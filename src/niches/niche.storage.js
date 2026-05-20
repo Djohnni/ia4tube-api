@@ -4,8 +4,8 @@ const path = require("path");
 // File-backed storage for IA4Tube Empresas niches. It is intentionally small
 // and JSON-based so the new architecture can be introduced without a database.
 const DEFAULT_NICHES_FILE = process.env.IA4_NICHES_FILE ||
-  (process.env.RENDER || process.env.NODE_ENV === "production"
-    ? "/var/data/nichos.json"
+  (process.env.DATA_DIR
+    ? path.join(process.env.DATA_DIR, "nichos.json")
     : path.join(__dirname, "..", "..", "data", "nichos.json"));
 
 function ensureDir(dirPath) {
