@@ -1400,8 +1400,8 @@ function criarPedidoHandler(categoria) {
     const clientes = readClientes();
     const c = clientes[whatsapp];
 
-    if (!c || !c.ativo) {
-      return res.status(403).json({ ok: false, error: "Mensalidade inativa" });
+    if (!c) {
+      return res.status(404).json({ ok: false, error: "Cliente não encontrado" });
     }
 
     const mesAtual = nowYYYYMM();
