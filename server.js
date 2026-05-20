@@ -1050,13 +1050,16 @@ app.get("/me", auth, (req, res) => {
     return res.status(404).json({ ok: false, error: "Cliente não encontrado" });
   }
 
+  const bonusTesteVisual = req.user.whatsapp === "15991120599" ? 999 : 0;
+  const saldoVisivel = Number(c.saldo_mensal || 0) + Number(c.saldo_extra || 0) + bonusTesteVisual;
+
   return res.json({
     ok: true,
     nome_time: c.nome_time,
     plano: c.plano,
     saldo_mensal: Number(c.saldo_mensal || 0),
     saldo_extra: Number(c.saldo_extra || 0),
-    saldo: Number(c.saldo_mensal || 0) + Number(c.saldo_extra || 0),
+    saldo: saldoVisivel,
     usados_no_ciclo: c.usados_no_ciclo,
     brinde_mascote_disponivel: c.brinde_mascote_disponivel === true,
     ativo: c.ativo
