@@ -1,0 +1,561 @@
+{
+  "version": 1,
+  "niches": {
+    "vidracaria": {
+      "id": "vidracaria",
+      "nome": "Vidraçaria",
+      "aliases": [],
+      "dna": {
+        "estilo_visual": "moderno e premium com toque minimalista",
+        "publico_alvo": [
+          "proprietários de imóveis",
+          "construtoras pequenas",
+          "reformadores",
+          "arquitetos locais"
+        ],
+        "cores_sugeridas": [
+          "azul escuro",
+          "cinza metálico",
+          "branco",
+          "toques de dourado"
+        ],
+        "tipo_layout": [
+          "imagem com destaque para produto em ambiente real",
+          "texto claro e direto ao lado ou sobreposição suave",
+          "logo no canto superior ou inferior"
+        ],
+        "ofertas_comuns": [
+          "orçamento grátis",
+          "medição gratuita",
+          "instalação rápida",
+          "desconto para clientes fidelidade"
+        ],
+        "chamadas": [
+          "Box de vidro sob medida para seu ambiente",
+          "Transforme seu espaço com elegância e segurança",
+          "Vidros Alfa: qualidade que protege e valoriza seu imóvel"
+        ],
+        "ctas": [
+          "Chame no WhatsApp",
+          "Solicite seu orçamento grátis",
+          "Converse agora com nossos especialistas"
+        ],
+        "elementos_visuais": [
+          "fotografias de boxes de vidro modernos",
+          "ícones de segurança e resistência",
+          "linhas e formas geométricas leves",
+          "logotipo com símbolo de vidro ou transparência"
+        ],
+        "tipos_de_post": [
+          "promoção de orçamento grátis",
+          "antes e depois da instalação",
+          "destaque de tipos de vidro e funcionalidades",
+          "depoimentos de clientes satisfeitos",
+          "dicas de manutenção e limpeza"
+        ]
+      },
+      "dna_origem": "ia",
+      "dna_status": "gerado",
+      "dna_gerado_em": "2026-05-18T20:39:13.679Z",
+      "dna_erro": "",
+      "usos": 6,
+      "criado_em": "2026-05-18T20:39:13.679Z",
+      "atualizado_em": "2026-05-19T22:50:08.013Z"
+    },
+    "medicina": {
+      "id": "medicina",
+      "nome": "medicina",
+      "aliases": [],
+      "dna": {
+        "estilo_visual": "moderno, clean e profissional",
+        "publico_alvo": [
+          "adultos",
+          "famílias",
+          "pacientes buscando cuidado médico confiável"
+        ],
+        "cores_sugeridas": [
+          "azul claro",
+          "branco",
+          "verde suave",
+          "cinza neutro"
+        ],
+        "tipo_layout": [
+          "foto do consultório",
+          "texto informativo claro",
+          "elementos gráficos minimalistas"
+        ],
+        "ofertas_comuns": [
+          "consulta com orçamento grátis",
+          "avaliação inicial gratuita",
+          "primeira consulta sem custo"
+        ],
+        "chamadas": [
+          "Agende sua consulta com a Dra. Alessandra Ohata",
+          "Cuidando da sua saúde com confiança",
+          "Seu bem-estar em primeiro lugar"
+        ],
+        "ctas": [
+          "Chame no WhatsApp",
+          "Agende já sua consulta",
+          "Fale conosco agora"
+        ],
+        "elementos_visuais": [
+          "símbolo de estetoscópio",
+          "ícone de atendimento",
+          "foto da médica ou da recepção",
+          "linhas suavemente curvas"
+        ],
+        "tipos_de_post": [
+          "divulgação de consultório",
+          "depoimentos de pacientes",
+          "informações sobre serviços",
+          "promoções e ofertas",
+          "dicas de saúde"
+        ]
+      },
+      "dna_origem": "ia",
+      "dna_status": "gerado",
+      "dna_gerado_em": "2026-05-19T12:36:04.944Z",
+      "dna_erro": "",
+      "usos": 1,
+      "criado_em": "2026-05-19T12:36:04.945Z",
+      "atualizado_em": "2026-05-19T12:36:04.952Z"
+    },
+    "acai": {
+      "id": "acai",
+      "nome": "Açaí",
+      "aliases": [],
+      "dna": {
+        "estilo_visual": "natural, vibrante e fresco",
+        "publico_alvo": [
+          "jovens",
+          "famílias",
+          "pessoas fitness",
+          "amantes de açaí"
+        ],
+        "cores_sugeridas": [
+          "roxo",
+          "verde",
+          "branco",
+          "amarelo"
+        ],
+        "tipo_layout": [
+          "foto do produto em destaque",
+          "texto promocional grande",
+          "botão de chamada para ação"
+        ],
+        "ofertas_comuns": [
+          "combo açaí + toppings",
+          "promoção compre 2 leve 3",
+          "desconto para pedidos pelo WhatsApp"
+        ],
+        "chamadas": [
+          "Sabor que refresca seu dia!",
+          "Combo especial para você!",
+          "Mais saúde e sabor no seu lanche!",
+          "Açaí do Lucas, o melhor açaí na sua casa!"
+        ],
+        "ctas": [
+          "Chame no Whats",
+          "Peça já pelo WhatsApp",
+          "Garanta seu combo agora",
+          "Fale conosco no Whats"
+        ],
+        "elementos_visuais": [
+          "folhas tropicais",
+          "ilustrações de frutas",
+          "elementos de colheita",
+          "texturas de madeira e natureza"
+        ],
+        "tipos_de_post": [
+          "promoção de combos",
+          "destaque de ingredientes naturais",
+          "depoimentos de clientes",
+          "reels mostrando preparo do açaí"
+        ]
+      },
+      "dna_origem": "ia",
+      "dna_status": "gerado",
+      "dna_gerado_em": "2026-05-19T14:38:18.495Z",
+      "dna_erro": "",
+      "usos": 1,
+      "criado_em": "2026-05-19T14:38:18.496Z",
+      "atualizado_em": "2026-05-19T14:38:18.505Z"
+    },
+    "hamburgueria": {
+      "id": "hamburgueria",
+      "nome": "Hamburgueria",
+      "aliases": [],
+      "dna": {
+        "estilo_visual": "moderno e acolhedor com foco em apelo gastronômico",
+        "publico_alvo": [
+          "jovens adultos",
+          "famílias",
+          "estudantes",
+          "profissionais que estudam ou trabalham tarde"
+        ],
+        "cores_sugeridas": [
+          "vermelho",
+          "amarelo",
+          "marrom",
+          "branco"
+        ],
+        "tipo_layout": [
+          "imagem do lanche em destaque",
+          "texto curto e direto",
+          "logotipo no canto",
+          "informação de horário destacada"
+        ],
+        "ofertas_comuns": [
+          "combo especial lanche + bebida",
+          "desconto para pedidos após 21h",
+          "promoção compre 2 leve 3",
+          "frete grátis para pedidos acima de X valor"
+        ],
+        "chamadas": [
+          "Sabor que não para até meia noite!",
+          "Seu lanche quentinho até tarde",
+          "Venha aproveitar nosso lanche delicioso",
+          "Aberto até meia noite para matar sua fome"
+        ],
+        "ctas": [
+          "Peça já pelo WhatsApp",
+          "Confira nosso cardápio",
+          "Aproveite o combo especial",
+          "Faça seu pedido agora"
+        ],
+        "elementos_visuais": [
+          "foto de hambúrguer suculento",
+          "ícone de relógio indicando horário",
+          "símbolos de ingredientes frescos",
+          "elementos gráficos de chama ou frescor"
+        ],
+        "tipos_de_post": [
+          "divulgação de produto",
+          "promoção/ oferta especial",
+          "post horário de funcionamento",
+          "depoimentos de clientes",
+          "stories interativos com enquete sobre sabores"
+        ]
+      },
+      "dna_origem": "ia",
+      "dna_status": "gerado",
+      "dna_gerado_em": "2026-05-19T17:00:35.780Z",
+      "dna_erro": "",
+      "usos": 2,
+      "criado_em": "2026-05-19T17:00:35.780Z",
+      "atualizado_em": "2026-05-20T01:53:43.926Z"
+    },
+    "marketing_visual_para_empresas": {
+      "id": "marketing_visual_para_empresas",
+      "nome": "Marketing visual para empresas",
+      "aliases": [],
+      "dna": {
+        "estilo_visual": "moderno e limpo com toque tecnológico",
+        "publico_alvo": [
+          "pequenos empresários",
+          "empreendedores digitais",
+          "microempreendedores",
+          "profissionais liberais"
+        ],
+        "cores_sugeridas": [
+          "azul escuro",
+          "cinza claro",
+          "branco",
+          "verde vibrante"
+        ],
+        "tipo_layout": [
+          "grade simétrica",
+          "uso de espaços negativos",
+          "tipografia bold para títulos",
+          "elementos gráficos minimalistas"
+        ],
+        "ofertas_comuns": [
+          "consultoria visual personalizada",
+          "criação de identidade visual",
+          "pacotes de posts para Instagram e WhatsApp",
+          "análise gratuita do perfil visual"
+        ],
+        "chamadas": [
+          "Sua marca com visual profissional",
+          "Aumente suas vendas com design de qualidade",
+          "Visual que conecta e vende",
+          "Impulsione seu negócio com marketing visual"
+        ],
+        "ctas": [
+          "chama no whats",
+          "faça um orçamento",
+          "sempre online para você",
+          "converse com um especialista"
+        ],
+        "elementos_visuais": [
+          "ícones lineares",
+          "gráficos simples",
+          "formas geométricas",
+          "imagens clean com pessoas e tecnologia"
+        ],
+        "tipos_de_post": [
+          "antes e depois da identidade visual",
+          "dicas rápidas de design",
+          "depoimentos de clientes",
+          "promoções temporárias",
+          "passo a passo para melhorar o visual da marca"
+        ]
+      },
+      "dna_origem": "ia",
+      "dna_status": "gerado",
+      "dna_gerado_em": "2026-05-19T17:20:22.082Z",
+      "dna_erro": "",
+      "usos": 6,
+      "criado_em": "2026-05-19T17:20:22.082Z",
+      "atualizado_em": "2026-05-20T02:50:24.511Z"
+    },
+    "serralheria": {
+      "id": "serralheria",
+      "nome": "Serralheria",
+      "aliases": [],
+      "dna": {
+        "estilo_visual": "moderno e industrial",
+        "publico_alvo": [
+          "pequenos e médios empresários",
+          "construtores",
+          "reformadores residenciais",
+          "donos de imóveis comerciais"
+        ],
+        "cores_sugeridas": [
+          "cinza metálico",
+          "azul escuro",
+          "preto",
+          "branco"
+        ],
+        "tipo_layout": [
+          "post quadrado para feed",
+          "stories verticais",
+          "banner para WhatsApp"
+        ],
+        "ofertas_comuns": [
+          "orçamento gratuito",
+          "desconto para reforma completa",
+          "instalação rápida",
+          "assistência técnica especializada"
+        ],
+        "chamadas": [
+          "Transforme seu espaço com segurança e qualidade",
+          "Serralheria profissional para sua obra",
+          "Resistência e acabamento que duram",
+          "Projeto e instalação com garantia"
+        ],
+        "ctas": [
+          "Chame no WhatsApp",
+          "Peça seu orçamento",
+          "Fale conosco agora",
+          "Consulte condições"
+        ],
+        "elementos_visuais": [
+          "texturas metálicas",
+          "linhas retas e ângulos retos",
+          "ícones de ferramentas e solda",
+          "foto de produtos acabados",
+          "logotipo limpo e legível"
+        ],
+        "tipos_de_post": [
+          "demonstração de produtos prontos",
+          "antes e depois de obras",
+          "depoimentos de clientes",
+          "dicas de manutenção",
+          "promoções e ofertas"
+        ]
+      },
+      "dna_origem": "ia",
+      "dna_status": "gerado",
+      "dna_gerado_em": "2026-05-19T17:43:52.069Z",
+      "dna_erro": "",
+      "usos": 1,
+      "criado_em": "2026-05-19T17:43:52.069Z",
+      "atualizado_em": "2026-05-19T17:43:52.083Z"
+    },
+    "escola_de_futebol": {
+      "id": "escola_de_futebol",
+      "nome": "Escola de futebol",
+      "aliases": [],
+      "dna": {
+        "estilo_visual": "moderno e vibrante",
+        "publico_alvo": [
+          "pais de crianças e adolescentes",
+          "jovens interessados em atividades esportivas",
+          "comunidade local"
+        ],
+        "cores_sugeridas": [
+          "azul",
+          "laranja",
+          "branco"
+        ],
+        "tipo_layout": [
+          "imagem com texto em destaque",
+          "cartaz com chamada clara",
+          "carrossel educativo e promocional"
+        ],
+        "ofertas_comuns": [
+          "desconto na matrícula",
+          "primeira aula gratuita",
+          "pacotes promocionais para irmãos"
+        ],
+        "chamadas": [
+          "Garanta já a vaga do seu filho!",
+          "Matrículas abertas: vagas limitadas!",
+          "Desenvolvimento e diversão para seu filho aqui!"
+        ],
+        "ctas": [
+          "Inscreva-se agora",
+          "Fale conosco",
+          "Reserve sua vaga"
+        ],
+        "elementos_visuais": [
+          "figuras de crianças em movimento",
+          "ícones de treino e evolução",
+          "fundo dinâmico e colorido"
+        ],
+        "tipos_de_post": [
+          "promoção de matrículas",
+          "testemunhos de pais",
+          "destaques da metodologia",
+          "convite para evento ou aula experimental"
+        ]
+      },
+      "dna_origem": "ia",
+      "dna_status": "gerado",
+      "dna_gerado_em": "2026-05-19T18:07:16.529Z",
+      "dna_erro": "",
+      "usos": 1,
+      "criado_em": "2026-05-19T18:07:16.529Z",
+      "atualizado_em": "2026-05-19T18:07:16.533Z"
+    },
+    "confeccao": {
+      "id": "confeccao",
+      "nome": "Confecção",
+      "aliases": [],
+      "dna": {
+        "estilo_visual": "moderno e acolhedor",
+        "publico_alvo": [
+          "mulheres jovens",
+          "homens adultos",
+          "microempreendedores",
+          "consumidores locais"
+        ],
+        "cores_sugeridas": [
+          "azul",
+          "laranja",
+          "branco",
+          "cinza claro"
+        ],
+        "tipo_layout": [
+          "banner promocional",
+          "carrossel",
+          "stories",
+          "flyer digital"
+        ],
+        "ofertas_comuns": [
+          "desconto progressivo",
+          "compre e ganhe",
+          "promoção compartilhe e concorra",
+          "frete grátis na compra acima de X"
+        ],
+        "chamadas": [
+          "Garanta seu look com desconto!",
+          "Não perca essa promoção exclusiva!",
+          "Compartilhe e concorra a prêmios!",
+          "Moda com preço que cabe no bolso!"
+        ],
+        "ctas": [
+          "Compartilhe agora",
+          "Compre já",
+          "Participe da promoção",
+          "Confira os modelos"
+        ],
+        "elementos_visuais": [
+          "fotos de roupas com fundo clean",
+          "ícones de compartilhamento",
+          "selo de promoção",
+          "texturas de tecido",
+          "elementos gráficos minimalistas"
+        ],
+        "tipos_de_post": [
+          "post estático para feed",
+          "story com CTA interativo",
+          "carrossel com looks diferentes",
+          "reel com demonstração de produtos"
+        ]
+      },
+      "dna_origem": "ia",
+      "dna_status": "gerado",
+      "dna_gerado_em": "2026-05-20T00:55:23.147Z",
+      "dna_erro": "",
+      "usos": 1,
+      "criado_em": "2026-05-20T00:55:23.148Z",
+      "atualizado_em": "2026-05-20T00:55:23.157Z"
+    },
+    "supermercado": {
+      "id": "supermercado",
+      "nome": "Supermercado",
+      "aliases": [],
+      "dna": {
+        "estilo_visual": "clean e vibrante",
+        "publico_alvo": [
+          "famílias",
+          "donas de casa",
+          "pequenos comerciantes",
+          "jovens adultos"
+        ],
+        "cores_sugeridas": [
+          "verde",
+          "amarelo",
+          "vermelho",
+          "branco"
+        ],
+        "tipo_layout": [
+          "imagem do produto com destaque à oferta",
+          "blocos de texto e preço",
+          "fundo simples"
+        ],
+        "ofertas_comuns": [
+          "descontos progressivos",
+          "promoção relâmpago",
+          "compre 2 leve 3",
+          "desconto por quantidade"
+        ],
+        "chamadas": [
+          "Novidades fresquinhas!",
+          "Só hoje: 30% OFF!",
+          "Aproveite e economize!",
+          "Promoção imperdível no Mercado Ascurra"
+        ],
+        "ctas": [
+          "Corra e aproveite!",
+          "Garanta já seu desconto!",
+          "Visite nossa loja!",
+          "Oferta por tempo limitado!"
+        ],
+        "elementos_visuais": [
+          "ícones de sacola de compras",
+          "tag de desconto",
+          "ilustrações de frutas e verduras",
+          "foto de produtos em destaque",
+          "barras coloridas para separar seções"
+        ],
+        "tipos_de_post": [
+          "promoção do dia",
+          "lançamento de produtos",
+          "destaque de ofertas semanais",
+          "posts de lembrete de liquidações"
+        ]
+      },
+      "dna_origem": "ia",
+      "dna_status": "gerado",
+      "dna_gerado_em": "2026-05-20T02:34:59.416Z",
+      "dna_erro": "",
+      "usos": 2,
+      "criado_em": "2026-05-20T02:34:59.416Z",
+      "atualizado_em": "2026-05-20T02:42:18.403Z"
+    }
+  }
+}

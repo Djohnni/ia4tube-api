@@ -1,0 +1,10 @@
+{
+  "15991120599": {
+    "nome_time": "Los Hermanos",
+    "senha_hash": "$2b$10$cEB8Hh9h2KG6nr6LPnRsMus21KTMvo9J7jt9BYoUq2enXSihfS4XO",
+    "plano": 999,
+    "ativo": true,
+    "ciclo_mes": "2026-02",
+    "usados_no_ciclo": 0
+  }
+}
