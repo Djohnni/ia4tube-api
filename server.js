@@ -19,11 +19,7 @@ const PORT = process.env.PORT || 3000;
 const JWT_SECRET = process.env.JWT_SECRET || "TROQUE_ISSO_AGORA";
 
 // ===== DATA STORAGE (RENDER DISK) =====
-const isRender = process.env.RENDER || process.env.NODE_ENV === "production";
-
-const DATA_DIR = isRender
-  ? "/var/data"
-  : path.join(__dirname, "dados");
+const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, "dados");
 
 const PEDIDOS_DIR = path.join(DATA_DIR, "pedidos");
 const CLIENTES_FILE = path.join(DATA_DIR, "clientes.json");
