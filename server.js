@@ -41,13 +41,7 @@ const CLIENTES_TESTE = [
 
 // CORS: permite seu site chamar a API
 app.use(cors({
-  origin: [
-  "https://omascote.com.br",
-  "https://ia4tube.com",
-  "https://www.ia4tube.com",
-  "http://127.0.0.1:8080",
-  "http://localhost:8080"
-],
+  origin: ["https://omascote.com.br", "http://127.0.0.1:8080", "http://localhost:8080"],
   credentials: false
 }));
 
@@ -1107,11 +1101,11 @@ app.post("/comprar-creditos", auth, async (req, res) => {
         credito: Number(p.credito)
       },
       back_urls: {
-        success: "https://omascote.com.br/app.html",
-        failure: "https://omascote.com.br/app.html",
-        pending: "https://omascote.com.br/app.html"
+        success: "https://ia4tube.com/app.html",
+        failure: "https://ia4tube.com/app.html",
+        pending: "https://ia4tube.com/app.html"
       },
-      notification_url: "https://api.omascote.com.br/webhook/mercadopago",
+      notification_url: "https://ia4tube-api.onrender.com/webhook/mercadopago",
       auto_return: "approved"
     };
 
@@ -1178,7 +1172,7 @@ app.post("/comprar-creditos-pix", auth, async (req, res) => {
         pacote,
         credito: Number(p.credito)
       },
-      notification_url: "https://api.omascote.com.br/webhook/mercadopago"
+      notification_url: "https://ia4tube-api.onrender.com/webhook/mercadopago"
     };
 
     const r = await fetch("https://api.mercadopago.com/v1/payments", {
@@ -1793,7 +1787,7 @@ app.post("/pedidos/:id/gerar-pix", auth, async (req, res) => {
         pedido_id: id,
         valor_pendente: Number(valorPendente.toFixed(2))
       },
-      notification_url: "https://api.omascote.com.br/webhook/mercadopago"
+      notification_url: "https://ia4tube-api.onrender.com/webhook/mercadopago"
     };
 
     const r = await fetch("https://api.mercadopago.com/v1/payments", {
