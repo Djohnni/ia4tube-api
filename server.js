@@ -41,7 +41,7 @@ const CLIENTES_TESTE = [
 
 // CORS: permite seu site chamar a API
 app.use(cors({
-  origin: ["https://omascote.com.br", "http://127.0.0.1:8080", "http://localhost:8080"],
+  origin: ["https://ia4tube.com", "https://www.ia4tube.com", "http://127.0.0.1:8080", "http://localhost:8080"],
   credentials: false
 }));
 
