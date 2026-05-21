@@ -19,7 +19,11 @@ const PORT = process.env.PORT || 3000;
 const JWT_SECRET = process.env.JWT_SECRET || "TROQUE_ISSO_AGORA";
 
 // ===== DATA STORAGE (RENDER DISK) =====
-const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, "dados");
+const isRender = process.env.RENDER || process.env.NODE_ENV === "production";
+
+const DATA_DIR = isRender
+  ? "/var/data"
+  : path.join(__dirname, "dados");
 
 const PEDIDOS_DIR = path.join(DATA_DIR, "pedidos");
 const CLIENTES_FILE = path.join(DATA_DIR, "clientes.json");
@@ -30,8 +34,11 @@ const TEMPO_ESTIMADO_FILE = path.join(DATA_DIR, "tempo_estimado.json");
 const ONLINE_FILE = path.join(DATA_DIR, "usuarios_online.json");
 const SUPORTE_ABERTAS_FILE = path.join(DATA_DIR, "suporte_conversas_abertas.json");
 const SUPORTE_FINALIZADAS_FILE = path.join(DATA_DIR, "suporte_conversas_finalizadas.json");
+const PREVIEW_LIMITER_FILE = path.join(DATA_DIR, "preview_limiter.json");
 const ANALYTICS_DIR = path.join(DATA_DIR, "analytics");
 const EVENTOS_CLIENTES_FILE = path.join(DATA_DIR, "eventos_clientes.json");
+const PREVIEW_LIMITER_MAX = 3;
+const PREVIEW_LIMITER_TTL_MS = 6 * 60 * 60 * 1000;
 
 const CLIENTES_TESTE = [
   "Los Hermanos",
@@ -41,7 +48,7 @@ const CLIENTES_TESTE = [
 
 // CORS: permite seu site chamar a API
 app.use(cors({
-  origin: ["https://ia4tube.com", "https://www.ia4tube.com", "http://127.0.0.1:8080", "http://localhost:8080"],
+  origin: ["https://omascote.com.br"],
   credentials: false
 }));
 
@@ -95,6 +102,10 @@ if (!fs.existsSync(EVENTOS_CLIENTES_FILE)) {
   fs.writeFileSync(EVENTOS_CLIENTES_FILE, JSON.stringify([], null, 2), "utf8");
 }
 
+if (!fs.existsSync(PREVIEW_LIMITER_FILE)) {
+  fs.writeFileSync(PREVIEW_LIMITER_FILE, JSON.stringify([], null, 2), "utf8");
+}
+
 // ===== HELPERS =====
 function readClientes() {
   return JSON.parse(fs.readFileSync(CLIENTES_FILE, "utf8") || "{}");
@@ -110,6 +121,19 @@ function readMpProcessados() {
 
 function writeMpProcessados(obj) {
   fs.writeFileSync(MP_PROCESSADOS_FILE, JSON.stringify(obj, null, 2), "utf8");
+}
+
+function readPreviewLimiter() {
+  try {
+    const data = JSON.parse(fs.readFileSync(PREVIEW_LIMITER_FILE, "utf8") || "[]");
+    return Array.isArray(data) ? data : [];
+  } catch {
+    return [];
+  }
+}
+
+function writePreviewLimiter(lista) {
+  fs.writeFileSync(PREVIEW_LIMITER_FILE, JSON.stringify(lista || [], null, 2), "utf8");
 }
 
 function readTempoEstimado() {
@@ -232,6 +256,117 @@ function listPedidoBasesByWhatsapp(whatsapp) {
 
 function removeOldPedidos(whatsapp, maxKeep = 15) {
   return orderStorage.removeOldPedidos(PEDIDOS_DIR, whatsapp, maxKeep);
+}
+
+function getPreviewLimiterIp(req) {
+  const forwarded = String(req.headers["x-forwarded-for"] || "").split(",")[0].trim();
+  return forwarded || req.ip || req.socket?.remoteAddress || "";
+}
+
+function getPreviewLimiterIdentifiers(req, cliente, whatsapp) {
+  const clienteId = cliente?.cliente_id || cliente?.id || "";
+  const deviceId = cliente?.device_id || req.body?.device_id || req.headers["x-device-id"] || req.headers["x-session-id"] || "";
+  const ip = getPreviewLimiterIp(req);
+  const identifiers = [];
+
+  if (clienteId) identifiers.push(`cliente:${clienteId}`);
+  if (whatsapp) identifiers.push(`whatsapp:${whatsapp}`);
+  if (deviceId) identifiers.push(`device:${deviceId}`);
+  if (!identifiers.length) identifiers.push(`ip:${ip || "desconhecido"}`);
+
+  return identifiers;
+}
+
+function isPedidoSemPagamentoConfirmado(pedido) {
+  if (!pedido) return false;
+  if (pedido.pagamento_pendente === true) return true;
+
+  return (
+    Number(pedido.valor_pendente || 0) > 0 &&
+    pedido.pagamento_pendente !== false &&
+    !pedido.pagamento_confirmado_em
+  );
+}
+
+function previewLimiterEntryStillCounts(entry) {
+  if (!entry?.whatsapp || !entry?.pedido_id) return true;
+
+  const base = getPedidoBase(entry.whatsapp, entry.pedido_id);
+  if (!base) return false;
+
+  try {
+    const pedido = readPedido(base);
+    return isPedidoSemPagamentoConfirmado(pedido);
+  } catch {
+    return false;
+  }
+}
+
+function getPreviewLimiterState(identifiers) {
+  const agora = Date.now();
+  const lista = readPreviewLimiter();
+  const ativos = [];
+  const wanted = new Set(Array.isArray(identifiers) ? identifiers : [identifiers].filter(Boolean));
+  const totals = {};
+
+  for (const entry of lista) {
+    const criadoEm = Number(entry.criado_em || 0);
+    if (!criadoEm || (agora - criadoEm) > PREVIEW_LIMITER_TTL_MS) continue;
+    if (!previewLimiterEntryStillCounts(entry)) continue;
+
+    ativos.push(entry);
+
+    const entryIdentifiers = Array.isArray(entry.identificadores)
+      ? entry.identificadores
+      : [entry.identificador].filter(Boolean);
+
+    entryIdentifiers.forEach(identifier => {
+      if (!wanted.has(identifier)) return;
+      totals[identifier] = (totals[identifier] || 0) + 1;
+    });
+  }
+
+  if (ativos.length !== lista.length) {
+    writePreviewLimiter(ativos);
+  }
+
+  let total = 0;
+  let identificador = Array.from(wanted)[0] || "desconhecido";
+
+  Object.entries(totals).forEach(([key, value]) => {
+    if (value > total) {
+      total = value;
+      identificador = key;
+    }
+  });
+
+  return { total, identificador };
+}
+
+function registrarPreviewPendente({ identifiers, whatsapp, pedidoId }) {
+  if (!pedidoId) return;
+
+  const listaIdentificadores = Array.isArray(identifiers)
+    ? identifiers.filter(Boolean)
+    : [identifiers].filter(Boolean);
+
+  if (!listaIdentificadores.length) return;
+
+  const agora = Date.now();
+  const lista = readPreviewLimiter().filter(entry => {
+    const criadoEm = Number(entry.criado_em || 0);
+    return criadoEm && (agora - criadoEm) <= PREVIEW_LIMITER_TTL_MS;
+  });
+
+  lista.push({
+    identificador: listaIdentificadores[0],
+    identificadores: listaIdentificadores,
+    whatsapp,
+    pedido_id: pedidoId,
+    criado_em: agora
+  });
+
+  writePreviewLimiter(lista);
 }
 
 function readPedido(base) {
@@ -609,6 +744,8 @@ function auth(req, res, next) {
 }
 
 // ===== UPLOAD (multer) =====
+const MAX_UPLOAD_FILE_SIZE = 50 * 1024 * 1024;
+
 const storage = multer.diskStorage({
   destination: (req, file, cb) =>
     cb(null, path.join(DATA_DIR, "tmp_uploads")),
@@ -621,6 +758,9 @@ const storage = multer.diskStorage({
 
 const upload = multer({
   storage,
+  limits: {
+    fileSize: MAX_UPLOAD_FILE_SIZE
+  },
   fileFilter: (req, file, cb) => {
     const permitidos = [
       "image/png",
@@ -638,6 +778,35 @@ const upload = multer({
 });
 
 const uploadResultado = multer({ storage });
+
+function uploadComErroControlado(middleware) {
+  return (req, res, next) => {
+    middleware(req, res, (err) => {
+      if (!err) return next();
+
+      if (err.code === "LIMIT_FILE_SIZE") {
+        console.warn("[UPLOAD_LIMIT] arquivo_maior_50mb", {
+          field: err.field || "",
+          url: req.originalUrl || req.url || ""
+        });
+        return res.status(400).json({
+          ok: false,
+          error: "Arquivo muito grande. Envie imagens com até 50MB."
+        });
+      }
+
+      console.warn("[UPLOAD_ERROR]", {
+        field: err.field || "",
+        url: req.originalUrl || req.url || "",
+        message: err.message || String(err)
+      });
+      return res.status(400).json({
+        ok: false,
+        error: err.message || "Erro ao enviar arquivo."
+      });
+    });
+  };
+}
 
 // ===== ROTAS =====
 
@@ -1050,16 +1219,13 @@ app.get("/me", auth, (req, res) => {
     return res.status(404).json({ ok: false, error: "Cliente não encontrado" });
   }
 
-  const bonusTesteVisual = req.user.whatsapp === "15991120599" ? 999 : 0;
-  const saldoVisivel = Number(c.saldo_mensal || 0) + Number(c.saldo_extra || 0) + bonusTesteVisual;
-
   return res.json({
     ok: true,
     nome_time: c.nome_time,
     plano: c.plano,
     saldo_mensal: Number(c.saldo_mensal || 0),
     saldo_extra: Number(c.saldo_extra || 0),
-    saldo: saldoVisivel,
+    saldo: Number(c.saldo_mensal || 0) + Number(c.saldo_extra || 0),
     usados_no_ciclo: c.usados_no_ciclo,
     brinde_mascote_disponivel: c.brinde_mascote_disponivel === true,
     ativo: c.ativo
@@ -1104,11 +1270,11 @@ app.post("/comprar-creditos", auth, async (req, res) => {
         credito: Number(p.credito)
       },
       back_urls: {
-        success: "https://ia4tube.com/app.html",
-        failure: "https://ia4tube.com/app.html",
-        pending: "https://ia4tube.com/app.html"
+        success: "https://omascote.com.br/app.html",
+        failure: "https://omascote.com.br/app.html",
+        pending: "https://omascote.com.br/app.html"
       },
-      notification_url: "https://ia4tube-api.onrender.com/webhook/mercadopago",
+      notification_url: "https://api.omascote.com.br/webhook/mercadopago",
       auto_return: "approved"
     };
 
@@ -1175,7 +1341,7 @@ app.post("/comprar-creditos-pix", auth, async (req, res) => {
         pacote,
         credito: Number(p.credito)
       },
-      notification_url: "https://ia4tube-api.onrender.com/webhook/mercadopago"
+      notification_url: "https://api.omascote.com.br/webhook/mercadopago"
     };
 
     const r = await fetch("https://api.mercadopago.com/v1/payments", {
@@ -1395,13 +1561,13 @@ app.post("/webhook/mercadopago", async (req, res) => {
 
 // ===== CRIA PEDIDO =====
 function criarPedidoHandler(categoria) {
-  return async (req, res) => {
+  return (req, res) => {
     const whatsapp = req.user.whatsapp;
     const clientes = readClientes();
     const c = clientes[whatsapp];
 
-    if (!c) {
-      return res.status(404).json({ ok: false, error: "Cliente não encontrado" });
+    if (!c || !c.ativo) {
+      return res.status(403).json({ ok: false, error: "Mensalidade inativa" });
     }
 
     const mesAtual = nowYYYYMM();
@@ -1415,6 +1581,18 @@ function criarPedidoHandler(categoria) {
     const temSaldoSuficiente = billingService.hasEnoughBalance(c, custoEfetivoPedido);
 
     const fields = orderService.normalizeOrderBody(req.body);
+    const previewLimiterIdentifiers = getPreviewLimiterIdentifiers(req, c, whatsapp);
+    const previewLimiterState = getPreviewLimiterState(previewLimiterIdentifiers);
+
+    if (!temSaldoSuficiente && previewLimiterState.total >= PREVIEW_LIMITER_MAX) {
+      console.warn(`[PREVIEW_LIMIT] bloqueado identificador=${previewLimiterState.identificador} total=${previewLimiterState.total} motivo=3_previews_sem_pagamento`);
+
+      return res.status(429).json({
+        ok: false,
+        erro: "limite_preview",
+        mensagem: "Detectamos várias prévias geradas em sequência. Aguarde um pouco para criar novas artes."
+      });
+    }
 
     if (!orderService.hasRequiredOrderFields(fields)) {
       return res.status(400).json({
@@ -1424,21 +1602,30 @@ function criarPedidoHandler(categoria) {
     }
 
     const files = req.files || {};
-    if (categoria === "arte_empresa" && !orderService.hasCompanyLogoReference(files)) {
+    let draft;
+
+    try {
+      draft = orderService.createOrderDraft({
+        categoria,
+        pedidosDir: PEDIDOS_DIR,
+        whatsapp,
+        mesAtual,
+        fields,
+        files
+      });
+    } catch (e) {
+      console.error("[pedido] erro ao criar pedido", {
+        categoria,
+        whatsapp,
+        erro: e.message,
+        code: e.code
+      });
+
       return res.status(400).json({
         ok: false,
-        error: "Envie o logo da empresa para criar a arte."
+        error: e.message || "Erro ao salvar arquivos do pedido"
       });
     }
-
-    const draft = await orderService.createOrderDraft({
-      categoria,
-      pedidosDir: PEDIDOS_DIR,
-      whatsapp,
-      mesAtual,
-      fields,
-      files
-    });
 
     const id = draft.id;
 
@@ -1449,6 +1636,7 @@ function criarPedidoHandler(categoria) {
       draft.pedido.valor_pendente = custoEfetivoPedido;
       draft.pedido.motivo_pagamento_pendente = "saldo_insuficiente";
       orderService.orderStorage.writeOrder(draft.base, draft.pedido);
+      registrarPreviewPendente({ identifiers: previewLimiterIdentifiers, whatsapp, pedidoId: id });
     }
 
     clientes[whatsapp] = c;
@@ -1464,18 +1652,15 @@ function criarPedidoHandler(categoria) {
 app.post(
   "/pedidos",
   auth,
-  upload.fields([
+  uploadComErroControlado(upload.fields([
     { name: "escudo1", maxCount: 1 },
     { name: "escudo2", maxCount: 1 },
     { name: "mascote", maxCount: 1 },
-    { name: "patrocinadores", maxCount: 20 },
-    { name: "logo", maxCount: 1 },
-    { name: "fotos", maxCount: 20 },
-    { name: "referencias", maxCount: 20 }
-  ]),
+    { name: "patrocinadores", maxCount: 20 }
+  ])),
   (req, res) => {
     const flyer_tipo = (req.body?.flyer_tipo || "").toLowerCase();
-    const productFromRegistry = productsRegistry.resolveProductFromRequestBody(req.body);
+    const productFromRegistry = productsRegistry.getProductByFlyerTipo(flyer_tipo);
 
     if (productFromRegistry) return criarPedidoHandler(productFromRegistry.id)(req, res);
 
@@ -1496,30 +1681,24 @@ app.post(
 app.post(
   "/mascotes",
   auth,
-  upload.fields([
+  uploadComErroControlado(upload.fields([
     { name: "escudo1", maxCount: 1 },
     { name: "escudo2", maxCount: 1 },
     { name: "mascote", maxCount: 1 },
-    { name: "patrocinadores", maxCount: 20 },
-    { name: "logo", maxCount: 1 },
-    { name: "fotos", maxCount: 20 },
-    { name: "referencias", maxCount: 20 }
-  ]),
+    { name: "patrocinadores", maxCount: 20 }
+  ])),
   criarPedidoHandler("mascote")
 );
 
 app.post(
   "/resultado_do_jogo",
   auth,
-  upload.fields([
+  uploadComErroControlado(upload.fields([
     { name: "escudo1", maxCount: 1 },
     { name: "escudo2", maxCount: 1 },
     { name: "mascote", maxCount: 1 },
-    { name: "patrocinadores", maxCount: 20 },
-    { name: "logo", maxCount: 1 },
-    { name: "fotos", maxCount: 20 },
-    { name: "referencias", maxCount: 20 }
-  ]),
+    { name: "patrocinadores", maxCount: 20 }
+  ])),
   criarPedidoHandler("resultado")
 );
 
@@ -1790,7 +1969,7 @@ app.post("/pedidos/:id/gerar-pix", auth, async (req, res) => {
         pedido_id: id,
         valor_pendente: Number(valorPendente.toFixed(2))
       },
-      notification_url: "https://ia4tube-api.onrender.com/webhook/mercadopago"
+      notification_url: "https://api.omascote.com.br/webhook/mercadopago"
     };
 
     const r = await fetch("https://api.mercadopago.com/v1/payments", {
