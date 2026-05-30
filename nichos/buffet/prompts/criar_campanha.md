@@ -1,0 +1,16 @@
+# Criar Campanha - Buffet
+
+Campanhas recomendadas:
+
+- agenda de festas do mes.
+- ferias com evento infantil.
+- dia das criancas.
+- casamentos de fim de ano.
+- confraternizacoes de empresas.
+- black friday de eventos.
+- sao joao e festas tematicas.
+- natal e reveillon.
+- agenda aberta de Buffet.
+- semana de divulgacao de Buffet.
+- campanha para clientes do bairro.
+- campanha educativa sobre Buffet.

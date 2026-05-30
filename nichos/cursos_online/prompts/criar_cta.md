@@ -1,0 +1,14 @@
+# Criar CTA - Cursos Online
+
+CTAs recomendados:
+
+- Matricule-se agora.
+- Agende uma aula experimental.
+- Conheca a metodologia.
+- Reserve sua vaga na turma.
+- Chame para ver horarios.
+- Comece seus estudos.
+- Visite a escola.
+- Garanta sua vaga.
+- Chame para avaliar Cursos Online.
+- Envie sua necessidade de Cursos Online.

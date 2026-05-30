@@ -1,0 +1,24 @@
+# Campanhas - Praia E Moda Fitness
+
+Esta pasta guarda campanhas especificas para Praia E Moda Fitness.
+
+## Campanhas prioritarias
+
+- lancamento de colecao.
+- semana do consumidor.
+- dia das maes.
+- dia dos pais.
+- dia dos namorados.
+- black friday.
+- volta as aulas.
+- natal com presentes.
+- agenda aberta de Praia E Moda Fitness.
+- semana de divulgacao de Praia E Moda Fitness.
+- campanha para clientes do bairro.
+- campanha educativa sobre Praia E Moda Fitness.
+
+## Uso recomendado
+
+- Escolher campanha ligada a uma dor real de Praia E Moda Fitness.
+- Conectar oferta, imagem e CTA.
+- Usar datas comerciais apenas quando fizerem sentido para o mercado.

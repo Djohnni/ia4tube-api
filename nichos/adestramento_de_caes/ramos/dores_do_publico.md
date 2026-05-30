@@ -1,0 +1,37 @@
+# Dores do Publico - Adestramento De Caes
+
+## Dores do negocio
+
+- pet volta estressado de outro local.
+- tutor tem medo de machucar o pet.
+- pelos embolados.
+- mau cheiro no animal.
+- falta de tempo para levar.
+- duvida sobre racao ideal.
+- pulgas e carrapatos.
+- necessidade de cuidado recorrente.
+- cliente nao entende quando procurar Adestramento De Caes.
+- baixa lembranca da marca de Adestramento De Caes.
+- duvida sobre escopo de Adestramento De Caes.
+- comparacao por preco em Adestramento De Caes.
+
+## Dores do cliente final
+
+- comparacao por preco em Adestramento De Caes.
+- duvida sobre escopo de Adestramento De Caes.
+- baixa lembranca da marca de Adestramento De Caes.
+- pessoa nao entende quando procurar Adestramento De Caes.
+- necessidade de cuidado recorrente.
+- pulgas e carrapatos.
+- duvida sobre racao ideal.
+- falta de tempo para levar.
+- mau cheiro no animal.
+- pelos embolados.
+- tutor tem medo de machucar o pet.
+- pet volta estressado de outro local.
+
+## Como transformar em arte
+
+- Escolher uma dor principal de Adestramento De Caes.
+- Mostrar o beneficio visual ou pratico ligado a essa dor.
+- Finalizar com CTA de mercado, como Agende o banho do seu pet.

@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "description": "Aliases oficiais entre slugs da lista IA4_EMPRESA_RAMOS e ids internos de pastas em nichos/.",
+  "aliases": {
+    "marketing_visual_para_empresas": "marketing_visual_empresas",
+    "advocacia": "advogado",
+    "escritorio_de_advocacia": "advogado",
+    "clinica_de_estetica": "clinica_estetica"
+  }
+}
