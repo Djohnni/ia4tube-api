@@ -3,7 +3,6 @@ const fs = require("fs");
 const orderStorage = require("./order.storage");
 const orderStatus = require("./order.status");
 const nicheService = require("../niches/niche.service");
-const nicheKnowledgeEngine = require("../niches/nicheKnowledge.engine");
 const modeloService = require("../modelos/modelo.service");
 
 function buildOrderBasePath({ pedidosDir, whatsapp, mesAtual, id }) {
@@ -424,23 +423,6 @@ function persistNewOrder({ base, pedido }) {
   orderStorage.writeStatus(base, orderStatus.ORDER_STATUS.NOVO);
 }
 
-function attachNicheKnowledgeContext(pedido) {
-  try {
-    const result = nicheKnowledgeEngine.buildNicheKnowledgeForInput({
-      product_id: pedido.product_id,
-      categoria: pedido.categoria,
-      flyer_tipo: pedido.flyer_tipo,
-      niche_id: pedido.niche_id,
-      nicho_id: pedido.nicho_id,
-      ramo: pedido.ramo,
-      objetivo: pedido.objetivo
-    });
-
-    if (result?.ok && result.context) {
-      pedido.niche_knowledge_context = result.context;
-    }
-  } catch {}
-}
 
 async function createOrderDraft({ categoria, pedidosDir, whatsapp, mesAtual, fields, files }) {
   const id = orderStorage.newPedidoId();
@@ -464,8 +446,6 @@ async function createOrderDraft({ categoria, pedidosDir, whatsapp, mesAtual, fie
     podeUsarMascote: uploadResult.podeUsarMascote,
     uploadResult
   });
-
-  attachNicheKnowledgeContext(pedido);
 
   persistNewOrder({ base, pedido });
 

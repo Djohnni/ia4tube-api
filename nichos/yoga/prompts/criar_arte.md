@@ -1,3 +1,0 @@
-# Criar Arte - Yoga
-
-A arte deve ter uma mensagem principal, imagem coerente com imagem real ou simbolo claro de Yoga, composicao limpa, beneficio em destaque e CTA visivel, oferta especifica e CTA claro.
