@@ -1,0 +1,12 @@
+# Objetivos - Turismo Rural
+
+Esta pasta organiza objetivos comerciais de Turismo Rural.
+
+## Objetivos principais
+
+- Gerar conversas qualificadas.
+- Explicar reserva antecipada.
+- Preencher agenda, pedidos, visitas ou reservas.
+- Divulgar campanhas sazonais coerentes.
+- Reativar clientes antigos.
+- Aumentar percepcao de valor antes da decisao.

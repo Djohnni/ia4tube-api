@@ -1,0 +1,14 @@
+# CTAs que Funcionam - Refeicoes Coletivas
+
+- Chame para avaliar Refeicoes Coletivas.
+- Envie sua necessidade de Refeicoes Coletivas.
+- Veja opcoes de Refeicoes Coletivas.
+- Reserve horario para Refeicoes Coletivas.
+- Tire duvidas sobre Refeicoes Coletivas.
+- Solicite avaliacao de Refeicoes Coletivas.
+- Confira disponibilidade de Refeicoes Coletivas.
+- Fale sobre seu caso de Refeicoes Coletivas.
+
+## Por que funcionam
+
+Eles indicam acao concreta dentro de Refeicoes Coletivas, sem depender de chamada vaga.

@@ -1,0 +1,16 @@
+# Criar Campanha - Bazar
+
+Campanhas recomendadas:
+
+- lancamento de colecao.
+- semana do consumidor.
+- dia das maes.
+- dia dos pais.
+- dia dos namorados.
+- black friday.
+- volta as aulas.
+- natal com presentes.
+- agenda aberta de Bazar.
+- semana de divulgacao de Bazar.
+- campanha para clientes do bairro.
+- campanha educativa sobre Bazar.

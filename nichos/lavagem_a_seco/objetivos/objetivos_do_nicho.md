@@ -1,0 +1,10 @@
+# Objetivos do Nicho - Lavagem A Seco
+
+- Divulgar diagnostico automotivo.
+- Gerar conversas qualificadas no WhatsApp.
+- Preencher agenda ou demanda de Lavagem A Seco.
+- Explicar diferencas entre opcoes de Lavagem A Seco.
+- Promover campanhas sazonais sem descaracterizar o nicho.
+- Reativar clientes antigos com oferta coerente.
+- Aumentar percepcao de valor antes de falar preco.
+- Fortalecer autoridade local em Lavagem A Seco.

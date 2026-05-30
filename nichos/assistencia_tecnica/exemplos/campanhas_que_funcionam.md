@@ -1,0 +1,12 @@
+# Campanhas que Funcionam - Assistencia Tecnica
+
+- agenda aberta de Assistencia Tecnica.
+- semana de divulgacao de Assistencia Tecnica.
+- campanha para clientes do bairro.
+- campanha educativa sobre Assistencia Tecnica.
+- oferta de avaliacao de Assistencia Tecnica.
+- prova visual autorizada de Assistencia Tecnica.
+- retorno de clientes antigos.
+- campanha sazonal local.
+
+O melhor padrao e combinar dor real, oferta especifica e CTA natural do mercado.

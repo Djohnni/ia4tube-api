@@ -1,0 +1,16 @@
+# Campanhas que Funcionam - Loja De Acessorios
+
+- lancamento de colecao.
+- semana do consumidor.
+- dia das maes.
+- dia dos pais.
+- dia dos namorados.
+- black friday.
+- volta as aulas.
+- natal com presentes.
+- agenda aberta de Loja De Acessorios.
+- semana de divulgacao de Loja De Acessorios.
+- campanha para clientes do bairro.
+- campanha educativa sobre Loja De Acessorios.
+
+O melhor padrao e combinar dor real, oferta especifica e CTA natural do mercado.

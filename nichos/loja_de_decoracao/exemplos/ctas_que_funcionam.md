@@ -1,0 +1,16 @@
+# CTAs que Funcionam - Loja De Decoracao
+
+- Agende o banho do seu pet.
+- Reserve a tosa.
+- Consulte pacote mensal.
+- Cuide do seu melhor amigo.
+- Chame para horario pet.
+- Garanta a tosa higienica.
+- Veja racoes disponiveis.
+- Prepare seu pet para a semana.
+- Chame para avaliar Loja De Decoracao.
+- Envie sua necessidade de Loja De Decoracao.
+
+## Por que funcionam
+
+Eles indicam acao concreta dentro de Loja De Decoracao, sem depender de chamada vaga.

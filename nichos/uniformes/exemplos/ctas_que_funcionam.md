@@ -1,0 +1,16 @@
+# CTAs que Funcionam - Uniformes
+
+- Veja novidades da loja.
+- Consulte disponibilidade.
+- Reserve seu item.
+- Garanta antes que acabe.
+- Chame para ver tamanhos.
+- Confira a colecao.
+- Escolha seu presente.
+- Veja ofertas da semana.
+- Chame para avaliar Uniformes.
+- Envie sua necessidade de Uniformes.
+
+## Por que funcionam
+
+Eles indicam acao concreta dentro de Uniformes, sem depender de chamada vaga.

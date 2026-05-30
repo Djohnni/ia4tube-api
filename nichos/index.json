@@ -1,0 +1,3977 @@
+{
+  "version": 1,
+  "generated_at": "2026-05-29T22:24:09.344Z",
+  "total": 566,
+  "aliases_total": 4,
+  "entries": [
+    {
+      "id": "academia",
+      "titulo": "Academia",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "academia_de_artes_marciais",
+      "titulo": "Academia de artes marciais",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "academia_de_danca",
+      "titulo": "Academia de dança",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "academia_de_ginastica",
+      "titulo": "Academia de ginástica",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "academia_de_musculacao",
+      "titulo": "Academia de musculação",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "academia_de_natacao",
+      "titulo": "Academia de natação",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "acai",
+      "titulo": "Açaí",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "acessorios_automotivos",
+      "titulo": "Acessórios automotivos",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "acessorios_femininos",
+      "titulo": "Acessórios femininos",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "acessorios_para_celular",
+      "titulo": "Acessórios para celular",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "acessorios_para_pets",
+      "titulo": "Acessórios para pets",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "acougue",
+      "titulo": "Açougue",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "acupuntura",
+      "titulo": "Acupuntura",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "adega",
+      "titulo": "Adega",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "adestramento_de_caes",
+      "titulo": "Adestramento de cães",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "administradora_de_condominios",
+      "titulo": "Administradora de condomínios",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "advogado",
+      "titulo": "Advogado",
+      "origem": "interno",
+      "alias": [
+        "advocacia",
+        "escritorio_de_advocacia"
+      ],
+      "status": "template"
+    },
+    {
+      "id": "aerografia",
+      "titulo": "Aerografia",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "agencia_de_empregos",
+      "titulo": "Agência de empregos",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "agencia_de_marketing",
+      "titulo": "Agência de marketing",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "agencia_de_publicidade",
+      "titulo": "Agência de publicidade",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "agencia_de_turismo",
+      "titulo": "Agência de turismo",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "agencia_digital",
+      "titulo": "Agência digital",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "agropecuaria",
+      "titulo": "Agropecuária",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "alfaiataria",
+      "titulo": "Alfaiataria",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "alimentos_congelados",
+      "titulo": "Alimentos congelados",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "alimentos_funcionais",
+      "titulo": "Alimentos funcionais",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "alimentos_saudaveis",
+      "titulo": "Alimentos saudáveis",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "alinhamento_e_balanceamento",
+      "titulo": "Alinhamento e balanceamento",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "alongamento_de_cilios",
+      "titulo": "Alongamento de cílios",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "aluguel_de_andaimes",
+      "titulo": "Aluguel de andaimes",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "aluguel_de_brinquedos",
+      "titulo": "Aluguel de brinquedos",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "aluguel_de_carros",
+      "titulo": "Aluguel de carros",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "aluguel_de_equipamentos",
+      "titulo": "Aluguel de equipamentos",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "aluguel_de_ferramentas",
+      "titulo": "Aluguel de ferramentas",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "aluguel_de_maquinas",
+      "titulo": "Aluguel de máquinas",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "aluguel_de_roupas",
+      "titulo": "Aluguel de roupas",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "aluguel_de_som_e_iluminacao",
+      "titulo": "Aluguel de som e iluminação",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "amolador",
+      "titulo": "Amolador",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "animacao_de_festas",
+      "titulo": "Animação de festas",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "antiguidades",
+      "titulo": "Antiguidades",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "aparelhos_auditivos",
+      "titulo": "Aparelhos auditivos",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "aplicacao_de_insulfilm",
+      "titulo": "Aplicação de insulfilm",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "aquecedores",
+      "titulo": "Aquecedores",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "ar_condicionado",
+      "titulo": "Ar-condicionado",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "armarinho",
+      "titulo": "Armarinho",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "aromaterapia",
+      "titulo": "Aromaterapia",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "arquitetura",
+      "titulo": "Arquitetura",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "artes_graficas",
+      "titulo": "Artes gráficas",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "artesanato",
+      "titulo": "Artesanato",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "assessoria_contabil",
+      "titulo": "Assessoria contábil",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "assessoria_esportiva",
+      "titulo": "Assessoria esportiva",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "assessoria_juridica",
+      "titulo": "Assessoria jurídica",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "assessoria_para_casamentos",
+      "titulo": "Assessoria para casamentos",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "assistencia_tecnica",
+      "titulo": "Assistência técnica",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "assistencia_tecnica_de_celulares",
+      "titulo": "Assistência técnica de celulares",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "assistencia_tecnica_de_computadores",
+      "titulo": "Assistência técnica de computadores",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "assistencia_tecnica_de_eletrodomesticos",
+      "titulo": "Assistência técnica de eletrodomésticos",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "atacadista",
+      "titulo": "Atacadista",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "atelie",
+      "titulo": "Ateliê",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "auditoria",
+      "titulo": "Auditoria",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "aulas_particulares",
+      "titulo": "Aulas particulares",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "auto_eletrica",
+      "titulo": "Auto elétrica",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "auto_escola",
+      "titulo": "Auto escola",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "auto_pecas",
+      "titulo": "Auto peças",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "auto_som",
+      "titulo": "Auto som",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "automacao_residencial",
+      "titulo": "Automação residencial",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "avicultura",
+      "titulo": "Avicultura",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "balancas_comerciais",
+      "titulo": "Balanças comerciais",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "baloes_personalizados",
+      "titulo": "Balões personalizados",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "banca_de_jornal",
+      "titulo": "Banca de jornal",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "banho_e_tosa",
+      "titulo": "Banho e tosa",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "bar",
+      "titulo": "Bar",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "barbearia",
+      "titulo": "Barbearia",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "barbearia_premium",
+      "titulo": "Barbearia premium",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "barraquinha_de_festa",
+      "titulo": "Barraquinha de festa",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "baterias_automotivas",
+      "titulo": "Baterias automotivas",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "bazar",
+      "titulo": "Bazar",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "bebedouros",
+      "titulo": "Bebedouros",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "bebidas",
+      "titulo": "Bebidas",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "bercario",
+      "titulo": "Berçário",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "bicicletaria",
+      "titulo": "Bicicletaria",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "bijuterias",
+      "titulo": "Bijuterias",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "bolos_caseiros",
+      "titulo": "Bolos caseiros",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "bolos_decorados",
+      "titulo": "Bolos decorados",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "bomboniere",
+      "titulo": "Bomboniere",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "bordados",
+      "titulo": "Bordados",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "borracharia",
+      "titulo": "Borracharia",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "boteco",
+      "titulo": "Boteco",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "boutique",
+      "titulo": "Boutique",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "brecho",
+      "titulo": "Brechó",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "brindes_personalizados",
+      "titulo": "Brindes personalizados",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "brinquedoteca",
+      "titulo": "Brinquedoteca",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "bronzeamento",
+      "titulo": "Bronzeamento",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "buffet",
+      "titulo": "Buffet",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "cabeleireiro",
+      "titulo": "Cabeleireiro",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "cafeteria",
+      "titulo": "Cafeteria",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "cafeteria_colonial",
+      "titulo": "Cafeteria colonial",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "calcados_femininos",
+      "titulo": "Calçados femininos",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "calcados_infantis",
+      "titulo": "Calçados infantis",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "calcados_masculinos",
+      "titulo": "Calçados masculinos",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "calhas",
+      "titulo": "Calhas",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "cama_mesa_e_banho",
+      "titulo": "Cama, mesa e banho",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "cameras_de_seguranca",
+      "titulo": "Câmeras de segurança",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "camping_e_pesca",
+      "titulo": "Camping e pesca",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "canil",
+      "titulo": "Canil",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "capas_para_celular",
+      "titulo": "Capas para celular",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "capelania",
+      "titulo": "Capelania",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "capotaria",
+      "titulo": "Capotaria",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "car_lavagem",
+      "titulo": "Car lavagem",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "carimbos",
+      "titulo": "Carimbos",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "carpintaria",
+      "titulo": "Carpintaria",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "carretos",
+      "titulo": "Carretos",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "cartorio",
+      "titulo": "Cartório",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "casa_de_carnes",
+      "titulo": "Casa de carnes",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "casa_de_festas",
+      "titulo": "Casa de festas",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "casa_de_racao",
+      "titulo": "Casa de ração",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "casa_loterica",
+      "titulo": "Casa lotérica",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "casas_de_repouso",
+      "titulo": "Casas de repouso",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "casas_pre_fabricadas",
+      "titulo": "Casas pré-fabricadas",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "celulares",
+      "titulo": "Celulares",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "centro_automotivo",
+      "titulo": "Centro automotivo",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "centro_de_estetica",
+      "titulo": "Centro de estética",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "centro_de_treinamento",
+      "titulo": "Centro de treinamento",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "cerimonial",
+      "titulo": "Cerimonial",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "cervejaria",
+      "titulo": "Cervejaria",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "cestas_de_cafe_da_manha",
+      "titulo": "Cestas de café da manhã",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "chaveiro",
+      "titulo": "Chaveiro",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "choperia",
+      "titulo": "Choperia",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "churrascaria",
+      "titulo": "Churrascaria",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "churrasquinho",
+      "titulo": "Churrasquinho",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "climatizacao",
+      "titulo": "Climatização",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "clinica_capilar",
+      "titulo": "Clínica capilar",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "clinica_de_emagrecimento",
+      "titulo": "Clínica de emagrecimento",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "clinica_de_exames",
+      "titulo": "Clínica de exames",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "clinica_de_fisioterapia",
+      "titulo": "Clínica de fisioterapia",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "clinica_de_olhos",
+      "titulo": "Clínica de olhos",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "clinica_de_ortopedia",
+      "titulo": "Clínica de ortopedia",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "clinica_de_psicologia",
+      "titulo": "Clínica de psicologia",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "clinica_de_vacinas",
+      "titulo": "Clínica de vacinas",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "clinica_estetica",
+      "titulo": "Clinica Estetica",
+      "origem": "interno",
+      "alias": [
+        "clinica_de_estetica"
+      ],
+      "status": "template"
+    },
+    {
+      "id": "clinica_geriatrica",
+      "titulo": "Clínica geriátrica",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "clinica_medica",
+      "titulo": "Clínica médica",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "clinica_odontologica",
+      "titulo": "Clínica odontológica",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "clinica_odontopediatrica",
+      "titulo": "Clínica odontopediátrica",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "clinica_popular",
+      "titulo": "Clínica popular",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "clinica_veterinaria",
+      "titulo": "Clínica veterinária",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "clube_de_assinatura",
+      "titulo": "Clube de assinatura",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "coach",
+      "titulo": "Coach",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "cobranca_empresarial",
+      "titulo": "Cobrança empresarial",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "coffee_break",
+      "titulo": "Coffee break",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "colchoes",
+      "titulo": "Colchões",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "colegio",
+      "titulo": "Colégio",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "colonia_de_ferias",
+      "titulo": "Colônia de férias",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "comercio_de_gas",
+      "titulo": "Comércio de gás",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "comida_caseira",
+      "titulo": "Comida caseira",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "comida_fitness",
+      "titulo": "Comida fitness",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "comida_japonesa",
+      "titulo": "Comida japonesa",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "comida_mexicana",
+      "titulo": "Comida mexicana",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "comida_mineira",
+      "titulo": "Comida mineira",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "comida_nordestina",
+      "titulo": "Comida nordestina",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "comida_saudavel",
+      "titulo": "Comida saudável",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "compressor_e_ferramentas",
+      "titulo": "Compressor e ferramentas",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "comunicacao_visual",
+      "titulo": "Comunicação visual",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "concessionaria",
+      "titulo": "Concessionária",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "condominios",
+      "titulo": "Condomínios",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "confeccao",
+      "titulo": "Confecção",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "confeitaria",
+      "titulo": "Confeitaria",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "conserto_de_ar_condicionado",
+      "titulo": "Conserto de ar-condicionado",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "conserto_de_bicicletas",
+      "titulo": "Conserto de bicicletas",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "conserto_de_celulares",
+      "titulo": "Conserto de celulares",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "conserto_de_computadores",
+      "titulo": "Conserto de computadores",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "conserto_de_eletrodomesticos",
+      "titulo": "Conserto de eletrodomésticos",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "conserto_de_geladeira",
+      "titulo": "Conserto de geladeira",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "conserto_de_impressoras",
+      "titulo": "Conserto de impressoras",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "conserto_de_maquinas",
+      "titulo": "Conserto de máquinas",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "conserto_de_motos",
+      "titulo": "Conserto de motos",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "conserto_de_roupas",
+      "titulo": "Conserto de roupas",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "conserto_de_televisao",
+      "titulo": "Conserto de televisão",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "consorcio",
+      "titulo": "Consórcio",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "construtora",
+      "titulo": "Construtora",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "consultoria_de_imagem",
+      "titulo": "Consultoria de imagem",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "consultoria_empresarial",
+      "titulo": "Consultoria empresarial",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "consultoria_financeira",
+      "titulo": "Consultoria financeira",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "contabilidade",
+      "titulo": "Contabilidade",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "conteineres",
+      "titulo": "Contêineres",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "controle_de_pragas",
+      "titulo": "Controle de pragas",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "corretora_de_imoveis",
+      "titulo": "Corretora de imóveis",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "corretora_de_seguros",
+      "titulo": "Corretora de seguros",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "corte_a_laser",
+      "titulo": "Corte a laser",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "cosmeticos",
+      "titulo": "Cosméticos",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "costura",
+      "titulo": "Costura",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "coworking",
+      "titulo": "Coworking",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "cozinha_industrial",
+      "titulo": "Cozinha industrial",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "creche",
+      "titulo": "Creche",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "criacao_de_sites",
+      "titulo": "Criação de sites",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "cristais_e_presentes",
+      "titulo": "Cristais e presentes",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "cuidadores_de_idosos",
+      "titulo": "Cuidadores de idosos",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "cupcakes",
+      "titulo": "Cupcakes",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "curso_de_beleza",
+      "titulo": "Curso de beleza",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "curso_de_idiomas",
+      "titulo": "Curso de idiomas",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "curso_de_informatica",
+      "titulo": "Curso de informática",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "curso_profissionalizante",
+      "titulo": "Curso profissionalizante",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "cursos_online",
+      "titulo": "Cursos online",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "day_care_pet",
+      "titulo": "Day care pet",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "decoracao",
+      "titulo": "Decoração",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "dedetizadora",
+      "titulo": "Dedetizadora",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "delivery",
+      "titulo": "Delivery",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "delivery_de_bebidas",
+      "titulo": "Delivery de bebidas",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "delivery_de_comida",
+      "titulo": "Delivery de comida",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "dentista",
+      "titulo": "Dentista",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "depilacao",
+      "titulo": "Depilação",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "deposito_de_bebidas",
+      "titulo": "Depósito de bebidas",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "deposito_de_construcao",
+      "titulo": "Depósito de construção",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "desentupidora",
+      "titulo": "Desentupidora",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "desenvolvimento_de_software",
+      "titulo": "Desenvolvimento de software",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "designer_de_interiores",
+      "titulo": "Designer de interiores",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "designer_grafico",
+      "titulo": "Designer gráfico",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "desmanche_legalizado",
+      "titulo": "Desmanche legalizado",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "despachante",
+      "titulo": "Despachante",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "despensa_e_mercearia",
+      "titulo": "Despensa e mercearia",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "diagnostico_por_imagem",
+      "titulo": "Diagnóstico por imagem",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "distribuidora",
+      "titulo": "Distribuidora",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "distribuidora_de_agua",
+      "titulo": "Distribuidora de água",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "distribuidora_de_alimentos",
+      "titulo": "Distribuidora de alimentos",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "distribuidora_de_gas",
+      "titulo": "Distribuidora de gás",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "distribuidora_de_higiene",
+      "titulo": "Distribuidora de higiene",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "distribuidora_de_pneus",
+      "titulo": "Distribuidora de pneus",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "distribuidora_de_produtos_hospitalares",
+      "titulo": "Distribuidora de produtos hospitalares",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "doceria",
+      "titulo": "Doceria",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "doces_finos",
+      "titulo": "Doces finos",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "doces_personalizados",
+      "titulo": "Doces personalizados",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "drogaria",
+      "titulo": "Drogaria",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "drones",
+      "titulo": "Drones",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "educacao_infantil",
+      "titulo": "Educação infantil",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "eletrica",
+      "titulo": "Elétrica",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "eletricista",
+      "titulo": "Eletricista",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "eletronicos",
+      "titulo": "Eletrônicos",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "emagrecimento",
+      "titulo": "Emagrecimento",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "embalagens",
+      "titulo": "Embalagens",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "emporio",
+      "titulo": "Empório",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "encanador",
+      "titulo": "Encanador",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "energia_solar",
+      "titulo": "Energia solar",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "enfermagem_domiciliar",
+      "titulo": "Enfermagem domiciliar",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "engenharia",
+      "titulo": "Engenharia",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "envelopamento_automotivo",
+      "titulo": "Envelopamento automotivo",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "equipamentos_agricolas",
+      "titulo": "Equipamentos agrícolas",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "equipamentos_de_protecao",
+      "titulo": "Equipamentos de proteção",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "equipamentos_medicos",
+      "titulo": "Equipamentos médicos",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "ervanario",
+      "titulo": "Ervanário",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "ervas_medicinais",
+      "titulo": "Ervas medicinais",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "escapamentos",
+      "titulo": "Escapamentos",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "escola",
+      "titulo": "Escola",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "escola_de_costura",
+      "titulo": "Escola de costura",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "escola_de_futebol",
+      "titulo": "Escola de futebol",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "escola_de_musica",
+      "titulo": "Escola de música",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "escola_de_natacao",
+      "titulo": "Escola de natação",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "escola_de_robotica",
+      "titulo": "Escola de robótica",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "escola_infantil",
+      "titulo": "Escola infantil",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "escola_tecnica",
+      "titulo": "Escola técnica",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "escritorio_virtual",
+      "titulo": "Escritório virtual",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "esfiharia",
+      "titulo": "Esfiharia",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "esoterismo",
+      "titulo": "Esoterismo",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "espaco_de_eventos",
+      "titulo": "Espaço de eventos",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "espaco_kids",
+      "titulo": "Espaço kids",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "espetaria",
+      "titulo": "Espetaria",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "esquadrias_de_aluminio",
+      "titulo": "Esquadrias de alumínio",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "estacionamento",
+      "titulo": "Estacionamento",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "estamparia",
+      "titulo": "Estamparia",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "estetica_automotiva",
+      "titulo": "Estética automotiva",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "estetica_facial",
+      "titulo": "Estética facial",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "estetica_masculina",
+      "titulo": "Estética masculina",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "estetica_pet",
+      "titulo": "Estética pet",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "estudio_de_fotografia",
+      "titulo": "Estúdio de fotografia",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "estudio_de_gravacao",
+      "titulo": "Estúdio de gravação",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "estudio_de_pilates",
+      "titulo": "Estúdio de pilates",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "estudio_de_tatuagem",
+      "titulo": "Estúdio de tatuagem",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "eventos_corporativos",
+      "titulo": "Eventos corporativos",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "extintores",
+      "titulo": "Extintores",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "fabrica_de_gelo",
+      "titulo": "Fábrica de gelo",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "fabrica_de_moveis",
+      "titulo": "Fábrica de móveis",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "fabrica_de_salgados",
+      "titulo": "Fábrica de salgados",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "fabrica_de_uniformes",
+      "titulo": "Fábrica de uniformes",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "faculdade",
+      "titulo": "Faculdade",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "farmacia",
+      "titulo": "Farmácia",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "ferragem",
+      "titulo": "Ferragem",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "ferramentaria",
+      "titulo": "Ferramentaria",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "festas_infantis",
+      "titulo": "Festas infantis",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "fibra_optica",
+      "titulo": "Fibra óptica",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "financeira",
+      "titulo": "Financeira",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "fisioterapia",
+      "titulo": "Fisioterapia",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "fitness_boutique",
+      "titulo": "Fitness boutique",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "floricultura",
+      "titulo": "Floricultura",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "fonoaudiologia",
+      "titulo": "Fonoaudiologia",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "food_truck",
+      "titulo": "Food truck",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "forneria",
+      "titulo": "Forneria",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "fotografia",
+      "titulo": "Fotografia",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "franquia",
+      "titulo": "Franquia",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "fretes_e_mudancas",
+      "titulo": "Fretes e mudanças",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "funeraria",
+      "titulo": "Funerária",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "funilaria",
+      "titulo": "Funilaria",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "funilaria_e_pintura",
+      "titulo": "Funilaria e pintura",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "galeteria",
+      "titulo": "Galeteria",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "gestao_de_trafego",
+      "titulo": "Gestão de tráfego",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "ginastica_laboral",
+      "titulo": "Ginástica laboral",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "grafica",
+      "titulo": "Gráfica",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "guincho",
+      "titulo": "Guincho",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "hamburgueria",
+      "titulo": "Hamburgueria",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "harmonizacao_facial",
+      "titulo": "Harmonização facial",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "hidraulica",
+      "titulo": "Hidráulica",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "home_care",
+      "titulo": "Home care",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "hortifruti",
+      "titulo": "Hortifruti",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "hospedagem_de_sites",
+      "titulo": "Hospedagem de sites",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "hospital_veterinario",
+      "titulo": "Hospital veterinário",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "hostel",
+      "titulo": "Hostel",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "hotel",
+      "titulo": "Hotel",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "iluminacao",
+      "titulo": "Iluminação",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "imobiliaria",
+      "titulo": "Imobiliária",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "impermeabilizacao",
+      "titulo": "Impermeabilização",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "importados",
+      "titulo": "Importados",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "impressao_3d",
+      "titulo": "Impressão 3D",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "impressao_digital",
+      "titulo": "Impressão digital",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "industria_alimenticia",
+      "titulo": "Indústria alimentícia",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "industria_textil",
+      "titulo": "Indústria têxtil",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "influenciador_digital",
+      "titulo": "Influenciador digital",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "informatica",
+      "titulo": "Informática",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "injecao_eletronica",
+      "titulo": "Injeção eletrônica",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "instalacao_eletrica",
+      "titulo": "Instalação elétrica",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "instalacao_hidraulica",
+      "titulo": "Instalação hidráulica",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "instituto_de_beleza",
+      "titulo": "Instituto de beleza",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "internet_fibra",
+      "titulo": "Internet fibra",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "isolamento_acustico",
+      "titulo": "Isolamento acústico",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "itens_personalizados",
+      "titulo": "Itens personalizados",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "jardinagem",
+      "titulo": "Jardinagem",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "joalheria",
+      "titulo": "Joalheria",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "joias",
+      "titulo": "Jóias",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "karaoke",
+      "titulo": "Karaokê",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "kits_festa",
+      "titulo": "Kits festa",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "laboratorio_de_analises",
+      "titulo": "Laboratório de análises",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "laboratorio_optico",
+      "titulo": "Laboratório óptico",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "lan_house",
+      "titulo": "Lan house",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "lanchonete",
+      "titulo": "Lanchonete",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "lareiras",
+      "titulo": "Lareiras",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "lava_jato",
+      "titulo": "Lava-jato",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "lavagem_a_seco",
+      "titulo": "Lavagem a seco",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "lavagem_de_estofados",
+      "titulo": "Lavagem de estofados",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "lavagem_de_tapetes",
+      "titulo": "Lavagem de tapetes",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "lavanderia",
+      "titulo": "Lavanderia",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "limpeza_de_pele",
+      "titulo": "Limpeza de pele",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "limpeza_pos_obra",
+      "titulo": "Limpeza pós-obra",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "limpeza_residencial",
+      "titulo": "Limpeza residencial",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "lingerie",
+      "titulo": "Lingerie",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "locacao_de_cacambas",
+      "titulo": "Locação de caçambas",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "locacao_de_equipamentos",
+      "titulo": "Locação de equipamentos",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "locacao_de_imoveis",
+      "titulo": "Locação de imóveis",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "locadora",
+      "titulo": "Locadora",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "loja_agropecuaria",
+      "titulo": "Loja agropecuária",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "loja_country",
+      "titulo": "Loja country",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "loja_de_acessorios",
+      "titulo": "Loja de acessórios",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "loja_de_aquarios",
+      "titulo": "Loja de aquários",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "loja_de_artigos_esportivos",
+      "titulo": "Loja de artigos esportivos",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "loja_de_artigos_para_festas",
+      "titulo": "Loja de artigos para festas",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "loja_de_artigos_religiosos",
+      "titulo": "Loja de artigos religiosos",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "loja_de_bebe",
+      "titulo": "Loja de bebê",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "loja_de_bolsas",
+      "titulo": "Loja de bolsas",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "loja_de_brinquedos",
+      "titulo": "Loja de brinquedos",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "loja_de_calcados",
+      "titulo": "Loja de calçados",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "loja_de_celular",
+      "titulo": "Loja de celular",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "loja_de_conveniencia",
+      "titulo": "Loja de conveniência",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "loja_de_cosmeticos",
+      "titulo": "Loja de cosméticos",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "loja_de_decoracao",
+      "titulo": "Loja de decoração",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "loja_de_eletrodomesticos",
+      "titulo": "Loja de eletrodomésticos",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "loja_de_eletronicos",
+      "titulo": "Loja de eletrônicos",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "loja_de_embalagens",
+      "titulo": "Loja de embalagens",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "loja_de_enxovais",
+      "titulo": "Loja de enxovais",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "loja_de_ferramentas",
+      "titulo": "Loja de ferramentas",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "loja_de_festas",
+      "titulo": "Loja de festas",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "loja_de_games",
+      "titulo": "Loja de games",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "loja_de_iluminacao",
+      "titulo": "Loja de iluminação",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "loja_de_informatica",
+      "titulo": "Loja de informática",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "loja_de_instrumentos_musicais",
+      "titulo": "Loja de instrumentos musicais",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "loja_de_lingerie",
+      "titulo": "Loja de lingerie",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "loja_de_maquiagem",
+      "titulo": "Loja de maquiagem",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "loja_de_materiais_eletricos",
+      "titulo": "Loja de materiais elétricos",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "loja_de_materiais_hidraulicos",
+      "titulo": "Loja de materiais hidráulicos",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "loja_de_motos",
+      "titulo": "Loja de motos",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "loja_de_moveis",
+      "titulo": "Loja de móveis",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "loja_de_piscinas",
+      "titulo": "Loja de piscinas",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "loja_de_pneus",
+      "titulo": "Loja de pneus",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "loja_de_presentes",
+      "titulo": "Loja de presentes",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "loja_de_roupas",
+      "titulo": "Loja de roupas",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "loja_de_suplementos",
+      "titulo": "Loja de suplementos",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "loja_de_utilidades",
+      "titulo": "Loja de utilidades",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "loja_geek",
+      "titulo": "Loja geek",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "loja_infantil",
+      "titulo": "Loja infantil",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "loterica",
+      "titulo": "Lotérica",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "lubrificantes",
+      "titulo": "Lubrificantes",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "luthier",
+      "titulo": "Luthier",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "madeireira",
+      "titulo": "Madeireira",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "manicure",
+      "titulo": "Manicure",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "manutencao_de_piscinas",
+      "titulo": "Manutenção de piscinas",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "manutencao_predial",
+      "titulo": "Manutenção predial",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "maquiagem_profissional",
+      "titulo": "Maquiagem profissional",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "maquinas_agricolas",
+      "titulo": "Máquinas agrícolas",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "maquinas_de_cartao",
+      "titulo": "Máquinas de cartão",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "maquinas_de_costura",
+      "titulo": "Máquinas de costura",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "maquinas_industriais",
+      "titulo": "Máquinas industriais",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "marcenaria",
+      "titulo": "Marcenaria",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "marketing_politico",
+      "titulo": "Marketing político",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "marketing_visual_empresas",
+      "titulo": "Marketing Visual Empresas",
+      "origem": "interno",
+      "alias": [
+        "marketing_visual_para_empresas"
+      ],
+      "status": "modelo"
+    },
+    {
+      "id": "marmitaria",
+      "titulo": "Marmitaria",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "marmoraria",
+      "titulo": "Marmoraria",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "massoterapia",
+      "titulo": "Massoterapia",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "materiais_de_construcao",
+      "titulo": "Materiais de construção",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "mecanica_automotiva",
+      "titulo": "Mecânica automotiva",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "mecanica_diesel",
+      "titulo": "Mecânica diesel",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "mecanica_pesada",
+      "titulo": "Mecânica pesada",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "medicina_do_trabalho",
+      "titulo": "Medicina do trabalho",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "medicina_estetica",
+      "titulo": "Medicina estética",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "mei_e_microempresa",
+      "titulo": "Mei e microempresa",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "mercado",
+      "titulo": "Mercado",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "mercearia",
+      "titulo": "Mercearia",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "metalurgica",
+      "titulo": "Metalúrgica",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "minimercado",
+      "titulo": "Minimercado",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "moda_evangelica",
+      "titulo": "Moda evangélica",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "moda_feminina",
+      "titulo": "Moda feminina",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "moda_fitness",
+      "titulo": "Moda fitness",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "moda_infantil",
+      "titulo": "Moda infantil",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "moda_masculina",
+      "titulo": "Moda masculina",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "moda_praia",
+      "titulo": "Moda praia",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "montagem_de_moveis",
+      "titulo": "Montagem de móveis",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "motel",
+      "titulo": "Motel",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "moveis_planejados",
+      "titulo": "Móveis planejados",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "moveis_rusticos",
+      "titulo": "Móveis rústicos",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "nutricionista",
+      "titulo": "Nutricionista",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "oficina",
+      "titulo": "Oficina",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "oficina_de_bicicletas",
+      "titulo": "Oficina de bicicletas",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "oficina_de_motos",
+      "titulo": "Oficina de motos",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "oficina_mecanica",
+      "titulo": "Oficina mecânica",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "operadora_de_internet",
+      "titulo": "Operadora de internet",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "organizacao_de_festas",
+      "titulo": "Organização de festas",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "organizacao_residencial",
+      "titulo": "Organização residencial",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "ortopedia",
+      "titulo": "Ortopedia",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "otica",
+      "titulo": "Ótica",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "padaria",
+      "titulo": "Padaria",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "padaria_artesanal",
+      "titulo": "Padaria artesanal",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "paisagismo",
+      "titulo": "Paisagismo",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "pamonharia",
+      "titulo": "Pamonharia",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "panificadora",
+      "titulo": "Panificadora",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "papel_de_parede",
+      "titulo": "Papel de parede",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "papelaria",
+      "titulo": "Papelaria",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "parafusos_e_ferramentas",
+      "titulo": "Parafusos e ferramentas",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "pastelaria",
+      "titulo": "Pastelaria",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "pastificio",
+      "titulo": "Pastifício",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "peixaria",
+      "titulo": "Peixaria",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "perfumaria",
+      "titulo": "Perfumaria",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "pericia_tecnica",
+      "titulo": "Perícia técnica",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "personal_trainer",
+      "titulo": "Personal trainer",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "personalizados",
+      "titulo": "Personalizados",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "pescados",
+      "titulo": "Pescados",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "pet_shop",
+      "titulo": "Pet shop",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "petiscaria",
+      "titulo": "Petiscaria",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "pilates",
+      "titulo": "Pilates",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "pintura_automotiva",
+      "titulo": "Pintura automotiva",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "pintura_predial",
+      "titulo": "Pintura predial",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "pintura_residencial",
+      "titulo": "Pintura residencial",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "pisos_e_revestimentos",
+      "titulo": "Pisos e revestimentos",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "pizzaria",
+      "titulo": "Pizzaria",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "pizzaria_delivery",
+      "titulo": "Pizzaria delivery",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "planejados",
+      "titulo": "Planejados",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "plano_de_saude",
+      "titulo": "Plano de saúde",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "podologia",
+      "titulo": "Podologia",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "polimento_automotivo",
+      "titulo": "Polimento automotivo",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "portoes_automaticos",
+      "titulo": "Portões automáticos",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "posto_de_combustivel",
+      "titulo": "Posto de combustível",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "pousada",
+      "titulo": "Pousada",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "praia_e_moda_fitness",
+      "titulo": "Praia e moda fitness",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "produtos_de_limpeza",
+      "titulo": "Produtos de limpeza",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "produtos_naturais",
+      "titulo": "Produtos naturais",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "protese_dentaria",
+      "titulo": "Prótese dentária",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "psicologia",
+      "titulo": "Psicologia",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "psicopedagogia",
+      "titulo": "Psicopedagogia",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "quiosque",
+      "titulo": "Quiosque",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "quiropraxia",
+      "titulo": "Quiropraxia",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "reabilitacao_fisica",
+      "titulo": "Reabilitação física",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "recarga_de_cartuchos",
+      "titulo": "Recarga de cartuchos",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "recarga_de_extintores",
+      "titulo": "Recarga de extintores",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "reciclagem",
+      "titulo": "Reciclagem",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "refeicoes_coletivas",
+      "titulo": "Refeições coletivas",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "reforco_escolar",
+      "titulo": "Reforço escolar",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "refrigeracao",
+      "titulo": "Refrigeração",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "relojoaria",
+      "titulo": "Relojoaria",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "restaurante",
+      "titulo": "Restaurante",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "restaurante_japones",
+      "titulo": "Restaurante japonês",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "retifica",
+      "titulo": "Retífica",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "retifica_de_motores",
+      "titulo": "Retífica de motores",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "revenda_de_carros",
+      "titulo": "Revenda de carros",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "rotisseria",
+      "titulo": "Rotisseria",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "roupas_profissionais",
+      "titulo": "Roupas profissionais",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "salao_de_beleza",
+      "titulo": "Salão de beleza",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "salao_infantil",
+      "titulo": "Salão infantil",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "salgaderia",
+      "titulo": "Salgaderia",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "sapataria",
+      "titulo": "Sapataria",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "saude_ocupacional",
+      "titulo": "Saúde ocupacional",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "seguranca_do_trabalho",
+      "titulo": "Segurança do trabalho",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "seguranca_eletronica",
+      "titulo": "Segurança eletrônica",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "seguro_auto",
+      "titulo": "Seguro auto",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "seguro_residencial",
+      "titulo": "Seguro residencial",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "seguros",
+      "titulo": "Seguros",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "semijoias",
+      "titulo": "Semijoias",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "serralheria",
+      "titulo": "Serralheria",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "servico_de_guincho",
+      "titulo": "Serviço de guincho",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "servico_de_instalacao",
+      "titulo": "Serviço de instalação",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "servico_de_pintura",
+      "titulo": "Serviço de pintura",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "servico_de_portaria",
+      "titulo": "Serviço de portaria",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "servico_de_reforma",
+      "titulo": "Serviço de reforma",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "servico_de_solda",
+      "titulo": "Serviço de solda",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "servicos_administrativos",
+      "titulo": "Serviços administrativos",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "servicos_contabeis",
+      "titulo": "Serviços contábeis",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "servicos_de_limpeza",
+      "titulo": "Serviços de limpeza",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "servicos_gerais",
+      "titulo": "Serviços gerais",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "sex_shop",
+      "titulo": "Sex shop",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "silkscreen",
+      "titulo": "Silkscreen",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "som_automotivo",
+      "titulo": "Som automotivo",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "sorveteria",
+      "titulo": "Sorveteria",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "spa",
+      "titulo": "Spa",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "studio_de_beleza",
+      "titulo": "Studio de beleza",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "studio_de_sobrancelhas",
+      "titulo": "Studio de sobrancelhas",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "supermercado",
+      "titulo": "Supermercado",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "supermercado_de_bairro",
+      "titulo": "Supermercado de bairro",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "suplementos",
+      "titulo": "Suplementos",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "sushi",
+      "titulo": "Sushi",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "tabacaria",
+      "titulo": "Tabacaria",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "tapecaria",
+      "titulo": "Tapeçaria",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "tapecaria_automotiva",
+      "titulo": "Tapeçaria automotiva",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "tatuagem",
+      "titulo": "Tatuagem",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "tecnologia",
+      "titulo": "Tecnologia",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "telecom",
+      "titulo": "Telecom",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "temakeria",
+      "titulo": "Temakeria",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "terapia_holistica",
+      "titulo": "Terapia holística",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "terapia_ocupacional",
+      "titulo": "Terapia ocupacional",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "terraplanagem",
+      "titulo": "Terraplanagem",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "tintas",
+      "titulo": "Tintas",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "toldos",
+      "titulo": "Toldos",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "topografia",
+      "titulo": "Topografia",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "transportadora",
+      "titulo": "Transportadora",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "transportes_executivos",
+      "titulo": "Transportes executivos",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "trattoria",
+      "titulo": "Trattoria",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "treinamento_empresarial",
+      "titulo": "Treinamento empresarial",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "turismo_rural",
+      "titulo": "Turismo rural",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "uniformes",
+      "titulo": "Uniformes",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "uniformes_escolares",
+      "titulo": "Uniformes escolares",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "uniformes_profissionais",
+      "titulo": "Uniformes profissionais",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "utensilios_domesticos",
+      "titulo": "Utensílios domésticos",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "venda_de_motos",
+      "titulo": "Venda de motos",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "venda_de_pneus",
+      "titulo": "Venda de pneus",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "venda_de_veiculos",
+      "titulo": "Venda de veículos",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "veterinaria",
+      "titulo": "Veterinária",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "vidracaria",
+      "titulo": "Vidraçaria",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "vistoria_veicular",
+      "titulo": "Vistoria veicular",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "visual_merchandising",
+      "titulo": "Visual merchandising",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "vitrines",
+      "titulo": "Vitrines",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "web_design",
+      "titulo": "Web design",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "xerox_e_copias",
+      "titulo": "Xerox e cópias",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "yoga",
+      "titulo": "Yoga",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    },
+    {
+      "id": "zeladoria",
+      "titulo": "Zeladoria",
+      "origem": "IA4_EMPRESA_RAMOS",
+      "alias": [],
+      "status": "template"
+    }
+  ]
+}

@@ -1,0 +1,12 @@
+# Criar Campanha - Emporio
+
+Campanhas recomendadas:
+
+- agenda aberta de Emporio.
+- semana de divulgacao de Emporio.
+- campanha para clientes do bairro.
+- campanha educativa sobre Emporio.
+- oferta de avaliacao de Emporio.
+- prova visual autorizada de Emporio.
+- retorno de clientes antigos.
+- campanha sazonal local.
