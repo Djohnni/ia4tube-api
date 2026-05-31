@@ -80,6 +80,9 @@ function normalizeOrderBody(body = {}) {
     whatsapp_contato: firstText(body.whatsapp_contato, body.whatsapp_empresa, body.whatsapp, companyFields.whatsapp),
     instagram: firstText(body.instagram, companyFields.instagram),
     observacoes: firstText(body.observacoes, companyFields.observacoes, companyFields.notes),
+    frase_foto: firstText(body.frase_foto, companyFields.frase_foto, companyFields.campos_dinamicos?.frase_na_foto),
+    historia_empresa: firstText(body.historia_empresa, companyFields.historia_empresa, companyFields.campos_dinamicos?.historia_empresa),
+    origem_foto_rapida: firstText(body.origem_foto_rapida, companyFields.origem_foto_rapida),
     new_model: newModel
   };
 }
@@ -106,7 +109,8 @@ function getUploadPermissions(categoria) {
     podeUsarPatrocinadores: categoria === "patrocinador",
     podeUsarLogo: categoria === "arte_empresa",
     podeUsarFotos: categoria === "arte_empresa",
-    podeUsarReferencias: categoria === "arte_empresa"
+    podeUsarReferencias: categoria === "arte_empresa",
+    podeUsarModeloExistente: categoria === "arte_empresa"
   };
 }
 
@@ -162,12 +166,22 @@ function moveOrderUploads({ categoria, files, base }) {
     fs.renameSync(f.path, dest);
   });
 
+  const modeloExistente = permissions.podeUsarModeloExistente
+    ? moveUploadedFile({
+        files,
+        base,
+        field: "modelo_existente",
+        destName: `modelo_existente${path.extname(files["modelo_existente"]?.[0]?.originalname || ".png") || ".png"}`
+      })
+    : null;
+
   return {
     ...permissions,
     pats,
     logo,
     fotos,
-    referencias
+    referencias,
+    modeloExistente
   };
 }
 
@@ -175,7 +189,10 @@ function buildCompanyAssets({ files, uploadResult }) {
   return {
     logo: files["logo"]?.[0] ? "logo.png" : "",
     fotos: (uploadResult.fotos || []).map((f, i) => `foto${String(i + 1).padStart(2, "0")}${path.extname(f.originalname || ".png") || ".png"}`),
-    referencias: (uploadResult.referencias || []).map((f, i) => `referencia${String(i + 1).padStart(2, "0")}${path.extname(f.originalname || ".png") || ".png"}`)
+    referencias: (uploadResult.referencias || []).map((f, i) => `referencia${String(i + 1).padStart(2, "0")}${path.extname(f.originalname || ".png") || ".png"}`),
+    modelo_existente: files["modelo_existente"]?.[0]
+      ? `modelo_existente${path.extname(files["modelo_existente"][0].originalname || ".png") || ".png"}`
+      : ""
   };
 }
 
@@ -197,6 +214,9 @@ async function buildCompanyData({ fields, files, uploadResult }) {
     whatsapp_contato: fields.whatsapp_contato || "",
     instagram: fields.instagram || "",
     observacoes: fields.observacoes || "",
+    frase_foto: fields.frase_foto || "",
+    historia_empresa: fields.historia_empresa || "",
+    origem_foto_rapida: fields.origem_foto_rapida || "",
     niche_id: nicheWithUsage?.id || "",
     niche_dna: nicheWithUsage?.dna || nicheService.createEmptyDna(),
     niche_dna_status: nicheWithUsage?.dna_status || "pendente",
@@ -339,14 +359,17 @@ async function buildPedidoData({
         cta,
         whatsapp_contato,
         instagram,
-        observacoes
+        observacoes,
+        frase_foto: fields.frase_foto,
+        historia_empresa: fields.historia_empresa,
+        origem_foto_rapida: fields.origem_foto_rapida
       },
       files,
       uploadResult
     });
 
     Object.assign(pedido, companyData, {
-      rodada: objetivo || "Arte para empresa",
+      rodada: "",
       data: oferta || nome_empresa || ramo,
       product_id: "arte_empresa",
       schema_version: new_model?.schema_version || 1
@@ -390,7 +413,10 @@ async function buildPedidoData({
         cta: pedido.cta,
         whatsapp: pedido.whatsapp_contato,
         instagram: pedido.instagram,
-        observacoes: pedido.observacoes
+        observacoes: pedido.observacoes,
+        frase_foto: pedido.frase_foto,
+        historia_empresa: pedido.historia_empresa,
+        origem_foto_rapida: pedido.origem_foto_rapida
       };
       pedido.assets = {
         ...pedido.assets,
@@ -406,12 +432,16 @@ async function buildPedidoData({
         whatsapp_contato: pedido.whatsapp_contato,
         instagram: pedido.instagram,
         observacoes: pedido.observacoes,
+        frase_foto: pedido.frase_foto,
+        historia_empresa: pedido.historia_empresa,
+        origem_foto_rapida: pedido.origem_foto_rapida,
         niche_id: pedido.niche_id,
         niche_dna_status: pedido.niche_dna_status,
         niche_dna_origem: pedido.niche_dna_origem,
         modelo_status: pedido.modelo_status,
         modelo_score: pedido.modelo_score
       };
+      delete pedido.legacy.rodada;
     }
   }
 
@@ -422,7 +452,6 @@ function persistNewOrder({ base, pedido }) {
   orderStorage.writeOrder(base, pedido);
   orderStorage.writeStatus(base, orderStatus.ORDER_STATUS.NOVO);
 }
-
 
 async function createOrderDraft({ categoria, pedidosDir, whatsapp, mesAtual, fields, files }) {
   const id = orderStorage.newPedidoId();
