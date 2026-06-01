@@ -11,6 +11,7 @@ const orderStorage = require("./src/orders/order.storage");
 const orderStatus = require("./src/orders/order.status");
 const orderService = require("./src/orders/order.service");
 const billingService = require("./src/billing/billing.service");
+const billingPlans = require("./src/billing/plans");
 
 const app = express();
 
@@ -25,6 +26,9 @@ const PEDIDOS_DIR = path.join(DATA_DIR, "pedidos");
 const CLIENTES_FILE = path.join(DATA_DIR, "clientes.json");
 const BOT_ADMIN_WHATSAPP = process.env.BOT_ADMIN_WHATSAPP || "15991120599";
 const MP_ACCESS_TOKEN = process.env.MP_ACCESS_TOKEN || "";
+const MP_NOTIFICATION_URL = process.env.MP_NOTIFICATION_URL || "https://ia4tube-api.onrender.com/webhook/mercadopago";
+const EMPRESA_ARTE_AVULSA_VALOR = productsRegistry.getProductPrice("arte_empresa") || 9.90;
+const MP_PROCESSANDO_RETRY_MS = 10 * 60 * 1000;
 const MP_PROCESSADOS_FILE = path.join(DATA_DIR, "mp_processados.json");
 const TEMPO_ESTIMADO_FILE = path.join(DATA_DIR, "tempo_estimado.json");
 const ONLINE_FILE = path.join(DATA_DIR, "usuarios_online.json");
@@ -110,6 +114,15 @@ function readMpProcessados() {
 
 function writeMpProcessados(obj) {
   fs.writeFileSync(MP_PROCESSADOS_FILE, JSON.stringify(obj, null, 2), "utf8");
+}
+
+function isMpProcessandoStale(registro) {
+  if (!registro || registro.status !== "processando") return false;
+
+  const tentativaEm = new Date(registro.ultima_tentativa_em || registro.criado_em || 0).getTime();
+  if (!tentativaEm || Number.isNaN(tentativaEm)) return true;
+
+  return Date.now() - tentativaEm > MP_PROCESSANDO_RETRY_MS;
 }
 
 function readTempoEstimado() {
@@ -1050,6 +1063,13 @@ app.get("/me", auth, (req, res) => {
     return res.status(404).json({ ok: false, error: "Cliente não encontrado" });
   }
 
+  const cicloAtualizado = billingService.refreshManualPlanCycle(c);
+  if (cicloAtualizado.changed) {
+    clientes[req.user.whatsapp] = c;
+    writeClientes(clientes);
+  }
+
+  const billing = billingService.getBillingStatus(c);
   const bonusTesteVisual = req.user.whatsapp === "15991120599" ? 999 : 0;
   const saldoVisivel = Number(c.saldo_mensal || 0) + Number(c.saldo_extra || 0) + bonusTesteVisual;
 
@@ -1057,16 +1077,179 @@ app.get("/me", auth, (req, res) => {
     ok: true,
     nome_time: c.nome_time,
     plano: c.plano,
+    plano_atual: billing.plano_atual,
+    plano_status: billing.plano_status,
+    plano_nome: billing.plano_nome,
+    plano_renova_em: billing.plano_renova_em,
+    artes_mensais_total: billing.artes_mensais_total,
+    artes_mensais_usadas: billing.artes_mensais_usadas,
+    artes_mensais_restantes: billing.artes_mensais_restantes,
     saldo_mensal: Number(c.saldo_mensal || 0),
     saldo_extra: Number(c.saldo_extra || 0),
     saldo: saldoVisivel,
     usados_no_ciclo: c.usados_no_ciclo,
     brinde_mascote_disponivel: c.brinde_mascote_disponivel === true,
-    ativo: c.ativo
+    ativo: c.ativo,
+    billing
   });
 });
 
 // ===== MERCADO PAGO =====
+async function createMercadoPagoPixPayment({ amount, description, payerKey, externalReference, metadata, idempotencyKey }) {
+  if (!MP_ACCESS_TOKEN) {
+    const error = new Error("MP_ACCESS_TOKEN nao configurado");
+    error.statusCode = 500;
+    throw error;
+  }
+
+  const payerEmail = `${String(payerKey).replace(/\D/g, "") || "cliente"}@ia4tube.com.br`;
+  const paymentPayload = {
+    transaction_amount: Number(Number(amount).toFixed(2)),
+    description,
+    payment_method_id: "pix",
+    payer: {
+      email: payerEmail
+    },
+    external_reference: externalReference,
+    metadata,
+    notification_url: MP_NOTIFICATION_URL
+  };
+
+  const r = await fetch("https://api.mercadopago.com/v1/payments", {
+    method: "POST",
+    headers: {
+      "Authorization": `Bearer ${MP_ACCESS_TOKEN}`,
+      "Content-Type": "application/json",
+      "X-Idempotency-Key": idempotencyKey
+    },
+    body: JSON.stringify(paymentPayload)
+  });
+
+  const data = await r.json();
+
+  if (!r.ok) {
+    const error = new Error("Erro ao gerar Pix");
+    error.statusCode = 500;
+    error.detail = data;
+    throw error;
+  }
+
+  const transactionData = data.point_of_interaction?.transaction_data || {};
+  return {
+    data,
+    pixCopiaCola: transactionData.qr_code || "",
+    qrCodeBase64: transactionData.qr_code_base64 || "",
+    ticketUrl: transactionData.ticket_url || ""
+  };
+}
+
+app.get("/billing/status", auth, (req, res) => {
+  const clientes = readClientes();
+  const c = clientes[req.user.whatsapp];
+
+  if (!c) {
+    return res.status(404).json({ ok: false, error: "Cliente nao encontrado" });
+  }
+
+  const cicloAtualizado = billingService.refreshManualPlanCycle(c);
+  if (cicloAtualizado.changed) {
+    clientes[req.user.whatsapp] = c;
+    writeClientes(clientes);
+  }
+
+  return res.json({
+    ok: true,
+    ...billingService.getBillingStatus(c)
+  });
+});
+
+app.post("/billing/saldo/pix", auth, async (req, res) => {
+  try {
+    const { pacote = "saldo_990" } = req.body || {};
+    const whatsapp = req.user.whatsapp;
+    const p = billingPlans.getBalancePackage(pacote);
+
+    if (!p) {
+      return res.status(400).json({ ok: false, error: "Pacote invalido" });
+    }
+
+    const result = await createMercadoPagoPixPayment({
+      amount: p.amount,
+      description: p.title,
+      payerKey: whatsapp,
+      externalReference: `saldo_extra|${whatsapp}|${p.id}|${Date.now()}`,
+      metadata: {
+        tipo: "saldo_extra",
+        whatsapp,
+        pacote: p.id,
+        credito: Number(p.credit)
+      },
+      idempotencyKey: `saldo_extra_${whatsapp}_${p.id}_${Date.now()}`
+    });
+
+    return res.json({
+      ok: true,
+      pix_copia_cola: result.pixCopiaCola,
+      qr_code_base64: result.qrCodeBase64,
+      ticket_url: result.ticketUrl,
+      payment_id: result.data.id,
+      pacote: p.id,
+      valor_pago: Number(p.amount),
+      credito: Number(p.credit)
+    });
+  } catch (e) {
+    return res.status(e.statusCode || 500).json({
+      ok: false,
+      error: e.message || "Erro interno ao gerar Pix",
+      detalhe: e.detail
+    });
+  }
+});
+
+app.post("/billing/planos/:planId/pix", auth, async (req, res) => {
+  try {
+    const whatsapp = req.user.whatsapp;
+    const plan = billingPlans.getPlan(req.params.planId);
+
+    if (!plan) {
+      return res.status(400).json({ ok: false, error: "Plano invalido" });
+    }
+
+    const result = await createMercadoPagoPixPayment({
+      amount: plan.price,
+      description: `IA4Tube - ${plan.name}`,
+      payerKey: whatsapp,
+      externalReference: `plano_pix|${whatsapp}|${plan.id}|${Date.now()}`,
+      metadata: {
+        tipo: "plano_pix",
+        whatsapp,
+        plan_id: plan.id,
+        plan_name: plan.name,
+        artes_mes: Number(plan.artsPerMonth)
+      },
+      idempotencyKey: `plano_pix_${whatsapp}_${plan.id}_${Date.now()}`
+    });
+
+    return res.json({
+      ok: true,
+      pix_copia_cola: result.pixCopiaCola,
+      qr_code_base64: result.qrCodeBase64,
+      ticket_url: result.ticketUrl,
+      payment_id: result.data.id,
+      plan_id: plan.id,
+      plan_name: plan.name,
+      valor_pago: Number(plan.price),
+      artes_mes: Number(plan.artsPerMonth)
+    });
+  } catch (e) {
+    return res.status(e.statusCode || 500).json({
+      ok: false,
+      error: e.message || "Erro interno ao gerar Pix",
+      detalhe: e.detail
+    });
+  }
+});
+
 app.post("/comprar-creditos", auth, async (req, res) => {
   try {
     if (!MP_ACCESS_TOKEN) {
@@ -1221,14 +1404,21 @@ app.post("/webhook/mercadopago", async (req, res) => {
     }
 
     let processados = readMpProcessados();
+    const registroAtual = processados[paymentId];
 
-    if (processados[paymentId]) {
+    if (registroAtual && registroAtual.status !== "processando") {
       return res.json({ ok: true, duplicado: true });
+    }
+
+    if (registroAtual && !isMpProcessandoStale(registroAtual)) {
+      return res.json({ ok: true, processando: true });
     }
 
     processados[paymentId] = {
       status: "processando",
-      criado_em: new Date().toISOString()
+      criado_em: registroAtual?.criado_em || new Date().toISOString(),
+      ultima_tentativa_em: new Date().toISOString(),
+      tentativas: Number(registroAtual?.tentativas || 0) + 1
     };
 
     writeMpProcessados(processados);
@@ -1352,10 +1542,88 @@ app.post("/webhook/mercadopago", async (req, res) => {
       return res.json({ ok: true });
     }
 
+    if (tipo === "plano_pix") {
+      const whatsapp = pagamento.metadata?.whatsapp || external.split("|")[1];
+      const planId = pagamento.metadata?.plan_id || external.split("|")[2];
+      const plan = billingPlans.getPlan(planId);
+
+      if (!whatsapp || !plan) {
+        processados = readMpProcessados();
+        processados[paymentId] = {
+          tipo: "plano_pix",
+          whatsapp,
+          plan_id: planId,
+          status: "erro_plano_invalido",
+          criado_em: new Date().toISOString()
+        };
+        writeMpProcessados(processados);
+        return res.json({ ok: true });
+      }
+
+      const clientes = readClientes();
+      const c = clientes[whatsapp];
+
+      if (!c) {
+        processados = readMpProcessados();
+        processados[paymentId] = {
+          tipo: "plano_pix",
+          whatsapp,
+          plan_id: plan.id,
+          status: "cliente_nao_encontrado",
+          criado_em: new Date().toISOString()
+        };
+        writeMpProcessados(processados);
+        return res.json({ ok: true });
+      }
+
+      const resultadoPlano = billingService.applyManualPlanPayment(c, plan, {
+        paymentId: String(paymentId),
+        paidAt: pagamento.date_approved || pagamento.date_last_updated || new Date().toISOString()
+      });
+
+      c.ultimo_pix_plano_valor = Number(pagamento.transaction_amount || plan.price);
+      c.ultimo_pix_plano_status = resultadoPlano.status;
+      clientes[whatsapp] = c;
+      writeClientes(clientes);
+
+      processados = readMpProcessados();
+      processados[paymentId] = {
+        tipo: "plano_pix",
+        whatsapp,
+        plan_id: plan.id,
+        plano_status: resultadoPlano.status,
+        status: pagamento.status,
+        criado_em: new Date().toISOString()
+      };
+      writeMpProcessados(processados);
+
+      return res.json({ ok: true });
+    }
+
+    if (tipo !== "saldo" && tipo !== "saldo_extra") {
+      processados = readMpProcessados();
+      processados[paymentId] = {
+        tipo: tipo || "desconhecido",
+        status: "ignorado",
+        criado_em: new Date().toISOString()
+      };
+      writeMpProcessados(processados);
+      return res.json({ ok: true, status: "tipo_ignorado" });
+    }
+
     const whatsapp = pagamento.metadata?.whatsapp || external.split("|")[0];
     const credito = Number(pagamento.metadata?.credito || 0);
 
     if (!whatsapp || !credito) {
+      processados = readMpProcessados();
+      processados[paymentId] = {
+        tipo,
+        whatsapp,
+        credito,
+        status: "erro_sem_whatsapp_ou_credito",
+        criado_em: new Date().toISOString()
+      };
+      writeMpProcessados(processados);
       return res.json({ ok: true, error: "sem whatsapp ou credito" });
     }
 
@@ -1363,6 +1631,15 @@ app.post("/webhook/mercadopago", async (req, res) => {
     const c = clientes[whatsapp];
 
     if (!c) {
+      processados = readMpProcessados();
+      processados[paymentId] = {
+        tipo,
+        whatsapp,
+        credito,
+        status: "cliente_nao_encontrado",
+        criado_em: new Date().toISOString()
+      };
+      writeMpProcessados(processados);
       return res.json({ ok: true, error: "cliente não encontrado" });
     }
 
@@ -1378,7 +1655,9 @@ app.post("/webhook/mercadopago", async (req, res) => {
     clientes[whatsapp] = c;
     writeClientes(clientes);
 
+    processados = readMpProcessados();
     processados[paymentId] = {
+      tipo,
       whatsapp,
       credito,
       status: pagamento.status,
@@ -1411,9 +1690,10 @@ function criarPedidoHandler(categoria) {
     const temBrindeMascote = billingService.hasMascoteUniformeGift(categoria, c);
 
     const custoPedido = getCustoPedido(categoria, c);
-    const custoEfetivoPedido = custoPedido;
+    const isArteEmpresa = categoria === "arte_empresa";
+    const custoEfetivoPedido = isArteEmpresa ? EMPRESA_ARTE_AVULSA_VALOR : custoPedido;
 
-    const temSaldoSuficiente = billingService.hasEnoughBalance(c, custoEfetivoPedido);
+    const temSaldoSuficiente = !isArteEmpresa && billingService.hasEnoughBalance(c, custoEfetivoPedido);
 
     const fields = orderService.normalizeOrderBody(req.body);
 
@@ -1432,6 +1712,28 @@ function criarPedidoHandler(categoria) {
       });
     }
 
+    let cobrancaEmpresa = null;
+    if (isArteEmpresa) {
+      cobrancaEmpresa = billingService.resolveCompanyArtCharge(c, {
+        custoPedido: custoEfetivoPedido,
+        now: new Date()
+      });
+
+      if (cobrancaEmpresa.allowed !== true) {
+        clientes[whatsapp] = c;
+        writeClientes(clientes);
+        return res.status(402).json({
+          ok: false,
+          code: "billing_required",
+          error: "Assine um plano ou adicione saldo para criar sua arte.",
+          required_amount: cobrancaEmpresa.required_amount,
+          saldo_extra: cobrancaEmpresa.saldo_extra,
+          artes_mensais_restantes: cobrancaEmpresa.artes_mensais_restantes,
+          plano_status: cobrancaEmpresa.plano_status
+        });
+      }
+    }
+
     const draft = await orderService.createOrderDraft({
       categoria,
       pedidosDir: PEDIDOS_DIR,
@@ -1443,7 +1745,17 @@ function criarPedidoHandler(categoria) {
 
     const id = draft.id;
 
-    if (temSaldoSuficiente) {
+    if (isArteEmpresa) {
+      billingService.applyResolvedCompanyArtCharge(c, cobrancaEmpresa, {
+        custoPedido: custoEfetivoPedido,
+        mesAtual
+      });
+      draft.pedido.cobranca_origem = cobrancaEmpresa.source;
+      draft.pedido.valor_cobrado = cobrancaEmpresa.source === "saldo_extra" ? custoEfetivoPedido : 0;
+      draft.pedido.plano_id = cobrancaEmpresa.source === "plano" ? cobrancaEmpresa.planId : "";
+      draft.pedido.plano_ciclo = cobrancaEmpresa.source === "plano" ? cobrancaEmpresa.planCycle : "";
+      orderService.orderStorage.writeOrder(draft.base, draft.pedido);
+    } else if (temSaldoSuficiente) {
       billingService.applyOrderCharge(c, { custoPedido: custoEfetivoPedido, mesAtual, temBrindeMascote });
     } else {
       draft.pedido.pagamento_pendente = true;
