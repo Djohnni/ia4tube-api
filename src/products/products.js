@@ -92,7 +92,7 @@ const PRODUCTS = {
   arte_empresa: {
     id: "arte_empresa",
     name: "Arte para empresa",
-    price: 8.00,
+    price: 9.90,
     category: "empresa",
     flyerTipos: ["arte_empresa"],
     aliases: [
