@@ -1141,7 +1141,7 @@ app.post("/comprar-creditos", auth, async (req, res) => {
 app.post("/comprar-creditos-pix", auth, async (req, res) => {
   try {
     if (!MP_ACCESS_TOKEN) {
-      return res.status(500).json({ ok: false, error: "MP_ACCESS_TOKEN nÃ£o configurado" });
+      return res.status(500).json({ ok: false, error: "MP_ACCESS_TOKEN não configurado" });
     }
 
     const { pacote } = req.body || {};
@@ -1157,7 +1157,7 @@ app.post("/comprar-creditos-pix", auth, async (req, res) => {
     const p = pacotes[pacote];
 
     if (!p) {
-      return res.status(400).json({ ok: false, error: "Pacote invÃ¡lido" });
+      return res.status(400).json({ ok: false, error: "Pacote inválido" });
     }
 
     const payerEmail = `${String(whatsapp).replace(/\D/g, "") || "cliente"}@ia4tube.com.br`;
@@ -1316,12 +1316,13 @@ app.post("/webhook/mercadopago", async (req, res) => {
       pedido.pagamento_confirmado_em = new Date().toISOString();
       pedido.mp_payment_status = "approved";
 
-      const valorBonusPedido = Number(
+      const deveCreditarBonusPedido = pedido.creditar_saldo_ao_pagar_pix === true;
+      const valorBonusPedido = deveCreditarBonusPedido ? Number(
         pedido.valor_pendente ||
         pagamento.metadata?.valor_pendente ||
         pagamento.transaction_amount ||
         0
-      );
+      ) : 0;
 
       if (valorBonusPedido > 0) {
         const clientes = readClientes();
@@ -1471,7 +1472,8 @@ app.post(
     { name: "patrocinadores", maxCount: 20 },
     { name: "logo", maxCount: 1 },
     { name: "fotos", maxCount: 20 },
-    { name: "referencias", maxCount: 20 }
+    { name: "referencias", maxCount: 20 },
+    { name: "modelo_existente", maxCount: 1 }
   ]),
   (req, res) => {
     const flyer_tipo = (req.body?.flyer_tipo || "").toLowerCase();
@@ -1503,7 +1505,8 @@ app.post(
     { name: "patrocinadores", maxCount: 20 },
     { name: "logo", maxCount: 1 },
     { name: "fotos", maxCount: 20 },
-    { name: "referencias", maxCount: 20 }
+    { name: "referencias", maxCount: 20 },
+    { name: "modelo_existente", maxCount: 1 }
   ]),
   criarPedidoHandler("mascote")
 );
@@ -1518,7 +1521,8 @@ app.post(
     { name: "patrocinadores", maxCount: 20 },
     { name: "logo", maxCount: 1 },
     { name: "fotos", maxCount: 20 },
-    { name: "referencias", maxCount: 20 }
+    { name: "referencias", maxCount: 20 },
+    { name: "modelo_existente", maxCount: 1 }
   ]),
   criarPedidoHandler("resultado")
 );
@@ -2010,6 +2014,59 @@ app.get("/pedidos/:id/download-resultado", auth, (req, res) => {
   return res.sendFile(arquivo);
 });
 
+function descricaoPostagemPedido(pedido = {}) {
+  const pronta = String(pedido.descricao_instagram || "").trim();
+  if (pronta && !descricaoPostagemGenerica(pronta)) return pronta;
+
+  const nome = String(pedido.nome_empresa || pedido.data || "").trim();
+  const ramo = String(pedido.ramo || "").trim();
+  const tipo = String(pedido.product_id || pedido.categoria || "arte").replace(/_/g, " ").trim();
+  const objetivo = String(pedido.objetivo || pedido.rodada || "").trim();
+  const frase = String(pedido.frase_foto || pedido.oferta || objetivo || "").trim();
+  const cta = String(pedido.cta || "").trim();
+  const historia = String(pedido.historia_empresa || "").trim();
+  const insta = String(pedido.instagram || "").trim();
+  const whatsapp = String(pedido.whatsapp_contato || "").trim();
+  const contexto = [ramo, tipo, objetivo, frase].join(" ").toLowerCase();
+  const marca = nome || ramo || "sua marca";
+  const linhas = [];
+
+  if (contexto.includes("lava") || contexto.includes("automot") || contexto.includes("carro")) {
+    linhas.push(`${marca}: carro limpo, cuidado no detalhe e atendimento caprichado para deixar seu veiculo com cara de novo.`);
+  } else if (
+    contexto.includes("futebol") ||
+    contexto.includes("jogo") ||
+    contexto.includes("time") ||
+    contexto.includes("torcida") ||
+    contexto.includes("escala")
+  ) {
+    linhas.push(`${marca} em campo com energia total. E dia de apoiar, vibrar e mostrar a forca da torcida.`);
+  } else if (frase) {
+    linhas.push(`${marca} apresenta: ${frase}`);
+  } else if (ramo) {
+    linhas.push(`${marca} traz uma novidade especial para quem procura ${ramo.toLowerCase()} com qualidade e atendimento de verdade.`);
+  } else {
+    linhas.push(`${marca} preparou uma novidade especial para voce conhecer hoje.`);
+  }
+
+  if (historia) linhas.push(historia.length > 180 ? `${historia.slice(0, 177)}...` : historia);
+  linhas.push(cta || "Chame agora e veja como podemos te atender.");
+  if (whatsapp) linhas.push(`WhatsApp: ${whatsapp}`);
+  if (insta) linhas.push(insta.startsWith("@") ? insta : `@${insta}`);
+  linhas.push("#IA4Tube #ArteComIA");
+
+  return linhas.join("\n").trim();
+}
+
+function descricaoPostagemGenerica(texto = "") {
+  const normalizada = String(texto).trim().toLowerCase();
+  return !normalizada ||
+    normalizada.includes("pedido ia4tube") ||
+    normalizada.includes("arte pronta") ||
+    normalizada.includes("arte profissional para sua marca") ||
+    normalizada === "#ia4tube #artecomia";
+}
+
 // ===== INFO DO PEDIDO =====
 app.get("/pedidos/:id/info", auth, (req, res) => {
   const whatsapp = req.user.whatsapp;
@@ -2038,6 +2095,15 @@ app.get("/pedidos/:id/info", auth, (req, res) => {
     id: req.params.id,
     status,
     categoria: pedido.categoria || "",
+    tipo_arte: pedido.product_id || pedido.categoria || "",
+    nome_empresa: pedido.nome_empresa || "",
+    ramo: pedido.ramo || "",
+    objetivo: pedido.objetivo || pedido.rodada || "",
+    frase_foto: pedido.frase_foto || "",
+    cta: pedido.cta || "",
+    whatsapp_contato: pedido.whatsapp_contato || "",
+    instagram: pedido.instagram || "",
+    historia_empresa: pedido.historia_empresa || "",
     imagem_pronta,
     preview_url: imagem_pronta
       ? `${req.protocol}://${req.get("host")}/pedidos/${req.params.id}/preview`
@@ -2046,6 +2112,7 @@ app.get("/pedidos/:id/info", auth, (req, res) => {
     pagamento_pendente: pedido.pagamento_pendente === true,
     valor_pendente: Number(pedido.valor_pendente || 0),
     motivo_pagamento_pendente: pedido.motivo_pagamento_pendente || "",
+    descricao_instagram: descricaoPostagemPedido(pedido),
     ajuste_automatico_usado: pedido.ajuste_automatico_usado === true,
     motivo_ajuste: pedido.motivo_ajuste || "",
     pode_baixar: imagem_pronta && pedido.aprovado_cliente === true && pedido.pagamento_pendente !== true,
