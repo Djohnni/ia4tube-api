@@ -1611,15 +1611,31 @@ app.post("/webhook/mercadopago", async (req, res) => {
       return res.json({ ok: true, status: "tipo_ignorado" });
     }
 
-    const whatsapp = pagamento.metadata?.whatsapp || external.split("|")[0];
-    const credito = Number(pagamento.metadata?.credito || 0);
+    const externalParts = external.split("|");
+    let whatsapp = String(pagamento.metadata?.whatsapp || "").trim();
 
-    if (!whatsapp || !credito) {
+    if (!whatsapp) {
+      if (tipo === "saldo_extra" && externalParts[0] === "saldo_extra") {
+        whatsapp = String(externalParts[1] || "").trim();
+      } else {
+        whatsapp = String(externalParts[0] || "").trim();
+      }
+    }
+
+    const credito = Number(pagamento.metadata?.credito || 0);
+    const clienteReferenciaValida = whatsapp &&
+      whatsapp !== "saldo" &&
+      whatsapp !== "saldo_extra" &&
+      !whatsapp.includes("|");
+
+    if (!clienteReferenciaValida || !credito) {
       processados = readMpProcessados();
       processados[paymentId] = {
         tipo,
         whatsapp,
         credito,
+        payment_id: String(paymentId),
+        external_reference: external,
         status: "erro_sem_whatsapp_ou_credito",
         criado_em: new Date().toISOString()
       };
@@ -1631,11 +1647,19 @@ app.post("/webhook/mercadopago", async (req, res) => {
     const c = clientes[whatsapp];
 
     if (!c) {
+      console.warn("[mercadopago webhook] cliente_nao_encontrado", {
+        paymentId: String(paymentId),
+        tipo,
+        whatsapp,
+        external_reference: external
+      });
       processados = readMpProcessados();
       processados[paymentId] = {
         tipo,
         whatsapp,
         credito,
+        payment_id: String(paymentId),
+        external_reference: external,
         status: "cliente_nao_encontrado",
         criado_em: new Date().toISOString()
       };
