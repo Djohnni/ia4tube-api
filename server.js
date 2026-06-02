@@ -25,6 +25,7 @@ const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, "dados");
 const PEDIDOS_DIR = path.join(DATA_DIR, "pedidos");
 const CLIENTES_FILE = path.join(DATA_DIR, "clientes.json");
 const BOT_ADMIN_WHATSAPP = process.env.BOT_ADMIN_WHATSAPP || "15991120599";
+const BOT_RUNNER_TOKEN = process.env.BOT_RUNNER_TOKEN || "";
 const MP_ACCESS_TOKEN = process.env.MP_ACCESS_TOKEN || "";
 const MP_NOTIFICATION_URL = process.env.MP_NOTIFICATION_URL || "https://ia4tube-api.onrender.com/webhook/mercadopago";
 const EMPRESA_ARTE_AVULSA_VALOR = productsRegistry.getProductPrice("arte_empresa") || 9.90;
@@ -621,6 +622,35 @@ function auth(req, res, next) {
   }
 }
 
+function botRunnerAuth(req, res, next) {
+  const h = req.headers.authorization || "";
+  const token = h.startsWith("Bearer ") ? h.slice(7) : "";
+
+  if (!token) {
+    return res.status(401).json({ ok: false, error: "Sem token" });
+  }
+
+  if (BOT_RUNNER_TOKEN && token === BOT_RUNNER_TOKEN) {
+    req.user = {
+      whatsapp: BOT_ADMIN_WHATSAPP,
+      bot_runner: true
+    };
+    return next();
+  }
+
+  try {
+    req.user = jwt.verify(token, JWT_SECRET);
+
+    if (!isBotAdmin(req)) {
+      return res.status(403).json({ ok: false, error: "Acesso negado" });
+    }
+
+    return next();
+  } catch {
+    return res.status(401).json({ ok: false, error: "Token inválido" });
+  }
+}
+
 // ===== UPLOAD (multer) =====
 const storage = multer.diskStorage({
   destination: (req, file, cb) =>
@@ -697,7 +727,7 @@ app.post("/evento", (req, res) => {
   }
 });
 
-app.post("/bot/tempo-estimado", auth, (req, res) => {
+app.post("/bot/tempo-estimado", botRunnerAuth, (req, res) => {
   if (!isBotAdmin(req)) {
     return res.status(403).json({ ok: false, error: "Acesso negado" });
   }
@@ -1867,7 +1897,7 @@ app.post(
 );
 
 // ===== BOT ADMIN: LISTAR NOVOS DE TODOS OS CLIENTES =====
-app.get("/bot/pedidos/novos", auth, (req, res) => {
+app.get("/bot/pedidos/novos", botRunnerAuth, (req, res) => {
   if (!isBotAdmin(req)) {
     return res.status(403).json({ ok: false, error: "Acesso negado" });
   }
@@ -1906,7 +1936,7 @@ app.get("/bot/pedidos/novos", auth, (req, res) => {
   return res.json({ ok: true, pedidos });
 });
 
-app.get("/bot/pedidos/:id/zip", auth, (req, res) => {
+app.get("/bot/pedidos/:id/zip", botRunnerAuth, (req, res) => {
   if (!isBotAdmin(req)) {
     return res.status(403).json({ ok: false, error: "Acesso negado" });
   }
@@ -2555,7 +2585,7 @@ app.post("/pedidos/:id/status", auth, (req, res) => {
 // ===== UPLOAD DO RESULTADO FINAL =====
 app.post(
   "/bot/pedidos/:id/upload-resultado",
-  auth,
+  botRunnerAuth,
   uploadResultado.fields([
     { name: "resultado", maxCount: 1 },
     { name: "preview", maxCount: 1 }
@@ -3133,7 +3163,7 @@ app.get("/bot/online", auth, (req, res) => {
   }
 });
 
-app.post("/bot/suporte/erro-pedido", auth, (req, res) => {
+app.post("/bot/suporte/erro-pedido", botRunnerAuth, (req, res) => {
   try {
     if (!isBotAdmin(req)) {
       return res.status(403).json({ ok:false, error:"Acesso negado" });
