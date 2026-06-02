@@ -1778,6 +1778,9 @@ function criarPedidoHandler(categoria) {
       draft.pedido.valor_cobrado = cobrancaEmpresa.source === "saldo_extra" ? custoEfetivoPedido : 0;
       draft.pedido.plano_id = cobrancaEmpresa.source === "plano" ? cobrancaEmpresa.planId : "";
       draft.pedido.plano_ciclo = cobrancaEmpresa.source === "plano" ? cobrancaEmpresa.planCycle : "";
+      draft.pedido.pagamento_pendente = false;
+      draft.pedido.valor_pendente = 0;
+      draft.pedido.motivo_pagamento_pendente = "";
       orderService.orderStorage.writeOrder(draft.base, draft.pedido);
     } else if (temSaldoSuficiente) {
       billingService.applyOrderCharge(c, { custoPedido: custoEfetivoPedido, mesAtual, temBrindeMascote });
@@ -2020,6 +2023,7 @@ app.post("/pedidos/:id/pagar-com-saldo", auth, (req, res) => {
 
   const pedidoPath = path.join(base, "pedido.json");
   const pedido = safeReadJson(pedidoPath) || {};
+  const isArteEmpresa = pedido.categoria === "arte_empresa" || pedido.product_id === "arte_empresa";
 
   if (pedido.pagamento_pendente !== true) {
     return res.json({
@@ -2317,7 +2321,9 @@ app.get("/pedidos/:id/download-resultado", auth, (req, res) => {
   if (pedido.aprovado_cliente !== true) {
     return res.status(403).json({
       ok: false,
-      error: "Aprove a prévia antes de baixar a imagem em alta qualidade."
+      error: isArteEmpresa
+        ? "Aprove a visualização antes de baixar a imagem em alta qualidade."
+        : "Aprove a prévia antes de baixar a imagem em alta qualidade."
     });
   }
 
