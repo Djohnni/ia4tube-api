@@ -2004,10 +2004,24 @@ app.get("/pedidos/novos", auth, (req, res) => {
   return res.json({ ok: true, pedidos });
 });
 
+function downloadBloqueadoPorCadastro(cliente) {
+  return cliente?.cadastro_automatico === true && cliente?.conta_finalizada !== true;
+}
+
+function mensagemDownloadBloqueado(cliente) {
+  return downloadBloqueadoPorCadastro(cliente)
+    ? "Crie seu login e senha para liberar o download."
+    : "";
+}
+
 app.get("/meus-pedidos", auth, (req, res) => {
   registrarOnline(req, { ultima_acao: "meus_pedidos" });
 
   const whatsapp = req.user.whatsapp;
+  const clientes = readClientes();
+  const cliente = clientes[whatsapp];
+  const bloqueioDownload = downloadBloqueadoPorCadastro(cliente);
+  const mensagemBloqueioDownload = mensagemDownloadBloqueado(cliente);
   const itens = listPedidoBasesByWhatsapp(whatsapp).slice(0, 15);
 
   const pedidos = itens.map((item) => {
@@ -2017,6 +2031,8 @@ app.get("/meus-pedidos", auth, (req, res) => {
     const aprovadoCliente = item.pedido.aprovado_cliente === true;
     const pagamentoPendente = item.pedido.pagamento_pendente === true;
     const ajusteUsado = item.pedido.ajuste_automatico_usado === true;
+    const downloadBloqueado = imagemPronta && !pagamentoPendente && bloqueioDownload;
+    const podeBaixar = imagemPronta && !pagamentoPendente && !downloadBloqueado;
 
     return {
       id: item.id,
@@ -2035,8 +2051,10 @@ app.get("/meus-pedidos", auth, (req, res) => {
       motivo_pagamento_pendente: item.pedido.motivo_pagamento_pendente || "",
       ajuste_automatico_usado: ajusteUsado,
       motivo_ajuste: item.pedido.motivo_ajuste || "",
-      pode_baixar: imagemPronta && aprovadoCliente && !pagamentoPendente,
-      pode_pedir_ajuste: imagemPronta && !aprovadoCliente && !ajusteUsado && status === "pronto"
+      pode_baixar: podeBaixar,
+      download_bloqueado: downloadBloqueado,
+      mensagem_download_bloqueado: downloadBloqueado ? mensagemBloqueioDownload : "",
+      pode_pedir_ajuste: imagemPronta && !ajusteUsado && status === "pronto"
     };
   });
 
@@ -2254,10 +2272,18 @@ app.post("/pedidos/:id/aprovar", auth, (req, res) => {
 
   fs.writeFileSync(pedidoPath, JSON.stringify(pedido, null, 2), "utf8");
 
+  const clientes = readClientes();
+  const cliente = clientes[whatsapp];
+  const imagemPronta = fs.existsSync(path.join(base, "resultado_final.png"));
+  const pagamentoPendente = pedido.pagamento_pendente === true;
+  const downloadBloqueado = imagemPronta && !pagamentoPendente && downloadBloqueadoPorCadastro(cliente);
+
   return res.json({
     ok: true,
     aprovado_cliente: true,
-    pode_baixar: true
+    pode_baixar: imagemPronta && !pagamentoPendente && !downloadBloqueado,
+    download_bloqueado: downloadBloqueado,
+    mensagem_download_bloqueado: downloadBloqueado ? mensagemDownloadBloqueado(cliente) : ""
   });
 });
 
@@ -2345,15 +2371,6 @@ app.get("/pedidos/:id/download-resultado", auth, (req, res) => {
     return res.status(403).json({
       ok: false,
       error: "Pagamento pendente. Desbloqueie esta imagem para baixar em alta qualidade."
-    });
-  }
-
-  if (pedido.aprovado_cliente !== true) {
-    return res.status(403).json({
-      ok: false,
-      error: isArteEmpresa
-        ? "Aprove a visualização antes de baixar a imagem em alta qualidade."
-        : "Aprove a prévia antes de baixar a imagem em alta qualidade."
     });
   }
 
@@ -2461,6 +2478,10 @@ app.get("/pedidos/:id/info", auth, (req, res) => {
   const status = readOrderStatus(base, "novo");
 
   const imagem_pronta = fs.existsSync(resultadoFinalPath);
+  const clientes = readClientes();
+  const cliente = clientes[whatsapp];
+  const pagamentoPendente = pedido.pagamento_pendente === true;
+  const downloadBloqueado = imagem_pronta && !pagamentoPendente && downloadBloqueadoPorCadastro(cliente);
 
   return res.json({
     ok: true,
@@ -2481,14 +2502,16 @@ app.get("/pedidos/:id/info", auth, (req, res) => {
       ? `${req.protocol}://${req.get("host")}/pedidos/${req.params.id}/preview`
       : null,
     aprovado_cliente: pedido.aprovado_cliente === true,
-    pagamento_pendente: pedido.pagamento_pendente === true,
+    pagamento_pendente: pagamentoPendente,
     valor_pendente: Number(pedido.valor_pendente || 0),
     motivo_pagamento_pendente: pedido.motivo_pagamento_pendente || "",
     descricao_instagram: descricaoPostagemPedido(pedido),
     ajuste_automatico_usado: pedido.ajuste_automatico_usado === true,
     motivo_ajuste: pedido.motivo_ajuste || "",
-    pode_baixar: imagem_pronta && pedido.aprovado_cliente === true && pedido.pagamento_pendente !== true,
-    pode_pedir_ajuste: imagem_pronta && pedido.aprovado_cliente !== true && pedido.ajuste_automatico_usado !== true && status === "pronto"
+    pode_baixar: imagem_pronta && !pagamentoPendente && !downloadBloqueado,
+    download_bloqueado: downloadBloqueado,
+    mensagem_download_bloqueado: downloadBloqueado ? mensagemDownloadBloqueado(cliente) : "",
+    pode_pedir_ajuste: imagem_pronta && pedido.ajuste_automatico_usado !== true && status === "pronto"
   });
 });
 
