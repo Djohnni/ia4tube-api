@@ -23,6 +23,7 @@ const JWT_SECRET = process.env.JWT_SECRET || "TROQUE_ISSO_AGORA";
 const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, "dados");
 
 const PEDIDOS_DIR = path.join(DATA_DIR, "pedidos");
+const TMP_UPLOADS_DIR = path.join(DATA_DIR, "tmp_uploads");
 const CLIENTES_FILE = path.join(DATA_DIR, "clientes.json");
 const BOT_ADMIN_WHATSAPP = process.env.BOT_ADMIN_WHATSAPP || "15991120599";
 const BOT_RUNNER_TOKEN = process.env.BOT_RUNNER_TOKEN || "";
@@ -62,7 +63,7 @@ function ensureDir(p) {
 
 ensureDir(DATA_DIR);
 ensureDir(PEDIDOS_DIR);
-ensureDir(path.join(DATA_DIR, "tmp_uploads"));
+ensureDir(TMP_UPLOADS_DIR);
 ensureDir(ANALYTICS_DIR);
 
 if (!fs.existsSync(CLIENTES_FILE)) {
@@ -652,9 +653,64 @@ function botRunnerAuth(req, res, next) {
 }
 
 // ===== UPLOAD (multer) =====
+const TMP_UPLOAD_MAX_AGE_MS = 6 * 60 * 60 * 1000;
+const TMP_UPLOAD_CLEANUP_INTERVAL_MS = 60 * 60 * 1000;
+
+function flattenUploadedFiles(files = {}) {
+  return Object.values(files).flat().filter(Boolean);
+}
+
+function cleanupUploadedFiles(files = {}) {
+  for (const file of flattenUploadedFiles(files)) {
+    try {
+      if (file?.path && file.path.startsWith(TMP_UPLOADS_DIR) && fs.existsSync(file.path)) {
+        fs.unlinkSync(file.path);
+      }
+    } catch (error) {
+      console.warn("[uploads] falha ao remover temporario da requisicao", {
+        path: file?.path,
+        message: error?.message
+      });
+    }
+  }
+}
+
+function cleanupOldTmpUploads() {
+  try {
+    ensureDir(TMP_UPLOADS_DIR);
+    const now = Date.now();
+    let removed = 0;
+    let freedBytes = 0;
+
+    for (const entry of fs.readdirSync(TMP_UPLOADS_DIR, { withFileTypes: true })) {
+      if (!entry.isFile()) continue;
+
+      const filePath = path.join(TMP_UPLOADS_DIR, entry.name);
+      const stat = fs.statSync(filePath);
+
+      if (now - stat.mtimeMs < TMP_UPLOAD_MAX_AGE_MS) continue;
+
+      fs.unlinkSync(filePath);
+      removed += 1;
+      freedBytes += stat.size;
+    }
+
+    if (removed > 0) {
+      console.log("[uploads] limpeza tmp_uploads", {
+        removed,
+        freed_mb: Number((freedBytes / 1024 / 1024).toFixed(2))
+      });
+    }
+  } catch (error) {
+    console.warn("[uploads] falha na limpeza tmp_uploads", {
+      message: error?.message
+    });
+  }
+}
+
 const storage = multer.diskStorage({
   destination: (req, file, cb) =>
-    cb(null, path.join(DATA_DIR, "tmp_uploads")),
+    cb(null, TMP_UPLOADS_DIR),
 
   filename: (req, file, cb) => {
     const safe = file.originalname.replace(/[^\w.\-]+/g, "_");
@@ -1829,6 +1885,7 @@ function criarPedidoHandler(categoria) {
 
     return res.json({ ok: true, pedido_id: id });
     } catch (error) {
+      cleanupUploadedFiles(req.files);
       console.error("[pedidos] erro ao criar pedido", {
         categoria,
         message: error?.message,
@@ -2638,6 +2695,7 @@ app.post(
     const base = getPedidoBaseGlobal(req.params.id);
 
     if (!base) {
+      cleanupUploadedFiles(req.files);
       return res.status(404).json({ ok: false, error: "Pedido não encontrado" });
     }
 
@@ -2645,6 +2703,7 @@ app.post(
     const previewFile = req.files?.preview?.[0] || null;
 
     if (!resultadoFile) {
+      cleanupUploadedFiles(req.files);
       return res.status(400).json({ ok: false, error: "Arquivo resultado não enviado" });
     }
 
@@ -2686,6 +2745,12 @@ app.post(
         preview: previewFile ? "preview_ia4tube.jpg" : ""
       });
     } catch (e) {
+      cleanupUploadedFiles(req.files);
+      console.error("[uploads] falha ao salvar resultado", {
+        pedido_id: req.params.id,
+        message: e?.message,
+        stack: e?.stack
+      });
       return res.status(500).json({
         ok: false,
         error: "Falha ao salvar resultado"
@@ -3491,6 +3556,7 @@ app.post("/bot/suporte/limpar-finalizadas", auth, (req, res) => {
 });
 
 app.use((err, req, res, next) => {
+  cleanupUploadedFiles(req.files);
   console.error("[api] erro nao tratado", {
     path: req.path,
     method: req.method,
@@ -3522,6 +3588,8 @@ app.use((err, req, res, next) => {
   });
 });
 
+cleanupOldTmpUploads();
+setInterval(cleanupOldTmpUploads, TMP_UPLOAD_CLEANUP_INTERVAL_MS);
 setInterval(finalizarConversasSuporteInativas, 60 * 1000);
 
 app.listen(PORT, () => {
