@@ -1730,6 +1730,7 @@ app.post("/webhook/mercadopago", async (req, res) => {
 // ===== CRIA PEDIDO =====
 function criarPedidoHandler(categoria) {
   return async (req, res) => {
+    try {
     const whatsapp = req.user.whatsapp;
     const clientes = readClientes();
     const c = clientes[whatsapp];
@@ -1827,6 +1828,20 @@ function criarPedidoHandler(categoria) {
     removeOldPedidos(whatsapp, 15);
 
     return res.json({ ok: true, pedido_id: id });
+    } catch (error) {
+      console.error("[pedidos] erro ao criar pedido", {
+        categoria,
+        message: error?.message,
+        stack: error?.stack
+      });
+
+      if (res.headersSent) return;
+
+      return res.status(error?.statusCode || 500).json({
+        ok: false,
+        error: "Não foi possível criar o pedido agora. Tente novamente em alguns instantes."
+      });
+    }
   };
 }
 
@@ -3473,6 +3488,38 @@ app.post("/bot/suporte/limpar-finalizadas", auth, (req, res) => {
   } catch (e) {
     return res.status(500).json({ ok: false, error: "Erro ao limpar suporte finalizado" });
   }
+});
+
+app.use((err, req, res, next) => {
+  console.error("[api] erro nao tratado", {
+    path: req.path,
+    method: req.method,
+    message: err?.message,
+    stack: err?.stack
+  });
+
+  if (res.headersSent) {
+    return next(err);
+  }
+
+  if (err instanceof multer.MulterError) {
+    return res.status(400).json({
+      ok: false,
+      error: "Não foi possível enviar a imagem. Verifique o arquivo e tente novamente."
+    });
+  }
+
+  if (String(err?.message || "").includes("Apenas imagens")) {
+    return res.status(400).json({
+      ok: false,
+      error: err.message
+    });
+  }
+
+  return res.status(err?.statusCode || 500).json({
+    ok: false,
+    error: "Não foi possível criar o pedido agora. Tente novamente em alguns instantes."
+  });
 });
 
 setInterval(finalizarConversasSuporteInativas, 60 * 1000);
