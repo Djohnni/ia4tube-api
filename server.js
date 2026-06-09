@@ -2619,7 +2619,10 @@ app.get("/pedidos/:id/preview", (req, res) => {
 
   const previewProtegidaPath = path.join(base, "preview_ia4tube.jpg");
   const resultadoFinalPath = path.join(base, "resultado_final.png");
-  const previewPath = fs.existsSync(previewProtegidaPath)
+  const pedidoPath = path.join(base, "pedido.json");
+  const pedido = safeReadJson(pedidoPath) || {};
+  const pagamentoPendente = pedido.pagamento_pendente === true;
+  const previewPath = pagamentoPendente && fs.existsSync(previewProtegidaPath)
     ? previewProtegidaPath
     : resultadoFinalPath;
 
