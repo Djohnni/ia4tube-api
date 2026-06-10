@@ -2,6 +2,7 @@ const FLYER_TIPO_TO_PRODUCT = {
   zz1fs: "escalacao",
   zz1fm: "contratacao",
   zz1ft: "proximo_jogo",
+  treino: "treino",
   zz1fj: "patrocinador",
   escudo3d: "escudo3d",
   jog_proximo: "proximo_jogo_jogador",
