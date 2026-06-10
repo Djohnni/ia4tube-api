@@ -102,10 +102,10 @@ function hasCompanyLogoReference(files = {}) {
 
 function getUploadPermissions(categoria) {
   return {
-    podeUsarEscudo1: ["resultado", "escalacao", "contratacao", "proximo_jogo", "patrocinador", "escudo3d", "proximo_jogo_jogador", "resultado_jogo_jogador", "jogador_escudo", "mascote_uniforme"].includes(categoria),
+    podeUsarEscudo1: ["resultado", "escalacao", "contratacao", "proximo_jogo", "treino", "patrocinador", "escudo3d", "proximo_jogo_jogador", "resultado_jogo_jogador", "jogador_escudo", "mascote_uniforme"].includes(categoria),
     podeUsarEscudo2: ["resultado", "escalacao", "contratacao", "proximo_jogo", "proximo_jogo_jogador", "resultado_jogo_jogador"].includes(categoria),
     escudo2EhFotoJogador: false,
-    podeUsarMascote: ["resultado", "escalacao", "proximo_jogo_jogador", "resultado_jogo_jogador", "jogador_escudo", "mascote_uniforme"].includes(categoria),
+    podeUsarMascote: ["resultado", "escalacao", "treino", "proximo_jogo_jogador", "resultado_jogo_jogador", "jogador_escudo", "mascote_uniforme"].includes(categoria),
     podeUsarPatrocinadores: categoria === "patrocinador",
     podeUsarLogo: categoria === "arte_empresa",
     podeUsarFotos: categoria === "arte_empresa",
@@ -337,8 +337,8 @@ async function buildPedidoData({
     mes: mesAtual,
     rodada,
     data,
-    hora: ["resultado", "resultado_jogo_jogador", "contratacao", "proximo_jogo", "proximo_jogo_jogador", "escalacao"].includes(categoria) ? (hora || "") : "",
-    arena: ["proximo_jogo", "proximo_jogo_jogador", "escalacao"].includes(categoria) ? (arena || "") : "",
+    hora: ["resultado", "resultado_jogo_jogador", "contratacao", "proximo_jogo", "treino", "proximo_jogo_jogador", "escalacao"].includes(categoria) ? (hora || "") : "",
+    arena: ["proximo_jogo", "treino", "proximo_jogo_jogador", "escalacao"].includes(categoria) ? (arena || "") : "",
     mascote_tipo: mascote_tipo || "",
     patrocinadores_qtd: pats.length,
     status: "novo",
