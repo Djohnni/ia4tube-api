@@ -35,6 +35,15 @@ const PRODUCTS = {
     aliases: ["proximo_jogo"]
   },
 
+  treino: {
+    id: "treino",
+    name: "Dia de Treino",
+    price: 7.00,
+    category: "time",
+    flyerTipos: ["treino"],
+    aliases: ["treino", "dia_de_treino"]
+  },
+
   patrocinador: {
     id: "patrocinador",
     name: "Patrocinador / Apoio",
