@@ -1,0 +1,14 @@
+Crie uma imagem profissional em formato A4 vertical para impressao, 1240x1754, como material grafico de um lava-jato ou estetica automotiva.
+
+Material: Controle de Veiculos.
+
+Use o nome da empresa, WhatsApp, Instagram e logo quando houver. O visual deve parecer uma ficha impressa de atendimento automotivo, organizada e facil de preencher.
+
+Estrutura desejada:
+- cabecalho com identidade da empresa
+- campos para cliente, telefone, placa, modelo, cor e data
+- checklist de servicos realizados
+- area para estado do veiculo na entrada
+- area para observacoes e assinatura
+
+Nao crie planilha digital. Nao crie PDF. Nao use interface de aplicativo. Gere uma arte limpa, legivel e pronta para impressao.

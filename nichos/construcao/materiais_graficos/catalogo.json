@@ -1,0 +1,17 @@
+{
+  "version": 2,
+  "materials": [
+    {
+      "id": "diario_obra",
+      "title": "Diário de Obra",
+      "type": "print_image",
+      "scope": "ramo",
+      "format": "png",
+      "width": 1240,
+      "height": 1754,
+      "prompt": "prompts/diario_obra.txt",
+      "plans": ["essencial", "profissional", "empresarial"],
+      "order": 1
+    }
+  ]
+}

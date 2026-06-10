@@ -12,6 +12,7 @@ const orderStatus = require("./src/orders/order.status");
 const orderService = require("./src/orders/order.service");
 const billingService = require("./src/billing/billing.service");
 const billingPlans = require("./src/billing/plans");
+const graphicMaterialsService = require("./src/company-graphic-materials/materials.service");
 
 const app = express();
 
@@ -24,6 +25,7 @@ const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, "dados");
 
 const PEDIDOS_DIR = path.join(DATA_DIR, "pedidos");
 const TMP_UPLOADS_DIR = path.join(DATA_DIR, "tmp_uploads");
+const GRAPHIC_MATERIALS_DIR = path.join(DATA_DIR, "materiais_graficos");
 const CLIENTES_FILE = path.join(DATA_DIR, "clientes.json");
 const BOT_ADMIN_WHATSAPP = process.env.BOT_ADMIN_WHATSAPP || "15991120599";
 const BOT_RUNNER_TOKEN = process.env.BOT_RUNNER_TOKEN || "";
@@ -64,6 +66,7 @@ function ensureDir(p) {
 ensureDir(DATA_DIR);
 ensureDir(PEDIDOS_DIR);
 ensureDir(TMP_UPLOADS_DIR);
+ensureDir(GRAPHIC_MATERIALS_DIR);
 ensureDir(ANALYTICS_DIR);
 
 if (!fs.existsSync(CLIENTES_FILE)) {
@@ -1784,6 +1787,283 @@ app.post("/webhook/mercadopago", async (req, res) => {
     return res.json({ ok: true });
   }
 });
+
+// ===== MATERIAIS GRAFICOS DA EMPRESA =====
+app.get("/empresa/materiais-graficos", auth, (req, res) => {
+  const whatsapp = req.user.whatsapp;
+  const clientes = readClientes();
+  const cliente = clientes[whatsapp];
+
+  if (!cliente) {
+    return res.status(404).json({ ok: false, error: "Cliente nao encontrado" });
+  }
+
+  try {
+    const payload = graphicMaterialsService.publicListPayload({
+      cliente,
+      ramo: req.query?.ramo || "",
+      baseDir: GRAPHIC_MATERIALS_DIR,
+      whatsapp
+    });
+    clientes[whatsapp] = cliente;
+    writeClientes(clientes);
+    return res.json(payload);
+  } catch (error) {
+    console.error("[materiais-graficos] erro ao listar", {
+      whatsapp,
+      message: error?.message,
+      stack: error?.stack
+    });
+    return res.status(500).json({
+      ok: false,
+      error: "Nao foi possivel listar os materiais graficos agora."
+    });
+  }
+});
+
+app.post(
+  "/empresa/materiais-graficos/:materialId/solicitar",
+  auth,
+  upload.single("logo"),
+  (req, res) => {
+    const whatsapp = req.user.whatsapp;
+    const clientes = readClientes();
+    const cliente = clientes[whatsapp];
+
+    if (!cliente) {
+      if (req.file?.path && fs.existsSync(req.file.path)) fs.unlinkSync(req.file.path);
+      return res.status(404).json({ ok: false, error: "Cliente nao encontrado" });
+    }
+
+    try {
+      const document = graphicMaterialsService.createRequest({
+        baseDir: GRAPHIC_MATERIALS_DIR,
+        cliente,
+        whatsapp,
+        materialId: req.params.materialId,
+        body: req.body || {},
+        logoPath: req.file?.path || ""
+      });
+
+      clientes[whatsapp] = cliente;
+      writeClientes(clientes);
+
+      return res.json({
+        ok: true,
+        document_id: document.document_id,
+        material_id: document.material_id,
+        title: document.title,
+        scope: document.scope,
+        ciclo: document.ciclo,
+        status: "processing",
+        status_label: "Em produção"
+      });
+    } catch (error) {
+      console.error("[materiais-graficos] erro ao solicitar", {
+        whatsapp,
+        materialId: req.params.materialId,
+        message: error?.message,
+        stack: error?.stack
+      });
+      return res.status(error?.statusCode || 500).json({
+        ok: false,
+        code: error?.code || "graphic_material_request_error",
+        error: error?.message || "Nao foi possivel solicitar o material grafico agora."
+      });
+    } finally {
+      if (req.file?.path && fs.existsSync(req.file.path)) {
+        try {
+          fs.unlinkSync(req.file.path);
+        } catch {}
+      }
+    }
+  }
+);
+
+app.get("/empresa/materiais-graficos/:materialId/status", auth, (req, res) => {
+  const whatsapp = req.user.whatsapp;
+  const clientes = readClientes();
+  const cliente = clientes[whatsapp];
+
+  if (!cliente) {
+    return res.status(404).json({ ok: false, error: "Cliente nao encontrado" });
+  }
+
+  try {
+    const payload = graphicMaterialsService.materialStatusPayload({
+      cliente,
+      ramo: req.query?.ramo || "",
+      baseDir: GRAPHIC_MATERIALS_DIR,
+      whatsapp,
+      materialId: req.params.materialId
+    });
+    clientes[whatsapp] = cliente;
+    writeClientes(clientes);
+    return res.json(payload);
+  } catch (error) {
+    return res.status(error?.statusCode || 500).json({
+      ok: false,
+      code: error?.code || "graphic_material_status_error",
+      error: error?.message || "Nao foi possivel consultar o status do material grafico."
+    });
+  }
+});
+
+app.get("/empresa/materiais-graficos/:materialId/download", auth, (req, res) => {
+  const whatsapp = req.user.whatsapp;
+  const clientes = readClientes();
+  const cliente = clientes[whatsapp];
+
+  if (!cliente) {
+    return res.status(404).json({ ok: false, error: "Cliente nao encontrado" });
+  }
+
+  try {
+    const document = graphicMaterialsService.downloadForMaterial({
+      baseDir: GRAPHIC_MATERIALS_DIR,
+      cliente,
+      whatsapp,
+      materialId: req.params.materialId
+    });
+
+    res.setHeader("Content-Type", "image/png");
+    res.setHeader("Content-Disposition", `attachment; filename="${document.filename}"`);
+    return res.sendFile(document.filePath);
+  } catch (error) {
+    return res.status(error?.statusCode || 500).json({
+      ok: false,
+      code: error?.code || "graphic_material_download_error",
+      error: error?.message || "Material grafico nao encontrado"
+    });
+  }
+});
+
+app.get("/bot/empresa/materiais-graficos/novos", botRunnerAuth, (req, res) => {
+  if (!isBotAdmin(req)) {
+    return res.status(403).json({ ok: false, error: "Acesso negado" });
+  }
+
+  const limit = Number(req.query?.limit || 5);
+  const materiais = graphicMaterialsService.listBotPending({
+    baseDir: GRAPHIC_MATERIALS_DIR,
+    limit: Number.isFinite(limit) && limit > 0 ? Math.min(limit, 50) : 5
+  });
+
+  return res.json({ ok: true, materiais });
+});
+
+app.get("/bot/empresa/materiais-graficos/:documentId/zip", botRunnerAuth, (req, res) => {
+  if (!isBotAdmin(req)) {
+    return res.status(403).json({ ok: false, error: "Acesso negado" });
+  }
+
+  const request = graphicMaterialsService.findRequestByDocument({
+    baseDir: GRAPHIC_MATERIALS_DIR,
+    documentId: req.params.documentId
+  });
+
+  if (!request) {
+    return res.status(404).json({ ok: false, error: "Solicitacao nao encontrada" });
+  }
+
+  res.setHeader("Content-Type", "application/zip");
+  res.setHeader("Content-Disposition", `attachment; filename="${req.params.documentId}.zip"`);
+
+  const archive = archiver("zip", { zlib: { level: 9 } });
+  archive.on("error", err => res.status(500).end(String(err)));
+  archive.pipe(res);
+  archive.directory(request.base_path, false);
+  archive.finalize();
+});
+
+app.post("/bot/empresa/materiais-graficos/:documentId/status", botRunnerAuth, (req, res) => {
+  if (!isBotAdmin(req)) {
+    return res.status(403).json({ ok: false, error: "Acesso negado" });
+  }
+
+  const request = graphicMaterialsService.findRequestByDocument({
+    baseDir: GRAPHIC_MATERIALS_DIR,
+    documentId: req.params.documentId
+  });
+
+  if (!request) {
+    return res.status(404).json({ ok: false, error: "Solicitacao nao encontrada" });
+  }
+
+  const updated = graphicMaterialsService.updateRequestStatus(
+    request,
+    String(req.body?.status || "processando"),
+    String(req.body?.message || "")
+  );
+
+  return res.json({
+    ok: true,
+    document_id: updated.document_id || updated.id,
+    status: updated.status
+  });
+});
+
+app.post(
+  "/bot/empresa/materiais-graficos/:documentId/upload-resultado",
+  botRunnerAuth,
+  uploadResultado.fields([
+    { name: "resultado", maxCount: 1 },
+    { name: "preview", maxCount: 1 }
+  ]),
+  (req, res) => {
+    if (!isBotAdmin(req)) {
+      cleanupUploadedFiles(req.files);
+      return res.status(403).json({ ok: false, error: "Acesso negado" });
+    }
+
+    const resultadoFile = req.files?.resultado?.[0] || null;
+    const previewFile = req.files?.preview?.[0] || null;
+
+    if (!resultadoFile) {
+      cleanupUploadedFiles(req.files);
+      return res.status(400).json({ ok: false, error: "Arquivo resultado nao enviado" });
+    }
+
+    try {
+      const apiInfo = req.body?.api_info ? JSON.parse(req.body.api_info) : {};
+      const request = graphicMaterialsService.saveUploadedResult({
+        baseDir: GRAPHIC_MATERIALS_DIR,
+        documentId: req.params.documentId,
+        resultPath: resultadoFile.path,
+        previewPath: previewFile?.path || "",
+        apiInfo
+      });
+
+      const clientes = readClientes();
+      const cliente = clientes[request.whatsapp];
+      if (cliente) {
+        graphicMaterialsService.markClientCreated(cliente, request);
+        clientes[request.whatsapp] = cliente;
+        writeClientes(clientes);
+      }
+
+      return res.json({
+        ok: true,
+        document_id: request.document_id || request.id,
+        material_id: request.material_id,
+        status: "created",
+        arquivo: "resultado_final.png",
+        preview: previewFile ? "preview_ia4tube.jpg" : ""
+      });
+    } catch (error) {
+      cleanupUploadedFiles(req.files);
+      console.error("[materiais-graficos] falha ao salvar resultado", {
+        documentId: req.params.documentId,
+        message: error?.message,
+        stack: error?.stack
+      });
+      return res.status(error?.statusCode || 500).json({
+        ok: false,
+        error: error?.message || "Falha ao salvar resultado"
+      });
+    }
+  }
+);
 
 // ===== CRIA PEDIDO =====
 function criarPedidoHandler(categoria) {

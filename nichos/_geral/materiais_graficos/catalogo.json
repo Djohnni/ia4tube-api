@@ -1,0 +1,53 @@
+{
+  "version": 2,
+  "materials": [
+    {
+      "id": "planejamento_semanal",
+      "title": "Planejamento Semanal",
+      "type": "print_image",
+      "scope": "geral",
+      "format": "png",
+      "width": 1240,
+      "height": 1754,
+      "prompt": "prompts/planejamento_semanal.txt",
+      "plans": ["essencial", "profissional", "empresarial"],
+      "order": 1
+    },
+    {
+      "id": "planejamento_mensal",
+      "title": "Planejamento Mensal",
+      "type": "print_image",
+      "scope": "geral",
+      "format": "png",
+      "width": 1240,
+      "height": 1754,
+      "prompt": "prompts/planejamento_mensal.txt",
+      "plans": ["essencial", "profissional", "empresarial"],
+      "order": 2
+    },
+    {
+      "id": "calendario_anual",
+      "title": "Calendário Anual",
+      "type": "print_image",
+      "scope": "geral",
+      "format": "png",
+      "width": 1240,
+      "height": 1754,
+      "prompt": "prompts/calendario_anual.txt",
+      "plans": ["essencial", "profissional", "empresarial"],
+      "order": 3
+    },
+    {
+      "id": "agenda_conteudo",
+      "title": "Agenda de Conteúdo",
+      "type": "print_image",
+      "scope": "geral",
+      "format": "png",
+      "width": 1240,
+      "height": 1754,
+      "prompt": "prompts/agenda_conteudo.txt",
+      "plans": ["essencial", "profissional", "empresarial"],
+      "order": 4
+    }
+  ]
+}

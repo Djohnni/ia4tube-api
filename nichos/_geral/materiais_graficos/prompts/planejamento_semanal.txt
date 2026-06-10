@@ -1,0 +1,14 @@
+Crie uma imagem profissional em formato A4 vertical para impressao, 1240x1754, como material grafico de uma empresa.
+
+Material: Planejamento Semanal.
+
+Use o nome da empresa, WhatsApp, Instagram e logo quando houver. O visual deve parecer uma folha elegante de papelaria empresarial, com cabecalho de marca, titulo claro e campos em branco para preenchimento manual.
+
+Estrutura desejada:
+- cabecalho com logo e nome da empresa
+- faixa de identificacao da semana
+- sete blocos organizados para segunda a domingo
+- area curta para prioridades da semana
+- area curta para observacoes
+
+Nao crie planilha digital. Nao crie PDF. Nao use interface de aplicativo. Gere uma arte limpa, legivel e pronta para impressao.

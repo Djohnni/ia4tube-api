@@ -1,0 +1,15 @@
+Crie uma imagem profissional em formato A4 vertical para impressao, 1240x1754, como material grafico de uma empresa de construcao.
+
+Material: Diario de Obra.
+
+Use o nome da empresa, WhatsApp, Instagram e logo quando houver. O material deve parecer uma folha tecnica de acompanhamento de obra, com campos em branco para uso diario.
+
+Estrutura desejada:
+- cabecalho com identidade da empresa
+- campos para obra, endereco, responsavel, data e clima
+- area para atividades executadas
+- area para equipe presente
+- area para materiais utilizados
+- area para ocorrencias e observacoes
+
+Nao crie planilha digital. Nao crie PDF. Nao use interface de aplicativo. Gere uma arte limpa, legivel e pronta para impressao.
