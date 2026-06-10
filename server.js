@@ -154,6 +154,7 @@ function getCustoPedido(categoria, cliente) {
   if (categoria === "escalacao") return 8.00;
   if (categoria === "contratacao") return 7.00;
   if (categoria === "proximo_jogo") return 7.00;
+  if (categoria === "treino") return 7.00;
   if (categoria === "patrocinador") return 8.00;
   if (categoria === "escudo3d") return 4.00;
 
@@ -177,6 +178,7 @@ function nomeCategoriaPedido(categoria) {
     escalacao: "Escalação",
     contratacao: "Contratação",
     proximo_jogo: "Próximo jogo",
+    treino: "Dia de Treino",
     patrocinador: "Patrocinador / Apoio",
     escudo3d: "Escudo 3D",
     proximo_jogo_jogador: "Próximo jogo jogador",
@@ -1926,6 +1928,7 @@ app.post(
     if (flyer_tipo === "zz1fs") return criarPedidoHandler("escalacao")(req, res);
     if (flyer_tipo === "zz1fm") return criarPedidoHandler("contratacao")(req, res);
     if (flyer_tipo === "zz1ft") return criarPedidoHandler("proximo_jogo")(req, res);
+    if (flyer_tipo === "treino") return criarPedidoHandler("treino")(req, res);
     if (flyer_tipo === "zz1fj") return criarPedidoHandler("patrocinador")(req, res);
     if (flyer_tipo === "jog_proximo") return criarPedidoHandler("proximo_jogo_jogador")(req, res);
     if (flyer_tipo === "jog_resultado") return criarPedidoHandler("resultado_jogo_jogador")(req, res);
