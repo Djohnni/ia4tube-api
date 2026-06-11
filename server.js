@@ -13,6 +13,7 @@ const orderService = require("./src/orders/order.service");
 const billingService = require("./src/billing/billing.service");
 const billingPlans = require("./src/billing/plans");
 const graphicMaterialsService = require("./src/company-graphic-materials/materials.service");
+const carouselService = require("./src/company-carousels/carousels.service");
 
 const app = express();
 
@@ -26,6 +27,7 @@ const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, "dados");
 const PEDIDOS_DIR = path.join(DATA_DIR, "pedidos");
 const TMP_UPLOADS_DIR = path.join(DATA_DIR, "tmp_uploads");
 const GRAPHIC_MATERIALS_DIR = path.join(DATA_DIR, "materiais_graficos");
+const CAROUSELS_DIR = path.join(DATA_DIR, "carrosseis");
 const CLIENTES_FILE = path.join(DATA_DIR, "clientes.json");
 const BOT_ADMIN_WHATSAPP = process.env.BOT_ADMIN_WHATSAPP || "15991120599";
 const BOT_RUNNER_TOKEN = process.env.BOT_RUNNER_TOKEN || "";
@@ -67,6 +69,7 @@ ensureDir(DATA_DIR);
 ensureDir(PEDIDOS_DIR);
 ensureDir(TMP_UPLOADS_DIR);
 ensureDir(GRAPHIC_MATERIALS_DIR);
+ensureDir(CAROUSELS_DIR);
 ensureDir(ANALYTICS_DIR);
 
 if (!fs.existsSync(CLIENTES_FILE)) {
