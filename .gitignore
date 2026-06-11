@@ -8,6 +8,8 @@ _tmp*/
 
 runner_materiais_graficos.py
 pipeline_materiais_graficos.py
+pipeline_carrossel.py
+runner_carrossel.py
 nichos/**/materiais_graficos/prompts/
 nichos/**/materiais_graficos/catalogo.json
 
