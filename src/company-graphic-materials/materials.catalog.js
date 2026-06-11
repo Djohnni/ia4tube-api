@@ -10,7 +10,22 @@ const BLOCKED_RAMO_SLUGS = new Set([
   "cemiterio"
 ]);
 
-const RAMO_ALIASES = [
+const WEAK_WORDS = new Set([
+  "a",
+  "as",
+  "o",
+  "os",
+  "de",
+  "da",
+  "das",
+  "do",
+  "dos",
+  "para",
+  "em",
+  "com"
+]);
+
+const LEGACY_RAMO_ALIASES = [
   { pattern: /vidrac/, folder: "vidracaria" },
   { pattern: /lava|estetica_automotiva|automotivo|veiculo|carro/, folder: "lava_jato" },
   { pattern: /constr|obra|empreiteira/, folder: "construcao" },
@@ -68,6 +83,86 @@ const BRANCH_FOLDERS = new Set(
     .map((material) => material.scopeFolder)
 );
 
+function slugTokens(value) {
+  const slug = normalizeSlug(value);
+  return slug ? slug.split("_").filter(Boolean) : [];
+}
+
+function singularizeToken(token) {
+  if (!token || token.length <= 3) return token;
+  if (token.endsWith("oes") && token.length > 5) return `${token.slice(0, -3)}ao`;
+  if (token.endsWith("ais") && token.length > 5) return `${token.slice(0, -3)}al`;
+  if (token.endsWith("eis") && token.length > 5) return `${token.slice(0, -3)}el`;
+  if (/[aeo]s$/.test(token)) return token.slice(0, -1);
+  return token;
+}
+
+function comparableKey(value) {
+  return slugTokens(value)
+    .filter((token) => !WEAK_WORDS.has(token))
+    .map(singularizeToken)
+    .join("_");
+}
+
+function buildUniqueIndex(values, keyFn) {
+  const map = new Map();
+  const ambiguous = new Set();
+
+  for (const value of values) {
+    const key = keyFn(value);
+    if (!key) continue;
+
+    if (map.has(key) && map.get(key) !== value) {
+      ambiguous.add(key);
+      map.delete(key);
+    } else if (!ambiguous.has(key)) {
+      map.set(key, value);
+    }
+  }
+
+  return map;
+}
+
+const BRANCH_FOLDER_LIST = Array.from(BRANCH_FOLDERS);
+const BRANCH_FOLDER_BY_COMPARABLE_KEY = buildUniqueIndex(BRANCH_FOLDER_LIST, comparableKey);
+
+function tokenSetFromComparableKey(key) {
+  return new Set(String(key || "").split("_").filter(Boolean));
+}
+
+function isSubset(subset, target) {
+  if (!subset.size || !target.size) return false;
+  for (const token of subset) {
+    if (!target.has(token)) return false;
+  }
+  return true;
+}
+
+function resolveByTokenContainment(key) {
+  const inputTokens = tokenSetFromComparableKey(key);
+  const matches = [];
+
+  for (const folder of BRANCH_FOLDER_LIST) {
+    const folderKey = comparableKey(folder);
+    const folderTokens = tokenSetFromComparableKey(folderKey);
+    const inputIncludesFolder = isSubset(folderTokens, inputTokens);
+    const folderIncludesInput = inputTokens.size >= 2 && isSubset(inputTokens, folderTokens);
+
+    if (!inputIncludesFolder && !folderIncludesInput) continue;
+
+    matches.push({
+      folder,
+      score: Math.max(folderTokens.size, inputTokens.size),
+      folderSize: folderTokens.size
+    });
+  }
+
+  matches.sort((a, b) => b.score - a.score || b.folderSize - a.folderSize || a.folder.localeCompare(b.folder));
+  if (matches.length === 1) return matches[0].folder;
+  if (matches.length > 1 && matches[0].score > matches[1].score) return matches[0].folder;
+  return "";
+}
+
 function isBlockedRamo(ramo) {
   const slug = normalizeSlug(ramo);
   return Boolean(slug && BLOCKED_RAMO_SLUGS.has(slug));
@@ -79,7 +174,14 @@ function folderForRamo(ramo) {
 
   if (BRANCH_FOLDERS.has(slug)) return slug;
 
-  const alias = RAMO_ALIASES.find((entry) => entry.pattern.test(slug));
+  const comparable = comparableKey(slug);
+  const exactComparable = BRANCH_FOLDER_BY_COMPARABLE_KEY.get(comparable);
+  if (exactComparable) return exactComparable;
+
+  const containmentMatch = resolveByTokenContainment(comparable);
+  if (containmentMatch) return containmentMatch;
+
+  const alias = LEGACY_RAMO_ALIASES.find((entry) => entry.pattern.test(slug));
   return alias && BRANCH_FOLDERS.has(alias.folder) ? alias.folder : slug;
 }
 
