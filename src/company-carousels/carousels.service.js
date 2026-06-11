@@ -37,6 +37,15 @@ function readJson(filePath) {
   }
 }
 
+function readDirEntries(dirPath) {
+  try {
+    if (!fs.existsSync(dirPath)) return [];
+    return fs.readdirSync(dirPath, { withFileTypes: true });
+  } catch {
+    return [];
+  }
+}
+
 function writeJson(filePath, data) {
   fs.writeFileSync(filePath, JSON.stringify(data, null, 2), "utf8");
 }
@@ -176,12 +185,11 @@ function createRequest({ baseDir, cliente, whatsapp, body }) {
 
 function findRequestById({ baseDir, carrosselId }) {
   const safeId = safeSegment(carrosselId, "carrossel");
-  if (!fs.existsSync(baseDir)) return null;
 
-  for (const userEntry of fs.readdirSync(baseDir, { withFileTypes: true })) {
+  for (const userEntry of readDirEntries(baseDir)) {
     if (!userEntry.isDirectory()) continue;
     const userDir = path.join(baseDir, userEntry.name);
-    for (const cycleEntry of fs.readdirSync(userDir, { withFileTypes: true })) {
+    for (const cycleEntry of readDirEntries(userDir)) {
       if (!cycleEntry.isDirectory()) continue;
       const dirPath = path.join(userDir, cycleEntry.name, safeId);
       if (!fs.existsSync(dirPath)) continue;
@@ -308,16 +316,15 @@ function saveUploadedResult({ baseDir, carrosselId, resultPath, descricaoInstagr
 }
 
 function listBotPending({ baseDir, limit = 5 }) {
-  if (!fs.existsSync(baseDir)) return [];
   const items = [];
 
-  for (const userEntry of fs.readdirSync(baseDir, { withFileTypes: true })) {
+  for (const userEntry of readDirEntries(baseDir)) {
     if (!userEntry.isDirectory()) continue;
     const userDir = path.join(baseDir, userEntry.name);
-    for (const cycleEntry of fs.readdirSync(userDir, { withFileTypes: true })) {
+    for (const cycleEntry of readDirEntries(userDir)) {
       if (!cycleEntry.isDirectory()) continue;
       const cycleDir = path.join(userDir, cycleEntry.name);
-      for (const carouselEntry of fs.readdirSync(cycleDir, { withFileTypes: true })) {
+      for (const carouselEntry of readDirEntries(cycleDir)) {
         if (!carouselEntry.isDirectory()) continue;
         const request = parseRequest(path.join(cycleDir, carouselEntry.name));
         if (!request || request.status !== "pendente") continue;

@@ -2153,13 +2153,25 @@ app.get("/bot/empresa/carrosseis/novos", botRunnerAuth, (req, res) => {
     return res.status(403).json({ ok: false, error: "Acesso negado" });
   }
 
-  const limit = Number(req.query?.limit || 5);
-  const carrosseis = carouselService.listBotPending({
-    baseDir: CAROUSELS_DIR,
-    limit: Number.isFinite(limit) && limit > 0 ? Math.min(limit, 50) : 5
-  });
+  try {
+    const limit = Number(req.query?.limit || 5);
+    const carrosseis = carouselService.listBotPending({
+      baseDir: CAROUSELS_DIR,
+      limit: Number.isFinite(limit) && limit > 0 ? Math.min(limit, 50) : 5
+    });
 
-  return res.json({ ok: true, carrosseis });
+    return res.json({ ok: true, carrosseis });
+  } catch (error) {
+    console.error("[carrosseis] erro ao listar novos para bot", {
+      message: error?.message,
+      stack: error?.stack
+    });
+    return res.status(error?.statusCode || 500).json({
+      ok: false,
+      code: "carousel_bot_list_error",
+      error: error?.message || "Nao foi possivel listar os carrosseis agora."
+    });
+  }
 });
 
 app.get("/bot/empresa/carrosseis/:carrosselId/zip", botRunnerAuth, (req, res) => {
