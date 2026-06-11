@@ -5,9 +5,9 @@ const billingService = require("../billing/billing.service");
 const catalog = require("./materials.catalog");
 
 const PLAN_LIMITS = {
-  essencial: { geral: 4, ramo: 1 },
-  profissional: { geral: 8, ramo: 3 },
-  empresarial: { geral: Infinity, ramo: Infinity }
+  essencial: { geral: 4, ramo: 0 },
+  profissional: { geral: 8, ramo: 1 },
+  empresarial: { geral: Infinity, ramo: 3 }
 };
 
 const ACTIVE_STATUSES = new Set(["novo", "em_producao", "processando"]);
@@ -72,7 +72,13 @@ function normalizeProfile(body = {}) {
     ramo: String(body.ramo || "").trim(),
     whatsapp: String(body.whatsapp || "").trim(),
     instagram: String(body.instagram || "").trim(),
-    historia: String(body.historia || "").trim()
+    historia: String(body.historia || "").trim(),
+    endereco: String(body.endereco || "").trim(),
+    cidade: String(body.cidade || "").trim(),
+    estado: String(body.estado || "").trim(),
+    cep: String(body.cep || "").trim(),
+    email: String(body.email || "").trim(),
+    site: String(body.site || "").trim()
   };
 }
 
@@ -234,6 +240,13 @@ function publicListPayload({ cliente, ramo, baseDir, whatsapp }) {
 }
 
 function materialStatusPayload({ cliente, ramo, baseDir, whatsapp, materialId }) {
+  if (catalog.isBlockedRamo(ramo)) {
+    const error = new Error("Ramo indisponivel para materiais graficos.");
+    error.statusCode = 403;
+    error.code = "blocked_ramo";
+    throw error;
+  }
+
   const result = annotateMaterials({ cliente, ramo, baseDir, whatsapp });
   const item = result.materials.find((material) => material.id === materialId);
   if (!item) {
@@ -246,6 +259,13 @@ function materialStatusPayload({ cliente, ramo, baseDir, whatsapp, materialId })
 }
 
 function findMaterialForRequest({ cliente, ramo, baseDir, whatsapp, materialId }) {
+  if (catalog.isBlockedRamo(ramo)) {
+    const error = new Error("Ramo indisponivel para materiais graficos.");
+    error.statusCode = 403;
+    error.code = "blocked_ramo";
+    throw error;
+  }
+
   const result = annotateMaterials({ cliente, ramo, baseDir, whatsapp });
   const item = result.materials.find((material) => material.id === materialId);
   if (!item) {
@@ -320,7 +340,6 @@ function createRequest({ baseDir, cliente, whatsapp, materialId, body, logoPath 
     ciclo,
     criado_em: now,
     ramo_folder: material.scopeFolder,
-    prompt: material.prompt,
     profile,
     assets: {
       logo: logoFile

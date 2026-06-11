@@ -1,0 +1,15 @@
+dados/
+pedidos/
+resultados_prontos/
+prontoPARAimagem/
+__pycache__/
+*.pyc
+_tmp*/
+
+runner_materiais_graficos.py
+pipeline_materiais_graficos.py
+nichos/**/materiais_graficos/prompts/
+nichos/**/materiais_graficos/catalogo.json
+
+.env
+*.jks
