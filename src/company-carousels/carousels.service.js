@@ -1,9 +1,16 @@
 const fs = require("fs");
 const path = require("path");
 const crypto = require("crypto");
+const billingService = require("../billing/billing.service");
 
 const VALID_STATUSES = new Set(["pendente", "baixado", "processando", "pronto", "erro"]);
 const READY_STATUSES = new Set(["pronto"]);
+const CAROUSEL_PLAN_LIMITS = {
+  essencial: 1,
+  profissional: 2,
+  empresarial: 4
+};
+const CAROUSEL_LIMIT_REACHED_MESSAGE = "Voc\u00ea atingiu o limite de carross\u00e9is do seu plano neste ciclo.";
 
 function safeSegment(value, fallback = "item") {
   return String(value || "")
@@ -22,6 +29,59 @@ function currentMonthCycle(now = new Date()) {
 
 function planCycle(cliente) {
   return String(cliente?.plano_ciclo || cliente?.ciclo_mes || currentMonthCycle()).trim();
+}
+
+function planKey(cliente) {
+  if (!billingService.isPlanActive(cliente)) return "";
+  const id = String(cliente.plano_atual || cliente.plano || "").toLowerCase();
+  if (id.includes("essencial")) return "essencial";
+  if (id.includes("profissional")) return "profissional";
+  if (id.includes("empresarial")) return "empresarial";
+  return "";
+}
+
+function ensureCarouselCycleState(cliente) {
+  billingService.refreshManualPlanCycle(cliente);
+  const ciclo = planCycle(cliente);
+  if (cliente.carrosseis_ciclo !== ciclo || typeof cliente.carrosseis_criados !== "object" || Array.isArray(cliente.carrosseis_criados)) {
+    cliente.carrosseis_ciclo = ciclo;
+    cliente.carrosseis_criados = {};
+  }
+  return ciclo;
+}
+
+function carouselUsagePayload(cliente) {
+  const ciclo = ensureCarouselCycleState(cliente);
+  const key = planKey(cliente);
+  const limit = CAROUSEL_PLAN_LIMITS[key] || 0;
+  const used = Object.keys(cliente.carrosseis_criados || {}).length;
+  return {
+    ciclo,
+    plano: key,
+    limite_plano: limit,
+    usado_no_ciclo: used,
+    restante_no_ciclo: Math.max(0, limit - used)
+  };
+}
+
+function assertCarouselQuotaAvailable(cliente) {
+  const usage = carouselUsagePayload(cliente);
+  if (usage.restante_no_ciclo > 0) return usage;
+
+  const error = new Error(CAROUSEL_LIMIT_REACHED_MESSAGE);
+  error.statusCode = 403;
+  error.code = "carousel_limit_reached";
+  error.quota = usage;
+  throw error;
+}
+
+function consumeCarouselQuota(cliente, carrosselId, createdAt) {
+  ensureCarouselCycleState(cliente);
+  cliente.carrosseis_criados[carrosselId] = {
+    criado_em: createdAt,
+    status: "solicitado"
+  };
+  return carouselUsagePayload(cliente);
 }
 
 function ensureDir(dirPath) {
@@ -191,10 +251,11 @@ function saveUploadedAssets(files = {}, dirPath) {
 }
 
 function createRequest({ baseDir, cliente, whatsapp, body, files = {} }) {
-  const ciclo = planCycle(cliente);
   const briefing = normalizeBriefing(body);
   const profile = normalizeProfile(body);
   validateBriefing(briefing);
+  const quotaBefore = assertCarouselQuotaAvailable(cliente);
+  const ciclo = quotaBefore.ciclo;
 
   const carrosselId = newCarouselId();
   const dirPath = requestDir(baseDir, whatsapp, ciclo, carrosselId);
@@ -202,6 +263,7 @@ function createRequest({ baseDir, cliente, whatsapp, body, files = {} }) {
   const assets = saveUploadedAssets(files, dirPath);
 
   const now = new Date().toISOString();
+  const quota = consumeCarouselQuota(cliente, carrosselId, now);
   const solicitacao = {
     id: carrosselId,
     carrossel_id: carrosselId,
@@ -214,8 +276,12 @@ function createRequest({ baseDir, cliente, whatsapp, body, files = {} }) {
     profile,
     assets,
     quota: {
-      prepared_for_future_control: true,
-      consumed: false
+      consumed: true,
+      ciclo: quota.ciclo,
+      plano: quota.plano,
+      limite_plano: quota.limite_plano,
+      usado_no_ciclo: quota.usado_no_ciclo,
+      restante_no_ciclo: quota.restante_no_ciclo
     }
   };
 
@@ -282,7 +348,8 @@ function publicStatusPayload({ baseDir, whatsapp, carrosselId }) {
       criado_em: request.criado_em || "",
       atualizado_em: request.atualizado_em || "",
       descricao_instagram: descricao,
-      download_url: ready ? `/empresa/carrosseis/${request.carrossel_id || request.id}/download` : ""
+      download_url: ready ? `/empresa/carrosseis/${request.carrossel_id || request.id}/download` : "",
+      quota: request.quota || null
     }
   };
 }

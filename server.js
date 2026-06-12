@@ -2171,7 +2171,8 @@ app.post(
         carrossel_id: carrossel.carrossel_id || carrossel.id,
         ciclo: carrossel.ciclo,
         status: "pendente",
-        status_label: "Pendente"
+        status_label: "Pendente",
+        quota: carrossel.quota || null
       });
     } catch (error) {
       cleanupUploadedFiles(req.files);
