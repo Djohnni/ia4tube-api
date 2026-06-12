@@ -2069,6 +2069,70 @@ app.post(
 );
 
 // ===== CARROSSEIS IA4TUBE =====
+function getFirstCarouselBodyValue(body, keys) {
+  for (const key of keys) {
+    const value = body?.[key];
+    if (Array.isArray(value)) {
+      const first = value.find(v => String(v || "").trim());
+      if (first !== undefined) return first;
+      continue;
+    }
+
+    if (value !== undefined && value !== null && String(value).trim()) {
+      return value;
+    }
+  }
+
+  return "";
+}
+
+function parseCarouselBodyPayload(value) {
+  if (!value) return {};
+  if (typeof value === "object" && !Array.isArray(value)) return value;
+  if (typeof value !== "string") return {};
+
+  try {
+    const parsed = JSON.parse(value);
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function normalizeCarouselRequestBody(rawBody = {}) {
+  const nestedPayload = parseCarouselBodyPayload(
+    rawBody.payload ||
+    rawBody.data ||
+    rawBody.request ||
+    rawBody.carrossel ||
+    rawBody.carousel
+  );
+  const merged = {
+    ...rawBody,
+    ...nestedPayload
+  };
+
+  return {
+    ...merged,
+    tema: String(getFirstCarouselBodyValue(merged, ["tema", "theme", "titulo", "assunto"])).trim(),
+    briefing: String(getFirstCarouselBodyValue(merged, ["briefing", "texto", "texto_fonte", "textoFonte", "sourceText", "description", "descricao", "prompt"])).trim(),
+    texto_fonte: String(getFirstCarouselBodyValue(merged, ["texto_fonte", "textoFonte", "sourceText", "texto"])).trim(),
+    quantidade_telas: String(getFirstCarouselBodyValue(merged, ["quantidade_telas", "quantidadeTelas", "quantidade", "telas", "screen_count", "screenCount"])).trim()
+  };
+}
+
+function summarizeCarouselFiles(files = {}) {
+  const summary = {};
+  for (const [field, list] of Object.entries(files || {})) {
+    summary[field] = (list || []).map(file => ({
+      originalname: file.originalname,
+      mimetype: file.mimetype,
+      size: file.size
+    }));
+  }
+  return summary;
+}
+
 app.post(
   "/empresa/carrosseis/solicitar",
   auth,
@@ -2082,15 +2146,20 @@ app.post(
     const cliente = clientes[whatsapp];
 
     if (!cliente) {
+      cleanupUploadedFiles(req.files);
       return res.status(404).json({ ok: false, error: "Cliente nao encontrado" });
     }
 
     try {
+      const carouselBody = normalizeCarouselRequestBody(req.body || {});
+      console.log("[carrosseis] body recebido", req.body);
+      console.log("[carrosseis] files recebidos", summarizeCarouselFiles(req.files));
+
       const carrossel = carouselService.createRequest({
         baseDir: CAROUSELS_DIR,
         cliente,
         whatsapp,
-        body: req.body || {},
+        body: carouselBody,
         files: req.files || {}
       });
 
@@ -2105,6 +2174,7 @@ app.post(
         status_label: "Pendente"
       });
     } catch (error) {
+      cleanupUploadedFiles(req.files);
       console.error("[carrosseis] erro ao solicitar", {
         whatsapp,
         message: error?.message,
