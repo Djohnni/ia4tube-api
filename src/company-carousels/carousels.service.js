@@ -150,7 +150,47 @@ function newCarouselId() {
   return `car_${stamp}_${crypto.randomBytes(4).toString("hex")}`;
 }
 
-function createRequest({ baseDir, cliente, whatsapp, body }) {
+function fileExtension(file) {
+  const original = String(file?.originalname || "");
+  const ext = path.extname(original).toLowerCase();
+  if ([".png", ".jpg", ".jpeg", ".webp"].includes(ext)) return ext;
+
+  const mime = String(file?.mimetype || "").toLowerCase();
+  if (mime.includes("jpeg") || mime.includes("jpg")) return ".jpg";
+  if (mime.includes("webp")) return ".webp";
+  return ".png";
+}
+
+function moveUploadedFile(file, dirPath, baseName) {
+  if (!file?.path || !fs.existsSync(file.path)) return null;
+
+  const filename = `${safeSegment(baseName)}${fileExtension(file)}`;
+  const destPath = path.join(dirPath, filename);
+  if (fs.existsSync(destPath)) fs.unlinkSync(destPath);
+  fs.renameSync(file.path, destPath);
+
+  return {
+    filename,
+    original_name: file.originalname || filename,
+    mime_type: file.mimetype || "",
+    size: file.size || 0,
+    path: filename
+  };
+}
+
+function saveUploadedAssets(files = {}, dirPath) {
+  const logo = moveUploadedFile(files.logo?.[0], dirPath, "logo");
+  const fotos = (files.fotos || [])
+    .map((file, index) => moveUploadedFile(file, dirPath, `foto_empresa_${String(index + 1).padStart(2, "0")}`))
+    .filter(Boolean);
+
+  return {
+    logo,
+    fotos
+  };
+}
+
+function createRequest({ baseDir, cliente, whatsapp, body, files = {} }) {
   const ciclo = planCycle(cliente);
   const briefing = normalizeBriefing(body);
   const profile = normalizeProfile(body);
@@ -159,6 +199,7 @@ function createRequest({ baseDir, cliente, whatsapp, body }) {
   const carrosselId = newCarouselId();
   const dirPath = requestDir(baseDir, whatsapp, ciclo, carrosselId);
   ensureDir(dirPath);
+  const assets = saveUploadedAssets(files, dirPath);
 
   const now = new Date().toISOString();
   const solicitacao = {
@@ -171,6 +212,7 @@ function createRequest({ baseDir, cliente, whatsapp, body }) {
     criado_em: now,
     briefing,
     profile,
+    assets,
     quota: {
       prepared_for_future_control: true,
       consumed: false

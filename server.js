@@ -2069,46 +2069,55 @@ app.post(
 );
 
 // ===== CARROSSEIS IA4TUBE =====
-app.post("/empresa/carrosseis/solicitar", auth, (req, res) => {
-  const whatsapp = req.user.whatsapp;
-  const clientes = readClientes();
-  const cliente = clientes[whatsapp];
+app.post(
+  "/empresa/carrosseis/solicitar",
+  auth,
+  upload.fields([
+    { name: "logo", maxCount: 1 },
+    { name: "fotos", maxCount: 20 }
+  ]),
+  (req, res) => {
+    const whatsapp = req.user.whatsapp;
+    const clientes = readClientes();
+    const cliente = clientes[whatsapp];
 
-  if (!cliente) {
-    return res.status(404).json({ ok: false, error: "Cliente nao encontrado" });
+    if (!cliente) {
+      return res.status(404).json({ ok: false, error: "Cliente nao encontrado" });
+    }
+
+    try {
+      const carrossel = carouselService.createRequest({
+        baseDir: CAROUSELS_DIR,
+        cliente,
+        whatsapp,
+        body: req.body || {},
+        files: req.files || {}
+      });
+
+      clientes[whatsapp] = cliente;
+      writeClientes(clientes);
+
+      return res.json({
+        ok: true,
+        carrossel_id: carrossel.carrossel_id || carrossel.id,
+        ciclo: carrossel.ciclo,
+        status: "pendente",
+        status_label: "Pendente"
+      });
+    } catch (error) {
+      console.error("[carrosseis] erro ao solicitar", {
+        whatsapp,
+        message: error?.message,
+        stack: error?.stack
+      });
+      return res.status(error?.statusCode || 500).json({
+        ok: false,
+        code: error?.code || "carousel_request_error",
+        error: error?.message || "Nao foi possivel solicitar o carrossel agora."
+      });
+    }
   }
-
-  try {
-    const carrossel = carouselService.createRequest({
-      baseDir: CAROUSELS_DIR,
-      cliente,
-      whatsapp,
-      body: req.body || {}
-    });
-
-    clientes[whatsapp] = cliente;
-    writeClientes(clientes);
-
-    return res.json({
-      ok: true,
-      carrossel_id: carrossel.carrossel_id || carrossel.id,
-      ciclo: carrossel.ciclo,
-      status: "pendente",
-      status_label: "Pendente"
-    });
-  } catch (error) {
-    console.error("[carrosseis] erro ao solicitar", {
-      whatsapp,
-      message: error?.message,
-      stack: error?.stack
-    });
-    return res.status(error?.statusCode || 500).json({
-      ok: false,
-      code: error?.code || "carousel_request_error",
-      error: error?.message || "Nao foi possivel solicitar o carrossel agora."
-    });
-  }
-});
+);
 
 app.get("/empresa/carrosseis/:carrosselId/status", auth, (req, res) => {
   const whatsapp = req.user.whatsapp;
