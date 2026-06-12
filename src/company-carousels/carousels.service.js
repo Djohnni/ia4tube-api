@@ -463,5 +463,6 @@ module.exports = {
   downloadForCarousel,
   updateRequestStatus,
   saveUploadedResult,
-  listBotPending
+  listBotPending,
+  carouselUsagePayload
 };

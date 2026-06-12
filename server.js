@@ -1158,12 +1158,22 @@ app.get("/me", auth, (req, res) => {
   }
 
   const cicloAtualizado = billingService.refreshManualPlanCycle(c);
-  if (cicloAtualizado.changed) {
+  const carrosselCycleBefore = JSON.stringify({
+    carrosseis_ciclo: c.carrosseis_ciclo || "",
+    carrosseis_criados: c.carrosseis_criados || null
+  });
+  const billing = billingService.getBillingStatus(c);
+  const carrosselUsage = carouselService.carouselUsagePayload(c);
+  const carrosselCycleAfter = JSON.stringify({
+    carrosseis_ciclo: c.carrosseis_ciclo || "",
+    carrosseis_criados: c.carrosseis_criados || null
+  });
+
+  if (cicloAtualizado.changed || carrosselCycleBefore !== carrosselCycleAfter) {
     clientes[req.user.whatsapp] = c;
     writeClientes(clientes);
   }
 
-  const billing = billingService.getBillingStatus(c);
   const bonusTesteVisual = req.user.whatsapp === "15991120599" ? 999 : 0;
   const saldoVisivel = Number(c.saldo_mensal || 0) + Number(c.saldo_extra || 0) + bonusTesteVisual;
 
@@ -1182,6 +1192,10 @@ app.get("/me", auth, (req, res) => {
     saldo_extra: Number(c.saldo_extra || 0),
     saldo: saldoVisivel,
     usados_no_ciclo: c.usados_no_ciclo,
+    carrosseis_limite: carrosselUsage.limite_plano,
+    carrosseis_usados: carrosselUsage.usado_no_ciclo,
+    carrosseis_restantes: carrosselUsage.restante_no_ciclo,
+    carrosseis_ciclo: carrosselUsage.ciclo,
     brinde_mascote_disponivel: c.brinde_mascote_disponivel === true,
     ativo: c.ativo,
     billing
