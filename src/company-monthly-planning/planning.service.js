@@ -215,6 +215,86 @@ function saveUploadedPhotos(files = {}, dirPath) {
     .filter(Boolean);
 }
 
+function parsePhotoOrientations(body = {}) {
+  const raw = body.orientacoes_fotos
+    || body.orientacoesFotos
+    || body.photo_orientations
+    || body.foto_orientacoes;
+
+  if (!raw) return [];
+
+  if (Array.isArray(raw)) {
+    return raw
+      .map((item, index) => normalizePhotoOrientation(item, index + 1))
+      .filter(Boolean);
+  }
+
+  if (typeof raw === "object") {
+    return Object.entries(raw)
+      .map(([arquivo, orientacao], index) => normalizePhotoOrientation({ arquivo, orientacao }, index + 1))
+      .filter(Boolean);
+  }
+
+  const text = String(raw || "").trim();
+  if (!text) return [];
+
+  try {
+    const parsed = JSON.parse(text);
+    if (Array.isArray(parsed)) {
+      return parsed
+        .map((item, index) => normalizePhotoOrientation(item, index + 1))
+        .filter(Boolean);
+    }
+    if (parsed && typeof parsed === "object") {
+      return Object.entries(parsed)
+        .map(([arquivo, orientacao], index) => normalizePhotoOrientation({ arquivo, orientacao }, index + 1))
+        .filter(Boolean);
+    }
+  } catch {
+    return [];
+  }
+
+  return [];
+}
+
+function normalizePhotoOrientation(item, fallbackOrder = 1) {
+  if (!item || typeof item !== "object") return null;
+  const ordem = Math.max(1, Number(item.ordem || item.order || fallbackOrder) || fallbackOrder);
+  const arquivo = String(item.arquivo || item.filename || item.file || item.nome || "").trim();
+  const orientacao = String(item.orientacao || item.orientation || item.instrucao || item.texto || "").trim().slice(0, 1000);
+  if (!arquivo && !orientacao) return null;
+  return {
+    ordem,
+    arquivo,
+    orientacao
+  };
+}
+
+function applyPhotoOrientations(fotos = [], body = {}) {
+  const orientations = parsePhotoOrientations(body);
+  if (!orientations.length) return fotos;
+
+  const byFile = new Map();
+  const byOrder = new Map();
+  orientations.forEach((item) => {
+    if (item.arquivo) byFile.set(item.arquivo.toLowerCase(), item);
+    byOrder.set(item.ordem, item);
+  });
+
+  return fotos.map((foto, index) => {
+    const orientation = byOrder.get(index + 1)
+      || byFile.get(String(foto.original_name || "").toLowerCase())
+      || byFile.get(String(foto.filename || "").toLowerCase())
+      || null;
+    if (!orientation?.orientacao) return foto;
+    return {
+      ...foto,
+      orientacao_cliente: orientation.orientacao,
+      orientacao_origem: "cliente_por_foto"
+    };
+  });
+}
+
 function normalizeQuantity(body = {}) {
   const raw = body.quantidade_reservada
     || body.quantidade_artes
@@ -648,7 +728,15 @@ function createRequest({ baseDir, cliente, whatsapp, body = {}, files = {} }) {
   const dirPath = requestDir(baseDir, whatsapp, ciclo, planningId);
   ensureDir(dirPath);
 
-  const fotos = saveUploadedPhotos(files, dirPath);
+  const fotos = applyPhotoOrientations(saveUploadedPhotos(files, dirPath), body);
+  const orientacoesFotos = fotos
+    .filter((foto) => String(foto.orientacao_cliente || "").trim())
+    .map((foto, index) => ({
+      ordem: index + 1,
+      arquivo: foto.original_name || foto.filename,
+      filename: foto.filename,
+      orientacao: foto.orientacao_cliente
+    }));
   const now = new Date().toISOString();
   const reservation = reservePlanningArts(cliente, planningId, quantidadeReservada, now, billing);
   const profile = normalizeProfile(body, cliente);
@@ -678,6 +766,7 @@ function createRequest({ baseDir, cliente, whatsapp, body = {}, files = {} }) {
       observacao: "Reserva definitiva aplicada em artes_mensais_restantes. Criar Arte usa somente as artes livres restantes."
     },
     profile,
+    orientacoes_fotos: orientacoesFotos,
     assets: {
       fotos
     },
@@ -958,11 +1047,184 @@ function cleanText(value, fallback = "") {
   return text || fallback;
 }
 
+function cleanInternalPlanningText(value, fallback = "") {
+  const text = cleanText(value, fallback);
+  const normalized = normalizeForCheck(text).trim();
+  const compact = normalized.replace(/[^a-z0-9]+/g, "");
+  if (
+    /^reforco\d*$/.test(compact) ||
+    /^reforo\d*$/.test(compact) ||
+    (compact.startsWith("refor") && compact.length <= 10)
+  ) {
+    return fallback;
+  }
+  return text;
+}
+
+const PLANNING_FORBIDDEN_VISIBLE_TEXTS = [
+  "reforco",
+  "reforco 2",
+  "reforco 3",
+  "reforco 4",
+  "reforco 5",
+  "tema interno",
+  "objetivo interno"
+];
+
+const PERSON_PRESERVATION_RULES = [
+  "nao alterar rosto",
+  "nao trocar rosto",
+  "nao alterar corpo",
+  "nao emagrecer ou engordar",
+  "nao mudar idade aparente",
+  "nao mudar cor de pele",
+  "nao transformar em outra pessoa",
+  "manter a identidade visual da pessoa",
+  "usar a foto como referencia principal"
+];
+
+const PRICE_FORBIDDEN_TEXTS = [
+  "preco",
+  "preço",
+  "valor",
+  "valores",
+  "R$",
+  "reais",
+  "desconto",
+  "a partir de",
+  "por apenas"
+];
+
+function normalizeArray(value) {
+  if (Array.isArray(value)) return value.filter((item) => String(item || "").trim());
+  if (!value) return [];
+  return [value].filter((item) => String(item || "").trim());
+}
+
+function normalizeForCheck(value = "") {
+  return String(value || "")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase();
+}
+
+function planningStyleForOrder(ordem = 1) {
+  const index = Math.max(0, Number(ordem || 1) - 1);
+  return index % 2 === 0 ? "normal" : "leve";
+}
+
+function orientationForItem(item = {}) {
+  const photo = item.foto_referencia || {};
+  return cleanText(
+    item.orientacao_cliente
+      || item.direcionamento_cliente
+      || photo.orientacao_cliente
+      || ""
+  );
+}
+
+function orientationFlags(value = "") {
+  const text = normalizeForCheck(value);
+  return {
+    promocao: /\b(promocao|promo|oferta|divulgar|venda|vender)\b/.test(text),
+    sem_preco: text.includes("nao colocar preco")
+      || text.includes("sem preco")
+      || text.includes("nao por preco")
+      || text.includes("nao mostrar preco")
+      || text.includes("sem valor")
+      || text.includes("nao colocar valor"),
+    fim_de_semana: text.includes("fim de semana")
+      || text.includes("final de semana")
+      || text.includes("sabado")
+      || text.includes("domingo")
+      || /\bfds\b/.test(text)
+  };
+}
+
+function hasPersonReference(item = {}) {
+  const photo = item.foto_referencia || {};
+  if (item.preservar_pessoa === true || photo.tem_pessoa === true) return true;
+  const text = normalizeForCheck([
+    item.tema,
+    item.objetivo,
+    item.briefing_arte,
+    photo.descricao,
+    photo.categoria_visual,
+    photo.tipo_conteudo,
+    ...(normalizeArray(photo.elementos_principais))
+  ].join(" "));
+  return /\b(pessoa|pessoas|rosto|face|corpo|atleta|equipe|funcionario|colaborador|profissional|cliente|aluno|professor)\b/.test(text);
+}
+
+function forbiddenVisibleTextsForItem(item = {}) {
+  const orientation = orientationForItem(item);
+  const flags = orientationFlags(orientation);
+  const custom = normalizeArray(item.texto_proibido);
+  return Array.from(new Set([
+    ...PLANNING_FORBIDDEN_VISIBLE_TEXTS,
+    ...custom,
+    ...(flags.sem_preco ? PRICE_FORBIDDEN_TEXTS : [])
+  ]));
+}
+
+function personRulesForItem(item = {}) {
+  const photo = item.foto_referencia || {};
+  const customRules = normalizeArray(item.regras_preservacao_pessoa || photo.regras_preservacao_pessoa);
+  if (!hasPersonReference(item)) return customRules;
+  return Array.from(new Set([...PERSON_PRESERVATION_RULES, ...customRules]));
+}
+
+function buildChildBriefing({ briefingArte, temaInterno, objetivoInterno, forbiddenTexts, personRules, customerOrientation }) {
+  const lines = [
+    briefingArte,
+    "Tema e objetivo do Planejamento Mensal sao orientacao interna, nao texto obrigatorio da arte.",
+    `Tema interno: ${temaInterno}.`,
+    `Objetivo interno: ${objetivoInterno}.`,
+    "O texto visivel da imagem deve ser criado naturalmente pelo pipeline principal, sem copiar literalmente tema ou objetivo.",
+    `Nunca escrever na imagem: ${forbiddenTexts.join(", ")}.`
+  ];
+
+  if (personRules.length) {
+    lines.push(`Foto com pessoa detectada: ${personRules.join("; ")}.`);
+  }
+
+  if (customerOrientation) {
+    lines.push([
+      "ORIENTACAO DO CLIENTE PARA ESTA FOTO:",
+      customerOrientation,
+      "OBEDECA ESSA ORIENTACAO. Nao trate como sugestao fraca.",
+      "Nao copie literalmente como texto obrigatorio na imagem, a menos que o cliente tenha pedido explicitamente.",
+      "Use como direcao da arte e da legenda."
+    ].join("\n"));
+  }
+
+  return lines.filter(Boolean).join("\n");
+}
+
 function buildChildOrder({ planning, item, itemId, pedidoId, mesAtual, copiedAssets }) {
   const profile = planning.profile || {};
-  const tema = cleanText(item.tema, `Postagem ${item.ordem || ""}`.trim());
-  const objetivoPostagem = cleanText(item.objetivo, "Divulgar a empresa com clareza e profissionalismo.");
-  const briefingArte = cleanText(item.briefing_arte, objetivoPostagem);
+  const tema = cleanInternalPlanningText(
+    item.tema_interno || item.tema,
+    `Postagem planejada ${item.ordem || ""}`.trim()
+  );
+  const objetivoPostagem = cleanInternalPlanningText(
+    item.objetivo_interno || item.objetivo,
+    "Divulgar a empresa com clareza e profissionalismo."
+  );
+  const publicOffer = cleanText(item.texto_nao_obrigatorio || item.texto_publico_sugerido || "");
+  const orientacaoCliente = orientationForItem(item);
+  const orientacaoFlags = orientationFlags(orientacaoCliente);
+  const forbiddenTexts = forbiddenVisibleTextsForItem(item);
+  const personRules = personRulesForItem(item);
+  const estiloVisual = planningStyleForOrder(item.ordem || 1);
+  const briefingArte = buildChildBriefing({
+    briefingArte: cleanText(item.briefing_arte, objetivoPostagem),
+    temaInterno: tema,
+    objetivoInterno: objetivoPostagem,
+    forbiddenTexts,
+    personRules,
+    customerOrientation: orientacaoCliente
+  });
   const dataSugerida = cleanText(item.data_sugerida);
   const horarioSugerido = cleanText(item.horario_sugerido);
   const nomeEmpresa = cleanText(profile.nome_empresa, "Empresa");
@@ -974,10 +1236,11 @@ function buildChildOrder({ planning, item, itemId, pedidoId, mesAtual, copiedAss
     ramo,
     nome_empresa: nomeEmpresa,
     objetivo: objetivoPostagem,
-    oferta: tema,
+    oferta: publicOffer,
     cta: whatsappContato ? "Chame no WhatsApp" : "Entre em contato",
     whatsapp: whatsappContato,
     instagram,
+    estilo_visual_cliente: estiloVisual,
     observacoes: [
       briefingArte,
       dataSugerida ? `Data sugerida: ${dataSugerida}` : "",
@@ -986,11 +1249,19 @@ function buildChildOrder({ planning, item, itemId, pedidoId, mesAtual, copiedAss
     historia_empresa: cleanText(profile.historia),
     campos_dinamicos: {
       origem: "planejamento_mensal",
-      tema,
-      objetivo_postagem: objetivoPostagem,
+      tema_interno: tema,
+      objetivo_interno: objetivoPostagem,
       data_sugerida: dataSugerida,
       horario_sugerido: horarioSugerido,
-      briefing_arte: briefingArte
+      briefing_arte: briefingArte,
+      estilo_visual_cliente: estiloVisual,
+      texto_proibido: forbiddenTexts,
+      orientacao_cliente: orientacaoCliente,
+      direcionamento_cliente: orientacaoCliente,
+      orientacao_prioridade: orientacaoCliente ? "alta" : "",
+      orientacao_flags: orientacaoFlags,
+      preservar_pessoa: personRules.length > 0,
+      regras_preservacao_pessoa: personRules
     }
   };
 
@@ -1004,7 +1275,17 @@ function buildChildOrder({ planning, item, itemId, pedidoId, mesAtual, copiedAss
     horario_sugerido: horarioSugerido,
     objetivo_postagem: objetivoPostagem,
     tema,
+    tema_interno: tema,
+    objetivo_interno: objetivoPostagem,
     briefing_arte: briefingArte,
+    estilo_visual_cliente: estiloVisual,
+    texto_proibido: forbiddenTexts,
+    orientacao_cliente: orientacaoCliente,
+    direcionamento_cliente: orientacaoCliente,
+    orientacao_prioridade: orientacaoCliente ? "alta" : "",
+    orientacao_flags: orientacaoFlags,
+    preservar_pessoa: personRules.length > 0,
+    regras_preservacao_pessoa: personRules,
     status: "pedido_criado",
     pedido_id: pedidoId
   };
@@ -1030,7 +1311,18 @@ function buildChildOrder({ planning, item, itemId, pedidoId, mesAtual, copiedAss
     horario_sugerido: horarioSugerido,
     objetivo_postagem: objetivoPostagem,
     tema,
+    tema_interno: tema,
+    objetivo_interno: objetivoPostagem,
     briefing_arte: briefingArte,
+    estilo_visual_cliente: estiloVisual,
+    estilo_planejamento_mensal: estiloVisual,
+    texto_proibido: forbiddenTexts,
+    orientacao_cliente: orientacaoCliente,
+    direcionamento_cliente: orientacaoCliente,
+    orientacao_prioridade: orientacaoCliente ? "alta" : "",
+    orientacao_flags: orientacaoFlags,
+    preservar_pessoa: personRules.length > 0,
+    regras_preservacao_pessoa: personRules,
     cobranca_origem: "planejamento_mensal_reserva",
     valor_cobrado: 0,
     pagamento_pendente: false,
@@ -1039,10 +1331,11 @@ function buildChildOrder({ planning, item, itemId, pedidoId, mesAtual, copiedAss
     ramo,
     nome_empresa: nomeEmpresa,
     objetivo: objetivoPostagem,
-    oferta: tema,
+    oferta: publicOffer,
     cta: fields.cta,
     whatsapp_contato: whatsappContato,
     instagram,
+    estilo_visual_cliente: estiloVisual,
     observacoes: fields.observacoes,
     historia_empresa: fields.historia_empresa,
     company_assets: {
@@ -1063,14 +1356,15 @@ function buildChildOrder({ planning, item, itemId, pedidoId, mesAtual, copiedAss
       ramo,
       nome_empresa: nomeEmpresa,
       objetivo: objetivoPostagem,
-      oferta: tema,
+      oferta: publicOffer,
       cta: fields.cta,
       whatsapp_contato: whatsappContato,
       instagram,
+      estilo_visual_cliente: estiloVisual,
       observacoes: fields.observacoes,
       historia_empresa: fields.historia_empresa,
       rodada: "",
-      data: tema,
+      data: "",
       hora: "",
       arena: ""
     }
