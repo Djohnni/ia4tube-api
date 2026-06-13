@@ -103,7 +103,15 @@ function listPedidoBasesByWhatsapp(pedidosDir, whatsapp) {
 }
 
 function removeOldPedidos(pedidosDir, whatsapp, maxKeep = 15) {
-  const pedidos = listPedidoBasesByWhatsapp(pedidosDir, whatsapp);
+  const pedidos = listPedidoBasesByWhatsapp(pedidosDir, whatsapp)
+    .filter((item) => {
+      const pedido = item.pedido || {};
+      return !(
+        pedido.origem === "planejamento_mensal" ||
+        pedido.planejamento_id ||
+        pedido.planejamento_mensal?.planejamento_id
+      );
+    });
 
   if (pedidos.length <= maxKeep) return;
 

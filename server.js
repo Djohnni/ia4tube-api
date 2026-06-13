@@ -14,6 +14,8 @@ const billingService = require("./src/billing/billing.service");
 const billingPlans = require("./src/billing/plans");
 const graphicMaterialsService = require("./src/company-graphic-materials/materials.service");
 const carouselService = require("./src/company-carousels/carousels.service");
+const monthlyPlanningService = require("./src/company-monthly-planning/planning.service");
+const fcmService = require("./src/notifications/fcm.service");
 
 const app = express();
 
@@ -28,6 +30,7 @@ const PEDIDOS_DIR = path.join(DATA_DIR, "pedidos");
 const TMP_UPLOADS_DIR = path.join(DATA_DIR, "tmp_uploads");
 const GRAPHIC_MATERIALS_DIR = path.join(DATA_DIR, "materiais_graficos");
 const CAROUSELS_DIR = path.join(DATA_DIR, "carrosseis");
+const MONTHLY_PLANNINGS_DIR = path.join(DATA_DIR, "planejamentos_mensais");
 const CLIENTES_FILE = path.join(DATA_DIR, "clientes.json");
 const BOT_ADMIN_WHATSAPP = process.env.BOT_ADMIN_WHATSAPP || "15991120599";
 const BOT_RUNNER_TOKEN = process.env.BOT_RUNNER_TOKEN || "";
@@ -35,6 +38,10 @@ const MP_ACCESS_TOKEN = process.env.MP_ACCESS_TOKEN || "";
 const MP_NOTIFICATION_URL = process.env.MP_NOTIFICATION_URL || "https://ia4tube-api.onrender.com/webhook/mercadopago";
 const EMPRESA_ARTE_AVULSA_VALOR = productsRegistry.getProductPrice("arte_empresa") || 9.90;
 const MP_PROCESSANDO_RETRY_MS = 10 * 60 * 1000;
+const MONTHLY_PLANNING_NOTIFICATIONS_INTERVAL_MS = Math.max(
+  30 * 1000,
+  Number(process.env.MONTHLY_PLANNING_NOTIFICATIONS_INTERVAL_MS || 60 * 1000)
+);
 const MP_PROCESSADOS_FILE = path.join(DATA_DIR, "mp_processados.json");
 const TEMPO_ESTIMADO_FILE = path.join(DATA_DIR, "tempo_estimado.json");
 const ONLINE_FILE = path.join(DATA_DIR, "usuarios_online.json");
@@ -70,6 +77,7 @@ ensureDir(PEDIDOS_DIR);
 ensureDir(TMP_UPLOADS_DIR);
 ensureDir(GRAPHIC_MATERIALS_DIR);
 ensureDir(CAROUSELS_DIR);
+ensureDir(MONTHLY_PLANNINGS_DIR);
 ensureDir(ANALYTICS_DIR);
 
 if (!fs.existsSync(CLIENTES_FILE)) {
@@ -1199,6 +1207,55 @@ app.get("/me", auth, (req, res) => {
     brinde_mascote_disponivel: c.brinde_mascote_disponivel === true,
     ativo: c.ativo,
     billing
+  });
+});
+
+app.post("/me/fcm-token", auth, (req, res) => {
+  const fcmToken = String(req.body?.token || "").trim();
+  const platform = String(req.body?.platform || "android").trim().toLowerCase() || "android";
+
+  if (!fcmToken) {
+    return res.status(400).json({ ok: false, error: "Token FCM obrigatorio" });
+  }
+
+  const clientes = readClientes();
+  const c = clientes[req.user.whatsapp];
+
+  if (!c) {
+    return res.status(404).json({ ok: false, error: "Cliente nao encontrado" });
+  }
+
+  const now = new Date().toISOString();
+  c.notificacoes = c.notificacoes && typeof c.notificacoes === "object" && !Array.isArray(c.notificacoes)
+    ? c.notificacoes
+    : {};
+
+  const existingTokens = Array.isArray(c.notificacoes.fcm_tokens)
+    ? c.notificacoes.fcm_tokens.filter(item => item && typeof item === "object" && item.token)
+    : [];
+  const current = existingTokens.find(item => item.token === fcmToken);
+
+  if (current) {
+    current.platform = platform;
+    current.ativo = true;
+    current.atualizado_em = now;
+  } else {
+    existingTokens.push({
+      token: fcmToken,
+      platform,
+      ativo: true,
+      atualizado_em: now
+    });
+  }
+
+  c.notificacoes.fcm_tokens = existingTokens;
+  clientes[req.user.whatsapp] = c;
+  writeClientes(clientes);
+
+  return res.json({
+    ok: true,
+    salvo: true,
+    tokens_ativos: existingTokens.filter(item => item.ativo !== false).length
   });
 });
 
@@ -2369,6 +2426,360 @@ app.post(
   }
 );
 
+// ===== PLANEJAMENTO MENSAL =====
+app.post(
+  "/empresa/planejamento-mensal/solicitar",
+  auth,
+  upload.fields([
+    { name: "fotos", maxCount: 10 }
+  ]),
+  (req, res) => {
+    const whatsapp = req.user.whatsapp;
+    const clientes = readClientes();
+    const cliente = clientes[whatsapp];
+
+    if (!cliente) {
+      cleanupUploadedFiles(req.files);
+      return res.status(404).json({ ok: false, error: "Cliente nao encontrado" });
+    }
+
+    try {
+      const clienteBefore = JSON.stringify(cliente);
+      const planejamento = monthlyPlanningService.createRequest({
+        baseDir: MONTHLY_PLANNINGS_DIR,
+        cliente,
+        whatsapp,
+        body: req.body || {},
+        files: req.files || {}
+      });
+
+      if (JSON.stringify(cliente) !== clienteBefore) {
+        clientes[whatsapp] = cliente;
+        writeClientes(clientes);
+      }
+
+      return res.json({
+        ok: true,
+        planejamento_id: planejamento.planejamento_id || planejamento.id,
+        ciclo: planejamento.ciclo,
+        status: planejamento.status,
+        status_label: "Em analise",
+        quantidade_reservada: planejamento.quantidade_reservada,
+        artes_deste_ciclo: planejamento.artes_deste_ciclo,
+        reservadas_no_planejamento: planejamento.reservadas_no_planejamento,
+        livres_para_criar_arte: planejamento.livres_para_criar_arte,
+        reserva_definitiva: true,
+        fase_4_pendente: false
+      });
+    } catch (error) {
+      cleanupUploadedFiles(req.files);
+      console.error("[planejamento-mensal] erro ao solicitar", {
+        whatsapp,
+        message: error?.message,
+        stack: error?.stack
+      });
+      return res.status(error?.statusCode || 500).json({
+        ok: false,
+        code: error?.code || "monthly_planning_request_error",
+        error: error?.message || "Nao foi possivel criar o Planejamento Mensal agora.",
+        artes_livres: error?.artes_livres,
+        billing: error?.billing
+      });
+    }
+  }
+);
+
+app.get("/empresa/planejamento-mensal", auth, (req, res) => {
+  const whatsapp = req.user.whatsapp;
+  const clientes = readClientes();
+  const cliente = clientes[whatsapp];
+
+  if (!cliente) {
+    return res.status(404).json({ ok: false, error: "Cliente nao encontrado" });
+  }
+
+  try {
+    return res.json(monthlyPlanningService.listClientPlannings({
+      baseDir: MONTHLY_PLANNINGS_DIR,
+      whatsapp,
+      pedidosDir: PEDIDOS_DIR
+    }));
+  } catch (error) {
+    console.error("[planejamento-mensal] erro ao listar", {
+      whatsapp,
+      message: error?.message,
+      stack: error?.stack
+    });
+    return res.status(500).json({
+      ok: false,
+      code: "monthly_planning_list_error",
+      error: "Nao foi possivel listar os Planejamentos Mensais agora."
+    });
+  }
+});
+
+app.get("/empresa/planejamento-mensal/:planningId", auth, (req, res) => {
+  const whatsapp = req.user.whatsapp;
+  const clientes = readClientes();
+  const cliente = clientes[whatsapp];
+
+  if (!cliente) {
+    return res.status(404).json({ ok: false, error: "Cliente nao encontrado" });
+  }
+
+  try {
+    return res.json(monthlyPlanningService.publicDetailPayload({
+      baseDir: MONTHLY_PLANNINGS_DIR,
+      whatsapp,
+      planningId: req.params.planningId,
+      pedidosDir: PEDIDOS_DIR
+    }));
+  } catch (error) {
+    return res.status(error?.statusCode || 500).json({
+      ok: false,
+      code: error?.code || "monthly_planning_detail_error",
+      error: error?.message || "Nao foi possivel consultar o Planejamento Mensal."
+    });
+  }
+});
+
+app.post("/empresa/planejamento-mensal/:planningId/cancelar", auth, (req, res) => {
+  const whatsapp = req.user.whatsapp;
+  const clientes = readClientes();
+  const cliente = clientes[whatsapp];
+
+  if (!cliente) {
+    return res.status(404).json({ ok: false, error: "Cliente nao encontrado" });
+  }
+
+  try {
+    const clienteBefore = JSON.stringify(cliente);
+    const planejamento = monthlyPlanningService.cancelPlanning({
+      baseDir: MONTHLY_PLANNINGS_DIR,
+      whatsapp,
+      planningId: req.params.planningId,
+      cliente
+    });
+
+    if (JSON.stringify(cliente) !== clienteBefore) {
+      clientes[whatsapp] = cliente;
+      writeClientes(clientes);
+    }
+
+    return res.json({
+      ok: true,
+      planejamento_id: planejamento.planejamento_id || planejamento.id,
+      status: planejamento.status,
+      status_label: planejamento.status_label || "Cancelado",
+      billing_alterado: planejamento.cancelamento?.billing_alterado === true,
+      reserva_definitiva: true,
+      artes_devolvidas: Number(planejamento.cancelamento?.artes_devolvidas || 0),
+      livres_para_criar_arte: Number(planejamento.cancelamento?.livres_para_criar_arte || planejamento.livres_para_criar_arte || 0)
+    });
+  } catch (error) {
+    return res.status(error?.statusCode || 500).json({
+      ok: false,
+      code: error?.code || "monthly_planning_cancel_error",
+      error: error?.message || "Nao foi possivel cancelar o Planejamento Mensal."
+    });
+  }
+});
+
+app.get("/bot/empresa/planejamento-mensal/novos", botRunnerAuth, (req, res) => {
+  if (!isBotAdmin(req)) {
+    return res.status(403).json({ ok: false, error: "Acesso negado" });
+  }
+
+  try {
+    return res.json(monthlyPlanningService.listBotPending({
+      baseDir: MONTHLY_PLANNINGS_DIR,
+      limit: req.query.limit,
+      claim: req.query.claim !== "false"
+    }));
+  } catch (error) {
+    console.error("[planejamento-mensal][bot] erro ao listar novos", {
+      message: error?.message,
+      stack: error?.stack
+    });
+    return res.status(500).json({
+      ok: false,
+      error: "Nao foi possivel listar Planejamentos Mensais pendentes."
+    });
+  }
+});
+
+app.get("/bot/empresa/planejamento-mensal/:planningId/zip", botRunnerAuth, (req, res) => {
+  if (!isBotAdmin(req)) {
+    return res.status(403).json({ ok: false, error: "Acesso negado" });
+  }
+
+  try {
+    const planejamento = monthlyPlanningService.findPlanningByIdAny({
+      baseDir: MONTHLY_PLANNINGS_DIR,
+      planningId: req.params.planningId
+    });
+
+    if (!planejamento) {
+      return res.status(404).json({ ok: false, error: "Planejamento Mensal nao encontrado" });
+    }
+
+    res.setHeader("Content-Type", "application/zip");
+    res.setHeader("Content-Disposition", `attachment; filename=\"${planejamento.planejamento_id || planejamento.id}.zip\"`);
+
+    const archive = archiver("zip", { zlib: { level: 9 } });
+    archive.on("error", (error) => {
+      throw error;
+    });
+    archive.pipe(res);
+    archive.directory(planejamento.base_path, false);
+    archive.finalize();
+  } catch (error) {
+    console.error("[planejamento-mensal][bot] erro ao gerar zip", {
+      planningId: req.params.planningId,
+      message: error?.message,
+      stack: error?.stack
+    });
+    if (!res.headersSent) {
+      return res.status(500).json({ ok: false, error: "Falha ao gerar ZIP do Planejamento Mensal" });
+    }
+  }
+});
+
+app.post("/bot/empresa/planejamento-mensal/:planningId/status", botRunnerAuth, (req, res) => {
+  if (!isBotAdmin(req)) {
+    return res.status(403).json({ ok: false, error: "Acesso negado" });
+  }
+
+  try {
+    const planejamento = monthlyPlanningService.updatePlanningStatus({
+      baseDir: MONTHLY_PLANNINGS_DIR,
+      planningId: req.params.planningId,
+      status: String(req.body?.status || "").trim(),
+      message: req.body?.message || req.body?.erro || ""
+    });
+
+    return res.json({
+      ok: true,
+      planejamento_id: planejamento.planejamento_id || planejamento.id,
+      status: planejamento.status
+    });
+  } catch (error) {
+    console.error("[planejamento-mensal][bot] erro ao atualizar status", {
+      planningId: req.params.planningId,
+      message: error?.message,
+      stack: error?.stack
+    });
+    return res.status(error?.statusCode || 500).json({
+      ok: false,
+      code: error?.code || "monthly_planning_bot_status_error",
+      error: error?.message || "Falha ao atualizar status do Planejamento Mensal"
+    });
+  }
+});
+
+app.post("/bot/empresa/planejamento-mensal/:planningId/upload-plano", botRunnerAuth, (req, res) => {
+  if (!isBotAdmin(req)) {
+    return res.status(403).json({ ok: false, error: "Acesso negado" });
+  }
+
+  try {
+    const planejamentoAtual = monthlyPlanningService.findPlanningByIdAny({
+      baseDir: MONTHLY_PLANNINGS_DIR,
+      planningId: req.params.planningId
+    });
+    const clientes = readClientes();
+    const cliente = planejamentoAtual?.whatsapp ? clientes[planejamentoAtual.whatsapp] : null;
+    const clienteBefore = cliente ? JSON.stringify(cliente) : "";
+
+    const planejamento = monthlyPlanningService.savePlanResult({
+      baseDir: MONTHLY_PLANNINGS_DIR,
+      pedidosDir: PEDIDOS_DIR,
+      planningId: req.params.planningId,
+      payload: req.body || {},
+      cliente
+    });
+
+    if (cliente && JSON.stringify(cliente) !== clienteBefore) {
+      clientes[planejamentoAtual.whatsapp] = cliente;
+      writeClientes(clientes);
+    }
+
+    const planoMensal = planejamento.plano_mensal || {};
+    const postagens = Array.isArray(planoMensal.postagens)
+      ? planoMensal.postagens
+      : Array.isArray(planoMensal.itens)
+        ? planoMensal.itens
+        : [];
+
+    return res.json({
+      ok: true,
+      planejamento_id: planejamento.planejamento_id || planejamento.id,
+      status: planejamento.status,
+      postagens: postagens.length,
+      pedidos_filhos_criados: Number(planejamento.pedidos_criados?.total || planejamento.pedidos_filhos_criados || 0)
+    });
+  } catch (error) {
+    console.error("[planejamento-mensal][bot] erro ao receber plano", {
+      planningId: req.params.planningId,
+      message: error?.message,
+      stack: error?.stack
+    });
+    return res.status(error?.statusCode || 500).json({
+      ok: false,
+      code: error?.code || "monthly_planning_bot_upload_error",
+      error: error?.message || "Falha ao salvar plano do Planejamento Mensal"
+    });
+  }
+});
+
+let monthlyPlanningNotificationsRunning = false;
+
+function monthlyPlanningNotificationPayload({ planning, post }) {
+  return {
+    title: "Hora de postar",
+    body: "Sua arte planejada para hoje esta pronta. Toque para ver e copiar a legenda.",
+    data: {
+      tipo: "planejamento_mensal",
+      route: "monthly_planning_detail",
+      planejamento_id: planning.planejamento_id || planning.id || "",
+      planejamento_item_id: post.planejamento_item_id || "",
+      pedido_id: post.pedido_id || ""
+    }
+  };
+}
+
+async function runMonthlyPlanningNotifications() {
+  if (monthlyPlanningNotificationsRunning) return;
+
+  monthlyPlanningNotificationsRunning = true;
+  try {
+    const clientes = readClientes();
+    const result = await monthlyPlanningService.processDueNotifications({
+      baseDir: MONTHLY_PLANNINGS_DIR,
+      pedidosDir: PEDIDOS_DIR,
+      clientes,
+      now: new Date(),
+      sendNotification: async ({ cliente, planning, post }) => {
+        return fcmService.sendToClient(
+          cliente,
+          monthlyPlanningNotificationPayload({ planning, post })
+        );
+      }
+    });
+
+    if (result.sent || result.errors || result.mock) {
+      console.log("[planejamento-mensal][notificacoes]", result);
+    }
+  } catch (error) {
+    console.error("[planejamento-mensal][notificacoes] erro no agendador", {
+      message: error?.message,
+      stack: error?.stack
+    });
+  } finally {
+    monthlyPlanningNotificationsRunning = false;
+  }
+}
+
 // ===== CRIA PEDIDO =====
 function criarPedidoHandler(categoria) {
   return async (req, res) => {
@@ -2681,7 +3092,22 @@ app.get("/meus-pedidos", auth, (req, res) => {
   const cliente = clientes[whatsapp];
   const bloqueioDownload = downloadBloqueadoPorCadastro(cliente);
   const mensagemBloqueioDownload = mensagemDownloadBloqueado(cliente);
-  const itens = listPedidoBasesByWhatsapp(whatsapp).slice(0, 15);
+  const itens = listPedidoBasesByWhatsapp(whatsapp)
+    .filter((item) => {
+      const pedido = item.pedido || {};
+      return !(
+        pedido.origem === "planejamento_mensal" ||
+        pedido.planejamento_id ||
+        pedido.planejamento_mensal?.planejamento_id
+      );
+    })
+    .slice(0, 15);
+  const planejamentos = monthlyPlanningService.listClientPlanningGroups({
+    baseDir: MONTHLY_PLANNINGS_DIR,
+    pedidosDir: PEDIDOS_DIR,
+    whatsapp,
+    limit: 15
+  });
 
   const pedidos = itens.map((item) => {
     const resultadoFinalPath = path.join(item.base, "resultado_final.png");
@@ -2703,7 +3129,7 @@ app.get("/meus-pedidos", auth, (req, res) => {
         ? `${req.protocol}://${req.get("host")}/pedidos/${item.id}/preview`
         : null,
       imagem_pronta: imagemPronta,
-      descricao_instagram: item.pedido.descricao_instagram || "",
+      descricao_instagram: descricaoPostagemPedido(item.pedido),
       aprovado_cliente: aprovadoCliente,
       pagamento_pendente: pagamentoPendente,
       valor_pendente: Number(item.pedido.valor_pendente || 0),
@@ -2717,7 +3143,7 @@ app.get("/meus-pedidos", auth, (req, res) => {
     };
   });
 
-  return res.json({ ok: true, pedidos });
+  return res.json({ ok: true, pedidos, planejamentos });
 });
 
 app.post("/pedidos/:id/pagar-com-saldo", auth, (req, res) => {
@@ -4181,6 +4607,9 @@ app.use((err, req, res, next) => {
 cleanupOldTmpUploads();
 setInterval(cleanupOldTmpUploads, TMP_UPLOAD_CLEANUP_INTERVAL_MS);
 setInterval(finalizarConversasSuporteInativas, 60 * 1000);
+
+setTimeout(runMonthlyPlanningNotifications, 15 * 1000);
+setInterval(runMonthlyPlanningNotifications, MONTHLY_PLANNING_NOTIFICATIONS_INTERVAL_MS);
 
 app.listen(PORT, () => {
   console.log("API rodando na porta", PORT);
