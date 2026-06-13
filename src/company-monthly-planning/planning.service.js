@@ -1021,16 +1021,58 @@ function extensionFromAsset(asset = {}, sourcePath = "") {
   return ".png";
 }
 
-function copyPlanningAssetsToOrder(planning, orderBase) {
-  const copiedPhotos = [];
+function photoReferenceOrder(item = {}) {
+  const ref = item.foto_referencia || {};
+  const ordem = Number(ref.ordem || ref.order || ref.index || 0);
+  return Number.isFinite(ordem) && ordem > 0 ? ordem : 0;
+}
+
+function photoReferenceName(item = {}) {
+  const ref = item.foto_referencia || {};
+  return String(ref.filename || ref.original_name || ref.arquivo || ref.file || "").trim().toLowerCase();
+}
+
+function selectPlanningPhotoAssets(planning, item = {}) {
   const assets = planning.assets || {};
   const photos = Array.isArray(assets.fotos) ? assets.fotos : [];
+  if (!photos.length) return [];
 
-  photos.forEach((asset, index) => {
+  const postOrder = Number(item.ordem || 0);
+  const refOrder = photoReferenceOrder(item);
+  const refName = photoReferenceName(item);
+  const refLooksSpecific = refOrder > 0 && refOrder === postOrder && postOrder <= photos.length;
+
+  if (refLooksSpecific) {
+    const byOrder = photos[refOrder - 1];
+    if (byOrder && typeof byOrder === "object") {
+      return [{ asset: byOrder, originalIndex: refOrder - 1 }];
+    }
+  }
+
+  if (refLooksSpecific && refName) {
+    const matchedIndex = photos.findIndex((photo) => {
+      if (!photo || typeof photo !== "object") return false;
+      return [photo.filename, photo.original_name, photo.arquivo, photo.file]
+        .map((value) => String(value || "").trim().toLowerCase())
+        .includes(refName);
+    });
+    if (matchedIndex >= 0) {
+      return [{ asset: photos[matchedIndex], originalIndex: matchedIndex }];
+    }
+  }
+
+  return photos.map((asset, originalIndex) => ({ asset, originalIndex }));
+}
+
+function copyPlanningAssetsToOrder(planning, orderBase, item = {}) {
+  const copiedPhotos = [];
+  const selectedPhotos = selectPlanningPhotoAssets(planning, item);
+
+  selectedPhotos.forEach(({ asset, originalIndex }) => {
     if (!asset || typeof asset !== "object") return;
     const sourcePath = resolvePlanningAssetPath(planning, asset);
     const ext = extensionFromAsset(asset, sourcePath);
-    const filename = `foto${String(index + 1).padStart(2, "0")}${ext}`;
+    const filename = `foto${String(originalIndex + 1).padStart(2, "0")}${ext}`;
     const destPath = path.join(orderBase, filename);
     if (safeCopyFile(sourcePath, destPath)) {
       copiedPhotos.push(filename);
@@ -1442,10 +1484,11 @@ function createChildOrdersFromPlan({ pedidosDir, planning, plan, cliente = null 
     const pedidoId = newChildPedidoId(planning.planejamento_id || planning.id, index + 1, pedidosDir);
     const orderBase = path.join(pedidosDir, safeSegment(planning.whatsapp, "sem_whatsapp"), safeSegment(mesAtual, "ciclo"), pedidoId);
     ensureDir(orderBase);
-    const copiedAssets = copyPlanningAssetsToOrder(planning, orderBase);
+    const itemForOrder = { ...item, ordem: item.ordem || index + 1 };
+    const copiedAssets = copyPlanningAssetsToOrder(planning, orderBase, itemForOrder);
     const childOrder = buildChildOrder({
       planning,
-      item: { ...item, ordem: item.ordem || index + 1 },
+      item: itemForOrder,
       itemId,
       pedidoId,
       mesAtual,
