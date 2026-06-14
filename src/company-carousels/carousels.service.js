@@ -161,14 +161,22 @@ function clampScreenCount(value) {
   return Math.max(2, Math.min(10, Math.round(count)));
 }
 
+function clampContentLevel(value) {
+  const level = Number(value || 2);
+  if (!Number.isFinite(level)) return 2;
+  return Math.max(1, Math.min(3, Math.round(level)));
+}
+
 function normalizeBriefing(body = {}) {
   const quantidade = clampScreenCount(body.quantidade_telas || body.quantidade || body.telas);
+  const nivelConteudo = clampContentLevel(body.nivel_conteudo || body.nivelConteudo || body.content_level);
   return {
     briefing: String(body.briefing || body.texto || "").trim(),
     tema: String(body.tema || "").trim(),
     formato: String(body.formato || "carrossel").trim(),
     quantidade,
     quantidade_telas: quantidade,
+    nivel_conteudo: nivelConteudo,
     publico: String(body.publico || body.publico_alvo || "").trim(),
     objetivo: String(body.objetivo || "").trim(),
     estilo_visual: String(body.estilo_visual || body.estiloVisual || "").trim(),
@@ -354,6 +362,7 @@ function publicCarouselSummary(request) {
     carrossel_id: carrosselId,
     tema: request.briefing?.tema || request.briefing?.briefing || "",
     quantidade_telas: request.briefing?.quantidade_telas || request.briefing?.quantidade || "",
+    nivel_conteudo: request.briefing?.nivel_conteudo || 2,
     status: request.status,
     status_label: statusLabel(request.status),
     ready,
@@ -478,6 +487,7 @@ function listBotPending({ baseDir, limit = 5 }) {
           status: request.status,
           criado_em: request.criado_em,
           quantidade_telas: request.briefing?.quantidade_telas || request.briefing?.quantidade || "",
+          nivel_conteudo: request.briefing?.nivel_conteudo || 2,
           tema: request.briefing?.tema || request.briefing?.briefing || "",
           zip_url: `/bot/empresa/carrosseis/${request.carrossel_id || request.id}/zip`
         });
