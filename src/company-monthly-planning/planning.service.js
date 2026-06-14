@@ -6,6 +6,7 @@ const orderStorage = require("../orders/order.storage");
 
 const VALID_STATUSES = new Set(["em_analise", "processando", "pronto", "erro", "cancelado"]);
 const NOTIFICATION_STATUSES = new Set(["pendente", "enviada", "erro", "cancelada"]);
+const PLANNING_ART_STATUSES = new Set(["novo", "ajuste_pendente", "processando", "pronto", "erro"]);
 const SAO_PAULO_UTC_OFFSET = "-03:00";
 const MAX_MONTHLY_PLANNING_ARTS = 36;
 const BOT_PENDING_HARD_LIMIT = 20;
@@ -1423,6 +1424,202 @@ function readCreatedOrdersFile(planning) {
   };
 }
 
+function isPlanningOrder(pedido = {}) {
+  if (!pedido || typeof pedido !== "object") return false;
+
+  const origem = String(pedido.origem || "").trim().toLowerCase();
+  if (origem === "planejamento_mensal") return true;
+
+  const meta = pedido.planejamento_mensal;
+  if (meta && typeof meta === "object") {
+    const metaOrigem = String(meta.origem || "").trim().toLowerCase();
+    if (metaOrigem === "planejamento_mensal") return true;
+  }
+
+  return Boolean(
+    String(pedido.planejamento_id || "").trim()
+    && String(pedido.planejamento_item_id || "").trim()
+  );
+}
+
+function planningArtPayload({ base, pedido, pedidoId, whatsapp = "", mes = "", status = "" }) {
+  const id = pedidoId || pedido?.id || path.basename(base || "");
+  return {
+    id,
+    pedido_id: id,
+    whatsapp: whatsapp || pedido?.whatsapp || "",
+    mes: mes || pedido?.mes || "",
+    status: status || pedido?.status || orderStorage.readStatus(base, "novo"),
+    planejamento_id: pedido?.planejamento_id || pedido?.planejamento_mensal?.planejamento_id || "",
+    planejamento_item_id: pedido?.planejamento_item_id || pedido?.planejamento_mensal?.planejamento_item_id || "",
+    origem: "planejamento_mensal",
+    zip_url: `/bot/empresa/planejamento-mensal/artes/${encodeURIComponent(id)}/zip`
+  };
+}
+
+function findPlanningArtOrder({ pedidosDir, pedidoId }) {
+  if (!pedidosDir || !pedidoId) return null;
+
+  const base = orderStorage.getPedidoBaseGlobal(pedidosDir, pedidoId);
+  if (!base) return null;
+
+  const pedido = orderStorage.readOrder(base) || {};
+  if (!isPlanningOrder(pedido)) return null;
+
+  const status = orderStorage.readStatus(base, pedido.status || "novo");
+  return {
+    base,
+    pedido,
+    pedidoId: pedido.id || pedidoId,
+    status,
+    payload: planningArtPayload({ base, pedido, pedidoId: pedido.id || pedidoId, status })
+  };
+}
+
+function listPlanningArtPending({ pedidosDir, limit = BOT_PENDING_HARD_LIMIT }) {
+  const max = Math.max(1, Math.min(100, Number(limit || BOT_PENDING_HARD_LIMIT) || BOT_PENDING_HARD_LIMIT));
+  const artes = [];
+
+  if (!pedidosDir || !fs.existsSync(pedidosDir)) {
+    return { ok: true, artes };
+  }
+
+  const whatsapps = fs.readdirSync(pedidosDir);
+  for (const whatsapp of whatsapps) {
+    if (artes.length >= max) break;
+    const pastaWhatsapp = path.join(pedidosDir, whatsapp);
+    if (!fs.existsSync(pastaWhatsapp) || !fs.statSync(pastaWhatsapp).isDirectory()) continue;
+
+    const ciclos = fs.readdirSync(pastaWhatsapp);
+    for (const mes of ciclos) {
+      if (artes.length >= max) break;
+      const pastaMes = path.join(pastaWhatsapp, mes);
+      if (!fs.existsSync(pastaMes) || !fs.statSync(pastaMes).isDirectory()) continue;
+
+      const ids = fs.readdirSync(pastaMes);
+      for (const id of ids) {
+        if (artes.length >= max) break;
+        const base = path.join(pastaMes, id);
+        if (!fs.existsSync(base) || !fs.statSync(base).isDirectory()) continue;
+
+        const pedido = orderStorage.readOrder(base) || {};
+        if (!isPlanningOrder(pedido)) continue;
+
+        const status = orderStorage.readStatus(base, pedido.status || "");
+        if (!["novo", "ajuste_pendente"].includes(status)) continue;
+        if (fs.existsSync(path.join(base, "resultado_final.png"))) continue;
+
+        artes.push(planningArtPayload({ base, pedido, pedidoId: id, whatsapp, mes, status }));
+      }
+    }
+  }
+
+  return { ok: true, artes };
+}
+
+function updatePlanningArtStatus({ pedidosDir, pedidoId, status, message = "" }) {
+  const normalizedStatus = String(status || "").trim().toLowerCase();
+  if (!PLANNING_ART_STATUSES.has(normalizedStatus)) {
+    const error = new Error("Status invalido para arte do Planejamento Mensal.");
+    error.statusCode = 400;
+    error.code = "monthly_planning_art_invalid_status";
+    throw error;
+  }
+
+  const found = findPlanningArtOrder({ pedidosDir, pedidoId });
+  if (!found) {
+    const error = new Error("Arte do Planejamento Mensal nao encontrada.");
+    error.statusCode = 404;
+    error.code = "monthly_planning_art_not_found";
+    throw error;
+  }
+
+  const now = new Date().toISOString();
+  const pedido = {
+    ...found.pedido,
+    status: normalizedStatus,
+    atualizado_em: now
+  };
+
+  if (normalizedStatus === "erro") {
+    pedido.erro = String(message || pedido.erro || "Falha no processamento da arte do Planejamento Mensal.");
+    pedido.motivo_erro = pedido.erro;
+    fs.writeFileSync(path.join(found.base, "erro.txt"), `${pedido.erro}\n`, "utf8");
+  }
+
+  orderStorage.writeOrder(found.base, pedido);
+  orderStorage.writeStatus(found.base, normalizedStatus);
+
+  return planningArtPayload({
+    base: found.base,
+    pedido,
+    pedidoId: found.pedidoId,
+    status: normalizedStatus
+  });
+}
+
+function savePlanningArtResult({
+  pedidosDir,
+  pedidoId,
+  resultadoPath,
+  previewPath = "",
+  descricaoInstagram = "",
+  apiInfo = null
+}) {
+  const found = findPlanningArtOrder({ pedidosDir, pedidoId });
+  if (!found) {
+    const error = new Error("Arte do Planejamento Mensal nao encontrada.");
+    error.statusCode = 404;
+    error.code = "monthly_planning_art_not_found";
+    throw error;
+  }
+
+  if (!resultadoPath || !fs.existsSync(resultadoPath)) {
+    const error = new Error("Arquivo resultado_final.png nao recebido.");
+    error.statusCode = 400;
+    error.code = "monthly_planning_art_missing_result";
+    throw error;
+  }
+
+  const finalPath = path.join(found.base, "resultado_final.png");
+  const previewDest = path.join(found.base, "preview_ia4tube.jpg");
+  if (fs.existsSync(finalPath)) fs.unlinkSync(finalPath);
+  fs.renameSync(resultadoPath, finalPath);
+
+  if (previewPath && fs.existsSync(previewPath)) {
+    if (fs.existsSync(previewDest)) fs.unlinkSync(previewDest);
+    fs.renameSync(previewPath, previewDest);
+  }
+
+  const now = new Date().toISOString();
+  const pedido = {
+    ...found.pedido,
+    status: "pronto",
+    descricao_instagram: String(descricaoInstagram || found.pedido.descricao_instagram || "").trim(),
+    resultado_enviado_em: now,
+    atualizado_em: now
+  };
+
+  if (pedido.legacy && typeof pedido.legacy === "object") {
+    pedido.legacy.descricao_instagram = pedido.descricao_instagram;
+  }
+
+  if (apiInfo && typeof apiInfo === "object") {
+    writeJson(path.join(found.base, "resultado_api_info.json"), apiInfo);
+  }
+
+  orderStorage.writeOrder(found.base, pedido);
+  orderStorage.writeStatus(found.base, "pronto");
+  fs.writeFileSync(path.join(found.base, "processado_handoff.txt"), "OK", "utf8");
+
+  return planningArtPayload({
+    base: found.base,
+    pedido,
+    pedidoId: found.pedidoId,
+    status: "pronto"
+  });
+}
+
 function syncPlanningReservationAfterChildren(cliente, planning, childCount) {
   if (!cliente) return null;
 
@@ -1947,6 +2144,11 @@ module.exports = {
   listBotPending,
   updatePlanningStatus,
   savePlanResult,
+  isPlanningOrder,
+  findPlanningArtOrder,
+  listPlanningArtPending,
+  updatePlanningArtStatus,
+  savePlanningArtResult,
   findPlanningByIdAny,
   processDueNotifications
 };

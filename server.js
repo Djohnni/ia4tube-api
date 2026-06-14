@@ -2732,6 +2732,149 @@ app.post("/bot/empresa/planejamento-mensal/:planningId/upload-plano", botRunnerA
   }
 });
 
+app.get("/bot/empresa/planejamento-mensal/artes/novas", botRunnerAuth, (req, res) => {
+  if (!isBotAdmin(req)) {
+    return res.status(403).json({ ok: false, error: "Acesso negado" });
+  }
+
+  try {
+    return res.json(monthlyPlanningService.listPlanningArtPending({
+      pedidosDir: PEDIDOS_DIR,
+      limit: req.query.limit
+    }));
+  } catch (error) {
+    console.error("[planejamento-mensal][artes] erro ao listar novas", {
+      message: error?.message,
+      stack: error?.stack
+    });
+    return res.status(500).json({
+      ok: false,
+      error: "Nao foi possivel listar artes do Planejamento Mensal."
+    });
+  }
+});
+
+app.get("/bot/empresa/planejamento-mensal/artes/:pedidoId/zip", botRunnerAuth, (req, res) => {
+  if (!isBotAdmin(req)) {
+    return res.status(403).json({ ok: false, error: "Acesso negado" });
+  }
+
+  try {
+    const arte = monthlyPlanningService.findPlanningArtOrder({
+      pedidosDir: PEDIDOS_DIR,
+      pedidoId: req.params.pedidoId
+    });
+
+    if (!arte) {
+      return res.status(404).json({ ok: false, error: "Arte do Planejamento Mensal nao encontrada" });
+    }
+
+    res.setHeader("Content-Type", "application/zip");
+    res.setHeader("Content-Disposition", `attachment; filename=\"${arte.pedidoId}.zip\"`);
+
+    const archive = archiver("zip", { zlib: { level: 9 } });
+    archive.on("error", (error) => {
+      throw error;
+    });
+    archive.pipe(res);
+    archive.directory(arte.base, false);
+    archive.finalize();
+  } catch (error) {
+    console.error("[planejamento-mensal][artes] erro ao gerar zip", {
+      pedidoId: req.params.pedidoId,
+      message: error?.message,
+      stack: error?.stack
+    });
+    if (!res.headersSent) {
+      return res.status(500).json({ ok: false, error: "Falha ao gerar ZIP da arte do Planejamento Mensal" });
+    }
+  }
+});
+
+app.post("/bot/empresa/planejamento-mensal/artes/:pedidoId/status", botRunnerAuth, (req, res) => {
+  if (!isBotAdmin(req)) {
+    return res.status(403).json({ ok: false, error: "Acesso negado" });
+  }
+
+  try {
+    const arte = monthlyPlanningService.updatePlanningArtStatus({
+      pedidosDir: PEDIDOS_DIR,
+      pedidoId: req.params.pedidoId,
+      status: String(req.body?.status || "").trim(),
+      message: req.body?.message || req.body?.erro || ""
+    });
+
+    return res.json({ ok: true, arte });
+  } catch (error) {
+    console.error("[planejamento-mensal][artes] erro ao atualizar status", {
+      pedidoId: req.params.pedidoId,
+      message: error?.message,
+      stack: error?.stack
+    });
+    return res.status(error?.statusCode || 500).json({
+      ok: false,
+      code: error?.code || "monthly_planning_art_status_error",
+      error: error?.message || "Falha ao atualizar status da arte do Planejamento Mensal"
+    });
+  }
+});
+
+app.post(
+  "/bot/empresa/planejamento-mensal/artes/:pedidoId/upload-resultado",
+  botRunnerAuth,
+  uploadResultado.fields([
+    { name: "resultado", maxCount: 1 },
+    { name: "preview", maxCount: 1 }
+  ]),
+  (req, res) => {
+    if (!isBotAdmin(req)) {
+      cleanupUploadedFiles(req.files);
+      return res.status(403).json({ ok: false, error: "Acesso negado" });
+    }
+
+    const resultado = req.files?.resultado?.[0];
+    const preview = req.files?.preview?.[0];
+    if (!resultado?.path) {
+      cleanupUploadedFiles(req.files);
+      return res.status(400).json({ ok: false, error: "Arquivo resultado_final.png obrigatorio" });
+    }
+
+    try {
+      let apiInfo = null;
+      if (req.body?.api_info) {
+        try {
+          apiInfo = JSON.parse(String(req.body.api_info || "{}"));
+        } catch {
+          apiInfo = null;
+        }
+      }
+
+      const arte = monthlyPlanningService.savePlanningArtResult({
+        pedidosDir: PEDIDOS_DIR,
+        pedidoId: req.params.pedidoId,
+        resultadoPath: resultado.path,
+        previewPath: preview?.path || "",
+        descricaoInstagram: req.body?.descricao_instagram || "",
+        apiInfo
+      });
+
+      return res.json({ ok: true, arte });
+    } catch (error) {
+      cleanupUploadedFiles(req.files);
+      console.error("[planejamento-mensal][artes] erro ao receber resultado", {
+        pedidoId: req.params.pedidoId,
+        message: error?.message,
+        stack: error?.stack
+      });
+      return res.status(error?.statusCode || 500).json({
+        ok: false,
+        code: error?.code || "monthly_planning_art_upload_error",
+        error: error?.message || "Falha ao salvar resultado da arte do Planejamento Mensal"
+      });
+    }
+  }
+);
+
 let monthlyPlanningNotificationsRunning = false;
 
 function monthlyPlanningNotificationPayload({ planning, post }) {
@@ -2997,6 +3140,8 @@ app.get("/bot/pedidos/novos", botRunnerAuth, (req, res) => {
         const statusPedido = readOrderStatus(base, "");
 
         if (statusPedido === "novo" || statusPedido === "ajuste_pendente") {
+          const pedido = safeReadJson(path.join(base, "pedido.json")) || {};
+          if (monthlyPlanningService.isPlanningOrder(pedido)) continue;
           pedidos.push({ id, whatsapp, mes, status: statusPedido });
         }
       }
