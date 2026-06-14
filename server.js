@@ -2261,6 +2261,26 @@ app.post(
   }
 );
 
+app.get("/empresa/carrosseis", auth, (req, res) => {
+  const whatsapp = req.user.whatsapp;
+  try {
+    const limit = Number(req.query?.limit || 50);
+    const carrosseis = carouselService.listClientRequests({
+      baseDir: CAROUSELS_DIR,
+      whatsapp,
+      limit: Number.isFinite(limit) && limit > 0 ? Math.min(limit, 100) : 50
+    });
+
+    return res.json({ ok: true, carrosseis });
+  } catch (error) {
+    return res.status(error?.statusCode || 500).json({
+      ok: false,
+      code: error?.code || "carousel_list_error",
+      error: error?.message || "Nao foi possivel listar os carrosseis."
+    });
+  }
+});
+
 app.get("/empresa/carrosseis/:carrosselId/status", auth, (req, res) => {
   const whatsapp = req.user.whatsapp;
   try {

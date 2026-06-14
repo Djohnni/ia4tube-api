@@ -331,27 +331,61 @@ function statusLabel(status) {
 function publicStatusPayload({ baseDir, whatsapp, carrosselId }) {
   const request = findRequestById({ baseDir, carrosselId });
   assertClientRequest(request, whatsapp);
+
+  return {
+    ok: true,
+    carrossel: publicCarouselSummary(request)
+  };
+}
+
+function publicCarouselSummary(request) {
+  const carrosselId = request.carrossel_id || request.id;
   const ready = READY_STATUSES.has(request.status) && fs.existsSync(request.resultado_path);
   const descricao = ready && fs.existsSync(request.descricao_path)
     ? fs.readFileSync(request.descricao_path, "utf8")
     : "";
+  const stat = fs.existsSync(request.solicitacao_path)
+    ? fs.statSync(request.solicitacao_path)
+    : null;
+  const atualizadoEm = request.atualizado_em || (stat ? stat.mtime.toISOString() : "");
 
   return {
-    ok: true,
-    carrossel: {
-      id: request.carrossel_id || request.id,
-      carrossel_id: request.carrossel_id || request.id,
-      status: request.status,
-      status_label: statusLabel(request.status),
-      ready,
-      ciclo: request.ciclo,
-      criado_em: request.criado_em || "",
-      atualizado_em: request.atualizado_em || "",
-      descricao_instagram: descricao,
-      download_url: ready ? `/empresa/carrosseis/${request.carrossel_id || request.id}/download` : "",
-      quota: request.quota || null
-    }
+    id: carrosselId,
+    carrossel_id: carrosselId,
+    tema: request.briefing?.tema || request.briefing?.briefing || "",
+    quantidade_telas: request.briefing?.quantidade_telas || request.briefing?.quantidade || "",
+    status: request.status,
+    status_label: statusLabel(request.status),
+    ready,
+    ciclo: request.ciclo,
+    criado_em: request.criado_em || "",
+    atualizado_em: atualizadoEm,
+    descricao_instagram: descricao,
+    download_url: ready ? `/empresa/carrosseis/${carrosselId}/download` : "",
+    quota: request.quota || null
   };
+}
+
+function listClientRequests({ baseDir, whatsapp, limit = 50 }) {
+  const userDir = path.join(baseDir, safeSegment(whatsapp, "sem_whatsapp"));
+  if (!fs.existsSync(userDir)) return [];
+
+  const items = [];
+  for (const cycleEntry of readDirEntries(userDir)) {
+    if (!cycleEntry.isDirectory()) continue;
+    const cycleDir = path.join(userDir, cycleEntry.name);
+    for (const carouselEntry of readDirEntries(cycleDir)) {
+      if (!carouselEntry.isDirectory()) continue;
+      const request = parseRequest(path.join(cycleDir, carouselEntry.name));
+      if (!request) continue;
+      if (String(request.whatsapp || "") !== String(whatsapp || "")) continue;
+      items.push(publicCarouselSummary(request));
+    }
+  }
+
+  return items
+    .sort((a, b) => String(b.criado_em || b.atualizado_em || "").localeCompare(String(a.criado_em || a.atualizado_em || "")))
+    .slice(0, limit);
 }
 
 function downloadForCarousel({ baseDir, whatsapp, carrosselId }) {
@@ -464,5 +498,6 @@ module.exports = {
   updateRequestStatus,
   saveUploadedResult,
   listBotPending,
+  listClientRequests,
   carouselUsagePayload
 };
