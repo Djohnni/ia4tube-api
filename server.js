@@ -36,6 +36,7 @@ const BOT_ADMIN_WHATSAPP = process.env.BOT_ADMIN_WHATSAPP || "15991120599";
 const BOT_RUNNER_TOKEN = process.env.BOT_RUNNER_TOKEN || "";
 const MP_ACCESS_TOKEN = process.env.MP_ACCESS_TOKEN || "";
 const MP_NOTIFICATION_URL = process.env.MP_NOTIFICATION_URL || "https://ia4tube-api.onrender.com/webhook/mercadopago";
+const PUBLIC_API_BASE_URL = (process.env.PUBLIC_API_BASE_URL || "https://ia4tube-api.onrender.com").replace(/\/+$/, "");
 const EMPRESA_ARTE_AVULSA_VALOR = productsRegistry.getProductPrice("arte_empresa") || 9.90;
 const MP_PROCESSANDO_RETRY_MS = 10 * 60 * 1000;
 const MONTHLY_PLANNING_NOTIFICATIONS_INTERVAL_MS = Math.max(
@@ -1306,6 +1307,13 @@ function fcmSenderForType(tipo = "") {
   }
 }
 
+function publicApiUrl(pathname = "") {
+  const cleanPath = String(pathname || "").startsWith("/")
+    ? String(pathname || "")
+    : `/${pathname || ""}`;
+  return `${PUBLIC_API_BASE_URL}${cleanPath}`;
+}
+
 app.post("/bot/notificacoes/teste", botRunnerAuth, async (req, res) => {
   if (!isBotAdmin(req)) {
     return res.status(403).json({ ok: false, error: "Acesso negado" });
@@ -1335,6 +1343,11 @@ app.post("/bot/notificacoes/teste", botRunnerAuth, async (req, res) => {
       planejamento_item_id: req.body?.planejamento_item_id,
       latest_version_code: req.body?.latest_version_code,
       latest_version_name: req.body?.latest_version_name,
+      image_url: req.body?.image_url ||
+        req.body?.imageUrl ||
+        req.body?.image ||
+        req.body?.picture ||
+        (req.body?.pedido_id ? publicApiUrl(`/pedidos/${encodeURIComponent(req.body.pedido_id)}/preview`) : ""),
       data: req.body?.data && typeof req.body.data === "object" ? req.body.data : {}
     });
 
@@ -2986,15 +2999,17 @@ app.post(
 let monthlyPlanningNotificationsRunning = false;
 
 function monthlyPlanningNotificationPayload({ planning, post }) {
+  const pedidoId = post.pedido_id || "";
   return {
     title: "Hora de postar",
     body: "Sua arte planejada para hoje esta pronta. Toque para ver e copiar a legenda.",
+    image_url: pedidoId ? publicApiUrl(`/pedidos/${encodeURIComponent(pedidoId)}/preview`) : "",
     data: {
       tipo: "planejamento_mensal",
       route: "monthly_planning_detail",
       planejamento_id: planning.planejamento_id || planning.id || "",
       planejamento_item_id: post.planejamento_item_id || "",
-      pedido_id: post.pedido_id || ""
+      pedido_id: pedidoId
     }
   };
 }

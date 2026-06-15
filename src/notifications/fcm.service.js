@@ -141,16 +141,31 @@ function normalizeData(data = {}) {
   );
 }
 
+function normalizeImageUrl(payload = {}) {
+  const value = payload.image_url ||
+    payload.imageUrl ||
+    payload.image ||
+    payload.picture ||
+    payload.preview_url ||
+    payload.previewUrl ||
+    "";
+  const imageUrl = String(value || "").trim();
+  if (!/^https?:\/\//i.test(imageUrl)) return "";
+  return imageUrl;
+}
+
 function notificationMessage(type, payload = {}) {
   const pedidoId = payload.pedido_id || payload.pedidoId || "";
   const planejamentoId = payload.planejamento_id || payload.planejamentoId || "";
   const planejamentoItemId = payload.planejamento_item_id || payload.planejamentoItemId || "";
+  const imageUrl = normalizeImageUrl(payload);
 
   const baseData = normalizeData({
     tipo: type,
     pedido_id: pedidoId,
     planejamento_id: planejamentoId,
     planejamento_item_id: planejamentoItemId,
+    image_url: imageUrl,
     ...(payload.data || {})
   });
 
@@ -159,6 +174,7 @@ function notificationMessage(type, payload = {}) {
       return {
         title: payload.title || "Sua arte esta pronta",
         body: payload.body || "Toque para ver, baixar, compartilhar ou copiar a descricao.",
+        imageUrl,
         data: {
           ...baseData,
           route: pedidoId ? "order_detail" : "orders"
@@ -168,6 +184,7 @@ function notificationMessage(type, payload = {}) {
       return {
         title: payload.title || "Pedido atualizado",
         body: payload.body || "Seu pedido teve uma atualizacao. Toque para acompanhar.",
+        imageUrl,
         data: {
           ...baseData,
           route: pedidoId ? "order_detail" : "orders",
@@ -178,6 +195,7 @@ function notificationMessage(type, payload = {}) {
       return {
         title: payload.title || "Hora de postar",
         body: payload.body || "Sua arte planejada para hoje esta pronta. Toque para ver e copiar a legenda.",
+        imageUrl,
         data: {
           ...baseData,
           route: planejamentoId ? "monthly_planning_detail" : "monthly_planning"
@@ -187,6 +205,7 @@ function notificationMessage(type, payload = {}) {
       return {
         title: payload.title || "Nova versao disponivel",
         body: payload.body || "Atualize o app para receber melhorias e correcoes.",
+        imageUrl,
         data: {
           ...baseData,
           route: "app_version",
@@ -199,6 +218,7 @@ function notificationMessage(type, payload = {}) {
       return {
         title: payload.title || "Aviso da iA4tube",
         body: payload.body || payload.message || "Voce tem uma novidade no app.",
+        imageUrl,
         data: {
           ...baseData,
           route: payload.route || "home"
@@ -207,20 +227,23 @@ function notificationMessage(type, payload = {}) {
   }
 }
 
-async function sendToToken({ serviceAccount, accessToken, token, title, body, data = {} }) {
+async function sendToToken({ serviceAccount, accessToken, token, title, body, imageUrl = "", data = {} }) {
   const url = `https://fcm.googleapis.com/v1/projects/${serviceAccount.project_id}/messages:send`;
+  const normalizedImageUrl = normalizeImageUrl({ image_url: imageUrl });
   const payload = {
     message: {
       token,
       notification: {
         title,
-        body
+        body,
+        ...(normalizedImageUrl ? { image: normalizedImageUrl } : {})
       },
       data: normalizeData(data),
       android: {
         priority: "high",
         notification: {
-          channel_id: "ia4tube_updates"
+          channel_id: "ia4tube_updates",
+          ...(normalizedImageUrl ? { image: normalizedImageUrl } : {})
         }
       }
     }
@@ -287,6 +310,7 @@ async function sendToClient(cliente, message) {
         token,
         title: message.title,
         body: message.body,
+        imageUrl: message.imageUrl || message.image_url || "",
         data: message.data || {}
       });
       sent += 1;
