@@ -15,3 +15,8 @@ nichos/**/materiais_graficos/catalogo.json
 
 .env
 *.jks
+bot_token.txt
+openai_key.txt
+*firebase-adminsdk*.json
+*service-account*.json
+firebase-admin*.json
