@@ -135,6 +135,78 @@ function activeFcmTokens(cliente = {}) {
     .filter(Boolean);
 }
 
+function normalizeData(data = {}) {
+  return Object.fromEntries(
+    Object.entries(data || {}).map(([key, value]) => [key, String(value ?? "")])
+  );
+}
+
+function notificationMessage(type, payload = {}) {
+  const pedidoId = payload.pedido_id || payload.pedidoId || "";
+  const planejamentoId = payload.planejamento_id || payload.planejamentoId || "";
+  const planejamentoItemId = payload.planejamento_item_id || payload.planejamentoItemId || "";
+
+  const baseData = normalizeData({
+    tipo: type,
+    pedido_id: pedidoId,
+    planejamento_id: planejamentoId,
+    planejamento_item_id: planejamentoItemId,
+    ...(payload.data || {})
+  });
+
+  switch (type) {
+    case "arte_pronta":
+      return {
+        title: payload.title || "Sua arte esta pronta",
+        body: payload.body || "Toque para ver, baixar, compartilhar ou copiar a descricao.",
+        data: {
+          ...baseData,
+          route: pedidoId ? "order_detail" : "orders"
+        }
+      };
+    case "pedido_atualizado":
+      return {
+        title: payload.title || "Pedido atualizado",
+        body: payload.body || "Seu pedido teve uma atualizacao. Toque para acompanhar.",
+        data: {
+          ...baseData,
+          route: pedidoId ? "order_detail" : "orders",
+          status: payload.status || ""
+        }
+      };
+    case "planejamento_mensal":
+      return {
+        title: payload.title || "Hora de postar",
+        body: payload.body || "Sua arte planejada para hoje esta pronta. Toque para ver e copiar a legenda.",
+        data: {
+          ...baseData,
+          route: planejamentoId ? "monthly_planning_detail" : "monthly_planning"
+        }
+      };
+    case "nova_versao":
+      return {
+        title: payload.title || "Nova versao disponivel",
+        body: payload.body || "Atualize o app para receber melhorias e correcoes.",
+        data: {
+          ...baseData,
+          route: "app_version",
+          latest_version_code: payload.latest_version_code || payload.latestVersionCode || "",
+          latest_version_name: payload.latest_version_name || payload.latestVersionName || ""
+        }
+      };
+    case "aviso_geral":
+    default:
+      return {
+        title: payload.title || "Aviso da iA4tube",
+        body: payload.body || payload.message || "Voce tem uma novidade no app.",
+        data: {
+          ...baseData,
+          route: payload.route || "home"
+        }
+      };
+  }
+}
+
 async function sendToToken({ serviceAccount, accessToken, token, title, body, data = {} }) {
   const url = `https://fcm.googleapis.com/v1/projects/${serviceAccount.project_id}/messages:send`;
   const payload = {
@@ -144,9 +216,13 @@ async function sendToToken({ serviceAccount, accessToken, token, title, body, da
         title,
         body
       },
-      data: Object.fromEntries(
-        Object.entries(data).map(([key, value]) => [key, String(value ?? "")])
-      )
+      data: normalizeData(data),
+      android: {
+        priority: "high",
+        notification: {
+          channel_id: "ia4tube_updates"
+        }
+      }
     }
   };
 
@@ -231,8 +307,34 @@ async function sendToClient(cliente, message) {
   };
 }
 
+function sendArtePronta(cliente, payload = {}) {
+  return sendToClient(cliente, notificationMessage("arte_pronta", payload));
+}
+
+function sendPedidoAtualizado(cliente, payload = {}) {
+  return sendToClient(cliente, notificationMessage("pedido_atualizado", payload));
+}
+
+function sendPlanejamentoMensal(cliente, payload = {}) {
+  return sendToClient(cliente, notificationMessage("planejamento_mensal", payload));
+}
+
+function sendNovaVersao(cliente, payload = {}) {
+  return sendToClient(cliente, notificationMessage("nova_versao", payload));
+}
+
+function sendAvisoGeral(cliente, payload = {}) {
+  return sendToClient(cliente, notificationMessage("aviso_geral", payload));
+}
+
 module.exports = {
   activeFcmTokens,
   isFirebaseConfigured,
+  notificationMessage,
+  sendArtePronta,
+  sendPedidoAtualizado,
+  sendPlanejamentoMensal,
+  sendNovaVersao,
+  sendAvisoGeral,
   sendToClient
 };

@@ -761,6 +761,37 @@ app.get("/", (req, res) => {
   res.json({ ok: true, msg: "omascote-api online" });
 });
 
+function envInt(name, fallback) {
+  const value = Number(process.env[name]);
+  return Number.isFinite(value) ? value : fallback;
+}
+
+function envBool(name, fallback = false) {
+  const value = String(process.env[name] || "").trim().toLowerCase();
+  if (["1", "true", "yes", "sim", "on"].includes(value)) return true;
+  if (["0", "false", "no", "nao", "não", "off"].includes(value)) return false;
+  return fallback;
+}
+
+app.get("/app/version", (req, res) => {
+  const latestVersionCode = envInt("IA4TUBE_ANDROID_LATEST_VERSION_CODE", 5);
+  const minimumVersionCode = envInt("IA4TUBE_ANDROID_MINIMUM_VERSION_CODE", 1);
+  const latestVersionName = process.env.IA4TUBE_ANDROID_LATEST_VERSION_NAME || "0.1.0";
+
+  return res.json({
+    ok: true,
+    latest_version_code: latestVersionCode,
+    minimum_version_code: minimumVersionCode,
+    latest_version_name: latestVersionName,
+    update_required: envBool("IA4TUBE_ANDROID_UPDATE_REQUIRED", false),
+    title: process.env.IA4TUBE_ANDROID_UPDATE_TITLE || "Nova versão disponível",
+    message: process.env.IA4TUBE_ANDROID_UPDATE_MESSAGE ||
+      "Atualize o app para receber melhorias, correções e uma experiência mais estável.",
+    play_store_url: process.env.IA4TUBE_ANDROID_PLAY_STORE_URL ||
+      "https://play.google.com/store/apps/details?id=com.ia4tube.app"
+  });
+});
+
 app.get("/tempo-estimado", (req, res) => {
   return res.json({
     ok: true,
@@ -1257,6 +1288,63 @@ app.post("/me/fcm-token", auth, (req, res) => {
     salvo: true,
     tokens_ativos: existingTokens.filter(item => item.ativo !== false).length
   });
+});
+
+function fcmSenderForType(tipo = "") {
+  switch (String(tipo || "").trim().toLowerCase()) {
+    case "arte_pronta":
+      return fcmService.sendArtePronta;
+    case "pedido_atualizado":
+      return fcmService.sendPedidoAtualizado;
+    case "planejamento_mensal":
+      return fcmService.sendPlanejamentoMensal;
+    case "nova_versao":
+      return fcmService.sendNovaVersao;
+    case "aviso_geral":
+    default:
+      return fcmService.sendAvisoGeral;
+  }
+}
+
+app.post("/bot/notificacoes/teste", botRunnerAuth, async (req, res) => {
+  if (!isBotAdmin(req)) {
+    return res.status(403).json({ ok: false, error: "Acesso negado" });
+  }
+
+  const whatsapp = String(req.body?.whatsapp || "").trim();
+  const tipo = String(req.body?.tipo || "aviso_geral").trim() || "aviso_geral";
+
+  if (!whatsapp) {
+    return res.status(400).json({ ok: false, error: "WhatsApp obrigatorio" });
+  }
+
+  const clientes = readClientes();
+  const cliente = clientes[whatsapp];
+
+  if (!cliente) {
+    return res.status(404).json({ ok: false, error: "Cliente nao encontrado" });
+  }
+
+  try {
+    const sender = fcmSenderForType(tipo);
+    const result = await sender(cliente, {
+      title: req.body?.title,
+      body: req.body?.body || req.body?.message,
+      pedido_id: req.body?.pedido_id,
+      planejamento_id: req.body?.planejamento_id,
+      planejamento_item_id: req.body?.planejamento_item_id,
+      latest_version_code: req.body?.latest_version_code,
+      latest_version_name: req.body?.latest_version_name,
+      data: req.body?.data && typeof req.body.data === "object" ? req.body.data : {}
+    });
+
+    return res.json({ ok: result?.ok === true, result });
+  } catch (error) {
+    return res.status(500).json({
+      ok: false,
+      error: error?.message || "Falha ao enviar notificacao de teste"
+    });
+  }
 });
 
 // ===== MERCADO PAGO =====
