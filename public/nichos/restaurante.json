@@ -1,0 +1,134 @@
+{
+  "nome_nicho": "Restaurante",
+  "slug": "restaurante",
+  "titulo_seo": "Arte para Restaurante: Posts Profissionais em Poucos Minutos | iA4Tube",
+  "descricao_seo": "Crie arte para restaurante em poucos minutos com a iA4Tube. Gere posts profissionais para pratos, cardapio, delivery, combos, almoco, jantar e promocoes.",
+  "h1": "Crie Artes Profissionais para seu Restaurante em Poucos Minutos",
+  "subtitulo": "A iA4Tube cria posts profissionais para restaurante usando a Inteligencia Artificial da iA4Tube. Voce informa o prato, combo ou promocao e recebe a arte com descricao pronta para postar.",
+  "chamada_superior": "Artes prontas para divulgar seu restaurante",
+  "nota_cta": "Informe o prato, combo ou promocao. A iA4Tube monta a arte e a descricao.",
+  "service_type": "Criacao de artes para restaurante com a Inteligencia Artificial da iA4Tube",
+  "secoes": {
+    "dores_titulo": "Por que seu restaurante precisa divulgar melhor",
+    "dores_intro": "Restaurante vende pelo apetite do momento. Um post bonito ajuda o cliente a escolher almoco, jantar, delivery ou combo.",
+    "cria_titulo": "O que a iA4Tube cria para restaurantes",
+    "cria_intro": "Voce informa o prato, promocao, cardapio ou foto. A iA4Tube monta a arte e a descricao para publicar.",
+    "exemplos_titulo": "Exemplos de artes para restaurante",
+    "como_funciona_titulo": "Como funciona",
+    "beneficios_titulo": "Beneficios"
+  },
+  "dores_cliente": [
+    {
+      "titulo": "Cliente decide pela fome",
+      "texto": "Um prato bem divulgado no horario certo pode virar pedido na hora."
+    },
+    {
+      "titulo": "Cardapio precisa aparecer",
+      "texto": "Prato do dia, combo e delivery precisam ser lembrados antes do almoco ou jantar."
+    },
+    {
+      "titulo": "Concorrencia e forte no delivery",
+      "texto": "Posts claros ajudam o restaurante a se destacar no WhatsApp e Instagram."
+    }
+  ],
+  "exemplos_objetivos": [
+    "Prato do dia no almoco",
+    "Combo para duas pessoas",
+    "Delivery de jantar",
+    "Marmita executiva",
+    "Sobremesa da casa",
+    "Happy hour",
+    "Promocao de quinta-feira",
+    "Reserva para fim de semana"
+  ],
+  "exemplos_artes": [
+    {
+      "titulo": "Prato do dia",
+      "texto": "Arte para almoco, jantar, marmita ou sugestao do chef."
+    },
+    {
+      "titulo": "Delivery",
+      "texto": "Post com chamada para pedir pelo WhatsApp ou aplicativo."
+    },
+    {
+      "titulo": "Fim de semana",
+      "texto": "Divulgacao de reservas, combos, sobremesas e pratos especiais."
+    }
+  ],
+  "como_funciona": [
+    {
+      "titulo": "Informe o prato",
+      "texto": "Digite prato, combo, preco ou promocao."
+    },
+    {
+      "titulo": "Adicione foto ou logo",
+      "texto": "Envie foto do prato ou logo, se quiser."
+    },
+    {
+      "titulo": "A iA4Tube cria a arte",
+      "texto": "A iA4Tube cria a arte em poucos minutos."
+    },
+    {
+      "titulo": "Publique no celular",
+      "texto": "Baixe a imagem e copie a descricao."
+    }
+  ],
+  "beneficios": [
+    "Arte pronta em poucos minutos.",
+    "Descricao pronta para postar.",
+    "Ajuda a divulgar pratos e delivery.",
+    "Funciona direto pelo celular.",
+    "Inclui ideias de posts alinhadas ao ramo.",
+    "Ajuda a criar campanhas sazonais com linguagem simples."
+  ],
+  "ctas": {
+    "principal": "Criar Arte para Meu Restaurante",
+    "url": "/app.html?ramo=Restaurante",
+    "meio_titulo": "Quer divulgar o prato do dia?",
+    "meio_texto": "Crie uma arte profissional em poucos minutos com a iA4Tube.",
+    "final_titulo": "Pronto para divulgar seu restaurante?",
+    "final_texto": "Crie uma arte profissional para atrair pedidos em poucos minutos com a iA4Tube."
+  },
+  "palavras_chave": [
+    "arte para restaurante",
+    "post para restaurante",
+    "divulgacao de restaurante",
+    "marketing para restaurante",
+    "criar arte para restaurante",
+    "inteligencia artificial para restaurante"
+  ],
+  "ideias_posts": [
+    "Prato do dia",
+    "Combo para duas pessoas",
+    "Delivery no jantar",
+    "Sobremesa da casa",
+    "Reserva para fim de semana"
+  ],
+  "campanhas_sazonais": [
+    "Dia dos Namorados com jantar especial",
+    "Dia das Maes com reserva",
+    "Festas de fim de ano",
+    "Feriado com delivery",
+    "Semana do cliente com combo"
+  ],
+  "exemplos_dia_a_dia": [
+    "Hoje tem parmegiana no almoco",
+    "Pe?a seu jantar pelo WhatsApp",
+    "Sobremesa especial da casa",
+    "Reserve sua mesa para o sabado"
+  ],
+  "faq": [
+    {
+      "pergunta": "A iA4Tube cria arte para prato do dia?",
+      "resposta": "Sim. Voce informa o prato, valor ou chamada e recebe arte pronta para postar."
+    },
+    {
+      "pergunta": "Serve para delivery?",
+      "resposta": "Sim. A arte pode ter foco em pedidos pelo WhatsApp, retirada ou entrega."
+    },
+    {
+      "pergunta": "Posso divulgar eventos e reservas?",
+      "resposta": "Sim. Funciona para datas especiais, jantar, almoco e reservas."
+    }
+  ]
+}

@@ -1,0 +1,98 @@
+{
+  "nome_nicho": "Nome do Nicho",
+  "slug": "slug-do-nicho",
+  "titulo_seo": "Arte para Nome do Nicho: Posts Profissionais em Poucos Minutos | iA4Tube",
+  "descricao_seo": "Crie arte para nome do nicho em poucos minutos com a iA4Tube. Gere posts profissionais para produtos, servicos, ofertas, campanhas e divulgacao local.",
+  "h1": "Crie Artes Profissionais para Nome do Nicho em Poucos Minutos",
+  "subtitulo": "A iA4Tube cria posts profissionais para nome do nicho usando a Inteligencia Artificial da iA4Tube. Voce informa o que quer divulgar e recebe a arte com descricao pronta para postar.",
+  "chamada_superior": "Artes prontas para divulgar nome do nicho",
+  "nota_cta": "Informe o produto, servico ou promocao. A iA4Tube monta a arte e a descricao.",
+  "service_type": "Criacao de artes para nome do nicho com a Inteligencia Artificial da iA4Tube",
+  "secoes": {
+    "dores_titulo": "Por que nome do nicho precisa divulgar melhor",
+    "dores_intro": "Texto curto explicando o problema real do cliente desse nicho e por que divulgar com frequencia ajuda a vender mais.",
+    "cria_titulo": "O que a iA4Tube cria para nome do nicho",
+    "cria_intro": "Texto curto explicando que o cliente informa produto, servico, promocao ou foto, e a iA4Tube cria a arte e a descricao para publicar.",
+    "exemplos_titulo": "Exemplos de artes para nome do nicho",
+    "como_funciona_titulo": "Como funciona",
+    "beneficios_titulo": "Beneficios"
+  },
+  "dores_cliente": [
+    {
+      "titulo": "Problema principal do nicho",
+      "texto": "Explique em uma frase curta uma dificuldade comum do cliente."
+    },
+    {
+      "titulo": "Oportunidade de venda",
+      "texto": "Explique como uma boa divulgacao ajuda a vender melhor."
+    },
+    {
+      "titulo": "Mais profissionalismo",
+      "texto": "Explique como posts bem feitos passam mais confianca."
+    }
+  ],
+  "exemplos_objetivos": [
+    "Promocao do dia",
+    "Produto em destaque",
+    "Servico principal",
+    "Delivery ou atendimento",
+    "Combo promocional",
+    "Novidade",
+    "Data comemorativa",
+    "Chamada para WhatsApp"
+  ],
+  "exemplos_artes": [
+    {
+      "titulo": "Oferta do dia",
+      "texto": "Explique um tipo de arte comum para esse nicho."
+    },
+    {
+      "titulo": "Produto ou servico",
+      "texto": "Explique como divulgar um produto ou servico importante."
+    },
+    {
+      "titulo": "Campanhas e datas",
+      "texto": "Explique como usar a pagina para datas comemorativas e campanhas locais."
+    }
+  ],
+  "como_funciona": [
+    {
+      "titulo": "Informe o que quer divulgar",
+      "texto": "Digite o produto, servico, promocao ou ideia da arte."
+    },
+    {
+      "titulo": "Adicione foto ou logo",
+      "texto": "Envie uma imagem se quiser deixar a arte mais personalizada."
+    },
+    {
+      "titulo": "A iA4Tube cria a arte",
+      "texto": "A iA4Tube cria a arte em poucos minutos."
+    },
+    {
+      "titulo": "Publique no celular",
+      "texto": "Baixe a imagem e copie a descricao."
+    }
+  ],
+  "beneficios": [
+    "Arte pronta em poucos minutos.",
+    "Descricao pronta para postar.",
+    "Funciona direto pelo celular.",
+    "Ajuda a divulgar produtos, servicos, ofertas e campanhas."
+  ],
+  "ctas": {
+    "principal": "Criar Arte para Meu Negocio",
+    "url": "/app.html",
+    "meio_titulo": "Quer divulgar uma oferta hoje?",
+    "meio_texto": "Crie uma arte profissional em poucos minutos com a iA4Tube.",
+    "final_titulo": "Pronto para melhorar sua divulgacao?",
+    "final_texto": "Crie uma arte profissional para divulgar seu negocio em poucos minutos com a iA4Tube."
+  },
+  "palavras_chave": [
+    "arte para nome do nicho",
+    "post para nome do nicho",
+    "divulgacao de nome do nicho",
+    "marketing para nome do nicho",
+    "criar arte para nome do nicho",
+    "inteligencia artificial para nome do nicho"
+  ]
+}

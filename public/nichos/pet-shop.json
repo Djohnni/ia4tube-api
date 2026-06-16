@@ -1,0 +1,134 @@
+{
+  "nome_nicho": "Pet Shop",
+  "slug": "pet-shop",
+  "titulo_seo": "Arte para Pet Shop: Posts Profissionais em Poucos Minutos | iA4Tube",
+  "descricao_seo": "Crie arte para pet shop em poucos minutos com a iA4Tube. Gere posts profissionais para banho e tosa, racao, acessorios, vacinas, promocoes e agendamentos.",
+  "h1": "Crie Artes Profissionais para seu Pet Shop em Poucos Minutos",
+  "subtitulo": "A iA4Tube cria posts profissionais para pet shop usando a Inteligencia Artificial da iA4Tube. Voce informa o servico ou promocao e recebe a arte com descricao pronta para postar.",
+  "chamada_superior": "Artes prontas para divulgar seu pet shop",
+  "nota_cta": "Informe o servico, produto ou promocao. A iA4Tube monta a arte e a descricao.",
+  "service_type": "Criacao de artes para pet shop com a Inteligencia Artificial da iA4Tube",
+  "secoes": {
+    "dores_titulo": "Por que seu pet shop precisa divulgar melhor",
+    "dores_intro": "Pet shop vende cuidado e confianca. Posts bonitos ajudam a lembrar o cliente de banho, tosa, racao, vacinas e promocoes.",
+    "cria_titulo": "O que a iA4Tube cria para pet shops",
+    "cria_intro": "Voce informa o servico, produto, promocao ou foto. A iA4Tube monta a arte e a descricao para publicar.",
+    "exemplos_titulo": "Exemplos de artes para pet shop",
+    "como_funciona_titulo": "Como funciona",
+    "beneficios_titulo": "Beneficios"
+  },
+  "dores_cliente": [
+    {
+      "titulo": "Tutor precisa confiar",
+      "texto": "Banho, tosa e cuidados com pet exigem uma imagem de carinho e seguranca."
+    },
+    {
+      "titulo": "Agenda precisa aparecer",
+      "texto": "Posts ajudam a lembrar o tutor de marcar banho, tosa e vacinas."
+    },
+    {
+      "titulo": "Produtos vendem por necessidade",
+      "texto": "Racao, antipulgas e acessorios precisam ser divulgados com clareza."
+    }
+  ],
+  "exemplos_objetivos": [
+    "Banho e tosa da semana",
+    "Tosa higienica",
+    "Pacote mensal pet",
+    "Racao em oferta",
+    "Antipulgas e vermifugo",
+    "Vacinas e cuidados",
+    "Acessorios para passeio",
+    "Agendamento pelo WhatsApp"
+  ],
+  "exemplos_artes": [
+    {
+      "titulo": "Agenda de banho e tosa",
+      "texto": "Arte para horarios disponiveis, pacotes e chamada para agendar."
+    },
+    {
+      "titulo": "Oferta de racao",
+      "texto": "Post para racoes, petiscos, brinquedos e produtos de cuidado."
+    },
+    {
+      "titulo": "Cuidados com o pet",
+      "texto": "Conteudo educativo para banho, pelos, vacinas e bem-estar."
+    }
+  ],
+  "como_funciona": [
+    {
+      "titulo": "Informe o servico",
+      "texto": "Digite o servico, produto ou promocao."
+    },
+    {
+      "titulo": "Adicione foto ou logo",
+      "texto": "Envie foto de pet, produto ou logo, se quiser."
+    },
+    {
+      "titulo": "A iA4Tube cria a arte",
+      "texto": "A iA4Tube cria a arte em poucos minutos."
+    },
+    {
+      "titulo": "Publique no celular",
+      "texto": "Baixe a imagem e copie a descricao."
+    }
+  ],
+  "beneficios": [
+    "Arte pronta em poucos minutos.",
+    "Descricao pronta para postar.",
+    "Ajuda a divulgar servicos e produtos pet.",
+    "Funciona direto pelo celular.",
+    "Inclui ideias de posts alinhadas ao ramo.",
+    "Ajuda a criar campanhas sazonais com linguagem simples."
+  ],
+  "ctas": {
+    "principal": "Criar Arte para Meu Pet Shop",
+    "url": "/app.html?ramo=Pet%20Shop",
+    "meio_titulo": "Quer divulgar banho e tosa hoje?",
+    "meio_texto": "Crie uma arte profissional em poucos minutos com a iA4Tube.",
+    "final_titulo": "Pronto para divulgar seu pet shop?",
+    "final_texto": "Crie uma arte profissional para atrair clientes em poucos minutos com a iA4Tube."
+  },
+  "palavras_chave": [
+    "arte para pet shop",
+    "post para pet shop",
+    "divulgacao de pet shop",
+    "marketing para pet shop",
+    "criar arte para pet shop",
+    "inteligencia artificial para pet shop"
+  ],
+  "ideias_posts": [
+    "Agenda de banho e tosa",
+    "Pacote mensal para pet",
+    "Racao em promocao",
+    "Tosa higienica",
+    "Cuidados com antipulgas"
+  ],
+  "campanhas_sazonais": [
+    "Verao com cuidados contra calor",
+    "Inverno com banho especial",
+    "Natal pet com acessorios",
+    "Mes dos pets com promocoes",
+    "Campanha de vacinacao"
+  ],
+  "exemplos_dia_a_dia": [
+    "Tem horario para banho hoje",
+    "Seu pet cheiroso para o fim de semana",
+    "Racao com oferta especial",
+    "Agende a tosa pelo WhatsApp"
+  ],
+  "faq": [
+    {
+      "pergunta": "A iA4Tube cria arte para banho e tosa?",
+      "resposta": "Sim. A arte pode divulgar horarios, pacotes, valores e chamada para agendamento."
+    },
+    {
+      "pergunta": "Da para divulgar produtos pet?",
+      "resposta": "Sim. Racao, petiscos, brinquedos, coleiras e acessorios podem virar posts profissionais."
+    },
+    {
+      "pergunta": "Posso usar foto de pets reais?",
+      "resposta": "Sim. Fotos reais ajudam a mostrar carinho, cuidado e confianca."
+    }
+  ]
+}

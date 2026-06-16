@@ -1,0 +1,132 @@
+{
+  "nome_nicho": "Hotel",
+  "slug": "hotel",
+  "titulo_seo": "Arte para Hotel: Posts Profissionais em Poucos Minutos | iA4Tube",
+  "descricao_seo": "Crie arte para hotel em poucos minutos com a iA4Tube. Gere posts profissionais para hospedagem, reservas, quartos e promocoes.",
+  "h1": "Crie Artes Profissionais para Hotel em Poucos Minutos",
+  "subtitulo": "A iA4Tube cria posts profissionais para hotel usando a Inteligencia Artificial da iA4Tube. Voce informa hospedagem, reservas, quartos e promocoes e recebe a arte com descricao pronta para postar.",
+  "chamada_superior": "Artes prontas para divulgar hotel",
+  "nota_cta": "Informe hospedagem, reservas, quartos e promocoes. A iA4Tube monta a arte e a descricao.",
+  "service_type": "Criacao de artes para hotel com a Inteligencia Artificial da iA4Tube",
+  "secoes": {
+    "dores_titulo": "Por que hotel precisa divulgar melhor",
+    "dores_intro": "Hotel precisa aparecer na hora certa. Posts claros ajudam a mostrar conforto, reservas e experiencias e chamar o cliente para agir.",
+    "cria_titulo": "O que a iA4Tube cria para Hotel",
+    "cria_intro": "Voce informa o que quer divulgar. A iA4Tube monta a arte e a descricao para publicar no Instagram, WhatsApp ou outras redes.",
+    "exemplos_titulo": "Exemplos de artes para Hotel",
+    "como_funciona_titulo": "Como funciona",
+    "beneficios_titulo": "Beneficios"
+  },
+  "dores_cliente": [
+    {
+      "titulo": "Mais visibilidade",
+      "texto": "Sua empresa aparece mais quando o cliente procura conforto, reservas e experiencias."
+    },
+    {
+      "titulo": "Mais clareza",
+      "texto": "Servicos, produtos e promocoes ficam faceis de entender."
+    },
+    {
+      "titulo": "Mais confianca",
+      "texto": "Posts com visual profissional ajudam a valorizar seu atendimento."
+    }
+  ],
+  "exemplos_objetivos": [
+    "Reserva de hospedagem",
+    "Promocao do dia",
+    "Produto ou servico em destaque",
+    "Agenda da semana",
+    "Chamada para WhatsApp",
+    "Data comemorativa",
+    "Novidade",
+    "Combo ou pacote"
+  ],
+  "exemplos_artes": [
+    {
+      "titulo": "Destaque do dia",
+      "texto": "Divulgue hospedagem, reservas, quartos e promocoes com uma arte simples e profissional."
+    },
+    {
+      "titulo": "Promocao",
+      "texto": "Crie posts para ofertas, combos, pacotes ou chamadas de atendimento."
+    },
+    {
+      "titulo": "Relacionamento",
+      "texto": "Publique avisos, novidades e datas importantes para manter contato com clientes."
+    }
+  ],
+  "como_funciona": [
+    {
+      "titulo": "Informe o que quer divulgar",
+      "texto": "Digite produto, servico, promocao ou ideia da arte."
+    },
+    {
+      "titulo": "Adicione foto ou logo",
+      "texto": "Envie uma imagem se quiser deixar a arte mais personalizada."
+    },
+    {
+      "titulo": "A iA4Tube cria a arte",
+      "texto": "A iA4Tube cria a arte em poucos minutos."
+    },
+    {
+      "titulo": "Publique no celular",
+      "texto": "Baixe a imagem e copie a descricao."
+    }
+  ],
+  "beneficios": [
+    "Arte pronta em poucos minutos.",
+    "Descricao pronta para postar.",
+    "Funciona direto pelo celular.",
+    "Ajuda a divulgar conforto, reservas e experiencias."
+  ],
+  "ctas": {
+    "principal": "Criar Arte para Meu Hotel",
+    "url": "/app.html?ramo=Hotel",
+    "meio_titulo": "Quer divulgar reserva de hospedagem hoje?",
+    "meio_texto": "Crie uma arte profissional em poucos minutos com a iA4Tube.",
+    "final_titulo": "Pronto para divulgar hotel?",
+    "final_texto": "Crie uma arte profissional para atrair mais clientes em poucos minutos com a iA4Tube."
+  },
+  "palavras_chave": [
+    "arte para hotel",
+    "post para hotel",
+    "divulgacao de hotel",
+    "marketing para hotel",
+    "criar arte para hotel",
+    "inteligencia artificial para hotel"
+  ],
+  "faq": [
+    {
+      "pergunta": "A iA4Tube cria arte para divulgar reservas de quartos em Hotel?",
+      "resposta": "Sim. Voce informa reservas de quartos, envia foto se quiser, e a iA4Tube monta a arte com descricao pronta para postar."
+    },
+    {
+      "pergunta": "Posso usar fotos reais de cafe da manha?",
+      "resposta": "Sim. Fotos reais ajudam a arte a ficar mais fiel ao atendimento, produto, servico ou ambiente de Hotel."
+    },
+    {
+      "pergunta": "A pagina serve para WhatsApp, Instagram e campanhas locais?",
+      "resposta": "Sim. A iA4Tube cria posts para divulgar pacotes de fim de semana, hospedagem para eventos, novidades, datas especiais e chamadas para atendimento pelo celular."
+    }
+  ],
+  "ideias_posts": [
+    "Mostrar reservas de quartos com foto real e chamada clara para o cliente",
+    "Divulgar cafe da manha explicando disponibilidade, horario ou beneficio",
+    "Criar post sobre pacotes de fim de semana para quem procura pelo celular",
+    "Anunciar hospedagem para eventos com convite para chamar no WhatsApp",
+    "Reforcar um diferencial de Hotel usando situacao real do dia a dia"
+  ],
+  "campanhas_sazonais": [
+    "Ferias escolares com reservas de quartos",
+    "Feriados prolongados com cafe da manha",
+    "Alta temporada com reservas antecipadas",
+    "Fim de semana com roteiro local",
+    "Promocao de baixa temporada para novos clientes"
+  ],
+  "exemplos_dia_a_dia": [
+    "Hoje temos reservas de quartos em destaque para clientes da regiao",
+    "Post rapido mostrando cafe da manha com informacao simples e direta",
+    "Chamada de WhatsApp para quem precisa de pacotes de fim de semana",
+    "Aviso de novidade, horario ou disponibilidade sobre hospedagem para eventos"
+  ]
+}

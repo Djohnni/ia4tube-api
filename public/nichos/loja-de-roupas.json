@@ -1,0 +1,134 @@
+{
+  "nome_nicho": "Loja de Roupas",
+  "slug": "loja-de-roupas",
+  "titulo_seo": "Arte para Loja de Roupas: Posts Profissionais em Poucos Minutos | iA4Tube",
+  "descricao_seo": "Crie arte para loja de roupas em poucos minutos com a iA4Tube. Gere posts profissionais para looks, promocoes, lancamentos, colecoes e vendas pelo WhatsApp.",
+  "h1": "Crie Artes Profissionais para sua Loja de Roupas em Poucos Minutos",
+  "subtitulo": "A iA4Tube cria posts profissionais para loja de roupas usando a Inteligencia Artificial da iA4Tube. Voce informa o produto, look ou promocao e recebe a arte com descricao pronta para postar.",
+  "chamada_superior": "Artes prontas para divulgar sua loja de roupas",
+  "nota_cta": "Informe o produto, look ou promocao. A iA4Tube monta a arte e a descricao.",
+  "service_type": "Criacao de artes para loja de roupas com a Inteligencia Artificial da iA4Tube",
+  "secoes": {
+    "dores_titulo": "Por que sua loja de roupas precisa divulgar melhor",
+    "dores_intro": "Moda vende pelo visual. Posts bonitos ajudam a mostrar looks, promocoes, novidades e chamadas para comprar pelo WhatsApp.",
+    "cria_titulo": "O que a iA4Tube cria para lojas de roupas",
+    "cria_intro": "Voce informa a peca, colecao, promocao ou foto. A iA4Tube monta a arte e a descricao para publicar.",
+    "exemplos_titulo": "Exemplos de artes para loja de roupas",
+    "como_funciona_titulo": "Como funciona",
+    "beneficios_titulo": "Beneficios"
+  },
+  "dores_cliente": [
+    {
+      "titulo": "Roupa vende pelo visual",
+      "texto": "Look bonito precisa aparecer com clareza para gerar desejo."
+    },
+    {
+      "titulo": "Novidade passa rapido",
+      "texto": "Pecas novas, reposicoes e promocoes precisam ser divulgadas antes de acabar."
+    },
+    {
+      "titulo": "Cliente quer facilidade",
+      "texto": "Post com chamada para WhatsApp ajuda a vender sem depender so da loja fisica."
+    }
+  ],
+  "exemplos_objetivos": [
+    "Look do dia",
+    "Vestido em promocao",
+    "Nova colecao",
+    "Queima de estoque",
+    "Moda masculina casual",
+    "Moda feminina festa",
+    "Acessorios para combinar",
+    "Atendimento pelo WhatsApp"
+  ],
+  "exemplos_artes": [
+    {
+      "titulo": "Look completo",
+      "texto": "Arte para combinar peca principal, acessorio e chamada de compra."
+    },
+    {
+      "titulo": "Promocao relampago",
+      "texto": "Post para desconto, queima de estoque ou ultimas unidades."
+    },
+    {
+      "titulo": "Lancamento",
+      "texto": "Divulgacao de nova colecao, chegada de pecas e vitrine da semana."
+    }
+  ],
+  "como_funciona": [
+    {
+      "titulo": "Informe a peca",
+      "texto": "Digite produto, look, preco ou promocao."
+    },
+    {
+      "titulo": "Adicione foto ou logo",
+      "texto": "Envie foto da peca ou logo, se quiser."
+    },
+    {
+      "titulo": "A iA4Tube cria a arte",
+      "texto": "A iA4Tube cria a arte em poucos minutos."
+    },
+    {
+      "titulo": "Publique no celular",
+      "texto": "Baixe a imagem e copie a descricao."
+    }
+  ],
+  "beneficios": [
+    "Arte pronta em poucos minutos.",
+    "Descricao pronta para postar.",
+    "Ajuda a divulgar looks e promocoes.",
+    "Funciona direto pelo celular.",
+    "Inclui ideias de posts alinhadas ao ramo.",
+    "Ajuda a criar campanhas sazonais com linguagem simples."
+  ],
+  "ctas": {
+    "principal": "Criar Arte para Minha Loja",
+    "url": "/app.html?ramo=Loja%20de%20Roupas",
+    "meio_titulo": "Quer divulgar uma peca hoje?",
+    "meio_texto": "Crie uma arte profissional em poucos minutos com a iA4Tube.",
+    "final_titulo": "Pronto para divulgar sua loja?",
+    "final_texto": "Crie uma arte profissional para vender mais em poucos minutos com a iA4Tube."
+  },
+  "palavras_chave": [
+    "arte para loja de roupas",
+    "post para loja de roupas",
+    "divulgacao de loja de roupas",
+    "marketing para loja de roupas",
+    "criar arte para loja de roupas",
+    "inteligencia artificial para loja de roupas"
+  ],
+  "ideias_posts": [
+    "Look do dia",
+    "Nova colecao",
+    "Ultimas unidades",
+    "Queima de estoque",
+    "Atendimento pelo WhatsApp"
+  ],
+  "campanhas_sazonais": [
+    "Dia das Maes com looks",
+    "Dia dos Namorados",
+    "Black Friday",
+    "Natal e Ano Novo",
+    "Troca de colecao"
+  ],
+  "exemplos_dia_a_dia": [
+    "Vestido novo na loja",
+    "Look completo para o fim de semana",
+    "Ultimas pecas com desconto",
+    "Chame no WhatsApp para reservar"
+  ],
+  "faq": [
+    {
+      "pergunta": "A iA4Tube cria posts para looks?",
+      "resposta": "Sim. Voce informa a peca ou colecao e recebe arte com descricao pronta."
+    },
+    {
+      "pergunta": "Posso divulgar preco e promocao?",
+      "resposta": "Sim. Ofertas, descontos e ultimas unidades podem entrar no post."
+    },
+    {
+      "pergunta": "Serve para venda pelo WhatsApp?",
+      "resposta": "Sim. A chamada pode direcionar o cliente para atendimento e reserva."
+    }
+  ]
+}

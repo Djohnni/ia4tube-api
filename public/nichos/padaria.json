@@ -1,0 +1,134 @@
+{
+  "nome_nicho": "Padaria",
+  "slug": "padaria",
+  "titulo_seo": "Arte para Padaria: Posts Profissionais em Poucos Minutos | iA4Tube",
+  "descricao_seo": "Crie arte para padaria em poucos minutos com a iA4Tube. Gere posts profissionais para pao frances, bolos, tortas, cafe da manha, delivery e promocoes.",
+  "h1": "Crie Artes Profissionais para sua Padaria em Poucos Minutos",
+  "subtitulo": "A iA4Tube cria posts profissionais para sua padaria usando a Inteligencia Artificial da iA4Tube. Voce informa o produto ou promocao e recebe a arte com descricao pronta para postar.",
+  "chamada_superior": "Artes prontas para divulgar sua padaria",
+  "nota_cta": "Informe o produto ou promocao. A iA4Tube monta a arte e a descricao.",
+  "service_type": "Criacao de artes para padaria com a Inteligencia Artificial da iA4Tube",
+  "secoes": {
+    "dores_titulo": "Por que sua padaria precisa divulgar melhor",
+    "dores_intro": "Padaria vende pela vontade do momento. Um post bonito lembra o cliente do pao quente, do bolo do dia e das promocoes.",
+    "cria_titulo": "O que a iA4Tube cria para padarias",
+    "cria_intro": "Voce nao precisa entender de design. Basta informar o produto ou promocao. A iA4Tube monta a arte e a descricao para publicar.",
+    "exemplos_titulo": "Exemplos de artes para padaria",
+    "como_funciona_titulo": "Como funciona",
+    "beneficios_titulo": "Beneficios"
+  },
+  "dores_cliente": [
+    {
+      "titulo": "Cliente compra pelo desejo",
+      "texto": "Pao quente, bolo fresco e salgado bonito precisam aparecer na hora certa."
+    },
+    {
+      "titulo": "Promocao precisa ser entendida rapido",
+      "texto": "Combo de cafe, paes e bolos vende melhor quando o post mostra a oferta com clareza."
+    },
+    {
+      "titulo": "Concorrencia posta todos os dias",
+      "texto": "Uma padaria lembrada no WhatsApp e Instagram tem mais chance de virar escolha do cliente."
+    }
+  ],
+  "exemplos_objetivos": [
+    "Pao frances saindo do forno",
+    "Bolo caseiro do dia",
+    "Combo cafe da manha",
+    "Salgados para encomenda",
+    "Delivery de paes e doces",
+    "Promocao de fim de tarde",
+    "Tortas e sobremesas",
+    "Datas como Pascoa e Natal"
+  ],
+  "exemplos_artes": [
+    {
+      "titulo": "Pao quente agora",
+      "texto": "Post para avisar horario de fornada e chamar o cliente para passar na padaria."
+    },
+    {
+      "titulo": "Combo de cafe",
+      "texto": "Arte para cafe, pao na chapa, bolo, suco e ofertas de manha."
+    },
+    {
+      "titulo": "Encomendas",
+      "texto": "Divulgacao de bolos, tortas, salgados e kits para festas."
+    }
+  ],
+  "como_funciona": [
+    {
+      "titulo": "Informe sua padaria",
+      "texto": "Digite o que quer divulgar."
+    },
+    {
+      "titulo": "Envie fotos e logo",
+      "texto": "Adicione foto ou logo, se quiser."
+    },
+    {
+      "titulo": "A iA4Tube cria a arte",
+      "texto": "A iA4Tube cria a arte em poucos minutos."
+    },
+    {
+      "titulo": "Publique no celular",
+      "texto": "Baixe a imagem e copie a descricao."
+    }
+  ],
+  "beneficios": [
+    "Arte pronta em poucos minutos.",
+    "Descricao pronta para postar.",
+    "Funciona direto pelo celular.",
+    "Ajuda a divulgar paes, bolos, combos e delivery.",
+    "Inclui ideias de posts alinhadas ao ramo.",
+    "Ajuda a criar campanhas sazonais com linguagem simples."
+  ],
+  "ctas": {
+    "principal": "Criar Arte para Minha Padaria",
+    "url": "/app.html?ramo=Padaria",
+    "meio_titulo": "Tem uma promocao de pao frances, bolo ou combo hoje?",
+    "meio_texto": "Crie uma arte profissional em poucos minutos e publique enquanto a oferta ainda esta quente.",
+    "final_titulo": "Pronto para melhorar o marketing da sua padaria?",
+    "final_texto": "Crie uma arte profissional para divulgar sua padaria, seus produtos e suas ofertas em poucos minutos."
+  },
+  "palavras_chave": [
+    "arte para padaria",
+    "post para padaria",
+    "divulgacao de padaria",
+    "marketing para padaria",
+    "criar arte para padaria",
+    "inteligencia artificial para padaria"
+  ],
+  "ideias_posts": [
+    "Avisar horario da fornada de pao frances",
+    "Mostrar bolo caseiro do dia",
+    "Divulgar combo cafe da manha",
+    "Criar post de encomenda de salgados",
+    "Lembrar delivery de paes e doces"
+  ],
+  "campanhas_sazonais": [
+    "Pascoa com ovos, colombas e doces",
+    "Festas juninas com bolos e quitandas",
+    "Natal com panetones, tortas e encomendas",
+    "Dia das Maes com cafe especial",
+    "Volta as aulas com lanches e combos"
+  ],
+  "exemplos_dia_a_dia": [
+    "Hoje tem pao frances quentinho as 17h",
+    "Bolo de cenoura saindo agora",
+    "Combo cafe + pao na chapa pela manha",
+    "Encomende salgados para sua festa pelo WhatsApp"
+  ],
+  "faq": [
+    {
+      "pergunta": "A iA4Tube cria arte para promocao de pao frances?",
+      "resposta": "Sim. Voce informa a promocao, horario ou preco, e a iA4Tube monta a arte com descricao pronta para postar."
+    },
+    {
+      "pergunta": "Posso usar foto real da minha padaria?",
+      "resposta": "Sim. Fotos de paes, bolos, vitrine e fachada ajudam a deixar a arte mais parecida com o seu negocio."
+    },
+    {
+      "pergunta": "A pagina serve para divulgar delivery?",
+      "resposta": "Sim. A iA4Tube pode criar posts para delivery, combos e chamadas para WhatsApp."
+    }
+  ]
+}

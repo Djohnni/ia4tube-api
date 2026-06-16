@@ -1,0 +1,134 @@
+{
+  "nome_nicho": "Dentista",
+  "slug": "dentista",
+  "titulo_seo": "Arte para Dentista: Posts Profissionais em Poucos Minutos | iA4Tube",
+  "descricao_seo": "Crie arte para dentista em poucos minutos com a iA4Tube. Gere posts profissionais para clareamento, limpeza, implantes, ortodontia, agenda e cuidados bucais.",
+  "h1": "Crie Artes Profissionais para Dentista em Poucos Minutos",
+  "subtitulo": "A iA4Tube cria posts profissionais para dentista usando a Inteligencia Artificial da iA4Tube. Voce informa o tratamento ou orientacao e recebe a arte com descricao pronta para postar.",
+  "chamada_superior": "Artes prontas para divulgar consultorio odontologico",
+  "nota_cta": "Informe o tratamento, servico ou orientacao. A iA4Tube monta a arte e a descricao.",
+  "service_type": "Criacao de artes para dentista com a Inteligencia Artificial da iA4Tube",
+  "secoes": {
+    "dores_titulo": "Por que dentista precisa divulgar melhor",
+    "dores_intro": "Consultorio precisa passar confianca. Posts bem feitos ajudam a explicar tratamentos, orientar pacientes e lembrar da agenda.",
+    "cria_titulo": "O que a iA4Tube cria para dentistas",
+    "cria_intro": "Voce informa o tratamento, campanha, dica ou chamada de agenda. A iA4Tube monta a arte e a descricao para publicar.",
+    "exemplos_titulo": "Exemplos de artes para dentista",
+    "como_funciona_titulo": "Como funciona",
+    "beneficios_titulo": "Beneficios"
+  },
+  "dores_cliente": [
+    {
+      "titulo": "Paciente precisa entender o tratamento",
+      "texto": "Posts simples ajudam a explicar limpeza, clareamento, aparelho e implante."
+    },
+    {
+      "titulo": "Confian?a vem antes da consulta",
+      "texto": "Uma comunicacao profissional transmite cuidado, higiene e seguran?a."
+    },
+    {
+      "titulo": "Agenda precisa ser lembrada",
+      "texto": "Conteudos recorrentes ajudam pacientes a marcar avaliacao e retorno."
+    }
+  ],
+  "exemplos_objetivos": [
+    "Limpeza preventiva",
+    "Clareamento dental",
+    "Avaliacao odontologica",
+    "Aparelho ortodontico",
+    "Implante dentario",
+    "Dor de dente e urgencia",
+    "Cuidados com criancas",
+    "Lembrete de retorno"
+  ],
+  "exemplos_artes": [
+    {
+      "titulo": "Tratamento explicado",
+      "texto": "Arte para mostrar o beneficio de limpeza, clareamento, implante ou ortodontia."
+    },
+    {
+      "titulo": "Agenda aberta",
+      "texto": "Post para avaliacao, horarios disponiveis e chamada para WhatsApp."
+    },
+    {
+      "titulo": "Dica de saude bucal",
+      "texto": "Conteudo curto para escovacao, fio dental, sensibilidade e prevencao."
+    }
+  ],
+  "como_funciona": [
+    {
+      "titulo": "Informe o tema",
+      "texto": "Digite tratamento, dica ou chamada de agenda."
+    },
+    {
+      "titulo": "Adicione foto ou logo",
+      "texto": "Envie logo ou foto do consultorio, se quiser."
+    },
+    {
+      "titulo": "A iA4Tube cria a arte",
+      "texto": "A iA4Tube cria a arte em poucos minutos."
+    },
+    {
+      "titulo": "Publique no celular",
+      "texto": "Baixe a imagem e copie a descricao."
+    }
+  ],
+  "beneficios": [
+    "Arte pronta em poucos minutos.",
+    "Descricao pronta para postar.",
+    "Ajuda a explicar tratamentos.",
+    "Funciona direto pelo celular.",
+    "Inclui ideias de posts alinhadas ao ramo.",
+    "Ajuda a criar campanhas sazonais com linguagem simples."
+  ],
+  "ctas": {
+    "principal": "Criar Arte para Meu Consultorio",
+    "url": "/app.html?ramo=Dentista",
+    "meio_titulo": "Quer divulgar um tratamento ou agenda?",
+    "meio_texto": "Crie uma arte profissional em poucos minutos com a iA4Tube.",
+    "final_titulo": "Pronto para divulgar seu consultorio?",
+    "final_texto": "Crie uma arte profissional para fortalecer sua presenca em poucos minutos com a iA4Tube."
+  },
+  "palavras_chave": [
+    "arte para dentista",
+    "post para dentista",
+    "divulgacao de dentista",
+    "marketing para dentista",
+    "criar arte para dentista",
+    "inteligencia artificial para dentista"
+  ],
+  "ideias_posts": [
+    "Limpeza preventiva",
+    "Clareamento dental",
+    "Agenda para avaliacao",
+    "Dica sobre fio dental",
+    "Alerta de dor de dente"
+  ],
+  "campanhas_sazonais": [
+    "Volta as aulas com cuidado infantil",
+    "Fim de ano com sorriso renovado",
+    "Mes da saude bucal",
+    "Campanha de clareamento",
+    "Lembrete de revisao semestral"
+  ],
+  "exemplos_dia_a_dia": [
+    "Sua limpeza esta em dia?",
+    "Clareamento com avaliacao profissional",
+    "Agende sua consulta pelo WhatsApp",
+    "Dor de dente nao deve esperar"
+  ],
+  "faq": [
+    {
+      "pergunta": "A iA4Tube cria posts para tratamentos odontologicos?",
+      "resposta": "Sim. Ela pode criar artes para limpeza, clareamento, aparelho, implante, avaliacao e dicas de saude bucal."
+    },
+    {
+      "pergunta": "Os textos ficam profissionais?",
+      "resposta": "Sim. A proposta e explicar de forma clara, sem parecer apelativo."
+    },
+    {
+      "pergunta": "Posso divulgar agenda do consultorio?",
+      "resposta": "Sim. A arte pode chamar para avaliacao, retorno ou contato pelo WhatsApp."
+    }
+  ]
+}

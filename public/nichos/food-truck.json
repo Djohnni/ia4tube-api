@@ -1,0 +1,134 @@
+{
+  "nome_nicho": "Food Truck",
+  "slug": "food-truck",
+  "titulo_seo": "Arte para Food Truck: Posts Profissionais em Poucos Minutos | iA4Tube",
+  "descricao_seo": "Crie arte para food truck em poucos minutos com a iA4Tube. Gere posts profissionais para hamburguer, pastel, porcoes, ofertas e divulgacao local.",
+  "h1": "Crie Artes Profissionais para Food Truck em Poucos Minutos",
+  "subtitulo": "A iA4Tube cria posts profissionais para seu food truck usando a Inteligencia Artificial da iA4Tube. Voce informa o que quer divulgar e recebe a arte com descricao pronta para postar.",
+  "chamada_superior": "Artes prontas para divulgar seu food truck",
+  "nota_cta": "Informe o servico, produto ou promocao. A iA4Tube monta a arte e a descricao.",
+  "service_type": "Criacao de artes para food truck com a Inteligencia Artificial da iA4Tube",
+  "secoes": {
+    "dores_titulo": "Por que seu food truck precisa divulgar melhor",
+    "dores_intro": "Food Truck vende mais quando o cliente entende rapido o que voce oferece, qual e o diferencial e como entrar em contato.",
+    "cria_titulo": "O que a iA4Tube cria para food truck",
+    "cria_intro": "Voce informa hamburguer, promocao, foto ou novidade. A iA4Tube transforma isso em arte profissional e descricao pronta para publicar.",
+    "exemplos_titulo": "Exemplos de artes para food truck",
+    "como_funciona_titulo": "Como funciona",
+    "beneficios_titulo": "Beneficios"
+  },
+  "dores_cliente": [
+    {
+      "titulo": "O cliente precisa entender rapido",
+      "texto": "Posts claros ajudam a mostrar hamburguer, pastel e outras ofertas sem confundir quem esta no celular."
+    },
+    {
+      "titulo": "Divulgacao constante traz lembranca",
+      "texto": "Quando seu food truck aparece com frequencia, o cliente lembra de chamar no WhatsApp na hora certa."
+    },
+    {
+      "titulo": "Imagem profissional passa confianca",
+      "texto": "Artes bem feitas deixam seu food truck com aparencia mais organizada e preparada para atender."
+    }
+  ],
+  "exemplos_objetivos": [
+    "Divulgar hamburguer",
+    "Mostrar pastel",
+    "Apresentar porcoes",
+    "Criar promocao da semana",
+    "Chamar clientes pelo WhatsApp",
+    "Mostrar novidade do dia",
+    "Divulgar campanha sazonal",
+    "Reforcar atendimento local"
+  ],
+  "exemplos_artes": [
+    {
+      "titulo": "Hamburguer em destaque",
+      "texto": "Arte para apresentar hamburguer com clareza e incentivar o cliente a pedir informacoes."
+    },
+    {
+      "titulo": "Promocao ou pacote",
+      "texto": "Post para divulgar oferta, combo, pacote ou condicao especial sem parecer improvisado."
+    },
+    {
+      "titulo": "Campanhas e datas",
+      "texto": "Artes para datas comerciais, fim de semana, feriados e momentos fortes do ramo."
+    }
+  ],
+  "como_funciona": [
+    {
+      "titulo": "Informe o que quer divulgar",
+      "texto": "Digite hamburguer, servico, produto, promocao ou ideia da arte."
+    },
+    {
+      "titulo": "Adicione foto ou logo",
+      "texto": "Envie uma imagem se quiser deixar a arte mais personalizada."
+    },
+    {
+      "titulo": "A iA4Tube cria a arte",
+      "texto": "A iA4Tube cria a arte em poucos minutos."
+    },
+    {
+      "titulo": "Publique no celular",
+      "texto": "Baixe a imagem e copie a descricao."
+    }
+  ],
+  "beneficios": [
+    "Arte pronta em poucos minutos.",
+    "Descricao pronta para postar.",
+    "Funciona direto pelo celular.",
+    "Ajuda a divulgar hamburguer, pastel, porcoes e campanhas locais.",
+    "Inclui ideias de posts alinhadas ao ramo.",
+    "Ajuda a manter uma presenca mais profissional nas redes sociais."
+  ],
+  "ctas": {
+    "principal": "Criar Arte para Seu Food Truck",
+    "url": "/app.html?ramo=Food%20Truck",
+    "meio_titulo": "Quer divulgar hamburguer hoje?",
+    "meio_texto": "Crie uma arte profissional em poucos minutos com a iA4Tube e publique direto pelo celular.",
+    "final_titulo": "Pronto para melhorar a divulgacao de seu food truck?",
+    "final_texto": "Crie uma arte profissional para divulgar seu food truck, seus servicos e suas ofertas em poucos minutos com a iA4Tube."
+  },
+  "palavras_chave": [
+    "arte para food truck",
+    "post para food truck",
+    "divulgacao de food truck",
+    "marketing para food truck",
+    "criar arte para food truck",
+    "inteligencia artificial para food truck"
+  ],
+  "ideias_posts": [
+    "Divulgar hamburguer",
+    "Mostrar pastel",
+    "Apresentar porcoes",
+    "Criar promocao da semana",
+    "Chamar clientes pelo WhatsApp"
+  ],
+  "campanhas_sazonais": [
+    "Dia das Maes",
+    "Black Friday",
+    "Natal",
+    "campanhas locais",
+    "fim de semana"
+  ],
+  "exemplos_dia_a_dia": [
+    "Hoje temos hamburguer em destaque",
+    "Conheca nossas opcoes de pastel",
+    "Fale no WhatsApp para saber mais",
+    "Oferta especial para clientes da regiao"
+  ],
+  "faq": [
+    {
+      "pergunta": "A iA4Tube cria arte para food truck?",
+      "resposta": "Sim. Voce informa o que quer divulgar e a iA4Tube monta a arte com descricao pronta para postar."
+    },
+    {
+      "pergunta": "Posso usar foto real de seu food truck?",
+      "resposta": "Sim. Fotos reais de produtos, servicos, equipe, fachada ou atendimento ajudam a deixar a arte mais parecida com o seu negocio."
+    },
+    {
+      "pergunta": "A pagina serve para promocoes e WhatsApp?",
+      "resposta": "Sim. A iA4Tube pode criar posts para ofertas, chamadas para WhatsApp, novidades e campanhas do seu ramo."
+    }
+  ]
+}

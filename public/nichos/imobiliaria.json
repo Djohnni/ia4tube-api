@@ -1,0 +1,134 @@
+{
+  "nome_nicho": "Imobiliaria",
+  "slug": "imobiliaria",
+  "titulo_seo": "Arte para Imobiliaria: Posts Profissionais em Poucos Minutos | iA4Tube",
+  "descricao_seo": "Crie arte para imobiliaria em poucos minutos com a iA4Tube. Gere posts profissionais para imoveis, locacao, venda, lancamentos, corretores e captacao.",
+  "h1": "Crie Artes Profissionais para sua Imobiliaria em Poucos Minutos",
+  "subtitulo": "A iA4Tube cria posts profissionais para imobiliaria usando a Inteligencia Artificial da iA4Tube. Voce informa o imovel, oportunidade ou servico e recebe a arte com descricao pronta para postar.",
+  "chamada_superior": "Artes prontas para divulgar sua imobiliaria",
+  "nota_cta": "Informe o imovel, oportunidade ou servico. A iA4Tube monta a arte e a descricao.",
+  "service_type": "Criacao de artes para imobiliaria com a Inteligencia Artificial da iA4Tube",
+  "secoes": {
+    "dores_titulo": "Por que sua imobiliaria precisa divulgar melhor",
+    "dores_intro": "Imobiliaria vende confianca, oportunidade e visibilidade. Posts profissionais ajudam a destacar imoveis, locacoes, vendas e lancamentos.",
+    "cria_titulo": "O que a iA4Tube cria para imobiliarias",
+    "cria_intro": "Voce informa o imovel, bairro, oferta, chamada ou foto. A iA4Tube monta a arte e a descricao para publicar.",
+    "exemplos_titulo": "Exemplos de artes para imobiliaria",
+    "como_funciona_titulo": "Como funciona",
+    "beneficios_titulo": "Beneficios"
+  },
+  "dores_cliente": [
+    {
+      "titulo": "Imovel precisa se destacar",
+      "texto": "Uma boa arte ajuda o cliente a notar localizacao, preco e beneficios."
+    },
+    {
+      "titulo": "Contato precisa ser facil",
+      "texto": "Post claro incentiva WhatsApp, visita e interesse real."
+    },
+    {
+      "titulo": "Captacao tambem importa",
+      "texto": "Conteudos profissionais ajudam proprietarios a confiar na imobiliaria."
+    }
+  ],
+  "exemplos_objetivos": [
+    "Casa a venda",
+    "Apartamento para alugar",
+    "Lancamento imobiliario",
+    "Terreno em destaque",
+    "Sala comercial",
+    "Captacao de imoveis",
+    "Agenda de visitas",
+    "Financiamento facilitado"
+  ],
+  "exemplos_artes": [
+    {
+      "titulo": "Imovel em destaque",
+      "texto": "Arte com bairro, tipo, principais diferenciais e chamada para visita."
+    },
+    {
+      "titulo": "Locacao",
+      "texto": "Post para aluguel residencial, comercial ou temporada."
+    },
+    {
+      "titulo": "Captacao",
+      "texto": "Conteudo para proprietarios anunciarem com a imobiliaria."
+    }
+  ],
+  "como_funciona": [
+    {
+      "titulo": "Informe o imovel",
+      "texto": "Digite tipo, bairro, preco ou chamada."
+    },
+    {
+      "titulo": "Adicione foto ou logo",
+      "texto": "Envie foto do imovel ou logo, se quiser."
+    },
+    {
+      "titulo": "A iA4Tube cria a arte",
+      "texto": "A iA4Tube cria a arte em poucos minutos."
+    },
+    {
+      "titulo": "Publique no celular",
+      "texto": "Baixe a imagem e copie a descricao."
+    }
+  ],
+  "beneficios": [
+    "Arte pronta em poucos minutos.",
+    "Descricao pronta para postar.",
+    "Ajuda a divulgar imoveis e oportunidades.",
+    "Funciona direto pelo celular.",
+    "Inclui ideias de posts alinhadas ao ramo.",
+    "Ajuda a criar campanhas sazonais com linguagem simples."
+  ],
+  "ctas": {
+    "principal": "Criar Arte para Minha Imobiliaria",
+    "url": "/app.html?ramo=Imobiliaria",
+    "meio_titulo": "Quer divulgar um imovel hoje?",
+    "meio_texto": "Crie uma arte profissional em poucos minutos com a iA4Tube.",
+    "final_titulo": "Pronto para divulgar sua imobiliaria?",
+    "final_texto": "Crie uma arte profissional para gerar mais contatos em poucos minutos com a iA4Tube."
+  },
+  "palavras_chave": [
+    "arte para imobiliaria",
+    "post para imobiliaria",
+    "divulgacao de imobiliaria",
+    "marketing para imobiliaria",
+    "criar arte para imobiliaria",
+    "inteligencia artificial para imobiliaria"
+  ],
+  "ideias_posts": [
+    "Imovel da semana",
+    "Apartamento para alugar",
+    "Casa com financiamento",
+    "Captacao de imoveis",
+    "Agenda de visitas"
+  ],
+  "campanhas_sazonais": [
+    "Inicio do ano com casa nova",
+    "Feirao de imoveis",
+    "Black Friday imobiliaria",
+    "Ferias com imoveis de temporada",
+    "Campanha de captacao"
+  ],
+  "exemplos_dia_a_dia": [
+    "Casa com 3 quartos no bairro X",
+    "Apartamento para alugar perto do centro",
+    "Proprietario, anuncie seu imovel",
+    "Agende sua visita pelo WhatsApp"
+  ],
+  "faq": [
+    {
+      "pergunta": "A iA4Tube cria arte para imovel a venda?",
+      "resposta": "Sim. Voce informa tipo, bairro, diferenciais e chamada para visita."
+    },
+    {
+      "pergunta": "Serve para locacao?",
+      "resposta": "Sim. Casas, apartamentos e salas comerciais podem ser divulgados."
+    },
+    {
+      "pergunta": "Ajuda na captacao de imoveis?",
+      "resposta": "Sim. Tambem pode criar posts para proprietarios que querem vender ou alugar."
+    }
+  ]
+}

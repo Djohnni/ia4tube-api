@@ -1,0 +1,134 @@
+{
+  "nome_nicho": "Cafeteria",
+  "slug": "cafeteria",
+  "titulo_seo": "Arte para Cafeteria: Posts Profissionais em Poucos Minutos | iA4Tube",
+  "descricao_seo": "Crie arte para cafeteria em poucos minutos com a iA4Tube. Gere posts profissionais para cafes, doces, lanches e combos.",
+  "h1": "Crie Artes Profissionais para Cafeteria em Poucos Minutos",
+  "subtitulo": "A iA4Tube cria posts profissionais para cafeteria usando a Inteligencia Artificial da iA4Tube. Voce informa cafes, doces, lanches e combos e recebe a arte com descricao pronta para postar.",
+  "chamada_superior": "Artes prontas para divulgar cafeteria",
+  "nota_cta": "Informe cafes, doces, lanches e combos. A iA4Tube monta a arte e a descricao.",
+  "service_type": "Criacao de artes para cafeteria com a Inteligencia Artificial da iA4Tube",
+  "secoes": {
+    "dores_titulo": "Por que cafeteria precisa divulgar melhor",
+    "dores_intro": "Cafeteria precisa aparecer na hora certa. Posts claros ajudam a mostrar cafes, sobremesas e momentos especiais e chamar o cliente para agir.",
+    "cria_titulo": "O que a iA4Tube cria para Cafeteria",
+    "cria_intro": "Voce informa o que quer divulgar. A iA4Tube monta a arte e a descricao para publicar no Instagram, WhatsApp ou outras redes.",
+    "exemplos_titulo": "Exemplos de artes para Cafeteria",
+    "como_funciona_titulo": "Como funciona",
+    "beneficios_titulo": "Beneficios"
+  },
+  "dores_cliente": [
+    {
+      "titulo": "Cafe vende por momento",
+      "texto": "Um post bonito desperta vontade de parar para um cafe, doce ou lanche."
+    },
+    {
+      "titulo": "Produtos mudam durante o dia",
+      "texto": "Bebidas, doces e combos precisam aparecer no horario certo."
+    },
+    {
+      "titulo": "Ambiente tambem vende",
+      "texto": "A comunicacao precisa mostrar experiencia, aconchego e atendimento."
+    }
+  ],
+  "exemplos_objetivos": [
+    "Cafe especial do dia",
+    "Combo cafe e doce",
+    "Capuccino gelado",
+    "Bolo da casa",
+    "Cafe da manha",
+    "Happy coffee",
+    "Novidade no cardapio",
+    "Delivery de lanches"
+  ],
+  "exemplos_artes": [
+    {
+      "titulo": "Combo do dia",
+      "texto": "Arte para cafe, bolo, pao de queijo, croissant ou sobremesa."
+    },
+    {
+      "titulo": "Bebida especial",
+      "texto": "Post para capuccino, espresso, gelado, chocolate ou cha."
+    },
+    {
+      "titulo": "Experiencia",
+      "texto": "Divulgacao do ambiente, atendimento e momentos para visitar."
+    }
+  ],
+  "como_funciona": [
+    {
+      "titulo": "Informe o que quer divulgar",
+      "texto": "Digite produto, servico, promocao ou ideia da arte."
+    },
+    {
+      "titulo": "Adicione foto ou logo",
+      "texto": "Envie uma imagem se quiser deixar a arte mais personalizada."
+    },
+    {
+      "titulo": "A iA4Tube cria a arte",
+      "texto": "A iA4Tube cria a arte em poucos minutos."
+    },
+    {
+      "titulo": "Publique no celular",
+      "texto": "Baixe a imagem e copie a descricao."
+    }
+  ],
+  "beneficios": [
+    "Arte pronta em poucos minutos.",
+    "Descricao pronta para postar.",
+    "Funciona direto pelo celular.",
+    "Ajuda a divulgar cafes, sobremesas e momentos especiais.",
+    "Inclui ideias de posts alinhadas ao ramo.",
+    "Ajuda a criar campanhas sazonais com linguagem simples."
+  ],
+  "ctas": {
+    "principal": "Criar Arte para Minha Cafeteria",
+    "url": "/app.html?ramo=Cafeteria",
+    "meio_titulo": "Quer divulgar cafe especial hoje?",
+    "meio_texto": "Crie uma arte profissional em poucos minutos com a iA4Tube.",
+    "final_titulo": "Pronto para divulgar cafeteria?",
+    "final_texto": "Crie uma arte profissional para atrair mais clientes em poucos minutos com a iA4Tube."
+  },
+  "palavras_chave": [
+    "arte para cafeteria",
+    "post para cafeteria",
+    "divulgacao de cafeteria",
+    "marketing para cafeteria",
+    "criar arte para cafeteria",
+    "inteligencia artificial para cafeteria"
+  ],
+  "ideias_posts": [
+    "Cafe especial do dia",
+    "Combo cafe e doce",
+    "Bolo da casa",
+    "Bebida gelada",
+    "Ambiente para trabalhar"
+  ],
+  "campanhas_sazonais": [
+    "Dia dos Namorados na cafeteria",
+    "Inverno com bebidas quentes",
+    "Verao com cafes gelados",
+    "Natal com doces especiais",
+    "Semana do cafe"
+  ],
+  "exemplos_dia_a_dia": [
+    "Capuccino especial hoje",
+    "Combo cafe + bolo",
+    "Venha trabalhar tomando um cafe",
+    "Doce novo no balcao"
+  ],
+  "faq": [
+    {
+      "pergunta": "A iA4Tube cria posts para cafeteria?",
+      "resposta": "Sim. Cafes, doces, combos e ambiente podem virar artes profissionais."
+    },
+    {
+      "pergunta": "Serve para divulgar produto do dia?",
+      "resposta": "Sim. Bolos, bebidas e novidades podem ser divulgados rapidamente."
+    },
+    {
+      "pergunta": "Posso usar fotos do ambiente?",
+      "resposta": "Sim. Fotos reais ajudam a mostrar a experiencia da cafeteria."
+    }
+  ]
+}

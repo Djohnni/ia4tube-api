@@ -1,0 +1,134 @@
+{
+  "nome_nicho": "Pizzaria",
+  "slug": "pizzaria",
+  "titulo_seo": "Arte para Pizzaria: Posts Profissionais em Poucos Minutos | iA4Tube",
+  "descricao_seo": "Crie arte para pizzaria em poucos minutos com a iA4Tube. Gere posts profissionais para pizzas, combos, sabores e delivery.",
+  "h1": "Crie Artes Profissionais para Pizzaria em Poucos Minutos",
+  "subtitulo": "A iA4Tube cria posts profissionais para pizzaria usando a Inteligencia Artificial da iA4Tube. Voce informa pizzas, combos, sabores e delivery e recebe a arte com descricao pronta para postar.",
+  "chamada_superior": "Artes prontas para divulgar pizzaria",
+  "nota_cta": "Informe pizzas, combos, sabores e delivery. A iA4Tube monta a arte e a descricao.",
+  "service_type": "Criacao de artes para pizzaria com a Inteligencia Artificial da iA4Tube",
+  "secoes": {
+    "dores_titulo": "Por que pizzaria precisa divulgar melhor",
+    "dores_intro": "Pizzaria precisa aparecer na hora certa. Posts claros ajudam a mostrar sabores, combos e pedidos pelo WhatsApp e chamar o cliente para agir.",
+    "cria_titulo": "O que a iA4Tube cria para Pizzaria",
+    "cria_intro": "Voce informa o que quer divulgar. A iA4Tube monta a arte e a descricao para publicar no Instagram, WhatsApp ou outras redes.",
+    "exemplos_titulo": "Exemplos de artes para Pizzaria",
+    "como_funciona_titulo": "Como funciona",
+    "beneficios_titulo": "Beneficios"
+  },
+  "dores_cliente": [
+    {
+      "titulo": "Pizza vende no horario certo",
+      "texto": "Fim de tarde e noite pedem posts claros de sabores, combos e delivery."
+    },
+    {
+      "titulo": "Sabores precisam dar vontade",
+      "texto": "Uma arte boa destaca massa, recheio, borda e promocao."
+    },
+    {
+      "titulo": "Cliente compara rapido",
+      "texto": "Combo, preco e chamada para WhatsApp precisam aparecer sem confusao."
+    }
+  ],
+  "exemplos_objetivos": [
+    "Pizza grande em promocao",
+    "Combo pizza + refrigerante",
+    "Rodizio de pizza",
+    "Delivery de sexta",
+    "Sabor especial da casa",
+    "Borda recheada",
+    "Pizza doce",
+    "Pedido pelo WhatsApp"
+  ],
+  "exemplos_artes": [
+    {
+      "titulo": "Combo de pizza",
+      "texto": "Arte para pizza grande, refrigerante, borda e oferta da noite."
+    },
+    {
+      "titulo": "Sabor especial",
+      "texto": "Post destacando ingredientes, massa e diferencial da casa."
+    },
+    {
+      "titulo": "Delivery",
+      "texto": "Divulgacao para pedir pelo WhatsApp e receber em casa."
+    }
+  ],
+  "como_funciona": [
+    {
+      "titulo": "Informe o que quer divulgar",
+      "texto": "Digite produto, servico, promocao ou ideia da arte."
+    },
+    {
+      "titulo": "Adicione foto ou logo",
+      "texto": "Envie uma imagem se quiser deixar a arte mais personalizada."
+    },
+    {
+      "titulo": "A iA4Tube cria a arte",
+      "texto": "A iA4Tube cria a arte em poucos minutos."
+    },
+    {
+      "titulo": "Publique no celular",
+      "texto": "Baixe a imagem e copie a descricao."
+    }
+  ],
+  "beneficios": [
+    "Arte pronta em poucos minutos.",
+    "Descricao pronta para postar.",
+    "Funciona direto pelo celular.",
+    "Ajuda a divulgar sabores, combos e pedidos pelo WhatsApp.",
+    "Inclui ideias de posts alinhadas ao ramo.",
+    "Ajuda a criar campanhas sazonais com linguagem simples."
+  ],
+  "ctas": {
+    "principal": "Criar Arte para Minha Pizzaria",
+    "url": "/app.html?ramo=Pizzaria",
+    "meio_titulo": "Quer divulgar pizza do dia hoje?",
+    "meio_texto": "Crie uma arte profissional em poucos minutos com a iA4Tube.",
+    "final_titulo": "Pronto para divulgar pizzaria?",
+    "final_texto": "Crie uma arte profissional para atrair mais clientes em poucos minutos com a iA4Tube."
+  },
+  "palavras_chave": [
+    "arte para pizzaria",
+    "post para pizzaria",
+    "divulgacao de pizzaria",
+    "marketing para pizzaria",
+    "criar arte para pizzaria",
+    "inteligencia artificial para pizzaria"
+  ],
+  "ideias_posts": [
+    "Pizza grande em promocao",
+    "Combo pizza + refri",
+    "Sabor especial",
+    "Borda recheada",
+    "Delivery de sexta"
+  ],
+  "campanhas_sazonais": [
+    "Dia da Pizza",
+    "Rodizio no fim de semana",
+    "Feriado com delivery",
+    "Black Friday de pizza",
+    "Noite do futebol com combo"
+  ],
+  "exemplos_dia_a_dia": [
+    "Pizza grande + refri hoje",
+    "Sabor especial da casa",
+    "Pe?a pelo WhatsApp",
+    "Borda recheada em promocao"
+  ],
+  "faq": [
+    {
+      "pergunta": "A iA4Tube cria posts para pizzaria?",
+      "resposta": "Sim. Combos, sabores, bordas e delivery podem virar artes em poucos minutos."
+    },
+    {
+      "pergunta": "Posso divulgar preco?",
+      "resposta": "Sim. Voce informa o valor e a chamada da promocao."
+    },
+    {
+      "pergunta": "Serve para rodizio?",
+      "resposta": "Sim. Rodizio, reservas e noites especiais tambem podem ser divulgados."
+    }
+  ]
+}

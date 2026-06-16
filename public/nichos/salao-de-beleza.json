@@ -1,0 +1,134 @@
+{
+  "nome_nicho": "Salao de Beleza",
+  "slug": "salao-de-beleza",
+  "titulo_seo": "Arte para Salao de Beleza: Posts Profissionais em Poucos Minutos | iA4Tube",
+  "descricao_seo": "Crie arte para salao de beleza em poucos minutos com a iA4Tube. Gere posts profissionais para cabelo, unhas, maquiagem, sobrancelha, agenda e promocoes.",
+  "h1": "Crie Artes Profissionais para seu Salao de Beleza em Poucos Minutos",
+  "subtitulo": "A iA4Tube cria posts profissionais para salao de beleza usando a Inteligencia Artificial da iA4Tube. Voce informa o servico ou promocao e recebe a arte com descricao pronta para postar.",
+  "chamada_superior": "Artes prontas para divulgar seu salao",
+  "nota_cta": "Informe o servico ou promocao. A iA4Tube monta a arte e a descricao.",
+  "service_type": "Criacao de artes para salao de beleza com a Inteligencia Artificial da iA4Tube",
+  "secoes": {
+    "dores_titulo": "Por que seu salao precisa divulgar melhor",
+    "dores_intro": "Salao vende beleza, resultado e agenda. Posts profissionais ajudam a divulgar servicos, horarios, antes e depois e promocoes.",
+    "cria_titulo": "O que a iA4Tube cria para saloes de beleza",
+    "cria_intro": "Voce informa o servico, promocao, foto ou horario. A iA4Tube monta a arte e a descricao para publicar.",
+    "exemplos_titulo": "Exemplos de artes para salao de beleza",
+    "como_funciona_titulo": "Como funciona",
+    "beneficios_titulo": "Beneficios"
+  },
+  "dores_cliente": [
+    {
+      "titulo": "Agenda depende de desejo",
+      "texto": "Fotos e artes bonitas ajudam clientes a lembrar de cabelo, unha e maquiagem."
+    },
+    {
+      "titulo": "Servico precisa mostrar resultado",
+      "texto": "Antes e depois, cor, corte e acabamento vendem melhor com visual caprichado."
+    },
+    {
+      "titulo": "Horarios vagos precisam girar",
+      "texto": "Posts ajudam a preencher agenda da semana e divulgar pacotes."
+    }
+  ],
+  "exemplos_objetivos": [
+    "Escova e hidratacao",
+    "Coloracao e luzes",
+    "Unhas da semana",
+    "Maquiagem para evento",
+    "Sobrancelha e design",
+    "Pacote beleza completo",
+    "Horario vago hoje",
+    "Noivas e formandas"
+  ],
+  "exemplos_artes": [
+    {
+      "titulo": "Agenda da semana",
+      "texto": "Post para horarios livres, pacotes e chamada para marcar."
+    },
+    {
+      "titulo": "Resultado em destaque",
+      "texto": "Arte para corte, cor, unha, make ou transformacao."
+    },
+    {
+      "titulo": "Datas especiais",
+      "texto": "Divulgacao para Dia das Maes, formaturas, festas e fim de ano."
+    }
+  ],
+  "como_funciona": [
+    {
+      "titulo": "Informe o servico",
+      "texto": "Digite servico, pacote ou promocao."
+    },
+    {
+      "titulo": "Adicione foto ou logo",
+      "texto": "Envie foto de resultado ou logo, se quiser."
+    },
+    {
+      "titulo": "A iA4Tube cria a arte",
+      "texto": "A iA4Tube cria a arte em poucos minutos."
+    },
+    {
+      "titulo": "Publique no celular",
+      "texto": "Baixe a imagem e copie a descricao."
+    }
+  ],
+  "beneficios": [
+    "Arte pronta em poucos minutos.",
+    "Descricao pronta para postar.",
+    "Ajuda a divulgar servicos e horarios.",
+    "Funciona direto pelo celular.",
+    "Inclui ideias de posts alinhadas ao ramo.",
+    "Ajuda a criar campanhas sazonais com linguagem simples."
+  ],
+  "ctas": {
+    "principal": "Criar Arte para Meu Salao",
+    "url": "/app.html?ramo=Salao%20de%20Beleza",
+    "meio_titulo": "Quer divulgar um horario ou promocao?",
+    "meio_texto": "Crie uma arte profissional em poucos minutos com a iA4Tube.",
+    "final_titulo": "Pronto para divulgar seu salao?",
+    "final_texto": "Crie uma arte profissional para atrair clientes em poucos minutos com a iA4Tube."
+  },
+  "palavras_chave": [
+    "arte para salao de beleza",
+    "post para salao de beleza",
+    "divulgacao de salao de beleza",
+    "marketing para salao de beleza",
+    "criar arte para salao de beleza",
+    "inteligencia artificial para salao de beleza"
+  ],
+  "ideias_posts": [
+    "Horario vago hoje",
+    "Pacote cabelo e unha",
+    "Antes e depois de coloracao",
+    "Maquiagem para festa",
+    "Semana da beleza"
+  ],
+  "campanhas_sazonais": [
+    "Dia das Maes no salao",
+    "Festas de fim de ano",
+    "Mes das noivas",
+    "Volta as aulas com corte infantil",
+    "Black Friday de beleza"
+  ],
+  "exemplos_dia_a_dia": [
+    "Tem horario para escova hoje",
+    "Unhas da semana com agenda aberta",
+    "Pacote beleza para o fim de semana",
+    "Transformacao de cabelo com horario marcado"
+  ],
+  "faq": [
+    {
+      "pergunta": "A iA4Tube cria arte para agenda do salao?",
+      "resposta": "Sim. Voce pode divulgar horarios livres, pacotes e chamadas para WhatsApp."
+    },
+    {
+      "pergunta": "Posso usar antes e depois?",
+      "resposta": "Sim. Fotos de resultado ajudam a valorizar corte, cor, unha e maquiagem."
+    },
+    {
+      "pergunta": "Serve para promocoes?",
+      "resposta": "Sim. Pacotes e campanhas de beleza podem virar posts em poucos minutos."
+    }
+  ]
+}

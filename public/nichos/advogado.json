@@ -1,0 +1,134 @@
+{
+  "nome_nicho": "Advogado",
+  "slug": "advogado",
+  "titulo_seo": "Arte para Advogado: Posts Profissionais em Poucos Minutos | iA4Tube",
+  "descricao_seo": "Crie arte para advogado em poucos minutos com a iA4Tube. Gere posts profissionais para areas de atuacao, orientacoes, atendimento, conteudo juridico e autoridade.",
+  "h1": "Crie Artes Profissionais para Advogado em Poucos Minutos",
+  "subtitulo": "A iA4Tube cria posts profissionais para advogado usando a Inteligencia Artificial da iA4Tube. Voce informa o tema juridico ou area de atuacao e recebe a arte com descricao pronta para postar.",
+  "chamada_superior": "Artes prontas para divulgar advocacia com clareza",
+  "nota_cta": "Informe o tema ou area de atuacao. A iA4Tube monta a arte e a descricao.",
+  "service_type": "Criacao de artes para advogado com a Inteligencia Artificial da iA4Tube",
+  "secoes": {
+    "dores_titulo": "Por que advogado precisa divulgar melhor",
+    "dores_intro": "Na advocacia, clareza e confianca importam. Posts profissionais ajudam a explicar areas de atuacao e fortalecer autoridade.",
+    "cria_titulo": "O que a iA4Tube cria para advogados",
+    "cria_intro": "Voce informa o tema, area ou orientacao. A iA4Tube monta uma arte informativa e a descricao para publicar.",
+    "exemplos_titulo": "Exemplos de artes para advogado",
+    "como_funciona_titulo": "Como funciona",
+    "beneficios_titulo": "Beneficios"
+  },
+  "dores_cliente": [
+    {
+      "titulo": "Autoridade precisa ser clara",
+      "texto": "O publico confia mais quando entende a area de atuacao e a seriedade do profissional."
+    },
+    {
+      "titulo": "Tema juridico pode parecer dificil",
+      "texto": "Posts simples transformam duvidas legais em orientacoes compreensiveis."
+    },
+    {
+      "titulo": "Contato precisa ser discreto e profissional",
+      "texto": "Uma arte bem feita ajuda a informar sem parecer apelativa."
+    }
+  ],
+  "exemplos_objetivos": [
+    "Direito trabalhista",
+    "Direito de familia",
+    "Direito previdenciario",
+    "Direito empresarial",
+    "Inventario e sucessoes",
+    "Contrato e cobranca",
+    "Orientacao para MEI",
+    "Atendimento juridico online"
+  ],
+  "exemplos_artes": [
+    {
+      "titulo": "Area de atuacao",
+      "texto": "Post para explicar quais casos o escritorio atende."
+    },
+    {
+      "titulo": "Orientacao juridica",
+      "texto": "Arte educativa com cuidado, clareza e linguagem acessivel."
+    },
+    {
+      "titulo": "Atendimento",
+      "texto": "Comunicado profissional para agendamento, consulta ou contato inicial."
+    }
+  ],
+  "como_funciona": [
+    {
+      "titulo": "Informe o tema",
+      "texto": "Digite area de atuacao, dica ou chamada."
+    },
+    {
+      "titulo": "Adicione logo",
+      "texto": "Envie logo ou identidade do escritorio, se quiser."
+    },
+    {
+      "titulo": "A iA4Tube cria a arte",
+      "texto": "A iA4Tube cria a arte em poucos minutos."
+    },
+    {
+      "titulo": "Publique no celular",
+      "texto": "Baixe a imagem e copie a descricao."
+    }
+  ],
+  "beneficios": [
+    "Arte pronta em poucos minutos.",
+    "Descricao pronta para postar.",
+    "Ajuda a divulgar areas de atuacao.",
+    "Funciona direto pelo celular.",
+    "Inclui ideias de posts alinhadas ao ramo.",
+    "Ajuda a criar campanhas sazonais com linguagem simples."
+  ],
+  "ctas": {
+    "principal": "Criar Arte para Advocacia",
+    "url": "/app.html?ramo=Advogado",
+    "meio_titulo": "Quer divulgar sua area de atuacao?",
+    "meio_texto": "Crie uma arte profissional em poucos minutos com a iA4Tube.",
+    "final_titulo": "Pronto para fortalecer sua presenca juridica?",
+    "final_texto": "Crie uma arte profissional para divulgar seu trabalho em poucos minutos com a iA4Tube."
+  },
+  "palavras_chave": [
+    "arte para advogado",
+    "post para advogado",
+    "divulgacao de advogado",
+    "marketing para advogado",
+    "criar arte para advogado",
+    "inteligencia artificial para advogado"
+  ],
+  "ideias_posts": [
+    "Direitos trabalhistas comuns",
+    "Divorcio e guarda",
+    "Aposentadoria e INSS",
+    "Contrato para empresas",
+    "Inventario e sucessao"
+  ],
+  "campanhas_sazonais": [
+    "Inicio do ano com organizacao juridica",
+    "Mes do consumidor",
+    "Campanha para MEI e empresas",
+    "Fim de ano com revisao contratual",
+    "Conteudos de direitos trabalhistas"
+  ],
+  "exemplos_dia_a_dia": [
+    "Voce sabe quando tem direito a hora extra?",
+    "Como funciona o inventario?",
+    "Atendimento juridico online",
+    "Empresas tambem precisam revisar contratos"
+  ],
+  "faq": [
+    {
+      "pergunta": "A iA4Tube cria posts para advocacia sem parecer sensacionalista?",
+      "resposta": "Sim. Os textos podem ser informativos, claros e profissionais."
+    },
+    {
+      "pergunta": "Posso divulgar areas de atuacao?",
+      "resposta": "Sim. Direito trabalhista, familia, previdenciario, empresarial e outras areas podem ter posts proprios."
+    },
+    {
+      "pergunta": "Serve para conteudo educativo?",
+      "resposta": "Sim. E uma boa forma de explicar duvidas comuns e fortalecer autoridade."
+    }
+  ]
+}

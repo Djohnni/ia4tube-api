@@ -1,0 +1,134 @@
+{
+  "nome_nicho": "Mecanica",
+  "slug": "mecanica",
+  "titulo_seo": "Arte para Mecanica: Posts Profissionais em Poucos Minutos | iA4Tube",
+  "descricao_seo": "Crie arte para mecanica em poucos minutos com a iA4Tube. Gere posts profissionais para revisao, troca de oleo, freios, alinhamento, promocoes e agendamento.",
+  "h1": "Crie Artes Profissionais para sua Mecanica em Poucos Minutos",
+  "subtitulo": "A iA4Tube cria posts profissionais para mecanica usando a Inteligencia Artificial da iA4Tube. Voce informa o servico ou promocao e recebe a arte com descricao pronta para postar.",
+  "chamada_superior": "Artes prontas para divulgar sua mecanica",
+  "nota_cta": "Informe o servico ou promocao. A iA4Tube monta a arte e a descricao.",
+  "service_type": "Criacao de artes para mecanica com a Inteligencia Artificial da iA4Tube",
+  "secoes": {
+    "dores_titulo": "Por que sua mecanica precisa divulgar melhor",
+    "dores_intro": "Mecanica vende confianca e manutencao preventiva. Posts claros ajudam a lembrar o cliente de revisar o carro antes do problema aparecer.",
+    "cria_titulo": "O que a iA4Tube cria para mecanicas",
+    "cria_intro": "Voce informa o servico, pacote, promocao ou foto. A iA4Tube monta a arte e a descricao para publicar.",
+    "exemplos_titulo": "Exemplos de artes para mecanica",
+    "como_funciona_titulo": "Como funciona",
+    "beneficios_titulo": "Beneficios"
+  },
+  "dores_cliente": [
+    {
+      "titulo": "Cliente adia manutencao",
+      "texto": "Posts ajudam a lembrar de revisao, oleo, freio e seguranca."
+    },
+    {
+      "titulo": "Servico tecnico precisa ser explicado",
+      "texto": "Uma arte simples mostra o problema e chama para avaliacao."
+    },
+    {
+      "titulo": "Confianca e decisiva",
+      "texto": "Oficina com comunicacao profissional passa mais seguranca."
+    }
+  ],
+  "exemplos_objetivos": [
+    "Troca de oleo",
+    "Revisao antes de viagem",
+    "Freios fazendo barulho",
+    "Alinhamento e balanceamento",
+    "Suspensao",
+    "Diagnostico automotivo",
+    "Bateria e eletrica",
+    "Check-up preventivo"
+  ],
+  "exemplos_artes": [
+    {
+      "titulo": "Revisao preventiva",
+      "texto": "Post para lembrar o cliente antes de viagem, feriado ou uso intenso."
+    },
+    {
+      "titulo": "Servico em destaque",
+      "texto": "Arte para oleo, freios, pneus, suspensao ou diagnostico."
+    },
+    {
+      "titulo": "Alerta de seguranca",
+      "texto": "Conteudo para sintomas do carro e chamada para avaliacao."
+    }
+  ],
+  "como_funciona": [
+    {
+      "titulo": "Informe o servico",
+      "texto": "Digite servico, pacote ou promocao."
+    },
+    {
+      "titulo": "Adicione foto ou logo",
+      "texto": "Envie foto da oficina ou logo, se quiser."
+    },
+    {
+      "titulo": "A iA4Tube cria a arte",
+      "texto": "A iA4Tube cria a arte em poucos minutos."
+    },
+    {
+      "titulo": "Publique no celular",
+      "texto": "Baixe a imagem e copie a descricao."
+    }
+  ],
+  "beneficios": [
+    "Arte pronta em poucos minutos.",
+    "Descricao pronta para postar.",
+    "Ajuda a divulgar servicos automotivos.",
+    "Funciona direto pelo celular.",
+    "Inclui ideias de posts alinhadas ao ramo.",
+    "Ajuda a criar campanhas sazonais com linguagem simples."
+  ],
+  "ctas": {
+    "principal": "Criar Arte para Minha Mecanica",
+    "url": "/app.html?ramo=Mecanica",
+    "meio_titulo": "Quer divulgar um servico automotivo?",
+    "meio_texto": "Crie uma arte profissional em poucos minutos com a iA4Tube.",
+    "final_titulo": "Pronto para divulgar sua mecanica?",
+    "final_texto": "Crie uma arte profissional para atrair clientes em poucos minutos com a iA4Tube."
+  },
+  "palavras_chave": [
+    "arte para mecanica",
+    "post para mecanica",
+    "divulgacao de mecanica",
+    "marketing para mecanica",
+    "criar arte para mecanica",
+    "inteligencia artificial para mecanica"
+  ],
+  "ideias_posts": [
+    "Troca de oleo",
+    "Revisao antes da viagem",
+    "Freio fazendo barulho",
+    "Alinhamento e balanceamento",
+    "Diagnostico automotivo"
+  ],
+  "campanhas_sazonais": [
+    "Revisao antes das ferias",
+    "Check-up antes de feriado",
+    "Volta de viagem",
+    "Mes da seguranca no transito",
+    "Campanha de troca de oleo"
+  ],
+  "exemplos_dia_a_dia": [
+    "Vai viajar? Revise seu carro",
+    "Seu freio esta fazendo barulho?",
+    "Troca de oleo com agendamento",
+    "Check-up preventivo pelo WhatsApp"
+  ],
+  "faq": [
+    {
+      "pergunta": "A iA4Tube cria posts para oficina mecanica?",
+      "resposta": "Sim. Ela cria artes para revisao, oleo, freios, suspensao, bateria e outros servicos."
+    },
+    {
+      "pergunta": "Serve para alertas de seguranca?",
+      "resposta": "Sim. Posts educativos ajudam o cliente a entender quando procurar a oficina."
+    },
+    {
+      "pergunta": "Posso divulgar promocao de servico?",
+      "resposta": "Sim. Pacotes, revisoes e agendamentos podem virar posts claros."
+    }
+  ]
+}

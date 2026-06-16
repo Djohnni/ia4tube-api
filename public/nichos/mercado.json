@@ -1,0 +1,134 @@
+{
+  "nome_nicho": "Mercado",
+  "slug": "mercado",
+  "titulo_seo": "Arte para Mercado: Posts Profissionais em Poucos Minutos | iA4Tube",
+  "descricao_seo": "Crie arte para mercado em poucos minutos com a iA4Tube. Gere posts profissionais para ofertas, hortifruti, carnes e produtos do dia.",
+  "h1": "Crie Artes Profissionais para Mercado em Poucos Minutos",
+  "subtitulo": "A iA4Tube cria posts profissionais para mercado usando a Inteligencia Artificial da iA4Tube. Voce informa ofertas, hortifruti, carnes e produtos do dia e recebe a arte com descricao pronta para postar.",
+  "chamada_superior": "Artes prontas para divulgar mercado",
+  "nota_cta": "Informe ofertas, hortifruti, carnes e produtos do dia. A iA4Tube monta a arte e a descricao.",
+  "service_type": "Criacao de artes para mercado com a Inteligencia Artificial da iA4Tube",
+  "secoes": {
+    "dores_titulo": "Por que mercado precisa divulgar melhor",
+    "dores_intro": "Mercado precisa aparecer na hora certa. Posts claros ajudam a mostrar precos, ofertas e produtos essenciais e chamar o cliente para agir.",
+    "cria_titulo": "O que a iA4Tube cria para Mercado",
+    "cria_intro": "Voce informa o que quer divulgar. A iA4Tube monta a arte e a descricao para publicar no Instagram, WhatsApp ou outras redes.",
+    "exemplos_titulo": "Exemplos de artes para Mercado",
+    "como_funciona_titulo": "Como funciona",
+    "beneficios_titulo": "Beneficios"
+  },
+  "dores_cliente": [
+    {
+      "titulo": "Oferta precisa ser vista",
+      "texto": "Arroz, feijao, carne, hortifruti e produtos do dia vendem mais quando aparecem."
+    },
+    {
+      "titulo": "Cliente compara preco",
+      "texto": "Post claro ajuda a mostrar promocao e atrair movimento."
+    },
+    {
+      "titulo": "Rotina pede frequencia",
+      "texto": "Mercado precisa comunicar ofertas toda semana."
+    }
+  ],
+  "exemplos_objetivos": [
+    "Oferta de arroz e feijao",
+    "Hortifruti da semana",
+    "Carnes para churrasco",
+    "Produtos de limpeza",
+    "Cesta basica",
+    "Promocao de fim de semana",
+    "Delivery de mercado",
+    "Encarte digital"
+  ],
+  "exemplos_artes": [
+    {
+      "titulo": "Ofertas da semana",
+      "texto": "Arte para produtos basicos, carnes, limpeza e bebidas."
+    },
+    {
+      "titulo": "Hortifruti fresco",
+      "texto": "Post para frutas, verduras, legumes e feira do dia."
+    },
+    {
+      "titulo": "Fim de semana",
+      "texto": "Divulgacao de churrasco, bebidas, combos e promocoes."
+    }
+  ],
+  "como_funciona": [
+    {
+      "titulo": "Informe o que quer divulgar",
+      "texto": "Digite produto, servico, promocao ou ideia da arte."
+    },
+    {
+      "titulo": "Adicione foto ou logo",
+      "texto": "Envie uma imagem se quiser deixar a arte mais personalizada."
+    },
+    {
+      "titulo": "A iA4Tube cria a arte",
+      "texto": "A iA4Tube cria a arte em poucos minutos."
+    },
+    {
+      "titulo": "Publique no celular",
+      "texto": "Baixe a imagem e copie a descricao."
+    }
+  ],
+  "beneficios": [
+    "Arte pronta em poucos minutos.",
+    "Descricao pronta para postar.",
+    "Funciona direto pelo celular.",
+    "Ajuda a divulgar precos, ofertas e produtos essenciais.",
+    "Inclui ideias de posts alinhadas ao ramo.",
+    "Ajuda a criar campanhas sazonais com linguagem simples."
+  ],
+  "ctas": {
+    "principal": "Criar Arte para Meu Mercado",
+    "url": "/app.html?ramo=Mercado",
+    "meio_titulo": "Quer divulgar oferta do dia hoje?",
+    "meio_texto": "Crie uma arte profissional em poucos minutos com a iA4Tube.",
+    "final_titulo": "Pronto para divulgar mercado?",
+    "final_texto": "Crie uma arte profissional para atrair mais clientes em poucos minutos com a iA4Tube."
+  },
+  "palavras_chave": [
+    "arte para mercado",
+    "post para mercado",
+    "divulgacao de mercado",
+    "marketing para mercado",
+    "criar arte para mercado",
+    "inteligencia artificial para mercado"
+  ],
+  "ideias_posts": [
+    "Oferta de arroz e feijao",
+    "Hortifruti fresco",
+    "Carnes para churrasco",
+    "Encarte da semana",
+    "Delivery de mercado"
+  ],
+  "campanhas_sazonais": [
+    "Churrasco de fim de semana",
+    "Volta as aulas",
+    "Natal com ceia",
+    "Pascoa com chocolates",
+    "Ofertas de pagamento do mes"
+  ],
+  "exemplos_dia_a_dia": [
+    "Ofertas validas hoje",
+    "Hortifruti fresquinho",
+    "Carne para churrasco no fim de semana",
+    "Compre pelo WhatsApp"
+  ],
+  "faq": [
+    {
+      "pergunta": "A iA4Tube cria arte para ofertas de mercado?",
+      "resposta": "Sim. Voce informa produtos, preco e validade da oferta."
+    },
+    {
+      "pergunta": "Serve para encarte digital?",
+      "resposta": "Sim. Pode ajudar a divulgar categorias e promocoes da semana."
+    },
+    {
+      "pergunta": "Posso divulgar delivery?",
+      "resposta": "Sim. A arte pode chamar para pedidos pelo WhatsApp."
+    }
+  ]
+}

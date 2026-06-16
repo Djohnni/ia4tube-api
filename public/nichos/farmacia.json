@@ -1,0 +1,134 @@
+{
+  "nome_nicho": "Farmacia",
+  "slug": "farmacia",
+  "titulo_seo": "Arte para Farmacia: Posts Profissionais em Poucos Minutos | iA4Tube",
+  "descricao_seo": "Crie arte para farmacia em poucos minutos com a iA4Tube. Gere posts profissionais para medicamentos, perfumaria, ofertas e entrega.",
+  "h1": "Crie Artes Profissionais para Farmacia em Poucos Minutos",
+  "subtitulo": "A iA4Tube cria posts profissionais para farmacia usando a Inteligencia Artificial da iA4Tube. Voce informa medicamentos, perfumaria, ofertas e entrega e recebe a arte com descricao pronta para postar.",
+  "chamada_superior": "Artes prontas para divulgar farmacia",
+  "nota_cta": "Informe medicamentos, perfumaria, ofertas e entrega. A iA4Tube monta a arte e a descricao.",
+  "service_type": "Criacao de artes para farmacia com a Inteligencia Artificial da iA4Tube",
+  "secoes": {
+    "dores_titulo": "Por que farmacia precisa divulgar melhor",
+    "dores_intro": "Farmacia precisa aparecer na hora certa. Posts claros ajudam a mostrar ofertas, cuidados e entrega e chamar o cliente para agir.",
+    "cria_titulo": "O que a iA4Tube cria para Farmacia",
+    "cria_intro": "Voce informa o que quer divulgar. A iA4Tube monta a arte e a descricao para publicar no Instagram, WhatsApp ou outras redes.",
+    "exemplos_titulo": "Exemplos de artes para Farmacia",
+    "como_funciona_titulo": "Como funciona",
+    "beneficios_titulo": "Beneficios"
+  },
+  "dores_cliente": [
+    {
+      "titulo": "Cliente busca praticidade",
+      "texto": "Ofertas, entrega e atendimento precisam aparecer com clareza."
+    },
+    {
+      "titulo": "Produtos mudam por necessidade",
+      "texto": "Perfumaria, cuidados e medicamentos de rotina precisam ser lembrados."
+    },
+    {
+      "titulo": "Confianca e essencial",
+      "texto": "Comunicacao profissional reforca cuidado e atendimento responsavel."
+    }
+  ],
+  "exemplos_objetivos": [
+    "Oferta de perfumaria",
+    "Entrega de medicamentos",
+    "Vitaminas e suplementos",
+    "Cuidados com gripe",
+    "Protetor solar",
+    "Fraldas e higiene",
+    "Promocao do mes",
+    "Chamada para WhatsApp"
+  ],
+  "exemplos_artes": [
+    {
+      "titulo": "Oferta da semana",
+      "texto": "Post para perfumaria, higiene, vitaminas ou produtos sazonais."
+    },
+    {
+      "titulo": "Entrega",
+      "texto": "Arte para delivery, WhatsApp e praticidade no atendimento."
+    },
+    {
+      "titulo": "Cuidados de saude",
+      "texto": "Conteudo para lembrar prevencao, rotina e bem-estar."
+    }
+  ],
+  "como_funciona": [
+    {
+      "titulo": "Informe o que quer divulgar",
+      "texto": "Digite produto, servico, promocao ou ideia da arte."
+    },
+    {
+      "titulo": "Adicione foto ou logo",
+      "texto": "Envie uma imagem se quiser deixar a arte mais personalizada."
+    },
+    {
+      "titulo": "A iA4Tube cria a arte",
+      "texto": "A iA4Tube cria a arte em poucos minutos."
+    },
+    {
+      "titulo": "Publique no celular",
+      "texto": "Baixe a imagem e copie a descricao."
+    }
+  ],
+  "beneficios": [
+    "Arte pronta em poucos minutos.",
+    "Descricao pronta para postar.",
+    "Funciona direto pelo celular.",
+    "Ajuda a divulgar ofertas, cuidados e entrega.",
+    "Inclui ideias de posts alinhadas ao ramo.",
+    "Ajuda a criar campanhas sazonais com linguagem simples."
+  ],
+  "ctas": {
+    "principal": "Criar Arte para Minha Farmacia",
+    "url": "/app.html?ramo=Farmacia",
+    "meio_titulo": "Quer divulgar oferta da farmacia hoje?",
+    "meio_texto": "Crie uma arte profissional em poucos minutos com a iA4Tube.",
+    "final_titulo": "Pronto para divulgar farmacia?",
+    "final_texto": "Crie uma arte profissional para atrair mais clientes em poucos minutos com a iA4Tube."
+  },
+  "palavras_chave": [
+    "arte para farmacia",
+    "post para farmacia",
+    "divulgacao de farmacia",
+    "marketing para farmacia",
+    "criar arte para farmacia",
+    "inteligencia artificial para farmacia"
+  ],
+  "ideias_posts": [
+    "Oferta de perfumaria",
+    "Entrega pelo WhatsApp",
+    "Vitaminas e suplementos",
+    "Protetor solar",
+    "Cuidados de inverno"
+  ],
+  "campanhas_sazonais": [
+    "Inverno com cuidados de gripe",
+    "Verao com protetor solar",
+    "Volta as aulas com higiene",
+    "Dia das Maes com perfumaria",
+    "Black Friday de farmacia"
+  ],
+  "exemplos_dia_a_dia": [
+    "Peca pelo WhatsApp e receba em casa",
+    "Oferta de vitaminas",
+    "Protetor solar em destaque",
+    "Perfumaria com desconto"
+  ],
+  "faq": [
+    {
+      "pergunta": "A iA4Tube cria posts para farmacia?",
+      "resposta": "Sim. Produtos, perfumaria, ofertas e entrega podem virar artes profissionais."
+    },
+    {
+      "pergunta": "Serve para divulgar delivery?",
+      "resposta": "Sim. A chamada pode reforcar WhatsApp, entrega e praticidade."
+    },
+    {
+      "pergunta": "Posso divulgar produtos sazonais?",
+      "resposta": "Sim. Gripe, protetor solar, higiene e vitaminas funcionam bem em campanhas."
+    }
+  ]
+}

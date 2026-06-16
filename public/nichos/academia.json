@@ -1,0 +1,134 @@
+{
+  "nome_nicho": "Academia",
+  "slug": "academia",
+  "titulo_seo": "Arte para Academia: Posts Profissionais em Poucos Minutos | iA4Tube",
+  "descricao_seo": "Crie arte para academia em poucos minutos com a iA4Tube. Gere posts profissionais para planos, aulas, treinos, matriculas, desafios e promocoes.",
+  "h1": "Crie Artes Profissionais para sua Academia em Poucos Minutos",
+  "subtitulo": "A iA4Tube cria posts profissionais para academia usando a Inteligencia Artificial da iA4Tube. Voce informa o plano, aula ou promocao e recebe a arte com descricao pronta para postar.",
+  "chamada_superior": "Artes prontas para divulgar sua academia",
+  "nota_cta": "Informe o plano, aula ou promocao. A iA4Tube monta a arte e a descricao.",
+  "service_type": "Criacao de artes para academia com a Inteligencia Artificial da iA4Tube",
+  "secoes": {
+    "dores_titulo": "Por que sua academia precisa divulgar melhor",
+    "dores_intro": "Academia precisa aparecer na rotina do aluno. Um post bom ajuda a vender matriculas, planos, aulas coletivas e desafios.",
+    "cria_titulo": "O que a iA4Tube cria para academias",
+    "cria_intro": "Voce informa o plano, modalidade, promocao ou foto da academia. A iA4Tube monta a arte e a descricao para publicar.",
+    "exemplos_titulo": "Exemplos de artes para academia",
+    "como_funciona_titulo": "Como funciona",
+    "beneficios_titulo": "Beneficios"
+  },
+  "dores_cliente": [
+    {
+      "titulo": "Matricula precisa de motivacao",
+      "texto": "O aluno entra quando entende o beneficio e sente vontade de comecar."
+    },
+    {
+      "titulo": "Planos precisam parecer claros",
+      "texto": "Mensalidade, horarios e modalidades vendem melhor com comunicacao simples."
+    },
+    {
+      "titulo": "Retencao tambem depende de conteudo",
+      "texto": "Posts de treino, desafios e rotina ajudam alunos atuais a continuar ativos."
+    }
+  ],
+  "exemplos_objetivos": [
+    "Matricula com taxa zero",
+    "Plano mensal ou trimestral",
+    "Aula experimental gratis",
+    "Treino funcional",
+    "Musculacao para iniciantes",
+    "Desafio de 30 dias",
+    "Horario de aulas coletivas",
+    "Segunda-feira do recome?o"
+  ],
+  "exemplos_artes": [
+    {
+      "titulo": "Campanha de matricula",
+      "texto": "Post para novos alunos com oferta, beneficios e chamada para WhatsApp."
+    },
+    {
+      "titulo": "Grade de aulas",
+      "texto": "Arte para funcional, spinning, danca, luta, alongamento ou personal."
+    },
+    {
+      "titulo": "Motivacao da semana",
+      "texto": "Conteudo para lembrar o aluno de treinar e manter frequencia."
+    }
+  ],
+  "como_funciona": [
+    {
+      "titulo": "Informe a oferta",
+      "texto": "Digite plano, aula, horario ou promocao."
+    },
+    {
+      "titulo": "Adicione foto ou logo",
+      "texto": "Envie foto da academia, equipe ou logo, se quiser."
+    },
+    {
+      "titulo": "A iA4Tube cria a arte",
+      "texto": "A iA4Tube cria a arte em poucos minutos."
+    },
+    {
+      "titulo": "Publique no celular",
+      "texto": "Baixe a imagem e copie a descricao."
+    }
+  ],
+  "beneficios": [
+    "Arte pronta em poucos minutos.",
+    "Descricao pronta para postar.",
+    "Ajuda a divulgar planos e aulas.",
+    "Funciona direto pelo celular.",
+    "Inclui ideias de posts alinhadas ao ramo.",
+    "Ajuda a criar campanhas sazonais com linguagem simples."
+  ],
+  "ctas": {
+    "principal": "Criar Arte para Minha Academia",
+    "url": "/app.html?ramo=Academia",
+    "meio_titulo": "Quer divulgar uma promocao de matricula?",
+    "meio_texto": "Crie uma arte profissional em poucos minutos com a iA4Tube.",
+    "final_titulo": "Pronto para divulgar sua academia?",
+    "final_texto": "Crie uma arte profissional para atrair alunos em poucos minutos com a iA4Tube."
+  },
+  "palavras_chave": [
+    "arte para academia",
+    "post para academia",
+    "divulgacao de academia",
+    "marketing para academia",
+    "criar arte para academia",
+    "inteligencia artificial para academia"
+  ],
+  "ideias_posts": [
+    "Matricula com taxa zero",
+    "Aula experimental gratuita",
+    "Grade de aulas coletivas",
+    "Desafio de 30 dias",
+    "Plano trimestral com desconto"
+  ],
+  "campanhas_sazonais": [
+    "Projeto verao",
+    "Volta aos treinos em janeiro",
+    "Segunda-feira do recome?o",
+    "Black Friday de matriculas",
+    "Dia do desafio fitness"
+  ],
+  "exemplos_dia_a_dia": [
+    "Comece hoje seu treino",
+    "Aula funcional as 19h",
+    "Plano mensal com acompanhamento",
+    "Treino para iniciantes sem vergonha de comecar"
+  ],
+  "faq": [
+    {
+      "pergunta": "A iA4Tube cria posts para matriculas?",
+      "resposta": "Sim. Voce informa plano, promocao ou aula experimental, e recebe arte pronta para publicar."
+    },
+    {
+      "pergunta": "Serve para divulgar aulas coletivas?",
+      "resposta": "Sim. Funciona para funcional, spinning, luta, danca, musculacao e outras modalidades."
+    },
+    {
+      "pergunta": "Posso usar fotos da academia?",
+      "resposta": "Sim. Fotos do espaco, aparelhos e equipe ajudam a personalizar a arte."
+    }
+  ]
+}

@@ -16,6 +16,7 @@ const graphicMaterialsService = require("./src/company-graphic-materials/materia
 const carouselService = require("./src/company-carousels/carousels.service");
 const monthlyPlanningService = require("./src/company-monthly-planning/planning.service");
 const fcmService = require("./src/notifications/fcm.service");
+const seoNichePages = require("./src/seo/niche-page-renderer");
 
 const app = express();
 
@@ -50,6 +51,7 @@ const SUPORTE_ABERTAS_FILE = path.join(DATA_DIR, "suporte_conversas_abertas.json
 const SUPORTE_FINALIZADAS_FILE = path.join(DATA_DIR, "suporte_conversas_finalizadas.json");
 const ANALYTICS_DIR = path.join(DATA_DIR, "analytics");
 const EVENTOS_CLIENTES_FILE = path.join(DATA_DIR, "eventos_clientes.json");
+const SEO_NICHES_DIR = path.join(__dirname, "public", "nichos");
 
 const CLIENTES_TESTE = [
   "Los Hermanos",
@@ -4837,6 +4839,120 @@ app.post("/bot/suporte/limpar-finalizadas", auth, (req, res) => {
   } catch (e) {
     return res.status(500).json({ ok: false, error: "Erro ao limpar suporte finalizado" });
   }
+});
+
+function escapeXml(value) {
+  return String(value ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&apos;");
+}
+
+function listSeoNicheSlugs() {
+  if (!fs.existsSync(SEO_NICHES_DIR)) {
+    return [];
+  }
+
+  return fs.readdirSync(SEO_NICHES_DIR)
+    .filter((fileName) => fileName.endsWith(".json") && !fileName.startsWith("_"))
+    .map((fileName) => {
+      const expectedSlug = path.basename(fileName, ".json");
+      const filePath = path.join(SEO_NICHES_DIR, fileName);
+
+      try {
+        const data = JSON.parse(fs.readFileSync(filePath, "utf8"));
+        const slug = String(data.slug || "").trim().toLowerCase();
+
+        if (slug !== expectedSlug) {
+          console.warn("[seo] sitemap ignorou nicho com slug divergente", {
+            fileName,
+            expectedSlug,
+            slug
+          });
+          return null;
+        }
+
+        if (!/^[a-z0-9-]{2,80}$/.test(slug)) {
+          console.warn("[seo] sitemap ignorou nicho com slug invalido", {
+            fileName,
+            slug
+          });
+          return null;
+        }
+
+        return slug;
+      } catch (e) {
+        console.warn("[seo] sitemap ignorou JSON invalido", {
+          fileName,
+          message: e?.message
+        });
+        return null;
+      }
+    })
+    .filter(Boolean)
+    .sort();
+}
+
+app.get("/sitemap.xml", (req, res) => {
+  const baseUrl = "https://ia4tube.com";
+  const urls = [
+    { loc: `${baseUrl}/`, changefreq: "daily", priority: "1.0" },
+    ...listSeoNicheSlugs().map((slug) => ({
+      loc: `${baseUrl}/${slug}`,
+      changefreq: "weekly",
+      priority: "0.8"
+    }))
+  ];
+
+  const body = `<?xml version="1.0" encoding="UTF-8"?>
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+${urls.map((item) => `  <url>
+    <loc>${escapeXml(item.loc)}</loc>
+    <changefreq>${escapeXml(item.changefreq)}</changefreq>
+    <priority>${escapeXml(item.priority)}</priority>
+  </url>`).join("\n")}
+</urlset>`;
+
+  return res.type("application/xml").send(body);
+});
+
+app.get("/robots.txt", (req, res) => {
+  return res.type("text/plain").send(`User-agent: *
+Allow: /
+
+Disallow: /login
+Disallow: /painel
+Disallow: /admin
+Disallow: /api
+
+Sitemap: https://ia4tube.com/sitemap.xml
+`);
+});
+
+app.get("/:nichoSlug", (req, res, next) => {
+  const slug = String(req.params.nichoSlug || "").trim().toLowerCase();
+
+  if (!/^[a-z0-9-]{2,80}$/.test(slug)) {
+    return next();
+  }
+
+  try {
+    const nicheData = seoNichePages.readNichePageData(SEO_NICHES_DIR, slug);
+
+    if (nicheData) {
+      return res.type("html").send(seoNichePages.renderNichePage(nicheData));
+    }
+  } catch (e) {
+    console.error("[seo] erro ao renderizar pagina de nicho", {
+      slug,
+      message: e?.message
+    });
+    return res.status(500).send("Erro ao carregar pagina de nicho");
+  }
+
+  return next();
 });
 
 app.use((err, req, res, next) => {
