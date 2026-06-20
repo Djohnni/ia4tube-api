@@ -29,6 +29,13 @@ const BALANCE_PACKAGES = {
   saldo_9990: { id: "saldo_9990", title: "Saldo IA4Tube - R$99,90", amount: 99.90, credit: 99.90 }
 };
 
+const SINGLE_ART_PURCHASE = {
+  id: "arte_avulsa_199",
+  title: "Arte avulsa IA4Tube - R$1,99",
+  amount: 1.99,
+  quantity: 1
+};
+
 function normalizeId(value) {
   return String(value || "").trim().toLowerCase();
 }
@@ -49,11 +56,17 @@ function listBalancePackages() {
   return Object.values(BALANCE_PACKAGES);
 }
 
+function getSingleArtPurchase() {
+  return { ...SINGLE_ART_PURCHASE };
+}
+
 module.exports = {
   PLANS,
   BALANCE_PACKAGES,
+  SINGLE_ART_PURCHASE,
   getPlan,
   listPlans,
   getBalancePackage,
-  listBalancePackages
+  listBalancePackages,
+  getSingleArtPurchase
 };

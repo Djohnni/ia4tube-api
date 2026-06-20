@@ -6,6 +6,7 @@ const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
 const multer = require("multer");
 const archiver = require("archiver");
+const crypto = require("crypto");
 const productsRegistry = require("./src/products");
 const orderStorage = require("./src/orders/order.storage");
 const orderStatus = require("./src/orders/order.status");
@@ -38,7 +39,8 @@ const BOT_RUNNER_TOKEN = process.env.BOT_RUNNER_TOKEN || "";
 const MP_ACCESS_TOKEN = process.env.MP_ACCESS_TOKEN || "";
 const MP_NOTIFICATION_URL = process.env.MP_NOTIFICATION_URL || "https://ia4tube-api.onrender.com/webhook/mercadopago";
 const PUBLIC_API_BASE_URL = (process.env.PUBLIC_API_BASE_URL || "https://ia4tube-api.onrender.com").replace(/\/+$/, "");
-const EMPRESA_ARTE_AVULSA_VALOR = productsRegistry.getProductPrice("arte_empresa") || 9.90;
+const ARTE_AVULSA_COMPRA = billingPlans.getSingleArtPurchase();
+const EMPRESA_ARTE_AVULSA_VALOR = Number(ARTE_AVULSA_COMPRA.amount || productsRegistry.getProductPrice("arte_empresa") || 1.99);
 const MP_PROCESSANDO_RETRY_MS = 10 * 60 * 1000;
 const MONTHLY_PLANNING_NOTIFICATIONS_INTERVAL_MS = Math.max(
   30 * 1000,
@@ -904,6 +906,11 @@ app.post("/auth/google", async (req, res) => {
         plano: 0,
         saldo_mensal: 0,
         saldo_extra: 0,
+        artes_avulsas_restantes: 0,
+        artes_avulsas_usadas: 0,
+        artes_avulsas_total_compradas: 0,
+        artes_avulsas_compras: [],
+        artes_avulsas_consumos: [],
         usados_no_ciclo: 0,
         ciclo_mes: nowYYYYMM(),
         ativo: true
@@ -930,6 +937,7 @@ app.post("/auth/google", async (req, res) => {
       plano: c.plano,
       saldo_mensal: Number(c.saldo_mensal || 0),
       saldo_extra: Number(c.saldo_extra || 0),
+      ...billingService.getStandaloneArtStatus(c),
       saldo: Number(c.saldo_mensal || 0) + Number(c.saldo_extra || 0),
       usados_no_ciclo: c.usados_no_ciclo
     });
@@ -973,6 +981,11 @@ app.post("/auth/auto-register", (req, res) => {
       plano: 0,
       saldo_mensal: 0,
       saldo_extra: 0,
+      artes_avulsas_restantes: 0,
+      artes_avulsas_usadas: 0,
+      artes_avulsas_total_compradas: 0,
+      artes_avulsas_compras: [],
+      artes_avulsas_consumos: [],
       usados_no_ciclo: 0,
       ciclo_mes: nowYYYYMM(),
       ativo: true,
@@ -993,6 +1006,7 @@ app.post("/auth/auto-register", (req, res) => {
       plano: novo.plano,
       saldo_mensal: Number(novo.saldo_mensal || 0),
       saldo_extra: Number(novo.saldo_extra || 0),
+      ...billingService.getStandaloneArtStatus(novo),
       saldo: Number(novo.saldo_mensal || 0) + Number(novo.saldo_extra || 0),
       usados_no_ciclo: novo.usados_no_ciclo
     });
@@ -1036,6 +1050,11 @@ app.post("/auth/register", (req, res) => {
     plano: 0,
     saldo_mensal: 0,
     saldo_extra: 0,
+    artes_avulsas_restantes: 0,
+    artes_avulsas_usadas: 0,
+    artes_avulsas_total_compradas: 0,
+    artes_avulsas_compras: [],
+    artes_avulsas_consumos: [],
     usados_no_ciclo: 0,
     ciclo_mes: nowYYYYMM(),
     ativo: true
@@ -1060,6 +1079,7 @@ app.post("/auth/register", (req, res) => {
     token,
     nome_time: novo.nome_time,
     plano: novo.plano,
+    ...billingService.getStandaloneArtStatus(novo),
     usados_no_ciclo: novo.usados_no_ciclo
   });
 });
@@ -1129,6 +1149,7 @@ app.post("/auth/finalizar-conta-auto", auth, (req, res) => {
       plano: clienteAtual.plano,
       saldo_mensal: Number(clienteAtual.saldo_mensal || 0),
       saldo_extra: Number(clienteAtual.saldo_extra || 0),
+      ...billingService.getStandaloneArtStatus(clienteAtual),
       saldo: Number(clienteAtual.saldo_mensal || 0) + Number(clienteAtual.saldo_extra || 0),
       usados_no_ciclo: clienteAtual.usados_no_ciclo
     });
@@ -1183,6 +1204,7 @@ app.post("/auth/login", (req, res) => {
     plano: c.plano,
     saldo_mensal: Number(c.saldo_mensal || 0),
     saldo_extra: Number(c.saldo_extra || 0),
+    ...billingService.getStandaloneArtStatus(c),
     saldo: Number(c.saldo_mensal || 0) + Number(c.saldo_extra || 0),
     usados_no_ciclo: c.usados_no_ciclo
   });
@@ -1230,6 +1252,12 @@ app.get("/me", auth, (req, res) => {
     artes_mensais_total: billing.artes_mensais_total,
     artes_mensais_usadas: billing.artes_mensais_usadas,
     artes_mensais_restantes: billing.artes_mensais_restantes,
+    artes_avulsas_restantes: billing.artes_avulsas_restantes,
+    artes_avulsas_usadas: billing.artes_avulsas_usadas,
+    artes_avulsas_total_compradas: billing.artes_avulsas_total_compradas,
+    arte_avulsa_valor: billing.arte_avulsa_valor,
+    arte_avulsa_produto_id: billing.arte_avulsa_produto_id,
+    arte_avulsa_titulo: billing.arte_avulsa_titulo,
     saldo_mensal: Number(c.saldo_mensal || 0),
     saldo_extra: Number(c.saldo_extra || 0),
     saldo: saldoVisivel,
@@ -1430,6 +1458,77 @@ app.get("/billing/status", auth, (req, res) => {
     ...billingService.getBillingStatus(c)
   });
 });
+
+function createArteAvulsaPurchaseId(whatsapp) {
+  const cleanWhatsapp = String(whatsapp || "").replace(/\W+/g, "").slice(0, 32) || "cliente";
+  return `arte_avulsa_${cleanWhatsapp}_${Date.now()}_${crypto.randomBytes(4).toString("hex")}`;
+}
+
+async function criarArteAvulsaPixHandler(req, res) {
+  try {
+    const whatsapp = req.user.whatsapp;
+    const clientes = readClientes();
+    const c = clientes[whatsapp];
+
+    if (!c) {
+      return res.status(404).json({ ok: false, error: "Cliente nao encontrado" });
+    }
+
+    const produto = billingPlans.getSingleArtPurchase();
+    const purchaseId = createArteAvulsaPurchaseId(whatsapp);
+
+    const result = await createMercadoPagoPixPayment({
+      amount: produto.amount,
+      description: produto.title,
+      payerKey: whatsapp,
+      externalReference: `arte_avulsa_pix|${whatsapp}|${purchaseId}`,
+      metadata: {
+        tipo: "arte_avulsa_pix",
+        whatsapp,
+        purchase_id: purchaseId,
+        produto_id: produto.id,
+        quantidade: Number(produto.quantity || 1),
+        valor_unitario: Number(produto.amount),
+        valor_pago: Number(produto.amount)
+      },
+      idempotencyKey: `arte_avulsa_pix_${purchaseId}`
+    });
+
+    billingService.recordStandaloneArtPurchasePending(c, {
+      purchaseId,
+      paymentId: String(result.data.id || ""),
+      amount: Number(produto.amount),
+      quantity: Number(produto.quantity || 1),
+      createdAt: new Date().toISOString()
+    });
+    clientes[whatsapp] = c;
+    writeClientes(clientes);
+
+    return res.json({
+      ok: true,
+      pix_copia_cola: result.pixCopiaCola,
+      qr_code_base64: result.qrCodeBase64,
+      ticket_url: result.ticketUrl,
+      payment_id: result.data.id,
+      purchase_id: purchaseId,
+      tipo: "arte_avulsa_pix",
+      produto_id: produto.id,
+      valor_pago: Number(produto.amount),
+      quantidade: Number(produto.quantity || 1),
+      cta_label: "Comprar 1 arte por R$ 1,99",
+      artes_avulsas_restantes: Number(c.artes_avulsas_restantes || 0)
+    });
+  } catch (e) {
+    return res.status(e.statusCode || 500).json({
+      ok: false,
+      error: e.message || "Erro interno ao gerar Pix da arte avulsa",
+      detalhe: e.detail
+    });
+  }
+}
+
+app.post("/billing/arte-avulsa/pix", auth, criarArteAvulsaPixHandler);
+app.post("/billing/artes-avulsas/pix", auth, criarArteAvulsaPixHandler);
 
 app.post("/billing/saldo/pix", auth, async (req, res) => {
   try {
@@ -1860,6 +1959,75 @@ app.post("/webhook/mercadopago", async (req, res) => {
         whatsapp,
         plan_id: plan.id,
         plano_status: resultadoPlano.status,
+        status: pagamento.status,
+        criado_em: new Date().toISOString()
+      };
+      writeMpProcessados(processados);
+
+      return res.json({ ok: true });
+    }
+
+    if (tipo === "arte_avulsa_pix") {
+      const externalParts = external.split("|");
+      const whatsapp = String(pagamento.metadata?.whatsapp || externalParts[1] || "").trim();
+      const purchaseId = String(pagamento.metadata?.purchase_id || externalParts[2] || "").trim();
+      const produto = billingPlans.getSingleArtPurchase();
+      const valorPago = billingService.roundMoney(pagamento.transaction_amount || pagamento.metadata?.valor_pago || 0);
+      const valorEsperado = billingService.roundMoney(produto.amount);
+
+      if (!whatsapp || !purchaseId || valorPago !== valorEsperado) {
+        processados = readMpProcessados();
+        processados[paymentId] = {
+          tipo: "arte_avulsa_pix",
+          whatsapp,
+          purchase_id: purchaseId,
+          valor_pago: valorPago,
+          valor_esperado: valorEsperado,
+          status: "erro_dados_ou_valor_invalido",
+          criado_em: new Date().toISOString()
+        };
+        writeMpProcessados(processados);
+        return res.json({ ok: true });
+      }
+
+      const clientes = readClientes();
+      const c = clientes[whatsapp];
+
+      if (!c) {
+        processados = readMpProcessados();
+        processados[paymentId] = {
+          tipo: "arte_avulsa_pix",
+          whatsapp,
+          purchase_id: purchaseId,
+          status: "cliente_nao_encontrado",
+          criado_em: new Date().toISOString()
+        };
+        writeMpProcessados(processados);
+        return res.json({ ok: true });
+      }
+
+      const credito = billingService.creditStandaloneArtPurchase(c, {
+        purchaseId,
+        paymentId: String(paymentId),
+        amount: valorPago,
+        quantity: Number(produto.quantity || 1),
+        paidAt: pagamento.date_approved || pagamento.date_last_updated || new Date().toISOString()
+      });
+
+      clientes[whatsapp] = c;
+      writeClientes(clientes);
+
+      processados = readMpProcessados();
+      processados[paymentId] = {
+        tipo: "arte_avulsa_pix",
+        whatsapp,
+        purchase_id: purchaseId,
+        produto_id: produto.id,
+        quantidade: Number(produto.quantity || 1),
+        valor_pago: valorPago,
+        creditado: credito.credited === true,
+        duplicado: credito.duplicate === true,
+        artes_avulsas_restantes: Number(c.artes_avulsas_restantes || 0),
         status: pagamento.status,
         criado_em: new Date().toISOString()
       };
@@ -3101,10 +3269,14 @@ function criarPedidoHandler(categoria) {
         return res.status(402).json({
           ok: false,
           code: "billing_required",
-          error: "Assine um plano ou adicione saldo para criar sua arte.",
+          error: "Compre 1 arte avulsa por R$ 1,99 ou assine um plano para criar sua arte.",
           required_amount: cobrancaEmpresa.required_amount,
+          arte_avulsa_valor: EMPRESA_ARTE_AVULSA_VALOR,
+          arte_avulsa_cta: "Comprar 1 arte por R$ 1,99",
+          arte_avulsa_endpoint: "/billing/arte-avulsa/pix",
           saldo_extra: cobrancaEmpresa.saldo_extra,
           artes_mensais_restantes: cobrancaEmpresa.artes_mensais_restantes,
+          artes_avulsas_restantes: cobrancaEmpresa.artes_avulsas_restantes,
           plano_status: cobrancaEmpresa.plano_status
         });
       }
@@ -3124,10 +3296,17 @@ function criarPedidoHandler(categoria) {
     if (isArteEmpresa) {
       billingService.applyResolvedCompanyArtCharge(c, cobrancaEmpresa, {
         custoPedido: custoEfetivoPedido,
-        mesAtual
+        mesAtual,
+        pedidoId: id
       });
       draft.pedido.cobranca_origem = cobrancaEmpresa.source;
-      draft.pedido.valor_cobrado = cobrancaEmpresa.source === "saldo_extra" ? custoEfetivoPedido : 0;
+      draft.pedido.valor_cobrado = cobrancaEmpresa.source === "saldo_extra" || cobrancaEmpresa.source === "arte_avulsa"
+        ? Number(cobrancaEmpresa.amount || custoEfetivoPedido)
+        : 0;
+      if (cobrancaEmpresa.source === "arte_avulsa") {
+        draft.pedido.tipo_compra = "avulsa";
+        draft.pedido.beneficios_plano_aplicados = false;
+      }
       draft.pedido.plano_id = cobrancaEmpresa.source === "plano" ? cobrancaEmpresa.planId : "";
       draft.pedido.plano_ciclo = cobrancaEmpresa.source === "plano" ? cobrancaEmpresa.planCycle : "";
       draft.pedido.pagamento_pendente = false;

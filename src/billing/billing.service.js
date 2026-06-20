@@ -102,6 +102,42 @@ function scheduleNextPlanCycle(cliente, plan, { paymentId, paidAt, currentRenewa
   return true;
 }
 
+function ensureStandaloneArtFields(cliente) {
+  if (!cliente || typeof cliente !== "object") return cliente;
+
+  cliente.artes_avulsas_restantes = Math.max(0, Number(cliente.artes_avulsas_restantes || 0));
+  cliente.artes_avulsas_usadas = Math.max(0, Number(cliente.artes_avulsas_usadas || 0));
+  cliente.artes_avulsas_total_compradas = Math.max(0, Number(cliente.artes_avulsas_total_compradas || 0));
+  cliente.artes_avulsas_compras = Array.isArray(cliente.artes_avulsas_compras)
+    ? cliente.artes_avulsas_compras
+    : [];
+  cliente.artes_avulsas_consumos = Array.isArray(cliente.artes_avulsas_consumos)
+    ? cliente.artes_avulsas_consumos
+    : [];
+
+  return cliente;
+}
+
+function getStandaloneArtStatus(cliente) {
+  ensureStandaloneArtFields(cliente);
+  const product = plansRegistry.getSingleArtPurchase();
+
+  return {
+    artes_avulsas_restantes: Number(cliente?.artes_avulsas_restantes || 0),
+    artes_avulsas_usadas: Number(cliente?.artes_avulsas_usadas || 0),
+    artes_avulsas_total_compradas: Number(cliente?.artes_avulsas_total_compradas || 0),
+    arte_avulsa_valor: roundMoney(product.amount),
+    arte_avulsa_quantidade_compra: Number(product.quantity || 1),
+    arte_avulsa_produto_id: product.id,
+    arte_avulsa_titulo: product.title
+  };
+}
+
+function hasAvailableStandaloneArt(cliente) {
+  ensureStandaloneArtFields(cliente);
+  return Number(cliente.artes_avulsas_restantes || 0) > 0;
+}
+
 function refreshManualPlanCycle(cliente, now = new Date()) {
   let changed = false;
   const current = parseDate(now) || new Date();
@@ -134,6 +170,7 @@ function refreshManualPlanCycle(cliente, now = new Date()) {
 
 function getBillingStatus(cliente, now = new Date()) {
   refreshManualPlanCycle(cliente, now);
+  const standaloneArt = getStandaloneArtStatus(cliente);
 
   return {
     plano: cliente.plano || "",
@@ -149,6 +186,7 @@ function getBillingStatus(cliente, now = new Date()) {
     artes_mensais_total: Number(cliente.artes_mensais_total || 0),
     artes_mensais_usadas: Number(cliente.artes_mensais_usadas || 0),
     artes_mensais_restantes: Number(cliente.artes_mensais_restantes || 0),
+    ...standaloneArt,
     saldo_mensal: roundMoney(cliente.saldo_mensal || 0),
     saldo_extra: roundMoney(cliente.saldo_extra || 0),
     saldo: getAvailableBalance(cliente),
@@ -197,6 +235,7 @@ function formatInsufficientBalanceMessage(custoPedido) {
 
 function resolveCompanyArtCharge(cliente, { custoPedido, now = new Date() }) {
   const refresh = refreshManualPlanCycle(cliente, now);
+  const standaloneArt = plansRegistry.getSingleArtPurchase();
 
   if (hasAvailablePlanArt(cliente, now)) {
     return {
@@ -205,6 +244,15 @@ function resolveCompanyArtCharge(cliente, { custoPedido, now = new Date() }) {
       billingChanged: refresh.changed,
       planId: cliente.plano_atual || cliente.plano || "",
       planCycle: cliente.plano_ciclo || ""
+    };
+  }
+
+  if (hasAvailableStandaloneArt(cliente)) {
+    return {
+      allowed: true,
+      source: "arte_avulsa",
+      amount: roundMoney(standaloneArt.amount),
+      billingChanged: refresh.changed
     };
   }
 
@@ -221,19 +269,94 @@ function resolveCompanyArtCharge(cliente, { custoPedido, now = new Date() }) {
     allowed: false,
     code: "billing_required",
     billingChanged: refresh.changed,
-    required_amount: roundMoney(custoPedido),
+    required_amount: roundMoney(standaloneArt.amount),
     saldo_extra: roundMoney(cliente.saldo_extra || 0),
     artes_mensais_restantes: Number(cliente.artes_mensais_restantes || 0),
+    artes_avulsas_restantes: Number(cliente.artes_avulsas_restantes || 0),
     plano_status: cliente.plano_status || "none"
   };
 }
 
-function applyResolvedCompanyArtCharge(cliente, charge, { custoPedido, mesAtual }) {
+function recordStandaloneArtPurchasePending(cliente, { purchaseId, paymentId, amount, quantity = 1, createdAt } = {}) {
+  ensureStandaloneArtFields(cliente);
+
+  const purchaseKey = String(purchaseId || "").trim();
+  const paymentKey = String(paymentId || "").trim();
+  let entry = cliente.artes_avulsas_compras.find(item =>
+    (purchaseKey && String(item.purchase_id || "") === purchaseKey) ||
+    (paymentKey && String(item.payment_id || "") === paymentKey)
+  );
+
+  if (!entry) {
+    entry = {};
+    cliente.artes_avulsas_compras.push(entry);
+  }
+
+  Object.assign(entry, {
+    purchase_id: purchaseKey || entry.purchase_id || "",
+    payment_id: paymentKey || entry.payment_id || "",
+    status: entry.status === "approved" ? "approved" : "pending",
+    quantidade: Number(quantity || entry.quantidade || 1),
+    valor_pago: roundMoney(amount || entry.valor_pago || 0),
+    criado_em: entry.criado_em || createdAt || new Date().toISOString()
+  });
+
+  return entry;
+}
+
+function creditStandaloneArtPurchase(cliente, { purchaseId, paymentId, amount, quantity = 1, paidAt } = {}) {
+  ensureStandaloneArtFields(cliente);
+
+  const purchaseKey = String(purchaseId || "").trim();
+  const paymentKey = String(paymentId || "").trim();
+  const paid = paidAt || new Date().toISOString();
+  const existingApproved = cliente.artes_avulsas_compras.find(item =>
+    item?.status === "approved" &&
+    ((purchaseKey && String(item.purchase_id || "") === purchaseKey) ||
+      (paymentKey && String(item.payment_id || "") === paymentKey))
+  );
+
+  if (existingApproved) {
+    return { credited: false, duplicate: true, cliente, entry: existingApproved };
+  }
+
+  const entry = recordStandaloneArtPurchasePending(cliente, {
+    purchaseId,
+    paymentId,
+    amount,
+    quantity,
+    createdAt: paid
+  });
+  const qty = Math.max(1, Number(quantity || entry.quantidade || 1));
+
+  entry.status = "approved";
+  entry.aprovado_em = paid;
+  entry.valor_pago = roundMoney(amount || entry.valor_pago || 0);
+  entry.quantidade = qty;
+
+  cliente.artes_avulsas_total_compradas = Number(cliente.artes_avulsas_total_compradas || 0) + qty;
+  cliente.artes_avulsas_restantes = Number(cliente.artes_avulsas_restantes || 0) + qty;
+  cliente.ativo = true;
+
+  return { credited: true, duplicate: false, cliente, entry };
+}
+
+function applyResolvedCompanyArtCharge(cliente, charge, { custoPedido, mesAtual, pedidoId }) {
   if (!charge || charge.allowed !== true) return cliente;
 
   if (charge.source === "plano") {
     cliente.artes_mensais_usadas = Number(cliente.artes_mensais_usadas || 0) + 1;
     cliente.artes_mensais_restantes = Math.max(0, Number(cliente.artes_mensais_restantes || 0) - 1);
+  } else if (charge.source === "arte_avulsa") {
+    ensureStandaloneArtFields(cliente);
+    cliente.artes_avulsas_restantes = Math.max(0, Number(cliente.artes_avulsas_restantes || 0) - 1);
+    cliente.artes_avulsas_usadas = Number(cliente.artes_avulsas_usadas || 0) + 1;
+    cliente.artes_avulsas_consumos.push({
+      pedido_id: pedidoId ? String(pedidoId) : "",
+      consumido_em: new Date().toISOString(),
+      valor_unitario: roundMoney(charge.amount || plansRegistry.getSingleArtPurchase().amount),
+      produto: "arte_empresa"
+    });
   } else if (charge.source === "saldo_extra") {
     const saldoExtraAtual = Number(cliente.saldo_extra || 0);
     cliente.saldo_extra = roundMoney(Math.max(0, saldoExtraAtual - Number(custoPedido || 0)));
@@ -308,6 +431,11 @@ module.exports = {
   addDays,
   addMonthsPreserveDay,
   getBillingStatus,
+  ensureStandaloneArtFields,
+  getStandaloneArtStatus,
+  hasAvailableStandaloneArt,
+  recordStandaloneArtPurchasePending,
+  creditStandaloneArtPurchase,
   refreshManualPlanCycle,
   isPlanActive,
   hasAvailablePlanArt,
