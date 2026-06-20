@@ -1,5 +1,6 @@
 package br.com.ia4tube.app.feature.create_art
 
+import android.util.Log
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
@@ -416,19 +417,35 @@ class CreateArtEmpresaViewModel(
                 }
                 is ApiResult.Failure -> {
                     val isBillingRequired = result.code == "billing_required" || result.statusCode == 402
+                    val errorCode = result.code.ifBlank { if (isBillingRequired) "billing_required" else "" }
+                    val statusCode = result.statusCode?.toString().orEmpty()
+                    val userError = if (isBillingRequired) {
+                        uiText(R.string.create_art_billing_required_error)
+                    } else {
+                        result.message.toUiTextOrNull() ?: uiText(R.string.create_art_create_error)
+                    }
+                    Log.w(
+                        TAG,
+                        "Erro ao criar pedido: statusCode=$statusCode code=$errorCode message=${result.message}"
+                    )
                     MobileAnalytics.track(
                         "mobile_pedido_erro",
                         tela = "criar_arte",
                         produto = "arte_empresa",
                         etapa = "revisao",
-                        payload = mapOf("erro" to result.message),
+                        payload = mapOf(
+                            "erro" to result.message,
+                            "statusCode" to statusCode,
+                            "code" to errorCode,
+                            "billingRequired" to isBillingRequired.toString()
+                        ),
                         flushNow = true
                     )
                     _uiState.update {
                         it.copy(
                             loading = false,
                             billingRequired = isBillingRequired,
-                            error = result.message.toUiTextOrNull() ?: uiText(R.string.create_art_create_error)
+                            error = userError
                         )
                     }
                 }
@@ -796,6 +813,7 @@ class CreateArtEmpresaViewModel(
     }
 
     companion object {
+        private const val TAG = "CreateArtEmpresaVM"
         const val MAX_IMAGENS_OPCIONAIS = 5
         const val RAMO_SUGGESTION_MIN_CHARS = 4
     }

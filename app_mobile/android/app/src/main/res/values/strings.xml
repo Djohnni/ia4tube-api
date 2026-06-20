@@ -234,6 +234,7 @@
     <string name="create_art_optional_ignored_error">Algumas imagens foram ignoradas. O limite é %1$d por seção.</string>
     <string name="create_art_select_logo_error">Selecione o logo da empresa.</string>
     <string name="create_art_create_error">Não foi possível criar o pedido agora.</string>
+    <string name="create_art_billing_required_error">Você precisa comprar 1 arte por R$ 1,99 ou escolher um plano.</string>
     <string name="create_art_validate_company_name">Informe o nome da empresa.</string>
     <string name="create_art_validate_business">Informe o ramo da empresa.</string>
     <string name="create_art_validate_goal">Informe o objetivo da arte.</string>

@@ -897,19 +897,48 @@ class IA4TubeApiClient(
 
                 val trimmed = text.trimStart()
                 if (trimmed.isNotBlank() && !trimmed.startsWith("{") && !trimmed.startsWith("[")) {
+                    Log.w(
+                        TAG,
+                        "Resposta nao JSON em ${request.method} ${request.url} status=${response.code} bodyPreview=$preview"
+                    )
                     return ApiResult.Failure(
-                        message = CREATE_ORDER_UNAVAILABLE_MESSAGE,
-                        statusCode = response.code
+                        message = if (response.code == 402) BILLING_REQUIRED_MESSAGE else CREATE_ORDER_UNAVAILABLE_MESSAGE,
+                        statusCode = response.code,
+                        code = if (response.code == 402) "billing_required" else ""
                     )
                 }
 
-                val json = if (text.isBlank()) JSONObject() else JSONObject(text)
+                val json = try {
+                    if (text.isBlank()) JSONObject() else JSONObject(text)
+                } catch (error: JSONException) {
+                    Log.e(
+                        TAG,
+                        "Erro ao interpretar JSON de ${request.method} ${request.url} status=${response.code} bodyPreview=$preview",
+                        error
+                    )
+                    return ApiResult.Failure(
+                        message = if (response.code == 402) BILLING_REQUIRED_MESSAGE else CREATE_ORDER_UNAVAILABLE_MESSAGE,
+                        statusCode = response.code,
+                        code = if (response.code == 402) "billing_required" else ""
+                    )
+                }
 
                 if (!response.isSuccessful || !json.optBoolean("ok", false)) {
+                    val rawErrorCode = json.optString("code")
+                    val errorCode = rawErrorCode.ifBlank { if (response.code == 402) "billing_required" else "" }
+                    val errorMessage = if (errorCode == "billing_required" || response.code == 402) {
+                        BILLING_REQUIRED_MESSAGE
+                    } else {
+                        json.optString("error", "Erro ao chamar API")
+                    }
+                    Log.w(
+                        TAG,
+                        "API falhou em ${request.method} ${request.url} status=${response.code} code=$errorCode message=$errorMessage bodyPreview=$preview"
+                    )
                     return ApiResult.Failure(
-                        message = json.optString("error", "Erro ao chamar API"),
+                        message = errorMessage,
                         statusCode = response.code,
-                        code = json.optString("code")
+                        code = errorCode
                     )
                 }
 
@@ -1011,6 +1040,8 @@ class IA4TubeApiClient(
         private const val TAG = "IA4TubeApiClient"
         private const val CREATE_ORDER_UNAVAILABLE_MESSAGE =
             "Não foi possível criar o pedido agora. Tente novamente em alguns instantes."
+        private const val BILLING_REQUIRED_MESSAGE =
+            "Você precisa comprar 1 arte por R$ 1,99 ou escolher um plano."
         private val JSON = "application/json; charset=utf-8".toMediaType()
 
         private fun logMultipart(url: String, fields: Iterable<String>, files: Iterable<br.com.ia4tube.app.data.models.UploadFile>) {
