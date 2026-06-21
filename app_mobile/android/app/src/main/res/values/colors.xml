@@ -1,0 +1,8 @@
+<resources>
+    <color name="ia4tube_blue">#1455D9</color>
+    <color name="ia4tube_green">#16A34A</color>
+    <color name="ia4tube_ink">#0F172A</color>
+    <color name="ia4tube_surface">#F8FAFC</color>
+    <color name="ia4tube_launcher_background">#0F172A</color>
+    <color name="ia4tube_splash_background">#F8FAFC</color>
+</resources>
