@@ -14,6 +14,7 @@ const orderService = require("./src/orders/order.service");
 const billingService = require("./src/billing/billing.service");
 const billingPlans = require("./src/billing/plans");
 const graphicMaterialsService = require("./src/company-graphic-materials/materials.service");
+const graphicMaterialsCatalog = require("./src/company-graphic-materials/materials.catalog");
 const carouselService = require("./src/company-carousels/carousels.service");
 const monthlyPlanningService = require("./src/company-monthly-planning/planning.service");
 const fcmService = require("./src/notifications/fcm.service");
@@ -122,7 +123,7 @@ if (!fs.existsSync(EVENTOS_CLIENTES_FILE)) {
 
 // ===== HELPERS =====
 function readClientes() {
-  return JSON.parse(fs.readFileSync(CLIENTES_FILE, "utf8") || "{}");
+  return JSON.parse((fs.readFileSync(CLIENTES_FILE, "utf8") || "{}").replace(/^\uFEFF/, ""));
 }
 
 function writeClientes(obj) {
@@ -774,7 +775,7 @@ function envInt(name, fallback) {
 function envBool(name, fallback = false) {
   const value = String(process.env[name] || "").trim().toLowerCase();
   if (["1", "true", "yes", "sim", "on"].includes(value)) return true;
-  if (["0", "false", "no", "nao", "não", "off"].includes(value)) return false;
+  if (["0", "false", "no", "nao", "n\u00e3o", "off"].includes(value)) return false;
   return fallback;
 }
 
@@ -789,9 +790,9 @@ app.get("/app/version", (req, res) => {
     minimum_version_code: minimumVersionCode,
     latest_version_name: latestVersionName,
     update_required: envBool("IA4TUBE_ANDROID_UPDATE_REQUIRED", false),
-    title: process.env.IA4TUBE_ANDROID_UPDATE_TITLE || "Nova versão disponível",
+    title: process.env.IA4TUBE_ANDROID_UPDATE_TITLE || "Nova vers\u00e3o dispon\u00edvel",
     message: process.env.IA4TUBE_ANDROID_UPDATE_MESSAGE ||
-      "Atualize o app para receber melhorias, correções e uma experiência mais estável.",
+      "Atualize o app para receber melhorias, corre\u00e7\u00f5es e uma experi\u00eancia mais est\u00e1vel.",
     play_store_url: process.env.IA4TUBE_ANDROID_PLAY_STORE_URL ||
       "https://play.google.com/store/apps/details?id=com.ia4tube.app"
   });
@@ -1344,6 +1345,46 @@ function publicApiUrl(pathname = "") {
   return `${PUBLIC_API_BASE_URL}${cleanPath}`;
 }
 
+function sendClientPushAsync(whatsapp, tipo, payload = {}) {
+  try {
+    const clientes = readClientes();
+    const cliente = clientes[whatsapp];
+
+    if (!cliente) {
+      console.warn("[fcm] cliente nao encontrado", { whatsapp, tipo });
+      return;
+    }
+
+    const sender = fcmSenderForType(tipo);
+    sender(cliente, payload)
+      .then((result) => {
+        if (!result?.ok) {
+          console.warn("[fcm] push nao enviado", { whatsapp, tipo, result });
+          return;
+        }
+        console.log("[fcm] push enviado", {
+          whatsapp,
+          tipo,
+          sent: result.sent || 0,
+          mock: result.mock === true
+        });
+      })
+      .catch((error) => {
+        console.warn("[fcm] falha ao enviar push", {
+          whatsapp,
+          tipo,
+          message: error?.message
+        });
+      });
+  } catch (error) {
+    console.warn("[fcm] falha ao preparar push", {
+      whatsapp,
+      tipo,
+      message: error?.message
+    });
+  }
+}
+
 app.post("/bot/notificacoes/teste", botRunnerAuth, async (req, res) => {
   if (!isBotAdmin(req)) {
     return res.status(403).json({ ok: false, error: "Acesso negado" });
@@ -1373,11 +1414,7 @@ app.post("/bot/notificacoes/teste", botRunnerAuth, async (req, res) => {
       planejamento_item_id: req.body?.planejamento_item_id,
       latest_version_code: req.body?.latest_version_code,
       latest_version_name: req.body?.latest_version_name,
-      image_url: req.body?.image_url ||
-        req.body?.imageUrl ||
-        req.body?.image ||
-        req.body?.picture ||
-        (req.body?.pedido_id ? publicApiUrl(`/pedidos/${encodeURIComponent(req.body.pedido_id)}/preview`) : ""),
+      image_url: req.body?.image_url || req.body?.imageUrl || req.body?.image || req.body?.picture,
       data: req.body?.data && typeof req.body.data === "object" ? req.body.data : {}
     });
 
@@ -2144,11 +2181,25 @@ app.get("/empresa/materiais-graficos", auth, (req, res) => {
   }
 
   try {
+    const requestedRamo = String(req.query?.ramo || cliente.ramo || cliente.nicho || "").trim();
     const payload = graphicMaterialsService.publicListPayload({
       cliente,
-      ramo: req.query?.ramo || "",
+      ramo: requestedRamo,
       baseDir: GRAPHIC_MATERIALS_DIR,
       whatsapp
+    });
+    const generalCount = payload.materiais.filter((material) => material.scope !== "ramo").length;
+    const branchCount = payload.materiais.filter((material) => material.scope === "ramo").length;
+    console.log("[materiais-graficos] listagem", {
+      whatsapp,
+      ramo_recebido: req.query?.ramo || "",
+      ramo_usado: requestedRamo,
+      ramo_resolvido: graphicMaterialsCatalog.folderForRamo(requestedRamo),
+      materiais_gerais: generalCount,
+      materiais_ramo: branchCount,
+      plano_atual: cliente.plano_atual || cliente.plano || "",
+      plano_status: cliente.plano_status || "",
+      plano_ativo: billingService.isPlanActive(cliente)
     });
     clientes[whatsapp] = cliente;
     writeClientes(clientes);
@@ -2411,76 +2462,12 @@ app.post(
 );
 
 // ===== CARROSSEIS IA4TUBE =====
-function getFirstCarouselBodyValue(body, keys) {
-  for (const key of keys) {
-    const value = body?.[key];
-    if (Array.isArray(value)) {
-      const first = value.find(v => String(v || "").trim());
-      if (first !== undefined) return first;
-      continue;
-    }
-
-    if (value !== undefined && value !== null && String(value).trim()) {
-      return value;
-    }
-  }
-
-  return "";
-}
-
-function parseCarouselBodyPayload(value) {
-  if (!value) return {};
-  if (typeof value === "object" && !Array.isArray(value)) return value;
-  if (typeof value !== "string") return {};
-
-  try {
-    const parsed = JSON.parse(value);
-    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
-  } catch {
-    return {};
-  }
-}
-
-function normalizeCarouselRequestBody(rawBody = {}) {
-  const nestedPayload = parseCarouselBodyPayload(
-    rawBody.payload ||
-    rawBody.data ||
-    rawBody.request ||
-    rawBody.carrossel ||
-    rawBody.carousel
-  );
-  const merged = {
-    ...rawBody,
-    ...nestedPayload
-  };
-
-  return {
-    ...merged,
-    tema: String(getFirstCarouselBodyValue(merged, ["tema", "theme", "titulo", "assunto"])).trim(),
-    briefing: String(getFirstCarouselBodyValue(merged, ["briefing", "texto", "texto_fonte", "textoFonte", "sourceText", "description", "descricao", "prompt"])).trim(),
-    texto_fonte: String(getFirstCarouselBodyValue(merged, ["texto_fonte", "textoFonte", "sourceText", "texto"])).trim(),
-    quantidade_telas: String(getFirstCarouselBodyValue(merged, ["quantidade_telas", "quantidadeTelas", "quantidade", "telas", "screen_count", "screenCount"])).trim()
-  };
-}
-
-function summarizeCarouselFiles(files = {}) {
-  const summary = {};
-  for (const [field, list] of Object.entries(files || {})) {
-    summary[field] = (list || []).map(file => ({
-      originalname: file.originalname,
-      mimetype: file.mimetype,
-      size: file.size
-    }));
-  }
-  return summary;
-}
-
 app.post(
   "/empresa/carrosseis/solicitar",
   auth,
   upload.fields([
     { name: "logo", maxCount: 1 },
-    { name: "fotos", maxCount: 20 }
+    { name: "fotos", maxCount: 2 }
   ]),
   (req, res) => {
     const whatsapp = req.user.whatsapp;
@@ -2493,15 +2480,11 @@ app.post(
     }
 
     try {
-      const carouselBody = normalizeCarouselRequestBody(req.body || {});
-      console.log("[carrosseis] body recebido", req.body);
-      console.log("[carrosseis] files recebidos", summarizeCarouselFiles(req.files));
-
       const carrossel = carouselService.createRequest({
         baseDir: CAROUSELS_DIR,
         cliente,
         whatsapp,
-        body: carouselBody,
+        body: req.body || {},
         files: req.files || {}
       });
 
@@ -2579,7 +2562,7 @@ app.get("/empresa/carrosseis/:carrosselId/download", auth, (req, res) => {
     });
 
     res.setHeader("Content-Type", "application/zip");
-    res.setHeader("Content-Disposition", "attachment; filename=\"" + result.filename + "\"");
+    res.setHeader("Content-Disposition", `attachment; filename="${result.filename}"`);
     return res.sendFile(result.filePath);
   } catch (error) {
     return res.status(error?.statusCode || 500).json({
@@ -2595,25 +2578,13 @@ app.get("/bot/empresa/carrosseis/novos", botRunnerAuth, (req, res) => {
     return res.status(403).json({ ok: false, error: "Acesso negado" });
   }
 
-  try {
-    const limit = Number(req.query?.limit || 5);
-    const carrosseis = carouselService.listBotPending({
-      baseDir: CAROUSELS_DIR,
-      limit: Number.isFinite(limit) && limit > 0 ? Math.min(limit, 50) : 5
-    });
+  const limit = Number(req.query?.limit || 5);
+  const carrosseis = carouselService.listBotPending({
+    baseDir: CAROUSELS_DIR,
+    limit: Number.isFinite(limit) && limit > 0 ? Math.min(limit, 50) : 5
+  });
 
-    return res.json({ ok: true, carrosseis });
-  } catch (error) {
-    console.error("[carrosseis] erro ao listar novos para bot", {
-      message: error?.message,
-      stack: error?.stack
-    });
-    return res.status(error?.statusCode || 500).json({
-      ok: false,
-      code: "carousel_bot_list_error",
-      error: error?.message || "Nao foi possivel listar os carrosseis agora."
-    });
-  }
+  return res.json({ ok: true, carrosseis });
 });
 
 app.get("/bot/empresa/carrosseis/:carrosselId/zip", botRunnerAuth, (req, res) => {
@@ -2631,7 +2602,7 @@ app.get("/bot/empresa/carrosseis/:carrosselId/zip", botRunnerAuth, (req, res) =>
   }
 
   res.setHeader("Content-Type", "application/zip");
-  res.setHeader("Content-Disposition", "attachment; filename=\"" + req.params.carrosselId + ".zip\"");
+  res.setHeader("Content-Disposition", `attachment; filename="${req.params.carrosselId}.zip"`);
 
   const archive = archiver("zip", { zlib: { level: 9 } });
   archive.on("error", err => res.status(500).end(String(err)));
@@ -2675,12 +2646,14 @@ app.post(
   ]),
   (req, res) => {
     if (!isBotAdmin(req)) {
+      cleanupUploadedFiles(req.files);
       return res.status(403).json({ ok: false, error: "Acesso negado" });
     }
 
     const resultadoFile = req.files?.resultado?.[0] || null;
 
     if (!resultadoFile) {
+      cleanupUploadedFiles(req.files);
       return res.status(400).json({ ok: false, error: "Arquivo resultado nao enviado" });
     }
 
@@ -2701,9 +2674,7 @@ app.post(
         arquivo: "resultado.zip"
       });
     } catch (error) {
-      try {
-        if (resultadoFile?.path && fs.existsSync(resultadoFile.path)) fs.unlinkSync(resultadoFile.path);
-      } catch {}
+      cleanupUploadedFiles(req.files);
       console.error("[carrosseis] falha ao salvar resultado", {
         carrosselId: req.params.carrosselId,
         message: error?.message,
@@ -3196,9 +3167,14 @@ async function runMonthlyPlanningNotifications() {
       clientes,
       now: new Date(),
       sendNotification: async ({ cliente, planning, post }) => {
-        return fcmService.sendToClient(
+        return fcmService.sendPlanejamentoMensal(
           cliente,
-          monthlyPlanningNotificationPayload({ planning, post })
+          {
+            ...monthlyPlanningNotificationPayload({ planning, post }),
+            planejamento_id: planning.planejamento_id || planning.id || "",
+            planejamento_item_id: post.planejamento_item_id || "",
+            pedido_id: post.pedido_id || ""
+          }
         );
       }
     });
@@ -3255,6 +3231,8 @@ function criarPedidoHandler(categoria) {
         error: "Envie o logo da empresa para criar a arte."
       });
     }
+
+    orderService.normalizeCompanyVisualStyleForUploads({ categoria, fields, files });
 
     let cobrancaEmpresa = null;
     if (isArteEmpresa) {
@@ -3496,6 +3474,23 @@ app.post("/bot/pedidos/:id/status", auth, (req, res) => {
   }
 
   writeOrderStatus(base, status);
+  try {
+    const pedido = readPedido(base) || {};
+    if (pedido.whatsapp && !monthlyPlanningService.isPlanningOrder(pedido)) {
+      sendClientPushAsync(pedido.whatsapp, "pedido_atualizado", {
+        pedido_id: req.params.id,
+        status,
+        body: status === orderStatus.ORDER_STATUS.EM_PRODUCAO
+          ? "Sua arte entrou em producao. Toque para acompanhar."
+          : "Seu pedido teve uma atualizacao. Toque para acompanhar."
+      });
+    }
+  } catch (error) {
+    console.warn("[fcm] nao foi possivel preparar push de status", {
+      pedido_id: req.params.id,
+      message: error?.message
+    });
+  }
 
   return res.json({ ok: true });
 });
@@ -3937,8 +3932,75 @@ app.get("/pedidos/:id/download-resultado", auth, (req, res) => {
   return res.sendFile(arquivo);
 });
 
+function normalizarLinhaDescricaoInstagram(texto = "") {
+  return String(texto || "")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .trim()
+    .toLowerCase()
+    .replace(/[,:.;!?\-\u2013\u2014]+$/g, "")
+    .trim();
+}
+
+function pedidoEhPatrocinador(pedido = {}) {
+  const contexto = [
+    pedido.product_id,
+    pedido.categoria,
+    pedido.objetivo,
+    pedido.rodada,
+    pedido.tipo_arte
+  ].map((valor) => String(valor || "").toLowerCase()).join(" ");
+
+  return contexto.includes("patrocin");
+}
+
+function removerHashtagsPatrocinador(linha = "") {
+  return String(linha || "")
+    .split(/\s+/)
+    .filter((parte) => {
+      const normalizada = normalizarLinhaDescricaoInstagram(parte);
+      return normalizada !== "#patrocinador" && normalizada !== "#patrocinadores";
+    })
+    .join(" ")
+    .trim();
+}
+
+function sanitizarDescricaoInstagram(texto = "", pedido = {}) {
+  const linhas = String(texto || "")
+    .split(/\r?\n/)
+    .map((linha) => linha.trim())
+    .filter(Boolean);
+
+  if (!linhas.length) return "";
+
+  const rotulos = new Set([
+    "descricao para instagram",
+    "descricao para postagem",
+    "legenda para instagram",
+    "sugestao de descricao",
+    "sugestao de legenda",
+    "caption",
+    "instagram caption",
+    "resultado",
+    "proximo jogo",
+    "escalacao",
+    "contratacao",
+    "dia de treino"
+  ]);
+  const podeUsarPatrocinador = pedidoEhPatrocinador(pedido);
+  return linhas.filter((linha) => {
+    const normalizada = normalizarLinhaDescricaoInstagram(linha);
+    if (rotulos.has(normalizada)) return false;
+    if (normalizada === "patrocinador" || normalizada === "patrocinadores") return false;
+    return true;
+  }).map((linha) => {
+    if (podeUsarPatrocinador) return linha;
+    return removerHashtagsPatrocinador(linha);
+  }).filter(Boolean).join("\n").trim();
+}
+
 function descricaoPostagemPedido(pedido = {}) {
-  const pronta = String(pedido.descricao_instagram || "").trim();
+  const pronta = sanitizarDescricaoInstagram(pedido.descricao_instagram || "", pedido);
   if (pronta && !descricaoPostagemGenerica(pronta)) return pronta;
 
   const nome = String(pedido.nome_empresa || pedido.data || "").trim();
@@ -3954,7 +4016,10 @@ function descricaoPostagemPedido(pedido = {}) {
   const marca = nome || ramo || "sua marca";
   const linhas = [];
 
-  if (contexto.includes("lava") || contexto.includes("automot") || contexto.includes("carro")) {
+  if (contexto.includes("marketing") || contexto.includes("redes") || contexto.includes("divulg")) {
+    linhas.push(`${marca}: sua empresa precisa aparecer melhor para vender mais e ser lembrada pelo cliente certo.`);
+    linhas.push(frase || "Criamos artes profissionais para divulgar produtos, servicos e promocoes com mais impacto.");
+  } else if (contexto.includes("lava") || contexto.includes("automot") || contexto.includes("carro")) {
     linhas.push(`${marca}: carro limpo, cuidado no detalhe e atendimento caprichado para deixar seu veiculo com cara de novo.`);
   } else if (
     contexto.includes("futebol") ||
@@ -3978,15 +4043,19 @@ function descricaoPostagemPedido(pedido = {}) {
   if (insta) linhas.push(insta.startsWith("@") ? insta : `@${insta}`);
   linhas.push("#IA4Tube #ArteComIA");
 
-  return linhas.join("\n").trim();
+  return sanitizarDescricaoInstagram(linhas.join("\n"), pedido);
 }
 
 function descricaoPostagemGenerica(texto = "") {
-  const normalizada = String(texto).trim().toLowerCase();
+  const normalizada = normalizarLinhaDescricaoInstagram(String(texto).trim())
+    .replace(/\s+/g, " ");
   return !normalizada ||
     normalizada.includes("pedido ia4tube") ||
     normalizada.includes("arte pronta") ||
     normalizada.includes("arte profissional para sua marca") ||
+    normalizada.includes("apresentamos novidades") ||
+    normalizada.includes("fique de olho nas proximas") ||
+    normalizada.includes("acompanhe para saber mais") ||
     normalizada === "#ia4tube #artecomia";
 }
 
@@ -4201,6 +4270,12 @@ app.post(
           pedidoData.baixado_cliente = false;
           pedidoData.resultado_enviado_em = new Date().toISOString();
           fs.writeFileSync(pedidoPath, JSON.stringify(pedidoData, null, 2), "utf8");
+          if (pedidoData.whatsapp && !monthlyPlanningService.isPlanningOrder(pedidoData)) {
+            sendClientPushAsync(pedidoData.whatsapp, "arte_pronta", {
+              pedido_id: req.params.id,
+              image_url: publicApiUrl(`/pedidos/${encodeURIComponent(req.params.id)}/preview`)
+            });
+          }
         }
       } catch (e) {}
 
@@ -4308,6 +4383,21 @@ if(msg.includes("como baixar") || msg.includes("baixar novamente")){
   });
 }
 
+if(
+  msg.includes("plano") ||
+  msg.includes("planos") ||
+  msg.includes("assinatura") ||
+  msg.includes("mensalidade") ||
+  msg.includes("essencial") ||
+  msg.includes("profissional") ||
+  msg.includes("empresarial")
+){
+  return res.json({
+    ok:true,
+    resposta:"Planos IA4Tube:\n\n- i4 Essencial: R$ 39,90/mês, 6 artes por mês, 3 Materiais Gráficos da Empresa por mês, 1 Carrossel por mês e suporte via WhatsApp.\n\n- i4 Profissional: R$ 79,90/mês, 16 artes por mês, 5 Materiais Gráficos da Empresa por mês, 1 Material Gráfico de Nicho por mês, 2 Carrosséis por mês e suporte via WhatsApp.\n\n- i4 Empresarial: R$ 149,90/mês, 36 artes por mês, todos os Materiais Gráficos Gerais liberados, 3 Materiais Gráficos de Nicho por mês, 4 Carrosséis por mês e suporte via WhatsApp."
+  });
+}
+
 if(msg.includes("saldo") && msg.includes("como")){
   return res.json({
     ok:true,
@@ -4384,6 +4474,7 @@ COMPORTAMENTO:
 - Se for cumprimento, responda: "Oi! Escolha uma opção no menu do suporte."
 - Se o cliente pedir opções, disser "quais opções", "me dê as opções" ou algo parecido, responda curto: "Use os botões do menu do suporte."
 - Se o cliente falar "dúvida sobre produto" ou perguntar "como funciona", responda: "Escolha o produto no menu abaixo."
+- Se o cliente perguntar sobre planos, assinatura, mensalidade, Essencial, Profissional ou Empresarial, responda somente: "Planos IA4Tube: i4 Essencial R$ 39,90/mês com 6 artes, 3 Materiais Gráficos da Empresa, 1 Carrossel e suporte via WhatsApp. i4 Profissional R$ 79,90/mês com 16 artes, 5 Materiais Gráficos da Empresa, 1 Material Gráfico de Nicho, 2 Carrosséis e suporte via WhatsApp. i4 Empresarial R$ 149,90/mês com 36 artes, todos os Materiais Gráficos Gerais, 3 Materiais Gráficos de Nicho, 4 Carrosséis e suporte via WhatsApp."
 
 - Se o cliente disser "Quero entender Resultado do jogo", explique somente Resultado do jogo.
 - Se o cliente disser "Quero entender Escalação", explique somente Escalação.
@@ -5131,6 +5222,12 @@ app.get("/:nichoSlug", (req, res, next) => {
     return res.status(500).send("Erro ao carregar pagina de nicho");
   }
 
+  const legacyPagePath = path.join(SEO_NICHES_DIR, `${slug}.html`);
+
+  if (fs.existsSync(legacyPagePath)) {
+    return res.sendFile(legacyPagePath);
+  }
+
   return next();
 });
 
@@ -5170,7 +5267,6 @@ app.use((err, req, res, next) => {
 cleanupOldTmpUploads();
 setInterval(cleanupOldTmpUploads, TMP_UPLOAD_CLEANUP_INTERVAL_MS);
 setInterval(finalizarConversasSuporteInativas, 60 * 1000);
-
 setTimeout(runMonthlyPlanningNotifications, 15 * 1000);
 setInterval(runMonthlyPlanningNotifications, MONTHLY_PLANNING_NOTIFICATIONS_INTERVAL_MS);
 
