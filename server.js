@@ -3232,7 +3232,7 @@ function criarPedidoHandler(categoria) {
       });
     }
 
-    orderService.normalizeCompanyVisualStyleForUploads({ categoria, fields, files });
+    const visualStyleNormalization = orderService.normalizeCompanyVisualStyleForUploads({ categoria, fields, files });
 
     let cobrancaEmpresa = null;
     if (isArteEmpresa) {
@@ -3240,6 +3240,16 @@ function criarPedidoHandler(categoria) {
         custoPedido: custoEfetivoPedido,
         now: new Date()
       });
+
+      if (visualStyleNormalization.converted) {
+        console.info("[pedidos] estilo visual arte_empresa ajustado", {
+          whatsapp,
+          origem_cobranca: cobrancaEmpresa.source || cobrancaEmpresa.code || "indefinida",
+          estilo_original: visualStyleNormalization.from,
+          estilo_final: visualStyleNormalization.to,
+          reason: visualStyleNormalization.reason
+        });
+      }
 
       if (cobrancaEmpresa.allowed !== true) {
         clientes[whatsapp] = c;

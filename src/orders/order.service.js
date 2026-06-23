@@ -83,6 +83,7 @@ function normalizeOrderBody(body = {}) {
     frase_foto: firstText(body.frase_foto, companyFields.frase_foto, companyFields.campos_dinamicos?.frase_na_foto),
     historia_empresa: firstText(body.historia_empresa, companyFields.historia_empresa, companyFields.campos_dinamicos?.historia_empresa),
     origem_foto_rapida: firstText(body.origem_foto_rapida, companyFields.origem_foto_rapida),
+    estilo_visual_cliente: firstText(body.estilo_visual_cliente, companyFields.estilo_visual_cliente),
     new_model: newModel
   };
 }
@@ -98,6 +99,43 @@ function hasRequiredOrderFields(fields) {
 
 function hasCompanyLogoReference(files = {}) {
   return Boolean(files.logo?.length);
+}
+
+function hasCompanyPhotoReference(files = {}) {
+  return Boolean(files.fotos?.length);
+}
+
+function normalizeCompanyVisualStyleForUploads({ categoria, fields, files }) {
+  if (categoria !== "arte_empresa" || !fields || typeof fields !== "object") {
+    return { converted: false };
+  }
+
+  const newModel = fields?.new_model || {};
+  const modelFields = newModel.fields && typeof newModel.fields === "object" && !Array.isArray(newModel.fields)
+    ? newModel.fields
+    : {};
+  const style = String(modelFields.estilo_visual_cliente || fields?.estilo_visual_cliente || "").trim().toLowerCase();
+
+  if (style !== "foto_detalhes" || hasCompanyPhotoReference(files) || !hasCompanyLogoReference(files)) {
+    return { converted: false };
+  }
+
+  if (!fields.new_model || typeof fields.new_model !== "object") {
+    fields.new_model = {};
+  }
+  if (!fields.new_model.fields || typeof fields.new_model.fields !== "object" || Array.isArray(fields.new_model.fields)) {
+    fields.new_model.fields = {};
+  }
+
+  fields.new_model.fields.estilo_visual_cliente = "leve";
+  fields.estilo_visual_cliente = "leve";
+
+  return {
+    converted: true,
+    from: "foto_detalhes",
+    to: "leve",
+    reason: "foto_detalhes_sem_foto_com_logo"
+  };
 }
 
 function getUploadPermissions(categoria) {
@@ -217,6 +255,7 @@ async function buildCompanyData({ fields, files, uploadResult }) {
     frase_foto: fields.frase_foto || "",
     historia_empresa: fields.historia_empresa || "",
     origem_foto_rapida: fields.origem_foto_rapida || "",
+    estilo_visual_cliente: fields.estilo_visual_cliente || "",
     niche_id: nicheWithUsage?.id || "",
     niche_dna: nicheWithUsage?.dna || nicheService.createEmptyDna(),
     niche_dna_status: nicheWithUsage?.dna_status || "pendente",
@@ -314,6 +353,7 @@ async function buildPedidoData({
     whatsapp_contato,
     instagram,
     observacoes,
+    estilo_visual_cliente,
     new_model
   } = fields;
 
@@ -362,7 +402,8 @@ async function buildPedidoData({
         observacoes,
         frase_foto: fields.frase_foto,
         historia_empresa: fields.historia_empresa,
-        origem_foto_rapida: fields.origem_foto_rapida
+        origem_foto_rapida: fields.origem_foto_rapida,
+        estilo_visual_cliente
       },
       files,
       uploadResult
@@ -416,7 +457,8 @@ async function buildPedidoData({
         observacoes: pedido.observacoes,
         frase_foto: pedido.frase_foto,
         historia_empresa: pedido.historia_empresa,
-        origem_foto_rapida: pedido.origem_foto_rapida
+        origem_foto_rapida: pedido.origem_foto_rapida,
+        estilo_visual_cliente: pedido.estilo_visual_cliente
       };
       pedido.assets = {
         ...pedido.assets,
@@ -435,6 +477,7 @@ async function buildPedidoData({
         frase_foto: pedido.frase_foto,
         historia_empresa: pedido.historia_empresa,
         origem_foto_rapida: pedido.origem_foto_rapida,
+        estilo_visual_cliente: pedido.estilo_visual_cliente,
         niche_id: pedido.niche_id,
         niche_dna_status: pedido.niche_dna_status,
         niche_dna_origem: pedido.niche_dna_origem,
@@ -497,6 +540,8 @@ module.exports = {
   normalizeOrderBody,
   hasRequiredOrderFields,
   hasCompanyLogoReference,
+  hasCompanyPhotoReference,
+  normalizeCompanyVisualStyleForUploads,
   getUploadPermissions,
   moveUploadedFile,
   moveOrderUploads,
