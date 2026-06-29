@@ -216,6 +216,14 @@ function saveUploadedPhotos(files = {}, dirPath) {
     .filter(Boolean);
 }
 
+function saveUploadedLogo(files = {}, dirPath) {
+  const logoFile = (files.logo || [])[0];
+  if (!logoFile) return null;
+  const assetsDir = path.join(dirPath, "assets");
+  ensureDir(assetsDir);
+  return moveUploadedFile(logoFile, assetsDir, "logo");
+}
+
 function parsePhotoOrientations(body = {}) {
   const raw = body.orientacoes_fotos
     || body.orientacoesFotos
@@ -730,6 +738,7 @@ function createRequest({ baseDir, cliente, whatsapp, body = {}, files = {} }) {
   ensureDir(dirPath);
 
   const fotos = applyPhotoOrientations(saveUploadedPhotos(files, dirPath), body);
+  const logo = saveUploadedLogo(files, dirPath);
   const orientacoesFotos = fotos
     .filter((foto) => String(foto.orientacao_cliente || "").trim())
     .map((foto, index) => ({
@@ -769,6 +778,7 @@ function createRequest({ baseDir, cliente, whatsapp, body = {}, files = {} }) {
     profile,
     orientacoes_fotos: orientacoesFotos,
     assets: {
+      logo,
       fotos
     },
     runner_contract: {
@@ -1068,6 +1078,7 @@ function selectPlanningPhotoAssets(planning, item = {}) {
 function copyPlanningAssetsToOrder(planning, orderBase, item = {}) {
   const copiedPhotos = [];
   const selectedPhotos = selectPlanningPhotoAssets(planning, item);
+  let copiedLogo = "";
 
   selectedPhotos.forEach(({ asset, originalIndex }) => {
     if (!asset || typeof asset !== "object") return;
@@ -1080,7 +1091,19 @@ function copyPlanningAssetsToOrder(planning, orderBase, item = {}) {
     }
   });
 
+  const logoAsset = planning.assets?.logo;
+  if (logoAsset && typeof logoAsset === "object") {
+    const sourcePath = resolvePlanningAssetPath(planning, logoAsset);
+    const ext = extensionFromAsset(logoAsset, sourcePath);
+    const filename = `logo${ext}`;
+    const destPath = path.join(orderBase, filename);
+    if (safeCopyFile(sourcePath, destPath)) {
+      copiedLogo = filename;
+    }
+  }
+
   return {
+    logo: copiedLogo,
     fotos: copiedPhotos
   };
 }
@@ -1156,6 +1179,103 @@ function planningStyleForOrder(ordem = 1) {
   return index % 2 === 0 ? "normal" : "leve";
 }
 
+function planningLevelFromOrientation(orientacaoCliente = "") {
+  const text = normalizeForCheck(orientacaoCliente).replace(/[_-]+/g, " ");
+  const patterns = [
+    /\bnivel\s+de\s+edicao\s*[:=]?\s*([123])\b/,
+    /\bnivel\s*edicao\s*[:=]?\s*([123])\b/,
+    /\bnivel\s*[:=]?\s*([123])\b/
+  ];
+
+  for (const pattern of patterns) {
+    const match = text.match(pattern);
+    if (match) return Number(match[1]);
+  }
+
+  const compact = text.replace(/[^a-z0-9]+/g, "");
+  const compactMatch = compact.match(/(?:niveldeedicao|niveledicao|nivel)([123])/);
+  return compactMatch ? Number(compactMatch[1]) : 0;
+}
+
+function planningStyleFromOrientation(orientacaoCliente = "", ordem = 1) {
+  switch (planningLevelFromOrientation(orientacaoCliente)) {
+    case 1:
+      return "foto_detalhes";
+    case 2:
+      return "leve";
+    case 3:
+      return "normal";
+    default:
+      return planningStyleForOrder(ordem);
+  }
+}
+
+function valueAfterOrientationLabel(line = "") {
+  const text = String(line || "");
+  const separatorIndex = text.search(/[:=]/);
+  return separatorIndex >= 0 ? text.slice(separatorIndex + 1).trim() : "";
+}
+
+function appendOrientationValue(currentValue = "", addition = "") {
+  const value = cleanText(addition);
+  if (!value) return currentValue;
+  return [currentValue, value].filter(Boolean).join("\n");
+}
+
+function parsePhotoOrientationBlocks(orientacaoCliente = "") {
+  const result = {
+    objetivo: "",
+    escrita: "",
+    nivel: planningLevelFromOrientation(orientacaoCliente),
+    visual: ""
+  };
+  let currentKey = "";
+  const visualLines = [];
+
+  String(orientacaoCliente || "").split(/\r?\n/).forEach((rawLine) => {
+    const line = String(rawLine || "").trim();
+    if (!line) return;
+    const normalized = normalizeForCheck(line).replace(/[_-]+/g, " ");
+
+    if (/^objetivo\s+da\s+foto\b/.test(normalized)) {
+      currentKey = "objetivo";
+      result.objetivo = appendOrientationValue(result.objetivo, valueAfterOrientationLabel(line));
+      return;
+    }
+
+    if (/^escrita\s+que\s+deve\s+aparecer\s+na\s+imagem\b/.test(normalized)) {
+      currentKey = "escrita";
+      result.escrita = appendOrientationValue(result.escrita, valueAfterOrientationLabel(line));
+      return;
+    }
+
+    if (
+      /^nivel\s+de\s+edicao\b/.test(normalized)
+      || /^nivel\s*edicao\b/.test(normalized)
+      || /^niveledicao\b/.test(normalized)
+      || /^nivel\s*[:=]?\s*[123]\b/.test(normalized)
+    ) {
+      currentKey = "";
+      return;
+    }
+
+    if (currentKey === "objetivo") {
+      result.objetivo = appendOrientationValue(result.objetivo, line);
+      return;
+    }
+
+    if (currentKey === "escrita") {
+      result.escrita = appendOrientationValue(result.escrita, line);
+      return;
+    }
+
+    visualLines.push(line);
+  });
+
+  result.visual = visualLines.join("\n").trim();
+  return result;
+}
+
 function orientationForItem(item = {}) {
   const photo = item.foto_referencia || {};
   return cleanText(
@@ -1184,6 +1304,122 @@ function orientationFlags(value = "") {
   };
 }
 
+function stripImageTextCommand(value = "") {
+  const original = cleanText(value);
+  return original
+    .replace(/^\s*(coloque|colocar|escreva|escrever|inclua|incluir|adicione|adicionar|mencione|mencionar)\s+/i, "")
+    .replace(/^\s*(na arte|na imagem|no post|no card)\s*[:,-]?\s*/i, "")
+    .trim()
+    .replace(/^[.,:;\-\s]+|[.,:;\-\s]+$/g, "") || original;
+}
+
+function forbiddenTermsFromOrientation(value = "") {
+  const text = normalizeForCheck(value);
+  const terms = [];
+  if (text.includes("preco") || text.includes("valor") || text.includes("r$") || text.includes("reais")) {
+    terms.push(...PRICE_FORBIDDEN_TEXTS);
+  }
+  if (text.includes("promocao") || text.includes("promo") || text.includes("oferta")) {
+    terms.push("promocao", "promoção", "promo", "oferta");
+  }
+  if (text.includes("desconto") || text.includes("off")) {
+    terms.push("desconto", "off", "% off");
+  }
+  if (text.includes("telefone") || text.includes("whatsapp") || text.includes("celular") || text.includes("contato")) {
+    terms.push("telefone", "whatsapp", "celular", "contato");
+  }
+  return Array.from(new Set(terms));
+}
+
+function classifyCustomerOrientation(value = "") {
+  const original = cleanText(value);
+  const text = normalizeForCheck(original);
+  const result = {
+    orientacao_visual: "",
+    texto_obrigatorio_imagem: "",
+    orientacao_legenda: "",
+    texto_proibido: []
+  };
+  if (!original) return result;
+
+  const hasForbiddenIntent = [
+    "nao colocar",
+    "nao escrever",
+    "nao falar",
+    "nao mencionar",
+    "sem preco",
+    "sem valor",
+    "sem telefone",
+    "sem desconto",
+    "nao mostrar",
+    "nao por"
+  ].some((term) => text.includes(term));
+
+  if (hasForbiddenIntent) {
+    result.texto_proibido = forbiddenTermsFromOrientation(original);
+    if (!result.texto_proibido.length) result.texto_proibido = [original];
+    return result;
+  }
+
+  const hasLegendIntent = [
+    "na legenda",
+    "na descricao",
+    "no texto do instagram",
+    "no instagram",
+    "caption",
+    "legenda explicar",
+    "descricao explicar"
+  ].some((term) => text.includes(term));
+
+  if (hasLegendIntent) {
+    result.orientacao_legenda = original;
+    return result;
+  }
+
+  const startsVisualShow = text.startsWith("mostrar que") || text.startsWith("falar sobre");
+  const hasImageTextIntent = [
+    "coloque ",
+    "colocar ",
+    "escreva ",
+    "escrever ",
+    "inclua ",
+    "incluir ",
+    "adicione ",
+    "adicionar ",
+    "mencione ",
+    "mencionar ",
+    "por na arte",
+    "poe na arte"
+  ].some((term) => text.includes(term));
+
+  if (hasImageTextIntent && !startsVisualShow) {
+    result.texto_obrigatorio_imagem = stripImageTextCommand(original);
+    return result;
+  }
+
+  result.orientacao_visual = original;
+  return result;
+}
+
+function mergeOrientationRouting(item = {}) {
+  const photo = item.foto_referencia || {};
+  const orientation = orientationForItem(item);
+  const parsed = parsePhotoOrientationBlocks(orientation);
+  const classified = classifyCustomerOrientation(parsed.visual);
+  return {
+    orientacao_visual: cleanText(item.orientacao_visual || photo.orientacao_visual || parsed.visual || classified.orientacao_visual),
+    texto_obrigatorio_imagem: cleanText(item.texto_obrigatorio_imagem || photo.texto_obrigatorio_imagem || parsed.escrita || classified.texto_obrigatorio_imagem),
+    orientacao_legenda: cleanText(item.orientacao_legenda || photo.orientacao_legenda || classified.orientacao_legenda),
+    objetivo_foto_cliente: parsed.objetivo,
+    nivel_edicao_cliente: parsed.nivel || 0,
+    texto_proibido: Array.from(new Set([
+      ...normalizeArray(item.texto_proibido),
+      ...normalizeArray(photo.texto_proibido),
+      ...normalizeArray(classified.texto_proibido)
+    ]))
+  };
+}
+
 function hasPersonReference(item = {}) {
   const photo = item.foto_referencia || {};
   if (item.preservar_pessoa === true || photo.tem_pessoa === true) return true;
@@ -1202,7 +1438,7 @@ function hasPersonReference(item = {}) {
 function forbiddenVisibleTextsForItem(item = {}) {
   const orientation = orientationForItem(item);
   const flags = orientationFlags(orientation);
-  const custom = normalizeArray(item.texto_proibido);
+  const custom = mergeOrientationRouting(item).texto_proibido;
   return Array.from(new Set([
     ...PLANNING_FORBIDDEN_VISIBLE_TEXTS,
     ...custom,
@@ -1217,7 +1453,7 @@ function personRulesForItem(item = {}) {
   return Array.from(new Set([...PERSON_PRESERVATION_RULES, ...customRules]));
 }
 
-function buildChildBriefing({ briefingArte, temaInterno, objetivoInterno, forbiddenTexts, personRules, customerOrientation }) {
+function buildChildBriefing({ briefingArte, temaInterno, objetivoInterno, forbiddenTexts, personRules, customerOrientation, routing }) {
   const lines = [
     briefingArte,
     "Tema e objetivo do Planejamento Mensal sao orientacao interna, nao texto obrigatorio da arte.",
@@ -1241,6 +1477,33 @@ function buildChildBriefing({ briefingArte, temaInterno, objetivoInterno, forbid
     ].join("\n"));
   }
 
+  if (routing?.orientacao_visual) {
+    lines.push([
+      "INSTRUCAO VISUAL OBRIGATORIA:",
+      routing.orientacao_visual,
+      "Use como direcao da composicao e da mensagem visual. Nao copie literalmente se nao houver pedido de texto."
+    ].join("\n"));
+  }
+
+  if (routing?.texto_obrigatorio_imagem) {
+    lines.push([
+      "TEXTO QUE DEVE APARECER NA IMAGEM:",
+      routing.texto_obrigatorio_imagem
+    ].join("\n"));
+  }
+
+  if (routing?.orientacao_legenda) {
+    lines.push([
+      "ORIENTACAO PARA LEGENDA/DESCRICAO:",
+      routing.orientacao_legenda,
+      "Nao usar como texto obrigatorio da imagem."
+    ].join("\n"));
+  }
+
+  if (forbiddenTexts.length) {
+    lines.push(`TEXTO/ASSUNTO PROIBIDO: ${forbiddenTexts.join(", ")}.`);
+  }
+
   return lines.filter(Boolean).join("\n");
 }
 
@@ -1257,16 +1520,32 @@ function buildChildOrder({ planning, item, itemId, pedidoId, mesAtual, copiedAss
   const publicOffer = cleanText(item.texto_nao_obrigatorio || item.texto_publico_sugerido || "");
   const orientacaoCliente = orientationForItem(item);
   const orientacaoFlags = orientationFlags(orientacaoCliente);
+  const orientacaoEstruturada = parsePhotoOrientationBlocks(orientacaoCliente);
+  const orientacaoRoteada = mergeOrientationRouting(item);
+  const objetivoFotoCliente = cleanText(orientacaoRoteada.objetivo_foto_cliente || orientacaoEstruturada.objetivo);
+  const objetivoPedido = cleanText(objetivoFotoCliente, objetivoPostagem);
+  const hasStructuredOrientation = Boolean(
+    objetivoFotoCliente
+      || orientacaoRoteada.texto_obrigatorio_imagem
+      || orientacaoRoteada.nivel_edicao_cliente
+  );
+  const orientacaoClienteBriefing = hasStructuredOrientation
+    ? [
+      objetivoFotoCliente ? `Objetivo da foto: ${objetivoFotoCliente}` : "",
+      orientacaoRoteada.orientacao_visual
+    ].filter(Boolean).join("\n")
+    : orientacaoCliente;
   const forbiddenTexts = forbiddenVisibleTextsForItem(item);
   const personRules = personRulesForItem(item);
-  const estiloVisual = planningStyleForOrder(item.ordem || 1);
+  const estiloVisual = planningStyleFromOrientation(orientacaoCliente, item.ordem || 1);
   const briefingArte = buildChildBriefing({
     briefingArte: cleanText(item.briefing_arte, objetivoPostagem),
     temaInterno: tema,
     objetivoInterno: objetivoPostagem,
     forbiddenTexts,
     personRules,
-    customerOrientation: orientacaoCliente
+    customerOrientation: orientacaoClienteBriefing,
+    routing: orientacaoRoteada
   });
   const dataSugerida = cleanText(item.data_sugerida);
   const horarioSugerido = cleanText(item.horario_sugerido);
@@ -1278,12 +1557,13 @@ function buildChildOrder({ planning, item, itemId, pedidoId, mesAtual, copiedAss
   const fields = {
     ramo,
     nome_empresa: nomeEmpresa,
-    objetivo: objetivoPostagem,
+    objetivo: objetivoPedido,
     oferta: publicOffer,
     cta: whatsappContato ? "Chame no WhatsApp" : "Entre em contato",
     whatsapp: whatsappContato,
     instagram,
     estilo_visual_cliente: estiloVisual,
+    frase_foto: orientacaoRoteada.texto_obrigatorio_imagem,
     observacoes: [
       briefingArte,
       dataSugerida ? `Data sugerida: ${dataSugerida}` : "",
@@ -1294,15 +1574,22 @@ function buildChildOrder({ planning, item, itemId, pedidoId, mesAtual, copiedAss
       origem: "planejamento_mensal",
       tema_interno: tema,
       objetivo_interno: objetivoPostagem,
+      objetivo_foto_cliente: objetivoFotoCliente,
+      objetivo_planejamento_interno: objetivoPostagem,
       data_sugerida: dataSugerida,
       horario_sugerido: horarioSugerido,
       briefing_arte: briefingArte,
       estilo_visual_cliente: estiloVisual,
+      nivel_edicao_cliente: orientacaoRoteada.nivel_edicao_cliente || 0,
+      frase_na_foto: orientacaoRoteada.texto_obrigatorio_imagem,
       texto_proibido: forbiddenTexts,
       orientacao_cliente: orientacaoCliente,
       direcionamento_cliente: orientacaoCliente,
       orientacao_prioridade: orientacaoCliente ? "alta" : "",
       orientacao_flags: orientacaoFlags,
+      orientacao_visual: orientacaoRoteada.orientacao_visual,
+      texto_obrigatorio_imagem: orientacaoRoteada.texto_obrigatorio_imagem,
+      orientacao_legenda: orientacaoRoteada.orientacao_legenda,
       preservar_pessoa: personRules.length > 0,
       regras_preservacao_pessoa: personRules
     }
@@ -1320,13 +1607,19 @@ function buildChildOrder({ planning, item, itemId, pedidoId, mesAtual, copiedAss
     tema,
     tema_interno: tema,
     objetivo_interno: objetivoPostagem,
+    objetivo_foto_cliente: objetivoFotoCliente,
     briefing_arte: briefingArte,
     estilo_visual_cliente: estiloVisual,
+    nivel_edicao_cliente: orientacaoRoteada.nivel_edicao_cliente || 0,
+    frase_foto: orientacaoRoteada.texto_obrigatorio_imagem,
     texto_proibido: forbiddenTexts,
     orientacao_cliente: orientacaoCliente,
     direcionamento_cliente: orientacaoCliente,
     orientacao_prioridade: orientacaoCliente ? "alta" : "",
     orientacao_flags: orientacaoFlags,
+    orientacao_visual: orientacaoRoteada.orientacao_visual,
+    texto_obrigatorio_imagem: orientacaoRoteada.texto_obrigatorio_imagem,
+    orientacao_legenda: orientacaoRoteada.orientacao_legenda,
     preservar_pessoa: personRules.length > 0,
     regras_preservacao_pessoa: personRules,
     status: "pedido_criado",
@@ -1364,6 +1657,9 @@ function buildChildOrder({ planning, item, itemId, pedidoId, mesAtual, copiedAss
     direcionamento_cliente: orientacaoCliente,
     orientacao_prioridade: orientacaoCliente ? "alta" : "",
     orientacao_flags: orientacaoFlags,
+    orientacao_visual: orientacaoRoteada.orientacao_visual,
+    texto_obrigatorio_imagem: orientacaoRoteada.texto_obrigatorio_imagem,
+    orientacao_legenda: orientacaoRoteada.orientacao_legenda,
     preservar_pessoa: personRules.length > 0,
     regras_preservacao_pessoa: personRules,
     cobranca_origem: "planejamento_mensal_reserva",
@@ -1373,23 +1669,25 @@ function buildChildOrder({ planning, item, itemId, pedidoId, mesAtual, copiedAss
     motivo_pagamento_pendente: "",
     ramo,
     nome_empresa: nomeEmpresa,
-    objetivo: objetivoPostagem,
+    objetivo: objetivoPedido,
+    objetivo_foto_cliente: objetivoFotoCliente,
     oferta: publicOffer,
     cta: fields.cta,
     whatsapp_contato: whatsappContato,
     instagram,
     estilo_visual_cliente: estiloVisual,
+    frase_foto: orientacaoRoteada.texto_obrigatorio_imagem,
     observacoes: fields.observacoes,
     historia_empresa: fields.historia_empresa,
     company_assets: {
-      logo: "",
+      logo: copiedAssets.logo || "",
       fotos: copiedAssets.fotos || [],
       referencias: [],
       modelo_existente: ""
     },
     fields,
     assets: {
-      logo: "",
+      logo: copiedAssets.logo || "",
       fotos: copiedAssets.fotos || [],
       referencias: [],
       modelo_existente: ""
@@ -1398,12 +1696,13 @@ function buildChildOrder({ planning, item, itemId, pedidoId, mesAtual, copiedAss
       categoria: "arte_empresa",
       ramo,
       nome_empresa: nomeEmpresa,
-      objetivo: objetivoPostagem,
+      objetivo: objetivoPedido,
       oferta: publicOffer,
       cta: fields.cta,
       whatsapp_contato: whatsappContato,
       instagram,
       estilo_visual_cliente: estiloVisual,
+      frase_foto: orientacaoRoteada.texto_obrigatorio_imagem,
       observacoes: fields.observacoes,
       historia_empresa: fields.historia_empresa,
       rodada: "",

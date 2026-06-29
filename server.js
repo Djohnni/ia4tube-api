@@ -760,6 +760,17 @@ const upload = multer({
 
 const uploadResultado = multer({ storage });
 
+const PEDIDO_UPLOAD_FIELDS = [
+  { name: "escudo1", maxCount: 1 },
+  { name: "escudo2", maxCount: 1 },
+  { name: "mascote", maxCount: 1 },
+  { name: "patrocinadores", maxCount: 20 },
+  { name: "logo", maxCount: 1 },
+  { name: "fotos", maxCount: 20 },
+  { name: "referencias", maxCount: 20 },
+  { name: "modelo_existente", maxCount: 1 }
+];
+
 // ===== ROTAS =====
 
 // Health check
@@ -2692,9 +2703,7 @@ app.post(
 app.post(
   "/empresa/planejamento-mensal/solicitar",
   auth,
-  upload.fields([
-    { name: "fotos", maxCount: 10 }
-  ]),
+  upload.fields(PEDIDO_UPLOAD_FIELDS),
   (req, res) => {
     const whatsapp = req.user.whatsapp;
     const clientes = readClientes();
@@ -3338,16 +3347,7 @@ function criarPedidoHandler(categoria) {
 app.post(
   "/pedidos",
   auth,
-  upload.fields([
-    { name: "escudo1", maxCount: 1 },
-    { name: "escudo2", maxCount: 1 },
-    { name: "mascote", maxCount: 1 },
-    { name: "patrocinadores", maxCount: 20 },
-    { name: "logo", maxCount: 1 },
-    { name: "fotos", maxCount: 20 },
-    { name: "referencias", maxCount: 20 },
-    { name: "modelo_existente", maxCount: 1 }
-  ]),
+  upload.fields(PEDIDO_UPLOAD_FIELDS),
   (req, res) => {
     const flyer_tipo = (req.body?.flyer_tipo || "").toLowerCase();
     const productFromRegistry = productsRegistry.resolveProductFromRequestBody(req.body);
@@ -3372,32 +3372,14 @@ app.post(
 app.post(
   "/mascotes",
   auth,
-  upload.fields([
-    { name: "escudo1", maxCount: 1 },
-    { name: "escudo2", maxCount: 1 },
-    { name: "mascote", maxCount: 1 },
-    { name: "patrocinadores", maxCount: 20 },
-    { name: "logo", maxCount: 1 },
-    { name: "fotos", maxCount: 20 },
-    { name: "referencias", maxCount: 20 },
-    { name: "modelo_existente", maxCount: 1 }
-  ]),
+  upload.fields(PEDIDO_UPLOAD_FIELDS),
   criarPedidoHandler("mascote")
 );
 
 app.post(
   "/resultado_do_jogo",
   auth,
-  upload.fields([
-    { name: "escudo1", maxCount: 1 },
-    { name: "escudo2", maxCount: 1 },
-    { name: "mascote", maxCount: 1 },
-    { name: "patrocinadores", maxCount: 20 },
-    { name: "logo", maxCount: 1 },
-    { name: "fotos", maxCount: 20 },
-    { name: "referencias", maxCount: 20 },
-    { name: "modelo_existente", maxCount: 1 }
-  ]),
+  upload.fields(PEDIDO_UPLOAD_FIELDS),
   criarPedidoHandler("resultado")
 );
 
@@ -5246,6 +5228,8 @@ app.use((err, req, res, next) => {
   console.error("[api] erro nao tratado", {
     path: req.path,
     method: req.method,
+    code: err?.code,
+    field: err?.field,
     message: err?.message,
     stack: err?.stack
   });
