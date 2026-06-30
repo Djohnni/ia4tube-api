@@ -332,12 +332,122 @@ function normalizeQuantity(body = {}) {
   return normalized;
 }
 
+function normalizeCompanyCharacteristics(value) {
+  if (Array.isArray(value)) {
+    return Array.from(new Set(value.map((item) => String(item || "").trim()).filter(Boolean)));
+  }
+
+  if (value && typeof value === "object") {
+    return Array.from(new Set(Object.values(value).flatMap((item) => normalizeCompanyCharacteristics(item))));
+  }
+
+  const raw = String(value || "").trim();
+  if (!raw) return [];
+
+  try {
+    const parsed = JSON.parse(raw);
+    if (Array.isArray(parsed)) {
+      return normalizeCompanyCharacteristics(parsed);
+    }
+    if (parsed && typeof parsed === "object") {
+      return normalizeCompanyCharacteristics(parsed);
+    }
+  } catch {
+    // Mantem compatibilidade com texto simples separado por linhas/virgulas.
+  }
+
+  return Array.from(new Set(raw
+    .split(/\r?\n|[,;]/)
+    .map((item) => String(item || "").trim())
+    .filter(Boolean)));
+}
+
+function firstCompanyCharacteristics(...values) {
+  for (const value of values) {
+    const normalized = normalizeCompanyCharacteristics(value);
+    if (normalized.length) return normalized;
+  }
+  return [];
+}
+
+function companyCharacteristicsFromBody(body = {}) {
+  return firstCompanyCharacteristics(
+    body.caracteristicas_empresa,
+    body.caracteristicasEmpresa,
+    body.company_characteristics,
+    body.companyCharacteristics,
+    body.fields?.caracteristicas_empresa,
+    body.fields?.caracteristicasEmpresa,
+    body.fields?.campos_dinamicos?.caracteristicas_empresa,
+    body.campos_dinamicos?.caracteristicas_empresa,
+    body.legacy?.caracteristicas_empresa,
+    body.planejamento_mensal?.caracteristicas_empresa
+  );
+}
+
+function companyCharacteristicsFromPlanning(planning = {}, profile = {}) {
+  const fields = planning.fields || {};
+  const camposDinamicos = fields.campos_dinamicos || planning.campos_dinamicos || {};
+  const monthly = planning.planejamento_mensal || {};
+  const legacy = planning.legacy || {};
+
+  return firstCompanyCharacteristics(
+    profile.caracteristicas_empresa,
+    planning.caracteristicas_empresa,
+    planning.caracteristicasEmpresa,
+    planning.company_characteristics,
+    planning.companyCharacteristics,
+    fields.caracteristicas_empresa,
+    fields.caracteristicasEmpresa,
+    camposDinamicos.caracteristicas_empresa,
+    monthly.caracteristicas_empresa,
+    legacy.caracteristicas_empresa
+  );
+}
+
+function companyImportantInfoFromBody(body = {}) {
+  return cleanText(
+    body.informacoes_empresa
+      || body.informacoesEmpresa
+      || body.informacoes_importantes_empresa
+      || body.regras_empresa
+      || body.dados_importantes_empresa
+      || body.fields?.informacoes_empresa
+      || body.fields?.campos_dinamicos?.informacoes_empresa
+      || body.campos_dinamicos?.informacoes_empresa
+      || body.legacy?.informacoes_empresa
+      || body.planejamento_mensal?.informacoes_empresa
+  );
+}
+
+function companyImportantInfoFromPlanning(planning = {}, profile = {}) {
+  const fields = planning.fields || {};
+  const camposDinamicos = fields.campos_dinamicos || planning.campos_dinamicos || {};
+  const monthly = planning.planejamento_mensal || {};
+  const legacy = planning.legacy || {};
+
+  return cleanText(
+    profile.informacoes_empresa
+      || planning.informacoes_empresa
+      || planning.informacoesEmpresa
+      || planning.informacoes_importantes_empresa
+      || planning.regras_empresa
+      || fields.informacoes_empresa
+      || fields.informacoesEmpresa
+      || camposDinamicos.informacoes_empresa
+      || monthly.informacoes_empresa
+      || legacy.informacoes_empresa
+  );
+}
+
 function normalizeProfile(body = {}, cliente = {}) {
   return {
     nome_empresa: String(body.nome_empresa || body.nomeEmpresa || cliente.nome_empresa || cliente.nome_time || "").trim(),
     ramo: String(body.ramo || cliente.ramo || cliente.nicho || "").trim(),
     whatsapp: String(body.whatsapp || cliente.whatsapp || "").trim(),
     instagram: String(body.instagram || cliente.instagram || "").trim(),
+    caracteristicas_empresa: companyCharacteristicsFromBody(body),
+    informacoes_empresa: companyImportantInfoFromBody(body),
     historia: String(body.historia || body.historia_empresa || cliente.historia || "").trim(),
     endereco: String(body.endereco || cliente.endereco || "").trim(),
     cidade: String(body.cidade || cliente.cidade || "").trim(),
@@ -776,6 +886,8 @@ function createRequest({ baseDir, cliente, whatsapp, body = {}, files = {} }) {
       observacao: "Reserva definitiva aplicada em artes_mensais_restantes. Criar Arte usa somente as artes livres restantes."
     },
     profile,
+    caracteristicas_empresa: profile.caracteristicas_empresa,
+    informacoes_empresa: profile.informacoes_empresa,
     orientacoes_fotos: orientacoesFotos,
     assets: {
       logo,
@@ -1553,6 +1665,8 @@ function buildChildOrder({ planning, item, itemId, pedidoId, mesAtual, copiedAss
   const ramo = cleanText(profile.ramo, "empresa local");
   const whatsappContato = cleanText(profile.whatsapp, planning.whatsapp || "");
   const instagram = cleanText(profile.instagram);
+  const caracteristicasEmpresa = companyCharacteristicsFromPlanning(planning, profile);
+  const informacoesEmpresa = companyImportantInfoFromPlanning(planning, profile);
 
   const fields = {
     ramo,
@@ -1562,6 +1676,8 @@ function buildChildOrder({ planning, item, itemId, pedidoId, mesAtual, copiedAss
     cta: whatsappContato ? "Chame no WhatsApp" : "Entre em contato",
     whatsapp: whatsappContato,
     instagram,
+    caracteristicas_empresa: caracteristicasEmpresa,
+    informacoes_empresa: informacoesEmpresa,
     estilo_visual_cliente: estiloVisual,
     frase_foto: orientacaoRoteada.texto_obrigatorio_imagem,
     observacoes: [
@@ -1590,6 +1706,8 @@ function buildChildOrder({ planning, item, itemId, pedidoId, mesAtual, copiedAss
       orientacao_visual: orientacaoRoteada.orientacao_visual,
       texto_obrigatorio_imagem: orientacaoRoteada.texto_obrigatorio_imagem,
       orientacao_legenda: orientacaoRoteada.orientacao_legenda,
+      caracteristicas_empresa: caracteristicasEmpresa,
+      informacoes_empresa: informacoesEmpresa,
       preservar_pessoa: personRules.length > 0,
       regras_preservacao_pessoa: personRules
     }
@@ -1620,6 +1738,8 @@ function buildChildOrder({ planning, item, itemId, pedidoId, mesAtual, copiedAss
     orientacao_visual: orientacaoRoteada.orientacao_visual,
     texto_obrigatorio_imagem: orientacaoRoteada.texto_obrigatorio_imagem,
     orientacao_legenda: orientacaoRoteada.orientacao_legenda,
+    caracteristicas_empresa: caracteristicasEmpresa,
+    informacoes_empresa: informacoesEmpresa,
     preservar_pessoa: personRules.length > 0,
     regras_preservacao_pessoa: personRules,
     status: "pedido_criado",
@@ -1675,6 +1795,8 @@ function buildChildOrder({ planning, item, itemId, pedidoId, mesAtual, copiedAss
     cta: fields.cta,
     whatsapp_contato: whatsappContato,
     instagram,
+    caracteristicas_empresa: caracteristicasEmpresa,
+    informacoes_empresa: informacoesEmpresa,
     estilo_visual_cliente: estiloVisual,
     frase_foto: orientacaoRoteada.texto_obrigatorio_imagem,
     observacoes: fields.observacoes,
@@ -1701,6 +1823,8 @@ function buildChildOrder({ planning, item, itemId, pedidoId, mesAtual, copiedAss
       cta: fields.cta,
       whatsapp_contato: whatsappContato,
       instagram,
+      caracteristicas_empresa: caracteristicasEmpresa,
+      informacoes_empresa: informacoesEmpresa,
       estilo_visual_cliente: estiloVisual,
       frase_foto: orientacaoRoteada.texto_obrigatorio_imagem,
       observacoes: fields.observacoes,
