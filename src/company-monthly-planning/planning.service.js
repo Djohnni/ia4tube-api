@@ -674,13 +674,207 @@ function planningTitle(ciclo) {
   return "Planejamento Mensal";
 }
 
+function clientPlanningDir(baseDir, whatsapp) {
+  return path.join(baseDir, safeSegment(whatsapp, "sem_whatsapp"));
+}
+
+function calendarHiddenPath(baseDir, whatsapp) {
+  return path.join(clientPlanningDir(baseDir, whatsapp), "calendario_oculto.json");
+}
+
+function readCalendarHiddenItems(baseDir, whatsapp) {
+  const data = readJson(calendarHiddenPath(baseDir, whatsapp), null);
+  if (Array.isArray(data)) return data;
+  if (Array.isArray(data?.hidden_items)) return data.hidden_items;
+  if (Array.isArray(data?.itens_ocultos)) return data.itens_ocultos;
+  if (Array.isArray(data?.hidden_keys)) {
+    return data.hidden_keys.map((key) => ({ key }));
+  }
+  return [];
+}
+
+function calendarHiddenKeys(baseDir, whatsapp) {
+  const keys = new Set();
+  for (const item of readCalendarHiddenItems(baseDir, whatsapp)) {
+    if (typeof item === "string") {
+      const key = item.trim();
+      if (key) keys.add(key);
+      continue;
+    }
+
+    if (!item || typeof item !== "object") continue;
+    [
+      item.key,
+      item.item_key,
+      item.calendar_key,
+      item.pedido_id,
+      item.planning_id && item.planejamento_item_id ? `${item.planning_id}:${item.planejamento_item_id}` : "",
+      item.planejamento_id && item.planejamento_item_id ? `${item.planejamento_id}:${item.planejamento_item_id}` : ""
+    ].forEach((value) => {
+      const key = String(value || "").trim();
+      if (key) keys.add(key);
+    });
+  }
+  return keys;
+}
+
+function writeCalendarHiddenItems(baseDir, whatsapp, items) {
+  const now = new Date().toISOString();
+  writeJson(calendarHiddenPath(baseDir, whatsapp), {
+    whatsapp,
+    atualizado_em: now,
+    hidden_items: items
+  });
+}
+
+function postCalendarKey(planningId, post) {
+  const itemId = String(post.planejamento_item_id || post.id || post.ordem || "").trim();
+  return [planningId, itemId].filter(Boolean).join(":") || String(post.pedido_id || "").trim();
+}
+
+function calendarItemAliases(item = {}) {
+  return [
+    item.calendar_key,
+    item.item_key,
+    item.key,
+    item.pedido_id,
+    item.planning_id && item.planejamento_item_id ? `${item.planning_id}:${item.planejamento_item_id}` : "",
+    item.planejamento_id && item.planejamento_item_id ? `${item.planejamento_id}:${item.planejamento_item_id}` : ""
+  ]
+    .map((value) => String(value || "").trim())
+    .filter(Boolean);
+}
+
+function isCalendarItemHidden(hiddenKeys, item) {
+  return calendarItemAliases(item).some((key) => hiddenKeys.has(key));
+}
+
+function stripImageTextPrefix(value = "") {
+  return String(value || "")
+    .trim()
+    .replace(/^escrita\s+que\s+deve\s+aparecer\s+na\s+imagem\s*:\s*/i, "")
+    .trim();
+}
+
+function firstWords(value = "", maxWords = 6) {
+  return String(value || "")
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean)
+    .slice(0, maxWords)
+    .join(" ");
+}
+
+function calendarPostTitle(post) {
+  const source = stripImageTextPrefix(
+    post.texto_obrigatorio_imagem
+      || post.frase_foto
+      || post.tema
+      || post.objetivo
+      || `Postagem ${post.ordem || ""}`
+  );
+  return firstWords(source, 6) || `Postagem ${post.ordem || ""}`.trim();
+}
+
+function createdOrdersFromPedidoFiles(planning = {}, pedidosDir = "") {
+  const planningId = String(planning.planejamento_id || planning.id || "").trim();
+  const whatsapp = String(planning.whatsapp || "").trim();
+  if (!pedidosDir || !planningId || !whatsapp) return [];
+
+  return orderStorage.listPedidoBasesByWhatsapp(pedidosDir, whatsapp)
+    .map((item) => {
+      const pedido = item.pedido || orderStorage.readOrder(item.base) || {};
+      if (!isPlanningOrder(pedido)) return null;
+
+      const meta = pedido.planejamento_mensal || {};
+      const pedidoPlanningId = String(pedido.planejamento_id || meta.planejamento_id || "").trim();
+      if (pedidoPlanningId !== planningId) return null;
+
+      const pedidoId = String(pedido.id || item.id || path.basename(item.base || "")).trim();
+      const itemId = String(pedido.planejamento_item_id || meta.planejamento_item_id || "").trim();
+      if (!pedidoId || !itemId) return null;
+
+      return {
+        pedido_id: pedidoId,
+        planejamento_item_id: itemId,
+        ordem: Number(meta.ordem || pedido.ordem || 0),
+        tema: pedido.tema || meta.tema || "",
+        objetivo_postagem: pedido.objetivo_postagem || meta.objetivo_postagem || "",
+        data_sugerida: pedido.data_sugerida || meta.data_sugerida || "",
+        horario_sugerido: pedido.horario_sugerido || meta.horario_sugerido || "",
+        status: orderStorage.readStatus(item.base, pedido.status || "novo"),
+        criado_em: pedido.criado_em || item.criado_em || "",
+        pedido_path: path.relative(pedidosDir, item.base).replace(/\\/g, "/")
+      };
+    })
+    .filter(Boolean);
+}
+
+function createdOrderRecords(planning = {}, pedidosDir = "") {
+  const pedidosCriados = [
+    ...(planning.pedidos_criados?.pedidos || readCreatedOrdersFile(planning).pedidos || [])
+  ];
+  const seenPedidoIds = new Set(
+    pedidosCriados
+      .map((pedido) => String(pedido?.pedido_id || "").trim())
+      .filter(Boolean)
+  );
+
+  for (const pedido of createdOrdersFromPedidoFiles(planning, pedidosDir)) {
+    if (seenPedidoIds.has(pedido.pedido_id)) continue;
+    pedidosCriados.push(pedido);
+    seenPedidoIds.add(pedido.pedido_id);
+  }
+
+  return pedidosCriados;
+}
+
+function createdOrdersByPlanningItem(planning = {}, pedidosDir = "") {
+  const pedidosCriados = createdOrderRecords(planning, pedidosDir);
+
+  const byItemId = new Map();
+  const byOrder = new Map();
+
+  for (const record of pedidosCriados) {
+    if (!record || typeof record !== "object") continue;
+    const pedidoId = String(record.pedido_id || "").trim();
+    if (!pedidoId) continue;
+
+    const itemId = String(record.planejamento_item_id || "").trim();
+    if (itemId) byItemId.set(itemId, pedidoId);
+
+    const ordem = Number(record.ordem || 0);
+    if (ordem > 0) byOrder.set(ordem, pedidoId);
+  }
+
+  return { byItemId, byOrder };
+}
+
+function resolvePlanningPostPedidoId({ planning, post, index, createdOrders }) {
+  const directId = String(post.pedido_id || "").trim();
+  if (directId) return directId;
+
+  const itemId = String(
+    post.planejamento_item_id
+      || post.id
+      || `${planning.planejamento_id || planning.id}_item_${String(index + 1).padStart(3, "0")}`
+  ).trim();
+  const byItemId = createdOrders?.byItemId?.get(itemId);
+  if (byItemId) return byItemId;
+
+  const ordem = Number(post.ordem || index + 1);
+  const byOrder = createdOrders?.byOrder?.get(ordem);
+  return byOrder || "";
+}
+
 function childOrderStatus({ pedidosDir, pedidoId }) {
   if (!pedidosDir || !pedidoId) {
     return {
       pedido_id: pedidoId || "",
       status: "planejada",
       status_label: "Planejada",
-      imagem_pronta: false
+      imagem_pronta: false,
+      descricao_instagram: ""
     };
   }
 
@@ -690,20 +884,25 @@ function childOrderStatus({ pedidosDir, pedidoId }) {
       pedido_id: pedidoId,
       status: "planejada",
       status_label: "Planejada",
-      imagem_pronta: false
+      imagem_pronta: false,
+      descricao_instagram: ""
     };
   }
 
   const pedido = orderStorage.readOrder(base) || {};
   const rawStatus = orderStorage.readStatus(base, pedido.status || "novo");
   const imagemPronta = fs.existsSync(path.join(base, "resultado_final.png"));
+  const descricaoInstagram = String(
+    pedido.descricao_instagram || pedido.legacy?.descricao_instagram || ""
+  ).trim();
 
   if (imagemPronta) {
     return {
       pedido_id: pedidoId,
       status: "pronta",
       status_label: "Pronta",
-      imagem_pronta: true
+      imagem_pronta: true,
+      descricao_instagram: descricaoInstagram
     };
   }
 
@@ -712,7 +911,8 @@ function childOrderStatus({ pedidosDir, pedidoId }) {
       pedido_id: pedidoId,
       status: "erro",
       status_label: "Erro",
-      imagem_pronta: false
+      imagem_pronta: false,
+      descricao_instagram: descricaoInstagram
     };
   }
 
@@ -721,7 +921,8 @@ function childOrderStatus({ pedidosDir, pedidoId }) {
       pedido_id: pedidoId,
       status: "em_producao",
       status_label: "Em producao",
-      imagem_pronta: false
+      imagem_pronta: false,
+      descricao_instagram: descricaoInstagram
     };
   }
 
@@ -729,7 +930,8 @@ function childOrderStatus({ pedidosDir, pedidoId }) {
     pedido_id: pedidoId,
     status: "planejada",
     status_label: "Planejada",
-    imagem_pronta: false
+    imagem_pronta: false,
+    descricao_instagram: descricaoInstagram
   };
 }
 
@@ -741,10 +943,12 @@ function planningPosts(planning, pedidosDir = "") {
       ? plano.itens
       : [];
 
+  const createdOrders = createdOrdersByPlanningItem(planning, pedidosDir);
   return sourcePosts.map((post, index) => {
-    const pedidoId = String(post.pedido_id || "").trim();
+    const pedidoId = resolvePlanningPostPedidoId({ planning, post, index, createdOrders });
     const childStatus = childOrderStatus({ pedidosDir, pedidoId });
     const notificationFields = notificationFieldsForPost(post, planning);
+    const legenda = String(childStatus.descricao_instagram || "").trim();
     return {
       ordem: Number(post.ordem || index + 1),
       planejamento_item_id: post.planejamento_item_id || post.id || `${planning.planejamento_id || planning.id}_item_${String(index + 1).padStart(3, "0")}`,
@@ -752,7 +956,12 @@ function planningPosts(planning, pedidosDir = "") {
       objetivo: post.objetivo || post.objetivo_postagem || "",
       data_sugerida: post.data_sugerida || "",
       horario_sugerido: post.horario_sugerido || "",
-      briefing_arte: post.briefing_arte || "",
+      legenda,
+      descricao_instagram: legenda,
+      texto_obrigatorio_imagem: post.texto_obrigatorio_imagem || post.frase_foto || "",
+      frase_foto: post.frase_foto || post.texto_obrigatorio_imagem || "",
+      orientacao_cliente: post.orientacao_cliente || post.direcionamento_cliente || "",
+      direcionamento_cliente: post.direcionamento_cliente || post.orientacao_cliente || "",
       pedido_id: pedidoId,
       status: childStatus.status,
       status_label: childStatus.status_label,
@@ -926,6 +1135,115 @@ function listClientPlannings({ baseDir, whatsapp, pedidosDir = "" }) {
   return {
     ok: true,
     planejamentos
+  };
+}
+
+function calendarPayloadForPost(planning, post) {
+  const planningId = String(planning.planejamento_id || planning.id || "").trim();
+  const calendarKey = postCalendarKey(planningId, post);
+  const pedidoId = String(post.pedido_id || "").trim();
+  const imageReady = post.imagem_pronta === true;
+  const previewUrl = imageReady && pedidoId
+    ? `/pedidos/${encodeURIComponent(pedidoId)}/preview`
+    : "";
+
+  return {
+    key: calendarKey,
+    item_key: calendarKey,
+    calendar_key: calendarKey,
+    planning_id: planningId,
+    planejamento_id: planningId,
+    pedido_id: pedidoId,
+    ordem: Number(post.ordem || 0),
+    planejamento_item_id: post.planejamento_item_id || post.id || "",
+    data: post.data_sugerida || "",
+    horario: post.horario_sugerido || "",
+    data_sugerida: post.data_sugerida || "",
+    horario_sugerido: post.horario_sugerido || "",
+    status: post.status || "",
+    status_label: post.status_label || post.status || "",
+    titulo: calendarPostTitle(post),
+    legenda: post.legenda || post.descricao_instagram || "",
+    descricao_instagram: post.descricao_instagram || post.legenda || "",
+    tema: post.tema || "",
+    objetivo: post.objetivo || post.objetivo_postagem || "",
+    texto_obrigatorio_imagem: post.texto_obrigatorio_imagem || post.frase_foto || "",
+    frase_foto: post.frase_foto || post.texto_obrigatorio_imagem || "",
+    orientacao_cliente: post.orientacao_cliente || post.direcionamento_cliente || "",
+    imagem_pronta: imageReady,
+    imagem_url: previewUrl,
+    miniatura_url: previewUrl,
+    preview_url: previewUrl,
+    sort_key: [
+      post.data_sugerida || "9999-12-31",
+      post.horario_sugerido || "23:59",
+      String(post.ordem || 0).padStart(4, "0")
+    ].join("|")
+  };
+}
+
+function listClientPlanningCalendar({ baseDir, whatsapp, pedidosDir = "" }) {
+  const hiddenKeys = calendarHiddenKeys(baseDir, whatsapp);
+  const postagens = [];
+
+  for (const planning of listPlanningDirsForWhatsapp(baseDir, whatsapp).map(parsePlanning).filter(Boolean)) {
+    const posts = planningPosts(planning, pedidosDir);
+    for (const post of posts) {
+      const item = calendarPayloadForPost(planning, post);
+      if (isCalendarItemHidden(hiddenKeys, item)) continue;
+      postagens.push(item);
+    }
+  }
+
+  postagens.sort((a, b) => String(a.sort_key || "").localeCompare(String(b.sort_key || "")));
+
+  return {
+    ok: true,
+    total: postagens.length,
+    postagens,
+    itens: postagens
+  };
+}
+
+function hideClientPlanningCalendarItem({
+  baseDir,
+  whatsapp,
+  itemKey = "",
+  pedidoId = "",
+  planningId = "",
+  planejamentoItemId = ""
+}) {
+  const key = String(itemKey || pedidoId || "").trim();
+  if (!key) {
+    const error = new Error("Item do calendario nao informado.");
+    error.statusCode = 400;
+    error.code = "monthly_planning_calendar_item_required";
+    throw error;
+  }
+
+  const now = new Date().toISOString();
+  const current = readCalendarHiddenItems(baseDir, whatsapp)
+    .map((item) => typeof item === "string" ? { key: item, item_key: item } : item)
+    .filter((item) => item && typeof item === "object");
+  const keys = calendarHiddenKeys(baseDir, whatsapp);
+
+  if (!keys.has(key)) {
+    current.push({
+      key,
+      item_key: key,
+      pedido_id: String(pedidoId || "").trim(),
+      planning_id: String(planningId || "").trim(),
+      planejamento_item_id: String(planejamentoItemId || "").trim(),
+      oculto_em: now
+    });
+  }
+
+  writeCalendarHiddenItems(baseDir, whatsapp, current);
+
+  return {
+    ok: true,
+    item_key: key,
+    oculto_em: now
   };
 }
 
@@ -2282,6 +2600,13 @@ function publicDetailPayload({ baseDir, whatsapp, planningId, pedidosDir = "" })
 
   const postagens = planningPosts(planning, pedidosDir);
   const planoMensal = planning.plano_mensal || { planejamento_id: planningId, itens: [] };
+  const pedidosCriados = {
+    ...(planning.pedidos_criados || { planejamento_id: planningId, pedidos: [] }),
+    planejamento_id: planning.planejamento_id || planning.id || planningId,
+    tipo: "planejamento_mensal_pedidos_filhos",
+    pedidos: createdOrderRecords(planning, pedidosDir)
+  };
+  pedidosCriados.total = pedidosCriados.pedidos.length;
   const planoMensalComStatus = {
     ...planoMensal,
     postagens,
@@ -2297,7 +2622,7 @@ function publicDetailPayload({ baseDir, whatsapp, planningId, pedidosDir = "" })
       reserva: planning.reserva || null,
       cancelamento: planning.cancelamento || null,
       plano_mensal: planoMensalComStatus,
-      pedidos_criados: planning.pedidos_criados || { planejamento_id: planningId, pedidos: [] }
+      pedidos_criados: pedidosCriados
     }
   };
 }
@@ -2560,6 +2885,8 @@ async function processDueNotifications({
 module.exports = {
   createRequest,
   listClientPlannings,
+  listClientPlanningCalendar,
+  hideClientPlanningCalendarItem,
   listClientPlanningGroups,
   publicDetailPayload,
   cancelPlanning,
