@@ -1746,10 +1746,10 @@ app.post("/comprar-creditos-pix", auth, async (req, res) => {
     const whatsapp = req.user.whatsapp;
 
     const pacotes = {
-      saldo_800: { titulo: "Saldo IA4Tube - R$8", valor_pago: 8.00, credito: 8.00 },
-      saldo_1800: { titulo: "Saldo IA4Tube - R$18", valor_pago: 18.00, credito: 18.00 },
-      saldo_2800: { titulo: "Saldo IA4Tube - R$28", valor_pago: 28.00, credito: 28.00 },
-      saldo_4800: { titulo: "Saldo IA4Tube - R$48", valor_pago: 48.00, credito: 48.00 }
+      saldo_800: { titulo: "Saldo IA4Tube Pix - pague R$8 e receba R$10", valor_pago: 8.00, credito: 10.00 },
+      saldo_1800: { titulo: "Saldo IA4Tube Pix - pague R$18 e receba R$21", valor_pago: 18.00, credito: 21.00 },
+      saldo_2800: { titulo: "Saldo IA4Tube Pix - pague R$28 e receba R$32", valor_pago: 28.00, credito: 32.00 },
+      saldo_4800: { titulo: "Saldo IA4Tube Pix - pague R$48 e receba R$56", valor_pago: 48.00, credito: 56.00 }
     };
 
     const p = pacotes[pacote];
