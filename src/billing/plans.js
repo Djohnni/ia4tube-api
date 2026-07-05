@@ -30,9 +30,9 @@ const BALANCE_PACKAGES = {
 };
 
 const SINGLE_ART_PURCHASE = {
-  id: "arte_avulsa_399",
-  title: "Arte avulsa IA4Tube - R$3,99",
-  amount: 3.99,
+  id: "arte_avulsa_599",
+  title: "Arte avulsa IA4Tube - R$5,99",
+  amount: 5.99,
   quantity: 1
 };
 

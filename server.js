@@ -41,7 +41,7 @@ const MP_ACCESS_TOKEN = process.env.MP_ACCESS_TOKEN || "";
 const MP_NOTIFICATION_URL = process.env.MP_NOTIFICATION_URL || "https://ia4tube-api.onrender.com/webhook/mercadopago";
 const PUBLIC_API_BASE_URL = (process.env.PUBLIC_API_BASE_URL || "https://ia4tube-api.onrender.com").replace(/\/+$/, "");
 const ARTE_AVULSA_COMPRA = billingPlans.getSingleArtPurchase();
-const EMPRESA_ARTE_AVULSA_VALOR = Number(ARTE_AVULSA_COMPRA.amount || productsRegistry.getProductPrice("arte_empresa") || 3.99);
+const EMPRESA_ARTE_AVULSA_VALOR = Number(ARTE_AVULSA_COMPRA.amount || productsRegistry.getProductPrice("arte_empresa") || 5.99);
 const MP_PROCESSANDO_RETRY_MS = 10 * 60 * 1000;
 const MONTHLY_PLANNING_NOTIFICATIONS_INTERVAL_MS = Math.max(
   30 * 1000,
@@ -1573,7 +1573,7 @@ async function criarArteAvulsaPixHandler(req, res) {
       produto_id: produto.id,
       valor_pago: Number(produto.amount),
       quantidade: Number(produto.quantity || 1),
-      cta_label: "Comprar 1 arte por R$ 3,99",
+      cta_label: "Comprar 1 arte por R$ 5,99",
       artes_avulsas_restantes: Number(c.artes_avulsas_restantes || 0)
     });
   } catch (e) {
@@ -3414,10 +3414,10 @@ function criarPedidoHandler(categoria) {
         return res.status(402).json({
           ok: false,
           code: "billing_required",
-          error: "Compre 1 arte avulsa por R$ 3,99 ou escolha um combo para criar sua arte.",
+          error: "Compre 1 arte avulsa por R$ 5,99 ou escolha um combo para criar sua arte.",
           required_amount: cobrancaEmpresa.required_amount,
           arte_avulsa_valor: EMPRESA_ARTE_AVULSA_VALOR,
-          arte_avulsa_cta: "Comprar 1 arte por R$ 3,99",
+          arte_avulsa_cta: "Comprar 1 arte por R$ 5,99",
           arte_avulsa_endpoint: "/billing/arte-avulsa/pix",
           saldo_extra: cobrancaEmpresa.saldo_extra,
           artes_mensais_restantes: cobrancaEmpresa.artes_mensais_restantes,

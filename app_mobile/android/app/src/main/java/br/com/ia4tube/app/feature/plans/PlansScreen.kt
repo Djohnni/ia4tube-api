@@ -49,12 +49,15 @@ import br.com.ia4tube.app.data.models.BillingPixResult
 import br.com.ia4tube.app.ui.components.ScreenScaffold
 
 private val planExampleAssets = listOf(
-    "exemplo_plano_1.jpeg",
-    "exemplo_plano_2.jpeg",
-    "exemplo_plano_3.jpeg",
-    "exemplo_plano_4.jpeg",
-    "exemplo_plano_5.jpeg",
-    "exemplo_plano_6.jpeg"
+    "combo_example_01.webp",
+    "combo_example_02.webp",
+    "combo_example_04.webp",
+    "combo_example_05.webp",
+    "combo_example_06.webp",
+    "combo_example_07.webp",
+    "combo_example_08.webp",
+    "combo_example_09.webp",
+    "combo_example_10.webp"
 )
 
 @Composable
@@ -341,7 +344,7 @@ private fun StandaloneArtCard(
                 style = MaterialTheme.typography.bodyMedium
             )
             Text(
-                text = "1 arte por R$ 3,99",
+                text = "1 arte por R$ 5,99",
                 color = accent,
                 style = MaterialTheme.typography.titleMedium,
                 fontWeight = FontWeight.ExtraBold
@@ -364,7 +367,7 @@ private fun StandaloneArtCard(
                     )
                 } else {
                     Text(
-                        text = "Comprar 1 arte por R$ 3,99",
+                        text = "Comprar 1 arte por R$ 5,99",
                         fontWeight = FontWeight.ExtraBold
                     )
                 }
@@ -510,7 +513,7 @@ private fun PlanExamplesSection(
             fontWeight = FontWeight.ExtraBold
         )
         Text(
-            text = "Quando os arquivos JPEG estiverem no app, eles aparecem aqui automaticamente.",
+            text = "Veja alguns exemplos comerciais criados para diferentes segmentos.",
             color = secondaryText,
             style = MaterialTheme.typography.bodyMedium
         )
@@ -557,7 +560,7 @@ private fun PlanExampleCard(
 
     Card(
         modifier = modifier
-            .aspectRatio(0.78f)
+            .aspectRatio(2f / 3f)
             .border(1.dp, accent.copy(alpha = 0.28f), RoundedCornerShape(16.dp)),
         shape = RoundedCornerShape(16.dp),
         colors = CardDefaults.cardColors(containerColor = cardColor),
@@ -568,7 +571,7 @@ private fun PlanExampleCard(
                 bitmap = bitmap,
                 contentDescription = assetName,
                 modifier = Modifier.fillMaxSize(),
-                contentScale = ContentScale.Crop
+                contentScale = ContentScale.Fit
             )
         } else {
             Box(
