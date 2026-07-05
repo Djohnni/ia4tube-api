@@ -4564,7 +4564,7 @@ if(
 ){
   return res.json({
     ok:true,
-    resposta:"Combos IA4Tube:\n\n- i4 Essencial: R$ 39,90/mês, 6 artes por mês, 3 Materiais Gráficos da Empresa por mês, 1 Carrossel por mês e suporte via WhatsApp.\n\n- i4 Profissional: R$ 79,90/mês, 16 artes por mês, 5 Materiais Gráficos da Empresa por mês, 1 Material Gráfico de Nicho por mês, 2 Carrosséis por mês e suporte via WhatsApp.\n\n- i4 Empresarial: R$ 149,90/mês, 36 artes por mês, todos os Materiais Gráficos Gerais liberados, 3 Materiais Gráficos de Nicho por mês, 4 Carrosséis por mês e suporte via WhatsApp."
+    resposta:"Combos IA4Tube:\n\n- i4 Essencial: R$ 39,90/mês, 8 artes por mês, 3 Materiais Gráficos da Empresa por mês, 1 Carrossel por mês e suporte via WhatsApp.\n\n- i4 Profissional: R$ 79,90/mês, 20 artes por mês, 5 Materiais Gráficos da Empresa por mês, 1 Material Gráfico de Nicho por mês, 2 Carrosséis por mês e suporte via WhatsApp.\n\n- i4 Empresarial: R$ 149,90/mês, 40 artes por mês, todos os Materiais Gráficos Gerais liberados, 3 Materiais Gráficos de Nicho por mês, 4 Carrosséis por mês e suporte via WhatsApp."
   });
 }
 
@@ -4644,7 +4644,7 @@ COMPORTAMENTO:
 - Se for cumprimento, responda: "Oi! Escolha uma opção no menu do suporte."
 - Se o cliente pedir opções, disser "quais opções", "me dê as opções" ou algo parecido, responda curto: "Use os botões do menu do suporte."
 - Se o cliente falar "dúvida sobre produto" ou perguntar "como funciona", responda: "Escolha o produto no menu abaixo."
-- Se o cliente perguntar sobre combos, planos, assinatura, mensalidade, Essencial, Profissional ou Empresarial, responda somente: "Combos IA4Tube: i4 Essencial R$ 39,90/mês com 6 artes, 3 Materiais Gráficos da Empresa, 1 Carrossel e suporte via WhatsApp. i4 Profissional R$ 79,90/mês com 16 artes, 5 Materiais Gráficos da Empresa, 1 Material Gráfico de Nicho, 2 Carrosséis e suporte via WhatsApp. i4 Empresarial R$ 149,90/mês com 36 artes, todos os Materiais Gráficos Gerais, 3 Materiais Gráficos de Nicho, 4 Carrosséis e suporte via WhatsApp."
+- Se o cliente perguntar sobre combos, planos, assinatura, mensalidade, Essencial, Profissional ou Empresarial, responda somente: "Combos IA4Tube: i4 Essencial R$ 39,90/mês com 8 artes, 3 Materiais Gráficos da Empresa, 1 Carrossel e suporte via WhatsApp. i4 Profissional R$ 79,90/mês com 20 artes, 5 Materiais Gráficos da Empresa, 1 Material Gráfico de Nicho, 2 Carrosséis e suporte via WhatsApp. i4 Empresarial R$ 149,90/mês com 40 artes, todos os Materiais Gráficos Gerais, 3 Materiais Gráficos de Nicho, 4 Carrosséis e suporte via WhatsApp."
 
 - Se o cliente disser "Quero entender Resultado do jogo", explique somente Resultado do jogo.
 - Se o cliente disser "Quero entender Escalação", explique somente Escalação.

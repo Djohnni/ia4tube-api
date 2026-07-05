@@ -150,7 +150,7 @@ fun PlansScreen(
                 planId = "i4_essencial",
                 name = "i4 Essencial",
                 price = "R$ 39,90",
-                arts = "6 artes para postar por mês",
+                arts = "8 artes para postar por mês",
                 benefit = "3 Materiais Gráficos da Empresa por mês",
                 description = "Inclui:",
                 options = listOf(
@@ -170,7 +170,7 @@ fun PlansScreen(
                 planId = "i4_profissional",
                 name = "i4 Profissional",
                 price = "R$ 79,90",
-                arts = "16 artes para postar por mês",
+                arts = "20 artes para postar por mês",
                 benefit = "5 Materiais Gráficos da Empresa por mês",
                 description = "Inclui:",
                 options = listOf(
@@ -191,7 +191,7 @@ fun PlansScreen(
                 planId = "i4_empresarial",
                 name = "i4 Empresarial",
                 price = "R$ 149,90",
-                arts = "36 artes para postar por mês",
+                arts = "40 artes para postar por mês",
                 benefit = "Todos os Materiais Gráficos Gerais liberados",
                 description = "Inclui:",
                 options = listOf(
