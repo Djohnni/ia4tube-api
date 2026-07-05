@@ -1756,10 +1756,10 @@ app.post("/comprar-creditos-pix", auth, async (req, res) => {
     const whatsapp = req.user.whatsapp;
 
     const pacotes = {
-      saldo_800: { titulo: "Saldo IA4Tube Pix - pague R$8 e receba R$10", valor_pago: 8.00, credito: 10.00 },
-      saldo_1800: { titulo: "Saldo IA4Tube Pix - pague R$18 e receba R$21", valor_pago: 18.00, credito: 21.00 },
-      saldo_2800: { titulo: "Saldo IA4Tube Pix - pague R$28 e receba R$32", valor_pago: 28.00, credito: 32.00 },
-      saldo_4800: { titulo: "Saldo IA4Tube Pix - pague R$48 e receba R$56", valor_pago: 48.00, credito: 56.00 }
+      saldo_800: { titulo: "Saldo IA4Tube - R$8", valor_pago: 8.00, credito: 8.00 },
+      saldo_1800: { titulo: "Saldo IA4Tube - R$18", valor_pago: 18.00, credito: 18.00 },
+      saldo_2800: { titulo: "Saldo IA4Tube - R$28", valor_pago: 28.00, credito: 28.00 },
+      saldo_4800: { titulo: "Saldo IA4Tube - R$48", valor_pago: 48.00, credito: 48.00 }
     };
 
     const p = pacotes[pacote];
@@ -2870,12 +2870,54 @@ function handleMonthlyPlanningCalendarHide(req, res) {
   }
 }
 
+function handleMonthlyPlanningCalendarReschedule(req, res) {
+  console.log("[planejamento-mensal][calendario] rota reagendar calendario", {
+    method: req.method,
+    path: req.originalUrl || req.path
+  });
+
+  const whatsapp = req.user.whatsapp;
+  const clientes = readClientes();
+  const cliente = clientes[whatsapp];
+
+  if (!cliente) {
+    return res.status(404).json({ ok: false, error: "Cliente nao encontrado" });
+  }
+
+  try {
+    return res.json(monthlyPlanningService.rescheduleClientPlanningCalendarItem({
+      baseDir: MONTHLY_PLANNINGS_DIR,
+      whatsapp,
+      pedidosDir: PEDIDOS_DIR,
+      itemKey: req.body?.item_key || req.body?.calendar_key || req.body?.key || "",
+      pedidoId: req.body?.pedido_id || "",
+      planningId: req.body?.planning_id || req.body?.planejamento_id || "",
+      planejamentoItemId: req.body?.planejamento_item_id || "",
+      date: req.body?.data || req.body?.date || req.body?.data_sugerida || "",
+      time: req.body?.horario || req.body?.time || req.body?.horario_sugerido || ""
+    }));
+  } catch (error) {
+    console.error("[planejamento-mensal][calendario] erro ao reagendar", {
+      whatsapp,
+      message: error?.message,
+      stack: error?.stack
+    });
+    return res.status(error?.statusCode || 500).json({
+      ok: false,
+      code: error?.code || "monthly_planning_calendar_reschedule_error",
+      error: error?.message || "Nao foi possivel reagendar este item do calendario."
+    });
+  }
+}
+
 app.get("/empresa/calendario-planejamento-mensal", auth, handleMonthlyPlanningCalendarList);
 app.post("/empresa/calendario-planejamento-mensal/ocultar", auth, handleMonthlyPlanningCalendarHide);
+app.post("/empresa/calendario-planejamento-mensal/reagendar", auth, handleMonthlyPlanningCalendarReschedule);
 
 app.get("/empresa/planejamento-mensal/calendario", auth, handleMonthlyPlanningCalendarList);
 
 app.post("/empresa/planejamento-mensal/calendario/ocultar", auth, handleMonthlyPlanningCalendarHide);
+app.post("/empresa/planejamento-mensal/calendario/reagendar", auth, handleMonthlyPlanningCalendarReschedule);
 
 app.get("/empresa/planejamento-mensal/:planningId", auth, (req, res, next) => {
   console.log("[planejamento-mensal] rota detalhe planejamento", {

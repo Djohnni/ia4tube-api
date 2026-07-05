@@ -1,0 +1,13 @@
+<resources>
+    <style name="Theme.IA4Tube" parent="android:style/Theme.Material.Light.NoActionBar">
+        <item name="android:windowBackground">@drawable/splash_background</item>
+        <item name="android:statusBarColor">@color/ia4tube_splash_background</item>
+        <item name="android:navigationBarColor">@color/ia4tube_splash_background</item>
+        <item name="android:colorAccent">@color/ia4tube_blue</item>
+        <item name="android:windowLightStatusBar">false</item>
+        <item name="android:windowLightNavigationBar">false</item>
+        <item name="android:windowSplashScreenBackground">@color/ia4tube_splash_background</item>
+        <item name="android:windowSplashScreenAnimatedIcon">@mipmap/ic_launcher</item>
+        <item name="android:windowSplashScreenIconBackgroundColor">@color/ia4tube_splash_background</item>
+    </style>
+</resources>

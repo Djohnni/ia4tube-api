@@ -12,6 +12,11 @@ const MAX_MONTHLY_PLANNING_ARTS = 36;
 const BOT_PENDING_HARD_LIMIT = 20;
 const BOT_CLAIM_TTL_MS = 10 * 60 * 1000;
 const PROCESSING_STALE_MS = 45 * 60 * 1000;
+const CALENDAR_SLOT_START_MINUTES = 9 * 60;
+const CALENDAR_SLOT_END_MINUTES = 21 * 60;
+const CALENDAR_SLOT_STEP_MINUTES = 30;
+const CALENDAR_DISTRIBUTION_DAYS = 30;
+const CALENDAR_SLOT_SEARCH_DAYS = 180;
 
 function safeSegment(value, fallback = "item") {
   return String(value || "")
@@ -1202,6 +1207,746 @@ function listClientPlanningCalendar({ baseDir, whatsapp, pedidosDir = "" }) {
     total: postagens.length,
     postagens,
     itens: postagens
+  };
+}
+
+function minutesFromTimeText(timeText = "") {
+  const normalized = normalizeTimeText(timeText);
+  if (!normalized) return null;
+
+  const [hour, minute] = normalized.split(":").map(Number);
+  return hour * 60 + minute;
+}
+
+function timeTextFromMinutes(minutes) {
+  const normalizedMinutes = Math.max(0, Math.min(23 * 60 + 59, Number(minutes || 0)));
+  const hour = Math.floor(normalizedMinutes / 60);
+  const minute = normalizedMinutes % 60;
+  return `${String(hour).padStart(2, "0")}:${String(minute).padStart(2, "0")}`;
+}
+
+function dateFromIsoDateText(dateText = "") {
+  const match = String(dateText || "").trim().match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!match) return null;
+
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  const date = new Date(Date.UTC(year, month - 1, day));
+  if (
+    date.getUTCFullYear() !== year
+    || date.getUTCMonth() !== month - 1
+    || date.getUTCDate() !== day
+  ) {
+    return null;
+  }
+  return date;
+}
+
+function isoDateTextFromDate(date) {
+  return [
+    date.getUTCFullYear(),
+    String(date.getUTCMonth() + 1).padStart(2, "0"),
+    String(date.getUTCDate()).padStart(2, "0")
+  ].join("-");
+}
+
+function addDaysToIsoDateText(dateText, days) {
+  const date = dateFromIsoDateText(dateText);
+  if (!date) return "";
+
+  date.setUTCDate(date.getUTCDate() + Number(days || 0));
+  return isoDateTextFromDate(date);
+}
+
+function scheduleSlotKey(dateText = "", timeText = "", ciclo = "") {
+  const date = normalizeDateText(dateText, ciclo);
+  const time = normalizeTimeText(timeText);
+  return date && time ? `${date}|${time}` : "";
+}
+
+function scheduleSlotFromPost(post = {}, ciclo = "") {
+  const date = normalizeDateText(post.data_sugerida || post.data || "", ciclo);
+  const time = normalizeTimeText(post.horario_sugerido || post.horario || post.hora || "");
+  const key = scheduleSlotKey(date, time, ciclo);
+  return { date, time, key };
+}
+
+function roundUpToScheduleStep(minutes) {
+  return Math.ceil(Number(minutes || 0) / CALENDAR_SLOT_STEP_MINUTES) * CALENDAR_SLOT_STEP_MINUTES;
+}
+
+function saoPauloScheduleNow(now = new Date()) {
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "America/Sao_Paulo",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hourCycle: "h23"
+  }).formatToParts(now);
+  const values = {};
+  for (const part of parts) {
+    if (part.type !== "literal") values[part.type] = part.value;
+  }
+  const hour = Number(values.hour || 0);
+  const minute = Number(values.minute || 0);
+
+  return {
+    date: `${values.year}-${values.month}-${values.day}`,
+    minutes: hour * 60 + minute
+  };
+}
+
+function ensureScheduleDay(scheduleByDate, dateText) {
+  const date = String(dateText || "").trim();
+  if (!date) return null;
+
+  let day = scheduleByDate.get(date);
+  if (!day) {
+    day = {
+      count: 0,
+      times: new Set()
+    };
+    scheduleByDate.set(date, day);
+  }
+  return day;
+}
+
+function addExistingSchedulePost(scheduleByDate, post, ciclo, todayText) {
+  const slot = scheduleSlotFromPost(post, ciclo);
+  if (!slot.date || slot.date < todayText) return;
+
+  const day = ensureScheduleDay(scheduleByDate, slot.date);
+  if (!day) return;
+
+  day.count += 1;
+  if (slot.time) day.times.add(slot.time);
+}
+
+function calendarAliasesOverlap(item, aliases) {
+  if (!aliases || aliases.size <= 0) return false;
+  return calendarItemAliases(item).some((alias) => aliases.has(alias));
+}
+
+function futureScheduleByDateForClient({
+  baseDir,
+  whatsapp,
+  pedidosDir = "",
+  currentPlanningId = "",
+  todayText = "",
+  excludeAliases = new Set()
+}) {
+  const scheduleByDate = new Map();
+  const currentId = String(currentPlanningId || "").trim();
+  const hiddenKeys = calendarHiddenKeys(baseDir, whatsapp);
+
+  for (const planning of listPlanningDirsForWhatsapp(baseDir, whatsapp).map(parsePlanning).filter(Boolean)) {
+    const planningId = String(planning.planejamento_id || planning.id || "").trim();
+    if (currentId && planningId === currentId) continue;
+    if (String(planning.status || "").trim().toLowerCase() === "cancelado") continue;
+
+    for (const post of planningPosts(planning, pedidosDir)) {
+      const item = calendarPayloadForPost(planning, post);
+      if (isCalendarItemHidden(hiddenKeys, item)) continue;
+      if (calendarAliasesOverlap(item, excludeAliases)) continue;
+      addExistingSchedulePost(scheduleByDate, post, planning.ciclo, todayText);
+    }
+  }
+
+  return scheduleByDate;
+}
+
+function calendarDistributionDates(todayText, totalDays = CALENDAR_DISTRIBUTION_DAYS) {
+  return Array.from({ length: totalDays }, (_, index) => addDaysToIsoDateText(todayText, index))
+    .filter(Boolean);
+}
+
+function isDateInDistributionWindow(dateText, distributionDates) {
+  return distributionDates.includes(String(dateText || "").trim());
+}
+
+function orderedDistributionDates({ distributionDates, preferredDate = "" }) {
+  const date = String(preferredDate || "").trim();
+  const startIndex = distributionDates.indexOf(date);
+  if (startIndex < 0) return distributionDates;
+
+  return [
+    ...distributionDates.slice(startIndex),
+    ...distributionDates.slice(0, startIndex)
+  ];
+}
+
+function availableStartMinutesForDate(dateText, todayInfo) {
+  let startMinutes = CALENDAR_SLOT_START_MINUTES;
+  if (dateText === todayInfo.date) {
+    startMinutes = Math.max(
+      startMinutes,
+      roundUpToScheduleStep(todayInfo.minutes + 20)
+    );
+  }
+  return startMinutes <= CALENDAR_SLOT_END_MINUTES ? startMinutes : null;
+}
+
+function pushCandidateTime(candidates, seen, timeText, startMinutes) {
+  const normalized = normalizeTimeText(timeText);
+  const minutes = minutesFromTimeText(normalized);
+  if (!normalized || minutes === null) return;
+  if (minutes < startMinutes || minutes > CALENDAR_SLOT_END_MINUTES) return;
+  if (seen.has(normalized)) return;
+
+  candidates.push(normalized);
+  seen.add(normalized);
+}
+
+function freeTimeForScheduleDate({ scheduleByDate, dateText, preferredTime = "", todayInfo }) {
+  const startMinutes = availableStartMinutesForDate(dateText, todayInfo);
+  if (startMinutes === null) return "";
+
+  const day = ensureScheduleDay(scheduleByDate, dateText);
+  if (!day) return "";
+
+  const candidates = [];
+  const seen = new Set();
+  const preferredMinutes = minutesFromTimeText(preferredTime);
+
+  if (preferredMinutes !== null) {
+    pushCandidateTime(candidates, seen, preferredTime, startMinutes);
+    for (
+      let minutes = Math.max(roundUpToScheduleStep(preferredMinutes + CALENDAR_SLOT_STEP_MINUTES), startMinutes);
+      minutes <= CALENDAR_SLOT_END_MINUTES;
+      minutes += CALENDAR_SLOT_STEP_MINUTES
+    ) {
+      pushCandidateTime(candidates, seen, timeTextFromMinutes(minutes), startMinutes);
+    }
+    for (
+      let minutes = startMinutes;
+      minutes < preferredMinutes && minutes <= CALENDAR_SLOT_END_MINUTES;
+      minutes += CALENDAR_SLOT_STEP_MINUTES
+    ) {
+      pushCandidateTime(candidates, seen, timeTextFromMinutes(minutes), startMinutes);
+    }
+  } else {
+    for (
+      let minutes = startMinutes;
+      minutes <= CALENDAR_SLOT_END_MINUTES;
+      minutes += CALENDAR_SLOT_STEP_MINUTES
+    ) {
+      pushCandidateTime(candidates, seen, timeTextFromMinutes(minutes), startMinutes);
+    }
+  }
+
+  return candidates.find((time) => !day.times.has(time)) || "";
+}
+
+function scheduleDayLoad(scheduleByDate, dateText) {
+  return Number(scheduleByDate.get(dateText)?.count || 0);
+}
+
+function findBestScheduleSlotForNewPost({
+  scheduleByDate,
+  preferredDate = "",
+  preferredTime = "",
+  todayInfo
+}) {
+  const distributionDates = calendarDistributionDates(todayInfo.date);
+  const effectivePreferredDate = isDateInDistributionWindow(preferredDate, distributionDates)
+    ? preferredDate
+    : todayInfo.date;
+  const orderedDates = orderedDistributionDates({
+    distributionDates,
+    preferredDate: effectivePreferredDate
+  });
+
+  for (const date of orderedDates) {
+    if (scheduleDayLoad(scheduleByDate, date) > 0) continue;
+
+    const time = freeTimeForScheduleDate({
+      scheduleByDate,
+      dateText: date,
+      preferredTime,
+      todayInfo
+    });
+    if (time) {
+      return {
+        date,
+        time,
+        reason: "dia_livre"
+      };
+    }
+  }
+
+  const leastLoadedDates = orderedDates
+    .map((date, index) => ({
+      date,
+      index,
+      count: scheduleDayLoad(scheduleByDate, date)
+    }))
+    .sort((a, b) => (a.count - b.count) || (a.index - b.index));
+
+  for (const item of leastLoadedDates) {
+    const time = freeTimeForScheduleDate({
+      scheduleByDate,
+      dateText: item.date,
+      preferredTime,
+      todayInfo
+    });
+    if (time) {
+      return {
+        date: item.date,
+        time,
+        reason: "dia_menos_ocupado"
+      };
+    }
+  }
+
+  for (let dayOffset = CALENDAR_DISTRIBUTION_DAYS; dayOffset <= CALENDAR_SLOT_SEARCH_DAYS; dayOffset += 1) {
+    const date = addDaysToIsoDateText(todayInfo.date, dayOffset);
+    const time = freeTimeForScheduleDate({
+      scheduleByDate,
+      dateText: date,
+      preferredTime,
+      todayInfo
+    });
+    if (time) {
+      return {
+        date,
+        time,
+        reason: "fora_janela_30_dias"
+      };
+    }
+  }
+
+  return null;
+}
+
+function distributePlanningCalendarSchedule({ baseDir, planning, pedidosDir = "", postagens = [] }) {
+  const todayInfo = saoPauloScheduleNow();
+  const scheduleByDate = futureScheduleByDateForClient({
+    baseDir,
+    whatsapp: planning.whatsapp,
+    pedidosDir,
+    currentPlanningId: planning.planejamento_id || planning.id,
+    todayText: todayInfo.date
+  });
+  const adjustedPosts = [];
+  const adjustments = [];
+
+  for (const post of postagens) {
+    const slot = scheduleSlotFromPost(post, planning.ciclo);
+    const bestSlot = findBestScheduleSlotForNewPost({
+      scheduleByDate,
+      preferredDate: slot.date,
+      preferredTime: slot.time,
+      todayInfo
+    });
+
+    if (!bestSlot?.date || !bestSlot?.time) {
+      adjustedPosts.push(post);
+      continue;
+    }
+
+    const day = ensureScheduleDay(scheduleByDate, bestSlot.date);
+    day.count += 1;
+    day.times.add(bestSlot.time);
+
+    const criterio = String(post.criterio_agendamento || "").trim();
+    const changed = slot.date !== bestSlot.date || slot.time !== bestSlot.time;
+    const adjustedPost = {
+      ...post,
+      data_sugerida: bestSlot.date,
+      horario_sugerido: bestSlot.time,
+      criterio_agendamento: changed
+        ? [
+          criterio,
+          `ajustado automaticamente para distribuir no calendario geral (${bestSlot.reason})`
+        ].filter(Boolean).join("; ")
+        : criterio
+    };
+    const updatedPost = changed
+      ? {
+        ...adjustedPost,
+        ...notificationFieldsForPost({
+          ...adjustedPost,
+          notificar_em: "",
+          notificacao_status: "pendente",
+          notificacao_enviada_em: "",
+          notificacao_erro: "",
+          notificacao_tentativas: 0
+        }, planning)
+      }
+      : adjustedPost;
+
+    adjustedPosts.push(updatedPost);
+    if (changed) {
+      adjustments.push({
+        ordem: post.ordem || adjustedPosts.length,
+        de: `${slot.date || "sem_data"} ${slot.time || "sem_horario"}`,
+        para: `${bestSlot.date} ${bestSlot.time}`,
+        motivo: bestSlot.reason
+      });
+    }
+  }
+
+  return {
+    postagens: adjustedPosts,
+    adjustments
+  };
+}
+
+function planningSourcePosts(plano = {}) {
+  if (Array.isArray(plano.postagens)) return plano.postagens;
+  if (Array.isArray(plano.itens)) return plano.itens;
+  return [];
+}
+
+function sourcePostItemId(planning, post, index) {
+  return String(
+    post.planejamento_item_id
+      || post.id
+      || `${planning.planejamento_id || planning.id}_item_${String(index + 1).padStart(3, "0")}`
+  ).trim();
+}
+
+function sourcePostAliases({ planning, post, index, pedidoId = "" }) {
+  const planningId = String(planning.planejamento_id || planning.id || "").trim();
+  const itemId = sourcePostItemId(planning, post, index);
+  const orderId = String(pedidoId || post.pedido_id || "").trim();
+  const calendarKey = postCalendarKey(planningId, {
+    ...post,
+    ordem: post.ordem || index + 1,
+    planejamento_item_id: itemId,
+    pedido_id: orderId
+  });
+
+  return [
+    calendarKey,
+    orderId,
+    planningId && itemId ? `${planningId}:${itemId}` : ""
+  ]
+    .map((value) => String(value || "").trim())
+    .filter(Boolean);
+}
+
+function targetCalendarAliases({
+  itemKey = "",
+  pedidoId = "",
+  planningId = "",
+  planejamentoItemId = ""
+}) {
+  return new Set([
+    itemKey,
+    pedidoId,
+    planningId && planejamentoItemId ? `${planningId}:${planejamentoItemId}` : ""
+  ]
+    .map((value) => String(value || "").trim())
+    .filter(Boolean));
+}
+
+function sourcePostMatchesTarget({
+  aliases,
+  targetAliases,
+  targetPlanningId = "",
+  targetItemId = "",
+  targetPedidoId = "",
+  planningId = "",
+  itemId = "",
+  pedidoId = ""
+}) {
+  if (targetAliases.size && aliases.some((alias) => targetAliases.has(alias))) return true;
+  if (targetPlanningId && targetItemId && planningId === targetPlanningId && itemId === targetItemId) return true;
+  if (targetPedidoId && pedidoId && pedidoId === targetPedidoId) return true;
+  return false;
+}
+
+function findClientPlanningCalendarSourceItem({
+  baseDir,
+  whatsapp,
+  pedidosDir = "",
+  itemKey = "",
+  pedidoId = "",
+  planningId = "",
+  planejamentoItemId = ""
+}) {
+  const targetAliases = targetCalendarAliases({
+    itemKey,
+    pedidoId,
+    planningId,
+    planejamentoItemId
+  });
+  const targetPlanningId = String(planningId || "").trim();
+  const targetItemId = String(planejamentoItemId || "").trim();
+  const targetPedidoId = String(pedidoId || "").trim();
+
+  for (const planning of listPlanningDirsForWhatsapp(baseDir, whatsapp).map(parsePlanning).filter(Boolean)) {
+    const currentPlanningId = String(planning.planejamento_id || planning.id || "").trim();
+    if (targetPlanningId && currentPlanningId !== targetPlanningId) continue;
+    if (String(planning.status || "").trim().toLowerCase() === "cancelado") continue;
+
+    const planoPath = path.join(planning.base_path, "plano_mensal.json");
+    const plano = readJson(planoPath, null);
+    const sourcePosts = planningSourcePosts(plano);
+    if (!plano || !sourcePosts.length) continue;
+
+    const createdOrders = createdOrdersByPlanningItem(planning, pedidosDir);
+    for (let index = 0; index < sourcePosts.length; index += 1) {
+      const post = sourcePosts[index] || {};
+      const itemId = sourcePostItemId(planning, post, index);
+      const resolvedPedidoId = resolvePlanningPostPedidoId({
+        planning,
+        post,
+        index,
+        createdOrders
+      });
+      const aliases = sourcePostAliases({
+        planning,
+        post,
+        index,
+        pedidoId: resolvedPedidoId
+      });
+
+      if (sourcePostMatchesTarget({
+        aliases,
+        targetAliases,
+        targetPlanningId,
+        targetItemId,
+        targetPedidoId,
+        planningId: currentPlanningId,
+        itemId,
+        pedidoId: resolvedPedidoId
+      })) {
+        return {
+          planning,
+          planoPath,
+          plano,
+          sourcePosts,
+          post,
+          index,
+          itemId,
+          pedidoId: resolvedPedidoId,
+          aliases
+        };
+      }
+    }
+  }
+
+  return null;
+}
+
+function updatePlanningChildOrderSchedule({ pedidosDir = "", pedidoId = "", date = "", time = "" }) {
+  if (!pedidosDir || !pedidoId) return false;
+
+  const base = orderStorage.getPedidoBaseGlobal(pedidosDir, pedidoId);
+  if (!base) return false;
+
+  const pedido = orderStorage.readOrder(base) || {};
+  if (!isPlanningOrder(pedido)) return false;
+
+  const now = new Date().toISOString();
+  const nextPedido = {
+    ...pedido,
+    data_sugerida: date,
+    horario_sugerido: time,
+    atualizado_em: now
+  };
+
+  if (nextPedido.planejamento_mensal && typeof nextPedido.planejamento_mensal === "object") {
+    nextPedido.planejamento_mensal = {
+      ...nextPedido.planejamento_mensal,
+      data_sugerida: date,
+      horario_sugerido: time,
+      atualizado_em: now
+    };
+  }
+
+  if (nextPedido.fields && typeof nextPedido.fields === "object") {
+    nextPedido.fields = {
+      ...nextPedido.fields,
+      campos_dinamicos: {
+        ...(nextPedido.fields.campos_dinamicos || {}),
+        data_sugerida: date,
+        horario_sugerido: time
+      }
+    };
+  }
+
+  if (nextPedido.legacy && typeof nextPedido.legacy === "object") {
+    nextPedido.legacy = {
+      ...nextPedido.legacy,
+      data: date,
+      hora: time
+    };
+  }
+
+  orderStorage.writeOrder(base, nextPedido);
+  return true;
+}
+
+function updateCreatedOrderSchedule({ planning, pedidoId = "", planejamentoItemId = "", date = "", time = "" }) {
+  const pedidosCriados = readCreatedOrdersFile(planning);
+  let changed = false;
+
+  pedidosCriados.pedidos = (pedidosCriados.pedidos || []).map((record) => {
+    const recordPedidoId = String(record?.pedido_id || "").trim();
+    const recordItemId = String(record?.planejamento_item_id || "").trim();
+    if (
+      (pedidoId && recordPedidoId === pedidoId)
+      || (planejamentoItemId && recordItemId === planejamentoItemId)
+    ) {
+      changed = true;
+      return {
+        ...record,
+        data_sugerida: date,
+        horario_sugerido: time,
+        reagendado_em: new Date().toISOString()
+      };
+    }
+    return record;
+  });
+
+  if (changed) {
+    pedidosCriados.atualizado_em = new Date().toISOString();
+    writeJson(path.join(planning.base_path, "pedidos_criados.json"), pedidosCriados);
+  }
+
+  return changed;
+}
+
+function rescheduleClientPlanningCalendarItem({
+  baseDir,
+  whatsapp,
+  pedidosDir = "",
+  itemKey = "",
+  pedidoId = "",
+  planningId = "",
+  planejamentoItemId = "",
+  date = "",
+  time = ""
+}) {
+  const found = findClientPlanningCalendarSourceItem({
+    baseDir,
+    whatsapp,
+    pedidosDir,
+    itemKey,
+    pedidoId,
+    planningId,
+    planejamentoItemId
+  });
+
+  if (!found) {
+    const error = new Error("Item do calendario nao encontrado.");
+    error.statusCode = 404;
+    error.code = "monthly_planning_calendar_item_not_found";
+    throw error;
+  }
+
+  const targetDate = normalizeDateText(date, found.planning.ciclo);
+  if (!targetDate) {
+    const error = new Error("Data invalida para reagendamento.");
+    error.statusCode = 400;
+    error.code = "monthly_planning_calendar_invalid_date";
+    throw error;
+  }
+
+  const originalSlot = scheduleSlotFromPost(found.post, found.planning.ciclo);
+  const preferredTime = normalizeTimeText(time || originalSlot.time || found.post.horario_sugerido || "09:00") || "09:00";
+  const todayInfo = saoPauloScheduleNow();
+  const scheduleByDate = futureScheduleByDateForClient({
+    baseDir,
+    whatsapp,
+    pedidosDir,
+    todayText: todayInfo.date,
+    excludeAliases: new Set(found.aliases)
+  });
+  const targetTime = freeTimeForScheduleDate({
+    scheduleByDate,
+    dateText: targetDate,
+    preferredTime,
+    todayInfo
+  });
+
+  if (!targetTime) {
+    const error = new Error("Nao ha horario livre nesse dia para reagendar a arte.");
+    error.statusCode = 409;
+    error.code = "monthly_planning_calendar_day_full";
+    throw error;
+  }
+
+  const now = new Date().toISOString();
+  const updatedPost = {
+    ...found.post,
+    planejamento_item_id: found.itemId,
+    pedido_id: found.pedidoId || found.post.pedido_id || "",
+    data_sugerida: targetDate,
+    horario_sugerido: targetTime,
+    reagendado_em: now,
+    reagendamento_origem: "cliente_calendario",
+    ...notificationFieldsForPost({
+      ...found.post,
+      data_sugerida: targetDate,
+      horario_sugerido: targetTime,
+      notificar_em: "",
+      notificacao_status: "pendente",
+      notificacao_enviada_em: "",
+      notificacao_erro: "",
+      notificacao_tentativas: 0
+    }, found.planning)
+  };
+
+  const updatedPosts = found.sourcePosts.map((post, index) => (
+    index === found.index ? updatedPost : post
+  ));
+  const updatedPlano = {
+    ...found.plano,
+    postagens: updatedPosts,
+    itens: updatedPosts,
+    atualizado_em: now
+  };
+
+  writeJson(found.planoPath, updatedPlano);
+  updateCreatedOrderSchedule({
+    planning: found.planning,
+    pedidoId: found.pedidoId,
+    planejamentoItemId: found.itemId,
+    date: targetDate,
+    time: targetTime
+  });
+  const pedidoAtualizado = updatePlanningChildOrderSchedule({
+    pedidosDir,
+    pedidoId: found.pedidoId,
+    date: targetDate,
+    time: targetTime
+  });
+
+  appendLog(
+    found.planning.base_path,
+    `Item reagendado pelo cliente: ${found.itemId} ${originalSlot.date || "sem_data"} ${originalSlot.time || "sem_horario"} -> ${targetDate} ${targetTime}.`
+  );
+
+  const refreshedPlanning = parsePlanning(found.planning.base_path) || {
+    ...found.planning,
+    plano_mensal: updatedPlano
+  };
+  const refreshedPost = planningPosts(refreshedPlanning, pedidosDir)
+    .find((post) => {
+      const currentItemId = String(post.planejamento_item_id || "").trim();
+      const currentPedidoId = String(post.pedido_id || "").trim();
+      return currentItemId === found.itemId || (found.pedidoId && currentPedidoId === found.pedidoId);
+    }) || {
+      ...updatedPost,
+      ordem: Number(updatedPost.ordem || found.index + 1),
+      status: "planejada",
+      status_label: "Planejada",
+      imagem_pronta: false
+    };
+
+  return {
+    ok: true,
+    pedido_atualizado: pedidoAtualizado,
+    data_sugerida: targetDate,
+    horario_sugerido: targetTime,
+    postagem: calendarPayloadForPost(refreshedPlanning, refreshedPost)
   };
 }
 
@@ -2550,13 +3295,20 @@ function savePlanResult({ baseDir, planningId, payload = {}, pedidosDir = "", cl
     throw error;
   }
 
+  const scheduleResolution = distributePlanningCalendarSchedule({
+    baseDir,
+    planning,
+    pedidosDir,
+    postagens
+  });
+  const adjustedPostagens = scheduleResolution.postagens;
   const now = new Date().toISOString();
   const finalPlan = {
     ...plan,
     planejamento_id: plan.planejamento_id || planning.planejamento_id || planning.id,
-    quantidade: Number(plan.quantidade || postagens.length),
-    postagens,
-    itens: Array.isArray(plan.itens) ? plan.itens : postagens,
+    quantidade: Number(plan.quantidade || adjustedPostagens.length),
+    postagens: adjustedPostagens,
+    itens: adjustedPostagens,
     gerado_em: plan.gerado_em || now
   };
 
@@ -2584,6 +3336,12 @@ function savePlanResult({ baseDir, planningId, payload = {}, pedidosDir = "", cl
   writeJson(path.join(planning.base_path, "plano_mensal.json"), finalPlan);
   writeJson(planning.solicitacao_path, solicitacao);
   writeStatus(planning.base_path, "pronto");
+  if (scheduleResolution.adjustments.length) {
+    const adjustmentSummary = scheduleResolution.adjustments
+      .map((item) => `#${item.ordem}: ${item.de} -> ${item.para} (${item.motivo})`)
+      .join("; ");
+    appendLog(planning.base_path, `Agendamento automatico distribuiu ${scheduleResolution.adjustments.length} postagem(ns): ${adjustmentSummary}.`);
+  }
   appendLog(planning.base_path, `Plano Mensal recebido pelo backend com ${postagens.length} postagem(ns).`);
 
   return parsePlanning(planning.base_path);
@@ -2887,6 +3645,7 @@ module.exports = {
   listClientPlannings,
   listClientPlanningCalendar,
   hideClientPlanningCalendarItem,
+  rescheduleClientPlanningCalendarItem,
   listClientPlanningGroups,
   publicDetailPayload,
   cancelPlanning,
