@@ -54,7 +54,8 @@ data class MonthlyPlanningPostDto(
     val caption: String,
     val pedidoId: String,
     val imageReady: Boolean,
-    val imageText: String = ""
+    val imageText: String = "",
+    val thumbnailUrl: String = ""
 )
 
 data class MonthlyPlanningRescheduleRequest(

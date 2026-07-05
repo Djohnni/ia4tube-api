@@ -1295,7 +1295,12 @@ class IA4TubeApiClient(
                 caption = item.optString("legenda").ifBlank { item.optString("descricao_instagram") },
                 pedidoId = item.optString("pedido_id"),
                 imageReady = item.optBoolean("imagem_pronta", false),
-                imageText = monthlyPlanningImageTextFromJson(item)
+                imageText = monthlyPlanningImageTextFromJson(item),
+                thumbnailUrl = item.optString("thumbnail_url")
+                    .ifBlank { item.optString("miniatura_url") }
+                    .ifBlank { item.optString("preview_url") }
+                    .ifBlank { item.optString("image_url") }
+                    .ifBlank { item.optString("imagem_url") }
             )
         }
 

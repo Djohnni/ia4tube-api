@@ -110,7 +110,8 @@ data class MonthlyPlanningPost(
     val caption: String,
     val pedidoId: String = "",
     val imageReady: Boolean = false,
-    val imageText: String = ""
+    val imageText: String = "",
+    val thumbnailUrl: String = ""
 )
 
 object MonthlyPlanningMockData {
@@ -761,7 +762,8 @@ private fun MonthlyPlanningPostDto.toUiPost(): MonthlyPlanningPost {
         caption = caption,
         pedidoId = pedidoId,
         imageReady = imageReady,
-        imageText = imageText
+        imageText = imageText,
+        thumbnailUrl = thumbnailUrl
     )
 }
 

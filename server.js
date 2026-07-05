@@ -4310,6 +4310,34 @@ app.get("/pedidos/:id/preview", (req, res) => {
   return res.sendFile(previewPath);
 });
 
+// ===== MINIATURA DA IMAGEM FINAL =====
+app.get("/pedidos/:id/thumbnail", (req, res) => {
+  const base = getPedidoBaseGlobal(req.params.id);
+
+  if (!base) {
+    return res.status(404).json({ ok: false, error: "Pedido nÃ£o encontrado" });
+  }
+
+  const previewProtegidaPath = path.join(base, "preview_ia4tube.jpg");
+  const resultadoFinalPath = path.join(base, "resultado_final.png");
+  const thumbnailPath = fs.existsSync(previewProtegidaPath)
+    ? previewProtegidaPath
+    : resultadoFinalPath;
+
+  if (!fs.existsSync(thumbnailPath)) {
+    return res.status(404).json({ ok: false, error: "Imagem ainda nÃ£o ficou pronta" });
+  }
+
+  if (thumbnailPath.endsWith(".jpg") || thumbnailPath.endsWith(".jpeg")) {
+    res.setHeader("Content-Type", "image/jpeg");
+  } else {
+    res.setHeader("Content-Type", "image/png");
+  }
+  res.setHeader("Cache-Control", "public, max-age=300");
+
+  return res.sendFile(thumbnailPath);
+});
+
 // ===== BAIXAR ZIP =====
 app.get("/pedidos/:id/zip", auth, (req, res) => {
   const whatsapp = req.user.whatsapp;

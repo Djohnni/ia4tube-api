@@ -1151,6 +1151,9 @@ function calendarPayloadForPost(planning, post) {
   const previewUrl = imageReady && pedidoId
     ? `/pedidos/${encodeURIComponent(pedidoId)}/preview`
     : "";
+  const thumbnailUrl = imageReady && pedidoId
+    ? `/pedidos/${encodeURIComponent(pedidoId)}/thumbnail`
+    : "";
 
   return {
     key: calendarKey,
@@ -1176,8 +1179,10 @@ function calendarPayloadForPost(planning, post) {
     frase_foto: post.frase_foto || post.texto_obrigatorio_imagem || "",
     orientacao_cliente: post.orientacao_cliente || post.direcionamento_cliente || "",
     imagem_pronta: imageReady,
+    image_url: previewUrl,
     imagem_url: previewUrl,
-    miniatura_url: previewUrl,
+    thumbnail_url: thumbnailUrl,
+    miniatura_url: thumbnailUrl,
     preview_url: previewUrl,
     sort_key: [
       post.data_sugerida || "9999-12-31",

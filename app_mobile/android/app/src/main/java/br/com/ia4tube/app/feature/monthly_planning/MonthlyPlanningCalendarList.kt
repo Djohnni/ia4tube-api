@@ -1,5 +1,7 @@
 package br.com.ia4tube.app.feature.monthly_planning
 
+import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -11,6 +13,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
@@ -29,9 +32,19 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import br.com.ia4tube.app.data.api.PreviewUrlBuilder
+import coil.compose.AsyncImagePainter
+import coil.compose.rememberAsyncImagePainter
+import coil.request.ImageRequest
 import java.time.LocalDate
 import java.time.format.DateTimeFormatter
 import java.time.format.DateTimeParseException
@@ -53,7 +66,8 @@ data class MonthlyPlanningCalendarListItem(
     val title: String,
     val pedidoId: String,
     val imageReady: Boolean,
-    val sortKey: String
+    val sortKey: String,
+    val thumbnailUrl: String = ""
 )
 
 @Composable
@@ -253,14 +267,22 @@ private fun MonthlyPlanningCalendarDayPost(
                 color = MaterialTheme.colorScheme.primary
             )
         }
-        Text(
-            text = item.title,
-            style = MaterialTheme.typography.bodyMedium,
-            fontWeight = FontWeight.SemiBold,
-            maxLines = 2,
-            overflow = TextOverflow.Ellipsis,
-            color = MaterialTheme.colorScheme.onSurface
-        )
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            MonthlyPlanningCalendarThumbnail(item = item)
+            Text(
+                modifier = Modifier.weight(1f),
+                text = item.title,
+                style = MaterialTheme.typography.bodyMedium,
+                fontWeight = FontWeight.SemiBold,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+                color = MaterialTheme.colorScheme.onSurface
+            )
+        }
         if (onReschedule != null || onRemove != null) {
             Row(
                 modifier = Modifier.align(Alignment.End),
@@ -327,14 +349,22 @@ private fun MonthlyPlanningCalendarListCard(
                     }
                 )
             }
-            Text(
-                text = item.title,
-                style = MaterialTheme.typography.bodyMedium,
-                fontWeight = FontWeight.SemiBold,
-                maxLines = 2,
-                overflow = TextOverflow.Ellipsis,
-                color = MaterialTheme.colorScheme.onSurface
-            )
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                MonthlyPlanningCalendarThumbnail(item = item)
+                Text(
+                    modifier = Modifier.weight(1f),
+                    text = item.title,
+                    style = MaterialTheme.typography.bodyMedium,
+                    fontWeight = FontWeight.SemiBold,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                    color = MaterialTheme.colorScheme.onSurface
+                )
+            }
             onRemove?.let { remove ->
                 TextButton(
                     modifier = Modifier.align(Alignment.End),
@@ -365,8 +395,104 @@ internal fun MonthlyPlanningPost.toCalendarListItem(planningId: String = ""): Mo
         title = calendarPostTitle(number, imageText, theme, objective),
         pedidoId = pedidoId,
         imageReady = imageReady,
-        sortKey = listOf(date, time, number.toString().padStart(4, '0')).joinToString("|")
+        sortKey = listOf(date, time, number.toString().padStart(4, '0')).joinToString("|"),
+        thumbnailUrl = thumbnailUrl
     )
+}
+
+@Composable
+private fun MonthlyPlanningCalendarThumbnail(item: MonthlyPlanningCalendarListItem) {
+    val shape = RoundedCornerShape(10.dp)
+    val backgroundColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.9f)
+    val borderColor = MaterialTheme.colorScheme.outline.copy(alpha = 0.22f)
+    val resolvedUrl = remember(item.pedidoId, item.thumbnailUrl) {
+        if (item.thumbnailUrl.isBlank()) {
+            ""
+        } else {
+            PreviewUrlBuilder.build(item.pedidoId, item.thumbnailUrl)
+        }
+    }
+
+    Box(
+        modifier = Modifier
+            .size(60.dp)
+            .clip(shape)
+            .background(backgroundColor)
+            .border(1.dp, borderColor, shape),
+        contentAlignment = Alignment.Center
+    ) {
+        if (resolvedUrl.isBlank()) {
+            CalendarImagePlaceholder()
+            return@Box
+        }
+
+        val context = LocalContext.current
+        val imageRequest = remember(resolvedUrl, context) {
+            ImageRequest.Builder(context)
+                .data(resolvedUrl)
+                .crossfade(true)
+                .build()
+        }
+        val painter = rememberAsyncImagePainter(model = imageRequest)
+
+        Image(
+            painter = painter,
+            contentDescription = "Miniatura da arte",
+            modifier = Modifier.matchParentSize(),
+            contentScale = ContentScale.Crop
+        )
+
+        when (painter.state) {
+            is AsyncImagePainter.State.Loading -> {
+                CalendarImagePlaceholder()
+                CircularProgressIndicator(
+                    modifier = Modifier.size(18.dp),
+                    strokeWidth = 2.dp,
+                    color = MaterialTheme.colorScheme.primary
+                )
+            }
+            is AsyncImagePainter.State.Error -> CalendarImagePlaceholder()
+            else -> Unit
+        }
+    }
+}
+
+@Composable
+private fun CalendarImagePlaceholder() {
+    val color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.62f)
+    Canvas(modifier = Modifier.size(28.dp)) {
+        val stroke = Stroke(width = 2.dp.toPx())
+        val radius = 5.dp.toPx()
+        drawRoundRect(
+            color = color,
+            size = Size(size.width, size.height),
+            cornerRadius = CornerRadius(radius, radius),
+            style = stroke
+        )
+        drawCircle(
+            color = color,
+            radius = 3.dp.toPx(),
+            center = Offset(size.width * 0.72f, size.height * 0.28f)
+        )
+        drawLine(
+            color = color,
+            start = Offset(size.width * 0.16f, size.height * 0.72f),
+            end = Offset(size.width * 0.42f, size.height * 0.48f),
+            strokeWidth = 2.dp.toPx()
+        )
+        drawLine(
+            color = color,
+            start = Offset(size.width * 0.42f, size.height * 0.48f),
+            end = Offset(size.width * 0.62f, size.height * 0.66f),
+            strokeWidth = 2.dp.toPx()
+        )
+        drawLine(
+            color = color,
+            start = Offset(size.width * 0.62f, size.height * 0.66f),
+            end = Offset(size.width * 0.84f, size.height * 0.42f),
+            strokeWidth = 2.dp.toPx()
+        )
+    }
 }
 
 @Composable
