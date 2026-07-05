@@ -6,6 +6,7 @@ import androidx.lifecycle.viewModelScope
 import br.com.ia4tube.app.core.company.CompanyProfile
 import br.com.ia4tube.app.core.company.CompanyProfileStore
 import br.com.ia4tube.app.data.models.ApiResult
+import br.com.ia4tube.app.data.models.DownloadedImage
 import br.com.ia4tube.app.data.models.MonthlyPlanningDetailDto
 import br.com.ia4tube.app.data.models.MonthlyPlanningPhotoInput
 import br.com.ia4tube.app.data.models.MonthlyPlanningPostDto
@@ -49,6 +50,8 @@ data class MonthlyPlanningUiState(
     val detailPlanning: MonthlyPlanningSummary? = null,
     val calendarLoading: Boolean = false,
     val calendarError: String? = null,
+    val calendarSharingItemKeys: Set<String> = emptySet(),
+    val calendarSharePayload: MonthlyPlanningCalendarSharePayload? = null,
     val generalCalendarPosts: List<MonthlyPlanningCalendarListItem> = emptyList()
 ) {
     val reservedArts: Int
@@ -112,6 +115,12 @@ data class MonthlyPlanningPost(
     val imageReady: Boolean = false,
     val imageText: String = "",
     val thumbnailUrl: String = ""
+)
+
+data class MonthlyPlanningCalendarSharePayload(
+    val pedidoId: String,
+    val image: DownloadedImage,
+    val description: String
 )
 
 object MonthlyPlanningMockData {
@@ -351,6 +360,52 @@ class MonthlyPlanningViewModel(
                 }
             }
         }
+    }
+
+    fun shareGeneralCalendarItem(item: MonthlyPlanningCalendarListItem) {
+        if (!item.imageReady || item.pedidoId.isBlank()) return
+
+        var shouldStart = false
+        _uiState.update { state ->
+            if (state.calendarSharingItemKeys.contains(item.key)) {
+                state
+            } else {
+                shouldStart = true
+                state.copy(
+                    calendarError = null,
+                    calendarSharePayload = null,
+                    calendarSharingItemKeys = state.calendarSharingItemKeys + item.key
+                )
+            }
+        }
+        if (!shouldStart) return
+
+        viewModelScope.launch {
+            when (val result = repository.downloadResultado(item.pedidoId)) {
+                is ApiResult.Success -> _uiState.update { state ->
+                    state.copy(
+                        calendarSharingItemKeys = state.calendarSharingItemKeys - item.key,
+                        calendarError = null,
+                        calendarSharePayload = MonthlyPlanningCalendarSharePayload(
+                            pedidoId = item.pedidoId,
+                            image = result.value,
+                            description = item.title
+                        )
+                    )
+                }
+                is ApiResult.Failure -> _uiState.update { state ->
+                    state.copy(
+                        calendarSharingItemKeys = state.calendarSharingItemKeys - item.key,
+                        calendarSharePayload = null,
+                        calendarError = result.message.ifBlank { "Não foi possível compartilhar a imagem." }
+                    )
+                }
+            }
+        }
+    }
+
+    fun clearCalendarSharePayload() {
+        _uiState.update { it.copy(calendarSharePayload = null) }
     }
 
     fun goToConfirmation() {

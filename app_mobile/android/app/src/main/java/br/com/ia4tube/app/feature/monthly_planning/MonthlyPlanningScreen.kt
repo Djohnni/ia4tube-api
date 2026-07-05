@@ -1,5 +1,6 @@
 package br.com.ia4tube.app.feature.monthly_planning
 
+import android.content.ClipData
 import android.graphics.BitmapFactory
 import android.content.Intent
 import android.net.Uri
@@ -69,6 +70,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import br.com.ia4tube.app.core.camera.CameraImageStore
+import br.com.ia4tube.app.core.share.ShareImageStore
 import br.com.ia4tube.app.core.upload.AndroidFileReader
 import br.com.ia4tube.app.data.models.ApiResult
 import br.com.ia4tube.app.data.models.UploadFile
@@ -96,6 +98,7 @@ fun MonthlyPlanningScreen(
     val context = LocalContext.current
     val fileReader = remember(context) { AndroidFileReader(context) }
     val cameraImageStore = remember(context) { CameraImageStore(context.applicationContext) }
+    val shareImageStore = remember(context) { ShareImageStore(context.applicationContext) }
     val scope = rememberCoroutineScope()
     val screenScrollState = rememberScrollState()
     var loadingPhotos by remember { mutableStateOf(false) }
@@ -163,6 +166,22 @@ fun MonthlyPlanningScreen(
         }
     }
 
+    LaunchedEffect(state.calendarSharePayload) {
+        val payload = state.calendarSharePayload ?: return@LaunchedEffect
+        val imageUri = shareImageStore.saveShareImage(payload.pedidoId, payload.image)
+        val shareIntent = Intent(Intent.ACTION_SEND).apply {
+            type = payload.image.contentType.ifBlank { "image/png" }
+            putExtra(Intent.EXTRA_STREAM, imageUri)
+            if (payload.description.isNotBlank()) {
+                putExtra(Intent.EXTRA_TEXT, payload.description)
+            }
+            clipData = ClipData.newRawUri("Arte iA4Tube", imageUri)
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        }
+        context.startActivity(Intent.createChooser(shareIntent, "Compartilhar"))
+        viewModel.clearCalendarSharePayload()
+    }
+
     BackHandler(enabled = showGeneralCalendar) {
         showGeneralCalendar = false
     }
@@ -182,6 +201,7 @@ fun MonthlyPlanningScreen(
                 onOpenOrder = onOpenOrder,
                 onRemove = { item -> viewModel.removeFromGeneralCalendar(item.key) },
                 onReschedule = viewModel::rescheduleGeneralCalendarItem,
+                onShare = viewModel::shareGeneralCalendarItem,
                 modifier = Modifier
                     .fillMaxSize()
                     .verticalScroll(screenScrollState)
@@ -412,6 +432,7 @@ private fun MonthlyPlanningGeneralCalendarContent(
     onOpenOrder: (String) -> Unit,
     onRemove: (MonthlyPlanningCalendarListItem) -> Unit,
     onReschedule: (MonthlyPlanningCalendarListItem, String) -> Unit,
+    onShare: (MonthlyPlanningCalendarListItem) -> Unit,
     modifier: Modifier = Modifier
 ) {
     Column(
@@ -460,6 +481,8 @@ private fun MonthlyPlanningGeneralCalendarContent(
             onOpenOrder = onOpenOrder,
             onRemove = onRemove,
             onReschedule = onReschedule,
+            onShare = onShare,
+            sharingItemKeys = state.calendarSharingItemKeys,
             showNextThirtyDays = true
         )
         Spacer(modifier = Modifier.height(18.dp))
