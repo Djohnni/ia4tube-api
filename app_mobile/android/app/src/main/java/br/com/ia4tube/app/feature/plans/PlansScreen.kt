@@ -102,7 +102,7 @@ fun PlansScreen(
                         overflow = TextOverflow.Ellipsis
                     )
                     Text(
-                        text = "Compre 1 arte avulsa ou escolha um plano mensal com beneficios completos.",
+                        text = "Compre 1 arte avulsa ou escolha um combo mensal com beneficios completos.",
                         color = secondaryText,
                         style = MaterialTheme.typography.bodyMedium
                     )
@@ -139,7 +139,7 @@ fun PlansScreen(
             )
 
             Text(
-                text = "Planos iA4tube",
+                text = "Combos iA4tube",
                 color = primaryText,
                 style = MaterialTheme.typography.titleLarge,
                 fontWeight = FontWeight.ExtraBold,
@@ -230,7 +230,7 @@ private fun PixPaymentDialog(
         decodeQrCodeBase64(pix.qrCodeBase64)
     }
     val title = when {
-        pix.planName.isNotBlank() -> "Pix do ${pix.planName}"
+        pix.planName.isNotBlank() -> "Pix do combo ${pix.planName}"
         pix.tipo == "arte_avulsa_pix" || pix.purchaseId.isNotBlank() -> "Pix da arte avulsa"
         else -> "Pix para adicionar saldo"
     }
@@ -336,12 +336,12 @@ private fun StandaloneArtCard(
                 fontWeight = FontWeight.ExtraBold
             )
             Text(
-                text = "Quer criar sem assinatura? Compre uma arte pronta para postar.",
+                text = "Quer criar só uma arte? Compre uma arte pronta para postar.",
                 color = secondaryText,
                 style = MaterialTheme.typography.bodyMedium
             )
             Text(
-                text = "1 arte por R$ 1,99",
+                text = "1 arte por R$ 3,99",
                 color = accent,
                 style = MaterialTheme.typography.titleMedium,
                 fontWeight = FontWeight.ExtraBold
@@ -364,7 +364,7 @@ private fun StandaloneArtCard(
                     )
                 } else {
                     Text(
-                        text = "Comprar 1 arte por R$ 1,99",
+                        text = "Comprar 1 arte por R$ 3,99",
                         fontWeight = FontWeight.ExtraBold
                     )
                 }
@@ -482,7 +482,7 @@ private fun PlanCard(
                     )
                 } else {
                     Text(
-                        text = "Assinar",
+                        text = "Comprar combo",
                         fontWeight = FontWeight.ExtraBold
                     )
                 }

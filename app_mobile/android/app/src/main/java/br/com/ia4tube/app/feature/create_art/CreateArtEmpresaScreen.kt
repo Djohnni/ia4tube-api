@@ -378,13 +378,13 @@ private fun BillingRequiredActions(
             modifier = Modifier.fillMaxWidth(),
             onClick = onOpenPlans
         ) {
-            Text("Comprar 1 arte por R$ 1,99")
+            Text("Comprar 1 arte por R$ 3,99")
         }
         OutlinedButton(
             modifier = Modifier.fillMaxWidth(),
             onClick = onOpenPlans
         ) {
-            Text("Ver planos")
+            Text("Ver combos")
         }
     }
 }

@@ -41,7 +41,7 @@ const MP_ACCESS_TOKEN = process.env.MP_ACCESS_TOKEN || "";
 const MP_NOTIFICATION_URL = process.env.MP_NOTIFICATION_URL || "https://ia4tube-api.onrender.com/webhook/mercadopago";
 const PUBLIC_API_BASE_URL = (process.env.PUBLIC_API_BASE_URL || "https://ia4tube-api.onrender.com").replace(/\/+$/, "");
 const ARTE_AVULSA_COMPRA = billingPlans.getSingleArtPurchase();
-const EMPRESA_ARTE_AVULSA_VALOR = Number(ARTE_AVULSA_COMPRA.amount || productsRegistry.getProductPrice("arte_empresa") || 1.99);
+const EMPRESA_ARTE_AVULSA_VALOR = Number(ARTE_AVULSA_COMPRA.amount || productsRegistry.getProductPrice("arte_empresa") || 3.99);
 const MP_PROCESSANDO_RETRY_MS = 10 * 60 * 1000;
 const MONTHLY_PLANNING_NOTIFICATIONS_INTERVAL_MS = Math.max(
   30 * 1000,
@@ -1573,7 +1573,7 @@ async function criarArteAvulsaPixHandler(req, res) {
       produto_id: produto.id,
       valor_pago: Number(produto.amount),
       quantidade: Number(produto.quantity || 1),
-      cta_label: "Comprar 1 arte por R$ 1,99",
+      cta_label: "Comprar 1 arte por R$ 3,99",
       artes_avulsas_restantes: Number(c.artes_avulsas_restantes || 0)
     });
   } catch (e) {
@@ -1637,7 +1637,7 @@ app.post("/billing/planos/:planId/pix", auth, async (req, res) => {
     const plan = billingPlans.getPlan(req.params.planId);
 
     if (!plan) {
-      return res.status(400).json({ ok: false, error: "Plano invalido" });
+      return res.status(400).json({ ok: false, error: "Combo invalido" });
     }
 
     const result = await createMercadoPagoPixPayment({
@@ -3414,10 +3414,10 @@ function criarPedidoHandler(categoria) {
         return res.status(402).json({
           ok: false,
           code: "billing_required",
-          error: "Compre 1 arte avulsa por R$ 1,99 ou assine um plano para criar sua arte.",
+          error: "Compre 1 arte avulsa por R$ 3,99 ou escolha um combo para criar sua arte.",
           required_amount: cobrancaEmpresa.required_amount,
           arte_avulsa_valor: EMPRESA_ARTE_AVULSA_VALOR,
-          arte_avulsa_cta: "Comprar 1 arte por R$ 1,99",
+          arte_avulsa_cta: "Comprar 1 arte por R$ 3,99",
           arte_avulsa_endpoint: "/billing/arte-avulsa/pix",
           saldo_extra: cobrancaEmpresa.saldo_extra,
           artes_mensais_restantes: cobrancaEmpresa.artes_mensais_restantes,
@@ -4552,6 +4552,8 @@ if(msg.includes("como baixar") || msg.includes("baixar novamente")){
 }
 
 if(
+  msg.includes("combo") ||
+  msg.includes("combos") ||
   msg.includes("plano") ||
   msg.includes("planos") ||
   msg.includes("assinatura") ||
@@ -4562,7 +4564,7 @@ if(
 ){
   return res.json({
     ok:true,
-    resposta:"Planos IA4Tube:\n\n- i4 Essencial: R$ 39,90/mês, 6 artes por mês, 3 Materiais Gráficos da Empresa por mês, 1 Carrossel por mês e suporte via WhatsApp.\n\n- i4 Profissional: R$ 79,90/mês, 16 artes por mês, 5 Materiais Gráficos da Empresa por mês, 1 Material Gráfico de Nicho por mês, 2 Carrosséis por mês e suporte via WhatsApp.\n\n- i4 Empresarial: R$ 149,90/mês, 36 artes por mês, todos os Materiais Gráficos Gerais liberados, 3 Materiais Gráficos de Nicho por mês, 4 Carrosséis por mês e suporte via WhatsApp."
+    resposta:"Combos IA4Tube:\n\n- i4 Essencial: R$ 39,90/mês, 6 artes por mês, 3 Materiais Gráficos da Empresa por mês, 1 Carrossel por mês e suporte via WhatsApp.\n\n- i4 Profissional: R$ 79,90/mês, 16 artes por mês, 5 Materiais Gráficos da Empresa por mês, 1 Material Gráfico de Nicho por mês, 2 Carrosséis por mês e suporte via WhatsApp.\n\n- i4 Empresarial: R$ 149,90/mês, 36 artes por mês, todos os Materiais Gráficos Gerais liberados, 3 Materiais Gráficos de Nicho por mês, 4 Carrosséis por mês e suporte via WhatsApp."
   });
 }
 
@@ -4642,7 +4644,7 @@ COMPORTAMENTO:
 - Se for cumprimento, responda: "Oi! Escolha uma opção no menu do suporte."
 - Se o cliente pedir opções, disser "quais opções", "me dê as opções" ou algo parecido, responda curto: "Use os botões do menu do suporte."
 - Se o cliente falar "dúvida sobre produto" ou perguntar "como funciona", responda: "Escolha o produto no menu abaixo."
-- Se o cliente perguntar sobre planos, assinatura, mensalidade, Essencial, Profissional ou Empresarial, responda somente: "Planos IA4Tube: i4 Essencial R$ 39,90/mês com 6 artes, 3 Materiais Gráficos da Empresa, 1 Carrossel e suporte via WhatsApp. i4 Profissional R$ 79,90/mês com 16 artes, 5 Materiais Gráficos da Empresa, 1 Material Gráfico de Nicho, 2 Carrosséis e suporte via WhatsApp. i4 Empresarial R$ 149,90/mês com 36 artes, todos os Materiais Gráficos Gerais, 3 Materiais Gráficos de Nicho, 4 Carrosséis e suporte via WhatsApp."
+- Se o cliente perguntar sobre combos, planos, assinatura, mensalidade, Essencial, Profissional ou Empresarial, responda somente: "Combos IA4Tube: i4 Essencial R$ 39,90/mês com 6 artes, 3 Materiais Gráficos da Empresa, 1 Carrossel e suporte via WhatsApp. i4 Profissional R$ 79,90/mês com 16 artes, 5 Materiais Gráficos da Empresa, 1 Material Gráfico de Nicho, 2 Carrosséis e suporte via WhatsApp. i4 Empresarial R$ 149,90/mês com 36 artes, todos os Materiais Gráficos Gerais, 3 Materiais Gráficos de Nicho, 4 Carrosséis e suporte via WhatsApp."
 
 - Se o cliente disser "Quero entender Resultado do jogo", explique somente Resultado do jogo.
 - Se o cliente disser "Quero entender Escalação", explique somente Escalação.

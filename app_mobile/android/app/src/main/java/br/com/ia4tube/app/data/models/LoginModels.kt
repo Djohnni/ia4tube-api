@@ -30,7 +30,7 @@ data class MeResponse(
     val artesAvulsasRestantes: Int = 0,
     val artesAvulsasUsadas: Int = 0,
     val artesAvulsasTotalCompradas: Int = 0,
-    val arteAvulsaValor: Double = 1.99,
+    val arteAvulsaValor: Double = 3.99,
     val arteAvulsaProdutoId: String = "",
     val arteAvulsaTitulo: String = "",
     val saldoExtra: Double = 0.0,

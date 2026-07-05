@@ -10,7 +10,7 @@ const CAROUSEL_PLAN_LIMITS = {
   profissional: 2,
   empresarial: 4
 };
-const CAROUSEL_LIMIT_REACHED_MESSAGE = "Voc\u00ea atingiu o limite de carross\u00e9is do seu plano neste ciclo.";
+const CAROUSEL_LIMIT_REACHED_MESSAGE = "Voc\u00ea atingiu o limite de carross\u00e9is do seu combo neste ciclo.";
 
 function safeSegment(value, fallback = "item") {
   return String(value || "")

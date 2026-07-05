@@ -234,7 +234,7 @@
     <string name="create_art_optional_ignored_error">Algumas imagens foram ignoradas. O limite é %1$d por seção.</string>
     <string name="create_art_select_logo_error">Selecione o logo da empresa.</string>
     <string name="create_art_create_error">Não foi possível criar o pedido agora.</string>
-    <string name="create_art_billing_required_error">Você precisa comprar 1 arte por R$ 1,99 ou escolher um plano.</string>
+    <string name="create_art_billing_required_error">Você precisa comprar 1 arte por R$ 3,99 ou escolher um combo.</string>
     <string name="create_art_validate_company_name">Informe o nome da empresa.</string>
     <string name="create_art_validate_business">Informe o ramo da empresa.</string>
     <string name="create_art_validate_goal">Informe o objetivo da arte.</string>
@@ -278,7 +278,7 @@
     <string name="company_profile_saved">Dados da empresa salvos com sucesso</string>
     <string name="company_graphic_materials_title">Materiais Gráficos da Empresa</string>
     <string name="company_graphic_materials_description">Modelos visuais em PNG A4 para imprimir, personalizados com os dados da empresa.</string>
-    <string name="company_graphic_materials_plan">Plano atual: %1$s</string>
+    <string name="company_graphic_materials_plan">Combo atual: %1$s</string>
     <string name="company_graphic_materials_loading">Carregando materiais gráficos...</string>
     <string name="company_graphic_materials_empty">Nenhum material gráfico disponível para este perfil.</string>
     <string name="company_graphic_materials_auth_required">Cadastre-se para liberar seus Materiais Gráficos da Empresa.</string>
@@ -287,7 +287,7 @@
     <string name="company_graphic_materials_branch">Materiais específicos: %1$s</string>
     <string name="company_graphic_materials_create">Criar</string>
     <string name="company_graphic_materials_created">Criado</string>
-    <string name="company_graphic_materials_locked">Bloqueado pelo plano</string>
+    <string name="company_graphic_materials_locked">Bloqueado pelo combo</string>
     <string name="company_graphic_materials_creating">Solicitando...</string>
     <string name="company_graphic_materials_generating">Gerando material gráfico... isso pode levar alguns minutos.</string>
     <string name="company_graphic_materials_requested">Material gráfico enviado para produção.</string>
@@ -303,7 +303,7 @@
     <string name="company_graphic_materials_load_error">Não foi possível carregar os materiais gráficos agora.</string>
     <string name="company_graphic_materials_generate_error">Não foi possível gerar o material gráfico agora.</string>
     <string name="company_graphic_materials_download_error">Não foi possível baixar o material gráfico agora.</string>
-    <string name="company_graphic_materials_created_cycle">Criado neste ciclo do plano</string>
+    <string name="company_graphic_materials_created_cycle">Criado neste ciclo do combo</string>
 
     <string name="home_carousel">Post Deslizante</string>
     <string name="carousel_title">Post Deslizante</string>
@@ -359,7 +359,7 @@
     <string name="carousel_theme_required">Informe o tema do Post Deslizante.</string>
     <string name="carousel_briefing_required">Informe o briefing do Post Deslizante.</string>
     <string name="carousel_screen_count_required">Informe a quantidade de telas.</string>
-    <string name="carousel_limit_reached">Você atingiu o limite de carrosséis do seu plano neste ciclo.</string>
+    <string name="carousel_limit_reached">Você atingiu o limite de carrosséis do seu combo neste ciclo.</string>
     <string name="carousel_request_error">Não foi possível enviar o Post Deslizante agora.</string>
     <string name="carousel_status_error">Não foi possível atualizar o status do Post Deslizante.</string>
     <string name="carousel_download_error">Não foi possível baixar o Post Deslizante agora.</string>

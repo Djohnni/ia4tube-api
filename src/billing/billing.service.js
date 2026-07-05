@@ -171,6 +171,7 @@ function refreshManualPlanCycle(cliente, now = new Date()) {
 function getBillingStatus(cliente, now = new Date()) {
   refreshManualPlanCycle(cliente, now);
   const standaloneArt = getStandaloneArtStatus(cliente);
+  const availableCombos = plansRegistry.listPlans();
 
   return {
     plano: cliente.plano || "",
@@ -193,7 +194,8 @@ function getBillingStatus(cliente, now = new Date()) {
     plano_proximo_ciclo_pago: cliente.plano_proximo_ciclo_pago === true,
     plano_proximo_ciclo_inicio_em: cliente.plano_proximo_ciclo_inicio_em || "",
     plano_proximo_ciclo_renova_em: cliente.plano_proximo_ciclo_renova_em || "",
-    planos: plansRegistry.listPlans(),
+    combos: availableCombos,
+    planos: availableCombos,
     pacotes_saldo: plansRegistry.listBalancePackages()
   };
 }

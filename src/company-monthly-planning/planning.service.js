@@ -509,7 +509,7 @@ function validatePlanAndFreeArts(cliente, quantity) {
   refreshPlanningReservationCounters(cliente);
 
   if (!billingService.isPlanActive(cliente)) {
-    const error = new Error("Assine ou ative um plano para criar um Planejamento Mensal.");
+    const error = new Error("Escolha ou ative um combo para criar um Planejamento Mensal.");
     error.statusCode = 403;
     error.code = "monthly_planning_plan_required";
     error.billing = billing;
@@ -3335,7 +3335,7 @@ function savePlanResult({ baseDir, planningId, payload = {}, pedidosDir = "", cl
     ...(solicitacao.runner_contract || {}),
     plano_mensal_recebido: true,
     pedidos_filhos_criados: Number(pedidosCriados.total || 0),
-    observacao_fase_6: "Plano mensal recebido e itens vinculados a pedidos filhos normais. Backend nao gerou imagens."
+    observacao_fase_6: "Planejamento mensal recebido e itens vinculados a pedidos filhos normais. Backend nao gerou imagens."
   };
 
   writeJson(path.join(planning.base_path, "plano_mensal.json"), finalPlan);
@@ -3347,7 +3347,7 @@ function savePlanResult({ baseDir, planningId, payload = {}, pedidosDir = "", cl
       .join("; ");
     appendLog(planning.base_path, `Agendamento automatico distribuiu ${scheduleResolution.adjustments.length} postagem(ns): ${adjustmentSummary}.`);
   }
-  appendLog(planning.base_path, `Plano Mensal recebido pelo backend com ${postagens.length} postagem(ns).`);
+  appendLog(planning.base_path, `Planejamento Mensal recebido pelo backend com ${postagens.length} postagem(ns).`);
 
   return parsePlanning(planning.base_path);
 }

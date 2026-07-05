@@ -33,7 +33,7 @@ data class HomeUiState(
     val artesAvulsasRestantes: Int = 0,
     val artesAvulsasUsadas: Int = 0,
     val artesAvulsasTotalCompradas: Int = 0,
-    val arteAvulsaValor: Double = 1.99,
+    val arteAvulsaValor: Double = 3.99,
     val carrosseisLimite: Int? = null,
     val carrosseisUsados: Int? = null,
     val carrosseisRestantes: Int? = null,

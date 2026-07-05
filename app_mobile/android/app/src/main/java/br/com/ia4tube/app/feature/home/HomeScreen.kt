@@ -250,13 +250,13 @@ private enum class HomeHelpItem(
     ),
     CurrentPlan(
         "\u2B50",
-        "Plano atual",
+        "Combos adquiridos",
         "Veja quantas artes ainda pode criar este m\u00eas e aproveite o acesso aos especialistas da iA4tube para o seu ramo."
     ),
     Support(
         "\uD83D\uDCAC",
         "Suporte",
-        "Precisa de ajuda? Nossa equipe pode orientar voc\u00ea sobre pedidos, planos e a melhor forma de usar a iA4tube para divulgar seu neg\u00f3cio."
+        "Precisa de ajuda? Nossa equipe pode orientar voc\u00ea sobre pedidos, combos e a melhor forma de usar a iA4tube para divulgar seu neg\u00f3cio."
     ),
     CreateArt(
         "\uD83C\uDFA8",
@@ -385,8 +385,8 @@ private fun QuickIconHelpDialog(
                             modifier = Modifier.size(24.dp)
                         )
                     },
-                    title = "Plano",
-                    description = "Veja créditos e planos disponíveis."
+                    title = "Combos",
+                    description = "Veja créditos e combos disponíveis."
                 )
                 QuickIconHelpRow(
                     icon = { HeadsetGlyph(primaryIcon, Modifier.size(24.dp)) },
@@ -720,12 +720,12 @@ private fun FuturisticHomePanel(
     val planCircleLabel = when {
         hasActivePlan -> displayPlanName(state.planoNome)
         standaloneArts > 0 -> "Arte avulsa"
-        else -> "Sem plano"
+        else -> "Nenhum combo"
     }
     val planCircleNumber = if (totalAvailableArts > 0) {
         totalAvailableArts.toString()
     } else {
-        "Ver planos"
+        "Ver combos"
     }
 
     Box(

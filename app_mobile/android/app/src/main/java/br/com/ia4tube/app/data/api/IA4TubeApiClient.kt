@@ -140,7 +140,7 @@ class IA4TubeApiClient(
                 artesAvulsasRestantes = json.optInt("artes_avulsas_restantes", 0),
                 artesAvulsasUsadas = json.optInt("artes_avulsas_usadas", 0),
                 artesAvulsasTotalCompradas = json.optInt("artes_avulsas_total_compradas", 0),
-                arteAvulsaValor = json.optDouble("arte_avulsa_valor", 1.99),
+                arteAvulsaValor = json.optDouble("arte_avulsa_valor", 3.99),
                 arteAvulsaProdutoId = json.optString("arte_avulsa_produto_id"),
                 arteAvulsaTitulo = json.optString("arte_avulsa_titulo"),
                 saldoExtra = json.optDouble("saldo_extra", 0.0),
@@ -1106,7 +1106,7 @@ class IA4TubeApiClient(
         private const val CREATE_ORDER_UNAVAILABLE_MESSAGE =
             "Não foi possível criar o pedido agora. Tente novamente em alguns instantes."
         private const val BILLING_REQUIRED_MESSAGE =
-            "Você precisa comprar 1 arte por R$ 1,99 ou escolher um plano."
+            "Você precisa comprar 1 arte por R$ 3,99 ou escolher um combo."
         private val JSON = "application/json; charset=utf-8".toMediaType()
 
         private fun logMultipart(url: String, fields: Iterable<String>, files: Iterable<br.com.ia4tube.app.data.models.UploadFile>) {

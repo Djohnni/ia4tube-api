@@ -176,7 +176,7 @@ function annotateMaterials({ cliente, ramo, baseDir, whatsapp }) {
     const withinLimit = counters[scopeKey] <= (limits[scopeKey] || 0);
     const documentId = created?.document_id || request?.document_id || request?.id || "";
     let status = "locked";
-    let statusLabel = "Bloqueado pelo plano";
+    let statusLabel = "Bloqueado pelo combo";
 
     if (created || (request && READY_STATUSES.has(request.status) && fs.existsSync(request.resultado_path))) {
       status = "created";
@@ -205,7 +205,7 @@ function annotateMaterials({ cliente, ramo, baseDir, whatsapp }) {
       ready: status === "created" && Boolean(documentId),
       download_url: status === "created" && documentId ? `/empresa/materiais-graficos/${material.id}/download` : "",
       locked: status === "locked",
-      plan_required: status === "locked" ? "Plano superior" : "",
+      plan_required: status === "locked" ? "Combo superior" : "",
       _material: material
     };
   });
@@ -286,7 +286,7 @@ function findMaterialForRequest({ cliente, ramo, baseDir, whatsapp, materialId }
     throw error;
   }
   if (item.status === "locked") {
-    const error = new Error("Material grafico bloqueado pelo plano.");
+    const error = new Error("Material grafico bloqueado pelo combo.");
     error.statusCode = 403;
     error.code = "plan_locked";
     throw error;
