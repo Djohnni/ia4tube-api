@@ -12,6 +12,10 @@ const MAX_MONTHLY_PLANNING_ARTS = 36;
 const BOT_PENDING_HARD_LIMIT = 20;
 const BOT_CLAIM_TTL_MS = 10 * 60 * 1000;
 const PROCESSING_STALE_MS = 45 * 60 * 1000;
+const CALENDAR_SLOT_START_MINUTES = 9 * 60;
+const CALENDAR_SLOT_END_MINUTES = 21 * 60;
+const CALENDAR_SLOT_STEP_MINUTES = 30;
+const CALENDAR_SLOT_SEARCH_DAYS = 180;
 
 function safeSegment(value, fallback = "item") {
   return String(value || "")
@@ -1202,6 +1206,199 @@ function listClientPlanningCalendar({ baseDir, whatsapp, pedidosDir = "" }) {
     total: postagens.length,
     postagens,
     itens: postagens
+  };
+}
+
+function minutesFromTimeText(timeText = "") {
+  const normalized = normalizeTimeText(timeText);
+  if (!normalized) return null;
+
+  const [hour, minute] = normalized.split(":").map(Number);
+  return hour * 60 + minute;
+}
+
+function timeTextFromMinutes(minutes) {
+  const normalizedMinutes = Math.max(0, Math.min(23 * 60 + 59, Number(minutes || 0)));
+  const hour = Math.floor(normalizedMinutes / 60);
+  const minute = normalizedMinutes % 60;
+  return `${String(hour).padStart(2, "0")}:${String(minute).padStart(2, "0")}`;
+}
+
+function dateFromIsoDateText(dateText = "") {
+  const match = String(dateText || "").trim().match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!match) return null;
+
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  const date = new Date(Date.UTC(year, month - 1, day));
+  if (
+    date.getUTCFullYear() !== year
+    || date.getUTCMonth() !== month - 1
+    || date.getUTCDate() !== day
+  ) {
+    return null;
+  }
+  return date;
+}
+
+function isoDateTextFromDate(date) {
+  return [
+    date.getUTCFullYear(),
+    String(date.getUTCMonth() + 1).padStart(2, "0"),
+    String(date.getUTCDate()).padStart(2, "0")
+  ].join("-");
+}
+
+function addDaysToIsoDateText(dateText, days) {
+  const date = dateFromIsoDateText(dateText);
+  if (!date) return "";
+
+  date.setUTCDate(date.getUTCDate() + Number(days || 0));
+  return isoDateTextFromDate(date);
+}
+
+function scheduleSlotKey(dateText = "", timeText = "", ciclo = "") {
+  const date = normalizeDateText(dateText, ciclo);
+  const time = normalizeTimeText(timeText);
+  return date && time ? `${date}|${time}` : "";
+}
+
+function scheduleSlotFromPost(post = {}, ciclo = "") {
+  const date = normalizeDateText(post.data_sugerida || post.data || "", ciclo);
+  const time = normalizeTimeText(post.horario_sugerido || post.horario || post.hora || "");
+  const key = scheduleSlotKey(date, time, ciclo);
+  return { date, time, key };
+}
+
+function nextScheduleMinuteAfter(minutes) {
+  return Math.ceil((Number(minutes || 0) + 1) / CALENDAR_SLOT_STEP_MINUTES) * CALENDAR_SLOT_STEP_MINUTES;
+}
+
+function occupiedScheduleSlotsForClient({ baseDir, whatsapp, pedidosDir = "", currentPlanningId = "" }) {
+  const occupiedSlots = new Set();
+  const currentId = String(currentPlanningId || "").trim();
+
+  for (const planning of listPlanningDirsForWhatsapp(baseDir, whatsapp).map(parsePlanning).filter(Boolean)) {
+    const planningId = String(planning.planejamento_id || planning.id || "").trim();
+    if (currentId && planningId === currentId) continue;
+    if (String(planning.status || "").trim().toLowerCase() === "cancelado") continue;
+
+    for (const post of planningPosts(planning, pedidosDir)) {
+      const slot = scheduleSlotFromPost(post, planning.ciclo);
+      if (slot.key) occupiedSlots.add(slot.key);
+    }
+  }
+
+  return occupiedSlots;
+}
+
+function findNextFreeScheduleSlot({ dateText = "", timeText = "", occupiedSlots }) {
+  const date = dateFromIsoDateText(dateText);
+  const minutes = minutesFromTimeText(timeText);
+  if (!date || minutes === null) return null;
+
+  for (let dayOffset = 0; dayOffset <= CALENDAR_SLOT_SEARCH_DAYS; dayOffset += 1) {
+    const candidateDate = addDaysToIsoDateText(dateText, dayOffset);
+    let startMinutes = dayOffset === 0
+      ? nextScheduleMinuteAfter(minutes)
+      : CALENDAR_SLOT_START_MINUTES;
+
+    startMinutes = Math.max(startMinutes, CALENDAR_SLOT_START_MINUTES);
+    if (startMinutes > CALENDAR_SLOT_END_MINUTES) continue;
+
+    for (
+      let candidateMinutes = startMinutes;
+      candidateMinutes <= CALENDAR_SLOT_END_MINUTES;
+      candidateMinutes += CALENDAR_SLOT_STEP_MINUTES
+    ) {
+      const candidateTime = timeTextFromMinutes(candidateMinutes);
+      const candidateKey = scheduleSlotKey(candidateDate, candidateTime);
+      if (!occupiedSlots.has(candidateKey)) {
+        return {
+          date: candidateDate,
+          time: candidateTime
+        };
+      }
+    }
+  }
+
+  const fallbackDate = addDaysToIsoDateText(dateText, CALENDAR_SLOT_SEARCH_DAYS + 1);
+  return {
+    date: fallbackDate,
+    time: timeTextFromMinutes(CALENDAR_SLOT_START_MINUTES)
+  };
+}
+
+function resolvePlanningCalendarConflicts({ baseDir, planning, pedidosDir = "", postagens = [] }) {
+  const occupiedSlots = occupiedScheduleSlotsForClient({
+    baseDir,
+    whatsapp: planning.whatsapp,
+    pedidosDir,
+    currentPlanningId: planning.planejamento_id || planning.id
+  });
+  const adjustedPosts = [];
+  const adjustments = [];
+
+  for (const post of postagens) {
+    const slot = scheduleSlotFromPost(post, planning.ciclo);
+    if (!slot.key) {
+      adjustedPosts.push(post);
+      continue;
+    }
+
+    if (!occupiedSlots.has(slot.key)) {
+      occupiedSlots.add(slot.key);
+      adjustedPosts.push(post);
+      continue;
+    }
+
+    const nextSlot = findNextFreeScheduleSlot({
+      dateText: slot.date,
+      timeText: slot.time,
+      occupiedSlots
+    });
+
+    if (!nextSlot?.date || !nextSlot?.time) {
+      adjustedPosts.push(post);
+      continue;
+    }
+
+    const nextKey = scheduleSlotKey(nextSlot.date, nextSlot.time, planning.ciclo);
+    occupiedSlots.add(nextKey);
+    const criterio = String(post.criterio_agendamento || "").trim();
+    const adjustedPost = {
+      ...post,
+      data_sugerida: nextSlot.date,
+      horario_sugerido: nextSlot.time,
+      criterio_agendamento: [
+        criterio,
+        `ajustado automaticamente para evitar sobreposicao com ${slot.date} ${slot.time}`
+      ].filter(Boolean).join("; ")
+    };
+    const updatedPost = {
+      ...adjustedPost,
+      ...notificationFieldsForPost({
+        ...adjustedPost,
+        notificar_em: "",
+        notificacao_status: "pendente",
+        notificacao_enviada_em: "",
+        notificacao_erro: "",
+        notificacao_tentativas: 0
+      }, planning)
+    };
+
+    adjustedPosts.push(updatedPost);
+    adjustments.push({
+      ordem: post.ordem || adjustedPosts.length,
+      de: `${slot.date} ${slot.time}`,
+      para: `${nextSlot.date} ${nextSlot.time}`
+    });
+  }
+
+  return {
+    postagens: adjustedPosts,
+    adjustments
   };
 }
 
@@ -2550,13 +2747,20 @@ function savePlanResult({ baseDir, planningId, payload = {}, pedidosDir = "", cl
     throw error;
   }
 
+  const scheduleResolution = resolvePlanningCalendarConflicts({
+    baseDir,
+    planning,
+    pedidosDir,
+    postagens
+  });
+  const adjustedPostagens = scheduleResolution.postagens;
   const now = new Date().toISOString();
   const finalPlan = {
     ...plan,
     planejamento_id: plan.planejamento_id || planning.planejamento_id || planning.id,
-    quantidade: Number(plan.quantidade || postagens.length),
-    postagens,
-    itens: Array.isArray(plan.itens) ? plan.itens : postagens,
+    quantidade: Number(plan.quantidade || adjustedPostagens.length),
+    postagens: adjustedPostagens,
+    itens: adjustedPostagens,
     gerado_em: plan.gerado_em || now
   };
 
@@ -2584,6 +2788,12 @@ function savePlanResult({ baseDir, planningId, payload = {}, pedidosDir = "", cl
   writeJson(path.join(planning.base_path, "plano_mensal.json"), finalPlan);
   writeJson(planning.solicitacao_path, solicitacao);
   writeStatus(planning.base_path, "pronto");
+  if (scheduleResolution.adjustments.length) {
+    const adjustmentSummary = scheduleResolution.adjustments
+      .map((item) => `#${item.ordem}: ${item.de} -> ${item.para}`)
+      .join("; ");
+    appendLog(planning.base_path, `Agendamento automatico ajustou ${scheduleResolution.adjustments.length} conflito(s): ${adjustmentSummary}.`);
+  }
   appendLog(planning.base_path, `Plano Mensal recebido pelo backend com ${postagens.length} postagem(ns).`);
 
   return parsePlanning(planning.base_path);
