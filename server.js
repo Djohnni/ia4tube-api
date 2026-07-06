@@ -55,6 +55,8 @@ const SUPORTE_FINALIZADAS_FILE = path.join(DATA_DIR, "suporte_conversas_finaliza
 const ANALYTICS_DIR = path.join(DATA_DIR, "analytics");
 const EVENTOS_CLIENTES_FILE = path.join(DATA_DIR, "eventos_clientes.json");
 const SEO_NICHES_DIR = path.join(__dirname, "public", "nichos");
+const ADMIN_MOBILE_ANALYTICS_FILE = path.join(__dirname, "admin", "mobile_analytics.html");
+const ADMIN_ANALYTICS_COOKIE = "ia4tube_admin_token";
 
 const CLIENTES_TESTE = [
   "Los Hermanos",
@@ -73,6 +75,13 @@ app.use(cors({
 }));
 
 app.use(express.json({ limit: "50mb" }));
+app.use(express.urlencoded({ extended: false, limit: "1mb" }));
+
+app.get(["/mobile_analytics.html", "/public/mobile_analytics.html"], (_req, res) => {
+  res.setHeader("Cache-Control", "no-store");
+  return res.status(404).send("Not found");
+});
+
 app.use(express.static("public"));
 
 const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID || "";
@@ -267,6 +276,253 @@ function safeReadJson(filePath) {
 
 function isBotAdmin(req) {
   return req.user && req.user.whatsapp === BOT_ADMIN_WHATSAPP;
+}
+
+function parseCookies(req) {
+  return String(req.headers.cookie || "")
+    .split(";")
+    .map((item) => item.trim())
+    .filter(Boolean)
+    .reduce((cookies, item) => {
+      const idx = item.indexOf("=");
+      if (idx === -1) return cookies;
+      const key = decodeURIComponent(item.slice(0, idx).trim());
+      const value = decodeURIComponent(item.slice(idx + 1).trim());
+      cookies[key] = value;
+      return cookies;
+    }, {});
+}
+
+function bearerTokenFromRequest(req) {
+  const h = req.headers.authorization || "";
+  if (h.startsWith("Bearer ")) return h.slice(7).trim();
+  const cookies = parseCookies(req);
+  return String(cookies[ADMIN_ANALYTICS_COOKIE] || "").trim();
+}
+
+function verifyBotAdminToken(token) {
+  if (!token) return null;
+  try {
+    const user = jwt.verify(token, JWT_SECRET);
+    if (user?.whatsapp !== BOT_ADMIN_WHATSAPP) return null;
+    return user;
+  } catch {
+    return null;
+  }
+}
+
+function setAdminAnalyticsCookie(res, token) {
+  res.cookie(ADMIN_ANALYTICS_COOKIE, token, {
+    httpOnly: true,
+    secure: true,
+    sameSite: "strict",
+    maxAge: 12 * 60 * 60 * 1000,
+    path: "/bot"
+  });
+}
+
+function botAdminAuth(req, res, next) {
+  const token = bearerTokenFromRequest(req);
+  const user = verifyBotAdminToken(token);
+
+  if (!user) {
+    return res.status(401).json({ ok: false, error: "Acesso restrito ao admin" });
+  }
+
+  req.user = user;
+  return next();
+}
+
+function adminAnalyticsLoginPage() {
+  return `<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Analytics Mobile IA4Tube - Acesso restrito</title>
+  <style>
+    body{margin:0;min-height:100vh;display:grid;place-items:center;background:#090d14;color:#eef4ff;font-family:Inter,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
+    main{width:min(420px,calc(100% - 32px));background:#111827;border:1px solid rgba(255,255,255,.1);border-radius:18px;padding:24px;box-shadow:0 18px 50px rgba(0,0,0,.35)}
+    h1{margin:0 0 8px;font-size:24px}p{color:#93a4bd}label{display:block;margin-top:18px;color:#cbd5e1}input{width:100%;margin-top:8px;border:1px solid rgba(255,255,255,.14);border-radius:12px;background:#0b1220;color:#fff;padding:12px}button{width:100%;margin-top:16px;border:0;border-radius:12px;background:#35d07f;color:#06110b;font-weight:800;padding:12px;cursor:pointer}.msg{min-height:22px;color:#ff6b7a}
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Analytics Mobile</h1>
+    <p>Acesso restrito ao admin iA4Tube.</p>
+    <label>Token admin
+      <input id="token" type="password" autocomplete="off" autofocus>
+    </label>
+    <button id="enter" type="button">Entrar</button>
+    <p id="msg" class="msg"></p>
+  </main>
+  <script>
+    async function login(){
+      const token = document.getElementById("token").value.trim();
+      const msg = document.getElementById("msg");
+      msg.textContent = "";
+      if(!token){ msg.textContent = "Informe o token admin."; return; }
+      const response = await fetch("/bot/mobile-analytics/login", {
+        method:"POST",
+        headers:{ "Content-Type":"application/json" },
+        body:JSON.stringify({ token })
+      });
+      if(response.ok){ location.href = "/bot/mobile-analytics"; return; }
+      msg.textContent = "Acesso negado. Confira o token admin.";
+    }
+    document.getElementById("enter").addEventListener("click", login);
+    document.getElementById("token").addEventListener("keydown", (event) => {
+      if(event.key === "Enter") login();
+    });
+  </script>
+</body>
+</html>`;
+}
+
+function mobileAnalyticsPanelAuth(req, res, next) {
+  const user = verifyBotAdminToken(bearerTokenFromRequest(req));
+  if (!user) {
+    res.setHeader("Cache-Control", "no-store");
+    return res.status(401).send(adminAnalyticsLoginPage());
+  }
+  req.user = user;
+  return next();
+}
+
+app.post("/bot/mobile-analytics/login", (req, res) => {
+  const token = String(req.body?.token || "").trim();
+  const user = verifyBotAdminToken(token);
+
+  if (!user) {
+    return res.status(401).json({ ok: false, error: "Acesso restrito ao admin" });
+  }
+
+  setAdminAnalyticsCookie(res, token);
+  return res.json({ ok: true });
+});
+
+app.post("/bot/mobile-analytics/logout", (_req, res) => {
+  res.clearCookie(ADMIN_ANALYTICS_COOKIE, {
+    secure: true,
+    sameSite: "strict",
+    path: "/bot"
+  });
+  return res.json({ ok: true });
+});
+
+app.get("/bot/mobile-analytics", mobileAnalyticsPanelAuth, (_req, res) => {
+  if (!fs.existsSync(ADMIN_MOBILE_ANALYTICS_FILE)) {
+    return res.status(404).send("Painel mobile analytics nao encontrado");
+  }
+
+  res.setHeader("Cache-Control", "no-store");
+  return res.sendFile(ADMIN_MOBILE_ANALYTICS_FILE);
+});
+
+function maskSensitiveIdentifier(value = "") {
+  const raw = String(value || "").replace(/\D+/g, "");
+  if (!raw) return "";
+  if (raw.length <= 4) return "****";
+  return `${raw.slice(0, 2)}****${raw.slice(-3)}`;
+}
+
+function sanitizeAnalyticsPayloadForResponse(value, depth = 0) {
+  const sensitiveParts = [
+    "telefone",
+    "phone",
+    "whatsapp",
+    "cliente_id",
+    "cliente",
+    "nome",
+    "empresa",
+    "email",
+    "senha",
+    "password",
+    "documento",
+    "cpf",
+    "cnpj",
+    "endereco",
+    "address",
+    "token",
+    "authorization",
+    "auth",
+    "pix",
+    "copia_cola",
+    "copiaecola",
+    "prompt",
+    "image",
+    "imagem",
+    "foto",
+    "url",
+    "uri",
+    "base64"
+  ];
+
+  if (depth > 4 || value === null || value === undefined) return value;
+
+  if (Array.isArray(value)) {
+    return value.slice(0, 50).map((item) => sanitizeAnalyticsPayloadForResponse(item, depth + 1));
+  }
+
+  if (typeof value === "object") {
+    return Object.entries(value).reduce((safe, [key, item]) => {
+      const normalizedKey = String(key || "").toLowerCase();
+      if (!normalizedKey || sensitiveParts.some((part) => normalizedKey.includes(part))) {
+        return safe;
+      }
+      safe[key] = sanitizeAnalyticsPayloadForResponse(item, depth + 1);
+      return safe;
+    }, {});
+  }
+
+  if (typeof value === "string") {
+    if (value.length > 180) return `${value.slice(0, 177)}...`;
+    return value;
+  }
+
+  if (["number", "boolean"].includes(typeof value)) return value;
+  return "";
+}
+
+function sanitizeAnalyticsEventForResponse(event = {}) {
+  const maskedClient = maskSensitiveIdentifier(event.whatsapp || event.cliente_id);
+  const safe = sanitizeAnalyticsPayloadForResponse(event) || {};
+
+  safe.cliente_mascarado = maskedClient;
+  safe.payload = sanitizeAnalyticsPayloadForResponse(event.payload || {});
+
+  delete safe.whatsapp;
+  delete safe.cliente_id;
+  delete safe.cliente;
+  delete safe.email;
+  delete safe.token;
+
+  return safe;
+}
+
+function sanitizeOnlineUserForResponse(user = {}) {
+  const safe = sanitizeAnalyticsPayloadForResponse(user) || {};
+  const maskedClient = maskSensitiveIdentifier(user.whatsapp || user.cliente_id);
+
+  safe.cliente_mascarado = maskedClient;
+  safe.online = Boolean(user.online);
+  safe.ultima_atividade = user.ultima_atividade || "";
+  safe.pagina_atual = user.pagina_atual || "";
+  safe.produto_atual = user.produto_atual || "";
+  safe.chat_aberto = Boolean(user.chat_aberto);
+  safe.ultima_acao = user.ultima_acao || "";
+  safe.campo_atual = user.campo_atual || "";
+  safe.ultima_acao_evento = user.ultima_acao_evento || "";
+  safe.tempo_inativo_ms = Number(user.tempo_inativo_ms || 0);
+  safe.ultimo_evento = user.ultimo_evento || "";
+
+  delete safe.whatsapp;
+  delete safe.cliente_id;
+  delete safe.email;
+  delete safe.token;
+  delete safe.foto_google;
+
+  return safe;
 }
 
 function getPedidoBaseGlobal(pedidoId) {
@@ -5231,7 +5487,7 @@ app.get("/suporte/minhas-mensagens", auth, (req, res) => {
   }
 });
 
-app.get("/bot/eventos-clientes", auth, (req, res) => {
+app.get("/bot/eventos-clientes", botAdminAuth, (req, res) => {
   try {
     if (!isBotAdmin(req)) {
       return res.status(403).json({ ok: false, error: "Acesso negado" });
@@ -5249,7 +5505,9 @@ app.get("/bot/eventos-clientes", auth, (req, res) => {
       `${yyyy}-${mm}-${dd}.json`
     );
 
-    const eventos = readJsonArraySafe(analyticsDiaFile).slice(-limite);
+    const eventos = readJsonArraySafe(analyticsDiaFile)
+      .slice(-limite)
+      .map(sanitizeAnalyticsEventForResponse);
 
     return res.json({
       ok: true,
@@ -5261,7 +5519,7 @@ app.get("/bot/eventos-clientes", auth, (req, res) => {
   }
 });
 
-app.get("/bot/analytics-dia/:data", auth, (req, res) => {
+app.get("/bot/analytics-dia/:data", botAdminAuth, (req, res) => {
   try {
     if (!isBotAdmin(req)) {
       return res.status(403).json({ ok: false, error: "Acesso negado" });
@@ -5286,7 +5544,8 @@ app.get("/bot/analytics-dia/:data", auth, (req, res) => {
       });
     }
 
-    const eventos = readJsonArraySafe(analyticsDiaFile);
+    const eventos = readJsonArraySafe(analyticsDiaFile)
+      .map(sanitizeAnalyticsEventForResponse);
 
     return res.json({
       ok: true,
@@ -5302,7 +5561,7 @@ app.get("/bot/analytics-dia/:data", auth, (req, res) => {
   }
 });
 
-app.get("/bot/eventos-pedido/:id", auth, (req, res) => {
+app.get("/bot/eventos-pedido/:id", botAdminAuth, (req, res) => {
   try {
     if (!isBotAdmin(req)) {
       return res.status(403).json({ ok: false, error: "Acesso negado" });
@@ -5315,7 +5574,8 @@ app.get("/bot/eventos-pedido/:id", auth, (req, res) => {
     }
 
     const eventosPedidoFile = path.join(basePedido, "eventos_cliente.json");
-    const eventos = readJsonArraySafe(eventosPedidoFile);
+    const eventos = readJsonArraySafe(eventosPedidoFile)
+      .map(sanitizeAnalyticsEventForResponse);
 
     return res.json({
       ok:true,
@@ -5328,7 +5588,7 @@ app.get("/bot/eventos-pedido/:id", auth, (req, res) => {
   }
 });
 
-app.get("/bot/online", auth, (req, res) => {
+app.get("/bot/online", botAdminAuth, (req, res) => {
   try {
     if (!isBotAdmin(req)) {
       return res.status(403).json({ ok: false, error: "Acesso negado" });
@@ -5336,7 +5596,7 @@ app.get("/bot/online", auth, (req, res) => {
 
     return res.json({
       ok: true,
-      usuarios: listarOnlineRecentes()
+      usuarios: listarOnlineRecentes().map(sanitizeOnlineUserForResponse)
     });
   } catch (e) {
     return res.status(500).json({ ok: false, error: "Erro ao listar online" });
