@@ -463,6 +463,75 @@ function salvarEventosCliente(req, eventos = []) {
   } catch {}
 }
 
+function sanitizeServerAnalyticsPayload(payload = {}) {
+  const sensitiveParts = [
+    "telefone",
+    "phone",
+    "whatsapp",
+    "email",
+    "senha",
+    "password",
+    "token",
+    "authorization",
+    "auth",
+    "pix",
+    "copia_cola",
+    "copiaecola",
+    "prompt",
+    "image",
+    "imagem",
+    "foto",
+    "url",
+    "uri",
+    "base64"
+  ];
+
+  return Object.entries(payload || {}).reduce((safe, [key, value]) => {
+    const normalizedKey = String(key || "").toLowerCase();
+    if (!normalizedKey || sensitiveParts.some((part) => normalizedKey.includes(part))) {
+      return safe;
+    }
+
+    if (value === null || value === undefined) {
+      return safe;
+    }
+
+    if (["string", "number", "boolean"].includes(typeof value)) {
+      safe[key] = typeof value === "string" ? value.slice(0, 160) : value;
+    }
+
+    return safe;
+  }, {});
+}
+
+function registrarEventoServidor(evento, options = {}) {
+  try {
+    const eventName = String(evento || "").trim();
+    if (!eventName) return;
+
+    const whatsapp = String(options.whatsapp || "").trim();
+    const pedidoId = String(options.pedidoId || options.pedido_id || "").trim();
+    const payload = sanitizeServerAnalyticsPayload({
+      origem: "backend",
+      ...options.payload,
+      pedido_id: pedidoId
+    });
+
+    salvarEventosCliente(
+      { user: whatsapp ? { whatsapp } : null },
+      [{
+        e: eventName,
+        sessao: `server_${Date.now()}_${Math.random().toString(16).slice(2)}`,
+        t: Date.now(),
+        produto: String(options.produto || "").trim(),
+        categoria: String(options.categoria || "").trim(),
+        logado: Boolean(whatsapp),
+        p: payload
+      }]
+    );
+  } catch {}
+}
+
 function getClienteResumo(whatsapp) {
   const clientes = readClientes();
   const c = clientes[whatsapp] || {};
@@ -2041,6 +2110,37 @@ app.post("/webhook/mercadopago", async (req, res) => {
       };
       writeMpProcessados(processados);
 
+      registrarEventoServidor("pix_pago", {
+        whatsapp,
+        pedidoId,
+        produto: pedido.product_id || pedido.categoria || "pedido",
+        payload: {
+          tipo: "pedido_pix",
+          valor_pago: Number(pagamento.transaction_amount || pedido.valor_pendente || 0),
+          status: pagamento.status
+        }
+      });
+      registrarEventoServidor("compra_aprovada", {
+        whatsapp,
+        pedidoId,
+        produto: pedido.product_id || pedido.categoria || "pedido",
+        payload: {
+          tipo: "pedido_pix",
+          valor_pago: Number(pagamento.transaction_amount || pedido.valor_pendente || 0)
+        }
+      });
+      if (valorBonusPedido > 0) {
+        registrarEventoServidor("saldo_creditado", {
+          whatsapp,
+          pedidoId,
+          produto: "saldo_extra",
+          payload: {
+            tipo: "bonus_pedido_pix",
+            credito: valorBonusPedido
+          }
+        });
+      }
+
       return res.json({ ok: true });
     }
 
@@ -2098,6 +2198,37 @@ app.post("/webhook/mercadopago", async (req, res) => {
         criado_em: new Date().toISOString()
       };
       writeMpProcessados(processados);
+
+      registrarEventoServidor("pix_pago", {
+        whatsapp,
+        produto: "combo",
+        payload: {
+          tipo: "plano_pix",
+          plano_id: plan.id,
+          valor_pago: Number(pagamento.transaction_amount || plan.price),
+          status: pagamento.status
+        }
+      });
+      registrarEventoServidor("compra_aprovada", {
+        whatsapp,
+        produto: "combo",
+        payload: {
+          tipo: "plano_pix",
+          plano_id: plan.id,
+          plano_status: resultadoPlano.status,
+          artes_mes: Number(plan.artsPerMonth || 0)
+        }
+      });
+      registrarEventoServidor("saldo_creditado", {
+        whatsapp,
+        produto: "combo",
+        payload: {
+          tipo: "combo_artes_mensais",
+          plano_id: plan.id,
+          artes_mes: Number(plan.artsPerMonth || 0),
+          plano_status: resultadoPlano.status
+        }
+      });
 
       return res.json({ ok: true });
     }
@@ -2168,6 +2299,39 @@ app.post("/webhook/mercadopago", async (req, res) => {
         criado_em: new Date().toISOString()
       };
       writeMpProcessados(processados);
+
+      registrarEventoServidor("pix_pago", {
+        whatsapp,
+        produto: "arte_avulsa",
+        payload: {
+          tipo: "arte_avulsa_pix",
+          produto_id: produto.id,
+          quantidade,
+          valor_pago: valorPago,
+          status: pagamento.status
+        }
+      });
+      registrarEventoServidor("compra_aprovada", {
+        whatsapp,
+        produto: "arte_avulsa",
+        payload: {
+          tipo: "arte_avulsa_pix",
+          produto_id: produto.id,
+          quantidade,
+          valor_pago: valorPago
+        }
+      });
+      if (credito.credited === true) {
+        registrarEventoServidor("saldo_creditado", {
+          whatsapp,
+          produto: "arte_avulsa",
+          payload: {
+            tipo: "arte_avulsa",
+            quantidade,
+            artes_avulsas_restantes: Number(c.artes_avulsas_restantes || 0)
+          }
+        });
+      }
 
       return res.json({ ok: true });
     }
@@ -2261,6 +2425,33 @@ app.post("/webhook/mercadopago", async (req, res) => {
     };
 
     writeMpProcessados(processados);
+
+    registrarEventoServidor("pix_pago", {
+      whatsapp,
+      produto: "saldo_extra",
+      payload: {
+        tipo,
+        credito,
+        status: pagamento.status
+      }
+    });
+    registrarEventoServidor("compra_aprovada", {
+      whatsapp,
+      produto: "saldo_extra",
+      payload: {
+        tipo,
+        credito
+      }
+    });
+    registrarEventoServidor("saldo_creditado", {
+      whatsapp,
+      produto: "saldo_extra",
+      payload: {
+        tipo,
+        credito,
+        saldo_extra: Number(c.saldo_extra || 0)
+      }
+    });
 
     return res.json({ ok: true });
 
@@ -3155,6 +3346,25 @@ app.post("/bot/empresa/planejamento-mensal/:planningId/status", botRunnerAuth, (
       message: req.body?.message || req.body?.erro || ""
     });
 
+    const statusNormalizado = String(planejamento.status || req.body?.status || "").toLowerCase();
+    const runnerEvent = statusNormalizado.includes("timeout")
+      ? "runner_timeout"
+      : statusNormalizado.includes("erro")
+        ? "runner_erro"
+        : "";
+    if (runnerEvent) {
+      registrarEventoServidor(runnerEvent, {
+        whatsapp: planejamento.whatsapp,
+        produto: "planejamento_mensal",
+        payload: {
+          tipo: "planejamento_mensal",
+          planning_id: planejamento.planejamento_id || planejamento.id || req.params.planningId,
+          status: planejamento.status || req.body?.status || "",
+          motivo: String(req.body?.message || req.body?.erro || "").trim()
+        }
+      });
+    }
+
     return res.json({
       ok: true,
       planejamento_id: planejamento.planejamento_id || planejamento.id,
@@ -3301,6 +3511,28 @@ app.post("/bot/empresa/planejamento-mensal/artes/:pedidoId/status", botRunnerAut
       message: req.body?.message || req.body?.erro || ""
     });
 
+    const statusNormalizado = String(arte.status || req.body?.status || "").toLowerCase();
+    const runnerEvent = statusNormalizado.includes("timeout")
+      ? "runner_timeout"
+      : statusNormalizado.includes("erro")
+        ? "runner_erro"
+        : "";
+    if (runnerEvent) {
+      const basePedido = getPedidoBaseGlobal(req.params.pedidoId);
+      const pedidoData = basePedido ? (readPedido(basePedido) || {}) : {};
+      registrarEventoServidor(runnerEvent, {
+        whatsapp: pedidoData.whatsapp,
+        pedidoId: req.params.pedidoId,
+        produto: "planejamento_mensal",
+        payload: {
+          tipo: "planejamento_mensal_arte",
+          planning_id: arte.planning_id || arte.planejamento_id || "",
+          status: arte.status || req.body?.status || "",
+          motivo: String(req.body?.message || req.body?.erro || "").trim()
+        }
+      });
+    }
+
     return res.json({ ok: true, arte });
   } catch (error) {
     console.error("[planejamento-mensal][artes] erro ao atualizar status", {
@@ -3353,6 +3585,19 @@ app.post(
         previewPath: preview?.path || "",
         descricaoInstagram: req.body?.descricao_instagram || "",
         apiInfo
+      });
+
+      const basePedido = getPedidoBaseGlobal(req.params.pedidoId);
+      const pedidoData = basePedido ? (readPedido(basePedido) || {}) : {};
+      registrarEventoServidor("pedido_pronto", {
+        whatsapp: pedidoData.whatsapp,
+        pedidoId: req.params.pedidoId,
+        produto: "planejamento_mensal",
+        payload: {
+          tipo: "planejamento_mensal",
+          planning_id: arte.planning_id || arte.planejamento_id || "",
+          status: arte.status || "pronto"
+        }
       });
 
       return res.json({ ok: true, arte });
@@ -3694,6 +3939,24 @@ app.post("/bot/pedidos/:id/status", auth, (req, res) => {
   writeOrderStatus(base, status);
   try {
     const pedido = readPedido(base) || {};
+    const statusNormalizado = String(status || "").toLowerCase();
+    const runnerEvent = statusNormalizado.includes("timeout")
+      ? "runner_timeout"
+      : statusNormalizado.includes("erro")
+        ? "runner_erro"
+        : "";
+    if (runnerEvent) {
+      registrarEventoServidor(runnerEvent, {
+        whatsapp: pedido.whatsapp,
+        pedidoId: req.params.id,
+        produto: pedido.product_id || pedido.categoria || "pedido",
+        payload: {
+          tipo: "pedido",
+          status,
+          motivo: String(req.body?.message || req.body?.erro || "").trim()
+        }
+      });
+    }
     if (pedido.whatsapp && !monthlyPlanningService.isPlanningOrder(pedido)) {
       sendClientPushAsync(pedido.whatsapp, "pedido_atualizado", {
         pedido_id: req.params.id,
@@ -4398,9 +4661,9 @@ app.get("/pedidos/:id/thumbnail", (req, res) => {
 
   const previewProtegidaPath = path.join(base, "preview_ia4tube.jpg");
   const resultadoFinalPath = path.join(base, "resultado_final.png");
-  const thumbnailPath = fs.existsSync(resultadoFinalPath)
-    ? resultadoFinalPath
-    : previewProtegidaPath;
+  const thumbnailPath = fs.existsSync(previewProtegidaPath)
+    ? previewProtegidaPath
+    : resultadoFinalPath;
 
   if (!fs.existsSync(thumbnailPath)) {
     return res.status(404).json({ ok: false, error: "Imagem ainda nÃ£o ficou pronta" });
@@ -4516,6 +4779,16 @@ app.post(
           pedidoData.baixado_cliente = false;
           pedidoData.resultado_enviado_em = new Date().toISOString();
           fs.writeFileSync(pedidoPath, JSON.stringify(pedidoData, null, 2), "utf8");
+          registrarEventoServidor("pedido_pronto", {
+            whatsapp: pedidoData.whatsapp,
+            pedidoId: req.params.id,
+            produto: pedidoData.product_id || pedidoData.categoria || "pedido",
+            payload: {
+              tipo: "pedido",
+              categoria: pedidoData.categoria || "",
+              pagamento_pendente: pedidoData.pagamento_pendente === true
+            }
+          });
           if (pedidoData.whatsapp && !monthlyPlanningService.isPlanningOrder(pedidoData)) {
             sendClientPushAsync(pedidoData.whatsapp, "arte_pronta", {
               pedido_id: req.params.id,
@@ -5101,6 +5374,15 @@ app.post("/bot/suporte/erro-pedido", botRunnerAuth, (req, res) => {
           JSON.stringify(pedidoData, null, 2),
           "utf8"
         );
+        registrarEventoServidor("runner_erro", {
+          whatsapp,
+          pedidoId: pedido_id,
+          produto: pedidoData.product_id || pedidoData.categoria || "pedido",
+          payload: {
+            tipo: "suporte_pipeline",
+            motivo: motivo || "erro_pipeline"
+          }
+        });
       } catch {}
     }
 
