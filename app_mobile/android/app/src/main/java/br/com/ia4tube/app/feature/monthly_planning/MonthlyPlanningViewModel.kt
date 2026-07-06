@@ -6,6 +6,7 @@ import androidx.lifecycle.viewModelScope
 import br.com.ia4tube.app.core.company.CompanyProfile
 import br.com.ia4tube.app.core.company.CompanyProfileStore
 import br.com.ia4tube.app.data.models.ApiResult
+import br.com.ia4tube.app.data.models.BillingPixResult
 import br.com.ia4tube.app.data.models.DownloadedImage
 import br.com.ia4tube.app.data.models.MonthlyPlanningDetailDto
 import br.com.ia4tube.app.data.models.MonthlyPlanningPhotoInput
@@ -52,13 +53,20 @@ data class MonthlyPlanningUiState(
     val calendarError: String? = null,
     val calendarSharingItemKeys: Set<String> = emptySet(),
     val calendarSharePayload: MonthlyPlanningCalendarSharePayload? = null,
-    val generalCalendarPosts: List<MonthlyPlanningCalendarListItem> = emptyList()
+    val generalCalendarPosts: List<MonthlyPlanningCalendarListItem> = emptyList(),
+    val billingRequired: Boolean = false,
+    val billingPixLoading: Boolean = false,
+    val billingPix: BillingPixResult? = null,
+    val billingPixError: String? = null
 ) {
     val reservedArts: Int
         get() = reservedInput.toIntOrNull()?.coerceIn(0, currentFreeArts) ?: 0
 
     val freeArts: Int
         get() = (currentFreeArts - reservedArts).coerceAtLeast(0)
+
+    val requiredStandaloneArts: Int
+        get() = photos.size.coerceAtLeast(1)
 
     val visibleGeneralCalendarPosts: List<MonthlyPlanningCalendarListItem>
         get() = generalCalendarPosts
@@ -415,10 +423,6 @@ class MonthlyPlanningViewModel(
                     uploadError = "Adicione pelo menos 1 foto para continuar.",
                     successMessage = null
                 )
-                state.reservedArts <= 0 -> state.copy(
-                    uploadError = "Nao ha saldo suficiente para continuar.",
-                    successMessage = null
-                )
                 else -> state.copy(
                     step = MonthlyPlanningStep.Confirmation,
                     uploadError = null,
@@ -441,11 +445,38 @@ class MonthlyPlanningViewModel(
         }
 
         if (current.reservedArts <= 0) {
-            _uiState.update {
-                it.copy(
-                    uploadError = "Nao ha saldo suficiente para continuar.",
-                    successMessage = null
-                )
+            viewModelScope.launch {
+                _uiState.update { it.copy(loading = true, uploadError = null, successMessage = null) }
+                val freeArts = when (val me = repository.me()) {
+                    is ApiResult.Success -> me.value.artesMensaisRestantes.coerceAtLeast(0)
+                    is ApiResult.Failure -> current.currentFreeArts
+                }
+                if (freeArts > 0) {
+                    _uiState.update { state ->
+                        state.copy(
+                            loading = false,
+                            currentFreeArts = freeArts,
+                            reservedInput = reservedInputForPhotos(state.photos.size, freeArts),
+                            billingRequired = false,
+                            billingPix = null,
+                            billingPixError = null,
+                            billingPixLoading = false
+                        )
+                    }
+                    confirmPlanning()
+                } else {
+                    _uiState.update {
+                        it.copy(
+                            loading = false,
+                            billingRequired = true,
+                            billingPix = null,
+                            billingPixError = null,
+                            billingPixLoading = false,
+                            uploadError = null,
+                            successMessage = null
+                        )
+                    }
+                }
             }
             return
         }
@@ -491,11 +522,59 @@ class MonthlyPlanningViewModel(
             when (val result = repository.solicitarPlanejamentoMensal(request)) {
                 is ApiResult.Success -> handlePlanningCreated(result.value)
                 is ApiResult.Failure -> _uiState.update {
+                    val billingRequired = result.isBillingRequired()
                     it.copy(
                         step = MonthlyPlanningStep.Confirmation,
                         loading = false,
-                        uploadError = result.message,
+                        billingRequired = billingRequired,
+                        billingPix = if (billingRequired) null else it.billingPix,
+                        billingPixError = null,
+                        billingPixLoading = false,
+                        uploadError = if (billingRequired) null else result.message,
                         successMessage = null
+                    )
+                }
+            }
+        }
+    }
+
+    fun dismissBillingRequired() {
+        _uiState.update {
+            it.copy(
+                billingRequired = false,
+                billingPixLoading = false,
+                billingPixError = null,
+                uploadError = null,
+                successMessage = null
+            )
+        }
+    }
+
+    fun generateStandaloneArtPix() {
+        val quantity = _uiState.value.requiredStandaloneArts
+        if (_uiState.value.billingPixLoading) return
+        viewModelScope.launch {
+            _uiState.update {
+                it.copy(
+                    billingPixLoading = true,
+                    billingPixError = null,
+                    billingPix = null,
+                    uploadError = null,
+                    successMessage = null
+                )
+            }
+            when (val result = repository.criarArteAvulsaPix(quantity)) {
+                is ApiResult.Success -> _uiState.update {
+                    it.copy(
+                        billingPixLoading = false,
+                        billingPix = result.value,
+                        billingPixError = null
+                    )
+                }
+                is ApiResult.Failure -> _uiState.update {
+                    it.copy(
+                        billingPixLoading = false,
+                        billingPixError = result.message.ifBlank { "Não foi possível gerar o PIX agora." }
                     )
                 }
             }
@@ -726,10 +805,26 @@ class MonthlyPlanningViewModel(
                 planning = merged.firstOrNull { item -> item.id == created.id } ?: created,
                 plannings = merged,
                 uploadError = null,
-                successMessage = null
+                successMessage = null,
+                billingRequired = false,
+                billingPixLoading = false,
+                billingPix = null,
+                billingPixError = null
             )
         }
     }
+}
+
+private fun ApiResult.Failure.isBillingRequired(): Boolean {
+    val normalizedMessage = message
+        .lowercase()
+        .replace('ã', 'a')
+        .replace('á', 'a')
+        .replace('à', 'a')
+        .replace('â', 'a')
+    return code == "billing_required" ||
+        statusCode == 402 ||
+        normalizedMessage.contains("saldo suficiente")
 }
 
 private fun String.clampReservedInput(max: Int): String {

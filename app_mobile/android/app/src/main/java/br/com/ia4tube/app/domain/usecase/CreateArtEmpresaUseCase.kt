@@ -10,4 +10,7 @@ class CreateArtEmpresaUseCase(private val repository: AuthRepository) {
 
     suspend fun criarPedidoFutebol(request: FootballOrderRequest) =
         repository.criarPedidoFutebol(request)
+
+    suspend fun criarArteAvulsaPix(quantidade: Int = 1) =
+        repository.criarArteAvulsaPix(quantidade)
 }

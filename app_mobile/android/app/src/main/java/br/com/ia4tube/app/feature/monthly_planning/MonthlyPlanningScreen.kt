@@ -4,6 +4,7 @@ import android.content.ClipData
 import android.graphics.BitmapFactory
 import android.content.Intent
 import android.net.Uri
+import android.util.Base64
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -36,6 +37,7 @@ import androidx.compose.material.icons.filled.AddCircle
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.KeyboardArrowDown
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
@@ -65,7 +67,9 @@ import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -92,7 +96,8 @@ fun MonthlyPlanningScreen(
     viewModel: MonthlyPlanningViewModel,
     onBack: () -> Unit,
     onOpenDetail: (String) -> Unit,
-    onOpenOrder: (String) -> Unit
+    onOpenOrder: (String) -> Unit,
+    onOpenPlans: () -> Unit
 ) {
     val state by viewModel.uiState.collectAsState()
     val context = LocalContext.current
@@ -192,6 +197,19 @@ fun MonthlyPlanningScreen(
         viewModel.backToUpload()
     }
 
+    if (state.billingRequired) {
+        MonthlyPlanningBillingRequiredDialog(
+            state = state,
+            onDismiss = viewModel::dismissBillingRequired,
+            onGeneratePix = viewModel::generateStandaloneArtPix,
+            onOpenPlans = {
+                viewModel.dismissBillingRequired()
+                onOpenPlans()
+            },
+            onRetrySubmit = viewModel::confirmPlanning
+        )
+    }
+
     ScreenScaffold {
         if (showGeneralCalendar) {
             MonthlyPlanningGeneralCalendarContent(
@@ -275,7 +293,7 @@ fun MonthlyPlanningScreen(
                     )
                 }
 
-                state.uploadError?.let { error ->
+                if (!state.billingRequired) state.uploadError?.let { error ->
                     Text(
                         text = error,
                         color = MaterialTheme.colorScheme.error,
@@ -297,6 +315,126 @@ fun MonthlyPlanningScreen(
         }
     }
 }
+
+@Composable
+private fun MonthlyPlanningBillingRequiredDialog(
+    state: MonthlyPlanningUiState,
+    onDismiss: () -> Unit,
+    onGeneratePix: () -> Unit,
+    onOpenPlans: () -> Unit,
+    onRetrySubmit: () -> Unit
+) {
+    val clipboard = LocalClipboardManager.current
+    val requiredArts = state.requiredStandaloneArts
+    val total = requiredArts * STANDALONE_ART_PRICE
+    val pix = state.billingPix
+    val qrBitmap = remember(pix?.qrCodeBase64) {
+        pix?.qrCodeBase64?.let { decodeMonthlyPlanningPixQrCodeBase64(it) }
+    }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = {
+            Text("Comprar arte avulsa", fontWeight = FontWeight.ExtraBold)
+        },
+        text = {
+            Column(
+                verticalArrangement = Arrangement.spacedBy(10.dp),
+                horizontalAlignment = Alignment.CenterHorizontally
+            ) {
+                Text(
+                    text = "Você não tem saldo suficiente para criar esta arte.",
+                    style = MaterialTheme.typography.bodyMedium
+                )
+                Text(
+                    text = "Quantidade necessária: $requiredArts ${if (requiredArts == 1) "arte" else "artes"}",
+                    style = MaterialTheme.typography.bodyMedium,
+                    fontWeight = FontWeight.SemiBold
+                )
+                Text(
+                    text = "R$ 5,99 por arte - Total ${formatBrazilianMoney(total)}",
+                    style = MaterialTheme.typography.bodyMedium,
+                    fontWeight = FontWeight.SemiBold
+                )
+                state.billingPixError?.let { error ->
+                    Text(
+                        text = error,
+                        color = MaterialTheme.colorScheme.error,
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                }
+                if (pix != null) {
+                    qrBitmap?.let { bitmap ->
+                        Image(
+                            bitmap = bitmap.asImageBitmap(),
+                            contentDescription = "QR Code PIX",
+                            modifier = Modifier.size(200.dp)
+                        )
+                    }
+                    Text(
+                        text = "Depois que o pagamento for aprovado, volte aqui e toque em Enviar novamente. Seus dados continuam preenchidos.",
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                    if (pix.pixCopiaCola.isNotBlank()) {
+                        Text(
+                            text = pix.pixCopiaCola,
+                            maxLines = 4,
+                            overflow = TextOverflow.Ellipsis,
+                            style = MaterialTheme.typography.bodySmall
+                        )
+                        TextButton(
+                            onClick = {
+                                clipboard.setText(AnnotatedString(pix.pixCopiaCola))
+                            }
+                        ) {
+                            Text("Copiar PIX")
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            Button(
+                enabled = !state.billingPixLoading,
+                onClick = {
+                    if (pix == null) onGeneratePix() else onRetrySubmit()
+                }
+            ) {
+                if (state.billingPixLoading) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(18.dp),
+                        strokeWidth = 2.dp
+                    )
+                } else {
+                    Text(if (pix == null) "Gerar PIX" else "Tentar enviar novamente")
+                }
+            }
+        },
+        dismissButton = {
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                TextButton(onClick = onOpenPlans) {
+                    Text("Ver combos")
+                }
+                TextButton(onClick = onDismiss) {
+                    Text("Fechar")
+                }
+            }
+        }
+    )
+}
+
+private const val STANDALONE_ART_PRICE = 5.99
+
+private fun formatBrazilianMoney(value: Double): String {
+    return "R$ " + String.format(Locale("pt", "BR"), "%.2f", value)
+}
+
+private fun decodeMonthlyPlanningPixQrCodeBase64(value: String) = runCatching {
+    val cleanValue = value.substringAfter("base64,", value)
+    val bytes = Base64.decode(cleanValue, Base64.DEFAULT)
+    BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+}.getOrNull()
 
 @Composable
 private fun MonthlyPlanningHeader(

@@ -8,6 +8,7 @@ import br.com.ia4tube.app.core.analytics.MobileAnalytics
 import br.com.ia4tube.app.core.company.CompanyProfile
 import br.com.ia4tube.app.core.company.CompanyProfileStore
 import br.com.ia4tube.app.data.models.ApiResult
+import br.com.ia4tube.app.data.models.BillingPixResult
 import br.com.ia4tube.app.data.models.CreateArtEmpresaRequest
 import br.com.ia4tube.app.data.models.FootballOrderRequest
 import br.com.ia4tube.app.data.models.UploadFile
@@ -69,9 +70,15 @@ data class CreateArtEmpresaUiState(
     val currentStep: Int = 0,
     val submitted: Boolean = false,
     val billingRequired: Boolean = false,
+    val billingPixLoading: Boolean = false,
+    val billingPix: BillingPixResult? = null,
+    val billingPixError: UiText? = null,
     val error: UiText? = null,
     val createdPedidoId: String = ""
-)
+) {
+    val requiredStandaloneArts: Int
+        get() = fotos.size.coerceAtLeast(1)
+}
 
 class CreateArtEmpresaViewModel(
     private val createArtEmpresa: CreateArtEmpresaUseCase,
@@ -330,7 +337,52 @@ class CreateArtEmpresaViewModel(
     }
 
     fun backToEdit() {
-        _uiState.update { it.copy(reviewing = false, currentStep = 2, error = null, billingRequired = false) }
+        _uiState.update {
+            it.copy(
+                reviewing = false,
+                currentStep = 2,
+                error = null,
+                billingRequired = false,
+                billingPix = null,
+                billingPixError = null
+            )
+        }
+    }
+
+    fun dismissBillingRequired() {
+        _uiState.update {
+            it.copy(
+                billingRequired = false,
+                billingPixLoading = false,
+                billingPix = null,
+                billingPixError = null,
+                error = null
+            )
+        }
+    }
+
+    fun generateStandaloneArtPix() {
+        val quantity = _uiState.value.requiredStandaloneArts
+        if (_uiState.value.billingPixLoading) return
+
+        viewModelScope.launch {
+            _uiState.update { it.copy(billingPixLoading = true, billingPixError = null) }
+            when (val result = createArtEmpresa.criarArteAvulsaPix(quantity)) {
+                is ApiResult.Success -> _uiState.update {
+                    it.copy(
+                        billingPixLoading = false,
+                        billingPix = result.value,
+                        billingPixError = null
+                    )
+                }
+                is ApiResult.Failure -> _uiState.update {
+                    it.copy(
+                        billingPixLoading = false,
+                        billingPixError = result.message.toUiTextOrNull() ?: uiText(R.string.order_pix_error)
+                    )
+                }
+            }
+        }
     }
 
     fun submit() {
@@ -411,12 +463,24 @@ class CreateArtEmpresaViewModel(
                     _uiState.update {
                         it.copy(
                             loading = false,
+                            billingPix = null,
+                            billingPixError = null,
+                            billingPixLoading = false,
+                            billingRequired = false,
                             createdPedidoId = result.value.pedidoId
                         )
                     }
                 }
                 is ApiResult.Failure -> {
-                    val isBillingRequired = result.code == "billing_required" || result.statusCode == 402
+                    val normalizedMessage = result.message
+                        .lowercase()
+                        .replace('ã', 'a')
+                        .replace('á', 'a')
+                        .replace('à', 'a')
+                        .replace('â', 'a')
+                    val isBillingRequired = result.code == "billing_required" ||
+                        result.statusCode == 402 ||
+                        normalizedMessage.contains("saldo suficiente")
                     val errorCode = result.code.ifBlank { if (isBillingRequired) "billing_required" else "" }
                     val statusCode = result.statusCode?.toString().orEmpty()
                     val userError = if (isBillingRequired) {
@@ -445,6 +509,9 @@ class CreateArtEmpresaViewModel(
                         it.copy(
                             loading = false,
                             billingRequired = isBillingRequired,
+                            billingPix = if (isBillingRequired) null else it.billingPix,
+                            billingPixError = null,
+                            billingPixLoading = false,
                             error = userError
                         )
                     }

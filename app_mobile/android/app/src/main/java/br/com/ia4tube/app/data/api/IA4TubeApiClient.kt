@@ -651,11 +651,14 @@ class IA4TubeApiClient(
         executeJson(request) { json -> billingPixFromJson(json) }
     }
 
-    suspend fun criarArteAvulsaPix(token: String): ApiResult<BillingPixResult> = withContext(Dispatchers.IO) {
+    suspend fun criarArteAvulsaPix(token: String, quantidade: Int = 1): ApiResult<BillingPixResult> = withContext(Dispatchers.IO) {
+        val bodyJson = JSONObject()
+            .put("quantidade", quantidade.coerceAtLeast(1))
+
         val request = Request.Builder()
             .url("${AppConfig.apiBase}/billing/arte-avulsa/pix")
             .header("Authorization", "Bearer $token")
-            .post(ByteArray(0).toRequestBody(null))
+            .post(bodyJson.toString().toRequestBody(JSON))
             .build()
 
         executeJson(request) { json -> billingPixFromJson(json) }

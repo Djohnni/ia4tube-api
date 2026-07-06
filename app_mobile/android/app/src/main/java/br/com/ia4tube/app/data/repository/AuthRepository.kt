@@ -144,10 +144,10 @@ class AuthRepository(
         return apiClient.criarSaldoPix(token, pacote)
     }
 
-    suspend fun criarArteAvulsaPix(): ApiResult<BillingPixResult> {
+    suspend fun criarArteAvulsaPix(quantidade: Int = 1): ApiResult<BillingPixResult> {
         val token = sessionStore.getToken()
         if (token.isBlank()) return ApiResult.Failure(SESSION_EXPIRED_MESSAGE)
-        return apiClient.criarArteAvulsaPix(token)
+        return apiClient.criarArteAvulsaPix(token, quantidade)
     }
 
     suspend fun criarPlanoPix(planId: String): ApiResult<BillingPixResult> {

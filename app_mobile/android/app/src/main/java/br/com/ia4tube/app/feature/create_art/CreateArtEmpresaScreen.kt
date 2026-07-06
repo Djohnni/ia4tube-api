@@ -2,6 +2,7 @@ package br.com.ia4tube.app.feature.create_art
 
 import android.graphics.BitmapFactory
 import android.net.Uri
+import android.util.Base64
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.BorderStroke
@@ -25,6 +26,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.relocation.BringIntoViewRequester
 import androidx.compose.foundation.relocation.bringIntoViewRequester
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
@@ -40,6 +42,7 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -55,8 +58,10 @@ import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -219,6 +224,16 @@ fun CreateArtEmpresaScreen(
         }
     }
 
+    if (state.billingRequired) {
+        BillingRequiredPaymentDialog(
+            state = state,
+            onDismiss = viewModel::dismissBillingRequired,
+            onGeneratePix = viewModel::generateStandaloneArtPix,
+            onOpenPlans = onOpenPlans,
+            onRetrySubmit = viewModel::submit
+        )
+    }
+
     ScreenScaffold {
         Column(
             modifier = Modifier
@@ -268,13 +283,9 @@ fun CreateArtEmpresaScreen(
                 onRemoveFootballSponsor = viewModel::removeFootballSponsorLogo
             )
 
-            state.error?.let { error ->
+            if (!state.billingRequired) state.error?.let { error ->
                 Spacer(modifier = Modifier.height(12.dp))
                 Text(error.asString(), color = MaterialTheme.colorScheme.error)
-                BillingRequiredActions(
-                    visible = state.billingRequired,
-                    onOpenPlans = onOpenPlans
-                )
             }
 
             Spacer(modifier = Modifier.height(18.dp))
@@ -363,6 +374,120 @@ private fun StepIndicator(currentStep: Int) {
 }
 
 @Composable
+private fun BillingRequiredPaymentDialog(
+    state: CreateArtEmpresaUiState,
+    onDismiss: () -> Unit,
+    onGeneratePix: () -> Unit,
+    onOpenPlans: () -> Unit,
+    onRetrySubmit: () -> Unit
+) {
+    val clipboard = LocalClipboardManager.current
+    val requiredArts = state.requiredStandaloneArts
+    val total = requiredArts * STANDALONE_ART_PRICE
+    val pix = state.billingPix
+    val qrBitmap = remember(pix?.qrCodeBase64) {
+        pix?.qrCodeBase64?.let(::decodePixQrCodeBase64)
+    }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = {
+            Text("Comprar arte avulsa", fontWeight = FontWeight.ExtraBold)
+        },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Text(
+                    text = "Você não tem saldo suficiente para criar esta arte.",
+                    style = MaterialTheme.typography.bodyLarge,
+                    color = MaterialTheme.colorScheme.onSurface
+                )
+                Text(
+                    text = "Quantidade necessária: $requiredArts ${if (requiredArts == 1) "arte" else "artes"}",
+                    style = MaterialTheme.typography.bodyMedium
+                )
+                Text(
+                    text = "R$ 5,99 por arte - Total ${formatBrazilianMoney(total)}",
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.Bold,
+                    color = MaterialTheme.colorScheme.primary
+                )
+                state.billingPixError?.let { error ->
+                    Text(
+                        text = error.asString(),
+                        color = MaterialTheme.colorScheme.error,
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                }
+                if (pix != null) {
+                    qrBitmap?.let { bitmap ->
+                        Image(
+                            bitmap = bitmap.asImageBitmap(),
+                            contentDescription = "QR Code Pix",
+                            modifier = Modifier
+                                .align(Alignment.CenterHorizontally)
+                                .height(180.dp)
+                                .aspectRatio(1f)
+                        )
+                    }
+                    Text(
+                        text = "Depois que o pagamento for aprovado, volte aqui e toque em Enviar novamente. Seus dados continuam preenchidos.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    if (pix.pixCopiaCola.isNotBlank()) {
+                        Text(
+                            text = pix.pixCopiaCola,
+                            maxLines = 4,
+                            overflow = TextOverflow.Ellipsis,
+                            style = MaterialTheme.typography.bodySmall
+                        )
+                        OutlinedButton(
+                            modifier = Modifier.fillMaxWidth(),
+                            onClick = {
+                                clipboard.setText(AnnotatedString(pix.pixCopiaCola))
+                            }
+                        ) {
+                            Text("Copiar PIX")
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            Button(
+                enabled = !state.billingPixLoading,
+                onClick = {
+                    if (pix == null) {
+                        onGeneratePix()
+                    } else {
+                        onRetrySubmit()
+                    }
+                }
+            ) {
+                if (state.billingPixLoading) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.height(18.dp),
+                        strokeWidth = 2.dp
+                    )
+                } else {
+                    Text(if (pix == null) "Gerar PIX" else "Tentar enviar novamente")
+                }
+            }
+        },
+        dismissButton = {
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                TextButton(onClick = onOpenPlans) {
+                    Text("Ver combos")
+                }
+                TextButton(onClick = onDismiss) {
+                    Text("Fechar")
+                }
+            }
+        }
+    )
+}
+
+@Composable
 private fun BillingRequiredActions(
     visible: Boolean,
     onOpenPlans: () -> Unit
@@ -388,6 +513,19 @@ private fun BillingRequiredActions(
         }
     }
 }
+
+private const val STANDALONE_ART_PRICE = 5.99
+
+private fun formatBrazilianMoney(value: Double): String {
+    return "R$ " + "%.2f".format(java.util.Locale("pt", "BR"), value)
+        .replace('.', ',')
+}
+
+private fun decodePixQrCodeBase64(value: String) = runCatching {
+    val cleanValue = value.substringAfter("base64,", value)
+    val bytes = Base64.decode(cleanValue, Base64.DEFAULT)
+    BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+}.getOrNull()
 
 @Composable
 private fun SectionCard(
@@ -1767,13 +1905,9 @@ private fun ReviewStep(
         UploadingCard()
     }
 
-    state.error?.let { error ->
+    if (!state.billingRequired) state.error?.let { error ->
         Spacer(modifier = Modifier.height(10.dp))
         Text(error.asString(), color = MaterialTheme.colorScheme.error)
-        BillingRequiredActions(
-            visible = state.billingRequired,
-            onOpenPlans = onOpenPlans
-        )
     }
 
     Spacer(modifier = Modifier.height(16.dp))

@@ -1602,11 +1602,16 @@ async function criarArteAvulsaPixHandler(req, res) {
     }
 
     const produto = billingPlans.getSingleArtPurchase();
+    const quantidade = Math.max(
+      1,
+      Math.min(20, Math.round(Number(req.body?.quantidade || produto.quantity || 1)))
+    );
+    const valorTotal = billingService.roundMoney(Number(produto.amount) * quantidade);
     const purchaseId = createArteAvulsaPurchaseId(whatsapp);
 
     const result = await createMercadoPagoPixPayment({
-      amount: produto.amount,
-      description: produto.title,
+      amount: valorTotal,
+      description: quantidade > 1 ? `${produto.title} (${quantidade} artes)` : produto.title,
       payerKey: whatsapp,
       externalReference: `arte_avulsa_pix|${whatsapp}|${purchaseId}`,
       metadata: {
@@ -1614,9 +1619,9 @@ async function criarArteAvulsaPixHandler(req, res) {
         whatsapp,
         purchase_id: purchaseId,
         produto_id: produto.id,
-        quantidade: Number(produto.quantity || 1),
+        quantidade,
         valor_unitario: Number(produto.amount),
-        valor_pago: Number(produto.amount)
+        valor_pago: valorTotal
       },
       idempotencyKey: `arte_avulsa_pix_${purchaseId}`
     });
@@ -1624,8 +1629,8 @@ async function criarArteAvulsaPixHandler(req, res) {
     billingService.recordStandaloneArtPurchasePending(c, {
       purchaseId,
       paymentId: String(result.data.id || ""),
-      amount: Number(produto.amount),
-      quantity: Number(produto.quantity || 1),
+      amount: valorTotal,
+      quantity: quantidade,
       createdAt: new Date().toISOString()
     });
     clientes[whatsapp] = c;
@@ -1640,9 +1645,12 @@ async function criarArteAvulsaPixHandler(req, res) {
       purchase_id: purchaseId,
       tipo: "arte_avulsa_pix",
       produto_id: produto.id,
-      valor_pago: Number(produto.amount),
-      quantidade: Number(produto.quantity || 1),
-      cta_label: "Comprar 1 arte por R$ 5,99",
+      valor_pago: valorTotal,
+      valor_unitario: Number(produto.amount),
+      quantidade,
+      cta_label: quantidade > 1
+        ? `Comprar ${quantidade} artes por R$ ${valorTotal.toFixed(2).replace(".", ",")}`
+        : "Comprar 1 arte por R$ 5,99",
       artes_avulsas_restantes: Number(c.artes_avulsas_restantes || 0)
     });
   } catch (e) {
@@ -2099,8 +2107,9 @@ app.post("/webhook/mercadopago", async (req, res) => {
       const whatsapp = String(pagamento.metadata?.whatsapp || externalParts[1] || "").trim();
       const purchaseId = String(pagamento.metadata?.purchase_id || externalParts[2] || "").trim();
       const produto = billingPlans.getSingleArtPurchase();
+      const quantidade = Math.max(1, Math.round(Number(pagamento.metadata?.quantidade || produto.quantity || 1)));
       const valorPago = billingService.roundMoney(pagamento.transaction_amount || pagamento.metadata?.valor_pago || 0);
-      const valorEsperado = billingService.roundMoney(produto.amount);
+      const valorEsperado = billingService.roundMoney(Number(produto.amount) * quantidade);
 
       if (!whatsapp || !purchaseId || valorPago !== valorEsperado) {
         processados = readMpProcessados();
@@ -2137,7 +2146,7 @@ app.post("/webhook/mercadopago", async (req, res) => {
         purchaseId,
         paymentId: String(paymentId),
         amount: valorPago,
-        quantity: Number(produto.quantity || 1),
+        quantity: quantidade,
         paidAt: pagamento.date_approved || pagamento.date_last_updated || new Date().toISOString()
       });
 
@@ -2150,7 +2159,7 @@ app.post("/webhook/mercadopago", async (req, res) => {
         whatsapp,
         purchase_id: purchaseId,
         produto_id: produto.id,
-        quantidade: Number(produto.quantity || 1),
+        quantidade,
         valor_pago: valorPago,
         creditado: credito.credited === true,
         duplicado: credito.duplicate === true,

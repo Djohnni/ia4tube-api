@@ -473,6 +473,9 @@ fun IA4TubeNavHost(
                     },
                     onOpenOrder = { pedidoId ->
                         navigateProtected(Routes.orderDetail(pedidoId))
+                    },
+                    onOpenPlans = {
+                        navigateProtected(Routes.Plans)
                     }
                 )
             }

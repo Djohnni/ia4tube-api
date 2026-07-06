@@ -505,39 +505,45 @@ function refreshPlanningReservationCounters(cliente) {
 
 function validatePlanAndFreeArts(cliente, quantity) {
   const billing = billingService.getBillingStatus(cliente);
+  const standalone = billingService.getStandaloneArtStatus(cliente);
   ensurePlanningReservationState(cliente, planCycle(cliente));
   refreshPlanningReservationCounters(cliente);
 
-  if (!billingService.isPlanActive(cliente)) {
-    const error = new Error("Escolha ou ative um combo para criar um Planejamento Mensal.");
-    error.statusCode = 403;
-    error.code = "monthly_planning_plan_required";
-    error.billing = billing;
-    throw error;
-  }
-
+  const planActive = billingService.isPlanActive(cliente);
   const freeArts = Number(billing.artes_mensais_restantes || 0);
-  if (quantity > freeArts) {
-    const error = new Error("Voce nao tem artes livres suficientes para este Planejamento Mensal.");
-    error.statusCode = 400;
-    error.code = "monthly_planning_insufficient_arts";
+  const monthlyQuantity = planActive ? Math.min(quantity, freeArts) : 0;
+  const standaloneQuantity = Math.max(0, quantity - monthlyQuantity);
+  const standaloneAvailable = Number(standalone.artes_avulsas_restantes || 0);
+
+  if (standaloneQuantity > standaloneAvailable) {
+    const error = new Error("Voce nao tem saldo suficiente para continuar.");
+    error.statusCode = 402;
+    error.code = "billing_required";
     error.billing = billing;
     error.artes_livres = freeArts;
+    error.artes_avulsas_restantes = standaloneAvailable;
     throw error;
   }
 
   return {
     billing,
-    artes_livres: freeArts
+    artes_livres: freeArts,
+    charge: {
+      mensal: monthlyQuantity,
+      avulsa: standaloneQuantity,
+      arte_avulsa_valor: Number(standalone.arte_avulsa_valor || 0)
+    }
   };
 }
 
-function reservePlanningArts(cliente, planningId, quantity, createdAt, billing) {
+function reservePlanningArts(cliente, planningId, quantity, createdAt, billing, charge = {}) {
   const ciclo = planCycle(cliente);
   const reservas = ensurePlanningReservationState(cliente, ciclo);
   const freeArts = Number(cliente.artes_mensais_restantes || 0);
+  const monthlyQuantity = Math.max(0, Number(charge.mensal ?? quantity));
+  const standaloneQuantity = Math.max(0, Number(charge.avulsa || 0));
 
-  if (quantity > freeArts) {
+  if (monthlyQuantity > freeArts) {
     const error = new Error("Voce nao tem artes livres suficientes para este Planejamento Mensal.");
     error.statusCode = 400;
     error.code = "monthly_planning_insufficient_arts";
@@ -546,14 +552,40 @@ function reservePlanningArts(cliente, planningId, quantity, createdAt, billing) 
     throw error;
   }
 
-  cliente.artes_mensais_restantes = Math.max(0, freeArts - quantity);
+  cliente.artes_mensais_restantes = Math.max(0, freeArts - monthlyQuantity);
+
+  if (standaloneQuantity > 0) {
+    billingService.ensureStandaloneArtFields(cliente);
+    const availableStandalone = Number(cliente.artes_avulsas_restantes || 0);
+    if (standaloneQuantity > availableStandalone) {
+      const error = new Error("Voce nao tem saldo suficiente para continuar.");
+      error.statusCode = 402;
+      error.code = "billing_required";
+      error.billing = billing || billingService.getBillingStatus(cliente);
+      error.artes_livres = freeArts;
+      error.artes_avulsas_restantes = availableStandalone;
+      throw error;
+    }
+    cliente.artes_avulsas_restantes = Math.max(0, availableStandalone - standaloneQuantity);
+    cliente.artes_avulsas_usadas = Number(cliente.artes_avulsas_usadas || 0) + standaloneQuantity;
+    cliente.artes_avulsas_consumos.push({
+      planejamento_id: planningId,
+      consumido_em: createdAt,
+      quantidade: standaloneQuantity,
+      valor_unitario: billingService.roundMoney(charge.arte_avulsa_valor || 0),
+      produto: "planejamento_mensal"
+    });
+  }
+
   reservas[planningId] = {
     ciclo,
     criado_em: createdAt,
     atualizado_em: createdAt,
     status: "ativa",
     quantidade_reservada: quantity,
-    artes_bloqueadas_ativas: quantity,
+    artes_mensais_reservadas: monthlyQuantity,
+    artes_avulsas_consumidas: standaloneQuantity,
+    artes_bloqueadas_ativas: monthlyQuantity,
     artes_produzidas: 0,
     artes_devolvidas: 0
   };
@@ -566,6 +598,8 @@ function reservePlanningArts(cliente, planningId, quantity, createdAt, billing) 
     quantidade_reservada: quantity,
     artes_deste_ciclo: Number(cliente.artes_mensais_total || billing?.artes_mensais_total || 0),
     reservadas_no_planejamento: quantity,
+    artes_mensais_reservadas: monthlyQuantity,
+    artes_avulsas_consumidas: standaloneQuantity,
     livres_para_criar_arte: usage.livres_para_criar_arte,
     ja_produzidas: 0,
     total_reservadas_no_ciclo: usage.reservadas_no_planejamento
@@ -602,7 +636,11 @@ function releasePlanningReservation(cliente, planning) {
     Number(planning.ja_produzidas || 0)
   );
   const jaDevolvidas = Number(reserva.artes_devolvidas || 0);
-  const bloqueadasAtivas = Number(reserva.artes_bloqueadas_ativas || Math.max(0, reservadas - produzidas - jaDevolvidas));
+  const bloqueadasAtivas = Number(
+    Object.prototype.hasOwnProperty.call(reserva, "artes_bloqueadas_ativas")
+      ? reserva.artes_bloqueadas_ativas
+      : Math.max(0, reservadas - produzidas - jaDevolvidas)
+  );
   const devolvidas = Math.max(0, Math.min(bloqueadasAtivas, reservadas - produzidas - jaDevolvidas));
   const now = new Date().toISOString();
 
@@ -1055,7 +1093,7 @@ function listAllPlanningDirs(baseDir) {
 
 function createRequest({ baseDir, cliente, whatsapp, body = {}, files = {} }) {
   const quantidadeReservada = normalizeQuantity(body);
-  const { billing } = validatePlanAndFreeArts(cliente, quantidadeReservada);
+  const { billing, charge } = validatePlanAndFreeArts(cliente, quantidadeReservada);
   const ciclo = planCycle(cliente);
   const planningId = newPlanningId();
   const dirPath = requestDir(baseDir, whatsapp, ciclo, planningId);
@@ -1072,7 +1110,7 @@ function createRequest({ baseDir, cliente, whatsapp, body = {}, files = {} }) {
       orientacao: foto.orientacao_cliente
     }));
   const now = new Date().toISOString();
-  const reservation = reservePlanningArts(cliente, planningId, quantidadeReservada, now, billing);
+  const reservation = reservePlanningArts(cliente, planningId, quantidadeReservada, now, billing, charge);
   const profile = normalizeProfile(body, cliente);
   const solicitacao = {
     id: planningId,
@@ -1093,7 +1131,9 @@ function createRequest({ baseDir, cliente, whatsapp, body = {}, files = {} }) {
       definitiva: true,
       fase_4_pendente: false,
       quantidade_reservada: quantidadeReservada,
-      artes_bloqueadas_ativas: quantidadeReservada,
+      artes_mensais_reservadas: reservation.artes_mensais_reservadas,
+      artes_avulsas_consumidas: reservation.artes_avulsas_consumidas,
+      artes_bloqueadas_ativas: reservation.artes_mensais_reservadas,
       artes_produzidas: 0,
       artes_devolvidas: 0,
       total_reservadas_no_ciclo: reservation.total_reservadas_no_ciclo,
@@ -3121,9 +3161,17 @@ function syncPlanningReservationAfterChildren(cliente, planning, childCount) {
   if (!reserva) return refreshPlanningReservationCounters(cliente);
 
   const quantidade = Number(reserva.quantidade_reservada || planning.quantidade_reservada || 0);
+  const mensalReservada = Number(
+    Object.prototype.hasOwnProperty.call(reserva, "artes_mensais_reservadas")
+      ? reserva.artes_mensais_reservadas
+      : quantidade
+  );
   const vinculadas = Math.max(Number(reserva.artes_produzidas || 0), Number(childCount || 0));
   reserva.artes_produzidas = Math.min(quantidade, vinculadas);
-  reserva.artes_bloqueadas_ativas = Math.max(0, quantidade - reserva.artes_produzidas);
+  reserva.artes_bloqueadas_ativas = Math.max(
+    0,
+    mensalReservada - Math.min(mensalReservada, reserva.artes_produzidas)
+  );
   reserva.atualizado_em = new Date().toISOString();
 
   return refreshPlanningReservationCounters(cliente);
