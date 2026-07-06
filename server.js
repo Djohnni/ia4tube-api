@@ -1359,6 +1359,54 @@ function fcmSenderForType(tipo = "") {
   }
 }
 
+function deactivateInvalidFcmTokens(whatsapp, invalidTokens = [], reason = "firebase_invalid_token") {
+  const tokenSet = new Set(
+    (Array.isArray(invalidTokens) ? invalidTokens : [])
+      .map((token) => String(token || "").trim())
+      .filter(Boolean)
+  );
+
+  if (!tokenSet.size) {
+    return { deactivated: 0 };
+  }
+
+  const clientes = readClientes();
+  const cliente = clientes[whatsapp];
+  if (!cliente) {
+    return { deactivated: 0 };
+  }
+
+  cliente.notificacoes = cliente.notificacoes && typeof cliente.notificacoes === "object" && !Array.isArray(cliente.notificacoes)
+    ? cliente.notificacoes
+    : {};
+
+  const tokens = Array.isArray(cliente.notificacoes.fcm_tokens)
+    ? cliente.notificacoes.fcm_tokens
+    : [];
+
+  const now = new Date().toISOString();
+  let deactivated = 0;
+
+  for (const item of tokens) {
+    const token = String(item?.token || "").trim();
+    if (!token || !tokenSet.has(token) || item.ativo === false) continue;
+
+    item.ativo = false;
+    item.invalidado_em = now;
+    item.invalidado_motivo = reason;
+    item.atualizado_em = now;
+    deactivated += 1;
+  }
+
+  if (deactivated > 0) {
+    cliente.notificacoes.fcm_tokens = tokens;
+    clientes[whatsapp] = cliente;
+    writeClientes(clientes);
+  }
+
+  return { deactivated };
+}
+
 function publicApiUrl(pathname = "") {
   const cleanPath = String(pathname || "").startsWith("/")
     ? String(pathname || "")
@@ -1377,8 +1425,21 @@ function sendClientPushAsync(whatsapp, tipo, payload = {}) {
     }
 
     const sender = fcmSenderForType(tipo);
-    sender(cliente, payload)
+    const invalidTokens = [];
+    sender(cliente, payload, {
+      onInvalidToken: (token) => invalidTokens.push(token)
+    })
       .then((result) => {
+        const cleanup = deactivateInvalidFcmTokens(whatsapp, invalidTokens);
+        if (cleanup.deactivated > 0) {
+          result.tokens_invalidos_desativados = cleanup.deactivated;
+          console.warn("[fcm] tokens invalidos desativados", {
+            whatsapp,
+            tipo,
+            deactivated: cleanup.deactivated
+          });
+        }
+
         if (!result?.ok) {
           console.warn("[fcm] push nao enviado", { whatsapp, tipo, result });
           return;
@@ -1427,6 +1488,7 @@ app.post("/bot/notificacoes/teste", botRunnerAuth, async (req, res) => {
 
   try {
     const sender = fcmSenderForType(tipo);
+    const invalidTokens = [];
     const result = await sender(cliente, {
       title: req.body?.title,
       body: req.body?.body || req.body?.message,
@@ -1437,7 +1499,14 @@ app.post("/bot/notificacoes/teste", botRunnerAuth, async (req, res) => {
       latest_version_name: req.body?.latest_version_name,
       image_url: req.body?.image_url || req.body?.imageUrl || req.body?.image || req.body?.picture,
       data: req.body?.data && typeof req.body.data === "object" ? req.body.data : {}
+    }, {
+      onInvalidToken: (token) => invalidTokens.push(token)
     });
+
+    const cleanup = deactivateInvalidFcmTokens(whatsapp, invalidTokens);
+    if (cleanup.deactivated > 0) {
+      result.tokens_invalidos_desativados = cleanup.deactivated;
+    }
 
     return res.json({ ok: result?.ok === true, result });
   } catch (error) {

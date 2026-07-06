@@ -2,10 +2,14 @@ plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
     id("org.jetbrains.kotlin.plugin.compose")
+    id("com.google.gms.google-services")
 }
 
-if (file("google-services.json").exists()) {
-    apply(plugin = "com.google.gms.google-services")
+val googleServicesFile = layout.projectDirectory.file("google-services.json").asFile
+if (!googleServicesFile.isFile) {
+    throw org.gradle.api.GradleException(
+        "Missing app/google-services.json. Firebase/FCM builds must include this file."
+    )
 }
 
 val uploadStorePassword = providers.gradleProperty("IA4TUBE_UPLOAD_STORE_PASSWORD")
