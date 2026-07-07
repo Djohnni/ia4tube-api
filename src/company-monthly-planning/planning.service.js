@@ -512,7 +512,11 @@ function validatePlanAndFreeArts(cliente, quantity) {
   const planActive = billingService.isPlanActive(cliente);
   const freeArts = Number(billing.artes_mensais_restantes || 0);
   const monthlyQuantity = planActive ? Math.min(quantity, freeArts) : 0;
-  const standaloneQuantity = Math.max(0, quantity - monthlyQuantity);
+  const remainingAfterPlan = Math.max(0, quantity - monthlyQuantity);
+  const freeArtQuantity = remainingAfterPlan > 0 && billingService.hasAvailableFreeCompanyArt(cliente)
+    ? Math.min(1, remainingAfterPlan)
+    : 0;
+  const standaloneQuantity = Math.max(0, remainingAfterPlan - freeArtQuantity);
   const standaloneAvailable = Number(standalone.artes_avulsas_restantes || 0);
 
   if (standaloneQuantity > standaloneAvailable) {
@@ -530,6 +534,7 @@ function validatePlanAndFreeArts(cliente, quantity) {
     artes_livres: freeArts,
     charge: {
       mensal: monthlyQuantity,
+      gratis: freeArtQuantity,
       avulsa: standaloneQuantity,
       arte_avulsa_valor: Number(standalone.arte_avulsa_valor || 0)
     }
@@ -541,6 +546,7 @@ function reservePlanningArts(cliente, planningId, quantity, createdAt, billing, 
   const reservas = ensurePlanningReservationState(cliente, ciclo);
   const freeArts = Number(cliente.artes_mensais_restantes || 0);
   const monthlyQuantity = Math.max(0, Number(charge.mensal ?? quantity));
+  const freeArtQuantity = Math.max(0, Math.min(1, Number(charge.gratis || 0)));
   const standaloneQuantity = Math.max(0, Number(charge.avulsa || 0));
 
   if (monthlyQuantity > freeArts) {
@@ -577,6 +583,24 @@ function reservePlanningArts(cliente, planningId, quantity, createdAt, billing, 
     });
   }
 
+  if (freeArtQuantity > 0) {
+    if (!billingService.hasAvailableFreeCompanyArt(cliente)) {
+      const error = new Error("Voce nao tem saldo suficiente para continuar.");
+      error.statusCode = 402;
+      error.code = "billing_required";
+      error.billing = billing || billingService.getBillingStatus(cliente);
+      error.artes_livres = freeArts;
+      error.artes_avulsas_restantes = Number(cliente.artes_avulsas_restantes || 0);
+      throw error;
+    }
+
+    billingService.applyResolvedCompanyArtCharge(
+      cliente,
+      { allowed: true, source: "arte_gratis", amount: 0 },
+      { custoPedido: 0, mesAtual: ciclo, pedidoId: planningId }
+    );
+  }
+
   reservas[planningId] = {
     ciclo,
     criado_em: createdAt,
@@ -584,10 +608,16 @@ function reservePlanningArts(cliente, planningId, quantity, createdAt, billing, 
     status: "ativa",
     quantidade_reservada: quantity,
     artes_mensais_reservadas: monthlyQuantity,
+    artes_gratis_consumidas: freeArtQuantity,
     artes_avulsas_consumidas: standaloneQuantity,
     artes_bloqueadas_ativas: monthlyQuantity,
     artes_produzidas: 0,
-    artes_devolvidas: 0
+    artes_devolvidas: 0,
+    cobranca_origem: freeArtQuantity >= quantity
+      ? "arte_gratis"
+      : freeArtQuantity > 0
+        ? "mista"
+        : "planejamento_mensal_reserva"
   };
 
   const usage = refreshPlanningReservationCounters(cliente);
@@ -599,10 +629,12 @@ function reservePlanningArts(cliente, planningId, quantity, createdAt, billing, 
     artes_deste_ciclo: Number(cliente.artes_mensais_total || billing?.artes_mensais_total || 0),
     reservadas_no_planejamento: quantity,
     artes_mensais_reservadas: monthlyQuantity,
+    artes_gratis_consumidas: freeArtQuantity,
     artes_avulsas_consumidas: standaloneQuantity,
     livres_para_criar_arte: usage.livres_para_criar_arte,
     ja_produzidas: 0,
-    total_reservadas_no_ciclo: usage.reservadas_no_planejamento
+    total_reservadas_no_ciclo: usage.reservadas_no_planejamento,
+    cobranca_origem: reservas[planningId].cobranca_origem
   };
 }
 
@@ -1121,6 +1153,11 @@ function createRequest({ baseDir, cliente, whatsapp, body = {}, files = {} }) {
     ciclo,
     criado_em: now,
     atualizado_em: now,
+    cobranca_origem: reservation.cobranca_origem || "planejamento_mensal_reserva",
+    tipo_compra: reservation.artes_gratis_consumidas >= quantidadeReservada ? "arte_gratis" : "",
+    valor_cobrado: 0,
+    origem_promocional: reservation.artes_gratis_consumidas > 0 ? "primeira_arte_gratis" : "",
+    marketing_context: reservation.artes_gratis_consumidas > 0 ? "primeira_arte_gratis" : "",
     quantidade_reservada: quantidadeReservada,
     artes_deste_ciclo: reservation.artes_deste_ciclo,
     reservadas_no_planejamento: reservation.reservadas_no_planejamento,
@@ -1132,10 +1169,12 @@ function createRequest({ baseDir, cliente, whatsapp, body = {}, files = {} }) {
       fase_4_pendente: false,
       quantidade_reservada: quantidadeReservada,
       artes_mensais_reservadas: reservation.artes_mensais_reservadas,
+      artes_gratis_consumidas: reservation.artes_gratis_consumidas,
       artes_avulsas_consumidas: reservation.artes_avulsas_consumidas,
       artes_bloqueadas_ativas: reservation.artes_mensais_reservadas,
       artes_produzidas: 0,
       artes_devolvidas: 0,
+      cobranca_origem: reservation.cobranca_origem || "planejamento_mensal_reserva",
       total_reservadas_no_ciclo: reservation.total_reservadas_no_ciclo,
       observacao: "Reserva definitiva aplicada em artes_mensais_restantes. Criar Arte usa somente as artes livres restantes."
     },
@@ -2727,6 +2766,52 @@ function buildChildBriefing({ briefingArte, temaInterno, objetivoInterno, forbid
   return lines.filter(Boolean).join("\n");
 }
 
+function planningChargeFieldsForItem(planning, item) {
+  const reserva = planning?.reserva || {};
+  const ordem = Math.max(1, Number(item?.ordem || 1));
+  const freeQuantity = Math.max(0, Number(reserva.artes_gratis_consumidas || 0));
+  const monthlyQuantity = Math.max(0, Number(reserva.artes_mensais_reservadas || 0));
+  const standaloneQuantity = Math.max(0, Number(reserva.artes_avulsas_consumidas || 0));
+
+  if (ordem <= freeQuantity) {
+    return {
+      cobranca_origem: "arte_gratis",
+      tipo_compra: "arte_gratis",
+      valor_cobrado: 0,
+      origem_promocional: "primeira_arte_gratis",
+      marketing_context: "primeira_arte_gratis"
+    };
+  }
+
+  if (ordem <= freeQuantity + monthlyQuantity) {
+    return {
+      cobranca_origem: "planejamento_mensal_reserva",
+      tipo_compra: "",
+      valor_cobrado: 0,
+      origem_promocional: "",
+      marketing_context: ""
+    };
+  }
+
+  if (ordem <= freeQuantity + monthlyQuantity + standaloneQuantity) {
+    return {
+      cobranca_origem: "arte_avulsa",
+      tipo_compra: "avulsa",
+      valor_cobrado: 0,
+      origem_promocional: "",
+      marketing_context: ""
+    };
+  }
+
+  return {
+    cobranca_origem: "planejamento_mensal_reserva",
+    tipo_compra: "",
+    valor_cobrado: 0,
+    origem_promocional: "",
+    marketing_context: ""
+  };
+}
+
 function buildChildOrder({ planning, item, itemId, pedidoId, mesAtual, copiedAssets }) {
   const profile = planning.profile || {};
   const tema = cleanInternalPlanningText(
@@ -2822,6 +2907,7 @@ function buildChildOrder({ planning, item, itemId, pedidoId, mesAtual, copiedAss
   };
 
   const now = new Date().toISOString();
+  const chargeFields = planningChargeFieldsForItem(planning, item);
   const planningMeta = {
     origem: "planejamento_mensal",
     planejamento_id: planning.planejamento_id || planning.id,
@@ -2851,7 +2937,12 @@ function buildChildOrder({ planning, item, itemId, pedidoId, mesAtual, copiedAss
     preservar_pessoa: personRules.length > 0,
     regras_preservacao_pessoa: personRules,
     status: "pedido_criado",
-    pedido_id: pedidoId
+    pedido_id: pedidoId,
+    cobranca_origem: chargeFields.cobranca_origem,
+    tipo_compra: chargeFields.tipo_compra,
+    valor_cobrado: chargeFields.valor_cobrado,
+    origem_promocional: chargeFields.origem_promocional,
+    marketing_context: chargeFields.marketing_context
   };
 
   return {
@@ -2890,8 +2981,7 @@ function buildChildOrder({ planning, item, itemId, pedidoId, mesAtual, copiedAss
     orientacao_legenda: orientacaoRoteada.orientacao_legenda,
     preservar_pessoa: personRules.length > 0,
     regras_preservacao_pessoa: personRules,
-    cobranca_origem: "planejamento_mensal_reserva",
-    valor_cobrado: 0,
+    ...chargeFields,
     pagamento_pendente: false,
     valor_pendente: 0,
     motivo_pagamento_pendente: "",
@@ -3243,6 +3333,9 @@ function createChildOrdersFromPlan({ pedidosDir, planning, plan, cliente = null 
       data_sugerida: childOrder.data_sugerida,
       horario_sugerido: childOrder.horario_sugerido,
       status: "novo",
+      cobranca_origem: childOrder.cobranca_origem || "",
+      tipo_compra: childOrder.tipo_compra || "",
+      valor_cobrado: Number(childOrder.valor_cobrado || 0),
       criado_em: now,
       pedido_path: path.relative(pedidosDir, orderBase).replace(/\\/g, "/")
     };

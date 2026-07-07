@@ -40,6 +40,14 @@ data class MeResponse(
     val carrosseisCiclo: String? = null
 )
 
+data class FreeArtStatus(
+    val active: Boolean,
+    val available: Boolean,
+    val used: Boolean,
+    val usedAt: String = "",
+    val pedidoId: String = ""
+)
+
 data class OrderSummary(
     val id: String,
     val tipo: String,

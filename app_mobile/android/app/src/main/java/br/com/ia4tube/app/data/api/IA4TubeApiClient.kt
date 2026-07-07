@@ -24,6 +24,7 @@ import br.com.ia4tube.app.data.models.CreateOrderResponse
 import br.com.ia4tube.app.data.models.DownloadedFile
 import br.com.ia4tube.app.data.models.DownloadedImage
 import br.com.ia4tube.app.data.models.FootballOrderRequest
+import br.com.ia4tube.app.data.models.FreeArtStatus
 import br.com.ia4tube.app.data.models.LoginResponse
 import br.com.ia4tube.app.data.models.MeResponse
 import br.com.ia4tube.app.data.models.MonthlyPlanningDetailDto
@@ -76,6 +77,24 @@ class IA4TubeApiClient(
                 playStoreUrl = json.optString("play_store_url").ifBlank {
                     "https://play.google.com/store/apps/details?id=com.ia4tube.app"
                 }
+            )
+        }
+    }
+
+    suspend fun freeArtStatus(token: String): ApiResult<FreeArtStatus> = withContext(Dispatchers.IO) {
+        val request = Request.Builder()
+            .url("${AppConfig.apiBase}/billing/free-art/status")
+            .header("Authorization", "Bearer $token")
+            .get()
+            .build()
+
+        executeJson(request) { json ->
+            FreeArtStatus(
+                active = json.optBoolean("arte_gratis_ativa", false),
+                available = json.optBoolean("arte_gratis_disponivel", false),
+                used = json.optBoolean("arte_gratis_usada", false),
+                usedAt = json.optString("arte_gratis_usada_em"),
+                pedidoId = json.optString("arte_gratis_pedido_id")
             )
         }
     }

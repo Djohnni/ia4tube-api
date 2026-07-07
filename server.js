@@ -1144,6 +1144,8 @@ function isHttpMediaUrl(value = "") {
   }
 }
 
+const TEMP_FIRST_FREE_ART_VIDEO_URL = "https://interactive-examples.mdn.mozilla.net/media/cc0-videos/flower.mp4";
+
 app.get("/app/version", (req, res) => {
   const latestVersionCode = envInt("IA4TUBE_ANDROID_LATEST_VERSION_CODE", 5);
   const minimumVersionCode = envInt("IA4TUBE_ANDROID_MINIMUM_VERSION_CODE", 1);
@@ -1165,8 +1167,10 @@ app.get("/app/version", (req, res) => {
 
 app.get("/marketing/video", auth, (req, res) => {
   const context = String(req.query?.context || "primeira_arte_gratis").trim() || "primeira_arte_gratis";
-  const videoUrl = envMarketingVideo("URL", context);
-  const enabled = envBool("IA4TUBE_MARKETING_VIDEO_ENABLED", Boolean(videoUrl)) && isHttpMediaUrl(videoUrl);
+  const configuredVideoUrl = envMarketingVideo("URL", context);
+  const enabledByFlag = envBool("IA4TUBE_MARKETING_VIDEO_ENABLED", context === "primeira_arte_gratis");
+  const videoUrl = configuredVideoUrl || (enabledByFlag && context === "primeira_arte_gratis" ? TEMP_FIRST_FREE_ART_VIDEO_URL : "");
+  const enabled = enabledByFlag && isHttpMediaUrl(videoUrl);
   const thumbnail = envMarketingVideo("THUMBNAIL", context);
   const version = envMarketingVideo("VERSION", context) || new Date().toISOString().slice(0, 10);
   const id = envMarketingVideo("ID", context) || `${context}_${version}`.replace(/[^a-zA-Z0-9_-]+/g, "_");
@@ -3332,6 +3336,10 @@ app.post(
         ciclo: planejamento.ciclo,
         status: planejamento.status,
         status_label: "Em analise",
+        cobranca_origem: planejamento.cobranca_origem || planejamento.reserva?.cobranca_origem || "",
+        tipo_compra: planejamento.tipo_compra || "",
+        valor_cobrado: Number(planejamento.valor_cobrado || 0),
+        arte_gratis: planejamento.cobranca_origem === "arte_gratis",
         quantidade_reservada: planejamento.quantidade_reservada,
         artes_deste_ciclo: planejamento.artes_deste_ciclo,
         reservadas_no_planejamento: planejamento.reservadas_no_planejamento,

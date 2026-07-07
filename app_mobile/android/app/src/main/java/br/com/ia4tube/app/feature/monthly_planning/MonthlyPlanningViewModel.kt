@@ -433,6 +433,10 @@ class MonthlyPlanningViewModel(
     }
 
     fun confirmPlanning() {
+        confirmPlanningInternal()
+    }
+
+    private fun confirmPlanningInternal(reservationOverride: Int? = null) {
         val current = _uiState.value
         if (current.photos.isEmpty()) {
             _uiState.update {
@@ -444,7 +448,8 @@ class MonthlyPlanningViewModel(
             return
         }
 
-        if (current.reservedArts <= 0) {
+        val requestedReservedArts = reservationOverride?.coerceAtLeast(0) ?: current.reservedArts
+        if (requestedReservedArts <= 0) {
             viewModelScope.launch {
                 _uiState.update { it.copy(loading = true, uploadError = null, successMessage = null) }
                 val freeArts = when (val me = repository.me()) {
@@ -463,8 +468,30 @@ class MonthlyPlanningViewModel(
                             billingPixLoading = false
                         )
                     }
-                    confirmPlanning()
+                    confirmPlanningInternal()
                 } else {
+                    val freeArtAvailable = current.requiredStandaloneArts == 1 &&
+                        when (val status = repository.freeArtStatus()) {
+                            is ApiResult.Success -> status.value.active && status.value.available && !status.value.used
+                            is ApiResult.Failure -> false
+                        }
+
+                    if (freeArtAvailable) {
+                        _uiState.update {
+                            it.copy(
+                                loading = false,
+                                billingRequired = false,
+                                billingPix = null,
+                                billingPixError = null,
+                                billingPixLoading = false,
+                                uploadError = null,
+                                successMessage = null
+                            )
+                        }
+                        confirmPlanningInternal(reservationOverride = 1)
+                        return@launch
+                    }
+
                     _uiState.update {
                         it.copy(
                             loading = false,
@@ -510,7 +537,7 @@ class MonthlyPlanningViewModel(
             }
 
             val request = MonthlyPlanningRequest(
-                quantidadeReservada = current.reservedArts,
+                quantidadeReservada = requestedReservedArts,
                 nomeEmpresa = nomeEmpresa,
                 ramo = ramo,
                 caracteristicasEmpresa = uiProfile.caracteristicasEmpresa,

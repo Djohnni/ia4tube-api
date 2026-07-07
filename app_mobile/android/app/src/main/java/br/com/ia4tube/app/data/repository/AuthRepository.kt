@@ -11,6 +11,7 @@ import br.com.ia4tube.app.data.models.CreateArtEmpresaRequest
 import br.com.ia4tube.app.data.models.CreateOrderResponse
 import br.com.ia4tube.app.data.models.DownloadedImage
 import br.com.ia4tube.app.data.models.FootballOrderRequest
+import br.com.ia4tube.app.data.models.FreeArtStatus
 import br.com.ia4tube.app.data.models.LoginResponse
 import br.com.ia4tube.app.data.models.MeResponse
 import br.com.ia4tube.app.data.models.MonthlyPlanningDetailDto
@@ -58,6 +59,12 @@ class AuthRepository(
         val token = sessionStore.getToken()
         if (token.isBlank()) return ApiResult.Failure(SESSION_EXPIRED_MESSAGE)
         return apiClient.me(token)
+    }
+
+    suspend fun freeArtStatus(): ApiResult<FreeArtStatus> {
+        val token = sessionStore.getToken()
+        if (token.isBlank()) return ApiResult.Failure(SESSION_EXPIRED_MESSAGE)
+        return apiClient.freeArtStatus(token)
     }
 
     suspend fun meusPedidos(): ApiResult<List<OrderSummary>> {
