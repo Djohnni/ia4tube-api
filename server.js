@@ -1262,6 +1262,7 @@ app.post("/auth/google", async (req, res) => {
         ciclo_mes: nowYYYYMM(),
         ativo: true
       };
+      billingService.markFreeArtEligible(c);
 
       clientes[chaveCliente] = c;
       writeClientes(clientes);
@@ -1338,6 +1339,7 @@ app.post("/auth/auto-register", (req, res) => {
       ativo: true,
       criado_em: new Date().toISOString()
     };
+    billingService.markFreeArtEligible(novo);
 
     clientes[login] = novo;
     writeClientes(clientes);
@@ -1406,6 +1408,7 @@ app.post("/auth/register", (req, res) => {
     ciclo_mes: nowYYYYMM(),
     ativo: true
   };
+  billingService.markFreeArtEligible(novo);
 
   const clientesAtualizados = readClientes();
 
@@ -1616,6 +1619,20 @@ app.get("/me", auth, (req, res) => {
     brinde_mascote_disponivel: c.brinde_mascote_disponivel === true,
     ativo: c.ativo,
     billing
+  });
+});
+
+app.get("/billing/free-art/status", auth, (req, res) => {
+  const clientes = readClientes();
+  const c = clientes[req.user.whatsapp];
+
+  if (!c) {
+    return res.status(404).json({ ok: false, error: "Cliente nao encontrado" });
+  }
+
+  return res.json({
+    ok: true,
+    ...billingService.getFreeArtStatus(c)
   });
 });
 
@@ -4027,6 +4044,12 @@ function criarPedidoHandler(categoria) {
       draft.pedido.valor_cobrado = cobrancaEmpresa.source === "saldo_extra" || cobrancaEmpresa.source === "arte_avulsa"
         ? Number(cobrancaEmpresa.amount || custoEfetivoPedido)
         : 0;
+      if (cobrancaEmpresa.source === "arte_gratis") {
+        draft.pedido.tipo_compra = "arte_gratis";
+        draft.pedido.origem_promocional = "primeira_arte_gratis";
+        draft.pedido.marketing_context = "primeira_arte_gratis";
+        draft.pedido.beneficios_plano_aplicados = false;
+      }
       if (cobrancaEmpresa.source === "arte_avulsa") {
         draft.pedido.tipo_compra = "avulsa";
         draft.pedido.beneficios_plano_aplicados = false;
@@ -4051,7 +4074,13 @@ function criarPedidoHandler(categoria) {
 
     removeOldPedidos(whatsapp, 15);
 
-    return res.json({ ok: true, pedido_id: id });
+    return res.json({
+      ok: true,
+      pedido_id: id,
+      cobranca_origem: draft.pedido?.cobranca_origem || "",
+      tipo_compra: draft.pedido?.tipo_compra || "",
+      arte_gratis: draft.pedido?.cobranca_origem === "arte_gratis"
+    });
     } catch (error) {
       cleanupUploadedFiles(req.files);
       console.error("[pedidos] erro ao criar pedido", {

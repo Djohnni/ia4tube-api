@@ -138,6 +138,57 @@ function hasAvailableStandaloneArt(cliente) {
   return Number(cliente.artes_avulsas_restantes || 0) > 0;
 }
 
+function freeArtFeatureEnabled() {
+  const value = String(process.env.IA4TUBE_FREE_ART_ENABLED || "true").trim().toLowerCase();
+  return !["0", "false", "no", "nao", "não", "off"].includes(value);
+}
+
+function markFreeArtEligible(cliente, { eligible = true, now = new Date() } = {}) {
+  if (!cliente || typeof cliente !== "object") return cliente;
+
+  if (cliente.arte_gratis_usada !== true) {
+    cliente.arte_gratis_usada = false;
+  }
+  cliente.arte_gratis_disponivel = eligible === true;
+  cliente.arte_gratis_criada_em = cliente.arte_gratis_criada_em || toIsoDate(now);
+  cliente.arte_gratis_usos = Array.isArray(cliente.arte_gratis_usos)
+    ? cliente.arte_gratis_usos
+    : [];
+
+  return cliente;
+}
+
+function ensureFreeArtFields(cliente) {
+  if (!cliente || typeof cliente !== "object") return cliente;
+
+  if (cliente.arte_gratis_usada !== true) {
+    cliente.arte_gratis_usada = false;
+  }
+  cliente.arte_gratis_usos = Array.isArray(cliente.arte_gratis_usos)
+    ? cliente.arte_gratis_usos
+    : [];
+
+  return cliente;
+}
+
+function getFreeArtStatus(cliente) {
+  ensureFreeArtFields(cliente);
+  const used = cliente?.arte_gratis_usada === true;
+  const available = freeArtFeatureEnabled() && used !== true && cliente?.arte_gratis_disponivel === true;
+
+  return {
+    arte_gratis_ativa: freeArtFeatureEnabled(),
+    arte_gratis_disponivel: available,
+    arte_gratis_usada: used,
+    arte_gratis_usada_em: cliente?.arte_gratis_usada_em || "",
+    arte_gratis_pedido_id: cliente?.arte_gratis_pedido_id || ""
+  };
+}
+
+function hasAvailableFreeCompanyArt(cliente) {
+  return getFreeArtStatus(cliente).arte_gratis_disponivel === true;
+}
+
 function refreshManualPlanCycle(cliente, now = new Date()) {
   let changed = false;
   const current = parseDate(now) || new Date();
@@ -172,6 +223,7 @@ function getBillingStatus(cliente, now = new Date()) {
   refreshManualPlanCycle(cliente, now);
   const standaloneArt = getStandaloneArtStatus(cliente);
   const availableCombos = plansRegistry.listPlans();
+  const freeArt = getFreeArtStatus(cliente);
 
   return {
     plano: cliente.plano || "",
@@ -187,6 +239,7 @@ function getBillingStatus(cliente, now = new Date()) {
     artes_mensais_total: Number(cliente.artes_mensais_total || 0),
     artes_mensais_usadas: Number(cliente.artes_mensais_usadas || 0),
     artes_mensais_restantes: Number(cliente.artes_mensais_restantes || 0),
+    ...freeArt,
     ...standaloneArt,
     saldo_mensal: roundMoney(cliente.saldo_mensal || 0),
     saldo_extra: roundMoney(cliente.saldo_extra || 0),
@@ -238,6 +291,15 @@ function formatInsufficientBalanceMessage(custoPedido) {
 function resolveCompanyArtCharge(cliente, { custoPedido, now = new Date() }) {
   const refresh = refreshManualPlanCycle(cliente, now);
   const standaloneArt = plansRegistry.getSingleArtPurchase();
+
+  if (hasAvailableFreeCompanyArt(cliente)) {
+    return {
+      allowed: true,
+      source: "arte_gratis",
+      amount: 0,
+      billingChanged: true
+    };
+  }
 
   if (hasAvailablePlanArt(cliente, now)) {
     return {
@@ -349,6 +411,18 @@ function applyResolvedCompanyArtCharge(cliente, charge, { custoPedido, mesAtual,
   if (charge.source === "plano") {
     cliente.artes_mensais_usadas = Number(cliente.artes_mensais_usadas || 0) + 1;
     cliente.artes_mensais_restantes = Math.max(0, Number(cliente.artes_mensais_restantes || 0) - 1);
+  } else if (charge.source === "arte_gratis") {
+    ensureFreeArtFields(cliente);
+    const now = new Date().toISOString();
+    cliente.arte_gratis_usada = true;
+    cliente.arte_gratis_disponivel = false;
+    cliente.arte_gratis_usada_em = now;
+    cliente.arte_gratis_pedido_id = pedidoId ? String(pedidoId) : "";
+    cliente.arte_gratis_usos.push({
+      pedido_id: pedidoId ? String(pedidoId) : "",
+      consumido_em: now,
+      produto: "arte_empresa"
+    });
   } else if (charge.source === "arte_avulsa") {
     ensureStandaloneArtFields(cliente);
     cliente.artes_avulsas_restantes = Math.max(0, Number(cliente.artes_avulsas_restantes || 0) - 1);
@@ -436,6 +510,10 @@ module.exports = {
   ensureStandaloneArtFields,
   getStandaloneArtStatus,
   hasAvailableStandaloneArt,
+  markFreeArtEligible,
+  ensureFreeArtFields,
+  getFreeArtStatus,
+  hasAvailableFreeCompanyArt,
   recordStandaloneArtPurchasePending,
   creditStandaloneArtPurchase,
   refreshManualPlanCycle,
