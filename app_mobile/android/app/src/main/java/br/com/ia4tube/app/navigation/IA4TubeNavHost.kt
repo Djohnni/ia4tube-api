@@ -46,6 +46,7 @@ import br.com.ia4tube.app.domain.usecase.DownloadOrderResultUseCase
 import br.com.ia4tube.app.domain.usecase.GenerateCompanyGraphicMaterialUseCase
 import br.com.ia4tube.app.domain.usecase.GeneratePixUseCase
 import br.com.ia4tube.app.domain.usecase.LoadMeUseCase
+import br.com.ia4tube.app.domain.usecase.LoadMarketingVideoUseCase
 import br.com.ia4tube.app.domain.usecase.LoadOrderInfoUseCase
 import br.com.ia4tube.app.domain.usecase.LoadPaymentInfoUseCase
 import br.com.ia4tube.app.domain.usecase.ListCarouselsUseCase
@@ -695,6 +696,7 @@ fun IA4TubeNavHost(
                         pedidoId = pedidoId,
                         previewToken = repository.getSavedToken(),
                         loadOrderInfo = LoadOrderInfoUseCase(repository),
+                        loadMarketingVideo = LoadMarketingVideoUseCase(repository),
                         approveOrder = ApproveOrderUseCase(repository),
                         downloadOrderResult = DownloadOrderResultUseCase(repository, imageDownloadStore),
                         requestOrderAdjustment = RequestOrderAdjustmentUseCase(repository),

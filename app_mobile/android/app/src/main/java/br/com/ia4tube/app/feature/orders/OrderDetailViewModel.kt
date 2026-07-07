@@ -6,6 +6,7 @@ import androidx.lifecycle.viewModelScope
 import br.com.ia4tube.app.core.analytics.MobileAnalytics
 import br.com.ia4tube.app.data.models.ApiResult
 import br.com.ia4tube.app.data.models.DownloadedImage
+import br.com.ia4tube.app.data.models.MarketingVideo
 import br.com.ia4tube.app.data.models.OrderInfo
 import br.com.ia4tube.app.data.models.PaymentInfo
 import br.com.ia4tube.app.domain.usecase.ApproveOrderUseCase
@@ -13,6 +14,7 @@ import br.com.ia4tube.app.domain.usecase.DownloadOrderResultUseCase
 import br.com.ia4tube.app.domain.usecase.GeneratePixUseCase
 import br.com.ia4tube.app.domain.usecase.LoadPaymentInfoUseCase
 import br.com.ia4tube.app.domain.usecase.LoadOrderInfoUseCase
+import br.com.ia4tube.app.domain.usecase.LoadMarketingVideoUseCase
 import br.com.ia4tube.app.domain.usecase.PayOrderWithBalanceUseCase
 import br.com.ia4tube.app.domain.usecase.RequestOrderAdjustmentUseCase
 import br.com.ia4tube.app.R
@@ -39,6 +41,11 @@ data class OrderDetailUiState(
     val manualRefreshing: Boolean = false,
     val info: OrderInfo? = null,
     val paymentInfo: PaymentInfo? = null,
+    val marketingVideo: MarketingVideo? = null,
+    val marketingVideoLoading: Boolean = false,
+    val marketingVideoUnavailable: Boolean = false,
+    val marketingVideoFinished: Boolean = false,
+    val marketingVideoDismissed: Boolean = false,
     val sharePayload: SharePayload? = null,
     val error: UiText? = null,
     val actionMessage: UiText? = null
@@ -54,6 +61,7 @@ class OrderDetailViewModel(
     private val pedidoId: String,
     val previewToken: String,
     private val loadOrderInfo: LoadOrderInfoUseCase,
+    private val loadMarketingVideo: LoadMarketingVideoUseCase,
     private val approveOrder: ApproveOrderUseCase,
     private val downloadOrderResult: DownloadOrderResultUseCase,
     private val requestOrderAdjustment: RequestOrderAdjustmentUseCase,
@@ -180,6 +188,11 @@ class OrderDetailViewModel(
                         "mobile_compartilhou_imagem",
                         tela = "detalhe_pedido",
                         pedidoId = pedidoId,
+                    )
+                    MobileAnalytics.track(
+                        "mobile_compartilhou_arte",
+                        tela = "detalhe_pedido",
+                        pedidoId = pedidoId,
                         flushNow = true
                     )
                     _uiState.update {
@@ -218,8 +231,8 @@ class OrderDetailViewModel(
             "mobile_video_marketing_$percent",
             video,
             mapOf(
-                "percentual" to percent,
-                "tempo_assistido_segundos" to watchedSeconds
+                "percentual" to percent.toString(),
+                "tempo_assistido_segundos" to watchedSeconds.toString()
             )
         )
     }
@@ -231,8 +244,8 @@ class OrderDetailViewModel(
             "mobile_video_marketing_100",
             video,
             mapOf(
-                "percentual" to 100,
-                "tempo_assistido_segundos" to watchedSeconds
+                "percentual" to "100",
+                "tempo_assistido_segundos" to watchedSeconds.toString()
             )
         )
     }
@@ -259,7 +272,7 @@ class OrderDetailViewModel(
             trackMarketingVideo(
                 "mobile_ver_minha_arte_agora",
                 video,
-                mapOf("tempo_assistido_segundos" to watchedSeconds),
+                mapOf("tempo_assistido_segundos" to watchedSeconds.toString()),
                 flushNow = true
             )
         }
@@ -272,7 +285,7 @@ class OrderDetailViewModel(
         trackMarketingVideo(
             "mobile_video_marketing_abandonou",
             video,
-            mapOf("tempo_assistido_segundos" to watchedSeconds),
+            mapOf("tempo_assistido_segundos" to watchedSeconds.toString()),
             flushNow = true
         )
     }
@@ -425,6 +438,7 @@ class OrderDetailViewModel(
                         pedidoId = pedidoId
                     )
                 }
+                maybeLoadMarketingVideo(result.value)
 
                 result.value
             }
@@ -436,6 +450,45 @@ class OrderDetailViewModel(
                     )
                 }
                 null
+            }
+        }
+    }
+
+    private suspend fun maybeLoadMarketingVideo(info: OrderInfo) {
+        if (!info.shouldRequestMarketingVideo()) return
+        val current = _uiState.value
+        if (
+            current.marketingVideo != null ||
+            current.marketingVideoLoading ||
+            current.marketingVideoUnavailable
+        ) {
+            return
+        }
+
+        val context = info.marketingContext.ifBlank { MARKETING_CONTEXT_FIRST_FREE_ART }
+        _uiState.update { it.copy(marketingVideoLoading = true) }
+
+        when (val result = loadMarketingVideo(context)) {
+            is ApiResult.Success -> {
+                val video = result.value
+                if (video.active && video.urlVideo.isNotBlank()) {
+                    _uiState.update {
+                        it.copy(
+                            marketingVideo = video,
+                            marketingVideoLoading = false,
+                            marketingVideoUnavailable = false,
+                            marketingVideoDismissed = false,
+                            marketingVideoFinished = false
+                        )
+                    }
+                } else {
+                    _uiState.update {
+                        it.copy(marketingVideoLoading = false, marketingVideoUnavailable = true)
+                    }
+                }
+            }
+            is ApiResult.Failure -> _uiState.update {
+                it.copy(marketingVideoLoading = false, marketingVideoUnavailable = true)
             }
         }
     }
@@ -504,6 +557,29 @@ class OrderDetailViewModel(
         return !pagamentoPendente && podeBaixar
     }
 
+    private fun OrderInfo.shouldRequestMarketingVideo(): Boolean {
+        return cobrancaOrigem.equals("arte_gratis", ignoreCase = true) && !imagemPronta && !hasErrorStatus()
+    }
+
+    private fun trackMarketingVideo(
+        eventName: String,
+        video: MarketingVideo,
+        extra: Map<String, String> = emptyMap(),
+        flushNow: Boolean = false
+    ) {
+        MobileAnalytics.track(
+            eventName,
+            tela = "detalhe_pedido",
+            pedidoId = pedidoId,
+            payload = mapOf(
+                "video_id" to video.id,
+                "versao" to video.version,
+                "contexto" to video.context.ifBlank { MARKETING_CONTEXT_FIRST_FREE_ART }
+            ) + extra,
+            flushNow = flushNow
+        )
+    }
+
     override fun onCleared() {
         stopPolling()
         super.onCleared()
@@ -511,6 +587,7 @@ class OrderDetailViewModel(
 
     companion object {
         private const val POLLING_INTERVAL_MS = 5_000L
+        private const val MARKETING_CONTEXT_FIRST_FREE_ART = "primeira_arte_gratis"
     }
 }
 
@@ -518,6 +595,7 @@ class OrderDetailViewModelFactory(
     private val pedidoId: String,
     private val previewToken: String,
     private val loadOrderInfo: LoadOrderInfoUseCase,
+    private val loadMarketingVideo: LoadMarketingVideoUseCase,
     private val approveOrder: ApproveOrderUseCase,
     private val downloadOrderResult: DownloadOrderResultUseCase,
     private val requestOrderAdjustment: RequestOrderAdjustmentUseCase,
@@ -531,6 +609,7 @@ class OrderDetailViewModelFactory(
             pedidoId,
             previewToken,
             loadOrderInfo,
+            loadMarketingVideo,
             approveOrder,
             downloadOrderResult,
             requestOrderAdjustment,

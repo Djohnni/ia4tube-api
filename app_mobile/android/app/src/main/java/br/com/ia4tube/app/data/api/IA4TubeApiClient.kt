@@ -454,7 +454,10 @@ class IA4TubeApiClient(
                 podeBaixar = json.optBoolean("pode_baixar", false),
                 podePedirAjuste = json.optBoolean("pode_pedir_ajuste", false),
                 downloadBloqueado = json.optBoolean("download_bloqueado", false),
-                mensagemDownloadBloqueado = json.optString("mensagem_download_bloqueado")
+                mensagemDownloadBloqueado = json.optString("mensagem_download_bloqueado"),
+                cobrancaOrigem = json.optString("cobranca_origem"),
+                tipoCompra = json.optString("tipo_compra"),
+                marketingContext = json.optString("marketing_context")
             )
         }
     }

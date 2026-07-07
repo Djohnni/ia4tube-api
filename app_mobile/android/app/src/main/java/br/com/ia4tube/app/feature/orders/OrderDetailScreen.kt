@@ -28,11 +28,13 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.platform.LocalClipboardManager
@@ -40,11 +42,18 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.viewinterop.AndroidView
+import androidx.media3.common.MediaItem
+import androidx.media3.common.Player
+import androidx.media3.common.util.UnstableApi
+import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.ui.PlayerView
 import coil.compose.AsyncImagePainter
 import coil.compose.rememberAsyncImagePainter
 import coil.request.ImageRequest
@@ -52,12 +61,14 @@ import br.com.ia4tube.app.R
 import br.com.ia4tube.app.core.analytics.MobileAnalytics
 import br.com.ia4tube.app.core.share.ShareImageStore
 import br.com.ia4tube.app.data.api.PreviewUrlBuilder
+import br.com.ia4tube.app.data.models.MarketingVideo
 import br.com.ia4tube.app.data.models.OrderInfo
 import br.com.ia4tube.app.data.models.PaymentInfo
 import br.com.ia4tube.app.ui.components.EstimatedCreationProgressCard
 import br.com.ia4tube.app.ui.components.ScreenScaffold
 import br.com.ia4tube.app.ui.text.UiText
 import br.com.ia4tube.app.ui.text.asString
+import kotlinx.coroutines.delay
 import java.text.Normalizer
 
 @Composable
@@ -117,10 +128,19 @@ fun OrderDetailScreen(
                         payingWithBalance = state.payingWithBalance,
                         polling = state.polling,
                         manualRefreshing = state.manualRefreshing,
+                        marketingVideo = state.marketingVideo,
+                        marketingVideoFinished = state.marketingVideoFinished,
+                        marketingVideoDismissed = state.marketingVideoDismissed,
                         previewToken = viewModel.previewToken,
                         errorMessage = state.error,
                         actionMessage = state.actionMessage,
                         onRefreshNow = viewModel::refreshNow,
+                        onMarketingVideoStarted = viewModel::onMarketingVideoStarted,
+                        onMarketingVideoQuartile = viewModel::onMarketingVideoQuartile,
+                        onMarketingVideoEnded = viewModel::onMarketingVideoEnded,
+                        onMarketingVideoError = viewModel::onMarketingVideoError,
+                        onMarketingVideoReadyClick = viewModel::openReadyFromMarketingVideo,
+                        onMarketingVideoAbandoned = viewModel::onMarketingVideoAbandoned,
                         onDownload = viewModel::downloadResult,
                         onShare = viewModel::shareResult,
                         onRequestAdjustment = {
@@ -185,10 +205,19 @@ private fun OrderInfoCard(
     payingWithBalance: Boolean,
     polling: Boolean,
     manualRefreshing: Boolean,
+    marketingVideo: MarketingVideo?,
+    marketingVideoFinished: Boolean,
+    marketingVideoDismissed: Boolean,
     previewToken: String,
     errorMessage: UiText?,
     actionMessage: UiText?,
     onRefreshNow: () -> Unit,
+    onMarketingVideoStarted: () -> Unit,
+    onMarketingVideoQuartile: (Int, Long) -> Unit,
+    onMarketingVideoEnded: (Long) -> Unit,
+    onMarketingVideoError: () -> Unit,
+    onMarketingVideoReadyClick: (Long) -> Unit,
+    onMarketingVideoAbandoned: (Long) -> Unit,
     onDownload: () -> Unit,
     onShare: () -> Unit,
     onRequestAdjustment: () -> Unit,
@@ -201,6 +230,37 @@ private fun OrderInfoCard(
     if (info == null) return
     val postDescription = finalPostDescription(info)
     val canDownloadResult = info.canDownloadResult()
+    val showMarketingVideo = marketingVideo != null &&
+        !marketingVideoDismissed &&
+        info.cobrancaOrigem.equals("arte_gratis", ignoreCase = true)
+
+    if (showMarketingVideo && marketingVideo != null) {
+        MarketingVideoWaitingCard(
+            video = marketingVideo,
+            artReady = info.imagemPronta,
+            videoFinished = marketingVideoFinished,
+            onStarted = onMarketingVideoStarted,
+            onQuartile = onMarketingVideoQuartile,
+            onEnded = onMarketingVideoEnded,
+            onError = onMarketingVideoError,
+            onReadyClick = onMarketingVideoReadyClick,
+            onAbandoned = onMarketingVideoAbandoned
+        )
+        Spacer(modifier = Modifier.height(12.dp))
+        OutlinedButton(
+            modifier = Modifier.fillMaxWidth(),
+            enabled = !manualRefreshing,
+            onClick = onRefreshNow
+        ) {
+            if (manualRefreshing) {
+                CircularProgressIndicator(modifier = Modifier.size(18.dp))
+            } else {
+                Text(stringResource(R.string.common_update_now))
+            }
+        }
+        OrderMessages(errorMessage = errorMessage, actionMessage = actionMessage)
+        return
+    }
 
     if (!info.imagemPronta) {
         ProductionSection(
