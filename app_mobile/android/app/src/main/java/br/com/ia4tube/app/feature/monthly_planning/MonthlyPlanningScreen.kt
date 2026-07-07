@@ -2230,12 +2230,9 @@ private fun MonthlyPlanningListStep(
         }
 
         plannings.firstOrNull { it.isCreatingImages() }?.let { planning ->
-            EstimatedCreationProgressCard(
-                progressKey = "monthly-planning-${planning.id}",
-                running = true,
-                title = "Estamos criando suas imagens",
-                subtitle = "Seu planejamento foi enviado para produção.",
-                explanation = "As imagens aparecerão em Minhas imagens conforme ficarem prontas."
+            MonthlyPlanningProcessingStatusCard(
+                readyPosts = planning.readyPosts,
+                totalPosts = planning.totalPosts
             )
         }
 
@@ -2244,6 +2241,43 @@ private fun MonthlyPlanningListStep(
                 planning = planning,
                 onOpenDetail = onOpenDetail
             )
+        }
+    }
+}
+
+@Composable
+private fun MonthlyPlanningProcessingStatusCard(
+    readyPosts: Int,
+    totalPosts: Int
+) {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(18.dp),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+        elevation = CardDefaults.cardElevation(defaultElevation = 1.dp),
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.24f))
+    ) {
+        Column(
+            modifier = Modifier.padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            Text(
+                text = "Imagens sendo criadas",
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.Bold
+            )
+            Text(
+                text = "Acompanhe os status abaixo conforme ficarem prontas.",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            if (totalPosts > 0) {
+                Text(
+                    text = "$readyPosts de $totalPosts prontas",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
         }
     }
 }
