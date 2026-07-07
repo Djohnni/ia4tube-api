@@ -966,7 +966,16 @@ function childOrderStatus({ pedidosDir, pedidoId }) {
 
   const pedido = orderStorage.readOrder(base) || {};
   const rawStatus = orderStorage.readStatus(base, pedido.status || "novo");
-  const imagemPronta = fs.existsSync(path.join(base, "resultado_final.png"));
+  const resultadoFinalPath = path.join(base, "resultado_final.png");
+  const imagemPronta = fs.existsSync(resultadoFinalPath);
+  const imagemAtualizadaEm = imagemPronta
+    ? String(
+      pedido.resultado_enviado_em
+      || pedido.atualizado_em
+      || fs.statSync(resultadoFinalPath).mtimeMs
+      || ""
+    )
+    : "";
   const descricaoInstagram = String(
     pedido.descricao_instagram || pedido.legacy?.descricao_instagram || ""
   ).trim();
@@ -977,6 +986,7 @@ function childOrderStatus({ pedidosDir, pedidoId }) {
       status: "pronta",
       status_label: "Pronta",
       imagem_pronta: true,
+      imagem_atualizada_em: imagemAtualizadaEm,
       descricao_instagram: descricaoInstagram
     };
   }
@@ -1041,6 +1051,7 @@ function planningPosts(planning, pedidosDir = "") {
       status: childStatus.status,
       status_label: childStatus.status_label,
       imagem_pronta: childStatus.imagem_pronta,
+      imagem_atualizada_em: childStatus.imagem_atualizada_em || "",
       ...notificationFields
     };
   });
@@ -1230,8 +1241,11 @@ function calendarPayloadForPost(planning, post) {
   const previewUrl = imageReady && pedidoId
     ? `/pedidos/${encodeURIComponent(pedidoId)}/preview`
     : "";
+  const thumbnailVersion = imageReady
+    ? encodeURIComponent(String(post.imagem_atualizada_em || "final").trim() || "final")
+    : "";
   const thumbnailUrl = imageReady && pedidoId
-    ? `/pedidos/${encodeURIComponent(pedidoId)}/thumbnail`
+    ? `/pedidos/${encodeURIComponent(pedidoId)}/thumbnail?v=${thumbnailVersion}`
     : "";
 
   return {

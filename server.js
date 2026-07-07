@@ -5010,9 +5010,9 @@ app.get("/pedidos/:id/thumbnail", (req, res) => {
 
   const previewProtegidaPath = path.join(base, "preview_ia4tube.jpg");
   const resultadoFinalPath = path.join(base, "resultado_final.png");
-  const thumbnailPath = fs.existsSync(previewProtegidaPath)
-    ? previewProtegidaPath
-    : resultadoFinalPath;
+  const thumbnailPath = fs.existsSync(resultadoFinalPath)
+    ? resultadoFinalPath
+    : previewProtegidaPath;
 
   if (!fs.existsSync(thumbnailPath)) {
     return res.status(404).json({ ok: false, error: "Imagem ainda nÃ£o ficou pronta" });
