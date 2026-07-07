@@ -504,8 +504,9 @@ function refreshPlanningReservationCounters(cliente) {
   };
 }
 
-function validatePlanAndFreeArts(cliente, quantity) {
-  const billing = billingService.getBillingStatus(cliente);
+function validatePlanAndFreeArts(cliente, quantity, options = {}) {
+  const freeArtBlocked = options?.freeArtBlocked === true;
+  const billing = billingService.getBillingStatus(cliente, { freeArtBlocked });
   const standalone = billingService.getStandaloneArtStatus(cliente);
   ensurePlanningReservationState(cliente, planCycle(cliente));
   refreshPlanningReservationCounters(cliente);
@@ -514,7 +515,7 @@ function validatePlanAndFreeArts(cliente, quantity) {
   const freeArts = Number(billing.artes_mensais_restantes || 0);
   const monthlyQuantity = planActive ? Math.min(quantity, freeArts) : 0;
   const remainingAfterPlan = Math.max(0, quantity - monthlyQuantity);
-  const freeArtQuantity = remainingAfterPlan > 0 && billingService.hasAvailableFreeCompanyArt(cliente)
+  const freeArtQuantity = remainingAfterPlan > 0 && billingService.hasAvailableFreeCompanyArt(cliente, { freeArtBlocked })
     ? Math.min(1, remainingAfterPlan)
     : 0;
   const standaloneQuantity = Math.max(0, remainingAfterPlan - freeArtQuantity);
@@ -1135,9 +1136,9 @@ function listAllPlanningDirs(baseDir) {
   return dirs;
 }
 
-function createRequest({ baseDir, cliente, whatsapp, body = {}, files = {} }) {
+function createRequest({ baseDir, cliente, whatsapp, body = {}, files = {}, freeArtBlocked = false }) {
   const quantidadeReservada = normalizeQuantity(body);
-  const { billing, charge } = validatePlanAndFreeArts(cliente, quantidadeReservada);
+  const { billing, charge } = validatePlanAndFreeArts(cliente, quantidadeReservada, { freeArtBlocked });
   const ciclo = planCycle(cliente);
   const planningId = newPlanningId();
   const dirPath = requestDir(baseDir, whatsapp, ciclo, planningId);
@@ -1188,6 +1189,7 @@ function createRequest({ baseDir, cliente, whatsapp, body = {}, files = {} }) {
       artes_devolvidas: 0,
       cobranca_origem: reservation.cobranca_origem || "planejamento_mensal_reserva",
       total_reservadas_no_ciclo: reservation.total_reservadas_no_ciclo,
+      cobranca_origem: reservation.cobranca_origem || "planejamento_mensal_reserva",
       observacao: "Reserva definitiva aplicada em artes_mensais_restantes. Criar Arte usa somente as artes livres restantes."
     },
     profile,

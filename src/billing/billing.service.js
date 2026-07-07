@@ -171,10 +171,11 @@ function ensureFreeArtFields(cliente) {
   return cliente;
 }
 
-function getFreeArtStatus(cliente) {
+function getFreeArtStatus(cliente, options = {}) {
   ensureFreeArtFields(cliente);
   const used = cliente?.arte_gratis_usada === true;
-  const available = freeArtFeatureEnabled() && used !== true && cliente?.arte_gratis_disponivel === true;
+  const blocked = options?.freeArtBlocked === true;
+  const available = freeArtFeatureEnabled() && !blocked && used !== true && cliente?.arte_gratis_disponivel === true;
 
   return {
     arte_gratis_ativa: freeArtFeatureEnabled(),
@@ -185,8 +186,8 @@ function getFreeArtStatus(cliente) {
   };
 }
 
-function hasAvailableFreeCompanyArt(cliente) {
-  return getFreeArtStatus(cliente).arte_gratis_disponivel === true;
+function hasAvailableFreeCompanyArt(cliente, options = {}) {
+  return getFreeArtStatus(cliente, options).arte_gratis_disponivel === true;
 }
 
 function refreshManualPlanCycle(cliente, now = new Date()) {
@@ -219,11 +220,15 @@ function refreshManualPlanCycle(cliente, now = new Date()) {
   return { changed, cliente };
 }
 
-function getBillingStatus(cliente, now = new Date()) {
+function getBillingStatus(cliente, now = new Date(), options = {}) {
+  if (now && typeof now === "object" && !(now instanceof Date) && !Number.isFinite(Number(now))) {
+    options = now;
+    now = new Date();
+  }
   refreshManualPlanCycle(cliente, now);
   const standaloneArt = getStandaloneArtStatus(cliente);
   const availableCombos = plansRegistry.listPlans();
-  const freeArt = getFreeArtStatus(cliente);
+  const freeArt = getFreeArtStatus(cliente, options);
 
   return {
     plano: cliente.plano || "",
@@ -288,11 +293,11 @@ function formatInsufficientBalanceMessage(custoPedido) {
   return `Saldo insuficiente. Este pedido custa R$ ${custoPedido.toFixed(2).replace(".", ",")}`;
 }
 
-function resolveCompanyArtCharge(cliente, { custoPedido, now = new Date() }) {
+function resolveCompanyArtCharge(cliente, { custoPedido, now = new Date(), freeArtBlocked = false }) {
   const refresh = refreshManualPlanCycle(cliente, now);
   const standaloneArt = plansRegistry.getSingleArtPurchase();
 
-  if (hasAvailableFreeCompanyArt(cliente)) {
+  if (hasAvailableFreeCompanyArt(cliente, { freeArtBlocked })) {
     return {
       allowed: true,
       source: "arte_gratis",

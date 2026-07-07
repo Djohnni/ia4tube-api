@@ -21,6 +21,7 @@ const fcmService = require("./src/notifications/fcm.service");
 const seoNichePages = require("./src/seo/niche-page-renderer");
 
 const app = express();
+app.set("trust proxy", true);
 
 // ===== CONFIG BÁSICA =====
 const PORT = process.env.PORT || 3000;
@@ -56,6 +57,9 @@ const ANALYTICS_DIR = path.join(DATA_DIR, "analytics");
 const EVENTOS_CLIENTES_FILE = path.join(DATA_DIR, "eventos_clientes.json");
 const MARKETING_VIDEOS_DIR = path.join(DATA_DIR, "marketing_videos");
 const MARKETING_VIDEO_VIEWS_FILE = path.join(MARKETING_VIDEOS_DIR, "views.json");
+const FREE_ART_IP_LOCKS_FILE = path.join(DATA_DIR, "free_art_ip_locks.json");
+const FREE_ART_IP_LOCK_DAYS = Math.max(1, Number(process.env.IA4TUBE_FREE_ART_IP_LOCK_DAYS || 7));
+const FREE_ART_IP_LOCK_MS = FREE_ART_IP_LOCK_DAYS * 24 * 60 * 60 * 1000;
 const PUBLIC_DIR = path.join(__dirname, "public");
 const PUBLIC_VIDEOS_DIR = path.join(PUBLIC_DIR, "videos");
 const SEO_NICHES_DIR = path.join(PUBLIC_DIR, "nichos");
@@ -155,6 +159,10 @@ if (!fs.existsSync(EVENTOS_CLIENTES_FILE)) {
 
 if (!fs.existsSync(MARKETING_VIDEO_VIEWS_FILE)) {
   fs.writeFileSync(MARKETING_VIDEO_VIEWS_FILE, JSON.stringify({}, null, 2), "utf8");
+}
+
+if (!fs.existsSync(FREE_ART_IP_LOCKS_FILE)) {
+  fs.writeFileSync(FREE_ART_IP_LOCKS_FILE, JSON.stringify({}, null, 2), "utf8");
 }
 
 // ===== HELPERS =====
@@ -597,6 +605,161 @@ function readJsonObjectSafe(filePath) {
     return data && typeof data === "object" && !Array.isArray(data) ? data : {};
   } catch {
     return {};
+  }
+}
+
+const activeFreeArtClaimLocks = new Set();
+
+function firstHeaderValue(value) {
+  if (Array.isArray(value)) return firstHeaderValue(value[0]);
+  return String(value || "").split(",")[0].trim();
+}
+
+function normalizeClientIp(value) {
+  let ip = String(value || "").trim();
+  if (!ip) return "";
+
+  if (ip.startsWith("::ffff:")) ip = ip.slice("::ffff:".length);
+  if (ip.startsWith("[") && ip.includes("]")) ip = ip.slice(1, ip.indexOf("]"));
+  if (/^\d{1,3}(\.\d{1,3}){3}:\d+$/.test(ip)) ip = ip.slice(0, ip.lastIndexOf(":"));
+
+  return ip;
+}
+
+function getClientIp(req) {
+  const candidates = [
+    firstHeaderValue(req.headers["cf-connecting-ip"]),
+    firstHeaderValue(req.headers["true-client-ip"]),
+    firstHeaderValue(req.headers["x-real-ip"]),
+    firstHeaderValue(req.headers["x-forwarded-for"]),
+    req.ip,
+    req.socket?.remoteAddress
+  ];
+
+  for (const candidate of candidates) {
+    const ip = normalizeClientIp(candidate);
+    if (ip) return ip;
+  }
+
+  return "";
+}
+
+function hashFreeArtIp(ip) {
+  const normalizedIp = normalizeClientIp(ip);
+  if (!normalizedIp) return "";
+  return crypto
+    .createHash("sha256")
+    .update(`ia4tube-free-art-ip:${JWT_SECRET}:${normalizedIp}`)
+    .digest("hex");
+}
+
+function maskClientIp(ip) {
+  const normalizedIp = normalizeClientIp(ip);
+  if (!normalizedIp) return "";
+
+  if (/^\d{1,3}(\.\d{1,3}){3}$/.test(normalizedIp)) {
+    const parts = normalizedIp.split(".");
+    return `${parts[0]}.${parts[1]}.${parts[2]}.0`;
+  }
+
+  const segments = normalizedIp.split(":").filter(Boolean);
+  return segments.length ? `${segments.slice(0, 3).join(":")}::` : "";
+}
+
+function readFreeArtIpLocks() {
+  return readJsonObjectSafe(FREE_ART_IP_LOCKS_FILE);
+}
+
+function writeFreeArtIpLocks(locks) {
+  writeJsonSafe(FREE_ART_IP_LOCKS_FILE, locks && typeof locks === "object" ? locks : {});
+}
+
+function cleanupExpiredFreeArtIpLocks(locks, now = new Date()) {
+  let changed = false;
+  const current = now instanceof Date ? now : new Date(now);
+
+  for (const [key, lock] of Object.entries(locks || {})) {
+    const blockedUntil = new Date(lock?.bloqueado_ate || 0);
+    if (!lock || Number.isNaN(blockedUntil.getTime()) || blockedUntil <= current) {
+      delete locks[key];
+      changed = true;
+    }
+  }
+
+  return changed;
+}
+
+function getFreeArtIpLockStatus(req, now = new Date()) {
+  const ip = getClientIp(req);
+  const ipHash = hashFreeArtIp(ip);
+  const ipMasked = maskClientIp(ip);
+
+  if (!ipHash) {
+    return { blocked: false, ipHash: "", ipMasked: "", lock: null };
+  }
+
+  const locks = readFreeArtIpLocks();
+  const cleaned = cleanupExpiredFreeArtIpLocks(locks, now);
+  const lock = locks[ipHash] || null;
+  const blockedUntil = new Date(lock?.bloqueado_ate || 0);
+  const blocked = lock && !Number.isNaN(blockedUntil.getTime()) && blockedUntil > now;
+
+  if (cleaned) writeFreeArtIpLocks(locks);
+
+  return {
+    blocked: Boolean(blocked),
+    ipHash,
+    ipMasked,
+    lock: blocked ? lock : null
+  };
+}
+
+function acquireFreeArtClaimLocks(whatsapp, ipHash) {
+  const keys = [
+    `user:${String(whatsapp || "").trim()}`,
+    ipHash ? `ip:${ipHash}` : ""
+  ].filter(Boolean);
+
+  if (!keys.length || keys.some((key) => activeFreeArtClaimLocks.has(key))) return [];
+  keys.forEach((key) => activeFreeArtClaimLocks.add(key));
+  return keys;
+}
+
+function releaseFreeArtClaimLocks(keys = []) {
+  for (const key of keys) {
+    activeFreeArtClaimLocks.delete(key);
+  }
+}
+
+function recordFreeArtIpLock(req, { whatsapp, pedidoId, context = "arte_empresa" } = {}) {
+  try {
+    const ip = getClientIp(req);
+    const ipHash = hashFreeArtIp(ip);
+    if (!ipHash) return null;
+
+    const now = new Date();
+    const blockedUntil = new Date(now.getTime() + FREE_ART_IP_LOCK_MS);
+    const locks = readFreeArtIpLocks();
+    cleanupExpiredFreeArtIpLocks(locks, now);
+
+    const lock = {
+      ip_hash: ipHash,
+      ip_mascarado: maskClientIp(ip),
+      cliente: String(whatsapp || "").trim(),
+      pedido_id: String(pedidoId || "").trim(),
+      contexto: String(context || "").trim() || "arte_empresa",
+      usado_em: now.toISOString(),
+      bloqueado_ate: blockedUntil.toISOString(),
+      dias_bloqueio: FREE_ART_IP_LOCK_DAYS
+    };
+
+    locks[ipHash] = lock;
+    writeFreeArtIpLocks(locks);
+
+    return lock;
+  } catch (error) {
+    console.warn("[free-art-ip] erro ao registrar bloqueio", { message: error?.message });
+    return null;
   }
 }
 
@@ -1766,12 +1929,13 @@ app.get("/me", auth, (req, res) => {
     return res.status(404).json({ ok: false, error: "Cliente não encontrado" });
   }
 
+  const freeArtIpLock = getFreeArtIpLockStatus(req);
   const cicloAtualizado = billingService.refreshManualPlanCycle(c);
   const carrosselCycleBefore = JSON.stringify({
     carrosseis_ciclo: c.carrosseis_ciclo || "",
     carrosseis_criados: c.carrosseis_criados || null
   });
-  const billing = billingService.getBillingStatus(c);
+  const billing = billingService.getBillingStatus(c, { freeArtBlocked: freeArtIpLock.blocked });
   const carrosselUsage = carouselService.carouselUsagePayload(c);
   const carrosselCycleAfter = JSON.stringify({
     carrosseis_ciclo: c.carrosseis_ciclo || "",
@@ -1825,9 +1989,16 @@ app.get("/billing/free-art/status", auth, (req, res) => {
     return res.status(404).json({ ok: false, error: "Cliente nao encontrado" });
   }
 
+  const freeArtIpLock = getFreeArtIpLockStatus(req);
+
   return res.json({
     ok: true,
-    ...billingService.getFreeArtStatus(c)
+    ...billingService.getFreeArtStatus(c, { freeArtBlocked: freeArtIpLock.blocked }),
+    arte_gratis_bloqueada_ip: freeArtIpLock.blocked,
+    arte_gratis_bloqueada_ate: freeArtIpLock.lock?.bloqueado_ate || "",
+    arte_gratis_mensagem_bloqueio: freeArtIpLock.blocked
+      ? "O limite de testes gratuitos nesta rede foi atingido. Voce ainda pode continuar usando com combo ou arte avulsa."
+      : ""
   });
 });
 
@@ -3461,15 +3632,64 @@ app.post(
       return res.status(404).json({ ok: false, error: "Cliente nao encontrado" });
     }
 
+    let freeArtClaimLockKeys = [];
+    let freeArtIpLock = { blocked: false, ipHash: "", ipMasked: "", lock: null };
+
     try {
+      freeArtIpLock = getFreeArtIpLockStatus(req);
+      let freeArtBlockedByClaimLock = false;
+
+      if (billingService.hasAvailableFreeCompanyArt(cliente, { freeArtBlocked: freeArtIpLock.blocked })) {
+        freeArtClaimLockKeys = acquireFreeArtClaimLocks(whatsapp, freeArtIpLock.ipHash);
+        freeArtBlockedByClaimLock = freeArtClaimLockKeys.length === 0;
+      }
+
+      if (freeArtIpLock.blocked && billingService.hasAvailableFreeCompanyArt(cliente)) {
+        console.info("[free-art-ip] planejamento bloqueado para arte gratis por IP", {
+          whatsapp,
+          ip_mascarado: freeArtIpLock.ipMasked,
+          bloqueado_ate: freeArtIpLock.lock?.bloqueado_ate || ""
+        });
+        registrarEventoServidor("free_art_ip_blocked", {
+          whatsapp,
+          produto: "planejamento_mensal",
+          payload: {
+            contexto: "planejamento_mensal",
+            ip_mascarado: freeArtIpLock.ipMasked,
+            bloqueado_ate: freeArtIpLock.lock?.bloqueado_ate || ""
+          }
+        });
+      }
+
       const clienteBefore = JSON.stringify(cliente);
       const planejamento = monthlyPlanningService.createRequest({
         baseDir: MONTHLY_PLANNINGS_DIR,
         cliente,
         whatsapp,
         body: req.body || {},
-        files: req.files || {}
+        files: req.files || {},
+        freeArtBlocked: freeArtIpLock.blocked || freeArtBlockedByClaimLock
       });
+
+      if (Number(planejamento?.reserva?.artes_gratis_consumidas || 0) > 0 || planejamento?.cobranca_origem === "arte_gratis") {
+        const ipLockRecord = recordFreeArtIpLock(req, {
+          whatsapp,
+          pedidoId: planejamento.planejamento_id || planejamento.id,
+          context: "planejamento_mensal"
+        });
+        if (ipLockRecord) {
+          registrarEventoServidor("free_art_ip_locked", {
+            whatsapp,
+            pedidoId: planejamento.planejamento_id || planejamento.id,
+            produto: "planejamento_mensal",
+            payload: {
+              contexto: "planejamento_mensal",
+              ip_mascarado: ipLockRecord.ip_mascarado,
+              bloqueado_ate: ipLockRecord.bloqueado_ate
+            }
+          });
+        }
+      }
 
       if (JSON.stringify(cliente) !== clienteBefore) {
         clientes[whatsapp] = cliente;
@@ -3505,8 +3725,15 @@ app.post(
         code: error?.code || "monthly_planning_request_error",
         error: error?.message || "Nao foi possivel criar o Planejamento Mensal agora.",
         artes_livres: error?.artes_livres,
+        free_art_ip_blocked: freeArtIpLock.blocked,
+        free_art_blocked_until: freeArtIpLock.lock?.bloqueado_ate || "",
+        free_art_message: freeArtIpLock.blocked
+          ? "O limite de testes gratuitos nesta rede foi atingido. Voce ainda pode continuar usando com combo ou arte avulsa."
+          : "",
         billing: error?.billing
       });
+    } finally {
+      releaseFreeArtClaimLocks(freeArtClaimLockKeys);
     }
   }
 );
@@ -4147,6 +4374,8 @@ async function runMonthlyPlanningNotifications() {
 // ===== CRIA PEDIDO =====
 function criarPedidoHandler(categoria) {
   return async (req, res) => {
+    let freeArtClaimLockKeys = [];
+
     try {
     const whatsapp = req.user.whatsapp;
     const clientes = readClientes();
@@ -4186,11 +4415,54 @@ function criarPedidoHandler(categoria) {
 
     const visualStyleNormalization = orderService.normalizeCompanyVisualStyleForUploads({ categoria, fields, files });
 
+    const freeArtIpLock = isArteEmpresa
+      ? getFreeArtIpLockStatus(req)
+      : { blocked: false, ipHash: "", ipMasked: "", lock: null };
+    let freeArtBlockedByClaimLock = false;
+
+    if (isArteEmpresa && billingService.hasAvailableFreeCompanyArt(c, { freeArtBlocked: freeArtIpLock.blocked })) {
+      freeArtClaimLockKeys = acquireFreeArtClaimLocks(whatsapp, freeArtIpLock.ipHash);
+      freeArtBlockedByClaimLock = freeArtClaimLockKeys.length === 0;
+
+      if (freeArtBlockedByClaimLock) {
+        console.warn("[free-art-ip] tentativa simultanea bloqueada", {
+          whatsapp,
+          ip_mascarado: freeArtIpLock.ipMasked
+        });
+        registrarEventoServidor("free_art_claim_lock_blocked", {
+          whatsapp,
+          produto: "arte_empresa",
+          payload: {
+            motivo: "tentativa_simultanea",
+            ip_mascarado: freeArtIpLock.ipMasked
+          }
+        });
+      }
+    }
+
+    if (isArteEmpresa && freeArtIpLock.blocked && billingService.hasAvailableFreeCompanyArt(c)) {
+      console.info("[free-art-ip] arte gratis bloqueada por IP", {
+        whatsapp,
+        ip_mascarado: freeArtIpLock.ipMasked,
+        bloqueado_ate: freeArtIpLock.lock?.bloqueado_ate || ""
+      });
+      registrarEventoServidor("free_art_ip_blocked", {
+        whatsapp,
+        produto: "arte_empresa",
+        payload: {
+          contexto: "arte_empresa",
+          ip_mascarado: freeArtIpLock.ipMasked,
+          bloqueado_ate: freeArtIpLock.lock?.bloqueado_ate || ""
+        }
+      });
+    }
+
     let cobrancaEmpresa = null;
     if (isArteEmpresa) {
       cobrancaEmpresa = billingService.resolveCompanyArtCharge(c, {
         custoPedido: custoEfetivoPedido,
-        now: new Date()
+        now: new Date(),
+        freeArtBlocked: freeArtIpLock.blocked || freeArtBlockedByClaimLock
       });
 
       if (visualStyleNormalization.converted) {
@@ -4214,6 +4486,11 @@ function criarPedidoHandler(categoria) {
           arte_avulsa_valor: EMPRESA_ARTE_AVULSA_VALOR,
           arte_avulsa_cta: "Comprar 1 arte por R$ 5,99",
           arte_avulsa_endpoint: "/billing/arte-avulsa/pix",
+          free_art_ip_blocked: freeArtIpLock.blocked,
+          free_art_blocked_until: freeArtIpLock.lock?.bloqueado_ate || "",
+          free_art_message: freeArtIpLock.blocked
+            ? "O limite de testes gratuitos nesta rede foi atingido. Voce ainda pode continuar usando com combo ou arte avulsa."
+            : "",
           saldo_extra: cobrancaEmpresa.saldo_extra,
           artes_mensais_restantes: cobrancaEmpresa.artes_mensais_restantes,
           artes_avulsas_restantes: cobrancaEmpresa.artes_avulsas_restantes,
@@ -4244,10 +4521,27 @@ function criarPedidoHandler(categoria) {
         ? Number(cobrancaEmpresa.amount || custoEfetivoPedido)
         : 0;
       if (cobrancaEmpresa.source === "arte_gratis") {
+        const ipLockRecord = recordFreeArtIpLock(req, {
+          whatsapp,
+          pedidoId: id,
+          context: "arte_empresa"
+        });
         draft.pedido.tipo_compra = "arte_gratis";
         draft.pedido.origem_promocional = "primeira_arte_gratis";
         draft.pedido.marketing_context = "primeira_arte_gratis";
         draft.pedido.beneficios_plano_aplicados = false;
+        if (ipLockRecord) {
+          registrarEventoServidor("free_art_ip_locked", {
+            whatsapp,
+            pedidoId: id,
+            produto: "arte_empresa",
+            payload: {
+              contexto: "arte_empresa",
+              ip_mascarado: ipLockRecord.ip_mascarado,
+              bloqueado_ate: ipLockRecord.bloqueado_ate
+            }
+          });
+        }
       }
       if (cobrancaEmpresa.source === "arte_avulsa") {
         draft.pedido.tipo_compra = "avulsa";
@@ -4294,6 +4588,8 @@ function criarPedidoHandler(categoria) {
         ok: false,
         error: "Não foi possível criar o pedido agora. Tente novamente em alguns instantes."
       });
+    } finally {
+      releaseFreeArtClaimLocks(freeArtClaimLockKeys);
     }
   };
 }
