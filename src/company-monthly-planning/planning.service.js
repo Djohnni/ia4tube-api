@@ -8,7 +8,7 @@ const VALID_STATUSES = new Set(["em_analise", "processando", "pronto", "erro", "
 const NOTIFICATION_STATUSES = new Set(["pendente", "enviada", "erro", "cancelada"]);
 const PLANNING_ART_STATUSES = new Set(["novo", "ajuste_pendente", "processando", "pronto", "erro"]);
 const SAO_PAULO_UTC_OFFSET = "-03:00";
-const MAX_MONTHLY_PLANNING_ARTS = 36;
+const MAX_MONTHLY_PLANNING_ARTS = 40;
 const BOT_PENDING_HARD_LIMIT = 20;
 const BOT_CLAIM_TTL_MS = 10 * 60 * 1000;
 const PROCESSING_STALE_MS = 45 * 60 * 1000;
@@ -17,6 +17,7 @@ const CALENDAR_SLOT_END_MINUTES = 21 * 60;
 const CALENDAR_SLOT_STEP_MINUTES = 30;
 const CALENDAR_DISTRIBUTION_DAYS = 30;
 const CALENDAR_SLOT_SEARCH_DAYS = 180;
+const CALENDAR_FALLBACK_TIMES = ["09:00", "11:00", "14:00", "16:00", "19:00"];
 
 function safeSegment(value, fallback = "item") {
   return String(value || "")
@@ -1461,19 +1462,93 @@ function calendarDistributionDates(todayText, totalDays = CALENDAR_DISTRIBUTION_
     .filter(Boolean);
 }
 
+function daysBetweenIsoDateText(startDateText = "", endDateText = "") {
+  const startDate = dateFromIsoDateText(startDateText);
+  const endDate = dateFromIsoDateText(endDateText);
+  if (!startDate || !endDate) return null;
+
+  return Math.round((endDate.getTime() - startDate.getTime()) / (24 * 60 * 60 * 1000));
+}
+
+function scheduleDistributionStartDate(todayInfo) {
+  return addDaysToIsoDateText(todayInfo.date, 1) || todayInfo.date;
+}
+
+function planningScheduleHorizonDays(totalPosts) {
+  const total = Math.max(1, Math.floor(Number(totalPosts || 1)));
+  if (total <= 1) return 1;
+  if (total <= 2) return 7;
+  if (total <= 4) return 14;
+  return CALENDAR_DISTRIBUTION_DAYS;
+}
+
+function targetDistributionDatesForPosts({ startDate = "", totalPosts = 1 }) {
+  const total = Math.max(1, Math.floor(Number(totalPosts || 1)));
+  const horizonDays = planningScheduleHorizonDays(total);
+
+  return Array.from({ length: total }, (_, index) => {
+    const offset = total <= 1
+      ? 0
+      : Math.round((index * (horizonDays - 1)) / (total - 1));
+    return addDaysToIsoDateText(startDate, offset);
+  }).filter(Boolean);
+}
+
+function defaultScheduleTimeForPost(index = 0) {
+  return CALENDAR_FALLBACK_TIMES[Math.abs(Number(index || 0)) % CALENDAR_FALLBACK_TIMES.length];
+}
+
 function isDateInDistributionWindow(dateText, distributionDates) {
   return distributionDates.includes(String(dateText || "").trim());
 }
 
-function orderedDistributionDates({ distributionDates, preferredDate = "" }) {
-  const date = String(preferredDate || "").trim();
-  const startIndex = distributionDates.indexOf(date);
-  if (startIndex < 0) return distributionDates;
+function scheduleWeekLoad(scheduleByDate, dateText, distributionStartDate) {
+  const offset = daysBetweenIsoDateText(distributionStartDate, dateText);
+  if (offset === null || offset < 0) return 0;
 
-  return [
-    ...distributionDates.slice(startIndex),
-    ...distributionDates.slice(0, startIndex)
-  ];
+  const weekStartOffset = Math.floor(offset / 7) * 7;
+  let load = 0;
+  for (let offsetInWeek = 0; offsetInWeek < 7; offsetInWeek += 1) {
+    const date = addDaysToIsoDateText(distributionStartDate, weekStartOffset + offsetInWeek);
+    load += scheduleDayLoad(scheduleByDate, date);
+  }
+  return load;
+}
+
+function orderedDistributionDates({
+  distributionDates,
+  targetDate = "",
+  scheduleByDate,
+  distributionStartDate
+}) {
+  const fallbackTarget = distributionDates[0] || "";
+  const target = isDateInDistributionWindow(targetDate, distributionDates)
+    ? targetDate
+    : fallbackTarget;
+  const targetOffset = daysBetweenIsoDateText(distributionStartDate, target) || 0;
+
+  return distributionDates
+    .map((date, index) => {
+      const offset = daysBetweenIsoDateText(distributionStartDate, date);
+      const distance = offset === null ? index : Math.abs(offset - targetOffset);
+      const count = scheduleDayLoad(scheduleByDate, date);
+      const weekLoad = scheduleWeekLoad(scheduleByDate, date, distributionStartDate);
+
+      return {
+        date,
+        index,
+        count,
+        weekLoad,
+        distance
+      };
+    })
+    .sort((a, b) => (
+      (a.count > 0 ? 1 : 0) - (b.count > 0 ? 1 : 0)
+      || a.distance - b.distance
+      || a.weekLoad - b.weekLoad
+      || a.count - b.count
+      || a.index - b.index
+    ));
 }
 
 function availableStartMinutesForDate(dateText, todayInfo) {
@@ -1544,44 +1619,55 @@ function scheduleDayLoad(scheduleByDate, dateText) {
 
 function findBestScheduleSlotForNewPost({
   scheduleByDate,
+  distributionDates,
+  distributionStartDate,
+  targetDate = "",
   preferredDate = "",
   preferredTime = "",
   todayInfo
 }) {
-  const distributionDates = calendarDistributionDates(todayInfo.date);
-  const effectivePreferredDate = isDateInDistributionWindow(preferredDate, distributionDates)
-    ? preferredDate
-    : todayInfo.date;
+  const effectiveDistributionStartDate = distributionStartDate || scheduleDistributionStartDate(todayInfo);
+  const effectiveDistributionDates = Array.isArray(distributionDates) && distributionDates.length
+    ? distributionDates
+    : calendarDistributionDates(effectiveDistributionStartDate);
+  const effectiveTargetDate = isDateInDistributionWindow(targetDate, effectiveDistributionDates)
+    ? targetDate
+    : isDateInDistributionWindow(preferredDate, effectiveDistributionDates)
+      ? preferredDate
+      : effectiveDistributionDates[0];
   const orderedDates = orderedDistributionDates({
-    distributionDates,
-    preferredDate: effectivePreferredDate
+    distributionDates: effectiveDistributionDates,
+    targetDate: effectiveTargetDate,
+    scheduleByDate,
+    distributionStartDate: effectiveDistributionStartDate
   });
 
   for (const date of orderedDates) {
-    if (scheduleDayLoad(scheduleByDate, date) > 0) continue;
+    if (date.count > 0) continue;
 
     const time = freeTimeForScheduleDate({
       scheduleByDate,
-      dateText: date,
+      dateText: date.date,
       preferredTime,
       todayInfo
     });
     if (time) {
       return {
-        date,
+        date: date.date,
         time,
-        reason: "dia_livre"
+        reason: "dia_livre_distribuido"
       };
     }
   }
 
   const leastLoadedDates = orderedDates
-    .map((date, index) => ({
-      date,
-      index,
-      count: scheduleDayLoad(scheduleByDate, date)
-    }))
-    .sort((a, b) => (a.count - b.count) || (a.index - b.index));
+    .slice()
+    .sort((a, b) => (
+      a.count - b.count
+      || a.distance - b.distance
+      || a.weekLoad - b.weekLoad
+      || a.index - b.index
+    ));
 
   for (const item of leastLoadedDates) {
     const time = freeTimeForScheduleDate({
@@ -1594,13 +1680,13 @@ function findBestScheduleSlotForNewPost({
       return {
         date: item.date,
         time,
-        reason: "dia_menos_ocupado"
+        reason: "dia_menos_ocupado_distribuido"
       };
     }
   }
 
   for (let dayOffset = CALENDAR_DISTRIBUTION_DAYS; dayOffset <= CALENDAR_SLOT_SEARCH_DAYS; dayOffset += 1) {
-    const date = addDaysToIsoDateText(todayInfo.date, dayOffset);
+    const date = addDaysToIsoDateText(effectiveDistributionStartDate, dayOffset);
     const time = freeTimeForScheduleDate({
       scheduleByDate,
       dateText: date,
@@ -1621,6 +1707,12 @@ function findBestScheduleSlotForNewPost({
 
 function distributePlanningCalendarSchedule({ baseDir, planning, pedidosDir = "", postagens = [] }) {
   const todayInfo = saoPauloScheduleNow();
+  const distributionStartDate = scheduleDistributionStartDate(todayInfo);
+  const distributionDates = calendarDistributionDates(distributionStartDate);
+  const targetDates = targetDistributionDatesForPosts({
+    startDate: distributionStartDate,
+    totalPosts: postagens.length
+  });
   const scheduleByDate = futureScheduleByDateForClient({
     baseDir,
     whatsapp: planning.whatsapp,
@@ -1631,12 +1723,17 @@ function distributePlanningCalendarSchedule({ baseDir, planning, pedidosDir = ""
   const adjustedPosts = [];
   const adjustments = [];
 
-  for (const post of postagens) {
+  for (let index = 0; index < postagens.length; index += 1) {
+    const post = postagens[index];
     const slot = scheduleSlotFromPost(post, planning.ciclo);
+    const preferredTime = slot.time || defaultScheduleTimeForPost(index);
     const bestSlot = findBestScheduleSlotForNewPost({
       scheduleByDate,
+      distributionDates,
+      distributionStartDate,
+      targetDate: targetDates[index] || distributionStartDate,
       preferredDate: slot.date,
-      preferredTime: slot.time,
+      preferredTime,
       todayInfo
     });
 
