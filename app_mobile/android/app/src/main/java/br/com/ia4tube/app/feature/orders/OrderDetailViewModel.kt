@@ -207,6 +207,76 @@ class OrderDetailViewModel(
         _uiState.update { it.copy(sharePayload = null) }
     }
 
+    fun onMarketingVideoStarted() {
+        val video = _uiState.value.marketingVideo ?: return
+        trackMarketingVideo("mobile_video_marketing_iniciado", video, flushNow = true)
+    }
+
+    fun onMarketingVideoQuartile(percent: Int, watchedSeconds: Long) {
+        val video = _uiState.value.marketingVideo ?: return
+        trackMarketingVideo(
+            "mobile_video_marketing_$percent",
+            video,
+            mapOf(
+                "percentual" to percent,
+                "tempo_assistido_segundos" to watchedSeconds
+            )
+        )
+    }
+
+    fun onMarketingVideoEnded(watchedSeconds: Long) {
+        val video = _uiState.value.marketingVideo ?: return
+        _uiState.update { it.copy(marketingVideoFinished = true) }
+        trackMarketingVideo(
+            "mobile_video_marketing_100",
+            video,
+            mapOf(
+                "percentual" to 100,
+                "tempo_assistido_segundos" to watchedSeconds
+            )
+        )
+    }
+
+    fun onMarketingVideoError() {
+        val video = _uiState.value.marketingVideo
+        _uiState.update {
+            it.copy(
+                marketingVideo = null,
+                marketingVideoUnavailable = true,
+                marketingVideoLoading = false,
+                marketingVideoDismissed = false
+            )
+        }
+        if (video != null) {
+            trackMarketingVideo("mobile_video_marketing_erro", video)
+        }
+    }
+
+    fun openReadyFromMarketingVideo(watchedSeconds: Long) {
+        val video = _uiState.value.marketingVideo
+        _uiState.update { it.copy(marketingVideoDismissed = true) }
+        if (video != null) {
+            trackMarketingVideo(
+                "mobile_ver_minha_arte_agora",
+                video,
+                mapOf("tempo_assistido_segundos" to watchedSeconds),
+                flushNow = true
+            )
+        }
+    }
+
+    fun onMarketingVideoAbandoned(watchedSeconds: Long) {
+        val state = _uiState.value
+        val video = state.marketingVideo ?: return
+        if (state.info?.imagemPronta == true || state.marketingVideoDismissed) return
+        trackMarketingVideo(
+            "mobile_video_marketing_abandonou",
+            video,
+            mapOf("tempo_assistido_segundos" to watchedSeconds),
+            flushNow = true
+        )
+    }
+
     fun requestAdjustment(motivo: String) {
         val info = _uiState.value.info ?: return
         val cleanMotivo = motivo.trim()

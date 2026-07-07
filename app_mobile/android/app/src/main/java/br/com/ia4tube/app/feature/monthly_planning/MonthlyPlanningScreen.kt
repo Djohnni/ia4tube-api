@@ -84,6 +84,9 @@ import androidx.media3.common.Player
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.ui.PlayerView
+import coil.compose.AsyncImagePainter
+import coil.compose.rememberAsyncImagePainter
+import coil.request.ImageRequest
 import br.com.ia4tube.app.R
 import br.com.ia4tube.app.core.camera.CameraImageStore
 import br.com.ia4tube.app.core.share.ShareImageStore
@@ -2005,26 +2008,31 @@ private fun MonthlyPlanningMarketingVideoWaitingCard(
     var startedSent by remember(video.urlVideo) { mutableStateOf(false) }
     var endedSent by remember(video.urlVideo) { mutableStateOf(false) }
     var playerFailed by remember(video.urlVideo) { mutableStateOf(false) }
+    var showPlayer by remember(video.urlVideo, video.autoplay) { mutableStateOf(video.autoplay) }
     val trackedQuartiles = remember(video.urlVideo) { mutableSetOf<Int>() }
     val currentArtReady by rememberUpdatedState(artReady)
     val currentPlayerFailed by rememberUpdatedState(playerFailed)
     val currentWatchedSeconds by rememberUpdatedState(watchedSeconds)
+    val currentStartedSent by rememberUpdatedState(startedSent)
 
     val player = remember(video.urlVideo) {
         ExoPlayer.Builder(context).build().apply {
             setMediaItem(MediaItem.fromUri(video.urlVideo))
-            playWhenReady = true
+            playWhenReady = video.autoplay
             prepare()
         }
     }
 
     DisposableEffect(player) {
         val listener = object : Player.Listener {
-            override fun onPlaybackStateChanged(playbackState: Int) {
-                if (playbackState == Player.STATE_READY && !startedSent) {
+            override fun onIsPlayingChanged(isPlaying: Boolean) {
+                if (isPlaying && !startedSent) {
                     startedSent = true
                     onStarted()
                 }
+            }
+
+            override fun onPlaybackStateChanged(playbackState: Int) {
                 if (playbackState == Player.STATE_ENDED && !endedSent) {
                     endedSent = true
                     onEnded(watchedSeconds)
@@ -2040,7 +2048,7 @@ private fun MonthlyPlanningMarketingVideoWaitingCard(
         player.addListener(listener)
         onDispose {
             player.removeListener(listener)
-            if (!currentArtReady && !currentPlayerFailed) {
+            if (!currentArtReady && !currentPlayerFailed && currentStartedSent) {
                 onAbandoned(currentWatchedSeconds)
             }
             player.release()
@@ -2084,20 +2092,31 @@ private fun MonthlyPlanningMarketingVideoWaitingCard(
                 )
             }
             Spacer(modifier = Modifier.height(12.dp))
-            AndroidView(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .aspectRatio(16f / 9f),
-                factory = { viewContext ->
-                    PlayerView(viewContext).apply {
-                        useController = false
-                        this.player = player
+            if (showPlayer) {
+                AndroidView(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .aspectRatio(16f / 9f),
+                    factory = { viewContext ->
+                        PlayerView(viewContext).apply {
+                            useController = false
+                            this.player = player
+                        }
+                    },
+                    update = { playerView ->
+                        playerView.player = player
                     }
-                },
-                update = { playerView ->
-                    playerView.player = player
-                }
-            )
+                )
+            } else {
+                MonthlyPlanningMarketingVideoPausedPreview(
+                    video = video,
+                    onPlay = {
+                        showPlayer = true
+                        player.playWhenReady = true
+                        player.play()
+                    }
+                )
+            }
             Spacer(modifier = Modifier.height(12.dp))
             if (artReady) {
                 Text(
@@ -2128,6 +2147,58 @@ private fun MonthlyPlanningMarketingVideoWaitingCard(
                     )
                 }
             }
+        }
+    }
+}
+
+@Composable
+private fun MonthlyPlanningMarketingVideoPausedPreview(
+    video: MarketingVideo,
+    onPlay: () -> Unit
+) {
+    val context = LocalContext.current
+    val imageRequest = remember(video.thumbnail) {
+        ImageRequest.Builder(context)
+            .data(video.thumbnail)
+            .crossfade(true)
+            .build()
+    }
+    val painter = rememberAsyncImagePainter(model = imageRequest)
+    val state = painter.state
+
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .aspectRatio(16f / 9f)
+            .background(Color(0xFF0B0F17)),
+        contentAlignment = Alignment.Center
+    ) {
+        if (video.thumbnail.isNotBlank() && state !is AsyncImagePainter.State.Error) {
+            Image(
+                painter = painter,
+                contentDescription = null,
+                modifier = Modifier.fillMaxSize(),
+                contentScale = ContentScale.Crop
+            )
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(Color(0x88000000))
+            )
+        } else {
+            Text(
+                text = "Video disponivel",
+                color = Color(0xFFE5E7EB),
+                style = MaterialTheme.typography.bodyMedium
+            )
+        }
+
+        if (state is AsyncImagePainter.State.Loading) {
+            CircularProgressIndicator(color = Color(0xFFF4D27A))
+        }
+
+        Button(onClick = onPlay) {
+            Text("Assistir video")
         }
     }
 }

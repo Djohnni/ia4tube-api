@@ -3,6 +3,7 @@ package br.com.ia4tube.app.feature.orders
 import android.content.Intent
 import android.graphics.BitmapFactory
 import android.util.Base64
+import androidx.compose.foundation.background
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -291,6 +292,232 @@ private fun ProductionSection(
     actionMessage?.let { message ->
         Spacer(modifier = Modifier.height(10.dp))
         Text(message.asString(), color = MaterialTheme.colorScheme.primary)
+    }
+}
+
+@Composable
+private fun OrderMessages(errorMessage: UiText?, actionMessage: UiText?) {
+    errorMessage?.let { message ->
+        Spacer(modifier = Modifier.height(10.dp))
+        Text(message.asString(), color = MaterialTheme.colorScheme.error)
+    }
+
+    actionMessage?.let { message ->
+        Spacer(modifier = Modifier.height(10.dp))
+        Text(message.asString(), color = MaterialTheme.colorScheme.primary)
+    }
+}
+
+@OptIn(UnstableApi::class)
+@Composable
+private fun MarketingVideoWaitingCard(
+    video: MarketingVideo,
+    artReady: Boolean,
+    videoFinished: Boolean,
+    onStarted: () -> Unit,
+    onQuartile: (Int, Long) -> Unit,
+    onEnded: (Long) -> Unit,
+    onError: () -> Unit,
+    onReadyClick: (Long) -> Unit,
+    onAbandoned: (Long) -> Unit
+) {
+    val context = LocalContext.current
+    var watchedSeconds by remember(video.urlVideo) { mutableStateOf(0L) }
+    var startedSent by remember(video.urlVideo) { mutableStateOf(false) }
+    var endedSent by remember(video.urlVideo) { mutableStateOf(false) }
+    var playerFailed by remember(video.urlVideo) { mutableStateOf(false) }
+    var showPlayer by remember(video.urlVideo, video.autoplay) { mutableStateOf(video.autoplay) }
+    val trackedQuartiles = remember(video.urlVideo) { mutableSetOf<Int>() }
+    val currentArtReady by rememberUpdatedState(artReady)
+    val currentPlayerFailed by rememberUpdatedState(playerFailed)
+    val currentWatchedSeconds by rememberUpdatedState(watchedSeconds)
+    val currentStartedSent by rememberUpdatedState(startedSent)
+
+    val player = remember(video.urlVideo) {
+        ExoPlayer.Builder(context).build().apply {
+            setMediaItem(MediaItem.fromUri(video.urlVideo))
+            playWhenReady = video.autoplay
+            prepare()
+        }
+    }
+
+    DisposableEffect(player) {
+        val listener = object : Player.Listener {
+            override fun onIsPlayingChanged(isPlaying: Boolean) {
+                if (isPlaying && !startedSent) {
+                    startedSent = true
+                    onStarted()
+                }
+            }
+
+            override fun onPlaybackStateChanged(playbackState: Int) {
+                if (playbackState == Player.STATE_ENDED && !endedSent) {
+                    endedSent = true
+                    onEnded(watchedSeconds)
+                }
+            }
+
+            override fun onPlayerError(error: androidx.media3.common.PlaybackException) {
+                playerFailed = true
+                onError()
+            }
+        }
+
+        player.addListener(listener)
+        onDispose {
+            player.removeListener(listener)
+            if (!currentArtReady && !currentPlayerFailed && currentStartedSent) {
+                onAbandoned(currentWatchedSeconds)
+            }
+            player.release()
+        }
+    }
+
+    LaunchedEffect(player, video.urlVideo) {
+        while (true) {
+            delay(500)
+            watchedSeconds = (player.currentPosition / 1000L).coerceAtLeast(0L)
+            val durationMs = player.duration
+            if (durationMs > 0L) {
+                val percent = ((player.currentPosition * 100L) / durationMs).toInt().coerceIn(0, 100)
+                listOf(25, 50, 75).forEach { mark ->
+                    if (percent >= mark && trackedQuartiles.add(mark)) {
+                        onQuartile(mark, watchedSeconds)
+                    }
+                }
+            }
+            if (player.playbackState == Player.STATE_ENDED) break
+        }
+    }
+
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(containerColor = Color(0xFF111827))
+    ) {
+        Column(modifier = Modifier.padding(14.dp)) {
+            Text(
+                text = video.title.ifBlank { stringResource(R.string.order_marketing_video_title) },
+                color = Color(0xFFF4D27A),
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.Bold
+            )
+            if (video.description.isNotBlank()) {
+                Spacer(modifier = Modifier.height(6.dp))
+                Text(
+                    text = video.description,
+                    color = Color(0xFFE5E7EB),
+                    style = MaterialTheme.typography.bodyMedium
+                )
+            }
+            Spacer(modifier = Modifier.height(12.dp))
+            if (showPlayer) {
+                AndroidView(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .aspectRatio(16f / 9f),
+                    factory = { viewContext ->
+                        PlayerView(viewContext).apply {
+                            useController = true
+                            this.player = player
+                        }
+                    },
+                    update = { playerView ->
+                        playerView.player = player
+                    }
+                )
+            } else {
+                MarketingVideoPausedPreview(
+                    video = video,
+                    onPlay = {
+                        showPlayer = true
+                        player.playWhenReady = true
+                        player.play()
+                    }
+                )
+            }
+            Spacer(modifier = Modifier.height(12.dp))
+            if (artReady) {
+                Text(
+                    text = stringResource(R.string.order_marketing_video_ready_message),
+                    color = Color(0xFFF4D27A),
+                    style = MaterialTheme.typography.bodyMedium,
+                    fontWeight = FontWeight.Bold
+                )
+                Spacer(modifier = Modifier.height(10.dp))
+                Button(
+                    modifier = Modifier.fillMaxWidth(),
+                    onClick = { onReadyClick(watchedSeconds) }
+                ) {
+                    Text(stringResource(R.string.order_marketing_video_ready_button))
+                }
+            } else {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    CircularProgressIndicator(modifier = Modifier.size(20.dp), color = Color(0xFFF4D27A))
+                    Spacer(modifier = Modifier.size(10.dp))
+                    Text(
+                        text = if (videoFinished) {
+                            stringResource(R.string.order_marketing_video_finished_waiting)
+                        } else {
+                            stringResource(R.string.order_marketing_video_waiting)
+                        },
+                        color = Color(0xFFE5E7EB),
+                        style = MaterialTheme.typography.bodyMedium
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun MarketingVideoPausedPreview(
+    video: MarketingVideo,
+    onPlay: () -> Unit
+) {
+    val context = LocalContext.current
+    val imageRequest = remember(video.thumbnail) {
+        ImageRequest.Builder(context)
+            .data(video.thumbnail)
+            .crossfade(true)
+            .build()
+    }
+    val painter = rememberAsyncImagePainter(model = imageRequest)
+    val state = painter.state
+
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .aspectRatio(16f / 9f)
+            .background(Color(0xFF0B0F17)),
+        contentAlignment = Alignment.Center
+    ) {
+        if (video.thumbnail.isNotBlank() && state !is AsyncImagePainter.State.Error) {
+            Image(
+                painter = painter,
+                contentDescription = null,
+                modifier = Modifier.fillMaxSize(),
+                contentScale = ContentScale.Crop
+            )
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(Color(0x88000000))
+            )
+        } else {
+            Text(
+                text = "Video disponivel",
+                color = Color(0xFFE5E7EB),
+                style = MaterialTheme.typography.bodyMedium
+            )
+        }
+
+        if (state is AsyncImagePainter.State.Loading) {
+            CircularProgressIndicator(color = Color(0xFFF4D27A))
+        }
+
+        Button(onClick = onPlay) {
+            Text("Assistir video")
+        }
     }
 }
 

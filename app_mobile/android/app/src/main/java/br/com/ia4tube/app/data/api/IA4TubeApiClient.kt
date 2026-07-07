@@ -117,6 +117,8 @@ class IA4TubeApiClient(
                 description = json.optString("descricao"),
                 urlVideo = json.optString("url_video"),
                 thumbnail = json.optString("thumbnail"),
+                autoplay = json.optBoolean("autoplay", true),
+                jaVisto = json.optBoolean("ja_visto", false),
                 durationSeconds = json.optInt("duracao", 0),
                 version = json.optString("versao"),
                 fallback = json.optString("fallback")

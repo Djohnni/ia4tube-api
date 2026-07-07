@@ -54,6 +54,8 @@ const SUPORTE_ABERTAS_FILE = path.join(DATA_DIR, "suporte_conversas_abertas.json
 const SUPORTE_FINALIZADAS_FILE = path.join(DATA_DIR, "suporte_conversas_finalizadas.json");
 const ANALYTICS_DIR = path.join(DATA_DIR, "analytics");
 const EVENTOS_CLIENTES_FILE = path.join(DATA_DIR, "eventos_clientes.json");
+const MARKETING_VIDEOS_DIR = path.join(DATA_DIR, "marketing_videos");
+const MARKETING_VIDEO_VIEWS_FILE = path.join(MARKETING_VIDEOS_DIR, "views.json");
 const PUBLIC_DIR = path.join(__dirname, "public");
 const PUBLIC_VIDEOS_DIR = path.join(PUBLIC_DIR, "videos");
 const SEO_NICHES_DIR = path.join(PUBLIC_DIR, "nichos");
@@ -114,6 +116,7 @@ ensureDir(GRAPHIC_MATERIALS_DIR);
 ensureDir(CAROUSELS_DIR);
 ensureDir(MONTHLY_PLANNINGS_DIR);
 ensureDir(ANALYTICS_DIR);
+ensureDir(MARKETING_VIDEOS_DIR);
 
 if (!fs.existsSync(CLIENTES_FILE)) {
   fs.writeFileSync(CLIENTES_FILE, JSON.stringify({}, null, 2), "utf8");
@@ -148,6 +151,10 @@ if (!fs.existsSync(SUPORTE_FINALIZADAS_FILE)) {
 
 if (!fs.existsSync(EVENTOS_CLIENTES_FILE)) {
   fs.writeFileSync(EVENTOS_CLIENTES_FILE, JSON.stringify([], null, 2), "utf8");
+}
+
+if (!fs.existsSync(MARKETING_VIDEO_VIEWS_FILE)) {
+  fs.writeFileSync(MARKETING_VIDEO_VIEWS_FILE, JSON.stringify({}, null, 2), "utf8");
 }
 
 // ===== HELPERS =====
@@ -583,6 +590,111 @@ function writeJsonSafe(filePath, data) {
   fs.writeFileSync(filePath, JSON.stringify(data, null, 2), "utf8");
 }
 
+function readJsonObjectSafe(filePath) {
+  try {
+    if (!fs.existsSync(filePath)) return {};
+    const data = JSON.parse(fs.readFileSync(filePath, "utf8") || "{}");
+    return data && typeof data === "object" && !Array.isArray(data) ? data : {};
+  } catch {
+    return {};
+  }
+}
+
+function marketingVideoViewKey(videoId, version, context) {
+  return [context, videoId, version]
+    .map((value) => String(value || "").trim().replace(/\s+/g, "_"))
+    .join("|");
+}
+
+function readMarketingVideoViews() {
+  return readJsonObjectSafe(MARKETING_VIDEO_VIEWS_FILE);
+}
+
+function writeMarketingVideoViews(views) {
+  writeJsonSafe(MARKETING_VIDEO_VIEWS_FILE, views && typeof views === "object" ? views : {});
+}
+
+function getMarketingVideoViewStatus(whatsapp, videoId, version, context) {
+  const userId = String(whatsapp || "").trim();
+  if (!userId || !videoId) {
+    return { ja_visto: false };
+  }
+
+  const views = readMarketingVideoViews();
+  const key = marketingVideoViewKey(videoId, version, context);
+  const record = views[userId]?.[key] || null;
+  return {
+    ja_visto: Boolean(record?.started_at || record?.viewed_at || record?.completed_at)
+  };
+}
+
+function marketingVideoEventDetails(event) {
+  const payload = event?.p && typeof event.p === "object" ? event.p : {};
+  const nested = payload.payload && typeof payload.payload === "object" ? payload.payload : {};
+  return { ...payload, ...nested };
+}
+
+function updateMarketingVideoViewsFromEvents(whatsapp, eventos = [], atIso = new Date().toISOString()) {
+  const userId = String(whatsapp || "").trim();
+  if (!userId || !Array.isArray(eventos) || eventos.length === 0) return;
+
+  let views = null;
+  let changed = false;
+
+  eventos.forEach((event) => {
+    const eventName = String(event?.e || "").trim();
+    if (!eventName.startsWith("mobile_video_marketing_")) return;
+    if (eventName === "mobile_video_marketing_erro") return;
+
+    const details = marketingVideoEventDetails(event);
+    const videoId = String(details.video_id || details.videoId || "").trim();
+    if (!videoId) return;
+
+    const version = String(details.versao || details.version || "").trim();
+    const context = String(details.contexto || details.context || FIRST_FREE_ART_VIDEO_CONTEXT).trim() || FIRST_FREE_ART_VIDEO_CONTEXT;
+    const watchedSeconds = Number(details.tempo_assistido_segundos || details.segundos || 0);
+    const percentFromName = Number((eventName.match(/_(25|50|75|100)$/) || [])[1] || 0);
+    const percent = Math.max(percentFromName, Number(details.percentual || 0) || 0);
+    const shouldMarkStarted =
+      eventName === "mobile_video_marketing_iniciado" ||
+      percent > 0 ||
+      (eventName === "mobile_video_marketing_abandonou" && watchedSeconds > 0);
+
+    if (!shouldMarkStarted) return;
+
+    if (!views) views = readMarketingVideoViews();
+    const key = marketingVideoViewKey(videoId, version, context);
+    const userViews = views[userId] && typeof views[userId] === "object" ? views[userId] : {};
+    const record = userViews[key] && typeof userViews[key] === "object" ? userViews[key] : {};
+
+    record.video_id = videoId;
+    record.versao = version;
+    record.contexto = context;
+    record.last_seen_at = atIso;
+    record.last_event = eventName;
+    record.max_percent = Math.max(Number(record.max_percent || 0), percent);
+    record.last_watched_seconds = Math.max(Number(record.last_watched_seconds || 0), watchedSeconds);
+
+    if (!record.started_at) record.started_at = atIso;
+    if (eventName === "mobile_video_marketing_iniciado") {
+      record.started_count = Number(record.started_count || 0) + 1;
+    }
+    if (percent >= 75 && !record.viewed_at) record.viewed_at = atIso;
+    if (percent >= 100 && !record.completed_at) record.completed_at = atIso;
+
+    const pedidoId = String(details.pedido_id || details.pedidoId || event?.pedido_id || "").trim();
+    if (pedidoId) record.last_pedido_id = pedidoId;
+
+    userViews[key] = record;
+    views[userId] = userViews;
+    changed = true;
+  });
+
+  if (changed) {
+    writeMarketingVideoViews(views);
+  }
+}
+
 function salvarEventosCliente(req, eventos = []) {
   try {
     if (!Array.isArray(eventos) || eventos.length === 0) return;
@@ -602,6 +714,7 @@ function salvarEventosCliente(req, eventos = []) {
     const atuais = readJsonArraySafe(analyticsDiaFile);
 
     const cliente = req.user ? getClienteResumo(req.user.whatsapp) : null;
+    updateMarketingVideoViewsFromEvents(req.user?.whatsapp, eventos, agoraIso);
 
     if (
       cliente?.nome_time &&
@@ -1203,6 +1316,8 @@ app.get("/marketing/video", auth, (req, res) => {
   const thumbnail = marketingVideoThumbnailUrl(context);
   const version = envMarketingVideo("VERSION", context) || new Date().toISOString().slice(0, 10);
   const id = envMarketingVideo("ID", context) || `${context}_${version}`.replace(/[^a-zA-Z0-9_-]+/g, "_");
+  const viewStatus = getMarketingVideoViewStatus(req.user?.whatsapp, id, version, context);
+  const autoplay = enabled && !viewStatus.ja_visto;
 
   res.setHeader("Cache-Control", "no-store");
 
@@ -1216,6 +1331,8 @@ app.get("/marketing/video", auth, (req, res) => {
     descricao: envMarketingVideo("DESCRIPTION", context) || "Veja como a iA4Tube pode ajudar seu negócio.",
     url_video: enabled ? videoUrl : "",
     thumbnail: isHttpMediaUrl(thumbnail) ? thumbnail : "",
+    autoplay,
+    ja_visto: viewStatus.ja_visto,
     duracao: envInt("IA4TUBE_MARKETING_VIDEO_DURATION", 0),
     versao: version,
     fallback: "progress_card"

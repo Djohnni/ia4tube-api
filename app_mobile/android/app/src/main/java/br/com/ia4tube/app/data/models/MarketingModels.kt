@@ -8,6 +8,8 @@ data class MarketingVideo(
     val description: String,
     val urlVideo: String,
     val thumbnail: String,
+    val autoplay: Boolean,
+    val jaVisto: Boolean,
     val durationSeconds: Int,
     val version: String,
     val fallback: String
