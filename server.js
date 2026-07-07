@@ -1125,6 +1125,25 @@ function envBool(name, fallback = false) {
   return fallback;
 }
 
+function envMarketingVideo(name, context = "primeira_arte_gratis") {
+  const suffix = String(context || "")
+    .trim()
+    .toUpperCase()
+    .replace(/[^A-Z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "");
+  const scopedName = suffix ? `IA4TUBE_MARKETING_VIDEO_${suffix}_${name}` : "";
+  return String((scopedName && process.env[scopedName]) || process.env[`IA4TUBE_MARKETING_VIDEO_${name}`] || "").trim();
+}
+
+function isHttpMediaUrl(value = "") {
+  try {
+    const url = new URL(String(value || ""));
+    return url.protocol === "https:" || url.protocol === "http:";
+  } catch {
+    return false;
+  }
+}
+
 app.get("/app/version", (req, res) => {
   const latestVersionCode = envInt("IA4TUBE_ANDROID_LATEST_VERSION_CODE", 5);
   const minimumVersionCode = envInt("IA4TUBE_ANDROID_MINIMUM_VERSION_CODE", 1);
@@ -1141,6 +1160,32 @@ app.get("/app/version", (req, res) => {
       "Atualize o app para receber melhorias, corre\u00e7\u00f5es e uma experi\u00eancia mais est\u00e1vel.",
     play_store_url: process.env.IA4TUBE_ANDROID_PLAY_STORE_URL ||
       "https://play.google.com/store/apps/details?id=com.ia4tube.app"
+  });
+});
+
+app.get("/marketing/video", auth, (req, res) => {
+  const context = String(req.query?.context || "primeira_arte_gratis").trim() || "primeira_arte_gratis";
+  const videoUrl = envMarketingVideo("URL", context);
+  const enabled = envBool("IA4TUBE_MARKETING_VIDEO_ENABLED", Boolean(videoUrl)) && isHttpMediaUrl(videoUrl);
+  const thumbnail = envMarketingVideo("THUMBNAIL", context);
+  const version = envMarketingVideo("VERSION", context) || new Date().toISOString().slice(0, 10);
+  const id = envMarketingVideo("ID", context) || `${context}_${version}`.replace(/[^a-zA-Z0-9_-]+/g, "_");
+
+  res.setHeader("Cache-Control", "no-store");
+
+  return res.json({
+    ok: true,
+    ativo: enabled,
+    id,
+    context,
+    contexto: context,
+    titulo: envMarketingVideo("TITLE", context) || "Enquanto sua primeira arte fica pronta...",
+    descricao: envMarketingVideo("DESCRIPTION", context) || "Veja como a iA4Tube pode ajudar seu negócio.",
+    url_video: enabled ? videoUrl : "",
+    thumbnail: isHttpMediaUrl(thumbnail) ? thumbnail : "",
+    duracao: envInt("IA4TUBE_MARKETING_VIDEO_DURATION", 0),
+    versao: version,
+    fallback: "progress_card"
   });
 });
 
