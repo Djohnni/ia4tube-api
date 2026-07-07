@@ -13,6 +13,7 @@ import br.com.ia4tube.app.data.models.DownloadedImage
 import br.com.ia4tube.app.data.models.FootballOrderRequest
 import br.com.ia4tube.app.data.models.FreeArtStatus
 import br.com.ia4tube.app.data.models.LoginResponse
+import br.com.ia4tube.app.data.models.MarketingVideo
 import br.com.ia4tube.app.data.models.MeResponse
 import br.com.ia4tube.app.data.models.MonthlyPlanningDetailDto
 import br.com.ia4tube.app.data.models.MonthlyPlanningPostDto
@@ -65,6 +66,12 @@ class AuthRepository(
         val token = sessionStore.getToken()
         if (token.isBlank()) return ApiResult.Failure(SESSION_EXPIRED_MESSAGE)
         return apiClient.freeArtStatus(token)
+    }
+
+    suspend fun marketingVideo(context: String): ApiResult<MarketingVideo> {
+        val token = sessionStore.getToken()
+        if (token.isBlank()) return ApiResult.Failure(SESSION_EXPIRED_MESSAGE)
+        return apiClient.marketingVideo(token, context)
     }
 
     suspend fun meusPedidos(): ApiResult<List<OrderSummary>> {

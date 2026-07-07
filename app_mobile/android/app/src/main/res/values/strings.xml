@@ -377,4 +377,9 @@
     <string name="support_message_hint">Escreva sua mensagem</string>
     <string name="support_sender_client">Você</string>
     <string name="support_sender_team">IA4Tube</string>
+    <string name="order_marketing_video_title">Enquanto sua primeira arte fica pronta</string>
+    <string name="order_marketing_video_waiting">Sua arte continua sendo criada em segundo plano.</string>
+    <string name="order_marketing_video_finished_waiting">Video finalizado. Estamos terminando sua arte.</string>
+    <string name="order_marketing_video_ready_message">Sua arte ficou pronta.</string>
+    <string name="order_marketing_video_ready_button">Sua arte esta pronta! Ver agora</string>
 </resources>

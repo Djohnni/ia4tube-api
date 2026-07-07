@@ -15,6 +15,7 @@ import androidx.compose.foundation.Image
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
@@ -51,11 +52,13 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -64,19 +67,29 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.viewinterop.AndroidView
+import androidx.media3.common.MediaItem
+import androidx.media3.common.Player
+import androidx.media3.common.util.UnstableApi
+import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.ui.PlayerView
+import br.com.ia4tube.app.R
 import br.com.ia4tube.app.core.camera.CameraImageStore
 import br.com.ia4tube.app.core.share.ShareImageStore
 import br.com.ia4tube.app.core.upload.AndroidFileReader
 import br.com.ia4tube.app.data.models.ApiResult
+import br.com.ia4tube.app.data.models.MarketingVideo
 import br.com.ia4tube.app.data.models.UploadFile
 import br.com.ia4tube.app.feature.company_profile.CompanyProfileRamoSearchField
 import br.com.ia4tube.app.feature.company_profile.DefaultLogoUploadCard
@@ -89,6 +102,7 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import java.util.TimeZone
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 @Composable
@@ -283,6 +297,15 @@ fun MonthlyPlanningScreen(
                     )
 
                     MonthlyPlanningStep.Processing -> MonthlyPlanningProcessingStep(
+                        marketingVideo = state.marketingVideo,
+                        marketingVideoFinished = state.marketingVideoFinished,
+                        artReady = state.planning.readyPosts >= state.planning.totalPosts && state.planning.totalPosts > 0,
+                        onMarketingVideoStarted = viewModel::onMarketingVideoStarted,
+                        onMarketingVideoQuartile = viewModel::onMarketingVideoQuartile,
+                        onMarketingVideoEnded = viewModel::onMarketingVideoEnded,
+                        onMarketingVideoError = viewModel::onMarketingVideoError,
+                        onMarketingVideoReadyClick = viewModel::openReadyFromMarketingVideo,
+                        onMarketingVideoAbandoned = viewModel::onMarketingVideoAbandoned,
                         onShowPlans = viewModel::showMyPlannings
                     )
 
@@ -1922,8 +1945,32 @@ private fun parsePlanningCreatedAt(createdAt: String): Date? {
 }
 
 @Composable
-private fun MonthlyPlanningProcessingStep(onShowPlans: () -> Unit) {
+private fun MonthlyPlanningProcessingStep(
+    marketingVideo: MarketingVideo?,
+    marketingVideoFinished: Boolean,
+    artReady: Boolean,
+    onMarketingVideoStarted: () -> Unit,
+    onMarketingVideoQuartile: (Int, Long) -> Unit,
+    onMarketingVideoEnded: (Long) -> Unit,
+    onMarketingVideoError: () -> Unit,
+    onMarketingVideoReadyClick: (Long) -> Unit,
+    onMarketingVideoAbandoned: (Long) -> Unit,
+    onShowPlans: () -> Unit
+) {
     Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        if (marketingVideo != null) {
+            MonthlyPlanningMarketingVideoWaitingCard(
+                video = marketingVideo,
+                artReady = artReady,
+                videoFinished = marketingVideoFinished,
+                onStarted = onMarketingVideoStarted,
+                onQuartile = onMarketingVideoQuartile,
+                onEnded = onMarketingVideoEnded,
+                onError = onMarketingVideoError,
+                onReadyClick = onMarketingVideoReadyClick,
+                onAbandoned = onMarketingVideoAbandoned
+            )
+        }
         EstimatedCreationProgressCard(
             progressKey = "monthly-planning-submit",
             running = true,
@@ -1936,6 +1983,151 @@ private fun MonthlyPlanningProcessingStep(onShowPlans: () -> Unit) {
             onClick = onShowPlans
         ) {
             Text("Ver Minhas imagens")
+        }
+    }
+}
+
+@OptIn(UnstableApi::class)
+@Composable
+private fun MonthlyPlanningMarketingVideoWaitingCard(
+    video: MarketingVideo,
+    artReady: Boolean,
+    videoFinished: Boolean,
+    onStarted: () -> Unit,
+    onQuartile: (Int, Long) -> Unit,
+    onEnded: (Long) -> Unit,
+    onError: () -> Unit,
+    onReadyClick: (Long) -> Unit,
+    onAbandoned: (Long) -> Unit
+) {
+    val context = LocalContext.current
+    var watchedSeconds by remember(video.urlVideo) { mutableStateOf(0L) }
+    var startedSent by remember(video.urlVideo) { mutableStateOf(false) }
+    var endedSent by remember(video.urlVideo) { mutableStateOf(false) }
+    var playerFailed by remember(video.urlVideo) { mutableStateOf(false) }
+    val trackedQuartiles = remember(video.urlVideo) { mutableSetOf<Int>() }
+    val currentArtReady by rememberUpdatedState(artReady)
+    val currentPlayerFailed by rememberUpdatedState(playerFailed)
+    val currentWatchedSeconds by rememberUpdatedState(watchedSeconds)
+
+    val player = remember(video.urlVideo) {
+        ExoPlayer.Builder(context).build().apply {
+            setMediaItem(MediaItem.fromUri(video.urlVideo))
+            playWhenReady = true
+            prepare()
+        }
+    }
+
+    DisposableEffect(player) {
+        val listener = object : Player.Listener {
+            override fun onPlaybackStateChanged(playbackState: Int) {
+                if (playbackState == Player.STATE_READY && !startedSent) {
+                    startedSent = true
+                    onStarted()
+                }
+                if (playbackState == Player.STATE_ENDED && !endedSent) {
+                    endedSent = true
+                    onEnded(watchedSeconds)
+                }
+            }
+
+            override fun onPlayerError(error: androidx.media3.common.PlaybackException) {
+                playerFailed = true
+                onError()
+            }
+        }
+
+        player.addListener(listener)
+        onDispose {
+            player.removeListener(listener)
+            if (!currentArtReady && !currentPlayerFailed) {
+                onAbandoned(currentWatchedSeconds)
+            }
+            player.release()
+        }
+    }
+
+    LaunchedEffect(player, video.urlVideo) {
+        while (true) {
+            delay(500)
+            watchedSeconds = (player.currentPosition / 1000L).coerceAtLeast(0L)
+            val durationMs = player.duration
+            if (durationMs > 0L) {
+                val percent = ((player.currentPosition * 100L) / durationMs).toInt().coerceIn(0, 100)
+                listOf(25, 50, 75).forEach { mark ->
+                    if (percent >= mark && trackedQuartiles.add(mark)) {
+                        onQuartile(mark, watchedSeconds)
+                    }
+                }
+            }
+            if (player.playbackState == Player.STATE_ENDED || playerFailed) break
+        }
+    }
+
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(containerColor = Color(0xFF111827))
+    ) {
+        Column(modifier = Modifier.padding(14.dp)) {
+            Text(
+                text = video.title.ifBlank { stringResource(R.string.order_marketing_video_title) },
+                color = Color(0xFFF4D27A),
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.Bold
+            )
+            if (video.description.isNotBlank()) {
+                Spacer(modifier = Modifier.height(6.dp))
+                Text(
+                    text = video.description,
+                    color = Color(0xFFE5E7EB),
+                    style = MaterialTheme.typography.bodyMedium
+                )
+            }
+            Spacer(modifier = Modifier.height(12.dp))
+            AndroidView(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .aspectRatio(16f / 9f),
+                factory = { viewContext ->
+                    PlayerView(viewContext).apply {
+                        useController = false
+                        this.player = player
+                    }
+                },
+                update = { playerView ->
+                    playerView.player = player
+                }
+            )
+            Spacer(modifier = Modifier.height(12.dp))
+            if (artReady) {
+                Text(
+                    text = stringResource(R.string.order_marketing_video_ready_message),
+                    color = Color(0xFFF4D27A),
+                    style = MaterialTheme.typography.bodyMedium,
+                    fontWeight = FontWeight.Bold
+                )
+                Spacer(modifier = Modifier.height(10.dp))
+                Button(
+                    modifier = Modifier.fillMaxWidth(),
+                    onClick = { onReadyClick(watchedSeconds) }
+                ) {
+                    Text(stringResource(R.string.order_marketing_video_ready_button))
+                }
+            } else {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    CircularProgressIndicator(modifier = Modifier.size(20.dp), color = Color(0xFFF4D27A))
+                    Spacer(modifier = Modifier.size(10.dp))
+                    Text(
+                        text = if (videoFinished) {
+                            stringResource(R.string.order_marketing_video_finished_waiting)
+                        } else {
+                            stringResource(R.string.order_marketing_video_waiting)
+                        },
+                        color = Color(0xFFE5E7EB),
+                        style = MaterialTheme.typography.bodyMedium
+                    )
+                }
+            }
         }
     }
 }

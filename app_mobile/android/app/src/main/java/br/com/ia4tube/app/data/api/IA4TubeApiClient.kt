@@ -26,6 +26,7 @@ import br.com.ia4tube.app.data.models.DownloadedImage
 import br.com.ia4tube.app.data.models.FootballOrderRequest
 import br.com.ia4tube.app.data.models.FreeArtStatus
 import br.com.ia4tube.app.data.models.LoginResponse
+import br.com.ia4tube.app.data.models.MarketingVideo
 import br.com.ia4tube.app.data.models.MeResponse
 import br.com.ia4tube.app.data.models.MonthlyPlanningDetailDto
 import br.com.ia4tube.app.data.models.MonthlyPlanningPostDto
@@ -95,6 +96,30 @@ class IA4TubeApiClient(
                 used = json.optBoolean("arte_gratis_usada", false),
                 usedAt = json.optString("arte_gratis_usada_em"),
                 pedidoId = json.optString("arte_gratis_pedido_id")
+            )
+        }
+    }
+
+    suspend fun marketingVideo(token: String, context: String): ApiResult<MarketingVideo> = withContext(Dispatchers.IO) {
+        val encodedContext = URLEncoder.encode(context, StandardCharsets.UTF_8.name())
+        val request = Request.Builder()
+            .url("${AppConfig.apiBase}/marketing/video?context=$encodedContext")
+            .header("Authorization", "Bearer $token")
+            .get()
+            .build()
+
+        executeJson(request) { json ->
+            MarketingVideo(
+                active = json.optBoolean("ativo", false),
+                id = json.optString("id"),
+                context = json.optString("context").ifBlank { json.optString("contexto") },
+                title = json.optString("titulo"),
+                description = json.optString("descricao"),
+                urlVideo = json.optString("url_video"),
+                thumbnail = json.optString("thumbnail"),
+                durationSeconds = json.optInt("duracao", 0),
+                version = json.optString("versao"),
+                fallback = json.optString("fallback")
             )
         }
     }
@@ -386,7 +411,11 @@ class IA4TubeApiClient(
                 quantidadeReservada = json.optInt("quantidade_reservada", requestData.quantidadeReservada),
                 artesDesteCiclo = json.optInt("artes_deste_ciclo", 0),
                 reservadasNoPlanejamento = json.optInt("reservadas_no_planejamento", 0),
-                livresParaCriarArte = json.optInt("livres_para_criar_arte", 0)
+                livresParaCriarArte = json.optInt("livres_para_criar_arte", 0),
+                cobrancaOrigem = json.optString("cobranca_origem"),
+                tipoCompra = json.optString("tipo_compra"),
+                valorCobrado = json.optDouble("valor_cobrado", 0.0),
+                arteGratis = json.optBoolean("arte_gratis", false)
             )
         }
     }

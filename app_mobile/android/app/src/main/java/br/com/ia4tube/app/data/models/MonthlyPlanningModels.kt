@@ -24,7 +24,11 @@ data class MonthlyPlanningRequestResponse(
     val quantidadeReservada: Int,
     val artesDesteCiclo: Int,
     val reservadasNoPlanejamento: Int,
-    val livresParaCriarArte: Int
+    val livresParaCriarArte: Int,
+    val cobrancaOrigem: String = "",
+    val tipoCompra: String = "",
+    val valorCobrado: Double = 0.0,
+    val arteGratis: Boolean = false
 )
 
 data class MonthlyPlanningSummaryDto(

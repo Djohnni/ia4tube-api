@@ -3,11 +3,13 @@ package br.com.ia4tube.app.feature.monthly_planning
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
+import br.com.ia4tube.app.core.analytics.MobileAnalytics
 import br.com.ia4tube.app.core.company.CompanyProfile
 import br.com.ia4tube.app.core.company.CompanyProfileStore
 import br.com.ia4tube.app.data.models.ApiResult
 import br.com.ia4tube.app.data.models.BillingPixResult
 import br.com.ia4tube.app.data.models.DownloadedImage
+import br.com.ia4tube.app.data.models.MarketingVideo
 import br.com.ia4tube.app.data.models.MonthlyPlanningDetailDto
 import br.com.ia4tube.app.data.models.MonthlyPlanningPhotoInput
 import br.com.ia4tube.app.data.models.MonthlyPlanningPostDto
@@ -27,6 +29,7 @@ private const val DEFAULT_CYCLE_ARTS = 0
 const val PHOTO_TEXT_MAX_LENGTH = 200
 private const val MIN_PHOTO_EDIT_LEVEL = 1
 private const val MAX_PHOTO_EDIT_LEVEL = 3
+private const val MARKETING_CONTEXT_FIRST_FREE_ART = "primeira_arte_gratis"
 const val MOCK_PLANNING_ID = "planejamento-junho-2026"
 
 enum class MonthlyPlanningStep {
@@ -57,7 +60,9 @@ data class MonthlyPlanningUiState(
     val billingRequired: Boolean = false,
     val billingPixLoading: Boolean = false,
     val billingPix: BillingPixResult? = null,
-    val billingPixError: String? = null
+    val billingPixError: String? = null,
+    val marketingVideo: MarketingVideo? = null,
+    val marketingVideoFinished: Boolean = false
 ) {
     val reservedArts: Int
         get() = reservedInput.toIntOrNull()?.coerceIn(0, currentFreeArts) ?: 0
@@ -416,6 +421,61 @@ class MonthlyPlanningViewModel(
         _uiState.update { it.copy(calendarSharePayload = null) }
     }
 
+    fun onMarketingVideoStarted() {
+        val video = _uiState.value.marketingVideo ?: return
+        trackMarketingVideo("mobile_video_marketing_iniciado", video)
+    }
+
+    fun onMarketingVideoQuartile(percent: Int, watchedSeconds: Long) {
+        val video = _uiState.value.marketingVideo ?: return
+        trackMarketingVideo(
+            "mobile_video_marketing_$percent",
+            video,
+            mapOf("percentual" to percent.toString(), "segundos" to watchedSeconds.toString())
+        )
+    }
+
+    fun onMarketingVideoEnded(watchedSeconds: Long) {
+        val video = _uiState.value.marketingVideo ?: return
+        _uiState.update { it.copy(marketingVideoFinished = true) }
+        trackMarketingVideo(
+            "mobile_video_marketing_100",
+            video,
+            mapOf("percentual" to "100", "segundos" to watchedSeconds.toString()),
+            flushNow = true
+        )
+    }
+
+    fun onMarketingVideoError() {
+        val video = _uiState.value.marketingVideo
+        _uiState.update { it.copy(marketingVideo = null, marketingVideoFinished = false) }
+        if (video != null) {
+            trackMarketingVideo("mobile_video_marketing_erro", video, flushNow = true)
+        }
+    }
+
+    fun openReadyFromMarketingVideo(watchedSeconds: Long) {
+        val video = _uiState.value.marketingVideo
+        if (video != null) {
+            trackMarketingVideo(
+                "mobile_video_marketing_ver_arte",
+                video,
+                mapOf("segundos" to watchedSeconds.toString()),
+                flushNow = true
+            )
+        }
+        showMyPlannings()
+    }
+
+    fun onMarketingVideoAbandoned(watchedSeconds: Long) {
+        val video = _uiState.value.marketingVideo ?: return
+        trackMarketingVideo(
+            "mobile_video_marketing_abandonou",
+            video,
+            mapOf("segundos" to watchedSeconds.toString())
+        )
+    }
+
     fun goToConfirmation() {
         _uiState.update { state ->
             when {
@@ -532,7 +592,9 @@ class MonthlyPlanningViewModel(
                     companyProfile = uiProfile,
                     loading = true,
                     uploadError = null,
-                    successMessage = null
+                    successMessage = null,
+                    marketingVideo = null,
+                    marketingVideoFinished = false
                 )
             }
 
@@ -614,7 +676,15 @@ class MonthlyPlanningViewModel(
     }
 
     fun backToUpload() {
-        _uiState.update { it.copy(step = MonthlyPlanningStep.Upload, uploadError = null, successMessage = null) }
+        _uiState.update {
+            it.copy(
+                step = MonthlyPlanningStep.Upload,
+                uploadError = null,
+                successMessage = null,
+                marketingVideo = null,
+                marketingVideoFinished = false
+            )
+        }
     }
 
     fun addPhotos(files: List<UploadFile>) {
@@ -805,6 +875,11 @@ class MonthlyPlanningViewModel(
 
     private suspend fun handlePlanningCreated(response: MonthlyPlanningRequestResponse) {
         val created = response.toUiSummary()
+        val marketingVideo = if (response.shouldShowFirstFreeArtVideo()) {
+            loadFirstFreeArtMarketingVideo()
+        } else {
+            null
+        }
         val refreshedAccount = repository.me()
         val plannings = when (val listResult = repository.listarPlanejamentosMensais()) {
             is ApiResult.Success -> listResult.value.map { it.toUiSummary() }
@@ -836,9 +911,43 @@ class MonthlyPlanningViewModel(
                 billingRequired = false,
                 billingPixLoading = false,
                 billingPix = null,
-                billingPixError = null
+                billingPixError = null,
+                marketingVideo = marketingVideo,
+                marketingVideoFinished = false
             )
         }
+    }
+
+    private suspend fun loadFirstFreeArtMarketingVideo(): MarketingVideo? {
+        return when (val result = repository.marketingVideo(MARKETING_CONTEXT_FIRST_FREE_ART)) {
+            is ApiResult.Success -> result.value.takeIf { it.active && it.urlVideo.isNotBlank() }
+            is ApiResult.Failure -> null
+        }
+    }
+
+    private fun MonthlyPlanningRequestResponse.shouldShowFirstFreeArtVideo(): Boolean {
+        return arteGratis ||
+            cobrancaOrigem.equals("arte_gratis", ignoreCase = true) ||
+            tipoCompra.equals("arte_gratis", ignoreCase = true)
+    }
+
+    private fun trackMarketingVideo(
+        eventName: String,
+        video: MarketingVideo,
+        extraPayload: Map<String, String> = emptyMap(),
+        flushNow: Boolean = false
+    ) {
+        MobileAnalytics.track(
+            eventName,
+            tela = "planejamento_mensal",
+            produto = "primeira_arte_gratis",
+            payload = mapOf(
+                "video_id" to video.id,
+                "versao" to video.version,
+                "contexto" to video.context.ifBlank { MARKETING_CONTEXT_FIRST_FREE_ART }
+            ) + extraPayload,
+            flushNow = flushNow
+        )
     }
 }
 
