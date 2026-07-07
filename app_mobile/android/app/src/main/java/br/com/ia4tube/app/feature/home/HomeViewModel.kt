@@ -38,13 +38,19 @@ data class HomeUiState(
     val carrosseisUsados: Int? = null,
     val carrosseisRestantes: Int? = null,
     val carrosseisCiclo: String? = null,
+    val firstFreeArtActive: Boolean = false,
+    val firstFreeArtAvailable: Boolean = false,
+    val firstFreeArtUsed: Boolean = true,
     val emProducao: Int = 0,
     val artesProntas: Int = 0,
     val pagamentosPendentes: Int = 0,
     val recentOrders: List<OrderSummary> = emptyList(),
     val summaryError: UiText? = null,
     val error: UiText? = null
-)
+) {
+    val shouldFocusFirstFreeArt: Boolean
+        get() = firstFreeArtActive && firstFreeArtAvailable && !firstFreeArtUsed
+}
 
 class HomeViewModel(
     private val repository: AuthRepository,
@@ -98,6 +104,23 @@ class HomeViewModel(
                     _uiState.update {
                         it.copy(loading = false, error = result.message.toUiTextOrNull())
                     }
+                }
+            }
+
+            when (val freeArt = repository.freeArtStatus()) {
+                is ApiResult.Success -> _uiState.update {
+                    it.copy(
+                        firstFreeArtActive = freeArt.value.active,
+                        firstFreeArtAvailable = freeArt.value.available,
+                        firstFreeArtUsed = freeArt.value.used
+                    )
+                }
+                is ApiResult.Failure -> _uiState.update {
+                    it.copy(
+                        firstFreeArtActive = false,
+                        firstFreeArtAvailable = false,
+                        firstFreeArtUsed = true
+                    )
                 }
             }
 

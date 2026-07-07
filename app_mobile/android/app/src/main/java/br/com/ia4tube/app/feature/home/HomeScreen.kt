@@ -45,6 +45,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
@@ -713,6 +714,18 @@ private fun FuturisticHomePanel(
     onIconHelpClick: () -> Unit,
     onHelpSelected: (HomeHelpItem) -> Unit
 ) {
+    val context = LocalContext.current
+    val firstFreeArtMode = state.shouldFocusFirstFreeArt
+    val lockedFeatureClick: () -> Unit = {
+        Toast.makeText(
+            context,
+            "Crie sua primeira imagem gr\u00e1tis para liberar esta fun\u00e7\u00e3o.",
+            Toast.LENGTH_SHORT
+        ).show()
+    }
+    val lockableClick: ((() -> Unit) -> () -> Unit) = { action ->
+        if (firstFreeArtMode) lockedFeatureClick else action
+    }
     val normalizedPlanStatus = state.planoStatus.trim().lowercase()
     val hasActivePlan = normalizedPlanStatus in setOf("active", "ativo") && state.planoNome.isNotBlank()
     val standaloneArts = state.artesAvulsasRestantes.coerceAtLeast(0)
@@ -797,22 +810,24 @@ private fun FuturisticHomePanel(
                     value = "",
                     accent = palette.haloSecondary,
                     palette = palette,
+                    modifier = Modifier.alpha(if (firstFreeArtMode) 0.28f else 1f),
                     icon = Icons.AutoMirrored.Filled.List,
                     compact = true,
                     badgeStart = state.emProducao,
                     badgeEnd = state.artesProntas,
-                    onHelpClick = { onHelpSelected(HomeHelpItem.Orders) },
-                    onClick = { onOpenOrders(OrderListFilter.All) }
+                    onHelpClick = lockableClick { onHelpSelected(HomeHelpItem.Orders) },
+                    onClick = lockableClick { onOpenOrders(OrderListFilter.All) }
                 )
                 OrbitActionCircle(
                     title = planCircleLabel,
                     value = "",
                     accent = palette.haloPrimary,
                     palette = palette,
+                    modifier = Modifier.alpha(if (firstFreeArtMode) 0.28f else 1f),
                     centerSubtitle = planCircleNumber,
                     compact = true,
-                    onHelpClick = { onHelpSelected(HomeHelpItem.CurrentPlan) },
-                    onClick = onOpenPlans
+                    onHelpClick = lockableClick { onHelpSelected(HomeHelpItem.CurrentPlan) },
+                    onClick = lockableClick(onOpenPlans)
                 )
                 Column(
                     horizontalAlignment = Alignment.CenterHorizontally,
@@ -823,10 +838,11 @@ private fun FuturisticHomePanel(
                         value = "",
                         accent = palette.haloSecondary,
                         palette = palette,
+                        modifier = Modifier.alpha(if (firstFreeArtMode) 0.28f else 1f),
                         compact = true,
                         customIcon = { HeadsetGlyph(palette.haloSecondary, Modifier.size(30.dp)) },
-                        onHelpClick = { onHelpSelected(HomeHelpItem.Support) },
-                        onClick = onSupport
+                        onHelpClick = lockableClick { onHelpSelected(HomeHelpItem.Support) },
+                        onClick = lockableClick(onSupport)
                     )
                 }
             }
@@ -842,6 +858,8 @@ private fun FuturisticHomePanel(
                 onCompanyProfile = onCompanyProfile,
                 carouselRemainingText = carouselRemainingText(state.carrosseisRestantes),
                 onLogout = onLogout,
+                firstFreeArtMode = firstFreeArtMode,
+                onLockedFeatureClick = lockedFeatureClick,
                 onHelpSelected = onHelpSelected
             )
 
@@ -1243,8 +1261,14 @@ private fun PrimaryCreateArtAction(
     onCompanyProfile: () -> Unit,
     carouselRemainingText: String?,
     onLogout: () -> Unit,
+    firstFreeArtMode: Boolean,
+    onLockedFeatureClick: () -> Unit,
     onHelpSelected: (HomeHelpItem) -> Unit
 ) {
+    val lockableClick: ((() -> Unit) -> () -> Unit) = { action ->
+        if (firstFreeArtMode) onLockedFeatureClick else action
+    }
+
     Column(
         modifier = Modifier
             .fillMaxWidth()
@@ -1270,16 +1294,18 @@ private fun PrimaryCreateArtAction(
                         )
                     )
                     .border(2.4.dp, palette.primaryBorder.copy(alpha = 0.92f), CircleShape)
-                    .clickable(onClick = onMonthlyPlanningClick)
+                    .clickable(onClick = if (firstFreeArtMode) onCreateArtClick else onMonthlyPlanningClick)
             )
-            HomeHelpButton(
-                palette = palette,
-                onClick = { onHelpSelected(HomeHelpItem.MonthlyPlanning) },
-                modifier = Modifier
-                    .align(Alignment.TopStart)
-                    .offset(x = 28.dp, y = 28.dp),
-                size = 28.dp
-            )
+            if (!firstFreeArtMode) {
+                HomeHelpButton(
+                    palette = palette,
+                    onClick = { onHelpSelected(HomeHelpItem.MonthlyPlanning) },
+                    modifier = Modifier
+                        .align(Alignment.TopStart)
+                        .offset(x = 28.dp, y = 28.dp),
+                    size = 28.dp
+                )
+            }
             Column(horizontalAlignment = Alignment.CenterHorizontally) {
                 GoldenPlusGlyph(
                     color = palette.primaryPlus,
@@ -1287,7 +1313,7 @@ private fun PrimaryCreateArtAction(
                     modifier = Modifier.size(92.dp)
                 )
                 Text(
-                    text = "Criar",
+                    text = if (firstFreeArtMode) "Gr\u00e1tis" else "Criar",
                     style = MaterialTheme.typography.titleMedium,
                     fontWeight = FontWeight.ExtraBold,
                     color = palette.metricNumber,
@@ -1295,6 +1321,27 @@ private fun PrimaryCreateArtAction(
                     overflow = TextOverflow.Ellipsis
                 )
             }
+        }
+        if (firstFreeArtMode) {
+            Spacer(modifier = Modifier.height(10.dp))
+            Text(
+                text = "Crie sua primeira imagem gr\u00e1tis",
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.ExtraBold,
+                color = palette.metricNumber,
+                textAlign = TextAlign.Center,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis
+            )
+            Spacer(modifier = Modifier.height(4.dp))
+            Text(
+                text = "Depois disso, voc\u00ea desbloqueia o acesso ao app completo.",
+                style = MaterialTheme.typography.bodySmall,
+                color = palette.textSecondary,
+                textAlign = TextAlign.Center,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis
+            )
         }
         Spacer(modifier = Modifier.height(12.dp))
         Row(
@@ -1304,8 +1351,9 @@ private fun PrimaryCreateArtAction(
             HomeToolButton(
                 palette = palette,
                 label = "Várias fotos",
-                onHelpClick = { onHelpSelected(HomeHelpItem.CreateArt) },
-                onClick = onCreateArtClick,
+                locked = firstFreeArtMode,
+                onHelpClick = lockableClick { onHelpSelected(HomeHelpItem.CreateArt) },
+                onClick = lockableClick(onCreateArtClick),
                 icon = {
                     PhotoLibraryGlyph(
                         color = palette.primaryBorder,
@@ -1317,8 +1365,9 @@ private fun PrimaryCreateArtAction(
             HomeToolButton(
                 palette = palette,
                 label = stringResource(R.string.home_printed_materials),
-                onHelpClick = { onHelpSelected(HomeHelpItem.PrintedMaterials) },
-                onClick = onCompanyProfile,
+                locked = firstFreeArtMode,
+                onHelpClick = lockableClick { onHelpSelected(HomeHelpItem.PrintedMaterials) },
+                onClick = lockableClick(onCompanyProfile),
                 icon = {
                     CompanyGlyph(palette.primaryBorder, Modifier.size(42.dp))
                 }
@@ -1333,8 +1382,9 @@ private fun PrimaryCreateArtAction(
                 palette = palette,
                 label = stringResource(R.string.home_carousel),
                 subtitle = carouselRemainingText,
-                onHelpClick = { onHelpSelected(HomeHelpItem.Carousel) },
-                onClick = onCarouselClick,
+                locked = firstFreeArtMode,
+                onHelpClick = lockableClick { onHelpSelected(HomeHelpItem.Carousel) },
+                onClick = lockableClick(onCarouselClick),
                 icon = {
                     CarouselGlyph(palette.primaryBorder, palette.cameraBackground, Modifier.size(42.dp))
                 }
@@ -1342,7 +1392,8 @@ private fun PrimaryCreateArtAction(
             HomeToolButton(
                 palette = palette,
                 label = "Ajuda",
-                onClick = onIconHelpClick,
+                locked = firstFreeArtMode,
+                onClick = lockableClick(onIconHelpClick),
                 icon = {
                     Text(
                         text = "?",
@@ -1493,11 +1544,13 @@ private fun HomeToolButton(
     palette: PremiumHomePalette,
     label: String,
     subtitle: String? = null,
+    locked: Boolean = false,
     onHelpClick: (() -> Unit)? = null,
     onClick: () -> Unit,
     icon: @Composable () -> Unit
 ) {
     Column(
+        modifier = Modifier.alpha(if (locked) 0.30f else 1f),
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.spacedBy(4.dp)
     ) {
