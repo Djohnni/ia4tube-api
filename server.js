@@ -54,7 +54,9 @@ const SUPORTE_ABERTAS_FILE = path.join(DATA_DIR, "suporte_conversas_abertas.json
 const SUPORTE_FINALIZADAS_FILE = path.join(DATA_DIR, "suporte_conversas_finalizadas.json");
 const ANALYTICS_DIR = path.join(DATA_DIR, "analytics");
 const EVENTOS_CLIENTES_FILE = path.join(DATA_DIR, "eventos_clientes.json");
-const SEO_NICHES_DIR = path.join(__dirname, "public", "nichos");
+const PUBLIC_DIR = path.join(__dirname, "public");
+const PUBLIC_VIDEOS_DIR = path.join(PUBLIC_DIR, "videos");
+const SEO_NICHES_DIR = path.join(PUBLIC_DIR, "nichos");
 const ADMIN_MOBILE_ANALYTICS_FILE = path.join(__dirname, "admin", "mobile_analytics.html");
 const ADMIN_ANALYTICS_COOKIE = "ia4tube_admin_token";
 
@@ -82,7 +84,21 @@ app.get(["/mobile_analytics.html", "/public/mobile_analytics.html"], (_req, res)
   return res.status(404).send("Not found");
 });
 
-app.use(express.static("public"));
+app.use("/videos", express.static(PUBLIC_VIDEOS_DIR, {
+  acceptRanges: true,
+  setHeaders: (res, filePath) => {
+    const normalizedPath = String(filePath || "").toLowerCase();
+    if (normalizedPath.endsWith(".mp4")) {
+      res.type("video/mp4");
+    }
+    if (normalizedPath.endsWith(".jpg") || normalizedPath.endsWith(".jpeg")) {
+      res.type("image/jpeg");
+    }
+    res.setHeader("Cache-Control", "public, max-age=300");
+  }
+}));
+
+app.use(express.static(PUBLIC_DIR));
 
 const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID || "";
 
@@ -1144,7 +1160,21 @@ function isHttpMediaUrl(value = "") {
   }
 }
 
-const TEMP_FIRST_FREE_ART_VIDEO_URL = "https://interactive-examples.mdn.mozilla.net/media/cc0-videos/flower.mp4";
+const FIRST_FREE_ART_VIDEO_CONTEXT = "primeira_arte_gratis";
+const DEFAULT_FIRST_FREE_ART_VIDEO_URL = "https://ia4tube.com/videos/primeira-arte-gratis.mp4";
+const DEFAULT_FIRST_FREE_ART_THUMBNAIL_URL = "https://ia4tube.com/videos/thumb-primeira-arte-gratis.jpg";
+
+function marketingVideoUrl(context) {
+  const configuredVideoUrl = String(process.env.IA4TUBE_MARKETING_VIDEO_URL || "").trim();
+  if (configuredVideoUrl) return configuredVideoUrl;
+  return context === FIRST_FREE_ART_VIDEO_CONTEXT ? DEFAULT_FIRST_FREE_ART_VIDEO_URL : "";
+}
+
+function marketingVideoThumbnailUrl(context) {
+  const configuredThumbnailUrl = envMarketingVideo("THUMBNAIL", context);
+  if (configuredThumbnailUrl) return configuredThumbnailUrl;
+  return context === FIRST_FREE_ART_VIDEO_CONTEXT ? DEFAULT_FIRST_FREE_ART_THUMBNAIL_URL : "";
+}
 
 app.get("/app/version", (req, res) => {
   const latestVersionCode = envInt("IA4TUBE_ANDROID_LATEST_VERSION_CODE", 5);
@@ -1166,12 +1196,11 @@ app.get("/app/version", (req, res) => {
 });
 
 app.get("/marketing/video", auth, (req, res) => {
-  const context = String(req.query?.context || "primeira_arte_gratis").trim() || "primeira_arte_gratis";
-  const configuredVideoUrl = envMarketingVideo("URL", context);
-  const enabledByFlag = envBool("IA4TUBE_MARKETING_VIDEO_ENABLED", context === "primeira_arte_gratis");
-  const videoUrl = configuredVideoUrl || (enabledByFlag && context === "primeira_arte_gratis" ? TEMP_FIRST_FREE_ART_VIDEO_URL : "");
+  const context = String(req.query?.context || FIRST_FREE_ART_VIDEO_CONTEXT).trim() || FIRST_FREE_ART_VIDEO_CONTEXT;
+  const enabledByFlag = envBool("IA4TUBE_MARKETING_VIDEO_ENABLED", context === FIRST_FREE_ART_VIDEO_CONTEXT);
+  const videoUrl = marketingVideoUrl(context);
   const enabled = enabledByFlag && isHttpMediaUrl(videoUrl);
-  const thumbnail = envMarketingVideo("THUMBNAIL", context);
+  const thumbnail = marketingVideoThumbnailUrl(context);
   const version = envMarketingVideo("VERSION", context) || new Date().toISOString().slice(0, 10);
   const id = envMarketingVideo("ID", context) || `${context}_${version}`.replace(/[^a-zA-Z0-9_-]+/g, "_");
 
