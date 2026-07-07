@@ -100,6 +100,7 @@ fun HomeScreen(
     val homePalette = premiumHomePalette(premiumTheme)
     val homeBackground = homePalette.screenBackground
     val context = LocalContext.current.applicationContext
+    val firstFreeArtMode = !isLoggedIn || state.shouldFocusFirstFreeArt
     val lifecycleOwner = LocalLifecycleOwner.current
     val cameraImageStore = remember { CameraImageStore(context) }
     var showPhotoSourceDialog by remember { mutableStateOf(false) }
@@ -174,6 +175,8 @@ fun HomeScreen(
                     onCompanyProfile = onCompanyProfile,
                     onSupport = onSupport,
                     onLogout = onLogout,
+                    firstFreeArtMode = firstFreeArtMode,
+                    showLogout = isLoggedIn,
                     onIconHelpClick = { showIconHelpDialog = true },
                     onHelpSelected = { selectedHelp = it }
                 )
@@ -711,11 +714,12 @@ private fun FuturisticHomePanel(
     onCompanyProfile: () -> Unit,
     onSupport: () -> Unit,
     onLogout: () -> Unit,
+    firstFreeArtMode: Boolean,
+    showLogout: Boolean,
     onIconHelpClick: () -> Unit,
     onHelpSelected: (HomeHelpItem) -> Unit
 ) {
     val context = LocalContext.current
-    val firstFreeArtMode = state.shouldFocusFirstFreeArt
     val lockedFeatureClick: () -> Unit = {
         Toast.makeText(
             context,
@@ -859,6 +863,7 @@ private fun FuturisticHomePanel(
                 carouselRemainingText = carouselRemainingText(state.carrosseisRestantes),
                 onLogout = onLogout,
                 firstFreeArtMode = firstFreeArtMode,
+                showLogout = showLogout,
                 onLockedFeatureClick = lockedFeatureClick,
                 onHelpSelected = onHelpSelected
             )
@@ -1262,6 +1267,7 @@ private fun PrimaryCreateArtAction(
     carouselRemainingText: String?,
     onLogout: () -> Unit,
     firstFreeArtMode: Boolean,
+    showLogout: Boolean,
     onLockedFeatureClick: () -> Unit,
     onHelpSelected: (HomeHelpItem) -> Unit
 ) {
@@ -1325,7 +1331,7 @@ private fun PrimaryCreateArtAction(
         if (firstFreeArtMode) {
             Spacer(modifier = Modifier.height(10.dp))
             Text(
-                text = "Crie sua primeira imagem gr\u00e1tis",
+                text = "Crie sua primeira imagem gr\u00e1tis.",
                 style = MaterialTheme.typography.titleMedium,
                 fontWeight = FontWeight.ExtraBold,
                 color = palette.metricNumber,
@@ -1418,21 +1424,23 @@ private fun PrimaryCreateArtAction(
             overflow = TextOverflow.Ellipsis
         )
         Spacer(modifier = Modifier.height(10.dp))
-        TextButton(
-            modifier = Modifier
-                .width(82.dp)
-                .height(34.dp),
-            shape = RoundedCornerShape(999.dp),
-            onClick = onLogout
-        ) {
-            Text(
-                text = stringResource(R.string.home_logout),
-                color = palette.textSecondary,
-                style = MaterialTheme.typography.labelMedium,
-                fontWeight = FontWeight.SemiBold,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis
-            )
+        if (showLogout) {
+            TextButton(
+                modifier = Modifier
+                    .width(82.dp)
+                    .height(34.dp),
+                shape = RoundedCornerShape(999.dp),
+                onClick = onLogout
+            ) {
+                Text(
+                    text = stringResource(R.string.home_logout),
+                    color = palette.textSecondary,
+                    style = MaterialTheme.typography.labelMedium,
+                    fontWeight = FontWeight.SemiBold,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
         }
         Spacer(modifier = Modifier.height(2.dp))
     }

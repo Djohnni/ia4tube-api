@@ -242,7 +242,7 @@ fun IA4TubeNavHost(
                 }
             }
             Routes.createArtEmpresa() -> {
-                navController.navigate(Routes.Home) {
+                navController.navigate(target) {
                     popUpTo(Routes.Home) { inclusive = false }
                     launchSingleTop = true
                 }
