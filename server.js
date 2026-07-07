@@ -2002,6 +2002,30 @@ app.get("/billing/free-art/status", auth, (req, res) => {
   });
 });
 
+app.post("/bot/free-art-ip-locks/remover-atual", botRunnerAuth, (req, res) => {
+  const status = getFreeArtIpLockStatus(req);
+  const locks = readFreeArtIpLocks();
+  const previous = status.ipHash ? locks[status.ipHash] : null;
+
+  if (status.ipHash && previous) {
+    delete locks[status.ipHash];
+    writeFreeArtIpLocks(locks);
+    registrarEventoServidor("free_art_ip_lock_removed_for_test", {
+      ip_mascarado: status.ipMasked,
+      bloqueado_ate: previous?.bloqueado_ate || "",
+      pedido_id: previous?.pedido_id || "",
+      cliente: previous?.cliente || ""
+    });
+  }
+
+  return res.json({
+    ok: true,
+    removed: Boolean(previous),
+    ip_mascarado: status.ipMasked,
+    bloqueado_ate: previous?.bloqueado_ate || ""
+  });
+});
+
 app.post("/me/fcm-token", auth, (req, res) => {
   const fcmToken = String(req.body?.token || "").trim();
   const platform = String(req.body?.platform || "android").trim().toLowerCase() || "android";
