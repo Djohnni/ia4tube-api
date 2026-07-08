@@ -1304,8 +1304,6 @@ function botRunnerAuth(req, res, next) {
 // ===== UPLOAD (multer) =====
 const TMP_UPLOAD_MAX_AGE_MS = 6 * 60 * 60 * 1000;
 const TMP_UPLOAD_CLEANUP_INTERVAL_MS = 60 * 60 * 1000;
-const ORDER_CREATE_DEDUPE_TTL_MS = 30 * 1000;
-const orderCreateDedupe = new Map();
 
 function flattenUploadedFiles(files = {}) {
   return Object.values(files).flat().filter(Boolean);
@@ -1324,108 +1322,6 @@ function cleanupUploadedFiles(files = {}) {
       });
     }
   }
-}
-
-function stableJson(value) {
-  if (Array.isArray(value)) {
-    return value.map(stableJson);
-  }
-
-  if (value && typeof value === "object") {
-    return Object.keys(value).sort().reduce((acc, key) => {
-      acc[key] = stableJson(value[key]);
-      return acc;
-    }, {});
-  }
-
-  return value;
-}
-
-function requestIdempotencyKey(req) {
-  return String(
-    req.get("x-idempotency-key") ||
-    req.get("x-request-id") ||
-    req.body?.client_request_id ||
-    req.body?.idempotency_key ||
-    ""
-  ).trim();
-}
-
-function uploadedFilesFingerprint(files = {}) {
-  return flattenUploadedFiles(files)
-    .map(file => ({
-      fieldname: file.fieldname || "",
-      originalname: file.originalname || "",
-      mimetype: file.mimetype || "",
-      size: Number(file.size || 0)
-    }))
-    .sort((a, b) =>
-      `${a.fieldname}:${a.originalname}:${a.size}`.localeCompare(`${b.fieldname}:${b.originalname}:${b.size}`)
-    );
-}
-
-function buildOrderCreateDedupeKey({ req, categoria, whatsapp, fields }) {
-  const clientKey = requestIdempotencyKey(req);
-
-  if (clientKey) {
-    return `client:${whatsapp}:${clientKey}`;
-  }
-
-  const payload = {
-    whatsapp,
-    categoria,
-    fields: stableJson(fields || {}),
-    files: uploadedFilesFingerprint(req.files || {})
-  };
-
-  return "auto:" + crypto
-    .createHash("sha256")
-    .update(JSON.stringify(payload))
-    .digest("hex");
-}
-
-function cleanupOrderCreateDedupe() {
-  const now = Date.now();
-
-  for (const [key, entry] of orderCreateDedupe.entries()) {
-    if (now - Number(entry.createdAt || 0) > ORDER_CREATE_DEDUPE_TTL_MS) {
-      orderCreateDedupe.delete(key);
-    }
-  }
-}
-
-function getOrderCreateDedupeEntry(key) {
-  cleanupOrderCreateDedupe();
-  const entry = orderCreateDedupe.get(key);
-  if (!entry) return null;
-
-  if (Date.now() - Number(entry.createdAt || 0) > ORDER_CREATE_DEDUPE_TTL_MS) {
-    orderCreateDedupe.delete(key);
-    return null;
-  }
-
-  return entry;
-}
-
-function beginOrderCreateDedupe(key) {
-  let resolvePedidoId;
-  let rejectPedidoId;
-  const promise = new Promise((resolve, reject) => {
-    resolvePedidoId = resolve;
-    rejectPedidoId = reject;
-  });
-  promise.catch(() => {});
-
-  const entry = {
-    createdAt: Date.now(),
-    pedidoId: "",
-    promise,
-    resolvePedidoId,
-    rejectPedidoId
-  };
-
-  orderCreateDedupe.set(key, entry);
-  return entry;
 }
 
 function cleanupOldTmpUploads() {
@@ -4479,8 +4375,6 @@ async function runMonthlyPlanningNotifications() {
 function criarPedidoHandler(categoria) {
   return async (req, res) => {
     let freeArtClaimLockKeys = [];
-    let dedupeEntry = null;
-    let idempotencyKey = "";
 
     try {
     const whatsapp = req.user.whatsapp;
@@ -4605,29 +4499,6 @@ function criarPedidoHandler(categoria) {
       }
     }
 
-    idempotencyKey = buildOrderCreateDedupeKey({ req, categoria, whatsapp, fields });
-    const existingDedupe = getOrderCreateDedupeEntry(idempotencyKey);
-
-    if (existingDedupe) {
-      cleanupUploadedFiles(req.files);
-
-      if (existingDedupe.pedidoId) {
-        return res.json({ ok: true, pedido_id: existingDedupe.pedidoId, idempotent: true });
-      }
-
-      try {
-        const pedidoId = await existingDedupe.promise;
-        return res.json({ ok: true, pedido_id: pedidoId, idempotent: true });
-      } catch {
-        return res.status(500).json({
-          ok: false,
-          error: "Nao foi possivel confirmar o envio anterior. Confira em Meus pedidos antes de tentar novamente."
-        });
-      }
-    }
-
-    dedupeEntry = beginOrderCreateDedupe(idempotencyKey);
-
     const draft = await orderService.createOrderDraft({
       categoria,
       pedidosDir: PEDIDOS_DIR,
@@ -4691,19 +4562,10 @@ function criarPedidoHandler(categoria) {
       orderService.orderStorage.writeOrder(draft.base, draft.pedido);
     }
 
-    draft.pedido.idempotency_key = idempotencyKey;
-    draft.pedido.idempotency_source = requestIdempotencyKey(req) ? "client" : "auto";
-    orderService.orderStorage.writeOrder(draft.base, draft.pedido);
-
     clientes[whatsapp] = c;
     writeClientes(clientes);
 
     removeOldPedidos(whatsapp, 15);
-
-    if (dedupeEntry) {
-      dedupeEntry.pedidoId = id;
-      dedupeEntry.resolvePedidoId(id);
-    }
 
     return res.json({
       ok: true,
@@ -4713,11 +4575,6 @@ function criarPedidoHandler(categoria) {
       arte_gratis: draft.pedido?.cobranca_origem === "arte_gratis"
     });
     } catch (error) {
-      if (dedupeEntry) {
-        dedupeEntry.rejectPedidoId(error);
-        if (idempotencyKey) orderCreateDedupe.delete(idempotencyKey);
-      }
-
       cleanupUploadedFiles(req.files);
       console.error("[pedidos] erro ao criar pedido", {
         categoria,
