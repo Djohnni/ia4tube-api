@@ -1366,11 +1366,6 @@ function uploadedFilesFingerprint(files = {}) {
 
 function buildOrderCreateDedupeKey({ req, categoria, whatsapp, fields }) {
   const clientKey = requestIdempotencyKey(req);
-
-  if (clientKey) {
-    return `client:${whatsapp}:${clientKey}`;
-  }
-
   const payload = {
     whatsapp,
     categoria,
@@ -1378,10 +1373,16 @@ function buildOrderCreateDedupeKey({ req, categoria, whatsapp, fields }) {
     files: uploadedFilesFingerprint(req.files || {})
   };
 
-  return "auto:" + crypto
+  const payloadHash = crypto
     .createHash("sha256")
     .update(JSON.stringify(payload))
     .digest("hex");
+
+  if (clientKey) {
+    return `client:${whatsapp}:${clientKey}:${payloadHash}`;
+  }
+
+  return `auto:${payloadHash}`;
 }
 
 function cleanupOrderCreateDedupe() {
