@@ -24,6 +24,7 @@ import br.com.ia4tube.app.data.models.CreateOrderResponse
 import br.com.ia4tube.app.data.models.DownloadedFile
 import br.com.ia4tube.app.data.models.DownloadedImage
 import br.com.ia4tube.app.data.models.FootballOrderRequest
+import br.com.ia4tube.app.data.models.FreeArtStatus
 import br.com.ia4tube.app.data.models.LoginResponse
 import br.com.ia4tube.app.data.models.MarketingVideo
 import br.com.ia4tube.app.data.models.MeResponse
@@ -103,6 +104,24 @@ class IA4TubeApiClient(
                 durationSeconds = json.optInt("duracao", 0),
                 version = json.optString("versao"),
                 fallback = json.optString("fallback")
+            )
+        }
+    }
+
+    suspend fun freeArtStatus(token: String): ApiResult<FreeArtStatus> = withContext(Dispatchers.IO) {
+        val request = Request.Builder()
+            .url("${AppConfig.apiBase}/billing/free-art/status")
+            .header("Authorization", "Bearer $token")
+            .get()
+            .build()
+
+        executeJson(request) { json ->
+            FreeArtStatus(
+                active = json.optBoolean("arte_gratis_ativa", false),
+                available = json.optBoolean("arte_gratis_disponivel", false),
+                used = json.optBoolean("arte_gratis_usada", false),
+                usedAt = json.optString("arte_gratis_usada_em"),
+                pedidoId = json.optString("arte_gratis_pedido_id")
             )
         }
     }
@@ -277,8 +296,18 @@ class IA4TubeApiClient(
         executeJson(request) { json ->
             val planning = json.optJSONObject("planejamento") ?: JSONObject()
             val planoMensal = planning.optJSONObject("plano_mensal") ?: JSONObject()
-            val postsJson = planoMensal.optJSONArray("postagens")
+            val postsJson = planning.optJSONArray("postagens")
+                ?: planning.optJSONArray("itens")
+                ?: planning.optJSONArray("posts")
+                ?: planning.optJSONArray("resultados")
+                ?: planoMensal.optJSONArray("postagens")
                 ?: planoMensal.optJSONArray("itens")
+                ?: planoMensal.optJSONArray("posts")
+                ?: planoMensal.optJSONArray("resultados")
+                ?: json.optJSONArray("postagens")
+                ?: json.optJSONArray("itens")
+                ?: json.optJSONArray("posts")
+                ?: json.optJSONArray("resultados")
                 ?: JSONArray()
             MonthlyPlanningDetailDto(
                 summary = monthlyPlanningSummaryFromJson(planning),
@@ -361,7 +390,7 @@ class IA4TubeApiClient(
             .addFormDataPart("orientacoes_fotos", monthlyPlanningPhotoOrientationsJson(requestData))
 
         requestData.fotos.forEach { photo ->
-            val foto = photo.file
+            val foto = photo.file ?: return@forEach
             val body = foto.bytes.toRequestBody(foto.contentType.toMediaTypeOrNull())
             multipartBuilder.addFormDataPart("fotos", foto.fileName, body)
         }
@@ -380,7 +409,7 @@ class IA4TubeApiClient(
         logMultipart(
             url = request.url.toString(),
             fields = listOf("quantidade_reservada", "nome_empresa", "ramo", "caracteristicas_empresa", "informacoes_empresa", "orientacoes_fotos", "fotos", "logo"),
-            files = requestData.fotos.map { it.file } + listOfNotNull(requestData.logo)
+            files = requestData.fotos.mapNotNull { it.file } + listOfNotNull(requestData.logo)
         )
 
         executeJson(request) { json ->
@@ -1285,11 +1314,23 @@ class IA4TubeApiClient(
 
         private fun monthlyPlanningPhotoOrientationsJson(requestData: MonthlyPlanningRequest): String {
             val array = JSONArray()
+            var fileIndex = 0
             requestData.fotos.forEachIndexed { index, photo ->
+                val file = photo.file
+                if (file != null) fileIndex += 1
                 array.put(
                     JSONObject()
-                        .put("ordem", index + 1)
-                        .put("arquivo", photo.file.fileName)
+                        .put("slot_id", photo.slotId)
+                        .put("id", photo.slotId)
+                        .put("ordem", photo.order.takeIf { it > 0 } ?: index + 1)
+                        .put("numero", photo.order.takeIf { it > 0 } ?: index + 1)
+                        .put("arquivo", file?.fileName.orEmpty())
+                        .put("arquivo_index", if (file != null) fileIndex else 0)
+                        .put("tem_arquivo", file != null)
+                        .put("objetivo", photo.objetivo.trim())
+                        .put("objetivo_id", photo.objetivoId.trim())
+                        .put("escrita_imagem", photo.escritaImagem.trim())
+                        .put("nivel_edicao", photo.nivelEdicao)
                         .put("orientacao", photo.orientacao.trim())
                 )
             }
@@ -1315,6 +1356,18 @@ class IA4TubeApiClient(
         }
 
         private fun monthlyPlanningPostFromJson(item: JSONObject, fallbackNumber: Int): MonthlyPlanningPostDto {
+            val status = item.optString("status")
+            val statusLabel = item.optString("status_label").ifBlank { status }
+            val normalizedStatus = statusLabel
+                .lowercase()
+                .replace('í', 'i')
+                .replace('ï', 'i')
+                .replace('ó', 'o')
+                .replace('ô', 'o')
+            val imageReady = item.optBoolean("imagem_pronta", false) ||
+                item.optBoolean("ready", false) ||
+                normalizedStatus.contains("pronto") ||
+                normalizedStatus.contains("concluido")
             return MonthlyPlanningPostDto(
                 number = item.optInt("ordem", fallbackNumber),
                 itemId = item.optString("calendar_key")
@@ -1330,17 +1383,23 @@ class IA4TubeApiClient(
                 time = item.optString("horario_sugerido").ifBlank { item.optString("horario") },
                 theme = item.optString("tema").ifBlank { item.optString("titulo") },
                 objective = item.optString("objetivo").ifBlank { item.optString("objetivo_postagem") },
-                status = item.optString("status"),
-                statusLabel = item.optString("status_label").ifBlank { item.optString("status") },
+                status = status,
+                statusLabel = statusLabel,
                 caption = item.optString("legenda").ifBlank { item.optString("descricao_instagram") },
-                pedidoId = item.optString("pedido_id"),
-                imageReady = item.optBoolean("imagem_pronta", false),
+                pedidoId = item.optString("pedido_id")
+                    .ifBlank { item.optString("pedidoId") }
+                    .ifBlank { item.optString("order_id") }
+                    .ifBlank { item.optString("orderId") }
+                    .ifBlank { item.optString("id_pedido") },
+                imageReady = imageReady,
                 imageText = monthlyPlanningImageTextFromJson(item),
                 thumbnailUrl = item.optString("thumbnail_url")
                     .ifBlank { item.optString("miniatura_url") }
                     .ifBlank { item.optString("preview_url") }
                     .ifBlank { item.optString("image_url") }
                     .ifBlank { item.optString("imagem_url") }
+                    .ifBlank { item.optString("url_imagem") }
+                    .ifBlank { item.optString("resultado_url") }
             )
         }
 

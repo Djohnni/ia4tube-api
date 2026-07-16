@@ -3,6 +3,7 @@ package br.com.ia4tube.app.feature.monthly_planning
 import android.graphics.BitmapFactory
 import android.content.Intent
 import android.net.Uri
+import android.util.Base64
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -36,6 +37,8 @@ import androidx.compose.material.icons.filled.AddCircle
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.KeyboardArrowDown
+import androidx.compose.material.icons.filled.KeyboardArrowUp
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
@@ -53,6 +56,7 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
@@ -68,9 +72,12 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
@@ -83,7 +90,9 @@ import coil.compose.AsyncImagePainter
 import coil.compose.rememberAsyncImagePainter
 import coil.request.ImageRequest
 import br.com.ia4tube.app.R
+import br.com.ia4tube.app.core.analytics.MobileAnalytics
 import br.com.ia4tube.app.core.camera.CameraImageStore
+import br.com.ia4tube.app.core.share.ShareImageStore
 import br.com.ia4tube.app.core.upload.AndroidFileReader
 import br.com.ia4tube.app.data.models.ApiResult
 import br.com.ia4tube.app.data.models.MarketingVideo
@@ -107,35 +116,45 @@ fun MonthlyPlanningScreen(
     viewModel: MonthlyPlanningViewModel,
     onBack: () -> Unit,
     onOpenDetail: (String) -> Unit,
-    onOpenOrder: (String) -> Unit
+    onOpenOrder: (String) -> Unit,
+    onOpenPlanningResults: (String) -> Unit,
+    onOpenPlans: () -> Unit
 ) {
     val state by viewModel.uiState.collectAsState()
     val context = LocalContext.current
     val fileReader = remember(context) { AndroidFileReader(context) }
     val cameraImageStore = remember(context) { CameraImageStore(context.applicationContext) }
+    val shareImageStore = remember { ShareImageStore(context.applicationContext) }
     val scope = rememberCoroutineScope()
     val screenScrollState = rememberScrollState()
     var loadingPhotos by remember { mutableStateOf(false) }
     var pendingCameraUri by remember { mutableStateOf<Uri?>(null) }
+    var pendingPhotoSlotId by remember { mutableStateOf<String?>(null) }
+    var pendingPhotoRemoval by remember { mutableStateOf<MonthlyPlanningPhotoDraft?>(null) }
     var showGeneralCalendar by remember { mutableStateOf(false) }
 
     val photosPicker = rememberLauncherForActivityResult(ActivityResultContracts.GetMultipleContents()) { uris ->
+        val slotId = pendingPhotoSlotId ?: state.photos.firstOrNull()?.id
+        pendingPhotoSlotId = null
+        if (slotId.isNullOrBlank()) return@rememberLauncherForActivityResult
         if (uris.isEmpty()) return@rememberLauncherForActivityResult
         scope.launch {
             loadingPhotos = true
             val files = readPlanningPhotos(uris, fileReader, viewModel::setUploadError)
-            viewModel.addPhotos(files)
+            viewModel.addPhotos(slotId, files)
             loadingPhotos = false
         }
     }
     val cameraLauncher = rememberLauncherForActivityResult(ActivityResultContracts.TakePicture()) { saved ->
         val uri = pendingCameraUri
+        val slotId = pendingPhotoSlotId ?: state.photos.firstOrNull()?.id
         pendingCameraUri = null
-        if (!saved || uri == null) return@rememberLauncherForActivityResult
+        pendingPhotoSlotId = null
+        if (!saved || uri == null || slotId.isNullOrBlank()) return@rememberLauncherForActivityResult
         scope.launch {
             loadingPhotos = true
             when (val result = fileReader.readUploadFile(uri)) {
-                is ApiResult.Success -> viewModel.addPhotos(listOf(result.value))
+                is ApiResult.Success -> viewModel.addPhotos(slotId, listOf(result.value))
                 is ApiResult.Failure -> viewModel.setUploadError(result.message)
             }
             loadingPhotos = false
@@ -174,10 +193,39 @@ fun MonthlyPlanningScreen(
         screenScrollState.scrollTo(0)
     }
 
+    var previousPhotoSlotCount by remember { mutableStateOf(state.photos.size) }
+    LaunchedEffect(state.photos.size, state.step) {
+        if (state.step == MonthlyPlanningStep.Upload && state.photos.size > previousPhotoSlotCount) {
+            delay(120)
+            screenScrollState.animateScrollTo(screenScrollState.maxValue)
+        }
+        previousPhotoSlotCount = state.photos.size
+    }
+
     LaunchedEffect(showGeneralCalendar) {
         if (showGeneralCalendar) {
+            MobileAnalytics.track(
+                "mobile_calendario_abriu",
+                tela = "calendario_geral",
+                produto = "planejamento_mensal"
+            )
             viewModel.loadGeneralCalendar()
         }
+    }
+
+    LaunchedEffect(state.calendarSharePayload) {
+        val payload = state.calendarSharePayload ?: return@LaunchedEffect
+        val imageUri = shareImageStore.saveShareImage(payload.pedidoId, payload.image)
+        val shareIntent = Intent(Intent.ACTION_SEND).apply {
+            type = payload.image.contentType.ifBlank { "image/png" }
+            putExtra(Intent.EXTRA_STREAM, imageUri)
+            if (payload.description.isNotBlank()) {
+                putExtra(Intent.EXTRA_TEXT, payload.description)
+            }
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        }
+        context.startActivity(Intent.createChooser(shareIntent, "Compartilhar"))
+        viewModel.clearCalendarSharePayload()
     }
 
     BackHandler(enabled = showGeneralCalendar) {
@@ -190,15 +238,56 @@ fun MonthlyPlanningScreen(
         viewModel.backToUpload()
     }
 
+    if (state.billingRequired) {
+        MonthlyPlanningBillingRequiredDialog(
+            state = state,
+            onDismiss = viewModel::dismissBillingRequired,
+            onGeneratePix = viewModel::generateStandaloneArtPix,
+            onOpenPlans = {
+                viewModel.dismissBillingRequired()
+                onOpenPlans()
+            },
+            onRetrySubmit = viewModel::confirmPlanning
+        )
+    }
+
+    pendingPhotoRemoval?.let { photo ->
+        AlertDialog(
+            onDismissRequest = { pendingPhotoRemoval = null },
+            title = {
+                Text("Remover Foto ${photo.number}?", fontWeight = FontWeight.ExtraBold)
+            },
+            text = {
+                Text("Os dados preenchidos neste bloco serão apagados.")
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        viewModel.removePhotoSlot(photo.id)
+                        pendingPhotoRemoval = null
+                    }
+                ) {
+                    Text("Remover")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { pendingPhotoRemoval = null }) {
+                    Text("Cancelar")
+                }
+            }
+        )
+    }
+
     ScreenScaffold {
         if (showGeneralCalendar) {
             MonthlyPlanningGeneralCalendarContent(
                 state = state,
                 onBack = { showGeneralCalendar = false },
-                onRefresh = viewModel::loadGeneralCalendar,
+                onRefresh = viewModel::refreshGeneralCalendar,
                 onOpenOrder = onOpenOrder,
                 onRemove = { item -> viewModel.removeFromGeneralCalendar(item.key) },
                 onReschedule = viewModel::rescheduleGeneralCalendarItem,
+                onShare = viewModel::shareGeneralCalendarItem,
                 modifier = Modifier
                     .fillMaxSize()
                     .verticalScroll(screenScrollState)
@@ -225,15 +314,28 @@ fun MonthlyPlanningScreen(
                     MonthlyPlanningStep.Upload -> MonthlyPlanningUploadContent(
                         state = state,
                         loadingPhotos = loadingPhotos,
-                        onSelectPhotos = { photosPicker.launch("image/*") },
-                        onTakePhoto = {
+                        onSelectPhotos = { slotId ->
+                            pendingPhotoSlotId = slotId
+                            photosPicker.launch("image/*")
+                        },
+                        onTakePhoto = { slotId ->
                             val uri = cameraImageStore.createImageUri()
+                            pendingPhotoSlotId = slotId
                             pendingCameraUri = uri
                             cameraLauncher.launch(uri)
                         },
-                        onRemovePhoto = viewModel::removePhoto,
-                        onObjectiveSelected = { index, objective ->
-                            viewModel.selectPhotoObjective(index, objective.id, objective.label)
+                        onRemovePhotoImage = viewModel::removePhotoImage,
+                        onRemovePhotoSlot = { photo ->
+                            if (photo.hasUserData) {
+                                pendingPhotoRemoval = photo
+                            } else {
+                                viewModel.removePhotoSlot(photo.id)
+                            }
+                        },
+                        onAddPhotoSlot = viewModel::addAnotherPhotoSlot,
+                        onTogglePhotoExpanded = viewModel::togglePhotoExpanded,
+                        onObjectiveSelected = { slotId, objective ->
+                            viewModel.selectPhotoObjective(slotId, objective.id, objective.label)
                         },
                         onManualObjectiveChange = viewModel::updatePhotoManualObjective,
                         onTextChange = viewModel::updatePhotoText,
@@ -262,16 +364,27 @@ fun MonthlyPlanningScreen(
                     )
 
                     MonthlyPlanningStep.Processing -> MonthlyPlanningProcessingStep(
+                        planning = state.planning,
                         marketingVideo = state.marketingVideo,
                         marketingVideoFinished = state.marketingVideoFinished,
-                        artReady = state.planning.readyPosts >= state.planning.totalPosts && state.planning.totalPosts > 0,
                         onMarketingVideoStarted = viewModel::onMarketingVideoStarted,
                         onMarketingVideoQuartile = viewModel::onMarketingVideoQuartile,
                         onMarketingVideoEnded = viewModel::onMarketingVideoEnded,
                         onMarketingVideoError = viewModel::onMarketingVideoError,
-                        onMarketingVideoReadyClick = viewModel::openReadyFromMarketingVideo,
+                        onMarketingVideoReadyClick = { watchedSeconds ->
+                            viewModel.openReadyFromMarketingVideo(
+                                watchedSeconds = watchedSeconds,
+                                onOpenOrder = onOpenOrder,
+                                onOpenPlanningResults = onOpenPlanningResults
+                            )
+                        },
                         onMarketingVideoAbandoned = viewModel::onMarketingVideoAbandoned,
-                        onShowPlans = viewModel::showMyPlannings
+                        onOpenResults = {
+                            viewModel.openCurrentPlanningResults(
+                                onOpenOrder = onOpenOrder,
+                                onOpenPlanningResults = onOpenPlanningResults
+                            )
+                        }
                     )
 
                     MonthlyPlanningStep.MyPlannings -> MonthlyPlanningListStep(
@@ -281,7 +394,7 @@ fun MonthlyPlanningScreen(
                     )
                 }
 
-                state.uploadError?.let { error ->
+                if (!state.billingRequired) state.uploadError?.let { error ->
                     Text(
                         text = error,
                         color = MaterialTheme.colorScheme.error,
@@ -303,6 +416,136 @@ fun MonthlyPlanningScreen(
         }
     }
 }
+
+@Composable
+private fun MonthlyPlanningBillingRequiredDialog(
+    state: MonthlyPlanningUiState,
+    onDismiss: () -> Unit,
+    onGeneratePix: () -> Unit,
+    onOpenPlans: () -> Unit,
+    onRetrySubmit: () -> Unit
+) {
+    val clipboard = LocalClipboardManager.current
+    val requiredArts = state.requiredStandaloneArts
+    val total = requiredArts * STANDALONE_ART_PRICE
+    val pix = state.billingPix
+    val qrBitmap = remember(pix?.qrCodeBase64) {
+        pix?.qrCodeBase64?.let { decodeMonthlyPlanningPixQrCodeBase64(it) }
+    }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = {
+            Text("Comprar arte avulsa", fontWeight = FontWeight.ExtraBold)
+        },
+        text = {
+            Column(
+                verticalArrangement = Arrangement.spacedBy(10.dp),
+                horizontalAlignment = Alignment.CenterHorizontally
+            ) {
+                Text(
+                    text = "Você não tem saldo suficiente para criar esta arte.",
+                    style = MaterialTheme.typography.bodyMedium
+                )
+                Text(
+                    text = "Quantidade necessária: $requiredArts ${if (requiredArts == 1) "arte" else "artes"}",
+                    style = MaterialTheme.typography.bodyMedium,
+                    fontWeight = FontWeight.SemiBold
+                )
+                Text(
+                    text = "R$ 5,99 por arte - Total ${formatBrazilianMoney(total)}",
+                    style = MaterialTheme.typography.bodyMedium,
+                    fontWeight = FontWeight.SemiBold
+                )
+                state.billingPixError?.let { error ->
+                    Text(
+                        text = error,
+                        color = MaterialTheme.colorScheme.error,
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                }
+                if (pix != null) {
+                    qrBitmap?.let { bitmap ->
+                        Image(
+                            bitmap = bitmap.asImageBitmap(),
+                            contentDescription = "QR Code PIX",
+                            modifier = Modifier.size(200.dp)
+                        )
+                    }
+                    Text(
+                        text = "Depois que o pagamento for aprovado, volte aqui e toque em Enviar novamente. Seus dados continuam preenchidos.",
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                    if (pix.pixCopiaCola.isNotBlank()) {
+                        Text(
+                            text = pix.pixCopiaCola,
+                            maxLines = 4,
+                            overflow = TextOverflow.Ellipsis,
+                            style = MaterialTheme.typography.bodySmall
+                        )
+                        TextButton(
+                            onClick = {
+                                clipboard.setText(AnnotatedString(pix.pixCopiaCola))
+                                MobileAnalytics.track(
+                                    "mobile_copiou_pix",
+                                    tela = "planejamento_mensal",
+                                    produto = "arte_avulsa",
+                                    payload = mapOf(
+                                        "quantidade" to requiredArts,
+                                        "valor_total" to total
+                                    ),
+                                    flushNow = true
+                                )
+                            }
+                        ) {
+                            Text("Copiar PIX")
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            Button(
+                enabled = !state.billingPixLoading,
+                onClick = {
+                    if (pix == null) onGeneratePix() else onRetrySubmit()
+                }
+            ) {
+                if (state.billingPixLoading) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(18.dp),
+                        strokeWidth = 2.dp
+                    )
+                } else {
+                    Text(if (pix == null) "Gerar PIX" else "Tentar enviar novamente")
+                }
+            }
+        },
+        dismissButton = {
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                TextButton(onClick = onOpenPlans) {
+                    Text("Ver combos")
+                }
+                TextButton(onClick = onDismiss) {
+                    Text("Fechar")
+                }
+            }
+        }
+    )
+}
+
+private const val STANDALONE_ART_PRICE = 5.99
+
+private fun formatBrazilianMoney(value: Double): String {
+    return "R$ " + String.format(Locale("pt", "BR"), "%.2f", value)
+}
+
+private fun decodeMonthlyPlanningPixQrCodeBase64(value: String) = runCatching {
+    val cleanValue = value.substringAfter("base64,", value)
+    val bytes = Base64.decode(cleanValue, Base64.DEFAULT)
+    BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+}.getOrNull()
 
 @Composable
 private fun MonthlyPlanningHeader(
@@ -438,6 +681,7 @@ private fun MonthlyPlanningGeneralCalendarContent(
     onOpenOrder: (String) -> Unit,
     onRemove: (MonthlyPlanningCalendarListItem) -> Unit,
     onReschedule: (MonthlyPlanningCalendarListItem, String) -> Unit,
+    onShare: (MonthlyPlanningCalendarListItem) -> Unit,
     modifier: Modifier = Modifier
 ) {
     Column(
@@ -478,6 +722,14 @@ private fun MonthlyPlanningGeneralCalendarContent(
                 color = MaterialTheme.colorScheme.error
             )
         }
+        state.calendarSuccessMessage?.let { message ->
+            Text(
+                text = message,
+                style = MaterialTheme.typography.bodyMedium,
+                fontWeight = FontWeight.SemiBold,
+                color = MaterialTheme.colorScheme.primary
+            )
+        }
         MonthlyPlanningCalendarList(
             title = "Postagens planejadas",
             items = state.visibleGeneralCalendarPosts,
@@ -486,6 +738,9 @@ private fun MonthlyPlanningGeneralCalendarContent(
             onOpenOrder = onOpenOrder,
             onRemove = onRemove,
             onReschedule = onReschedule,
+            reschedulingItemKeys = state.reschedulingCalendarItemKeys,
+            sharingItemKeys = state.sharingCalendarItemKeys,
+            onShare = onShare,
             showNextThirtyDays = true
         )
         Spacer(modifier = Modifier.height(18.dp))
@@ -496,56 +751,65 @@ private fun MonthlyPlanningGeneralCalendarContent(
 private fun MonthlyPlanningUploadContent(
     state: MonthlyPlanningUiState,
     loadingPhotos: Boolean,
-    onSelectPhotos: () -> Unit,
-    onTakePhoto: () -> Unit,
-    onRemovePhoto: (Int) -> Unit,
-    onObjectiveSelected: (Int, CreateArtObjective) -> Unit,
-    onManualObjectiveChange: (Int, String) -> Unit,
-    onTextChange: (Int, String) -> Unit,
-    onDecreaseLevel: (Int) -> Unit,
-    onIncreaseLevel: (Int) -> Unit,
-    onToggleLevelInfo: (Int) -> Unit,
+    onSelectPhotos: (String) -> Unit,
+    onTakePhoto: (String) -> Unit,
+    onRemovePhotoImage: (String) -> Unit,
+    onRemovePhotoSlot: (MonthlyPlanningPhotoDraft) -> Unit,
+    onAddPhotoSlot: () -> Unit,
+    onTogglePhotoExpanded: (String) -> Unit,
+    onObjectiveSelected: (String, CreateArtObjective) -> Unit,
+    onManualObjectiveChange: (String, String) -> Unit,
+    onTextChange: (String, String) -> Unit,
+    onDecreaseLevel: (String) -> Unit,
+    onIncreaseLevel: (String) -> Unit,
+    onToggleLevelInfo: (String) -> Unit,
     onBack: () -> Unit,
     onContinue: () -> Unit
 ) {
     Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
-        if (state.photos.isEmpty()) {
-            PlanningPhotoPlaceholderCard(
-                loadingPhotos = loadingPhotos,
-                onSelectPhotos = onSelectPhotos,
-                onTakePhoto = onTakePhoto
-            )
-        } else {
-            state.photos.forEachIndexed { index, photo ->
+        state.photos.forEach { photo ->
+            key(photo.id) {
                 PlanningPhotoCard(
-                    index = index + 1,
                     photo = photo,
                     ramo = state.companyProfile.ramo,
+                    loadingPhotos = loadingPhotos,
+                    onToggleExpanded = { onTogglePhotoExpanded(photo.id) },
+                    onSelectPhotos = { onSelectPhotos(photo.id) },
+                    onTakePhoto = { onTakePhoto(photo.id) },
+                    onRemoveImage = { onRemovePhotoImage(photo.id) },
                     onObjectiveSelected = { objective ->
-                        onObjectiveSelected(index, objective)
+                        onObjectiveSelected(photo.id, objective)
                     },
                     onManualObjectiveChange = { value ->
-                        onManualObjectiveChange(index, value)
+                        onManualObjectiveChange(photo.id, value)
                     },
                     onTextChange = { value ->
-                        onTextChange(index, value)
+                        onTextChange(photo.id, value)
                     },
                     onDecreaseLevel = {
-                        onDecreaseLevel(index)
+                        onDecreaseLevel(photo.id)
                     },
                     onIncreaseLevel = {
-                        onIncreaseLevel(index)
+                        onIncreaseLevel(photo.id)
                     },
                     onToggleLevelInfo = {
-                        onToggleLevelInfo(index)
+                        onToggleLevelInfo(photo.id)
                     },
-                    onRemove = { onRemovePhoto(index) }
+                    onRemove = { onRemovePhotoSlot(photo) }
                 )
             }
+        }
+
+        if (state.canAddMorePhotos) {
             AddPhotoCard(
                 loadingPhotos = loadingPhotos,
-                hasPhotos = true,
-                onClick = onSelectPhotos
+                onClick = onAddPhotoSlot
+            )
+        } else {
+            Text(
+                text = "Limite de $MONTHLY_PLANNING_MAX_ARTS_PER_REQUEST artes por pedido atingido.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
             )
         }
 
@@ -669,9 +933,13 @@ private fun PhotoOptionCard(
 
 @Composable
 private fun PlanningPhotoCard(
-    index: Int,
     photo: MonthlyPlanningPhotoDraft,
     ramo: String,
+    loadingPhotos: Boolean,
+    onToggleExpanded: () -> Unit,
+    onSelectPhotos: () -> Unit,
+    onTakePhoto: () -> Unit,
+    onRemoveImage: () -> Unit,
     onObjectiveSelected: (CreateArtObjective) -> Unit,
     onManualObjectiveChange: (String) -> Unit,
     onTextChange: (String) -> Unit,
@@ -680,8 +948,8 @@ private fun PlanningPhotoCard(
     onToggleLevelInfo: () -> Unit,
     onRemove: () -> Unit
 ) {
-    var objectiveExpanded by remember(photo.file.fileName, photo.file.bytes.size) { mutableStateOf(false) }
-    var textExpanded by remember(photo.file.fileName, photo.file.bytes.size) { mutableStateOf(false) }
+    var objectiveExpanded by remember(photo.id) { mutableStateOf(false) }
+    var textExpanded by remember(photo.id) { mutableStateOf(false) }
     val objectiveSummary = photo.objetivo.ifBlank { "Nenhum objetivo selecionado" }
     val textSummary = photo.escritaImagem.ifBlank { "Nenhuma escrita adicionada" }
 
@@ -696,43 +964,55 @@ private fun PlanningPhotoCard(
             modifier = Modifier.padding(18.dp),
             verticalArrangement = Arrangement.spacedBy(16.dp)
         ) {
-            PlanningPhotoHeader(index = index, onRemove = onRemove)
-            PlanningPhotoPreview(index = index, photo = photo)
-            PlanningPhotoAccordionSection(
-                title = "Objetivo para esta foto",
-                summary = objectiveSummary,
-                expanded = objectiveExpanded,
-                onToggle = { objectiveExpanded = !objectiveExpanded }
-            ) {
-                PlanningPhotoObjectiveSection(
-                    ramo = ramo,
-                    selectedObjective = photo.objetivo,
-                    selectedObjectiveId = photo.objetivoId,
-                    onObjectiveSelected = { objective ->
-                        onObjectiveSelected(objective)
-                        objectiveExpanded = false
-                    },
-                    onManualObjectiveChange = onManualObjectiveChange
-                )
-            }
-            PlanningPhotoAccordionSection(
-                title = "Escrita da imagem",
-                summary = textSummary,
-                expanded = textExpanded,
-                onToggle = { textExpanded = !textExpanded }
-            ) {
-                PlanningPhotoTextField(
-                    value = photo.escritaImagem,
-                    onValueChange = onTextChange
-                )
-            }
-            PlanningPhotoLevelSelector(
-                level = photo.nivelEdicao,
-                showInfo = photo.showNivelInfo,
-                onDecrease = onDecreaseLevel,
-                onIncrease = onIncreaseLevel,
-                onToggleInfo = onToggleLevelInfo
+            PlanningPhotoHeader(
+                photo = photo,
+                onToggleExpanded = onToggleExpanded,
+                onRemove = onRemove
             )
+            if (photo.expanded) {
+                PlanningPhotoPreview(
+                    photo = photo,
+                    loadingPhotos = loadingPhotos,
+                    onSelectPhotos = onSelectPhotos,
+                    onTakePhoto = onTakePhoto,
+                    onRemoveImage = onRemoveImage
+                )
+                PlanningPhotoAccordionSection(
+                    title = "Objetivo para esta foto",
+                    summary = objectiveSummary,
+                    expanded = objectiveExpanded,
+                    onToggle = { objectiveExpanded = !objectiveExpanded }
+                ) {
+                    PlanningPhotoObjectiveSection(
+                        ramo = ramo,
+                        selectedObjective = photo.objetivo,
+                        selectedObjectiveId = photo.objetivoId,
+                        onObjectiveSelected = { objective ->
+                            onObjectiveSelected(objective)
+                            objectiveExpanded = false
+                        },
+                        onManualObjectiveChange = onManualObjectiveChange
+                    )
+                }
+                PlanningPhotoAccordionSection(
+                    title = "Escrita da imagem",
+                    summary = textSummary,
+                    expanded = textExpanded,
+                    onToggle = { textExpanded = !textExpanded }
+                ) {
+                    PlanningPhotoTextField(
+                        value = photo.escritaImagem,
+                        onValueChange = onTextChange
+                    )
+                }
+                PlanningPhotoLevelSelector(
+                    level = photo.nivelEdicao,
+                    showInfo = photo.showNivelInfo,
+                    onDecrease = onDecreaseLevel,
+                    onIncrease = onIncreaseLevel,
+                    onToggleInfo = onToggleLevelInfo
+                )
+            }
         }
     }
 }
@@ -804,51 +1084,65 @@ private fun PlanningPhotoAccordionSection(
 
 @Composable
 private fun PlanningPhotoHeader(
-    index: Int,
+    photo: MonthlyPlanningPhotoDraft,
+    onToggleExpanded: () -> Unit,
     onRemove: () -> Unit
 ) {
     Row(
-        modifier = Modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.SpaceBetween,
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onToggleExpanded),
+        horizontalArrangement = Arrangement.spacedBy(10.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
         Text(
-            text = "Foto $index",
+            text = "Foto ${photo.number}",
+            modifier = Modifier.weight(1f),
             style = MaterialTheme.typography.titleMedium,
             fontWeight = FontWeight.ExtraBold
         )
-        TextButton(
-            onClick = onRemove,
-            modifier = Modifier.height(32.dp),
-            contentPadding = PaddingValues(horizontal = 6.dp, vertical = 0.dp),
-            colors = ButtonDefaults.textButtonColors(
-                contentColor = MaterialTheme.colorScheme.onSurfaceVariant
-            )
-        ) {
-            Icon(
-                imageVector = Icons.Filled.Delete,
-                contentDescription = null,
-                modifier = Modifier.size(16.dp),
-                tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.72f)
-            )
-            Spacer(modifier = Modifier.width(4.dp))
-            Text(
-                text = "Remover",
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.78f)
-            )
+        if (photo.number > 1 && (photo.isActive || !photo.fixedSlot)) {
+            TextButton(
+                onClick = onRemove,
+                modifier = Modifier.height(32.dp),
+                contentPadding = PaddingValues(horizontal = 6.dp, vertical = 0.dp),
+                colors = ButtonDefaults.textButtonColors(
+                    contentColor = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            ) {
+                Icon(
+                    imageVector = Icons.Filled.Delete,
+                    contentDescription = null,
+                    modifier = Modifier.size(16.dp),
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.72f)
+                )
+                Spacer(modifier = Modifier.width(4.dp))
+                Text(
+                    text = "Remover",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.78f)
+                )
+            }
         }
+        Icon(
+            imageVector = if (photo.expanded) Icons.Filled.KeyboardArrowUp else Icons.Filled.KeyboardArrowDown,
+            contentDescription = null,
+            tint = MaterialTheme.colorScheme.onSurfaceVariant
+        )
     }
 }
 
 @Composable
 private fun PlanningPhotoPreview(
-    index: Int,
-    photo: MonthlyPlanningPhotoDraft
+    photo: MonthlyPlanningPhotoDraft,
+    loadingPhotos: Boolean,
+    onSelectPhotos: () -> Unit,
+    onTakePhoto: () -> Unit,
+    onRemoveImage: () -> Unit
 ) {
     val file = photo.file
-    val bitmap = remember(file.fileName, file.bytes.size) {
-        BitmapFactory.decodeByteArray(file.bytes, 0, file.bytes.size)
+    val bitmap = remember(file?.fileName, file?.bytes?.size) {
+        file?.let { BitmapFactory.decodeByteArray(it.bytes, 0, it.bytes.size) }
     }
 
     Row(
@@ -856,30 +1150,48 @@ private fun PlanningPhotoPreview(
         horizontalArrangement = Arrangement.spacedBy(16.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
-        if (bitmap != null) {
-            Image(
-                bitmap = bitmap.asImageBitmap(),
-                contentDescription = "Foto $index do pedido",
-                modifier = Modifier
-                    .width(108.dp)
-                    .height(144.dp)
-                    .clip(RoundedCornerShape(12.dp)),
-                contentScale = ContentScale.Crop
-            )
-        } else {
-            Box(
-                modifier = Modifier
-                    .width(108.dp)
-                    .height(144.dp)
-                    .clip(RoundedCornerShape(12.dp))
-                    .background(MaterialTheme.colorScheme.surfaceVariant),
-                contentAlignment = Alignment.Center
-            ) {
-                Text(
-                    text = "Foto",
-                    style = MaterialTheme.typography.labelMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
+        Box(
+            modifier = Modifier
+                .width(108.dp)
+                .height(144.dp)
+                .clip(RoundedCornerShape(12.dp))
+                .background(MaterialTheme.colorScheme.surfaceVariant),
+            contentAlignment = Alignment.Center
+        ) {
+            if (bitmap != null) {
+                Image(
+                    bitmap = bitmap.asImageBitmap(),
+                    contentDescription = "Foto ${photo.number} do pedido",
+                    modifier = Modifier.fillMaxSize(),
+                    contentScale = ContentScale.Crop
                 )
+            } else {
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    SmallPhotoActionButton(
+                        enabled = !loadingPhotos,
+                        onClick = onSelectPhotos
+                    ) {
+                        Icon(
+                            imageVector = Icons.Filled.AddCircle,
+                            contentDescription = "Adicionar foto da galeria",
+                            modifier = Modifier.size(22.dp),
+                            tint = MaterialTheme.colorScheme.primary
+                        )
+                    }
+                    SmallPhotoActionButton(
+                        enabled = !loadingPhotos,
+                        onClick = onTakePhoto
+                    ) {
+                        CameraSourceGlyph(
+                            color = MaterialTheme.colorScheme.primary,
+                            background = MaterialTheme.colorScheme.surfaceVariant,
+                            modifier = Modifier.size(24.dp)
+                        )
+                    }
+                }
             }
         }
 
@@ -887,20 +1199,72 @@ private fun PlanningPhotoPreview(
             modifier = Modifier.weight(1f),
             verticalArrangement = Arrangement.spacedBy(4.dp)
         ) {
-            Text(
-                text = file.fileName,
-                style = MaterialTheme.typography.bodySmall,
-                fontWeight = FontWeight.Medium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                maxLines = 2,
-                overflow = TextOverflow.Ellipsis
-            )
-            Text(
-                text = formatUploadFileSize(file.bytes.size),
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.78f)
-            )
+            if (file != null) {
+                Text(
+                    text = file.fileName,
+                    style = MaterialTheme.typography.bodySmall,
+                    fontWeight = FontWeight.Medium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis
+                )
+                Text(
+                    text = formatUploadFileSize(file.bytes.size),
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.78f)
+                )
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    TextButton(
+                        enabled = !loadingPhotos,
+                        onClick = onSelectPhotos,
+                        contentPadding = PaddingValues(horizontal = 0.dp)
+                    ) {
+                        Text("Substituir", style = MaterialTheme.typography.labelSmall)
+                    }
+                    TextButton(
+                        onClick = onRemoveImage,
+                        contentPadding = PaddingValues(horizontal = 0.dp)
+                    ) {
+                        Text("Remover imagem", style = MaterialTheme.typography.labelSmall)
+                    }
+                }
+            } else {
+                Text(
+                    text = "Arte sem foto",
+                    style = MaterialTheme.typography.bodySmall,
+                    fontWeight = FontWeight.Medium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Text(
+                    text = "Imagem opcional",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.78f)
+                )
+            }
         }
+    }
+}
+
+@Composable
+private fun SmallPhotoActionButton(
+    enabled: Boolean,
+    onClick: () -> Unit,
+    content: @Composable () -> Unit
+) {
+    Box(
+        modifier = Modifier
+            .size(42.dp)
+            .clip(RoundedCornerShape(10.dp))
+            .background(MaterialTheme.colorScheme.surface.copy(alpha = 0.92f))
+            .border(
+                width = 1.dp,
+                color = MaterialTheme.colorScheme.primary.copy(alpha = 0.28f),
+                shape = RoundedCornerShape(10.dp)
+            )
+            .clickable(enabled = enabled, onClick = onClick),
+        contentAlignment = Alignment.Center
+    ) {
+        content()
     }
 }
 
@@ -1240,9 +1604,9 @@ private fun PlanningCalendarGlyph(
 @Composable
 private fun AddPhotoCard(
     loadingPhotos: Boolean,
-    hasPhotos: Boolean,
     onClick: () -> Unit
 ) {
+    val hasPhotos = true
     val title = if (hasPhotos) {
         "Criar + imagens no mesmo pedido"
     } else {
@@ -1270,9 +1634,9 @@ private fun AddPhotoCard(
             .fillMaxWidth()
             .clickable(enabled = !loadingPhotos, onClick = onClick),
         shape = RoundedCornerShape(18.dp),
-        colors = CardDefaults.cardColors(containerColor = containerColor),
-        elevation = CardDefaults.cardElevation(defaultElevation = if (hasPhotos) 0.dp else 1.dp),
-        border = BorderStroke(1.dp, borderColor)
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+        elevation = CardDefaults.cardElevation(defaultElevation = 0.dp),
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.24f))
     ) {
         Row(
             modifier = Modifier.padding(18.dp),
@@ -1284,13 +1648,13 @@ private fun AddPhotoCard(
                 verticalArrangement = Arrangement.spacedBy(2.dp)
             ) {
                 Text(
-                    text = if (loadingPhotos) "Carregando fotos..." else title,
+                    text = if (loadingPhotos) "Carregando fotos..." else "Adicionar outra arte ao pedido",
                     style = MaterialTheme.typography.titleMedium,
                     fontWeight = FontWeight.ExtraBold,
                     color = MaterialTheme.colorScheme.primary
                 )
                 Text(
-                    text = subtitle,
+                    text = "Crie a proxima foto deste planejamento",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
@@ -1298,7 +1662,7 @@ private fun AddPhotoCard(
             Icon(
                 imageVector = Icons.Filled.AddCircle,
                 contentDescription = null,
-                modifier = Modifier.size(iconSize),
+                modifier = Modifier.size(36.dp),
                 tint = MaterialTheme.colorScheme.primary
             )
         }
@@ -1395,7 +1759,7 @@ private fun MonthlyPlanningConfirmationStep(
             onToggleOtherInfo = onToggleOtherInfo,
             onValueChange = onCompanyImportantInfoChange
         )
-        MonthlyPlanningPhotosReviewCard(photos = state.photos)
+        MonthlyPlanningPhotosReviewCard(photos = state.activePhotos)
 
         MonthlyPlanningFooter(
             secondaryText = "Voltar",
@@ -1683,18 +2047,18 @@ private fun MonthlyPlanningPhotosReviewCard(photos: List<MonthlyPlanningPhotoDra
                 fontWeight = FontWeight.ExtraBold
             )
             Text(
-                text = "${photos.size} ${if (photos.size == 1) "foto selecionada" else "fotos selecionadas"}",
+                text = "${photos.size} ${if (photos.size == 1) "arte ativa" else "artes ativas"}",
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
             if (photos.isEmpty()) {
                 Text(
-                    text = "Nenhuma foto selecionada.",
+                    text = "Nenhuma arte ativa.",
                     style = MaterialTheme.typography.bodyMedium
                 )
             } else {
-                photos.forEachIndexed { index, photo ->
-                    ReviewPhotoLine(index = index + 1, photo = photo)
+                photos.forEach { photo ->
+                    ReviewPhotoLine(photo = photo)
                 }
             }
         }
@@ -1703,31 +2067,63 @@ private fun MonthlyPlanningPhotosReviewCard(photos: List<MonthlyPlanningPhotoDra
 
 @Composable
 private fun ReviewPhotoLine(
-    index: Int,
     photo: MonthlyPlanningPhotoDraft
 ) {
+    val file = photo.file
+    val bitmap = remember(file?.fileName, file?.bytes?.size) {
+        file?.let { BitmapFactory.decodeByteArray(it.bytes, 0, it.bytes.size) }
+    }
+
     Column(
         modifier = Modifier.fillMaxWidth(),
         verticalArrangement = Arrangement.spacedBy(4.dp)
     ) {
         Row(
             modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
+            horizontalArrangement = Arrangement.spacedBy(12.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Text(
-                text = "Foto $index",
-                style = MaterialTheme.typography.bodyMedium,
-                fontWeight = FontWeight.SemiBold
-            )
-            Text(
-                text = photo.file.fileName,
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-                modifier = Modifier.weight(1f).padding(start = 14.dp)
-            )
+            Box(
+                modifier = Modifier
+                    .width(44.dp)
+                    .height(58.dp)
+                    .clip(RoundedCornerShape(8.dp))
+                    .background(MaterialTheme.colorScheme.surfaceVariant),
+                contentAlignment = Alignment.Center
+            ) {
+                if (bitmap != null) {
+                    Image(
+                        bitmap = bitmap.asImageBitmap(),
+                        contentDescription = "Miniatura da Foto ${photo.number}",
+                        modifier = Modifier.fillMaxSize(),
+                        contentScale = ContentScale.Crop
+                    )
+                } else {
+                    Text(
+                        text = "Sem\nfoto",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        textAlign = TextAlign.Center
+                    )
+                }
+            }
+            Column(
+                modifier = Modifier.weight(1f),
+                verticalArrangement = Arrangement.spacedBy(2.dp)
+            ) {
+                Text(
+                    text = "Foto ${photo.number}",
+                    style = MaterialTheme.typography.bodyMedium,
+                    fontWeight = FontWeight.SemiBold
+                )
+                Text(
+                    text = file?.fileName ?: "Arte sem foto",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
         }
         PhotoReviewDetail(label = "Objetivo", value = photo.objetivo.ifBlank { "-" })
         PhotoReviewDetail(label = "Escrita", value = photo.escritaImagem.ifBlank { "-" })
@@ -1788,22 +2184,24 @@ private fun parsePlanningCreatedAt(createdAt: String): Date? {
 
 @Composable
 private fun MonthlyPlanningProcessingStep(
+    planning: MonthlyPlanningSummary,
     marketingVideo: MarketingVideo?,
     marketingVideoFinished: Boolean,
-    artReady: Boolean,
     onMarketingVideoStarted: () -> Unit,
     onMarketingVideoQuartile: (Int, Long) -> Unit,
     onMarketingVideoEnded: (Long) -> Unit,
     onMarketingVideoError: () -> Unit,
     onMarketingVideoReadyClick: (Long) -> Unit,
     onMarketingVideoAbandoned: (Long) -> Unit,
-    onShowPlans: () -> Unit
+    onOpenResults: () -> Unit
 ) {
+    val processingStatus = planning.toProcessingStatus()
+
     Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
         if (marketingVideo != null) {
             MonthlyPlanningMarketingVideoWaitingCard(
                 video = marketingVideo,
-                artReady = artReady,
+                artReady = processingStatus.canOpenResults,
                 videoFinished = marketingVideoFinished,
                 onStarted = onMarketingVideoStarted,
                 onQuartile = onMarketingVideoQuartile,
@@ -1813,18 +2211,44 @@ private fun MonthlyPlanningProcessingStep(
                 onAbandoned = onMarketingVideoAbandoned
             )
         }
-        EstimatedCreationProgressCard(
-            progressKey = "monthly-planning-submit",
-            running = true,
-            title = "Estamos criando suas imagens",
-            subtitle = "Seu planejamento foi enviado para produção.",
-            explanation = "As imagens aparecerão em Minhas imagens conforme ficarem prontas."
-        )
+        if (!processingStatus.canOpenResults) {
+            EstimatedCreationProgressCard(
+                progressKey = "monthly-planning-submit",
+                running = true,
+                title = processingStatus.title,
+                subtitle = processingStatus.message,
+                explanation = ""
+            )
+        } else {
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(containerColor = Color(0xFFF6E8C9)),
+                shape = RoundedCornerShape(18.dp)
+            ) {
+                Column(
+                    modifier = Modifier.padding(16.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Text(
+                        text = processingStatus.title,
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.ExtraBold,
+                        color = Color(0xFF4A2A00)
+                    )
+                    Text(
+                        text = processingStatus.message,
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = Color(0xFF5A4630)
+                    )
+                }
+            }
+        }
         Button(
             modifier = Modifier.fillMaxWidth(),
-            onClick = onShowPlans
+            enabled = processingStatus.canOpenResults,
+            onClick = onOpenResults
         ) {
-            Text("Ver Minhas imagens")
+            Text("Ver imagens")
         }
     }
 }

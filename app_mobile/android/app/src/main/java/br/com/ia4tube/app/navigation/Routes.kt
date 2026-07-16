@@ -15,6 +15,7 @@ object Routes {
     const val Carousel = "carousel"
     const val MonthlyPlanning = "monthly-planning"
     const val MonthlyPlanningDetail = "monthly-planning/{planningId}"
+    const val MonthlyPlanningResults = "monthly-planning-results/{planningId}"
     const val CompanyProfile = "company-profile"
     const val Support = "support"
     const val Plans = "plans"
@@ -22,6 +23,7 @@ object Routes {
     fun orders(filter: OrderListFilter = OrderListFilter.All): String = "orders?filter=${filter.routeValue}"
     fun orderDetail(pedidoId: String): String = "orders/$pedidoId"
     fun monthlyPlanningDetail(planningId: String): String = "monthly-planning/$planningId"
+    fun monthlyPlanningResults(planningId: String): String = "monthly-planning-results/${Uri.encode(planningId)}"
     fun createArtEmpresa(photoUri: String = ""): String {
         return if (photoUri.isBlank()) {
             "create-art/empresa"

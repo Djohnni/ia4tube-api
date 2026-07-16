@@ -11,7 +11,13 @@ data class MonthlyPlanningRequest(
 )
 
 data class MonthlyPlanningPhotoInput(
-    val file: UploadFile,
+    val slotId: String,
+    val order: Int,
+    val file: UploadFile? = null,
+    val objetivo: String = "",
+    val objetivoId: String = "",
+    val escritaImagem: String = "",
+    val nivelEdicao: Int = 2,
     val orientacao: String = ""
 )
 
@@ -58,7 +64,8 @@ data class MonthlyPlanningPostDto(
     val caption: String,
     val pedidoId: String,
     val imageReady: Boolean,
-    val imageText: String = ""
+    val imageText: String = "",
+    val thumbnailUrl: String = ""
 )
 
 data class MonthlyPlanningRescheduleRequest(
