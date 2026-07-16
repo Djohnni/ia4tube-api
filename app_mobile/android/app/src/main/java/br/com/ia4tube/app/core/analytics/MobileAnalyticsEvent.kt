@@ -7,6 +7,6 @@ data class MobileAnalyticsEvent(
     val etapa: String = "",
     val campoAtual: String = "",
     val pedidoId: String = "",
-    val payload: Map<String, String> = emptyMap(),
+    val payload: Map<String, Any> = emptyMap(),
     val timestamp: Long = System.currentTimeMillis()
 )

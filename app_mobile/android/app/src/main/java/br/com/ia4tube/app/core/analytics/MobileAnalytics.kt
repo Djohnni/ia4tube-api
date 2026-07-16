@@ -15,7 +15,7 @@ object MobileAnalytics {
         etapa: String = "",
         campoAtual: String = "",
         pedidoId: String = "",
-        payload: Map<String, String> = emptyMap(),
+        payload: Map<String, Any> = emptyMap(),
         flushNow: Boolean = false
     ) {
         tracker?.track(

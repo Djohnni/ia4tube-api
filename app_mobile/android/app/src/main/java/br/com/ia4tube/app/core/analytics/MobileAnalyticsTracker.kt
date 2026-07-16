@@ -42,13 +42,11 @@ class MobileAnalyticsTracker(
         etapa: String = "",
         campoAtual: String = currentField,
         pedidoId: String = "",
-        payload: Map<String, String> = emptyMap(),
+        payload: Map<String, Any> = emptyMap(),
         flushNow: Boolean = false
     ) {
         val safeEvent = if (eventName.startsWith("mobile_")) eventName else "mobile_$eventName"
-        val sanitizedPayload = payload
-            .filterKeys { key -> !key.contains("senha", ignoreCase = true) && !key.contains("token", ignoreCase = true) }
-            .filterValues { value -> value.length <= 500 && !value.startsWith("data:image", ignoreCase = true) }
+        val sanitizedPayload = sanitizePayload(payload)
 
         val event = MobileAnalyticsEvent(
             evento = safeEvent,
@@ -157,7 +155,35 @@ class MobileAnalyticsTracker(
     companion object {
         private const val BATCH_SIZE = 12
         private const val FLUSH_INTERVAL_MS = 6_000L
+        private const val MAX_PAYLOAD_STRING_LENGTH = 500
         private val JSON = "application/json; charset=utf-8".toMediaType()
+
+        internal fun sanitizePayload(payload: Map<String, Any?>): Map<String, Any> {
+            return payload.mapNotNull { (key, value) ->
+                if (isSensitivePayloadKey(key)) return@mapNotNull null
+                val normalized = normalizePayloadValue(value) ?: return@mapNotNull null
+                if (!isSafePayloadValue(normalized)) return@mapNotNull null
+                key to normalized
+            }.toMap()
+        }
+
+        private fun isSensitivePayloadKey(key: String): Boolean {
+            return key.contains("senha", ignoreCase = true) || key.contains("token", ignoreCase = true)
+        }
+
+        private fun normalizePayloadValue(value: Any?): Any? = when (value) {
+            is String -> value
+            is Int -> value
+            is Long -> value
+            is Double -> value
+            is Boolean -> value
+            else -> null
+        }
+
+        private fun isSafePayloadValue(value: Any): Boolean {
+            if (value !is String) return true
+            return value.length <= MAX_PAYLOAD_STRING_LENGTH && !value.startsWith("data:image", ignoreCase = true)
+        }
 
         private fun defaultClient(): OkHttpClient {
             return OkHttpClient.Builder()
