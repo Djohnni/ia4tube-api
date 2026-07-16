@@ -1001,7 +1001,7 @@ private fun PlanningPhotoCard(
                     )
                 }
                 PlanningPhotoAccordionSection(
-                    title = "Escrita da imagem",
+                    title = "Escrita da imagem (Opcional)",
                     summary = textSummary,
                     expanded = textExpanded,
                     onToggle = { textExpanded = !textExpanded }
