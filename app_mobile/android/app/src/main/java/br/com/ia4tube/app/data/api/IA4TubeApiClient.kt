@@ -1327,6 +1327,7 @@ class IA4TubeApiClient(
                         .put("arquivo", file?.fileName.orEmpty())
                         .put("arquivo_index", if (file != null) fileIndex else 0)
                         .put("tem_arquivo", file != null)
+                        .put("sem_foto_selecionado", photo.withoutPhotoSelected && file == null)
                         .put("objetivo", photo.objetivo.trim())
                         .put("objetivo_id", photo.objetivoId.trim())
                         .put("escrita_imagem", photo.escritaImagem.trim())

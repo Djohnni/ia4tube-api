@@ -128,6 +128,7 @@ data class MonthlyPlanningPhotoDraft(
     val objetivoId: String = "",
     val escritaImagem: String = "",
     val nivelEdicao: Int = DEFAULT_MONTHLY_PLANNING_PHOTO_EDIT_LEVEL,
+    val withoutPhotoSelected: Boolean = false,
     val expanded: Boolean = false,
     val fixedSlot: Boolean = false,
     val showNivelInfo: Boolean = false
@@ -136,10 +137,10 @@ data class MonthlyPlanningPhotoDraft(
         get() = file != null || objetivo.isNotBlank() || escritaImagem.isNotBlank()
 
     val hasUserData: Boolean
-        get() = hasMeaningfulContent
+        get() = hasMeaningfulContent || withoutPhotoSelected
 
     val isActive: Boolean
-        get() = hasUserData
+        get() = hasMeaningfulContent
 }
 
 fun createInitialMonthlyPlanningPhotoDrafts(): List<MonthlyPlanningPhotoDraft> {
@@ -176,8 +177,28 @@ private fun MonthlyPlanningPhotoDraft.clearedMonthlyPlanningPhotoSlot(): Monthly
         objetivoId = "",
         escritaImagem = "",
         nivelEdicao = DEFAULT_MONTHLY_PLANNING_PHOTO_EDIT_LEVEL,
+        withoutPhotoSelected = false,
         expanded = false,
         showNivelInfo = false
+    )
+}
+
+internal fun MonthlyPlanningPhotoDraft.toggleWithoutPhotoChoice(): MonthlyPlanningPhotoDraft {
+    if (file != null) return this
+    return copy(withoutPhotoSelected = !withoutPhotoSelected)
+}
+
+internal fun MonthlyPlanningPhotoDraft.withPhotoFile(file: UploadFile): MonthlyPlanningPhotoDraft {
+    return copy(
+        file = file,
+        withoutPhotoSelected = false
+    )
+}
+
+internal fun MonthlyPlanningPhotoDraft.withRemovedPhotoFile(): MonthlyPlanningPhotoDraft {
+    return copy(
+        file = null,
+        withoutPhotoSelected = true
     )
 }
 
@@ -1049,8 +1070,7 @@ class MonthlyPlanningViewModel(
 
             fun assignFile(index: Int, file: UploadFile, expanded: Boolean) {
                 val current = photos.getOrNull(index) ?: return
-                photos[index] = current.copy(
-                    file = file,
+                photos[index] = current.withPhotoFile(file).copy(
                     expanded = expanded
                 )
             }
@@ -1155,7 +1175,13 @@ class MonthlyPlanningViewModel(
 
     fun removePhotoImage(slotId: String) {
         updatePhoto(slotId) {
-            it.copy(file = null)
+            it.withRemovedPhotoFile()
+        }
+    }
+
+    fun toggleWithoutPhotoChoice(slotId: String) {
+        updatePhoto(slotId) {
+            it.toggleWithoutPhotoChoice()
         }
     }
 
@@ -1485,8 +1511,9 @@ private fun reservedInputForPhotos(photoCount: Int, currentFreeArts: Int): Strin
     return photoCount.coerceAtMost(max).toString()
 }
 
-private fun MonthlyPlanningPhotoDraft.toRequestInput(): MonthlyPlanningPhotoInput {
+internal fun MonthlyPlanningPhotoDraft.toRequestInput(): MonthlyPlanningPhotoInput {
     val orientacao = buildList {
+        if (withoutPhotoSelected && file == null) add("Cliente escolheu criar esta arte sem foto.")
         if (objetivo.isNotBlank()) add("Objetivo da foto: ${objetivo.trim()}")
         if (escritaImagem.isNotBlank()) add("Escrita que deve aparecer na imagem: ${escritaImagem.trim()}")
         add("Nivel de edicao: $nivelEdicao")
@@ -1500,6 +1527,7 @@ private fun MonthlyPlanningPhotoDraft.toRequestInput(): MonthlyPlanningPhotoInpu
         objetivoId = objetivoId.trim(),
         escritaImagem = escritaImagem.trim(),
         nivelEdicao = nivelEdicao,
+        withoutPhotoSelected = withoutPhotoSelected && file == null,
         orientacao = orientacao
     )
 }

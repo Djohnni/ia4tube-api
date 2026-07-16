@@ -34,6 +34,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowLeft
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.AddCircle
+import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.KeyboardArrowDown
@@ -324,6 +325,7 @@ fun MonthlyPlanningScreen(
                             pendingCameraUri = uri
                             cameraLauncher.launch(uri)
                         },
+                        onToggleWithoutPhoto = viewModel::toggleWithoutPhotoChoice,
                         onRemovePhotoImage = viewModel::removePhotoImage,
                         onRemovePhotoSlot = { photo ->
                             if (photo.hasUserData) {
@@ -753,6 +755,7 @@ private fun MonthlyPlanningUploadContent(
     loadingPhotos: Boolean,
     onSelectPhotos: (String) -> Unit,
     onTakePhoto: (String) -> Unit,
+    onToggleWithoutPhoto: (String) -> Unit,
     onRemovePhotoImage: (String) -> Unit,
     onRemovePhotoSlot: (MonthlyPlanningPhotoDraft) -> Unit,
     onAddPhotoSlot: () -> Unit,
@@ -776,6 +779,7 @@ private fun MonthlyPlanningUploadContent(
                     onToggleExpanded = { onTogglePhotoExpanded(photo.id) },
                     onSelectPhotos = { onSelectPhotos(photo.id) },
                     onTakePhoto = { onTakePhoto(photo.id) },
+                    onToggleWithoutPhoto = { onToggleWithoutPhoto(photo.id) },
                     onRemoveImage = { onRemovePhotoImage(photo.id) },
                     onObjectiveSelected = { objective ->
                         onObjectiveSelected(photo.id, objective)
@@ -939,6 +943,7 @@ private fun PlanningPhotoCard(
     onToggleExpanded: () -> Unit,
     onSelectPhotos: () -> Unit,
     onTakePhoto: () -> Unit,
+    onToggleWithoutPhoto: () -> Unit,
     onRemoveImage: () -> Unit,
     onObjectiveSelected: (CreateArtObjective) -> Unit,
     onManualObjectiveChange: (String) -> Unit,
@@ -975,6 +980,7 @@ private fun PlanningPhotoCard(
                     loadingPhotos = loadingPhotos,
                     onSelectPhotos = onSelectPhotos,
                     onTakePhoto = onTakePhoto,
+                    onToggleWithoutPhoto = onToggleWithoutPhoto,
                     onRemoveImage = onRemoveImage
                 )
                 PlanningPhotoAccordionSection(
@@ -1138,16 +1144,29 @@ private fun PlanningPhotoPreview(
     loadingPhotos: Boolean,
     onSelectPhotos: () -> Unit,
     onTakePhoto: () -> Unit,
+    onToggleWithoutPhoto: () -> Unit,
     onRemoveImage: () -> Unit
 ) {
     val file = photo.file
     val bitmap = remember(file?.fileName, file?.bytes?.size) {
         file?.let { BitmapFactory.decodeByteArray(it.bytes, 0, it.bytes.size) }
     }
+    val withoutPhotoSelected = photo.withoutPhotoSelected && file == null
+    val placeholderBackground = if (withoutPhotoSelected) {
+        MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.38f)
+    } else {
+        MaterialTheme.colorScheme.surfaceVariant
+    }
+    val placeholderBorder = if (withoutPhotoSelected) {
+        MaterialTheme.colorScheme.primary.copy(alpha = 0.72f)
+    } else {
+        Color.Transparent
+    }
+    val placeholderBorderWidth = if (withoutPhotoSelected) 2.dp else 1.dp
 
     Row(
         modifier = Modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.spacedBy(16.dp),
+        horizontalArrangement = Arrangement.spacedBy(14.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
         Box(
@@ -1155,7 +1174,16 @@ private fun PlanningPhotoPreview(
                 .width(108.dp)
                 .height(144.dp)
                 .clip(RoundedCornerShape(12.dp))
-                .background(MaterialTheme.colorScheme.surfaceVariant),
+                .background(placeholderBackground)
+                .border(
+                    width = placeholderBorderWidth,
+                    color = placeholderBorder,
+                    shape = RoundedCornerShape(12.dp)
+                )
+                .clickable(
+                    enabled = file == null && !loadingPhotos,
+                    onClick = onToggleWithoutPhoto
+                ),
             contentAlignment = Alignment.Center
         ) {
             if (bitmap != null) {
@@ -1166,31 +1194,33 @@ private fun PlanningPhotoPreview(
                     contentScale = ContentScale.Crop
                 )
             } else {
-                Row(
-                    horizontalArrangement = Arrangement.spacedBy(10.dp),
-                    verticalAlignment = Alignment.CenterVertically
+                Column(
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.Center,
+                    modifier = Modifier.padding(horizontal = 10.dp)
                 ) {
-                    SmallPhotoActionButton(
-                        enabled = !loadingPhotos,
-                        onClick = onSelectPhotos
-                    ) {
+                    if (withoutPhotoSelected) {
                         Icon(
-                            imageVector = Icons.Filled.AddCircle,
-                            contentDescription = "Adicionar foto da galeria",
-                            modifier = Modifier.size(22.dp),
+                            imageVector = Icons.Default.Check,
+                            contentDescription = null,
+                            modifier = Modifier.size(18.dp),
                             tint = MaterialTheme.colorScheme.primary
                         )
+                        Spacer(modifier = Modifier.height(6.dp))
                     }
-                    SmallPhotoActionButton(
-                        enabled = !loadingPhotos,
-                        onClick = onTakePhoto
-                    ) {
-                        CameraSourceGlyph(
-                            color = MaterialTheme.colorScheme.primary,
-                            background = MaterialTheme.colorScheme.surfaceVariant,
-                            modifier = Modifier.size(24.dp)
-                        )
-                    }
+                    Text(
+                        text = if (withoutPhotoSelected) "Sem foto\nselecionada" else "Deixar\nsem foto",
+                        style = MaterialTheme.typography.labelMedium,
+                        fontWeight = FontWeight.SemiBold,
+                        color = if (withoutPhotoSelected) {
+                            MaterialTheme.colorScheme.primary
+                        } else {
+                            MaterialTheme.colorScheme.onSurfaceVariant
+                        },
+                        textAlign = TextAlign.Center,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis
+                    )
                 }
             }
         }
@@ -1229,42 +1259,75 @@ private fun PlanningPhotoPreview(
                     }
                 }
             } else {
-                Text(
-                    text = "Arte sem foto",
-                    style = MaterialTheme.typography.bodySmall,
-                    fontWeight = FontWeight.Medium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-                Text(
-                    text = "Imagem opcional",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.78f)
-                )
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(12.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = "OU",
+                        style = MaterialTheme.typography.labelMedium,
+                        fontWeight = FontWeight.ExtraBold,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.72f)
+                    )
+                    PhotoInlineAction(
+                        enabled = !loadingPhotos,
+                        label = "Adicionar foto",
+                        onClick = onSelectPhotos
+                    ) { color ->
+                        Icon(
+                            imageVector = Icons.Filled.AddCircle,
+                            contentDescription = "Adicionar foto da galeria",
+                            modifier = Modifier.size(30.dp),
+                            tint = color
+                        )
+                    }
+                    PhotoInlineAction(
+                        enabled = !loadingPhotos,
+                        label = "Câmera",
+                        onClick = onTakePhoto
+                    ) { color ->
+                        CameraSourceGlyph(
+                            color = color,
+                            background = MaterialTheme.colorScheme.surface,
+                            modifier = Modifier.size(32.dp)
+                        )
+                    }
+                }
             }
         }
     }
 }
 
 @Composable
-private fun SmallPhotoActionButton(
+private fun PhotoInlineAction(
     enabled: Boolean,
+    label: String,
     onClick: () -> Unit,
-    content: @Composable () -> Unit
+    icon: @Composable (Color) -> Unit
 ) {
-    Box(
+    val contentColor = if (enabled) {
+        MaterialTheme.colorScheme.primary
+    } else {
+        MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.45f)
+    }
+
+    Column(
         modifier = Modifier
-            .size(42.dp)
-            .clip(RoundedCornerShape(10.dp))
-            .background(MaterialTheme.colorScheme.surface.copy(alpha = 0.92f))
-            .border(
-                width = 1.dp,
-                color = MaterialTheme.colorScheme.primary.copy(alpha = 0.28f),
-                shape = RoundedCornerShape(10.dp)
-            )
+            .width(68.dp)
             .clickable(enabled = enabled, onClick = onClick),
-        contentAlignment = Alignment.Center
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(6.dp)
     ) {
-        content()
+        icon(contentColor)
+        Text(
+            text = label,
+            style = MaterialTheme.typography.labelSmall,
+            fontWeight = FontWeight.SemiBold,
+            color = contentColor,
+            textAlign = TextAlign.Center,
+            maxLines = 2,
+            overflow = TextOverflow.Ellipsis
+        )
     }
 }
 
@@ -2083,27 +2146,20 @@ private fun ReviewPhotoLine(
             horizontalArrangement = Arrangement.spacedBy(12.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Box(
-                modifier = Modifier
-                    .width(44.dp)
-                    .height(58.dp)
-                    .clip(RoundedCornerShape(8.dp))
-                    .background(MaterialTheme.colorScheme.surfaceVariant),
-                contentAlignment = Alignment.Center
-            ) {
-                if (bitmap != null) {
+            if (bitmap != null) {
+                Box(
+                    modifier = Modifier
+                        .width(44.dp)
+                        .height(58.dp)
+                        .clip(RoundedCornerShape(8.dp))
+                        .background(MaterialTheme.colorScheme.surfaceVariant),
+                    contentAlignment = Alignment.Center
+                ) {
                     Image(
                         bitmap = bitmap.asImageBitmap(),
                         contentDescription = "Miniatura da Foto ${photo.number}",
                         modifier = Modifier.fillMaxSize(),
                         contentScale = ContentScale.Crop
-                    )
-                } else {
-                    Text(
-                        text = "Sem\nfoto",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        textAlign = TextAlign.Center
                     )
                 }
             }

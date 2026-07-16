@@ -18,6 +18,7 @@ data class MonthlyPlanningPhotoInput(
     val objetivoId: String = "",
     val escritaImagem: String = "",
     val nivelEdicao: Int = 2,
+    val withoutPhotoSelected: Boolean = false,
     val orientacao: String = ""
 )
 

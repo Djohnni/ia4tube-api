@@ -4,6 +4,7 @@ import br.com.ia4tube.app.data.models.UploadFile
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -45,6 +46,92 @@ class MonthlyPlanningPhotoDraftTest {
         assertTrue(objectiveOnly.isActive)
         assertTrue(textOnly.isActive)
         assertTrue(imageOnly.isActive)
+    }
+
+    @Test
+    fun withoutPhotoChoiceAloneDoesNotActivateASlot() {
+        val withoutPhotoOnly = MonthlyPlanningPhotoDraft(
+            id = "sem-foto",
+            number = 1,
+            withoutPhotoSelected = true
+        )
+
+        assertTrue(withoutPhotoOnly.hasUserData)
+        assertFalse(withoutPhotoOnly.isActive)
+
+        val state = MonthlyPlanningUiState(
+            photos = listOf(withoutPhotoOnly.copy(fixedSlot = true))
+        )
+
+        assertEquals(emptyList<MonthlyPlanningPhotoDraft>(), state.activePhotos)
+        assertEquals(0, state.activePhotoCount)
+    }
+
+    @Test
+    fun withoutPhotoChoiceWithObjectiveOrWritingActivatesSlot() {
+        val withObjective = MonthlyPlanningPhotoDraft(
+            id = "objetivo",
+            number = 1,
+            withoutPhotoSelected = true,
+            objetivo = "Divulgar agenda"
+        )
+        val withWriting = MonthlyPlanningPhotoDraft(
+            id = "escrita",
+            number = 2,
+            withoutPhotoSelected = true,
+            escritaImagem = "Agende hoje"
+        )
+
+        assertTrue(withObjective.isActive)
+        assertTrue(withWriting.isActive)
+    }
+
+    @Test
+    fun togglingWithoutPhotoChoiceCanBeUndone() {
+        val empty = MonthlyPlanningPhotoDraft(id = "photo-1", number = 1)
+        val selected = empty.toggleWithoutPhotoChoice()
+        val unselected = selected.toggleWithoutPhotoChoice()
+
+        assertTrue(selected.withoutPhotoSelected)
+        assertFalse(selected.isActive)
+        assertFalse(unselected.withoutPhotoSelected)
+        assertFalse(unselected.isActive)
+    }
+
+    @Test
+    fun addingPhotoAfterWithoutPhotoChoiceClearsTheChoice() {
+        val selectedWithoutPhoto = MonthlyPlanningPhotoDraft(
+            id = "photo-1",
+            number = 1,
+            withoutPhotoSelected = true,
+            objetivo = "Mostrar produto"
+        )
+        val withPhoto = selectedWithoutPhoto.withPhotoFile(upload("produto.jpg"))
+
+        assertFalse(withPhoto.withoutPhotoSelected)
+        assertEquals("Mostrar produto", withPhoto.objetivo)
+        assertEquals("produto.jpg", withPhoto.file?.fileName)
+        assertTrue(withPhoto.isActive)
+    }
+
+    @Test
+    fun removingPhotoReturnsToWithoutPhotoChoiceAndPreservesText() {
+        val withPhoto = MonthlyPlanningPhotoDraft(
+            id = "photo-1",
+            number = 1,
+            file = upload(),
+            objetivo = "Anunciar agenda",
+            escritaImagem = "Vagas abertas",
+            nivelEdicao = 3
+        )
+        val withoutPhoto = withPhoto.withRemovedPhotoFile()
+
+        assertNull(withoutPhoto.file)
+        assertTrue(withoutPhoto.withoutPhotoSelected)
+        assertEquals("Anunciar agenda", withoutPhoto.objetivo)
+        assertEquals("Vagas abertas", withoutPhoto.escritaImagem)
+        assertEquals(3, withoutPhoto.nivelEdicao)
+        assertTrue(withoutPhoto.isActive)
     }
 
     @Test
@@ -122,5 +209,38 @@ class MonthlyPlanningPhotoDraftTest {
 
         assertEquals(MONTHLY_PLANNING_MAX_ARTS_PER_REQUEST, limitState.countedPhotoSlots)
         assertFalse(limitState.canAddMorePhotos)
+    }
+
+    @Test
+    fun mixedOrderOnlySendsActiveSlotsAndPreservesNoPhotoPayload() {
+        val withPhoto = MonthlyPlanningPhotoDraft(
+            id = "photo-1",
+            number = 1,
+            file = upload("foto-1.jpg"),
+            objetivo = "Promover servico"
+        )
+        val withoutPhotoAndObjective = MonthlyPlanningPhotoDraft(
+            id = "photo-2",
+            number = 2,
+            withoutPhotoSelected = true,
+            objetivo = "Avisar horario"
+        )
+        val emptyWithoutPhoto = MonthlyPlanningPhotoDraft(
+            id = "photo-3",
+            number = 3,
+            withoutPhotoSelected = true
+        )
+        val state = MonthlyPlanningUiState(
+            photos = listOf(withPhoto, withoutPhotoAndObjective, emptyWithoutPhoto)
+        )
+
+        val requestPhotos = state.activePhotos.map { it.toRequestInput() }
+
+        assertEquals(2, requestPhotos.size)
+        assertEquals("foto-1.jpg", requestPhotos[0].file?.fileName)
+        assertFalse(requestPhotos[0].withoutPhotoSelected)
+        assertNull(requestPhotos[1].file)
+        assertTrue(requestPhotos[1].withoutPhotoSelected)
+        assertTrue(requestPhotos[1].orientacao.contains("sem foto"))
     }
 }
