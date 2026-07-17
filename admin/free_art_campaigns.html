@@ -1,0 +1,287 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>IA4Tube - Arte Gratis da Semana</title>
+  <style>
+    :root{color-scheme:dark;--bg:#080c12;--panel:#111827;--line:rgba(255,255,255,.1);--text:#eef4ff;--muted:#9aa8bd;--accent:#35d07f;--warn:#f4c15d;--danger:#ff6b7a}
+    *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font-family:Inter,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
+    main{width:min(1180px,calc(100% - 28px));margin:24px auto 56px}h1{margin:0 0 6px;font-size:28px}h2{margin:0 0 14px;font-size:18px}.muted{color:var(--muted)}
+    .grid{display:grid;grid-template-columns:320px 1fr;gap:16px}.panel{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:16px}.row{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+    button,input,select,textarea{font:inherit}button{border:0;border-radius:10px;background:var(--accent);color:#06110b;font-weight:800;padding:10px 14px;cursor:pointer}button.secondary{background:#202a3a;color:var(--text);border:1px solid var(--line)}button.danger{background:#3a1720;color:#ffd6dc;border:1px solid rgba(255,107,122,.35)}button:disabled{opacity:.48;cursor:not-allowed}
+    input,select,textarea{width:100%;border:1px solid var(--line);border-radius:10px;background:#0b1220;color:var(--text);padding:10px}label{display:block;margin:10px 0 6px;color:#cbd5e1}.list{display:grid;gap:8px;max-height:540px;overflow:auto}.branch,.campaign{display:flex;justify-content:space-between;gap:8px;padding:10px;border:1px solid var(--line);border-radius:10px;background:#0b1220;cursor:pointer}.branch.active,.campaign.active{border-color:var(--accent)}
+    .cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(190px,1fr));gap:12px}.art{background:#0b1220;border:1px solid var(--line);border-radius:12px;padding:10px}.art img{width:100%;aspect-ratio:9/16;object-fit:contain;background:#05070a;border-radius:8px}.badge{display:inline-flex;border-radius:999px;padding:4px 8px;background:#202a3a;color:#d8e2f0;font-size:12px}.badge.ok{background:#123524;color:#a7f3c4}.badge.warn{background:#3a2b11;color:#ffe1a1}.badge.err{background:#3b121b;color:#ffc2cc}
+    .confirm{border-color:rgba(244,193,93,.45);background:#1d1820}.hidden{display:none}.message{min-height:24px;margin:12px 0;color:var(--warn)}pre{white-space:pre-wrap;background:#0b1220;border:1px solid var(--line);border-radius:10px;padding:10px;max-height:220px;overflow:auto}
+    @media(max-width:900px){.grid{grid-template-columns:1fr}}
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Arte Gratis da Semana</h1>
+    <p class="muted">Gere artes genericas por ramo, revise e distribua somente apos confirmacao.</p>
+    <div id="message" class="message"></div>
+    <div class="grid">
+      <section class="panel">
+        <h2>Ramos encontrados</h2>
+        <p class="muted" id="branch-summary">Carregando...</p>
+        <div id="branches" class="list"></div>
+      </section>
+      <section class="panel">
+        <h2>Nova campanha</h2>
+        <div class="row">
+          <span class="badge" id="selected-branch">Nenhum ramo selecionado</span>
+          <span class="badge" id="max-arts">Limite: 20</span>
+        </div>
+        <label>Quantidade de artes</label>
+        <input id="quantity" type="number" min="1" max="20" value="1">
+        <label>Opcao rapida</label>
+        <select id="quick">
+          <option value="faca_o_que_quiser">Faca o que quiser</option>
+          <option value="vender">Faca algo para vender</option>
+          <option value="institucional">Faca algo institucional</option>
+          <option value="produto_principal">Faca algo relacionado ao produto principal</option>
+          <option value="criativo">Faca algo criativo</option>
+        </select>
+        <label>Prompt livre</label>
+        <textarea id="prompt" rows="4" placeholder="Opcional"></textarea>
+        <div class="row">
+          <div style="flex:1">
+            <label>Data da postagem</label>
+            <input id="date" type="date">
+          </div>
+          <div style="width:140px">
+            <label>Horario</label>
+            <input id="time" type="time" value="18:00">
+          </div>
+        </div>
+        <label>Titulo da notificacao</label>
+        <input id="title" value="Arte Gratis da Semana">
+        <label>Mensagem da notificacao</label>
+        <input id="body" value="Sua arte gratis da semana esta pronta. Toque para ver.">
+        <p class="muted" id="estimate">Selecione um ramo para ver a estimativa.</p>
+        <div class="row">
+          <button id="create">Gerar campanha</button>
+          <button id="save-settings" class="secondary" disabled>Salvar ajustes</button>
+          <button id="duplicate" class="secondary" disabled>Duplicar campanha</button>
+        </div>
+      </section>
+    </div>
+
+    <section class="panel" style="margin-top:16px">
+      <h2>Campanhas</h2>
+      <div id="campaigns" class="list"></div>
+    </section>
+
+    <section class="panel" style="margin-top:16px">
+      <h2>Revisao</h2>
+      <div id="campaign-detail" class="muted">Selecione uma campanha.</div>
+      <div id="arts" class="cards"></div>
+      <div id="confirm" class="panel confirm hidden" style="margin-top:16px">
+        <h2>Confirmacao de envio</h2>
+        <pre id="preview"></pre>
+        <button id="send">Enviar para os clientes</button>
+      </div>
+    </section>
+  </main>
+
+  <script>
+    const state = { config:null, branches:[], branch:null, campaigns:[], selectedCampaign:null };
+    const $ = (id) => document.getElementById(id);
+    const msg = (text) => $("message").textContent = text || "";
+
+    async function api(path, options = {}) {
+      const response = await fetch(`/bot/free-art-campaigns${path}`, {
+        headers: { "Content-Type": "application/json", ...(options.headers || {}) },
+        ...options
+      });
+      const json = await response.json().catch(() => ({}));
+      if (!response.ok || json.ok === false) throw new Error(json.error || "Erro na API");
+      return json;
+    }
+
+    function todayText() {
+      return new Date().toISOString().slice(0, 10);
+    }
+
+    function renderBranches() {
+      $("branch-summary").textContent = `Clientes sem ramo identificado: ${state.withoutBranch || 0}`;
+      $("branches").innerHTML = "";
+      state.branches.forEach((branch) => {
+        const el = document.createElement("div");
+        el.className = `branch ${state.branch?.ramo_normalizado === branch.ramo_normalizado ? "active" : ""}`;
+        el.innerHTML = `<strong>${branch.ramo}</strong><span>${branch.clientes} clientes</span>`;
+        el.onclick = () => {
+          state.branch = branch;
+          $("selected-branch").textContent = `${branch.ramo} - ${branch.clientes} clientes`;
+          $("estimate").textContent = `Ramo: ${branch.ramo}. Clientes: ${branch.clientes}. Custo estimado: nao informado pela API.`;
+          renderBranches();
+        };
+        $("branches").appendChild(el);
+      });
+    }
+
+    function renderCampaigns() {
+      $("campaigns").innerHTML = "";
+      state.campaigns.forEach((campaign) => {
+        const el = document.createElement("div");
+        el.className = `campaign ${state.selectedCampaign?.id === campaign.id ? "active" : ""}`;
+        el.innerHTML = `<span><strong>${campaign.ramo}</strong><br><span class="muted">${campaign.id}</span></span><span>${campaign.status}</span>`;
+        el.onclick = () => loadCampaign(campaign.id);
+        $("campaigns").appendChild(el);
+      });
+    }
+
+    function statusBadge(status) {
+      const cls = status === "aprovada" ? "ok" : status === "erro" || status === "excluida" ? "err" : "warn";
+      return `<span class="badge ${cls}">${status}</span>`;
+    }
+
+    function renderDetail(data) {
+      const campaign = data.campaign;
+      const locked = campaign.status === "distribuida";
+      state.selectedCampaign = campaign;
+      $("campaign-detail").textContent = `${campaign.ramo} - ${campaign.clientes_elegiveis_total} clientes - ${campaign.artes_aprovadas || 0} aprovadas`;
+      $("date").value = campaign.data_postagem || $("date").value;
+      $("time").value = campaign.horario || "18:00";
+      $("title").value = campaign.notificacao_titulo || "Arte Gratis da Semana";
+      $("body").value = campaign.notificacao_mensagem || "Sua arte gratis da semana esta pronta. Toque para ver.";
+      $("save-settings").disabled = locked;
+      $("duplicate").disabled = false;
+      $("arts").innerHTML = "";
+      data.artes.forEach((art) => {
+        const image = art.arquivo_original ? `/bot/free-art-campaigns/${campaign.id}/artes/${art.id}/image?ts=${Date.now()}` : "";
+        const el = document.createElement("div");
+        el.className = "art";
+        el.innerHTML = `
+          ${image ? `<img src="${image}" alt="${art.id}">` : `<div class="muted" style="aspect-ratio:9/16;display:grid;place-items:center">Aguardando geracao</div>`}
+          <p><strong>${art.id}</strong> ${statusBadge(art.status)}</p>
+          <div class="row">
+            <button class="secondary" data-action="approve" ${locked || art.status !== "pronta" ? "disabled" : ""}>Aprovar</button>
+            <button class="secondary" data-action="regen" ${locked ? "disabled" : ""}>Regenerar</button>
+            <button class="danger" data-action="delete" ${locked ? "disabled" : ""}>Excluir</button>
+          </div>`;
+        el.querySelector('[data-action="approve"]').onclick = () => artAction(campaign.id, art.id, "approve");
+        el.querySelector('[data-action="regen"]').onclick = () => artAction(campaign.id, art.id, "regenerate");
+        el.querySelector('[data-action="delete"]').onclick = () => artAction(campaign.id, art.id, "delete");
+        $("arts").appendChild(el);
+      });
+      $("confirm").classList.toggle("hidden", !data.artes.some((art) => art.status === "aprovada") || locked);
+      renderCampaigns();
+    }
+
+    async function loadConfig() {
+      state.config = await api("/config");
+      $("max-arts").textContent = `Limite: ${state.config.max_artes_por_campanha}`;
+      $("quantity").max = state.config.max_artes_por_campanha;
+      $("date").value = todayText();
+    }
+
+    async function loadBranches() {
+      const data = await api("/ramos");
+      state.branches = data.ramos || [];
+      state.withoutBranch = data.clientes_sem_ramo_identificado || 0;
+      renderBranches();
+    }
+
+    async function loadCampaigns() {
+      const data = await api("/");
+      state.campaigns = data.campaigns || [];
+      renderCampaigns();
+    }
+
+    async function loadCampaign(id) {
+      msg("");
+      const data = await api(`/${encodeURIComponent(id)}`);
+      renderDetail(data);
+    }
+
+    async function artAction(campaignId, artId, action) {
+      msg("Processando...");
+      await api(`/${encodeURIComponent(campaignId)}/artes/${encodeURIComponent(artId)}/${action}`, { method:"POST", body:"{}" });
+      await loadCampaign(campaignId);
+      msg("");
+    }
+
+    async function saveSelectedSettings() {
+      const campaign = state.selectedCampaign;
+      if (!campaign) return null;
+      const payload = {
+        data_postagem: $("date").value,
+        horario: $("time").value || "18:00",
+        notificacao_titulo: $("title").value,
+        notificacao_mensagem: $("body").value
+      };
+      const data = await api(`/${encodeURIComponent(campaign.id)}`, {
+        method:"PATCH",
+        body:JSON.stringify(payload)
+      });
+      renderDetail(data);
+      await loadCampaigns();
+      return data;
+    }
+
+    $("create").onclick = async () => {
+      if (!state.branch) return msg("Selecione um ramo.");
+      msg("Criando campanha...");
+      const payload = {
+        ramo_normalizado: state.branch.ramo_normalizado,
+        quantidade: Number($("quantity").value),
+        opcao_rapida: $("quick").value,
+        prompt_livre: $("prompt").value,
+        data_postagem: $("date").value,
+        horario: $("time").value || "18:00",
+        notificacao_titulo: $("title").value,
+        notificacao_mensagem: $("body").value
+      };
+      const data = await api("/", { method:"POST", body:JSON.stringify(payload) });
+      await loadCampaigns();
+      renderDetail(data);
+      msg("Campanha criada. O runner separado fara a geracao.");
+    };
+
+    $("save-settings").onclick = async () => {
+      msg("Salvando ajustes...");
+      await saveSelectedSettings();
+      msg("Ajustes salvos.");
+    };
+
+    $("duplicate").onclick = async () => {
+      const campaign = state.selectedCampaign;
+      if (!campaign) return;
+      msg("Duplicando campanha...");
+      const data = await api(`/${encodeURIComponent(campaign.id)}/duplicate`, { method:"POST", body:"{}" });
+      await loadCampaigns();
+      renderDetail(data);
+      msg("Campanha duplicada.");
+    };
+
+    $("send").onclick = async () => {
+      const campaign = state.selectedCampaign;
+      if (!campaign) return;
+      await saveSelectedSettings();
+      msg("Montando confirmacao...");
+      const preview = await api(`/${encodeURIComponent(campaign.id)}/distribute/preview`, { method:"POST", body:"{}" });
+      $("preview").textContent = JSON.stringify(preview, null, 2);
+      if (!window.confirm("Confirmar envio para os clientes?")) return msg("Envio cancelado.");
+      msg("Distribuindo...");
+      const data = await api(`/${encodeURIComponent(campaign.id)}/distribute`, { method:"POST", body:"{}" });
+      renderDetail(data);
+      await loadCampaigns();
+      msg("Campanha distribuida.");
+    };
+
+    async function init() {
+      try {
+        await loadConfig();
+        await Promise.all([loadBranches(), loadCampaigns()]);
+        msg("");
+      } catch (error) {
+        msg(error.message);
+      }
+    }
+
+    init();
+  </script>
+</body>
+</html>

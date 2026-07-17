@@ -609,10 +609,25 @@ private fun DeliverySection(
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
             Text(
-                text = stringResource(R.string.order_delivery_title),
+                text = stringResource(
+                    if (info.isWeeklyFreeArt()) {
+                        R.string.order_free_weekly_title
+                    } else {
+                        R.string.order_delivery_title
+                    }
+                ),
                 style = MaterialTheme.typography.titleLarge,
                 fontWeight = FontWeight.Bold
             )
+            if (info.isWeeklyFreeArt()) {
+                Spacer(modifier = Modifier.height(6.dp))
+                Text(
+                    text = stringResource(R.string.order_free_weekly_description),
+                    modifier = Modifier.fillMaxWidth(),
+                    color = MaterialTheme.colorScheme.onTertiaryContainer,
+                    style = MaterialTheme.typography.bodyMedium
+                )
+            }
             Spacer(modifier = Modifier.height(14.dp))
             OrderPreviewImage(
                 info = info,
@@ -917,6 +932,11 @@ private fun String.isGenericPostDescription(): Boolean {
 private fun OrderInfo.isCompanyArt(): Boolean {
     return categoria.equals("arte_empresa", ignoreCase = true) ||
         tipoArte.equals("arte_empresa", ignoreCase = true)
+}
+
+private fun OrderInfo.isWeeklyFreeArt(): Boolean {
+    return origem.equals("arte_gratis_semanal", ignoreCase = true) ||
+        campaignId.startsWith("free_", ignoreCase = true)
 }
 
 @Composable

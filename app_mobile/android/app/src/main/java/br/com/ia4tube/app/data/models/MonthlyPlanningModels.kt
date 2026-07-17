@@ -4,6 +4,7 @@ data class MonthlyPlanningRequest(
     val quantidadeReservada: Int,
     val nomeEmpresa: String,
     val ramo: String,
+    val whatsapp: String = "",
     val caracteristicasEmpresa: List<String> = emptyList(),
     val informacoesEmpresa: String = "",
     val logo: UploadFile? = null,
@@ -66,7 +67,12 @@ data class MonthlyPlanningPostDto(
     val pedidoId: String,
     val imageReady: Boolean,
     val imageText: String = "",
-    val thumbnailUrl: String = ""
+    val thumbnailUrl: String = "",
+    val origem: String = "",
+    val tipo: String = "",
+    val freeArtWeekly: Boolean = false,
+    val campaignId: String = "",
+    val assignmentId: String = ""
 )
 
 data class MonthlyPlanningRescheduleRequest(

@@ -3,10 +3,16 @@ package br.com.ia4tube.app.feature.orders
 import br.com.ia4tube.app.data.models.OrderSummary
 
 enum class OrderStatusBadge {
+    WeeklyFreeArt,
     Production,
     Ready,
     PaymentPending,
     Error
+}
+
+fun OrderSummary.isWeeklyFreeArt(): Boolean {
+    return origem.equals("arte_gratis_semanal", ignoreCase = true) ||
+        campaignId.startsWith("free_", ignoreCase = true)
 }
 
 fun OrderSummary.isInProduction(): Boolean {
@@ -28,6 +34,7 @@ fun OrderSummary.statusBadges(): List<OrderStatusBadge> {
             if (productionPosts > 0 || plannedPosts > 0) add(OrderStatusBadge.Production)
             if (readyPosts > 0) add(OrderStatusBadge.Ready)
         } else {
+            if (isWeeklyFreeArt()) add(OrderStatusBadge.WeeklyFreeArt)
             if (hasErrorStatus()) add(OrderStatusBadge.Error)
             if (isInProduction()) add(OrderStatusBadge.Production)
             if (imagemPronta) add(OrderStatusBadge.Ready)

@@ -154,6 +154,23 @@ function normalizeImageUrl(payload = {}) {
   return imageUrl;
 }
 
+function isInvalidFcmTokenError(error = {}) {
+  const firebaseError = error?.detail?.error || {};
+  const status = String(firebaseError.status || "").trim().toUpperCase();
+  const message = String(error?.message || firebaseError.message || "").trim().toLowerCase();
+  const details = Array.isArray(firebaseError.details) ? firebaseError.details : [];
+  const fcmErrorCodes = details
+    .map((detail) => String(detail?.errorCode || detail?.error_code || "").trim().toUpperCase())
+    .filter(Boolean);
+
+  return (
+    status === "NOT_FOUND" ||
+    status === "UNREGISTERED" ||
+    message.includes("requested entity was not found") ||
+    fcmErrorCodes.includes("UNREGISTERED")
+  );
+}
+
 function notificationMessage(type, payload = {}) {
   const pedidoId = payload.pedido_id || payload.pedidoId || "";
   const planejamentoId = payload.planejamento_id || payload.planejamentoId || "";
@@ -199,6 +216,18 @@ function notificationMessage(type, payload = {}) {
         data: {
           ...baseData,
           route: planejamentoId ? "monthly_planning_detail" : "monthly_planning"
+        }
+      };
+    case "arte_gratis_semanal":
+      return {
+        title: payload.title || "Arte Gratis da Semana",
+        body: payload.body || payload.message || "Sua arte gratis da semana esta pronta. Toque para ver.",
+        imageUrl,
+        data: {
+          ...baseData,
+          route: pedidoId ? "order_detail" : "orders",
+          campaign_id: payload.campaign_id || payload.campaignId || "",
+          assignment_id: payload.assignment_id || payload.assignmentId || ""
         }
       };
     case "nova_versao":
@@ -269,7 +298,7 @@ async function sendToToken({ serviceAccount, accessToken, token, title, body, im
   return result;
 }
 
-async function sendToClient(cliente, message) {
+async function sendToClient(cliente, message, options = {}) {
   const tokens = activeFcmTokens(cliente);
   if (!tokens.length) {
     return {
@@ -300,6 +329,7 @@ async function sendToClient(cliente, message) {
 
   const accessToken = await getAccessToken(serviceAccount);
   const errors = [];
+  const invalidTokens = [];
   let sent = 0;
 
   for (const token of tokens) {
@@ -315,10 +345,19 @@ async function sendToClient(cliente, message) {
       });
       sent += 1;
     } catch (error) {
+      const invalidToken = isInvalidFcmTokenError(error);
+      if (invalidToken) {
+        invalidTokens.push(token);
+        if (typeof options.onInvalidToken === "function") {
+          await Promise.resolve(options.onInvalidToken(token, error));
+        }
+      }
+
       errors.push({
         token_suffix: token.slice(-8),
         code: error.code || "firebase_send_error",
-        message: error.message
+        message: error.message,
+        invalid_token: invalidToken
       });
     }
   }
@@ -327,37 +366,44 @@ async function sendToClient(cliente, message) {
     ok: sent > 0,
     sent,
     tokens: tokens.length,
+    invalid_tokens: invalidTokens.length,
     errors
   };
 }
 
-function sendArtePronta(cliente, payload = {}) {
-  return sendToClient(cliente, notificationMessage("arte_pronta", payload));
+function sendArtePronta(cliente, payload = {}, options = {}) {
+  return sendToClient(cliente, notificationMessage("arte_pronta", payload), options);
 }
 
-function sendPedidoAtualizado(cliente, payload = {}) {
-  return sendToClient(cliente, notificationMessage("pedido_atualizado", payload));
+function sendPedidoAtualizado(cliente, payload = {}, options = {}) {
+  return sendToClient(cliente, notificationMessage("pedido_atualizado", payload), options);
 }
 
-function sendPlanejamentoMensal(cliente, payload = {}) {
-  return sendToClient(cliente, notificationMessage("planejamento_mensal", payload));
+function sendPlanejamentoMensal(cliente, payload = {}, options = {}) {
+  return sendToClient(cliente, notificationMessage("planejamento_mensal", payload), options);
 }
 
-function sendNovaVersao(cliente, payload = {}) {
-  return sendToClient(cliente, notificationMessage("nova_versao", payload));
+function sendArteGratisSemanal(cliente, payload = {}, options = {}) {
+  return sendToClient(cliente, notificationMessage("arte_gratis_semanal", payload), options);
 }
 
-function sendAvisoGeral(cliente, payload = {}) {
-  return sendToClient(cliente, notificationMessage("aviso_geral", payload));
+function sendNovaVersao(cliente, payload = {}, options = {}) {
+  return sendToClient(cliente, notificationMessage("nova_versao", payload), options);
+}
+
+function sendAvisoGeral(cliente, payload = {}, options = {}) {
+  return sendToClient(cliente, notificationMessage("aviso_geral", payload), options);
 }
 
 module.exports = {
   activeFcmTokens,
+  isInvalidFcmTokenError,
   isFirebaseConfigured,
   notificationMessage,
   sendArtePronta,
   sendPedidoAtualizado,
   sendPlanejamentoMensal,
+  sendArteGratisSemanal,
   sendNovaVersao,
   sendAvisoGeral,
   sendToClient

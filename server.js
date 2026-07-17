@@ -7,6 +7,7 @@ const jwt = require("jsonwebtoken");
 const multer = require("multer");
 const archiver = require("archiver");
 const crypto = require("crypto");
+const { spawnSync } = require("child_process");
 const productsRegistry = require("./src/products");
 const orderStorage = require("./src/orders/order.storage");
 const orderStatus = require("./src/orders/order.status");
@@ -18,6 +19,10 @@ const graphicMaterialsCatalog = require("./src/company-graphic-materials/materia
 const carouselService = require("./src/company-carousels/carousels.service");
 const monthlyPlanningService = require("./src/company-monthly-planning/planning.service");
 const fcmService = require("./src/notifications/fcm.service");
+const freeArtCampaignsService = require("./src/admin-free-art-campaigns/free-art-campaigns.service");
+const freeArtCampaignsStorage = require("./src/admin-free-art-campaigns/free-art-campaigns.storage");
+const freeArtCampaignsScheduler = require("./src/admin-free-art-campaigns/free-art-campaigns.scheduler");
+const { createFreeArtCampaignRoutes } = require("./src/admin-free-art-campaigns/free-art-campaigns.routes");
 const seoNichePages = require("./src/seo/niche-page-renderer");
 
 const app = express();
@@ -35,6 +40,7 @@ const TMP_UPLOADS_DIR = path.join(DATA_DIR, "tmp_uploads");
 const GRAPHIC_MATERIALS_DIR = path.join(DATA_DIR, "materiais_graficos");
 const CAROUSELS_DIR = path.join(DATA_DIR, "carrosseis");
 const MONTHLY_PLANNINGS_DIR = path.join(DATA_DIR, "planejamentos_mensais");
+const FREE_ART_CAMPAIGNS_DIR = path.join(DATA_DIR, "campanhas_artes_gratis");
 const CLIENTES_FILE = path.join(DATA_DIR, "clientes.json");
 const BOT_ADMIN_WHATSAPP = process.env.BOT_ADMIN_WHATSAPP || "15991120599";
 const BOT_RUNNER_TOKEN = process.env.BOT_RUNNER_TOKEN || "";
@@ -64,6 +70,7 @@ const PUBLIC_DIR = path.join(__dirname, "public");
 const PUBLIC_VIDEOS_DIR = path.join(PUBLIC_DIR, "videos");
 const SEO_NICHES_DIR = path.join(PUBLIC_DIR, "nichos");
 const ADMIN_MOBILE_ANALYTICS_FILE = path.join(__dirname, "admin", "mobile_analytics.html");
+const ADMIN_FREE_ART_CAMPAIGNS_FILE = path.join(__dirname, "admin", "free_art_campaigns.html");
 const ADMIN_ANALYTICS_COOKIE = "ia4tube_admin_token";
 
 const CLIENTES_TESTE = [
@@ -1398,6 +1405,29 @@ const PEDIDO_UPLOAD_FIELDS = [
   { name: "modelo_existente", maxCount: 1 }
 ];
 
+app.use("/bot/free-art-campaigns", createFreeArtCampaignRoutes({
+  service: freeArtCampaignsService,
+  storage: freeArtCampaignsStorage,
+  uploadResultado,
+  config: {
+    enabled: adminFreeArtsEnabled,
+    maxArts: adminFreeArtsMaxArts,
+    stuckTimeoutMs: adminFreeArtsGeneratingTimeoutMs,
+    stuckAction: adminFreeArtsStuckAction
+  },
+  paths: {
+    baseDir: FREE_ART_CAMPAIGNS_DIR,
+    pedidosDir: PEDIDOS_DIR,
+    panelFile: ADMIN_FREE_ART_CAMPAIGNS_FILE
+  },
+  auth: botAdminAuth,
+  botRunnerAuth,
+  isBotAdmin,
+  readClientes,
+  cleanupUploadedFiles,
+  composeLogo: composeFreeArtLogo
+}));
+
 // ===== ROTAS =====
 
 // Health check
@@ -1415,6 +1445,83 @@ function envBool(name, fallback = false) {
   if (["1", "true", "yes", "sim", "on"].includes(value)) return true;
   if (["0", "false", "no", "nao", "n\u00e3o", "off"].includes(value)) return false;
   return fallback;
+}
+
+function adminFreeArtsEnabled() {
+  return envBool("IA4TUBE_ADMIN_FREE_ARTS_ENABLED", false);
+}
+
+function adminFreeArtsNotificationsEnabled() {
+  return adminFreeArtsEnabled() && envBool("IA4TUBE_ADMIN_FREE_ARTS_NOTIFICATIONS_ENABLED", false);
+}
+
+function adminFreeArtsMaxArts() {
+  return Math.max(1, Math.min(envInt("IA4TUBE_ADMIN_FREE_ARTS_MAX_ARTS", 20), 20));
+}
+
+function adminFreeArtsGeneratingTimeoutMs() {
+  return Math.max(
+    60 * 1000,
+    envInt("IA4TUBE_ADMIN_FREE_ARTS_GENERATING_TIMEOUT_MS", 30 * 60 * 1000)
+  );
+}
+
+function adminFreeArtsStuckAction() {
+  const action = String(process.env.IA4TUBE_ADMIN_FREE_ARTS_STUCK_ACTION || "pendente").trim().toLowerCase();
+  return action === "erro" ? "erro" : "pendente";
+}
+
+function adminFreeArtsRecoveryIntervalMs() {
+  return Math.max(
+    60 * 1000,
+    envInt("IA4TUBE_ADMIN_FREE_ARTS_RECOVERY_INTERVAL_MS", 5 * 60 * 1000)
+  );
+}
+
+function adminFreeArtsNotificationsIntervalMs() {
+  return Math.max(
+    30 * 1000,
+    envInt("IA4TUBE_ADMIN_FREE_ARTS_NOTIFICATIONS_INTERVAL_MS", 60 * 1000)
+  );
+}
+
+function isAdminFreeArtOrderHidden(pedido = {}) {
+  return freeArtCampaignsService.isFreeArtOrder(pedido) && !adminFreeArtsEnabled();
+}
+
+function sendHiddenAdminFreeArtOrder(res) {
+  return res.status(404).json({
+    ok: false,
+    code: "admin_free_arts_disabled",
+    error: "Pedido nao encontrado"
+  });
+}
+
+function composeFreeArtLogo({ baseImagePath, logoPath, outputPath }) {
+  const scriptPath = path.join(__dirname, "scripts", "compose_free_art_logo.py");
+  if (!fs.existsSync(scriptPath)) {
+    return { ok: false, error: "compose_script_not_found" };
+  }
+
+  const result = spawnSync("python", [
+    scriptPath,
+    "--base", baseImagePath,
+    "--logo", logoPath,
+    "--out", outputPath
+  ], {
+    cwd: __dirname,
+    encoding: "utf8",
+    timeout: 30 * 1000
+  });
+
+  if (result.status !== 0) {
+    return {
+      ok: false,
+      error: result.stderr || result.stdout || "compose_failed"
+    };
+  }
+
+  return { ok: true, output_path: outputPath };
 }
 
 function envMarketingVideo(name, context = "primeira_arte_gratis") {
@@ -2059,6 +2166,8 @@ function fcmSenderForType(tipo = "") {
       return fcmService.sendPedidoAtualizado;
     case "planejamento_mensal":
       return fcmService.sendPlanejamentoMensal;
+    case "arte_gratis_semanal":
+      return fcmService.sendArteGratisSemanal;
     case "nova_versao":
       return fcmService.sendNovaVersao;
     case "aviso_geral":
@@ -3782,11 +3891,32 @@ function handleMonthlyPlanningCalendarList(req, res) {
   }
 
   try {
-    return res.json(monthlyPlanningService.listClientPlanningCalendar({
+    const monthlyCalendar = monthlyPlanningService.listClientPlanningCalendar({
       baseDir: MONTHLY_PLANNINGS_DIR,
       whatsapp,
       pedidosDir: PEDIDOS_DIR
-    }));
+    });
+
+    if (!adminFreeArtsEnabled()) {
+      return res.json(monthlyCalendar);
+    }
+
+    const freeArtItems = freeArtCampaignsService.listClientCalendar({
+      baseDir: FREE_ART_CAMPAIGNS_DIR,
+      whatsapp,
+      pedidosDir: PEDIDOS_DIR
+    });
+    const postagens = [
+      ...(monthlyCalendar.postagens || monthlyCalendar.itens || []),
+      ...freeArtItems
+    ].sort((a, b) => String(a.sort_key || "").localeCompare(String(b.sort_key || "")));
+
+    return res.json({
+      ...monthlyCalendar,
+      total: postagens.length,
+      postagens,
+      itens: postagens
+    });
   } catch (error) {
     console.error("[planejamento-mensal][calendario] erro ao listar", {
       whatsapp,
@@ -3816,6 +3946,15 @@ function handleMonthlyPlanningCalendarHide(req, res) {
   }
 
   try {
+    if (adminFreeArtsEnabled()) {
+      const freeResult = freeArtCampaignsService.hideCalendarItem({
+        baseDir: FREE_ART_CAMPAIGNS_DIR,
+        whatsapp,
+        itemKey: req.body?.item_key || req.body?.calendar_key || req.body?.key || ""
+      });
+      if (freeResult) return res.json(freeResult);
+    }
+
     return res.json(monthlyPlanningService.hideClientPlanningCalendarItem({
       baseDir: MONTHLY_PLANNINGS_DIR,
       whatsapp,
@@ -3853,11 +3992,20 @@ function handleMonthlyPlanningCalendarReschedule(req, res) {
   }
 
   try {
+    const itemKey = req.body?.item_key || req.body?.calendar_key || req.body?.key || "";
+    if (adminFreeArtsEnabled() && String(itemKey || "").startsWith("free-art:")) {
+      return res.status(400).json({
+        ok: false,
+        code: "free_art_calendar_reschedule_not_supported",
+        error: "A data da Arte Gratis da Semana e definida pela campanha."
+      });
+    }
+
     return res.json(monthlyPlanningService.rescheduleClientPlanningCalendarItem({
       baseDir: MONTHLY_PLANNINGS_DIR,
       whatsapp,
       pedidosDir: PEDIDOS_DIR,
-      itemKey: req.body?.item_key || req.body?.calendar_key || req.body?.key || "",
+      itemKey,
       pedidoId: req.body?.pedido_id || "",
       planningId: req.body?.planning_id || req.body?.planejamento_id || "",
       planejamentoItemId: req.body?.planejamento_item_id || "",
@@ -4317,6 +4465,7 @@ app.post(
 );
 
 let monthlyPlanningNotificationsRunning = false;
+let freeArtNotificationsRunning = false;
 
 function monthlyPlanningNotificationPayload({ planning, post }) {
   const pedidoId = post.pedido_id || "";
@@ -4368,6 +4517,76 @@ async function runMonthlyPlanningNotifications() {
     });
   } finally {
     monthlyPlanningNotificationsRunning = false;
+  }
+}
+
+async function runFreeArtCampaignNotifications() {
+  if (!adminFreeArtsNotificationsEnabled()) return;
+  if (freeArtNotificationsRunning) return;
+
+  freeArtNotificationsRunning = true;
+  try {
+    const clientes = readClientes();
+    const result = await freeArtCampaignsScheduler.processDueNotifications({
+      baseDir: FREE_ART_CAMPAIGNS_DIR,
+      pedidosDir: PEDIDOS_DIR,
+      clientes,
+      now: new Date(),
+      sendNotification: async ({ cliente, campaign, assignment }) => {
+        const pedidoId = assignment.pedido_id || assignment.assignment_id || "";
+        return fcmService.sendArteGratisSemanal(
+          cliente,
+          {
+            title: campaign.notificacao_titulo || "Arte Gratis da Semana",
+            body: campaign.notificacao_mensagem || "Sua arte gratis da semana esta pronta. Toque para ver.",
+            pedido_id: pedidoId,
+            campaign_id: campaign.id || "",
+            assignment_id: assignment.assignment_id || "",
+            image_url: pedidoId ? publicApiUrl(`/pedidos/${encodeURIComponent(pedidoId)}/preview`) : "",
+            data: {
+              tipo: "arte_gratis_semanal",
+              route: pedidoId ? "order_detail" : "orders",
+              campaign_id: campaign.id || "",
+              assignment_id: assignment.assignment_id || "",
+              pedido_id: pedidoId
+            }
+          }
+        );
+      }
+    });
+
+    if (result.sent || result.errors || result.mock) {
+      console.log("[arte-gratis-semanal][notificacoes]", result);
+    }
+  } catch (error) {
+    console.error("[arte-gratis-semanal][notificacoes] erro no agendador", {
+      message: error?.message,
+      stack: error?.stack
+    });
+  } finally {
+    freeArtNotificationsRunning = false;
+  }
+}
+
+function runFreeArtCampaignRecovery() {
+  if (!adminFreeArtsEnabled()) return;
+
+  try {
+    const result = freeArtCampaignsService.recoverStuckGeneration({
+      baseDir: FREE_ART_CAMPAIGNS_DIR,
+      timeoutMs: adminFreeArtsGeneratingTimeoutMs(),
+      action: adminFreeArtsStuckAction(),
+      now: new Date()
+    });
+
+    if (result.recovered_count > 0) {
+      console.log("[arte-gratis-semanal][recuperacao-geracao]", result);
+    }
+  } catch (error) {
+    console.error("[arte-gratis-semanal][recuperacao-geracao] erro", {
+      message: error?.message,
+      stack: error?.stack
+    });
   }
 }
 
@@ -4667,6 +4886,7 @@ app.get("/bot/pedidos/novos", botRunnerAuth, (req, res) => {
         if (statusPedido === "novo" || statusPedido === "ajuste_pendente") {
           const pedido = safeReadJson(path.join(base, "pedido.json")) || {};
           if (monthlyPlanningService.isPlanningOrder(pedido)) continue;
+          if (freeArtCampaignsService.isFreeArtOrder(pedido)) continue;
           pedidos.push({ id, whatsapp, mes, status: statusPedido });
         }
       }
@@ -4685,6 +4905,18 @@ app.get("/bot/pedidos/:id/zip", botRunnerAuth, (req, res) => {
 
   if (!base) {
     return res.status(404).json({ ok: false, error: "Pedido não encontrado" });
+  }
+
+  const pedido = safeReadJson(path.join(base, "pedido.json")) || {};
+  if (isAdminFreeArtOrderHidden(pedido)) {
+    return sendHiddenAdminFreeArtOrder(res);
+  }
+  if (freeArtCampaignsService.isFreeArtOrder(pedido)) {
+    return res.status(403).json({
+      ok: false,
+      code: "free_art_weekly_zip_blocked",
+      error: "A Arte Gratis da Semana nao entra no fluxo normal de ZIP."
+    });
   }
 
   res.setHeader("Content-Type", "application/zip");
@@ -4708,6 +4940,18 @@ app.post("/bot/pedidos/:id/status", auth, (req, res) => {
 
   if (!base) {
     return res.status(404).json({ ok: false, error: "Pedido não encontrado" });
+  }
+
+  const pedido = safeReadJson(path.join(base, "pedido.json")) || {};
+  if (isAdminFreeArtOrderHidden(pedido)) {
+    return sendHiddenAdminFreeArtOrder(res);
+  }
+  if (freeArtCampaignsService.isFreeArtOrder(pedido)) {
+    return res.status(403).json({
+      ok: false,
+      code: "free_art_weekly_status_blocked",
+      error: "A Arte Gratis da Semana nao entra no fluxo normal de status."
+    });
   }
 
   const { status } = req.body || {};
@@ -4737,7 +4981,11 @@ app.post("/bot/pedidos/:id/status", auth, (req, res) => {
         }
       });
     }
-    if (pedido.whatsapp && !monthlyPlanningService.isPlanningOrder(pedido)) {
+    if (
+      pedido.whatsapp &&
+      !monthlyPlanningService.isPlanningOrder(pedido) &&
+      !freeArtCampaignsService.isFreeArtOrder(pedido)
+    ) {
       sendClientPushAsync(pedido.whatsapp, "pedido_atualizado", {
         pedido_id: req.params.id,
         status,
@@ -4800,6 +5048,7 @@ app.get("/meus-pedidos", auth, (req, res) => {
   const itens = listPedidoBasesByWhatsapp(whatsapp)
     .filter((item) => {
       const pedido = item.pedido || {};
+      if (isAdminFreeArtOrderHidden(pedido)) return false;
       return !(
         pedido.origem === "planejamento_mensal" ||
         pedido.planejamento_id ||
@@ -4821,12 +5070,13 @@ app.get("/meus-pedidos", auth, (req, res) => {
     const aprovadoCliente = item.pedido.aprovado_cliente === true;
     const pagamentoPendente = item.pedido.pagamento_pendente === true;
     const ajusteUsado = item.pedido.ajuste_automatico_usado === true;
+    const isFreeArtWeekly = freeArtCampaignsService.isFreeArtOrder(item.pedido);
     const downloadBloqueado = imagemPronta && !pagamentoPendente && bloqueioDownload;
     const podeBaixar = imagemPronta && !pagamentoPendente && !downloadBloqueado;
 
     return {
       id: item.id,
-      tipo: nomeCategoriaPedido(item.pedido.categoria || ""),
+      tipo: isFreeArtWeekly ? "Arte Gratis da Semana" : nomeCategoriaPedido(item.pedido.categoria || ""),
       status,
       data: item.pedido.data || item.criado_em,
       criado_em: item.criado_em,
@@ -4843,13 +5093,19 @@ app.get("/meus-pedidos", auth, (req, res) => {
       tipo_compra: item.pedido.tipo_compra || "",
       valor_cobrado: Number(item.pedido.valor_cobrado || 0),
       origem_promocional: item.pedido.origem_promocional || "",
+      origem: item.pedido.origem || "",
+      gratuita_administrativa: item.pedido.gratuita_administrativa === true,
+      bloquear_cobranca: item.pedido.bloquear_cobranca === true,
+      bloquear_edicao: item.pedido.bloquear_edicao === true,
+      campaign_id: item.pedido.campaign_id || "",
+      assignment_id: item.pedido.assignment_id || "",
       marketing_context: item.pedido.marketing_context || "",
       ajuste_automatico_usado: ajusteUsado,
       motivo_ajuste: item.pedido.motivo_ajuste || "",
       pode_baixar: podeBaixar,
       download_bloqueado: downloadBloqueado,
       mensagem_download_bloqueado: downloadBloqueado ? mensagemBloqueioDownload : "",
-      pode_pedir_ajuste: imagemPronta && !ajusteUsado && status === "pronto"
+      pode_pedir_ajuste: !isFreeArtWeekly && imagemPronta && !ajusteUsado && status === "pronto"
     };
   });
 
@@ -4867,6 +5123,18 @@ app.post("/pedidos/:id/pagar-com-saldo", auth, (req, res) => {
   const pedidoPath = path.join(base, "pedido.json");
   const pedido = safeReadJson(pedidoPath) || {};
   const isArteEmpresa = pedido.categoria === "arte_empresa" || pedido.product_id === "arte_empresa";
+
+  if (isAdminFreeArtOrderHidden(pedido)) {
+    return sendHiddenAdminFreeArtOrder(res);
+  }
+
+  if (freeArtCampaignsService.isFreeArtOrder(pedido)) {
+    return res.status(403).json({
+      ok: false,
+      code: "free_art_weekly_billing_blocked",
+      error: "A Arte Gratis da Semana nao possui cobranca."
+    });
+  }
 
   if (pedido.pagamento_pendente !== true) {
     return res.json({
@@ -4937,6 +5205,18 @@ app.post("/pedidos/:id/gerar-pix", auth, async (req, res) => {
 
     const pedidoPath = path.join(base, "pedido.json");
     const pedido = safeReadJson(pedidoPath) || {};
+
+    if (isAdminFreeArtOrderHidden(pedido)) {
+      return sendHiddenAdminFreeArtOrder(res);
+    }
+
+    if (freeArtCampaignsService.isFreeArtOrder(pedido)) {
+      return res.status(403).json({
+        ok: false,
+        code: "free_art_weekly_billing_blocked",
+        error: "A Arte Gratis da Semana nao possui cobranca."
+      });
+    }
 
     if (pedido.pagamento_pendente !== true) {
       return res.status(400).json({ ok: false, error: "Pedido ja liberado." });
@@ -5038,6 +5318,10 @@ app.get("/pedidos/:id/pagamento-info", auth, (req, res) => {
   const pedidoPath = path.join(base, "pedido.json");
   const pedido = safeReadJson(pedidoPath) || {};
 
+  if (isAdminFreeArtOrderHidden(pedido)) {
+    return sendHiddenAdminFreeArtOrder(res);
+  }
+
   return res.json({
     ok: true,
     pagamento_pendente: pedido.pagamento_pendente === true,
@@ -5060,6 +5344,18 @@ app.post("/pedidos/:id/aprovar", auth, (req, res) => {
 
   const pedidoPath = path.join(base, "pedido.json");
   const pedido = safeReadJson(pedidoPath) || {};
+
+  if (isAdminFreeArtOrderHidden(pedido)) {
+    return sendHiddenAdminFreeArtOrder(res);
+  }
+
+  if (freeArtCampaignsService.isFreeArtOrder(pedido)) {
+    return res.status(403).json({
+      ok: false,
+      code: "free_art_weekly_edit_blocked",
+      error: "A Arte Gratis da Semana nao entra no fluxo normal de aprovacao."
+    });
+  }
 
   pedido.aprovado_cliente = true;
   pedido.baixado_cliente = false;
@@ -5098,6 +5394,18 @@ app.post("/pedidos/:id/solicitar-ajuste", auth, (req, res) => {
 
   const pedidoPath = path.join(base, "pedido.json");
   const pedido = safeReadJson(pedidoPath) || {};
+
+  if (isAdminFreeArtOrderHidden(pedido)) {
+    return sendHiddenAdminFreeArtOrder(res);
+  }
+
+  if (freeArtCampaignsService.isFreeArtOrder(pedido)) {
+    return res.status(403).json({
+      ok: false,
+      code: "free_art_weekly_edit_blocked",
+      error: "A Arte Gratis da Semana nao entra no fluxo de ajustes nesta versao."
+    });
+  }
 
   if (pedido.ajuste_automatico_usado === true) {
     const conversa = salvarMensagemSuporteAberta(
@@ -5161,6 +5469,10 @@ app.get("/pedidos/:id/download-resultado", auth, (req, res) => {
 
   const pedidoPath = path.join(base, "pedido.json");
   const pedido = safeReadJson(pedidoPath) || {};
+
+  if (isAdminFreeArtOrderHidden(pedido)) {
+    return sendHiddenAdminFreeArtOrder(res);
+  }
 
   if (pedido.pagamento_pendente === true) {
     return res.status(403).json({
@@ -5344,12 +5656,17 @@ app.get("/pedidos/:id/info", auth, (req, res) => {
     } catch {}
   }
 
+  if (isAdminFreeArtOrderHidden(pedido)) {
+    return sendHiddenAdminFreeArtOrder(res);
+  }
+
   const status = readOrderStatus(base, "novo");
 
   const imagem_pronta = fs.existsSync(resultadoFinalPath);
   const clientes = readClientes();
   const cliente = clientes[whatsapp];
   const pagamentoPendente = pedido.pagamento_pendente === true;
+  const isFreeArtWeekly = freeArtCampaignsService.isFreeArtOrder(pedido);
   const downloadBloqueado = imagem_pronta && !pagamentoPendente && downloadBloqueadoPorCadastro(cliente);
 
   return res.json({
@@ -5378,15 +5695,22 @@ app.get("/pedidos/:id/info", auth, (req, res) => {
     tipo_compra: pedido.tipo_compra || "",
     valor_cobrado: Number(pedido.valor_cobrado || 0),
     origem_promocional: pedido.origem_promocional || "",
+    origem: pedido.origem || "",
+    gratuita_administrativa: pedido.gratuita_administrativa === true,
+    bloquear_cobranca: pedido.bloquear_cobranca === true,
+    bloquear_edicao: pedido.bloquear_edicao === true,
+    campaign_id: pedido.campaign_id || "",
+    assignment_id: pedido.assignment_id || "",
     marketing_context: pedido.marketing_context || "",
     arte_gratis: pedido.cobranca_origem === "arte_gratis",
+    arte_gratis_semanal: isFreeArtWeekly,
     descricao_instagram: descricaoPostagemPedido(pedido),
     ajuste_automatico_usado: pedido.ajuste_automatico_usado === true,
     motivo_ajuste: pedido.motivo_ajuste || "",
     pode_baixar: imagem_pronta && !pagamentoPendente && !downloadBloqueado,
     download_bloqueado: downloadBloqueado,
     mensagem_download_bloqueado: downloadBloqueado ? mensagemDownloadBloqueado(cliente) : "",
-    pode_pedir_ajuste: imagem_pronta && pedido.ajuste_automatico_usado !== true && status === "pronto"
+    pode_pedir_ajuste: !isFreeArtWeekly && imagem_pronta && pedido.ajuste_automatico_usado !== true && status === "pronto"
   });
 });
 
@@ -5425,6 +5749,11 @@ app.get("/pedidos/:id/preview", (req, res) => {
   const pedidoPath = path.join(base, "pedido.json");
   const pedido = safeReadJson(pedidoPath) || {};
   const pagamentoPendente = pedido.pagamento_pendente === true;
+
+  if (isAdminFreeArtOrderHidden(pedido)) {
+    return sendHiddenAdminFreeArtOrder(res);
+  }
+
   const previewPath = pagamentoPendente && fs.existsSync(previewProtegidaPath)
     ? previewProtegidaPath
     : resultadoFinalPath;
@@ -5452,6 +5781,12 @@ app.get("/pedidos/:id/thumbnail", (req, res) => {
 
   const previewProtegidaPath = path.join(base, "preview_ia4tube.jpg");
   const resultadoFinalPath = path.join(base, "resultado_final.png");
+  const pedido = safeReadJson(path.join(base, "pedido.json")) || {};
+
+  if (isAdminFreeArtOrderHidden(pedido)) {
+    return sendHiddenAdminFreeArtOrder(res);
+  }
+
   const thumbnailPath = fs.existsSync(previewProtegidaPath)
     ? previewProtegidaPath
     : resultadoFinalPath;
@@ -5479,6 +5814,18 @@ app.get("/pedidos/:id/zip", auth, (req, res) => {
     return res.status(404).json({ ok: false, error: "Pedido não encontrado" });
   }
 
+  const pedido = safeReadJson(path.join(base, "pedido.json")) || {};
+  if (isAdminFreeArtOrderHidden(pedido)) {
+    return sendHiddenAdminFreeArtOrder(res);
+  }
+  if (freeArtCampaignsService.isFreeArtOrder(pedido)) {
+    return res.status(403).json({
+      ok: false,
+      code: "free_art_weekly_zip_blocked",
+      error: "A Arte Gratis da Semana nao entra no fluxo normal de ZIP."
+    });
+  }
+
   res.setHeader("Content-Type", "application/zip");
   res.setHeader("Content-Disposition", `attachment; filename="${req.params.id}.zip"`);
 
@@ -5498,6 +5845,18 @@ app.post("/pedidos/:id/status", auth, (req, res) => {
 
   if (!base) {
     return res.status(404).json({ ok: false, error: "Pedido não encontrado" });
+  }
+
+  const pedido = safeReadJson(path.join(base, "pedido.json")) || {};
+  if (isAdminFreeArtOrderHidden(pedido)) {
+    return sendHiddenAdminFreeArtOrder(res);
+  }
+  if (freeArtCampaignsService.isFreeArtOrder(pedido)) {
+    return res.status(403).json({
+      ok: false,
+      code: "free_art_weekly_status_blocked",
+      error: "A Arte Gratis da Semana nao entra no fluxo normal de status."
+    });
   }
 
   const { status } = req.body || {};
@@ -5531,6 +5890,20 @@ app.post(
     if (!base) {
       cleanupUploadedFiles(req.files);
       return res.status(404).json({ ok: false, error: "Pedido não encontrado" });
+    }
+
+    const existingPedido = safeReadJson(path.join(base, "pedido.json")) || {};
+    if (isAdminFreeArtOrderHidden(existingPedido)) {
+      cleanupUploadedFiles(req.files);
+      return sendHiddenAdminFreeArtOrder(res);
+    }
+    if (freeArtCampaignsService.isFreeArtOrder(existingPedido)) {
+      cleanupUploadedFiles(req.files);
+      return res.status(403).json({
+        ok: false,
+        code: "free_art_weekly_upload_blocked",
+        error: "A Arte Gratis da Semana nao entra no fluxo normal de upload."
+      });
     }
 
     const resultadoFile = req.files?.resultado?.[0] || null;
@@ -5580,7 +5953,11 @@ app.post(
               pagamento_pendente: pedidoData.pagamento_pendente === true
             }
           });
-          if (pedidoData.whatsapp && !monthlyPlanningService.isPlanningOrder(pedidoData)) {
+          if (
+            pedidoData.whatsapp &&
+            !monthlyPlanningService.isPlanningOrder(pedidoData) &&
+            !freeArtCampaignsService.isFreeArtOrder(pedidoData)
+          ) {
             sendClientPushAsync(pedidoData.whatsapp, "arte_pronta", {
               pedido_id: req.params.id,
               image_url: publicApiUrl(`/pedidos/${encodeURIComponent(req.params.id)}/preview`)
@@ -6596,6 +6973,14 @@ setInterval(cleanupOldTmpUploads, TMP_UPLOAD_CLEANUP_INTERVAL_MS);
 setInterval(finalizarConversasSuporteInativas, 60 * 1000);
 setTimeout(runMonthlyPlanningNotifications, 15 * 1000);
 setInterval(runMonthlyPlanningNotifications, MONTHLY_PLANNING_NOTIFICATIONS_INTERVAL_MS);
+if (adminFreeArtsEnabled()) {
+  setTimeout(runFreeArtCampaignRecovery, 60 * 1000);
+  setInterval(runFreeArtCampaignRecovery, adminFreeArtsRecoveryIntervalMs());
+}
+if (adminFreeArtsNotificationsEnabled()) {
+  setTimeout(runFreeArtCampaignNotifications, 20 * 1000);
+  setInterval(runFreeArtCampaignNotifications, adminFreeArtsNotificationsIntervalMs());
+}
 
 app.listen(PORT, () => {
   console.log("API rodando na porta", PORT);

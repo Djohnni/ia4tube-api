@@ -67,7 +67,12 @@ data class MonthlyPlanningCalendarListItem(
     val pedidoId: String,
     val imageReady: Boolean,
     val sortKey: String,
-    val thumbnailUrl: String = ""
+    val thumbnailUrl: String = "",
+    val origem: String = "",
+    val tipo: String = "",
+    val freeArtWeekly: Boolean = false,
+    val campaignId: String = "",
+    val assignmentId: String = ""
 )
 
 @Composable
@@ -165,6 +170,7 @@ private fun MonthlyPlanningCalendarDayCard(
 ) {
     val hasPosts = day.posts.isNotEmpty()
     val shape = RoundedCornerShape(16.dp)
+    val hasWeeklyFreeArt = day.posts.any { it.isWeeklyFreeArt() }
     Card(
         modifier = Modifier
             .fillMaxWidth()
@@ -182,7 +188,11 @@ private fun MonthlyPlanningCalendarDayCard(
         shape = shape,
         colors = CardDefaults.cardColors(
             containerColor = if (hasPosts) {
-                MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.55f)
+                if (hasWeeklyFreeArt) {
+                    MaterialTheme.colorScheme.tertiaryContainer.copy(alpha = 0.36f)
+                } else {
+                    MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.55f)
+                }
             } else {
                 MaterialTheme.colorScheme.surface
             }
@@ -258,6 +268,7 @@ private fun MonthlyPlanningCalendarDayPost(
     onReschedule: ((MonthlyPlanningCalendarListItem) -> Unit)?
 ) {
     val canOpenOrder = item.imageReady && item.pedidoId.isNotBlank()
+    val effectiveOnReschedule = if (item.isWeeklyFreeArt()) null else onReschedule
     val contentModifier = if (canOpenOrder) {
         Modifier.clickable { onOpenOrder(item.pedidoId) }
     } else {
@@ -280,10 +291,14 @@ private fun MonthlyPlanningCalendarDayPost(
                 color = MaterialTheme.colorScheme.primary
             )
             Text(
-                text = "Pronta",
+                text = if (item.isWeeklyFreeArt()) "Arte Gratis da Semana" else "Pronta",
                 style = MaterialTheme.typography.bodySmall,
                 fontWeight = FontWeight.SemiBold,
-                color = MaterialTheme.colorScheme.primary
+                color = if (item.isWeeklyFreeArt()) {
+                    MaterialTheme.colorScheme.tertiary
+                } else {
+                    MaterialTheme.colorScheme.primary
+                }
             )
         }
         Row(
@@ -322,7 +337,7 @@ private fun MonthlyPlanningCalendarDayPost(
                 )
             }
         }
-        if (onShare != null || onReschedule != null || onRemove != null) {
+        if (onShare != null || effectiveOnReschedule != null || onRemove != null) {
             Row(
                 modifier = Modifier.align(Alignment.End),
                 horizontalArrangement = Arrangement.spacedBy(4.dp)
@@ -335,7 +350,7 @@ private fun MonthlyPlanningCalendarDayPost(
                         Text(if (isSharing) "Compartilhando..." else "Compartilhar")
                     }
                 }
-                onReschedule?.let { reschedule ->
+                effectiveOnReschedule?.let { reschedule ->
                     TextButton(
                         enabled = !isRescheduling,
                         onClick = { reschedule(item) }
@@ -371,7 +386,13 @@ private fun MonthlyPlanningCalendarListCard(
     Card(
         modifier = Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(16.dp),
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.55f))
+        colors = CardDefaults.cardColors(
+            containerColor = if (item.isWeeklyFreeArt()) {
+                MaterialTheme.colorScheme.tertiaryContainer.copy(alpha = 0.36f)
+            } else {
+                MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.55f)
+            }
+        )
     ) {
         Column(
             modifier = Modifier.padding(14.dp),
@@ -389,10 +410,12 @@ private fun MonthlyPlanningCalendarListCard(
                     color = MaterialTheme.colorScheme.onSurface
                 )
                 Text(
-                    text = item.status.ifBlank { "Planejada" },
+                    text = if (item.isWeeklyFreeArt()) "Arte Gratis da Semana" else item.status.ifBlank { "Planejada" },
                     style = MaterialTheme.typography.bodySmall,
                     fontWeight = FontWeight.SemiBold,
-                    color = if (item.status.equals("Pronta", ignoreCase = true)) {
+                    color = if (item.isWeeklyFreeArt()) {
+                        MaterialTheme.colorScheme.tertiary
+                    } else if (item.status.equals("Pronta", ignoreCase = true)) {
                         MaterialTheme.colorScheme.primary
                     } else {
                         MaterialTheme.colorScheme.onSurfaceVariant
@@ -460,8 +483,18 @@ internal fun MonthlyPlanningPost.toCalendarListItem(planningId: String = ""): Mo
         pedidoId = pedidoId,
         imageReady = imageReady,
         sortKey = listOf(date, time, number.toString().padStart(4, '0')).joinToString("|"),
-        thumbnailUrl = thumbnailUrl
+        thumbnailUrl = thumbnailUrl,
+        origem = origem,
+        tipo = tipo,
+        freeArtWeekly = freeArtWeekly,
+        campaignId = campaignId,
+        assignmentId = assignmentId
     )
+}
+
+private fun MonthlyPlanningCalendarListItem.isWeeklyFreeArt(): Boolean {
+    return origem.equals("arte_gratis_semanal", ignoreCase = true) ||
+        campaignId.startsWith("free_", ignoreCase = true)
 }
 
 @Composable
