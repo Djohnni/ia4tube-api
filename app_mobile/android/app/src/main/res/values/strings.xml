@@ -78,6 +78,7 @@
     <string name="orders_image_ready">Imagem pronta: %1$s</string>
     <string name="orders_payment_pending">Pagamento pendente: %1$s</string>
     <string name="orders_badge_ready">Pronto</string>
+    <string name="orders_badge_free_weekly">Arte Gratis da Semana</string>
     <string name="orders_badge_error">Erro</string>
     <string name="orders_load_error">Não foi possível carregar seus pedidos agora.</string>
 
@@ -101,6 +102,8 @@
     <string name="order_share_image">Compartilhar</string>
     <string name="order_download_not_available">A imagem está pronta, mas o download ainda não está liberado.</string>
     <string name="order_delivery_title">Sua arte está pronta</string>
+    <string name="order_free_weekly_title">Arte Gratis da Semana</string>
+    <string name="order_free_weekly_description">Esta arte foi enviada gratuitamente pela iA4Tube para ajudar na sua divulgacao.</string>
     <string name="order_post_description_title">Descrição para postagem</string>
     <string name="order_copy_description">Copiar descrição</string>
     <string name="order_request_adjustment">Solicitar ajuste</string>

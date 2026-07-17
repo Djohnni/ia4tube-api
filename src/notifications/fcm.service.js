@@ -218,6 +218,18 @@ function notificationMessage(type, payload = {}) {
           route: planejamentoId ? "monthly_planning_detail" : "monthly_planning"
         }
       };
+    case "arte_gratis_semanal":
+      return {
+        title: payload.title || "Arte Gratis da Semana",
+        body: payload.body || payload.message || "Sua arte gratis da semana esta pronta. Toque para ver.",
+        imageUrl,
+        data: {
+          ...baseData,
+          route: pedidoId ? "order_detail" : "orders",
+          campaign_id: payload.campaign_id || payload.campaignId || "",
+          assignment_id: payload.assignment_id || payload.assignmentId || ""
+        }
+      };
     case "nova_versao":
       return {
         title: payload.title || "Nova versao disponivel",
@@ -371,6 +383,10 @@ function sendPlanejamentoMensal(cliente, payload = {}, options = {}) {
   return sendToClient(cliente, notificationMessage("planejamento_mensal", payload), options);
 }
 
+function sendArteGratisSemanal(cliente, payload = {}, options = {}) {
+  return sendToClient(cliente, notificationMessage("arte_gratis_semanal", payload), options);
+}
+
 function sendNovaVersao(cliente, payload = {}, options = {}) {
   return sendToClient(cliente, notificationMessage("nova_versao", payload), options);
 }
@@ -387,6 +403,7 @@ module.exports = {
   sendArtePronta,
   sendPedidoAtualizado,
   sendPlanejamentoMensal,
+  sendArteGratisSemanal,
   sendNovaVersao,
   sendAvisoGeral,
   sendToClient

@@ -234,7 +234,13 @@ class IA4TubeApiClient(
                                 imagemPronta = item.optBoolean("imagem_pronta", false),
                                 pagamentoPendente = item.optBoolean("pagamento_pendente", false),
                                 createdAt = item.optString("criado_em")
-                                    .ifBlank { item.optString("created_at") }
+                                    .ifBlank { item.optString("created_at") },
+                                origem = item.optString("origem"),
+                                gratuitaAdministrativa = item.optBoolean("gratuita_administrativa", false),
+                                bloquearCobranca = item.optBoolean("bloquear_cobranca", false),
+                                bloquearEdicao = item.optBoolean("bloquear_edicao", false),
+                                campaignId = item.optString("campaign_id"),
+                                assignmentId = item.optString("assignment_id")
                             )
                         )
                     }
@@ -457,7 +463,17 @@ class IA4TubeApiClient(
                 mensagemDownloadBloqueado = json.optString("mensagem_download_bloqueado"),
                 cobrancaOrigem = json.optString("cobranca_origem"),
                 tipoCompra = json.optString("tipo_compra"),
-                marketingContext = json.optString("marketing_context")
+                valorCobrado = json.optDouble("valor_cobrado", 0.0),
+                origemPromocional = json.optString("origem_promocional"),
+                origem = json.optString("origem"),
+                gratuitaAdministrativa = json.optBoolean("gratuita_administrativa", false),
+                bloquearCobranca = json.optBoolean("bloquear_cobranca", false),
+                bloquearEdicao = json.optBoolean("bloquear_edicao", false),
+                campaignId = json.optString("campaign_id"),
+                assignmentId = json.optString("assignment_id"),
+                arteGratisSemanal = json.optBoolean("arte_gratis_semanal", false),
+                marketingContext = json.optString("marketing_context"),
+                arteGratis = json.optBoolean("arte_gratis", false)
             )
         }
     }
@@ -1331,6 +1347,20 @@ class IA4TubeApiClient(
         }
 
         private fun monthlyPlanningPostFromJson(item: JSONObject, fallbackNumber: Int): MonthlyPlanningPostDto {
+            val status = item.optString("status")
+            val statusLabel = item.optString("status_label").ifBlank { status }
+            val normalizedStatus = statusLabel
+                .lowercase()
+                .replace('í', 'i')
+                .replace('ï', 'i')
+                .replace('ó', 'o')
+                .replace('ô', 'o')
+            val imageReady = item.optBoolean("imagem_pronta", false) ||
+                item.optBoolean("ready", false) ||
+                normalizedStatus.contains("pronto") ||
+                normalizedStatus.contains("concluido")
+            val origem = item.optString("origem")
+            val campaignId = item.optString("campaign_id")
             return MonthlyPlanningPostDto(
                 number = item.optInt("ordem", fallbackNumber),
                 itemId = item.optString("calendar_key")
@@ -1357,6 +1387,14 @@ class IA4TubeApiClient(
                     .ifBlank { item.optString("preview_url") }
                     .ifBlank { item.optString("image_url") }
                     .ifBlank { item.optString("imagem_url") }
+                    .ifBlank { item.optString("url_imagem") }
+                    .ifBlank { item.optString("resultado_url") },
+                origem = origem,
+                tipo = item.optString("tipo"),
+                freeArtWeekly = origem.equals("arte_gratis_semanal", ignoreCase = true) ||
+                    campaignId.startsWith("free_", ignoreCase = true),
+                campaignId = campaignId,
+                assignmentId = item.optString("assignment_id")
             )
         }
 

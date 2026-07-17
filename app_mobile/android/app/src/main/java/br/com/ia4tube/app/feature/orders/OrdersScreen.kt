@@ -231,18 +231,32 @@ private fun OrderSummaryCard(
     val orderDateLabel = remember(pedido.id, pedido.createdAt) {
         formatOrderDateLabel(pedido.createdAt, pedido.id)
     }
+    val isWeeklyFreeArt = pedido.isWeeklyFreeArt()
 
     Card(
         modifier = Modifier
             .fillMaxWidth()
             .clickable(onClick = onClick),
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
+        colors = CardDefaults.cardColors(
+            containerColor = if (isWeeklyFreeArt) {
+                MaterialTheme.colorScheme.tertiaryContainer.copy(alpha = 0.42f)
+            } else {
+                MaterialTheme.colorScheme.surface
+            }
+        )
     ) {
         Column(
             modifier = Modifier
                 .fillMaxWidth()
                 .padding(16.dp)
         ) {
+            if (isWeeklyFreeArt) {
+                Text(
+                    text = stringResource(R.string.orders_badge_free_weekly),
+                    style = MaterialTheme.typography.titleMedium
+                )
+                Spacer(modifier = Modifier.height(4.dp))
+            }
             if (orderDateLabel == null) {
                 Text(stringResource(R.string.orders_id, pedido.id), style = MaterialTheme.typography.titleMedium)
                 StatusBadgesRow(badges = pedido.statusBadges())
@@ -341,6 +355,7 @@ private fun StatusBadge(badge: OrderStatusBadge) {
 private fun badgeColors(badge: OrderStatusBadge): BadgeColors {
     val scheme = MaterialTheme.colorScheme
     return when (badge) {
+        OrderStatusBadge.WeeklyFreeArt -> BadgeColors(scheme.tertiaryContainer, scheme.onTertiaryContainer)
         OrderStatusBadge.Production -> BadgeColors(scheme.secondaryContainer, scheme.onSecondaryContainer)
         OrderStatusBadge.Ready -> BadgeColors(scheme.primaryContainer, scheme.onPrimaryContainer)
         OrderStatusBadge.PaymentPending -> BadgeColors(scheme.tertiaryContainer, scheme.onTertiaryContainer)
@@ -350,6 +365,7 @@ private fun badgeColors(badge: OrderStatusBadge): BadgeColors {
 
 private fun OrderStatusBadge.labelRes(): Int {
     return when (this) {
+        OrderStatusBadge.WeeklyFreeArt -> R.string.orders_badge_free_weekly
         OrderStatusBadge.Production -> R.string.orders_filter_production
         OrderStatusBadge.Ready -> R.string.orders_badge_ready
         OrderStatusBadge.PaymentPending -> R.string.orders_filter_payment_pending

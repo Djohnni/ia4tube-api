@@ -1,0 +1,18 @@
+Crie uma arte vertical 9:16 para uma campanha generica de marketing.
+
+Regras obrigatorias:
+- A arte deve ser generica para o ramo informado.
+- Nao invente nome de empresa, telefone, Instagram, endereco, preco ou promocao especifica.
+- Nao inclua marca, logo ou dados de cliente.
+- Use texto curto, comercial e legivel.
+- O resultado deve servir para varios clientes do mesmo ramo.
+- Nao use conteudo sensivel, politico, enganoso ou com direitos autorais.
+
+Ramo:
+{ramo}
+
+Direcao criativa:
+{direcao}
+
+Prompt livre do administrador:
+{prompt_livre}

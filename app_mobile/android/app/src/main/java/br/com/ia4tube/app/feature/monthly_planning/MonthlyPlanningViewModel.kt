@@ -127,7 +127,12 @@ data class MonthlyPlanningPost(
     val pedidoId: String = "",
     val imageReady: Boolean = false,
     val imageText: String = "",
-    val thumbnailUrl: String = ""
+    val thumbnailUrl: String = "",
+    val origem: String = "",
+    val tipo: String = "",
+    val freeArtWeekly: Boolean = false,
+    val campaignId: String = "",
+    val assignmentId: String = ""
 )
 
 data class MonthlyPlanningCalendarSharePayload(
@@ -866,7 +871,7 @@ class MonthlyPlanningViewModel(
             current.copy(
                 nomeEmpresa = profile.nomeEmpresa.trim(),
                 ramo = profile.ramo.trim(),
-                whatsapp = profile.whatsapp.trim(),
+                whatsapp = current.whatsapp,
                 instagram = profile.instagram.trim(),
                 logoUri = profile.logoUri.trim()
             )
@@ -993,7 +998,7 @@ private fun CompanyProfile.toUiCompanyProfile(): MonthlyPlanningCompanyProfile {
         ramo = ramo.trim(),
         ramoSelecionadoCatalogo = ramo.isNotBlank(),
         ramoDigitacaoLivre = false,
-        whatsapp = whatsapp.trim(),
+        whatsapp = "",
         instagram = instagram.trim(),
         logoUri = logoUri.trim()
     )
@@ -1049,7 +1054,12 @@ private fun MonthlyPlanningPostDto.toUiPost(): MonthlyPlanningPost {
         pedidoId = pedidoId,
         imageReady = imageReady,
         imageText = imageText,
-        thumbnailUrl = thumbnailUrl
+        thumbnailUrl = thumbnailUrl,
+        origem = origem,
+        tipo = tipo,
+        freeArtWeekly = freeArtWeekly,
+        campaignId = campaignId,
+        assignmentId = assignmentId
     )
 }
 

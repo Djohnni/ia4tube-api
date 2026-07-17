@@ -59,7 +59,12 @@ data class MonthlyPlanningPostDto(
     val pedidoId: String,
     val imageReady: Boolean,
     val imageText: String = "",
-    val thumbnailUrl: String = ""
+    val thumbnailUrl: String = "",
+    val origem: String = "",
+    val tipo: String = "",
+    val freeArtWeekly: Boolean = false,
+    val campaignId: String = "",
+    val assignmentId: String = ""
 )
 
 data class MonthlyPlanningRescheduleRequest(
