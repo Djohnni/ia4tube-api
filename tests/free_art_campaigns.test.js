@@ -46,6 +46,92 @@ function clientesFixture() {
   };
 }
 
+function selectedClientesFixture() {
+  return {
+    "5511991111111": {
+      nome_time: "Ana Padaria",
+      ativo: true,
+      saldo_mensal: 4,
+      saldo_extra: 1,
+      usados_no_ciclo: 2,
+      arte_gratis_usada: false
+    },
+    "5511992222222": {
+      nome_time: "Bruno Paes",
+      ativo: true,
+      saldo_mensal: 7,
+      saldo_extra: 0,
+      usados_no_ciclo: 1,
+      arte_gratis_usada: true
+    },
+    "5511993333333": {
+      nome_time: "Carla Confeitaria",
+      ativo: true,
+      saldo_mensal: 2,
+      saldo_extra: 3,
+      usados_no_ciclo: 0,
+      arte_gratis_usada: false
+    },
+    "5511984444444": {
+      nome_time: "Davi Hamburgueria",
+      ativo: true,
+      saldo_mensal: 9,
+      saldo_extra: 0,
+      usados_no_ciclo: 0,
+      arte_gratis_usada: true
+    }
+  };
+}
+
+function selectedFixtureContext() {
+  const root = tempRoot();
+  const baseDir = path.join(root, "campanhas");
+  const pedidosDir = path.join(root, "pedidos");
+  const clientes = selectedClientesFixture();
+  const branches = {
+    "5511991111111": "Padaria",
+    "5511992222222": "Padaria",
+    "5511993333333": "Padaria",
+    "5511984444444": "Hamburgueria"
+  };
+
+  Object.entries(branches).forEach(([whatsapp, ramo], index) => {
+    writeOrder(pedidosDir, whatsapp, "2026-06", `202606${String(index + 1).padStart(2, "0")}_100000`, {
+      origem: "planejamento_mensal",
+      planejamento_id: `pm_${index + 1}`,
+      planejamento_item_id: "item1",
+      ramo,
+      criado_em: `2026-06-${String(index + 1).padStart(2, "0")}T10:00:00Z`,
+      status: "pronto"
+    });
+  });
+
+  return { root, baseDir, pedidosDir, clientes };
+}
+
+function createFixtureCampaign(context, body = {}) {
+  return service.createCampaign({
+    baseDir: context.baseDir,
+    pedidosDir: context.pedidosDir,
+    clientes: context.clientes,
+    body: {
+      ramo: "Padaria",
+      quantidade: 2,
+      data_postagem: "2026-07-20",
+      horario: "18:00",
+      notificacao_titulo: "Titulo de teste",
+      notificacao_mensagem: "Mensagem de teste",
+      ...body
+    },
+    adminId: "admin-test",
+    maxArts: 20
+  });
+}
+
+function assertThrowsCode(callback, code) {
+  assert.throws(callback, (error) => error?.code === code);
+}
+
 function createReadyArt(baseDir, campaignId, artId) {
   const uploadPath = path.join(tempRoot(), `${artId}.png`);
   fs.writeFileSync(uploadPath, "fake-image");
@@ -287,9 +373,137 @@ function testInvalidQuantityAndRequiredDate() {
   }), /Data da postagem/);
 }
 
+function testDistributionModeTodosKeepsAllClients() {
+  const context = selectedFixtureContext();
+  const created = createFixtureCampaign(context, {
+    distribution_mode: "todos",
+    selected_whatsapps: ["5511991111111"]
+  });
+
+  assert.strictEqual(created.campaign.distribution_mode, "todos");
+  assert.deepStrictEqual(created.campaign.selected_whatsapps, []);
+  assert.deepStrictEqual(
+    created.campaign.eligible_clients_snapshot.map((client) => client.whatsapp),
+    ["5511991111111", "5511992222222", "5511993333333"]
+  );
+}
+
+function testDistributionModeSelectedValidation() {
+  const selectedContext = selectedFixtureContext();
+  const created = createFixtureCampaign(selectedContext, {
+    distribution_mode: "selecionados",
+    selected_whatsapps: ["+55 (11) 99111-1111", "5511991111111"]
+  });
+
+  assert.strictEqual(created.campaign.distribution_mode, "selecionados");
+  assert.deepStrictEqual(created.campaign.selected_whatsapps, ["5511991111111"]);
+  assert.deepStrictEqual(
+    created.campaign.eligible_clients_snapshot.map((client) => client.whatsapp),
+    ["5511991111111"]
+  );
+
+  const validationContext = selectedFixtureContext();
+  assertThrowsCode(() => createFixtureCampaign(validationContext, {
+    distribution_mode: "selecionados",
+    selected_whatsapps: []
+  }), "selected_clients_required");
+  assertThrowsCode(() => createFixtureCampaign(validationContext, {
+    distribution_mode: "selecionados",
+    selected_whatsapps: ["5511984444444"]
+  }), "selected_client_not_eligible");
+  assertThrowsCode(() => createFixtureCampaign(validationContext, {
+    distribution_mode: "selecionados",
+    selected_whatsapps: ["5511975555555"]
+  }), "selected_client_not_eligible");
+  assertThrowsCode(() => createFixtureCampaign(validationContext, {
+    distribution_mode: "selecionados",
+    selected_whatsapps: ["numero-invalido"]
+  }), "invalid_selected_whatsapp");
+  assertThrowsCode(() => createFixtureCampaign(validationContext, {
+    distribution_mode: "percentual",
+    selected_whatsapps: []
+  }), "invalid_distribution_mode");
+  assertThrowsCode(() => createFixtureCampaign(validationContext, {
+    distribution_mode: "selecionados",
+    selected_whatsapps: "5511991111111"
+  }), "invalid_selected_whatsapps");
+}
+
+function testDetailedPreviewMatchesRealDistribution() {
+  const context = selectedFixtureContext();
+  const billingBefore = JSON.stringify(context.clientes);
+  const created = createFixtureCampaign(context, {
+    distribution_mode: "selecionados",
+    selected_whatsapps: ["5511991111111", "5511993333333"]
+  });
+  const campaignId = created.campaign.id;
+  createReadyArt(context.baseDir, campaignId, "art_01");
+  createReadyArt(context.baseDir, campaignId, "art_02");
+
+  const preview = service.buildDistributionPreview({ baseDir: context.baseDir, campaignId });
+  const previewAssignments = preview.distribuicao_detalhada
+    .flatMap((group) => group.clientes)
+    .map((client) => [client.whatsapp, client.art_id])
+    .sort((a, b) => a[0].localeCompare(b[0]));
+
+  assert.strictEqual(preview.clientes, 2);
+  assert.strictEqual(Object.values(preview.distribuicao_por_arte).reduce((sum, total) => sum + total, 0), 2);
+  assert.strictEqual(previewAssignments.length, 2);
+  assert(preview.distribuicao_detalhada.every((group) => group.clientes.every((client) => (
+    client.nome && client.whatsapp && client.art_id === group.art_id
+  ))));
+
+  const distributed = service.distributeCampaign({
+    baseDir: context.baseDir,
+    pedidosDir: context.pedidosDir,
+    campaignId,
+    adminId: "admin-test"
+  });
+  const realAssignments = distributed.distribuicao
+    .map((assignment) => [assignment.whatsapp, assignment.art_id])
+    .sort((a, b) => a[0].localeCompare(b[0]));
+
+  assert.deepStrictEqual(realAssignments, previewAssignments);
+  assert.strictEqual(distributed.distribuicao.length, created.campaign.eligible_clients_snapshot.length);
+  assert.strictEqual(distributed.distribuicao.some((assignment) => assignment.whatsapp === "5511992222222"), false);
+  assert.strictEqual(JSON.stringify(context.clientes), billingBefore);
+  distributed.distribuicao.forEach((assignment) => {
+    assert.strictEqual(assignment.notificacao_status, "pendente");
+    assert.strictEqual(assignment.notificacao_tentativas, 0);
+    assert.strictEqual(Boolean(assignment.notificacao_enviada_em), false);
+  });
+}
+
+function testLegacyCampaignWithoutDistributionFieldsStillWorks() {
+  const context = selectedFixtureContext();
+  const created = createFixtureCampaign(context, { quantidade: 1 });
+  const campaignId = created.campaign.id;
+  const legacyCampaign = storage.readCampaign(context.baseDir, campaignId);
+  delete legacyCampaign.distribution_mode;
+  delete legacyCampaign.selected_whatsapps;
+  storage.writeCampaign(context.baseDir, legacyCampaign);
+  createReadyArt(context.baseDir, campaignId, "art_01");
+
+  const preview = service.buildDistributionPreview({ baseDir: context.baseDir, campaignId });
+  assert.strictEqual(preview.clientes, 3);
+  assert.strictEqual(preview.distribuicao_detalhada[0].clientes.length, 3);
+
+  const distributed = service.distributeCampaign({
+    baseDir: context.baseDir,
+    pedidosDir: context.pedidosDir,
+    campaignId,
+    adminId: "admin-test"
+  });
+  assert.strictEqual(distributed.distribuicao.length, 3);
+}
+
 testClassifierUsesOnlyOwnIdentifiers();
 testBranchScanUsesLatestPlanningBeforeCompanyArt();
 testCreateAndDistributeDoesNotMutateBilling();
 testRecoverStuckGeneration();
 testInvalidQuantityAndRequiredDate();
+testDistributionModeTodosKeepsAllClients();
+testDistributionModeSelectedValidation();
+testDetailedPreviewMatchesRealDistribution();
+testLegacyCampaignWithoutDistributionFieldsStillWorks();
 console.log("free_art_campaigns.test.js ok");

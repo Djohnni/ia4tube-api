@@ -10,9 +10,10 @@
     main{width:min(1180px,calc(100% - 28px));margin:24px auto 56px}h1{margin:0 0 6px;font-size:28px}h2{margin:0 0 14px;font-size:18px}.muted{color:var(--muted)}
     .grid{display:grid;grid-template-columns:320px 1fr;gap:16px}.panel{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:16px}.row{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
     button,input,select,textarea{font:inherit}button{border:0;border-radius:10px;background:var(--accent);color:#06110b;font-weight:800;padding:10px 14px;cursor:pointer}button.secondary{background:#202a3a;color:var(--text);border:1px solid var(--line)}button.danger{background:#3a1720;color:#ffd6dc;border:1px solid rgba(255,107,122,.35)}button:disabled{opacity:.48;cursor:not-allowed}
-    input,select,textarea{width:100%;border:1px solid var(--line);border-radius:10px;background:#0b1220;color:var(--text);padding:10px}label{display:block;margin:10px 0 6px;color:#cbd5e1}.list{display:grid;gap:8px;max-height:540px;overflow:auto}.branch,.campaign{display:flex;justify-content:space-between;gap:8px;padding:10px;border:1px solid var(--line);border-radius:10px;background:#0b1220;cursor:pointer}.branch.active,.campaign.active{border-color:var(--accent)}
+    input,select,textarea{width:100%;border:1px solid var(--line);border-radius:10px;background:#0b1220;color:var(--text);padding:10px}input[type="radio"],input[type="checkbox"]{width:auto;accent-color:var(--accent)}label{display:block;margin:10px 0 6px;color:#cbd5e1}.list{display:grid;gap:8px;max-height:540px;overflow:auto}.branch,.campaign{display:flex;justify-content:space-between;gap:8px;padding:10px;border:1px solid var(--line);border-radius:10px;background:#0b1220;cursor:pointer}.branch.active,.campaign.active{border-color:var(--accent)}
     .cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(190px,1fr));gap:12px}.art{background:#0b1220;border:1px solid var(--line);border-radius:12px;padding:10px}.art img{width:100%;aspect-ratio:9/16;object-fit:contain;background:#05070a;border-radius:8px}.badge{display:inline-flex;border-radius:999px;padding:4px 8px;background:#202a3a;color:#d8e2f0;font-size:12px}.badge.ok{background:#123524;color:#a7f3c4}.badge.warn{background:#3a2b11;color:#ffe1a1}.badge.err{background:#3b121b;color:#ffc2cc}
-    .confirm{border-color:rgba(244,193,93,.45);background:#1d1820}.hidden{display:none}.message{min-height:24px;margin:12px 0;color:var(--warn)}pre{white-space:pre-wrap;background:#0b1220;border:1px solid var(--line);border-radius:10px;padding:10px;max-height:220px;overflow:auto}
+    .distribution-mode{border:1px solid var(--line);border-radius:10px;margin:14px 0;padding:6px 12px 10px}.distribution-mode legend{color:#cbd5e1;padding:0 6px}.choice{display:flex;align-items:center;gap:8px;margin:8px 0;cursor:pointer}.client-picker{border:1px solid var(--line);border-radius:10px;background:#0b1220;padding:12px;margin-bottom:12px}.client-list{display:grid;gap:6px;max-height:280px;overflow:auto;margin-top:10px}.client-row{display:grid;grid-template-columns:auto minmax(0,1fr);gap:10px;align-items:start;padding:9px;border:1px solid var(--line);border-radius:9px;background:#111827}.client-row label{margin:0;cursor:pointer}.client-meta{display:flex;gap:8px;flex-wrap:wrap;margin-top:3px;color:var(--muted);font-size:12px}
+    .confirm{border-color:rgba(244,193,93,.45);background:#1d1820}.hidden{display:none!important}.message{min-height:24px;margin:12px 0;color:var(--warn)}.preview-group{margin:12px 0;padding:12px;border:1px solid var(--line);border-radius:10px;background:#0b1220}.preview-group h3{margin:0 0 10px;font-size:15px}.table-wrap{overflow:auto}table{width:100%;border-collapse:collapse;font-size:13px}th,td{text-align:left;padding:8px;border-bottom:1px solid var(--line);white-space:nowrap}th{color:#cbd5e1}.preview-empty{padding:12px;color:var(--muted)}
     @media(max-width:900px){.grid{grid-template-columns:1fr}}
   </style>
 </head>
@@ -32,6 +33,21 @@
         <div class="row">
           <span class="badge" id="selected-branch">Nenhum ramo selecionado</span>
           <span class="badge" id="max-arts">Limite: 20</span>
+        </div>
+        <fieldset class="distribution-mode">
+          <legend>Modo de distribuicao</legend>
+          <label class="choice"><input id="distribution-all" type="radio" name="distribution-mode" value="todos" checked> Distribuir para todos</label>
+          <label class="choice"><input id="distribution-selected" type="radio" name="distribution-mode" value="selecionados"> Distribuir somente para clientes selecionados</label>
+        </fieldset>
+        <div id="client-picker" class="client-picker hidden">
+          <label for="client-search">Pesquisar por nome ou WhatsApp</label>
+          <input id="client-search" type="search" placeholder="Digite o nome ou telefone">
+          <div class="row" style="margin-top:10px">
+            <button id="select-all-clients" type="button" class="secondary">Selecionar tudo</button>
+            <button id="clear-all-clients" type="button" class="secondary">Desmarcar tudo</button>
+            <span id="selection-counter" class="badge">0 selecionados</span>
+          </div>
+          <div id="client-list" class="client-list"></div>
         </div>
         <label>Quantidade de artes</label>
         <input id="quantity" type="number" min="1" max="20" value="1">
@@ -78,15 +94,28 @@
       <div id="campaign-detail" class="muted">Selecione uma campanha.</div>
       <div id="arts" class="cards"></div>
       <div id="confirm" class="panel confirm hidden" style="margin-top:16px">
-        <h2>Confirmacao de envio</h2>
-        <pre id="preview"></pre>
-        <button id="send">Enviar para os clientes</button>
+        <h2>Previa detalhada da distribuicao</h2>
+        <p id="preview-summary" class="muted">Carregando previa...</p>
+        <div id="preview"></div>
+        <div class="row" style="margin-top:12px">
+          <button id="refresh-preview" class="secondary">Atualizar previa</button>
+          <button id="send">Enviar para os clientes</button>
+        </div>
       </div>
     </section>
   </main>
 
   <script>
-    const state = { config:null, branches:[], branch:null, campaigns:[], selectedCampaign:null };
+    const state = {
+      config:null,
+      branches:[],
+      clients:[],
+      branch:null,
+      campaigns:[],
+      selectedCampaign:null,
+      distributionMode:"todos",
+      selectedWhatsapps:new Set()
+    };
     const $ = (id) => document.getElementById(id);
     const msg = (text) => $("message").textContent = text || "";
 
@@ -104,6 +133,116 @@
       return new Date().toISOString().slice(0, 10);
     }
 
+    function normalizeWhatsapp(value) {
+      return String(value || "").replace(/\D+/g, "");
+    }
+
+    function normalizeSearch(value) {
+      return String(value || "")
+        .normalize("NFD")
+        .replace(/[\u0300-\u036f]/g, "")
+        .toLowerCase()
+        .trim();
+    }
+
+    function selectedBranchClients() {
+      if (!state.branch) return [];
+      const unique = new Map();
+      state.clients
+        .filter((client) => client.ramo_normalizado === state.branch.ramo_normalizado)
+        .forEach((client) => {
+          const whatsapp = normalizeWhatsapp(client.whatsapp);
+          const key = whatsapp || String(client.whatsapp || "");
+          if (!unique.has(key)) unique.set(key, { ...client, whatsapp_normalizado:whatsapp });
+        });
+      return [...unique.values()];
+    }
+
+    function updateCreateState() {
+      const missingSelection = state.distributionMode === "selecionados" && state.selectedWhatsapps.size === 0;
+      $("create").disabled = missingSelection;
+      $("create").title = missingSelection ? "Selecione pelo menos um cliente." : "";
+    }
+
+    function renderClientPicker() {
+      const selectedMode = state.distributionMode === "selecionados";
+      $("client-picker").classList.toggle("hidden", !selectedMode);
+      $("distribution-all").checked = !selectedMode;
+      $("distribution-selected").checked = selectedMode;
+
+      const clients = selectedBranchClients();
+      const query = normalizeSearch($("client-search").value);
+      const queryDigits = normalizeWhatsapp(query);
+      const filtered = clients.filter((client) => {
+        if (!query) return true;
+        const nameMatches = normalizeSearch(client.nome_time).includes(query);
+        const phoneMatches = queryDigits && client.whatsapp_normalizado.includes(queryDigits);
+        return nameMatches || phoneMatches;
+      });
+
+      $("selection-counter").textContent = `${state.selectedWhatsapps.size} de ${clients.length} selecionados`;
+      $("client-list").innerHTML = "";
+
+      if (!state.branch) {
+        const empty = document.createElement("div");
+        empty.className = "preview-empty";
+        empty.textContent = "Selecione um ramo para listar os clientes.";
+        $("client-list").appendChild(empty);
+      } else if (!filtered.length) {
+        const empty = document.createElement("div");
+        empty.className = "preview-empty";
+        empty.textContent = "Nenhum cliente encontrado.";
+        $("client-list").appendChild(empty);
+      } else {
+        filtered.forEach((client) => {
+          const validWhatsapp = /^\d{8,15}$/.test(client.whatsapp_normalizado);
+          const row = document.createElement("div");
+          row.className = "client-row";
+          const checkbox = document.createElement("input");
+          checkbox.type = "checkbox";
+          checkbox.checked = state.selectedWhatsapps.has(client.whatsapp_normalizado);
+          checkbox.disabled = !validWhatsapp;
+          checkbox.setAttribute("aria-label", `Selecionar ${client.nome_time || client.whatsapp}`);
+          checkbox.onchange = () => {
+            if (checkbox.checked) state.selectedWhatsapps.add(client.whatsapp_normalizado);
+            else state.selectedWhatsapps.delete(client.whatsapp_normalizado);
+            renderClientPicker();
+          };
+
+          const content = document.createElement("label");
+          content.onclick = () => {
+            if (checkbox.disabled) return;
+            checkbox.checked = !checkbox.checked;
+            checkbox.onchange();
+          };
+          const name = document.createElement("strong");
+          name.textContent = client.nome_time || "Sem nome";
+          const meta = document.createElement("div");
+          meta.className = "client-meta";
+          const phone = document.createElement("span");
+          phone.textContent = `WhatsApp: ${client.whatsapp || "Nao informado"}`;
+          const branch = document.createElement("span");
+          branch.textContent = `Ramo: ${client.ramo || state.branch.ramo}`;
+          meta.append(phone, branch);
+          if (!validWhatsapp) {
+            const invalid = document.createElement("span");
+            invalid.className = "badge err";
+            invalid.textContent = "WhatsApp invalido";
+            meta.appendChild(invalid);
+          }
+          content.append(name, meta);
+          row.append(checkbox, content);
+          $("client-list").appendChild(row);
+        });
+      }
+      updateCreateState();
+    }
+
+    function setDistributionMode(mode) {
+      state.distributionMode = mode === "selecionados" ? "selecionados" : "todos";
+      renderClientPicker();
+    }
+
     function renderBranches() {
       $("branch-summary").textContent = `Clientes sem ramo identificado: ${state.withoutBranch || 0}`;
       $("branches").innerHTML = "";
@@ -113,9 +252,12 @@
         el.innerHTML = `<strong>${branch.ramo}</strong><span>${branch.clientes} clientes</span>`;
         el.onclick = () => {
           state.branch = branch;
+          state.selectedWhatsapps.clear();
+          $("client-search").value = "";
           $("selected-branch").textContent = `${branch.ramo} - ${branch.clientes} clientes`;
           $("estimate").textContent = `Ramo: ${branch.ramo}. Clientes: ${branch.clientes}. Custo estimado: nao informado pela API.`;
           renderBranches();
+          renderClientPicker();
         };
         $("branches").appendChild(el);
       });
@@ -135,6 +277,70 @@
     function statusBadge(status) {
       const cls = status === "aprovada" ? "ok" : status === "erro" || status === "excluida" ? "err" : "warn";
       return `<span class="badge ${cls}">${status}</span>`;
+    }
+
+    function renderDistributionPreview(data) {
+      $("preview-summary").textContent = `${data.clientes || 0} clientes receberao ${data.artes_aprovadas || 0} artes aprovadas.`;
+      $("preview").innerHTML = "";
+      const groups = Array.isArray(data.distribuicao_detalhada) ? data.distribuicao_detalhada : [];
+
+      if (!groups.length) {
+        const empty = document.createElement("div");
+        empty.className = "preview-empty";
+        empty.textContent = "A previa detalhada nao possui clientes para exibir.";
+        $("preview").appendChild(empty);
+        return;
+      }
+
+      groups.forEach((group) => {
+        const section = document.createElement("section");
+        section.className = "preview-group";
+        const heading = document.createElement("h3");
+        const clients = Array.isArray(group.clientes) ? group.clientes : [];
+        heading.textContent = `${group.art_id} - ${clients.length} cliente(s)`;
+        section.appendChild(heading);
+
+        if (!clients.length) {
+          const empty = document.createElement("div");
+          empty.className = "preview-empty";
+          empty.textContent = "Nenhum cliente recebera esta arte.";
+          section.appendChild(empty);
+        } else {
+          const wrap = document.createElement("div");
+          wrap.className = "table-wrap";
+          const table = document.createElement("table");
+          const thead = document.createElement("thead");
+          const headerRow = document.createElement("tr");
+          ["Nome", "WhatsApp", "Ramo", "ID da arte"].forEach((label) => {
+            const th = document.createElement("th");
+            th.textContent = label;
+            headerRow.appendChild(th);
+          });
+          thead.appendChild(headerRow);
+          const tbody = document.createElement("tbody");
+          clients.forEach((client) => {
+            const row = document.createElement("tr");
+            [client.nome || "Sem nome", client.whatsapp || "", client.ramo || "", client.art_id || group.art_id].forEach((value) => {
+              const cell = document.createElement("td");
+              cell.textContent = value;
+              row.appendChild(cell);
+            });
+            tbody.appendChild(row);
+          });
+          table.append(thead, tbody);
+          wrap.appendChild(table);
+          section.appendChild(wrap);
+        }
+        $("preview").appendChild(section);
+      });
+    }
+
+    async function loadDistributionPreview(campaignId) {
+      $("preview-summary").textContent = "Carregando previa...";
+      const data = await api(`/${encodeURIComponent(campaignId)}/distribute/preview`, { method:"POST", body:"{}" });
+      if (state.selectedCampaign?.id !== campaignId) return data;
+      renderDistributionPreview(data);
+      return data;
     }
 
     function renderDetail(data) {
@@ -166,7 +372,15 @@
         el.querySelector('[data-action="delete"]').onclick = () => artAction(campaign.id, art.id, "delete");
         $("arts").appendChild(el);
       });
-      $("confirm").classList.toggle("hidden", !data.artes.some((art) => art.status === "aprovada") || locked);
+      const canDistribute = data.artes.some((art) => art.status === "aprovada") && !locked;
+      $("confirm").classList.toggle("hidden", !canDistribute);
+      if (canDistribute) {
+        $("preview").innerHTML = "";
+        loadDistributionPreview(campaign.id).catch((error) => {
+          if (state.selectedCampaign?.id !== campaign.id) return;
+          $("preview-summary").textContent = `Nao foi possivel montar a previa: ${error.message}`;
+        });
+      }
       renderCampaigns();
     }
 
@@ -180,8 +394,10 @@
     async function loadBranches() {
       const data = await api("/ramos");
       state.branches = data.ramos || [];
+      state.clients = data.clients || [];
       state.withoutBranch = data.clientes_sem_ramo_identificado || 0;
       renderBranches();
+      renderClientPicker();
     }
 
     async function loadCampaigns() {
@@ -223,9 +439,14 @@
 
     $("create").onclick = async () => {
       if (!state.branch) return msg("Selecione um ramo.");
+      if (state.distributionMode === "selecionados" && state.selectedWhatsapps.size === 0) {
+        return msg("Selecione pelo menos um cliente.");
+      }
       msg("Criando campanha...");
       const payload = {
         ramo_normalizado: state.branch.ramo_normalizado,
+        distribution_mode: state.distributionMode,
+        selected_whatsapps: state.distributionMode === "selecionados" ? [...state.selectedWhatsapps] : [],
         quantidade: Number($("quantity").value),
         opcao_rapida: $("quick").value,
         prompt_livre: $("prompt").value,
@@ -256,13 +477,34 @@
       msg("Campanha duplicada.");
     };
 
+    $("distribution-all").onchange = () => setDistributionMode("todos");
+    $("distribution-selected").onchange = () => setDistributionMode("selecionados");
+    $("client-search").oninput = renderClientPicker;
+    $("select-all-clients").onclick = () => {
+      selectedBranchClients().forEach((client) => {
+        if (/^\d{8,15}$/.test(client.whatsapp_normalizado)) state.selectedWhatsapps.add(client.whatsapp_normalizado);
+      });
+      renderClientPicker();
+    };
+    $("clear-all-clients").onclick = () => {
+      state.selectedWhatsapps.clear();
+      renderClientPicker();
+    };
+
+    $("refresh-preview").onclick = async () => {
+      const campaign = state.selectedCampaign;
+      if (!campaign) return;
+      msg("Atualizando previa...");
+      await loadDistributionPreview(campaign.id);
+      msg("");
+    };
+
     $("send").onclick = async () => {
       const campaign = state.selectedCampaign;
       if (!campaign) return;
       await saveSelectedSettings();
-      msg("Montando confirmacao...");
-      const preview = await api(`/${encodeURIComponent(campaign.id)}/distribute/preview`, { method:"POST", body:"{}" });
-      $("preview").textContent = JSON.stringify(preview, null, 2);
+      msg("Atualizando previa antes da confirmacao...");
+      await loadDistributionPreview(campaign.id);
       if (!window.confirm("Confirmar envio para os clientes?")) return msg("Envio cancelado.");
       msg("Distribuindo...");
       const data = await api(`/${encodeURIComponent(campaign.id)}/distribute`, { method:"POST", body:"{}" });

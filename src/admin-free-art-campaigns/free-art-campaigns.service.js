@@ -30,6 +30,81 @@ function normalizeRamo(value = "") {
   return normalizeText(value);
 }
 
+function normalizeWhatsapp(value = "") {
+  return String(value || "").replace(/\D+/g, "");
+}
+
+function normalizeDistributionMode(value = "") {
+  const mode = String(value || "todos").trim().toLowerCase();
+  if (["todos", "selecionados"].includes(mode)) return mode;
+
+  const error = new Error("Modo de distribuicao invalido.");
+  error.statusCode = 400;
+  error.code = "invalid_distribution_mode";
+  throw error;
+}
+
+function selectCampaignClients({ eligibleClients = [], distributionMode = "todos", selectedWhatsapps = [] }) {
+  if (distributionMode === "todos") {
+    return {
+      clients: eligibleClients,
+      selectedWhatsapps: []
+    };
+  }
+
+  if (!Array.isArray(selectedWhatsapps)) {
+    const error = new Error("A lista de clientes selecionados deve ser valida.");
+    error.statusCode = 400;
+    error.code = "invalid_selected_whatsapps";
+    throw error;
+  }
+
+  const normalizedSelected = [];
+  const selectedSet = new Set();
+  for (const rawWhatsapp of selectedWhatsapps) {
+    const whatsapp = normalizeWhatsapp(rawWhatsapp);
+    if (!/^\d{8,15}$/.test(whatsapp)) {
+      const error = new Error("WhatsApp selecionado invalido.");
+      error.statusCode = 400;
+      error.code = "invalid_selected_whatsapp";
+      throw error;
+    }
+    if (selectedSet.has(whatsapp)) continue;
+    selectedSet.add(whatsapp);
+    normalizedSelected.push(whatsapp);
+  }
+
+  if (!normalizedSelected.length) {
+    const error = new Error("Selecione pelo menos um cliente.");
+    error.statusCode = 400;
+    error.code = "selected_clients_required";
+    throw error;
+  }
+
+  const eligibleByWhatsapp = new Map();
+  for (const client of eligibleClients) {
+    const whatsapp = normalizeWhatsapp(client.whatsapp);
+    if (/^\d{8,15}$/.test(whatsapp) && !eligibleByWhatsapp.has(whatsapp)) {
+      eligibleByWhatsapp.set(whatsapp, client);
+    }
+  }
+
+  for (const whatsapp of normalizedSelected) {
+    if (eligibleByWhatsapp.has(whatsapp)) continue;
+    const error = new Error(`Cliente selecionado nao pertence ao ramo: ${whatsapp}.`);
+    error.statusCode = 400;
+    error.code = "selected_client_not_eligible";
+    throw error;
+  }
+
+  return {
+    clients: [...eligibleByWhatsapp.entries()]
+      .filter(([whatsapp]) => selectedSet.has(whatsapp))
+      .map(([, client]) => client),
+    selectedWhatsapps: normalizedSelected.sort((a, b) => a.localeCompare(b))
+  };
+}
+
 function sanitizeIdPart(value = "") {
   return normalizeText(value)
     .replace(/[^a-z0-9]+/g, "_")
@@ -266,9 +341,16 @@ function createCampaign({ baseDir, pedidosDir, clientes, body = {}, adminId = ""
     stableHash(`${ramoInfo.ramo_normalizado}:${now}`, 6)
   ].join("_");
 
-  const eligibleClients = scan.clients
+  const branchEligibleClients = scan.clients
     .filter((client) => client.ramo_normalizado === ramoInfo.ramo_normalizado)
     .sort((a, b) => a.whatsapp.localeCompare(b.whatsapp));
+  const distributionMode = normalizeDistributionMode(body.distribution_mode || body.distributionMode || "todos");
+  const selected = selectCampaignClients({
+    eligibleClients: branchEligibleClients,
+    distributionMode,
+    selectedWhatsapps: body.selected_whatsapps ?? body.selectedWhatsapps ?? []
+  });
+  const eligibleClients = selected.clients;
 
   const campaign = {
     id: campaignId,
@@ -277,6 +359,8 @@ function createCampaign({ baseDir, pedidosDir, clientes, body = {}, adminId = ""
     status: "gerando",
     ramo: ramoInfo.ramo,
     ramo_normalizado: ramoInfo.ramo_normalizado,
+    distribution_mode: distributionMode,
+    selected_whatsapps: selected.selectedWhatsapps,
     quantidade_artes: quantidade,
     prompt_livre: promptLivre,
     opcao_rapida: opcaoRapida || "faca_o_que_quiser",
@@ -326,6 +410,8 @@ function createCampaign({ baseDir, pedidosDir, clientes, body = {}, adminId = ""
   storage.appendAudit(baseDir, campaignId, {
     action: "created",
     by: adminId,
+    distribution_mode: distributionMode,
+    selected_whatsapps: selected.selectedWhatsapps,
     quantidade_artes: quantidade,
     clientes_elegiveis_total: eligibleClients.length
   });
@@ -378,7 +464,11 @@ function duplicateCampaign({ baseDir, pedidosDir, clientes, campaignId, adminId 
       data_postagem: campaign.data_postagem,
       horario: campaign.horario,
       notificacao_titulo: campaign.notificacao_titulo,
-      notificacao_mensagem: campaign.notificacao_mensagem
+      notificacao_mensagem: campaign.notificacao_mensagem,
+      distribution_mode: campaign.distribution_mode || "todos",
+      selected_whatsapps: campaign.distribution_mode === "selecionados"
+        ? (campaign.selected_whatsapps || campaign.eligible_clients_snapshot?.map((client) => client.whatsapp) || [])
+        : []
     },
     adminId,
     maxArts
@@ -787,9 +877,17 @@ function buildDistributionPreview({ baseDir, campaignId }) {
   }
   const clients = Array.isArray(campaign.eligible_clients_snapshot) ? campaign.eligible_clients_snapshot : [];
   const perArt = Object.fromEntries(approvedArts.map((art) => [art.id, 0]));
+  const detailedByArt = new Map(approvedArts.map((art) => [art.id, []]));
   clients.forEach((client, index) => {
     const art = selectArtForClient(approvedArts, client, index);
-    if (art) perArt[art.id] += 1;
+    if (!art) return;
+    perArt[art.id] += 1;
+    detailedByArt.get(art.id).push({
+      art_id: art.id,
+      nome: client.nome_time || "",
+      whatsapp: client.whatsapp || "",
+      ramo: client.ramo || campaign.ramo || ""
+    });
   });
 
   return {
@@ -802,7 +900,11 @@ function buildDistributionPreview({ baseDir, campaignId }) {
     horario: campaign.horario,
     notificacao_titulo: campaign.notificacao_titulo,
     notificacao_mensagem: campaign.notificacao_mensagem,
-    distribuicao_por_arte: perArt
+    distribuicao_por_arte: perArt,
+    distribuicao_detalhada: approvedArts.map((art) => ({
+      art_id: art.id,
+      clientes: detailedByArt.get(art.id) || []
+    }))
   };
 }
 
