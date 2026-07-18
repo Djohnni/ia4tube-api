@@ -38,13 +38,14 @@ class LoginViewModel(
 
     fun submit() {
         val state = _uiState.value
+        if (state.loading) return
         if (state.login.isBlank() || state.senha.isBlank()) {
             _uiState.update { it.copy(error = "Informe login e senha.") }
             return
         }
 
+        _uiState.update { it.copy(loading = true, error = "") }
         viewModelScope.launch {
-            _uiState.update { it.copy(loading = true, error = "") }
             when (val result = loginUseCase(state.login.trim(), state.senha)) {
                 is ApiResult.Success -> {
                     MobileAnalytics.track("mobile_login_concluido", tela = "login", flushNow = true)
