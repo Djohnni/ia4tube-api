@@ -1300,7 +1300,7 @@ private fun PrimaryCreateArtAction(
                         )
                     )
                     .border(2.4.dp, palette.primaryBorder.copy(alpha = 0.92f), CircleShape)
-                    .clickable(onClick = if (firstFreeArtMode) onCreateArtClick else onMonthlyPlanningClick)
+                    .clickable(onClick = onMonthlyPlanningClick)
             )
             if (!firstFreeArtMode) {
                 HomeHelpButton(

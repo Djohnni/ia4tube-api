@@ -6,6 +6,7 @@ import androidx.lifecycle.viewModelScope
 import br.com.ia4tube.app.core.analytics.MobileAnalytics
 import br.com.ia4tube.app.core.company.CompanyProfile
 import br.com.ia4tube.app.core.company.CompanyProfileStore
+import br.com.ia4tube.app.core.monthly_planning.MonthlyPlanningCalendarCacheStore
 import br.com.ia4tube.app.data.models.ApiResult
 import br.com.ia4tube.app.data.models.BillingPixResult
 import br.com.ia4tube.app.data.models.DownloadedImage
@@ -23,13 +24,21 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 
 private const val DEFAULT_CYCLE_ARTS = 0
 const val PHOTO_TEXT_MAX_LENGTH = 200
+const val DEFAULT_MONTHLY_PLANNING_PHOTO_EDIT_LEVEL = 2
 private const val MIN_PHOTO_EDIT_LEVEL = 1
 private const val MAX_PHOTO_EDIT_LEVEL = 3
+const val MONTHLY_PLANNING_INITIAL_VISIBLE_PHOTOS = 4
+const val MONTHLY_PLANNING_MAX_ARTS_PER_REQUEST = 20
+const val MONTHLY_PLANNING_EMPTY_REQUEST_MESSAGE = "Preencha um objetivo, uma escrita ou adicione uma imagem para criar sua arte."
 private const val MARKETING_CONTEXT_FIRST_FREE_ART = "primeira_arte_gratis"
+private const val PLANNING_PROCESSING_POLL_INTERVAL_MS = 5_000L
 const val MOCK_PLANNING_ID = "planejamento-junho-2026"
 
 enum class MonthlyPlanningStep {
@@ -45,7 +54,7 @@ data class MonthlyPlanningUiState(
     val cycleArts: Int = DEFAULT_CYCLE_ARTS,
     val currentFreeArts: Int = 0,
     val reservedInput: String = "",
-    val photos: List<MonthlyPlanningPhotoDraft> = emptyList(),
+    val photos: List<MonthlyPlanningPhotoDraft> = createInitialMonthlyPlanningPhotoDrafts(),
     val companyProfile: MonthlyPlanningCompanyProfile = MonthlyPlanningCompanyProfile(),
     val uploadError: String? = null,
     val successMessage: String? = null,
@@ -54,7 +63,9 @@ data class MonthlyPlanningUiState(
     val detailPlanning: MonthlyPlanningSummary? = null,
     val calendarLoading: Boolean = false,
     val calendarError: String? = null,
-    val calendarSharingItemKeys: Set<String> = emptySet(),
+    val calendarSuccessMessage: String? = null,
+    val reschedulingCalendarItemKeys: Set<String> = emptySet(),
+    val sharingCalendarItemKeys: Set<String> = emptySet(),
     val calendarSharePayload: MonthlyPlanningCalendarSharePayload? = null,
     val generalCalendarPosts: List<MonthlyPlanningCalendarListItem> = emptyList(),
     val billingRequired: Boolean = false,
@@ -64,6 +75,18 @@ data class MonthlyPlanningUiState(
     val marketingVideo: MarketingVideo? = null,
     val marketingVideoFinished: Boolean = false
 ) {
+    val activePhotos: List<MonthlyPlanningPhotoDraft>
+        get() = photos.activeMonthlyPlanningPhotos()
+
+    val activePhotoCount: Int
+        get() = activePhotos.size
+
+    val countedPhotoSlots: Int
+        get() = photos.monthlyPlanningCountedSlots()
+
+    val canAddMorePhotos: Boolean
+        get() = countedPhotoSlots < MONTHLY_PLANNING_MAX_ARTS_PER_REQUEST
+
     val reservedArts: Int
         get() = reservedInput.toIntOrNull()?.coerceIn(0, currentFreeArts) ?: 0
 
@@ -71,11 +94,17 @@ data class MonthlyPlanningUiState(
         get() = (currentFreeArts - reservedArts).coerceAtLeast(0)
 
     val requiredStandaloneArts: Int
-        get() = photos.size.coerceAtLeast(1)
+        get() = activePhotoCount.coerceAtLeast(1)
 
     val visibleGeneralCalendarPosts: List<MonthlyPlanningCalendarListItem>
         get() = generalCalendarPosts
 }
+
+data class MonthlyPlanningCalendarSharePayload(
+    val pedidoId: String,
+    val image: DownloadedImage,
+    val description: String
+)
 
 data class MonthlyPlanningCompanyProfile(
     val nomeEmpresa: String = "",
@@ -92,13 +121,86 @@ data class MonthlyPlanningCompanyProfile(
 )
 
 data class MonthlyPlanningPhotoDraft(
-    val file: UploadFile,
+    val id: String,
+    val number: Int,
+    val file: UploadFile? = null,
     val objetivo: String = "",
     val objetivoId: String = "",
     val escritaImagem: String = "",
-    val nivelEdicao: Int = 2,
+    val nivelEdicao: Int = DEFAULT_MONTHLY_PLANNING_PHOTO_EDIT_LEVEL,
+    val withoutPhotoSelected: Boolean = false,
+    val expanded: Boolean = false,
+    val fixedSlot: Boolean = false,
     val showNivelInfo: Boolean = false
-)
+) {
+    val hasMeaningfulContent: Boolean
+        get() = file != null || objetivo.isNotBlank() || escritaImagem.isNotBlank()
+
+    val hasUserData: Boolean
+        get() = hasMeaningfulContent || withoutPhotoSelected
+
+    val isActive: Boolean
+        get() = hasMeaningfulContent
+}
+
+fun createInitialMonthlyPlanningPhotoDrafts(): List<MonthlyPlanningPhotoDraft> {
+    return (1..MONTHLY_PLANNING_INITIAL_VISIBLE_PHOTOS).map { number ->
+        MonthlyPlanningPhotoDraft(
+            id = fixedMonthlyPlanningPhotoId(number),
+            number = number,
+            expanded = number == 1,
+            fixedSlot = true
+        )
+    }
+}
+
+fun List<MonthlyPlanningPhotoDraft>.activeMonthlyPlanningPhotos(): List<MonthlyPlanningPhotoDraft> {
+    return filter { it.isActive }
+}
+
+fun List<MonthlyPlanningPhotoDraft>.monthlyPlanningCountedSlots(): Int {
+    return count { it.isActive || !it.fixedSlot }
+}
+
+private fun fixedMonthlyPlanningPhotoId(number: Int): String = "fixed-photo-$number"
+
+private fun newMonthlyPlanningPhotoId(number: Int): String = "extra-photo-$number-${System.nanoTime()}"
+
+private fun List<MonthlyPlanningPhotoDraft>.normalizeMonthlyPlanningPhotoNumbers(): List<MonthlyPlanningPhotoDraft> {
+    return mapIndexed { index, photo -> photo.copy(number = index + 1) }
+}
+
+private fun MonthlyPlanningPhotoDraft.clearedMonthlyPlanningPhotoSlot(): MonthlyPlanningPhotoDraft {
+    return copy(
+        file = null,
+        objetivo = "",
+        objetivoId = "",
+        escritaImagem = "",
+        nivelEdicao = DEFAULT_MONTHLY_PLANNING_PHOTO_EDIT_LEVEL,
+        withoutPhotoSelected = false,
+        expanded = false,
+        showNivelInfo = false
+    )
+}
+
+internal fun MonthlyPlanningPhotoDraft.toggleWithoutPhotoChoice(): MonthlyPlanningPhotoDraft {
+    if (file != null) return this
+    return copy(withoutPhotoSelected = !withoutPhotoSelected)
+}
+
+internal fun MonthlyPlanningPhotoDraft.withPhotoFile(file: UploadFile): MonthlyPlanningPhotoDraft {
+    return copy(
+        file = file,
+        withoutPhotoSelected = false
+    )
+}
+
+internal fun MonthlyPlanningPhotoDraft.withRemovedPhotoFile(): MonthlyPlanningPhotoDraft {
+    return copy(
+        file = null,
+        withoutPhotoSelected = true
+    )
+}
 
 data class MonthlyPlanningSummary(
     val id: String,
@@ -135,11 +237,71 @@ data class MonthlyPlanningPost(
     val assignmentId: String = ""
 )
 
-data class MonthlyPlanningCalendarSharePayload(
-    val pedidoId: String,
-    val image: DownloadedImage,
-    val description: String
+sealed class MonthlyPlanningResultDestination {
+    object Unavailable : MonthlyPlanningResultDestination()
+    data class SingleOrder(val pedidoId: String) : MonthlyPlanningResultDestination()
+    data class PlanningResults(val planningId: String) : MonthlyPlanningResultDestination()
+}
+
+data class MonthlyPlanningProcessingStatus(
+    val title: String,
+    val message: String,
+    val canOpenResults: Boolean,
+    val fullyReady: Boolean
 )
+
+internal val MonthlyPlanningSummary.effectiveTotalPosts: Int
+    get() = posts.size.takeIf { it > 0 } ?: totalPosts
+
+internal val MonthlyPlanningSummary.readyResultPosts: List<MonthlyPlanningPost>
+    get() = posts.filter { it.imageReady && it.pedidoId.isNotBlank() }
+
+internal fun MonthlyPlanningSummary.hasReadyResult(): Boolean {
+    return readyResultPosts.isNotEmpty()
+}
+
+internal fun MonthlyPlanningSummary.isFullyReadyForViewing(): Boolean {
+    val total = effectiveTotalPosts
+    val postsComplete = total > 0 && readyResultPosts.size >= total
+    val summaryComplete = totalPosts > 0 && readyPosts >= totalPosts
+    val hasPostLevelProgress = total > 0 || totalPosts > 0
+    return postsComplete || summaryComplete || (!hasPostLevelProgress && hasCompleteStatus())
+}
+
+internal fun MonthlyPlanningSummary.toProcessingStatus(): MonthlyPlanningProcessingStatus {
+    val hasReadyResult = hasReadyResult()
+    val fullyReady = isFullyReadyForViewing()
+    return MonthlyPlanningProcessingStatus(
+        title = if (hasReadyResult) {
+            "Suas imagens estão prontas"
+        } else {
+            "Estamos criando suas imagens"
+        },
+        message = when {
+            !hasReadyResult -> "Seu pedido foi enviado para produção."
+            fullyReady -> "Seu pedido foi concluído."
+            else -> "Seu pedido já possui imagens prontas para visualizar."
+        },
+        canOpenResults = hasReadyResult,
+        fullyReady = fullyReady
+    )
+}
+
+internal fun MonthlyPlanningSummary.resultDestination(): MonthlyPlanningResultDestination {
+    val firstReadyOrderId = readyResultPosts.firstOrNull()?.pedidoId.orEmpty()
+    if (firstReadyOrderId.isBlank()) return MonthlyPlanningResultDestination.Unavailable
+
+    return if (effectiveTotalPosts <= 1) {
+        MonthlyPlanningResultDestination.SingleOrder(firstReadyOrderId)
+    } else {
+        val planningId = id
+        if (planningId.isBlank()) {
+            MonthlyPlanningResultDestination.Unavailable
+        } else {
+            MonthlyPlanningResultDestination.PlanningResults(planningId)
+        }
+    }
+}
 
 object MonthlyPlanningMockData {
     val posts = listOf(
@@ -216,10 +378,12 @@ object MonthlyPlanningMockData {
 
 class MonthlyPlanningViewModel(
     private val repository: AuthRepository,
-    private val companyProfileStore: CompanyProfileStore
+    private val companyProfileStore: CompanyProfileStore,
+    private val calendarCacheStore: MonthlyPlanningCalendarCacheStore
 ) : ViewModel() {
     private val _uiState = MutableStateFlow(MonthlyPlanningUiState())
     val uiState: StateFlow<MonthlyPlanningUiState> = _uiState.asStateFlow()
+    private var planningProcessingPollingJob: Job? = null
 
     init {
         refreshCompanyProfile()
@@ -243,7 +407,7 @@ class MonthlyPlanningViewModel(
                             cycleArts = total,
                             currentFreeArts = free,
                             reservedInput = state.reservedInput.clampReservedInput(free)
-                                .ifBlank { reservedInputForPhotos(state.photos.size, free) }
+                                .ifBlank { reservedInputForPhotos(state.activePhotoCount, free) }
                         )
                     }
                 }
@@ -297,19 +461,35 @@ class MonthlyPlanningViewModel(
     }
 
     fun loadGeneralCalendar() {
+        loadGeneralCalendar(forceRefresh = false)
+    }
+
+    fun refreshGeneralCalendar() {
+        loadGeneralCalendar(forceRefresh = true)
+    }
+
+    private fun loadGeneralCalendar(forceRefresh: Boolean) {
         viewModelScope.launch {
-            _uiState.update {
-                it.copy(
+            val token = repository.getSavedToken()
+            val cachedPosts = if (forceRefresh) {
+                emptyList()
+            } else {
+                calendarCacheStore.load(token).toCalendarListItems()
+            }
+            val hasCachedCalendar = cachedPosts.isNotEmpty()
+
+            _uiState.update { state ->
+                state.copy(
                     calendarLoading = true,
-                    calendarError = null
+                    calendarError = null,
+                    generalCalendarPosts = if (hasCachedCalendar) cachedPosts else state.generalCalendarPosts
                 )
             }
 
             when (val result = repository.calendarioPlanejamentoMensal()) {
                 is ApiResult.Success -> {
-                    val calendarPosts = result.value
-                        .map { it.toUiPost().toCalendarListItem() }
-                        .sortedWith(compareBy<MonthlyPlanningCalendarListItem> { it.sortKey }.thenBy { it.title })
+                    calendarCacheStore.save(token, result.value)
+                    val calendarPosts = result.value.toCalendarListItems()
 
                     _uiState.update {
                         it.copy(
@@ -322,7 +502,8 @@ class MonthlyPlanningViewModel(
                 is ApiResult.Failure -> _uiState.update {
                     it.copy(
                         calendarLoading = false,
-                        calendarError = result.message
+                        calendarError = if (hasCachedCalendar) null else result.message,
+                        generalCalendarPosts = if (hasCachedCalendar) cachedPosts else it.generalCalendarPosts
                     )
                 }
             }
@@ -332,11 +513,14 @@ class MonthlyPlanningViewModel(
     fun removeFromGeneralCalendar(itemKey: String) {
         viewModelScope.launch {
             when (val result = repository.ocultarItemCalendarioPlanejamento(itemKey)) {
-                is ApiResult.Success -> _uiState.update {
-                    it.copy(
-                        calendarError = null,
-                        generalCalendarPosts = it.generalCalendarPosts.filterNot { item -> item.key == itemKey }
-                    )
+                is ApiResult.Success -> {
+                    calendarCacheStore.remove(repository.getSavedToken(), itemKey)
+                    _uiState.update {
+                        it.copy(
+                            calendarError = null,
+                            generalCalendarPosts = it.generalCalendarPosts.filterNot { item -> item.key == itemKey }
+                        )
+                    }
                 }
                 is ApiResult.Failure -> _uiState.update {
                     it.copy(calendarError = result.message)
@@ -346,37 +530,79 @@ class MonthlyPlanningViewModel(
     }
 
     fun rescheduleGeneralCalendarItem(item: MonthlyPlanningCalendarListItem, newDate: String) {
-        viewModelScope.launch {
-            val request = MonthlyPlanningRescheduleRequest(
-                itemKey = item.key,
-                planningId = item.planningId,
-                planejamentoItemId = item.planejamentoItemId,
-                pedidoId = item.pedidoId,
-                date = newDate,
-                time = item.time
-            )
-
-            when (val result = repository.reagendarItemCalendarioPlanejamento(request)) {
-                is ApiResult.Success -> {
-                    val updated = result.value.toUiPost().toCalendarListItem()
-                    _uiState.update { state ->
-                        state.copy(
-                            calendarError = null,
-                            generalCalendarPosts = state.generalCalendarPosts
-                                .filterNot { existing ->
-                                    existing.key == item.key ||
-                                        (updated.key.isNotBlank() && existing.key == updated.key)
-                                }
-                                .plus(updated)
-                                .sortedWith(compareBy<MonthlyPlanningCalendarListItem> { it.sortKey }.thenBy { it.title })
-                        )
-                    }
-                    loadGeneralCalendar()
-                }
-                is ApiResult.Failure -> _uiState.update {
-                    it.copy(calendarError = result.message)
-                }
+        var shouldStart = false
+        _uiState.update { state ->
+            if (state.reschedulingCalendarItemKeys.contains(item.key)) {
+                state
+            } else {
+                shouldStart = true
+                state.copy(
+                    calendarError = null,
+                    calendarSuccessMessage = null,
+                    reschedulingCalendarItemKeys = state.reschedulingCalendarItemKeys + item.key
+                )
             }
+        }
+        if (!shouldStart) return
+
+        viewModelScope.launch {
+            try {
+                val request = MonthlyPlanningRescheduleRequest(
+                    itemKey = item.key,
+                    planningId = item.planningId,
+                    planejamentoItemId = item.planejamentoItemId,
+                    pedidoId = item.pedidoId,
+                    date = newDate,
+                    time = item.time
+                )
+
+                when (val result = repository.reagendarItemCalendarioPlanejamento(request)) {
+                    is ApiResult.Success -> {
+                        calendarCacheStore.upsert(repository.getSavedToken(), item.key, result.value)
+                        val updated = result.value.toUiPost().toCalendarListItem()
+                        MobileAnalytics.track(
+                            "mobile_alterou_data_calendario",
+                            tela = "calendario_geral",
+                            produto = "planejamento_mensal",
+                            pedidoId = item.pedidoId,
+                            payload = mapOf(
+                                "data_origem" to item.date,
+                                "data_destino" to updated.date,
+                                "horario" to updated.time
+                            ),
+                            flushNow = true
+                        )
+                        _uiState.update { state ->
+                            state.copy(
+                                calendarError = null,
+                                calendarSuccessMessage = "Data alterada com sucesso.",
+                                reschedulingCalendarItemKeys = state.reschedulingCalendarItemKeys - item.key,
+                                generalCalendarPosts = state.generalCalendarPosts
+                                    .filterNot { existing ->
+                                        existing.key == item.key ||
+                                            (updated.key.isNotBlank() && existing.key == updated.key)
+                                    }
+                                    .plus(updated)
+                                    .sortedWith(compareBy<MonthlyPlanningCalendarListItem> { it.sortKey }.thenBy { it.title })
+                            )
+                        }
+                        refreshGeneralCalendar()
+                    }
+                    is ApiResult.Failure -> showCalendarRescheduleError(item.key)
+                }
+            } catch (_: Exception) {
+                showCalendarRescheduleError(item.key)
+            }
+        }
+    }
+
+    private fun showCalendarRescheduleError(itemKey: String) {
+        _uiState.update {
+            it.copy(
+                calendarError = "Não foi possível alterar a data. Tente novamente.",
+                calendarSuccessMessage = null,
+                reschedulingCalendarItemKeys = it.reschedulingCalendarItemKeys - itemKey
+            )
         }
     }
 
@@ -385,14 +611,15 @@ class MonthlyPlanningViewModel(
 
         var shouldStart = false
         _uiState.update { state ->
-            if (state.calendarSharingItemKeys.contains(item.key)) {
+            if (state.sharingCalendarItemKeys.contains(item.key)) {
                 state
             } else {
                 shouldStart = true
                 state.copy(
                     calendarError = null,
+                    calendarSuccessMessage = null,
                     calendarSharePayload = null,
-                    calendarSharingItemKeys = state.calendarSharingItemKeys + item.key
+                    sharingCalendarItemKeys = state.sharingCalendarItemKeys + item.key
                 )
             }
         }
@@ -401,9 +628,16 @@ class MonthlyPlanningViewModel(
         viewModelScope.launch {
             when (val result = repository.downloadResultado(item.pedidoId)) {
                 is ApiResult.Success -> _uiState.update { state ->
+                    MobileAnalytics.track(
+                        "mobile_compartilhou_arte",
+                        tela = "calendario_geral",
+                        produto = "planejamento_mensal",
+                        pedidoId = item.pedidoId,
+                        flushNow = true
+                    )
                     state.copy(
-                        calendarSharingItemKeys = state.calendarSharingItemKeys - item.key,
                         calendarError = null,
+                        sharingCalendarItemKeys = state.sharingCalendarItemKeys - item.key,
                         calendarSharePayload = MonthlyPlanningCalendarSharePayload(
                             pedidoId = item.pedidoId,
                             image = result.value,
@@ -413,9 +647,8 @@ class MonthlyPlanningViewModel(
                 }
                 is ApiResult.Failure -> _uiState.update { state ->
                     state.copy(
-                        calendarSharingItemKeys = state.calendarSharingItemKeys - item.key,
-                        calendarSharePayload = null,
-                        calendarError = result.message.ifBlank { "Não foi possível compartilhar a imagem." }
+                        calendarError = result.message.ifBlank { "NÃ£o foi possÃ­vel compartilhar a imagem agora." },
+                        sharingCalendarItemKeys = state.sharingCalendarItemKeys - item.key
                     )
                 }
             }
@@ -459,7 +692,11 @@ class MonthlyPlanningViewModel(
         }
     }
 
-    fun openReadyFromMarketingVideo(watchedSeconds: Long) {
+    fun openReadyFromMarketingVideo(
+        watchedSeconds: Long,
+        onOpenOrder: (String) -> Unit,
+        onOpenPlanningResults: (String) -> Unit
+    ) {
         val video = _uiState.value.marketingVideo
         if (video != null) {
             trackMarketingVideo(
@@ -469,7 +706,7 @@ class MonthlyPlanningViewModel(
                 flushNow = true
             )
         }
-        showMyPlannings()
+        openCurrentPlanningResults(onOpenOrder, onOpenPlanningResults)
     }
 
     fun onMarketingVideoAbandoned(watchedSeconds: Long) {
@@ -484,8 +721,12 @@ class MonthlyPlanningViewModel(
     fun goToConfirmation() {
         _uiState.update { state ->
             when {
-                state.photos.isEmpty() -> state.copy(
-                    uploadError = "Adicione pelo menos 1 foto para continuar.",
+                state.activePhotos.isEmpty() -> state.copy(
+                    uploadError = MONTHLY_PLANNING_EMPTY_REQUEST_MESSAGE,
+                    successMessage = null
+                )
+                state.activePhotoCount > MONTHLY_PLANNING_MAX_ARTS_PER_REQUEST -> state.copy(
+                    uploadError = "Este pedido permite no máximo $MONTHLY_PLANNING_MAX_ARTS_PER_REQUEST artes.",
                     successMessage = null
                 )
                 else -> state.copy(
@@ -503,10 +744,20 @@ class MonthlyPlanningViewModel(
 
     private fun confirmPlanningInternal(reservationOverride: Int? = null) {
         val current = _uiState.value
-        if (current.photos.isEmpty()) {
+        val activePhotos = current.activePhotos
+        if (activePhotos.isEmpty()) {
             _uiState.update {
                 it.copy(
-                    uploadError = "Adicione pelo menos 1 foto para continuar.",
+                    uploadError = MONTHLY_PLANNING_EMPTY_REQUEST_MESSAGE,
+                    successMessage = null
+                )
+            }
+            return
+        }
+        if (activePhotos.size > MONTHLY_PLANNING_MAX_ARTS_PER_REQUEST) {
+            _uiState.update {
+                it.copy(
+                    uploadError = "Este pedido permite no máximo $MONTHLY_PLANNING_MAX_ARTS_PER_REQUEST artes.",
                     successMessage = null
                 )
             }
@@ -526,7 +777,7 @@ class MonthlyPlanningViewModel(
                         state.copy(
                             loading = false,
                             currentFreeArts = freeArts,
-                            reservedInput = reservedInputForPhotos(state.photos.size, freeArts),
+                            reservedInput = reservedInputForPhotos(state.activePhotoCount, freeArts),
                             billingRequired = false,
                             billingPix = null,
                             billingPixError = null,
@@ -557,6 +808,13 @@ class MonthlyPlanningViewModel(
                         return@launch
                     }
 
+                    MobileAnalytics.track(
+                        "mobile_sem_saldo",
+                        tela = "planejamento_mensal",
+                        produto = "planejamento_mensal",
+                        payload = mapOf("quantidade" to current.requiredStandaloneArts.toString()),
+                        flushNow = true
+                    )
                     _uiState.update {
                         it.copy(
                             loading = false,
@@ -576,6 +834,7 @@ class MonthlyPlanningViewModel(
         val uiProfile = current.companyProfile
         val nomeEmpresa = uiProfile.nomeEmpresa.trim()
         val ramo = uiProfile.ramo.trim()
+        val whatsappContato = uiProfile.whatsapp.trim()
 
         if (nomeEmpresa.isBlank() || ramo.isBlank()) {
             _uiState.update {
@@ -607,16 +866,26 @@ class MonthlyPlanningViewModel(
                 quantidadeReservada = requestedReservedArts,
                 nomeEmpresa = nomeEmpresa,
                 ramo = ramo,
+                whatsapp = whatsappContato,
                 caracteristicasEmpresa = uiProfile.caracteristicasEmpresa,
                 informacoesEmpresa = uiProfile.informacoesEmpresa.trim(),
                 logo = uiProfile.logoFile,
-                fotos = current.photos.map { it.toRequestInput() }
+                fotos = activePhotos.map { it.toRequestInput() }
             )
 
             when (val result = repository.solicitarPlanejamentoMensal(request)) {
                 is ApiResult.Success -> handlePlanningCreated(result.value)
                 is ApiResult.Failure -> _uiState.update {
                     val billingRequired = result.isBillingRequired()
+                    if (billingRequired) {
+                        MobileAnalytics.track(
+                            "mobile_sem_saldo",
+                            tela = "planejamento_mensal",
+                            produto = "planejamento_mensal",
+                            payload = mapOf("quantidade" to current.requiredStandaloneArts.toString()),
+                            flushNow = true
+                        )
+                    }
                     it.copy(
                         step = MonthlyPlanningStep.Confirmation,
                         loading = false,
@@ -658,12 +927,24 @@ class MonthlyPlanningViewModel(
                 )
             }
             when (val result = repository.criarArteAvulsaPix(quantity)) {
-                is ApiResult.Success -> _uiState.update {
-                    it.copy(
-                        billingPixLoading = false,
-                        billingPix = result.value,
-                        billingPixError = null
+                is ApiResult.Success -> {
+                    MobileAnalytics.track(
+                        "mobile_gerou_pix",
+                        tela = "planejamento_mensal",
+                        produto = "arte_avulsa",
+                        payload = mapOf(
+                            "quantidade" to quantity.toString(),
+                            "valor_total" to result.value.valorPago.toString()
+                        ),
+                        flushNow = true
                     )
+                    _uiState.update {
+                        it.copy(
+                            billingPixLoading = false,
+                            billingPix = result.value,
+                            billingPixError = null
+                        )
+                    }
                 }
                 is ApiResult.Failure -> _uiState.update {
                     it.copy(
@@ -676,11 +957,30 @@ class MonthlyPlanningViewModel(
     }
 
     fun showMyPlannings() {
+        stopPlanningProcessingPolling()
         _uiState.update { it.copy(step = MonthlyPlanningStep.MyPlannings, uploadError = null) }
         loadAccountAndPlannings()
     }
 
+    fun openCurrentPlanningResults(
+        onOpenOrder: (String) -> Unit,
+        onOpenPlanningResults: (String) -> Unit
+    ) {
+        when (val destination = _uiState.value.planning.resultDestination()) {
+            is MonthlyPlanningResultDestination.SingleOrder -> {
+                stopPlanningProcessingPolling()
+                onOpenOrder(destination.pedidoId)
+            }
+            is MonthlyPlanningResultDestination.PlanningResults -> {
+                stopPlanningProcessingPolling()
+                onOpenPlanningResults(destination.planningId)
+            }
+            MonthlyPlanningResultDestination.Unavailable -> Unit
+        }
+    }
+
     fun backToUpload() {
+        stopPlanningProcessingPolling()
         _uiState.update {
             it.copy(
                 step = MonthlyPlanningStep.Upload,
@@ -692,33 +992,233 @@ class MonthlyPlanningViewModel(
         }
     }
 
-    fun addPhotos(files: List<UploadFile>) {
+    fun loadResults(planningId: String) {
+        startPlanningProcessingPolling(
+            planningId = planningId,
+            updateCurrentPlanning = true,
+            updateDetailPlanning = true,
+            showInitialLoading = true
+        )
+    }
+
+    fun stopResultsPolling() {
+        stopPlanningProcessingPolling()
+    }
+
+    private fun startPlanningProcessingPolling(
+        planningId: String,
+        updateCurrentPlanning: Boolean = false,
+        updateDetailPlanning: Boolean = false,
+        showInitialLoading: Boolean = false
+    ) {
+        if (planningId.isBlank()) return
+        planningProcessingPollingJob?.cancel()
+        if (showInitialLoading) {
+            _uiState.update { it.copy(loading = true, uploadError = null) }
+        }
+        planningProcessingPollingJob = viewModelScope.launch {
+            while (isActive) {
+                when (val result = repository.planejamentoMensalDetalhe(planningId)) {
+                    is ApiResult.Success -> {
+                        val detail = result.value.toUiSummary()
+                        _uiState.update { state ->
+                            val updatedPlannings = state.plannings.replacePlanningSummary(detail)
+                            val shouldUpdateCurrent = updateCurrentPlanning ||
+                                state.step == MonthlyPlanningStep.Processing ||
+                                state.planning.id == planningId
+                            state.copy(
+                                loading = false,
+                                uploadError = null,
+                                planning = if (shouldUpdateCurrent) detail else state.planning,
+                                detailPlanning = if (updateDetailPlanning || state.detailPlanning?.id == planningId) {
+                                    detail
+                                } else {
+                                    state.detailPlanning
+                                },
+                                plannings = updatedPlannings
+                            )
+                        }
+                        if (!detail.shouldContinueProcessingPolling()) {
+                            break
+                        }
+                    }
+                    is ApiResult.Failure -> {
+                        if (showInitialLoading) {
+                            _uiState.update {
+                                it.copy(
+                                    loading = false,
+                                    uploadError = result.message
+                                )
+                            }
+                        }
+                    }
+                }
+                delay(PLANNING_PROCESSING_POLL_INTERVAL_MS)
+            }
+            planningProcessingPollingJob = null
+        }
+    }
+
+    private fun stopPlanningProcessingPolling() {
+        planningProcessingPollingJob?.cancel()
+        planningProcessingPollingJob = null
+    }
+
+    fun addPhotos(slotId: String, files: List<UploadFile>) {
         if (files.isEmpty()) return
         _uiState.update { state ->
-            val photos = state.photos + files.map { file -> MonthlyPlanningPhotoDraft(file = file) }
+            val photos = state.photos.toMutableList()
+            var limitReached = false
+
+            fun canActivate(index: Int): Boolean {
+                return photos.getOrNull(index)?.isActive == true ||
+                    photos.monthlyPlanningCountedSlots() < MONTHLY_PLANNING_MAX_ARTS_PER_REQUEST
+            }
+
+            fun assignFile(index: Int, file: UploadFile, expanded: Boolean) {
+                val current = photos.getOrNull(index) ?: return
+                photos[index] = current.withPhotoFile(file).copy(
+                    expanded = expanded
+                )
+            }
+
+            val targetIndex = photos.indexOfFirst { it.id == slotId }.takeIf { it >= 0 } ?: 0
+            if (!canActivate(targetIndex)) {
+                limitReached = true
+            } else {
+                val firstFile = files.first()
+                val targetId = photos[targetIndex].id
+                for (index in photos.indices) {
+                    photos[index] = photos[index].copy(expanded = photos[index].id == targetId)
+                }
+                assignFile(targetIndex, firstFile, expanded = true)
+            }
+
+            files.drop(1).forEach { file ->
+                if (limitReached) return@forEach
+                if (photos.monthlyPlanningCountedSlots() >= MONTHLY_PLANNING_MAX_ARTS_PER_REQUEST) {
+                    limitReached = true
+                    return@forEach
+                }
+                val targetNumber = photos.getOrNull(targetIndex)?.number ?: 1
+                val emptyFixedIndex = photos.indexOfFirst {
+                    it.fixedSlot && !it.isActive && it.file == null && it.number > targetNumber
+                }.takeIf { it >= 0 } ?: photos.indexOfFirst {
+                    it.fixedSlot && !it.isActive && it.file == null
+                }.takeIf { it >= 0 }
+
+                if (emptyFixedIndex != null) {
+                    assignFile(emptyFixedIndex, file, expanded = false)
+                } else {
+                    val nextNumber = photos.size + 1
+                    photos.add(
+                        MonthlyPlanningPhotoDraft(
+                            id = newMonthlyPlanningPhotoId(nextNumber),
+                            number = nextNumber,
+                            file = file,
+                            expanded = false,
+                            fixedSlot = false
+                        )
+                    )
+                }
+            }
+
+            val normalized = photos.normalizeMonthlyPlanningPhotoNumbers()
             state.copy(
-                photos = photos,
-                reservedInput = reservedInputForPhotos(photos.size, state.currentFreeArts),
-                uploadError = null,
+                photos = normalized,
+                reservedInput = reservedInputForPhotos(normalized.activeMonthlyPlanningPhotos().size, state.currentFreeArts),
+                uploadError = if (limitReached) {
+                    "Este pedido permite no máximo $MONTHLY_PLANNING_MAX_ARTS_PER_REQUEST artes."
+                } else {
+                    null
+                },
                 successMessage = null
             )
         }
     }
 
-    fun removePhoto(index: Int) {
+    fun addAnotherPhotoSlot() {
         _uiState.update { state ->
-            val photos = state.photos.filterIndexed { itemIndex, _ -> itemIndex != index }
+            if (!state.canAddMorePhotos) {
+                return@update state.copy(
+                    uploadError = "Este pedido permite no máximo $MONTHLY_PLANNING_MAX_ARTS_PER_REQUEST artes.",
+                    successMessage = null
+                )
+            }
+            val nextNumber = state.photos.size + 1
+            val photos = state.photos
+                .map { it.copy(expanded = false) } + MonthlyPlanningPhotoDraft(
+                    id = newMonthlyPlanningPhotoId(nextNumber),
+                    number = nextNumber,
+                    expanded = true,
+                    fixedSlot = false
+                )
             state.copy(
                 photos = photos,
-                reservedInput = reservedInputForPhotos(photos.size, state.currentFreeArts),
+                reservedInput = reservedInputForPhotos(photos.activeMonthlyPlanningPhotos().size, state.currentFreeArts),
                 uploadError = null,
                 successMessage = null
             )
         }
     }
 
-    fun selectPhotoObjective(index: Int, objectiveId: String, objective: String) {
-        updatePhoto(index) {
+    fun togglePhotoExpanded(slotId: String) {
+        _uiState.update { state ->
+            val selected = state.photos.firstOrNull { it.id == slotId } ?: return@update state
+            val shouldExpand = !selected.expanded
+            state.copy(
+                photos = state.photos.map { photo ->
+                    when {
+                        photo.id == slotId -> photo.copy(expanded = shouldExpand)
+                        shouldExpand -> photo.copy(expanded = false)
+                        else -> photo
+                    }
+                },
+                uploadError = null,
+                successMessage = null
+            )
+        }
+    }
+
+    fun removePhotoImage(slotId: String) {
+        updatePhoto(slotId) {
+            it.withRemovedPhotoFile()
+        }
+    }
+
+    fun toggleWithoutPhotoChoice(slotId: String) {
+        updatePhoto(slotId) {
+            it.toggleWithoutPhotoChoice()
+        }
+    }
+
+    fun removePhotoSlot(slotId: String) {
+        _uiState.update { state ->
+            val photo = state.photos.firstOrNull { it.id == slotId } ?: return@update state
+            if (photo.number == 1) return@update state
+
+            val photos = if (photo.fixedSlot) {
+                state.photos.map {
+                    if (it.id == slotId) {
+                        it.clearedMonthlyPlanningPhotoSlot()
+                    } else {
+                        it
+                    }
+                }
+            } else {
+                state.photos.filterNot { it.id == slotId }.normalizeMonthlyPlanningPhotoNumbers()
+            }
+            state.copy(
+                photos = photos,
+                reservedInput = reservedInputForPhotos(photos.activeMonthlyPlanningPhotos().size, state.currentFreeArts),
+                uploadError = null,
+                successMessage = null
+            )
+        }
+    }
+
+    fun selectPhotoObjective(slotId: String, objectiveId: String, objective: String) {
+        updatePhoto(slotId) {
             it.copy(
                 objetivo = objective,
                 objetivoId = objectiveId
@@ -726,8 +1226,8 @@ class MonthlyPlanningViewModel(
         }
     }
 
-    fun updatePhotoManualObjective(index: Int, value: String) {
-        updatePhoto(index) {
+    fun updatePhotoManualObjective(slotId: String, value: String) {
+        updatePhoto(slotId) {
             it.copy(
                 objetivo = value,
                 objetivoId = ""
@@ -735,26 +1235,26 @@ class MonthlyPlanningViewModel(
         }
     }
 
-    fun updatePhotoText(index: Int, value: String) {
-        updatePhoto(index) {
+    fun updatePhotoText(slotId: String, value: String) {
+        updatePhoto(slotId) {
             it.copy(escritaImagem = value.take(PHOTO_TEXT_MAX_LENGTH))
         }
     }
 
-    fun increasePhotoEditLevel(index: Int) {
-        updatePhoto(index) {
+    fun increasePhotoEditLevel(slotId: String) {
+        updatePhoto(slotId) {
             it.copy(nivelEdicao = (it.nivelEdicao + 1).coerceAtMost(MAX_PHOTO_EDIT_LEVEL))
         }
     }
 
-    fun decreasePhotoEditLevel(index: Int) {
-        updatePhoto(index) {
+    fun decreasePhotoEditLevel(slotId: String) {
+        updatePhoto(slotId) {
             it.copy(nivelEdicao = (it.nivelEdicao - 1).coerceAtLeast(MIN_PHOTO_EDIT_LEVEL))
         }
     }
 
-    fun togglePhotoEditLevelInfo(index: Int) {
-        updatePhoto(index) {
+    fun togglePhotoEditLevelInfo(slotId: String) {
+        updatePhoto(slotId) {
             it.copy(showNivelInfo = !it.showNivelInfo)
         }
     }
@@ -840,15 +1340,17 @@ class MonthlyPlanningViewModel(
     }
 
     private fun updatePhoto(
-        index: Int,
+        slotId: String,
         transform: (MonthlyPlanningPhotoDraft) -> MonthlyPlanningPhotoDraft
     ) {
         _uiState.update { state ->
-            if (index !in state.photos.indices) return@update state
+            if (state.photos.none { it.id == slotId }) return@update state
+            val photos = state.photos.map { item ->
+                if (item.id == slotId) transform(item) else item
+            }
             state.copy(
-                photos = state.photos.mapIndexed { itemIndex, item ->
-                    if (itemIndex == index) transform(item) else item
-                },
+                photos = photos,
+                reservedInput = reservedInputForPhotos(photos.activeMonthlyPlanningPhotos().size, state.currentFreeArts),
                 uploadError = null,
                 successMessage = null
             )
@@ -908,7 +1410,7 @@ class MonthlyPlanningViewModel(
                 cycleArts = cycleArts,
                 currentFreeArts = freeArts,
                 reservedInput = "",
-                photos = emptyList(),
+                photos = createInitialMonthlyPlanningPhotoDrafts(),
                 planning = merged.firstOrNull { item -> item.id == created.id } ?: created,
                 plannings = merged,
                 uploadError = null,
@@ -921,6 +1423,7 @@ class MonthlyPlanningViewModel(
                 marketingVideoFinished = false
             )
         }
+        startPlanningProcessingPolling(created.id)
     }
 
     private suspend fun loadFirstFreeArtMarketingVideo(): MarketingVideo? {
@@ -928,12 +1431,6 @@ class MonthlyPlanningViewModel(
             is ApiResult.Success -> result.value.takeIf { it.active && it.urlVideo.isNotBlank() }
             is ApiResult.Failure -> null
         }
-    }
-
-    private fun MonthlyPlanningRequestResponse.shouldShowFirstFreeArtVideo(): Boolean {
-        return arteGratis ||
-            cobrancaOrigem.equals("arte_gratis", ignoreCase = true) ||
-            tipoCompra.equals("arte_gratis", ignoreCase = true)
     }
 
     private fun trackMarketingVideo(
@@ -954,6 +1451,48 @@ class MonthlyPlanningViewModel(
             flushNow = flushNow
         )
     }
+}
+
+internal fun MonthlyPlanningSummary.hasCompleteStatus(): Boolean {
+    val normalizedStatus = status
+        .lowercase()
+        .replace('í', 'i')
+        .replace('ï', 'i')
+        .replace('ó', 'o')
+        .replace('ô', 'o')
+        .replace('ú', 'u')
+    return normalizedStatus.contains("pronto") ||
+        normalizedStatus.contains("concluido")
+}
+
+internal fun MonthlyPlanningRequestResponse.shouldShowFirstFreeArtVideo(): Boolean {
+    return arteGratis ||
+        cobrancaOrigem.equals("arte_gratis", ignoreCase = true) ||
+        tipoCompra.equals("arte_gratis", ignoreCase = true)
+}
+
+internal fun MonthlyPlanningSummary.isProductionComplete(): Boolean {
+    return isFullyReadyForViewing()
+}
+
+internal fun MonthlyPlanningSummary.shouldContinueProcessingPolling(): Boolean {
+    return !isProductionComplete()
+}
+
+private fun List<MonthlyPlanningSummary>.replacePlanningSummary(
+    updated: MonthlyPlanningSummary
+): List<MonthlyPlanningSummary> {
+    if (updated.id.isBlank()) return this
+    var found = false
+    val replaced = map { current ->
+        if (current.id == updated.id) {
+            found = true
+            updated
+        } else {
+            current
+        }
+    }
+    return if (found) replaced else listOf(updated) + this
 }
 
 private fun ApiResult.Failure.isBillingRequired(): Boolean {
@@ -979,15 +1518,23 @@ private fun reservedInputForPhotos(photoCount: Int, currentFreeArts: Int): Strin
     return photoCount.coerceAtMost(max).toString()
 }
 
-private fun MonthlyPlanningPhotoDraft.toRequestInput(): MonthlyPlanningPhotoInput {
+internal fun MonthlyPlanningPhotoDraft.toRequestInput(): MonthlyPlanningPhotoInput {
     val orientacao = buildList {
+        if (withoutPhotoSelected && file == null) add("Cliente escolheu criar esta arte sem foto.")
         if (objetivo.isNotBlank()) add("Objetivo da foto: ${objetivo.trim()}")
         if (escritaImagem.isNotBlank()) add("Escrita que deve aparecer na imagem: ${escritaImagem.trim()}")
         add("Nivel de edicao: $nivelEdicao")
     }.joinToString("\n")
 
     return MonthlyPlanningPhotoInput(
+        slotId = id,
+        order = number,
         file = file,
+        objetivo = objetivo.trim(),
+        objetivoId = objetivoId.trim(),
+        escritaImagem = escritaImagem.trim(),
+        nivelEdicao = nivelEdicao,
+        withoutPhotoSelected = withoutPhotoSelected && file == null,
         orientacao = orientacao
     )
 }
@@ -1038,6 +1585,11 @@ private fun MonthlyPlanningDetailDto.toUiSummary(): MonthlyPlanningSummary {
     )
 }
 
+private fun List<MonthlyPlanningPostDto>.toCalendarListItems(): List<MonthlyPlanningCalendarListItem> {
+    return map { it.toUiPost().toCalendarListItem() }
+        .sortedWith(compareBy<MonthlyPlanningCalendarListItem> { it.sortKey }.thenBy { it.title })
+}
+
 private fun MonthlyPlanningPostDto.toUiPost(): MonthlyPlanningPost {
     return MonthlyPlanningPost(
         number = number,
@@ -1075,10 +1627,11 @@ private fun formatPlanningDateLabel(date: String, time: String): String {
 
 class MonthlyPlanningViewModelFactory(
     private val repository: AuthRepository,
-    private val companyProfileStore: CompanyProfileStore
+    private val companyProfileStore: CompanyProfileStore,
+    private val calendarCacheStore: MonthlyPlanningCalendarCacheStore
 ) : ViewModelProvider.Factory {
     override fun <T : ViewModel> create(modelClass: Class<T>): T {
         @Suppress("UNCHECKED_CAST")
-        return MonthlyPlanningViewModel(repository, companyProfileStore) as T
+        return MonthlyPlanningViewModel(repository, companyProfileStore, calendarCacheStore) as T
     }
 }

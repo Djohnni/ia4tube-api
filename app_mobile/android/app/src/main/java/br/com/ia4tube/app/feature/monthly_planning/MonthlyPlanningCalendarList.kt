@@ -9,7 +9,6 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
@@ -85,8 +84,9 @@ internal fun MonthlyPlanningCalendarList(
     onOpenOrder: (String) -> Unit,
     onRemove: ((MonthlyPlanningCalendarListItem) -> Unit)? = null,
     onReschedule: ((MonthlyPlanningCalendarListItem, String) -> Unit)? = null,
-    onShare: ((MonthlyPlanningCalendarListItem) -> Unit)? = null,
+    reschedulingItemKeys: Set<String> = emptySet(),
     sharingItemKeys: Set<String> = emptySet(),
+    onShare: ((MonthlyPlanningCalendarListItem) -> Unit)? = null,
     showNextThirtyDays: Boolean = false
 ) {
     var pendingRescheduleItem by remember { mutableStateOf<MonthlyPlanningCalendarListItem?>(null) }
@@ -113,13 +113,18 @@ internal fun MonthlyPlanningCalendarList(
                     day = day,
                     onOpenOrder = onOpenOrder,
                     onRemove = onRemove,
+                    reschedulingItemKeys = reschedulingItemKeys,
                     sharingItemKeys = sharingItemKeys,
+                    onShare = onShare,
                     onReschedule = if (onReschedule != null) {
-                        { item: MonthlyPlanningCalendarListItem -> pendingRescheduleItem = item }
+                        { item: MonthlyPlanningCalendarListItem ->
+                            if (!reschedulingItemKeys.contains(item.key)) {
+                                pendingRescheduleItem = item
+                            }
+                        }
                     } else {
                         null
-                    },
-                    onShare = onShare
+                    }
                 )
             }
         } else {
@@ -128,8 +133,8 @@ internal fun MonthlyPlanningCalendarList(
                     item = item,
                     onOpenOrder = onOpenOrder,
                     onRemove = onRemove,
-                    onShare = onShare,
-                    isSharing = sharingItemKeys.contains(item.key)
+                    isSharing = sharingItemKeys.contains(item.key),
+                    onShare = onShare
                 )
             }
         }
@@ -158,9 +163,10 @@ private fun MonthlyPlanningCalendarDayCard(
     day: MonthlyPlanningCalendarDay,
     onOpenOrder: (String) -> Unit,
     onRemove: ((MonthlyPlanningCalendarListItem) -> Unit)?,
+    reschedulingItemKeys: Set<String>,
     sharingItemKeys: Set<String>,
-    onReschedule: ((MonthlyPlanningCalendarListItem) -> Unit)?,
-    onShare: ((MonthlyPlanningCalendarListItem) -> Unit)?
+    onShare: ((MonthlyPlanningCalendarListItem) -> Unit)?,
+    onReschedule: ((MonthlyPlanningCalendarListItem) -> Unit)?
 ) {
     val hasPosts = day.posts.isNotEmpty()
     val shape = RoundedCornerShape(16.dp)
@@ -240,9 +246,10 @@ private fun MonthlyPlanningCalendarDayCard(
                         item = item,
                         onOpenOrder = onOpenOrder,
                         onRemove = onRemove,
+                        isRescheduling = reschedulingItemKeys.contains(item.key),
                         isSharing = sharingItemKeys.contains(item.key),
-                        onReschedule = onReschedule,
-                        onShare = onShare
+                        onShare = onShare,
+                        onReschedule = onReschedule
                     )
                 }
             }
@@ -255,23 +262,21 @@ private fun MonthlyPlanningCalendarDayPost(
     item: MonthlyPlanningCalendarListItem,
     onOpenOrder: (String) -> Unit,
     onRemove: ((MonthlyPlanningCalendarListItem) -> Unit)?,
+    isRescheduling: Boolean,
     isSharing: Boolean,
-    onReschedule: ((MonthlyPlanningCalendarListItem) -> Unit)?,
-    onShare: ((MonthlyPlanningCalendarListItem) -> Unit)?
+    onShare: ((MonthlyPlanningCalendarListItem) -> Unit)?,
+    onReschedule: ((MonthlyPlanningCalendarListItem) -> Unit)?
 ) {
     val canOpenOrder = item.imageReady && item.pedidoId.isNotBlank()
-    val canShare = item.imageReady && item.pedidoId.isNotBlank()
     val effectiveOnReschedule = if (item.isWeeklyFreeArt()) null else onReschedule
-    val rowModifier = if (canOpenOrder) {
-        Modifier
-            .fillMaxWidth()
-            .clickable { onOpenOrder(item.pedidoId) }
+    val contentModifier = if (canOpenOrder) {
+        Modifier.clickable { onOpenOrder(item.pedidoId) }
     } else {
-        Modifier.fillMaxWidth()
+        Modifier
     }
 
     Column(
-        modifier = rowModifier,
+        modifier = Modifier.fillMaxWidth(),
         verticalArrangement = Arrangement.spacedBy(6.dp)
     ) {
         Row(
@@ -297,7 +302,9 @@ private fun MonthlyPlanningCalendarDayPost(
             )
         }
         Row(
-            modifier = Modifier.fillMaxWidth(),
+            modifier = Modifier
+                .fillMaxWidth()
+                .then(contentModifier),
             horizontalArrangement = Arrangement.spacedBy(10.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
@@ -312,24 +319,43 @@ private fun MonthlyPlanningCalendarDayPost(
                 color = MaterialTheme.colorScheme.onSurface
             )
         }
+        if (isRescheduling) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                CircularProgressIndicator(
+                    modifier = Modifier.size(16.dp),
+                    strokeWidth = 2.dp,
+                    color = MaterialTheme.colorScheme.primary
+                )
+                Text(
+                    text = "Alterando data...",
+                    style = MaterialTheme.typography.bodySmall,
+                    fontWeight = FontWeight.SemiBold,
+                    color = MaterialTheme.colorScheme.primary
+                )
+            }
+        }
         if (onShare != null || effectiveOnReschedule != null || onRemove != null) {
             Row(
                 modifier = Modifier.align(Alignment.End),
                 horizontalArrangement = Arrangement.spacedBy(4.dp)
             ) {
-                effectiveOnReschedule?.let { reschedule ->
-                    TextButton(onClick = { reschedule(item) }) {
-                        Text("Alterar data")
+                if (onShare != null && canOpenOrder) {
+                    TextButton(
+                        enabled = !isSharing,
+                        onClick = { onShare(item) }
+                    ) {
+                        Text(if (isSharing) "Compartilhando..." else "Compartilhar")
                     }
                 }
-                if (canShare) {
-                    onShare?.let { share ->
-                        TextButton(
-                            enabled = !isSharing,
-                            onClick = { share(item) }
-                        ) {
-                            Text(if (isSharing) "Compartilhando..." else "Compartilhar")
-                        }
+                effectiveOnReschedule?.let { reschedule ->
+                    TextButton(
+                        enabled = !isRescheduling,
+                        onClick = { reschedule(item) }
+                    ) {
+                        Text("Alterar data")
                     }
                 }
                 onRemove?.let { remove ->
@@ -347,21 +373,18 @@ private fun MonthlyPlanningCalendarListCard(
     item: MonthlyPlanningCalendarListItem,
     onOpenOrder: (String) -> Unit,
     onRemove: ((MonthlyPlanningCalendarListItem) -> Unit)?,
-    onShare: ((MonthlyPlanningCalendarListItem) -> Unit)?,
-    isSharing: Boolean
+    isSharing: Boolean,
+    onShare: ((MonthlyPlanningCalendarListItem) -> Unit)?
 ) {
     val canOpenOrder = item.imageReady && item.pedidoId.isNotBlank()
-    val canShare = item.imageReady && item.pedidoId.isNotBlank()
-    val cardModifier = if (canOpenOrder) {
-        Modifier
-            .fillMaxWidth()
-            .clickable { onOpenOrder(item.pedidoId) }
+    val contentModifier = if (canOpenOrder) {
+        Modifier.clickable { onOpenOrder(item.pedidoId) }
     } else {
-        Modifier.fillMaxWidth()
+        Modifier
     }
 
     Card(
-        modifier = cardModifier,
+        modifier = Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(16.dp),
         colors = CardDefaults.cardColors(
             containerColor = if (item.isWeeklyFreeArt()) {
@@ -400,7 +423,9 @@ private fun MonthlyPlanningCalendarListCard(
                 )
             }
             Row(
-                modifier = Modifier.fillMaxWidth(),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .then(contentModifier),
                 horizontalArrangement = Arrangement.spacedBy(10.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
@@ -420,14 +445,12 @@ private fun MonthlyPlanningCalendarListCard(
                     modifier = Modifier.align(Alignment.End),
                     horizontalArrangement = Arrangement.spacedBy(4.dp)
                 ) {
-                    if (canShare) {
-                        onShare?.let { share ->
-                            TextButton(
-                                enabled = !isSharing,
-                                onClick = { share(item) }
-                            ) {
-                                Text(if (isSharing) "Compartilhando..." else "Compartilhar")
-                            }
+                    if (onShare != null && canOpenOrder) {
+                        TextButton(
+                            enabled = !isSharing,
+                            onClick = { onShare(item) }
+                        ) {
+                            Text(if (isSharing) "Compartilhando..." else "Compartilhar")
                         }
                     }
                     onRemove?.let { remove ->
@@ -487,46 +510,9 @@ private fun MonthlyPlanningCalendarThumbnail(item: MonthlyPlanningCalendarListIt
         }
     }
 
-    val context = LocalContext.current
-    val imageRequest = remember(resolvedUrl, context) {
-        if (resolvedUrl.isBlank()) {
-            null
-        } else {
-            ImageRequest.Builder(context)
-                .data(resolvedUrl)
-                .crossfade(true)
-                .build()
-        }
-    }
-    val painter = rememberAsyncImagePainter(model = imageRequest)
-    val painterState = painter.state
-    val aspectRatio = (painterState as? AsyncImagePainter.State.Success)
-        ?.painter
-        ?.intrinsicSize
-        ?.let { size ->
-            if (!size.width.isNaN() && !size.width.isInfinite() &&
-                !size.height.isNaN() && !size.height.isInfinite() &&
-                size.width > 0f && size.height > 0f
-            ) {
-                (size.width / size.height).coerceIn(0.45f, 1.6f)
-            } else {
-                null
-            }
-        }
-    val thumbnailModifier = when {
-        aspectRatio == null -> Modifier.size(60.dp)
-        aspectRatio < 0.92f -> Modifier
-            .height(96.dp)
-            .aspectRatio(aspectRatio)
-        aspectRatio > 1.08f -> Modifier
-            .height(62.dp)
-            .aspectRatio(aspectRatio)
-        else -> Modifier.size(68.dp)
-    }
-
     Box(
         modifier = Modifier
-            .then(thumbnailModifier)
+            .size(60.dp)
             .clip(shape)
             .background(backgroundColor)
             .border(1.dp, borderColor, shape),
@@ -537,6 +523,15 @@ private fun MonthlyPlanningCalendarThumbnail(item: MonthlyPlanningCalendarListIt
             return@Box
         }
 
+        val context = LocalContext.current
+        val imageRequest = remember(resolvedUrl, context) {
+            ImageRequest.Builder(context)
+                .data(resolvedUrl)
+                .crossfade(true)
+                .build()
+        }
+        val painter = rememberAsyncImagePainter(model = imageRequest)
+
         Image(
             painter = painter,
             contentDescription = "Miniatura da arte",
@@ -544,7 +539,7 @@ private fun MonthlyPlanningCalendarThumbnail(item: MonthlyPlanningCalendarListIt
             contentScale = ContentScale.Fit
         )
 
-        when (painterState) {
+        when (painter.state) {
             is AsyncImagePainter.State.Loading -> {
                 CalendarImagePlaceholder()
                 CircularProgressIndicator(

@@ -32,6 +32,7 @@ import br.com.ia4tube.app.core.notifications.NotificationNavigationTarget
 import br.com.ia4tube.app.core.session.SessionStore
 import br.com.ia4tube.app.core.analytics.MobileAnalytics
 import br.com.ia4tube.app.core.analytics.MobileAnalyticsTracker
+import br.com.ia4tube.app.core.monthly_planning.MonthlyPlanningCalendarCacheStore
 import br.com.ia4tube.app.data.api.IA4TubeApiClient
 import br.com.ia4tube.app.data.repository.AuthRepository
 import br.com.ia4tube.app.data.repository.CarouselRepository
@@ -85,6 +86,7 @@ import br.com.ia4tube.app.feature.home.HomeViewModel
 import br.com.ia4tube.app.feature.home.HomeViewModelFactory
 import br.com.ia4tube.app.feature.home.premiumHomePalette
 import br.com.ia4tube.app.feature.monthly_planning.MonthlyPlanningDetailScreen
+import br.com.ia4tube.app.feature.monthly_planning.MonthlyPlanningResultsScreen
 import br.com.ia4tube.app.feature.monthly_planning.MonthlyPlanningScreen
 import br.com.ia4tube.app.feature.monthly_planning.MonthlyPlanningViewModel
 import br.com.ia4tube.app.feature.monthly_planning.MonthlyPlanningViewModelFactory
@@ -158,6 +160,9 @@ fun IA4TubeNavHost(
     }
     val companyProfileStore = remember {
         CompanyProfileStore(context)
+    }
+    val monthlyPlanningCalendarCacheStore = remember {
+        MonthlyPlanningCalendarCacheStore(context)
     }
     val analyticsTracker = remember {
         MobileAnalyticsTracker(
@@ -463,7 +468,8 @@ fun IA4TubeNavHost(
                 val viewModel: MonthlyPlanningViewModel = viewModel(
                     factory = MonthlyPlanningViewModelFactory(
                         repository,
-                        companyProfileStore
+                        companyProfileStore,
+                        monthlyPlanningCalendarCacheStore
                     )
                 )
                 MonthlyPlanningScreen(
@@ -475,8 +481,44 @@ fun IA4TubeNavHost(
                     onOpenOrder = { pedidoId ->
                         navigateProtected(Routes.orderDetail(pedidoId))
                     },
+                    onOpenPlanningResults = { planningId ->
+                        navigateProtected(Routes.monthlyPlanningResults(planningId))
+                    },
                     onOpenPlans = {
                         navigateProtected(Routes.Plans)
+                    }
+                )
+            }
+        }
+
+        composable(
+            route = Routes.MonthlyPlanningResults,
+            arguments = listOf(
+                navArgument("planningId") {
+                    type = NavType.StringType
+                }
+            )
+        ) { backStackEntry ->
+            val planningId = backStackEntry.arguments?.getString("planningId").orEmpty()
+            if (!hasSavedToken()) {
+                LaunchedEffect(planningId) {
+                    requestAuthFor(Routes.monthlyPlanningResults(planningId))
+                }
+            } else {
+                val viewModel: MonthlyPlanningViewModel = viewModel(
+                    factory = MonthlyPlanningViewModelFactory(
+                        repository,
+                        companyProfileStore,
+                        monthlyPlanningCalendarCacheStore
+                    )
+                )
+                MonthlyPlanningResultsScreen(
+                    planningId = planningId,
+                    viewModel = viewModel,
+                    previewToken = repository.getSavedToken(),
+                    onBack = { navController.popBackStack() },
+                    onOpenOrder = { pedidoId ->
+                        navigateProtected(Routes.orderDetail(pedidoId))
                     }
                 )
             }
@@ -499,7 +541,8 @@ fun IA4TubeNavHost(
                 val viewModel: MonthlyPlanningViewModel = viewModel(
                     factory = MonthlyPlanningViewModelFactory(
                         repository,
-                        companyProfileStore
+                        companyProfileStore,
+                        monthlyPlanningCalendarCacheStore
                     )
                 )
                 MonthlyPlanningDetailScreen(

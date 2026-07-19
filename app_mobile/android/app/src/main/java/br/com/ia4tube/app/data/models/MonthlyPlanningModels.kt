@@ -4,6 +4,7 @@ data class MonthlyPlanningRequest(
     val quantidadeReservada: Int,
     val nomeEmpresa: String,
     val ramo: String,
+    val whatsapp: String = "",
     val caracteristicasEmpresa: List<String> = emptyList(),
     val informacoesEmpresa: String = "",
     val logo: UploadFile? = null,
@@ -11,7 +12,14 @@ data class MonthlyPlanningRequest(
 )
 
 data class MonthlyPlanningPhotoInput(
-    val file: UploadFile,
+    val slotId: String,
+    val order: Int,
+    val file: UploadFile? = null,
+    val objetivo: String = "",
+    val objetivoId: String = "",
+    val escritaImagem: String = "",
+    val nivelEdicao: Int = 2,
+    val withoutPhotoSelected: Boolean = false,
     val orientacao: String = ""
 )
 
