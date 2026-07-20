@@ -18,6 +18,19 @@ val uploadKeyPassword = providers.gradleProperty("IA4TUBE_UPLOAD_KEY_PASSWORD")
     .orElse(providers.environmentVariable("IA4TUBE_UPLOAD_KEY_PASSWORD"))
     .orElse(uploadStorePassword)
 
+val productionApiBase = "https://ia4tube-api.onrender.com"
+val explicitDebugProductDiscoveryApiBase = providers
+    .gradleProperty("IA4TUBE_PRODUCT_DISCOVERY_API_BASE")
+    .orNull
+    ?.trim()
+    ?.trimEnd('/')
+    ?.takeIf { it.isNotBlank() }
+val debugProductDiscoveryApiBase = explicitDebugProductDiscoveryApiBase ?: productionApiBase
+
+fun String.asBuildConfigString(): String {
+    return "\"" + replace("\\", "\\\\").replace("\"", "\\\"") + "\""
+}
+
 android {
     namespace = "br.com.ia4tube.app"
     compileSdk = 35
@@ -29,7 +42,8 @@ android {
         versionCode = 26
         versionName = "0.2.15"
 
-        buildConfigField("String", "API_BASE", "\"https://ia4tube-api.onrender.com\"")
+        buildConfigField("String", "API_BASE", productionApiBase.asBuildConfigString())
+        buildConfigField("String", "PRODUCT_DISCOVERY_API_BASE", productionApiBase.asBuildConfigString())
     }
 
     signingConfigs {
@@ -42,7 +56,21 @@ android {
     }
 
     buildTypes {
+        debug {
+            buildConfigField(
+                "String",
+                "PRODUCT_DISCOVERY_API_BASE",
+                debugProductDiscoveryApiBase.asBuildConfigString()
+            )
+            manifestPlaceholders["productDiscoveryUsesCleartext"] =
+                debugProductDiscoveryApiBase.startsWith("http://").toString()
+        }
         release {
+            buildConfigField(
+                "String",
+                "PRODUCT_DISCOVERY_API_BASE",
+                productionApiBase.asBuildConfigString()
+            )
             signingConfig = signingConfigs.getByName("release")
         }
     }

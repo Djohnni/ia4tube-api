@@ -82,6 +82,8 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import androidx.media3.common.MediaItem
 import androidx.media3.common.Player
 import androidx.media3.common.util.UnstableApi
@@ -165,10 +167,11 @@ fun MonthlyPlanningScreen(
     }
     val discoveryGalleryPicker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
         if (uri == null) return@rememberLauncherForActivityResult
+        if (!viewModel.beginProductDiscovery()) return@rememberLauncherForActivityResult
         scope.launch {
             when (val result = fileReader.readUploadFile(uri)) {
                 is ApiResult.Success -> viewModel.discoverProducts(result.value)
-                is ApiResult.Failure -> viewModel.setUploadError(result.message)
+                is ApiResult.Failure -> viewModel.failProductDiscovery(result.message)
             }
         }
     }
@@ -176,10 +179,11 @@ fun MonthlyPlanningScreen(
         val uri = pendingDiscoveryCameraUri
         pendingDiscoveryCameraUri = null
         if (!saved || uri == null) return@rememberLauncherForActivityResult
+        if (!viewModel.beginProductDiscovery()) return@rememberLauncherForActivityResult
         scope.launch {
             when (val result = fileReader.readUploadFile(uri)) {
                 is ApiResult.Success -> viewModel.discoverProducts(result.value)
-                is ApiResult.Failure -> viewModel.setUploadError(result.message)
+                is ApiResult.Failure -> viewModel.failProductDiscovery(result.message)
             }
         }
     }
@@ -306,6 +310,26 @@ fun MonthlyPlanningScreen(
                 }
             }
         )
+    }
+
+    if (state.discoveryLoading) {
+        val discoveryStage = state.discoveryStage ?: MonthlyPlanningDiscoveryStage.Sending
+        Dialog(
+            onDismissRequest = {},
+            properties = DialogProperties(
+                dismissOnBackPress = false,
+                dismissOnClickOutside = false
+            )
+        ) {
+            EstimatedCreationProgressCard(
+                progressKey = "monthly-planning-discovery-${state.discoveryAttempt}",
+                running = discoveryStage != MonthlyPlanningDiscoveryStage.Complete,
+                title = "Descobrindo seus produtos",
+                subtitle = discoveryStage.message,
+                explanation = "Aguarde. Seus blocos atuais serão preservados durante a análise.",
+                progressOverride = state.discoveryProgress
+            )
+        }
     }
 
     pendingPhotoRemoval?.let { photo ->

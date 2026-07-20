@@ -458,7 +458,7 @@ class IA4TubeApiClient(
             .addFormDataPart("imagem", image.fileName, imageBody)
             .build()
         val request = Request.Builder()
-            .url("${AppConfig.apiBase}/empresa/planejamento-mensal/descobrir-produtos")
+            .url("${AppConfig.productDiscoveryApiBase}/empresa/planejamento-mensal/descobrir-produtos")
             .header("Authorization", "Bearer $token")
             .post(multipart)
             .build()

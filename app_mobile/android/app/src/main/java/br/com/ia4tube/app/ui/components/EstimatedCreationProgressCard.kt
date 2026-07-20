@@ -32,12 +32,14 @@ fun EstimatedCreationProgressCard(
     modifier: Modifier = Modifier,
     hasError: Boolean = false,
     errorTitle: String = title,
-    errorSubtitle: String = subtitle
+    errorSubtitle: String = subtitle,
+    progressOverride: Float? = null
 ) {
     val startTimeMs = remember(progressKey) { System.currentTimeMillis() }
     var progress by remember(progressKey) { mutableStateOf(0.12f) }
 
-    LaunchedEffect(progressKey, running, hasError) {
+    LaunchedEffect(progressKey, running, hasError, progressOverride) {
+        if (progressOverride != null) return@LaunchedEffect
         while (running && !hasError && progress < 0.92f) {
             delay(1000)
             val elapsedMs = System.currentTimeMillis() - startTimeMs
@@ -45,7 +47,12 @@ fun EstimatedCreationProgressCard(
         }
     }
 
-    val percent = if (hasError) 0 else (progress * 100).toInt().coerceIn(12, 92)
+    val displayedProgress = progressOverride?.coerceIn(0f, 1f) ?: progress
+    val percent = when {
+        hasError -> 0
+        progressOverride != null -> (displayedProgress * 100).toInt().coerceIn(0, 100)
+        else -> (displayedProgress * 100).toInt().coerceIn(12, 92)
+    }
 
     Card(
         modifier = modifier.fillMaxWidth(),
@@ -72,7 +79,7 @@ fun EstimatedCreationProgressCard(
                 )
                 Spacer(modifier = Modifier.height(10.dp))
                 LinearProgressIndicator(
-                    progress = { progress },
+                    progress = { displayedProgress },
                     modifier = Modifier.fillMaxWidth()
                 )
                 Spacer(modifier = Modifier.height(10.dp))

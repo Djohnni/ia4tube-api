@@ -26,6 +26,7 @@ import br.com.ia4tube.app.data.repository.AuthRepository
 import java.io.ByteArrayOutputStream
 import java.text.Normalizer
 import java.util.Locale
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -46,6 +47,10 @@ private const val MAX_PHOTO_EDIT_LEVEL = 3
 const val MONTHLY_PLANNING_INITIAL_VISIBLE_PHOTOS = 4
 const val MONTHLY_PLANNING_MAX_ARTS_PER_REQUEST = 20
 const val MONTHLY_PLANNING_EMPTY_REQUEST_MESSAGE = "Preencha um objetivo, uma escrita ou adicione uma imagem para criar sua arte."
+const val PRODUCT_DISCOVERY_EMPTY_MESSAGE =
+    "Não encontramos produtos claramente identificáveis nesta foto. Tente fotografar mais perto."
+const val PRODUCT_DISCOVERY_FRIENDLY_ERROR_MESSAGE =
+    "Não foi possível analisar a foto agora. Verifique sua conexão e tente novamente."
 private const val MARKETING_CONTEXT_FIRST_FREE_ART = "primeira_arte_gratis"
 private const val PLANNING_PROCESSING_POLL_INTERVAL_MS = 5_000L
 const val MOCK_PLANNING_ID = "planejamento-junho-2026"
@@ -57,6 +62,17 @@ enum class MonthlyPlanningStep {
     MyPlannings
 }
 
+enum class MonthlyPlanningDiscoveryStage(
+    val progress: Float,
+    val message: String
+) {
+    Sending(0.10f, "Enviando sua foto…"),
+    Analyzing(0.30f, "Analisando os produtos…"),
+    Identifying(0.60f, "Identificando preços e informações…"),
+    Preparing(0.85f, "Preparando os produtos no Planejador…"),
+    Complete(1.00f, "Preparando os produtos no Planejador…")
+}
+
 data class MonthlyPlanningUiState(
     val step: MonthlyPlanningStep = MonthlyPlanningStep.Upload,
     val loading: Boolean = false,
@@ -65,6 +81,9 @@ data class MonthlyPlanningUiState(
     val reservedInput: String = "",
     val photos: List<MonthlyPlanningPhotoDraft> = createInitialMonthlyPlanningPhotoDrafts(),
     val discoveryLoading: Boolean = false,
+    val discoveryStage: MonthlyPlanningDiscoveryStage? = null,
+    val discoveryProgress: Float = 0f,
+    val discoveryAttempt: Long = 0L,
     val technicalPlanningLimit: Int = MONTHLY_PLANNING_MAX_ARTS_PER_REQUEST,
     val companyProfile: MonthlyPlanningCompanyProfile = MonthlyPlanningCompanyProfile(),
     val uploadError: String? = null,
@@ -116,6 +135,45 @@ data class MonthlyPlanningUiState(
 
     val visibleGeneralCalendarPosts: List<MonthlyPlanningCalendarListItem>
         get() = generalCalendarPosts
+}
+
+internal fun MonthlyPlanningUiState.tryStartProductDiscovery(): MonthlyPlanningUiState? {
+    if (discoveryLoading) return null
+    return copy(
+        discoveryLoading = true,
+        discoveryStage = MonthlyPlanningDiscoveryStage.Sending,
+        discoveryProgress = MonthlyPlanningDiscoveryStage.Sending.progress,
+        discoveryAttempt = discoveryAttempt + 1,
+        uploadError = null,
+        successMessage = null
+    )
+}
+
+internal fun MonthlyPlanningUiState.advanceProductDiscovery(
+    stage: MonthlyPlanningDiscoveryStage
+): MonthlyPlanningUiState {
+    if (!discoveryLoading || stage.progress < discoveryProgress) return this
+    return copy(
+        discoveryStage = stage,
+        discoveryProgress = maxOf(discoveryProgress, stage.progress)
+    )
+}
+
+@Suppress("UNUSED_PARAMETER")
+internal fun productDiscoveryFriendlyErrorMessage(technicalMessage: String?): String {
+    return PRODUCT_DISCOVERY_FRIENDLY_ERROR_MESSAGE
+}
+
+internal fun MonthlyPlanningUiState.finishProductDiscoveryWithError(
+    technicalMessage: String? = null
+): MonthlyPlanningUiState {
+    return copy(
+        discoveryLoading = false,
+        discoveryStage = null,
+        discoveryProgress = 0f,
+        uploadError = productDiscoveryFriendlyErrorMessage(technicalMessage),
+        successMessage = null
+    )
 }
 
 data class MonthlyPlanningCalendarSharePayload(
@@ -481,6 +539,8 @@ class MonthlyPlanningViewModel(
     private val _uiState = MutableStateFlow(MonthlyPlanningUiState())
     val uiState: StateFlow<MonthlyPlanningUiState> = _uiState.asStateFlow()
     private var planningProcessingPollingJob: Job? = null
+    private var productDiscoveryJob: Job? = null
+    private var productDiscoveryProgressJob: Job? = null
 
     init {
         refreshCompanyProfile()
@@ -1238,62 +1298,116 @@ class MonthlyPlanningViewModel(
         }
     }
 
+    fun beginProductDiscovery(): Boolean {
+        var started = false
+        _uiState.update { state ->
+            state.tryStartProductDiscovery()?.also { started = true } ?: state
+        }
+        return started
+    }
+
+    fun failProductDiscovery(technicalMessage: String? = null) {
+        productDiscoveryProgressJob?.cancel()
+        _uiState.update { state ->
+            state.finishProductDiscoveryWithError(technicalMessage)
+        }
+    }
+
     fun discoverProducts(image: UploadFile) {
-        if (_uiState.value.discoveryLoading) return
-        viewModelScope.launch {
-            _uiState.update {
-                it.copy(
-                    discoveryLoading = true,
-                    uploadError = null,
-                    successMessage = null
-                )
+        if (productDiscoveryJob?.isActive == true) return
+        if (!_uiState.value.discoveryLoading && !beginProductDiscovery()) return
+        val attempt = _uiState.value.discoveryAttempt
+
+        productDiscoveryJob = viewModelScope.launch {
+            productDiscoveryProgressJob = launch {
+                delay(450)
+                advanceProductDiscovery(MonthlyPlanningDiscoveryStage.Analyzing)
+                delay(1_000)
+                advanceProductDiscovery(MonthlyPlanningDiscoveryStage.Identifying)
             }
-            when (val result = repository.descobrirProdutosPlanejamentoMensal(image)) {
-                is ApiResult.Success -> {
-                    val cropsByProduct = withContext(Dispatchers.Default) {
-                        createDiscoveredProductCrops(image, result.value.products)
-                    }
-                    _uiState.update { state ->
-                        val append = appendDiscoveredProductsToPlanning(
-                            currentPhotos = state.photos,
-                            products = result.value.products,
-                            technicalLimit = result.value.technicalPlanningLimit,
-                            cropFactory = { product ->
-                                cropsByProduct[normalizeDiscoveredProductKey(product.name)]
-                            }
-                        )
-                        val message = when {
-                            result.value.products.isEmpty() -> null
-                            append.added == 0 -> "Os produtos identificados já estão no Planejador."
-                            append.added == 1 -> "1 produto foi adicionado ao Planejador."
-                            else -> "${append.added} produtos foram adicionados ao Planejador."
+
+            try {
+                when (val result = repository.descobrirProdutosPlanejamentoMensal(image)) {
+                    is ApiResult.Success -> {
+                        productDiscoveryProgressJob?.cancel()
+                        advanceProductDiscovery(MonthlyPlanningDiscoveryStage.Preparing)
+
+                        val cropsByProduct = withContext(Dispatchers.Default) {
+                            createDiscoveredProductCrops(image, result.value.products)
                         }
-                        state.copy(
-                            photos = append.photos,
-                            discoveryLoading = false,
-                            technicalPlanningLimit = result.value.technicalPlanningLimit,
-                            reservedInput = reservedInputForPhotos(
-                                append.photos.activeMonthlyPlanningPhotos().size,
-                                state.currentFreeArts
-                            ),
-                            uploadError = when {
-                                result.value.products.isEmpty() -> "Não foi possível identificar produtos com segurança nessa foto."
+                        var finalError: String? = null
+                        var finalSuccess: String? = null
+                        _uiState.update { state ->
+                            if (state.discoveryAttempt != attempt) return@update state
+                            val append = appendDiscoveredProductsToPlanning(
+                                currentPhotos = state.photos,
+                                products = result.value.products,
+                                technicalLimit = result.value.technicalPlanningLimit,
+                                cropFactory = { product ->
+                                    cropsByProduct[normalizeDiscoveredProductKey(product.name)]
+                                }
+                            )
+                            finalError = when {
+                                result.value.products.isEmpty() -> PRODUCT_DISCOVERY_EMPTY_MESSAGE
                                 append.limitReached -> "Alguns produtos não foram adicionados porque o limite técnico do Planejador foi atingido."
                                 else -> null
-                            },
-                            successMessage = message
-                        )
+                            }
+                            finalSuccess = when {
+                                result.value.products.isEmpty() -> null
+                                append.added == 0 -> "Os produtos identificados já estão no Planejador."
+                                append.added == 1 -> "1 produto adicionado ao Planejador."
+                                else -> "${append.added} produtos adicionados ao Planejador."
+                            }
+                            state.copy(
+                                photos = append.photos,
+                                discoveryStage = MonthlyPlanningDiscoveryStage.Complete,
+                                discoveryProgress = MonthlyPlanningDiscoveryStage.Complete.progress,
+                                technicalPlanningLimit = result.value.technicalPlanningLimit,
+                                reservedInput = reservedInputForPhotos(
+                                    append.photos.activeMonthlyPlanningPhotos().size,
+                                    state.currentFreeArts
+                                ),
+                                uploadError = null,
+                                successMessage = null
+                            )
+                        }
+                        delay(350)
+                        _uiState.update { state ->
+                            if (state.discoveryAttempt != attempt) return@update state
+                            state.copy(
+                                discoveryLoading = false,
+                                discoveryStage = null,
+                                discoveryProgress = 0f,
+                                uploadError = finalError,
+                                successMessage = finalSuccess
+                            )
+                        }
+                    }
+                    is ApiResult.Failure -> {
+                        productDiscoveryProgressJob?.cancel()
+                        _uiState.update { state ->
+                            if (state.discoveryAttempt != attempt) state
+                            else state.finishProductDiscoveryWithError(result.message)
+                        }
                     }
                 }
-                is ApiResult.Failure -> _uiState.update {
-                    it.copy(
-                        discoveryLoading = false,
-                        uploadError = result.message,
-                        successMessage = null
-                    )
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Exception) {
+                _uiState.update { state ->
+                    if (state.discoveryAttempt != attempt) state
+                    else state.finishProductDiscoveryWithError(error.message)
                 }
+            } finally {
+                productDiscoveryProgressJob?.cancel()
+                productDiscoveryProgressJob = null
+                productDiscoveryJob = null
             }
         }
+    }
+
+    private fun advanceProductDiscovery(stage: MonthlyPlanningDiscoveryStage) {
+        _uiState.update { state -> state.advanceProductDiscovery(stage) }
     }
 
     fun addAnotherPhotoSlot() {
@@ -1577,6 +1691,8 @@ class MonthlyPlanningViewModel(
                 reservedInput = "",
                 photos = createInitialMonthlyPlanningPhotoDrafts(),
                 discoveryLoading = false,
+                discoveryStage = null,
+                discoveryProgress = 0f,
                 technicalPlanningLimit = MONTHLY_PLANNING_MAX_ARTS_PER_REQUEST,
                 planning = merged.firstOrNull { item -> item.id == created.id } ?: created,
                 plannings = merged,

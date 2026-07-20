@@ -434,4 +434,84 @@ class MonthlyPlanningPhotoDraftTest {
         assertEquals(24, state.requestMaxArts)
         assertFalse(state.canAddMorePhotos)
     }
+
+    @Test
+    fun discoveryProgressUsesMonotonicControlledStages() {
+        val stages = MonthlyPlanningDiscoveryStage.entries
+
+        assertEquals(listOf(10, 30, 60, 85, 100), stages.map { (it.progress * 100).toInt() })
+        assertTrue(stages.zipWithNext().all { (current, next) -> next.progress >= current.progress })
+        assertTrue(stages.filter { it != MonthlyPlanningDiscoveryStage.Complete }.all { it.progress <= 0.90f })
+        assertEquals("Enviando sua foto…", MonthlyPlanningDiscoveryStage.Sending.message)
+        assertEquals("Analisando os produtos…", MonthlyPlanningDiscoveryStage.Analyzing.message)
+        assertEquals(
+            "Identificando preços e informações…",
+            MonthlyPlanningDiscoveryStage.Identifying.message
+        )
+        assertEquals(
+            "Preparando os produtos no Planejador…",
+            MonthlyPlanningDiscoveryStage.Preparing.message
+        )
+    }
+
+    @Test
+    fun discoveryCannotStartTwiceWhileAnAttemptIsRunning() {
+        val started = MonthlyPlanningUiState().tryStartProductDiscovery()
+
+        assertTrue(started != null)
+        assertNull(started?.tryStartProductDiscovery())
+        assertEquals(MonthlyPlanningDiscoveryStage.Sending, started?.discoveryStage)
+        assertEquals(0.10f, started?.discoveryProgress)
+    }
+
+    @Test
+    fun discoveryProgressNeverMovesBackwards() {
+        val started = MonthlyPlanningUiState().tryStartProductDiscovery()!!
+        val identifying = started.advanceProductDiscovery(MonthlyPlanningDiscoveryStage.Identifying)
+        val staleUpdate = identifying.advanceProductDiscovery(MonthlyPlanningDiscoveryStage.Analyzing)
+
+        assertEquals(MonthlyPlanningDiscoveryStage.Identifying, staleUpdate.discoveryStage)
+        assertEquals(0.60f, staleUpdate.discoveryProgress)
+    }
+
+    @Test
+    fun technicalDiscoveryFailuresAreFriendlyAndPreserveBlocks() {
+        val manual = MonthlyPlanningPhotoDraft(
+            id = "manual-1",
+            number = 1,
+            objetivo = "Objetivo manual",
+            escritaImagem = "Texto preservado"
+        )
+        val started = MonthlyPlanningUiState(photos = listOf(manual)).tryStartProductDiscovery()!!
+        val failed = started.finishProductDiscoveryWithError("Failed to connect to /127.0.0.1:3100")
+
+        assertEquals(listOf(manual), failed.photos)
+        assertFalse(failed.discoveryLoading)
+        assertNull(failed.discoveryStage)
+        assertEquals(0f, failed.discoveryProgress)
+        assertEquals(PRODUCT_DISCOVERY_FRIENDLY_ERROR_MESSAGE, failed.uploadError)
+        assertFalse(failed.uploadError.orEmpty().contains("127.0.0.1"))
+        assertEquals(
+            PRODUCT_DISCOVERY_FRIENDLY_ERROR_MESSAGE,
+            productDiscoveryFriendlyErrorMessage("timeout")
+        )
+    }
+
+    @Test
+    fun returningToPlanningDoesNotDuplicateAnExistingDiscoveredProduct() {
+        val existing = MonthlyPlanningPhotoDraft(
+            id = "discovered-1",
+            number = 1,
+            produtoIdentificado = "Teclado USB Fortrek"
+        )
+        val result = appendDiscoveredProductsToPlanning(
+            currentPhotos = listOf(existing),
+            products = listOf(MonthlyPlanningDiscoveredProduct(name = "teclado usb fortrek")),
+            technicalLimit = 40,
+            cropFactory = { upload("duplicate.jpg") }
+        )
+
+        assertEquals(0, result.added)
+        assertEquals(listOf(existing), result.photos)
+    }
 }
