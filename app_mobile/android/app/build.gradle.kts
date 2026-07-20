@@ -26,8 +26,8 @@ android {
         applicationId = "com.ia4tube.app"
         minSdk = 26
         targetSdk = 35
-        versionCode = 25
-        versionName = "0.2.14"
+        versionCode = 26
+        versionName = "0.2.15"
 
         buildConfigField("String", "API_BASE", "\"https://ia4tube-api.onrender.com\"")
     }
