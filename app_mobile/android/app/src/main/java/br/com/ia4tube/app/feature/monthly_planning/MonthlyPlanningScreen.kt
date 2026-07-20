@@ -131,6 +131,8 @@ fun MonthlyPlanningScreen(
     var loadingPhotos by remember { mutableStateOf(false) }
     var pendingCameraUri by remember { mutableStateOf<Uri?>(null) }
     var pendingPhotoSlotId by remember { mutableStateOf<String?>(null) }
+    var showDiscoverySourceDialog by remember { mutableStateOf(false) }
+    var pendingDiscoveryCameraUri by remember { mutableStateOf<Uri?>(null) }
     var pendingPhotoRemoval by remember { mutableStateOf<MonthlyPlanningPhotoDraft?>(null) }
     var showGeneralCalendar by remember { mutableStateOf(false) }
 
@@ -159,6 +161,26 @@ fun MonthlyPlanningScreen(
                 is ApiResult.Failure -> viewModel.setUploadError(result.message)
             }
             loadingPhotos = false
+        }
+    }
+    val discoveryGalleryPicker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
+        if (uri == null) return@rememberLauncherForActivityResult
+        scope.launch {
+            when (val result = fileReader.readUploadFile(uri)) {
+                is ApiResult.Success -> viewModel.discoverProducts(result.value)
+                is ApiResult.Failure -> viewModel.setUploadError(result.message)
+            }
+        }
+    }
+    val discoveryCameraLauncher = rememberLauncherForActivityResult(ActivityResultContracts.TakePicture()) { saved ->
+        val uri = pendingDiscoveryCameraUri
+        pendingDiscoveryCameraUri = null
+        if (!saved || uri == null) return@rememberLauncherForActivityResult
+        scope.launch {
+            when (val result = fileReader.readUploadFile(uri)) {
+                is ApiResult.Success -> viewModel.discoverProducts(result.value)
+                is ApiResult.Failure -> viewModel.setUploadError(result.message)
+            }
         }
     }
     val logoPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
@@ -252,6 +274,40 @@ fun MonthlyPlanningScreen(
         )
     }
 
+    if (showDiscoverySourceDialog) {
+        AlertDialog(
+            onDismissRequest = { showDiscoverySourceDialog = false },
+            title = {
+                Text("Descobrir meus produtos", fontWeight = FontWeight.ExtraBold)
+            },
+            text = {
+                Text("Tire uma foto ou escolha uma imagem da galeria. A IA analisará somente essa foto.")
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        showDiscoverySourceDialog = false
+                        val uri = cameraImageStore.createImageUri()
+                        pendingDiscoveryCameraUri = uri
+                        discoveryCameraLauncher.launch(uri)
+                    }
+                ) {
+                    Text("Câmera")
+                }
+            },
+            dismissButton = {
+                TextButton(
+                    onClick = {
+                        showDiscoverySourceDialog = false
+                        discoveryGalleryPicker.launch("image/*")
+                    }
+                ) {
+                    Text("Galeria")
+                }
+            }
+        )
+    }
+
     pendingPhotoRemoval?.let { photo ->
         AlertDialog(
             onDismissRequest = { pendingPhotoRemoval = null },
@@ -315,6 +371,7 @@ fun MonthlyPlanningScreen(
                     MonthlyPlanningStep.Upload -> MonthlyPlanningUploadContent(
                         state = state,
                         loadingPhotos = loadingPhotos,
+                        onDiscoverProducts = { showDiscoverySourceDialog = true },
                         onSelectPhotos = { slotId ->
                             pendingPhotoSlotId = slotId
                             photosPicker.launch("image/*")
@@ -341,6 +398,7 @@ fun MonthlyPlanningScreen(
                         },
                         onManualObjectiveChange = viewModel::updatePhotoManualObjective,
                         onTextChange = viewModel::updatePhotoText,
+                        onPriceChange = viewModel::updatePhotoPrice,
                         onDecreaseLevel = viewModel::decreasePhotoEditLevel,
                         onIncreaseLevel = viewModel::increasePhotoEditLevel,
                         onToggleLevelInfo = viewModel::togglePhotoEditLevelInfo,
@@ -753,6 +811,7 @@ private fun MonthlyPlanningGeneralCalendarContent(
 private fun MonthlyPlanningUploadContent(
     state: MonthlyPlanningUiState,
     loadingPhotos: Boolean,
+    onDiscoverProducts: () -> Unit,
     onSelectPhotos: (String) -> Unit,
     onTakePhoto: (String) -> Unit,
     onToggleWithoutPhoto: (String) -> Unit,
@@ -763,6 +822,7 @@ private fun MonthlyPlanningUploadContent(
     onObjectiveSelected: (String, CreateArtObjective) -> Unit,
     onManualObjectiveChange: (String, String) -> Unit,
     onTextChange: (String, String) -> Unit,
+    onPriceChange: (String, String) -> Unit,
     onDecreaseLevel: (String) -> Unit,
     onIncreaseLevel: (String) -> Unit,
     onToggleLevelInfo: (String) -> Unit,
@@ -770,6 +830,30 @@ private fun MonthlyPlanningUploadContent(
     onContinue: () -> Unit
 ) {
     Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
+        OutlinedButton(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(54.dp),
+            enabled = !loadingPhotos && !state.discoveryLoading,
+            onClick = onDiscoverProducts,
+            shape = RoundedCornerShape(14.dp),
+            border = BorderStroke(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.55f))
+        ) {
+            if (state.discoveryLoading) {
+                CircularProgressIndicator(
+                    modifier = Modifier.size(20.dp),
+                    strokeWidth = 2.dp
+                )
+                Spacer(modifier = Modifier.width(10.dp))
+                Text("Analisando uma foto...")
+            } else {
+                Text(
+                    text = "✨ Descobrir meus produtos",
+                    fontWeight = FontWeight.Bold
+                )
+            }
+        }
+
         state.photos.forEach { photo ->
             key(photo.id) {
                 PlanningPhotoCard(
@@ -789,6 +873,9 @@ private fun MonthlyPlanningUploadContent(
                     },
                     onTextChange = { value ->
                         onTextChange(photo.id, value)
+                    },
+                    onPriceChange = { value ->
+                        onPriceChange(photo.id, value)
                     },
                     onDecreaseLevel = {
                         onDecreaseLevel(photo.id)
@@ -839,6 +926,7 @@ private fun PlanningPhotoCard(
     onObjectiveSelected: (CreateArtObjective) -> Unit,
     onManualObjectiveChange: (String) -> Unit,
     onTextChange: (String) -> Unit,
+    onPriceChange: (String) -> Unit,
     onDecreaseLevel: () -> Unit,
     onIncreaseLevel: () -> Unit,
     onToggleLevelInfo: () -> Unit,
@@ -865,6 +953,14 @@ private fun PlanningPhotoCard(
                 onToggleExpanded = onToggleExpanded,
                 onRemove = onRemove
             )
+            if (photo.produtoIdentificado.isNotBlank()) {
+                Text(
+                    text = "Produto identificado: ${photo.produtoIdentificado}",
+                    style = MaterialTheme.typography.bodyMedium,
+                    fontWeight = FontWeight.SemiBold,
+                    color = MaterialTheme.colorScheme.primary
+                )
+            }
             if (photo.expanded) {
                 PlanningPhotoPreview(
                     photo = photo,
@@ -902,6 +998,13 @@ private fun PlanningPhotoCard(
                         onValueChange = onTextChange
                     )
                 }
+                OutlinedTextField(
+                    modifier = Modifier.fillMaxWidth(),
+                    value = photo.preco,
+                    onValueChange = onPriceChange,
+                    label = { Text("Preço (opcional)") },
+                    singleLine = true
+                )
                 PlanningPhotoLevelSelector(
                     level = photo.nivelEdicao,
                     showInfo = photo.showNivelInfo,
@@ -2051,6 +2154,12 @@ private fun ReviewPhotoLine(
         }
         PhotoReviewDetail(label = "Objetivo", value = photo.objetivo.ifBlank { "-" })
         PhotoReviewDetail(label = "Escrita", value = photo.escritaImagem.ifBlank { "-" })
+        if (photo.produtoIdentificado.isNotBlank()) {
+            PhotoReviewDetail(label = "Produto identificado", value = photo.produtoIdentificado)
+        }
+        if (photo.preco.isNotBlank()) {
+            PhotoReviewDetail(label = "Preço", value = photo.preco)
+        }
         PhotoReviewDetail(label = "Nível", value = photo.nivelEdicao.toString())
     }
 }

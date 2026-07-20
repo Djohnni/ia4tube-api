@@ -17,6 +17,7 @@ import br.com.ia4tube.app.data.models.MarketingVideo
 import br.com.ia4tube.app.data.models.MeResponse
 import br.com.ia4tube.app.data.models.MonthlyPlanningDetailDto
 import br.com.ia4tube.app.data.models.MonthlyPlanningPostDto
+import br.com.ia4tube.app.data.models.MonthlyPlanningProductDiscoveryResponse
 import br.com.ia4tube.app.data.models.MonthlyPlanningRequest
 import br.com.ia4tube.app.data.models.MonthlyPlanningRequestResponse
 import br.com.ia4tube.app.data.models.MonthlyPlanningRescheduleRequest
@@ -26,6 +27,7 @@ import br.com.ia4tube.app.data.models.OrderSummary
 import br.com.ia4tube.app.data.models.PaymentInfo
 import br.com.ia4tube.app.data.models.SendSupportMessageResponse
 import br.com.ia4tube.app.data.models.SupportMessage
+import br.com.ia4tube.app.data.models.UploadFile
 
 class AuthRepository(
     private val apiClient: IA4TubeApiClient,
@@ -120,6 +122,14 @@ class AuthRepository(
         val token = sessionStore.getToken()
         if (token.isBlank()) return ApiResult.Failure(SESSION_EXPIRED_MESSAGE)
         return apiClient.pedidoInfo(token, pedidoId)
+    }
+
+    suspend fun descobrirProdutosPlanejamentoMensal(
+        image: UploadFile
+    ): ApiResult<MonthlyPlanningProductDiscoveryResponse> {
+        val token = sessionStore.getToken()
+        if (token.isBlank()) return ApiResult.Failure(SESSION_EXPIRED_MESSAGE)
+        return apiClient.descobrirProdutosPlanejamentoMensal(token, image)
     }
 
     suspend fun aprovarPedido(pedidoId: String): ApiResult<Unit> {

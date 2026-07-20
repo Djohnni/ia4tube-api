@@ -9,6 +9,13 @@ const NOTIFICATION_STATUSES = new Set(["pendente", "enviada", "erro", "cancelada
 const PLANNING_ART_STATUSES = new Set(["novo", "ajuste_pendente", "processando", "pronto", "erro"]);
 const SAO_PAULO_UTC_OFFSET = "-03:00";
 const MAX_MONTHLY_PLANNING_ARTS = 40;
+const MAX_MONTHLY_PLANNING_REQUEST_ITEMS = Math.min(
+  MAX_MONTHLY_PLANNING_ARTS,
+  Math.max(
+    1,
+    Math.floor(Number(process.env.MONTHLY_PLANNING_MAX_REQUEST_ITEMS || MAX_MONTHLY_PLANNING_ARTS) || MAX_MONTHLY_PLANNING_ARTS)
+  )
+);
 const BOT_PENDING_HARD_LIMIT = 20;
 const BOT_CLAIM_TTL_MS = 10 * 60 * 1000;
 const PROCESSING_STALE_MS = 45 * 60 * 1000;
@@ -308,6 +315,248 @@ function applyPhotoOrientations(fotos = [], body = {}) {
       orientacao_origem: "cliente_por_foto"
     };
   });
+}
+
+function parsePlanningPhotoItems(body = {}) {
+  const raw = body.itens_fotos
+    || body.itensFotos
+    || body.photo_items
+    || body.fotos_itens
+    || body.orientacoes_fotos
+    || body.orientacoesFotos;
+
+  if (!raw) return [];
+
+  if (Array.isArray(raw)) {
+    return raw
+      .map((item, index) => normalizePlanningPhotoItem(item, index + 1))
+      .filter(Boolean);
+  }
+
+  if (typeof raw === "object") {
+    return Object.entries(raw)
+      .map(([arquivo, orientacao], index) => normalizePlanningPhotoItem({ arquivo, orientacao }, index + 1))
+      .filter(Boolean);
+  }
+
+  const text = String(raw || "").trim();
+  if (!text) return [];
+
+  try {
+    const parsed = JSON.parse(text);
+    if (Array.isArray(parsed)) {
+      return parsed
+        .map((item, index) => normalizePlanningPhotoItem(item, index + 1))
+        .filter(Boolean);
+    }
+    if (parsed && typeof parsed === "object") {
+      return Object.entries(parsed)
+        .map(([arquivo, orientacao], index) => normalizePlanningPhotoItem({ arquivo, orientacao }, index + 1))
+        .filter(Boolean);
+    }
+  } catch {
+    return [];
+  }
+
+  return [];
+}
+
+function normalizePlanningPhotoItem(item, fallbackOrder = 1) {
+  if (!item || typeof item !== "object") return null;
+  const hasStructuredFields = [
+    "slot_id",
+    "slotId",
+    "id",
+    "photo_id",
+    "objetivo",
+    "objective",
+    "objetivo_foto",
+    "objetivoFoto",
+    "objetivo_id",
+    "objective_id",
+    "objetivoId",
+    "escrita_imagem",
+    "escritaImagem",
+    "texto_obrigatorio_imagem",
+    "texto_imagem",
+    "escrita",
+    "preco",
+    "produto_identificado",
+    "produtoIdentificado",
+    "nivel_edicao",
+    "nivelEdicao",
+    "nivel",
+    "tem_arquivo",
+    "temArquivo",
+    "arquivo_index",
+    "file_index",
+    "upload_index"
+  ].some((key) => Object.prototype.hasOwnProperty.call(item, key));
+  const ordem = Math.max(1, Number(item.ordem || item.order || item.numero || fallbackOrder) || fallbackOrder);
+  const slotId = String(item.slot_id || item.slotId || item.id || item.photo_id || `foto-${ordem}`).trim();
+  const arquivo = String(item.arquivo || item.filename || item.file || item.nome || "").trim();
+  const arquivoIndex = Math.max(0, Number(item.arquivo_index || item.file_index || item.upload_index || 0) || 0);
+  const objetivo = cleanText(item.objetivo || item.objective || item.objetivo_foto || item.objetivoFoto);
+  const objetivoId = cleanText(item.objetivo_id || item.objective_id || item.objetivoId);
+  const escritaImagem = cleanText(
+    item.escrita_imagem ||
+      item.escritaImagem ||
+      item.texto_obrigatorio_imagem ||
+      item.texto_imagem ||
+      item.escrita
+  );
+  const preco = cleanText(item.preco || item.price);
+  const produtoIdentificado = cleanText(
+    item.produto_identificado || item.produtoIdentificado || item.identified_product
+  );
+  const nivelEdicao = Math.min(3, Math.max(1, Number(item.nivel_edicao || item.nivelEdicao || item.nivel || 2) || 2));
+  const orientacaoRaw = cleanText(item.orientacao || item.orientation || item.instrucao || item.texto);
+  const orientacao = orientacaoRaw || [
+    produtoIdentificado ? `Produto identificado: ${produtoIdentificado}` : "",
+    objetivo ? `Objetivo da foto: ${objetivo}` : "",
+    escritaImagem ? `Escrita que deve aparecer na imagem: ${escritaImagem}` : "",
+    preco ? `Preco informado: ${preco}` : "",
+    `Nivel de edicao: ${nivelEdicao}`
+  ].filter(Boolean).join("\n");
+  const hasFileHint = item.tem_arquivo === true ||
+    item.temArquivo === true ||
+    Boolean(arquivo) ||
+    arquivoIndex > 0;
+  const active = Boolean(arquivo || arquivoIndex || objetivo || escritaImagem || produtoIdentificado || orientacaoRaw || hasFileHint);
+  if (!active) return null;
+
+  return {
+    _structured: hasStructuredFields,
+    slot_id: slotId || `foto-${ordem}`,
+    ordem,
+    arquivo,
+    arquivo_index: arquivoIndex,
+    tem_arquivo: hasFileHint,
+    objetivo,
+    objetivo_id: objetivoId,
+    escrita_imagem: escritaImagem,
+    preco,
+    produto_identificado: produtoIdentificado,
+    nivel_edicao: nivelEdicao,
+    orientacao
+  };
+}
+
+function planningPhotoItemsAreStructured(items = []) {
+  return items.some((item) => item && item._structured === true);
+}
+
+function findUploadedPhotoForItem(item = {}, fotos = [], usedIndexes = new Set()) {
+  if (!Array.isArray(fotos) || !fotos.length) return null;
+
+  if (item.arquivo_index > 0) {
+    const uploadIndex = item.arquivo_index - 1;
+    if (fotos[uploadIndex] && !usedIndexes.has(uploadIndex)) {
+      usedIndexes.add(uploadIndex);
+      return fotos[uploadIndex];
+    }
+  }
+
+  const fileName = String(item.arquivo || "").trim().toLowerCase();
+  if (fileName) {
+    const matchedIndex = fotos.findIndex((foto, index) => {
+      if (usedIndexes.has(index)) return false;
+      return [foto.original_name, foto.filename]
+        .map((value) => String(value || "").trim().toLowerCase())
+        .includes(fileName);
+    });
+    if (matchedIndex >= 0) {
+      usedIndexes.add(matchedIndex);
+      return fotos[matchedIndex];
+    }
+  }
+
+  if (item.tem_arquivo !== false && item.ordem > 0 && item.ordem <= fotos.length) {
+    const orderIndex = item.ordem - 1;
+    if (!usedIndexes.has(orderIndex)) {
+      usedIndexes.add(orderIndex);
+      return fotos[orderIndex];
+    }
+  }
+
+  return null;
+}
+
+function buildPlanningPhotoItems(fotos = [], body = {}) {
+  const parsedItems = parsePlanningPhotoItems(body);
+  const structured = planningPhotoItemsAreStructured(parsedItems);
+  const usedIndexes = new Set();
+  const items = (parsedItems.length ? parsedItems : fotos.map((foto, index) => ({
+    slot_id: `legacy-foto-${index + 1}`,
+    ordem: index + 1,
+    arquivo: foto.original_name || foto.filename || "",
+    arquivo_index: index + 1,
+    tem_arquivo: true,
+    objetivo: "",
+    objetivo_id: "",
+    escrita_imagem: "",
+    preco: "",
+    produto_identificado: "",
+    nivel_edicao: 2,
+    orientacao: ""
+  }))).map((item) => {
+    const { _structured, ...publicItem } = item;
+    const photoAsset = findUploadedPhotoForItem(item, fotos, usedIndexes);
+    const enrichedPhoto = photoAsset ? {
+      ...photoAsset,
+      slot_id: item.slot_id,
+      ordem: item.ordem,
+      objetivo_cliente: item.objetivo,
+      objetivo_id_cliente: item.objetivo_id,
+      escrita_imagem: item.escrita_imagem,
+      preco_cliente: item.preco,
+      produto_identificado: item.produto_identificado,
+      nivel_edicao_cliente: item.nivel_edicao,
+      orientacao_cliente: item.orientacao,
+      orientacao_origem: "cliente_por_slot"
+    } : null;
+
+    return {
+      ...publicItem,
+      tem_arquivo: Boolean(enrichedPhoto),
+      arquivo: enrichedPhoto?.original_name || enrichedPhoto?.filename || item.arquivo || "",
+      filename: enrichedPhoto?.filename || "",
+      foto: enrichedPhoto
+    };
+  }).filter((item) => {
+    if (!structured) return Boolean(item.foto);
+    return item.foto ||
+      item.objetivo ||
+      item.escrita_imagem ||
+      item.produto_identificado ||
+      item.orientacao;
+  });
+
+  if (!structured) {
+    fotos.forEach((foto, index) => {
+      if (usedIndexes.has(index)) return;
+      items.push({
+        slot_id: `legacy-foto-${index + 1}`,
+        ordem: index + 1,
+        arquivo: foto.original_name || foto.filename || "",
+        filename: foto.filename || "",
+        arquivo_index: index + 1,
+        tem_arquivo: true,
+        objetivo: "",
+        objetivo_id: "",
+        escrita_imagem: "",
+        preco: "",
+        produto_identificado: "",
+        nivel_edicao: 2,
+        orientacao: foto.orientacao_cliente || "",
+        foto
+      });
+    });
+  }
+
+  return items
+    .sort((a, b) => Number(a.ordem || 0) - Number(b.ordem || 0))
+    .map((item, index) => ({ ...item, ordem: index + 1 }));
 }
 
 function normalizeQuantity(body = {}) {
@@ -1137,23 +1386,48 @@ function listAllPlanningDirs(baseDir) {
 }
 
 function createRequest({ baseDir, cliente, whatsapp, body = {}, files = {}, freeArtBlocked = false }) {
-  const quantidadeReservada = normalizeQuantity(body);
+  const parsedPhotoItems = parsePlanningPhotoItems(body);
+  const hasStructuredPhotoItems = planningPhotoItemsAreStructured(parsedPhotoItems);
+  const quantidadeReservada = hasStructuredPhotoItems ? parsedPhotoItems.length : normalizeQuantity(body);
+  if (!Number.isFinite(quantidadeReservada) || quantidadeReservada <= 0) {
+    const error = new Error("Informe pelo menos uma arte com objetivo, escrita ou imagem para o Planejamento Mensal.");
+    error.statusCode = 400;
+    error.code = "monthly_planning_empty_request";
+    throw error;
+  }
+  if (quantidadeReservada > MAX_MONTHLY_PLANNING_REQUEST_ITEMS) {
+    const error = new Error(`Este pedido permite no maximo ${MAX_MONTHLY_PLANNING_REQUEST_ITEMS} artes.`);
+    error.statusCode = 400;
+    error.code = "monthly_planning_items_limit";
+    throw error;
+  }
   const { billing, charge } = validatePlanAndFreeArts(cliente, quantidadeReservada, { freeArtBlocked });
   const ciclo = planCycle(cliente);
   const planningId = newPlanningId();
   const dirPath = requestDir(baseDir, whatsapp, ciclo, planningId);
   ensureDir(dirPath);
 
-  const fotos = applyPhotoOrientations(saveUploadedPhotos(files, dirPath), body);
+  const uploadedFotos = applyPhotoOrientations(saveUploadedPhotos(files, dirPath), body);
   const logo = saveUploadedLogo(files, dirPath);
-  const orientacoesFotos = fotos
-    .filter((foto) => String(foto.orientacao_cliente || "").trim())
-    .map((foto, index) => ({
-      ordem: index + 1,
-      arquivo: foto.original_name || foto.filename,
-      filename: foto.filename,
-      orientacao: foto.orientacao_cliente
-    }));
+  const photoItems = buildPlanningPhotoItems(uploadedFotos, body);
+  const fotos = photoItems.map((item) => item.foto).filter(Boolean);
+  const orientacoesFotos = photoItems.map((item, index) => ({
+    slot_id: item.slot_id || `foto-${index + 1}`,
+    ordem: item.ordem || index + 1,
+    numero: item.ordem || index + 1,
+    arquivo: item.arquivo || "",
+    filename: item.filename || "",
+    arquivo_index: item.arquivo_index || 0,
+    tem_arquivo: Boolean(item.tem_arquivo),
+    sem_imagem: !item.tem_arquivo,
+    objetivo: item.objetivo || "",
+    objetivo_id: item.objetivo_id || "",
+    escrita_imagem: item.escrita_imagem || "",
+    preco: item.preco || "",
+    produto_identificado: item.produto_identificado || "",
+    nivel_edicao: item.nivel_edicao || 2,
+    orientacao: item.orientacao || ""
+  }));
   const now = new Date().toISOString();
   const reservation = reservePlanningArts(cliente, planningId, quantidadeReservada, now, billing, charge);
   const profile = normalizeProfile(body, cliente);
@@ -1196,6 +1470,7 @@ function createRequest({ baseDir, cliente, whatsapp, body = {}, files = {}, free
     caracteristicas_empresa: profile.caracteristicas_empresa,
     informacoes_empresa: profile.informacoes_empresa,
     orientacoes_fotos: orientacoesFotos,
+    itens_fotos: orientacoesFotos,
     assets: {
       logo,
       fotos
@@ -2421,6 +2696,15 @@ function selectPlanningPhotoAssets(planning, item = {}) {
   if (!photos.length) return [];
 
   const postOrder = Number(item.ordem || 0);
+  const ref = item.foto_referencia || {};
+  if (
+    item.sem_imagem === true ||
+    ref.sem_imagem === true ||
+    ref.tem_arquivo === false ||
+    String(ref.sem_imagem || "").toLowerCase() === "true"
+  ) {
+    return [];
+  }
   const refOrder = photoReferenceOrder(item);
   const refName = photoReferenceName(item);
   const refLooksSpecific = refOrder > 0 && refOrder === postOrder && postOrder <= photos.length;
@@ -3918,5 +4202,12 @@ module.exports = {
   updatePlanningArtStatus,
   savePlanningArtResult,
   findPlanningByIdAny,
-  processDueNotifications
+  processDueNotifications,
+  _private: {
+    MAX_MONTHLY_PLANNING_REQUEST_ITEMS,
+    parsePlanningPhotoItems,
+    planningPhotoItemsAreStructured,
+    buildPlanningPhotoItems,
+    selectPlanningPhotoAssets
+  }
 };

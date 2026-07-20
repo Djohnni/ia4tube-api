@@ -1,6 +1,8 @@
 package br.com.ia4tube.app.feature.monthly_planning
 
 import br.com.ia4tube.app.data.models.UploadFile
+import br.com.ia4tube.app.data.models.MonthlyPlanningDiscoveredProduct
+import br.com.ia4tube.app.data.models.MonthlyPlanningProductCrop
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
@@ -146,6 +148,38 @@ class MonthlyPlanningPhotoDraftTest {
     }
 
     @Test
+    fun manualSlotsStartWithoutDiscoveryMetadataOrPrice() {
+        val state = MonthlyPlanningUiState()
+
+        assertTrue(state.photos.all { it.produtoIdentificado.isEmpty() })
+        assertTrue(state.photos.all { it.preco.isEmpty() })
+    }
+
+    @Test
+    fun optionalPriceAloneDoesNotActivateAnEmptyManualSlot() {
+        val priceOnly = MonthlyPlanningPhotoDraft(
+            id = "price-only",
+            number = 1,
+            preco = "R$ 19,90"
+        )
+
+        assertTrue(priceOnly.hasUserData)
+        assertFalse(priceOnly.isActive)
+    }
+
+    @Test
+    fun identifiedProductActivatesBlockEvenWithoutPhotoOrFormFields() {
+        val discovered = MonthlyPlanningPhotoDraft(
+            id = "discovered-1",
+            number = 1,
+            produtoIdentificado = "Frango assado"
+        )
+
+        assertTrue(discovered.isActive)
+        assertNull(discovered.file)
+    }
+
+    @Test
     fun imageRemovalPreservesTextsAndLevel() {
         val filled = MonthlyPlanningPhotoDraft(
             id = "photo-1",
@@ -251,5 +285,153 @@ class MonthlyPlanningPhotoDraftTest {
         assertEquals("Atendimento ate as 18h", requestPhotos[1].escritaImagem)
         assertEquals(3, requestPhotos[1].nivelEdicao)
         assertTrue(requestPhotos[1].orientacao.contains("sem foto"))
+    }
+
+    @Test
+    fun manualSlotRequestKeepsObjectiveWritingLevelAndPhotoUnchanged() {
+        val manual = MonthlyPlanningPhotoDraft(
+            id = "manual-photo-1",
+            number = 1,
+            file = upload("manual.jpg"),
+            objetivo = "Divulgar o atendimento",
+            objetivoId = "atrair-clientes",
+            escritaImagem = "Agende hoje",
+            nivelEdicao = 3
+        )
+
+        val request = manual.toRequestInput()
+
+        assertEquals("manual-photo-1", request.slotId)
+        assertEquals("manual.jpg", request.file?.fileName)
+        assertEquals("Divulgar o atendimento", request.objetivo)
+        assertEquals("atrair-clientes", request.objetivoId)
+        assertEquals("Agende hoje", request.escritaImagem)
+        assertEquals(3, request.nivelEdicao)
+        assertFalse(request.withoutPhotoSelected)
+        assertEquals("", request.preco)
+        assertEquals("", request.produtoIdentificado)
+    }
+
+    @Test
+    fun discoveryMetadataAndOptionalPriceArePreservedInRequestWithoutChangingObjectiveOrWriting() {
+        val discovered = MonthlyPlanningPhotoDraft(
+            id = "discovered-1",
+            number = 5,
+            produtoIdentificado = "Frango assado",
+            preco = "R$ 29,90"
+        )
+
+        val request = discovered.toRequestInput()
+
+        assertEquals("Frango assado", request.produtoIdentificado)
+        assertEquals("R$ 29,90", request.preco)
+        assertEquals("", request.objetivo)
+        assertEquals("", request.escritaImagem)
+        assertNull(request.file)
+        assertTrue(request.orientacao.contains("Produto identificado: Frango assado"))
+        assertTrue(request.orientacao.contains("Preco informado: R$ 29,90"))
+    }
+
+    @Test
+    fun discoveryFillsOnlyEmptyBlocksAndPreservesManualContent() {
+        val manual = MonthlyPlanningPhotoDraft(
+            id = "fixed-photo-1",
+            number = 1,
+            objetivo = "Objetivo manual",
+            escritaImagem = "Texto manual",
+            expanded = true,
+            fixedSlot = true
+        )
+        val empty = MonthlyPlanningPhotoDraft(
+            id = "fixed-photo-2",
+            number = 2,
+            fixedSlot = true
+        )
+
+        val result = appendDiscoveredProductsToPlanning(
+            currentPhotos = listOf(manual, empty),
+            products = listOf(MonthlyPlanningDiscoveredProduct(name = "Frango assado", price = "R$ 29,90")),
+            technicalLimit = 36,
+            cropFactory = { null }
+        )
+
+        assertEquals("Objetivo manual", result.photos[0].objetivo)
+        assertEquals("Texto manual", result.photos[0].escritaImagem)
+        assertEquals("", result.photos[0].produtoIdentificado)
+        assertEquals("Frango assado", result.photos[1].produtoIdentificado)
+        assertEquals("R$ 29,90", result.photos[1].preco)
+        assertEquals("", result.photos[1].objetivo)
+        assertEquals("", result.photos[1].escritaImagem)
+        assertEquals(1, result.added)
+    }
+
+    @Test
+    fun discoveryDeduplicatesEquivalentNamesButKeepsProductVariants() {
+        val result = appendDiscoveredProductsToPlanning(
+            currentPhotos = createInitialMonthlyPlanningPhotoDrafts(),
+            products = listOf(
+                MonthlyPlanningDiscoveredProduct(name = "Coca-Cola"),
+                MonthlyPlanningDiscoveredProduct(name = "coca cola"),
+                MonthlyPlanningDiscoveredProduct(name = "Coca-Cola Zero")
+            ),
+            technicalLimit = 36,
+            cropFactory = { null }
+        )
+
+        assertEquals(2, result.added)
+        assertEquals(
+            listOf("Coca-Cola", "Coca-Cola Zero"),
+            result.photos.map { it.produtoIdentificado }.filter { it.isNotBlank() }
+        )
+    }
+
+    @Test
+    fun discoveryUsesCropOnlyWhenBackendMarkedItUsable() {
+        val crop = MonthlyPlanningProductCrop(0.1, 0.1, 0.5, 0.5)
+        var cropCalls = 0
+        val result = appendDiscoveredProductsToPlanning(
+            currentPhotos = createInitialMonthlyPlanningPhotoDrafts(),
+            products = listOf(
+                MonthlyPlanningDiscoveredProduct(name = "Com recorte", useCrop = true, crop = crop),
+                MonthlyPlanningDiscoveredProduct(name = "Sem recorte", useCrop = false, crop = crop)
+            ),
+            technicalLimit = 36,
+            cropFactory = {
+                cropCalls += 1
+                upload("crop.jpg")
+            }
+        )
+
+        assertEquals(1, cropCalls)
+        assertEquals("crop.jpg", result.photos[0].file?.fileName)
+        assertNull(result.photos[1].file)
+    }
+
+    @Test
+    fun discoveryCanExceedManualTwentyOnlyUpToBackendTechnicalLimit() {
+        val manualTwenty = (1..MONTHLY_PLANNING_MAX_ARTS_PER_REQUEST).map { index ->
+            MonthlyPlanningPhotoDraft(
+                id = "manual-$index",
+                number = index,
+                objetivo = "Objetivo $index",
+                fixedSlot = false
+            )
+        }
+        val result = appendDiscoveredProductsToPlanning(
+            currentPhotos = manualTwenty,
+            products = (1..20).map { MonthlyPlanningDiscoveredProduct(name = "Produto $it") },
+            technicalLimit = 24,
+            cropFactory = { null }
+        )
+
+        assertEquals(4, result.added)
+        assertTrue(result.limitReached)
+        assertEquals(24, result.photos.count { it.isActive })
+        val state = MonthlyPlanningUiState(
+            photos = result.photos,
+            technicalPlanningLimit = 24
+        )
+        assertEquals(24, state.requestMaxArts)
+        assertFalse(state.canAddMorePhotos)
     }
 }
