@@ -18,9 +18,30 @@ data class MonthlyPlanningPhotoInput(
     val objetivo: String = "",
     val objetivoId: String = "",
     val escritaImagem: String = "",
+    val preco: String = "",
+    val produtoIdentificado: String = "",
     val nivelEdicao: Int = 2,
     val withoutPhotoSelected: Boolean = false,
     val orientacao: String = ""
+)
+
+data class MonthlyPlanningProductCrop(
+    val x: Double,
+    val y: Double,
+    val width: Double,
+    val height: Double
+)
+
+data class MonthlyPlanningDiscoveredProduct(
+    val name: String,
+    val price: String = "",
+    val useCrop: Boolean = false,
+    val crop: MonthlyPlanningProductCrop? = null
+)
+
+data class MonthlyPlanningProductDiscoveryResponse(
+    val products: List<MonthlyPlanningDiscoveredProduct>,
+    val technicalPlanningLimit: Int
 )
 
 data class MonthlyPlanningRequestResponse(

@@ -1,5 +1,7 @@
 package br.com.ia4tube.app.feature.monthly_planning
 
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
@@ -12,6 +14,7 @@ import br.com.ia4tube.app.data.models.BillingPixResult
 import br.com.ia4tube.app.data.models.DownloadedImage
 import br.com.ia4tube.app.data.models.MarketingVideo
 import br.com.ia4tube.app.data.models.MonthlyPlanningDetailDto
+import br.com.ia4tube.app.data.models.MonthlyPlanningDiscoveredProduct
 import br.com.ia4tube.app.data.models.MonthlyPlanningPhotoInput
 import br.com.ia4tube.app.data.models.MonthlyPlanningPostDto
 import br.com.ia4tube.app.data.models.MonthlyPlanningRequest
@@ -20,6 +23,10 @@ import br.com.ia4tube.app.data.models.MonthlyPlanningRescheduleRequest
 import br.com.ia4tube.app.data.models.MonthlyPlanningSummaryDto
 import br.com.ia4tube.app.data.models.UploadFile
 import br.com.ia4tube.app.data.repository.AuthRepository
+import java.io.ByteArrayOutputStream
+import java.text.Normalizer
+import java.util.Locale
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -28,9 +35,11 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 private const val DEFAULT_CYCLE_ARTS = 0
 const val PHOTO_TEXT_MAX_LENGTH = 200
+const val PHOTO_PRICE_MAX_LENGTH = 40
 const val DEFAULT_MONTHLY_PLANNING_PHOTO_EDIT_LEVEL = 2
 private const val MIN_PHOTO_EDIT_LEVEL = 1
 private const val MAX_PHOTO_EDIT_LEVEL = 3
@@ -55,6 +64,8 @@ data class MonthlyPlanningUiState(
     val currentFreeArts: Int = 0,
     val reservedInput: String = "",
     val photos: List<MonthlyPlanningPhotoDraft> = createInitialMonthlyPlanningPhotoDrafts(),
+    val discoveryLoading: Boolean = false,
+    val technicalPlanningLimit: Int = MONTHLY_PLANNING_MAX_ARTS_PER_REQUEST,
     val companyProfile: MonthlyPlanningCompanyProfile = MonthlyPlanningCompanyProfile(),
     val uploadError: String? = null,
     val successMessage: String? = null,
@@ -86,6 +97,13 @@ data class MonthlyPlanningUiState(
 
     val canAddMorePhotos: Boolean
         get() = countedPhotoSlots < MONTHLY_PLANNING_MAX_ARTS_PER_REQUEST
+
+    val requestMaxArts: Int
+        get() = if (photos.any { it.produtoIdentificado.isNotBlank() }) {
+            technicalPlanningLimit.coerceAtLeast(MONTHLY_PLANNING_MAX_ARTS_PER_REQUEST)
+        } else {
+            MONTHLY_PLANNING_MAX_ARTS_PER_REQUEST
+        }
 
     val reservedArts: Int
         get() = reservedInput.toIntOrNull()?.coerceIn(0, currentFreeArts) ?: 0
@@ -127,6 +145,8 @@ data class MonthlyPlanningPhotoDraft(
     val objetivo: String = "",
     val objetivoId: String = "",
     val escritaImagem: String = "",
+    val preco: String = "",
+    val produtoIdentificado: String = "",
     val nivelEdicao: Int = DEFAULT_MONTHLY_PLANNING_PHOTO_EDIT_LEVEL,
     val withoutPhotoSelected: Boolean = false,
     val expanded: Boolean = false,
@@ -134,14 +154,20 @@ data class MonthlyPlanningPhotoDraft(
     val showNivelInfo: Boolean = false
 ) {
     val hasMeaningfulContent: Boolean
-        get() = file != null || objetivo.isNotBlank() || escritaImagem.isNotBlank()
+        get() = file != null || objetivo.isNotBlank() || escritaImagem.isNotBlank() || produtoIdentificado.isNotBlank()
 
     val hasUserData: Boolean
-        get() = hasMeaningfulContent || withoutPhotoSelected
+        get() = hasMeaningfulContent || preco.isNotBlank() || withoutPhotoSelected
 
     val isActive: Boolean
         get() = hasMeaningfulContent
 }
+
+internal data class MonthlyPlanningDiscoveryAppendResult(
+    val photos: List<MonthlyPlanningPhotoDraft>,
+    val added: Int,
+    val limitReached: Boolean
+)
 
 fun createInitialMonthlyPlanningPhotoDrafts(): List<MonthlyPlanningPhotoDraft> {
     return (1..MONTHLY_PLANNING_INITIAL_VISIBLE_PHOTOS).map { number ->
@@ -176,6 +202,8 @@ private fun MonthlyPlanningPhotoDraft.clearedMonthlyPlanningPhotoSlot(): Monthly
         objetivo = "",
         objetivoId = "",
         escritaImagem = "",
+        preco = "",
+        produtoIdentificado = "",
         nivelEdicao = DEFAULT_MONTHLY_PLANNING_PHOTO_EDIT_LEVEL,
         withoutPhotoSelected = false,
         expanded = false,
@@ -200,6 +228,75 @@ internal fun MonthlyPlanningPhotoDraft.withRemovedPhotoFile(): MonthlyPlanningPh
         file = null,
         withoutPhotoSelected = true
     )
+}
+
+internal fun appendDiscoveredProductsToPlanning(
+    currentPhotos: List<MonthlyPlanningPhotoDraft>,
+    products: List<MonthlyPlanningDiscoveredProduct>,
+    technicalLimit: Int,
+    cropFactory: (MonthlyPlanningDiscoveredProduct) -> UploadFile?
+): MonthlyPlanningDiscoveryAppendResult {
+    val maxItems = technicalLimit.coerceAtLeast(1)
+    val photos = currentPhotos.toMutableList()
+    val knownProducts = photos
+        .map { normalizeDiscoveredProductKey(it.produtoIdentificado) }
+        .filter { it.isNotBlank() }
+        .toMutableSet()
+    var activeCount = photos.count { it.isActive }
+    var added = 0
+    var limitReached = false
+
+    for (product in products) {
+        val name = product.name.trim()
+        val key = normalizeDiscoveredProductKey(name)
+        if (key.isBlank() || !knownProducts.add(key)) continue
+        if (activeCount >= maxItems) {
+            limitReached = true
+            break
+        }
+
+        val crop = if (product.useCrop && product.crop != null) cropFactory(product) else null
+        val emptyIndex = photos.indexOfFirst { !it.hasUserData }
+        if (emptyIndex >= 0) {
+            val current = photos[emptyIndex]
+            photos[emptyIndex] = current.copy(
+                file = crop,
+                preco = product.price.trim().take(PHOTO_PRICE_MAX_LENGTH),
+                produtoIdentificado = name,
+                withoutPhotoSelected = false
+            )
+        } else {
+            val nextNumber = photos.size + 1
+            photos.add(
+                MonthlyPlanningPhotoDraft(
+                    id = newMonthlyPlanningPhotoId(nextNumber),
+                    number = nextNumber,
+                    file = crop,
+                    preco = product.price.trim().take(PHOTO_PRICE_MAX_LENGTH),
+                    produtoIdentificado = name,
+                    expanded = false,
+                    fixedSlot = false
+                )
+            )
+        }
+        activeCount += 1
+        added += 1
+    }
+
+    return MonthlyPlanningDiscoveryAppendResult(
+        photos = photos.normalizeMonthlyPlanningPhotoNumbers(),
+        added = added,
+        limitReached = limitReached
+    )
+}
+
+internal fun normalizeDiscoveredProductKey(value: String): String {
+    return Normalizer.normalize(value.trim(), Normalizer.Form.NFD)
+        .replace(Regex("[\\u0300-\\u036f]"), "")
+        .lowercase(Locale.ROOT)
+        .replace(Regex("[^a-z0-9]+"), " ")
+        .trim()
+        .replace(Regex("\\s+"), " ")
 }
 
 data class MonthlyPlanningSummary(
@@ -721,12 +818,16 @@ class MonthlyPlanningViewModel(
     fun goToConfirmation() {
         _uiState.update { state ->
             when {
+                state.discoveryLoading -> state.copy(
+                    uploadError = "Aguarde a análise da foto terminar.",
+                    successMessage = null
+                )
                 state.activePhotos.isEmpty() -> state.copy(
                     uploadError = MONTHLY_PLANNING_EMPTY_REQUEST_MESSAGE,
                     successMessage = null
                 )
-                state.activePhotoCount > MONTHLY_PLANNING_MAX_ARTS_PER_REQUEST -> state.copy(
-                    uploadError = "Este pedido permite no máximo $MONTHLY_PLANNING_MAX_ARTS_PER_REQUEST artes.",
+                state.activePhotoCount > state.requestMaxArts -> state.copy(
+                    uploadError = "Este pedido permite no máximo ${state.requestMaxArts} artes.",
                     successMessage = null
                 )
                 else -> state.copy(
@@ -754,10 +855,10 @@ class MonthlyPlanningViewModel(
             }
             return
         }
-        if (activePhotos.size > MONTHLY_PLANNING_MAX_ARTS_PER_REQUEST) {
+        if (activePhotos.size > current.requestMaxArts) {
             _uiState.update {
                 it.copy(
-                    uploadError = "Este pedido permite no máximo $MONTHLY_PLANNING_MAX_ARTS_PER_REQUEST artes.",
+                    uploadError = "Este pedido permite no máximo ${current.requestMaxArts} artes.",
                     successMessage = null
                 )
             }
@@ -1137,6 +1238,64 @@ class MonthlyPlanningViewModel(
         }
     }
 
+    fun discoverProducts(image: UploadFile) {
+        if (_uiState.value.discoveryLoading) return
+        viewModelScope.launch {
+            _uiState.update {
+                it.copy(
+                    discoveryLoading = true,
+                    uploadError = null,
+                    successMessage = null
+                )
+            }
+            when (val result = repository.descobrirProdutosPlanejamentoMensal(image)) {
+                is ApiResult.Success -> {
+                    val cropsByProduct = withContext(Dispatchers.Default) {
+                        createDiscoveredProductCrops(image, result.value.products)
+                    }
+                    _uiState.update { state ->
+                        val append = appendDiscoveredProductsToPlanning(
+                            currentPhotos = state.photos,
+                            products = result.value.products,
+                            technicalLimit = result.value.technicalPlanningLimit,
+                            cropFactory = { product ->
+                                cropsByProduct[normalizeDiscoveredProductKey(product.name)]
+                            }
+                        )
+                        val message = when {
+                            result.value.products.isEmpty() -> null
+                            append.added == 0 -> "Os produtos identificados já estão no Planejador."
+                            append.added == 1 -> "1 produto foi adicionado ao Planejador."
+                            else -> "${append.added} produtos foram adicionados ao Planejador."
+                        }
+                        state.copy(
+                            photos = append.photos,
+                            discoveryLoading = false,
+                            technicalPlanningLimit = result.value.technicalPlanningLimit,
+                            reservedInput = reservedInputForPhotos(
+                                append.photos.activeMonthlyPlanningPhotos().size,
+                                state.currentFreeArts
+                            ),
+                            uploadError = when {
+                                result.value.products.isEmpty() -> "Não foi possível identificar produtos com segurança nessa foto."
+                                append.limitReached -> "Alguns produtos não foram adicionados porque o limite técnico do Planejador foi atingido."
+                                else -> null
+                            },
+                            successMessage = message
+                        )
+                    }
+                }
+                is ApiResult.Failure -> _uiState.update {
+                    it.copy(
+                        discoveryLoading = false,
+                        uploadError = result.message,
+                        successMessage = null
+                    )
+                }
+            }
+        }
+    }
+
     fun addAnotherPhotoSlot() {
         _uiState.update { state ->
             if (!state.canAddMorePhotos) {
@@ -1238,6 +1397,12 @@ class MonthlyPlanningViewModel(
     fun updatePhotoText(slotId: String, value: String) {
         updatePhoto(slotId) {
             it.copy(escritaImagem = value.take(PHOTO_TEXT_MAX_LENGTH))
+        }
+    }
+
+    fun updatePhotoPrice(slotId: String, value: String) {
+        updatePhoto(slotId) {
+            it.copy(preco = value.take(PHOTO_PRICE_MAX_LENGTH))
         }
     }
 
@@ -1411,6 +1576,8 @@ class MonthlyPlanningViewModel(
                 currentFreeArts = freeArts,
                 reservedInput = "",
                 photos = createInitialMonthlyPlanningPhotoDrafts(),
+                discoveryLoading = false,
+                technicalPlanningLimit = MONTHLY_PLANNING_MAX_ARTS_PER_REQUEST,
                 planning = merged.firstOrNull { item -> item.id == created.id } ?: created,
                 plannings = merged,
                 uploadError = null,
@@ -1521,8 +1688,10 @@ private fun reservedInputForPhotos(photoCount: Int, currentFreeArts: Int): Strin
 internal fun MonthlyPlanningPhotoDraft.toRequestInput(): MonthlyPlanningPhotoInput {
     val orientacao = buildList {
         if (withoutPhotoSelected && file == null) add("Cliente escolheu criar esta arte sem foto.")
+        if (produtoIdentificado.isNotBlank()) add("Produto identificado: ${produtoIdentificado.trim()}")
         if (objetivo.isNotBlank()) add("Objetivo da foto: ${objetivo.trim()}")
         if (escritaImagem.isNotBlank()) add("Escrita que deve aparecer na imagem: ${escritaImagem.trim()}")
+        if (preco.isNotBlank()) add("Preco informado: ${preco.trim()}")
         add("Nivel de edicao: $nivelEdicao")
     }.joinToString("\n")
 
@@ -1533,10 +1702,61 @@ internal fun MonthlyPlanningPhotoDraft.toRequestInput(): MonthlyPlanningPhotoInp
         objetivo = objetivo.trim(),
         objetivoId = objetivoId.trim(),
         escritaImagem = escritaImagem.trim(),
+        preco = preco.trim(),
+        produtoIdentificado = produtoIdentificado.trim(),
         nivelEdicao = nivelEdicao,
         withoutPhotoSelected = withoutPhotoSelected && file == null,
         orientacao = orientacao
     )
+}
+
+private fun createDiscoveredProductCrops(
+    source: UploadFile,
+    products: List<MonthlyPlanningDiscoveredProduct>
+): Map<String, UploadFile> {
+    val sourceBitmap = BitmapFactory.decodeByteArray(source.bytes, 0, source.bytes.size) ?: return emptyMap()
+    val crops = mutableMapOf<String, UploadFile>()
+    try {
+        products.forEach { product ->
+            if (!product.useCrop) return@forEach
+            val crop = product.crop ?: return@forEach
+            val key = normalizeDiscoveredProductKey(product.name)
+            if (key.isBlank() || crops.containsKey(key)) return@forEach
+            try {
+                val left = (crop.x * sourceBitmap.width).toInt().coerceIn(0, sourceBitmap.width - 1)
+                val top = (crop.y * sourceBitmap.height).toInt().coerceIn(0, sourceBitmap.height - 1)
+                val width = (crop.width * sourceBitmap.width).toInt()
+                    .coerceIn(1, sourceBitmap.width - left)
+                val height = (crop.height * sourceBitmap.height).toInt()
+                    .coerceIn(1, sourceBitmap.height - top)
+                if (width < 120 || height < 120) return@forEach
+
+                val cropped = Bitmap.createBitmap(sourceBitmap, left, top, width, height)
+                try {
+                    val output = ByteArrayOutputStream()
+                    if (!cropped.compress(Bitmap.CompressFormat.JPEG, 90, output)) return@forEach
+                    val bytes = output.toByteArray()
+                    if (bytes.isEmpty()) return@forEach
+                    crops[key] = UploadFile(
+                        fileName = "produto_descoberto_${System.nanoTime()}.jpg",
+                        contentType = "image/jpeg",
+                        bytes = bytes,
+                        optimized = true,
+                        originalSizeBytes = source.bytes.size,
+                        originalWidth = width,
+                        originalHeight = height
+                    )
+                } finally {
+                    if (cropped !== sourceBitmap) cropped.recycle()
+                }
+            } catch (_: Exception) {
+                Unit
+            }
+        }
+    } finally {
+        sourceBitmap.recycle()
+    }
+    return crops
 }
 
 private fun CompanyProfile.toUiCompanyProfile(): MonthlyPlanningCompanyProfile {

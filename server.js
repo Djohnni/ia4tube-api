@@ -18,6 +18,7 @@ const graphicMaterialsService = require("./src/company-graphic-materials/materia
 const graphicMaterialsCatalog = require("./src/company-graphic-materials/materials.catalog");
 const carouselService = require("./src/company-carousels/carousels.service");
 const monthlyPlanningService = require("./src/company-monthly-planning/planning.service");
+const productDiscoveryService = require("./src/company-monthly-planning/product-discovery.service");
 const fcmService = require("./src/notifications/fcm.service");
 const freeArtCampaignsService = require("./src/admin-free-art-campaigns/free-art-campaigns.service");
 const freeArtCampaignsStorage = require("./src/admin-free-art-campaigns/free-art-campaigns.storage");
@@ -1392,6 +1393,21 @@ const upload = multer({
   }
 });
 
+const productDiscoveryUpload = multer({
+  storage,
+  limits: {
+    files: 1,
+    fileSize: 3 * 1024 * 1024
+  },
+  fileFilter: (req, file, cb) => {
+    const permitidos = ["image/png", "image/jpeg", "image/jpg", "image/webp"];
+    if (!permitidos.includes(String(file.mimetype || "").toLowerCase())) {
+      return cb(new Error("Apenas imagens PNG, JPG e WEBP são permitidas."));
+    }
+    return cb(null, true);
+  }
+});
+
 const uploadResultado = multer({ storage });
 
 const PEDIDO_UPLOAD_FIELDS = [
@@ -1404,6 +1420,17 @@ const PEDIDO_UPLOAD_FIELDS = [
   { name: "referencias", maxCount: 20 },
   { name: "modelo_existente", maxCount: 1 }
 ];
+
+const MONTHLY_PLANNING_REQUEST_MAX_ITEMS = Math.max(
+  1,
+  Number(monthlyPlanningService._private?.MAX_MONTHLY_PLANNING_REQUEST_ITEMS || 20) || 20
+);
+const MONTHLY_PLANNING_UPLOAD_FIELDS = PEDIDO_UPLOAD_FIELDS.map((field) => (
+  field.name === "fotos"
+    ? { ...field, maxCount: Math.max(field.maxCount, MONTHLY_PLANNING_REQUEST_MAX_ITEMS) }
+    : field
+));
+const productDiscoveryInFlight = new Set();
 
 app.use("/bot/free-art-campaigns", createFreeArtCampaignRoutes({
   service: freeArtCampaignsService,
@@ -3728,9 +3755,65 @@ app.post(
 
 // ===== PLANEJAMENTO MENSAL =====
 app.post(
+  "/empresa/planejamento-mensal/descobrir-produtos",
+  auth,
+  productDiscoveryUpload.single("imagem"),
+  async (req, res) => {
+    const whatsapp = req.user.whatsapp;
+    if (!req.file) {
+      return res.status(400).json({
+        ok: false,
+        code: "product_discovery_image_required",
+        error: "Envie uma imagem para analisar."
+      });
+    }
+    if (!readClientes()[whatsapp]) {
+      cleanupUploadedFiles({ imagem: [req.file] });
+      return res.status(404).json({ ok: false, error: "Cliente nao encontrado" });
+    }
+    if (productDiscoveryInFlight.has(whatsapp)) {
+      cleanupUploadedFiles({ imagem: [req.file] });
+      return res.status(429).json({
+        ok: false,
+        code: "product_discovery_in_progress",
+        error: "Ja existe uma imagem em analise. Aguarde a conclusao."
+      });
+    }
+
+    productDiscoveryInFlight.add(whatsapp);
+    try {
+      const result = await productDiscoveryService.discoverProducts({
+        filePath: req.file.path,
+        mimeType: req.file.mimetype,
+        maxItems: MONTHLY_PLANNING_REQUEST_MAX_ITEMS
+      });
+      return res.json({
+        ok: true,
+        produtos: result.produtos,
+        limite_tecnico_planejamento: MONTHLY_PLANNING_REQUEST_MAX_ITEMS
+      });
+    } catch (error) {
+      console.error("[product-discovery] erro ao analisar imagem", {
+        whatsapp,
+        code: error?.code,
+        message: error?.message
+      });
+      return res.status(error?.statusCode || 502).json({
+        ok: false,
+        code: error?.code || "product_discovery_error",
+        error: error?.message || "Nao foi possivel analisar a imagem agora."
+      });
+    } finally {
+      productDiscoveryInFlight.delete(whatsapp);
+      cleanupUploadedFiles({ imagem: [req.file] });
+    }
+  }
+);
+
+app.post(
   "/empresa/planejamento-mensal/solicitar",
   auth,
-  upload.fields(PEDIDO_UPLOAD_FIELDS),
+  upload.fields(MONTHLY_PLANNING_UPLOAD_FIELDS),
   (req, res) => {
     const whatsapp = req.user.whatsapp;
     const clientes = readClientes();

@@ -29,7 +29,10 @@ import br.com.ia4tube.app.data.models.LoginResponse
 import br.com.ia4tube.app.data.models.MarketingVideo
 import br.com.ia4tube.app.data.models.MeResponse
 import br.com.ia4tube.app.data.models.MonthlyPlanningDetailDto
+import br.com.ia4tube.app.data.models.MonthlyPlanningDiscoveredProduct
 import br.com.ia4tube.app.data.models.MonthlyPlanningPostDto
+import br.com.ia4tube.app.data.models.MonthlyPlanningProductCrop
+import br.com.ia4tube.app.data.models.MonthlyPlanningProductDiscoveryResponse
 import br.com.ia4tube.app.data.models.MonthlyPlanningRequest
 import br.com.ia4tube.app.data.models.MonthlyPlanningRequestResponse
 import br.com.ia4tube.app.data.models.MonthlyPlanningRescheduleRequest
@@ -40,6 +43,7 @@ import br.com.ia4tube.app.data.models.PaymentInfo
 import br.com.ia4tube.app.data.models.SendSupportMessageResponse
 import br.com.ia4tube.app.data.models.SupportMessage
 import br.com.ia4tube.app.data.models.SupportSender
+import br.com.ia4tube.app.data.models.UploadFile
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.MediaType.Companion.toMediaType
@@ -59,6 +63,11 @@ import java.util.concurrent.TimeUnit
 class IA4TubeApiClient(
     private val client: OkHttpClient = defaultClient()
 ) {
+    private val productDiscoveryClient = client.newBuilder()
+        .readTimeout(90, TimeUnit.SECONDS)
+        .writeTimeout(45, TimeUnit.SECONDS)
+        .build()
+
     suspend fun appVersion(): ApiResult<AppVersionInfo> = withContext(Dispatchers.IO) {
         val request = Request.Builder()
             .url("${AppConfig.apiBase}/app/version")
@@ -435,6 +444,66 @@ class IA4TubeApiClient(
                 tipoCompra = json.optString("tipo_compra"),
                 valorCobrado = json.optDouble("valor_cobrado", 0.0),
                 arteGratis = json.optBoolean("arte_gratis", false)
+            )
+        }
+    }
+
+    suspend fun descobrirProdutosPlanejamentoMensal(
+        token: String,
+        image: UploadFile
+    ): ApiResult<MonthlyPlanningProductDiscoveryResponse> = withContext(Dispatchers.IO) {
+        val imageBody = image.bytes.toRequestBody(image.contentType.toMediaTypeOrNull())
+        val multipart = MultipartBody.Builder()
+            .setType(MultipartBody.FORM)
+            .addFormDataPart("imagem", image.fileName, imageBody)
+            .build()
+        val request = Request.Builder()
+            .url("${AppConfig.apiBase}/empresa/planejamento-mensal/descobrir-produtos")
+            .header("Authorization", "Bearer $token")
+            .post(multipart)
+            .build()
+
+        logMultipart(
+            url = request.url.toString(),
+            fields = listOf("imagem"),
+            files = listOf(image)
+        )
+
+        executeJson(request, productDiscoveryClient) { json ->
+            val productsJson = json.optJSONArray("produtos") ?: JSONArray()
+            val products = buildList {
+                for (index in 0 until productsJson.length()) {
+                    val item = productsJson.optJSONObject(index) ?: continue
+                    val name = item.optString("nome").trim()
+                    if (name.isBlank()) continue
+                    val cropJson = item.optJSONObject("recorte")
+                    val crop = cropJson?.let {
+                        MonthlyPlanningProductCrop(
+                            x = it.optDouble("x", Double.NaN),
+                            y = it.optDouble("y", Double.NaN),
+                            width = it.optDouble("largura", Double.NaN),
+                            height = it.optDouble("altura", Double.NaN)
+                        )
+                    }?.takeIf {
+                        it.x.isFinite() && it.y.isFinite() &&
+                            it.width.isFinite() && it.height.isFinite()
+                    }
+                    add(
+                        MonthlyPlanningDiscoveredProduct(
+                            name = name,
+                            price = item.optString("preco").trim(),
+                            useCrop = item.optBoolean("usar_recorte", false) && crop != null,
+                            crop = crop
+                        )
+                    )
+                }
+            }
+            MonthlyPlanningProductDiscoveryResponse(
+                products = products,
+                technicalPlanningLimit = json.optInt(
+                    "limite_tecnico_planejamento",
+                    20
+                ).coerceAtLeast(1)
             )
         }
     }
@@ -1032,9 +1101,13 @@ class IA4TubeApiClient(
         }
     }
 
-    private fun <T> executeJson(request: Request, mapper: (JSONObject) -> T): ApiResult<T> {
+    private fun <T> executeJson(
+        request: Request,
+        httpClient: OkHttpClient = client,
+        mapper: (JSONObject) -> T
+    ): ApiResult<T> {
         return try {
-            client.newCall(request).execute().use { response ->
+            httpClient.newCall(request).execute().use { response ->
                 val text = response.body?.string().orEmpty()
                 val contentType = response.header("Content-Type").orEmpty()
                 val preview = text.take(500)
@@ -1332,8 +1405,7 @@ class IA4TubeApiClient(
             requestData.fotos.forEachIndexed { index, photo ->
                 val file = photo.file
                 if (file != null) fileIndex += 1
-                array.put(
-                    JSONObject()
+                val item = JSONObject()
                         .put("slot_id", photo.slotId)
                         .put("id", photo.slotId)
                         .put("ordem", photo.order.takeIf { it > 0 } ?: index + 1)
@@ -1347,7 +1419,11 @@ class IA4TubeApiClient(
                         .put("escrita_imagem", photo.escritaImagem.trim())
                         .put("nivel_edicao", photo.nivelEdicao)
                         .put("orientacao", photo.orientacao.trim())
-                )
+                if (photo.preco.isNotBlank()) item.put("preco", photo.preco.trim())
+                if (photo.produtoIdentificado.isNotBlank()) {
+                    item.put("produto_identificado", photo.produtoIdentificado.trim())
+                }
+                array.put(item)
             }
             return array.toString()
         }
