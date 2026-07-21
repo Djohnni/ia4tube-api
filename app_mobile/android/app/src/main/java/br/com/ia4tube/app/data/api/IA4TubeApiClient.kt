@@ -416,6 +416,7 @@ class IA4TubeApiClient(
             .addFormDataPart("nome_empresa", requestData.nomeEmpresa)
             .addFormDataPart("ramo", requestData.ramo)
             .addFormDataPart("whatsapp", requestData.whatsapp)
+            .addFormDataPart("instagram", requestData.instagram)
             .addFormDataPart("caracteristicas_empresa", JSONArray(requestData.caracteristicasEmpresa).toString())
             .addFormDataPart("informacoes_empresa", requestData.informacoesEmpresa)
             .addFormDataPart("orientacoes_fotos", monthlyPlanningPhotoOrientationsJson(requestData))
@@ -439,7 +440,7 @@ class IA4TubeApiClient(
 
         logMultipart(
             url = request.url.toString(),
-            fields = listOf("quantidade_reservada", "nome_empresa", "ramo", "whatsapp", "caracteristicas_empresa", "informacoes_empresa", "orientacoes_fotos", "fotos", "logo"),
+            fields = listOf("quantidade_reservada", "nome_empresa", "ramo", "whatsapp", "instagram", "caracteristicas_empresa", "informacoes_empresa", "orientacoes_fotos", "fotos", "logo"),
             files = requestData.fotos.mapNotNull { it.file } + listOfNotNull(requestData.logo)
         )
 
@@ -1441,6 +1442,7 @@ class IA4TubeApiClient(
                         .put("escrita_imagem", photo.escritaImagem.trim())
                         .put("nivel_edicao", photo.nivelEdicao)
                         .put("orientacao", photo.orientacao.trim())
+                        .put("tipo_referencia", photo.tipoReferencia.trim().ifBlank { "foto_manual" })
                 if (photo.preco.isNotBlank()) item.put("preco", photo.preco.trim())
                 if (photo.produtoIdentificado.isNotBlank()) {
                     item.put("produto_identificado", photo.produtoIdentificado.trim())

@@ -5,6 +5,7 @@ data class MonthlyPlanningRequest(
     val nomeEmpresa: String,
     val ramo: String,
     val whatsapp: String = "",
+    val instagram: String = "",
     val caracteristicasEmpresa: List<String> = emptyList(),
     val informacoesEmpresa: String = "",
     val logo: UploadFile? = null,
@@ -20,6 +21,7 @@ data class MonthlyPlanningPhotoInput(
     val escritaImagem: String = "",
     val preco: String = "",
     val produtoIdentificado: String = "",
+    val tipoReferencia: String = "foto_manual",
     val nivelEdicao: Int = 2,
     val withoutPhotoSelected: Boolean = false,
     val orientacao: String = ""

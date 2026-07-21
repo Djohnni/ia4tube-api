@@ -41,6 +41,9 @@ import kotlinx.coroutines.withContext
 private const val DEFAULT_CYCLE_ARTS = 0
 const val PHOTO_TEXT_MAX_LENGTH = 200
 const val PHOTO_PRICE_MAX_LENGTH = 40
+const val IDENTIFIED_PRODUCT_MAX_LENGTH = 120
+const val MONTHLY_PLANNING_REFERENCE_MANUAL = "foto_manual"
+const val MONTHLY_PLANNING_REFERENCE_DISCOVERED = "produto_descoberto"
 const val DEFAULT_MONTHLY_PLANNING_PHOTO_EDIT_LEVEL = 2
 private const val MIN_PHOTO_EDIT_LEVEL = 1
 private const val MAX_PHOTO_EDIT_LEVEL = 3
@@ -256,6 +259,7 @@ data class MonthlyPlanningPhotoDraft(
     val escritaImagem: String = "",
     val preco: String = "",
     val produtoIdentificado: String = "",
+    val tipoReferencia: String = MONTHLY_PLANNING_REFERENCE_MANUAL,
     val nivelEdicao: Int = DEFAULT_MONTHLY_PLANNING_PHOTO_EDIT_LEVEL,
     val withoutPhotoSelected: Boolean = false,
     val expanded: Boolean = false,
@@ -378,6 +382,11 @@ internal fun MonthlyPlanningPhotoDraft.withRemovedPhotoFile(): MonthlyPlanningPh
     )
 }
 
+internal fun MonthlyPlanningPhotoDraft.withIdentifiedProductName(value: String): MonthlyPlanningPhotoDraft {
+    val limited = value.take(IDENTIFIED_PRODUCT_MAX_LENGTH)
+    return if (limited.isBlank()) this else copy(produtoIdentificado = limited)
+}
+
 internal fun appendDiscoveredProductsToPlanning(
     currentPhotos: List<MonthlyPlanningPhotoDraft>,
     products: List<MonthlyPlanningDiscoveredProduct>,
@@ -411,6 +420,7 @@ internal fun appendDiscoveredProductsToPlanning(
                 file = crop,
                 preco = product.price.trim().take(PHOTO_PRICE_MAX_LENGTH),
                 produtoIdentificado = name,
+                tipoReferencia = MONTHLY_PLANNING_REFERENCE_DISCOVERED,
                 withoutPhotoSelected = false
             )
         } else {
@@ -422,6 +432,7 @@ internal fun appendDiscoveredProductsToPlanning(
                     file = crop,
                     preco = product.price.trim().take(PHOTO_PRICE_MAX_LENGTH),
                     produtoIdentificado = name,
+                    tipoReferencia = MONTHLY_PLANNING_REFERENCE_DISCOVERED,
                     expanded = false,
                     fixedSlot = false
                 )
@@ -1118,6 +1129,7 @@ class MonthlyPlanningViewModel(
                 nomeEmpresa = nomeEmpresa,
                 ramo = ramo,
                 whatsapp = whatsappContato,
+                instagram = uiProfile.instagram.trim(),
                 caracteristicasEmpresa = uiProfile.caracteristicasEmpresa,
                 informacoesEmpresa = uiProfile.informacoesEmpresa.trim(),
                 logo = uiProfile.logoFile,
@@ -1636,6 +1648,12 @@ class MonthlyPlanningViewModel(
         }
     }
 
+    fun updatePhotoIdentifiedProduct(slotId: String, value: String) {
+        updatePhoto(slotId) {
+            it.withIdentifiedProductName(value)
+        }
+    }
+
     fun increasePhotoEditLevel(slotId: String) {
         updatePhoto(slotId) {
             it.copy(nivelEdicao = (it.nivelEdicao + 1).coerceAtMost(MAX_PHOTO_EDIT_LEVEL))
@@ -1918,9 +1936,13 @@ private fun reservedInputForPhotos(photoCount: Int, currentFreeArts: Int): Strin
 }
 
 internal fun MonthlyPlanningPhotoDraft.toRequestInput(): MonthlyPlanningPhotoInput {
+    val identifiedProduct = produtoIdentificado.trim()
     val orientacao = buildList {
         if (withoutPhotoSelected && file == null) add("Cliente escolheu criar esta arte sem foto.")
-        if (produtoIdentificado.isNotBlank()) add("Produto identificado: ${produtoIdentificado.trim()}")
+        if (identifiedProduct.isNotBlank()) add("Produto identificado: $identifiedProduct")
+        if (identifiedProduct.isNotBlank() && file != null) {
+            add("Use a imagem anexada como referência do produto identificado. O foco é $identifiedProduct. Ignore objetos vizinhos, fundo, prateleira, cabos e elementos que não pertençam ao produto principal.")
+        }
         if (objetivo.isNotBlank()) add("Objetivo da foto: ${objetivo.trim()}")
         if (escritaImagem.isNotBlank()) add("Escrita que deve aparecer na imagem: ${escritaImagem.trim()}")
         if (preco.isNotBlank()) add("Preco informado: ${preco.trim()}")
@@ -1935,10 +1957,76 @@ internal fun MonthlyPlanningPhotoDraft.toRequestInput(): MonthlyPlanningPhotoInp
         objetivoId = objetivoId.trim(),
         escritaImagem = escritaImagem.trim(),
         preco = preco.trim(),
-        produtoIdentificado = produtoIdentificado.trim(),
+        produtoIdentificado = identifiedProduct,
+        tipoReferencia = tipoReferencia.ifBlank { MONTHLY_PLANNING_REFERENCE_MANUAL },
         nivelEdicao = nivelEdicao,
         withoutPhotoSelected = withoutPhotoSelected && file == null,
         orientacao = orientacao
+    )
+}
+
+internal data class ProductReferenceCropBounds(
+    val left: Int,
+    val top: Int,
+    val width: Int,
+    val height: Int
+)
+
+internal data class ProductReferenceCropDecision(
+    val bounds: ProductReferenceCropBounds? = null,
+    val rejectionReason: String? = null
+)
+
+internal fun calculateProductReferenceCropBounds(
+    imageWidth: Int,
+    imageHeight: Int,
+    crop: br.com.ia4tube.app.data.models.MonthlyPlanningProductCrop
+): ProductReferenceCropDecision {
+    if (imageWidth <= 0 || imageHeight <= 0) {
+        return ProductReferenceCropDecision(rejectionReason = "invalid_source_dimensions")
+    }
+    val values = listOf(crop.x, crop.y, crop.width, crop.height)
+    if (values.any { !it.isFinite() } || crop.width <= 0.0 || crop.height <= 0.0) {
+        return ProductReferenceCropDecision(rejectionReason = "invalid_coordinates")
+    }
+
+    val normalizedLeft = crop.x.coerceIn(0.0, 1.0)
+    val normalizedTop = crop.y.coerceIn(0.0, 1.0)
+    val normalizedRight = (crop.x + crop.width).coerceIn(0.0, 1.0)
+    val normalizedBottom = (crop.y + crop.height).coerceIn(0.0, 1.0)
+    if (normalizedRight <= normalizedLeft || normalizedBottom <= normalizedTop) {
+        return ProductReferenceCropDecision(rejectionReason = "region_outside_image")
+    }
+
+    val rawLeft = (normalizedLeft * imageWidth).toInt()
+    val rawTop = (normalizedTop * imageHeight).toInt()
+    val rawRight = (normalizedRight * imageWidth).toInt().coerceAtMost(imageWidth)
+    val rawBottom = (normalizedBottom * imageHeight).toInt().coerceAtMost(imageHeight)
+    val rawWidth = rawRight - rawLeft
+    val rawHeight = rawBottom - rawTop
+    if (rawWidth < 32 || rawHeight < 32) {
+        return ProductReferenceCropDecision(rejectionReason = "product_region_too_small")
+    }
+
+    val horizontalMargin = maxOf(
+        kotlin.math.ceil(rawWidth * 0.15).toInt(),
+        kotlin.math.ceil(imageWidth * 0.015).toInt()
+    )
+    val verticalMargin = maxOf(
+        kotlin.math.ceil(rawHeight * 0.15).toInt(),
+        kotlin.math.ceil(imageHeight * 0.015).toInt()
+    )
+    val left = (rawLeft - horizontalMargin).coerceAtLeast(0)
+    val top = (rawTop - verticalMargin).coerceAtLeast(0)
+    val right = (rawRight + horizontalMargin).coerceAtMost(imageWidth)
+    val bottom = (rawBottom + verticalMargin).coerceAtMost(imageHeight)
+    return ProductReferenceCropDecision(
+        bounds = ProductReferenceCropBounds(
+            left = left,
+            top = top,
+            width = right - left,
+            height = bottom - top
+        )
     )
 }
 
@@ -1955,18 +2043,22 @@ private fun createDiscoveredProductCrops(
             val key = normalizeDiscoveredProductKey(product.name)
             if (key.isBlank() || crops.containsKey(key)) return@forEach
             try {
-                val left = (crop.x * sourceBitmap.width).toInt().coerceIn(0, sourceBitmap.width - 1)
-                val top = (crop.y * sourceBitmap.height).toInt().coerceIn(0, sourceBitmap.height - 1)
-                val width = (crop.width * sourceBitmap.width).toInt()
-                    .coerceIn(1, sourceBitmap.width - left)
-                val height = (crop.height * sourceBitmap.height).toInt()
-                    .coerceIn(1, sourceBitmap.height - top)
-                if (width < 120 || height < 120) return@forEach
+                val bounds = calculateProductReferenceCropBounds(
+                    imageWidth = sourceBitmap.width,
+                    imageHeight = sourceBitmap.height,
+                    crop = crop
+                ).bounds ?: return@forEach
 
-                val cropped = Bitmap.createBitmap(sourceBitmap, left, top, width, height)
+                val cropped = Bitmap.createBitmap(
+                    sourceBitmap,
+                    bounds.left,
+                    bounds.top,
+                    bounds.width,
+                    bounds.height
+                )
                 try {
                     val output = ByteArrayOutputStream()
-                    if (!cropped.compress(Bitmap.CompressFormat.JPEG, 90, output)) return@forEach
+                    if (!cropped.compress(Bitmap.CompressFormat.JPEG, 92, output)) return@forEach
                     val bytes = output.toByteArray()
                     if (bytes.isEmpty()) return@forEach
                     crops[key] = UploadFile(
@@ -1975,8 +2067,8 @@ private fun createDiscoveredProductCrops(
                         bytes = bytes,
                         optimized = true,
                         originalSizeBytes = source.bytes.size,
-                        originalWidth = width,
-                        originalHeight = height
+                        originalWidth = bounds.width,
+                        originalHeight = bounds.height
                     )
                 } finally {
                     if (cropped !== sourceBitmap) cropped.recycle()

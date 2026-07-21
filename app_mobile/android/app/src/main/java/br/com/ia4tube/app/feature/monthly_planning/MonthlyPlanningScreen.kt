@@ -172,7 +172,7 @@ fun MonthlyPlanningScreen(
         if (uri == null) return@rememberLauncherForActivityResult
         if (!viewModel.beginProductDiscovery()) return@rememberLauncherForActivityResult
         scope.launch {
-            when (val result = fileReader.readUploadFile(uri)) {
+            when (val result = fileReader.readProductDiscoveryUploadFile(uri)) {
                 is ApiResult.Success -> viewModel.discoverProducts(result.value)
                 is ApiResult.Failure -> viewModel.failProductDiscovery(result.message)
             }
@@ -184,7 +184,7 @@ fun MonthlyPlanningScreen(
         if (!saved || uri == null) return@rememberLauncherForActivityResult
         if (!viewModel.beginProductDiscovery()) return@rememberLauncherForActivityResult
         scope.launch {
-            when (val result = fileReader.readUploadFile(uri)) {
+            when (val result = fileReader.readProductDiscoveryUploadFile(uri)) {
                 is ApiResult.Success -> viewModel.discoverProducts(result.value)
                 is ApiResult.Failure -> viewModel.failProductDiscovery(result.message)
             }
@@ -528,6 +528,7 @@ fun MonthlyPlanningScreen(
                         onManualObjectiveChange = viewModel::updatePhotoManualObjective,
                         onTextChange = viewModel::updatePhotoText,
                         onPriceChange = viewModel::updatePhotoPrice,
+                        onIdentifiedProductChange = viewModel::updatePhotoIdentifiedProduct,
                         onDecreaseLevel = viewModel::decreasePhotoEditLevel,
                         onIncreaseLevel = viewModel::increasePhotoEditLevel,
                         onToggleLevelInfo = viewModel::togglePhotoEditLevelInfo,
@@ -952,6 +953,7 @@ private fun MonthlyPlanningUploadContent(
     onManualObjectiveChange: (String, String) -> Unit,
     onTextChange: (String, String) -> Unit,
     onPriceChange: (String, String) -> Unit,
+    onIdentifiedProductChange: (String, String) -> Unit,
     onDecreaseLevel: (String) -> Unit,
     onIncreaseLevel: (String) -> Unit,
     onToggleLevelInfo: (String) -> Unit,
@@ -1006,6 +1008,9 @@ private fun MonthlyPlanningUploadContent(
                     onPriceChange = { value ->
                         onPriceChange(photo.id, value)
                     },
+                    onIdentifiedProductChange = { value ->
+                        onIdentifiedProductChange(photo.id, value)
+                    },
                     onDecreaseLevel = {
                         onDecreaseLevel(photo.id)
                     },
@@ -1056,6 +1061,7 @@ private fun PlanningPhotoCard(
     onManualObjectiveChange: (String) -> Unit,
     onTextChange: (String) -> Unit,
     onPriceChange: (String) -> Unit,
+    onIdentifiedProductChange: (String) -> Unit,
     onDecreaseLevel: () -> Unit,
     onIncreaseLevel: () -> Unit,
     onToggleLevelInfo: () -> Unit,
@@ -1083,11 +1089,12 @@ private fun PlanningPhotoCard(
                 onRemove = onRemove
             )
             if (photo.produtoIdentificado.isNotBlank()) {
-                Text(
-                    text = "Produto identificado: ${photo.produtoIdentificado}",
-                    style = MaterialTheme.typography.bodyMedium,
-                    fontWeight = FontWeight.SemiBold,
-                    color = MaterialTheme.colorScheme.primary
+                OutlinedTextField(
+                    modifier = Modifier.fillMaxWidth(),
+                    value = photo.produtoIdentificado,
+                    onValueChange = onIdentifiedProductChange,
+                    label = { Text("Produto identificado") },
+                    singleLine = true
                 )
             }
             if (photo.expanded) {

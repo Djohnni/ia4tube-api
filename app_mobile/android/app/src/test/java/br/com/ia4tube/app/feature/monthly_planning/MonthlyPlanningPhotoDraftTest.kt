@@ -310,6 +310,7 @@ class MonthlyPlanningPhotoDraftTest {
         assertFalse(request.withoutPhotoSelected)
         assertEquals("", request.preco)
         assertEquals("", request.produtoIdentificado)
+        assertEquals(MONTHLY_PLANNING_REFERENCE_MANUAL, request.tipoReferencia)
     }
 
     @Test
@@ -318,7 +319,8 @@ class MonthlyPlanningPhotoDraftTest {
             id = "discovered-1",
             number = 5,
             produtoIdentificado = "Frango assado",
-            preco = "R$ 29,90"
+            preco = "R$ 29,90",
+            tipoReferencia = MONTHLY_PLANNING_REFERENCE_DISCOVERED
         )
 
         val request = discovered.toRequestInput()
@@ -330,6 +332,49 @@ class MonthlyPlanningPhotoDraftTest {
         assertNull(request.file)
         assertTrue(request.orientacao.contains("Produto identificado: Frango assado"))
         assertTrue(request.orientacao.contains("Preco informado: R$ 29,90"))
+        assertEquals(MONTHLY_PLANNING_REFERENCE_DISCOVERED, request.tipoReferencia)
+    }
+
+    @Test
+    fun editedIdentifiedProductPersistsInBlockAndReferencePayload() {
+        val original = MonthlyPlanningPhotoDraft(
+            id = "discovered-editable",
+            number = 1,
+            file = upload("mouse-reference.jpg"),
+            produtoIdentificado = "Mouse Philips com fio",
+            expanded = true
+        )
+
+        val edited = original
+            .withIdentifiedProductName("Mouse óptico Philips USB")
+            .copy(expanded = false)
+        val recreatedUiState = MonthlyPlanningUiState(photos = listOf(edited))
+        val request = recreatedUiState.photos.single().toRequestInput()
+
+        assertEquals("Mouse óptico Philips USB", recreatedUiState.photos.single().produtoIdentificado)
+        assertEquals("Mouse óptico Philips USB", request.produtoIdentificado)
+        assertTrue(request.orientacao.contains("Produto identificado: Mouse óptico Philips USB"))
+        assertTrue(request.orientacao.contains("O foco é Mouse óptico Philips USB"))
+        assertTrue(request.orientacao.contains("Use a imagem anexada como referência"))
+        assertTrue(request.orientacao.contains("Ignore objetos vizinhos, fundo, prateleira, cabos"))
+        assertEquals("", request.objetivo)
+        assertEquals("", request.escritaImagem)
+    }
+
+    @Test
+    fun identifiedProductEditIsBoundedAndCannotAccidentallyRemoveTheField() {
+        val original = MonthlyPlanningPhotoDraft(
+            id = "discovered-editable",
+            number = 1,
+            produtoIdentificado = "Mouse Philips"
+        )
+
+        assertEquals("Mouse Philips", original.withIdentifiedProductName("").produtoIdentificado)
+        assertEquals(
+            IDENTIFIED_PRODUCT_MAX_LENGTH,
+            original.withIdentifiedProductName("x".repeat(IDENTIFIED_PRODUCT_MAX_LENGTH + 20))
+                .produtoIdentificado.length
+        )
     }
 
     @Test
@@ -360,6 +405,7 @@ class MonthlyPlanningPhotoDraftTest {
         assertEquals("", result.photos[0].produtoIdentificado)
         assertEquals("Frango assado", result.photos[1].produtoIdentificado)
         assertEquals("R$ 29,90", result.photos[1].preco)
+        assertEquals(MONTHLY_PLANNING_REFERENCE_DISCOVERED, result.photos[1].tipoReferencia)
         assertEquals("", result.photos[1].objetivo)
         assertEquals("", result.photos[1].escritaImagem)
         assertEquals(1, result.added)
@@ -528,6 +574,75 @@ class MonthlyPlanningPhotoDraftTest {
 
         assertEquals(0, result.added)
         assertEquals(listOf(existing), result.photos)
+    }
+
+    @Test
+    fun newDiscoveryDeduplicationUsesTheCurrentEditedProductName() {
+        val edited = MonthlyPlanningPhotoDraft(
+            id = "discovered-1",
+            number = 1,
+            produtoIdentificado = "Mouse óptico Philips USB"
+        )
+        val result = appendDiscoveredProductsToPlanning(
+            currentPhotos = listOf(edited),
+            products = listOf(
+                MonthlyPlanningDiscoveredProduct(name = "mouse optico philips usb"),
+                MonthlyPlanningDiscoveredProduct(name = "Mouse gamer Philips")
+            ),
+            technicalLimit = 40,
+            cropFactory = { null }
+        )
+
+        assertEquals(1, result.added)
+        assertEquals(
+            listOf("Mouse óptico Philips USB", "Mouse gamer Philips"),
+            result.photos.map { it.produtoIdentificado }
+        )
+    }
+
+    @Test
+    fun referenceCropAddsContextMarginAndKeepsTheWholeProduct() {
+        val decision = calculateProductReferenceCropBounds(
+            imageWidth = 1000,
+            imageHeight = 800,
+            crop = MonthlyPlanningProductCrop(x = 0.2, y = 0.25, width = 0.4, height = 0.5)
+        )
+
+        assertNull(decision.rejectionReason)
+        assertEquals(ProductReferenceCropBounds(left = 140, top = 140, width = 520, height = 520), decision.bounds)
+    }
+
+    @Test
+    fun referenceCropAcceptsUsefulSmallRegionThatOldAbsoluteLimitRejected() {
+        val decision = calculateProductReferenceCropBounds(
+            imageWidth = 1000,
+            imageHeight = 1000,
+            crop = MonthlyPlanningProductCrop(x = 0.4, y = 0.4, width = 0.08, height = 0.08)
+        )
+
+        assertNull(decision.rejectionReason)
+        assertTrue(decision.bounds!!.width < 120)
+        assertTrue(decision.bounds.height < 120)
+    }
+
+    @Test
+    fun referenceCropStillRejectsInvalidTinyOrAmbiguousCoordinates() {
+        assertEquals(
+            "product_region_too_small",
+            calculateProductReferenceCropBounds(
+                1000,
+                1000,
+                MonthlyPlanningProductCrop(0.5, 0.5, 0.02, 0.02)
+            ).rejectionReason
+        )
+        assertEquals(
+            "region_outside_image",
+            calculateProductReferenceCropBounds(
+                1000,
+                1000,
+                MonthlyPlanningProductCrop(1.2, 0.2, 0.2, 0.2)
+            ).rejectionReason
+        )
     }
 
     @Test
