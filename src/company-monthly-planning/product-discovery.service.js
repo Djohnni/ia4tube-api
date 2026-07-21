@@ -41,6 +41,59 @@ const GENERIC_NON_PRODUCT_PATTERNS = [
   /^(qualidade|tradicao|variedade)(\s|$)/
 ];
 
+const INSTITUTIONAL_OPERATIONAL_LABELS = new Set([
+  "aberto",
+  "aceitamos cartao",
+  "aceitamos cartoes",
+  "agende seu horario",
+  "atendimento",
+  "atendimento por agendamento",
+  "avaliacao gratuita",
+  "bem vindo",
+  "bem vindos",
+  "cardapio",
+  "catalogo",
+  "delivery",
+  "drive thru",
+  "endereco",
+  "entrega",
+  "entregamos",
+  "facebook",
+  "faca seu pedido",
+  "fechado",
+  "frete gratis",
+  "instagram",
+  "novidade",
+  "oferta",
+  "peca agora",
+  "pix",
+  "promocao",
+  "retirada na loja",
+  "retirada no balcao",
+  "retirada no local",
+  "retire aqui",
+  "tabela de precos",
+  "telefone",
+  "whatsapp"
+]);
+
+const INSTITUTIONAL_OPERATIONAL_PATTERNS = [
+  /^(delivery|entrega|entregas|entregamos)(\s+(disponivel|disponiveis|gratis|gratuita|rapida|rapidas|expressa|expressas|em domicilio|a domicilio|na regiao|para toda a cidade))*$/,
+  /^(fazemos|oferecemos|realizamos|temos)\s+(delivery|entrega|entregas)(\s+(disponivel|disponiveis|gratis|gratuita|rapida|rapidas|em domicilio|a domicilio|na regiao|para toda a cidade))*$/,
+  /^(retirada|retire|retirar)\s+(aqui|na loja|no balcao|no local|em loja|em nosso local)$/,
+  /^(faca|envie|realize)\s+(o\s+seu\s+|o\s+|seu\s+|um\s+)?pedido(\s+(agora|aqui|pelo whatsapp|por whatsapp|online))?$/,
+  /^(peca|compre)\s+(agora|ja)(\s+(pelo whatsapp|por whatsapp|online))?$/,
+  /^atendimento\s+(com hora marcada|por agendamento|sob agendamento|via telefone|via whatsapp)$/,
+  /^(agende|marque)\s+(o\s+|a\s+|seu\s+|sua\s+|um\s+|uma\s+)?(atendimento|horario|avaliacao)(\s+agora)?$/,
+  /^(promocao|promocoes|oferta|ofertas|novidade|novidades)(\s+(da semana|do dia|especial|especiais|imperdivel|imperdiveis|por tempo limitado))*$/,
+  /^(aberto|fechado)(\s+(agora|hoje))*$/,
+  /^(fale|chame|entre em contato)\s+(conosco\s+)?(no|pelo|por|via)\s+(telefone|whatsapp)$/,
+  /^(siga|acompanhe)\s+(nos|a gente|nossa loja|nossa empresa)\s+(no|pelo)\s+(facebook|instagram)$/,
+  /^(chave|pagamento)\s+(pix|via pix)$/,
+  /^frete\s+(gratis|gratuito)$/,
+  /^aceitamos\s+(cartao|cartoes|todos os cartoes)$/
+];
+
 const GENERIC_BUSINESS_NICHES = new Set([
   "loja",
   "comercio",
@@ -69,13 +122,14 @@ function normalizeProductKey(value) {
 function isGenericNonProductLabel(value) {
   const key = normalizeProductKey(value);
   if (!key || GENERIC_NON_PRODUCT_LABELS.has(key)) return true;
+  if (isInstitutionalOrOperationalLabel(key)) return true;
   return GENERIC_NON_PRODUCT_PATTERNS.some((pattern) => pattern.test(key));
 }
 
-function normalizedCoordinate(value) {
-  const number = Number(value);
-  if (!Number.isFinite(number)) return null;
-  return Math.min(1, Math.max(0, number));
+function isInstitutionalOrOperationalLabel(value) {
+  const key = normalizeProductKey(value);
+  if (!key || INSTITUTIONAL_OPERATIONAL_LABELS.has(key)) return true;
+  return INSTITUTIONAL_OPERATIONAL_PATTERNS.some((pattern) => pattern.test(key));
 }
 
 function sanitizeBusinessNiche(value) {
@@ -102,16 +156,41 @@ function resolveBusinessNicheContext(body = {}, client = {}) {
   };
 }
 
+function evaluateCrop(value) {
+  if (!value || typeof value !== "object") {
+    return { crop: null, rejectionReason: "missing_coordinates" };
+  }
+  const rawX = Number(value.x);
+  const rawY = Number(value.y);
+  const rawWidth = Number(value.largura ?? value.width);
+  const rawHeight = Number(value.altura ?? value.height);
+  if (![rawX, rawY, rawWidth, rawHeight].every(Number.isFinite)) {
+    return { crop: null, rejectionReason: "invalid_coordinates" };
+  }
+  if (rawWidth <= 0 || rawHeight <= 0) {
+    return { crop: null, rejectionReason: "non_positive_region" };
+  }
+
+  const left = Math.max(0, rawX);
+  const top = Math.max(0, rawY);
+  const right = Math.min(1, rawX + rawWidth);
+  const bottom = Math.min(1, rawY + rawHeight);
+  const width = right - left;
+  const height = bottom - top;
+  if (width <= 0 || height <= 0) {
+    return { crop: null, rejectionReason: "region_outside_image" };
+  }
+  if (width < 0.025 || height < 0.025 || (width * height) < 0.001) {
+    return { crop: null, rejectionReason: "product_region_too_small" };
+  }
+  return {
+    crop: { x: left, y: top, largura: width, altura: height },
+    rejectionReason: null
+  };
+}
+
 function normalizeCrop(value) {
-  if (!value || typeof value !== "object") return null;
-  const x = normalizedCoordinate(value.x);
-  const y = normalizedCoordinate(value.y);
-  const width = normalizedCoordinate(value.largura ?? value.width);
-  const height = normalizedCoordinate(value.altura ?? value.height);
-  if ([x, y, width, height].some((item) => item === null)) return null;
-  if (width < 0.08 || height < 0.08) return null;
-  if (x + width > 1.001 || y + height > 1.001) return null;
-  return { x, y, largura: width, altura: height };
+  return evaluateCrop(value).crop;
 }
 
 function normalizeProducts(items = [], maxItems = 36) {
@@ -154,6 +233,7 @@ function responseSchema(maxItems) {
     properties: {
       produtos: {
         type: "array",
+        description: "Todos os produtos ou servicos concretos e visualmente distinguiveis; cada produto separado deve ser um item independente, exceto kit ou combo claramente vendido como uma unidade.",
         maxItems,
         items: {
           type: "object",
@@ -169,9 +249,10 @@ function responseSchema(maxItems) {
             },
             usar_recorte: {
               type: "boolean",
-              description: "Verdadeiro apenas quando o recorte isolado tem qualidade suficiente para divulgacao."
+              description: "Verdadeiro quando a regiao ajuda a localizar e reconhecer claramente o produto descrito neste item, mesmo com fundo, prateleira, pequena sobreposicao ou objetos vizinhos; nao exige qualidade pronta para anuncio."
             },
             recorte: {
+              description: "Caixa normalizada propria do produto descrito neste item; caixas de itens diferentes podem ter pequena sobreposicao.",
               anyOf: [
                 {
                   type: "object",
@@ -213,18 +294,34 @@ function discoveryPrompt(maxItems, niche = "") {
     "Analise somente esta unica foto para descobrir produtos ou servicos visiveis da empresa.",
     ...nicheInstructions,
     `Retorne no maximo ${maxItems} itens distintos.`,
+    "Analise toda a imagem e identifique TODOS os produtos ou servicos concretos e visualmente distinguiveis que aparentem ser comercializados pela empresa.",
+    "Nao selecione apenas o item mais evidente nem limite a analise a um unico produto principal.",
+    "Quando houver dois ou mais produtos igualmente visiveis, retorne cada produto visualmente separado como um item independente.",
+    "Nao retorne produtos=[] apenas porque existem varios objetos ou produtos igualmente evidentes na cena.",
+    "Nao agrupe produtos independentes em um nome composto, como Mouse e teclado; use itens separados sempre que cada produto puder ser reconhecido individualmente.",
+    "Quando uma embalagem, rotulo ou contexto visual indicar claramente um kit ou combo comercializado como uma unidade, preserve esse kit ou combo como um unico item.",
     "Inclua somente produto ou servico concreto e especifico realmente sustentado pela imagem.",
+    "Ignore moveis, equipamentos, ferramentas, decoracao e objetos internos usados pela empresa quando eles nao aparentarem estar a venda; inclua-os somente se a imagem sustentar claramente que sao produtos comercializados.",
     "Nao trate como produto: nome da empresa, slogan, categoria do estabelecimento, ramo de atividade, texto institucional, titulo generico ou decoracao sem produto concreto identificavel.",
+    "Nunca retorne como produto textos institucionais, operacionais, promocionais, canais de contato, formas de pagamento, instrucoes de pedido ou formas de retirada.",
+    "Ignore rótulos isolados ou frases equivalentes a: Delivery, Entrega, Entregamos, Retirada no balcao, Retirada na loja, Retirada no local, Retire aqui, Drive-thru, Faca seu pedido, Peca agora, Atendimento, Atendimento por agendamento, Agende seu horario, Avaliacao gratuita, Promocao, Oferta, Novidade, Bem-vindo, Aberto, Fechado, Pix, WhatsApp, Instagram, Facebook, Telefone, Endereco, Cardapio, Catalogo, Tabela de precos, Frete gratis e Aceitamos cartoes.",
+    "Nao descarte apenas porque uma dessas palavras aparece dentro de um nome concreto. Kit Delivery para motoboy, Bolsa termica para delivery, Caixa termica para entrega, Servico de entrega expressa e Drive-thru infantil podem ser produtos ou servicos validos quando a imagem sustentar claramente o item completo.",
     "Exemplos que devem ser ignorados: Moda Feminina, Loja de Informatica, Produtos de Qualidade, Ofertas Especiais, Cardapio, Bebidas e Calcados.",
     "Exemplos concretos permitidos quando realmente visiveis: Camiseta amarela, Teclado USB Fortrek, Frango assado, Coca-Cola Zero 2 L, Troca de oleo e Corte masculino.",
-    "Se houver somente texto institucional ou se existir qualquer duvida sobre um item ser concreto, retorne produtos=[]; e melhor retornar zero produtos do que inventar um item.",
+    "Se a imagem contiver somente texto institucional e nenhum produto concreto, retorne produtos=[].",
+    "Quando houver duvida sobre um objeto especifico, omita somente esse objeto e preserve os demais produtos concretos identificados; e melhor descartar o objeto duvidoso do que inventa-lo.",
     "Nao invente nomes, marcas ou precos. Se o nome nao puder ser sustentado pela imagem, nao inclua o item.",
     "O preco deve ser copiado somente quando estiver legivel e inequivocamente associado ao item; caso contrario use string vazia.",
     "Remova repeticoes evidentes do mesmo produto, mas preserve variantes diferentes, por exemplo Coca-Cola normal e Coca-Cola Zero.",
     "Nao crie objetivo, escrita publicitaria, descricao, categoria, confianca, quantidade ou qualquer outro campo.",
-    "Marque usar_recorte=true somente se o produto estiver nitido, bem enquadrado, sem obstrucoes relevantes e o recorte puder servir para divulgacao.",
-    "Quando usar_recorte=false, retorne recorte=null.",
-    "As coordenadas do recorte devem ser normalizadas entre 0 e 1 em relacao a imagem original, no formato x, y, largura e altura."
+    "O recorte sera usado como referencia por outra IA, nao como imagem pronta para publicidade.",
+    "Para cada item retornado, forneca uma caixa propria referente ao produto daquele item. Caixas podem ter pequena sobreposicao quando produtos estiverem proximos ou parcialmente sobrepostos.",
+    "Sempre que for possivel localizar e entender o produto correspondente ao item com razoavel seguranca, marque usar_recorte=true e retorne suas coordenadas.",
+    "Aceite como referencia regioes com fundo imperfeito, prateleira, cabos, etiquetas, partes do ambiente ou pequenos trechos de objetos vizinhos, desde que o produto correspondente ao item continue distinguivel.",
+    "Nao marque usar_recorte=false apenas porque o enquadramento nao esta pronto para anuncio ou porque o produto nao esta perfeitamente isolado.",
+    "Use usar_recorte=false e recorte=null somente quando nao houver coordenadas validas, o produto estiver realmente muito pequeno, quase totalmente escondido, totalmente desfocado ou o produto correspondente ao item nao estiver distinguivel.",
+    "Ao retornar coordenadas, use uma caixa um pouco mais ampla ao redor do produto, preserve o objeto inteiro e nao corte suas partes importantes tentando isola-lo demais.",
+    "As coordenadas do recorte devem ser normalizadas entre 0 e 1 em relacao aos pixels da imagem recebida, no formato x, y, largura e altura."
   ].join("\n");
 }
 
@@ -335,6 +432,8 @@ module.exports = {
   _private: {
     normalizeProductKey,
     isGenericNonProductLabel,
+    isInstitutionalOrOperationalLabel,
+    evaluateCrop,
     normalizeCrop,
     normalizeProducts,
     responseSchema,
