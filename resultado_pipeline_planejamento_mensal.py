@@ -521,7 +521,14 @@ def collect_monthly_reference_images(pedido_dir, pedido):
                 continue
             add(path)
 
-    return refs[:MAX_REFERENCIAS_PLANEJAMENTO]
+    if len(refs) > MAX_REFERENCIAS_PLANEJAMENTO:
+        raise ValueError(
+            f"Pedido possui {len(refs)} referencias obrigatorias; "
+            f"o limite tecnico e {MAX_REFERENCIAS_PLANEJAMENTO}. "
+            "Nenhuma referencia foi descartada."
+        )
+
+    return refs
 
 
 def pessoa_block(pedido):
@@ -569,6 +576,25 @@ def build_prompt(pedido, referencias):
     visual = instructions["orientacao_visual"] or "nenhuma"
     legend = instructions["orientacao_legenda"] or "nenhuma"
     customer_goal = text_value(pedido, "objetivo_foto_cliente") or text_value(pedido, "objetivo")
+    reference_type = text_value(pedido, "tipo_referencia") or "foto_manual"
+    identified_product = text_value(pedido, "produto_identificado")
+    product_price = text_value(pedido, "preco")
+    is_discovered_product = reference_type == "produto_descoberto"
+    if is_discovered_product and has_photo:
+        photo_rules = """- Use a imagem enviada como referencia visual do produto identificado.
+- Preserve fielmente o produto principal, suas cores, formato, marca e caracteristicas visiveis.
+- Ignore fundo, prateleira, cabos e objetos vizinhos.
+- Nao copie a composicao original do ambiente.
+- Crie uma nova composicao publicitaria profissional ao redor do produto.
+- Nao misture fotos de outros posts."""
+    elif is_discovered_product:
+        photo_rules = """- Este produto descoberto nao possui imagem de referencia neste pedido.
+- Crie a composicao a partir dos dados estruturados, sem inventar marca, formato ou caracteristicas ausentes.
+- Nao use fotos de outros posts."""
+    else:
+        photo_rules = """- A imagem enviada manda na composicao visual.
+- Preserve produto, ambiente, pessoa, cor e contexto da foto.
+- Nao misture fotos de outros posts."""
 
     return f"""
 Crie uma arte vertical profissional para Instagram, pronta para postar.
@@ -588,7 +614,15 @@ DADOS DA EMPRESA:
 
 DADOS DO PEDIDO:
 - Objetivo principal: {customer_goal or "nao informado"}
+- Produto identificado: {identified_product or "nao informado"}
+- Preco do produto: {product_price or "nao informado"}
 - Texto que deve aparecer na imagem: {required}
+
+CONTRATO DOS DADOS ESTRUTURADOS:
+- O nome do produto define o foco da composicao; nao e uma instrucao para copiar automaticamente como texto.
+- O preco, quando informado, pertence ao produto identificado e pode aparecer na arte exatamente como recebido.
+- Nunca inferir ou inventar preco quando estiver como nao informado.
+- Somente o campo "Texto que deve aparecer na imagem" e texto obrigatorio informado pelo cliente.
 
 CONTEXTO INTERNO DO PLANEJAMENTO:
 - Tema interno: {text_value(pedido, "tema_interno", "tema") or "nao informado"}
@@ -603,9 +637,8 @@ REGRA SOBRE TEMA E OBJETIVO:
 
 FOTOS E REFERENCIAS:
 {foto_info}
-- A imagem enviada manda na composicao visual.
-- Preserve produto, ambiente, pessoa, cor e contexto da foto.
-- Nao misture fotos de outros posts.
+Tipo da referencia: {reference_type}
+{photo_rules}
 
 {pessoa_block(pedido)}
 
