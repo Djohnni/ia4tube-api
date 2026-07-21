@@ -2422,7 +2422,7 @@ private fun MonthlyPlanningProcessingStep(
     }
 }
 
-@OptIn(UnstableApi::class)
+@androidx.annotation.OptIn(UnstableApi::class)
 @Composable
 private fun MonthlyPlanningMarketingVideoWaitingCard(
     video: MarketingVideo,

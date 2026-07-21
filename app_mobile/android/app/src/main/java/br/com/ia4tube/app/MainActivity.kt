@@ -1,5 +1,6 @@
 package br.com.ia4tube.app
 
+import android.annotation.SuppressLint
 import android.Manifest
 import android.content.Context
 import android.content.Intent
@@ -34,6 +35,7 @@ import br.com.ia4tube.app.ui.theme.IA4TubeTheme
 class MainActivity : ComponentActivity() {
     private var notificationTarget by mutableStateOf<NotificationNavigationTarget?>(null)
 
+    @SuppressLint("InvalidFragmentVersionForActivityResult")
     private val notificationPermissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestPermission()
     ) {

@@ -6,6 +6,7 @@ import android.media.MediaScannerConnection
 import android.os.Build
 import android.os.Environment
 import android.provider.MediaStore
+import androidx.annotation.RequiresApi
 import br.com.ia4tube.app.R
 import br.com.ia4tube.app.data.models.ApiResult
 import br.com.ia4tube.app.data.models.CarouselImage
@@ -107,6 +108,7 @@ class ZipDownloadStore(private val context: Context) {
         }
     }
 
+    @RequiresApi(Build.VERSION_CODES.Q)
     private fun saveZipWithMediaStore(fileName: String, file: DownloadedFile, relativeFolder: String): ApiResult<String> {
         val resolver = context.contentResolver
         val values = ContentValues().apply {

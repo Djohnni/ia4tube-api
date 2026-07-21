@@ -368,7 +368,7 @@ private fun OrderMessages(errorMessage: UiText?, actionMessage: UiText?) {
     }
 }
 
-@OptIn(UnstableApi::class)
+@androidx.annotation.OptIn(UnstableApi::class)
 @Composable
 private fun MarketingVideoWaitingCard(
     video: MarketingVideo,
