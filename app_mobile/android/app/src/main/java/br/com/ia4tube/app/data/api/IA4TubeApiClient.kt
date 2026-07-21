@@ -56,6 +56,7 @@ import org.json.JSONArray
 import org.json.JSONException
 import org.json.JSONObject
 import java.io.IOException
+import java.net.SocketTimeoutException
 import java.net.URLEncoder
 import java.nio.charset.StandardCharsets
 import java.util.concurrent.TimeUnit
@@ -1180,7 +1181,14 @@ class IA4TubeApiClient(
                 ApiResult.Success(mapper(json))
             }
         } catch (error: IOException) {
-            ApiResult.Failure(error.message ?: "Erro de rede")
+            ApiResult.Failure(
+                message = error.message ?: "Erro de rede",
+                code = if (error is SocketTimeoutException) {
+                    "network_timeout"
+                } else {
+                    "network_unavailable"
+                }
+            )
         } catch (error: JSONException) {
             Log.e(TAG, "Erro ao interpretar resposta JSON de ${request.url}", error)
             ApiResult.Failure(CREATE_ORDER_UNAVAILABLE_MESSAGE)

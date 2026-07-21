@@ -475,7 +475,7 @@ class MonthlyPlanningPhotoDraftTest {
     }
 
     @Test
-    fun technicalDiscoveryFailuresAreFriendlyAndPreserveBlocks() {
+    fun discoveryFailuresUseSpecificFriendlyMessagesAndPreserveBlocks() {
         val manual = MonthlyPlanningPhotoDraft(
             id = "manual-1",
             number = 1,
@@ -483,18 +483,33 @@ class MonthlyPlanningPhotoDraftTest {
             escritaImagem = "Texto preservado"
         )
         val started = MonthlyPlanningUiState(photos = listOf(manual)).tryStartProductDiscovery()!!
-        val failed = started.finishProductDiscoveryWithError("Failed to connect to /127.0.0.1:3100")
+        val failed = started.finishProductDiscoveryWithError(
+            technicalMessage = "Failed to connect to /127.0.0.1:3100",
+            code = "network_unavailable"
+        )
 
         assertEquals(listOf(manual), failed.photos)
         assertFalse(failed.discoveryLoading)
         assertNull(failed.discoveryStage)
         assertEquals(0f, failed.discoveryProgress)
-        assertEquals(PRODUCT_DISCOVERY_FRIENDLY_ERROR_MESSAGE, failed.uploadError)
+        assertEquals(PRODUCT_DISCOVERY_OFFLINE_MESSAGE, failed.uploadError)
         assertFalse(failed.uploadError.orEmpty().contains("127.0.0.1"))
-        assertEquals(
-            PRODUCT_DISCOVERY_FRIENDLY_ERROR_MESSAGE,
-            productDiscoveryFriendlyErrorMessage("timeout")
-        )
+        assertEquals(PRODUCT_DISCOVERY_SESSION_EXPIRED_MESSAGE,
+            productDiscoveryFriendlyErrorMessage("unauthorized", statusCode = 401))
+        assertEquals(PRODUCT_DISCOVERY_SESSION_EXPIRED_MESSAGE,
+            productDiscoveryFriendlyErrorMessage("missing token", code = "session_expired"))
+        assertEquals(PRODUCT_DISCOVERY_INVALID_PHOTO_MESSAGE,
+            productDiscoveryFriendlyErrorMessage("bad request", statusCode = 400))
+        assertEquals(PRODUCT_DISCOVERY_INVALID_PHOTO_MESSAGE,
+            productDiscoveryFriendlyErrorMessage("read failed", localImageFailure = true))
+        assertEquals(PRODUCT_DISCOVERY_TIMEOUT_MESSAGE,
+            productDiscoveryFriendlyErrorMessage("timeout", code = "network_timeout"))
+        assertEquals(PRODUCT_DISCOVERY_TIMEOUT_MESSAGE,
+            productDiscoveryFriendlyErrorMessage("OpenAI unavailable", statusCode = 503))
+        assertEquals(PRODUCT_DISCOVERY_RATE_LIMIT_MESSAGE,
+            productDiscoveryFriendlyErrorMessage("too many requests", statusCode = 429))
+        assertEquals(PRODUCT_DISCOVERY_INTERNAL_ERROR_MESSAGE,
+            productDiscoveryFriendlyErrorMessage("internal", statusCode = 500))
     }
 
     @Test

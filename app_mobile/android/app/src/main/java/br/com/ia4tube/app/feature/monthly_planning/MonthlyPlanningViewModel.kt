@@ -49,8 +49,18 @@ const val MONTHLY_PLANNING_MAX_ARTS_PER_REQUEST = 20
 const val MONTHLY_PLANNING_EMPTY_REQUEST_MESSAGE = "Preencha um objetivo, uma escrita ou adicione uma imagem para criar sua arte."
 const val PRODUCT_DISCOVERY_EMPTY_MESSAGE =
     "Não encontramos produtos claramente identificáveis nesta foto. Tente fotografar mais perto."
-const val PRODUCT_DISCOVERY_FRIENDLY_ERROR_MESSAGE =
-    "Não foi possível analisar a foto agora. Verifique sua conexão e tente novamente."
+const val PRODUCT_DISCOVERY_OFFLINE_MESSAGE =
+    "Você está sem conexão. Conecte-se e tente novamente."
+const val PRODUCT_DISCOVERY_SESSION_EXPIRED_MESSAGE =
+    "Sua sessão expirou. Entre novamente para continuar."
+const val PRODUCT_DISCOVERY_INVALID_PHOTO_MESSAGE =
+    "Não foi possível usar esta foto. Tente outra imagem."
+const val PRODUCT_DISCOVERY_TIMEOUT_MESSAGE =
+    "A análise demorou mais que o esperado. Tente novamente em instantes."
+const val PRODUCT_DISCOVERY_INTERNAL_ERROR_MESSAGE =
+    "Não foi possível analisar a foto agora. Tente novamente em instantes."
+const val PRODUCT_DISCOVERY_RATE_LIMIT_MESSAGE =
+    "Você fez muitas análises em pouco tempo. Aguarde alguns minutos."
 private const val MARKETING_CONTEXT_FIRST_FREE_ART = "primeira_arte_gratis"
 private const val PLANNING_PROCESSING_POLL_INTERVAL_MS = 5_000L
 const val MOCK_PLANNING_ID = "planejamento-junho-2026"
@@ -161,18 +171,58 @@ internal fun MonthlyPlanningUiState.advanceProductDiscovery(
 }
 
 @Suppress("UNUSED_PARAMETER")
-internal fun productDiscoveryFriendlyErrorMessage(technicalMessage: String?): String {
-    return PRODUCT_DISCOVERY_FRIENDLY_ERROR_MESSAGE
+internal fun productDiscoveryFriendlyErrorMessage(
+    technicalMessage: String?,
+    statusCode: Int? = null,
+    code: String = "",
+    localImageFailure: Boolean = false
+): String {
+    val normalizedCode = code.trim().lowercase(Locale.ROOT)
+    return when {
+        localImageFailure -> PRODUCT_DISCOVERY_INVALID_PHOTO_MESSAGE
+        statusCode == 401 || normalizedCode == "session_expired" -> {
+            PRODUCT_DISCOVERY_SESSION_EXPIRED_MESSAGE
+        }
+        statusCode == 400 || statusCode == 413 || statusCode == 415 ||
+            normalizedCode == "product_discovery_image_required" ||
+            normalizedCode == "product_discovery_empty_image" ||
+            normalizedCode == "product_discovery_image_too_large" ||
+            normalizedCode == "product_discovery_invalid_image" -> {
+            PRODUCT_DISCOVERY_INVALID_PHOTO_MESSAGE
+        }
+        statusCode == 429 || normalizedCode == "product_discovery_in_progress" -> {
+            PRODUCT_DISCOVERY_RATE_LIMIT_MESSAGE
+        }
+        statusCode == 502 || statusCode == 503 || statusCode == 504 ||
+            normalizedCode == "network_timeout" ||
+            normalizedCode == "product_discovery_timeout" ||
+            normalizedCode == "product_discovery_ai_error" ||
+            normalizedCode == "product_discovery_not_configured" ||
+            normalizedCode == "product_discovery_unavailable" ||
+            normalizedCode == "product_discovery_invalid_response" -> {
+            PRODUCT_DISCOVERY_TIMEOUT_MESSAGE
+        }
+        normalizedCode == "network_unavailable" -> PRODUCT_DISCOVERY_OFFLINE_MESSAGE
+        else -> PRODUCT_DISCOVERY_INTERNAL_ERROR_MESSAGE
+    }
 }
 
 internal fun MonthlyPlanningUiState.finishProductDiscoveryWithError(
-    technicalMessage: String? = null
+    technicalMessage: String? = null,
+    statusCode: Int? = null,
+    code: String = "",
+    localImageFailure: Boolean = false
 ): MonthlyPlanningUiState {
     return copy(
         discoveryLoading = false,
         discoveryStage = null,
         discoveryProgress = 0f,
-        uploadError = productDiscoveryFriendlyErrorMessage(technicalMessage),
+        uploadError = productDiscoveryFriendlyErrorMessage(
+            technicalMessage = technicalMessage,
+            statusCode = statusCode,
+            code = code,
+            localImageFailure = localImageFailure
+        ),
         successMessage = null
     )
 }
@@ -1363,7 +1413,10 @@ class MonthlyPlanningViewModel(
     fun failProductDiscovery(technicalMessage: String? = null) {
         productDiscoveryProgressJob?.cancel()
         _uiState.update { state ->
-            state.finishProductDiscoveryWithError(technicalMessage)
+            state.finishProductDiscoveryWithError(
+                technicalMessage = technicalMessage,
+                localImageFailure = true
+            )
         }
     }
 
@@ -1446,7 +1499,11 @@ class MonthlyPlanningViewModel(
                         productDiscoveryProgressJob?.cancel()
                         _uiState.update { state ->
                             if (state.discoveryAttempt != attempt) state
-                            else state.finishProductDiscoveryWithError(result.message)
+                            else state.finishProductDiscoveryWithError(
+                                technicalMessage = result.message,
+                                statusCode = result.statusCode,
+                                code = result.code
+                            )
                         }
                     }
                 }

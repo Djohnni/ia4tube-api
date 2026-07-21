@@ -154,7 +154,13 @@ class AuthRepository(
         ramoContexto: String? = null
     ): ApiResult<MonthlyPlanningProductDiscoveryResponse> {
         val token = sessionStore.getToken()
-        if (token.isBlank()) return ApiResult.Failure(SESSION_EXPIRED_MESSAGE)
+        if (token.isBlank()) {
+            return ApiResult.Failure(
+                message = SESSION_EXPIRED_MESSAGE,
+                statusCode = 401,
+                code = "session_expired"
+            )
+        }
         return apiClient.descobrirProdutosPlanejamentoMensal(token, image, ramoContexto)
     }
 

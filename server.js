@@ -1398,7 +1398,9 @@ const productDiscoveryUpload = multer({
   limits: {
     files: 1,
     fields: 1,
-    parts: 2,
+    // Busboy emits LIMIT_PART_COUNT when the configured count is reached.
+    // Keep files/fields strict while allowing one image plus ramo_contexto.
+    parts: 3,
     fieldSize: 512,
     fileSize: 3 * 1024 * 1024
   },
@@ -7041,8 +7043,15 @@ app.use((err, req, res, next) => {
   }
 
   if (err instanceof multer.MulterError) {
-    return res.status(400).json({
+    const isProductDiscovery = req.path === "/empresa/planejamento-mensal/descobrir-produtos";
+    const imageTooLarge = err.code === "LIMIT_FILE_SIZE";
+    return res.status(isProductDiscovery && imageTooLarge ? 413 : 400).json({
       ok: false,
+      ...(isProductDiscovery ? {
+        code: imageTooLarge
+          ? "product_discovery_image_too_large"
+          : "product_discovery_invalid_image"
+      } : {}),
       error: "Não foi possível enviar a imagem. Verifique o arquivo e tente novamente."
     });
   }
@@ -7050,6 +7059,9 @@ app.use((err, req, res, next) => {
   if (String(err?.message || "").includes("Apenas imagens")) {
     return res.status(400).json({
       ok: false,
+      ...(req.path === "/empresa/planejamento-mensal/descobrir-produtos"
+        ? { code: "product_discovery_invalid_image" }
+        : {}),
       error: err.message
     });
   }

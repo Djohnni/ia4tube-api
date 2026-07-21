@@ -2,6 +2,8 @@ const assert = require("assert");
 const fs = require("fs");
 const os = require("os");
 const path = require("path");
+const express = require("express");
+const multer = require("multer");
 
 const service = require("../src/company-monthly-planning/product-discovery.service");
 
@@ -236,7 +238,115 @@ function testEndpointUsesHybridBusinessNicheResolver() {
   assert.match(serverSource, /niche:\s*businessContext\.niche/);
   assert.doesNotMatch(serverSource, /niche:\s*cliente\.ramo/);
   assert.doesNotMatch(routeSource, /writeClientes|billingService|reservar|saldo_mensal|saldo_extra/i);
-  assert.match(serverSource, /productDiscoveryUpload\s*=\s*multer\([\s\S]*?fields:\s*1[\s\S]*?fieldSize:\s*512/);
+  assert.match(serverSource, /productDiscoveryUpload\s*=\s*multer\([\s\S]*?files:\s*1[\s\S]*?fields:\s*1[\s\S]*?parts:\s*3[\s\S]*?fieldSize:\s*512[\s\S]*?fileSize:\s*3\s*\*\s*1024\s*\*\s*1024/);
+  assert.doesNotMatch(serverSource, /productDiscoveryUpload\s*=\s*multer\([\s\S]*?parts:\s*2/);
+  assert.match(serverSource, /const permitidos = \["image\/png", "image\/jpeg", "image\/jpg", "image\/webp"\]/);
+  assert.match(serverSource, /product_discovery_image_too_large/);
+  assert.match(serverSource, /product_discovery_invalid_image/);
+  assert.match(serverSource, /product_discovery_in_progress/);
+  assert.match(serverSource, /product_discovery_error/);
+  assert.match(routeSource, /finally\s*\{[\s\S]*?cleanupUploadedFiles\(\{ imagem: \[req\.file\] \}\)/);
+}
+
+function multipartForm({ context, mimeType = "image/jpeg", bytes = Buffer.from("valid-image") }) {
+  const form = new FormData();
+  form.append("imagem", new Blob([bytes], { type: mimeType }), "produto.jpg");
+  if (context !== undefined) form.append("ramo_contexto", context);
+  return form;
+}
+
+async function testProductDiscoveryMultipartLimitsAndCleanup() {
+  const uploadDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "ia4tube-discovery-upload-"));
+  const storage = multer.diskStorage({
+    destination: (_req, _file, callback) => callback(null, uploadDirectory),
+    filename: (_req, file, callback) => callback(null, `test_${file.originalname}`)
+  });
+  const upload = multer({
+    storage,
+    limits: {
+      files: 1,
+      fields: 1,
+      parts: 3,
+      fieldSize: 512,
+      fileSize: 3 * 1024 * 1024
+    },
+    fileFilter: (_req, file, callback) => {
+      const allowed = ["image/png", "image/jpeg", "image/jpg", "image/webp"];
+      if (!allowed.includes(String(file.mimetype || "").toLowerCase())) {
+        return callback(new Error("Apenas imagens PNG, JPG e WEBP sao permitidas."));
+      }
+      return callback(null, true);
+    }
+  });
+  const app = express();
+  app.post("/test", upload.single("imagem"), (req, res) => {
+    const hasContext = Object.prototype.hasOwnProperty.call(req.body || {}, "ramo_contexto");
+    const context = hasContext ? req.body.ramo_contexto : null;
+    if (req.file?.path && fs.existsSync(req.file.path)) fs.unlinkSync(req.file.path);
+    return res.json({ ok: true, hasContext, context, fileCount: req.file ? 1 : 0 });
+  });
+  app.use((error, _req, res, _next) => {
+    const tooLarge = error instanceof multer.MulterError && error.code === "LIMIT_FILE_SIZE";
+    return res.status(tooLarge ? 413 : 400).json({
+      ok: false,
+      code: tooLarge
+        ? "product_discovery_image_too_large"
+        : "product_discovery_invalid_image",
+      multerCode: error instanceof multer.MulterError ? error.code : ""
+    });
+  });
+
+  const server = await new Promise((resolve) => {
+    const listening = app.listen(0, "127.0.0.1", () => resolve(listening));
+  });
+  const url = `http://127.0.0.1:${server.address().port}/test`;
+
+  try {
+    const contexts = [
+      { label: "absent", value: undefined, expectedPresent: false, expectedValue: null },
+      { label: "empty", value: "", expectedPresent: true, expectedValue: "" },
+      { label: "filled", value: "Padaria", expectedPresent: true, expectedValue: "Padaria" }
+    ];
+    for (const item of contexts) {
+      const response = await fetch(url, {
+        method: "POST",
+        body: multipartForm({ context: item.value })
+      });
+      const body = await response.json();
+      assert.strictEqual(response.status, 200, `${item.label} context must be accepted`);
+      assert.strictEqual(body.fileCount, 1);
+      assert.strictEqual(body.hasContext, item.expectedPresent);
+      assert.strictEqual(body.context, item.expectedValue);
+      assert.notStrictEqual(body.multerCode, "LIMIT_PART_COUNT");
+      assert.deepStrictEqual(fs.readdirSync(uploadDirectory), []);
+    }
+
+    const invalidResponse = await fetch(url, {
+      method: "POST",
+      body: multipartForm({ context: "Padaria", mimeType: "text/plain" })
+    });
+    assert.strictEqual(invalidResponse.status, 400);
+    assert.strictEqual((await invalidResponse.json()).code, "product_discovery_invalid_image");
+    assert.deepStrictEqual(fs.readdirSync(uploadDirectory), []);
+
+    const largeResponse = await fetch(url, {
+      method: "POST",
+      body: multipartForm({
+        context: "Padaria",
+        bytes: Buffer.alloc(3 * 1024 * 1024 + 1)
+      })
+    });
+    const largeBody = await largeResponse.json();
+    assert.strictEqual(largeResponse.status, 413);
+    assert.strictEqual(largeBody.code, "product_discovery_image_too_large");
+    assert.notStrictEqual(largeBody.multerCode, "LIMIT_PART_COUNT");
+    assert.deepStrictEqual(fs.readdirSync(uploadDirectory), []);
+  } finally {
+    await new Promise((resolve, reject) => {
+      server.close((error) => error ? reject(error) : resolve());
+    });
+    fs.rmSync(uploadDirectory, { recursive: true, force: true });
+  }
 }
 
 async function testOneImageStructuredRequest() {
@@ -286,6 +396,7 @@ async function run() {
   testGenericAndUnsafeBusinessNichesAreDiscardedOrSanitized();
   testNoBusinessNicheUsesConservativePrompt();
   testEndpointUsesHybridBusinessNicheResolver();
+  await testProductDiscoveryMultipartLimitsAndCleanup();
   await testInstitutionalOnlyResponseReturnsNoItems();
   await testEachBusinessNicheReachesTheOpenAiRequest();
   await testOneImageStructuredRequest();
