@@ -1397,6 +1397,9 @@ const productDiscoveryUpload = multer({
   storage,
   limits: {
     files: 1,
+    fields: 1,
+    parts: 2,
+    fieldSize: 512,
     fileSize: 3 * 1024 * 1024
   },
   fileFilter: (req, file, cb) => {
@@ -3760,6 +3763,7 @@ app.post(
   productDiscoveryUpload.single("imagem"),
   async (req, res) => {
     const whatsapp = req.user.whatsapp;
+    const cliente = readClientes()[whatsapp];
     if (!req.file) {
       return res.status(400).json({
         ok: false,
@@ -3767,7 +3771,7 @@ app.post(
         error: "Envie uma imagem para analisar."
       });
     }
-    if (!readClientes()[whatsapp]) {
+    if (!cliente) {
       cleanupUploadedFiles({ imagem: [req.file] });
       return res.status(404).json({ ok: false, error: "Cliente nao encontrado" });
     }
@@ -3782,9 +3786,14 @@ app.post(
 
     productDiscoveryInFlight.add(whatsapp);
     try {
+      const businessContext = productDiscoveryService.resolveBusinessNicheContext(
+        req.body,
+        cliente
+      );
       const result = await productDiscoveryService.discoverProducts({
         filePath: req.file.path,
         mimeType: req.file.mimetype,
+        niche: businessContext.niche,
         maxItems: MONTHLY_PLANNING_REQUEST_MAX_ITEMS
       });
       return res.json({

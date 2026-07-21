@@ -1,6 +1,26 @@
 package br.com.ia4tube.app.core.company
 
 import android.content.Context
+import java.text.Normalizer
+import java.util.Locale
+
+internal fun normalizeCompanyProfileOwner(value: String): String {
+    return Normalizer.normalize(value.trim(), Normalizer.Form.NFD)
+        .replace("[\\u0300-\\u036f]".toRegex(), "")
+        .lowercase(Locale.ROOT)
+        .replace("[^a-z0-9._-]+".toRegex(), "")
+}
+
+internal fun shouldClearCompanyProfileForAccountChange(
+    currentOwner: String,
+    authenticatedAccount: String
+): Boolean {
+    val normalizedCurrent = normalizeCompanyProfileOwner(currentOwner)
+    val normalizedAuthenticated = normalizeCompanyProfileOwner(authenticatedAccount)
+    return normalizedCurrent.isNotBlank() &&
+        normalizedAuthenticated.isNotBlank() &&
+        normalizedCurrent != normalizedAuthenticated
+}
 
 class CompanyProfileStore(context: Context) {
     private val preferences = context.getSharedPreferences(PREFERENCES_NAME, Context.MODE_PRIVATE)
@@ -39,6 +59,26 @@ class CompanyProfileStore(context: Context) {
             .apply()
     }
 
+    fun prepareForAuthenticatedAccount(accountId: String) {
+        val normalizedAccount = normalizeCompanyProfileOwner(accountId)
+        if (normalizedAccount.isBlank()) return
+
+        val currentOwner = preferences.getString(KEY_PROFILE_OWNER, "").orEmpty()
+        if (shouldClearCompanyProfileForAccountChange(currentOwner, normalizedAccount)) {
+            preferences.edit()
+                .clear()
+                .putString(KEY_PROFILE_OWNER, normalizedAccount)
+                .apply()
+            return
+        }
+
+        if (normalizeCompanyProfileOwner(currentOwner).isBlank()) {
+            preferences.edit()
+                .putString(KEY_PROFILE_OWNER, normalizedAccount)
+                .apply()
+        }
+    }
+
     private companion object {
         const val PREFERENCES_NAME = "ia4tube_company_profile"
         const val KEY_NOME_EMPRESA = "nome_empresa"
@@ -53,5 +93,6 @@ class CompanyProfileStore(context: Context) {
         const val KEY_EMAIL = "email"
         const val KEY_SITE = "site"
         const val KEY_LOGO_URI = "logo_uri"
+        const val KEY_PROFILE_OWNER = "profile_owner"
     }
 }

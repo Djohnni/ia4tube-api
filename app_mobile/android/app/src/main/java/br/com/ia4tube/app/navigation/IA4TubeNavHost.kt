@@ -126,6 +126,9 @@ fun IA4TubeNavHost(
     val sessionStore = remember {
         SessionStore(context)
     }
+    val companyProfileStore = remember {
+        CompanyProfileStore(context)
+    }
     val fcmTokenRegistrar = remember {
         FcmTokenRegistrar(
             context = context,
@@ -137,7 +140,8 @@ fun IA4TubeNavHost(
         AuthRepository(
             apiClient = apiClient,
             sessionStore = sessionStore,
-            fcmTokenRegistrar = fcmTokenRegistrar
+            fcmTokenRegistrar = fcmTokenRegistrar,
+            companyProfileStore = companyProfileStore
         )
     }
     val graphicMaterialsRepository = remember {
@@ -157,9 +161,6 @@ fun IA4TubeNavHost(
     }
     val zipDownloadStore = remember {
         ZipDownloadStore(context)
-    }
-    val companyProfileStore = remember {
-        CompanyProfileStore(context)
     }
     val monthlyPlanningCalendarCacheStore = remember {
         MonthlyPlanningCalendarCacheStore(context)

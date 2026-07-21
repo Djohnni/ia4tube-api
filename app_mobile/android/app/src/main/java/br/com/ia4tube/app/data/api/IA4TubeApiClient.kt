@@ -60,6 +60,20 @@ import java.net.URLEncoder
 import java.nio.charset.StandardCharsets
 import java.util.concurrent.TimeUnit
 
+internal fun buildProductDiscoveryMultipart(
+    image: UploadFile,
+    ramoContexto: String?
+): MultipartBody {
+    val imageBody = image.bytes.toRequestBody(image.contentType.toMediaTypeOrNull())
+    val builder = MultipartBody.Builder()
+        .setType(MultipartBody.FORM)
+        .addFormDataPart("imagem", image.fileName, imageBody)
+    if (ramoContexto != null) {
+        builder.addFormDataPart("ramo_contexto", ramoContexto)
+    }
+    return builder.build()
+}
+
 class IA4TubeApiClient(
     private val client: OkHttpClient = defaultClient()
 ) {
@@ -450,13 +464,10 @@ class IA4TubeApiClient(
 
     suspend fun descobrirProdutosPlanejamentoMensal(
         token: String,
-        image: UploadFile
+        image: UploadFile,
+        ramoContexto: String? = null
     ): ApiResult<MonthlyPlanningProductDiscoveryResponse> = withContext(Dispatchers.IO) {
-        val imageBody = image.bytes.toRequestBody(image.contentType.toMediaTypeOrNull())
-        val multipart = MultipartBody.Builder()
-            .setType(MultipartBody.FORM)
-            .addFormDataPart("imagem", image.fileName, imageBody)
-            .build()
+        val multipart = buildProductDiscoveryMultipart(image, ramoContexto)
         val request = Request.Builder()
             .url("${AppConfig.productDiscoveryApiBase}/empresa/planejamento-mensal/descobrir-produtos")
             .header("Authorization", "Bearer $token")
@@ -465,7 +476,10 @@ class IA4TubeApiClient(
 
         logMultipart(
             url = request.url.toString(),
-            fields = listOf("imagem"),
+            fields = buildList {
+                add("imagem")
+                if (ramoContexto != null) add("ramo_contexto")
+            },
             files = listOf(image)
         )
 

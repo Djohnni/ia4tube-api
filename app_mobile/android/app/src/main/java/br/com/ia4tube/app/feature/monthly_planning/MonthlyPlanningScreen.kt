@@ -134,6 +134,9 @@ fun MonthlyPlanningScreen(
     var pendingCameraUri by remember { mutableStateOf<Uri?>(null) }
     var pendingPhotoSlotId by remember { mutableStateOf<String?>(null) }
     var showDiscoverySourceDialog by remember { mutableStateOf(false) }
+    var showDiscoveryBusinessDialog by remember { mutableStateOf(false) }
+    var discoveryBusinessDraft by remember { mutableStateOf("") }
+    var discoveryBusinessFreeTyping by remember { mutableStateOf(false) }
     var pendingDiscoveryCameraUri by remember { mutableStateOf<Uri?>(null) }
     var pendingPhotoRemoval by remember { mutableStateOf<MonthlyPlanningPhotoDraft?>(null) }
     var showGeneralCalendar by remember { mutableStateOf(false) }
@@ -279,36 +282,128 @@ fun MonthlyPlanningScreen(
     }
 
     if (showDiscoverySourceDialog) {
+        val discoveryBusinessContext = state.ramoContextoDescoberta.orEmpty()
         AlertDialog(
             onDismissRequest = { showDiscoverySourceDialog = false },
             title = {
                 Text("Descobrir meus produtos", fontWeight = FontWeight.ExtraBold)
             },
             text = {
-                Text("Tire uma foto ou escolha uma imagem da galeria. A IA analisará somente essa foto.")
-            },
-            confirmButton = {
-                Button(
-                    onClick = {
-                        showDiscoverySourceDialog = false
-                        val uri = cameraImageStore.createImageUri()
-                        pendingDiscoveryCameraUri = uri
-                        discoveryCameraLauncher.launch(uri)
+                Column(modifier = Modifier.fillMaxWidth()) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            modifier = Modifier.weight(1f),
+                            text = if (discoveryBusinessContext.isBlank()) {
+                                "Análise sem contexto de ramo"
+                            } else {
+                                "Contexto da análise: $discoveryBusinessContext"
+                            },
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        TextButton(
+                            onClick = {
+                                val current = discoveryBusinessContext.ifBlank {
+                                    state.companyProfile.ramo.trim()
+                                }
+                                discoveryBusinessDraft = current
+                                discoveryBusinessFreeTyping =
+                                    isUsableDiscoveryBusinessContext(current)
+                                showDiscoverySourceDialog = false
+                                showDiscoveryBusinessDialog = true
+                            }
+                        ) {
+                            Text(if (discoveryBusinessContext.isBlank()) "Informar" else "Alterar")
+                        }
                     }
-                ) {
-                    Text("Câmera")
+                    Text("Tire uma foto ou escolha uma imagem da galeria. A IA analisará somente essa foto.")
+                    Spacer(modifier = Modifier.height(12.dp))
+                    Button(
+                        modifier = Modifier.fillMaxWidth(),
+                        onClick = {
+                            showDiscoverySourceDialog = false
+                            val uri = cameraImageStore.createImageUri()
+                            pendingDiscoveryCameraUri = uri
+                            discoveryCameraLauncher.launch(uri)
+                        }
+                    ) {
+                        Text("Câmera")
+                    }
+                    Spacer(modifier = Modifier.height(6.dp))
+                    OutlinedButton(
+                        modifier = Modifier.fillMaxWidth(),
+                        onClick = {
+                            showDiscoverySourceDialog = false
+                            discoveryGalleryPicker.launch("image/*")
+                        }
+                    ) {
+                        Text("Galeria")
+                    }
+                    TextButton(
+                        modifier = Modifier.fillMaxWidth(),
+                        onClick = { showDiscoverySourceDialog = false }
+                    ) {
+                        Text("Cancelar")
+                    }
                 }
             },
-            dismissButton = {
-                TextButton(
-                    onClick = {
-                        showDiscoverySourceDialog = false
-                        discoveryGalleryPicker.launch("image/*")
+            confirmButton = {}
+        )
+    }
+
+    if (showDiscoveryBusinessDialog) {
+        AlertDialog(
+            onDismissRequest = { showDiscoveryBusinessDialog = false },
+            title = {
+                Text("Qual é o ramo da sua empresa?", fontWeight = FontWeight.ExtraBold)
+            },
+            text = {
+                Column(modifier = Modifier.fillMaxWidth()) {
+                    CompanyProfileRamoSearchField(
+                        value = discoveryBusinessDraft,
+                        onValueChange = { discoveryBusinessDraft = it },
+                        onRamoSelected = {
+                            discoveryBusinessDraft = it
+                            discoveryBusinessFreeTyping = false
+                        },
+                        onContinueTyping = { discoveryBusinessFreeTyping = true },
+                        freeTyping = discoveryBusinessFreeTyping
+                    )
+                    Spacer(modifier = Modifier.height(12.dp))
+                    Button(
+                        modifier = Modifier.fillMaxWidth(),
+                        enabled = isUsableDiscoveryBusinessContext(discoveryBusinessDraft),
+                        onClick = {
+                            viewModel.setDiscoveryBusinessContext(discoveryBusinessDraft)
+                            showDiscoveryBusinessDialog = false
+                            showDiscoverySourceDialog = true
+                        }
+                    ) {
+                        Text("Usar este ramo")
                     }
-                ) {
-                    Text("Galeria")
+                    Spacer(modifier = Modifier.height(6.dp))
+                    OutlinedButton(
+                        modifier = Modifier.fillMaxWidth(),
+                        onClick = {
+                            viewModel.setDiscoveryBusinessContext("")
+                            showDiscoveryBusinessDialog = false
+                            showDiscoverySourceDialog = true
+                        }
+                    ) {
+                        Text("Continuar sem informar")
+                    }
+                    TextButton(
+                        modifier = Modifier.fillMaxWidth(),
+                        onClick = { showDiscoveryBusinessDialog = false }
+                    ) {
+                        Text("Cancelar")
+                    }
                 }
-            }
+            },
+            confirmButton = {}
         )
     }
 
@@ -395,7 +490,17 @@ fun MonthlyPlanningScreen(
                     MonthlyPlanningStep.Upload -> MonthlyPlanningUploadContent(
                         state = state,
                         loadingPhotos = loadingPhotos,
-                        onDiscoverProducts = { showDiscoverySourceDialog = true },
+                        onDiscoverProducts = {
+                            if (viewModel.prepareProductDiscoveryContext()) {
+                                showDiscoverySourceDialog = true
+                            } else {
+                                val current = state.companyProfile.ramo.trim()
+                                discoveryBusinessDraft = current
+                                discoveryBusinessFreeTyping =
+                                    isUsableDiscoveryBusinessContext(current)
+                                showDiscoveryBusinessDialog = true
+                            }
+                        },
                         onSelectPhotos = { slotId ->
                             pendingPhotoSlotId = slotId
                             photosPicker.launch("image/*")

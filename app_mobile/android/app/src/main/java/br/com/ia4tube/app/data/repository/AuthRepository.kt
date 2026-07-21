@@ -1,5 +1,6 @@
 package br.com.ia4tube.app.data.repository
 
+import br.com.ia4tube.app.core.company.CompanyProfileStore
 import br.com.ia4tube.app.core.notifications.FcmTokenRegistrar
 import br.com.ia4tube.app.core.session.SessionStore
 import br.com.ia4tube.app.data.api.IA4TubeApiClient
@@ -28,17 +29,40 @@ import br.com.ia4tube.app.data.models.PaymentInfo
 import br.com.ia4tube.app.data.models.SendSupportMessageResponse
 import br.com.ia4tube.app.data.models.SupportMessage
 import br.com.ia4tube.app.data.models.UploadFile
+import java.nio.charset.StandardCharsets
+import java.util.Base64
+
+internal fun authenticatedAccountFromJwt(token: String): String {
+    return runCatching {
+        val payload = token.split('.').getOrNull(1).orEmpty()
+        if (payload.isBlank()) return@runCatching ""
+        val json = String(Base64.getUrlDecoder().decode(payload), StandardCharsets.UTF_8)
+        Regex("\"whatsapp\"\\s*:\\s*\"([^\"]+)\"")
+            .find(json)
+            ?.groupValues
+            ?.getOrNull(1)
+            .orEmpty()
+    }.getOrDefault("")
+}
 
 class AuthRepository(
     private val apiClient: IA4TubeApiClient,
     private val sessionStore: SessionStore,
-    private val fcmTokenRegistrar: FcmTokenRegistrar? = null
+    private val fcmTokenRegistrar: FcmTokenRegistrar? = null,
+    private val companyProfileStore: CompanyProfileStore? = null
 ) {
+    init {
+        companyProfileStore?.prepareForAuthenticatedAccount(
+            authenticatedAccountFromJwt(sessionStore.getToken())
+        )
+    }
+
     fun getSavedToken(): String = sessionStore.getToken()
 
     suspend fun login(login: String, senha: String): ApiResult<LoginResponse> {
         return when (val result = apiClient.login(login, senha)) {
             is ApiResult.Success -> {
+                companyProfileStore?.prepareForAuthenticatedAccount(login)
                 sessionStore.saveToken(result.value.token)
                 fcmTokenRegistrar?.syncCurrentToken()
                 result
@@ -50,6 +74,7 @@ class AuthRepository(
     suspend fun register(whatsapp: String, senha: String): ApiResult<LoginResponse> {
         return when (val result = apiClient.register(whatsapp, senha)) {
             is ApiResult.Success -> {
+                companyProfileStore?.prepareForAuthenticatedAccount(whatsapp)
                 sessionStore.saveToken(result.value.token)
                 fcmTokenRegistrar?.syncCurrentToken()
                 result
@@ -125,11 +150,12 @@ class AuthRepository(
     }
 
     suspend fun descobrirProdutosPlanejamentoMensal(
-        image: UploadFile
+        image: UploadFile,
+        ramoContexto: String? = null
     ): ApiResult<MonthlyPlanningProductDiscoveryResponse> {
         val token = sessionStore.getToken()
         if (token.isBlank()) return ApiResult.Failure(SESSION_EXPIRED_MESSAGE)
-        return apiClient.descobrirProdutosPlanejamentoMensal(token, image)
+        return apiClient.descobrirProdutosPlanejamentoMensal(token, image, ramoContexto)
     }
 
     suspend fun aprovarPedido(pedidoId: String): ApiResult<Unit> {

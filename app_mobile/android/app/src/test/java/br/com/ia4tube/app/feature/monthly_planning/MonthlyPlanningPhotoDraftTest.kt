@@ -514,4 +514,67 @@ class MonthlyPlanningPhotoDraftTest {
         assertEquals(0, result.added)
         assertEquals(listOf(existing), result.photos)
     }
+
+    @Test
+    fun specificPlanningBusinessContextIsPreparedWithoutChangingCompanyProfile() {
+        val initial = MonthlyPlanningUiState(
+            companyProfile = MonthlyPlanningCompanyProfile(ramo = "Padaria")
+        )
+
+        val prepared = initial.withPreparedDiscoveryBusinessContext()
+
+        assertEquals("Padaria", prepared.ramoContextoDescoberta)
+        assertEquals("Padaria", prepared.companyProfile.ramo)
+        assertEquals(initial.companyProfile, prepared.companyProfile)
+    }
+
+    @Test
+    fun blankOrGenericPlanningBusinessContextRequiresTheCompactSelector() {
+        val genericValues = listOf(
+            "",
+            "Loja",
+            "Comércio",
+            "Empresa",
+            "Produtos",
+            "Serviços",
+            "Outros",
+            "Diversos",
+            "Não informado"
+        )
+
+        for (business in genericValues) {
+            val prepared = MonthlyPlanningUiState(
+                companyProfile = MonthlyPlanningCompanyProfile(ramo = business)
+            ).withPreparedDiscoveryBusinessContext()
+
+            assertNull(prepared.ramoContextoDescoberta)
+            assertFalse(isUsableDiscoveryBusinessContext(business))
+        }
+        assertTrue(isUsableDiscoveryBusinessContext("Assistência técnica de celulares"))
+    }
+
+    @Test
+    fun discoveryBusinessContextIsTemporaryAndDoesNotAlterReviewBusiness() {
+        val initial = MonthlyPlanningUiState(
+            companyProfile = MonthlyPlanningCompanyProfile(ramo = "Padaria")
+        )
+
+        val changed = initial.withDiscoveryBusinessContext("Loja de informática")
+
+        assertEquals("Loja de informática", changed.ramoContextoDescoberta)
+        assertEquals("Padaria", changed.companyProfile.ramo)
+        assertEquals("Padaria", initial.companyProfile.ramo)
+    }
+
+    @Test
+    fun explicitWithoutBusinessContextIsRememberedForTheDiscoverySession() {
+        val withoutContext = MonthlyPlanningUiState(
+            companyProfile = MonthlyPlanningCompanyProfile(ramo = "Padaria")
+        ).withDiscoveryBusinessContext("")
+
+        val preparedAgain = withoutContext.withPreparedDiscoveryBusinessContext()
+
+        assertEquals("", preparedAgain.ramoContextoDescoberta)
+        assertEquals("Padaria", preparedAgain.companyProfile.ramo)
+    }
 }

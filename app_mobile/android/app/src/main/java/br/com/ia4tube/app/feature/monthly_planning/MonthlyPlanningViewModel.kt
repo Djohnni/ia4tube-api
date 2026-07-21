@@ -84,6 +84,7 @@ data class MonthlyPlanningUiState(
     val discoveryStage: MonthlyPlanningDiscoveryStage? = null,
     val discoveryProgress: Float = 0f,
     val discoveryAttempt: Long = 0L,
+    val ramoContextoDescoberta: String? = null,
     val technicalPlanningLimit: Int = MONTHLY_PLANNING_MAX_ARTS_PER_REQUEST,
     val companyProfile: MonthlyPlanningCompanyProfile = MonthlyPlanningCompanyProfile(),
     val uploadError: String? = null,
@@ -226,6 +227,45 @@ internal data class MonthlyPlanningDiscoveryAppendResult(
     val added: Int,
     val limitReached: Boolean
 )
+
+private val GENERIC_DISCOVERY_BUSINESS_CONTEXTS = setOf(
+    "loja",
+    "comercio",
+    "empresa",
+    "produtos",
+    "servicos",
+    "outros",
+    "diversos",
+    "nao informado"
+)
+
+internal fun normalizeDiscoveryBusinessContext(value: String): String {
+    return Normalizer.normalize(value.trim(), Normalizer.Form.NFD)
+        .replace("[\\u0300-\\u036f]".toRegex(), "")
+        .lowercase(Locale.ROOT)
+        .replace("[^a-z0-9]+".toRegex(), " ")
+        .trim()
+        .replace("\\s+".toRegex(), " ")
+}
+
+internal fun isUsableDiscoveryBusinessContext(value: String): Boolean {
+    val normalized = normalizeDiscoveryBusinessContext(value)
+    return normalized.isNotBlank() && normalized !in GENERIC_DISCOVERY_BUSINESS_CONTEXTS
+}
+
+internal fun MonthlyPlanningUiState.withPreparedDiscoveryBusinessContext(): MonthlyPlanningUiState {
+    if (ramoContextoDescoberta != null) return this
+    val currentBusiness = companyProfile.ramo.trim()
+    return if (isUsableDiscoveryBusinessContext(currentBusiness)) {
+        copy(ramoContextoDescoberta = currentBusiness)
+    } else {
+        this
+    }
+}
+
+internal fun MonthlyPlanningUiState.withDiscoveryBusinessContext(value: String): MonthlyPlanningUiState {
+    return copy(ramoContextoDescoberta = value.trim())
+}
 
 fun createInitialMonthlyPlanningPhotoDrafts(): List<MonthlyPlanningPhotoDraft> {
     return (1..MONTHLY_PLANNING_INITIAL_VISIBLE_PHOTOS).map { number ->
@@ -1306,6 +1346,20 @@ class MonthlyPlanningViewModel(
         return started
     }
 
+    fun prepareProductDiscoveryContext(): Boolean {
+        var ready = false
+        _uiState.update { state ->
+            state.withPreparedDiscoveryBusinessContext().also {
+                ready = it.ramoContextoDescoberta != null
+            }
+        }
+        return ready
+    }
+
+    fun setDiscoveryBusinessContext(value: String) {
+        _uiState.update { state -> state.withDiscoveryBusinessContext(value) }
+    }
+
     fun failProductDiscovery(technicalMessage: String? = null) {
         productDiscoveryProgressJob?.cancel()
         _uiState.update { state ->
@@ -1327,7 +1381,12 @@ class MonthlyPlanningViewModel(
             }
 
             try {
-                when (val result = repository.descobrirProdutosPlanejamentoMensal(image)) {
+                when (
+                    val result = repository.descobrirProdutosPlanejamentoMensal(
+                        image = image,
+                        ramoContexto = _uiState.value.ramoContextoDescoberta
+                    )
+                ) {
                     is ApiResult.Success -> {
                         productDiscoveryProgressJob?.cancel()
                         advanceProductDiscovery(MonthlyPlanningDiscoveryStage.Preparing)
