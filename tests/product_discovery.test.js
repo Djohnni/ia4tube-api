@@ -302,6 +302,24 @@ function testPromptAndSchemaRequireAllIndependentProducts() {
   assert.doesNotMatch(schemaText, /produto principal/i);
 }
 
+function testPromptAndSchemaRequireCompleteRecallAcrossTheWholeImage() {
+  const prompt = service._private.discoveryPrompt(40, "Mercado");
+  const schema = service._private.responseSchema(40);
+  const productDescription = schema.properties.produtos.description;
+  const nameDescription = schema.properties.produtos.items.properties.nome.description;
+
+  assert.match(prompt, /varredura visual completa da cena/i);
+  assert.match(prompt, /centro, bordas, cantos, primeiro plano e fundo/i);
+  assert.match(prompt, /Avalie cada objeto candidato de forma independente/i);
+  assert.match(prompt, /nao depende de ele ser o maior, central, destacado, estar em primeiro plano, ter preco visivel/i);
+  assert.match(prompt, /produtos parcialmente visiveis ou ao fundo/i);
+  assert.match(prompt, /use somente o tipo sustentado pela imagem/i);
+  assert.match(prompt, /omita o item apenas se nem o tipo concreto puder ser reconhecido/i);
+  assert.match(prompt, /sem exigir que cada produto seja tipico desse ramo/i);
+  assert.match(productDescription, /bordas, ao fundo ou parcialmente visiveis/i);
+  assert.match(nameDescription, /Use somente o tipo identificavel, como Teclado/i);
+}
+
 function testTwoSideBySideProductsKeepIndependentCrops() {
   const products = service._private.normalizeProducts([
     {
@@ -699,6 +717,47 @@ async function testStructuredResponseKeepsMultipleProducts() {
   }
 }
 
+async function testCompleteRecallResponsePreservesClearForegroundBackgroundAndPartialProducts() {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ia4tube-discovery-complete-recall-"));
+  const filePath = path.join(dir, "mixed-depth-products.jpg");
+  fs.writeFileSync(filePath, "fake-image");
+
+  try {
+    const result = await service.discoverProducts({
+      filePath,
+      mimeType: "image/jpeg",
+      niche: "Mercado",
+      maxItems: 40,
+      apiKey: "test-only",
+      fetchImpl: async () => ({
+        ok: true,
+        json: async () => ({
+          output: [{ content: [{ text: JSON.stringify({
+            produtos: [
+              { nome: "Teclado", preco: "", usar_recorte: true, recorte: { x: 0.03, y: 0.58, largura: 0.72, altura: 0.31 } },
+              { nome: "Livro infantil", preco: "", usar_recorte: true, recorte: { x: 0.1, y: 0.12, largura: 0.3, altura: 0.38 } },
+              { nome: "Lampada LED", preco: "", usar_recorte: true, recorte: { x: 0.65, y: 0.08, largura: 0.27, altura: 0.3 } },
+              { nome: "Mouse USB", preco: "", usar_recorte: true, recorte: { x: 0.78, y: 0.63, largura: 0.18, altura: 0.22 } },
+              { nome: "Promocao", preco: "", usar_recorte: false, recorte: null }
+            ]
+          }) }] }]
+        })
+      })
+    });
+
+    assert.deepStrictEqual(result.produtos.map((item) => item.nome), [
+      "Teclado",
+      "Livro infantil",
+      "Lampada LED",
+      "Mouse USB"
+    ]);
+    assert.ok(result.produtos.every((item) => item.preco === ""));
+    assert.ok(result.produtos.every((item) => item.usar_recorte && item.recorte));
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+}
+
 async function run() {
   testConservativeDeduplication();
   testUnsafeCropIsDisabled();
@@ -710,6 +769,7 @@ async function run() {
   testPromptRejectsInstitutionalTextAndPrefersZeroItems();
   testPromptTreatsCropAsProductReferenceInsteadOfFinishedAdvertising();
   testPromptAndSchemaRequireAllIndependentProducts();
+  testPromptAndSchemaRequireCompleteRecallAcrossTheWholeImage();
   testTwoSideBySideProductsKeepIndependentCrops();
   testThreeSeparatedProductsRemainThreeItems();
   testPartiallyOverlappingProductsRemainIndependent();
@@ -726,6 +786,7 @@ async function run() {
   await testEachBusinessNicheReachesTheOpenAiRequest();
   await testOneImageStructuredRequest();
   await testStructuredResponseKeepsMultipleProducts();
+  await testCompleteRecallResponsePreservesClearForegroundBackgroundAndPartialProducts();
   console.log("product_discovery.test.js: ok");
 }
 
