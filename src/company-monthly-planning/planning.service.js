@@ -9,6 +9,8 @@ const NOTIFICATION_STATUSES = new Set(["pendente", "enviada", "erro", "cancelada
 const PLANNING_ART_STATUSES = new Set(["novo", "ajuste_pendente", "processando", "pronto", "erro"]);
 const SAO_PAULO_UTC_OFFSET = "-03:00";
 const MAX_MONTHLY_PLANNING_ARTS = 40;
+const PLANNING_REFERENCE_MANUAL = "foto_manual";
+const PLANNING_REFERENCE_DISCOVERED = "produto_descoberto";
 const MAX_MONTHLY_PLANNING_REQUEST_ITEMS = Math.min(
   MAX_MONTHLY_PLANNING_ARTS,
   Math.max(
@@ -383,6 +385,8 @@ function normalizePlanningPhotoItem(item, fallbackOrder = 1) {
     "preco",
     "produto_identificado",
     "produtoIdentificado",
+    "tipo_referencia",
+    "tipoReferencia",
     "nivel_edicao",
     "nivelEdicao",
     "nivel",
@@ -409,10 +413,16 @@ function normalizePlanningPhotoItem(item, fallbackOrder = 1) {
   const produtoIdentificado = cleanText(
     item.produto_identificado || item.produtoIdentificado || item.identified_product
   );
+  const tipoReferencia = normalizePlanningReferenceType(
+    item.tipo_referencia || item.tipoReferencia || item.reference_type
+  );
   const nivelEdicao = Math.min(3, Math.max(1, Number(item.nivel_edicao || item.nivelEdicao || item.nivel || 2) || 2));
   const orientacaoRaw = cleanText(item.orientacao || item.orientation || item.instrucao || item.texto);
   const orientacao = orientacaoRaw || [
     produtoIdentificado ? `Produto identificado: ${produtoIdentificado}` : "",
+    produtoIdentificado && arquivo
+      ? `Use a imagem anexada como referencia do produto principal. O foco e ${produtoIdentificado}. Ignore objetos vizinhos, fundo, prateleira, cabos e elementos que nao pertencam ao produto.`
+      : "",
     objetivo ? `Objetivo da foto: ${objetivo}` : "",
     escritaImagem ? `Escrita que deve aparecer na imagem: ${escritaImagem}` : "",
     preco ? `Preco informado: ${preco}` : "",
@@ -437,6 +447,7 @@ function normalizePlanningPhotoItem(item, fallbackOrder = 1) {
     escrita_imagem: escritaImagem,
     preco,
     produto_identificado: produtoIdentificado,
+    tipo_referencia: tipoReferencia,
     nivel_edicao: nivelEdicao,
     orientacao
   };
@@ -471,7 +482,7 @@ function findUploadedPhotoForItem(item = {}, fotos = [], usedIndexes = new Set()
     }
   }
 
-  if (item.tem_arquivo !== false && item.ordem > 0 && item.ordem <= fotos.length) {
+  if (item._structured !== true && item.tem_arquivo !== false && item.ordem > 0 && item.ordem <= fotos.length) {
     const orderIndex = item.ordem - 1;
     if (!usedIndexes.has(orderIndex)) {
       usedIndexes.add(orderIndex);
@@ -497,6 +508,7 @@ function buildPlanningPhotoItems(fotos = [], body = {}) {
     escrita_imagem: "",
     preco: "",
     produto_identificado: "",
+    tipo_referencia: PLANNING_REFERENCE_MANUAL,
     nivel_edicao: 2,
     orientacao: ""
   }))).map((item) => {
@@ -511,6 +523,8 @@ function buildPlanningPhotoItems(fotos = [], body = {}) {
       escrita_imagem: item.escrita_imagem,
       preco_cliente: item.preco,
       produto_identificado: item.produto_identificado,
+      tipo_referencia: item.tipo_referencia,
+      arquivo_index: item.arquivo_index,
       nivel_edicao_cliente: item.nivel_edicao,
       orientacao_cliente: item.orientacao,
       orientacao_origem: "cliente_por_slot"
@@ -547,6 +561,7 @@ function buildPlanningPhotoItems(fotos = [], body = {}) {
         escrita_imagem: "",
         preco: "",
         produto_identificado: "",
+        tipo_referencia: PLANNING_REFERENCE_MANUAL,
         nivel_edicao: 2,
         orientacao: foto.orientacao_cliente || "",
         foto
@@ -1425,6 +1440,8 @@ function createRequest({ baseDir, cliente, whatsapp, body = {}, files = {}, free
     escrita_imagem: item.escrita_imagem || "",
     preco: item.preco || "",
     produto_identificado: item.produto_identificado || "",
+    tipo_referencia: normalizePlanningReferenceType(item.tipo_referencia),
+    contrato_foto_estruturado: hasStructuredPhotoItems,
     nivel_edicao: item.nivel_edicao || 2,
     orientacao: item.orientacao || ""
   }));
@@ -2679,6 +2696,120 @@ function extensionFromAsset(asset = {}, sourcePath = "") {
   return ".png";
 }
 
+function planningPhotoSourceItems(planning = {}) {
+  const raw = Array.isArray(planning.itens_fotos)
+    ? planning.itens_fotos
+    : Array.isArray(planning.orientacoes_fotos)
+      ? planning.orientacoes_fotos
+      : [];
+  return raw.filter((item) => item && typeof item === "object");
+}
+
+function sourcePhotoItemForPost(sources = [], post = {}, postIndex = 0, usedIndexes = new Set()) {
+  const ref = post.foto_referencia || {};
+  const findUnused = (predicate) => {
+    const matches = sources
+      .map((source, index) => ({ source, index }))
+      .filter(({ source, index }) => !usedIndexes.has(index) && predicate(source));
+    if (matches.length !== 1) return null;
+    usedIndexes.add(matches[0].index);
+    return matches[0].source;
+  };
+
+  const slotId = cleanText(ref.slot_id || post.slot_id).toLowerCase();
+  if (slotId) {
+    const bySlot = findUnused((source) => cleanText(source.slot_id || source.slotId).toLowerCase() === slotId);
+    if (bySlot) return bySlot;
+  }
+
+  const fileIndex = Number(ref.arquivo_index || post.arquivo_index || 0);
+  if (Number.isFinite(fileIndex) && fileIndex > 0) {
+    const byFileIndex = findUnused((source) => Number(source.arquivo_index || source.file_index || 0) === fileIndex);
+    if (byFileIndex) return byFileIndex;
+  }
+
+  const fileName = photoReferenceName(post);
+  if (fileName) {
+    const byName = findUnused((source) => [source.filename, source.original_name, source.arquivo, source.file]
+      .map((value) => cleanText(value).toLowerCase())
+      .filter(Boolean)
+      .includes(fileName));
+    if (byName) return byName;
+  }
+
+  const order = Number(post.ordem || ref.ordem || postIndex + 1);
+  if (Number.isFinite(order) && order > 0) {
+    const byOrder = findUnused((source) => Number(source.ordem || source.numero || 0) === order);
+    if (byOrder) return byOrder;
+  }
+
+  if (sources.length === postIndex + 1 || (postIndex < sources.length && !usedIndexes.has(postIndex))) {
+    usedIndexes.add(postIndex);
+    return sources[postIndex];
+  }
+  return null;
+}
+
+function enrichPlanPhotoReferences(planning = {}, postagens = []) {
+  const sources = planningPhotoSourceItems(planning);
+  if (!sources.length) return postagens;
+  const usedIndexes = new Set();
+
+  return postagens.map((post, index) => {
+    const source = sourcePhotoItemForPost(sources, post, index, usedIndexes);
+    if (!source) return post;
+
+    const referenceType = normalizePlanningReferenceType(source.tipo_referencia || source.tipoReferencia);
+    const structuredContract = source.contrato_foto_estruturado === true;
+    const productName = cleanText(source.produto_identificado || source.produtoIdentificado);
+    const price = cleanText(source.preco || source.price);
+    const imageWriting = cleanText(source.escrita_imagem || source.escritaImagem);
+    const objective = cleanText(source.objetivo || source.objective);
+    const level = Math.min(3, Math.max(1, Number(source.nivel_edicao || source.nivelEdicao || 2) || 2));
+    const hasFile = source.tem_arquivo === true && Boolean(source.filename || source.arquivo || source.arquivo_index);
+    const referenceInstruction = referenceType === PLANNING_REFERENCE_DISCOVERED
+      ? discoveredProductReferenceInstruction(productName)
+      : cleanText(post.orientacao_visual || post.foto_referencia?.orientacao_visual);
+    const reference = {
+      ...(post.foto_referencia || {}),
+      slot_id: cleanText(source.slot_id || source.slotId),
+      arquivo_index: Math.max(0, Number(source.arquivo_index || source.file_index || 0) || 0),
+      arquivo: cleanText(source.arquivo),
+      filename: cleanText(source.filename || source.arquivo),
+      ordem: Math.max(1, Number(source.ordem || source.numero || index + 1) || index + 1),
+      tem_arquivo: hasFile,
+      sem_imagem: !hasFile,
+      produto_identificado: productName,
+      preco: price,
+      tipo_referencia: referenceType,
+      objetivo_cliente: objective,
+      escrita_imagem: imageWriting,
+      texto_obrigatorio_imagem: structuredContract ? imageWriting : cleanText(post.foto_referencia?.texto_obrigatorio_imagem),
+      nivel_edicao_cliente: level,
+      orientacao_cliente: cleanText(source.orientacao),
+      orientacao_visual: referenceInstruction,
+      contrato_foto_estruturado: structuredContract
+    };
+
+    return {
+      ...post,
+      slot_id: reference.slot_id,
+      arquivo_index: reference.arquivo_index,
+      filename: reference.filename,
+      produto_identificado: productName,
+      preco: price,
+      tipo_referencia: referenceType,
+      escrita_imagem_cliente: imageWriting,
+      objetivo_foto_cliente: objective,
+      nivel_edicao_cliente: level,
+      contrato_foto_estruturado: structuredContract,
+      texto_obrigatorio_imagem: structuredContract ? imageWriting : post.texto_obrigatorio_imagem,
+      orientacao_visual: referenceInstruction || post.orientacao_visual,
+      foto_referencia: reference
+    };
+  });
+}
+
 function photoReferenceOrder(item = {}) {
   const ref = item.foto_referencia || {};
   const ordem = Number(ref.ordem || ref.order || ref.index || 0);
@@ -2690,12 +2821,28 @@ function photoReferenceName(item = {}) {
   return String(ref.filename || ref.original_name || ref.arquivo || ref.file || "").trim().toLowerCase();
 }
 
+function photoReferenceSlotId(item = {}) {
+  const ref = item.foto_referencia || {};
+  return cleanText(ref.slot_id || ref.slotId || item.slot_id || item.slotId).toLowerCase();
+}
+
+function photoReferenceFileIndex(item = {}) {
+  const ref = item.foto_referencia || {};
+  const value = Number(ref.arquivo_index || ref.file_index || item.arquivo_index || item.file_index || 0);
+  return Number.isFinite(value) && value > 0 ? Math.floor(value) : 0;
+}
+
+function photoAssetNames(asset = {}) {
+  return [asset.filename, asset.original_name, asset.arquivo, asset.file]
+    .map((value) => cleanText(value).toLowerCase())
+    .filter(Boolean);
+}
+
 function selectPlanningPhotoAssets(planning, item = {}) {
   const assets = planning.assets || {};
   const photos = Array.isArray(assets.fotos) ? assets.fotos : [];
   if (!photos.length) return [];
 
-  const postOrder = Number(item.ordem || 0);
   const ref = item.foto_referencia || {};
   if (
     item.sem_imagem === true ||
@@ -2705,30 +2852,54 @@ function selectPlanningPhotoAssets(planning, item = {}) {
   ) {
     return [];
   }
+  const refSlotId = photoReferenceSlotId(item);
+  const refFileIndex = photoReferenceFileIndex(item);
   const refOrder = photoReferenceOrder(item);
   const refName = photoReferenceName(item);
-  const refLooksSpecific = refOrder > 0 && refOrder === postOrder && postOrder <= photos.length;
 
-  if (refLooksSpecific) {
-    const byOrder = photos[refOrder - 1];
-    if (byOrder && typeof byOrder === "object") {
-      return [{ asset: byOrder, originalIndex: refOrder - 1 }];
+  if (refSlotId) {
+    const slotMatches = photos
+      .map((asset, originalIndex) => ({ asset, originalIndex }))
+      .filter(({ asset }) => cleanText(asset?.slot_id || asset?.slotId).toLowerCase() === refSlotId);
+    if (slotMatches.length === 1) return slotMatches;
+  }
+
+  if (refFileIndex > 0) {
+    const indexedMatches = photos
+      .map((asset, originalIndex) => ({ asset, originalIndex }))
+      .filter(({ asset, originalIndex }) => {
+        const assetFileIndex = Number(asset?.arquivo_index || asset?.file_index || 0);
+        const indexMatches = assetFileIndex > 0
+          ? assetFileIndex === refFileIndex
+          : originalIndex === refFileIndex - 1;
+        return indexMatches && (!refName || photoAssetNames(asset).includes(refName));
+      });
+    if (indexedMatches.length === 1) return indexedMatches;
+  }
+
+  if (refName) {
+    const nameMatches = photos
+      .map((asset, originalIndex) => ({ asset, originalIndex }))
+      .filter(({ asset }) => photoAssetNames(asset).includes(refName));
+    if (nameMatches.length === 1) return nameMatches;
+  }
+
+  const hasStableReference = Boolean(refSlotId || refFileIndex || refName);
+  if (!hasStableReference && refOrder > 0) {
+    const orderMatches = photos
+      .map((asset, originalIndex) => ({ asset, originalIndex }))
+      .filter(({ asset }) => Number(asset?.ordem || 0) === refOrder);
+    if (orderMatches.length === 1) return orderMatches;
+  }
+
+  if (!hasStableReference && photos.length === 1) {
+    const onlyPhoto = photos[0];
+    if (onlyPhoto && typeof onlyPhoto === "object") {
+      return [{ asset: onlyPhoto, originalIndex: 0 }];
     }
   }
 
-  if (refLooksSpecific && refName) {
-    const matchedIndex = photos.findIndex((photo) => {
-      if (!photo || typeof photo !== "object") return false;
-      return [photo.filename, photo.original_name, photo.arquivo, photo.file]
-        .map((value) => String(value || "").trim().toLowerCase())
-        .includes(refName);
-    });
-    if (matchedIndex >= 0) {
-      return [{ asset: photos[matchedIndex], originalIndex: matchedIndex }];
-    }
-  }
-
-  return photos.map((asset, originalIndex) => ({ asset, originalIndex }));
+  return [];
 }
 
 function copyPlanningAssetsToOrder(planning, orderBase, item = {}) {
@@ -2767,6 +2938,25 @@ function copyPlanningAssetsToOrder(planning, orderBase, item = {}) {
 function cleanText(value, fallback = "") {
   const text = String(value || "").trim();
   return text || fallback;
+}
+
+function normalizePlanningReferenceType(value = "") {
+  const normalized = String(value || "").trim().toLowerCase();
+  return normalized === PLANNING_REFERENCE_DISCOVERED
+    ? PLANNING_REFERENCE_DISCOVERED
+    : PLANNING_REFERENCE_MANUAL;
+}
+
+function discoveredProductReferenceInstruction(productName = "") {
+  const focus = cleanText(productName);
+  return [
+    "Use a imagem enviada como referencia visual do produto identificado.",
+    focus ? `O foco e ${focus}.` : "Preserve fielmente o produto principal identificado.",
+    "Preserve fielmente o produto principal, suas cores, formato, marca e caracteristicas visiveis.",
+    "Ignore fundo, prateleira, cabos e objetos vizinhos.",
+    "Nao copie a composicao original do ambiente.",
+    "Crie uma nova composicao publicitaria profissional ao redor do produto."
+  ].join(" ");
 }
 
 function cleanInternalPlanningText(value, fallback = "") {
@@ -3059,6 +3249,25 @@ function classifyCustomerOrientation(value = "") {
 
 function mergeOrientationRouting(item = {}) {
   const photo = item.foto_referencia || {};
+  const structuredContract = item.contrato_foto_estruturado === true || photo.contrato_foto_estruturado === true;
+  if (structuredContract) {
+    const productName = cleanText(item.produto_identificado || photo.produto_identificado);
+    const referenceType = normalizePlanningReferenceType(item.tipo_referencia || photo.tipo_referencia);
+    const structuredVisual = referenceType === PLANNING_REFERENCE_DISCOVERED
+      ? discoveredProductReferenceInstruction(productName)
+      : cleanText(item.orientacao_visual || photo.orientacao_visual);
+    return {
+      orientacao_visual: structuredVisual,
+      texto_obrigatorio_imagem: cleanText(item.escrita_imagem_cliente || photo.escrita_imagem),
+      orientacao_legenda: cleanText(item.orientacao_legenda || photo.orientacao_legenda),
+      objetivo_foto_cliente: cleanText(item.objetivo_foto_cliente || photo.objetivo_cliente),
+      nivel_edicao_cliente: Math.min(3, Math.max(1, Number(item.nivel_edicao_cliente || photo.nivel_edicao_cliente || 2) || 2)),
+      texto_proibido: Array.from(new Set([
+        ...normalizeArray(item.texto_proibido),
+        ...normalizeArray(photo.texto_proibido)
+      ]))
+    };
+  }
   const orientation = orientationForItem(item);
   const parsed = parsePhotoOrientationBlocks(orientation);
   const classified = classifyCustomerOrientation(parsed.visual);
@@ -3224,6 +3433,13 @@ function buildChildOrder({ planning, item, itemId, pedidoId, mesAtual, copiedAss
   const orientacaoFlags = orientationFlags(orientacaoCliente);
   const orientacaoEstruturada = parsePhotoOrientationBlocks(orientacaoCliente);
   const orientacaoRoteada = mergeOrientationRouting(item);
+  const photoReference = item.foto_referencia || {};
+  const produtoIdentificado = cleanText(item.produto_identificado || photoReference.produto_identificado);
+  const precoProduto = cleanText(item.preco || photoReference.preco);
+  const tipoReferencia = normalizePlanningReferenceType(item.tipo_referencia || photoReference.tipo_referencia);
+  const referenceSlotId = cleanText(item.slot_id || photoReference.slot_id);
+  const referenceFileIndex = Math.max(0, Number(item.arquivo_index || photoReference.arquivo_index || 0) || 0);
+  const referenceFilename = cleanText(item.filename || photoReference.filename || photoReference.arquivo);
   const objetivoFotoCliente = cleanText(orientacaoRoteada.objetivo_foto_cliente || orientacaoEstruturada.objetivo);
   const objetivoPedido = cleanText(objetivoFotoCliente, objetivoPostagem);
   const hasStructuredOrientation = Boolean(
@@ -3270,6 +3486,12 @@ function buildChildOrder({ planning, item, itemId, pedidoId, mesAtual, copiedAss
     informacoes_empresa: informacoesEmpresa,
     estilo_visual_cliente: estiloVisual,
     frase_foto: orientacaoRoteada.texto_obrigatorio_imagem,
+    produto_identificado: produtoIdentificado,
+    preco: precoProduto,
+    tipo_referencia: tipoReferencia,
+    slot_id: referenceSlotId,
+    arquivo_index: referenceFileIndex,
+    filename: referenceFilename,
     observacoes: [
       briefingArte,
       dataSugerida ? `Data sugerida: ${dataSugerida}` : "",
@@ -3295,6 +3517,12 @@ function buildChildOrder({ planning, item, itemId, pedidoId, mesAtual, copiedAss
       orientacao_flags: orientacaoFlags,
       orientacao_visual: orientacaoRoteada.orientacao_visual,
       texto_obrigatorio_imagem: orientacaoRoteada.texto_obrigatorio_imagem,
+      produto_identificado: produtoIdentificado,
+      preco: precoProduto,
+      tipo_referencia: tipoReferencia,
+      slot_id: referenceSlotId,
+      arquivo_index: referenceFileIndex,
+      filename: referenceFilename,
       orientacao_legenda: orientacaoRoteada.orientacao_legenda,
       caracteristicas_empresa: caracteristicasEmpresa,
       informacoes_empresa: informacoesEmpresa,
@@ -3328,6 +3556,12 @@ function buildChildOrder({ planning, item, itemId, pedidoId, mesAtual, copiedAss
     orientacao_flags: orientacaoFlags,
     orientacao_visual: orientacaoRoteada.orientacao_visual,
     texto_obrigatorio_imagem: orientacaoRoteada.texto_obrigatorio_imagem,
+    produto_identificado: produtoIdentificado,
+    preco: precoProduto,
+    tipo_referencia: tipoReferencia,
+    slot_id: referenceSlotId,
+    arquivo_index: referenceFileIndex,
+    filename: referenceFilename,
     orientacao_legenda: orientacaoRoteada.orientacao_legenda,
     caracteristicas_empresa: caracteristicasEmpresa,
     informacoes_empresa: informacoesEmpresa,
@@ -3375,6 +3609,12 @@ function buildChildOrder({ planning, item, itemId, pedidoId, mesAtual, copiedAss
     orientacao_flags: orientacaoFlags,
     orientacao_visual: orientacaoRoteada.orientacao_visual,
     texto_obrigatorio_imagem: orientacaoRoteada.texto_obrigatorio_imagem,
+    produto_identificado: produtoIdentificado,
+    preco: precoProduto,
+    tipo_referencia: tipoReferencia,
+    slot_id: referenceSlotId,
+    arquivo_index: referenceFileIndex,
+    filename: referenceFilename,
     orientacao_legenda: orientacaoRoteada.orientacao_legenda,
     preservar_pessoa: personRules.length > 0,
     regras_preservacao_pessoa: personRules,
@@ -3422,6 +3662,12 @@ function buildChildOrder({ planning, item, itemId, pedidoId, mesAtual, copiedAss
       informacoes_empresa: informacoesEmpresa,
       estilo_visual_cliente: estiloVisual,
       frase_foto: orientacaoRoteada.texto_obrigatorio_imagem,
+      produto_identificado: produtoIdentificado,
+      preco: precoProduto,
+      tipo_referencia: tipoReferencia,
+      slot_id: referenceSlotId,
+      arquivo_index: referenceFileIndex,
+      filename: referenceFilename,
       observacoes: fields.observacoes,
       historia_empresa: fields.historia_empresa,
       rodada: "",
@@ -3810,11 +4056,12 @@ function savePlanResult({ baseDir, planningId, payload = {}, pedidosDir = "", cl
   }
 
   const plan = normalizePlanResultPayload(payload);
-  const postagens = Array.isArray(plan.postagens)
+  const rawPostagens = Array.isArray(plan.postagens)
     ? plan.postagens
     : Array.isArray(plan.itens)
       ? plan.itens
       : [];
+  const postagens = enrichPlanPhotoReferences(planning, rawPostagens);
 
   if (!postagens.length) {
     const error = new Error("plano_mensal precisa conter postagens planejadas.");
@@ -4208,6 +4455,11 @@ module.exports = {
     parsePlanningPhotoItems,
     planningPhotoItemsAreStructured,
     buildPlanningPhotoItems,
-    selectPlanningPhotoAssets
+    selectPlanningPhotoAssets,
+    enrichPlanPhotoReferences,
+    mergeOrientationRouting,
+    buildChildOrder,
+    normalizePlanningReferenceType,
+    discoveredProductReferenceInstruction
   }
 };
