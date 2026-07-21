@@ -35,6 +35,48 @@ class MonthlyPlanningPipelineTest(unittest.TestCase):
         self.assertIn("Preserve produto, ambiente, pessoa, cor e contexto da foto", prompt)
         self.assertNotIn("Nao copie a composicao original do ambiente", prompt)
 
+    def test_provided_logo_is_mandatory_for_discovered_product_without_losing_product_focus(self):
+        pedido = {
+            "tipo_referencia": "produto_descoberto",
+            "produto_identificado": "Mouse optico Philips USB",
+            "assets": {"fotos": ["foto01.jpg"], "logo": "logo.png"},
+        }
+
+        prompt = pipeline.build_prompt(pedido, [Path("foto01.jpg"), Path("logo.png")])
+
+        self.assertIn("LOGO FORNECIDA - PRESENCA VISUAL OBRIGATORIA", prompt)
+        self.assertIn("A imagem final DEVE mostrar essa mesma logo", prompt)
+        self.assertIn("claramente visivel e legivel", prompt)
+        self.assertIn("Preserve fielmente desenho, simbolo, texto, proporcoes, cores", prompt)
+        self.assertIn("Nao use a logo apenas como inspiracao", prompt)
+        self.assertIn("Nao omita, oculte, substitua, redesenhe, estilize, deforme, recorte nem invente outra logo", prompt)
+        self.assertIn("Nao deixe a logo pequena demais para leitura", prompt)
+        self.assertIn("nem parcialmente fora dos limites da arte", prompt)
+        self.assertIn("o produto ou servico continua sendo o foco principal da arte", prompt)
+        self.assertNotIn("incluindo logo, apenas como apoio", prompt)
+
+    def test_provided_logo_has_same_mandatory_contract_for_manual_photo(self):
+        pedido = {
+            "assets": {"fotos": ["foto01.jpg"], "logo": "logo.png"},
+        }
+
+        prompt = pipeline.build_prompt(pedido, [Path("foto01.jpg"), Path("logo.png")])
+
+        self.assertIn("Tipo da referencia: foto_manual", prompt)
+        self.assertIn("A imagem enviada manda na composicao visual", prompt)
+        self.assertIn("LOGO FORNECIDA - PRESENCA VISUAL OBRIGATORIA", prompt)
+        self.assertIn("A imagem final DEVE mostrar essa mesma logo", prompt)
+
+    def test_order_without_logo_does_not_invent_or_reserve_logo_space(self):
+        pedido = {"assets": {"fotos": ["foto01.jpg"], "logo": ""}}
+
+        prompt = pipeline.build_prompt(pedido, [Path("foto01.jpg")])
+
+        self.assertIn("Nenhuma logo valida foi fornecida neste pedido", prompt)
+        self.assertIn("Nao invente logo, marca ou simbolo", prompt)
+        self.assertIn("nao reserve espaco vazio para uma logo inexistente", prompt)
+        self.assertNotIn("LOGO FORNECIDA - PRESENCA VISUAL OBRIGATORIA", prompt)
+
     def test_more_than_eight_declared_references_fails_without_silent_truncation(self):
         with tempfile.TemporaryDirectory() as tmp:
             pedido_dir = Path(tmp)

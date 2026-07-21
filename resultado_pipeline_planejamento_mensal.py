@@ -560,6 +560,12 @@ def pessoa_block(pedido):
 def build_prompt(pedido, referencias):
     instructions = planning_instructions(pedido)
     style = planning_style(pedido)
+    declared_logo_names = {
+        clean_file_name(name).lower()
+        for name in collect_declared_asset_names(pedido, "logo")
+        if clean_file_name(name)
+    }
+    has_logo = any(ref.name.lower() in declared_logo_names for ref in referencias)
     has_photo = bool(collect_declared_asset_names(pedido, "fotos")) or any(
         ref.name.lower().startswith("foto") for ref in referencias
     )
@@ -567,7 +573,7 @@ def build_prompt(pedido, referencias):
     if has_photo and len(referencias) == 1:
         foto_info = "Ha uma foto principal neste pedido. Use essa foto como referencia visual principal."
     elif has_photo and len(referencias) > 1:
-        foto_info = "Ha uma foto principal neste pedido. Use a foto principal como base e as demais imagens, incluindo logo, apenas como apoio de identidade visual."
+        foto_info = "Ha uma foto principal neste pedido. Use a foto principal como base e as demais imagens como apoio visual. Se houver logo fornecida, cumpra integralmente o contrato obrigatorio de logo abaixo."
     elif len(referencias) > 1:
         foto_info = "Ha mais de uma referencia neste pedido. Use as imagens apenas como apoio visual e de identidade."
 
@@ -595,6 +601,20 @@ def build_prompt(pedido, referencias):
         photo_rules = """- A imagem enviada manda na composicao visual.
 - Preserve produto, ambiente, pessoa, cor e contexto da foto.
 - Nao misture fotos de outros posts."""
+
+    if has_logo:
+        logo_rules = """LOGO FORNECIDA - PRESENCA VISUAL OBRIGATORIA:
+- Uma das referencias enviadas e a logo valida da empresa.
+- A imagem final DEVE mostrar essa mesma logo de forma claramente visivel e legivel.
+- Preserve fielmente desenho, simbolo, texto, proporcoes, cores e identidade da logo fornecida.
+- Nao use a logo apenas como inspiracao: reproduza visualmente a logo fornecida na arte final.
+- Nao omita, oculte, substitua, redesenhe, estilize, deforme, recorte nem invente outra logo.
+- Nao deixe a logo pequena demais para leitura nem parcialmente fora dos limites da arte.
+- Integre a logo profissionalmente sem impor posicao fixa; o produto ou servico continua sendo o foco principal da arte."""
+    else:
+        logo_rules = """LOGO:
+- Nenhuma logo valida foi fornecida neste pedido.
+- Nao invente logo, marca ou simbolo e nao reserve espaco vazio para uma logo inexistente."""
 
     return f"""
 Crie uma arte vertical profissional para Instagram, pronta para postar.
@@ -639,6 +659,8 @@ FOTOS E REFERENCIAS:
 {foto_info}
 Tipo da referencia: {reference_type}
 {photo_rules}
+
+{logo_rules}
 
 {pessoa_block(pedido)}
 
