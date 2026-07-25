@@ -1110,17 +1110,18 @@ class IA4TubeApiClient(
             httpClient.newCall(request).execute().use { response ->
                 val text = response.body?.string().orEmpty()
                 val contentType = response.header("Content-Type").orEmpty()
-                val preview = text.take(500)
+                val preview = redactForLog(text.take(500))
+                val requestUrlForLog = safeUrlForLog(request.url.toString())
                 Log.d(
                     TAG,
-                    "HTTP ${response.code} ${request.method} ${request.url} contentType=$contentType bodyPreview=$preview"
+                    "HTTP ${response.code} ${request.method} $requestUrlForLog contentType=$contentType bodyPreview=$preview"
                 )
 
                 val trimmed = text.trimStart()
                 if (trimmed.isNotBlank() && !trimmed.startsWith("{") && !trimmed.startsWith("[")) {
                     Log.w(
                         TAG,
-                        "Resposta nao JSON em ${request.method} ${request.url} status=${response.code} bodyPreview=$preview"
+                        "Resposta nao JSON em ${request.method} $requestUrlForLog status=${response.code} bodyPreview=$preview"
                     )
                     return ApiResult.Failure(
                         message = if (response.code == 402) BILLING_REQUIRED_MESSAGE else CREATE_ORDER_UNAVAILABLE_MESSAGE,
@@ -1134,7 +1135,7 @@ class IA4TubeApiClient(
                 } catch (error: JSONException) {
                     Log.e(
                         TAG,
-                        "Erro ao interpretar JSON de ${request.method} ${request.url} status=${response.code} bodyPreview=$preview",
+                        "Erro ao interpretar JSON de ${request.method} $requestUrlForLog status=${response.code} bodyPreview=$preview",
                         error
                     )
                     return ApiResult.Failure(
@@ -1154,7 +1155,7 @@ class IA4TubeApiClient(
                     }
                     Log.w(
                         TAG,
-                        "API falhou em ${request.method} ${request.url} status=${response.code} code=$errorCode message=$errorMessage bodyPreview=$preview"
+                        "API falhou em ${request.method} $requestUrlForLog status=${response.code} code=$errorCode message=${redactForLog(errorMessage)} bodyPreview=$preview"
                     )
                     return ApiResult.Failure(
                         message = errorMessage,
@@ -1168,7 +1169,7 @@ class IA4TubeApiClient(
         } catch (error: IOException) {
             ApiResult.Failure(error.message ?: "Erro de rede")
         } catch (error: JSONException) {
-            Log.e(TAG, "Erro ao interpretar resposta JSON de ${request.url}", error)
+            Log.e(TAG, "Erro ao interpretar resposta JSON de ${safeUrlForLog(request.url.toString())}", error)
             ApiResult.Failure(CREATE_ORDER_UNAVAILABLE_MESSAGE)
         } catch (error: Exception) {
             ApiResult.Failure(error.message ?: "Erro inesperado")
@@ -1263,14 +1264,42 @@ class IA4TubeApiClient(
             "Não foi possível criar o pedido agora. Tente novamente em alguns instantes."
         private const val BILLING_REQUIRED_MESSAGE =
             "Você precisa comprar 1 arte por R$ 5,99 ou escolher um combo."
+        private const val REDACTED = "[REDACTED]"
         private val JSON = "application/json; charset=utf-8".toMediaType()
+        private val SENSITIVE_QUERY_VALUE = Regex(
+            """(?i)([?&](?:access_token|refresh_token|id_token|code|client_secret|password|senha|token|sig|signature)=)[^&#\s]*"""
+        )
+        private val SENSITIVE_JSON_VALUE = Regex(
+            """(?i)("(?:authorization|access_token|refresh_token|id_token|client_secret|password|senha|token|whatsapp|email|cpf|cnpj)"\s*:\s*")[^"]*(")"""
+        )
+        private val JWT_VALUE = Regex("""\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b""")
+
+        private fun redactForLog(value: String): String {
+            return value
+                .replace(SENSITIVE_QUERY_VALUE) { match -> "${match.groupValues[1]}$REDACTED" }
+                .replace(SENSITIVE_JSON_VALUE) { match -> "${match.groupValues[1]}$REDACTED${match.groupValues[2]}" }
+                .replace(JWT_VALUE, REDACTED)
+                .replace(Regex("""(?i)Bearer\s+[A-Za-z0-9._~+/=-]+"""), "Bearer $REDACTED")
+        }
+
+        private fun safeUrlForLog(value: String): String {
+            return runCatching {
+                val uri = java.net.URI(value)
+                val base = buildString {
+                    if (!uri.scheme.isNullOrBlank()) append(uri.scheme).append("://")
+                    if (!uri.rawAuthority.isNullOrBlank()) append(uri.rawAuthority)
+                    append(uri.rawPath.orEmpty())
+                }
+                if (uri.rawQuery.isNullOrBlank()) base else "$base?[REDACTED]"
+            }.getOrElse { redactForLog(value) }
+        }
 
         private fun logMultipart(url: String, fields: Iterable<String>, files: Iterable<br.com.ia4tube.app.data.models.UploadFile>) {
             val fieldNames = fields.distinct().joinToString(",")
             val fileInfo = files.joinToString(";") { file ->
                 "${file.fileName}|${file.contentType}|${file.bytes.size} bytes"
             }
-            Log.d(TAG, "Multipart url=$url fields=$fieldNames files=$fileInfo")
+            Log.d(TAG, "Multipart url=${safeUrlForLog(url)} fields=$fieldNames files=$fileInfo")
         }
 
         private fun adjustmentMessage(json: JSONObject): String {

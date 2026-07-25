@@ -31,7 +31,19 @@ function safeReadJson(filePath) {
   }
 }
 
+function isSafePathSegment(value) {
+  const normalized = String(value || "");
+  return Boolean(normalized) &&
+    normalized.length <= 200 &&
+    normalized !== "." &&
+    normalized !== ".." &&
+    !normalized.includes("/") &&
+    !normalized.includes("\\") &&
+    !/[\u0000-\u001f\u007f]/.test(normalized);
+}
+
 function getPedidoBase(pedidosDir, whatsapp, pedidoId) {
+  if (!isSafePathSegment(whatsapp) || !isSafePathSegment(pedidoId)) return null;
   const pastaWhatsapp = path.join(pedidosDir, whatsapp);
 
   if (!fs.existsSync(pastaWhatsapp)) return null;
@@ -47,6 +59,7 @@ function getPedidoBase(pedidosDir, whatsapp, pedidoId) {
 }
 
 function getPedidoBaseGlobal(pedidosDir, pedidoId) {
+  if (!isSafePathSegment(pedidoId)) return null;
   if (!fs.existsSync(pedidosDir)) return null;
 
   const whatsapps = fs.readdirSync(pedidosDir);
@@ -67,6 +80,7 @@ function getPedidoBaseGlobal(pedidosDir, pedidoId) {
 }
 
 function listPedidoBasesByWhatsapp(pedidosDir, whatsapp) {
+  if (!isSafePathSegment(whatsapp)) return [];
   const pastaWhatsapp = path.join(pedidosDir, whatsapp);
 
   if (!fs.existsSync(pastaWhatsapp)) return [];
@@ -167,6 +181,7 @@ module.exports = {
   removeOldPedidos,
   getOrderJsonPath,
   getStatusPath,
+  isSafePathSegment,
   readOrder,
   writeOrder,
   readStatus,

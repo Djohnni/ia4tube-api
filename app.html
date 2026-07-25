@@ -6667,6 +6667,20 @@ const API_BASE = ["localhost", "127.0.0.1"].includes(location.hostname) ? "http:
 
 let token = localStorage.getItem("omascote_token");
 
+async function obterUrlProtegidaPedido(pedidoId, variant = "preview"){
+  if(!token || !pedidoId) throw new Error("Autorizacao obrigatoria");
+  const url = new URL(`${API_BASE}/pedidos/${encodeURIComponent(pedidoId)}/media-url`);
+  url.searchParams.set("variant", variant);
+  const response = await fetch(url.toString(), {
+    headers: { "Authorization": "Bearer " + token }
+  });
+  const data = await response.json();
+  if(!response.ok || !data.ok || !data.url){
+    throw new Error(data.error || "Nao foi possivel carregar a imagem.");
+  }
+  return data.url;
+}
+
 // removido: JavaScript dos stories
 
 
@@ -10317,7 +10331,7 @@ function iniciarProgressoNoProduto(form, pedidoId, startedAt){
   cleanProductProgressTimers.set(form, { timer, pedidoId });
 }
 
-function finalizarProgressoNoProduto(form, pedidoId){
+function finalizarProgressoNoProduto(form, pedidoId, protectedPreviewUrl = ""){
   const state = cleanProductProgressTimers.get(form);
   if(state?.timer) clearInterval(state.timer);
   cleanProductProgressTimers.delete(form);
@@ -10326,25 +10340,32 @@ function finalizarProgressoNoProduto(form, pedidoId){
   if(!imageBox) return;
 
   const img = imageBox.querySelector("img");
-  const previewUrl = pedidoId ? `${API_BASE}/pedidos/${pedidoId}/preview?ts=${Date.now()}` : "";
-  if(img && pedidoId){
-    img.src = previewUrl;
-    img.setAttribute("data-preview-url", previewUrl);
-    img.style.cursor = "pointer";
-    img.onclick = () => abrirPedidoDireto(pedidoId);
-  }
+  const applyPreviewUrl = (previewUrl) => {
+    if(!previewUrl || !pedidoId) return;
+    if(img){
+      img.src = previewUrl;
+      img.setAttribute("data-preview-url", previewUrl);
+      img.style.cursor = "pointer";
+      img.onclick = () => abrirPedidoDireto(pedidoId);
+    }
 
-  if(previewUrl){
     imageBox.dataset.previewUrl = previewUrl;
     imageBox.dataset.previewPedidoId = pedidoId;
     imageBox.style.cursor = "pointer";
     imageBox.onclick = (ev) => {
       ev.preventDefault();
       ev.stopPropagation();
-      console.log("[preview-card-click]", { pedidoId, target: ev.target });
       abrirPedidoDireto(pedidoId);
     };
     imageBox.classList.add("is-preview-ready");
+  };
+
+  if(protectedPreviewUrl){
+    applyPreviewUrl(protectedPreviewUrl);
+  }else if(pedidoId){
+    obterUrlProtegidaPedido(pedidoId, "preview")
+      .then(applyPreviewUrl)
+      .catch(() => restaurarImagemOriginalDoProduto(form));
   }
 
   renderCleanProgressOverlay(imageBox, 100, "Arte pronta!");
@@ -10573,8 +10594,8 @@ async function acompanharResultadoClean(pedidoId, form){
         clearInterval(timer);
         cleanProductResultWatchers.delete(pedidoId);
         marcarMarketingVideoArtePronta(pedidoId, form);
-        finalizarProgressoNoProduto(form, pedidoId);
-        const previewUrl = `${API_BASE}/pedidos/${pedidoId}/preview?ts=${Date.now()}`;
+        finalizarProgressoNoProduto(form, pedidoId, data.preview_url || "");
+        const previewUrl = data.preview_url || await obterUrlProtegidaPedido(pedidoId, "preview");
         if(statusElLocal) statusElLocal.textContent = "Confira sua arte antes de baixar";
         if(imgEl){
           imgEl.src = previewUrl;
@@ -10642,7 +10663,7 @@ function restaurarPedidosAtivos(pedidos){
     if(pedido.imagem_pronta === true){
       const imageBox = getCleanProductImageFromForm(form);
       if(imageBox?.dataset.previewPedidoId !== pedido.id){
-        finalizarProgressoNoProduto(form, pedido.id);
+        finalizarProgressoNoProduto(form, pedido.id, pedido.imagem_url || pedido.preview_url || "");
       }
       continue;
     }
@@ -15448,7 +15469,7 @@ async function acompanharResultado(pedidoId){
       if(data.ok && data.imagem_pronta){
         clearInterval(timer);
 
-        const previewUrl = `${API_BASE}/pedidos/${pedidoId}/preview?ts=${Date.now()}`;
+        const previewUrl = data.preview_url || await obterUrlProtegidaPedido(pedidoId, "preview");
 
         statusElLocal.textContent = "Confira sua arte antes de baixar";
         imgEl.src = previewUrl;
