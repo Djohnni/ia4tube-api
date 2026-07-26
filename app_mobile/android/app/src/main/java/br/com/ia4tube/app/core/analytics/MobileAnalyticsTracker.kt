@@ -3,6 +3,7 @@ package br.com.ia4tube.app.core.analytics
 import android.content.Context
 import android.os.Build
 import br.com.ia4tube.app.core.config.AppConfig
+import br.com.ia4tube.app.core.config.EnvironmentIsolationInterceptor
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -45,6 +46,7 @@ class MobileAnalyticsTracker(
         payload: Map<String, String> = emptyMap(),
         flushNow: Boolean = false
     ) {
+        if (!AppConfig.mobileAnalyticsEnabled) return
         val safeEvent = if (eventName.startsWith("mobile_")) eventName else "mobile_$eventName"
         val sanitizedPayload = payload
             .filterKeys { key -> !key.contains("senha", ignoreCase = true) && !key.contains("token", ignoreCase = true) }
@@ -83,6 +85,7 @@ class MobileAnalyticsTracker(
     }
 
     fun flush() {
+        if (!AppConfig.mobileAnalyticsEnabled) return
         scope.launch { flushInternal() }
     }
 
@@ -97,6 +100,7 @@ class MobileAnalyticsTracker(
     }
 
     private suspend fun flushInternal() {
+        if (!AppConfig.mobileAnalyticsEnabled) return
         val events = queue.drain(50)
         if (events.isEmpty()) return
 
@@ -161,6 +165,9 @@ class MobileAnalyticsTracker(
 
         private fun defaultClient(): OkHttpClient {
             return OkHttpClient.Builder()
+                .addInterceptor(EnvironmentIsolationInterceptor())
+                .followRedirects(!AppConfig.isStaging)
+                .followSslRedirects(!AppConfig.isStaging)
                 .connectTimeout(8, TimeUnit.SECONDS)
                 .readTimeout(8, TimeUnit.SECONDS)
                 .writeTimeout(8, TimeUnit.SECONDS)

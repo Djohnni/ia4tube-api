@@ -1,5 +1,6 @@
 package br.com.ia4tube.app.core.notifications
 
+import android.annotation.SuppressLint
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -12,6 +13,7 @@ import android.net.Uri
 import android.os.Build
 import br.com.ia4tube.app.MainActivity
 import br.com.ia4tube.app.R
+import br.com.ia4tube.app.core.config.AppConfig
 import java.net.HttpURLConnection
 import java.net.URL
 
@@ -20,10 +22,12 @@ object IA4TubeNotificationHelper {
     private const val CHANNEL_NAME = "Atualizacoes da iA4tube"
 
     fun ensureDefaultChannel(context: Context) {
+        if (!AppConfig.notificationsEnabled) return
         val manager = context.applicationContext.getSystemService(NotificationManager::class.java)
         ensureChannel(manager)
     }
 
+    @SuppressLint("NotificationPermission")
     fun show(
         context: Context,
         title: String,
@@ -31,6 +35,7 @@ object IA4TubeNotificationHelper {
         imageUrl: String? = null,
         data: Map<String, String>
     ) {
+        if (!AppConfig.notificationsEnabled) return
         val appContext = context.applicationContext
         val manager = appContext.getSystemService(NotificationManager::class.java)
         ensureChannel(manager)

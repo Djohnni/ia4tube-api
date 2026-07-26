@@ -26,6 +26,7 @@ import androidx.core.content.ContextCompat
 import br.com.ia4tube.app.core.notifications.IA4TubeNotificationHelper
 import br.com.ia4tube.app.core.notifications.NotificationNavigationTarget
 import br.com.ia4tube.app.core.notifications.toNotificationNavigationTarget
+import br.com.ia4tube.app.core.config.AppConfig
 import br.com.ia4tube.app.data.api.IA4TubeApiClient
 import br.com.ia4tube.app.data.models.ApiResult
 import br.com.ia4tube.app.data.models.AppVersionInfo
@@ -45,8 +46,10 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         notificationTarget = intent.toNotificationNavigationTarget()
-        IA4TubeNotificationHelper.ensureDefaultChannel(this)
-        requestNotificationPermissionIfNeeded()
+        if (AppConfig.notificationsEnabled) {
+            IA4TubeNotificationHelper.ensureDefaultChannel(this)
+            requestNotificationPermissionIfNeeded()
+        }
         setContent {
             IA4TubeTheme {
                 AppUpdateGate {
@@ -90,6 +93,7 @@ private fun AppUpdateGate(
     var updateInfo by remember { mutableStateOf<AppVersionInfo?>(null) }
 
     LaunchedEffect(Unit) {
+        if (!AppConfig.appUpdateEnabled) return@LaunchedEffect
         when (val result = apiClient.appVersion()) {
             is ApiResult.Success -> {
                 val info = result.value
@@ -140,9 +144,9 @@ private fun AppUpdateGate(
 }
 
 private fun openPlayStore(context: Context, playStoreUrl: String) {
-    val safeUrl = playStoreUrl.ifBlank {
-        "https://play.google.com/store/apps/details?id=com.ia4tube.app"
-    }
+    if (!AppConfig.appUpdateEnabled) return
+    val safeUrl = playStoreUrl.ifBlank { AppConfig.playStoreUrl }
+    if (safeUrl.isBlank()) return
     val intent = Intent(Intent.ACTION_VIEW, Uri.parse(safeUrl)).apply {
         addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
     }

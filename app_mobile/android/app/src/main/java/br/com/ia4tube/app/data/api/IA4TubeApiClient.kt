@@ -2,6 +2,7 @@ package br.com.ia4tube.app.data.api
 
 import android.util.Log
 import br.com.ia4tube.app.core.config.AppConfig
+import br.com.ia4tube.app.core.config.EnvironmentIsolationInterceptor
 import br.com.ia4tube.app.data.models.AdjustmentResult
 import br.com.ia4tube.app.data.models.AppVersionInfo
 import br.com.ia4tube.app.data.models.ApiResult
@@ -99,8 +100,10 @@ class IA4TubeApiClient(
                 message = json.optString("message").ifBlank {
                     "Atualize o app para receber melhorias, corre\u00e7\u00f5es e uma experi\u00eancia mais est\u00e1vel."
                 },
-                playStoreUrl = json.optString("play_store_url").ifBlank {
-                    "https://play.google.com/store/apps/details?id=com.ia4tube.app"
+                playStoreUrl = if (AppConfig.appUpdateEnabled) {
+                    json.optString("play_store_url").ifBlank { AppConfig.playStoreUrl }
+                } else {
+                    ""
                 }
             )
         }
@@ -1629,6 +1632,9 @@ class IA4TubeApiClient(
 
         private fun defaultClient(): OkHttpClient {
             return OkHttpClient.Builder()
+                .addInterceptor(EnvironmentIsolationInterceptor())
+                .followRedirects(!AppConfig.isStaging)
+                .followSslRedirects(!AppConfig.isStaging)
                 .connectTimeout(20, TimeUnit.SECONDS)
                 .readTimeout(30, TimeUnit.SECONDS)
                 .writeTimeout(30, TimeUnit.SECONDS)

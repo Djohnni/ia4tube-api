@@ -8,7 +8,10 @@ import java.nio.charset.StandardCharsets
 object PreviewUrlBuilder {
     fun build(pedidoId: String, apiPreviewUrl: String = ""): String {
         val cleanApiUrl = apiPreviewUrl.trim()
-        if (cleanApiUrl.isNotBlank()) return normalize(cleanApiUrl)
+        if (cleanApiUrl.isNotBlank()) {
+            val normalized = normalize(cleanApiUrl)
+            if (!AppConfig.isStaging || isSameApiOrigin(normalized)) return normalized
+        }
 
         val encodedId = URLEncoder.encode(pedidoId, StandardCharsets.UTF_8.name())
         return "${AppConfig.apiBase}/pedidos/$encodedId/preview"
@@ -18,6 +21,18 @@ object PreviewUrlBuilder {
         val previewHost = previewUrl.toHost()
         val apiHost = AppConfig.apiBase.toHost()
         return previewHost.isNotBlank() && previewHost == apiHost
+    }
+
+    private fun isSameApiOrigin(url: String): Boolean {
+        return try {
+            val candidate = URI(url)
+            val api = URI(AppConfig.apiBase)
+            candidate.scheme.equals("https", ignoreCase = true) &&
+                candidate.host.equals(api.host, ignoreCase = true) &&
+                effectivePort(candidate) == effectivePort(api)
+        } catch (_: Exception) {
+            false
+        }
     }
 
     private fun normalize(rawUrl: String): String {
@@ -38,5 +53,9 @@ object PreviewUrlBuilder {
         URI(this).host.orEmpty().lowercase()
     } catch (_: Exception) {
         ""
+    }
+
+    private fun effectivePort(uri: URI): Int {
+        return if (uri.port >= 0) uri.port else if (uri.scheme.equals("https", ignoreCase = true)) 443 else 80
     }
 }

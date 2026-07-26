@@ -26,6 +26,7 @@ import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import br.com.ia4tube.app.core.download.ImageDownloadStore
 import br.com.ia4tube.app.core.download.ZipDownloadStore
+import br.com.ia4tube.app.core.config.AppConfig
 import br.com.ia4tube.app.core.company.CompanyProfileStore
 import br.com.ia4tube.app.core.notifications.FcmTokenRegistrar
 import br.com.ia4tube.app.core.notifications.NotificationNavigationTarget
@@ -779,10 +780,9 @@ private fun shouldUsePremiumShell(route: String?): Boolean {
 }
 
 private const val PENDING_CAMERA_ACTION = "__camera__"
-private const val WHATSAPP_SUPPORT_URL = "https://wa.me/554791049079"
-
 private fun openWhatsAppSupport(context: Context) {
-    val uri = Uri.parse(WHATSAPP_SUPPORT_URL)
+    if (!AppConfig.supportEnabled || AppConfig.supportUrl.isBlank()) return
+    val uri = Uri.parse(AppConfig.supportUrl)
     if (openSupportUri(context, uri, "com.whatsapp")) return
     if (openSupportUri(context, uri, "com.whatsapp.w4b")) return
     openSupportUri(context, uri, null)

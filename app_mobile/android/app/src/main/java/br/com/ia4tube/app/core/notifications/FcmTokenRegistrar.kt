@@ -2,6 +2,7 @@ package br.com.ia4tube.app.core.notifications
 
 import android.content.Context
 import android.util.Log
+import br.com.ia4tube.app.core.config.AppConfig
 import br.com.ia4tube.app.core.session.SessionStore
 import br.com.ia4tube.app.data.api.IA4TubeApiClient
 import br.com.ia4tube.app.data.models.ApiResult
@@ -22,6 +23,7 @@ class FcmTokenRegistrar(
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     fun syncCurrentToken() {
+        if (!AppConfig.fcmRegistrationEnabled) return
         if (!isFirebaseConfigured()) return
 
         runCatching {
@@ -36,6 +38,7 @@ class FcmTokenRegistrar(
     }
 
     fun syncToken(token: String) {
+        if (!AppConfig.fcmRegistrationEnabled) return
         val cleanToken = token.trim()
         if (cleanToken.isBlank()) return
 

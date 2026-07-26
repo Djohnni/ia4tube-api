@@ -1,15 +1,10 @@
+import groovy.json.JsonSlurper
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
     id("org.jetbrains.kotlin.plugin.compose")
     id("com.google.gms.google-services")
-}
-
-val googleServicesFile = layout.projectDirectory.file("google-services.json").asFile
-if (!googleServicesFile.isFile) {
-    throw org.gradle.api.GradleException(
-        "Missing app/google-services.json. Firebase/FCM builds must include this file."
-    )
 }
 
 val uploadStorePassword = providers.gradleProperty("IA4TUBE_UPLOAD_STORE_PASSWORD")
@@ -19,6 +14,9 @@ val uploadKeyPassword = providers.gradleProperty("IA4TUBE_UPLOAD_KEY_PASSWORD")
     .orElse(uploadStorePassword)
 
 val productionApiBase = "https://ia4tube-api.onrender.com"
+val stagingApiBase = "https://ia4tube-api-staging-checkpoint-a.onrender.com"
+val productionPlayStoreUrl = "https://play.google.com/store/apps/details?id=com.ia4tube.app"
+val productionSupportUrl = "https://wa.me/554791049079"
 val explicitDebugProductDiscoveryApiBase = providers
     .gradleProperty("IA4TUBE_PRODUCT_DISCOVERY_API_BASE")
     .orNull
@@ -44,6 +42,15 @@ android {
 
         buildConfigField("String", "API_BASE", productionApiBase.asBuildConfigString())
         buildConfigField("String", "PRODUCT_DISCOVERY_API_BASE", productionApiBase.asBuildConfigString())
+        buildConfigField("String", "PLAY_STORE_URL", productionPlayStoreUrl.asBuildConfigString())
+        buildConfigField("String", "SUPPORT_URL", productionSupportUrl.asBuildConfigString())
+        buildConfigField("boolean", "IS_STAGING", "false")
+        buildConfigField("boolean", "FCM_REGISTRATION_ENABLED", "true")
+        buildConfigField("boolean", "NOTIFICATIONS_ENABLED", "true")
+        buildConfigField("boolean", "MOBILE_ANALYTICS_ENABLED", "true")
+        buildConfigField("boolean", "PAYMENTS_ENABLED", "true")
+        buildConfigField("boolean", "SUPPORT_ENABLED", "true")
+        buildConfigField("boolean", "APP_UPDATE_ENABLED", "true")
     }
 
     signingConfigs {
@@ -72,6 +79,24 @@ android {
                 productionApiBase.asBuildConfigString()
             )
             signingConfig = signingConfigs.getByName("release")
+        }
+        create("staging") {
+            initWith(getByName("debug"))
+            applicationIdSuffix = ".staging"
+            versionNameSuffix = "-staging"
+            signingConfig = signingConfigs.getByName("debug")
+
+            buildConfigField("String", "API_BASE", stagingApiBase.asBuildConfigString())
+            buildConfigField("String", "PRODUCT_DISCOVERY_API_BASE", stagingApiBase.asBuildConfigString())
+            buildConfigField("String", "PLAY_STORE_URL", "".asBuildConfigString())
+            buildConfigField("String", "SUPPORT_URL", "".asBuildConfigString())
+            buildConfigField("boolean", "IS_STAGING", "true")
+            buildConfigField("boolean", "FCM_REGISTRATION_ENABLED", "false")
+            buildConfigField("boolean", "NOTIFICATIONS_ENABLED", "false")
+            buildConfigField("boolean", "MOBILE_ANALYTICS_ENABLED", "false")
+            buildConfigField("boolean", "PAYMENTS_ENABLED", "false")
+            buildConfigField("boolean", "SUPPORT_ENABLED", "false")
+            buildConfigField("boolean", "APP_UPDATE_ENABLED", "false")
         }
     }
 
@@ -116,4 +141,57 @@ dependencies {
 
     testImplementation("junit:junit:4.13.2")
     debugImplementation("androidx.compose.ui:ui-tooling")
+}
+
+val productionGoogleServicesFile = layout.projectDirectory.file("google-services.json").asFile
+val stagingGoogleServicesFile = layout.projectDirectory.file("src/staging/google-services.json").asFile
+
+val validateProductionGoogleServices by tasks.registering {
+    doLast {
+        if (!productionGoogleServicesFile.isFile) {
+            throw org.gradle.api.GradleException(
+                "Missing app/google-services.json. Production Firebase/FCM builds must include this file."
+            )
+        }
+    }
+}
+
+val validateStagingGoogleServices by tasks.registering {
+    doLast {
+        if (!stagingGoogleServicesFile.isFile) {
+            throw org.gradle.api.GradleException(
+                "Missing app/src/staging/google-services.json. Use only the isolated staging Firebase file."
+            )
+        }
+
+        val root = JsonSlurper().parse(stagingGoogleServicesFile) as? Map<*, *>
+            ?: throw org.gradle.api.GradleException("Invalid staging google-services.json.")
+        val projectInfo = root["project_info"] as? Map<*, *>
+            ?: throw org.gradle.api.GradleException("Missing staging Firebase project metadata.")
+        if (projectInfo["project_id"] != "ia4tube-staging-checkpoint-a") {
+            throw org.gradle.api.GradleException("Unexpected Firebase project for the staging variant.")
+        }
+
+        val clients = root["client"] as? List<*> ?: emptyList<Any>()
+        val expectedClient = clients
+            .mapNotNull { it as? Map<*, *> }
+            .firstOrNull { client ->
+                val clientInfo = client["client_info"] as? Map<*, *> ?: return@firstOrNull false
+                val androidInfo = clientInfo["android_client_info"] as? Map<*, *>
+                    ?: return@firstOrNull false
+                androidInfo["package_name"] == "com.ia4tube.app.staging" &&
+                    clientInfo["mobilesdk_app_id"] ==
+                    "1:462270027427:android:e5b15e005d8e703c225116"
+            }
+        if (expectedClient == null || clients.size != 1) {
+            throw org.gradle.api.GradleException("Unexpected Firebase Android app for the staging variant.")
+        }
+    }
+}
+
+tasks.matching { it.name == "preDebugBuild" || it.name == "preReleaseBuild" }.configureEach {
+    dependsOn(validateProductionGoogleServices)
+}
+tasks.matching { it.name == "preStagingBuild" }.configureEach {
+    dependsOn(validateStagingGoogleServices)
 }

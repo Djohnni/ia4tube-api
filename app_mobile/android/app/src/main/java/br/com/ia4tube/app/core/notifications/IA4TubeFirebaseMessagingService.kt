@@ -1,5 +1,6 @@
 package br.com.ia4tube.app.core.notifications
 
+import br.com.ia4tube.app.core.config.AppConfig
 import br.com.ia4tube.app.core.session.SessionStore
 import br.com.ia4tube.app.data.api.IA4TubeApiClient
 import com.google.firebase.messaging.FirebaseMessagingService
@@ -8,6 +9,7 @@ import com.google.firebase.messaging.RemoteMessage
 class IA4TubeFirebaseMessagingService : FirebaseMessagingService() {
     override fun onNewToken(token: String) {
         super.onNewToken(token)
+        if (!AppConfig.fcmRegistrationEnabled) return
         FcmTokenRegistrar(
             context = applicationContext,
             apiClient = IA4TubeApiClient(),
@@ -17,6 +19,7 @@ class IA4TubeFirebaseMessagingService : FirebaseMessagingService() {
 
     override fun onMessageReceived(message: RemoteMessage) {
         super.onMessageReceived(message)
+        if (!AppConfig.notificationsEnabled) return
 
         val title = message.notification?.title
             ?: message.data["title"]
