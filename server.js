@@ -38,6 +38,7 @@ const {
   timingSafeSecretMatch
 } = require("./src/security/runtime-security");
 const { createOrderMediaAccess } = require("./src/security/order-media-access");
+const { createPublicUrlConfig } = require("./src/config/public-urls");
 
 const app = express();
 app.set("trust proxy", true);
@@ -64,15 +65,13 @@ const BOT_RUNNER_TOKENS = configuredSecrets(
   "BOT_RUNNER_TOKEN",
   "BOT_RUNNER_TOKEN_NEXT"
 );
+const PUBLIC_URLS = createPublicUrlConfig(process.env);
 const MP_ACCESS_TOKEN = process.env.MP_ACCESS_TOKEN || "";
-const MP_NOTIFICATION_URL = process.env.MP_NOTIFICATION_URL || "https://ia4tube-api.onrender.com/webhook/mercadopago";
-const PUBLIC_API_BASE_URL = (process.env.PUBLIC_API_BASE_URL || "https://ia4tube-api.onrender.com").replace(/\/+$/, "");
-if (
-  String(process.env.NODE_ENV || "").toLowerCase() === "production" &&
-  !PUBLIC_API_BASE_URL.startsWith("https://")
-) {
-  throw new Error("Configuracao segura obrigatoria invalida: PUBLIC_API_BASE_URL deve usar HTTPS em producao.");
-}
+const MP_NOTIFICATION_URL = PUBLIC_URLS.mercadoPagoNotificationUrl;
+const PUBLIC_API_BASE_URL = PUBLIC_URLS.publicApiBaseUrl;
+const PUBLIC_WEB_BASE_URL = PUBLIC_URLS.publicWebBaseUrl;
+const PAYMENT_RETURN_URL = PUBLIC_URLS.paymentReturnUrl;
+const PAYMENT_PAYER_EMAIL_DOMAIN = PUBLIC_URLS.paymentPayerEmailDomain;
 const ORDER_MEDIA_URL_TTL_SECONDS = Math.max(
   60,
   Math.min(Number(process.env.ORDER_MEDIA_URL_TTL_SECONDS || 24 * 60 * 60), 7 * 24 * 60 * 60)
@@ -126,7 +125,12 @@ app.use(createHttpsEnforcement());
 
 // CORS: permite seu site chamar a API
 app.use(cors({
-  origin: ["https://ia4tube.com", "https://www.ia4tube.com", "http://127.0.0.1:8080", "http://localhost:8080"],
+  origin: [
+    PUBLIC_WEB_BASE_URL,
+    ...(String(process.env.NODE_ENV || "").toLowerCase() === "production"
+      ? []
+      : ["http://127.0.0.1:8080", "http://localhost:8080"])
+  ],
   credentials: false
 }));
 
@@ -1639,8 +1643,8 @@ function isHttpMediaUrl(value = "") {
 }
 
 const FIRST_FREE_ART_VIDEO_CONTEXT = "primeira_arte_gratis";
-const DEFAULT_FIRST_FREE_ART_VIDEO_URL = "https://ia4tube.com/videos/primeira-arte-gratis.mp4";
-const DEFAULT_FIRST_FREE_ART_THUMBNAIL_URL = "https://ia4tube.com/videos/thumb-primeira-arte-gratis.jpg";
+const DEFAULT_FIRST_FREE_ART_VIDEO_URL = `${PUBLIC_WEB_BASE_URL}/videos/primeira-arte-gratis.mp4`;
+const DEFAULT_FIRST_FREE_ART_THUMBNAIL_URL = `${PUBLIC_WEB_BASE_URL}/videos/thumb-primeira-arte-gratis.jpg`;
 
 function marketingVideoUrl(context) {
   const configuredVideoUrl = String(process.env.IA4TUBE_MARKETING_VIDEO_URL || "").trim();
@@ -2490,7 +2494,7 @@ async function createMercadoPagoPixPayment({ amount, description, payerKey, exte
     throw error;
   }
 
-  const payerEmail = `${String(payerKey).replace(/\D/g, "") || "cliente"}@ia4tube.com.br`;
+  const payerEmail = `${String(payerKey).replace(/\D/g, "") || "cliente"}@${PAYMENT_PAYER_EMAIL_DOMAIN}`;
   const paymentPayload = {
     transaction_amount: Number(Number(amount).toFixed(2)),
     description,
@@ -2754,11 +2758,11 @@ app.post("/comprar-creditos", auth, async (req, res) => {
         credito: Number(p.credito)
       },
       back_urls: {
-        success: "https://ia4tube.com/app.html",
-        failure: "https://ia4tube.com/app.html",
-        pending: "https://ia4tube.com/app.html"
+        success: PAYMENT_RETURN_URL,
+        failure: PAYMENT_RETURN_URL,
+        pending: PAYMENT_RETURN_URL
       },
-      notification_url: "https://ia4tube-api.onrender.com/webhook/mercadopago",
+      notification_url: MP_NOTIFICATION_URL,
       auto_return: "approved"
     };
 
@@ -2810,7 +2814,7 @@ app.post("/comprar-creditos-pix", auth, async (req, res) => {
       return res.status(400).json({ ok: false, error: "Pacote inválido" });
     }
 
-    const payerEmail = `${String(whatsapp).replace(/\D/g, "") || "cliente"}@ia4tube.com.br`;
+    const payerEmail = `${String(whatsapp).replace(/\D/g, "") || "cliente"}@${PAYMENT_PAYER_EMAIL_DOMAIN}`;
     const paymentPayload = {
       transaction_amount: Number(Number(p.valor_pago).toFixed(2)),
       description: p.titulo,
@@ -2825,7 +2829,7 @@ app.post("/comprar-creditos-pix", auth, async (req, res) => {
         pacote,
         credito: Number(p.credito)
       },
-      notification_url: "https://ia4tube-api.onrender.com/webhook/mercadopago"
+      notification_url: MP_NOTIFICATION_URL
     };
 
     const r = await fetch("https://api.mercadopago.com/v1/payments", {
@@ -2863,6 +2867,13 @@ app.post("/comprar-creditos-pix", auth, async (req, res) => {
 
 app.post("/webhook/mercadopago", async (req, res) => {
   try {
+    if (!MP_ACCESS_TOKEN) {
+      return res.status(503).json({
+        ok: false,
+        error: "Integracao de pagamento desativada"
+      });
+    }
+
     const body = req.body || {};
     const paymentId = body?.data?.id || body?.id || req.query?.id;
 
@@ -5472,7 +5483,7 @@ app.post("/pedidos/:id/gerar-pix", auth, async (req, res) => {
       });
     }
 
-    const payerEmail = `${String(whatsapp).replace(/\D/g, "") || "cliente"}@ia4tube.com.br`;
+    const payerEmail = `${String(whatsapp).replace(/\D/g, "") || "cliente"}@${PAYMENT_PAYER_EMAIL_DOMAIN}`;
     const paymentPayload = {
       transaction_amount: Number(valorPendente.toFixed(2)),
       description: `IA4Tube - Desbloqueio pedido ${id}`,
@@ -5487,7 +5498,7 @@ app.post("/pedidos/:id/gerar-pix", auth, async (req, res) => {
         pedido_id: id,
         valor_pendente: Number(valorPendente.toFixed(2))
       },
-      notification_url: "https://ia4tube-api.onrender.com/webhook/mercadopago"
+      notification_url: MP_NOTIFICATION_URL
     };
 
     const r = await fetch("https://api.mercadopago.com/v1/payments", {
@@ -7122,7 +7133,7 @@ function listSeoNicheSlugs() {
 }
 
 app.get("/sitemap.xml", (req, res) => {
-  const baseUrl = "https://ia4tube.com";
+  const baseUrl = PUBLIC_WEB_BASE_URL;
   const urls = [
     { loc: `${baseUrl}/`, changefreq: "daily", priority: "1.0" },
     ...listSeoNicheSlugs().map((slug) => ({
@@ -7153,7 +7164,7 @@ Disallow: /painel
 Disallow: /admin
 Disallow: /api
 
-Sitemap: https://ia4tube.com/sitemap.xml
+Sitemap: ${PUBLIC_WEB_BASE_URL}/sitemap.xml
 `);
 });
 
@@ -7168,7 +7179,9 @@ app.get("/:nichoSlug", (req, res, next) => {
     const nicheData = seoNichePages.readNichePageData(SEO_NICHES_DIR, slug);
 
     if (nicheData) {
-      return res.type("html").send(seoNichePages.renderNichePage(nicheData));
+      return res.type("html").send(seoNichePages.renderNichePage(nicheData, {
+        baseUrl: PUBLIC_WEB_BASE_URL
+      }));
     }
   } catch (e) {
     console.error("[seo] erro ao renderizar pagina de nicho", {

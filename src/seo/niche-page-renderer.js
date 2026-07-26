@@ -130,7 +130,11 @@ function renderFaqSection(items) {
     </section>`;
 }
 
-function renderNichePage(data) {
+function renderNichePage(data, { baseUrl } = {}) {
+  const publicBaseUrl = String(baseUrl || "").replace(/\/+$/, "");
+  if (!publicBaseUrl.startsWith("https://")) {
+    throw new Error("baseUrl HTTPS obrigatoria para pagina de nicho");
+  }
   const slug = escapeHtml(data.slug);
   const nicheName = escapeHtml(data.nome_nicho);
   const seoTitle = escapeHtml(ensureBrand(data.titulo_seo));
@@ -159,13 +163,13 @@ function renderNichePage(data) {
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>${seoTitle}</title>
   <meta name="description" content="${seoDescription}">
-  <link rel="canonical" href="https://ia4tube.com/${slug}">
+  <link rel="canonical" href="${publicBaseUrl}/${slug}">
   <meta name="robots" content="index, follow">
   <meta property="og:type" content="website">
   <meta property="og:site_name" content="iA4Tube">
   <meta property="og:title" content="${h1}">
   <meta property="og:description" content="${seoDescription}">
-  <meta property="og:url" content="https://ia4tube.com/${slug}">
+  <meta property="og:url" content="${publicBaseUrl}/${slug}">
   <meta name="twitter:card" content="summary_large_image">
   <meta name="twitter:title" content="${seoTitle}">
   <meta name="twitter:description" content="${seoDescription}">
@@ -575,7 +579,7 @@ function renderNichePage(data) {
     provider: {
       "@type": "Organization",
       name: "iA4Tube",
-      url: "https://ia4tube.com/"
+      url: `${publicBaseUrl}/`
     },
     areaServed: "BR",
     serviceType: normalizeBrandReferences(data.service_type || `Criacao de artes para ${data.nome_nicho} com a Inteligencia Artificial da iA4Tube`),

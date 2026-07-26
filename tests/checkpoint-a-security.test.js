@@ -163,6 +163,31 @@ async function expectMissingJwtFailsSecurely(dataDir) {
   assert.doesNotMatch(instance.output(), /TROQUE_ISSO_AGORA/);
 }
 
+async function expectInvalidPublicApiBaseFailsSecurely(dataDir, value) {
+  const port = await getFreePort();
+  const env = baseEnvironment({ port, dataDir });
+  if (value === undefined) {
+    delete env.PUBLIC_API_BASE_URL;
+  } else {
+    env.PUBLIC_API_BASE_URL = value;
+  }
+  const instance = spawnServer(env);
+  const exitCode = await new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      instance.child.kill();
+      reject(new Error("Servidor com PUBLIC_API_BASE_URL invalida nao encerrou."));
+    }, 5000);
+    instance.child.once("exit", (code) => {
+      clearTimeout(timeout);
+      resolve(code);
+    });
+  });
+
+  assert.notEqual(exitCode, 0);
+  assert.match(instance.output(), /PUBLIC_API_BASE_URL/);
+  assert.doesNotMatch(instance.output(), /ia4tube-api\.onrender\.com/);
+}
+
 async function main() {
   const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "ia4tube-checkpoint-a-"));
   const dataDir = path.join(tempRoot, "data");
@@ -203,6 +228,8 @@ async function main() {
   createOrder(dataDir, "cliente-b", collisionOrder, Buffer.from("B_COLLISION"));
 
   await expectMissingJwtFailsSecurely(dataDir);
+  await expectInvalidPublicApiBaseFailsSecurely(dataDir, undefined);
+  await expectInvalidPublicApiBaseFailsSecurely(dataDir, "http://staging.invalid");
 
   const port = await getFreePort();
   const instance = spawnServer(baseEnvironment({ port, dataDir }));
@@ -220,6 +247,21 @@ async function main() {
     assert.equal(insecureGet.status, 308);
     assert.match(String(insecureGet.headers.location || ""), /^https:\/\//);
 
+    const disabledPaymentWebhook = await request(port, "/webhook/mercadopago", {
+      method: "POST",
+      body: { data: { id: "pagamento-sintetico" } }
+    });
+    assert.equal(disabledPaymentWebhook.status, 503);
+
+    const sitemap = await request(port, "/sitemap.xml");
+    assert.equal(sitemap.status, 200);
+    assert.ok(sitemap.body.toString("utf8").includes("https://ia4tube.test/"));
+    assert.ok(!sitemap.body.toString("utf8").includes("ia4tube-api.onrender.com"));
+
+    const robots = await request(port, "/robots.txt");
+    assert.equal(robots.status, 200);
+    assert.ok(robots.body.toString("utf8").includes("https://ia4tube.test/sitemap.xml"));
+
     const loginA = await request(port, "/auth/login", {
       method: "POST",
       body: { whatsapp: "cliente-a", senha: passwordA }
@@ -230,6 +272,11 @@ async function main() {
     assert.equal(loginA.headers["x-content-type-options"], "nosniff");
     assert.equal(loginA.headers["x-frame-options"], "DENY");
     assert.match(String(loginA.headers["strict-transport-security"] || ""), /max-age=/);
+
+    const marketingVideo = await request(port, "/marketing/video", { token: tokenA });
+    assert.equal(marketingVideo.status, 200);
+    assert.ok(marketingVideo.json().url_video.startsWith("https://ia4tube.test/"));
+    assert.ok(marketingVideo.json().thumbnail.startsWith("https://ia4tube.test/"));
 
     const loginB = await request(port, "/auth/login", {
       method: "POST",
