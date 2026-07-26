@@ -8,7 +8,6 @@ const path = require("path");
 const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
 const multer = require("multer");
-const archiver = require("archiver");
 const crypto = require("crypto");
 const { spawnSync } = require("child_process");
 const productsRegistry = require("./src/products");
@@ -39,6 +38,7 @@ const {
 } = require("./src/security/runtime-security");
 const { createOrderMediaAccess } = require("./src/security/order-media-access");
 const { createPublicUrlConfig } = require("./src/config/public-urls");
+const { streamDirectoryZip } = require("./src/zip/zip-stream");
 
 const app = express();
 app.set("trust proxy", true);
@@ -3545,7 +3545,7 @@ app.get("/bot/empresa/materiais-graficos/novos", botRunnerAuth, (req, res) => {
   return res.json({ ok: true, materiais });
 });
 
-app.get("/bot/empresa/materiais-graficos/:documentId/zip", botRunnerAuth, (req, res) => {
+app.get("/bot/empresa/materiais-graficos/:documentId/zip", botRunnerAuth, async (req, res) => {
   if (!isBotAdmin(req)) {
     return res.status(403).json({ ok: false, error: "Acesso negado" });
   }
@@ -3559,14 +3559,11 @@ app.get("/bot/empresa/materiais-graficos/:documentId/zip", botRunnerAuth, (req, 
     return res.status(404).json({ ok: false, error: "Solicitacao nao encontrada" });
   }
 
-  res.setHeader("Content-Type", "application/zip");
-  res.setHeader("Content-Disposition", `attachment; filename="${req.params.documentId}.zip"`);
-
-  const archive = archiver("zip", { zlib: { level: 9 } });
-  archive.on("error", err => res.status(500).end(String(err)));
-  archive.pipe(res);
-  archive.directory(request.base_path, false);
-  archive.finalize();
+  return streamDirectoryZip({
+    res,
+    directory: request.base_path,
+    filename: `${req.params.documentId}.zip`
+  });
 });
 
 app.post("/bot/empresa/materiais-graficos/:documentId/status", botRunnerAuth, (req, res) => {
@@ -3784,7 +3781,7 @@ app.get("/bot/empresa/carrosseis/novos", botRunnerAuth, (req, res) => {
   return res.json({ ok: true, carrosseis });
 });
 
-app.get("/bot/empresa/carrosseis/:carrosselId/zip", botRunnerAuth, (req, res) => {
+app.get("/bot/empresa/carrosseis/:carrosselId/zip", botRunnerAuth, async (req, res) => {
   if (!isBotAdmin(req)) {
     return res.status(403).json({ ok: false, error: "Acesso negado" });
   }
@@ -3798,14 +3795,11 @@ app.get("/bot/empresa/carrosseis/:carrosselId/zip", botRunnerAuth, (req, res) =>
     return res.status(404).json({ ok: false, error: "Solicitacao nao encontrada" });
   }
 
-  res.setHeader("Content-Type", "application/zip");
-  res.setHeader("Content-Disposition", `attachment; filename="${req.params.carrosselId}.zip"`);
-
-  const archive = archiver("zip", { zlib: { level: 9 } });
-  archive.on("error", err => res.status(500).end(String(err)));
-  archive.pipe(res);
-  archive.directory(request.base_path, false);
-  archive.finalize();
+  return streamDirectoryZip({
+    res,
+    directory: request.base_path,
+    filename: `${req.params.carrosselId}.zip`
+  });
 });
 
 app.post("/bot/empresa/carrosseis/:carrosselId/status", botRunnerAuth, (req, res) => {
@@ -4365,7 +4359,7 @@ app.get("/bot/empresa/planejamento-mensal/novos", botRunnerAuth, (req, res) => {
   }
 });
 
-app.get("/bot/empresa/planejamento-mensal/:planningId/zip", botRunnerAuth, (req, res) => {
+app.get("/bot/empresa/planejamento-mensal/:planningId/zip", botRunnerAuth, async (req, res) => {
   if (!isBotAdmin(req)) {
     return res.status(403).json({ ok: false, error: "Acesso negado" });
   }
@@ -4380,16 +4374,11 @@ app.get("/bot/empresa/planejamento-mensal/:planningId/zip", botRunnerAuth, (req,
       return res.status(404).json({ ok: false, error: "Planejamento Mensal nao encontrado" });
     }
 
-    res.setHeader("Content-Type", "application/zip");
-    res.setHeader("Content-Disposition", `attachment; filename=\"${planejamento.planejamento_id || planejamento.id}.zip\"`);
-
-    const archive = archiver("zip", { zlib: { level: 9 } });
-    archive.on("error", (error) => {
-      throw error;
+    return await streamDirectoryZip({
+      res,
+      directory: planejamento.base_path,
+      filename: `${planejamento.planejamento_id || planejamento.id}.zip`
     });
-    archive.pipe(res);
-    archive.directory(planejamento.base_path, false);
-    archive.finalize();
   } catch (error) {
     console.error("[planejamento-mensal][bot] erro ao gerar zip", {
       planningId: req.params.planningId,
@@ -4530,7 +4519,7 @@ app.get("/bot/empresa/planejamento-mensal/artes/novas", botRunnerAuth, (req, res
   }
 });
 
-app.get("/bot/empresa/planejamento-mensal/artes/:pedidoId/zip", botRunnerAuth, (req, res) => {
+app.get("/bot/empresa/planejamento-mensal/artes/:pedidoId/zip", botRunnerAuth, async (req, res) => {
   if (!isBotAdmin(req)) {
     return res.status(403).json({ ok: false, error: "Acesso negado" });
   }
@@ -4545,16 +4534,11 @@ app.get("/bot/empresa/planejamento-mensal/artes/:pedidoId/zip", botRunnerAuth, (
       return res.status(404).json({ ok: false, error: "Arte do Planejamento Mensal nao encontrada" });
     }
 
-    res.setHeader("Content-Type", "application/zip");
-    res.setHeader("Content-Disposition", `attachment; filename=\"${arte.pedidoId}.zip\"`);
-
-    const archive = archiver("zip", { zlib: { level: 9 } });
-    archive.on("error", (error) => {
-      throw error;
+    return await streamDirectoryZip({
+      res,
+      directory: arte.base,
+      filename: `${arte.pedidoId}.zip`
     });
-    archive.pipe(res);
-    archive.directory(arte.base, false);
-    archive.finalize();
   } catch (error) {
     console.error("[planejamento-mensal][artes] erro ao gerar zip", {
       pedidoId: req.params.pedidoId,
@@ -5133,7 +5117,7 @@ app.get("/bot/pedidos/novos", botRunnerAuth, (req, res) => {
   return res.json({ ok: true, pedidos });
 });
 
-app.get("/bot/pedidos/:id/zip", botRunnerAuth, (req, res) => {
+app.get("/bot/pedidos/:id/zip", botRunnerAuth, async (req, res) => {
   if (!isBotAdmin(req)) {
     return res.status(403).json({ ok: false, error: "Acesso negado" });
   }
@@ -5156,16 +5140,11 @@ app.get("/bot/pedidos/:id/zip", botRunnerAuth, (req, res) => {
     });
   }
 
-  res.setHeader("Content-Type", "application/zip");
-  res.setHeader("Content-Disposition", `attachment; filename="${req.params.id}.zip"`);
-
-  const archive = archiver("zip", { zlib: { level: 9 } });
-
-  archive.on("error", err => res.status(500).end(String(err)));
-
-  archive.pipe(res);
-  archive.directory(base, false);
-  archive.finalize();
+  return streamDirectoryZip({
+    res,
+    directory: base,
+    filename: `${req.params.id}.zip`
+  });
 });
 
 app.post("/bot/pedidos/:id/status", auth, (req, res) => {
@@ -6066,7 +6045,7 @@ app.get("/pedidos/:id/preview", (req, res) => sendOrderMedia(req, res, "preview"
 app.get("/pedidos/:id/thumbnail", (req, res) => sendOrderMedia(req, res, "thumbnail"));
 
 // ===== BAIXAR ZIP =====
-app.get("/pedidos/:id/zip", auth, (req, res) => {
+app.get("/pedidos/:id/zip", auth, async (req, res) => {
   const whatsapp = req.user.whatsapp;
   const base = getPedidoBase(whatsapp, req.params.id);
 
@@ -6086,16 +6065,11 @@ app.get("/pedidos/:id/zip", auth, (req, res) => {
     });
   }
 
-  res.setHeader("Content-Type", "application/zip");
-  res.setHeader("Content-Disposition", `attachment; filename="${req.params.id}.zip"`);
-
-  const archive = archiver("zip", { zlib: { level: 9 } });
-
-  archive.on("error", err => res.status(500).end(String(err)));
-
-  archive.pipe(res);
-  archive.directory(base, false);
-  archive.finalize();
+  return streamDirectoryZip({
+    res,
+    directory: base,
+    filename: `${req.params.id}.zip`
+  });
 });
 
 // ===== ATUALIZAR STATUS =====
