@@ -1,8 +1,12 @@
-const fs = require("fs");
 const crypto = require("crypto");
+const {
+  safeRuntimeSummary,
+  validateFcmRuntimeConfig
+} = require("./fcm-config");
 
 const FCM_SCOPE = "https://www.googleapis.com/auth/firebase.messaging";
 const GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token";
+const runtimeConfig = validateFcmRuntimeConfig(process.env);
 
 let cachedAccessToken = null;
 let cachedAccessTokenExpiresAt = 0;
@@ -13,36 +17,6 @@ function base64Url(input) {
     .replace(/=/g, "")
     .replace(/\+/g, "-")
     .replace(/\//g, "_");
-}
-
-function parseServiceAccount() {
-  if (process.env.FIREBASE_SERVICE_ACCOUNT_JSON) {
-    try {
-      return JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT_JSON);
-    } catch {
-      return null;
-    }
-  }
-
-  if (process.env.GOOGLE_APPLICATION_CREDENTIALS && fs.existsSync(process.env.GOOGLE_APPLICATION_CREDENTIALS)) {
-    try {
-      return JSON.parse(fs.readFileSync(process.env.GOOGLE_APPLICATION_CREDENTIALS, "utf8"));
-    } catch {
-      return null;
-    }
-  }
-
-  const projectId = process.env.FIREBASE_PROJECT_ID;
-  const clientEmail = process.env.FIREBASE_CLIENT_EMAIL;
-  const privateKey = process.env.FIREBASE_PRIVATE_KEY;
-
-  if (!projectId || !clientEmail || !privateKey) return null;
-
-  return {
-    project_id: projectId,
-    client_email: clientEmail,
-    private_key: privateKey
-  };
 }
 
 function normalizePrivateKey(privateKey = "") {
@@ -58,11 +32,19 @@ function serviceAccountIsValid(serviceAccount) {
 }
 
 function isFirebaseConfigured() {
-  return serviceAccountIsValid(parseServiceAccount());
+  return Boolean(runtimeConfig.credentialConfigured);
 }
 
-function localMockEnabled() {
-  return process.env.FCM_MOCK === "true" || process.env.NODE_ENV !== "production";
+function fcmDeliveryEnabled() {
+  return runtimeConfig.deliveryEnabled === true;
+}
+
+function automaticNotificationsEnabled() {
+  return runtimeConfig.automaticNotificationsEnabled === true;
+}
+
+function runtimeConfigSummary() {
+  return safeRuntimeSummary(runtimeConfig);
 }
 
 function createSignedJwt(serviceAccount) {
@@ -113,9 +95,8 @@ async function getAccessToken(serviceAccount) {
 
   const data = await response.json().catch(() => ({}));
   if (!response.ok || !data.access_token) {
-    const error = new Error(data.error_description || data.error || "Falha ao obter token Firebase.");
+    const error = new Error("Falha ao obter token Firebase.");
     error.code = "firebase_access_token_error";
-    error.detail = data;
     throw error;
   }
 
@@ -289,9 +270,24 @@ async function sendToToken({ serviceAccount, accessToken, token, title, body, im
 
   const result = await response.json().catch(() => ({}));
   if (!response.ok) {
-    const error = new Error(result.error?.message || "Falha ao enviar FCM.");
+    const firebaseError = result?.error || {};
+    const error = new Error("Falha ao enviar FCM.");
     error.code = "firebase_send_error";
-    error.detail = result;
+    error.detail = {
+      error: {
+        status: String(firebaseError.status || ""),
+        message: String(firebaseError.message || ""),
+        details: Array.isArray(firebaseError.details)
+          ? firebaseError.details.map((detail) => ({
+              errorCode: String(
+                detail?.errorCode ||
+                detail?.error_code ||
+                ""
+              )
+            }))
+          : []
+      }
+    };
     throw error;
   }
 
@@ -299,6 +295,14 @@ async function sendToToken({ serviceAccount, accessToken, token, title, body, im
 }
 
 async function sendToClient(cliente, message, options = {}) {
+  if (!fcmDeliveryEnabled()) {
+    return {
+      ok: false,
+      code: "fcm_delivery_disabled",
+      error: "Entrega FCM desativada por configuracao segura."
+    };
+  }
+
   const tokens = activeFcmTokens(cliente);
   if (!tokens.length) {
     return {
@@ -308,18 +312,8 @@ async function sendToClient(cliente, message, options = {}) {
     };
   }
 
-  const serviceAccount = parseServiceAccount();
+  const serviceAccount = runtimeConfig.serviceAccount;
   if (!serviceAccountIsValid(serviceAccount)) {
-    if (localMockEnabled()) {
-      return {
-        ok: true,
-        mock: true,
-        sent: tokens.length,
-        tokens: tokens.length,
-        reason: "firebase_not_configured"
-      };
-    }
-
     return {
       ok: false,
       code: "firebase_not_configured",
@@ -354,9 +348,8 @@ async function sendToClient(cliente, message, options = {}) {
       }
 
       errors.push({
-        token_suffix: token.slice(-8),
         code: error.code || "firebase_send_error",
-        message: error.message,
+        message: "Falha ao enviar FCM.",
         invalid_token: invalidToken
       });
     }
@@ -397,9 +390,12 @@ function sendAvisoGeral(cliente, payload = {}, options = {}) {
 
 module.exports = {
   activeFcmTokens,
+  automaticNotificationsEnabled,
+  fcmDeliveryEnabled,
   isInvalidFcmTokenError,
   isFirebaseConfigured,
   notificationMessage,
+  runtimeConfigSummary,
   sendArtePronta,
   sendPedidoAtualizado,
   sendPlanejamentoMensal,

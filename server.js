@@ -4698,6 +4698,7 @@ function monthlyPlanningNotificationPayload({ planning, post }) {
 }
 
 async function runMonthlyPlanningNotifications() {
+  if (!fcmService.automaticNotificationsEnabled()) return;
   if (monthlyPlanningNotificationsRunning) return;
 
   monthlyPlanningNotificationsRunning = true;
@@ -4735,6 +4736,7 @@ async function runMonthlyPlanningNotifications() {
 }
 
 async function runFreeArtCampaignNotifications() {
+  if (!fcmService.automaticNotificationsEnabled()) return;
   if (!adminFreeArtsNotificationsEnabled()) return;
   if (freeArtNotificationsRunning) return;
 
@@ -7212,17 +7214,20 @@ app.use((err, req, res, next) => {
 cleanupOldTmpUploads();
 setInterval(cleanupOldTmpUploads, TMP_UPLOAD_CLEANUP_INTERVAL_MS);
 setInterval(finalizarConversasSuporteInativas, 60 * 1000);
-setTimeout(runMonthlyPlanningNotifications, 15 * 1000);
-setInterval(runMonthlyPlanningNotifications, MONTHLY_PLANNING_NOTIFICATIONS_INTERVAL_MS);
 if (adminFreeArtsEnabled()) {
   setTimeout(runFreeArtCampaignRecovery, 60 * 1000);
   setInterval(runFreeArtCampaignRecovery, adminFreeArtsRecoveryIntervalMs());
 }
-if (adminFreeArtsNotificationsEnabled()) {
-  setTimeout(runFreeArtCampaignNotifications, 20 * 1000);
-  setInterval(runFreeArtCampaignNotifications, adminFreeArtsNotificationsIntervalMs());
+if (fcmService.automaticNotificationsEnabled()) {
+  setTimeout(runMonthlyPlanningNotifications, 15 * 1000);
+  setInterval(runMonthlyPlanningNotifications, MONTHLY_PLANNING_NOTIFICATIONS_INTERVAL_MS);
+  if (adminFreeArtsNotificationsEnabled()) {
+    setTimeout(runFreeArtCampaignNotifications, 20 * 1000);
+    setInterval(runFreeArtCampaignNotifications, adminFreeArtsNotificationsIntervalMs());
+  }
 }
 
 app.listen(PORT, () => {
   console.log("API rodando na porta", PORT);
+  console.log("[fcm][safety]", fcmService.runtimeConfigSummary());
 });
