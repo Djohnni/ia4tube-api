@@ -3,6 +3,9 @@ const {
   safeRuntimeSummary,
   validateFcmRuntimeConfig
 } = require("./fcm-config");
+const {
+  decryptActiveFcmTokens
+} = require("./fcm-token-store");
 
 const FCM_SCOPE = "https://www.googleapis.com/auth/firebase.messaging";
 const GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token";
@@ -106,14 +109,7 @@ async function getAccessToken(serviceAccount) {
 }
 
 function activeFcmTokens(cliente = {}) {
-  const tokens = Array.isArray(cliente?.notificacoes?.fcm_tokens)
-    ? cliente.notificacoes.fcm_tokens
-    : [];
-
-  return tokens
-    .filter((item) => item && item.ativo !== false && item.token)
-    .map((item) => String(item.token).trim())
-    .filter(Boolean);
+  return decryptActiveFcmTokens({ cliente });
 }
 
 function normalizeData(data = {}) {
@@ -303,7 +299,16 @@ async function sendToClient(cliente, message, options = {}) {
     };
   }
 
-  const tokens = activeFcmTokens(cliente);
+  let tokens;
+  try {
+    tokens = activeFcmTokens(cliente);
+  } catch {
+    return {
+      ok: false,
+      code: "fcm_token_storage_unavailable",
+      error: "Armazenamento seguro de token FCM indisponivel."
+    };
+  }
   if (!tokens.length) {
     return {
       ok: false,

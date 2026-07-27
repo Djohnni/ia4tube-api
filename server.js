@@ -22,6 +22,7 @@ const carouselService = require("./src/company-carousels/carousels.service");
 const monthlyPlanningService = require("./src/company-monthly-planning/planning.service");
 const productDiscoveryService = require("./src/company-monthly-planning/product-discovery.service");
 const fcmService = require("./src/notifications/fcm.service");
+const fcmTokenStore = require("./src/notifications/fcm-token-store");
 const freeArtCampaignsService = require("./src/admin-free-art-campaigns/free-art-campaigns.service");
 const freeArtCampaignsStorage = require("./src/admin-free-art-campaigns/free-art-campaigns.storage");
 const freeArtCampaignsScheduler = require("./src/admin-free-art-campaigns/free-art-campaigns.scheduler");
@@ -251,7 +252,26 @@ function readClientes() {
 }
 
 function writeClientes(obj) {
-  fs.writeFileSync(CLIENTES_FILE, JSON.stringify(obj, null, 2), "utf8");
+  fcmTokenStore.assertNoLegacyFcmTokens(obj);
+  fcmTokenStore.atomicWriteJson(CLIENTES_FILE, obj);
+}
+
+const fcmTokenStorageStartup = fcmTokenStore.migrateLegacyFcmTokensFile({
+  filePath: CLIENTES_FILE,
+  expectedLegacySha256: process.env.FCM_TOKEN_LEGACY_EXPECTED_SHA256,
+  expectedLegacyCount: 1,
+  env: process.env
+});
+
+if (fcmTokenStorageStartup.storageAfter.total > 0) {
+  console.info("[fcm-token-storage]", {
+    code: "fcm_token_storage_ready",
+    migrated: fcmTokenStorageStartup.migrated,
+    total: fcmTokenStorageStartup.storageAfter.total,
+    active: fcmTokenStorageStartup.storageAfter.active,
+    encrypted: fcmTokenStorageStartup.storageAfter.encrypted,
+    legacy: fcmTokenStorageStartup.storageAfter.legacy
+  });
 }
 
 function isMonthlyPlanningReservedRouteSegment(value) {
@@ -2228,32 +2248,32 @@ app.post("/me/fcm-token", auth, (req, res) => {
     ? c.notificacoes
     : {};
 
-  const existingTokens = Array.isArray(c.notificacoes.fcm_tokens)
-    ? c.notificacoes.fcm_tokens.filter(item => item && typeof item === "object" && item.token)
-    : [];
-  const current = existingTokens.find(item => item.token === fcmToken);
-
-  if (current) {
-    current.platform = platform;
-    current.ativo = true;
-    current.atualizado_em = now;
-  } else {
-    existingTokens.push({
+  let registration;
+  try {
+    registration = fcmTokenStore.registerFcmToken({
+      cliente: c,
       token: fcmToken,
       platform,
-      ativo: true,
-      atualizado_em: now
+      now
+    });
+    clientes[req.user.whatsapp] = c;
+    writeClientes(clientes);
+  } catch (error) {
+    console.warn("[fcm-token-storage]", {
+      code: error?.code || "fcm_token_storage_error",
+      operation: "register"
+    });
+    return res.status(503).json({
+      ok: false,
+      code: "fcm_token_storage_unavailable",
+      error: "Armazenamento seguro de token FCM indisponivel."
     });
   }
-
-  c.notificacoes.fcm_tokens = existingTokens;
-  clientes[req.user.whatsapp] = c;
-  writeClientes(clientes);
 
   return res.json({
     ok: true,
     salvo: true,
-    tokens_ativos: existingTokens.filter(item => item.ativo !== false).length
+    tokens_ativos: registration.activeCount
   });
 });
 
@@ -2292,30 +2312,22 @@ function deactivateInvalidFcmTokens(whatsapp, invalidTokens = [], reason = "fire
     return { deactivated: 0 };
   }
 
-  cliente.notificacoes = cliente.notificacoes && typeof cliente.notificacoes === "object" && !Array.isArray(cliente.notificacoes)
-    ? cliente.notificacoes
-    : {};
-
-  const tokens = Array.isArray(cliente.notificacoes.fcm_tokens)
-    ? cliente.notificacoes.fcm_tokens
-    : [];
-
-  const now = new Date().toISOString();
   let deactivated = 0;
-
-  for (const item of tokens) {
-    const token = String(item?.token || "").trim();
-    if (!token || !tokenSet.has(token) || item.ativo === false) continue;
-
-    item.ativo = false;
-    item.invalidado_em = now;
-    item.invalidado_motivo = reason;
-    item.atualizado_em = now;
-    deactivated += 1;
+  try {
+    ({ deactivated } = fcmTokenStore.deactivateFcmTokens({
+      cliente,
+      tokens: [...tokenSet],
+      reason
+    }));
+  } catch (error) {
+    console.warn("[fcm-token-storage]", {
+      code: error?.code || "fcm_token_storage_error",
+      operation: "deactivate"
+    });
+    return { deactivated: 0 };
   }
 
   if (deactivated > 0) {
-    cliente.notificacoes.fcm_tokens = tokens;
     clientes[whatsapp] = cliente;
     writeClientes(clientes);
   }

@@ -15,13 +15,25 @@ const SENSITIVE_KEY_PARTS = [
   "secret",
   "signature",
   "private_key",
+  "encryption_key",
+  "hmac_key",
   "fcm_token",
   "bot_token"
 ];
+const SENSITIVE_EXACT_KEYS = new Set([
+  "token",
+  "iv",
+  "tag",
+  "ciphertext",
+  "fingerprint"
+]);
 
 function isSensitiveKey(key) {
   const normalized = String(key || "").trim().toLowerCase();
-  return Boolean(normalized) && SENSITIVE_KEY_PARTS.some((part) => normalized.includes(part));
+  return Boolean(normalized) && (
+    SENSITIVE_EXACT_KEYS.has(normalized) ||
+    SENSITIVE_KEY_PARTS.some((part) => normalized.includes(part))
+  );
 }
 
 function redactString(value) {
