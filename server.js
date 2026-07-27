@@ -5,7 +5,6 @@ const path = require("path");
 const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
 const multer = require("multer");
-const archiver = require("archiver");
 const crypto = require("crypto");
 const { spawnSync } = require("child_process");
 const productsRegistry = require("./src/products");
@@ -20,6 +19,19 @@ const carouselService = require("./src/company-carousels/carousels.service");
 const monthlyPlanningService = require("./src/company-monthly-planning/planning.service");
 const productDiscoveryService = require("./src/company-monthly-planning/product-discovery.service");
 const fcmService = require("./src/notifications/fcm.service");
+const {
+  activeEncryptedFcmTokenRecords,
+  atomicWriteJson,
+  deactivateFcmTokens,
+  registerFcmToken
+} = require("./src/notifications/fcm-token-store");
+const {
+  createArtReadyNotificationService
+} = require("./src/notifications/art-ready-notification.service");
+const {
+  successfulCompletionTransition
+} = require("./src/notifications/art-ready-generation");
+const { streamDirectoryZip } = require("./src/zip/zip-stream");
 const freeArtCampaignsService = require("./src/admin-free-art-campaigns/free-art-campaigns.service");
 const freeArtCampaignsStorage = require("./src/admin-free-art-campaigns/free-art-campaigns.storage");
 const freeArtCampaignsScheduler = require("./src/admin-free-art-campaigns/free-art-campaigns.scheduler");
@@ -43,6 +55,11 @@ const CAROUSELS_DIR = path.join(DATA_DIR, "carrosseis");
 const MONTHLY_PLANNINGS_DIR = path.join(DATA_DIR, "planejamentos_mensais");
 const FREE_ART_CAMPAIGNS_DIR = path.join(DATA_DIR, "campanhas_artes_gratis");
 const CLIENTES_FILE = path.join(DATA_DIR, "clientes.json");
+const ART_READY_OUTBOX_FILE = path.join(
+  DATA_DIR,
+  "notifications",
+  "art-ready-outbox.json"
+);
 const BOT_ADMIN_WHATSAPP = process.env.BOT_ADMIN_WHATSAPP || "15991120599";
 const BOT_RUNNER_TOKEN = process.env.BOT_RUNNER_TOKEN || "";
 const MP_ACCESS_TOKEN = process.env.MP_ACCESS_TOKEN || "";
@@ -181,6 +198,19 @@ function readClientes() {
 function writeClientes(obj) {
   fs.writeFileSync(CLIENTES_FILE, JSON.stringify(obj, null, 2), "utf8");
 }
+
+const artReadyNotificationService = createArtReadyNotificationService({
+  outboxPath: ART_READY_OUTBOX_FILE,
+  eventEnabled: fcmService.artReadyEventEnabled,
+  deliveryEnabled: fcmService.fcmDeliveryEnabled,
+  automaticNotificationsEnabled: fcmService.automaticNotificationsEnabled,
+  getClienteByOwner: (ownerId) => readClientes()[ownerId] || null,
+  listActiveTokenRecords: (cliente) =>
+    activeEncryptedFcmTokenRecords({ cliente }),
+  sendToClient: fcmService.sendToClient,
+  deactivateInvalidTokens: (ownerId, tokens) =>
+    deactivateInvalidFcmTokens(ownerId, tokens)
+});
 
 function isMonthlyPlanningReservedRouteSegment(value) {
   return MONTHLY_PLANNING_RESERVED_ROUTE_SEGMENTS.has(
@@ -566,6 +596,15 @@ function sanitizeOnlineUserForResponse(user = {}) {
 
 function getPedidoBaseGlobal(pedidoId) {
   return orderStorage.getPedidoBaseGlobal(PEDIDOS_DIR, pedidoId);
+}
+
+function getPedidoOwnerFromBase(base) {
+  const relative = path.relative(path.resolve(PEDIDOS_DIR), path.resolve(base || ""));
+  if (!relative || relative.startsWith("..") || path.isAbsolute(relative)) {
+    return "";
+  }
+  const parts = relative.split(path.sep).filter(Boolean);
+  return parts.length === 3 ? String(parts[0] || "").trim() : "";
 }
 
 function listPedidoBasesByWhatsapp(whatsapp) {
@@ -2142,6 +2181,14 @@ app.get("/billing/free-art/status", auth, (req, res) => {
 });
 
 app.post("/me/fcm-token", auth, (req, res) => {
+  if (!fcmService.tokenRegistrationEnabled()) {
+    return res.status(503).json({
+      ok: false,
+      code: "fcm_token_registration_disabled",
+      error: "Registro de notificacoes desativado."
+    });
+  }
+
   const fcmToken = String(req.body?.token || "").trim();
   const platform = String(req.body?.platform || "android").trim().toLowerCase() || "android";
 
@@ -2156,38 +2203,26 @@ app.post("/me/fcm-token", auth, (req, res) => {
     return res.status(404).json({ ok: false, error: "Cliente nao encontrado" });
   }
 
-  const now = new Date().toISOString();
-  c.notificacoes = c.notificacoes && typeof c.notificacoes === "object" && !Array.isArray(c.notificacoes)
-    ? c.notificacoes
-    : {};
-
-  const existingTokens = Array.isArray(c.notificacoes.fcm_tokens)
-    ? c.notificacoes.fcm_tokens.filter(item => item && typeof item === "object" && item.token)
-    : [];
-  const current = existingTokens.find(item => item.token === fcmToken);
-
-  if (current) {
-    current.platform = platform;
-    current.ativo = true;
-    current.atualizado_em = now;
-  } else {
-    existingTokens.push({
+  try {
+    const result = registerFcmToken({
+      cliente: c,
       token: fcmToken,
-      platform,
-      ativo: true,
-      atualizado_em: now
+      platform
+    });
+    clientes[req.user.whatsapp] = c;
+    atomicWriteJson(CLIENTES_FILE, clientes);
+    return res.json({
+      ok: true,
+      salvo: result.saved === true,
+      tokens_ativos: result.activeCount
+    });
+  } catch {
+    return res.status(503).json({
+      ok: false,
+      code: "fcm_token_secure_storage_unavailable",
+      error: "Registro seguro de notificacoes indisponivel."
     });
   }
-
-  c.notificacoes.fcm_tokens = existingTokens;
-  clientes[req.user.whatsapp] = c;
-  writeClientes(clientes);
-
-  return res.json({
-    ok: true,
-    salvo: true,
-    tokens_ativos: existingTokens.filter(item => item.ativo !== false).length
-  });
 });
 
 function fcmSenderForType(tipo = "") {
@@ -2209,13 +2244,7 @@ function fcmSenderForType(tipo = "") {
 }
 
 function deactivateInvalidFcmTokens(whatsapp, invalidTokens = [], reason = "firebase_invalid_token") {
-  const tokenSet = new Set(
-    (Array.isArray(invalidTokens) ? invalidTokens : [])
-      .map((token) => String(token || "").trim())
-      .filter(Boolean)
-  );
-
-  if (!tokenSet.size) {
+  if (!Array.isArray(invalidTokens) || invalidTokens.length === 0) {
     return { deactivated: 0 };
   }
 
@@ -2225,35 +2254,23 @@ function deactivateInvalidFcmTokens(whatsapp, invalidTokens = [], reason = "fire
     return { deactivated: 0 };
   }
 
-  cliente.notificacoes = cliente.notificacoes && typeof cliente.notificacoes === "object" && !Array.isArray(cliente.notificacoes)
-    ? cliente.notificacoes
-    : {};
-
-  const tokens = Array.isArray(cliente.notificacoes.fcm_tokens)
-    ? cliente.notificacoes.fcm_tokens
-    : [];
-
-  const now = new Date().toISOString();
-  let deactivated = 0;
-
-  for (const item of tokens) {
-    const token = String(item?.token || "").trim();
-    if (!token || !tokenSet.has(token) || item.ativo === false) continue;
-
-    item.ativo = false;
-    item.invalidado_em = now;
-    item.invalidado_motivo = reason;
-    item.atualizado_em = now;
-    deactivated += 1;
+  try {
+    const result = deactivateFcmTokens({
+      cliente,
+      tokens: invalidTokens,
+      reason
+    });
+    if (result.deactivated > 0) {
+      clientes[whatsapp] = cliente;
+      atomicWriteJson(CLIENTES_FILE, clientes);
+    }
+    return result;
+  } catch {
+    return {
+      deactivated: 0,
+      code: "fcm_token_secure_storage_unavailable"
+    };
   }
-
-  if (deactivated > 0) {
-    cliente.notificacoes.fcm_tokens = tokens;
-    clientes[whatsapp] = cliente;
-    writeClientes(clientes);
-  }
-
-  return { deactivated };
 }
 
 function publicApiUrl(pathname = "") {
@@ -2264,12 +2281,22 @@ function publicApiUrl(pathname = "") {
 }
 
 function sendClientPushAsync(whatsapp, tipo, payload = {}) {
+  if (
+    !fcmService.automaticNotificationsEnabled() ||
+    !fcmService.fcmDeliveryEnabled()
+  ) {
+    return;
+  }
+
   try {
     const clientes = readClientes();
     const cliente = clientes[whatsapp];
 
     if (!cliente) {
-      console.warn("[fcm] cliente nao encontrado", { whatsapp, tipo });
+      console.warn("[fcm] push nao preparado", {
+        code: "fcm_client_not_found",
+        type: String(tipo || "")
+      });
       return;
     }
 
@@ -2283,34 +2310,32 @@ function sendClientPushAsync(whatsapp, tipo, payload = {}) {
         if (cleanup.deactivated > 0) {
           result.tokens_invalidos_desativados = cleanup.deactivated;
           console.warn("[fcm] tokens invalidos desativados", {
-            whatsapp,
-            tipo,
+            type: String(tipo || ""),
             deactivated: cleanup.deactivated
           });
         }
 
         if (!result?.ok) {
-          console.warn("[fcm] push nao enviado", { whatsapp, tipo, result });
+          console.warn("[fcm] push nao enviado", {
+            type: String(tipo || ""),
+            code: result?.code || "fcm_send_failed"
+          });
           return;
         }
         console.log("[fcm] push enviado", {
-          whatsapp,
-          tipo,
+          type: String(tipo || ""),
           sent: result.sent || 0,
-          mock: result.mock === true
         });
       })
       .catch((error) => {
         console.warn("[fcm] falha ao enviar push", {
-          whatsapp,
-          tipo,
+          type: String(tipo || ""),
           message: error?.message
         });
       });
   } catch (error) {
     console.warn("[fcm] falha ao preparar push", {
-      whatsapp,
-      tipo,
+      type: String(tipo || ""),
       message: error?.message
     });
   }
@@ -2319,6 +2344,13 @@ function sendClientPushAsync(whatsapp, tipo, payload = {}) {
 app.post("/bot/notificacoes/teste", botRunnerAuth, async (req, res) => {
   if (!isBotAdmin(req)) {
     return res.status(403).json({ ok: false, error: "Acesso negado" });
+  }
+  if (!fcmService.fcmDeliveryEnabled()) {
+    return res.status(503).json({
+      ok: false,
+      code: "fcm_delivery_disabled",
+      error: "Entrega FCM desativada."
+    });
   }
 
   const whatsapp = String(req.body?.whatsapp || "").trim();
@@ -3418,7 +3450,7 @@ app.get("/bot/empresa/materiais-graficos/novos", botRunnerAuth, (req, res) => {
   return res.json({ ok: true, materiais });
 });
 
-app.get("/bot/empresa/materiais-graficos/:documentId/zip", botRunnerAuth, (req, res) => {
+app.get("/bot/empresa/materiais-graficos/:documentId/zip", botRunnerAuth, async (req, res) => {
   if (!isBotAdmin(req)) {
     return res.status(403).json({ ok: false, error: "Acesso negado" });
   }
@@ -3432,14 +3464,11 @@ app.get("/bot/empresa/materiais-graficos/:documentId/zip", botRunnerAuth, (req, 
     return res.status(404).json({ ok: false, error: "Solicitacao nao encontrada" });
   }
 
-  res.setHeader("Content-Type", "application/zip");
-  res.setHeader("Content-Disposition", `attachment; filename="${req.params.documentId}.zip"`);
-
-  const archive = archiver("zip", { zlib: { level: 9 } });
-  archive.on("error", err => res.status(500).end(String(err)));
-  archive.pipe(res);
-  archive.directory(request.base_path, false);
-  archive.finalize();
+  return streamDirectoryZip({
+    res,
+    directory: request.base_path,
+    filename: `${req.params.documentId}.zip`
+  });
 });
 
 app.post("/bot/empresa/materiais-graficos/:documentId/status", botRunnerAuth, (req, res) => {
@@ -3657,7 +3686,7 @@ app.get("/bot/empresa/carrosseis/novos", botRunnerAuth, (req, res) => {
   return res.json({ ok: true, carrosseis });
 });
 
-app.get("/bot/empresa/carrosseis/:carrosselId/zip", botRunnerAuth, (req, res) => {
+app.get("/bot/empresa/carrosseis/:carrosselId/zip", botRunnerAuth, async (req, res) => {
   if (!isBotAdmin(req)) {
     return res.status(403).json({ ok: false, error: "Acesso negado" });
   }
@@ -3671,14 +3700,11 @@ app.get("/bot/empresa/carrosseis/:carrosselId/zip", botRunnerAuth, (req, res) =>
     return res.status(404).json({ ok: false, error: "Solicitacao nao encontrada" });
   }
 
-  res.setHeader("Content-Type", "application/zip");
-  res.setHeader("Content-Disposition", `attachment; filename="${req.params.carrosselId}.zip"`);
-
-  const archive = archiver("zip", { zlib: { level: 9 } });
-  archive.on("error", err => res.status(500).end(String(err)));
-  archive.pipe(res);
-  archive.directory(request.base_path, false);
-  archive.finalize();
+  return streamDirectoryZip({
+    res,
+    directory: request.base_path,
+    filename: `${req.params.carrosselId}.zip`
+  });
 });
 
 app.post("/bot/empresa/carrosseis/:carrosselId/status", botRunnerAuth, (req, res) => {
@@ -4237,7 +4263,7 @@ app.get("/bot/empresa/planejamento-mensal/novos", botRunnerAuth, (req, res) => {
   }
 });
 
-app.get("/bot/empresa/planejamento-mensal/:planningId/zip", botRunnerAuth, (req, res) => {
+app.get("/bot/empresa/planejamento-mensal/:planningId/zip", botRunnerAuth, async (req, res) => {
   if (!isBotAdmin(req)) {
     return res.status(403).json({ ok: false, error: "Acesso negado" });
   }
@@ -4252,16 +4278,11 @@ app.get("/bot/empresa/planejamento-mensal/:planningId/zip", botRunnerAuth, (req,
       return res.status(404).json({ ok: false, error: "Planejamento Mensal nao encontrado" });
     }
 
-    res.setHeader("Content-Type", "application/zip");
-    res.setHeader("Content-Disposition", `attachment; filename=\"${planejamento.planejamento_id || planejamento.id}.zip\"`);
-
-    const archive = archiver("zip", { zlib: { level: 9 } });
-    archive.on("error", (error) => {
-      throw error;
+    return await streamDirectoryZip({
+      res,
+      directory: planejamento.base_path,
+      filename: `${planejamento.planejamento_id || planejamento.id}.zip`
     });
-    archive.pipe(res);
-    archive.directory(planejamento.base_path, false);
-    archive.finalize();
   } catch (error) {
     console.error("[planejamento-mensal][bot] erro ao gerar zip", {
       planningId: req.params.planningId,
@@ -4402,7 +4423,7 @@ app.get("/bot/empresa/planejamento-mensal/artes/novas", botRunnerAuth, (req, res
   }
 });
 
-app.get("/bot/empresa/planejamento-mensal/artes/:pedidoId/zip", botRunnerAuth, (req, res) => {
+app.get("/bot/empresa/planejamento-mensal/artes/:pedidoId/zip", botRunnerAuth, async (req, res) => {
   if (!isBotAdmin(req)) {
     return res.status(403).json({ ok: false, error: "Acesso negado" });
   }
@@ -4417,16 +4438,11 @@ app.get("/bot/empresa/planejamento-mensal/artes/:pedidoId/zip", botRunnerAuth, (
       return res.status(404).json({ ok: false, error: "Arte do Planejamento Mensal nao encontrada" });
     }
 
-    res.setHeader("Content-Type", "application/zip");
-    res.setHeader("Content-Disposition", `attachment; filename=\"${arte.pedidoId}.zip\"`);
-
-    const archive = archiver("zip", { zlib: { level: 9 } });
-    archive.on("error", (error) => {
-      throw error;
+    return await streamDirectoryZip({
+      res,
+      directory: arte.base,
+      filename: `${arte.pedidoId}.zip`
     });
-    archive.pipe(res);
-    archive.directory(arte.base, false);
-    archive.finalize();
   } catch (error) {
     console.error("[planejamento-mensal][artes] erro ao gerar zip", {
       pedidoId: req.params.pedidoId,
@@ -4578,6 +4594,7 @@ function monthlyPlanningNotificationPayload({ planning, post }) {
 }
 
 async function runMonthlyPlanningNotifications() {
+  if (!fcmService.scheduledNotificationsEnabled()) return;
   if (monthlyPlanningNotificationsRunning) return;
 
   monthlyPlanningNotificationsRunning = true;
@@ -4615,6 +4632,7 @@ async function runMonthlyPlanningNotifications() {
 }
 
 async function runFreeArtCampaignNotifications() {
+  if (!fcmService.scheduledNotificationsEnabled()) return;
   if (!adminFreeArtsNotificationsEnabled()) return;
   if (freeArtNotificationsRunning) return;
 
@@ -4990,7 +5008,7 @@ app.get("/bot/pedidos/novos", botRunnerAuth, (req, res) => {
   return res.json({ ok: true, pedidos });
 });
 
-app.get("/bot/pedidos/:id/zip", botRunnerAuth, (req, res) => {
+app.get("/bot/pedidos/:id/zip", botRunnerAuth, async (req, res) => {
   if (!isBotAdmin(req)) {
     return res.status(403).json({ ok: false, error: "Acesso negado" });
   }
@@ -5013,16 +5031,11 @@ app.get("/bot/pedidos/:id/zip", botRunnerAuth, (req, res) => {
     });
   }
 
-  res.setHeader("Content-Type", "application/zip");
-  res.setHeader("Content-Disposition", `attachment; filename="${req.params.id}.zip"`);
-
-  const archive = archiver("zip", { zlib: { level: 9 } });
-
-  archive.on("error", err => res.status(500).end(String(err)));
-
-  archive.pipe(res);
-  archive.directory(base, false);
-  archive.finalize();
+  return streamDirectoryZip({
+    res,
+    directory: base,
+    filename: `${req.params.id}.zip`
+  });
 });
 
 app.post("/bot/pedidos/:id/status", auth, (req, res) => {
@@ -5900,7 +5913,7 @@ app.get("/pedidos/:id/thumbnail", (req, res) => {
 });
 
 // ===== BAIXAR ZIP =====
-app.get("/pedidos/:id/zip", auth, (req, res) => {
+app.get("/pedidos/:id/zip", auth, async (req, res) => {
   const whatsapp = req.user.whatsapp;
   const base = getPedidoBase(whatsapp, req.params.id);
 
@@ -5920,16 +5933,11 @@ app.get("/pedidos/:id/zip", auth, (req, res) => {
     });
   }
 
-  res.setHeader("Content-Type", "application/zip");
-  res.setHeader("Content-Disposition", `attachment; filename="${req.params.id}.zip"`);
-
-  const archive = archiver("zip", { zlib: { level: 9 } });
-
-  archive.on("error", err => res.status(500).end(String(err)));
-
-  archive.pipe(res);
-  archive.directory(base, false);
-  archive.finalize();
+  return streamDirectoryZip({
+    res,
+    directory: base,
+    filename: `${req.params.id}.zip`
+  });
 });
 
 // ===== ATUALIZAR STATUS =====
@@ -6002,6 +6010,10 @@ app.post(
 
     const resultadoFile = req.files?.resultado?.[0] || null;
     const previewFile = req.files?.preview?.[0] || null;
+    const artReadyEventEnabled = fcmService.artReadyEventEnabled();
+    const previousOrderStatus = artReadyEventEnabled
+      ? readOrderStatus(base, "")
+      : "";
 
     if (!resultadoFile) {
       cleanupUploadedFiles(req.files);
@@ -6031,6 +6043,41 @@ app.post(
         const pedidoPath = path.join(base, "pedido.json");
         if (fs.existsSync(pedidoPath)) {
           const pedidoData = JSON.parse(fs.readFileSync(pedidoPath, "utf8"));
+          let artReadyCompletion = null;
+
+          if (
+            artReadyEventEnabled &&
+            pedidoData.whatsapp &&
+            !monthlyPlanningService.isPlanningOrder(pedidoData) &&
+            !freeArtCampaignsService.isFreeArtOrder(pedidoData)
+          ) {
+            try {
+              const ownerId = getPedidoOwnerFromBase(base);
+              if (ownerId !== String(pedidoData.whatsapp || "").trim()) {
+                throw Object.assign(new Error("Proprietario divergente."), {
+                  code: "art_ready_owner_mismatch"
+                });
+              }
+              const transition = successfulCompletionTransition({
+                previousStatus: existingPedido.status,
+                previousOrderStatus,
+                existingGenerationId: pedidoData.art_ready_generation_id,
+                createGenerationId: artReadyNotificationService.createGenerationId
+              });
+              if (transition.transitioned) {
+                pedidoData.art_ready_generation_id = transition.generationId;
+                artReadyCompletion = {
+                  generationId: transition.generationId,
+                  ownerId
+                };
+              }
+            } catch (error) {
+              console.warn("[fcm][art-ready] evento nao preparado", {
+                code: error?.code || "art_ready_prepare_failed"
+              });
+            }
+          }
+
           pedidoData.descricao_instagram = descricao_instagram || "";
           pedidoData.status = "pronto";
           pedidoData.aprovado_cliente = false;
@@ -6047,14 +6094,22 @@ app.post(
               pagamento_pendente: pedidoData.pagamento_pendente === true
             }
           });
-          if (
-            pedidoData.whatsapp &&
-            !monthlyPlanningService.isPlanningOrder(pedidoData) &&
-            !freeArtCampaignsService.isFreeArtOrder(pedidoData)
-          ) {
-            sendClientPushAsync(pedidoData.whatsapp, "arte_pronta", {
-              pedido_id: req.params.id,
-              image_url: publicApiUrl(`/pedidos/${encodeURIComponent(req.params.id)}/preview`)
+          if (artReadyCompletion) {
+            setImmediate(() => {
+              artReadyNotificationService
+                .handleCompletion(artReadyCompletion)
+                .then((result) => {
+                  console.log("[fcm][art-ready] processamento concluido", {
+                    code: result?.code || "art_ready_result_unknown",
+                    sent: Number(result?.sent || 0),
+                    blocked: Number(result?.blocked || 0)
+                  });
+                })
+                .catch((error) => {
+                  console.warn("[fcm][art-ready] processamento falhou", {
+                    code: error?.code || "art_ready_processing_failed"
+                  });
+                });
             });
           }
         }
@@ -7075,13 +7130,18 @@ app.use((err, req, res, next) => {
 cleanupOldTmpUploads();
 setInterval(cleanupOldTmpUploads, TMP_UPLOAD_CLEANUP_INTERVAL_MS);
 setInterval(finalizarConversasSuporteInativas, 60 * 1000);
-setTimeout(runMonthlyPlanningNotifications, 15 * 1000);
-setInterval(runMonthlyPlanningNotifications, MONTHLY_PLANNING_NOTIFICATIONS_INTERVAL_MS);
+if (fcmService.scheduledNotificationsEnabled()) {
+  setTimeout(runMonthlyPlanningNotifications, 15 * 1000);
+  setInterval(runMonthlyPlanningNotifications, MONTHLY_PLANNING_NOTIFICATIONS_INTERVAL_MS);
+}
 if (adminFreeArtsEnabled()) {
   setTimeout(runFreeArtCampaignRecovery, 60 * 1000);
   setInterval(runFreeArtCampaignRecovery, adminFreeArtsRecoveryIntervalMs());
 }
-if (adminFreeArtsNotificationsEnabled()) {
+if (
+  adminFreeArtsNotificationsEnabled() &&
+  fcmService.scheduledNotificationsEnabled()
+) {
   setTimeout(runFreeArtCampaignNotifications, 20 * 1000);
   setInterval(runFreeArtCampaignNotifications, adminFreeArtsNotificationsIntervalMs());
 }

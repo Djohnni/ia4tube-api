@@ -1,96 +1,75 @@
-const fs = require("fs");
+"use strict";
+
 const crypto = require("crypto");
+const {
+  safeRuntimeSummary,
+  validateFcmRuntimeConfig
+} = require("./fcm-config");
+const {
+  decryptActiveFcmTokens
+} = require("./fcm-token-store");
 
 const FCM_SCOPE = "https://www.googleapis.com/auth/firebase.messaging";
 const GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token";
+const runtimeConfig = validateFcmRuntimeConfig(process.env);
 
 let cachedAccessToken = null;
 let cachedAccessTokenExpiresAt = 0;
 
-function base64Url(input) {
-  return Buffer.from(input)
-    .toString("base64")
-    .replace(/=/g, "")
-    .replace(/\+/g, "-")
-    .replace(/\//g, "_");
+function tokenRegistrationEnabled() {
+  return runtimeConfig.tokenRegistrationEnabled === true;
 }
 
-function parseServiceAccount() {
-  if (process.env.FIREBASE_SERVICE_ACCOUNT_JSON) {
-    try {
-      return JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT_JSON);
-    } catch {
-      return null;
-    }
-  }
+function artReadyEventEnabled() {
+  return runtimeConfig.artReadyEventEnabled === true;
+}
 
-  if (process.env.GOOGLE_APPLICATION_CREDENTIALS && fs.existsSync(process.env.GOOGLE_APPLICATION_CREDENTIALS)) {
-    try {
-      return JSON.parse(fs.readFileSync(process.env.GOOGLE_APPLICATION_CREDENTIALS, "utf8"));
-    } catch {
-      return null;
-    }
-  }
+function fcmDeliveryEnabled() {
+  return runtimeConfig.deliveryEnabled === true;
+}
 
-  const projectId = process.env.FIREBASE_PROJECT_ID;
-  const clientEmail = process.env.FIREBASE_CLIENT_EMAIL;
-  const privateKey = process.env.FIREBASE_PRIVATE_KEY;
+function automaticNotificationsEnabled() {
+  return runtimeConfig.automaticNotificationsEnabled === true;
+}
 
-  if (!projectId || !clientEmail || !privateKey) return null;
+function scheduledNotificationsEnabled() {
+  return runtimeConfig.scheduledNotificationsEnabled === true;
+}
 
-  return {
-    project_id: projectId,
-    client_email: clientEmail,
-    private_key: privateKey
-  };
+function runtimeConfigSummary() {
+  return safeRuntimeSummary(runtimeConfig);
+}
+
+function isFirebaseConfigured() {
+  return runtimeConfig.credentialConfigured === true;
+}
+
+function base64Url(input) {
+  return Buffer.from(input).toString("base64url");
 }
 
 function normalizePrivateKey(privateKey = "") {
   return String(privateKey || "").replace(/\\n/g, "\n");
 }
 
-function serviceAccountIsValid(serviceAccount) {
-  return Boolean(
-    serviceAccount?.project_id &&
-    serviceAccount?.client_email &&
-    serviceAccount?.private_key
-  );
-}
-
-function isFirebaseConfigured() {
-  return serviceAccountIsValid(parseServiceAccount());
-}
-
-function localMockEnabled() {
-  return process.env.FCM_MOCK === "true" || process.env.NODE_ENV !== "production";
-}
-
 function createSignedJwt(serviceAccount) {
   const now = Math.floor(Date.now() / 1000);
-  const header = {
+  const unsigned = `${base64Url(JSON.stringify({
     alg: "RS256",
     typ: "JWT"
-  };
-  const payload = {
+  }))}.${base64Url(JSON.stringify({
     iss: serviceAccount.client_email,
     scope: FCM_SCOPE,
     aud: GOOGLE_TOKEN_URL,
     iat: now,
     exp: now + 3600
-  };
-
-  const unsigned = `${base64Url(JSON.stringify(header))}.${base64Url(JSON.stringify(payload))}`;
+  }))}`;
   const signer = crypto.createSign("RSA-SHA256");
   signer.update(unsigned);
   signer.end();
-
-  const signature = signer
-    .sign(normalizePrivateKey(serviceAccount.private_key), "base64")
-    .replace(/=/g, "")
-    .replace(/\+/g, "-")
-    .replace(/\//g, "_");
-
-  return `${unsigned}.${signature}`;
+  return `${unsigned}.${signer
+    .sign(normalizePrivateKey(serviceAccount.private_key))
+    .toString("base64url")}`;
 }
 
 async function getAccessToken(serviceAccount) {
@@ -99,7 +78,6 @@ async function getAccessToken(serviceAccount) {
     return cachedAccessToken;
   }
 
-  const jwt = createSignedJwt(serviceAccount);
   const response = await fetch(GOOGLE_TOKEN_URL, {
     method: "POST",
     headers: {
@@ -107,32 +85,24 @@ async function getAccessToken(serviceAccount) {
     },
     body: new URLSearchParams({
       grant_type: "urn:ietf:params:oauth:grant-type:jwt-bearer",
-      assertion: jwt
+      assertion: createSignedJwt(serviceAccount)
     })
   });
-
   const data = await response.json().catch(() => ({}));
   if (!response.ok || !data.access_token) {
-    const error = new Error(data.error_description || data.error || "Falha ao obter token Firebase.");
+    const error = new Error("Falha ao obter token Firebase.");
     error.code = "firebase_access_token_error";
-    error.detail = data;
     throw error;
   }
 
   cachedAccessToken = data.access_token;
-  cachedAccessTokenExpiresAt = Date.now() + Number(data.expires_in || 3600) * 1000;
+  cachedAccessTokenExpiresAt =
+    Date.now() + Number(data.expires_in || 3600) * 1000;
   return cachedAccessToken;
 }
 
 function activeFcmTokens(cliente = {}) {
-  const tokens = Array.isArray(cliente?.notificacoes?.fcm_tokens)
-    ? cliente.notificacoes.fcm_tokens
-    : [];
-
-  return tokens
-    .filter((item) => item && item.ativo !== false && item.token)
-    .map((item) => String(item.token).trim())
-    .filter(Boolean);
+  return decryptActiveFcmTokens({ cliente });
 }
 
 function normalizeData(data = {}) {
@@ -150,33 +120,38 @@ function normalizeImageUrl(payload = {}) {
     payload.previewUrl ||
     "";
   const imageUrl = String(value || "").trim();
-  if (!/^https?:\/\//i.test(imageUrl)) return "";
-  return imageUrl;
+  return /^https?:\/\//i.test(imageUrl) ? imageUrl : "";
 }
 
 function isInvalidFcmTokenError(error = {}) {
   const firebaseError = error?.detail?.error || {};
   const status = String(firebaseError.status || "").trim().toUpperCase();
-  const message = String(error?.message || firebaseError.message || "").trim().toLowerCase();
-  const details = Array.isArray(firebaseError.details) ? firebaseError.details : [];
-  const fcmErrorCodes = details
-    .map((detail) => String(detail?.errorCode || detail?.error_code || "").trim().toUpperCase())
+  const message = String(
+    error?.message || firebaseError.message || ""
+  ).trim().toLowerCase();
+  const details = Array.isArray(firebaseError.details)
+    ? firebaseError.details
+    : [];
+  const codes = details
+    .map((detail) => String(
+      detail?.errorCode || detail?.error_code || ""
+    ).trim().toUpperCase())
     .filter(Boolean);
-
   return (
     status === "NOT_FOUND" ||
     status === "UNREGISTERED" ||
     message.includes("requested entity was not found") ||
-    fcmErrorCodes.includes("UNREGISTERED")
+    codes.includes("UNREGISTERED")
   );
 }
 
 function notificationMessage(type, payload = {}) {
   const pedidoId = payload.pedido_id || payload.pedidoId || "";
-  const planejamentoId = payload.planejamento_id || payload.planejamentoId || "";
-  const planejamentoItemId = payload.planejamento_item_id || payload.planejamentoItemId || "";
+  const planejamentoId =
+    payload.planejamento_id || payload.planejamentoId || "";
+  const planejamentoItemId =
+    payload.planejamento_item_id || payload.planejamentoItemId || "";
   const imageUrl = normalizeImageUrl(payload);
-
   const baseData = normalizeData({
     tipo: type,
     pedido_id: pedidoId,
@@ -238,8 +213,10 @@ function notificationMessage(type, payload = {}) {
         data: {
           ...baseData,
           route: "app_version",
-          latest_version_code: payload.latest_version_code || payload.latestVersionCode || "",
-          latest_version_name: payload.latest_version_name || payload.latestVersionName || ""
+          latest_version_code:
+            payload.latest_version_code || payload.latestVersionCode || "",
+          latest_version_name:
+            payload.latest_version_name || payload.latestVersionName || ""
         }
       };
     case "aviso_geral":
@@ -256,50 +233,86 @@ function notificationMessage(type, payload = {}) {
   }
 }
 
-async function sendToToken({ serviceAccount, accessToken, token, title, body, imageUrl = "", data = {} }) {
-  const url = `https://fcm.googleapis.com/v1/projects/${serviceAccount.project_id}/messages:send`;
+async function sendToToken({
+  serviceAccount,
+  accessToken,
+  token,
+  title,
+  body,
+  imageUrl = "",
+  data = {}
+}) {
+  const url =
+    `https://fcm.googleapis.com/v1/projects/${serviceAccount.project_id}/messages:send`;
   const normalizedImageUrl = normalizeImageUrl({ image_url: imageUrl });
-  const payload = {
-    message: {
-      token,
-      notification: {
-        title,
-        body,
-        ...(normalizedImageUrl ? { image: normalizedImageUrl } : {})
-      },
-      data: normalizeData(data),
-      android: {
-        priority: "high",
-        notification: {
-          channel_id: "ia4tube_updates",
-          ...(normalizedImageUrl ? { image: normalizedImageUrl } : {})
-        }
-      }
-    }
-  };
-
   const response = await fetch(url, {
     method: "POST",
     headers: {
       "Authorization": `Bearer ${accessToken}`,
       "Content-Type": "application/json"
     },
-    body: JSON.stringify(payload)
+    body: JSON.stringify({
+      message: {
+        token,
+        notification: {
+          title,
+          body,
+          ...(normalizedImageUrl ? { image: normalizedImageUrl } : {})
+        },
+        data: normalizeData(data),
+        android: {
+          priority: "high",
+          notification: {
+            channel_id: "ia4tube_updates",
+            ...(normalizedImageUrl ? { image: normalizedImageUrl } : {})
+          }
+        }
+      }
+    })
   });
-
   const result = await response.json().catch(() => ({}));
   if (!response.ok) {
-    const error = new Error(result.error?.message || "Falha ao enviar FCM.");
+    const firebaseError = result?.error || {};
+    const error = new Error("Falha ao enviar FCM.");
     error.code = "firebase_send_error";
-    error.detail = result;
+    error.detail = {
+      error: {
+        status: String(firebaseError.status || ""),
+        message: String(firebaseError.message || ""),
+        details: Array.isArray(firebaseError.details)
+          ? firebaseError.details.map((detail) => ({
+              errorCode: String(
+                detail?.errorCode || detail?.error_code || ""
+              )
+            }))
+          : []
+      }
+    };
     throw error;
   }
-
   return result;
 }
 
 async function sendToClient(cliente, message, options = {}) {
-  const tokens = activeFcmTokens(cliente);
+  // Esta verificacao precisa permanecer antes de token, chave, JWT ou rede.
+  if (!fcmDeliveryEnabled()) {
+    return {
+      ok: false,
+      code: "fcm_delivery_disabled",
+      error: "Entrega FCM desativada por configuracao segura."
+    };
+  }
+
+  let tokens;
+  try {
+    tokens = activeFcmTokens(cliente);
+  } catch {
+    return {
+      ok: false,
+      code: "fcm_token_storage_unavailable",
+      error: "Armazenamento seguro de token FCM indisponivel."
+    };
+  }
   if (!tokens.length) {
     return {
       ok: false,
@@ -308,18 +321,8 @@ async function sendToClient(cliente, message, options = {}) {
     };
   }
 
-  const serviceAccount = parseServiceAccount();
-  if (!serviceAccountIsValid(serviceAccount)) {
-    if (localMockEnabled()) {
-      return {
-        ok: true,
-        mock: true,
-        sent: tokens.length,
-        tokens: tokens.length,
-        reason: "firebase_not_configured"
-      };
-    }
-
+  const serviceAccount = runtimeConfig.serviceAccount;
+  if (!serviceAccount) {
     return {
       ok: false,
       code: "firebase_not_configured",
@@ -329,9 +332,8 @@ async function sendToClient(cliente, message, options = {}) {
 
   const accessToken = await getAccessToken(serviceAccount);
   const errors = [];
-  const invalidTokens = [];
   let sent = 0;
-
+  let invalidTokenCount = 0;
   for (const token of tokens) {
     try {
       await sendToToken({
@@ -347,16 +349,14 @@ async function sendToClient(cliente, message, options = {}) {
     } catch (error) {
       const invalidToken = isInvalidFcmTokenError(error);
       if (invalidToken) {
-        invalidTokens.push(token);
+        invalidTokenCount += 1;
         if (typeof options.onInvalidToken === "function") {
           await Promise.resolve(options.onInvalidToken(token, error));
         }
       }
-
       errors.push({
-        token_suffix: token.slice(-8),
         code: error.code || "firebase_send_error",
-        message: error.message,
+        message: "Falha ao enviar FCM.",
         invalid_token: invalidToken
       });
     }
@@ -366,45 +366,75 @@ async function sendToClient(cliente, message, options = {}) {
     ok: sent > 0,
     sent,
     tokens: tokens.length,
-    invalid_tokens: invalidTokens.length,
+    invalid_tokens: invalidTokenCount,
     errors
   };
 }
 
 function sendArtePronta(cliente, payload = {}, options = {}) {
-  return sendToClient(cliente, notificationMessage("arte_pronta", payload), options);
+  return sendToClient(
+    cliente,
+    notificationMessage("arte_pronta", payload),
+    options
+  );
 }
 
 function sendPedidoAtualizado(cliente, payload = {}, options = {}) {
-  return sendToClient(cliente, notificationMessage("pedido_atualizado", payload), options);
+  return sendToClient(
+    cliente,
+    notificationMessage("pedido_atualizado", payload),
+    options
+  );
 }
 
 function sendPlanejamentoMensal(cliente, payload = {}, options = {}) {
-  return sendToClient(cliente, notificationMessage("planejamento_mensal", payload), options);
+  return sendToClient(
+    cliente,
+    notificationMessage("planejamento_mensal", payload),
+    options
+  );
 }
 
 function sendArteGratisSemanal(cliente, payload = {}, options = {}) {
-  return sendToClient(cliente, notificationMessage("arte_gratis_semanal", payload), options);
+  return sendToClient(
+    cliente,
+    notificationMessage("arte_gratis_semanal", payload),
+    options
+  );
 }
 
 function sendNovaVersao(cliente, payload = {}, options = {}) {
-  return sendToClient(cliente, notificationMessage("nova_versao", payload), options);
+  return sendToClient(
+    cliente,
+    notificationMessage("nova_versao", payload),
+    options
+  );
 }
 
 function sendAvisoGeral(cliente, payload = {}, options = {}) {
-  return sendToClient(cliente, notificationMessage("aviso_geral", payload), options);
+  return sendToClient(
+    cliente,
+    notificationMessage("aviso_geral", payload),
+    options
+  );
 }
 
 module.exports = {
   activeFcmTokens,
-  isInvalidFcmTokenError,
+  artReadyEventEnabled,
+  automaticNotificationsEnabled,
+  fcmDeliveryEnabled,
   isFirebaseConfigured,
+  isInvalidFcmTokenError,
   notificationMessage,
+  runtimeConfigSummary,
+  scheduledNotificationsEnabled,
+  sendArteGratisSemanal,
   sendArtePronta,
+  sendAvisoGeral,
+  sendNovaVersao,
   sendPedidoAtualizado,
   sendPlanejamentoMensal,
-  sendArteGratisSemanal,
-  sendNovaVersao,
-  sendAvisoGeral,
-  sendToClient
+  sendToClient,
+  tokenRegistrationEnabled
 };
