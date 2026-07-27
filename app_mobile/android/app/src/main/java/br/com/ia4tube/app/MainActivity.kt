@@ -24,9 +24,12 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.platform.LocalContext
 import androidx.core.content.ContextCompat
 import br.com.ia4tube.app.core.notifications.IA4TubeNotificationHelper
+import br.com.ia4tube.app.core.notifications.FcmActivationPolicy
+import br.com.ia4tube.app.core.notifications.FcmTokenRegistrar
 import br.com.ia4tube.app.core.notifications.NotificationNavigationTarget
 import br.com.ia4tube.app.core.notifications.toNotificationNavigationTarget
 import br.com.ia4tube.app.core.config.AppConfig
+import br.com.ia4tube.app.core.session.SessionStore
 import br.com.ia4tube.app.data.api.IA4TubeApiClient
 import br.com.ia4tube.app.data.models.ApiResult
 import br.com.ia4tube.app.data.models.AppVersionInfo
@@ -39,8 +42,11 @@ class MainActivity : ComponentActivity() {
     @SuppressLint("InvalidFragmentVersionForActivityResult")
     private val notificationPermissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestPermission()
-    ) {
+    ) { granted ->
         // Notifications are optional; the app keeps working with manual status refresh.
+        if (granted && AppConfig.isStaging) {
+            activateStagingFcmAfterConsent()
+        }
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -71,16 +77,54 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun requestNotificationPermissionIfNeeded() {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) return
+        if (!AppConfig.isStaging) {
+            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) return
 
-        val granted = ContextCompat.checkSelfPermission(
-            this,
-            Manifest.permission.POST_NOTIFICATIONS
-        ) == PackageManager.PERMISSION_GRANTED
+            val granted = ContextCompat.checkSelfPermission(
+                this,
+                Manifest.permission.POST_NOTIFICATIONS
+            ) == PackageManager.PERMISSION_GRANTED
 
-        if (!granted) {
-            notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+            if (!granted) {
+                notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+            }
+            return
         }
+
+        val granted = Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU ||
+            ContextCompat.checkSelfPermission(
+                this,
+                Manifest.permission.POST_NOTIFICATIONS
+            ) == PackageManager.PERMISSION_GRANTED
+
+        if (
+            FcmActivationPolicy.shouldRequestPermission(
+                fcmRegistrationEnabled = AppConfig.fcmRegistrationEnabled,
+                notificationsEnabled = AppConfig.notificationsEnabled,
+                sdkInt = Build.VERSION.SDK_INT,
+                permissionGranted = granted
+            )
+        ) {
+            notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+        } else if (
+            FcmActivationPolicy.shouldActivate(
+                fcmRegistrationEnabled = AppConfig.fcmRegistrationEnabled,
+                notificationsEnabled = AppConfig.notificationsEnabled,
+                sdkInt = Build.VERSION.SDK_INT,
+                permissionGranted = granted
+            )
+        ) {
+            activateStagingFcmAfterConsent()
+        }
+    }
+
+    private fun activateStagingFcmAfterConsent() {
+        if (!AppConfig.isStaging) return
+        FcmTokenRegistrar(
+            context = applicationContext,
+            apiClient = IA4TubeApiClient(),
+            sessionStore = SessionStore(applicationContext)
+        ).syncCurrentToken()
     }
 }
 

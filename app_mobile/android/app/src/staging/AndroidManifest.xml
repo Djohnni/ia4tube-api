@@ -2,13 +2,7 @@
     xmlns:tools="http://schemas.android.com/tools">
 
     <uses-permission
-        android:name="android.permission.POST_NOTIFICATIONS"
-        tools:node="remove" />
-    <uses-permission
         android:name="com.google.android.gms.permission.AD_ID"
-        tools:node="remove" />
-    <uses-permission
-        android:name="com.google.android.c2dm.permission.RECEIVE"
         tools:node="remove" />
 
     <application
@@ -23,19 +17,6 @@
         <meta-data
             android:name="firebase_analytics_collection_enabled"
             android:value="false" />
-        <meta-data
-            android:name="com.google.firebase.messaging.default_notification_channel_id"
-            tools:node="remove" />
-
-        <service
-            android:name=".core.notifications.IA4TubeFirebaseMessagingService"
-            tools:node="remove" />
-        <service
-            android:name="com.google.firebase.messaging.FirebaseMessagingService"
-            tools:node="remove" />
-        <receiver
-            android:name="com.google.firebase.iid.FirebaseInstanceIdReceiver"
-            tools:node="remove" />
     </application>
 
 </manifest>

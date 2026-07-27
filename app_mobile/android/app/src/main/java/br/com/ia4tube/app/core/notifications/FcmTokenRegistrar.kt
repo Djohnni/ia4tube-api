@@ -1,7 +1,11 @@
 package br.com.ia4tube.app.core.notifications
 
+import android.Manifest
 import android.content.Context
+import android.content.pm.PackageManager
+import android.os.Build
 import android.util.Log
+import androidx.core.content.ContextCompat
 import br.com.ia4tube.app.core.config.AppConfig
 import br.com.ia4tube.app.core.session.SessionStore
 import br.com.ia4tube.app.data.api.IA4TubeApiClient
@@ -24,10 +28,15 @@ class FcmTokenRegistrar(
 
     fun syncCurrentToken() {
         if (!AppConfig.fcmRegistrationEnabled) return
+        if (!stagingConsentGranted()) return
         if (!isFirebaseConfigured()) return
 
         runCatching {
-            FirebaseMessaging.getInstance().token
+            FirebaseMessaging.getInstance().apply {
+                if (AppConfig.isStaging) {
+                    isAutoInitEnabled = true
+                }
+            }.token
                 .addOnSuccessListener { token -> syncToken(token) }
                 .addOnFailureListener { error ->
                     Log.w(TAG, "Nao foi possivel obter token FCM.", error)
@@ -39,6 +48,7 @@ class FcmTokenRegistrar(
 
     fun syncToken(token: String) {
         if (!AppConfig.fcmRegistrationEnabled) return
+        if (!stagingConsentGranted()) return
         val cleanToken = token.trim()
         if (cleanToken.isBlank()) return
 
@@ -66,6 +76,22 @@ class FcmTokenRegistrar(
 
     private fun isFirebaseConfigured(): Boolean {
         return runCatching { FirebaseApp.getApps(appContext).isNotEmpty() }.getOrDefault(false)
+    }
+
+    private fun stagingConsentGranted(): Boolean {
+        if (!AppConfig.isStaging) return true
+        val permissionGranted = Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU ||
+            ContextCompat.checkSelfPermission(
+                appContext,
+                Manifest.permission.POST_NOTIFICATIONS
+            ) == PackageManager.PERMISSION_GRANTED
+
+        return FcmActivationPolicy.shouldActivate(
+            fcmRegistrationEnabled = AppConfig.fcmRegistrationEnabled,
+            notificationsEnabled = AppConfig.notificationsEnabled,
+            sdkInt = Build.VERSION.SDK_INT,
+            permissionGranted = permissionGranted
+        )
     }
 
     private companion object {

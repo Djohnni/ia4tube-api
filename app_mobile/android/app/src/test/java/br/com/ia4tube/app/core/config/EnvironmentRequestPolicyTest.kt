@@ -65,6 +65,30 @@ class EnvironmentRequestPolicyTest {
         )
     }
 
+    @Test
+    fun enabledStagingFcmCanRegisterOnlyAtTheStagingOrigin() {
+        val fcmEnabledPolicy = EnvironmentRequestPolicy(
+            isStaging = true,
+            apiBase = STAGING_BASE,
+            fcmRegistrationEnabled = true,
+            mobileAnalyticsEnabled = false,
+            paymentsEnabled = false,
+            supportEnabled = false
+        )
+
+        assertNull(
+            fcmEnabledPolicy.rejectionCode(
+                "$STAGING_BASE/me/fcm-token".toHttpUrl()
+            )
+        )
+        assertEquals(
+            "STAGING_ORIGIN_BLOCKED",
+            fcmEnabledPolicy.rejectionCode(
+                "https://ia4tube-api.onrender.com/me/fcm-token".toHttpUrl()
+            )
+        )
+    }
+
     private companion object {
         const val STAGING_BASE = "https://ia4tube-api-staging-checkpoint-a.onrender.com"
     }
