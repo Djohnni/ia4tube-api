@@ -197,12 +197,14 @@ async function run() {
     }
   );
 
-  assertConfigError(
-    "fcm_automatic_notifications_forbidden_in_staging",
-    stagingEnv({
-      FCM_AUTOMATIC_NOTIFICATIONS_ENABLED: "true"
-    })
+  const automaticRuleConfig = validateFcmRuntimeConfig(stagingEnv({
+    FCM_AUTOMATIC_NOTIFICATIONS_ENABLED: "true"
+  }));
+  assert.strictEqual(
+    automaticRuleConfig.automaticNotificationsEnabled,
+    true
   );
+  assert.strictEqual(automaticRuleConfig.scheduledNotificationsEnabled, false);
 
   assertConfigError(
     "fcm_credentials_missing",
@@ -249,6 +251,7 @@ async function run() {
         assert.strictEqual(result.ok, false);
         assert.strictEqual(result.code, "fcm_delivery_disabled");
         assert.strictEqual(fcmService.automaticNotificationsEnabled(), false);
+        assert.strictEqual(fcmService.scheduledNotificationsEnabled(), false);
         assert.deepStrictEqual(
           Object.values(fcmService.runtimeConfigSummary()).filter(
             (value) => typeof value !== "boolean" && typeof value !== "string"
@@ -276,15 +279,15 @@ async function run() {
   );
   assert.match(
     serverSource,
-    /if \(fcmService\.automaticNotificationsEnabled\(\)\) \{[\s\S]*setTimeout\(runMonthlyPlanningNotifications/
+    /if \(fcmService\.scheduledNotificationsEnabled\(\)\) \{[\s\S]*setTimeout\(runMonthlyPlanningNotifications/
   );
   assert.match(
     serverSource,
-    /async function runMonthlyPlanningNotifications\(\) \{\s*if \(!fcmService\.automaticNotificationsEnabled\(\)\) return;/
+    /async function runMonthlyPlanningNotifications\(\) \{\s*if \(!fcmService\.scheduledNotificationsEnabled\(\)\) return;/
   );
   assert.match(
     serverSource,
-    /async function runFreeArtCampaignNotifications\(\) \{\s*if \(!fcmService\.automaticNotificationsEnabled\(\)\) return;/
+    /async function runFreeArtCampaignNotifications\(\) \{\s*if \(!fcmService\.scheduledNotificationsEnabled\(\)\) return;/
   );
 
   console.log("fcm-safety.test.js ok");

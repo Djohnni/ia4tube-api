@@ -164,6 +164,15 @@ function decryptActiveFcmTokens({
     .map((item) => tokenCrypto.decryptToken(item));
 }
 
+function activeEncryptedFcmTokenRecords({
+  cliente,
+  tokenCrypto = createFcmTokenCrypto()
+}) {
+  return encryptedRecords(cliente, tokenCrypto)
+    .filter((item) => item.ativo !== false)
+    .map((item) => ({ ...item }));
+}
+
 function deactivateFcmTokens({
   cliente,
   tokens = [],
@@ -430,6 +439,7 @@ function migrateLegacyFcmTokensFile({
 }
 
 module.exports = {
+  activeEncryptedFcmTokenRecords,
   assertNoLegacyFcmTokens,
   atomicWriteJson,
   deactivateFcmTokens,

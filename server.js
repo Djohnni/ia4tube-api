@@ -23,6 +23,12 @@ const monthlyPlanningService = require("./src/company-monthly-planning/planning.
 const productDiscoveryService = require("./src/company-monthly-planning/product-discovery.service");
 const fcmService = require("./src/notifications/fcm.service");
 const fcmTokenStore = require("./src/notifications/fcm-token-store");
+const {
+  createArtReadyNotificationService
+} = require("./src/notifications/art-ready-notification.service");
+const {
+  successfulCompletionTransition
+} = require("./src/notifications/art-ready-generation");
 const freeArtCampaignsService = require("./src/admin-free-art-campaigns/free-art-campaigns.service");
 const freeArtCampaignsStorage = require("./src/admin-free-art-campaigns/free-art-campaigns.storage");
 const freeArtCampaignsScheduler = require("./src/admin-free-art-campaigns/free-art-campaigns.scheduler");
@@ -61,6 +67,11 @@ const CAROUSELS_DIR = path.join(DATA_DIR, "carrosseis");
 const MONTHLY_PLANNINGS_DIR = path.join(DATA_DIR, "planejamentos_mensais");
 const FREE_ART_CAMPAIGNS_DIR = path.join(DATA_DIR, "campanhas_artes_gratis");
 const CLIENTES_FILE = path.join(DATA_DIR, "clientes.json");
+const ART_READY_OUTBOX_FILE = path.join(
+  DATA_DIR,
+  "notifications",
+  "art-ready-outbox.json"
+);
 const BOT_ADMIN_WHATSAPP = process.env.BOT_ADMIN_WHATSAPP || "15991120599";
 const BOT_RUNNER_TOKENS = configuredSecrets(
   "BOT_RUNNER_TOKEN",
@@ -658,6 +669,18 @@ function sanitizeOnlineUserForResponse(user = {}) {
 
 function getPedidoBaseGlobal(pedidoId) {
   return orderStorage.getPedidoBaseGlobal(PEDIDOS_DIR, pedidoId);
+}
+
+function getPedidoOwnerFromBase(base) {
+  const relative = path.relative(
+    path.resolve(PEDIDOS_DIR),
+    path.resolve(String(base || ""))
+  );
+  if (!relative || relative.startsWith("..") || path.isAbsolute(relative)) {
+    return "";
+  }
+  const [owner] = relative.split(path.sep);
+  return orderStorage.isSafePathSegment(owner) ? owner : "";
 }
 
 function listPedidoBasesByWhatsapp(whatsapp) {
@@ -2395,58 +2418,17 @@ function findOrderBaseForSignedMedia({ orderId, variant, expiresAt, signature })
   return null;
 }
 
-function sendClientPushAsync(whatsapp, tipo, payload = {}) {
-  try {
-    const clientes = readClientes();
-    const cliente = clientes[whatsapp];
-
-    if (!cliente) {
-      console.warn("[fcm] cliente nao encontrado", { whatsapp, tipo });
-      return;
-    }
-
-    const sender = fcmSenderForType(tipo);
-    const invalidTokens = [];
-    sender(cliente, payload, {
-      onInvalidToken: (token) => invalidTokens.push(token)
-    })
-      .then((result) => {
-        const cleanup = deactivateInvalidFcmTokens(whatsapp, invalidTokens);
-        if (cleanup.deactivated > 0) {
-          result.tokens_invalidos_desativados = cleanup.deactivated;
-          console.warn("[fcm] tokens invalidos desativados", {
-            whatsapp,
-            tipo,
-            deactivated: cleanup.deactivated
-          });
-        }
-
-        if (!result?.ok) {
-          console.warn("[fcm] push nao enviado", { whatsapp, tipo, result });
-          return;
-        }
-        console.log("[fcm] push enviado", {
-          whatsapp,
-          tipo,
-          sent: result.sent || 0,
-          mock: result.mock === true
-        });
-      })
-      .catch((error) => {
-        console.warn("[fcm] falha ao enviar push", {
-          whatsapp,
-          tipo,
-          message: error?.message
-        });
-      });
-  } catch (error) {
-    console.warn("[fcm] falha ao preparar push", {
-      whatsapp,
-      tipo,
-      message: error?.message
-    });
-  }
-}
+const artReadyNotificationService = createArtReadyNotificationService({
+  outboxPath: ART_READY_OUTBOX_FILE,
+  deliveryEnabled: fcmService.fcmDeliveryEnabled,
+  automaticNotificationsEnabled: fcmService.automaticNotificationsEnabled,
+  getClienteByOwner: (ownerId) => readClientes()[ownerId] || null,
+  listActiveTokenRecords: (cliente) =>
+    fcmTokenStore.activeEncryptedFcmTokenRecords({ cliente }),
+  sendToClient: fcmService.sendToClient,
+  deactivateInvalidTokens: (ownerId, invalidTokens) =>
+    deactivateInvalidFcmTokens(ownerId, invalidTokens)
+});
 
 app.post("/bot/notificacoes/teste", botRunnerAuth, async (req, res) => {
   if (!isBotAdmin(req)) {
@@ -4710,7 +4692,7 @@ function monthlyPlanningNotificationPayload({ planning, post }) {
 }
 
 async function runMonthlyPlanningNotifications() {
-  if (!fcmService.automaticNotificationsEnabled()) return;
+  if (!fcmService.scheduledNotificationsEnabled()) return;
   if (monthlyPlanningNotificationsRunning) return;
 
   monthlyPlanningNotificationsRunning = true;
@@ -4748,7 +4730,7 @@ async function runMonthlyPlanningNotifications() {
 }
 
 async function runFreeArtCampaignNotifications() {
-  if (!fcmService.automaticNotificationsEnabled()) return;
+  if (!fcmService.scheduledNotificationsEnabled()) return;
   if (!adminFreeArtsNotificationsEnabled()) return;
   if (freeArtNotificationsRunning) return;
 
@@ -5211,23 +5193,10 @@ app.post("/bot/pedidos/:id/status", auth, (req, res) => {
         }
       });
     }
-    if (
-      pedido.whatsapp &&
-      !monthlyPlanningService.isPlanningOrder(pedido) &&
-      !freeArtCampaignsService.isFreeArtOrder(pedido)
-    ) {
-      sendClientPushAsync(pedido.whatsapp, "pedido_atualizado", {
-        pedido_id: req.params.id,
-        status,
-        body: status === orderStatus.ORDER_STATUS.EM_PRODUCAO
-          ? "Sua arte entrou em producao. Toque para acompanhar."
-          : "Seu pedido teve uma atualizacao. Toque para acompanhar."
-      });
-    }
   } catch (error) {
-    console.warn("[fcm] nao foi possivel preparar push de status", {
+    console.warn("[pedidos] nao foi possivel registrar status do runner", {
       pedido_id: req.params.id,
-      message: error?.message
+      code: error?.code || "runner_status_event_error"
     });
   }
 
@@ -6126,7 +6095,7 @@ app.post(
     { name: "resultado", maxCount: 1 },
     { name: "preview", maxCount: 1 }
   ]),
-  (req, res) => {
+  async (req, res) => {
 
     const descricao_instagram = req.body?.descricao_instagram || "";
     if (!isBotAdmin(req)) {
@@ -6154,6 +6123,23 @@ app.post(
       });
     }
 
+    const ownerId = getPedidoOwnerFromBase(base);
+    if (
+      !ownerId ||
+      String(existingPedido.whatsapp || "").trim() !== ownerId
+    ) {
+      cleanupUploadedFiles(req.files);
+      return res.status(409).json({
+        ok: false,
+        code: "art_ready_owner_mismatch",
+        error: "Proprietario do pedido nao pode ser confirmado."
+      });
+    }
+
+    const previousStatus = readOrderStatus(
+      base,
+      String(existingPedido.status || "")
+    );
     const resultadoFile = req.files?.resultado?.[0] || null;
     const previewFile = req.files?.preview?.[0] || null;
 
@@ -6166,6 +6152,13 @@ app.post(
     const previewDest = path.join(base, "preview_ia4tube.jpg");
 
     try {
+      const completionTransition = successfulCompletionTransition({
+        previousStatus,
+        previousOrderStatus: existingPedido.status,
+        existingGenerationId: existingPedido.art_ready_generation_id,
+        createGenerationId: artReadyNotificationService.createGenerationId
+      });
+
       if (fs.existsSync(dest)) fs.unlinkSync(dest);
       fs.renameSync(resultadoFile.path, dest);
 
@@ -6174,50 +6167,64 @@ app.post(
         fs.renameSync(previewFile.path, previewDest);
       }
 
-      writeOrderStatus(base, orderStatus.ORDER_STATUS.PRONTO);
-
       try {
         const ajustePendentePath = path.join(base, "ajuste_pendente.txt");
         if (fs.existsSync(ajustePendentePath)) fs.unlinkSync(ajustePendentePath);
       } catch {}
 
-      try {
-        const pedidoPath = path.join(base, "pedido.json");
-        if (fs.existsSync(pedidoPath)) {
-          const pedidoData = JSON.parse(fs.readFileSync(pedidoPath, "utf8"));
-          pedidoData.descricao_instagram = descricao_instagram || "";
-          pedidoData.status = "pronto";
-          pedidoData.aprovado_cliente = false;
-          pedidoData.baixado_cliente = false;
-          pedidoData.resultado_enviado_em = new Date().toISOString();
-          fs.writeFileSync(pedidoPath, JSON.stringify(pedidoData, null, 2), "utf8");
-          registrarEventoServidor("pedido_pronto", {
-            whatsapp: pedidoData.whatsapp,
-            pedidoId: req.params.id,
-            produto: pedidoData.product_id || pedidoData.categoria || "pedido",
-            payload: {
-              tipo: "pedido",
-              categoria: pedidoData.categoria || "",
-              pagamento_pendente: pedidoData.pagamento_pendente === true
-            }
-          });
-          if (
-            pedidoData.whatsapp &&
-            !monthlyPlanningService.isPlanningOrder(pedidoData) &&
-            !freeArtCampaignsService.isFreeArtOrder(pedidoData)
-          ) {
-            sendClientPushAsync(pedidoData.whatsapp, "arte_pronta", {
-              pedido_id: req.params.id,
-              image_url: signedOrderMediaUrl({
-                owner: pedidoData.whatsapp,
-                orderId: req.params.id,
-                variant: "preview",
-                ttlSeconds: ORDER_MEDIA_NOTIFICATION_TTL_SECONDS
-              })
-            });
-          }
+      const completedAt = new Date().toISOString();
+      const generationId = completionTransition.generationId;
+      const pedidoData = {
+        ...existingPedido,
+        descricao_instagram: descricao_instagram || "",
+        status: orderStatus.ORDER_STATUS.PRONTO,
+        aprovado_cliente: false,
+        baixado_cliente: false,
+        resultado_enviado_em: completedAt,
+        ...(generationId ? {
+          art_ready_generation_id: generationId,
+          art_ready_completed_at: !completionTransition.transitioned
+            ? existingPedido.art_ready_completed_at || completedAt
+            : completedAt
+        } : {})
+      };
+      writePedido(base, pedidoData);
+      writeOrderStatus(base, orderStatus.ORDER_STATUS.PRONTO);
+
+      registrarEventoServidor("pedido_pronto", {
+        whatsapp: pedidoData.whatsapp,
+        pedidoId: req.params.id,
+        produto: pedidoData.product_id || pedidoData.categoria || "pedido",
+        payload: {
+          tipo: "pedido",
+          categoria: pedidoData.categoria || "",
+          pagamento_pendente: pedidoData.pagamento_pendente === true
         }
-      } catch (e) {}
+      });
+
+      if (
+        generationId &&
+        !monthlyPlanningService.isPlanningOrder(pedidoData) &&
+        !freeArtCampaignsService.isFreeArtOrder(pedidoData)
+      ) {
+        try {
+          const notification = await artReadyNotificationService.handleCompletion({
+            generationId,
+            ownerId
+          });
+          console.log("[art-ready-notification]", {
+            code: notification.code,
+            recipients: notification.recipients,
+            sent: notification.sent,
+            blocked: notification.blocked,
+            failed: notification.failed
+          });
+        } catch (error) {
+          console.warn("[art-ready-notification]", {
+            code: error?.code || "art_ready_event_failed"
+          });
+        }
+      }
 
       return res.json({
         ok: true,
@@ -7230,7 +7237,7 @@ if (adminFreeArtsEnabled()) {
   setTimeout(runFreeArtCampaignRecovery, 60 * 1000);
   setInterval(runFreeArtCampaignRecovery, adminFreeArtsRecoveryIntervalMs());
 }
-if (fcmService.automaticNotificationsEnabled()) {
+if (fcmService.scheduledNotificationsEnabled()) {
   setTimeout(runMonthlyPlanningNotifications, 15 * 1000);
   setInterval(runMonthlyPlanningNotifications, MONTHLY_PLANNING_NOTIFICATIONS_INTERVAL_MS);
   if (adminFreeArtsNotificationsEnabled()) {

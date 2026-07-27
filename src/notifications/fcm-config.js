@@ -191,10 +191,6 @@ function validateFcmRuntimeConfig(env = process.env, options = {}) {
     );
   }
 
-  if (automaticNotificationsRequested) {
-    fail("fcm_automatic_notifications_forbidden_in_staging");
-  }
-
   let serviceAccount = null;
   if (sources.length === 1) {
     serviceAccount = validateServiceAccount(
@@ -216,7 +212,8 @@ function validateFcmRuntimeConfig(env = process.env, options = {}) {
 
   return Object.freeze({
     deliveryEnabled,
-    automaticNotificationsEnabled: false,
+    automaticNotificationsEnabled: automaticNotificationsRequested,
+    scheduledNotificationsEnabled: false,
     credentialConfigured: Boolean(serviceAccount),
     credentialSourceCount: sources.length,
     expectedProjectConfigured: Boolean(expectedProjectId),

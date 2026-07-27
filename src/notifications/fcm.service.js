@@ -46,6 +46,10 @@ function automaticNotificationsEnabled() {
   return runtimeConfig.automaticNotificationsEnabled === true;
 }
 
+function scheduledNotificationsEnabled() {
+  return runtimeConfig.scheduledNotificationsEnabled === true;
+}
+
 function runtimeConfigSummary() {
   return safeRuntimeSummary(runtimeConfig);
 }
@@ -401,6 +405,7 @@ module.exports = {
   isFirebaseConfigured,
   notificationMessage,
   runtimeConfigSummary,
+  scheduledNotificationsEnabled,
   sendArtePronta,
   sendPedidoAtualizado,
   sendPlanejamentoMensal,
