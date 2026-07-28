@@ -31,6 +31,11 @@ const {
 const {
   successfulCompletionTransition
 } = require("./src/notifications/art-ready-generation");
+const {
+  FcmTokenApiContractError,
+  parseDeactivateFcmTokenBody,
+  parseRegisterFcmTokenBody
+} = require("./src/notifications/fcm-token-api-contract");
 const { streamDirectoryZip } = require("./src/zip/zip-stream");
 const freeArtCampaignsService = require("./src/admin-free-art-campaigns/free-art-campaigns.service");
 const freeArtCampaignsStorage = require("./src/admin-free-art-campaigns/free-art-campaigns.storage");
@@ -207,7 +212,7 @@ const artReadyNotificationService = createArtReadyNotificationService({
   getClienteByOwner: (ownerId) => readClientes()[ownerId] || null,
   listActiveTokenRecords: (cliente) =>
     activeEncryptedFcmTokenRecords({ cliente }),
-  sendToClient: fcmService.sendToClient,
+  sendToClient: fcmService.sendArtReadyToClient,
   deactivateInvalidTokens: (ownerId, tokens) =>
     deactivateInvalidFcmTokens(ownerId, tokens)
 });
@@ -2189,11 +2194,17 @@ app.post("/me/fcm-token", auth, (req, res) => {
     });
   }
 
-  const fcmToken = String(req.body?.token || "").trim();
-  const platform = String(req.body?.platform || "android").trim().toLowerCase() || "android";
-
-  if (!fcmToken) {
-    return res.status(400).json({ ok: false, error: "Token FCM obrigatorio" });
+  let requestData;
+  try {
+    requestData = parseRegisterFcmTokenBody(req.body);
+  } catch (error) {
+    return res.status(400).json({
+      ok: false,
+      code: error instanceof FcmTokenApiContractError
+        ? error.code
+        : "fcm_token_request_invalid",
+      error: "Requisicao de notificacoes invalida."
+    });
   }
 
   const clientes = readClientes();
@@ -2204,10 +2215,17 @@ app.post("/me/fcm-token", auth, (req, res) => {
   }
 
   try {
+    if (requestData.previousToken) {
+      deactivateFcmTokens({
+        cliente: c,
+        tokens: [requestData.previousToken],
+        reason: "token_replaced"
+      });
+    }
     const result = registerFcmToken({
       cliente: c,
-      token: fcmToken,
-      platform
+      token: requestData.token,
+      platform: requestData.platform
     });
     clientes[req.user.whatsapp] = c;
     atomicWriteJson(CLIENTES_FILE, clientes);
@@ -2221,6 +2239,61 @@ app.post("/me/fcm-token", auth, (req, res) => {
       ok: false,
       code: "fcm_token_secure_storage_unavailable",
       error: "Registro seguro de notificacoes indisponivel."
+    });
+  }
+});
+
+app.delete("/me/fcm-token", auth, (req, res) => {
+  // Esta trava deve preceder leitura do body, clientes, chaves ou tokens.
+  if (!fcmService.tokenRegistrationEnabled()) {
+    return res.status(503).json({
+      ok: false,
+      code: "fcm_token_registration_disabled",
+      error: "Registro de notificacoes desativado."
+    });
+  }
+
+  let requestData;
+  try {
+    requestData = parseDeactivateFcmTokenBody(req.body);
+  } catch (error) {
+    return res.status(400).json({
+      ok: false,
+      code: error instanceof FcmTokenApiContractError
+        ? error.code
+        : "fcm_token_request_invalid",
+      error: "Requisicao de notificacoes invalida."
+    });
+  }
+
+  const clientes = readClientes();
+  const cliente = clientes[req.user.whatsapp];
+  if (!cliente) {
+    return res.status(404).json({
+      ok: false,
+      error: "Cliente nao encontrado"
+    });
+  }
+
+  try {
+    const result = deactivateFcmTokens({
+      cliente,
+      tokens: [requestData.token],
+      reason: "client_deactivated"
+    });
+    if (result.deactivated > 0) {
+      clientes[req.user.whatsapp] = cliente;
+      atomicWriteJson(CLIENTES_FILE, clientes);
+    }
+    return res.json({
+      ok: true,
+      desativado: result.deactivated > 0
+    });
+  } catch {
+    return res.status(503).json({
+      ok: false,
+      code: "fcm_token_secure_storage_unavailable",
+      error: "Desativacao segura de notificacoes indisponivel."
     });
   }
 });
@@ -2281,10 +2354,7 @@ function publicApiUrl(pathname = "") {
 }
 
 function sendClientPushAsync(whatsapp, tipo, payload = {}) {
-  if (
-    !fcmService.automaticNotificationsEnabled() ||
-    !fcmService.fcmDeliveryEnabled()
-  ) {
+  if (!fcmService.statusNotificationsEnabled()) {
     return;
   }
 
@@ -2345,11 +2415,11 @@ app.post("/bot/notificacoes/teste", botRunnerAuth, async (req, res) => {
   if (!isBotAdmin(req)) {
     return res.status(403).json({ ok: false, error: "Acesso negado" });
   }
-  if (!fcmService.fcmDeliveryEnabled()) {
+  if (!fcmService.manualNotificationsEnabled()) {
     return res.status(503).json({
       ok: false,
-      code: "fcm_delivery_disabled",
-      error: "Entrega FCM desativada."
+      code: "fcm_manual_notifications_disabled",
+      error: "Notificacoes manuais desativadas."
     });
   }
 
@@ -6068,7 +6138,8 @@ app.post(
                 pedidoData.art_ready_generation_id = transition.generationId;
                 artReadyCompletion = {
                   generationId: transition.generationId,
-                  ownerId
+                  ownerId,
+                  pedidoId: req.params.id
                 };
               }
             } catch (error) {

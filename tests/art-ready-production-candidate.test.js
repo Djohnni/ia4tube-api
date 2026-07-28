@@ -11,7 +11,9 @@ const {
   BODY,
   TITLE,
   createArtReadyNotificationService,
-  createGenerationId
+  createGenerationId,
+  validateGenerationId,
+  validatePedidoId
 } = require("../src/notifications/art-ready-notification.service");
 const {
   successfulCompletionTransition
@@ -26,6 +28,32 @@ const {
 const {
   createFcmTokenCrypto
 } = require("../src/notifications/fcm-token-crypto");
+const {
+  buildArtReadyFcmRequest
+} = require("../src/notifications/fcm.service");
+
+const SYNTHETIC_PEDIDO_ID = "synthetic-order-art-ready";
+
+test("backend identifiers match the strict Android contract boundaries", () => {
+  const eventId = "art_12345678-1234-4abc-8def-1234567890ab";
+  assert.equal(validateGenerationId(eventId), eventId);
+  assert.equal(validatePedidoId("a"), "a");
+  assert.equal(validatePedidoId(`a${"b".repeat(127)}`).length, 128);
+
+  for (const invalidEventId of [
+    "event_20260728_0001",
+    "art_12345678-1234-3abc-8def-1234567890ab",
+    "art_12345678-1234-4abc-7def-1234567890ab"
+  ]) {
+    assert.throws(() => validateGenerationId(invalidEventId));
+  }
+  for (const invalidPedidoId of [
+    ".pedido",
+    `a${"b".repeat(128)}`
+  ]) {
+    assert.throws(() => validatePedidoId(invalidPedidoId));
+  }
+});
 
 function cryptoEnv() {
   const keyId = "synthetic-v1";
@@ -107,6 +135,63 @@ test("event gate returns before owner, token, outbox or transport", async () => 
   }
 });
 
+test("art-ready FCM request is exact, data-only and Unicode-safe", () => {
+  const eventId = createGenerationId();
+  const request = buildArtReadyFcmRequest({
+    token: "synthetic-token-contract-only",
+    eventId,
+    pedidoId: SYNTHETIC_PEDIDO_ID
+  });
+
+  assert.equal(TITLE, "Sua arte está pronta!");
+  assert.equal(BODY, "Toque para visualizar sua criação na IA4Tube.");
+  assert.deepEqual(request, {
+    message: {
+      token: "synthetic-token-contract-only",
+      data: {
+        schema_version: "1",
+        tipo: "arte_pronta",
+        event_id: eventId,
+        pedido_id: SYNTHETIC_PEDIDO_ID,
+        title: TITLE,
+        body: BODY
+      },
+      android: {
+        priority: "high"
+      }
+    }
+  });
+  assert.deepEqual(Object.keys(request.message.data), [
+    "schema_version",
+    "tipo",
+    "event_id",
+    "pedido_id",
+    "title",
+    "body"
+  ]);
+  for (const forbidden of [
+    "notification",
+    "image",
+    "link",
+    "route",
+    "topic",
+    "condition",
+    "tokens",
+    "fcm_options",
+    "analytics",
+    "analytics_label"
+  ]) {
+    assert.equal(
+      Object.prototype.hasOwnProperty.call(request.message, forbidden),
+      false
+    );
+    assert.equal(
+      Object.prototype.hasOwnProperty.call(request.message.data, forbidden),
+      false
+    );
+  }
+});
+
 test("owner isolation, persisted idempotency and PII-free content", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "ia4tube-art-on-"));
   const tokenCrypto = createFcmTokenCrypto({ env: cryptoEnv() });
@@ -135,11 +220,13 @@ test("owner isolation, persisted idempotency and PII-free content", async () => 
     const generationId = createGenerationId();
     const first = await instance.service.handleCompletion({
       generationId,
-      ownerId: ownerA
+      ownerId: ownerA,
+      pedidoId: SYNTHETIC_PEDIDO_ID
     });
     const second = await instance.service.handleCompletion({
       generationId,
-      ownerId: ownerA
+      ownerId: ownerA,
+      pedidoId: SYNTHETIC_PEDIDO_ID
     });
 
     assert.equal(first.sent, 1);
@@ -158,18 +245,13 @@ test("owner isolation, persisted idempotency and PII-free content", async () => 
       clientB.notificacoes.fcm_tokens[0].fingerprint
     );
     assert.deepEqual(deliveries[0].message, {
-      title: TITLE,
-      body: BODY,
-      imageUrl: "",
-      data: {
-        tipo: "arte_pronta",
-        route: "orders"
-      }
+      eventId: generationId,
+      pedidoId: SYNTHETIC_PEDIDO_ID
     });
     const messageText = JSON.stringify(deliveries[0].message);
     assert.equal(messageText.includes(ownerA), false);
     assert.equal(messageText.includes(ownerB), false);
-    assert.equal(messageText.includes("pedido"), false);
+    assert.equal(messageText.includes("synthetic-token"), false);
 
     const persisted = readOutbox(instance.outboxPath);
     assert.equal(Object.keys(persisted.events).length, 1);
@@ -194,7 +276,8 @@ test("owner isolation, persisted idempotency and PII-free content", async () => 
     });
     const afterRestart = await restarted.service.handleCompletion({
       generationId,
-      ownerId: ownerA
+      ownerId: ownerA,
+      pedidoId: SYNTHETIC_PEDIDO_ID
     });
     assert.equal(afterRestart.duplicates, 1);
     assert.equal(restarted.counters.sends, 0);
@@ -264,7 +347,8 @@ test("automatic gate blocks before token decryption and inactive tokens are skip
     });
     const blocked = await service.handleCompletion({
       generationId: createGenerationId(),
-      ownerId: "owner"
+      ownerId: "owner",
+      pedidoId: SYNTHETIC_PEDIDO_ID
     });
     assert.equal(blocked.code, "art_ready_blocked");
     assert.equal(decryptions, 0);
@@ -273,7 +357,8 @@ test("automatic gate blocks before token decryption and inactive tokens are skip
     cliente.notificacoes.fcm_tokens[0].ativo = false;
     const inactive = await service.handleCompletion({
       generationId: createGenerationId(),
-      ownerId: "owner"
+      ownerId: "owner",
+      pedidoId: SYNTHETIC_PEDIDO_ID
     });
     assert.equal(inactive.code, "art_ready_no_active_tokens");
     assert.equal(decryptions, 0);
@@ -295,14 +380,16 @@ test("missing or unknown owner fails closed before outbox creation", async () =>
     await assert.rejects(
       () => instance.service.handleCompletion({
         generationId: createGenerationId(),
-        ownerId: ""
+        ownerId: "",
+        pedidoId: SYNTHETIC_PEDIDO_ID
       }),
       (error) => error?.code === "art_ready_owner_missing"
     );
     await assert.rejects(
       () => instance.service.handleCompletion({
         generationId: createGenerationId(),
-        ownerId: "unknown-owner"
+        ownerId: "unknown-owner",
+        pedidoId: SYNTHETIC_PEDIDO_ID
       }),
       (error) => error?.code === "art_ready_owner_not_found"
     );
@@ -330,7 +417,8 @@ test("notification failures stay isolated from the completed-art flow", async ()
     });
     const result = await instance.service.handleCompletion({
       generationId: createGenerationId(),
-      ownerId: "owner"
+      ownerId: "owner",
+      pedidoId: SYNTHETIC_PEDIDO_ID
     });
     assert.equal(result.failed, 1);
     assert.equal(result.sent, 0);

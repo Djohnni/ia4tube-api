@@ -216,6 +216,30 @@ test("disabled gates preserve upload contract and create no notification state",
     );
     assert.equal(sha256File(clientesFile), clientesHashBefore);
 
+    const deactivation = await fetch(
+      `http://127.0.0.1:${port}/me/fcm-token`,
+      {
+        method: "DELETE",
+        headers: {
+          "Authorization": `Bearer ${loginToken}`,
+          "Content-Type": "application/json",
+          "X-Forwarded-Proto": "https"
+        },
+        body: JSON.stringify({
+          token: fcmToken,
+          platform: "android",
+          forbidden_field_must_not_be_read: true
+        })
+      }
+    );
+    const deactivationBody = await deactivation.json();
+    assert.equal(deactivation.status, 503);
+    assert.equal(
+      deactivationBody.code,
+      "fcm_token_registration_disabled"
+    );
+    assert.equal(sha256File(clientesFile), clientesHashBefore);
+
     const resultadoBytes = Buffer.from(
       "synthetic-result-image-content",
       "utf8"

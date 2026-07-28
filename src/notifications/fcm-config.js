@@ -137,14 +137,26 @@ function validateFcmRuntimeConfig(env = process.env, options = {}) {
   const automaticNotificationsEnabled = explicitTrue(
     env.FCM_AUTOMATIC_NOTIFICATIONS_ENABLED
   );
+  const statusNotificationsEnabled =
+    deliveryEnabled &&
+    automaticNotificationsEnabled &&
+    explicitTrue(env.FCM_STATUS_NOTIFICATIONS_ENABLED);
+  const scheduledNotificationsEnabled =
+    deliveryEnabled &&
+    automaticNotificationsEnabled &&
+    explicitTrue(env.FCM_SCHEDULED_NOTIFICATIONS_ENABLED);
+  const manualNotificationsEnabled =
+    deliveryEnabled &&
+    explicitTrue(env.FCM_MANUAL_NOTIFICATIONS_ENABLED);
 
   const disabledConfig = {
     tokenRegistrationEnabled,
     artReadyEventEnabled,
     deliveryEnabled,
     automaticNotificationsEnabled,
-    scheduledNotificationsEnabled:
-      deliveryEnabled && automaticNotificationsEnabled,
+    statusNotificationsEnabled,
+    scheduledNotificationsEnabled,
+    manualNotificationsEnabled,
     credentialConfigured: false,
     credentialSourceCount: 0,
     expectedProjectConfigured: false,
@@ -207,8 +219,14 @@ function safeRuntimeSummary(config) {
     automatic_notifications_enabled: Boolean(
       config?.automaticNotificationsEnabled
     ),
+    status_notifications_enabled: Boolean(
+      config?.statusNotificationsEnabled
+    ),
     scheduled_notifications_enabled: Boolean(
       config?.scheduledNotificationsEnabled
+    ),
+    manual_notifications_enabled: Boolean(
+      config?.manualNotificationsEnabled
     ),
     credential_configured: Boolean(config?.credentialConfigured),
     credential_source_count_valid: Number(config?.credentialSourceCount || 0) <= 1,

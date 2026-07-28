@@ -10,12 +10,24 @@ const {
   FcmConfigurationError,
   validateFcmRuntimeConfig
 } = require("../src/notifications/fcm-config");
+const {
+  createFcmTokenCrypto
+} = require("../src/notifications/fcm-token-crypto");
+const {
+  registerFcmToken
+} = require("../src/notifications/fcm-token-store");
+const {
+  createGenerationId
+} = require("../src/notifications/art-ready-notification.service");
 
 const FCM_ENV_NAMES = [
   "FCM_TOKEN_REGISTRATION_ENABLED",
   "FCM_ART_READY_EVENT_ENABLED",
   "FCM_DELIVERY_ENABLED",
   "FCM_AUTOMATIC_NOTIFICATIONS_ENABLED",
+  "FCM_STATUS_NOTIFICATIONS_ENABLED",
+  "FCM_SCHEDULED_NOTIFICATIONS_ENABLED",
+  "FCM_MANUAL_NOTIFICATIONS_ENABLED",
   "FCM_MOCK",
   "FIREBASE_EXPECTED_PROJECT_ID",
   "FIREBASE_SERVICE_ACCOUNT_JSON",
@@ -67,9 +79,38 @@ test("all four FCM gates are closed when absent or not exactly true", () => {
     assert.equal(config.artReadyEventEnabled, false);
     assert.equal(config.deliveryEnabled, false);
     assert.equal(config.automaticNotificationsEnabled, false);
+    assert.equal(config.statusNotificationsEnabled, false);
     assert.equal(config.scheduledNotificationsEnabled, false);
+    assert.equal(config.manualNotificationsEnabled, false);
     assert.equal(config.serviceAccount, null);
   }
+});
+
+test("art-ready gates do not unlock status, schedulers or manual endpoint", () => {
+  const { privateKey } = crypto.generateKeyPairSync("rsa", {
+    modulusLength: 2048,
+    privateKeyEncoding: { type: "pkcs8", format: "pem" },
+    publicKeyEncoding: { type: "spki", format: "pem" }
+  });
+  const config = validateFcmRuntimeConfig({
+    FCM_TOKEN_REGISTRATION_ENABLED: "true",
+    FCM_ART_READY_EVENT_ENABLED: "true",
+    FCM_DELIVERY_ENABLED: "true",
+    FCM_AUTOMATIC_NOTIFICATIONS_ENABLED: "true",
+    FCM_STATUS_NOTIFICATIONS_ENABLED: "false",
+    FCM_SCHEDULED_NOTIFICATIONS_ENABLED: "false",
+    FCM_MANUAL_NOTIFICATIONS_ENABLED: "false",
+    FIREBASE_EXPECTED_PROJECT_ID: "synthetic-project",
+    FIREBASE_SERVICE_ACCOUNT_JSON: JSON.stringify({
+      project_id: "synthetic-project",
+      client_email: "synthetic@example.invalid",
+      private_key: privateKey
+    })
+  });
+
+  assert.equal(config.statusNotificationsEnabled, false);
+  assert.equal(config.scheduledNotificationsEnabled, false);
+  assert.equal(config.manualNotificationsEnabled, false);
 });
 
 test("disabled delivery never reads or validates configured credential material", () => {
@@ -178,12 +219,105 @@ test("delivery gate precedes token decryption, OAuth, mock and network", async (
       assert.equal(service.tokenRegistrationEnabled(), false);
       assert.equal(service.artReadyEventEnabled(), false);
       assert.equal(service.automaticNotificationsEnabled(), false);
+      assert.equal(service.statusNotificationsEnabled(), false);
       assert.equal(service.scheduledNotificationsEnabled(), false);
+      assert.equal(service.manualNotificationsEnabled(), false);
     });
   } finally {
     global.fetch = originalFetch;
   }
   assert.equal(externalRequests, 0);
+});
+
+test("art-ready transport uses one synthetic token and exact data-only body", async () => {
+  const { privateKey } = crypto.generateKeyPairSync("rsa", {
+    modulusLength: 2048,
+    privateKeyEncoding: { type: "pkcs8", format: "pem" },
+    publicKeyEncoding: { type: "spki", format: "pem" }
+  });
+  const keyId = "synthetic-transport-v1";
+  const tokenKeyEnv = {
+    FCM_TOKEN_ACTIVE_KEY_ID: keyId,
+    FCM_TOKEN_ENCRYPTION_KEYS_JSON: JSON.stringify({
+      [keyId]: crypto.randomBytes(32).toString("base64url")
+    }),
+    FCM_TOKEN_HMAC_KEYS_JSON: JSON.stringify({
+      [keyId]: crypto.randomBytes(32).toString("base64url")
+    })
+  };
+  const tokenCrypto = createFcmTokenCrypto({ env: tokenKeyEnv });
+  const cliente = {};
+  registerFcmToken({
+    cliente,
+    token: "synthetic-transport-token",
+    tokenCrypto
+  });
+  const eventId = createGenerationId();
+  const pedidoId = "synthetic-order-transport";
+  const requests = [];
+  const originalFetch = global.fetch;
+  global.fetch = async (url, options = {}) => {
+    requests.push({ url: String(url), options });
+    if (String(url).includes("oauth2.googleapis.com")) {
+      return {
+        ok: true,
+        json: async () => ({
+          access_token: "synthetic-access-token",
+          expires_in: 3600
+        })
+      };
+    }
+    return {
+      ok: true,
+      json: async () => ({ name: "synthetic-message-id" })
+    };
+  };
+
+  try {
+    await withFcmEnv({
+      ...tokenKeyEnv,
+      FCM_ART_READY_EVENT_ENABLED: "true",
+      FCM_DELIVERY_ENABLED: "true",
+      FCM_AUTOMATIC_NOTIFICATIONS_ENABLED: "true",
+      FIREBASE_EXPECTED_PROJECT_ID: "synthetic-project",
+      FIREBASE_SERVICE_ACCOUNT_JSON: JSON.stringify({
+        project_id: "synthetic-project",
+        client_email: "synthetic@example.invalid",
+        private_key: privateKey
+      })
+    }, async (service) => {
+      const result = await service.sendArtReadyToClient(
+        cliente,
+        { eventId, pedidoId }
+      );
+      assert.equal(result.ok, true);
+      assert.equal(result.sent, 1);
+    });
+  } finally {
+    global.fetch = originalFetch;
+  }
+
+  assert.equal(requests.length, 2);
+  const fcmRequest = requests.find((item) =>
+    item.url.includes("fcm.googleapis.com")
+  );
+  assert.ok(fcmRequest);
+  assert.deepEqual(JSON.parse(fcmRequest.options.body), {
+    message: {
+      token: "synthetic-transport-token",
+      data: {
+        schema_version: "1",
+        tipo: "arte_pronta",
+        event_id: eventId,
+        pedido_id: pedidoId,
+        title: "Sua arte está pronta!",
+        body: "Toque para visualizar sua criação na IA4Tube."
+      },
+      android: {
+        priority: "high"
+      }
+    }
+  });
 });
 
 test("candidate contains no staging-only identifiers and schedulers are gated", () => {
@@ -193,7 +327,9 @@ test("candidate contains no staging-only identifiers and schedulers are gated", 
     "src/notifications/fcm-config.js",
     "src/notifications/fcm-token-crypto.js",
     "src/notifications/fcm-token-store.js",
+    "src/notifications/fcm-token-api-contract.js",
     "src/notifications/fcm.service.js",
+    "src/notifications/art-ready-contract.js",
     "src/notifications/art-ready-generation.js",
     "src/notifications/art-ready-notification.service.js",
     "src/notifications/art-ready-outbox.js"
@@ -218,5 +354,13 @@ test("candidate contains no staging-only identifiers and schedulers are gated", 
   assert.match(
     source,
     /async function runFreeArtCampaignNotifications\(\) \{\s*if \(!fcmService\.scheduledNotificationsEnabled\(\)\) return;/
+  );
+  assert.match(
+    source,
+    /function sendClientPushAsync[\s\S]*if \(!fcmService\.statusNotificationsEnabled\(\)\)/
+  );
+  assert.match(
+    source,
+    /app\.post\("\/bot\/notificacoes\/teste"[\s\S]*if \(!fcmService\.manualNotificationsEnabled\(\)\)/
   );
 });

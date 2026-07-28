@@ -8,6 +8,11 @@ const {
 const {
   decryptActiveFcmTokens
 } = require("./fcm-token-store");
+const {
+  BODY: ART_READY_BODY,
+  TITLE: ART_READY_TITLE,
+  artReadyData
+} = require("./art-ready-contract");
 
 const FCM_SCOPE = "https://www.googleapis.com/auth/firebase.messaging";
 const GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token";
@@ -32,8 +37,16 @@ function automaticNotificationsEnabled() {
   return runtimeConfig.automaticNotificationsEnabled === true;
 }
 
+function statusNotificationsEnabled() {
+  return runtimeConfig.statusNotificationsEnabled === true;
+}
+
 function scheduledNotificationsEnabled() {
   return runtimeConfig.scheduledNotificationsEnabled === true;
+}
+
+function manualNotificationsEnabled() {
+  return runtimeConfig.manualNotificationsEnabled === true;
 }
 
 function runtimeConfigSummary() {
@@ -164,13 +177,17 @@ function notificationMessage(type, payload = {}) {
   switch (type) {
     case "arte_pronta":
       return {
-        title: payload.title || "Sua arte esta pronta",
-        body: payload.body || "Toque para ver, baixar, compartilhar ou copiar a descricao.",
-        imageUrl,
-        data: {
-          ...baseData,
-          route: pedidoId ? "order_detail" : "orders"
-        }
+        title: ART_READY_TITLE,
+        body: ART_READY_BODY,
+        imageUrl: "",
+        data: { ...artReadyData({
+          eventId:
+            payload.event_id ||
+            payload.eventId ||
+            payload.generation_id ||
+            payload.generationId,
+          pedidoId
+        }) }
       };
     case "pedido_atualizado":
       return {
@@ -293,7 +310,67 @@ async function sendToToken({
   return result;
 }
 
-async function sendToClient(cliente, message, options = {}) {
+function buildArtReadyFcmRequest({ token, eventId, pedidoId }) {
+  const normalizedToken = String(token || "").trim();
+  if (!normalizedToken) {
+    const error = new Error("Destinatario FCM invalido.");
+    error.code = "fcm_token_invalid";
+    throw error;
+  }
+  return {
+    message: {
+      token: normalizedToken,
+      data: { ...artReadyData({ eventId, pedidoId }) },
+      android: {
+        priority: "high"
+      }
+    }
+  };
+}
+
+async function sendArtReadyToToken({
+  serviceAccount,
+  accessToken,
+  token,
+  eventId,
+  pedidoId
+}) {
+  const url =
+    `https://fcm.googleapis.com/v1/projects/${serviceAccount.project_id}/messages:send`;
+  const response = await fetch(url, {
+    method: "POST",
+    headers: {
+      "Authorization": `Bearer ${accessToken}`,
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify(
+      buildArtReadyFcmRequest({ token, eventId, pedidoId })
+    )
+  });
+  const result = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    const firebaseError = result?.error || {};
+    const error = new Error("Falha ao enviar FCM.");
+    error.code = "firebase_send_error";
+    error.detail = {
+      error: {
+        status: String(firebaseError.status || ""),
+        message: String(firebaseError.message || ""),
+        details: Array.isArray(firebaseError.details)
+          ? firebaseError.details.map((detail) => ({
+              errorCode: String(
+                detail?.errorCode || detail?.error_code || ""
+              )
+            }))
+          : []
+      }
+    };
+    throw error;
+  }
+  return result;
+}
+
+async function deliverToClient(cliente, sendOne, options = {}) {
   // Esta verificacao precisa permanecer antes de token, chave, JWT ou rede.
   if (!fcmDeliveryEnabled()) {
     return {
@@ -336,15 +413,7 @@ async function sendToClient(cliente, message, options = {}) {
   let invalidTokenCount = 0;
   for (const token of tokens) {
     try {
-      await sendToToken({
-        serviceAccount,
-        accessToken,
-        token,
-        title: message.title,
-        body: message.body,
-        imageUrl: message.imageUrl || message.image_url || "",
-        data: message.data || {}
-      });
+      await sendOne({ serviceAccount, accessToken, token });
       sent += 1;
     } catch (error) {
       const invalidToken = isInvalidFcmTokenError(error);
@@ -371,10 +440,69 @@ async function sendToClient(cliente, message, options = {}) {
   };
 }
 
-function sendArtePronta(cliente, payload = {}, options = {}) {
-  return sendToClient(
+function sendToClient(cliente, message, options = {}) {
+  return deliverToClient(
     cliente,
-    notificationMessage("arte_pronta", payload),
+    ({ serviceAccount, accessToken, token }) =>
+      sendToToken({
+        serviceAccount,
+        accessToken,
+        token,
+        title: message.title,
+        body: message.body,
+        imageUrl: message.imageUrl || message.image_url || "",
+        data: message.data || {}
+      }),
+    options
+  );
+}
+
+function sendArtReadyToClient(
+  cliente,
+  { eventId, pedidoId } = {},
+  options = {}
+) {
+  // Defesa em profundidade: este transporte dedicado nao pode contornar
+  // as travas de evento ou de notificacoes automaticas.
+  if (!artReadyEventEnabled()) {
+    return Promise.resolve({
+      ok: false,
+      code: "art_ready_event_disabled",
+      error: "Evento de arte pronta desativado por configuracao segura."
+    });
+  }
+  if (!automaticNotificationsEnabled()) {
+    return Promise.resolve({
+      ok: false,
+      code: "fcm_automatic_notifications_disabled",
+      error: "Notificacoes automaticas desativadas por configuracao segura."
+    });
+  }
+  return deliverToClient(
+    cliente,
+    ({ serviceAccount, accessToken, token }) =>
+      sendArtReadyToToken({
+        serviceAccount,
+        accessToken,
+        token,
+        eventId,
+        pedidoId
+      }),
+    options
+  );
+}
+
+function sendArtePronta(cliente, payload = {}, options = {}) {
+  return sendArtReadyToClient(
+    cliente,
+    {
+      eventId:
+        payload.event_id ||
+        payload.eventId ||
+        payload.generation_id ||
+        payload.generationId,
+      pedidoId: payload.pedido_id || payload.pedidoId
+    },
     options
   );
 }
@@ -423,18 +551,22 @@ module.exports = {
   activeFcmTokens,
   artReadyEventEnabled,
   automaticNotificationsEnabled,
+  buildArtReadyFcmRequest,
   fcmDeliveryEnabled,
   isFirebaseConfigured,
   isInvalidFcmTokenError,
+  manualNotificationsEnabled,
   notificationMessage,
   runtimeConfigSummary,
   scheduledNotificationsEnabled,
   sendArteGratisSemanal,
   sendArtePronta,
+  sendArtReadyToClient,
   sendAvisoGeral,
   sendNovaVersao,
   sendPedidoAtualizado,
   sendPlanejamentoMensal,
   sendToClient,
+  statusNotificationsEnabled,
   tokenRegistrationEnabled
 };

@@ -2,11 +2,12 @@
 
 const crypto = require("crypto");
 const { createArtReadyOutbox } = require("./art-ready-outbox");
-
-const TITLE = "Sua arte esta pronta!";
-const BODY = "Toque para visualizar sua criacao na IA4Tube.";
-const GENERATION_ID_PATTERN =
-  /^art_[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const {
+  BODY,
+  TITLE,
+  validateGenerationId,
+  validatePedidoId
+} = require("./art-ready-contract");
 const OWNER_ID_PATTERN = /^[^\u0000-\u001f\u007f/\\]{1,200}$/;
 
 class ArtReadyNotificationError extends Error {
@@ -22,19 +23,7 @@ function fail(code) {
 }
 
 function createGenerationId(randomUUID = crypto.randomUUID) {
-  const generationId = `art_${randomUUID()}`;
-  if (!GENERATION_ID_PATTERN.test(generationId)) {
-    fail("art_ready_generation_id_invalid");
-  }
-  return generationId;
-}
-
-function validateGenerationId(value) {
-  const normalized = String(value || "").trim();
-  if (!GENERATION_ID_PATTERN.test(normalized)) {
-    fail("art_ready_generation_id_invalid");
-  }
-  return normalized;
+  return validateGenerationId(`art_${randomUUID()}`);
 }
 
 function validateOwnerId(value) {
@@ -76,7 +65,7 @@ function createArtReadyNotificationService({
     }
   }
 
-  async function handleCompletion({ generationId, ownerId }) {
+  async function handleCompletion({ generationId, ownerId, pedidoId }) {
     // Esta trava precede validacao de dono, leitura de cliente/token e outbox.
     if (eventEnabled() !== true) {
       return {
@@ -89,6 +78,7 @@ function createArtReadyNotificationService({
     }
 
     const normalizedGenerationId = validateGenerationId(generationId);
+    const normalizedPedidoId = validatePedidoId(pedidoId);
     const normalizedOwnerId = validateOwnerId(ownerId);
     const cliente = getClienteByOwner(normalizedOwnerId);
     if (!cliente || typeof cliente !== "object" || Array.isArray(cliente)) {
@@ -178,13 +168,8 @@ function createArtReadyNotificationService({
             }
           },
           {
-            title: TITLE,
-            body: BODY,
-            imageUrl: "",
-            data: {
-              tipo: "arte_pronta",
-              route: "orders"
-            }
+            eventId: normalizedGenerationId,
+            pedidoId: normalizedPedidoId
           },
           {
             onInvalidToken: (token) => invalidTokens.push(token)
@@ -240,5 +225,6 @@ module.exports = {
   createArtReadyNotificationService,
   createGenerationId,
   validateGenerationId,
-  validateOwnerId
+  validateOwnerId,
+  validatePedidoId
 };
