@@ -22,8 +22,7 @@ const fcmService = require("./src/notifications/fcm.service");
 const {
   activeEncryptedFcmTokenRecords,
   atomicWriteJson,
-  deactivateFcmTokens,
-  registerFcmToken
+  deactivateFcmTokens
 } = require("./src/notifications/fcm-token-store");
 const {
   createArtReadyNotificationService
@@ -36,6 +35,12 @@ const {
   parseDeactivateFcmTokenBody,
   parseRegisterFcmTokenBody
 } = require("./src/notifications/fcm-token-api-contract");
+const {
+  FcmFinalTestError,
+  assertFinalTestAllowedOwner,
+  deactivateFinalTestDevice,
+  registerFinalTestDevice
+} = require("./src/notifications/fcm-final-test");
 const { streamDirectoryZip } = require("./src/zip/zip-stream");
 const freeArtCampaignsService = require("./src/admin-free-art-campaigns/free-art-campaigns.service");
 const freeArtCampaignsStorage = require("./src/admin-free-art-campaigns/free-art-campaigns.storage");
@@ -48,7 +53,19 @@ app.set("trust proxy", true);
 
 // ===== CONFIG BÁSICA =====
 const PORT = process.env.PORT || 3000;
-const JWT_SECRET = process.env.JWT_SECRET || "TROQUE_ISSO_AGORA";
+function requireJwtSecret(env = process.env) {
+  const value = String(env.JWT_SECRET || "").trim();
+  if (
+    value.length < 32 ||
+    value === "TROQUE_ISSO_AGORA"
+  ) {
+    throw new Error(
+      "Configuracao obrigatoria invalida: JWT_SECRET"
+    );
+  }
+  return value;
+}
+const JWT_SECRET = requireJwtSecret();
 
 // ===== DATA STORAGE (RENDER DISK) =====
 const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, "dados");
@@ -112,8 +129,68 @@ app.use(cors({
   credentials: false
 }));
 
-app.use(express.json({ limit: "50mb" }));
-app.use(express.urlencoded({ extended: false, limit: "1mb" }));
+const globalJsonParser = express.json({ limit: "50mb" });
+const globalUrlencodedParser = express.urlencoded({ extended: false, limit: "1mb" });
+const finalTestFcmJsonParser = express.json({ limit: "16kb" });
+
+function isFcmTokenRouteRequest(req) {
+  const normalizedPath = String(req.path || "")
+    .toLowerCase()
+    .replace(/\/+$/, "");
+  return (
+    normalizedPath === "/me/fcm-token" &&
+    ["POST", "DELETE"].includes(req.method)
+  );
+}
+
+app.use((req, res, next) => {
+  if (!isFcmTokenRouteRequest(req)) return next();
+  if (!fcmService.tokenRegistrationEnabled()) {
+    return res.status(503).json({
+      ok: false,
+      code: "fcm_token_registration_disabled",
+      error: "Registro de notificacoes desativado."
+    });
+  }
+  return auth(req, res, () => {
+    if (!requireFinalTestAllowedOwner(req, res)) return;
+    if (!req.is("application/json")) {
+      return res.status(415).json({
+        ok: false,
+        code: "fcm_token_content_type_invalid",
+        error: "Requisicao de notificacoes invalida."
+      });
+    }
+    req.fcmFinalTestPreauthorized = true;
+    return next();
+  });
+});
+
+app.use((req, res, next) => {
+  if (req.fcmFinalTestPreauthorized === true) {
+    return finalTestFcmJsonParser(req, res, next);
+  }
+  return globalJsonParser(req, res, next);
+});
+app.use((req, res, next) => {
+  if (req.fcmFinalTestPreauthorized === true) return next();
+  return globalUrlencodedParser(req, res, next);
+});
+app.use((err, req, res, next) => {
+  if (
+    req.fcmFinalTestPreauthorized === true &&
+    ["entity.parse.failed", "entity.too.large"].includes(err?.type)
+  ) {
+    return res.status(err.type === "entity.too.large" ? 413 : 400).json({
+      ok: false,
+      code: err.type === "entity.too.large"
+        ? "fcm_token_payload_too_large"
+        : "fcm_token_request_invalid",
+      error: "Requisicao de notificacoes invalida."
+    });
+  }
+  return next(err);
+});
 
 app.get(["/mobile_analytics.html", "/public/mobile_analytics.html"], (_req, res) => {
   res.setHeader("Cache-Control", "no-store");
@@ -377,7 +454,9 @@ function bearerTokenFromRequest(req) {
 function verifyBotAdminToken(token) {
   if (!token) return null;
   try {
-    const user = jwt.verify(token, JWT_SECRET);
+    const user = jwt.verify(token, JWT_SECRET, {
+      algorithms: ["HS256"]
+    });
     if (user?.whatsapp !== BOT_ADMIN_WHATSAPP) return null;
     return user;
   } catch {
@@ -1317,7 +1396,9 @@ function auth(req, res, next) {
   }
 
   try {
-    req.user = jwt.verify(token, JWT_SECRET);
+    req.user = jwt.verify(token, JWT_SECRET, {
+      algorithms: ["HS256"]
+    });
     return next();
   } catch {
     return res.status(401).json({ ok: false, error: "Token inválido" });
@@ -1341,7 +1422,9 @@ function botRunnerAuth(req, res, next) {
   }
 
   try {
-    req.user = jwt.verify(token, JWT_SECRET);
+    req.user = jwt.verify(token, JWT_SECRET, {
+      algorithms: ["HS256"]
+    });
 
     if (!isBotAdmin(req)) {
       return res.status(403).json({ ok: false, error: "Acesso negado" });
@@ -1705,7 +1788,9 @@ app.post("/evento", (req, res) => {
       const token = h.startsWith("Bearer ") ? h.slice(7) : "";
 
       if (token) {
-        clienteFake = jwt.verify(token, JWT_SECRET);
+        clienteFake = jwt.verify(token, JWT_SECRET, {
+          algorithms: ["HS256"]
+        });
       }
     } catch {}
 
@@ -1817,7 +1902,10 @@ app.post("/auth/google", async (req, res) => {
       writeClientes(clientes);
     }
 
-    const token = jwt.sign({ whatsapp: chaveCliente }, JWT_SECRET, { expiresIn: "7d" });
+    const token = jwt.sign({ whatsapp: chaveCliente }, JWT_SECRET, {
+      algorithm: "HS256",
+      expiresIn: "7d"
+    });
 
     return res.json({
       ok: true,
@@ -1885,7 +1973,10 @@ app.post("/auth/auto-register", (req, res) => {
     clientes[login] = novo;
     writeClientes(clientes);
 
-    const token = jwt.sign({ whatsapp: login }, JWT_SECRET, { expiresIn: "7d" });
+    const token = jwt.sign({ whatsapp: login }, JWT_SECRET, {
+      algorithm: "HS256",
+      expiresIn: "7d"
+    });
 
     return res.json({
       ok: true,
@@ -1963,7 +2054,10 @@ app.post("/auth/register", (req, res) => {
   clientesAtualizados[whatsapp] = novo;
   writeClientes(clientesAtualizados);
 
-  const token = jwt.sign({ whatsapp }, JWT_SECRET, { expiresIn: "7d" });
+  const token = jwt.sign({ whatsapp }, JWT_SECRET, {
+    algorithm: "HS256",
+    expiresIn: "7d"
+  });
 
   return res.json({
     ok: true,
@@ -2030,7 +2124,10 @@ app.post("/auth/finalizar-conta-auto", auth, (req, res) => {
 
     writeClientes(clientes);
 
-    const token = jwt.sign({ whatsapp: novoLogin }, JWT_SECRET, { expiresIn: "7d" });
+    const token = jwt.sign({ whatsapp: novoLogin }, JWT_SECRET, {
+      algorithm: "HS256",
+      expiresIn: "7d"
+    });
 
     return res.json({
       ok:true,
@@ -2086,7 +2183,10 @@ app.post("/auth/login", (req, res) => {
     writeClientes(clientes);
   }
 
-  const token = jwt.sign({ whatsapp }, JWT_SECRET, { expiresIn: "7d" });
+  const token = jwt.sign({ whatsapp }, JWT_SECRET, {
+    algorithm: "HS256",
+    expiresIn: "7d"
+  });
 
   return res.json({
     ok: true,
@@ -2185,6 +2285,25 @@ app.get("/billing/free-art/status", auth, (req, res) => {
   });
 });
 
+function requireFinalTestAllowedOwner(req, res) {
+  try {
+    assertFinalTestAllowedOwner(req.user?.whatsapp, process.env);
+    return true;
+  } catch (error) {
+    const configurationUnavailable =
+      error instanceof FcmFinalTestError &&
+      error.code === "fcm_final_test_owner_allowlist_unavailable";
+    res.status(configurationUnavailable ? 503 : 403).json({
+      ok: false,
+      code: configurationUnavailable
+        ? "fcm_final_test_owner_allowlist_unavailable"
+        : "fcm_final_test_owner_not_allowed",
+      error: "Registro de notificacoes indisponivel."
+    });
+    return false;
+  }
+}
+
 app.post("/me/fcm-token", auth, (req, res) => {
   if (!fcmService.tokenRegistrationEnabled()) {
     return res.status(503).json({
@@ -2193,6 +2312,14 @@ app.post("/me/fcm-token", auth, (req, res) => {
       error: "Registro de notificacoes desativado."
     });
   }
+  if (req.fcmFinalTestPreauthorized !== true) {
+    return res.status(503).json({
+      ok: false,
+      code: "fcm_token_registration_unavailable",
+      error: "Registro de notificacoes indisponivel."
+    });
+  }
+  if (!requireFinalTestAllowedOwner(req, res)) return;
 
   let requestData;
   try {
@@ -2207,28 +2334,14 @@ app.post("/me/fcm-token", auth, (req, res) => {
     });
   }
 
-  const clientes = readClientes();
-  const c = clientes[req.user.whatsapp];
-
-  if (!c) {
-    return res.status(404).json({ ok: false, error: "Cliente nao encontrado" });
-  }
-
   try {
-    if (requestData.previousToken) {
-      deactivateFcmTokens({
-        cliente: c,
-        tokens: [requestData.previousToken],
-        reason: "token_replaced"
-      });
-    }
-    const result = registerFcmToken({
-      cliente: c,
+    const result = registerFinalTestDevice({
+      dataDir: DATA_DIR,
+      ownerId: req.user.whatsapp,
       token: requestData.token,
+      previousToken: requestData.previousToken,
       platform: requestData.platform
     });
-    clientes[req.user.whatsapp] = c;
-    atomicWriteJson(CLIENTES_FILE, clientes);
     return res.json({
       ok: true,
       salvo: result.saved === true,
@@ -2252,6 +2365,14 @@ app.delete("/me/fcm-token", auth, (req, res) => {
       error: "Registro de notificacoes desativado."
     });
   }
+  if (req.fcmFinalTestPreauthorized !== true) {
+    return res.status(503).json({
+      ok: false,
+      code: "fcm_token_registration_unavailable",
+      error: "Registro de notificacoes indisponivel."
+    });
+  }
+  if (!requireFinalTestAllowedOwner(req, res)) return;
 
   let requestData;
   try {
@@ -2266,25 +2387,12 @@ app.delete("/me/fcm-token", auth, (req, res) => {
     });
   }
 
-  const clientes = readClientes();
-  const cliente = clientes[req.user.whatsapp];
-  if (!cliente) {
-    return res.status(404).json({
-      ok: false,
-      error: "Cliente nao encontrado"
-    });
-  }
-
   try {
-    const result = deactivateFcmTokens({
-      cliente,
-      tokens: [requestData.token],
-      reason: "client_deactivated"
+    const result = deactivateFinalTestDevice({
+      dataDir: DATA_DIR,
+      ownerId: req.user.whatsapp,
+      token: requestData.token
     });
-    if (result.deactivated > 0) {
-      clientes[req.user.whatsapp] = cliente;
-      atomicWriteJson(CLIENTES_FILE, clientes);
-    }
     return res.json({
       ok: true,
       desativado: result.deactivated > 0

@@ -8,6 +8,7 @@ const net = require("net");
 const os = require("os");
 const path = require("path");
 const { spawn } = require("child_process");
+const jwt = require("jsonwebtoken");
 
 const repoDir = path.resolve(__dirname, "..");
 const serverFile = path.join(repoDir, "server.js");
@@ -30,29 +31,34 @@ function writeJson(filePath, value) {
   fs.writeFileSync(filePath, JSON.stringify(value, null, 2), "utf8");
 }
 
-function spawnServer(port, dataDir) {
+function spawnServer(port, dataDir, options = {}) {
+  const jwtValue = Object.hasOwn(options, "jwtValue")
+    ? options.jwtValue
+    : jwtSecret;
+  const env = {
+    ...process.env,
+    PORT: String(port),
+    DATA_DIR: dataDir,
+    NODE_ENV: "test",
+    HTTPS_ENFORCE: "true",
+    HTTPS_ALLOW_LOCAL_HTTP: "false",
+    PUBLIC_API_BASE_URL: "https://ia4tube.test",
+    BOT_RUNNER_TOKEN: botToken,
+    BOT_RUNNER_TOKEN_NEXT: "",
+    MP_ACCESS_TOKEN: "",
+    OPENAI_API_KEY: "",
+    FCM_MOCK: "1",
+    IA4TUBE_FREE_ART_ENABLED: "false",
+    AUTH_LOGIN_RATE_LIMIT_MAX: "50",
+    AUTH_LOGIN_ACCOUNT_RATE_LIMIT_MAX: "50",
+    AUTH_ACCOUNT_CREATE_RATE_LIMIT_MAX: "50"
+  };
+  if (jwtValue !== undefined) env.JWT_SECRET = jwtValue;
+  else delete env.JWT_SECRET;
   const child = spawn(process.execPath, [serverFile], {
     cwd: repoDir,
     windowsHide: true,
-    env: {
-      ...process.env,
-      PORT: String(port),
-      DATA_DIR: dataDir,
-      NODE_ENV: "test",
-      HTTPS_ENFORCE: "true",
-      HTTPS_ALLOW_LOCAL_HTTP: "false",
-      PUBLIC_API_BASE_URL: "https://ia4tube.test",
-      JWT_SECRET: jwtSecret,
-      BOT_RUNNER_TOKEN: botToken,
-      BOT_RUNNER_TOKEN_NEXT: "",
-      MP_ACCESS_TOKEN: "",
-      OPENAI_API_KEY: "",
-      FCM_MOCK: "1",
-      IA4TUBE_FREE_ART_ENABLED: "false",
-      AUTH_LOGIN_RATE_LIMIT_MAX: "50",
-      AUTH_LOGIN_ACCOUNT_RATE_LIMIT_MAX: "50",
-      AUTH_ACCOUNT_CREATE_RATE_LIMIT_MAX: "50"
-    },
+    env,
     stdio: ["ignore", "pipe", "pipe"]
   });
 
@@ -72,6 +78,30 @@ async function waitForServer(instance, timeoutMs = 10_000) {
     await new Promise((resolve) => setTimeout(resolve, 50));
   }
   throw new Error("Servidor body-parser nao iniciou no prazo.");
+}
+
+async function assertJwtStartupRejected(dataDir, jwtValue) {
+  const port = await getFreePort();
+  const instance = spawnServer(port, dataDir, { jwtValue });
+  const exitCode = await new Promise((resolve, reject) => {
+    const timeout = setTimeout(
+      () => reject(new Error("JWT startup rejection timeout")),
+      5_000
+    );
+    instance.child.once("exit", (code) => {
+      clearTimeout(timeout);
+      resolve(code);
+    });
+  }).finally(() => {
+    if (instance.child.exitCode === null) {
+      instance.child.kill("SIGKILL");
+    }
+  });
+  assert.notEqual(exitCode, 0);
+  assert.match(instance.output(), /JWT_SECRET/);
+  if (jwtValue) {
+    assert.equal(instance.output().includes(jwtValue), false);
+  }
 }
 
 function request(port, route, {
@@ -156,6 +186,16 @@ async function main() {
   fs.writeFileSync(path.join(uploadOrderDir, "status.txt"), "novo", "utf8");
   writeJson(path.join(dataDir, "clientes.json"), {});
 
+  await assertJwtStartupRejected(dataDir, undefined);
+  await assertJwtStartupRejected(
+    dataDir,
+    "synthetic-weak-jwt"
+  );
+  await assertJwtStartupRejected(
+    dataDir,
+    "TROQUE_ISSO_AGORA"
+  );
+
   const port = await getFreePort();
   const instance = spawnServer(port, dataDir);
 
@@ -170,6 +210,23 @@ async function main() {
     const serverSource = fs.readFileSync(serverFile, "utf8");
     assert.match(serverSource, /express\.json\(\{ limit: "50mb" \}\)/);
     assert.match(serverSource, /express\.urlencoded\(\{ extended: false, limit: "1mb" \}\)/);
+    assert.equal(
+      (serverSource.match(/jwt\.verify\(/g) || []).length,
+      4
+    );
+    assert.equal(
+      (serverSource.match(/algorithms:\s*\["HS256"\]/g) || [])
+        .length,
+      4
+    );
+    assert.equal(
+      (serverSource.match(/jwt\.sign\(/g) || []).length,
+      5
+    );
+    assert.equal(
+      (serverSource.match(/algorithm:\s*"HS256"/g) || []).length,
+      5
+    );
 
     await waitForServer(instance);
 
@@ -195,6 +252,31 @@ async function main() {
     });
     assert.equal(register.status, 200);
 
+    const existingHs256Session = jwt.sign(
+      { whatsapp: "parser-user" },
+      jwtSecret,
+      { expiresIn: "5m" }
+    );
+    const existingSessionResponse = await request(port, "/me", {
+      method: "GET",
+      token: existingHs256Session
+    });
+    assert.equal(existingSessionResponse.status, 200);
+
+    const rejectedHs384Session = jwt.sign(
+      { whatsapp: "parser-user" },
+      jwtSecret,
+      {
+        algorithm: "HS384",
+        expiresIn: "5m"
+      }
+    );
+    const rejectedAlgorithmResponse = await request(port, "/me", {
+      method: "GET",
+      token: rejectedHs384Session
+    });
+    assert.equal(rejectedAlgorithmResponse.status, 401);
+
     const login = await request(port, "/auth/login", {
       method: "POST",
       body: {
@@ -203,6 +285,11 @@ async function main() {
       }
     });
     assert.equal(login.status, 200);
+    const loginPayload = JSON.parse(login.body.toString("utf8"));
+    assert.equal(
+      jwt.decode(loginPayload.token, { complete: true }).header.alg,
+      "HS256"
+    );
 
     const oversizedUrlencoded = Buffer.from(`campo=${"x".repeat(1024 * 1024 + 1024)}`, "utf8");
     const urlencoded413 = await request(port, "/auth/login", {

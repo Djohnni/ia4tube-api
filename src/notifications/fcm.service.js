@@ -6,6 +6,7 @@ const {
   validateFcmRuntimeConfig
 } = require("./fcm-config");
 const {
+  activeEncryptedFcmTokenRecords,
   decryptActiveFcmTokens
 } = require("./fcm-token-store");
 const {
@@ -13,6 +14,15 @@ const {
   TITLE: ART_READY_TITLE,
   artReadyData
 } = require("./art-ready-contract");
+const {
+  FcmFinalTestError,
+  assertFinalTestAllowedTokenFingerprint,
+  assertFinalTestProductionInvariants,
+  assertFinalTestSendGates,
+  assertFinalTestTokenRecord,
+  createFcmFinalTestRunner,
+  safeFinalTestCode
+} = require("./fcm-final-test");
 
 const FCM_SCOPE = "https://www.googleapis.com/auth/firebase.messaging";
 const GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token";
@@ -492,6 +502,92 @@ function sendArtReadyToClient(
   );
 }
 
+function sendClaimedFinalTestArtReadyToClient(
+  cliente,
+  {
+    eventId,
+    pedidoId,
+    expectedTokenFingerprint
+  } = {},
+  options = {}
+) {
+  let record;
+  try {
+    assertFinalTestSendGates(process.env);
+    artReadyData({ eventId, pedidoId });
+    const records = activeEncryptedFcmTokenRecords({ cliente });
+    if (records.length !== 1) {
+      throw new FcmFinalTestError(
+        "fcm_final_test_active_token_count_invalid"
+      );
+    }
+    record = records[0];
+    const fingerprint = assertFinalTestTokenRecord(
+      record,
+      process.env
+    );
+    const expectedFingerprint =
+      assertFinalTestAllowedTokenFingerprint(
+        expectedTokenFingerprint,
+        process.env
+      );
+    if (fingerprint !== expectedFingerprint) {
+      throw new FcmFinalTestError(
+        "fcm_final_test_token_not_allowed"
+      );
+    }
+  } catch (error) {
+    return Promise.resolve({
+      ok: false,
+      code: error instanceof FcmFinalTestError
+        ? error.code
+        : safeFinalTestCode(
+            error?.code,
+            "fcm_final_test_preflight_failed"
+          ),
+      sent: 0,
+      tokens: 0
+    });
+  }
+
+  return deliverToClient(
+    {
+      notificacoes: {
+        fcm_tokens: [{ ...record }]
+      }
+    },
+    ({ serviceAccount, accessToken, token }) =>
+      sendArtReadyToToken({
+        serviceAccount,
+        accessToken,
+        token,
+        eventId,
+        pedidoId
+      }),
+    options
+  );
+}
+
+function runFinalTestArtReady({
+  ownerId,
+  eventId,
+  pedidoId
+} = {}) {
+  try {
+    assertFinalTestProductionInvariants(process.env);
+  } catch (error) {
+    return Promise.reject(error);
+  }
+  const dataDir = "/var/data";
+  const runner = createFcmFinalTestRunner({
+    env: process.env,
+    dataDir,
+    sendFinalTestArtReady:
+      sendClaimedFinalTestArtReadyToClient
+  });
+  return runner.run({ ownerId, eventId, pedidoId });
+}
+
 function sendArtePronta(cliente, payload = {}, options = {}) {
   return sendArtReadyToClient(
     cliente,
@@ -562,6 +658,7 @@ module.exports = {
   sendArteGratisSemanal,
   sendArtePronta,
   sendArtReadyToClient,
+  runFinalTestArtReady,
   sendAvisoGeral,
   sendNovaVersao,
   sendPedidoAtualizado,

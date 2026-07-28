@@ -67,7 +67,8 @@ function spawnSyntheticServer({
   botAdmin,
   tokenRegistrationEnabled = false,
   artReadyEventEnabled = false,
-  omitFcmGates = false
+  omitFcmGates = false,
+  allowedOwner = ""
 }) {
   const blockedNames = [
     "OPENAI_API_KEY",
@@ -96,6 +97,12 @@ function spawnSyntheticServer({
       artReadyEventEnabled ? "true" : "false",
     FCM_DELIVERY_ENABLED: "false",
     FCM_AUTOMATIC_NOTIFICATIONS_ENABLED: "false",
+    FCM_FINAL_TEST_ALLOWED_OWNER_SHA256: allowedOwner
+      ? crypto
+          .createHash("sha256")
+          .update(allowedOwner, "utf8")
+          .digest("hex")
+      : "",
     IA4TUBE_ADMIN_FREE_ARTS_ENABLED: "false",
     IA4TUBE_ADMIN_FREE_ARTS_NOTIFICATIONS_ENABLED: "false"
   };
@@ -352,7 +359,8 @@ test("disabled gates preserve upload contract and create no notification state",
       botToken,
       botAdmin,
       tokenRegistrationEnabled: true,
-      artReadyEventEnabled: true
+      artReadyEventEnabled: true,
+      allowedOwner: owner
     });
     await waitUntilReady(instance);
 

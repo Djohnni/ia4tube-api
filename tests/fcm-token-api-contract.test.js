@@ -21,6 +21,10 @@ const {
 const {
   decryptActiveFcmTokens
 } = require("../src/notifications/fcm-token-store");
+const {
+  finalTestDevicePath,
+  readFinalTestDevice
+} = require("../src/notifications/fcm-final-test");
 
 const repoDir = path.resolve(__dirname, "..");
 const serverFile = path.join(repoDir, "server.js");
@@ -88,7 +92,9 @@ function spawnSyntheticServer({
   port,
   preloadFile,
   jwtSecret,
-  keyEnv
+  keyEnv,
+  allowedOwner,
+  tokenRegistrationEnabled = true
 }) {
   const env = {
     ...process.env,
@@ -100,7 +106,12 @@ function spawnSyntheticServer({
     BOT_RUNNER_TOKEN: "synthetic-bot-token-contract",
     BOT_ADMIN_WHATSAPP: "synthetic-admin",
     PUBLIC_API_BASE_URL: "https://synthetic.invalid",
-    FCM_TOKEN_REGISTRATION_ENABLED: "true",
+    FCM_TOKEN_REGISTRATION_ENABLED:
+      tokenRegistrationEnabled ? "true" : "false",
+    FCM_FINAL_TEST_ALLOWED_OWNER_SHA256: crypto
+      .createHash("sha256")
+      .update(allowedOwner, "utf8")
+      .digest("hex"),
     FCM_ART_READY_EVENT_ENABLED: "false",
     FCM_DELIVERY_ENABLED: "false",
     FCM_AUTOMATIC_NOTIFICATIONS_ENABLED: "false",
@@ -214,17 +225,46 @@ test("authenticated registration, replacement and deactivation are isolated", as
   const ownerB = "synthetic-owner-contract-b";
   const tokenA1 = "synthetic-fcm-contract-a-one";
   const tokenA2 = "synthetic-fcm-contract-a-two";
+  const tokenA3 = "synthetic-fcm-contract-a-single-slot";
   const tokenB = "synthetic-fcm-contract-b";
+  const deniedToken = "synthetic-forbidden-owner-token";
+  const legacyA = "synthetic-legacy-owner-a-untouched";
+  const legacyB = "synthetic-legacy-owner-b-untouched";
+  const deniedMalformedMarker =
+    "synthetic-denied-malformed-body-secret";
+  const allowedMalformedMarker =
+    "synthetic-allowed-malformed-body-secret";
   const jwtSecret = "synthetic-jwt-contract-secret-long-enough";
   const keyEnv = syntheticKeyEnv();
   const tokenCrypto = createFcmTokenCrypto({ env: keyEnv });
+  const ownerAllowlist = crypto
+    .createHash("sha256")
+    .update(ownerA, "utf8")
+    .digest("hex");
+  const vaultEnv = {
+    ...keyEnv,
+    FCM_FINAL_TEST_ALLOWED_OWNER_SHA256: ownerAllowlist
+  };
   let instance;
 
   try {
     writeJson(clientesFile, {
-      [ownerA]: { nome_time: "Synthetic A", whatsapp: ownerA },
-      [ownerB]: { nome_time: "Synthetic B", whatsapp: ownerB }
+      [ownerA]: {
+        nome_time: "Synthetic A",
+        whatsapp: ownerA,
+        notificacoes: {
+          fcm_tokens: [{ token: legacyA, ativo: true }]
+        }
+      },
+      [ownerB]: {
+        nome_time: "Synthetic B",
+        whatsapp: ownerB,
+        notificacoes: {
+          fcm_tokens: [{ token: legacyB, ativo: false }]
+        }
+      }
     });
+    const clientesHashOriginal = sha256File(clientesFile);
     fs.writeFileSync(
       preloadFile,
       [
@@ -245,7 +285,8 @@ test("authenticated registration, replacement and deactivation are isolated", as
       port,
       preloadFile,
       jwtSecret,
-      keyEnv
+      keyEnv,
+      allowedOwner: ownerA
     });
     await waitUntilReady(instance);
 
@@ -255,6 +296,79 @@ test("authenticated registration, replacement and deactivation are isolated", as
     const jwtB = jwt.sign({ whatsapp: ownerB }, jwtSecret, {
       expiresIn: "5m"
     });
+
+    const deniedMalformed = await fetch(
+      `http://127.0.0.1:${port}/ME/FCM-TOKEN`,
+      {
+        method: "POST",
+        headers: {
+          "Authorization": `Bearer ${jwtB}`,
+          "Content-Type": "application/json",
+          "X-Forwarded-Proto": "https"
+        },
+        body: `{"token":"${deniedMalformedMarker}"`
+      }
+    );
+    assert.equal(deniedMalformed.status, 403);
+
+    const allowedMalformed = await fetch(
+      `http://127.0.0.1:${port}/me/fcm-token/`,
+      {
+        method: "POST",
+        headers: {
+          "Authorization": `Bearer ${jwtA}`,
+          "Content-Type": "application/json",
+          "X-Forwarded-Proto": "https"
+        },
+        body: `{"token":"${allowedMalformedMarker}"`
+      }
+    );
+    assert.equal(allowedMalformed.status, 400);
+    assert.equal(
+      (await allowedMalformed.json()).code,
+      "fcm_token_request_invalid"
+    );
+
+    const oversized = await fetch(
+      `http://127.0.0.1:${port}/me/fcm-token////`,
+      {
+        method: "POST",
+        headers: {
+          "Authorization": `Bearer ${jwtA}`,
+          "Content-Type": "application/json",
+          "X-Forwarded-Proto": "https"
+        },
+        body: JSON.stringify({
+          token: "x".repeat(17 * 1024),
+          platform: "android"
+        })
+      }
+    );
+    assert.equal(oversized.status, 413);
+    assert.equal(
+      (await oversized.json()).code,
+      "fcm_token_payload_too_large"
+    );
+
+    const urlencodedAliasMarker =
+      "synthetic-urlencoded-alias-secret";
+    const urlencodedAlias = await fetch(
+      `http://127.0.0.1:${port}/ME/FCM-TOKEN/`,
+      {
+        method: "POST",
+        headers: {
+          "Authorization": `Bearer ${jwtA}`,
+          "Content-Type": "application/x-www-form-urlencoded",
+          "X-Forwarded-Proto": "https"
+        },
+        body: `token=${urlencodedAliasMarker}&platform=android`
+      }
+    );
+    assert.equal(urlencodedAlias.status, 415);
+    assert.equal(
+      (await urlencodedAlias.json()).code,
+      "fcm_token_content_type_invalid"
+    );
 
     const unauthorized = await request(port, "/me/fcm-token", {
       method: "DELETE",
@@ -295,12 +409,65 @@ test("authenticated registration, replacement and deactivation are isolated", as
     assert.equal(replaced.status, 200);
     assert.equal(replaced.body.ok, true);
 
-    const registeredB = await request(port, "/me/fcm-token", {
+    const singleSlot = await request(port, "/me/fcm-token", {
       method: "POST",
+      jwtToken: jwtA,
+      body: {
+        token: tokenA3,
+        platform: "android"
+      }
+    });
+    assert.equal(singleSlot.status, 200);
+    assert.equal(singleSlot.body.tokens_ativos, 1);
+    const activeSingleSlotDevice = readFinalTestDevice({
+      dataDir,
+      env: vaultEnv
+    });
+    assert.equal(
+      activeSingleSlotDevice.notificacoes.fcm_tokens.length,
+      1
+    );
+    assert.deepEqual(
+      decryptActiveFcmTokens({
+        cliente: activeSingleSlotDevice,
+        tokenCrypto
+      }),
+      [tokenA3]
+    );
+
+    const beforeDeniedOwner = sha256File(clientesFile);
+    const deniedOwner = await request(port, "/me/fcm-token", {
+      method: "POST",
+      jwtToken: jwtB,
+      body: {
+        token: deniedToken,
+        platform: "android"
+      }
+    });
+    assert.deepEqual(deniedOwner, {
+      status: 403,
+      body: {
+        ok: false,
+        code: "fcm_final_test_owner_not_allowed",
+        error: "Registro de notificacoes indisponivel."
+      }
+    });
+    assert.equal(sha256File(clientesFile), beforeDeniedOwner);
+
+    const deniedDelete = await request(port, "/me/fcm-token", {
+      method: "DELETE",
       jwtToken: jwtB,
       body: { token: tokenB, platform: "android" }
     });
-    assert.equal(registeredB.status, 200);
+    assert.deepEqual(deniedDelete, {
+      status: 403,
+      body: {
+        ok: false,
+        code: "fcm_final_test_owner_not_allowed",
+        error: "Registro de notificacoes indisponivel."
+      }
+    });
+    assert.equal(sha256File(clientesFile), beforeDeniedOwner);
 
     const crossOwner = await request(port, "/me/fcm-token", {
       method: "DELETE",
@@ -328,7 +495,7 @@ test("authenticated registration, replacement and deactivation are isolated", as
     const deactivated = await request(port, "/me/fcm-token", {
       method: "DELETE",
       jwtToken: jwtA,
-      body: { token: tokenA2, platform: "android" }
+      body: { token: tokenA3, platform: "android" }
     });
     assert.deepEqual(deactivated, {
       status: 200,
@@ -337,40 +504,117 @@ test("authenticated registration, replacement and deactivation are isolated", as
     const repeated = await request(port, "/me/fcm-token", {
       method: "DELETE",
       jwtToken: jwtA,
-      body: { token: tokenA2, platform: "android" }
+      body: { token: tokenA3, platform: "android" }
     });
     assert.deepEqual(repeated, {
       status: 200,
       body: { ok: true, desativado: false }
     });
 
-    const clientes = JSON.parse(fs.readFileSync(clientesFile, "utf8"));
+    assert.equal(sha256File(clientesFile), clientesHashOriginal);
+    const device = readFinalTestDevice({
+      dataDir,
+      env: vaultEnv
+    });
     assert.deepEqual(
       decryptActiveFcmTokens({
-        cliente: clientes[ownerA],
+        cliente: device,
         tokenCrypto
       }),
       []
     );
-    assert.deepEqual(
-      decryptActiveFcmTokens({
-        cliente: clientes[ownerB],
-        tokenCrypto
-      }),
-      [tokenB]
+    const serialized = fs.readFileSync(
+      finalTestDevicePath(dataDir),
+      "utf8"
     );
-    const serialized = JSON.stringify(clientes);
     assert.equal(serialized.includes(tokenA1), false);
     assert.equal(serialized.includes(tokenA2), false);
+    assert.equal(serialized.includes(tokenA3), false);
     assert.equal(serialized.includes(tokenB), false);
     assert.equal(instance.output().includes(tokenA1), false);
     assert.equal(instance.output().includes(tokenA2), false);
+    assert.equal(instance.output().includes(tokenA3), false);
     assert.equal(instance.output().includes(tokenB), false);
+    assert.equal(instance.output().includes(deniedToken), false);
+    assert.equal(instance.output().includes(legacyA), false);
+    assert.equal(instance.output().includes(legacyB), false);
+    assert.equal(
+      instance.output().includes(deniedMalformedMarker),
+      false
+    );
+    assert.equal(
+      instance.output().includes(allowedMalformedMarker),
+      false
+    );
+    assert.equal(
+      instance.output().includes(urlencodedAliasMarker),
+      false
+    );
     assert.equal(fs.existsSync(externalCallsFile), false);
     assert.deepEqual(
       fs.readdirSync(dataDir).filter((name) => name.endsWith(".tmp")),
       []
     );
+
+    const vaultHashBeforeClosedGate = sha256File(
+      finalTestDevicePath(dataDir)
+    );
+    await stopServer(instance);
+    instance = null;
+    const closedGatePort = await freePort();
+    instance = spawnSyntheticServer({
+      dataDir,
+      port: closedGatePort,
+      preloadFile,
+      jwtSecret,
+      keyEnv,
+      allowedOwner: ownerA,
+      tokenRegistrationEnabled: false
+    });
+    await waitUntilReady(instance);
+
+    const closedGateMarkers = [
+      "synthetic-closed-gate-exact",
+      "synthetic-closed-gate-uppercase",
+      "synthetic-closed-gate-trailing",
+      "synthetic-closed-gate-urlencoded"
+    ];
+    const closedGateRequests = [
+      ["/me/fcm-token", "application/json", `{"token":"${closedGateMarkers[0]}"`],
+      ["/ME/FCM-TOKEN", "application/json", `{"token":"${closedGateMarkers[1]}"`],
+      ["/me/fcm-token////", "application/json", JSON.stringify({
+        token: closedGateMarkers[2].repeat(2_000),
+        platform: "android"
+      })],
+      ["/ME/FCM-TOKEN/", "application/x-www-form-urlencoded",
+        `token=${closedGateMarkers[3]}&platform=android`]
+    ];
+    for (const [pathname, contentType, body] of closedGateRequests) {
+      const response = await fetch(
+        `http://127.0.0.1:${closedGatePort}${pathname}`,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": contentType,
+            "X-Forwarded-Proto": "https"
+          },
+          body
+        }
+      );
+      assert.equal(response.status, 503);
+      assert.equal(
+        (await response.json()).code,
+        "fcm_token_registration_disabled"
+      );
+    }
+    assert.equal(
+      sha256File(finalTestDevicePath(dataDir)),
+      vaultHashBeforeClosedGate
+    );
+    for (const marker of closedGateMarkers) {
+      assert.equal(instance.output().includes(marker), false);
+    }
+    assert.equal(fs.existsSync(externalCallsFile), false);
   } finally {
     await stopServer(instance);
     fs.rmSync(root, { recursive: true, force: true });
