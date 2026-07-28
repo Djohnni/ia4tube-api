@@ -17,7 +17,9 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.platform.LocalContext
+import br.com.ia4tube.app.core.notifications.IA4TubeNotificationHelper
 import br.com.ia4tube.app.core.notifications.NotificationNavigationTarget
+import br.com.ia4tube.app.core.notifications.autoCancelOnNotificationTap
 import br.com.ia4tube.app.core.notifications.toNotificationNavigationTarget
 import br.com.ia4tube.app.data.api.IA4TubeApiClient
 import br.com.ia4tube.app.data.models.ApiResult
@@ -30,7 +32,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        notificationTarget = intent.toNotificationNavigationTarget()
+        handleNotificationIntent(intent)
         setContent {
             IA4TubeTheme {
                 AppUpdateGate {
@@ -46,7 +48,16 @@ class MainActivity : ComponentActivity() {
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
-        notificationTarget = intent.toNotificationNavigationTarget()
+        handleNotificationIntent(intent)
+    }
+
+    private fun handleNotificationIntent(intent: Intent?) {
+        notificationTarget = autoCancelOnNotificationTap(
+            target = intent.toNotificationNavigationTarget(),
+            cancelByEventId = { eventId ->
+                IA4TubeNotificationHelper.cancel(this, eventId)
+            }
+        )
     }
 
     private fun consumeNotificationTarget() {

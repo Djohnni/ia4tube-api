@@ -9,6 +9,14 @@ data class NotificationNavigationTarget(
     val nonce: Long = eventId.hashCode().toLong()
 }
 
+internal fun autoCancelOnNotificationTap(
+    target: NotificationNavigationTarget?,
+    cancelByEventId: (String) -> Unit
+): NotificationNavigationTarget? {
+    target?.let { cancelByEventId(it.eventId) }
+    return target
+}
+
 fun Intent?.toNotificationNavigationTarget(): NotificationNavigationTarget? {
     val intent = this ?: return null
     if (intent.action != IA4TubeNotificationHelper.ACTION_OPEN_ART_READY) return null

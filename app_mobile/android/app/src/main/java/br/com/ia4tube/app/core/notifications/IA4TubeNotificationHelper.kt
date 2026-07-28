@@ -41,6 +41,17 @@ internal object IA4TubeNotificationHelper {
             .cancelAll()
     }
 
+    fun cancel(context: Context, eventId: String): Boolean {
+        if (!ArtReadyNotificationPayload.isSafeEventId(eventId)) return false
+
+        return runCatching {
+            context.applicationContext
+                .getSystemService(NotificationManager::class.java)
+                .cancel(notificationIdForEvent(eventId))
+            true
+        }.getOrDefault(false)
+    }
+
     fun show(
         context: Context,
         payload: ArtReadyNotificationPayload
@@ -50,7 +61,7 @@ internal object IA4TubeNotificationHelper {
         val appContext = context.applicationContext
         val manager = appContext.getSystemService(NotificationManager::class.java)
         ensureChannel(manager)
-        val notificationId = payload.eventId.hashCode() and Int.MAX_VALUE
+        val notificationId = notificationIdForEvent(payload.eventId)
         val contentIntent = PendingIntent.getActivity(
             appContext,
             notificationId,
@@ -73,6 +84,10 @@ internal object IA4TubeNotificationHelper {
             manager.notify(notificationId, notification)
             true
         }.getOrDefault(false)
+    }
+
+    internal fun notificationIdForEvent(eventId: String): Int {
+        return eventId.hashCode() and Int.MAX_VALUE
     }
 
     private fun ensureChannel(manager: NotificationManager) {
