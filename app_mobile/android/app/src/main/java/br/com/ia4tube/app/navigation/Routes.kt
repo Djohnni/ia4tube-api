@@ -21,7 +21,7 @@ object Routes {
     const val Plans = "plans"
 
     fun orders(filter: OrderListFilter = OrderListFilter.All): String = "orders?filter=${filter.routeValue}"
-    fun orderDetail(pedidoId: String): String = "orders/$pedidoId"
+    fun orderDetail(pedidoId: String): String = "orders/${Uri.encode(pedidoId)}"
     fun monthlyPlanningDetail(planningId: String): String = "monthly-planning/$planningId"
     fun monthlyPlanningResults(planningId: String): String = "monthly-planning-results/${Uri.encode(planningId)}"
     fun createArtEmpresa(photoUri: String = ""): String {

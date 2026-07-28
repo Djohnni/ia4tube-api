@@ -20,3 +20,9 @@ openai_key.txt
 *firebase-adminsdk*.json
 *service-account*.json
 firebase-admin*.json
+
+# Artefatos locais e configuracao Firebase do build Android.
+app_mobile/android/.gradle/
+app_mobile/android/build/
+app_mobile/android/app/build/
+app_mobile/android/app/google-services.json

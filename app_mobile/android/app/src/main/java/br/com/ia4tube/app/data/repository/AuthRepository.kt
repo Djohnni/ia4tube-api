@@ -63,8 +63,13 @@ class AuthRepository(
         return when (val result = apiClient.login(login, senha)) {
             is ApiResult.Success -> {
                 companyProfileStore?.prepareForAuthenticatedAccount(login)
+                runCatching {
+                    fcmTokenRegistrar?.prepareForAccountChange(result.value.token)
+                }
                 sessionStore.saveToken(result.value.token)
-                fcmTokenRegistrar?.syncCurrentToken()
+                runCatching {
+                    fcmTokenRegistrar?.syncCurrentTokenNow()
+                }
                 result
             }
             is ApiResult.Failure -> result
@@ -75,8 +80,13 @@ class AuthRepository(
         return when (val result = apiClient.register(whatsapp, senha)) {
             is ApiResult.Success -> {
                 companyProfileStore?.prepareForAuthenticatedAccount(whatsapp)
+                runCatching {
+                    fcmTokenRegistrar?.prepareForAccountChange(result.value.token)
+                }
                 sessionStore.saveToken(result.value.token)
-                fcmTokenRegistrar?.syncCurrentToken()
+                runCatching {
+                    fcmTokenRegistrar?.syncCurrentTokenNow()
+                }
                 result
             }
             is ApiResult.Failure -> result
@@ -242,7 +252,10 @@ class AuthRepository(
         return apiClient.enviarMensagemSuporte(token, mensagem)
     }
 
-    fun logout() {
+    suspend fun logout() {
+        runCatching {
+            fcmTokenRegistrar?.deactivateForLogout()
+        }
         sessionStore.clear()
     }
 

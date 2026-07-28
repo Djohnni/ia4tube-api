@@ -1,22 +1,33 @@
 package br.com.ia4tube.app.navigation
 
+import android.Manifest
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.net.Uri
+import android.os.Build
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.padding
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
 import androidx.compose.material3.ColorScheme
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.core.content.ContextCompat
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
@@ -27,6 +38,8 @@ import androidx.navigation.compose.rememberNavController
 import br.com.ia4tube.app.core.download.ImageDownloadStore
 import br.com.ia4tube.app.core.download.ZipDownloadStore
 import br.com.ia4tube.app.core.company.CompanyProfileStore
+import br.com.ia4tube.app.core.notifications.FcmActivationPolicy
+import br.com.ia4tube.app.core.notifications.IA4TubeNotificationHelper
 import br.com.ia4tube.app.core.notifications.FcmTokenRegistrar
 import br.com.ia4tube.app.core.notifications.NotificationNavigationTarget
 import br.com.ia4tube.app.core.session.SessionStore
@@ -34,6 +47,7 @@ import br.com.ia4tube.app.core.analytics.MobileAnalytics
 import br.com.ia4tube.app.core.analytics.MobileAnalyticsTracker
 import br.com.ia4tube.app.core.monthly_planning.MonthlyPlanningCalendarCacheStore
 import br.com.ia4tube.app.data.api.IA4TubeApiClient
+import br.com.ia4tube.app.data.models.ApiResult
 import br.com.ia4tube.app.data.repository.AuthRepository
 import br.com.ia4tube.app.data.repository.CarouselRepository
 import br.com.ia4tube.app.data.repository.CompanyGraphicMaterialsRepository
@@ -106,6 +120,7 @@ import br.com.ia4tube.app.feature.splash.SplashViewModelFactory
 import br.com.ia4tube.app.feature.support.SupportScreen
 import br.com.ia4tube.app.feature.support.SupportViewModel
 import br.com.ia4tube.app.feature.support.SupportViewModelFactory
+import kotlinx.coroutines.launch
 
 @Composable
 fun IA4TubeNavHost(
@@ -120,6 +135,7 @@ fun IA4TubeNavHost(
     val premiumPalette = premiumHomePalette(premiumHomeTheme)
     val usePremiumShell = shouldUsePremiumShell(currentRoute)
     val context = LocalContext.current.applicationContext
+    val notificationScope = rememberCoroutineScope()
     val apiClient = remember {
         IA4TubeApiClient()
     }
@@ -132,7 +148,6 @@ fun IA4TubeNavHost(
     val fcmTokenRegistrar = remember {
         FcmTokenRegistrar(
             context = context,
-            apiClient = apiClient,
             sessionStore = sessionStore
         )
     }
@@ -174,24 +189,45 @@ fun IA4TubeNavHost(
     var pendingProtectedRoute by rememberSaveable { mutableStateOf<String?>(null) }
     var cameraRequestKey by rememberSaveable { mutableStateOf(0) }
     var showAuthSheet by rememberSaveable { mutableStateOf(false) }
+    var showNotificationConsent by rememberSaveable { mutableStateOf(false) }
+    var notificationConsentError by rememberSaveable { mutableStateOf(false) }
+    val notificationPermissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        notificationScope.launch {
+            if (granted) {
+                val result = runCatching {
+                    IA4TubeNotificationHelper.ensureDefaultChannel(context)
+                    fcmTokenRegistrar.grantConsentAndActivate()
+                }.getOrNull()
+                val activated = result is ApiResult.Success
+                notificationConsentError = !activated
+                showNotificationConsent = !activated
+            } else {
+                runCatching {
+                    fcmTokenRegistrar.declineConsent()
+                }
+                notificationConsentError = false
+                showNotificationConsent = false
+            }
+        }
+    }
 
     fun hasSavedToken(): Boolean = repository.getSavedToken().isNotBlank()
 
+    fun hasNotificationPermission(): Boolean {
+        return Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU ||
+            ContextCompat.checkSelfPermission(
+                context,
+                Manifest.permission.POST_NOTIFICATIONS
+            ) == PackageManager.PERMISSION_GRANTED
+    }
+
     fun routeForNotification(target: NotificationNavigationTarget): String {
-        if (target.pedidoId.isNotBlank()) return Routes.orderDetail(target.pedidoId)
-        if (target.planejamentoId.isNotBlank()) return Routes.monthlyPlanningDetail(target.planejamentoId)
-
-        val type = target.tipo.lowercase()
-        val route = target.route.lowercase()
-
-        return when {
-            type == "arte_pronta" || type == "pedido_atualizado" -> Routes.orders(OrderListFilter.All)
-            type == "planejamento_mensal" || route.contains("monthly_planning") -> Routes.MonthlyPlanning
-            type == "nova_versao" || type == "aviso_geral" -> Routes.Home
-            route.contains("orders") || route.contains("pedidos") -> Routes.orders(OrderListFilter.All)
-            route.contains("planning") || route.contains("planejamento") -> Routes.MonthlyPlanning
-            route.contains("plans") || route.contains("planos") -> Routes.Plans
-            else -> Routes.Home
+        return if (target.pedidoId.isNotBlank()) {
+            Routes.orderDetail(target.pedidoId)
+        } else {
+            Routes.Home
         }
     }
 
@@ -278,9 +314,25 @@ fun IA4TubeNavHost(
         MobileAnalytics.init(analyticsTracker)
     }
 
-    LaunchedEffect(hasSavedToken()) {
+    LaunchedEffect(hasSavedToken(), currentRoute) {
         if (hasSavedToken()) {
-            fcmTokenRegistrar.syncCurrentToken()
+            if (fcmTokenRegistrar.hasConsentDecisionForCurrentAccount()) {
+                if (fcmTokenRegistrar.hasGrantedConsentForCurrentAccount()) {
+                    if (hasNotificationPermission()) {
+                        fcmTokenRegistrar.syncCurrentToken()
+                    } else {
+                        notificationScope.launch {
+                            runCatching {
+                                fcmTokenRegistrar.declineConsent()
+                            }
+                        }
+                    }
+                }
+            } else {
+                showNotificationConsent = true
+            }
+        } else {
+            showNotificationConsent = false
         }
     }
 
@@ -412,9 +464,11 @@ fun IA4TubeNavHost(
                 onPremiumThemeSelected = { premiumHomeThemeName = it.name },
                 onLogout = {
                     pendingProtectedRoute = null
-                    repository.logout()
-                    navController.navigate(Routes.Login) {
-                        popUpTo(Routes.Home) { inclusive = true }
+                    notificationScope.launch {
+                        repository.logout()
+                        navController.navigate(Routes.Login) {
+                            popUpTo(Routes.Home) { inclusive = true }
+                        }
                     }
                 },
                 isLoggedIn = hasSavedToken(),
@@ -633,10 +687,12 @@ fun IA4TubeNavHost(
                 },
                 onLogout = {
                     pendingProtectedRoute = null
-                    repository.logout()
-                    navController.navigate(Routes.Login) {
-                        popUpTo(Routes.Home) { inclusive = true }
-                        launchSingleTop = true
+                    notificationScope.launch {
+                        repository.logout()
+                        navController.navigate(Routes.Login) {
+                            popUpTo(Routes.Home) { inclusive = true }
+                            launchSingleTop = true
+                        }
                     }
                 }
             )
@@ -763,6 +819,84 @@ fun IA4TubeNavHost(
                     onLogin = { login, senha -> repository.login(login, senha) },
                     onRegister = { whatsapp, senha -> repository.register(whatsapp, senha) },
                     onAuthenticated = ::finishAuthSheet
+                )
+            }
+            if (showNotificationConsent) {
+                AlertDialog(
+                    onDismissRequest = {
+                        notificationScope.launch {
+                            runCatching {
+                                fcmTokenRegistrar.declineConsent()
+                            }
+                            notificationConsentError = false
+                            showNotificationConsent = false
+                        }
+                    },
+                    title = {
+                        Text("Receber aviso quando sua arte ficar pronta?")
+                    },
+                    text = {
+                        Text(
+                            "A IA4Tube pode avisar quando sua criação estiver pronta. " +
+                                "Você pode continuar acompanhando manualmente se preferir." +
+                                if (notificationConsentError) {
+                                    " Não foi possível ativar agora. Tente novamente."
+                                } else {
+                                    ""
+                                }
+                        )
+                    },
+                    confirmButton = {
+                        Button(
+                            onClick = {
+                                val permissionGranted = hasNotificationPermission()
+                                if (
+                                    FcmActivationPolicy.shouldRequestSystemPermission(
+                                        sdkInt = Build.VERSION.SDK_INT,
+                                        explicitConsentGranted = true,
+                                        permissionGranted = permissionGranted
+                                    )
+                                ) {
+                                    notificationPermissionLauncher.launch(
+                                        Manifest.permission.POST_NOTIFICATIONS
+                                    )
+                                } else if (
+                                    FcmActivationPolicy.canActivate(
+                                        sdkInt = Build.VERSION.SDK_INT,
+                                        explicitConsentGranted = true,
+                                        permissionGranted = permissionGranted
+                                    )
+                                ) {
+                                    notificationScope.launch {
+                                        val result = runCatching {
+                                            IA4TubeNotificationHelper.ensureDefaultChannel(context)
+                                            fcmTokenRegistrar.grantConsentAndActivate()
+                                        }.getOrNull()
+                                        val activated = result is ApiResult.Success
+                                        notificationConsentError = !activated
+                                        showNotificationConsent = !activated
+                                    }
+                                }
+                            }
+                        ) {
+                            Text("Ativar avisos")
+                        }
+                    },
+                    dismissButton = {
+                        TextButton(
+                            onClick = {
+                                notificationScope.launch {
+                                    runCatching {
+                                        fcmTokenRegistrar.declineConsent()
+                                    }
+                                    notificationConsentError = false
+                                    showNotificationConsent = false
+                                }
+                            }
+                        ) {
+                            Text("Agora não")
+                        }
+                    }
                 )
             }
     }

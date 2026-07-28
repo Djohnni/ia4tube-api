@@ -1,15 +1,10 @@
 package br.com.ia4tube.app
 
-import android.annotation.SuppressLint
-import android.Manifest
 import android.content.Context
 import android.content.Intent
-import android.content.pm.PackageManager
 import android.net.Uri
-import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
-import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.compose.setContent
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -22,8 +17,6 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.platform.LocalContext
-import androidx.core.content.ContextCompat
-import br.com.ia4tube.app.core.notifications.IA4TubeNotificationHelper
 import br.com.ia4tube.app.core.notifications.NotificationNavigationTarget
 import br.com.ia4tube.app.core.notifications.toNotificationNavigationTarget
 import br.com.ia4tube.app.data.api.IA4TubeApiClient
@@ -35,26 +28,15 @@ import br.com.ia4tube.app.ui.theme.IA4TubeTheme
 class MainActivity : ComponentActivity() {
     private var notificationTarget by mutableStateOf<NotificationNavigationTarget?>(null)
 
-    @SuppressLint("InvalidFragmentVersionForActivityResult")
-    private val notificationPermissionLauncher = registerForActivityResult(
-        ActivityResultContracts.RequestPermission()
-    ) {
-        // Notifications are optional; the app keeps working with manual status refresh.
-    }
-
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         notificationTarget = intent.toNotificationNavigationTarget()
-        IA4TubeNotificationHelper.ensureDefaultChannel(this)
-        requestNotificationPermissionIfNeeded()
         setContent {
             IA4TubeTheme {
                 AppUpdateGate {
                     IA4TubeNavHost(
                         notificationTarget = notificationTarget,
-                        onNotificationTargetHandled = {
-                            notificationTarget = null
-                        }
+                        onNotificationTargetHandled = ::consumeNotificationTarget
                     )
                 }
             }
@@ -67,17 +49,9 @@ class MainActivity : ComponentActivity() {
         notificationTarget = intent.toNotificationNavigationTarget()
     }
 
-    private fun requestNotificationPermissionIfNeeded() {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) return
-
-        val granted = ContextCompat.checkSelfPermission(
-            this,
-            Manifest.permission.POST_NOTIFICATIONS
-        ) == PackageManager.PERMISSION_GRANTED
-
-        if (!granted) {
-            notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
-        }
+    private fun consumeNotificationTarget() {
+        notificationTarget = null
+        setIntent(Intent(this, MainActivity::class.java))
     }
 }
 
