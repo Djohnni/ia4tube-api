@@ -1,1 +1,4 @@
 bot_token.txt -diff
+db/migrations/*.sql text eol=lf
+db/postgres/*.sql text eol=lf
+db/migrations/checksums.json text eol=lf

@@ -1,0 +1,20 @@
+{
+  "format": 1,
+  "migrations": [
+    {
+      "version": "0001_social_multitenant_foundation",
+      "file": "0001_social_multitenant_foundation.up.sql",
+      "sha256": "ecab91eb1b915378b6d98edfa66c929c3558054349fbda8b25dbf274191a21bb"
+    },
+    {
+      "version": "0002_social_connections_and_vault",
+      "file": "0002_social_connections_and_vault.up.sql",
+      "sha256": "72b05e7de90cd2d7742b5622bc92f9e9d78168317b9b7d547a5adb1b918d722d"
+    },
+    {
+      "version": "0003_global_vault_key_registry",
+      "file": "0003_global_vault_key_registry.up.sql",
+      "sha256": "28e63269e5d31ebd05b49f24194be706d3e65eed3fa7f6b39f9051cfc9b96db7"
+    }
+  ]
+}

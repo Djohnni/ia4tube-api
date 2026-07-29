@@ -4,434 +4,1079 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
 const test = require("node:test");
-
+const {
+  loadMigrationPostgresConfig,
+  loadRuntimePostgresConfig
+} = require("../src/persistence/postgres/config");
 const {
   SET_COMPANY_SCOPE_SQL,
-  SocialPersistenceError,
+  verifyRuntimeRole,
+  withTransaction
+} = require("../src/persistence/postgres/pool");
+const {
   createCompanyScopedRepository
 } = require("../src/persistence/postgres/company-scoped-repository");
+const {
+  createSocialRepository
+} = require("../src/persistence/postgres/social-repository");
+const {
+  RUNTIME_COLUMN_GRANTS,
+  RUNTIME_TABLE_GRANTS,
+  TENANT_POLICIES,
+  TENANT_SCOPE_COLUMNS,
+  TENANT_TABLES,
+  verifyRuntimeSchema
+} = require("../src/persistence/postgres/runtime-validation");
+const {
+  createSocialRuntime
+} = require("../src/social/runtime");
 
+const root = path.resolve(__dirname, "..");
 const companyA = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 const companyB = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
 const userA = "11111111-1111-4111-8111-111111111111";
-const mappingA = "22222222-2222-4222-8222-222222222222";
-const targetA = "33333333-3333-4333-8333-333333333333";
-const syntheticDatabaseUrl =
-  "postgresql://synthetic.invalid/ia4tube_social_test";
+const connectionA = "22222222-2222-4222-8222-222222222222";
+const identityVersion = "identity-v1";
 
-function createFakePool({
-  rows = [],
-  failWhen = () => false,
-  resultFor,
-  rollbackFails = false
-} = {}) {
-  const state = {
-    connectCalls: 0,
-    released: 0,
-    discardedWithError: 0,
-    queries: []
+function runtimeTableAclRows() {
+  return Object.entries(RUNTIME_TABLE_GRANTS).flatMap(
+    ([table_name, privileges]) =>
+      privileges.map((privilege_type) => ({
+        grantee: "ia4tube_social_runtime",
+        table_name,
+        privilege_type,
+        is_grantable: false,
+        grantor_name: "ia4tube_social_owner"
+      }))
+  );
+}
+
+function runtimeColumnAclRows() {
+  return Object.entries(RUNTIME_COLUMN_GRANTS).flatMap(
+    ([table_name, columns]) =>
+      Object.entries(columns).flatMap(([column_name, privileges]) =>
+        privileges.map((privilege_type) => ({
+          grantee: "ia4tube_social_runtime",
+          table_name,
+          column_name,
+          privilege_type,
+          is_grantable: false,
+          grantor_name: "ia4tube_social_owner"
+        }))
+      )
+  );
+}
+
+function runtimeSchemaAclRows() {
+  return [
+    {
+      grantee: "ia4tube_social_runtime",
+      privilege_type: "USAGE",
+      is_grantable: false,
+      grantor_name: "ia4tube_social_owner"
+    }
+  ];
+}
+
+function vaultRegistryBoundaryRow(overrides = {}) {
+  return {
+    schema_owner: "ia4tube_social_owner",
+    registry_kind: "r",
+    registry_owner: "ia4tube_social_owner",
+    registry_rls: false,
+    registry_force_rls: false,
+    registry_policy_count: 0,
+    registry_primary_key_count: 1,
+    vault_registry_fk_count: 1,
+    schema_non_owner_acl_count: 0,
+    table_non_owner_acl_count: 0,
+    runtime_usage_absent: true,
+    runtime_create_absent: true,
+    ...overrides
   };
+}
+
+function socialRelationRows(overrides = {}) {
+  return [
+    ...TENANT_TABLES.map((relname) => ({
+      relname,
+      object_kind: "r",
+      owner_name: "ia4tube_social_owner"
+    })),
+    {
+      relname: "runtime_schema_contract",
+      object_kind: "v",
+      owner_name: "ia4tube_social_owner"
+    }
+  ].map((row) =>
+    row.relname === overrides.relation
+      ? { ...row, ...overrides.values }
+      : row
+  );
+}
+
+function safePrincipalAccess(overrides = {}) {
+  return {
+    owns_database: false,
+    database_create: false,
+    owns_schema: false,
+    schema_create: false,
+    owns_relation: false,
+    owns_function: false,
+    owns_type: false,
+    table_truncate: false,
+    ...overrides
+  };
+}
+
+function read(relativePath) {
+  return fs.readFileSync(path.join(root, relativePath), "utf8");
+}
+
+function fakePool(handler) {
+  const queries = [];
   const client = {
-    async query(text, values = []) {
-      state.queries.push({ text, values: [...values] });
-      if (text === "ROLLBACK" && rollbackFails) {
-        throw new Error("synthetic rollback failure");
-      }
-      if (failWhen(text, values)) {
-        throw new Error("synthetic query failure");
-      }
-      if (typeof resultFor === "function") {
-        return resultFor(text, values, state);
-      }
-      return { rows };
+    async query(text, values) {
+      queries.push({ text, values });
+      return handler ? handler(text, values, queries) : { rows: [] };
     },
     release(error) {
-      state.released += 1;
-      if (error) state.discardedWithError += 1;
-    }
+      client.released = true;
+      client.releaseError = error;
+    },
+    released: false
   };
   return {
+    queries,
+    client,
     pool: {
       async connect() {
-        state.connectCalls += 1;
         return client;
       }
-    },
-    state
+    }
   };
 }
 
-function assertErrorCode(expectedCode) {
-  return (error) =>
-    error instanceof SocialPersistenceError &&
-    error.code === expectedCode;
-}
-
-test("DATABASE_URL is mandatory and fails before the pool is used", () => {
-  const { pool, state } = createFakePool();
-  for (const databaseUrl of [
-    undefined,
-    "",
-    " https://database.invalid/ia4tube",
-    "https://database.invalid/ia4tube",
-    "postgresql://synthetic.invalid"
-  ]) {
-    assert.throws(
-      () => createCompanyScopedRepository({ pool, databaseUrl }),
-      (error) =>
-        error instanceof SocialPersistenceError &&
-        ["database_url_missing", "database_url_invalid"].includes(error.code)
-    );
-  }
-  assert.equal(state.connectCalls, 0);
+test("social persistence is disabled by default without opening a pool", async () => {
+  assert.deepEqual(loadRuntimePostgresConfig({}), { enabled: false });
+  assert.deepEqual(await createSocialRuntime({ env: {} }), {
+    enabled: false,
+    reason: "social_persistence_disabled"
+  });
 });
 
-test("an injected pool is mandatory and no connection is created implicitly", () => {
+test("enabled social persistence fails closed without an explicit database", () => {
   assert.throws(
     () =>
-      createCompanyScopedRepository({
-        databaseUrl: syntheticDatabaseUrl
+      loadRuntimePostgresConfig({
+        SOCIAL_PERSISTENCE_ENABLED: "true"
       }),
-    assertErrorCode("postgres_pool_required")
+    { code: "database_url_missing" }
   );
 });
 
-test("company_id is required before opening a transaction", async () => {
-  const { pool, state } = createFakePool();
-  const repository = createCompanyScopedRepository({
-    pool,
-    databaseUrl: syntheticDatabaseUrl
+test("runtime PostgreSQL forces verified TLS outside loopback tests", () => {
+  const config = loadRuntimePostgresConfig({
+    SOCIAL_PERSISTENCE_ENABLED: "true",
+    DATABASE_URL:
+      "postgresql://runtime:synthetic@db.example.test/social?sslmode=require"
   });
-
-  for (const companyId of [
-    undefined,
-    "",
-    "not-a-uuid",
-    "00000000-0000-0000-0000-000000000000"
-  ]) {
-    await assert.rejects(
-      repository.withCompanyTransaction(companyId, async () => null),
-      assertErrorCode("company_id_required")
-    );
-  }
-  assert.equal(state.connectCalls, 0);
+  assert.equal(config.enabled, true);
+  assert.equal(config.pool.ssl.rejectUnauthorized, true);
+  assert.equal(config.pool.connectionString.includes("sslmode"), false);
+  assert.equal(config.pool.max, 5);
+  assert.ok(config.pool.options.includes("statement_timeout=10000"));
+  assert.ok(
+    config.pool.options.includes("idle_in_transaction_session_timeout=5000")
+  );
 });
 
-test("a company transaction sets local tenant scope and commits", async () => {
-  const { pool, state } = createFakePool();
-  const repository = createCompanyScopedRepository({
-    pool,
-    databaseUrl: syntheticDatabaseUrl
-  });
-
-  const value = await repository.withCompanyTransaction(
-    companyA,
-    async (transaction) => {
-      assert.equal(transaction.companyId, companyA);
-      await transaction.query("SELECT $1::uuid AS company_id", [companyA]);
-      return "committed";
-    }
+test("runtime PostgreSQL refuses role names that diverge from migrations", () => {
+  assert.throws(
+    () =>
+      loadRuntimePostgresConfig({
+        SOCIAL_PERSISTENCE_ENABLED: "true",
+        DATABASE_URL:
+          "postgresql://runtime:synthetic@db.example.test/social",
+        SOCIAL_DATABASE_RUNTIME_ROLE: "alternate_runtime"
+      }),
+    { code: "social_database_runtime_role_must_be_canonical" }
   );
+});
 
-  assert.equal(value, "committed");
+test("unencrypted remote PostgreSQL is refused", () => {
+  assert.throws(
+    () =>
+      loadRuntimePostgresConfig({
+        SOCIAL_PERSISTENCE_ENABLED: "true",
+        DATABASE_URL:
+          "postgresql://runtime:synthetic@db.example.test/social?sslmode=disable"
+      }),
+    { code: "social_database_tls_required" }
+  );
+});
+
+test("unencrypted PostgreSQL is allowed only for explicit loopback tests", () => {
+  const config = loadRuntimePostgresConfig({
+    NODE_ENV: "test",
+    SOCIAL_PERSISTENCE_ENABLED: "true",
+    SOCIAL_DATABASE_ALLOW_INSECURE_LOCALHOST: "true",
+    DATABASE_URL:
+      "postgresql://runtime:synthetic@127.0.0.1:55432/social_test?sslmode=disable"
+  });
+  assert.equal(config.pool.ssl, false);
+
+  assert.throws(
+    () =>
+      loadRuntimePostgresConfig({
+        NODE_ENV: "test",
+        SOCIAL_PERSISTENCE_ENABLED: "true",
+        SOCIAL_DATABASE_ALLOW_INSECURE_LOCALHOST: "true",
+        DATABASE_URL:
+          "postgresql://runtime:synthetic@remote.test/social?sslmode=disable"
+      }),
+    { code: "social_database_tls_required" }
+  );
+});
+
+test("migration credentials must differ from runtime credentials", () => {
+  const url = "postgresql://migration:synthetic@localhost/social_test";
+  assert.throws(
+    () =>
+      loadMigrationPostgresConfig({
+        NODE_ENV: "test",
+        SOCIAL_DATABASE_ALLOW_INSECURE_LOCALHOST: "true",
+        SOCIAL_MIGRATION_ENVIRONMENT: "test",
+        SOCIAL_MIGRATIONS_DATABASE_URL: url,
+        DATABASE_URL: url
+      }),
+    { code: "migration_runtime_credentials_must_differ" }
+  );
+});
+
+test("equivalent database URLs cannot disguise reused migration credentials", () => {
+  assert.throws(
+    () =>
+      loadMigrationPostgresConfig({
+        NODE_ENV: "test",
+        SOCIAL_DATABASE_ALLOW_INSECURE_LOCALHOST: "true",
+        SOCIAL_MIGRATION_ENVIRONMENT: "test",
+        SOCIAL_MIGRATION_EXPECTED_ENVIRONMENT_ID:
+          "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+        SOCIAL_MIGRATIONS_DATABASE_URL:
+          "postgresql://migration:one@localhost:5432/social_test?application_name=migration",
+        DATABASE_URL:
+          "postgresql://MIGRATION:two@LOCALHOST/social_test?sslmode=disable"
+      }),
+    { code: "migration_runtime_credentials_must_differ" }
+  );
+});
+
+test("tenant transaction sets role and local company context before work", async () => {
+  const harness = fakePool((text) => {
+    if (text === "SELECT synthetic") return { rows: [{ ok: true }] };
+    return { rows: [] };
+  });
+  const result = await withTransaction(
+    harness.pool,
+    (client) => client.query("SELECT synthetic"),
+    { companyId: companyA, role: "ia4tube_social_runtime" }
+  );
+  assert.deepEqual(result.rows, [{ ok: true }]);
   assert.deepEqual(
-    state.queries.map(({ text }) => text),
+    harness.queries.map((query) => query.text),
     [
       "BEGIN",
+      'SET LOCAL ROLE "ia4tube_social_runtime"',
       SET_COMPANY_SCOPE_SQL,
-      "SELECT $1::uuid AS company_id",
+      "SELECT synthetic",
       "COMMIT"
     ]
   );
-  assert.deepEqual(state.queries[1].values, [companyA]);
-  assert.equal(state.queries.some(({ text }) => text === "ROLLBACK"), false);
-  assert.equal(state.released, 1);
+  assert.deepEqual(harness.queries[2].values, [companyA]);
+  assert.equal(harness.client.released, true);
 });
 
-test("a failing operation is rolled back and never committed", async () => {
-  const { pool, state } = createFakePool();
-  const repository = createCompanyScopedRepository({
-    pool,
-    databaseUrl: syntheticDatabaseUrl
+test("tenant transaction rolls back and releases the client on failure", async () => {
+  const harness = fakePool((text) => {
+    if (text === "SELECT fail") throw new Error("synthetic failure");
+    return { rows: [] };
   });
-  const syntheticFailure = new Error("synthetic operation failure");
-
   await assert.rejects(
-    repository.withCompanyTransaction(companyA, async (transaction) => {
-      await transaction.query("SELECT $1::uuid", [companyA]);
-      throw syntheticFailure;
-    }),
-    (error) => error === syntheticFailure
+    withTransaction(
+      harness.pool,
+      (client) => client.query("SELECT fail"),
+      { companyId: companyA, role: "ia4tube_social_runtime" }
+    ),
+    /synthetic failure/
   );
-
-  assert.deepEqual(
-    state.queries.map(({ text }) => text),
-    [
-      "BEGIN",
-      SET_COMPANY_SCOPE_SQL,
-      "SELECT $1::uuid",
-      "ROLLBACK"
-    ]
-  );
-  assert.equal(state.queries.some(({ text }) => text === "COMMIT"), false);
-  assert.equal(state.released, 1);
+  assert.equal(harness.queries.at(-1).text, "ROLLBACK");
+  assert.equal(harness.client.released, true);
 });
 
-test("failure while establishing tenant scope also rolls back", async () => {
-  const { pool, state } = createFakePool({
-    failWhen: (text) => text === SET_COMPANY_SCOPE_SQL
-  });
-  const repository = createCompanyScopedRepository({
-    pool,
-    databaseUrl: syntheticDatabaseUrl
-  });
-
-  await assert.rejects(
-    repository.withCompanyTransaction(companyA, async () => {
-      throw new Error("operation must not run");
-    }),
-    /synthetic query failure/
-  );
-  assert.deepEqual(
-    state.queries.map(({ text }) => text),
-    ["BEGIN", SET_COMPANY_SCOPE_SQL, "ROLLBACK"]
-  );
-  assert.equal(state.released, 1);
-});
-
-test("rollback failure destroys the client instead of returning scoped state to pool", async () => {
-  const { pool, state } = createFakePool({ rollbackFails: true });
-  const repository = createCompanyScopedRepository({
-    pool,
-    databaseUrl: syntheticDatabaseUrl
-  });
-
-  await assert.rejects(
-    repository.withCompanyTransaction(companyA, async () => {
-      throw new Error("synthetic operation failure");
-    }),
-    assertErrorCode("postgres_rollback_failed")
-  );
-  assert.equal(state.released, 1);
-  assert.equal(state.discardedWithError, 1);
-  assert.equal(state.queries.at(-1).text, "ROLLBACK");
-});
-
-test("membership lookup binds the same company to scope and query", async () => {
-  const { pool, state } = createFakePool({
-    rows: [{
-      company_id: companyA,
-      user_id: userA,
-      role: "owner",
-      status: "active"
-    }]
-  });
-  const repository = createCompanyScopedRepository({
-    pool,
-    databaseUrl: syntheticDatabaseUrl
-  });
-
-  const membership = await repository.findMembership({
-    companyId: companyA,
-    userId: userA
-  });
-
-  assert.equal(membership.company_id, companyA);
-  assert.deepEqual(state.queries[1].values, [companyA]);
-  assert.match(state.queries[2].text, /WHERE company_id = \$1/);
-  assert.deepEqual(state.queries[2].values, [companyA, userA]);
-  assert.equal(
-    state.queries.some(({ values }) => values.includes(companyB)),
-    false
-  );
-});
-
-test("legacy mapping is tenant-scoped, parameterized and idempotent", async () => {
-  const { pool, state } = createFakePool({
-    rows: [{
-      id: mappingA,
-      company_id: companyA,
-      source_sha256: "a".repeat(64),
-      target_entity_type: "user",
-      target_entity_id: targetA
-    }]
-  });
-  const repository = createCompanyScopedRepository({
-    pool,
-    databaseUrl: syntheticDatabaseUrl
-  });
-
-  const mapping = await repository.recordLegacyMapping({
-    id: mappingA,
-    migrationVersion: "0001_social_multitenant_foundation",
-    companyId: companyA,
-    sourceSystem: "legacy-json",
-    sourceEntityType: "client",
-    sourceEntityId: "synthetic-legacy-id",
-    sourceSha256: "a".repeat(64),
-    targetEntityType: "user",
-    targetEntityId: targetA
-  });
-
-  assert.equal(mapping.company_id, companyA);
-  const insert = state.queries[2];
-  assert.match(insert.text, /ON CONFLICT/);
-  assert.match(insert.text, /DO NOTHING/);
-  assert.doesNotMatch(insert.text, /DO UPDATE/);
-  assert.equal(insert.text.includes("synthetic-legacy-id"), false);
-  assert.deepEqual(insert.values, [
-    mappingA,
-    "0001_social_multitenant_foundation",
-    companyA,
-    "legacy-json",
-    "client",
-    "synthetic-legacy-id",
-    "a".repeat(64),
-    "user",
-    targetA
-  ]);
-});
-
-test("an identical legacy mapping replay returns the existing target", async () => {
-  const existing = {
-    id: mappingA,
-    company_id: companyA,
-    source_sha256: "a".repeat(64),
-    target_entity_type: "user",
-    target_entity_id: targetA
-  };
-  const { pool, state } = createFakePool({
-    resultFor(text) {
-      if (text.startsWith("INSERT INTO legacy_entity_mappings")) {
-        return { rows: [] };
+test("runtime role validation rejects superuser, bypassrls and table owners", async () => {
+  for (const unsafe of [
+    { postgres_version_supported: false },
+    { active_canlogin: true },
+    { active_superuser: true },
+    { active_createdb: true },
+    { active_createrole: true },
+    { active_inherit: true },
+    { active_replication: true },
+    { active_bypassrls: true },
+    { login_superuser: true },
+    { login_createdb: true },
+    { login_createrole: true },
+    { login_replication: true },
+    { login_bypassrls: true },
+    { database_owner_safe: false },
+    { login_is_separate: false },
+    { direct_connect_exact: false },
+    { public_database_acl_absent: false },
+    { database_temp_absent: false },
+    { owner_member: true },
+    { migrator_member: true },
+    { unexpected_membership: true },
+    { runtime_members_exact: false }
+  ]) {
+    const harness = fakePool((text) => {
+      if (text.includes("FROM pg_catalog.pg_roles")) {
+        return {
+          rows: [
+            {
+              postgres_version_supported: true,
+              active_canlogin: false,
+              active_superuser: false,
+              active_createdb: false,
+              active_createrole: false,
+              active_inherit: false,
+              active_replication: false,
+              active_bypassrls: false,
+              login_superuser: false,
+              login_createdb: false,
+              login_createrole: false,
+              login_replication: false,
+              login_bypassrls: false,
+              database_owner_safe: true,
+              login_is_separate: true,
+              direct_connect_exact: true,
+              public_database_acl_absent: true,
+              database_temp_absent: true,
+              runtime_member: true,
+              owner_member: false,
+              migrator_member: false,
+              unexpected_membership: false,
+              runtime_members_exact: true,
+              ...unsafe
+            }
+          ]
+        };
       }
-      if (text.startsWith("SELECT id, company_id, source_sha256")) {
-        return { rows: [existing] };
+      if (text.includes("AS owns_database")) {
+        return { rows: [safePrincipalAccess()] };
       }
       return { rows: [] };
+    });
+    await assert.rejects(
+      verifyRuntimeRole(harness.pool, "ia4tube_social_runtime"),
+      { code: "postgres_runtime_role_unsafe" }
+    );
+  }
+
+  const ownerHarness = fakePool((text) => {
+    if (text.includes("FROM pg_catalog.pg_roles")) {
+      return {
+        rows: [
+          {
+            postgres_version_supported: true,
+            active_canlogin: false,
+            active_superuser: false,
+            active_createdb: false,
+            active_createrole: false,
+            active_inherit: false,
+            active_replication: false,
+            active_bypassrls: false,
+            login_superuser: false,
+            login_createdb: false,
+            login_createrole: false,
+            login_replication: false,
+            login_bypassrls: false,
+            database_owner_safe: true,
+            login_is_separate: true,
+            direct_connect_exact: true,
+            public_database_acl_absent: true,
+            database_temp_absent: true,
+            runtime_member: true,
+            owner_member: false,
+            migrator_member: false,
+            unexpected_membership: false,
+            runtime_members_exact: true
+          }
+        ]
+      };
     }
+    if (text.includes("AS owns_database")) {
+      return {
+        rows: [safePrincipalAccess({ owns_database: true })]
+      };
+    }
+    return { rows: [] };
   });
-  const repository = createCompanyScopedRepository({
-    pool,
-    databaseUrl: syntheticDatabaseUrl
-  });
-
-  const replay = await repository.recordLegacyMapping({
-    id: mappingA,
-    migrationVersion: "0001_social_multitenant_foundation",
-    companyId: companyA,
-    sourceSystem: "legacy-json",
-    sourceEntityType: "client",
-    sourceEntityId: "synthetic-legacy-id",
-    sourceSha256: "a".repeat(64),
-    targetEntityType: "user",
-    targetEntityId: targetA
-  });
-
-  assert.deepEqual(replay, existing);
-  assert.equal(
-    state.queries.filter(({ text }) =>
-      text.startsWith("INSERT INTO legacy_entity_mappings")
-    ).length,
-    1
+  await assert.rejects(
+    verifyRuntimeRole(ownerHarness.pool, "ia4tube_social_runtime"),
+    { code: "postgres_runtime_role_is_owner" }
   );
-  assert.equal(
-    state.queries.filter(({ text }) =>
-      text.startsWith("SELECT id, company_id, source_sha256")
-    ).length,
-    1
+  const membershipQuery = ownerHarness.queries.find((query) =>
+    query.text.includes("AS runtime_members_exact")
   );
-  assert.equal(state.queries.at(-1).text, "COMMIT");
-});
+  assert.match(membershipQuery.text, /membership\.admin_option/);
+  assert.match(membershipQuery.text, /membership\.inherit_option/);
+  assert.match(membershipQuery.text, /membership\.set_option/);
+  assert.match(membershipQuery.text, /COUNT\(\*\) = 2/);
+  assert.match(membershipQuery.text, /grantor\.rolsuper/);
+  assert.match(membershipQuery.text, /database_info\.datdba/);
+  assert.match(membershipQuery.text, /direct_connect_exact/);
+  assert.match(membershipQuery.text, /public_database_acl_absent/);
+  assert.match(membershipQuery.text, /database_temp_absent/);
 
-test("a divergent legacy mapping replay fails closed and rolls back", async () => {
-  const { pool, state } = createFakePool({
-    resultFor(text) {
-      if (text.startsWith("INSERT INTO legacy_entity_mappings")) {
-        return { rows: [] };
-      }
-      if (text.startsWith("SELECT id, company_id, source_sha256")) {
+  for (const elevatedAccess of [
+    "database_create",
+    "owns_schema",
+    "schema_create",
+    "owns_relation",
+    "owns_function",
+    "owns_type",
+    "table_truncate"
+  ]) {
+    const harness = fakePool((text) => {
+      if (text.includes("FROM pg_catalog.pg_roles")) {
         return {
-          rows: [{
-            id: mappingA,
-            company_id: companyA,
-            source_sha256: "b".repeat(64),
-            target_entity_type: "user",
-            target_entity_id: targetA
-          }]
+          rows: [
+            {
+              postgres_version_supported: true,
+              active_canlogin: false,
+              active_superuser: false,
+              active_createdb: false,
+              active_createrole: false,
+              active_inherit: false,
+              active_replication: false,
+              active_bypassrls: false,
+              login_superuser: false,
+              login_createdb: false,
+              login_createrole: false,
+              login_replication: false,
+              login_bypassrls: false,
+              database_owner_safe: true,
+              login_is_separate: true,
+              direct_connect_exact: true,
+              public_database_acl_absent: true,
+              database_temp_absent: true,
+              runtime_member: true,
+              owner_member: false,
+              migrator_member: false,
+              unexpected_membership: false,
+              runtime_members_exact: true
+            }
+          ]
+        };
+      }
+      if (text.includes("AS owns_database")) {
+        return {
+          rows: [safePrincipalAccess({ [elevatedAccess]: true })]
         };
       }
       return { rows: [] };
-    }
-  });
-  const repository = createCompanyScopedRepository({
-    pool,
-    databaseUrl: syntheticDatabaseUrl
-  });
-
-  await assert.rejects(
-    repository.recordLegacyMapping({
-      id: mappingA,
-      migrationVersion: "0001_social_multitenant_foundation",
-      companyId: companyA,
-      sourceSystem: "legacy-json",
-      sourceEntityType: "client",
-      sourceEntityId: "synthetic-legacy-id",
-      sourceSha256: "a".repeat(64),
-      targetEntityType: "user",
-      targetEntityId: targetA
-    }),
-    assertErrorCode("legacy_mapping_conflict")
-  );
-
-  assert.equal(state.queries.at(-1).text, "ROLLBACK");
-  assert.equal(state.queries.some(({ text }) => text === "COMMIT"), false);
+    });
+    await assert.rejects(
+      verifyRuntimeRole(harness.pool, "ia4tube_social_runtime"),
+      { code: "postgres_runtime_role_is_owner" }
+    );
+  }
 });
 
-test("SQL migrations are minimal, tenant-scoped and reversible", () => {
-  const migrationsDir = path.resolve(__dirname, "..", "db", "migrations");
-  const up = fs.readFileSync(
-    path.join(
-      migrationsDir,
-      "0001_social_multitenant_foundation.up.sql"
-    ),
-    "utf8"
+test("runtime schema validation requires checksums, FORCE RLS and least privilege", async () => {
+  const manifest = JSON.parse(
+    read("db/migrations/checksums.json")
+  ).migrations;
+  const validHarness = fakePool((text) => {
+    if (text.includes("SELECT owner.rolname AS owner_name")) {
+      return {
+        rowCount: 1,
+        rows: [{ owner_name: "ia4tube_social_owner" }]
+      };
+    }
+    if (text.includes("AS vault_registry_fk_count")) {
+      return { rowCount: 1, rows: [vaultRegistryBoundaryRow()] };
+    }
+    if (text.includes("relation.relkind AS object_kind")) {
+      return { rows: socialRelationRows() };
+    }
+    if (text.includes("FROM pg_catalog.pg_proc routine")) {
+      return { rows: [{ routine_count: 0 }] };
+    }
+    if (text.includes("FROM ia4tube_social.runtime_schema_contract")) {
+      return {
+        rows: manifest.map((migration) => ({
+          version: migration.version,
+          checksum_sha256: migration.sha256
+        }))
+      };
+    }
+    if (text.includes("FROM pg_catalog.pg_class c")) {
+      return {
+        rows: TENANT_TABLES.map((relname) => ({
+          relname,
+          relrowsecurity: true,
+          relforcerowsecurity: true,
+          policy_count: 1
+        }))
+      };
+    }
+    if (text.includes("FROM pg_catalog.pg_policies")) {
+      return {
+        rows: TENANT_TABLES.map((tablename) => ({
+          tablename,
+          policyname: TENANT_POLICIES[tablename],
+          permissive: "PERMISSIVE",
+          roles: ["public"],
+          cmd: "ALL",
+          qual: `(${TENANT_SCOPE_COLUMNS[tablename]} = NULLIF(current_setting('ia4tube.company_id'::text, true), ''::text)::uuid)`,
+          with_check: `(${TENANT_SCOPE_COLUMNS[tablename]} = NULLIF(current_setting('ia4tube.company_id'::text, true), ''::text)::uuid)`
+        }))
+      };
+    }
+    if (text.includes("namespace.nspacl")) {
+      return { rows: runtimeSchemaAclRows() };
+    }
+    if (text.includes("relation.relacl")) {
+      return { rows: runtimeTableAclRows() };
+    }
+    if (text.includes("attribute.attacl")) {
+      return { rows: runtimeColumnAclRows() };
+    }
+    if (text.includes("has_table_privilege")) {
+      return {
+        rows: [
+          {
+            contract_select: true,
+            audit_update: false,
+            audit_delete: false,
+            identity_write: false,
+            legacy_access: false
+          }
+        ]
+      };
+    }
+    return { rows: [] };
+  });
+  const result = await verifyRuntimeSchema(
+    validHarness.pool,
+    "ia4tube_social_runtime"
   );
-  const down = fs.readFileSync(
-    path.join(
-      migrationsDir,
-      "0001_social_multitenant_foundation.down.sql"
-    ),
-    "utf8"
-  );
+  assert.equal(result.valid, true);
+  assert.equal(result.tenantTableCount, TENANT_TABLES.length);
 
-  for (const table of [
-    "schema_migrations",
+  const unsafeHarness = fakePool((text) => {
+    if (text.includes("SELECT owner.rolname AS owner_name")) {
+      return {
+        rowCount: 1,
+        rows: [{ owner_name: "ia4tube_social_owner" }]
+      };
+    }
+    if (text.includes("AS vault_registry_fk_count")) {
+      return { rowCount: 1, rows: [vaultRegistryBoundaryRow()] };
+    }
+    if (text.includes("relation.relkind AS object_kind")) {
+      return { rows: socialRelationRows() };
+    }
+    if (text.includes("FROM pg_catalog.pg_proc routine")) {
+      return { rows: [{ routine_count: 0 }] };
+    }
+    if (text.includes("FROM ia4tube_social.runtime_schema_contract")) {
+      return {
+        rows: manifest.map((migration) => ({
+          version: migration.version,
+          checksum_sha256: migration.sha256
+        }))
+      };
+    }
+    if (text.includes("FROM pg_catalog.pg_class c")) {
+      return {
+        rows: TENANT_TABLES.map((relname) => ({
+          relname,
+          relrowsecurity: true,
+          relforcerowsecurity: true,
+          policy_count: 1
+        }))
+      };
+    }
+    if (text.includes("FROM pg_catalog.pg_policies")) {
+      return {
+        rows: TENANT_TABLES.map((tablename) => ({
+          tablename,
+          policyname: TENANT_POLICIES[tablename],
+          permissive: "PERMISSIVE",
+          roles: ["public"],
+          cmd: "ALL",
+          qual: `(${TENANT_SCOPE_COLUMNS[tablename]} = NULLIF(current_setting('ia4tube.company_id'::text, true), ''::text)::uuid)`,
+          with_check: `(${TENANT_SCOPE_COLUMNS[tablename]} = NULLIF(current_setting('ia4tube.company_id'::text, true), ''::text)::uuid)`
+        }))
+      };
+    }
+    if (text.includes("namespace.nspacl")) {
+      return { rows: runtimeSchemaAclRows() };
+    }
+    if (text.includes("relation.relacl")) {
+      return { rows: runtimeTableAclRows() };
+    }
+    if (text.includes("attribute.attacl")) {
+      return { rows: runtimeColumnAclRows() };
+    }
+    if (text.includes("has_table_privilege")) {
+      return {
+        rows: [{
+          contract_select: true,
+          audit_update: true,
+          audit_delete: false,
+          identity_write: false,
+          legacy_access: false
+        }]
+      };
+    }
+    return { rows: [] };
+  });
+  await assert.rejects(
+    verifyRuntimeSchema(unsafeHarness.pool, "ia4tube_social_runtime"),
+    { code: "postgres_runtime_grants_unsafe" }
+  );
+});
+
+test("runtime schema rejects policy, table and ACL drift", async () => {
+  const manifest = JSON.parse(
+    read("db/migrations/checksums.json")
+  ).migrations;
+  function harnessFor(options = {}) {
+    return fakePool((text) => {
+      if (text.includes("SELECT owner.rolname AS owner_name")) {
+        return {
+          rowCount: 1,
+          rows: [
+            {
+              owner_name: options.wrongSchemaOwner
+                ? "unexpected_owner"
+                : "ia4tube_social_owner"
+            }
+          ]
+        };
+      }
+      if (text.includes("AS vault_registry_fk_count")) {
+        return {
+          rowCount: 1,
+          rows: [
+            vaultRegistryBoundaryRow(
+              options.runtimeAdminUsage
+                ? { runtime_usage_absent: false }
+                : options.invalidVaultForeignKey
+                  ? { vault_registry_fk_count: 0 }
+                  : {}
+            )
+          ]
+        };
+      }
+      if (text.includes("relation.relkind AS object_kind")) {
+        const rows = socialRelationRows(
+          options.wrongRelationOwner
+            ? {
+                relation: "social_connections",
+                values: { owner_name: "unexpected_owner" }
+              }
+            : {}
+        );
+        return { rows };
+      }
+      if (text.includes("FROM pg_catalog.pg_proc routine")) {
+        return {
+          rows: [
+            { routine_count: options.unexpectedRoutine ? 1 : 0 }
+          ]
+        };
+      }
+      if (text.includes("FROM ia4tube_social.runtime_schema_contract")) {
+        return {
+          rows: manifest.map((migration) => ({
+            version: migration.version,
+            checksum_sha256: migration.sha256
+          }))
+        };
+      }
+      if (text.includes("FROM pg_catalog.pg_class c")) {
+        const tables = TENANT_TABLES.map((relname) => ({
+          relname,
+          relrowsecurity: true,
+          relforcerowsecurity: true,
+          policy_count: 1
+        }));
+        if (options.extraTable) {
+          tables.push({
+            relname: "unexpected_tenant_data",
+            relrowsecurity: false,
+            relforcerowsecurity: false,
+            policy_count: 0
+          });
+        }
+        return { rows: tables };
+      }
+      if (text.includes("FROM pg_catalog.pg_policies")) {
+        return {
+          rows: TENANT_TABLES.map((tablename) => {
+            const expression =
+              `(${TENANT_SCOPE_COLUMNS[tablename]} = ` +
+              "NULLIF(current_setting('ia4tube.company_id'::text, true), " +
+              "''::text)::uuid)";
+            const qualifier =
+              options.tamperedPolicy && tablename === "social_connections"
+                ? `(TRUE OR ${expression})`
+                : expression;
+            return {
+              tablename,
+              policyname: TENANT_POLICIES[tablename],
+              permissive: "PERMISSIVE",
+              roles:
+                options.wrongRole && tablename === "social_connections"
+                  ? ["ia4tube_social_runtime"]
+                  : ["public"],
+              cmd: "ALL",
+              qual: qualifier,
+              with_check: qualifier
+            };
+          })
+        };
+      }
+      if (text.includes("namespace.nspacl")) {
+        const rows = runtimeSchemaAclRows();
+        if (options.schemaThirdPartyGrant) {
+          rows.push({
+            grantee: "unexpected_login",
+            privilege_type: "USAGE",
+            is_grantable: false,
+            grantor_name: "ia4tube_social_owner"
+          });
+        }
+        return { rows };
+      }
+      if (text.includes("relation.relacl")) {
+        const rows = runtimeTableAclRows();
+        if (options.extraGrant) {
+          rows.push({
+            grantee: "ia4tube_social_runtime",
+            table_name: "social_connections",
+            privilege_type: "DELETE"
+          });
+        }
+        if (options.thirdPartyGrant) {
+          rows.push({
+            grantee: "unexpected_login",
+            table_name: "social_encrypted_credentials",
+            privilege_type: "SELECT",
+            is_grantable: false,
+            grantor_name: "ia4tube_social_owner"
+          });
+        }
+        if (options.runtimeGrantOption) {
+          rows[0] = { ...rows[0], is_grantable: true };
+        }
+        return { rows };
+      }
+      if (text.includes("attribute.attacl")) {
+        return { rows: runtimeColumnAclRows() };
+      }
+      if (text.includes("has_table_privilege")) {
+        return {
+          rows: [
+            {
+              contract_select: true,
+              audit_update: false,
+              audit_delete: false,
+              identity_write: false,
+              legacy_access: false
+            }
+          ]
+        };
+      }
+      return { rows: [] };
+    });
+  }
+
+  for (const options of [
+    { tamperedPolicy: true },
+    { wrongRole: true },
+    { extraTable: true },
+    { extraGrant: true },
+    { thirdPartyGrant: true },
+    { runtimeGrantOption: true },
+    { schemaThirdPartyGrant: true },
+    { runtimeAdminUsage: true },
+    { invalidVaultForeignKey: true },
+    { wrongSchemaOwner: true },
+    { wrongRelationOwner: true },
+    { unexpectedRoutine: true }
+  ]) {
+    await assert.rejects(
+      verifyRuntimeSchema(
+        harnessFor(options).pool,
+        "ia4tube_social_runtime"
+      ),
+      (error) =>
+        error?.code === "postgres_rls_contract_mismatch" ||
+        error?.code === "postgres_runtime_grants_unsafe" ||
+        error?.code === "postgres_vault_key_registry_unsafe" ||
+        error?.code === "postgres_schema_owner_mismatch" ||
+        error?.code === "postgres_relation_owner_mismatch" ||
+        error?.code === "postgres_routine_contract_mismatch"
+    );
+  }
+});
+
+test("company repository is read-only, typed and derivation-version bound", async () => {
+  const harness = fakePool((text, values) => {
+    if (text.includes("FROM ia4tube_social.companies")) {
+      assert.deepEqual(values, [companyA, identityVersion]);
+      return {
+        rows: [
+          {
+            id: companyA,
+            name: "Synthetic Company",
+            status: "active",
+            identity_derivation_version: identityVersion
+          }
+        ]
+      };
+    }
+    return { rows: [] };
+  });
+  const repository = createCompanyScopedRepository({
+    pool: harness.pool,
+    identityDerivationVersion: identityVersion
+  });
+  assert.deepEqual(Object.keys(repository).sort(), [
+    "findCompanyById",
+    "findMembership"
+  ]);
+  const result = await repository.findCompanyById(companyA);
+  assert.equal(result.id, companyA);
+  assert.equal(
+    JSON.stringify(harness.queries).includes(
+      "identity_derivation_version"
+    ),
+    true
+  );
+});
+
+test("social repository scopes every query and stores only envelopes", async () => {
+  const credentialId = "55555555-5555-4555-8555-555555555555";
+  const harness = fakePool((text, values) => {
+    if (
+      text.includes(
+        "INSERT INTO ia4tube_social.social_encrypted_credentials"
+      )
+    ) {
+      return {
+        rows: [
+          {
+            company_id: values[0],
+            id: values[1],
+            provider: values[2],
+            connection_id: values[3],
+            oauth_transaction_id: values[4],
+            credential_type: values[5],
+            ciphertext: values[6],
+            nonce: values[7],
+            auth_tag: values[8],
+            key_version: values[9],
+            aad_version: values[10],
+            revision: 1
+          }
+        ]
+      };
+    }
+    return { rows: [] };
+  });
+  const repository = createSocialRepository({
+    pool: harness.pool,
+    identityDerivationVersion: identityVersion
+  });
+  const row = await repository.storeEncryptedCredential({
+    companyId: companyA,
+    id: credentialId,
+    provider: "instagram",
+    connectionId: connectionA,
+    credentialType: "access_token",
+    ciphertext: Buffer.from("ciphertext"),
+    nonce: Buffer.alloc(12, 1),
+    authTag: Buffer.alloc(16, 2),
+    keyVersion: "key-2026-01",
+    aadVersion: 1
+  });
+  assert.equal(row.company_id, companyA);
+  assert.equal(
+    harness.queries.some(
+      (query) =>
+        query.text === SET_COMPANY_SCOPE_SQL &&
+        query.values[0] === companyA
+    ),
+    true
+  );
+  assert.equal(JSON.stringify(harness.queries).includes("plaintext"), false);
+  await assert.rejects(
+    repository.findConnection({
+      companyId: companyA,
+      connectionId: "00000000-0000-0000-0000-000000000000"
+    }),
+    { code: "connection_id_invalid" }
+  );
+});
+
+test("reauth consumption atomically revalidates the active company", async () => {
+  const tokenDigest = "a".repeat(64);
+  const sessionDigest = "b".repeat(64);
+  const harness = fakePool((text, values) => {
+    if (text.includes("UPDATE ia4tube_social.social_reauth_grants")) {
+      assert.match(text, /ia4tube_social\.companies company/);
+      assert.match(text, /company\.status = 'active'/);
+      assert.match(
+        text,
+        /company\.identity_derivation_version = \$8/
+      );
+      assert.deepEqual(values, [
+        companyA,
+        userA,
+        tokenDigest,
+        sessionDigest,
+        "social.connect",
+        "instagram",
+        null,
+        identityVersion
+      ]);
+      return {
+        rows: [
+          {
+            id: "77777777-7777-4777-8777-777777777777",
+            company_id: companyA,
+            user_id: userA,
+            action: "social.connect",
+            provider: "instagram",
+            target_connection_id: null,
+            consumed_at: new Date()
+          }
+        ]
+      };
+    }
+    return { rows: [] };
+  });
+  const repository = createSocialRepository({
+    pool: harness.pool,
+    identityDerivationVersion: identityVersion
+  });
+
+  const consumed = await repository.consumeReauthGrant({
+    companyId: companyA,
+    userId: userA,
+    tokenDigest,
+    sessionJtiDigest: sessionDigest,
+    action: "social.connect",
+    provider: "instagram"
+  });
+
+  assert.equal(consumed.company_id, companyA);
+});
+
+test("SQL foundation forces RLS on every tenant table and uses composite FKs", () => {
+  const sql = [
+    read("db/migrations/0001_social_multitenant_foundation.up.sql"),
+    read("db/migrations/0002_social_connections_and_vault.up.sql")
+  ].join("\n");
+  const tables = [
     "companies",
     "users",
     "company_memberships",
-    "legacy_entity_mappings"
-  ]) {
-    assert.match(up, new RegExp(`CREATE TABLE ${table}\\b`));
-    assert.match(down, new RegExp(`DROP TABLE IF EXISTS ${table}\\b`));
+    "legacy_entity_mappings",
+    "social_connections",
+    "social_external_accounts",
+    "social_destinations",
+    "social_connection_scopes",
+    "social_oauth_transactions",
+    "social_encrypted_credentials",
+    "social_reauth_grants",
+    "social_audit_events"
+  ];
+  for (const table of tables) {
+    assert.match(
+      sql,
+      new RegExp(
+        `ALTER TABLE ia4tube_social\\.${table}[\\s\\S]{0,80}ENABLE ROW LEVEL SECURITY`
+      )
+    );
+    assert.match(
+      sql,
+      new RegExp(
+        `ALTER TABLE ia4tube_social\\.${table}[\\s\\S]{0,80}FORCE ROW LEVEL SECURITY`
+      )
+    );
   }
-
-  assert.match(up, /company_id UUID NOT NULL/g);
-  assert.equal((up.match(/ENABLE ROW LEVEL SECURITY/g) || []).length, 3);
-  assert.equal((up.match(/FORCE ROW LEVEL SECURITY/g) || []).length, 3);
-  assert.equal(
-    (up.match(/current_setting\('ia4tube\.company_id', true\)/g) || [])
-      .length,
-    6
+  assert.match(
+    sql,
+    /FOREIGN KEY \(company_id, connection_id, external_account_id\)/
   );
-  assert.match(up, /^BEGIN;/);
-  assert.match(up, /COMMIT;\s*$/);
-  assert.match(down, /^BEGIN;/);
-  assert.match(down, /COMMIT;\s*$/);
-  assert.doesNotMatch(up, /\bINSERT\s+INTO\s+(clientes|pedidos)\b/i);
-  assert.doesNotMatch(up + down, /\bCASCADE\b/i);
+  assert.match(sql, /FOREIGN KEY \(company_id, user_id\)/);
   assert.doesNotMatch(
-    up + down,
-    /firebase|fcm|instagram|oauth|ia4tube-api\.onrender\.com/i
+    sql,
+    /\b(access_token|refresh_token|oauth_code|authorization_code)\s+(TEXT|VARCHAR|BYTEA)\b/i
   );
+  assert.match(sql, /UNIQUE \(key_version, nonce\)/);
+  assert.match(
+    sql,
+    /FOREIGN KEY \(company_id, connection_id, provider\)/
+  );
+  assert.doesNotMatch(
+    sql,
+    /GRANT SELECT, INSERT, UPDATE, DELETE\s+ON ALL TABLES/i
+  );
+  assert.match(
+    sql,
+    /GRANT SELECT, INSERT\s+ON ia4tube_social\.social_audit_events/
+  );
+  assert.doesNotMatch(sql, /\bBEGIN\s*;|\bCOMMIT\s*;/i);
+});
+
+test("role bootstrap is password-free and runtime cannot bypass RLS", () => {
+  const sql = read("db/postgres/roles.sql");
+  assert.match(
+    sql,
+    /ia4tube_social_runtime[\s\S]*?NOLOGIN[\s\S]*?NOSUPERUSER[\s\S]*?NOREPLICATION[\s\S]*?NOBYPASSRLS/
+  );
+  assert.match(sql, /ia4tube_social_postgres_18_required/);
+  assert.match(
+    sql,
+    /GRANT ia4tube_social_owner TO ia4tube_social_migrator[\s\S]*?WITH ADMIN FALSE, INHERIT FALSE, SET TRUE/
+  );
+  assert.match(sql, /REVOKE CREATE ON SCHEMA public FROM PUBLIC/);
+  assert.match(sql, /GRANT CREATE ON DATABASE %I TO ia4tube_social_owner/);
+  assert.match(sql, /SET LOCAL createrole_self_grant = ''/);
+  assert.match(sql, /ia4tube_social_provisioner_invalid/);
+  assert.match(sql, /grantor\.rolsuper/);
+  assert.match(sql, /SET LOCAL ROLE ia4tube_social_owner/);
+  assert.match(sql, /GRANTED BY CURRENT_USER RESTRICT/);
+  assert.match(sql, /COMMIT;\s*$/);
+  assert.match(sql, /CREATE SCHEMA IF NOT EXISTS ia4tube_migrations/);
+  assert.match(sql, /environment_identity/);
+  assert.match(sql, /ia4tube_social_role_memberships_invalid/);
+  assert.doesNotMatch(sql, /\bPASSWORD\b/i);
+});
+
+test("default npm test command includes only automated test files", () => {
+  const pkg = JSON.parse(read("package.json"));
+  assert.equal(pkg.scripts.test, "node scripts/run-node-tests.js");
+  const runner = read("scripts/run-node-tests.js");
+  assert.match(runner, /\.endsWith\("\.test\.js"\)/);
+  assert.doesNotMatch(runner, /app_mobile|manual|adb/i);
 });
