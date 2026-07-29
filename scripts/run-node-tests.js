@@ -5,7 +5,9 @@ const path = require("node:path");
 const { spawnSync } = require("node:child_process");
 
 const testsDirectory = path.resolve(__dirname, "..", "tests");
-const MANUAL_TEST_FILES = new Set(["social-postgres-real.test.js"]);
+const DEDICATED_GATE_TEST_FILES = new Set([
+  "social-postgres-real.test.js"
+]);
 
 function discoverAutomatedTests(directory = testsDirectory) {
   return fs
@@ -14,7 +16,7 @@ function discoverAutomatedTests(directory = testsDirectory) {
       (entry) =>
         entry.isFile() &&
         entry.name.endsWith(".test.js") &&
-        !MANUAL_TEST_FILES.has(entry.name)
+        !DEDICATED_GATE_TEST_FILES.has(entry.name)
     )
     .map((entry) => path.join(directory, entry.name))
     .sort();
@@ -44,7 +46,7 @@ function main() {
 if (require.main === module) process.exit(main());
 
 module.exports = {
-  MANUAL_TEST_FILES,
+  DEDICATED_GATE_TEST_FILES,
   discoverAutomatedTests,
   main
 };
