@@ -268,16 +268,24 @@ async function proveNormalStartupDoesNotMigrate(
 ) {
   const stateQuery = [
     "SELECT",
-    "  to_regclass('ia4tube_migrations.schema_migrations')::text",
-    "    AS migration_ledger,",
-    "  to_regnamespace('ia4tube_social')::text AS social_schema,",
-    "  to_regnamespace('ia4tube_social_admin')::text AS admin_schema"
+    "  (SELECT COUNT(*)::integer",
+    "   FROM pg_catalog.pg_class relation",
+    "   JOIN pg_catalog.pg_namespace namespace",
+    "     ON namespace.oid = relation.relnamespace",
+    "   WHERE namespace.nspname = 'ia4tube_migrations'",
+    "     AND relation.relname = 'schema_migrations')",
+    "    AS migration_ledger_count,",
+    "  (SELECT COUNT(*)::integer",
+    "   FROM pg_catalog.pg_namespace namespace",
+    "   WHERE namespace.nspname = ANY($1::text[]))",
+    "    AS application_schema_count"
   ].join("\n");
-  const before = await provisionerPool.query(stateQuery);
+  const before = await provisionerPool.query(stateQuery, [
+    ["ia4tube_social", "ia4tube_social_admin"]
+  ]);
   assert.deepEqual(before.rows[0], {
-    migration_ledger: null,
-    social_schema: null,
-    admin_schema: null
+    migration_ledger_count: 0,
+    application_schema_count: 0
   });
 
   const port = await reserveLoopbackPort();
@@ -350,7 +358,9 @@ async function proveNormalStartupDoesNotMigrate(
     fs.rmSync(dataDirectory, { recursive: true, force: true });
   }
 
-  const after = await provisionerPool.query(stateQuery);
+  const after = await provisionerPool.query(stateQuery, [
+    ["ia4tube_social", "ia4tube_social_admin"]
+  ]);
   assert.deepEqual(after.rows[0], before.rows[0]);
 }
 
