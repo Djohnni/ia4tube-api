@@ -2132,7 +2132,10 @@ async function proveVaultPersistence(
       { role: OWNER_ROLE, companyId: companyA.companyId }
     );
     assert.equal(raw.rowCount, 1);
-    const originalA = raw.rows[0];
+    const originalA = Object.freeze({
+      ...raw.rows[0],
+      revision: Number(raw.rows[0].revision)
+    });
     assert.equal(originalA.company_id, companyA.companyId);
     assert.equal(originalA.id, companyA.credentialId);
     assert.equal(originalA.provider, "instagram");
@@ -2172,7 +2175,10 @@ async function proveVaultPersistence(
       { role: OWNER_ROLE, companyId: companyB.companyId }
     );
     assert.equal(rawRefresh.rowCount, 1);
-    const originalB = rawRefresh.rows[0];
+    const originalB = Object.freeze({
+      ...rawRefresh.rows[0],
+      revision: Number(rawRefresh.rows[0].revision)
+    });
     assert.equal(originalB.company_id, companyB.companyId);
     assert.equal(originalB.id, companyB.credentialId);
     assert.equal(originalB.provider, "instagram");
@@ -2326,7 +2332,7 @@ async function proveVaultPersistence(
       credentialId: companyA.credentialId
     });
     assert.equal(rotatedA.key_version, "v2");
-    assert.equal(rotatedA.revision, originalA.revision + 1);
+    assert.equal(Number(rotatedA.revision), originalA.revision + 1);
     assert.equal(rotatedA.nonce.equals(originalA.nonce), false);
     assert.equal(rotatedA.ciphertext.equals(originalA.ciphertext), false);
     assert.equal(rotatedA.auth_tag.equals(originalA.auth_tag), false);
@@ -2377,7 +2383,7 @@ async function proveVaultPersistence(
       companyId: companyA.companyId,
       credentialId: companyA.credentialId
     });
-    assert.equal(rotatedA.revision, rotation.revision + 1);
+    assert.equal(Number(rotatedA.revision), rotation.revision + 1);
     assert.equal(
       candidates.some((candidate) => candidate.nonce.equals(rotatedA.nonce)),
       true
@@ -2422,7 +2428,7 @@ async function proveVaultPersistence(
     });
     assert.equal(rotationB.changed, true);
     assert.equal(rotationB.keyVersion, "v2");
-    assert.equal(rotationB.revision, oldB.revision + 1);
+    assert.equal(rotationB.revision, Number(oldB.revision) + 1);
     const currentB = await repository.findEncryptedCredential({
       companyId: companyB.companyId,
       credentialId: companyB.credentialId
