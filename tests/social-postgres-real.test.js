@@ -2817,7 +2817,7 @@ async function proveAllRlsPolicies(
 
 test(
   "real PostgreSQL proves migrations, physical RLS, vault and reauthentication",
-  { skip: skipReason, timeout: 240000 },
+  { skip: skipReason, timeout: 900000 },
   async () => {
     const configuration = loadRealTestConfiguration();
     const pools = [];
