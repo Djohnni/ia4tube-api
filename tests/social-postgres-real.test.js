@@ -994,23 +994,31 @@ async function revokeTestRoleMemberships(
   configuration,
   membershipState
 ) {
-  const revocations = [];
+  const failures = [];
+  async function revoke(stateKey, sql) {
+    if (!membershipState[stateKey]) return;
+    try {
+      await pool.query(sql);
+      membershipState[stateKey] = false;
+    } catch (error) {
+      failures.push(error);
+    }
+  }
+
   if (membershipState.runtime) {
-    revocations.push(
-      pool.query(
-        `REVOKE ${quoteIdentifier(RUNTIME_ROLE)} FROM ${quoteIdentifier(
-          configuration.identities[2].username
-        )}`
-      )
+    await revoke(
+      "runtime",
+      `REVOKE ${quoteIdentifier(RUNTIME_ROLE)} FROM ${quoteIdentifier(
+        configuration.identities[2].username
+      )}`
     );
   }
   if (membershipState.migrator) {
-    revocations.push(
-      pool.query(
-        `REVOKE ${quoteIdentifier(MIGRATOR_ROLE)} FROM ${quoteIdentifier(
-          configuration.identities[1].username
-        )}`
-      )
+    await revoke(
+      "migrator",
+      `REVOKE ${quoteIdentifier(MIGRATOR_ROLE)} FROM ${quoteIdentifier(
+        configuration.identities[1].username
+      )}`
     );
   }
   const databaseResult = await pool.query(
@@ -1018,32 +1026,24 @@ async function revokeTestRoleMemberships(
   );
   const databaseName = databaseResult.rows?.[0]?.database_name;
   if (membershipState.runtimeConnect) {
-    revocations.push(
-      pool.query(
-        `REVOKE CONNECT ON DATABASE ${quoteIdentifier(
-          databaseName
-        )} FROM ${quoteIdentifier(configuration.identities[2].username)}`
-      )
+    await revoke(
+      "runtimeConnect",
+      `REVOKE CONNECT ON DATABASE ${quoteIdentifier(
+        databaseName
+      )} FROM ${quoteIdentifier(configuration.identities[2].username)}`
     );
   }
   if (membershipState.migratorConnect) {
-    revocations.push(
-      pool.query(
-        `REVOKE CONNECT ON DATABASE ${quoteIdentifier(
-          databaseName
-        )} FROM ${quoteIdentifier(configuration.identities[1].username)}`
-      )
+    await revoke(
+      "migratorConnect",
+      `REVOKE CONNECT ON DATABASE ${quoteIdentifier(
+        databaseName
+      )} FROM ${quoteIdentifier(configuration.identities[1].username)}`
     );
   }
-  const results = await Promise.allSettled(revocations);
-  if (results.every((result) => result.status === "fulfilled")) {
-    membershipState.runtime = false;
-    membershipState.migrator = false;
-    membershipState.runtimeConnect = false;
-    membershipState.migratorConnect = false;
-    return;
+  if (failures.length > 0) {
+    throw new Error("synthetic_role_membership_cleanup_failed");
   }
-  throw new Error("synthetic_role_membership_cleanup_failed");
 }
 
 async function proveFinalCleanup(configuration, createdState) {
