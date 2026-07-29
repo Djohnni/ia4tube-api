@@ -3,10 +3,15 @@
 const crypto = require("node:crypto");
 const { postgresFail } = require("../persistence/postgres/errors");
 const {
-  requireKeyVersion,
   requireProvider,
   requireUuid
 } = require("../persistence/postgres/validation");
+const {
+  assertVaultKeyringFingerprint,
+  assertVaultKeyVersionMaterial,
+  requireVaultKeyVersion: requireBoundVaultKeyVersion,
+  vaultKeyringFingerprint
+} = require("./vault-key-version");
 
 const ALGORITHM = "aes-256-gcm";
 const AAD_VERSION = 1;
@@ -27,6 +32,10 @@ function vaultFail(code) {
   throw new SocialVaultError(code);
 }
 
+function requireVaultKeyVersion(value) {
+  return requireBoundVaultKeyVersion(value);
+}
+
 function decodeKey(encoded) {
   if (
     typeof encoded !== "string" ||
@@ -44,7 +53,7 @@ function decodeKey(encoded) {
 }
 
 function parseVaultKeyring(env = process.env) {
-  const activeVersion = requireKeyVersion(
+  const activeVersion = requireVaultKeyVersion(
     env.SOCIAL_VAULT_ACTIVE_KEY_VERSION
   );
   let parsed;
@@ -66,11 +75,26 @@ function parseVaultKeyring(env = process.env) {
   const keys = new Map();
   try {
     for (const [version, encoded] of Object.entries(parsed)) {
-      const safeVersion = requireKeyVersion(version);
-      keys.set(safeVersion, decodeKey(encoded));
+      const safeVersion = requireVaultKeyVersion(version);
+      const key = decodeKey(encoded);
+      try {
+        assertVaultKeyVersionMaterial(safeVersion, key);
+      } catch (error) {
+        key.fill(0);
+        throw error;
+      }
+      keys.set(safeVersion, key);
     }
     if (!keys.has(activeVersion)) vaultFail("vault_active_key_missing");
-    return Object.freeze({ activeVersion, keys });
+    const fingerprint = vaultKeyringFingerprint(
+      activeVersion,
+      [...keys.keys()]
+    );
+    assertVaultKeyringFingerprint(
+      fingerprint,
+      env.SOCIAL_VAULT_EXPECTED_KEYRING_FINGERPRINT
+    );
+    return Object.freeze({ activeVersion, keys, fingerprint });
   } catch (error) {
     for (const key of keys.values()) key.fill(0);
     keys.clear();
@@ -100,7 +124,7 @@ function requireContext(context = {}) {
 
 function canonicalAad(context, keyVersion) {
   const safe = requireContext(context);
-  const version = requireKeyVersion(keyVersion);
+  const version = requireVaultKeyVersion(keyVersion);
   return Buffer.from(
     JSON.stringify({
       aad_version: AAD_VERSION,
@@ -134,13 +158,16 @@ function requireEnvelope(envelope = {}) {
     ciphertext: Buffer.from(envelope.ciphertext),
     nonce: Buffer.from(envelope.nonce),
     authTag: Buffer.from(envelope.authTag),
-    keyVersion: requireKeyVersion(envelope.keyVersion),
+    keyVersion: requireVaultKeyVersion(envelope.keyVersion),
     aadVersion: envelope.aadVersion
   });
 }
 
 function createSocialVault(options = {}) {
-  const candidate = options.keyring || parseVaultKeyring(options.env);
+  const directKeyring = options.keyring !== undefined;
+  const candidate = directKeyring
+    ? options.keyring
+    : parseVaultKeyring(options.env);
   const randomBytes = options.randomBytes || crypto.randomBytes;
   if (
     !candidate ||
@@ -150,15 +177,17 @@ function createSocialVault(options = {}) {
   ) {
     vaultFail("vault_keyring_invalid");
   }
-  const activeVersion = requireKeyVersion(candidate.activeVersion);
+  const activeVersion = requireVaultKeyVersion(candidate.activeVersion);
   const keys = new Map();
   const fingerprints = new Set();
+  let canonicalFingerprint;
   try {
     for (const [rawVersion, rawKey] of candidate.keys.entries()) {
-      const version = requireKeyVersion(rawVersion);
+      const version = requireVaultKeyVersion(rawVersion);
       if (!Buffer.isBuffer(rawKey) || rawKey.length !== 32) {
         vaultFail("vault_key_invalid");
       }
+      assertVaultKeyVersionMaterial(version, rawKey);
       const fingerprint = crypto
         .createHash("sha256")
         .update(rawKey)
@@ -170,12 +199,26 @@ function createSocialVault(options = {}) {
       keys.set(version, Buffer.from(rawKey));
     }
     if (!keys.has(activeVersion)) vaultFail("vault_active_key_missing");
+    canonicalFingerprint = vaultKeyringFingerprint(
+      activeVersion,
+      [...keys.keys()]
+    );
+    assertVaultKeyringFingerprint(
+      canonicalFingerprint,
+      directKeyring
+        ? options.expectedKeyringFingerprint
+        : candidate.fingerprint
+    );
   } catch (error) {
     for (const key of keys.values()) key.fill(0);
     keys.clear();
     throw error;
   }
-  const keyring = Object.freeze({ activeVersion, keys });
+  const keyring = Object.freeze({
+    activeVersion,
+    keys,
+    fingerprint: canonicalFingerprint
+  });
   let destroyed = false;
 
   function assertAvailable() {
@@ -277,6 +320,7 @@ function createSocialVault(options = {}) {
     assertAvailable();
     return Object.freeze({
       active: keyring.activeVersion,
+      fingerprint: keyring.fingerprint,
       readable: Object.freeze([...keyring.keys.keys()].sort())
     });
   }
@@ -299,5 +343,6 @@ module.exports = {
   TAG_BYTES,
   canonicalAad,
   createSocialVault,
-  parseVaultKeyring
+  parseVaultKeyring,
+  requireVaultKeyVersion
 };

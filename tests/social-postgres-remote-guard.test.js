@@ -243,6 +243,31 @@ test("ambient TLS bypass variables are refused before URL handling", () => {
   );
 });
 
+test("all ambient PostgreSQL overrides fail closed before the physical gate", () => {
+  for (const [name, value] of [
+    ["PGOPTIONS", "-c search_path=untrusted"],
+    ["PGSERVICE", "untrusted-service"],
+    ["PGPASSFILE", "untrusted-password-file"],
+    ["PGHOST", "untrusted.example.test"],
+    ["pgclientencoding", "SQL_ASCII"],
+    ["PGFUTUREOVERRIDE", "configured"]
+  ]) {
+    assertRefused(
+      remoteEnvironment({ [name]: value }),
+      "ambient_postgres_configuration_refused"
+    );
+  }
+
+  assert.doesNotThrow(() =>
+    validateGateEnvironment(
+      remoteEnvironment({
+        PGOPTIONS: " ",
+        PGSERVICE: ""
+      })
+    )
+  );
+});
+
 test("remote target refuses IPs and non-Render hostnames", () => {
   assertRefused(
     remoteEnvironment({ SOCIAL_TEST_EXPECTED_HOST: "127.0.0.1" }),

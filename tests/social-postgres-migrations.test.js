@@ -6,11 +6,16 @@ const os = require("node:os");
 const path = require("node:path");
 const test = require("node:test");
 const {
+  databaseTargetFingerprint,
   loadMigrationPostgresConfig
 } = require("../src/persistence/postgres/config");
 const {
   ADVISORY_LOCK_ID,
   APPLY_APPROVAL,
+  GLOBAL_VAULT_BACKFILL_POLICY,
+  GLOBAL_VAULT_BACKFILL_POLICY_CREATE,
+  GLOBAL_VAULT_BACKFILL_POLICY_DROP,
+  GLOBAL_VAULT_REGISTRY_MIGRATION,
   LEDGER_NAME,
   PRODUCTION_APPROVAL,
   assertApplyTarget,
@@ -548,27 +553,29 @@ test("apply requires approval and exact non-secret target fingerprint", () => {
   }
 });
 
-test("migration URLs are compared by normalized principal, not raw text", () => {
+test("migration job accepts public runtime identity without runtime URL", () => {
+  const databaseUrl =
+    "postgresql://synthetic_migrator:two@db.example.test/social";
   const common = {
     SOCIAL_MIGRATION_ENVIRONMENT: "test",
-    SOCIAL_MIGRATION_EXPECTED_ENVIRONMENT_ID: environmentId
+    SOCIAL_MIGRATION_EXPECTED_ENVIRONMENT_ID: environmentId,
+    SOCIAL_DATABASE_EXPECTED_RUNTIME_LOGIN: "synthetic_runtime",
+    SOCIAL_MIGRATIONS_EXPECTED_LOGIN: "synthetic_migrator",
+    SOCIAL_DATABASE_EXPECTED_TARGET_FINGERPRINT:
+      databaseTargetFingerprint(new URL(databaseUrl))
   };
   assert.throws(
     () =>
       loadMigrationPostgresConfig({
         ...common,
-        DATABASE_URL:
-          "postgresql://SYNTHETIC%5Fruntime:one@DB.EXAMPLE.test:5432/social?application_name=runtime",
-        SOCIAL_MIGRATIONS_DATABASE_URL:
-          "postgresql://synthetic_runtime:two@db.example.test/social?application_name=migrations"
+        SOCIAL_MIGRATIONS_DATABASE_URL: databaseUrl,
+        SOCIAL_DATABASE_EXPECTED_RUNTIME_LOGIN: "synthetic_migrator"
       }),
     { code: "migration_runtime_credentials_must_differ" }
   );
 
   const separated = loadMigrationPostgresConfig({
     ...common,
-    DATABASE_URL:
-      "postgresql://synthetic_runtime:one@db.example.test:5432/social",
     SOCIAL_MIGRATIONS_DATABASE_URL:
       "postgresql://synthetic_migrator:two@DB.EXAMPLE.test/social",
     SOCIAL_DATABASE_MIGRATOR_ROLE: "ia4tube_social_migrator",
@@ -581,11 +588,16 @@ test("migration URLs are compared by normalized principal, not raw text", () => 
 });
 
 test("migration configuration refuses non-canonical role names", () => {
+  const databaseUrl =
+    "postgresql://synthetic_migrator:two@db.example.test/social";
   const common = {
     SOCIAL_MIGRATION_ENVIRONMENT: "test",
     SOCIAL_MIGRATION_EXPECTED_ENVIRONMENT_ID: environmentId,
-    SOCIAL_MIGRATIONS_DATABASE_URL:
-      "postgresql://synthetic_migrator:two@db.example.test/social"
+    SOCIAL_DATABASE_EXPECTED_RUNTIME_LOGIN: "synthetic_runtime",
+    SOCIAL_MIGRATIONS_EXPECTED_LOGIN: "synthetic_migrator",
+    SOCIAL_DATABASE_EXPECTED_TARGET_FINGERPRINT:
+      databaseTargetFingerprint(new URL(databaseUrl)),
+    SOCIAL_MIGRATIONS_DATABASE_URL: databaseUrl
   };
   for (const override of [
     { SOCIAL_DATABASE_MIGRATOR_ROLE: "alternate_migrator" },
@@ -1133,6 +1145,77 @@ test("a later migration rollback preserves only committed checksums", async () =
       (row) => row.version === manifest[1].version
     ),
     false
+  );
+});
+
+test("migration 0003 wraps its populated backfill in one owner-only transient policy", async () => {
+  const harness = migrationPool();
+  await runnerFor(harness).apply({
+    SOCIAL_MIGRATION_TARGET_FINGERPRINT:
+      targetFingerprint(baseTarget)
+  });
+
+  const texts = harness.state.queries.map((query) => query.text);
+  const createPolicy = texts.indexOf(GLOBAL_VAULT_BACKFILL_POLICY_CREATE);
+  const migrationSql = texts.findIndex((text) =>
+    text.includes("CREATE SCHEMA ia4tube_social_admin")
+  );
+  const dropPolicy = texts.indexOf(GLOBAL_VAULT_BACKFILL_POLICY_DROP);
+  const ledgerInsert = texts.findIndex(
+    (text, index) =>
+      index > dropPolicy &&
+      text.includes("INSERT INTO ia4tube_migrations.schema_migrations")
+  );
+
+  assert.equal(
+    GLOBAL_VAULT_REGISTRY_MIGRATION,
+    "0003_global_vault_key_registry"
+  );
+  assert.equal(
+    GLOBAL_VAULT_BACKFILL_POLICY,
+    "social_credentials_key_registry_backfill"
+  );
+  assert.match(
+    GLOBAL_VAULT_BACKFILL_POLICY_CREATE,
+    /FOR SELECT\s+TO ia4tube_social_owner\s+USING \(TRUE\)/
+  );
+  assert.equal(
+    /ia4tube_social_runtime|BYPASSRLS|SUPERUSER|DISABLE ROW LEVEL SECURITY/i.test(
+      GLOBAL_VAULT_BACKFILL_POLICY_CREATE
+    ),
+    false
+  );
+  assert.ok(createPolicy >= 0);
+  assert.ok(migrationSql > createPolicy);
+  assert.ok(dropPolicy > migrationSql);
+  assert.ok(ledgerInsert > dropPolicy);
+  assert.equal(
+    harness.state.applied[2].version,
+    GLOBAL_VAULT_REGISTRY_MIGRATION
+  );
+});
+
+test("failure while removing the 0003 transient policy rolls back its ledger row", async () => {
+  const harness = migrationPool({
+    failOn: GLOBAL_VAULT_BACKFILL_POLICY_DROP
+  });
+  await assert.rejects(
+    runnerFor(harness).apply({
+      SOCIAL_MIGRATION_TARGET_FINGERPRINT:
+        targetFingerprint(baseTarget)
+    }),
+    /synthetic migration failure/
+  );
+
+  assert.deepEqual(
+    harness.state.applied.map((row) => row.version),
+    [
+      "0001_social_multitenant_foundation",
+      "0002_social_connections_and_vault"
+    ]
+  );
+  assert.ok(
+    harness.state.queries.some((query) => query.text === "ROLLBACK")
   );
 });
 

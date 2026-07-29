@@ -1,21 +1,114 @@
 "use strict";
 
+const crypto = require("node:crypto");
 const { postgresFail } = require("./errors");
 const { requireSafeLabel, requireUuid } = require("./validation");
 
 const LOOPBACK_HOSTS = new Set(["127.0.0.1", "::1", "localhost"]);
-const SSL_QUERY_KEYS = [
-  "sslmode",
-  "sslcert",
-  "sslkey",
-  "sslrootcert"
-];
+const ALLOWED_DATABASE_QUERY_KEY = "sslmode";
+const DATABASE_NAME_PATTERN = /^[a-z][a-z0-9_]{0,62}$/;
 const SOCIAL_OWNER_ROLE = "ia4tube_social_owner";
 const SOCIAL_MIGRATOR_ROLE = "ia4tube_social_migrator";
 const SOCIAL_RUNTIME_ROLE = "ia4tube_social_runtime";
+const OPERATOR_DATABASE_MARKER_PATTERN =
+  /(?:^|_)(?:BACKUP|RESTORE|BOOTSTRAP|SIZING|TEST|MIGRATIONS?|PROVISIONER|ROTATIONS?|OPERATOR)(?:_|$)/;
+const OPERATOR_SECRET_TOKEN_PATTERN =
+  /(?:^|_)(?:PASSWORDS?|SECRETS?|KEYS?|TOKENS?)(?:_|$)/;
+const WEB_SERVICE_LIBPQ_ENVIRONMENT_NAMES = new Set([
+  "PGAPPNAME",
+  "PGCHANNELBINDING",
+  "PGCLIENTENCODING",
+  "PGCONNECT_TIMEOUT",
+  "PGDATABASE",
+  "PGDATESTYLE",
+  "PGGEQO",
+  "PGGSSDELEGATION",
+  "PGGSSENCMODE",
+  "PGGSSLIB",
+  "PGHOST",
+  "PGHOSTADDR",
+  "PGKEEPALIVES",
+  "PGKEEPALIVES_COUNT",
+  "PGKEEPALIVES_IDLE",
+  "PGKEEPALIVES_INTERVAL",
+  "PGKRBSRVNAME",
+  "PGLOADBALANCEHOSTS",
+  "PGLOCALEDIR",
+  "PGMAXPROTOCOLVERSION",
+  "PGMINPROTOCOLVERSION",
+  "PGOPTIONS",
+  "PGPASSWORD",
+  "PGPASSFILE",
+  "PGPORT",
+  "PGREQUIREAUTH",
+  "PGREQUIREPEER",
+  "PGREQUIRESSL",
+  "PGSERVICE",
+  "PGSERVICEFILE",
+  "PGSSLCRL",
+  "PGSSLCRLDIR",
+  "PGSSLCERT",
+  "PGSSLCERTMODE",
+  "PGSSLCOMPRESSION",
+  "PGSSLKEY",
+  "PGSSLMAXPROTOCOLVERSION",
+  "PGSSLMINPROTOCOLVERSION",
+  "PGSSLMODE",
+  "PGSSLNEGOTIATION",
+  "PGSSLROOTCERT",
+  "PGSSLSNI",
+  "PGSYSCONFDIR",
+  "PGTARGETSESSIONATTRS",
+  "PGTCPUSER_TIMEOUT",
+  "PGTZ",
+  "PGUSER"
+]);
+const WEB_SERVICE_OPERATOR_SECRET_NAMES = new Set([
+  "SOCIAL_BACKUP_BUNDLE_KEY",
+  "SOCIAL_LOGIN_BOOTSTRAP_MIGRATION_PASSWORD",
+  "SOCIAL_LOGIN_BOOTSTRAP_RUNTIME_PASSWORD"
+]);
+const WEB_SERVICE_OPERATOR_ENVIRONMENT_PREFIXES = Object.freeze([
+  "SOCIAL_VAULT_ROTATION_"
+]);
+const POSTGRES_ENVIRONMENT_NAME_PATTERN = /^PG[A-Z0-9_]+$/;
 
 function explicitTrue(value) {
   return String(value || "").trim().toLowerCase() === "true";
+}
+
+function hasConfiguredValue(value) {
+  return value !== undefined &&
+    value !== null &&
+    String(value).trim().length > 0;
+}
+
+function assertNoAmbientPostgresEnvironment(
+  env,
+  code = "postgres_environment_override_forbidden"
+) {
+  for (const [name, value] of Object.entries(env || {})) {
+    if (
+      POSTGRES_ENVIRONMENT_NAME_PATTERN.test(
+        String(name || "").toUpperCase()
+      ) &&
+      hasConfiguredValue(value)
+    ) {
+      postgresFail(
+        code,
+        "Override ambiental PostgreSQL recusado."
+      );
+    }
+  }
+  return true;
+}
+
+function isOperatorDatabaseUrlName(normalizedName) {
+  const tokens = normalizedName.split("_").filter(Boolean);
+  return (
+    tokens.includes("URL") &&
+    (tokens.includes("DATABASE") || tokens.includes("DB"))
+  );
 }
 
 function boundedInteger(value, fallback, minimum, maximum, field) {
@@ -52,11 +145,125 @@ function parseDatabaseUrl(raw, field) {
     !parsed.hostname ||
     !parsed.pathname ||
     parsed.pathname === "/" ||
-    !parsed.username
+    !parsed.username ||
+    parsed.hash
   ) {
     postgresFail(`${field}_invalid`, "Conexao PostgreSQL recusada.");
   }
+  databaseName(parsed, field);
   return parsed;
+}
+
+function databaseName(parsed, field = "social_database") {
+  const encoded = String(parsed?.pathname || "").slice(1);
+  let decoded;
+  try {
+    decoded = decodeURIComponent(encoded);
+  } catch {
+    postgresFail(
+      `${field}_database_invalid`,
+      "Nome do banco PostgreSQL recusado."
+    );
+  }
+  if (
+    decoded !== encoded ||
+    !DATABASE_NAME_PATTERN.test(decoded)
+  ) {
+    postgresFail(
+      `${field}_database_invalid`,
+      "Nome do banco PostgreSQL recusado."
+    );
+  }
+  return decoded;
+}
+
+function normalizedDatabaseUsername(parsed) {
+  let login;
+  try {
+    login = decodeURIComponent(parsed.username);
+  } catch {
+    postgresFail(
+      "social_database_login_invalid",
+      "Login PostgreSQL recusado."
+    );
+  }
+  if (login !== login.toLowerCase()) {
+    postgresFail(
+      "social_database_login_must_be_canonical",
+      "Login PostgreSQL deve usar a forma canonica."
+    );
+  }
+  return login;
+}
+
+function databaseTargetFingerprint(parsed) {
+  const database = databaseName(parsed, "social_database_target");
+  return crypto
+    .createHash("sha256")
+    .update(
+      [
+        "ia4tube-social-database-target-v1",
+        parsed.hostname.toLowerCase(),
+        parsed.port || "5432",
+        database
+      ].join("/")
+    )
+    .digest("hex");
+}
+
+function requireExpectedTargetFingerprint(env, parsed) {
+  const expected =
+    typeof env.SOCIAL_DATABASE_EXPECTED_TARGET_FINGERPRINT === "string"
+      ? env.SOCIAL_DATABASE_EXPECTED_TARGET_FINGERPRINT
+      : "";
+  const actual = databaseTargetFingerprint(parsed);
+  if (
+    !/^[0-9a-f]{64}$/.test(expected) ||
+    !crypto.timingSafeEqual(
+      Buffer.from(actual, "hex"),
+      Buffer.from(expected, "hex")
+    )
+  ) {
+    postgresFail(
+      "social_database_expected_target_fingerprint_mismatch",
+      "Destino publico PostgreSQL diverge da identidade esperada."
+    );
+  }
+  return actual;
+}
+
+function requireRemotePassword(parsed, field) {
+  if (
+    !LOOPBACK_HOSTS.has(parsed.hostname.toLowerCase()) &&
+    !parsed.password
+  ) {
+    postgresFail(
+      `${field}_password_required`,
+      "Senha da conexao PostgreSQL remota e obrigatoria."
+    );
+  }
+}
+
+function requireCanonicalExpectedLogin(env, name, field) {
+  const expected = requireSafeLabel(env[name], field);
+  if (expected !== expected.toLowerCase()) {
+    postgresFail(
+      `${field}_must_be_canonical`,
+      "Login PostgreSQL esperado deve usar a forma canonica."
+    );
+  }
+  return expected;
+}
+
+function requireExpectedLogin(env, name, actual, field) {
+  const expected = requireCanonicalExpectedLogin(env, name, field);
+  if (expected !== actual) {
+    postgresFail(
+      `${field}_mismatch`,
+      "Login PostgreSQL diverge da identidade esperada."
+    );
+  }
+  return expected;
 }
 
 function requireCanonicalRole(value, expected, field) {
@@ -97,17 +304,35 @@ function connectionSecurity(parsed, env) {
     explicitTrue(env.SOCIAL_DATABASE_ALLOW_INSECURE_LOCALHOST) &&
     LOOPBACK_HOSTS.has(parsed.hostname.toLowerCase());
 
-  const requestedMode = String(parsed.searchParams.get("sslmode") || "")
+  const queryEntries = [...parsed.searchParams.entries()];
+  if (
+    queryEntries.some(([name]) => name !== ALLOWED_DATABASE_QUERY_KEY) ||
+    parsed.searchParams.getAll(ALLOWED_DATABASE_QUERY_KEY).length > 1
+  ) {
+    postgresFail(
+      "social_database_connection_parameter_forbidden",
+      "Parametro de conexao PostgreSQL recusado."
+    );
+  }
+  const requestedMode = String(
+    parsed.searchParams.get(ALLOWED_DATABASE_QUERY_KEY) || ""
+  )
     .trim()
     .toLowerCase();
-  if (requestedMode === "disable" && !localInsecure) {
+  if (
+    requestedMode &&
+    (
+      (localInsecure && requestedMode !== "disable") ||
+      (!localInsecure && requestedMode !== "verify-full")
+    )
+  ) {
     postgresFail(
-      "social_database_tls_required",
-      "TLS PostgreSQL e obrigatorio."
+      "social_database_tls_mode_invalid",
+      "Modo TLS PostgreSQL recusado."
     );
   }
 
-  for (const key of SSL_QUERY_KEYS) parsed.searchParams.delete(key);
+  parsed.search = "";
 
   if (localInsecure) {
     return Object.freeze({ connectionString: parsed.toString(), ssl: false });
@@ -127,8 +352,8 @@ function commonPoolConfig(parsed, env, kind) {
   const security = connectionSecurity(parsed, env);
   const prefix =
     kind === "migration" ? "SOCIAL_MIGRATION" : "SOCIAL_DATABASE";
-  const maxDefault = kind === "migration" ? 1 : 5;
-  const maxCap = kind === "migration" ? 2 : 10;
+  const maxDefault = kind === "migration" ? 1 : 3;
+  const maxCap = kind === "migration" ? 1 : 5;
   const max = boundedInteger(
     env[`${prefix}_POOL_MAX`],
     maxDefault,
@@ -171,6 +396,13 @@ function commonPoolConfig(parsed, env, kind) {
     30000,
     "social_database_idle_transaction_timeout"
   );
+  const lockTimeoutMillis = boundedInteger(
+    env[`${prefix}_LOCK_TIMEOUT_MS`],
+    Math.min(5000, statementTimeoutMillis),
+    250,
+    Math.min(30000, statementTimeoutMillis),
+    "social_database_lock_timeout"
+  );
 
   return Object.freeze({
     ...security,
@@ -186,7 +418,7 @@ function commonPoolConfig(parsed, env, kind) {
     options: [
       `-c statement_timeout=${statementTimeoutMillis}`,
       `-c idle_in_transaction_session_timeout=${idleInTransactionTimeoutMillis}`,
-      "-c lock_timeout=5000",
+      `-c lock_timeout=${lockTimeoutMillis}`,
       "-c search_path=pg_catalog"
     ].join(" "),
     allowExitOnIdle: false
@@ -198,8 +430,19 @@ function loadRuntimePostgresConfig(env = process.env) {
   if (!enabled) return Object.freeze({ enabled: false });
 
   const parsed = parseDatabaseUrl(env.DATABASE_URL, "database_url");
+  requireRemotePassword(parsed, "database_url");
+  const targetFingerprint = requireExpectedTargetFingerprint(env, parsed);
+  const login = normalizedDatabaseUsername(parsed);
+  requireExpectedLogin(
+    env,
+    "SOCIAL_DATABASE_EXPECTED_RUNTIME_LOGIN",
+    login,
+    "social_database_expected_runtime_login"
+  );
   return Object.freeze({
     enabled: true,
+    login,
+    targetFingerprint,
     role: requireCanonicalRole(
       env.SOCIAL_DATABASE_RUNTIME_ROLE,
       SOCIAL_RUNTIME_ROLE,
@@ -210,39 +453,53 @@ function loadRuntimePostgresConfig(env = process.env) {
 }
 
 function loadMigrationPostgresConfig(env = process.env) {
+  if (typeof env.DATABASE_URL === "string" && env.DATABASE_URL.trim()) {
+    postgresFail(
+      "migration_runtime_database_credential_forbidden",
+      "Credencial PostgreSQL de runtime recusada no job de migration."
+    );
+  }
   const parsed = parseDatabaseUrl(
     env.SOCIAL_MIGRATIONS_DATABASE_URL,
     "social_migrations_database_url"
   );
-  const runtimeRaw = String(env.DATABASE_URL || "").trim();
-  if (runtimeRaw) {
-    const runtimeParsed = parseDatabaseUrl(runtimeRaw, "database_url");
-    const normalizedPrincipal = (value) =>
-      [
-        value.hostname.toLowerCase(),
-        value.port || "5432",
-        decodeURIComponent(value.pathname.slice(1)),
-        decodeURIComponent(value.username).toLowerCase()
-      ].join("/");
-    if (normalizedPrincipal(runtimeParsed) === normalizedPrincipal(parsed)) {
-      postgresFail(
-        "migration_runtime_credentials_must_differ",
-        "Credenciais de runtime e migration devem ser separadas."
-      );
-    }
+  const ownerRole = requireCanonicalRole(
+    env.SOCIAL_DATABASE_OWNER_ROLE,
+    SOCIAL_OWNER_ROLE,
+    "social_database_owner_role"
+  );
+  const migratorRole = requireCanonicalRole(
+    env.SOCIAL_DATABASE_MIGRATOR_ROLE,
+    SOCIAL_MIGRATOR_ROLE,
+    "social_database_migrator_role"
+  );
+  requireRemotePassword(parsed, "social_migrations_database_url");
+  const targetFingerprint = requireExpectedTargetFingerprint(env, parsed);
+  const migrationLogin = normalizedDatabaseUsername(parsed);
+  const runtimeLogin = requireCanonicalExpectedLogin(
+    env,
+    "SOCIAL_DATABASE_EXPECTED_RUNTIME_LOGIN",
+    "social_database_expected_runtime_login"
+  );
+  requireExpectedLogin(
+    env,
+    "SOCIAL_MIGRATIONS_EXPECTED_LOGIN",
+    migrationLogin,
+    "social_migrations_expected_login"
+  );
+  if (
+    runtimeLogin === migrationLogin
+  ) {
+    postgresFail(
+      "migration_runtime_credentials_must_differ",
+      "Credenciais de runtime e migration devem ser separadas."
+    );
   }
   return Object.freeze({
     enabled: true,
-    ownerRole: requireCanonicalRole(
-      env.SOCIAL_DATABASE_OWNER_ROLE,
-      SOCIAL_OWNER_ROLE,
-      "social_database_owner_role"
-    ),
-    migratorRole: requireCanonicalRole(
-      env.SOCIAL_DATABASE_MIGRATOR_ROLE,
-      SOCIAL_MIGRATOR_ROLE,
-      "social_database_migrator_role"
-    ),
+    targetFingerprint,
+    ownerRole,
+    migratorRole,
     pool: commonPoolConfig(parsed, env, "migration"),
     target: Object.freeze({
       environment: requireSafeLabel(
@@ -259,10 +516,80 @@ function loadMigrationPostgresConfig(env = process.env) {
       ),
       host: parsed.hostname.toLowerCase(),
       port: parsed.port || "5432",
-      database: decodeURIComponent(parsed.pathname.slice(1)),
-      username: decodeURIComponent(parsed.username).toLowerCase()
+      database: databaseName(parsed, "social_migrations_database_url"),
+      username: migrationLogin
     })
   });
+}
+
+function assertWebServiceDatabaseCredentialBoundary(env = process.env) {
+  assertNoAmbientPostgresEnvironment(
+    env,
+    "web_service_libpq_environment_override_forbidden"
+  );
+  for (const [name, value] of Object.entries(env)) {
+    const normalizedName = String(name || "").toUpperCase();
+    if (
+      WEB_SERVICE_OPERATOR_SECRET_NAMES.has(normalizedName) &&
+      hasConfiguredValue(value)
+    ) {
+      postgresFail(
+        "web_service_operator_secret_forbidden",
+        "Segredo operacional recusado no Web Service."
+      );
+    }
+    if (
+      WEB_SERVICE_OPERATOR_ENVIRONMENT_PREFIXES.some((prefix) =>
+        normalizedName.startsWith(prefix)
+      ) &&
+      hasConfiguredValue(value)
+    ) {
+      postgresFail(
+        "web_service_operator_environment_forbidden",
+        "Configuracao operacional recusada no Web Service."
+      );
+    }
+    if (
+      WEB_SERVICE_LIBPQ_ENVIRONMENT_NAMES.has(normalizedName) &&
+      hasConfiguredValue(value)
+    ) {
+      postgresFail(
+        "web_service_libpq_environment_override_forbidden",
+        "Override ambiental libpq recusado no Web Service."
+      );
+    }
+    if (
+      OPERATOR_DATABASE_MARKER_PATTERN.test(normalizedName) &&
+      (
+        OPERATOR_SECRET_TOKEN_PATTERN.test(normalizedName) ||
+        isOperatorDatabaseUrlName(normalizedName)
+      ) &&
+      hasConfiguredValue(value)
+    ) {
+      postgresFail(
+        isOperatorDatabaseUrlName(normalizedName)
+          ? "web_service_privileged_database_credential_forbidden"
+          : "web_service_privileged_operator_secret_forbidden",
+        "Credencial operacional privilegiada recusada no Web Service."
+      );
+    }
+  }
+
+  if (!explicitTrue(env.SOCIAL_PERSISTENCE_ENABLED)) {
+    if (hasConfiguredValue(env.DATABASE_URL)) {
+      postgresFail(
+        "web_service_runtime_database_credential_disabled",
+        "Credencial PostgreSQL recusada com persistencia social desativada."
+      );
+    }
+    return true;
+  }
+
+  // Reuse the complete runtime parser so the Web Service boundary and the
+  // pool cannot disagree about password, target, login, role or TLS policy.
+  // loadRuntimePostgresConfig never calls this boundary.
+  loadRuntimePostgresConfig(env);
+  return true;
 }
 
 module.exports = {
@@ -270,6 +597,9 @@ module.exports = {
   SOCIAL_MIGRATOR_ROLE,
   SOCIAL_OWNER_ROLE,
   SOCIAL_RUNTIME_ROLE,
+  assertNoAmbientPostgresEnvironment,
+  assertWebServiceDatabaseCredentialBoundary,
+  databaseTargetFingerprint,
   explicitTrue,
   loadMigrationPostgresConfig,
   loadRuntimePostgresConfig,

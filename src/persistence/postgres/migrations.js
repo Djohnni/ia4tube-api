@@ -20,6 +20,22 @@ const LEDGER_NAME = "ia4tube_migrations.schema_migrations";
 const APPLY_APPROVAL = "APPLY_SOCIAL_MIGRATIONS";
 const PRODUCTION_APPROVAL =
   "APPLY_SOCIAL_MIGRATIONS_TO_PRODUCTION_WITH_VERIFIED_BACKUP";
+const GLOBAL_VAULT_REGISTRY_MIGRATION =
+  "0003_global_vault_key_registry";
+const GLOBAL_VAULT_BACKFILL_POLICY =
+  "social_credentials_key_registry_backfill";
+const GLOBAL_VAULT_BACKFILL_POLICY_CREATE = [
+  `CREATE POLICY ${GLOBAL_VAULT_BACKFILL_POLICY}`,
+  "  ON ia4tube_social.social_encrypted_credentials",
+  "  AS PERMISSIVE",
+  "  FOR SELECT",
+  "  TO ia4tube_social_owner",
+  "  USING (TRUE)"
+].join("\n");
+const GLOBAL_VAULT_BACKFILL_POLICY_DROP = [
+  `DROP POLICY ${GLOBAL_VAULT_BACKFILL_POLICY}`,
+  "  ON ia4tube_social.social_encrypted_credentials"
+].join("\n");
 
 function aclRowKey(row) {
   return (
@@ -928,7 +944,13 @@ async function applyOne(client, migration, ownerRole) {
   await client.query("BEGIN");
   try {
     await client.query(`SET LOCAL ROLE ${quoteIdentifier(ownerRole)}`);
+    if (migration.version === GLOBAL_VAULT_REGISTRY_MIGRATION) {
+      await client.query(GLOBAL_VAULT_BACKFILL_POLICY_CREATE);
+    }
     await client.query(migration.sql);
+    if (migration.version === GLOBAL_VAULT_REGISTRY_MIGRATION) {
+      await client.query(GLOBAL_VAULT_BACKFILL_POLICY_DROP);
+    }
     const elapsed = Number((process.hrtime.bigint() - started) / 1000000n);
     await client.query(
       [
@@ -1048,6 +1070,10 @@ function createMigrationRunner(options = {}) {
 module.exports = {
   ADVISORY_LOCK_ID,
   APPLY_APPROVAL,
+  GLOBAL_VAULT_BACKFILL_POLICY,
+  GLOBAL_VAULT_BACKFILL_POLICY_CREATE,
+  GLOBAL_VAULT_BACKFILL_POLICY_DROP,
+  GLOBAL_VAULT_REGISTRY_MIGRATION,
   LEDGER_NAME,
   MIGRATION_FILE_PATTERN,
   PRODUCTION_APPROVAL,

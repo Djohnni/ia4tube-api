@@ -14,6 +14,10 @@ const {
   parseVaultKeyring
 } = require("../src/social/vault");
 const {
+  deriveVaultKeyVersion,
+  vaultKeyringFingerprint
+} = require("../src/social/vault-key-version");
+const {
   REAUTH_TTL_MS,
   SESSION_AUDIENCE,
   SESSION_ISSUER,
@@ -45,6 +49,12 @@ function key(byte) {
   return Buffer.alloc(32, byte);
 }
 
+function testOnlyKeyVersion(label, keyMaterial) {
+  const match = /^v([1-9][0-9]*)$/.exec(label);
+  assert.ok(match, "rotulo sintetico de chave invalido");
+  return deriveVaultKeyVersion(Number(match[1]), keyMaterial);
+}
+
 function hmacIdentity(value, derivationKey, domain) {
   return crypto
     .createHmac("sha256", derivationKey)
@@ -67,11 +77,25 @@ function context(overrides = {}) {
 
 function vault(activeVersion, keys, nonceStart = 1) {
   let next = nonceStart;
+  const entries = Object.entries(keys).map(([label, keyMaterial]) => [
+    testOnlyKeyVersion(label, keyMaterial),
+    keyMaterial
+  ]);
+  const activeKey = keys[activeVersion];
+  const boundActiveVersion = testOnlyKeyVersion(
+    activeVersion,
+    activeKey
+  );
+  const readable = entries.map(([version]) => version);
   return createSocialVault({
     keyring: {
-      activeVersion,
-      keys: new Map(Object.entries(keys))
+      activeVersion: boundActiveVersion,
+      keys: new Map(entries)
     },
+    expectedKeyringFingerprint: vaultKeyringFingerprint(
+      boundActiveVersion,
+      readable
+    ),
     randomBytes(size) {
       return Buffer.alloc(size, next++);
     }
@@ -172,36 +196,128 @@ test("identity configuration requires a canonical independent 256-bit key", () =
 });
 
 test("vault keyring rejects invalid and duplicated 256-bit key material", () => {
-  const encoded = key(7).toString("base64");
+  const material = key(7);
+  const encoded = material.toString("base64");
+  const version = deriveVaultKeyVersion(1, material);
+  const fingerprint = vaultKeyringFingerprint(version, [version]);
   const keyring = parseVaultKeyring({
-    SOCIAL_VAULT_ACTIVE_KEY_VERSION: "v1",
-    SOCIAL_VAULT_KEYS_JSON: JSON.stringify({ v1: encoded })
+    SOCIAL_VAULT_ACTIVE_KEY_VERSION: version,
+    SOCIAL_VAULT_KEYS_JSON: JSON.stringify({ [version]: encoded }),
+    SOCIAL_VAULT_EXPECTED_KEYRING_FINGERPRINT: fingerprint
   });
-  assert.equal(keyring.activeVersion, "v1");
-  assert.equal(keyring.keys.get("v1").length, 32);
+  assert.equal(keyring.activeVersion, version);
+  assert.equal(keyring.keys.get(version).length, 32);
+  assert.equal(keyring.fingerprint, fingerprint);
 
   assert.throws(
     () =>
       parseVaultKeyring({
-        SOCIAL_VAULT_ACTIVE_KEY_VERSION: "v1",
+        SOCIAL_VAULT_ACTIVE_KEY_VERSION: version,
         SOCIAL_VAULT_KEYS_JSON: JSON.stringify({
-          v1: Buffer.alloc(31).toString("base64")
-        })
+          [version]: Buffer.alloc(31).toString("base64")
+        }),
+        SOCIAL_VAULT_EXPECTED_KEYRING_FINGERPRINT: fingerprint
       }),
     SocialVaultError
   );
+  const duplicateV1 = deriveVaultKeyVersion(1, key(9));
+  const duplicateV2 = deriveVaultKeyVersion(2, key(9));
   assert.throws(
     () =>
       createSocialVault({
         keyring: {
-          activeVersion: "v2",
+          activeVersion: duplicateV2,
           keys: new Map([
-            ["v1", key(9)],
-            ["v2", key(9)]
+            [duplicateV1, key(9)],
+            [duplicateV2, key(9)]
           ])
-        }
+        },
+        expectedKeyringFingerprint: vaultKeyringFingerprint(
+          duplicateV2,
+          [duplicateV1, duplicateV2]
+        )
       }),
     { code: "vault_duplicate_key_material" }
+  );
+});
+
+test("key IDs bind every instance to the same AES material", () => {
+  const material = key(5);
+  const version = deriveVaultKeyVersion(7, material);
+  const fingerprint = vaultKeyringFingerprint(version, [version]);
+  const first = createSocialVault({
+    keyring: {
+      activeVersion: version,
+      keys: new Map([[version, material]])
+    },
+    expectedKeyringFingerprint: fingerprint
+  });
+  const second = createSocialVault({
+    keyring: {
+      activeVersion: version,
+      keys: new Map([[version, Buffer.from(material)]])
+    },
+    expectedKeyringFingerprint: fingerprint
+  });
+  assert.deepEqual(first.versions(), second.versions());
+  assert.throws(
+    () =>
+      createSocialVault({
+        keyring: {
+          activeVersion: version,
+          keys: new Map([[version, key(6)]])
+        },
+        expectedKeyringFingerprint: fingerprint
+      }),
+    { code: "vault_key_version_material_mismatch" }
+  );
+  first.destroy();
+  second.destroy();
+});
+
+test("keyring fingerprint refuses different active or readable sets", () => {
+  const firstMaterial = key(5);
+  const secondMaterial = key(6);
+  const firstVersion = deriveVaultKeyVersion(5, firstMaterial);
+  const secondVersion = deriveVaultKeyVersion(6, secondMaterial);
+  const expected = vaultKeyringFingerprint(secondVersion, [
+    firstVersion,
+    secondVersion
+  ]);
+  const encoded = {
+    [firstVersion]: firstMaterial.toString("base64"),
+    [secondVersion]: secondMaterial.toString("base64")
+  };
+
+  assert.throws(
+    () =>
+      parseVaultKeyring({
+        SOCIAL_VAULT_ACTIVE_KEY_VERSION: firstVersion,
+        SOCIAL_VAULT_KEYS_JSON: JSON.stringify(encoded),
+        SOCIAL_VAULT_EXPECTED_KEYRING_FINGERPRINT: expected
+      }),
+    { code: "vault_keyring_fingerprint_mismatch" }
+  );
+  assert.throws(
+    () =>
+      parseVaultKeyring({
+        SOCIAL_VAULT_ACTIVE_KEY_VERSION: firstVersion,
+        SOCIAL_VAULT_KEYS_JSON: JSON.stringify({
+          [firstVersion]: encoded[firstVersion]
+        }),
+        SOCIAL_VAULT_EXPECTED_KEYRING_FINGERPRINT: expected
+      }),
+    { code: "vault_keyring_fingerprint_mismatch" }
+  );
+  assert.throws(
+    () =>
+      parseVaultKeyring({
+        SOCIAL_VAULT_ACTIVE_KEY_VERSION: firstVersion,
+        SOCIAL_VAULT_KEYS_JSON: JSON.stringify({
+          [firstVersion]: encoded[firstVersion]
+        })
+      }),
+    { code: "vault_keyring_fingerprint_invalid" }
   );
 });
 
@@ -258,7 +374,10 @@ test("key rotation reads the old key and rewrites with a new nonce/version", () 
   const rotatingVault = vault("v2", { v1: key(1), v2: key(2) }, 9);
   const rotated = rotatingVault.rotate(oldEnvelope, context());
   assert.equal(rotated.changed, true);
-  assert.equal(rotated.envelope.keyVersion, "v2");
+  assert.equal(
+    rotated.envelope.keyVersion,
+    testOnlyKeyVersion("v2", key(2))
+  );
   assert.notDeepEqual(rotated.envelope.nonce, oldEnvelope.nonce);
   const decrypted = rotatingVault.decrypt(rotated.envelope, context());
   assert.equal(decrypted.toString("utf8"), "synthetic-refresh-token");
@@ -272,9 +391,11 @@ test("key rotation reads the old key and rewrites with a new nonce/version", () 
 test("destroyed vault refuses every operation and cannot expose key versions", () => {
   const service = vault("v1", { v1: key(1) });
   const encrypted = service.encrypt("synthetic-destroy-token", context());
+  const version = testOnlyKeyVersion("v1", key(1));
   assert.deepEqual(service.versions(), {
-    active: "v1",
-    readable: ["v1"]
+    active: version,
+    fingerprint: vaultKeyringFingerprint(version, [version]),
+    readable: [version]
   });
 
   service.destroy();
@@ -310,7 +431,12 @@ test("credential service confines plaintext to a callback and wipes it", async (
     },
     async listCredentialKeyVersions({ companyId }) {
       inventoryCompany = companyId;
-      return [{ keyVersion: "v1", credentialCount: 1 }];
+      return [
+        {
+          keyVersion: testOnlyKeyVersion("v1", key(3)),
+          credentialCount: 1
+        }
+      ];
     }
   };
   const credentials = createSocialCredentialService({
@@ -358,7 +484,12 @@ test("credential service confines plaintext to a callback and wipes it", async (
   const inventory = await credentials.tenantKeyInventory({
     companyId: companyA
   });
-  assert.deepEqual(inventory, [{ keyVersion: "v1", credentialCount: 1 }]);
+  assert.deepEqual(inventory, [
+    {
+      keyVersion: testOnlyKeyVersion("v1", key(3)),
+      credentialCount: 1
+    }
+  ]);
   assert.equal(inventoryCompany, companyA);
 
   await assert.rejects(
@@ -469,8 +600,14 @@ test("credential service rotates with optimistic revision and inventories keys",
     async listCredentialKeyVersions({ companyId }) {
       inventoryCompany = companyId;
       return [
-        { keyVersion: "v1", credentialCount: 0 },
-        { keyVersion: "v2", credentialCount: 1 }
+        {
+          keyVersion: testOnlyKeyVersion("v1", key(1)),
+          credentialCount: 0
+        },
+        {
+          keyVersion: testOnlyKeyVersion("v2", key(2)),
+          credentialCount: 1
+        }
       ];
     }
   };
@@ -484,7 +621,7 @@ test("credential service rotates with optimistic revision and inventories keys",
   });
   assert.deepEqual(result, {
     changed: true,
-    keyVersion: "v2",
+    keyVersion: testOnlyKeyVersion("v2", key(2)),
     revision: 8
   });
   assert.equal(update.expectedRevision, 7);
@@ -494,8 +631,14 @@ test("credential service rotates with optimistic revision and inventories keys",
   assert.deepEqual(
     await credentials.tenantKeyInventory({ companyId: companyA }),
     [
-      { keyVersion: "v1", credentialCount: 0 },
-      { keyVersion: "v2", credentialCount: 1 }
+      {
+        keyVersion: testOnlyKeyVersion("v1", key(1)),
+        credentialCount: 0
+      },
+      {
+        keyVersion: testOnlyKeyVersion("v2", key(2)),
+        credentialCount: 1
+      }
     ]
   );
   assert.equal(inventoryCompany, companyA);
@@ -904,7 +1047,7 @@ test("synthetic secrets never appear in error text", () => {
         ciphertext: Buffer.from(synthetic),
         nonce: Buffer.alloc(12),
         authTag: Buffer.alloc(16),
-        keyVersion: "missing",
+        keyVersion: deriveVaultKeyVersion(2, key(2)),
         aadVersion: 1
       },
       context()

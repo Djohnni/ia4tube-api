@@ -5,6 +5,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 const test = require("node:test");
 const {
+  databaseTargetFingerprint,
   loadMigrationPostgresConfig,
   loadRuntimePostgresConfig
 } = require("../src/persistence/postgres/config");
@@ -27,9 +28,16 @@ const {
   TENANT_TABLES,
   verifyRuntimeSchema
 } = require("../src/persistence/postgres/runtime-validation");
+
+function targetOf(url) {
+  return databaseTargetFingerprint(new URL(url));
+}
 const {
   createSocialRuntime
 } = require("../src/social/runtime");
+const {
+  deriveVaultKeyVersion
+} = require("../src/social/vault-key-version");
 
 const root = path.resolve(__dirname, "..");
 const companyA = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
@@ -37,6 +45,10 @@ const companyB = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
 const userA = "11111111-1111-4111-8111-111111111111";
 const connectionA = "22222222-2222-4222-8222-222222222222";
 const identityVersion = "identity-v1";
+const credentialKeyVersion = deriveVaultKeyVersion(
+  1,
+  Buffer.alloc(32, 9)
+);
 
 function runtimeTableAclRows() {
   return Object.entries(RUNTIME_TABLE_GRANTS).flatMap(
@@ -176,15 +188,18 @@ test("enabled social persistence fails closed without an explicit database", () 
 });
 
 test("runtime PostgreSQL forces verified TLS outside loopback tests", () => {
+  const url =
+    "postgresql://runtime:synthetic@db.example.test/social?sslmode=verify-full";
   const config = loadRuntimePostgresConfig({
     SOCIAL_PERSISTENCE_ENABLED: "true",
-    DATABASE_URL:
-      "postgresql://runtime:synthetic@db.example.test/social?sslmode=require"
+    SOCIAL_DATABASE_EXPECTED_RUNTIME_LOGIN: "runtime",
+    SOCIAL_DATABASE_EXPECTED_TARGET_FINGERPRINT: targetOf(url),
+    DATABASE_URL: url
   });
   assert.equal(config.enabled, true);
   assert.equal(config.pool.ssl.rejectUnauthorized, true);
   assert.equal(config.pool.connectionString.includes("sslmode"), false);
-  assert.equal(config.pool.max, 5);
+  assert.equal(config.pool.max, 3);
   assert.ok(config.pool.options.includes("statement_timeout=10000"));
   assert.ok(
     config.pool.options.includes("idle_in_transaction_session_timeout=5000")
@@ -192,12 +207,15 @@ test("runtime PostgreSQL forces verified TLS outside loopback tests", () => {
 });
 
 test("runtime PostgreSQL refuses role names that diverge from migrations", () => {
+  const url =
+    "postgresql://runtime:synthetic@db.example.test/social";
   assert.throws(
     () =>
       loadRuntimePostgresConfig({
         SOCIAL_PERSISTENCE_ENABLED: "true",
-        DATABASE_URL:
-          "postgresql://runtime:synthetic@db.example.test/social",
+        SOCIAL_DATABASE_EXPECTED_RUNTIME_LOGIN: "runtime",
+        SOCIAL_DATABASE_EXPECTED_TARGET_FINGERPRINT: targetOf(url),
+        DATABASE_URL: url,
         SOCIAL_DATABASE_RUNTIME_ROLE: "alternate_runtime"
       }),
     { code: "social_database_runtime_role_must_be_canonical" }
@@ -205,24 +223,31 @@ test("runtime PostgreSQL refuses role names that diverge from migrations", () =>
 });
 
 test("unencrypted remote PostgreSQL is refused", () => {
+  const url =
+    "postgresql://runtime:synthetic@db.example.test/social?sslmode=disable";
   assert.throws(
     () =>
       loadRuntimePostgresConfig({
         SOCIAL_PERSISTENCE_ENABLED: "true",
-        DATABASE_URL:
-          "postgresql://runtime:synthetic@db.example.test/social?sslmode=disable"
+        SOCIAL_DATABASE_EXPECTED_RUNTIME_LOGIN: "runtime",
+        SOCIAL_DATABASE_EXPECTED_TARGET_FINGERPRINT: targetOf(url),
+        DATABASE_URL: url
       }),
-    { code: "social_database_tls_required" }
+    { code: "social_database_tls_mode_invalid" }
   );
 });
 
 test("unencrypted PostgreSQL is allowed only for explicit loopback tests", () => {
+  const localUrl =
+    "postgresql://runtime:synthetic@127.0.0.1:55432/" +
+    "social_test?sslmode=disable";
   const config = loadRuntimePostgresConfig({
     NODE_ENV: "test",
     SOCIAL_PERSISTENCE_ENABLED: "true",
+    SOCIAL_DATABASE_EXPECTED_RUNTIME_LOGIN: "runtime",
     SOCIAL_DATABASE_ALLOW_INSECURE_LOCALHOST: "true",
-    DATABASE_URL:
-      "postgresql://runtime:synthetic@127.0.0.1:55432/social_test?sslmode=disable"
+    SOCIAL_DATABASE_EXPECTED_TARGET_FINGERPRINT: targetOf(localUrl),
+    DATABASE_URL: localUrl
   });
   assert.equal(config.pool.ssl, false);
 
@@ -231,11 +256,16 @@ test("unencrypted PostgreSQL is allowed only for explicit loopback tests", () =>
       loadRuntimePostgresConfig({
         NODE_ENV: "test",
         SOCIAL_PERSISTENCE_ENABLED: "true",
+        SOCIAL_DATABASE_EXPECTED_RUNTIME_LOGIN: "runtime",
         SOCIAL_DATABASE_ALLOW_INSECURE_LOCALHOST: "true",
+        SOCIAL_DATABASE_EXPECTED_TARGET_FINGERPRINT: targetOf(
+          "postgresql://runtime:synthetic@remote.test/social" +
+            "?sslmode=disable"
+        ),
         DATABASE_URL:
           "postgresql://runtime:synthetic@remote.test/social?sslmode=disable"
       }),
-    { code: "social_database_tls_required" }
+    { code: "social_database_tls_mode_invalid" }
   );
 });
 
@@ -247,26 +277,31 @@ test("migration credentials must differ from runtime credentials", () => {
         NODE_ENV: "test",
         SOCIAL_DATABASE_ALLOW_INSECURE_LOCALHOST: "true",
         SOCIAL_MIGRATION_ENVIRONMENT: "test",
+        SOCIAL_MIGRATIONS_EXPECTED_LOGIN: "migration",
+        SOCIAL_DATABASE_EXPECTED_RUNTIME_LOGIN: "migration",
+        SOCIAL_DATABASE_EXPECTED_TARGET_FINGERPRINT: targetOf(url),
         SOCIAL_MIGRATIONS_DATABASE_URL: url,
-        DATABASE_URL: url
       }),
     { code: "migration_runtime_credentials_must_differ" }
   );
 });
 
 test("equivalent database URLs cannot disguise reused migration credentials", () => {
+  const url =
+    "postgresql://migration:one@localhost:5432/" +
+    "social_test?application_name=migration";
   assert.throws(
     () =>
       loadMigrationPostgresConfig({
         NODE_ENV: "test",
         SOCIAL_DATABASE_ALLOW_INSECURE_LOCALHOST: "true",
         SOCIAL_MIGRATION_ENVIRONMENT: "test",
+        SOCIAL_MIGRATIONS_EXPECTED_LOGIN: "migration",
+        SOCIAL_DATABASE_EXPECTED_RUNTIME_LOGIN: "migration",
+        SOCIAL_DATABASE_EXPECTED_TARGET_FINGERPRINT: targetOf(url),
         SOCIAL_MIGRATION_EXPECTED_ENVIRONMENT_ID:
           "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
-        SOCIAL_MIGRATIONS_DATABASE_URL:
-          "postgresql://migration:one@localhost:5432/social_test?application_name=migration",
-        DATABASE_URL:
-          "postgresql://MIGRATION:two@LOCALHOST/social_test?sslmode=disable"
+        SOCIAL_MIGRATIONS_DATABASE_URL: url,
       }),
     { code: "migration_runtime_credentials_must_differ" }
   );
@@ -914,7 +949,7 @@ test("social repository scopes every query and stores only envelopes", async () 
     ciphertext: Buffer.from("ciphertext"),
     nonce: Buffer.alloc(12, 1),
     authTag: Buffer.alloc(16, 2),
-    keyVersion: "key-2026-01",
+    keyVersion: credentialKeyVersion,
     aadVersion: 1
   });
   assert.equal(row.company_id, companyA);

@@ -4,12 +4,15 @@ const crypto = require("node:crypto");
 const net = require("node:net");
 const path = require("node:path");
 const { spawnSync } = require("node:child_process");
+const {
+  assertNoAmbientPostgresEnvironment
+} = require("../src/persistence/postgres/config");
 
 const APPROVAL = "RUN_SOCIAL_POSTGRES_REAL_TESTS";
 const REMOTE_APPROVAL = "RUN_SOCIAL_POSTGRES_RENDER_FREE_DISPOSABLE";
 const LOOPBACK_MODE = "loopback";
 const RENDER_REMOTE_MODE = "render_free_remote";
-const REMOTE_DATABASE = "ia4tube_social_2a_gate";
+const REMOTE_DATABASE = "ia4tube_social_2b0_gate";
 const REQUIRED = [
   "SOCIAL_TEST_ENVIRONMENT_ID",
   "SOCIAL_TEST_PROVISIONER_DATABASE_URL",
@@ -188,6 +191,19 @@ function validateGateEnvironment(env = process.env) {
     if (/^PGSSL/i.test(name) && String(value || "").trim()) {
       refuse("ambient_pgssl_configuration_refused");
     }
+  }
+  try {
+    assertNoAmbientPostgresEnvironment(
+      env,
+      "ambient_postgres_configuration_refused"
+    );
+  } catch (error) {
+    if (
+      error?.code === "ambient_postgres_configuration_refused"
+    ) {
+      refuse("ambient_postgres_configuration_refused");
+    }
+    throw error;
   }
   if (requireValue(env, "SOCIAL_TEST_POSTGRES_APPROVED") !== APPROVAL) {
     refuse("explicit_approval_missing");

@@ -11,6 +11,10 @@ const {
   requireUuid
 } = require("./validation");
 
+const {
+  requireVaultKeyVersion
+} = require("../../social/vault-key-version");
+
 const REAUTH_ACTIONS = new Set([
   "social.connect",
   "social.disconnect",
@@ -128,7 +132,7 @@ function createSocialRepository(options = {}) {
     const ciphertext = requireBuffer(input.ciphertext, null, "ciphertext");
     const nonce = requireBuffer(input.nonce, 12, "nonce");
     const authTag = requireBuffer(input.authTag, 16, "auth_tag");
-    const keyVersion = requireKeyVersion(input.keyVersion);
+    const keyVersion = requireVaultKeyVersion(input.keyVersion);
     const aadVersion = requirePositiveInteger(
       input.aadVersion,
       "aad_version"
@@ -213,6 +217,25 @@ function createSocialRepository(options = {}) {
     });
   }
 
+  async function findEncryptedCredentialForKeyRotation(input = {}) {
+    const companyId = requireUuid(input.companyId, "company_id");
+    const id = requireUuid(input.credentialId, "credential_id");
+    return scoped(companyId, async (client) => {
+      const result = await client.query(
+        [
+          "SELECT company_id, id, provider, connection_id,",
+          "  oauth_transaction_id, credential_type, ciphertext, nonce,",
+          "  auth_tag, key_version, aad_version, expires_at,",
+          "  revoked_at, revision",
+          "FROM ia4tube_social.social_encrypted_credentials",
+          "WHERE company_id = $1 AND id = $2"
+        ].join("\n"),
+        [companyId, id]
+      );
+      return freezeRow(result.rows?.[0]);
+    });
+  }
+
   async function rotateEncryptedCredential(input = {}) {
     const companyId = requireUuid(input.companyId, "company_id");
     const id = requireUuid(input.credentialId, "credential_id");
@@ -223,7 +246,7 @@ function createSocialRepository(options = {}) {
     const ciphertext = requireBuffer(input.ciphertext, null, "ciphertext");
     const nonce = requireBuffer(input.nonce, 12, "nonce");
     const authTag = requireBuffer(input.authTag, 16, "auth_tag");
-    const keyVersion = requireKeyVersion(input.keyVersion);
+    const keyVersion = requireVaultKeyVersion(input.keyVersion);
 
     return scoped(companyId, async (client) => {
       const result = await client.query(
@@ -258,6 +281,51 @@ function createSocialRepository(options = {}) {
     });
   }
 
+  async function rotateEncryptedCredentialForKeyRotation(input = {}) {
+    const companyId = requireUuid(input.companyId, "company_id");
+    const id = requireUuid(input.credentialId, "credential_id");
+    const expectedRevision = requirePositiveInteger(
+      input.expectedRevision,
+      "expected_revision"
+    );
+    const ciphertext = requireBuffer(input.ciphertext, null, "ciphertext");
+    const nonce = requireBuffer(input.nonce, 12, "nonce");
+    const authTag = requireBuffer(input.authTag, 16, "auth_tag");
+    const keyVersion = requireVaultKeyVersion(input.keyVersion);
+
+    return scoped(companyId, async (client) => {
+      const result = await client.query(
+        [
+          "UPDATE ia4tube_social.social_encrypted_credentials",
+          "SET ciphertext = $3, nonce = $4, auth_tag = $5,",
+          "  key_version = $6, revision = revision + 1,",
+          "  updated_at = CURRENT_TIMESTAMP",
+          "WHERE company_id = $1 AND id = $2 AND revision = $7",
+          "RETURNING company_id, id, provider, connection_id,",
+          "  oauth_transaction_id, credential_type, ciphertext, nonce,",
+          "  auth_tag, key_version, aad_version, expires_at,",
+          "  revoked_at, revision"
+        ].join("\n"),
+        [
+          companyId,
+          id,
+          ciphertext,
+          nonce,
+          authTag,
+          keyVersion,
+          expectedRevision
+        ]
+      );
+      if (!result.rows?.[0]) {
+        postgresFail(
+          "credential_rotation_conflict",
+          "Rotacao concorrente recusada."
+        );
+      }
+      return freezeRow(result.rows[0]);
+    });
+  }
+
   async function listCredentialKeyVersions({ companyId } = {}) {
     const scopedCompanyId = requireUuid(companyId, "company_id");
     return scoped(scopedCompanyId, async (client) => {
@@ -265,7 +333,7 @@ function createSocialRepository(options = {}) {
         [
           "SELECT key_version, COUNT(*)::bigint AS credential_count",
           "FROM ia4tube_social.social_encrypted_credentials",
-          "WHERE company_id = $1 AND revoked_at IS NULL",
+          "WHERE company_id = $1",
           "GROUP BY key_version",
           "ORDER BY key_version"
         ].join("\n"),
@@ -274,7 +342,7 @@ function createSocialRepository(options = {}) {
       return Object.freeze(
         (result.rows || []).map((row) =>
           Object.freeze({
-            keyVersion: requireKeyVersion(row.key_version),
+            keyVersion: requireVaultKeyVersion(row.key_version),
             credentialCount: requirePositiveInteger(
               row.credential_count,
               "credential_count"
@@ -448,8 +516,10 @@ function createSocialRepository(options = {}) {
     findReauthIdentity,
     findConnection,
     findEncryptedCredential,
+    findEncryptedCredentialForKeyRotation,
     listCredentialKeyVersions,
     rotateEncryptedCredential,
+    rotateEncryptedCredentialForKeyRotation,
     storeEncryptedCredential
   });
 }

@@ -5,26 +5,46 @@ const path = require("node:path");
 const { spawnSync } = require("node:child_process");
 
 const testsDirectory = path.resolve(__dirname, "..", "tests");
-const testFiles = fs
-  .readdirSync(testsDirectory, { withFileTypes: true })
-  .filter((entry) => entry.isFile() && entry.name.endsWith(".test.js"))
-  .map((entry) => path.join(testsDirectory, entry.name))
-  .sort();
+const MANUAL_TEST_FILES = new Set(["social-postgres-real.test.js"]);
 
-if (testFiles.length === 0) {
-  process.stderr.write("Nenhum teste automatizado foi encontrado.\n");
-  process.exit(1);
+function discoverAutomatedTests(directory = testsDirectory) {
+  return fs
+    .readdirSync(directory, { withFileTypes: true })
+    .filter(
+      (entry) =>
+        entry.isFile() &&
+        entry.name.endsWith(".test.js") &&
+        !MANUAL_TEST_FILES.has(entry.name)
+    )
+    .map((entry) => path.join(directory, entry.name))
+    .sort();
 }
 
-const result = spawnSync(process.execPath, ["--test", ...testFiles], {
-  cwd: path.resolve(__dirname, ".."),
-  env: process.env,
-  stdio: "inherit"
-});
+function main() {
+  const testFiles = discoverAutomatedTests();
+  if (testFiles.length === 0) {
+    process.stderr.write("Nenhum teste automatizado foi encontrado.\n");
+    return 1;
+  }
 
-if (result.error) {
-  process.stderr.write("Nao foi possivel iniciar os testes automatizados.\n");
-  process.exit(1);
+  const result = spawnSync(process.execPath, ["--test", ...testFiles], {
+    cwd: path.resolve(__dirname, ".."),
+    env: process.env,
+    stdio: "inherit"
+  });
+
+  if (result.error) {
+    process.stderr.write("Nao foi possivel iniciar os testes automatizados.\n");
+    return 1;
+  }
+
+  return result.status === null ? 1 : result.status;
 }
 
-process.exit(result.status === null ? 1 : result.status);
+if (require.main === module) process.exit(main());
+
+module.exports = {
+  MANUAL_TEST_FILES,
+  discoverAutomatedTests,
+  main
+};

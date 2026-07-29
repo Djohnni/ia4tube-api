@@ -11,6 +11,9 @@ const test = require("node:test");
 const bcrypt = require("bcryptjs");
 const { Pool } = require("pg");
 const {
+  databaseTargetFingerprint
+} = require("../src/persistence/postgres/config");
+const {
   LOOPBACK_MODE,
   PostgresGateRefusal,
   RENDER_REMOTE_MODE,
@@ -20,6 +23,7 @@ const {
 const {
   ADVISORY_LOCK_ID,
   APPLY_APPROVAL,
+  GLOBAL_VAULT_BACKFILL_POLICY,
   compareMigrationState,
   createMigrationRunner,
   readManifest,
@@ -45,6 +49,13 @@ const {
 } = require("../src/social/credential-service");
 const { createSocialReauthService } = require("../src/social/reauth");
 const { createSocialVault } = require("../src/social/vault");
+const {
+  deriveVaultKeyVersion,
+  vaultKeyringFingerprint
+} = require("../src/social/vault-key-version");
+const {
+  createVaultKeyRotationService
+} = require("../src/social/vault-key-rotation-service");
 
 const OWNER_ROLE = "ia4tube_social_owner";
 const MIGRATOR_ROLE = "ia4tube_social_migrator";
@@ -52,6 +63,14 @@ const RUNTIME_ROLE = "ia4tube_social_runtime";
 const IDENTITY_VERSION = "v1";
 const FOUNDATION_MIGRATION_VERSION =
   "0001_social_multitenant_foundation";
+const BACKFILL_VERSION_V1 = deriveVaultKeyVersion(
+  101,
+  Buffer.alloc(32, 101)
+);
+const BACKFILL_VERSION_V2 = deriveVaultKeyVersion(
+  102,
+  Buffer.alloc(32, 102)
+);
 
 const requiredByDedicatedRunner =
   process.env.SOCIAL_REAL_POSTGRES_REQUIRED === "true";
@@ -129,7 +148,12 @@ function migrationCliEnvironment(configuration) {
     ...systemChildEnvironment(),
     NODE_ENV: "test",
     SOCIAL_MIGRATIONS_DATABASE_URL: configuration.migrationUrl,
-    DATABASE_URL: configuration.runtimeUrl,
+    SOCIAL_DATABASE_EXPECTED_TARGET_FINGERPRINT:
+      databaseTargetFingerprint(new URL(configuration.migrationUrl)),
+    SOCIAL_MIGRATIONS_EXPECTED_LOGIN:
+      configuration.identities[1].username,
+    SOCIAL_DATABASE_EXPECTED_RUNTIME_LOGIN:
+      configuration.identities[2].username,
     SOCIAL_DATABASE_OWNER_ROLE: OWNER_ROLE,
     SOCIAL_DATABASE_MIGRATOR_ROLE: MIGRATOR_ROLE,
     SOCIAL_MIGRATION_ENVIRONMENT: configuration.target.environment,
@@ -306,6 +330,10 @@ async function proveNormalStartupDoesNotMigrate(
     PUBLIC_WEB_BASE_URL: "https://normal-start-probe.invalid",
     SOCIAL_PERSISTENCE_ENABLED: "true",
     DATABASE_URL: configuration.runtimeUrl,
+    SOCIAL_DATABASE_EXPECTED_TARGET_FINGERPRINT:
+      databaseTargetFingerprint(new URL(configuration.runtimeUrl)),
+    SOCIAL_DATABASE_EXPECTED_RUNTIME_LOGIN:
+      configuration.identities[2].username,
     FCM_TOKEN_REGISTRATION_ENABLED: "false",
     FCM_ART_READY_EVENT_ENABLED: "false",
     FCM_DELIVERY_ENABLED: "false",
@@ -706,13 +734,22 @@ async function preflightPhysicalTarget(pool, configuration) {
 
     const canonicalRoles = await client.query(
       [
-        "SELECT COUNT(*)::integer AS role_count",
+        "SELECT COUNT(*)::integer AS role_count,",
+        "  COALESCE(BOOL_AND(",
+        "    NOT rolcanlogin AND NOT rolsuper AND NOT rolcreatedb",
+        "    AND NOT rolcreaterole AND NOT rolinherit",
+        "    AND NOT rolreplication AND NOT rolbypassrls",
+        "  ), TRUE) AS attributes_safe",
         "FROM pg_catalog.pg_roles",
         "WHERE rolname = ANY($1::text[])"
       ].join("\n"),
       [[OWNER_ROLE, MIGRATOR_ROLE, RUNTIME_ROLE]]
     );
-    assert.equal(canonicalRoles.rows[0].role_count, 0);
+    assert.ok(
+      [0, 3].includes(canonicalRoles.rows[0].role_count),
+      "O cluster reutilizado deve ter zero ou todos os papeis canonicos."
+    );
+    assert.equal(canonicalRoles.rows[0].attributes_safe, true);
 
     const applicationSchemas = await client.query(
       [
@@ -1158,16 +1195,52 @@ function migrationRunner(pool, configuration, manifestOptions) {
   });
 }
 
+function temporaryMigrationManifest(migrations, suffix) {
+  const directory = fs.mkdtempSync(
+    path.join(os.tmpdir(), `ia4tube-social-${suffix}-`)
+  );
+  const entries = [];
+  for (const migration of migrations) {
+    fs.writeFileSync(
+      path.join(directory, migration.file),
+      migration.sql,
+      "utf8"
+    );
+    entries.push({
+      version: migration.version,
+      file: migration.file,
+      sha256: migration.sha256
+    });
+  }
+  const manifestPath = path.join(directory, "checksums.json");
+  fs.writeFileSync(
+    manifestPath,
+    `${JSON.stringify({ format: 1, migrations: entries }, null, 2)}\n`,
+    "utf8"
+  );
+  return Object.freeze({
+    directory,
+    manifestPath,
+    options: Object.freeze({
+      migrationsDirectory: directory,
+      manifestPath
+    })
+  });
+}
+
 async function proveMigrationConcurrency(
   firstRunner,
   secondRunner,
-  configuration
+  configuration,
+  expectedVersions
 ) {
   const before = await firstRunner.inspect();
-  assert.equal(
-    before.every((item) => item.state === "pending"),
-    true,
-    "O gate real exige um banco sintetico novo, sem migrations aplicadas."
+  assert.deepEqual(
+    before
+      .filter((item) => item.state === "pending")
+      .map((item) => item.version),
+    expectedVersions,
+    "O conjunto pendente deve ser exato antes da concorrencia."
   );
   const runners = [firstRunner, secondRunner];
   const outcomes = await Promise.allSettled(
@@ -1192,9 +1265,6 @@ async function proveMigrationConcurrency(
   const applied = outcomes
     .filter((outcome) => outcome.status === "fulfilled")
     .flatMap((outcome) => outcome.value);
-  const expectedVersions = readManifest().map(
-    (migration) => migration.version
-  );
   assert.equal(applied.length, expectedVersions.length);
   assert.deepEqual(
     applied.map((item) => item.version).sort(),
@@ -1214,7 +1284,6 @@ async function proveMigrationConcurrency(
 
 async function proveAdvisoryLock(
   lockPool,
-  observerPool,
   runner,
   configuration,
   runnerApplicationName
@@ -1239,11 +1308,13 @@ async function proveAdvisoryLock(
     );
     let observedWaiting = false;
     for (let attempt = 0; attempt < 20; attempt += 1) {
-      const activity = await observerPool.query(
+      const activity = await client.query(
         [
           "SELECT EXISTS (",
           "  SELECT 1 FROM pg_catalog.pg_stat_activity",
           "  WHERE datname = current_database()",
+          "    AND usename = session_user",
+          "    AND pid <> pg_backend_pid()",
           "    AND application_name = $1",
           "    AND wait_event_type = 'Lock'",
           "    AND wait_event = 'advisory'",
@@ -1512,6 +1583,356 @@ async function seedCoreTenant(pool, fixture, passwordHash) {
       );
     },
     { role: OWNER_ROLE, companyId: fixture.companyId }
+  );
+}
+
+async function seedPreRegistryCredential(pool, fixture, keyVersion) {
+  const ciphertext = crypto
+    .createHash("sha256")
+    .update(`synthetic-backfill-ciphertext-${fixture.label}`)
+    .digest();
+  const nonce = crypto
+    .createHash("sha256")
+    .update(`synthetic-backfill-nonce-${fixture.label}`)
+    .digest()
+    .subarray(0, 12);
+  const authTag = crypto
+    .createHash("sha256")
+    .update(`synthetic-backfill-tag-${fixture.label}`)
+    .digest()
+    .subarray(0, 16);
+  await withTransaction(
+    pool,
+    async (client) => {
+      await client.query(
+        [
+          "INSERT INTO ia4tube_social.social_connections (",
+          "  company_id, id, provider, created_by_user_id",
+          ") VALUES ($1, $2, 'instagram', $3)"
+        ].join("\n"),
+        [fixture.companyId, fixture.connectionId, fixture.userId]
+      );
+      await client.query(
+        [
+          "INSERT INTO ia4tube_social.social_encrypted_credentials (",
+          "  company_id, id, provider, connection_id, credential_type,",
+          "  ciphertext, nonce, auth_tag, key_version, aad_version",
+          ") VALUES ($1, $2, 'instagram', $3, 'access_token',",
+          "  $4, $5, $6, $7, 1)"
+        ].join("\n"),
+        [
+          fixture.companyId,
+          fixture.credentialId,
+          fixture.connectionId,
+          ciphertext,
+          nonce,
+          authTag,
+          keyVersion
+        ]
+      );
+    },
+    { role: RUNTIME_ROLE, companyId: fixture.companyId }
+  );
+}
+
+async function readPreRegistryCredentialSnapshot(pool, fixture) {
+  const result = await withTransaction(
+    pool,
+    (client) =>
+      client.query(
+        [
+          "SELECT company_id::text, id::text, provider,",
+          "  connection_id::text, credential_type,",
+          "  encode(ciphertext, 'hex') AS ciphertext_hex,",
+          "  encode(nonce, 'hex') AS nonce_hex,",
+          "  encode(auth_tag, 'hex') AS auth_tag_hex,",
+          "  key_version, aad_version, revision",
+          "FROM ia4tube_social.social_encrypted_credentials",
+          "WHERE company_id = $1 AND id = $2"
+        ].join("\n"),
+        [fixture.companyId, fixture.credentialId]
+      ),
+    { role: RUNTIME_ROLE, companyId: fixture.companyId }
+  );
+  assert.equal(result.rowCount, 1);
+  return digest(JSON.stringify(result.rows[0]));
+}
+
+async function provePreRegistryIsolation(
+  migrationPool,
+  runtimePool,
+  companyC,
+  companyD
+) {
+  const catalog = await migrationPool.query(
+    [
+      "SELECT",
+      "  to_regnamespace('ia4tube_social_admin') IS NULL",
+      "    AS admin_schema_absent,",
+      "  NOT EXISTS (",
+      "    SELECT 1 FROM pg_catalog.pg_constraint",
+      "    WHERE conname = 'social_encrypted_credentials_key_version_fk'",
+      "  ) AS key_fk_absent,",
+      "  relation.relrowsecurity AS rls_enabled,",
+      "  relation.relforcerowsecurity AS rls_forced",
+      "FROM pg_catalog.pg_class relation",
+      "JOIN pg_catalog.pg_namespace namespace",
+      "  ON namespace.oid = relation.relnamespace",
+      "WHERE namespace.nspname = 'ia4tube_social'",
+      "  AND relation.relname = 'social_encrypted_credentials'"
+    ].join("\n")
+  );
+  assert.equal(catalog.rowCount, 1);
+  assert.equal(catalog.rows[0].admin_schema_absent, true);
+  assert.equal(catalog.rows[0].key_fk_absent, true);
+  assert.equal(catalog.rows[0].rls_enabled, true);
+  assert.equal(catalog.rows[0].rls_forced, true);
+
+  const ownerWithoutTenant = await withTransaction(
+    migrationPool,
+    (client) =>
+      client.query(
+        [
+          "SELECT COUNT(*)::integer AS credential_count",
+          "FROM ia4tube_social.social_encrypted_credentials"
+        ].join("\n")
+      ),
+    { role: OWNER_ROLE }
+  );
+  assert.equal(ownerWithoutTenant.rows[0].credential_count, 0);
+
+  for (const [own, other] of [
+    [companyC, companyD],
+    [companyD, companyC]
+  ]) {
+    const ownRows = await withTransaction(
+      runtimePool,
+      (client) =>
+        client.query(
+          [
+            "SELECT id FROM ia4tube_social.social_encrypted_credentials",
+            "WHERE company_id = $1 AND id = $2"
+          ].join("\n"),
+          [own.companyId, own.credentialId]
+        ),
+      { role: RUNTIME_ROLE, companyId: own.companyId }
+    );
+    assert.equal(ownRows.rowCount, 1);
+    const crossRows = await withTransaction(
+      runtimePool,
+      (client) =>
+        client.query(
+          [
+            "SELECT id FROM ia4tube_social.social_encrypted_credentials",
+            "WHERE company_id = $1 AND id = $2"
+          ].join("\n"),
+          [other.companyId, other.credentialId]
+        ),
+      { role: RUNTIME_ROLE, companyId: own.companyId }
+    );
+    assert.equal(crossRows.rowCount, 0);
+  }
+}
+
+async function provePopulated0003Rollback(
+  migrationPool,
+  runtimePool,
+  configuration,
+  companyC,
+  companyD,
+  snapshots
+) {
+  const manifest = readManifest();
+  const migration = manifest.at(-1);
+  const failedSql = [
+    migration.sql.trimEnd(),
+    "SELECT ia4tube_intentionally_missing_backfill_function();",
+    ""
+  ].join("\n");
+  const failedMigration = Object.freeze({
+    ...migration,
+    sql: failedSql,
+    sha256: migrationSha256(Buffer.from(failedSql, "utf8"))
+  });
+  const temporary = temporaryMigrationManifest(
+    [...manifest.slice(0, -1), failedMigration],
+    "0003-populated-rollback"
+  );
+  try {
+    const runner = migrationRunner(
+      migrationPool,
+      configuration,
+      temporary.options
+    );
+    await assert.rejects(
+      runner.apply(configuration.approvalEnvironment),
+      (error) => error?.code === "42883"
+    );
+  } finally {
+    fs.rmSync(temporary.directory, { recursive: true, force: true });
+  }
+
+  const state = await withTransaction(
+    migrationPool,
+    (client) =>
+      client.query(
+        [
+          "SELECT",
+          "  to_regnamespace('ia4tube_social_admin') IS NULL",
+          "    AS admin_schema_absent,",
+          "  NOT EXISTS (",
+          "    SELECT 1 FROM pg_catalog.pg_constraint",
+          "    WHERE conname = 'social_encrypted_credentials_key_version_fk'",
+          "  ) AS key_fk_absent,",
+          "  NOT EXISTS (",
+          "    SELECT 1 FROM pg_catalog.pg_policies",
+          "    WHERE schemaname = 'ia4tube_social'",
+          "      AND tablename = 'social_encrypted_credentials'",
+          "      AND policyname = $1",
+          "  ) AS transient_policy_absent,",
+          "  (SELECT COUNT(*)::integer",
+          "   FROM ia4tube_migrations.schema_migrations) AS ledger_count"
+        ].join("\n"),
+        [GLOBAL_VAULT_BACKFILL_POLICY]
+      ),
+    { role: OWNER_ROLE }
+  );
+  assert.equal(state.rows[0].admin_schema_absent, true);
+  assert.equal(state.rows[0].key_fk_absent, true);
+  assert.equal(state.rows[0].transient_policy_absent, true);
+  assert.equal(state.rows[0].ledger_count, 2);
+  assert.equal(
+    await readPreRegistryCredentialSnapshot(runtimePool, companyC),
+    snapshots.get(companyC.companyId)
+  );
+  assert.equal(
+    await readPreRegistryCredentialSnapshot(runtimePool, companyD),
+    snapshots.get(companyD.companyId)
+  );
+  await provePreRegistryIsolation(
+    migrationPool,
+    runtimePool,
+    companyC,
+    companyD
+  );
+}
+
+async function provePopulated0003Success(
+  migrationPool,
+  runtimePool,
+  runner,
+  configuration,
+  companyC,
+  companyD,
+  snapshots
+) {
+  const state = await migrationPool.query(
+    [
+      "SELECT",
+      "  constraint_info.convalidated AS key_fk_validated,",
+      "  NOT EXISTS (",
+      "    SELECT 1 FROM pg_catalog.pg_policies",
+      "    WHERE schemaname = 'ia4tube_social'",
+      "      AND tablename = 'social_encrypted_credentials'",
+      "      AND policyname = $1",
+      "  ) AS transient_policy_absent,",
+      "  relation.relrowsecurity AS rls_enabled,",
+      "  relation.relforcerowsecurity AS rls_forced",
+      "FROM pg_catalog.pg_constraint constraint_info",
+      "JOIN pg_catalog.pg_class relation",
+      "  ON relation.oid = constraint_info.conrelid",
+      "WHERE constraint_info.conname =",
+      "  'social_encrypted_credentials_key_version_fk'"
+    ].join("\n"),
+    [GLOBAL_VAULT_BACKFILL_POLICY]
+  );
+  assert.equal(state.rowCount, 1);
+  assert.equal(state.rows[0].key_fk_validated, true);
+  assert.equal(state.rows[0].transient_policy_absent, true);
+  assert.equal(state.rows[0].rls_enabled, true);
+  assert.equal(state.rows[0].rls_forced, true);
+
+  const registry = await withTransaction(
+    migrationPool,
+    (client) =>
+      client.query(
+        [
+          "SELECT key_version",
+          "FROM ia4tube_social_admin.vault_key_versions",
+          "ORDER BY key_version"
+        ].join("\n")
+      ),
+    { role: OWNER_ROLE }
+  );
+  assert.deepEqual(
+    registry.rows.map((row) => row.key_version),
+    [BACKFILL_VERSION_V1]
+  );
+  assert.equal(
+    await readPreRegistryCredentialSnapshot(runtimePool, companyC),
+    snapshots.get(companyC.companyId)
+  );
+  assert.equal(
+    await readPreRegistryCredentialSnapshot(runtimePool, companyD),
+    snapshots.get(companyD.companyId)
+  );
+  assert.deepEqual(
+    await runner.apply(configuration.approvalEnvironment),
+    []
+  );
+
+  const keyRegistryAdmin = createVaultKeyRegistryAdmin({
+    pool: migrationPool,
+    ownerRole: OWNER_ROLE
+  });
+  await keyRegistryAdmin.register({ keyVersion: BACKFILL_VERSION_V2 });
+  async function rotate(fixture) {
+    const result = await withTransaction(
+      runtimePool,
+      (client) =>
+        client.query(
+          [
+            "UPDATE ia4tube_social.social_encrypted_credentials",
+            "SET key_version = $3,",
+            "  revision = revision + 1, updated_at = CURRENT_TIMESTAMP",
+            "WHERE company_id = $1 AND id = $2",
+            "RETURNING key_version, revision"
+          ].join("\n"),
+          [
+            fixture.companyId,
+            fixture.credentialId,
+            BACKFILL_VERSION_V2
+          ]
+        ),
+      { role: RUNTIME_ROLE, companyId: fixture.companyId }
+    );
+    assert.equal(result.rowCount, 1);
+    assert.equal(result.rows[0].key_version, BACKFILL_VERSION_V2);
+    assert.equal(Number(result.rows[0].revision), 2);
+  }
+  await rotate(companyC);
+  await assert.rejects(
+    keyRegistryAdmin.retire({ keyVersion: BACKFILL_VERSION_V1 }),
+    { code: "vault_key_version_in_use" }
+  );
+  const companyDOld = await withTransaction(
+    runtimePool,
+    (client) =>
+      client.query(
+        [
+          "SELECT key_version",
+          "FROM ia4tube_social.social_encrypted_credentials",
+          "WHERE company_id = $1 AND id = $2"
+        ].join("\n"),
+        [companyD.companyId, companyD.credentialId]
+      ),
+    { role: RUNTIME_ROLE, companyId: companyD.companyId }
+  );
+  assert.equal(companyDOld.rows[0].key_version, BACKFILL_VERSION_V1);
+  await rotate(companyD);
+  assert.deepEqual(
+    await keyRegistryAdmin.retire({ keyVersion: BACKFILL_VERSION_V1 }),
+    { keyVersion: BACKFILL_VERSION_V1, retired: true }
   );
 }
 
@@ -2022,6 +2443,9 @@ async function proveVaultPersistence(
 ) {
   const keyV1 = crypto.randomBytes(32);
   const keyV2 = crypto.randomBytes(32);
+  const versionV1 = deriveVaultKeyVersion(1, keyV1);
+  const versionV2 = deriveVaultKeyVersion(2, keyV2);
+  const readableVersions = [versionV1, versionV2];
   let vaultV1;
   let vaultV2;
   let v2OnlyVault;
@@ -2055,22 +2479,32 @@ async function proveVaultPersistence(
   try {
     vaultV1 = createSocialVault({
       keyring: {
-        activeVersion: "v1",
+        activeVersion: versionV1,
         keys: new Map([
-          ["v1", keyV1],
-          ["v2", keyV2]
+          [versionV1, keyV1],
+          [versionV2, keyV2]
         ])
-      }
+      },
+      expectedKeyringFingerprint: vaultKeyringFingerprint(
+        versionV1,
+        readableVersions
+      )
     });
     vaultV2 = createSocialVault({
       keyring: {
-        activeVersion: "v2",
+        activeVersion: versionV2,
         keys: new Map([
-          ["v1", keyV1],
-          ["v2", keyV2]
+          [versionV1, keyV1],
+          [versionV2, keyV2]
         ])
-      }
+      },
+      expectedKeyringFingerprint: vaultKeyringFingerprint(
+        versionV2,
+        readableVersions
+      )
     });
+    await keyRegistryAdmin.register({ keyVersion: versionV1 });
+    await keyRegistryAdmin.register({ keyVersion: versionV2 });
     const credentialsV1 = createSocialCredentialService({
       repository,
       vault: vaultV1
@@ -2078,6 +2512,12 @@ async function proveVaultPersistence(
     const credentialsV2 = createSocialCredentialService({
       repository,
       vault: vaultV2
+    });
+    const rotationService = createVaultKeyRotationService({
+      credentialService: credentialsV2,
+      keyRegistryAdmin,
+      vault: vaultV2,
+      backoff: async () => undefined
     });
 
     const [storedA, storedB] = await Promise.all([
@@ -2092,8 +2532,8 @@ async function proveVaultPersistence(
         plaintext: plaintextB
       })
     ]);
-    assert.equal(storedA.keyVersion, "v1");
-    assert.equal(storedB.keyVersion, "v1");
+    assert.equal(storedA.keyVersion, versionV1);
+    assert.equal(storedB.keyVersion, versionV1);
     assert.equal(
       await credentialsV1.withDecryptedCredential(
         {
@@ -2113,7 +2553,7 @@ async function proveVaultPersistence(
         (value) => value.toString("utf8") === plaintextB
       ),
       true,
-      "A chave v1 deve continuar descriptografavel durante a janela."
+      "A chave anterior deve continuar legivel durante a janela."
     );
 
     const raw = await withTransaction(
@@ -2145,7 +2585,7 @@ async function proveVaultPersistence(
     assert.ok(originalA.ciphertext.length > 0);
     assert.equal(originalA.nonce.length, 12);
     assert.equal(originalA.auth_tag.length, 16);
-    assert.equal(originalA.key_version, "v1");
+    assert.equal(originalA.key_version, versionV1);
     assert.equal(originalA.aad_version, 1);
     assert.equal(originalA.revision, 1);
     assert.equal(JSON.stringify(raw.rows).includes(plaintextA), false);
@@ -2188,7 +2628,7 @@ async function proveVaultPersistence(
     assert.ok(originalB.ciphertext.length > 0);
     assert.equal(originalB.nonce.length, 12);
     assert.equal(originalB.auth_tag.length, 16);
-    assert.equal(originalB.key_version, "v1");
+    assert.equal(originalB.key_version, versionV1);
     assert.equal(originalB.aad_version, 1);
     assert.equal(originalB.revision, 1);
     assert.equal(JSON.stringify(rawRefresh.rows).includes(plaintextA), false);
@@ -2320,18 +2760,38 @@ async function proveVaultPersistence(
       );
     }
 
-    const rotation = await credentialsV2.rotate({
+    const initialAuthority = await keyRegistryAdmin.withActiveVersion(
+      { keyVersion: versionV1 },
+      async (authority) => authority
+    );
+    assert.equal(
+      initialAuthority.authority.activeKeyVersion,
+      versionV1
+    );
+    assert.equal(initialAuthority.authority.generation, 1);
+
+    const rotationBatch = await rotationService.rotateTenant({
       companyId: companyA.companyId,
-      credentialId: companyA.credentialId
+      credentialIds: [companyA.credentialId],
+      keyVersion: versionV2,
+      expectedActiveKeyVersion: versionV1
     });
+    assert.equal(rotationBatch.generation, 2);
+    assert.equal(rotationBatch.credentials, 1);
+    assert.equal(rotationBatch.changed, 1);
+    const rotation = rotationBatch.results[0];
     assert.equal(rotation.changed, true);
-    assert.equal(rotation.keyVersion, "v2");
+    assert.equal(rotation.keyVersion, versionV2);
     assert.equal(rotation.revision, originalA.revision + 1);
+    const currentAuthority = await keyRegistryAdmin.currentAuthority();
+    assert.equal(currentAuthority.activeKeyVersion, versionV2);
+    assert.equal(currentAuthority.generation, 2);
+    assert.ok(currentAuthority.activatedAt);
     let rotatedA = await repository.findEncryptedCredential({
       companyId: companyA.companyId,
       credentialId: companyA.credentialId
     });
-    assert.equal(rotatedA.key_version, "v2");
+    assert.equal(rotatedA.key_version, versionV2);
     assert.equal(Number(rotatedA.revision), originalA.revision + 1);
     assert.equal(rotatedA.nonce.equals(originalA.nonce), false);
     assert.equal(rotatedA.ciphertext.equals(originalA.ciphertext), false);
@@ -2403,10 +2863,10 @@ async function proveVaultPersistence(
       await credentialsV2.tenantKeyInventory({
         companyId: companyA.companyId
       }),
-      [{ keyVersion: "v2", credentialCount: 1 }]
+      [{ keyVersion: versionV2, credentialCount: 1 }]
     );
     await assert.rejects(
-      keyRegistryAdmin.retire({ keyVersion: "v1" }),
+      rotationService.retire({ keyVersion: versionV1 }),
       { code: "vault_key_version_in_use" }
     );
 
@@ -2414,7 +2874,7 @@ async function proveVaultPersistence(
       companyId: companyB.companyId,
       credentialId: companyB.credentialId
     });
-    assert.equal(oldB.key_version, "v1");
+    assert.equal(oldB.key_version, versionV1);
     const oldBEnvelope = Object.freeze({
       ciphertext: Buffer.from(oldB.ciphertext),
       nonce: Buffer.from(oldB.nonce),
@@ -2422,12 +2882,18 @@ async function proveVaultPersistence(
       keyVersion: oldB.key_version,
       aadVersion: oldB.aad_version
     });
-    const rotationB = await credentialsV2.rotate({
+    const rotationBatchB = await rotationService.rotateTenant({
       companyId: companyB.companyId,
-      credentialId: companyB.credentialId
+      credentialIds: [companyB.credentialId],
+      keyVersion: versionV2,
+      expectedActiveKeyVersion: versionV1
     });
+    assert.equal(rotationBatchB.generation, 2);
+    assert.equal(rotationBatchB.credentials, 1);
+    assert.equal(rotationBatchB.changed, 1);
+    const rotationB = rotationBatchB.results[0];
     assert.equal(rotationB.changed, true);
-    assert.equal(rotationB.keyVersion, "v2");
+    assert.equal(rotationB.keyVersion, versionV2);
     assert.equal(rotationB.revision, Number(oldB.revision) + 1);
     const currentB = await repository.findEncryptedCredential({
       companyId: companyB.companyId,
@@ -2448,7 +2914,7 @@ async function proveVaultPersistence(
       await credentialsV2.tenantKeyInventory({
         companyId: companyB.companyId
       }),
-      [{ keyVersion: "v2", credentialCount: 1 }]
+      [{ keyVersion: versionV2, credentialCount: 1 }]
     );
 
     const v1Usage = await Promise.all(
@@ -2460,8 +2926,9 @@ async function proveVaultPersistence(
               [
                 "SELECT COUNT(*)::integer AS usage_count",
                 "FROM ia4tube_social.social_encrypted_credentials",
-                "WHERE key_version = 'v1'"
-              ].join("\n")
+                "WHERE key_version = $1"
+              ].join("\n"),
+              [versionV1]
             ),
           { role: OWNER_ROLE, companyId }
         )
@@ -2475,15 +2942,19 @@ async function proveVaultPersistence(
       0
     );
     assert.deepEqual(
-      await keyRegistryAdmin.retire({ keyVersion: "v1" }),
-      { keyVersion: "v1", retired: true }
+      await rotationService.retire({ keyVersion: versionV1 }),
+      { keyVersion: versionV1, retired: true }
     );
 
     v2OnlyVault = createSocialVault({
       keyring: {
-        activeVersion: "v2",
-        keys: new Map([["v2", keyV2]])
-      }
+        activeVersion: versionV2,
+        keys: new Map([[versionV2, keyV2]])
+      },
+      expectedKeyringFingerprint: vaultKeyringFingerprint(
+        versionV2,
+        [versionV2]
+      )
     });
     assert.throws(
       () => v2OnlyVault.decrypt(oldBEnvelope, contextB),
@@ -2499,7 +2970,12 @@ async function proveVaultPersistence(
       currentBPlaintext.fill(0);
     }
 
-    const unusedKeyVersion = `unused-${randomUuid()}`;
+    const unusedKeyMaterial = crypto.randomBytes(32);
+    const unusedKeyVersion = deriveVaultKeyVersion(
+      99,
+      unusedKeyMaterial
+    );
+    unusedKeyMaterial.fill(0);
     assert.deepEqual(
       await keyRegistryAdmin.register({ keyVersion: unusedKeyVersion }),
       { keyVersion: unusedKeyVersion, registered: true }
@@ -2842,13 +3318,13 @@ test(
       const migrationPoolA = createPool(
         configuration.migrationUrl,
         "ia4tube-social-real-migration-a",
-        2,
+        1,
         configuration
       );
       const migrationPoolB = createPool(
         configuration.migrationUrl,
         "ia4tube-social-real-migration-b",
-        2,
+        1,
         configuration
       );
       const runtimePool = createPool(
@@ -2879,11 +3355,96 @@ test(
         configuration
       );
 
+      const manifest = readManifest();
+      const prefixManifest = temporaryMigrationManifest(
+        manifest.slice(0, 2),
+        "0001-0002-prefix"
+      );
+      try {
+        const prefixRunnerA = migrationRunner(
+          migrationPoolA,
+          configuration,
+          prefixManifest.options
+        );
+        const prefixRunnerB = migrationRunner(
+          migrationPoolB,
+          configuration,
+          prefixManifest.options
+        );
+        await proveMigrationConcurrency(
+          prefixRunnerA,
+          prefixRunnerB,
+          configuration,
+          manifest.slice(0, 2).map((migration) => migration.version)
+        );
+      } finally {
+        fs.rmSync(prefixManifest.directory, {
+          recursive: true,
+          force: true
+        });
+      }
+
+      const companyC = tenantFixture("Backfill-C");
+      const companyD = tenantFixture("Backfill-D");
+      const backfillPasswordHash = await bcrypt.hash(
+        `Synthetic-Backfill-Password-${randomUuid()}`,
+        8
+      );
+      await seedCoreTenant(migrationPoolA, companyC, backfillPasswordHash);
+      await seedCoreTenant(migrationPoolA, companyD, backfillPasswordHash);
+      await seedPreRegistryCredential(
+        runtimePool,
+        companyC,
+        BACKFILL_VERSION_V1
+      );
+      await seedPreRegistryCredential(
+        runtimePool,
+        companyD,
+        BACKFILL_VERSION_V1
+      );
+      const backfillSnapshots = new Map([
+        [
+          companyC.companyId,
+          await readPreRegistryCredentialSnapshot(runtimePool, companyC)
+        ],
+        [
+          companyD.companyId,
+          await readPreRegistryCredentialSnapshot(runtimePool, companyD)
+        ]
+      ]);
+      await provePreRegistryIsolation(
+        migrationPoolA,
+        runtimePool,
+        companyC,
+        companyD
+      );
+      await provePopulated0003Rollback(
+        migrationPoolA,
+        runtimePool,
+        configuration,
+        companyC,
+        companyD,
+        backfillSnapshots
+      );
+
       const runnerA = migrationRunner(migrationPoolA, configuration);
       const runnerB = migrationRunner(migrationPoolB, configuration);
-      await proveMigrationConcurrency(runnerA, runnerB, configuration);
-      await proveAdvisoryLock(
+      await proveMigrationConcurrency(
+        runnerA,
+        runnerB,
+        configuration,
+        [manifest.at(-1).version]
+      );
+      await provePopulated0003Success(
         migrationPoolA,
+        runtimePool,
+        runnerA,
+        configuration,
+        companyC,
+        companyD,
+        backfillSnapshots
+      );
+      await proveAdvisoryLock(
         migrationPoolA,
         runnerB,
         configuration,
@@ -2973,8 +3534,6 @@ test(
         pool: migrationPoolA,
         ownerRole: OWNER_ROLE
       });
-      await keyRegistryAdmin.register({ keyVersion: "v1" });
-      await keyRegistryAdmin.register({ keyVersion: "v2" });
       await seedSocialTenant(runtimePool, repository, companyA);
       await seedSocialTenant(runtimePool, repository, companyB);
       await seedSecondaryCredentialAndGrant(repository, companyB);

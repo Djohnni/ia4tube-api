@@ -1,5 +1,9 @@
 const { installConsoleRedaction } = require("./src/security/log-redaction");
 installConsoleRedaction();
+const {
+  assertWebServiceDatabaseCredentialBoundary
+} = require("./src/persistence/postgres/config");
+assertWebServiceDatabaseCredentialBoundary(process.env);
 
 const express = require("express");
 const cors = require("cors");

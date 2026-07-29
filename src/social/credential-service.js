@@ -2,12 +2,17 @@
 
 const { postgresFail } = require("../persistence/postgres/errors");
 const {
-  requireKeyVersion,
+  CREDENTIAL_KEY_FOREIGN_KEY
+} = require("../persistence/postgres/vault-key-registry-admin");
+const {
   requirePositiveInteger,
   requireProvider,
   requireSafeLabel,
   requireUuid
 } = require("../persistence/postgres/validation");
+const {
+  requireVaultKeyVersion
+} = require("./vault-key-version");
 
 function contextFromInput(input = {}) {
   const connectionId = input.connectionId
@@ -81,6 +86,24 @@ function optionalExpiry(value) {
   return value;
 }
 
+function isConstraintError(error, code, constraint) {
+  const visited = new Set();
+  for (
+    let candidate = error;
+    candidate && !visited.has(candidate);
+    candidate = candidate?.cause
+  ) {
+    visited.add(candidate);
+    if (
+      candidate?.code === code &&
+      candidate?.constraint === constraint
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
 function createSocialCredentialService(options = {}) {
   const repository = options.repository;
   const vault = options.vault;
@@ -103,6 +126,19 @@ function createSocialCredentialService(options = {}) {
     typeof vault.rotate !== "function"
   ) {
     postgresFail("social_vault_required", "Cofre social obrigatorio.");
+  }
+  const lifecycleFind =
+    repository.findEncryptedCredentialForKeyRotation;
+  const lifecycleRotate =
+    repository.rotateEncryptedCredentialForKeyRotation;
+  if (
+    (typeof lifecycleFind === "function") !==
+    (typeof lifecycleRotate === "function")
+  ) {
+    postgresFail(
+      "credential_rotation_repository_incomplete",
+      "Repositorio de rotacao administrativa incompleto."
+    );
   }
 
   async function store(input = {}) {
@@ -146,12 +182,24 @@ function createSocialCredentialService(options = {}) {
               : optionalExpiry(stored.expires_at)
         });
       } catch (error) {
-        const constraint =
-          error?.constraint || error?.cause?.constraint || "";
+        if (
+          isConstraintError(
+            error,
+            "23503",
+            CREDENTIAL_KEY_FOREIGN_KEY
+          )
+        ) {
+          postgresFail(
+            "vault_active_key_not_registered",
+            "Chave ativa do cofre nao registrada."
+          );
+        }
         const nonceCollision =
-          error?.code === "23505" &&
-          constraint ===
-            "social_encrypted_credentials_key_nonce_unique";
+          isConstraintError(
+            error,
+            "23505",
+            "social_encrypted_credentials_key_nonce_unique"
+          );
         if (!nonceCollision || attempt === 3) {
           if (nonceCollision) {
             postgresFail(
@@ -192,8 +240,27 @@ function createSocialCredentialService(options = {}) {
     }
   }
 
-  async function rotate({ companyId, credentialId } = {}) {
-    const row = await repository.findEncryptedCredential({
+  async function rotateUsing(
+    { companyId, credentialId } = {},
+    includeInactive
+  ) {
+    if (
+      includeInactive &&
+      (typeof lifecycleFind !== "function" ||
+        typeof lifecycleRotate !== "function")
+    ) {
+      postgresFail(
+        "credential_rotation_repository_required",
+        "Repositorio de rotacao administrativa obrigatorio."
+      );
+    }
+    const find = includeInactive
+      ? lifecycleFind.bind(repository)
+      : repository.findEncryptedCredential.bind(repository);
+    const update = includeInactive
+      ? lifecycleRotate.bind(repository)
+      : repository.rotateEncryptedCredential.bind(repository);
+    const row = await find({
       companyId,
       credentialId
     });
@@ -203,7 +270,9 @@ function createSocialCredentialService(options = {}) {
       if (!result.changed) {
         return Object.freeze({
           changed: false,
-          keyVersion: requireKeyVersion(result.envelope.keyVersion),
+          keyVersion: requireVaultKeyVersion(
+            result.envelope.keyVersion
+          ),
           revision: requirePositiveInteger(
             row.revision,
             "credential_revision"
@@ -211,7 +280,7 @@ function createSocialCredentialService(options = {}) {
         });
       }
       try {
-        const updated = await repository.rotateEncryptedCredential({
+        const updated = await update({
           companyId: context.companyId,
           credentialId: context.credentialId,
           ciphertext: result.envelope.ciphertext,
@@ -222,19 +291,31 @@ function createSocialCredentialService(options = {}) {
         });
         return Object.freeze({
           changed: true,
-          keyVersion: requireKeyVersion(updated?.key_version),
+          keyVersion: requireVaultKeyVersion(updated?.key_version),
           revision: requirePositiveInteger(
             updated?.revision,
             "credential_revision"
           )
         });
       } catch (error) {
-        const constraint =
-          error?.constraint || error?.cause?.constraint || "";
+        if (
+          isConstraintError(
+            error,
+            "23503",
+            CREDENTIAL_KEY_FOREIGN_KEY
+          )
+        ) {
+          postgresFail(
+            "vault_active_key_not_registered",
+            "Chave ativa do cofre nao registrada."
+          );
+        }
         const nonceCollision =
-          error?.code === "23505" &&
-          constraint ===
-            "social_encrypted_credentials_key_nonce_unique";
+          isConstraintError(
+            error,
+            "23505",
+            "social_encrypted_credentials_key_nonce_unique"
+          );
         if (!nonceCollision || attempt === 3) {
           if (nonceCollision) {
             postgresFail(
@@ -252,12 +333,21 @@ function createSocialCredentialService(options = {}) {
     );
   }
 
+  function rotate(input) {
+    return rotateUsing(input, false);
+  }
+
+  function rotateForKeyLifecycle(input) {
+    return rotateUsing(input, true);
+  }
+
   async function tenantKeyInventory({ companyId } = {}) {
     return repository.listCredentialKeyVersions({ companyId });
   }
 
   return Object.freeze({
     rotate,
+    rotateForKeyLifecycle,
     store,
     tenantKeyInventory,
     withDecryptedCredential
@@ -269,5 +359,6 @@ module.exports = {
   contextFromRow,
   createSocialCredentialService,
   envelopeFromRow,
+  isConstraintError,
   optionalExpiry
 };

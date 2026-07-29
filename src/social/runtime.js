@@ -1,6 +1,7 @@
 "use strict";
 
 const {
+  assertWebServiceDatabaseCredentialBoundary,
   loadRuntimePostgresConfig
 } = require("../persistence/postgres/config");
 const {
@@ -30,8 +31,10 @@ const {
   createSocialVault,
   parseVaultKeyring
 } = require("./vault");
-const crypto = require("node:crypto");
 const { postgresFail } = require("../persistence/postgres/errors");
+const {
+  assertSocialSecretSeparation
+} = require("./secret-separation");
 
 function createDisabledRuntime() {
   return Object.freeze({
@@ -42,6 +45,7 @@ function createDisabledRuntime() {
 
 async function createSocialRuntime(options = {}) {
   const env = options.env || process.env;
+  assertWebServiceDatabaseCredentialBoundary(env);
   const config = loadRuntimePostgresConfig(env);
   if (!config.enabled) return createDisabledRuntime();
 
@@ -52,14 +56,11 @@ async function createSocialRuntime(options = {}) {
   try {
     identityConfig = parseIdentityConfig(env);
     vaultKeyring = parseVaultKeyring(env);
-    for (const vaultKey of vaultKeyring.keys.values()) {
-      if (crypto.timingSafeEqual(identityConfig.key, vaultKey)) {
-        postgresFail(
-          "social_key_separation_required",
-          "Chaves sociais independentes sao obrigatorias."
-        );
-      }
-    }
+    assertSocialSecretSeparation({
+      vaultKeyring,
+      identityKey: identityConfig.key,
+      env
+    });
     pool = createPostgresPool(config.pool, {
       logger: options.logger,
       PoolClass: options.PoolClass
@@ -76,7 +77,10 @@ async function createSocialRuntime(options = {}) {
       runtimeRole: config.role,
       identityDerivationVersion: identityConfig.derivationVersion
     });
-    vault = createSocialVault({ keyring: vaultKeyring });
+    vault = createSocialVault({
+      keyring: vaultKeyring,
+      expectedKeyringFingerprint: vaultKeyring.fingerprint
+    });
     for (const key of vaultKeyring.keys.values()) key.fill(0);
     vaultKeyring.keys.clear();
     const credentials = createSocialCredentialService({
