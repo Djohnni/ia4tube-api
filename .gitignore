@@ -5,6 +5,7 @@ prontoPARAimagem/
 __pycache__/
 *.pyc
 _tmp*/
+node_modules/
 
 runner_materiais_graficos.py
 pipeline_materiais_graficos.py

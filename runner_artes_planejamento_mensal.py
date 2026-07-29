@@ -16,8 +16,9 @@ BASE_DIR = Path(os.environ.get("IA4TUBE_BASE_DIR", Path(__file__).resolve().pare
 PEDIDOS_DIR = Path(os.environ.get("IA4TUBE_PEDIDOS_DIR", BASE_DIR / "dados" / "pedidos"))
 PIPELINE = BASE_DIR / "resultado_pipeline_planejamento_mensal.py"
 
-API_BASE = os.environ.get("IA4TUBE_API_BASE", "https://ia4tube-api.onrender.com").rstrip("/")
-BOT_TOKEN_FILE = BASE_DIR / "bot_token.txt"
+API_BASE = os.environ.get("IA4TUBE_API_BASE", "").strip().rstrip("/")
+if not API_BASE.startswith("https://"):
+    raise RuntimeError("IA4TUBE_API_BASE HTTPS deve ser configurada explicitamente.")
 
 MAX_PROCESSOS = int(os.environ.get("IA4TUBE_PLANNING_ARTS_MAX_PROCESSOS", "4"))
 INTERVALO_SEGUNDOS = int(os.environ.get("IA4TUBE_PLANNING_ARTS_INTERVALO_SEGUNDOS", "5"))
@@ -29,17 +30,7 @@ def log(msg):
 
 
 def carregar_bot_token():
-    token = os.environ.get("IA4TUBE_BOT_TOKEN", "").strip()
-    if token:
-        return token
-
-    if BOT_TOKEN_FILE.exists():
-        try:
-            return BOT_TOKEN_FILE.read_text(encoding="utf-8").strip()
-        except Exception:
-            return ""
-
-    return ""
+    return os.environ.get("IA4TUBE_BOT_TOKEN", "").strip()
 
 
 def safe_segment(value, fallback):
@@ -82,7 +73,7 @@ def is_monthly_planning_order(pasta):
 def request_api_json(path, timeout=20):
     token = carregar_bot_token()
     if not token:
-        log("Aviso: IA4TUBE_BOT_TOKEN/bot_token.txt nao configurado; nao consigo buscar artes do planejamento.")
+        log("Aviso: IA4TUBE_BOT_TOKEN nao configurado; nao consigo buscar artes do planejamento.")
         return None
 
     req = urllib.request.Request(

@@ -6,6 +6,7 @@ const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
 const multer = require("multer");
 const crypto = require("crypto");
+const { Transform, pipeline } = require("stream");
 const { spawnSync } = require("child_process");
 const productsRegistry = require("./src/products");
 const orderStorage = require("./src/orders/order.storage");
@@ -47,28 +48,141 @@ const freeArtCampaignsStorage = require("./src/admin-free-art-campaigns/free-art
 const freeArtCampaignsScheduler = require("./src/admin-free-art-campaigns/free-art-campaigns.scheduler");
 const { createFreeArtCampaignRoutes } = require("./src/admin-free-art-campaigns/free-art-campaigns.routes");
 const seoNichePages = require("./src/seo/niche-page-renderer");
+const {
+  configuredSecrets,
+  createConcurrencyLimiter,
+  createEssentialSecurityHeaders,
+  createHttpsEnforcement,
+  createRateLimiter,
+  envFlag,
+  requestIp,
+  requireHttpsOrigin,
+  requireSecret,
+  timingSafeSecretMatch
+} = require("./src/security/runtime-security");
+const { installConsoleRedaction } = require("./src/security/log-redaction");
+const { createOrderMediaAccess } = require("./src/security/order-media-access");
+const { createTenantContextMiddleware } = require("./src/security/tenant-context");
+const { createLegalPagesRouter } = require("./src/legal/legal-pages.routes");
 
+installConsoleRedaction();
 const app = express();
-app.set("trust proxy", true);
+app.disable("x-powered-by");
+app.set("trust proxy", 1);
 
 // ===== CONFIG BÁSICA =====
 const PORT = process.env.PORT || 3000;
+const IS_DEPLOYED_RUNTIME =
+  String(process.env.NODE_ENV || "").trim().toLowerCase() === "production" ||
+  String(process.env.RENDER || "").trim().toLowerCase() === "true";
 function requireJwtSecret(env = process.env) {
-  const value = String(env.JWT_SECRET || "").trim();
-  if (
-    value.length < 32 ||
-    value === "TROQUE_ISSO_AGORA"
-  ) {
-    throw new Error(
-      "Configuracao obrigatoria invalida: JWT_SECRET"
-    );
-  }
-  return value;
+  return requireSecret("JWT_SECRET", {
+    env,
+    minLength: 32,
+    rejectedValues: ["TROQUE_ISSO_AGORA"]
+  });
 }
 const JWT_SECRET = requireJwtSecret();
+const USER_TOKEN_ISSUER = "ia4tube-api";
+const USER_TOKEN_AUDIENCE = "ia4tube-client";
+const PASSWORD_BCRYPT_COST = 12;
+
+function signUserToken(whatsapp) {
+  const normalizedOwner = normalizarLoginId(whatsapp);
+  if (!normalizedOwner) {
+    throw new Error("Nao foi possivel criar uma sessao segura.");
+  }
+
+  return jwt.sign(
+    {
+      sub: normalizedOwner,
+      whatsapp: normalizedOwner,
+      company_id: normalizedOwner,
+      token_version: 2
+    },
+    JWT_SECRET,
+    {
+      algorithm: "HS256",
+      expiresIn: "7d",
+      issuer: USER_TOKEN_ISSUER,
+      audience: USER_TOKEN_AUDIENCE,
+      jwtid: crypto.randomUUID()
+    }
+  );
+}
+
+function verifyUserToken(token) {
+  const user = jwt.verify(token, JWT_SECRET, {
+    algorithms: ["HS256"]
+  });
+
+  if (Number(user?.token_version || 0) >= 2) {
+    if (
+      user.iss !== USER_TOKEN_ISSUER ||
+      user.aud !== USER_TOKEN_AUDIENCE ||
+      !user.jti ||
+      user.sub !== user.whatsapp
+    ) {
+      throw new Error("Token invalido");
+    }
+  }
+
+  if (!orderStorage.isSafePathSegment(user?.whatsapp)) {
+    throw new Error("Token invalido");
+  }
+
+  return user;
+}
+
+function strongPasswordError(password) {
+  const value = String(password || "");
+  if (value.length < 10) return "A senha deve ter pelo menos 10 caracteres.";
+  if (!/[A-Za-z]/.test(value) || !/\d/.test(value)) {
+    return "A senha deve combinar letras e numeros.";
+  }
+  return "";
+}
+
+function requireDeployedPath(name, rawValue, fallback) {
+  const value = String(rawValue || fallback || "").trim();
+  if (!value || (IS_DEPLOYED_RUNTIME && !path.isAbsolute(value))) {
+    throw new Error(`Configuracao obrigatoria invalida: ${name}`);
+  }
+  if (IS_DEPLOYED_RUNTIME && path.resolve(value) === path.resolve(__dirname, "dados")) {
+    throw new Error(`Configuracao persistente obrigatoria ausente: ${name}`);
+  }
+  return path.resolve(value);
+}
+
+function resolvePublicApiBaseUrl() {
+  const configured = String(process.env.PUBLIC_API_BASE_URL || "").trim();
+  if (!configured) {
+    throw new Error("Configuracao obrigatoria invalida: PUBLIC_API_BASE_URL");
+  }
+  if (IS_DEPLOYED_RUNTIME) {
+    return requireHttpsOrigin("PUBLIC_API_BASE_URL", configured);
+  }
+  if (/^https:\/\//i.test(configured)) {
+    return requireHttpsOrigin("PUBLIC_API_BASE_URL", configured);
+  }
+  const parsed = new URL(configured);
+  if (
+    parsed.protocol !== "http:" ||
+    !["127.0.0.1", "localhost"].includes(parsed.hostname) ||
+    parsed.username ||
+    parsed.password
+  ) {
+    throw new Error("Configuracao local invalida: PUBLIC_API_BASE_URL");
+  }
+  return parsed.origin;
+}
 
 // ===== DATA STORAGE (RENDER DISK) =====
-const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, "dados");
+const DATA_DIR = requireDeployedPath(
+  "DATA_DIR",
+  process.env.DATA_DIR,
+  IS_DEPLOYED_RUNTIME ? "" : path.join(__dirname, "dados")
+);
 
 const PEDIDOS_DIR = path.join(DATA_DIR, "pedidos");
 const TMP_UPLOADS_DIR = path.join(DATA_DIR, "tmp_uploads");
@@ -82,11 +196,47 @@ const ART_READY_OUTBOX_FILE = path.join(
   "notifications",
   "art-ready-outbox.json"
 );
-const BOT_ADMIN_WHATSAPP = process.env.BOT_ADMIN_WHATSAPP || "15991120599";
-const BOT_RUNNER_TOKEN = process.env.BOT_RUNNER_TOKEN || "";
+const BOT_ADMIN_WHATSAPP = String(process.env.BOT_ADMIN_WHATSAPP || "").trim() ||
+  (IS_DEPLOYED_RUNTIME ? "" : "local_admin");
+if (!orderStorage.isSafePathSegment(BOT_ADMIN_WHATSAPP)) {
+  throw new Error("Configuracao obrigatoria invalida: BOT_ADMIN_WHATSAPP");
+}
+const BOT_RUNNER_TOKENS = configuredSecrets([
+  "BOT_RUNNER_TOKEN",
+  "BOT_RUNNER_TOKEN_NEXT"
+]);
+if (IS_DEPLOYED_RUNTIME) {
+  for (const tokenName of ["BOT_RUNNER_TOKEN", "BOT_RUNNER_TOKEN_NEXT"]) {
+    if (String(process.env[tokenName] || "").trim()) {
+      requireSecret(tokenName, { minLength: 32 });
+    }
+  }
+}
 const MP_ACCESS_TOKEN = process.env.MP_ACCESS_TOKEN || "";
-const MP_NOTIFICATION_URL = process.env.MP_NOTIFICATION_URL || "https://ia4tube-api.onrender.com/webhook/mercadopago";
-const PUBLIC_API_BASE_URL = (process.env.PUBLIC_API_BASE_URL || "https://ia4tube-api.onrender.com").replace(/\/+$/, "");
+const PUBLIC_API_BASE_URL = resolvePublicApiBaseUrl();
+const ORDER_MEDIA_SIGNING_SECRET = IS_DEPLOYED_RUNTIME
+  ? requireSecret("ORDER_MEDIA_SIGNING_SECRET", { minLength: 32 })
+  : String(process.env.ORDER_MEDIA_SIGNING_SECRET || crypto.randomBytes(32).toString("base64url"));
+const orderMediaAccess = createOrderMediaAccess({
+  secret: ORDER_MEDIA_SIGNING_SECRET,
+  defaultTtlSeconds: 5 * 60,
+  maxTtlSeconds: 15 * 60,
+  allowLoopbackHttp: !IS_DEPLOYED_RUNTIME
+});
+const MP_NOTIFICATION_URL = String(
+  process.env.MP_NOTIFICATION_URL ||
+  `${PUBLIC_API_BASE_URL}/webhook/mercadopago`
+).trim();
+if (MP_ACCESS_TOKEN) {
+  const parsedMpNotificationUrl = new URL(MP_NOTIFICATION_URL);
+  if (
+    parsedMpNotificationUrl.protocol !== "https:" ||
+    parsedMpNotificationUrl.origin !== PUBLIC_API_BASE_URL ||
+    parsedMpNotificationUrl.pathname !== "/webhook/mercadopago"
+  ) {
+    throw new Error("Configuracao obrigatoria invalida: MP_NOTIFICATION_URL");
+  }
+}
 const ARTE_AVULSA_COMPRA = billingPlans.getSingleArtPurchase();
 const EMPRESA_ARTE_AVULSA_VALOR = Number(ARTE_AVULSA_COMPRA.amount || productsRegistry.getProductPrice("arte_empresa") || 5.99);
 const MP_PROCESSANDO_RETRY_MS = 10 * 60 * 1000;
@@ -113,6 +263,76 @@ const ADMIN_MOBILE_ANALYTICS_FILE = path.join(__dirname, "admin", "mobile_analyt
 const ADMIN_FREE_ART_CAMPAIGNS_FILE = path.join(__dirname, "admin", "free_art_campaigns.html");
 const ADMIN_ANALYTICS_COOKIE = "ia4tube_admin_token";
 
+function directoryExists(dirPath) {
+  try {
+    return fs.existsSync(dirPath) && fs.statSync(dirPath).isDirectory();
+  } catch {
+    return true;
+  }
+}
+
+function encodedTenantDirectoryName(login) {
+  return `tenant_${Buffer.from(String(login || ""), "utf8").toString("base64url")}`;
+}
+
+function legacyTenantDirectoryName(login, { preserveDots = true } = {}) {
+  const allowed = preserveDots ? /[^a-zA-Z0-9_.@+-]+/g : /[^a-zA-Z0-9_-]+/g;
+  return String(login || "")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(allowed, "_")
+    .replace(/^_+|_+$/g, "")
+    .slice(0, 100);
+}
+
+function tenantNamespaceExists(login) {
+  const owner = normalizarLoginId(login);
+  if (!loginIdIsValid(owner)) return true;
+
+  const encoded = encodedTenantDirectoryName(owner);
+  const legacyWithDots = legacyTenantDirectoryName(owner);
+  const legacyWithoutDots = legacyTenantDirectoryName(owner, { preserveDots: false });
+  const tenantDirectories = [
+    path.join(PEDIDOS_DIR, owner),
+    path.join(GRAPHIC_MATERIALS_DIR, owner),
+    path.join(GRAPHIC_MATERIALS_DIR, legacyWithoutDots),
+    path.join(CAROUSELS_DIR, encoded),
+    path.join(CAROUSELS_DIR, legacyWithDots),
+    path.join(MONTHLY_PLANNINGS_DIR, encoded),
+    path.join(MONTHLY_PLANNINGS_DIR, legacyWithDots)
+  ];
+  if (tenantDirectories.some(directoryExists)) return true;
+
+  const supportRecords = [
+    ...readJsonArraySafe(SUPORTE_ABERTAS_FILE),
+    ...readJsonArraySafe(SUPORTE_FINALIZADAS_FILE)
+  ];
+  if (supportRecords.some((record) => String(record?.whatsapp || "") === owner)) {
+    return true;
+  }
+
+  for (const campaign of freeArtCampaignsStorage.listCampaigns(FREE_ART_CAMPAIGNS_DIR)) {
+    const distribution = freeArtCampaignsStorage.readDistribution(
+      FREE_ART_CAMPAIGNS_DIR,
+      campaign.id
+    );
+    if ((distribution.assignments || []).some(
+      (assignment) => String(assignment?.whatsapp || "") === owner
+    )) {
+      return true;
+    }
+    if (directoryExists(path.join(
+      freeArtCampaignsStorage.campaignDir(FREE_ART_CAMPAIGNS_DIR, campaign.id),
+      "clientes",
+      owner
+    ))) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
 const CLIENTES_TESTE = [
   "Los Hermanos",
   "TESTE",
@@ -123,15 +343,106 @@ const MONTHLY_PLANNING_RESERVED_ROUTE_SEGMENTS = new Set([
   "calendario"
 ]);
 
+const HTTPS_ENFORCE = envFlag("HTTPS_ENFORCE", IS_DEPLOYED_RUNTIME);
+const HTTPS_ALLOW_LOCAL_HTTP = envFlag("HTTPS_ALLOW_LOCAL_HTTP", !IS_DEPLOYED_RUNTIME);
+app.use(createEssentialSecurityHeaders({
+  trustProxy: "express"
+}));
+app.use(createHttpsEnforcement({
+  enabled: HTTPS_ENFORCE,
+  allowLocalHttp: HTTPS_ALLOW_LOCAL_HTTP,
+  trustProxy: "express",
+  canonicalOrigin: /^https:\/\//i.test(PUBLIC_API_BASE_URL) ? PUBLIC_API_BASE_URL : ""
+}));
+
+function securityRateLimitKey(req) {
+  return requestIp(req, {
+    trustProxy: IS_DEPLOYED_RUNTIME ? "express" : false,
+    trustedProxyHops: 1
+  });
+}
+
+const loginRateLimit = createRateLimiter({
+  windowMs: 15 * 60 * 1000,
+  max: 12,
+  keyGenerator: securityRateLimitKey,
+  skipSuccessfulRequests: true,
+  code: "login_rate_limit_exceeded"
+});
+const registrationRateLimit = createRateLimiter({
+  windowMs: 60 * 60 * 1000,
+  max: 8,
+  keyGenerator: securityRateLimitKey,
+  code: "registration_rate_limit_exceeded"
+});
+const oauthPreparationRateLimit = createRateLimiter({
+  windowMs: 10 * 60 * 1000,
+  max: 20,
+  keyGenerator: securityRateLimitKey,
+  code: "oauth_rate_limit_exceeded"
+});
+const analyticsRateLimit = createRateLimiter({
+  windowMs: 60 * 1000,
+  max: 120,
+  keyGenerator: securityRateLimitKey,
+  code: "analytics_rate_limit_exceeded"
+});
+const clientUploadConcurrencyLimit = createConcurrencyLimiter({
+  maxGlobal: 4,
+  maxPerKey: 1,
+  keyGenerator: (req) => req.user?.whatsapp || securityRateLimitKey(req),
+  code: "client_upload_in_progress",
+  message: "Ja existe um envio de imagem em andamento."
+});
+
+app.use(["/auth", "/oauth"], (_req, res, next) => {
+  res.setHeader("Cache-Control", "no-store");
+  res.setHeader("Pragma", "no-cache");
+  return next();
+});
+app.use("/auth/login", loginRateLimit);
+app.use("/auth/google", loginRateLimit);
+app.use("/bot/mobile-analytics/login", loginRateLimit);
+app.use("/auth/register", registrationRateLimit);
+app.use("/auth/auto-register", registrationRateLimit);
+app.use("/oauth", oauthPreparationRateLimit);
+app.use("/auth/instagram", oauthPreparationRateLimit);
+app.use("/evento", analyticsRateLimit);
+
 // CORS: permite seu site chamar a API
 app.use(cors({
   origin: ["https://ia4tube.com", "https://www.ia4tube.com", "http://127.0.0.1:8080", "http://localhost:8080"],
   credentials: false
 }));
 
-const globalJsonParser = express.json({ limit: "50mb" });
+const globalJsonParser = express.json({ limit: "1mb" });
 const globalUrlencodedParser = express.urlencoded({ extended: false, limit: "1mb" });
 const finalTestFcmJsonParser = express.json({ limit: "16kb" });
+const securitySensitiveJsonParser = express.json({ limit: "32kb" });
+const securitySensitiveUrlencodedParser = express.urlencoded({ extended: false, limit: "32kb" });
+const analyticsJsonParser = express.json({ limit: "256kb" });
+
+function isSecuritySensitiveBodyRoute(req) {
+  const routePath = String(req.path || "").toLowerCase();
+  return routePath === "/bot/mobile-analytics/login" ||
+    routePath === "/oauth" ||
+    routePath.startsWith("/oauth/") ||
+    routePath === "/auth" ||
+    routePath.startsWith("/auth/");
+}
+
+app.use((req, res, next) => {
+  if (req.path === "/evento") {
+    req.restrictedBodyParser = "analytics";
+    return analyticsJsonParser(req, res, next);
+  }
+  if (!isSecuritySensitiveBodyRoute(req)) return next();
+  req.restrictedBodyParser = "security";
+  return securitySensitiveJsonParser(req, res, (jsonError) => {
+    if (jsonError) return next(jsonError);
+    return securitySensitiveUrlencodedParser(req, res, next);
+  });
+});
 
 function isFcmTokenRouteRequest(req) {
   const normalizedPath = String(req.path || "")
@@ -170,13 +481,26 @@ app.use((req, res, next) => {
   if (req.fcmFinalTestPreauthorized === true) {
     return finalTestFcmJsonParser(req, res, next);
   }
+  if (req.restrictedBodyParser) return next();
   return globalJsonParser(req, res, next);
 });
 app.use((req, res, next) => {
-  if (req.fcmFinalTestPreauthorized === true) return next();
+  if (req.fcmFinalTestPreauthorized === true || req.restrictedBodyParser) return next();
   return globalUrlencodedParser(req, res, next);
 });
 app.use((err, req, res, next) => {
+  if (
+    req.restrictedBodyParser &&
+    ["entity.parse.failed", "entity.too.large"].includes(err?.type)
+  ) {
+    return res.status(err.type === "entity.too.large" ? 413 : 400).json({
+      ok: false,
+      code: err.type === "entity.too.large"
+        ? "request_payload_too_large"
+        : "request_payload_invalid",
+      error: "Requisicao invalida."
+    });
+  }
   if (
     req.fcmFinalTestPreauthorized === true &&
     ["entity.parse.failed", "entity.too.large"].includes(err?.type)
@@ -389,21 +713,59 @@ function normalizarLoginId(valor) {
     .replace(/[^a-z0-9._-]+/g, "");
 }
 
+function loginIdIsValid(value) {
+  const login = String(value || "");
+  return login.length >= 3 && login.length <= 160;
+}
+
+function loginIdIsReserved(value) {
+  const login = normalizarLoginId(value);
+  return login === BOT_ADMIN_WHATSAPP ||
+    login.startsWith("google_") ||
+    login.startsWith("auto_");
+}
+
+function tenantKeyForLogin(login, clientes) {
+  const normalizedLogin = normalizarLoginId(login);
+  if (!normalizedLogin || !clientes || typeof clientes !== "object") return "";
+
+  const aliasMatches = Object.entries(clientes)
+    .filter(([, client]) => (
+      client &&
+      typeof client === "object" &&
+      normalizarLoginId(client.login_id) === normalizedLogin
+    ))
+    .map(([tenantKey]) => tenantKey);
+  if (aliasMatches.length === 1) {
+    return aliasMatches[0];
+  }
+  if (aliasMatches.length > 1) return "";
+
+  const direct = clientes[normalizedLogin];
+  if (!direct || typeof direct !== "object") return "";
+  const publicLogin = normalizarLoginId(direct.login_id);
+  return !publicLogin || publicLogin === normalizedLogin ? normalizedLogin : "";
+}
+
+function loginIdExists(login, clientes) {
+  return Boolean(tenantKeyForLogin(login, clientes) || clientes?.[normalizarLoginId(login)]);
+}
+
 function gerarSenhaAutomatica() {
-  return "ia4" + Math.random().toString(36).slice(2, 8);
+  return `ia4-${crypto.randomBytes(12).toString("base64url")}-9A`;
 }
 
 function criarLoginAutomaticoUnico(base, clientes) {
-  let loginBase = normalizarLoginId(base);
+  let loginBase = normalizarLoginId(base).slice(0, 100);
 
   if (!loginBase || loginBase.length < 3) {
     loginBase = "jogador";
   }
 
-  let login = "auto_" + loginBase + "_" + Date.now();
+  let login = `auto_${loginBase}_${Date.now()}_${crypto.randomBytes(5).toString("hex")}`;
 
-  while (clientes[login]) {
-    login = "auto_" + loginBase + "_" + Date.now() + "_" + Math.floor(Math.random() * 999);
+  while (loginIdExists(login, clientes)) {
+    login = `auto_${loginBase}_${Date.now()}_${crypto.randomBytes(5).toString("hex")}`;
   }
 
   return login;
@@ -419,6 +781,51 @@ function newPedidoId() {
 
 function getPedidoBase(whatsapp, pedidoId) {
   return orderStorage.getPedidoBase(PEDIDOS_DIR, whatsapp, pedidoId);
+}
+
+const ORDER_MEDIA_URL_CACHE_REUSE_MS = 4 * 60 * 1000;
+const ORDER_MEDIA_URL_CACHE_MAX_ENTRIES = 20_000;
+const orderMediaUrlCache = new Map();
+
+function buildOrderMediaUrl(owner, orderId, variant) {
+  const now = Date.now();
+  const cacheKey = JSON.stringify([owner, orderId, variant]);
+  const cached = orderMediaUrlCache.get(cacheKey);
+  if (cached && cached.reuseUntil > now) return cached.url;
+
+  const url = orderMediaAccess.buildUrl({
+    baseUrl: PUBLIC_API_BASE_URL,
+    owner,
+    orderId,
+    variant
+  });
+  if (orderMediaUrlCache.size >= ORDER_MEDIA_URL_CACHE_MAX_ENTRIES) {
+    const removeCount = Math.ceil(ORDER_MEDIA_URL_CACHE_MAX_ENTRIES / 4);
+    for (const key of orderMediaUrlCache.keys()) {
+      orderMediaUrlCache.delete(key);
+      if (orderMediaUrlCache.size <= ORDER_MEDIA_URL_CACHE_MAX_ENTRIES - removeCount) break;
+    }
+  }
+  orderMediaUrlCache.set(cacheKey, {
+    url,
+    reuseUntil: now + ORDER_MEDIA_URL_CACHE_REUSE_MS
+  });
+  return url;
+}
+
+function allowProtectedCrossOriginMedia(res) {
+  res.setHeader("Cross-Origin-Resource-Policy", "cross-origin");
+}
+
+function protectOrderMediaPayload(payload, owner) {
+  return orderMediaAccess.protectPayload(payload, {
+    owner,
+    baseUrl: PUBLIC_API_BASE_URL,
+    ttlSeconds: 5 * 60,
+    buildMediaUrl: ({ orderId, variant }) => (
+      buildOrderMediaUrl(owner, orderId, variant)
+    )
+  });
 }
 
 function safeReadJson(filePath) {
@@ -454,10 +861,10 @@ function bearerTokenFromRequest(req) {
 function verifyBotAdminToken(token) {
   if (!token) return null;
   try {
-    const user = jwt.verify(token, JWT_SECRET, {
-      algorithms: ["HS256"]
-    });
+    const user = verifyUserToken(token);
     if (user?.whatsapp !== BOT_ADMIN_WHATSAPP) return null;
+    const client = readClientes()[user.whatsapp];
+    if (!client || client.ativo === false) return null;
     return user;
   } catch {
     return null;
@@ -1094,9 +1501,9 @@ function salvarEventosCliente(req, eventos = []) {
       atuais.push(item);
       ultimoEventoPorSessao[item.sessao] = item;
 
-      if (pedidoId) {
+      if (pedidoId && req.user?.whatsapp) {
         try {
-          const basePedido = getPedidoBaseGlobal(pedidoId);
+          const basePedido = getPedidoBase(req.user.whatsapp, pedidoId);
 
           if (basePedido) {
             const eventosPedidoFile = path.join(basePedido, "eventos_cliente.json");
@@ -1387,6 +1794,31 @@ function finalizarConversasSuporteInativas() {
   writeJsonSafe(finalizadasPath, finalizadas);
 }
 
+const legacyTenantContextMiddleware = createTenantContextMiddleware({
+  resolveLegacyTenant: async ({ principalId }) => principalId,
+  resolveTenant: async ({ tenantId }) => {
+    const client = readClientes()[tenantId];
+    if (!client) return null;
+    return {
+      id: tenantId,
+      active: client.ativo !== false
+    };
+  },
+  resolveMembership: async ({ tenantId, principalId }) => {
+    if (tenantId !== principalId) return null;
+    const client = readClientes()[tenantId];
+    if (!client) return null;
+    return {
+      tenant_id: tenantId,
+      principal_id: principalId,
+      role: "owner",
+      active: client.ativo !== false
+    };
+  }
+});
+
+app.use(createLegalPagesRouter());
+
 function auth(req, res, next) {
   const h = req.headers.authorization || "";
   const token = h.startsWith("Bearer ") ? h.slice(7) : "";
@@ -1396,10 +1828,16 @@ function auth(req, res, next) {
   }
 
   try {
-    req.user = jwt.verify(token, JWT_SECRET, {
-      algorithms: ["HS256"]
-    });
-    return next();
+    req.user = verifyUserToken(token);
+    const client = readClientes()[req.user.whatsapp];
+    if (!client) {
+      return res.status(401).json({ ok: false, error: "Sessao sem conta ativa" });
+    }
+    if (client.ativo === false) {
+      return res.status(403).json({ ok: false, error: "Conta inativa" });
+    }
+    req.auth = req.user;
+    return legacyTenantContextMiddleware(req, res, next);
   } catch {
     return res.status(401).json({ ok: false, error: "Token inválido" });
   }
@@ -1413,7 +1851,7 @@ function botRunnerAuth(req, res, next) {
     return res.status(401).json({ ok: false, error: "Sem token" });
   }
 
-  if (BOT_RUNNER_TOKEN && token === BOT_RUNNER_TOKEN) {
+  if (timingSafeSecretMatch(token, BOT_RUNNER_TOKENS)) {
     req.user = {
       whatsapp: BOT_ADMIN_WHATSAPP,
       bot_runner: true
@@ -1422,9 +1860,11 @@ function botRunnerAuth(req, res, next) {
   }
 
   try {
-    req.user = jwt.verify(token, JWT_SECRET, {
-      algorithms: ["HS256"]
-    });
+    req.user = verifyUserToken(token);
+    const client = readClientes()[req.user.whatsapp];
+    if (!client || client.ativo === false) {
+      return res.status(client ? 403 : 401).json({ ok: false, error: "Acesso negado" });
+    }
 
     if (!isBotAdmin(req)) {
       return res.status(403).json({ ok: false, error: "Acesso negado" });
@@ -1447,8 +1887,18 @@ function flattenUploadedFiles(files = {}) {
 function cleanupUploadedFiles(files = {}) {
   for (const file of flattenUploadedFiles(files)) {
     try {
-      if (file?.path && file.path.startsWith(TMP_UPLOADS_DIR) && fs.existsSync(file.path)) {
-        fs.unlinkSync(file.path);
+      if (file?.path) {
+        const uploadRoot = path.resolve(TMP_UPLOADS_DIR);
+        const resolvedFile = path.resolve(file.path);
+        const relative = path.relative(uploadRoot, resolvedFile);
+        if (
+          relative &&
+          !relative.startsWith("..") &&
+          !path.isAbsolute(relative) &&
+          fs.existsSync(resolvedFile)
+        ) {
+          fs.unlinkSync(resolvedFile);
+        }
       }
     } catch (error) {
       console.warn("[uploads] falha ao remover temporario da requisicao", {
@@ -1492,18 +1942,93 @@ function cleanupOldTmpUploads() {
   }
 }
 
+function uploadExtensionForMime(file) {
+  const mime = String(file?.mimetype || "").trim().toLowerCase();
+  if (mime === "image/png") return ".png";
+  if (mime === "image/jpeg" || mime === "image/jpg") return ".jpg";
+  if (mime === "image/webp") return ".webp";
+  return ".bin";
+}
+
 const storage = multer.diskStorage({
   destination: (req, file, cb) =>
     cb(null, TMP_UPLOADS_DIR),
 
   filename: (req, file, cb) => {
-    const safe = file.originalname.replace(/[^\w.\-]+/g, "_");
-    cb(null, `${Date.now()}_${safe}`);
+    cb(
+      null,
+      `${Date.now()}_${crypto.randomBytes(16).toString("hex")}${uploadExtensionForMime(file)}`
+    );
   }
 });
 
+const CLIENT_UPLOAD_MAX_TOTAL_BYTES = 64 * 1024 * 1024;
+
+function createAggregateLimitedDiskStorage({
+  destination,
+  maxTotalBytes = CLIENT_UPLOAD_MAX_TOTAL_BYTES
+}) {
+  const uploadRoot = path.resolve(destination);
+  ensureDir(uploadRoot);
+
+  return {
+    _handleFile(req, file, cb) {
+      const filename =
+        `${Date.now()}_${crypto.randomBytes(16).toString("hex")}${uploadExtensionForMime(file)}`;
+      const finalPath = path.join(uploadRoot, filename);
+      const counter = new Transform({
+        transform(chunk, encoding, done) {
+          req.ia4tubeClientUploadBytes =
+            Number(req.ia4tubeClientUploadBytes || 0) + chunk.length;
+          if (req.ia4tubeClientUploadBytes > maxTotalBytes) {
+            const error = new multer.MulterError("LIMIT_FILE_SIZE", file.fieldname);
+            error.code = "LIMIT_TOTAL_FILE_SIZE";
+            return done(error);
+          }
+          return done(null, chunk);
+        }
+      });
+      const output = fs.createWriteStream(finalPath, { flags: "wx" });
+
+      pipeline(file.stream, counter, output, (error) => {
+        if (error) {
+          return fs.rm(finalPath, { force: true }, () => cb(error));
+        }
+        return cb(null, {
+          destination: uploadRoot,
+          filename,
+          path: finalPath,
+          size: output.bytesWritten
+        });
+      });
+    },
+
+    _removeFile(req, file, cb) {
+      const filePath = file?.path;
+      delete file.destination;
+      delete file.filename;
+      delete file.path;
+      if (!filePath) return cb(null);
+      return fs.rm(filePath, { force: true }, cb);
+    }
+  };
+}
+
+const clientUploadStorage = createAggregateLimitedDiskStorage({
+  destination: TMP_UPLOADS_DIR
+});
+
 const upload = multer({
-  storage,
+  storage: clientUploadStorage,
+  limits: {
+    // Busboy emits LIMIT_FILE_COUNT when the configured count is reached.
+    // Keep room for every declared field while the field schema still caps at 65.
+    files: 66,
+    fields: 128,
+    parts: 200,
+    fieldSize: 256 * 1024,
+    fileSize: 8 * 1024 * 1024
+  },
   fileFilter: (req, file, cb) => {
     const permitidos = [
       "image/png",
@@ -1519,6 +2044,111 @@ const upload = multer({
     cb(null, true);
   }
 });
+
+function requestUploadedFiles(req) {
+  return [
+    ...flattenUploadedFiles(req?.files || {}),
+    ...(req?.file ? [req.file] : [])
+  ];
+}
+
+function cleanupRequestUploadedFiles(req) {
+  cleanupUploadedFiles({
+    fields: flattenUploadedFiles(req?.files || {}),
+    single: req?.file ? [req.file] : []
+  });
+}
+
+function uploadedImageMatchesDeclaredType(file) {
+  if (!file?.path || !fs.existsSync(file.path)) return false;
+  const header = Buffer.alloc(12);
+  let descriptor;
+  let bytesRead = 0;
+  try {
+    descriptor = fs.openSync(file.path, "r");
+    bytesRead = fs.readSync(descriptor, header, 0, header.length, 0);
+  } catch {
+    return false;
+  } finally {
+    if (descriptor !== undefined) {
+      try {
+        fs.closeSync(descriptor);
+      } catch {}
+    }
+  }
+
+  const mime = String(file.mimetype || "").trim().toLowerCase();
+  const isPng = bytesRead >= 8 &&
+    header.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]));
+  const isJpeg = bytesRead >= 3 &&
+    header[0] === 0xff &&
+    header[1] === 0xd8 &&
+    header[2] === 0xff;
+  const isWebp = bytesRead >= 12 &&
+    header.subarray(0, 4).toString("ascii") === "RIFF" &&
+    header.subarray(8, 12).toString("ascii") === "WEBP";
+
+  if (mime === "image/png") return isPng;
+  if (mime === "image/jpeg" || mime === "image/jpg") return isJpeg;
+  if (mime === "image/webp") return isWebp;
+  return false;
+}
+
+function validateClientImageUploads(req, res, next) {
+  const invalid = requestUploadedFiles(req).find(
+    (file) => !uploadedImageMatchesDeclaredType(file)
+  );
+  if (invalid) {
+    cleanupRequestUploadedFiles(req);
+    return res.status(415).json({
+      ok: false,
+      code: "invalid_image_content",
+      error: "O conteudo do arquivo nao corresponde a uma imagem permitida."
+    });
+  }
+
+  let cleaned = false;
+  const cleanup = () => {
+    if (cleaned) return;
+    cleaned = true;
+    cleanupRequestUploadedFiles(req);
+  };
+  res.once("finish", cleanup);
+  res.once("close", cleanup);
+  return next();
+}
+
+function secureClientUpload(middleware) {
+  return (req, res, next) => {
+    const contentLength = Number(req.headers["content-length"]);
+    if (
+      Number.isFinite(contentLength) &&
+      contentLength > CLIENT_UPLOAD_MAX_TOTAL_BYTES
+    ) {
+      return res.status(413).json({
+        ok: false,
+        code: "upload_limit_exceeded",
+        error: "O envio ultrapassa o limite total permitido."
+      });
+    }
+
+    return middleware(req, res, (error) => {
+      if (error) {
+        cleanupRequestUploadedFiles(req);
+        return next(error);
+      }
+      return validateClientImageUploads(req, res, next);
+    });
+  };
+}
+
+function secureClientUploadFields(fields) {
+  return secureClientUpload(upload.fields(fields));
+}
+
+function secureClientUploadSingle(field) {
+  return secureClientUpload(upload.single(field));
+}
 
 const productDiscoveryUpload = multer({
   storage,
@@ -1780,19 +2410,53 @@ app.post("/evento", (req, res) => {
     const eventos = Array.isArray(req.body?.eventos)
       ? req.body.eventos
       : [];
+  const referencesOrder = eventos.some((event) => {
+      const payload = event?.p || {};
+      return Boolean(String(payload.pedido_id || event?.pedido_id || "").trim());
+    });
 
     let clienteFake = null;
+    const h = req.headers.authorization || "";
+    const token = h.startsWith("Bearer ") ? h.slice(7) : "";
 
-    try {
-      const h = req.headers.authorization || "";
-      const token = h.startsWith("Bearer ") ? h.slice(7) : "";
+    if (token) {
+      try {
+        clienteFake = verifyUserToken(token);
+        const client = readClientes()[clienteFake.whatsapp];
+        if (!client || client.ativo === false) {
+          return res.status(client ? 403 : 401).json({ ok: false, error: "Acesso negado" });
+        }
+      } catch {
+        return res.status(401).json({ ok: false, error: "Token invalido" });
+      }
+    }
 
-      if (token) {
-        clienteFake = jwt.verify(token, JWT_SECRET, {
-          algorithms: ["HS256"]
+    if (referencesOrder && !clienteFake) {
+      return res.status(401).json({
+        ok: false,
+        code: "order_event_auth_required",
+        error: "Autorizacao obrigatoria para eventos de pedido."
+      });
+    }
+
+    if (referencesOrder) {
+      const referencedOrderIds = [...new Set(eventos
+        .map((event) => {
+          const payload = event?.p || {};
+          return String(payload.pedido_id || event?.pedido_id || "").trim();
+        })
+        .filter(Boolean))];
+      const hasForeignOrMissingOrder = referencedOrderIds.some(
+        (pedidoId) => !getPedidoBase(clienteFake.whatsapp, pedidoId)
+      );
+      if (hasForeignOrMissingOrder) {
+        return res.status(404).json({
+          ok: false,
+          code: "order_event_not_found",
+          error: "Pedido nao encontrado."
         });
       }
-    } catch {}
+    }
 
     salvarEventosCliente(
       { user: clienteFake },
@@ -1868,9 +2532,32 @@ app.post("/auth/google", async (req, res) => {
 
     let c = clientes[chaveCliente];
 
+    if (!c && tenantNamespaceExists(chaveCliente)) {
+      return res.status(409).json({
+        ok: false,
+        code: "tenant_namespace_reserved",
+        error: "Conta nao pode ser criada sobre dados existentes."
+      });
+    }
+
+    if (
+      c &&
+      (
+        c.login_tipo !== "google" ||
+        String(c.google_id || "") !== String(google.sub)
+      )
+    ) {
+      return res.status(409).json({
+        ok: false,
+        code: "google_identity_binding_conflict",
+        error: "Identidade Google nao pode ser vinculada a esta conta."
+      });
+    }
+
     if (!c) {
       c = {
         nome_time: nomeGoogle,
+        login_id: chaveCliente,
         senha_hash: "",
         login_tipo: "google",
         google_id: google.sub,
@@ -1902,10 +2589,7 @@ app.post("/auth/google", async (req, res) => {
       writeClientes(clientes);
     }
 
-    const token = jwt.sign({ whatsapp: chaveCliente }, JWT_SECRET, {
-      algorithm: "HS256",
-      expiresIn: "7d"
-    });
+    const token = signUserToken(chaveCliente);
 
     return res.json({
       ok: true,
@@ -1944,10 +2628,11 @@ app.post("/auth/auto-register", (req, res) => {
     const creditoPreviewInterno = getCustoPedido(produtoOrigem, null);
     const login = criarLoginAutomaticoUnico(body.login || nome_time, clientes);
     const senhaCliente = gerarSenhaAutomatica();
-    const senha_hash = bcrypt.hashSync(senhaCliente, 8);
+    const senha_hash = bcrypt.hashSync(senhaCliente, PASSWORD_BCRYPT_COST);
 
     const novo = {
       nome_time: nome_time || "Jogador",
+      login_id: login,
       senha_hash,
       login_tipo: "automatico",
       cadastro_automatico: true,
@@ -1973,10 +2658,7 @@ app.post("/auth/auto-register", (req, res) => {
     clientes[login] = novo;
     writeClientes(clientes);
 
-    const token = jwt.sign({ whatsapp: login }, JWT_SECRET, {
-      algorithm: "HS256",
-      expiresIn: "7d"
-    });
+    const token = signUserToken(login);
 
     return res.json({
       ok: true,
@@ -2010,23 +2692,40 @@ app.post("/auth/register", (req, res) => {
     return res.status(400).json({ ok: false, error: "login e senha obrigatórios" });
   }
 
-  if (whatsapp.length < 3) {
-    return res.status(400).json({ ok: false, error: "Login muito curto" });
+  if (!loginIdIsValid(whatsapp)) {
+    return res.status(400).json({ ok: false, error: "Login deve ter entre 3 e 160 caracteres" });
+  }
+
+  if (loginIdIsReserved(whatsapp)) {
+    return res.status(403).json({ ok: false, error: "Login reservado" });
+  }
+
+  const passwordError = strongPasswordError(senha);
+  if (passwordError) {
+    return res.status(400).json({ ok: false, error: passwordError });
   }
 
   const clientes = readClientes();
 
-  if (clientes[whatsapp]) {
+  if (loginIdExists(whatsapp, clientes)) {
     return res.status(400).json({
       ok: false,
       error: `Esse login já existe. Tente algo como: ${whatsapp}${Math.floor(Math.random()*99)}`
     });
   }
+  if (tenantNamespaceExists(whatsapp)) {
+    return res.status(409).json({
+      ok: false,
+      code: "tenant_namespace_reserved",
+      error: "Login reservado por dados existentes."
+    });
+  }
 
-  const senha_hash = bcrypt.hashSync(senha, 8);
+  const senha_hash = bcrypt.hashSync(senha, PASSWORD_BCRYPT_COST);
 
   const novo = {
     nome_time,
+    login_id: whatsapp,
     senha_hash,
     plano: 0,
     saldo_mensal: 0,
@@ -2044,20 +2743,24 @@ app.post("/auth/register", (req, res) => {
 
   const clientesAtualizados = readClientes();
 
-  if (clientesAtualizados[whatsapp]) {
+  if (loginIdExists(whatsapp, clientesAtualizados)) {
     return res.status(400).json({
       ok: false,
       error: `Esse login já existe. Tente outro nome.`
+    });
+  }
+  if (tenantNamespaceExists(whatsapp)) {
+    return res.status(409).json({
+      ok: false,
+      code: "tenant_namespace_reserved",
+      error: "Login reservado por dados existentes."
     });
   }
 
   clientesAtualizados[whatsapp] = novo;
   writeClientes(clientesAtualizados);
 
-  const token = jwt.sign({ whatsapp }, JWT_SECRET, {
-    algorithm: "HS256",
-    expiresIn: "7d"
-  });
+  const token = signUserToken(whatsapp);
 
   return res.json({
     ok: true,
@@ -2075,12 +2778,17 @@ app.post("/auth/finalizar-conta-auto", auth, (req, res) => {
     const novoLogin = normalizarLoginId(req.body?.login);
     const senha = String(req.body?.senha || "");
 
-    if (!novoLogin || novoLogin.length < 3) {
-      return res.status(400).json({ ok:false, error:"Login muito curto" });
+    if (!loginIdIsValid(novoLogin)) {
+      return res.status(400).json({ ok:false, error:"Login deve ter entre 3 e 160 caracteres" });
     }
 
-    if (!senha || senha.length < 3) {
-      return res.status(400).json({ ok:false, error:"Senha muito curta" });
+    if (loginIdIsReserved(novoLogin) && novoLogin !== loginAtual) {
+      return res.status(403).json({ ok:false, error:"Login reservado" });
+    }
+
+    const passwordError = strongPasswordError(senha);
+    if (passwordError) {
+      return res.status(400).json({ ok:false, error: passwordError });
     }
 
     const clientes = readClientes();
@@ -2094,40 +2802,31 @@ app.post("/auth/finalizar-conta-auto", auth, (req, res) => {
       return res.status(400).json({ ok:false, error:"Essa conta já foi finalizada" });
     }
 
-    if (clientes[novoLogin] && novoLogin !== loginAtual) {
+    const existingTenantKey = tenantKeyForLogin(novoLogin, clientes);
+    if (existingTenantKey && existingTenantKey !== loginAtual) {
       return res.status(400).json({
         ok:false,
         error:`Esse login já existe. Tente algo como: ${novoLogin}${Math.floor(Math.random()*99)}`
       });
     }
+    if (novoLogin !== loginAtual && tenantNamespaceExists(novoLogin)) {
+      return res.status(409).json({
+        ok: false,
+        code: "tenant_namespace_reserved",
+        error: "Login reservado por dados existentes."
+      });
+    }
 
     clienteAtual.nome_time = novoLogin;
-    clienteAtual.senha_hash = bcrypt.hashSync(senha, 8);
+    clienteAtual.login_id = novoLogin;
+    clienteAtual.senha_hash = bcrypt.hashSync(senha, PASSWORD_BCRYPT_COST);
     clienteAtual.conta_finalizada = true;
     clienteAtual.finalizado_em = new Date().toISOString();
-
-    if (novoLogin !== loginAtual) {
-      clientes[novoLogin] = clienteAtual;
-      delete clientes[loginAtual];
-
-      try {
-        const pastaAntiga = path.join(PEDIDOS_DIR, loginAtual);
-        const pastaNova = path.join(PEDIDOS_DIR, novoLogin);
-
-        if (fs.existsSync(pastaAntiga) && !fs.existsSync(pastaNova)) {
-          fs.renameSync(pastaAntiga, pastaNova);
-        }
-      } catch {}
-    } else {
-      clientes[loginAtual] = clienteAtual;
-    }
+    clientes[loginAtual] = clienteAtual;
 
     writeClientes(clientes);
 
-    const token = jwt.sign({ whatsapp: novoLogin }, JWT_SECRET, {
-      algorithm: "HS256",
-      expiresIn: "7d"
-    });
+    const token = signUserToken(loginAtual);
 
     return res.json({
       ok:true,
@@ -2160,7 +2859,8 @@ app.post("/auth/login", (req, res) => {
   }
 
   const clientes = readClientes();
-  const c = clientes[whatsapp];
+  const tenantKey = tenantKeyForLogin(whatsapp, clientes);
+  const c = tenantKey ? clientes[tenantKey] : null;
 
   if (!c) {
     return res.status(401).json({ ok: false, error: "Login não encontrado" });
@@ -2179,14 +2879,11 @@ app.post("/auth/login", (req, res) => {
   if (c.ciclo_mes !== mesAtual) {
     c.ciclo_mes = mesAtual;
     c.usados_no_ciclo = 0;
-    clientes[whatsapp] = c;
+    clientes[tenantKey] = c;
     writeClientes(clientes);
   }
 
-  const token = jwt.sign({ whatsapp }, JWT_SECRET, {
-    algorithm: "HS256",
-    expiresIn: "7d"
-  });
+  const token = signUserToken(tenantKey);
 
   return res.json({
     ok: true,
@@ -2852,7 +3549,7 @@ app.post("/comprar-creditos", auth, async (req, res) => {
         failure: "https://ia4tube.com/app.html",
         pending: "https://ia4tube.com/app.html"
       },
-      notification_url: "https://ia4tube-api.onrender.com/webhook/mercadopago",
+      notification_url: MP_NOTIFICATION_URL,
       auto_return: "approved"
     };
 
@@ -2919,7 +3616,7 @@ app.post("/comprar-creditos-pix", auth, async (req, res) => {
         pacote,
         credito: Number(p.credito)
       },
-      notification_url: "https://ia4tube-api.onrender.com/webhook/mercadopago"
+      notification_url: MP_NOTIFICATION_URL
     };
 
     const r = await fetch("https://api.mercadopago.com/v1/payments", {
@@ -3500,7 +4197,8 @@ app.get("/empresa/materiais-graficos", auth, (req, res) => {
 app.post(
   "/empresa/materiais-graficos/:materialId/solicitar",
   auth,
-  upload.single("logo"),
+  clientUploadConcurrencyLimit,
+  secureClientUploadSingle("logo"),
   (req, res) => {
     const whatsapp = req.user.whatsapp;
     const clientes = readClientes();
@@ -3604,6 +4302,7 @@ app.get("/empresa/materiais-graficos/:materialId/download", auth, (req, res) => 
 
     res.setHeader("Content-Type", "image/png");
     res.setHeader("Content-Disposition", `attachment; filename="${document.filename}"`);
+    allowProtectedCrossOriginMedia(res);
     return res.sendFile(document.filePath);
   } catch (error) {
     return res.status(error?.statusCode || 500).json({
@@ -3742,7 +4441,8 @@ app.post(
 app.post(
   "/empresa/carrosseis/solicitar",
   auth,
-  upload.fields([
+  clientUploadConcurrencyLimit,
+  secureClientUploadFields([
     { name: "logo", maxCount: 1 },
     { name: "fotos", maxCount: 2 }
   ]),
@@ -3840,6 +4540,7 @@ app.get("/empresa/carrosseis/:carrosselId/download", auth, (req, res) => {
 
     res.setHeader("Content-Type", "application/zip");
     res.setHeader("Content-Disposition", `attachment; filename="${result.filename}"`);
+    allowProtectedCrossOriginMedia(res);
     return res.sendFile(result.filePath);
   } catch (error) {
     return res.status(error?.statusCode || 500).json({
@@ -3966,7 +4667,9 @@ app.post(
 app.post(
   "/empresa/planejamento-mensal/descobrir-produtos",
   auth,
+  clientUploadConcurrencyLimit,
   productDiscoveryUpload.single("imagem"),
+  validateClientImageUploads,
   async (req, res) => {
     const whatsapp = req.user.whatsapp;
     const cliente = readClientes()[whatsapp];
@@ -4028,7 +4731,8 @@ app.post(
 app.post(
   "/empresa/planejamento-mensal/solicitar",
   auth,
-  upload.fields(MONTHLY_PLANNING_UPLOAD_FIELDS),
+  clientUploadConcurrencyLimit,
+  secureClientUploadFields(MONTHLY_PLANNING_UPLOAD_FIELDS),
   (req, res) => {
     const whatsapp = req.user.whatsapp;
     const clientes = readClientes();
@@ -4140,6 +4844,7 @@ app.post(
         billing: error?.billing
       });
     } finally {
+      cleanupUploadedFiles(req.files);
       releaseFreeArtClaimLocks(freeArtClaimLockKeys);
     }
   }
@@ -4196,7 +4901,7 @@ function handleMonthlyPlanningCalendarList(req, res) {
     });
 
     if (!adminFreeArtsEnabled()) {
-      return res.json(monthlyCalendar);
+      return res.json(protectOrderMediaPayload(monthlyCalendar, whatsapp));
     }
 
     const freeArtItems = freeArtCampaignsService.listClientCalendar({
@@ -4209,12 +4914,12 @@ function handleMonthlyPlanningCalendarList(req, res) {
       ...freeArtItems
     ].sort((a, b) => String(a.sort_key || "").localeCompare(String(b.sort_key || "")));
 
-    return res.json({
+    return res.json(protectOrderMediaPayload({
       ...monthlyCalendar,
       total: postagens.length,
       postagens,
       itens: postagens
-    });
+    }, whatsapp));
   } catch (error) {
     console.error("[planejamento-mensal][calendario] erro ao listar", {
       whatsapp,
@@ -4299,7 +5004,7 @@ function handleMonthlyPlanningCalendarReschedule(req, res) {
       });
     }
 
-    return res.json(monthlyPlanningService.rescheduleClientPlanningCalendarItem({
+    const rescheduled = monthlyPlanningService.rescheduleClientPlanningCalendarItem({
       baseDir: MONTHLY_PLANNINGS_DIR,
       whatsapp,
       pedidosDir: PEDIDOS_DIR,
@@ -4309,7 +5014,8 @@ function handleMonthlyPlanningCalendarReschedule(req, res) {
       planejamentoItemId: req.body?.planejamento_item_id || "",
       date: req.body?.data || req.body?.date || req.body?.data_sugerida || "",
       time: req.body?.horario || req.body?.time || req.body?.horario_sugerido || ""
-    }));
+    });
+    return res.json(protectOrderMediaPayload(rescheduled, whatsapp));
   } catch (error) {
     console.error("[planejamento-mensal][calendario] erro ao reagendar", {
       whatsapp,
@@ -4353,12 +5059,12 @@ app.get("/empresa/planejamento-mensal/:planningId", auth, (req, res, next) => {
   }
 
   try {
-    return res.json(monthlyPlanningService.publicDetailPayload({
+    return res.json(protectOrderMediaPayload(monthlyPlanningService.publicDetailPayload({
       baseDir: MONTHLY_PLANNINGS_DIR,
       whatsapp,
       planningId: req.params.planningId,
       pedidosDir: PEDIDOS_DIR
-    }));
+    }), whatsapp));
   } catch (error) {
     return res.status(error?.statusCode || 500).json({
       ok: false,
@@ -5098,6 +5804,7 @@ function criarPedidoHandler(categoria) {
         error: "Não foi possível criar o pedido agora. Tente novamente em alguns instantes."
       });
     } finally {
+      cleanupUploadedFiles(req.files);
       releaseFreeArtClaimLocks(freeArtClaimLockKeys);
     }
   };
@@ -5107,7 +5814,8 @@ function criarPedidoHandler(categoria) {
 app.post(
   "/pedidos",
   auth,
-  upload.fields(PEDIDO_UPLOAD_FIELDS),
+  clientUploadConcurrencyLimit,
+  secureClientUploadFields(PEDIDO_UPLOAD_FIELDS),
   (req, res) => {
     const flyer_tipo = (req.body?.flyer_tipo || "").toLowerCase();
     const productFromRegistry = productsRegistry.resolveProductFromRequestBody(req.body);
@@ -5132,14 +5840,16 @@ app.post(
 app.post(
   "/mascotes",
   auth,
-  upload.fields(PEDIDO_UPLOAD_FIELDS),
+  clientUploadConcurrencyLimit,
+  secureClientUploadFields(PEDIDO_UPLOAD_FIELDS),
   criarPedidoHandler("mascote")
 );
 
 app.post(
   "/resultado_do_jogo",
   auth,
-  upload.fields(PEDIDO_UPLOAD_FIELDS),
+  clientUploadConcurrencyLimit,
+  secureClientUploadFields(PEDIDO_UPLOAD_FIELDS),
   criarPedidoHandler("resultado")
 );
 
@@ -5158,27 +5868,18 @@ app.get("/bot/pedidos/novos", botRunnerAuth, (req, res) => {
   const whatsapps = fs.readdirSync(PEDIDOS_DIR);
 
   for (const whatsapp of whatsapps) {
-    const pastaWhatsapp = path.join(PEDIDOS_DIR, whatsapp);
-    if (!fs.existsSync(pastaWhatsapp) || !fs.statSync(pastaWhatsapp).isDirectory()) continue;
-
-    const meses = fs.readdirSync(pastaWhatsapp);
-
-    for (const mes of meses) {
-      const pastaMes = path.join(pastaWhatsapp, mes);
-      if (!fs.existsSync(pastaMes) || !fs.statSync(pastaMes).isDirectory()) continue;
-
-      const ids = fs.readdirSync(pastaMes);
-
-      for (const id of ids) {
-        const base = path.join(pastaMes, id);
-        const statusPedido = readOrderStatus(base, "");
-
-        if (statusPedido === "novo" || statusPedido === "ajuste_pendente") {
-          const pedido = safeReadJson(path.join(base, "pedido.json")) || {};
-          if (monthlyPlanningService.isPlanningOrder(pedido)) continue;
-          if (freeArtCampaignsService.isFreeArtOrder(pedido)) continue;
-          pedidos.push({ id, whatsapp, mes, status: statusPedido });
-        }
+    for (const item of orderStorage.listPedidoBasesByWhatsapp(PEDIDOS_DIR, whatsapp)) {
+      const statusPedido = readOrderStatus(item.base, "");
+      if (statusPedido === "novo" || statusPedido === "ajuste_pendente") {
+        const pedido = item.pedido || {};
+        if (monthlyPlanningService.isPlanningOrder(pedido)) continue;
+        if (freeArtCampaignsService.isFreeArtOrder(pedido)) continue;
+        pedidos.push({
+          id: item.id,
+          whatsapp,
+          mes: path.basename(path.dirname(item.base)),
+          status: statusPedido
+        });
       }
     }
   }
@@ -5302,7 +6003,9 @@ app.get("/pedidos/novos", auth, (req, res) => {
   const pedidos = [];
 
   for (const id of fs.readdirSync(dir)) {
-    const pdir = path.join(dir, id);
+    if (!orderStorage.isSafePathSegment(id)) continue;
+    const pdir = orderStorage.resolveContained(dir, id);
+    if (!pdir || !orderStorage.orderMetadataMatchesOwner(pdir, whatsapp)) continue;
 
     if (readOrderStatus(pdir, "") === "novo") {
       pedidos.push({ id });
@@ -5366,7 +6069,7 @@ app.get("/meus-pedidos", auth, (req, res) => {
       data: item.pedido.data || item.criado_em,
       criado_em: item.criado_em,
       imagem_url: imagemPronta
-        ? `${req.protocol}://${req.get("host")}/pedidos/${item.id}/preview`
+        ? buildOrderMediaUrl(whatsapp, item.id, "preview")
         : null,
       imagem_pronta: imagemPronta,
       descricao_instagram: descricaoPostagemPedido(item.pedido),
@@ -5542,7 +6245,7 @@ app.post("/pedidos/:id/gerar-pix", auth, async (req, res) => {
         pedido_id: id,
         valor_pendente: Number(valorPendente.toFixed(2))
       },
-      notification_url: "https://ia4tube-api.onrender.com/webhook/mercadopago"
+      notification_url: MP_NOTIFICATION_URL
     };
 
     const r = await fetch("https://api.mercadopago.com/v1/payments", {
@@ -5791,6 +6494,7 @@ app.get("/pedidos/:id/download-resultado", auth, (req, res) => {
 
   res.setHeader("Content-Type", "image/png");
   res.setHeader("Content-Disposition", `attachment; filename="${req.params.id}_resultado.png"`);
+  allowProtectedCrossOriginMedia(res);
 
   return res.sendFile(arquivo);
 });
@@ -5970,7 +6674,7 @@ app.get("/pedidos/:id/info", auth, (req, res) => {
     historia_empresa: pedido.historia_empresa || "",
     imagem_pronta,
     preview_url: imagem_pronta
-      ? `${req.protocol}://${req.get("host")}/pedidos/${req.params.id}/preview`
+      ? buildOrderMediaUrl(whatsapp, req.params.id, "preview")
       : null,
     aprovado_cliente: pedido.aprovado_cliente === true,
     pagamento_pendente: pagamentoPendente,
@@ -5999,31 +6703,77 @@ app.get("/pedidos/:id/info", auth, (req, res) => {
   });
 });
 
-// ===== PREVIEW DA IMAGEM FINAL =====
-app.get("/pedidos/:id/preview", (req, res) => {
-  const pedidoId = req.params.id;
+function resolveOrderMediaAccess(req, variant) {
+  const authorization = String(req.headers.authorization || "");
+  const bearerToken = authorization.startsWith("Bearer ")
+    ? authorization.slice(7).trim()
+    : "";
+  let owner = "";
 
-  function procurarPedidoPorId() {
-    if (!fs.existsSync(PEDIDOS_DIR)) return null;
-
-    const whatsapps = fs.readdirSync(PEDIDOS_DIR);
-
-    for (const whatsapp of whatsapps) {
-      const pastaWhatsapp = path.join(PEDIDOS_DIR, whatsapp);
-      if (!fs.statSync(pastaWhatsapp).isDirectory()) continue;
-
-      const meses = fs.readdirSync(pastaWhatsapp);
-
-      for (const mes of meses) {
-        const base = path.join(pastaWhatsapp, mes, pedidoId);
-        if (fs.existsSync(base)) return base;
-      }
+  if (bearerToken) {
+    try {
+      const user = verifyUserToken(bearerToken);
+      const client = readClientes()[user.whatsapp];
+      if (!client || client.ativo === false) return { authorized: false, base: null };
+      owner = user.whatsapp;
+    } catch {
+      return { authorized: false, base: null };
+    }
+  } else {
+    owner = orderMediaAccess.openOwnerContext(req.query?.ctx);
+    if (
+      !owner ||
+      !orderMediaAccess.verify({
+        owner,
+        orderId: req.params.id,
+        variant,
+        expiresAt: Number(req.query?.exp),
+        nonce: req.query?.nonce,
+        signature: req.query?.sig
+      })
+    ) {
+      return { authorized: false, base: null };
     }
 
-    return null;
+    const client = readClientes()[owner];
+    if (!client || client.ativo === false) return { authorized: false, base: null };
   }
 
-  const base = procurarPedidoPorId();
+  return {
+    authorized: true,
+    base: getPedidoBase(owner, req.params.id),
+    owner
+  };
+}
+
+app.get("/pedidos/:id/media-url", auth, (req, res) => {
+  const variant = orderMediaAccess.normalizeVariant(req.query?.variant || "preview");
+  if (!variant) {
+    return res.status(400).json({ ok: false, error: "Variante de imagem invalida" });
+  }
+  if (!getPedidoBase(req.user.whatsapp, req.params.id)) {
+    return res.status(404).json({ ok: false, error: "Pedido nao encontrado" });
+  }
+
+  return res.json({
+    ok: true,
+    variant,
+    expires_in: 5 * 60,
+    url: buildOrderMediaUrl(req.user.whatsapp, req.params.id, variant)
+  });
+});
+
+// ===== PREVIEW DA IMAGEM FINAL =====
+app.get("/pedidos/:id/preview", (req, res) => {
+  const access = resolveOrderMediaAccess(req, "preview");
+  if (!access.authorized) {
+    return res.status(401).json({
+      ok: false,
+      code: "order_media_authorization_required",
+      error: "Autorizacao obrigatoria."
+    });
+  }
+  const base = access.base;
 
   if (!base) {
     return res.status(404).json({ ok: false, error: "Pedido não encontrado" });
@@ -6034,12 +6784,24 @@ app.get("/pedidos/:id/preview", (req, res) => {
   const pedidoPath = path.join(base, "pedido.json");
   const pedido = safeReadJson(pedidoPath) || {};
   const pagamentoPendente = pedido.pagamento_pendente === true;
+  const cadastroPendente = downloadBloqueadoPorCadastro(
+    readClientes()[access.owner]
+  );
+  const somentePreviewProtegido = pagamentoPendente || cadastroPendente;
 
   if (isAdminFreeArtOrderHidden(pedido)) {
     return sendHiddenAdminFreeArtOrder(res);
   }
 
-  const previewPath = pagamentoPendente && fs.existsSync(previewProtegidaPath)
+  if (somentePreviewProtegido && !fs.existsSync(previewProtegidaPath)) {
+    return res.status(404).json({
+      ok: false,
+      code: "protected_preview_unavailable",
+      error: "Preview protegido ainda nao ficou pronto."
+    });
+  }
+
+  const previewPath = somentePreviewProtegido
     ? previewProtegidaPath
     : resultadoFinalPath;
 
@@ -6052,13 +6814,23 @@ app.get("/pedidos/:id/preview", (req, res) => {
   } else {
     res.setHeader("Content-Type", "image/png");
   }
+  res.setHeader("Cache-Control", "private, max-age=60, no-transform");
+  allowProtectedCrossOriginMedia(res);
 
   return res.sendFile(previewPath);
 });
 
 // ===== MINIATURA DA IMAGEM FINAL =====
 app.get("/pedidos/:id/thumbnail", (req, res) => {
-  const base = getPedidoBaseGlobal(req.params.id);
+  const access = resolveOrderMediaAccess(req, "thumbnail");
+  if (!access.authorized) {
+    return res.status(401).json({
+      ok: false,
+      code: "order_media_authorization_required",
+      error: "Autorizacao obrigatoria."
+    });
+  }
+  const base = access.base;
 
   if (!base) {
     return res.status(404).json({ ok: false, error: "Pedido nÃ£o encontrado" });
@@ -6072,9 +6844,24 @@ app.get("/pedidos/:id/thumbnail", (req, res) => {
     return sendHiddenAdminFreeArtOrder(res);
   }
 
-  const thumbnailPath = fs.existsSync(resultadoFinalPath)
-    ? resultadoFinalPath
-    : previewProtegidaPath;
+  const paymentPending = pedido.pagamento_pendente === true;
+  const registrationPending = downloadBloqueadoPorCadastro(
+    readClientes()[access.owner]
+  );
+  const protectedPreviewOnly = paymentPending || registrationPending;
+  if (protectedPreviewOnly && !fs.existsSync(previewProtegidaPath)) {
+    return res.status(404).json({
+      ok: false,
+      code: "protected_preview_unavailable",
+      error: "Preview protegido ainda nao ficou pronto."
+    });
+  }
+
+  const thumbnailPath = protectedPreviewOnly
+    ? previewProtegidaPath
+    : fs.existsSync(resultadoFinalPath)
+      ? resultadoFinalPath
+      : previewProtegidaPath;
 
   if (!fs.existsSync(thumbnailPath)) {
     return res.status(404).json({ ok: false, error: "Imagem ainda nÃ£o ficou pronta" });
@@ -6085,7 +6872,8 @@ app.get("/pedidos/:id/thumbnail", (req, res) => {
   } else {
     res.setHeader("Content-Type", "image/png");
   }
-  res.setHeader("Cache-Control", "public, max-age=300");
+  res.setHeader("Cache-Control", "private, max-age=60, no-transform");
+  allowProtectedCrossOriginMedia(res);
 
   return res.sendFile(thumbnailPath);
 });
@@ -6124,30 +6912,13 @@ app.post("/pedidos/:id/status", auth, (req, res) => {
   const base = getPedidoBase(whatsapp, req.params.id);
 
   if (!base) {
-    return res.status(404).json({ ok: false, error: "Pedido não encontrado" });
+    return res.status(404).json({ ok: false, code: "order_not_found", error: "Pedido nao encontrado" });
   }
-
-  const pedido = safeReadJson(path.join(base, "pedido.json")) || {};
-  if (isAdminFreeArtOrderHidden(pedido)) {
-    return sendHiddenAdminFreeArtOrder(res);
-  }
-  if (freeArtCampaignsService.isFreeArtOrder(pedido)) {
-    return res.status(403).json({
-      ok: false,
-      code: "free_art_weekly_status_blocked",
-      error: "A Arte Gratis da Semana nao entra no fluxo normal de status."
-    });
-  }
-
-  const { status } = req.body || {};
-
-  if (!orderStatus.isValidPublicStatus(status)) {
-    return res.status(400).json({ ok: false, error: "status inválido" });
-  }
-
-  writeOrderStatus(base, status);
-
-  return res.json({ ok: true });
+  return res.status(403).json({
+    ok: false,
+    code: "client_status_transition_forbidden",
+    error: "Atualizacao de status reservada ao processamento autorizado."
+  });
 });
 
 // ===== UPLOAD DO RESULTADO FINAL =====
@@ -6855,7 +7626,14 @@ app.post("/bot/suporte/erro-pedido", botRunnerAuth, (req, res) => {
       return res.status(400).json({ ok:false, error:"pedido_id e whatsapp obrigatórios" });
     }
 
-    const basePedido = getPedidoBaseGlobal(pedido_id);
+    const basePedido = getPedidoBase(whatsapp, pedido_id);
+    if (!basePedido) {
+      return res.status(404).json({
+        ok: false,
+        code: "order_owner_mismatch",
+        error: "Pedido nao encontrado para a empresa informada."
+      });
+    }
 
     if (basePedido) {
       try {
@@ -6919,33 +7697,47 @@ app.post("/bot/suporte/erro-pedido", botRunnerAuth, (req, res) => {
 function resolverWhatsappDestinoSuporte(destino) {
   destino = String(destino || "").trim();
 
-  if (!destino) return "";
+  if (!destino) return { whatsapp: "", ambiguous: false };
+
+  const candidatos = new Set();
+  const adicionarCandidato = (value) => {
+    const candidato = String(value || "").trim();
+    if (orderStorage.isSafePathSegment(candidato)) {
+      candidatos.add(candidato);
+    }
+  };
 
   const abertas = readJsonArraySafe(SUPORTE_ABERTAS_FILE);
-  const conversa = abertas.find(c => c.id === destino && !c.finalizada);
-
-  if (conversa?.whatsapp) {
-    return conversa.whatsapp;
+  for (const conversa of abertas) {
+    if (conversa?.id === destino && !conversa.finalizada) {
+      adicionarCandidato(conversa.whatsapp);
+    }
   }
 
   const clientes = readClientes();
 
-  if (clientes[destino]) {
-    return destino;
-  }
-
-  const basePedido = getPedidoBaseGlobal(destino);
-
-  if (basePedido) {
-    const pedidoPath = path.join(basePedido, "pedido.json");
-    const pedido = safeReadJson(pedidoPath) || {};
-
-    if (pedido.whatsapp) {
-      return pedido.whatsapp;
+  const loginNormalizado = normalizarLoginId(destino);
+  for (const [tenantKey, cliente] of Object.entries(clientes)) {
+    if (!cliente || typeof cliente !== "object") continue;
+    const loginPublico = normalizarLoginId(cliente.login_id);
+    if (
+      (tenantKey === loginNormalizado && (!loginPublico || loginPublico === loginNormalizado)) ||
+      loginPublico === loginNormalizado
+    ) {
+      adicionarCandidato(tenantKey);
     }
   }
 
-  return "";
+  for (const basePedido of orderStorage.findPedidoBasesGlobal(PEDIDOS_DIR, destino)) {
+    const pedidoPath = path.join(basePedido, "pedido.json");
+    const pedido = safeReadJson(pedidoPath) || {};
+    adicionarCandidato(pedido.whatsapp);
+  }
+
+  return {
+    whatsapp: candidatos.size === 1 ? [...candidatos][0] : "",
+    ambiguous: candidatos.size > 1
+  };
 }
 
 app.post("/bot/suporte/enviar-cliente", auth, (req, res) => {
@@ -6964,9 +7756,17 @@ app.post("/bot/suporte/enviar-cliente", auth, (req, res) => {
       });
     }
 
-    const whatsapp = resolverWhatsappDestinoSuporte(destino);
+    const destinoResolvido = resolverWhatsappDestinoSuporte(destino);
 
-    if (!whatsapp) {
+    if (destinoResolvido.ambiguous) {
+      return res.status(409).json({
+        ok:false,
+        code:"support_destination_ambiguous",
+        error:"Destino de suporte ambiguo."
+      });
+    }
+
+    if (!destinoResolvido.whatsapp) {
       return res.status(404).json({
         ok:false,
         error:"Cliente não encontrado por esse ID, WhatsApp ou pedido."
@@ -6974,7 +7774,7 @@ app.post("/bot/suporte/enviar-cliente", auth, (req, res) => {
     }
 
     const conversa = salvarMensagemSuporteAberta(
-      whatsapp,
+      destinoResolvido.whatsapp,
       "",
       texto,
       "humano"
@@ -7278,14 +8078,23 @@ app.use((err, req, res, next) => {
 
   if (err instanceof multer.MulterError) {
     const isProductDiscovery = req.path === "/empresa/planejamento-mensal/descobrir-produtos";
-    const imageTooLarge = err.code === "LIMIT_FILE_SIZE";
-    return res.status(isProductDiscovery && imageTooLarge ? 413 : 400).json({
+    const limitExceeded = new Set([
+      "LIMIT_FILE_SIZE",
+      "LIMIT_FILE_COUNT",
+      "LIMIT_FIELD_COUNT",
+      "LIMIT_FIELD_VALUE",
+      "LIMIT_PART_COUNT",
+      "LIMIT_TOTAL_FILE_SIZE"
+    ]).has(err.code);
+    return res.status(limitExceeded ? 413 : 400).json({
       ok: false,
-      ...(isProductDiscovery ? {
-        code: imageTooLarge
+      code: isProductDiscovery
+        ? limitExceeded
           ? "product_discovery_image_too_large"
           : "product_discovery_invalid_image"
-      } : {}),
+        : limitExceeded
+          ? "upload_limit_exceeded"
+          : "invalid_upload",
       error: "Não foi possível enviar a imagem. Verifique o arquivo e tente novamente."
     });
   }

@@ -26,8 +26,9 @@ ESTADO_FILE = BASE_DIR / "runner_estado.json"
 TEMPOS_FILE = BASE_DIR / "runner_tempos.json"
 INICIAR_A_PARTIR_DE = "20260428_182150"
 
-API_BASE = os.environ.get("IA4TUBE_API_BASE", "https://ia4tube-api.onrender.com").rstrip("/")
-BOT_TOKEN_FILE = BASE_DIR / "bot_token.txt"
+API_BASE = os.environ.get("IA4TUBE_API_BASE", "").strip().rstrip("/")
+if not API_BASE.startswith("https://"):
+    raise RuntimeError("IA4TUBE_API_BASE HTTPS deve ser configurada explicitamente.")
 TEMPO_PADRAO_SEGUNDOS = 0
 HISTORICO_TEMPOS_MAX = 20
 
@@ -51,17 +52,7 @@ def salvar_ultimo_pedido(nome_pedido):
     )
 
 def carregar_bot_token():
-    token = os.environ.get("IA4TUBE_BOT_TOKEN", "").strip()
-    if token:
-        return token
-
-    if BOT_TOKEN_FILE.exists():
-        try:
-            return BOT_TOKEN_FILE.read_text(encoding="utf-8").strip()
-        except Exception:
-            return ""
-
-    return ""
+    return os.environ.get("IA4TUBE_BOT_TOKEN", "").strip()
 
 def safe_segment(value, fallback):
     value = str(value or "").strip()
@@ -83,7 +74,7 @@ def mes_do_pedido(pedido):
 def request_api_json(path, timeout=15):
     token = carregar_bot_token()
     if not token:
-        log("Aviso: IA4TUBE_BOT_TOKEN/bot_token.txt nao configurado; nao consigo buscar pedidos na API.")
+        log("Aviso: IA4TUBE_BOT_TOKEN nao configurado; nao consigo buscar pedidos na API.")
         return None
 
     req = urllib.request.Request(
@@ -330,7 +321,7 @@ def enviar_tempo_est_api(payload):
 def avisar_erro_pedido_api(pasta, motivo):
     token = carregar_bot_token()
     if not token:
-        log("⚠️ Sem bot_token.txt: não consegui avisar suporte no site.")
+        log("⚠️ Sem IA4TUBE_BOT_TOKEN: não consegui avisar suporte no site.")
         return
 
     try:

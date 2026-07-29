@@ -23,6 +23,40 @@ function safeSegment(value, fallback = "usuario") {
     .slice(0, 100) || fallback;
 }
 
+function tenantSegment(value) {
+  const segment = String(value || "").trim();
+  if (
+    !segment ||
+    segment.length > 160 ||
+    segment === "." ||
+    segment === ".." ||
+    /[\\/\0-\x1f\x7f]/.test(segment)
+  ) {
+    const error = new Error("Identificador de empresa invalido.");
+    error.statusCode = 403;
+    error.code = "invalid_tenant_identifier";
+    throw error;
+  }
+  return segment;
+}
+
+function strictStorageSegment(value, label) {
+  const segment = String(value || "").trim();
+  if (
+    !segment ||
+    segment.length > 160 ||
+    segment !== safeSegment(segment, "") ||
+    segment === "." ||
+    segment === ".."
+  ) {
+    const error = new Error(`${label} invalido.`);
+    error.statusCode = 400;
+    error.code = "invalid_storage_identifier";
+    throw error;
+  }
+  return segment;
+}
+
 function currentMonthCycle(now = new Date()) {
   const year = now.getUTCFullYear();
   const month = String(now.getUTCMonth() + 1).padStart(2, "0");
@@ -87,7 +121,12 @@ function ensureDir(dirPath) {
 }
 
 function requestDir(baseDir, whatsapp, ciclo, documentId) {
-  return path.join(baseDir, safeSegment(whatsapp), safeSegment(ciclo, "ciclo"), safeSegment(documentId, "documento"));
+  return path.join(
+    baseDir,
+    tenantSegment(whatsapp),
+    strictStorageSegment(ciclo, "Ciclo"),
+    strictStorageSegment(documentId, "Documento")
+  );
 }
 
 function readJson(filePath) {
@@ -134,16 +173,47 @@ function parseRequest(dirPath) {
   };
 }
 
-function listRequestsForCycle({ baseDir, whatsapp, ciclo }) {
-  const cycleDir = path.join(baseDir, safeSegment(whatsapp), safeSegment(ciclo, "ciclo"));
-  if (!fs.existsSync(cycleDir)) return [];
+function requestStoredForOwner(baseDir, request) {
+  try {
+    const owner = String(request?.whatsapp || "");
+    if (!owner) return false;
+    const allowedRoots = [...new Set([
+      path.resolve(baseDir, tenantSegment(owner)),
+      path.resolve(baseDir, safeSegment(owner))
+    ])];
+    const requestPath = path.resolve(request.base_path || "");
+    return allowedRoots.some((root) => {
+      const relative = path.relative(root, requestPath);
+      return Boolean(
+        relative &&
+        !relative.startsWith(`..${path.sep}`) &&
+        relative !== ".." &&
+        !path.isAbsolute(relative)
+      );
+    });
+  } catch {
+    return false;
+  }
+}
 
-  return fs.readdirSync(cycleDir, { withFileTypes: true })
-    .filter((entry) => entry.isDirectory())
-    .map((entry) => parseRequest(path.join(cycleDir, entry.name)))
+function listRequestsForCycle({ baseDir, whatsapp, ciclo }) {
+  const exactTenant = tenantSegment(whatsapp);
+  const legacyTenant = safeSegment(whatsapp);
+  const safeCycle = strictStorageSegment(ciclo, "Ciclo");
+  const tenantDirectories = [...new Set([exactTenant, legacyTenant])]
+    .map((tenant) => path.join(baseDir, tenant, safeCycle))
+    .filter((cycleDir) => fs.existsSync(cycleDir));
+
+  return tenantDirectories
+    .flatMap((cycleDir) => fs.readdirSync(cycleDir, { withFileTypes: true })
+      .filter((entry) => entry.isDirectory())
+      .map((entry) => parseRequest(path.join(cycleDir, entry.name))))
     .filter(Boolean)
     .filter((request) => String(request.whatsapp || "") === String(whatsapp || ""))
-    .sort((a, b) => String(b.criado_em || "").localeCompare(String(a.criado_em || "")));
+    .sort((a, b) => String(b.criado_em || "").localeCompare(String(a.criado_em || "")))
+    .filter((request, index, all) => (
+      all.findIndex((candidate) => candidate.base_path === request.base_path) === index
+    ));
 }
 
 function activeRequestMap({ baseDir, whatsapp, ciclo }) {
@@ -354,8 +424,9 @@ function createRequest({ baseDir, cliente, whatsapp, materialId, body, logoPath 
 }
 
 function findRequestByDocument({ baseDir, documentId }) {
-  const safeDocumentId = safeSegment(documentId, "documento");
+  const safeDocumentId = strictStorageSegment(documentId, "Documento");
   if (!fs.existsSync(baseDir)) return null;
+  const matches = [];
 
   for (const userEntry of fs.readdirSync(baseDir, { withFileTypes: true })) {
     if (!userEntry.isDirectory()) continue;
@@ -365,13 +436,14 @@ function findRequestByDocument({ baseDir, documentId }) {
       const requestDirPath = path.join(userDir, cycleEntry.name, safeDocumentId);
       if (!fs.existsSync(requestDirPath)) continue;
       const request = parseRequest(requestDirPath);
-      if (!request) return null;
-      if (String(request.document_id || request.id) !== String(documentId)) return null;
-      return request;
+      if (!request) continue;
+      if (String(request.document_id || request.id) !== String(documentId)) continue;
+      if (!requestStoredForOwner(baseDir, request)) continue;
+      matches.push(request);
     }
   }
 
-  return null;
+  return matches.length === 1 ? matches[0] : null;
 }
 
 function findClientRequestByMaterial({ baseDir, whatsapp, ciclo, materialId, documentId = "" }) {
@@ -484,7 +556,11 @@ function listBotPending({ baseDir, limit = 5 }) {
       for (const docEntry of fs.readdirSync(cycleDir, { withFileTypes: true })) {
         if (!docEntry.isDirectory()) continue;
         const request = parseRequest(path.join(cycleDir, docEntry.name));
-        if (!request || request.status !== "novo") continue;
+        if (
+          !request ||
+          !requestStoredForOwner(baseDir, request) ||
+          request.status !== "novo"
+        ) continue;
         items.push({
           document_id: request.document_id || request.id,
           material_id: request.material_id,

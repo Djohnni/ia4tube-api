@@ -404,9 +404,14 @@ test("disabled gates preserve upload contract and create no notification state",
         body: mismatchForm
       }
     );
-    assert.equal(mismatchUpload.status, 200);
+    assert.equal(mismatchUpload.status, 404);
     const mismatchPedido = JSON.parse(
       fs.readFileSync(path.join(mismatchDir, "pedido.json"), "utf8")
+    );
+    assert.equal(mismatchPedido.status, "em_producao");
+    assert.equal(
+      fs.existsSync(path.join(mismatchDir, "resultado_final.png")),
+      false
     );
     assert.equal(
       Object.hasOwn(mismatchPedido, "art_ready_generation_id"),

@@ -10,8 +10,9 @@ import requests
 BASE_DIR = Path(os.environ.get("IA4TUBE_BASE_DIR", Path(__file__).resolve().parent))
 CAMPAIGNS_DIR = Path(os.environ.get("IA4TUBE_FREE_ART_CAMPAIGNS_DIR", BASE_DIR / "dados" / "campanhas_artes_gratis"))
 PIPELINE = BASE_DIR / "resultado_pipeline_arte_gratis_semanal.py"
-API_BASE = os.environ.get("IA4TUBE_API_BASE", "https://ia4tube-api.onrender.com").rstrip("/")
-BOT_TOKEN_FILE = BASE_DIR / "bot_token.txt"
+API_BASE = os.environ.get("IA4TUBE_API_BASE", "").strip().rstrip("/")
+if not API_BASE.startswith("https://"):
+    raise RuntimeError("IA4TUBE_API_BASE HTTPS deve ser configurada explicitamente.")
 INTERVAL_SECONDS = int(os.environ.get("IA4TUBE_FREE_ARTS_INTERVAL_SECONDS", "10"))
 PROCESS_TIMEOUT_SECONDS = int(os.environ.get("IA4TUBE_FREE_ARTS_TIMEOUT_SECONDS", "900"))
 
@@ -21,18 +22,13 @@ def log(message):
 
 
 def bot_token():
-    token = os.environ.get("IA4TUBE_BOT_TOKEN", "").strip()
-    if token:
-        return token
-    if BOT_TOKEN_FILE.exists():
-        return BOT_TOKEN_FILE.read_text(encoding="utf-8", errors="ignore").strip()
-    return ""
+    return os.environ.get("IA4TUBE_BOT_TOKEN", "").strip()
 
 
 def api_get(path):
     token = bot_token()
     if not token:
-        log("IA4TUBE_BOT_TOKEN/bot_token.txt nao configurado.")
+        log("IA4TUBE_BOT_TOKEN nao configurado.")
         return None
     response = requests.get(
         f"{API_BASE}{path}",

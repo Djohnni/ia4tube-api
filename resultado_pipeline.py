@@ -12,7 +12,9 @@ from openai import OpenAI
 from PIL import Image, ImageDraw, ImageFont
 from nicho_knowledge_local import build_local_niche_knowledge_for_order, resolve_local_nicho_id
 
-API_BASE = os.environ.get("IA4TUBE_API_BASE", "https://api.ia4tube.com.br").rstrip("/")
+API_BASE = os.environ.get("IA4TUBE_API_BASE", "").strip().rstrip("/")
+if not API_BASE.startswith("https://"):
+    raise RuntimeError("IA4TUBE_API_BASE HTTPS deve ser configurada explicitamente.")
 DESCRIPTION_TIMEOUT_SECONDS = float(os.environ.get("IA4TUBE_DESCRIPTION_TIMEOUT_SECONDS", "30"))
 
 # =========================================================

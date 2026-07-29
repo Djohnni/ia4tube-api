@@ -54,6 +54,14 @@ function firstText(...values) {
   return "";
 }
 
+function boundedDisplayText(value, maxLength = 120) {
+  return String(value || "")
+    .replace(/[\u0000-\u001f\u007f]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, maxLength);
+}
+
 function normalizeOrderBody(body = {}) {
   const newModel = normalizeNewOrderModel(body);
   const companyFields = newModel.fields || {};
@@ -72,7 +80,7 @@ function normalizeOrderBody(body = {}) {
     gols_time_principal: body.gols_time_principal,
     gols_adversario: body.gols_adversario,
     time_adversario: body.time_adversario,
-    ramo: firstText(body.ramo, companyFields.ramo),
+    ramo: boundedDisplayText(firstText(body.ramo, companyFields.ramo)),
     nome_empresa: firstText(body.nome_empresa, companyFields.nome_empresa, companyFields.company_name),
     objetivo: firstText(body.objetivo, companyFields.objetivo, companyFields.objective),
     oferta: firstText(body.oferta, companyFields.oferta, companyFields.offer),

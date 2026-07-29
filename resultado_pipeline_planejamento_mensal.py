@@ -27,8 +27,9 @@ from resultado_pipeline_ia4tube import (
 
 
 MAX_REFERENCIAS_PLANEJAMENTO = 8
-API_BASE = os.environ.get("IA4TUBE_API_BASE", "https://ia4tube-api.onrender.com").rstrip("/")
-BOT_TOKEN_FILE = BASE_DIR / "bot_token.txt"
+API_BASE = os.environ.get("IA4TUBE_API_BASE", "").strip().rstrip("/")
+if not API_BASE.startswith("https://"):
+    raise RuntimeError("IA4TUBE_API_BASE HTTPS deve ser configurada explicitamente.")
 ALL_IMAGES_DIR = BASE_DIR / "dados" / "pedidos" / "todas imagens"
 TEXTOS_INTERNOS_PROIBIDOS = [
     "reforco",
@@ -777,23 +778,13 @@ def save_description(pedido_dir, pedido, descricao):
 
 
 def load_bot_token():
-    token = os.environ.get("IA4TUBE_BOT_TOKEN", "").strip()
-    if token:
-        return token
-
-    try:
-        if BOT_TOKEN_FILE.exists():
-            return BOT_TOKEN_FILE.read_text(encoding="utf-8").strip()
-    except Exception:
-        return ""
-
-    return ""
+    return os.environ.get("IA4TUBE_BOT_TOKEN", "").strip()
 
 
 def upload_resultado_planejamento(pedido_dir, pedido_id, imagem_path, preview_path=None):
     token = load_bot_token()
     if not token:
-        raise RuntimeError("IA4TUBE_BOT_TOKEN/bot_token.txt nao configurado para upload da arte do Planejamento Mensal.")
+        raise RuntimeError("IA4TUBE_BOT_TOKEN nao configurado para upload da arte do Planejamento Mensal.")
 
     endpoint = os.environ.get("IA4TUBE_PLANNING_ART_UPLOAD_ENDPOINT", "").strip()
     if not endpoint:

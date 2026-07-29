@@ -14,6 +14,7 @@ function writeOrder(pedidosDir, whatsapp, id, ramo) {
   const base = path.join(pedidosDir, whatsapp, "2026-02", id);
   fs.mkdirSync(base, { recursive: true });
   fs.writeFileSync(path.join(base, "pedido.json"), JSON.stringify({
+    whatsapp,
     origem: "planejamento_mensal",
     planejamento_id: `pm_${id}`,
     planejamento_item_id: "item1",

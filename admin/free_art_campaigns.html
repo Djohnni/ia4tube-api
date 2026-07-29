@@ -106,11 +106,15 @@
 
     function renderBranches() {
       $("branch-summary").textContent = `Clientes sem ramo identificado: ${state.withoutBranch || 0}`;
-      $("branches").innerHTML = "";
+      $("branches").replaceChildren();
       state.branches.forEach((branch) => {
         const el = document.createElement("div");
         el.className = `branch ${state.branch?.ramo_normalizado === branch.ramo_normalizado ? "active" : ""}`;
-        el.innerHTML = `<strong>${branch.ramo}</strong><span>${branch.clientes} clientes</span>`;
+        const title = document.createElement("strong");
+        title.textContent = String(branch.ramo || "");
+        const count = document.createElement("span");
+        count.textContent = `${Number(branch.clientes || 0)} clientes`;
+        el.append(title, count);
         el.onclick = () => {
           state.branch = branch;
           $("selected-branch").textContent = `${branch.ramo} - ${branch.clientes} clientes`;
@@ -122,11 +126,20 @@
     }
 
     function renderCampaigns() {
-      $("campaigns").innerHTML = "";
+      $("campaigns").replaceChildren();
       state.campaigns.forEach((campaign) => {
         const el = document.createElement("div");
         el.className = `campaign ${state.selectedCampaign?.id === campaign.id ? "active" : ""}`;
-        el.innerHTML = `<span><strong>${campaign.ramo}</strong><br><span class="muted">${campaign.id}</span></span><span>${campaign.status}</span>`;
+        const details = document.createElement("span");
+        const title = document.createElement("strong");
+        title.textContent = String(campaign.ramo || "");
+        const id = document.createElement("span");
+        id.className = "muted";
+        id.textContent = String(campaign.id || "");
+        details.append(title, document.createElement("br"), id);
+        const status = document.createElement("span");
+        status.textContent = String(campaign.status || "");
+        el.append(details, status);
         el.onclick = () => loadCampaign(campaign.id);
         $("campaigns").appendChild(el);
       });
@@ -134,7 +147,10 @@
 
     function statusBadge(status) {
       const cls = status === "aprovada" ? "ok" : status === "erro" || status === "excluida" ? "err" : "warn";
-      return `<span class="badge ${cls}">${status}</span>`;
+      const badge = document.createElement("span");
+      badge.className = `badge ${cls}`;
+      badge.textContent = String(status || "");
+      return badge;
     }
 
     function renderDetail(data) {
@@ -148,22 +164,48 @@
       $("body").value = campaign.notificacao_mensagem || "Sua arte gratis da semana esta pronta. Toque para ver.";
       $("save-settings").disabled = locked;
       $("duplicate").disabled = false;
-      $("arts").innerHTML = "";
+      $("arts").replaceChildren();
       data.artes.forEach((art) => {
-        const image = art.arquivo_original ? `/bot/free-art-campaigns/${campaign.id}/artes/${art.id}/image?ts=${Date.now()}` : "";
         const el = document.createElement("div");
         el.className = "art";
-        el.innerHTML = `
-          ${image ? `<img src="${image}" alt="${art.id}">` : `<div class="muted" style="aspect-ratio:9/16;display:grid;place-items:center">Aguardando geracao</div>`}
-          <p><strong>${art.id}</strong> ${statusBadge(art.status)}</p>
-          <div class="row">
-            <button class="secondary" data-action="approve" ${locked || art.status !== "pronta" ? "disabled" : ""}>Aprovar</button>
-            <button class="secondary" data-action="regen" ${locked ? "disabled" : ""}>Regenerar</button>
-            <button class="danger" data-action="delete" ${locked ? "disabled" : ""}>Excluir</button>
-          </div>`;
-        el.querySelector('[data-action="approve"]').onclick = () => artAction(campaign.id, art.id, "approve");
-        el.querySelector('[data-action="regen"]').onclick = () => artAction(campaign.id, art.id, "regenerate");
-        el.querySelector('[data-action="delete"]').onclick = () => artAction(campaign.id, art.id, "delete");
+
+        if (art.arquivo_original) {
+          const image = document.createElement("img");
+          image.src = `/bot/free-art-campaigns/${encodeURIComponent(campaign.id)}/artes/${encodeURIComponent(art.id)}/image?ts=${Date.now()}`;
+          image.alt = String(art.id || "");
+          el.appendChild(image);
+        } else {
+          const placeholder = document.createElement("div");
+          placeholder.className = "muted";
+          placeholder.style.cssText = "aspect-ratio:9/16;display:grid;place-items:center";
+          placeholder.textContent = "Aguardando geracao";
+          el.appendChild(placeholder);
+        }
+
+        const summary = document.createElement("p");
+        const artId = document.createElement("strong");
+        artId.textContent = String(art.id || "");
+        summary.append(artId, document.createTextNode(" "), statusBadge(art.status));
+
+        const actions = document.createElement("div");
+        actions.className = "row";
+        const approve = document.createElement("button");
+        approve.className = "secondary";
+        approve.textContent = "Aprovar";
+        approve.disabled = locked || art.status !== "pronta";
+        approve.onclick = () => artAction(campaign.id, art.id, "approve");
+        const regenerate = document.createElement("button");
+        regenerate.className = "secondary";
+        regenerate.textContent = "Regenerar";
+        regenerate.disabled = locked;
+        regenerate.onclick = () => artAction(campaign.id, art.id, "regenerate");
+        const remove = document.createElement("button");
+        remove.className = "danger";
+        remove.textContent = "Excluir";
+        remove.disabled = locked;
+        remove.onclick = () => artAction(campaign.id, art.id, "delete");
+        actions.append(approve, regenerate, remove);
+        el.append(summary, actions);
         $("arts").appendChild(el);
       });
       $("confirm").classList.toggle("hidden", !data.artes.some((art) => art.status === "aprovada") || locked);
