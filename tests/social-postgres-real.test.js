@@ -1164,18 +1164,47 @@ async function proveMigrationConcurrency(
     true,
     "O gate real exige um banco sintetico novo, sem migrations aplicadas."
   );
-  const [first, second] = await Promise.all([
-    firstRunner.apply(configuration.approvalEnvironment),
-    secondRunner.apply(configuration.approvalEnvironment)
-  ]);
+  const runners = [firstRunner, secondRunner];
+  const outcomes = await Promise.allSettled(
+    runners.map((runner) =>
+      runner.apply(configuration.approvalEnvironment)
+    )
+  );
+  const rejected = outcomes
+    .map((outcome, index) => ({ outcome, index }))
+    .filter(({ outcome }) => outcome.status === "rejected");
+  assert.ok(
+    rejected.length <= 1,
+    "No maximo um migrador concorrente pode sofrer timeout do lock."
+  );
+  for (const { outcome } of rejected) {
+    assert.equal(
+      outcome.reason?.code,
+      "55P03",
+      "Somente o timeout seguro do advisory lock pode recusar concorrencia."
+    );
+  }
+  const applied = outcomes
+    .filter((outcome) => outcome.status === "fulfilled")
+    .flatMap((outcome) => outcome.value);
   const expectedVersions = readManifest().map(
     (migration) => migration.version
   );
-  assert.equal(first.length + second.length, expectedVersions.length);
+  assert.equal(applied.length, expectedVersions.length);
   assert.deepEqual(
-    [...first, ...second].map((item) => item.version).sort(),
+    applied.map((item) => item.version).sort(),
     expectedVersions
   );
+  if (rejected.length === 1) {
+    const retry = await runners[rejected[0].index].apply(
+      configuration.approvalEnvironment
+    );
+    assert.deepEqual(
+      retry,
+      [],
+      "O migrador recusado pelo lock deve ser idempotente ao repetir."
+    );
+  }
 }
 
 async function proveAdvisoryLock(
