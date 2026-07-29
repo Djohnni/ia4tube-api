@@ -77,7 +77,7 @@ function createVaultKeyRegistryAdmin(options = {}) {
       });
     } catch (error) {
       if (
-        error?.code === "23503" &&
+        ["23001", "23503"].includes(error?.code) &&
         error?.constraint === CREDENTIAL_KEY_FOREIGN_KEY
       ) {
         postgresFail(

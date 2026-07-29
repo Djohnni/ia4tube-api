@@ -152,27 +152,29 @@ test("admin registry registers and retires only through the owner role", async (
   assert.equal(harness.client.released, true);
 });
 
-test("physical foreign key refusal becomes a closed administrative error", async () => {
-  const harness = fakePool((text) => {
-    if (text.startsWith(`DELETE FROM ${VAULT_KEY_REGISTRY}`)) {
-      const error = new Error("synthetic foreign key refusal");
-      error.code = "23503";
-      error.constraint = CREDENTIAL_KEY_FOREIGN_KEY;
-      throw error;
-    }
-    return { rowCount: 0, rows: [] };
-  });
-  const admin = createVaultKeyRegistryAdmin({ pool: harness.pool });
+for (const postgresErrorCode of ["23001", "23503"]) {
+  test(`physical foreign key refusal ${postgresErrorCode} becomes a closed administrative error`, async () => {
+    const harness = fakePool((text) => {
+      if (text.startsWith(`DELETE FROM ${VAULT_KEY_REGISTRY}`)) {
+        const error = new Error("synthetic foreign key refusal");
+        error.code = postgresErrorCode;
+        error.constraint = CREDENTIAL_KEY_FOREIGN_KEY;
+        throw error;
+      }
+      return { rowCount: 0, rows: [] };
+    });
+    const admin = createVaultKeyRegistryAdmin({ pool: harness.pool });
 
-  await assert.rejects(
-    admin.retire({ keyVersion: "v1" }),
-    (error) =>
-      error?.code === "vault_key_version_in_use" &&
-      error?.cause?.code === "23503"
-  );
-  assert.equal(harness.queries.at(-1).text, "ROLLBACK");
-  assert.equal(harness.client.released, true);
-});
+    await assert.rejects(
+      admin.retire({ keyVersion: "v1" }),
+      (error) =>
+        error?.code === "vault_key_version_in_use" &&
+        error?.cause?.code === postgresErrorCode
+    );
+    assert.equal(harness.queries.at(-1).text, "ROLLBACK");
+    assert.equal(harness.client.released, true);
+  });
+}
 
 test("unknown versions and unauthorized owner role fail closed", async () => {
   const missing = fakePool((text) => {
