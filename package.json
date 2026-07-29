@@ -4,7 +4,11 @@
   "main": "server.js",
   "type": "commonjs",
   "scripts": {
-    "start": "node server.js"
+    "start": "node server.js",
+    "test": "node --test"
+  },
+  "engines": {
+    "node": ">=20 <25"
   },
   "dependencies": {
     "archiver": "^8.0.0",

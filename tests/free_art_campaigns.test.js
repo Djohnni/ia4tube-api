@@ -13,7 +13,10 @@ function tempRoot() {
 function writeOrder(pedidosDir, whatsapp, month, id, pedido) {
   const base = path.join(pedidosDir, whatsapp, month, id);
   fs.mkdirSync(base, { recursive: true });
-  fs.writeFileSync(path.join(base, "pedido.json"), JSON.stringify(pedido, null, 2), "utf8");
+  fs.writeFileSync(path.join(base, "pedido.json"), JSON.stringify({
+    ...pedido,
+    whatsapp: pedido.whatsapp || whatsapp
+  }, null, 2), "utf8");
   fs.writeFileSync(path.join(base, "status.txt"), pedido.status || "pronto", "utf8");
   return base;
 }
@@ -497,6 +500,52 @@ function testLegacyCampaignWithoutDistributionFieldsStillWorks() {
   assert.strictEqual(distributed.distribuicao.length, 3);
 }
 
+function testStorageTraversalAndMisplacedOwnerAreRejected() {
+  const root = tempRoot();
+  const baseDir = path.join(root, "campanhas");
+  const pedidosDir = path.join(root, "pedidos");
+
+  assert.throws(
+    () => storage.readCampaign(baseDir, "../outside"),
+    (error) => error?.code === "invalid_storage_identifier"
+  );
+  assert.throws(
+    () => storage.readArt(baseDir, "campaign-ok", ".."),
+    (error) => error?.code === "invalid_storage_identifier"
+  );
+
+  storage.writeArt(baseDir, "campaign-ok", {
+    id: "art_01",
+    campaign_id: "campaign-ok",
+    status: "pronta"
+  });
+  const outsideFile = path.join(root, "outside.png");
+  fs.writeFileSync(outsideFile, "outside", "utf8");
+  assert.equal(
+    storage.existingFileIsContained(
+      storage.artDir(baseDir, "campaign-ok", "art_01"),
+      outsideFile
+    ),
+    false
+  );
+
+  writeOrder(pedidosDir, "c1", "2026-02", "misplaced-b", {
+    whatsapp: "c2",
+    origem: "planejamento_mensal",
+    planejamento_id: "pm-b",
+    planejamento_item_id: "item-b",
+    ramo: "Segredo B",
+    criado_em: "2026-02-01T10:00:00Z",
+    status: "pronto"
+  });
+  const scan = service.scanClientBranches({
+    pedidosDir,
+    clientes: { c1: { ativo: true } }
+  });
+  assert.equal(scan.clients.length, 0);
+  assert.equal(scan.clientes_sem_ramo_identificado, 1);
+}
+
 testClassifierUsesOnlyOwnIdentifiers();
 testBranchScanUsesLatestPlanningBeforeCompanyArt();
 testCreateAndDistributeDoesNotMutateBilling();
@@ -506,4 +555,5 @@ testDistributionModeTodosKeepsAllClients();
 testDistributionModeSelectedValidation();
 testDetailedPreviewMatchesRealDistribution();
 testLegacyCampaignWithoutDistributionFieldsStillWorks();
+testStorageTraversalAndMisplacedOwnerAreRejected();
 console.log("free_art_campaigns.test.js ok");

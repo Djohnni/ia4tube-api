@@ -1,5 +1,35 @@
 const fs = require("fs");
 const path = require("path");
+const crypto = require("crypto");
+
+const MAX_PATH_SEGMENT_LENGTH = 160;
+
+function isSafePathSegment(value) {
+  const segment = String(value ?? "");
+  return Boolean(
+    segment &&
+    segment.length <= MAX_PATH_SEGMENT_LENGTH &&
+    segment !== "." &&
+    segment !== ".." &&
+    !/[\\/\0-\x1f\x7f]/.test(segment)
+  );
+}
+
+function isSafeMonthSegment(value) {
+  return /^\d{4}-(0[1-9]|1[0-2])$/.test(String(value || ""));
+}
+
+function resolveContained(baseDir, ...segments) {
+  const root = path.resolve(baseDir);
+  const resolved = path.resolve(root, ...segments);
+  const relative = path.relative(root, resolved);
+
+  if (relative === "" || (!relative.startsWith(`..${path.sep}`) && relative !== ".." && !path.isAbsolute(relative))) {
+    return resolved;
+  }
+
+  return null;
+}
 
 function ensureDir(dirPath) {
   if (!fs.existsSync(dirPath)) fs.mkdirSync(dirPath, { recursive: true });
@@ -20,7 +50,8 @@ function newPedidoId() {
   const hh = String(d.getHours()).padStart(2, "0");
   const mm = String(d.getMinutes()).padStart(2, "0");
   const ss = String(d.getSeconds()).padStart(2, "0");
-  return `${y}${mo}${da}_${hh}${mm}${ss}`;
+  const entropy = crypto.randomBytes(16).toString("hex");
+  return `${y}${mo}${da}_${hh}${mm}${ss}_${entropy}`;
 }
 
 function safeReadJson(filePath) {
@@ -31,75 +62,99 @@ function safeReadJson(filePath) {
   }
 }
 
-function isSafePathSegment(value) {
-  const normalized = String(value || "");
-  return Boolean(normalized) &&
-    normalized.length <= 200 &&
-    normalized !== "." &&
-    normalized !== ".." &&
-    !normalized.includes("/") &&
-    !normalized.includes("\\") &&
-    !/[\u0000-\u001f\u007f]/.test(normalized);
+function orderMetadataMatchesOwner(base, owner) {
+  const pedido = safeReadJson(path.join(base, "pedido.json"));
+  return Boolean(
+    pedido &&
+    typeof pedido === "object" &&
+    String(pedido.whatsapp || "").trim() === String(owner || "").trim()
+  );
 }
 
 function getPedidoBase(pedidosDir, whatsapp, pedidoId) {
   if (!isSafePathSegment(whatsapp) || !isSafePathSegment(pedidoId)) return null;
-  const pastaWhatsapp = path.join(pedidosDir, whatsapp);
 
-  if (!fs.existsSync(pastaWhatsapp)) return null;
+  const pastaWhatsapp = resolveContained(pedidosDir, String(whatsapp));
+
+  if (!pastaWhatsapp || !fs.existsSync(pastaWhatsapp) || !fs.statSync(pastaWhatsapp).isDirectory()) return null;
 
   const meses = fs.readdirSync(pastaWhatsapp);
 
   for (const mes of meses) {
-    const base = path.join(pastaWhatsapp, mes, pedidoId);
-    if (fs.existsSync(base)) return base;
-  }
-
-  return null;
-}
-
-function getPedidoBaseGlobal(pedidosDir, pedidoId) {
-  if (!isSafePathSegment(pedidoId)) return null;
-  if (!fs.existsSync(pedidosDir)) return null;
-
-  const whatsapps = fs.readdirSync(pedidosDir);
-
-  for (const whatsapp of whatsapps) {
-    const pastaWhatsapp = path.join(pedidosDir, whatsapp);
-    if (!fs.existsSync(pastaWhatsapp) || !fs.statSync(pastaWhatsapp).isDirectory()) continue;
-
-    const meses = fs.readdirSync(pastaWhatsapp);
-
-    for (const mes of meses) {
-      const base = path.join(pastaWhatsapp, mes, pedidoId);
-      if (fs.existsSync(base)) return base;
+    if (!isSafeMonthSegment(mes)) continue;
+    const base = resolveContained(pastaWhatsapp, mes, String(pedidoId));
+    if (
+      base &&
+      fs.existsSync(base) &&
+      fs.statSync(base).isDirectory() &&
+      orderMetadataMatchesOwner(base, whatsapp)
+    ) {
+      return base;
     }
   }
 
   return null;
 }
 
+function findPedidoBasesGlobal(pedidosDir, pedidoId) {
+  if (!isSafePathSegment(pedidoId) || !fs.existsSync(pedidosDir)) return [];
+
+  const whatsapps = fs.readdirSync(pedidosDir);
+  const matches = [];
+
+  for (const whatsapp of whatsapps) {
+    if (!isSafePathSegment(whatsapp)) continue;
+    const pastaWhatsapp = resolveContained(pedidosDir, whatsapp);
+    if (!pastaWhatsapp || !fs.existsSync(pastaWhatsapp) || !fs.statSync(pastaWhatsapp).isDirectory()) continue;
+
+    const meses = fs.readdirSync(pastaWhatsapp);
+
+    for (const mes of meses) {
+      if (!isSafeMonthSegment(mes)) continue;
+      const base = resolveContained(pastaWhatsapp, mes, String(pedidoId));
+      if (
+        base &&
+        fs.existsSync(base) &&
+        fs.statSync(base).isDirectory() &&
+        orderMetadataMatchesOwner(base, whatsapp)
+      ) {
+        matches.push(base);
+      }
+    }
+  }
+
+  return matches;
+}
+
+function getPedidoBaseGlobal(pedidosDir, pedidoId) {
+  const matches = findPedidoBasesGlobal(pedidosDir, pedidoId);
+  return matches.length === 1 ? matches[0] : null;
+}
+
 function listPedidoBasesByWhatsapp(pedidosDir, whatsapp) {
   if (!isSafePathSegment(whatsapp)) return [];
-  const pastaWhatsapp = path.join(pedidosDir, whatsapp);
+  const pastaWhatsapp = resolveContained(pedidosDir, String(whatsapp));
 
-  if (!fs.existsSync(pastaWhatsapp)) return [];
+  if (!pastaWhatsapp || !fs.existsSync(pastaWhatsapp) || !fs.statSync(pastaWhatsapp).isDirectory()) return [];
 
   const meses = fs.readdirSync(pastaWhatsapp);
   const pedidos = [];
 
   for (const mes of meses) {
-    const pastaMes = path.join(pastaWhatsapp, mes);
-    if (!fs.existsSync(pastaMes) || !fs.statSync(pastaMes).isDirectory()) continue;
+    if (!isSafeMonthSegment(mes)) continue;
+    const pastaMes = resolveContained(pastaWhatsapp, mes);
+    if (!pastaMes || !fs.existsSync(pastaMes) || !fs.statSync(pastaMes).isDirectory()) continue;
 
     const ids = fs.readdirSync(pastaMes);
 
     for (const id of ids) {
-      const base = path.join(pastaMes, id);
-      if (!fs.existsSync(base) || !fs.statSync(base).isDirectory()) continue;
+      if (!isSafePathSegment(id)) continue;
+      const base = resolveContained(pastaMes, id);
+      if (!base || !fs.existsSync(base) || !fs.statSync(base).isDirectory()) continue;
 
       const pedidoPath = path.join(base, "pedido.json");
       const pedido = safeReadJson(pedidoPath) || {};
+      if (String(pedido.whatsapp || "").trim() !== String(whatsapp)) continue;
       const criadoEm = pedido.criado_em || new Date(fs.statSync(base).mtimeMs).toISOString();
 
       pedidos.push({
@@ -174,14 +229,18 @@ module.exports = {
   ensureDir,
   nowYYYYMM,
   newPedidoId,
+  isSafePathSegment,
+  isSafeMonthSegment,
+  resolveContained,
   safeReadJson,
+  orderMetadataMatchesOwner,
   getPedidoBase,
+  findPedidoBasesGlobal,
   getPedidoBaseGlobal,
   listPedidoBasesByWhatsapp,
   removeOldPedidos,
   getOrderJsonPath,
   getStatusPath,
-  isSafePathSegment,
   readOrder,
   writeOrder,
   readStatus,

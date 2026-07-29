@@ -1,5 +1,52 @@
 const fs = require("fs");
 const path = require("path");
+const crypto = require("crypto");
+
+const STORAGE_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_-]{0,159}$/;
+
+function requireStorageId(value, label = "id") {
+  const id = String(value || "").trim();
+  if (!STORAGE_ID_PATTERN.test(id)) {
+    const error = new Error(`${label} invalido.`);
+    error.statusCode = 400;
+    error.code = "invalid_storage_identifier";
+    throw error;
+  }
+  return id;
+}
+
+function resolveContained(baseDir, ...segments) {
+  const root = path.resolve(baseDir);
+  const resolved = path.resolve(root, ...segments);
+  const relative = path.relative(root, resolved);
+  if (
+    relative === "" ||
+    (!relative.startsWith(`..${path.sep}`) && relative !== ".." && !path.isAbsolute(relative))
+  ) {
+    return resolved;
+  }
+  const error = new Error("Caminho de armazenamento recusado.");
+  error.statusCode = 400;
+  error.code = "storage_path_outside_root";
+  throw error;
+}
+
+function existingFileIsContained(baseDir, filePath) {
+  try {
+    const root = fs.realpathSync(baseDir);
+    const file = fs.realpathSync(filePath);
+    const relative = path.relative(root, file);
+    return Boolean(
+      relative &&
+      !relative.startsWith(`..${path.sep}`) &&
+      relative !== ".." &&
+      !path.isAbsolute(relative) &&
+      fs.statSync(file).isFile()
+    );
+  } catch {
+    return false;
+  }
+}
 
 function ensureDir(dirPath) {
   if (!fs.existsSync(dirPath)) fs.mkdirSync(dirPath, { recursive: true });
@@ -16,11 +63,13 @@ function readJson(filePath, fallback = null) {
 
 function writeJson(filePath, data) {
   ensureDir(path.dirname(filePath));
-  fs.writeFileSync(filePath, JSON.stringify(data, null, 2), "utf8");
+  const tempPath = `${filePath}.${process.pid}.${crypto.randomBytes(8).toString("hex")}.tmp`;
+  fs.writeFileSync(tempPath, JSON.stringify(data, null, 2), "utf8");
+  fs.renameSync(tempPath, filePath);
 }
 
 function campaignDir(baseDir, campaignId) {
-  return path.join(baseDir, String(campaignId || ""));
+  return resolveContained(baseDir, requireStorageId(campaignId, "campaign_id"));
 }
 
 function campaignFile(baseDir, campaignId) {
@@ -32,7 +81,11 @@ function distributionFile(baseDir, campaignId) {
 }
 
 function artDir(baseDir, campaignId, artId) {
-  return path.join(campaignDir(baseDir, campaignId), "artes", String(artId || ""));
+  return resolveContained(
+    campaignDir(baseDir, campaignId),
+    "artes",
+    requireStorageId(artId, "art_id")
+  );
 }
 
 function artFile(baseDir, campaignId, artId) {
@@ -81,6 +134,7 @@ function listCampaignIds(baseDir) {
   if (!fs.existsSync(baseDir)) return [];
 
   return fs.readdirSync(baseDir)
+    .filter((name) => STORAGE_ID_PATTERN.test(name))
     .filter((name) => {
       const dir = path.join(baseDir, name);
       return fs.existsSync(path.join(dir, "campanha.json"));
@@ -100,6 +154,7 @@ function listArts(baseDir, campaignId) {
   if (!fs.existsSync(dir)) return [];
 
   return fs.readdirSync(dir)
+    .filter((artId) => STORAGE_ID_PATTERN.test(artId))
     .map((artId) => readArt(baseDir, campaignId, artId))
     .filter(Boolean)
     .sort((a, b) => Number(a.index || 0) - Number(b.index || 0));
@@ -107,6 +162,9 @@ function listArts(baseDir, campaignId) {
 
 module.exports = {
   ensureDir,
+  requireStorageId,
+  resolveContained,
+  existingFileIsContained,
   readJson,
   writeJson,
   campaignDir,

@@ -397,6 +397,7 @@ async function main() {
       owner: "cliente-a",
       orderId: orderA,
       variant: "preview",
+      nonce: signedPath.searchParams.get("nonce"),
       expiresAt: Number(signedPath.searchParams.get("exp")),
       signature: signedPath.searchParams.get("sig"),
       now: 1000
@@ -405,6 +406,7 @@ async function main() {
       owner: "cliente-a",
       orderId: orderA,
       variant: "preview",
+      nonce: signedPath.searchParams.get("nonce"),
       expiresAt: Number(signedPath.searchParams.get("exp")),
       signature: signedPath.searchParams.get("sig"),
       now: 3000

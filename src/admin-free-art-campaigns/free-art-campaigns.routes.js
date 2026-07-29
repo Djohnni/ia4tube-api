@@ -159,7 +159,16 @@ function createFreeArtCampaignRoutes({
     try {
       const art = storage.readArt(paths.baseDir, req.params.campaignId, req.params.artId);
       const filePath = String(art?.arquivo_preview || art?.arquivo_original || "");
-      if (!filePath || !fs.existsSync(filePath)) {
+      const allowedArtDir = storage.artDir(
+        paths.baseDir,
+        req.params.campaignId,
+        req.params.artId
+      );
+      if (
+        !filePath ||
+        !fs.existsSync(filePath) ||
+        !storage.existingFileIsContained(allowedArtDir, filePath)
+      ) {
         return res.status(404).json({ ok: false, error: "Imagem nao encontrada" });
       }
       res.setHeader("Cache-Control", "no-store");

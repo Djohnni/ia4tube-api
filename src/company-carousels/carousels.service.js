@@ -17,6 +17,30 @@ function safeSegment(value, fallback = "item") {
     .slice(0, 100) || fallback;
 }
 
+function tenantSegment(value) {
+  const tenant = String(value || "").trim();
+  if (
+    !tenant ||
+    tenant.length > 160 ||
+    tenant === "." ||
+    tenant === ".." ||
+    /[\\/\0-\x1f\x7f]/.test(tenant)
+  ) {
+    const error = new Error("Identificador de empresa invalido.");
+    error.statusCode = 403;
+    error.code = "invalid_tenant_identifier";
+    throw error;
+  }
+  return `tenant_${Buffer.from(tenant, "utf8").toString("base64url")}`;
+}
+
+function ownerStorageDirs(baseDir, whatsapp) {
+  return [...new Set([
+    path.join(baseDir, tenantSegment(whatsapp)),
+    path.join(baseDir, safeSegment(whatsapp, "sem_whatsapp"))
+  ])];
+}
+
 function currentMonthCycle(now = new Date()) {
   const year = now.getUTCFullYear();
   const month = String(now.getUTCMonth() + 1).padStart(2, "0");
@@ -113,6 +137,15 @@ function readJson(filePath) {
   }
 }
 
+function readDirEntries(dirPath) {
+  try {
+    if (!fs.existsSync(dirPath)) return [];
+    return fs.readdirSync(dirPath, { withFileTypes: true });
+  } catch {
+    return [];
+  }
+}
+
 function writeJson(filePath, data) {
   fs.writeFileSync(filePath, JSON.stringify(data, null, 2), "utf8");
 }
@@ -139,7 +172,7 @@ function appendLog(dirPath, message) {
 function requestDir(baseDir, whatsapp, ciclo, carrosselId) {
   return path.join(
     baseDir,
-    safeSegment(whatsapp, "sem_whatsapp"),
+    tenantSegment(whatsapp),
     safeSegment(ciclo, "ciclo"),
     safeSegment(carrosselId, "carrossel")
   );
@@ -222,7 +255,7 @@ function validateBriefing(briefing) {
 function newCarouselId() {
   const now = new Date();
   const stamp = now.toISOString().replace(/[-:TZ.]/g, "").slice(0, 14);
-  return `car_${stamp}_${crypto.randomBytes(4).toString("hex")}`;
+  return `car_${stamp}_${crypto.randomBytes(16).toString("hex")}`;
 }
 
 function fileExtension(file) {
@@ -306,9 +339,46 @@ function createRequest({ baseDir, cliente, whatsapp, body, files = {} }) {
   return solicitacao;
 }
 
+function exactStorageSegment(value) {
+  const raw = String(value || "");
+  if (!raw || safeSegment(raw, "") !== raw) return "";
+  return raw;
+}
+
+function requestMatchesIdentity(request, { whatsapp, carrosselId }) {
+  if (!request) return false;
+  return (
+    String(request.whatsapp || "") === String(whatsapp || "")
+    && String(request.carrossel_id || request.id || "") === String(carrosselId || "")
+  );
+}
+
+function findClientRequestById({ baseDir, whatsapp, carrosselId }) {
+  const safeId = exactStorageSegment(carrosselId);
+  if (!safeId) return null;
+
+  const matches = [];
+  for (const userDir of ownerStorageDirs(baseDir, whatsapp)) {
+    for (const cycleEntry of readDirEntries(userDir)) {
+      if (!cycleEntry.isDirectory()) continue;
+      const dirPath = path.join(userDir, cycleEntry.name, safeId);
+      if (!fs.existsSync(dirPath)) continue;
+      const request = parseRequest(dirPath);
+      if (!requestMatchesIdentity(request, { whatsapp, carrosselId })) continue;
+      matches.push(request);
+    }
+  }
+
+  return matches.length === 1 ? matches[0] : null;
+}
+
+// Privileged bot/admin lookup. IDs are not tenant-unique in legacy storage, so
+// an ambiguous global match must never select whichever directory is read first.
 function findRequestById({ baseDir, carrosselId }) {
-  const safeId = safeSegment(carrosselId, "carrossel");
+  const safeId = exactStorageSegment(carrosselId);
+  if (!safeId) return null;
   if (!fs.existsSync(baseDir)) return null;
+  const matches = [];
 
   for (const userEntry of fs.readdirSync(baseDir, { withFileTypes: true })) {
     if (!userEntry.isDirectory()) continue;
@@ -318,13 +388,15 @@ function findRequestById({ baseDir, carrosselId }) {
       const dirPath = path.join(userDir, cycleEntry.name, safeId);
       if (!fs.existsSync(dirPath)) continue;
       const request = parseRequest(dirPath);
-      if (!request) return null;
-      if (String(request.carrossel_id || request.id) !== String(carrosselId)) return null;
-      return request;
+      const owner = String(request?.whatsapp || "");
+      if (!owner) continue;
+      if (!requestMatchesIdentity(request, { whatsapp: owner, carrosselId })) continue;
+      if (!ownerStorageDirs(baseDir, owner).includes(userDir)) continue;
+      matches.push(request);
     }
   }
 
-  return null;
+  return matches.length === 1 ? matches[0] : null;
 }
 
 function assertClientRequest(request, whatsapp) {
@@ -345,7 +417,7 @@ function statusLabel(status) {
 }
 
 function publicStatusPayload({ baseDir, whatsapp, carrosselId }) {
-  const request = findRequestById({ baseDir, carrosselId });
+  const request = findClientRequestById({ baseDir, whatsapp, carrosselId });
   assertClientRequest(request, whatsapp);
 
   return {
@@ -384,29 +456,31 @@ function publicCarouselSummary(request) {
 }
 
 function listClientRequests({ baseDir, whatsapp, limit = 50 }) {
-  const userDir = path.join(baseDir, safeSegment(whatsapp, "sem_whatsapp"));
-  if (!fs.existsSync(userDir)) return [];
-
   const items = [];
-  for (const cycleEntry of fs.readdirSync(userDir, { withFileTypes: true })) {
-    if (!cycleEntry.isDirectory()) continue;
-    const cycleDir = path.join(userDir, cycleEntry.name);
-    for (const carouselEntry of fs.readdirSync(cycleDir, { withFileTypes: true })) {
-      if (!carouselEntry.isDirectory()) continue;
-      const request = parseRequest(path.join(cycleDir, carouselEntry.name));
-      if (!request) continue;
-      if (String(request.whatsapp || "") !== String(whatsapp || "")) continue;
-      items.push(publicCarouselSummary(request));
+  for (const userDir of ownerStorageDirs(baseDir, whatsapp)) {
+    for (const cycleEntry of readDirEntries(userDir)) {
+      if (!cycleEntry.isDirectory()) continue;
+      const cycleDir = path.join(userDir, cycleEntry.name);
+      for (const carouselEntry of readDirEntries(cycleDir)) {
+        if (!carouselEntry.isDirectory()) continue;
+        const request = parseRequest(path.join(cycleDir, carouselEntry.name));
+        if (!requestMatchesIdentity(request, {
+          whatsapp,
+          carrosselId: carouselEntry.name
+        })) continue;
+        items.push(publicCarouselSummary(request));
+      }
     }
   }
 
   return items
+    .filter((item, index, all) => all.findIndex((candidate) => candidate.id === item.id) === index)
     .sort((a, b) => String(b.criado_em || b.atualizado_em || "").localeCompare(String(a.criado_em || a.atualizado_em || "")))
     .slice(0, limit);
 }
 
 function downloadForCarousel({ baseDir, whatsapp, carrosselId }) {
-  const request = findRequestById({ baseDir, carrosselId });
+  const request = findClientRequestById({ baseDir, whatsapp, carrosselId });
   assertClientRequest(request, whatsapp);
 
   if (!READY_STATUSES.has(request.status) || !fs.existsSync(request.resultado_path)) {
@@ -488,7 +562,12 @@ function listBotPending({ baseDir, limit = 5 }) {
       for (const carouselEntry of fs.readdirSync(cycleDir, { withFileTypes: true })) {
         if (!carouselEntry.isDirectory()) continue;
         const request = parseRequest(path.join(cycleDir, carouselEntry.name));
-        if (!request || request.status !== "pendente") continue;
+        const owner = String(request?.whatsapp || "");
+        if (!owner) continue;
+        if (!requestMatchesIdentity(request, {
+          whatsapp: owner,
+          carrosselId: carouselEntry.name
+        }) || !ownerStorageDirs(baseDir, owner).includes(userDir) || request.status !== "pendente") continue;
         items.push({
           carrossel_id: request.carrossel_id || request.id,
           whatsapp: request.whatsapp,
@@ -512,6 +591,7 @@ function listBotPending({ baseDir, limit = 5 }) {
 module.exports = {
   createRequest,
   findRequestById,
+  findClientRequestById,
   publicStatusPayload,
   downloadForCarousel,
   updateRequestStatus,

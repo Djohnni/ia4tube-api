@@ -3,6 +3,7 @@ const path = require("path");
 const crypto = require("crypto");
 
 const storage = require("./free-art-campaigns.storage");
+const orderStorage = require("../orders/order.storage");
 
 const ORIGIN = "arte_gratis_semanal";
 const SAO_PAULO_TZ = "America/Sao_Paulo";
@@ -202,26 +203,9 @@ function orderRamoCandidate(orderPath, orderId, pedido = {}) {
 }
 
 function listOrderCandidatesForClient(pedidosDir, whatsapp) {
-  const clientDir = path.join(pedidosDir, whatsapp);
-  if (!fs.existsSync(clientDir)) return [];
-
-  const candidates = [];
-  for (const month of fs.readdirSync(clientDir)) {
-    const monthDir = path.join(clientDir, month);
-    if (!fs.existsSync(monthDir) || !fs.statSync(monthDir).isDirectory()) continue;
-
-    for (const orderId of fs.readdirSync(monthDir)) {
-      const orderPath = path.join(monthDir, orderId);
-      const pedidoPath = path.join(orderPath, "pedido.json");
-      if (!fs.existsSync(pedidoPath)) continue;
-
-      const pedido = readOrderJson(pedidoPath);
-      const candidate = orderRamoCandidate(orderPath, orderId, pedido || {});
-      if (candidate) candidates.push(candidate);
-    }
-  }
-
-  return candidates;
+  return orderStorage.listPedidoBasesByWhatsapp(pedidosDir, whatsapp)
+    .map(({ base, id, pedido }) => orderRamoCandidate(base, id, pedido || {}))
+    .filter(Boolean);
 }
 
 function selectLatestRamoCandidate(candidates = []) {
@@ -757,15 +741,15 @@ function regenerateArt({ baseDir, campaignId, artId, adminId = "" }) {
 }
 
 function findLatestLogoForClient(pedidosDir, whatsapp) {
-  const clientDir = path.join(pedidosDir, whatsapp);
-  if (!fs.existsSync(clientDir)) return "";
   const matches = [];
-  for (const filePath of walkFiles(clientDir)) {
-    const name = path.basename(filePath).toLowerCase();
-    if (!/^logo\.(png|jpg|jpeg|webp)$/.test(name)) continue;
-    try {
-      matches.push({ filePath, mtimeMs: fs.statSync(filePath).mtimeMs });
-    } catch {}
+  for (const { base } of orderStorage.listPedidoBasesByWhatsapp(pedidosDir, whatsapp)) {
+    for (const filePath of walkFiles(base)) {
+      const name = path.basename(filePath).toLowerCase();
+      if (!/^logo\.(png|jpg|jpeg|webp)$/.test(name)) continue;
+      try {
+        matches.push({ filePath, mtimeMs: fs.statSync(filePath).mtimeMs });
+      } catch {}
+    }
   }
   matches.sort((a, b) => b.mtimeMs - a.mtimeMs);
   return matches[0]?.filePath || "";

@@ -37,6 +37,23 @@ function safeSegment(value, fallback = "item") {
     .slice(0, 100) || fallback;
 }
 
+function tenantSegment(value) {
+  const tenant = String(value || "").trim();
+  if (
+    !tenant ||
+    tenant.length > 160 ||
+    tenant === "." ||
+    tenant === ".." ||
+    /[\\/\0-\x1f\x7f]/.test(tenant)
+  ) {
+    const error = new Error("Identificador de empresa invalido.");
+    error.statusCode = 403;
+    error.code = "invalid_tenant_identifier";
+    throw error;
+  }
+  return `tenant_${Buffer.from(tenant, "utf8").toString("base64url")}`;
+}
+
 function currentMonthCycle(now = new Date()) {
   const year = now.getUTCFullYear();
   const month = String(now.getUTCMonth() + 1).padStart(2, "0");
@@ -100,7 +117,7 @@ function safeCopyFile(sourcePath, destPath) {
 function newPlanningId() {
   const now = new Date();
   const stamp = now.toISOString().replace(/[-:TZ.]/g, "").slice(0, 14);
-  return `pm_${stamp}_${crypto.randomBytes(4).toString("hex")}`;
+  return `pm_${stamp}_${crypto.randomBytes(16).toString("hex")}`;
 }
 
 function normalizeDateText(dateText = "", ciclo = "") {
@@ -188,7 +205,7 @@ function newChildPedidoId(planningId, index, pedidosDir) {
 function requestDir(baseDir, whatsapp, ciclo, planningId) {
   return path.join(
     baseDir,
-    safeSegment(whatsapp, "sem_whatsapp"),
+    tenantSegment(whatsapp),
     safeSegment(ciclo, "ciclo"),
     safeSegment(planningId, "planejamento")
   );
@@ -1003,7 +1020,14 @@ function planningTitle(ciclo) {
 }
 
 function clientPlanningDir(baseDir, whatsapp) {
-  return path.join(baseDir, safeSegment(whatsapp, "sem_whatsapp"));
+  return path.join(baseDir, tenantSegment(whatsapp));
+}
+
+function clientPlanningDirs(baseDir, whatsapp) {
+  return [...new Set([
+    clientPlanningDir(baseDir, whatsapp),
+    path.join(baseDir, safeSegment(whatsapp, "sem_whatsapp"))
+  ])];
 }
 
 function calendarHiddenPath(baseDir, whatsapp) {
@@ -1011,14 +1035,20 @@ function calendarHiddenPath(baseDir, whatsapp) {
 }
 
 function readCalendarHiddenItems(baseDir, whatsapp) {
-  const data = readJson(calendarHiddenPath(baseDir, whatsapp), null);
-  if (Array.isArray(data)) return data;
-  if (Array.isArray(data?.hidden_items)) return data.hidden_items;
-  if (Array.isArray(data?.itens_ocultos)) return data.itens_ocultos;
-  if (Array.isArray(data?.hidden_keys)) {
-    return data.hidden_keys.map((key) => ({ key }));
+  const items = [];
+  for (const userDir of clientPlanningDirs(baseDir, whatsapp)) {
+    const data = readJson(path.join(userDir, "calendario_oculto.json"), null);
+    if (Array.isArray(data)) {
+      items.push(...data);
+    } else if (Array.isArray(data?.hidden_items)) {
+      items.push(...data.hidden_items);
+    } else if (Array.isArray(data?.itens_ocultos)) {
+      items.push(...data.itens_ocultos);
+    } else if (Array.isArray(data?.hidden_keys)) {
+      items.push(...data.hidden_keys.map((key) => ({ key })));
+    }
   }
-  return [];
+  return items;
 }
 
 function calendarHiddenKeys(baseDir, whatsapp) {
@@ -1195,8 +1225,14 @@ function resolvePlanningPostPedidoId({ planning, post, index, createdOrders }) {
   return byOrder || "";
 }
 
-function childOrderStatus({ pedidosDir, pedidoId }) {
-  if (!pedidosDir || !pedidoId) {
+function childOrderStatus({
+  pedidosDir,
+  whatsapp,
+  pedidoId,
+  planningId = "",
+  planningItemId = ""
+}) {
+  if (!pedidosDir || !whatsapp || !pedidoId) {
     return {
       pedido_id: pedidoId || "",
       status: "planejada",
@@ -1206,7 +1242,7 @@ function childOrderStatus({ pedidosDir, pedidoId }) {
     };
   }
 
-  const base = orderStorage.getPedidoBaseGlobal(pedidosDir, pedidoId);
+  const base = orderStorage.getPedidoBase(pedidosDir, whatsapp, pedidoId);
   if (!base) {
     return {
       pedido_id: pedidoId,
@@ -1218,6 +1254,25 @@ function childOrderStatus({ pedidosDir, pedidoId }) {
   }
 
   const pedido = orderStorage.readOrder(base) || {};
+  const pedidoPlanningId = String(
+    pedido.planejamento_id || pedido.planejamento_mensal?.planejamento_id || ""
+  ).trim();
+  const pedidoItemId = String(
+    pedido.planejamento_item_id || pedido.planejamento_mensal?.planejamento_item_id || ""
+  ).trim();
+  if (
+    String(pedido.whatsapp || "").trim() !== String(whatsapp) ||
+    (planningId && pedidoPlanningId !== String(planningId)) ||
+    (planningItemId && pedidoItemId !== String(planningItemId))
+  ) {
+    return {
+      pedido_id: pedidoId,
+      status: "planejada",
+      status_label: "Planejada",
+      imagem_pronta: false,
+      descricao_instagram: ""
+    };
+  }
   const rawStatus = orderStorage.readStatus(base, pedido.status || "novo");
   const imagemPronta = fs.existsSync(path.join(base, "resultado_final.png"));
   const descricaoInstagram = String(
@@ -1274,12 +1329,20 @@ function planningPosts(planning, pedidosDir = "") {
   const createdOrders = createdOrdersByPlanningItem(planning, pedidosDir);
   return sourcePosts.map((post, index) => {
     const pedidoId = resolvePlanningPostPedidoId({ planning, post, index, createdOrders });
-    const childStatus = childOrderStatus({ pedidosDir, pedidoId });
+    const planningItemId = post.planejamento_item_id || post.id ||
+      `${planning.planejamento_id || planning.id}_item_${String(index + 1).padStart(3, "0")}`;
+    const childStatus = childOrderStatus({
+      pedidosDir,
+      whatsapp: planning.whatsapp,
+      pedidoId,
+      planningId: planning.planejamento_id || planning.id,
+      planningItemId
+    });
     const notificationFields = notificationFieldsForPost(post, planning);
     const legenda = String(childStatus.descricao_instagram || "").trim();
     return {
       ordem: Number(post.ordem || index + 1),
-      planejamento_item_id: post.planejamento_item_id || post.id || `${planning.planejamento_id || planning.id}_item_${String(index + 1).padStart(3, "0")}`,
+      planejamento_item_id: planningItemId,
       tema: post.tema || "",
       objetivo: post.objetivo || post.objetivo_postagem || "",
       data_sugerida: post.data_sugerida || "",
@@ -1341,19 +1404,47 @@ function summarizePlanning(planning, pedidosDir = "") {
 }
 
 function listPlanningDirsForWhatsapp(baseDir, whatsapp) {
-  const userDir = path.join(baseDir, safeSegment(whatsapp, "sem_whatsapp"));
-  if (!fs.existsSync(userDir)) return [];
-
   const dirs = [];
-  for (const cycleEntry of fs.readdirSync(userDir, { withFileTypes: true })) {
-    if (!cycleEntry.isDirectory()) continue;
-    const cycleDir = path.join(userDir, cycleEntry.name);
-    for (const planningEntry of fs.readdirSync(cycleDir, { withFileTypes: true })) {
-      if (!planningEntry.isDirectory()) continue;
-      dirs.push(path.join(cycleDir, planningEntry.name));
+  for (const userDir of clientPlanningDirs(baseDir, whatsapp)) {
+    if (!fs.existsSync(userDir)) continue;
+    for (const cycleEntry of fs.readdirSync(userDir, { withFileTypes: true })) {
+      if (!cycleEntry.isDirectory()) continue;
+      const cycleDir = path.join(userDir, cycleEntry.name);
+      for (const planningEntry of fs.readdirSync(cycleDir, { withFileTypes: true })) {
+        if (!planningEntry.isDirectory()) continue;
+        dirs.push(path.join(cycleDir, planningEntry.name));
+      }
     }
   }
-  return dirs;
+  return [...new Set(dirs)];
+}
+
+function parseOwnedPlanning(dirPath, whatsapp) {
+  const planning = parsePlanning(dirPath);
+  if (!planning || String(planning.whatsapp || "") !== String(whatsapp || "")) {
+    return null;
+  }
+  return planning;
+}
+
+function planningStoredForOwner(baseDir, planning) {
+  try {
+    const owner = String(planning?.whatsapp || "");
+    if (!owner) return false;
+    const allowedRoots = clientPlanningDirs(baseDir, owner).map((dirPath) => path.resolve(dirPath));
+    const planningPath = path.resolve(planning.base_path || "");
+    return allowedRoots.some((root) => {
+      const relative = path.relative(root, planningPath);
+      return Boolean(
+        relative &&
+        !relative.startsWith(`..${path.sep}`) &&
+        relative !== ".." &&
+        !path.isAbsolute(relative)
+      );
+    });
+  } catch {
+    return false;
+  }
 }
 
 function listAllPlanningDirs(baseDir) {
@@ -1490,7 +1581,7 @@ function createRequest({ baseDir, cliente, whatsapp, body = {}, files = {}, free
 
 function listClientPlannings({ baseDir, whatsapp, pedidosDir = "" }) {
   const planejamentos = listPlanningDirsForWhatsapp(baseDir, whatsapp)
-    .map(parsePlanning)
+    .map((dirPath) => parseOwnedPlanning(dirPath, whatsapp))
     .filter(Boolean)
     .sort((a, b) => String(b.criado_em || "").localeCompare(String(a.criado_em || "")))
     .map((planning) => summarizePlanning(planning, pedidosDir));
@@ -1554,7 +1645,9 @@ function listClientPlanningCalendar({ baseDir, whatsapp, pedidosDir = "" }) {
   const hiddenKeys = calendarHiddenKeys(baseDir, whatsapp);
   const postagens = [];
 
-  for (const planning of listPlanningDirsForWhatsapp(baseDir, whatsapp).map(parsePlanning).filter(Boolean)) {
+  for (const planning of listPlanningDirsForWhatsapp(baseDir, whatsapp)
+    .map((dirPath) => parseOwnedPlanning(dirPath, whatsapp))
+    .filter(Boolean)) {
     const posts = planningPosts(planning, pedidosDir);
     for (const post of posts) {
       const item = calendarPayloadForPost(planning, post);
@@ -1705,7 +1798,9 @@ function futureScheduleByDateForClient({
   const currentId = String(currentPlanningId || "").trim();
   const hiddenKeys = calendarHiddenKeys(baseDir, whatsapp);
 
-  for (const planning of listPlanningDirsForWhatsapp(baseDir, whatsapp).map(parsePlanning).filter(Boolean)) {
+  for (const planning of listPlanningDirsForWhatsapp(baseDir, whatsapp)
+    .map((dirPath) => parseOwnedPlanning(dirPath, whatsapp))
+    .filter(Boolean)) {
     const planningId = String(planning.planejamento_id || planning.id || "").trim();
     if (currentId && planningId === currentId) continue;
     if (String(planning.status || "").trim().toLowerCase() === "cancelado") continue;
@@ -2042,7 +2137,9 @@ function findClientPlanningCalendarSourceItem({
   const targetItemId = String(planejamentoItemId || "").trim();
   const targetPedidoId = String(pedidoId || "").trim();
 
-  for (const planning of listPlanningDirsForWhatsapp(baseDir, whatsapp).map(parsePlanning).filter(Boolean)) {
+  for (const planning of listPlanningDirsForWhatsapp(baseDir, whatsapp)
+    .map((dirPath) => parseOwnedPlanning(dirPath, whatsapp))
+    .filter(Boolean)) {
     const currentPlanningId = String(planning.planejamento_id || planning.id || "").trim();
     if (targetPlanningId && currentPlanningId !== targetPlanningId) continue;
     if (String(planning.status || "").trim().toLowerCase() === "cancelado") continue;
@@ -2097,14 +2194,33 @@ function findClientPlanningCalendarSourceItem({
   return null;
 }
 
-function updatePlanningChildOrderSchedule({ pedidosDir = "", pedidoId = "", date = "", time = "" }) {
-  if (!pedidosDir || !pedidoId) return false;
+function updatePlanningChildOrderSchedule({
+  pedidosDir = "",
+  whatsapp = "",
+  pedidoId = "",
+  planningId = "",
+  planningItemId = "",
+  date = "",
+  time = ""
+}) {
+  if (!pedidosDir || !whatsapp || !pedidoId) return false;
 
-  const base = orderStorage.getPedidoBaseGlobal(pedidosDir, pedidoId);
+  const base = orderStorage.getPedidoBase(pedidosDir, whatsapp, pedidoId);
   if (!base) return false;
 
   const pedido = orderStorage.readOrder(base) || {};
-  if (!isPlanningOrder(pedido)) return false;
+  if (
+    !isPlanningOrder(pedido) ||
+    String(pedido.whatsapp || "") !== String(whatsapp) ||
+    (planningId && String(
+      pedido.planejamento_id || pedido.planejamento_mensal?.planejamento_id || ""
+    ) !== String(planningId)) ||
+    (planningItemId && String(
+      pedido.planejamento_item_id || pedido.planejamento_mensal?.planejamento_item_id || ""
+    ) !== String(planningItemId))
+  ) {
+    return false;
+  }
 
   const now = new Date().toISOString();
   const nextPedido = {
@@ -2277,7 +2393,10 @@ function rescheduleClientPlanningCalendarItem({
   });
   const pedidoAtualizado = updatePlanningChildOrderSchedule({
     pedidosDir,
+    whatsapp,
     pedidoId: found.pedidoId,
+    planningId: found.planning.planejamento_id || found.planning.id,
+    planningItemId: found.itemId,
     date: targetDate,
     time: targetTime
   });
@@ -2358,7 +2477,7 @@ function hideClientPlanningCalendarItem({
 function listClientPlanningGroups({ baseDir, whatsapp, pedidosDir = "", limit = 15 }) {
   const max = Math.max(1, Math.min(Number(limit) || 15, 50));
   const planejamentos = listPlanningDirsForWhatsapp(baseDir, whatsapp)
-    .map(parsePlanning)
+    .map((dirPath) => parseOwnedPlanning(dirPath, whatsapp))
     .filter(Boolean)
     .sort((a, b) => String(b.criado_em || "").localeCompare(String(a.criado_em || "")))
     .slice(0, max)
@@ -2374,7 +2493,11 @@ function findPlanningById({ baseDir, whatsapp, planningId }) {
   for (const dirPath of dirs) {
     if (path.basename(dirPath) !== safeId) continue;
     const planning = parsePlanning(dirPath);
-    if (planning && String(planning.planejamento_id || planning.id) === String(planningId)) {
+    if (
+      planning &&
+      String(planning.planejamento_id || planning.id) === String(planningId) &&
+      String(planning.whatsapp || "") === String(whatsapp)
+    ) {
       return planning;
     }
   }
@@ -2385,16 +2508,21 @@ function findPlanningById({ baseDir, whatsapp, planningId }) {
 function findPlanningByIdAny({ baseDir, planningId }) {
   const safeId = safeSegment(planningId, "planejamento");
   const dirs = listAllPlanningDirs(baseDir);
+  const matches = [];
 
   for (const dirPath of dirs) {
     if (path.basename(dirPath) !== safeId) continue;
     const planning = parsePlanning(dirPath);
-    if (planning && String(planning.planejamento_id || planning.id) === String(planningId)) {
-      return planning;
+    if (
+      planning &&
+      String(planning.planejamento_id || planning.id) === String(planningId) &&
+      planningStoredForOwner(baseDir, planning)
+    ) {
+      matches.push(planning);
     }
   }
 
-  return null;
+  return matches.length === 1 ? matches[0] : null;
 }
 
 function botPendingPayload(planning) {
@@ -2465,6 +2593,7 @@ function listBotPending({ baseDir, limit = 5, claim = true }) {
   const candidates = listAllPlanningDirs(baseDir)
     .map(parsePlanning)
     .filter(Boolean)
+    .filter((planning) => planningStoredForOwner(baseDir, planning))
     .map((planning) => recoverStaleProcessing(planning, now))
     .filter((planning) => planning.status === "em_analise")
     .filter((planning) => planning.runner_contract?.pronto_para_runner !== false)
@@ -3396,30 +3525,24 @@ function listPlanningArtPending({ pedidosDir, limit = BOT_PENDING_HARD_LIMIT }) 
   const whatsapps = fs.readdirSync(pedidosDir);
   for (const whatsapp of whatsapps) {
     if (artes.length >= max) break;
-    const pastaWhatsapp = path.join(pedidosDir, whatsapp);
-    if (!fs.existsSync(pastaWhatsapp) || !fs.statSync(pastaWhatsapp).isDirectory()) continue;
-
-    const ciclos = fs.readdirSync(pastaWhatsapp);
-    for (const mes of ciclos) {
+    const ownedOrders = orderStorage.listPedidoBasesByWhatsapp(pedidosDir, whatsapp);
+    for (const item of ownedOrders) {
       if (artes.length >= max) break;
-      const pastaMes = path.join(pastaWhatsapp, mes);
-      if (!fs.existsSync(pastaMes) || !fs.statSync(pastaMes).isDirectory()) continue;
+      const pedido = item.pedido || {};
+      if (!isPlanningOrder(pedido)) continue;
 
-      const ids = fs.readdirSync(pastaMes);
-      for (const id of ids) {
-        if (artes.length >= max) break;
-        const base = path.join(pastaMes, id);
-        if (!fs.existsSync(base) || !fs.statSync(base).isDirectory()) continue;
+      const status = orderStorage.readStatus(item.base, pedido.status || "");
+      if (!["novo", "ajuste_pendente"].includes(status)) continue;
+      if (fs.existsSync(path.join(item.base, "resultado_final.png"))) continue;
 
-        const pedido = orderStorage.readOrder(base) || {};
-        if (!isPlanningOrder(pedido)) continue;
-
-        const status = orderStorage.readStatus(base, pedido.status || "");
-        if (!["novo", "ajuste_pendente"].includes(status)) continue;
-        if (fs.existsSync(path.join(base, "resultado_final.png"))) continue;
-
-        artes.push(planningArtPayload({ base, pedido, pedidoId: id, whatsapp, mes, status }));
-      }
+      artes.push(planningArtPayload({
+        base: item.base,
+        pedido,
+        pedidoId: item.id,
+        whatsapp,
+        mes: path.basename(path.dirname(item.base)),
+        status
+      }));
     }
   }
 
@@ -3596,7 +3719,27 @@ function createChildOrdersFromPlan({ pedidosDir, planning, plan, cliente = null 
     }
 
     const pedidoId = newChildPedidoId(planning.planejamento_id || planning.id, index + 1, pedidosDir);
-    const orderBase = path.join(pedidosDir, safeSegment(planning.whatsapp, "sem_whatsapp"), safeSegment(mesAtual, "ciclo"), pedidoId);
+    if (
+      !orderStorage.isSafePathSegment(planning.whatsapp) ||
+      !orderStorage.isSafeMonthSegment(mesAtual)
+    ) {
+      const error = new Error("Empresa ou ciclo invalido para pedido do planejamento.");
+      error.statusCode = 403;
+      error.code = "monthly_planning_order_scope_invalid";
+      throw error;
+    }
+    const orderBase = orderStorage.resolveContained(
+      pedidosDir,
+      String(planning.whatsapp),
+      String(mesAtual),
+      pedidoId
+    );
+    if (!orderBase) {
+      const error = new Error("Caminho do pedido do planejamento recusado.");
+      error.statusCode = 403;
+      error.code = "monthly_planning_order_path_invalid";
+      throw error;
+    }
     ensureDir(orderBase);
     const itemForOrder = { ...item, ordem: item.ordem || index + 1 };
     const copiedAssets = copyPlanningAssetsToOrder(planning, orderBase, itemForOrder);
@@ -3953,7 +4096,7 @@ async function processDueNotifications({
     if (result.checked >= max) break;
 
     const planning = parsePlanning(dirPath);
-    if (!planning) continue;
+    if (!planning || !planningStoredForOwner(baseDir, planning)) continue;
 
     if (planning.status === "cancelado") {
       const cancelled = cancelPendingNotificationsForPlanning(planning);
@@ -4019,7 +4162,10 @@ async function processDueNotifications({
 
       const childStatus = childOrderStatus({
         pedidosDir,
-        pedidoId: postWithNotification.pedido_id
+        whatsapp: planning.whatsapp,
+        pedidoId: postWithNotification.pedido_id,
+        planningId: planning.planejamento_id || planning.id,
+        planningItemId: postWithNotification.planejamento_item_id || postWithNotification.id || ""
       });
 
       if (!childStatus.imagem_pronta) {
