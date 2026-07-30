@@ -328,6 +328,42 @@ async function inspectTargetIdentity(client, configuration) {
   }
 }
 
+async function readExistingEnvironmentMarker(client) {
+  let transactionStarted = false;
+  try {
+    await client.query("BEGIN");
+    transactionStarted = true;
+    await client.query(
+      [
+        "GRANT ia4tube_social_owner TO CURRENT_USER",
+        "  WITH ADMIN FALSE, INHERIT FALSE, SET TRUE",
+        "  GRANTED BY CURRENT_USER"
+      ].join("\n")
+    );
+    await client.query("SET LOCAL ROLE ia4tube_social_owner");
+    const marker = await client.query(
+      [
+        "SELECT environment_id::text, environment_name",
+        "FROM ia4tube_migrations.environment_identity",
+        "WHERE singleton = TRUE"
+      ].join("\n")
+    );
+    await client.query("ROLLBACK");
+    transactionStarted = false;
+    return marker;
+  } catch (error) {
+    if (transactionStarted) {
+      try {
+        await client.query("ROLLBACK");
+      } catch {
+        fail("staging_provision_marker_read_rollback_failed");
+      }
+    }
+    if (error instanceof SocialPostgresError) throw error;
+    fail("staging_provision_marker_read_failed");
+  }
+}
+
 async function inspectBaselineState(client, configuration) {
   const result = await client.query(
     [
@@ -394,13 +430,7 @@ async function inspectBaselineState(client, configuration) {
   ) {
     fail("staging_provision_target_not_baseline");
   }
-  const marker = await client.query(
-    [
-      "SELECT environment_id::text, environment_name",
-      "FROM ia4tube_migrations.environment_identity",
-      "WHERE singleton = TRUE"
-    ].join("\n")
-  );
+  const marker = await readExistingEnvironmentMarker(client);
   if (
     marker.rowCount !== 1 ||
     marker.rows?.[0]?.environment_id !==
@@ -435,6 +465,14 @@ async function provisionStagingBaseline(
     await client.query(rolesSql);
     await client.query(
       [
+        "GRANT ia4tube_social_owner TO CURRENT_USER",
+        "  WITH ADMIN FALSE, INHERIT FALSE, SET TRUE",
+        "  GRANTED BY CURRENT_USER"
+      ].join("\n")
+    );
+    await client.query("SET LOCAL ROLE ia4tube_social_owner");
+    await client.query(
+      [
         "INSERT INTO ia4tube_migrations.environment_identity (",
         "  singleton, environment_id, environment_name",
         ") VALUES (TRUE, $1, 'staging')",
@@ -456,6 +494,36 @@ async function provisionStagingBaseline(
       marker.rows?.[0]?.environment_name !== "staging"
     ) {
       fail("staging_provision_environment_marker_mismatch");
+    }
+    await client.query("RESET ROLE");
+    await client.query(
+      [
+        "REVOKE ia4tube_social_owner FROM CURRENT_USER",
+        "  GRANTED BY CURRENT_USER RESTRICT"
+      ].join("\n")
+    );
+    const temporaryMembership = await client.query(
+      [
+        "SELECT NOT EXISTS (",
+        "  SELECT 1",
+        "  FROM pg_catalog.pg_auth_members membership",
+        "  JOIN pg_catalog.pg_roles granted",
+        "    ON granted.oid = membership.roleid",
+        "  JOIN pg_catalog.pg_roles member",
+        "    ON member.oid = membership.member",
+        "  JOIN pg_catalog.pg_roles grantor",
+        "    ON grantor.oid = membership.grantor",
+        "  WHERE granted.rolname = 'ia4tube_social_owner'",
+        "    AND member.rolname = session_user",
+        "    AND grantor.rolname = session_user",
+        ") AS removed"
+      ].join("\n")
+    );
+    if (
+      temporaryMembership.rowCount !== 1 ||
+      temporaryMembership.rows?.[0]?.removed !== true
+    ) {
+      fail("staging_provision_temporary_membership_not_removed");
     }
     await client.query("COMMIT");
     transactionStarted = false;

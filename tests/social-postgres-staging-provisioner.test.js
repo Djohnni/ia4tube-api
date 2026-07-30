@@ -113,6 +113,22 @@ function fakeClient(options = {}) {
       if (sql === "BEGIN" || sql === "COMMIT" || sql === "ROLLBACK") {
         return { rowCount: null, rows: [] };
       }
+      if (
+        sql.startsWith("GRANT ia4tube_social_owner TO CURRENT_USER") ||
+        sql === "SET LOCAL ROLE ia4tube_social_owner" ||
+        sql === "RESET ROLE" ||
+        sql.startsWith(
+          "REVOKE ia4tube_social_owner FROM CURRENT_USER"
+        )
+      ) {
+        return { rowCount: null, rows: [] };
+      }
+      if (sql.includes(") AS removed")) {
+        return {
+          rowCount: 1,
+          rows: [{ removed: options.membershipRemoved !== false }]
+        };
+      }
       if (sql.includes("DO $postgres_version$")) {
         if (options.rolesFailure) throw options.rolesFailure;
         return { rowCount: null, rows: [] };
@@ -384,6 +400,40 @@ test("identity or marker drift is refused before commit", async () => {
   );
   assert.equal(
     markerDrift.queries.some(({ sql }) => sql === "BEGIN"),
+    true
+  );
+  assert.equal(
+    markerDrift.queries.some(({ sql }) => sql === "ROLLBACK"),
+    true
+  );
+  assert.equal(
+    markerDrift.queries.some(({ sql }) => sql === "COMMIT"),
+    false
+  );
+  assert.equal(
+    markerDrift.queries.some(({ sql }) =>
+      sql.includes("DO $postgres_version$")
+    ),
+    false
+  );
+});
+
+test("temporary owner membership must be removed before commit", async () => {
+  const config = loadStagingProvisionConfig(environment());
+  const client = fakeClient({
+    state: "pristine",
+    membershipRemoved: false
+  });
+  await assert.rejects(
+    provisionStagingBaseline(fakePool(client), config),
+    { code: "staging_provision_temporary_membership_not_removed" }
+  );
+  assert.equal(
+    client.queries.some(({ sql }) => sql === "ROLLBACK"),
+    true
+  );
+  assert.equal(
+    client.queries.some(({ sql }) => sql === "COMMIT"),
     false
   );
 });
