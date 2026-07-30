@@ -60,16 +60,24 @@ destinos descartáveis de restauração, mas não pode ter `SUPERUSER`,
    migration e runtime.
 6. Registrar apenas host, porta, banco, nomes dos logins e fingerprints
    públicos esperados.
-7. Executar as migrations em job local/efêmero contendo somente a credencial
-   de migration. O processo HTTP não executa migrations.
-8. Executar o gate físico completo: checksums, rollback provocado,
-   concorrência, retomada, RLS A/B, cofre e ausência de privilégios
-   temporários.
-9. Gerar backup lógico criptografado, validar seu roundtrip e restaurá-lo em
-   banco novo e descartável.
-10. Aprovar os verificadores do runtime atual e do commit antigo 2A contra o
+7. Criar, na mesma instância paga e sem novo plano, o banco lógico
+   descartável de gate com nome, owner, marcador e fingerprint exatos.
+8. Executar nesse banco descartável o gate físico completo: checksums,
+   rollback provocado, concorrência, retomada, RLS A/B, cofre e ausência de
+   privilégios temporários. O gate não pode gravar fixtures ou autoridade de
+   chave efêmera no banco principal.
+9. Confirmar o encerramento dos pools, validar o marcador novamente e remover
+   somente o banco descartável criado pelo lifecycle.
+10. Executar as migrations no banco principal ainda limpo, por job
+    local/efêmero contendo somente a credencial de migration. O processo HTTP
+    não executa migrations.
+11. Inicializar no banco principal somente o keyring operacional custodiado e
+    fixtures sintéticas explicitamente gerenciadas para o canário.
+12. Gerar backup lógico criptografado, validar seu roundtrip e restaurá-lo em
+    outro banco novo e descartável.
+13. Aprovar os verificadores do runtime atual e do commit antigo 2A contra o
     banco restaurado.
-11. Somente depois desses gates, preparar o Web Service com a credencial de
+14. Somente depois desses gates, preparar o Web Service com a credencial de
     runtime.
 
 ## Chaves fora do PostgreSQL
@@ -137,6 +145,8 @@ aprovados e autorização próprios.
   preservado.
 - Não existe down migration destrutiva.
 - Falha antes da promoção mantém o banco novo isolado e sem tráfego.
+- Falha do gate físico descarta somente o banco lógico marcado do gate; o
+  banco principal não recebe suas fixtures ou chaves efêmeras.
 - Falha de dados restaura o bundle em **outro banco novo**, executa os gates e
   só então permite trocar o destino. O banco original nunca é limpo,
   sobrescrito ou restaurado no lugar.
@@ -150,7 +160,7 @@ O Checkpoint 2B só fica apto ao OAuth quando:
 - custo e recurso forem aprovados;
 - deploy hook exposto estiver rotacionado;
 - logins permanentes e segregação estiverem comprovados;
-- migrations e gate físico passarem;
+- gate físico descartável e migrations do banco principal passarem;
 - backup externo criptografado e restauração isolada passarem;
 - runtime operar somente com seu LOGIN;
 - staging permanecer estável dentro dos limites;

@@ -2054,7 +2054,8 @@ async function runLogicalBackup({
   operator,
   runTool,
   fileSystem = fs,
-  generatedAt
+  generatedAt,
+  requireBundleDirectoryFsync = false
 }) {
   if (
     !operator ||
@@ -2063,7 +2064,8 @@ async function runLogicalBackup({
     typeof operator.assertTransientPoliciesAbsent !== "function" ||
     typeof operator.collectCatalogEvidence !== "function" ||
     typeof operator.releaseLocks !== "function" ||
-    typeof runTool !== "function"
+    typeof runTool !== "function" ||
+    typeof requireBundleDirectoryFsync !== "boolean"
   ) {
     fail("backup_operator_invalid");
   }
@@ -2170,6 +2172,12 @@ async function runLogicalBackup({
       bundleKey: config.bundleKey,
       fileSystem
     });
+    if (
+      requireBundleDirectoryFsync &&
+      encrypted.bundleDirectoryFsyncConfirmed !== true
+    ) {
+      fail("backup_bundle_directory_sync_unconfirmed");
+    }
     await withExtractedEncryptedBundle({
       containerPath: config.files.bundle,
       expectedNames: archiveNames,

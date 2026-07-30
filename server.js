@@ -4,6 +4,11 @@ const {
   assertWebServiceDatabaseCredentialBoundary
 } = require("./src/persistence/postgres/config");
 assertWebServiceDatabaseCredentialBoundary(process.env);
+const {
+  initializeSocialServerRuntime,
+  installSocialRuntimeShutdown,
+  safeErrorCode
+} = require("./src/social/server-runtime");
 
 const express = require("express");
 const cors = require("cors");
@@ -7955,23 +7960,66 @@ app.use((err, req, res, next) => {
   });
 });
 
-cleanupOldTmpUploads();
-setInterval(cleanupOldTmpUploads, TMP_UPLOAD_CLEANUP_INTERVAL_MS);
-setInterval(finalizarConversasSuporteInativas, 60 * 1000);
-if (adminFreeArtsEnabled()) {
-  setTimeout(runFreeArtCampaignRecovery, 60 * 1000);
-  setInterval(runFreeArtCampaignRecovery, adminFreeArtsRecoveryIntervalMs());
-}
-if (fcmService.scheduledNotificationsEnabled()) {
-  setTimeout(runMonthlyPlanningNotifications, 15 * 1000);
-  setInterval(runMonthlyPlanningNotifications, MONTHLY_PLANNING_NOTIFICATIONS_INTERVAL_MS);
-  if (adminFreeArtsNotificationsEnabled()) {
-    setTimeout(runFreeArtCampaignNotifications, 20 * 1000);
-    setInterval(runFreeArtCampaignNotifications, adminFreeArtsNotificationsIntervalMs());
+function startBackgroundTasks() {
+  cleanupOldTmpUploads();
+  setInterval(cleanupOldTmpUploads, TMP_UPLOAD_CLEANUP_INTERVAL_MS);
+  setInterval(finalizarConversasSuporteInativas, 60 * 1000);
+  if (adminFreeArtsEnabled()) {
+    setTimeout(runFreeArtCampaignRecovery, 60 * 1000);
+    setInterval(runFreeArtCampaignRecovery, adminFreeArtsRecoveryIntervalMs());
+  }
+  if (fcmService.scheduledNotificationsEnabled()) {
+    setTimeout(runMonthlyPlanningNotifications, 15 * 1000);
+    setInterval(runMonthlyPlanningNotifications, MONTHLY_PLANNING_NOTIFICATIONS_INTERVAL_MS);
+    if (adminFreeArtsNotificationsEnabled()) {
+      setTimeout(runFreeArtCampaignNotifications, 20 * 1000);
+      setInterval(runFreeArtCampaignNotifications, adminFreeArtsNotificationsIntervalMs());
+    }
   }
 }
 
-app.listen(PORT, () => {
-  console.log("API rodando na porta", PORT);
-  console.log("[fcm][safety]", fcmService.runtimeConfigSummary());
+async function startApiServer() {
+  let socialRuntimeState;
+  try {
+    socialRuntimeState = await initializeSocialServerRuntime({
+      env: process.env,
+      logger: {
+        error(event) {
+          console.error("[social][postgres]", {
+            component: "social_postgres",
+            code: safeErrorCode(event, "social_postgres_error")
+          });
+        }
+      }
+    });
+    startBackgroundTasks();
+    const httpServer = app.listen(PORT, () => {
+      console.log("API rodando na porta", PORT);
+      console.log("[fcm][safety]", fcmService.runtimeConfigSummary());
+      if (socialRuntimeState.enabled) {
+        console.log("[social][persistence]", { enabled: true });
+      }
+    });
+    installSocialRuntimeShutdown({
+      runtimeState: socialRuntimeState,
+      server: httpServer
+    });
+  } catch (error) {
+    if (socialRuntimeState?.enabled) {
+      try {
+        await socialRuntimeState.close();
+      } catch {
+        // The startup remains fail-closed and reports only a safe code.
+      }
+    }
+    throw error;
+  }
+}
+
+startApiServer().catch((error) => {
+  console.error("[social][startup]", {
+    ok: false,
+    code: safeErrorCode(error, "social_runtime_startup_failed")
+  });
+  process.exitCode = 1;
 });

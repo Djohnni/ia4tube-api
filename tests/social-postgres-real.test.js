@@ -286,38 +286,19 @@ async function stopChild(child) {
   }
 }
 
-async function proveNormalStartupDoesNotMigrate(
-  provisionerPool,
-  configuration
+function createStartupProbeEnvironment(
+  configuration,
+  port,
+  dataDirectory
 ) {
-  const stateQuery = [
-    "SELECT",
-    "  (SELECT COUNT(*)::integer",
-    "   FROM pg_catalog.pg_class relation",
-    "   JOIN pg_catalog.pg_namespace namespace",
-    "     ON namespace.oid = relation.relnamespace",
-    "   WHERE namespace.nspname = 'ia4tube_migrations'",
-    "     AND relation.relname = 'schema_migrations')",
-    "    AS migration_ledger_count,",
-    "  (SELECT COUNT(*)::integer",
-    "   FROM pg_catalog.pg_namespace namespace",
-    "   WHERE namespace.nspname = ANY($1::text[]))",
-    "    AS application_schema_count"
-  ].join("\n");
-  const before = await provisionerPool.query(stateQuery, [
-    ["ia4tube_social", "ia4tube_social_admin"]
-  ]);
-  assert.deepEqual(before.rows[0], {
-    migration_ledger_count: 0,
-    application_schema_count: 0
-  });
-
-  const port = await reserveLoopbackPort();
-  const dataDirectory = fs.mkdtempSync(
-    path.join(os.tmpdir(), "ia4tube-social-normal-start-")
-  );
+  const identityKey = crypto.randomBytes(32);
+  const vaultKey = crypto.randomBytes(32);
   const jwtSecret = crypto.randomBytes(48).toString("base64url");
   const mediaSecret = crypto.randomBytes(48).toString("base64url");
+  const vaultVersion = deriveVaultKeyVersion(1, vaultKey);
+  const vaultKeysJson = JSON.stringify({
+    [vaultVersion]: vaultKey.toString("base64")
+  });
   const env = {
     ...systemChildEnvironment(),
     NODE_ENV: "test",
@@ -334,6 +315,14 @@ async function proveNormalStartupDoesNotMigrate(
       databaseTargetFingerprint(new URL(configuration.runtimeUrl)),
     SOCIAL_DATABASE_EXPECTED_RUNTIME_LOGIN:
       configuration.identities[2].username,
+    SOCIAL_DATABASE_POOL_MAX: "3",
+    SOCIAL_TENANT_NAMESPACE_UUID: crypto.randomUUID(),
+    SOCIAL_IDENTITY_DERIVATION_VERSION: IDENTITY_VERSION,
+    SOCIAL_IDENTITY_DERIVATION_KEY: identityKey.toString("base64"),
+    SOCIAL_VAULT_ACTIVE_KEY_VERSION: vaultVersion,
+    SOCIAL_VAULT_KEYS_JSON: vaultKeysJson,
+    SOCIAL_VAULT_EXPECTED_KEYRING_FINGERPRINT:
+      vaultKeyringFingerprint(vaultVersion, [vaultVersion]),
     FCM_TOKEN_REGISTRATION_ENABLED: "false",
     FCM_ART_READY_EVENT_ENABLED: "false",
     FCM_DELIVERY_ENABLED: "false",
@@ -347,9 +336,34 @@ async function proveNormalStartupDoesNotMigrate(
     BOT_RUNNER_TOKEN_NEXT: "",
     GOOGLE_CLIENT_ID: ""
   };
+  return Object.freeze({
+    env,
+    secrets: Object.freeze([
+      jwtSecret,
+      mediaSecret,
+      env.SOCIAL_IDENTITY_DERIVATION_KEY,
+      vaultKeysJson
+    ]),
+    destroy() {
+      identityKey.fill(0);
+      vaultKey.fill(0);
+    }
+  });
+}
+
+async function runStartupProbe(configuration, expectStarted) {
+  const port = await reserveLoopbackPort();
+  const dataDirectory = fs.mkdtempSync(
+    path.join(os.tmpdir(), "ia4tube-social-normal-start-")
+  );
+  const probe = createStartupProbeEnvironment(
+    configuration,
+    port,
+    dataDirectory
+  );
   const child = spawn(process.execPath, ["server.js"], {
     cwd: path.join(__dirname, ".."),
-    env,
+    env: probe.env,
     windowsHide: true,
     stdio: ["ignore", "pipe", "pipe"]
   });
@@ -371,20 +385,72 @@ async function proveNormalStartupDoesNotMigrate(
     ) {
       await delay(50);
     }
-    assert.equal(
-      stdout.includes("API rodando na porta"),
-      true,
-      "O start normal sintetico deve chegar ao estado de escuta."
-    );
+    if (expectStarted) {
+      assert.equal(
+        stdout.includes("API rodando na porta"),
+        true,
+        "O start sintetico deve chegar ao estado de escuta."
+      );
+    } else {
+      if (child.exitCode === null) {
+        await waitForChildExit(child, 1000).catch(() => undefined);
+      }
+      assert.equal(
+        stdout.includes("API rodando na porta"),
+        false,
+        "O runtime sem migrations nao pode abrir a API."
+      );
+      assert.notEqual(
+        child.exitCode,
+        null,
+        "O runtime sem migrations deve falhar fechado."
+      );
+      assert.notEqual(child.exitCode, 0);
+    }
   } finally {
     await stopChild(child);
     assertRedactedOutput(
       `${stdout}${stderr}`,
       configuration,
-      [jwtSecret, mediaSecret]
+      probe.secrets
     );
+    probe.destroy();
     fs.rmSync(dataDirectory, { recursive: true, force: true });
   }
+}
+
+async function proveStartupBoundary(
+  provisionerPool,
+  configuration,
+  expectMigrated
+) {
+  const stateQuery = [
+    "SELECT",
+    "  (SELECT COUNT(*)::integer",
+    "   FROM pg_catalog.pg_class relation",
+    "   JOIN pg_catalog.pg_namespace namespace",
+    "     ON namespace.oid = relation.relnamespace",
+    "   WHERE namespace.nspname = 'ia4tube_migrations'",
+    "     AND relation.relname = 'schema_migrations')",
+    "    AS migration_ledger_count,",
+    "  (SELECT COUNT(*)::integer",
+    "   FROM pg_catalog.pg_namespace namespace",
+    "   WHERE namespace.nspname = ANY($1::text[]))",
+    "    AS application_schema_count"
+  ].join("\n");
+  const before = await provisionerPool.query(stateQuery, [
+    ["ia4tube_social", "ia4tube_social_admin"]
+  ]);
+  if (expectMigrated) {
+    assert.ok(before.rows[0].migration_ledger_count > 0);
+    assert.equal(before.rows[0].application_schema_count, 2);
+  } else {
+    assert.deepEqual(before.rows[0], {
+      migration_ledger_count: 0,
+      application_schema_count: 0
+    });
+  }
+  await runStartupProbe(configuration, expectMigrated);
 
   const after = await provisionerPool.query(stateQuery, [
     ["ia4tube_social", "ia4tube_social_admin"]
@@ -718,7 +784,7 @@ async function preflightPhysicalTarget(pool, configuration) {
       assert.equal(login.rolcreaterole, false);
     }
 
-    if (configuration.mode !== RENDER_REMOTE_MODE) return;
+    if (configuration.mode === LOOPBACK_MODE) return;
 
     const tls = await client.query(
       [
@@ -753,15 +819,36 @@ async function preflightPhysicalTarget(pool, configuration) {
 
     const applicationSchemas = await client.query(
       [
-        "SELECT COUNT(*)::integer AS schema_count",
+        "SELECT",
+        "  COUNT(*) FILTER (",
+        "    WHERE nspname = 'ia4tube_migrations'",
+        "  )::integer AS migration_schema_count,",
+        "  COUNT(*) FILTER (",
+        "    WHERE nspname IN (",
+        "      'ia4tube_social', 'ia4tube_social_admin'",
+        "    )",
+        "  )::integer AS application_schema_count",
         "FROM pg_catalog.pg_namespace",
-        "WHERE nspname = ANY($1::text[])"
       ].join("\n"),
-      [["ia4tube_social", "ia4tube_social_admin", "ia4tube_migrations"]]
     );
-    assert.equal(applicationSchemas.rows[0].schema_count, 0);
+    const schemaState = applicationSchemas.rows[0];
 
     const userRelations = await client.query(
+      [
+        "SELECT namespace.nspname AS schema_name,",
+        "  relation.relname AS relation_name, relation.relkind",
+        "FROM pg_catalog.pg_class relation",
+        "JOIN pg_catalog.pg_namespace namespace",
+        "  ON namespace.oid = relation.relnamespace",
+        "WHERE namespace.nspname IN (",
+        "  'ia4tube_migrations',",
+        "  'ia4tube_social',",
+        "  'ia4tube_social_admin'",
+        ")",
+        "ORDER BY namespace.nspname, relation.relname"
+      ].join("\n")
+    );
+    const unexpectedRelations = await client.query(
       [
         "SELECT COUNT(*)::integer AS relation_count",
         "FROM pg_catalog.pg_class relation",
@@ -769,11 +856,21 @@ async function preflightPhysicalTarget(pool, configuration) {
         "  ON namespace.oid = relation.relnamespace",
         "WHERE namespace.nspname NOT IN ('pg_catalog', 'information_schema')",
         "  AND namespace.nspname !~ '^pg_toast'",
-        "  AND relation.relkind = ANY($1::\"char\"[])"
+        "  AND relation.relkind = ANY($1::\"char\"[])",
+        "  AND NOT (",
+        "    namespace.nspname = 'ia4tube_migrations'",
+        "    AND relation.relname = ANY($2::text[])",
+        "  )"
       ].join("\n"),
-      [["r", "p", "v", "m", "S", "f"]]
+      [
+        ["r", "p", "v", "m", "S", "f", "i"],
+        []
+      ]
     );
-    assert.equal(userRelations.rows[0].relation_count, 0);
+    assert.equal(unexpectedRelations.rows[0].relation_count, 0);
+    assert.equal(schemaState.migration_schema_count, 0);
+    assert.equal(schemaState.application_schema_count, 0);
+    assert.deepEqual(userRelations.rows, []);
   } finally {
     client.release();
   }
@@ -964,10 +1061,13 @@ async function provisionRolesAndMarker(
         [
           "INSERT INTO ia4tube_migrations.environment_identity (",
           "  singleton, environment_id, environment_name",
-          ") VALUES (TRUE, $1, 'test')",
+          ") VALUES (TRUE, $1, $2)",
           "ON CONFLICT (singleton) DO NOTHING"
         ].join("\n"),
-        [configuration.environmentId]
+        [
+          configuration.environmentId,
+          configuration.target.environment
+        ]
       );
       const marker = await client.query(
         [
@@ -978,7 +1078,10 @@ async function provisionRolesAndMarker(
       );
       assert.equal(marker.rowCount, 1);
       assert.equal(marker.rows[0].environment_id, configuration.environmentId);
-      assert.equal(marker.rows[0].environment_name, "test");
+      assert.equal(
+        marker.rows[0].environment_name,
+        configuration.target.environment
+      );
       await client.query("RESET ROLE");
       await client.query(
         [
@@ -3330,7 +3433,7 @@ test(
       const runtimePool = createPool(
         configuration.runtimeUrl,
         "ia4tube-social-real-runtime",
-        6,
+        3,
         configuration
       );
       const contextPool = createPool(
@@ -3350,9 +3453,10 @@ test(
         provisionerPool,
         configuration
       );
-      await proveNormalStartupDoesNotMigrate(
+      await proveStartupBoundary(
         provisionerPool,
-        configuration
+        configuration,
+        false
       );
 
       const manifest = readManifest();
@@ -3451,6 +3555,10 @@ test(
         "ia4tube-social-real-migration-b"
       );
       await proveChecksums(migrationPoolA, runnerA);
+      const migrationPoolBIndex = pools.indexOf(migrationPoolB);
+      assert.ok(migrationPoolBIndex >= 0);
+      await migrationPoolB.end();
+      pools.splice(migrationPoolBIndex, 1);
       await proveMigrationCli(configuration);
       await proveProvisionerEffectiveAccess(provisionerPool);
       await proveTargetRefusals(
@@ -3465,6 +3573,11 @@ test(
 
       await verifyRuntimeRole(runtimePool, RUNTIME_ROLE);
       await verifyRuntimeSchema(runtimePool, RUNTIME_ROLE);
+      await proveStartupBoundary(
+        provisionerPool,
+        configuration,
+        true
+      );
       await assert.rejects(
         verifyRuntimeRole(migrationPoolA, RUNTIME_ROLE),
         (error) =>

@@ -7,11 +7,25 @@ const { spawnSync } = require("node:child_process");
 const {
   assertNoAmbientPostgresEnvironment
 } = require("../src/persistence/postgres/config");
+const {
+  PAID_STAGING_PUBLIC_TARGET
+} = require(
+  "../src/persistence/postgres/staging-provisioner"
+);
+const {
+  DISPOSABLE_DATABASE_NAME
+} = require(
+  "../src/persistence/postgres/disposable-database-lifecycle"
+);
 
 const APPROVAL = "RUN_SOCIAL_POSTGRES_REAL_TESTS";
 const REMOTE_APPROVAL = "RUN_SOCIAL_POSTGRES_RENDER_FREE_DISPOSABLE";
+const PAID_STAGING_DISPOSABLE_APPROVAL =
+  "RUN_SOCIAL_POSTGRES_RENDER_PAID_STAGING_DISPOSABLE";
 const LOOPBACK_MODE = "loopback";
 const RENDER_REMOTE_MODE = "render_free_remote";
+const RENDER_PAID_STAGING_DISPOSABLE_MODE =
+  "render_paid_staging_disposable";
 const REMOTE_DATABASE = "ia4tube_social_2b0_gate";
 const REQUIRED = [
   "SOCIAL_TEST_ENVIRONMENT_ID",
@@ -34,6 +48,8 @@ const UUID =
 const SHA256 = /^[0-9a-f]{64}$/;
 const BLOCKED_LABEL =
   /(^|[-_.])(prod|production|stage|staging|live|main)([-_.]|$)/i;
+const PRODUCTION_LABEL =
+  /(^|[-_.])(prod|production|live|main)([-_.]|$)/i;
 const CONNECTION_NAMES = [
   "SOCIAL_TEST_PROVISIONER_DATABASE_URL",
   "SOCIAL_TEST_MIGRATION_DATABASE_URL",
@@ -105,7 +121,7 @@ function targetFingerprint(input) {
     String(input.provisionerUsername || "").toLowerCase(),
     String(input.migrationUsername || "").toLowerCase(),
     String(input.runtimeUsername || "").toLowerCase(),
-    input.mode === RENDER_REMOTE_MODE ? "tls-verify-full" : "loopback",
+    input.mode === LOOPBACK_MODE ? "loopback" : "tls-verify-full",
     "disposable-empty-v1"
   ].join("/");
   return crypto.createHash("sha256").update(normalized).digest("hex");
@@ -130,7 +146,7 @@ function parseDatabaseUrl(name, env, mode, expected) {
   if (
     !["postgres:", "postgresql:"].includes(parsed.protocol) ||
     !parsed.username ||
-    (mode === RENDER_REMOTE_MODE && !parsed.password) ||
+    (mode !== LOOPBACK_MODE && !parsed.password) ||
     !parsed.pathname ||
     parsed.pathname === "/"
   ) {
@@ -173,7 +189,7 @@ function secureConnection(raw, configuration) {
   return Object.freeze({
     connectionString: parsed.toString(),
     ssl:
-      configuration.mode === RENDER_REMOTE_MODE
+      configuration.mode !== LOOPBACK_MODE
         ? Object.freeze({
             rejectUnauthorized: true,
             minVersion: "TLSv1.2",
@@ -216,15 +232,24 @@ function validateGateEnvironment(env = process.env) {
   const mode = String(env.SOCIAL_TEST_TARGET_MODE || LOOPBACK_MODE)
     .trim()
     .toLowerCase();
-  if (![LOOPBACK_MODE, RENDER_REMOTE_MODE].includes(mode)) {
+  if (
+    ![
+      LOOPBACK_MODE,
+      RENDER_REMOTE_MODE,
+      RENDER_PAID_STAGING_DISPOSABLE_MODE
+    ].includes(mode)
+  ) {
     refuse("target_mode_invalid");
   }
 
   let expected = Object.freeze({});
-  if (mode === RENDER_REMOTE_MODE) {
+  if (mode !== LOOPBACK_MODE) {
+    const approval =
+      mode === RENDER_REMOTE_MODE
+        ? REMOTE_APPROVAL
+        : PAID_STAGING_DISPOSABLE_APPROVAL;
     if (
-      requireValue(env, "SOCIAL_TEST_RENDER_REMOTE_APPROVED") !==
-      REMOTE_APPROVAL
+      requireValue(env, "SOCIAL_TEST_RENDER_REMOTE_APPROVED") !== approval
     ) {
       refuse("remote_approval_missing");
     }
@@ -243,13 +268,33 @@ function validateGateEnvironment(env = process.env) {
       ]),
       fingerprint: env.SOCIAL_TEST_EXPECTED_TARGET_FINGERPRINT.toLowerCase()
     });
+    const targetLabels = [expected.database, ...expected.usernames];
+    const freeTargetInvalid =
+      mode === RENDER_REMOTE_MODE &&
+      (
+        expected.database !== REMOTE_DATABASE ||
+        targetLabels.some((label) => BLOCKED_LABEL.test(label))
+      );
+    const paidDisposableTargetInvalid =
+      mode === RENDER_PAID_STAGING_DISPOSABLE_MODE &&
+      (
+        environmentId !== PAID_STAGING_PUBLIC_TARGET.environmentId ||
+        expected.host !== PAID_STAGING_PUBLIC_TARGET.host ||
+        expected.port !== PAID_STAGING_PUBLIC_TARGET.port ||
+        expected.database !== DISPOSABLE_DATABASE_NAME ||
+        expected.usernames[0] !==
+          PAID_STAGING_PUBLIC_TARGET.provisionerLogin ||
+        expected.usernames[1] !==
+          PAID_STAGING_PUBLIC_TARGET.migrationLogin ||
+        expected.usernames[2] !==
+          PAID_STAGING_PUBLIC_TARGET.runtimeLogin ||
+        targetLabels.some((label) => PRODUCTION_LABEL.test(label))
+      );
     if (
       net.isIP(expected.host) !== 0 ||
       !expected.host.endsWith(".render.com") ||
-      expected.database !== REMOTE_DATABASE ||
-      [expected.database, ...expected.usernames].some((label) =>
-        BLOCKED_LABEL.test(label)
-      )
+      freeTargetInvalid ||
+      paidDisposableTargetInvalid
     ) {
       refuse("expected_target_not_disposable");
     }
@@ -370,9 +415,11 @@ if (require.main === module) process.exit(main());
 module.exports = {
   APPROVAL,
   LOOPBACK_MODE,
+  PAID_STAGING_DISPOSABLE_APPROVAL,
   PostgresGateRefusal,
   REMOTE_APPROVAL,
   REMOTE_DATABASE,
+  RENDER_PAID_STAGING_DISPOSABLE_MODE,
   RENDER_REMOTE_MODE,
   main,
   secureConnection,

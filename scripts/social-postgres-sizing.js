@@ -6,7 +6,14 @@ const {
   loadRuntimePostgresConfig
 } = require("../src/persistence/postgres/config");
 const {
+  verifyRuntimeRole
+} = require("../src/persistence/postgres/pool");
+const {
+  verifyRuntimeSchema
+} = require("../src/persistence/postgres/runtime-validation");
+const {
   LOOPBACK_MODE,
+  RENDER_PAID_STAGING_MODE,
   RUNTIME_POOL_MAX,
   runSizingHarness,
   validateSizingEnvironment
@@ -15,6 +22,8 @@ const {
 async function main(env = process.env, options = {}) {
   let pool;
   let exitCode = 2;
+  const stdout = options.stdout || process.stdout;
+  const stderr = options.stderr || process.stderr;
   try {
     const target = validateSizingEnvironment(env);
     const runtime = loadRuntimePostgresConfig({
@@ -29,14 +38,24 @@ async function main(env = process.env, options = {}) {
       SOCIAL_DATABASE_POOL_MAX: String(RUNTIME_POOL_MAX)
     });
     pool = new (options.PoolClass || Pool)(runtime.pool);
-    const metrics = await runSizingHarness({
+    if (target.mode === RENDER_PAID_STAGING_MODE) {
+      await (options.verifyRuntimeRole || verifyRuntimeRole)(
+        pool,
+        runtime.role
+      );
+      await (options.verifyRuntimeSchema || verifyRuntimeSchema)(
+        pool,
+        runtime.role
+      );
+    }
+    const metrics = await (options.runSizingHarness || runSizingHarness)({
       pool,
       holdMs: target.holdMs,
       expectedDatabase: target.database,
       expectedUsername: target.username,
       expectTls: target.mode !== LOOPBACK_MODE
     });
-    process.stdout.write(
+    stdout.write(
       `${JSON.stringify({
         event: "social_postgres_sizing_complete",
         metrics
@@ -48,7 +67,7 @@ async function main(env = process.env, options = {}) {
     const code = /^[a-zA-Z0-9_]{2,64}$/.test(rawCode)
       ? rawCode
       : "sizing_failed";
-    process.stderr.write(
+    stderr.write(
       `${JSON.stringify({
         event: "social_postgres_sizing_refused",
         code
@@ -60,7 +79,7 @@ async function main(env = process.env, options = {}) {
       try {
         await pool.end();
       } catch {
-        process.stderr.write(
+        stderr.write(
           `${JSON.stringify({
             event: "social_postgres_sizing_cleanup_failed",
             code: "sizing_pool_close_failed"

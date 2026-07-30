@@ -12,10 +12,13 @@ const {
 } = require("../src/persistence/postgres/login-bootstrap");
 const {
   LOOPBACK_MODE,
+  PAID_STAGING_TARGET,
   REMOTE_DATABASE,
+  RENDER_PAID_STAGING_MODE,
   RENDER_REMOTE_MODE,
   RUNTIME_POOL_MAX,
   SIZING_APPROVAL,
+  SIZING_PAID_STAGING_APPROVAL,
   SIZING_REMOTE_APPROVAL,
   SIZING_TASK_COUNT,
   SYNTHETIC_QUERY,
@@ -23,6 +26,9 @@ const {
   runSizingHarness,
   validateSizingEnvironment
 } = require("../src/persistence/postgres/sizing-harness");
+const {
+  main: sizingMain
+} = require("../scripts/social-postgres-sizing");
 
 const environmentId = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
 
@@ -69,6 +75,35 @@ function remoteEnvironment(overrides = {}) {
     SOCIAL_POSTGRES_SIZING_ENVIRONMENT_ID: environmentId,
     SOCIAL_POSTGRES_SIZING_DATABASE_URL:
       "postgresql://synthetic_runtime:synthetic-password@" +
+      `${target.host}:${target.port}/${target.database}` +
+      "?sslmode=verify-full",
+    SOCIAL_POSTGRES_SIZING_EXPECTED_HOST: target.host,
+    SOCIAL_POSTGRES_SIZING_EXPECTED_PORT: target.port,
+    SOCIAL_POSTGRES_SIZING_EXPECTED_DATABASE: target.database,
+    SOCIAL_POSTGRES_SIZING_EXPECTED_USERNAME: target.username,
+    SOCIAL_POSTGRES_SIZING_EXPECTED_TARGET_FINGERPRINT:
+      fingerprint(target),
+    ...overrides
+  };
+}
+
+function paidEnvironment(overrides = {}) {
+  const target = {
+    mode: RENDER_PAID_STAGING_MODE,
+    environmentId: PAID_STAGING_TARGET.environmentId,
+    host: PAID_STAGING_TARGET.host,
+    port: PAID_STAGING_TARGET.port,
+    database: PAID_STAGING_TARGET.database,
+    username: PAID_STAGING_TARGET.runtimeLogin
+  };
+  return {
+    SOCIAL_POSTGRES_SIZING_APPROVED: SIZING_APPROVAL,
+    SOCIAL_POSTGRES_SIZING_RENDER_REMOTE_APPROVED:
+      SIZING_PAID_STAGING_APPROVAL,
+    SOCIAL_POSTGRES_SIZING_TARGET_MODE: RENDER_PAID_STAGING_MODE,
+    SOCIAL_POSTGRES_SIZING_ENVIRONMENT_ID: target.environmentId,
+    SOCIAL_POSTGRES_SIZING_DATABASE_URL:
+      `postgresql://${target.username}:synthetic-paid-password@` +
       `${target.host}:${target.port}/${target.database}` +
       "?sslmode=verify-full",
     SOCIAL_POSTGRES_SIZING_EXPECTED_HOST: target.host,
@@ -157,6 +192,11 @@ test("sizing guard requires opt-in, exact synthetic target and fingerprint", () 
   assert.equal(remote.mode, RENDER_REMOTE_MODE);
   assert.equal(remote.database, REMOTE_DATABASE);
 
+  const paid = validateSizingEnvironment(paidEnvironment());
+  assert.equal(paid.mode, RENDER_PAID_STAGING_MODE);
+  assert.equal(paid.host, PAID_STAGING_TARGET.host);
+  assert.equal(paid.database, PAID_STAGING_TARGET.database);
+
   for (const override of [
     { SOCIAL_POSTGRES_SIZING_APPROVED: "no" },
     { SOCIAL_POSTGRES_SIZING_EXPECTED_DATABASE: "other" },
@@ -184,6 +224,56 @@ test("sizing guard requires opt-in, exact synthetic target and fingerprint", () 
       })
     )
   );
+
+  for (const override of [
+    {
+      SOCIAL_POSTGRES_SIZING_RENDER_REMOTE_APPROVED:
+        SIZING_REMOTE_APPROVAL
+    },
+    {
+      SOCIAL_POSTGRES_SIZING_ENVIRONMENT_ID:
+        "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+    },
+    {
+      SOCIAL_POSTGRES_SIZING_EXPECTED_HOST:
+        "dpg-other-a.oregon-postgres.render.com"
+    },
+    {
+      SOCIAL_POSTGRES_SIZING_EXPECTED_DATABASE:
+        "ia4tube_social_staging_other"
+    },
+    {
+      SOCIAL_POSTGRES_SIZING_EXPECTED_USERNAME:
+        "production_runtime"
+    },
+    {
+      SOCIAL_POSTGRES_SIZING_DATABASE_URL:
+        paidEnvironment().SOCIAL_POSTGRES_SIZING_DATABASE_URL.replace(
+          PAID_STAGING_TARGET.runtimeLogin,
+          "ia4tube_social_staging_runtime_other"
+        ),
+      SOCIAL_POSTGRES_SIZING_EXPECTED_USERNAME:
+        "ia4tube_social_staging_runtime_other",
+      SOCIAL_POSTGRES_SIZING_EXPECTED_TARGET_FINGERPRINT:
+        fingerprint({
+          mode: RENDER_PAID_STAGING_MODE,
+          environmentId: PAID_STAGING_TARGET.environmentId,
+          host: PAID_STAGING_TARGET.host,
+          port: PAID_STAGING_TARGET.port,
+          database: PAID_STAGING_TARGET.database,
+          username: "ia4tube_social_staging_runtime_other"
+        })
+    },
+    {
+      SOCIAL_POSTGRES_SIZING_DATABASE_URL:
+        paidEnvironment().SOCIAL_POSTGRES_SIZING_DATABASE_URL +
+        "&application_name=forbidden"
+    }
+  ]) {
+    assert.throws(() =>
+      validateSizingEnvironment(paidEnvironment(override))
+    );
+  }
 });
 
 test("each migration worker uses one of two permanent connections", () => {
@@ -235,6 +325,87 @@ test("each migration worker uses one of two permanent connections", () => {
   assert.equal(migration.pool.max, 1);
   assert.match(migration.pool.options, /statement_timeout=60000/);
   assert.match(migration.pool.options, /lock_timeout=5000/);
+});
+
+test("paid sizing verifies the canonical runtime boundary before max-three load", async () => {
+  let poolConfiguration;
+  let roleChecks = 0;
+  let schemaChecks = 0;
+  let harnessCalls = 0;
+  let closed = 0;
+  class SyntheticPool {
+    constructor(configuration) {
+      poolConfiguration = configuration;
+    }
+    async end() {
+      closed += 1;
+    }
+  }
+  let stdout = "";
+  let stderr = "";
+  const status = await sizingMain(paidEnvironment(), {
+    PoolClass: SyntheticPool,
+    async verifyRuntimeRole(_pool, role) {
+      roleChecks += 1;
+      assert.equal(role, "ia4tube_social_runtime");
+    },
+    async verifyRuntimeSchema(_pool, role) {
+      schemaChecks += 1;
+      assert.equal(role, "ia4tube_social_runtime");
+    },
+    async runSizingHarness(options) {
+      harnessCalls += 1;
+      assert.equal(options.expectedDatabase, PAID_STAGING_TARGET.database);
+      assert.equal(options.expectedUsername, "ia4tube_social_staging_runtime");
+      assert.equal(options.expectTls, true);
+      return { passed: true, connections: { configuredMax: 3 } };
+    },
+    stdout: { write(value) { stdout += value; } },
+    stderr: { write(value) { stderr += value; } }
+  });
+  assert.equal(status, 0);
+  assert.equal(roleChecks, 1);
+  assert.equal(schemaChecks, 1);
+  assert.equal(harnessCalls, 1);
+  assert.equal(poolConfiguration.max, 3);
+  assert.equal(closed, 1);
+  assert.equal(stderr, "");
+  assert.equal(JSON.parse(stdout).event, "social_postgres_sizing_complete");
+});
+
+test("paid sizing refuses load when the canonical runtime boundary fails", async () => {
+  const secret = "synthetic-paid-password";
+  class SyntheticPool {
+    async end() {}
+  }
+  let stdout = "";
+  let stderr = "";
+  let harnessCalls = 0;
+  const status = await sizingMain(paidEnvironment(), {
+    PoolClass: SyntheticPool,
+    async verifyRuntimeRole() {
+      const error = new Error(`must-not-leak-${secret}`);
+      error.code = "postgres_runtime_role_unsafe";
+      throw error;
+    },
+    async verifyRuntimeSchema() {
+      throw new Error("must-not-run");
+    },
+    async runSizingHarness() {
+      harnessCalls += 1;
+      return { passed: true };
+    },
+    stdout: { write(value) { stdout += value; } },
+    stderr: { write(value) { stderr += value; } }
+  });
+  assert.equal(status, 2);
+  assert.equal(harnessCalls, 0);
+  assert.equal(stdout, "");
+  assert.equal(stderr.includes(secret), false);
+  assert.equal(
+    JSON.parse(stderr).code,
+    "postgres_runtime_role_unsafe"
+  );
 });
 
 test("thirty synthetic tasks stay inside max three and expose aggregates only", async () => {

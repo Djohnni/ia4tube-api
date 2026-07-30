@@ -172,6 +172,14 @@ O destino precisa ser um banco descartável novo cujo nome contenha
 `restore` ou `disposable`. Nomes com `production`, `prod`, `live`, `main`,
 `stage` ou `staging` são recusados.
 
+Neste ambiente pago, o único destino autorizado pelo lifecycle para a
+restauração é
+`ia4tube_social_disposable_restore_20260729`. Ele é distinto do banco
+descartável do gate físico e do banco primário. Nome, ambiente, host, porta,
+login provisionador, PostgreSQL 18, TLS `verify-full`, fingerprint, marker e
+aprovações de criação/remoção ficam vinculados entre si. Nenhum nome livre ou
+prefixo semelhante é aceito.
+
 Os três roles canônicos devem existir no cluster, mas os schemas
 `ia4tube_social`, `ia4tube_social_admin` e `ia4tube_migrations` precisam estar
 ausentes. O banco original nunca é limpo ou sobrescrito.
@@ -183,6 +191,34 @@ permanentes de migration e runtime, e `GRANT CREATE` somente ao role
 ele só cria o schema depois de `SET ROLE` para o owner canônico. O restore
 recusa um alvo em que essa topologia, as memberships ou os limites de conexão
 divirjam.
+
+A criação e a remoção usam exclusivamente
+`scripts/social-db-disposable-lifecycle.js`, com
+`SOCIAL_STAGING_DISPOSABLE_EXPECTED_DATABASE` fixado ao nome acima. Para este
+destino, as aprovações são distintas das usadas pelo gate físico:
+
+- criação:
+  `CREATE_SOCIAL_POSTGRES_RESTORE_DISPOSABLE:<environment-id>:<fingerprint>`;
+- remoção:
+  `DROP_SOCIAL_POSTGRES_RESTORE_DISPOSABLE:<environment-id>:<fingerprint>`.
+
+Na criação, antes de qualquer `CREATE DATABASE`, o operador valida no banco
+primário os roles canônicos, os dois logins permanentes, memberships, ACLs e
+limites de conexão. Depois de criar o banco a partir de `template0` e aplicar
+o marker exato, o mesmo lifecycle executa em uma transação apenas a topologia
+mínima: remove todos os privilégios de `PUBLIC` no banco, concede `CREATE`
+somente ao role owner, concede `CONNECT` diretamente somente aos logins de
+migration e runtime e remove `CREATE` de `PUBLIC` no schema `public`. Ele não
+executa `roles.sql`, não cria schema, tabela ou mídia. A transação só confirma
+depois da leitura exata das ACLs e da prova de que os três schemas da
+aplicação continuam ausentes.
+
+Depois do gate comportamental, a remoção exige o marker e fingerprint
+específicos desse destino, fecha primeiro o pool do banco descartável,
+encerra somente sessões cujo `datname` coincida exatamente, executa
+`DROP DATABASE ... WITH (FORCE)` somente para o nome fixo e prova sua
+ausência. Uma falha de validação não dispara limpeza automática nem alcança
+qualquer outro banco.
 
 Variáveis do operador:
 

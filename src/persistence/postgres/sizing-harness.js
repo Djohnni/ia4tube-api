@@ -2,13 +2,20 @@
 
 const crypto = require("node:crypto");
 const net = require("node:net");
+const {
+  PAID_STAGING_PUBLIC_TARGET
+} = require("./staging-provisioner");
 
 const SIZING_APPROVAL = "RUN_SOCIAL_POSTGRES_SIZING";
 const SIZING_REMOTE_APPROVAL =
   "RUN_SOCIAL_POSTGRES_SIZING_RENDER_FREE_DISPOSABLE";
+const SIZING_PAID_STAGING_APPROVAL =
+  "RUN_SOCIAL_POSTGRES_SIZING_RENDER_PAID_STAGING";
 const LOOPBACK_MODE = "loopback";
 const RENDER_REMOTE_MODE = "render_free_remote";
+const RENDER_PAID_STAGING_MODE = "render_paid_staging";
 const REMOTE_DATABASE = "ia4tube_social_2b0_gate";
+const PAID_STAGING_TARGET = PAID_STAGING_PUBLIC_TARGET;
 const SIZING_TASK_COUNT = 30;
 const RUNTIME_POOL_MAX = 3;
 const MAX_ATTEMPTS = 3;
@@ -18,6 +25,8 @@ const MAX_BACKOFF_MS = 200;
 const LOOPBACK_HOSTS = new Set(["127.0.0.1", "::1", "localhost"]);
 const BLOCKED_LABEL =
   /(^|[-_.])(prod|production|stage|staging|live|main)([-_.]|$)/i;
+const PRODUCTION_LABEL =
+  /(^|[-_.])(prod|production|live|main)([-_.]|$)/i;
 const UUID =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const SHA256 = /^[0-9a-f]{64}$/;
@@ -130,7 +139,7 @@ function fingerprint(input) {
     input.port,
     input.database,
     input.username.toLowerCase(),
-    input.mode === RENDER_REMOTE_MODE ? "tls-verify-full" : "loopback",
+    input.mode === LOOPBACK_MODE ? "loopback" : "tls-verify-full",
     `tasks-${SIZING_TASK_COUNT}`,
     `pool-${RUNTIME_POOL_MAX}`
   ].join("/");
@@ -183,7 +192,13 @@ function validateSizingEnvironment(env = process.env) {
   )
     .trim()
     .toLowerCase();
-  if (![LOOPBACK_MODE, RENDER_REMOTE_MODE].includes(mode)) {
+  if (
+    ![
+      LOOPBACK_MODE,
+      RENDER_REMOTE_MODE,
+      RENDER_PAID_STAGING_MODE
+    ].includes(mode)
+  ) {
     refuse("sizing_target_mode_invalid");
   }
   const environmentId = requireValue(
@@ -214,7 +229,14 @@ function validateSizingEnvironment(env = process.env) {
   const database = decodeUrlPart(parsed.pathname.slice(1));
   const username = decodeUrlPart(parsed.username).toLowerCase();
   if (
+    mode !== RENDER_PAID_STAGING_MODE &&
     [database, username].some((value) => BLOCKED_LABEL.test(value))
+  ) {
+    refuse("sizing_target_not_synthetic");
+  }
+  if (
+    mode === RENDER_PAID_STAGING_MODE &&
+    [database, username].some((value) => PRODUCTION_LABEL.test(value))
   ) {
     refuse("sizing_target_not_synthetic");
   }
@@ -233,11 +255,15 @@ function validateSizingEnvironment(env = process.env) {
       refuse("sizing_loopback_tls_invalid");
     }
   } else {
+    const requiredRemoteApproval =
+      mode === RENDER_REMOTE_MODE
+        ? SIZING_REMOTE_APPROVAL
+        : SIZING_PAID_STAGING_APPROVAL;
     if (
       requireValue(
         env,
         "SOCIAL_POSTGRES_SIZING_RENDER_REMOTE_APPROVED"
-      ) !== SIZING_REMOTE_APPROVAL
+      ) !== requiredRemoteApproval
     ) {
       refuse("sizing_remote_approval_missing");
     }
@@ -245,7 +271,20 @@ function validateSizingEnvironment(env = process.env) {
       !parsed.password ||
       net.isIP(host) !== 0 ||
       !host.endsWith(".render.com") ||
-      database !== REMOTE_DATABASE
+      (
+        mode === RENDER_REMOTE_MODE &&
+        database !== REMOTE_DATABASE
+      ) ||
+      (
+        mode === RENDER_PAID_STAGING_MODE &&
+        (
+          environmentId !== PAID_STAGING_TARGET.environmentId ||
+          host !== PAID_STAGING_TARGET.host ||
+          port !== PAID_STAGING_TARGET.port ||
+          database !== PAID_STAGING_TARGET.database ||
+          username !== PAID_STAGING_TARGET.runtimeLogin
+        )
+      )
     ) {
       refuse("sizing_remote_target_invalid");
     }
@@ -623,11 +662,14 @@ module.exports = {
   DEFAULT_HOLD_MS,
   LOOPBACK_MODE,
   MAX_ATTEMPTS,
+  PAID_STAGING_TARGET,
   PostgresSizingRefusal,
   REMOTE_DATABASE,
+  RENDER_PAID_STAGING_MODE,
   RENDER_REMOTE_MODE,
   RUNTIME_POOL_MAX,
   SIZING_APPROVAL,
+  SIZING_PAID_STAGING_APPROVAL,
   SIZING_REMOTE_APPROVAL,
   SIZING_TASK_COUNT,
   SYNTHETIC_QUERY,

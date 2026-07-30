@@ -1298,7 +1298,12 @@ test("physical gate retains CLI, startup, RLS and both vault markers", () => {
   assert.match(source, /runMigrationCli\("status", configuration\)/);
   assert.match(source, /runMigrationCli\("validate", configuration\)/);
   assert.match(source, /runMigrationCli\("apply", configuration\)/);
-  assert.match(source, /proveNormalStartupDoesNotMigrate/);
+  assert.match(source, /proveStartupBoundary/);
+  assert.match(source, /runStartupProbe\(configuration, expectMigrated\)/);
+  assert.match(
+    source,
+    /await migrationPoolB\.end\(\);\s+pools\.splice\(/s
+  );
   assert.match(source, /row_security_active\(\$1::regclass\)/);
   assert.match(source, /synthetic-access-token-A-/);
   assert.match(source, /synthetic-refresh-token-B-/);

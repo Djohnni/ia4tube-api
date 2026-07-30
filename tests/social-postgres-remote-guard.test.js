@@ -5,18 +5,31 @@ const test = require("node:test");
 const {
   APPROVAL,
   LOOPBACK_MODE,
+  PAID_STAGING_DISPOSABLE_APPROVAL,
   PostgresGateRefusal,
   REMOTE_APPROVAL,
   REMOTE_DATABASE,
+  RENDER_PAID_STAGING_DISPOSABLE_MODE,
   RENDER_REMOTE_MODE,
   secureConnection,
   targetFingerprint,
   validateGateEnvironment
 } = require("../scripts/run-real-postgres-tests");
+const {
+  PAID_STAGING_PUBLIC_TARGET
+} = require("../src/persistence/postgres/staging-provisioner");
+const {
+  DISPOSABLE_DATABASE_NAME
+} = require(
+  "../src/persistence/postgres/disposable-database-lifecycle"
+);
 
 const ENVIRONMENT_ID = "19db4682-c76b-4f83-93cd-a66aa2bc2343";
 const HOST = "dpg-social2a-a.oregon-postgres.render.com";
 const PORT = "5432";
+const DISABLED_PAID_STAGING_MODE = "render_paid_staging";
+const DISABLED_PAID_STAGING_APPROVAL =
+  "RUN_SOCIAL_POSTGRES_RENDER_PAID_STAGING";
 const USERS = Object.freeze([
   "gate_provisioner",
   "gate_migration",
@@ -61,6 +74,111 @@ function remoteEnvironment(overrides = {}) {
     SOCIAL_TEST_EXPECTED_MIGRATION_USERNAME: USERS[1],
     SOCIAL_TEST_EXPECTED_RUNTIME_USERNAME: USERS[2],
     SOCIAL_TEST_EXPECTED_TARGET_FINGERPRINT: targetFingerprint(target),
+    ...overrides
+  };
+}
+
+const PAID_USERS = Object.freeze([
+  PAID_STAGING_PUBLIC_TARGET.provisionerLogin,
+  PAID_STAGING_PUBLIC_TARGET.migrationLogin,
+  PAID_STAGING_PUBLIC_TARGET.runtimeLogin
+]);
+
+function paidUrl(username, host = PAID_STAGING_PUBLIC_TARGET.host) {
+  return (
+    `postgresql://${username}:synthetic-paid-password@${host}:` +
+    `${PAID_STAGING_PUBLIC_TARGET.port}/` +
+    `${PAID_STAGING_PUBLIC_TARGET.database}?sslmode=verify-full`
+  );
+}
+
+function paidTarget(overrides = {}) {
+  return {
+    mode: DISABLED_PAID_STAGING_MODE,
+    environmentId: PAID_STAGING_PUBLIC_TARGET.environmentId,
+    host: PAID_STAGING_PUBLIC_TARGET.host,
+    port: PAID_STAGING_PUBLIC_TARGET.port,
+    database: PAID_STAGING_PUBLIC_TARGET.database,
+    provisionerUsername: PAID_USERS[0],
+    migrationUsername: PAID_USERS[1],
+    runtimeUsername: PAID_USERS[2],
+    ...overrides
+  };
+}
+
+function paidEnvironment(overrides = {}) {
+  const target = paidTarget();
+  return {
+    SOCIAL_TEST_POSTGRES_APPROVED: APPROVAL,
+    SOCIAL_TEST_RENDER_REMOTE_APPROVED:
+      DISABLED_PAID_STAGING_APPROVAL,
+    SOCIAL_TEST_TARGET_MODE: DISABLED_PAID_STAGING_MODE,
+    SOCIAL_TEST_ENVIRONMENT_ID:
+      PAID_STAGING_PUBLIC_TARGET.environmentId,
+    SOCIAL_TEST_PROVISIONER_DATABASE_URL: paidUrl(PAID_USERS[0]),
+    SOCIAL_TEST_MIGRATION_DATABASE_URL: paidUrl(PAID_USERS[1]),
+    SOCIAL_TEST_RUNTIME_DATABASE_URL: paidUrl(PAID_USERS[2]),
+    SOCIAL_TEST_EXPECTED_HOST: PAID_STAGING_PUBLIC_TARGET.host,
+    SOCIAL_TEST_EXPECTED_PORT: PAID_STAGING_PUBLIC_TARGET.port,
+    SOCIAL_TEST_EXPECTED_DATABASE:
+      PAID_STAGING_PUBLIC_TARGET.database,
+    SOCIAL_TEST_EXPECTED_PROVISIONER_USERNAME: PAID_USERS[0],
+    SOCIAL_TEST_EXPECTED_MIGRATION_USERNAME: PAID_USERS[1],
+    SOCIAL_TEST_EXPECTED_RUNTIME_USERNAME: PAID_USERS[2],
+    SOCIAL_TEST_EXPECTED_TARGET_FINGERPRINT:
+      targetFingerprint(target),
+    ...overrides
+  };
+}
+
+function paidDisposableUrl(
+  username,
+  host = PAID_STAGING_PUBLIC_TARGET.host
+) {
+  return (
+    `postgresql://${username}:synthetic-paid-password@${host}:` +
+    `${PAID_STAGING_PUBLIC_TARGET.port}/` +
+    `${DISPOSABLE_DATABASE_NAME}?sslmode=verify-full`
+  );
+}
+
+function paidDisposableTarget(overrides = {}) {
+  return {
+    mode: RENDER_PAID_STAGING_DISPOSABLE_MODE,
+    environmentId: PAID_STAGING_PUBLIC_TARGET.environmentId,
+    host: PAID_STAGING_PUBLIC_TARGET.host,
+    port: PAID_STAGING_PUBLIC_TARGET.port,
+    database: DISPOSABLE_DATABASE_NAME,
+    provisionerUsername: PAID_USERS[0],
+    migrationUsername: PAID_USERS[1],
+    runtimeUsername: PAID_USERS[2],
+    ...overrides
+  };
+}
+
+function paidDisposableEnvironment(overrides = {}) {
+  const target = paidDisposableTarget();
+  return {
+    SOCIAL_TEST_POSTGRES_APPROVED: APPROVAL,
+    SOCIAL_TEST_RENDER_REMOTE_APPROVED:
+      PAID_STAGING_DISPOSABLE_APPROVAL,
+    SOCIAL_TEST_TARGET_MODE: RENDER_PAID_STAGING_DISPOSABLE_MODE,
+    SOCIAL_TEST_ENVIRONMENT_ID:
+      PAID_STAGING_PUBLIC_TARGET.environmentId,
+    SOCIAL_TEST_PROVISIONER_DATABASE_URL:
+      paidDisposableUrl(PAID_USERS[0]),
+    SOCIAL_TEST_MIGRATION_DATABASE_URL:
+      paidDisposableUrl(PAID_USERS[1]),
+    SOCIAL_TEST_RUNTIME_DATABASE_URL:
+      paidDisposableUrl(PAID_USERS[2]),
+    SOCIAL_TEST_EXPECTED_HOST: PAID_STAGING_PUBLIC_TARGET.host,
+    SOCIAL_TEST_EXPECTED_PORT: PAID_STAGING_PUBLIC_TARGET.port,
+    SOCIAL_TEST_EXPECTED_DATABASE: DISPOSABLE_DATABASE_NAME,
+    SOCIAL_TEST_EXPECTED_PROVISIONER_USERNAME: PAID_USERS[0],
+    SOCIAL_TEST_EXPECTED_MIGRATION_USERNAME: PAID_USERS[1],
+    SOCIAL_TEST_EXPECTED_RUNTIME_USERNAME: PAID_USERS[2],
+    SOCIAL_TEST_EXPECTED_TARGET_FINGERPRINT:
+      targetFingerprint(target),
     ...overrides
   };
 }
@@ -240,6 +358,70 @@ test("ambient TLS bypass variables are refused before URL handling", () => {
   assertRefused(
     remoteEnvironment({ PGSSLROOTCERT: "synthetic-path" }),
     "ambient_pgssl_configuration_refused"
+  );
+});
+
+test("destructive paid primary mode is permanently refused", () => {
+  assertRefused(paidEnvironment(), "target_mode_invalid");
+  assertRefused(
+    paidEnvironment({
+      SOCIAL_TEST_RENDER_REMOTE_APPROVED:
+        PAID_STAGING_DISPOSABLE_APPROVAL
+    }),
+    "target_mode_invalid"
+  );
+});
+
+test("paid disposable mode is compiled to one exact throwaway database", () => {
+  const configuration = validateGateEnvironment(
+    paidDisposableEnvironment()
+  );
+  assert.equal(
+    configuration.mode,
+    RENDER_PAID_STAGING_DISPOSABLE_MODE
+  );
+  assert.equal(configuration.database, DISPOSABLE_DATABASE_NAME);
+  assert.deepEqual(
+    configuration.identities.map((identity) => identity.username),
+    PAID_USERS
+  );
+
+  assertRefused(
+    paidDisposableEnvironment({
+      SOCIAL_TEST_EXPECTED_DATABASE:
+        PAID_STAGING_PUBLIC_TARGET.database
+    }),
+    "expected_target_not_disposable"
+  );
+  assertRefused(
+    paidDisposableEnvironment({
+      SOCIAL_TEST_EXPECTED_DATABASE:
+        `${DISPOSABLE_DATABASE_NAME}_other`
+    }),
+    "expected_target_not_disposable"
+  );
+  assertRefused(
+    paidDisposableEnvironment({
+      SOCIAL_TEST_EXPECTED_MIGRATION_USERNAME:
+        "ia4tube_social_staging_migration_other",
+      SOCIAL_TEST_MIGRATION_DATABASE_URL: paidDisposableUrl(
+        "ia4tube_social_staging_migration_other"
+      ),
+      SOCIAL_TEST_EXPECTED_TARGET_FINGERPRINT: targetFingerprint(
+        paidDisposableTarget({
+          migrationUsername:
+            "ia4tube_social_staging_migration_other"
+        })
+      )
+    }),
+    "expected_target_not_disposable"
+  );
+  assertRefused(
+    paidDisposableEnvironment({
+      SOCIAL_TEST_RENDER_REMOTE_APPROVED:
+        DISABLED_PAID_STAGING_APPROVAL
+    }),
+    "remote_approval_missing"
   );
 });
 

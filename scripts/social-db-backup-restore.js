@@ -248,13 +248,29 @@ function successPayload(mode, result) {
   });
 }
 
+async function closeOperatorPool(pool) {
+  if (!pool || typeof pool.end !== "function") {
+    const error = new Error("backup_restore_pool_close_failed");
+    error.code = "backup_restore_pool_close_failed";
+    throw error;
+  }
+  try {
+    await pool.end();
+  } catch {
+    const error = new Error("backup_restore_pool_close_failed");
+    error.code = "backup_restore_pool_close_failed";
+    throw error;
+  }
+}
+
 async function main({
   env = process.env,
   argv = process.argv.slice(2),
   PoolClass = pg.Pool,
   stdout = process.stdout,
   stderr = process.stderr,
-  verifiers
+  verifiers,
+  requireBundleDirectoryFsync = false
 } = {}) {
   if (
     !Array.isArray(argv) ||
@@ -274,6 +290,13 @@ async function main({
   let pool;
   let config;
   try {
+    if (typeof requireBundleDirectoryFsync !== "boolean") {
+      const error = new Error(
+        "backup_directory_fsync_requirement_invalid"
+      );
+      error.code = "backup_directory_fsync_requirement_invalid";
+      throw error;
+    }
     config =
       mode === "backup"
         ? loadBackupConfig(env)
@@ -297,13 +320,20 @@ async function main({
     const operator = createPostgresBackupOperator(pool);
     const result =
       mode === "backup"
-        ? await runLogicalBackup({ config, operator, runTool })
+        ? await runLogicalBackup({
+            config,
+            operator,
+            runTool,
+            requireBundleDirectoryFsync
+          })
         : await runLogicalRestore({
             config,
             operator,
             runTool,
             ...verifiers
           });
+    await closeOperatorPool(pool);
+    pool = null;
     stdout.write(`${JSON.stringify(successPayload(mode, result))}\n`);
     return 0;
   } catch (error) {
@@ -335,6 +365,7 @@ if (require.main === module) {
 module.exports = {
   MAX_TOOL_RUNTIME_MS,
   TOOL_TERMINATION_GRACE_MS,
+  closeOperatorPool,
   main,
   poolConfig,
   runTool,

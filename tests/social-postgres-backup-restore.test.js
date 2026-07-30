@@ -57,6 +57,7 @@ const {
 const {
   MAX_TOOL_RUNTIME_MS,
   TOOL_TERMINATION_GRACE_MS,
+  closeOperatorPool,
   main,
   poolConfig,
   runTool,
@@ -1188,6 +1189,75 @@ test("backup workflow produces a verified bundle and always releases locks", asy
   }
 });
 
+test("strict Linux durability gate removes a bundle when directory fsync is unconfirmed", async (t) => {
+  const directory = temporaryDirectory(t);
+  const config = loadBackupConfig(backupEnvironment(directory), {
+    repositoryRoot: root
+  });
+  const unrelated = path.join(directory, "unrelated-preserved.txt");
+  fs.writeFileSync(unrelated, "preserve me");
+  const events = [];
+  const realOpen = fs.openSync.bind(fs);
+  const unsupportedDirectoryFsync = {
+    ...fs,
+    openSync(file, flags, mode) {
+      if (
+        path.resolve(file) === path.resolve(directory) &&
+        fs.existsSync(config.files.bundle)
+      ) {
+        const error = new Error(
+          "synthetic unsupported directory fsync"
+        );
+        error.code = "EPERM";
+        throw error;
+      }
+      return realOpen(file, flags, mode);
+    }
+  };
+
+  async function populate(plan) {
+    if (plan.executable === tools.psql) {
+      for (const table of BACKUP_TABLES) {
+        fs.writeFileSync(
+          config.files.dataPartial[table],
+          `-- ${table}\nINSERT synthetic;\n`
+        );
+      }
+      fs.writeFileSync(
+        config.files.evidencePartial,
+        JSON.stringify(safeSnapshot())
+      );
+      return { code: 0, stdout: "" };
+    }
+    if (plan.executable === tools.dump) {
+      fs.writeFileSync(config.files.schemaPartial, "schema archive");
+      return { code: 0, stdout: "" };
+    }
+    return { code: 0, stdout: archiveList() };
+  }
+
+  await assert.rejects(
+    runLogicalBackup({
+      config,
+      operator: mockOperator(events),
+      runTool: populate,
+      fileSystem: unsupportedDirectoryFsync,
+      generatedAt: "2026-07-29T12:00:00.000Z",
+      requireBundleDirectoryFsync: true
+    }),
+    { code: "backup_bundle_directory_sync_unconfirmed" }
+  );
+  assert.equal(fs.existsSync(config.files.bundle), false);
+  assert.equal(fs.existsSync(config.files.bundlePartial), false);
+  assert.equal(fs.existsSync(config.workspace.path), false);
+  assert.equal(fs.readFileSync(unrelated, "utf8"), "preserve me");
+  assert.deepEqual(events.at(-1), [
+    "release",
+    BACKUP_LOCK_ID,
+    MIGRATION_LOCK_ID
+  ]);
+});
+
 test("failed encrypted roundtrip removes the container and every plaintext output", async (t) => {
   const directory = temporaryDirectory(t);
   const config = loadBackupConfig(backupEnvironment(directory), {
@@ -1631,6 +1701,20 @@ test("official PostgreSQL tools have a bounded total runtime", async () => {
     { code: "postgres_tool_timeout" }
   );
   assert.ok(Date.now() - startedAt < 5000);
+});
+
+test("operator pool closure is mandatory and driver details stay internal", async () => {
+  await closeOperatorPool({ async end() {} });
+  await assert.rejects(
+    closeOperatorPool({
+      async end() {
+        throw new Error(`driver-close-${password}`);
+      }
+    }),
+    (error) =>
+      error?.code === "backup_restore_pool_close_failed" &&
+      !String(error?.message || "").includes(password)
+  );
 });
 
 test("raw error after timeout waits for confirmed child close", async () => {
