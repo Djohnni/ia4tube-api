@@ -59,8 +59,14 @@ async function main({
   try {
     const configuration =
       loadDisposableDatabaseLifecycleConfig(env);
-    parentPool = new PoolClass(configuration.parentPool);
-    disposablePool = new PoolClass(configuration.disposablePool);
+    parentPool = new PoolClass({
+      ...configuration.parentPool,
+      connectionString: configuration.parentPool.connectionString
+    });
+    disposablePool = new PoolClass({
+      ...configuration.disposablePool,
+      connectionString: configuration.disposablePool.connectionString
+    });
     const result =
       configuration.action === "create"
         ? await createDisposableDatabase(

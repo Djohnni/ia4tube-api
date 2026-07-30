@@ -678,9 +678,11 @@ test("operator success output contains booleans only and closes both pools", asy
   const fake = fakeLifecycle({ exists: false });
   let constructed = 0;
   let ended = 0;
+  const receivedConnections = [];
   class FakePool {
     constructor(options) {
       constructed += 1;
+      receivedConnections.push(options.connectionString);
       this.delegate =
         options.application_name ===
         "ia4tube-social-disposable-parent"
@@ -709,6 +711,19 @@ test("operator success output contains booleans only and closes both pools", asy
   const evidence = JSON.parse(stdout);
   assert.equal(constructed, 2);
   assert.equal(ended, 2);
+  assert.equal(
+    receivedConnections.every((value) => typeof value === "string"),
+    true
+  );
+  assert.deepEqual(
+    receivedConnections.map(
+      (value) => decodeURIComponent(new URL(value).pathname.slice(1))
+    ),
+    [
+      PAID_STAGING_PUBLIC_TARGET.database,
+      DISPOSABLE_DATABASE_NAME
+    ]
+  );
   assert.equal(
     Object.values(evidence).every(
       (value) => typeof value === "boolean"
