@@ -151,7 +151,7 @@ async function validateFixtureSchema(client, options = {}) {
       "  owner.rolname AS owner_name,",
       "  relation.relrowsecurity AS rls_enabled,",
       "  relation.relforcerowsecurity AS rls_forced,",
-      "  ARRAY_AGG(attribute.attname ORDER BY attribute.attnum)",
+      "  ARRAY_AGG(attribute.attname::text ORDER BY attribute.attnum)",
       "    FILTER (WHERE attribute.attnum > 0",
       "      AND NOT attribute.attisdropped) AS column_names",
       "FROM pg_catalog.pg_class relation",
@@ -181,7 +181,8 @@ async function validateFixtureSchema(client, options = {}) {
 
   const policyResult = await client.query(
     [
-      "SELECT policyname, permissive, roles, cmd, qual, with_check",
+      "SELECT policyname, permissive, roles::text[] AS roles,",
+      "  cmd, qual, with_check",
       "FROM pg_catalog.pg_policies",
       "WHERE schemaname = 'ia4tube_social'",
       "  AND tablename = 'companies'"
