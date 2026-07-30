@@ -28,7 +28,10 @@ async function main({
   let pool;
   try {
     const configuration = loadStagingProvisionConfig(env);
-    pool = new PoolClass(configuration.pool);
+    pool = new PoolClass({
+      ...configuration.pool,
+      connectionString: configuration.pool.connectionString
+    });
     const result = await provisionStagingBaseline(pool, configuration);
     try {
       await pool.end();

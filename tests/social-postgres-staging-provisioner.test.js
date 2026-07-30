@@ -448,6 +448,33 @@ test("operator refuses argv before opening a database pool", async () => {
   });
 });
 
+test("operator forwards the hidden connection string to the real pool boundary", async () => {
+  let received;
+  class InspectingPool {
+    constructor(options) {
+      received = options;
+    }
+    async connect() {
+      throw new Error("synthetic connection refusal");
+    }
+    async end() {}
+  }
+  const status = await main({
+    env: environment(),
+    argv: [],
+    PoolClass: InspectingPool,
+    stdout: { write() {} },
+    stderr: { write() {} }
+  });
+  assert.equal(status, 1);
+  assert.equal(typeof received?.connectionString, "string");
+  const parsed = new URL(received.connectionString);
+  assert.equal(parsed.hostname, target().host);
+  assert.equal(decodeURIComponent(parsed.username), target().provisionerLogin);
+  assert.equal(decodeURIComponent(parsed.pathname.slice(1)), target().database);
+  assert.equal(parsed.search, "");
+});
+
 test("operator refuses success when the provisioner pool cannot close", async () => {
   let stdout = "";
   let stderr = "";
