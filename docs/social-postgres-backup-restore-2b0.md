@@ -20,6 +20,11 @@ Render enquanto o Checkpoint Social 2B não for autorizado.
   `PGSSLROOTCERT=system`. Para não depender da configuração OpenSSL do host, o
   operador materializa, dentro do workspace protegido, um bundle temporário
   exato de `node:tls.rootCertificates` e fixa seu caminho em `SSL_CERT_FILE`.
+  O endpoint público do Render recusa o SCRAM channel binding do libpq 18;
+  por isso, o subprocesso fixa `PGCHANNELBINDING=disable`, sem aceitar
+  override ambiental. A confidencialidade e a identidade do servidor
+  continuam obrigatoriamente protegidas por TLS `verify-full`, hostname
+  exato e pelo bundle de raízes confiáveis.
   O arquivo é exclusivo, `0600`, regular, sem link, vinculado por identidade e
   hash e removido com a mesma verificação. Overrides ambientais de OpenSSL,
   libpq, service file e password file são descartados.

@@ -838,6 +838,7 @@ test("process plans keep passwords out of argv and SQL", (t) => {
     roots.bundle
   );
   assert.equal(plan.env.PGPASSWORD, password);
+  assert.equal(plan.env.PGCHANNELBINDING, "disable");
   assert.equal(plan.env.PGSSLMODE, "verify-full");
   assert.equal(plan.env.PGSSLROOTCERT, "system");
   assert.equal(
@@ -867,6 +868,7 @@ test("PostgreSQL child environment pins verified TLS with system roots", (t) => 
     roots.bundle,
     {
       SYSTEMROOT: "C:\\Windows",
+      PGCHANNELBINDING: "require",
       PGSSLMODE: "disable",
       PGSSLROOTCERT: "untrusted-root.pem",
       PGSSLCERT: "untrusted-client.pem",
@@ -884,6 +886,7 @@ test("PostgreSQL child environment pins verified TLS with system roots", (t) => 
     }
   );
 
+  assert.equal(childEnvironment.PGCHANNELBINDING, "disable");
   assert.equal(childEnvironment.PGSSLMODE, "verify-full");
   assert.equal(childEnvironment.PGSSLROOTCERT, "system");
   assert.equal(childEnvironment.PGCONNECT_TIMEOUT, "10");
@@ -1110,6 +1113,7 @@ test("backup workflow produces a verified bundle and always releases locks", asy
       true
     );
     if ([tools.psql, tools.dump].includes(plan.executable)) {
+      assert.equal(plan.env.PGCHANNELBINDING, "disable");
       assert.equal(plan.env.PGSSLMODE, "verify-full");
       assert.equal(plan.env.PGSSLROOTCERT, "system");
       assert.equal(

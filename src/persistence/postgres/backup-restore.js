@@ -968,6 +968,7 @@ function childConnectionEnvironment(
       "backup_database_password_invalid"
     ),
     PGCONNECT_TIMEOUT: "10",
+    PGCHANNELBINDING: "disable",
     PGSSLMODE: "verify-full",
     PGSSLROOTCERT: "system",
     SSL_CERT_FILE: trustedRoots.path,
