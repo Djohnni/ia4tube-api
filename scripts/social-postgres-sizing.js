@@ -12,6 +12,9 @@ const {
   verifyRuntimeSchema
 } = require("../src/persistence/postgres/runtime-validation");
 const {
+  CUSTOM_TRUST_ENVIRONMENT_NAMES
+} = require("../src/persistence/postgres/tls");
+const {
   LOOPBACK_MODE,
   RENDER_PAID_STAGING_MODE,
   RUNTIME_POOL_MAX,
@@ -26,8 +29,13 @@ async function main(env = process.env, options = {}) {
   const stderr = options.stderr || process.stderr;
   try {
     const target = validateSizingEnvironment(env);
+    const customTrustEnvironment = Object.fromEntries(
+      CUSTOM_TRUST_ENVIRONMENT_NAMES.map((name) => [name, env[name]])
+    );
     const runtime = loadRuntimePostgresConfig({
       NODE_ENV: target.mode === LOOPBACK_MODE ? "test" : "sizing",
+      NODE_TLS_REJECT_UNAUTHORIZED:
+        env.NODE_TLS_REJECT_UNAUTHORIZED,
       SOCIAL_PERSISTENCE_ENABLED: "true",
       SOCIAL_DATABASE_ALLOW_INSECURE_LOCALHOST:
         target.mode === LOOPBACK_MODE ? "true" : "false",
@@ -35,7 +43,8 @@ async function main(env = process.env, options = {}) {
       SOCIAL_DATABASE_EXPECTED_TARGET_FINGERPRINT:
         databaseTargetFingerprint(new URL(target.databaseUrl)),
       SOCIAL_DATABASE_EXPECTED_RUNTIME_LOGIN: target.username,
-      SOCIAL_DATABASE_POOL_MAX: String(RUNTIME_POOL_MAX)
+      SOCIAL_DATABASE_POOL_MAX: String(RUNTIME_POOL_MAX),
+      ...customTrustEnvironment
     });
     pool = new (options.PoolClass || Pool)(runtime.pool);
     if (target.mode === RENDER_PAID_STAGING_MODE) {

@@ -49,6 +49,20 @@ destinos descartáveis de restauração, mas não pode ter `SUPERUSER`,
 `REPLICATION` ou `BYPASSRLS`. Migration e runtime não podem ter ownership,
 `CREATEDB`, `CREATEROLE`, `BYPASSRLS`, `TRUNCATE` ou privilégios cruzados.
 
+## Contrato TLS comum a todos os operadores
+
+Todo processo que abre uma conexão PostgreSQL remota — provisionamento,
+bootstrap de logins, migration, lifecycle descartável, sizing, canário,
+backup, restore, verificadores e runtime — usa obrigatoriamente o hostname
+externo completo, TLS 1.2 ou superior, `verify-full`, validação de cadeia e
+hostname e o trust store público padrão do Node ou do sistema.
+
+A URL pode estar sem query ou conter somente um `sslmode=verify-full`. A
+aplicação valida e remove essa query antes de criar o `pg.Pool`, mantendo o
+objeto `ssl` como autoridade única. CA customizada, pinning, fingerprint de
+certificado, TOFU, hostname sem SAN, `NODE_TLS_REJECT_UNAUTHORIZED=0` e
+overrides ambientais de trust são recusados antes da conexão.
+
 ## Ordem de provisionamento
 
 1. Confirmar PostgreSQL 18, região, plano, armazenamento e custo.
@@ -115,13 +129,16 @@ receber somente:
 - `SOCIAL_DATABASE_EXPECTED_RUNTIME_LOGIN`;
 - `SOCIAL_DATABASE_EXPECTED_TARGET_FINGERPRINT`;
 - `SOCIAL_DATABASE_POOL_MAX=3`;
-- TLS/CA e timeouts públicos quando necessários;
+- timeouts públicos quando necessários;
 - configuração de identidade e keyring social;
 - `SOCIAL_VAULT_EXPECTED_KEYRING_FINGERPRINT`.
 
 O Web Service deve recusar URLs de provisionamento, migration, teste,
 sizing, backup ou restore, além de senhas de bootstrap e da chave do bundle.
 A URL de migration permanece exclusivamente no job efêmero.
+Hostname divergente, parâmetro TLS conflitante, CA customizada ou verificação
+global desativada impedem a inicialização. O trust store padrão não pode ser
+substituído por variável ambiental.
 
 ## Primeiro deploy controlado
 

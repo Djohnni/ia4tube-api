@@ -20,18 +20,14 @@ function toolFailure(code) {
   return Object.assign(new Error(code), { code });
 }
 
-function poolConfig(connection) {
+function poolConfig(connection, postgresTls) {
   const parsed = new URL(connection.parsed.toString());
   for (const key of [...parsed.searchParams.keys()]) {
     parsed.searchParams.delete(key);
   }
   return Object.freeze({
     connectionString: parsed.toString(),
-    ssl: Object.freeze({
-      rejectUnauthorized: true,
-      minVersion: "TLSv1.2",
-      servername: connection.public.host
-    }),
+    ssl: postgresTls,
     max: 1,
     min: 0,
     connectionTimeoutMillis: 5000,
@@ -217,14 +213,29 @@ function successPayload(mode, result) {
   const common = {
     ok: true,
     mode,
-    evidenceVerified: /^[0-9a-f]{64}$/.test(result.evidenceSha256)
+    evidenceVerified: /^[0-9a-f]{64}$/.test(result.evidenceSha256),
+    evidenceSha256: result.evidenceSha256,
+    temporaryWorkspaceCleanupConfirmed:
+      result.temporaryWorkspaceCleanupConfirmed === true,
+    plaintextArtifactsAbsent:
+      result.plaintextArtifactsAbsent === true
   };
+  if (
+    common.temporaryWorkspaceCleanupConfirmed !== true ||
+    common.plaintextArtifactsAbsent !== true
+  ) {
+    const error = new Error("backup_restore_cleanup_unconfirmed");
+    error.code = "backup_restore_cleanup_unconfirmed";
+    throw error;
+  }
   if (mode === "backup") {
     if (
       result.files !== 1 ||
       !Number.isSafeInteger(result.bundleSize) ||
       result.bundleSize < 1 ||
+      result.bundleFileFsyncConfirmed !== true ||
       typeof result.bundleDirectoryFsyncConfirmed !== "boolean" ||
+      result.bundleRoundTripVerified !== true ||
       !/^[0-9a-f]{64}$/.test(result.bundleSha256)
     ) {
       const error = new Error("backup_result_metadata_invalid");
@@ -236,8 +247,10 @@ function successPayload(mode, result) {
       fileCount: 1,
       bundleSize: result.bundleSize,
       bundleSha256: result.bundleSha256,
+      bundleFileFsyncConfirmed: true,
       bundleDirectoryFsyncConfirmed:
-        result.bundleDirectoryFsyncConfirmed
+        result.bundleDirectoryFsyncConfirmed,
+      bundleRoundTripVerified: true
     });
   }
   return Object.freeze({
@@ -316,7 +329,9 @@ async function main({
       throw error;
     }
     await validateTools(config.tools);
-    pool = new PoolClass(poolConfig(config.operator));
+    pool = new PoolClass(
+      poolConfig(config.operator, config.postgresTls)
+    );
     const operator = createPostgresBackupOperator(pool);
     const result =
       mode === "backup"

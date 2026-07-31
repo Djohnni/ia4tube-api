@@ -2,6 +2,10 @@
 
 const crypto = require("node:crypto");
 const { postgresFail } = require("./errors");
+const {
+  assertSystemTrustOnly,
+  loadSystemPostgresTls
+} = require("./tls");
 const { requireSafeLabel, requireUuid } = require("./validation");
 
 const LOOPBACK_HOSTS = new Set(["127.0.0.1", "::1", "localhost"]);
@@ -277,27 +281,6 @@ function requireCanonicalRole(value, expected, field) {
   return role;
 }
 
-function decodeCa(raw) {
-  if (!raw) return undefined;
-  if (
-    typeof raw !== "string" ||
-    raw.length > 200000 ||
-    !/^[A-Za-z0-9+/=\r\n]+$/.test(raw)
-  ) {
-    postgresFail("social_database_ca_invalid", "CA PostgreSQL recusada.");
-  }
-  const decoded = Buffer.from(raw.replace(/\s/g, ""), "base64").toString(
-    "utf8"
-  );
-  if (
-    !decoded.includes("-----BEGIN CERTIFICATE-----") ||
-    !decoded.includes("-----END CERTIFICATE-----")
-  ) {
-    postgresFail("social_database_ca_invalid", "CA PostgreSQL recusada.");
-  }
-  return decoded;
-}
-
 function connectionSecurity(parsed, env) {
   const localInsecure =
     env.NODE_ENV === "test" &&
@@ -338,13 +321,12 @@ function connectionSecurity(parsed, env) {
     return Object.freeze({ connectionString: parsed.toString(), ssl: false });
   }
 
-  const ca = decodeCa(env.SOCIAL_DATABASE_CA_BASE64);
   return Object.freeze({
     connectionString: parsed.toString(),
-    ssl: Object.freeze({
-      rejectUnauthorized: true,
-      ...(ca ? { ca } : {})
-    })
+    ssl: loadSystemPostgresTls(
+      env,
+      parsed.hostname.toLowerCase()
+    )
   });
 }
 
@@ -353,7 +335,7 @@ function commonPoolConfig(parsed, env, kind) {
   const prefix =
     kind === "migration" ? "SOCIAL_MIGRATION" : "SOCIAL_DATABASE";
   const maxDefault = kind === "migration" ? 1 : 3;
-  const maxCap = kind === "migration" ? 1 : 5;
+  const maxCap = kind === "migration" ? 1 : 3;
   const max = boundedInteger(
     env[`${prefix}_POOL_MAX`],
     maxDefault,
@@ -523,6 +505,10 @@ function loadMigrationPostgresConfig(env = process.env) {
 }
 
 function assertWebServiceDatabaseCredentialBoundary(env = process.env) {
+  // These switches affect the whole Node process. Refuse them even while
+  // social persistence is disabled so a future enablement cannot inherit an
+  // already-weakened trust policy.
+  assertSystemTrustOnly(env);
   assertNoAmbientPostgresEnvironment(
     env,
     "web_service_libpq_environment_override_forbidden"

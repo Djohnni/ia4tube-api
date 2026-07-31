@@ -11,6 +11,9 @@ const {
   loadRuntimePostgresConfig
 } = require("../src/persistence/postgres/config");
 const {
+  CUSTOM_TRUST_ENVIRONMENT_NAMES
+} = require("../src/persistence/postgres/tls");
+const {
   MIGRATION_CONNECTION_LIMIT
 } = require("../src/persistence/postgres/login-bootstrap");
 const { createSocialRuntime } = require("../src/social/runtime");
@@ -113,10 +116,10 @@ test("runtime and migration pool budgets are bounded for a 512 MB service", () =
       "postgresql://ia4tube_social_runtime:" +
         "password@db.example.test/social"
     ),
-    SOCIAL_DATABASE_POOL_MAX: "5",
+    SOCIAL_DATABASE_POOL_MAX: "3",
     SOCIAL_DATABASE_LOCK_TIMEOUT_MS: "750"
   });
-  assert.equal(tuned.pool.max, 5);
+  assert.equal(tuned.pool.max, 3);
   assert.match(tuned.pool.options, /-c lock_timeout=750(?:\s|$)/);
 
   assert.throws(
@@ -130,7 +133,7 @@ test("runtime and migration pool budgets are bounded for a 512 MB service", () =
           "postgresql://ia4tube_social_runtime:" +
             "password@db.example.test/social"
         ),
-        SOCIAL_DATABASE_POOL_MAX: "6"
+        SOCIAL_DATABASE_POOL_MAX: "4"
       }),
     { code: "social_database_pool_max_invalid" }
   );
@@ -538,7 +541,9 @@ test("future Web Service boundary rejects migration and provisioner credentials"
     "SOCIAL_VAULT_ROTATION_APPROVAL",
     "SOCIAL_VAULT_ROTATION_BATCH_SIZE",
     "SOCIAL_VAULT_ROTATION_DATABASE_CA_BASE64",
+    "SOCIAL_VAULT_ROTATION_DATABASE_CA_FILE",
     "SOCIAL_VAULT_ROTATION_ENVIRONMENT",
+    "SOCIAL_VAULT_ROTATION_EXPECTED_CA_SHA256",
     "SOCIAL_VAULT_ROTATION_EXPECTED_CURRENT_KEY_VERSION",
     "SOCIAL_VAULT_ROTATION_EXPECTED_ENVIRONMENT_ID",
     "SOCIAL_VAULT_ROTATION_EXPECTED_KEYRING_FINGERPRINT",
@@ -822,6 +827,27 @@ test("disabled social runtime needs no database but still rejects privileged URL
       }),
     { code: "web_service_runtime_database_credential_disabled" }
   );
+
+  for (const value of ["0", " 0 "]) {
+    assert.throws(
+      () =>
+        assertWebServiceDatabaseCredentialBoundary({
+          SOCIAL_PERSISTENCE_ENABLED: "false",
+          NODE_TLS_REJECT_UNAUTHORIZED: value
+        }),
+      { code: "node_tls_verification_disabled" }
+    );
+  }
+  for (const name of CUSTOM_TRUST_ENVIRONMENT_NAMES) {
+    assert.throws(
+      () =>
+        assertWebServiceDatabaseCredentialBoundary({
+          SOCIAL_PERSISTENCE_ENABLED: "false",
+          [name]: "synthetic-custom-trust"
+        }),
+      { code: "social_database_custom_trust_forbidden" }
+    );
+  }
 });
 
 test("server boot enforces the privileged credential boundary before startup", () => {

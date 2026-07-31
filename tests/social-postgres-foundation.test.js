@@ -11,6 +11,7 @@ const {
 } = require("../src/persistence/postgres/config");
 const {
   SET_COMPANY_SCOPE_SQL,
+  createPostgresPool,
   verifyRuntimeRole,
   withTransaction
 } = require("../src/persistence/postgres/pool");
@@ -198,12 +199,42 @@ test("runtime PostgreSQL forces verified TLS outside loopback tests", () => {
   });
   assert.equal(config.enabled, true);
   assert.equal(config.pool.ssl.rejectUnauthorized, true);
+  assert.equal(config.pool.ssl.servername, "db.example.test");
+  assert.equal(
+    Object.prototype.hasOwnProperty.call(config.pool.ssl, "ca"),
+    false
+  );
   assert.equal(config.pool.connectionString.includes("sslmode"), false);
   assert.equal(config.pool.max, 3);
   assert.ok(config.pool.options.includes("statement_timeout=10000"));
   assert.ok(
     config.pool.options.includes("idle_in_transaction_session_timeout=5000")
   );
+});
+
+test("node-postgres preserves the strict SSL object after URL parsing", async () => {
+  const url =
+    "postgresql://runtime:synthetic@db.example.test/social?sslmode=verify-full";
+  const config = loadRuntimePostgresConfig({
+    SOCIAL_PERSISTENCE_ENABLED: "true",
+    SOCIAL_DATABASE_EXPECTED_RUNTIME_LOGIN: "runtime",
+    SOCIAL_DATABASE_EXPECTED_TARGET_FINGERPRINT: targetOf(url),
+    DATABASE_URL: url
+  });
+  const pool = createPostgresPool(config.pool);
+  try {
+    assert.equal(pool.options.max, 3);
+    assert.equal(pool.options.connectionString.includes("sslmode"), false);
+    assert.equal(pool.options.ssl.rejectUnauthorized, true);
+    assert.equal(pool.options.ssl.minVersion, "TLSv1.2");
+    assert.equal(pool.options.ssl.servername, "db.example.test");
+    assert.equal(
+      Object.prototype.hasOwnProperty.call(pool.options.ssl, "ca"),
+      false
+    );
+  } finally {
+    await pool.end();
+  }
 });
 
 test("runtime PostgreSQL refuses role names that diverge from migrations", () => {

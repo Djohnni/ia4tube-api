@@ -19,6 +19,7 @@ const {
   withTransaction,
   verifyRuntimeRole
 } = require("./pool");
+const { loadSystemPostgresTls } = require("./tls");
 const {
   verifyRuntimeSchema
 } = require("./runtime-validation");
@@ -504,14 +505,10 @@ function loadLegacy2ADependencies(
   return legacy;
 }
 
-function poolConfiguration(target, applicationName, maximum) {
+function poolConfiguration(target, applicationName, maximum, ssl) {
   return Object.freeze({
     connectionString: target.connectionString,
-    ssl: Object.freeze({
-      rejectUnauthorized: true,
-      minVersion: "TLSv1.2",
-      servername: target.host
-    }),
+    ssl,
     application_name: applicationName,
     max: maximum,
     min: 0,
@@ -617,6 +614,10 @@ function createRestoreBehaviorVerifiers(options = {}) {
       )
   );
   const targets = inspectSeparatedTargets(options);
+  const ssl = loadSystemPostgresTls(
+    options.env || process.env,
+    targets.runtime.host
+  );
   const verifierTargetFingerprint = targetFingerprint({
     host: targets.runtime.host,
     port: targets.runtime.port,
@@ -648,14 +649,16 @@ function createRestoreBehaviorVerifiers(options = {}) {
     poolConfiguration(
       targets.migration,
       "ia4tube-restore-behavior-migration",
-      1
+      1,
+      ssl
     )
   );
   const runtimePool = new dependencies.PoolClass(
     poolConfiguration(
       targets.runtime,
       "ia4tube-restore-behavior-runtime",
-      2
+      2,
+      ssl
     )
   );
   const state = {

@@ -25,9 +25,27 @@ const {
 const {
   main
 } = require("../scripts/social-db-disposable-lifecycle");
+const {
+  completePhysicalEvidence,
+  startPhysicalEvidence
+} = require("../src/persistence/postgres/physical-gate-evidence");
 
 const PASSWORD =
   "Synthetic-Restore-Provisioner-Password-2026!";
+const EVIDENCE_RUN_ID = "87654321-4321-4cba-8fed-0987654321ab";
+const EVIDENCE_COMMIT = "c".repeat(40);
+const EVIDENCE_STARTED_AT = "2026-07-31T11:00:00.000Z";
+const EVIDENCE_COMPLETED_AT = "2026-07-31T11:00:01.000Z";
+const EXECUTION_IDENTITY = Object.freeze({
+  runId: EVIDENCE_RUN_ID,
+  commit: EVIDENCE_COMMIT,
+  renderCommitVerified: true,
+  codeManifestSha256: "d".repeat(64),
+  codeManifestFileCount: 42,
+  environment: "staging",
+  environmentId: PAID_STAGING_PUBLIC_TARGET.environmentId,
+  region: "oregon"
+});
 
 function provisionerUrl(overrides = {}) {
   const target = {
@@ -74,8 +92,77 @@ function environment(action = "create", overrides = {}) {
       PAID_STAGING_PUBLIC_TARGET.provisionerLogin,
     SOCIAL_STAGING_DISPOSABLE_EXPECTED_TARGET_FINGERPRINT:
       fingerprint,
+    SOCIAL_2B_EVIDENCE_RUN_ID: EVIDENCE_RUN_ID,
+    SOCIAL_2B_EVIDENCE_COMMIT: EVIDENCE_COMMIT,
+    RENDER_GIT_COMMIT: EVIDENCE_COMMIT,
     ...overrides
   };
+}
+
+function physicalEvidenceHarness() {
+  const targetFingerprint = disposableDatabaseTargetFingerprint(
+    RESTORE_DISPOSABLE_DATABASE_NAME
+  );
+  let startCalls = 0;
+  let completeCalls = 0;
+  return Object.freeze({
+    options: Object.freeze({
+      loadIdentity(env) {
+        assert.equal(env.SOCIAL_2B_EVIDENCE_RUN_ID, EVIDENCE_RUN_ID);
+        assert.equal(env.SOCIAL_2B_EVIDENCE_COMMIT, EVIDENCE_COMMIT);
+        assert.equal(env.RENDER_GIT_COMMIT, EVIDENCE_COMMIT);
+        return EXECUTION_IDENTITY;
+      },
+      startEvidence(input) {
+        startCalls += 1;
+        assert.equal(typeof input.now, "function");
+        const { now, ...identity } = input;
+        assert.deepEqual(identity, {
+          identity: EXECUTION_IDENTITY,
+          sequence: 2,
+          databasePurpose: "disposable-restore",
+          databaseName: RESTORE_DISPOSABLE_DATABASE_NAME,
+          targetFingerprint
+        });
+        return startPhysicalEvidence({
+          ...identity,
+          now: () => new Date(EVIDENCE_STARTED_AT)
+        });
+      },
+      completeEvidence(started, now) {
+        completeCalls += 1;
+        assert.equal(typeof now, "function");
+        assert.equal(started.runId, EVIDENCE_RUN_ID);
+        assert.equal(started.commit, EVIDENCE_COMMIT);
+        assert.equal(started.startedAt, EVIDENCE_STARTED_AT);
+        return completePhysicalEvidence(
+          started,
+          () => new Date(EVIDENCE_COMPLETED_AT),
+          {
+            manifestLoader: () => ({
+              sha256: EXECUTION_IDENTITY.codeManifestSha256,
+              fileCount: EXECUTION_IDENTITY.codeManifestFileCount
+            })
+          }
+        );
+      }
+    }),
+    expected: Object.freeze({
+      ...EXECUTION_IDENTITY,
+      sequence: 2,
+      databasePurpose: "disposable-restore",
+      databaseName: RESTORE_DISPOSABLE_DATABASE_NAME,
+      targetFingerprint,
+      startedAt: EVIDENCE_STARTED_AT,
+      completedAt: EVIDENCE_COMPLETED_AT
+    }),
+    get startCalls() {
+      return startCalls;
+    },
+    get completeCalls() {
+      return completeCalls;
+    }
+  });
 }
 
 function identity(database, overrides = {}) {
@@ -536,10 +623,12 @@ test("operator output confirms restore topology without exposing credentials", a
       return this.delegate.end();
     }
   }
+  const physical = physicalEvidenceHarness();
   const status = await main({
     env: environment("create"),
     argv: [],
     PoolClass: FakePool,
+    ...physical.options,
     stdout: { write(value) { stdout += value; } },
     stderr: { write(value) { stderr += value; } }
   });
@@ -554,6 +643,9 @@ test("operator output confirms restore topology without exposing credentials", a
     identityVerified: true,
     sessionsTerminated: false,
     absenceConfirmed: false,
-    restoreTopologyPrepared: true
+    restoreTopologyPrepared: true,
+    ...physical.expected
   });
+  assert.equal(physical.startCalls, 1);
+  assert.equal(physical.completeCalls, 1);
 });

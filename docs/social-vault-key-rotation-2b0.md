@@ -92,7 +92,6 @@ administrativo recebe somente no próprio ambiente:
 - `SOCIAL_VAULT_ROTATION_ACTIVE_KEY_VERSION`
 - `SOCIAL_VAULT_ROTATION_APPROVAL`
 - `SOCIAL_VAULT_ROTATION_BATCH_SIZE`
-- `SOCIAL_VAULT_ROTATION_DATABASE_CA_BASE64`
 - `SOCIAL_VAULT_ROTATION_ENVIRONMENT`
 - `SOCIAL_VAULT_ROTATION_EXPECTED_CURRENT_KEY_VERSION`
 - `SOCIAL_VAULT_ROTATION_EXPECTED_ENVIRONMENT_ID`
@@ -106,6 +105,11 @@ administrativo recebe somente no próprio ambiente:
 - `SOCIAL_VAULT_ROTATION_PRODUCTION_APPROVAL`, somente em produção
 - `SOCIAL_VAULT_ROTATION_RETIRE_KEY_VERSION`, somente na retirada
 - `SOCIAL_VAULT_ROTATION_RUNTIME_DATABASE_URL`
+
+O operador usa exclusivamente o trust store público padrão do Node/sistema,
+TLS 1.2 ou superior, `verify-full` e hostname exato. CA customizada, pinning,
+fingerprint de certificado, TOFU, override ambiental ou verificação TLS
+global desativada falham antes de abrir qualquer pool.
 
 O modo `prepare` exige a aprovação exata
 `PREPARE_SOCIAL_VAULT:<environmentId>`. Seu keyring administrativo contém a

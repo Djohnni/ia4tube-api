@@ -8,6 +8,9 @@ const {
   assertNoAmbientPostgresEnvironment
 } = require("../src/persistence/postgres/config");
 const {
+  loadSystemPostgresTls
+} = require("../src/persistence/postgres/tls");
+const {
   PAID_STAGING_PUBLIC_TARGET
 } = require(
   "../src/persistence/postgres/staging-provisioner"
@@ -186,15 +189,22 @@ function secureConnection(raw, configuration) {
   for (const key of [...parsed.searchParams.keys()]) {
     parsed.searchParams.delete(key);
   }
+  if (
+    configuration.mode !== LOOPBACK_MODE &&
+    (
+      !configuration.ssl ||
+      configuration.ssl.rejectUnauthorized !== true ||
+      configuration.ssl.servername !== configuration.host ||
+      Object.prototype.hasOwnProperty.call(configuration.ssl, "ca")
+    )
+  ) {
+    refuse("system_trust_configuration_invalid");
+  }
   return Object.freeze({
     connectionString: parsed.toString(),
     ssl:
       configuration.mode !== LOOPBACK_MODE
-        ? Object.freeze({
-            rejectUnauthorized: true,
-            minVersion: "TLSv1.2",
-            servername: configuration.host
-          })
+        ? configuration.ssl
         : false
   });
 }
@@ -353,7 +363,16 @@ function validateGateEnvironment(env = process.env) {
     }
   }
 
-  return Object.freeze({
+  let ssl;
+  if (mode !== LOOPBACK_MODE) {
+    try {
+      ssl = loadSystemPostgresTls(env, identities[0].host);
+    } catch (error) {
+      if (typeof error?.code === "string") refuse(error.code);
+      throw error;
+    }
+  }
+  const configuration = {
     mode,
     environmentId,
     host: identities[0].host,
@@ -371,7 +390,16 @@ function validateGateEnvironment(env = process.env) {
       migrationUsername: identities[1].username,
       runtimeUsername: identities[2].username
     })
-  });
+  };
+  if (ssl) {
+    Object.defineProperty(configuration, "ssl", {
+      value: ssl,
+      enumerable: false,
+      writable: false,
+      configurable: false
+    });
+  }
+  return Object.freeze(configuration);
 }
 
 function main(env = process.env) {

@@ -299,14 +299,14 @@ test("each migration worker uses one of two permanent connections", () => {
   assert.equal(
     loadRuntimePostgresConfig({
       ...runtimeBase,
-      SOCIAL_DATABASE_POOL_MAX: "5"
+      SOCIAL_DATABASE_POOL_MAX: "3"
     }).pool.max,
-    5
+    3
   );
   assert.throws(() =>
     loadRuntimePostgresConfig({
       ...runtimeBase,
-      SOCIAL_DATABASE_POOL_MAX: "6"
+      SOCIAL_DATABASE_POOL_MAX: "4"
     })
   );
 
@@ -368,9 +368,36 @@ test("paid sizing verifies the canonical runtime boundary before max-three load"
   assert.equal(schemaChecks, 1);
   assert.equal(harnessCalls, 1);
   assert.equal(poolConfiguration.max, 3);
+  assert.equal(
+    Object.prototype.hasOwnProperty.call(poolConfiguration.ssl, "ca"),
+    false
+  );
   assert.equal(closed, 1);
   assert.equal(stderr, "");
   assert.equal(JSON.parse(stdout).event, "social_postgres_sizing_complete");
+});
+
+test("paid sizing cannot hide a globally disabled TLS verifier", async () => {
+  let poolCreated = false;
+  let stderr = "";
+  const status = await sizingMain(
+    paidEnvironment({ NODE_TLS_REJECT_UNAUTHORIZED: " 0 " }),
+    {
+      PoolClass: class ForbiddenPool {
+        constructor() {
+          poolCreated = true;
+        }
+      },
+      stdout: { write() {} },
+      stderr: { write(value) { stderr += value; } }
+    }
+  );
+  assert.equal(status, 2);
+  assert.equal(poolCreated, false);
+  assert.equal(
+    JSON.parse(stderr).code,
+    "node_tls_verification_disabled"
+  );
 });
 
 test("paid sizing refuses load when the canonical runtime boundary fails", async () => {

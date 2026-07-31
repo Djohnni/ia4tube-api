@@ -22,9 +22,27 @@ const {
   closePoolsConfirmed,
   main
 } = require("../scripts/social-db-disposable-lifecycle");
+const {
+  completePhysicalEvidence,
+  startPhysicalEvidence
+} = require("../src/persistence/postgres/physical-gate-evidence");
 
 const PASSWORD =
   "Synthetic-Disposable-Provisioner-Password-2026!";
+const EVIDENCE_RUN_ID = "12345678-1234-4abc-8def-1234567890ab";
+const EVIDENCE_COMMIT = "a".repeat(40);
+const EVIDENCE_STARTED_AT = "2026-07-31T10:00:00.000Z";
+const EVIDENCE_COMPLETED_AT = "2026-07-31T10:00:01.000Z";
+const EXECUTION_IDENTITY = Object.freeze({
+  runId: EVIDENCE_RUN_ID,
+  commit: EVIDENCE_COMMIT,
+  renderCommitVerified: true,
+  codeManifestSha256: "b".repeat(64),
+  codeManifestFileCount: 42,
+  environment: "staging",
+  environmentId: PAID_STAGING_PUBLIC_TARGET.environmentId,
+  region: "oregon"
+});
 
 function provisionerUrl(overrides = {}) {
   const target = {
@@ -67,8 +85,79 @@ function environment(action = "create", overrides = {}) {
       PAID_STAGING_PUBLIC_TARGET.provisionerLogin,
     SOCIAL_STAGING_DISPOSABLE_EXPECTED_TARGET_FINGERPRINT:
       fingerprint,
+    SOCIAL_2B_EVIDENCE_RUN_ID: EVIDENCE_RUN_ID,
+    SOCIAL_2B_EVIDENCE_COMMIT: EVIDENCE_COMMIT,
+    RENDER_GIT_COMMIT: EVIDENCE_COMMIT,
     ...overrides
   };
+}
+
+function physicalEvidenceHarness({
+  sequence = 2,
+  databasePurpose = "disposable-gate",
+  databaseName = DISPOSABLE_DATABASE_NAME,
+  targetFingerprint = disposableDatabaseTargetFingerprint()
+} = {}) {
+  let startCalls = 0;
+  let completeCalls = 0;
+  return Object.freeze({
+    options: Object.freeze({
+      loadIdentity(env) {
+        assert.equal(env.SOCIAL_2B_EVIDENCE_RUN_ID, EVIDENCE_RUN_ID);
+        assert.equal(env.SOCIAL_2B_EVIDENCE_COMMIT, EVIDENCE_COMMIT);
+        assert.equal(env.RENDER_GIT_COMMIT, EVIDENCE_COMMIT);
+        return EXECUTION_IDENTITY;
+      },
+      startEvidence(input) {
+        startCalls += 1;
+        assert.equal(typeof input.now, "function");
+        const { now, ...identity } = input;
+        assert.deepEqual(identity, {
+          identity: EXECUTION_IDENTITY,
+          sequence,
+          databasePurpose,
+          databaseName,
+          targetFingerprint
+        });
+        return startPhysicalEvidence({
+          ...identity,
+          now: () => new Date(EVIDENCE_STARTED_AT)
+        });
+      },
+      completeEvidence(started, now) {
+        completeCalls += 1;
+        assert.equal(typeof now, "function");
+        assert.equal(started.runId, EVIDENCE_RUN_ID);
+        assert.equal(started.commit, EVIDENCE_COMMIT);
+        assert.equal(started.startedAt, EVIDENCE_STARTED_AT);
+        return completePhysicalEvidence(
+          started,
+          () => new Date(EVIDENCE_COMPLETED_AT),
+          {
+            manifestLoader: () => ({
+              sha256: EXECUTION_IDENTITY.codeManifestSha256,
+              fileCount: EXECUTION_IDENTITY.codeManifestFileCount
+            })
+          }
+        );
+      }
+    }),
+    expected: Object.freeze({
+      ...EXECUTION_IDENTITY,
+      sequence,
+      databasePurpose,
+      databaseName,
+      targetFingerprint,
+      startedAt: EVIDENCE_STARTED_AT,
+      completedAt: EVIDENCE_COMPLETED_AT
+    }),
+    get startCalls() {
+      return startCalls;
+    },
+    get completeCalls() {
+      return completeCalls;
+    }
+  });
 }
 
 function identityRow(database, overrides = {}) {
@@ -239,6 +328,10 @@ test("configuration is pinned to one parent and one disposable target", () => {
   assert.equal(config.disposablePool.max, 1);
   assert.equal(config.parentPool.ssl.rejectUnauthorized, true);
   assert.equal(config.parentPool.ssl.minVersion, "TLSv1.2");
+  assert.equal(
+    Object.prototype.hasOwnProperty.call(config.parentPool.ssl, "ca"),
+    false
+  );
   assert.equal(
     config.parentPool.ssl.servername,
     PAID_STAGING_PUBLIC_TARGET.host
@@ -658,10 +751,12 @@ test("driver failures are reduced to safe codes without secret output", async ()
     }
     async end() {}
   }
+  const physical = physicalEvidenceHarness();
   const status = await main({
     env: environment("create"),
     argv: [],
     PoolClass: FailingPool,
+    ...physical.options,
     stdout: { write(value) { stdout += value; } },
     stderr: { write(value) { stderr += value; } }
   });
@@ -672,9 +767,11 @@ test("driver failures are reduced to safe codes without secret output", async ()
     ok: false,
     code: "staging_disposable_create_failed"
   });
+  assert.equal(physical.startCalls, 1);
+  assert.equal(physical.completeCalls, 0);
 });
 
-test("operator success output contains booleans only and closes both pools", async () => {
+test("operator success output binds physical evidence and closes both pools", async () => {
   const fake = fakeLifecycle({ exists: false });
   let constructed = 0;
   let ended = 0;
@@ -698,10 +795,12 @@ test("operator success output contains booleans only and closes both pools", asy
   }
   let stdout = "";
   let stderr = "";
+  const physical = physicalEvidenceHarness();
   const status = await main({
     env: environment("create"),
     argv: [],
     PoolClass: FakePool,
+    ...physical.options,
     stdout: { write(value) { stdout += value; } },
     stderr: { write(value) { stderr += value; } }
   });
@@ -724,12 +823,6 @@ test("operator success output contains booleans only and closes both pools", asy
       DISPOSABLE_DATABASE_NAME
     ]
   );
-  assert.equal(
-    Object.values(evidence).every(
-      (value) => typeof value === "boolean"
-    ),
-    true
-  );
   assert.deepEqual(evidence, {
     ok: true,
     safe: true,
@@ -737,8 +830,11 @@ test("operator success output contains booleans only and closes both pools", asy
     dropped: false,
     identityVerified: true,
     sessionsTerminated: false,
-    absenceConfirmed: false
+    absenceConfirmed: false,
+    ...physical.expected
   });
+  assert.equal(physical.startCalls, 1);
+  assert.equal(physical.completeCalls, 1);
 });
 
 test("operator refuses success unless both pools close cleanly", async () => {
@@ -781,9 +877,11 @@ test("operator refuses success unless both pools close cleanly", async () => {
         }
       }
     }
+    const physical = physicalEvidenceHarness();
     const status = await main({
       env: environment("create"),
       PoolClass: CloseFailurePool,
+      ...physical.options,
       stdout: { write(value) { stdout += value; } },
       stderr: { write(value) { stderr += value; } }
     });
@@ -794,11 +892,14 @@ test("operator refuses success unless both pools close cleanly", async () => {
       ok: false,
       code: "staging_disposable_pool_close_failed"
     });
+    assert.equal(physical.startCalls, 1);
+    assert.equal(physical.completeCalls, 0);
   }
 });
 
 test("operator refuses argv before loading credentials or creating pools", async () => {
   let constructed = 0;
+  let identityLoads = 0;
   class ForbiddenPool {
     constructor() {
       constructed += 1;
@@ -809,11 +910,16 @@ test("operator refuses argv before loading credentials or creating pools", async
     env: environment("create"),
     argv: ["--database-url", provisionerUrl()],
     PoolClass: ForbiddenPool,
+    loadIdentity() {
+      identityLoads += 1;
+      return EXECUTION_IDENTITY;
+    },
     stdout: { write() {} },
     stderr: { write(value) { stderr += value; } }
   });
   assert.equal(status, 2);
   assert.equal(constructed, 0);
+  assert.equal(identityLoads, 0);
   assert.equal(stderr.includes(PASSWORD), false);
   assert.deepEqual(JSON.parse(stderr), {
     ok: false,

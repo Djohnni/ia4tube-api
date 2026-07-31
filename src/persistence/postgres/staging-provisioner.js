@@ -8,6 +8,7 @@ const {
   assertNoAmbientPostgresEnvironment
 } = require("./config");
 const { SocialPostgresError, postgresFail } = require("./errors");
+const { loadSystemPostgresTls } = require("./tls");
 const { requireUuid } = require("./validation");
 
 const STAGING_PROVISION_APPROVAL_PREFIX =
@@ -221,11 +222,7 @@ function loadStagingProvisionConfig(env = process.env) {
     targetFingerprint: fingerprint,
     pool: hiddenConnection(
       {
-        ssl: Object.freeze({
-          rejectUnauthorized: true,
-          minVersion: "TLSv1.2",
-          servername: host
-        }),
+        ssl: loadSystemPostgresTls(env, host),
         max: 1,
         min: 0,
         connectionTimeoutMillis: 5000,

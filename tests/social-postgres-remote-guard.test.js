@@ -237,7 +237,27 @@ test("valid synthetic Render target requires explicit TLS verification", () => {
   assert.equal(connection.ssl.rejectUnauthorized, true);
   assert.equal(connection.ssl.minVersion, "TLSv1.2");
   assert.equal(connection.ssl.servername, HOST);
+  assert.equal(
+    Object.prototype.hasOwnProperty.call(connection.ssl, "ca"),
+    false
+  );
   assert.equal(new URL(connection.connectionString).search, "");
+});
+
+test("remote gate refuses custom trust and certificate pinning", () => {
+  for (const name of [
+    "SOCIAL_DATABASE_CA_BASE64",
+    "SOCIAL_DATABASE_CA_FILE",
+    "SOCIAL_DATABASE_EXPECTED_CA_SHA256",
+    "NODE_EXTRA_CA_CERTS",
+    "SSL_CERT_FILE",
+    "SSL_CERT_DIR"
+  ]) {
+    assertRefused(
+      remoteEnvironment({ [name]: "synthetic-custom-trust" }),
+      "social_database_custom_trust_forbidden"
+    );
+  }
 });
 
 test("target fingerprint is deterministic, public and identity-bound", () => {

@@ -231,6 +231,10 @@ test("configuration is compiled to one paid staging target and hides its URL", (
   assert.equal(config.pool.ssl.minVersion, "TLSv1.2");
   assert.equal(config.pool.ssl.servername, target().host);
   assert.equal(
+    Object.prototype.hasOwnProperty.call(config.pool.ssl, "ca"),
+    false
+  );
+  assert.equal(
     new URL(config.pool.connectionString).search,
     ""
   );

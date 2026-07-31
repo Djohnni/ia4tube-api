@@ -23,6 +23,15 @@ const {
 const {
   PAID_STAGING_PUBLIC_TARGET
 } = require("../src/persistence/postgres/staging-provisioner");
+const {
+  CUSTOM_TRUST_ENVIRONMENT_NAMES,
+  loadSystemPostgresTls
+} = require("../src/persistence/postgres/tls");
+const {
+  completePhysicalEvidence,
+  loadExecutionIdentity,
+  startPhysicalEvidence
+} = require("../src/persistence/postgres/physical-gate-evidence");
 
 const MAX_CAPTURE_BYTES = 64 * 1024;
 const SAFE_CODE = /^[a-z0-9_]{3,100}$/;
@@ -139,7 +148,26 @@ function assertExpectedTarget(
   );
 }
 
-function validatePinnedLinuxGateEnvironment(mode, env = process.env) {
+function postgresTlsEnvironment(env) {
+  const isolated = {
+    NODE_TLS_REJECT_UNAUTHORIZED:
+      env.NODE_TLS_REJECT_UNAUTHORIZED
+  };
+  for (const name of CUSTOM_TRUST_ENVIRONMENT_NAMES) {
+    isolated[name] = env[name];
+  }
+  return Object.freeze(isolated);
+}
+
+function validatePinnedLinuxGateEnvironment(
+  mode,
+  env = process.env,
+  executionIdentity = loadExecutionIdentity(env)
+) {
+  loadSystemPostgresTls(
+    env,
+    PAID_STAGING_PUBLIC_TARGET.host
+  );
   exactValue(
     env,
     mode === "backup"
@@ -158,6 +186,12 @@ function validatePinnedLinuxGateEnvironment(mode, env = process.env) {
   );
 
   if (mode === "backup") {
+    exactValue(
+      env,
+      "SOCIAL_BACKUP_LABEL",
+      `social-2b-${executionIdentity.runId}`,
+      "linux_gate_backup_label_mismatch"
+    );
     exactValue(
       env,
       "SOCIAL_BACKUP_EXPECTED_ENVIRONMENT_ID",
@@ -202,6 +236,12 @@ function validatePinnedLinuxGateEnvironment(mode, env = process.env) {
   }
 
   if (mode !== "restore") fail("linux_gate_mode_invalid");
+  exactValue(
+    env,
+    "SOCIAL_RESTORE_LABEL",
+    `social-2b-${executionIdentity.runId}`,
+    "linux_gate_restore_label_mismatch"
+  );
   assertPinnedDatabaseUrl(
     env.SOCIAL_RESTORE_TARGET_DATABASE_URL,
     PAID_STAGING_PUBLIC_TARGET.migrationLogin,
@@ -451,7 +491,9 @@ function safeSuccessPayload(mode, text) {
   if (
     payload.ok !== true ||
     payload.mode !== mode ||
-    payload.evidenceVerified !== true
+    payload.evidenceVerified !== true ||
+    payload.temporaryWorkspaceCleanupConfirmed !== true ||
+    payload.plaintextArtifactsAbsent !== true
   ) {
     fail("linux_gate_operator_result_invalid");
   }
@@ -460,14 +502,18 @@ function safeSuccessPayload(mode, text) {
     (payload.fileCount !== 1 ||
       !Number.isSafeInteger(payload.bundleSize) ||
       payload.bundleSize < 1 ||
+      !/^[0-9a-f]{64}$/.test(String(payload.evidenceSha256 || "")) ||
       !/^[0-9a-f]{64}$/.test(String(payload.bundleSha256 || "")) ||
+      payload.bundleFileFsyncConfirmed !== true ||
+      payload.bundleRoundTripVerified !== true ||
       payload.bundleDirectoryFsyncConfirmed !== true)
   ) {
     fail("linux_gate_backup_durability_unconfirmed");
   }
   if (
     mode === "restore" &&
-    (payload.runtimeIsolation !== true ||
+    (!/^[0-9a-f]{64}$/.test(String(payload.evidenceSha256 || "")) ||
+      payload.runtimeIsolation !== true ||
       payload.vault !== true ||
       payload.compatibleWith2A !== true)
   ) {
@@ -478,18 +524,26 @@ function safeSuccessPayload(mode, text) {
         ok: true,
         mode,
         evidenceVerified: true,
+        evidenceSha256: payload.evidenceSha256,
         fileCount: 1,
         bundleSize: payload.bundleSize,
         bundleSha256: payload.bundleSha256,
-        bundleDirectoryFsyncConfirmed: true
+        bundleFileFsyncConfirmed: true,
+        bundleRoundTripVerified: true,
+        bundleDirectoryFsyncConfirmed: true,
+        temporaryWorkspaceCleanupConfirmed: true,
+        plaintextArtifactsAbsent: true
       })
     : Object.freeze({
         ok: true,
         mode,
         evidenceVerified: true,
+        evidenceSha256: payload.evidenceSha256,
         runtimeIsolation: true,
         vault: true,
-        compatibleWith2A: true
+        compatibleWith2A: true,
+        temporaryWorkspaceCleanupConfirmed: true,
+        plaintextArtifactsAbsent: true
       });
 }
 
@@ -533,7 +587,11 @@ async function main({
   noFollowProbe = physicalNoFollowProbe,
   runOperator = runBackupRestoreOperator,
   createVerifiers = createRestoreBehaviorVerifiers,
-  validateTarget = validatePinnedLinuxGateEnvironment
+  validateTarget = validatePinnedLinuxGateEnvironment,
+  loadIdentity = loadExecutionIdentity,
+  startEvidence = startPhysicalEvidence,
+  completeEvidence = completePhysicalEvidence,
+  now = () => new Date()
 } = {}) {
   if (
     !Array.isArray(argv) ||
@@ -551,13 +609,39 @@ async function main({
   let gate;
   let outcome;
   let failure;
+  let stepEvidence;
   try {
+    if (typeof loadIdentity !== "function") {
+      fail("linux_gate_execution_identity_invalid");
+    }
+    const identity = loadIdentity(env);
     if (
       typeof validateTarget !== "function" ||
-      validateTarget(mode, env) !== true
+      validateTarget(mode, env, identity) !== true
     ) {
       fail("linux_gate_target_unconfirmed");
     }
+    if (
+      typeof startEvidence !== "function" ||
+      typeof completeEvidence !== "function"
+    ) {
+      fail("linux_gate_execution_evidence_invalid");
+    }
+    stepEvidence = startEvidence({
+      identity,
+      sequence: mode === "backup" ? 1 : 3,
+      databasePurpose:
+        mode === "backup" ? "primary-backup" : "disposable-restore",
+      databaseName:
+        mode === "backup"
+          ? PAID_STAGING_PUBLIC_TARGET.database
+          : RESTORE_DISPOSABLE_DATABASE_NAME,
+      targetFingerprint:
+        mode === "backup"
+          ? PRIMARY_TARGET_FINGERPRINT
+          : RESTORE_TARGET_FINGERPRINT,
+      now
+    });
     const probeRoot =
       mode === "backup"
         ? env.SOCIAL_BACKUP_OUTPUT_DIRECTORY
@@ -573,6 +657,7 @@ async function main({
         fail("linux_gate_restore_verifier_factory_invalid");
       }
       gate = createVerifiers({
+        env: postgresTlsEnvironment(env),
         migrationDatabaseUrl: requireText(
           env.SOCIAL_RESTORE_TARGET_DATABASE_URL,
           "linux_gate_restore_migration_url_missing"
@@ -657,7 +742,10 @@ async function main({
 
   let payload;
   try {
-    payload = safeSuccessPayload(mode, outcome.stdout);
+    payload = Object.freeze({
+      ...safeSuccessPayload(mode, outcome.stdout),
+      ...completeEvidence(stepEvidence, now)
+    });
   } catch (error) {
     writePayload(
       stderr,

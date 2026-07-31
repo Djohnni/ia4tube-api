@@ -63,6 +63,9 @@ As senhas precisam ter de 32 a 256 caracteres, com maiúscula, minúscula,
 número e símbolo, sem espaços e sem conter o nome do login. As três
 credenciais devem ter logins e senhas diferentes. A URL exige
 `sslmode=verify-full` e nenhuma opção adicional.
+A conexão usa apenas a cadeia pública padrão do Node e do sistema. CA
+customizada, pinning, fingerprint de certificado, TOFU ou cadeia sem hostname
+verificável são recusados.
 
 Antes de qualquer criação, o utilitário valida PostgreSQL 18, dono do banco,
 roles `NOLOGIN`, memberships, ACL pública e topologia completa. A criação dos
@@ -82,12 +85,14 @@ Quando a persistência social for habilitada, o Web Service aceita somente:
 - `DATABASE_URL` com o login de runtime;
 - `SOCIAL_DATABASE_EXPECTED_RUNTIME_LOGIN`;
 - `SOCIAL_DATABASE_EXPECTED_TARGET_FINGERPRINT`;
-- configuração pública de pool, TLS e timeouts.
+- configuração pública de pool e timeouts.
 
 O processo falha antes de iniciar se encontrar URL de migration,
 provisionamento, teste, sizing, backup ou restore. Também recusa a chave do
 bundle e as senhas de bootstrap, mesmo quando a persistência social está
 desativada.
+O trust store padrão é obrigatório. Overrides de CA, pinning e verificação
+TLS desativada são recusados.
 
 ## Operação futura
 

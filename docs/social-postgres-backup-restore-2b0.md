@@ -16,18 +16,20 @@ Render enquanto o Checkpoint Social 2B não for autorizado.
   bloqueado para intervenção, sem abandonar uma ferramenta mutando o banco.
 - A senha existe apenas no ambiente do processo filho (`PGPASSWORD`). Ela não
   aparece em argumento, SQL, manifesto, stdout ou relatório.
-- Os clientes oficiais mantêm `PGSSLMODE=verify-full` e
-  `PGSSLROOTCERT=system`. Para não depender da configuração OpenSSL do host, o
-  operador materializa, dentro do workspace protegido, um bundle temporário
-  exato de `node:tls.rootCertificates` e fixa seu caminho em `SSL_CERT_FILE`.
+- Os clientes oficiais mantêm `PGSSLMODE=verify-full` e usam exclusivamente
+  as raízes públicas padrão do sistema com `PGSSLROOTCERT=system`. Não existe
+  CA customizada, pinning, fingerprint de certificado ou TOFU.
+  Para manter o mesmo conjunto público usado pelo Node, o operador materializa
+  temporariamente `node:tls.rootCertificates` em um arquivo protegido e o
+  fornece aos subprocessos como `SSL_CERT_FILE`. Esse arquivo contém somente
+  as raízes padrão, é criado fora do Git e é removido antes de qualquer
+  resultado aprovado; um `SSL_CERT_FILE` recebido do ambiente é recusado.
   O endpoint público do Render recusa o SCRAM channel binding do libpq 18;
   por isso, o subprocesso fixa `PGCHANNELBINDING=disable`, sem aceitar
   override ambiental. A confidencialidade e a identidade do servidor
   continuam obrigatoriamente protegidas por TLS `verify-full`, hostname
-  exato e pelo bundle de raízes confiáveis.
-  O arquivo é exclusivo, `0600`, regular, sem link, vinculado por identidade e
-  hash e removido com a mesma verificação. Overrides ambientais de OpenSSL,
-  libpq, service file e password file são descartados.
+  exato e trust store padrão. Overrides ambientais de OpenSSL, libpq,
+  service file e password file são descartados.
 - O diretório de saída deve estar fora do repositório e ter proteção de acesso
   confirmada pelo operador.
 - O processo mantém os advisory locks de migration e backup durante toda a
@@ -136,9 +138,10 @@ físico Linux deve confirmar `O_NOFOLLOW` e `fsync` de diretório antes do
 primeiro uso com dados reais, pois o Node no Windows não oferece garantias
 equivalentes contra todas as corridas com reparse points.
 
-A saída segura do operador inclui
-`bundleDirectoryFsyncConfirmed=true|false`. O arquivo do bundle sempre passa
-por `fsync`; uma falha nesse `fsync` invalida e remove a saída. O valor
+A saída segura do operador inclui `bundleFileFsyncConfirmed`,
+`bundleDirectoryFsyncConfirmed`, `bundleRoundTripVerified`, o SHA-256 do
+bundle e o digest opaco das evidências. O arquivo sempre passa por `fsync`;
+uma falha nesse `fsync` invalida e remove a saída. O valor
 `false` em um gate sintético no Windows significa apenas que a plataforma não
 confirmou a persistência da entrada do diretório após uma queda abrupta. Ele
 não pode ser usado para aprovar backup de dados reais: antes disso, o mesmo
@@ -233,6 +236,7 @@ Variáveis do operador:
 - `SOCIAL_RESTORE_BUNDLE`
 - `SOCIAL_RESTORE_LABEL`
 - `SOCIAL_RESTORE_TARGET_DATABASE_URL`
+- `SOCIAL_RESTORE_RUNTIME_DATABASE_URL`
 - `SOCIAL_RESTORE_TARGET_EXPECTED_HOST`
 - `SOCIAL_RESTORE_TARGET_EXPECTED_PORT`
 - `SOCIAL_RESTORE_TARGET_EXPECTED_DATABASE`
@@ -250,6 +254,7 @@ Variáveis do operador:
 - `SOCIAL_BACKUP_BUNDLE_KEY`
 - `SOCIAL_RESTORE_PSQL_PATH`
 - `SOCIAL_RESTORE_PG_RESTORE_PATH`
+- `SOCIAL_RESTORE_LEGACY_2A_ROOT`
 
 A restauração de dados também cria e remove policies owner-only dentro de uma
 única transação. Depois, o gate compara:
@@ -287,6 +292,57 @@ Os advisory locks de migration e backup são adquiridos antes da recuperação
 de workspace, da autenticação do bundle e da extração. Assim, duas operações
 do operador não podem disputar a remoção de plaintext temporário. A evidência
 gerada depois do restore também fica dentro do mesmo workspace marcado.
+
+## Relatório persistido e reproduzível
+
+Depois de backup, criação do banco descartável, restore e remoção confirmada,
+as quatro saídas JSON sanitizadas são consolidadas exclusivamente por:
+
+```text
+node scripts/social-db-backup-restore-evidence.js
+```
+
+O consolidador exige Linux, não aceita argumentos e não recebe credenciais.
+Ele usa somente estes caminhos e o commit público do código:
+
+- `SOCIAL_2B_EVIDENCE_RUN_ID` (UUID v4 novo para a execução completa)
+- `SOCIAL_2B_EVIDENCE_BACKUP_FILE`
+- `SOCIAL_2B_EVIDENCE_CREATE_FILE`
+- `SOCIAL_2B_EVIDENCE_RESTORE_FILE`
+- `SOCIAL_2B_EVIDENCE_DROP_FILE`
+- `SOCIAL_2B_EVIDENCE_BUNDLE_FILE`
+- `SOCIAL_2B_EVIDENCE_REPORT_FILE`
+- `SOCIAL_2B_EVIDENCE_COMMIT`
+- `SOCIAL_2B_EVIDENCE_EXPECTED_CODE_MANIFEST_SHA256`
+- `SOCIAL_2B_EVIDENCE_EXPECTED_CODE_MANIFEST_FILE_COUNT`
+- `RENDER_GIT_COMMIT` (fornecido pelo Render e igual ao commit aprovado)
+
+O mesmo `runId` deve formar também os labels de backup e restore e o nome
+exato `social-2b-<runId>.ia4sb`. Cada um dos quatro payloads inclui commit,
+manifesto SHA-256 do código executado, ambiente, alvo lógico, sequência e
+horários. O consolidador exige igualdade desses vínculos e ordem temporal
+estrita; evidências antigas ou de execuções diferentes não podem ser
+combinadas.
+
+Os payloads precisam ter exatamente os campos allowlisted. O SHA-256 e o
+tamanho do bundle são recalculados por descritor estável; os digests do
+backup e do conteúdo restaurado precisam coincidir. O relatório só pode ser
+aprovado depois de a remoção comprovar identidade, encerramento das sessões,
+ausência do banco descartável, limpeza dos workspaces temporários e ausência
+de plaintext reservado.
+
+O JSON final e o sidecar `.sha256` são criados em diretório protegido fora do
+Git. Cada um é escrito primeiro em `.partial` com modo `0600`, passa por
+`fsync`, é publicado sem sobrescrita por hardlink e é seguido por `fsync` do
+diretório. O sidecar é publicado por último e funciona como marcador de
+conclusão. Relatório sem sidecar válido é incompleto. Nenhum caminho absoluto,
+URL de conexão, login, senha, chave do bundle ou conteúdo de tabela entra no
+artefato.
+
+Antes de retornar sucesso, o operador reabre sem seguir symlinks e recalcula
+o relatório, o sidecar e o bundle, confirma as identidades de arquivo e repete
+o `fsync` do diretório. Falha de publicação ou de limpeza remove somente os
+inodes criados pela própria execução e nunca adota um arquivo concorrente.
 
 ## Gate e rollback do futuro banco pago
 

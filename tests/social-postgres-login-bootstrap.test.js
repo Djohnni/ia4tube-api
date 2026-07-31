@@ -168,6 +168,10 @@ test("configuration requires explicit target, distinct logins and strong env pas
   assert.equal(config.provisionerPool.ssl.rejectUnauthorized, true);
   assert.equal(config.provisionerPool.ssl.servername, TARGET.host);
   assert.equal(
+    Object.prototype.hasOwnProperty.call(config.provisionerPool.ssl, "ca"),
+    false
+  );
+  assert.equal(
     config.provisionerPool.connectionString.includes("sslmode"),
     false
   );

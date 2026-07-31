@@ -30,6 +30,9 @@ const {
   createVaultKeyRotationService
 } = require("../src/social/vault-key-rotation-service");
 const {
+  loadSystemPostgresTls
+} = require("../src/persistence/postgres/tls");
+const {
   LEGACY_2A_COMMIT,
   LEGACY_2A_MODULES,
   LEGACY_2A_SOURCE_MANIFEST,
@@ -509,6 +512,7 @@ function createSyntheticWorld(options = {}) {
 function createGate(worldOptions = {}) {
   const synthetic = createSyntheticWorld(worldOptions);
   const gate = createRestoreBehaviorVerifiers({
+    env: {},
     migrationDatabaseUrl: MIGRATION_URL,
     runtimeDatabaseUrl: RUNTIME_URL,
     expectedMigrationLogin: MIGRATION_LOGIN,
@@ -576,20 +580,34 @@ test("pool boundary fixes migration at one and runtime at two", () => {
     expectedMigrationLogin: MIGRATION_LOGIN,
     expectedRuntimeLogin: RUNTIME_LOGIN
   });
+  const ssl = loadSystemPostgresTls(
+    {},
+    target.runtime.host
+  );
   const migration = poolConfiguration(
     target.migration,
     "synthetic-migration",
-    1
+    1,
+    ssl
   );
   const runtime = poolConfiguration(
     target.runtime,
     "synthetic-runtime",
-    2
+    2,
+    ssl
   );
   assert.equal(migration.max, 1);
   assert.equal(runtime.max, 2);
   assert.equal(migration.ssl.rejectUnauthorized, true);
   assert.equal(runtime.ssl.minVersion, "TLSv1.2");
+  assert.equal(
+    Object.prototype.hasOwnProperty.call(migration.ssl, "ca"),
+    false
+  );
+  assert.equal(
+    Object.prototype.hasOwnProperty.call(runtime.ssl, "ca"),
+    false
+  );
   assert.match(migration.options, /search_path=pg_catalog/);
 });
 

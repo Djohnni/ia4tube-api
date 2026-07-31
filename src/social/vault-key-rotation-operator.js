@@ -7,6 +7,9 @@ const {
   loadRuntimePostgresConfig,
   parseDatabaseUrl
 } = require("../persistence/postgres/config");
+const {
+  assertSystemTrustOnly
+} = require("../persistence/postgres/tls");
 const { postgresFail } = require("../persistence/postgres/errors");
 const {
   createMigrationRunner
@@ -57,7 +60,6 @@ const OPERATOR_ENVIRONMENT_NAMES = Object.freeze([
   "SOCIAL_VAULT_ROTATION_ACTIVE_KEY_VERSION",
   "SOCIAL_VAULT_ROTATION_APPROVAL",
   "SOCIAL_VAULT_ROTATION_BATCH_SIZE",
-  "SOCIAL_VAULT_ROTATION_DATABASE_CA_BASE64",
   "SOCIAL_VAULT_ROTATION_ENVIRONMENT",
   "SOCIAL_VAULT_ROTATION_EXPECTED_CURRENT_KEY_VERSION",
   "SOCIAL_VAULT_ROTATION_EXPECTED_ENVIRONMENT_ID",
@@ -71,6 +73,11 @@ const OPERATOR_ENVIRONMENT_NAMES = Object.freeze([
   "SOCIAL_VAULT_ROTATION_PRODUCTION_APPROVAL",
   "SOCIAL_VAULT_ROTATION_RETIRE_KEY_VERSION",
   "SOCIAL_VAULT_ROTATION_RUNTIME_DATABASE_URL"
+]);
+const LEGACY_CUSTOM_TRUST_NAMES = Object.freeze([
+  "SOCIAL_VAULT_ROTATION_DATABASE_CA_BASE64",
+  "SOCIAL_VAULT_ROTATION_DATABASE_CA_FILE",
+  "SOCIAL_VAULT_ROTATION_EXPECTED_CA_SHA256"
 ]);
 
 function requireMode(value) {
@@ -256,6 +263,15 @@ function loadVaultRotationOperatorConfig(
   env = process.env,
   request = {}
 ) {
+  assertSystemTrustOnly(env);
+  for (const name of LEGACY_CUSTOM_TRUST_NAMES) {
+    if (hasValue(env[name])) {
+      postgresFail(
+        "vault_rotation_custom_trust_forbidden",
+        "Trust store customizado recusado no operador de rotacao."
+      );
+    }
+  }
   assertNoAmbientPostgresEnvironment(
     env,
     "vault_rotation_postgres_environment_override_forbidden"
@@ -325,12 +341,12 @@ function loadVaultRotationOperatorConfig(
 
   const shared = {
     NODE_ENV: env.NODE_ENV,
+    NODE_TLS_REJECT_UNAUTHORIZED:
+      env.NODE_TLS_REJECT_UNAUTHORIZED,
     SOCIAL_DATABASE_ALLOW_INSECURE_LOCALHOST:
       env.NODE_ENV === "test"
         ? env.SOCIAL_DATABASE_ALLOW_INSECURE_LOCALHOST
         : undefined,
-    SOCIAL_DATABASE_CA_BASE64:
-      env.SOCIAL_VAULT_ROTATION_DATABASE_CA_BASE64,
     SOCIAL_DATABASE_EXPECTED_TARGET_FINGERPRINT:
       env.SOCIAL_VAULT_ROTATION_EXPECTED_TARGET_FINGERPRINT,
     SOCIAL_DATABASE_EXPECTED_RUNTIME_LOGIN: expectedRuntimeLogin

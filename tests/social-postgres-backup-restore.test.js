@@ -109,9 +109,7 @@ function systemRootsFixture(t, directory) {
     root: directory,
     purpose: "tls-test"
   });
-  const bundle = createSystemRootCertificateBundle({
-    workspace
-  });
+  const bundle = createSystemRootCertificateBundle({ workspace });
   return { bundle, workspace };
 }
 
@@ -534,7 +532,12 @@ test("operator pool is built only from the distinct provisioner connection", (t)
   const config = loadBackupConfig(backupEnvironment(directory), {
     repositoryRoot: root
   });
-  const parsed = new URL(poolConfig(config.operator).connectionString);
+  const pool = poolConfig(config.operator, config.postgresTls);
+  const parsed = new URL(pool.connectionString);
+  assert.equal(
+    Object.prototype.hasOwnProperty.call(pool.ssl, "ca"),
+    false
+  );
   assert.equal(
     decodeURIComponent(parsed.username),
     sourceOperatorTarget.login
@@ -555,8 +558,12 @@ test("CLI backup success reports only verifiable non-secret metadata", () => {
     files: 1,
     bundleSize: 1234,
     bundleSha256: "a".repeat(64),
+    bundleFileFsyncConfirmed: true,
     bundleDirectoryFsyncConfirmed: false,
+    bundleRoundTripVerified: true,
     evidenceSha256: "b".repeat(64),
+    temporaryWorkspaceCleanupConfirmed: true,
+    plaintextArtifactsAbsent: true,
     bundle: "C:\\must-not-appear\\backup.ia4sb",
     bundleKey,
     password,
@@ -566,10 +573,15 @@ test("CLI backup success reports only verifiable non-secret metadata", () => {
     ok: true,
     mode: "backup",
     evidenceVerified: true,
+    evidenceSha256: "b".repeat(64),
+    temporaryWorkspaceCleanupConfirmed: true,
+    plaintextArtifactsAbsent: true,
     fileCount: 1,
     bundleSize: 1234,
     bundleSha256: "a".repeat(64),
-    bundleDirectoryFsyncConfirmed: false
+    bundleFileFsyncConfirmed: true,
+    bundleDirectoryFsyncConfirmed: false,
+    bundleRoundTripVerified: true
   });
   const serialized = JSON.stringify(payload);
   assert.equal(serialized.includes("must-not-appear"), false);
@@ -585,7 +597,11 @@ test("CLI refuses backup metadata without an explicit directory durability resul
         files: 1,
         bundleSize: 1234,
         bundleSha256: "a".repeat(64),
-        evidenceSha256: "b".repeat(64)
+        bundleFileFsyncConfirmed: true,
+        bundleRoundTripVerified: true,
+        evidenceSha256: "b".repeat(64),
+        temporaryWorkspaceCleanupConfirmed: true,
+        plaintextArtifactsAbsent: true
       }),
     { code: "backup_result_metadata_invalid" }
   );
@@ -857,7 +873,7 @@ test("process plans keep passwords out of argv and SQL", (t) => {
   );
 });
 
-test("PostgreSQL child environment pins verified TLS with system roots", (t) => {
+test("PostgreSQL child environment uses verified TLS with system roots", (t) => {
   const directory = temporaryDirectory(t);
   const config = loadBackupConfig(backupEnvironment(directory), {
     repositoryRoot: root
@@ -1152,10 +1168,12 @@ test("backup workflow produces a verified bundle and always releases locks", asy
   assert.equal(fs.existsSync(config.files.bundle), true);
   assert.equal(result.bundleSize, fs.statSync(config.files.bundle).size);
   assert.match(result.bundleSha256, /^[0-9a-f]{64}$/);
+  assert.equal(result.bundleFileFsyncConfirmed, true);
   assert.equal(
     typeof result.bundleDirectoryFsyncConfirmed,
     "boolean"
   );
+  assert.equal(result.bundleRoundTripVerified, true);
   assert.equal(fs.existsSync(config.files.manifest), false);
   assert.equal(fs.existsSync(config.files.schema), false);
   assert.equal(

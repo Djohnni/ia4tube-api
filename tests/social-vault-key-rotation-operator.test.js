@@ -143,6 +143,14 @@ test("operator config requires explicit approval, exact identities, and separate
     assert.equal(config.migration.targetFingerprint, config.runtime.targetFingerprint);
     assert.equal(config.migration.target.username, "rotation_migration");
     assert.equal(config.runtime.login, "rotation_runtime");
+    assert.equal(
+      Object.prototype.hasOwnProperty.call(config.migration.pool.ssl, "ca"),
+      false
+    );
+    assert.equal(
+      Object.prototype.hasOwnProperty.call(config.runtime.pool.ssl, "ca"),
+      false
+    );
     assert.equal(config.batchSize, 2);
   } finally {
     clearParsedKeyring(config.keyring);
@@ -239,6 +247,47 @@ test("operator config requires explicit approval, exact identities, and separate
         { mode: "rotate", retire: false }
       ),
     { code: "vault_rotation_database_login_mismatch" }
+  );
+
+  for (const name of [
+    "SOCIAL_VAULT_ROTATION_DATABASE_CA_BASE64",
+    "SOCIAL_VAULT_ROTATION_DATABASE_CA_FILE",
+    "SOCIAL_VAULT_ROTATION_EXPECTED_CA_SHA256"
+  ]) {
+    assert.throws(
+      () =>
+        loadVaultRotationOperatorConfig(
+          operatorEnvironment({ [name]: "synthetic-custom-trust" }),
+          { mode: "rotate", retire: false }
+        ),
+      { code: "vault_rotation_custom_trust_forbidden" }
+    );
+  }
+
+  for (const name of [
+    "NODE_EXTRA_CA_CERTS",
+    "SSL_CERT_DIR",
+    "SSL_CERT_FILE"
+  ]) {
+    assert.throws(
+      () =>
+        loadVaultRotationOperatorConfig(
+          operatorEnvironment({ [name]: "synthetic-custom-trust" }),
+          { mode: "rotate", retire: false }
+        ),
+      { code: "social_database_custom_trust_forbidden" }
+    );
+  }
+
+  assert.throws(
+    () =>
+      loadVaultRotationOperatorConfig(
+        operatorEnvironment({
+          NODE_TLS_REJECT_UNAUTHORIZED: "0"
+        }),
+        { mode: "rotate", retire: false }
+      ),
+    { code: "node_tls_verification_disabled" }
   );
 
   for (const name of [

@@ -24,6 +24,14 @@ O limite `9` não autoriza escalar automaticamente para três instâncias. Ele �
 um teto de segurança. Qualquer aumento de instâncias, pool ou limite do LOGIN
 exige novo teste de carga e revisão do orçamento total de conexões.
 
+## Gate TLS do sizing remoto
+
+O sizing remoto usa a mesma política fail-closed do runtime: trust store
+padrão, TLS `verify-full`, `rejectUnauthorized=true`, TLS 1.2 ou superior e
+hostname exato. CA customizada, pinning, fingerprint de certificado, TOFU,
+override ambiental ou hostname sem SAN compatível bloqueiam o teste antes da
+abertura do pool.
+
 ## Gate físico de 29/07/2026
 
 O harness foi executado no PostgreSQL gratuito isolado da prova, com limite de

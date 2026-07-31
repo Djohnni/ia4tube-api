@@ -23,6 +23,66 @@ const {
 const {
   PAID_STAGING_PUBLIC_TARGET
 } = require("../src/persistence/postgres/staging-provisioner");
+const {
+  executionCodeManifest
+} = require("../src/persistence/postgres/physical-gate-evidence");
+const {
+  CUSTOM_TRUST_ENVIRONMENT_NAMES
+} = require("../src/persistence/postgres/tls");
+
+const RUN_ID = "12345678-1234-4abc-8def-1234567890ab";
+const COMMIT = "3204e876401175c37f028eaa8ebbff90c5c909f9";
+const CURRENT_MANIFEST = executionCodeManifest();
+const EXECUTION_IDENTITY = Object.freeze({
+  runId: RUN_ID,
+  commit: COMMIT,
+  renderCommitVerified: true,
+  codeManifestSha256: "e".repeat(64),
+  codeManifestFileCount: 42,
+  environment: "staging",
+  environmentId: PAID_STAGING_PUBLIC_TARGET.environmentId,
+  region: "oregon"
+});
+
+function evidenceEnvironment() {
+  return {
+    SOCIAL_2B_EVIDENCE_RUN_ID: RUN_ID,
+    SOCIAL_2B_EVIDENCE_COMMIT: COMMIT,
+    RENDER_GIT_COMMIT: COMMIT,
+    SOCIAL_2B_EVIDENCE_EXPECTED_CODE_MANIFEST_SHA256:
+      CURRENT_MANIFEST.sha256,
+    SOCIAL_2B_EVIDENCE_EXPECTED_CODE_MANIFEST_FILE_COUNT:
+      String(CURRENT_MANIFEST.fileCount)
+  };
+}
+
+function evidenceDependencies() {
+  return {
+    loadIdentity: () => EXECUTION_IDENTITY,
+    startEvidence({
+      identity,
+      sequence,
+      databasePurpose,
+      databaseName,
+      targetFingerprint
+    }) {
+      return {
+        ...identity,
+        sequence,
+        databasePurpose,
+        databaseName,
+        targetFingerprint,
+        startedAt: `2026-07-31T12:0${sequence}:00.000Z`
+      };
+    },
+    completeEvidence(started) {
+      return {
+        ...started,
+        completedAt: `2026-07-31T12:1${started.sequence}:00.000Z`
+      };
+    }
+  };
+}
 
 function temporaryDirectory(t) {
   const directory = fs.mkdtempSync(
@@ -52,10 +112,15 @@ function backupSuccess(overrides = {}) {
     ok: true,
     mode: "backup",
     evidenceVerified: true,
+    evidenceSha256: "b".repeat(64),
     fileCount: 1,
     bundleSize: 4096,
     bundleSha256: "a".repeat(64),
+    bundleFileFsyncConfirmed: true,
     bundleDirectoryFsyncConfirmed: true,
+    bundleRoundTripVerified: true,
+    temporaryWorkspaceCleanupConfirmed: true,
+    plaintextArtifactsAbsent: true,
     ...overrides
   };
 }
@@ -65,15 +130,60 @@ function restoreSuccess(overrides = {}) {
     ok: true,
     mode: "restore",
     evidenceVerified: true,
+    evidenceSha256: "b".repeat(64),
     runtimeIsolation: true,
     vault: true,
     compatibleWith2A: true,
+    temporaryWorkspaceCleanupConfirmed: true,
+    plaintextArtifactsAbsent: true,
     ...overrides
+  };
+}
+
+function completedStep(
+  sequence,
+  databasePurpose,
+  databaseName,
+  targetFingerprintValue
+) {
+  return {
+    ...EXECUTION_IDENTITY,
+    sequence,
+    databasePurpose,
+    databaseName,
+    targetFingerprint: targetFingerprintValue,
+    startedAt: `2026-07-31T12:0${sequence}:00.000Z`,
+    completedAt: `2026-07-31T12:1${sequence}:00.000Z`
+  };
+}
+
+function approvedBackupGatePayload() {
+  return {
+    ...backupSuccess(),
+    ...completedStep(
+      1,
+      "primary-backup",
+      PAID_STAGING_PUBLIC_TARGET.database,
+      PRIMARY_TARGET_FINGERPRINT
+    )
+  };
+}
+
+function approvedRestoreGatePayload() {
+  return {
+    ...restoreSuccess(),
+    ...completedStep(
+      3,
+      "disposable-restore",
+      RESTORE_DISPOSABLE_DATABASE_NAME,
+      RESTORE_TARGET_FINGERPRINT
+    )
   };
 }
 
 function restoreEnvironment(overrides = {}) {
   return {
+    ...evidenceEnvironment(),
     SOCIAL_RESTORE_WORK_DIRECTORY: path.resolve("synthetic-restore-work"),
     SOCIAL_RESTORE_TARGET_DATABASE_URL:
       "postgresql://synthetic_migration:secret@" +
@@ -86,6 +196,7 @@ function restoreEnvironment(overrides = {}) {
     SOCIAL_RESTORE_EXPECTED_MIGRATION_LOGIN: "synthetic_migration",
     SOCIAL_RESTORE_EXPECTED_RUNTIME_LOGIN: "synthetic_runtime",
     SOCIAL_RESTORE_LEGACY_2A_ROOT: path.resolve("synthetic-2a-root"),
+    SOCIAL_RESTORE_LABEL: `social-2b-${RUN_ID}`,
     ...overrides
   };
 }
@@ -102,6 +213,7 @@ function pinnedUrl(login, database, password) {
 function pinnedBackupEnvironment(overrides = {}) {
   const target = PAID_STAGING_PUBLIC_TARGET;
   return {
+    ...evidenceEnvironment(),
     SOCIAL_BACKUP_SOURCE_DATABASE_URL: pinnedUrl(
       target.migrationLogin,
       target.database,
@@ -116,6 +228,7 @@ function pinnedBackupEnvironment(overrides = {}) {
     SOCIAL_BACKUP_SOURCE_EXPECTED_PORT: target.port,
     SOCIAL_BACKUP_SOURCE_EXPECTED_DATABASE: target.database,
     SOCIAL_BACKUP_SOURCE_EXPECTED_LOGIN: target.migrationLogin,
+    SOCIAL_BACKUP_LABEL: `social-2b-${RUN_ID}`,
     SOCIAL_BACKUP_SOURCE_EXPECTED_FINGERPRINT:
       PRIMARY_TARGET_FINGERPRINT,
     SOCIAL_BACKUP_OPERATOR_EXPECTED_HOST: target.host,
@@ -135,6 +248,7 @@ function pinnedBackupEnvironment(overrides = {}) {
 function pinnedRestoreEnvironment(overrides = {}) {
   const target = PAID_STAGING_PUBLIC_TARGET;
   return {
+    ...evidenceEnvironment(),
     SOCIAL_RESTORE_TARGET_DATABASE_URL: pinnedUrl(
       target.migrationLogin,
       RESTORE_DISPOSABLE_DATABASE_NAME,
@@ -167,6 +281,7 @@ function pinnedRestoreEnvironment(overrides = {}) {
     SOCIAL_RESTORE_EXPECTED_MIGRATION_LOGIN: target.migrationLogin,
     SOCIAL_RESTORE_EXPECTED_RUNTIME_LOGIN: target.runtimeLogin,
     SOCIAL_RESTORE_SOURCE_FINGERPRINT: PRIMARY_TARGET_FINGERPRINT,
+    SOCIAL_RESTORE_LABEL: `social-2b-${RUN_ID}`,
     ...overrides
   };
 }
@@ -186,6 +301,21 @@ test("Linux gate is pinned to the paid staging source and exact restore target",
     ),
     true
   );
+});
+
+test("Linux gate refuses custom trust before target work", () => {
+  for (const name of CUSTOM_TRUST_ENVIRONMENT_NAMES) {
+    assert.throws(
+      () =>
+        validatePinnedLinuxGateEnvironment(
+          "backup",
+          pinnedBackupEnvironment({
+            [name]: "synthetic-custom-trust"
+          })
+        ),
+      { code: "social_database_custom_trust_forbidden" }
+    );
+  }
 });
 
 test("Linux gate refuses coherent alternate Render targets", () => {
@@ -224,6 +354,7 @@ test("Linux gate refuses another platform before an operator can run", async () 
   const stderr = outputCapture();
   let operatorCalled = false;
   const status = await main({
+    ...evidenceDependencies(),
     env: {
       SOCIAL_BACKUP_OUTPUT_DIRECTORY: path.resolve("synthetic-backup")
     },
@@ -254,8 +385,10 @@ test("Linux gate performs the nofollow probe before strict backup", async () => 
   const stderr = outputCapture();
   const events = [];
   const outputDirectory = path.resolve("synthetic-backup");
+  const env = { SOCIAL_BACKUP_OUTPUT_DIRECTORY: outputDirectory };
   const status = await main({
-    env: { SOCIAL_BACKUP_OUTPUT_DIRECTORY: outputDirectory },
+    ...evidenceDependencies(),
+    env,
     argv: ["backup"],
     platform: "linux",
     validateTarget: () => true,
@@ -266,6 +399,7 @@ test("Linux gate performs the nofollow probe before strict backup", async () => 
       return true;
     },
     async runOperator(options) {
+      assert.equal(options.env, env);
       events.push([
         "operator",
         options.argv[0],
@@ -277,7 +411,7 @@ test("Linux gate performs the nofollow probe before strict backup", async () => 
   });
   assert.equal(status, 0);
   assert.equal(stderr.read(), "");
-  assert.deepEqual(JSON.parse(stdout.read()), backupSuccess());
+  assert.deepEqual(JSON.parse(stdout.read()), approvedBackupGatePayload());
   assert.deepEqual(events, [
     ["probe", outputDirectory],
     ["operator", "backup", true]
@@ -288,6 +422,7 @@ test("Linux gate never approves an unconfirmed directory fsync", async () => {
   const stdout = outputCapture();
   const stderr = outputCapture();
   const status = await main({
+    ...evidenceDependencies(),
     env: {
       SOCIAL_BACKUP_OUTPUT_DIRECTORY: path.resolve("synthetic-backup")
     },
@@ -314,6 +449,42 @@ test("Linux gate never approves an unconfirmed directory fsync", async () => {
   });
 });
 
+test("Linux gate requires file fsync and encrypted round-trip", async () => {
+  for (const override of [
+    { bundleFileFsyncConfirmed: false },
+    { bundleRoundTripVerified: false }
+  ]) {
+    const stdout = outputCapture();
+    const stderr = outputCapture();
+    const status = await main({
+      ...evidenceDependencies(),
+      env: {
+        SOCIAL_BACKUP_OUTPUT_DIRECTORY: path.resolve(
+          "synthetic-backup"
+        )
+      },
+      argv: ["backup"],
+      platform: "linux",
+      validateTarget: () => true,
+      stdout: stdout.stream,
+      stderr: stderr.stream,
+      noFollowProbe: () => true,
+      async runOperator(options) {
+        options.stdout.write(
+          `${JSON.stringify(backupSuccess(override))}\n`
+        );
+        return 0;
+      }
+    });
+    assert.equal(status, 1);
+    assert.equal(stdout.read(), "");
+    assert.deepEqual(JSON.parse(stderr.read()), {
+      ok: false,
+      code: "linux_gate_backup_durability_unconfirmed"
+    });
+  }
+});
+
 test("restore injects all behavioral verifiers and closes them", async () => {
   const stdout = outputCapture();
   const stderr = outputCapture();
@@ -326,6 +497,7 @@ test("restore injects all behavioral verifiers and closes them", async () => {
     verify2ACompatibility: async () => true
   });
   const status = await main({
+    ...evidenceDependencies(),
     env,
     argv: ["restore"],
     platform: "linux",
@@ -354,14 +526,21 @@ test("restore injects all behavioral verifiers and closes them", async () => {
 
   assert.equal(status, 0);
   assert.equal(stderr.read(), "");
-  assert.deepEqual(JSON.parse(stdout.read()), restoreSuccess());
+  assert.deepEqual(JSON.parse(stdout.read()), approvedRestoreGatePayload());
   assert.deepEqual(events[0], [
     "probe",
     env.SOCIAL_RESTORE_WORK_DIRECTORY
   ]);
+  const expectedTlsEnvironment = {
+    NODE_TLS_REJECT_UNAUTHORIZED: undefined
+  };
+  for (const name of CUSTOM_TRUST_ENVIRONMENT_NAMES) {
+    expectedTlsEnvironment[name] = undefined;
+  }
   assert.deepEqual(events[1], [
     "create",
     {
+      env: expectedTlsEnvironment,
       migrationDatabaseUrl: env.SOCIAL_RESTORE_TARGET_DATABASE_URL,
       runtimeDatabaseUrl: env.SOCIAL_RESTORE_RUNTIME_DATABASE_URL,
       expectedMigrationLogin:
@@ -381,6 +560,7 @@ test("restore closes verifiers after an operator refusal", async () => {
   const stderr = outputCapture();
   let closed = 0;
   const status = await main({
+    ...evidenceDependencies(),
     env: restoreEnvironment(),
     argv: ["restore"],
     platform: "linux",
@@ -424,6 +604,7 @@ test("restore cleanup failure discards a buffered success", async () => {
   const stdout = outputCapture();
   const stderr = outputCapture();
   const status = await main({
+    ...evidenceDependencies(),
     env: restoreEnvironment(),
     argv: ["restore"],
     platform: "linux",
@@ -465,6 +646,7 @@ test("unexpected exceptions never disclose their message", async () => {
   const stderr = outputCapture();
   const sensitive = "postgresql://login:secret@example.test/database";
   const status = await main({
+    ...evidenceDependencies(),
     env: {
       SOCIAL_BACKUP_OUTPUT_DIRECTORY: path.resolve("synthetic-backup")
     },

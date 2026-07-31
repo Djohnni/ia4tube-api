@@ -5,6 +5,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 const tls = require("node:tls");
 const { SocialPostgresError, postgresFail } = require("./errors");
+const { loadSystemPostgresTls } = require("./tls");
 const {
   ADVISORY_LOCK_ID: MIGRATION_LOCK_ID
 } = require("./migrations");
@@ -491,6 +492,7 @@ function loadBackupConfig(env = process.env, options = {}) {
   return freezeConfigWithBundleKey({
     source,
     operator,
+    postgresTls: loadSystemPostgresTls(env, operator.public.host),
     sourceFingerprint,
     permanentLogins,
     environmentId,
@@ -588,6 +590,7 @@ function loadRestoreConfig(env = process.env, options = {}) {
     sourceFingerprint,
     target,
     operator,
+    postgresTls: loadSystemPostgresTls(env, operator.public.host),
     targetFingerprint: targetFingerprintValue,
     permanentLogins,
     workDirectory,
@@ -2214,10 +2217,14 @@ async function runLogicalBackup({
       bundle: encrypted.path,
       bundleSize: encrypted.size,
       bundleSha256: encrypted.sha256,
+      bundleFileFsyncConfirmed: true,
       bundleDirectoryFsyncConfirmed:
         encrypted.bundleDirectoryFsyncConfirmed,
+      bundleRoundTripVerified: true,
       evidenceSha256: manifest.evidenceSha256,
-      files: 1
+      files: 1,
+      temporaryWorkspaceCleanupConfirmed: true,
+      plaintextArtifactsAbsent: true
     });
   } catch (error) {
     let cleanupError;
@@ -2411,7 +2418,11 @@ async function runLogicalRestore({
     rootCertificateBundle = undefined;
     cleanupOwnedWorkspace(rootWorkspace, fileSystem);
     rootWorkspace = undefined;
-    return result;
+    return Object.freeze({
+      ...result,
+      temporaryWorkspaceCleanupConfirmed: true,
+      plaintextArtifactsAbsent: true
+    });
   } catch (error) {
     let cleanupError;
     if (rootCertificateBundle) {

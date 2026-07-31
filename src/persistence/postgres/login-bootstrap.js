@@ -5,6 +5,7 @@ const {
   assertNoAmbientPostgresEnvironment
 } = require("./config");
 const { postgresFail, SocialPostgresError } = require("./errors");
+const { loadSystemPostgresTls } = require("./tls");
 
 const BOOTSTRAP_APPROVAL = "BOOTSTRAP_SOCIAL_DATABASE_LOGINS";
 const BOOTSTRAP_LOCK_ID = "49703484320260729";
@@ -563,11 +564,7 @@ function loadLoginBootstrapConfig(env = process.env) {
   }
   const provisionerPool = freezeWithHiddenSecret(
     {
-      ssl: Object.freeze({
-        rejectUnauthorized: true,
-        minVersion: "TLSv1.2",
-        servername: host
-      }),
+      ssl: loadSystemPostgresTls(env, host),
       max: 1,
       min: 0,
       connectionTimeoutMillis: 5000,

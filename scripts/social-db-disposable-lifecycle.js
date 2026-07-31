@@ -10,6 +10,11 @@ const {
 } = require(
   "../src/persistence/postgres/disposable-database-lifecycle"
 );
+const {
+  completePhysicalEvidence,
+  loadExecutionIdentity,
+  startPhysicalEvidence
+} = require("../src/persistence/postgres/physical-gate-evidence");
 
 async function closePoolsConfirmed(pools) {
   const outcomes = await Promise.allSettled(
@@ -41,7 +46,11 @@ async function main({
   argv = process.argv.slice(2),
   PoolClass = pg.Pool,
   stdout = process.stdout,
-  stderr = process.stderr
+  stderr = process.stderr,
+  loadIdentity = loadExecutionIdentity,
+  startEvidence = startPhysicalEvidence,
+  completeEvidence = completePhysicalEvidence,
+  now = () => new Date()
 } = {}) {
   if (!Array.isArray(argv) || argv.length !== 0) {
     stderr.write(
@@ -55,10 +64,22 @@ async function main({
 
   let parentPool;
   let disposablePool;
+  let stepEvidence;
   const lifecycleState = {};
   try {
+    const identity = loadIdentity(env);
     const configuration =
       loadDisposableDatabaseLifecycleConfig(env);
+    stepEvidence = startEvidence({
+      identity,
+      sequence: configuration.action === "create" ? 2 : 4,
+      databasePurpose: configuration.restoreTopology
+        ? "disposable-restore"
+        : "disposable-gate",
+      databaseName: configuration.target.disposableDatabase,
+      targetFingerprint: configuration.targetFingerprint,
+      now
+    });
     parentPool = new PoolClass({
       ...configuration.parentPool,
       connectionString: configuration.parentPool.connectionString
@@ -103,6 +124,10 @@ async function main({
     if (result.restoreTopologyPrepared === true) {
       evidence.restoreTopologyPrepared = true;
     }
+    Object.assign(
+      evidence,
+      completeEvidence(stepEvidence, now)
+    );
     stdout.write(`${JSON.stringify(evidence)}\n`);
     return 0;
   } catch (error) {

@@ -6,6 +6,7 @@ const {
   assertNoAmbientPostgresEnvironment
 } = require("./config");
 const { SocialPostgresError, postgresFail } = require("./errors");
+const { loadSystemPostgresTls } = require("./tls");
 const { requireUuid } = require("./validation");
 const {
   PAID_STAGING_PUBLIC_TARGET
@@ -268,14 +269,13 @@ function hiddenPoolConfig(properties, connectionString) {
   return Object.freeze(result);
 }
 
-function poolConfig(connectionString, database, applicationName) {
+function poolConfig(env, connectionString, database, applicationName) {
   return hiddenPoolConfig(
     {
-      ssl: Object.freeze({
-        rejectUnauthorized: true,
-        minVersion: "TLSv1.2",
-        servername: PAID_STAGING_PUBLIC_TARGET.host
-      }),
+      ssl: loadSystemPostgresTls(
+        env,
+        PAID_STAGING_PUBLIC_TARGET.host
+      ),
       max: 1,
       min: 0,
       connectionTimeoutMillis: 5000,
@@ -468,11 +468,13 @@ function loadDisposableDatabaseLifecycleConfig(env = process.env) {
       provisionerLogin
     }),
     parentPool: poolConfig(
+      env,
       parentUrl,
       parentDatabase,
       "ia4tube-social-disposable-parent"
     ),
     disposablePool: poolConfig(
+      env,
       disposableUrl.toString(),
       disposableTarget.database,
       disposableTarget.restoreTopology
