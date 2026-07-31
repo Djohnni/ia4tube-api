@@ -7,7 +7,8 @@ const {
   targetFingerprint
 } = require("./backup-restore");
 const {
-  RESTORE_DISPOSABLE_DATABASE_NAME
+  RESTORE_DISPOSABLE_DATABASE_NAME,
+  disposableDatabaseTargetFingerprint
 } = require("./disposable-database-lifecycle");
 const {
   COMMIT_PATTERN,
@@ -37,6 +38,10 @@ const RESTORE_TARGET_FINGERPRINT = targetFingerprint({
   port: PAID_STAGING_PUBLIC_TARGET.port,
   database: RESTORE_DISPOSABLE_DATABASE_NAME
 });
+const RESTORE_DISPOSABLE_LIFECYCLE_FINGERPRINT =
+  disposableDatabaseTargetFingerprint(
+    RESTORE_DISPOSABLE_DATABASE_NAME
+  );
 const COMMON_STEP_KEYS = Object.freeze([
   "codeManifestFileCount",
   "codeManifestSha256",
@@ -398,7 +403,7 @@ function normalizeCreate(payload) {
       sequence: 2,
       databasePurpose: "disposable-restore",
       databaseName: RESTORE_DISPOSABLE_DATABASE_NAME,
-      targetFingerprint: RESTORE_TARGET_FINGERPRINT,
+      targetFingerprint: RESTORE_DISPOSABLE_LIFECYCLE_FINGERPRINT,
       code: "social_evidence_create_invalid"
     })
   });
@@ -436,7 +441,7 @@ function normalizeDrop(payload) {
       sequence: 4,
       databasePurpose: "disposable-restore",
       databaseName: RESTORE_DISPOSABLE_DATABASE_NAME,
-      targetFingerprint: RESTORE_TARGET_FINGERPRINT,
+      targetFingerprint: RESTORE_DISPOSABLE_LIFECYCLE_FINGERPRINT,
       code: "social_evidence_drop_invalid"
     })
   });
@@ -822,7 +827,9 @@ function buildDurableEvidenceReport({
       primaryDatabase: PAID_STAGING_PUBLIC_TARGET.database,
       disposableDatabase: RESTORE_DISPOSABLE_DATABASE_NAME,
       primaryTargetFingerprint: PRIMARY_TARGET_FINGERPRINT,
-      restoreTargetFingerprint: RESTORE_TARGET_FINGERPRINT
+      restoreTargetFingerprint: RESTORE_TARGET_FINGERPRINT,
+      disposableDatabaseLifecycleFingerprint:
+        RESTORE_DISPOSABLE_LIFECYCLE_FINGERPRINT
     }),
     tls: Object.freeze({
       mode: "verify-full",
@@ -843,6 +850,7 @@ function buildDurableEvidenceReport({
         startedAt: normalizedBackup.step.startedAt,
         completedAt: normalizedBackup.step.completedAt,
         ok: true,
+        targetFingerprint: normalizedBackup.step.targetFingerprint,
         evidenceSha256: normalizedBackup.evidenceSha256,
         fileCount: 1,
         bundleFile: bundle.name,
@@ -858,6 +866,7 @@ function buildDurableEvidenceReport({
         startedAt: normalizedCreate.step.startedAt,
         completedAt: normalizedCreate.step.completedAt,
         ok: true,
+        targetFingerprint: normalizedCreate.step.targetFingerprint,
         safe: true,
         created: true,
         identityVerified: true,
@@ -868,6 +877,7 @@ function buildDurableEvidenceReport({
         startedAt: normalizedRestore.step.startedAt,
         completedAt: normalizedRestore.step.completedAt,
         ok: true,
+        targetFingerprint: normalizedRestore.step.targetFingerprint,
         evidenceSha256: normalizedRestore.evidenceSha256,
         restoredContentMatchesBackup: true,
         runtimeIsolation: true,
@@ -879,6 +889,7 @@ function buildDurableEvidenceReport({
         startedAt: normalizedDrop.step.startedAt,
         completedAt: normalizedDrop.step.completedAt,
         ok: true,
+        targetFingerprint: normalizedDrop.step.targetFingerprint,
         safe: true,
         dropped: true,
         identityVerified: true,

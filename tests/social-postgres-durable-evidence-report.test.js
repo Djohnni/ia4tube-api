@@ -7,6 +7,7 @@ const os = require("node:os");
 const path = require("node:path");
 const test = require("node:test");
 const {
+  buildDurableEvidenceReport,
   createDurableEvidenceReport
 } = require(
   "../src/persistence/postgres/durable-evidence-report"
@@ -15,7 +16,8 @@ const {
   targetFingerprint
 } = require("../src/persistence/postgres/backup-restore");
 const {
-  RESTORE_DISPOSABLE_DATABASE_NAME
+  RESTORE_DISPOSABLE_DATABASE_NAME,
+  disposableDatabaseTargetFingerprint
 } = require(
   "../src/persistence/postgres/disposable-database-lifecycle"
 );
@@ -42,6 +44,10 @@ const RESTORE_TARGET_FINGERPRINT = targetFingerprint({
   port: PAID_STAGING_PUBLIC_TARGET.port,
   database: RESTORE_DISPOSABLE_DATABASE_NAME
 });
+const RESTORE_DISPOSABLE_LIFECYCLE_FINGERPRINT =
+  disposableDatabaseTargetFingerprint(
+    RESTORE_DISPOSABLE_DATABASE_NAME
+  );
 const CURRENT_IDENTITY = Object.freeze({
   runId: RUN_ID,
   commit: COMMIT,
@@ -143,7 +149,7 @@ function fixture(t, overrides = {}) {
         2,
         "disposable-restore",
         RESTORE_DISPOSABLE_DATABASE_NAME,
-        RESTORE_TARGET_FINGERPRINT
+        RESTORE_DISPOSABLE_LIFECYCLE_FINGERPRINT
       ),
       ...overrides.create
     },
@@ -177,7 +183,7 @@ function fixture(t, overrides = {}) {
         4,
         "disposable-restore",
         RESTORE_DISPOSABLE_DATABASE_NAME,
-        RESTORE_TARGET_FINGERPRINT
+        RESTORE_DISPOSABLE_LIFECYCLE_FINGERPRINT
       ),
       ...overrides.drop
     }
@@ -190,6 +196,12 @@ function fixture(t, overrides = {}) {
   return Object.freeze({
     ...inputs,
     bundleFile,
+    bundle: Object.freeze({
+      name: path.basename(bundleFile),
+      size: fs.statSync(bundleFile).size,
+      sha256: bundleSha256
+    }),
+    payloads,
     reportFile: path.join(directory, "final-evidence.json"),
     directory
   });
@@ -267,6 +279,34 @@ test("durable report rehashes the bundle and publishes a final sidecar", (t) => 
   assert.equal(report.steps.backup.independentHashVerified, true);
   assert.equal(report.steps.restore.restoredContentMatchesBackup, true);
   assert.equal(report.steps.drop.absenceConfirmed, true);
+  assert.equal(
+    report.source.primaryTargetFingerprint,
+    PRIMARY_TARGET_FINGERPRINT
+  );
+  assert.equal(
+    report.source.restoreTargetFingerprint,
+    RESTORE_TARGET_FINGERPRINT
+  );
+  assert.equal(
+    report.source.disposableDatabaseLifecycleFingerprint,
+    RESTORE_DISPOSABLE_LIFECYCLE_FINGERPRINT
+  );
+  assert.equal(
+    report.steps.backup.targetFingerprint,
+    PRIMARY_TARGET_FINGERPRINT
+  );
+  assert.equal(
+    report.steps.create.targetFingerprint,
+    RESTORE_DISPOSABLE_LIFECYCLE_FINGERPRINT
+  );
+  assert.equal(
+    report.steps.restore.targetFingerprint,
+    RESTORE_TARGET_FINGERPRINT
+  );
+  assert.equal(
+    report.steps.drop.targetFingerprint,
+    RESTORE_DISPOSABLE_LIFECYCLE_FINGERPRINT
+  );
   assert.equal(report.postconditions.plaintextArtifactsAbsent, true);
   assert.equal(serialized.includes(files.directory), false);
   assert.equal(serialized.includes("postgresql://"), false);
@@ -280,6 +320,121 @@ test("durable report rehashes the bundle and publishes a final sidecar", (t) => 
     fs.readFileSync(sidecarFile, "ascii"),
     `${expectedHash}  final-evidence.json\n`
   );
+});
+
+test("fingerprint domains are strict, mandatory and never interchangeable", (t) => {
+  const cases = [
+    {
+      overrides: {
+        create: { targetFingerprint: PRIMARY_TARGET_FINGERPRINT }
+      },
+      code: "social_evidence_create_invalid"
+    },
+    {
+      overrides: {
+        create: { targetFingerprint: RESTORE_TARGET_FINGERPRINT }
+      },
+      code: "social_evidence_create_invalid"
+    },
+    {
+      overrides: {
+        backup: {
+          targetFingerprint:
+            RESTORE_DISPOSABLE_LIFECYCLE_FINGERPRINT
+        }
+      },
+      code: "social_evidence_backup_invalid"
+    },
+    {
+      overrides: {
+        restore: {
+          targetFingerprint:
+            RESTORE_DISPOSABLE_LIFECYCLE_FINGERPRINT
+        }
+      },
+      code: "social_evidence_restore_invalid"
+    },
+    {
+      overrides: { drop: { targetFingerprint: "f".repeat(64) } },
+      code: "social_evidence_drop_invalid"
+    },
+    {
+      overrides: { create: { targetFingerprint: undefined } },
+      code: "social_evidence_create_invalid"
+    },
+    {
+      overrides: { drop: { targetFingerprint: undefined } },
+      code: "social_evidence_drop_invalid"
+    }
+  ];
+
+  for (const current of cases) {
+    const files = fixture(t, current.overrides);
+    assert.throws(
+      () => runFixture(files),
+      { code: current.code }
+    );
+    assert.equal(fs.existsSync(files.reportFile), false);
+  }
+});
+
+test("create and final drop evidence are both mandatory", (t) => {
+  const missingCreate = fixture(t);
+  assert.throws(
+    () =>
+      buildDurableEvidenceReport({
+        ...missingCreate.payloads,
+        create: undefined,
+        bundle: missingCreate.bundle,
+        currentIdentity: CURRENT_IDENTITY,
+        completedAt: COMPLETED_AT
+      }),
+    { code: "social_evidence_create_invalid" }
+  );
+
+  const missingDrop = fixture(t);
+  assert.throws(
+    () =>
+      buildDurableEvidenceReport({
+        ...missingDrop.payloads,
+        drop: undefined,
+        bundle: missingDrop.bundle,
+        currentIdentity: CURRENT_IDENTITY,
+        completedAt: COMPLETED_AT
+      }),
+    { code: "social_evidence_drop_invalid" }
+  );
+});
+
+test("tampered evidence is refused with a secret-free error", (t) => {
+  const files = fixture(t);
+  const generated = JSON.parse(
+    fs.readFileSync(files.createFile, "utf8")
+  );
+  const sensitiveSentinel =
+    "SYNTHETIC_SENSITIVE_VALUE_DO_NOT_LOG_20260731";
+  generated.targetFingerprint = PRIMARY_TARGET_FINGERPRINT;
+  generated.untrustedSensitiveValue = sensitiveSentinel;
+  fs.writeFileSync(
+    files.createFile,
+    `${JSON.stringify(generated)}\n`,
+    { encoding: "utf8", flag: "w", mode: 0o600 }
+  );
+
+  let failure;
+  try {
+    runFixture(files);
+  } catch (error) {
+    failure = error;
+  }
+  assert.equal(failure?.code, "social_evidence_create_invalid");
+  const serializedError = `${failure?.name}:${failure?.message}`;
+  assert.equal(serializedError.includes(sensitiveSentinel), false);
+  assert.doesNotMatch(
+    serializedError,
+    /postgres(?:ql)?:\/\/|authorization|password|private[ _-]?key/i
+  );
+  assert.equal(fs.existsSync(files.reportFile), false);
 });
 
 test("report refuses a changed bundle and mismatched restored evidence", (t) => {

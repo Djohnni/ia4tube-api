@@ -4,8 +4,14 @@ const assert = require("node:assert/strict");
 const test = require("node:test");
 const {
   BLOCKED_RESTORE_LABEL,
-  DISPOSABLE_DATABASE_PATTERN
+  DISPOSABLE_DATABASE_PATTERN,
+  targetFingerprint
 } = require("../src/persistence/postgres/backup-restore");
+const {
+  buildDurableEvidenceReport
+} = require(
+  "../src/persistence/postgres/durable-evidence-report"
+);
 const {
   PAID_STAGING_PUBLIC_TARGET
 } = require("../src/persistence/postgres/staging-provisioner");
@@ -99,7 +105,11 @@ function environment(action = "create", overrides = {}) {
   };
 }
 
-function physicalEvidenceHarness() {
+function physicalEvidenceHarness({
+  sequence = 2,
+  startedAt = EVIDENCE_STARTED_AT,
+  completedAt = EVIDENCE_COMPLETED_AT
+} = {}) {
   const targetFingerprint = disposableDatabaseTargetFingerprint(
     RESTORE_DISPOSABLE_DATABASE_NAME
   );
@@ -119,14 +129,14 @@ function physicalEvidenceHarness() {
         const { now, ...identity } = input;
         assert.deepEqual(identity, {
           identity: EXECUTION_IDENTITY,
-          sequence: 2,
+          sequence,
           databasePurpose: "disposable-restore",
           databaseName: RESTORE_DISPOSABLE_DATABASE_NAME,
           targetFingerprint
         });
         return startPhysicalEvidence({
           ...identity,
-          now: () => new Date(EVIDENCE_STARTED_AT)
+          now: () => new Date(startedAt)
         });
       },
       completeEvidence(started, now) {
@@ -134,10 +144,10 @@ function physicalEvidenceHarness() {
         assert.equal(typeof now, "function");
         assert.equal(started.runId, EVIDENCE_RUN_ID);
         assert.equal(started.commit, EVIDENCE_COMMIT);
-        assert.equal(started.startedAt, EVIDENCE_STARTED_AT);
+        assert.equal(started.startedAt, startedAt);
         return completePhysicalEvidence(
           started,
-          () => new Date(EVIDENCE_COMPLETED_AT),
+          () => new Date(completedAt),
           {
             manifestLoader: () => ({
               sha256: EXECUTION_IDENTITY.codeManifestSha256,
@@ -149,12 +159,12 @@ function physicalEvidenceHarness() {
     }),
     expected: Object.freeze({
       ...EXECUTION_IDENTITY,
-      sequence: 2,
+      sequence,
       databasePurpose: "disposable-restore",
       databaseName: RESTORE_DISPOSABLE_DATABASE_NAME,
       targetFingerprint,
-      startedAt: EVIDENCE_STARTED_AT,
-      completedAt: EVIDENCE_COMPLETED_AT
+      startedAt,
+      completedAt
     }),
     get startCalls() {
       return startCalls;
@@ -648,4 +658,186 @@ test("operator output confirms restore topology without exposing credentials", a
   });
   assert.equal(physical.startCalls, 1);
   assert.equal(physical.completeCalls, 1);
+});
+
+test("real lifecycle create and drop outputs satisfy the durable evidence contract", async () => {
+  const fake = fakeLifecycle({ exists: false });
+
+  class FakePool {
+    constructor(options) {
+      this.delegate =
+        options.application_name ===
+        "ia4tube-social-disposable-parent"
+          ? fake.parentPool
+          : fake.disposablePool;
+    }
+    async connect() {
+      return this.delegate.connect();
+    }
+    async end() {
+      return this.delegate.end();
+    }
+  }
+
+  async function captureLifecycle(action, timing) {
+    let stdout = "";
+    let stderr = "";
+    const physical = physicalEvidenceHarness(timing);
+    const status = await main({
+      env: environment(action),
+      argv: [],
+      PoolClass: FakePool,
+      ...physical.options,
+      stdout: { write(value) { stdout += value; } },
+      stderr: { write(value) { stderr += value; } }
+    });
+    assert.equal(status, 0);
+    assert.equal(stderr, "");
+    assert.equal(stdout.includes(PASSWORD), false);
+    assert.equal(physical.startCalls, 1);
+    assert.equal(physical.completeCalls, 1);
+    return JSON.parse(stdout);
+  }
+
+  const create = await captureLifecycle("create", {
+    sequence: 2,
+    startedAt: "2026-07-31T12:02:00.000Z",
+    completedAt: "2026-07-31T12:03:00.000Z"
+  });
+  const drop = await captureLifecycle("drop", {
+    sequence: 4,
+    startedAt: "2026-07-31T12:06:00.000Z",
+    completedAt: "2026-07-31T12:07:00.000Z"
+  });
+  const lifecycleFingerprint =
+    disposableDatabaseTargetFingerprint(
+      RESTORE_DISPOSABLE_DATABASE_NAME
+    );
+  const primaryFingerprint = targetFingerprint({
+    host: PAID_STAGING_PUBLIC_TARGET.host,
+    port: PAID_STAGING_PUBLIC_TARGET.port,
+    database: PAID_STAGING_PUBLIC_TARGET.database
+  });
+  const restoreFingerprint = targetFingerprint({
+    host: PAID_STAGING_PUBLIC_TARGET.host,
+    port: PAID_STAGING_PUBLIC_TARGET.port,
+    database: RESTORE_DISPOSABLE_DATABASE_NAME
+  });
+  const evidenceSha256 = "a".repeat(64);
+  const bundle = Object.freeze({
+    name: `social-2b-${EVIDENCE_RUN_ID}.ia4sb`,
+    size: 128,
+    sha256: "b".repeat(64)
+  });
+  const step = (
+    sequence,
+    databasePurpose,
+    databaseName,
+    fingerprint,
+    startedAt,
+    completedAt
+  ) => ({
+    ...EXECUTION_IDENTITY,
+    sequence,
+    databasePurpose,
+    databaseName,
+    targetFingerprint: fingerprint,
+    startedAt,
+    completedAt
+  });
+  const backup = {
+    ok: true,
+    mode: "backup",
+    evidenceVerified: true,
+    evidenceSha256,
+    fileCount: 1,
+    bundleSize: bundle.size,
+    bundleSha256: bundle.sha256,
+    bundleFileFsyncConfirmed: true,
+    bundleDirectoryFsyncConfirmed: true,
+    bundleRoundTripVerified: true,
+    temporaryWorkspaceCleanupConfirmed: true,
+    plaintextArtifactsAbsent: true,
+    ...step(
+      1,
+      "primary-backup",
+      PAID_STAGING_PUBLIC_TARGET.database,
+      primaryFingerprint,
+      "2026-07-31T12:00:00.000Z",
+      "2026-07-31T12:01:00.000Z"
+    )
+  };
+  const restore = {
+    ok: true,
+    mode: "restore",
+    evidenceVerified: true,
+    evidenceSha256,
+    runtimeIsolation: true,
+    vault: true,
+    compatibleWith2A: true,
+    temporaryWorkspaceCleanupConfirmed: true,
+    plaintextArtifactsAbsent: true,
+    ...step(
+      3,
+      "disposable-restore",
+      RESTORE_DISPOSABLE_DATABASE_NAME,
+      restoreFingerprint,
+      "2026-07-31T12:04:00.000Z",
+      "2026-07-31T12:05:00.000Z"
+    )
+  };
+
+  const report = buildDurableEvidenceReport({
+    backup,
+    create,
+    restore,
+    drop,
+    bundle,
+    currentIdentity: EXECUTION_IDENTITY,
+    completedAt: "2026-07-31T12:08:00.000Z"
+  });
+  assert.equal(report.ok, true);
+  assert.equal(create.targetFingerprint, lifecycleFingerprint);
+  assert.equal(drop.targetFingerprint, lifecycleFingerprint);
+  assert.equal(
+    report.source.primaryTargetFingerprint,
+    primaryFingerprint
+  );
+  assert.equal(
+    report.source.restoreTargetFingerprint,
+    restoreFingerprint
+  );
+  assert.equal(
+    report.source.disposableDatabaseLifecycleFingerprint,
+    lifecycleFingerprint
+  );
+  assert.equal(
+    report.steps.create.targetFingerprint,
+    lifecycleFingerprint
+  );
+  assert.equal(
+    report.steps.drop.targetFingerprint,
+    lifecycleFingerprint
+  );
+
+  const tamperedCreate = {
+    ...create,
+    targetFingerprint: primaryFingerprint
+  };
+  let failure;
+  try {
+    buildDurableEvidenceReport({
+      backup,
+      create: tamperedCreate,
+      restore,
+      drop,
+      bundle,
+      currentIdentity: EXECUTION_IDENTITY,
+      completedAt: "2026-07-31T12:08:00.000Z"
+    });
+  } catch (error) {
+    failure = error;
+  }
+  assert.equal(failure?.code, "social_evidence_create_invalid");
+  assert.equal(`${failure?.message}`.includes(PASSWORD), false);
 });
