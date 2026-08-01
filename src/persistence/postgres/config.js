@@ -287,6 +287,9 @@ function connectionSecurity(parsed, env) {
     explicitTrue(env.SOCIAL_DATABASE_ALLOW_INSECURE_LOCALHOST) &&
     LOOPBACK_HOSTS.has(parsed.hostname.toLowerCase());
 
+  // Keep channel_binding outside this allowlist. pg-connection-string accepts
+  // it as an opaque query key, but node-postgres does not implement libpq's
+  // strict channel_binding=require semantics from that key.
   const queryEntries = [...parsed.searchParams.entries()];
   if (
     queryEntries.some(([name]) => name !== ALLOWED_DATABASE_QUERY_KEY) ||
