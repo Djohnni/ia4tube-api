@@ -20,6 +20,18 @@ g_suporteTotalUltimoValido := 0
 g_suporteTemValorValido := false
 g_suporteConsultaValida := false
 g_suporteUltimoErro := ""
+g_cacheVisual := Map()
+g_metricasVisuais := Map(
+    "ciclos", 0,
+    "textoAplicado", 0,
+    "corAplicada", 0,
+    "fonteAplicada", 0,
+    "textoEvitado", 0,
+    "corEvitada", 0,
+    "fonteEvitada", 0,
+    "invalidacoes", 0
+)
+WM_METRICAS_VISUAIS := DllCall("RegisterWindowMessage", "Str", "IA4Tube.Painel.MetricasVisuais.Etapa3A", "UInt")
 ERROS_RESOLVIDOS_FILE := BASE_DIR "\painel_erros_resolvidos.txt"
 SUPORTE_RESOLVIDOS_FILE := BASE_DIR "\painel_suporte_resolvidos.txt"
 API_BASE := "https://ia4tube-api.onrender.com"
@@ -33,7 +45,7 @@ if FileExist(SUPORTE_RESOLVIDOS_FILE) {
     try g_suporteResolvidos := Integer(Trim(FileRead(SUPORTE_RESOLVIDOS_FILE, "UTF-8")))
 }
 
-global GuiPainel, g_minimizado, g_lastAlerta, g_pipelineSemDesde, g_errosResolvidos, g_suporteResolvidos, g_erroMap, g_suporteAssinatura, g_suporteJanelaAberta, g_suporteTotalUltimoValido, g_suporteTemValorValido, g_suporteConsultaValida, g_suporteUltimoErro, ERROS_RESOLVIDOS_FILE, SUPORTE_RESOLVIDOS_FILE
+global GuiPainel, g_minimizado, g_lastAlerta, g_pipelineSemDesde, g_errosResolvidos, g_suporteResolvidos, g_erroMap, g_suporteAssinatura, g_suporteJanelaAberta, g_suporteTotalUltimoValido, g_suporteTemValorValido, g_suporteConsultaValida, g_suporteUltimoErro, g_cacheVisual, g_metricasVisuais, WM_METRICAS_VISUAIS, ERROS_RESOLVIDOS_FILE, SUPORTE_RESOLVIDOS_FILE
 global BASE_DIR, PEDIDOS_DIR, MATERIAIS_GRAFICOS_DIR, CARROSSEIS_DIR, PLANEJAMENTOS_DIR, SUPORTE_DIR, API_BASE, BOT_TOKEN_FILE
 global g_listaConversasIds := Map()
 global g_conversaSelecionadaId := ""
@@ -43,6 +55,7 @@ global txtTitulo, txtStatus, txtFila, txtAndamento, txtHoje, txtErro, txtUltimo,
 GuiPainel := Gui("+AlwaysOnTop -Caption +ToolWindow +Border")
 GuiPainel.BackColor := "202124"
 GuiPainel.SetFont("s8 cFFFFFF", "Segoe UI")
+OnMessage(WM_METRICAS_VISUAIS, ResponderMetricasVisuais)
 
 GuiPainel.AddText("x0 y0 w220 h24 Background303134")
 btnMais := GuiPainel.AddText("x154 y4 w16 h18 cCCCCCC BackgroundTrans Center", "+")
@@ -129,8 +142,117 @@ MoverPainel(*) {
     PostMessage(0xA1, 2,,, GuiPainel.Hwnd)
 }
 
+ChaveCacheVisual(gui, controle, propriedade) {
+    return ObjPtr(gui) "|" gui.Hwnd "|" ObjPtr(controle) "|" controle.Hwnd "|" propriedade
+}
+
+RegistrarResultadoVisual(propriedade, aplicado) {
+    global g_metricasVisuais
+
+    chave := propriedade (propriedade = "texto"
+        ? (aplicado ? "Aplicado" : "Evitado")
+        : (aplicado ? "Aplicada" : "Evitada"))
+    g_metricasVisuais[chave] += 1
+}
+
+AplicarTextoVisualSeMudou(gui, controle, valor) {
+    global g_cacheVisual
+
+    chave := ChaveCacheVisual(gui, controle, "texto")
+    if (g_cacheVisual.Has(chave) && g_cacheVisual[chave] == valor) {
+        RegistrarResultadoVisual("texto", false)
+        return false
+    }
+
+    controle.Text := valor
+    g_cacheVisual[chave] := valor
+    RegistrarResultadoVisual("texto", true)
+    return true
+}
+
+AplicarCorVisualSeMudou(gui, controle, opcoesCor) {
+    global g_cacheVisual
+
+    chave := ChaveCacheVisual(gui, controle, "cor")
+    if (g_cacheVisual.Has(chave) && g_cacheVisual[chave] == opcoesCor) {
+        RegistrarResultadoVisual("cor", false)
+        return false
+    }
+
+    controle.SetFont(opcoesCor)
+    g_cacheVisual[chave] := opcoesCor
+    RegistrarResultadoVisual("cor", true)
+    return true
+}
+
+AplicarFonteVisualSeMudou(gui, controle, opcoesFonte, nomeFonte := "") {
+    global g_cacheVisual
+
+    valor := opcoesFonte "|" nomeFonte
+    chave := ChaveCacheVisual(gui, controle, "fonte")
+    if (g_cacheVisual.Has(chave) && g_cacheVisual[chave] == valor) {
+        RegistrarResultadoVisual("fonte", false)
+        return false
+    }
+
+    if (nomeFonte = "")
+        controle.SetFont(opcoesFonte)
+    else
+        controle.SetFont(opcoesFonte, nomeFonte)
+
+    g_cacheVisual[chave] := valor
+    RegistrarResultadoVisual("fonte", true)
+    return true
+}
+
+InvalidarCacheVisual(gui) {
+    global g_cacheVisual, g_metricasVisuais
+
+    prefixo := ObjPtr(gui) "|"
+    chaves := []
+    for chave, estado in g_cacheVisual {
+        if (SubStr(chave, 1, StrLen(prefixo)) = prefixo)
+            chaves.Push(chave)
+    }
+
+    for chave in chaves
+        g_cacheVisual.Delete(chave)
+
+    g_metricasVisuais["invalidacoes"] += 1
+}
+
+RegistrarCicloVisual() {
+    global g_metricasVisuais
+    g_metricasVisuais["ciclos"] += 1
+}
+
+ResponderMetricasVisuais(wParam, lParam, msg, hwnd) {
+    global GuiPainel, g_metricasVisuais
+
+    if (hwnd != GuiPainel.Hwnd)
+        return 0
+
+    chaves := [
+        "ciclos",
+        "textoAplicado",
+        "corAplicada",
+        "fonteAplicada",
+        "textoEvitado",
+        "corEvitada",
+        "fonteEvitada",
+        "invalidacoes"
+    ]
+
+    if (wParam < 1 || wParam > chaves.Length)
+        return 0
+
+    return g_metricasVisuais[chaves[wParam]]
+}
+
 AtualizarPainel() {
     global PEDIDOS_DIR, SUPORTE_DIR, GuiPainel, g_minimizado, g_lastAlerta, g_pipelineSemDesde, g_errosResolvidos, g_suporteResolvidos, g_suporteConsultaValida, g_suporteTemValorValido, g_suporteUltimoErro, g_erroMap, txtTitulo, txtStatus, txtFila, txtAndamento, txtHoje, txtErro, txtUltimo, txtBot, txtProgramas, txtMgPend, txtMgProc, txtMgHoje, txtMgErro, txtMgUltimo, txtProgramasMg, txtCarPend, txtCarProc, txtCarHoje, txtCarErro, txtCarUltimo, txtProgramasCar, txtPlanPend, txtPlanProc, txtPlanHoje, txtPlanErro, txtPlanUltimo, txtProgramasPlan, txtProgramasPlanArt, txtPlanVision, txtPlanUltimaAnalise, txtSuporte, txtAlerta, txtErroTitulo, txtErroLinhas
+
+    RegistrarCicloVisual()
 
     pendentes := 0
     andamento := 0
@@ -189,21 +311,21 @@ AtualizarPainel() {
     runnerAtivo := statusProc.runner
     botAtivo := statusProc.bot
 
-    txtBot.Text := "Bot: " (statusProc.bot ? "aberto" : "fechado")
-    txtBot.SetFont(statusProc.bot ? "c66FF99" : "cFF6666")
+    AplicarTextoVisualSeMudou(GuiPainel, txtBot, "Bot: " (statusProc.bot ? "aberto" : "fechado"))
+    AplicarCorVisualSeMudou(GuiPainel, txtBot, statusProc.bot ? "c66FF99" : "cFF6666")
 
-    txtProgramas.Text := "Run: " (statusProc.runner ? "ON" : "OFF") "  Pipe: " (statusProc.pipeline ? "ON" : "OFF")
-    txtProgramasMg.Text := "Run MG: " (statusProc.runnerMg ? "ON" : "OFF") "  Pipe MG: " (statusProc.pipelineMg ? "ON" : "OFF")
-    txtProgramasMg.SetFont((statusProc.runnerMg && statusProc.pipelineMg) ? "c66FF99" : "cFFD166")
-    txtProgramasCar.Text := "Run Car: " (statusProc.runnerCar ? "ON" : "OFF") "  Pipe Car: " (statusProc.pipelineCar ? "ON" : "OFF")
-    txtProgramasCar.SetFont(statusProc.runnerCar ? (statusProc.pipelineCar ? "c66FF99" : "cFFD166") : "cFF6666")
-    txtProgramasPlan.Text := "Run Plan: " (statusProc.runnerPlan ? "ON" : "OFF") "  Pipe Plan: " (statusProc.pipelinePlan ? "ON" : "OFF")
-    txtProgramasPlan.SetFont(statusProc.runnerPlan ? (statusProc.pipelinePlan ? "c66FF99" : "cFFD166") : "cFF6666")
-    txtProgramasPlanArt.Text := "Run Arte Plan: " (statusProc.runnerPlanArt ? "ON" : "OFF")
-    txtProgramasPlanArt.SetFont(statusProc.runnerPlanArt ? "c66FF99" : "cFF6666")
+    AplicarTextoVisualSeMudou(GuiPainel, txtProgramas, "Run: " (statusProc.runner ? "ON" : "OFF") "  Pipe: " (statusProc.pipeline ? "ON" : "OFF"))
+    AplicarTextoVisualSeMudou(GuiPainel, txtProgramasMg, "Run MG: " (statusProc.runnerMg ? "ON" : "OFF") "  Pipe MG: " (statusProc.pipelineMg ? "ON" : "OFF"))
+    AplicarCorVisualSeMudou(GuiPainel, txtProgramasMg, (statusProc.runnerMg && statusProc.pipelineMg) ? "c66FF99" : "cFFD166")
+    AplicarTextoVisualSeMudou(GuiPainel, txtProgramasCar, "Run Car: " (statusProc.runnerCar ? "ON" : "OFF") "  Pipe Car: " (statusProc.pipelineCar ? "ON" : "OFF"))
+    AplicarCorVisualSeMudou(GuiPainel, txtProgramasCar, statusProc.runnerCar ? (statusProc.pipelineCar ? "c66FF99" : "cFFD166") : "cFF6666")
+    AplicarTextoVisualSeMudou(GuiPainel, txtProgramasPlan, "Run Plan: " (statusProc.runnerPlan ? "ON" : "OFF") "  Pipe Plan: " (statusProc.pipelinePlan ? "ON" : "OFF"))
+    AplicarCorVisualSeMudou(GuiPainel, txtProgramasPlan, statusProc.runnerPlan ? (statusProc.pipelinePlan ? "c66FF99" : "cFFD166") : "cFF6666")
+    AplicarTextoVisualSeMudou(GuiPainel, txtProgramasPlanArt, "Run Arte Plan: " (statusProc.runnerPlanArt ? "ON" : "OFF"))
+    AplicarCorVisualSeMudou(GuiPainel, txtProgramasPlanArt, statusProc.runnerPlanArt ? "c66FF99" : "cFF6666")
     visionAtiva := VisionPlanejamentoAtiva()
-    txtPlanVision.Text := "Vision: " (visionAtiva ? "ON" : "OFF")
-    txtPlanVision.SetFont(visionAtiva ? "c66FF99" : "cFF6666")
+    AplicarTextoVisualSeMudou(GuiPainel, txtPlanVision, "Vision: " (visionAtiva ? "ON" : "OFF"))
+    AplicarCorVisualSeMudou(GuiPainel, txtPlanVision, visionAtiva ? "c66FF99" : "cFF6666")
 
     errosPendentes := erros
 
@@ -220,12 +342,12 @@ AtualizarPainel() {
         suportePendentes := 0
 
     if (g_suporteConsultaValida) {
-        txtSuporte.Text := "Suporte: " suportePendentes
-        txtSuporte.SetFont(suportePendentes > 0 ? "cFF3333" : "c66FF99")
+        AplicarTextoVisualSeMudou(GuiPainel, txtSuporte, "Suporte: " suportePendentes)
+        AplicarCorVisualSeMudou(GuiPainel, txtSuporte, suportePendentes > 0 ? "cFF3333" : "c66FF99")
     } else {
         valorSuporte := g_suporteTemValorValido ? suportePendentes : "?"
-        txtSuporte.Text := "Suporte: " valorSuporte " [" g_suporteUltimoErro "]"
-        txtSuporte.SetFont("cFFD166")
+        AplicarTextoVisualSeMudou(GuiPainel, txtSuporte, "Suporte: " valorSuporte " [" g_suporteUltimoErro "]")
+        AplicarCorVisualSeMudou(GuiPainel, txtSuporte, "cFFD166")
     }
 
     if (andamento > 0 && !statusProc.pipeline) {
@@ -257,78 +379,78 @@ AtualizarPainel() {
         alerta := "ERRO EM PEDIDO"
 
     if (alerta != "") {
-        txtAlerta.Text := "Alerta: " alerta
-        txtAlerta.SetFont("cFF6666")
+        AplicarTextoVisualSeMudou(GuiPainel, txtAlerta, "Alerta: " alerta)
+        AplicarCorVisualSeMudou(GuiPainel, txtAlerta, "cFF6666")
 
         if (alerta != g_lastAlerta) {
             SoundBeep(900, 180)
             g_lastAlerta := alerta
         }
     } else {
-        txtAlerta.Text := "Alerta: tudo ok"
-        txtAlerta.SetFont("c66FF99")
+        AplicarTextoVisualSeMudou(GuiPainel, txtAlerta, "Alerta: tudo ok")
+        AplicarCorVisualSeMudou(GuiPainel, txtAlerta, "c66FF99")
         g_lastAlerta := ""
     }
 
     if (g_minimizado) {
-        txtTitulo.Text := (alerta != "" 
+        AplicarTextoVisualSeMudou(GuiPainel, txtTitulo, (alerta != ""
             ? "IA4Tube " (statusProc.bot ? "on " : "off ") pendentes " - " feitosHoje
-            : "IA4Tube " (statusProc.bot ? "on " : "off ") pendentes " - " feitosHoje)
+            : "IA4Tube " (statusProc.bot ? "on " : "off ") pendentes " - " feitosHoje))
 
-        txtTitulo.SetFont(alerta != "" ? "cFF6666" : (statusProc.bot ? "c66FF99" : "cFF6666"))
+        AplicarCorVisualSeMudou(GuiPainel, txtTitulo, alerta != "" ? "cFF6666" : (statusProc.bot ? "c66FF99" : "cFF6666"))
 
-        txtStatus.Text := ""
+        AplicarTextoVisualSeMudou(GuiPainel, txtStatus, "")
 
         return
     } else {
-        txtTitulo.Text := "IA4Tube"
-        txtTitulo.SetFont("cFFFFFF")
+        AplicarTextoVisualSeMudou(GuiPainel, txtTitulo, "IA4Tube")
+        AplicarCorVisualSeMudou(GuiPainel, txtTitulo, "cFFFFFF")
     }
 
     if (statusProc.bot && statusProc.runner) {
-        txtProgramas.SetFont("c66FF99")
+        AplicarCorVisualSeMudou(GuiPainel, txtProgramas, "c66FF99")
     } else {
-        txtProgramas.SetFont("cFFD166")
+        AplicarCorVisualSeMudou(GuiPainel, txtProgramas, "cFFD166")
     }
 
     if (!runnerAtivo) {
-        txtStatus.Text := "runner parado"
-        txtStatus.SetFont("cFF6666")
+        AplicarTextoVisualSeMudou(GuiPainel, txtStatus, "runner parado")
+        AplicarCorVisualSeMudou(GuiPainel, txtStatus, "cFF6666")
     } else if (errosPendentes > 0) {
-        txtStatus.Text := "erro"
-        txtStatus.SetFont("cFF6666")
+        AplicarTextoVisualSeMudou(GuiPainel, txtStatus, "erro")
+        AplicarCorVisualSeMudou(GuiPainel, txtStatus, "cFF6666")
     } else if (andamento > 0) {
-        txtStatus.Text := "processando"
-        txtStatus.SetFont("cFFD166")
+        AplicarTextoVisualSeMudou(GuiPainel, txtStatus, "processando")
+        AplicarCorVisualSeMudou(GuiPainel, txtStatus, "cFFD166")
     } else {
-        txtStatus.Text := "normal"
-        txtStatus.SetFont("c66FF99")
+        AplicarTextoVisualSeMudou(GuiPainel, txtStatus, "normal")
+        AplicarCorVisualSeMudou(GuiPainel, txtStatus, "c66FF99")
     }
 
-    txtFila.Text := "Pend: " pendentes
-    txtAndamento.Text := "Proc: " andamento "/10"
-    txtHoje.Text := "Hoje: " feitosHoje
-    txtErro.Text := "Erro: " errosPendentes
-    txtMgPend.Text := "Pend MG: " statsMg.pendentes
-    txtMgProc.Text := "Proc MG: " statsMg.processando
-    txtMgHoje.Text := "Hoje MG: " statsMg.hoje
-    txtMgErro.Text := "Erro MG: " statsMg.erros
-    txtMgUltimo.Text := "Ultimo MG: " (statsMg.ultimo != "" ? statsMg.ultimo : "-")
-    txtMgErro.SetFont(statsMg.erros > 0 ? "cFF6666" : "cFFFFFF")
-    txtCarPend.Text := "Pend Car: " statsCar.pendentes
-    txtCarProc.Text := "Proc Car: " statsCar.processando
-    txtCarHoje.Text := "Hoje Car: " statsCar.hoje
-    txtCarErro.Text := "Erro Car: " statsCar.erros
-    txtCarUltimo.Text := "Ultimo Car: " (statsCar.ultimo != "" ? statsCar.ultimo : "-")
-    txtCarErro.SetFont(statsCar.erros > 0 ? "cFF6666" : "cFFFFFF")
-    txtPlanPend.Text := "Pend Plan: " statsPlan.pendentes
-    txtPlanProc.Text := "Proc Plan: " statsPlan.processando
-    txtPlanHoje.Text := "Hoje Plan: " statsPlan.hoje
-    txtPlanErro.Text := "Erro Plan: " statsPlan.erros
-    txtPlanUltimo.Text := "Ultimo Plan: " (statsPlan.ultimo != "" ? statsPlan.ultimo : "-")
-    txtPlanUltimaAnalise.Text := "Ultima analise: " (statsPlan.ultimaAnalise != "" ? statsPlan.ultimaAnalise : "-")
-    txtPlanErro.SetFont(statsPlan.erros > 0 ? "cFF6666" : "cFFFFFF")
-    txtUltimo.Text := "Ultimo: " (ultimo != "" ? ultimo : "-")
+    AplicarTextoVisualSeMudou(GuiPainel, txtFila, "Pend: " pendentes)
+    AplicarTextoVisualSeMudou(GuiPainel, txtAndamento, "Proc: " andamento "/10")
+    AplicarTextoVisualSeMudou(GuiPainel, txtHoje, "Hoje: " feitosHoje)
+    AplicarTextoVisualSeMudou(GuiPainel, txtErro, "Erro: " errosPendentes)
+    AplicarTextoVisualSeMudou(GuiPainel, txtMgPend, "Pend MG: " statsMg.pendentes)
+    AplicarTextoVisualSeMudou(GuiPainel, txtMgProc, "Proc MG: " statsMg.processando)
+    AplicarTextoVisualSeMudou(GuiPainel, txtMgHoje, "Hoje MG: " statsMg.hoje)
+    AplicarTextoVisualSeMudou(GuiPainel, txtMgErro, "Erro MG: " statsMg.erros)
+    AplicarTextoVisualSeMudou(GuiPainel, txtMgUltimo, "Ultimo MG: " (statsMg.ultimo != "" ? statsMg.ultimo : "-"))
+    AplicarCorVisualSeMudou(GuiPainel, txtMgErro, statsMg.erros > 0 ? "cFF6666" : "cFFFFFF")
+    AplicarTextoVisualSeMudou(GuiPainel, txtCarPend, "Pend Car: " statsCar.pendentes)
+    AplicarTextoVisualSeMudou(GuiPainel, txtCarProc, "Proc Car: " statsCar.processando)
+    AplicarTextoVisualSeMudou(GuiPainel, txtCarHoje, "Hoje Car: " statsCar.hoje)
+    AplicarTextoVisualSeMudou(GuiPainel, txtCarErro, "Erro Car: " statsCar.erros)
+    AplicarTextoVisualSeMudou(GuiPainel, txtCarUltimo, "Ultimo Car: " (statsCar.ultimo != "" ? statsCar.ultimo : "-"))
+    AplicarCorVisualSeMudou(GuiPainel, txtCarErro, statsCar.erros > 0 ? "cFF6666" : "cFFFFFF")
+    AplicarTextoVisualSeMudou(GuiPainel, txtPlanPend, "Pend Plan: " statsPlan.pendentes)
+    AplicarTextoVisualSeMudou(GuiPainel, txtPlanProc, "Proc Plan: " statsPlan.processando)
+    AplicarTextoVisualSeMudou(GuiPainel, txtPlanHoje, "Hoje Plan: " statsPlan.hoje)
+    AplicarTextoVisualSeMudou(GuiPainel, txtPlanErro, "Erro Plan: " statsPlan.erros)
+    AplicarTextoVisualSeMudou(GuiPainel, txtPlanUltimo, "Ultimo Plan: " (statsPlan.ultimo != "" ? statsPlan.ultimo : "-"))
+    AplicarTextoVisualSeMudou(GuiPainel, txtPlanUltimaAnalise, "Ultima analise: " (statsPlan.ultimaAnalise != "" ? statsPlan.ultimaAnalise : "-"))
+    AplicarCorVisualSeMudou(GuiPainel, txtPlanErro, statsPlan.erros > 0 ? "cFF6666" : "cFFFFFF")
+    AplicarTextoVisualSeMudou(GuiPainel, txtUltimo, "Ultimo: " (ultimo != "" ? ultimo : "-"))
 }
 
 ColetarErrosPedidos() {
@@ -382,13 +504,13 @@ ColetarErrosPedidos() {
 }
 
 RenderizarErrosPainel(lista) {
-    global g_erroMap, txtErroTitulo, txtErroLinhas
+    global GuiPainel, g_erroMap, txtErroTitulo, txtErroLinhas
 
     g_erroMap := Map()
 
     total := lista.Length
-    txtErroTitulo.Text := total > 0 ? "Erros dos pedidos: " total : "Erros dos pedidos: nenhum"
-    txtErroTitulo.SetFont(total > 0 ? "cFF6666" : "c66FF99")
+    AplicarTextoVisualSeMudou(GuiPainel, txtErroTitulo, total > 0 ? "Erros dos pedidos: " total : "Erros dos pedidos: nenhum")
+    AplicarCorVisualSeMudou(GuiPainel, txtErroTitulo, total > 0 ? "cFF6666" : "c66FF99")
 
     Loop txtErroLinhas.Length {
         idx := A_Index
@@ -397,10 +519,10 @@ RenderizarErrosPainel(lista) {
         if (idx <= total) {
             item := lista[idx]
             g_erroMap[idx] := item.pasta
-            linha.Text := idx ". " item.pedido " - " item.arquivo
-            linha.SetFont("cFF6666")
+            AplicarTextoVisualSeMudou(GuiPainel, linha, idx ". " item.pedido " - " item.arquivo)
+            AplicarCorVisualSeMudou(GuiPainel, linha, "cFF6666")
         } else {
-            linha.Text := ""
+            AplicarTextoVisualSeMudou(GuiPainel, linha, "")
         }
     }
 }
@@ -1152,15 +1274,16 @@ MinimizarPainel(*) {
     global GuiPainel, g_minimizado, txtTitulo, txtStatus
 
     g_minimizado := !g_minimizado
+    InvalidarCacheVisual(GuiPainel)
 
     if (g_minimizado) {
         txtTitulo.Move(8, 4, 145, 18)
-        txtStatus.Text := ""
+        AplicarTextoVisualSeMudou(GuiPainel, txtStatus, "")
         GuiPainel.Show("w220 h24 NoActivate")
     } else {
         txtTitulo.Move(8, 4, 65, 18)
-        txtTitulo.Text := "IA4Tube"
-        txtTitulo.SetFont("cFFFFFF")
+        AplicarTextoVisualSeMudou(GuiPainel, txtTitulo, "IA4Tube")
+        AplicarCorVisualSeMudou(GuiPainel, txtTitulo, "cFFFFFF")
         GuiPainel.Show("w220 h950 NoActivate")
         AtualizarPainel()
     }
