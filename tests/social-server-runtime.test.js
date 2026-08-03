@@ -76,6 +76,35 @@ test("enabled social persistence initializes and closes exactly once", async () 
   assert.equal(closeCalls, 1);
 });
 
+test("server runtime exposes only the bounded HTTP canary operation", async () => {
+  let canaryCalls = 0;
+  const expected = Object.freeze({ status: "passed" });
+  const state = await initializeSocialServerRuntime({
+    env: {
+      SOCIAL_PERSISTENCE_ENABLED: "true",
+      SOCIAL_DATABASE_POOL_MAX: "3"
+    },
+    async createRuntime() {
+      return {
+        enabled: true,
+        async runHttpCanary() {
+          canaryCalls += 1;
+          return expected;
+        },
+        async close() {}
+      };
+    }
+  });
+  assert.equal(state.pool, undefined);
+  assert.equal(state.vault, undefined);
+  assert.equal(await state.runHttpCanary(), expected);
+  assert.equal(canaryCalls, 1);
+  await state.close();
+  await assert.rejects(state.runHttpCanary(), {
+    code: "social_http_canary_runtime_unavailable"
+  });
+});
+
 test("server runtime refuses a pool other than three before initialization", async () => {
   let createCalls = 0;
   await assert.rejects(

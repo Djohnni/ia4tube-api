@@ -59,10 +59,14 @@ const {
 const { createOrderMediaAccess } = require("./src/security/order-media-access");
 const { createTenantContextMiddleware } = require("./src/security/tenant-context");
 const { createLegalPagesRouter } = require("./src/legal/legal-pages.routes");
+const {
+  createSocialHttpCanaryRouter
+} = require("./src/social/http-canary-routes");
 const { createPublicUrlConfig } = require("./src/config/public-urls");
 const { streamDirectoryZip } = require("./src/zip/zip-stream");
 
 const app = express();
+let socialRuntimeState;
 app.disable("x-powered-by");
 app.set("trust proxy", 1);
 
@@ -391,6 +395,16 @@ app.use(cors({
   ],
   credentials: false
 }));
+
+// The staging-only canary rejects every request body from transport headers.
+// Mount it before the global parsers so malformed/untrusted payloads cannot be
+// parsed or logged before its authentication and rate-limit boundary runs.
+const socialHttpCanaryRouter = createSocialHttpCanaryRouter({
+  env: process.env,
+  internalTokens: BOT_RUNNER_TOKENS,
+  getRuntimeState: () => socialRuntimeState
+});
+if (socialHttpCanaryRouter) app.use(socialHttpCanaryRouter);
 
 const globalJsonParser = express.json({ limit: "1mb" });
 const globalUrlencodedParser = express.urlencoded({ extended: false, limit: "1mb" });
@@ -7979,7 +7993,6 @@ function startBackgroundTasks() {
 }
 
 async function startApiServer() {
-  let socialRuntimeState;
   try {
     socialRuntimeState = await initializeSocialServerRuntime({
       env: process.env,

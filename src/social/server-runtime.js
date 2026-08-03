@@ -55,6 +55,15 @@ async function initializeSocialServerRuntime(options = {}) {
   let closed = false;
   return Object.freeze({
     enabled: true,
+    async runHttpCanary() {
+      if (closed || typeof runtime.runHttpCanary !== "function") {
+        postgresFail(
+          "social_http_canary_runtime_unavailable",
+          "Canario HTTP social indisponivel."
+        );
+      }
+      return runtime.runHttpCanary();
+    },
     async close() {
       if (closed) return;
       closed = true;

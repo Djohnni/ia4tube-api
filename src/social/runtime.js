@@ -31,6 +31,15 @@ const {
   createSocialVault,
   parseVaultKeyring
 } = require("./vault");
+const {
+  createSocialHttpCanaryProbe
+} = require("../persistence/postgres/http-canary-probe");
+const {
+  createSocialHttpCanaryService
+} = require("./http-canary-service");
+const {
+  resolveHttpCanaryTarget
+} = require("./http-canary-availability");
 const { postgresFail } = require("../persistence/postgres/errors");
 const {
   assertSocialSecretSeparation
@@ -89,6 +98,7 @@ async function createSocialRuntime(options = {}) {
     });
     const reauth = createSocialReauthService({ repository: social });
     const authAdapter = createSocialAuthAdapter(identityConfig);
+    let httpCanaryService;
     let closed = false;
     function assertOpen() {
       if (closed) {
@@ -97,6 +107,30 @@ async function createSocialRuntime(options = {}) {
           "Runtime social indisponivel."
         );
       }
+    }
+    function requireHttpCanaryService() {
+      assertOpen();
+      if (httpCanaryService) return httpCanaryService;
+      const target = resolveHttpCanaryTarget(env);
+      if (!target.enabled) {
+        postgresFail(
+          "social_http_canary_environment_forbidden",
+          "Canario HTTP social indisponivel."
+        );
+      }
+      const probe = createSocialHttpCanaryProbe({
+        pool,
+        runtimeRole: config.role,
+        operationalPoolMax: config.pool.max
+      });
+      httpCanaryService = createSocialHttpCanaryService({
+        probe,
+        vault,
+        companyA: target.companyA,
+        companyB: target.companyB,
+        logger: options.logger
+      });
+      return httpCanaryService;
     }
     return Object.freeze({
       enabled: true,
@@ -118,6 +152,9 @@ async function createSocialRuntime(options = {}) {
           legacyCompanyId,
           legacyUserId
         });
+      },
+      async runHttpCanary() {
+        return requireHttpCanaryService().run();
       },
       async close() {
         if (closed) return;
