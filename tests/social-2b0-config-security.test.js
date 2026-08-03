@@ -622,6 +622,27 @@ test("runtime login mismatch fails before pool and a match reaches pool creation
   assert.equal(poolCreations, 1);
 });
 
+test("runtime target fingerprint mismatch fails before pool creation", async () => {
+  let poolCreations = 0;
+  class ForbiddenPool {
+    constructor() {
+      poolCreations += 1;
+      throw new Error("pool_must_not_be_created");
+    }
+  }
+
+  await assert.rejects(
+    createSocialRuntime({
+      env: socialRuntimeEnv({
+        SOCIAL_DATABASE_EXPECTED_TARGET_FINGERPRINT: "0".repeat(64)
+      }),
+      PoolClass: ForbiddenPool
+    }),
+    { code: "social_database_expected_target_fingerprint_mismatch" }
+  );
+  assert.equal(poolCreations, 0);
+});
+
 test("future Web Service boundary rejects migration and provisioner credentials", () => {
   const safe = {
     SOCIAL_PERSISTENCE_ENABLED: "true",

@@ -12,19 +12,7 @@ const LOOPBACK_HOSTS = new Set(["127.0.0.1", "::1", "localhost"]);
 const ALLOWED_DATABASE_QUERY_KEY = "sslmode";
 const DATABASE_NAME_PATTERN = /^[a-z][a-z0-9_]{0,62}$/;
 const DATABASE_LOGIN_PATTERN = /^[a-z][a-z0-9_]{2,62}$/;
-const COMMIT_SHA_PATTERN = /^[0-9a-f]{40}$/;
 const FINGERPRINT_PATTERN = /^[0-9a-f]{64}$/;
-const FINGERPRINT_DIAGNOSTICS_COMMIT_ENV =
-  "SOCIAL_DATABASE_FINGERPRINT_DIAGNOSTICS_COMMIT";
-const FINGERPRINT_DIAGNOSTICS_SCOPE = Object.freeze({
-  branch: "social/checkpoint-2b-tls-ca-20260730",
-  externalHostname: "ia4tube-api-staging-checkpoint-a.onrender.com",
-  repository: "djohnni/ia4tube-api",
-  serviceId: "srv-d9itiiurnols73fsbmmg",
-  serviceName: "ia4tube-api-staging-checkpoint-a",
-  serviceType: "web"
-});
-const FINGERPRINT_DIAGNOSTICS_DATABASE = "ia4tube_social_staging";
 const SOCIAL_OWNER_ROLE = "ia4tube_social_owner";
 const SOCIAL_MIGRATOR_ROLE = "ia4tube_social_migrator";
 const SOCIAL_RUNTIME_ROLE = "ia4tube_social_runtime";
@@ -237,145 +225,7 @@ function databaseTargetFingerprint(parsed) {
     .digest("hex");
 }
 
-function requireFingerprintDiagnosticsCommit(env, kind) {
-  const configured = env[FINGERPRINT_DIAGNOSTICS_COMMIT_ENV];
-  if (configured === undefined || configured === null || configured === "") {
-    return null;
-  }
-
-  const renderCommit = String(env.RENDER_GIT_COMMIT || "");
-  const contextMatches =
-    kind === "runtime" &&
-    typeof configured === "string" &&
-    COMMIT_SHA_PATTERN.test(configured) &&
-    COMMIT_SHA_PATTERN.test(renderCommit) &&
-    crypto.timingSafeEqual(
-      Buffer.from(configured, "hex"),
-      Buffer.from(renderCommit, "hex")
-    ) &&
-    env.RENDER === "true" &&
-    env.RENDER_SERVICE_ID === FINGERPRINT_DIAGNOSTICS_SCOPE.serviceId &&
-    env.RENDER_SERVICE_NAME === FINGERPRINT_DIAGNOSTICS_SCOPE.serviceName &&
-    env.RENDER_SERVICE_TYPE === FINGERPRINT_DIAGNOSTICS_SCOPE.serviceType &&
-    env.RENDER_EXTERNAL_HOSTNAME ===
-      FINGERPRINT_DIAGNOSTICS_SCOPE.externalHostname &&
-    String(env.RENDER_GIT_REPO_SLUG || "").toLowerCase() ===
-      FINGERPRINT_DIAGNOSTICS_SCOPE.repository &&
-    env.RENDER_GIT_BRANCH === FINGERPRINT_DIAGNOSTICS_SCOPE.branch;
-
-  if (!contextMatches) {
-    postgresFail(
-      "social_database_fingerprint_diagnostic_context_refused",
-      "Diagnostico PostgreSQL recusado fora do contexto autorizado."
-    );
-  }
-  return configured;
-}
-
-function databaseHostClass(hostname) {
-  const normalized = String(hostname || "").toLowerCase();
-  if (/^[a-z0-9.-]+\.render\.com$/.test(normalized)) return "external";
-  if (/^dpg-[a-z0-9-]+-a$/.test(normalized)) return "internal";
-  return "unknown";
-}
-
-function fingerprintMismatchDiagnostic(parsed, expected, actual) {
-  const expectedFormatValid = FINGERPRINT_PATTERN.test(expected);
-  const queryEntries = [...parsed.searchParams.entries()];
-  const sslmodeEntries = queryEntries.filter(
-    ([name]) => String(name).trim().toLowerCase() === "sslmode"
-  );
-  const normalizedHostname = parsed.hostname.toLowerCase();
-
-  return Object.freeze({
-    diagnosticsEnabled: true,
-    expectedFingerprintPresent: expected.length > 0,
-    expectedFingerprintLength: expected.length,
-    expectedFingerprintFormatValid: expectedFormatValid,
-    expectedFingerprintPrefix:
-      expectedFormatValid ? expected.slice(0, 12) : null,
-    calculatedFingerprintLength: actual.length,
-    calculatedFingerprintPrefix: actual.slice(0, 12),
-    fingerprintsEqual:
-      expectedFormatValid &&
-      crypto.timingSafeEqual(
-        Buffer.from(actual, "hex"),
-        Buffer.from(expected, "hex")
-      ),
-    databaseHostClass: databaseHostClass(normalizedHostname),
-    databaseHostHashPrefix: crypto
-      .createHash("sha256")
-      .update(`ia4tube-social-database-host-v1/${normalizedHostname}`)
-      .digest("hex")
-      .slice(0, 12),
-    databasePort: Number(parsed.port || "5432"),
-    databaseNameMatchesExpected:
-      databaseName(parsed, "social_database_target") ===
-      FINGERPRINT_DIAGNOSTICS_DATABASE,
-    sslmodeVerifyFullExactlyOnce:
-      sslmodeEntries.length === 1 &&
-      sslmodeEntries[0][0] === "sslmode" &&
-      sslmodeEntries[0][1] === "verify-full",
-    channelBindingAbsent: !queryEntries.some(
-      ([name]) =>
-        String(name).trim().toLowerCase() === "channel_binding"
-    ),
-    poolCreated: false,
-    databaseConnectionAttempted: false
-  });
-}
-
-function emitFingerprintMismatchDiagnostic(parsed, expected, actual) {
-  const serialized = JSON.stringify(
-    fingerprintMismatchDiagnostic(parsed, expected, actual)
-  );
-  try {
-    // Pre-serialize the strict allowlist so the global redactor cannot mask
-    // the deliberately bounded fingerprint prefixes as full fingerprints.
-    console.error(serialized);
-  } catch {
-    // Diagnostic logging must never replace the original fail-closed error.
-  }
-}
-
-function runtimeLoginHashPrefix(login) {
-  return crypto
-    .createHash("sha256")
-    .update(`ia4tube-social-runtime-login-v1/${login}`)
-    .digest("hex")
-    .slice(0, 12);
-}
-
-function emitRuntimeLoginMismatchDiagnostic(
-  actual,
-  expected,
-  expectedPresent = true
-) {
-  const serialized = JSON.stringify(
-    Object.freeze({
-      diagnosticsEnabled: true,
-      expectedRuntimeLoginPresent: expectedPresent,
-      expectedRuntimeLoginMatches: false,
-      actualRuntimeLoginHashPrefix: runtimeLoginHashPrefix(actual),
-      expectedRuntimeLoginHashPrefix:
-        expected === null ? null : runtimeLoginHashPrefix(expected),
-      poolCreated: false,
-      databaseConnectionAttempted: false
-    })
-  );
-  try {
-    console.error(serialized);
-  } catch {
-    // Diagnostic logging must never replace the original fail-closed error.
-  }
-}
-
-function requireExpectedTargetFingerprint(
-  env,
-  parsed,
-  kind,
-  diagnosticsCommit = requireFingerprintDiagnosticsCommit(env, kind)
-) {
+function requireExpectedTargetFingerprint(env, parsed) {
   const expected =
     typeof env.SOCIAL_DATABASE_EXPECTED_TARGET_FINGERPRINT === "string"
       ? env.SOCIAL_DATABASE_EXPECTED_TARGET_FINGERPRINT
@@ -389,9 +239,6 @@ function requireExpectedTargetFingerprint(
       Buffer.from(expected, "hex")
     );
   if (!fingerprintsEqual) {
-    if (diagnosticsCommit) {
-      emitFingerprintMismatchDiagnostic(parsed, expected, actual);
-    }
     postgresFail(
       "social_database_expected_target_fingerprint_mismatch",
       "Destino publico PostgreSQL diverge da identidade esperada."
@@ -416,24 +263,9 @@ function requireCanonicalExpectedLogin(env, name, field) {
   return requireCanonicalDatabaseLogin(env[name], field);
 }
 
-function requireExpectedLogin(env, name, actual, field, options = {}) {
-  let expected;
-  try {
-    expected = requireCanonicalExpectedLogin(env, name, field);
-  } catch (error) {
-    if (options.diagnosticsEnabled === true) {
-      emitRuntimeLoginMismatchDiagnostic(
-        actual,
-        null,
-        hasConfiguredValue(env[name])
-      );
-    }
-    throw error;
-  }
+function requireExpectedLogin(env, name, actual, field) {
+  const expected = requireCanonicalExpectedLogin(env, name, field);
   if (expected !== actual) {
-    if (options.diagnosticsEnabled === true) {
-      emitRuntimeLoginMismatchDiagnostic(actual, expected);
-    }
     postgresFail(
       `${field}_mismatch`,
       "Login PostgreSQL diverge da identidade esperada."
@@ -588,23 +420,13 @@ function loadRuntimePostgresConfig(env = process.env) {
 
   const parsed = parseDatabaseUrl(env.DATABASE_URL, "database_url");
   requireRemotePassword(parsed, "database_url");
-  const diagnosticsCommit = requireFingerprintDiagnosticsCommit(
-    env,
-    "runtime"
-  );
-  const targetFingerprint = requireExpectedTargetFingerprint(
-    env,
-    parsed,
-    "runtime",
-    diagnosticsCommit
-  );
+  const targetFingerprint = requireExpectedTargetFingerprint(env, parsed);
   const login = normalizedDatabaseUsername(parsed);
   requireExpectedLogin(
     env,
     "SOCIAL_DATABASE_EXPECTED_RUNTIME_LOGIN",
     login,
-    "social_database_expected_runtime_login",
-    { diagnosticsEnabled: Boolean(diagnosticsCommit) }
+    "social_database_expected_runtime_login"
   );
   return Object.freeze({
     enabled: true,
@@ -641,11 +463,7 @@ function loadMigrationPostgresConfig(env = process.env) {
     "social_database_migrator_role"
   );
   requireRemotePassword(parsed, "social_migrations_database_url");
-  const targetFingerprint = requireExpectedTargetFingerprint(
-    env,
-    parsed,
-    "migration"
-  );
+  const targetFingerprint = requireExpectedTargetFingerprint(env, parsed);
   const migrationLogin = normalizedDatabaseUsername(parsed);
   const runtimeLogin = requireCanonicalExpectedLogin(
     env,
