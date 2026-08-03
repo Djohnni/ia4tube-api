@@ -266,6 +266,102 @@ test("authorized valid configuration produces no error diagnostic", async () => 
   assert.deepEqual(calls, []);
 });
 
+test("runtime login mismatch diagnostic is authorized, hashed and fail-closed", async () => {
+  const expectedLogin = "ia4tube_social_runtime";
+  const env = diagnosticEnvironment({
+    SOCIAL_DATABASE_EXPECTED_RUNTIME_LOGIN: expectedLogin,
+    SOCIAL_DATABASE_EXPECTED_TARGET_FINGERPRINT: targetOf(DATABASE_URL)
+  });
+  const { calls } = await captureErrors(async () => {
+    assert.throws(
+      () => loadRuntimePostgresConfig(env),
+      { code: "social_database_expected_runtime_login_mismatch" }
+    );
+  });
+  const record = parseOnlyDiagnostic(calls);
+  assert.deepEqual(Object.keys(record), [
+    "diagnosticsEnabled",
+    "expectedRuntimeLoginPresent",
+    "expectedRuntimeLoginMatches",
+    "actualRuntimeLoginHashPrefix",
+    "expectedRuntimeLoginHashPrefix",
+    "poolCreated",
+    "databaseConnectionAttempted"
+  ]);
+  assert.deepEqual(record, {
+    diagnosticsEnabled: true,
+    expectedRuntimeLoginPresent: true,
+    expectedRuntimeLoginMatches: false,
+    actualRuntimeLoginHashPrefix: record.actualRuntimeLoginHashPrefix,
+    expectedRuntimeLoginHashPrefix: record.expectedRuntimeLoginHashPrefix,
+    poolCreated: false,
+    databaseConnectionAttempted: false
+  });
+  assert.match(record.actualRuntimeLoginHashPrefix, /^[0-9a-f]{12}$/);
+  assert.match(record.expectedRuntimeLoginHashPrefix, /^[0-9a-f]{12}$/);
+  assert.notEqual(
+    record.actualRuntimeLoginHashPrefix,
+    record.expectedRuntimeLoginHashPrefix
+  );
+
+  const serialized = calls[0][0];
+  assert.deepEqual(JSON.parse(redactString(serialized)), record);
+  for (const forbidden of [
+    DATABASE_URL,
+    DATABASE_HOST,
+    DATABASE_USER,
+    DATABASE_PASSWORD,
+    expectedLogin
+  ]) {
+    assert.equal(serialized.includes(forbidden), false);
+  }
+});
+
+test("runtime login mismatch diagnostic remains off without its exact flag", async () => {
+  const env = diagnosticEnvironment({
+    [DIAGNOSTIC_FLAG]: undefined,
+    SOCIAL_DATABASE_EXPECTED_RUNTIME_LOGIN: "ia4tube_social_runtime",
+    SOCIAL_DATABASE_EXPECTED_TARGET_FINGERPRINT: targetOf(DATABASE_URL)
+  });
+  const { calls } = await captureErrors(async () => {
+    assert.throws(
+      () => loadRuntimePostgresConfig(env),
+      { code: "social_database_expected_runtime_login_mismatch" }
+    );
+  });
+  assert.deepEqual(calls, []);
+});
+
+test("runtime login diagnostic reports a missing expectation without leaking it", async () => {
+  const env = diagnosticEnvironment({
+    SOCIAL_DATABASE_EXPECTED_RUNTIME_LOGIN: undefined,
+    SOCIAL_DATABASE_EXPECTED_TARGET_FINGERPRINT: targetOf(DATABASE_URL)
+  });
+  const { calls } = await captureErrors(async () => {
+    assert.throws(
+      () => loadRuntimePostgresConfig(env),
+      { code: "social_database_expected_runtime_login_invalid" }
+    );
+  });
+  const record = parseOnlyDiagnostic(calls);
+  assert.equal(record.expectedRuntimeLoginPresent, false);
+  assert.equal(record.expectedRuntimeLoginMatches, false);
+  assert.match(record.actualRuntimeLoginHashPrefix, /^[0-9a-f]{12}$/);
+  assert.equal(record.expectedRuntimeLoginHashPrefix, null);
+  assert.equal(record.poolCreated, false);
+  assert.equal(record.databaseConnectionAttempted, false);
+
+  const serialized = calls[0][0];
+  for (const forbidden of [
+    DATABASE_URL,
+    DATABASE_HOST,
+    DATABASE_USER,
+    DATABASE_PASSWORD
+  ]) {
+    assert.equal(serialized.includes(forbidden), false);
+  }
+});
+
 test("active diagnostic is refused outside its exact staging commit", async () => {
   const divergentContexts = [
     { RENDER: "false" },

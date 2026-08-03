@@ -11,6 +11,7 @@ const { requireSafeLabel, requireUuid } = require("./validation");
 const LOOPBACK_HOSTS = new Set(["127.0.0.1", "::1", "localhost"]);
 const ALLOWED_DATABASE_QUERY_KEY = "sslmode";
 const DATABASE_NAME_PATTERN = /^[a-z][a-z0-9_]{0,62}$/;
+const DATABASE_LOGIN_PATTERN = /^[a-z][a-z0-9_]{2,62}$/;
 const COMMIT_SHA_PATTERN = /^[0-9a-f]{40}$/;
 const FINGERPRINT_PATTERN = /^[0-9a-f]{64}$/;
 const FINGERPRINT_DIAGNOSTICS_COMMIT_ENV =
@@ -204,11 +205,19 @@ function normalizedDatabaseUsername(parsed) {
       "Login PostgreSQL recusado."
     );
   }
+  return requireCanonicalDatabaseLogin(login, "social_database_login");
+}
+
+function requireCanonicalDatabaseLogin(value, field) {
+  const login = requireSafeLabel(value, field);
   if (login !== login.toLowerCase()) {
     postgresFail(
-      "social_database_login_must_be_canonical",
+      `${field}_must_be_canonical`,
       "Login PostgreSQL deve usar a forma canonica."
     );
+  }
+  if (!DATABASE_LOGIN_PATTERN.test(login)) {
+    postgresFail(`${field}_invalid`, "Login PostgreSQL recusado.");
   }
   return login;
 }
@@ -329,8 +338,44 @@ function emitFingerprintMismatchDiagnostic(parsed, expected, actual) {
   }
 }
 
-function requireExpectedTargetFingerprint(env, parsed, kind) {
-  const diagnosticsCommit = requireFingerprintDiagnosticsCommit(env, kind);
+function runtimeLoginHashPrefix(login) {
+  return crypto
+    .createHash("sha256")
+    .update(`ia4tube-social-runtime-login-v1/${login}`)
+    .digest("hex")
+    .slice(0, 12);
+}
+
+function emitRuntimeLoginMismatchDiagnostic(
+  actual,
+  expected,
+  expectedPresent = true
+) {
+  const serialized = JSON.stringify(
+    Object.freeze({
+      diagnosticsEnabled: true,
+      expectedRuntimeLoginPresent: expectedPresent,
+      expectedRuntimeLoginMatches: false,
+      actualRuntimeLoginHashPrefix: runtimeLoginHashPrefix(actual),
+      expectedRuntimeLoginHashPrefix:
+        expected === null ? null : runtimeLoginHashPrefix(expected),
+      poolCreated: false,
+      databaseConnectionAttempted: false
+    })
+  );
+  try {
+    console.error(serialized);
+  } catch {
+    // Diagnostic logging must never replace the original fail-closed error.
+  }
+}
+
+function requireExpectedTargetFingerprint(
+  env,
+  parsed,
+  kind,
+  diagnosticsCommit = requireFingerprintDiagnosticsCommit(env, kind)
+) {
   const expected =
     typeof env.SOCIAL_DATABASE_EXPECTED_TARGET_FINGERPRINT === "string"
       ? env.SOCIAL_DATABASE_EXPECTED_TARGET_FINGERPRINT
@@ -368,19 +413,27 @@ function requireRemotePassword(parsed, field) {
 }
 
 function requireCanonicalExpectedLogin(env, name, field) {
-  const expected = requireSafeLabel(env[name], field);
-  if (expected !== expected.toLowerCase()) {
-    postgresFail(
-      `${field}_must_be_canonical`,
-      "Login PostgreSQL esperado deve usar a forma canonica."
-    );
-  }
-  return expected;
+  return requireCanonicalDatabaseLogin(env[name], field);
 }
 
-function requireExpectedLogin(env, name, actual, field) {
-  const expected = requireCanonicalExpectedLogin(env, name, field);
+function requireExpectedLogin(env, name, actual, field, options = {}) {
+  let expected;
+  try {
+    expected = requireCanonicalExpectedLogin(env, name, field);
+  } catch (error) {
+    if (options.diagnosticsEnabled === true) {
+      emitRuntimeLoginMismatchDiagnostic(
+        actual,
+        null,
+        hasConfiguredValue(env[name])
+      );
+    }
+    throw error;
+  }
   if (expected !== actual) {
+    if (options.diagnosticsEnabled === true) {
+      emitRuntimeLoginMismatchDiagnostic(actual, expected);
+    }
     postgresFail(
       `${field}_mismatch`,
       "Login PostgreSQL diverge da identidade esperada."
@@ -535,17 +588,23 @@ function loadRuntimePostgresConfig(env = process.env) {
 
   const parsed = parseDatabaseUrl(env.DATABASE_URL, "database_url");
   requireRemotePassword(parsed, "database_url");
+  const diagnosticsCommit = requireFingerprintDiagnosticsCommit(
+    env,
+    "runtime"
+  );
   const targetFingerprint = requireExpectedTargetFingerprint(
     env,
     parsed,
-    "runtime"
+    "runtime",
+    diagnosticsCommit
   );
   const login = normalizedDatabaseUsername(parsed);
   requireExpectedLogin(
     env,
     "SOCIAL_DATABASE_EXPECTED_RUNTIME_LOGIN",
     login,
-    "social_database_expected_runtime_login"
+    "social_database_expected_runtime_login",
+    { diagnosticsEnabled: Boolean(diagnosticsCommit) }
   );
   return Object.freeze({
     enabled: true,

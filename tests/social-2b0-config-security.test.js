@@ -427,6 +427,201 @@ test("runtime and migration login identities must match explicit public expectat
   );
 });
 
+test("runtime login identity is exact, environment-specific and canonical", () => {
+  const stagingLogin = "ia4tube_social_staging_runtime";
+  const stagingUrl =
+    `postgresql://${stagingLogin}:runtime-password@localhost/` +
+    "social_test";
+  const stagingEnv = socialRuntimeEnv({
+    DATABASE_URL: stagingUrl,
+    SOCIAL_DATABASE_EXPECTED_TARGET_FINGERPRINT: targetOf(stagingUrl),
+    SOCIAL_DATABASE_EXPECTED_RUNTIME_LOGIN: stagingLogin
+  });
+
+  const approved = loadRuntimePostgresConfig(stagingEnv);
+  assert.equal(approved.login, stagingLogin);
+  assert.equal(approved.role, "ia4tube_social_runtime");
+
+  for (const unexpected of [
+    "ia4tube_social_runtime",
+    "ia4tube_social_other_runtime"
+  ]) {
+    assert.throws(
+      () =>
+        loadRuntimePostgresConfig({
+          ...stagingEnv,
+          SOCIAL_DATABASE_EXPECTED_RUNTIME_LOGIN: unexpected
+        }),
+      { code: "social_database_expected_runtime_login_mismatch" }
+    );
+  }
+
+  for (const unexpected of [
+    "ia4tube_social_runtime",
+    "ia4tube_social_other_runtime"
+  ]) {
+    const url =
+      `postgresql://${unexpected}:runtime-password@localhost/` +
+      "social_test";
+    assert.throws(
+      () =>
+        loadRuntimePostgresConfig({
+          ...stagingEnv,
+          DATABASE_URL: url,
+          SOCIAL_DATABASE_EXPECTED_TARGET_FINGERPRINT: targetOf(url)
+        }),
+      { code: "social_database_expected_runtime_login_mismatch" }
+    );
+  }
+
+  for (const invalid of [
+    undefined,
+    "",
+    ` ${stagingLogin}`,
+    `${stagingLogin}\n`,
+    `"${stagingLogin}"`,
+    `'${stagingLogin}'`,
+    `${stagingLogin},ia4tube_social_runtime`,
+    "*"
+  ]) {
+    const env = {
+      ...stagingEnv,
+      SOCIAL_DATABASE_EXPECTED_RUNTIME_LOGIN: invalid
+    };
+    if (invalid === undefined) {
+      delete env.SOCIAL_DATABASE_EXPECTED_RUNTIME_LOGIN;
+    }
+    assert.throws(
+      () => loadRuntimePostgresConfig(env),
+      { code: "social_database_expected_runtime_login_invalid" }
+    );
+  }
+
+  assert.throws(
+    () =>
+      loadRuntimePostgresConfig({
+        ...stagingEnv,
+        SOCIAL_DATABASE_EXPECTED_RUNTIME_LOGIN:
+          "IA4TUBE_SOCIAL_STAGING_RUNTIME"
+      }),
+    {
+      code:
+        "social_database_expected_runtime_login_must_be_canonical"
+    }
+  );
+});
+
+test("runtime URL login decoding is deterministic and rejects unsafe labels", () => {
+  const stagingLogin = "ia4tube_social_staging_runtime";
+  const encodedUrl =
+    "postgresql://%69a4tube%5Fsocial%5Fstaging%5Fruntime:" +
+    "runtime-password@localhost/social_test";
+  const approved = loadRuntimePostgresConfig(
+    socialRuntimeEnv({
+      DATABASE_URL: encodedUrl,
+      SOCIAL_DATABASE_EXPECTED_TARGET_FINGERPRINT: targetOf(encodedUrl),
+      SOCIAL_DATABASE_EXPECTED_RUNTIME_LOGIN: stagingLogin
+    })
+  );
+  assert.equal(approved.login, stagingLogin);
+
+  for (const encodedLogin of [
+    `${stagingLogin}%20`,
+    `${stagingLogin}%0A`,
+    `%22${stagingLogin}%22`,
+    `${stagingLogin}%3Aother`,
+    "9ia4tube_social_staging_runtime",
+    "ia4tube-social-staging-runtime"
+  ]) {
+    const url =
+      `postgresql://${encodedLogin}:runtime-password@localhost/` +
+      "social_test";
+    assert.throws(
+      () =>
+        loadRuntimePostgresConfig(
+          socialRuntimeEnv({
+            DATABASE_URL: url,
+            SOCIAL_DATABASE_EXPECTED_TARGET_FINGERPRINT: targetOf(url),
+            SOCIAL_DATABASE_EXPECTED_RUNTIME_LOGIN: stagingLogin
+          })
+        ),
+      { code: "social_database_login_invalid" }
+    );
+  }
+
+  const uppercaseUrl =
+    "postgresql://%49A4TUBE_SOCIAL_STAGING_RUNTIME:" +
+    "runtime-password@localhost/social_test";
+  assert.throws(
+    () =>
+      loadRuntimePostgresConfig(
+        socialRuntimeEnv({
+          DATABASE_URL: uppercaseUrl,
+          SOCIAL_DATABASE_EXPECTED_TARGET_FINGERPRINT:
+            targetOf(uppercaseUrl),
+          SOCIAL_DATABASE_EXPECTED_RUNTIME_LOGIN: stagingLogin
+        })
+      ),
+    { code: "social_database_login_must_be_canonical" }
+  );
+
+  const malformedUrl =
+    "postgresql://ia4tube_social_staging_runtime%ZZ:" +
+    "runtime-password@localhost/social_test";
+  assert.throws(
+    () =>
+      loadRuntimePostgresConfig(
+        socialRuntimeEnv({
+          DATABASE_URL: malformedUrl,
+          SOCIAL_DATABASE_EXPECTED_TARGET_FINGERPRINT:
+            targetOf(malformedUrl),
+          SOCIAL_DATABASE_EXPECTED_RUNTIME_LOGIN: stagingLogin
+        })
+      ),
+    { code: "social_database_login_invalid" }
+  );
+});
+
+test("runtime login mismatch fails before pool and a match reaches pool creation", async () => {
+  const stagingLogin = "ia4tube_social_staging_runtime";
+  const stagingUrl =
+    `postgresql://${stagingLogin}:runtime-password@localhost/` +
+    "social_test";
+  const env = socialRuntimeEnv({
+    DATABASE_URL: stagingUrl,
+    SOCIAL_DATABASE_EXPECTED_TARGET_FINGERPRINT: targetOf(stagingUrl),
+    SOCIAL_DATABASE_EXPECTED_RUNTIME_LOGIN: stagingLogin
+  });
+  let poolCreations = 0;
+  class PoolWitness {
+    constructor() {
+      poolCreations += 1;
+      const error = new Error("synthetic_pool_creation_witness");
+      error.code = "synthetic_pool_creation_witness";
+      throw error;
+    }
+  }
+
+  await assert.rejects(
+    createSocialRuntime({
+      env: {
+        ...env,
+        SOCIAL_DATABASE_EXPECTED_RUNTIME_LOGIN:
+          "ia4tube_social_runtime"
+      },
+      PoolClass: PoolWitness
+    }),
+    { code: "social_database_expected_runtime_login_mismatch" }
+  );
+  assert.equal(poolCreations, 0);
+
+  await assert.rejects(
+    createSocialRuntime({ env, PoolClass: PoolWitness }),
+    { code: "synthetic_pool_creation_witness" }
+  );
+  assert.equal(poolCreations, 1);
+});
+
 test("future Web Service boundary rejects migration and provisioner credentials", () => {
   const safe = {
     SOCIAL_PERSISTENCE_ENABLED: "true",
@@ -931,6 +1126,9 @@ test("server boot enforces the privileged credential boundary before startup", (
     /social_database_expected_runtime_login_mismatch/
   );
   assert.equal(runtimeOutput.includes("secret-value-never-log"), false);
+  assert.equal(runtimeOutput.includes("postgresql://"), false);
+  assert.equal(runtimeOutput.includes("wrong_runtime"), false);
+  assert.equal(runtimeOutput.includes("ia4tube_social_runtime"), false);
 });
 
 test("every AES key is separated from identity, JWT and order-signing secrets before pool creation", async () => {
