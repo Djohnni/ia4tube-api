@@ -19,10 +19,13 @@ const {
   MIGRATION_LOCK_ID,
   MIGRATOR_ROLE,
   OWNER_ROLE,
+  PRE_0004_BACKUP_TABLES,
+  PRE_0004_RLS_TABLES,
   POLICY_PREFIX,
   RESTORE_APPROVAL,
   RLS_TABLES,
   RUNTIME_ROLE,
+  SCHEMA_PROFILES,
   SYSTEM_ROOT_BUNDLE_NAME,
   assertSecretFreePlan,
   bundleArchiveEntries,
@@ -43,6 +46,7 @@ const {
   psqlPlan,
   runLogicalBackup,
   runLogicalRestore,
+  resolveSchemaProfile,
   targetFingerprint,
   temporaryPolicySql,
   validateManifestFiles
@@ -269,8 +273,35 @@ function safeEvidence(overrides = {}) {
   };
 }
 
-function archiveList() {
-  return BACKUP_TABLES.map((table) => {
+function profileCatalog(profile, overrides = {}) {
+  return safeCatalog({
+    rlsTableCount: profile.rlsTables.length,
+    forcedRlsTableCount: profile.rlsTables.length,
+    ...overrides
+  });
+}
+
+function profileSnapshot(profile, overrides = {}) {
+  return {
+    tableCounts: profile.evidenceTables.map((table, index) => ({
+      table,
+      count: index + 1
+    })),
+    migrations: profile.migrationRows.map((migration) => ({ ...migration })),
+    ...overrides
+  };
+}
+
+function profileEvidence(profile, overrides = {}) {
+  return {
+    ...profileSnapshot(profile),
+    catalog: profileCatalog(profile),
+    ...overrides
+  };
+}
+
+function archiveList(profile = SCHEMA_PROFILES.at(-1)) {
+  return profile.backupTables.map((table) => {
     const [schema, name] = table.split(".");
     return `TABLE ${schema} ${name}`;
   }).join("\n");
@@ -281,13 +312,18 @@ function planOutputFile(plan) {
   return match ? match[1].replace(/''/g, "'") : null;
 }
 
-function mockOperator(events, catalog = safeCatalog()) {
+function mockOperator(
+  events,
+  catalog = safeCatalog(),
+  schemaProfile = SCHEMA_PROFILES.at(-1)
+) {
   return {
     async acquireLocks(ids) {
       events.push(["acquire", ...ids]);
     },
     async preflight() {
       events.push(["preflight"]);
+      return schemaProfile;
     },
     async preflightEmptyTarget() {
       events.push(["preflight-empty"]);
@@ -305,7 +341,7 @@ function mockOperator(events, catalog = safeCatalog()) {
   };
 }
 
-function createBundle(t) {
+function createBundle(t, profile = SCHEMA_PROFILES.at(-1)) {
   const directory = temporaryDirectory(t);
   const config = loadBackupConfig(backupEnvironment(directory), {
     repositoryRoot: root
@@ -316,13 +352,13 @@ function createBundle(t) {
     id: config.workspace.id
   });
   fs.writeFileSync(config.files.schema, "synthetic schema archive");
-  for (const table of BACKUP_TABLES) {
+  for (const table of profile.backupTables) {
     fs.writeFileSync(
       config.files.data[table],
       `-- ${table}\nINSERT synthetic;\n`
     );
   }
-  const evidence = normalizeEvidence(safeEvidence());
+  const evidence = normalizeEvidence(profileEvidence(profile));
   const manifest = buildManifest({
     config,
     evidence,
@@ -332,17 +368,38 @@ function createBundle(t) {
   return { config, directory, evidence, manifest };
 }
 
-async function createEncryptedFixture(t) {
-  const bundle = createBundle(t);
+async function createEncryptedFixture(t, profile = SCHEMA_PROFILES.at(-1)) {
+  const bundle = createBundle(t, profile);
   const encrypted = await createEncryptedBundle({
-    entries: bundleArchiveEntries(bundle.config),
-    expectedNames: bundleArchiveNames(),
+    entries: bundleArchiveEntries(bundle.config, profile),
+    expectedNames: bundleArchiveNames(profile),
     outputPath: bundle.config.files.bundle,
     label: bundle.config.label,
     sourceFingerprint: bundle.config.sourceFingerprint,
     bundleKey: bundle.config.bundleKey
   });
   return { ...bundle, encrypted };
+}
+
+async function createLegacy0003EncryptedFixture(t) {
+  const profile = SCHEMA_PROFILES[0];
+  const bundle = createBundle(t, profile);
+  const legacyManifest = JSON.parse(JSON.stringify(bundle.manifest));
+  legacyManifest.format = 2;
+  delete legacyManifest.schemaProfile;
+  fs.writeFileSync(
+    bundle.config.files.manifest,
+    `${JSON.stringify(legacyManifest)}\n`
+  );
+  const encrypted = await createEncryptedBundle({
+    entries: bundleArchiveEntries(bundle.config, profile),
+    expectedNames: bundleArchiveNames(profile),
+    outputPath: bundle.config.files.bundle,
+    label: bundle.config.label,
+    sourceFingerprint: bundle.config.sourceFingerprint,
+    bundleKey: bundle.config.bundleKey
+  });
+  return { ...bundle, encrypted, legacyManifest, profile };
 }
 
 test("backup and restore configs require exact protected isolated targets", (t) => {
@@ -658,6 +715,11 @@ test("operator uses only provisioner locks and catalog inspection", async (t) =>
         loginChecks.push(values);
         return { rows: [safePermanentLogin()] };
       }
+      if (
+        text.startsWith("SELECT version, checksum_sha256 AS checksum")
+      ) {
+        return { rows: EXPECTED_MIGRATION_ROWS };
+      }
       if (text.includes("AS postgres_version_supported")) {
         return {
           rows: [{
@@ -756,7 +818,7 @@ test("operator uses only provisioner locks and catalog inspection", async (t) =>
     }
   });
   await operator.acquireLocks([MIGRATION_LOCK_ID, BACKUP_LOCK_ID]);
-  await operator.preflight(config);
+  const inspectedProfile = await operator.preflight(config);
   await operator.preflightEmptyTarget(restore);
   const catalog = await operator.collectCatalogEvidence(config);
   await operator.releaseLocks([BACKUP_LOCK_ID, MIGRATION_LOCK_ID]);
@@ -769,7 +831,19 @@ test("operator uses only provisioner locks and catalog inspection", async (t) =>
   assert.equal(events.includes("BEGIN"), false);
   assert.equal(events.some((text) => /\bSET\s+(?:LOCAL\s+)?ROLE\b/i.test(text)), false);
   assert.equal(events.some((text) => text.includes("environment_identity")), false);
-  assert.equal(events.some((text) => text.includes("schema_migrations")), false);
+  assert.equal(inspectedProfile.id, "social-schema-0004");
+  assert.equal(
+    events.filter((text) => text.includes("schema_migrations")).length,
+    1
+  );
+  assert.equal(
+    events.some(
+      (text) =>
+        text.includes("schema_migrations") &&
+        /\b(?:INSERT|UPDATE|DELETE|TRUNCATE|ALTER|DROP)\b/i.test(text)
+    ),
+    false
+  );
 });
 
 test("backup data is exported under owner-only policies in one transaction", (t) => {
@@ -1105,6 +1179,223 @@ test("manifest verifies every logical file, counts and migration checksum", (t) 
       ),
     { code: "backup_migration_state_invalid" }
   );
+});
+
+test("schema profile is selected only from an exact authenticated migration prefix", () => {
+  const legacy = SCHEMA_PROFILES[0];
+  const current = SCHEMA_PROFILES[1];
+  assert.equal(resolveSchemaProfile(legacy.migrationRows).id, legacy.id);
+  assert.equal(resolveSchemaProfile(current.migrationRows).id, current.id);
+  assert.throws(() => resolveSchemaProfile([]), {
+    code: "backup_migration_state_invalid"
+  });
+  assert.throws(
+    () =>
+      resolveSchemaProfile([
+        ...legacy.migrationRows.slice(0, -1),
+        { ...legacy.migrationRows.at(-1), checksum: "0".repeat(64) }
+      ]),
+    { code: "backup_migration_state_invalid" }
+  );
+  assert.throws(
+    () => resolveSchemaProfile([...legacy.migrationRows].reverse()),
+    { code: "backup_migration_state_invalid" }
+  );
+  assert.throws(
+    () =>
+      resolveSchemaProfile([
+        ...legacy.migrationRows,
+        { version: "9999_unknown", checksum: "f".repeat(64) }
+      ]),
+    { code: "backup_migration_state_invalid" }
+  );
+});
+
+test("pre-0004 backup reads only existing tables and authenticates the exact set", (t) => {
+  const profile = SCHEMA_PROFILES[0];
+  const directory = temporaryDirectory(t);
+  const config = loadBackupConfig(backupEnvironment(directory), {
+    repositoryRoot: root
+  });
+  const sql = createBackupDataScript(config, profile);
+  for (const table of PRE_0004_BACKUP_TABLES) {
+    assert.match(sql, new RegExp(table.replace(".", "\\.")));
+  }
+  for (const table of BACKUP_TABLES.filter(
+    (name) => !PRE_0004_BACKUP_TABLES.includes(name)
+  )) {
+    assert.doesNotMatch(sql, new RegExp(table.replace(".", "\\.")));
+  }
+  assert.equal(temporaryPolicySql("select", profile).length, PRE_0004_RLS_TABLES.length);
+  assert.equal(sql.includes(EXPECTED_MIGRATION_ROWS[2].version), true);
+  assert.equal(sql.includes(EXPECTED_MIGRATION_ROWS[3].version), false);
+
+  const bundle = createBundle(t, profile);
+  assert.equal(bundle.manifest.format, 3);
+  assert.equal(bundle.manifest.schemaProfile.id, profile.id);
+  assert.deepEqual(
+    bundle.manifest.schemaProfile.backupTables,
+    PRE_0004_BACKUP_TABLES
+  );
+  assert.deepEqual(bundle.manifest.schemaProfile.rlsTables, PRE_0004_RLS_TABLES);
+  assert.deepEqual(
+    bundle.manifest.files.data.map((entry) => entry.table),
+    PRE_0004_BACKUP_TABLES
+  );
+  assert.doesNotThrow(() =>
+    validateManifestFiles(bundle.manifest, {
+      expectedDirectory: bundle.config.workspace.path,
+      sourceFingerprint: bundle.config.sourceFingerprint
+    })
+  );
+
+  const switched = JSON.parse(JSON.stringify(bundle.manifest));
+  switched.schemaProfile.backupTables = [...PRE_0004_BACKUP_TABLES].reverse();
+  assert.throws(() => validateManifestFiles(switched), {
+    code: "restore_manifest_schema_profile_invalid"
+  });
+  const missing = JSON.parse(JSON.stringify(bundle.manifest));
+  delete missing.schemaProfile;
+  assert.throws(() => validateManifestFiles(missing), {
+    code: "restore_manifest_invalid"
+  });
+  const missingTable = JSON.parse(JSON.stringify(bundle.manifest));
+  missingTable.files.data.pop();
+  assert.throws(() => validateManifestFiles(missingTable), {
+    code: "restore_manifest_invalid"
+  });
+  const exchangedTables = JSON.parse(JSON.stringify(bundle.manifest));
+  [exchangedTables.files.data[0], exchangedTables.files.data[1]] = [
+    exchangedTables.files.data[1],
+    exchangedTables.files.data[0]
+  ];
+  assert.throws(() => validateManifestFiles(exchangedTables), {
+    code: "restore_manifest_invalid"
+  });
+  const wrongLedgerDigest = JSON.parse(JSON.stringify(bundle.manifest));
+  wrongLedgerDigest.schemaProfile.migrationLedgerSha256 = "0".repeat(64);
+  assert.throws(() => validateManifestFiles(wrongLedgerDigest), {
+    code: "restore_manifest_schema_profile_invalid"
+  });
+});
+
+test("legacy format-2 0003 bundle restores with its exact authenticated table set", async (t) => {
+  const bundle = await createLegacy0003EncryptedFixture(t);
+  assert.doesNotThrow(() =>
+    validateManifestFiles(bundle.legacyManifest, {
+      expectedDirectory: bundle.config.workspace.path,
+      sourceFingerprint: bundle.config.sourceFingerprint
+    })
+  );
+  const config = loadRestoreConfig(
+    restoreEnvironment(bundle.directory, bundle.config.files.bundle),
+    { repositoryRoot: root }
+  );
+  let psqlCalls = 0;
+  const result = await runLogicalRestore({
+    config,
+    operator: mockOperator([], profileCatalog(bundle.profile), bundle.profile),
+    verifierTargetFingerprint: config.targetFingerprint,
+    async runTool(plan) {
+      if (plan.executable === tools.restore && plan.args[0] === "--list") {
+        return { code: 0, stdout: archiveList(bundle.profile) };
+      }
+      if (plan.executable === tools.psql) {
+        psqlCalls += 1;
+        if (psqlCalls === 1) {
+          assert.equal(
+            plan.input.split("\n").filter((line) => line.startsWith("\\i ")).length,
+            PRE_0004_BACKUP_TABLES.length
+          );
+          for (const table of BACKUP_TABLES.filter(
+            (name) => !PRE_0004_BACKUP_TABLES.includes(name)
+          )) {
+            assert.equal(
+              plan.input.includes(table.replace(".", "__")),
+              false
+            );
+          }
+        } else {
+          fs.writeFileSync(
+            planOutputFile(plan),
+            JSON.stringify(profileSnapshot(bundle.profile))
+          );
+        }
+      }
+      return { code: 0, stdout: "" };
+    },
+    async verifyRuntimeIsolation() {
+      return true;
+    },
+    async verifyVault() {
+      return true;
+    },
+    async verify2ACompatibility() {
+      return true;
+    }
+  });
+  assert.equal(result.ok, true);
+  assert.equal(psqlCalls, 2);
+});
+
+test("legacy format-2 exception is limited to the exact 0003 contract", (t) => {
+  const current = createBundle(t, SCHEMA_PROFILES[1]);
+  const disguisedCurrent = JSON.parse(JSON.stringify(current.manifest));
+  disguisedCurrent.format = 2;
+  delete disguisedCurrent.schemaProfile;
+  assert.throws(() => validateManifestFiles(disguisedCurrent), {
+    code: "restore_manifest_schema_profile_invalid"
+  });
+
+  const legacy = createBundle(t, SCHEMA_PROFILES[0]);
+  const format2WithUntrustedProfile = JSON.parse(JSON.stringify(legacy.manifest));
+  format2WithUntrustedProfile.format = 2;
+  assert.throws(() => validateManifestFiles(format2WithUntrustedProfile), {
+    code: "restore_manifest_invalid"
+  });
+});
+
+test("backup workflow completes against an exact pre-0004 ledger without future tables", async (t) => {
+  const profile = SCHEMA_PROFILES[0];
+  const directory = temporaryDirectory(t);
+  const config = loadBackupConfig(backupEnvironment(directory), {
+    repositoryRoot: root
+  });
+  let dataPlan;
+  const result = await runLogicalBackup({
+    config,
+    operator: mockOperator([], profileCatalog(profile), profile),
+    async runTool(plan) {
+      if (plan.executable === tools.psql) {
+        dataPlan = plan;
+        for (const table of profile.backupTables) {
+          fs.writeFileSync(
+            config.files.dataPartial[table],
+            `-- ${table}\nINSERT synthetic;\n`
+          );
+        }
+        fs.writeFileSync(
+          config.files.evidencePartial,
+          JSON.stringify(profileSnapshot(profile))
+        );
+        return { code: 0, stdout: "" };
+      }
+      if (plan.executable === tools.dump) {
+        fs.writeFileSync(config.files.schemaPartial, "schema archive");
+        return { code: 0, stdout: "" };
+      }
+      return { code: 0, stdout: archiveList(profile) };
+    },
+    generatedAt: "2026-08-04T12:00:00.000Z"
+  });
+  assert.equal(result.ok, true);
+  assert.ok(dataPlan);
+  for (const table of BACKUP_TABLES.filter(
+    (name) => !PRE_0004_BACKUP_TABLES.includes(name)
+  )) {
+    assert.doesNotMatch(dataPlan.input, new RegExp(table.replace(".", "\\.")));
+    assert.equal(fs.existsSync(config.files.data[table]), false);
+  }
 });
 
 test("backup workflow produces a verified bundle and always releases locks", async (t) => {

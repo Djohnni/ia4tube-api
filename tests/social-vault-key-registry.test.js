@@ -83,7 +83,7 @@ test("migration 0003 keeps its approved bytes and adds a global RESTRICT registr
     read("db/migrations/checksums.json")
   ).migrations;
   assert.deepEqual(
-    manifest.map((migration) => migration.version),
+    manifest.slice(0, 3).map((migration) => migration.version),
     [
       "0001_social_multitenant_foundation",
       "0002_social_connections_and_vault",

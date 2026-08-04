@@ -83,13 +83,16 @@ function transitionPublicationState(current, next) {
   return transition(current, next, PUBLICATION_TRANSITIONS);
 }
 
-function safeReference(value) {
+const PROVIDER_REFERENCE_PATTERN =
+  /^[A-Za-z0-9][A-Za-z0-9._:-]{0,499}$/;
+const SENSITIVE_REFERENCE_PATTERN =
+  /(access[_-]?token|refresh[_-]?token|authorization|bearer|password|secret|oauth[_-]?code|api[_-]?key|ciphertext)/i;
+
+function isSafeProviderReference(value) {
   return Boolean(
     typeof value === "string" &&
-    value === value.trim() &&
-    value.length >= 1 &&
-    value.length <= 500 &&
-    !/[\u0000-\u001f\u007f]/.test(value)
+    PROVIDER_REFERENCE_PATTERN.test(value) &&
+    !SENSITIVE_REFERENCE_PATTERN.test(value)
   );
 }
 
@@ -100,7 +103,7 @@ function assertPublicationConfirmation(record = {}) {
     record.confirmedProviderReference !== null;
   if (
     record.state === "published"
-      ? !safeReference(record.confirmedProviderReference)
+      ? !isSafeProviderReference(record.confirmedProviderReference)
       : hasConfirmed
   ) {
     connectorFail("connector_contract_invalid");
@@ -108,7 +111,7 @@ function assertPublicationConfirmation(record = {}) {
   if (
     record.reconciliationReference !== undefined &&
     record.reconciliationReference !== null &&
-    !safeReference(record.reconciliationReference)
+    !isSafeProviderReference(record.reconciliationReference)
   ) {
     connectorFail("connector_contract_invalid");
   }
@@ -126,6 +129,7 @@ module.exports = {
   PUBLICATION_STATES,
   PUBLICATION_TRANSITIONS,
   assertPublicationConfirmation,
+  isSafeProviderReference,
   isPublicationConfirmed,
   transitionConnectionState,
   transitionPublicationState

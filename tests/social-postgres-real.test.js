@@ -1628,6 +1628,8 @@ function tenantFixture(label) {
     oauthId: randomUuid(),
     credentialId: randomUuid(),
     reauthId: randomUuid(),
+    idempotencyOperationId: randomUuid(),
+    publicationId: randomUuid(),
     auditId: randomUuid(),
     eventId: randomUuid()
   });
@@ -1846,7 +1848,11 @@ async function provePopulated0003Rollback(
   snapshots
 ) {
   const manifest = readManifest();
-  const migration = manifest.at(-1);
+  const migrationIndex = manifest.findIndex(
+    (item) => item.version === GLOBAL_VAULT_REGISTRY_MIGRATION
+  );
+  assert.ok(migrationIndex >= 0);
+  const migration = manifest[migrationIndex];
   const failedSql = [
     migration.sql.trimEnd(),
     "SELECT ia4tube_intentionally_missing_backfill_function();",
@@ -1858,7 +1864,7 @@ async function provePopulated0003Rollback(
     sha256: migrationSha256(Buffer.from(failedSql, "utf8"))
   });
   const temporary = temporaryMigrationManifest(
-    [...manifest.slice(0, -1), failedMigration],
+    [...manifest.slice(0, migrationIndex), failedMigration],
     "0003-populated-rollback"
   );
   try {
@@ -2115,12 +2121,52 @@ async function seedSocialTenant(pool, repository, fixture) {
           digest(`session-${fixture.label}`)
         ]
       );
+      const publicationHash = digest(
+        `synthetic-publication-${fixture.label}`
+      );
+      await client.query(
+        [
+          "INSERT INTO ia4tube_social.social_idempotency_operations (",
+          "  company_id, operation_id, provider, capability, request_hash",
+          ") VALUES ($1, $2, 'instagram', 'publishImage', $3)"
+        ].join("\n"),
+        [
+          fixture.companyId,
+          fixture.idempotencyOperationId,
+          publicationHash
+        ]
+      );
+      await client.query(
+        [
+          "INSERT INTO ia4tube_social.social_publications (",
+          "  company_id, id, connection_id, provider, media_reference,",
+          "  media_metadata_digest, idempotency_key, request_hash",
+          ") VALUES ($1, $2, $3, 'instagram', $4, $5, $6, $7)"
+        ].join("\n"),
+        [
+          fixture.companyId,
+          fixture.publicationId,
+          fixture.connectionId,
+          `synthetic-media-${fixture.label.toLowerCase()}`,
+          digest(`synthetic-media-metadata-${fixture.label}`),
+          fixture.idempotencyOperationId,
+          publicationHash
+        ]
+      );
+      await client.query(
+        [
+          "INSERT INTO ia4tube_social.social_publication_attempts (",
+          "  company_id, publication_id, provider, attempt_number, state",
+          ") VALUES ($1, $2, 'instagram', 1, 'started')"
+        ].join("\n"),
+        [fixture.companyId, fixture.publicationId]
+      );
       await client.query(
         [
           "INSERT INTO ia4tube_social.social_audit_events (",
           "  company_id, id, event_id, actor_user_id, connection_id,",
-          "  action, outcome, details_code",
-          ") VALUES ($1, $2, $3, $4, $5,",
+          "  provider, action, outcome, details_code",
+          ") VALUES ($1, $2, $3, $4, $5, 'instagram',",
           "  'social.test', 'succeeded', 'synthetic')"
         ].join("\n"),
         [
@@ -3279,6 +3325,21 @@ const RLS_TABLES = Object.freeze([
     selectColumn: "id"
   },
   {
+    table: "social_idempotency_operations",
+    tenantColumn: "company_id",
+    selectColumn: "operation_id"
+  },
+  {
+    table: "social_publications",
+    tenantColumn: "company_id",
+    selectColumn: "id"
+  },
+  {
+    table: "social_publication_attempts",
+    tenantColumn: "company_id",
+    selectColumn: "publication_id"
+  },
+  {
     table: "social_audit_events",
     tenantColumn: "company_id",
     selectColumn: "id"
@@ -3531,22 +3592,56 @@ test(
         backfillSnapshots
       );
 
+      const registryMigrationIndex = manifest.findIndex(
+        (migration) => migration.version === GLOBAL_VAULT_REGISTRY_MIGRATION
+      );
+      assert.ok(registryMigrationIndex >= 0);
+      const registryManifest = temporaryMigrationManifest(
+        manifest.slice(0, registryMigrationIndex + 1),
+        "0001-0003-prefix"
+      );
+      try {
+        const registryRunnerA = migrationRunner(
+          migrationPoolA,
+          configuration,
+          registryManifest.options
+        );
+        const registryRunnerB = migrationRunner(
+          migrationPoolB,
+          configuration,
+          registryManifest.options
+        );
+        await proveMigrationConcurrency(
+          registryRunnerA,
+          registryRunnerB,
+          configuration,
+          [GLOBAL_VAULT_REGISTRY_MIGRATION]
+        );
+        await provePopulated0003Success(
+          migrationPoolA,
+          runtimePool,
+          registryRunnerA,
+          configuration,
+          companyC,
+          companyD,
+          backfillSnapshots
+        );
+      } finally {
+        fs.rmSync(registryManifest.directory, {
+          recursive: true,
+          force: true
+        });
+      }
+
       const runnerA = migrationRunner(migrationPoolA, configuration);
       const runnerB = migrationRunner(migrationPoolB, configuration);
       await proveMigrationConcurrency(
         runnerA,
         runnerB,
         configuration,
-        [manifest.at(-1).version]
-      );
-      await provePopulated0003Success(
-        migrationPoolA,
-        runtimePool,
-        runnerA,
-        configuration,
-        companyC,
-        companyD,
-        backfillSnapshots
+        manifest
+          .slice(registryMigrationIndex + 1)
+          .map((migration) => migration.version)
       );
       await proveAdvisoryLock(
         migrationPoolA,

@@ -15,6 +15,11 @@
       "version": "0003_global_vault_key_registry",
       "file": "0003_global_vault_key_registry.up.sql",
       "sha256": "28e63269e5d31ebd05b49f24194be706d3e65eed3fa7f6b39f9051cfc9b96db7"
+    },
+    {
+      "version": "0004_social_connector_persistence",
+      "file": "0004_social_connector_persistence.up.sql",
+      "sha256": "2c1547b872bc967e9a7ae1e67b9691e1079657fb9dd09706c406234af49d7311"
     }
   ]
 }

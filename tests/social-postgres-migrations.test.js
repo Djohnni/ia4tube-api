@@ -18,6 +18,7 @@ const {
   GLOBAL_VAULT_REGISTRY_MIGRATION,
   LEDGER_NAME,
   PRODUCTION_APPROVAL,
+  SOCIAL_CONNECTOR_PERSISTENCE_MIGRATION,
   assertApplyTarget,
   assertNonDestructiveSql,
   compareMigrationState,
@@ -380,7 +381,8 @@ test("manifest freezes ordered LF-only migration checksums", () => {
     [
       "0001_social_multitenant_foundation",
       "0002_social_connections_and_vault",
-      "0003_global_vault_key_registry"
+      "0003_global_vault_key_registry",
+      "0004_social_connector_persistence"
     ]
   );
   for (const migration of migrations) {
@@ -442,6 +444,234 @@ test("migration scanner refuses destructive statements", () => {
       "0003_synthetic"
     )
   );
+});
+
+test("migration scanner allows only the exact 0004 status-check replacement", () => {
+  const migrationPath = path.join(
+    root,
+    "db",
+    "migrations",
+    "0004_social_connector_persistence.up.sql"
+  );
+  const migrationSql = fs.readFileSync(migrationPath, "utf8");
+  assert.equal(
+    SOCIAL_CONNECTOR_PERSISTENCE_MIGRATION,
+    "0004_social_connector_persistence"
+  );
+  assert.doesNotThrow(() =>
+    assertNonDestructiveSql(
+      migrationSql,
+      SOCIAL_CONNECTOR_PERSISTENCE_MIGRATION
+    )
+  );
+
+  const refused = [
+    {
+      version: "0005_synthetic",
+      sql: migrationSql
+    },
+    {
+      version: SOCIAL_CONNECTOR_PERSISTENCE_MIGRATION,
+      sql: migrationSql.replace(
+        "DROP CONSTRAINT social_connections_status_allowed,",
+        "DROP CONSTRAINT unexpected_status_constraint,"
+      )
+    },
+    {
+      version: SOCIAL_CONNECTOR_PERSISTENCE_MIGRATION,
+      sql: migrationSql.replace(
+        "DROP CONSTRAINT social_connections_status_allowed,",
+        [
+          "DROP CONSTRAINT unexpected_status_constraint,",
+          "  DROP CONSTRAINT social_connections_status_allowed,"
+        ].join("\n")
+      )
+    },
+    {
+      version: SOCIAL_CONNECTOR_PERSISTENCE_MIGRATION,
+      sql: migrationSql.replace(
+        "ALTER TABLE ia4tube_social.social_connections",
+        "ALTER TABLE ia4tube_social.social_external_accounts"
+      )
+    },
+    {
+      version: SOCIAL_CONNECTOR_PERSISTENCE_MIGRATION,
+      sql: migrationSql.replace(
+        "DROP CONSTRAINT social_connections_status_allowed,",
+        "DROP CONSTRAINT IF EXISTS social_connections_status_allowed,"
+      )
+    },
+    {
+      version: SOCIAL_CONNECTOR_PERSISTENCE_MIGRATION,
+      sql: migrationSql.replace(
+        "ADD CONSTRAINT social_connections_status_allowed",
+        "ADD CONSTRAINT replacement_name_does_not_match"
+      )
+    },
+    {
+      version: SOCIAL_CONNECTOR_PERSISTENCE_MIGRATION,
+      sql: migrationSql.replace(
+        /ADD CONSTRAINT social_connections_status_allowed\s+CHECK/,
+        "ADD CONSTRAINT social_connections_status_allowed UNIQUE"
+      )
+    }
+  ];
+  for (const candidate of refused) {
+    assert.throws(
+      () => assertNonDestructiveSql(candidate.sql, candidate.version),
+      { code: "destructive_migration_refused" }
+    );
+  }
+});
+
+test("migration 0004 keeps legacy rows valid and adds only the minimum connector ledger", () => {
+  const sql = fs.readFileSync(
+    path.join(
+      root,
+      "db",
+      "migrations",
+      "0004_social_connector_persistence.up.sql"
+    ),
+    "utf8"
+  );
+  const blockingIndex = sql.match(
+    /CREATE UNIQUE INDEX social_connections_instagram_blocking_company_unique[\s\S]*?;/
+  )?.[0];
+  assert.ok(blockingIndex);
+  const statusAllowed = sql.match(
+    /ADD CONSTRAINT social_connections_status_allowed[\s\S]*?(?=\n\s*ADD CONSTRAINT social_connections_status_timestamp_consistent)/
+  )?.[0];
+  assert.ok(statusAllowed);
+  assert.deepEqual(
+    [...statusAllowed.matchAll(/'([a-z_]+)'/g)].map((match) => match[1]),
+    [
+      "pending",
+      "active",
+      "expired",
+      "revoked",
+      "disconnected",
+      "error",
+      "authorization_pending",
+      "connected",
+      "reconnect_required",
+      "disconnecting",
+      "failed"
+    ]
+  );
+  assert.deepEqual(
+    [...blockingIndex.matchAll(/'([a-z_]+)'/g)].map((match) => match[1]),
+    [
+      "instagram",
+      "pending",
+      "active",
+      "authorization_pending",
+      "connected",
+      "reconnect_required",
+      "disconnecting"
+    ]
+  );
+  assert.match(
+    sql,
+    /CREATE UNIQUE INDEX social_external_accounts_instagram_active_company_unique[\s\S]*?ON ia4tube_social\.social_external_accounts \(company_id\)[\s\S]*?provider = 'instagram' AND status = 'active'/
+  );
+  const preflight = sql.match(
+    /DO \$social_connector_preflight\$[\s\S]*?\$social_connector_preflight\$;/
+  )?.[0];
+  assert.ok(preflight);
+  assert.match(
+    preflight,
+    /social_connections[\s\S]*?GROUP BY company_id[\s\S]*?HAVING COUNT\(\*\) > 1[\s\S]*?social_connector_blocking_connection_conflict/
+  );
+  assert.match(
+    preflight,
+    /social_external_accounts[\s\S]*?GROUP BY company_id[\s\S]*?HAVING COUNT\(\*\) > 1[\s\S]*?social_connector_active_account_conflict/
+  );
+  assert.equal((preflight.match(/RAISE EXCEPTION/g) || []).length, 2);
+  assert.doesNotMatch(preflight, /SELECT\s+(company_id|id|external_id|username)\b/i);
+  assert.match(
+    sql,
+    /status = 'reconnect_required'[\s\S]*?revoked_at IS NULL[\s\S]*?disconnected_at IS NULL/
+  );
+  assert.match(
+    sql,
+    /status = 'disconnected'[\s\S]*?disconnected_at IS NOT NULL[\s\S]*?revoked_at IS NULL/
+  );
+  assert.match(
+    sql,
+    /social_external_accounts_instagram_professional[\s\S]*?account_type IN \('business', 'creator'\)[\s\S]*?NOT VALID/
+  );
+  assert.match(sql, /ADD COLUMN connection_id UUID/);
+  assert.match(sql, /ADD COLUMN failed_at TIMESTAMPTZ/);
+  assert.match(sql, /ADD COLUMN failure_code TEXT/);
+  assert.match(sql, /ADD COLUMN audit_event_id UUID/);
+  assert.match(sql, /ADD COLUMN correlation_id UUID/);
+  assert.match(
+    sql,
+    /GRANT UPDATE \(connection_id, oauth_transaction_id\)[\s\S]*?social_encrypted_credentials[\s\S]*?ia4tube_social_runtime/
+  );
+  assert.match(
+    sql,
+    /social_audit_events_reference_provider_present[\s\S]*?connection_id IS NULL[\s\S]*?publication_id IS NULL[\s\S]*?provider IS NOT NULL[\s\S]*?NOT VALID/
+  );
+  assert.deepEqual(
+    [...sql.matchAll(/CREATE TABLE ia4tube_social\.([a-z_]+) \(/g)].map(
+      (match) => match[1]
+    ),
+    [
+      "social_idempotency_operations",
+      "social_publications",
+      "social_publication_attempts"
+    ]
+  );
+  const attempts = sql.match(
+    /CREATE TABLE ia4tube_social\.social_publication_attempts \([\s\S]*?\n\);/
+  )?.[0];
+  assert.ok(attempts);
+  assert.match(attempts, /state TEXT NOT NULL DEFAULT 'started'/);
+  assert.match(
+    attempts,
+    /provider_reference ~[\s\S]*?\^\[A-Za-z0-9\]\[A-Za-z0-9\._:-\]\{0,499\}\$[\s\S]*?access\[_-\]\?token/
+  );
+  assert.match(attempts, /state = 'started'/);
+  assert.doesNotMatch(attempts, /'publishing'/);
+  const attemptStates = attempts.match(
+    /social_publication_attempts_state_allowed[\s\S]*?(?=\n\s*CONSTRAINT social_publication_attempts_error_code_valid)/
+  )?.[0];
+  assert.ok(attemptStates);
+  assert.deepEqual(
+    [...attemptStates.matchAll(/'([a-z_]+)'/g)].map(
+      (match) => match[1]
+    ),
+    [
+      "started",
+      "provider_confirming",
+      "published",
+      "failed_temporary",
+      "failed_permanent"
+    ]
+  );
+  assert.doesNotMatch(sql, /\bBYTEA\b/i);
+  for (const table of [
+    "social_idempotency_operations",
+    "social_publications",
+    "social_publication_attempts"
+  ]) {
+    assert.match(
+      sql,
+      new RegExp(
+        `ALTER TABLE ia4tube_social\\.${table}\\s+` +
+          "ENABLE ROW LEVEL SECURITY;"
+      )
+    );
+    assert.match(
+      sql,
+      new RegExp(
+        `ALTER TABLE ia4tube_social\\.${table}\\s+` +
+          "FORCE ROW LEVEL SECURITY;"
+      )
+    );
+    assert.match(sql, new RegExp(`CREATE POLICY ${table}_company_scope`));
+  }
 });
 
 test("ledger comparison refuses unknown or modified applied migrations", () => {
@@ -923,7 +1153,7 @@ test("status and validate are read-only when the ledger is absent", async () => 
   const result = await runner.validate();
   assert.equal(result.valid, true);
   assert.equal(result.applied, 0);
-  assert.equal(result.pending, 3);
+  assert.equal(result.pending, 4);
   assert.equal(
     harness.state.queries.some((query) =>
       /^(CREATE|INSERT|UPDATE|DELETE|ALTER|DROP|TRUNCATE)\b/i.test(
@@ -942,13 +1172,14 @@ test("apply takes an advisory lock and records SQL plus checksum atomically", as
   const applied = await runner.apply({
     SOCIAL_MIGRATION_TARGET_FINGERPRINT: targetFingerprint(target)
   });
-  assert.equal(applied.length, 3);
+  assert.equal(applied.length, 4);
   assert.deepEqual(
     harness.state.applied.map((row) => row.version),
     [
       "0001_social_multitenant_foundation",
       "0002_social_connections_and_vault",
-      "0003_global_vault_key_registry"
+      "0003_global_vault_key_registry",
+      "0004_social_connector_persistence"
     ]
   );
   const texts = harness.state.queries.map((query) => query.text);
@@ -1148,6 +1379,61 @@ test("a later migration rollback preserves only committed checksums", async () =
   );
 });
 
+test("migration 0004 rolls back atomically and never records a partial ledger row", async () => {
+  const harness = migrationPool({
+    failOn: "CREATE TABLE ia4tube_social.social_publication_attempts"
+  });
+  await assert.rejects(
+    runnerFor(harness).apply({
+      SOCIAL_MIGRATION_TARGET_FINGERPRINT:
+        targetFingerprint(baseTarget)
+    }),
+    /synthetic migration failure/
+  );
+  assert.deepEqual(
+    harness.state.applied.map((row) => row.version),
+    [
+      "0001_social_multitenant_foundation",
+      "0002_social_connections_and_vault",
+      "0003_global_vault_key_registry"
+    ]
+  );
+  assert.equal(
+    harness.state.applied.some(
+      (row) => row.version === SOCIAL_CONNECTOR_PERSISTENCE_MIGRATION
+    ),
+    false
+  );
+  assert.ok(
+    harness.state.queries.some((query) => query.text === "ROLLBACK")
+  );
+});
+
+test("reapplying all four migrations is idempotent at the ledger boundary", async () => {
+  const harness = migrationPool();
+  const runner = runnerFor(harness);
+  const approval = {
+    SOCIAL_MIGRATION_TARGET_FINGERPRINT: targetFingerprint(baseTarget)
+  };
+  const first = await runner.apply(approval);
+  const second = await runner.apply(approval);
+  assert.equal(first.length, 4);
+  assert.equal(second.length, 0);
+  assert.deepEqual(
+    harness.state.applied.map((row) => row.version),
+    [
+      "0001_social_multitenant_foundation",
+      "0002_social_connections_and_vault",
+      "0003_global_vault_key_registry",
+      "0004_social_connector_persistence"
+    ]
+  );
+  assert.equal(
+    new Set(harness.state.applied.map((row) => row.version)).size,
+    4
+  );
+});
+
 test("migration 0003 wraps its populated backfill in one owner-only transient policy", async () => {
   const harness = migrationPool();
   await runnerFor(harness).apply({
@@ -1236,15 +1522,15 @@ test("concurrent runners serialize and never apply a checksum twice", async () =
 
   assert.deepEqual(
     results.map((result) => result.length).sort((a, b) => a - b),
-    [0, 3]
+    [0, 4]
   );
   assert.equal(harness.state.lockWaits, 1);
   assert.equal(harness.state.maxActiveLocks, 1);
   assert.equal(harness.state.activeLocks, 0);
-  assert.equal(harness.state.applied.length, 3);
+  assert.equal(harness.state.applied.length, 4);
   assert.equal(
     new Set(harness.state.applied.map((row) => row.version)).size,
-    3
+    4
   );
 });
 

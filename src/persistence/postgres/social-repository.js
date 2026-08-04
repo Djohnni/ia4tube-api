@@ -203,11 +203,12 @@ function createSocialRepository(options = {}) {
           "    OR credential.expires_at > CURRENT_TIMESTAMP)",
           "  AND (",
           "    (credential.connection_id IS NOT NULL",
-          "      AND connection.status = 'active')",
+          "      AND connection.status IN ('active', 'connected'))",
           "    OR",
           "    (credential.oauth_transaction_id IS NOT NULL",
           "      AND oauth.consumed_at IS NULL",
           "      AND oauth.cancelled_at IS NULL",
+          "      AND oauth.failed_at IS NULL",
           "      AND oauth.expires_at > CURRENT_TIMESTAMP)",
           "  )"
         ].join("\n"),

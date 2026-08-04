@@ -993,6 +993,18 @@ test("social repository scopes every query and stores only envelopes", async () 
     true
   );
   assert.equal(JSON.stringify(harness.queries).includes("plaintext"), false);
+  await repository.findEncryptedCredential({
+    companyId: companyA,
+    credentialId
+  });
+  const credentialRead = harness.queries.find((query) =>
+    query.text.includes("FROM ia4tube_social.social_encrypted_credentials credential")
+  );
+  assert.match(
+    credentialRead.text,
+    /connection\.status IN \('active', 'connected'\)/
+  );
+  assert.match(credentialRead.text, /oauth\.failed_at IS NULL/);
   await assert.rejects(
     repository.findConnection({
       companyId: companyA,

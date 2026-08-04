@@ -22,6 +22,9 @@ const TENANT_TABLES = Object.freeze([
   "social_oauth_transactions",
   "social_encrypted_credentials",
   "social_reauth_grants",
+  "social_idempotency_operations",
+  "social_publications",
+  "social_publication_attempts",
   "social_audit_events"
 ]);
 const TENANT_POLICIES = Object.freeze(
@@ -46,6 +49,9 @@ const RUNTIME_TABLE_GRANTS = Object.freeze({
   social_oauth_transactions: ["INSERT", "SELECT"],
   social_encrypted_credentials: ["INSERT", "SELECT"],
   social_reauth_grants: ["INSERT", "SELECT"],
+  social_idempotency_operations: ["INSERT", "SELECT"],
+  social_publications: ["INSERT", "SELECT"],
+  social_publication_attempts: ["INSERT", "SELECT"],
   social_audit_events: ["INSERT", "SELECT"]
 });
 const RUNTIME_COLUMN_GRANTS = Object.freeze({
@@ -98,9 +104,13 @@ const RUNTIME_COLUMN_GRANTS = Object.freeze({
   },
   social_oauth_transactions: {
     consumed_at: ["UPDATE"],
-    cancelled_at: ["UPDATE"]
+    cancelled_at: ["UPDATE"],
+    failed_at: ["UPDATE"],
+    failure_code: ["UPDATE"]
   },
   social_encrypted_credentials: {
+    connection_id: ["UPDATE"],
+    oauth_transaction_id: ["UPDATE"],
     ciphertext: ["UPDATE"],
     nonce: ["UPDATE"],
     auth_tag: ["UPDATE"],
@@ -112,6 +122,32 @@ const RUNTIME_COLUMN_GRANTS = Object.freeze({
   },
   social_reauth_grants: {
     consumed_at: ["UPDATE"]
+  },
+  social_idempotency_operations: {
+    status: ["UPDATE"],
+    result_payload: ["UPDATE"],
+    error_code: ["UPDATE"],
+    updated_at: ["UPDATE"],
+    revision: ["UPDATE"]
+  },
+  social_publications: {
+    state: ["UPDATE"],
+    confirmed_provider_reference: ["UPDATE"],
+    reconciliation_reference: ["UPDATE"],
+    error_code: ["UPDATE"],
+    published_at: ["UPDATE"],
+    updated_at: ["UPDATE"],
+    revision: ["UPDATE"]
+  },
+  social_publication_attempts: {
+    state: ["UPDATE"],
+    error_code: ["UPDATE"],
+    provider_reference: ["UPDATE"],
+    finished_at: ["UPDATE"],
+    duration_ms: ["UPDATE"],
+    retry_after: ["UPDATE"],
+    updated_at: ["UPDATE"],
+    revision: ["UPDATE"]
   }
 });
 

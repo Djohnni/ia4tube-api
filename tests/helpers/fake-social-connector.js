@@ -1,5 +1,6 @@
 "use strict";
 
+const crypto = require("node:crypto");
 const {
   CONNECTOR_CAPABILITIES
 } = require("../../src/social/connectors/contract");
@@ -73,8 +74,6 @@ function createFakeSocialConnector(options = {}) {
   const disconnectOutcome = options.disconnectOutcome || "disconnected";
   const mintedAuthorizationHandles = new Map();
   const calls = [];
-  let authorizationCounter = 0;
-
   function record(capability, context, input) {
     requireTestContext(context);
     assertSyntheticInput(input);
@@ -88,12 +87,7 @@ function createFakeSocialConnector(options = {}) {
   async function beginAuthorization(context, input) {
     record("beginAuthorization", context, input);
     if (options.beginThrows) throw options.beginThrows;
-    authorizationCounter += 1;
-    const handle = [
-      "synthetic-authorization",
-      input.connectionId,
-      String(authorizationCounter)
-    ].join(":");
+    const handle = crypto.randomUUID();
     mintedAuthorizationHandles.set(handle, Object.freeze({
       companyId: context.companyId,
       connectionId: input.connectionId
@@ -206,7 +200,8 @@ function createSyntheticSocialStore() {
           if (
             record.provider === provider &&
             record.id !== excludeConnectionId &&
-            BLOCKING_CONNECTION_STATES.has(record.state)
+            BLOCKING_CONNECTION_STATES.has(record.state) &&
+            (record.state !== "failed" || record.account)
           ) {
             return copy(record);
           }
@@ -225,6 +220,41 @@ function createSyntheticSocialStore() {
         data.connections.set(record.id, copy(record));
         data.history.push({ kind: "connection", record: copy(record) });
         return copy(record);
+      },
+      async activateConnectionFromAuthorization(
+        record,
+        expectedRevision,
+        authorizationHandle
+      ) {
+        if (typeof authorizationHandle !== "string") {
+          connectorFail("connector_contract_invalid");
+        }
+        const current = data.connections.get(record.id) || null;
+        if (
+          !current ||
+          current.revision !== expectedRevision ||
+          current.state !== "authorization_pending" ||
+          record.state !== "connected" ||
+          !record.account
+        ) {
+          connectorFail("state_transition_invalid");
+        }
+        data.connections.set(record.id, copy(record));
+        data.history.push({
+          kind: "connection_activation",
+          record: copy(record)
+        });
+        return copy(record);
+      },
+      async ensureDisconnected(id) {
+        const current = data.connections.get(id) || null;
+        if (!current || current.state !== "disconnected") {
+          connectorFail("state_transition_invalid");
+        }
+        const clean = { ...copy(current), account: null };
+        data.connections.set(id, clean);
+        data.history.push({ kind: "connection_cleanup", record: copy(clean) });
+        return copy(clean);
       },
       async getPublication(id) {
         return copy(data.publications.get(id) || null);
@@ -263,6 +293,22 @@ function createSyntheticSocialStore() {
           result: null,
           errorCode: null
         });
+        if (
+          record.capability === "publishImage" &&
+          record.payload &&
+          !data.publications.has(record.payload.publicationId)
+        ) {
+          data.publications.set(record.payload.publicationId, {
+            companyId: context.companyId,
+            id: record.payload.publicationId,
+            connectionId: record.payload.connectionId,
+            provider: context.provider,
+            state: "ready",
+            confirmedProviderReference: null,
+            reconciliationReference: null,
+            revision: 1
+          });
+        }
         return { status: "acquired" };
       },
       async completeIdempotency(record) {
@@ -291,7 +337,7 @@ function createSyntheticSocialStore() {
         });
         await previous;
         try {
-          return await operation();
+          return await operation(this);
         } finally {
           release();
         }
@@ -336,7 +382,7 @@ function createSyntheticSocialStore() {
 function createSyntheticAudit() {
   const events = [];
   return Object.freeze({
-    async append(event) {
+    async append(_context, event) {
       events.push(copy(event));
     },
     events() {

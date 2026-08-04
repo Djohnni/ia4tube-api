@@ -19,6 +19,15 @@ const {
   createSocialRepository
 } = require("../persistence/postgres/social-repository");
 const {
+  createPostgresConnectorAudit
+} = require("../persistence/postgres/social-connector-audit");
+const {
+  createPostgresConnectorStore
+} = require("../persistence/postgres/social-connector-store");
+const {
+  createPostgresOAuthRepository
+} = require("../persistence/postgres/social-oauth-repository");
+const {
   deriveSocialIdentity,
   parseIdentityConfig
 } = require("./identity");
@@ -88,6 +97,20 @@ async function createSocialRuntime(options = {}) {
       vault
     });
     const reauth = createSocialReauthService({ repository: social });
+    const connectorPersistence = Object.freeze({
+      audit: createPostgresConnectorAudit({
+        pool,
+        runtimeRole: config.role
+      }),
+      oauth: createPostgresOAuthRepository({
+        pool,
+        runtimeRole: config.role
+      }),
+      store: createPostgresConnectorStore({
+        pool,
+        runtimeRole: config.role
+      })
+    });
     const authAdapter = createSocialAuthAdapter(identityConfig);
     let closed = false;
     function assertOpen() {
@@ -101,6 +124,7 @@ async function createSocialRuntime(options = {}) {
     return Object.freeze({
       enabled: true,
       companies,
+      connectorPersistence,
       credentials,
       reauth,
       auth: Object.freeze({

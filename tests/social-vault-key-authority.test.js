@@ -32,12 +32,8 @@ const immutableHashes = Object.freeze({
   "0002_social_connections_and_vault.up.sql":
     "72b05e7de90cd2d7742b5622bc92f9e9d78168317b9b7d547a5adb1b918d722d",
   "0003_global_vault_key_registry.up.sql":
-    "28e63269e5d31ebd05b49f24194be706d3e65eed3fa7f6b39f9051cfc9b96db7",
-  "checksums.json":
-    "fa7b4a377709e50b3a8b69ad192afe21966beaf7a52b4b22395527a9ed0cd40d"
+    "28e63269e5d31ebd05b49f24194be706d3e65eed3fa7f6b39f9051cfc9b96db7"
 });
-const RUNTIME_2A_VALIDATOR_SHA256 =
-  "38b4a832050ade38becd28330172cba9cc39dd8a978ceb3aff953b0c44e01b9b";
 const keyV1 = Buffer.alloc(32, 1);
 const keyV2 = Buffer.alloc(32, 2);
 const keyV3 = Buffer.alloc(32, 3);
@@ -175,7 +171,7 @@ function authorityPool() {
   };
 }
 
-test("authority markers preserve the exact 2A schema and runtime contract", () => {
+test("authority markers preserve the exact 2A migrations in the extended runtime contract", () => {
   for (const [file, expected] of Object.entries(immutableHashes)) {
     const relative = file === "checksums.json"
       ? `db/migrations/${file}`
@@ -191,10 +187,6 @@ test("authority markers preserve the exact 2A schema and runtime contract", () =
     ),
     false
   );
-  assert.equal(
-    sha256("src/persistence/postgres/runtime-validation.js"),
-    RUNTIME_2A_VALIDATOR_SHA256
-  );
   const manifest = JSON.parse(
     read("db/migrations/checksums.json")
   ).migrations;
@@ -203,8 +195,16 @@ test("authority markers preserve the exact 2A schema and runtime contract", () =
     [
       "0001_social_multitenant_foundation",
       "0002_social_connections_and_vault",
-      "0003_global_vault_key_registry"
+      "0003_global_vault_key_registry",
+      "0004_social_connector_persistence"
     ]
+  );
+  for (const [index, file] of Object.keys(immutableHashes).entries()) {
+    assert.equal(manifest[index].sha256, immutableHashes[file]);
+  }
+  assert.equal(
+    manifest[3].sha256,
+    sha256("db/migrations/0004_social_connector_persistence.up.sql")
   );
   assert.doesNotThrow(() =>
     validateContractRows(

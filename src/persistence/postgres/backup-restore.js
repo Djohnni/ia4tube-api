@@ -19,6 +19,7 @@ const {
   createEncryptedBundle,
   createOwnedWorkspace,
   decodeBundleKey,
+  EncryptedBackupBundleError,
   recoverOwnedWorkspaces,
   withExtractedEncryptedBundle
 } = require("./encrypted-backup-bundle");
@@ -59,7 +60,7 @@ const EXPECTED_MIGRATION_ROWS = Object.freeze(
 const EXPECTED_MIGRATIONS = Object.freeze(
   EXPECTED_MIGRATION_ROWS.map((migration) => migration.version)
 );
-const RLS_TABLES = Object.freeze([
+const PRE_0004_RLS_TABLES = Object.freeze([
   "companies",
   "users",
   "company_memberships",
@@ -73,7 +74,14 @@ const RLS_TABLES = Object.freeze([
   "social_reauth_grants",
   "social_audit_events"
 ]);
-const BACKUP_TABLES = Object.freeze([
+const RLS_TABLES = Object.freeze([
+  ...PRE_0004_RLS_TABLES.slice(0, -1),
+  "social_idempotency_operations",
+  "social_publications",
+  "social_publication_attempts",
+  "social_audit_events"
+]);
+const PRE_0004_BACKUP_TABLES = Object.freeze([
   "ia4tube_migrations.environment_identity",
   "ia4tube_migrations.schema_migrations",
   "ia4tube_social_admin.vault_key_versions",
@@ -90,9 +98,38 @@ const BACKUP_TABLES = Object.freeze([
   "ia4tube_social.social_audit_events",
   "ia4tube_social.legacy_entity_mappings"
 ]);
+const BACKUP_TABLES = Object.freeze([
+  ...PRE_0004_BACKUP_TABLES.slice(0, -2),
+  "ia4tube_social.social_idempotency_operations",
+  "ia4tube_social.social_publications",
+  "ia4tube_social.social_publication_attempts",
+  "ia4tube_social.social_audit_events",
+  "ia4tube_social.legacy_entity_mappings"
+]);
 const EVIDENCE_TABLES = Object.freeze(
   [...BACKUP_TABLES].sort((left, right) => left.localeCompare(right))
 );
+const SCHEMA_PROFILES = Object.freeze([
+  Object.freeze({
+    id: "social-schema-0003",
+    migrationRows: Object.freeze(EXPECTED_MIGRATION_ROWS.slice(0, 3)),
+    backupTables: PRE_0004_BACKUP_TABLES,
+    evidenceTables: Object.freeze(
+      [...PRE_0004_BACKUP_TABLES].sort((left, right) =>
+        left.localeCompare(right)
+      )
+    ),
+    rlsTables: PRE_0004_RLS_TABLES
+  }),
+  Object.freeze({
+    id: "social-schema-0004",
+    migrationRows: EXPECTED_MIGRATION_ROWS,
+    backupTables: BACKUP_TABLES,
+    evidenceTables: EVIDENCE_TABLES,
+    rlsTables: RLS_TABLES
+  })
+]);
+const CURRENT_SCHEMA_PROFILE = SCHEMA_PROFILES.at(-1);
 const TOOL_BASENAMES = Object.freeze({
   dump: new Set(["pg_dump", "pg_dump.exe"]),
   restore: new Set(["pg_restore", "pg_restore.exe"]),
@@ -101,6 +138,86 @@ const TOOL_BASENAMES = Object.freeze({
 
 function fail(code) {
   postgresFail(code, "Backup PostgreSQL social recusado.");
+}
+
+function migrationRowsDigest(rows) {
+  return crypto
+    .createHash("sha256")
+    .update(canonicalJson(rows))
+    .digest("hex");
+}
+
+function schemaProfileById(value) {
+  const id = typeof value === "string" ? value : value?.id;
+  const profile = SCHEMA_PROFILES.find((candidate) => candidate.id === id);
+  if (!profile) fail("backup_schema_profile_invalid");
+  return profile;
+}
+
+function normalizeRawMigrationRows(rows) {
+  if (!Array.isArray(rows)) fail("backup_migration_state_invalid");
+  return Object.freeze(
+    rows.map((row) =>
+      Object.freeze({
+        version: String(row?.version || ""),
+        checksum: requireSha256(
+          String(row?.checksum || row?.checksum_sha256 || "").toLowerCase(),
+          "backup_migration_checksum"
+        )
+      })
+    )
+  );
+}
+
+function resolveSchemaProfile(rows) {
+  const normalized = normalizeRawMigrationRows(rows);
+  const profile = SCHEMA_PROFILES.find(
+    (candidate) =>
+      candidate.migrationRows.length === normalized.length &&
+      candidate.migrationRows.every(
+        (expected, index) =>
+          expected.version === normalized[index].version &&
+          expected.checksum === normalized[index].checksum
+      )
+  );
+  if (!profile) fail("backup_migration_state_invalid");
+  return profile;
+}
+
+function schemaProfileContract(value) {
+  const profile = schemaProfileById(value);
+  return Object.freeze({
+    id: profile.id,
+    migrationLedgerSha256: migrationRowsDigest(profile.migrationRows),
+    backupTables: profile.backupTables,
+    rlsTables: profile.rlsTables
+  });
+}
+
+function requireManifestSchemaProfile(manifest) {
+  const stored = manifest?.schemaProfile;
+  if (!stored) {
+    const legacyProfile = resolveSchemaProfile(manifest?.evidence?.migrations);
+    if (manifest?.format !== 2 || legacyProfile.id !== "social-schema-0003") {
+      fail("restore_manifest_schema_profile_invalid");
+    }
+    return legacyProfile;
+  }
+  const profile = schemaProfileById(stored?.id);
+  const expected = schemaProfileContract(profile);
+  if (
+    !stored ||
+    canonicalJson(Object.keys(stored).sort()) !==
+      canonicalJson(Object.keys(expected).sort()) ||
+    stored.migrationLedgerSha256 !== expected.migrationLedgerSha256 ||
+    !Array.isArray(stored.backupTables) ||
+    !Array.isArray(stored.rlsTables) ||
+    canonicalJson(stored.backupTables) !== canonicalJson(expected.backupTables) ||
+    canonicalJson(stored.rlsTables) !== canonicalJson(expected.rlsTables)
+  ) {
+    fail("restore_manifest_schema_profile_invalid");
+  }
+  return profile;
 }
 
 function explicitTrue(value) {
@@ -331,15 +448,17 @@ function bundleDataArchiveName(table, index) {
   )}.data.sql`;
 }
 
-function bundleArchiveNames() {
+function bundleArchiveNames(schemaProfile = CURRENT_SCHEMA_PROFILE) {
+  const profile = schemaProfileById(schemaProfile);
   return Object.freeze([
     BUNDLE_ARCHIVE_MANIFEST,
     BUNDLE_ARCHIVE_SCHEMA,
-    ...BACKUP_TABLES.map(bundleDataArchiveName)
+    ...profile.backupTables.map(bundleDataArchiveName)
   ]);
 }
 
-function bundleArchiveEntries(config) {
+function bundleArchiveEntries(config, schemaProfile = CURRENT_SCHEMA_PROFILE) {
+  const profile = schemaProfileById(schemaProfile);
   return Object.freeze([
     Object.freeze({
       name: BUNDLE_ARCHIVE_MANIFEST,
@@ -349,7 +468,7 @@ function bundleArchiveEntries(config) {
       name: BUNDLE_ARCHIVE_SCHEMA,
       path: config.files.schema
     }),
-    ...BACKUP_TABLES.map((table, index) =>
+    ...profile.backupTables.map((table, index) =>
       Object.freeze({
         name: bundleDataArchiveName(table, index),
         path: config.files.data[table]
@@ -614,11 +733,15 @@ function policyName(table, command) {
   return `${POLICY_PREFIX}${command}_${table}`;
 }
 
-function temporaryPolicySql(command = "select") {
+function temporaryPolicySql(
+  command = "select",
+  schemaProfile = CURRENT_SCHEMA_PROFILE
+) {
+  const profile = schemaProfileById(schemaProfile);
   const all = command === "all";
   if (!all && command !== "select") fail("backup_policy_command_invalid");
   return Object.freeze(
-    RLS_TABLES.map((table) => {
+    profile.rlsTables.map((table) => {
       const name = policyName(table, command);
       return Object.freeze({
         table,
@@ -1064,8 +1187,9 @@ function restoreSchemaPlan(
   });
 }
 
-function migrationAssertionSql() {
-  const values = EXPECTED_MIGRATION_ROWS.map(
+function migrationAssertionSql(schemaProfile = CURRENT_SCHEMA_PROFILE) {
+  const profile = schemaProfileById(schemaProfile);
+  const values = profile.migrationRows.map(
     (entry) =>
       `(${quoteLiteral(entry.version)}, ${quoteLiteral(entry.checksum)})`
   ).join(",\n      ");
@@ -1111,7 +1235,9 @@ function preflightSql(config, connection, options = {}) {
           "  END IF;"
         ]
       : []),
-    ...(options.skipMigrations ? [] : [migrationAssertionSql()]),
+    ...(options.skipMigrations
+      ? []
+      : [migrationAssertionSql(options.schemaProfile)]),
     "  IF EXISTS (",
     "    SELECT 1 FROM pg_catalog.pg_policies",
     "    WHERE schemaname = 'ia4tube_social'",
@@ -1125,8 +1251,12 @@ function preflightSql(config, connection, options = {}) {
   ].join("\n");
 }
 
-function evidenceSelectSql(outputFile) {
-  const countParts = BACKUP_TABLES.map(
+function evidenceSelectSql(
+  outputFile,
+  schemaProfile = CURRENT_SCHEMA_PROFILE
+) {
+  const profile = schemaProfileById(schemaProfile);
+  const countParts = profile.backupTables.map(
     (table) =>
       `SELECT ${quoteLiteral(table)}::text AS table_name, ` +
       `COUNT(*)::bigint AS row_count FROM ${quoteQualifiedTable(table)}`
@@ -1202,33 +1332,38 @@ function dataRowSql(table) {
   ].join("\n");
 }
 
-function createBackupDataScript(config) {
-  const policies = temporaryPolicySql("select");
+function createBackupDataScript(
+  config,
+  schemaProfile = CURRENT_SCHEMA_PROFILE
+) {
+  const profile = schemaProfileById(schemaProfile);
+  const policies = temporaryPolicySql("select", profile);
   const lines = [
     ...psqlHeader(),
-    preflightSql(config, config.source),
+    preflightSql(config, config.source, { schemaProfile: profile }),
     ...policies.map((policy) => `${policy.create};`)
   ];
-  for (const table of BACKUP_TABLES) {
+  for (const table of profile.backupTables) {
     lines.push(`\\o ${clientPathLiteral(config.files.dataPartial[table])}`);
     lines.push(`\\qecho -- IA4Tube logical data: ${table}`);
     lines.push(dataRowSql(table));
     lines.push("\\o");
   }
-  lines.push(evidenceSelectSql(config.files.evidencePartial));
+  lines.push(evidenceSelectSql(config.files.evidencePartial, profile));
   lines.push(...[...policies].reverse().map((policy) => `${policy.drop};`));
   lines.push(assertPoliciesAbsentSql(), "COMMIT;");
   return `${lines.join("\n")}\n`;
 }
 
 function createRestoreDataScript(config, manifest) {
-  const policies = temporaryPolicySql("all");
+  const profile = requireManifestSchemaProfile(manifest);
+  const policies = temporaryPolicySql("all", profile);
   const lines = [
     ...psqlHeader(),
     preflightSql({}, config.target, { skipMigrations: true }),
     ...policies.map((policy) => `${policy.create};`)
   ];
-  for (const table of BACKUP_TABLES) {
+  for (const table of profile.backupTables) {
     const entry = manifest.files.data.find((file) => file.table === table);
     if (!entry) fail("restore_manifest_table_missing");
     lines.push(`\\i ${clientPathLiteral(entry.path)}`);
@@ -1239,7 +1374,8 @@ function createRestoreDataScript(config, manifest) {
 }
 
 function createEvidenceScript(config, outputFile, sourceManifest) {
-  const policies = temporaryPolicySql("select");
+  const profile = requireManifestSchemaProfile(sourceManifest);
+  const policies = temporaryPolicySql("select", profile);
   const source = sourceManifest?.source;
   const expectedSource =
     source?.environmentId && source?.environment
@@ -1250,9 +1386,9 @@ function createEvidenceScript(config, outputFile, sourceManifest) {
       : {};
   return `${[
     ...psqlHeader(),
-    preflightSql(expectedSource, config.target),
+    preflightSql(expectedSource, config.target, { schemaProfile: profile }),
     ...policies.map((policy) => `${policy.create};`),
-    evidenceSelectSql(outputFile),
+    evidenceSelectSql(outputFile, profile),
     ...[...policies].reverse().map((policy) => `${policy.drop};`),
     assertPoliciesAbsentSql(),
     "COMMIT;"
@@ -1293,30 +1429,24 @@ function evidenceDigest(evidence) {
     .digest("hex");
 }
 
-function normalizeMigrationEvidence(rows) {
-  const migrations = [...(rows || [])].map((row) =>
-    Object.freeze({
-      version: String(row.version || ""),
-      checksum: requireSha256(
-        String(row.checksum || row.checksum_sha256 || "").toLowerCase(),
-        "backup_migration_checksum"
-      )
-    })
-  );
+function normalizeMigrationEvidence(rows, expectedSchemaProfile) {
+  const migrations = normalizeRawMigrationRows(rows);
+  const profile = resolveSchemaProfile(migrations);
   if (
-    migrations.length !== EXPECTED_MIGRATION_ROWS.length ||
-    migrations.some(
-      (row, index) =>
-        row.version !== EXPECTED_MIGRATION_ROWS[index].version ||
-        row.checksum !== EXPECTED_MIGRATION_ROWS[index].checksum
-    )
+    expectedSchemaProfile &&
+    profile.id !== schemaProfileById(expectedSchemaProfile).id
   ) {
     fail("backup_migration_state_invalid");
   }
-  return Object.freeze(migrations);
+  return Object.freeze({ migrations, profile });
 }
 
-function normalizeEvidence(raw) {
+function normalizeEvidence(raw, expectedSchemaProfile) {
+  const migrationState = normalizeMigrationEvidence(
+    raw?.migrations,
+    expectedSchemaProfile
+  );
+  const profile = migrationState.profile;
   const tableCounts = [...(raw?.tableCounts || [])]
     .map((row) =>
       Object.freeze({
@@ -1326,24 +1456,21 @@ function normalizeEvidence(raw) {
     )
     .sort((left, right) => left.table.localeCompare(right.table));
   if (
-    tableCounts.length !== EVIDENCE_TABLES.length ||
+    tableCounts.length !== profile.evidenceTables.length ||
     tableCounts.some(
       (row, index) =>
-        row.table !== EVIDENCE_TABLES[index] ||
+        row.table !== profile.evidenceTables[index] ||
         !Number.isSafeInteger(row.count) ||
         row.count < 0
     )
   ) {
     fail("backup_table_counts_invalid");
   }
-
-  const migrations = normalizeMigrationEvidence(raw?.migrations);
-
   const catalog = raw?.catalog;
   if (
     !catalog ||
-    Number(catalog.rlsTableCount) !== RLS_TABLES.length ||
-    Number(catalog.forcedRlsTableCount) !== RLS_TABLES.length ||
+    Number(catalog.rlsTableCount) !== profile.rlsTables.length ||
+    Number(catalog.forcedRlsTableCount) !== profile.rlsTables.length ||
     Number(catalog.transientPolicyCount) !== 0 ||
     Number(catalog.canonicalRoleCount) !== 3 ||
     catalog.runtimeEscalationPossible ||
@@ -1354,10 +1481,10 @@ function normalizeEvidence(raw) {
   }
   return Object.freeze({
     tableCounts: Object.freeze(tableCounts),
-    migrations: Object.freeze(migrations),
+    migrations: migrationState.migrations,
     catalog: Object.freeze({
-      rlsTableCount: RLS_TABLES.length,
-      forcedRlsTableCount: RLS_TABLES.length,
+      rlsTableCount: profile.rlsTables.length,
+      forcedRlsTableCount: profile.rlsTables.length,
       transientPolicyCount: 0,
       canonicalRoleCount: 3,
       runtimeEscalationPossible: false,
@@ -1406,8 +1533,9 @@ function hashFile(file, fileSystem = fs) {
 
 function buildManifest({ config, evidence, generatedAt, fileSystem = fs }) {
   const normalized = normalizeEvidence(evidence);
+  const profile = resolveSchemaProfile(normalized.migrations);
   const schema = hashFile(config.files.schema, fileSystem);
-  const data = BACKUP_TABLES.map((table) => {
+  const data = profile.backupTables.map((table) => {
     const metadata = hashFile(config.files.data[table], fileSystem);
     if (metadata.size < 1) fail("backup_data_file_empty");
     return Object.freeze({
@@ -1418,7 +1546,7 @@ function buildManifest({ config, evidence, generatedAt, fileSystem = fs }) {
     });
   });
   return Object.freeze({
-    format: 2,
+    format: 3,
     kind: "ia4tube-social-postgresql-logical-bundle",
     generatedAt: new Date(generatedAt || Date.now()).toISOString(),
     source: Object.freeze({
@@ -1427,6 +1555,7 @@ function buildManifest({ config, evidence, generatedAt, fileSystem = fs }) {
       environment: config.environment,
       postgresMajor: POSTGRES_MAJOR
     }),
+    schemaProfile: schemaProfileContract(profile),
     files: Object.freeze({
       schema: Object.freeze({
         path: config.files.schema,
@@ -1452,8 +1581,13 @@ function readSmallJson(file, fileSystem = fs) {
   }
 }
 
-function materializeExtractedManifest(extracted, fileSystem = fs) {
-  const names = bundleArchiveNames();
+function materializeExtractedManifest(
+  extracted,
+  schemaProfile,
+  fileSystem = fs
+) {
+  const profile = schemaProfileById(schemaProfile);
+  const names = bundleArchiveNames(profile);
   if (
     !extracted ||
     !Array.isArray(extracted.files) ||
@@ -1469,10 +1603,12 @@ function materializeExtractedManifest(extracted, fileSystem = fs) {
     byName.get(BUNDLE_ARCHIVE_MANIFEST),
     fileSystem
   );
+  const storedProfile = requireManifestSchemaProfile(stored);
   if (
+    storedProfile.id !== profile.id ||
     !stored?.files?.schema ||
     !Array.isArray(stored?.files?.data) ||
-    stored.files.data.length !== BACKUP_TABLES.length
+    stored.files.data.length !== profile.backupTables.length
   ) {
     fail("restore_manifest_invalid");
   }
@@ -1488,7 +1624,7 @@ function materializeExtractedManifest(extracted, fileSystem = fs) {
           Object.freeze({
             ...entry,
             path: byName.get(
-              bundleDataArchiveName(BACKUP_TABLES[index], index)
+              bundleDataArchiveName(profile.backupTables[index], index)
             )
           })
         )
@@ -1500,7 +1636,9 @@ function materializeExtractedManifest(extracted, fileSystem = fs) {
 function validateManifestFiles(manifest, options = {}) {
   const fileSystem = options.fileSystem || fs;
   if (
-    manifest?.format !== 2 ||
+    ![2, 3].includes(manifest?.format) ||
+    (manifest?.format === 2 && manifest.schemaProfile !== undefined) ||
+    (manifest?.format === 3 && !manifest.schemaProfile) ||
     manifest?.kind !== "ia4tube-social-postgresql-logical-bundle" ||
     !manifest.source ||
     manifest.source.postgresMajor !== POSTGRES_MAJOR ||
@@ -1516,6 +1654,7 @@ function validateManifestFiles(manifest, options = {}) {
   ) {
     fail("restore_manifest_invalid");
   }
+  const profile = requireManifestSchemaProfile(manifest);
   if (
     options.sourceFingerprint &&
     !equalDigest(manifest.source.fingerprint, options.sourceFingerprint)
@@ -1530,9 +1669,9 @@ function validateManifestFiles(manifest, options = {}) {
     ...(manifest.files?.data || [])
   ];
   if (
-    entries.length !== BACKUP_TABLES.length + 1 ||
+    entries.length !== profile.backupTables.length + 1 ||
     manifest.files.data.some(
-      (entry, index) => entry.table !== BACKUP_TABLES[index]
+      (entry, index) => entry.table !== profile.backupTables[index]
     )
   ) {
     fail("restore_manifest_invalid");
@@ -1556,7 +1695,7 @@ function validateManifestFiles(manifest, options = {}) {
       fail("restore_archive_integrity_failed");
     }
   }
-  const normalized = normalizeEvidence(manifest.evidence);
+  const normalized = normalizeEvidence(manifest.evidence, profile);
   if (!equalDigest(evidenceDigest(normalized), manifest.evidenceSha256)) {
     fail("restore_manifest_integrity_failed");
   }
@@ -1565,7 +1704,8 @@ function validateManifestFiles(manifest, options = {}) {
 
 function compareRestoredEvidence(expected, actual) {
   const normalizedExpected = normalizeEvidence(expected);
-  const normalizedActual = normalizeEvidence(actual);
+  const profile = resolveSchemaProfile(normalizedExpected.migrations);
+  const normalizedActual = normalizeEvidence(actual, profile);
   if (
     !equalDigest(
       evidenceDigest(normalizedExpected),
@@ -1577,10 +1717,14 @@ function compareRestoredEvidence(expected, actual) {
   return true;
 }
 
-function assertSchemaArchiveList(text) {
+function assertSchemaArchiveList(
+  text,
+  schemaProfile = CURRENT_SCHEMA_PROFILE
+) {
+  const profile = schemaProfileById(schemaProfile);
   const output = String(text || "");
   if (output.includes(POLICY_PREFIX)) fail("backup_transient_policy_archived");
-  for (const table of BACKUP_TABLES) {
+  for (const table of profile.backupTables) {
     const [schema, name] = table.split(".");
     if (!output.includes(schema) || !output.includes(name)) {
       fail("backup_schema_archive_incomplete");
@@ -1685,6 +1829,17 @@ function createPostgresBackupOperator(pool) {
     );
   }
 
+  async function inspectSchemaProfile() {
+    const result = await querySafe(
+      [
+        "SELECT version, checksum_sha256 AS checksum",
+        "FROM ia4tube_migrations.schema_migrations",
+        "ORDER BY version"
+      ].join("\n")
+    );
+    return resolveSchemaProfile(result.rows || []);
+  }
+
   async function inspectPrincipal(connection) {
     const result = await querySafe(
       [
@@ -1740,6 +1895,7 @@ function createPostgresBackupOperator(pool) {
   async function preflight(config) {
     await inspectPrincipal(config.operator);
     await inspectPermanentLogins(config);
+    return inspectSchemaProfile();
   }
 
   async function preflightEmptyTarget(config) {
@@ -1834,7 +1990,11 @@ function createPostgresBackupOperator(pool) {
     }
   }
 
-  async function collectCatalogEvidence(config) {
+  async function collectCatalogEvidence(
+    config,
+    schemaProfile = CURRENT_SCHEMA_PROFILE
+  ) {
+    const profile = schemaProfileById(schemaProfile);
     const permanentLogins = await inspectPermanentLogins(config);
     const state = await querySafe(
       [
@@ -1853,7 +2013,7 @@ function createPostgresBackupOperator(pool) {
         "  AND relation.relkind IN ('r', 'p')",
         "  AND relation.relname = ANY($1::text[])"
       ].join("\n"),
-      [RLS_TABLES]
+      [profile.rlsTables]
     );
     const roles = await querySafe(
       [
@@ -1976,7 +2136,7 @@ function createPostgresBackupOperator(pool) {
       membershipRows[0].set_option;
     return Object.freeze({
       rlsTableCount:
-        Number(stateRow.enabled_rls_table_count) === RLS_TABLES.length
+        Number(stateRow.enabled_rls_table_count) === profile.rlsTables.length
           ? Number(stateRow.rls_table_count)
           : -1,
       forcedRlsTableCount: Number(stateRow.forced_rls_table_count),
@@ -2103,13 +2263,13 @@ async function runLogicalBackup({
       fileSystem
     });
     assertFreshOutput(config, fileSystem);
-    await operator.preflight(config);
+    const schemaProfile = schemaProfileById(await operator.preflight(config));
     await operator.assertTransientPoliciesAbsent();
 
     const data = psqlPlan(
       config.tools.psql,
       config.source,
-      createBackupDataScript(config),
+      createBackupDataScript(config, schemaProfile),
       rootCertificateBundle,
       fileSystem
     );
@@ -2128,19 +2288,22 @@ async function runLogicalBackup({
       runTool,
       schemaListPlan(config.tools.restore, config.files.schemaPartial)
     );
-    assertSchemaArchiveList(listing.stdout);
+    assertSchemaArchiveList(listing.stdout, schemaProfile);
 
     const snapshotEvidence = readSmallJson(
       config.files.evidencePartial,
       fileSystem
     );
-    const catalog = await operator.collectCatalogEvidence(config);
+    const catalog = await operator.collectCatalogEvidence(
+      config,
+      schemaProfile
+    );
     const evidence = normalizeEvidence({
       ...snapshotEvidence,
       catalog
-    });
+    }, schemaProfile);
 
-    for (const table of BACKUP_TABLES) {
+    for (const table of schemaProfile.backupTables) {
       const partial = config.files.dataPartial[table];
       if (!fileSystem.statSync(partial).isFile()) {
         fail("backup_data_file_missing");
@@ -2166,9 +2329,9 @@ async function runLogicalBackup({
       expectedDirectory: config.workspace.path,
       sourceFingerprint: config.sourceFingerprint
     });
-    const archiveNames = bundleArchiveNames();
+    const archiveNames = bundleArchiveNames(schemaProfile);
     encrypted = await createEncryptedBundle({
-      entries: bundleArchiveEntries(config),
+      entries: bundleArchiveEntries(config, schemaProfile),
       expectedNames: archiveNames,
       outputPath: config.files.bundle,
       label: config.label,
@@ -2195,6 +2358,7 @@ async function runLogicalBackup({
         compareEntryEvidence(encrypted.entries, extracted.files);
         const roundTripManifest = materializeExtractedManifest(
           extracted,
+          schemaProfile,
           fileSystem
         );
         validateManifestFiles(roundTripManifest, {
@@ -2268,6 +2432,35 @@ async function runLogicalBackup({
   }
 }
 
+async function withExtractedVersionedBundle(options) {
+  let profileMismatch;
+  for (const profile of [...SCHEMA_PROFILES].reverse()) {
+    try {
+      return await withExtractedEncryptedBundle({
+        ...options,
+        expectedNames: bundleArchiveNames(profile),
+        async operation(extracted) {
+          return options.operation(extracted, profile);
+        }
+      });
+    } catch (error) {
+      if (
+        error instanceof EncryptedBackupBundleError &&
+        [
+          "backup_bundle_allowlist_incomplete",
+          "backup_bundle_tar_entry_invalid"
+        ].includes(error.code)
+      ) {
+        profileMismatch = error;
+        continue;
+      }
+      throw error;
+    }
+  }
+  if (profileMismatch) fail("restore_bundle_schema_profile_unknown");
+  fail("restore_encrypted_bundle_invalid");
+}
+
 async function runLogicalRestore({
   config,
   operator,
@@ -2327,22 +2520,22 @@ async function runLogicalRestore({
       workspace: rootWorkspace,
       fileSystem
     });
-    const result = await withExtractedEncryptedBundle({
+    const result = await withExtractedVersionedBundle({
       containerPath: config.bundlePath,
-      expectedNames: bundleArchiveNames(),
       expectedLabel: config.label,
       expectedSourceFingerprint: config.sourceFingerprint,
       workDirectory: config.workDirectory,
       workspacePurpose: "restore",
       bundleKey: config.bundleKey,
       fileSystem,
-      async operation(extracted) {
+      async operation(extracted, schemaProfile) {
         const evidencePartial = path.join(
           extracted.directory,
           `${config.label}.restored-evidence.json.partial`
         );
         const manifest = materializeExtractedManifest(
           extracted,
+          schemaProfile,
           fileSystem
         );
         const expected = validateManifestFiles(manifest, {
@@ -2354,7 +2547,7 @@ async function runLogicalRestore({
           runTool,
           schemaListPlan(config.tools.restore, manifest.files.schema.path)
         );
-        assertSchemaArchiveList(listing.stdout);
+        assertSchemaArchiveList(listing.stdout, schemaProfile);
 
         const schema = restoreSchemaPlan(
           config,
@@ -2390,8 +2583,14 @@ async function runLogicalRestore({
         assertSecretFreePlan(evidencePlan, passwords);
         await runToolChecked(runTool, evidencePlan);
         const snapshot = readSmallJson(evidencePartial, fileSystem);
-        const catalog = await operator.collectCatalogEvidence(config);
-        const actual = normalizeEvidence({ ...snapshot, catalog });
+        const catalog = await operator.collectCatalogEvidence(
+          config,
+          schemaProfile
+        );
+        const actual = normalizeEvidence(
+          { ...snapshot, catalog },
+          schemaProfile
+        );
         compareRestoredEvidence(expected, actual);
 
         if (
@@ -2466,11 +2665,14 @@ module.exports = {
   MIGRATION_LOCK_ID,
   MIGRATOR_ROLE,
   OWNER_ROLE,
+  PRE_0004_BACKUP_TABLES,
+  PRE_0004_RLS_TABLES,
   POLICY_PREFIX,
   POSTGRES_MAJOR,
   RESTORE_APPROVAL,
   RLS_TABLES,
   RUNTIME_ROLE,
+  SCHEMA_PROFILES,
   SYSTEM_ROOT_BUNDLE_NAME,
   assertSchemaArchiveList,
   assertSecretFreePlan,
@@ -2492,6 +2694,7 @@ module.exports = {
   loadRestoreConfig,
   materializeExtractedManifest,
   normalizeEvidence,
+  resolveSchemaProfile,
   psqlPlan,
   restoreSchemaPlan,
   runLogicalBackup,

@@ -400,6 +400,28 @@ test("only published carries a confirmed provider reference", () => {
   );
 });
 
+test("provider references are opaque identifiers and never URLs or secret-shaped data", () => {
+  for (const reference of [
+    "https://synthetic.invalid/container?access_token=forbidden",
+    "Bearer.synthetic-secret",
+    "oauth_code:forbidden",
+    '{"id":"raw-provider-response"}',
+    "identifier with whitespace"
+  ]) {
+    assert.throws(
+      () => assertPublicationConfirmation({
+        state: "published",
+        confirmedProviderReference: reference
+      }),
+      { code: "connector_contract_invalid" }
+    );
+  }
+  assert.doesNotThrow(() => assertPublicationConfirmation({
+    state: "provider_confirming",
+    reconciliationReference: "container:17890000000000000"
+  }));
+});
+
 test("pending provider result is never treated as published", async () => {
   const h = harness({
     publishSequence: [{
@@ -643,7 +665,7 @@ test("cached idempotency result is revalidated before it can reach a caller", as
       state: "authorization_pending",
       account: null,
       revision: 2,
-      authorizationHandle: "synthetic-authorization-safe",
+      authorizationHandle: uuid(),
       token: "synthetic-cached-secret-must-not-escape"
     }
   });
@@ -657,6 +679,33 @@ test("cached idempotency result is revalidated before it can reach a caller", as
       .includes("synthetic-cached-secret-must-not-escape"),
     false
   );
+});
+
+test("OAuth state-shaped text cannot be reused as a durable authorization handle", async () => {
+  const h = harness();
+  const context = contextFor("synthetic-a");
+  const operationId = uuid();
+  const connectionId = uuid();
+  h.store.seedIdempotency(context, {
+    capability: "beginAuthorization",
+    operationId,
+    digest: inputDigest({ connectionId }),
+    errorCode: null,
+    result: {
+      connectionId,
+      provider: "instagram",
+      state: "authorization_pending",
+      account: null,
+      revision: 2,
+      authorizationHandle:
+        "eyJzdGF0ZSI6InN5bnRoZXRpYy1vYXV0aC1zdGF0ZSJ9"
+    }
+  });
+  await assert.rejects(
+    h.service.beginAuthorization(context, { operationId, connectionId }),
+    { code: "connector_contract_invalid" }
+  );
+  assert.equal(h.connector.callCount("beginAuthorization"), 0);
 });
 
 test("stored account rows are allowlisted before being returned", async () => {
@@ -724,6 +773,7 @@ test("publication media must be resolved as company-owned before connector invoc
   const { connectionId } = await connectAccount(h, contextA);
   const mediaId = "synthetic-media-owned-by-b";
   h.media.authorize(contextB, mediaId);
+  const before = h.store.snapshot(contextA);
   await assert.rejects(
     h.service.publishImage(contextA, {
       operationId: uuid(),
@@ -734,6 +784,9 @@ test("publication media must be resolved as company-owned before connector invoc
     { code: "resource_unavailable" }
   );
   assert.equal(h.connector.callCount("publishImage"), 0);
+  const after = h.store.snapshot(contextA);
+  assert.equal(after.publications.length, 0);
+  assert.equal(after.idempotencyCount, before.idempotencyCount);
 });
 
 test("late out-of-order pending response cannot regress a published result", async () => {
@@ -984,11 +1037,15 @@ test("audit metadata is tenant-bound and contains only normalized fields", async
     "actorUserId",
     "auditEventId",
     "companyId",
+    "connectionId",
     "correlationId",
     "detailsCode",
     "outcome",
-    "provider"
+    "provider",
+    "publicationId"
   ]);
+  assert.equal(typeof event.connectionId, "string");
+  assert.equal(event.publicationId, null);
 });
 
 test("synthetic connector cannot be registered in staging or production", () => {

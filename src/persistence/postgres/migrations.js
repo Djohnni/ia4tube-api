@@ -22,6 +22,12 @@ const PRODUCTION_APPROVAL =
   "APPLY_SOCIAL_MIGRATIONS_TO_PRODUCTION_WITH_VERIFIED_BACKUP";
 const GLOBAL_VAULT_REGISTRY_MIGRATION =
   "0003_global_vault_key_registry";
+const SOCIAL_CONNECTOR_PERSISTENCE_MIGRATION =
+  "0004_social_connector_persistence";
+const SOCIAL_CONNECTION_STATUS_CONSTRAINT_REPLACEMENTS = Object.freeze([
+  "social_connections_status_allowed",
+  "social_connections_status_timestamp_consistent"
+]);
 const GLOBAL_VAULT_BACKFILL_POLICY =
   "social_credentials_key_registry_backfill";
 const GLOBAL_VAULT_BACKFILL_POLICY_CREATE = [
@@ -76,10 +82,75 @@ function canonicalSql(filePath) {
   return content;
 }
 
+function stripApprovedConstraintReplacement(sql, version) {
+  const dropMarkers = [...sql.matchAll(/\bDROP\s+CONSTRAINT\b/gi)];
+  if (
+    dropMarkers.length === 0 ||
+    version !== SOCIAL_CONNECTOR_PERSISTENCE_MIGRATION
+  ) {
+    return sql;
+  }
+  if (
+    dropMarkers.length !==
+      SOCIAL_CONNECTION_STATUS_CONSTRAINT_REPLACEMENTS.length ||
+    /\bDROP\s+CONSTRAINT\s+IF\s+EXISTS\b/i.test(sql)
+  ) {
+    return sql;
+  }
+
+  const statementPattern =
+    /\bALTER\s+TABLE\s+ia4tube_social\.social_connections\b[\s\S]*?;/gi;
+  const statements = [...sql.matchAll(statementPattern)];
+  const statement = statements.find((candidate) => {
+    const start = candidate.index;
+    const end = start + candidate[0].length;
+    return dropMarkers.every(
+      (marker) => marker.index >= start && marker.index < end
+    );
+  });
+  if (!statement) return sql;
+
+  const dropClausePattern =
+    /\bDROP\s+CONSTRAINT\s+([a-z_][a-z0-9_]*)\s*,/gi;
+  const dropClauses = [...statement[0].matchAll(dropClausePattern)];
+  const droppedNames = dropClauses.map((match) => match[1].toLowerCase());
+  if (
+    dropClauses.length !== dropMarkers.length ||
+    new Set(droppedNames).size !== droppedNames.length ||
+    SOCIAL_CONNECTION_STATUS_CONSTRAINT_REPLACEMENTS.some(
+      (constraint) => !droppedNames.includes(constraint)
+    )
+  ) {
+    return sql;
+  }
+
+  for (const constraint of SOCIAL_CONNECTION_STATUS_CONSTRAINT_REPLACEMENTS) {
+    const escaped = constraint.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const replacementPattern = new RegExp(
+      `\\bADD\\s+CONSTRAINT\\s+${escaped}\\s+CHECK\\s*\\(`,
+      "gi"
+    );
+    if ([...statement[0].matchAll(replacementPattern)].length !== 1) {
+      return sql;
+    }
+  }
+
+  const sanitizedStatement = statement[0].replace(dropClausePattern, "");
+  return (
+    sql.slice(0, statement.index) +
+    sanitizedStatement +
+    sql.slice(statement.index + statement[0].length)
+  );
+}
+
 function assertNonDestructiveSql(sql, version) {
   const withoutComments = sql
     .replace(/\/\*[\s\S]*?\*\//g, " ")
     .replace(/--[^\n]*/g, " ");
+  const sanitized = stripApprovedConstraintReplacement(
+    withoutComments,
+    version
+  );
   const forbidden = [
     /\bDROP\s+(TABLE|SCHEMA|DATABASE|COLUMN|CONSTRAINT|INDEX|TYPE)\b/i,
     /\bTRUNCATE\b/i,
@@ -87,7 +158,7 @@ function assertNonDestructiveSql(sql, version) {
     /\bALTER\s+TABLE\b[\s\S]*?\bDROP\b/i,
     /\bCASCADE\b/i
   ];
-  if (forbidden.some((pattern) => pattern.test(withoutComments))) {
+  if (forbidden.some((pattern) => pattern.test(sanitized))) {
     postgresFail(
       "destructive_migration_refused",
       `Migration ${version} contem DDL destrutiva.`
@@ -1074,6 +1145,7 @@ module.exports = {
   GLOBAL_VAULT_BACKFILL_POLICY_CREATE,
   GLOBAL_VAULT_BACKFILL_POLICY_DROP,
   GLOBAL_VAULT_REGISTRY_MIGRATION,
+  SOCIAL_CONNECTOR_PERSISTENCE_MIGRATION,
   LEDGER_NAME,
   MIGRATION_FILE_PATTERN,
   PRODUCTION_APPROVAL,

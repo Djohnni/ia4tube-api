@@ -24,12 +24,15 @@ const BLOCKING_CONNECTION_STATES = new Set([
   "authorization_pending",
   "connected",
   "reconnect_required",
-  "disconnecting"
+  "disconnecting",
+  "failed"
 ]);
 const REQUIRED_SCOPE_METHODS = Object.freeze([
   "getConnection",
   "findBlockingConnection",
   "saveConnection",
+  "activateConnectionFromAuthorization",
+  "ensureDisconnected",
   "getPublication",
   "savePublication",
   "beginIdempotency",
@@ -229,9 +232,8 @@ function validateConnectionResult(context, value, includeAuthorization) {
     revision: result.revision
   };
   if (includeAuthorization) {
-    normalized.authorizationHandle = safeText(
-      result.authorizationHandle,
-      { max: 500 }
+    normalized.authorizationHandle = operationUuid(
+      result.authorizationHandle
     );
   }
   return deepFreeze(normalized);
@@ -319,18 +321,26 @@ function createSocialConnectorService(options = {}) {
     return requireStoreScope(store.scope(context));
   }
 
-  async function emit(context, action, outcome, detailsCode = null) {
+  async function emit(
+    context,
+    action,
+    outcome,
+    detailsCode = null,
+    references = {}
+  ) {
     const event = Object.freeze({
       companyId: context.companyId,
       actorUserId: context.userId,
       provider: context.provider,
       auditEventId: context.auditEventId,
       correlationId: context.correlationId,
+      connectionId: references.connectionId || null,
+      publicationId: references.publicationId || null,
       action,
       outcome,
       detailsCode
     });
-    await audit.append(event);
+    await audit.append(context, event);
     if (logger && typeof logger.info === "function") {
       logger.info(Object.freeze({
         component: "social_connector",
@@ -356,12 +366,24 @@ function createSocialConnectorService(options = {}) {
       connectorFail("connector_contract_invalid");
     }
     const scope = scopeFor(context);
-    const digest = inputDigest(payload);
-    const reservation = await scope.beginIdempotency({
+    const digestPayload = clone(payload);
+    if (
+      digestPayload &&
+      typeof digestPayload === "object" &&
+      !Array.isArray(digestPayload)
+    ) {
+      delete digestPayload.operationId;
+    }
+    const digest = inputDigest(digestPayload);
+    const reservationInput = {
       capability,
       operationId,
       digest
-    });
+    };
+    if (capability === "publishImage") {
+      reservationInput.payload = clone(payload);
+    }
+    const reservation = await scope.beginIdempotency(reservationInput);
     if (!reservation || typeof reservation !== "object") {
       connectorFail("connector_contract_invalid");
     }
@@ -444,17 +466,18 @@ function createSocialConnectorService(options = {}) {
         operationId,
         { connectionId },
         async (scope) => {
-          let connection = await scope.runExclusive(async () => {
-            let reserved = await scope.getConnection(connectionId);
+          let connection = await scope.runExclusive(async (transactionScope) => {
+            const exclusive = requireStoreScope(transactionScope);
+            let reserved = await exclusive.getConnection(connectionId);
             if (reserved) {
               reserved = assertConnection(trusted, reserved);
             } else {
-              const blocking = await scope.findBlockingConnection(
+              const blocking = await exclusive.findBlockingConnection(
                 trusted.provider,
                 connectionId
               );
               if (blocking) connectorFail("active_connection_exists");
-              reserved = await saveConnection(scope, trusted, {
+              reserved = await saveConnection(exclusive, trusted, {
                 companyId: trusted.companyId,
                 id: connectionId,
                 provider: trusted.provider,
@@ -463,7 +486,7 @@ function createSocialConnectorService(options = {}) {
                 revision: 1
               }, null);
             }
-            const blocking = await scope.findBlockingConnection(
+            const blocking = await exclusive.findBlockingConnection(
               trusted.provider,
               connectionId
             );
@@ -476,7 +499,7 @@ function createSocialConnectorService(options = {}) {
               connectorFail("active_connection_exists");
             }
             return moveConnection(
-              scope,
+              exclusive,
               trusted,
               reserved,
               "authorization_pending",
@@ -496,9 +519,8 @@ function createSocialConnectorService(options = {}) {
             }
             return Object.freeze({
               ...connectionView(connection),
-              authorizationHandle: safeText(
-                providerResult.authorizationHandle,
-                { max: 500 }
+              authorizationHandle: operationUuid(
+                providerResult.authorizationHandle
               )
             });
           } catch (error) {
@@ -508,11 +530,19 @@ function createSocialConnectorService(options = {}) {
         },
         (value) => validateConnectionResult(trusted, value, true)
       );
-      await emit(trusted, "social.authorization.begin", "succeeded");
+      await emit(trusted, "social.authorization.begin", "succeeded", null, {
+        connectionId
+      });
       return result;
     } catch (error) {
       const normalized = normalizeConnectorError(error);
-      await emit(trusted, "social.authorization.begin", "failed", normalized.code);
+      await emit(
+        trusted,
+        "social.authorization.begin",
+        "failed",
+        normalized.code,
+        { connectionId }
+      );
       throw normalized;
     }
   }
@@ -523,7 +553,7 @@ function createSocialConnectorService(options = {}) {
     strictObject(input, ["operationId", "connectionId", "authorizationHandle"]);
     const operationId = operationUuid(input.operationId);
     const connectionId = operationUuid(input.connectionId);
-    const authorizationHandle = safeText(input.authorizationHandle, { max: 500 });
+    const authorizationHandle = operationUuid(input.authorizationHandle);
     try {
       const result = await runIdempotent(
         trusted,
@@ -550,25 +580,34 @@ function createSocialConnectorService(options = {}) {
             const normalizedAccount = normalizeProfessionalAccount(
               providerResult.account
             );
-            connection = await scope.runExclusive(async () => {
+            connection = await scope.runExclusive(async (transactionScope) => {
+              const exclusive = requireStoreScope(transactionScope);
               const current = assertConnection(
                 trusted,
-                await scope.getConnection(connectionId)
+                await exclusive.getConnection(connectionId)
               );
               if (current.state !== "authorization_pending") {
                 connectorFail("state_transition_invalid");
               }
-              const blocking = await scope.findBlockingConnection(
+              const blocking = await exclusive.findBlockingConnection(
                 trusted.provider,
                 connectionId
               );
               if (blocking) connectorFail("active_connection_exists");
-              return moveConnection(
-                scope,
+              return assertConnection(
                 trusted,
-                current,
-                "connected",
-                { account: normalizedAccount }
+                await exclusive.activateConnectionFromAuthorization(
+                  {
+                    companyId: trusted.companyId,
+                    id: current.id,
+                    provider: trusted.provider,
+                    state: "connected",
+                    account: normalizedAccount,
+                    revision: current.revision + 1
+                  },
+                  current.revision,
+                  authorizationHandle
+                )
               );
             });
             return connectionView(connection);
@@ -586,11 +625,19 @@ function createSocialConnectorService(options = {}) {
         },
         (value) => validateConnectionResult(trusted, value, false)
       );
-      await emit(trusted, "social.account.discover", "succeeded");
+      await emit(trusted, "social.account.discover", "succeeded", null, {
+        connectionId
+      });
       return result;
     } catch (error) {
       const normalized = normalizeConnectorError(error);
-      await emit(trusted, "social.account.discover", "failed", normalized.code);
+      await emit(
+        trusted,
+        "social.account.discover",
+        "failed",
+        normalized.code,
+        { connectionId }
+      );
       throw normalized;
     }
   }
@@ -666,6 +713,13 @@ function createSocialConnectorService(options = {}) {
     }
     if (result.outcome === "provider_confirming") {
       if (publication.state === "provider_confirming") {
+        if (
+          publication.reconciliationReference &&
+          result.reconciliationReference !==
+            publication.reconciliationReference
+        ) {
+          connectorFail("provider_result_unknown");
+        }
         return publication;
       }
       return movePublication(
@@ -681,7 +735,13 @@ function createSocialConnectorService(options = {}) {
       reconciliationReference:
         result.outcome === "published"
           ? publication.reconciliationReference || null
-          : null
+          : null,
+      errorCode:
+        result.outcome === "failed_temporary"
+          ? "provider_temporary_failure"
+          : result.outcome === "failed_permanent"
+            ? "provider_permanent_failure"
+            : null
     });
   }
 
@@ -690,6 +750,19 @@ function createSocialConnectorService(options = {}) {
     assertNoAuthorityFields(input);
     const clean = publicationInput(input);
     try {
+      const ownedMedia = await media.resolveOwnedJpeg(
+        trusted,
+        clean.image.mediaId
+      );
+      if (
+        !ownedMedia ||
+        typeof ownedMedia !== "object" ||
+        ownedMedia.companyId !== trusted.companyId ||
+        ownedMedia.mediaId !== clean.image.mediaId ||
+        ownedMedia.mimeType !== "image/jpeg"
+      ) {
+        connectorFail("resource_unavailable");
+      }
       const result = await runIdempotent(
         trusted,
         "publishImage",
@@ -703,19 +776,6 @@ function createSocialConnectorService(options = {}) {
           if (connection.state !== "connected") {
             connectorFail("credential_unavailable");
           }
-          const ownedMedia = await media.resolveOwnedJpeg(
-            trusted,
-            clean.image.mediaId
-          );
-          if (
-            !ownedMedia ||
-            typeof ownedMedia !== "object" ||
-            ownedMedia.companyId !== trusted.companyId ||
-            ownedMedia.mediaId !== clean.image.mediaId ||
-            ownedMedia.mimeType !== "image/jpeg"
-          ) {
-            connectorFail("resource_unavailable");
-          }
           let publication = await scope.getPublication(clean.publicationId);
           if (publication) {
             publication = assertPublication(trusted, publication);
@@ -727,7 +787,8 @@ function createSocialConnectorService(options = {}) {
                 scope,
                 trusted,
                 publication,
-                "publishing"
+                "publishing",
+                { errorCode: null }
               );
             } else if (publication.state !== "ready") {
               connectorFail("state_transition_invalid");
@@ -791,7 +852,17 @@ function createSocialConnectorService(options = {}) {
                 : normalized.code === "provider_result_unknown"
                   ? "provider_confirming"
                   : "failed_temporary";
-              await movePublication(scope, trusted, publication, nextState);
+              await movePublication(
+                scope,
+                trusted,
+                publication,
+                nextState,
+                {
+                  errorCode: nextState.startsWith("failed_")
+                    ? normalized.code
+                    : null
+                }
+              );
             }
             if ([
               "authorization_expired",
@@ -810,11 +881,23 @@ function createSocialConnectorService(options = {}) {
         },
         (value) => validatePublicationResult(trusted, value)
       );
-      await emit(trusted, "social.publication.publish", "succeeded");
+      await emit(trusted, "social.publication.publish", "succeeded", null, {
+        connectionId: clean.connectionId,
+        publicationId: clean.publicationId
+      });
       return result;
     } catch (error) {
       const normalized = normalizeConnectorError(error);
-      await emit(trusted, "social.publication.publish", "failed", normalized.code);
+      await emit(
+        trusted,
+        "social.publication.publish",
+        "failed",
+        normalized.code,
+        {
+          connectionId: clean.connectionId,
+          publicationId: clean.publicationId
+        }
+      );
       throw normalized;
     }
   }
@@ -882,11 +965,19 @@ function createSocialConnectorService(options = {}) {
         },
         (value) => validatePublicationResult(trusted, value)
       );
-      await emit(trusted, "social.publication.reconcile", "succeeded");
+      await emit(trusted, "social.publication.reconcile", "succeeded", null, {
+        publicationId: clean.publicationId
+      });
       return result;
     } catch (error) {
       const normalized = normalizeConnectorError(error);
-      await emit(trusted, "social.publication.reconcile", "failed", normalized.code);
+      await emit(
+        trusted,
+        "social.publication.reconcile",
+        "failed",
+        normalized.code,
+        { publicationId: clean.publicationId }
+      );
       throw normalized;
     }
   }
@@ -915,6 +1006,10 @@ function createSocialConnectorService(options = {}) {
             await scope.getConnection(clean.connectionId)
           );
           if (connection.state === "disconnected") {
+            connection = assertConnection(
+              trusted,
+              await scope.ensureDisconnected(clean.connectionId)
+            );
             return connectionView(connection);
           }
           if (connection.state === "authorization_pending") {
@@ -963,11 +1058,19 @@ function createSocialConnectorService(options = {}) {
         },
         (value) => validateConnectionResult(trusted, value, false)
       );
-      await emit(trusted, "social.connection.disconnect", "succeeded");
+      await emit(trusted, "social.connection.disconnect", "succeeded", null, {
+        connectionId: clean.connectionId
+      });
       return result;
     } catch (error) {
       const normalized = normalizeConnectorError(error);
-      await emit(trusted, "social.connection.disconnect", "failed", normalized.code);
+      await emit(
+        trusted,
+        "social.connection.disconnect",
+        "failed",
+        normalized.code,
+        { connectionId: clean.connectionId }
+      );
       throw normalized;
     }
   }
