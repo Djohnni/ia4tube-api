@@ -7,10 +7,20 @@ const {
   SESSION_ISSUER
 } = require("./reauth");
 
+const AUTHENTICATED_SOCIAL_PRINCIPALS = new WeakSet();
+
 function audienceMatches(audience) {
   return audience === SESSION_AUDIENCE ||
     (Array.isArray(audience) && audience.length === 1 &&
       audience[0] === SESSION_AUDIENCE);
+}
+
+function isAuthenticatedSocialPrincipal(value) {
+  return Boolean(
+    value &&
+    typeof value === "object" &&
+    AUTHENTICATED_SOCIAL_PRINCIPALS.has(value)
+  );
 }
 
 function createSocialAuthAdapter(identityConfig = {}) {
@@ -40,7 +50,7 @@ function createSocialAuthAdapter(identityConfig = {}) {
       legacyCompanyId: claims.company_id,
       legacyUserId: claims.sub
     });
-    return Object.freeze({
+    const principal = Object.freeze({
       tokenVersion: claims.token_version,
       issuer: SESSION_ISSUER,
       audience: SESSION_AUDIENCE,
@@ -50,6 +60,8 @@ function createSocialAuthAdapter(identityConfig = {}) {
       userId: identity.userId,
       derivationVersion: identity.derivationVersion
     });
+    AUTHENTICATED_SOCIAL_PRINCIPALS.add(principal);
+    return principal;
   }
 
   return Object.freeze({ fromVerifiedJwt });
@@ -57,5 +69,6 @@ function createSocialAuthAdapter(identityConfig = {}) {
 
 module.exports = {
   audienceMatches,
-  createSocialAuthAdapter
+  createSocialAuthAdapter,
+  isAuthenticatedSocialPrincipal
 };
