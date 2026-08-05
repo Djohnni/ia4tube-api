@@ -11,13 +11,15 @@ const {
 } = require("../scripts/social-3a0p-local-physical-harness");
 const {
   commandLineEntry,
+  POSTGRES_PACKAGE_NAME,
+  PRODUCT_COMMIT,
   parseCommandLine,
   prepareTrustedWindowsEntry,
   validateTrustedWindowsEntryInput
 } = require("../scripts/social-3a0p-local-windows-entry");
 
 const HASH = "a".repeat(64);
-const PACKAGE = path.resolve("C:\\synthetic\\postgresql-18.4.zip");
+const PACKAGE = path.resolve(`C:\\synthetic\\${POSTGRES_PACKAGE_NAME}`);
 
 function validInput(overrides = {}) {
   return {
@@ -56,6 +58,7 @@ test("aprovação, caminho, hash e porta falham fechado antes da preparação", 
     "postgresql-18.4.zip",
     "\\\\server\\share\\postgresql-18.4.zip",
     "\\\\?\\C:\\postgresql-18.4.zip",
+    path.resolve("C:\\synthetic\\postgresql-18.4.zip"),
     `${PACKAGE} `
   ]) {
     assert.throws(
@@ -118,7 +121,7 @@ test("preparação confiável copia o pacote por hash e cancela sem executar Pos
   skip: process.platform !== "win32"
 }, async () => {
   const parent = fs.mkdtempSync(path.join(os.tmpdir(), "ia4tube-entry-source-"));
-  const source = path.join(parent, "postgresql-18.4.zip");
+  const source = path.join(parent, POSTGRES_PACKAGE_NAME);
   const bytes = Buffer.from("synthetic-package-not-executed", "utf8");
   fs.writeFileSync(source, bytes, { flag: "wx" });
   const expectedSha256 = crypto.createHash("sha256").update(bytes).digest("hex");
@@ -131,6 +134,10 @@ test("preparação confiável copia o pacote por hash e cancela sem executar Pos
     });
     assert.deepEqual(prepared.summary, {
       packageSha256: expectedSha256,
+      packageName: POSTGRES_PACKAGE_NAME,
+      packageBuild: "18.4-2",
+      sourceOwnedByRun: false,
+      workingCopyOwnedByRun: true,
       port: 64995,
       postgresVersion: "18.4",
       targetHost: "127.0.0.1"
@@ -150,7 +157,7 @@ test("hash incorreto é recusado antes de criar uma execução física", {
   skip: process.platform !== "win32"
 }, async () => {
   const parent = fs.mkdtempSync(path.join(os.tmpdir(), "ia4tube-entry-hash-"));
-  const source = path.join(parent, "postgresql-18.4.zip");
+  const source = path.join(parent, POSTGRES_PACKAGE_NAME);
   fs.writeFileSync(source, "synthetic", { flag: "wx" });
   try {
     await assert.rejects(
@@ -171,7 +178,7 @@ test("entrada confiável ignora SystemRoot e PATH manipulados pelo chamador", {
   skip: process.platform !== "win32"
 }, async () => {
   const parent = fs.mkdtempSync(path.join(os.tmpdir(), "ia4tube-entry-env-"));
-  const source = path.join(parent, "postgresql-18.4.zip");
+  const source = path.join(parent, POSTGRES_PACKAGE_NAME);
   const bytes = Buffer.from("synthetic-package-environment-proof", "utf8");
   fs.writeFileSync(source, bytes, { flag: "wx" });
   const expectedSha256 = crypto.createHash("sha256").update(bytes).digest("hex");
@@ -201,4 +208,9 @@ test("entrada confiável ignora SystemRoot e PATH manipulados pelo chamador", {
     bytes.fill(0);
     fs.rmSync(parent, { recursive: true, force: true });
   }
+});
+
+test("identidade do produto e nome do build futuro permanecem canônicos", () => {
+  assert.match(PRODUCT_COMMIT, /^[0-9a-f]{40}$/);
+  assert.equal(POSTGRES_PACKAGE_NAME, "postgresql-18.4-2-windows-x64-binaries.zip");
 });

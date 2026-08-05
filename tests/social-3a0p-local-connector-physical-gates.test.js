@@ -115,7 +115,12 @@ function fakeDependencies() {
     async runProfileBackup(plan) {
       return {
         profileId: plan.profileId,
-        evidence: { bundleSize: plan.profileId.endsWith("0003") ? 100 : 200, bundleSha256: plan.profileId.endsWith("0003") ? "3".repeat(64) : "4".repeat(64) }
+        evidence: {
+          bundleSize: plan.profileId.endsWith("0003") ? 100 : 200,
+          bundleSha256: plan.profileId.endsWith("0003") ? "3".repeat(64) : "4".repeat(64),
+          tableCount: plan.profileId.endsWith("0003") ? 6 : 8,
+          rlsTableCount: plan.profileId.endsWith("0003") ? 8 : 10
+        }
       };
     },
     async runProfileRestore() { return { disposableTargetRemoved: true }; }
@@ -173,7 +178,14 @@ test("concrete connector gates use the product contracts and physical plan runne
   assert.equal(vault.aes256Gcm, true);
   assert.equal(backup.profile0003, true);
   assert.equal(backup.profile0004, true);
-  assert.match(backup.bundleSha256, /^[0-9a-f]{64}$/);
+  assert.equal(backup.bundle0003Size, 100);
+  assert.match(backup.bundle0003Sha256, /^3{64}$/);
+  assert.equal(backup.bundle0003Tables, 6);
+  assert.equal(backup.bundle0003RlsPolicies, 8);
+  assert.equal(backup.bundle0004Size, 200);
+  assert.match(backup.bundle0004Sha256, /^4{64}$/);
+  assert.equal(backup.bundle0004Tables, 8);
+  assert.equal(backup.bundle0004RlsPolicies, 10);
   gates.destroy();
 });
 

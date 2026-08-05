@@ -17,6 +17,25 @@ const {
   createProcessRunner,
   terminateProcessTree: terminateWindowsProcessTree
 } = require("./social-3a0p-local-process");
+const {
+  createSanitizedEvidenceLedger
+} = require("./social-3a0p-local-evidence-ledger");
+const {
+  createWindowsEvidenceLedgerAdapters
+} = require("./social-3a0p-local-windows-evidence-ledger-adapters");
+const {
+  assertNoResidualProcesses,
+  assertSessionMetricsSafe,
+  collectResidualProcessMetrics,
+  collectSessionMetrics,
+  createPoolMetricsRegistry
+} = require("./social-3a0p-local-runtime-evidence-metrics");
+const {
+  assertBundleMetricsSafe,
+  assertDataChecksumsEnabled,
+  collectMeasuredBundleMetrics,
+  collectDataChecksumsMetric
+} = require("./social-3a0p-local-bundle-cluster-metrics");
 
 const POSTGRES_VERSION = "18.4";
 const LOOPBACK_HOST = "127.0.0.1";
@@ -31,6 +50,7 @@ const RUNTIME_LOGIN = "ia4tube_social_local_runtime";
 const OWNED_ROOT = /^ia4tube-social-3a0p-[A-Za-z0-9]{6}$/;
 const SAFE_IDENTIFIER = /^[a-z][a-z0-9_]{2,62}$/;
 const SHA256 = /^[0-9a-f]{64}$/;
+const TRACKED_POOL_RELEASE = Symbol("ia4tubeTrackedPoolRelease");
 const REQUIRED_ARCHIVE_FILES = Object.freeze([
   "bin/initdb.exe",
   "bin/pg_ctl.exe",
@@ -243,6 +263,7 @@ function defaultStorage() {
     rename: (source, destination) => promises.rename(source, destination),
     rm: (target, options) => promises.rm(target, options),
     stat: (target) => promises.stat(target),
+    statfs: (target) => promises.statfs(target),
     unlink: (target) => promises.unlink(target),
     writeFile: (target, value, options) => promises.writeFile(target, value, options),
     existsSync: (target) => fs.existsSync(target),
@@ -365,13 +386,28 @@ function defaultArchive({ processRunner, executables, environment, paths }) {
   });
 }
 
+function firewallFingerprintPowerShell() {
+  return [
+    "$ErrorActionPreference='Stop';",
+    "$profiles=@(Get-NetFirewallProfile|Sort-Object Name|ForEach-Object{[ordered]@{name=$_.Name;enabled=[bool]$_.Enabled;inbound=[string]$_.DefaultInboundAction;outbound=[string]$_.DefaultOutboundAction}});",
+    "$rules=@(Get-NetFirewallRule|Sort-Object InstanceID|ForEach-Object{$r=$_;$a=@($r|Get-NetFirewallAddressFilter);$p=@($r|Get-NetFirewallPortFilter);$x=@($r|Get-NetFirewallApplicationFilter);$s=@($r|Get-NetFirewallServiceFilter);$i=@($r|Get-NetFirewallInterfaceFilter);$t=@($r|Get-NetFirewallInterfaceTypeFilter);$q=@($r|Get-NetFirewallSecurityFilter);[ordered]@{id=$r.InstanceID;enabled=[string]$r.Enabled;direction=[string]$r.Direction;action=[string]$r.Action;profile=[string]$r.Profile;edgeTraversalPolicy=[string]$r.EdgeTraversalPolicy;localOnlyMapping=[string]$r.LocalOnlyMapping;looseSourceMapping=[string]$r.LooseSourceMapping;owner=[string]$r.Owner;platform=@($r.Platform|Sort-Object);localAddress=@($a.LocalAddress|Sort-Object);remoteAddress=@($a.RemoteAddress|Sort-Object);protocol=@($p.Protocol|Sort-Object);localPort=@($p.LocalPort|Sort-Object);remotePort=@($p.RemotePort|Sort-Object);icmpType=@($p.IcmpType|Sort-Object);dynamicTarget=@($p.DynamicTarget|Sort-Object);program=@($x.Program|Sort-Object);package=@($x.Package|Sort-Object);service=@($s.Service|Sort-Object);interfaceAlias=@($i.InterfaceAlias|Sort-Object);interfaceType=@($t.InterfaceType|Sort-Object);authentication=@($q.Authentication|Sort-Object);encryption=@($q.Encryption|Sort-Object);overrideBlockRules=@($q.OverrideBlockRules|Sort-Object);localUser=@($q.LocalUser|Sort-Object);remoteUser=@($q.RemoteUser|Sort-Object);remoteMachine=@($q.RemoteMachine|Sort-Object)}});",
+    "$json=[ordered]@{profiles=$profiles;rules=$rules}|ConvertTo-Json -Compress -Depth 8;",
+    "$sha=[Security.Cryptography.SHA256]::Create();try{$hash=([BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($json)))).Replace('-','').ToLowerInvariant()}finally{$sha.Dispose()};",
+    "[ordered]@{sha256=$hash;profileCount=$profiles.Count;ruleCount=$rules.Count}|ConvertTo-Json -Compress"
+  ].join("");
+}
+
 function defaultSystemProbe({ processRunner, executables, environment, paths }) {
-  async function powershell(script, label) {
+  async function powershell(script, label, target = null) {
     const result = await processRunner.run({
       executable: executables.powershell,
       args: ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", script],
       cwd: paths.ownedRoot,
-      environment,
+      environment: target === null ? environment : {
+        ...environment,
+        IA4TUBE_HARNESS_TARGET: target
+      },
+      allowedEnvironmentNames: target === null ? [] : ["IA4TUBE_HARNESS_TARGET"],
       timeoutMs: 15_000,
       label
     });
@@ -388,7 +424,20 @@ function defaultSystemProbe({ processRunner, executables, environment, paths }) 
         ].join(""),
         "postgres_preflight"
       );
-      return result.processes === 0 && result.services === 0 && result.listeners === 0;
+      const processes = result.processes;
+      const services = result.services;
+      const listeners = result.listeners;
+      if ([processes, services, listeners].some(
+        (value) => !Number.isSafeInteger(value) || value < 0
+      )) {
+        fail("windows_harness_system_clean_probe_invalid");
+      }
+      return Object.freeze({
+        clean: processes === 0 && services === 0 && listeners === 0,
+        processes,
+        services,
+        listeners
+      });
     },
     async processAlive(pid) {
       const result = await powershell(
@@ -423,6 +472,62 @@ function defaultSystemProbe({ processRunner, executables, environment, paths }) 
       );
       return (Array.isArray(result.rows) ? result.rows : result.rows ? [result.rows] : [])
         .map((row) => ({ address: row.address, port: Number(row.port), pid: Number(row.pid) }));
+    },
+    async protectAndAuditRoot(target) {
+      const result = await powershell(
+        [
+          "$ErrorActionPreference='Stop';$p=[IO.Path]::GetFullPath($env:IA4TUBE_HARNESS_TARGET);",
+          "$i=Get-Item -LiteralPath $p -Force;if(-not$i.PSIsContainer-or($i.Attributes-band[IO.FileAttributes]::ReparsePoint)){throw 'root_invalid'};",
+          "$me=[Security.Principal.WindowsIdentity]::GetCurrent().User;",
+          "$s=New-Object Security.AccessControl.DirectorySecurity;$s.SetAccessRuleProtection($true,$false);$s.SetOwner($me);",
+          "$f=[Security.AccessControl.InheritanceFlags]'ContainerInherit,ObjectInherit';",
+          "foreach($v in @($me.Value,'S-1-5-18','S-1-5-32-544')){$sid=New-Object Security.Principal.SecurityIdentifier($v);$r=New-Object Security.AccessControl.FileSystemAccessRule($sid,[Security.AccessControl.FileSystemRights]::FullControl,$f,[Security.AccessControl.PropagationFlags]::None,[Security.AccessControl.AccessControlType]::Allow);[void]$s.AddAccessRule($r)};",
+          "$i.SetAccessControl($s);$a=Get-Acl -LiteralPath $p;$rules=@($a.GetAccessRules($true,$true,[Security.Principal.SecurityIdentifier]));",
+          "$owner=([Security.Principal.NTAccount]$a.Owner).Translate([Security.Principal.SecurityIdentifier]).Value;$allowed=@($me.Value,'S-1-5-18','S-1-5-32-544');",
+          "@{ownerCurrentUser=($owner-eq$me.Value);inheritanceProtected=[bool]$a.AreAccessRulesProtected;explicitRuleCount=@($rules|Where-Object{-not$_.IsInherited}).Count;inheritedRuleCount=@($rules|Where-Object{$_.IsInherited}).Count;denyRuleCount=@($rules|Where-Object{$_.AccessControlType-eq'Deny'}).Count;unexpectedAllowRuleCount=@($rules|Where-Object{$_.AccessControlType-eq'Allow'-and$_.IdentityReference.Value-notin$allowed}).Count}|ConvertTo-Json -Compress"
+        ].join(""),
+        "harness_root_acl",
+        target
+      );
+      return Object.freeze({
+        ownerCurrentUser: result.ownerCurrentUser === true,
+        inheritanceProtected: result.inheritanceProtected === true,
+        explicitRuleCount: Number(result.explicitRuleCount),
+        inheritedRuleCount: Number(result.inheritedRuleCount),
+        denyRuleCount: Number(result.denyRuleCount),
+        unexpectedAllowRuleCount: Number(result.unexpectedAllowRuleCount)
+      });
+    },
+    async firewallFingerprint() {
+      const result = await powershell(
+        firewallFingerprintPowerShell(),
+        "firewall_fingerprint"
+      );
+      if (
+        !SHA256.test(String(result.sha256 || "")) ||
+        !Number.isSafeInteger(result.profileCount) || result.profileCount < 0 ||
+        !Number.isSafeInteger(result.ruleCount) || result.ruleCount < 0
+      ) {
+        fail("windows_harness_firewall_fingerprint_invalid");
+      }
+      return Object.freeze({
+        sha256: result.sha256,
+        profileCount: result.profileCount,
+        ruleCount: result.ruleCount
+      });
+    },
+    async residualProcesses(target) {
+      const result = await powershell(
+        [
+          "$p=[IO.Path]::GetFullPath($env:IA4TUBE_HARNESS_TARGET).TrimEnd('\\')+'\\';",
+          "$rows=@(Get-CimInstance Win32_Process -Filter \"Name='postgres.exe'\" -ErrorAction SilentlyContinue|Where-Object{([string]$_.ExecutablePath).StartsWith($p,[StringComparison]::OrdinalIgnoreCase)}|ForEach-Object{@{pid=[int]$_.ProcessId}});",
+          "@{rows=$rows}|ConvertTo-Json -Compress -Depth 3"
+        ].join(""),
+        "postgres_residual_processes",
+        target
+      );
+      return (Array.isArray(result.rows) ? result.rows : result.rows ? [result.rows] : [])
+        .map((row) => ({ pid: Number(row.pid) }));
     }
   });
 }
@@ -450,7 +555,13 @@ async function closePool(pool) {
   if (pool && typeof pool.end === "function") await pool.end();
 }
 
-function createDefaultRoleBootstrap({ state, storage, PoolClass, product }) {
+function createDefaultRoleBootstrap({
+  state,
+  storage,
+  PoolClass,
+  product,
+  instrumentRuntimePool = (pool) => pool
+}) {
   if (
     typeof PoolClass !== "function" ||
     typeof product.bootstrapDatabaseLogins !== "function" ||
@@ -637,7 +748,15 @@ function createDefaultRoleBootstrap({ state, storage, PoolClass, product }) {
       }
 
       state.pools.migration = new PoolClass(poolOptions(state, MIGRATION_LOGIN, state.materials.migration, 2, "ia4tube-social-local-migration"));
-      state.pools.runtime = new PoolClass(poolOptions(state, RUNTIME_LOGIN, state.materials.runtime, 3, "ia4tube-social-local-runtime"));
+      state.pools.runtime = instrumentRuntimePool(
+        new PoolClass(poolOptions(
+          state,
+          RUNTIME_LOGIN,
+          state.materials.runtime,
+          3,
+          "ia4tube-social-local-runtime"
+        ))
+      );
       return {
         physicalExecution: true,
         syntheticOnly: true,
@@ -684,9 +803,25 @@ function createWindowsPhysicalAdapters(options = {}) {
     clusterRoot: path.join(ownedRoot, "cluster"),
     logsRoot: path.join(ownedRoot, "logs"),
     custodyPath: path.join(ownedRoot, "dpapi-physical-gate.bin"),
-    evidencePath: path.join(ownedParent, `${path.basename(ownedRoot)}-evidence.json`),
-    evidencePendingPath: path.join(ownedParent, `${path.basename(ownedRoot)}-evidence.json.pending`),
-    evidenceFinalizingPath: path.join(ownedParent, `${path.basename(ownedRoot)}-evidence.json.finalizing`)
+    incrementalEvidenceRoot: path.join(
+      ownedParent,
+      `${path.basename(ownedRoot)}-incremental-evidence`
+    ),
+    evidencePath: path.join(
+      ownedParent,
+      `${path.basename(ownedRoot)}-incremental-evidence`,
+      "canonical-evidence.json"
+    ),
+    evidencePendingPath: path.join(
+      ownedParent,
+      `${path.basename(ownedRoot)}-incremental-evidence`,
+      "canonical-evidence.json.pending"
+    ),
+    evidenceFinalizingPath: path.join(
+      ownedParent,
+      `${path.basename(ownedRoot)}-incremental-evidence`,
+      "canonical-evidence.json.finalizing"
+    )
   });
   const executables = requireExecutableMap(options, paths);
   const storage = options.dependencies?.storage || defaultStorage();
@@ -697,15 +832,33 @@ function createWindowsPhysicalAdapters(options = {}) {
     TMPDIR: paths.ownedRoot
   });
   const activeChildPids = new Set();
+  const activeChildOwnership = new Map();
+  const allowedChildExecutables = new Set(
+    Object.values(executables).map((value) => path.resolve(value).toLowerCase())
+  );
   const childProcessJournal = Object.freeze({
-    registerProcess(pid) {
-      if (!Number.isSafeInteger(pid) || pid < 1 || activeChildPids.has(pid)) {
+    registerProcess(pid, proof) {
+      const executablePath = path.resolve(String(proof?.executablePath || ""));
+      if (
+        !Number.isSafeInteger(pid) ||
+        pid < 1 ||
+        activeChildPids.has(pid) ||
+        Number(proof?.pid) !== pid ||
+        !allowedChildExecutables.has(executablePath.toLowerCase()) ||
+        typeof proof?.isOriginalProcessActive !== "function"
+      ) {
         fail("windows_harness_child_pid_invalid");
       }
       activeChildPids.add(pid);
+      activeChildOwnership.set(pid, Object.freeze({
+        pid,
+        executablePath,
+        isOriginalProcessActive: proof.isOriginalProcessActive
+      }));
     },
     unregisterProcess(pid) {
       activeChildPids.delete(pid);
+      activeChildOwnership.delete(pid);
     }
   });
   const processRunnerFactory = options.dependencies?.createProcessRunner ||
@@ -719,7 +872,14 @@ function createWindowsPhysicalAdapters(options = {}) {
   });
   const archive = options.dependencies?.archive || defaultArchive({ processRunner, executables, environment: systemEnvironment, paths });
   const systemProbe = options.dependencies?.systemProbe || defaultSystemProbe({ processRunner, executables, environment: systemEnvironment, paths });
-  const PoolClass = options.dependencies?.PoolClass || require("pg").Pool;
+  let BasePoolClass = options.dependencies?.PoolClass || null;
+  function loadBasePoolClass() {
+    if (!BasePoolClass) BasePoolClass = require("pg").Pool;
+    if (typeof BasePoolClass !== "function") {
+      fail("windows_harness_pool_class_invalid");
+    }
+    return BasePoolClass;
+  }
   const product = productDependencies(options.dependencies?.product || {});
   const randomBytes = options.dependencies?.randomBytes || crypto.randomBytes;
   const randomUUID = options.dependencies?.randomUUID || crypto.randomUUID;
@@ -727,10 +887,15 @@ function createWindowsPhysicalAdapters(options = {}) {
     repositoryRoot,
     target: null,
     packageDescriptor: null,
+    packageEvidence: null,
+    rootAclEvidence: null,
+    observedPackageSha256: null,
     archiveEntries: [],
     pid: null,
     postmasterIdentity: null,
     initialized: false,
+    productDatabasePrepared: false,
+    backupRestoreCompleted: false,
     started: false,
     startAmbiguous: false,
     materials: Object.create(null),
@@ -738,52 +903,543 @@ function createWindowsPhysicalAdapters(options = {}) {
     phaseResults: Object.create(null),
     pendingEvidence: null,
     environmentId: randomUUID(),
+    diskSpace: {
+      initialFreeBytes: null,
+      minimumFreeBytes: null,
+      beforeExtractionFreeBytes: null,
+      afterExtractionFreeBytes: null,
+      afterPackageRemovalFreeBytes: null,
+      finalFreeBytes: null
+    },
+    firewallBefore: null,
+    firewallAfter: null,
+    processTreesTerminated: 0,
+    workingPackageRemoved: false,
     cleaned: false
   };
   const runMarker = typeof options.runMarker === "string"
     ? options.runMarker
     : `ia4tube-social-3a0p-${randomUUID().replaceAll("-", "").slice(0, 24)}`;
-  const physicalPlans = options.physicalPlans ||
-    (options.dependencies?.physicalGates || options.dependencies?.connectorGateFactory
-      ? undefined
-      : require("./social-3a0p-local-windows-physical-plans")
-        .createWindowsPhysicalPlans({
-          approval: "RUN_SOCIAL_3A0P_LOCAL_BACKUP_RESTORE",
-          runMarker,
-          // The state target is populated by the first bound phase. The plan
-          // reads this stable object only when a physical method is invoked.
-          target: options.target,
-          state,
-          paths,
-          executables,
-          processRunner,
-          PoolClass,
-          repositoryRoot,
-          randomBytes,
-          dependencies: options.dependencies?.physicalPlanDependencies
+  const poolMetrics = createPoolMetricsRegistry();
+  const sessionOwnership = new Map();
+  const sessionRoleCategory = new Map([
+    [RUNTIME_LOGIN, "runtime"],
+    [MIGRATION_LOGIN, "migration"],
+    [PROVISIONER_LOGIN, "provisioning"],
+    [ADMIN_LOGIN, "provisioning"]
+  ]);
+  const poolRoleCategory = new Map([
+    [RUNTIME_LOGIN, "runtime"],
+    [MIGRATION_LOGIN, "migration"],
+    [PROVISIONER_LOGIN, "provisioning"],
+    [ADMIN_LOGIN, "administration"]
+  ]);
+
+  function poolLogin(configuration) {
+    if (typeof configuration?.user === "string") return configuration.user;
+    if (typeof configuration?.connectionString !== "string") return "";
+    try {
+      return decodeURIComponent(new URL(configuration.connectionString).username);
+    } catch {
+      return "";
+    }
+  }
+
+  let TrackedPoolClass = null;
+  function loadTrackedPoolClass() {
+    if (TrackedPoolClass) return TrackedPoolClass;
+    const LoadedBasePoolClass = loadBasePoolClass();
+    TrackedPoolClass = class HarnessTrackedPool extends LoadedBasePoolClass {
+    constructor(configuration) {
+      const configuredMax = Number(configuration?.max);
+      if (!Number.isSafeInteger(configuredMax) || configuredMax < 1) {
+        fail("windows_harness_pool_max_invalid");
+      }
+      super(configuration);
+      const role = poolLogin(configuration);
+      const category = poolRoleCategory.get(role);
+      if (!category) fail("windows_harness_pool_role_invalid");
+      this.harnessPoolConfiguration = Object.freeze({
+        role,
+        category,
+        configuredMax,
+        applicationName: String(configuration?.application_name || "")
+      });
+      this.harnessOwnedPids = new Set();
+      this.harnessPoolRegistered = true;
+      poolMetrics.register(this, { category, configuredMax });
+      poolMetrics.observe(this, metricView(this));
+      if (typeof this.on === "function") {
+        this.on("remove", (client) => {
+          const pid = Number(client?.processID);
+          if (Number.isSafeInteger(pid) && pid > 0) {
+            this.harnessOwnedPids.delete(pid);
+            sessionOwnership.delete(pid);
+          }
+          if (this.harnessPoolRegistered) {
+            poolMetrics.observe(this, metricView(this));
+          }
+        });
+      }
+    }
+
+    harnessRecordClient(client) {
+      const originalRelease = client?.release;
+      if (typeof originalRelease !== "function") {
+        fail("windows_harness_pool_release_invalid");
+      }
+      if (originalRelease[TRACKED_POOL_RELEASE] !== true) {
+        const pool = this;
+        const trackedRelease = function trackedHarnessPoolRelease(...args) {
+          try {
+            return originalRelease.apply(client, args);
+          } finally {
+            if (pool.harnessPoolRegistered) {
+              poolMetrics.observe(pool, metricView(pool));
+            }
+          }
+        };
+        Object.defineProperty(trackedRelease, TRACKED_POOL_RELEASE, {
+          value: true
+        });
+        client.release = trackedRelease;
+      }
+      poolMetrics.recordAcquisition(this, metricView(this));
+      const pid = Number(client?.processID);
+      const category = sessionRoleCategory.get(this.harnessPoolConfiguration.role);
+      const applicationName = this.harnessPoolConfiguration.applicationName;
+      if (
+        Number.isSafeInteger(pid) &&
+        pid > 0 &&
+        category &&
+        /^ia4tube-social-(?:local|3a0p)-[a-z0-9_-]+$/.test(applicationName)
+      ) {
+        const current = sessionOwnership.get(pid);
+        if (
+          current &&
+          (current.category !== category || current.applicationName !== applicationName)
+        ) {
+          fail("windows_harness_session_ownership_conflict");
+        }
+        sessionOwnership.set(pid, Object.freeze({
+          pid,
+          category,
+          applicationName
         }));
+        this.harnessOwnedPids.add(pid);
+      }
+      return client;
+    }
+
+    connect(...args) {
+      poolMetrics.observe(this, metricView(this));
+      const callback = typeof args.at(-1) === "function" ? args.pop() : null;
+      if (callback) {
+        let returned;
+        try {
+          returned = super.connect(...args, (error, client, release) => {
+            poolMetrics.observe(this, metricView(this));
+            if (error) return callback(error);
+            let trackedClient;
+            try {
+              trackedClient = this.harnessRecordClient(client);
+            } catch (trackingError) {
+              try { client?.release?.(); } catch {}
+              return callback(trackingError);
+            }
+            return callback(null, trackedClient, trackedClient.release);
+          });
+          poolMetrics.observe(this, metricView(this));
+          return returned;
+        } catch (error) {
+          poolMetrics.observe(this, metricView(this));
+          throw error;
+        }
+      }
+      let pending;
+      try {
+        pending = super.connect(...args);
+        poolMetrics.observe(this, metricView(this));
+      } catch (error) {
+        poolMetrics.observe(this, metricView(this));
+        throw error;
+      }
+      return Promise.resolve(pending).then(
+        (client) => {
+          try {
+            return this.harnessRecordClient(client);
+          } catch (trackingError) {
+            try { client?.release?.(); } catch {}
+            throw trackingError;
+          }
+        },
+        (error) => {
+          poolMetrics.observe(this, metricView(this));
+          throw error;
+        }
+      );
+    }
+
+    harnessUnregister() {
+      if (this.harnessPoolRegistered) {
+        for (const pid of this.harnessOwnedPids) sessionOwnership.delete(pid);
+        this.harnessOwnedPids.clear();
+        poolMetrics.observe(this, metricView(this));
+        poolMetrics.unregister(this);
+        this.harnessPoolRegistered = false;
+      }
+    }
+
+    end(...args) {
+      const callback = typeof args.at(-1) === "function" ? args.pop() : null;
+      if (callback) {
+        return super.end(...args, (error) => {
+          this.harnessUnregister();
+          callback(error);
+        });
+      }
+      let pending;
+      try {
+        pending = super.end(...args);
+      } catch (error) {
+        this.harnessUnregister();
+        throw error;
+      }
+      return Promise.resolve(pending).finally(() => this.harnessUnregister());
+    }
+    };
+    return TrackedPoolClass;
+  }
+
+  function PoolClass(configuration) {
+    const LoadedTrackedPoolClass = loadTrackedPoolClass();
+    return new LoadedTrackedPoolClass(configuration);
+  }
+  const ledgerAdapters = options.dependencies?.evidenceLedgerAdapters ||
+    createWindowsEvidenceLedgerAdapters({
+      controlledRoot: paths.ownedParent,
+      evidenceRoot: paths.incrementalEvidenceRoot,
+      cleanupRoot: paths.ownedRoot,
+      powershell: executables.powershell,
+      processRunner,
+      environment: systemEnvironment
+    });
+  const evidenceLedger = options.dependencies?.evidenceLedger ||
+    createSanitizedEvidenceLedger({
+      runId: state.environmentId,
+      harnessCommit: options.harnessCommit,
+      productCommit: options.productCommit,
+      controlledRoot: paths.ownedParent,
+      evidenceRoot: paths.incrementalEvidenceRoot,
+      cleanupRoot: paths.ownedRoot,
+      adapters: ledgerAdapters
+    });
+  const sourcePackageVerifier = options.sourcePackageVerifier;
   const connectorGateFactory = options.dependencies?.connectorGateFactory ||
     ((settings) => require("./social-3a0p-local-connector-physical-gates")
       .createConnectorPhysicalGates(settings));
-  const physicalGates = plainObject(
-    options.dependencies?.physicalGates || connectorGateFactory({
-      dependencies: options.dependencies?.connectorGateDependencies,
-      plans: physicalPlans,
-      randomBytes,
-      randomUUID
-    }),
-    "windows_harness_physical_gates_missing"
-  );
-  for (const gate of PHYSICAL_GATES) {
-    if (typeof physicalGates[gate] !== "function") fail("windows_harness_physical_gate_missing");
+  let loadedPhysicalGates = options.dependencies?.physicalGates || null;
+  function loadPhysicalGates() {
+    if (!loadedPhysicalGates) {
+      const physicalPlans = options.physicalPlans ||
+        (options.dependencies?.connectorGateFactory
+          ? undefined
+          : require("./social-3a0p-local-windows-physical-plans")
+          .createWindowsPhysicalPlans({
+            approval: "RUN_SOCIAL_3A0P_LOCAL_BACKUP_RESTORE",
+            runMarker,
+            // The state target is populated by the first bound phase. The plan
+            // reads this stable object only when a physical method is invoked.
+            target: options.target,
+            state,
+            paths,
+            executables,
+            processRunner,
+            PoolClass,
+            repositoryRoot,
+            randomBytes,
+            dependencies: options.dependencies?.physicalPlanDependencies
+          }));
+      loadedPhysicalGates = connectorGateFactory({
+        dependencies: options.dependencies?.connectorGateDependencies,
+        plans: physicalPlans,
+        randomBytes,
+        randomUUID
+      });
+    }
+    const gates = plainObject(
+      loadedPhysicalGates,
+      "windows_harness_physical_gates_missing"
+    );
+    for (const gate of PHYSICAL_GATES) {
+      if (typeof gates[gate] !== "function") {
+        fail("windows_harness_physical_gate_missing");
+      }
+    }
+    return gates;
   }
+  const physicalGates = Object.freeze({
+    assertConfigured() {
+      return loadPhysicalGates().assertConfigured?.();
+    },
+    migration(input) { return loadPhysicalGates().migration(input); },
+    rls(input) { return loadPhysicalGates().rls(input); },
+    concurrency(input) { return loadPhysicalGates().concurrency(input); },
+    vault(input) { return loadPhysicalGates().vault(input); },
+    backupRestore(input) { return loadPhysicalGates().backupRestore(input); },
+    destroy() {
+      return loadedPhysicalGates?.destroy?.();
+    }
+  });
   const dpapiScript = path.join(repositoryRoot, "scripts", "social-3a0p-local-dpapi.ps1");
   // The default role bootstrap needs the stable state object after creation.
-  const effectiveRoleBootstrap = options.dependencies?.roleBootstrap || createDefaultRoleBootstrap({ state, storage, PoolClass, product });
+  const effectiveRoleBootstrap = options.dependencies?.roleBootstrap ||
+    createDefaultRoleBootstrap({
+      state,
+      storage,
+      PoolClass,
+      product,
+      instrumentRuntimePool: (pool) => pool
+    });
 
   function remember(phase, result) {
     state.phaseResults[phase] = result;
     return result;
+  }
+
+  function phaseMetricKey(phase) {
+    return phase.replace(/-([a-z])/g, (_, letter) => letter.toUpperCase());
+  }
+
+  function packageInventory() {
+    const descriptor = state.packageDescriptor;
+    if (!descriptor) return [];
+    const fileName = path.basename(descriptor.archivePath).toLowerCase();
+    const canonicalFileName = fileName
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/^-+|-+$/g, "")
+      .slice(0, 63);
+    const build = /^postgresql-18\.4-(\d+)-windows-x64-binaries\.zip$/.exec(
+      fileName
+    )?.[1];
+    return [
+      canonicalFileName || "postgresql-package",
+      "version-18-4",
+      build ? `build-${build}` : "build-unspecified",
+      descriptor.sourceOwnedByRun ? "source-run-owned" : "source-external",
+      "working-copy-owned"
+    ];
+  }
+
+  function availablePartialResult(phase) {
+    const counts = {};
+    const metrics = {};
+    const hashes = {};
+    const checks = {};
+    const inventory = packageInventory();
+    if (state.packageEvidence) {
+      counts.packageBytes = state.packageEvidence.archiveBytes;
+      counts.packageBuild = state.packageEvidence.build;
+      metrics.packageMajor = 18;
+      metrics.packageMinor = 4;
+      checks.packageSourceOwnedByRun = state.packageEvidence.sourceOwnedByRun;
+      checks.workingCopyOwnedByRun = true;
+    }
+    for (const [key, value] of Object.entries(state.diskSpace)) {
+      if (value !== null) counts[key] = value;
+    }
+    if (state.rootAclEvidence) {
+      counts.rootAclExplicitRules = state.rootAclEvidence.explicitRuleCount;
+      counts.rootAclInheritedRules = state.rootAclEvidence.inheritedRuleCount;
+      counts.rootAclDenyRules = state.rootAclEvidence.denyRuleCount;
+      counts.rootAclUnexpectedAllowRules =
+        state.rootAclEvidence.unexpectedAllowRuleCount;
+      checks.rootAclOwnerCurrentUser = state.rootAclEvidence.ownerCurrentUser;
+      checks.rootAclInheritanceProtected =
+        state.rootAclEvidence.inheritanceProtected;
+    }
+    if (state.firewallBefore) {
+      counts.firewallProfiles = state.firewallBefore.profileCount;
+      counts.firewallRules = state.firewallBefore.ruleCount;
+      hashes.firewallBeforeSha256 = state.firewallBefore.sha256;
+    }
+    if (state.observedPackageSha256) {
+      hashes.archiveSha256 = state.observedPackageSha256;
+    }
+    if (state.archiveEntries.length > 0) {
+      counts.archiveEntries = state.archiveEntries.length;
+    }
+    if (state.target) {
+      counts.clusterPort = state.target.port;
+      inventory.push("address-127-0-0-1");
+    }
+    if (Number.isSafeInteger(state.pid) && state.pid > 0) {
+      counts.postmasterPid = state.pid;
+    }
+    checks.clusterInitialized = state.initialized === true;
+    checks.clusterStarted = state.started === true;
+    try {
+      const pool = poolMetrics.snapshot();
+      Object.assign(counts, pool.counts);
+      Object.assign(metrics, pool.metrics);
+      Object.assign(checks, pool.checks);
+    } catch {
+      // No pool has been created yet. Earlier physical evidence remains valid.
+    }
+    return {
+      code: `windows_${phase.replaceAll("-", "_")}_partial_evidence`,
+      ...(Object.keys(counts).length > 0 ? { counts } : {}),
+      ...(Object.keys(metrics).length > 0 ? { metrics } : {}),
+      ...(Object.keys(hashes).length > 0 ? { hashes } : {}),
+      ...(Object.keys(checks).length > 0 ? { checks } : {}),
+      ...(inventory.length > 0
+        ? { inventory: [...new Set(inventory)].sort() }
+        : {})
+    };
+  }
+
+  function withPartialEvidence(phase, operation) {
+    return async (...args) => {
+      try {
+        return await operation(...args);
+      } catch (error) {
+        if (error?.partialResult) throw error;
+        const failure = sanitizedFailure(
+          error,
+          `windows_harness_${phase.replaceAll("-", "_")}_failed`
+        );
+        failure.partialResult = availablePartialResult(phase);
+        throw failure;
+      }
+    };
+  }
+
+  function ledgerEvidence(phase, result) {
+    if (!result) return {};
+    const evidence = {
+      metrics: {
+        phaseEvidence: {
+          [phaseMetricKey(phase)]: {
+            code: result.code,
+            ...(result.counts ? { counts: result.counts } : {}),
+            ...(result.metrics ? { metrics: result.metrics } : {}),
+            ...(result.hashes ? { hashes: result.hashes } : {}),
+            ...(result.checks ? { checks: result.checks } : {}),
+            ...(result.inventory ? { inventory: result.inventory } : {}),
+            ...(result.pendencies ? { pendencies: result.pendencies } : {})
+          }
+        }
+      }
+    };
+    if (phase === "cleanup") {
+      evidence.residues = {
+        ownedRoot: result.checks?.ownedRootRemoved === true ? 0 : 1
+      };
+      if (Number.isSafeInteger(result.counts?.residualOwnedPostgresProcesses)) {
+        evidence.residues.residualProcesses =
+          result.counts.residualOwnedPostgresProcesses;
+      }
+    }
+    return evidence;
+  }
+
+  async function measureSpace(field) {
+    if (typeof storage.statfs !== "function") {
+      fail("windows_harness_space_probe_missing");
+    }
+    const observed = await storage.statfs(paths.ownedParent);
+    if (
+      !Number.isSafeInteger(observed?.bavail) || observed.bavail < 0 ||
+      !Number.isSafeInteger(observed?.bsize) || observed.bsize < 1
+    ) {
+      fail("windows_harness_space_probe_invalid");
+    }
+    const freeBytes = observed.bavail * observed.bsize;
+    if (!Number.isSafeInteger(freeBytes) || freeBytes < 0) {
+      fail("windows_harness_space_probe_invalid");
+    }
+    state.diskSpace[field] = freeBytes;
+    state.diskSpace.minimumFreeBytes = state.diskSpace.minimumFreeBytes === null
+      ? freeBytes
+      : Math.min(state.diskSpace.minimumFreeBytes, freeBytes);
+    return freeBytes;
+  }
+
+  function metricView(pool) {
+    if (
+      !Number.isSafeInteger(pool?.totalCount) || pool.totalCount < 0 ||
+      !Number.isSafeInteger(pool?.idleCount) || pool.idleCount < 0 ||
+      !Number.isSafeInteger(pool?.waitingCount) || pool.waitingCount < 0
+    ) {
+      fail("windows_harness_pool_metrics_unavailable");
+    }
+    return {
+      totalCount: pool.totalCount,
+      idleCount: pool.idleCount,
+      waitingCount: pool.waitingCount
+    };
+  }
+
+  async function systemCleanSnapshot() {
+    const observed = await systemProbe.assertClean(state.target);
+    const counts = [observed?.processes, observed?.services, observed?.listeners];
+    if (counts.some((value) => !Number.isSafeInteger(value) || value < 0)) {
+      fail("windows_harness_system_clean_probe_invalid");
+    }
+    const clean = counts.every((value) => value === 0);
+    if (typeof observed.clean === "boolean" && observed.clean !== clean) {
+      fail("windows_harness_system_clean_probe_incoherent");
+    }
+    return Object.freeze({
+      clean,
+      processes: counts[0],
+      services: counts[1],
+      listeners: counts[2]
+    });
+  }
+
+  async function initializeEvidenceLedger(input) {
+    bind(input);
+    try {
+      return await evidenceLedger.initialize({
+        metrics: {
+          packageOwnership: {
+            sourceOwnedByRun: input.packageDescriptor.sourceOwnedByRun === true,
+            workingCopyOwnedByRun: input.packageDescriptor.workingCopyOwnedByRun === true
+          }
+        },
+        residues: { ownedRoot: 1 }
+      });
+    } catch (error) {
+      throw sanitizedFailure(error, "windows_harness_evidence_ledger_initialize_failed");
+    }
+  }
+
+  async function transitionEvidenceLedger(event) {
+    try {
+      if (event?.kind === "started") {
+        return event.phase === "cleanup"
+          ? evidenceLedger.beginCleanup()
+          : evidenceLedger.beginPhase(event.phase);
+      }
+      if (event?.kind !== "finished") {
+        fail("windows_harness_evidence_ledger_event_invalid");
+      }
+      const evidence = ledgerEvidence(event.phase, event.result);
+      return event.phase === "cleanup"
+        ? evidenceLedger.finishCleanup({
+          status: event.status,
+          code: event.code,
+          ...evidence
+        })
+        : evidenceLedger.finishPhase(event.phase, {
+          status: event.status,
+          code: event.code,
+          ...evidence
+        });
+    } catch (error) {
+      throw sanitizedFailure(error, "windows_harness_evidence_ledger_transition_failed");
+    }
   }
 
   function bind(input) {
@@ -875,7 +1531,7 @@ function createWindowsPhysicalAdapters(options = {}) {
           label: "postgres_start_compensation"
         });
         const gone = (await systemProbe.processIdentity(identity.pid)) === null;
-        if (gone && (await systemProbe.assertClean(state.target)) === true) {
+        if (gone && (await systemCleanSnapshot()).clean === true) {
           state.pid = null;
           state.postmasterIdentity = null;
           state.started = false;
@@ -887,7 +1543,7 @@ function createWindowsPhysicalAdapters(options = {}) {
       }
     } else {
       try {
-        if ((await systemProbe.assertClean(state.target)) === true) {
+        if ((await systemCleanSnapshot()).clean === true) {
           state.started = false;
           state.startAmbiguous = false;
           throw primaryError;
@@ -906,8 +1562,69 @@ function createWindowsPhysicalAdapters(options = {}) {
     if ((options.platform || process.platform) !== "win32") fail("windows_harness_platform_refused");
     if (typeof physicalGates.assertConfigured === "function") physicalGates.assertConfigured();
     const archivePath = requireWithin(input.packageDescriptor.archivePath, ownedRoot, "windows_harness_archive_outside_root");
+    if (typeof systemProbe.protectAndAuditRoot !== "function") {
+      fail("windows_harness_root_acl_probe_missing");
+    }
+    const rootAcl = await systemProbe.protectAndAuditRoot(ownedRoot);
+    if (
+      typeof rootAcl?.ownerCurrentUser !== "boolean" ||
+      typeof rootAcl?.inheritanceProtected !== "boolean" ||
+      !Number.isSafeInteger(rootAcl?.explicitRuleCount) ||
+      !Number.isSafeInteger(rootAcl?.inheritedRuleCount) ||
+      !Number.isSafeInteger(rootAcl?.denyRuleCount) ||
+      !Number.isSafeInteger(rootAcl?.unexpectedAllowRuleCount) ||
+      [
+        rootAcl.explicitRuleCount,
+        rootAcl.inheritedRuleCount,
+        rootAcl.denyRuleCount,
+        rootAcl.unexpectedAllowRuleCount
+      ].some((value) => value < 0)
+    ) {
+      fail("windows_harness_root_acl_invalid");
+    }
+    state.rootAclEvidence = Object.freeze({
+      ownerCurrentUser: rootAcl.ownerCurrentUser,
+      inheritanceProtected: rootAcl.inheritanceProtected,
+      explicitRuleCount: rootAcl.explicitRuleCount,
+      inheritedRuleCount: rootAcl.inheritedRuleCount,
+      denyRuleCount: rootAcl.denyRuleCount,
+      unexpectedAllowRuleCount: rootAcl.unexpectedAllowRuleCount
+    });
+    if (
+      rootAcl.ownerCurrentUser !== true ||
+      rootAcl.inheritanceProtected !== true ||
+      rootAcl.explicitRuleCount !== 3 ||
+      rootAcl.inheritedRuleCount !== 0 ||
+      rootAcl.denyRuleCount !== 0 ||
+      rootAcl.unexpectedAllowRuleCount !== 0
+    ) {
+      fail("windows_harness_root_acl_invalid");
+    }
+    const initialFreeBytes = await measureSpace("initialFreeBytes");
+    if (typeof systemProbe.firewallFingerprint !== "function") {
+      fail("windows_harness_firewall_probe_missing");
+    }
+    state.firewallBefore = await systemProbe.firewallFingerprint();
     const root = await storage.lstat(ownedRoot);
     const archiveStat = await storage.stat(archivePath);
+    if (!Number.isSafeInteger(archiveStat?.size) || archiveStat.size < 1) {
+      fail("windows_harness_archive_size_invalid");
+    }
+    const packageMatch = /^postgresql-18\.4-(\d+)-windows-x64-binaries\.zip$/.exec(
+      path.basename(archivePath)
+    );
+    if (!packageMatch) {
+      fail("windows_harness_archive_build_invalid");
+    }
+    const packageBuild = Number(packageMatch[1]);
+    if (!Number.isSafeInteger(packageBuild) || packageBuild < 1) {
+      fail("windows_harness_archive_build_invalid");
+    }
+    state.packageEvidence = Object.freeze({
+      archiveBytes: archiveStat.size,
+      build: packageBuild,
+      sourceOwnedByRun: input.packageDescriptor.sourceOwnedByRun === true
+    });
     assertActive(input);
     if (!root.isDirectory() || root.isSymbolicLink() || !archiveStat.isFile()) {
       fail("windows_harness_preflight_filesystem_invalid");
@@ -916,7 +1633,7 @@ function createWindowsPhysicalAdapters(options = {}) {
     if (initialEntries.some((name) => /\.(?:part|partial|tmp|crdownload)$/i.test(name))) {
       fail("windows_harness_partial_download_detected");
     }
-    if ((await systemProbe.assertClean(state.target)) !== true) {
+    if ((await systemCleanSnapshot()).clean !== true) {
       fail("windows_harness_postgres_activity_detected");
     }
     assertActive(input);
@@ -930,7 +1647,8 @@ function createWindowsPhysicalAdapters(options = {}) {
       typeof storage.readFileSync !== "function" ||
       typeof storage.renameSync !== "function" ||
       typeof storage.unlinkSync !== "function" ||
-      typeof storage.writeFileSync !== "function"
+      typeof storage.writeFileSync !== "function" ||
+      typeof storage.statfs !== "function"
     ) {
       fail("windows_harness_storage_contract_invalid");
     }
@@ -945,7 +1663,29 @@ function createWindowsPhysicalAdapters(options = {}) {
     await storage.mkdir(paths.logsRoot, { recursive: false });
     return remember("preflight", {
       code: "windows_preflight_passed",
-      checks: { ownedRootValidated: true, postgresAbsent: true, portAvailable: true }
+      counts: {
+        packageBytes: state.packageEvidence.archiveBytes,
+        packageBuild: state.packageEvidence.build,
+        diskInitialFreeBytes: initialFreeBytes,
+        firewallProfiles: state.firewallBefore.profileCount,
+        firewallRules: state.firewallBefore.ruleCount,
+        rootAclExplicitRules: rootAcl.explicitRuleCount,
+        rootAclInheritedRules: rootAcl.inheritedRuleCount,
+        rootAclDenyRules: rootAcl.denyRuleCount,
+        rootAclUnexpectedAllowRules: rootAcl.unexpectedAllowRuleCount
+      },
+      hashes: { firewallBeforeSha256: state.firewallBefore.sha256 },
+      inventory: packageInventory(),
+      checks: {
+        ownedRootValidated: true,
+        rootAclProtected: true,
+        rootAclOwnerCurrentUser: rootAcl.ownerCurrentUser,
+        rootAclInheritanceProtected: rootAcl.inheritanceProtected,
+        packageSourceOwnedByRun: state.packageEvidence.sourceOwnedByRun,
+        workingCopyOwnedByRun: true,
+        postgresAbsent: true,
+        portAvailable: true
+      }
     });
   }
 
@@ -956,6 +1696,7 @@ function createWindowsPhysicalAdapters(options = {}) {
     }
     const actual = await storage.hashFile(input.packageDescriptor.archivePath);
     assertActive(input);
+    if (SHA256.test(actual)) state.observedPackageSha256 = actual;
     if (!SHA256.test(actual) || actual !== input.packageDescriptor.expectedSha256) {
       fail("windows_harness_archive_sha256_mismatch");
     }
@@ -978,17 +1719,31 @@ function createWindowsPhysicalAdapters(options = {}) {
     state.archiveEntries = entries.slice();
     return remember("validate-package", {
       code: "windows_package_validated",
-      counts: { archiveEntries: entries.length },
+      counts: {
+        archiveEntries: entries.length,
+        packageBytes: state.packageEvidence.archiveBytes,
+        packageBuild: state.packageEvidence.build
+      },
       hashes: { archiveSha256: actual },
-      checks: { postgresVersionDeclared: input.packageDescriptor.version === POSTGRES_VERSION }
+      inventory: packageInventory(),
+      checks: {
+        postgresVersionDeclared:
+          input.packageDescriptor.version === POSTGRES_VERSION,
+        packageSourceOwnedByRun: state.packageEvidence.sourceOwnedByRun,
+        workingCopyOwnedByRun: true
+      }
     });
   }
 
   async function extractPackage(input) {
     bind(input);
+    const beforeExtractionFreeBytes = await measureSpace(
+      "beforeExtractionFreeBytes"
+    );
     await storage.mkdir(paths.binaryRoot, { recursive: false });
     assertActive(input);
     const actual = await storage.hashFile(input.packageDescriptor.archivePath);
+    if (SHA256.test(actual)) state.observedPackageSha256 = actual;
     if (!SHA256.test(actual) || actual !== input.packageDescriptor.expectedSha256) {
       fail("windows_harness_archive_sha256_mismatch");
     }
@@ -1018,8 +1773,16 @@ function createWindowsPhysicalAdapters(options = {}) {
     if (!/\b18\.4\b/.test(version.stdoutSanitized) || /\b18\.(?!4\b)\d+\b/.test(version.stdoutSanitized)) {
       fail("windows_harness_postgres_version_mismatch");
     }
+    const afterExtractionFreeBytes = await measureSpace(
+      "afterExtractionFreeBytes"
+    );
     return remember("extract-package", {
       code: "windows_package_extracted",
+      counts: {
+        diskBeforeExtractionFreeBytes: beforeExtractionFreeBytes,
+        diskAfterExtractionFreeBytes: afterExtractionFreeBytes,
+        diskMinimumObservedFreeBytes: state.diskSpace.minimumFreeBytes
+      },
       checks: { treeSafe: true, executablesPresent: true, postgresVersionExact: true }
     });
   }
@@ -1038,7 +1801,7 @@ function createWindowsPhysicalAdapters(options = {}) {
     try {
       await processRunner.run({
         executable: executables.initdb,
-        args: ["--pgdata", paths.clusterRoot, "--username", ADMIN_LOGIN, "--auth-host", "scram-sha-256", "--auth-local", "scram-sha-256", "--pwfile=-", "--encoding=UTF8", "--locale=C"],
+        args: ["--pgdata", paths.clusterRoot, "--username", ADMIN_LOGIN, "--auth-host", "scram-sha-256", "--auth-local", "scram-sha-256", "--pwfile=-", "--encoding=UTF8", "--locale=C", "--data-checksums"],
         cwd: paths.ownedRoot,
         environment: systemEnvironment,
         timeoutMs: 10 * 60_000,
@@ -1071,7 +1834,12 @@ function createWindowsPhysicalAdapters(options = {}) {
     state.initialized = true;
     return remember("initialize-cluster", {
       code: "windows_cluster_initialized",
-      checks: { loopbackOnly: true, scramConfigured: true, durableWritesConfigured: true }
+      checks: {
+        loopbackOnly: true,
+        scramConfigured: true,
+        durableWritesConfigured: true,
+        dataChecksumsRequested: true
+      }
     });
   }
 
@@ -1109,8 +1877,17 @@ function createWindowsPhysicalAdapters(options = {}) {
     state.startAmbiguous = false;
     return remember("start-cluster", {
       code: "windows_cluster_started",
-      counts: { serverProcesses: 1 },
-      checks: { postmasterPidRecorded: true }
+      counts: {
+        serverProcesses: 1,
+        postmasterPid: pid,
+        clusterPort: state.target.port
+      },
+      metrics: { postgresMajor: 18, postgresMinor: 4 },
+      inventory: ["address-127-0-0-1", "postgresql-18-4"],
+      checks: {
+        postmasterPidRecorded: true,
+        clusterAddressLoopback: true
+      }
     });
   }
 
@@ -1187,9 +1964,17 @@ function createWindowsPhysicalAdapters(options = {}) {
     } catch (error) {
       throw sanitizedFailure(error, "windows_harness_role_bootstrap_failed");
     }
+    if (
+      !Number.isSafeInteger(result.createdCount) ||
+      result.createdCount < 0 ||
+      result.createdCount > 2
+    ) {
+      fail("windows_harness_role_bootstrap_measurement_invalid");
+    }
+    state.productDatabasePrepared = true;
     return remember("bootstrap-roles", {
       code: "windows_roles_bootstrapped",
-      counts: { rolesCreated: Number(result.createdCount || 0), roleKinds: 3 },
+      counts: { rolesCreated: result.createdCount, roleKinds: 3 },
       checks: { rolesIdempotent: true, runtimeSafe: true, migrationSafe: true, scramVerified: true }
     });
   }
@@ -1287,20 +2072,126 @@ function createWindowsPhysicalAdapters(options = {}) {
     bind(input);
     const result = validateGateResult("backup_restore", await physicalGates.backupRestore({ state, input }), ["profile0003", "profile0004", "restoreIsolated", "manifestTamperRefused", "crossProfileRefused", "operationalRollback", "disposableRemoved", "fileFsync"]);
     assertActive(input);
-    if (!SHA256.test(String(result.bundleSha256 || "")) || !Number.isSafeInteger(result.bundleSize) || result.bundleSize < 1) {
-      fail("windows_harness_backup_restore_proof_invalid");
-    }
+    const bundles = collectMeasuredBundleMetrics({
+      bundles: [
+        {
+          profile: "social-schema-0003",
+          size: result.bundle0003Size,
+          sha256: result.bundle0003Sha256,
+          tableCount: result.bundle0003Tables,
+          rlsPolicyCount: result.bundle0003RlsPolicies,
+          restoreApproved: result.profile0003 === true
+        },
+        {
+          profile: "social-schema-0004",
+          size: result.bundle0004Size,
+          sha256: result.bundle0004Sha256,
+          tableCount: result.bundle0004Tables,
+          rlsPolicyCount: result.bundle0004RlsPolicies,
+          restoreApproved: result.profile0004 === true
+        }
+      ]
+    });
+    assertBundleMetricsSafe(bundles);
+    state.backupRestoreCompleted = true;
     return remember("run-backup-restore-gate", {
       code: "windows_backup_restore_gate_passed",
-      counts: { schemaProfiles: 2, bundleBytes: result.bundleSize },
-      hashes: { bundleSha256: result.bundleSha256 },
-      checks: { profile0003: true, profile0004: true, restoreIsolated: true, manifestTamperRefused: true, crossProfileRefused: true, operationalRollback: true, fileFsync: true },
+      counts: {
+        schemaProfiles: 2,
+        ...bundles.counts
+      },
+      hashes: { ...bundles.hashes },
+      checks: {
+        profile0003: true,
+        profile0004: true,
+        ...bundles.checks,
+        restoreIsolated: true,
+        manifestTamperRefused: true,
+        crossProfileRefused: true,
+        operationalRollback: true,
+        fileFsync: true,
+        disposableDatabasesRemoved: result.disposableRemoved === true
+      },
       pendencies: ["directory-fsync-linux", "nofollow-linux"]
     });
   }
 
+  async function collectRuntimeEvidenceMetrics() {
+    const AuditPoolClass = loadBasePoolClass();
+    const auditPool = new AuditPoolClass(poolOptions(
+      state,
+      ADMIN_LOGIN,
+      state.materials.admin,
+      1,
+      "ia4tube-social-local-session-audit"
+    ));
+    poolMetrics.register(auditPool, {
+      category: "administration",
+      configuredMax: 1
+    });
+    poolMetrics.observe(auditPool, metricView(auditPool));
+    let client;
+    try {
+      client = await auditPool.connect();
+      poolMetrics.recordAcquisition(auditPool, metricView(auditPool));
+      const checksum = await collectDataChecksumsMetric({
+        async readSetting() {
+          const result = await client.query("SHOW data_checksums");
+          return result.rows?.[0]?.data_checksums;
+        }
+      });
+      assertDataChecksumsEnabled(checksum);
+      const observed = await client.query([
+        "SELECT pid::integer AS pid, usename AS role, state, application_name",
+        "FROM pg_catalog.pg_stat_activity",
+        "WHERE pid<>pg_backend_pid()",
+        "  AND backend_type='client backend'",
+        "ORDER BY pid"
+      ].join(" "));
+      const sessions = (observed.rows || []).map((row) => ({
+        pid: Number(row.pid),
+        role: String(row.role || ""),
+        state: String(row.state || ""),
+        applicationName: String(row.application_name || "")
+      }));
+      const ownedSessions = [...sessionOwnership.values()];
+      const sessionMetrics = collectSessionMetrics({
+        sessions,
+        ownedSessions,
+        roleCategories: {
+          runtime: [RUNTIME_LOGIN],
+          migration: [MIGRATION_LOGIN],
+          provisioning: [PROVISIONER_LOGIN, ADMIN_LOGIN]
+        }
+      });
+      assertSessionMetricsSafe(sessionMetrics);
+      const pool = poolMetrics.snapshot();
+      return Object.freeze({
+        counts: {
+          ...pool.counts,
+          ...sessionMetrics.counts
+        },
+        metrics: { ...pool.metrics },
+        checks: {
+          ...pool.checks,
+          ...sessionMetrics.checks,
+          ...checksum.checks
+        }
+      });
+    } finally {
+      if (client && typeof client.release === "function") client.release();
+      try {
+        await closePool(auditPool);
+      } finally {
+        poolMetrics.observe(auditPool, metricView(auditPool));
+        poolMetrics.unregister(auditPool);
+      }
+    }
+  }
+
   async function collectSanitizedEvidence(input) {
     bind(input);
+    const runtimeMetrics = await collectRuntimeEvidenceMetrics();
     const phases = Object.fromEntries(
       Object.keys(state.phaseResults)
         .sort()
@@ -1329,11 +2220,54 @@ function createWindowsPhysicalAdapters(options = {}) {
     state.pendingEvidence = evidence;
     return remember("collect-sanitized-evidence", {
       code: "windows_evidence_collected",
-      counts: { completedPhases: evidence.phaseCount },
+      counts: {
+        completedPhases: evidence.phaseCount,
+        ...runtimeMetrics.counts
+      },
+      metrics: { ...runtimeMetrics.metrics },
       hashes: { evidenceSha256 },
       inventory: ["physical-gates", "owned-resources", "linux-pendencies"],
-      checks: { syntheticOnly: true, sensitiveDataAbsent: true }
+      checks: {
+        syntheticOnly: true,
+        sensitiveDataAbsent: true,
+        ...runtimeMetrics.checks
+      }
     });
+  }
+
+  async function helperProcessStillOwned(pid) {
+    const proof = activeChildOwnership.get(pid);
+    if (!proof) fail("windows_harness_child_identity_missing");
+    let originalActive;
+    try {
+      originalActive = proof.isOriginalProcessActive() === true;
+    } catch {
+      fail("windows_harness_child_identity_unconfirmed");
+    }
+    if (!originalActive) {
+      activeChildPids.delete(pid);
+      activeChildOwnership.delete(pid);
+      return false;
+    }
+    let current;
+    try {
+      current = await systemProbe.processIdentity(pid);
+    } catch {
+      fail("windows_harness_child_identity_unconfirmed");
+    }
+    if (current === null) {
+      activeChildPids.delete(pid);
+      activeChildOwnership.delete(pid);
+      return false;
+    }
+    if (
+      Number(current?.pid) !== pid ||
+      path.resolve(String(current?.executablePath || "")).toLowerCase() !==
+        proof.executablePath.toLowerCase()
+    ) {
+      fail("windows_harness_child_identity_changed");
+    }
+    return true;
   }
 
   async function terminateProcessTree() {
@@ -1341,9 +2275,12 @@ function createWindowsPhysicalAdapters(options = {}) {
       ((pid) => terminateWindowsProcessTree(pid, {
         taskkillPath: executables.taskkill
       }));
-    const targets = new Set(activeChildPids);
+    const targets = new Set([
+      ...activeChildPids,
+      ...activeChildOwnership.keys()
+    ]);
     if (state.pid) targets.add(state.pid);
-    let allConfirmed = true;
+    let allConfirmed = activeChildPids.size === activeChildOwnership.size;
     for (const pid of targets) {
       if (pid === state.pid) {
         try {
@@ -1356,20 +2293,30 @@ function createWindowsPhysicalAdapters(options = {}) {
           allConfirmed = false;
           continue;
         }
+      } else {
+        try {
+          if ((await helperProcessStillOwned(pid)) !== true) continue;
+        } catch {
+          allConfirmed = false;
+          continue;
+        }
       }
       const terminated = await Promise.resolve()
         .then(() => terminate(pid))
         .catch(() => false);
       if (terminated === true) {
+        const remaining = await systemProbe.processIdentity(pid)
+          .catch(() => ({ unconfirmed: true }));
+        if (remaining !== null) {
+          allConfirmed = false;
+          continue;
+        }
+        state.processTreesTerminated += 1;
         activeChildPids.delete(pid);
+        activeChildOwnership.delete(pid);
         if (state.pid === pid) {
-          const remaining = await systemProbe.processIdentity(pid).catch(() => ({ reused: true }));
-          if (remaining !== null) {
-            allConfirmed = false;
-          } else {
-            state.pid = null;
-            state.postmasterIdentity = null;
-          }
+          state.pid = null;
+          state.postmasterIdentity = null;
         }
       } else {
         allConfirmed = false;
@@ -1395,7 +2342,9 @@ function createWindowsPhysicalAdapters(options = {}) {
     }
     state.pools = Object.create(null);
     let processConfirmedStopped = !state.pid &&
-      !state.startAmbiguous && activeChildPids.size === 0;
+      !state.startAmbiguous &&
+      activeChildPids.size === 0 &&
+      activeChildOwnership.size === 0;
     if (state.pid) {
       const stoppingPid = state.pid;
       try {
@@ -1436,8 +2385,9 @@ function createWindowsPhysicalAdapters(options = {}) {
     }
     if (state.startAmbiguous) {
       try {
-        processConfirmedStopped = (await systemProbe.assertClean(state.target)) === true &&
-          activeChildPids.size === 0;
+        processConfirmedStopped = (await systemCleanSnapshot()).clean === true &&
+          activeChildPids.size === 0 &&
+          activeChildOwnership.size === 0;
       } catch {
         processConfirmedStopped = false;
       }
@@ -1448,7 +2398,7 @@ function createWindowsPhysicalAdapters(options = {}) {
         recordFailure("windows_harness_cleanup_process_unconfirmed");
       }
     }
-    if (activeChildPids.size > 0) {
+    if (activeChildPids.size > 0 || activeChildOwnership.size > 0) {
       if ((await terminateProcessTree()) !== true) {
         processConfirmedStopped = false;
         recordFailure("windows_harness_cleanup_child_process_failed");
@@ -1465,8 +2415,28 @@ function createWindowsPhysicalAdapters(options = {}) {
     } catch {
       recordFailure("windows_harness_cleanup_gate_material_failed");
     }
+    let workingPackageRemoved = false;
     let ownedRootRemoved = false;
     if (processConfirmedStopped) {
+      try {
+        const workingPackage = requireWithin(
+          state.packageDescriptor.archivePath,
+          paths.ownedRoot,
+          "windows_harness_working_package_outside_root"
+        );
+        if (await storage.exists(workingPackage)) {
+          await storage.unlink(workingPackage);
+        }
+        workingPackageRemoved = (await storage.exists(workingPackage)) === false;
+        if (!workingPackageRemoved) {
+          recordFailure("windows_harness_working_package_removal_unconfirmed");
+        } else {
+          state.workingPackageRemoved = true;
+          await measureSpace("afterPackageRemovalFreeBytes");
+        }
+      } catch {
+        recordFailure("windows_harness_working_package_removal_failed");
+      }
       try {
         const removed = await storage.removeOwnedTree(
           paths.ownedRoot,
@@ -1481,15 +2451,135 @@ function createWindowsPhysicalAdapters(options = {}) {
         recordFailure("windows_harness_cleanup_owned_root_failed");
       }
     }
+    let firewallUnchanged = false;
+    let systemClean = false;
+    let noResidualProcesses = false;
+    let residualProcessCount = null;
+    let finalSystemSnapshot = null;
+    let temporaryCustodiesRemaining = null;
+    let clusterRemoved = false;
+    let binariesRemoved = false;
+    if (ownedRootRemoved) {
+      try {
+        const residual = collectResidualProcessMetrics({
+          processes: await systemProbe.residualProcesses(paths.ownedRoot)
+        });
+        residualProcessCount = residual.counts.residualProcesses;
+        assertNoResidualProcesses(residual);
+        noResidualProcesses = true;
+        await measureSpace("finalFreeBytes");
+        finalSystemSnapshot = await systemCleanSnapshot();
+        systemClean = finalSystemSnapshot.clean === true;
+        if (!systemClean) {
+          recordFailure("windows_harness_cleanup_system_not_clean");
+        }
+        temporaryCustodiesRemaining = (await storage.exists(paths.custodyPath))
+          ? 1
+          : 0;
+        clusterRemoved = (await storage.exists(paths.clusterRoot)) === false;
+        binariesRemoved = (await storage.exists(paths.binaryRoot)) === false;
+        const firewallAfter = await systemProbe.firewallFingerprint();
+        state.firewallAfter = firewallAfter;
+        firewallUnchanged = Boolean(
+          state.firewallBefore &&
+          firewallAfter.sha256 === state.firewallBefore.sha256 &&
+          firewallAfter.profileCount === state.firewallBefore.profileCount &&
+          firewallAfter.ruleCount === state.firewallBefore.ruleCount
+        );
+        if (!firewallUnchanged) {
+          recordFailure("windows_harness_firewall_changed");
+        }
+      } catch {
+        recordFailure("windows_harness_cleanup_metrics_failed");
+      }
+    }
+    const cleanupCounts = {
+      poolsClosed,
+      processTreesTerminated: state.processTreesTerminated,
+      helperProcessesRemaining: Math.max(
+        activeChildPids.size,
+        activeChildOwnership.size
+      ),
+      workingPackagesRemoved: workingPackageRemoved ? 1 : 0
+    };
+    if (state.initialized) cleanupCounts.clustersRemoved = clusterRemoved ? 1 : 0;
+    if (state.productDatabasePrepared) {
+      cleanupCounts.primaryDatabasesRemoved = clusterRemoved ? 1 : 0;
+    }
+    if (state.backupRestoreCompleted) {
+      cleanupCounts.restorationDatabasesRemoved =
+        clusterRemoved &&
+        state.phaseResults["run-backup-restore-gate"]?.checks
+          ?.disposableDatabasesRemoved === true
+          ? 1
+          : 0;
+    }
+    const measuredCounts = {
+      residualOwnedPostgresProcesses: residualProcessCount,
+      postgresProcessesRemaining: finalSystemSnapshot?.processes,
+      postgresServicesRemaining: finalSystemSnapshot?.services,
+      postgresListenersRemaining: finalSystemSnapshot?.listeners,
+      temporaryCustodiesRemaining,
+      diskInitialFreeBytes: state.diskSpace.initialFreeBytes,
+      diskMinimumObservedFreeBytes: state.diskSpace.minimumFreeBytes,
+      diskBeforeExtractionFreeBytes: state.diskSpace.beforeExtractionFreeBytes,
+      diskAfterExtractionFreeBytes: state.diskSpace.afterExtractionFreeBytes,
+      diskAfterPackageRemovalFreeBytes:
+        state.diskSpace.afterPackageRemovalFreeBytes,
+      diskFinalFreeBytes: state.diskSpace.finalFreeBytes,
+      firewallProfilesBefore: state.firewallBefore?.profileCount,
+      firewallRulesBefore: state.firewallBefore?.ruleCount,
+      firewallProfilesAfter: state.firewallAfter?.profileCount,
+      firewallRulesAfter: state.firewallAfter?.ruleCount
+    };
+    for (const [name, value] of Object.entries(measuredCounts)) {
+      if (Number.isSafeInteger(value) && value >= 0) cleanupCounts[name] = value;
+    }
+    const cleanupChecks = {
+      ownedRootRemoved,
+      workingPackageRemoved,
+      externalPackageDeletionAttempted: false,
+      firewallUnchanged,
+      systemClean,
+      noResidualProcesses,
+      processesZero: finalSystemSnapshot?.processes === 0,
+      servicesZero: finalSystemSnapshot?.services === 0,
+      listenersZero: finalSystemSnapshot?.listeners === 0,
+      helpersZero:
+        activeChildPids.size === 0 && activeChildOwnership.size === 0,
+      temporaryCustodiesZero: temporaryCustodiesRemaining === 0,
+      portClosed: finalSystemSnapshot?.listeners === 0,
+      workingPackageOwnedByRun:
+        state.packageDescriptor?.workingCopyOwnedByRun === true,
+      sourcePackageExternal:
+        state.packageDescriptor?.sourceOwnedByRun === false,
+      packageSourceOwnedByRun:
+        state.packageDescriptor?.sourceOwnedByRun === true,
+      sanitizedEvidencePrepared: false,
+      materialsZeroed: true,
+      externalSystemsUntouched: true
+    };
+    if (state.initialized) {
+      cleanupChecks.clusterRemoved = clusterRemoved;
+      cleanupChecks.binariesRemoved = binariesRemoved;
+    }
+    if (state.productDatabasePrepared) {
+      cleanupChecks.primaryDatabaseRemoved = clusterRemoved;
+    }
+    if (state.backupRestoreCompleted) {
+      cleanupChecks.restorationDatabasesRemoved =
+        cleanupCounts.restorationDatabasesRemoved === 1;
+    }
     const cleanupResult = {
       code: "windows_cleanup_passed",
-      counts: { poolsClosed, processTreesTerminated: state.started ? 1 : 0 },
-      checks: {
-        ownedRootRemoved,
-        sanitizedEvidencePrepared: false,
-        materialsZeroed: true,
-        externalSystemsUntouched: true
-      }
+      counts: cleanupCounts,
+      hashes: state.firewallBefore && state.firewallAfter
+        ? {
+          firewallBeforeSha256: state.firewallBefore.sha256,
+          firewallAfterSha256: state.firewallAfter.sha256
+        }
+        : {},
+      checks: cleanupChecks
     };
     if (!cleanupFailure && state.pendingEvidence) {
       try {
@@ -1508,7 +2598,10 @@ function createWindowsPhysicalAdapters(options = {}) {
       }
     }
     state.cleaned = true;
-    if (cleanupFailure) throw cleanupFailure;
+    if (cleanupFailure) {
+      cleanupFailure.partialResult = cleanupResult;
+      throw cleanupFailure;
+    }
     return cleanupResult;
   }
 
@@ -1626,28 +2719,98 @@ function createWindowsPhysicalAdapters(options = {}) {
     }
   }
 
+  async function verifyPackageSourcePreserved() {
+    if (state.packageDescriptor?.sourceOwnedByRun === true) {
+      if (
+        state.cleaned !== true ||
+        state.workingPackageRemoved !== true ||
+        storage.existsSync(paths.ownedRoot) !== false
+      ) {
+        fail("windows_harness_run_owned_package_removal_unconfirmed");
+      }
+      return {
+        code: "windows_package_source_preserved",
+        checks: {
+          packageSourceOwnedByRun: true,
+          runOwnedPackageRemoved: true,
+          externalPackageDeletionAttempted: false
+        }
+      };
+    }
+    if (typeof sourcePackageVerifier !== "function") {
+      fail("windows_harness_package_source_verifier_missing");
+    }
+    let result;
+    try {
+      result = await sourcePackageVerifier();
+    } catch {
+      fail("windows_harness_external_package_verification_failed");
+    }
+    if (
+      !result ||
+      Object.getPrototypeOf(result) !== Object.prototype ||
+      result.externalPackagePreserved !== true ||
+      result.sourceHashUnchanged !== true
+    ) {
+      fail("windows_harness_external_package_verification_failed");
+    }
+    return {
+      code: "windows_package_source_preserved",
+      checks: {
+        packageSourceOwnedByRun: false,
+        externalPackagePreserved: true,
+        sourceHashUnchanged: true,
+        externalPackageDeletionAttempted: false
+      }
+    };
+  }
+
   consumeOwnedTemporaryRootProof(
     options.ownershipProof,
     ownedRoot,
     ownedParent
   );
   return Object.freeze({
-    preflight,
-    validatePackage,
-    extractPackage,
-    initializeCluster,
-    startCluster,
-    createReadinessProbes,
-    bootstrapRoles,
-    establishDpapiCustody: establishCustody,
-    runMigrationGate,
-    runRlsGate,
-    runConcurrencyGate,
-    runVaultGate,
-    runBackupRestoreGate,
-    collectSanitizedEvidence,
-    cleanup,
+    preflight: withPartialEvidence("preflight", preflight),
+    validatePackage: withPartialEvidence("validate-package", validatePackage),
+    extractPackage: withPartialEvidence("extract-package", extractPackage),
+    initializeCluster: withPartialEvidence(
+      "initialize-cluster",
+      initializeCluster
+    ),
+    startCluster: withPartialEvidence("start-cluster", startCluster),
+    createReadinessProbes: withPartialEvidence(
+      "wait-for-readiness",
+      createReadinessProbes
+    ),
+    bootstrapRoles: withPartialEvidence("bootstrap-roles", bootstrapRoles),
+    establishDpapiCustody: withPartialEvidence(
+      "establish-dpapi-custody",
+      establishCustody
+    ),
+    runMigrationGate: withPartialEvidence(
+      "run-migration-gate",
+      runMigrationGate
+    ),
+    runRlsGate: withPartialEvidence("run-rls-gate", runRlsGate),
+    runConcurrencyGate: withPartialEvidence(
+      "run-concurrency-gate",
+      runConcurrencyGate
+    ),
+    runVaultGate: withPartialEvidence("run-vault-gate", runVaultGate),
+    runBackupRestoreGate: withPartialEvidence(
+      "run-backup-restore-gate",
+      runBackupRestoreGate
+    ),
+    collectSanitizedEvidence: withPartialEvidence(
+      "collect-sanitized-evidence",
+      collectSanitizedEvidence
+    ),
+    cleanup: withPartialEvidence("cleanup", cleanup),
     finalizeSanitizedEvidence,
+    initializeEvidenceLedger,
+    transitionEvidenceLedger,
+    verifyPackageSourcePreserved,
     terminateProcessTree
   });
 }
@@ -1723,6 +2886,7 @@ module.exports = {
   canonicalArchiveEntry,
   createWindowsHarnessInvocation,
   createWindowsPhysicalAdapters,
+  firewallFingerprintPowerShell,
   pendingPhysicalProofs,
   runWindowsPhysicalHarness,
   validateArchiveListings,

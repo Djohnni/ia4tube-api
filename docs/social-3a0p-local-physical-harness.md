@@ -102,6 +102,24 @@ No Windows, o fsync do arquivo precisa ser comprovado fisicamente. Fsync definit
 
 ## Cleanup e evidências
 
+### Contrato H2 incremental e fail-closed
+
+O H2 acrescenta um ledger sanitizado que nasce antes do `preflight`. Cada fase grava, em ordem, início, término, duração, status, código canônico, métricas e resíduos. Uma falha de persistência bloqueia a próxima operação física; o cleanup real continua sendo tentado. Falhas anteriores a `collect-sanitized-evidence` permanecem registradas. A evidência incremental nunca equivale a uma aprovação física.
+
+O encerramento de cada fase é persistido somente pelo resultado autoritativo do controlador, depois da resolução de timeout, abort e encerramento da árvore de processos. Assim, uma operação que assenta depois do abort pode contribuir apenas com métricas parciais sanitizadas; ela não pode sobrescrever `preflight_timeout`, `cleanup_timeout` ou outro código final com um resultado interno tardio.
+
+O ledger exige a identidade exata do commit do harness e do commit-base do produto. Ele fica em um diretório irmão da raiz descartável, com herança NTFS bloqueada e regras explícitas para o usuário atual, SYSTEM e Administradores. Componentes reparse são recusados, cada revisão é criada com exclusividade, recebe flush e ACL protegida e é promovida atomicamente. A primeira promoção usa rename no mesmo diretório; revisões existentes usam `File.Replace` do Windows e verificação do SHA-256 antes e depois. O artefato canônico de sucesso também fica dentro dessa raiz protegida.
+
+As evidências de backup não são agregadas. Os perfis `0001-0003` e `0001-0004` conservam separadamente tamanho, SHA-256, número de tabelas, políticas RLS e aprovação da restauração isolada.
+
+Todos os pools criados pelo harness e pelos planos físicos são instrumentados com limite observado de três conexões por pool. O ledger registra máximo configurado, pico total, pico ativo, pico ocioso, pico em espera e aquisições. PIDs, categorias de roles sintéticas e `application_name` são registrados na aquisição do pool e comparados de forma independente com todos os `client backend` do cluster. Role inesperada, `idle in transaction`, PID órfão, sessão sem identidade owned e processo residual falham fechado.
+
+O gate registra espaço livre inicial, mínimo, antes/depois da extração, depois da remoção da cópia owned do pacote e ao final. `initdb` exige data checksums e o resultado é confirmado por `SHOW data_checksums`. A raiz temporária recebe auditoria sanitizada de proprietário, herança e regras NTFS. O firewall é serializado de forma sanitizada incluindo perfis, regras, endereços, portas, protocolo, programa, pacote e serviço; somente contagens e SHA-256 anterior/posterior entram na evidência. O cleanup repete a prova global de zero processo PostgreSQL, zero serviço PostgreSQL ativo e zero listener na porta reservada.
+
+A entrada confiável aceita exclusivamente o build oficial futuro `postgresql-18.4-2-windows-x64-binaries.zip` e continua exigindo que o operador forneça o SHA-256 real de 64 hexadecimais; nenhum hash não comprovado está hardcoded. A origem passada por `--package-path` é externa e nunca é removida; somente a cópia criada dentro da raiz owned pode ser apagada. A origem externa é reaberta e revalidada pelo mesmo SHA-256 antes da promoção da evidência canônica. O contrato injetável também cobre separadamente um ZIP criado pelo próprio run: nesse caso ele precisa estar dentro da raiz owned e sua remoção precisa ser comprovada. Provas de preservação externa e de remoção owned não são intercambiáveis.
+
+Este checkpoint implementa apenas contrato e testes. Ele não baixa, extrai ou inicia PostgreSQL e não antecipa resultado do gate físico.
+
 `cleanup` roda em sucesso, falha, exceção e timeout. Ele só pode operar na raiz temporária pertencente ao run atual, não segue junctions/reparse points, encerra descendentes comprovadamente pertencentes ao run e remove cluster, bancos descartáveis, roles sintéticas aplicáveis, custódias, helpers e pacote extraído. Falha de criação de banco é reconciliada por identidade; banco preexistente ou sem prova nunca é adotado. Custódia DPAPI parcial é eliminada. Firewall, serviços Windows, Git e evidências sanitizadas ficam intactos.
 
 A coleta grava primeiro somente um artefato `pending_cleanup`, marcado explicitamente com `physicalExecution=false`. O arquivo canônico de evidência ainda não existe nessa fase. O cleanup apenas confirma encerramento de processos, fechamento de pools, eliminação de materiais, remoção da raiz pertencente ao run e preservação do pending não aprovador.
@@ -112,10 +130,12 @@ O relatório final admite apenas fase, status, duração, códigos, contagens, t
 
 ## Próximo gate físico
 
-Somente após nova autorização: fornecer o pacote oficial PostgreSQL 18.4 já baixado e seu SHA-256 e executar a entrada confiável abaixo em uma porta comprovadamente livre. O comando não deve ser executado enquanto caminho e hash reais ainda não tiverem sido conferidos:
+Somente após nova autorização: fornecer o pacote oficial `postgresql-18.4-2-windows-x64-binaries.zip` já baixado e seu SHA-256 e executar a entrada confiável abaixo em uma porta comprovadamente livre. O comando não deve ser executado enquanto caminho e hash reais ainda não tiverem sido conferidos:
+
+Antes dessa autorização, a página oficial de origem, o nome exato do build, o tamanho e o SHA-256 deverão ser reconfirmados. Qualquer mudança de build ou pacote exige nova decisão explícita; o harness não adota automaticamente um nome ou hash diferente.
 
 ```powershell
-node scripts\social-3a0p-local-windows-entry.js --approval RUN_SOCIAL_3A0P_LOCAL_POSTGRES_18_4 --package-path "<CAMINHO_ABSOLUTO_LOCAL_DO_POSTGRESQL_18_4.zip>" --expected-sha256 <SHA256_REAL_DE_64_HEXADECIMAIS> --port 64995
+node scripts\social-3a0p-local-windows-entry.js --approval RUN_SOCIAL_3A0P_LOCAL_POSTGRES_18_4 --package-path "<CAMINHO_ABSOLUTO_LOCAL_DO_postgresql-18.4-2-windows-x64-binaries.zip>" --expected-sha256 <SHA256_REAL_DE_64_HEXADECIMAIS> --port 64995
 ```
 
 A execução física deverá completar as quinze fases: migration, RLS, concorrência/OAuth sintético/idempotência, cofre e backup/restauração Windows. As duas provas de durabilidade exclusivas de Linux — fsync do diretório do bundle e proteção forte equivalente a `O_NOFOLLOW` — permanecerão para checkpoint separado.

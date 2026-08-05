@@ -8,6 +8,7 @@ const {
   fail,
   isLoopbackHost,
   runPhasedHarness,
+  validatePhaseResult,
   waitForReadiness
 } = require("./social-3a0p-local-harness-core");
 
@@ -42,6 +43,9 @@ const REQUIRED_ADAPTERS = Object.freeze([
   ...Object.values(PHASE_ADAPTERS),
   "createReadinessProbes",
   "finalizeSanitizedEvidence",
+  "initializeEvidenceLedger",
+  "transitionEvidenceLedger",
+  "verifyPackageSourcePreserved",
   "terminateProcessTree"
 ]);
 
@@ -77,10 +81,18 @@ function validatePackageDescriptor(descriptor) {
   ) {
     fail("harness_package_sha256_invalid");
   }
+  if (
+    typeof descriptor.sourceOwnedByRun !== "boolean" ||
+    descriptor.workingCopyOwnedByRun !== true
+  ) {
+    fail("harness_package_ownership_invalid");
+  }
   return Object.freeze({
     archivePath: path.resolve(descriptor.archivePath),
     expectedSha256: descriptor.expectedSha256,
-    version: descriptor.version
+    version: descriptor.version,
+    sourceOwnedByRun: descriptor.sourceOwnedByRun,
+    workingCopyOwnedByRun: true
   });
 }
 
@@ -181,39 +193,110 @@ function phaseInput(phase, contract, runtime) {
 
 function createHarnessActions(contract) {
   const actions = {};
-  for (const [phase, adapterName] of Object.entries(PHASE_ADAPTERS)) {
-    actions[phase] = (runtime) =>
-      contract.adapters[adapterName](phaseInput(phase, contract, runtime));
+  let ledgerInitialized = false;
+
+  async function transition(event) {
+    if (!ledgerInitialized) return null;
+    return contract.adapters.transitionEvidenceLedger(Object.freeze(event));
   }
-  actions["wait-for-readiness"] = async (runtime) => {
-    const input = phaseInput("wait-for-readiness", contract, runtime);
-    const readiness = await contract.adapters.createReadinessProbes(input);
-    requirePlainObject(readiness, "harness_readiness_adapter_invalid");
-    return waitForReadiness({
-      probes: readiness.probes,
-      pid: readiness.pid,
-      port: contract.target.port,
-      stepTimeouts: contract.readinessStepTimeouts,
-      heartbeat: runtime.heartbeat,
-      signal: runtime.signal
-    });
-  };
+
+  async function executePhase(phase, runtime, operation) {
+    const input = phaseInput(phase, contract, runtime);
+    if (phase === "preflight") {
+      await contract.adapters.initializeEvidenceLedger(input);
+      ledgerInitialized = true;
+    }
+    if (phase === "cleanup") {
+      let evidenceFailure = null;
+      try {
+        await transition({ kind: "started", phase });
+      } catch (error) {
+        evidenceFailure = error;
+      }
+      let result;
+      try {
+        result = validatePhaseResult(await operation(input));
+      } catch (error) {
+        throw error;
+      }
+      if (evidenceFailure) throw evidenceFailure;
+      return result;
+    }
+
+    await transition({ kind: "started", phase });
+    return validatePhaseResult(await operation(input));
+  }
+
+  for (const [phase, adapterName] of Object.entries(PHASE_ADAPTERS)) {
+    actions[phase] = (runtime) => executePhase(
+      phase,
+      runtime,
+      (input) => contract.adapters[adapterName](input)
+    );
+  }
+  actions["wait-for-readiness"] = (runtime) => executePhase(
+    "wait-for-readiness",
+    runtime,
+    async (input) => {
+      const readiness = await contract.adapters.createReadinessProbes(input);
+      requirePlainObject(readiness, "harness_readiness_adapter_invalid");
+      return waitForReadiness({
+        probes: readiness.probes,
+        pid: readiness.pid,
+        port: contract.target.port,
+        stepTimeouts: contract.readinessStepTimeouts,
+        heartbeat: runtime.heartbeat,
+        signal: runtime.signal
+      });
+    }
+  );
+  actions.onPhaseSettled = (event) => transition({
+    kind: "finished",
+    phase: event.phase,
+    status: event.status,
+    code: event.status === "passed" ? event.result.code : event.code,
+    result: event.result
+  });
   return Object.freeze(actions);
 }
 
 async function runLocalPhysicalHarness(options) {
   const contract = controllerContract(options);
+  const actions = createHarnessActions(contract);
   const report = await runPhasedHarness({
-    actions: createHarnessActions(contract),
+    actions,
     timeouts: contract.timeouts,
     heartbeat: options.heartbeat || (() => {}),
     now: options.now || Date.now,
+    onPhaseSettled: actions.onPhaseSettled,
     terminateTree: ({ phase }) =>
       contract.adapters.terminateProcessTree(
         Object.freeze({ phase, target: contract.target })
       )
   });
   try {
+    const sourceVerification = await contract.adapters.verifyPackageSourcePreserved(
+      Object.freeze({ packageDescriptor: contract.packageDescriptor })
+    );
+    requirePlainObject(
+      sourceVerification,
+      "harness_package_source_verification_invalid"
+    );
+    const sourceChecks = sourceVerification.checks;
+    const ownershipVerified = contract.packageDescriptor.sourceOwnedByRun
+      ? sourceChecks?.packageSourceOwnedByRun === true &&
+        sourceChecks?.runOwnedPackageRemoved === true &&
+        sourceChecks?.externalPackageDeletionAttempted === false
+      : sourceChecks?.packageSourceOwnedByRun === false &&
+        sourceChecks?.externalPackagePreserved === true &&
+        sourceChecks?.sourceHashUnchanged === true &&
+        sourceChecks?.externalPackageDeletionAttempted === false;
+    if (
+      sourceVerification.code !== "windows_package_source_preserved" ||
+      ownershipVerified !== true
+    ) {
+      fail("harness_package_source_verification_invalid");
+    }
     const finalization = contract.adapters.finalizeSanitizedEvidence(
       Object.freeze({ report })
     );

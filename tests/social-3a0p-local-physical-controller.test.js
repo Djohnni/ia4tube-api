@@ -19,6 +19,8 @@ function packageDescriptor(overrides = {}) {
     archivePath: path.resolve("synthetic-postgresql-18.4.zip"),
     expectedSha256: "a".repeat(64),
     version: REQUIRED_POSTGRES_VERSION,
+    sourceOwnedByRun: false,
+    workingCopyOwnedByRun: true,
     ...overrides
   };
 }
@@ -67,6 +69,17 @@ function adapters(events = [], overrides = {}) {
         closedReportApproved: true,
         canonicalEvidenceCreated: true,
         pendingEvidenceRemoved: true
+      }
+    }),
+    initializeEvidenceLedger: async () => ({ code: "ledger_initialized" }),
+    transitionEvidenceLedger: async () => ({ code: "ledger_transitioned" }),
+    verifyPackageSourcePreserved: async () => ({
+      code: "windows_package_source_preserved",
+      checks: {
+        packageSourceOwnedByRun: false,
+        externalPackagePreserved: true,
+        sourceHashUnchanged: true,
+        externalPackageDeletionAttempted: false
       }
     }),
     terminateProcessTree: async () => true,
@@ -167,6 +180,152 @@ test("controller wires all fifteen phases in deterministic order", async () => {
   );
 });
 
+test("controller exige propriedade declarada e cópia de trabalho owned", () => {
+  for (const invalid of [
+    { workingCopyOwnedByRun: false },
+    { sourceOwnedByRun: undefined },
+    { workingCopyOwnedByRun: undefined }
+  ]) {
+    assert.throws(
+      () => controllerContract(options({
+        packageDescriptor: packageDescriptor(invalid)
+      })),
+      { code: "harness_package_ownership_invalid" }
+    );
+  }
+});
+
+test("controller aceita ZIP criado pela execução somente após remoção comprovada", async () => {
+  const report = await runLocalPhysicalHarness(options({
+    packageDescriptor: packageDescriptor({ sourceOwnedByRun: true }),
+    adapters: adapters([], {
+      async verifyPackageSourcePreserved() {
+        return {
+          code: "windows_package_source_preserved",
+          checks: {
+            packageSourceOwnedByRun: true,
+            runOwnedPackageRemoved: true,
+            externalPackageDeletionAttempted: false
+          }
+        };
+      }
+    })
+  }));
+  assert.equal(report.ok, true);
+});
+
+test("controller recusa prova cruzada entre ZIP externo e ZIP criado pela execução", async () => {
+  for (const configured of [
+    {
+      descriptor: packageDescriptor({ sourceOwnedByRun: true }),
+      checks: {
+        packageSourceOwnedByRun: false,
+        externalPackagePreserved: true,
+        sourceHashUnchanged: true,
+        externalPackageDeletionAttempted: false
+      }
+    },
+    {
+      descriptor: packageDescriptor({ sourceOwnedByRun: false }),
+      checks: {
+        packageSourceOwnedByRun: true,
+        runOwnedPackageRemoved: true,
+        externalPackageDeletionAttempted: false
+      }
+    }
+  ]) {
+    await assert.rejects(
+      runLocalPhysicalHarness(options({
+        packageDescriptor: configured.descriptor,
+        adapters: adapters([], {
+          async verifyPackageSourcePreserved() {
+            return {
+              code: "windows_package_source_preserved",
+              checks: configured.checks
+            };
+          }
+        })
+      })),
+      { code: "harness_package_source_verification_invalid" }
+    );
+  }
+});
+
+test("ledger incremental recebe início e término de todas as fases, inclusive cleanup", async () => {
+  const ledgerEvents = [];
+  const configuredAdapters = adapters([], {
+    async initializeEvidenceLedger() {
+      ledgerEvents.push({ kind: "initialize" });
+      return { code: "ledger_initialized" };
+    },
+    async transitionEvidenceLedger(event) {
+      ledgerEvents.push({ ...event });
+      return { code: "ledger_transitioned" };
+    }
+  });
+  const report = await runLocalPhysicalHarness(
+    options({ adapters: configuredAdapters })
+  );
+  assert.equal(report.ok, true);
+  assert.equal(ledgerEvents[0].kind, "initialize");
+  for (const phase of PHASES) {
+    const events = ledgerEvents.filter((entry) => entry.phase === phase);
+    assert.deepEqual(events.map((entry) => entry.kind), ["started", "finished"]);
+    assert.equal(events[1].status, "passed");
+  }
+});
+
+test("falha de persistência do ledger bloqueia a fase física, mas cleanup real ainda é tentado", async () => {
+  let preflightRan = false;
+  let cleanupRan = false;
+  const configuredAdapters = adapters([], {
+    async transitionEvidenceLedger(event) {
+      if (event.phase === "preflight" && event.kind === "started") {
+        throw new Error("synthetic_ledger_write_failed");
+      }
+      return { code: "ledger_transitioned" };
+    },
+    async preflight() {
+      preflightRan = true;
+      return { code: "adapter_approved" };
+    },
+    async cleanup() {
+      cleanupRan = true;
+      return { code: "adapter_approved", checks: { approved: true } };
+    }
+  });
+  await assert.rejects(
+    runLocalPhysicalHarness(options({ adapters: configuredAdapters }))
+  );
+  assert.equal(preflightRan, false);
+  assert.equal(cleanupRan, true);
+});
+
+test("pacote externo é revalidado antes da promoção da evidência canônica", async () => {
+  let finalized = false;
+  await assert.rejects(
+    runLocalPhysicalHarness(options({
+      adapters: adapters([], {
+        async verifyPackageSourcePreserved() {
+          throw new Error("synthetic_external_package_changed");
+        },
+        finalizeSanitizedEvidence() {
+          finalized = true;
+          return {
+            code: "windows_evidence_finalized",
+            checks: {
+              closedReportApproved: true,
+              canonicalEvidenceCreated: true,
+              pendingEvidenceRemoved: true
+            }
+          };
+        }
+      })
+    }))
+  );
+  assert.equal(finalized, false);
+});
+
 test("canonical evidence finalization runs only after the cleanup report is closed", async () => {
   const events = [];
   let observedReport;
@@ -215,10 +374,15 @@ test("an asynchronous evidence finalizer is refused", async () => {
 
 test("cleanup timeout never invokes canonical evidence finalization", async () => {
   let finalized = false;
+  const ledgerEvents = [];
   await assert.rejects(
     runLocalPhysicalHarness(options({
       timeouts: { cleanup: 5 },
       adapters: adapters([], {
+        async transitionEvidenceLedger(event) {
+          ledgerEvents.push({ ...event });
+          return { code: "ledger_transitioned" };
+        },
         cleanup: async ({ signal }) => new Promise((resolve) => {
           signal.addEventListener("abort", () => resolve({
             code: "cleanup_aborted",
@@ -241,6 +405,12 @@ test("cleanup timeout never invokes canonical evidence finalization", async () =
     { code: "cleanup_timeout" }
   );
   assert.equal(finalized, false);
+  const cleanupFinished = ledgerEvents.find(
+    (event) => event.phase === "cleanup" && event.kind === "finished"
+  );
+  assert.equal(cleanupFinished.status, "failed");
+  assert.equal(cleanupFinished.code, "cleanup_timeout");
+  assert.equal(cleanupFinished.result.code, "cleanup_aborted");
 });
 
 test("controller readiness requires PostgreSQL 18.4", async () => {
@@ -284,11 +454,16 @@ test("controller rejects an unknown timeout phase", () => {
 
 test("controller forwards the exact timed-out phase to the owned terminator", async () => {
   let terminationInput;
+  const ledgerEvents = [];
   await assert.rejects(
     runLocalPhysicalHarness(
       options({
         timeouts: { preflight: 5 },
         adapters: adapters([], {
+          async transitionEvidenceLedger(event) {
+            ledgerEvents.push({ ...event });
+            return { code: "ledger_transitioned" };
+          },
           preflight: async ({ signal }) =>
             new Promise((resolve) => {
               signal.addEventListener("abort", () => resolve({
@@ -308,6 +483,12 @@ test("controller forwards the exact timed-out phase to the owned terminator", as
     phase: "preflight",
     target: { host: "127.0.0.1", port: 64995 }
   });
+  const preflightFinished = ledgerEvents.find(
+    (event) => event.phase === "preflight" && event.kind === "finished"
+  );
+  assert.equal(preflightFinished.status, "failed");
+  assert.equal(preflightFinished.code, "preflight_timeout");
+  assert.equal(preflightFinished.result.code, "preflight_aborted");
 });
 
 test("direct command-line entry is fail-closed and runs no adapter", async () => {

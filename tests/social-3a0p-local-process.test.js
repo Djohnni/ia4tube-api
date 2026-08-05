@@ -127,6 +127,37 @@ test("runner registra PID, captura canais sanitizados e encerra normalmente", as
   assert.doesNotMatch(result.stderrSanitized, /user:pass/);
 });
 
+test("resource journal receives a live child ownership proof that closes with the child", async () => {
+  const child = fakeChild(7799);
+  let proof;
+  const runner = createProcessRunner({
+    allowedExecutables: [APPROVED_EXECUTABLE],
+    spawnImpl: () => child,
+    resourceJournal: {
+      registerProcess(pid, candidate) {
+        assert.equal(pid, 7799);
+        proof = candidate;
+      },
+      unregisterProcess() {}
+    }
+  });
+
+  const pending = runner.run({
+    executable: APPROVED_EXECUTABLE,
+    environment: { PATH: "C:\\Windows" },
+    cwd: WORKING_DIRECTORY,
+    timeoutMs: 1_000,
+    label: "owned_process"
+  });
+  assert.equal(proof.pid, 7799);
+  assert.equal(proof.executablePath, APPROVED_EXECUTABLE.toLowerCase());
+  assert.equal(proof.isOriginalProcessActive(), true);
+
+  child.emit("close", 0, null);
+  await pending;
+  assert.equal(proof.isOriginalProcessActive(), false);
+});
+
 test("timeout encerra exatamente a árvore do PID registrado", async () => {
   const child = fakeChild(9911);
   const terminated = [];
@@ -439,13 +470,14 @@ test("registry por invocacao invalido falha antes do spawn", async () => {
 
 test("timeout sem confirmacao de termino usa codigo distinto", async () => {
   const child = fakeChild(9912);
+  let ownershipProof;
   const unregistered = [];
   const runner = createProcessRunner({
     allowedExecutables: [APPROVED_EXECUTABLE],
     spawnImpl: () => child,
     terminateTree: async () => false,
     resourceJournal: {
-      registerProcess: () => {},
+      registerProcess: (_pid, proof) => { ownershipProof = proof; },
       unregisterProcess: (pid) => unregistered.push(pid)
     }
   });
@@ -464,6 +496,11 @@ test("timeout sem confirmacao de termino usa codigo distinto", async () => {
     }
   );
   assert.deepEqual(unregistered, []);
+  assert.equal(ownershipProof.isOriginalProcessActive(), true);
+
+  child.emit("close", null, "SIGTERM");
+  assert.equal(ownershipProof.isOriginalProcessActive(), false);
+  assert.deepEqual(unregistered, [9912]);
 });
 
 for (const channel of ["stdin", "stdout", "stderr"]) {

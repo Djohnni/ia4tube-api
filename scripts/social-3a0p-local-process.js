@@ -397,8 +397,14 @@ function createProcessRunner({
           { terminationConfirmed }
         );
       }
+      let originalProcessActive = true;
+      const ownershipProof = Object.freeze({
+        pid,
+        executablePath: normalized,
+        isOriginalProcessActive: () => originalProcessActive === true
+      });
       try {
-        resourceJournal?.registerProcess(pid);
+        resourceJournal?.registerProcess(pid, ownershipProof);
       } catch {
         let terminationTimer;
         const terminationConfirmed = await Promise.race([
@@ -414,6 +420,14 @@ function createProcessRunner({
           })
         ]);
         clearTimeout(terminationTimer);
+        if (terminationConfirmed) {
+          originalProcessActive = false;
+          try {
+            resourceJournal?.unregisterProcess(pid);
+          } catch {
+            // The registration failure remains authoritative.
+          }
+        }
         throw new HarnessFailure(
           terminationConfirmed
             ? `${codePrefix}_journal_registration_failed`
@@ -436,6 +450,7 @@ function createProcessRunner({
         let timer;
         let onAbort;
         const safeUnregister = () => {
+          originalProcessActive = false;
           try {
             resourceJournal?.unregisterProcess(pid);
           } catch {
@@ -496,8 +511,8 @@ function createProcessRunner({
           void rejectAfterTermination(`${codePrefix}_spawn_failed`);
         });
         child.once("close", (exitCode, signal) => {
-          if (!claim()) return;
           safeUnregister();
+          if (!claim()) return;
           try {
             const result = Object.freeze({
               exitCode: Number.isInteger(exitCode) ? exitCode : null,

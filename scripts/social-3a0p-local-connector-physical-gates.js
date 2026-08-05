@@ -460,11 +460,23 @@ async function backupRestoreGate(state, dependencies, plans) {
     ) {
       fail("connector_physical_backup_restore_invalid");
     }
-    const bundleSize = Number(backup0003.evidence.bundleSize) + Number(backup0004.evidence.bundleSize);
-    const bundleSha256 = crypto.createHash("sha256")
-      .update(backup0003.evidence.bundleSha256)
-      .update(backup0004.evidence.bundleSha256)
-      .digest("hex");
+    const individualBundles = [backup0003, backup0004].map((backup) => ({
+      size: Number(backup.evidence.bundleSize),
+      sha256: String(backup.evidence.bundleSha256 || ""),
+      tables: Number(backup.evidence.tableCount),
+      rlsPolicies: Number(backup.evidence.rlsTableCount)
+    }));
+    if (individualBundles.some((bundle) => (
+      !Number.isSafeInteger(bundle.size) ||
+      bundle.size < 1 ||
+      !/^[0-9a-f]{64}$/.test(bundle.sha256) ||
+      !Number.isSafeInteger(bundle.tables) ||
+      bundle.tables < 1 ||
+      !Number.isSafeInteger(bundle.rlsPolicies) ||
+      bundle.rlsPolicies < 1
+    ))) {
+      fail("connector_physical_backup_bundle_evidence_invalid");
+    }
     // Tamper and cross-profile refusals are executed by the concrete plan so no
     // result is inferred from a unit-test-only JSON mutation.
     requireTrue(await plan.assertManifestTamperRefused(), "connector_physical_manifest_tamper_accepted");
@@ -480,8 +492,14 @@ async function backupRestoreGate(state, dependencies, plans) {
       operationalRollback: true,
       disposableRemoved: true,
       fileFsync: true,
-      bundleSize,
-      bundleSha256
+      bundle0003Size: individualBundles[0].size,
+      bundle0003Sha256: individualBundles[0].sha256,
+      bundle0003Tables: individualBundles[0].tables,
+      bundle0003RlsPolicies: individualBundles[0].rlsPolicies,
+      bundle0004Size: individualBundles[1].size,
+      bundle0004Sha256: individualBundles[1].sha256,
+      bundle0004Tables: individualBundles[1].tables,
+      bundle0004RlsPolicies: individualBundles[1].rlsPolicies
     };
   } finally {
     if (typeof plan.cleanup === "function") await plan.cleanup();

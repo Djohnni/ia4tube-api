@@ -26,6 +26,9 @@ const INPUT_KEYS = Object.freeze([
 const SHA256 = /^[0-9a-f]{64}$/;
 const FORBIDDEN_LOCAL_PATH = /^(?:\\\\|\/\/|\\\\\?\\|\\\\\.\\)/;
 const KERNEL_SYSTEM_ROOT = "\\\\?\\GLOBALROOT\\SystemRoot";
+const POSTGRES_PACKAGE_NAME = "postgresql-18.4-2-windows-x64-binaries.zip";
+const PRODUCT_COMMIT = "fcfc92419021dae5f77baad731c634b10c275c5b";
+const COMMIT = /^[0-9a-f]{40}$/;
 
 function fail(code) {
   throw new HarnessFailure(code);
@@ -67,7 +70,8 @@ function validateTrustedWindowsEntryInput(input) {
     !input.packagePath ||
     input.packagePath !== input.packagePath.trim() ||
     !path.isAbsolute(input.packagePath) ||
-    FORBIDDEN_LOCAL_PATH.test(input.packagePath)
+    FORBIDDEN_LOCAL_PATH.test(input.packagePath) ||
+    path.basename(input.packagePath).toLowerCase() !== POSTGRES_PACKAGE_NAME
   ) {
     fail("windows_entry_package_path_invalid");
   }
@@ -87,6 +91,44 @@ function validateTrustedWindowsEntryInput(input) {
     packagePath: path.resolve(input.packagePath),
     port: input.port
   });
+}
+
+function readWorktreeHeadCommit(repositoryRoot) {
+  let gitDirectory;
+  try {
+    const dotGit = path.join(repositoryRoot, ".git");
+    const item = fs.lstatSync(dotGit);
+    if (item.isDirectory()) {
+      gitDirectory = dotGit;
+    } else if (item.isFile()) {
+      const pointer = fs.readFileSync(dotGit, "utf8").trim();
+      if (!pointer.startsWith("gitdir: ")) fail("windows_entry_git_identity_invalid");
+      gitDirectory = path.resolve(repositoryRoot, pointer.slice(8));
+    } else {
+      fail("windows_entry_git_identity_invalid");
+    }
+    const head = fs.readFileSync(path.join(gitDirectory, "HEAD"), "utf8").trim();
+    if (COMMIT.test(head)) return head;
+    if (!head.startsWith("ref: refs/")) fail("windows_entry_git_identity_invalid");
+    const reference = head.slice(5);
+    const candidates = [path.join(gitDirectory, reference)];
+    const commonFile = path.join(gitDirectory, "commondir");
+    if (fs.existsSync(commonFile)) {
+      const commonDirectory = path.resolve(
+        gitDirectory,
+        fs.readFileSync(commonFile, "utf8").trim()
+      );
+      candidates.push(path.join(commonDirectory, reference));
+    }
+    for (const candidate of candidates) {
+      if (!fs.existsSync(candidate)) continue;
+      const commit = fs.readFileSync(candidate, "utf8").trim();
+      if (COMMIT.test(commit)) return commit;
+    }
+  } catch (error) {
+    if (error instanceof HarnessFailure) throw error;
+  }
+  fail("windows_entry_git_identity_invalid");
 }
 
 function requireLocalRegularFile(file, code) {
@@ -219,13 +261,14 @@ async function prepareTrustedWindowsEntry(input) {
     fail("windows_entry_package_sha256_mismatch");
   }
   const runtime = trustedRuntimePaths();
+  const harnessCommit = readWorktreeHeadCommit(runtime.repositoryRoot);
   const ownedParent = requireLocalDirectory(
     os.tmpdir(),
     "windows_entry_temporary_parent_invalid"
   );
   const ownershipProof = createOwnedTemporaryRoot({ parent: ownedParent });
   const ownedRoot = ownershipProof.root;
-  const ownedPackage = path.join(ownedRoot, "postgresql-18.4.zip");
+  const ownedPackage = path.join(ownedRoot, POSTGRES_PACKAGE_NAME);
   let prepared = false;
   try {
     await fsp.copyFile(sourcePackage, ownedPackage, fs.constants.COPYFILE_EXCL);
@@ -243,6 +286,21 @@ async function prepareTrustedWindowsEntry(input) {
         ownedParent,
         ownershipProof,
         repositoryRoot: runtime.repositoryRoot,
+        harnessCommit,
+        productCommit: PRODUCT_COMMIT,
+        sourcePackageVerifier: async () => {
+          const preservedSource = requireLocalRegularFile(
+            sourcePackage,
+            "windows_entry_external_package_missing"
+          );
+          if ((await sha256File(preservedSource)) !== validated.expectedSha256) {
+            fail("windows_entry_external_package_changed");
+          }
+          return {
+            externalPackagePreserved: true,
+            sourceHashUnchanged: true
+          };
+        },
         platform: "win32",
         systemEnvironment: runtime.systemEnvironment,
         executables: {
@@ -254,7 +312,9 @@ async function prepareTrustedWindowsEntry(input) {
       packageDescriptor: {
         archivePath: ownedPackage,
         expectedSha256: validated.expectedSha256,
-        version: REQUIRED_POSTGRES_VERSION
+        version: REQUIRED_POSTGRES_VERSION,
+        sourceOwnedByRun: false,
+        workingCopyOwnedByRun: true
       },
       target: { host: "127.0.0.1", port: validated.port },
       heartbeat(event) {
@@ -270,11 +330,17 @@ async function prepareTrustedWindowsEntry(input) {
         const { runLocalPhysicalHarness } = require(
           "./social-3a0p-local-physical-harness"
         );
+        let report;
+        let executionFailure = null;
         try {
-          return await runLocalPhysicalHarness(invocation);
+          report = await runLocalPhysicalHarness(invocation);
+        } catch (error) {
+          executionFailure = error;
         } finally {
           state = "closed";
         }
+        if (executionFailure) throw executionFailure;
+        return report;
       },
       cancelPreparation() {
         if (state !== "prepared") fail("windows_entry_state_invalid");
@@ -283,6 +349,10 @@ async function prepareTrustedWindowsEntry(input) {
       },
       summary: Object.freeze({
         packageSha256: validated.expectedSha256,
+        packageName: POSTGRES_PACKAGE_NAME,
+        packageBuild: "18.4-2",
+        sourceOwnedByRun: false,
+        workingCopyOwnedByRun: true,
         port: validated.port,
         postgresVersion: REQUIRED_POSTGRES_VERSION,
         targetHost: "127.0.0.1"
@@ -368,6 +438,8 @@ if (require.main === module) {
 
 module.exports = {
   INPUT_KEYS,
+  POSTGRES_PACKAGE_NAME,
+  PRODUCT_COMMIT,
   commandLineEntry,
   parseCommandLine,
   prepareTrustedWindowsEntry,

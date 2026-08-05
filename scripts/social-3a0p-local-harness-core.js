@@ -77,6 +77,7 @@ const REPORT_KEYS = new Set([
   "schemaVersion",
   "ok",
   "primaryFailureCode",
+  "persistenceFailureCode",
   "cleanupFailureCode",
   "lastCompletedPhase",
   "durationMs",
@@ -367,6 +368,8 @@ function assertClosedEvidenceReport(report) {
   if (
     (report.primaryFailureCode !== null &&
       !CANONICAL_CODE.test(report.primaryFailureCode)) ||
+    (report.persistenceFailureCode !== null &&
+      report.persistenceFailureCode !== "harness_phase_settled_hook_failed") ||
     (report.cleanupFailureCode !== null &&
       !CANONICAL_CODE.test(report.cleanupFailureCode)) ||
     (report.lastCompletedPhase !== null &&
@@ -424,7 +427,11 @@ function assertClosedEvidenceReport(report) {
   const executionFailure = execution.find((record) => record.status === "failed");
   const lastPassed = [...execution].reverse().find((record) => record.status === "passed");
   if (
-    report.ok !== (!executionFailure && cleanup.status === "passed") ||
+    report.ok !== (
+      !executionFailure &&
+      cleanup.status === "passed" &&
+      report.persistenceFailureCode === null
+    ) ||
     report.primaryFailureCode !== (executionFailure?.code || null) ||
     report.cleanupFailureCode !== (cleanup.status === "failed" ? cleanup.code : null) ||
     report.lastCompletedPhase !== (lastPassed?.phase || null) ||
@@ -516,10 +523,20 @@ async function executeWithTimeout({
   let timer;
   let timedOut = false;
   let settled = false;
+  let settlementOutcome = null;
   const operationPromise = Promise.resolve().then(() => operation(controller.signal));
-  const observedOperation = operationPromise.finally(() => {
-    settled = true;
-  });
+  const observedOperation = operationPromise.then(
+    (value) => {
+      settled = true;
+      settlementOutcome = Object.freeze({ status: "fulfilled", value });
+      return value;
+    },
+    (reason) => {
+      settled = true;
+      settlementOutcome = Object.freeze({ status: "rejected", reason });
+      throw reason;
+    }
+  );
   observedOperation.catch(() => {});
   const timeoutPromise = new Promise((resolve, reject) => {
     timer = setTimeout(() => {
@@ -558,10 +575,15 @@ async function executeWithTimeout({
       : !operationSettled
         ? `${prefix}_timeout_operation_unsettled`
         : `${prefix}_timeout`;
-    throw new HarnessFailure(code, {
+    const timeoutFailure = new HarnessFailure(code, {
       terminationConfirmed,
       operationSettled
     });
+    const partialResult = settlementOutcome?.status === "fulfilled"
+      ? sanitizedPartialResult({ partialResult: settlementOutcome.value })
+      : sanitizedPartialResult(settlementOutcome?.reason);
+    if (partialResult !== null) timeoutFailure.partialResult = partialResult;
+    throw timeoutFailure;
   } finally {
     clearTimeout(timer);
   }
@@ -637,11 +659,63 @@ function finishPhaseRecord(record, harnessStartedAt, now, status, code, result) 
   return Object.freeze({ ...record });
 }
 
+function sanitizedPartialResult(error) {
+  let candidate;
+  try {
+    candidate = error?.partialResult;
+  } catch {
+    return null;
+  }
+  if (candidate === undefined) return null;
+  try {
+    return validatePhaseResult(candidate);
+  } catch {
+    return null;
+  }
+}
+
+function phaseSettledEvent(record) {
+  const event = {
+    phase: record.phase,
+    status: record.status,
+    code: record.code,
+    result: record.result
+  };
+  if (
+    !PHASES.includes(event.phase) ||
+    (event.status !== "passed" && event.status !== "failed") ||
+    !CANONICAL_CODE.test(event.code)
+  ) {
+    fail("harness_phase_settled_event_invalid");
+  }
+  if (event.result !== null) validatePhaseResult(event.result);
+  return Object.freeze(event);
+}
+
+async function notifyPhaseSettled(onPhaseSettled, record) {
+  if (onPhaseSettled === null) return;
+  const event = phaseSettledEvent(record);
+  try {
+    await onPhaseSettled(event);
+  } catch {
+    throw new HarnessFailure("harness_phase_settled_hook_failed");
+  }
+}
+
+function hookFailurePhaseRecord(record) {
+  return Object.freeze({
+    ...record,
+    status: "failed",
+    code: "harness_phase_settled_hook_failed"
+  });
+}
+
 async function runPhasedHarness({
   actions,
   timeouts = DEFAULT_PHASE_TIMEOUTS,
   now = Date.now,
   heartbeat = () => {},
+  onPhaseSettled = null,
   terminateTree = async () => true,
   heartbeatIntervalMs = DEFAULT_HEARTBEAT_INTERVAL_MS,
   setIntervalImpl = setInterval,
@@ -651,6 +725,9 @@ async function runPhasedHarness({
 }) {
   if (!actions || typeof actions !== "object" || typeof now !== "function") {
     fail("harness_actions_invalid");
+  }
+  if (onPhaseSettled !== null && typeof onPhaseSettled !== "function") {
+    fail("harness_phase_settled_hook_invalid");
   }
   for (const phase of PHASES) {
     requirePositiveTimeout(timeouts?.[phase], phase);
@@ -663,6 +740,7 @@ async function runPhasedHarness({
     resourceJournal: actions.resourceJournal || null
   };
   let primaryFailure = null;
+  let persistenceFailure = null;
   let cleanupFailure = null;
   let cleanupPermitted = true;
 
@@ -671,6 +749,8 @@ async function runPhasedHarness({
     const phaseStartedAt = now();
     const lease = createPhaseLease(phase);
     let stopHeartbeat = () => {};
+    let settledRecord;
+    let phaseFailure = null;
     try {
       if (typeof actions[phase] !== "function") {
         fail("harness_phase_action_missing");
@@ -703,36 +783,45 @@ async function runPhasedHarness({
         terminationTimeoutMs,
         settlementTimeoutMs
       });
-      phaseRecords.push(
-        finishPhaseRecord(
-          record,
-          harnessStartedAt,
-          now,
-          "passed",
-          "phase_passed",
-          validatePhaseResult(value)
-        )
+      settledRecord = finishPhaseRecord(
+        record,
+        harnessStartedAt,
+        now,
+        "passed",
+        "phase_passed",
+        validatePhaseResult(value)
       );
     } catch (error) {
-      primaryFailure =
+      phaseFailure =
         error instanceof HarnessFailure
           ? error
           : new HarnessFailure("harness_phase_unexpected_failure");
-      if (primaryFailure.operationSettled === false) cleanupPermitted = false;
-      phaseRecords.push(
-        finishPhaseRecord(
-          record,
-          harnessStartedAt,
-          now,
-          "failed",
-          primaryFailure.code,
-          null
-        )
+      if (phaseFailure.operationSettled === false) cleanupPermitted = false;
+      settledRecord = finishPhaseRecord(
+        record,
+        harnessStartedAt,
+        now,
+        "failed",
+        phaseFailure.code,
+        sanitizedPartialResult(error)
       );
-      break;
     } finally {
       lease.invalidate();
       stopHeartbeat();
+    }
+    try {
+      await notifyPhaseSettled(onPhaseSettled, settledRecord);
+    } catch (error) {
+      persistenceFailure ||= error;
+      if (phaseFailure === null) {
+        phaseFailure = error;
+        settledRecord = hookFailurePhaseRecord(settledRecord);
+      }
+    }
+    phaseRecords.push(settledRecord);
+    if (phaseFailure !== null) {
+      primaryFailure = phaseFailure;
+      break;
     }
   }
 
@@ -740,6 +829,7 @@ async function runPhasedHarness({
   const cleanupStartedAt = now();
   const cleanupLease = createPhaseLease("cleanup");
   let stopCleanupHeartbeat = () => {};
+  let settledCleanupRecord;
   try {
     if (!cleanupPermitted) {
       fail("harness_cleanup_blocked_unsettled_operation");
@@ -777,40 +867,50 @@ async function runPhasedHarness({
       terminationTimeoutMs,
       settlementTimeoutMs
     });
-    phaseRecords.push(
-      finishPhaseRecord(
-        cleanupRecord,
-        harnessStartedAt,
-        now,
-        "passed",
-        "cleanup_passed",
-        validatePhaseResult(value)
-      )
+    settledCleanupRecord = finishPhaseRecord(
+      cleanupRecord,
+      harnessStartedAt,
+      now,
+      "passed",
+      "cleanup_passed",
+      validatePhaseResult(value)
     );
   } catch (error) {
     cleanupFailure =
       error instanceof HarnessFailure
         ? error
         : new HarnessFailure("harness_cleanup_unexpected_failure");
-    phaseRecords.push(
-      finishPhaseRecord(
-        cleanupRecord,
-        harnessStartedAt,
-        now,
-        "failed",
-        cleanupFailure.code,
-        null
-      )
+    settledCleanupRecord = finishPhaseRecord(
+      cleanupRecord,
+      harnessStartedAt,
+      now,
+      "failed",
+      cleanupFailure.code,
+      sanitizedPartialResult(error)
     );
   } finally {
     cleanupLease.invalidate();
     stopCleanupHeartbeat();
   }
+  try {
+    await notifyPhaseSettled(onPhaseSettled, settledCleanupRecord);
+  } catch (error) {
+    persistenceFailure ||= error;
+    if (cleanupFailure === null) {
+      cleanupFailure = error;
+      settledCleanupRecord = hookFailurePhaseRecord(settledCleanupRecord);
+    }
+  }
+  phaseRecords.push(settledCleanupRecord);
 
   const report = Object.freeze({
     schemaVersion: 1,
-    ok: primaryFailure === null && cleanupFailure === null,
+    ok:
+      primaryFailure === null &&
+      persistenceFailure === null &&
+      cleanupFailure === null,
     primaryFailureCode: primaryFailure?.code || null,
+    persistenceFailureCode: persistenceFailure?.code || null,
     cleanupFailureCode: cleanupFailure?.code || null,
     lastCompletedPhase:
       [...phaseRecords]
