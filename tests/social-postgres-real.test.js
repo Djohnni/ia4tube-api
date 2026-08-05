@@ -144,7 +144,7 @@ function assertRedactedOutput(output, configuration, extras = []) {
 }
 
 function migrationCliEnvironment(configuration) {
-  return {
+  const env = {
     ...systemChildEnvironment(),
     NODE_ENV: "test",
     SOCIAL_MIGRATIONS_DATABASE_URL: configuration.migrationUrl,
@@ -165,6 +165,10 @@ function migrationCliEnvironment(configuration) {
       configuration.approvalEnvironment
         .SOCIAL_MIGRATION_TARGET_FINGERPRINT
   };
+  if (configuration.mode === LOOPBACK_MODE) {
+    env.SOCIAL_DATABASE_ALLOW_INSECURE_LOCALHOST = "true";
+  }
+  return env;
 }
 
 function runMigrationCli(command, configuration) {
@@ -336,6 +340,9 @@ function createStartupProbeEnvironment(
     BOT_RUNNER_TOKEN_NEXT: "",
     GOOGLE_CLIENT_ID: ""
   };
+  if (configuration.mode === LOOPBACK_MODE) {
+    env.SOCIAL_DATABASE_ALLOW_INSECURE_LOCALHOST = "true";
+  }
   return Object.freeze({
     env,
     secrets: Object.freeze([
