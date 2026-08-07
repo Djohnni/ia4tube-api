@@ -4,8 +4,11 @@ const path = require("node:path");
 const {
   DEFAULT_PHASE_TIMEOUTS,
   DEFAULT_READINESS_TIMEOUTS,
+  HarnessFailure,
   PHASES,
+  executeWithTimeout,
   fail,
+  heartbeatEvent,
   isLoopbackHost,
   runPhasedHarness,
   validatePhaseResult,
@@ -275,28 +278,7 @@ async function runLocalPhysicalHarness(options) {
       )
   });
   try {
-    const sourceVerification = await contract.adapters.verifyPackageSourcePreserved(
-      Object.freeze({ packageDescriptor: contract.packageDescriptor })
-    );
-    requirePlainObject(
-      sourceVerification,
-      "harness_package_source_verification_invalid"
-    );
-    const sourceChecks = sourceVerification.checks;
-    const ownershipVerified = contract.packageDescriptor.sourceOwnedByRun
-      ? sourceChecks?.packageSourceOwnedByRun === true &&
-        sourceChecks?.runOwnedPackageRemoved === true &&
-        sourceChecks?.externalPackageDeletionAttempted === false
-      : sourceChecks?.packageSourceOwnedByRun === false &&
-        sourceChecks?.externalPackagePreserved === true &&
-        sourceChecks?.sourceHashUnchanged === true &&
-        sourceChecks?.externalPackageDeletionAttempted === false;
-    if (
-      sourceVerification.code !== "windows_package_source_preserved" ||
-      ownershipVerified !== true
-    ) {
-      fail("harness_package_source_verification_invalid");
-    }
+    await verifyPackageSourcePreserved(contract);
     const finalization = contract.adapters.finalizeSanitizedEvidence(
       Object.freeze({ report })
     );
@@ -315,6 +297,175 @@ async function runLocalPhysicalHarness(options) {
   } catch (error) {
     if (error && typeof error === "object") error.report = report;
     throw error;
+  }
+  return report;
+}
+
+async function verifyPackageSourcePreserved(contract) {
+  const sourceVerification = await contract.adapters.verifyPackageSourcePreserved(
+    Object.freeze({ packageDescriptor: contract.packageDescriptor })
+  );
+  requirePlainObject(
+    sourceVerification,
+    "harness_package_source_verification_invalid"
+  );
+  const sourceChecks = sourceVerification.checks;
+  const ownershipVerified = contract.packageDescriptor.sourceOwnedByRun
+    ? sourceChecks?.packageSourceOwnedByRun === true &&
+      sourceChecks?.runOwnedPackageRemoved === true &&
+      sourceChecks?.externalPackageDeletionAttempted === false
+    : sourceChecks?.packageSourceOwnedByRun === false &&
+      sourceChecks?.externalPackagePreserved === true &&
+      sourceChecks?.sourceHashUnchanged === true &&
+      sourceChecks?.externalPackageDeletionAttempted === false;
+  if (
+    sourceVerification.code !== "windows_package_source_preserved" ||
+    ownershipVerified !== true
+  ) {
+    fail("harness_package_source_verification_invalid");
+  }
+  return sourceVerification;
+}
+
+function createPreflightOnlyRecord({
+  phase,
+  status,
+  code,
+  result,
+  startedOffsetMs,
+  completedOffsetMs
+}) {
+  return Object.freeze({
+    phase,
+    status,
+    startedOffsetMs,
+    completedOffsetMs,
+    durationMs: completedOffsetMs - startedOffsetMs,
+    code,
+    result
+  });
+}
+
+function assertPreflightOnlyReport(report) {
+  if (
+    !report ||
+    report.schemaVersion !== 1 ||
+    !Array.isArray(report.phases) ||
+    report.phases.length !== 2 ||
+    report.phases[0]?.phase !== "preflight" ||
+    report.phases[1]?.phase !== "cleanup" ||
+    report.phases.some((record) => record.status === "running") ||
+    report.lastCompletedPhase !== (
+      report.phases[0].status === "passed" ? "preflight" : null
+    ) ||
+    report.ok !== (
+      report.phases[0].status === "passed" &&
+      report.phases[1].status === "passed" &&
+      report.persistenceFailureCode === null
+    )
+  ) {
+    fail("harness_preflight_only_report_invalid");
+  }
+  return true;
+}
+
+async function runLocalPreflightOnly(options) {
+  const contract = controllerContract(options);
+  const heartbeat = options.heartbeat || (() => {});
+  const now = options.now || Date.now;
+  const startedAt = now();
+  const context = Object.freeze({ state: {}, resourceJournal: null });
+  const phases = [];
+
+  async function runPhase(phase, adapterName) {
+    const phaseStartedAt = now();
+    const startedOffsetMs = Math.max(0, phaseStartedAt - startedAt);
+    let result = null;
+    let failure = null;
+    heartbeat(heartbeatEvent(phase, "phase_started", phaseStartedAt, now));
+    try {
+      result = validatePhaseResult(await executeWithTimeout({
+        phase,
+        timeoutMs: contract.timeouts[phase],
+        operation: (signal) => contract.adapters[adapterName](phaseInput(
+          phase,
+          contract,
+          {
+            context,
+            signal,
+            heartbeat: (step) =>
+              heartbeat(heartbeatEvent(phase, step, phaseStartedAt, now))
+          }
+        )),
+        terminateTree: () => contract.adapters.terminateProcessTree(
+          Object.freeze({ phase, target: contract.target })
+        )
+      }));
+    } catch (error) {
+      failure = error instanceof HarnessFailure
+        ? error
+        : new HarnessFailure(
+          phase === "cleanup"
+            ? "harness_cleanup_unexpected_failure"
+            : "harness_phase_unexpected_failure"
+        );
+    }
+    const record = createPreflightOnlyRecord({
+      phase,
+      status: failure ? "failed" : "passed",
+      code: failure
+        ? failure.code
+        : phase === "cleanup" ? "cleanup_passed" : "phase_passed",
+      result,
+      startedOffsetMs,
+      completedOffsetMs: Math.max(startedOffsetMs, now() - startedAt)
+    });
+    phases.push(record);
+    return failure;
+  }
+
+  const primaryFailure = await runPhase("preflight", "preflight");
+  const cleanupFailure = primaryFailure?.operationSettled === false
+    ? new HarnessFailure("harness_cleanup_blocked_unsettled_operation")
+    : await runPhase("cleanup", "cleanup");
+  if (phases.at(-1)?.phase !== "cleanup") {
+    const cleanupOffsetMs = Math.max(0, now() - startedAt);
+    phases.push(createPreflightOnlyRecord({
+      phase: "cleanup",
+      status: "failed",
+      code: cleanupFailure.code,
+      result: null,
+      startedOffsetMs: cleanupOffsetMs,
+      completedOffsetMs: cleanupOffsetMs
+    }));
+  }
+  const report = Object.freeze({
+    schemaVersion: 1,
+    ok: !primaryFailure && !cleanupFailure,
+    primaryFailureCode: primaryFailure?.code || null,
+    persistenceFailureCode: null,
+    cleanupFailureCode: cleanupFailure?.code || null,
+    lastCompletedPhase: phases[0]?.status === "passed" ? "preflight" : null,
+    durationMs: Math.max(0, now() - startedAt),
+    phases: Object.freeze([...phases])
+  });
+  assertPreflightOnlyReport(report);
+
+  let sourceFailure = null;
+  try {
+    await verifyPackageSourcePreserved(contract);
+  } catch (error) {
+    sourceFailure = error;
+  }
+  for (const failure of [
+    primaryFailure,
+    cleanupFailure,
+    sourceFailure
+  ]) {
+    if (failure) {
+      if (failure && typeof failure === "object") failure.report = report;
+      throw failure;
+    }
   }
   return report;
 }
@@ -350,6 +501,7 @@ module.exports = {
   commandLineEntry,
   controllerContract,
   createHarnessActions,
+  runLocalPreflightOnly,
   runLocalPhysicalHarness,
   validateAdapters,
   validateLoopbackTarget,

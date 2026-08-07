@@ -1,12 +1,32 @@
 # Social 3A-0P-H: harness físico local
 
-Este checkpoint prepara o controlador para uma execução futura e descartável do PostgreSQL 18.4. Ele não baixa pacotes, não inicia o PostgreSQL e não acessa rede, Render, staging ou produção.
+Este checkpoint controla uma execução local, explícita e descartável do PostgreSQL 18.4. Importar, testar ou executar `--preflight-only` não baixa pacotes, não inicia PostgreSQL e não acessa rede, Render, staging ou produção; somente a entrada física com a aprovação exata alcança a inicialização local.
 
 ## Causa delimitada do timeout anterior
 
 O PostgreSQL 18.4 chegou a registrar prontidão em `127.0.0.1:64995`, sem `FATAL`, `ERROR` ou `PANIC`. O comando controlador permaneceu, porém, dentro de uma execução única com limite total de dez minutos e expirou antes de produzir evidência do bootstrap das roles, da custódia DPAPI ou do início dos gates. Além disso, o ambiente do subprocesso do CLI de migrations não continha a autorização local de loopback. Isso caracteriza falha de orquestração do harness, não falha comprovada do produto nem do PostgreSQL.
 
-O novo controlador usa fases e limites independentes. Um timeout identifica a fase exata, solicita o encerramento da árvore de processos e sempre passa por `cleanup`; não existe repetição automática.
+O novo controlador usa fases e limites independentes. Um timeout identifica a fase exata e solicita o encerramento da árvore de processos. O `cleanup` ocorre quando a operação anterior assentou; caso ela permaneça ativa após o encerramento, a remoção é bloqueada de forma fail-closed. Não existe repetição automática.
+
+## Evidência local de firewall: `loopback_nonmutation_v1`
+
+O caminho anterior de snapshot abrangente foi encerrado com a classificação `firewall_snapshot_instrumentation_unreliable`. Ele não é preservado no caminho executável e não deve ser recriado. Para este gate descartável, o contrato passa a ser `FIREWALL_EVIDENCE_MODE=loopback_nonmutation_v1`.
+
+O contrato vale exclusivamente para o checkpoint Social 3A-0P em Windows, sob usuário não elevado, cluster temporário e listener exato em `127.0.0.1`. Ele não autoriza staging, produção, Render, serviço permanente, listener externo nem configuração TLS do produto.
+
+Antes de iniciar o PostgreSQL, o preflight:
+
+- verifica, contra um catálogo explícito e fail-closed, que os fontes locais alcançáveis pelo run não contêm comandos conhecidos de mutação de firewall, elevação/UAC, tarefa agendada, serviço ou usuário local; essa verificação não é apresentada como prova universal contra código arbitrariamente ofuscado;
+- confirma usuário resolvido, processo não elevado e integridade não administrativa sem registrar usuário ou SID;
+- consulta uma única vez e em lote `Get-NetFirewallProfile`, `Get-NetFirewallSetting` e `Get-NetFirewallRule`, sempre com `-PolicyStore ActiveStore`;
+- não consulta filtros associados, não usa `Show-NetFirewallRule` e não executa pipeline de cmdlet por regra;
+- canonicaliza e calcula SHA-256 separado para perfis, configurações globais e metadados básicos das regras, além de um hash agregado.
+- exige no mínimo 7 GiB livres antes de qualquer extração ou inicialização do PostgreSQL;
+- enumera os sockets TCP e TCPv6 da porta reservada pela ferramenta nativa somente leitura, sem depender de texto de estado localizado e sem filtrar previamente PID ou endereço.
+
+Depois do cleanup, a mesma leitura leve é repetida. A divergência de qualquer componente reprova o gate e registra somente o nome canônico do componente divergente; o harness nunca tenta corrigir a política do firewall.
+
+A limitação é obrigatória e explícita: `fullFirewallFilterSnapshotProved=false`. A evidência detecta mudanças nos três componentes observados, mas não cobre filtros de endereço, porta, interface ou tipo de interface e não representa igualdade byte a byte da política. A ausência de exposição é provada por vínculo de loopback, com `externalExposurePreventedByLoopbackBinding=true`, e não por abertura ou modificação de regra de firewall.
 
 ## Fases e limites padrão
 
@@ -39,7 +59,7 @@ O controlador em `scripts/social-3a0p-local-physical-harness.js` é injetável p
 - alvo exato `127.0.0.1` em porta não privilegiada;
 - todos os adapters das fases, das probes de readiness e do encerramento da árvore de processos.
 
-A entrada física definitiva deste checkpoint é `scripts/social-3a0p-local-windows-entry.js`. Ela aceita somente quatro campos: aprovação, caminho absoluto local do pacote, SHA-256 e porta. Não aceita injeção de adapter, dependência, executável, argumento adicional ou ambiente. O pacote é validado antes da criação da raiz, copiado com exclusividade para uma raiz pertencente ao run e validado novamente pelo mesmo SHA-256.
+A entrada física definitiva deste checkpoint é `scripts/social-3a0p-local-windows-entry.js`. Ela aceita somente quatro pares nome/valor: aprovação, caminho absoluto local do pacote, SHA-256 e porta. A única flag adicional aceita é `--preflight-only`, que executa exclusivamente preflight e cleanup na mesma entrada, sem ledger persistente, extração, `initdb`, startup, migration ou conexão PostgreSQL. Esse modo confirma a remoção da raiz e a ausência de um ledger incremental antes de retornar e publica somente evidência sanitizada no stdout. Não aceita injeção de adapter, dependência, executável, argumento adicional ou ambiente. O pacote é validado antes da criação da raiz, copiado com exclusividade para uma raiz pertencente ao run e validado novamente pelo mesmo SHA-256.
 
 Antes da extração, o inventário simples e o inventário detalhado do `bsdtar` precisam ter a mesma quantidade de entradas. Cada nome é validado contra caminho absoluto, traversal, ADS, nomes reservados do Windows, componentes terminados em ponto/espaço e caracteres de controle; cada tipo precisa ser diretório ou arquivo regular. Links simbólicos, hardlinks, devices, sockets, FIFOs e tipos desconhecidos são recusados antes de qualquer escrita.
 
@@ -72,9 +92,10 @@ O log “pronto” não aprova o servidor. A ordem obrigatória é:
 3. `pg_isready` aprovado;
 4. conexão administrativa sintética aprovada;
 5. `SELECT 1` retornando `1`;
-6. versão do servidor exatamente `18.4`.
+6. versão do servidor exatamente `18.4`;
+7. `SHOW listen_addresses` retornando exatamente `127.0.0.1`.
 
-Processo encerrado, listener externo, listener adicional, porta adicional, versão diferente ou qualquer prova ausente falha fechado. O adapter devolve todos os listeners pertencentes ao PID; nenhum listener é filtrado antes do validador central.
+Processo encerrado, listener externo, listener adicional, porta adicional, versão diferente ou qualquer prova ausente falha fechado. O adapter enumera por `netstat.exe` a união de todos os sockets TCP/TCPv6 da porta reservada e todos os sockets pertencentes ao PID comprovado do postmaster, sem filtrar previamente endereço e sem depender das palavras localizadas de estado. Uma linha é classificada como listener pelo endpoint remoto nulo do protocolo. O validador central exige exatamente uma linha relevante, pertencente ao postmaster comprovado, em `127.0.0.1:<porta>`.
 
 O adapter de readiness fornece o PID e também vincula a identidade imutável do postmaster ao caminho exato de `postgres.exe` dentro da raiz owned e à data de criação do processo. A identidade é verificada novamente antes de readiness, parada ou terminação forçada. Reutilização do mesmo PID por outro processo nunca autoriza `taskkill`; nesse caso o cleanup falha fechado e preserva a raiz para diagnóstico.
 
@@ -104,7 +125,7 @@ No Windows, o fsync do arquivo precisa ser comprovado fisicamente. Fsync definit
 
 ### Contrato H2 incremental e fail-closed
 
-O H2 acrescenta um ledger sanitizado que nasce antes do `preflight`. Cada fase grava, em ordem, início, término, duração, status, código canônico, métricas e resíduos. Uma falha de persistência bloqueia a próxima operação física; o cleanup real continua sendo tentado. Falhas anteriores a `collect-sanitized-evidence` permanecem registradas. A evidência incremental nunca equivale a uma aprovação física.
+O H2 acrescenta um ledger sanitizado que nasce antes do `preflight` da execução física completa. Cada fase grava, em ordem, início, término, duração, status, código canônico, métricas e resíduos. Uma falha de persistência bloqueia a próxima operação física; o cleanup real continua sendo tentado. Falhas anteriores a `collect-sanitized-evidence` permanecem registradas. A evidência incremental nunca equivale a uma aprovação física. O modo `--preflight-only` deliberadamente não cria esse ledger: ele retorna sua prova sanitizada em memória/stdout e exige zero raiz ou ledger residual.
 
 O encerramento de cada fase é persistido somente pelo resultado autoritativo do controlador, depois da resolução de timeout, abort e encerramento da árvore de processos. Assim, uma operação que assenta depois do abort pode contribuir apenas com métricas parciais sanitizadas; ela não pode sobrescrever `preflight_timeout`, `cleanup_timeout` ou outro código final com um resultado interno tardio.
 
@@ -116,13 +137,13 @@ As evidências de backup não são agregadas. Os perfis `0001-0003` e `0001-0004
 
 Todos os pools criados pelo harness e pelos planos físicos são instrumentados com limite observado de três conexões por pool. O ledger registra máximo configurado, pico total, pico ativo, pico ocioso, pico em espera e aquisições. PIDs, categorias de roles sintéticas e `application_name` são registrados na aquisição do pool e comparados de forma independente com todos os `client backend` do cluster. Role inesperada, `idle in transaction`, PID órfão, sessão sem identidade owned e processo residual falham fechado.
 
-O gate registra espaço livre inicial, mínimo, antes/depois da extração, depois da remoção da cópia owned do pacote e ao final. `initdb` exige data checksums e o resultado é confirmado por `SHOW data_checksums`. A raiz temporária recebe auditoria sanitizada de proprietário, herança e regras NTFS. O firewall é serializado de forma sanitizada incluindo perfis, regras, endereços, portas, protocolo, programa, pacote e serviço; somente contagens e SHA-256 anterior/posterior entram na evidência. O cleanup repete a prova global de zero processo PostgreSQL, zero serviço PostgreSQL ativo e zero listener na porta reservada.
+O gate exige pelo menos 7 GiB livres e registra espaço livre inicial, mínimo, antes/depois da extração, depois da remoção da cópia owned do pacote e ao final. `initdb` exige data checksums e o resultado é confirmado por `SHOW data_checksums`. A raiz temporária recebe auditoria sanitizada de proprietário, herança e regras NTFS. O firewall não é inventariado integralmente: somente contagens e SHA-256 dos perfis, configurações globais e metadados básicos das regras entram na evidência. O cleanup repete a prova global de zero processo PostgreSQL, zero serviço PostgreSQL instalado (inclusive parado e também identificado pelo executável associado) e zero listener na porta reservada, além de comparar os hashes leves antes/depois.
 
 A entrada confiável aceita exclusivamente o build oficial futuro `postgresql-18.4-2-windows-x64-binaries.zip` e continua exigindo que o operador forneça o SHA-256 real de 64 hexadecimais; nenhum hash não comprovado está hardcoded. A origem passada por `--package-path` é externa e nunca é removida; somente a cópia criada dentro da raiz owned pode ser apagada. A origem externa é reaberta e revalidada pelo mesmo SHA-256 antes da promoção da evidência canônica. O contrato injetável também cobre separadamente um ZIP criado pelo próprio run: nesse caso ele precisa estar dentro da raiz owned e sua remoção precisa ser comprovada. Provas de preservação externa e de remoção owned não são intercambiáveis.
 
-Este checkpoint implementa apenas contrato e testes. Ele não baixa, extrai ou inicia PostgreSQL e não antecipa resultado do gate físico.
+O código não baixa PostgreSQL nem antecipa resultado físico. A extração e o startup só são alcançados pela execução completa com a aprovação exata; o modo `--preflight-only` é estruturalmente incapaz de alcançá-los.
 
-`cleanup` roda em sucesso, falha, exceção e timeout. Ele só pode operar na raiz temporária pertencente ao run atual, não segue junctions/reparse points, encerra descendentes comprovadamente pertencentes ao run e remove cluster, bancos descartáveis, roles sintéticas aplicáveis, custódias, helpers e pacote extraído. Falha de criação de banco é reconciliada por identidade; banco preexistente ou sem prova nunca é adotado. Custódia DPAPI parcial é eliminada. Firewall, serviços Windows, Git e evidências sanitizadas ficam intactos.
+`cleanup` roda em sucesso, falha, exceção e timeout depois que a operação anterior assentou. Se uma operação continuar sem assentar mesmo após aborto e encerramento confirmado da árvore, a remoção é bloqueada de forma fail-closed para não apagar recursos ainda em uso; o relatório registra essa exceção em vez de alegar resíduos zero. O cleanup só pode operar na raiz temporária pertencente ao run atual, não segue junctions/reparse points, encerra descendentes comprovadamente pertencentes ao run e remove cluster, bancos descartáveis, roles sintéticas aplicáveis, custódias, helpers e pacote extraído. Falha de criação de banco é reconciliada por identidade; banco preexistente ou sem prova nunca é adotado. Custódia DPAPI parcial é eliminada. Firewall, serviços Windows, Git e evidências sanitizadas ficam intactos.
 
 A coleta grava primeiro somente um artefato `pending_cleanup`, marcado explicitamente com `physicalExecution=false`. O arquivo canônico de evidência ainda não existe nessa fase. O cleanup apenas confirma encerramento de processos, fechamento de pools, eliminação de materiais, remoção da raiz pertencente ao run e preservação do pending não aprovador.
 
@@ -130,16 +151,16 @@ Somente depois que o orquestrador fecha e valida o relatório das quinze fases c
 
 O relatório final admite apenas fase, status, duração, códigos, contagens, tamanhos, hashes, métricas, gates canônicos e inventário de limpeza. Segredos, URLs completas, credenciais, SQL sensível e dados reais são recusados.
 
-## Próximo gate físico
+## Gate físico autorizado
 
-Somente após nova autorização: fornecer o pacote oficial `postgresql-18.4-2-windows-x64-binaries.zip` já baixado e seu SHA-256 e executar a entrada confiável abaixo em uma porta comprovadamente livre. O comando não deve ser executado enquanto caminho e hash reais ainda não tiverem sido conferidos:
-
-Antes dessa autorização, a página oficial de origem, o nome exato do build, o tamanho e o SHA-256 deverão ser reconfirmados. Qualquer mudança de build ou pacote exige nova decisão explícita; o harness não adota automaticamente um nome ou hash diferente.
+O fluxo autorizado primeiro executa a própria entrada com `--preflight-only`. Somente se modo, hashes leves, pacote, espaço, PostgreSQL zero, porta livre e resíduos zero forem comprovados, a mesma entrada é executada uma única vez sem essa flag. Qualquer mudança de build, pacote ou SHA-256 continua exigindo decisão explícita; o harness não adota automaticamente um valor diferente.
 
 ```powershell
-node scripts\social-3a0p-local-windows-entry.js --approval RUN_SOCIAL_3A0P_LOCAL_POSTGRES_18_4 --package-path "<CAMINHO_ABSOLUTO_LOCAL_DO_postgresql-18.4-2-windows-x64-binaries.zip>" --expected-sha256 <SHA256_REAL_DE_64_HEXADECIMAIS> --port 64995
+node scripts\social-3a0p-local-windows-entry.js --approval RUN_SOCIAL_3A0P_LOCAL_POSTGRES_18_4 --package-path "<PACOTE_POSTGRESQL_18_4_ABSOLUTO>" --expected-sha256 02e239529ed7833d169f98d915d3feffe0813264b08b3ae353e78e8b9c97e1a6 --port 64995 --preflight-only
+
+node scripts\social-3a0p-local-windows-entry.js --approval RUN_SOCIAL_3A0P_LOCAL_POSTGRES_18_4 --package-path "<PACOTE_POSTGRESQL_18_4_ABSOLUTO>" --expected-sha256 02e239529ed7833d169f98d915d3feffe0813264b08b3ae353e78e8b9c97e1a6 --port 64995
 ```
 
 A execução física deverá completar as quinze fases: migration, RLS, concorrência/OAuth sintético/idempotência, cofre e backup/restauração Windows. As duas provas de durabilidade exclusivas de Linux — fsync do diretório do bundle e proteção forte equivalente a `O_NOFOLLOW` — permanecerão para checkpoint separado.
 
-Até este commit, somente a persistência NTFS do ledger possui prova física isolada. O gate PostgreSQL continua não executado: `postgresAccessed=false` e `networkAccessed=false`. Nenhum resultado das quinze fases PostgreSQL é antecipado.
+Antes da execução autorizada descrita nesta seção, somente a persistência NTFS do ledger possuía prova física isolada. O resultado real das quinze fases deve vir exclusivamente da evidência canônica produzida pelo run; este documento não antecipa aprovação.

@@ -39,6 +39,9 @@ const {
   collectMeasuredBundleMetrics,
   collectDataChecksumsMetric
 } = require("./social-3a0p-local-bundle-cluster-metrics");
+const firewallNonmutation = require(
+  "./social-3a0p-local-firewall-nonmutation"
+);
 
 const POSTGRES_VERSION = "18.4";
 const LOOPBACK_HOST = "127.0.0.1";
@@ -53,6 +56,7 @@ const RUNTIME_LOGIN = "ia4tube_social_local_runtime";
 const OWNED_ROOT = /^ia4tube-social-3a0p-[A-Za-z0-9]{6}$/;
 const SAFE_IDENTIFIER = /^[a-z][a-z0-9_]{2,62}$/;
 const SHA256 = /^[0-9a-f]{64}$/;
+const MINIMUM_FREE_BYTES = 7 * 1024 * 1024 * 1024;
 const TRACKED_POOL_RELEASE = Symbol("ia4tubeTrackedPoolRelease");
 const REQUIRED_ARCHIVE_FILES = Object.freeze([
   "bin/initdb.exe",
@@ -393,57 +397,182 @@ function defaultArchive({ processRunner, executables, environment, paths }) {
   });
 }
 
-function firewallFingerprintPowerShell() {
+function firewallExecutableSources(repositoryRoot) {
+  const files = [];
+  const visit = (directory) => {
+    for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
+      const candidate = path.join(directory, entry.name);
+      if (entry.isSymbolicLink()) {
+        fail("windows_harness_executable_source_reparse_refused");
+      }
+      if (entry.isDirectory()) {
+        visit(candidate);
+      } else if (entry.isFile() && /\.(?:js|ps1)$/i.test(entry.name)) {
+        files.push(candidate);
+      }
+    }
+  };
+  for (const directory of ["scripts", "src"].map((name) =>
+    path.join(repositoryRoot, name))) {
+    if (!fs.existsSync(directory)) {
+      fail("windows_harness_executable_sources_missing");
+    }
+    visit(directory);
+  }
+  const serverEntry = path.join(repositoryRoot, "server.js");
+  if (!fs.existsSync(serverEntry)) {
+    fail("windows_harness_executable_sources_missing");
+  }
+  files.push(serverEntry);
+  files.sort((left, right) => left.localeCompare(
+    right,
+    "en",
+    { sensitivity: "variant", usage: "sort" }
+  ));
+  if (files.length < 1) fail("windows_harness_executable_sources_missing");
+  return files.map((file) => Object.freeze({
+    sourceId: `runtime:${path.relative(repositoryRoot, file)
+      .replaceAll("\\", "/").toLowerCase()}`,
+    executable: true,
+    source: fs.readFileSync(file, "utf8")
+  }));
+}
+
+function validatedListenerScope(port, ownerPid) {
+  if (!Number.isSafeInteger(port) || port < 1 || port > 65535) {
+    fail("windows_harness_listener_port_invalid");
+  }
+  if (
+    ownerPid !== null &&
+    (!Number.isSafeInteger(ownerPid) || ownerPid < 1)
+  ) {
+    fail("windows_harness_listener_pid_invalid");
+  }
+  return Object.freeze({
+    port,
+    ownerPidValue: ownerPid === null ? 0 : ownerPid
+  });
+}
+
+function netstatListenerParserPowerShell(port, ownerPid = null) {
+  const scope = validatedListenerScope(port, ownerPid);
+  return [
+    "$rows=@();foreach($line in $lines){$text=[string]$line;if($text-notmatch'^\\s*TCP\\s+'){continue};if($text-notmatch'^\\s*TCP\\s+(\\S+)\\s+(\\S+)\\s+(\\S+)\\s+(\\d+)\\s*$'){throw 'listener_netstat_row_invalid'};",
+    "$local=[string]$matches[1];$remote=[string]$matches[2];$pidText=[string]$matches[4];if($remote-ne'0.0.0.0:0'-and$remote-ne'[::]:0'){continue};$separator=$local.LastIndexOf(':');if($separator-lt1){throw 'listener_endpoint_invalid'};$portText=$local.Substring($separator+1);if($portText-notmatch'^\\d+$'-or$pidText-notmatch'^\\d+$'){throw 'listener_endpoint_invalid'};$localPort=[int]$portText;$rowPid=[int]$pidText;if($rowPid-lt1){throw 'listener_endpoint_invalid'};if($localPort-ne",
+    `${scope.port}-and(${scope.ownerPidValue}-eq0-or$rowPid-ne${scope.ownerPidValue})){continue};$address=$local.Substring(0,$separator);if($address.StartsWith('[')-and$address.EndsWith(']')){$address=$address.Substring(1,$address.Length-2)};if([string]::IsNullOrWhiteSpace($address)){throw 'listener_endpoint_invalid'};$rows+=@{address=$address;port=$localPort;pid=$rowPid}};`,
+    `@{rows=$rows;source='netstat_tcp_and_tcpv6';parserSucceeded=$true;listenersEnumeratedAllPidsByTargetPort=$true;ownerProcessListenersIncluded=$${scope.ownerPidValue > 0 ? "true" : "false"}}|ConvertTo-Json -Compress -Depth 3`
+  ].join("");
+}
+
+function netstatTargetListenersPowerShell(port, ownerPid = null) {
+  validatedListenerScope(port, ownerPid);
   return [
     "$ErrorActionPreference='Stop';",
-    "$profiles=@(Get-NetFirewallProfile|Sort-Object Name|ForEach-Object{[ordered]@{name=$_.Name;enabled=[bool]$_.Enabled;inbound=[string]$_.DefaultInboundAction;outbound=[string]$_.DefaultOutboundAction}});",
-    "$rules=@(Get-NetFirewallRule|Sort-Object InstanceID|ForEach-Object{$r=$_;$a=@($r|Get-NetFirewallAddressFilter);$p=@($r|Get-NetFirewallPortFilter);$x=@($r|Get-NetFirewallApplicationFilter);$s=@($r|Get-NetFirewallServiceFilter);$i=@($r|Get-NetFirewallInterfaceFilter);$t=@($r|Get-NetFirewallInterfaceTypeFilter);$q=@($r|Get-NetFirewallSecurityFilter);[ordered]@{id=$r.InstanceID;enabled=[string]$r.Enabled;direction=[string]$r.Direction;action=[string]$r.Action;profile=[string]$r.Profile;edgeTraversalPolicy=[string]$r.EdgeTraversalPolicy;localOnlyMapping=[string]$r.LocalOnlyMapping;looseSourceMapping=[string]$r.LooseSourceMapping;owner=[string]$r.Owner;platform=@($r.Platform|Sort-Object);localAddress=@($a.LocalAddress|Sort-Object);remoteAddress=@($a.RemoteAddress|Sort-Object);protocol=@($p.Protocol|Sort-Object);localPort=@($p.LocalPort|Sort-Object);remotePort=@($p.RemotePort|Sort-Object);icmpType=@($p.IcmpType|Sort-Object);dynamicTarget=@($p.DynamicTarget|Sort-Object);program=@($x.Program|Sort-Object);package=@($x.Package|Sort-Object);service=@($s.Service|Sort-Object);interfaceAlias=@($i.InterfaceAlias|Sort-Object);interfaceType=@($t.InterfaceType|Sort-Object);authentication=@($q.Authentication|Sort-Object);encryption=@($q.Encryption|Sort-Object);overrideBlockRules=@($q.OverrideBlockRules|Sort-Object);localUser=@($q.LocalUser|Sort-Object);remoteUser=@($q.RemoteUser|Sort-Object);remoteMachine=@($q.RemoteMachine|Sort-Object)}});",
-    "$json=[ordered]@{profiles=$profiles;rules=$rules}|ConvertTo-Json -Compress -Depth 8;",
-    "$sha=[Security.Cryptography.SHA256]::Create();try{$hash=([BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($json)))).Replace('-','').ToLowerInvariant()}finally{$sha.Dispose()};",
-    "[ordered]@{sha256=$hash;profileCount=$profiles.Count;ruleCount=$rules.Count}|ConvertTo-Json -Compress"
+    "$netstat=Join-Path $env:SystemRoot 'System32\\netstat.exe';if(-not(Test-Path -LiteralPath $netstat -PathType Leaf)){throw 'listener_netstat_missing'};",
+    "$lines=@(& $netstat -ano -p TCP);if($LASTEXITCODE-ne0){throw 'listener_netstat_failed'};$lines+=@(& $netstat -ano -p TCPv6);if($LASTEXITCODE-ne0){throw 'listener_netstat_failed'};",
+    netstatListenerParserPowerShell(port, ownerPid)
+  ].join("");
+}
+
+function postgresServiceClassificationPowerShell() {
+  return [
+    "$s=@($allServices|Where-Object{",
+    "([string]$_.Name)-match'(?i)postgres'-or",
+    "([string]$_.DisplayName)-match'(?i)postgres'-or",
+    "([string]$_.PathName)-match'(?i)(?:postgres|pg_ctl)(?:\\.exe)?'",
+    "}).Count;",
+    "@{services=$s;servicesIncludeStopped=$true;serviceExecutablePathsInspected=$true}|ConvertTo-Json -Compress"
   ].join("");
 }
 
 function defaultSystemProbe({ processRunner, executables, environment, paths }) {
-  async function powershell(script, label, target = null) {
+  const probeEnvironment = Object.freeze({
+    ...environment,
+    TEMP: paths.ownedParent,
+    TMP: paths.ownedParent,
+    TMPDIR: paths.ownedParent
+  });
+  async function powershell(script, label, target = null, signal = null) {
     const result = await processRunner.run({
       executable: executables.powershell,
       args: ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", script],
-      cwd: paths.ownedRoot,
-      environment: target === null ? environment : {
-        ...environment,
+      cwd: paths.ownedParent,
+      environment: target === null ? probeEnvironment : {
+        ...probeEnvironment,
         IA4TUBE_HARNESS_TARGET: target
       },
       allowedEnvironmentNames: target === null ? [] : ["IA4TUBE_HARNESS_TARGET"],
       timeoutMs: 15_000,
+      signal,
       label
     });
     return parseJsonLine(result.stdoutSanitized, `${label}_output_invalid`);
+  }
+  async function targetListeners(target, label, ownerPid = null) {
+    const result = await powershell(
+      netstatTargetListenersPowerShell(Number(target.port), ownerPid),
+      label
+    );
+    if (
+      result.source !== "netstat_tcp_and_tcpv6" ||
+      result.parserSucceeded !== true ||
+      result.listenersEnumeratedAllPidsByTargetPort !== true ||
+      result.ownerProcessListenersIncluded !== (ownerPid !== null)
+    ) {
+      fail("windows_harness_listener_probe_invalid");
+    }
+    const rows = Array.isArray(result.rows)
+      ? result.rows
+      : result.rows ? [result.rows] : [];
+    return Object.freeze(rows.map((row) => {
+      const address = String(row?.address || "");
+      const port = Number(row?.port);
+      const pid = Number(row?.pid);
+      if (
+        !address || /[\0\r\n]/.test(address) ||
+        (
+          port !== Number(target.port) &&
+          !(ownerPid !== null && pid === ownerPid)
+        ) ||
+        !Number.isSafeInteger(pid) || pid < 1
+      ) {
+        fail("windows_harness_listener_probe_invalid");
+      }
+      return Object.freeze({ address, port, pid });
+    }));
   }
   return Object.freeze({
     async assertClean(target) {
       const result = await powershell(
         [
           "$p=@(Get-Process postgres -ErrorAction SilentlyContinue).Count;",
-          "$s=@(Get-Service *postgres* -ErrorAction SilentlyContinue | Where-Object Status -ne 'Stopped').Count;",
-          `$l=@(Get-NetTCPConnection -State Listen -LocalPort ${target.port} -ErrorAction SilentlyContinue).Count;`,
-          "@{processes=$p;services=$s;listeners=$l}|ConvertTo-Json -Compress"
+          "$allServices=@(Get-CimInstance -ClassName Win32_Service -ErrorAction Stop);",
+          postgresServiceClassificationPowerShell().replace(
+            "@{services=$s;",
+            "@{processes=$p;services=$s;"
+          )
         ].join(""),
         "postgres_preflight"
       );
+      const listenerRows = await targetListeners(target, "postgres_port_probe");
       const processes = result.processes;
       const services = result.services;
-      const listeners = result.listeners;
-      if ([processes, services, listeners].some(
+      const listeners = listenerRows.length;
+      if ([processes, services].some(
         (value) => !Number.isSafeInteger(value) || value < 0
-      )) {
+      ) ||
+      result.servicesIncludeStopped !== true ||
+      result.serviceExecutablePathsInspected !== true) {
         fail("windows_harness_system_clean_probe_invalid");
       }
       return Object.freeze({
         clean: processes === 0 && services === 0 && listeners === 0,
         processes,
         services,
-        listeners
+        listeners,
+        servicesIncludeStopped: true,
+        serviceExecutablePathsInspected: true,
+        listenersEnumeratedAllPidsByTargetPort: true
       });
     },
     async processAlive(pid) {
@@ -469,16 +598,7 @@ function defaultSystemProbe({ processRunner, executables, environment, paths }) 
       }) : null;
     },
     async listeners(pid, target) {
-      const result = await powershell(
-        [
-          `$r=@(Get-NetTCPConnection -State Listen -OwningProcess ${Number(pid)} -ErrorAction SilentlyContinue|`,
-          "ForEach-Object{@{address=$_.LocalAddress;port=$_.LocalPort;pid=$_.OwningProcess}});",
-          "@{rows=$r}|ConvertTo-Json -Compress -Depth 3"
-        ].join(""),
-        "postgres_listener_probe"
-      );
-      return (Array.isArray(result.rows) ? result.rows : result.rows ? [result.rows] : [])
-        .map((row) => ({ address: row.address, port: Number(row.port), pid: Number(row.pid) }));
+      return targetListeners(target, "postgres_listener_probe", Number(pid));
     },
     async protectAndAuditRoot(target) {
       const result = await powershell(
@@ -505,23 +625,14 @@ function defaultSystemProbe({ processRunner, executables, environment, paths }) 
         unexpectedAllowRuleCount: Number(result.unexpectedAllowRuleCount)
       });
     },
-    async firewallFingerprint() {
+    async firewallLightEvidence({ signal = null } = {}) {
       const result = await powershell(
-        firewallFingerprintPowerShell(),
-        "firewall_fingerprint"
+        firewallNonmutation.firewallLightEvidencePowerShell(),
+        "firewall_light_evidence",
+        null,
+        signal
       );
-      if (
-        !SHA256.test(String(result.sha256 || "")) ||
-        !Number.isSafeInteger(result.profileCount) || result.profileCount < 0 ||
-        !Number.isSafeInteger(result.ruleCount) || result.ruleCount < 0
-      ) {
-        fail("windows_harness_firewall_fingerprint_invalid");
-      }
-      return Object.freeze({
-        sha256: result.sha256,
-        profileCount: result.profileCount,
-        ruleCount: result.ruleCount
-      });
+      return firewallNonmutation.validateFirewallLightEvidence(result);
     },
     async residualProcesses(target) {
       const result = await powershell(
@@ -920,6 +1031,13 @@ function createWindowsPhysicalAdapters(options = {}) {
     },
     firewallBefore: null,
     firewallAfter: null,
+    firewallComparison: null,
+    firewallExecutableProof: null,
+    firewallContext: null,
+    preflightSystemSnapshot: null,
+    loopbackOnlyListenerProved: false,
+    externalListenerAbsent: false,
+    effectiveListenAddressesLoopback: false,
     processTreesTerminated: 0,
     workingPackageRemoved: false,
     cleaned: false
@@ -1266,9 +1384,20 @@ function createWindowsPhysicalAdapters(options = {}) {
         state.rootAclEvidence.inheritanceProtected;
     }
     if (state.firewallBefore) {
-      counts.firewallProfiles = state.firewallBefore.profileCount;
-      counts.firewallRules = state.firewallBefore.ruleCount;
-      hashes.firewallBeforeSha256 = state.firewallBefore.sha256;
+      const components = Object.fromEntries(
+        state.firewallBefore.components.map((entry) => [entry.componentName, entry])
+      );
+      counts.firewallProfiles = components.profiles.objectCount;
+      counts.firewallGlobalSettings = components.globalSettings.objectCount;
+      counts.firewallRules = components.rulesMetadata.objectCount;
+      hashes.firewallProfilesBeforeSha256 = components.profiles.sha256;
+      hashes.firewallGlobalSettingsBeforeSha256 = components.globalSettings.sha256;
+      hashes.firewallRulesBeforeSha256 = components.rulesMetadata.sha256;
+      hashes.firewallBeforeSha256 = state.firewallBefore.aggregateSha256;
+      checks.fullFirewallFilterSnapshotProved = false;
+      checks.processNonElevated = state.firewallContext?.processNonElevated === true;
+      checks.firewallMutationCommandsAbsent =
+        state.firewallExecutableProof?.firewallMutationCommandsAbsent === true;
     }
     if (state.observedPackageSha256) {
       hashes.archiveSha256 = state.observedPackageSha256;
@@ -1397,11 +1526,21 @@ function createWindowsPhysicalAdapters(options = {}) {
     if (typeof observed.clean === "boolean" && observed.clean !== clean) {
       fail("windows_harness_system_clean_probe_incoherent");
     }
+    if (
+      observed?.servicesIncludeStopped !== true ||
+      observed?.serviceExecutablePathsInspected !== true ||
+      observed?.listenersEnumeratedAllPidsByTargetPort !== true
+    ) {
+      fail("windows_harness_system_clean_probe_scope_invalid");
+    }
     return Object.freeze({
       clean,
       processes: counts[0],
       services: counts[1],
-      listeners: counts[2]
+      listeners: counts[2],
+      servicesIncludeStopped: true,
+      serviceExecutablePathsInspected: true,
+      listenersEnumeratedAllPidsByTargetPort: true
     });
   }
 
@@ -1567,6 +1706,12 @@ function createWindowsPhysicalAdapters(options = {}) {
   async function preflight(input) {
     bind(input);
     if ((options.platform || process.platform) !== "win32") fail("windows_harness_platform_refused");
+    const firewallCommand = firewallNonmutation.firewallLightEvidencePowerShell();
+    state.firewallExecutableProof =
+      firewallNonmutation.proveLoopbackNonmutationExecutablePath({
+        command: firewallCommand,
+        sources: firewallExecutableSources(repositoryRoot)
+      });
     if (typeof physicalGates.assertConfigured === "function") physicalGates.assertConfigured();
     const archivePath = requireWithin(input.packageDescriptor.archivePath, ownedRoot, "windows_harness_archive_outside_root");
     if (typeof systemProbe.protectAndAuditRoot !== "function") {
@@ -1608,10 +1753,22 @@ function createWindowsPhysicalAdapters(options = {}) {
       fail("windows_harness_root_acl_invalid");
     }
     const initialFreeBytes = await measureSpace("initialFreeBytes");
-    if (typeof systemProbe.firewallFingerprint !== "function") {
+    if (initialFreeBytes < MINIMUM_FREE_BYTES) {
+      fail("windows_harness_insufficient_free_space");
+    }
+    if (typeof systemProbe.firewallLightEvidence !== "function") {
       fail("windows_harness_firewall_probe_missing");
     }
-    state.firewallBefore = await systemProbe.firewallFingerprint();
+    state.firewallBefore = firewallNonmutation.validateFirewallLightEvidence(
+      await systemProbe.firewallLightEvidence({ signal: input.signal })
+    );
+    state.firewallContext = firewallNonmutation.validateLoopbackNonmutationContext({
+      mode: state.firewallBefore.firewallEvidenceMode,
+      platform: options.platform || process.platform,
+      scope: firewallNonmutation.FIREWALL_EVIDENCE_SCOPE,
+      host: state.target.host,
+      processElevated: state.firewallBefore.processElevated
+    });
     const root = await storage.lstat(ownedRoot);
     const archiveStat = await storage.stat(archivePath);
     if (!Number.isSafeInteger(archiveStat?.size) || archiveStat.size < 1) {
@@ -1640,7 +1797,8 @@ function createWindowsPhysicalAdapters(options = {}) {
     if (initialEntries.some((name) => /\.(?:part|partial|tmp|crdownload)$/i.test(name))) {
       fail("windows_harness_partial_download_detected");
     }
-    if ((await systemCleanSnapshot()).clean !== true) {
+    state.preflightSystemSnapshot = await systemCleanSnapshot();
+    if (state.preflightSystemSnapshot.clean !== true) {
       fail("windows_harness_postgres_activity_detected");
     }
     assertActive(input);
@@ -1668,21 +1826,39 @@ function createWindowsPhysicalAdapters(options = {}) {
     }
     assertActive(input);
     await storage.mkdir(paths.logsRoot, { recursive: false });
+    const firewallComponents = Object.fromEntries(
+      state.firewallBefore.components.map((entry) => [entry.componentName, entry])
+    );
     return remember("preflight", {
       code: "windows_preflight_passed",
       counts: {
         packageBytes: state.packageEvidence.archiveBytes,
         packageBuild: state.packageEvidence.build,
         diskInitialFreeBytes: initialFreeBytes,
-        firewallProfiles: state.firewallBefore.profileCount,
-        firewallRules: state.firewallBefore.ruleCount,
+        diskMinimumRequiredFreeBytes: MINIMUM_FREE_BYTES,
+        firewallProfiles: firewallComponents.profiles.objectCount,
+        firewallGlobalSettings: firewallComponents.globalSettings.objectCount,
+        firewallRules: firewallComponents.rulesMetadata.objectCount,
+        postgresProcessesBefore: state.preflightSystemSnapshot.processes,
+        postgresServicesBeforeIncludingStopped:
+          state.preflightSystemSnapshot.services,
+        targetPortListenersBefore: state.preflightSystemSnapshot.listeners,
         rootAclExplicitRules: rootAcl.explicitRuleCount,
         rootAclInheritedRules: rootAcl.inheritedRuleCount,
         rootAclDenyRules: rootAcl.denyRuleCount,
         rootAclUnexpectedAllowRules: rootAcl.unexpectedAllowRuleCount
       },
-      hashes: { firewallBeforeSha256: state.firewallBefore.sha256 },
-      inventory: packageInventory(),
+      hashes: {
+        firewallProfilesBeforeSha256: firewallComponents.profiles.sha256,
+        firewallGlobalSettingsBeforeSha256:
+          firewallComponents.globalSettings.sha256,
+        firewallRulesBeforeSha256: firewallComponents.rulesMetadata.sha256,
+        firewallBeforeSha256: state.firewallBefore.aggregateSha256
+      },
+      inventory: [
+        ...packageInventory(),
+        "firewall-evidence-mode-loopback-nonmutation-v1"
+      ],
       checks: {
         ownedRootValidated: true,
         rootAclProtected: true,
@@ -1691,7 +1867,31 @@ function createWindowsPhysicalAdapters(options = {}) {
         packageSourceOwnedByRun: state.packageEvidence.sourceOwnedByRun,
         workingCopyOwnedByRun: true,
         postgresAbsent: true,
-        portAvailable: true
+        portAvailable: true,
+        postgresProcessesZero: state.preflightSystemSnapshot.processes === 0,
+        postgresServicesZeroIncludingStopped:
+          state.preflightSystemSnapshot.services === 0,
+        postgresServiceExecutablePathsInspected:
+          state.preflightSystemSnapshot.serviceExecutablePathsInspected === true,
+        targetPortListenersZero: state.preflightSystemSnapshot.listeners === 0,
+        targetPortAvailable: state.preflightSystemSnapshot.listeners === 0,
+        minimumFreeSpaceSatisfied: initialFreeBytes >= MINIMUM_FREE_BYTES,
+        firewallMutationCommandsAbsent:
+          state.firewallExecutableProof.firewallMutationCommandsAbsent,
+        uacElevationCommandsAbsent:
+          state.firewallExecutableProof.uacElevationCommandsAbsent,
+        scheduledTaskMutationCommandsAbsent:
+          state.firewallExecutableProof.scheduledTaskMutationCommandsAbsent,
+        serviceMutationCommandsAbsent:
+          state.firewallExecutableProof.serviceMutationCommandsAbsent,
+        localUserMutationCommandsAbsent:
+          state.firewallExecutableProof.localUserMutationCommandsAbsent,
+        currentUserResolved: state.firewallBefore.currentUserResolved,
+        processNonElevated: state.firewallContext.processNonElevated,
+        integrityNonAdministrative:
+          state.firewallBefore.integrityNonAdministrative,
+        firewallLightBaselineCaptured: true,
+        fullFirewallFilterSnapshotProved: false
       }
     });
   }
@@ -1914,7 +2114,14 @@ function createWindowsPhysicalAdapters(options = {}) {
           if (pid !== state.pid || (await postmasterAlive()) !== true) {
             fail("windows_harness_postmaster_identity_changed");
           }
-          return systemProbe.listeners(pid, state.target);
+          const rows = await systemProbe.listeners(pid, state.target);
+          const exactLoopbackListener = Array.isArray(rows) && rows.length === 1 &&
+            rows[0]?.address === LOOPBACK_HOST &&
+            Number(rows[0]?.port) === state.target.port &&
+            Number(rows[0]?.pid) === state.pid;
+          state.loopbackOnlyListenerProved = exactLoopbackListener;
+          state.externalListenerAbsent = exactLoopbackListener;
+          return rows;
         },
         async pgIsReady() {
           try {
@@ -1949,6 +2156,12 @@ function createWindowsPhysicalAdapters(options = {}) {
             async serverVersion() {
               const result = await client.query("SHOW server_version");
               return String(result.rows?.[0]?.server_version || "");
+            },
+            async listenAddresses() {
+              const result = await client.query("SHOW listen_addresses");
+              const value = String(result.rows?.[0]?.listen_addresses || "");
+              state.effectiveListenAddressesLoopback = value === LOOPBACK_HOST;
+              return value;
             },
             async close() {
               client.release();
@@ -2466,38 +2679,49 @@ function createWindowsPhysicalAdapters(options = {}) {
     let temporaryCustodiesRemaining = null;
     let clusterRemoved = false;
     let binariesRemoved = false;
-    if (ownedRootRemoved) {
+    try {
+      const residual = collectResidualProcessMetrics({
+        processes: await systemProbe.residualProcesses(paths.ownedRoot)
+      });
+      residualProcessCount = residual.counts.residualProcesses;
+      assertNoResidualProcesses(residual);
+      noResidualProcesses = true;
+      await measureSpace("finalFreeBytes");
+      finalSystemSnapshot = await systemCleanSnapshot();
+      systemClean = finalSystemSnapshot.clean === true;
+      if (!systemClean) {
+        recordFailure("windows_harness_cleanup_system_not_clean");
+      }
+      temporaryCustodiesRemaining = (await storage.exists(paths.custodyPath))
+        ? 1
+        : 0;
+      clusterRemoved = (await storage.exists(paths.clusterRoot)) === false;
+      binariesRemoved = (await storage.exists(paths.binaryRoot)) === false;
+    } catch {
+      recordFailure("windows_harness_cleanup_metrics_failed");
+    }
+    if (state.firewallBefore) {
       try {
-        const residual = collectResidualProcessMetrics({
-          processes: await systemProbe.residualProcesses(paths.ownedRoot)
-        });
-        residualProcessCount = residual.counts.residualProcesses;
-        assertNoResidualProcesses(residual);
-        noResidualProcesses = true;
-        await measureSpace("finalFreeBytes");
-        finalSystemSnapshot = await systemCleanSnapshot();
-        systemClean = finalSystemSnapshot.clean === true;
-        if (!systemClean) {
-          recordFailure("windows_harness_cleanup_system_not_clean");
-        }
-        temporaryCustodiesRemaining = (await storage.exists(paths.custodyPath))
-          ? 1
-          : 0;
-        clusterRemoved = (await storage.exists(paths.clusterRoot)) === false;
-        binariesRemoved = (await storage.exists(paths.binaryRoot)) === false;
-        const firewallAfter = await systemProbe.firewallFingerprint();
-        state.firewallAfter = firewallAfter;
-        firewallUnchanged = Boolean(
-          state.firewallBefore &&
-          firewallAfter.sha256 === state.firewallBefore.sha256 &&
-          firewallAfter.profileCount === state.firewallBefore.profileCount &&
-          firewallAfter.ruleCount === state.firewallBefore.ruleCount
+        const firewallAfter = firewallNonmutation.validateFirewallLightEvidence(
+          await systemProbe.firewallLightEvidence({ signal: input.signal })
         );
+        state.firewallAfter = firewallAfter;
+        state.firewallComparison = firewallNonmutation.compareFirewallLightEvidence(
+          state.firewallBefore,
+          firewallAfter
+        );
+        firewallUnchanged = state.firewallComparison.equal === true;
         if (!firewallUnchanged) {
-          recordFailure("windows_harness_firewall_changed");
+          const componentCode = {
+            profiles: "profiles",
+            globalSettings: "global_settings",
+            rulesMetadata: "rules_metadata",
+            aggregate: "aggregate"
+          }[state.firewallComparison.divergentComponent] || "unknown";
+          recordFailure(`windows_harness_firewall_${componentCode}_changed`);
         }
       } catch {
-        recordFailure("windows_harness_cleanup_metrics_failed");
+        recordFailure("windows_harness_cleanup_firewall_evidence_failed");
       }
     }
     const cleanupCounts = {
@@ -2521,6 +2745,16 @@ function createWindowsPhysicalAdapters(options = {}) {
           ? 1
           : 0;
     }
+    const firewallBeforeComponents = state.firewallBefore
+      ? Object.fromEntries(
+        state.firewallBefore.components.map((entry) => [entry.componentName, entry])
+      )
+      : null;
+    const firewallAfterComponents = state.firewallAfter
+      ? Object.fromEntries(
+        state.firewallAfter.components.map((entry) => [entry.componentName, entry])
+      )
+      : null;
     const measuredCounts = {
       residualOwnedPostgresProcesses: residualProcessCount,
       postgresProcessesRemaining: finalSystemSnapshot?.processes,
@@ -2534,10 +2768,14 @@ function createWindowsPhysicalAdapters(options = {}) {
       diskAfterPackageRemovalFreeBytes:
         state.diskSpace.afterPackageRemovalFreeBytes,
       diskFinalFreeBytes: state.diskSpace.finalFreeBytes,
-      firewallProfilesBefore: state.firewallBefore?.profileCount,
-      firewallRulesBefore: state.firewallBefore?.ruleCount,
-      firewallProfilesAfter: state.firewallAfter?.profileCount,
-      firewallRulesAfter: state.firewallAfter?.ruleCount
+      firewallProfilesBefore: firewallBeforeComponents?.profiles.objectCount,
+      firewallGlobalSettingsBefore:
+        firewallBeforeComponents?.globalSettings.objectCount,
+      firewallRulesBefore: firewallBeforeComponents?.rulesMetadata.objectCount,
+      firewallProfilesAfter: firewallAfterComponents?.profiles.objectCount,
+      firewallGlobalSettingsAfter:
+        firewallAfterComponents?.globalSettings.objectCount,
+      firewallRulesAfter: firewallAfterComponents?.rulesMetadata.objectCount
     };
     for (const [name, value] of Object.entries(measuredCounts)) {
       if (Number.isSafeInteger(value) && value >= 0) cleanupCounts[name] = value;
@@ -2547,15 +2785,38 @@ function createWindowsPhysicalAdapters(options = {}) {
       workingPackageRemoved,
       externalPackageDeletionAttempted: false,
       firewallUnchanged,
+      firewallLightEvidenceStable: state.firewallComparison?.equal === true,
+      firewallProfilesAndRulesMetadataStable:
+        state.firewallComparison?.firewallProfilesAndRulesMetadataStable === true,
+      firewallGlobalSettingsStable:
+        state.firewallComparison?.firewallGlobalSettingsStable === true,
+      fullFirewallFilterSnapshotProved: false,
+      firewallMutationCommandsAbsent:
+        state.firewallExecutableProof?.firewallMutationCommandsAbsent === true,
+      processNonElevated: state.firewallContext?.processNonElevated === true,
+      loopbackOnlyListenerProved: state.loopbackOnlyListenerProved === true,
+      externalListenerAbsent: state.externalListenerAbsent === true,
+      externalExposurePreventedByLoopbackBinding:
+        state.loopbackOnlyListenerProved === true &&
+        state.externalListenerAbsent === true &&
+        state.effectiveListenAddressesLoopback === true,
+      effectiveListenAddressesLoopback:
+        state.effectiveListenAddressesLoopback === true,
       systemClean,
       noResidualProcesses,
       processesZero: finalSystemSnapshot?.processes === 0,
       servicesZero: finalSystemSnapshot?.services === 0,
       listenersZero: finalSystemSnapshot?.listeners === 0,
+      postgresServicesZeroIncludingStopped:
+        finalSystemSnapshot?.services === 0,
+      postgresServiceExecutablePathsInspected:
+        finalSystemSnapshot?.serviceExecutablePathsInspected === true,
+      targetPortListenersZero: finalSystemSnapshot?.listeners === 0,
       helpersZero:
         activeChildPids.size === 0 && activeChildOwnership.size === 0,
       temporaryCustodiesZero: temporaryCustodiesRemaining === 0,
       portClosed: finalSystemSnapshot?.listeners === 0,
+      finalPortClosed: finalSystemSnapshot?.listeners === 0,
       workingPackageOwnedByRun:
         state.packageDescriptor?.workingCopyOwnedByRun === true,
       sourcePackageExternal:
@@ -2582,8 +2843,20 @@ function createWindowsPhysicalAdapters(options = {}) {
       counts: cleanupCounts,
       hashes: state.firewallBefore && state.firewallAfter
         ? {
-          firewallBeforeSha256: state.firewallBefore.sha256,
-          firewallAfterSha256: state.firewallAfter.sha256
+          firewallProfilesBeforeSha256:
+            firewallBeforeComponents.profiles.sha256,
+          firewallProfilesAfterSha256:
+            firewallAfterComponents.profiles.sha256,
+          firewallGlobalSettingsBeforeSha256:
+            firewallBeforeComponents.globalSettings.sha256,
+          firewallGlobalSettingsAfterSha256:
+            firewallAfterComponents.globalSettings.sha256,
+          firewallRulesBeforeSha256:
+            firewallBeforeComponents.rulesMetadata.sha256,
+          firewallRulesAfterSha256:
+            firewallAfterComponents.rulesMetadata.sha256,
+          firewallBeforeSha256: state.firewallBefore.aggregateSha256,
+          firewallAfterSha256: state.firewallAfter.aggregateSha256
         }
         : {},
       checks: cleanupChecks
@@ -2882,6 +3155,7 @@ module.exports = {
   ADMIN_LOGIN,
   LOCAL_DATABASE,
   LOOPBACK_HOST,
+  MINIMUM_FREE_BYTES,
   MIGRATION_LOGIN,
   PHYSICAL_GATES,
   PHYSICAL_PROOFS,
@@ -2893,7 +3167,9 @@ module.exports = {
   canonicalArchiveEntry,
   createWindowsHarnessInvocation,
   createWindowsPhysicalAdapters,
-  firewallFingerprintPowerShell,
+  netstatListenerParserPowerShell,
+  netstatTargetListenersPowerShell,
+  postgresServiceClassificationPowerShell,
   pendingPhysicalProofs,
   runWindowsPhysicalHarness,
   validateArchiveListings,

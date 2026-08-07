@@ -48,6 +48,7 @@ function readinessProbes(overrides = {}) {
   const session = {
     selectOne: async () => 1,
     serverVersion: async () => "18.4",
+    listenAddresses: async () => "127.0.0.1",
     close: async () => true
   };
   return {
@@ -374,6 +375,10 @@ test("readiness imediato usa uma sessão e sempre a fecha", async () => {
           order.push("version");
           return "18.4";
         },
+        listenAddresses: async () => {
+          order.push("listen_addresses");
+          return "127.0.0.1";
+        },
         close: async () => {
           order.push("close");
           closed += 1;
@@ -388,7 +393,8 @@ test("readiness imediato usa uma sessão e sempre a fecha", async () => {
   assert.ok(order.indexOf("listener") < order.indexOf("pg_isready"));
   assert.ok(order.indexOf("connect") < order.indexOf("select"));
   assert.ok(order.indexOf("select") < order.indexOf("version"));
-  assert.ok(order.indexOf("version") < order.indexOf("close"));
+  assert.ok(order.indexOf("version") < order.indexOf("listen_addresses"));
+  assert.ok(order.indexOf("listen_addresses") < order.indexOf("close"));
 });
 
 test("readiness atrasado respeita polling por etapa", async () => {
@@ -439,6 +445,12 @@ test("readiness recusa processo morto", async () => {
 test("readiness recusa listener externo ou de PID diferente", async () => {
   for (const listener of [
     { address: "0.0.0.0", port: 64995, pid: 44 },
+    { address: "192.168.1.15", port: 64995, pid: 44 },
+    { address: "10.10.0.8", port: 64995, pid: 44 },
+    { address: "172.20.10.2", port: 64995, pid: 44 },
+    { address: "::", port: 64995, pid: 44 },
+    { address: "::1", port: 64995, pid: 44 },
+    { address: "2001:db8::10", port: 64995, pid: 44 },
     { address: "127.0.0.1", port: 64995, pid: 45 },
     { address: "127.0.0.1", port: 5432, pid: 44 }
   ]) {
@@ -479,6 +491,7 @@ test("falha SELECT 1 fecha a mesma sessão", async () => {
         openAdminSession: async () => ({
           selectOne: async () => 0,
           serverVersion: async () => "18.4",
+          listenAddresses: async () => "127.0.0.1",
           close: async () => {
             closed += 1;
           }
@@ -500,6 +513,7 @@ test("versão diferente de 18.4 é recusada e sessão fechada", async () => {
         openAdminSession: async () => ({
           selectOne: async () => 1,
           serverVersion: async () => "18.3",
+          listenAddresses: async () => "127.0.0.1",
           close: async () => {
             closed = true;
           }
@@ -511,6 +525,28 @@ test("versão diferente de 18.4 é recusada e sessão fechada", async () => {
     expectCode("harness_postgres_version_mismatch")
   );
   assert.equal(closed, true);
+});
+
+test("readiness exige listen_addresses efetivo exatamente em 127.0.0.1", async () => {
+  for (const value of ["*", "0.0.0.0", "localhost", "127.0.0.1,localhost", "::1", " 127.0.0.1", ""]) {
+    let closed = false;
+    await assert.rejects(
+      waitForReadiness({
+        probes: readinessProbes({
+          openAdminSession: async () => ({
+            selectOne: async () => 1,
+            serverVersion: async () => "18.4",
+            listenAddresses: async () => value,
+            close: async () => { closed = true; }
+          })
+        }),
+        pid: 44,
+        port: 64995
+      }),
+      expectCode("harness_postgres_listen_addresses_mismatch")
+    );
+    assert.equal(closed, true);
+  }
 });
 
 test("custódia DPAPI usa CurrentUser, zera material e remove temporário", async () => {
@@ -1094,6 +1130,7 @@ test("sessão administrativa que chega após deadline é fechada", async () => {
   const lateSession = {
     selectOne: async () => 1,
     serverVersion: async () => "18.4",
+    listenAddresses: async () => "127.0.0.1",
     close: async () => { closed += 1; return true; }
   };
   await assert.rejects(

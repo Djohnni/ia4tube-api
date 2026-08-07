@@ -47,6 +47,7 @@ const DEFAULT_READINESS_TIMEOUTS = Object.freeze({
   adminConnection: 30_000,
   selectOne: 10_000,
   serverVersion: 10_000,
+  listenAddresses: 10_000,
   closeSession: 5_000
 });
 const DEFAULT_HEARTBEAT_INTERVAL_MS = 30_000;
@@ -1132,6 +1133,7 @@ async function waitForReadiness({
     if (
       typeof candidate.selectOne !== "function" ||
       typeof candidate.serverVersion !== "function" ||
+      typeof candidate.listenAddresses !== "function" ||
       typeof candidate.close !== "function"
     ) {
       await closeLateSession(candidate);
@@ -1155,6 +1157,15 @@ async function waitForReadiness({
       signal
     );
     if (version !== "18.4") fail("harness_postgres_version_mismatch");
+    const listenAddresses = await withDeadline(
+      () => session.listenAddresses(),
+      stepTimeouts.listenAddresses,
+      "harness_readiness_listen_addresses_timeout",
+      signal
+    );
+    if (listenAddresses !== LOOPBACK_HOST) {
+      fail("harness_postgres_listen_addresses_mismatch");
+    }
   } catch (error) {
     primaryFailure =
       error instanceof HarnessFailure
@@ -1183,10 +1194,14 @@ async function waitForReadiness({
     checks: Object.freeze({
       processActive: true,
       loopbackListener: true,
+      targetPortListenerUnique: true,
+      targetPortListenerOwnedByPostmaster: true,
+      targetPortListenerLoopbackOnly: true,
       pgIsReady: true,
       adminConnection: true,
       selectOne: true,
       postgresVersionExact: true,
+      listenAddressesLoopbackOnly: true,
       sessionClosed: true
     }),
     metrics: Object.freeze({ postgresMajor: 18, postgresMinor: 4 })

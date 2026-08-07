@@ -2,21 +2,28 @@
 
 const assert = require("node:assert/strict");
 const crypto = require("node:crypto");
+const { spawnSync } = require("node:child_process");
 const fs = require("node:fs");
 const path = require("node:path");
 const test = require("node:test");
 const {
   ADMIN_LOGIN,
   LOCAL_DATABASE,
+  MINIMUM_FREE_BYTES,
   POSTGRES_VERSION,
   PROVISIONER_LOGIN,
   canonicalArchiveEntry,
   createWindowsHarnessInvocation,
   createWindowsPhysicalAdapters,
-  firewallFingerprintPowerShell,
+  netstatListenerParserPowerShell,
+  netstatTargetListenersPowerShell,
+  postgresServiceClassificationPowerShell,
   pendingPhysicalProofs,
   validateArchiveListings
 } = require("../scripts/social-3a0p-local-windows-adapters");
+const {
+  buildFirewallLightEvidence
+} = require("../scripts/social-3a0p-local-firewall-nonmutation");
 const {
   PHYSICAL_APPROVAL,
   controllerContract,
@@ -27,6 +34,7 @@ const {
 } = require("../scripts/social-3a0p-local-harness-core");
 
 const HASH = "a".repeat(64);
+const GIB = 1024 ** 3;
 const BUNDLE_0003_HASH = "b".repeat(64);
 const BUNDLE_0004_HASH = "c".repeat(64);
 
@@ -44,9 +52,48 @@ function file(size = 13) {
 }
 
 function systemSnapshot(clean) {
-  return clean
-    ? { clean: true, processes: 0, services: 0, listeners: 0 }
-    : { clean: false, processes: 1, services: 1, listeners: 1 };
+  return {
+    ...(clean
+      ? { clean: true, processes: 0, services: 0, listeners: 0 }
+      : { clean: false, processes: 1, services: 1, listeners: 1 }),
+    servicesIncludeStopped: true,
+    serviceExecutablePathsInspected: true,
+    listenersEnumeratedAllPidsByTargetPort: true
+  };
+}
+
+function firewallEvidence({
+  profileEnabled = "True",
+  globalFtp = "False",
+  ruleAction = "Block"
+} = {}) {
+  return buildFirewallLightEvidence({
+    profiles: [{
+      name: "Domain",
+      enabled: profileEnabled,
+      defaultInboundAction: "Block",
+      defaultOutboundAction: "Allow"
+    }],
+    globalSettings: {
+      exemptions: "None",
+      enableStatefulFtp: globalFtp,
+      enableStatefulPptp: "False",
+      requireFullAuthSupport: "True",
+      certValidationLevel: "RequireCrlCheck",
+      allowIpsecThroughNat: "None",
+      maxSaIdleTimeSeconds: 300,
+      keyEncoding: "UTF8",
+      enablePacketQueuing: "None"
+    },
+    rules: [{
+      name: "synthetic-rule",
+      enabled: "True",
+      direction: "Inbound",
+      action: ruleAction,
+      profile: "Any",
+      policyStoreSourceType: "Local"
+    }]
+  });
 }
 
 function syntheticOwnershipProof(parent, root) {
@@ -157,7 +204,13 @@ function fixture(overrides = {}) {
     async rm(target) { calls.removed.push(target); },
     async stat() { return file(); },
     async statfs() {
-      const values = overrides.statfsFreeBytes || [9_000, 8_000, 7_000, 8_500, 9_200];
+      const values = overrides.statfsFreeBytes || [
+        9 * GIB,
+        8 * GIB,
+        15 * GIB / 2,
+        17 * GIB / 2,
+        9 * GIB
+      ];
       const index = Math.min(calls.statfsReads || 0, values.length - 1);
       calls.statfsReads = (calls.statfsReads || 0) + 1;
       return { bavail: values[index], bsize: 1 };
@@ -233,8 +286,8 @@ function fixture(overrides = {}) {
         unexpectedAllowRuleCount: 0
       };
     },
-    async firewallFingerprint() {
-      return { sha256: "d".repeat(64), profileCount: 3, ruleCount: 12 };
+    async firewallLightEvidence() {
+      return firewallEvidence();
     },
     async residualProcesses() { return []; },
     async processAlive(pid) { return pid === 4242 && !calls.stopped; },
@@ -284,7 +337,8 @@ function fixture(overrides = {}) {
           const text = String(sql);
           calls.queries.push({ text, values });
           if (text === "SELECT 1::integer AS value") return { rowCount: 1, rows: [{ value: 1 }] };
-           if (text === "SHOW server_version") return { rowCount: 1, rows: [{ server_version: "18.4" }] };
+          if (text === "SHOW server_version") return { rowCount: 1, rows: [{ server_version: "18.4" }] };
+          if (text === "SHOW listen_addresses") return { rowCount: 1, rows: [{ listen_addresses: "127.0.0.1" }] };
           if (text === "SHOW data_checksums") return { rowCount: 1, rows: [{ data_checksums: "on" }] };
           if (text.includes("FROM pg_catalog.pg_stat_activity")) return { rowCount: 0, rows: [] };
           if (text.includes("FROM pg_catalog.pg_roles WHERE rolname=$1")) return { rowCount: 0, rows: [] };
@@ -476,6 +530,21 @@ test("adapter executes the complete physical lifecycle with injected fakes only"
   assert.equal(evidence.closedReport.ok, true);
   assert.equal(evidence.closedReport.phases.at(-1).phase, "cleanup");
   assert.equal(evidence.closedReport.phases.at(-1).status, "passed");
+  const preflightEvidence = evidence.closedReport.phases.find(
+    (entry) => entry.phase === "preflight"
+  ).result;
+  assert.ok(
+    preflightEvidence.inventory.includes(
+      "firewall-evidence-mode-loopback-nonmutation-v1"
+    )
+  );
+  assert.equal(preflightEvidence.checks.firewallMutationCommandsAbsent, true);
+  assert.equal(preflightEvidence.checks.processNonElevated, true);
+  assert.equal(preflightEvidence.checks.integrityNonAdministrative, true);
+  assert.equal(preflightEvidence.checks.fullFirewallFilterSnapshotProved, false);
+  assert.equal(preflightEvidence.counts.postgresProcessesBefore, 0);
+  assert.equal(preflightEvidence.counts.postgresServicesBeforeIncludingStopped, 0);
+  assert.equal(preflightEvidence.counts.targetPortListenersBefore, 0);
   const startEvidence = evidence.closedReport.phases.find(
     (entry) => entry.phase === "start-cluster"
   );
@@ -499,13 +568,31 @@ test("adapter executes the complete physical lifecycle with injected fakes only"
   assert.equal(cleanupEvidence.counts.helperProcessesRemaining, 0);
   assert.equal(cleanupEvidence.counts.temporaryCustodiesRemaining, 0);
   assert.equal(cleanupEvidence.counts.residualOwnedPostgresProcesses, 0);
-  assert.equal(cleanupEvidence.counts.diskMinimumObservedFreeBytes, 7_000);
+  assert.equal(cleanupEvidence.counts.diskMinimumObservedFreeBytes, 15 * GIB / 2);
   assert.equal(cleanupEvidence.checks.primaryDatabaseRemoved, true);
   assert.equal(cleanupEvidence.checks.restorationDatabasesRemoved, true);
   assert.equal(cleanupEvidence.checks.clusterRemoved, true);
   assert.equal(cleanupEvidence.checks.binariesRemoved, true);
   assert.equal(cleanupEvidence.checks.sourcePackageExternal, true);
   assert.equal(cleanupEvidence.checks.workingPackageOwnedByRun, true);
+  assert.equal(cleanupEvidence.checks.firewallLightEvidenceStable, true);
+  assert.equal(
+    cleanupEvidence.checks.firewallProfilesAndRulesMetadataStable,
+    true
+  );
+  assert.equal(cleanupEvidence.checks.firewallGlobalSettingsStable, true);
+  assert.equal(cleanupEvidence.checks.fullFirewallFilterSnapshotProved, false);
+  assert.equal(cleanupEvidence.checks.firewallMutationCommandsAbsent, true);
+  assert.equal(cleanupEvidence.checks.processNonElevated, true);
+  assert.equal(cleanupEvidence.checks.loopbackOnlyListenerProved, true);
+  assert.equal(cleanupEvidence.checks.externalListenerAbsent, true);
+  assert.equal(
+    cleanupEvidence.checks.externalExposurePreventedByLoopbackBinding,
+    true
+  );
+  assert.equal(cleanupEvidence.checks.effectiveListenAddressesLoopback, true);
+  assert.equal(cleanupEvidence.checks.finalPortClosed, true);
+  assert.ok(calls.queries.some((entry) => entry.text === "SHOW listen_addresses"));
   assert.equal(
     evidence.closedReport.phases.at(-1).result.hashes.firewallBeforeSha256,
     evidence.closedReport.phases.at(-1).result.hashes.firewallAfterSha256
@@ -1351,55 +1438,152 @@ test("pool release refreshes simultaneous active metrics before another pool acq
   assert.ok(evidence.metrics.poolPeakTotalGlobal >= 2);
 });
 
-test("firewall fingerprint probe sorts every multi-value filter without mutation", () => {
-  const script = firewallFingerprintPowerShell();
-  assert.match(script, /\[ordered\]@\{/);
-  for (const field of [
-    "$a.LocalAddress",
-    "$a.RemoteAddress",
-    "$p.Protocol",
-    "$p.LocalPort",
-    "$p.RemotePort",
-    "$p.IcmpType",
-    "$p.DynamicTarget",
-    "$x.Program",
-    "$x.Package",
-    "$s.Service",
-    "$i.InterfaceAlias",
-    "$t.InterfaceType",
-    "$q.Authentication",
-    "$q.Encryption",
-    "$q.OverrideBlockRules",
-    "$q.LocalUser",
-    "$q.RemoteUser",
-    "$q.RemoteMachine",
-    "$r.Platform"
-  ]) {
-    assert.match(script, new RegExp(
-      field.replace(/[.$]/g, "\\$&") + "\\|Sort-Object"
-    ));
-  }
-  assert.doesNotMatch(script, /Set-NetFirewall|New-NetFirewall|Remove-NetFirewall/);
+test("adapter uses the lightweight all-PID listener and stopped-service contracts", () => {
+  const source = fs.readFileSync(
+    path.resolve(__dirname, "../scripts/social-3a0p-local-windows-adapters.js"),
+    "utf8"
+  );
+  assert.match(source, /firewallLightEvidencePowerShell/);
+  assert.doesNotMatch(source, /firewallFingerprintPowerShell/);
+  assert.doesNotMatch(source, /Get-NetFirewallAddressFilter|Show-NetFirewallRule/);
+  assert.doesNotMatch(source, /Get-NetTCPConnection/);
+  const listenerScript = netstatTargetListenersPowerShell(64995);
+  assert.match(listenerScript, /netstat\.exe/);
+  assert.match(listenerScript, /-ano -p TCP\b/);
+  assert.match(listenerScript, /-ano -p TCPv6\b/);
+  assert.match(listenerScript, /0\.0\.0\.0:0/);
+  assert.match(listenerScript, /\[::\]:0/);
+  assert.doesNotMatch(listenerScript, /LISTENING|ESCUTANDO/);
+  assert.match(source, /Get-CimInstance -ClassName Win32_Service/);
+  assert.match(source, /DisplayName/);
+  assert.match(source, /PathName/);
+  assert.match(source, /serviceExecutablePathsInspected/);
+  assert.doesNotMatch(source, /Where-Object Status -ne ['"]Stopped['"]/);
+  assert.match(source, /cwd: paths\.ownedParent/);
+});
+
+test("parser netstat sintético é independente do idioma e cobre TCP/TCPv6/owner", {
+  skip: process.platform !== "win32"
+}, () => {
+  const powershell = path.join(
+    process.env.SystemRoot,
+    "System32/WindowsPowerShell/v1.0/powershell.exe"
+  );
+  const run = (lines, ownerPid = null) => {
+    const input = lines.map((line) => `'${line.replaceAll("'", "''")}'`).join(",");
+    const script = [
+      "$ErrorActionPreference='Stop';",
+      `$lines=@(${input});`,
+      netstatListenerParserPowerShell(64995, ownerPid)
+    ].join("");
+    return spawnSync(
+      powershell,
+      ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", script],
+      { encoding: "utf8", windowsHide: true }
+    );
+  };
+
+  const empty = run([]);
+  assert.equal(empty.status, 0, empty.stderr);
+  assert.deepEqual(JSON.parse(empty.stdout.trim()).rows, []);
+
+  const observed = run([
+    "  TCP    127.0.0.1:64995      0.0.0.0:0       ESCUTANDO       7001",
+    "  TCP    [::]:64995           [::]:0            LISTENING       7002",
+    "  TCP    127.0.0.1:61234      127.0.0.1:443      ESTABLISHED     7001",
+    "  TCP    10.0.0.8:65000       0.0.0.0:0          OUVINDO         7001",
+    "  TCP    127.0.0.1:649950     0.0.0.0:0          LISTENING       7003"
+  ], 7001);
+  assert.equal(observed.status, 0, observed.stderr);
+  const parsed = JSON.parse(observed.stdout.trim());
+  assert.equal(parsed.ownerProcessListenersIncluded, true);
+  assert.deepEqual(parsed.rows, [
+    { pid: 7001, address: "127.0.0.1", port: 64995 },
+    { pid: 7002, address: "::", port: 64995 },
+    { pid: 7001, address: "10.0.0.8", port: 65000 }
+  ]);
+
+  const malformed = run([
+    "  TCP    127.0.0.1:64995      malformed"
+  ]);
+  assert.notEqual(malformed.status, 0);
+  assert.doesNotMatch(malformed.stderr, /127\.0\.0\.1|64995/);
+});
+
+test("classificação sintética detecta serviço PostgreSQL pelo executável mesmo parado", {
+  skip: process.platform !== "win32"
+}, () => {
+  const powershell = path.join(
+    process.env.SystemRoot,
+    "System32/WindowsPowerShell/v1.0/powershell.exe"
+  );
+  const run = (rows) => {
+    const literals = rows.map((row) =>
+      `[pscustomobject]@{Name='${row.name}';DisplayName='${row.displayName}';PathName='${row.pathName}';State='${row.state}'}`
+    ).join(",");
+    const result = spawnSync(
+      powershell,
+      [
+        "-NoLogo",
+        "-NoProfile",
+        "-NonInteractive",
+        "-Command",
+        `$ErrorActionPreference='Stop';$allServices=@(${literals});${postgresServiceClassificationPowerShell()}`
+      ],
+      { encoding: "utf8", windowsHide: true }
+    );
+    assert.equal(result.status, 0, result.stderr);
+    return JSON.parse(result.stdout.trim());
+  };
+  const observed = run([
+    { name: "neutral-a", displayName: "Neutral A", pathName: "C:\\tools\\postgres.exe -D synthetic", state: "Stopped" },
+    { name: "neutral-b", displayName: "Neutral B", pathName: "C:\\tools\\pg_ctl.exe runservice", state: "Stopped" },
+    { name: "unrelated", displayName: "Unrelated", pathName: "C:\\tools\\service.exe", state: "Running" }
+  ]);
+  assert.equal(observed.services, 2);
+  assert.equal(observed.servicesIncludeStopped, true);
+  assert.equal(observed.serviceExecutablePathsInspected, true);
 });
 
 test("cleanup recusa firewall alterado depois da execução", async () => {
   let reads = 0;
   const base = fixture({ dependencies: {
     systemProbe: {
-      async firewallFingerprint() {
+      async firewallLightEvidence() {
         reads += 1;
-        return {
-          sha256: (reads === 1 ? "d" : "e").repeat(64),
-          profileCount: 3,
-          ruleCount: 12
-        };
+        return firewallEvidence({ ruleAction: reads === 1 ? "Block" : "Allow" });
       }
     }
   } });
   await base.adapters.preflight(base.input);
   await assert.rejects(base.adapters.cleanup(base.input), {
-    code: "windows_harness_firewall_changed"
+    code: "windows_harness_firewall_rules_metadata_changed"
   });
+});
+
+test("preflight recusa evidência leve ausente ou estruturalmente inválida", async () => {
+  for (const invalid of [
+    null,
+    {},
+    { firewallEvidenceMode: "loopback_nonmutation_v1" },
+    { ...firewallEvidence(), components: [] }
+  ]) {
+    const base = fixture({ dependencies: {
+      systemProbe: {
+        async firewallLightEvidence() { return invalid; }
+      }
+    } });
+    await assert.rejects(
+      base.adapters.preflight(base.input),
+      { code: "firewall_nonmutation_evidence_invalid" }
+    );
+    assert.equal(
+      base.calls.process.some((entry) =>
+        ["postgres_initdb", "postgres_start"].includes(entry.label)
+      ),
+      false
+    );
+  }
 });
 
 test("cleanup repete a prova global e recusa processo, serviço ou listener residual", async () => {
@@ -1426,8 +1610,16 @@ test("cleanup preserves explicit nonzero process, service and listener counts in
       async assertClean() {
         cleanReads += 1;
         return cleanReads === 1
-          ? { clean: true, processes: 0, services: 0, listeners: 0 }
-          : { clean: false, processes: 2, services: 1, listeners: 3 };
+          ? systemSnapshot(true)
+          : {
+            clean: false,
+            processes: 2,
+            services: 1,
+            listeners: 3,
+            servicesIncludeStopped: true,
+            serviceExecutablePathsInspected: true,
+            listenersEnumeratedAllPidsByTargetPort: true
+          };
       }
     }
   } });
@@ -1447,19 +1639,50 @@ test("cleanup preserves explicit nonzero process, service and listener counts in
   );
 });
 
+test("cleanup recusa separadamente processo, serviço parado ou listener residual", async (t) => {
+  for (const [name, residual, countKey, checkKey] of [
+    ["process", { processes: 1, services: 0, listeners: 0 }, "postgresProcessesRemaining", "processesZero"],
+    ["service", { processes: 0, services: 1, listeners: 0 }, "postgresServicesRemaining", "servicesZero"],
+    ["listener", { processes: 0, services: 0, listeners: 1 }, "postgresListenersRemaining", "listenersZero"]
+  ]) {
+    await t.test(name, async () => {
+      let reads = 0;
+      const base = fixture({ dependencies: {
+        systemProbe: {
+          async assertClean() {
+            reads += 1;
+            return reads === 1
+              ? systemSnapshot(true)
+              : {
+                clean: false,
+                ...residual,
+                servicesIncludeStopped: true,
+                serviceExecutablePathsInspected: true,
+                listenersEnumeratedAllPidsByTargetPort: true
+              };
+          }
+        }
+      } });
+      await base.adapters.preflight(base.input);
+      await assert.rejects(
+        base.adapters.cleanup(base.input),
+        (error) => {
+          assert.equal(error.code, "windows_harness_cleanup_system_not_clean");
+          assert.equal(error.partialResult.counts[countKey], 1);
+          assert.equal(error.partialResult.checks[checkKey], false);
+          return true;
+        }
+      );
+    });
+  }
+});
+
 test("cleanup does not serialize unmeasured disk checkpoints as zero", async () => {
   const base = fixture();
-  let cleanup;
-  await assert.rejects(
-    base.adapters.cleanup(base.input),
-    (error) => {
-      cleanup = error.partialResult;
-      return error.code === "windows_harness_firewall_changed";
-    }
-  );
+  const cleanup = await base.adapters.cleanup(base.input);
   assert.equal(Object.hasOwn(cleanup.counts, "diskInitialFreeBytes"), false);
   assert.equal(Object.hasOwn(cleanup.counts, "diskBeforeExtractionFreeBytes"), false);
-  assert.equal(cleanup.counts.diskMinimumObservedFreeBytes, 8_000);
+  assert.equal(cleanup.counts.diskMinimumObservedFreeBytes, 8 * GIB);
 });
 
 test("missing disk probe fields fail closed instead of becoming zero", async () => {
@@ -1468,6 +1691,14 @@ test("missing disk probe fields fail closed instead of becoming zero", async () 
   await assert.rejects(
     base.adapters.preflight(base.input),
     { code: "windows_harness_space_probe_invalid" }
+  );
+});
+
+test("preflight recusa espaço livre abaixo do mínimo de 7 GiB", async () => {
+  const base = fixture({ statfsFreeBytes: [MINIMUM_FREE_BYTES - 1] });
+  await assert.rejects(
+    base.adapters.preflight(base.input),
+    { code: "windows_harness_insufficient_free_space" }
   );
 });
 

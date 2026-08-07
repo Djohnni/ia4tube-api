@@ -50,6 +50,7 @@ function adapters(events = [], overrides = {}) {
           openAdminSession: async () => ({
             selectOne: async () => 1,
             serverVersion: async () => "18.4",
+            listenAddresses: async () => "127.0.0.1",
             close: async () => true
           })
         }
@@ -468,6 +469,7 @@ test("controller readiness requires PostgreSQL 18.4", async () => {
                 openAdminSession: async () => ({
                   selectOne: async () => 1,
                   serverVersion: async () => "18.3",
+                  listenAddresses: async () => "127.0.0.1",
                   close: async () => true
                 })
               }
