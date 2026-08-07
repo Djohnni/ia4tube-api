@@ -15,6 +15,7 @@ const SAFE_BASE_ENVIRONMENT = new Set([
   "systemroot",
   "temp",
   "tmp",
+  "tmpdir",
   "windir"
 ]);
 const SENSITIVE_ARGUMENT = Object.freeze([

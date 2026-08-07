@@ -11,6 +11,7 @@ const {
   runLocalPhysicalHarness
 } = require("../scripts/social-3a0p-local-physical-harness");
 const {
+  HarnessFailure,
   PHASES
 } = require("../scripts/social-3a0p-local-harness-core");
 
@@ -299,6 +300,41 @@ test("falha de persistência do ledger bloqueia a fase física, mas cleanup real
   );
   assert.equal(preflightRan, false);
   assert.equal(cleanupRan, true);
+});
+
+test("ledger bootstrap failure blocks preflight, extraction and PostgreSQL before cleanup", async () => {
+  const calls = [];
+  const configuredAdapters = adapters([], {
+    async initializeEvidenceLedger() {
+      calls.push("initialize-ledger");
+      throw new HarnessFailure("evidence_parent_validation_failed");
+    },
+    async transitionEvidenceLedger() {
+      calls.push("transition-ledger");
+      return { code: "ledger_transitioned" };
+    },
+    async preflight() {
+      calls.push("preflight");
+      return { code: "adapter_approved" };
+    },
+    async extractPackage() {
+      calls.push("extract-package");
+      return { code: "adapter_approved" };
+    },
+    async startCluster() {
+      calls.push("start-cluster");
+      return { code: "adapter_approved" };
+    },
+    async cleanup() {
+      calls.push("cleanup");
+      return { code: "adapter_approved", checks: { approved: true } };
+    }
+  });
+  await assert.rejects(
+    runLocalPhysicalHarness(options({ adapters: configuredAdapters })),
+    { code: "evidence_parent_validation_failed" }
+  );
+  assert.deepEqual(calls, ["initialize-ledger", "cleanup"]);
 });
 
 test("pacote externo é revalidado antes da promoção da evidência canônica", async () => {

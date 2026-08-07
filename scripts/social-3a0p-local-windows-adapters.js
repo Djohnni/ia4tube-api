@@ -24,6 +24,9 @@ const {
   createWindowsEvidenceLedgerAdapters
 } = require("./social-3a0p-local-windows-evidence-ledger-adapters");
 const {
+  validateBootstrapDiagnostic
+} = require("./social-3a0p-local-evidence-bootstrap-diagnostic");
+const {
   assertNoResidualProcesses,
   assertSessionMetricsSafe,
   collectResidualProcessMetrics,
@@ -227,10 +230,14 @@ function hidden(object, key, value) {
 
 function sanitizedFailure(error, fallback) {
   const code = String(error?.code || "");
-  if (/^[a-z][a-z0-9_]{2,95}$/.test(code)) {
-    return new WindowsPhysicalAdapterFailure(code);
+  const failure = new WindowsPhysicalAdapterFailure(
+    /^[a-z][a-z0-9_]{2,95}$/.test(code) ? code : fallback
+  );
+  if (error?.bootstrapDiagnostic) {
+    validateBootstrapDiagnostic(error.bootstrapDiagnostic);
+    hidden(failure, "bootstrapDiagnostic", error.bootstrapDiagnostic);
   }
-  return new WindowsPhysicalAdapterFailure(fallback);
+  return failure;
 }
 
 function defaultStorage() {

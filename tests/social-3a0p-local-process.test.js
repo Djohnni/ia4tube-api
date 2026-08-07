@@ -61,6 +61,14 @@ test("NODE_PATH e variável ambiente não allowlisted são recusados", () => {
     ),
     true
   );
+  assert.equal(
+    assertProcessEnvironment({
+      TEMP: "C:\\synthetic-owned-root",
+      TMP: "C:\\synthetic-owned-root",
+      TMPDIR: "C:\\synthetic-owned-root"
+    }),
+    true
+  );
 });
 
 test("sanitização separada remove URL, bearer e senha", () => {

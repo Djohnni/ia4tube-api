@@ -16,6 +16,9 @@ const {
   PHYSICAL_APPROVAL,
   REQUIRED_POSTGRES_VERSION
 } = require("./social-3a0p-local-physical-harness");
+const {
+  serializeBootstrapDiagnostic
+} = require("./social-3a0p-local-evidence-bootstrap-diagnostic");
 
 const INPUT_KEYS = Object.freeze([
   "approval",
@@ -421,6 +424,9 @@ async function commandLineEntry({
     const code = error instanceof HarnessFailure
       ? error.code
       : "windows_entry_failed";
+    if (error?.bootstrapDiagnostic) {
+      stderr.write(`${serializeBootstrapDiagnostic(error.bootstrapDiagnostic)}\n`);
+    }
     stderr.write(`${JSON.stringify({
       ok: false,
       code,

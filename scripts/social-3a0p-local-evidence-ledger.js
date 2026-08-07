@@ -7,10 +7,32 @@
 const crypto = require("node:crypto");
 const path = require("node:path");
 const { PHASES } = require("./social-3a0p-local-harness-core");
+const {
+  bootstrapStageFailure,
+  createBootstrapDiagnostic,
+  validateBootstrapDiagnostic
+} = require("./social-3a0p-local-evidence-bootstrap-diagnostic");
+const {
+  createPersistenceDiagnostic,
+  persistenceStageFailure,
+  validatePersistenceDiagnostic
+} = require("./social-3a0p-local-evidence-persistence-diagnostic");
+const {
+  validateFileReplaceExceptionDiagnostic
+} = require("./social-3a0p-local-file-replace-diagnostic");
+const {
+  validateFileReplaceArgumentDiagnostic
+} = require("./social-3a0p-local-file-replace-argument-diagnostic");
+const {
+  createTempValidationFailureMetadata,
+  createTempValidationDiagnostic,
+  validateTempValidationDiagnostic
+} = require("./social-3a0p-local-temp-validation-diagnostic");
 
 const EXECUTION_PHASES = Object.freeze(PHASES.filter((phase) => phase !== "cleanup"));
 const COMMIT = /^[0-9a-f]{40}$/;
 const OPAQUE_RUN_ID = /^(?:[0-9a-f]{32}|[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})$/;
+const REPLACEMENT_TRANSACTION_ID = /^[0-9a-f]{32}$/;
 const CODE = /^[a-z][a-z0-9_]{2,95}$/;
 const DETAIL_KEY = /^[a-z][a-zA-Z0-9]{1,63}$/;
 const SAFE_LABEL = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,159}$/;
@@ -45,17 +67,68 @@ const REQUIRED_ADAPTERS = Object.freeze([
   "writeFileCreateNew",
   "flushFile",
   "applyProtectedAcl",
+  "prepareFileReplacement",
   "replaceFileAtomic",
-  "removeOwnedTemporaryFile"
+  "finalizeFileReplacement",
+  "rollbackFileReplacement",
+  "removeOwnedTemporaryFile",
+  "cleanupFailedInitialization"
 ]);
 
 class EvidenceLedgerFailure extends Error {
-  constructor(code) {
+  constructor(code, options = {}) {
     const normalized = canonicalCode(code, "evidence_ledger_failed");
     super(normalized);
     this.code = normalized;
     this.name = "EvidenceLedgerFailure";
     this.mustAbortPhysicalExecution = true;
+    if (options.bootstrapDiagnostic) {
+      validateBootstrapDiagnostic(options.bootstrapDiagnostic);
+      Object.defineProperty(this, "bootstrapDiagnostic", {
+        configurable: false,
+        enumerable: false,
+        writable: false,
+        value: options.bootstrapDiagnostic
+      });
+    }
+    if (options.persistenceDiagnostic) {
+      validatePersistenceDiagnostic(options.persistenceDiagnostic);
+      Object.defineProperty(this, "persistenceDiagnostic", {
+        configurable: false,
+        enumerable: false,
+        writable: false,
+        value: options.persistenceDiagnostic
+      });
+    }
+    if (options.tempValidationDiagnostic) {
+      validateTempValidationDiagnostic(options.tempValidationDiagnostic);
+      Object.defineProperty(this, "tempValidationDiagnostic", {
+        configurable: false,
+        enumerable: false,
+        writable: false,
+        value: options.tempValidationDiagnostic
+      });
+    }
+    if (options.fileReplaceDiagnostic) {
+      validateFileReplaceExceptionDiagnostic(options.fileReplaceDiagnostic);
+      Object.defineProperty(this, "fileReplaceDiagnostic", {
+        configurable: false,
+        enumerable: false,
+        writable: false,
+        value: options.fileReplaceDiagnostic
+      });
+    }
+    if (options.fileReplaceArgumentDiagnostic) {
+      validateFileReplaceArgumentDiagnostic(
+        options.fileReplaceArgumentDiagnostic
+      );
+      Object.defineProperty(this, "fileReplaceArgumentDiagnostic", {
+        configurable: false,
+        enumerable: false,
+        writable: false,
+        value: options.fileReplaceArgumentDiagnostic
+      });
+    }
   }
 }
 
@@ -358,7 +431,13 @@ function createSanitizedEvidenceLedger(options = {}) {
   }
 
   async function cleanupTemporary(tempPath) {
-    if (!tempPath) return true;
+    if (!tempPath) {
+      return Object.freeze({
+        attempted: false,
+        completed: false,
+        error: null
+      });
+    }
     try {
       if (await adapters.exists(tempPath)) {
         const removed = await adapters.removeOwnedTemporaryFile({
@@ -371,8 +450,12 @@ function createSanitizedEvidenceLedger(options = {}) {
           );
         }
       }
-      return true;
-    } catch {
+      return Object.freeze({
+        attempted: true,
+        completed: true,
+        error: null
+      });
+    } catch (error) {
       temporaryCleanupFailureCode ||= "evidence_ledger_temporary_cleanup_failed";
       state.temporaryCleanupFailureCode = temporaryCleanupFailureCode;
       state.residues = {
@@ -382,65 +465,545 @@ function createSanitizedEvidenceLedger(options = {}) {
           Number(state.residues.evidenceTemporaryFiles || 0)
         )
       };
-      return false;
+      return Object.freeze({
+        attempted: true,
+        completed: false,
+        error
+      });
     }
   }
 
-  async function persist() {
-    const nextRevision = state.revision + 1;
-    const nextPayload = snapshotPayload(nextRevision);
-    const payloadJson = canonicalJson(nextPayload);
-    const payloadSha256 = hashBytes(Buffer.from(payloadJson, "utf8"));
-    const document = canonicalJson({
-      ...nextPayload,
-      integritySha256: payloadSha256
-    });
-    const bytes = Buffer.from(`${document}\n`, "utf8");
-    const candidateNonce = String(nonce() || "");
-    if (!/^[0-9a-f]{16,64}$/.test(candidateNonce)) {
-      fail("evidence_ledger_nonce_invalid");
-    }
-    const temporaryPath = path.join(
-      layout.evidenceRoot,
-      `.${path.basename(layout.evidencePath)}.${nextRevision}.${candidateNonce}.tmp`
-    );
-    if (!isWithin(temporaryPath, layout.evidenceRoot)) {
-      fail("evidence_ledger_path_scope_refused");
-    }
-
+  async function inspectPersistenceFailureState(
+    temporaryPath,
+    backupPath,
+    recoveryPath
+  ) {
+    let previousLedgerPreserved = false;
+    let temporaryFilePresent = false;
+    let backupFilePresent = false;
+    let backupMatchesPreviousRevision = false;
+    let recoveryFilePresent = false;
     try {
       if (
-        await adapters.assertNoReparseComponents({
+        lastPersistedSha256 !== null &&
+        await adapters.exists(layout.evidencePath)
+      ) {
+        const previous = await adapters.readFile(layout.evidencePath);
+        previousLedgerPreserved =
+          Buffer.isBuffer(previous) &&
+          hashBytes(previous) === lastPersistedSha256;
+      }
+    } catch {
+      previousLedgerPreserved = false;
+    }
+    try {
+      temporaryFilePresent = Boolean(
+        temporaryPath && await adapters.exists(temporaryPath)
+      );
+    } catch {
+      temporaryFilePresent = false;
+    }
+    try {
+      backupFilePresent = Boolean(
+        backupPath && await adapters.exists(backupPath)
+      );
+      if (backupFilePresent && lastPersistedSha256 !== null) {
+        const backup = await adapters.readFile(backupPath);
+        backupMatchesPreviousRevision =
+          Buffer.isBuffer(backup) &&
+          hashBytes(backup) === lastPersistedSha256;
+      }
+    } catch {
+      backupMatchesPreviousRevision = false;
+    }
+    try {
+      recoveryFilePresent = Boolean(
+        recoveryPath && await adapters.exists(recoveryPath)
+      );
+    } catch {
+      recoveryFilePresent = false;
+    }
+    return Object.freeze({
+      previousLedgerPreserved,
+      temporaryFilePresent,
+      backupFilePresent,
+      backupMatchesPreviousRevision,
+      recoveryFilePresent
+    });
+  }
+
+  async function persist({ bootstrap = false } = {}) {
+    let bootstrapFailureCode = "evidence_ledger_first_revision_failed";
+    let persistenceFailureStageCode =
+      "evidence_second_revision_prepare_failed";
+    const nextRevision = state.revision + 1;
+    let temporaryPath = null;
+    let backupPath = null;
+    let recoveryPath = null;
+    let payloadSha256 = null;
+    let bytes = null;
+    let replacementTransactionId = null;
+    let replacementFinalized = false;
+    let replacementOccurred = false;
+    let tempValidationFailure = null;
+    const captureTempValidationFailure = (
+      stage,
+      failureClass = "unknown",
+      failureCode = "UNKNOWN",
+      actualConditionClass = "unknown"
+    ) => {
+      tempValidationFailure = createTempValidationFailureMetadata({
+        tempValidationStage: stage,
+        sanitizedFailureClass: failureClass,
+        sanitizedFailureCode: failureCode,
+        actualConditionClass
+      });
+    };
+    const replacement = {
+      explicitBackupPrepared: false,
+      explicitBackupValidated: false,
+      explicitBackupMatchesPreviousRevision: false,
+      newLedgerValidated: false,
+      rollbackRequired: false,
+      rollbackAttempted: false,
+      rollbackCompleted: false,
+      previousLedgerRestored: false,
+      failedCandidatePreserved: false,
+      failedCandidateRemovedAfterRestore: false,
+      backupRemovedAfterValidation: false
+    };
+
+    try {
+      const nextPayload = snapshotPayload(nextRevision);
+      persistenceFailureStageCode =
+        "evidence_second_revision_serialize_failed";
+      const payloadJson = canonicalJson(nextPayload);
+      payloadSha256 = hashBytes(Buffer.from(payloadJson, "utf8"));
+      const document = canonicalJson({
+        ...nextPayload,
+        integritySha256: payloadSha256
+      });
+      bytes = Buffer.from(`${document}\n`, "utf8");
+      const replacementSha256 = hashBytes(bytes);
+
+      persistenceFailureStageCode = "evidence_second_revision_prepare_failed";
+      let candidateNonce;
+      try {
+        candidateNonce = String(nonce() || "");
+      } catch (error) {
+        captureTempValidationFailure(
+          "second_revision_temp_ownership_marker_validate",
+          "ownership",
+          "UNKNOWN",
+          "unknown"
+        );
+        throw error;
+      }
+      if (!/^[0-9a-f]{16,64}$/.test(candidateNonce)) {
+        captureTempValidationFailure(
+          "second_revision_temp_ownership_marker_validate",
+          "ownership",
+          "MISMATCH",
+          "mismatch"
+        );
+        fail("evidence_ledger_nonce_invalid");
+      }
+      let artifactStem;
+      try {
+        artifactStem = `.${path.basename(layout.evidencePath)}.${nextRevision}.${candidateNonce}`;
+        temporaryPath = path.join(layout.evidenceRoot, `${artifactStem}.tmp`);
+        backupPath = path.join(layout.evidenceRoot, `${artifactStem}.previous.bak`);
+        recoveryPath = path.join(layout.evidenceRoot, `${artifactStem}.failed.bak`);
+      } catch (error) {
+        captureTempValidationFailure(
+          "second_revision_temp_canonicalize",
+          "filesystem",
+          "UNKNOWN",
+          "unknown"
+        );
+        throw error;
+      }
+      const replacementPaths = [
+        temporaryPath,
+        layout.evidencePath,
+        backupPath,
+        recoveryPath
+      ];
+      if (
+        replacementPaths.some(
+          (candidate) =>
+            !path.isAbsolute(candidate) || path.resolve(candidate) !== candidate
+        )
+      ) {
+        captureTempValidationFailure(
+          "second_revision_temp_canonicalize",
+          "filesystem",
+          "EINVAL",
+          "invalid"
+        );
+        fail("evidence_ledger_path_scope_refused");
+      }
+      if (
+        !isWithin(temporaryPath, layout.evidenceRoot) ||
+        !isWithin(backupPath, layout.evidenceRoot) ||
+        !isWithin(recoveryPath, layout.evidenceRoot)
+      ) {
+        captureTempValidationFailure(
+          "second_revision_temp_scope_validate",
+          "harness_validation",
+          "OUTSIDE_SCOPE",
+          "outside_scope"
+        );
+        fail("evidence_ledger_path_scope_refused");
+      }
+      const replacementDirectories = replacementPaths.map(
+        (candidate) => path.dirname(candidate).toLowerCase()
+      );
+      if (
+        replacementDirectories.some(
+          (candidate) => candidate !== replacementDirectories[0]
+        )
+      ) {
+        captureTempValidationFailure(
+          "second_revision_temp_same_directory_validate",
+          "filesystem",
+          "MISMATCH",
+          "different"
+        );
+        fail("evidence_ledger_path_scope_refused");
+      }
+      const replacementVolumes = replacementPaths.map(
+        (candidate) => path.parse(candidate).root.toLowerCase()
+      );
+      if (
+        replacementVolumes.some(
+          (candidate) => candidate !== replacementVolumes[0]
+        )
+      ) {
+        captureTempValidationFailure(
+          "second_revision_temp_same_volume_validate",
+          "filesystem",
+          "MISMATCH",
+          "different"
+        );
+        fail("evidence_ledger_path_scope_refused");
+      }
+
+      bootstrapFailureCode = "evidence_root_reparse_detected";
+      let noReparseComponents;
+      try {
+        noReparseComponents = await adapters.assertNoReparseComponents({
           controlledRoot: layout.controlledRoot,
           evidenceRoot: layout.evidenceRoot,
           cleanupRoot: layout.cleanupRoot,
           evidencePath: layout.evidencePath,
-          temporaryPath
-        }) !== true
-      ) {
+          temporaryPath,
+          backupPath,
+          recoveryPath
+        });
+      } catch (error) {
+        captureTempValidationFailure(
+          "second_revision_temp_reparse_audit",
+          "filesystem",
+          String(error?.code || "").toUpperCase(),
+          "unknown"
+        );
+        throw error;
+      }
+      if (noReparseComponents !== true) {
+        captureTempValidationFailure(
+          "second_revision_temp_reparse_audit",
+          "filesystem",
+          "REPARSE_DETECTED",
+          "present"
+        );
         fail("evidence_ledger_reparse_refused");
       }
-      const targetExists = await adapters.exists(layout.evidencePath);
+      bootstrapFailureCode = "evidence_ledger_first_revision_failed";
+      let targetExists;
+      try {
+        targetExists = await adapters.exists(layout.evidencePath);
+      } catch (error) {
+        captureTempValidationFailure(
+          "second_revision_previous_ledger_presence_validate",
+          "filesystem",
+          String(error?.code || "").toUpperCase(),
+          "unknown"
+        );
+        throw error;
+      }
       if (lastPersistedSha256 === null && targetExists) {
         fail("evidence_ledger_existing_target_refused");
       }
       if (lastPersistedSha256 !== null) {
-        if (!targetExists) fail("evidence_ledger_previous_revision_missing");
-        const previous = await adapters.readFile(layout.evidencePath);
-        if (hashBytes(previous) !== lastPersistedSha256) {
+        if (!targetExists) {
+          captureTempValidationFailure(
+            "second_revision_previous_ledger_presence_validate",
+            "filesystem",
+            "ENOENT",
+            "absent"
+          );
+          fail("evidence_ledger_previous_revision_missing");
+        }
+        let previous;
+        try {
+          previous = await adapters.readFile(layout.evidencePath);
+        } catch (error) {
+          captureTempValidationFailure(
+            "second_revision_previous_ledger_integrity_validate",
+            "integrity",
+            String(error?.code || "").toUpperCase(),
+            "unknown"
+          );
+          throw error;
+        }
+        if (
+          !Buffer.isBuffer(previous) ||
+          hashBytes(previous) !== lastPersistedSha256
+        ) {
+          captureTempValidationFailure(
+            "second_revision_previous_ledger_integrity_validate",
+            "integrity",
+            "HASH_MISMATCH",
+            "mismatch"
+          );
           fail("evidence_ledger_previous_revision_changed");
         }
       }
-      await adapters.writeFileCreateNew(temporaryPath, bytes);
-      await adapters.flushFile(temporaryPath);
-      if (await adapters.applyProtectedAcl(temporaryPath) !== true) {
+
+      persistenceFailureStageCode =
+        "evidence_second_revision_temp_create_failed";
+      bootstrapFailureCode = "evidence_ledger_first_write_failed";
+      try {
+        await adapters.writeFileCreateNew(temporaryPath, bytes);
+      } catch (error) {
+        throw persistenceStageFailure(
+          error,
+          error?.code === "EEXIST"
+            ? "evidence_second_revision_temp_create_failed"
+            : "evidence_second_revision_write_failed"
+        );
+      }
+
+      persistenceFailureStageCode = "evidence_second_revision_flush_failed";
+      bootstrapFailureCode = "evidence_ledger_flush_failed";
+      try {
+        await adapters.flushFile(temporaryPath);
+      } catch (error) {
+        captureTempValidationFailure(
+          "second_revision_temp_handle_closed_validate",
+          "filesystem",
+          String(error?.systemErrorCode || error?.code || "").toUpperCase(),
+          "open_or_unknown"
+        );
+        throw error;
+      }
+
+      persistenceFailureStageCode =
+        "evidence_second_revision_pre_replace_validation_failed";
+      bootstrapFailureCode = "evidence_root_acl_protection_failed";
+      let aclApplied;
+      try {
+        aclApplied = await adapters.applyProtectedAcl(temporaryPath);
+      } catch (error) {
+        captureTempValidationFailure(
+          "second_revision_temp_acl_validate",
+          "acl",
+          String(error?.code || "").toUpperCase(),
+          "unknown"
+        );
+        throw error;
+      }
+      if (aclApplied !== true) {
+        captureTempValidationFailure(
+          "second_revision_temp_acl_validate",
+          "acl",
+          "ACL_INVALID",
+          "invalid"
+        );
         fail("evidence_ledger_acl_application_failed");
       }
-      validateSecurityProof(await adapters.inspectProtectedAcl(temporaryPath));
-      const promoted = await adapters.replaceFileAtomic({
+      bootstrapFailureCode = "evidence_root_acl_validation_failed";
+      let temporarySecurityProof;
+      try {
+        temporarySecurityProof = await adapters.inspectProtectedAcl(temporaryPath);
+        exactKeys(
+          temporarySecurityProof,
+          REQUIRED_SECURITY_PROOF_KEYS,
+          "evidence_ledger_acl_proof_schema_invalid"
+        );
+      } catch (error) {
+        captureTempValidationFailure(
+          "second_revision_temp_acl_validate",
+          "acl",
+          String(error?.code || "").toUpperCase(),
+          "unknown"
+        );
+        throw error;
+      }
+      if (temporarySecurityProof.ownerCurrentUser !== true) {
+        captureTempValidationFailure(
+          "second_revision_temp_owner_validate",
+          "ownership",
+          "OWNER_INVALID",
+          "invalid"
+        );
+        fail("evidence_ledger_acl_refused");
+      }
+      try {
+        validateSecurityProof(temporarySecurityProof);
+      } catch (error) {
+        captureTempValidationFailure(
+          "second_revision_temp_acl_validate",
+          "acl",
+          "ACL_INVALID",
+          "invalid"
+        );
+        throw error;
+      }
+      let temporaryExists;
+      try {
+        temporaryExists = await adapters.exists(temporaryPath);
+      } catch (error) {
+        captureTempValidationFailure(
+          "second_revision_temp_exists",
+          "filesystem",
+          String(error?.code || "").toUpperCase(),
+          "unknown"
+        );
+        throw error;
+      }
+      if (temporaryExists !== true) {
+        captureTempValidationFailure(
+          "second_revision_temp_exists",
+          "filesystem",
+          "ENOENT",
+          "absent"
+        );
+        fail("evidence_ledger_temporary_validation_failed");
+      }
+      let staged;
+      try {
+        staged = await adapters.readFile(temporaryPath);
+      } catch (error) {
+        captureTempValidationFailure(
+          "second_revision_temp_regular_file_validate",
+          "filesystem",
+          String(error?.code || "").toUpperCase(),
+          "unknown"
+        );
+        throw error;
+      }
+      if (!Buffer.isBuffer(staged)) {
+        captureTempValidationFailure(
+          "second_revision_temp_regular_file_validate",
+          "filesystem",
+          "MISMATCH",
+          "invalid"
+        );
+        fail("evidence_ledger_temporary_validation_failed");
+      }
+      if (staged.length !== bytes.length) {
+        captureTempValidationFailure(
+          "second_revision_temp_size_validate",
+          "integrity",
+          "SIZE_MISMATCH",
+          "mismatch"
+        );
+        fail("evidence_ledger_temporary_validation_failed");
+      }
+      if (!staged.equals(bytes) || hashBytes(staged) !== replacementSha256) {
+        captureTempValidationFailure(
+          "second_revision_temp_hash_validate",
+          "integrity",
+          "HASH_MISMATCH",
+          "mismatch"
+        );
+        fail("evidence_ledger_temporary_validation_failed");
+      }
+      let temporaryDocument;
+      try {
+        temporaryDocument = JSON.parse(staged.toString("utf8"));
+      } catch {
+        captureTempValidationFailure(
+          "second_revision_temp_parse",
+          "serialization",
+          "EINVAL",
+          "invalid"
+        );
+        fail("evidence_ledger_temporary_validation_failed");
+      }
+      if (
+        !temporaryDocument ||
+        Object.getPrototypeOf(temporaryDocument) !== Object.prototype ||
+        Object.keys(temporaryDocument).sort().join("\0") !==
+          Object.keys(JSON.parse(document)).sort().join("\0")
+      ) {
+        captureTempValidationFailure(
+          "second_revision_temp_structure_validate",
+          "serialization",
+          "MISMATCH",
+          "invalid"
+        );
+        fail("evidence_ledger_temporary_validation_failed");
+      }
+      if (temporaryDocument.revision !== nextRevision) {
+        captureTempValidationFailure(
+          "second_revision_temp_revision_validate",
+          "integrity",
+          "REVISION_MISMATCH",
+          "mismatch"
+        );
+        fail("evidence_ledger_temporary_validation_failed");
+      }
+      if (
+        temporaryDocument.runId !== identity.runId ||
+        temporaryDocument.harnessCommit !== identity.harnessCommit ||
+        temporaryDocument.productCommit !== identity.productCommit
+      ) {
+        captureTempValidationFailure(
+          "second_revision_temp_run_identity_validate",
+          "integrity",
+          "RUN_IDENTITY_MISMATCH",
+          "mismatch"
+        );
+        fail("evidence_ledger_temporary_validation_failed");
+      }
+
+      persistenceFailureStageCode =
+        "evidence_second_revision_replacement_prepare_failed";
+      const prepared = await adapters.prepareFileReplacement({
         temporaryPath,
         targetPath: layout.evidencePath,
-        expectedPreviousSha256: lastPersistedSha256
+        backupPath,
+        recoveryPath,
+        expectedPreviousSha256: lastPersistedSha256,
+        expectedReplacementSha256: replacementSha256
+      });
+      if (
+        prepared &&
+        REPLACEMENT_TRANSACTION_ID.test(String(prepared.transactionId || ""))
+      ) {
+        replacementTransactionId = prepared.transactionId;
+      }
+      exactKeys(
+        prepared,
+        ["transactionId", "hadPrevious"],
+        "evidence_ledger_replacement_prepare_result_invalid"
+      );
+      if (
+        !REPLACEMENT_TRANSACTION_ID.test(String(prepared.transactionId || "")) ||
+        prepared.hadPrevious !== (lastPersistedSha256 !== null)
+      ) {
+        fail("evidence_ledger_replacement_prepare_result_invalid");
+      }
+      replacement.explicitBackupPrepared = prepared.hadPrevious;
+
+      persistenceFailureStageCode =
+        "evidence_second_revision_atomic_replace_failed";
+      bootstrapFailureCode = "evidence_ledger_atomic_rename_failed";
+      const promoted = await adapters.replaceFileAtomic({
+        transactionId: replacementTransactionId
       });
       exactKeys(
         promoted,
@@ -450,37 +1013,233 @@ function createSanitizedEvidenceLedger(options = {}) {
       if (promoted.committed !== true || promoted.previousMatched !== true) {
         fail("evidence_ledger_atomic_replace_failed");
       }
+      replacementOccurred = true;
+      if (prepared.hadPrevious) {
+        replacement.explicitBackupValidated = true;
+        replacement.explicitBackupMatchesPreviousRevision = true;
+      }
+
+      persistenceFailureStageCode = "evidence_second_revision_reopen_failed";
       if (
         await adapters.exists(temporaryPath) ||
         !(await adapters.exists(layout.evidencePath))
       ) {
         fail("evidence_ledger_atomic_replace_unconfirmed");
       }
+      bootstrapFailureCode = "evidence_root_acl_validation_failed";
       validateSecurityProof(await adapters.inspectProtectedAcl(layout.evidencePath));
+      bootstrapFailureCode = "evidence_ledger_reopen_failed";
       const persisted = await adapters.readFile(layout.evidencePath);
+
+      persistenceFailureStageCode =
+        "evidence_second_revision_verification_failed";
       if (!Buffer.isBuffer(persisted) || !persisted.equals(bytes)) {
+        bootstrapFailureCode = "evidence_ledger_first_revision_failed";
         fail("evidence_ledger_persisted_bytes_mismatch");
       }
+      let reopenedDocument;
+      try {
+        reopenedDocument = JSON.parse(persisted.toString("utf8"));
+      } catch {
+        fail("evidence_ledger_persisted_structure_invalid");
+      }
+      if (
+        reopenedDocument.revision !== nextRevision ||
+        reopenedDocument.integritySha256 !== payloadSha256
+      ) {
+        fail("evidence_ledger_persisted_structure_invalid");
+      }
+
+      persistenceFailureStageCode = "evidence_second_revision_hash_failed";
+      const persistedSha256 = hashBytes(persisted);
+      if (persistedSha256 !== replacementSha256) {
+        fail("evidence_ledger_persisted_hash_mismatch");
+      }
+      replacement.newLedgerValidated = true;
+
+      persistenceFailureStageCode = "evidence_second_revision_finalize_failed";
+      const finalized = await adapters.finalizeFileReplacement({
+        transactionId: replacementTransactionId
+      });
+      exactKeys(
+        finalized,
+        ["finalized", "previousRevisionBackupRemoved"],
+        "evidence_ledger_replacement_finalize_result_invalid"
+      );
+      if (
+        finalized.finalized !== true ||
+        finalized.previousRevisionBackupRemoved !== prepared.hadPrevious
+      ) {
+        fail("evidence_ledger_replacement_finalize_result_invalid");
+      }
+      replacement.backupRemovedAfterValidation =
+        finalized.previousRevisionBackupRemoved;
+      replacementFinalized = true;
+      replacementTransactionId = null;
+
       state.revision = nextRevision;
-      lastPersistedSha256 = hashBytes(persisted);
+      lastPersistedSha256 = persistedSha256;
       return Object.freeze({
         code: "evidence_ledger_persisted",
         revision: nextRevision,
         evidenceSha256: lastPersistedSha256,
-        payloadSha256
+        payloadSha256,
+        replacement: Object.freeze({ ...replacement })
       });
     } catch (error) {
-      const temporaryCleaned = await cleanupTemporary(temporaryPath);
-      const code = error instanceof EvidenceLedgerFailure
-        ? error.code
-        : "evidence_ledger_persistence_failed";
+      let rollbackFailure = null;
+      if (replacementTransactionId && !replacementFinalized) {
+        replacement.rollbackRequired = true;
+        replacement.rollbackAttempted = true;
+        try {
+          const rolledBack = await adapters.rollbackFileReplacement({
+            transactionId: replacementTransactionId
+          });
+          exactKeys(
+            rolledBack,
+            [
+              "rollbackCompleted",
+              "previousLedgerRestored",
+              "failedCandidatePreserved",
+              "failedCandidateRemovedAfterRestore"
+            ],
+            "evidence_ledger_replacement_rollback_result_invalid"
+          );
+          if (
+            rolledBack.rollbackCompleted !== true ||
+            rolledBack.previousLedgerRestored !== true ||
+            typeof rolledBack.failedCandidatePreserved !== "boolean" ||
+            typeof rolledBack.failedCandidateRemovedAfterRestore !== "boolean" ||
+            (rolledBack.failedCandidateRemovedAfterRestore &&
+              !rolledBack.failedCandidatePreserved)
+          ) {
+            fail("evidence_ledger_replacement_rollback_result_invalid");
+          }
+          replacement.rollbackCompleted = true;
+          replacement.previousLedgerRestored = true;
+          replacement.failedCandidatePreserved =
+            rolledBack.failedCandidatePreserved;
+          replacement.failedCandidateRemovedAfterRestore =
+            rolledBack.failedCandidateRemovedAfterRestore;
+          replacementTransactionId = null;
+        } catch (rollbackError) {
+          rollbackFailure = rollbackError;
+          state.residues = {
+            ...state.residues,
+            evidenceRecoveryFiles: Math.max(
+              1,
+              Number(state.residues.evidenceRecoveryFiles || 0)
+            )
+          };
+        }
+      }
+      const failureState = bootstrap
+        ? null
+        : await inspectPersistenceFailureState(
+            temporaryPath,
+            backupPath,
+            recoveryPath
+          );
+      if (failureState) {
+        if (replacement.explicitBackupPrepared) {
+          replacement.explicitBackupValidated ||=
+            failureState.backupMatchesPreviousRevision;
+          replacement.explicitBackupMatchesPreviousRevision ||=
+            failureState.backupMatchesPreviousRevision;
+        }
+        replacement.failedCandidatePreserved ||=
+          failureState.recoveryFilePresent;
+        if (failureState.backupFilePresent || failureState.recoveryFilePresent) {
+          state.residues = {
+            ...state.residues,
+            evidenceRecoveryFiles: Math.max(
+              Number(state.residues.evidenceRecoveryFiles || 0),
+              Number(failureState.backupFilePresent) +
+                Number(failureState.recoveryFilePresent)
+            )
+          };
+        }
+      }
+      const cleanup = rollbackFailure
+        ? Object.freeze({ attempted: false, completed: false, error: null })
+        : await cleanupTemporary(temporaryPath);
+      const effectiveBootstrapFailureCode =
+        bootstrapFailureCode === "evidence_ledger_first_write_failed" &&
+        (error?.code === "EEXIST" || error?.systemErrorCode === "EEXIST")
+          ? "evidence_ledger_temp_create_failed"
+          : bootstrapFailureCode;
+      const stagedFailure = bootstrap
+        ? bootstrapStageFailure(error, effectiveBootstrapFailureCode)
+        : persistenceStageFailure(
+            rollbackFailure ||
+              (cleanup.attempted && !cleanup.completed ? cleanup.error : error),
+            rollbackFailure
+              ? "evidence_second_revision_rollback_failed"
+              : cleanup.attempted && !cleanup.completed
+                ? "evidence_second_revision_temp_cleanup_failed"
+                : persistenceFailureStageCode
+          );
+      const code = bootstrap
+        ? error instanceof EvidenceLedgerFailure
+          ? error.code
+          : "evidence_ledger_persistence_failed"
+        : stagedFailure.failureCode;
       persistenceFailureCode ||= code;
       state.persistenceFailureCode = persistenceFailureCode;
       state.status = "failed";
       state.primaryFailureCode ||= persistenceFailureCode;
-      throw new EvidenceLedgerFailure(
-        temporaryCleaned ? code : temporaryCleanupFailureCode
-      );
+      if (bootstrap) throw stagedFailure;
+      const diagnostic = createPersistenceDiagnostic({
+        failure: stagedFailure,
+        revisionNumber: nextRevision,
+        previousLedgerPreserved: failureState.previousLedgerPreserved,
+        temporaryFilePresent: failureState.temporaryFilePresent,
+        cleanupAttempted: cleanup.attempted,
+        cleanupCompleted: cleanup.completed,
+        ...replacement
+      });
+      const observedTempValidationFailure =
+        tempValidationFailure ||
+        error?.tempValidationFailure ||
+        (persistenceFailureStageCode ===
+        "evidence_second_revision_replacement_prepare_failed"
+          ? createTempValidationFailureMetadata({
+              tempValidationStage:
+                "second_revision_temp_unknown_validation_stage",
+              sanitizedFailureClass: "unknown",
+              sanitizedFailureCode: "UNKNOWN",
+              actualConditionClass: "unknown"
+            })
+          : null);
+      let tempValidationDiagnostic = null;
+      if (
+        nextRevision === 2 &&
+        replacementOccurred === false &&
+        replacement.explicitBackupPrepared === false &&
+        replacement.rollbackRequired === false &&
+        replacementTransactionId === null &&
+        observedTempValidationFailure
+      ) {
+        try {
+          tempValidationDiagnostic = createTempValidationDiagnostic({
+            ...observedTempValidationFailure,
+            previousLedgerPreserved:
+              failureState.previousLedgerPreserved,
+            temporaryFilePresent: failureState.temporaryFilePresent,
+            cleanupAttempted: cleanup.attempted,
+            cleanupCompleted: cleanup.completed
+          });
+        } catch {
+          tempValidationDiagnostic = null;
+        }
+      }
+      throw new EvidenceLedgerFailure(code, {
+        persistenceDiagnostic: diagnostic,
+        tempValidationDiagnostic,
+        fileReplaceDiagnostic: stagedFailure.fileReplaceDiagnostic,
+        fileReplaceArgumentDiagnostic:
+          stagedFailure.fileReplaceArgumentDiagnostic
+      });
     }
   }
 
@@ -509,6 +1268,7 @@ function createSanitizedEvidenceLedger(options = {}) {
     return mutate(async () => {
       if (initialized) fail("evidence_ledger_already_initialized");
       applyEvidence({ metrics, residues });
+      let bootstrapFailureCode = "evidence_root_create_failed";
       try {
         if (
           await adapters.prepareProtectedDirectory({
@@ -518,6 +1278,7 @@ function createSanitizedEvidenceLedger(options = {}) {
         ) {
           fail("evidence_ledger_root_preparation_failed");
         }
+        bootstrapFailureCode = "evidence_root_reparse_detected";
         if (
           await adapters.assertNoReparseComponents({
             controlledRoot: layout.controlledRoot,
@@ -529,20 +1290,37 @@ function createSanitizedEvidenceLedger(options = {}) {
         ) {
           fail("evidence_ledger_reparse_refused");
         }
+        bootstrapFailureCode = "evidence_root_acl_validation_failed";
         validateSecurityProof(await adapters.inspectProtectedAcl(layout.evidenceRoot));
         tick();
-        const result = await persist();
+        bootstrapFailureCode = "evidence_ledger_first_revision_failed";
+        const result = await persist({ bootstrap: true });
         initialized = true;
         return result;
       } catch (error) {
-        const code = error instanceof EvidenceLedgerFailure
-          ? error.code
-          : "evidence_ledger_initialization_failed";
+        const failure = bootstrapStageFailure(error, bootstrapFailureCode);
+        let cleanupCompleted = false;
+        try {
+          cleanupCompleted = await adapters.cleanupFailedInitialization({
+            controlledRoot: layout.controlledRoot,
+            evidenceRoot: layout.evidenceRoot,
+            cleanupRoot: layout.cleanupRoot
+          }) === true;
+        } catch {
+          cleanupCompleted = false;
+        }
+        const diagnostic = createBootstrapDiagnostic({
+          failure,
+          runId: identity.runId,
+          cleanupAttempted: true,
+          cleanupCompleted
+        });
+        const code = failure.failureCode;
         persistenceFailureCode ||= code;
         state.persistenceFailureCode = persistenceFailureCode;
         state.primaryFailureCode ||= persistenceFailureCode;
         state.status = "failed";
-        throw new EvidenceLedgerFailure(code);
+        throw new EvidenceLedgerFailure(code, { bootstrapDiagnostic: diagnostic });
       }
     });
   }
