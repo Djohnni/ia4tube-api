@@ -472,8 +472,14 @@ function poolOptions({ host, port, database, login, password, max, applicationNa
   };
 }
 
-function instrumentedPoolClass(Pool, metricsRegistry) {
-  if (typeof Pool !== "function" || !metricsRegistry) fail("linux_pool_instrumentation_invalid");
+function instrumentedPoolClass(Pool, metricsRegistry, trackedPools = null) {
+  if (
+    typeof Pool !== "function" || !metricsRegistry ||
+    (trackedPools !== null && (
+      typeof trackedPools.add !== "function" ||
+      typeof trackedPools.delete !== "function"
+    ))
+  ) fail("linux_pool_instrumentation_invalid");
   return class LinuxInstrumentedPool extends Pool {
     constructor(configuration = {}) {
       super(configuration);
@@ -485,12 +491,155 @@ function instrumentedPoolClass(Pool, metricsRegistry) {
           : applicationName.includes("provisioner")
             ? "provisioning"
             : "administration";
+      const lifecycle = {
+        state: "active",
+        callbacks: null,
+        endPromise: null,
+        endCallbacks: [],
+        baseCallbackArgs: null,
+        settled: false,
+        settledCallbackArgs: null,
+        callbackRejectionObserved: false,
+        unregisterAttempted: false,
+        trackedDeleteAttempted: false
+      };
+      const permitsMetrics = () => (
+        lifecycle.state === "active" || lifecycle.state === "draining"
+      );
+      const callbacks = Object.freeze({
+        connect: () => {
+          if (permitsMetrics()) metricsRegistry.observe(this, this);
+        },
+        acquire: () => {
+          if (permitsMetrics()) metricsRegistry.recordAcquisition(this, this);
+        },
+        remove: () => {
+          if (permitsMetrics()) metricsRegistry.observe(this, this);
+        }
+      });
+      lifecycle.callbacks = callbacks;
+      Object.defineProperty(this, "linuxMetricsLifecycle", {
+        value: lifecycle,
+        enumerable: false,
+        configurable: false,
+        writable: false
+      });
       metricsRegistry.register(this, { category, configuredMax: Number(configuration.max) });
-      const observe = () => metricsRegistry.observe(this, this);
-      this.on("connect", observe);
-      this.on("acquire", () => metricsRegistry.recordAcquisition(this, this));
-      this.on("remove", observe);
-      observe();
+      this.on("connect", callbacks.connect);
+      this.on("acquire", callbacks.acquire);
+      this.on("remove", callbacks.remove);
+      metricsRegistry.observe(this, this);
+      trackedPools?.add(this);
+    }
+
+    end(...args) {
+      const lifecycle = this.linuxMetricsLifecycle;
+      const baseArgs = [...args];
+      const endCallback = typeof baseArgs[baseArgs.length - 1] === "function"
+        ? baseArgs.pop()
+        : null;
+      if (endCallback) {
+        if (lifecycle.settled) {
+          endCallback(...lifecycle.settledCallbackArgs);
+        } else {
+          lifecycle.endCallbacks.push(endCallback);
+        }
+        if (lifecycle.endPromise && !lifecycle.callbackRejectionObserved) {
+          lifecycle.callbackRejectionObserved = true;
+          void lifecycle.endPromise.then(undefined, () => undefined);
+        }
+      }
+      if (lifecycle.endPromise) return lifecycle.endPromise;
+      if (lifecycle.state !== "active") fail("linux_pool_lifecycle_invalid");
+      lifecycle.state = "draining";
+
+      lifecycle.endPromise = Promise.resolve().then(async () => {
+        let result;
+        let primaryError;
+        let primaryFailed = false;
+        let teardownError;
+        let teardownFailed = false;
+        const captureTeardownFailure = (action) => {
+          try {
+            action();
+          } catch (error) {
+            if (!teardownFailed) {
+              teardownError = error;
+              teardownFailed = true;
+            }
+          }
+        };
+
+        try {
+          if (endCallback) {
+            result = await new Promise((resolve, reject) => {
+              super.end(...baseArgs, (...callbackArgs) => {
+                lifecycle.baseCallbackArgs = callbackArgs;
+                if (callbackArgs[0]) reject(callbackArgs[0]);
+                else resolve(callbackArgs[1]);
+              });
+            });
+          } else {
+            result = await super.end(...baseArgs);
+          }
+        } catch (error) {
+          primaryError = error;
+          primaryFailed = true;
+        }
+
+        captureTeardownFailure(() => metricsRegistry.observe(this, this));
+        lifecycle.state = "detached";
+        let removeListener = null;
+        captureTeardownFailure(() => {
+          const method = typeof this.off === "function" ? this.off : this.removeListener;
+          if (typeof method !== "function") fail("linux_pool_listener_detach_invalid");
+          removeListener = method.bind(this);
+        });
+        if (removeListener) {
+          for (const eventName of ["connect", "acquire", "remove"]) {
+            captureTeardownFailure(() => {
+              removeListener(eventName, lifecycle.callbacks[eventName]);
+            });
+          }
+        }
+        if (!lifecycle.unregisterAttempted) {
+          lifecycle.unregisterAttempted = true;
+          captureTeardownFailure(() => metricsRegistry.unregister(this));
+        }
+        if (trackedPools !== null && !lifecycle.trackedDeleteAttempted) {
+          lifecycle.trackedDeleteAttempted = true;
+          captureTeardownFailure(() => trackedPools.delete(this));
+        }
+        lifecycle.state = "closed";
+
+        const completionFailed = primaryFailed || teardownFailed;
+        const completionError = primaryFailed ? primaryError : teardownError;
+        lifecycle.settledCallbackArgs = completionFailed
+          ? [completionError]
+          : lifecycle.baseCallbackArgs || [];
+        lifecycle.settled = true;
+        let callbackError;
+        let callbackFailed = false;
+        for (const callback of lifecycle.endCallbacks.splice(0)) {
+          try {
+            callback(...lifecycle.settledCallbackArgs);
+          } catch (error) {
+            if (!callbackFailed) {
+              callbackError = error;
+              callbackFailed = true;
+            }
+          }
+        }
+
+        if (completionFailed) throw completionError;
+        if (callbackFailed) throw callbackError;
+        return result;
+      });
+      if (endCallback && !lifecycle.callbackRejectionObserved) {
+        lifecycle.callbackRejectionObserved = true;
+        void lifecycle.endPromise.then(undefined, () => undefined);
+      }
+      return lifecycle.endPromise;
     }
   };
 }
@@ -562,27 +711,7 @@ function createLinuxPostgres(options = {}) {
     !Number.isSafeInteger(runnerGid) || runnerGid < 0
   ) fail("linux_postgres_dependencies_invalid");
   const trackedPools = new Set();
-  const MetricsPool = instrumentedPoolClass(PoolClass, metricsRegistry);
-  class InstrumentedPool extends MetricsPool {
-    constructor(configuration = {}) {
-      super(configuration);
-      trackedPools.add(this);
-      this.linuxMetricsRegistered = true;
-    }
-
-    async end(...args) {
-      try {
-        return await super.end(...args);
-      } finally {
-        if (this.linuxMetricsRegistered) {
-          try { metricsRegistry.observe(this, this); } catch {}
-          metricsRegistry.unregister(this);
-          this.linuxMetricsRegistered = false;
-        }
-        trackedPools.delete(this);
-      }
-    }
-  }
+  const InstrumentedPool = instrumentedPoolClass(PoolClass, metricsRegistry, trackedPools);
   const materials = Object.freeze({
     admin: generatedSecret(options.randomBytes),
     provisioner: generatedSecret(options.randomBytes),
@@ -1017,7 +1146,6 @@ function createLinuxPostgres(options = {}) {
       fail("linux_postgres_host_direct_connection_failed", diagnostic);
     } finally {
       await admin.end();
-      trackedPools.delete(admin);
     }
     if (!diagnostic.hostListenerAbsent || !diagnostic.hostDirectConnectionPassed) {
       fail("linux_postgres_internal_bridge_direct_invalid", diagnostic);
@@ -1150,9 +1278,8 @@ function createLinuxPostgres(options = {}) {
         })
       });
     } finally {
-      if (provisioner) { await provisioner.end(); trackedPools.delete(provisioner); }
+      if (provisioner) await provisioner.end();
       await admin.end();
-      trackedPools.delete(admin);
     }
   }
 
@@ -1245,9 +1372,17 @@ function createLinuxPostgres(options = {}) {
   }
 
   async function cleanup() {
+    let poolCloseError;
+    let poolCloseFailed = false;
     for (const pool of [...trackedPools]) {
-      try { await pool.end(); } catch {}
-      trackedPools.delete(pool);
+      try {
+        await pool.end();
+      } catch (error) {
+        if (!poolCloseFailed) {
+          poolCloseError = error;
+          poolCloseFailed = true;
+        }
+      }
     }
     let commandFailures = 0;
     const invoke = async (args, extra = {}) => {
@@ -1454,15 +1589,18 @@ function createLinuxPostgres(options = {}) {
       volumeRemoved: volumeResiduals === 0,
       networkRemoved: networkResiduals === 0,
       syntheticCredentialMaterialRemoved: !fs.existsSync(passwordFile),
-      cleanupCompleted: commandFailures === 0 && containerResiduals === 0 && volumeResiduals === 0 && networkResiduals === 0 && listeners.length === 0 && !fs.existsSync(runRoot) && identityMarkerResiduals === 0
+      cleanupCompleted: commandFailures === 0 && containerResiduals === 0 && volumeResiduals === 0 && networkResiduals === 0 && listeners.length === 0 && !fs.existsSync(runRoot) && identityMarkerResiduals === 0 && trackedPools.size === 0
     });
+    if (result.cleanupCompleted) {
+      started = false;
+      containerId = "";
+      networkId = "";
+      volumeCreated = false;
+      databaseHost = "";
+      port = 0;
+    }
+    if (poolCloseFailed) throw poolCloseError;
     if (!result.cleanupCompleted) fail("linux_postgres_cleanup_incomplete");
-    started = false;
-    containerId = "";
-    networkId = "";
-    volumeCreated = false;
-    databaseHost = "";
-    port = 0;
     return result;
   }
 
@@ -1478,6 +1616,7 @@ function createLinuxPostgres(options = {}) {
     get port() { return port; },
     get runRoot() { return runRoot; },
     get workDirectory() { return workDirectory; },
+    get trackedPoolCount() { return trackedPools.size; },
     makePool,
     orphanSessionCount,
     scanDataDirectoryMarkers,

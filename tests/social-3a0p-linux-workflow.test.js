@@ -8,16 +8,17 @@ const test = require("node:test");
 const REPOSITORY_ROOT = path.resolve(__dirname, "..");
 const WORKFLOW_RELATIVE_PATH = ".github/workflows/social-3a0p-linux-physical-gates.yml";
 const WORKFLOW_PATH = path.join(REPOSITORY_ROOT, ...WORKFLOW_RELATIVE_PATH.split("/"));
-const BRANCH = "social/checkpoint-3a0p-linux-physical-gates-20260807";
-const PARENT = "88ff0ea427e6f321e8026910d018cd37e1e2687e";
-const MESSAGE = "[run-social-3a0p-linux-gate] use isolated internal network without host publishing";
+const BRANCH = "social/checkpoint-3a0p-linux-pool-lifecycle-20260808";
+const PARENT = "68819e49d8120aa35afe864848404444b0a40ad7";
+const ZERO_SHA = "0000000000000000000000000000000000000000";
+const MESSAGE = "[run-social-3a0p-linux-gate] fix pool metrics shutdown lifecycle";
 const JOB_IF = [
   "github.event_name == 'push'",
   `github.ref == 'refs/heads/${BRANCH}'`,
-  "github.event.created == false",
+  "github.event.created == true",
   "github.event.deleted == false",
   "github.event.forced == false",
-  `github.event.before == '${PARENT}'`,
+  `github.event.before == '${ZERO_SHA}'`,
   `github.event.head_commit.message == '${MESSAGE}'`,
   "github.run_attempt == 1"
 ].join(" && ");
@@ -47,7 +48,7 @@ test("Linux gate is the repository's sole workflow and is strict JSON", () => {
   assert.doesNotThrow(() => JSON.parse(fs.readFileSync(WORKFLOW_PATH, "utf8")));
 });
 
-test("workflow triggers only the exact authorized third push", () => {
+test("workflow triggers only the exact authorized new-branch creation push", () => {
   const { workflow } = readWorkflow();
   assert.deepEqual(workflow.on, { push: { branches: [BRANCH] } });
   assert.deepEqual(workflow.permissions, { contents: "read" });
@@ -70,35 +71,47 @@ test("workflow triggers only the exact authorized third push", () => {
   assert.ok(guard.run.includes('test "$(git log -1 --pretty=%B)" = "$SOCIAL_3A0P_AUTHORIZED_MESSAGE"'));
   assert.ok(guard.run.includes('git diff --quiet "$SOCIAL_3A0P_PRODUCT_COMMIT" HEAD -- src db/migrations migrations server.js package.json package-lock.json'));
   assert.ok(guard.run.includes('git diff --name-only "$SOCIAL_3A0P_AUTHORIZED_PARENT" HEAD'));
+  assert.ok(guard.run.includes("scripts/social-3a0p-linux-postgres.js"));
+  assert.ok(guard.run.includes("tests/social-3a0p-linux-postgres.test.js"));
+  assert.ok(guard.run.includes("tests/social-3a0p-linux-workflow.test.js"));
+  assert.equal(guard.run.includes("scripts/social-3a0p-linux-*"), false);
+  assert.equal(guard.run.includes("tests/social-3a0p-linux-*"), false);
+  assert.equal(guard.run.includes("docs/social-3a0p-linux-*"), false);
   assert.equal(guard.run.includes("social-3a0p-local-scope"), false);
 });
 
-test("third-push contract refuses creation, wrong parent, wrong message, and rerun", () => {
+test("creation-push contract refuses wrong branch, parent, message, before, creation flag, and rerun", () => {
   const authorized = Object.freeze({
     eventName: "push",
     ref: `refs/heads/${BRANCH}`,
-    created: false,
+    parent: PARENT,
+    created: true,
     deleted: false,
     forced: false,
-    before: PARENT,
+    before: ZERO_SHA,
     message: MESSAGE,
     runAttempt: 1
   });
   const accepted = (event) => (
     event.eventName === "push" &&
     event.ref === `refs/heads/${BRANCH}` &&
-    event.created === false &&
+    event.parent === PARENT &&
+    event.created === true &&
     event.deleted === false &&
     event.forced === false &&
-    event.before === PARENT &&
+    event.before === ZERO_SHA &&
     event.message === MESSAGE &&
     event.runAttempt === 1
   );
   assert.equal(accepted(authorized), true);
   for (const mutation of [
-    { created: true },
-    { before: "d80d351c599444dfca372db6071bda757e16dd64" },
-    { message: "[run-social-3a0p-linux-gate] use verified structured loopback inspection" },
+    { ref: "refs/heads/social/checkpoint-3a0p-linux-physical-gates-20260807" },
+    { parent: "88ff0ea427e6f321e8026910d018cd37e1e2687e" },
+    { before: PARENT },
+    { message: "[run-social-3a0p-linux-gate] use isolated internal network without host publishing" },
+    { created: false },
+    { deleted: true },
+    { forced: true },
     { runAttempt: 2 }
   ]) {
     assert.equal(accepted({ ...authorized, ...mutation }), false);

@@ -17,9 +17,13 @@ const {
   inspectContainerListing,
   inspectInternalContainer,
   inspectInternalNetwork,
+  instrumentedPoolClass,
   POSTGRES_CONNECTIVITY_MODE,
   safeRunId
 } = require("../scripts/social-3a0p-linux-postgres");
+const {
+  createPoolMetricsRegistry
+} = require("../scripts/social-3a0p-local-runtime-evidence-metrics");
 
 const CONTAINER_ID = "a".repeat(64);
 const NETWORK_ID = "b".repeat(64);
@@ -132,6 +136,374 @@ function metrics() {
     recordAcquisition() {}
   };
 }
+
+class TrackedPoolSet extends Set {
+  constructor(events = []) {
+    super();
+    this.events = events;
+    this.addCalls = 0;
+    this.deleteCalls = 0;
+  }
+
+  add(pool) {
+    this.addCalls += 1;
+    this.events.push({ type: "tracked-add", pool });
+    return super.add(pool);
+  }
+
+  delete(pool) {
+    this.deleteCalls += 1;
+    this.events.push({ type: "tracked-delete", pool });
+    return super.delete(pool);
+  }
+}
+
+test("pool metrics lifecycle observes active and draining events, then detaches exact callbacks once", async () => {
+  const events = [];
+  const trackedPools = new TrackedPoolSet(events);
+  let registered = false;
+  let finishBaseEnd;
+  const registry = {
+    register(pool) {
+      assert.equal(registered, false);
+      registered = true;
+      events.push({ type: "register", pool });
+    },
+    observe(pool) {
+      assert.equal(registered, true);
+      events.push({
+        type: "observe",
+        state: pool.linuxMetricsLifecycle.state,
+        total: pool.totalCount
+      });
+    },
+    recordAcquisition(pool) {
+      assert.equal(registered, true);
+      events.push({ type: "acquire", state: pool.linuxMetricsLifecycle.state });
+    },
+    unregister(pool) {
+      assert.equal(registered, true);
+      assert.equal(pool.listenerCount("connect"), 0);
+      assert.equal(pool.listenerCount("acquire"), 0);
+      assert.equal(pool.listenerCount("remove"), 0);
+      events.push({ type: "unregister", state: pool.linuxMetricsLifecycle.state });
+      registered = false;
+    }
+  };
+  class ControlledPool extends FakePool {
+    end() {
+      this.baseEndCalls = (this.baseEndCalls || 0) + 1;
+      events.push({ type: "super-end", state: this.linuxMetricsLifecycle.state });
+      return new Promise((resolve) => { finishBaseEnd = resolve; });
+    }
+
+    off(eventName, callback) {
+      events.push({
+        type: `off-${eventName}`,
+        exact: callback === this.linuxMetricsLifecycle.callbacks[eventName],
+        state: this.linuxMetricsLifecycle.state
+      });
+      return super.off(eventName, callback);
+    }
+  }
+  const InstrumentedPool = instrumentedPoolClass(ControlledPool, registry, trackedPools);
+  const pool = new InstrumentedPool({ max: 3, application_name: "lifecycle-runtime" });
+  const callbacks = pool.linuxMetricsLifecycle.callbacks;
+
+  assert.equal(pool.linuxMetricsLifecycle.state, "active");
+  assert.strictEqual(pool.listeners("connect")[0], callbacks.connect);
+  assert.strictEqual(pool.listeners("acquire")[0], callbacks.acquire);
+  assert.strictEqual(pool.listeners("remove")[0], callbacks.remove);
+  assert.equal(events.filter((event) => event.type === "observe").length, 1);
+  assert.equal(events.filter((event) => event.type === "acquire").length, 0);
+  pool.totalCount = 1;
+  pool.emit("connect");
+  assert.equal(events.filter((event) => event.type === "observe").length, 2);
+  pool.emit("acquire");
+  assert.equal(events.filter((event) => event.type === "acquire").length, 1);
+  pool.emit("remove");
+  assert.equal(events.filter((event) => event.type === "observe").length, 3);
+
+  const firstEnd = pool.end();
+  const concurrentEnd = pool.end();
+  assert.strictEqual(concurrentEnd, firstEnd);
+  assert.equal(pool.linuxMetricsLifecycle.state, "draining");
+  await Promise.resolve();
+  assert.equal(pool.baseEndCalls, 1);
+  pool.totalCount = 2;
+  pool.emit("remove");
+  assert.equal(events.filter((event) => event.type === "observe").length, 4);
+  assert.equal(events.filter((event) => event.type === "observe").at(-1).state, "draining");
+  pool.totalCount = 0;
+  finishBaseEnd("base-ended");
+  assert.equal(await firstEnd, "base-ended");
+
+  assert.equal(pool.linuxMetricsLifecycle.state, "closed");
+  assert.equal(trackedPools.addCalls, 1);
+  assert.equal(trackedPools.deleteCalls, 1);
+  assert.equal(trackedPools.size, 0);
+  assert.equal(events.filter((event) => event.type === "unregister").length, 1);
+  assert.deepEqual(
+    events.filter((event) => event.type.startsWith("off-")).map((event) => [event.type, event.exact, event.state]),
+    [
+      ["off-connect", true, "detached"],
+      ["off-acquire", true, "detached"],
+      ["off-remove", true, "detached"]
+    ]
+  );
+  const finalObserveIndex = events.findLastIndex((event) => event.type === "observe");
+  const firstOffIndex = events.findIndex((event) => event.type === "off-connect");
+  const unregisterIndex = events.findIndex((event) => event.type === "unregister");
+  const trackedDeleteIndex = events.findIndex((event) => event.type === "tracked-delete");
+  assert.equal(events[finalObserveIndex].state, "draining");
+  assert.equal(events[finalObserveIndex].total, 0);
+  assert.ok(finalObserveIndex < firstOffIndex);
+  assert.ok(firstOffIndex < unregisterIndex);
+  assert.ok(unregisterIndex < trackedDeleteIndex);
+
+  const metricCallsBeforeLateCallbacks = events.filter((event) => (
+    event.type === "observe" || event.type === "acquire"
+  )).length;
+  assert.doesNotThrow(() => callbacks.remove());
+  assert.doesNotThrow(() => callbacks.connect());
+  assert.doesNotThrow(() => callbacks.acquire());
+  assert.equal(events.filter((event) => (
+    event.type === "observe" || event.type === "acquire"
+  )).length, metricCallsBeforeLateCallbacks);
+  assert.strictEqual(pool.end(), firstEnd);
+  assert.equal(pool.baseEndCalls, 1);
+  assert.equal(trackedPools.deleteCalls, 1);
+});
+
+test("callback pool end waits for its callback, shares one close, and reports completion after detach", async () => {
+  const events = [];
+  const uncaught = [];
+  const unhandled = [];
+  const onUncaught = (error) => { uncaught.push(error); };
+  const onUnhandled = (error) => { unhandled.push(error); };
+  process.on("uncaughtException", onUncaught);
+  process.on("unhandledRejection", onUnhandled);
+  try {
+    let finishBaseEnd;
+    let registered = false;
+    const trackedPools = new TrackedPoolSet(events);
+    const registry = {
+      register() { registered = true; },
+      observe(pool) {
+        assert.equal(registered, true);
+        events.push({ type: "observe", state: pool.linuxMetricsLifecycle.state });
+      },
+      recordAcquisition() {},
+      unregister(pool) {
+        assert.equal(pool.linuxMetricsLifecycle.state, "detached");
+        registered = false;
+        events.push({ type: "unregister" });
+      }
+    };
+    class CallbackPool extends FakePool {
+      end(callback) {
+        this.baseEndCalls = (this.baseEndCalls || 0) + 1;
+        this.emit("remove");
+        finishBaseEnd = () => callback(null, "callback-ended");
+        return undefined;
+      }
+    }
+    const InstrumentedPool = instrumentedPoolClass(CallbackPool, registry, trackedPools);
+    const pool = new InstrumentedPool({ max: 1, application_name: "administration" });
+    const callbackResults = [];
+    const firstEnd = pool.end((...callbackArgs) => {
+      callbackResults.push({ callbackArgs, state: pool.linuxMetricsLifecycle.state });
+    });
+    const concurrentEnd = pool.end((...callbackArgs) => {
+      callbackResults.push({ callbackArgs, state: pool.linuxMetricsLifecycle.state });
+    });
+    assert.strictEqual(concurrentEnd, firstEnd);
+    await Promise.resolve();
+    assert.equal(pool.baseEndCalls, 1);
+    assert.equal(pool.linuxMetricsLifecycle.state, "draining");
+    assert.equal(events.filter((event) => event.type === "observe").at(-1).state, "draining");
+    assert.deepEqual(callbackResults, []);
+    finishBaseEnd();
+    assert.equal(await firstEnd, "callback-ended");
+    assert.deepEqual(callbackResults, [
+      { callbackArgs: [null, "callback-ended"], state: "closed" },
+      { callbackArgs: [null, "callback-ended"], state: "closed" }
+    ]);
+    assert.equal(events.filter((event) => event.type === "unregister").length, 1);
+    assert.equal(trackedPools.deleteCalls, 1);
+    assert.equal(trackedPools.size, 0);
+    const postCloseResults = [];
+    assert.strictEqual(pool.end((...callbackArgs) => postCloseResults.push(callbackArgs)), firstEnd);
+    assert.deepEqual(postCloseResults, [[null, "callback-ended"]]);
+    await Promise.resolve();
+    assert.deepEqual(uncaught, []);
+    assert.deepEqual(unhandled, []);
+  } finally {
+    process.removeListener("uncaughtException", onUncaught);
+    process.removeListener("unhandledRejection", onUnhandled);
+  }
+});
+
+test("callback pool end preserves its base error over final metrics failure", async () => {
+  const baseError = new Error("callback_pool_end_failed");
+  const finalMetricsError = new Error("callback_final_metrics_failed");
+  const trackedPools = new TrackedPoolSet();
+  let finishBaseEnd;
+  let observeCalls = 0;
+  const registry = {
+    register() {},
+    observe() {
+      observeCalls += 1;
+      if (observeCalls > 2) throw finalMetricsError;
+    },
+    recordAcquisition() {},
+    unregister() {}
+  };
+  class CallbackFailingPool extends FakePool {
+    end(callback) {
+      this.emit("remove");
+      finishBaseEnd = () => callback(baseError);
+    }
+  }
+  const InstrumentedPool = instrumentedPoolClass(CallbackFailingPool, registry, trackedPools);
+  const pool = new InstrumentedPool({ max: 1, application_name: "administration" });
+  let reportedError = null;
+  const endPromise = pool.end((error) => { reportedError = error; });
+  await Promise.resolve();
+  finishBaseEnd();
+  await assert.rejects(endPromise, (error) => error === baseError);
+  assert.strictEqual(reportedError, baseError);
+  assert.equal(pool.linuxMetricsLifecycle.state, "closed");
+  assert.equal(trackedPools.deleteCalls, 1);
+});
+
+test("callback-only end reports its exact error without an unhandled rejection", async () => {
+  const baseError = new Error("callback_only_pool_end_failed");
+  const uncaught = [];
+  const unhandled = [];
+  const onUncaught = (error) => { uncaught.push(error); };
+  const onUnhandled = (error) => { unhandled.push(error); };
+  process.on("uncaughtException", onUncaught);
+  process.on("unhandledRejection", onUnhandled);
+  try {
+    let finishBaseEnd;
+    class CallbackOnlyPool extends FakePool {
+      end(callback) {
+        finishBaseEnd = () => callback(baseError);
+      }
+    }
+    const trackedPools = new TrackedPoolSet();
+    const InstrumentedPool = instrumentedPoolClass(CallbackOnlyPool, metrics(), trackedPools);
+    const pool = new InstrumentedPool({ max: 1, application_name: "administration" });
+    let reportedError = null;
+    let callbackState = null;
+    pool.end((error) => {
+      reportedError = error;
+      callbackState = pool.linuxMetricsLifecycle.state;
+    });
+    await Promise.resolve();
+    finishBaseEnd();
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.strictEqual(reportedError, baseError);
+    assert.equal(callbackState, "closed");
+    assert.deepEqual(uncaught, []);
+    assert.deepEqual(unhandled, []);
+    assert.equal(trackedPools.deleteCalls, 1);
+    assert.equal(trackedPools.size, 0);
+  } finally {
+    process.removeListener("uncaughtException", onUncaught);
+    process.removeListener("unhandledRejection", onUnhandled);
+  }
+});
+
+test("pool metrics lifecycle preserves the original end failure while completing teardown", async () => {
+  const primaryError = new Error("base_pool_end_failed");
+  const finalMetricsError = new Error("final_metrics_failed");
+  const trackedPools = new TrackedPoolSet();
+  let observeCalls = 0;
+  let unregisterCalls = 0;
+  const registry = {
+    register() {},
+    observe() {
+      observeCalls += 1;
+      if (observeCalls > 1) throw finalMetricsError;
+    },
+    recordAcquisition() {},
+    unregister() { unregisterCalls += 1; }
+  };
+  class FailingPool extends FakePool {
+    end() { throw primaryError; }
+  }
+  const InstrumentedPool = instrumentedPoolClass(FailingPool, registry, trackedPools);
+  const pool = new InstrumentedPool({ max: 1, application_name: "administration" });
+  const firstEnd = pool.end();
+  assert.strictEqual(pool.end(), firstEnd);
+  await assert.rejects(firstEnd, (error) => error === primaryError);
+  assert.equal(pool.linuxMetricsLifecycle.state, "closed");
+  assert.equal(unregisterCalls, 1);
+  assert.equal(trackedPools.deleteCalls, 1);
+  assert.equal(trackedPools.size, 0);
+  assert.equal(pool.listenerCount("connect"), 0);
+  assert.equal(pool.listenerCount("acquire"), 0);
+  assert.equal(pool.listenerCount("remove"), 0);
+});
+
+test("active and final metric failures remain real while teardown still closes the pool", async () => {
+  const activeMetricsError = new Error("active_metrics_failed");
+  const finalMetricsError = new Error("final_metrics_failed");
+  const trackedPools = new TrackedPoolSet();
+  let failActive = false;
+  let failFinal = false;
+  let unregisterCalls = 0;
+  const registry = {
+    register() {},
+    observe(pool) {
+      if (pool.linuxMetricsLifecycle.state === "active" && failActive) throw activeMetricsError;
+      if (pool.linuxMetricsLifecycle.state === "draining" && failFinal) throw finalMetricsError;
+    },
+    recordAcquisition() {},
+    unregister() { unregisterCalls += 1; }
+  };
+  const InstrumentedPool = instrumentedPoolClass(FakePool, registry, trackedPools);
+  const pool = new InstrumentedPool({ max: 1, application_name: "administration" });
+  failActive = true;
+  assert.throws(() => pool.emit("connect"), (error) => error === activeMetricsError);
+  assert.equal(pool.linuxMetricsLifecycle.state, "active");
+  failActive = false;
+  failFinal = true;
+  await assert.rejects(pool.end(), (error) => error === finalMetricsError);
+  assert.equal(pool.linuxMetricsLifecycle.state, "closed");
+  assert.equal(unregisterCalls, 1);
+  assert.equal(trackedPools.deleteCalls, 1);
+});
+
+test("real metrics registry stays fail-closed and retains peaks after pool shutdown", async () => {
+  const registry = createPoolMetricsRegistry();
+  const trackedPools = new TrackedPoolSet();
+  const InstrumentedPool = instrumentedPoolClass(FakePool, registry, trackedPools);
+  const pool = new InstrumentedPool({ max: 3, application_name: "lifecycle-runtime" });
+  pool.totalCount = 3;
+  pool.idleCount = 1;
+  pool.waitingCount = 2;
+  pool.emit("acquire");
+  pool.idleCount = 0;
+  pool.waitingCount = 1;
+  pool.emit("connect");
+  await pool.end();
+
+  const snapshot = registry.snapshot();
+  assert.equal(snapshot.counts.poolConfiguredMaxGlobal, 3);
+  assert.equal(snapshot.counts.poolAcquisitionsGlobal, 1);
+  assert.equal(snapshot.metrics.poolPeakTotalGlobal, 3);
+  assert.equal(snapshot.metrics.poolPeakActiveGlobal, 3);
+  assert.equal(snapshot.metrics.poolPeakIdleGlobal, 1);
+  assert.equal(snapshot.metrics.poolPeakWaitingGlobal, 2);
+  assert.equal(snapshot.checks.poolConfiguredMaxRespected, true);
+  assert.throws(
+    () => registry.observe(pool, pool),
+    { code: "harness_pool_metrics_pool_unregistered" }
+  );
+});
 
 test("official PostgreSQL pin is complete and immutable for linux/amd64", () => {
   assert.equal(
@@ -363,19 +735,26 @@ test("container start uses only the internal bridge and connects directly withou
   class OrderedPool extends FakePool {
     constructor(configuration) {
       super(configuration);
-      calls.push({ executable: "pool-create", args: [], configuration: { ...configuration }, environment: {} });
+      calls.push({ executable: "pool-create", args: [], configuration: { ...configuration }, environment: {}, pool: this });
     }
 
     async query(...args) {
       calls.push({ executable: "pool", args: ["query", ...args], environment: {} });
       return super.query(...args);
     }
+
+    async end() {
+      this.savedRemoveCallback = this.listeners("remove")[0];
+      this.emit("remove");
+      return super.end();
+    }
   }
+  const poolMetrics = createPoolMetricsRegistry();
   const postgres = createLinuxPostgres({
     runnerTemp: root,
     runId: "linux-314159",
     PoolClass: OrderedPool,
-    metricsRegistry: metrics(),
+    metricsRegistry: poolMetrics,
     runnerUid: 1001,
     runnerGid: 127,
     runCommand,
@@ -397,6 +776,7 @@ test("container start uses only the internal bridge and connects directly withou
     assert.equal(result.internalBridgeDirectConnectionProved, true);
     assert.equal(result.hostDirectContainerIpConnectionPassed, true);
     assert.equal(result.hostListenerAbsent, true);
+    assert.equal(postgres.trackedPoolCount, 0);
     assert.equal(JSON.stringify(result).includes(PRIVATE_HOST), false);
     const network = calls.find((call) => call.args[0] === "network" && call.args[1] === "create");
     const start = calls.find((call) => call.args[0] === "run" && call.args.includes("--detach"));
@@ -425,6 +805,12 @@ test("container start uses only the internal bridge and connects directly withou
     assert.equal(directPool.configuration.host, PRIVATE_HOST);
     assert.equal(directPool.configuration.port, 5432);
     assert.equal(directPool.configuration.ssl, false);
+    assert.equal(directPool.pool.linuxMetricsLifecycle.state, "closed");
+    assert.doesNotThrow(() => directPool.pool.savedRemoveCallback());
+    assert.throws(
+      () => poolMetrics.observe(directPool.pool, directPool.pool),
+      { code: "harness_pool_metrics_pool_unregistered" }
+    );
     const directQuery = calls.find((call) => call.executable === "pool");
     assert.match(String(directQuery.args[1]), /1::integer AS selected/);
     const adapted = postgres.adaptLogicalPoolOptions({
@@ -464,6 +850,7 @@ test("container start uses only the internal bridge and connects directly withou
     failContainerRemoval = false;
     const cleanup = await postgres.cleanup();
     assert.equal(cleanup.cleanupCompleted, true);
+    assert.equal(postgres.trackedPoolCount, 0);
     assert.ok(calls.some((call) => call.args[0] === "rm" && call.args.includes("--volumes")));
     assert.ok(calls.some((call) => call.args[0] === "rm" && call.args.includes(CONTAINER_ID)));
     assert.ok(calls.some((call) => call.args[0] === "ps" && call.args.includes("--no-trunc")));
@@ -1107,6 +1494,56 @@ test("cleanup is an idempotent success before any resource is created", async ()
   try {
     assert.equal((await postgres.cleanup()).cleanupCompleted, true);
     assert.equal((await postgres.cleanup()).cleanupCompleted, true);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("cleanup closes every tracked pool, completes physical cleanup, and rethrows the first close error", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ia4tube-linux-pg-close-error-"));
+  const firstError = new Error("first_pool_close_failed");
+  const secondError = new Error("second_pool_close_failed");
+  const closed = [];
+  const commands = [];
+  class CleanupFailingPool extends FakePool {
+    end() {
+      closed.push(this.configuration.application_name);
+      throw this.configuration.closeError;
+    }
+  }
+  const postgres = createLinuxPostgres({
+    runnerTemp: root,
+    runId: "linux-271828",
+    PoolClass: CleanupFailingPool,
+    metricsRegistry: metrics(),
+    runnerUid: 1001,
+    runnerGid: 127,
+    async runCommand(executable, args) {
+      commands.push({ executable, args: [...args] });
+      return { code: 0, signal: null, stdout: "", stderr: "" };
+    },
+    randomBytes: (size) => Buffer.alloc(size, 7)
+  });
+  try {
+    new postgres.InstrumentedPool({
+      max: 1,
+      application_name: "first-runtime",
+      closeError: firstError
+    });
+    new postgres.InstrumentedPool({
+      max: 1,
+      application_name: "second-migration",
+      closeError: secondError
+    });
+    assert.equal(postgres.trackedPoolCount, 2);
+    await assert.rejects(postgres.cleanup(), (error) => error === firstError);
+    assert.deepEqual(closed, ["first-runtime", "second-migration"]);
+    assert.equal(postgres.trackedPoolCount, 0);
+    assert.ok(commands.some((call) => call.executable === "docker" && call.args[0] === "ps"));
+    assert.ok(commands.some((call) => call.executable === "docker" && call.args[0] === "volume"));
+    assert.ok(commands.some((call) => call.executable === "docker" && call.args[0] === "network"));
+    assert.equal((await postgres.cleanup()).cleanupCompleted, true);
+    assert.deepEqual(closed, ["first-runtime", "second-migration"]);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }

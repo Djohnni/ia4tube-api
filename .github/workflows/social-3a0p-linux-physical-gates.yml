@@ -3,7 +3,7 @@
   "on": {
     "push": {
       "branches": [
-        "social/checkpoint-3a0p-linux-physical-gates-20260807"
+        "social/checkpoint-3a0p-linux-pool-lifecycle-20260808"
       ]
     }
   },
@@ -15,15 +15,15 @@
     "cancel-in-progress": false
   },
   "env": {
-    "SOCIAL_3A0P_AUTHORIZED_PARENT": "88ff0ea427e6f321e8026910d018cd37e1e2687e",
+    "SOCIAL_3A0P_AUTHORIZED_PARENT": "68819e49d8120aa35afe864848404444b0a40ad7",
     "SOCIAL_3A0P_PRODUCT_COMMIT": "fcfc92419021dae5f77baad731c634b10c275c5b",
-    "SOCIAL_3A0P_AUTHORIZED_MESSAGE": "[run-social-3a0p-linux-gate] use isolated internal network without host publishing",
+    "SOCIAL_3A0P_AUTHORIZED_MESSAGE": "[run-social-3a0p-linux-gate] fix pool metrics shutdown lifecycle",
     "POSTGRES_CONNECTIVITY_MODE": "internal_bridge_direct_v1",
     "SOCIAL_3A0P_POSTGRES_IMAGE": "docker.io/library/postgres:18.4-bookworm@sha256:7e6103cf85f88f7a0eddb3ec0b1ba8940eba098ed118ade25a729ca9daee5568"
   },
   "jobs": {
     "physical-gates": {
-      "if": "github.event_name == 'push' && github.ref == 'refs/heads/social/checkpoint-3a0p-linux-physical-gates-20260807' && github.event.created == false && github.event.deleted == false && github.event.forced == false && github.event.before == '88ff0ea427e6f321e8026910d018cd37e1e2687e' && github.event.head_commit.message == '[run-social-3a0p-linux-gate] use isolated internal network without host publishing' && github.run_attempt == 1",
+      "if": "github.event_name == 'push' && github.ref == 'refs/heads/social/checkpoint-3a0p-linux-pool-lifecycle-20260808' && github.event.created == true && github.event.deleted == false && github.event.forced == false && github.event.before == '0000000000000000000000000000000000000000' && github.event.head_commit.message == '[run-social-3a0p-linux-gate] fix pool metrics shutdown lifecycle' && github.run_attempt == 1",
       "runs-on": "ubuntu-24.04",
       "timeout-minutes": 60,
       "defaults": {
@@ -47,7 +47,7 @@
             "AUTHORIZED_MESSAGE": "${{ github.event.head_commit.message }}",
             "AUTHORIZED_ATTEMPT": "${{ github.run_attempt }}"
           },
-          "run": "set -euo pipefail\ntest \"$AUTHORIZED_ATTEMPT\" = \"1\"\ntest \"$AUTHORIZED_MESSAGE\" = \"$SOCIAL_3A0P_AUTHORIZED_MESSAGE\"\ntest \"$(git rev-parse HEAD)\" = \"$AUTHORIZED_SHA\"\ntest \"$(git rev-parse HEAD^)\" = \"$SOCIAL_3A0P_AUTHORIZED_PARENT\"\ntest \"$(git log -1 --pretty=%B)\" = \"$SOCIAL_3A0P_AUTHORIZED_MESSAGE\"\ngit diff --quiet \"$SOCIAL_3A0P_PRODUCT_COMMIT\" HEAD -- src db/migrations migrations server.js package.json package-lock.json\nwhile IFS= read -r changed; do\n  case \"$changed\" in\n    .github/workflows/social-3a0p-linux-physical-gates.yml|scripts/social-3a0p-linux-*|tests/social-3a0p-linux-*|docs/social-3a0p-linux-*) ;;\n    *) exit 1 ;;\n  esac\ndone < <(git diff --name-only \"$SOCIAL_3A0P_AUTHORIZED_PARENT\" HEAD)\ntest ! -e \"$RUNNER_TEMP/social-3a0p-linux-gate-evidence\""
+          "run": "set -euo pipefail\ntest \"$AUTHORIZED_ATTEMPT\" = \"1\"\ntest \"$AUTHORIZED_MESSAGE\" = \"$SOCIAL_3A0P_AUTHORIZED_MESSAGE\"\ntest \"$(git rev-parse HEAD)\" = \"$AUTHORIZED_SHA\"\ntest \"$(git rev-parse HEAD^)\" = \"$SOCIAL_3A0P_AUTHORIZED_PARENT\"\ntest \"$(git log -1 --pretty=%B)\" = \"$SOCIAL_3A0P_AUTHORIZED_MESSAGE\"\ngit diff --quiet \"$SOCIAL_3A0P_PRODUCT_COMMIT\" HEAD -- src db/migrations migrations server.js package.json package-lock.json\nwhile IFS= read -r changed; do\n  case \"$changed\" in\n    .github/workflows/social-3a0p-linux-physical-gates.yml|scripts/social-3a0p-linux-postgres.js|tests/social-3a0p-linux-postgres.test.js|tests/social-3a0p-linux-workflow.test.js) ;;\n    *) exit 1 ;;\n  esac\ndone < <(git diff --name-only \"$SOCIAL_3A0P_AUTHORIZED_PARENT\" HEAD)\ntest ! -e \"$RUNNER_TEMP/social-3a0p-linux-gate-evidence\""
         },
         {
           "name": "Set up Node.js",
