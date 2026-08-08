@@ -18,8 +18,7 @@ const {
   netstatListenerParserPowerShell,
   netstatTargetListenersPowerShell,
   postgresServiceClassificationPowerShell,
-  pendingPhysicalProofs,
-  validateArchiveListings
+  pendingPhysicalProofs
 } = require("../scripts/social-3a0p-local-windows-adapters");
 const {
   buildFirewallLightEvidence
@@ -809,36 +808,7 @@ test("package hash and archive traversal are rejected before extraction", async 
   await assert.rejects(traversal.adapters.validatePackage(traversal.input), { code: "windows_harness_archive_entry_invalid" });
 });
 
-test("archive inventory accepts only preflighted regular files and directories", () => {
-  const entries = validateArchiveListings(
-    "pgsql/\npgsql/bin/postgres.exe\n",
-    "drwxr-xr-x  0 0 0 0 Aug 04 12:00 pgsql/\n-rwxr-xr-x  0 0 0 1 Aug 04 12:00 pgsql/bin/postgres.exe\n"
-  );
-  assert.deepEqual(entries, ["pgsql", "pgsql/bin/postgres.exe"]);
-
-  for (const mode of ["lrwxrwxrwx", "hrw-r--r--", "crw-r--r--", "brw-r--r--", "prw-r--r--", "srw-r--r--"]) {
-    assert.throws(
-      () => validateArchiveListings(
-        "pgsql/bin/postgres.exe\n",
-        `${mode}  0 0 0 1 Aug 04 12:00 pgsql/bin/postgres.exe\n`
-      ),
-      { code: "windows_harness_archive_entry_type_refused" }
-    );
-  }
-  assert.throws(
-    () => validateArchiveListings(
-      "pgsql/\npgsql/bin/postgres.exe\n",
-      "drwxr-xr-x  0 0 0 0 Aug 04 12:00 pgsql/\n"
-    ),
-    { code: "windows_harness_archive_type_inventory_invalid" }
-  );
-  assert.throws(
-    () => validateArchiveListings(
-      "pgsql/bin/postgres.exe\n",
-      "not-a-mode pgsql/bin/postgres.exe\n"
-    ),
-    { code: "windows_harness_archive_entry_type_refused" }
-  );
+test("archive path normalization remains fail-closed after central-directory inventory", () => {
   for (const unsafe of [
     "pgsql/bin/postgres.exe::",
     "pgsql/.. /outside.exe",
@@ -868,19 +838,17 @@ test("default extraction binds the approved hash to one locked safe ZIP reader",
   ];
   const base = fixture({ dependencies: {
     archive: undefined,
+    inspectZipFile: () => ({
+      totalEntries: entries.length,
+      entries: entries.map((name) => ({
+        name,
+        kind: "regular_file",
+        diagnosticClass: "dos_regular_file"
+      }))
+    }),
     processRunner: {
       async run(spec) {
         base.calls.process.push(spec);
-        if (spec.label === "archive_list") {
-          return { stdoutSanitized: `${entries.join("\n")}\n` };
-        }
-        if (spec.label === "archive_list_types") {
-          return {
-            stdoutSanitized: entries
-              .map((entry) => `-rwxr-xr-x  0 0 0 1 Aug 04 12:00 ${entry}`)
-              .join("\n") + "\n"
-          };
-        }
         if (spec.label === "postgres_version") {
           return { stdoutSanitized: "postgres (PostgreSQL) 18.4" };
         }
@@ -908,6 +876,12 @@ test("default extraction binds the approved hash to one locked safe ZIP reader",
     ),
     false
   );
+  assert.equal(
+    base.calls.process.some((call) =>
+      call.label === "archive_list" || call.label === "archive_list_types"
+    ),
+    false
+  );
 
   const extractorSource = fs.readFileSync(
     path.join(base.adapterOptions.repositoryRoot, "scripts", "social-3a0p-local-safe-zip-extract.ps1"),
@@ -918,6 +892,35 @@ test("default extraction binds the approved hash to one locked safe ZIP reader",
   assert.match(extractorSource, /archive_entry_type_refused/);
   assert.match(extractorSource, /FileMode\]::CreateNew/);
   assert.match(extractorSource, /ReparsePoint/);
+});
+
+test("an unapproved central-directory type cannot reach extraction or PostgreSQL", async () => {
+  const base = fixture({ dependencies: {
+    archive: undefined,
+    inspectZipFile: () => ({
+      totalEntries: 1,
+      entries: [{
+        name: "pgsql/bin/postgres.exe",
+        kind: "symbolic_link",
+        diagnosticClass: "symbolic_link"
+      }]
+    })
+  } });
+  await assert.rejects(base.adapters.validatePackage(base.input), {
+    code: "windows_harness_archive_entry_type_refused"
+  });
+  assert.equal(
+    base.calls.process.some((call) => call.label === "archive_extract"),
+    false
+  );
+  assert.equal(
+    base.calls.process.some((call) =>
+      call.label === "postgres_start" ||
+      call.label === "postgres_initialize" ||
+      call.label === "postgres_version"
+    ),
+    false
+  );
 });
 
 test("archive bytes changed after validation are refused before extraction", async () => {

@@ -196,6 +196,16 @@ function createWindowsEvidenceLedgerAdapters(options = {}) {
   ) {
     fail("windows_evidence_adapter_configuration_invalid");
   }
+  // The cleanup phase intentionally removes cleanupRoot before its settled
+  // event is persisted. Ledger helpers therefore need a cwd and temporary
+  // directory that outlive cleanup; controlledRoot is the already-validated
+  // parent shared by cleanupRoot and evidenceRoot.
+  const stableProcessEnvironment = Object.freeze({
+    ...environment,
+    TEMP: controlledRoot,
+    TMP: controlledRoot,
+    TMPDIR: controlledRoot
+  });
   const replacementTransactions = new Map();
   const replacementAudit = {
     explicitBackupPreparedCount: 0,
@@ -266,9 +276,9 @@ function createWindowsEvidenceLedgerAdapters(options = {}) {
         "-Command",
         script
       ],
-      cwd: cleanupRoot,
+      cwd: controlledRoot,
       environment: {
-        ...environment,
+        ...stableProcessEnvironment,
         IA4TUBE_EVIDENCE_TARGET: target
       },
       allowedEnvironmentNames: ["IA4TUBE_EVIDENCE_TARGET"],
@@ -301,9 +311,9 @@ function createWindowsEvidenceLedgerAdapters(options = {}) {
           "@{ok=(-not $found);reparsePointDetected=$found}|ConvertTo-Json -Compress"
         ].join("")
       ],
-      cwd: cleanupRoot,
+      cwd: controlledRoot,
       environment: {
-        ...environment,
+        ...stableProcessEnvironment,
         IA4TUBE_EVIDENCE_TARGET: target
       },
       allowedEnvironmentNames: ["IA4TUBE_EVIDENCE_TARGET"],
@@ -723,9 +733,9 @@ function createWindowsEvidenceLedgerAdapters(options = {}) {
           "[ordered]@{ok=$false;argumentDiagnostic=$argumentDiagnostic;exceptionDiagnostic=(New-IA4FileReplaceDiagnostic $_)}|ConvertTo-Json -Depth 6 -Compress}"
         ].join("")
       ],
-      cwd: cleanupRoot,
+      cwd: controlledRoot,
       environment: {
-        ...environment,
+        ...stableProcessEnvironment,
         IA4TUBE_EVIDENCE_SOURCE: source,
         IA4TUBE_EVIDENCE_TARGET: target,
         IA4TUBE_EVIDENCE_BACKUP: backup

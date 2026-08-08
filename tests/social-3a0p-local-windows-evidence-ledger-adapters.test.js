@@ -10,6 +10,9 @@ const {
   createWindowsEvidenceLedgerAdapters
 } = require("../scripts/social-3a0p-local-windows-evidence-ledger-adapters");
 const {
+  createSanitizedEvidenceLedger
+} = require("../scripts/social-3a0p-local-evidence-ledger");
+const {
   createFileReplaceExceptionDiagnostic
 } = require("../scripts/social-3a0p-local-file-replace-diagnostic");
 const {
@@ -80,8 +83,10 @@ function fixture(options = {}) {
   const evidenceRoot = path.join(controlledRoot, "evidence");
   const cleanupRoot = path.join(controlledRoot, "owned-run");
   fs.mkdirSync(cleanupRoot);
+  const processCalls = [];
   const processRunner = {
     async run(spec) {
+      processCalls.push(spec);
       const target = spec.environment.IA4TUBE_EVIDENCE_TARGET;
       if (spec.label === "evidence_reparse_audit") {
         return {
@@ -155,8 +160,64 @@ function fixture(options = {}) {
     processRunner,
     environment: {}
   });
-  return { adapter, cleanupRoot, controlledRoot, evidenceRoot };
+  return { adapter, cleanupRoot, controlledRoot, evidenceRoot, processCalls };
 }
+
+test("cleanup settled evidence persists after the disposable root is removed", async () => {
+  const base = fixture();
+  try {
+    const ledger = createSanitizedEvidenceLedger({
+      runId: "11111111-1111-4111-8111-111111111111",
+      harnessCommit: "a".repeat(40),
+      productCommit: "b".repeat(40),
+      controlledRoot: base.controlledRoot,
+      evidenceRoot: base.evidenceRoot,
+      cleanupRoot: base.cleanupRoot,
+      adapters: base.adapter
+    });
+    await ledger.initialize({ residues: { ownedRoot: 1 } });
+    await ledger.beginPhase("preflight");
+    await ledger.finishPhase("preflight", {
+      status: "passed",
+      code: "windows_preflight_passed"
+    });
+    await ledger.beginPhase("validate-package");
+    await ledger.finishPhase("validate-package", {
+      status: "failed",
+      code: "windows_harness_archive_type_inventory_invalid"
+    });
+    await ledger.beginCleanup();
+
+    fs.rmSync(base.cleanupRoot, { recursive: true, force: false });
+    await ledger.finishCleanup({
+      status: "passed",
+      code: "windows_cleanup_passed",
+      residues: { ownedRoot: 0 }
+    });
+
+    const snapshot = ledger.snapshot();
+    assert.equal(snapshot.revision, 7);
+    assert.equal(snapshot.primaryFailureCode, "windows_harness_archive_type_inventory_invalid");
+    assert.equal(snapshot.persistenceFailureCode, null);
+    assert.deepEqual(snapshot.cleanup, {
+      started: true,
+      completed: true,
+      status: "passed",
+      failureCode: null
+    });
+    assert.equal(snapshot.residues.ownedRoot, 0);
+    assert.equal(fs.existsSync(base.cleanupRoot), false);
+    assert.ok(base.processCalls.length > 0);
+    for (const call of base.processCalls) {
+      assert.equal(call.cwd, base.controlledRoot);
+      assert.equal(call.environment.TEMP, base.controlledRoot);
+      assert.equal(call.environment.TMP, base.controlledRoot);
+      assert.equal(call.environment.TMPDIR, base.controlledRoot);
+    }
+  } finally {
+    fs.rmSync(base.controlledRoot, { recursive: true, force: true });
+  }
+});
 
 test("adapter persiste, sincroniza e substitui evidência atomicamente dentro da raiz protegida", async () => {
   const base = fixture();

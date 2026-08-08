@@ -42,6 +42,9 @@ const {
 const firewallNonmutation = require(
   "./social-3a0p-local-firewall-nonmutation"
 );
+const {
+  inspectZipFile
+} = require("./social-3a0p-local-zip-inventory");
 
 const POSTGRES_VERSION = "18.4";
 const LOOPBACK_HOST = "127.0.0.1";
@@ -166,37 +169,6 @@ function canonicalArchiveEntry(value) {
     fail("windows_harness_archive_entry_invalid");
   }
   return normalized;
-}
-
-function archiveListingLines(value, code) {
-  if (typeof value !== "string") fail(code);
-  const lines = value.split(/\r?\n/);
-  while (lines.at(-1) === "") lines.pop();
-  if (lines.length === 0 || lines.some((line) => line.length === 0)) fail(code);
-  return lines;
-}
-
-function validateArchiveListings(namesOutput, verboseOutput) {
-  const entries = archiveListingLines(
-    namesOutput,
-    "windows_harness_archive_inventory_invalid"
-  ).map((entry) => canonicalArchiveEntry(entry));
-  const verbose = archiveListingLines(
-    verboseOutput,
-    "windows_harness_archive_type_inventory_invalid"
-  );
-  if (entries.length !== verbose.length) {
-    fail("windows_harness_archive_type_inventory_invalid");
-  }
-  for (const line of verbose) {
-    // bsdtar emits a POSIX mode field first. Only regular files and
-    // directories are accepted; links and every special-file type are
-    // rejected before extraction can write anything to disk.
-    if (!/^[d-][rwxstST-]{9}(?:[+@.]?)[ \t]/.test(line)) {
-      fail("windows_harness_archive_entry_type_refused");
-    }
-  }
-  return entries;
 }
 
 function stripLayout(entry, layoutRoot) {
@@ -342,25 +314,33 @@ function validateGateResult(name, result, requiredChecks) {
   return result;
 }
 
-function defaultArchive({ processRunner, executables, environment, paths }) {
+function defaultArchive({
+  processRunner,
+  executables,
+  environment,
+  paths,
+  inspectCentralDirectory = inspectZipFile
+}) {
   async function inspect(archivePath) {
-    const names = await processRunner.run({
-      executable: executables.tar,
-      args: ["-tf", archivePath],
-      cwd: paths.ownedRoot,
-      environment,
-      timeoutMs: 120_000,
-      label: "archive_list"
+    const inventory = await Promise.resolve(inspectCentralDirectory(archivePath));
+    if (
+      !inventory ||
+      !Number.isSafeInteger(inventory.totalEntries) ||
+      inventory.totalEntries < 1 ||
+      !Array.isArray(inventory.entries) ||
+      inventory.entries.length !== inventory.totalEntries
+    ) {
+      fail("windows_harness_archive_type_inventory_invalid");
+    }
+    return inventory.entries.map((entry) => {
+      if (
+        !entry ||
+        (entry.kind !== "regular_file" && entry.kind !== "directory")
+      ) {
+        fail("windows_harness_archive_entry_type_refused");
+      }
+      return canonicalArchiveEntry(entry.name);
     });
-    const types = await processRunner.run({
-      executable: executables.tar,
-      args: ["-tvf", archivePath],
-      cwd: paths.ownedRoot,
-      environment,
-      timeoutMs: 120_000,
-      label: "archive_list_types"
-    });
-    return validateArchiveListings(names.stdoutSanitized, types.stdoutSanitized);
   }
   return Object.freeze({
     list: inspect,
@@ -988,7 +968,14 @@ function createWindowsPhysicalAdapters(options = {}) {
     }),
     resourceJournal: childProcessJournal
   });
-  const archive = options.dependencies?.archive || defaultArchive({ processRunner, executables, environment: systemEnvironment, paths });
+  const archive = options.dependencies?.archive || defaultArchive({
+    processRunner,
+    executables,
+    environment: systemEnvironment,
+    paths,
+    inspectCentralDirectory:
+      options.dependencies?.inspectZipFile || inspectZipFile
+  });
   const systemProbe = options.dependencies?.systemProbe || defaultSystemProbe({ processRunner, executables, environment: systemEnvironment, paths });
   let BasePoolClass = options.dependencies?.PoolClass || null;
   function loadBasePoolClass() {
@@ -3172,6 +3159,5 @@ module.exports = {
   postgresServiceClassificationPowerShell,
   pendingPhysicalProofs,
   runWindowsPhysicalHarness,
-  validateArchiveListings,
   validateGateResult
 };
