@@ -2,32 +2,69 @@
 
 ## Limite e proveniência
 
-Esta rota encerra formalmente a sequência física local Windows no commit
-`36be098f926cc060ee89dff7874dab772a3ef22f`. Ela não diagnostica nem corrige
-`postgres_initdb_failed`, não altera a branch Windows e não reutiliza o pacote
-Windows preservado.
+Esta quarta rota Linux isolada parte exclusivamente do commit
+`1ce8bd3c9ce0830c942b9b2c8ea666a74c859442`. A branch predecessora
+`social/checkpoint-3a0p-linux-pool-lifecycle-20260808` e todas as branches
+anteriores permanecem preservadas, sem novo push ou edição.
 
-O workflow Linux existe somente na branch
-`social/checkpoint-3a0p-linux-physical-gates-20260807`. O produto permanece
-idêntico a `fcfc92419021dae5f77baad731c634b10c275c5b`: `src/`,
-`db/migrations/`, `server.js`, `package.json` e `package-lock.json` não são
-alterados.
+O workflow existe somente para a branch
+`social/checkpoint-3a0p-linux-login-verifier-bridge-20260808`. O produto
+permanece idêntico a `fcfc92419021dae5f77baad731c634b10c275c5b`: `src/`,
+todo `db/` (inclusive `roles.sql`), `server.js`, `package.json` e `package-lock.json` não são
+alterados. PostgreSQL, SCRAM, roles, rede Docker e credenciais também não são
+alterados por esta correção.
 
-## Terceiro e último disparo autorizado
+## Quarto disparo Linux isolado autorizado
 
-O único gatilho agora autorizado é o terceiro `push` na branch exata, sem
-recriação, exclusão ou force, cujo commit tenha a mensagem integral:
+O único gatilho autorizado é o primeiro e único `push` de criação da nova
+branch, sem exclusão ou force, cujo commit tenha a mensagem integral:
 
 ```text
-[run-social-3a0p-linux-gate] use isolated internal network without host publishing
+[run-social-3a0p-linux-gate] bridge verified login credential transport
 ```
 
-O job exige `run_attempt == 1`, `created == false`, `deleted == false`,
-`forced == false`, `before` e pai exatos
-`88ff0ea427e6f321e8026910d018cd37e1e2687e`, além de diff estritamente
-allowlisted. Não há `workflow_dispatch`, pull request, agenda, matriz ou retry
-automático. A regra operacional permanece: nenhuma repetição manual, quarto
-push ou recriação da branch depois desta terceira execução.
+O job exige `run_attempt == 1`, `created == true`, `deleted == false`,
+`forced == false`, `before` igual a 40 zeros e pai exato
+`1ce8bd3c9ce0830c942b9b2c8ea666a74c859442`, além de diff nominal e
+estritamente allowlisted. Não há `workflow_dispatch`, pull request, agenda,
+matriz ou retry automático. A regra operacional é: zero re-run, zero segundo
+push, zero PR, zero merge e zero deploy depois desta execução única.
+
+## Falha predecessora e bridge exclusiva do verificador
+
+O run predecessor `31261593977` (artifact `9022940755`, SHA-256
+`552d72db1176f1bb53dd412ac213ec20a5d98d98b205191ab7d54384e05a5bcd`)
+encerrou na fase `migrations` com o código sanitizado
+`login_bootstrap_credential_verification_failed`. A cadeia focal é:
+
+1. `verifyProvisionedLoginCredentials` chama `verifyOneLoginCredential`;
+2. `loginPoolConfig` produz a configuração com `connectionString`;
+3. o verificador instancia a `PoolClass` recebida;
+4. no Gate 1, essa classe era o `PhysicalPlanPool` geral;
+5. `createPrivatePlanPoolOptionsAdapter` recusava a `connectionString` antes de
+   abrir socket;
+6. o produto convertia a causa interna
+   `linux_gate_plan_pool_logical_transport_invalid` no código sanitizado acima.
+
+A correção mantém o adapter geral recusando toda `connectionString`. Somente o
+database manager físico injeta uma PoolClass/factory exclusiva em
+`verifyProvisionedLoginCredentials`. Essa bridge faz parse estrito da URI
+criada pelo próprio login bootstrap e aceita apenas protocolo PostgreSQL, host
+lógico `127.0.0.1`, porta `5432`, banco descartável exato, login e senha
+sintéticos correspondentes, `application_name`, limites e timeouts aprovados,
+sem fragmento, query extra ou TLS.
+
+Depois da validação, a bridge remove `connectionString` e entrega ao
+`InstrumentedPool` somente opções explícitas: o IPv4 privado já aprovado pelo
+inspect Docker, porta `5432`, banco, usuário e senha exatos e `ssl=false`. O IP
+físico não pode ser fornecido pelo chamador. URI, IP, senha, configuração
+completa e mensagem bruta do driver não são registrados. Host, porta, banco,
+login, senha, protocolo, TLS, query, fragmento ou origem divergentes falham
+antes de qualquer conexão física.
+
+Esse desenho ainda depende do único run desta branch. Nenhuma aprovação dos
+gates físicos é declarada antes do término e da validação da evidência desse
+run.
 
 ## Supply chain fechada
 

@@ -33,8 +33,8 @@ const {
   createPoolMetricsRegistry
 } = require("./social-3a0p-local-runtime-evidence-metrics");
 
-const BRANCH = "social/checkpoint-3a0p-linux-physical-gates-20260807";
-const BASE_COMMIT = "36be098f926cc060ee89dff7874dab772a3ef22f";
+const BRANCH = "social/checkpoint-3a0p-linux-login-verifier-bridge-20260808";
+const BASE_COMMIT = "1ce8bd3c9ce0830c942b9b2c8ea666a74c859442";
 const PRODUCT_COMMIT = "fcfc92419021dae5f77baad731c634b10c275c5b";
 const MARKER = "[run-social-3a0p-linux-gate]";
 const RUN_MARKER_PREFIX = "ia4tube-social-3a0p-linux-";
@@ -51,6 +51,18 @@ const SAFE_PHASE = new Set([
 ]);
 const LINUX_RESTORE_DATABASE =
   /^ia4tube_social_disposable_(?:rollback_0003|restore_0003|restore_0004|tamper|cross)_[0-9a-f]{12}$/;
+const LINUX_VERIFIER_DATABASE =
+  /^ia4tube_social_disposable_(?:rollback_source|rollback_0003|source_0003|restore_0003|restore_0004|tamper|cross)_[0-9a-f]{12}$/;
+const LOGIN_VERIFIER_SESSION_OPTIONS =
+  "-c statement_timeout=10000 -c lock_timeout=5000 -c idle_in_transaction_session_timeout=5000";
+const LOGIN_VERIFIER_AMBIENT_URL_NAMES = new Set([
+  "DATABASE_URL", "POSTGRESQL_URL", "POSTGRES_URL"
+]);
+const LOGIN_VERIFIER_POOL_KEYS = Object.freeze([
+  "allowExitOnIdle", "application_name", "connectionString", "connectionTimeoutMillis",
+  "database", "host", "idleTimeoutMillis", "max", "min", "options", "password",
+  "port", "query_timeout", "ssl", "user"
+].sort());
 const RESTORE_APPLICATION_SCHEMAS = Object.freeze([
   "ia4tube_social",
   "ia4tube_social_admin",
@@ -869,6 +881,194 @@ function isPrivateIpv4(value) {
     (values[0] === 192 && values[1] === 168);
 }
 
+function exactPlainKeys(value, expected) {
+  return Boolean(
+    value && Object.getPrototypeOf(value) === Object.prototype &&
+    Object.keys(value).sort().length === expected.length &&
+    Object.keys(value).sort().every((key, index) => key === expected[index])
+  );
+}
+
+function equalSecret(left, right) {
+  if (typeof left !== "string" || typeof right !== "string") return false;
+  const leftBuffer = Buffer.from(left, "utf8");
+  const rightBuffer = Buffer.from(right, "utf8");
+  try {
+    return leftBuffer.length === rightBuffer.length && crypto.timingSafeEqual(leftBuffer, rightBuffer);
+  } finally {
+    leftBuffer.fill(0);
+    rightBuffer.fill(0);
+  }
+}
+
+function parseVerifierUrl(value, expected) {
+  let parsed;
+  let login;
+  let password;
+  let database;
+  if (
+    typeof value !== "string" || value.length === 0 || value !== value.trim() ||
+    value.includes("?") || value.includes("#")
+  ) {
+    fail("linux_gate_login_verifier_uri_invalid");
+  }
+  try {
+    parsed = new URL(value);
+    login = decodeURIComponent(parsed.username);
+    password = decodeURIComponent(parsed.password);
+    database = decodeURIComponent(parsed.pathname.slice(1));
+  } catch {
+    fail("linux_gate_login_verifier_uri_invalid");
+  }
+  if (
+    !new Set(["postgres:", "postgresql:"]).has(parsed.protocol) ||
+    parsed.toString() !== value ||
+    parsed.hostname !== LOOPBACK || parsed.port !== String(LOGICAL_DATABASE_PORT) ||
+    parsed.pathname[0] !== "/" || database !== expected.database ||
+    login !== expected.login || password.length === 0 ||
+    !equalSecret(password, expected.password) || parsed.search !== "" || parsed.hash !== ""
+  ) {
+    fail("linux_gate_login_verifier_uri_invalid");
+  }
+  return Object.freeze({ login, password, database });
+}
+
+function createVerifiedLoginCredentialPoolBridge(postgres, contract, options = {}) {
+  if (
+    !postgres || typeof postgres.InstrumentedPool !== "function" ||
+    !exactPlainKeys(contract, [
+      "database", "migrationLogin", "passwords", "provisionerLogin", "runtimeLogin", "target"
+    ]) ||
+    !exactPlainKeys(contract.target, ["host", "port"]) ||
+    contract.target.host !== LOOPBACK || contract.target.port !== LOGICAL_DATABASE_PORT ||
+    !LINUX_VERIFIER_DATABASE.test(String(contract.database || "")) ||
+    contract.provisionerLogin !== PROVISIONER_LOGIN ||
+    contract.migrationLogin !== MIGRATION_LOGIN || contract.runtimeLogin !== RUNTIME_LOGIN ||
+    !contract.passwords || Object.getPrototypeOf(contract.passwords) !== Object.prototype ||
+    Object.keys(contract.passwords).sort().join("\0") !==
+      [MIGRATION_LOGIN, PROVISIONER_LOGIN, RUNTIME_LOGIN].sort().join("\0") ||
+    [PROVISIONER_LOGIN, MIGRATION_LOGIN, RUNTIME_LOGIN]
+      .some((login) => typeof contract.passwords[login] !== "string" || contract.passwords[login].length < 32)
+  ) {
+    fail("linux_gate_login_verifier_contract_invalid");
+  }
+  if (
+    !options || Object.getPrototypeOf(options) !== Object.prototype ||
+    Object.keys(options).some((key) => key !== "environment")
+  ) {
+    fail("linux_gate_login_verifier_contract_invalid");
+  }
+  const environment = options.environment === undefined ? process.env : options.environment;
+  if (
+    !environment || typeof environment !== "object" ||
+    Object.keys(environment).some((name) => {
+      const normalized = name.toUpperCase();
+      return /^PG[A-Z0-9_]*$/.test(normalized) ||
+        LOGIN_VERIFIER_AMBIENT_URL_NAMES.has(normalized);
+    })
+  ) {
+    fail("linux_gate_login_verifier_ambient_environment_refused");
+  }
+  const physicalHost = postgres.databaseHost;
+  if (!isPrivateIpv4(physicalHost) || postgres.port !== LOGICAL_DATABASE_PORT) {
+    fail("linux_gate_login_verifier_private_transport_invalid");
+  }
+  const provenance = Symbol("linux-login-verifier-provenance");
+  let provisionerPoolAuthorized = false;
+
+  function assertBaseShape(configuration, applicationName) {
+    if (
+      !exactPlainKeys(configuration, LOGIN_VERIFIER_POOL_KEYS) ||
+      configuration.host !== LOOPBACK || configuration.port !== LOGICAL_DATABASE_PORT ||
+      configuration.database !== contract.database || configuration.user !== PROVISIONER_LOGIN ||
+      !equalSecret(configuration.password, contract.passwords[PROVISIONER_LOGIN]) ||
+      configuration.ssl !== false || configuration.max !== 1 || configuration.min !== 0 ||
+      configuration.connectionTimeoutMillis !== 5_000 || configuration.idleTimeoutMillis !== 5_000 ||
+      configuration.query_timeout !== 15_000 || configuration.application_name !== applicationName ||
+      configuration.options !== LOGIN_VERIFIER_SESSION_OPTIONS ||
+      configuration.allowExitOnIdle !== false
+    ) {
+      fail("linux_gate_login_verifier_configuration_invalid");
+    }
+  }
+
+  function authorizeProvisionerPool(configuration) {
+    if (provisionerPoolAuthorized) fail("linux_gate_login_verifier_provenance_invalid");
+    assertBaseShape(configuration, "ia4tube-social-3a0p-provisioner");
+    parseVerifierUrl(configuration.connectionString, {
+      database: contract.database,
+      login: PROVISIONER_LOGIN,
+      password: contract.passwords[PROVISIONER_LOGIN]
+    });
+    const authorized = { ...configuration };
+    Object.defineProperty(authorized, provenance, {
+      configurable: false,
+      enumerable: true,
+      writable: false,
+      value: true
+    });
+    provisionerPoolAuthorized = true;
+    return Object.freeze(authorized);
+  }
+
+  class VerifiedLoginCredentialPool extends postgres.InstrumentedPool {
+    constructor(configuration) {
+      const symbols = configuration && typeof configuration === "object"
+        ? Object.getOwnPropertySymbols(configuration)
+        : [];
+      const stringKeys = configuration && typeof configuration === "object"
+        ? Object.keys(configuration).sort()
+        : [];
+      if (
+        symbols.length !== 1 || symbols[0] !== provenance || configuration[provenance] !== true ||
+        stringKeys.length !== LOGIN_VERIFIER_POOL_KEYS.length ||
+        !stringKeys.every((key, index) => key === LOGIN_VERIFIER_POOL_KEYS[index]) ||
+        postgres.databaseHost !== physicalHost || postgres.port !== LOGICAL_DATABASE_PORT
+      ) {
+        fail("linux_gate_login_verifier_provenance_invalid");
+      }
+      let uri;
+      let login;
+      try {
+        uri = new URL(configuration.connectionString);
+        login = decodeURIComponent(uri.username);
+      } catch {
+        fail("linux_gate_login_verifier_uri_invalid");
+      }
+      const expected = login === MIGRATION_LOGIN
+        ? { password: contract.passwords[MIGRATION_LOGIN], applicationName: "ia4tube-social-migration-login-check" }
+        : login === RUNTIME_LOGIN
+          ? { password: contract.passwords[RUNTIME_LOGIN], applicationName: "ia4tube-social-runtime-login-check" }
+          : null;
+      if (!expected) fail("linux_gate_login_verifier_login_invalid");
+      assertBaseShape(configuration, expected.applicationName);
+      const parsed = parseVerifierUrl(configuration.connectionString, {
+        database: contract.database,
+        login,
+        password: expected.password
+      });
+      super({
+        host: physicalHost,
+        port: LOGICAL_DATABASE_PORT,
+        database: parsed.database,
+        user: parsed.login,
+        password: parsed.password,
+        ssl: false,
+        max: 1,
+        min: 0,
+        connectionTimeoutMillis: 5_000,
+        idleTimeoutMillis: 5_000,
+        query_timeout: 15_000,
+        application_name: expected.applicationName,
+        options: LOGIN_VERIFIER_SESSION_OPTIONS,
+        allowExitOnIdle: false
+      });
+    }
+  }
+
+  return Object.freeze({ PoolClass: VerifiedLoginCredentialPool, authorizeProvisionerPool });
+}
+
 function createPrivatePlanPoolOptionsAdapter(postgres) {
   if (!postgres || typeof postgres.adaptLogicalPoolOptions !== "function") {
     fail("linux_gate_plan_pool_transport_contract_invalid");
@@ -1380,6 +1580,23 @@ async function runLinuxGate(options = {}) {
           backupProduct,
           backupDirectory: path.join(postgres.workDirectory, "backups")
         }),
+        createLoginCredentialVerifierBridge({ database, configuration }) {
+          if (configuration?.target?.database !== database) {
+            fail("linux_gate_login_verifier_database_invalid");
+          }
+          return createVerifiedLoginCredentialPoolBridge(postgres, {
+            target: { host: LOOPBACK, port: LOGICAL_DATABASE_PORT },
+            database,
+            provisionerLogin: PROVISIONER_LOGIN,
+            migrationLogin: MIGRATION_LOGIN,
+            runtimeLogin: RUNTIME_LOGIN,
+            passwords: {
+              [PROVISIONER_LOGIN]: postgres.materials.provisioner.toString("utf8"),
+              [MIGRATION_LOGIN]: postgres.materials.migration.toString("utf8"),
+              [RUNTIME_LOGIN]: postgres.materials.runtime.toString("utf8")
+            }
+          }, { environment: options.environment || process.env });
+        },
         runTool: physicalRunTool,
         restoreBehavior: createRestoreBehaviorFacade(legacy2ARoot)
       }
@@ -1661,6 +1878,7 @@ module.exports = {
   createPhysicalPoolDrainTracker,
   createPrivatePlanPoolOptionsAdapter,
   createRoleScopedPlanPoolClass,
+  createVerifiedLoginCredentialPoolBridge,
   evidenceSafe,
   failureCode,
   freeBytes,

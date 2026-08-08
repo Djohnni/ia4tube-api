@@ -9,6 +9,7 @@ const {
 const {
   MIGRATION_LOGIN,
   PROVISIONER_LOGIN,
+  RUNTIME_LOGIN,
   WindowsPhysicalPlanFailure,
   assertLocalToolPlan,
   createLocalPgToolRunner,
@@ -229,6 +230,158 @@ test("physical plan factory is lazy, binds one marker and exposes concrete plans
   assert.match(rollback.disposableDatabase, /^ia4tube_social_disposable_rollback_0003_[0-9a-f]{12}$/);
   await plans.destroy();
   assert.deepEqual(calls, ["cleanup"]);
+});
+
+test("default physical database manager injects the login verifier bridge only into the definitive verifier", async () => {
+  const target = Object.freeze({ host: "127.0.0.1", port: 5432 });
+  const events = [];
+  const genericPoolOptions = [];
+  const bridgeProvenance = Symbol("test-login-verifier-bridge");
+  let databaseExists = false;
+  let databaseMarker = "";
+  let factoryCalls = 0;
+  let bootstrapProvisionerPool;
+  let originalProvisionerPool;
+  let authorizedProvisionerPool;
+
+  class GenericPhysicalPlanPool {
+    constructor(options) {
+      this.options = options;
+      genericPoolOptions.push(options);
+    }
+    async connect() {
+      const pool = this;
+      return {
+        async query(text) {
+          const sql = String(text);
+          if (sql.includes("FROM pg_catalog.pg_database database")) {
+            return databaseExists
+              ? { rowCount: 1, rows: [{ owner: PROVISIONER_LOGIN, marker: databaseMarker }] }
+              : { rowCount: 0, rows: [] };
+          }
+          if (sql.startsWith("CREATE DATABASE")) {
+            databaseExists = true;
+            return { rowCount: 0, rows: [] };
+          }
+          if (sql.startsWith("COMMENT ON DATABASE")) {
+            databaseMarker = sql.match(/ IS '([^']+)'$/u)?.[1] || "";
+            return { rowCount: 0, rows: [] };
+          }
+          if (sql.startsWith("DROP DATABASE")) {
+            databaseExists = false;
+            databaseMarker = "";
+            return { rowCount: 0, rows: [] };
+          }
+          if (sql.includes("SELECT rolname FROM pg_catalog.pg_roles")) {
+            return {
+              rowCount: 2,
+              rows: [{ rolname: MIGRATION_LOGIN }, { rolname: RUNTIME_LOGIN }]
+            };
+          }
+          events.push(["generic-query", pool.options.application_name || "none"]);
+          return { rowCount: 0, rows: [] };
+        },
+        release() {}
+      };
+    }
+    async end() { events.push(["generic-end", this.options.application_name || "none"]); }
+  }
+  class VerifierOnlyPool {}
+  const loginBootstrap = {
+    MIGRATOR_ROLE: "ia4tube_social_migrator",
+    RUNTIME_ROLE: "ia4tube_social_runtime",
+    MIGRATION_CONNECTION_LIMIT: 2,
+    RUNTIME_CONNECTION_LIMIT: 9,
+    targetFingerprint(value) {
+      assert.equal(value.host, "127.0.0.1");
+      assert.equal(value.port, "5432");
+      return "f".repeat(64);
+    },
+    async bootstrapDatabaseLogins(pool, configuration) {
+      events.push(["bootstrap", pool.constructor.name]);
+      assert.equal(pool instanceof GenericPhysicalPlanPool, true);
+      if (!bootstrapProvisionerPool) bootstrapProvisionerPool = configuration.provisionerPool;
+      assert.equal(configuration.provisionerPool, bootstrapProvisionerPool);
+      return { safe: true, created: { migration: false, runtime: false } };
+    },
+    async verifyProvisionedLoginCredentials(PoolClass, configuration) {
+      events.push(["verify", PoolClass.name]);
+      assert.equal(PoolClass, VerifierOnlyPool);
+      assert.equal(configuration.provisionerPool, authorizedProvisionerPool);
+      assert.notEqual(configuration.provisionerPool, originalProvisionerPool);
+      assert.equal(configuration.provisionerPool[bridgeProvenance], true);
+      return { safe: true, verified: 2 };
+    }
+  };
+  const materials = Object.freeze({
+    admin: Buffer.from("Synthetic-Admin-Credential-000000000!"),
+    provisioner: Buffer.from("Synthetic-Provisioner-Credential-000!"),
+    migration: Buffer.from("Synthetic-Migration-Credential-00000!"),
+    runtime: Buffer.from("Synthetic-Runtime-Credential-0000000!")
+  });
+  const plans = createWindowsPhysicalPlans({
+    approval: LOCAL_PHYSICAL_APPROVAL,
+    runMarker: RUN_MARKER,
+    target,
+    state: {
+      target,
+      materials,
+      environmentId: "00000000-0000-4000-8000-000000000001"
+    },
+    paths: { ownedRoot: OWNED_ROOT },
+    executables: EXECUTABLES,
+    processRunner: { async run() { throw new Error("must_not_spawn"); } },
+    PoolClass: GenericPhysicalPlanPool,
+    repositoryRoot: path.resolve(__dirname, ".."),
+    randomBytes: (size) => Buffer.alloc(size, 9),
+    dependencies: {
+      loginBootstrap,
+      createLoginCredentialVerifierBridge({ database, configuration }) {
+        factoryCalls += 1;
+        events.push(["bridge", database]);
+        assert.equal(database, configuration.target.database);
+        originalProvisionerPool = configuration.provisionerPool;
+        assert.equal(originalProvisionerPool, bootstrapProvisionerPool);
+        return {
+          PoolClass: VerifierOnlyPool,
+          authorizeProvisionerPool(provisionerPool) {
+            assert.equal(provisionerPool, originalProvisionerPool);
+            authorizedProvisionerPool = { ...provisionerPool };
+            Object.defineProperty(authorizedProvisionerPool, bridgeProvenance, {
+              enumerable: true,
+              value: true
+            });
+            return Object.freeze(authorizedProvisionerPool);
+          }
+        };
+      },
+      runTool: async () => { throw new Error("must_not_run_tool"); }
+    }
+  });
+  const rollback = await plans.createRollbackAdapter();
+  const proof = await rollback.createDisposable0003({
+    host: "127.0.0.1",
+    database: rollback.disposableDatabase,
+    profileId: "social-schema-0003",
+    runMarker: RUN_MARKER
+  });
+  assert.equal(proof.createdByThisRun, true);
+  assert.equal(factoryCalls, 1);
+  assert.deepEqual(events.filter(([event]) => event === "bootstrap").map((entry) => entry[1]), [
+    "GenericPhysicalPlanPool",
+    "GenericPhysicalPlanPool"
+  ]);
+  assert.deepEqual(events.filter(([event]) => event === "verify"), [["verify", "VerifierOnlyPool"]]);
+  assert.equal(
+    genericPoolOptions.some((options) => /(?:migration|runtime)-login-check/u.test(String(options.application_name))),
+    false
+  );
+  assert.equal(
+    genericPoolOptions.some((options) => options.connectionString != null),
+    false
+  );
+  await plans.destroy();
+  assert.equal(databaseExists, false);
 });
 
 test("rollback lifecycle never accepts a proof from another run or database", async () => {

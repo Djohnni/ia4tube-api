@@ -7,9 +7,25 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const test = require("node:test");
-const { LinuxPostgresFailure } = require("../scripts/social-3a0p-linux-postgres");
+const {
+  LinuxPostgresFailure,
+  instrumentedPoolClass
+} = require("../scripts/social-3a0p-linux-postgres");
+const {
+  createPoolMetricsRegistry
+} = require("../scripts/social-3a0p-local-runtime-evidence-metrics");
 const { Pool: PgPool } = require("pg");
 const {
+  MIGRATION_CONNECTION_LIMIT,
+  MIGRATOR_ROLE,
+  RUNTIME_CONNECTION_LIMIT,
+  RUNTIME_ROLE,
+  targetFingerprint,
+  verifyProvisionedLoginCredentials
+} = require("../src/persistence/postgres/login-bootstrap");
+const {
+  BASE_COMMIT,
+  BRANCH,
   canonicalJson,
   containsMarkerInTree,
   createDrainAwareRunTool,
@@ -20,6 +36,7 @@ const {
   createPhysicalPoolDrainTracker,
   createPrivatePlanPoolOptionsAdapter,
   createRoleScopedPlanPoolClass,
+  createVerifiedLoginCredentialPoolBridge,
   evidenceSafe,
   failureCode,
   isLinuxRestoreDatabase,
@@ -33,6 +50,15 @@ const {
 } = require("../scripts/social-3a0p-linux-gate");
 
 const ROOT = path.resolve(__dirname, "..");
+
+test("evidence provenance matches the authorized workflow branch and parent", () => {
+  const workflow = JSON.parse(fs.readFileSync(
+    path.join(ROOT, ".github", "workflows", "social-3a0p-linux-physical-gates.yml"),
+    "utf8"
+  ));
+  assert.deepEqual(workflow.on.push.branches, [BRANCH]);
+  assert.equal(workflow.env.SOCIAL_3A0P_AUTHORIZED_PARENT, BASE_COMMIT);
+});
 
 test("canonical evidence JSON is stable and key ordered", () => {
   assert.equal(canonicalJson({ z: 1, a: { y: true, b: false } }), '{"a":{"b":false,"y":true},"z":1}');
@@ -429,6 +455,776 @@ test("physical plan pools remap only the canonical logical transport before Base
   assert.equal(pool.options.database, "ia4tube_social_local");
   assert.equal(verifier.options.database, "ia4tube_social_disposable_restore_0003_012345abcdef");
   await Pool.closeAll();
+});
+
+test("definitive login credential verification reproduces the connectionString transport incompatibility before socket or authentication", async () => {
+  const database = "ia4tube_social_disposable_restore_0003_012345abcdef";
+  const provisionerLogin = "ia4tube_social_local_provisioner";
+  const migrationLogin = "ia4tube_social_local_migration";
+  const runtimeLogin = "ia4tube_social_local_runtime";
+  const provisionerPassword = "Synthetic-Provisioner-Credential-123!";
+  const migrationPassword = "Synthetic-Migration-Credential-456!";
+  const runtimePassword = "Synthetic-Runtime-Credential-789!";
+  const target = Object.freeze({
+    host: "127.0.0.1",
+    port: "5432",
+    database,
+    provisionerLogin,
+    migrationLogin,
+    runtimeLogin
+  });
+  const provisionerUrl = new URL(`postgresql://127.0.0.1:5432/${database}`);
+  provisionerUrl.username = provisionerLogin;
+  provisionerUrl.password = provisionerPassword;
+  const hidden = (value, key, secret) => {
+    Object.defineProperty(value, key, {
+      configurable: false,
+      enumerable: false,
+      writable: false,
+      value: secret
+    });
+    return Object.freeze(value);
+  };
+  const configuration = Object.freeze({
+    target,
+    targetFingerprint: targetFingerprint(target),
+    provisionerPool: Object.freeze({
+      host: "127.0.0.1",
+      port: 5432,
+      database,
+      user: provisionerLogin,
+      password: provisionerPassword,
+      ssl: false,
+      max: 1,
+      min: 0,
+      connectionTimeoutMillis: 5_000,
+      idleTimeoutMillis: 5_000,
+      query_timeout: 15_000,
+      application_name: "ia4tube-social-3a0p-provisioner",
+      options: "-c statement_timeout=10000 -c lock_timeout=5000 -c idle_in_transaction_session_timeout=5000",
+      allowExitOnIdle: false,
+      connectionString: provisionerUrl.toString()
+    }),
+    migration: hidden({
+      login: migrationLogin,
+      role: MIGRATOR_ROLE,
+      connectionLimit: MIGRATION_CONNECTION_LIMIT
+    }, "password", migrationPassword),
+    runtime: hidden({
+      login: runtimeLogin,
+      role: RUNTIME_ROLE,
+      connectionLimit: RUNTIME_CONNECTION_LIMIT
+    }, "password", runtimePassword)
+  });
+
+  let basePoolConstructions = 0;
+  let physicalConnectCalls = 0;
+  let authenticationAttempts = 0;
+  let physicalAdaptations = 0;
+  class SocketAndAuthenticationSentinelPool {
+    constructor(options) {
+      basePoolConstructions += 1;
+      this.options = options;
+    }
+    async connect() {
+      physicalConnectCalls += 1;
+      authenticationAttempts += 1;
+      throw new Error("socket/authentication sentinel must remain unreachable");
+    }
+    async end() {}
+  }
+  const privateHost = ["10", "44", "0", "9"].join(".");
+  const PhysicalPlanPool = createRoleScopedPlanPoolClass(
+    SocketAndAuthenticationSentinelPool,
+    async () => ({ rows: [] }),
+    null,
+    async () => true,
+    createPrivatePlanPoolOptionsAdapter({
+      databaseHost: privateHost,
+      adaptLogicalPoolOptions(options) {
+        physicalAdaptations += 1;
+        return { ...options, host: privateHost, port: 5432 };
+      }
+    })
+  );
+
+  const migrationUrl = new URL(configuration.provisionerPool.connectionString);
+  migrationUrl.username = migrationLogin;
+  migrationUrl.password = migrationPassword;
+  const definitiveMigrationPoolConfig = Object.freeze({
+    ...configuration.provisionerPool,
+    connectionString: migrationUrl.toString(),
+    application_name: "ia4tube-social-migration-login-check"
+  });
+  assert.equal(migrationUrl.protocol, "postgresql:");
+  assert.equal(migrationUrl.hostname, "127.0.0.1");
+  assert.equal(migrationUrl.port, "5432");
+  assert.equal(decodeURIComponent(migrationUrl.pathname.slice(1)), database);
+  assert.equal(decodeURIComponent(migrationUrl.username), migrationLogin);
+
+  assert.throws(
+    () => new PhysicalPlanPool(definitiveMigrationPoolConfig),
+    { code: "linux_gate_plan_pool_logical_transport_invalid" }
+  );
+  assert.equal(basePoolConstructions, 0);
+  assert.equal(physicalAdaptations, 0);
+  assert.equal(physicalConnectCalls, 0);
+  assert.equal(authenticationAttempts, 0);
+
+  await assert.rejects(
+    verifyProvisionedLoginCredentials(PhysicalPlanPool, configuration),
+    (error) => (
+      error?.code === "login_bootstrap_credential_verification_failed" &&
+      error?.cause === undefined &&
+      !String(error?.message).includes(migrationPassword) &&
+      !String(error?.message).includes(runtimePassword)
+    )
+  );
+  assert.equal(basePoolConstructions, 0);
+  assert.equal(physicalAdaptations, 0);
+  assert.equal(physicalConnectCalls, 0);
+  assert.equal(authenticationAttempts, 0);
+  assert.equal(await PhysicalPlanPool.closeAll(), true);
+});
+
+test("verified login credential bridge translates both definitive verifier pools to the approved physical transport", async () => {
+  const database = "ia4tube_social_disposable_restore_0003_012345abcdef";
+  const provisionerLogin = "ia4tube_social_local_provisioner";
+  const migrationLogin = "ia4tube_social_local_migration";
+  const runtimeLogin = "ia4tube_social_local_runtime";
+  const passwords = Object.freeze({
+    [provisionerLogin]: "Synthetic-Provisioner-Credential-123!",
+    [migrationLogin]: "Synthetic-Migration-Credential-456!",
+    [runtimeLogin]: "Synthetic-Runtime-Credential-789!"
+  });
+  const privateHost = ["10", "44", "0", "9"].join(".");
+  const constructed = [];
+  const released = [];
+  const ended = [];
+  const roleChanges = [];
+  class InstrumentedPoolSentinel {
+    constructor(options) {
+      this.options = options;
+      constructed.push(options);
+    }
+    async connect() {
+      const options = this.options;
+      return {
+        async query(text, values = []) {
+          if (String(text).includes("role_not_assumed")) {
+            return { rows: [{
+              login_exact: values[0] === options.user,
+              role_not_assumed: true,
+              database_exact: values[1] === options.database,
+              superuser_absent: true,
+              database_create_absent: true,
+              database_temp_absent: true
+            }] };
+          }
+          if (String(text).startsWith("SET LOCAL ROLE")) {
+            roleChanges.push([options.user, String(text)]);
+            return { rows: [] };
+          }
+          if (String(text).includes("role_exact")) {
+            const expectedRole = options.user === migrationLogin ? MIGRATOR_ROLE : RUNTIME_ROLE;
+            return { rows: [{
+              login_exact: values[0] === options.user,
+              role_exact: values[1] === expectedRole
+            }] };
+          }
+          return { rows: [] };
+        },
+        release() { released.push(options.user); }
+      };
+    }
+    async end() { ended.push(this.options.user); }
+  }
+  const postgres = {
+    InstrumentedPool: InstrumentedPoolSentinel,
+    get databaseHost() { return privateHost; },
+    get port() { return 5432; }
+  };
+  const bridge = createVerifiedLoginCredentialPoolBridge(postgres, {
+    target: { host: "127.0.0.1", port: 5432 },
+    database,
+    provisionerLogin,
+    migrationLogin,
+    runtimeLogin,
+    passwords
+  }, { environment: {} });
+  const provisionerUrl = new URL(`postgresql://127.0.0.1:5432/${database}`);
+  provisionerUrl.username = provisionerLogin;
+  provisionerUrl.password = passwords[provisionerLogin];
+  const provisionerPool = bridge.authorizeProvisionerPool(Object.freeze({
+    host: "127.0.0.1",
+    port: 5432,
+    database,
+    user: provisionerLogin,
+    password: passwords[provisionerLogin],
+    ssl: false,
+    max: 1,
+    min: 0,
+    connectionTimeoutMillis: 5_000,
+    idleTimeoutMillis: 5_000,
+    query_timeout: 15_000,
+    application_name: "ia4tube-social-3a0p-provisioner",
+    options: "-c statement_timeout=10000 -c lock_timeout=5000 -c idle_in_transaction_session_timeout=5000",
+    allowExitOnIdle: false,
+    connectionString: provisionerUrl.toString()
+  }));
+  const target = Object.freeze({
+    host: "127.0.0.1",
+    port: "5432",
+    database,
+    provisionerLogin,
+    migrationLogin,
+    runtimeLogin
+  });
+  const hidden = (value, key, secret) => {
+    Object.defineProperty(value, key, { value: secret, enumerable: false });
+    return Object.freeze(value);
+  };
+  const configuration = Object.freeze({
+    target,
+    targetFingerprint: targetFingerprint(target),
+    provisionerPool,
+    migration: hidden({
+      login: migrationLogin,
+      role: MIGRATOR_ROLE,
+      connectionLimit: MIGRATION_CONNECTION_LIMIT
+    }, "password", passwords[migrationLogin]),
+    runtime: hidden({
+      login: runtimeLogin,
+      role: RUNTIME_ROLE,
+      connectionLimit: RUNTIME_CONNECTION_LIMIT
+    }, "password", passwords[runtimeLogin])
+  });
+
+  assert.deepEqual(
+    await verifyProvisionedLoginCredentials(bridge.PoolClass, configuration),
+    { safe: true, verified: 2 }
+  );
+  assert.equal(constructed.length, 2);
+  for (const options of constructed) {
+    assert.equal(options.host, privateHost);
+    assert.equal(options.port, 5432);
+    assert.equal(options.database, database);
+    assert.equal(options.ssl, false);
+    assert.equal(Object.hasOwn(options, "connectionString"), false);
+    assert.equal(options.user === migrationLogin || options.user === runtimeLogin, true);
+    assert.equal(options.password, passwords[options.user]);
+  }
+  assert.deepEqual(released.sort(), [migrationLogin, runtimeLogin].sort());
+  assert.deepEqual(ended.sort(), [migrationLogin, runtimeLogin].sort());
+  assert.deepEqual(roleChanges.sort((left, right) => left[0].localeCompare(right[0])), [
+    [migrationLogin, `SET LOCAL ROLE "${MIGRATOR_ROLE}"`],
+    [runtimeLogin, `SET LOCAL ROLE "${RUNTIME_ROLE}"`]
+  ].sort((left, right) => left[0].localeCompare(right[0])));
+});
+
+const LOGIN_VERIFIER_FIXTURE = Object.freeze({
+  database: "ia4tube_social_disposable_restore_0003_012345abcdef",
+  provisionerLogin: "ia4tube_social_local_provisioner",
+  migrationLogin: "ia4tube_social_local_migration",
+  runtimeLogin: "ia4tube_social_local_runtime",
+  privateHost: ["10", "44", "0", "9"].join("."),
+  passwords: Object.freeze({
+    ia4tube_social_local_provisioner: "Synthetic-Provisioner-Credential-123!",
+    ia4tube_social_local_migration: "Synthetic-Migration-Credential-456!",
+    ia4tube_social_local_runtime: "Synthetic-Runtime-Credential-789!"
+  })
+});
+
+function loginVerifierUrl({
+  protocol = "postgresql:",
+  host = "127.0.0.1",
+  port = 5432,
+  database = LOGIN_VERIFIER_FIXTURE.database,
+  login = LOGIN_VERIFIER_FIXTURE.provisionerLogin,
+  password = LOGIN_VERIFIER_FIXTURE.passwords[login],
+  omitPassword = false,
+  search = "",
+  hash = ""
+} = {}) {
+  const value = new URL(`${protocol}//${host}:${port}/${database}`);
+  value.username = login;
+  if (!omitPassword) value.password = password;
+  value.search = search;
+  value.hash = hash;
+  return value.toString();
+}
+
+function loginVerifierProvisionerPool(overrides = {}) {
+  return Object.freeze({
+    host: "127.0.0.1",
+    port: 5432,
+    database: LOGIN_VERIFIER_FIXTURE.database,
+    user: LOGIN_VERIFIER_FIXTURE.provisionerLogin,
+    password: LOGIN_VERIFIER_FIXTURE.passwords[LOGIN_VERIFIER_FIXTURE.provisionerLogin],
+    ssl: false,
+    max: 1,
+    min: 0,
+    connectionTimeoutMillis: 5_000,
+    idleTimeoutMillis: 5_000,
+    query_timeout: 15_000,
+    application_name: "ia4tube-social-3a0p-provisioner",
+    options: "-c statement_timeout=10000 -c lock_timeout=5000 -c idle_in_transaction_session_timeout=5000",
+    allowExitOnIdle: false,
+    connectionString: loginVerifierUrl(),
+    ...overrides
+  });
+}
+
+function createLoginVerifierFixture(options = {}) {
+  const constructed = [];
+  const ended = [];
+  let physicalHost = options.physicalHost || LOGIN_VERIFIER_FIXTURE.privateHost;
+  let physicalPort = options.omitPhysicalPort
+    ? undefined
+    : options.physicalPort === undefined ? 5432 : options.physicalPort;
+  class CapturingInstrumentedPool {
+    constructor(configuration) {
+      if (options.baseFailure) throw options.baseFailure;
+      this.options = configuration;
+      constructed.push(configuration);
+    }
+    async connect() {
+      if (typeof options.connect === "function") return options.connect(this.options);
+      return { async query() { return { rows: [] }; }, release() {} };
+    }
+    async end() { ended.push(this.options.user); }
+  }
+  const postgres = {
+    InstrumentedPool: options.InstrumentedPool || CapturingInstrumentedPool,
+    get databaseHost() { return physicalHost; },
+    get port() { return physicalPort; }
+  };
+  const bridge = createVerifiedLoginCredentialPoolBridge(postgres, {
+    target: { host: "127.0.0.1", port: 5432 },
+    database: LOGIN_VERIFIER_FIXTURE.database,
+    provisionerLogin: LOGIN_VERIFIER_FIXTURE.provisionerLogin,
+    migrationLogin: LOGIN_VERIFIER_FIXTURE.migrationLogin,
+    runtimeLogin: LOGIN_VERIFIER_FIXTURE.runtimeLogin,
+    passwords: { ...LOGIN_VERIFIER_FIXTURE.passwords }
+  }, { environment: options.environment || {} });
+  const provisionerPool = options.authorize === false
+    ? null
+    : bridge.authorizeProvisionerPool(options.provisionerPool || loginVerifierProvisionerPool());
+  return {
+    bridge,
+    constructed,
+    ended,
+    provisionerPool,
+    setPhysicalHost(value) { physicalHost = value; },
+    setPhysicalPort(value) { physicalPort = value; }
+  };
+}
+
+function loginVerifierPoolConfiguration(fixture, overrides = {}) {
+  const login = overrides.login || LOGIN_VERIFIER_FIXTURE.migrationLogin;
+  const password = Object.hasOwn(overrides, "uriPassword")
+    ? overrides.uriPassword
+    : LOGIN_VERIFIER_FIXTURE.passwords[login];
+  const connectionString = Object.hasOwn(overrides, "connectionString")
+    ? overrides.connectionString
+    : loginVerifierUrl({
+        protocol: overrides.protocol,
+        host: overrides.uriHost,
+        port: overrides.uriPort,
+        database: overrides.uriDatabase,
+        login,
+        password,
+        omitPassword: overrides.omitPassword,
+        search: overrides.search,
+        hash: overrides.hash
+      });
+  const configuration = {
+    ...fixture.provisionerPool,
+    connectionString,
+    application_name: overrides.application_name || (
+      login === LOGIN_VERIFIER_FIXTURE.runtimeLogin
+        ? "ia4tube-social-runtime-login-check"
+        : "ia4tube-social-migration-login-check"
+    )
+  };
+  for (const [key, value] of Object.entries(overrides.configuration || {})) {
+    if (value === undefined) delete configuration[key];
+    else configuration[key] = value;
+  }
+  return Object.freeze(configuration);
+}
+
+test("login verifier bridge accepts only exact postgres URI shapes and emits explicit BasePool options", async () => {
+  for (const [protocol, login, applicationName] of [
+    ["postgresql:", LOGIN_VERIFIER_FIXTURE.migrationLogin, "ia4tube-social-migration-login-check"],
+    ["postgres:", LOGIN_VERIFIER_FIXTURE.runtimeLogin, "ia4tube-social-runtime-login-check"]
+  ]) {
+    const fixture = createLoginVerifierFixture();
+    const original = fixture.provisionerPool;
+    const pool = new fixture.bridge.PoolClass(loginVerifierPoolConfiguration(fixture, {
+      protocol,
+      login,
+      application_name: applicationName
+    }));
+    assert.equal(fixture.constructed.length, 1);
+    assert.deepEqual(Object.keys(pool.options).sort(), [
+      "allowExitOnIdle", "application_name", "connectionTimeoutMillis", "database",
+      "host", "idleTimeoutMillis", "max", "min", "options", "password", "port",
+      "query_timeout", "ssl", "user"
+    ].sort());
+    assert.equal(Object.hasOwn(pool.options, "connectionString"), false);
+    assert.equal(pool.options.host, LOGIN_VERIFIER_FIXTURE.privateHost);
+    assert.equal(pool.options.port, 5432);
+    assert.equal(pool.options.database, LOGIN_VERIFIER_FIXTURE.database);
+    assert.equal(pool.options.user, login);
+    assert.equal(pool.options.password, LOGIN_VERIFIER_FIXTURE.passwords[login]);
+    assert.equal(pool.options.ssl, false);
+    assert.equal(pool.options.max, 1);
+    assert.equal(pool.options.min, 0);
+    assert.equal(pool.options.connectionTimeoutMillis, 5_000);
+    assert.equal(pool.options.idleTimeoutMillis, 5_000);
+    assert.equal(pool.options.query_timeout, 15_000);
+    assert.equal(pool.options.application_name, applicationName);
+    assert.equal(Object.isFrozen(original), true);
+    await pool.end();
+    assert.deepEqual(fixture.ended, [login]);
+  }
+});
+
+test("login verifier bridge refuses every URI, configuration and provenance drift before BasePool", () => {
+  const canonicalMigrationUrl = loginVerifierUrl({
+    login: LOGIN_VERIFIER_FIXTURE.migrationLogin,
+    password: LOGIN_VERIFIER_FIXTURE.passwords[LOGIN_VERIFIER_FIXTURE.migrationLogin]
+  });
+  const cases = [
+    ["logical host", { configuration: { host: "localhost" } }, "linux_gate_login_verifier_configuration_invalid"],
+    ["URI loopback alias", { uriHost: "localhost" }, "linux_gate_login_verifier_uri_invalid"],
+    ["URI external host", { uriHost: "database.example.invalid" }, "linux_gate_login_verifier_uri_invalid"],
+    ["URI production host", { uriHost: "production.example.com" }, "linux_gate_login_verifier_uri_invalid"],
+    ["logical port", { configuration: { port: 5433 } }, "linux_gate_login_verifier_configuration_invalid"],
+    ["URI port", { uriPort: 5433 }, "linux_gate_login_verifier_uri_invalid"],
+    ["logical database", { configuration: { database: "ia4tube_social_disposable_restore_0004_012345abcdef" } }, "linux_gate_login_verifier_configuration_invalid"],
+    ["URI database", { uriDatabase: "ia4tube_social_disposable_restore_0004_012345abcdef" }, "linux_gate_login_verifier_uri_invalid"],
+    ["migration URI with runtime application", {
+      login: LOGIN_VERIFIER_FIXTURE.migrationLogin,
+      application_name: "ia4tube-social-runtime-login-check"
+    }, "linux_gate_login_verifier_configuration_invalid"],
+    ["runtime URI substituted into the migration verifier entry", {
+      login: LOGIN_VERIFIER_FIXTURE.runtimeLogin,
+      application_name: "ia4tube-social-migration-login-check"
+    }, "linux_gate_login_verifier_configuration_invalid"],
+    ["unknown login", { login: "ia4tube_social_local_unknown", uriPassword: "Synthetic-Unknown-Credential-000!" }, "linux_gate_login_verifier_login_invalid"],
+    ["crossed migration/runtime password", {
+      login: LOGIN_VERIFIER_FIXTURE.migrationLogin,
+      uriPassword: LOGIN_VERIFIER_FIXTURE.passwords[LOGIN_VERIFIER_FIXTURE.runtimeLogin]
+    }, "linux_gate_login_verifier_uri_invalid"],
+    ["wrong password", { uriPassword: "Synthetic-Divergent-Credential-000!" }, "linux_gate_login_verifier_uri_invalid"],
+    ["missing password", { omitPassword: true }, "linux_gate_login_verifier_uri_invalid"],
+    ["query", { search: "sslmode=disable" }, "linux_gate_login_verifier_uri_invalid"],
+    ["fragment", { hash: "unexpected" }, "linux_gate_login_verifier_uri_invalid"],
+    ["bare query delimiter", { connectionString: `${canonicalMigrationUrl}?` }, "linux_gate_login_verifier_uri_invalid"],
+    ["bare fragment delimiter", { connectionString: `${canonicalMigrationUrl}#` }, "linux_gate_login_verifier_uri_invalid"],
+    ["leading whitespace", { connectionString: ` ${canonicalMigrationUrl}` }, "linux_gate_login_verifier_uri_invalid"],
+    ["trailing whitespace", { connectionString: `${canonicalMigrationUrl} ` }, "linux_gate_login_verifier_uri_invalid"],
+    ["non-canonical port", {
+      connectionString: canonicalMigrationUrl.replace(":5432/", ":05432/")
+    }, "linux_gate_login_verifier_uri_invalid"],
+    ["malformed URI", { connectionString: "not a postgresql uri" }, "linux_gate_login_verifier_uri_invalid"],
+    ["non-PostgreSQL protocol", { protocol: "http:" }, "linux_gate_login_verifier_uri_invalid"],
+    ["TLS", { configuration: { ssl: true } }, "linux_gate_login_verifier_configuration_invalid"],
+    ["application name", { application_name: "ia4tube-social-unapproved-check" }, "linux_gate_login_verifier_configuration_invalid"],
+    ["pool max", { configuration: { max: 2 } }, "linux_gate_login_verifier_configuration_invalid"],
+    ["pool min", { configuration: { min: 1 } }, "linux_gate_login_verifier_configuration_invalid"],
+    ["connect timeout", { configuration: { connectionTimeoutMillis: 5_001 } }, "linux_gate_login_verifier_configuration_invalid"],
+    ["idle timeout", { configuration: { idleTimeoutMillis: 5_001 } }, "linux_gate_login_verifier_configuration_invalid"],
+    ["query timeout", { configuration: { query_timeout: 15_001 } }, "linux_gate_login_verifier_configuration_invalid"],
+    ["session options", { configuration: { options: "-c statement_timeout=9999" } }, "linux_gate_login_verifier_configuration_invalid"],
+    ["allow exit", { configuration: { allowExitOnIdle: true } }, "linux_gate_login_verifier_configuration_invalid"],
+    ["extra option", { configuration: { unexpected: true } }, "linux_gate_login_verifier_provenance_invalid"],
+    ["missing connection string", { configuration: { connectionString: undefined } }, "linux_gate_login_verifier_provenance_invalid"]
+  ];
+  for (const [label, overrides, code] of cases) {
+    const fixture = createLoginVerifierFixture();
+    assert.throws(
+      () => new fixture.bridge.PoolClass(loginVerifierPoolConfiguration(fixture, overrides)),
+      (error) => error?.code === code && !String(error?.message).includes("Synthetic-"),
+      label
+    );
+    assert.equal(fixture.constructed.length, 0, label);
+  }
+});
+
+test("login verifier bridge refuses external provenance, ambient PostgreSQL state and unapproved physical transport", () => {
+  class ContractPool {}
+  const contractPostgres = {
+    InstrumentedPool: ContractPool,
+    databaseHost: LOGIN_VERIFIER_FIXTURE.privateHost,
+    port: 5432
+  };
+  const exactContract = {
+    target: { host: "127.0.0.1", port: 5432 },
+    database: LOGIN_VERIFIER_FIXTURE.database,
+    provisionerLogin: LOGIN_VERIFIER_FIXTURE.provisionerLogin,
+    migrationLogin: LOGIN_VERIFIER_FIXTURE.migrationLogin,
+    runtimeLogin: LOGIN_VERIFIER_FIXTURE.runtimeLogin,
+    passwords: { ...LOGIN_VERIFIER_FIXTURE.passwords }
+  };
+  for (const contract of [
+    { ...exactContract, target: { host: "database.example.invalid", port: 5432 } },
+    { ...exactContract, physicalHost: ["10", "99", "0", "7"].join(".") },
+    { ...exactContract, target: { ...exactContract.target, physicalHost: ["10", "99", "0", "7"].join(".") } }
+  ]) {
+    assert.throws(
+      () => createVerifiedLoginCredentialPoolBridge(contractPostgres, contract, { environment: {} }),
+      { code: "linux_gate_login_verifier_contract_invalid" }
+    );
+  }
+
+  const external = createLoginVerifierFixture();
+  const externalConfiguration = loginVerifierProvisionerPool({
+    connectionString: loginVerifierUrl({
+      login: LOGIN_VERIFIER_FIXTURE.migrationLogin,
+      password: LOGIN_VERIFIER_FIXTURE.passwords[LOGIN_VERIFIER_FIXTURE.migrationLogin]
+    }),
+    application_name: "ia4tube-social-migration-login-check"
+  });
+  assert.throws(
+    () => new external.bridge.PoolClass(externalConfiguration),
+    { code: "linux_gate_login_verifier_provenance_invalid" }
+  );
+  assert.equal(external.constructed.length, 0);
+  assert.throws(
+    () => external.bridge.authorizeProvisionerPool(loginVerifierProvisionerPool()),
+    { code: "linux_gate_login_verifier_provenance_invalid" }
+  );
+
+  for (const environment of [
+    { DATABASE_URL: "postgresql://external.invalid/database" },
+    { PGHOST: "127.0.0.1" },
+    { PGUSER: LOGIN_VERIFIER_FIXTURE.migrationLogin },
+    { PGCLIENTENCODING: "UTF8" },
+    { PGPASSWORD: "Synthetic-Ambient-Credential-000!" },
+    { PGSSLMODE: "disable" }
+  ]) {
+    assert.throws(
+      () => createLoginVerifierFixture({ environment, authorize: false }),
+      { code: "linux_gate_login_verifier_ambient_environment_refused" }
+    );
+  }
+  for (const physicalHost of ["127.0.0.1", "8.8.8.8", "database.example.invalid"]) {
+    assert.throws(
+      () => createLoginVerifierFixture({ physicalHost, authorize: false }),
+      { code: "linux_gate_login_verifier_private_transport_invalid" }
+    );
+  }
+  assert.throws(
+    () => createLoginVerifierFixture({ physicalPort: 5433, authorize: false }),
+    { code: "linux_gate_login_verifier_private_transport_invalid" }
+  );
+  assert.throws(
+    () => createLoginVerifierFixture({ omitPhysicalPort: true, authorize: false }),
+    { code: "linux_gate_login_verifier_private_transport_invalid" }
+  );
+
+  const hostDrift = createLoginVerifierFixture();
+  hostDrift.setPhysicalHost(["10", "44", "0", "10"].join("."));
+  assert.throws(
+    () => new hostDrift.bridge.PoolClass(loginVerifierPoolConfiguration(hostDrift)),
+    { code: "linux_gate_login_verifier_provenance_invalid" }
+  );
+  assert.equal(hostDrift.constructed.length, 0);
+  const portDrift = createLoginVerifierFixture();
+  portDrift.setPhysicalPort(5433);
+  assert.throws(
+    () => new portDrift.bridge.PoolClass(loginVerifierPoolConfiguration(portDrift)),
+    { code: "linux_gate_login_verifier_provenance_invalid" }
+  );
+  assert.equal(portDrift.constructed.length, 0);
+});
+
+test("login verifier bridge preserves caller input and sanitizes BasePool failures without logs or secrets", async () => {
+  const original = loginVerifierProvisionerPool();
+  const originalKeys = Reflect.ownKeys(original);
+  const originalUrl = original.connectionString;
+  const fixture = createLoginVerifierFixture({ provisionerPool: original });
+  assert.notStrictEqual(fixture.provisionerPool, original);
+  assert.deepEqual(Reflect.ownKeys(original), originalKeys);
+  assert.equal(original.connectionString, originalUrl);
+  assert.equal(Object.getOwnPropertySymbols(original).length, 0);
+
+  const secret = LOGIN_VERIFIER_FIXTURE.passwords[LOGIN_VERIFIER_FIXTURE.migrationLogin];
+  const driverFailure = new Error(`driver refused ${secret} at postgresql://sensitive.invalid/database`);
+  const logs = [];
+  const originalConsole = { error: console.error, log: console.log, warn: console.warn };
+  console.error = (...values) => logs.push(values);
+  console.log = (...values) => logs.push(values);
+  console.warn = (...values) => logs.push(values);
+  try {
+    const failing = createLoginVerifierFixture({ baseFailure: driverFailure });
+    const target = Object.freeze({
+      host: "127.0.0.1",
+      port: "5432",
+      database: LOGIN_VERIFIER_FIXTURE.database,
+      provisionerLogin: LOGIN_VERIFIER_FIXTURE.provisionerLogin,
+      migrationLogin: LOGIN_VERIFIER_FIXTURE.migrationLogin,
+      runtimeLogin: LOGIN_VERIFIER_FIXTURE.runtimeLogin
+    });
+    const hidden = (value, password) => {
+      Object.defineProperty(value, "password", { value: password, enumerable: false });
+      return Object.freeze(value);
+    };
+    const configuration = Object.freeze({
+      target,
+      targetFingerprint: targetFingerprint(target),
+      provisionerPool: failing.provisionerPool,
+      migration: hidden({
+        login: LOGIN_VERIFIER_FIXTURE.migrationLogin,
+        role: MIGRATOR_ROLE,
+        connectionLimit: MIGRATION_CONNECTION_LIMIT
+      }, secret),
+      runtime: hidden({
+        login: LOGIN_VERIFIER_FIXTURE.runtimeLogin,
+        role: RUNTIME_ROLE,
+        connectionLimit: RUNTIME_CONNECTION_LIMIT
+      }, LOGIN_VERIFIER_FIXTURE.passwords[LOGIN_VERIFIER_FIXTURE.runtimeLogin])
+    });
+    await assert.rejects(
+      verifyProvisionedLoginCredentials(failing.bridge.PoolClass, configuration),
+      (error) => (
+        error?.code === "login_bootstrap_credential_verification_failed" &&
+        error?.cause === undefined &&
+        !String(error?.message).includes(secret) &&
+        !String(error?.stack).includes(secret) &&
+        !JSON.stringify(error).includes(secret)
+      )
+    );
+    assert.equal(failing.constructed.length, 0);
+    assert.equal(JSON.stringify(logs).includes(secret), false);
+    assert.deepEqual(logs, []);
+  } finally {
+    console.error = originalConsole.error;
+    console.log = originalConsole.log;
+    console.warn = originalConsole.warn;
+  }
+});
+
+test("login verifier bridge keeps InstrumentedPool metrics race-free, closes both pools and leaves the registry fail-closed", async () => {
+  const registry = createPoolMetricsRegistry();
+  const trackedPools = new Set();
+  const pools = [];
+  const roleChanges = [];
+  class SimulatedPool extends EventEmitter {
+    constructor(configuration) {
+      super();
+      this.options = configuration;
+      this.totalCount = 0;
+      this.idleCount = 0;
+      this.waitingCount = 0;
+      pools.push(this);
+    }
+    async connect() {
+      this.totalCount = 1;
+      const pool = this;
+      const client = {
+        async query(text, values = []) {
+          const sql = String(text);
+          if (sql.includes("role_not_assumed")) {
+            return { rows: [{
+              login_exact: values[0] === pool.options.user,
+              role_not_assumed: true,
+              database_exact: values[1] === pool.options.database,
+              superuser_absent: true,
+              database_create_absent: true,
+              database_temp_absent: true
+            }] };
+          }
+          if (sql.startsWith("SET LOCAL ROLE")) {
+            const expected = pool.options.user === LOGIN_VERIFIER_FIXTURE.migrationLogin
+              ? MIGRATOR_ROLE
+              : RUNTIME_ROLE;
+            assert.equal(sql, `SET LOCAL ROLE "${expected}"`);
+            roleChanges.push([pool.options.user, expected]);
+            return { rows: [] };
+          }
+          if (sql.includes("role_exact")) {
+            const expected = pool.options.user === LOGIN_VERIFIER_FIXTURE.migrationLogin
+              ? MIGRATOR_ROLE
+              : RUNTIME_ROLE;
+            return { rows: [{
+              login_exact: values[0] === pool.options.user,
+              role_exact: values[1] === expected
+            }] };
+          }
+          return { rows: [] };
+        },
+        release() {
+          pool.totalCount = 0;
+          pool.emit("release", undefined, client);
+          pool.emit("remove", client);
+        }
+      };
+      this.emit("connect", client);
+      this.emit("acquire", client);
+      return client;
+    }
+    async end() {
+      assert.equal(this.totalCount, 0);
+    }
+  }
+  const InstrumentedPool = instrumentedPoolClass(SimulatedPool, registry, trackedPools);
+  const fixture = createLoginVerifierFixture({ InstrumentedPool });
+  const target = Object.freeze({
+    host: "127.0.0.1",
+    port: "5432",
+    database: LOGIN_VERIFIER_FIXTURE.database,
+    provisionerLogin: LOGIN_VERIFIER_FIXTURE.provisionerLogin,
+    migrationLogin: LOGIN_VERIFIER_FIXTURE.migrationLogin,
+    runtimeLogin: LOGIN_VERIFIER_FIXTURE.runtimeLogin
+  });
+  const hidden = (value, password) => {
+    Object.defineProperty(value, "password", { value: password, enumerable: false });
+    return Object.freeze(value);
+  };
+  const configuration = Object.freeze({
+    target,
+    targetFingerprint: targetFingerprint(target),
+    provisionerPool: fixture.provisionerPool,
+    migration: hidden({
+      login: LOGIN_VERIFIER_FIXTURE.migrationLogin,
+      role: MIGRATOR_ROLE,
+      connectionLimit: MIGRATION_CONNECTION_LIMIT
+    }, LOGIN_VERIFIER_FIXTURE.passwords[LOGIN_VERIFIER_FIXTURE.migrationLogin]),
+    runtime: hidden({
+      login: LOGIN_VERIFIER_FIXTURE.runtimeLogin,
+      role: RUNTIME_ROLE,
+      connectionLimit: RUNTIME_CONNECTION_LIMIT
+    }, LOGIN_VERIFIER_FIXTURE.passwords[LOGIN_VERIFIER_FIXTURE.runtimeLogin])
+  });
+
+  assert.deepEqual(
+    await verifyProvisionedLoginCredentials(fixture.bridge.PoolClass, configuration),
+    { safe: true, verified: 2 }
+  );
+  assert.equal(pools.length, 2);
+  assert.equal(trackedPools.size, 0);
+  assert.equal(pools.every((pool) => pool.linuxMetricsLifecycle.state === "closed"), true);
+  assert.equal(pools.every((pool) => pool.listenerCount("connect") === 0), true);
+  assert.equal(pools.every((pool) => pool.listenerCount("acquire") === 0), true);
+  assert.equal(pools.every((pool) => pool.listenerCount("remove") === 0), true);
+  assert.deepEqual(roleChanges.sort(), [
+    [LOGIN_VERIFIER_FIXTURE.migrationLogin, MIGRATOR_ROLE],
+    [LOGIN_VERIFIER_FIXTURE.runtimeLogin, RUNTIME_ROLE]
+  ].sort());
+  const metrics = registry.snapshot();
+  assert.equal(metrics.counts.poolInstancesObserved, 2);
+  assert.equal(metrics.counts.poolAcquisitionsGlobal, 2);
+  assert.equal(metrics.counts.poolConfiguredMaxMigration, 1);
+  assert.equal(metrics.counts.poolConfiguredMaxRuntime, 1);
+  assert.equal(metrics.checks.poolConfiguredMaxRespected, true);
+  assert.throws(
+    () => registry.observe(pools[0], pools[0]),
+    { code: "harness_pool_metrics_pool_unregistered" }
+  );
 });
 
 test("physical plan pool adapter refuses divergent logical or physical transports before BasePool", () => {

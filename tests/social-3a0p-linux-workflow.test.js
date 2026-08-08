@@ -8,10 +8,10 @@ const test = require("node:test");
 const REPOSITORY_ROOT = path.resolve(__dirname, "..");
 const WORKFLOW_RELATIVE_PATH = ".github/workflows/social-3a0p-linux-physical-gates.yml";
 const WORKFLOW_PATH = path.join(REPOSITORY_ROOT, ...WORKFLOW_RELATIVE_PATH.split("/"));
-const BRANCH = "social/checkpoint-3a0p-linux-pool-lifecycle-20260808";
-const PARENT = "68819e49d8120aa35afe864848404444b0a40ad7";
+const BRANCH = "social/checkpoint-3a0p-linux-login-verifier-bridge-20260808";
+const PARENT = "1ce8bd3c9ce0830c942b9b2c8ea666a74c859442";
 const ZERO_SHA = "0000000000000000000000000000000000000000";
-const MESSAGE = "[run-social-3a0p-linux-gate] fix pool metrics shutdown lifecycle";
+const MESSAGE = "[run-social-3a0p-linux-gate] bridge verified login credential transport";
 const JOB_IF = [
   "github.event_name == 'push'",
   `github.ref == 'refs/heads/${BRANCH}'`,
@@ -28,6 +28,15 @@ const ACTIONS = Object.freeze({
   setupNode: "actions/setup-node@820762786026740c76f36085b0efc47a31fe5020",
   uploadArtifact: "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a"
 });
+const AUTHORIZED_FILES = Object.freeze([
+  ".github/workflows/social-3a0p-linux-physical-gates.yml",
+  "docs/social-3a0p-linux-physical-gates.md",
+  "scripts/social-3a0p-linux-gate.js",
+  "scripts/social-3a0p-local-windows-physical-plans.js",
+  "tests/social-3a0p-linux-gate.test.js",
+  "tests/social-3a0p-local-windows-physical-plans.test.js",
+  "tests/social-3a0p-linux-workflow.test.js"
+]);
 
 function readWorkflow() {
   const source = fs.readFileSync(WORKFLOW_PATH, "utf8");
@@ -69,11 +78,13 @@ test("workflow triggers only the exact authorized new-branch creation push", () 
   const guard = job.steps.find((step) => step.name === "Verify immutable execution contract");
   assert.ok(guard.run.includes('test "$(git rev-parse HEAD^)" = "$SOCIAL_3A0P_AUTHORIZED_PARENT"'));
   assert.ok(guard.run.includes('test "$(git log -1 --pretty=%B)" = "$SOCIAL_3A0P_AUTHORIZED_MESSAGE"'));
-  assert.ok(guard.run.includes('git diff --quiet "$SOCIAL_3A0P_PRODUCT_COMMIT" HEAD -- src db/migrations migrations server.js package.json package-lock.json'));
+  assert.ok(guard.run.includes('git diff --quiet "$SOCIAL_3A0P_PRODUCT_COMMIT" HEAD -- src db migrations server.js package.json package-lock.json'));
   assert.ok(guard.run.includes('git diff --name-only "$SOCIAL_3A0P_AUTHORIZED_PARENT" HEAD'));
-  assert.ok(guard.run.includes("scripts/social-3a0p-linux-postgres.js"));
-  assert.ok(guard.run.includes("tests/social-3a0p-linux-postgres.test.js"));
-  assert.ok(guard.run.includes("tests/social-3a0p-linux-workflow.test.js"));
+  const allowlist = guard.run.match(/case "\$changed" in\n\s+([^\n)]+)\) ;;/);
+  assert.ok(allowlist);
+  assert.deepEqual(allowlist[1].split("|"), AUTHORIZED_FILES);
+  assert.equal(guard.run.includes("scripts/social-3a0p-linux-postgres.js"), false);
+  assert.equal(guard.run.includes("tests/social-3a0p-linux-postgres.test.js"), false);
   assert.equal(guard.run.includes("scripts/social-3a0p-linux-*"), false);
   assert.equal(guard.run.includes("tests/social-3a0p-linux-*"), false);
   assert.equal(guard.run.includes("docs/social-3a0p-linux-*"), false);
@@ -108,7 +119,7 @@ test("creation-push contract refuses wrong branch, parent, message, before, crea
     { ref: "refs/heads/social/checkpoint-3a0p-linux-physical-gates-20260807" },
     { parent: "88ff0ea427e6f321e8026910d018cd37e1e2687e" },
     { before: PARENT },
-    { message: "[run-social-3a0p-linux-gate] use isolated internal network without host publishing" },
+    { message: "[run-social-3a0p-linux-gate] fix pool metrics shutdown lifecycle" },
     { created: false },
     { deleted: true },
     { forced: true },

@@ -413,11 +413,18 @@ function createDefaultDatabaseManager({
   state,
   paths,
   PoolClass,
+  createLoginCredentialVerifierBridge = null,
   repositoryRoot,
   product,
   fileSystem = fs
 }) {
-  if (typeof PoolClass !== "function") fail("windows_physical_pool_missing");
+  if (
+    typeof PoolClass !== "function" ||
+    (createLoginCredentialVerifierBridge !== null &&
+      typeof createLoginCredentialVerifierBridge !== "function")
+  ) {
+    fail("windows_physical_pool_missing");
+  }
   const migrations = product.migrations;
   const loginBootstrap = product.loginBootstrap;
   const rolesSql = fileSystem.readFileSync(
@@ -588,9 +595,35 @@ function createDefaultDatabaseManager({
       provisionerPool,
       configuration
     );
+    let verifierPoolClass = PoolClass;
+    let verifierConfiguration = configuration;
+    if (createLoginCredentialVerifierBridge) {
+      const bridge = createLoginCredentialVerifierBridge({ database, configuration });
+      if (
+        !bridge || Object.getPrototypeOf(bridge) !== Object.prototype ||
+        typeof bridge.PoolClass !== "function" ||
+        typeof bridge.authorizeProvisionerPool !== "function"
+      ) {
+        fail("windows_physical_login_verifier_bridge_invalid");
+      }
+      const authorizedProvisionerPool = bridge.authorizeProvisionerPool(
+        configuration.provisionerPool
+      );
+      if (
+        !authorizedProvisionerPool ||
+        authorizedProvisionerPool === configuration.provisionerPool
+      ) {
+        fail("windows_physical_login_verifier_bridge_invalid");
+      }
+      verifierPoolClass = bridge.PoolClass;
+      verifierConfiguration = Object.freeze({
+        ...configuration,
+        provisionerPool: authorizedProvisionerPool
+      });
+    }
     const verified = await loginBootstrap.verifyProvisionedLoginCredentials(
-      PoolClass,
-      configuration
+      verifierPoolClass,
+      verifierConfiguration
     );
     if (
       first.safe !== true ||
@@ -881,6 +914,8 @@ function createWindowsPhysicalPlans(options = {}) {
     state,
     paths,
     PoolClass: options.PoolClass,
+    createLoginCredentialVerifierBridge:
+      options.dependencies?.createLoginCredentialVerifierBridge || null,
     repositoryRoot: options.repositoryRoot,
     product,
     fileSystem: options.dependencies?.fileSystem || fs
