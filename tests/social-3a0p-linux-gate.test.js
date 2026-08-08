@@ -18,6 +18,7 @@ const {
   createLinuxRestoreConfigFacade,
   createPhaseRunner,
   createPhysicalPoolDrainTracker,
+  createPrivatePlanPoolOptionsAdapter,
   createRoleScopedPlanPoolClass,
   evidenceSafe,
   failureCode,
@@ -40,6 +41,11 @@ test("canonical evidence JSON is stable and key ordered", () => {
 test("evidence contract refuses secrets, URLs and sensitive key names", () => {
   assert.equal(evidenceSafe({ ok: true, sha256: "a".repeat(64) }), true);
   assert.equal(evidenceSafe({ databaseUrl: "redacted" }), false);
+  assert.equal(evidenceSafe({ databaseHost: "redacted" }), false);
+  assert.equal(evidenceSafe({ containerId: "a".repeat(64) }), false);
+  assert.equal(evidenceSafe({ networkId: "b".repeat(64) }), false);
+  assert.equal(evidenceSafe({ value: "172.30.0.2" }), false);
+  assert.equal(evidenceSafe({ value: "172.30.0.0/16" }), false);
   assert.equal(evidenceSafe({ value: "postgresql://user:pass@host/db" }), false);
   assert.equal(evidenceSafe({ value: "-----BEGIN PRIVATE KEY-----" }), false);
   assert.equal(evidenceSafe({ value: "eyJabcdefghijk.abcdefghijk.abcdefghijk" }), false);
@@ -83,46 +89,46 @@ test("postgres failure evidence preserves only the closed sanitized diagnostics"
   const evidence = { phases: [], firstFailure: null };
   const phase = createPhaseRunner(evidence);
   const diagnostic = {
-    dockerRunCompleted: true,
-    containerIdPresent: true,
-    containerIdMatched: true,
+    networkCreated: true,
+    networkInternal: true,
+    networkDriverClass: "bridge",
+    containerCreated: true,
     containerRunning: true,
-    inspectCompleted: true,
-    networkSettingsPortsPresent: true,
-    internalPortEntryPresent: true,
-    bindingCount: 1,
-    hostIpClass: "loopback_ipv4",
-    hostPortPresent: true,
-    hostPortNumeric: true,
-    externalBindingDetected: false,
-    loopbackConnectionPassed: false,
-    failureStage: "loopback_connection",
-    exitCodeClass: "zero",
-    signalPresent: false,
-    stdoutPresent: true,
-    stderrPresent: false,
+    containerNetworkCount: 1,
+    containerIpPresent: true,
+    containerIpWithinSubnet: true,
+    portBindingsAbsent: true,
+    publishedPortsAbsent: true,
+    internalReadinessPassed: true,
+    hostDirectConnectionAttempted: true,
+    hostDirectConnectionPassed: false,
+    hostListenerAbsent: true,
+    failureStage: "host_direct_connection",
+    sanitizedFailureCode: "linux_postgres_host_direct_connection_failed",
+    cleanupCompleted: false,
     rawStdout: "forbidden",
     rawInspect: { Id: "forbidden" },
     message: "forbidden"
   };
   await assert.rejects(
     phase("postgres", async () => {
-      throw new LinuxPostgresFailure("linux_postgres_loopback_connection_failed", diagnostic);
+      throw new LinuxPostgresFailure("linux_postgres_host_direct_connection_failed", diagnostic);
     }),
-    { code: "linux_postgres_loopback_connection_failed" }
+    { code: "linux_postgres_host_direct_connection_failed" }
   );
   assert.deepEqual(evidence.firstFailure, {
     phase: "postgres",
-    code: "linux_postgres_loopback_connection_failed"
+    code: "linux_postgres_host_direct_connection_failed"
   });
   assert.equal(evidence.phases.length, 1);
   assert.deepEqual(Object.keys(evidence.phases[0].diagnostics).sort(), [
-    "dockerRunCompleted", "containerIdPresent", "containerIdMatched",
-    "containerRunning", "inspectCompleted", "networkSettingsPortsPresent",
-    "internalPortEntryPresent", "bindingCount", "hostIpClass",
-    "hostPortPresent", "hostPortNumeric", "externalBindingDetected",
-    "loopbackConnectionPassed", "failureStage", "exitCodeClass",
-    "signalPresent", "stdoutPresent", "stderrPresent"
+    "networkCreated", "networkInternal", "networkDriverClass",
+    "containerCreated", "containerRunning", "containerNetworkCount",
+    "containerIpPresent", "containerIpWithinSubnet", "portBindingsAbsent",
+    "publishedPortsAbsent", "internalReadinessPassed",
+    "hostDirectConnectionAttempted", "hostDirectConnectionPassed",
+    "hostListenerAbsent", "failureStage", "sanitizedFailureCode",
+    "cleanupCompleted"
   ].sort());
   const serialized = JSON.stringify(evidence);
   assert.equal(serialized.includes("forbidden"), false);
@@ -369,6 +375,137 @@ test("restore inventory interception runs once only for an exact disposable targ
   await assert.rejects(sourceClient.query(inventory), { code: "linux_gate_restore_target_database_invalid" });
   sourceClient.release();
   await Pool.closeAll();
+});
+
+test("physical plan pools remap only the canonical logical transport before BasePool", async () => {
+  const privateHost = ["10", "44", "0", "9"].join(".");
+  const adaptedInputs = [];
+  const constructed = [];
+  const postgres = {
+    get databaseHost() { return privateHost; },
+    adaptLogicalPoolOptions(options) {
+      adaptedInputs.push(options);
+      return { ...options, host: privateHost, port: 5432 };
+    }
+  };
+  class BasePool {
+    constructor(options) {
+      this.options = options;
+      constructed.push(options);
+    }
+    async end() {}
+  }
+  const Pool = createRoleScopedPlanPoolClass(
+    BasePool,
+    async () => ({ rows: [] }),
+    null,
+    async () => true,
+    createPrivatePlanPoolOptionsAdapter(postgres)
+  );
+  const logical = {
+    host: "127.0.0.1",
+    port: 5432,
+    ssl: false,
+    connectionString: undefined,
+    database: "ia4tube_social_local",
+    user: "ia4tube_social_local_migration",
+    password: "synthetic-not-a-secret",
+    max: 1
+  };
+  const pool = new Pool(logical);
+  const verifier = new Pool({ ...logical, database: "ia4tube_social_disposable_restore_0003_012345abcdef" });
+  assert.equal(logical.host, "127.0.0.1");
+  assert.equal(logical.port, 5432);
+  assert.equal(logical.ssl, false);
+  assert.equal(adaptedInputs.length, 2);
+  assert.equal(constructed.length, 2);
+  for (const options of constructed) {
+    assert.equal(options.host, privateHost);
+    assert.equal(options.port, 5432);
+    assert.equal(options.ssl, false);
+    assert.equal(options.connectionString, undefined);
+    assert.equal(options.max, 1);
+  }
+  assert.equal(pool.options.database, "ia4tube_social_local");
+  assert.equal(verifier.options.database, "ia4tube_social_disposable_restore_0003_012345abcdef");
+  await Pool.closeAll();
+});
+
+test("physical plan pool adapter refuses divergent logical or physical transports before BasePool", () => {
+  const privateHost = ["172", "20", "0", "7"].join(".");
+  let constructed = 0;
+  class BasePool {
+    constructor(options) { constructed += 1; this.options = options; }
+    async end() {}
+  }
+  const valid = {
+    host: "127.0.0.1",
+    port: 5432,
+    ssl: false,
+    database: "ia4tube_social_local",
+    user: "ia4tube_social_local_migration",
+    password: "synthetic-not-a-secret",
+    max: 1
+  };
+  const makePool = (adaptLogicalPoolOptions) => createRoleScopedPlanPoolClass(
+    BasePool,
+    async () => ({ rows: [] }),
+    null,
+    async () => true,
+    createPrivatePlanPoolOptionsAdapter({
+      databaseHost: privateHost,
+      adaptLogicalPoolOptions
+    })
+  );
+  const validAdapter = (options) => ({ ...options, host: privateHost, port: 5432 });
+  const Pool = makePool(validAdapter);
+  for (const divergent of [
+    { host: "localhost" },
+    { host: privateHost },
+    { port: 5433 },
+    { port: "5432" },
+    { ssl: true },
+    { ssl: undefined },
+    { connectionString: "postgresql://synthetic.invalid/local" }
+  ]) {
+    assert.throws(
+      () => new Pool({ ...valid, ...divergent }),
+      { code: "linux_gate_plan_pool_logical_transport_invalid" }
+    );
+  }
+  assert.equal(constructed, 0);
+
+  const invalidPhysicalAdapters = [
+    (options) => options,
+    (options) => ({ ...options, host: "127.0.0.1" }),
+    (options) => ({ ...options, host: privateHost, port: 5433 }),
+    (options) => ({ ...options, host: privateHost, ssl: true }),
+    (options) => ({ ...options, host: privateHost, database: "different_database" }),
+    (options) => ({ ...options, host: privateHost, unexpected: true }),
+    (options) => {
+      options.host = privateHost;
+      return { ...options };
+    }
+  ];
+  for (const adaptLogicalPoolOptions of invalidPhysicalAdapters) {
+    const InvalidPool = makePool(adaptLogicalPoolOptions);
+    assert.throws(
+      () => new InvalidPool({ ...valid }),
+      { code: "linux_gate_plan_pool_physical_transport_invalid" }
+    );
+  }
+  assert.equal(constructed, 0);
+  assert.throws(
+    () => createPrivatePlanPoolOptionsAdapter({ databaseHost: privateHost }),
+    { code: "linux_gate_plan_pool_transport_contract_invalid" }
+  );
+  assert.throws(
+    () => createPrivatePlanPoolOptionsAdapter({
+      databaseHost: "127.0.0.1",
+      adaptLogicalPoolOptions: validAdapter
+    }),
+    { code: "linux_gate_plan_pool_private_host_invalid" }
+  );
 });
 
 test("profile 0003 source fixture is seeded and verified with identical IDs after restore", async () => {

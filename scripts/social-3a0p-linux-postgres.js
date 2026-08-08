@@ -2,6 +2,7 @@
 
 const crypto = require("node:crypto");
 const fs = require("node:fs");
+const net = require("node:net");
 const path = require("node:path");
 const { spawn } = require("node:child_process");
 
@@ -9,6 +10,7 @@ const IMAGE = "docker.io/library/postgres:18.4-bookworm@sha256:7e6103cf85f88f7a0
 const IMAGE_DIGEST = "sha256:7e6103cf85f88f7a0eddb3ec0b1ba8940eba098ed118ade25a729ca9daee5568";
 const LOOPBACK = "127.0.0.1";
 const INTERNAL_PORT = 5432;
+const POSTGRES_CONNECTIVITY_MODE = "internal_bridge_direct_v1";
 const ADMIN_LOGIN = "ia4tube_social_local_admin";
 const PROVISIONER_LOGIN = "ia4tube_social_local_provisioner";
 const MIGRATION_LOGIN = "ia4tube_social_local_migration";
@@ -21,50 +23,50 @@ const SAFE_RUN_ID = /^[a-z0-9][a-z0-9-]{2,63}$/;
 const SAFE_DATABASE = /^[a-z][a-z0-9_]{2,62}$/;
 const SAFE_LOGIN = new Set([MIGRATION_LOGIN, PROVISIONER_LOGIN]);
 const CONTAINER_ID = /^[0-9a-f]{64}$/;
+const EMPTY_IDENTITY_HASH = "0".repeat(64);
+const IDENTITY_MARKER_FORMAT = "ia4tube-social-3a0p-resource-identity-v1";
 const INTERNAL_PORT_KEY = `${INTERNAL_PORT}/tcp`;
 const DIAGNOSTIC_KEY_LIST = Object.freeze([
-  "dockerRunCompleted", "containerIdPresent", "containerIdMatched",
-  "containerRunning", "inspectCompleted", "networkSettingsPortsPresent",
-  "internalPortEntryPresent", "bindingCount", "hostIpClass",
-  "hostPortPresent", "hostPortNumeric", "externalBindingDetected",
-  "loopbackConnectionPassed", "failureStage", "exitCodeClass",
-  "signalPresent", "stdoutPresent", "stderrPresent"
+  "networkCreated", "networkInternal", "networkDriverClass",
+  "containerCreated", "containerRunning", "containerNetworkCount",
+  "containerIpPresent", "containerIpWithinSubnet", "portBindingsAbsent",
+  "publishedPortsAbsent", "internalReadinessPassed",
+  "hostDirectConnectionAttempted", "hostDirectConnectionPassed",
+  "hostListenerAbsent", "failureStage", "sanitizedFailureCode",
+  "cleanupCompleted"
 ]);
 const DIAGNOSTIC_KEYS = new Set(DIAGNOSTIC_KEY_LIST);
-const HOST_IP_CLASSES = new Set([
-  "not_observed", "missing", "loopback_ipv4", "wildcard_ipv4",
-  "loopback_ipv6", "wildcard_ipv6", "other"
-]);
-const EXIT_CODE_CLASSES = new Set(["not_observed", "zero", "nonzero", "no_exit_code"]);
+const NETWORK_DRIVER_CLASSES = new Set(["not_observed", "bridge", "other"]);
 const FAILURE_STAGES = new Set([
-  "unknown", "pre_container", "docker_run", "container_id", "readiness",
-  "container_inspect", "container_inspect_parse", "container_identity",
-  "container_label", "container_state", "container_security",
-  "network_settings_ports", "host_config_port_bindings",
-  "container_inspect_approved", "host_listener", "loopback_connection",
-  "complete"
+  "unknown", "pre_network", "network_create", "network_id", "volume_create",
+  "docker_run", "container_id", "internal_readiness", "network_inspect",
+  "network_inspect_parse", "network_identity", "network_configuration",
+  "network_ipam", "container_inspect", "container_inspect_parse",
+  "container_identity", "container_state", "container_security",
+  "container_network", "container_ports", "container_listing",
+  "host_listener", "host_direct_connection", "complete", "cleanup"
 ]);
+const SAFE_FAILURE_CODE = /^linux_[a-z0-9_]{3,92}$/;
 
 function diagnosticDefaults() {
   return {
-    dockerRunCompleted: false,
-    containerIdPresent: false,
-    containerIdMatched: false,
+    networkCreated: false,
+    networkInternal: false,
+    networkDriverClass: "not_observed",
+    containerCreated: false,
     containerRunning: false,
-    inspectCompleted: false,
-    networkSettingsPortsPresent: false,
-    internalPortEntryPresent: false,
-    bindingCount: 0,
-    hostIpClass: "not_observed",
-    hostPortPresent: false,
-    hostPortNumeric: false,
-    externalBindingDetected: false,
-    loopbackConnectionPassed: false,
+    containerNetworkCount: 0,
+    containerIpPresent: false,
+    containerIpWithinSubnet: false,
+    portBindingsAbsent: false,
+    publishedPortsAbsent: false,
+    internalReadinessPassed: false,
+    hostDirectConnectionAttempted: false,
+    hostDirectConnectionPassed: false,
+    hostListenerAbsent: false,
     failureStage: "unknown",
-    exitCodeClass: "not_observed",
-    signalPresent: false,
-    stdoutPresent: false,
-    stderrPresent: false
+    sanitizedFailureCode: "not_observed",
+    cleanupCompleted: false
   };
 }
 
@@ -72,14 +74,16 @@ function sanitizedDiagnostic(value = {}) {
   const result = diagnosticDefaults();
   for (const [key, entry] of Object.entries(value || {})) {
     if (!DIAGNOSTIC_KEYS.has(key)) continue;
-    if (key === "bindingCount") {
+    if (key === "containerNetworkCount") {
       result[key] = Number.isSafeInteger(entry) && entry >= 0 && entry <= 1000 ? entry : 0;
-    } else if (key === "hostIpClass") {
-      result[key] = HOST_IP_CLASSES.has(entry) ? entry : "not_observed";
-    } else if (key === "exitCodeClass") {
-      result[key] = EXIT_CODE_CLASSES.has(entry) ? entry : "not_observed";
+    } else if (key === "networkDriverClass") {
+      result[key] = NETWORK_DRIVER_CLASSES.has(entry) ? entry : "not_observed";
     } else if (key === "failureStage") {
       result[key] = FAILURE_STAGES.has(entry) ? entry : "unknown";
+    } else if (key === "sanitizedFailureCode") {
+      result[key] = entry === "not_observed" || SAFE_FAILURE_CODE.test(entry)
+        ? entry
+        : "linux_postgres_failure_code_invalid";
     } else {
       result[key] = entry === true;
     }
@@ -97,24 +101,23 @@ function postgresFailureDiagnostics(error) {
     keys.some((key, index) => key !== [...DIAGNOSTIC_KEY_LIST].sort()[index])
   ) return null;
   if (
-    typeof value.dockerRunCompleted !== "boolean" ||
-    typeof value.containerIdPresent !== "boolean" ||
-    typeof value.containerIdMatched !== "boolean" ||
+    typeof value.networkCreated !== "boolean" ||
+    typeof value.networkInternal !== "boolean" ||
+    !NETWORK_DRIVER_CLASSES.has(value.networkDriverClass) ||
+    typeof value.containerCreated !== "boolean" ||
     typeof value.containerRunning !== "boolean" ||
-    typeof value.inspectCompleted !== "boolean" ||
-    typeof value.networkSettingsPortsPresent !== "boolean" ||
-    typeof value.internalPortEntryPresent !== "boolean" ||
-    !Number.isSafeInteger(value.bindingCount) || value.bindingCount < 0 || value.bindingCount > 1000 ||
-    !HOST_IP_CLASSES.has(value.hostIpClass) ||
-    typeof value.hostPortPresent !== "boolean" ||
-    typeof value.hostPortNumeric !== "boolean" ||
-    typeof value.externalBindingDetected !== "boolean" ||
-    typeof value.loopbackConnectionPassed !== "boolean" ||
+    !Number.isSafeInteger(value.containerNetworkCount) || value.containerNetworkCount < 0 || value.containerNetworkCount > 1000 ||
+    typeof value.containerIpPresent !== "boolean" ||
+    typeof value.containerIpWithinSubnet !== "boolean" ||
+    typeof value.portBindingsAbsent !== "boolean" ||
+    typeof value.publishedPortsAbsent !== "boolean" ||
+    typeof value.internalReadinessPassed !== "boolean" ||
+    typeof value.hostDirectConnectionAttempted !== "boolean" ||
+    typeof value.hostDirectConnectionPassed !== "boolean" ||
+    typeof value.hostListenerAbsent !== "boolean" ||
     !FAILURE_STAGES.has(value.failureStage) ||
-    !EXIT_CODE_CLASSES.has(value.exitCodeClass) ||
-    typeof value.signalPresent !== "boolean" ||
-    typeof value.stdoutPresent !== "boolean" ||
-    typeof value.stderrPresent !== "boolean"
+    !(value.sanitizedFailureCode === "not_observed" || SAFE_FAILURE_CODE.test(value.sanitizedFailureCode)) ||
+    typeof value.cleanupCompleted !== "boolean"
   ) return null;
   return Object.freeze({ ...value });
 }
@@ -125,7 +128,7 @@ class LinuxPostgresFailure extends Error {
     this.name = "LinuxPostgresFailure";
     this.code = code;
     Object.defineProperty(this, "linuxPostgresDiagnostic", {
-      value: sanitizedDiagnostic(diagnostic),
+      value: sanitizedDiagnostic({ ...diagnostic, sanitizedFailureCode: code }),
       enumerable: false,
       configurable: false,
       writable: false
@@ -138,24 +141,11 @@ function fail(code, diagnostic) {
 }
 
 function classifyHostListenerRows(rows, port) {
-  if (!Array.isArray(rows) || !Number.isSafeInteger(port) || port < 1024 || port > 65535) {
+  if (!Array.isArray(rows) || port !== INTERNAL_PORT) {
     fail("linux_postgres_listener_exposure_invalid");
   }
-  if (rows.length === 0) return "none_observed";
-  if (
-    rows.length !== 1 ||
-    (String(rows[0]).trim().split(/\s+/)[3] || "") !== `${LOOPBACK}:${port}`
-  ) fail("linux_postgres_listener_exposure_invalid");
-  return "loopback_ipv4_observed";
-}
-
-function classifyHostIp(value) {
-  if (typeof value !== "string" || value.length === 0) return "missing";
-  if (value === LOOPBACK) return "loopback_ipv4";
-  if (value === "0.0.0.0") return "wildcard_ipv4";
-  if (value === "::1") return "loopback_ipv6";
-  if (value === "::") return "wildcard_ipv6";
-  return "other";
+  if (rows.length !== 0) fail("linux_postgres_listener_exposure_invalid");
+  return "none_observed";
 }
 
 function commandOutcome(result) {
@@ -171,90 +161,182 @@ function commandOutcome(result) {
 
 function assertCommandSucceeded(result, code, diagnostic) {
   const outcome = commandOutcome(result);
-  Object.assign(diagnostic, outcome);
   if (outcome.exitCodeClass !== "zero" || outcome.signalPresent) fail(code, diagnostic);
   return result;
 }
 
 function beginFailureStage(diagnostic, failureStage) {
-  Object.assign(diagnostic, {
-    failureStage,
-    exitCodeClass: "not_observed",
-    signalPresent: false,
-    stdoutPresent: false,
-    stderrPresent: false
-  });
+  diagnostic.failureStage = failureStage;
 }
 
-function inspectContainerBinding(stdout, { containerId, names, diagnostic = {} }) {
-  const state = { ...diagnostic, inspectCompleted: true, failureStage: "container_inspect_parse" };
+function plainObject(value) {
+  return Boolean(value && typeof value === "object" && !Array.isArray(value));
+}
+
+function parseStructuredObject(stdout, code, diagnostic) {
   let value;
-  try { value = JSON.parse(String(stdout || "").trim()); } catch {
-    fail("linux_postgres_container_inspect_invalid", state);
+  try { value = JSON.parse(String(stdout || "").trim()); } catch { fail(code, diagnostic); }
+  if (!plainObject(value)) fail(code, diagnostic);
+  return value;
+}
+
+function ipv4Number(value) {
+  if (typeof value !== "string" || net.isIPv4(value) !== true) return null;
+  const octets = value.split(".").map(Number);
+  if (octets.join(".") !== value) return null;
+  return (((octets[0] * 256 + octets[1]) * 256 + octets[2]) * 256 + octets[3]) >>> 0;
+}
+
+function privateIpv4(value) {
+  const number = ipv4Number(value);
+  if (number == null) return false;
+  return privateIpv4Range(number) != null;
+}
+
+function privateIpv4Range(number) {
+  for (const [first, last] of [
+    [0x0a000000, 0x0affffff],
+    [0xac100000, 0xac1fffff],
+    [0xc0a80000, 0xc0a8ffff]
+  ]) {
+    if (number >= first && number <= last) return Object.freeze({ first, last });
   }
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
-    fail("linux_postgres_container_inspect_invalid", state);
+  return null;
+}
+
+function parsePrivateIpv4Cidr(value, diagnostic) {
+  const match = typeof value === "string" ? value.match(/^([^/]+)\/([0-9]{1,2})$/) : null;
+  const address = match?.[1] || "";
+  const prefix = Number(match?.[2]);
+  const number = ipv4Number(address);
+  if (
+    number == null || !Number.isInteger(prefix) || String(prefix) !== match?.[2] ||
+    prefix < 8 || prefix > 30
+  ) {
+    fail("linux_postgres_network_ipam_invalid", diagnostic);
   }
-  state.containerIdMatched = value.Id === containerId;
-  if (!state.containerIdMatched || value.Name !== `/${names.container}`) {
-    fail("linux_postgres_container_identity_invalid", { ...state, failureStage: "container_identity" });
+  const mask = (0xffffffff << (32 - prefix)) >>> 0;
+  const first = (number & mask) >>> 0;
+  const last = (first | (~mask >>> 0)) >>> 0;
+  const privateRange = privateIpv4Range(first);
+  if (number !== first || privateRange == null || last > privateRange.last) {
+    fail("linux_postgres_network_ipam_invalid", diagnostic);
   }
+  return Object.freeze({ first, last, prefix });
+}
+
+function ipv4InCidr(value, cidr, { usable = true } = {}) {
+  const number = ipv4Number(value);
+  return number != null && privateIpv4(value) && number >= cidr.first && number <= cidr.last &&
+    (!usable || (number !== cidr.first && number !== cidr.last));
+}
+
+function inspectInternalNetwork(stdout, { networkId, containerId, names, diagnostic = {} }) {
+  const state = { ...diagnostic, failureStage: "network_inspect_parse" };
+  const value = parseStructuredObject(stdout, "linux_postgres_network_inspect_invalid", state);
   const [labelKey, labelValue] = names.label.split("=", 2);
-  if (value.Config?.Labels?.[labelKey] !== labelValue) {
-    fail("linux_postgres_container_identity_invalid", { ...state, failureStage: "container_label" });
+  if (
+    value.Id !== networkId || value.Name !== names.network || value.Scope !== "local" ||
+    value.Labels?.[labelKey] !== labelValue
+  ) fail("linux_postgres_network_identity_invalid", { ...state, failureStage: "network_identity" });
+
+  state.networkDriverClass = value.Driver === "bridge" ? "bridge" : "other";
+  state.networkInternal = value.Internal === true;
+  if (
+    state.networkDriverClass !== "bridge" || !state.networkInternal ||
+    value.Attachable !== false || value.Ingress !== false || value.EnableIPv6 === true ||
+    !plainObject(value.Options) || Object.keys(value.Options).length !== 0
+  ) fail("linux_postgres_network_configuration_invalid", { ...state, failureStage: "network_configuration" });
+
+  const ipam = value.IPAM;
+  if (
+    !plainObject(ipam) || ipam.Driver !== "default" ||
+    !(ipam.Options == null || (plainObject(ipam.Options) && Object.keys(ipam.Options).length === 0)) ||
+    !Array.isArray(ipam.Config) || ipam.Config.length !== 1 || !plainObject(ipam.Config[0])
+  ) fail("linux_postgres_network_ipam_invalid", { ...state, failureStage: "network_ipam" });
+  const ipamDiagnostic = { ...state, failureStage: "network_ipam" };
+  const cidr = parsePrivateIpv4Cidr(ipam.Config[0].Subnet, ipamDiagnostic);
+  const gateway = ipam.Config[0].Gateway;
+  if (!ipv4InCidr(gateway, cidr)) fail("linux_postgres_network_ipam_invalid", ipamDiagnostic);
+
+  const containers = value.Containers;
+  if (!plainObject(containers) || Object.keys(containers).length !== 1 || !plainObject(containers[containerId])) {
+    fail("linux_postgres_container_network_invalid", { ...state, failureStage: "container_network" });
   }
+  const networkContainer = containers[containerId];
+  if (
+    networkContainer.Name !== names.container ||
+    typeof networkContainer.IPv4Address !== "string" ||
+    networkContainer.IPv4Address.length === 0 ||
+    !(networkContainer.IPv6Address == null || networkContainer.IPv6Address === "")
+  ) fail("linux_postgres_container_network_invalid", { ...state, failureStage: "container_network" });
+  return Object.freeze({ cidr, gateway, networkContainer, diagnostic: sanitizedDiagnostic(state) });
+}
+
+function absentPortBindings(value) {
+  return value == null || (plainObject(value) && Object.keys(value).length === 0);
+}
+
+function unpublishedPorts(value) {
+  if (value == null) return true;
+  if (!plainObject(value)) return false;
+  const keys = Object.keys(value);
+  return keys.length === 0 || (keys.length === 1 && keys[0] === INTERNAL_PORT_KEY && value[INTERNAL_PORT_KEY] == null);
+}
+
+function inspectInternalContainer(stdout, { containerId, networkId, names, network, diagnostic = {} }) {
+  const state = { ...diagnostic, failureStage: "container_inspect_parse" };
+  const value = parseStructuredObject(stdout, "linux_postgres_container_inspect_invalid", state);
+  const [labelKey, labelValue] = names.label.split("=", 2);
+  if (
+    value.Id !== containerId || value.Name !== `/${names.container}` ||
+    value.Config?.Labels?.[labelKey] !== labelValue
+  ) fail("linux_postgres_container_identity_invalid", { ...state, failureStage: "container_identity" });
   state.containerRunning = value.State?.Running === true;
   if (!state.containerRunning || value.State?.Paused !== false) {
     fail("linux_postgres_container_state_invalid", { ...state, failureStage: "container_state" });
   }
   if (
-    value.HostConfig?.Privileged !== false ||
-    value.HostConfig?.NetworkMode !== names.network
+    value.HostConfig?.Privileged !== false || value.HostConfig?.NetworkMode !== names.network ||
+    value.HostConfig?.PublishAllPorts !== false
   ) fail("linux_postgres_container_security_invalid", { ...state, failureStage: "container_security" });
 
-  const ports = value.NetworkSettings?.Ports;
-  state.networkSettingsPortsPresent = Boolean(ports && typeof ports === "object" && !Array.isArray(ports));
-  state.internalPortEntryPresent = state.networkSettingsPortsPresent && Object.hasOwn(ports, INTERNAL_PORT_KEY);
-  const entries = state.internalPortEntryPresent ? ports[INTERNAL_PORT_KEY] : undefined;
-  state.bindingCount = Array.isArray(entries) ? entries.length : 0;
-  const bindingEntries = Array.isArray(entries) ? entries : [];
-  const binding = bindingEntries.length > 0 ? bindingEntries[0] : null;
-  state.hostIpClass = classifyHostIp(binding?.HostIp);
-  state.hostPortPresent = typeof binding?.HostPort === "string" && binding.HostPort.length !== 0;
-  state.hostPortNumeric = state.hostPortPresent && /^[0-9]+$/.test(binding.HostPort);
-  const otherPublishedBinding = state.networkSettingsPortsPresent && Object.entries(ports).some(([key, entriesForKey]) => (
-    key !== INTERNAL_PORT_KEY && entriesForKey != null &&
-    (!Array.isArray(entriesForKey) || entriesForKey.length > 0)
-  ));
-  state.externalBindingDetected = bindingEntries.some((entry) => (
-    classifyHostIp(entry?.HostIp) !== "loopback_ipv4"
-  )) || otherPublishedBinding;
-  const parsedPort = state.hostPortNumeric ? Number(binding.HostPort) : 0;
-  if (
-    !state.networkSettingsPortsPresent ||
-    Object.keys(ports).length !== 1 ||
-    !state.internalPortEntryPresent || state.bindingCount !== 1 ||
-    state.externalBindingDetected || !Number.isSafeInteger(parsedPort) ||
-    parsedPort < 1024 || parsedPort > 65535
-  ) fail("linux_postgres_port_binding_invalid", { ...state, failureStage: "network_settings_ports" });
+  state.portBindingsAbsent = absentPortBindings(value.HostConfig?.PortBindings);
+  state.publishedPortsAbsent = unpublishedPorts(value.NetworkSettings?.Ports);
+  if (!state.portBindingsAbsent || !state.publishedPortsAbsent) {
+    fail("linux_postgres_published_port_refused", { ...state, failureStage: "container_ports" });
+  }
 
-  const configured = value.HostConfig?.PortBindings;
-  const configuredEntries = configured?.[INTERNAL_PORT_KEY];
+  const networks = value.NetworkSettings?.Networks;
+  state.containerNetworkCount = plainObject(networks) ? Object.keys(networks).length : 0;
+  const attachment = plainObject(networks) ? networks[names.network] : null;
+  if (state.containerNetworkCount !== 1 || !plainObject(attachment) || attachment.NetworkID !== networkId) {
+    fail("linux_postgres_container_network_invalid", { ...state, failureStage: "container_network" });
+  }
+  const address = attachment.IPAddress;
+  state.containerIpPresent = typeof address === "string" && address.length !== 0;
+  state.containerIpWithinSubnet = state.containerIpPresent &&
+    ipv4InCidr(address, network.cidr) && address !== network.gateway;
+  const expectedCidr = `${address}/${network.cidr.prefix}`;
   if (
-    !configured || typeof configured !== "object" || Array.isArray(configured) ||
-    Object.keys(configured).length !== 1 ||
-    !Array.isArray(configuredEntries) ||
-    configuredEntries.length !== 1 || configuredEntries[0]?.HostIp !== LOOPBACK ||
-    !new Set(["", binding.HostPort]).has(configuredEntries[0]?.HostPort) ||
-    Object.entries(configured).some(([key, entriesForKey]) => (
-      key !== INTERNAL_PORT_KEY && entriesForKey != null &&
-      (!Array.isArray(entriesForKey) || entriesForKey.length > 0)
-    ))
-  ) fail("linux_postgres_port_binding_invalid", { ...state, failureStage: "host_config_port_bindings" });
-  return Object.freeze({
-    port: parsedPort,
-    diagnostic: sanitizedDiagnostic({ ...state, failureStage: "container_inspect_approved" })
-  });
+    !state.containerIpWithinSubnet || attachment.IPPrefixLen !== network.cidr.prefix ||
+    attachment.Gateway !== "" ||
+    !(attachment.GlobalIPv6Address == null || attachment.GlobalIPv6Address === "") ||
+    network.networkContainer.IPv4Address !== expectedCidr
+  ) fail("linux_postgres_container_ip_invalid", { ...state, failureStage: "container_network" });
+  return Object.freeze({ databaseHost: address, diagnostic: sanitizedDiagnostic(state) });
+}
+
+function inspectContainerListing(stdout, { containerId, names, diagnostic = {} }) {
+  const lines = String(stdout || "").split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  if (lines.length !== 1) fail("linux_postgres_container_listing_invalid", diagnostic);
+  const value = parseStructuredObject(lines[0], "linux_postgres_container_listing_invalid", diagnostic);
+  if (
+    value.ID !== containerId || value.Names !== names.container || value.Networks !== names.network ||
+    !new Set(["", INTERNAL_PORT_KEY]).has(String(value.Ports || "")) ||
+    String(value.Ports || "").includes("->")
+  ) fail("linux_postgres_container_listing_invalid", diagnostic);
+  return true;
 }
 
 function assertAbsoluteWithin(candidate, root, code) {
@@ -370,9 +452,10 @@ function quoteIdentifier(value) {
   return `"${value}"`;
 }
 
-function poolOptions({ port, database, login, password, max, applicationName }) {
+function poolOptions({ host, port, database, login, password, max, applicationName }) {
+  if (!privateIpv4(host) || port !== INTERNAL_PORT) fail("linux_postgres_pool_transport_invalid");
   return {
-    host: LOOPBACK,
+    host,
     port,
     database,
     user: login,
@@ -423,9 +506,34 @@ function dockerNames(runId) {
   });
 }
 
-function containerIdentityHash(containerId) {
-  return crypto.createHash("sha256").update(containerId, "ascii").digest("hex");
+function resourceIdentityHash(resourceId) {
+  return crypto.createHash("sha256").update(resourceId, "ascii").digest("hex");
 }
+
+function identityMarkerText({ networkSha256, containerState, containerSha256, volumeSha256 }) {
+  if (
+    !CONTAINER_ID.test(networkSha256) || networkSha256 === EMPTY_IDENTITY_HASH ||
+    !new Set(["pending", "present"]).has(containerState) ||
+    !CONTAINER_ID.test(containerSha256) ||
+    (containerState === "pending") !== (containerSha256 === EMPTY_IDENTITY_HASH) ||
+    !CONTAINER_ID.test(volumeSha256) || volumeSha256 === EMPTY_IDENTITY_HASH
+  ) fail("linux_postgres_identity_marker_invalid");
+  return [
+    `format=${IDENTITY_MARKER_FORMAT}`,
+    `networkSha256=${networkSha256}`,
+    `containerState=${containerState}`,
+    `containerSha256=${containerSha256}`,
+    `volumeSha256=${volumeSha256}`,
+    ""
+  ].join("\n");
+}
+
+const IDENTITY_MARKER_SIZE = Buffer.byteLength(identityMarkerText({
+  networkSha256: "1".repeat(64),
+  containerState: "pending",
+  containerSha256: EMPTY_IDENTITY_HASH,
+  volumeSha256: "2".repeat(64)
+}), "ascii");
 
 function createLinuxPostgres(options = {}) {
   const runnerTemp = path.resolve(String(options.runnerTemp || ""));
@@ -485,29 +593,184 @@ function createLinuxPostgres(options = {}) {
   let port = 0;
   let started = false;
   let containerId = "";
+  let networkId = "";
+  let volumeCreated = false;
+  let databaseHost = "";
 
   function readContainerIdentityMarker() {
-    let stats;
-    try {
-      stats = fs.lstatSync(containerIdentityMarker);
-    } catch (error) {
-      return error?.code === "ENOENT"
-        ? Object.freeze({ present: false, valid: true, sha256: "" })
-        : Object.freeze({ present: true, valid: false, sha256: "" });
-    }
-    if (!stats.isFile() || stats.isSymbolicLink() || stats.nlink !== 1) {
-      return Object.freeze({ present: true, valid: false, sha256: "" });
-    }
-    let value;
-    try { value = fs.readFileSync(containerIdentityMarker, "ascii"); } catch {
-      return Object.freeze({ present: true, valid: false, sha256: "" });
-    }
-    const match = value.match(/^([0-9a-f]{64})\n$/);
-    return Object.freeze({
-      present: true,
-      valid: Boolean(match),
-      sha256: match?.[1] || ""
+    const absent = () => Object.freeze({
+      present: false,
+      valid: true,
+      networkSha256: "",
+      containerState: "",
+      containerSha256: "",
+      volumeSha256: ""
     });
+    const invalid = () => Object.freeze({
+      present: true,
+      valid: false,
+      networkSha256: "",
+      containerState: "",
+      containerSha256: "",
+      volumeSha256: ""
+    });
+    let initialStats;
+    try {
+      initialStats = fs.lstatSync(containerIdentityMarker);
+    } catch (error) {
+      return error?.code === "ENOENT" ? absent() : invalid();
+    }
+    if (
+      !initialStats.isFile() || initialStats.isSymbolicLink() || initialStats.nlink !== 1 ||
+      initialStats.size !== IDENTITY_MARKER_SIZE ||
+      (process.platform === "linux" && (initialStats.mode & 0o777) !== 0o600)
+    ) {
+      return invalid();
+    }
+    let descriptor;
+    let content;
+    try {
+      descriptor = fs.openSync(
+        containerIdentityMarker,
+        fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW || 0)
+      );
+      const openedStats = fs.fstatSync(descriptor);
+      if (
+        !openedStats.isFile() || openedStats.nlink !== 1 || openedStats.size !== IDENTITY_MARKER_SIZE ||
+        openedStats.dev !== initialStats.dev || openedStats.ino !== initialStats.ino ||
+        (process.platform === "linux" && (openedStats.mode & 0o777) !== 0o600)
+      ) return invalid();
+      content = Buffer.alloc(IDENTITY_MARKER_SIZE);
+      let offset = 0;
+      while (offset < content.length) {
+        const count = fs.readSync(descriptor, content, offset, content.length - offset, offset);
+        if (count <= 0) return invalid();
+        offset += count;
+      }
+      const value = content.toString("ascii");
+      const match = value.match(new RegExp(
+        `^format=${IDENTITY_MARKER_FORMAT}\\n` +
+        "networkSha256=([0-9a-f]{64})\\n" +
+        "containerState=(pending|present)\\n" +
+        "containerSha256=([0-9a-f]{64})\\n" +
+        "volumeSha256=([0-9a-f]{64})\\n$"
+      ));
+      const networkSha256 = match?.[1] || "";
+      const containerState = match?.[2] || "";
+      const containerSha256 = match?.[3] || "";
+      const volumeSha256 = match?.[4] || "";
+      const valid = Boolean(match) &&
+        networkSha256 !== EMPTY_IDENTITY_HASH &&
+        volumeSha256 !== EMPTY_IDENTITY_HASH &&
+        ((containerState === "pending" && containerSha256 === EMPTY_IDENTITY_HASH) ||
+          (containerState === "present" && containerSha256 !== EMPTY_IDENTITY_HASH));
+      return Object.freeze({
+        present: true,
+        valid,
+        networkSha256: valid ? networkSha256 : "",
+        containerState: valid ? containerState : "",
+        containerSha256: valid ? containerSha256 : "",
+        volumeSha256: valid ? volumeSha256 : ""
+      });
+    } catch {
+      return invalid();
+    } finally {
+      content?.fill(0);
+      if (descriptor !== undefined) {
+        try { fs.closeSync(descriptor); } catch {}
+      }
+    }
+  }
+
+  function writeContainerIdentityMarker(containerState, observedContainerId = "") {
+    if (!CONTAINER_ID.test(networkId)) fail("linux_postgres_identity_marker_invalid");
+    const containerSha256 = containerState === "pending"
+      ? EMPTY_IDENTITY_HASH
+      : CONTAINER_ID.test(observedContainerId)
+        ? resourceIdentityHash(observedContainerId)
+        : "";
+    const value = Buffer.from(identityMarkerText({
+      networkSha256: resourceIdentityHash(networkId),
+      containerState,
+      containerSha256,
+      volumeSha256: resourceIdentityHash(names.volume)
+    }), "ascii");
+    const prior = readContainerIdentityMarker();
+    if (
+      value.length !== IDENTITY_MARKER_SIZE ||
+      (containerState === "pending" && prior.present) ||
+      (containerState === "present" && (
+        !prior.present || !prior.valid || prior.containerState !== "pending" ||
+        prior.networkSha256 !== resourceIdentityHash(networkId) ||
+        prior.volumeSha256 !== resourceIdentityHash(names.volume)
+      ))
+    ) {
+      value.fill(0);
+      fail("linux_postgres_identity_marker_invalid");
+    }
+    let descriptor;
+    let openedPrior;
+    try {
+      const noFollow = fs.constants.O_NOFOLLOW || 0;
+      const flags = containerState === "pending"
+        ? fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | noFollow
+        : fs.constants.O_RDWR | noFollow;
+      descriptor = fs.openSync(containerIdentityMarker, flags, 0o600);
+      if (containerState === "pending") fs.fchmodSync(descriptor, 0o600);
+      const openedStats = fs.fstatSync(descriptor);
+      if (
+        !openedStats.isFile() || openedStats.nlink !== 1 ||
+        (containerState === "present" && openedStats.size !== IDENTITY_MARKER_SIZE) ||
+        (process.platform === "linux" && (openedStats.mode & 0o777) !== 0o600)
+      ) fail("linux_postgres_identity_marker_invalid");
+      if (containerState === "present") {
+        openedPrior = Buffer.alloc(IDENTITY_MARKER_SIZE);
+        let readOffset = 0;
+        while (readOffset < openedPrior.length) {
+          const count = fs.readSync(
+            descriptor,
+            openedPrior,
+            readOffset,
+            openedPrior.length - readOffset,
+            readOffset
+          );
+          if (count <= 0) fail("linux_postgres_identity_marker_invalid");
+          readOffset += count;
+        }
+        const expectedPrior = identityMarkerText({
+          networkSha256: resourceIdentityHash(networkId),
+          containerState: "pending",
+          containerSha256: EMPTY_IDENTITY_HASH,
+          volumeSha256: resourceIdentityHash(names.volume)
+        });
+        if (openedPrior.toString("ascii") !== expectedPrior) {
+          fail("linux_postgres_identity_marker_invalid");
+        }
+      }
+      let offset = 0;
+      while (offset < value.length) {
+        const count = fs.writeSync(descriptor, value, offset, value.length - offset, offset);
+        if (count <= 0) fail("linux_postgres_identity_marker_invalid");
+        offset += count;
+      }
+      fs.fsyncSync(descriptor);
+    } catch (error) {
+      if (error instanceof LinuxPostgresFailure) throw error;
+      fail("linux_postgres_identity_marker_invalid");
+    } finally {
+      value.fill(0);
+      openedPrior?.fill(0);
+      if (descriptor !== undefined) {
+        try { fs.closeSync(descriptor); } catch {}
+      }
+    }
+    const written = readContainerIdentityMarker();
+    if (
+      !written.present || !written.valid || written.containerState !== containerState ||
+      written.networkSha256 !== resourceIdentityHash(networkId) ||
+      written.containerSha256 !== containerSha256 ||
+      written.volumeSha256 !== resourceIdentityHash(names.volume)
+    ) fail("linux_postgres_identity_marker_invalid");
   }
 
   function containerIdentityMarkerExists() {
@@ -517,7 +780,11 @@ function createLinuxPostgres(options = {}) {
   }
 
   function makePool(database, login, material, max, applicationName) {
+    if (!started || !privateIpv4(databaseHost) || port !== INTERNAL_PORT) {
+      fail("linux_postgres_not_started");
+    }
     const pool = new InstrumentedPool(poolOptions({
+      host: databaseHost,
       port,
       database,
       login,
@@ -526,6 +793,36 @@ function createLinuxPostgres(options = {}) {
       applicationName
     }));
     return pool;
+  }
+
+  function adaptLogicalPoolOptions(configuration) {
+    if (!plainObject(configuration) || !started || !privateIpv4(databaseHost) || port !== INTERNAL_PORT) {
+      fail("linux_postgres_logical_pool_transport_refused");
+    }
+    if (
+      configuration.host !== LOOPBACK || Number(configuration.port) !== INTERNAL_PORT ||
+      configuration.ssl !== false
+    ) fail("linux_postgres_logical_pool_transport_refused");
+    let connectionString = configuration.connectionString;
+    if (connectionString != null) {
+      let parsed;
+      try { parsed = new URL(connectionString); } catch { fail("linux_postgres_logical_pool_transport_refused"); }
+      if (
+        !new Set(["postgres:", "postgresql:"]).has(parsed.protocol) ||
+        parsed.hostname !== LOOPBACK || Number(parsed.port) !== INTERNAL_PORT ||
+        parsed.searchParams.get("sslmode") === "require"
+      ) fail("linux_postgres_logical_pool_transport_refused");
+      parsed.hostname = databaseHost;
+      parsed.port = String(INTERNAL_PORT);
+      connectionString = parsed.toString();
+    }
+    return Object.freeze({
+      ...configuration,
+      host: databaseHost,
+      port: INTERNAL_PORT,
+      ssl: false,
+      ...(connectionString == null ? {} : { connectionString })
+    });
   }
 
   async function docker(args, extra = {}) {
@@ -556,8 +853,10 @@ function createLinuxPostgres(options = {}) {
         "exec", containerId, "pg_isready", "--host", LOOPBACK,
         "--port", String(INTERNAL_PORT), "--username", ADMIN_LOGIN, "--dbname", "postgres"
       ], { allowFailure: true, timeoutMs: 10_000 });
-      Object.assign(diagnostic, commandOutcome(probe));
-      if (probe.code === 0) return true;
+      if (probe.code === 0 && probe.signal === null) {
+        diagnostic.internalReadinessPassed = true;
+        return true;
+      }
       await readinessDelay(1000);
     }
     fail("linux_postgres_readiness_failed", diagnostic);
@@ -593,19 +892,30 @@ function createLinuxPostgres(options = {}) {
       failureCode: "linux_postgres_image_pull_failed"
     });
     await verifyImage();
-    await docker(["network", "create", "--internal", "--label", names.label, names.network], {
-      failureCode: "linux_postgres_network_create_failed"
-    });
+    beginFailureStage(diagnostic, "network_create");
+    const networkCreateResult = assertCommandSucceeded(await docker([
+      "network", "create", "--driver", "bridge", "--internal", "--label", names.label, names.network
+    ], {
+      failureCode: "linux_postgres_network_create_failed",
+      allowFailure: true
+    }), "linux_postgres_network_create_failed", diagnostic);
+    diagnostic.networkCreated = true;
+    beginFailureStage(diagnostic, "network_id");
+    const networkIdMatch = String(networkCreateResult.stdout || "").match(/^([0-9a-f]{64})(?:\r?\n)?$/);
+    if (!networkIdMatch) fail("linux_postgres_network_id_invalid", diagnostic);
+    networkId = networkIdMatch[1];
+    writeContainerIdentityMarker("pending");
+    beginFailureStage(diagnostic, "volume_create");
     await docker([
       "volume", "create", "--driver", "local", "--label", names.label,
       "--opt", "type=none", "--opt", "o=bind", "--opt", `device=${dataDirectory}`,
       names.volume
     ], { failureCode: "linux_postgres_volume_create_failed" });
+    volumeCreated = true;
     beginFailureStage(diagnostic, "docker_run");
     const runResult = assertCommandSucceeded(await docker([
       "run", "--detach", "--name", names.container, "--hostname", names.container,
       "--label", names.label, "--network", names.network, "--log-driver", "none",
-      "--publish", `${LOOPBACK}::${INTERNAL_PORT}`,
       "--mount", `type=volume,src=${names.volume},dst=/var/lib/postgresql`,
       "--mount", `type=bind,src=${runRoot},dst=${runRoot}`,
       "--mount", `type=bind,src=${passwordFile},dst=/run/secrets/postgres-password,readonly`,
@@ -619,21 +929,32 @@ function createLinuxPostgres(options = {}) {
       failureCode: "linux_postgres_container_start_failed",
       allowFailure: true
     }), "linux_postgres_container_start_failed", diagnostic);
-    diagnostic.dockerRunCompleted = true;
+    diagnostic.containerCreated = true;
     started = true;
     diagnostic.failureStage = "container_id";
     const observedContainerId = String(runResult.stdout || "");
-    diagnostic.containerIdPresent = observedContainerId.trim().length !== 0;
     const containerIdMatch = observedContainerId.match(/^([0-9a-f]{64})(?:\r?\n)?$/);
     if (!containerIdMatch) fail("linux_postgres_container_id_invalid", diagnostic);
     containerId = containerIdMatch[1];
-    fs.writeFileSync(containerIdentityMarker, `${containerIdentityHash(containerId)}\n`, {
-      flag: "wx",
-      mode: 0o600
-    });
-    fs.chmodSync(containerIdentityMarker, 0o600);
-    beginFailureStage(diagnostic, "readiness");
+    writeContainerIdentityMarker("present", containerId);
+    beginFailureStage(diagnostic, "internal_readiness");
     await waitReady(diagnostic);
+
+    beginFailureStage(diagnostic, "network_inspect");
+    const networkInspectResult = assertCommandSucceeded(await docker([
+      "network", "inspect", "--format", "{{json .}}", networkId
+    ], {
+      failureCode: "linux_postgres_network_inspect_failed",
+      allowFailure: true
+    }), "linux_postgres_network_inspect_failed", diagnostic);
+    const inspectedNetwork = inspectInternalNetwork(networkInspectResult.stdout, {
+      networkId,
+      containerId,
+      names,
+      diagnostic
+    });
+    Object.assign(diagnostic, inspectedNetwork.diagnostic);
+
     beginFailureStage(diagnostic, "container_inspect");
     const inspectResult = assertCommandSucceeded(await docker([
       "inspect", "--type=container", "--format", "{{json .}}", containerId
@@ -641,15 +962,34 @@ function createLinuxPostgres(options = {}) {
       failureCode: "linux_postgres_container_inspect_failed",
       allowFailure: true
     }), "linux_postgres_container_inspect_failed", diagnostic);
-    const inspected = inspectContainerBinding(inspectResult.stdout, { containerId, names, diagnostic });
+    const inspected = inspectInternalContainer(inspectResult.stdout, {
+      containerId,
+      networkId,
+      names,
+      network: inspectedNetwork,
+      diagnostic
+    });
     Object.assign(diagnostic, inspected.diagnostic);
-    port = inspected.port;
+    databaseHost = inspected.databaseHost;
+    port = INTERNAL_PORT;
+
+    beginFailureStage(diagnostic, "container_listing");
+    const listingResult = assertCommandSucceeded(await docker([
+      "ps", "--no-trunc", "--all", "--filter", `id=${containerId}`, "--format", "{{json .}}"
+    ], {
+      failureCode: "linux_postgres_container_listing_failed",
+      allowFailure: true
+    }), "linux_postgres_container_listing_failed", diagnostic);
+    inspectContainerListing(listingResult.stdout, { containerId, names, diagnostic });
+
     beginFailureStage(diagnostic, "host_listener");
     const listeners = await hostListeners(port);
     const listenerClass = classifyHostListenerRows(listeners, port);
+    diagnostic.hostListenerAbsent = listenerClass === "none_observed";
     const admin = makePool("postgres", ADMIN_LOGIN, materials.admin, 1, "ia4tube-social-3a0p-administration");
     try {
-      beginFailureStage(diagnostic, "loopback_connection");
+      beginFailureStage(diagnostic, "host_direct_connection");
+      diagnostic.hostDirectConnectionAttempted = true;
       const result = await admin.query([
         "SELECT current_setting('server_version_num') AS version_num,",
         " current_setting('server_encoding') AS encoding,",
@@ -671,16 +1011,16 @@ function createLinuxPostgres(options = {}) {
       ) {
         fail("linux_postgres_runtime_identity_invalid", diagnostic);
       }
-      diagnostic.loopbackConnectionPassed = true;
+      diagnostic.hostDirectConnectionPassed = true;
     } catch (error) {
       if (error instanceof LinuxPostgresFailure) throw error;
-      fail("linux_postgres_loopback_connection_failed", diagnostic);
+      fail("linux_postgres_host_direct_connection_failed", diagnostic);
     } finally {
       await admin.end();
       trackedPools.delete(admin);
     }
-    if (listenerClass === "none_observed" && diagnostic.loopbackConnectionPassed !== true) {
-      fail("linux_postgres_listener_exposure_invalid", diagnostic);
+    if (!diagnostic.hostListenerAbsent || !diagnostic.hostDirectConnectionPassed) {
+      fail("linux_postgres_internal_bridge_direct_invalid", diagnostic);
     }
     diagnostic.failureStage = "complete";
     return Object.freeze({
@@ -693,22 +1033,28 @@ function createLinuxPostgres(options = {}) {
       locale: "C",
       scramSha256: true,
       hostAuthenticationScramSha256: true,
+      connectivityMode: POSTGRES_CONNECTIVITY_MODE,
       containerIdCaptured: true,
       containerIdMatched: true,
       structuredInspectCompleted: true,
-      bindingCount: 1,
-      hostIp: LOOPBACK,
-      hostPort: port,
-      loopbackConnectionPassed: true,
-      hostListener: listenerClass,
-      externalIpv4Listeners: 0,
-      externalIpv6Listeners: 0,
+      networkInternal: true,
+      networkDriver: "bridge",
+      containerAttachedNetworkCount: 1,
+      publishedPortCount: 0,
+      hostPortBindingAbsent: true,
+      noHostPortPublished: true,
+      internalNetworkProved: true,
+      internalReadinessPassed: true,
+      internalBridgeDirectConnectionProved: true,
+      hostDirectContainerIpConnectionPassed: true,
+      externalPortExposureAbsent: true,
+      hostListenerAbsent: true,
       port
     });
   }
 
   async function start() {
-    const diagnostic = { ...diagnosticDefaults(), failureStage: "pre_container" };
+    const diagnostic = { ...diagnosticDefaults(), failureStage: "pre_network" };
     try {
       return await startWithDiagnostic(diagnostic);
     } catch (error) {
@@ -717,20 +1063,14 @@ function createLinuxPostgres(options = {}) {
         if (errorDiagnostic?.failureStage !== "unknown") {
           throw new LinuxPostgresFailure(error.code, errorDiagnostic);
         }
-        throw new LinuxPostgresFailure(error.code, {
-          ...diagnostic,
-          exitCodeClass: errorDiagnostic?.exitCodeClass,
-          signalPresent: errorDiagnostic?.signalPresent,
-          stdoutPresent: errorDiagnostic?.stdoutPresent,
-          stderrPresent: errorDiagnostic?.stderrPresent
-        });
+        throw new LinuxPostgresFailure(error.code, diagnostic);
       }
       throw new LinuxPostgresFailure("linux_postgres_start_failed", diagnostic);
     }
   }
 
   async function bootstrap(repositoryRoot, environmentId) {
-    if (!started || !port) fail("linux_postgres_not_started");
+    if (!started || port !== INTERNAL_PORT || !privateIpv4(databaseHost)) fail("linux_postgres_not_started");
     const loginBootstrap = require("../src/persistence/postgres/login-bootstrap");
     const rolesSql = fs.readFileSync(path.join(repositoryRoot, "db", "postgres", "roles.sql"), "utf8");
     const admin = makePool("postgres", ADMIN_LOGIN, materials.admin, 1, "ia4tube-social-3a0p-administration");
@@ -774,13 +1114,13 @@ function createLinuxPostgres(options = {}) {
         host: LOOPBACK, port: String(port), database: DATABASE,
         provisionerLogin: PROVISIONER_LOGIN, migrationLogin: MIGRATION_LOGIN, runtimeLogin: RUNTIME_LOGIN
       };
-      const connectionString = new URL(`postgresql://${LOOPBACK}:${port}/${DATABASE}`);
+      const connectionString = new URL(`postgresql://${databaseHost}:${port}/${DATABASE}`);
       connectionString.username = PROVISIONER_LOGIN;
       connectionString.password = secretText(materials.provisioner);
       const configuration = {
         target,
         targetFingerprint: loginBootstrap.targetFingerprint(target),
-        provisionerPool: { ...poolOptions({ port, database: DATABASE, login: PROVISIONER_LOGIN, password: secretText(materials.provisioner), max: 1, applicationName: "ia4tube-social-3a0p-provisioner" }), connectionString: connectionString.toString() },
+        provisionerPool: { ...poolOptions({ host: databaseHost, port, database: DATABASE, login: PROVISIONER_LOGIN, password: secretText(materials.provisioner), max: 1, applicationName: "ia4tube-social-3a0p-provisioner" }), connectionString: connectionString.toString() },
         migration: { login: MIGRATION_LOGIN, role: MIGRATOR_ROLE, connectionLimit: loginBootstrap.MIGRATION_CONNECTION_LIMIT },
         runtime: { login: RUNTIME_LOGIN, role: RUNTIME_ROLE, connectionLimit: loginBootstrap.RUNTIME_CONNECTION_LIMIT }
       };
@@ -923,58 +1263,111 @@ function createLinuxPostgres(options = {}) {
     const lines = (result) => result?.code === 0 && result.signal === null
       ? result.stdout.split(/\r?\n/).map((item) => item.trim()).filter(Boolean)
       : [];
-    const containerBefore = await invoke([
-      "ps", "--no-trunc", "--all", "--quiet", "--filter", `label=${names.label}`, "--filter", `name=^/${names.container}$`
+    const containerByLabelBefore = await invoke([
+      "ps", "--no-trunc", "--all", "--quiet", "--filter", `label=${names.label}`
+    ]);
+    const containerByNameBefore = await invoke([
+      "ps", "--no-trunc", "--all", "--quiet", "--filter", `name=^/${names.container}$`
     ]);
     const allContainersBefore = await invoke(["ps", "--no-trunc", "--all", "--quiet"]);
     const volumeBefore = await invoke(["volume", "ls", "--quiet", "--filter", `label=${names.label}`]);
-    const networkBefore = await invoke([
-      "network", "ls", "--quiet", "--filter", `label=${names.label}`, "--filter", `name=^${names.network}$`
+    const volumeByNameBefore = await invoke([
+      "volume", "ls", "--quiet", "--filter", `name=^${names.volume}$`
     ]);
-    const ownedContainersBefore = lines(containerBefore);
+    const networkBefore = await invoke([
+      "network", "ls", "--no-trunc", "--quiet", "--filter", `label=${names.label}`
+    ]);
+    const networkByNameBefore = await invoke([
+      "network", "ls", "--no-trunc", "--quiet", "--filter", `name=^${names.network}$`
+    ]);
+    const labeledContainersBefore = lines(containerByLabelBefore);
+    const namedContainersBefore = lines(containerByNameBefore);
+    const ownedContainersBefore = labeledContainersBefore.length === 1 &&
+      namedContainersBefore.length === 1 && labeledContainersBefore[0] === namedContainersBefore[0]
+      ? [labeledContainersBefore[0]]
+      : [];
     const allContainerIdsBefore = lines(allContainersBefore);
     const ownedVolumesBefore = volumeBefore?.code === 0
       ? volumeBefore.stdout.split(/\r?\n/).map((item) => item.trim()).filter(Boolean)
       : [];
+    const namedVolumesBefore = lines(volumeByNameBefore);
     const ownedNetworksBefore = lines(networkBefore);
+    const namedNetworksBefore = lines(networkByNameBefore);
     const inventorySucceeded = (result) => result?.code === 0 && result.signal === null;
     const marker = readContainerIdentityMarker();
-    const inMemoryIdentityHash = CONTAINER_ID.test(containerId)
-      ? containerIdentityHash(containerId)
+    const inMemoryContainerIdentityHash = CONTAINER_ID.test(containerId)
+      ? resourceIdentityHash(containerId)
       : "";
-    const expectedIdentityHash = inMemoryIdentityHash || (marker.valid ? marker.sha256 : "");
-    const expectedContainerIds = expectedIdentityHash === ""
+    const expectedContainerIdentityHash = inMemoryContainerIdentityHash ||
+      (marker.valid && marker.containerState === "present" ? marker.containerSha256 : "");
+    const inMemoryNetworkIdentityHash = CONTAINER_ID.test(networkId)
+      ? resourceIdentityHash(networkId)
+      : "";
+    const expectedNetworkIdentityHash = inMemoryNetworkIdentityHash ||
+      (marker.valid ? marker.networkSha256 : "");
+    const expectedContainerIds = expectedContainerIdentityHash === ""
       ? []
       : allContainerIdsBefore.filter((item) => (
-        CONTAINER_ID.test(item) && containerIdentityHash(item) === expectedIdentityHash
+        CONTAINER_ID.test(item) && resourceIdentityHash(item) === expectedContainerIdentityHash
       ));
+    const expectedVolumeIdentityHash = resourceIdentityHash(names.volume);
+    const volumeOwnershipExpected = volumeCreated || (
+      marker.present && marker.valid && marker.volumeSha256 === expectedVolumeIdentityHash
+    );
+    const pendingContainerDiscoveryAuthorized = marker.present && marker.valid &&
+      marker.containerState === "pending" && marker.volumeSha256 === expectedVolumeIdentityHash;
     const resourceIdentityConflict = (
-      !inventorySucceeded(containerBefore) ||
+      !inventorySucceeded(containerByLabelBefore) ||
+      !inventorySucceeded(containerByNameBefore) ||
       !inventorySucceeded(allContainersBefore) ||
       !inventorySucceeded(volumeBefore) ||
+      !inventorySucceeded(volumeByNameBefore) ||
       !inventorySucceeded(networkBefore) ||
-      ownedContainersBefore.length > 1 ||
-      ownedContainersBefore.some((item) => !CONTAINER_ID.test(item)) ||
+      !inventorySucceeded(networkByNameBefore) ||
+      labeledContainersBefore.length > 1 ||
+      namedContainersBefore.length > 1 ||
+      labeledContainersBefore.some((item) => !CONTAINER_ID.test(item)) ||
+      namedContainersBefore.some((item) => !CONTAINER_ID.test(item)) ||
+      JSON.stringify(labeledContainersBefore) !== JSON.stringify(namedContainersBefore) ||
       allContainerIdsBefore.some((item) => !CONTAINER_ID.test(item)) ||
       new Set(allContainerIdsBefore).size !== allContainerIdsBefore.length ||
-      ownedContainersBefore.some((item) => !allContainerIdsBefore.includes(item)) ||
+      labeledContainersBefore.some((item) => !allContainerIdsBefore.includes(item)) ||
+      namedContainersBefore.some((item) => !allContainerIdsBefore.includes(item)) ||
       (marker.present && !marker.valid) ||
-      (marker.present && inMemoryIdentityHash !== "" && marker.sha256 !== inMemoryIdentityHash) ||
+      (marker.present && inMemoryContainerIdentityHash !== "" &&
+        marker.containerState === "present" && marker.containerSha256 !== inMemoryContainerIdentityHash) ||
+      (marker.present && inMemoryNetworkIdentityHash !== "" &&
+        marker.networkSha256 !== inMemoryNetworkIdentityHash) ||
+      (marker.present && marker.valid && marker.volumeSha256 !== expectedVolumeIdentityHash) ||
       (containerId !== "" && (
         !CONTAINER_ID.test(containerId) ||
         (ownedContainersBefore.length === 1 && ownedContainersBefore[0] !== containerId)
       )) ||
-      (ownedContainersBefore.length === 1 && expectedIdentityHash !== "" && (
-        containerIdentityHash(ownedContainersBefore[0]) !== expectedIdentityHash
+      (ownedContainersBefore.length === 1 && expectedContainerIdentityHash !== "" && (
+        resourceIdentityHash(ownedContainersBefore[0]) !== expectedContainerIdentityHash
       )) ||
       expectedContainerIds.length > 1 ||
       (expectedContainerIds.length === 1 && (
         ownedContainersBefore.length !== 1 || ownedContainersBefore[0] !== expectedContainerIds[0]
       )) ||
-      (expectedContainerIds.length === 0 && expectedIdentityHash !== "" && ownedContainersBefore.length !== 0) ||
+      (expectedContainerIds.length === 0 && expectedContainerIdentityHash !== "" && ownedContainersBefore.length !== 0) ||
+      (ownedContainersBefore.length === 1 && expectedContainerIdentityHash === "" &&
+        !pendingContainerDiscoveryAuthorized && containerId === "") ||
       ownedVolumesBefore.length > 1 ||
       ownedVolumesBefore.some((item) => item !== names.volume) ||
-      ownedNetworksBefore.length > 1
+      namedVolumesBefore.length > 1 ||
+      namedVolumesBefore.some((item) => item !== names.volume) ||
+      JSON.stringify(ownedVolumesBefore) !== JSON.stringify(namedVolumesBefore) ||
+      (ownedVolumesBefore.length === 1 && !volumeOwnershipExpected) ||
+      ownedNetworksBefore.length > 1 ||
+      namedNetworksBefore.length > 1 ||
+      ownedNetworksBefore.some((item) => !CONTAINER_ID.test(item)) ||
+      namedNetworksBefore.some((item) => !CONTAINER_ID.test(item)) ||
+      JSON.stringify(ownedNetworksBefore) !== JSON.stringify(namedNetworksBefore) ||
+      (networkId !== "" && !CONTAINER_ID.test(networkId)) ||
+      (ownedNetworksBefore.length === 1 && expectedNetworkIdentityHash === "") ||
+      (ownedNetworksBefore.length === 1 && expectedNetworkIdentityHash !== "" &&
+        resourceIdentityHash(ownedNetworksBefore[0]) !== expectedNetworkIdentityHash)
     );
     let destructiveCleanupAuthorized = !resourceIdentityConflict;
     if (resourceIdentityConflict) {
@@ -987,14 +1380,19 @@ function createLinuxPostgres(options = {}) {
           destructiveCleanupAuthorized = false;
         } else {
           const exactAfterRemoval = await invoke([
-            "ps", "--no-trunc", "--all", "--quiet", "--filter", `label=${names.label}`, "--filter", `name=^/${names.container}$`
+            "ps", "--no-trunc", "--all", "--quiet", "--filter", `label=${names.label}`
+          ]);
+          const namedAfterRemoval = await invoke([
+            "ps", "--no-trunc", "--all", "--quiet", "--filter", `name=^/${names.container}$`
           ]);
           const allAfterRemoval = await invoke(["ps", "--no-trunc", "--all", "--quiet"]);
           const exactAfterIds = lines(exactAfterRemoval);
+          const namedAfterIds = lines(namedAfterRemoval);
           const allAfterIds = lines(allAfterRemoval);
           if (
-            !inventorySucceeded(exactAfterRemoval) || !inventorySucceeded(allAfterRemoval) ||
-            exactAfterIds.length !== 0 || allAfterIds.includes(removalId) ||
+            !inventorySucceeded(exactAfterRemoval) || !inventorySucceeded(namedAfterRemoval) ||
+            !inventorySucceeded(allAfterRemoval) || exactAfterIds.length !== 0 ||
+            namedAfterIds.length !== 0 || allAfterIds.includes(removalId) ||
             allAfterIds.some((item) => !CONTAINER_ID.test(item))
           ) {
             commandFailures += 1;
@@ -1014,7 +1412,7 @@ function createLinuxPostgres(options = {}) {
         await invoke(["volume", "rm", "--force", names.volume], { timeoutMs: 60_000 });
       }
       if (ownedNetworksBefore.length === 1) {
-        await invoke(["network", "rm", names.network], { timeoutMs: 60_000 });
+        await invoke(["network", "rm", ownedNetworksBefore[0]], { timeoutMs: 60_000 });
       }
       try {
         if (fs.existsSync(runRoot)) fs.rmSync(runRoot, { recursive: true, force: false, maxRetries: 0 });
@@ -1022,14 +1420,22 @@ function createLinuxPostgres(options = {}) {
         commandFailures += 1;
       }
     }
-    const containers = await invoke(["ps", "--all", "--quiet", "--filter", `label=${names.label}`]);
+    const containers = await invoke(["ps", "--no-trunc", "--all", "--quiet", "--filter", `label=${names.label}`]);
+    const containersByName = await invoke([
+      "ps", "--no-trunc", "--all", "--quiet", "--filter", `name=^/${names.container}$`
+    ]);
     const volumes = await invoke(["volume", "ls", "--quiet", "--filter", `label=${names.label}`]);
     const networks = await invoke(["network", "ls", "--quiet", "--filter", `label=${names.label}`]);
-    const listeners = port ? await hostListeners(port).catch(() => ["probe-failed"]) : [];
+    const volumesByName = await invoke(["volume", "ls", "--quiet", "--filter", `name=^${names.volume}$`]);
+    const networksByName = await invoke(["network", "ls", "--quiet", "--filter", `name=^${names.network}$`]);
+    const listeners = await hostListeners(INTERNAL_PORT).catch(() => ["probe-failed"]);
     for (const material of Object.values(materials)) material.fill(0);
-    const containerResiduals = containers?.code === 0 && !containers.stdout.trim() ? 0 : 1;
-    const volumeResiduals = volumes?.code === 0 && !volumes.stdout.trim() ? 0 : 1;
-    const networkResiduals = networks?.code === 0 && !networks.stdout.trim() ? 0 : 1;
+    const containerResiduals = containers?.code === 0 && containersByName?.code === 0 &&
+      !containers.stdout.trim() && !containersByName.stdout.trim() ? 0 : 1;
+    const volumeResiduals = volumes?.code === 0 && volumesByName?.code === 0 &&
+      !volumes.stdout.trim() && !volumesByName.stdout.trim() ? 0 : 1;
+    const networkResiduals = networks?.code === 0 && networksByName?.code === 0 &&
+      !networks.stdout.trim() && !networksByName.stdout.trim() ? 0 : 1;
     if (
       commandFailures === 0 && containerResiduals === 0 && volumeResiduals === 0 &&
       networkResiduals === 0 && listeners.length === 0 && !fs.existsSync(runRoot) &&
@@ -1053,16 +1459,22 @@ function createLinuxPostgres(options = {}) {
     if (!result.cleanupCompleted) fail("linux_postgres_cleanup_incomplete");
     started = false;
     containerId = "";
+    networkId = "";
+    volumeCreated = false;
+    databaseHost = "";
+    port = 0;
     return result;
   }
 
   return Object.freeze({
+    adaptLogicalPoolOptions,
     bootstrap,
     cleanup,
     createRunTool,
     get InstrumentedPool() { return InstrumentedPool; },
     get materials() { return materials; },
     get names() { return names; },
+    get databaseHost() { return databaseHost; },
     get port() { return port; },
     get runRoot() { return runRoot; },
     get workDirectory() { return workDirectory; },
@@ -1080,13 +1492,16 @@ module.exports = {
   IMAGE,
   IMAGE_DIGEST,
   classifyHostListenerRows,
-  inspectContainerBinding,
+  inspectContainerListing,
+  inspectInternalContainer,
+  inspectInternalNetwork,
   INTERNAL_PORT,
   LOOPBACK,
   LinuxPostgresFailure,
   MIGRATION_LOGIN,
   MIGRATOR_ROLE,
   OWNER_ROLE,
+  POSTGRES_CONNECTIVITY_MODE,
   postgresFailureDiagnostics,
   PROVISIONER_LOGIN,
   RUNTIME_LOGIN,

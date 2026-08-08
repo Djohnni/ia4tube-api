@@ -43,6 +43,7 @@ const EVIDENCE_HASH_FILE = "social-3a0p-linux-physical-gates-evidence.sha256";
 const SANITIZED_MARKER = ".sanitized-approved";
 const LEGACY_2A_COMMIT = "9deb1e04249026a7046d44d6cbf4e2da87b9a0a4";
 const PHYSICAL_POOL_DRAIN_TIMEOUT_MS = 10_000;
+const LOGICAL_DATABASE_PORT = 5432;
 const SAFE_FAILURE = /^[a-z][a-z0-9_]{2,119}$/;
 const SAFE_PHASE = new Set([
   "platform", "durability", "postgres", "bootstrap", "migrations", "rls_roles",
@@ -133,6 +134,7 @@ function evidenceSafe(value, depth = 0) {
   if (typeof value === "number") return Number.isFinite(value) && Number.isSafeInteger(value);
   if (typeof value === "string") {
     return value.length <= 300 && !/[\0\r\n\u0001-\u001f\u007f]/.test(value) &&
+      !/(?:^|[^0-9])(?:25[0-5]|2[0-4][0-9]|1?[0-9]{1,2})(?:\.(?:25[0-5]|2[0-4][0-9]|1?[0-9]{1,2})){3}(?:\/(?:[0-9]|[12][0-9]|3[0-2]))?(?:$|[^0-9])/u.test(value) &&
       !/(?:postgres(?:ql)?:\/\/|password=|bearer\s|-----BEGIN|github_pat_|ghp_|sk-[A-Za-z0-9]|eyJ[A-Za-z0-9_-]{10,}\.)/i.test(value);
   }
   if (Array.isArray(value)) return value.length <= 100 && value.every((item) => evidenceSafe(item, depth + 1));
@@ -140,6 +142,7 @@ function evidenceSafe(value, depth = 0) {
   return Object.entries(value).every(([key, item]) => (
     /^[a-zA-Z][a-zA-Z0-9_]{0,79}$/.test(key) &&
     !/(password|connectionString|databaseUrl|rawState|token|secret|environmentVariables)/i.test(key) &&
+    !/^(?:databaseHost|containerId|networkId|ipAddress|subnet|gateway)$/i.test(key) &&
     evidenceSafe(item, depth + 1)
   ));
 }
@@ -855,22 +858,70 @@ async function retirePrimaryPoolsBeforeBackup(state) {
   return true;
 }
 
+function isPrivateIpv4(value) {
+  if (typeof value !== "string") return false;
+  const octets = value.split(".");
+  if (octets.length !== 4 || octets.some((octet) => !/^(?:0|[1-9]\d{0,2})$/.test(octet))) return false;
+  const values = octets.map(Number);
+  if (values.some((octet) => octet > 255)) return false;
+  return values[0] === 10 ||
+    (values[0] === 172 && values[1] >= 16 && values[1] <= 31) ||
+    (values[0] === 192 && values[1] === 168);
+}
+
+function createPrivatePlanPoolOptionsAdapter(postgres) {
+  if (!postgres || typeof postgres.adaptLogicalPoolOptions !== "function") {
+    fail("linux_gate_plan_pool_transport_contract_invalid");
+  }
+  const databaseHost = postgres.databaseHost;
+  if (!isPrivateIpv4(databaseHost)) fail("linux_gate_plan_pool_private_host_invalid");
+  return (options) => {
+    if (
+      !options || Object.getPrototypeOf(options) !== Object.prototype ||
+      options.host !== LOOPBACK || options.port !== LOGICAL_DATABASE_PORT ||
+      options.ssl !== false || options.connectionString != null
+    ) {
+      fail("linux_gate_plan_pool_logical_transport_invalid");
+    }
+    const logicalKeys = Object.keys(options)
+      .filter((key) => key !== "connectionString" || options[key] != null)
+      .sort();
+    const adapted = postgres.adaptLogicalPoolOptions(options);
+    const physicalKeys = adapted && Object.getPrototypeOf(adapted) === Object.prototype
+      ? Object.keys(adapted).filter((key) => key !== "connectionString" || adapted[key] != null).sort()
+      : [];
+    if (
+      !adapted || Object.getPrototypeOf(adapted) !== Object.prototype || adapted === options ||
+      options.host !== LOOPBACK || options.port !== LOGICAL_DATABASE_PORT || options.ssl !== false ||
+      adapted.host !== databaseHost || adapted.port !== LOGICAL_DATABASE_PORT || adapted.ssl !== false ||
+      adapted.connectionString != null ||
+      logicalKeys.length !== physicalKeys.length ||
+      logicalKeys.some((key, index) => key !== physicalKeys[index]) ||
+      logicalKeys.some((key) => key !== "host" && key !== "port" && !Object.is(adapted[key], options[key]))
+    ) {
+      fail("linux_gate_plan_pool_physical_transport_invalid");
+    }
+    return adapted;
+  };
+}
+
 function createRoleScopedPlanPoolClass(
   BasePool,
   withTransactionImpl = require("../src/persistence/postgres/pool").withTransaction,
   createMigrationPool = null,
-  prepareRestoreTarget = prepareLinuxRestoreTarget
+  prepareRestoreTarget = prepareLinuxRestoreTarget,
+  adaptPoolOptions = (options) => options
 ) {
   if (
     typeof BasePool !== "function" || typeof withTransactionImpl !== "function" ||
-    typeof prepareRestoreTarget !== "function"
+    typeof prepareRestoreTarget !== "function" || typeof adaptPoolOptions !== "function"
   ) {
     fail("linux_gate_plan_pool_contract_invalid");
   }
   const instances = new Set();
   return class LinuxRoleScopedPlanPool extends BasePool {
     constructor(options) {
-      super(options);
+      super(adaptPoolOptions(options));
       this.linuxPhysicalDrain = createPhysicalPoolDrainTracker(this);
       this.linuxRestoreTargetPrepared = false;
       this.linuxRestoreTargetPreparing = null;
@@ -1243,7 +1294,13 @@ async function runLinuxGate(options = {}) {
     await phase("durability", () => (options.runDurability || runLinuxDurabilityProof)({ runnerTemp }));
     sampleSpace();
     activePhase = "postgres";
-    const postgresEvidence = await phase("postgres", () => postgres.start());
+    let adaptPlanPoolOptions;
+    const postgresEvidence = await phase("postgres", async () => {
+      const started = await postgres.start();
+      if (postgres.port !== LOGICAL_DATABASE_PORT) fail("linux_gate_private_database_port_invalid");
+      adaptPlanPoolOptions = createPrivatePlanPoolOptionsAdapter(postgres);
+      return started;
+    });
     sampleSpace();
     const environmentId = crypto.randomUUID();
     let bootstrap;
@@ -1261,7 +1318,7 @@ async function runLinuxGate(options = {}) {
       runCommand
     });
     state = {
-      target: { host: LOOPBACK, port: postgres.port },
+      target: { host: LOOPBACK, port: LOGICAL_DATABASE_PORT },
       environmentId,
       repositoryRoot,
       workDirectory: postgres.workDirectory,
@@ -1299,8 +1356,11 @@ async function runLinuxGate(options = {}) {
         postgres.materials.migration,
         1,
         "ia4tube-social-3a0p-migration"
-      )
+      ),
+      prepareLinuxRestoreTarget,
+      adaptPlanPoolOptions
     );
+    state.PoolClass = PhysicalPlanPool;
     const physicalRunTool = createDrainAwareRunTool(
       PhysicalPlanPool,
       postgres.createRunTool()
@@ -1493,6 +1553,15 @@ async function runLinuxGate(options = {}) {
       const code = recordCleanupFailure(error);
       evidence.phases.push({ name: "cleanup", status: "failed", durationMs: Date.now() - cleanupStarted, code });
     }
+    const failedPostgresPhase = evidence.phases.find((entry) => (
+      entry?.name === "postgres" && entry?.status === "failed" && entry?.diagnostics
+    ));
+    if (failedPostgresPhase) {
+      failedPostgresPhase.diagnostics = Object.freeze({
+        ...failedPostgresPhase.diagnostics,
+        cleanupCompleted: cleanupResult?.cleanupCompleted === true
+      });
+    }
     evidence.cleanup = cleanupResult || { cleanupCompleted: false };
     evidence.diskFinalFreeBytes = freeBytes(runnerTemp);
     evidence.status = evidence.status === "passed" && cleanupResult?.cleanupCompleted === true && !evidence.cleanupFailure
@@ -1590,6 +1659,7 @@ module.exports = {
   createLinuxRestoreConfigFacade,
   createPhaseRunner,
   createPhysicalPoolDrainTracker,
+  createPrivatePlanPoolOptionsAdapter,
   createRoleScopedPlanPoolClass,
   evidenceSafe,
   failureCode,

@@ -9,8 +9,8 @@ const REPOSITORY_ROOT = path.resolve(__dirname, "..");
 const WORKFLOW_RELATIVE_PATH = ".github/workflows/social-3a0p-linux-physical-gates.yml";
 const WORKFLOW_PATH = path.join(REPOSITORY_ROOT, ...WORKFLOW_RELATIVE_PATH.split("/"));
 const BRANCH = "social/checkpoint-3a0p-linux-physical-gates-20260807";
-const PARENT = "d80d351c599444dfca372db6071bda757e16dd64";
-const MESSAGE = "[run-social-3a0p-linux-gate] use verified structured loopback inspection";
+const PARENT = "88ff0ea427e6f321e8026910d018cd37e1e2687e";
+const MESSAGE = "[run-social-3a0p-linux-gate] use isolated internal network without host publishing";
 const JOB_IF = [
   "github.event_name == 'push'",
   `github.ref == 'refs/heads/${BRANCH}'`,
@@ -47,7 +47,7 @@ test("Linux gate is the repository's sole workflow and is strict JSON", () => {
   assert.doesNotThrow(() => JSON.parse(fs.readFileSync(WORKFLOW_PATH, "utf8")));
 });
 
-test("workflow triggers only the exact authorized second push", () => {
+test("workflow triggers only the exact authorized third push", () => {
   const { workflow } = readWorkflow();
   assert.deepEqual(workflow.on, { push: { branches: [BRANCH] } });
   assert.deepEqual(workflow.permissions, { contents: "read" });
@@ -62,6 +62,7 @@ test("workflow triggers only the exact authorized second push", () => {
   assert.equal(job.if, JOB_IF);
   assert.equal(workflow.env.SOCIAL_3A0P_AUTHORIZED_PARENT, PARENT);
   assert.equal(workflow.env.SOCIAL_3A0P_AUTHORIZED_MESSAGE, MESSAGE);
+  assert.equal(workflow.env.POSTGRES_CONNECTIVITY_MODE, "internal_bridge_direct_v1");
   assert.equal(workflow.env.SOCIAL_3A0P_POSTGRES_IMAGE, IMAGE);
 
   const guard = job.steps.find((step) => step.name === "Verify immutable execution contract");
@@ -69,9 +70,10 @@ test("workflow triggers only the exact authorized second push", () => {
   assert.ok(guard.run.includes('test "$(git log -1 --pretty=%B)" = "$SOCIAL_3A0P_AUTHORIZED_MESSAGE"'));
   assert.ok(guard.run.includes('git diff --quiet "$SOCIAL_3A0P_PRODUCT_COMMIT" HEAD -- src db/migrations migrations server.js package.json package-lock.json'));
   assert.ok(guard.run.includes('git diff --name-only "$SOCIAL_3A0P_AUTHORIZED_PARENT" HEAD'));
+  assert.equal(guard.run.includes("social-3a0p-local-scope"), false);
 });
 
-test("second-push contract refuses creation, wrong parent, wrong message, and rerun", () => {
+test("third-push contract refuses creation, wrong parent, wrong message, and rerun", () => {
   const authorized = Object.freeze({
     eventName: "push",
     ref: `refs/heads/${BRANCH}`,
@@ -95,8 +97,8 @@ test("second-push contract refuses creation, wrong parent, wrong message, and re
   assert.equal(accepted(authorized), true);
   for (const mutation of [
     { created: true },
-    { before: "36be098f926cc060ee89dff7874dab772a3ef22f" },
-    { message: "[run-social-3a0p-linux-gate] add isolated Linux physical gates" },
+    { before: "d80d351c599444dfca372db6071bda757e16dd64" },
+    { message: "[run-social-3a0p-linux-gate] use verified structured loopback inspection" },
     { runAttempt: 2 }
   ]) {
     assert.equal(accepted({ ...authorized, ...mutation }), false);
