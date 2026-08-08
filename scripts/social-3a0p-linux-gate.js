@@ -21,7 +21,6 @@ const {
   postgresFailureDiagnostics
 } = require("./social-3a0p-linux-postgres");
 const {
-  createRestoreBehaviorFacade,
   databaseContainsMarker,
   runConcurrencyOAuthIdempotencyGate,
   runPersistedVaultGate,
@@ -34,8 +33,8 @@ const {
   createPoolMetricsRegistry
 } = require("./social-3a0p-local-runtime-evidence-metrics");
 
-const BRANCH = "social/checkpoint-3a0p-linux-backup-transport-20260808";
-const BASE_COMMIT = "f47438ef12b03a5eb1f2965c2e68e3c6efd9f36a";
+const BRANCH = "social/checkpoint-3a0p-linux-profile-aware-restore-20260808";
+const BASE_COMMIT = "931d1986e1cc5864c4d28997a995a27aaa593fd6";
 const PRODUCT_COMMIT = "fcfc92419021dae5f77baad731c634b10c275c5b";
 const MARKER = "[run-social-3a0p-linux-gate]";
 const RUN_MARKER_PREFIX = "ia4tube-social-3a0p-linux-";
@@ -69,6 +68,20 @@ const RESTORE_APPLICATION_SCHEMAS = Object.freeze([
   "ia4tube_social_admin",
   "ia4tube_migrations"
 ]);
+const SCHEMA_PROFILE_0003 = "social-schema-0003";
+const SCHEMA_PROFILE_0004 = "social-schema-0004";
+const SCHEMA_PROFILE_IDS = Object.freeze([
+  SCHEMA_PROFILE_0003,
+  SCHEMA_PROFILE_0004
+]);
+const SCHEMA_PROFILE_DIAGNOSTIC_KEYS = Object.freeze([
+  "expectedRelationCount",
+  "kindMismatchCount",
+  "missingRelationCount",
+  "observedRelationCount",
+  "ownerMismatchCount",
+  "unexpectedRelationCount"
+].sort());
 
 class LinuxGateFailure extends Error {
   constructor(code) {
@@ -192,6 +205,9 @@ function sanitizedFailureEvidence(source, code = "linux_evidence_sanitization_fa
     cleanupFailure: typeof source?.cleanupFailure === "string" && SAFE_FAILURE.test(source.cleanupFailure)
       ? source.cleanupFailure
       : null,
+    schemaProfileDiagnostics: sanitizedSchemaProfileDiagnostics(
+      source?.schemaProfileDiagnostics
+    ),
     cleanup,
     sanitizationFailure: true
   });
@@ -1316,6 +1332,262 @@ function createRoleScopedPlanPoolClass(
   };
 }
 
+function definitiveSchemaProfile(expectedProfileId) {
+  if (
+    typeof expectedProfileId !== "string" ||
+    !SCHEMA_PROFILE_IDS.includes(expectedProfileId)
+  ) {
+    fail("linux_gate_schema_profile_invalid");
+  }
+  const backup = require("../src/persistence/postgres/backup-restore");
+  const profiles = backup.SCHEMA_PROFILES;
+  const profile = Array.isArray(profiles)
+    ? profiles.find((candidate) => candidate?.id === expectedProfileId)
+    : undefined;
+  if (
+    !profile ||
+    !Array.isArray(profile.rlsTables) ||
+    profile.rlsTables.length < 1 ||
+    profile.rlsTables.some(
+      (table) => typeof table !== "string" || !/^[a-z][a-z0-9_]{2,62}$/.test(table)
+    )
+  ) {
+    fail("linux_gate_schema_profile_contract_invalid");
+  }
+  return profile;
+}
+
+function closedSchemaProfileDiagnostics(candidate) {
+  if (candidate === null || candidate === undefined) return null;
+  if (
+    !candidate ||
+    Object.getPrototypeOf(candidate) !== Object.prototype ||
+    JSON.stringify(Object.keys(candidate).sort()) !==
+      JSON.stringify(SCHEMA_PROFILE_DIAGNOSTIC_KEYS)
+  ) {
+    fail("linux_gate_schema_profile_diagnostics_invalid");
+  }
+  const snapshot = Object.freeze({
+    observedRelationCount: candidate.observedRelationCount,
+    expectedRelationCount: candidate.expectedRelationCount,
+    missingRelationCount: candidate.missingRelationCount,
+    unexpectedRelationCount: candidate.unexpectedRelationCount,
+    kindMismatchCount: candidate.kindMismatchCount,
+    ownerMismatchCount: candidate.ownerMismatchCount
+  });
+  if (
+    Object.values(snapshot).some(
+      (value) => !Number.isSafeInteger(value) || value < 0
+    ) ||
+    snapshot.missingRelationCount > snapshot.expectedRelationCount ||
+    snapshot.unexpectedRelationCount > snapshot.observedRelationCount ||
+    snapshot.kindMismatchCount > Math.min(
+      snapshot.observedRelationCount,
+      snapshot.expectedRelationCount
+    ) ||
+    snapshot.ownerMismatchCount > snapshot.observedRelationCount
+  ) {
+    fail("linux_gate_schema_profile_diagnostics_invalid");
+  }
+  return snapshot;
+}
+
+function sanitizedSchemaProfileDiagnostics(candidate) {
+  try {
+    return closedSchemaProfileDiagnostics(candidate);
+  } catch {
+    return null;
+  }
+}
+
+async function collectSchemaProfileDiagnostics(pool, profile) {
+  if (!pool || typeof pool.query !== "function") {
+    fail("linux_gate_schema_profile_diagnostics_pool_invalid");
+  }
+  const expectedRelations = Object.freeze([
+    ...profile.rlsTables,
+    "runtime_schema_contract"
+  ]);
+  const result = await pool.query(
+    [
+      "WITH expected(relation_name, object_kind) AS (",
+      "  SELECT relation_name,",
+      "    CASE WHEN relation_name = 'runtime_schema_contract'",
+      "      THEN 'v'::\"char\" ELSE 'r'::\"char\" END",
+      "  FROM unnest($1::text[]) AS supplied(relation_name)",
+      "), observed AS (",
+      "  SELECT relation.relname AS relation_name,",
+      "    relation.relkind AS object_kind,",
+      "    owner.rolname AS owner_name",
+      "  FROM pg_catalog.pg_class relation",
+      "  JOIN pg_catalog.pg_namespace namespace",
+      "    ON namespace.oid = relation.relnamespace",
+      "  JOIN pg_catalog.pg_roles owner",
+      "    ON owner.oid = relation.relowner",
+      "  WHERE namespace.nspname = 'ia4tube_social'",
+      "    AND relation.relkind IN ('r', 'p', 'v', 'm', 'S')",
+      ")",
+      "SELECT",
+      "  (SELECT COUNT(*)::integer FROM observed) AS observed_relation_count,",
+      "  (SELECT COUNT(*)::integer FROM expected) AS expected_relation_count,",
+      "  (SELECT COUNT(*)::integer FROM expected",
+      "    LEFT JOIN observed USING (relation_name)",
+      "    WHERE observed.relation_name IS NULL) AS missing_relation_count,",
+      "  (SELECT COUNT(*)::integer FROM observed",
+      "    LEFT JOIN expected USING (relation_name)",
+      "    WHERE expected.relation_name IS NULL) AS unexpected_relation_count,",
+      "  (SELECT COUNT(*)::integer FROM observed",
+      "    JOIN expected USING (relation_name)",
+      "    WHERE observed.object_kind <> expected.object_kind) AS kind_mismatch_count,",
+      "  (SELECT COUNT(*)::integer FROM observed",
+      "    WHERE observed.owner_name <> $2) AS owner_mismatch_count"
+    ].join("\n"),
+    [expectedRelations, OWNER_ROLE]
+  );
+  const row = result?.rows?.[0];
+  const diagnostics = closedSchemaProfileDiagnostics({
+    observedRelationCount: Number(row?.observed_relation_count),
+    expectedRelationCount: Number(row?.expected_relation_count),
+    missingRelationCount: Number(row?.missing_relation_count),
+    unexpectedRelationCount: Number(row?.unexpected_relation_count),
+    kindMismatchCount: Number(row?.kind_mismatch_count),
+    ownerMismatchCount: Number(row?.owner_mismatch_count)
+  });
+  if (
+    result?.rowCount !== 1 ||
+    diagnostics.expectedRelationCount !== expectedRelations.length
+  ) {
+    fail("linux_gate_schema_profile_diagnostics_invalid");
+  }
+  return diagnostics;
+}
+
+function createRestoreBehaviorFacade(legacy2ARoot, overrides = {}) {
+  if (
+    !overrides ||
+    Object.getPrototypeOf(overrides) !== Object.prototype
+  ) {
+    fail("linux_gate_restore_behavior_facade_invalid");
+  }
+  const restoreBehavior = overrides.restoreBehavior === undefined
+    ? require("../src/persistence/postgres/restore-behavior-verifiers")
+    : overrides.restoreBehavior;
+  const runtimeValidation = overrides.runtimeValidation === undefined
+    ? require("../src/persistence/postgres/runtime-validation")
+    : overrides.runtimeValidation;
+  if (
+    !restoreBehavior ||
+    typeof restoreBehavior.createRestoreBehaviorVerifiers !== "function" ||
+    typeof restoreBehavior.loadLegacy2ADependencies !== "function" ||
+    !runtimeValidation ||
+    typeof runtimeValidation.verifyRuntimeSchema !== "function"
+  ) {
+    fail("linux_gate_restore_behavior_facade_invalid");
+  }
+
+  // This is deliberately eager and has no current-code fallback. The existing
+  // loader proves the fixed commit, closed manifest and every source hash.
+  const legacy = restoreBehavior.loadLegacy2ADependencies(legacy2ARoot);
+  const legacyOperationNames = [
+    "createCompanyScopedRepository",
+    "createSocialCredentialService",
+    "createSocialRepository",
+    "createSocialVault",
+    "verifyRuntimeRole",
+    "verifyRuntimeSchema"
+  ];
+  if (
+    !legacy ||
+    typeof legacy !== "object" ||
+    legacyOperationNames.some((name) => typeof legacy[name] !== "function")
+  ) {
+    fail("linux_gate_restore_behavior_2a_dependencies_invalid");
+  }
+
+  let diagnostics = null;
+
+  function selectedVerifier(expectedProfileId) {
+    definitiveSchemaProfile(expectedProfileId);
+    return expectedProfileId === SCHEMA_PROFILE_0003
+      ? legacy.verifyRuntimeSchema
+      : runtimeValidation.verifyRuntimeSchema;
+  }
+
+  function bindVerifier(expectedProfileId) {
+    const profile = definitiveSchemaProfile(expectedProfileId);
+    const verifier = selectedVerifier(expectedProfileId);
+    return async function verifyProfileRuntimeSchema(pool, role) {
+      try {
+        return await verifier(pool, role);
+      } catch (error) {
+        if (
+          error?.code === "postgres_relation_owner_mismatch" &&
+          diagnostics === null
+        ) {
+          try {
+            diagnostics = await collectSchemaProfileDiagnostics(pool, profile);
+          } catch {
+            // The original schema failure remains the first and only failure.
+          }
+        }
+        throw error;
+      }
+    };
+  }
+
+  function profileBoundLegacyDependencies(verifyRuntimeSchemaForProfile) {
+    return Object.freeze({
+      createCompanyScopedRepository: legacy.createCompanyScopedRepository,
+      createSocialCredentialService: legacy.createSocialCredentialService,
+      createSocialRepository: legacy.createSocialRepository,
+      createSocialVault: legacy.createSocialVault,
+      verifyRuntimeRole: legacy.verifyRuntimeRole,
+      verifyRuntimeSchema: verifyRuntimeSchemaForProfile
+    });
+  }
+
+  return Object.freeze({
+    createRestoreBehaviorVerifiers(options = {}) {
+      if (
+        !options ||
+        Object.getPrototypeOf(options) !== Object.prototype ||
+        Object.hasOwn(options, "legacyDependencies")
+      ) {
+        fail("linux_gate_restore_behavior_options_invalid");
+      }
+      const expectedProfileId = options.expectedProfileId;
+      const verifyRuntimeSchemaForProfile = bindVerifier(expectedProfileId);
+      const forwarded = { ...options };
+      delete forwarded.expectedProfileId;
+      return restoreBehavior.createRestoreBehaviorVerifiers({
+        ...forwarded,
+        legacy2ARoot,
+        dependencies: {
+          ...(forwarded.dependencies || {}),
+          verifyRuntimeSchema: verifyRuntimeSchemaForProfile
+        },
+        legacyDependencies: profileBoundLegacyDependencies(
+          verifyRuntimeSchemaForProfile
+        )
+      });
+    },
+    verifyRuntimeSchemaForProfile(request) {
+      if (
+        !request ||
+        Object.getPrototypeOf(request) !== Object.prototype ||
+        JSON.stringify(Object.keys(request).sort()) !==
+          JSON.stringify(["expectedProfileId", "pool", "role"])
+      ) {
+        fail("linux_gate_schema_profile_verifier_request_invalid");
+      }
+      return bindVerifier(request.expectedProfileId)(request.pool, request.role);
+    },
+    schemaProfileDiagnostics() {
+      return diagnostics;
+    }
+  });
+}
+
 async function materializeLegacy2ASource({ repositoryRoot, destination, runCommand }) {
   const manifest = require("../src/persistence/postgres/legacy-2a-source-manifest.json");
   const files = Object.keys(manifest.files || {}).sort();
@@ -1526,6 +1798,7 @@ async function runLinuxGate(options = {}) {
   let profile0003Plans;
   let gates;
   let legacy2ARoot;
+  let restoreBehaviorFacade;
   let cleanupResult = null;
   let operationalFailure = null;
   let activePhase = "platform";
@@ -1572,6 +1845,7 @@ async function runLinuxGate(options = {}) {
       destination: path.join(postgres.runRoot, "legacy-2a-source"),
       runCommand
     });
+    restoreBehaviorFacade = createRestoreBehaviorFacade(legacy2ARoot);
     state = {
       target: { host: LOOPBACK, port: LOGICAL_DATABASE_PORT },
       environmentId,
@@ -1656,7 +1930,7 @@ async function runLinuxGate(options = {}) {
           return createBackupTransportBridge(postgres, physicalRunTool, contract);
         },
         runTool: physicalRunTool,
-        restoreBehavior: createRestoreBehaviorFacade(legacy2ARoot)
+        restoreBehavior: restoreBehaviorFacade
       }
     });
     const gate1MigrationPools = createGate1MigrationPoolLifecycle({
@@ -1853,6 +2127,8 @@ async function runLinuxGate(options = {}) {
       });
     }
     evidence.backupTransport = publicBackupTransportEvidence(postgres);
+    evidence.schemaProfileDiagnostics =
+      restoreBehaviorFacade?.schemaProfileDiagnostics() || null;
     evidence.cleanup = cleanupResult || { cleanupCompleted: false };
     evidence.diskFinalFreeBytes = freeBytes(runnerTemp);
     evidence.status = evidence.status === "passed" && cleanupResult?.cleanupCompleted === true && !evidence.cleanupFailure
@@ -1952,6 +2228,7 @@ module.exports = {
   createPhaseRunner,
   createPhysicalPoolDrainTracker,
   createPrivatePlanPoolOptionsAdapter,
+  createRestoreBehaviorFacade,
   createRoleScopedPlanPoolClass,
   createVerifiedLoginCredentialPoolBridge,
   evidenceSafe,

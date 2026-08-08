@@ -1,9 +1,11 @@
 "use strict";
 
 const assert = require("node:assert/strict");
+const { execFileSync } = require("node:child_process");
 const crypto = require("node:crypto");
 const { EventEmitter } = require("node:events");
 const fs = require("node:fs");
+const { createRequire } = require("node:module");
 const os = require("node:os");
 const path = require("node:path");
 const test = require("node:test");
@@ -36,6 +38,7 @@ const {
   createPhaseRunner,
   createPhysicalPoolDrainTracker,
   createPrivatePlanPoolOptionsAdapter,
+  createRestoreBehaviorFacade,
   createRoleScopedPlanPoolClass,
   createVerifiedLoginCredentialPoolBridge,
   evidenceSafe,
@@ -52,6 +55,344 @@ const {
 } = require("../scripts/social-3a0p-linux-gate");
 
 const ROOT = path.resolve(__dirname, "..");
+const PROFILE_0003_ID = "social-schema-0003";
+const PROFILE_0004_ID = "social-schema-0004";
+const PROFILE_0004_ONLY_RELATIONS = Object.freeze([
+  "social_idempotency_operations",
+  "social_publications",
+  "social_publication_attempts"
+]);
+
+function materializeFixedLegacy2AForTest() {
+  const manifest = require("../src/persistence/postgres/legacy-2a-source-manifest.json");
+  const temporaryRoot = fs.mkdtempSync(
+    path.join(os.tmpdir(), "social-3a0p-profile-matrix-")
+  );
+  const legacyRoot = path.join(temporaryRoot, "legacy-2a");
+  const dependenciesLink = path.join(legacyRoot, "node_modules");
+  fs.mkdirSync(legacyRoot, { mode: 0o700 });
+  try {
+    for (const relative of Object.keys(manifest.files).sort()) {
+      const target = path.join(legacyRoot, ...relative.split("/"));
+      fs.mkdirSync(path.dirname(target), { recursive: true, mode: 0o700 });
+      fs.writeFileSync(
+        target,
+        execFileSync("git", ["show", `${manifest.commit}:${relative}`], {
+          cwd: ROOT,
+          encoding: "buffer",
+          maxBuffer: 8 * 1024 * 1024,
+          windowsHide: true
+        }),
+        { flag: "wx", mode: 0o600 }
+      );
+    }
+    const nodeModules = path.dirname(
+      path.dirname(require.resolve("pg/package.json"))
+    );
+    fs.symlinkSync(
+      nodeModules,
+      dependenciesLink,
+      process.platform === "win32" ? "junction" : "dir"
+    );
+    const restoreBehavior = require("../src/persistence/postgres/restore-behavior-verifiers");
+    const dependencies = restoreBehavior.loadLegacy2ADependencies(legacyRoot);
+    const requireLegacy = createRequire(path.join(legacyRoot, "package.json"));
+    return Object.freeze({
+      cleanup() {
+        if (fs.existsSync(dependenciesLink)) fs.unlinkSync(dependenciesLink);
+        fs.rmSync(temporaryRoot, { recursive: true, force: false });
+      },
+      dependencies,
+      legacyRoot,
+      migrations: requireLegacy("./src/persistence/postgres/migrations.js"),
+      runtimeValidation: requireLegacy(
+        "./src/persistence/postgres/runtime-validation.js"
+      )
+    });
+  } catch (error) {
+    if (fs.existsSync(dependenciesLink)) fs.unlinkSync(dependenciesLink);
+    fs.rmSync(temporaryRoot, { recursive: true, force: true });
+    throw error;
+  }
+}
+
+function runtimeSchemaContract(runtimeValidation, migrations) {
+  return Object.freeze({
+    migrations: migrations.readManifest(),
+    runtimeValidation,
+    tables: runtimeValidation.TENANT_TABLES,
+    policies: runtimeValidation.TENANT_POLICIES,
+    scopeColumns: runtimeValidation.TENANT_SCOPE_COLUMNS,
+    tableGrants: runtimeValidation.RUNTIME_TABLE_GRANTS,
+    columnGrants: runtimeValidation.RUNTIME_COLUMN_GRANTS
+  });
+}
+
+function exactSchemaInventory(contract) {
+  return Object.freeze([
+    ...contract.tables.map((name) => Object.freeze({
+      name,
+      kind: "r",
+      owner: "ia4tube_social_owner"
+    })),
+    Object.freeze({
+      name: "runtime_schema_contract",
+      kind: "v",
+      owner: "ia4tube_social_owner"
+    })
+  ]);
+}
+
+function replaceSchemaInventory(inventory, operation) {
+  return Object.freeze(operation(inventory.map((entry) => ({ ...entry })))
+    .map((entry) => Object.freeze({ ...entry })));
+}
+
+function schemaInventoryStatistics(inventory, expectedRelations) {
+  const observedByName = new Map(inventory.map((entry) => [entry.name, entry]));
+  const expectedByName = new Map(expectedRelations.map((name) => [
+    name,
+    name === "runtime_schema_contract" ? "v" : "r"
+  ]));
+  return Object.freeze({
+    observedRelationCount: inventory.length,
+    expectedRelationCount: expectedRelations.length,
+    missingRelations: Object.freeze(expectedRelations.filter(
+      (name) => !observedByName.has(name)
+    )),
+    unexpectedRelations: Object.freeze(inventory
+      .filter((entry) => !expectedByName.has(entry.name))
+      .map((entry) => entry.name)),
+    kindMismatchCount: inventory.filter(
+      (entry) => expectedByName.has(entry.name) &&
+        expectedByName.get(entry.name) !== entry.kind
+    ).length,
+    ownerMismatchCount: inventory.filter(
+      (entry) => entry.owner !== "ia4tube_social_owner"
+    ).length
+  });
+}
+
+function runtimeTableAclRows(contract) {
+  return Object.entries(contract.tableGrants).flatMap(
+    ([table_name, privileges]) => privileges.map((privilege_type) => ({
+      grantee: "ia4tube_social_runtime",
+      table_name,
+      privilege_type,
+      is_grantable: false,
+      grantor_name: "ia4tube_social_owner"
+    }))
+  );
+}
+
+function runtimeColumnAclRows(contract) {
+  return Object.entries(contract.columnGrants).flatMap(
+    ([table_name, columns]) => Object.entries(columns).flatMap(
+      ([column_name, privileges]) => privileges.map((privilege_type) => ({
+        grantee: "ia4tube_social_runtime",
+        table_name,
+        column_name,
+        privilege_type,
+        is_grantable: false,
+        grantor_name: "ia4tube_social_owner"
+      }))
+    )
+  );
+}
+
+function runtimeSchemaCatalogPool(contract, inventory) {
+  const queries = [];
+  async function query(text, values) {
+    const sql = String(text);
+    const normalized = sql.trim();
+    queries.push(Object.freeze({ text: sql, values }));
+    if (
+      normalized === "BEGIN" || normalized === "COMMIT" ||
+      normalized === "ROLLBACK" || normalized.startsWith("SET LOCAL ROLE ")
+    ) {
+      return { rowCount: 0, rows: [] };
+    }
+    if (normalized.startsWith("WITH expected(relation_name, object_kind) AS")) {
+      const expected = values[0];
+      const statistics = schemaInventoryStatistics(inventory, expected);
+      return {
+        rowCount: 1,
+        rows: [{
+          observed_relation_count: statistics.observedRelationCount,
+          expected_relation_count: statistics.expectedRelationCount,
+          missing_relation_count: statistics.missingRelations.length,
+          unexpected_relation_count: statistics.unexpectedRelations.length,
+          kind_mismatch_count: statistics.kindMismatchCount,
+          owner_mismatch_count: statistics.ownerMismatchCount
+        }]
+      };
+    }
+    if (
+      sql.includes("SELECT owner.rolname AS owner_name") &&
+      sql.includes("WHERE namespace.nspname = 'ia4tube_social'")
+    ) {
+      return {
+        rowCount: 1,
+        rows: [{ owner_name: "ia4tube_social_owner" }]
+      };
+    }
+    if (sql.includes("AS vault_registry_fk_count")) {
+      return {
+        rowCount: 1,
+        rows: [{
+          schema_owner: "ia4tube_social_owner",
+          registry_kind: "r",
+          registry_owner: "ia4tube_social_owner",
+          registry_rls: false,
+          registry_force_rls: false,
+          registry_policy_count: 0,
+          registry_primary_key_count: 1,
+          vault_registry_fk_count: 1,
+          schema_non_owner_acl_count: 0,
+          table_non_owner_acl_count: 0,
+          runtime_usage_absent: true,
+          runtime_create_absent: true
+        }]
+      };
+    }
+    if (sql.includes("relation.relkind AS object_kind")) {
+      return {
+        rowCount: inventory.length,
+        rows: inventory.map((entry) => ({
+          relname: entry.name,
+          object_kind: entry.kind,
+          owner_name: entry.owner
+        }))
+      };
+    }
+    if (sql.includes("FROM pg_catalog.pg_proc routine")) {
+      return { rowCount: 1, rows: [{ routine_count: 0 }] };
+    }
+    if (sql.includes("FROM ia4tube_social.runtime_schema_contract")) {
+      return {
+        rowCount: contract.migrations.length,
+        rows: contract.migrations.map((migration) => ({
+          version: migration.version,
+          checksum_sha256: migration.sha256
+        }))
+      };
+    }
+    if (sql.includes("COUNT(policy.policyname)::integer AS policy_count")) {
+      return {
+        rowCount: contract.tables.length,
+        rows: contract.tables.map((relname) => ({
+          relname,
+          relrowsecurity: true,
+          relforcerowsecurity: true,
+          policy_count: 1
+        }))
+      };
+    }
+    if (sql.includes("FROM pg_catalog.pg_policies")) {
+      return {
+        rowCount: contract.tables.length,
+        rows: contract.tables.map((tablename) => {
+          const expression =
+            `(${contract.scopeColumns[tablename]} = ` +
+            "NULLIF(current_setting('ia4tube.company_id'::text, true), " +
+            "''::text)::uuid)";
+          return {
+            tablename,
+            policyname: contract.policies[tablename],
+            permissive: "PERMISSIVE",
+            roles: ["public"],
+            cmd: "ALL",
+            qual: expression,
+            with_check: expression
+          };
+        })
+      };
+    }
+    if (sql.includes("namespace.nspacl")) {
+      return {
+        rowCount: 1,
+        rows: [{
+          grantee: "ia4tube_social_runtime",
+          privilege_type: "USAGE",
+          is_grantable: false,
+          grantor_name: "ia4tube_social_owner"
+        }]
+      };
+    }
+    if (sql.includes("relation.relacl")) {
+      const rows = runtimeTableAclRows(contract);
+      return { rowCount: rows.length, rows };
+    }
+    if (sql.includes("attribute.attacl")) {
+      const rows = runtimeColumnAclRows(contract);
+      return { rowCount: rows.length, rows };
+    }
+    if (sql.includes("has_table_privilege")) {
+      return {
+        rowCount: 1,
+        rows: [{
+          contract_select: true,
+          audit_update: false,
+          audit_delete: false,
+          identity_write: false,
+          legacy_access: false
+        }]
+      };
+    }
+    throw new Error(`unexpected_runtime_schema_query:${normalized.slice(0, 48)}`);
+  }
+  const client = Object.freeze({ query, release() {} });
+  return Object.freeze({
+    queries,
+    query,
+    async connect() { return client; }
+  });
+}
+
+function restoreBehaviorFacadeFixture(options = {}) {
+  const calls = {
+    created: [],
+    currentSchema: [],
+    legacySchema: [],
+    loadedRoots: []
+  };
+  const legacy = Object.freeze({
+    createCompanyScopedRepository() {},
+    createSocialCredentialService() {},
+    createSocialRepository() {},
+    createSocialVault() {},
+    verifyRuntimeRole() {},
+    async verifyRuntimeSchema(...args) {
+      calls.legacySchema.push(args);
+      if (options.legacySchemaFailure) throw options.legacySchemaFailure;
+      return true;
+    }
+  });
+  const restoreBehavior = {
+    loadLegacy2ADependencies(root) {
+      calls.loadedRoots.push(root);
+      if (options.loaderFailure) throw options.loaderFailure;
+      return legacy;
+    },
+    createRestoreBehaviorVerifiers(configuration) {
+      calls.created.push(configuration);
+      return Object.freeze({ configuration });
+    }
+  };
+  const runtimeValidation = {
+    async verifyRuntimeSchema(...args) {
+      calls.currentSchema.push(args);
+      if (options.currentSchemaFailure) throw options.currentSchemaFailure;
+      return true;
+    }
+  };
+  const legacyRoot = path.join(ROOT, "synthetic-legacy-2a-source");
+  const facade = createRestoreBehaviorFacade(legacyRoot, {
+    restoreBehavior,
+    runtimeValidation
+  });
+  return Object.freeze({ calls, facade, legacy, legacyRoot });
+}
 
 test("evidence provenance matches the authorized workflow branch and parent", () => {
   const workflow = JSON.parse(fs.readFileSync(
@@ -60,6 +401,463 @@ test("evidence provenance matches the authorized workflow branch and parent", ()
   ));
   assert.deepEqual(workflow.on.push.branches, [BRANCH]);
   assert.equal(workflow.env.SOCIAL_3A0P_AUTHORIZED_PARENT, BASE_COMMIT);
+});
+
+test("profile-aware restore facade binds both schema slots to legacy for 0003 and current for 0004", async () => {
+  const fixture = restoreBehaviorFacadeFixture();
+  assert.deepEqual(fixture.calls.loadedRoots, [fixture.legacyRoot]);
+
+  fixture.facade.createRestoreBehaviorVerifiers({
+    expectedProfileId: "social-schema-0003",
+    dependencies: { PoolClass: class SyntheticPool {} },
+    env: { SOCIAL_SCHEMA_PROFILE: "social-schema-0004" }
+  });
+  const profile0003 = fixture.calls.created[0];
+  assert.equal(Object.hasOwn(profile0003, "expectedProfileId"), false);
+  assert.equal(profile0003.legacy2ARoot, fixture.legacyRoot);
+  assert.equal(
+    profile0003.dependencies.verifyRuntimeSchema,
+    profile0003.legacyDependencies.verifyRuntimeSchema
+  );
+  for (const operation of [
+    "createCompanyScopedRepository",
+    "createSocialCredentialService",
+    "createSocialRepository",
+    "createSocialVault",
+    "verifyRuntimeRole"
+  ]) {
+    assert.equal(profile0003.legacyDependencies[operation], fixture.legacy[operation]);
+  }
+  const pool0003 = Object.freeze({ observedProfileId: "social-schema-0004" });
+  await profile0003.dependencies.verifyRuntimeSchema(pool0003, "synthetic_runtime");
+  await profile0003.legacyDependencies.verifyRuntimeSchema(pool0003, "synthetic_runtime");
+  assert.equal(fixture.calls.legacySchema.length, 2);
+  assert.equal(fixture.calls.currentSchema.length, 0);
+
+  fixture.facade.createRestoreBehaviorVerifiers({
+    expectedProfileId: "social-schema-0004",
+    dependencies: { PoolClass: class SyntheticPool {} },
+    env: { SOCIAL_SCHEMA_PROFILE: "social-schema-0003" }
+  });
+  const profile0004 = fixture.calls.created[1];
+  assert.equal(
+    profile0004.dependencies.verifyRuntimeSchema,
+    profile0004.legacyDependencies.verifyRuntimeSchema
+  );
+  for (const operation of [
+    "createCompanyScopedRepository",
+    "createSocialCredentialService",
+    "createSocialRepository",
+    "createSocialVault",
+    "verifyRuntimeRole"
+  ]) {
+    assert.equal(profile0004.legacyDependencies[operation], fixture.legacy[operation]);
+  }
+  const pool0004 = Object.freeze({ observedProfileId: "social-schema-0003" });
+  await profile0004.dependencies.verifyRuntimeSchema(pool0004, "synthetic_runtime");
+  await profile0004.legacyDependencies.verifyRuntimeSchema(pool0004, "synthetic_runtime");
+  assert.equal(fixture.calls.legacySchema.length, 2);
+  assert.equal(fixture.calls.currentSchema.length, 2);
+});
+
+test("fixed 0003 and current 0004 schema verifiers enforce their exact closed inventories", async (t) => {
+  const fixedLegacy = materializeFixedLegacy2AForTest();
+  try {
+    const currentRuntimeValidation = require(
+      "../src/persistence/postgres/runtime-validation"
+    );
+    const currentMigrations = require(
+      "../src/persistence/postgres/migrations"
+    );
+    const profiles = require(
+      "../src/persistence/postgres/backup-restore"
+    ).SCHEMA_PROFILES;
+    const profile0003 = profiles.find((profile) => profile.id === PROFILE_0003_ID);
+    const profile0004 = profiles.find((profile) => profile.id === PROFILE_0004_ID);
+    const legacyContract = runtimeSchemaContract(
+      fixedLegacy.runtimeValidation,
+      fixedLegacy.migrations
+    );
+    const currentContract = runtimeSchemaContract(
+      currentRuntimeValidation,
+      currentMigrations
+    );
+    const inventory0003 = exactSchemaInventory(legacyContract);
+    const inventory0004 = exactSchemaInventory(currentContract);
+    const facade = createRestoreBehaviorFacade(fixedLegacy.legacyRoot);
+    const request = (expectedProfileId, pool) => ({
+      expectedProfileId,
+      pool,
+      role: "ia4tube_social_runtime"
+    });
+    const rejectsRelationMismatch = (operation) => assert.rejects(
+      operation,
+      { code: "postgres_relation_owner_mismatch" }
+    );
+
+    await t.test("exact 0003 passes the fixed legacy verifier", async () => {
+      const result = await facade.verifyRuntimeSchemaForProfile(
+        request(
+          PROFILE_0003_ID,
+          runtimeSchemaCatalogPool(legacyContract, inventory0003)
+        )
+      );
+      assert.deepEqual(result, {
+        valid: true,
+        migrationCount: 3,
+        tenantTableCount: 12
+      });
+    });
+
+    await t.test("exact 0003 deterministically fails current only for the three 0004 relations", async () => {
+      const expectedCurrentRelations = [
+        ...profile0004.rlsTables,
+        "runtime_schema_contract"
+      ];
+      const statistics = schemaInventoryStatistics(
+        inventory0003,
+        expectedCurrentRelations
+      );
+      assert.deepEqual(statistics.missingRelations, PROFILE_0004_ONLY_RELATIONS);
+      assert.deepEqual(statistics.unexpectedRelations, []);
+      assert.equal(statistics.kindMismatchCount, 0);
+      assert.equal(statistics.ownerMismatchCount, 0);
+      assert.equal(statistics.observedRelationCount, 13);
+      assert.equal(statistics.expectedRelationCount, 16);
+
+      await rejectsRelationMismatch(
+        facade.verifyRuntimeSchemaForProfile(
+          request(
+            PROFILE_0004_ID,
+            runtimeSchemaCatalogPool(legacyContract, inventory0003)
+          )
+        )
+      );
+      assert.deepEqual(facade.schemaProfileDiagnostics(), {
+        observedRelationCount: 13,
+        expectedRelationCount: 16,
+        missingRelationCount: 3,
+        unexpectedRelationCount: 0,
+        kindMismatchCount: 0,
+        ownerMismatchCount: 0
+      });
+    });
+
+    await t.test("adding only the three 0004 relations removes the generic relation failure", async () => {
+      const augmented = replaceSchemaInventory(inventory0003, (entries) => {
+        entries.push(...PROFILE_0004_ONLY_RELATIONS.map((name) => ({
+          name,
+          kind: "r",
+          owner: "ia4tube_social_owner"
+        })));
+        return entries;
+      });
+      const pool = runtimeSchemaCatalogPool(legacyContract, augmented);
+      let observed;
+      try {
+        await currentRuntimeValidation.verifyRuntimeSchema(
+          pool,
+          "ia4tube_social_runtime"
+        );
+      } catch (error) {
+        observed = error;
+      }
+      assert.ok(observed);
+      assert.notEqual(observed.code, "postgres_relation_owner_mismatch");
+      assert.equal(
+        pool.queries.some(({ text }) =>
+          text.includes("FROM ia4tube_social.runtime_schema_contract")
+        ),
+        true
+      );
+    });
+
+    await t.test("exact 0004 passes the complete current verifier", async () => {
+      const result = await facade.verifyRuntimeSchemaForProfile(
+        request(
+          PROFILE_0004_ID,
+          runtimeSchemaCatalogPool(currentContract, inventory0004)
+        )
+      );
+      assert.deepEqual(result, {
+        valid: true,
+        migrationCount: 4,
+        tenantTableCount: 15
+      });
+    });
+
+    await t.test("0003 refuses a missing native relation", async () => {
+      const missing = replaceSchemaInventory(
+        inventory0003,
+        (entries) => entries.filter((entry) => entry.name !== "social_connections")
+      );
+      await rejectsRelationMismatch(
+        fixedLegacy.dependencies.verifyRuntimeSchema(
+          runtimeSchemaCatalogPool(legacyContract, missing),
+          "ia4tube_social_runtime"
+        )
+      );
+    });
+
+    await t.test("0003 refuses every relation exclusive to 0004", async () => {
+      for (const relation of PROFILE_0004_ONLY_RELATIONS) {
+        const extra = replaceSchemaInventory(inventory0003, (entries) => {
+          entries.push({
+            name: relation,
+            kind: "r",
+            owner: "ia4tube_social_owner"
+          });
+          return entries;
+        });
+        await rejectsRelationMismatch(
+          fixedLegacy.dependencies.verifyRuntimeSchema(
+            runtimeSchemaCatalogPool(legacyContract, extra),
+            "ia4tube_social_runtime"
+          )
+        );
+      }
+    });
+
+    await t.test("0004 refuses each missing new relation", async () => {
+      for (const relation of PROFILE_0004_ONLY_RELATIONS) {
+        const missing = replaceSchemaInventory(
+          inventory0004,
+          (entries) => entries.filter((entry) => entry.name !== relation)
+        );
+        await rejectsRelationMismatch(
+          currentRuntimeValidation.verifyRuntimeSchema(
+            runtimeSchemaCatalogPool(currentContract, missing),
+            "ia4tube_social_runtime"
+          )
+        );
+      }
+    });
+
+    await t.test("both profiles refuse a wrong relation owner", async () => {
+      for (const [contract, inventory, verifier] of [
+        [legacyContract, inventory0003, fixedLegacy.dependencies.verifyRuntimeSchema],
+        [currentContract, inventory0004, currentRuntimeValidation.verifyRuntimeSchema]
+      ]) {
+        const wrongOwner = replaceSchemaInventory(inventory, (entries) => {
+          entries.find((entry) => entry.name === "companies").owner = "unexpected_owner";
+          return entries;
+        });
+        await rejectsRelationMismatch(
+          verifier(
+            runtimeSchemaCatalogPool(contract, wrongOwner),
+            "ia4tube_social_runtime"
+          )
+        );
+      }
+    });
+
+    await t.test("both profiles refuse a wrong relkind", async () => {
+      for (const [contract, inventory, verifier] of [
+        [legacyContract, inventory0003, fixedLegacy.dependencies.verifyRuntimeSchema],
+        [currentContract, inventory0004, currentRuntimeValidation.verifyRuntimeSchema]
+      ]) {
+        const wrongKind = replaceSchemaInventory(inventory, (entries) => {
+          entries.find((entry) => entry.name === "companies").kind = "v";
+          return entries;
+        });
+        await rejectsRelationMismatch(
+          verifier(
+            runtimeSchemaCatalogPool(contract, wrongKind),
+            "ia4tube_social_runtime"
+          )
+        );
+      }
+    });
+
+    await t.test("both profiles refuse a missing runtime contract view", async () => {
+      for (const [contract, inventory, verifier] of [
+        [legacyContract, inventory0003, fixedLegacy.dependencies.verifyRuntimeSchema],
+        [currentContract, inventory0004, currentRuntimeValidation.verifyRuntimeSchema]
+      ]) {
+        const missingView = replaceSchemaInventory(
+          inventory,
+          (entries) => entries.filter(
+            (entry) => entry.name !== "runtime_schema_contract"
+          )
+        );
+        await rejectsRelationMismatch(
+          verifier(
+            runtimeSchemaCatalogPool(contract, missingView),
+            "ia4tube_social_runtime"
+          )
+        );
+      }
+    });
+
+    assert.deepEqual(profile0003.rlsTables, legacyContract.tables);
+    assert.deepEqual(profile0004.rlsTables, currentContract.tables);
+  } finally {
+    fixedLegacy.cleanup();
+  }
+});
+
+test("profile selection is closed, ignores environment and observed database state, and has no fallback", async () => {
+  const legacyRelationFailure = Object.assign(
+    new Error("postgres_relation_owner_mismatch"),
+    { code: "postgres_relation_owner_mismatch" }
+  );
+  const fixture = restoreBehaviorFacadeFixture({
+    legacySchemaFailure: legacyRelationFailure
+  });
+  assert.throws(
+    () => fixture.facade.createRestoreBehaviorVerifiers({
+      expectedProfileId: "social-schema-unknown",
+      env: { SOCIAL_SCHEMA_PROFILE: "social-schema-0003" }
+    }),
+    { code: "linux_gate_schema_profile_invalid" }
+  );
+  assert.equal(fixture.calls.created.length, 0);
+
+  const pool = Object.freeze({
+    observedProfileId: "social-schema-0004",
+    query: async () => { throw new Error("diagnostic_unavailable"); }
+  });
+  await assert.rejects(
+    fixture.facade.verifyRuntimeSchemaForProfile({
+      expectedProfileId: "social-schema-0003",
+      pool,
+      role: "synthetic_runtime"
+    }),
+    (error) => error === legacyRelationFailure
+  );
+  assert.equal(fixture.calls.legacySchema.length, 1);
+  assert.equal(fixture.calls.currentSchema.length, 0);
+  assert.equal(fixture.facade.schemaProfileDiagnostics(), null);
+
+  const currentRelationFailure = Object.assign(
+    new Error("postgres_relation_owner_mismatch"),
+    { code: "postgres_relation_owner_mismatch" }
+  );
+  const noCurrentToLegacyFallback = restoreBehaviorFacadeFixture({
+    currentSchemaFailure: currentRelationFailure
+  });
+  await assert.rejects(
+    noCurrentToLegacyFallback.facade.verifyRuntimeSchemaForProfile({
+      expectedProfileId: "social-schema-0004",
+      pool: Object.freeze({
+        observedProfileId: "social-schema-0003",
+        query: async () => { throw new Error("diagnostic_unavailable"); }
+      }),
+      role: "synthetic_runtime"
+    }),
+    (error) => error === currentRelationFailure
+  );
+  assert.equal(noCurrentToLegacyFallback.calls.currentSchema.length, 1);
+  assert.equal(noCurrentToLegacyFallback.calls.legacySchema.length, 0);
+});
+
+test("legacy loader failure is terminal and never substitutes the current verifier", () => {
+  const loaderFailure = Object.assign(new Error("legacy_source_hash_mismatch"), {
+    code: "restore_behavior_2a_source_hash_mismatch"
+  });
+  const currentCalls = [];
+  assert.throws(
+    () => createRestoreBehaviorFacade("synthetic-legacy-root", {
+      restoreBehavior: {
+        loadLegacy2ADependencies() { throw loaderFailure; },
+        createRestoreBehaviorVerifiers() { throw new Error("must_not_create"); }
+      },
+      runtimeValidation: {
+        verifyRuntimeSchema(...args) {
+          currentCalls.push(args);
+          return true;
+        }
+      }
+    }),
+    (error) => error === loaderFailure
+  );
+  assert.deepEqual(currentCalls, []);
+});
+
+test("relation mismatch diagnostics retain only six closed integer counters and survive evidence sanitization", async () => {
+  const relationFailure = Object.assign(
+    new Error("postgres_relation_owner_mismatch"),
+    { code: "postgres_relation_owner_mismatch" }
+  );
+  const fixture = restoreBehaviorFacadeFixture({
+    currentSchemaFailure: relationFailure
+  });
+  const queryCalls = [];
+  const pool = {
+    observedProfileId: "social-schema-0003",
+    async query(sql, values) {
+      queryCalls.push({ sql, values });
+      return {
+        rowCount: 1,
+        rows: [{
+          observed_relation_count: "13",
+          expected_relation_count: "16",
+          missing_relation_count: "3",
+          unexpected_relation_count: "0",
+          kind_mismatch_count: "0",
+          owner_mismatch_count: "0",
+          observed_relation_names: ["forbidden_name"]
+        }]
+      };
+    }
+  };
+  await assert.rejects(
+    fixture.facade.verifyRuntimeSchemaForProfile({
+      expectedProfileId: "social-schema-0004",
+      pool,
+      role: "synthetic_runtime"
+    }),
+    (error) => error === relationFailure
+  );
+  assert.equal(queryCalls.length, 1);
+  assert.equal(queryCalls[0].values[0].length, 16);
+  assert.equal(queryCalls[0].values[1], "ia4tube_social_owner");
+  const diagnostics = fixture.facade.schemaProfileDiagnostics();
+  assert.deepEqual(diagnostics, {
+    observedRelationCount: 13,
+    expectedRelationCount: 16,
+    missingRelationCount: 3,
+    unexpectedRelationCount: 0,
+    kindMismatchCount: 0,
+    ownerMismatchCount: 0
+  });
+  assert.equal(Object.isFrozen(diagnostics), true);
+  assert.deepEqual(Object.keys(diagnostics).sort(), [
+    "expectedRelationCount",
+    "kindMismatchCount",
+    "missingRelationCount",
+    "observedRelationCount",
+    "ownerMismatchCount",
+    "unexpectedRelationCount"
+  ]);
+  assert.equal(JSON.stringify(diagnostics).includes("forbidden_name"), false);
+  assert.equal(evidenceSafe({ schemaProfileDiagnostics: diagnostics }), true);
+
+  const sanitized = sanitizedFailureEvidence({
+    firstFailure: {
+      phase: "migrations",
+      code: "postgres_relation_owner_mismatch"
+    },
+    schemaProfileDiagnostics: diagnostics,
+    cleanup: {
+      cleanupCompleted: true,
+      containerResiduals: 0,
+      volumeResiduals: 0,
+      networkResiduals: 0,
+      listenerResiduals: 0,
+      temporaryRootResiduals: 0
+    }
+  });
+  assert.deepEqual(sanitized.schemaProfileDiagnostics, diagnostics);
+  assert.equal(evidenceSafe(sanitized), true);
+  const source = fs.readFileSync(
+    path.join(ROOT, "scripts", "social-3a0p-linux-gate.js"),
+    "utf8"
+  );
+  assert.match(
+    source,
+    /finally\s*\{[\s\S]*evidence\.schemaProfileDiagnostics\s*=/
+  );
 });
 
 test("canonical evidence JSON is stable and key ordered", () => {

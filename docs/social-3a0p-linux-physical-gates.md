@@ -2,35 +2,106 @@
 
 ## Limite e proveniência
 
-Esta quinta rota Linux isolada parte exclusivamente do commit
-`f47438ef12b03a5eb1f2965c2e68e3c6efd9f36a`. A branch predecessora
-`social/checkpoint-3a0p-linux-login-verifier-bridge-20260808` e todas as branches
+Esta sexta rota Linux isolada parte exclusivamente do commit
+`931d1986e1cc5864c4d28997a995a27aaa593fd6`. A branch predecessora
+`social/checkpoint-3a0p-linux-backup-transport-20260808` e todas as branches
 anteriores permanecem preservadas, sem novo push ou edição.
 
 O workflow existe somente para a branch
-`social/checkpoint-3a0p-linux-backup-transport-20260808`. O produto
+`social/checkpoint-3a0p-linux-profile-aware-restore-20260808`. O produto
 permanece idêntico a `fcfc92419021dae5f77baad731c634b10c275c5b`: `src/`,
 todo `db/` (inclusive `roles.sql`), `server.js`, `package.json` e `package-lock.json` não são
 alterados. PostgreSQL, SCRAM, roles, rede Docker e credenciais também não são
 alterados por esta correção.
 
-## Quinto disparo Linux isolado autorizado
+## Sexto disparo Linux isolado autorizado
 
 O único gatilho autorizado é o primeiro e único `push` de criação da nova
 branch, sem exclusão ou force, cujo commit tenha a mensagem integral:
 
 ```text
-[run-social-3a0p-linux-gate] bridge verified backup transport
+[run-social-3a0p-linux-gate] validate restored schema by profile
 ```
 
 O job exige `run_attempt == 1`, `created == true`, `deleted == false`,
 `forced == false`, `before` igual a 40 zeros e pai exato
-`f47438ef12b03a5eb1f2965c2e68e3c6efd9f36a`, além de diff nominal e
+`931d1986e1cc5864c4d28997a995a27aaa593fd6`, além de diff nominal e
 estritamente allowlisted. Não há `workflow_dispatch`, pull request, agenda,
 matriz ou retry automático. A regra operacional é: zero re-run, zero segundo
 push, zero PR, zero merge e zero deploy depois desta execução única.
 
-## Falha predecessora e bridge exclusiva de backup/restauração
+A allowlist do commit contém exatamente estes sete caminhos, sem curinga,
+prefixo ou diretório inteiro:
+
+- `.github/workflows/social-3a0p-linux-physical-gates.yml`;
+- `docs/social-3a0p-linux-physical-gates.md`;
+- `scripts/social-3a0p-linux-gate.js`;
+- `scripts/social-3a0p-local-windows-physical-plans.js`;
+- `tests/social-3a0p-linux-gate.test.js`;
+- `tests/social-3a0p-local-windows-physical-plans.test.js`;
+- `tests/social-3a0p-linux-workflow.test.js`.
+
+Qualquer outro caminho, inclusive outro workflow, `src/`, `db/`, migrations,
+roles, servidor ou dependências, encerra o job antes do gate.
+
+## Falha predecessora e prova focal do schema profile
+
+O run predecessor `31271208390` (artifact `9025655493`, SHA-256 da evidência
+`4afe3e810d06f57b9b3af78627f5ab9c650073e80142a48a6de215b58585b7a3`)
+encerrou na fase `migrations` com o código sanitizado
+`postgres_relation_owner_mismatch`, depois de `pg_dump` e `pg_restore` terem
+sido iniciados e concluídos. As provas de durabilidade, `O_NOFOLLOW`, rede
+interna, zero exposição, bootstrap, credenciais, identidade TLS lógica,
+transporte físico descartável e cleanup permaneceram aprovadas e não são
+alteradas nesta rota.
+
+A reprodução focal sem PostgreSQL, Docker ou rede comprovou que um perfil 0003
+perfeito contém 12 tabelas sociais e a view `runtime_schema_contract`, total de
+13 relações. O verificador atual espera 15 tabelas sociais e a mesma view,
+total de 16. Os contadores do fixture original são:
+
+- `observedRelationCount=13`;
+- `expectedRelationCount=16`;
+- `missingRelationCount=3`;
+- `unexpectedRelationCount=0`;
+- `kindMismatchCount=0`;
+- `ownerMismatchCount=0`.
+
+As três relações ausentes são exatamente
+`social_idempotency_operations`, `social_publications` e
+`social_publication_attempts`. Todas as relações observadas têm owner
+`ia4tube_social_owner` e relkind correto. A condição atual agrupa divergência
+de contagem, ausência, relação inesperada, relkind e owner sob o mesmo código;
+portanto, esse código não demonstrava corrupção de ownership. Acrescentar
+somente as três relações 0004 elimina essa classificação específica.
+
+A correção permanece exclusivamente no harness e seleciona o verificador a
+partir de `expectedProfile.id` obtido dos `SCHEMA_PROFILES` definitivos:
+
+- `social-schema-0003` usa o `verifyRuntimeSchema` da implementação 2A;
+- `social-schema-0004` usa o `verifyRuntimeSchema` atual;
+- qualquer outro profile ID é recusado antes da abertura do verifier.
+
+A implementação 2A é carregada somente por `loadLegacy2ADependencies`, com
+commit fixado `9deb1e04249026a7046d44d6cbf4e2da87b9a0a4`, manifesto, árvore e hashes
+validados antes e depois da carga. O run não baixa código nem consulta branch
+remota. Ambiente, conteúdo observado do banco e falha anterior não podem
+selecionar o profile; não existe fallback automático entre verificadores.
+
+O Gate 1 aplica o verificador 0003 ao banco restaurado, mantém isolamento,
+repository, vault e compatibilidade 2A, reaplica 0004 e então exige o
+verificador atual. O Gate 5 vincula separadamente os restores 0003 e 0004 aos
+respectivos verificadores. A injeção usa a dependência controlada
+`verifyRuntimeSchema` do verifier existente; o produto permanece byte-idêntico.
+Não há `ALTER OWNER`, `REASSIGN OWNED`, compensação posterior de ownership,
+mudança em `pg_dump` ou `pg_restore`, nem seleção baseada no banco restaurado.
+
+Se `postgres_relation_owner_mismatch` reaparecer, a evidência preservará apenas
+os seis contadores sanitizados acima, parará na primeira falha e não haverá
+segundo push ou re-run. Até o único run encerrar e sua evidência ser conferida,
+o checkpoint permanece bloqueado.
+
+## Bridge exclusiva de backup/restauração preservada
 
 O run predecessor `31266308555` (artifact `9024249819`, SHA-256 da evidência
 `1729427d82fefa1ff2e68ef258cf7bb92ef826b08b8d1f6fbf95e947ef7365ba`)
@@ -104,7 +175,7 @@ A evidência deve separar os dois contratos com estes valores exatos:
 Portanto, este gate valida que o contrato lógico definitivo continua exigindo
 `verify-full`, mas não declara que o TLS de produção foi exercitado fisicamente
 no cluster descartável. Essa prova permanece nos checkpoints Social 2B de
-staging/TLS. Até o quinto run terminar e sua evidência ser conferida, nenhum
+staging/TLS. Até o novo run terminar e sua evidência ser conferida, nenhum
 gate desta nova branch é declarado aprovado.
 
 ## Bridge exclusiva do verificador de credenciais preservada

@@ -27,6 +27,12 @@ const MIGRATION_LOGIN = "ia4tube_social_local_migration";
 const RUNTIME_LOGIN = "ia4tube_social_local_runtime";
 const OWNER_ROLE = "ia4tube_social_owner";
 const MIGRATOR_ROLE = "ia4tube_social_migrator";
+const SCHEMA_PROFILE_0003 = "social-schema-0003";
+const SCHEMA_PROFILE_0004 = "social-schema-0004";
+const SCHEMA_PROFILE_IDS = Object.freeze([
+  SCHEMA_PROFILE_0003,
+  SCHEMA_PROFILE_0004
+]);
 const SAFE_IDENTIFIER = /^[a-z][a-z0-9_]{2,62}$/;
 const SAFE_ENVIRONMENT_NAMES = new Set([
   "SYSTEMROOT",
@@ -71,6 +77,192 @@ function fail(code) {
 function plain(value, code) {
   if (!value || Object.getPrototypeOf(value) !== Object.prototype) fail(code);
   return value;
+}
+
+function requireCanonicalSchemaProfile(schemaProfiles, expectedProfileId) {
+  if (
+    !Array.isArray(schemaProfiles) ||
+    !Object.isFrozen(schemaProfiles) ||
+    schemaProfiles.length === 0 ||
+    typeof expectedProfileId !== "string" ||
+    expectedProfileId !== expectedProfileId.trim() ||
+    expectedProfileId.length === 0
+  ) {
+    fail("windows_physical_schema_profile_invalid");
+  }
+  const ids = new Set();
+  let canonical;
+  for (const profile of schemaProfiles) {
+    if (
+      !profile ||
+      Object.getPrototypeOf(profile) !== Object.prototype ||
+      !Object.isFrozen(profile) ||
+      Object.keys(profile).sort().join("\u0000") !==
+        ["backupTables", "evidenceTables", "id", "migrationRows", "rlsTables"].join("\u0000") ||
+      typeof profile.id !== "string" ||
+      profile.id !== profile.id.trim() ||
+      profile.id.length === 0 ||
+      ![profile.backupTables, profile.evidenceTables, profile.migrationRows, profile.rlsTables]
+        .every((value) => Array.isArray(value) && Object.isFrozen(value)) ||
+      ids.has(profile.id)
+    ) {
+      fail("windows_physical_schema_profile_invalid");
+    }
+    ids.add(profile.id);
+    if (profile.id === expectedProfileId) canonical = profile;
+  }
+  if (!canonical) fail("windows_physical_schema_profile_invalid");
+  return canonical;
+}
+
+function requireRestoreBehaviorFacade(candidate) {
+  if (
+    !candidate ||
+    typeof candidate !== "object" ||
+    typeof candidate.createRestoreBehaviorVerifiers !== "function" ||
+    typeof candidate.verifyRuntimeSchemaForProfile !== "function" ||
+    typeof candidate.schemaProfileDiagnostics !== "function"
+  ) {
+    fail("windows_physical_restore_behavior_facade_invalid");
+  }
+  return candidate;
+}
+
+function createDefaultRestoreBehaviorFacade({
+  restoreBehavior,
+  runtimeValidation,
+  schemaProfiles,
+  legacy2ARoot
+}) {
+  if (
+    !restoreBehavior ||
+    typeof restoreBehavior.createRestoreBehaviorVerifiers !== "function" ||
+    typeof restoreBehavior.loadLegacy2ADependencies !== "function" ||
+    !runtimeValidation ||
+    typeof runtimeValidation.verifyRuntimeSchema !== "function" ||
+    typeof legacy2ARoot !== "string" ||
+    !path.isAbsolute(legacy2ARoot)
+  ) {
+    fail("windows_physical_restore_behavior_facade_invalid");
+  }
+  for (const profileId of SCHEMA_PROFILE_IDS) {
+    requireCanonicalSchemaProfile(schemaProfiles, profileId);
+  }
+  if (
+    schemaProfiles.length !== SCHEMA_PROFILE_IDS.length ||
+    schemaProfiles.some((profile) => !SCHEMA_PROFILE_IDS.includes(profile.id))
+  ) {
+    fail("windows_physical_schema_profile_invalid");
+  }
+
+  let legacyDependencies;
+  let legacyLoadFailure;
+  let legacyLoadAttempted = false;
+  let legacyLoadSucceeded = false;
+
+  function loadLegacyDependencies() {
+    if (legacyLoadAttempted) {
+      if (!legacyLoadSucceeded) throw legacyLoadFailure;
+      return legacyDependencies;
+    }
+    legacyLoadAttempted = true;
+    try {
+      const loaded = restoreBehavior.loadLegacy2ADependencies(legacy2ARoot);
+      const operationNames = [
+        "createCompanyScopedRepository",
+        "createSocialCredentialService",
+        "createSocialRepository",
+        "createSocialVault",
+        "verifyRuntimeRole",
+        "verifyRuntimeSchema"
+      ];
+      if (
+        !loaded ||
+        typeof loaded !== "object" ||
+        operationNames.some((name) => typeof loaded[name] !== "function")
+      ) {
+        fail("windows_physical_restore_behavior_2a_dependencies_invalid");
+      }
+      legacyDependencies = loaded;
+      legacyLoadSucceeded = true;
+      return legacyDependencies;
+    } catch (error) {
+      legacyLoadFailure = error;
+      throw error;
+    }
+  }
+
+  function selectedSchemaVerifier(expectedProfileId) {
+    requireCanonicalSchemaProfile(schemaProfiles, expectedProfileId);
+    if (!SCHEMA_PROFILE_IDS.includes(expectedProfileId)) {
+      fail("windows_physical_schema_profile_invalid");
+    }
+    return expectedProfileId === SCHEMA_PROFILE_0003
+      ? loadLegacyDependencies().verifyRuntimeSchema
+      : runtimeValidation.verifyRuntimeSchema;
+  }
+
+  function boundSchemaVerifier(expectedProfileId) {
+    const verifier = selectedSchemaVerifier(expectedProfileId);
+    return (pool, role) => verifier(pool, role);
+  }
+
+  function profileBoundLegacyDependencies(verifyRuntimeSchema) {
+    const legacy = loadLegacyDependencies();
+    return Object.freeze({
+      createCompanyScopedRepository: legacy.createCompanyScopedRepository,
+      createSocialCredentialService: legacy.createSocialCredentialService,
+      createSocialRepository: legacy.createSocialRepository,
+      createSocialVault: legacy.createSocialVault,
+      verifyRuntimeRole: legacy.verifyRuntimeRole,
+      verifyRuntimeSchema
+    });
+  }
+
+  return Object.freeze({
+    createRestoreBehaviorVerifiers(options = {}) {
+      if (
+        !options ||
+        Object.getPrototypeOf(options) !== Object.prototype ||
+        Object.hasOwn(options, "legacyDependencies")
+      ) {
+        fail("windows_physical_restore_behavior_options_invalid");
+      }
+      const verifyRuntimeSchema = boundSchemaVerifier(
+        options.expectedProfileId
+      );
+      const forwarded = { ...options };
+      delete forwarded.expectedProfileId;
+      return restoreBehavior.createRestoreBehaviorVerifiers({
+        ...forwarded,
+        legacy2ARoot,
+        dependencies: {
+          ...(forwarded.dependencies || {}),
+          verifyRuntimeSchema
+        },
+        legacyDependencies: profileBoundLegacyDependencies(
+          verifyRuntimeSchema
+        )
+      });
+    },
+    verifyRuntimeSchemaForProfile(request) {
+      if (
+        !request ||
+        Object.getPrototypeOf(request) !== Object.prototype ||
+        Object.keys(request).sort().join("\u0000") !==
+          ["expectedProfileId", "pool", "role"].join("\u0000")
+      ) {
+        fail("windows_physical_schema_profile_verifier_request_invalid");
+      }
+      return boundSchemaVerifier(request.expectedProfileId)(
+        request.pool,
+        request.role
+      );
+    },
+    schemaProfileDiagnostics() {
+      return null;
+    }
+  });
 }
 
 function identifier(value, code = "windows_physical_plan_identifier_invalid") {
@@ -912,7 +1104,18 @@ function createWindowsPhysicalPlans(options = {}) {
   const backup = options.dependencies?.backup || require("../src/persistence/postgres/backup-restore");
   const migrations = options.dependencies?.migrations || require("../src/persistence/postgres/migrations");
   const loginBootstrap = options.dependencies?.loginBootstrap || require("../src/persistence/postgres/login-bootstrap");
-  const restoreBehavior = options.dependencies?.restoreBehavior || require("../src/persistence/postgres/restore-behavior-verifiers");
+  const legacy2ARoot = path.join(
+    path.dirname(options.repositoryRoot),
+    "social-checkpoint-2a-postgres-vault-20260729"
+  );
+  const restoreBehavior = options.dependencies?.restoreBehavior === undefined
+    ? createDefaultRestoreBehaviorFacade({
+        restoreBehavior: require("../src/persistence/postgres/restore-behavior-verifiers"),
+        runtimeValidation: require("../src/persistence/postgres/runtime-validation"),
+        schemaProfiles: backup.SCHEMA_PROFILES,
+        legacy2ARoot
+      })
+    : requireRestoreBehaviorFacade(options.dependencies.restoreBehavior);
   const product = { backup, migrations, loginBootstrap };
   const databaseManager = options.dependencies?.databaseManager || createDefaultDatabaseManager({
     state,
@@ -963,25 +1166,33 @@ function createWindowsPhysicalPlans(options = {}) {
   const createdPlans = new Set();
   let planDirectoriesCreated = false;
 
-  function restoreVerifiers(database) {
+  function restoreVerifiers(database, expectedProfileId) {
     if (!databaseManager.isAllowedDatabase(database)) {
       fail("windows_physical_verifier_database_refused");
     }
+    const expectedProfile = requireCanonicalSchemaProfile(
+      backup.SCHEMA_PROFILES,
+      expectedProfileId
+    );
     let gate;
+    let closed = false;
     const passwords = Object.freeze({
       [MIGRATION_LOGIN]: materialText(state.materials.migration),
       [RUNTIME_LOGIN]: materialText(state.materials.runtime)
     });
     const get = () => {
+      if (closed) fail("windows_physical_restore_verifier_closed");
       if (!gate) {
+        const facade = requireRestoreBehaviorFacade(restoreBehavior);
         const verifierTarget = { host: LOCAL_VERIFIER_HOST, port: binding.target.port };
-        gate = restoreBehavior.createRestoreBehaviorVerifiers({
+        gate = facade.createRestoreBehaviorVerifiers({
           env: {},
+          expectedProfileId: expectedProfile.id,
           migrationDatabaseUrl: connectionUrl({ target: verifierTarget, database, login: MIGRATION_LOGIN, password: passwords[MIGRATION_LOGIN] }),
           runtimeDatabaseUrl: connectionUrl({ target: verifierTarget, database, login: RUNTIME_LOGIN, password: passwords[RUNTIME_LOGIN] }),
           expectedMigrationLogin: MIGRATION_LOGIN,
           expectedRuntimeLogin: RUNTIME_LOGIN,
-          legacy2ARoot: path.join(path.dirname(options.repositoryRoot), "social-checkpoint-2a-postgres-vault-20260729"),
+          legacy2ARoot,
           dependencies: {
             PoolClass: createLocalVerifierPoolClass({
               PoolClass: options.PoolClass,
@@ -991,6 +1202,16 @@ function createWindowsPhysicalPlans(options = {}) {
             })
           }
         });
+        if (
+          !gate ||
+          typeof gate.close !== "function" ||
+          !gate.verifiers ||
+          typeof gate.verifiers.verifyRuntimeIsolation !== "function" ||
+          typeof gate.verifiers.verifyVault !== "function" ||
+          typeof gate.verifiers.verify2ACompatibility !== "function"
+        ) {
+          fail("windows_physical_restore_behavior_gate_invalid");
+        }
       }
       return gate;
     };
@@ -998,7 +1219,13 @@ function createWindowsPhysicalPlans(options = {}) {
       verifyRuntimeIsolation: () => get().verifiers.verifyRuntimeIsolation(),
       verifyVault: () => get().verifiers.verifyVault(),
       verify2ACompatibility: () => get().verifiers.verify2ACompatibility(),
-      async closeVerifiers() { if (gate) await gate.close(); }
+      async closeVerifiers() {
+        if (closed) return;
+        closed = true;
+        const current = gate;
+        gate = undefined;
+        if (current) await current.close();
+      }
     });
   }
 
@@ -1203,7 +1430,7 @@ function createWindowsPhysicalPlans(options = {}) {
       repositoryRoot: options.repositoryRoot
     });
     const targetLifecycle = lifecycle(targetDatabase, expectedProfile.id);
-    const behavior = restoreVerifiers(targetDatabase);
+    const behavior = restoreVerifiers(targetDatabase, expectedProfile.id);
     return Object.freeze({
       approval: LOCAL_PHYSICAL_APPROVAL,
       expectedProfile,
@@ -1223,7 +1450,14 @@ function createWindowsPhysicalPlans(options = {}) {
   }
 
   async function createRollbackAdapter() {
-    const profile0003 = backup.SCHEMA_PROFILES.find((item) => item.id === "social-schema-0003");
+    const profile0003 = requireCanonicalSchemaProfile(
+      backup.SCHEMA_PROFILES,
+      "social-schema-0003"
+    );
+    const profile0004 = requireCanonicalSchemaProfile(
+      backup.SCHEMA_PROFILES,
+      "social-schema-0004"
+    );
     const sourceIdentity = identity(names.rollbackSource, profile0003.id);
     const restoreIdentity = identity(names.rollbackRestore, profile0003.id);
     let sourceProof;
@@ -1264,7 +1498,7 @@ function createWindowsPhysicalPlans(options = {}) {
         return true;
       },
       async apply0004() {
-        return databaseManager.applyProfile(names.rollbackSource, "social-schema-0004");
+        return databaseManager.applyProfile(names.rollbackSource, profile0004.id);
       },
       createDisposable0003: (candidate) => databaseManager.create(exactIdentity(candidate, restoreIdentity)),
       reconcileDisposable0003CreateFailure: (candidate) => databaseManager.reconcile(exactIdentity(candidate, restoreIdentity)),
@@ -1275,7 +1509,10 @@ function createWindowsPhysicalPlans(options = {}) {
         const env = connectionEnvironment("SOCIAL_RESTORE", names.rollbackRestore, sourcePlan.config.label, sourcePlan.config.files.bundle);
         env.SOCIAL_RESTORE_SOURCE_FINGERPRINT = sourcePlan.config.sourceFingerprint;
         restoreConfig = backup.loadRestoreConfig(env, { repositoryRoot: options.repositoryRoot });
-        const behavior = restoreVerifiers(names.rollbackRestore);
+        const behavior = restoreVerifiers(
+          names.rollbackRestore,
+          profile0003.id
+        );
         try {
           const result = await backup.runLogicalRestore({
             config: restoreConfig,
@@ -1299,14 +1536,28 @@ function createWindowsPhysicalPlans(options = {}) {
       removeDisposable0003: (proof) => databaseManager.remove(exactProof(proof, restoreIdentity)),
       assertDisposable0003Removed: (proof) => databaseManager.assertRemoved(exactProof(proof, restoreIdentity)),
       async reapply0004() {
-        return databaseManager.applyProfile(names.rollbackSource, "social-schema-0004");
+        return databaseManager.applyProfile(names.rollbackSource, profile0004.id);
       },
       async verify0004Checksum() {
-        await databaseManager.verifyProfile(names.rollbackSource, "social-schema-0004");
+        await databaseManager.verifyProfile(names.rollbackSource, profile0004.id);
         return true;
       },
       async verifyProfile0004() {
-        await databaseManager.verifyProfile(names.rollbackSource, "social-schema-0004");
+        await databaseManager.verifyProfile(names.rollbackSource, profile0004.id);
+        const facade = requireRestoreBehaviorFacade(restoreBehavior);
+        if (typeof databaseManager.getPools !== "function") {
+          fail("windows_physical_profile_schema_pool_invalid");
+        }
+        const runtimePool = databaseManager.getPools(names.rollbackSource)?.runtime;
+        if (!runtimePool) fail("windows_physical_profile_schema_pool_invalid");
+        const validation = await facade.verifyRuntimeSchemaForProfile({
+          expectedProfileId: profile0004.id,
+          pool: runtimePool,
+          role: loginBootstrap.RUNTIME_ROLE
+        });
+        if (validation?.valid !== true) {
+          fail("windows_physical_profile_schema_validation_failed");
+        }
         return true;
       },
       async verifyNonSocialUnchanged() {
@@ -1323,8 +1574,14 @@ function createWindowsPhysicalPlans(options = {}) {
 
   async function prepareBackupRestore() {
     ensurePlanDirectories();
-    const profile0003 = backup.SCHEMA_PROFILES.find((item) => item.id === "social-schema-0003");
-    const profile0004 = backup.SCHEMA_PROFILES.find((item) => item.id === "social-schema-0004");
+    const profile0003 = requireCanonicalSchemaProfile(
+      backup.SCHEMA_PROFILES,
+      "social-schema-0003"
+    );
+    const profile0004 = requireCanonicalSchemaProfile(
+      backup.SCHEMA_PROFILES,
+      "social-schema-0004"
+    );
     const sourceProof = await databaseManager.create(identity(names.backupSource0003, profile0003.id));
     await databaseManager.applyProfile(names.backupSource0003, profile0003.id);
     const plan0003 = backupRequest(names.backupSource0003, profile0003, `profile-0003-${digest}`);
@@ -1436,6 +1693,8 @@ module.exports = {
   WindowsPhysicalPlanFailure,
   assertLocalToolPlan,
   assertRunBinding,
+  createDefaultRestoreBehaviorFacade,
   createLocalPgToolRunner,
-  createWindowsPhysicalPlans
+  createWindowsPhysicalPlans,
+  requireCanonicalSchemaProfile
 };

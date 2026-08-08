@@ -14,8 +14,10 @@ const {
   RUNTIME_LOGIN,
   WindowsPhysicalPlanFailure,
   assertLocalToolPlan,
+  createDefaultRestoreBehaviorFacade,
   createLocalPgToolRunner,
-  createWindowsPhysicalPlans
+  createWindowsPhysicalPlans,
+  requireCanonicalSchemaProfile
 } = require("../scripts/social-3a0p-local-windows-physical-plans");
 
 const RUN_MARKER = "ia4tube-social-3a0p-physical-plan-test-0001";
@@ -217,6 +219,406 @@ async function destroyBackupTransportFixture(fixture) {
     fs.rmSync(fixture.root, { recursive: true, force: true });
   }
 }
+
+function createLogicalBackupTransportBridge(contract) {
+  return Object.freeze({
+    localBinding: Object.freeze({
+      connectivityMode: "logical_dns_to_internal_container_v1",
+      logicalHost: "backup.local.ia4tube.invalid",
+      logicalPort: 5432,
+      physicalMode: "internal_container_loopback",
+      physicalHost: "127.0.0.1",
+      physicalPort: 5432,
+      database: contract.database,
+      login: contract.login,
+      runMarker: contract.runMarker,
+      targetFingerprint: contract.targetFingerprint,
+      containerIdentityDigest: "c".repeat(64)
+    }),
+    runTool: async () => ({ code: 0, stdout: "", stderr: "" })
+  });
+}
+
+function profileAwareRestoreBehaviorFixture(options = {}) {
+  const created = [];
+  const operations = [];
+  const closed = [];
+  const schemaValidations = [];
+  const facade = Object.freeze({
+    createRestoreBehaviorVerifiers(configuration) {
+      const profileId = configuration?.expectedProfileId;
+      created.push(profileId);
+      if (profileId === options.failCreateForProfileId) {
+        throw Object.assign(new Error("synthetic_profile_verifier_failure"), {
+          code: "synthetic_profile_verifier_failure"
+        });
+      }
+      return Object.freeze({
+        async close() {
+          closed.push(profileId);
+        },
+        verifiers: Object.freeze({
+          async verifyRuntimeIsolation() {
+            operations.push([profileId, "runtime"]);
+            return true;
+          },
+          async verifyVault() {
+            operations.push([profileId, "vault"]);
+            return true;
+          },
+          async verify2ACompatibility() {
+            operations.push([profileId, "2a"]);
+            return true;
+          }
+        })
+      });
+    },
+    schemaProfileDiagnostics() {
+      return null;
+    },
+    async verifyRuntimeSchemaForProfile(configuration) {
+      schemaValidations.push(Object.freeze({ ...configuration }));
+      return Object.freeze({ valid: true });
+    }
+  });
+  return Object.freeze({
+    closed,
+    created,
+    facade,
+    operations,
+    schemaValidations
+  });
+}
+
+test("schema profile selection returns only the exact canonical frozen profile", () => {
+  const profiles = require("../src/persistence/postgres/backup-restore").SCHEMA_PROFILES;
+  assert.equal(
+    requireCanonicalSchemaProfile(profiles, "social-schema-0003"),
+    profiles[0]
+  );
+  assert.equal(
+    requireCanonicalSchemaProfile(profiles, "social-schema-0004"),
+    profiles[1]
+  );
+  for (const [candidate, profileId] of [
+    [profiles, "social-schema-unknown"],
+    [[...profiles], "social-schema-0003"],
+    [Object.freeze([profiles[0], profiles[0]]), "social-schema-0003"],
+    [Object.freeze([Object.freeze({ id: "social-schema-0003" })]), "social-schema-0003"],
+    [Object.freeze([{ ...profiles[0] }, profiles[1]]), "social-schema-0003"],
+    [profiles, " social-schema-0003"]
+  ]) {
+    assert.throws(
+      () => requireCanonicalSchemaProfile(candidate, profileId),
+      {
+        code: "windows_physical_schema_profile_invalid",
+        name: "WindowsPhysicalPlanFailure"
+      }
+    );
+  }
+});
+
+function defaultRestoreBehaviorFacadeFixture(options = {}) {
+  const calls = {
+    created: [],
+    currentSchema: [],
+    legacyLoad: [],
+    legacySchema: []
+  };
+  const legacy = Object.freeze({
+    createCompanyScopedRepository() {},
+    createSocialCredentialService() {},
+    createSocialRepository() {},
+    createSocialVault() {},
+    verifyRuntimeRole() {},
+    async verifyRuntimeSchema(...args) {
+      calls.legacySchema.push(args);
+      if (options.legacySchemaFailure) throw options.legacySchemaFailure;
+      return Object.freeze({ valid: true, profile: "0003" });
+    }
+  });
+  const loaderFailure = options.loaderFailure;
+  const restoreBehavior = Object.freeze({
+    loadLegacy2ADependencies(root) {
+      calls.legacyLoad.push(root);
+      if (loaderFailure) throw loaderFailure;
+      return legacy;
+    },
+    createRestoreBehaviorVerifiers(configuration) {
+      calls.created.push(configuration);
+      return Object.freeze({ configuration });
+    }
+  });
+  const runtimeValidation = Object.freeze({
+    async verifyRuntimeSchema(...args) {
+      calls.currentSchema.push(args);
+      if (options.currentSchemaFailure) throw options.currentSchemaFailure;
+      return Object.freeze({ valid: true, profile: "0004" });
+    }
+  });
+  const schemaProfiles = require(
+    "../src/persistence/postgres/backup-restore"
+  ).SCHEMA_PROFILES;
+  const legacy2ARoot = path.resolve(
+    "C:\\synthetic-legacy\\social-checkpoint-2a-postgres-vault-20260729"
+  );
+  const facade = createDefaultRestoreBehaviorFacade({
+    restoreBehavior,
+    runtimeValidation,
+    schemaProfiles,
+    legacy2ARoot
+  });
+  return Object.freeze({
+    calls,
+    facade,
+    legacy,
+    legacy2ARoot
+  });
+}
+
+test("default Windows restore facade binds 0003 legacy and 0004 current into both schema slots", async () => {
+  const fixture = defaultRestoreBehaviorFacadeFixture();
+  const PoolClass = class SyntheticPool {};
+  const profile0003 = fixture.facade.createRestoreBehaviorVerifiers({
+    expectedProfileId: "social-schema-0003",
+    env: { SOCIAL_SCHEMA_PROFILE: "social-schema-0004" },
+    dependencies: { PoolClass }
+  }).configuration;
+  const profile0004 = fixture.facade.createRestoreBehaviorVerifiers({
+    expectedProfileId: "social-schema-0004",
+    env: { SOCIAL_SCHEMA_PROFILE: "social-schema-0003" },
+    dependencies: { PoolClass }
+  }).configuration;
+
+  assert.equal(fixture.calls.legacyLoad.length, 1);
+  assert.equal(fixture.calls.legacyLoad[0], fixture.legacy2ARoot);
+  assert.equal(Object.hasOwn(profile0003, "expectedProfileId"), false);
+  assert.equal(Object.hasOwn(profile0004, "expectedProfileId"), false);
+  assert.equal(profile0003.legacy2ARoot, fixture.legacy2ARoot);
+  assert.equal(profile0004.legacy2ARoot, fixture.legacy2ARoot);
+  assert.equal(profile0003.dependencies.PoolClass, PoolClass);
+  assert.equal(profile0004.dependencies.PoolClass, PoolClass);
+  assert.equal(
+    profile0003.dependencies.verifyRuntimeSchema,
+    profile0003.legacyDependencies.verifyRuntimeSchema
+  );
+  assert.equal(
+    profile0004.dependencies.verifyRuntimeSchema,
+    profile0004.legacyDependencies.verifyRuntimeSchema
+  );
+  for (const operation of [
+    "createCompanyScopedRepository",
+    "createSocialCredentialService",
+    "createSocialRepository",
+    "createSocialVault",
+    "verifyRuntimeRole"
+  ]) {
+    assert.equal(profile0003.legacyDependencies[operation], fixture.legacy[operation]);
+    assert.equal(profile0004.legacyDependencies[operation], fixture.legacy[operation]);
+  }
+
+  const observed0004 = Object.freeze({ observedProfile: "0004" });
+  await profile0003.dependencies.verifyRuntimeSchema(
+    observed0004,
+    "synthetic_runtime"
+  );
+  await profile0003.legacyDependencies.verifyRuntimeSchema(
+    observed0004,
+    "synthetic_runtime"
+  );
+  assert.equal(fixture.calls.legacySchema.length, 2);
+  assert.equal(fixture.calls.currentSchema.length, 0);
+
+  const observed0003 = Object.freeze({ observedProfile: "0003" });
+  await profile0004.dependencies.verifyRuntimeSchema(
+    observed0003,
+    "synthetic_runtime"
+  );
+  await profile0004.legacyDependencies.verifyRuntimeSchema(
+    observed0003,
+    "synthetic_runtime"
+  );
+  assert.equal(fixture.calls.legacySchema.length, 2);
+  assert.equal(fixture.calls.currentSchema.length, 2);
+
+  await fixture.facade.verifyRuntimeSchemaForProfile({
+    expectedProfileId: "social-schema-0004",
+    pool: observed0003,
+    role: "synthetic_runtime"
+  });
+  assert.equal(fixture.calls.currentSchema.length, 3);
+  assert.equal(fixture.facade.schemaProfileDiagnostics(), null);
+});
+
+test("default Windows restore facade treats a validated legacy loader failure as terminal without fallback", () => {
+  const loaderFailure = Object.assign(new Error("synthetic_loader_failure"), {
+    code: "restore_behavior_2a_source_hash_mismatch"
+  });
+  const fixture = defaultRestoreBehaviorFacadeFixture({ loaderFailure });
+  for (const profileId of ["social-schema-0003", "social-schema-0004"]) {
+    assert.throws(
+      () => fixture.facade.createRestoreBehaviorVerifiers({
+        expectedProfileId: profileId,
+        dependencies: { PoolClass: class SyntheticPool {} }
+      }),
+      (error) => error === loaderFailure
+    );
+  }
+  assert.equal(fixture.calls.legacyLoad.length, 1);
+  assert.equal(fixture.calls.created.length, 0);
+  assert.equal(fixture.calls.currentSchema.length, 0);
+  assert.equal(fixture.calls.legacySchema.length, 0);
+});
+
+test("Gate 5 restore verifiers bind 0003 and 0004 across runtime, vault and 2A and close once", async () => {
+  const behavior = profileAwareRestoreBehaviorFixture();
+  const fixture = backupTransportFixture({
+    precreateBackupDirectory: false,
+    dependencies: {
+      createBackupTransportBridge: createLogicalBackupTransportBridge,
+      restoreBehavior: behavior.facade
+    }
+  });
+  try {
+    const prepared = await fixture.plans.prepareBackupRestore();
+    for (const [request, profileId] of [
+      [prepared.restore0003, "social-schema-0003"],
+      [prepared.restore0004, "social-schema-0004"]
+    ]) {
+      assert.equal(await request.verifyRuntimeIsolation(), true);
+      assert.equal(await request.verifyVault(), true);
+      assert.equal(await request.verify2ACompatibility(), true);
+      await request.closeVerifiers();
+      await request.closeVerifiers();
+      await assert.rejects(
+        Promise.resolve().then(() => request.verifyRuntimeIsolation()),
+        {
+          code: "windows_physical_restore_verifier_closed",
+          name: "WindowsPhysicalPlanFailure"
+        }
+      );
+      assert.equal(request.expectedProfile.id, profileId);
+    }
+    assert.deepEqual(behavior.created, [
+      "social-schema-0003",
+      "social-schema-0004"
+    ]);
+    assert.deepEqual(behavior.operations, [
+      ["social-schema-0003", "runtime"],
+      ["social-schema-0003", "vault"],
+      ["social-schema-0003", "2a"],
+      ["social-schema-0004", "runtime"],
+      ["social-schema-0004", "vault"],
+      ["social-schema-0004", "2a"]
+    ]);
+    assert.deepEqual(behavior.closed, [
+      "social-schema-0003",
+      "social-schema-0004"
+    ]);
+  } finally {
+    await destroyBackupTransportFixture(fixture);
+  }
+});
+
+test("profile verifier creation failure never falls back from 0004 to 0003", async () => {
+  const behavior = profileAwareRestoreBehaviorFixture({
+    failCreateForProfileId: "social-schema-0004"
+  });
+  const fixture = backupTransportFixture({
+    precreateBackupDirectory: false,
+    dependencies: {
+      createBackupTransportBridge: createLogicalBackupTransportBridge,
+      restoreBehavior: behavior.facade
+    }
+  });
+  try {
+    const prepared = await fixture.plans.prepareBackupRestore();
+    await assert.rejects(
+      Promise.resolve().then(() =>
+        prepared.restore0004.verifyRuntimeIsolation()
+      ),
+      { code: "synthetic_profile_verifier_failure" }
+    );
+    assert.deepEqual(behavior.created, ["social-schema-0004"]);
+    assert.deepEqual(behavior.operations, []);
+    assert.deepEqual(behavior.closed, []);
+    await prepared.restore0004.closeVerifiers();
+  } finally {
+    await destroyBackupTransportFixture(fixture);
+  }
+});
+
+test("rollback wires 0003 and requires the current 0004 schema verifier after reapply", async () => {
+  const behavior = profileAwareRestoreBehaviorFixture();
+  const runtimePool = Object.freeze({ kind: "synthetic-runtime-pool" });
+  const events = [];
+  const profiles = require("../src/persistence/postgres/backup-restore").SCHEMA_PROFILES;
+  const databaseManager = {
+    isAllowedDatabase() { return true; },
+    getPools(database) {
+      events.push(["get-pools", database]);
+      return { provisioner: {}, runtime: runtimePool };
+    },
+    async applyProfile(database, profileId) {
+      events.push(["apply", database, profileId]);
+      return true;
+    },
+    async verifyProfile(database, profileId) {
+      events.push(["verify-profile", database, profileId]);
+      return profiles.find((profile) => profile.id === profileId);
+    },
+    async cleanupAll() {
+      events.push(["cleanup"]);
+    }
+  };
+  const fixture = backupTransportFixture({
+    dependencies: {
+      databaseManager,
+      restoreBehavior: behavior.facade
+    }
+  });
+  try {
+    const rollback = await fixture.plans.createRollbackAdapter();
+    assert.equal(await rollback.reapply0004(), true);
+    assert.equal(await rollback.verify0004Checksum(), true);
+    assert.equal(await rollback.verifyProfile0004(), true);
+    assert.deepEqual(
+      events.filter(([event]) => event === "apply" || event === "verify-profile")
+        .map(([event, , profileId]) => [event, profileId]),
+      [
+        ["apply", "social-schema-0004"],
+        ["verify-profile", "social-schema-0004"],
+        ["verify-profile", "social-schema-0004"]
+      ]
+    );
+    assert.equal(behavior.schemaValidations.length, 1);
+    assert.deepEqual(
+      Object.keys(behavior.schemaValidations[0]).sort(),
+      ["expectedProfileId", "pool", "role"]
+    );
+    assert.equal(
+      behavior.schemaValidations[0].expectedProfileId,
+      "social-schema-0004"
+    );
+    assert.equal(behavior.schemaValidations[0].pool, runtimePool);
+    assert.equal(
+      behavior.schemaValidations[0].role,
+      "ia4tube_social_runtime"
+    );
+    assert.deepEqual(behavior.created, []);
+
+    const source = fs.readFileSync(
+      path.resolve(__dirname, "../scripts/social-3a0p-local-windows-physical-plans.js"),
+      "utf8"
+    );
+    assert.match(
+      source,
+      /restoreVerifiers\(\s*names\.rollbackRestore,\s*profile0003\.id\s*\)/u
+    );
+  } finally {
+    await destroyBackupTransportFixture(fixture);
+  }
+});
 
 test("current backup chain rejects loopback verify-full in loadBackupConfig before pg_dump", async () => {
   const fixture = backupTransportFixture();

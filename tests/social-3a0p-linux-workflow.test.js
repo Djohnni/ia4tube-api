@@ -8,10 +8,10 @@ const test = require("node:test");
 const REPOSITORY_ROOT = path.resolve(__dirname, "..");
 const WORKFLOW_RELATIVE_PATH = ".github/workflows/social-3a0p-linux-physical-gates.yml";
 const WORKFLOW_PATH = path.join(REPOSITORY_ROOT, ...WORKFLOW_RELATIVE_PATH.split("/"));
-const BRANCH = "social/checkpoint-3a0p-linux-backup-transport-20260808";
-const PARENT = "f47438ef12b03a5eb1f2965c2e68e3c6efd9f36a";
+const BRANCH = "social/checkpoint-3a0p-linux-profile-aware-restore-20260808";
+const PARENT = "931d1986e1cc5864c4d28997a995a27aaa593fd6";
 const ZERO_SHA = "0000000000000000000000000000000000000000";
-const MESSAGE = "[run-social-3a0p-linux-gate] bridge verified backup transport";
+const MESSAGE = "[run-social-3a0p-linux-gate] validate restored schema by profile";
 const JOB_IF = [
   "github.event_name == 'push'",
   `github.ref == 'refs/heads/${BRANCH}'`,
@@ -32,12 +32,8 @@ const AUTHORIZED_FILES = Object.freeze([
   ".github/workflows/social-3a0p-linux-physical-gates.yml",
   "docs/social-3a0p-linux-physical-gates.md",
   "scripts/social-3a0p-linux-gate.js",
-  "scripts/social-3a0p-linux-postgres.js",
-  "scripts/social-3a0p-local-backup-restore.js",
   "scripts/social-3a0p-local-windows-physical-plans.js",
   "tests/social-3a0p-linux-gate.test.js",
-  "tests/social-3a0p-linux-postgres.test.js",
-  "tests/social-3a0p-local-backup-restore.test.js",
   "tests/social-3a0p-local-windows-physical-plans.test.js",
   "tests/social-3a0p-linux-workflow.test.js"
 ]);
@@ -107,6 +103,38 @@ test("workflow triggers only the exact authorized new-branch creation push", () 
   assert.equal(guard.run.includes("social-3a0p-local-scope"), false);
 });
 
+test("workflow scope refuses globs, directories and every non-allowlisted path", () => {
+  const { workflow } = readWorkflow();
+  const guard = onlyJob(workflow).steps.find(
+    (step) => step.name === "Verify immutable execution contract"
+  );
+  const allowlist = guard.run.match(/case "\$changed" in\n\s+([^\n)]+)\) ;;/);
+  assert.ok(allowlist);
+  const accepted = new Set(allowlist[1].split("|"));
+  assert.deepEqual([...accepted], [...AUTHORIZED_FILES]);
+
+  for (const pathCandidate of [
+    ".github/workflows/",
+    ".github/workflows/*",
+    ".github/workflows/other.yml",
+    "scripts/social-3a0p-*",
+    "scripts/social-3a0p-linux-postgres.js",
+    "scripts/social-3a0p-local-backup-restore.js",
+    "tests/social-3a0p-*",
+    "tests/social-3a0p-linux-postgres.test.js",
+    "tests/social-3a0p-local-backup-restore.test.js",
+    "docs/social-3a0p-*",
+    "src/persistence/postgres/runtime-validation.js",
+    "db/migrations/0004_social_connector_persistence.up.sql",
+    "migrations/0004.sql",
+    "server.js",
+    "package.json",
+    "package-lock.json"
+  ]) {
+    assert.equal(accepted.has(pathCandidate), false, pathCandidate);
+  }
+});
+
 test("creation-push contract refuses wrong branch, parent, message, before, creation flag, and rerun", () => {
   const authorized = Object.freeze({
     eventName: "push",
@@ -132,10 +160,10 @@ test("creation-push contract refuses wrong branch, parent, message, before, crea
   );
   assert.equal(accepted(authorized), true);
   for (const mutation of [
-    { ref: "refs/heads/social/checkpoint-3a0p-linux-login-verifier-bridge-20260808" },
-    { parent: "1ce8bd3c9ce0830c942b9b2c8ea666a74c859442" },
+    { ref: "refs/heads/social/checkpoint-3a0p-linux-backup-transport-20260808" },
+    { parent: "f47438ef12b03a5eb1f2965c2e68e3c6efd9f36a" },
     { before: PARENT },
-    { message: "[run-social-3a0p-linux-gate] bridge verified login credential transport" },
+    { message: "[run-social-3a0p-linux-gate] bridge verified backup transport" },
     { created: false },
     { deleted: true },
     { forced: true },
