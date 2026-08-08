@@ -8,6 +8,7 @@ const path = require("node:path");
 const { EventEmitter } = require("node:events");
 const test = require("node:test");
 const {
+  DATABASE,
   IMAGE,
   IMAGE_DIGEST,
   classifyHostListenerRows,
@@ -18,7 +19,10 @@ const {
   inspectInternalContainer,
   inspectInternalNetwork,
   instrumentedPoolClass,
+  MIGRATION_LOGIN,
+  OWNER_ROLE,
   POSTGRES_CONNECTIVITY_MODE,
+  PROVISIONER_LOGIN,
   safeRunId
 } = require("../scripts/social-3a0p-linux-postgres");
 const {
@@ -28,6 +32,16 @@ const {
 const CONTAINER_ID = "a".repeat(64);
 const NETWORK_ID = "b".repeat(64);
 const PRIVATE_HOST = "172.30.0.2";
+const BACKUP_CONNECTIVITY_MODE = "logical_dns_to_internal_container_v1";
+const BACKUP_LOGICAL_HOST = "backup.local.ia4tube.invalid";
+const BACKUP_PHYSICAL_MODE = "internal_container_loopback";
+const BACKUP_APPLICATION_NAME = "ia4tube-social-backup-restore";
+const BACKUP_RUN_ID = "linux-backup-transport-271828";
+const BACKUP_RUN_MARKER = `ia4tube-social-3a0p-linux-${crypto
+  .createHash("sha256")
+  .update(BACKUP_RUN_ID)
+  .digest("hex")
+  .slice(0, 16)}`;
 
 function networkInspection(names, overrides = {}) {
   const base = {
@@ -1395,19 +1409,60 @@ test("pending marker cleanup remains fail-closed on container and network identi
   }
 });
 
-test("database tools receive password only through child memory environment", async () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ia4tube-linux-pg-tool-"));
+function backupTargetFingerprint(database) {
+  return crypto.createHash("sha256").update([
+    "ia4tube-social-backup-target-v2",
+    BACKUP_LOGICAL_HOST,
+    "5432",
+    database,
+    "tls-verify-full"
+  ].join("/")).digest("hex");
+}
+
+function exactBackupContract(overrides = {}) {
+  const database = overrides.database || DATABASE;
+  return {
+    database,
+    login: MIGRATION_LOGIN,
+    runMarker: BACKUP_RUN_MARKER,
+    targetFingerprint: backupTargetFingerprint(database),
+    ...overrides
+  };
+}
+
+function disposableBackupDatabase(label = "source_0003") {
+  const suffix = crypto.createHash("sha256")
+    .update(BACKUP_RUN_MARKER)
+    .digest("hex")
+    .slice(0, 12);
+  return `ia4tube_social_disposable_${label}_${suffix}`;
+}
+
+async function createBackupTransportFixture(fixtureOptions = {}) {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ia4tube-linux-pg-backup-transport-"));
   const calls = [];
   let containerPresent = false;
   let volumePresent = false;
   let networkPresent = false;
-  const names = dockerNames("linux-271828");
-  async function runCommand(executable, args, options = {}) {
-    calls.push({ executable, args: [...args], environment: { ...(options.environment || {}) } });
-    const result = (stdout = "", code = 0) => ({ code, signal: null, stdout, stderr: "" });
+  let randomFill = 1;
+  const names = dockerNames(BACKUP_RUN_ID);
+  async function runCommand(executable, args, commandOptions = {}) {
+    calls.push({
+      executable,
+      args: [...args],
+      environment: { ...(commandOptions.environment || {}) },
+      input: commandOptions.input
+    });
+    const result = (stdout = "", code = 0, stderr = "") => ({
+      code, signal: null, stdout, stderr
+    });
     if (executable === "ss") return result();
     if (args[0] === "image" && args[1] === "inspect") {
-      return result(JSON.stringify({ Os: "linux", Architecture: "amd64", RepoDigests: [`postgres@${IMAGE_DIGEST}`] }));
+      return result(JSON.stringify({
+        Os: "linux",
+        Architecture: "amd64",
+        RepoDigests: [`postgres@${IMAGE_DIGEST}`]
+      }));
     }
     if (args[0] === "network" && args[1] === "create") {
       networkPresent = true;
@@ -1425,11 +1480,28 @@ test("database tools receive password only through child memory environment", as
       return result(JSON.stringify(networkInspection(names)));
     }
     if (args[0] === "ps" && args.includes("--format")) {
-      return result(containerPresent ? `${JSON.stringify({ ID: CONTAINER_ID, Names: names.container, Networks: names.network, Ports: "5432/tcp" })}\n` : "");
+      return result(containerPresent
+        ? `${JSON.stringify({
+            ID: CONTAINER_ID,
+            Names: names.container,
+            Networks: names.network,
+            Ports: "5432/tcp"
+          })}\n`
+        : "");
     }
     if (args[0] === "ps") return result(containerPresent ? `${CONTAINER_ID}\n` : "");
-    if (args[0] === "volume" && args[1] === "ls") return result(volumePresent ? `${names.volume}\n` : "");
-    if (args[0] === "network" && args[1] === "ls") return result(networkPresent ? `${NETWORK_ID}\n` : "");
+    if (args[0] === "volume" && args[1] === "ls") {
+      return result(volumePresent ? `${names.volume}\n` : "");
+    }
+    if (args[0] === "network" && args[1] === "ls") {
+      return result(networkPresent ? `${NETWORK_ID}\n` : "");
+    }
+    if (args[0] === "exec") {
+      const containerIndex = args.indexOf(CONTAINER_ID);
+      const tool = containerIndex >= 0 ? args[containerIndex + 1] : "";
+      const code = Number(fixtureOptions.toolExitCodes?.[tool] || 0);
+      return result("", code, code === 0 ? "" : "synthetic tool failure");
+    }
     if (args[0] === "rm") containerPresent = false;
     if (args[0] === "volume" && args[1] === "rm") volumePresent = false;
     if (args[0] === "network" && args[1] === "rm") networkPresent = false;
@@ -1437,40 +1509,683 @@ test("database tools receive password only through child memory environment", as
   }
   const postgres = createLinuxPostgres({
     runnerTemp: root,
-    runId: "linux-271828",
+    runId: BACKUP_RUN_ID,
     PoolClass: FakePool,
     metricsRegistry: metrics(),
     runnerUid: 1001,
     runnerGid: 127,
     runCommand,
-    randomBytes: (size) => Buffer.alloc(size, 8)
+    randomBytes(size) {
+      const value = Buffer.alloc(size, randomFill);
+      randomFill += 1;
+      return value;
+    }
   });
   await postgres.start();
-  const password = `aA0_${Buffer.alloc(48, 8).toString("base64url")}`;
-  const tool = postgres.createRunTool();
-  await tool({
+  return {
+    calls,
+    names,
+    postgres,
+    root,
+    runTool: postgres.createRunTool(),
+    async destroy() {
+      try {
+        await postgres.cleanup();
+      } finally {
+        fs.rmSync(root, { recursive: true, force: true });
+      }
+    }
+  };
+}
+
+function exactBackupEnvironment(fixture, binding, overrides = {}) {
+  const environment = {
+    LANG: "C.UTF-8",
+    PGHOST: BACKUP_LOGICAL_HOST,
+    PGPORT: "5432",
+    PGDATABASE: binding.database,
+    PGUSER: binding.login,
+    PGPASSWORD: fixture.postgres.materials[
+      binding.login === PROVISIONER_LOGIN ? "provisioner" : "migration"
+    ].toString("utf8"),
+    PGCONNECT_TIMEOUT: "10",
+    PGCHANNELBINDING: "disable",
+    PGSSLMODE: "verify-full",
+    PGSSLROOTCERT: "system",
+    SSL_CERT_FILE: path.join(fixture.postgres.workDirectory, "postgres-system-roots.pem"),
+    PGAPPNAME: BACKUP_APPLICATION_NAME,
+    ...overrides
+  };
+  for (const [name, value] of Object.entries(environment)) {
+    if (value === undefined) delete environment[name];
+  }
+  return environment;
+}
+
+function exactBackupPlan(fixture, binding, kind = "psql") {
+  const environment = exactBackupEnvironment(fixture, binding);
+  if (kind === "pg_dump") {
+    return {
+      executable: "/usr/bin/pg_dump",
+      args: [
+        "--format=custom", "--compress=9", "--no-password",
+        `--role=${OWNER_ROLE}`, "--schema=ia4tube_social",
+        "--schema=ia4tube_social_admin", "--schema=ia4tube_migrations",
+        "--lock-wait-timeout=10000", "--schema-only",
+        `--file=${path.join(fixture.postgres.workDirectory, "backup-schema.dump")}`
+      ],
+      env: environment
+    };
+  }
+  if (kind === "pg_restore") {
+    return {
+      executable: "/usr/bin/pg_restore",
+      args: [
+        "--exit-on-error", "--single-transaction", "--no-password",
+        "--no-owner", `--role=${OWNER_ROLE}`,
+        `--dbname=${binding.database}`,
+        path.join(fixture.postgres.workDirectory, "restore-schema.dump")
+      ],
+      env: environment
+    };
+  }
+  if (kind === "pg_restore_list") {
+    return {
+      executable: "/usr/bin/pg_restore",
+      args: [
+        "--list",
+        path.join(fixture.postgres.workDirectory, "offline-schema.dump")
+      ],
+      env: { LANG: "C.UTF-8" }
+    };
+  }
+  return {
     executable: "/usr/bin/psql",
-    args: ["--no-password", "--file=-"],
-    env: {
-      PGHOST: "127.0.0.1",
-      PGPORT: "5432",
-      PGDATABASE: "ia4tube_social_local",
-      PGUSER: "ia4tube_social_local_migration",
-      PGPASSWORD: password
-    },
+    args: [
+      "--no-password", "--no-psqlrc", "--set=ON_ERROR_STOP=1",
+      "--set=VERBOSITY=terse", "--quiet", "--file=-"
+    ],
+    env: environment,
     input: "SELECT 1;"
+  };
+}
+
+function planWithEnvironment(plan, overrides) {
+  const environment = { ...plan.env, ...overrides };
+  for (const [name, value] of Object.entries(environment)) {
+    if (value === undefined) delete environment[name];
+  }
+  return { ...plan, env: environment };
+}
+
+async function rejectsWithoutSecret(operation, code, secret) {
+  await assert.rejects(operation, (error) => {
+    assert.equal(error?.code, code);
+    assert.equal(JSON.stringify(error).includes(secret), false);
+    assert.equal(String(error?.message || "").includes(secret), false);
+    return true;
   });
-  const call = calls.at(-1);
-  assert.deepEqual(call.args.slice(0, 4), ["exec", "--interactive", "--user", "1001:127"]);
-  assert.ok(call.args.includes(CONTAINER_ID));
-  assert.ok(call.args.indexOf(CONTAINER_ID) < call.args.indexOf("psql"));
-  assert.ok(call.args.includes("PGPASSWORD"));
-  assert.equal(call.args.some((argument) => argument.includes(password)), false);
-  assert.equal(call.environment.PGPASSWORD, password);
-  assert.equal(call.environment.PGHOST, "127.0.0.1");
-  assert.equal(call.environment.PGPORT, "5432");
-  await postgres.cleanup();
-  fs.rmSync(root, { recursive: true, force: true });
+}
+
+test("backup transport factory emits only the immutable 11-key logical-to-physical binding", async () => {
+  const fixture = await createBackupTransportFixture();
+  try {
+    const callCount = fixture.calls.length;
+    const contract = exactBackupContract();
+    assert.deepEqual(Object.keys(contract).sort(), [
+      "database", "login", "runMarker", "targetFingerprint"
+    ]);
+    const binding = fixture.postgres.createBackupTransportBinding(contract);
+    assert.equal(Object.isFrozen(binding), true);
+    assert.deepEqual(Object.keys(binding).sort(), [
+      "connectivityMode", "containerIdentityDigest", "database", "logicalHost",
+      "logicalPort", "login", "physicalHost", "physicalMode", "physicalPort",
+      "runMarker", "targetFingerprint"
+    ]);
+    assert.deepEqual(binding, {
+      connectivityMode: BACKUP_CONNECTIVITY_MODE,
+      logicalHost: BACKUP_LOGICAL_HOST,
+      logicalPort: 5432,
+      physicalMode: BACKUP_PHYSICAL_MODE,
+      physicalHost: "127.0.0.1",
+      physicalPort: 5432,
+      database: DATABASE,
+      login: MIGRATION_LOGIN,
+      runMarker: BACKUP_RUN_MARKER,
+      targetFingerprint: backupTargetFingerprint(DATABASE),
+      containerIdentityDigest: crypto.createHash("sha256")
+        .update(CONTAINER_ID, "ascii")
+        .digest("hex")
+    });
+    assert.equal(JSON.stringify(binding).includes(CONTAINER_ID), false);
+    assert.equal(JSON.stringify(binding).includes(
+      fixture.postgres.materials.migration.toString("utf8")
+    ), false);
+    assert.throws(() => { binding.logicalHost = "127.0.0.1"; }, TypeError);
+
+    const disposableDatabase = disposableBackupDatabase();
+    const disposable = fixture.postgres.createBackupTransportBinding(
+      exactBackupContract({ database: disposableDatabase })
+    );
+    assert.equal(disposable.database, disposableDatabase);
+    const provisioner = fixture.postgres.createBackupTransportBinding(
+      exactBackupContract({ login: PROVISIONER_LOGIN })
+    );
+    assert.equal(provisioner.login, PROVISIONER_LOGIN);
+
+    const invalidContracts = [
+      null,
+      { ...contract, physicalHost: "127.0.0.1" },
+      Object.fromEntries(Object.entries(contract).filter(([name]) => name !== "targetFingerprint")),
+      exactBackupContract({ database: "ia4tube_social_other" }),
+      exactBackupContract({ database: `${disposableDatabase}0` }),
+      exactBackupContract({ login: "ia4tube_social_local_runtime" }),
+      exactBackupContract({ runMarker: "wrong" }),
+      exactBackupContract({
+        runMarker: "ia4tube-social-3a0p-another-linux-run-0001"
+      }),
+      exactBackupContract({ targetFingerprint: "0".repeat(64) }),
+      exactBackupContract({ targetFingerprint: "A".repeat(64) })
+    ];
+    for (const candidate of invalidContracts) {
+      assert.throws(
+        () => fixture.postgres.createBackupTransportBinding(candidate),
+        { code: "linux_postgres_backup_transport_contract_invalid" }
+      );
+    }
+    assert.equal(fixture.calls.length, callCount);
+  } finally {
+    await fixture.destroy();
+  }
+});
+
+test("backup transport refuses every forged binding field before docker exec", async () => {
+  const fixture = await createBackupTransportFixture();
+  try {
+    const binding = fixture.postgres.createBackupTransportBinding(exactBackupContract());
+    const plan = exactBackupPlan(fixture, binding);
+    const secret = plan.env.PGPASSWORD;
+    const callCount = fixture.calls.length;
+    const mutations = [
+      { connectivityMode: "logical_dns_to_other_transport_v1" },
+      { logicalHost: "127.0.0.1" },
+      { logicalHost: "10.20.30.40" },
+      { logicalHost: "localhost" },
+      { logicalHost: "other.local.ia4tube.invalid" },
+      { logicalHost: "social-staging.example.com" },
+      { logicalHost: "social.example.com" },
+      { logicalPort: 5433 },
+      { physicalMode: "host_loopback" },
+      { physicalHost: "172.30.0.2" },
+      { physicalPort: 5433 },
+      { database: "ia4tube_social_other" },
+      { login: PROVISIONER_LOGIN },
+      { runMarker: "ia4tube-social-3a0p-another-linux-run-0001" },
+      { targetFingerprint: "d".repeat(64) },
+      { containerIdentityDigest: "e".repeat(64) }
+    ];
+    for (const mutation of mutations) {
+      const forged = Object.freeze({ ...binding, ...mutation });
+      await rejectsWithoutSecret(
+        () => fixture.runTool(plan, forged),
+        "linux_postgres_backup_transport_binding_invalid",
+        secret
+      );
+    }
+    const missing = { ...binding };
+    delete missing.containerIdentityDigest;
+    for (const forged of [
+      binding && { ...binding },
+      Object.freeze(missing),
+      Object.freeze({ ...binding, unexpected: true })
+    ]) {
+      await rejectsWithoutSecret(
+        () => fixture.runTool(plan, forged),
+        "linux_postgres_backup_transport_binding_invalid",
+        secret
+      );
+    }
+    assert.equal(fixture.calls.length, callCount);
+  } finally {
+    await fixture.destroy();
+  }
+});
+
+test("backup transport refuses logical TLS and command divergence before child execution", async () => {
+  const fixture = await createBackupTransportFixture();
+  try {
+    const binding = fixture.postgres.createBackupTransportBinding(exactBackupContract());
+    const plan = exactBackupPlan(fixture, binding);
+    const secret = plan.env.PGPASSWORD;
+    const callCount = fixture.calls.length;
+    const environmentMutations = [
+      { PGHOST: "127.0.0.1" },
+      { PGHOST: "10.20.30.40" },
+      { PGHOST: "localhost" },
+      { PGHOST: "other.local.ia4tube.invalid" },
+      { PGHOST: "social-staging.example.com" },
+      { PGHOST: "social.example.com" },
+      { PGPORT: "5433" },
+      { PGDATABASE: "ia4tube_social_other" },
+      { PGUSER: PROVISIONER_LOGIN },
+      { PGPASSWORD: "synthetic-wrong-password-not-authorized-for-this-login" },
+      { PGSSLMODE: "disable" },
+      { PGSSLMODE: "require" },
+      { PGSSLROOTCERT: undefined },
+      { PGSSLROOTCERT: "root.crt" },
+      { SSL_CERT_FILE: undefined },
+      { SSL_CERT_FILE: path.join(path.dirname(fixture.postgres.workDirectory), "outside.pem") },
+      { PGAPPNAME: "another-application" },
+      { PGCONNECT_TIMEOUT: "11" },
+      { PGCHANNELBINDING: "prefer" },
+      { DATABASE_URL: "postgresql://forbidden.invalid/db" }
+    ];
+    for (const mutation of environmentMutations) {
+      await rejectsWithoutSecret(
+        () => fixture.runTool(planWithEnvironment(plan, mutation), binding),
+        "linux_postgres_tool_transport_refused",
+        secret
+      );
+    }
+
+    const dumpOutside = exactBackupPlan(fixture, binding, "pg_dump");
+    dumpOutside.args[9] = `--file=${path.join(path.dirname(fixture.postgres.workDirectory), "outside.dump")}`;
+    const restoreWrongDatabase = exactBackupPlan(fixture, binding, "pg_restore");
+    restoreWrongDatabase.args[5] = "--dbname=ia4tube_social_other";
+    const restoreOutside = exactBackupPlan(fixture, binding, "pg_restore");
+    restoreOutside.args[6] = path.join(path.dirname(fixture.postgres.workDirectory), "outside.dump");
+    const commandMutations = [
+      { ...plan, executable: "/usr/bin/curl" },
+      { ...plan, executable: "/usr/local/bin/psql" },
+      { ...plan, executable: "psql" },
+      { ...plan, args: [...plan.args, "--host=external.invalid"] },
+      { ...plan, args: [...plan.args, "--port=5433"] },
+      { ...plan, args: [...plan.args, "--username=other"] },
+      { ...plan, args: [...plan.args, "--dbname=other"] },
+      { ...plan, input: undefined },
+      dumpOutside,
+      restoreWrongDatabase,
+      restoreOutside
+    ];
+    for (const candidate of commandMutations) {
+      await rejectsWithoutSecret(
+        () => fixture.runTool(candidate, binding),
+        "linux_postgres_tool_command_refused",
+        secret
+      );
+    }
+
+    const offline = exactBackupPlan(fixture, binding, "pg_restore_list");
+    for (const candidate of [
+      { ...offline, env: { PGPASSWORD: secret } },
+      { ...offline, args: [...offline.args, "--host=external.invalid"] },
+      { ...offline, input: "forbidden" },
+      {
+        ...offline,
+        args: ["--list", path.join(path.dirname(fixture.postgres.workDirectory), "outside.dump")]
+      }
+    ]) {
+      await rejectsWithoutSecret(
+        () => fixture.runTool(candidate, binding),
+        "linux_postgres_tool_offline_plan_refused",
+        secret
+      );
+    }
+    assert.equal(fixture.calls.length, callCount);
+  } finally {
+    await fixture.destroy();
+  }
+});
+
+test("pre-validation refusal never marks pg_dump or pg_restore as started", async () => {
+  const fixture = await createBackupTransportFixture();
+  try {
+    const binding = fixture.postgres.createBackupTransportBinding(exactBackupContract());
+    const invalid = planWithEnvironment(
+      exactBackupPlan(fixture, binding, "pg_dump"),
+      { PGSSLMODE: "disable" }
+    );
+    const callCount = fixture.calls.length;
+    await assert.rejects(
+      () => fixture.runTool(invalid, binding),
+      { code: "linux_postgres_tool_transport_refused" }
+    );
+    assert.equal(fixture.calls.length, callCount);
+    assert.deepEqual(fixture.postgres.backupTransportEvidence(), {
+      logicalIdentityTlsContractValidated: false,
+      physicalDisposableTransportValidated: false,
+      productionTlsPhysicallyTestedInThisGate: false,
+      productionTlsPreviouslyProvedBySocial2B: true,
+      localTlsDisabledOnlyInsideOwnedContainer: false,
+      pgDumpStarted: false,
+      pgDumpSucceeded: false,
+      pgRestoreStarted: false,
+      pgRestoreSucceeded: false
+    });
+  } finally {
+    await fixture.destroy();
+  }
+});
+
+test("pg_dump code 1 records started without recording success", async () => {
+  const fixture = await createBackupTransportFixture({
+    toolExitCodes: { pg_dump: 1 }
+  });
+  try {
+    const binding = fixture.postgres.createBackupTransportBinding(exactBackupContract());
+    const callCount = fixture.calls.length;
+    const result = await fixture.runTool(
+      exactBackupPlan(fixture, binding, "pg_dump"),
+      binding
+    );
+    assert.deepEqual(result, {
+      code: 1,
+      stdout: "",
+      stderr: "synthetic tool failure"
+    });
+    const calls = fixture.calls.slice(callCount);
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].args[calls[0].args.indexOf(CONTAINER_ID) + 1], "pg_dump");
+    assert.deepEqual(fixture.postgres.backupTransportEvidence(), {
+      logicalIdentityTlsContractValidated: true,
+      physicalDisposableTransportValidated: false,
+      productionTlsPhysicallyTestedInThisGate: false,
+      productionTlsPreviouslyProvedBySocial2B: true,
+      localTlsDisabledOnlyInsideOwnedContainer: true,
+      pgDumpStarted: true,
+      pgDumpSucceeded: false,
+      pgRestoreStarted: false,
+      pgRestoreSucceeded: false
+    });
+  } finally {
+    await fixture.destroy();
+  }
+});
+
+test("pg_restore code 1 records started without recording success", async () => {
+  const fixture = await createBackupTransportFixture({
+    toolExitCodes: { pg_restore: 1 }
+  });
+  try {
+    const binding = fixture.postgres.createBackupTransportBinding(exactBackupContract());
+    const callCount = fixture.calls.length;
+    const result = await fixture.runTool(
+      exactBackupPlan(fixture, binding, "pg_restore"),
+      binding
+    );
+    assert.deepEqual(result, {
+      code: 1,
+      stdout: "",
+      stderr: "synthetic tool failure"
+    });
+    const calls = fixture.calls.slice(callCount);
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].args[calls[0].args.indexOf(CONTAINER_ID) + 1], "pg_restore");
+    assert.deepEqual(fixture.postgres.backupTransportEvidence(), {
+      logicalIdentityTlsContractValidated: true,
+      physicalDisposableTransportValidated: false,
+      productionTlsPhysicallyTestedInThisGate: false,
+      productionTlsPreviouslyProvedBySocial2B: true,
+      localTlsDisabledOnlyInsideOwnedContainer: true,
+      pgDumpStarted: false,
+      pgDumpSucceeded: false,
+      pgRestoreStarted: true,
+      pgRestoreSucceeded: false
+    });
+  } finally {
+    await fixture.destroy();
+  }
+});
+
+test("tool plan snapshots args once so a getter and later mutation cannot change execution", async () => {
+  const fixture = await createBackupTransportFixture();
+  try {
+    const binding = fixture.postgres.createBackupTransportBinding(exactBackupContract());
+    const base = exactBackupPlan(fixture, binding, "pg_dump");
+    const expectedArgs = [...base.args];
+    const sourceArgs = [...expectedArgs];
+    const poisonedArgs = [...expectedArgs, "--host=external.invalid"];
+    let getterCalls = 0;
+    delete base.args;
+    Object.defineProperty(base, "args", {
+      configurable: false,
+      enumerable: true,
+      get() {
+        getterCalls += 1;
+        if (getterCalls !== 1) return poisonedArgs;
+        queueMicrotask(() => {
+          sourceArgs.splice(0, sourceArgs.length, ...poisonedArgs);
+        });
+        return sourceArgs;
+      }
+    });
+    const callCount = fixture.calls.length;
+    const result = await fixture.runTool(base, binding);
+    assert.equal(result.code, 0);
+    assert.equal(getterCalls, 1);
+    assert.deepEqual(sourceArgs, poisonedArgs);
+    const calls = fixture.calls.slice(callCount);
+    assert.equal(calls.length, 1);
+    const containerIndex = calls[0].args.indexOf(CONTAINER_ID);
+    assert.equal(calls[0].args[containerIndex + 1], "pg_dump");
+    assert.deepEqual(calls[0].args.slice(containerIndex + 2), expectedArgs);
+    assert.equal(calls[0].args.includes("--host=external.invalid"), false);
+  } finally {
+    await fixture.destroy();
+  }
+});
+
+test("tool plan snapshots every environment getter once before later mutation", async () => {
+  const fixture = await createBackupTransportFixture();
+  try {
+    const binding = fixture.postgres.createBackupTransportBinding(exactBackupContract());
+    const base = exactBackupPlan(fixture, binding, "psql");
+    const exactEnvironment = { ...base.env };
+    const poisonedEnvironment = {
+      ...exactEnvironment,
+      LANG: "poisoned",
+      PGHOST: "external.invalid",
+      PGPORT: "5433",
+      PGDATABASE: "ia4tube_social_other",
+      PGUSER: PROVISIONER_LOGIN,
+      PGPASSWORD: "synthetic-poisoned-password-that-must-never-reach-child",
+      PGCONNECT_TIMEOUT: "11",
+      PGCHANNELBINDING: "prefer",
+      PGSSLMODE: "disable",
+      PGSSLROOTCERT: "poisoned.crt",
+      SSL_CERT_FILE: path.join(path.dirname(fixture.postgres.workDirectory), "outside.pem"),
+      PGAPPNAME: "poisoned-application"
+    };
+    const getterCalls = Object.create(null);
+    const getterEnvironment = {};
+    for (const name of Object.keys(exactEnvironment)) {
+      getterCalls[name] = 0;
+      Object.defineProperty(getterEnvironment, name, {
+        configurable: false,
+        enumerable: true,
+        get() {
+          getterCalls[name] += 1;
+          return getterCalls[name] === 1
+            ? exactEnvironment[name]
+            : poisonedEnvironment[name];
+        }
+      });
+    }
+    let environmentGetterCalls = 0;
+    delete base.env;
+    Object.defineProperty(base, "env", {
+      configurable: false,
+      enumerable: true,
+      get() {
+        environmentGetterCalls += 1;
+        return environmentGetterCalls === 1
+          ? getterEnvironment
+          : poisonedEnvironment;
+      }
+    });
+    queueMicrotask(() => {
+      Object.assign(exactEnvironment, poisonedEnvironment);
+    });
+
+    const callCount = fixture.calls.length;
+    const result = await fixture.runTool(base, binding);
+    assert.equal(result.code, 0);
+    assert.equal(environmentGetterCalls, 1);
+    assert.deepEqual(Object.values(getterCalls), Object.keys(getterCalls).map(() => 1));
+    assert.deepEqual(exactEnvironment, poisonedEnvironment);
+    const calls = fixture.calls.slice(callCount);
+    assert.equal(calls.length, 1);
+    const call = calls[0];
+    assert.equal(call.environment.PGHOST, "127.0.0.1");
+    assert.equal(call.environment.PGPORT, "5432");
+    assert.equal(call.environment.PGDATABASE, binding.database);
+    assert.equal(call.environment.PGUSER, binding.login);
+    assert.equal(
+      call.environment.PGPASSWORD,
+      fixture.postgres.materials.migration.toString("utf8")
+    );
+    assert.equal(call.environment.PGSSLMODE, "disable");
+    assert.equal(call.environment.PGAPPNAME, BACKUP_APPLICATION_NAME);
+    assert.equal(JSON.stringify(call).includes("synthetic-poisoned-password"), false);
+    assert.equal(JSON.stringify(call).includes("external.invalid"), false);
+  } finally {
+    await fixture.destroy();
+  }
+});
+
+test("tool executable must be the exact canonical absolute allowlisted string", async () => {
+  const fixture = await createBackupTransportFixture();
+  try {
+    const binding = fixture.postgres.createBackupTransportBinding(exactBackupContract());
+    const exact = exactBackupPlan(fixture, binding, "psql");
+    const exactResult = await fixture.runTool(exact, binding);
+    assert.equal(exactResult.code, 0);
+    const callCount = fixture.calls.length;
+    for (const executable of [
+      "/usr/bin/../bin/psql",
+      "/usr/bin/./psql",
+      "/usr//bin/psql",
+      "\\usr\\bin\\psql"
+    ]) {
+      await assert.rejects(
+        () => fixture.runTool({ ...exact, executable }, binding),
+        { code: "linux_postgres_tool_command_refused" }
+      );
+    }
+    assert.equal(fixture.calls.length, callCount);
+  } finally {
+    await fixture.destroy();
+  }
+});
+
+test("exact backup, psql and restore plans map only inside the owned container without DNS or exposure", async () => {
+  const fixture = await createBackupTransportFixture();
+  try {
+    const binding = fixture.postgres.createBackupTransportBinding(exactBackupContract());
+    const secret = fixture.postgres.materials.migration.toString("utf8");
+    const callCount = fixture.calls.length;
+    const psqlResult = await fixture.runTool(
+      exactBackupPlan(fixture, binding, "psql"),
+      binding
+    );
+    const dumpResult = await fixture.runTool(
+      exactBackupPlan(fixture, binding, "pg_dump"),
+      binding
+    );
+    const listResult = await fixture.runTool(
+      exactBackupPlan(fixture, binding, "pg_restore_list"),
+      binding
+    );
+    const beforeConnectedRestore = fixture.postgres.backupTransportEvidence();
+    assert.equal(beforeConnectedRestore.logicalIdentityTlsContractValidated, true);
+    assert.equal(beforeConnectedRestore.physicalDisposableTransportValidated, false);
+    assert.equal(beforeConnectedRestore.localTlsDisabledOnlyInsideOwnedContainer, true);
+    assert.equal(beforeConnectedRestore.pgDumpStarted, true);
+    assert.equal(beforeConnectedRestore.pgDumpSucceeded, true);
+    assert.equal(beforeConnectedRestore.pgRestoreStarted, false);
+    assert.equal(beforeConnectedRestore.pgRestoreSucceeded, false);
+    const restoreResult = await fixture.runTool(
+      exactBackupPlan(fixture, binding, "pg_restore"),
+      binding
+    );
+    for (const result of [psqlResult, dumpResult, listResult, restoreResult]) {
+      assert.deepEqual(result, { code: 0, stdout: "", stderr: "" });
+      assert.equal(JSON.stringify(result).includes(secret), false);
+    }
+
+    const calls = fixture.calls.slice(callCount);
+    assert.equal(calls.length, 4);
+    assert.equal(calls.every((call) => call.executable === "docker"), true);
+    assert.equal(calls.every((call) => call.args[0] === "exec"), true);
+    assert.equal(calls.every((call) => call.args[1] === "--interactive"), true);
+    assert.equal(calls.every((call) => call.args[2] === "--user"), true);
+    assert.equal(calls.every((call) => call.args[3] === "1001:127"), true);
+    for (const call of calls) {
+      const containerIndex = call.args.indexOf(CONTAINER_ID);
+      assert.ok(containerIndex > 3);
+      assert.equal(call.args.filter((argument) => argument === CONTAINER_ID).length, 1);
+      assert.ok(["psql", "pg_dump", "pg_restore"].includes(call.args[containerIndex + 1]));
+    }
+    assert.equal(calls.some((call) => call.args.includes("--publish")), false);
+    assert.equal(calls.some((call) => call.args.includes("-p")), false);
+    assert.equal(calls.some((call) => call.args.includes("-P")), false);
+    assert.equal(calls.some((call) => call.args[0] === "port"), false);
+    assert.equal(calls.some((call) => call.args[0] === "run"), false);
+    assert.equal(JSON.stringify(calls.map((call) => call.args)).includes(BACKUP_LOGICAL_HOST), false);
+    assert.equal(JSON.stringify(calls.map((call) => call.args)).includes(secret), false);
+
+    const online = calls.filter((call) => !call.args.includes("--list"));
+    assert.equal(online.length, 3);
+    for (const call of online) {
+      assert.equal(call.environment.PGHOST, "127.0.0.1");
+      assert.equal(call.environment.PGPORT, "5432");
+      assert.equal(call.environment.PGDATABASE, binding.database);
+      assert.equal(call.environment.PGUSER, binding.login);
+      assert.equal(call.environment.PGPASSWORD, secret);
+      assert.equal(call.environment.PGSSLMODE, "disable");
+      assert.equal(call.environment.PGCHANNELBINDING, "disable");
+      assert.equal(call.environment.PGCONNECT_TIMEOUT, "10");
+      assert.equal(call.environment.PGAPPNAME, BACKUP_APPLICATION_NAME);
+      assert.equal(Object.hasOwn(call.environment, "PGSSLROOTCERT"), false);
+      assert.equal(Object.hasOwn(call.environment, "SSL_CERT_FILE"), false);
+      assert.ok(call.args.includes("PGPASSWORD"));
+      assert.ok(call.args.includes("PGHOST"));
+      assert.ok(call.args.indexOf(CONTAINER_ID) < call.args.length - 1);
+    }
+    const offline = calls.find((call) => call.args.includes("--list"));
+    assert.ok(offline);
+    assert.deepEqual(offline.environment, {});
+    assert.equal(offline.args.includes("--env"), false);
+    assert.equal(offline.args.includes("PGPASSWORD"), false);
+
+    const evidence = fixture.postgres.backupTransportEvidence();
+    assert.equal(Object.isFrozen(evidence), true);
+    assert.deepEqual(evidence, {
+      logicalIdentityTlsContractValidated: true,
+      physicalDisposableTransportValidated: true,
+      productionTlsPhysicallyTestedInThisGate: false,
+      productionTlsPreviouslyProvedBySocial2B: true,
+      localTlsDisabledOnlyInsideOwnedContainer: true,
+      pgDumpStarted: true,
+      pgDumpSucceeded: true,
+      pgRestoreStarted: true,
+      pgRestoreSucceeded: true
+    });
+    const evidenceText = JSON.stringify(evidence);
+    assert.equal(evidenceText.includes(secret), false);
+    assert.equal(evidenceText.includes(CONTAINER_ID), false);
+    assert.equal(evidenceText.includes(BACKUP_LOGICAL_HOST), false);
+    assert.equal(evidenceText.includes("127.0.0.1"), false);
+
+    const implementation = fs.readFileSync(
+      path.join(__dirname, "..", "scripts", "social-3a0p-linux-postgres.js"),
+      "utf8"
+    );
+    assert.doesNotMatch(implementation, /require\(["'](?:node:)?dns["']\)/);
+    assert.doesNotMatch(implementation, /\bdns\.(?:lookup|resolve|resolve4|resolve6)\b/);
+  } finally {
+    await fixture.destroy();
+  }
 });
 
 test("cleanup is an idempotent success before any resource is created", async () => {

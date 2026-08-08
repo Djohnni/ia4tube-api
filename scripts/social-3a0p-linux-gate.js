@@ -6,6 +6,7 @@ const os = require("node:os");
 const path = require("node:path");
 const { runLinuxDurabilityProof } = require("./social-3a0p-linux-durability");
 const {
+  BACKUP_CONNECTIVITY_MODE,
   DATABASE,
   IMAGE,
   IMAGE_DIGEST,
@@ -33,8 +34,8 @@ const {
   createPoolMetricsRegistry
 } = require("./social-3a0p-local-runtime-evidence-metrics");
 
-const BRANCH = "social/checkpoint-3a0p-linux-login-verifier-bridge-20260808";
-const BASE_COMMIT = "1ce8bd3c9ce0830c942b9b2c8ea666a74c859442";
+const BRANCH = "social/checkpoint-3a0p-linux-backup-transport-20260808";
+const BASE_COMMIT = "f47438ef12b03a5eb1f2965c2e68e3c6efd9f36a";
 const PRODUCT_COMMIT = "fcfc92419021dae5f77baad731c634b10c275c5b";
 const MARKER = "[run-social-3a0p-linux-gate]";
 const RUN_MARKER_PREFIX = "ia4tube-social-3a0p-linux-";
@@ -757,6 +758,51 @@ function createDrainAwareRunTool(PlanPoolClass, runTool) {
   };
 }
 
+function publicBackupTransportEvidence(postgres) {
+  const value = postgres?.backupTransportEvidence?.();
+  const keys = [
+    "localTlsDisabledOnlyInsideOwnedContainer",
+    "logicalIdentityTlsContractValidated",
+    "pgDumpStarted",
+    "pgDumpSucceeded",
+    "pgRestoreStarted",
+    "pgRestoreSucceeded",
+    "physicalDisposableTransportValidated",
+    "productionTlsPhysicallyTestedInThisGate",
+    "productionTlsPreviouslyProvedBySocial2B"
+  ];
+  if (
+    !value || Object.getPrototypeOf(value) !== Object.prototype ||
+    JSON.stringify(Object.keys(value).sort()) !== JSON.stringify(keys) ||
+    Object.values(value).some((entry) => typeof entry !== "boolean") ||
+    value.productionTlsPhysicallyTestedInThisGate !== false ||
+    value.productionTlsPreviouslyProvedBySocial2B !== true
+  ) {
+    fail("linux_gate_backup_transport_evidence_invalid");
+  }
+  return Object.freeze({ ...value });
+}
+
+function createBackupTransportBridge(postgres, runTool, contract) {
+  if (
+    !postgres || typeof postgres.createBackupTransportBinding !== "function" ||
+    typeof runTool !== "function"
+  ) {
+    fail("linux_gate_backup_transport_bridge_invalid");
+  }
+  const localBinding = postgres.createBackupTransportBinding(contract);
+  const boundRunTool = async (plan, candidateBinding) => {
+    if (candidateBinding !== localBinding) {
+      fail("linux_gate_backup_transport_binding_invalid");
+    }
+    return runTool(plan, candidateBinding);
+  };
+  return Object.freeze({
+    localBinding,
+    runTool: boundRunTool
+  });
+}
+
 function retiredPoolHandle() {
   return Object.freeze({
     retired: true,
@@ -1419,6 +1465,15 @@ function createPhaseRunner(evidence) {
 }
 
 async function runLinuxGate(options = {}) {
+  const gateEnvironment = options.environment === undefined
+    ? process.env
+    : options.environment;
+  if (
+    !gateEnvironment || typeof gateEnvironment !== "object" ||
+    gateEnvironment.POSTGRES_BACKUP_CONNECTIVITY_MODE !== BACKUP_CONNECTIVITY_MODE
+  ) {
+    fail("linux_gate_backup_connectivity_mode_invalid");
+  }
   const runnerTemp = path.resolve(options.runnerTemp || process.env.RUNNER_TEMP || "");
   const repositoryRoot = path.resolve(options.repositoryRoot || path.join(__dirname, ".."));
   const runIdSource = options.runId || process.env.GITHUB_RUN_ID;
@@ -1595,7 +1650,10 @@ async function runLinuxGate(options = {}) {
               [MIGRATION_LOGIN]: postgres.materials.migration.toString("utf8"),
               [RUNTIME_LOGIN]: postgres.materials.runtime.toString("utf8")
             }
-          }, { environment: options.environment || process.env });
+          }, { environment: gateEnvironment });
+        },
+        createBackupTransportBridge(contract) {
+          return createBackupTransportBridge(postgres, physicalRunTool, contract);
         },
         runTool: physicalRunTool,
         restoreBehavior: createRestoreBehaviorFacade(legacy2ARoot)
@@ -1662,9 +1720,24 @@ async function runLinuxGate(options = {}) {
       await retirePrimaryPoolsBeforeBackup(state);
       const result = await gates.backupRestore({ state });
       if (directoryFsyncBundles !== 2) fail("linux_gate_bundle_directory_fsync_count_invalid");
+      const backupTransport = publicBackupTransportEvidence(postgres);
+      if (
+        backupTransport.logicalIdentityTlsContractValidated !== true ||
+        backupTransport.physicalDisposableTransportValidated !== true ||
+        backupTransport.productionTlsPhysicallyTestedInThisGate !== false ||
+        backupTransport.productionTlsPreviouslyProvedBySocial2B !== true ||
+        backupTransport.localTlsDisabledOnlyInsideOwnedContainer !== true ||
+        backupTransport.pgDumpStarted !== true ||
+        backupTransport.pgDumpSucceeded !== true ||
+        backupTransport.pgRestoreStarted !== true ||
+        backupTransport.pgRestoreSucceeded !== true
+      ) {
+        fail("linux_gate_backup_transport_evidence_invalid");
+      }
       return Object.freeze({
         ...result,
         ...profile0003Plans.evidence(),
+        ...backupTransport,
         bundleDirectoryFsyncConfirmed: true,
         bundleDirectoryFsyncCount: directoryFsyncBundles
       });
@@ -1779,6 +1852,7 @@ async function runLinuxGate(options = {}) {
         cleanupCompleted: cleanupResult?.cleanupCompleted === true
       });
     }
+    evidence.backupTransport = publicBackupTransportEvidence(postgres);
     evidence.cleanup = cleanupResult || { cleanupCompleted: false };
     evidence.diskFinalFreeBytes = freeBytes(runnerTemp);
     evidence.status = evidence.status === "passed" && cleanupResult?.cleanupCompleted === true && !evidence.cleanupFailure
@@ -1871,6 +1945,7 @@ module.exports = {
   cleanupOnly,
   containsMarkerInTree,
   createDrainAwareRunTool,
+  createBackupTransportBridge,
   createGate1MigrationPoolLifecycle,
   createLinuxProfile0003PlansFacade,
   createLinuxRestoreConfigFacade,
@@ -1891,6 +1966,7 @@ module.exports = {
   proveMigrationManifestTamper,
   publicPlatformEvidence,
   publicBootstrapEvidence,
+  publicBackupTransportEvidence,
   retirePrimaryPoolsBeforeBackup,
   sanitizedFailureEvidence,
   runLinuxGate

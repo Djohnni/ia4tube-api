@@ -9,13 +9,36 @@ const {
   resolveSchemaProfile,
   runLogicalBackup,
   runLogicalRestore,
+  targetFingerprint,
   validateManifestFiles
 } = require("../src/persistence/postgres/backup-restore");
 
 const LOCAL_PHYSICAL_APPROVAL =
   "RUN_SOCIAL_3A0P_LOCAL_BACKUP_RESTORE";
 const EXACT_LOOPBACK_HOST = "127.0.0.1";
+const BACKUP_CONNECTIVITY_MODE = "logical_dns_to_internal_container_v1";
+const BACKUP_LOGICAL_HOST = "backup.local.ia4tube.invalid";
+const BACKUP_LOGICAL_PORT = 5432;
+const BACKUP_PHYSICAL_MODE = "internal_container_loopback";
+const BACKUP_PHYSICAL_PORT = 5432;
 const RUN_MARKER_PATTERN = /^ia4tube-social-3a0p-[a-z0-9-]{8,64}$/;
+const SHA256_PATTERN = /^[0-9a-f]{64}$/;
+const LEGACY_BINDING_KEYS = Object.freeze([
+  "database", "host", "login", "port", "runMarker"
+]);
+const LOGICAL_TRANSPORT_BINDING_KEYS = Object.freeze([
+  "connectivityMode",
+  "containerIdentityDigest",
+  "database",
+  "login",
+  "logicalHost",
+  "logicalPort",
+  "physicalHost",
+  "physicalMode",
+  "physicalPort",
+  "runMarker",
+  "targetFingerprint"
+].sort());
 const ALLOWED_PROFILE_IDS = Object.freeze([
   "social-schema-0003",
   "social-schema-0004"
@@ -358,9 +381,13 @@ function validateBoundManifest({
 
 function assertLocalConfigTarget(config, mode, localBinding) {
   const target = mode === "backup" ? config?.source : config?.target;
-  assertExactLoopbackHost(target?.public?.host);
-  const keys = ["database", "host", "login", "port", "runMarker"];
   const port = Number(target?.public?.port);
+  const bindingKeys = localBinding && Object.getPrototypeOf(localBinding) === Object.prototype
+    ? Object.keys(localBinding).sort()
+    : [];
+  const legacyBinding = JSON.stringify(bindingKeys) === JSON.stringify(LEGACY_BINDING_KEYS);
+  const logicalTransportBinding =
+    JSON.stringify(bindingKeys) === JSON.stringify(LOGICAL_TRANSPORT_BINDING_KEYS);
   if (
     !target?.public?.database ||
     !target?.public?.login ||
@@ -372,17 +399,61 @@ function assertLocalConfigTarget(config, mode, localBinding) {
     String(port) !== String(target.public.port) ||
     !localBinding ||
     Object.getPrototypeOf(localBinding) !== Object.prototype ||
-    JSON.stringify(Object.keys(localBinding).sort()) !== JSON.stringify(keys) ||
-    localBinding.host !== EXACT_LOOPBACK_HOST ||
-    localBinding.host !== target.public.host ||
-    localBinding.port !== String(target.public.port) ||
     localBinding.database !== target.public.database ||
     localBinding.login !== target.public.login ||
-    !RUN_MARKER_PATTERN.test(String(localBinding.runMarker || ""))
+    !RUN_MARKER_PATTERN.test(String(localBinding.runMarker || "")) ||
+    (!legacyBinding && !logicalTransportBinding)
+  ) {
+    fail(`local_${mode}_target_invalid`);
+  }
+  if (legacyBinding) {
+    assertExactLoopbackHost(target.public.host);
+    if (
+      localBinding.host !== EXACT_LOOPBACK_HOST ||
+      localBinding.host !== target.public.host ||
+      localBinding.port !== String(target.public.port)
+    ) {
+      fail(`local_${mode}_target_invalid`);
+    }
+    return true;
+  }
+  const configFingerprint = mode === "backup"
+    ? config?.sourceFingerprint
+    : config?.targetFingerprint;
+  if (
+    Object.isFrozen(localBinding) !== true ||
+    target.public.host !== BACKUP_LOGICAL_HOST ||
+    target.public.port !== String(BACKUP_LOGICAL_PORT) ||
+    localBinding.connectivityMode !== BACKUP_CONNECTIVITY_MODE ||
+    localBinding.logicalHost !== BACKUP_LOGICAL_HOST ||
+    localBinding.logicalHost !== target.public.host ||
+    localBinding.logicalPort !== BACKUP_LOGICAL_PORT ||
+    localBinding.logicalPort !== port ||
+    localBinding.physicalMode !== BACKUP_PHYSICAL_MODE ||
+    localBinding.physicalHost !== EXACT_LOOPBACK_HOST ||
+    localBinding.physicalPort !== BACKUP_PHYSICAL_PORT ||
+    !SHA256_PATTERN.test(String(localBinding.containerIdentityDigest || "")) ||
+    !SHA256_PATTERN.test(String(localBinding.targetFingerprint || "")) ||
+    localBinding.targetFingerprint !== configFingerprint ||
+    targetFingerprint(target.public) !== configFingerprint ||
+    config?.postgresTls?.servername !== BACKUP_LOGICAL_HOST ||
+    config.postgresTls.rejectUnauthorized !== true ||
+    config.postgresTls.minVersion !== "TLSv1.2" ||
+    typeof config.postgresTls.checkServerIdentity !== "function" ||
+    (mode === "restore" && (
+      !String(target.public.database).includes("disposable") ||
+      !SHA256_PATTERN.test(String(config?.sourceFingerprint || "")) ||
+      config.sourceFingerprint === configFingerprint
+    ))
   ) {
     fail(`local_${mode}_target_invalid`);
   }
   return true;
+}
+
+function bindLocalRunTool(runTool, localBinding) {
+  if (typeof runTool !== "function") fail("local_backup_tool_runner_missing");
+  return (plan) => runTool(plan, localBinding);
 }
 
 function createOperator(pool, dependencies) {
@@ -439,6 +510,7 @@ async function runProfileBackup({
   const profile = profileForRows(profileRows, dependencies);
   if (typeof runTool !== "function") fail("local_backup_tool_runner_missing");
   const run = dependencies.runLogicalBackup || runLogicalBackup;
+  const boundRunTool = bindLocalRunTool(runTool, localBinding);
   const operator = bindBackupOperatorToProfile(
     createOperator(pool, dependencies),
     profile
@@ -448,7 +520,7 @@ async function runProfileBackup({
     result = await run({
       config,
       operator,
-      runTool,
+      runTool: boundRunTool,
       generatedAt,
       // Windows proves file durability. Directory fsync remains a Linux gate.
       requireBundleDirectoryFsync: false
@@ -512,10 +584,11 @@ async function runProfileRestore({
       fail("local_restore_disposable_create_unconfirmed");
     }
     const run = dependencies.runLogicalRestore || runLogicalRestore;
+    const boundRunTool = bindLocalRunTool(runTool, localBinding);
     result = await run({
       config,
       operator: createOperator(pool, dependencies),
-      runTool,
+      runTool: boundRunTool,
       verifierTargetFingerprint,
       verifyRuntimeIsolation,
       verifyVault,
@@ -762,6 +835,11 @@ function profile0003() {
 
 module.exports = {
   ALLOWED_PROFILE_IDS,
+  BACKUP_CONNECTIVITY_MODE,
+  BACKUP_LOGICAL_HOST,
+  BACKUP_LOGICAL_PORT,
+  BACKUP_PHYSICAL_MODE,
+  BACKUP_PHYSICAL_PORT,
   EXACT_LOOPBACK_HOST,
   LOCAL_PHYSICAL_APPROVAL,
   LocalBackupRestoreFailure,

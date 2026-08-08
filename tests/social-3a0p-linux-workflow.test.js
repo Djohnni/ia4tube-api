@@ -8,10 +8,10 @@ const test = require("node:test");
 const REPOSITORY_ROOT = path.resolve(__dirname, "..");
 const WORKFLOW_RELATIVE_PATH = ".github/workflows/social-3a0p-linux-physical-gates.yml";
 const WORKFLOW_PATH = path.join(REPOSITORY_ROOT, ...WORKFLOW_RELATIVE_PATH.split("/"));
-const BRANCH = "social/checkpoint-3a0p-linux-login-verifier-bridge-20260808";
-const PARENT = "1ce8bd3c9ce0830c942b9b2c8ea666a74c859442";
+const BRANCH = "social/checkpoint-3a0p-linux-backup-transport-20260808";
+const PARENT = "f47438ef12b03a5eb1f2965c2e68e3c6efd9f36a";
 const ZERO_SHA = "0000000000000000000000000000000000000000";
-const MESSAGE = "[run-social-3a0p-linux-gate] bridge verified login credential transport";
+const MESSAGE = "[run-social-3a0p-linux-gate] bridge verified backup transport";
 const JOB_IF = [
   "github.event_name == 'push'",
   `github.ref == 'refs/heads/${BRANCH}'`,
@@ -32,8 +32,12 @@ const AUTHORIZED_FILES = Object.freeze([
   ".github/workflows/social-3a0p-linux-physical-gates.yml",
   "docs/social-3a0p-linux-physical-gates.md",
   "scripts/social-3a0p-linux-gate.js",
+  "scripts/social-3a0p-linux-postgres.js",
+  "scripts/social-3a0p-local-backup-restore.js",
   "scripts/social-3a0p-local-windows-physical-plans.js",
   "tests/social-3a0p-linux-gate.test.js",
+  "tests/social-3a0p-linux-postgres.test.js",
+  "tests/social-3a0p-local-backup-restore.test.js",
   "tests/social-3a0p-local-windows-physical-plans.test.js",
   "tests/social-3a0p-linux-workflow.test.js"
 ]);
@@ -73,6 +77,10 @@ test("workflow triggers only the exact authorized new-branch creation push", () 
   assert.equal(workflow.env.SOCIAL_3A0P_AUTHORIZED_PARENT, PARENT);
   assert.equal(workflow.env.SOCIAL_3A0P_AUTHORIZED_MESSAGE, MESSAGE);
   assert.equal(workflow.env.POSTGRES_CONNECTIVITY_MODE, "internal_bridge_direct_v1");
+  assert.equal(
+    workflow.env.POSTGRES_BACKUP_CONNECTIVITY_MODE,
+    "logical_dns_to_internal_container_v1"
+  );
   assert.equal(workflow.env.SOCIAL_3A0P_POSTGRES_IMAGE, IMAGE);
 
   const guard = job.steps.find((step) => step.name === "Verify immutable execution contract");
@@ -83,10 +91,18 @@ test("workflow triggers only the exact authorized new-branch creation push", () 
   const allowlist = guard.run.match(/case "\$changed" in\n\s+([^\n)]+)\) ;;/);
   assert.ok(allowlist);
   assert.deepEqual(allowlist[1].split("|"), AUTHORIZED_FILES);
-  assert.equal(guard.run.includes("scripts/social-3a0p-linux-postgres.js"), false);
-  assert.equal(guard.run.includes("tests/social-3a0p-linux-postgres.test.js"), false);
+  assert.equal(allowlist[1].includes("*"), false);
+  assert.equal(allowlist[1].includes("src/"), false);
+  assert.equal(allowlist[1].includes("db/"), false);
+  assert.equal(allowlist[1].includes("migrations/"), false);
+  assert.equal(allowlist[1].includes("server.js"), false);
+  assert.equal(allowlist[1].includes("package.json"), false);
+  assert.equal(allowlist[1].includes("package-lock.json"), false);
+  assert.equal(guard.run.includes(".github/workflows/*"), false);
   assert.equal(guard.run.includes("scripts/social-3a0p-linux-*"), false);
+  assert.equal(guard.run.includes("scripts/social-3a0p-local-*"), false);
   assert.equal(guard.run.includes("tests/social-3a0p-linux-*"), false);
+  assert.equal(guard.run.includes("tests/social-3a0p-local-*"), false);
   assert.equal(guard.run.includes("docs/social-3a0p-linux-*"), false);
   assert.equal(guard.run.includes("social-3a0p-local-scope"), false);
 });
@@ -116,10 +132,10 @@ test("creation-push contract refuses wrong branch, parent, message, before, crea
   );
   assert.equal(accepted(authorized), true);
   for (const mutation of [
-    { ref: "refs/heads/social/checkpoint-3a0p-linux-physical-gates-20260807" },
-    { parent: "88ff0ea427e6f321e8026910d018cd37e1e2687e" },
+    { ref: "refs/heads/social/checkpoint-3a0p-linux-login-verifier-bridge-20260808" },
+    { parent: "1ce8bd3c9ce0830c942b9b2c8ea666a74c859442" },
     { before: PARENT },
-    { message: "[run-social-3a0p-linux-gate] fix pool metrics shutdown lifecycle" },
+    { message: "[run-social-3a0p-linux-gate] bridge verified login credential transport" },
     { created: false },
     { deleted: true },
     { forced: true },

@@ -2,37 +2,114 @@
 
 ## Limite e proveniência
 
-Esta quarta rota Linux isolada parte exclusivamente do commit
-`1ce8bd3c9ce0830c942b9b2c8ea666a74c859442`. A branch predecessora
-`social/checkpoint-3a0p-linux-pool-lifecycle-20260808` e todas as branches
+Esta quinta rota Linux isolada parte exclusivamente do commit
+`f47438ef12b03a5eb1f2965c2e68e3c6efd9f36a`. A branch predecessora
+`social/checkpoint-3a0p-linux-login-verifier-bridge-20260808` e todas as branches
 anteriores permanecem preservadas, sem novo push ou edição.
 
 O workflow existe somente para a branch
-`social/checkpoint-3a0p-linux-login-verifier-bridge-20260808`. O produto
+`social/checkpoint-3a0p-linux-backup-transport-20260808`. O produto
 permanece idêntico a `fcfc92419021dae5f77baad731c634b10c275c5b`: `src/`,
 todo `db/` (inclusive `roles.sql`), `server.js`, `package.json` e `package-lock.json` não são
 alterados. PostgreSQL, SCRAM, roles, rede Docker e credenciais também não são
 alterados por esta correção.
 
-## Quarto disparo Linux isolado autorizado
+## Quinto disparo Linux isolado autorizado
 
 O único gatilho autorizado é o primeiro e único `push` de criação da nova
 branch, sem exclusão ou force, cujo commit tenha a mensagem integral:
 
 ```text
-[run-social-3a0p-linux-gate] bridge verified login credential transport
+[run-social-3a0p-linux-gate] bridge verified backup transport
 ```
 
 O job exige `run_attempt == 1`, `created == true`, `deleted == false`,
 `forced == false`, `before` igual a 40 zeros e pai exato
-`1ce8bd3c9ce0830c942b9b2c8ea666a74c859442`, além de diff nominal e
+`f47438ef12b03a5eb1f2965c2e68e3c6efd9f36a`, além de diff nominal e
 estritamente allowlisted. Não há `workflow_dispatch`, pull request, agenda,
 matriz ou retry automático. A regra operacional é: zero re-run, zero segundo
 push, zero PR, zero merge e zero deploy depois desta execução única.
 
-## Falha predecessora e bridge exclusiva do verificador
+## Falha predecessora e bridge exclusiva de backup/restauração
 
-O run predecessor `31261593977` (artifact `9022940755`, SHA-256
+O run predecessor `31266308555` (artifact `9024249819`, SHA-256 da evidência
+`1729427d82fefa1ff2e68ef258cf7bb92ef826b08b8d1f6fbf95e947ef7365ba`)
+encerrou na fase `migrations` com o código sanitizado
+`social_database_tls_hostname_invalid`. Durabilidade, `O_NOFOLLOW`, isolamento
+Docker, bootstrap, credenciais, migrations principais e o perfil descartável
+0003 já haviam sido alcançados. A primeira falha ocorreu em
+`backup.loadBackupConfig(...)`, antes da criação do plano, do início de
+`pg_dump`, da abertura de subprocesso ou da produção do bundle.
+
+A causa comprovada foi a divergência entre identidade lógica e transporte
+físico. O plano antigo entregava `127.0.0.1` com `sslmode=verify-full` ao
+carregador TLS definitivo. O produto corretamente recusa IP como `servername`
+TLS e exige hostname DNS; a conversão física para o namespace do contêiner só
+ocorreria no executor, que ainda não havia sido alcançado. Esta correção não
+altera nem relaxa essa política do produto.
+
+O contrato exclusivo do harness é
+`POSTGRES_BACKUP_CONNECTIVITY_MODE=logical_dns_to_internal_container_v1`. A
+identidade lógica é fixa e imutável:
+
+- host `backup.local.ia4tube.invalid`;
+- porta `5432`;
+- `sslmode=verify-full`;
+- raiz TLS `system`;
+- aplicação `ia4tube-social-backup-restore`;
+- banco descartável, login sintético, perfil, run marker e contêiner exatos.
+
+O binding local fechado registra `logicalHost`, `logicalPort`,
+`physicalMode=internal_container_loopback`, `physicalHost=127.0.0.1`,
+`physicalPort=5432`, banco, login migration ou provisioner autorizado,
+`runMarker` e o digest/referência da identidade do contêiner já validado. Esses
+campos são derivados pelo gate dentro de closures imutáveis; nenhum deles pode
+ser substituído pelo ambiente ou pelo chamador.
+
+Esse hostname reservado é usado somente nas URLs entregues a
+`loadBackupConfig`/`loadRestoreConfig`, no host esperado, nos fingerprints e
+nos planos definitivos. Ele não vem de ambiente, argumento ou outra entrada
+externa, não é resolvido e nunca recebe uma conexão. IP, `localhost`, outro
+domínio `.invalid`, hostname de staging ou produção e qualquer divergência de
+porta, banco, login, run, TLS, executável ou argumento falham antes do processo
+filho.
+
+Somente depois de validar integralmente o plano, o executor Linux converte o
+transporte imediatamente antes de `docker exec` no mesmo contêiner PostgreSQL
+pertencente ao run:
+
+- `PGHOST=backup.local.ia4tube.invalid` torna-se `PGHOST=127.0.0.1`;
+- `PGPORT=5432` é preservado;
+- `PGSSLMODE=verify-full` torna-se `PGSSLMODE=disable`;
+- `PGSSLROOTCERT` e `SSL_CERT_FILE` são removidos;
+- banco, login, senha sintética e `PGAPPNAME` são preservados.
+
+A mesma ponte estreita cobre `pg_dump`, `psql` e `pg_restore` dos caminhos de
+backup e restauração. O produto continua executando
+`loadBackupConfig`, `loadRestoreConfig`, `runLogicalBackup`,
+`runLogicalRestore`, perfis, manifesto, catálogo, bundle criptografado,
+integridade e comportamento de restauração; somente o transporte do processo
+filho é adaptado pelo harness. Não há DNS real, certificado local, CA local,
+trust store local, listener no host, porta publicada ou segundo sistema de
+backup.
+
+A evidência deve separar os dois contratos com estes valores exatos:
+
+- `logicalIdentityTlsContractValidated=true`;
+- `physicalDisposableTransportValidated=true`;
+- `productionTlsPhysicallyTestedInThisGate=false`;
+- `productionTlsPreviouslyProvedBySocial2B=true`;
+- `localTlsDisabledOnlyInsideOwnedContainer=true`.
+
+Portanto, este gate valida que o contrato lógico definitivo continua exigindo
+`verify-full`, mas não declara que o TLS de produção foi exercitado fisicamente
+no cluster descartável. Essa prova permanece nos checkpoints Social 2B de
+staging/TLS. Até o quinto run terminar e sua evidência ser conferida, nenhum
+gate desta nova branch é declarado aprovado.
+
+## Bridge exclusiva do verificador de credenciais preservada
+
+O run histórico `31261593977` (artifact `9022940755`, SHA-256
 `552d72db1176f1bb53dd412ac213ec20a5d98d98b205191ab7d54384e05a5bcd`)
 encerrou na fase `migrations` com o código sanitizado
 `login_bootstrap_credential_verification_failed`. A cadeia focal é:
@@ -62,9 +139,9 @@ completa e mensagem bruta do driver não são registrados. Host, porta, banco,
 login, senha, protocolo, TLS, query, fragmento ou origem divergentes falham
 antes de qualquer conexão física.
 
-Esse desenho ainda depende do único run desta branch. Nenhuma aprovação dos
-gates físicos é declarada antes do término e da validação da evidência desse
-run.
+O run `31266308555` alcançou e aprovou migration login, runtime login e
+`SET LOCAL ROLE` usando essa bridge. A correção atual não altera o verificador
+nem amplia o adapter geral.
 
 ## Supply chain fechada
 

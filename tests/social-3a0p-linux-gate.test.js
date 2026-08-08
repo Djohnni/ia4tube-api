@@ -28,6 +28,7 @@ const {
   BRANCH,
   canonicalJson,
   containsMarkerInTree,
+  createBackupTransportBridge,
   createDrainAwareRunTool,
   createGate1MigrationPoolLifecycle,
   createLinuxProfile0003PlansFacade,
@@ -43,6 +44,7 @@ const {
   isRestoreEmptyTargetInventoryQuery,
   migrationEvidence,
   prepareLinuxRestoreTarget,
+  publicBackupTransportEvidence,
   publicBootstrapEvidence,
   publicPlatformEvidence,
   retirePrimaryPoolsBeforeBackup,
@@ -62,6 +64,82 @@ test("evidence provenance matches the authorized workflow branch and parent", ()
 
 test("canonical evidence JSON is stable and key ordered", () => {
   assert.equal(canonicalJson({ z: 1, a: { y: true, b: false } }), '{"a":{"b":false,"y":true},"z":1}');
+});
+
+test("backup transport bridge preserves the issued binding across the drain-aware runner", async () => {
+  const contract = Object.freeze({
+    database: "ia4tube_social_local",
+    login: "ia4tube_social_local_migration",
+    runMarker: "ia4tube-social-3a0p-linux-0123456789abcdef",
+    targetFingerprint: "a".repeat(64)
+  });
+  const localBinding = Object.freeze({
+    connectivityMode: "logical_dns_to_internal_container_v1",
+    logicalHost: "backup.local.ia4tube.invalid",
+    logicalPort: 5432,
+    physicalMode: "internal_container_loopback",
+    physicalHost: "127.0.0.1",
+    physicalPort: 5432,
+    database: contract.database,
+    login: contract.login,
+    runMarker: contract.runMarker,
+    targetFingerprint: contract.targetFingerprint,
+    containerIdentityDigest: "b".repeat(64)
+  });
+  const observed = [];
+  const postgres = {
+    createBackupTransportBinding(candidate) {
+      assert.equal(candidate, contract);
+      return localBinding;
+    }
+  };
+  const bridge = createBackupTransportBridge(
+    postgres,
+    async (...args) => {
+      observed.push(args);
+      return Object.freeze({ code: 0, stdout: "", stderr: "" });
+    },
+    contract
+  );
+  assert.equal(bridge.localBinding, localBinding);
+  assert.equal(Object.isFrozen(bridge), true);
+  const plan = Object.freeze({ executable: "/usr/bin/psql" });
+  await bridge.runTool(plan, localBinding);
+  assert.deepEqual(observed, [[plan, localBinding]]);
+  await assert.rejects(
+    bridge.runTool(plan, Object.freeze({ ...localBinding })),
+    { code: "linux_gate_backup_transport_binding_invalid" }
+  );
+  assert.equal(observed.length, 1);
+});
+
+test("failed-run evidence preserves whether pg_dump or pg_restore actually started", () => {
+  const snapshot = Object.freeze({
+    logicalIdentityTlsContractValidated: true,
+    physicalDisposableTransportValidated: false,
+    productionTlsPhysicallyTestedInThisGate: false,
+    productionTlsPreviouslyProvedBySocial2B: true,
+    localTlsDisabledOnlyInsideOwnedContainer: true,
+    pgDumpStarted: true,
+    pgDumpSucceeded: false,
+    pgRestoreStarted: false,
+    pgRestoreSucceeded: false
+  });
+  const evidence = {
+    backupTransport: publicBackupTransportEvidence({
+      backupTransportEvidence() { return snapshot; }
+    })
+  };
+  assert.deepEqual(evidence.backupTransport, snapshot);
+  assert.equal(evidenceSafe(evidence), true);
+  const source = fs.readFileSync(
+    path.join(ROOT, "scripts", "social-3a0p-linux-gate.js"),
+    "utf8"
+  );
+  assert.match(
+    source,
+    /finally\s*\{[\s\S]*evidence\.backupTransport\s*=\s*publicBackupTransportEvidence\(postgres\)/
+  );
 });
 
 test("evidence contract refuses secrets, URLs and sensitive key names", () => {

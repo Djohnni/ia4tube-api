@@ -3,9 +3,15 @@
 const assert = require("node:assert/strict");
 const test = require("node:test");
 const {
-  SCHEMA_PROFILES
+  SCHEMA_PROFILES,
+  targetFingerprint
 } = require("../src/persistence/postgres/backup-restore");
 const {
+  BACKUP_CONNECTIVITY_MODE,
+  BACKUP_LOGICAL_HOST,
+  BACKUP_LOGICAL_PORT,
+  BACKUP_PHYSICAL_MODE,
+  BACKUP_PHYSICAL_PORT,
   EXACT_LOOPBACK_HOST,
   LOCAL_PHYSICAL_APPROVAL,
   ROLLBACK_MODEL,
@@ -81,6 +87,68 @@ function bindingFor(config, mode = "backup") {
     port: target.port,
     runMarker
   };
+}
+
+function logicalTlsContract(overrides = {}) {
+  return {
+    checkServerIdentity() {},
+    minVersion: "TLSv1.2",
+    rejectUnauthorized: true,
+    servername: BACKUP_LOGICAL_HOST,
+    ...overrides
+  };
+}
+
+function logicalConfig(mode = "backup", overrides = {}) {
+  const database = overrides.database || (mode === "backup"
+    ? "ia4tube_social_local"
+    : restoreDatabase);
+  const connection = {
+    public: {
+      host: BACKUP_LOGICAL_HOST,
+      port: String(BACKUP_LOGICAL_PORT),
+      database,
+      login: "ia4tube_social_local_migration"
+    }
+  };
+  const fingerprint = targetFingerprint(connection.public);
+  const common = {
+    postgresTls: logicalTlsContract(overrides.postgresTls),
+    ...(mode === "backup"
+      ? { source: connection, sourceFingerprint: fingerprint }
+      : {
+          target: connection,
+          targetFingerprint: fingerprint,
+          sourceFingerprint: overrides.sourceFingerprint || "a".repeat(64)
+        })
+  };
+  if (overrides.public) Object.assign(connection.public, overrides.public);
+  if (overrides.fingerprint !== undefined) {
+    common[mode === "backup" ? "sourceFingerprint" : "targetFingerprint"] =
+      overrides.fingerprint;
+  }
+  return common;
+}
+
+function logicalBindingFor(config, mode = "backup", overrides = {}) {
+  const target = mode === "backup" ? config.source.public : config.target.public;
+  const fingerprint = mode === "backup"
+    ? config.sourceFingerprint
+    : config.targetFingerprint;
+  return Object.freeze({
+    connectivityMode: BACKUP_CONNECTIVITY_MODE,
+    logicalHost: BACKUP_LOGICAL_HOST,
+    logicalPort: BACKUP_LOGICAL_PORT,
+    physicalMode: BACKUP_PHYSICAL_MODE,
+    physicalHost: EXACT_LOOPBACK_HOST,
+    physicalPort: BACKUP_PHYSICAL_PORT,
+    database: target.database,
+    login: target.login,
+    runMarker,
+    targetFingerprint: fingerprint,
+    containerIdentityDigest: "c".repeat(64),
+    ...overrides
+  });
 }
 
 function backupResult(overrides = {}) {
@@ -555,6 +623,164 @@ test("backup binding refuses wrong port, database, login or run marker before th
     );
     assert.equal(operatorCreated, false);
   }
+});
+
+test("logical backup binding validates the exact TLS identity and closes runTool over the immutable binding", async () => {
+  const config = logicalConfig("backup");
+  const localBinding = logicalBindingFor(config);
+  const calls = [];
+  const plan = Object.freeze({ kind: "synthetic-logical-backup-plan" });
+  const rawRunTool = async (...args) => {
+    calls.push(args);
+    return { code: 0, stdout: "", stderr: "" };
+  };
+  const result = await runProfileBackup({
+    approval: LOCAL_PHYSICAL_APPROVAL,
+    runMarker,
+    profileRows: profile0003.migrationRows,
+    config,
+    localBinding,
+    pool: { id: "logical-backup" },
+    runTool: rawRunTool,
+    dependencies: dependencies([], {
+      async runLogicalBackup(options) {
+        await options.runTool(plan);
+        return backupResult();
+      }
+    }, profile0003)
+  });
+  assert.equal(result.profileId, profile0003.id);
+  assert.equal(Object.isFrozen(localBinding), true);
+  assert.deepEqual(calls, [[plan, localBinding]]);
+});
+
+test("logical restore binding closes runTool over the same immutable target binding", async () => {
+  const events = [];
+  const config = logicalConfig("restore");
+  const localBinding = logicalBindingFor(config, "restore");
+  const calls = [];
+  const plan = Object.freeze({ kind: "synthetic-logical-restore-plan" });
+  const result = await runProfileRestore(restoreRequest(profile0003, events, {
+    config,
+    localBinding,
+    runTool: async (...args) => {
+      calls.push(args);
+      return { code: 0, stdout: "", stderr: "" };
+    },
+    dependencies: dependencies(events, {
+      async runLogicalRestore(options) {
+        await options.runTool(plan);
+        return restoreResult();
+      }
+    })
+  }));
+  assert.equal(result.profileId, profile0003.id);
+  assert.deepEqual(calls, [[plan, localBinding]]);
+});
+
+test("logical transport binding refuses every identity, transport and provenance mutation before the operator", async () => {
+  const config = logicalConfig("backup");
+  const exact = logicalBindingFor(config);
+  const mutations = [
+    { connectivityMode: "logical_dns_to_other_transport_v1" },
+    { logicalHost: "127.0.0.1" },
+    { logicalHost: "10.20.30.40" },
+    { logicalHost: "localhost" },
+    { logicalHost: "other.local.ia4tube.invalid" },
+    { logicalHost: "database.staging.example" },
+    { logicalHost: "database.production.example" },
+    { logicalPort: 5433 },
+    { physicalMode: "host_listener" },
+    { physicalHost: "10.20.30.40" },
+    { physicalPort: 5433 },
+    { database: "ia4tube_social_other" },
+    { login: "ia4tube_social_local_provisioner" },
+    { runMarker: "ia4tube-social-3a0p-another-run-0001" },
+    { targetFingerprint: "d".repeat(64) },
+    { containerIdentityDigest: "not-a-sha256" },
+    { containerIdentityDigest: "C".repeat(64) }
+  ];
+  for (const mutation of mutations) {
+    let operatorCreated = false;
+    await assert.rejects(runProfileBackup({
+      approval: LOCAL_PHYSICAL_APPROVAL,
+      runMarker,
+      profileRows: profile0003.migrationRows,
+      config,
+      localBinding: Object.freeze({ ...exact, ...mutation }),
+      pool: { id: "logical-binding-mutation" },
+      runTool: async () => ({ code: 0 }),
+      dependencies: {
+        createPostgresBackupOperator() {
+          operatorCreated = true;
+        }
+      }
+    }), { code: "local_backup_target_invalid" });
+    assert.equal(operatorCreated, false);
+  }
+  await assert.rejects(runProfileBackup({
+    approval: LOCAL_PHYSICAL_APPROVAL,
+    runMarker,
+    profileRows: profile0003.migrationRows,
+    config,
+    localBinding: Object.freeze({ ...exact, unexpected: true }),
+    pool: { id: "logical-binding-extra-key" },
+    runTool: async () => ({ code: 0 })
+  }), { code: "local_backup_target_invalid" });
+  await assert.rejects(runProfileBackup({
+    approval: LOCAL_PHYSICAL_APPROVAL,
+    runMarker,
+    profileRows: profile0003.migrationRows,
+    config,
+    localBinding: { ...exact },
+    pool: { id: "logical-binding-not-frozen" },
+    runTool: async () => ({ code: 0 })
+  }), { code: "local_backup_target_invalid" });
+});
+
+test("logical config refuses host, port, fingerprint and TLS contract drift", async () => {
+  const cases = [
+    logicalConfig("backup", { public: { host: "127.0.0.1" } }),
+    logicalConfig("backup", { public: { host: "10.20.30.40" } }),
+    logicalConfig("backup", { public: { host: "localhost" } }),
+    logicalConfig("backup", { public: { host: "other.local.ia4tube.invalid" } }),
+    logicalConfig("backup", { public: { port: "5433" } }),
+    logicalConfig("backup", { public: { database: "ia4tube_social_other" } }),
+    logicalConfig("backup", { public: { login: "ia4tube_social_other" } }),
+    logicalConfig("backup", { fingerprint: "d".repeat(64) }),
+    logicalConfig("backup", { postgresTls: { servername: "other.local.ia4tube.invalid" } }),
+    logicalConfig("backup", { postgresTls: { rejectUnauthorized: false } }),
+    logicalConfig("backup", { postgresTls: { minVersion: "TLSv1.1" } }),
+    logicalConfig("backup", { postgresTls: { checkServerIdentity: null } })
+  ];
+  for (const config of cases) {
+    await assert.rejects(runProfileBackup({
+      approval: LOCAL_PHYSICAL_APPROVAL,
+      runMarker,
+      profileRows: profile0003.migrationRows,
+      config,
+      localBinding: logicalBindingFor(logicalConfig("backup")),
+      pool: { id: "logical-config-mutation" },
+      runTool: async () => ({ code: 0 })
+    }), { code: "local_backup_target_invalid" });
+  }
+});
+
+test("logical restore still refuses source equals target and a non-disposable target", async () => {
+  const equalConfig = logicalConfig("restore");
+  equalConfig.sourceFingerprint = equalConfig.targetFingerprint;
+  await assert.rejects(runProfileRestore(restoreRequest(profile0003, [], {
+    config: equalConfig,
+    localBinding: logicalBindingFor(equalConfig, "restore")
+  })), { code: "local_restore_target_invalid" });
+
+  const nonDisposable = logicalConfig("restore", {
+    database: "ia4tube_social_local"
+  });
+  await assert.rejects(runProfileRestore(restoreRequest(profile0003, [], {
+    config: nonDisposable,
+    localBinding: logicalBindingFor(nonDisposable, "restore")
+  })), { code: "local_restore_target_invalid" });
 });
 
 test("restore binding refuses a run marker different from its owned lifecycle", async () => {

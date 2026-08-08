@@ -3,7 +3,7 @@
   "on": {
     "push": {
       "branches": [
-        "social/checkpoint-3a0p-linux-login-verifier-bridge-20260808"
+        "social/checkpoint-3a0p-linux-backup-transport-20260808"
       ]
     }
   },
@@ -15,15 +15,16 @@
     "cancel-in-progress": false
   },
   "env": {
-    "SOCIAL_3A0P_AUTHORIZED_PARENT": "1ce8bd3c9ce0830c942b9b2c8ea666a74c859442",
+    "SOCIAL_3A0P_AUTHORIZED_PARENT": "f47438ef12b03a5eb1f2965c2e68e3c6efd9f36a",
     "SOCIAL_3A0P_PRODUCT_COMMIT": "fcfc92419021dae5f77baad731c634b10c275c5b",
-    "SOCIAL_3A0P_AUTHORIZED_MESSAGE": "[run-social-3a0p-linux-gate] bridge verified login credential transport",
+    "SOCIAL_3A0P_AUTHORIZED_MESSAGE": "[run-social-3a0p-linux-gate] bridge verified backup transport",
     "POSTGRES_CONNECTIVITY_MODE": "internal_bridge_direct_v1",
+    "POSTGRES_BACKUP_CONNECTIVITY_MODE": "logical_dns_to_internal_container_v1",
     "SOCIAL_3A0P_POSTGRES_IMAGE": "docker.io/library/postgres:18.4-bookworm@sha256:7e6103cf85f88f7a0eddb3ec0b1ba8940eba098ed118ade25a729ca9daee5568"
   },
   "jobs": {
     "physical-gates": {
-      "if": "github.event_name == 'push' && github.ref == 'refs/heads/social/checkpoint-3a0p-linux-login-verifier-bridge-20260808' && github.event.created == true && github.event.deleted == false && github.event.forced == false && github.event.before == '0000000000000000000000000000000000000000' && github.event.head_commit.message == '[run-social-3a0p-linux-gate] bridge verified login credential transport' && github.run_attempt == 1",
+      "if": "github.event_name == 'push' && github.ref == 'refs/heads/social/checkpoint-3a0p-linux-backup-transport-20260808' && github.event.created == true && github.event.deleted == false && github.event.forced == false && github.event.before == '0000000000000000000000000000000000000000' && github.event.head_commit.message == '[run-social-3a0p-linux-gate] bridge verified backup transport' && github.run_attempt == 1",
       "runs-on": "ubuntu-24.04",
       "timeout-minutes": 60,
       "defaults": {
@@ -47,7 +48,7 @@
             "AUTHORIZED_MESSAGE": "${{ github.event.head_commit.message }}",
             "AUTHORIZED_ATTEMPT": "${{ github.run_attempt }}"
           },
-          "run": "set -euo pipefail\ntest \"$AUTHORIZED_ATTEMPT\" = \"1\"\ntest \"$AUTHORIZED_MESSAGE\" = \"$SOCIAL_3A0P_AUTHORIZED_MESSAGE\"\ntest \"$(git rev-parse HEAD)\" = \"$AUTHORIZED_SHA\"\ntest \"$(git rev-parse HEAD^)\" = \"$SOCIAL_3A0P_AUTHORIZED_PARENT\"\ntest \"$(git log -1 --pretty=%B)\" = \"$SOCIAL_3A0P_AUTHORIZED_MESSAGE\"\ngit diff --quiet \"$SOCIAL_3A0P_PRODUCT_COMMIT\" HEAD -- src db migrations server.js package.json package-lock.json\nwhile IFS= read -r changed; do\n  case \"$changed\" in\n    .github/workflows/social-3a0p-linux-physical-gates.yml|docs/social-3a0p-linux-physical-gates.md|scripts/social-3a0p-linux-gate.js|scripts/social-3a0p-local-windows-physical-plans.js|tests/social-3a0p-linux-gate.test.js|tests/social-3a0p-local-windows-physical-plans.test.js|tests/social-3a0p-linux-workflow.test.js) ;;\n    *) exit 1 ;;\n  esac\ndone < <(git diff --name-only \"$SOCIAL_3A0P_AUTHORIZED_PARENT\" HEAD)\ntest ! -e \"$RUNNER_TEMP/social-3a0p-linux-gate-evidence\""
+          "run": "set -euo pipefail\ntest \"$AUTHORIZED_ATTEMPT\" = \"1\"\ntest \"$AUTHORIZED_MESSAGE\" = \"$SOCIAL_3A0P_AUTHORIZED_MESSAGE\"\ntest \"$(git rev-parse HEAD)\" = \"$AUTHORIZED_SHA\"\ntest \"$(git rev-parse HEAD^)\" = \"$SOCIAL_3A0P_AUTHORIZED_PARENT\"\ntest \"$(git log -1 --pretty=%B)\" = \"$SOCIAL_3A0P_AUTHORIZED_MESSAGE\"\ngit diff --quiet \"$SOCIAL_3A0P_PRODUCT_COMMIT\" HEAD -- src db migrations server.js package.json package-lock.json\nwhile IFS= read -r changed; do\n  case \"$changed\" in\n    .github/workflows/social-3a0p-linux-physical-gates.yml|docs/social-3a0p-linux-physical-gates.md|scripts/social-3a0p-linux-gate.js|scripts/social-3a0p-linux-postgres.js|scripts/social-3a0p-local-backup-restore.js|scripts/social-3a0p-local-windows-physical-plans.js|tests/social-3a0p-linux-gate.test.js|tests/social-3a0p-linux-postgres.test.js|tests/social-3a0p-local-backup-restore.test.js|tests/social-3a0p-local-windows-physical-plans.test.js|tests/social-3a0p-linux-workflow.test.js) ;;\n    *) exit 1 ;;\n  esac\ndone < <(git diff --name-only \"$SOCIAL_3A0P_AUTHORIZED_PARENT\" HEAD)\ntest ! -e \"$RUNNER_TEMP/social-3a0p-linux-gate-evidence\""
         },
         {
           "name": "Set up Node.js",

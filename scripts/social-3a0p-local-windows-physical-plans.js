@@ -15,6 +15,10 @@ const {
 } = require("./social-3a0p-local-backup-restore");
 
 const LOOPBACK_HOST = "127.0.0.1";
+const BACKUP_LOGICAL_HOST = "backup.local.ia4tube.invalid";
+const BACKUP_LOGICAL_PORT = 5432;
+const BACKUP_CONNECTIVITY_MODE = "logical_dns_to_internal_container_v1";
+const BACKUP_PHYSICAL_MODE = "internal_container_loopback";
 const LOCAL_VERIFIER_HOST = "local.ia4tube.invalid";
 const LOCAL_DATABASE = "ia4tube_social_local";
 const ADMIN_LOGIN = "ia4tube_social_local_admin";
@@ -947,6 +951,14 @@ function createWindowsPhysicalPlans(options = {}) {
     allowedDatabases: ownedDatabaseNames,
     allowedLogins: [MIGRATION_LOGIN, PROVISIONER_LOGIN]
   });
+  const createBackupTransportBridge =
+    options.dependencies?.createBackupTransportBridge || null;
+  if (
+    createBackupTransportBridge !== null &&
+    typeof createBackupTransportBridge !== "function"
+  ) {
+    fail("windows_physical_backup_transport_bridge_invalid");
+  }
   const fileSystem = options.dependencies?.fileSystem || fs;
   const createdPlans = new Set();
   let planDirectoriesCreated = false;
@@ -1029,11 +1041,80 @@ function createWindowsPhysicalPlans(options = {}) {
     });
   }
 
+  function backupConnectionTarget(database, login) {
+    return Object.freeze({
+      host: createBackupTransportBridge ? BACKUP_LOGICAL_HOST : binding.target.host,
+      port: createBackupTransportBridge ? BACKUP_LOGICAL_PORT : binding.target.port,
+      database,
+      login
+    });
+  }
+
+  function requireBackupTransport(database) {
+    const target = backupConnectionTarget(database, MIGRATION_LOGIN);
+    const targetFingerprint = backup.targetFingerprint(target);
+    if (!createBackupTransportBridge) {
+      return Object.freeze({
+        localBinding: Object.freeze({
+          host: LOOPBACK_HOST,
+          port: String(binding.target.port),
+          database,
+          login: MIGRATION_LOGIN,
+          runMarker: binding.runMarker
+        }),
+        runTool,
+        target,
+        targetFingerprint
+      });
+    }
+    const contract = Object.freeze({
+      database,
+      login: MIGRATION_LOGIN,
+      runMarker: binding.runMarker,
+      targetFingerprint
+    });
+    const bridge = createBackupTransportBridge(contract);
+    const localBinding = bridge?.localBinding;
+    const expectedKeys = [
+      "connectivityMode", "containerIdentityDigest", "database", "logicalHost",
+      "logicalPort", "login", "physicalHost", "physicalMode", "physicalPort",
+      "runMarker", "targetFingerprint"
+    ];
+    if (
+      !bridge || Object.getPrototypeOf(bridge) !== Object.prototype ||
+      JSON.stringify(Object.keys(bridge).sort()) !== JSON.stringify(["localBinding", "runTool"]) ||
+      !Object.isFrozen(bridge) ||
+      !localBinding || Object.getPrototypeOf(localBinding) !== Object.prototype ||
+      JSON.stringify(Object.keys(localBinding).sort()) !== JSON.stringify(expectedKeys) ||
+      !Object.isFrozen(localBinding) ||
+      localBinding.connectivityMode !== BACKUP_CONNECTIVITY_MODE ||
+      localBinding.logicalHost !== BACKUP_LOGICAL_HOST ||
+      localBinding.logicalPort !== BACKUP_LOGICAL_PORT ||
+      localBinding.physicalMode !== BACKUP_PHYSICAL_MODE ||
+      localBinding.physicalHost !== LOOPBACK_HOST ||
+      localBinding.physicalPort !== BACKUP_LOGICAL_PORT ||
+      localBinding.database !== database ||
+      localBinding.login !== MIGRATION_LOGIN ||
+      localBinding.runMarker !== binding.runMarker ||
+      localBinding.targetFingerprint !== targetFingerprint ||
+      !/^[0-9a-f]{64}$/.test(String(localBinding.containerIdentityDigest || "")) ||
+      typeof bridge.runTool !== "function"
+    ) {
+      fail("windows_physical_backup_transport_bridge_invalid");
+    }
+    return Object.freeze({
+      localBinding,
+      runTool: bridge.runTool,
+      target,
+      targetFingerprint
+    });
+  }
+
   function connectionEnvironment(prefix, database, label, bundlePath) {
     const migrationPassword = materialText(state.materials.migration);
     const provisionerPassword = materialText(state.materials.provisioner);
-    const target = { ...binding.target, database, login: MIGRATION_LOGIN };
-    const operator = { ...binding.target, database, login: PROVISIONER_LOGIN };
+    const target = backupConnectionTarget(database, MIGRATION_LOGIN);
+    const operator = backupConnectionTarget(database, PROVISIONER_LOGIN);
     const base = {
       [`${prefix}_EXPECTED_MIGRATION_LOGIN`]: MIGRATION_LOGIN,
       [`${prefix}_EXPECTED_RUNTIME_LOGIN`]: RUNTIME_LOGIN,
@@ -1046,15 +1127,15 @@ function createWindowsPhysicalPlans(options = {}) {
         SOCIAL_BACKUP_DIRECTORY_PROTECTED: "true",
         SOCIAL_BACKUP_OUTPUT_DIRECTORY: path.join(paths.ownedRoot, "backups"),
         SOCIAL_BACKUP_LABEL: label,
-        SOCIAL_BACKUP_SOURCE_DATABASE_URL: connectionUrl({ target: binding.target, database, login: MIGRATION_LOGIN, password: migrationPassword }),
-        SOCIAL_BACKUP_SOURCE_EXPECTED_HOST: LOOPBACK_HOST,
-        SOCIAL_BACKUP_SOURCE_EXPECTED_PORT: String(binding.target.port),
+        SOCIAL_BACKUP_SOURCE_DATABASE_URL: connectionUrl({ target, database, login: MIGRATION_LOGIN, password: migrationPassword }),
+        SOCIAL_BACKUP_SOURCE_EXPECTED_HOST: target.host,
+        SOCIAL_BACKUP_SOURCE_EXPECTED_PORT: String(target.port),
         SOCIAL_BACKUP_SOURCE_EXPECTED_DATABASE: database,
         SOCIAL_BACKUP_SOURCE_EXPECTED_LOGIN: MIGRATION_LOGIN,
         SOCIAL_BACKUP_SOURCE_EXPECTED_FINGERPRINT: backup.targetFingerprint(target),
-        SOCIAL_BACKUP_OPERATOR_PROVISIONER_DATABASE_URL: connectionUrl({ target: binding.target, database, login: PROVISIONER_LOGIN, password: provisionerPassword }),
-        SOCIAL_BACKUP_OPERATOR_EXPECTED_HOST: LOOPBACK_HOST,
-        SOCIAL_BACKUP_OPERATOR_EXPECTED_PORT: String(binding.target.port),
+        SOCIAL_BACKUP_OPERATOR_PROVISIONER_DATABASE_URL: connectionUrl({ target: operator, database, login: PROVISIONER_LOGIN, password: provisionerPassword }),
+        SOCIAL_BACKUP_OPERATOR_EXPECTED_HOST: operator.host,
+        SOCIAL_BACKUP_OPERATOR_EXPECTED_PORT: String(operator.port),
         SOCIAL_BACKUP_OPERATOR_EXPECTED_DATABASE: database,
         SOCIAL_BACKUP_OPERATOR_EXPECTED_LOGIN: PROVISIONER_LOGIN,
         SOCIAL_BACKUP_OPERATOR_EXPECTED_FINGERPRINT: backup.targetFingerprint(operator),
@@ -1072,15 +1153,15 @@ function createWindowsPhysicalPlans(options = {}) {
       SOCIAL_RESTORE_WORK_DIRECTORY: path.join(paths.ownedRoot, "restore-work"),
       SOCIAL_RESTORE_BUNDLE: bundlePath,
       SOCIAL_RESTORE_LABEL: label,
-      SOCIAL_RESTORE_TARGET_DATABASE_URL: connectionUrl({ target: binding.target, database, login: MIGRATION_LOGIN, password: migrationPassword }),
-      SOCIAL_RESTORE_TARGET_EXPECTED_HOST: LOOPBACK_HOST,
-      SOCIAL_RESTORE_TARGET_EXPECTED_PORT: String(binding.target.port),
+      SOCIAL_RESTORE_TARGET_DATABASE_URL: connectionUrl({ target, database, login: MIGRATION_LOGIN, password: migrationPassword }),
+      SOCIAL_RESTORE_TARGET_EXPECTED_HOST: target.host,
+      SOCIAL_RESTORE_TARGET_EXPECTED_PORT: String(target.port),
       SOCIAL_RESTORE_TARGET_EXPECTED_DATABASE: database,
       SOCIAL_RESTORE_TARGET_EXPECTED_LOGIN: MIGRATION_LOGIN,
       SOCIAL_RESTORE_TARGET_EXPECTED_FINGERPRINT: backup.targetFingerprint(target),
-      SOCIAL_RESTORE_OPERATOR_PROVISIONER_DATABASE_URL: connectionUrl({ target: binding.target, database, login: PROVISIONER_LOGIN, password: provisionerPassword }),
-      SOCIAL_RESTORE_OPERATOR_EXPECTED_HOST: LOOPBACK_HOST,
-      SOCIAL_RESTORE_OPERATOR_EXPECTED_PORT: String(binding.target.port),
+      SOCIAL_RESTORE_OPERATOR_PROVISIONER_DATABASE_URL: connectionUrl({ target: operator, database, login: PROVISIONER_LOGIN, password: provisionerPassword }),
+      SOCIAL_RESTORE_OPERATOR_EXPECTED_HOST: operator.host,
+      SOCIAL_RESTORE_OPERATOR_EXPECTED_PORT: String(operator.port),
       SOCIAL_RESTORE_OPERATOR_EXPECTED_DATABASE: database,
       SOCIAL_RESTORE_OPERATOR_EXPECTED_LOGIN: PROVISIONER_LOGIN,
       SOCIAL_RESTORE_OPERATOR_EXPECTED_FINGERPRINT: backup.targetFingerprint(operator),
@@ -1091,6 +1172,7 @@ function createWindowsPhysicalPlans(options = {}) {
   }
 
   function backupRequest(database, profile, label) {
+    const transport = requireBackupTransport(database);
     const config = backup.loadBackupConfig(
       connectionEnvironment("SOCIAL_BACKUP", database, label),
       { repositoryRoot: options.repositoryRoot }
@@ -1100,21 +1182,16 @@ function createWindowsPhysicalPlans(options = {}) {
       profileRows: profile.migrationRows,
       config,
       runMarker: binding.runMarker,
-      localBinding: {
-        host: LOOPBACK_HOST,
-        port: String(binding.target.port),
-        database,
-        login: MIGRATION_LOGIN,
-        runMarker: binding.runMarker
-      },
+      localBinding: transport.localBinding,
       pool: databaseManager.getPools(database).provisioner,
-      runTool,
+      runTool: transport.runTool,
       generatedAt: new Date().toISOString()
     };
     return Object.freeze({ request, config, profile });
   }
 
   function restoreRequest(sourcePlan, targetDatabase, expectedProfile) {
+    const transport = requireBackupTransport(targetDatabase);
     const env = connectionEnvironment(
       "SOCIAL_RESTORE",
       targetDatabase,
@@ -1131,15 +1208,9 @@ function createWindowsPhysicalPlans(options = {}) {
       approval: LOCAL_PHYSICAL_APPROVAL,
       expectedProfile,
       config,
-      localBinding: {
-        host: LOOPBACK_HOST,
-        port: String(binding.target.port),
-        database: targetDatabase,
-        login: MIGRATION_LOGIN,
-        runMarker: binding.runMarker
-      },
+      localBinding: transport.localBinding,
       pool: databaseManager.getPools(targetDatabase).provisioner,
-      runTool,
+      runTool: transport.runTool,
       verifierTargetFingerprint: config.targetFingerprint,
       verifyRuntimeIsolation: behavior.verifyRuntimeIsolation,
       verifyVault: behavior.verifyVault,
@@ -1200,6 +1271,7 @@ function createWindowsPhysicalPlans(options = {}) {
       assertDisposable0003Created: (proof) => databaseManager.assertCreated(exactProof(proof, restoreIdentity)),
       async restore0003(proof) {
         exactProof(proof, restoreIdentity);
+        const transport = requireBackupTransport(names.rollbackRestore);
         const env = connectionEnvironment("SOCIAL_RESTORE", names.rollbackRestore, sourcePlan.config.label, sourcePlan.config.files.bundle);
         env.SOCIAL_RESTORE_SOURCE_FINGERPRINT = sourcePlan.config.sourceFingerprint;
         restoreConfig = backup.loadRestoreConfig(env, { repositoryRoot: options.repositoryRoot });
@@ -1208,7 +1280,7 @@ function createWindowsPhysicalPlans(options = {}) {
           const result = await backup.runLogicalRestore({
             config: restoreConfig,
             operator: backup.createPostgresBackupOperator(databaseManager.getPools(names.rollbackRestore).provisioner),
-            runTool,
+            runTool: (plan) => transport.runTool(plan, transport.localBinding),
             verifierTargetFingerprint: restoreConfig.targetFingerprint,
             verifyRuntimeIsolation: behavior.verifyRuntimeIsolation,
             verifyVault: behavior.verifyVault,
@@ -1352,6 +1424,10 @@ function createWindowsPhysicalPlans(options = {}) {
 
 module.exports = {
   ADMIN_LOGIN,
+  BACKUP_CONNECTIVITY_MODE,
+  BACKUP_LOGICAL_HOST,
+  BACKUP_LOGICAL_PORT,
+  BACKUP_PHYSICAL_MODE,
   LOCAL_DATABASE,
   LOOPBACK_HOST,
   MIGRATION_LOGIN,

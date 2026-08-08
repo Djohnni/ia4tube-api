@@ -1,6 +1,8 @@
 "use strict";
 
 const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const os = require("node:os");
 const path = require("node:path");
 const test = require("node:test");
 const {
@@ -78,6 +80,259 @@ function runnerFixture() {
   });
   return { calls, runner };
 }
+
+function backupTransportFixture(options = {}) {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ia4tube-social-backup-transport-test-"));
+  const ownedRoot = path.join(root, "owned");
+  fs.mkdirSync(ownedRoot);
+  if (options.precreateBackupDirectory !== false) {
+    fs.mkdirSync(path.join(ownedRoot, "backups"));
+  }
+  const productBackup = require("../src/persistence/postgres/backup-restore");
+  const configLoads = [];
+  const restoreConfigLoads = [];
+  const runToolCalls = [];
+  const pgDumpStarts = [];
+  const processStarts = [];
+  const databaseManager = {
+    isAllowedDatabase() { return true; },
+    getPools() { return { provisioner: {} }; },
+    async create(identity) { return Object.freeze({ ...identity, created: true }); },
+    async applyProfile() { return true; },
+    async cleanupAll() {}
+  };
+  const backup = {
+    ...productBackup,
+    loadBackupConfig(environment, loadOptions) {
+      const source = new URL(environment.SOCIAL_BACKUP_SOURCE_DATABASE_URL);
+      const operator = new URL(environment.SOCIAL_BACKUP_OPERATOR_PROVISIONER_DATABASE_URL);
+      const event = {
+        sourceHost: source.hostname,
+        sourcePort: source.port,
+        sourceSslmode: source.searchParams.get("sslmode"),
+        sourceExpectedHost: environment.SOCIAL_BACKUP_SOURCE_EXPECTED_HOST,
+        operatorHost: operator.hostname,
+        operatorPort: operator.port,
+        operatorSslmode: operator.searchParams.get("sslmode"),
+        operatorExpectedHost: environment.SOCIAL_BACKUP_OPERATOR_EXPECTED_HOST
+      };
+      configLoads.push(event);
+      try {
+        const config = productBackup.loadBackupConfig(environment, loadOptions);
+        event.postgresTlsServername = config.postgresTls.servername;
+        return config;
+      } finally {
+        Object.freeze(event);
+      }
+    },
+    loadRestoreConfig(environment, loadOptions) {
+      const target = new URL(environment.SOCIAL_RESTORE_TARGET_DATABASE_URL);
+      const operator = new URL(environment.SOCIAL_RESTORE_OPERATOR_PROVISIONER_DATABASE_URL);
+      const event = {
+        targetHost: target.hostname,
+        targetPort: target.port,
+        targetSslmode: target.searchParams.get("sslmode"),
+        targetExpectedHost: environment.SOCIAL_RESTORE_TARGET_EXPECTED_HOST,
+        operatorHost: operator.hostname,
+        operatorPort: operator.port,
+        operatorSslmode: operator.searchParams.get("sslmode"),
+        operatorExpectedHost: environment.SOCIAL_RESTORE_OPERATOR_EXPECTED_HOST
+      };
+      restoreConfigLoads.push(event);
+      let placeholderCreated = false;
+      try {
+        if (!fs.existsSync(environment.SOCIAL_RESTORE_BUNDLE)) {
+          fs.writeFileSync(environment.SOCIAL_RESTORE_BUNDLE, "", { flag: "wx", mode: 0o600 });
+          placeholderCreated = true;
+        }
+        const config = productBackup.loadRestoreConfig(environment, loadOptions);
+        event.postgresTlsServername = config.postgresTls.servername;
+        return config;
+      } finally {
+        Object.freeze(event);
+        if (placeholderCreated) fs.unlinkSync(environment.SOCIAL_RESTORE_BUNDLE);
+      }
+    }
+  };
+  const executables = Object.freeze({
+    psql: path.join(ownedRoot, "pgsql", "bin", "psql.exe"),
+    pgDump: path.join(ownedRoot, "pgsql", "bin", "pg_dump.exe"),
+    pgRestore: path.join(ownedRoot, "pgsql", "bin", "pg_restore.exe")
+  });
+  const plans = createWindowsPhysicalPlans({
+    approval: LOCAL_PHYSICAL_APPROVAL,
+    runMarker: RUN_MARKER,
+    target: { host: "127.0.0.1", port: 5432 },
+    state: {
+      target: { host: "127.0.0.1", port: 5432 },
+      environmentId: "00000000-0000-4000-8000-000000000001",
+      materials: {
+        provisioner: Buffer.from("p".repeat(48)),
+        migration: Buffer.from("m".repeat(48)),
+        runtime: Buffer.from("r".repeat(48))
+      }
+    },
+    paths: { ownedRoot },
+    executables,
+    processRunner: {
+      async run(specification) {
+        processStarts.push(specification);
+        return { exitCode: 0, stdoutSanitized: "", stderrSanitized: "" };
+      }
+    },
+    PoolClass: class {},
+    repositoryRoot: path.resolve(__dirname, ".."),
+    randomBytes: (size) => Buffer.alloc(size, 7),
+    dependencies: {
+      backup,
+      databaseManager,
+      async runTool(plan) {
+        runToolCalls.push(plan);
+        if (path.basename(String(plan?.executable || "")).toLowerCase().startsWith("pg_dump")) {
+          pgDumpStarts.push(plan);
+        }
+        return { code: 0, stdout: "", stderr: "" };
+      },
+      ...(options.dependencies || {})
+    },
+    ...(options.planOptions || {})
+  });
+  return Object.freeze({
+    configLoads,
+    executables,
+    ownedRoot,
+    pgDumpStarts,
+    plans,
+    processStarts,
+    restoreConfigLoads,
+    root,
+    runToolCalls
+  });
+}
+
+async function destroyBackupTransportFixture(fixture) {
+  try {
+    await fixture.plans.destroy();
+  } finally {
+    fs.rmSync(fixture.root, { recursive: true, force: true });
+  }
+}
+
+test("current backup chain rejects loopback verify-full in loadBackupConfig before pg_dump", async () => {
+  const fixture = backupTransportFixture();
+  try {
+    const rollback = await fixture.plans.createRollbackAdapter();
+    await assert.rejects(
+      rollback.backup0003(),
+      { code: "social_database_tls_hostname_invalid" }
+    );
+    assert.deepEqual(fixture.configLoads, [{
+      sourceHost: "127.0.0.1",
+      sourcePort: "5432",
+      sourceSslmode: "verify-full",
+      sourceExpectedHost: "127.0.0.1",
+      operatorHost: "127.0.0.1",
+      operatorPort: "5432",
+      operatorSslmode: "verify-full",
+      operatorExpectedHost: "127.0.0.1"
+    }]);
+    assert.equal(fixture.runToolCalls.length, 0);
+    assert.equal(fixture.pgDumpStarts.length, 0);
+    assert.equal(fixture.processStarts.length, 0);
+  } finally {
+    await destroyBackupTransportFixture(fixture);
+  }
+});
+
+test("backup plans require the fixed logical TLS identity and its bound internal-container transport", async () => {
+  const logicalHost = "backup.local.ia4tube.invalid";
+  const connectivityMode = "logical_dns_to_internal_container_v1";
+  const bridgeCalls = [];
+  const boundRunTools = new Map();
+  const fixture = backupTransportFixture({
+    precreateBackupDirectory: false,
+    dependencies: {
+      createBackupTransportBridge(contract) {
+        bridgeCalls.push(Object.freeze({ ...contract }));
+        assert.deepEqual(Object.keys(contract).sort(), [
+          "database", "login", "runMarker", "targetFingerprint"
+        ]);
+        assert.equal(contract.login, MIGRATION_LOGIN);
+        assert.equal(contract.runMarker, RUN_MARKER);
+        assert.equal(Object.hasOwn(contract, "physicalHost"), false);
+        const runTool = async () => ({ code: 0, stdout: "", stderr: "" });
+        boundRunTools.set(contract.database, runTool);
+        return Object.freeze({
+          localBinding: Object.freeze({
+            connectivityMode,
+            logicalHost,
+            logicalPort: 5432,
+            physicalMode: "internal_container_loopback",
+            physicalHost: "127.0.0.1",
+            physicalPort: 5432,
+            database: contract.database,
+            login: contract.login,
+            runMarker: contract.runMarker,
+            targetFingerprint: contract.targetFingerprint,
+            containerIdentityDigest: "c".repeat(64)
+          }),
+          runTool
+        });
+      }
+    }
+  });
+  try {
+    const prepared = await fixture.plans.prepareBackupRestore();
+    assert.equal(bridgeCalls.length, 4);
+    assert.equal(fixture.configLoads.length, 2);
+    assert.equal(fixture.restoreConfigLoads.length, 2);
+    for (const load of fixture.configLoads) {
+      assert.equal(load.sourceHost, logicalHost);
+      assert.equal(load.sourcePort, "5432");
+      assert.equal(load.sourceSslmode, "verify-full");
+      assert.equal(load.sourceExpectedHost, logicalHost);
+      assert.equal(load.operatorHost, logicalHost);
+      assert.equal(load.operatorPort, "5432");
+      assert.equal(load.operatorSslmode, "verify-full");
+      assert.equal(load.operatorExpectedHost, logicalHost);
+      assert.equal(load.postgresTlsServername, logicalHost);
+    }
+    for (const load of fixture.restoreConfigLoads) {
+      assert.equal(load.targetHost, logicalHost);
+      assert.equal(load.targetPort, "5432");
+      assert.equal(load.targetSslmode, "verify-full");
+      assert.equal(load.targetExpectedHost, logicalHost);
+      assert.equal(load.operatorHost, logicalHost);
+      assert.equal(load.operatorPort, "5432");
+      assert.equal(load.operatorSslmode, "verify-full");
+      assert.equal(load.operatorExpectedHost, logicalHost);
+      assert.equal(load.postgresTlsServername, logicalHost);
+    }
+    for (const request of [
+      prepared.backup0003,
+      prepared.restore0003,
+      prepared.backup0004,
+      prepared.restore0004
+    ]) {
+      assert.equal(request.localBinding.connectivityMode, connectivityMode);
+      assert.equal(request.localBinding.logicalHost, logicalHost);
+      assert.equal(request.localBinding.logicalPort, 5432);
+      assert.equal(request.localBinding.physicalMode, "internal_container_loopback");
+      assert.equal(request.localBinding.physicalHost, "127.0.0.1");
+      assert.equal(request.localBinding.physicalPort, 5432);
+      assert.equal(request.localBinding.login, MIGRATION_LOGIN);
+      assert.equal(request.localBinding.runMarker, RUN_MARKER);
+      assert.match(request.localBinding.targetFingerprint, /^[0-9a-f]{64}$/);
+      assert.equal(request.localBinding.containerIdentityDigest, "c".repeat(64));
+      assert.equal(request.runTool, boundRunTools.get(request.localBinding.database));
+    }
+    assert.equal(fixture.runToolCalls.length, 0);
+    assert.equal(fixture.pgDumpStarts.length, 0);
+    assert.equal(fixture.processStarts.length, 0);
+  } finally {
+    await destroyBackupTransportFixture(fixture);
+  }
+});
 
 test("local tool adapter converts verify-full to ssl=off only after exact run binding", async () => {
   const { calls, runner } = runnerFixture();

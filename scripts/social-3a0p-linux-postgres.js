@@ -11,6 +11,10 @@ const IMAGE_DIGEST = "sha256:7e6103cf85f88f7a0eddb3ec0b1ba8940eba098ed118ade25a7
 const LOOPBACK = "127.0.0.1";
 const INTERNAL_PORT = 5432;
 const POSTGRES_CONNECTIVITY_MODE = "internal_bridge_direct_v1";
+const BACKUP_CONNECTIVITY_MODE = "logical_dns_to_internal_container_v1";
+const BACKUP_LOGICAL_HOST = "backup.local.ia4tube.invalid";
+const BACKUP_PHYSICAL_MODE = "internal_container_loopback";
+const BACKUP_APPLICATION_NAME = "ia4tube-social-backup-restore";
 const ADMIN_LOGIN = "ia4tube_social_local_admin";
 const PROVISIONER_LOGIN = "ia4tube_social_local_provisioner";
 const MIGRATION_LOGIN = "ia4tube_social_local_migration";
@@ -21,11 +25,26 @@ const MIGRATOR_ROLE = "ia4tube_social_migrator";
 const RUNTIME_ROLE = "ia4tube_social_runtime";
 const SAFE_RUN_ID = /^[a-z0-9][a-z0-9-]{2,63}$/;
 const SAFE_DATABASE = /^[a-z][a-z0-9_]{2,62}$/;
+const BACKUP_RUN_MARKER = /^ia4tube-social-3a0p-[a-z0-9-]{8,64}$/;
+const SHA256 = /^[0-9a-f]{64}$/;
 const SAFE_LOGIN = new Set([MIGRATION_LOGIN, PROVISIONER_LOGIN]);
 const CONTAINER_ID = /^[0-9a-f]{64}$/;
 const EMPTY_IDENTITY_HASH = "0".repeat(64);
 const IDENTITY_MARKER_FORMAT = "ia4tube-social-3a0p-resource-identity-v1";
 const INTERNAL_PORT_KEY = `${INTERNAL_PORT}/tcp`;
+const BACKUP_ENVIRONMENT_NAMES = new Set([
+  "SYSTEMROOT", "WINDIR", "TEMP", "TMP", "TMPDIR", "LANG", "LC_ALL",
+  "PGHOST", "PGPORT", "PGDATABASE", "PGUSER", "PGPASSWORD",
+  "PGCONNECT_TIMEOUT", "PGCHANNELBINDING", "PGSSLMODE", "PGSSLROOTCERT",
+  "SSL_CERT_FILE", "PGAPPNAME"
+]);
+const BACKUP_SYSTEM_ENVIRONMENT_NAMES = new Set([
+  "SYSTEMROOT", "WINDIR", "TEMP", "TMP", "TMPDIR", "LANG", "LC_ALL"
+]);
+const BACKUP_PSQL_ARGS = Object.freeze([
+  "--no-password", "--no-psqlrc", "--set=ON_ERROR_STOP=1",
+  "--set=VERBOSITY=terse", "--quiet", "--file=-"
+]);
 const DIAGNOSTIC_KEY_LIST = Object.freeze([
   "networkCreated", "networkInternal", "networkDriverClass",
   "containerCreated", "containerRunning", "containerNetworkCount",
@@ -725,6 +744,215 @@ function createLinuxPostgres(options = {}) {
   let networkId = "";
   let volumeCreated = false;
   let databaseHost = "";
+  const backupTransportAttemptedExecutables = new Set();
+  const backupTransportSucceededExecutables = new Set();
+  const issuedBackupTransportBindings = new WeakSet();
+  const expectedBackupRunMarker = `ia4tube-social-3a0p-linux-${crypto
+    .createHash("sha256")
+    .update(runId)
+    .digest("hex")
+    .slice(0, 16)}`;
+
+  function ownedBackupDatabase(database, runMarker) {
+    if (!SAFE_DATABASE.test(String(database || ""))) return false;
+    if (database === DATABASE) return true;
+    const suffix = crypto.createHash("sha256").update(runMarker).digest("hex").slice(0, 12);
+    return database.startsWith("ia4tube_social_disposable_") && database.endsWith(`_${suffix}`);
+  }
+
+  function backupTargetFingerprint(database) {
+    return crypto.createHash("sha256").update([
+      "ia4tube-social-backup-target-v2",
+      BACKUP_LOGICAL_HOST,
+      String(INTERNAL_PORT),
+      database,
+      "tls-verify-full"
+    ].join("/")).digest("hex");
+  }
+
+  function createBackupTransportBinding(contract) {
+    const keys = ["database", "login", "runMarker", "targetFingerprint"];
+    if (
+      !contract || Object.getPrototypeOf(contract) !== Object.prototype ||
+      JSON.stringify(Object.keys(contract).sort()) !== JSON.stringify(keys) ||
+      !started || !CONTAINER_ID.test(containerId) || !privateIpv4(databaseHost) ||
+      port !== INTERNAL_PORT ||
+      contract.runMarker !== expectedBackupRunMarker ||
+      !BACKUP_RUN_MARKER.test(contract.runMarker) ||
+      !ownedBackupDatabase(contract.database, contract.runMarker) ||
+      !SAFE_LOGIN.has(contract.login) ||
+      !SHA256.test(String(contract.targetFingerprint || "")) ||
+      contract.targetFingerprint !== backupTargetFingerprint(contract.database)
+    ) {
+      fail("linux_postgres_backup_transport_contract_invalid");
+    }
+    const localBinding = Object.freeze({
+      connectivityMode: BACKUP_CONNECTIVITY_MODE,
+      logicalHost: BACKUP_LOGICAL_HOST,
+      logicalPort: INTERNAL_PORT,
+      physicalMode: BACKUP_PHYSICAL_MODE,
+      physicalHost: LOOPBACK,
+      physicalPort: INTERNAL_PORT,
+      database: contract.database,
+      login: contract.login,
+      runMarker: contract.runMarker,
+      targetFingerprint: contract.targetFingerprint,
+      containerIdentityDigest: resourceIdentityHash(containerId)
+    });
+    issuedBackupTransportBindings.add(localBinding);
+    return localBinding;
+  }
+
+  function requireBackupTransportBinding(localBinding) {
+    const keys = [
+      "connectivityMode", "containerIdentityDigest", "database", "logicalHost",
+      "logicalPort", "login", "physicalHost", "physicalMode", "physicalPort",
+      "runMarker", "targetFingerprint"
+    ];
+    if (
+      !localBinding || Object.getPrototypeOf(localBinding) !== Object.prototype ||
+      !issuedBackupTransportBindings.has(localBinding) ||
+      JSON.stringify(Object.keys(localBinding).sort()) !== JSON.stringify(keys) ||
+      !Object.isFrozen(localBinding) ||
+      localBinding.connectivityMode !== BACKUP_CONNECTIVITY_MODE ||
+      localBinding.logicalHost !== BACKUP_LOGICAL_HOST ||
+      localBinding.logicalPort !== INTERNAL_PORT ||
+      localBinding.physicalMode !== BACKUP_PHYSICAL_MODE ||
+      localBinding.physicalHost !== LOOPBACK ||
+      localBinding.physicalPort !== INTERNAL_PORT ||
+      localBinding.runMarker !== expectedBackupRunMarker ||
+      !BACKUP_RUN_MARKER.test(localBinding.runMarker) ||
+      !ownedBackupDatabase(localBinding.database, localBinding.runMarker) ||
+      !SAFE_LOGIN.has(localBinding.login) ||
+      localBinding.targetFingerprint !== backupTargetFingerprint(localBinding.database) ||
+      localBinding.containerIdentityDigest !== resourceIdentityHash(containerId)
+    ) {
+      fail("linux_postgres_backup_transport_binding_invalid");
+    }
+    return localBinding;
+  }
+
+  function expectedBackupPassword(login) {
+    if (login === MIGRATION_LOGIN) return secretText(materials.migration);
+    if (login === PROVISIONER_LOGIN) return secretText(materials.provisioner);
+    fail("linux_postgres_backup_transport_login_invalid");
+  }
+
+  function exactToolExecutable(value) {
+    return new Set(["/usr/bin/psql", "/usr/bin/pg_dump", "/usr/bin/pg_restore"]).has(value)
+      ? value
+      : "";
+  }
+
+  function snapshotToolEnvironment(value) {
+    try {
+      if (!value || Object.getPrototypeOf(value) !== Object.prototype) return null;
+      const names = Reflect.ownKeys(value);
+      if (names.some((name) => typeof name !== "string")) return null;
+      const entries = [];
+      for (const name of names) {
+        const descriptor = Object.getOwnPropertyDescriptor(value, name);
+        if (!descriptor || descriptor.enumerable !== true) return null;
+        entries.push([name, value[name]]);
+      }
+      return Object.freeze(Object.fromEntries(entries));
+    } catch {
+      return null;
+    }
+  }
+
+  function exactArguments(actual, expected) {
+    return Array.isArray(actual) && actual.length === expected.length &&
+      actual.every((entry, index) => typeof entry === "string" && entry === expected[index]);
+  }
+
+  function validateBackupToolPlan(plan, localBinding) {
+    const binding = requireBackupTransportBinding(localBinding);
+    if (!plan || Object.getPrototypeOf(plan) !== Object.prototype) {
+      fail("linux_postgres_tool_plan_refused");
+    }
+    const executable = exactToolExecutable(plan.executable);
+    const environment = snapshotToolEnvironment(plan.env);
+    if (!environment) {
+      fail("linux_postgres_tool_plan_refused");
+    }
+    if (!executable) fail("linux_postgres_tool_command_refused");
+    const providedArgs = plan.args;
+    const args = Array.isArray(providedArgs)
+      ? Object.freeze([...providedArgs])
+      : providedArgs;
+    const input = plan.input;
+    const offlineCandidate = executable === "/usr/bin/pg_restore" &&
+      Array.isArray(args) && args[0] === "--list";
+    if (offlineCandidate) {
+      if (
+        args.length !== 2 ||
+        typeof args[1] !== "string" ||
+        path.resolve(args[1]) !== assertAbsoluteWithin(args[1], workDirectory, "linux_postgres_tool_offline_plan_refused") ||
+        Object.keys(environment).some((name) => !BACKUP_SYSTEM_ENVIRONMENT_NAMES.has(name)) ||
+        input !== undefined
+      ) {
+        fail("linux_postgres_tool_offline_plan_refused");
+      }
+      return Object.freeze({ args, binding, environment, executable, input, offline: true });
+    }
+    if (
+      environment.PGHOST !== BACKUP_LOGICAL_HOST ||
+      environment.PGPORT !== String(INTERNAL_PORT) ||
+      environment.PGDATABASE !== binding.database ||
+      environment.PGUSER !== binding.login ||
+      environment.PGPASSWORD !== expectedBackupPassword(binding.login) ||
+      environment.PGCONNECT_TIMEOUT !== "10" ||
+      environment.PGCHANNELBINDING !== "disable" ||
+      environment.PGSSLMODE !== "verify-full" ||
+      environment.PGSSLROOTCERT !== "system" ||
+      environment.PGAPPNAME !== BACKUP_APPLICATION_NAME ||
+      typeof environment.SSL_CERT_FILE !== "string" ||
+      path.resolve(environment.SSL_CERT_FILE) !== assertAbsoluteWithin(
+        environment.SSL_CERT_FILE,
+        workDirectory,
+        "linux_postgres_tool_transport_refused"
+      ) ||
+      Object.keys(environment).some((name) => !BACKUP_ENVIRONMENT_NAMES.has(name))
+    ) {
+      fail("linux_postgres_tool_transport_refused");
+    }
+    const dumpFile = Array.isArray(args) && typeof args[9] === "string" &&
+      args[9].startsWith("--file=") ? args[9].slice("--file=".length) : "";
+    const isPsql = executable === "/usr/bin/psql" &&
+      exactArguments(args, BACKUP_PSQL_ARGS) &&
+      (typeof input === "string" || Buffer.isBuffer(input));
+    const isDump = executable === "/usr/bin/pg_dump" &&
+      exactArguments(args, [
+        "--format=custom", "--compress=9", "--no-password",
+        `--role=${OWNER_ROLE}`, "--schema=ia4tube_social",
+        "--schema=ia4tube_social_admin", "--schema=ia4tube_migrations",
+        "--lock-wait-timeout=10000", "--schema-only", args?.[9]
+      ]) &&
+      typeof dumpFile === "string" && dumpFile !== "" &&
+      path.resolve(dumpFile) === assertAbsoluteWithin(
+        dumpFile,
+        workDirectory,
+        "linux_postgres_tool_command_refused"
+      ) && input === undefined;
+    const restoreArchive = Array.isArray(args) ? args[6] : undefined;
+    const isRestore = executable === "/usr/bin/pg_restore" &&
+      exactArguments(args, [
+        "--exit-on-error", "--single-transaction", "--no-password",
+        "--no-owner", `--role=${OWNER_ROLE}`,
+        `--dbname=${binding.database}`, restoreArchive
+      ]) &&
+      typeof restoreArchive === "string" &&
+      path.resolve(restoreArchive) === assertAbsoluteWithin(
+        restoreArchive,
+        workDirectory,
+        "linux_postgres_tool_command_refused"
+      ) && input === undefined;
+    if (!(isPsql || isDump || isRestore)) {
+      fail("linux_postgres_tool_command_refused");
+    }
+    return Object.freeze({ args, binding, environment, executable, input, offline: false });
+  }
 
   function readContainerIdentityMarker() {
     const absent = () => Object.freeze({
@@ -1284,22 +1512,14 @@ function createLinuxPostgres(options = {}) {
   }
 
   function createRunTool() {
-    return async (plan) => {
+    return async (plan, localBinding) => {
       if (!CONTAINER_ID.test(containerId)) fail("linux_postgres_container_id_invalid");
-      const executable = path.posix.basename(String(plan?.executable || ""));
-      if (!new Set(["psql", "pg_dump", "pg_restore"]).has(executable) || !Array.isArray(plan.args)) {
-        fail("linux_postgres_tool_plan_refused");
-      }
-      const environment = plan.env || {};
-      const offline = executable === "pg_restore" && plan.args[0] === "--list";
+      const validated = validateBackupToolPlan(plan, localBinding);
+      const executable = path.posix.basename(validated.executable);
+      const environment = validated.environment;
       const dockerArgs = ["exec", "--interactive", "--user", `${runnerUid}:${runnerGid}`];
       const childEnvironment = {};
-      if (!offline) {
-        if (
-          environment.PGHOST !== LOOPBACK || Number(environment.PGPORT) !== port ||
-          !SAFE_DATABASE.test(environment.PGDATABASE) || !SAFE_LOGIN.has(environment.PGUSER) ||
-          typeof environment.PGPASSWORD !== "string" || environment.PGPASSWORD.length < 43
-        ) fail("linux_postgres_tool_transport_refused");
+      if (!validated.offline) {
         Object.assign(childEnvironment, {
           PGPASSWORD: environment.PGPASSWORD,
           PGHOST: LOOPBACK,
@@ -1307,21 +1527,48 @@ function createLinuxPostgres(options = {}) {
           PGDATABASE: environment.PGDATABASE,
           PGUSER: environment.PGUSER,
           PGSSLMODE: "disable",
-          PGAPPNAME: "ia4tube-social-backup-restore"
+          PGCHANNELBINDING: "disable",
+          PGCONNECT_TIMEOUT: "10",
+          PGAPPNAME: BACKUP_APPLICATION_NAME
         });
         for (const name of Object.keys(childEnvironment)) dockerArgs.push("--env", name);
       }
-      dockerArgs.push(containerId, executable, ...plan.args);
-      const result = await docker(dockerArgs, {
-        allowFailure: true,
-        timeoutMs: 10 * 60_000,
-        environment: childEnvironment,
-        input: plan.input,
-        failureCode: "linux_postgres_tool_execution_failed"
-      });
-      childEnvironment.PGPASSWORD = "";
-      return Object.freeze({ code: result.code, stdout: result.stdout, stderr: result.stderr });
+      dockerArgs.push(containerId, executable, ...validated.args);
+      if (!validated.offline) backupTransportAttemptedExecutables.add(executable);
+      try {
+        const result = await docker(dockerArgs, {
+          allowFailure: true,
+          timeoutMs: 10 * 60_000,
+          environment: childEnvironment,
+          input: validated.input,
+          failureCode: "linux_postgres_tool_execution_failed"
+        });
+        if (result.code === 0 && result.signal === null && !validated.offline) {
+          backupTransportSucceededExecutables.add(executable);
+        }
+        return Object.freeze({ code: result.code, stdout: result.stdout, stderr: result.stderr });
+      } finally {
+        childEnvironment.PGPASSWORD = "";
+      }
     };
+  }
+
+  function backupTransportEvidence() {
+    const logicalValidated = backupTransportAttemptedExecutables.size > 0;
+    const complete = ["psql", "pg_dump", "pg_restore"].every((name) => (
+      backupTransportSucceededExecutables.has(name)
+    ));
+    return Object.freeze({
+      logicalIdentityTlsContractValidated: logicalValidated,
+      physicalDisposableTransportValidated: complete,
+      productionTlsPhysicallyTestedInThisGate: false,
+      productionTlsPreviouslyProvedBySocial2B: true,
+      localTlsDisabledOnlyInsideOwnedContainer: logicalValidated,
+      pgDumpStarted: backupTransportAttemptedExecutables.has("pg_dump"),
+      pgDumpSucceeded: backupTransportSucceededExecutables.has("pg_dump"),
+      pgRestoreStarted: backupTransportAttemptedExecutables.has("pg_restore"),
+      pgRestoreSucceeded: backupTransportSucceededExecutables.has("pg_restore")
+    });
   }
 
   async function sessionRows(adminPool) {
@@ -1606,8 +1853,10 @@ function createLinuxPostgres(options = {}) {
 
   return Object.freeze({
     adaptLogicalPoolOptions,
+    backupTransportEvidence,
     bootstrap,
     cleanup,
+    createBackupTransportBinding,
     createRunTool,
     get InstrumentedPool() { return InstrumentedPool; },
     get materials() { return materials; },
@@ -1627,6 +1876,9 @@ function createLinuxPostgres(options = {}) {
 
 module.exports = {
   ADMIN_LOGIN,
+  BACKUP_CONNECTIVITY_MODE,
+  BACKUP_LOGICAL_HOST,
+  BACKUP_PHYSICAL_MODE,
   DATABASE,
   IMAGE,
   IMAGE_DIGEST,
