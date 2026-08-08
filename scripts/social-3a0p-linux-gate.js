@@ -16,7 +16,8 @@ const {
   PROVISIONER_LOGIN,
   RUNTIME_LOGIN,
   commandRunner,
-  createLinuxPostgres
+  createLinuxPostgres,
+  postgresFailureDiagnostics
 } = require("./social-3a0p-linux-postgres");
 const {
   createRestoreBehaviorFacade,
@@ -1155,7 +1156,12 @@ function createPhaseRunner(evidence) {
     } catch (error) {
       const code = failureCode(error);
       evidence.firstFailure = { phase: name, code };
-      evidence.phases.push({ name, status: "failed", durationMs: Date.now() - started, code });
+      const failedPhase = { name, status: "failed", durationMs: Date.now() - started, code };
+      if (name === "postgres") {
+        const diagnostics = postgresFailureDiagnostics(error);
+        if (diagnostics) failedPhase.diagnostics = diagnostics;
+      }
+      evidence.phases.push(failedPhase);
       throw error;
     }
   };

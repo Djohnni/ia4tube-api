@@ -13,20 +13,21 @@ idêntico a `fcfc92419021dae5f77baad731c634b10c275c5b`: `src/`,
 `db/migrations/`, `server.js`, `package.json` e `package-lock.json` não são
 alterados.
 
-## Disparo único
+## Segundo e último disparo autorizado
 
-O único gatilho é um `push` que crie a branch exata e cujo commit tenha a
-mensagem integral:
+O único gatilho agora autorizado é o segundo `push` na branch exata, sem
+recriação, exclusão ou force, cujo commit tenha a mensagem integral:
 
 ```text
-[run-social-3a0p-linux-gate] add isolated Linux physical gates
+[run-social-3a0p-linux-gate] use verified structured loopback inspection
 ```
 
-O job exige `run_attempt == 1`, `before` nulo, criação de branch sem force,
-pai exato `36be098f926cc060ee89dff7874dab772a3ef22f` e diff estritamente allowlisted.
-Não há `workflow_dispatch`, pull request, agenda, matriz ou retry automático.
-A regra operacional permanece: nenhuma repetição manual, novo push ou recriação
-da branch depois da primeira execução.
+O job exige `run_attempt == 1`, `created == false`, `deleted == false`,
+`forced == false`, `before` e pai exatos
+`d80d351c599444dfca372db6071bda757e16dd64`, além de diff estritamente
+allowlisted. Não há `workflow_dispatch`, pull request, agenda, matriz ou retry
+automático. A regra operacional permanece: nenhuma repetição manual, terceiro
+push ou recriação da branch depois desta segunda execução.
 
 ## Supply chain fechada
 
@@ -52,11 +53,26 @@ publicada exclusivamente como `127.0.0.1:<porta-alta>:5432`.
 
 O PostgreSQL escuta na interface privada do contêiner para receber o DNAT da
 publicação Docker. Isso não é relatado como exposição externa. A prova
-autoritativa é feita no host com `docker port`, inspeção exata de
-`HostConfig.PortBindings` e `ss`: o vínculo Docker deve ser unicamente IPv4
-loopback e `ss` deve observar exatamente um listener em
-`127.0.0.1:<porta-alta>`. Ausência, duplicidade, wildcard, IPv4 externo ou
-qualquer bind IPv6 reprovam o gate.
+autoritativa não usa mais `docker port`. O ID completo retornado por
+`docker run --detach` é capturado e vinculado ao nome e ao label esperados.
+Uma única inspeção JSON desse ID usa `NetworkSettings.Ports["5432/tcp"]` como
+fonte da porta efetivamente publicada. A entrada correspondente em
+`HostConfig.PortBindings` serve somente como confirmação independente da
+solicitação original; ela não escolhe a porta nem substitui o estado publicado.
+As duas estruturas devem conter uma única associação, exclusivamente em
+`127.0.0.1:<porta-alta>`, para a porta interna `5432/tcp`.
+
+O probe `ss` é apenas uma prova negativa de exposição. Wildcard, IPv4 externo,
+IPv6, duplicidade ou associação ambígua reprovam o gate. Zero linhas para a
+porta é aceitável quando a inspeção estruturada acima foi aprovada e uma conexão
+real iniciada no host para `127.0.0.1:<porta-alta>` também foi aprovada; portanto
+o sucesso não depende de uma representação específica do proxy Docker em `ss`.
+
+Na primeira execução Linux, o antigo comando `docker port` terminou com o código
+sanitizado `linux_postgres_port_inspect_failed`. A causa física permanece
+indeterminada: aquela evidência não preservou o status detalhado, `stderr`, ID do
+contêiner ou bindings estruturados, e o cleanup com zero resíduos não permite
+reconstruir retrospectivamente qual dessas condições ocorreu.
 
 O cluster exige PostgreSQL 18.4, `C`, UTF8, SCRAM-SHA-256 e data checksums. A
 senha administrativa é sintética, nasce durante o job e fica somente em memória

@@ -15,14 +15,14 @@
     "cancel-in-progress": false
   },
   "env": {
-    "SOCIAL_3A0P_AUTHORIZED_PARENT": "36be098f926cc060ee89dff7874dab772a3ef22f",
+    "SOCIAL_3A0P_AUTHORIZED_PARENT": "d80d351c599444dfca372db6071bda757e16dd64",
     "SOCIAL_3A0P_PRODUCT_COMMIT": "fcfc92419021dae5f77baad731c634b10c275c5b",
-    "SOCIAL_3A0P_AUTHORIZED_MESSAGE": "[run-social-3a0p-linux-gate] add isolated Linux physical gates",
+    "SOCIAL_3A0P_AUTHORIZED_MESSAGE": "[run-social-3a0p-linux-gate] use verified structured loopback inspection",
     "SOCIAL_3A0P_POSTGRES_IMAGE": "docker.io/library/postgres:18.4-bookworm@sha256:7e6103cf85f88f7a0eddb3ec0b1ba8940eba098ed118ade25a729ca9daee5568"
   },
   "jobs": {
     "physical-gates": {
-      "if": "github.event_name == 'push' && github.ref == 'refs/heads/social/checkpoint-3a0p-linux-physical-gates-20260807' && github.event.created == true && github.event.deleted == false && github.event.forced == false && github.event.before == '0000000000000000000000000000000000000000' && github.event.head_commit.message == '[run-social-3a0p-linux-gate] add isolated Linux physical gates' && github.run_attempt == 1",
+      "if": "github.event_name == 'push' && github.ref == 'refs/heads/social/checkpoint-3a0p-linux-physical-gates-20260807' && github.event.created == false && github.event.deleted == false && github.event.forced == false && github.event.before == 'd80d351c599444dfca372db6071bda757e16dd64' && github.event.head_commit.message == '[run-social-3a0p-linux-gate] use verified structured loopback inspection' && github.run_attempt == 1",
       "runs-on": "ubuntu-24.04",
       "timeout-minutes": 60,
       "defaults": {

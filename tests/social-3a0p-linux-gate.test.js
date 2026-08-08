@@ -7,6 +7,7 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const test = require("node:test");
+const { LinuxPostgresFailure } = require("../scripts/social-3a0p-linux-postgres");
 const { Pool: PgPool } = require("pg");
 const {
   canonicalJson,
@@ -76,6 +77,67 @@ test("first failed phase prevents every later gate", async () => {
   await assert.rejects(phase("bootstrap", async () => { calls.push("forbidden"); }));
   assert.deepEqual(calls, ["durability", "postgres"]);
   assert.deepEqual(evidence.firstFailure, { phase: "postgres", code: "synthetic_first_failure" });
+});
+
+test("postgres failure evidence preserves only the closed sanitized diagnostics", async () => {
+  const evidence = { phases: [], firstFailure: null };
+  const phase = createPhaseRunner(evidence);
+  const diagnostic = {
+    dockerRunCompleted: true,
+    containerIdPresent: true,
+    containerIdMatched: true,
+    containerRunning: true,
+    inspectCompleted: true,
+    networkSettingsPortsPresent: true,
+    internalPortEntryPresent: true,
+    bindingCount: 1,
+    hostIpClass: "loopback_ipv4",
+    hostPortPresent: true,
+    hostPortNumeric: true,
+    externalBindingDetected: false,
+    loopbackConnectionPassed: false,
+    failureStage: "loopback_connection",
+    exitCodeClass: "zero",
+    signalPresent: false,
+    stdoutPresent: true,
+    stderrPresent: false,
+    rawStdout: "forbidden",
+    rawInspect: { Id: "forbidden" },
+    message: "forbidden"
+  };
+  await assert.rejects(
+    phase("postgres", async () => {
+      throw new LinuxPostgresFailure("linux_postgres_loopback_connection_failed", diagnostic);
+    }),
+    { code: "linux_postgres_loopback_connection_failed" }
+  );
+  assert.deepEqual(evidence.firstFailure, {
+    phase: "postgres",
+    code: "linux_postgres_loopback_connection_failed"
+  });
+  assert.equal(evidence.phases.length, 1);
+  assert.deepEqual(Object.keys(evidence.phases[0].diagnostics).sort(), [
+    "dockerRunCompleted", "containerIdPresent", "containerIdMatched",
+    "containerRunning", "inspectCompleted", "networkSettingsPortsPresent",
+    "internalPortEntryPresent", "bindingCount", "hostIpClass",
+    "hostPortPresent", "hostPortNumeric", "externalBindingDetected",
+    "loopbackConnectionPassed", "failureStage", "exitCodeClass",
+    "signalPresent", "stdoutPresent", "stderrPresent"
+  ].sort());
+  const serialized = JSON.stringify(evidence);
+  assert.equal(serialized.includes("forbidden"), false);
+  assert.equal(serialized.includes("rawStdout"), false);
+  assert.equal(serialized.includes("rawInspect"), false);
+  assert.equal(evidenceSafe(evidence), true);
+
+  const forged = { phases: [], firstFailure: null };
+  await assert.rejects(createPhaseRunner(forged)("postgres", async () => {
+    const error = new Error("synthetic");
+    error.code = "linux_postgres_container_inspect_failed";
+    error.linuxPostgresDiagnostic = diagnostic;
+    throw error;
+  }));
+  assert.equal(Object.hasOwn(forged.phases[0], "diagnostics"), false);
 });
 
 test("bootstrap evidence excludes pools and password-bearing configuration", () => {
