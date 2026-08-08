@@ -56,8 +56,31 @@ test("harness scope rejects path traversal and absolute paths", () => {
   }
 });
 
-test("surgical loopback test change is the sole non-prefixed exception", () => {
+test("surgical loopback test change remains confined to its exact path", () => {
   assert.equal(isHarnessOnlyFile("tests/social-postgres-real.test.js"), true);
   assert.equal(isHarnessOnlyFile("tests/other-existing.test.js"), false);
   assert.equal(isHarnessOnlyFile("scripts/run-real-postgres-tests.js"), false);
+});
+
+test("the exact Linux physical-gate workflow is the sole workflow exception", () => {
+  const workflow = ".github/workflows/social-3a0p-linux-physical-gates.yml";
+  assert.equal(isHarnessOnlyFile(workflow), true);
+  assert.deepEqual(assertHarnessOnlyChangedFiles([workflow]), {
+    harnessOnly: true,
+    changedFileCount: 1
+  });
+
+  for (const file of [
+    ".github/workflows/",
+    ".github/workflows/*",
+    ".github/workflows/other.yml",
+    ".github/workflows/social-3a0p-linux-physical-gates.yaml",
+    ".github/workflows/social-3a0p-linux-physical-gates.yml/other",
+    ".github/workflows/SOCIAL-3A0P-LINUX-PHYSICAL-GATES.YML"
+  ]) {
+    assert.equal(isHarnessOnlyFile(file), false);
+    assert.throws(() => assertHarnessOnlyChangedFiles([file]), {
+      code: "harness_scope_product_change_refused"
+    });
+  }
 });

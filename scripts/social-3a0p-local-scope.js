@@ -3,6 +3,7 @@
 const path = require("node:path");
 
 const ALLOWED_EXACT_FILES = new Set([
+  ".github/workflows/social-3a0p-linux-physical-gates.yml",
   "tests/social-postgres-real.test.js"
 ]);
 const ALLOWED_PREFIXES = Object.freeze([

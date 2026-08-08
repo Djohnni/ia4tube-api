@@ -1,0 +1,933 @@
+"use strict";
+
+const assert = require("node:assert/strict");
+const crypto = require("node:crypto");
+const { EventEmitter } = require("node:events");
+const fs = require("node:fs");
+const os = require("node:os");
+const path = require("node:path");
+const test = require("node:test");
+const { Pool: PgPool } = require("pg");
+const {
+  canonicalJson,
+  containsMarkerInTree,
+  createDrainAwareRunTool,
+  createGate1MigrationPoolLifecycle,
+  createLinuxProfile0003PlansFacade,
+  createLinuxRestoreConfigFacade,
+  createPhaseRunner,
+  createPhysicalPoolDrainTracker,
+  createRoleScopedPlanPoolClass,
+  evidenceSafe,
+  failureCode,
+  isLinuxRestoreDatabase,
+  isRestoreEmptyTargetInventoryQuery,
+  migrationEvidence,
+  prepareLinuxRestoreTarget,
+  publicBootstrapEvidence,
+  publicPlatformEvidence,
+  retirePrimaryPoolsBeforeBackup,
+  sanitizedFailureEvidence
+} = require("../scripts/social-3a0p-linux-gate");
+
+const ROOT = path.resolve(__dirname, "..");
+
+test("canonical evidence JSON is stable and key ordered", () => {
+  assert.equal(canonicalJson({ z: 1, a: { y: true, b: false } }), '{"a":{"b":false,"y":true},"z":1}');
+});
+
+test("evidence contract refuses secrets, URLs and sensitive key names", () => {
+  assert.equal(evidenceSafe({ ok: true, sha256: "a".repeat(64) }), true);
+  assert.equal(evidenceSafe({ databaseUrl: "redacted" }), false);
+  assert.equal(evidenceSafe({ value: "postgresql://user:pass@host/db" }), false);
+  assert.equal(evidenceSafe({ value: "-----BEGIN PRIVATE KEY-----" }), false);
+  assert.equal(evidenceSafe({ value: "eyJabcdefghijk.abcdefghijk.abcdefghijk" }), false);
+});
+
+test("unsafe evidence is replaced by a minimal sanitized failure", () => {
+  const fallback = sanitizedFailureEvidence({
+    firstFailure: { phase: "vault", code: "linux_gate_vault_failed" },
+    cleanupFailure: null,
+    cleanup: {
+      cleanupCompleted: true,
+      containerResiduals: 0,
+      volumeResiduals: 0,
+      networkResiduals: 0,
+      listenerResiduals: 0,
+      temporaryRootResiduals: 0
+    },
+    databaseUrl: "postgresql://synthetic:unsafe@invalid/db"
+  });
+  assert.equal(fallback.status, "failed");
+  assert.deepEqual(fallback.firstFailure, { phase: "vault", code: "linux_gate_vault_failed" });
+  assert.equal(fallback.sanitizationFailure, true);
+  assert.equal(Object.hasOwn(fallback, "databaseUrl"), false);
+  assert.equal(evidenceSafe(fallback), true);
+});
+
+test("first failed phase prevents every later gate", async () => {
+  const evidence = { phases: [], firstFailure: null };
+  const phase = createPhaseRunner(evidence);
+  const calls = [];
+  await phase("durability", async () => { calls.push("durability"); return { ok: true }; });
+  await assert.rejects(
+    phase("postgres", async () => { calls.push("postgres"); const error = new Error("failed"); error.code = "synthetic_first_failure"; throw error; })
+  );
+  await assert.rejects(phase("bootstrap", async () => { calls.push("forbidden"); }));
+  assert.deepEqual(calls, ["durability", "postgres"]);
+  assert.deepEqual(evidence.firstFailure, { phase: "postgres", code: "synthetic_first_failure" });
+});
+
+test("bootstrap evidence excludes pools and password-bearing configuration", () => {
+  const raw = {
+    checks: {
+      roleBootstrapIdempotent: true,
+      runtimePoolMax3: true,
+      runtimePoolConfiguredMax: 3,
+      syntheticCredentialsOnly: true
+    },
+    pools: { runtime: { options: { password: "synthetic-sensitive" } } }
+  };
+  const result = publicBootstrapEvidence(raw);
+  assert.deepEqual(result, raw.checks);
+  assert.equal(Object.hasOwn(result, "pools"), false);
+  assert.equal(evidenceSafe(result), true);
+});
+
+test("platform evidence normalizes the hosted runner ext filesystem name", async () => {
+  let call = 0;
+  const result = await publicPlatformEvidence(path.resolve(os.tmpdir()), async () => {
+    call += 1;
+    return { code: 0, signal: null, stdout: call === 1 ? "ext2/ext3\n" : "11.6.0\n", stderr: "" };
+  });
+  assert.equal(result.filesystem, "ext2-ext3");
+  assert.equal(result.runner, "ubuntu-24.04");
+});
+
+test("Linux restore targets are exact and source databases never match", () => {
+  assert.equal(isLinuxRestoreDatabase("ia4tube_social_disposable_restore_0003_012345abcdef"), true);
+  assert.equal(isLinuxRestoreDatabase("ia4tube_social_disposable_restore_0004_012345abcdef"), true);
+  assert.equal(isLinuxRestoreDatabase("ia4tube_social_disposable_rollback_0003_012345abcdef"), true);
+  assert.equal(isLinuxRestoreDatabase("ia4tube_social_disposable_tamper_012345abcdef"), true);
+  assert.equal(isLinuxRestoreDatabase("ia4tube_social_disposable_cross_012345abcdef"), true);
+  assert.equal(isLinuxRestoreDatabase("ia4tube_social_disposable_source_0003_012345abcdef"), false);
+  assert.equal(isLinuxRestoreDatabase("ia4tube_social_disposable_rollback_source_012345abcdef"), false);
+  assert.equal(isLinuxRestoreDatabase("ia4tube_social_local"), false);
+  assert.equal(isLinuxRestoreDatabase("ia4tube_social_disposable_restore_0003_012345abcdeg"), false);
+});
+
+test("restore target preparation removes only the three application schemas under temporary owner role", async () => {
+  const database = "ia4tube_social_disposable_restore_0003_012345abcdef";
+  const events = [];
+  let clusterReads = 0;
+  let inventoryReads = 0;
+  const query = async (text) => {
+    const normalized = String(text);
+    if (normalized === "BEGIN" || normalized === "COMMIT" || normalized === "ROLLBACK") {
+      events.push(normalized);
+      return { rows: [] };
+    }
+    if (normalized.includes("current_database()=$1")) {
+      events.push("identity");
+      return { rows: [{ database_exact: true, login_exact: true, owner_exact: true }] };
+    }
+    if (normalized.includes("cluster_snapshot")) {
+      clusterReads += 1;
+      events.push(`cluster${clusterReads}`);
+      return { rows: [{ role_count: 6, cluster_snapshot: "canonical-cluster-snapshot" }] };
+    }
+    if (normalized.includes("unexpected_schema_count")) {
+      inventoryReads += 1;
+      events.push(`inventory${inventoryReads}`);
+      return { rows: [inventoryReads === 1 ? {
+        application_schema_count: 1,
+        application_relation_count: 1,
+        environment_identity_count: 1,
+        unexpected_schema_count: 0,
+        unexpected_relation_count: 0,
+        unexpected_routine_count: 0,
+        unexpected_type_count: 0
+      } : {
+        application_schema_count: 0,
+        application_relation_count: 0,
+        environment_identity_count: 0,
+        unexpected_schema_count: 0,
+        unexpected_relation_count: 0,
+        unexpected_routine_count: 0,
+        unexpected_type_count: 0
+      }] };
+    }
+    if (normalized.startsWith("GRANT ia4tube_social_owner")) events.push("grant-owner");
+    else if (normalized === "SET LOCAL ROLE ia4tube_social_owner") events.push("set-owner");
+    else if (normalized.startsWith("DROP SCHEMA")) events.push(normalized);
+    else if (normalized === "RESET ROLE") events.push("reset-owner");
+    else if (normalized.startsWith("REVOKE ia4tube_social_owner")) events.push("revoke-owner");
+    else assert.fail(`unexpected query category: ${normalized.slice(0, 40)}`);
+    return { rows: [] };
+  };
+  assert.equal(await prepareLinuxRestoreTarget({ database, query }), true);
+  assert.deepEqual(events, [
+    "BEGIN",
+    "identity",
+    "cluster1",
+    "inventory1",
+    "grant-owner",
+    "set-owner",
+    'DROP SCHEMA IF EXISTS "ia4tube_social" CASCADE',
+    'DROP SCHEMA IF EXISTS "ia4tube_social_admin" CASCADE',
+    'DROP SCHEMA IF EXISTS "ia4tube_migrations" CASCADE',
+    "reset-owner",
+    "revoke-owner",
+    "cluster2",
+    "inventory2",
+    "COMMIT"
+  ]);
+  assert.equal(events.filter((event) => event === "grant-owner").length, 1);
+  assert.equal(events.filter((event) => event === "revoke-owner").length, 1);
+  assert.ok(events.indexOf("cluster2") > events.indexOf("revoke-owner"));
+  assert.equal(events.filter((event) => String(event).startsWith("DROP SCHEMA")).length, 3);
+  assert.equal(events.includes("ROLLBACK"), false);
+});
+
+test("restore target preparation detects a residual owner membership and rolls back", async () => {
+  let clusterReads = 0;
+  const events = [];
+  const query = async (text) => {
+    const normalized = String(text);
+    events.push(normalized);
+    if (normalized.includes("current_database()=$1")) {
+      return { rows: [{ database_exact: true, login_exact: true, owner_exact: true }] };
+    }
+    if (normalized.includes("cluster_snapshot")) {
+      clusterReads += 1;
+      return { rows: [{
+        role_count: 6,
+        cluster_snapshot: clusterReads === 1 ? "canonical" : "residual-owner-membership"
+      }] };
+    }
+    if (normalized.includes("unexpected_schema_count")) {
+      return { rows: [{
+        application_schema_count: clusterReads === 1 ? 1 : 0,
+        application_relation_count: clusterReads === 1 ? 1 : 0,
+        environment_identity_count: clusterReads === 1 ? 1 : 0,
+        unexpected_schema_count: 0,
+        unexpected_relation_count: 0,
+        unexpected_routine_count: 0,
+        unexpected_type_count: 0
+      }] };
+    }
+    return { rows: [] };
+  };
+  await assert.rejects(
+    prepareLinuxRestoreTarget({
+      database: "ia4tube_social_disposable_restore_0003_012345abcdef",
+      query
+    }),
+    { code: "linux_gate_restore_cluster_identity_changed" }
+  );
+  assert.equal(events.filter((text) => text.startsWith("REVOKE ia4tube_social_owner")).length, 1);
+  assert.equal(events.at(-1), "ROLLBACK");
+});
+
+test("restore target preparation refuses unexpected objects before role grant or drop", async () => {
+  const events = [];
+  const query = async (text) => {
+    const normalized = String(text);
+    events.push(normalized);
+    if (normalized.includes("current_database()=$1")) {
+      return { rows: [{ database_exact: true, login_exact: true, owner_exact: true }] };
+    }
+    if (normalized.includes("cluster_snapshot")) {
+      return { rows: [{ role_count: 6, cluster_snapshot: "canonical" }] };
+    }
+    if (normalized.includes("unexpected_schema_count")) {
+      return { rows: [{
+        application_schema_count: 1,
+        application_relation_count: 1,
+        environment_identity_count: 1,
+        unexpected_schema_count: 0,
+        unexpected_relation_count: 1,
+        unexpected_routine_count: 0,
+        unexpected_type_count: 0
+      }] };
+    }
+    return { rows: [] };
+  };
+  await assert.rejects(
+    prepareLinuxRestoreTarget({
+      database: "ia4tube_social_disposable_restore_0003_012345abcdef",
+      query
+    }),
+    { code: "linux_gate_restore_target_unexpected_objects" }
+  );
+  assert.equal(events.some((text) => text.startsWith("GRANT ia4tube_social_owner")), false);
+  assert.equal(events.some((text) => text.startsWith("DROP SCHEMA")), false);
+  assert.equal(events.at(-1), "ROLLBACK");
+});
+
+test("restore inventory interception runs once only for an exact disposable target", async () => {
+  const inventory = [
+    "SELECT 0 AS application_schema_count,",
+    " 0 AS user_relation_count, 0 AS user_routine_count,",
+    " 0 AS standalone_user_type_count"
+  ].join("\n");
+  assert.equal(isRestoreEmptyTargetInventoryQuery(inventory), true);
+  const events = [];
+  class BasePool {
+    constructor(options) { this.options = options; }
+    async connect() {
+      return {
+        async query(text) { events.push(["raw", text]); return { rows: [] }; },
+        release() {}
+      };
+    }
+    async end() {}
+  }
+  const Pool = createRoleScopedPlanPoolClass(
+    BasePool,
+    async () => ({ rows: [] }),
+    null,
+    async ({ database }) => { events.push(["prepare", database]); return true; }
+  );
+  const target = new Pool({
+    database: "ia4tube_social_disposable_restore_0003_012345abcdef",
+    user: "ia4tube_social_local_provisioner"
+  });
+  const targetClient = await target.connect();
+  await targetClient.query(inventory);
+  await targetClient.query(inventory);
+  targetClient.release();
+  assert.equal(events.filter(([kind]) => kind === "prepare").length, 1);
+  assert.equal(events.filter(([kind]) => kind === "raw").length, 2);
+  const source = new Pool({
+    database: "ia4tube_social_disposable_source_0003_012345abcdef",
+    user: "ia4tube_social_local_provisioner"
+  });
+  const sourceClient = await source.connect();
+  await assert.rejects(sourceClient.query(inventory), { code: "linux_gate_restore_target_database_invalid" });
+  sourceClient.release();
+  await Pool.closeAll();
+});
+
+test("profile 0003 source fixture is seeded and verified with identical IDs after restore", async () => {
+  const events = [];
+  const databases = [];
+  let uuidCall = 0;
+  const uuids = [
+    "11111111-1111-4111-8111-111111111111",
+    "22222222-2222-4222-8222-222222222222"
+  ];
+  const basePlans = {
+    async prepareBackupRestore() {
+      return {
+        backup0003: { localBinding: { database: "ia4tube_social_disposable_source_0003_012345abcdef" } },
+        restore0003: {
+          localBinding: { database: "ia4tube_social_disposable_restore_0003_012345abcdef" },
+          async verifyRestoredProfile() { events.push("profile-verified"); return { id: "social-schema-0003" }; }
+        }
+      };
+    },
+    async destroy() {}
+  };
+  const adapter = createLinuxProfile0003PlansFacade({
+    plans: basePlans,
+    randomUUID() { return uuids[uuidCall++]; },
+    makeMigrationPool(database) {
+      databases.push(database);
+      return {
+        async query(text) {
+          if (String(text).startsWith("INSERT INTO")) events.push(String(text).split("(")[0]);
+          if (String(text).includes("tenant_companies")) {
+            const restored = database.includes("restore_0003");
+            return { rows: [{
+              companies: 1,
+              users: 1,
+              memberships: 1,
+              tenant_companies: restored ? 2 : 1,
+              tenant_users: restored ? 2 : 1,
+              tenant_memberships: restored ? 2 : 1
+            }] };
+          }
+          return { rows: [] };
+        },
+        async end() { events.push(`end:${database}`); }
+      };
+    },
+    async withTransactionImpl(pool, operation, options) {
+      assert.equal(options.role, "ia4tube_social_owner");
+      return operation(pool);
+    }
+  });
+  const plan = await adapter.plans.prepareBackupRestore();
+  assert.equal(events.filter((event) => String(event).startsWith("INSERT INTO")).length, 3);
+  assert.deepEqual(await plan.restore0003.verifyRestoredProfile(), { id: "social-schema-0003" });
+  assert.deepEqual(databases, [
+    "ia4tube_social_disposable_source_0003_012345abcdef",
+    "ia4tube_social_disposable_restore_0003_012345abcdef"
+  ]);
+  const evidence = adapter.evidence();
+  assert.equal(evidence.profile0003SyntheticFixtureRestored, true);
+  assert.equal(evidence.profile0003FixtureRows, 3);
+  assert.match(evidence.profile0003FixtureIdentitySha256, /^[0-9a-f]{64}$/);
+});
+
+test("physical-plan ledger reads assume only the canonical migrator role", async () => {
+  const calls = [];
+  class BasePool extends PgPool {
+    constructor(options) { super(options); }
+    connect(callback) {
+      const client = new EventEmitter();
+      client.query = (text, values, done) => {
+        const callbackImpl = typeof values === "function" ? values : done;
+        calls.push(["direct", text]);
+        const result = { rows: [] };
+        if (typeof callbackImpl === "function") {
+          callbackImpl(null, result);
+          return undefined;
+        }
+        return Promise.resolve(result);
+      };
+      client.release = (error) => { calls.push(["release", Boolean(error)]); };
+      if (typeof callback === "function") {
+        callback(null, client, client.release);
+        return undefined;
+      }
+      return Promise.resolve(client);
+    }
+    async end() { calls.push(["end", this.options.user]); }
+  }
+  const ScopedPool = createRoleScopedPlanPoolClass(BasePool, async (pool, operation, options) => {
+    calls.push(["role", pool.options.user, options.role]);
+    return operation({ async query(text, values) {
+      assert.notEqual(typeof values, "function");
+      calls.push(["scoped", text]);
+      return { rows: [{ version: "0001" }] };
+    } });
+  });
+  const migration = new ScopedPool({ user: "ia4tube_social_local_migration" });
+  const ledgerQuery = [
+    "SELECT version, checksum_sha256 AS checksum",
+    "FROM ia4tube_migrations.schema_migrations ORDER BY version"
+  ].join("\n");
+  assert.equal((await migration.query(ledgerQuery)).rows.length, 1);
+  await migration.query("SELECT 1");
+  assert.deepEqual(calls.map((entry) => entry[0]), ["role", "scoped", "direct", "release"]);
+  assert.equal(calls[0][2], "ia4tube_social_migrator");
+  await new Promise((resolve, reject) => migration.query("SELECT 2", (error, result) => {
+    if (error) return reject(error);
+    assert.deepEqual(result, { rows: [] });
+    resolve();
+  }));
+  await new Promise((resolve, reject) => migration.query(ledgerQuery, (error, result) => {
+    if (error) return reject(error);
+    assert.equal(result.rows.length, 1);
+    resolve();
+  }));
+  const runtime = new ScopedPool({ user: "ia4tube_social_local_runtime" });
+  const runtimeClient = await runtime.connect();
+  runtimeClient.release();
+  assert.deepEqual(calls.at(-1), ["release", true]);
+  await assert.rejects(
+    runtime.query(ledgerQuery),
+    { code: "linux_gate_ledger_login_invalid" }
+  );
+  for (const unsafeQuery of [
+    `DELETE FROM ia4tube_migrations.schema_migrations`,
+    `WITH rows AS (SELECT * FROM ia4tube_migrations.schema_migrations) SELECT * FROM rows`,
+    `${ledgerQuery}; SELECT 1`
+  ]) {
+    await runtime.query(unsafeQuery);
+  }
+  assert.equal(await ScopedPool.closeAll(), true);
+  assert.equal(calls.filter((entry) => entry[0] === "end").length, 2);
+});
+
+test("backup provisioner clients delegate only ledger reads to the scoped migrator", async () => {
+  const events = [];
+  class BasePool {
+    constructor(options) { this.options = options; }
+    async connect() {
+      return {
+        async query(text) { events.push(["provisioner", text]); return { rows: [] }; },
+        release(error) { events.push(["release", Boolean(error)]); }
+      };
+    }
+    async end() { events.push(["planEnd"]); }
+  }
+  const ScopedPool = createRoleScopedPlanPoolClass(
+    BasePool,
+    async (pool, operation, options) => {
+      events.push(["role", options.role]);
+      return operation({ async query(text, values) {
+        assert.notEqual(typeof values, "function");
+        events.push(["migration", text]);
+        return { rows: [{ version: "0001" }] };
+      } });
+    },
+    (database) => {
+      events.push(["makePool", database]);
+      return { async end() { events.push(["migrationEnd"]); } };
+    }
+  );
+  const provisioner = new ScopedPool({
+    database: "ia4tube_social_local_restore",
+    user: "ia4tube_social_local_provisioner"
+  });
+  const client = await provisioner.connect();
+  await client.query("SELECT current_database()");
+  await client.query([
+    "SELECT version, checksum_sha256 AS checksum",
+    "FROM ia4tube_migrations.schema_migrations ORDER BY version"
+  ].join("\n"));
+  client.release();
+  await ScopedPool.closeAll();
+  assert.deepEqual(events.map((entry) => entry[0]), [
+    "provisioner", "makePool", "role", "migration", "migrationEnd", "release", "planEnd"
+  ]);
+});
+
+test("restore configs validate a future owned bundle without leaving a placeholder", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ia4tube-linux-lazy-restore-"));
+  const backupDirectory = path.join(root, "backups");
+  fs.mkdirSync(backupDirectory);
+  const bundlePath = path.join(backupDirectory, "profile-0003-012345abcdef.ia4sb");
+  const events = [];
+  const facade = createLinuxRestoreConfigFacade({
+    backupDirectory,
+    backupProduct: {
+      constant: true,
+      loadRestoreConfig(environment) {
+        const stat = fs.lstatSync(environment.SOCIAL_RESTORE_BUNDLE);
+        events.push(["load", stat.isFile(), stat.size]);
+        return Object.freeze({ bundlePath: environment.SOCIAL_RESTORE_BUNDLE });
+      }
+    }
+  });
+  try {
+    assert.equal(facade.constant, true);
+    assert.equal(facade.loadRestoreConfig({ SOCIAL_RESTORE_BUNDLE: bundlePath }).bundlePath, bundlePath);
+    assert.deepEqual(events, [["load", true, 0]]);
+    assert.equal(fs.existsSync(bundlePath), false);
+    fs.writeFileSync(bundlePath, "real-bundle", { flag: "wx", mode: 0o600 });
+    facade.loadRestoreConfig({ SOCIAL_RESTORE_BUNDLE: bundlePath });
+    assert.equal(fs.readFileSync(bundlePath, "utf8"), "real-bundle");
+    assert.throws(() => facade.loadRestoreConfig({
+      SOCIAL_RESTORE_BUNDLE: path.join(backupDirectory, "rollback-0003-012345abcdef.ia4sb")
+    }), { code: "linux_gate_restore_bundle_placeholder_refused" });
+    assert.throws(() => facade.loadRestoreConfig({
+      SOCIAL_RESTORE_BUNDLE: path.join(root, "outside.ia4sb")
+    }), { code: "linux_gate_restore_bundle_path_invalid" });
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("physical pool drain waits for remove after end resolves and ends only once", async () => {
+  const events = [];
+  const client = {};
+  const pool = new EventEmitter();
+  pool._clients = [client];
+  let endCalls = 0;
+  pool.end = async () => {
+    endCalls += 1;
+    events.push("end-resolved");
+    pool._clients = [];
+    setTimeout(() => {
+      events.push("remove-emitted");
+      pool.emit("remove", client);
+    }, 5);
+  };
+  const drain = createPhysicalPoolDrainTracker(pool, { timeoutMs: 100 });
+  await drain.end(() => pool.end());
+  events.push("drain-complete");
+  await drain.end(() => pool.end());
+  assert.equal(endCalls, 1);
+  assert.deepEqual(events, ["end-resolved", "remove-emitted", "drain-complete"]);
+  assert.equal(pool.listenerCount("remove"), 0);
+});
+
+test("physical pool drain fails with only a sanitized code when remove never arrives", async () => {
+  const client = {};
+  const pool = new EventEmitter();
+  pool._clients = [client];
+  pool.end = async () => { pool._clients = []; };
+  const drain = createPhysicalPoolDrainTracker(pool, { timeoutMs: 5 });
+  await assert.rejects(
+    drain.end(() => pool.end()),
+    { code: "linux_gate_pool_physical_drain_timeout" }
+  );
+});
+
+test("physical pool drain times out a hung end without unhandled rejection or listeners", async () => {
+  const client = {};
+  const pool = new EventEmitter();
+  pool._clients = [client];
+  pool.end = () => new Promise(() => {});
+  const unhandled = [];
+  const onUnhandled = (error) => { unhandled.push(error); };
+  process.on("unhandledRejection", onUnhandled);
+  try {
+    const drain = createPhysicalPoolDrainTracker(pool, { timeoutMs: 5 });
+    await assert.rejects(
+      drain.end(() => pool.end()),
+      { code: "linux_gate_pool_physical_drain_timeout" }
+    );
+    await new Promise((resolve) => setTimeout(resolve, 15));
+    assert.equal(unhandled.length, 0);
+    for (const event of ["connect", "acquire", "release", "remove"]) {
+      assert.equal(pool.listenerCount(event), 0);
+    }
+  } finally {
+    process.removeListener("unhandledRejection", onUnhandled);
+  }
+});
+
+test("physical plan pools wait for delayed release removal before reopen and runTool", async () => {
+  const events = [];
+  let nextClient = 0;
+  let endCalls = 0;
+  class EarlyResolvingPool extends EventEmitter {
+    constructor(options) {
+      super();
+      this.options = options;
+      this._clients = [];
+    }
+    connect(callback) {
+      const id = ++nextClient;
+      const client = new EventEmitter();
+      client.query = async () => ({ rows: [] });
+      client.release = (error) => {
+        events.push(`release-${id}`);
+        this.emit("release", error, client);
+        this._clients = this._clients.filter((candidate) => candidate !== client);
+        setTimeout(() => {
+          events.push(`remove-${id}`);
+          this.emit("remove", client);
+        }, 5);
+      };
+      this._clients.push(client);
+      this.emit("connect", client);
+      this.emit("acquire", client);
+      events.push(`connect-${id}`);
+      if (typeof callback === "function") {
+        callback(null, client, client.release);
+        return undefined;
+      }
+      return Promise.resolve(client);
+    }
+    async end() {
+      endCalls += 1;
+      events.push("base-end-resolved");
+      const clients = this._clients.splice(0);
+      for (const [index, client] of clients.entries()) {
+        setTimeout(() => {
+          events.push(`remove-end-${index + 1}`);
+          this.emit("remove", client);
+        }, 5);
+      }
+    }
+  }
+  const ScopedPool = createRoleScopedPlanPoolClass(EarlyResolvingPool, async () => ({ rows: [] }));
+  const pool = new ScopedPool({ user: "ia4tube_social_local_migration" });
+
+  const first = await pool.connect();
+  first.release();
+  const second = await pool.connect();
+  assert.ok(events.indexOf("remove-1") < events.indexOf("connect-2"));
+  second.release();
+
+  const runTool = createDrainAwareRunTool(ScopedPool, async () => {
+    events.push("run-tool");
+    return true;
+  });
+  assert.equal(await runTool(), true);
+  assert.ok(events.indexOf("remove-2") < events.indexOf("run-tool"));
+
+  await pool.connect();
+  await pool.end();
+  events.push("scoped-end-complete");
+  assert.ok(events.indexOf("base-end-resolved") < events.indexOf("remove-end-1"));
+  assert.ok(events.indexOf("remove-end-1") < events.indexOf("scoped-end-complete"));
+  assert.equal(endCalls, 1);
+  assert.equal(await ScopedPool.closeAll(), true);
+  assert.equal(endCalls, 1);
+});
+
+test("a plan pool waits for pending removals from every database before connecting", async () => {
+  const events = [];
+  class CrossDatabasePool extends EventEmitter {
+    constructor(options) {
+      super();
+      this.options = options;
+      this._clients = [];
+    }
+    connect(callback) {
+      const label = this.options.database;
+      const client = new EventEmitter();
+      client.query = async () => ({ rows: [] });
+      client.release = (error) => {
+        events.push(`release-${label}`);
+        this.emit("release", error, client);
+        this._clients = this._clients.filter((candidate) => candidate !== client);
+        const delay = label === "database-a" ? 5 : label === "database-b" ? 15 : 1;
+        setTimeout(() => {
+          events.push(`remove-${label}`);
+          this.emit("remove", client);
+        }, delay);
+      };
+      this._clients.push(client);
+      this.emit("connect", client);
+      this.emit("acquire", client);
+      events.push(`connect-${label}`);
+      if (typeof callback === "function") {
+        callback(null, client, client.release);
+        return undefined;
+      }
+      return Promise.resolve(client);
+    }
+    async end() {}
+  }
+  const ScopedPool = createRoleScopedPlanPoolClass(CrossDatabasePool, async () => ({ rows: [] }));
+  const poolA = new ScopedPool({ database: "database-a", user: "ia4tube_social_local_migration" });
+  const poolB = new ScopedPool({ database: "database-b", user: "ia4tube_social_local_migration" });
+  const poolC = new ScopedPool({ database: "database-c", user: "ia4tube_social_local_migration" });
+
+  const clientA = await poolA.connect();
+  const clientB = await poolB.connect();
+  clientA.release();
+  clientB.release();
+  const clientC = await poolC.connect();
+  assert.ok(events.indexOf("remove-database-a") < events.indexOf("connect-database-c"));
+  assert.ok(events.indexOf("remove-database-b") < events.indexOf("connect-database-c"));
+  clientC.release();
+  await ScopedPool.awaitPendingRemovals();
+  await ScopedPool.closeAll();
+});
+
+test("backup phase retires both primary pools without double-ending them", async () => {
+  const events = [];
+  const migration = { async end() { events.push("migration-end"); } };
+  const runtime = { async end() { events.push("runtime-end"); } };
+  const state = { pools: Object.freeze({ migration, runtime }) };
+  assert.equal(await retirePrimaryPoolsBeforeBackup(state), true);
+  assert.equal(state.pools.migration.retired, true);
+  assert.equal(state.pools.runtime.retired, true);
+  await state.pools.migration.end();
+  await state.pools.runtime.end();
+  assert.deepEqual(events.sort(), ["migration-end", "runtime-end"]);
+});
+
+test("Gate 1 retires migration before rollback and recreates an exact max-2 pool", async () => {
+  const events = [];
+  let initialEnds = 0;
+  let replacementEnds = 0;
+  let runtimeEnds = 0;
+  const initialMigration = {
+    async end() {
+      initialEnds += 1;
+      events.push("initial-migration-end");
+    }
+  };
+  const runtime = {
+    async end() {
+      runtimeEnds += 1;
+      events.push("runtime-end");
+    }
+  };
+  const replacement = {
+    options: {
+      user: "ia4tube_social_local_migration",
+      database: "ia4tube_social_local",
+      max: 2
+    },
+    async end() {
+      replacementEnds += 1;
+      events.push("replacement-migration-end");
+    }
+  };
+  const state = { pools: Object.freeze({ migration: initialMigration, runtime }) };
+  const lifecycle = createGate1MigrationPoolLifecycle({
+    state,
+    plans: {
+      async createRollbackAdapter() {
+        events.push("rollback-adapter-created");
+        return {
+          async captureCanonical0003() {
+            events.push("rollback-capture-started");
+            assert.equal(state.pools.migration.retired, true);
+            assert.equal(state.pools.runtime, runtime);
+            return true;
+          }
+        };
+      }
+    },
+    createMigrationPool() {
+      events.push("replacement-migration-created");
+      return replacement;
+    }
+  });
+
+  const adapter = await lifecycle.plans.createRollbackAdapter();
+  assert.equal(await adapter.captureCanonical0003(), true);
+  assert.deepEqual(events, [
+    "rollback-adapter-created",
+    "initial-migration-end",
+    "rollback-capture-started"
+  ]);
+  assert.equal(initialEnds, 1);
+
+  assert.equal(await lifecycle.recreateMigrationPoolForEvidence(), true);
+  assert.equal(state.pools.migration, replacement);
+  assert.equal(state.pools.runtime, runtime);
+  assert.equal(state.pools.migration.options.max, 2);
+  assert.deepEqual(events, [
+    "rollback-adapter-created",
+    "initial-migration-end",
+    "rollback-capture-started",
+    "replacement-migration-created"
+  ]);
+
+  await assert.rejects(
+    lifecycle.recreateMigrationPoolForEvidence(),
+    { code: "linux_gate_gate1_migration_recreation_refused" }
+  );
+  await assert.rejects(
+    adapter.captureCanonical0003(),
+    { code: "linux_gate_gate1_capture_reused" }
+  );
+  assert.equal(initialEnds, 1);
+
+  assert.equal(await retirePrimaryPoolsBeforeBackup(state), true);
+  await state.pools.migration.end();
+  await state.pools.runtime.end();
+  assert.equal(initialEnds, 1);
+  assert.equal(replacementEnds, 1);
+  assert.equal(runtimeEnds, 1);
+  assert.deepEqual(events, [
+    "rollback-adapter-created",
+    "initial-migration-end",
+    "rollback-capture-started",
+    "replacement-migration-created",
+    "replacement-migration-end",
+    "runtime-end"
+  ]);
+});
+
+test("Gate 1 refuses and closes a replacement outside the exact migration pool limit", async () => {
+  let invalidReplacementEnds = 0;
+  const runtime = { async end() {} };
+  const state = {
+    pools: Object.freeze({
+      migration: { async end() {} },
+      runtime
+    })
+  };
+  const lifecycle = createGate1MigrationPoolLifecycle({
+    state,
+    plans: {
+      async createRollbackAdapter() {
+        return { async captureCanonical0003() { return true; } };
+      }
+    },
+    createMigrationPool() {
+      return {
+        options: {
+          user: "ia4tube_social_local_migration",
+          database: "ia4tube_social_local",
+          max: 3
+        },
+        async end() { invalidReplacementEnds += 1; }
+      };
+    }
+  });
+
+  const adapter = await lifecycle.plans.createRollbackAdapter();
+  assert.equal(await adapter.captureCanonical0003(), true);
+  await assert.rejects(
+    lifecycle.recreateMigrationPoolForEvidence(),
+    { code: "linux_gate_gate1_migration_replacement_invalid" }
+  );
+  assert.equal(invalidReplacementEnds, 1);
+  assert.equal(state.pools.migration.retired, true);
+  assert.equal(state.pools.runtime, runtime);
+});
+
+test("marker scan sees exact synthetic plaintext and never prints it", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ia4tube-linux-scan-"));
+  const marker = `synthetic-marker-${crypto.randomBytes(24).toString("hex")}`;
+  try {
+    fs.writeFileSync(path.join(root, "evidence.bin"), Buffer.from(`prefix:${marker}:suffix`));
+    assert.equal(containsMarkerInTree(root, [marker]).present, true);
+    fs.writeFileSync(path.join(root, "evidence.bin"), "sanitized");
+    const result = containsMarkerInTree(root, [marker]);
+    assert.equal(result.present, false);
+    assert.equal(result.filesScanned, 1);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("migration evidence binds the physical ledger to the checked-in manifest", async () => {
+  const migrations = require("../src/persistence/postgres/migrations");
+  const manifest = migrations.readManifest({ root: ROOT });
+  let call = 0;
+  const workDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "ia4tube-linux-migration-evidence-"));
+  const state = {
+    repositoryRoot: ROOT,
+    workDirectory,
+    environmentId: crypto.randomUUID(),
+    target: { port: 49152 },
+    pools: {
+      migration: {
+        async query() {
+          call += 1;
+          if (call === 1) return { rows: manifest.map((item) => ({ version: item.version, checksum: item.sha256 })) };
+          return { rows: [{ idempotency: true, publications: true, attempts: true, indexes: 17, constraints: 23, rls_missing: 0 }] };
+        }
+      }
+    }
+  };
+  try {
+    const result = await migrationEvidence(state, {
+      migrationRunner: {
+        async apply() { return []; },
+        async validate() { return { valid: true, applied: 4, pending: 0 }; }
+      },
+      async withTransaction(pool, operation) { return operation(pool); }
+    });
+    assert.equal(result.applied, 4);
+    assert.equal(result.requiredTablesPresent, true);
+    assert.equal(result.checksumTamperRefused, true);
+    assert.equal(result.idempotentReapply, true);
+    assert.match(result.ledgerSha256, /^[0-9a-f]{64}$/);
+    assert.match(result.migration0004Checksum, /^[0-9a-f]{64}$/);
+    assert.deepEqual(fs.readdirSync(workDirectory), []);
+  } finally {
+    fs.rmSync(workDirectory, { recursive: true, force: true });
+  }
+});
+
+test("failure diagnostics expose only canonical codes", () => {
+  assert.equal(failureCode({ code: "linux_safe_failure" }), "linux_safe_failure");
+  assert.equal(failureCode({ message: "path C:/Users/person password=secret" }), "linux_gate_unclassified_failure");
+});
+
+test("Linux gate source reuses product plans and has no external provider call", () => {
+  const gate = fs.readFileSync(path.join(ROOT, "scripts/social-3a0p-linux-gate.js"), "utf8");
+  const physical = fs.readFileSync(path.join(ROOT, "scripts/social-3a0p-linux-physical-gates.js"), "utf8");
+  assert.match(gate, /social-3a0p-local-windows-physical-plans/);
+  assert.match(gate, /social-3a0p-local-connector-physical-gates/);
+  assert.match(gate, /requireBundleDirectoryFsync:\s*true/);
+  assert.match(physical, /createPostgresConnectorStore/);
+  assert.match(physical, /createPostgresOAuthRepository/);
+  assert.doesNotMatch(physical, /\b(?:fetch|axios|https?\.request|tls\.connect|net\.connect)\s*\(/);
+  const order = [
+    'phase("migrations"',
+    'phase("rls_roles"',
+    'phase("concurrency_oauth_idempotency"',
+    'phase("vault"',
+    'phase("backup_restore"'
+  ].map((needle) => gate.indexOf(needle));
+  assert.ok(order.every((index) => index >= 0));
+  assert.deepEqual([...order].sort((a, b) => a - b), order);
+});

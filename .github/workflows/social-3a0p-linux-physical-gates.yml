@@ -1,0 +1,107 @@
+{
+  "name": "Social 3A-0P isolated Linux physical gates",
+  "on": {
+    "push": {
+      "branches": [
+        "social/checkpoint-3a0p-linux-physical-gates-20260807"
+      ]
+    }
+  },
+  "permissions": {
+    "contents": "read"
+  },
+  "concurrency": {
+    "group": "social-3a0p-linux-physical-gates",
+    "cancel-in-progress": false
+  },
+  "env": {
+    "SOCIAL_3A0P_AUTHORIZED_PARENT": "36be098f926cc060ee89dff7874dab772a3ef22f",
+    "SOCIAL_3A0P_PRODUCT_COMMIT": "fcfc92419021dae5f77baad731c634b10c275c5b",
+    "SOCIAL_3A0P_AUTHORIZED_MESSAGE": "[run-social-3a0p-linux-gate] add isolated Linux physical gates",
+    "SOCIAL_3A0P_POSTGRES_IMAGE": "docker.io/library/postgres:18.4-bookworm@sha256:7e6103cf85f88f7a0eddb3ec0b1ba8940eba098ed118ade25a729ca9daee5568"
+  },
+  "jobs": {
+    "physical-gates": {
+      "if": "github.event_name == 'push' && github.ref == 'refs/heads/social/checkpoint-3a0p-linux-physical-gates-20260807' && github.event.created == true && github.event.deleted == false && github.event.forced == false && github.event.before == '0000000000000000000000000000000000000000' && github.event.head_commit.message == '[run-social-3a0p-linux-gate] add isolated Linux physical gates' && github.run_attempt == 1",
+      "runs-on": "ubuntu-24.04",
+      "timeout-minutes": 60,
+      "defaults": {
+        "run": {
+          "shell": "bash"
+        }
+      },
+      "steps": [
+        {
+          "name": "Checkout authorized commit",
+          "uses": "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+          "with": {
+            "fetch-depth": 0,
+            "persist-credentials": false
+          }
+        },
+        {
+          "name": "Verify immutable execution contract",
+          "env": {
+            "AUTHORIZED_SHA": "${{ github.sha }}",
+            "AUTHORIZED_MESSAGE": "${{ github.event.head_commit.message }}",
+            "AUTHORIZED_ATTEMPT": "${{ github.run_attempt }}"
+          },
+          "run": "set -euo pipefail\ntest \"$AUTHORIZED_ATTEMPT\" = \"1\"\ntest \"$AUTHORIZED_MESSAGE\" = \"$SOCIAL_3A0P_AUTHORIZED_MESSAGE\"\ntest \"$(git rev-parse HEAD)\" = \"$AUTHORIZED_SHA\"\ntest \"$(git rev-parse HEAD^)\" = \"$SOCIAL_3A0P_AUTHORIZED_PARENT\"\ntest \"$(git log -1 --pretty=%B)\" = \"$SOCIAL_3A0P_AUTHORIZED_MESSAGE\"\ngit diff --quiet \"$SOCIAL_3A0P_PRODUCT_COMMIT\" HEAD -- src db/migrations migrations server.js package.json package-lock.json\nwhile IFS= read -r changed; do\n  case \"$changed\" in\n    .github/workflows/social-3a0p-linux-physical-gates.yml|scripts/social-3a0p-local-scope.js|tests/social-3a0p-local-scope.test.js|scripts/social-3a0p-linux-*|tests/social-3a0p-linux-*|docs/social-3a0p-linux-*) ;;\n    *) exit 1 ;;\n  esac\ndone < <(git diff --name-only \"$SOCIAL_3A0P_AUTHORIZED_PARENT\" HEAD)\ntest ! -e \"$RUNNER_TEMP/social-3a0p-linux-gate-evidence\""
+        },
+        {
+          "name": "Set up Node.js",
+          "uses": "actions/setup-node@820762786026740c76f36085b0efc47a31fe5020",
+          "with": {
+            "node-version": "24",
+            "package-manager-cache": false
+          }
+        },
+        {
+          "name": "Install locked dependencies without lifecycle scripts",
+          "run": "npm ci --ignore-scripts --no-audit --no-fund"
+        },
+        {
+          "name": "Run isolated Linux physical gates once",
+          "id": "gate",
+          "run": "set +e\nnode scripts/social-3a0p-linux-gate.js --run\ngate_status=$?\nset -e\necho \"gate_exit_code=$gate_status\" >> \"$GITHUB_OUTPUT\"\nexit 0"
+        },
+        {
+          "name": "Approve sanitized evidence for upload",
+          "id": "evidence",
+          "if": "always()",
+          "run": "set -euo pipefail\nevidence_dir=\"$RUNNER_TEMP/social-3a0p-linux-gate-evidence\"\nevidence_json=\"$evidence_dir/social-3a0p-linux-physical-gates-evidence.json\"\nevidence_sha=\"$evidence_dir/social-3a0p-linux-physical-gates-evidence.sha256\"\nsanitized_marker=\"$evidence_dir/.sanitized-approved\"\nupload=false\nif test -f \"$evidence_json\" && test -f \"$evidence_sha\" && test -f \"$sanitized_marker\"; then\n  expected_hash=\"$(cut -d ' ' -f 1 \"$evidence_sha\")\"\n  actual_hash=\"$(sha256sum \"$evidence_json\" | cut -d ' ' -f 1)\"\n  if test \"${#expected_hash}\" = \"64\" && test \"$expected_hash\" = \"$actual_hash\"; then\n    upload=true\n  fi\nfi\necho \"upload=$upload\" >> \"$GITHUB_OUTPUT\""
+        },
+        {
+          "name": "Upload the single sanitized evidence artifact",
+          "if": "always() && steps.evidence.outputs.upload == 'true'",
+          "uses": "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a",
+          "with": {
+            "name": "social-3a0p-linux-physical-gates-evidence",
+            "path": "${{ runner.temp }}/social-3a0p-linux-gate-evidence/social-3a0p-linux-physical-gates-evidence.json\n${{ runner.temp }}/social-3a0p-linux-gate-evidence/social-3a0p-linux-physical-gates-evidence.sha256",
+            "if-no-files-found": "error",
+            "compression-level": 0,
+            "overwrite": false,
+            "include-hidden-files": false,
+            "retention-days": 7
+          }
+        },
+        {
+          "name": "Clean owned disposable resources",
+          "id": "cleanup",
+          "if": "always()",
+          "run": "set +e\nnode scripts/social-3a0p-linux-gate.js --cleanup\ncleanup_status=$?\nset -e\necho \"cleanup_exit_code=$cleanup_status\" >> \"$GITHUB_OUTPUT\"\nexit 0"
+        },
+        {
+          "name": "Enforce first-attempt gate result",
+          "if": "always()",
+          "env": {
+            "GATE_EXIT_CODE": "${{ steps.gate.outputs.gate_exit_code }}",
+            "CLEANUP_EXIT_CODE": "${{ steps.cleanup.outputs.cleanup_exit_code }}",
+            "EVIDENCE_UPLOAD_APPROVED": "${{ steps.evidence.outputs.upload }}"
+          },
+          "run": "set -euo pipefail\ntest \"$GATE_EXIT_CODE\" = \"0\"\ntest \"$CLEANUP_EXIT_CODE\" = \"0\"\ntest \"$EVIDENCE_UPLOAD_APPROVED\" = \"true\""
+        }
+      ]
+    }
+  }
+}
