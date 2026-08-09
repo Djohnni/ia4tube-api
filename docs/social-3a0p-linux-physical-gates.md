@@ -2,51 +2,106 @@
 
 ## Limite e proveniência
 
-Esta sétima rota Linux isolada parte exclusivamente do commit
-`0f09b99b06fc99b5e176414d7f8365a996704f4a`. A branch predecessora
-`social/checkpoint-3a0p-linux-profile-aware-restore-20260808` e todas as branches
+Esta oitava rota Linux isolada parte exclusivamente do commit
+`ad453a930bce259f5b251a8324fc32ad388ce5b6`. A branch predecessora
+`social/checkpoint-3a0p-linux-restore-provenance-20260808` e todas as branches
 anteriores permanecem preservadas, sem novo push ou edição.
 
 O workflow existe somente para a branch
-`social/checkpoint-3a0p-linux-restore-provenance-20260808`. O produto
+`social/checkpoint-3a0p-linux-profile0003-vault-bridge-20260808`. O produto
 permanece idêntico a `fcfc92419021dae5f77baad731c634b10c275c5b`: `src/`,
 todo `db/` (inclusive `roles.sql`), `server.js`, `package.json` e `package-lock.json` não são
 alterados. PostgreSQL, SCRAM, roles, rede Docker e credenciais também não são
 alterados por esta correção.
 
-## Sétimo disparo Linux isolado autorizado
+## Oitavo disparo Linux isolado autorizado
 
 O único gatilho autorizado é o primeiro e único `push` de criação da nova
 branch, sem exclusão ou force, cujo commit tenha a mensagem integral:
 
 ```text
-[run-social-3a0p-linux-gate] preserve restore failure provenance
+[run-social-3a0p-linux-gate] bridge profile 0003 vault repository
 ```
 
 O job exige `run_attempt == 1`, `created == true`, `deleted == false`,
 `forced == false`, `before` igual a 40 zeros e pai exato
-`0f09b99b06fc99b5e176414d7f8365a996704f4a`, além de diff nominal e
+`ad453a930bce259f5b251a8324fc32ad388ce5b6`, além de diff nominal e
 estritamente allowlisted. Não há `workflow_dispatch`, pull request, agenda,
 matriz ou retry automático. A regra operacional é: zero re-run, zero segundo
 push, zero PR, zero merge e zero deploy depois desta execução única.
 
-A allowlist do commit contém exatamente estes nove caminhos, sem curinga,
+A allowlist do commit contém exatamente estes sete caminhos, sem curinga,
 prefixo ou diretório inteiro:
 
 - `.github/workflows/social-3a0p-linux-physical-gates.yml`;
 - `docs/social-3a0p-linux-physical-gates.md`;
 - `scripts/social-3a0p-linux-gate.js`;
-- `scripts/social-3a0p-local-connector-physical-gates.js`;
 - `scripts/social-3a0p-local-windows-physical-plans.js`;
 - `tests/social-3a0p-linux-gate.test.js`;
-- `tests/social-3a0p-local-connector-physical-gates.test.js`;
 - `tests/social-3a0p-local-windows-physical-plans.test.js`;
 - `tests/social-3a0p-linux-workflow.test.js`.
 
 Qualquer outro caminho, inclusive outro workflow, `src/`, `db/`, migrations,
 roles, servidor ou dependências, encerra o job antes do gate.
 
-## Falha predecessora e procedência sanitizada
+## Falha física mais recente e reprodução focal do cofre
+
+O run físico anterior `31290136520` (artifact `9031104643`, SHA-256 da
+evidência
+`65611a2184b40b552f2327255fda5ec49cef243a9a0135a82d5338dd6623d988`)
+encerrou na fase `migrations`, na operação `rollback_restore_0003`, subetapa
+exata `restore_vault` e fronteira `internal_callback`. O código causal público
+permaneceu `backup_restore_internal_callback_failed`, o código superior
+permaneceu `backup_external_tool_failed` e nenhum processo externo foi iniciado
+nessa subetapa. Um `pg_dump` e o `pg_restore` anterior já haviam sido concluídos;
+isso não atribui a falha a essas ferramentas. O cleanup foi aprovado com zero
+resíduo, sem segundo push, retry ou re-run.
+
+A reprodução focal local, sem Docker, GitHub Actions ou rede externa,
+comprovou a incompatibilidade antes de qualquer correção. O profile
+`social-schema-0003` contém somente as migrations 0001, 0002 e 0003. A tabela
+`ia4tube_social.social_oauth_transactions` já contém `consumed_at`,
+`cancelled_at` e `expires_at`, mas `failed_at` e `failure_code` surgem somente
+na migration `0004_social_connector_persistence`. O método atual
+`findEncryptedCredential` consulta `oauth.failed_at`; contra o catálogo 0003,
+a primeira leitura normal recusou com SQLSTATE interno `42703`. O método
+equivalente da implementação 2A fixada não consulta essa coluna, e o repositório
+atual permaneceu compatível com o catálogo 0004.
+
+A mesma prova confirmou a ordem causal: registro das chaves v1 e v2 e
+armazenamento das duas credenciais não dependem das colunas 0004. A recusa
+ocorreu na primeira chamada de `withDecryptedCredential`, antes de
+`vault.decrypt`, testes de adulteração, rotação, retirada de chave ou
+`verify2ACompatibility`. O tracker existente classificou essa causa como
+`rollback_restore_0003` → `restore_vault`, sem processo externo, e preservou o
+código público genérico já aprovado. Somente o teste focal converte `42703` em
+`postgres_undefined_column`; SQL, mensagem do PostgreSQL, argumentos, caminhos,
+endereços e credenciais não entram na evidência pública.
+
+A correção permanece exclusivamente no harness e seleciona a factory antes da
+criação do repositório, a partir do `expectedProfileId` canônico proveniente de
+`SCHEMA_PROFILES`:
+
+- no profile 0003, são construídos o repositório atual e o repositório 2A
+  validado; um facade novo, fechado e congelado preserva todos os métodos atuais
+  e substitui exclusivamente `findEncryptedCredential` pelo método legado;
+- no profile 0004, o repositório primário é integralmente o atual, sem facade,
+  fallback ou método legado nesse repositório;
+- profile desconhecido é recusado antes da criação dos repositórios; erro SQL,
+  ambiente e conteúdo observado do banco não participam da seleção.
+
+O probe separado `verify2ACompatibility` continua usando suas dependências 2A
+fixadas para provar compatibilidade histórica. Ele não transforma o repositório
+primário do profile 0004 em legado. A implementação 2A continua carregada apenas
+pelo commit `9deb1e04249026a7046d44d6cbf4e2da87b9a0a4`, manifesto fechado e hashes
+aprovados para os 21 arquivos do escopo da árvore-fonte. O materializador não
+cria outro arquivo-fonte; acrescenta somente o link local de dependências fora
+desse escopo, sem download durante o run. A reprodução
+local autoriza a correção, mas não aprova fisicamente `restore_vault`, o restore
+0003 integral, o reapply 0004, a validação 0004 ou qualquer Gate; isso depende
+do único run Linux autorizado.
+
+## Falha predecessora da instrumentação preservada
 
 O run predecessor `31282878969` (artifact `9028948591`, SHA-256 da evidência
 `12d26dc06ece482eb4a84249056484014aa9ff02517343b91b6ac00d96f1a2c7`)
@@ -57,7 +112,7 @@ executável, subetapa, argumentos, origem interna da exceção, stdout ou stderr
 brutos. Por isso, ela não permite identificar qual operação posterior falhou
 nem afirmar que a origem foi necessariamente um processo externo.
 
-Esta rota altera exclusivamente o harness para preservar a procedência
+A rota predecessora alterou exclusivamente o harness para preservar a procedência
 sanitizada da primeira falha dentro do backup/restore. O esquema fechado contém
 somente `operation`, `substep`, `boundary`, `causalCode`,
 `externalTransportProcessStarted` e `substepExact`. Uma subetapa é declarada

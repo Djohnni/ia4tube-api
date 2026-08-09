@@ -16,6 +16,10 @@ const {
 const {
   createPoolMetricsRegistry
 } = require("../scripts/social-3a0p-local-runtime-evidence-metrics");
+const {
+  createProfile0003SocialRepositoryBridge,
+  createProfileAwareSocialRepositoryFactory
+} = require("../scripts/social-3a0p-local-windows-physical-plans");
 const { Pool: PgPool } = require("pg");
 const {
   MIGRATION_CONNECTION_LIMIT,
@@ -25,6 +29,21 @@ const {
   targetFingerprint,
   verifyProvisionedLoginCredentials
 } = require("../src/persistence/postgres/login-bootstrap");
+const {
+  SCHEMA_PROFILES
+} = require("../src/persistence/postgres/backup-restore");
+const {
+  createSocialRepository
+} = require("../src/persistence/postgres/social-repository");
+const {
+  createVaultKeyRegistryAdmin
+} = require("../src/persistence/postgres/vault-key-registry-admin");
+const {
+  createSocialCredentialService
+} = require("../src/social/credential-service");
+const {
+  deriveVaultKeyVersion
+} = require("../src/social/vault-key-version");
 const {
   BASE_COMMIT,
   BRANCH,
@@ -118,6 +137,138 @@ function materializeFixedLegacy2AForTest() {
     fs.rmSync(temporaryRoot, { recursive: true, force: true });
     throw error;
   }
+}
+
+function profileCredentialCatalogHarness(
+  profileId,
+  defaultRow,
+  options = {}
+) {
+  if (![PROFILE_0003_ID, PROFILE_0004_ID].includes(profileId)) {
+    throw new TypeError("synthetic_profile_invalid");
+  }
+  const queries = [];
+  const client = Object.freeze({
+    async query(text, values = []) {
+      const sql = String(text);
+      queries.push(Object.freeze({ text: sql, values }));
+      if (
+        sql.includes(
+          "INSERT INTO ia4tube_social.social_encrypted_credentials"
+        )
+      ) {
+        return {
+          rowCount: 1,
+          rows: [Object.freeze({
+            company_id: values[0],
+            id: values[1],
+            provider: values[2],
+            connection_id: values[3],
+            oauth_transaction_id: values[4],
+            credential_type: values[5],
+            ciphertext: values[6],
+            nonce: values[7],
+            auth_tag: values[8],
+            key_version: values[9],
+            aad_version: values[10],
+            expires_at: values[11],
+            revision: 1
+          })]
+        };
+      }
+      if (
+        sql.includes(
+          "FROM ia4tube_social.social_encrypted_credentials credential"
+        )
+      ) {
+        if (
+          profileId === PROFILE_0003_ID &&
+          sql.includes("oauth.failed_at")
+        ) {
+          throw Object.assign(new Error("synthetic_undefined_column"), {
+            code: "42703"
+          });
+        }
+        const expired = defaultRow.expires_at !== null &&
+          new Date(defaultRow.expires_at).getTime() <= Date.now();
+        const visible =
+          values[0] === defaultRow.company_id &&
+          values[1] === defaultRow.id &&
+          options.revoked !== true &&
+          !expired;
+        return {
+          rowCount: visible ? 1 : 0,
+          rows: visible ? [defaultRow] : []
+        };
+      }
+      return { rowCount: 0, rows: [] };
+    },
+    release() {}
+  });
+  return Object.freeze({
+    pool: Object.freeze({
+      async connect() {
+        return client;
+      }
+    }),
+    queries
+  });
+}
+
+function profileVaultRegistryHarness(profileId) {
+  if (![PROFILE_0003_ID, PROFILE_0004_ID].includes(profileId)) {
+    throw new TypeError("synthetic_profile_invalid");
+  }
+  const queries = [];
+  const registered = new Map();
+  const client = Object.freeze({
+    async query(text, values = []) {
+      const sql = String(text);
+      queries.push(Object.freeze({ text: sql, values }));
+      if (
+        profileId === PROFILE_0003_ID &&
+        /\b(?:failed_at|failure_code)\b/.test(sql)
+      ) {
+        throw Object.assign(new Error("synthetic_undefined_column"), {
+          code: "42703"
+        });
+      }
+      if (sql.includes("SELECT pg_advisory_unlock")) {
+        return { rowCount: 1, rows: [{ unlocked: true }] };
+      }
+      if (
+        sql.includes("SELECT key_version, registered_at") &&
+        sql.includes("ia4tube_social_admin.vault_key_versions")
+      ) {
+        return { rowCount: registered.size, rows: [...registered.values()] };
+      }
+      if (
+        sql.includes(
+          "INSERT INTO ia4tube_social_admin.vault_key_versions"
+        )
+      ) {
+        const keyVersion = values[0];
+        if (registered.has(keyVersion)) return { rowCount: 0, rows: [] };
+        const row = Object.freeze({
+          key_version: keyVersion,
+          registered_at: new Date(0)
+        });
+        registered.set(keyVersion, row);
+        return { rowCount: 1, rows: [row] };
+      }
+      return { rowCount: 0, rows: [] };
+    },
+    release() {}
+  });
+  return Object.freeze({
+    pool: Object.freeze({
+      async connect() {
+        return client;
+      }
+    }),
+    queries,
+    registered
+  });
 }
 
 function runtimeSchemaContract(runtimeValidation, migrations) {
@@ -357,13 +508,28 @@ function restoreBehaviorFacadeFixture(options = {}) {
   const calls = {
     created: [],
     currentSchema: [],
+    legacyRepositoryOptions: [],
     legacySchema: [],
     loadedRoots: []
   };
+  const legacyRepository = Object.freeze({
+    consumeReauthGrant() {},
+    createConnection() {},
+    createReauthGrant() {},
+    findReauthIdentity() {},
+    findConnection() {},
+    findEncryptedCredential() {},
+    listCredentialKeyVersions() {},
+    rotateEncryptedCredential() {},
+    storeEncryptedCredential() {}
+  });
   const legacy = Object.freeze({
     createCompanyScopedRepository() {},
     createSocialCredentialService() {},
-    createSocialRepository() {},
+    createSocialRepository(repositoryOptions) {
+      calls.legacyRepositoryOptions.push(repositoryOptions);
+      return legacyRepository;
+    },
     createSocialVault() {},
     verifyRuntimeRole() {},
     async verifyRuntimeSchema(...args) {
@@ -395,7 +561,13 @@ function restoreBehaviorFacadeFixture(options = {}) {
     restoreBehavior,
     runtimeValidation
   });
-  return Object.freeze({ calls, facade, legacy, legacyRoot });
+  return Object.freeze({
+    calls,
+    facade,
+    legacy,
+    legacyRepository,
+    legacyRoot
+  });
 }
 
 test("evidence provenance matches the authorized workflow branch and parent", () => {
@@ -462,6 +634,93 @@ test("profile-aware restore facade binds both schema slots to legacy for 0003 an
   await profile0004.legacyDependencies.verifyRuntimeSchema(pool0004, "synthetic_runtime");
   assert.equal(fixture.calls.legacySchema.length, 2);
   assert.equal(fixture.calls.currentSchema.length, 2);
+});
+
+test("profile-aware restore facade binds the primary repository before creation without SQL-error fallback", () => {
+  const fixture = restoreBehaviorFacadeFixture();
+  const repositoryOptions = Object.freeze({
+    pool: Object.freeze({ async connect() {} }),
+    runtimeRole: "ia4tube_social_runtime",
+    identityDerivationVersion: "v1"
+  });
+
+  fixture.facade.createRestoreBehaviorVerifiers({
+    expectedProfileId: PROFILE_0003_ID,
+    dependencies: { PoolClass: class SyntheticPool {} },
+    env: { SOCIAL_SCHEMA_PROFILE: PROFILE_0004_ID }
+  });
+  const profile0003 = fixture.calls.created[0];
+  assert.notEqual(
+    profile0003.dependencies.createSocialRepository,
+    createSocialRepository
+  );
+  const bridge = profile0003.dependencies.createSocialRepository(
+    repositoryOptions
+  );
+  assert.equal(Object.isFrozen(bridge), true);
+  assert.deepEqual(Reflect.ownKeys(bridge), [
+    "consumeReauthGrant",
+    "createConnection",
+    "createReauthGrant",
+    "findReauthIdentity",
+    "findConnection",
+    "findEncryptedCredential",
+    "findEncryptedCredentialForKeyRotation",
+    "listCredentialKeyVersions",
+    "rotateEncryptedCredential",
+    "rotateEncryptedCredentialForKeyRotation",
+    "storeEncryptedCredential"
+  ]);
+  assert.equal(
+    bridge.findEncryptedCredential,
+    fixture.legacyRepository.findEncryptedCredential
+  );
+  for (const name of [
+    "consumeReauthGrant",
+    "createConnection",
+    "createReauthGrant",
+    "findReauthIdentity",
+    "findConnection",
+    "listCredentialKeyVersions",
+    "rotateEncryptedCredential",
+    "storeEncryptedCredential"
+  ]) {
+    assert.notEqual(bridge[name], fixture.legacyRepository[name]);
+  }
+  assert.deepEqual(fixture.calls.legacyRepositoryOptions, [repositoryOptions]);
+
+  fixture.facade.createRestoreBehaviorVerifiers({
+    expectedProfileId: PROFILE_0004_ID,
+    dependencies: { PoolClass: class SyntheticPool {} },
+    env: { SOCIAL_SCHEMA_PROFILE: PROFILE_0003_ID }
+  });
+  const profile0004 = fixture.calls.created[1];
+  assert.equal(
+    profile0004.dependencies.createSocialRepository,
+    createSocialRepository
+  );
+  assert.equal(fixture.calls.legacyRepositoryOptions.length, 1);
+
+  const createdBeforeUnknown = fixture.calls.created.length;
+  assert.throws(
+    () => fixture.facade.createRestoreBehaviorVerifiers({
+      expectedProfileId: "social-schema-unknown",
+      dependencies: { PoolClass: class SyntheticPool {} }
+    }),
+    { code: "linux_gate_schema_profile_invalid" }
+  );
+  assert.equal(fixture.calls.created.length, createdBeforeUnknown);
+  assert.equal(fixture.calls.legacyRepositoryOptions.length, 1);
+  assert.throws(
+    () => fixture.facade.createRestoreBehaviorVerifiers({
+      expectedProfileId: PROFILE_0003_ID,
+      dependencies: {
+        PoolClass: class SyntheticPool {},
+        createSocialRepository() {}
+      }
+    }),
+    { code: "linux_gate_restore_behavior_repository_dependency_invalid" }
+  );
 });
 
 test("fixed 0003 and current 0004 schema verifiers enforce their exact closed inventories", async (t) => {
@@ -695,6 +954,594 @@ test("fixed 0003 and current 0004 schema verifiers enforce their exact closed in
 
     assert.deepEqual(profile0003.rlsTables, legacyContract.tables);
     assert.deepEqual(profile0004.rlsTables, currentContract.tables);
+  } finally {
+    fixedLegacy.cleanup();
+  }
+});
+
+test("pre-correction profile 0003 vault reproduction proves current-read 42703 before vault lifecycle", async () => {
+  const migrationManifest = JSON.parse(fs.readFileSync(
+    path.join(ROOT, "db", "migrations", "checksums.json"),
+    "utf8"
+  ));
+  const migrationSql = new Map(migrationManifest.migrations.map((migration) => [
+    migration.version,
+    fs.readFileSync(
+      path.join(ROOT, "db", "migrations", migration.file),
+      "utf8"
+    )
+  ]));
+  const profile0003 = SCHEMA_PROFILES.find(
+    (profile) => profile.id === PROFILE_0003_ID
+  );
+  const profile0004 = SCHEMA_PROFILES.find(
+    (profile) => profile.id === PROFILE_0004_ID
+  );
+  assert.deepEqual(
+    profile0003.migrationRows.map(({ version }) => version),
+    [
+      "0001_social_multitenant_foundation",
+      "0002_social_connections_and_vault",
+      "0003_global_vault_key_registry"
+    ]
+  );
+  assert.deepEqual(
+    profile0004.migrationRows.map(({ version }) => version),
+    [...profile0003.migrationRows.map(({ version }) => version),
+      "0004_social_connector_persistence"]
+  );
+
+  const migration0002 = migrationSql.get(
+    "0002_social_connections_and_vault"
+  );
+  const oauthTableStart = migration0002.indexOf(
+    "CREATE TABLE ia4tube_social.social_oauth_transactions"
+  );
+  const oauthTableEnd = migration0002.indexOf(
+    "CREATE TABLE ia4tube_social.social_encrypted_credentials",
+    oauthTableStart
+  );
+  assert.ok(oauthTableStart >= 0 && oauthTableEnd > oauthTableStart);
+  const oauthTable0003 = migration0002.slice(oauthTableStart, oauthTableEnd);
+  for (const column of ["expires_at", "consumed_at", "cancelled_at"]) {
+    assert.match(oauthTable0003, new RegExp(`\\b${column}\\b`));
+  }
+  assert.doesNotMatch(oauthTable0003, /\b(?:failed_at|failure_code)\b/);
+
+  for (const column of ["failed_at", "failure_code"]) {
+    const origins = migrationManifest.migrations
+      .filter((migration) =>
+        new RegExp(`\\b${column}\\b`).test(migrationSql.get(migration.version))
+      )
+      .map(({ version }) => version);
+    assert.deepEqual(origins, ["0004_social_connector_persistence"]);
+  }
+  const migration0004 = migrationSql.get(
+    "0004_social_connector_persistence"
+  );
+  assert.match(migration0004, /ADD COLUMN failed_at TIMESTAMPTZ/);
+  assert.match(migration0004, /ADD COLUMN failure_code TEXT/);
+
+  const registrySource = fs.readFileSync(
+    path.join(
+      ROOT,
+      "src",
+      "persistence",
+      "postgres",
+      "vault-key-registry-admin.js"
+    ),
+    "utf8"
+  );
+  const registerStart = registrySource.indexOf("async function register(");
+  const registerEnd = registrySource.indexOf(
+    "async function withActiveVersion(",
+    registerStart
+  );
+  assert.ok(registerStart >= 0 && registerEnd > registerStart);
+  const registerImplementation = registrySource.slice(
+    registerStart,
+    registerEnd
+  );
+  assert.doesNotMatch(
+    registerImplementation,
+    /\b(?:failed_at|failure_code)\b/
+  );
+  assert.match(
+    migrationSql.get("0003_global_vault_key_registry"),
+    /CREATE TABLE ia4tube_social_admin\.vault_key_versions/
+  );
+
+  const fixedLegacy = materializeFixedLegacy2AForTest();
+  try {
+    const legacyManifest = require(
+      "../src/persistence/postgres/legacy-2a-source-manifest.json"
+    );
+    assert.equal(
+      legacyManifest.commit,
+      "9deb1e04249026a7046d44d6cbf4e2da87b9a0a4"
+    );
+
+    const companyId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    const connectionId = "22222222-2222-4222-8222-222222222222";
+    const credentialA = "55555555-5555-4555-8555-555555555555";
+    const credentialB = "66666666-6666-4666-8666-666666666666";
+    const keyMaterialV1 = Buffer.alloc(32, 9);
+    const keyMaterialV2 = Buffer.alloc(32, 10);
+    const keyVersionV1 = deriveVaultKeyVersion(101, keyMaterialV1);
+    const keyVersionV2 = deriveVaultKeyVersion(102, keyMaterialV2);
+    keyMaterialV1.fill(0);
+    keyMaterialV2.fill(0);
+    const defaultRow = Object.freeze({
+      company_id: companyId,
+      id: credentialA,
+      provider: "instagram",
+      connection_id: connectionId,
+      oauth_transaction_id: null,
+      credential_type: "access_token",
+      ciphertext: Buffer.from([1]),
+      nonce: Buffer.alloc(12, 2),
+      auth_tag: Buffer.alloc(16, 3),
+      key_version: keyVersionV1,
+      aad_version: 1,
+      expires_at: null,
+      revision: 1
+    });
+    const input = Object.freeze({ companyId, credentialId: credentialA });
+
+    const legacy0003Catalog = profileCredentialCatalogHarness(
+      PROFILE_0003_ID,
+      defaultRow
+    );
+    const legacyRepository = fixedLegacy.dependencies.createSocialRepository({
+      pool: legacy0003Catalog.pool,
+      runtimeRole: "ia4tube_social_runtime",
+      identityDerivationVersion: "identity-v1"
+    });
+    const legacyResult = await legacyRepository.findEncryptedCredential(input);
+    assert.equal(legacyResult.id, credentialA);
+    const legacyRead = legacy0003Catalog.queries.find(({ text }) =>
+      text.includes(
+        "FROM ia4tube_social.social_encrypted_credentials credential"
+      )
+    );
+    assert.ok(legacyRead);
+    assert.doesNotMatch(legacyRead.text, /\boauth\.failed_at\b/);
+
+    const current0004Catalog = profileCredentialCatalogHarness(
+      PROFILE_0004_ID,
+      defaultRow
+    );
+    const current0004Repository = createSocialRepository({
+      pool: current0004Catalog.pool,
+      runtimeRole: "ia4tube_social_runtime",
+      identityDerivationVersion: "identity-v1"
+    });
+    const current0004Result = await current0004Repository
+      .findEncryptedCredential(input);
+    assert.equal(current0004Result.id, credentialA);
+    const current0004Read = current0004Catalog.queries.find(({ text }) =>
+      text.includes(
+        "FROM ia4tube_social.social_encrypted_credentials credential"
+      )
+    );
+    assert.ok(current0004Read);
+    assert.match(current0004Read.text, /\boauth\.failed_at\b/);
+
+    const current0003Catalog = profileCredentialCatalogHarness(
+      PROFILE_0003_ID,
+      defaultRow
+    );
+    const current0003Repository = createSocialRepository({
+      pool: current0003Catalog.pool,
+      runtimeRole: "ia4tube_social_runtime",
+      identityDerivationVersion: "identity-v1"
+    });
+    const observed = {
+      decrypt: 0,
+      encrypt: 0,
+      register: 0,
+      retire: 0,
+      rotate: 0,
+      tamper: 0,
+      verify2A: 0
+    };
+    const vault = Object.freeze({
+      decrypt() {
+        observed.decrypt += 1;
+        return Buffer.from("must-not-be-reached");
+      },
+      encrypt() {
+        observed.encrypt += 1;
+        return Object.freeze({
+          ciphertext: Buffer.from([observed.encrypt]),
+          nonce: Buffer.alloc(12, observed.encrypt),
+          authTag: Buffer.alloc(16, observed.encrypt + 2),
+          keyVersion: keyVersionV1,
+          aadVersion: 1
+        });
+      },
+      rotate() {
+        observed.rotate += 1;
+        return Object.freeze({
+          changed: false,
+          envelope: Object.freeze({ keyVersion: keyVersionV1 })
+        });
+      }
+    });
+    const credentials = createSocialCredentialService({
+      repository: current0003Repository,
+      vault
+    });
+    const registryCatalog = profileVaultRegistryHarness(PROFILE_0003_ID);
+    const registry = createVaultKeyRegistryAdmin({
+      pool: registryCatalog.pool,
+      ownerRole: "ia4tube_social_owner"
+    });
+    let undefinedColumn;
+    try {
+      await registry.register({ keyVersion: keyVersionV1 });
+      observed.register += 1;
+      await registry.register({ keyVersion: keyVersionV2 });
+      observed.register += 1;
+      await credentials.store({
+        companyId,
+        provider: "instagram",
+        credentialId: credentialA,
+        credentialType: "access_token",
+        connectionId,
+        plaintext: Buffer.from("synthetic-a")
+      });
+      await credentials.store({
+        companyId,
+        provider: "instagram",
+        credentialId: credentialB,
+        credentialType: "refresh_token",
+        connectionId,
+        plaintext: Buffer.from("synthetic-b")
+      });
+      await credentials.withDecryptedCredential(input, () => true);
+      observed.tamper += 1;
+      observed.rotate += 1;
+      observed.retire += 1;
+      observed.verify2A += 1;
+    } catch (error) {
+      undefinedColumn = error;
+    }
+    assert.equal(undefinedColumn?.code, "42703");
+    const sanitizedInternalCode = undefinedColumn?.code === "42703"
+      ? "postgres_undefined_column"
+      : "postgres_failure";
+    assert.equal(sanitizedInternalCode, "postgres_undefined_column");
+    const internalReproductionEvidence = Object.freeze({
+      profileRepositoryMode: "legacy_read_current_lifecycle",
+      profile0003CurrentReadRefused: true,
+      sanitizedSqlStateClass: "undefined_column",
+      externalProcessStarted: false
+    });
+    assert.deepEqual(internalReproductionEvidence, {
+      profileRepositoryMode: "legacy_read_current_lifecycle",
+      profile0003CurrentReadRefused: true,
+      sanitizedSqlStateClass: "undefined_column",
+      externalProcessStarted: false
+    });
+    assert.equal(
+      JSON.stringify(internalReproductionEvidence).includes("42703"),
+      false
+    );
+    assert.deepEqual(observed, {
+      decrypt: 0,
+      encrypt: 2,
+      register: 2,
+      retire: 0,
+      rotate: 0,
+      tamper: 0,
+      verify2A: 0
+    });
+    const storeQueries = current0003Catalog.queries.filter(({ text }) =>
+      text.includes(
+        "INSERT INTO ia4tube_social.social_encrypted_credentials"
+      )
+    );
+    assert.equal(storeQueries.length, 2);
+    for (const { text } of storeQueries) {
+      assert.doesNotMatch(text, /\b(?:failed_at|failure_code)\b/);
+    }
+    assert.equal(registryCatalog.registered.size, 2);
+    const registryInsertQueries = registryCatalog.queries.filter(({ text }) =>
+      text.includes(
+        "INSERT INTO ia4tube_social_admin.vault_key_versions"
+      )
+    );
+    assert.equal(registryInsertQueries.length, 2);
+    for (const { text } of registryCatalog.queries) {
+      assert.doesNotMatch(text, /\b(?:failed_at|failure_code)\b/);
+    }
+    const current0003Read = current0003Catalog.queries.find(({ text }) =>
+      text.includes(
+        "FROM ia4tube_social.social_encrypted_credentials credential"
+      )
+    );
+    assert.ok(current0003Read);
+    assert.match(current0003Read.text, /\boauth\.failed_at\b/);
+    assert.equal(
+      current0003Catalog.queries.some(({ text }) => text === "ROLLBACK"),
+      true
+    );
+
+    const verifierSource = fs.readFileSync(
+      path.join(
+        ROOT,
+        "src",
+        "persistence",
+        "postgres",
+        "restore-behavior-verifiers.js"
+      ),
+      "utf8"
+    );
+    const registerV1 = verifierSource.indexOf(
+      "await registry.register({ keyVersion: versionV1 })"
+    );
+    const registerV2 = verifierSource.indexOf(
+      "await registry.register({ keyVersion: versionV2 })",
+      registerV1
+    );
+    const storeA = verifierSource.indexOf(
+      "await credentialsV1.store({",
+      registerV2
+    );
+    const storeB = verifierSource.indexOf(
+      "await credentialsV1.store({",
+      storeA + 1
+    );
+    const firstRead = verifierSource.indexOf(
+      "await credentialsV1.withDecryptedCredential(",
+      storeB
+    );
+    const tamper = verifierSource.indexOf(
+      "for (const field of [\"ciphertext\", \"nonce\", \"authTag\"])",
+      firstRead
+    );
+    const rotate = verifierSource.indexOf(
+      "const first = await rotation.rotateTenant({",
+      tamper
+    );
+    const retire = verifierSource.indexOf(
+      "() => rotation.retire({ keyVersion: versionV2 })",
+      rotate
+    );
+    const verify2A = verifierSource.indexOf(
+      "async function verify2ACompatibility()",
+      retire
+    );
+    const exactOrder = [
+      registerV1,
+      registerV2,
+      storeA,
+      storeB,
+      firstRead,
+      tamper,
+      rotate,
+      retire,
+      verify2A
+    ];
+    assert.ok(exactOrder.every((index) => index >= 0));
+    assert.deepEqual(
+      [...exactOrder].sort((left, right) => left - right),
+      exactOrder
+    );
+    const backupRestoreSource = fs.readFileSync(
+      path.join(
+        ROOT,
+        "src",
+        "persistence",
+        "postgres",
+        "backup-restore.js"
+      ),
+      "utf8"
+    );
+    const logicalRestore = backupRestoreSource.slice(
+      backupRestoreSource.indexOf("async function runLogicalRestore("),
+      backupRestoreSource.indexOf("module.exports = {")
+    );
+    const runtimeIsolationCall = logicalRestore.indexOf(
+      "(await verifyRuntimeIsolation())"
+    );
+    const vaultCall = logicalRestore.indexOf(
+      "(await verifyVault())",
+      runtimeIsolationCall
+    );
+    const compatibilityCall = logicalRestore.indexOf(
+      "(await verify2ACompatibility())",
+      vaultCall
+    );
+    assert.ok(
+      runtimeIsolationCall >= 0 &&
+      runtimeIsolationCall < vaultCall &&
+      vaultCall < compatibilityCall
+    );
+
+    const tracker = createBackupRestoreProvenanceTracker();
+    const request = {
+      runTool: spawnedToolRunner(tracker, [0, 0, 0, 0]),
+      async verifyVault() {
+        throw undefinedColumn;
+      }
+    };
+    await assert.rejects(
+      () => bindAndRunProvenance(
+        tracker,
+        "restore",
+        "rollback_restore_0003",
+        async (tracked) => {
+          for (let index = 0; index < 4; index += 1) {
+            await tracked.runTool();
+          }
+          await tracked.verifyVault();
+        },
+        request
+      ),
+      (error) => error === undefinedColumn
+    );
+    assert.deepEqual(tracker.failure(), {
+      operation: "rollback_restore_0003",
+      substep: "restore_vault",
+      boundary: "internal_callback",
+      causalCode: "backup_restore_internal_callback_failed",
+      externalTransportProcessStarted: false,
+      substepExact: true
+    });
+  } finally {
+    fixedLegacy.cleanup();
+  }
+});
+
+test("profile 0003 bridge uses the validated legacy read and current lifecycle while 0004 keeps the current factory", async () => {
+  const fixedLegacy = materializeFixedLegacy2AForTest();
+  try {
+    const profile0003 = SCHEMA_PROFILES.find(
+      (profile) => profile.id === PROFILE_0003_ID
+    );
+    const profile0004 = SCHEMA_PROFILES.find(
+      (profile) => profile.id === PROFILE_0004_ID
+    );
+    const companyId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    const otherCompanyId = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+    const credentialId = "55555555-5555-4555-8555-555555555555";
+    const connectionId = "22222222-2222-4222-8222-222222222222";
+    const keyMaterial = Buffer.alloc(32, 11);
+    const keyVersion = deriveVaultKeyVersion(103, keyMaterial);
+    keyMaterial.fill(0);
+    const row = Object.freeze({
+      company_id: companyId,
+      id: credentialId,
+      provider: "instagram",
+      connection_id: connectionId,
+      oauth_transaction_id: null,
+      credential_type: "access_token",
+      ciphertext: Buffer.from([7, 8, 9]),
+      nonce: Buffer.alloc(12, 4),
+      auth_tag: Buffer.alloc(16, 5),
+      key_version: keyVersion,
+      aad_version: 1,
+      expires_at: null,
+      revision: 1
+    });
+    const catalog = profileCredentialCatalogHarness(
+      PROFILE_0003_ID,
+      row
+    );
+    const repositoryOptions = Object.freeze({
+      pool: catalog.pool,
+      runtimeRole: "ia4tube_social_runtime",
+      identityDerivationVersion: "v1"
+    });
+    const currentRepository = createSocialRepository(repositoryOptions);
+    const legacyRepository =
+      fixedLegacy.dependencies.createSocialRepository(repositoryOptions);
+    const bridge = createProfile0003SocialRepositoryBridge(
+      currentRepository,
+      legacyRepository
+    );
+    assert.equal(Object.isFrozen(bridge), true);
+    assert.deepEqual(Reflect.ownKeys(bridge), Reflect.ownKeys(currentRepository));
+    for (const name of Reflect.ownKeys(currentRepository)) {
+      assert.equal(
+        bridge[name],
+        name === "findEncryptedCredential"
+          ? legacyRepository[name]
+          : currentRepository[name]
+      );
+    }
+    assert.equal(
+      Object.values(bridge).every((operation) => typeof operation === "function"),
+      true
+    );
+
+    const own = await bridge.findEncryptedCredential({
+      companyId,
+      credentialId
+    });
+    assert.equal(own.id, credentialId);
+    assert.equal(
+      await bridge.findEncryptedCredential({
+        companyId: otherCompanyId,
+        credentialId
+      }),
+      null
+    );
+    const read = catalog.queries.find(({ text }) =>
+      text.includes(
+        "FROM ia4tube_social.social_encrypted_credentials credential"
+      )
+    );
+    assert.ok(read);
+    assert.doesNotMatch(read.text, /\boauth\.failed_at\b/);
+    assert.match(read.text, /credential\.revoked_at IS NULL/);
+    assert.match(read.text, /credential\.expires_at > CURRENT_TIMESTAMP/);
+    assert.match(read.text, /connection\.status = 'active'/);
+    assert.match(read.text, /oauth\.cancelled_at IS NULL/);
+
+    const credentials = createSocialCredentialService({
+      repository: bridge,
+      vault: Object.freeze({
+        decrypt() { return Buffer.from("bridge-roundtrip", "utf8"); },
+        encrypt() { throw new Error("not_used"); },
+        rotate() { throw new Error("not_used"); }
+      })
+    });
+    assert.equal(typeof credentials.rotateForKeyLifecycle, "function");
+    const roundtrip = await credentials.withDecryptedCredential(
+      { companyId, credentialId },
+      (plaintext) => plaintext.toString("utf8")
+    );
+    assert.equal(roundtrip, "bridge-roundtrip");
+
+    for (const [label, candidateRow, catalogOptions] of [
+      [
+        "expired",
+        Object.freeze({ ...row, expires_at: new Date(0) }),
+        Object.freeze({})
+      ],
+      ["revoked", row, Object.freeze({ revoked: true })]
+    ]) {
+      const unavailableCatalog = profileCredentialCatalogHarness(
+        PROFILE_0003_ID,
+        candidateRow,
+        catalogOptions
+      );
+      const unavailableOptions = Object.freeze({
+        ...repositoryOptions,
+        pool: unavailableCatalog.pool
+      });
+      const unavailableBridge = createProfile0003SocialRepositoryBridge(
+        createSocialRepository(unavailableOptions),
+        fixedLegacy.dependencies.createSocialRepository(unavailableOptions)
+      );
+      assert.equal(
+        await unavailableBridge.findEncryptedCredential({
+          companyId,
+          credentialId
+        }),
+        null,
+        label
+      );
+    }
+
+    const profile0003Factory = createProfileAwareSocialRepositoryFactory({
+      currentCreateSocialRepository: createSocialRepository,
+      expectedProfile: profile0003,
+      legacyCreateSocialRepository:
+        fixedLegacy.dependencies.createSocialRepository
+    });
+    assert.notEqual(profile0003Factory, createSocialRepository);
+    assert.equal(Object.isFrozen(profile0003Factory), true);
+    const profile0004Factory = createProfileAwareSocialRepositoryFactory({
+      currentCreateSocialRepository: createSocialRepository,
+      expectedProfile: profile0004,
+      legacyCreateSocialRepository:
+        fixedLegacy.dependencies.createSocialRepository
+    });
+    assert.equal(profile0004Factory, createSocialRepository);
   } finally {
     fixedLegacy.cleanup();
   }

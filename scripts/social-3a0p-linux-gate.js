@@ -34,8 +34,9 @@ const {
   createPoolMetricsRegistry
 } = require("./social-3a0p-local-runtime-evidence-metrics");
 
-const BRANCH = "social/checkpoint-3a0p-linux-restore-provenance-20260808";
-const BASE_COMMIT = "0f09b99b06fc99b5e176414d7f8365a996704f4a";
+const BRANCH =
+  "social/checkpoint-3a0p-linux-profile0003-vault-bridge-20260808";
+const BASE_COMMIT = "ad453a930bce259f5b251a8324fc32ad388ce5b6";
 const PRODUCT_COMMIT = "fcfc92419021dae5f77baad731c634b10c275c5b";
 const MARKER = "[run-social-3a0p-linux-gate]";
 const RUN_MARKER_PREFIX = "ia4tube-social-3a0p-linux-";
@@ -2274,12 +2275,20 @@ function createRestoreBehaviorFacade(legacy2ARoot, overrides = {}) {
   const runtimeValidation = overrides.runtimeValidation === undefined
     ? require("../src/persistence/postgres/runtime-validation")
     : overrides.runtimeValidation;
+  const currentCreateSocialRepository = require(
+    "../src/persistence/postgres/social-repository"
+  ).createSocialRepository;
+  const createProfileAwareSocialRepositoryFactory = require(
+    "./social-3a0p-local-windows-physical-plans"
+  ).createProfileAwareSocialRepositoryFactory;
   if (
     !restoreBehavior ||
     typeof restoreBehavior.createRestoreBehaviorVerifiers !== "function" ||
     typeof restoreBehavior.loadLegacy2ADependencies !== "function" ||
     !runtimeValidation ||
-    typeof runtimeValidation.verifyRuntimeSchema !== "function"
+    typeof runtimeValidation.verifyRuntimeSchema !== "function" ||
+    typeof currentCreateSocialRepository !== "function" ||
+    typeof createProfileAwareSocialRepositoryFactory !== "function"
   ) {
     fail("linux_gate_restore_behavior_facade_invalid");
   }
@@ -2355,15 +2364,32 @@ function createRestoreBehaviorFacade(legacy2ARoot, overrides = {}) {
         fail("linux_gate_restore_behavior_options_invalid");
       }
       const expectedProfileId = options.expectedProfileId;
+      const profile = definitiveSchemaProfile(expectedProfileId);
       const verifyRuntimeSchemaForProfile = bindVerifier(expectedProfileId);
       const forwarded = { ...options };
       delete forwarded.expectedProfileId;
+      if (
+        forwarded.dependencies !== undefined && (
+          !forwarded.dependencies ||
+          Object.getPrototypeOf(forwarded.dependencies) !== Object.prototype ||
+          Object.hasOwn(forwarded.dependencies, "createSocialRepository")
+        )
+      ) {
+        fail("linux_gate_restore_behavior_repository_dependency_invalid");
+      }
+      const createSocialRepositoryForProfile =
+        createProfileAwareSocialRepositoryFactory({
+          expectedProfile: profile,
+          currentCreateSocialRepository,
+          legacyCreateSocialRepository: legacy.createSocialRepository
+        });
       return restoreBehavior.createRestoreBehaviorVerifiers({
         ...forwarded,
         legacy2ARoot,
         dependencies: {
           ...(forwarded.dependencies || {}),
-          verifyRuntimeSchema: verifyRuntimeSchemaForProfile
+          verifyRuntimeSchema: verifyRuntimeSchemaForProfile,
+          createSocialRepository: createSocialRepositoryForProfile
         },
         legacyDependencies: profileBoundLegacyDependencies(
           verifyRuntimeSchemaForProfile

@@ -33,6 +33,30 @@ const SCHEMA_PROFILE_IDS = Object.freeze([
   SCHEMA_PROFILE_0003,
   SCHEMA_PROFILE_0004
 ]);
+const CURRENT_SOCIAL_REPOSITORY_METHODS = Object.freeze([
+  "consumeReauthGrant",
+  "createConnection",
+  "createReauthGrant",
+  "findReauthIdentity",
+  "findConnection",
+  "findEncryptedCredential",
+  "findEncryptedCredentialForKeyRotation",
+  "listCredentialKeyVersions",
+  "rotateEncryptedCredential",
+  "rotateEncryptedCredentialForKeyRotation",
+  "storeEncryptedCredential"
+]);
+const LEGACY_SOCIAL_REPOSITORY_METHODS = Object.freeze([
+  "consumeReauthGrant",
+  "createConnection",
+  "createReauthGrant",
+  "findReauthIdentity",
+  "findConnection",
+  "findEncryptedCredential",
+  "listCredentialKeyVersions",
+  "rotateEncryptedCredential",
+  "storeEncryptedCredential"
+]);
 const BACKUP_PROVENANCE_OPERATIONS = new Set([
   "rollback_backup_0003",
   "gate5_backup_0003",
@@ -125,6 +149,106 @@ function requireCanonicalSchemaProfile(schemaProfiles, expectedProfileId) {
   return canonical;
 }
 
+function requireExactFrozenMethodObject(candidate, methodNames, code) {
+  if (
+    !candidate ||
+    Object.getPrototypeOf(candidate) !== Object.prototype ||
+    !Object.isFrozen(candidate)
+  ) {
+    fail(code);
+  }
+  const keys = Reflect.ownKeys(candidate);
+  if (
+    keys.some((key) => typeof key !== "string") ||
+    keys.length !== methodNames.length
+  ) {
+    fail(code);
+  }
+  const actualNames = [...keys].sort();
+  const expectedNames = [...methodNames].sort();
+  if (actualNames.some((key, index) => key !== expectedNames[index])) {
+    fail(code);
+  }
+  for (const name of methodNames) {
+    const descriptor = Object.getOwnPropertyDescriptor(candidate, name);
+    if (
+      !descriptor ||
+      descriptor.enumerable !== true ||
+      descriptor.configurable !== false ||
+      descriptor.writable !== false ||
+      typeof descriptor.value !== "function" ||
+      typeof descriptor.get === "function" ||
+      typeof descriptor.set === "function"
+    ) {
+      fail(code);
+    }
+  }
+  return candidate;
+}
+
+function createProfile0003SocialRepositoryBridge(
+  currentRepository,
+  legacyRepository
+) {
+  const current = requireExactFrozenMethodObject(
+    currentRepository,
+    CURRENT_SOCIAL_REPOSITORY_METHODS,
+    "windows_physical_current_social_repository_invalid"
+  );
+  const legacy = requireExactFrozenMethodObject(
+    legacyRepository,
+    LEGACY_SOCIAL_REPOSITORY_METHODS,
+    "windows_physical_2a_social_repository_invalid"
+  );
+  return requireExactFrozenMethodObject(
+    Object.freeze({
+      consumeReauthGrant: current.consumeReauthGrant,
+      createConnection: current.createConnection,
+      createReauthGrant: current.createReauthGrant,
+      findReauthIdentity: current.findReauthIdentity,
+      findConnection: current.findConnection,
+      findEncryptedCredential: legacy.findEncryptedCredential,
+      findEncryptedCredentialForKeyRotation:
+        current.findEncryptedCredentialForKeyRotation,
+      listCredentialKeyVersions: current.listCredentialKeyVersions,
+      rotateEncryptedCredential: current.rotateEncryptedCredential,
+      rotateEncryptedCredentialForKeyRotation:
+        current.rotateEncryptedCredentialForKeyRotation,
+      storeEncryptedCredential: current.storeEncryptedCredential
+    }),
+    CURRENT_SOCIAL_REPOSITORY_METHODS,
+    "windows_physical_profile0003_repository_bridge_invalid"
+  );
+}
+
+function createProfileAwareSocialRepositoryFactory({
+  currentCreateSocialRepository,
+  expectedProfile,
+  legacyCreateSocialRepository
+}) {
+  if (
+    !expectedProfile ||
+    Object.getPrototypeOf(expectedProfile) !== Object.prototype ||
+    !Object.isFrozen(expectedProfile) ||
+    !SCHEMA_PROFILE_IDS.includes(expectedProfile.id) ||
+    typeof currentCreateSocialRepository !== "function" ||
+    typeof legacyCreateSocialRepository !== "function"
+  ) {
+    fail("windows_physical_profile_repository_factory_invalid");
+  }
+  if (expectedProfile.id === SCHEMA_PROFILE_0004) {
+    return currentCreateSocialRepository;
+  }
+  return Object.freeze(function createProfile0003SocialRepository(options) {
+    const currentRepository = currentCreateSocialRepository(options);
+    const legacyRepository = legacyCreateSocialRepository(options);
+    return createProfile0003SocialRepositoryBridge(
+      currentRepository,
+      legacyRepository
+    );
+  });
+}
+
 function requireRestoreBehaviorFacade(candidate) {
   if (
     !candidate ||
@@ -139,6 +263,7 @@ function requireRestoreBehaviorFacade(candidate) {
 }
 
 function createDefaultRestoreBehaviorFacade({
+  currentSocialRepository,
   restoreBehavior,
   runtimeValidation,
   schemaProfiles,
@@ -148,6 +273,8 @@ function createDefaultRestoreBehaviorFacade({
     !restoreBehavior ||
     typeof restoreBehavior.createRestoreBehaviorVerifiers !== "function" ||
     typeof restoreBehavior.loadLegacy2ADependencies !== "function" ||
+    !currentSocialRepository ||
+    typeof currentSocialRepository.createSocialRepository !== "function" ||
     !runtimeValidation ||
     typeof runtimeValidation.verifyRuntimeSchema !== "function" ||
     typeof legacy2ARoot !== "string" ||
@@ -234,25 +361,44 @@ function createDefaultRestoreBehaviorFacade({
       if (
         !options ||
         Object.getPrototypeOf(options) !== Object.prototype ||
-        Object.hasOwn(options, "legacyDependencies")
+        Object.hasOwn(options, "legacyDependencies") ||
+        (options.dependencies !== undefined && (
+          !options.dependencies ||
+          Object.getPrototypeOf(options.dependencies) !== Object.prototype ||
+          Object.hasOwn(options.dependencies, "createSocialRepository")
+        ))
       ) {
         fail("windows_physical_restore_behavior_options_invalid");
       }
-      const verifyRuntimeSchema = boundSchemaVerifier(
+      const expectedProfile = requireCanonicalSchemaProfile(
+        schemaProfiles,
         options.expectedProfileId
       );
+      const verifyRuntimeSchema = boundSchemaVerifier(
+        expectedProfile.id
+      );
+      const legacyDependencies = profileBoundLegacyDependencies(
+        verifyRuntimeSchema
+      );
+      const createSocialRepository =
+        createProfileAwareSocialRepositoryFactory({
+          currentCreateSocialRepository:
+            currentSocialRepository.createSocialRepository,
+          expectedProfile,
+          legacyCreateSocialRepository:
+            legacyDependencies.createSocialRepository
+        });
       const forwarded = { ...options };
       delete forwarded.expectedProfileId;
       return restoreBehavior.createRestoreBehaviorVerifiers({
         ...forwarded,
         legacy2ARoot,
-        dependencies: {
+        dependencies: Object.freeze({
           ...(forwarded.dependencies || {}),
+          createSocialRepository,
           verifyRuntimeSchema
-        },
-        legacyDependencies: profileBoundLegacyDependencies(
-          verifyRuntimeSchema
-        )
+        }),
+        legacyDependencies
       });
     },
     verifyRuntimeSchemaForProfile(request) {
@@ -1125,6 +1271,7 @@ function createWindowsPhysicalPlans(options = {}) {
   );
   const restoreBehavior = options.dependencies?.restoreBehavior === undefined
     ? createDefaultRestoreBehaviorFacade({
+        currentSocialRepository: require("../src/persistence/postgres/social-repository"),
         restoreBehavior: require("../src/persistence/postgres/restore-behavior-verifiers"),
         runtimeValidation: require("../src/persistence/postgres/runtime-validation"),
         schemaProfiles: backup.SCHEMA_PROFILES,
@@ -1939,6 +2086,8 @@ module.exports = {
   BACKUP_LOGICAL_HOST,
   BACKUP_LOGICAL_PORT,
   BACKUP_PHYSICAL_MODE,
+  CURRENT_SOCIAL_REPOSITORY_METHODS,
+  LEGACY_SOCIAL_REPOSITORY_METHODS,
   LOCAL_DATABASE,
   LOOPBACK_HOST,
   MIGRATION_LOGIN,
@@ -1949,6 +2098,8 @@ module.exports = {
   assertRunBinding,
   createDefaultRestoreBehaviorFacade,
   createLocalPgToolRunner,
+  createProfile0003SocialRepositoryBridge,
+  createProfileAwareSocialRepositoryFactory,
   createWindowsPhysicalPlans,
   requireCanonicalSchemaProfile
 };

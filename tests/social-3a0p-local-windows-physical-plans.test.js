@@ -17,6 +17,7 @@ const {
   assertLocalToolPlan,
   createDefaultRestoreBehaviorFacade,
   createLocalPgToolRunner,
+  createProfile0003SocialRepositoryBridge,
   createWindowsPhysicalPlans,
   requireCanonicalSchemaProfile
 } = require("../scripts/social-3a0p-local-windows-physical-plans");
@@ -29,6 +30,40 @@ const EXECUTABLES = Object.freeze({
   pgDump: path.join(OWNED_ROOT, "pgsql", "bin", "pg_dump.exe"),
   pgRestore: path.join(OWNED_ROOT, "pgsql", "bin", "pg_restore.exe")
 });
+
+const CURRENT_SOCIAL_REPOSITORY_METHODS = Object.freeze([
+  "consumeReauthGrant",
+  "createConnection",
+  "createReauthGrant",
+  "findReauthIdentity",
+  "findConnection",
+  "findEncryptedCredential",
+  "findEncryptedCredentialForKeyRotation",
+  "listCredentialKeyVersions",
+  "rotateEncryptedCredential",
+  "rotateEncryptedCredentialForKeyRotation",
+  "storeEncryptedCredential"
+]);
+const LEGACY_SOCIAL_REPOSITORY_METHODS = Object.freeze(
+  CURRENT_SOCIAL_REPOSITORY_METHODS.filter(
+    (name) => ![
+      "findEncryptedCredentialForKeyRotation",
+      "rotateEncryptedCredentialForKeyRotation"
+    ].includes(name)
+  )
+);
+
+function frozenMethodRepository(methodNames, calls, failures = {}) {
+  const repository = {};
+  for (const name of methodNames) {
+    repository[name] = async (...args) => {
+      calls.push(Object.freeze({ args, name }));
+      if (failures[name]) throw failures[name];
+      return Object.freeze({ name });
+    };
+  }
+  return Object.freeze(repository);
+}
 
 function productPlan(overrides = {}) {
   return {
@@ -483,14 +518,37 @@ test("optional backup/restore provenance dependency requires the exact four-meth
 function defaultRestoreBehaviorFacadeFixture(options = {}) {
   const calls = {
     created: [],
+    currentRepositoryFactory: [],
+    currentRepositoryMethods: [],
     currentSchema: [],
+    legacyRepositoryFactory: [],
+    legacyRepositoryMethods: [],
     legacyLoad: [],
     legacySchema: []
   };
+  const currentRepository = options.currentRepository || frozenMethodRepository(
+    CURRENT_SOCIAL_REPOSITORY_METHODS,
+    calls.currentRepositoryMethods,
+    options.currentRepositoryFailures
+  );
+  const legacyRepository = options.legacyRepository || frozenMethodRepository(
+    LEGACY_SOCIAL_REPOSITORY_METHODS,
+    calls.legacyRepositoryMethods,
+    options.legacyRepositoryFailures
+  );
+  const currentSocialRepository = Object.freeze({
+    createSocialRepository(repositoryOptions) {
+      calls.currentRepositoryFactory.push(repositoryOptions);
+      return currentRepository;
+    }
+  });
   const legacy = Object.freeze({
     createCompanyScopedRepository() {},
     createSocialCredentialService() {},
-    createSocialRepository() {},
+    createSocialRepository(repositoryOptions) {
+      calls.legacyRepositoryFactory.push(repositoryOptions);
+      return legacyRepository;
+    },
     createSocialVault() {},
     verifyRuntimeRole() {},
     async verifyRuntimeSchema(...args) {
@@ -525,6 +583,7 @@ function defaultRestoreBehaviorFacadeFixture(options = {}) {
     "C:\\synthetic-legacy\\social-checkpoint-2a-postgres-vault-20260729"
   );
   const facade = createDefaultRestoreBehaviorFacade({
+    currentSocialRepository,
     restoreBehavior,
     runtimeValidation,
     schemaProfiles,
@@ -532,8 +591,11 @@ function defaultRestoreBehaviorFacadeFixture(options = {}) {
   });
   return Object.freeze({
     calls,
+    currentRepository,
+    currentSocialRepository,
     facade,
     legacy,
+    legacyRepository,
     legacy2ARoot
   });
 }
@@ -610,6 +672,203 @@ test("default Windows restore facade binds 0003 legacy and 0004 current into bot
   });
   assert.equal(fixture.calls.currentSchema.length, 3);
   assert.equal(fixture.facade.schemaProfileDiagnostics(), null);
+});
+
+test("default Windows restore facade binds the 0003 repository bridge before creation and leaves 0004 current by identity", () => {
+  const fixture = defaultRestoreBehaviorFacadeFixture();
+  const profile0003 = fixture.facade.createRestoreBehaviorVerifiers({
+    expectedProfileId: "social-schema-0003",
+    dependencies: { PoolClass: class SyntheticPool0003 {} }
+  }).configuration;
+  const profile0004 = fixture.facade.createRestoreBehaviorVerifiers({
+    expectedProfileId: "social-schema-0004",
+    dependencies: { PoolClass: class SyntheticPool0004 {} }
+  }).configuration;
+
+  assert.equal(
+    profile0004.dependencies.createSocialRepository,
+    fixture.currentSocialRepository.createSocialRepository
+  );
+  assert.notEqual(
+    profile0003.dependencies.createSocialRepository,
+    fixture.currentSocialRepository.createSocialRepository
+  );
+
+  const repositoryOptions = Object.freeze({
+    identityDerivationVersion: "v1",
+    pool: Object.freeze({ connect() {} }),
+    runtimeRole: "ia4tube_social_runtime"
+  });
+  const bridge = profile0003.dependencies.createSocialRepository(
+    repositoryOptions
+  );
+  assert.equal(Object.getPrototypeOf(bridge), Object.prototype);
+  assert.equal(Object.isFrozen(bridge), true);
+  assert.deepEqual(
+    Reflect.ownKeys(bridge).sort(),
+    [...CURRENT_SOCIAL_REPOSITORY_METHODS].sort()
+  );
+  assert.equal(
+    bridge.findEncryptedCredential,
+    fixture.legacyRepository.findEncryptedCredential
+  );
+  for (const name of CURRENT_SOCIAL_REPOSITORY_METHODS) {
+    const descriptor = Object.getOwnPropertyDescriptor(bridge, name);
+    assert.equal(descriptor.enumerable, true);
+    assert.equal(descriptor.configurable, false);
+    assert.equal(descriptor.writable, false);
+    assert.equal(typeof descriptor.value, "function");
+    if (name !== "findEncryptedCredential") {
+      assert.equal(bridge[name], fixture.currentRepository[name]);
+    }
+  }
+  assert.deepEqual(fixture.calls.currentRepositoryFactory, [repositoryOptions]);
+  assert.deepEqual(fixture.calls.legacyRepositoryFactory, [repositoryOptions]);
+  assert.equal(
+    profile0003.legacyDependencies.createSocialRepository,
+    fixture.legacy.createSocialRepository
+  );
+  assert.equal(
+    profile0004.legacyDependencies.createSocialRepository,
+    fixture.legacy.createSocialRepository
+  );
+
+  const current0004 = profile0004.dependencies.createSocialRepository(
+    repositoryOptions
+  );
+  assert.equal(current0004, fixture.currentRepository);
+  assert.deepEqual(
+    fixture.calls.currentRepositoryFactory,
+    [repositoryOptions, repositoryOptions]
+  );
+  assert.deepEqual(fixture.calls.legacyRepositoryFactory, [repositoryOptions]);
+});
+
+test("profile 0003 repository bridge refuses every non-closed repository shape", () => {
+  const current = frozenMethodRepository(
+    CURRENT_SOCIAL_REPOSITORY_METHODS,
+    []
+  );
+  const legacy = frozenMethodRepository(
+    LEGACY_SOCIAL_REPOSITORY_METHODS,
+    []
+  );
+  const malformed = (repository) => {
+    const nullPrototype = Object.assign(Object.create(null), repository);
+    const withSymbol = { ...repository };
+    withSymbol[Symbol("hidden_repository")] = async () => undefined;
+    const withGetter = { ...repository };
+    Object.defineProperty(withGetter, "findEncryptedCredential", {
+      configurable: true,
+      enumerable: true,
+      get() {
+        return repository.findEncryptedCredential;
+      }
+    });
+    const missing = { ...repository };
+    delete missing.findEncryptedCredential;
+    return [
+      { ...repository },
+      Object.freeze(nullPrototype),
+      Object.freeze({ ...repository, unexpectedMethod: async () => undefined }),
+      Object.freeze(withSymbol),
+      Object.freeze(withGetter),
+      Object.freeze(missing),
+      Object.freeze({ ...repository, findEncryptedCredential: true })
+    ];
+  };
+
+  for (const candidate of malformed(current)) {
+    assert.throws(
+      () => createProfile0003SocialRepositoryBridge(candidate, legacy),
+      {
+        code: "windows_physical_current_social_repository_invalid",
+        name: "WindowsPhysicalPlanFailure"
+      }
+    );
+  }
+  for (const candidate of malformed(legacy)) {
+    assert.throws(
+      () => createProfile0003SocialRepositoryBridge(current, candidate),
+      {
+        code: "windows_physical_2a_social_repository_invalid",
+        name: "WindowsPhysicalPlanFailure"
+      }
+    );
+  }
+});
+
+test("profile-bound repository reads propagate their selected error without fallback", async () => {
+  const legacyFailure = Object.assign(new Error("legacy_read_failed"), {
+    code: "42703"
+  });
+  const profile0003 = defaultRestoreBehaviorFacadeFixture({
+    legacyRepositoryFailures: { findEncryptedCredential: legacyFailure }
+  });
+  const selected0003 = profile0003.facade.createRestoreBehaviorVerifiers({
+    expectedProfileId: "social-schema-0003"
+  }).configuration.dependencies.createSocialRepository({});
+  await assert.rejects(
+    selected0003.findEncryptedCredential({}),
+    (error) => error === legacyFailure
+  );
+  assert.deepEqual(
+    profile0003.calls.legacyRepositoryMethods.map(({ name }) => name),
+    ["findEncryptedCredential"]
+  );
+  assert.deepEqual(profile0003.calls.currentRepositoryMethods, []);
+
+  const currentFailure = Object.assign(new Error("current_read_failed"), {
+    code: "42703"
+  });
+  const profile0004 = defaultRestoreBehaviorFacadeFixture({
+    currentRepositoryFailures: { findEncryptedCredential: currentFailure }
+  });
+  const selected0004 = profile0004.facade.createRestoreBehaviorVerifiers({
+    expectedProfileId: "social-schema-0004"
+  }).configuration.dependencies.createSocialRepository({});
+  await assert.rejects(
+    selected0004.findEncryptedCredential({}),
+    (error) => error === currentFailure
+  );
+  assert.deepEqual(
+    profile0004.calls.currentRepositoryMethods.map(({ name }) => name),
+    ["findEncryptedCredential"]
+  );
+  assert.deepEqual(profile0004.calls.legacyRepositoryFactory, []);
+  assert.deepEqual(profile0004.calls.legacyRepositoryMethods, []);
+});
+
+test("default Windows repository selection refuses unknown profiles and caller factories before creation", () => {
+  const fixture = defaultRestoreBehaviorFacadeFixture();
+  assert.throws(
+    () => fixture.facade.createRestoreBehaviorVerifiers({
+      expectedProfileId: "social-schema-unknown",
+      dependencies: { PoolClass: class SyntheticPool {} }
+    }),
+    {
+      code: "windows_physical_schema_profile_invalid",
+      name: "WindowsPhysicalPlanFailure"
+    }
+  );
+  assert.throws(
+    () => fixture.facade.createRestoreBehaviorVerifiers({
+      expectedProfileId: "social-schema-0003",
+      dependencies: {
+        createSocialRepository() {
+          throw new Error("caller_factory_must_not_run");
+        }
+      }
+    }),
+    {
+      code: "windows_physical_restore_behavior_options_invalid",
+      name: "WindowsPhysicalPlanFailure"
+    }
+  );
+  assert.deepEqual(fixture.calls.created, []);
+  assert.deepEqual(fixture.calls.legacyLoad, []);
+  assert.deepEqual(fixture.calls.currentRepositoryFactory, []);
+  assert.deepEqual(fixture.calls.legacyRepositoryFactory, []);
 });
 
 test("default Windows restore facade treats a validated legacy loader failure as terminal without fallback", () => {
