@@ -26,6 +26,7 @@ const {
   runConcurrencyOAuthIdempotencyGate,
   runPersistedVaultGate,
   runRlsAndRoleGate,
+  runRlsPrivilegeInventoryContextReproduction,
   runRlsRuntimeWriteContractReproduction,
   runVaultSupplementalGate
 } = require("./social-3a0p-linux-physical-gates");
@@ -36,8 +37,8 @@ const {
 } = require("./social-3a0p-local-runtime-evidence-metrics");
 
 const BRANCH =
-  "social/checkpoint-3a0p-linux-rls-runtime-write-contract-20260809";
-const BASE_COMMIT = "32309df0e44488420e1e3352c8d62d12e944a264";
+  "social/checkpoint-3a0p-linux-rls-inventory-context-20260809";
+const BASE_COMMIT = "77f0eb732497f9f8d4f1139e2a6ded80ac0a3476";
 const PRODUCT_COMMIT = "fcfc92419021dae5f77baad731c634b10c275c5b";
 const MARKER = "[run-social-3a0p-linux-gate]";
 const RUN_MARKER_PREFIX = "ia4tube-social-3a0p-linux-";
@@ -135,6 +136,7 @@ const BACKUP_RESTORE_SUBSTEPS = new Set([
 ]);
 const SAFE_PHASE = new Set([
   "platform", "durability", "postgres", "bootstrap", "migrations",
+  "rls_privilege_inventory_context_reproduction",
   "rls_runtime_write_contract_reproduction", "rls_roles",
   "concurrency_oauth_idempotency", "vault", "backup_restore", "metrics", "secret_scan", "cleanup"
 ]);
@@ -142,6 +144,12 @@ const RLS_SUBSTEPS = new Set([
   "rls_base_gate",
   "rls_seed_tenants",
   "rls_privilege_inventory",
+  "rls_inventory_direct_session_identity",
+  "rls_inventory_direct_schema_access",
+  "rls_inventory_direct_name_resolution_refusal",
+  "rls_inventory_migrator_role_activation",
+  "rls_inventory_migrator_privilege_read",
+  "rls_inventory_role_reset",
   "rls_core_user_insert_reproduction",
   "rls_core_user_insert_refusal",
   "rls_bidirectional_read",
@@ -152,6 +160,25 @@ const RLS_SUBSTEPS = new Set([
   "rls_connection_scope_reset",
   "rls_runtime_role_attributes"
 ]);
+const RLS_INVENTORY_CONTEXT_REPRODUCTION_RESULT = Object.freeze({
+  aclUnchanged: true,
+  directLoginBypassRls: false,
+  directLoginCanSetMigratorRole: true,
+  directLoginCreateRole: false,
+  directLoginInheritsMigratorRole: false,
+  directLoginSuperuser: false,
+  directNameResolutionRefused: true,
+  directPoolUsableAfterRefusal: true,
+  directSchemaUsage: false,
+  directSessionIdentityVerified: true,
+  directTransactionPersisted: false,
+  migratorInventorySucceeded: true,
+  migratorRoleActivated: true,
+  migratorSchemaUsage: true,
+  migratorSessionIdentityPreserved: true,
+  privilegesUnchanged: true,
+  roleResetAfterTransaction: true
+});
 const RLS_BASE_GATE_RESULT = Object.freeze({
   forceRls: true,
   missingContextRefused: true,
@@ -344,6 +371,34 @@ function publicRlsRuntimeWriteContractReproductionEvidence(candidate) {
   return RLS_REPRODUCTION_EVIDENCE;
 }
 
+function publicRlsPrivilegeInventoryContextReproductionEvidence(candidate) {
+  return exactRlsResult(
+    candidate,
+    RLS_INVENTORY_CONTEXT_REPRODUCTION_RESULT,
+    "rls_privilege_inventory_context_reproduction_invalid"
+  );
+}
+
+async function runRlsPrivilegeInventoryContextPhase(options = {}) {
+  const {
+    state,
+    runSubstep,
+    runReproduction = runRlsPrivilegeInventoryContextReproduction
+  } = options;
+  if (
+    !state || typeof runSubstep !== "function" ||
+    typeof runReproduction !== "function"
+  ) {
+    fail("rls_privilege_inventory_context_orchestrator_invalid");
+  }
+  const candidate = await runReproduction(state, Object.freeze({ runSubstep }));
+  try {
+    return publicRlsPrivilegeInventoryContextReproductionEvidence(candidate);
+  } catch (error) {
+    return runSubstep("rls_inventory_role_reset", async () => { throw error; });
+  }
+}
+
 function publicRlsRoleGateEvidence(candidate) {
   return exactRlsResult(
     candidate,
@@ -356,6 +411,7 @@ function createRlsRuntimeWriteContractOrchestrator(options = {}) {
   const {
     state,
     gates,
+    inventoryContextReproduction,
     runSubstep,
     legacyFailureCode = failureCode,
     runReproduction = runRlsRuntimeWriteContractReproduction,
@@ -370,6 +426,11 @@ function createRlsRuntimeWriteContractOrchestrator(options = {}) {
   ) {
     fail("rls_runtime_write_contract_orchestrator_invalid");
   }
+  const inventoryContext = exactRlsResult(
+    inventoryContextReproduction,
+    RLS_INVENTORY_CONTEXT_REPRODUCTION_RESULT,
+    "rls_privilege_inventory_context_reproduction_required"
+  );
   let status = "ready";
   let reproduction = null;
 
@@ -382,6 +443,7 @@ function createRlsRuntimeWriteContractOrchestrator(options = {}) {
         exactRlsResult(base, RLS_BASE_GATE_RESULT, "rls_base_gate_evidence_invalid");
       });
       const candidate = await runReproduction(state, Object.freeze({
+        inventoryContextReproduction: inventoryContext,
         legacyFailureCode,
         runSubstep
       }));
@@ -3048,11 +3110,6 @@ async function runLinuxGate(options = {}) {
       }
     });
     gates.assertConfigured();
-    const rlsRuntimeWriteContract = createRlsRuntimeWriteContractOrchestrator({
-      state,
-      gates,
-      runSubstep: rlsFailureProvenance.runSubstep
-    });
     activePhase = "migrations";
     await phase("migrations", async () => {
       const base = await gates.migration({ state });
@@ -3061,6 +3118,20 @@ async function runLinuxGate(options = {}) {
       return Object.freeze({ ...base, ...catalog });
     });
     sampleSpace();
+    activePhase = "rls_privilege_inventory_context_reproduction";
+    const inventoryContextReproduction = await phase(
+      "rls_privilege_inventory_context_reproduction",
+      () => runRlsPrivilegeInventoryContextPhase({
+        state,
+        runSubstep: rlsFailureProvenance.runSubstep
+      })
+    );
+    const rlsRuntimeWriteContract = createRlsRuntimeWriteContractOrchestrator({
+      state,
+      gates,
+      inventoryContextReproduction,
+      runSubstep: rlsFailureProvenance.runSubstep
+    });
     activePhase = "rls_runtime_write_contract_reproduction";
     await phase(
       "rls_runtime_write_contract_reproduction",
@@ -3348,6 +3419,7 @@ module.exports = {
   publicPlatformEvidence,
   publicBootstrapEvidence,
   publicBackupTransportEvidence,
+  publicRlsPrivilegeInventoryContextReproductionEvidence,
   publicRlsRoleGateEvidence,
   publicRlsRuntimeWriteContractReproductionEvidence,
   retirePrimaryPoolsBeforeBackup,
@@ -3355,5 +3427,6 @@ module.exports = {
   sanitizedBackupRestoreFailureProvenance,
   sanitizedFailureEvidence,
   sanitizedRlsFailureProvenance,
+  runRlsPrivilegeInventoryContextPhase,
   runLinuxGate
 };

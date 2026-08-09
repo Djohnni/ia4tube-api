@@ -74,13 +74,15 @@ const {
   publicBackupTransportEvidence,
   publicBootstrapEvidence,
   publicPlatformEvidence,
+  publicRlsPrivilegeInventoryContextReproductionEvidence,
   publicRlsRoleGateEvidence,
   publicRlsRuntimeWriteContractReproductionEvidence,
   retirePrimaryPoolsBeforeBackup,
   rlsFailureCode,
   sanitizedBackupRestoreFailureProvenance,
   sanitizedFailureEvidence,
-  sanitizedRlsFailureProvenance
+  sanitizedRlsFailureProvenance,
+  runRlsPrivilegeInventoryContextPhase
 } = require("../scripts/social-3a0p-linux-gate");
 
 const ROOT = path.resolve(__dirname, "..");
@@ -101,6 +103,29 @@ function validRlsBaseGateResult(overrides = {}) {
     tamperedContextRefused: true,
     forceRls: true,
     syntheticCompanies: 2,
+    ...overrides
+  };
+}
+
+function validRlsInventoryContextReproductionResult(overrides = {}) {
+  return {
+    directSessionIdentityVerified: true,
+    directLoginSuperuser: false,
+    directLoginBypassRls: false,
+    directLoginCreateRole: false,
+    directLoginCanSetMigratorRole: true,
+    directLoginInheritsMigratorRole: false,
+    directSchemaUsage: false,
+    directNameResolutionRefused: true,
+    directTransactionPersisted: false,
+    directPoolUsableAfterRefusal: true,
+    migratorSessionIdentityPreserved: true,
+    migratorRoleActivated: true,
+    migratorSchemaUsage: true,
+    migratorInventorySucceeded: true,
+    roleResetAfterTransaction: true,
+    privilegesUnchanged: true,
+    aclUnchanged: true,
     ...overrides
   };
 }
@@ -2000,6 +2025,138 @@ test("RLS failure provenance preserves only the first closed substep and causal 
   assert.equal(evidenceSafe(fallback), true);
 });
 
+test("RLS inventory-context evidence is exact, frozen, boolean-only, and identity-free", () => {
+  const evidence = publicRlsPrivilegeInventoryContextReproductionEvidence(
+    validRlsInventoryContextReproductionResult()
+  );
+  assert.equal(Object.isFrozen(evidence), true);
+  assert.deepEqual(
+    Object.keys(evidence).sort(),
+    Object.keys(validRlsInventoryContextReproductionResult()).sort()
+  );
+  assert.equal(Object.keys(evidence).length, 17);
+  assert.equal(Object.values(evidence).every((value) => typeof value === "boolean"), true);
+  for (const forbidden of [
+    "sessionUser", "currentUser", "login", "roleName", "sql", "arguments", "message"
+  ]) {
+    assert.equal(Object.hasOwn(evidence, forbidden), false);
+  }
+  assert.equal(evidenceSafe({ inventoryContextReproduction: evidence }), true);
+  assert.throws(
+    () => publicRlsPrivilegeInventoryContextReproductionEvidence(
+      validRlsInventoryContextReproductionResult({ migratorSchemaUsage: false })
+    ),
+    {
+      code: "rls_privilege_inventory_context_reproduction_invalid",
+      name: "LinuxGateFailure"
+    }
+  );
+});
+
+test("RLS inventory-context phase passes only canonical state and the closed substep adapter", async () => {
+  const tracker = createRlsFailureProvenanceTracker();
+  const state = Object.freeze({ synthetic: true });
+  const calls = [];
+  const evidence = await runRlsPrivilegeInventoryContextPhase({
+    state,
+    runSubstep: tracker.runSubstep,
+    async runReproduction(receivedState, dependencies) {
+      assert.equal(receivedState, state);
+      assert.deepEqual(Object.keys(dependencies), ["runSubstep"]);
+      assert.equal(dependencies.runSubstep, tracker.runSubstep);
+      await dependencies.runSubstep(
+        "rls_inventory_direct_session_identity",
+        async () => { calls.push("direct-session"); }
+      );
+      await dependencies.runSubstep(
+        "rls_inventory_migrator_role_activation",
+        async () => { calls.push("migrator-role"); }
+      );
+      await dependencies.runSubstep(
+        "rls_inventory_role_reset",
+        async () => { calls.push("role-reset"); }
+      );
+      return validRlsInventoryContextReproductionResult();
+    }
+  });
+  assert.deepEqual(calls, ["direct-session", "migrator-role", "role-reset"]);
+  assert.deepEqual(evidence, validRlsInventoryContextReproductionResult());
+  assert.equal(tracker.failure(), null);
+});
+
+test("RLS inventory-context divergence stops before old reproduction and Gate 2", async () => {
+  const tracker = createRlsFailureProvenanceTracker();
+  const calls = [];
+  const evidence = { phases: [], firstFailure: null };
+  const phase = createPhaseRunner(evidence);
+  await phase("migrations", async () => ({ gate1Passed: true }));
+  await assert.rejects(
+    phase(
+      "rls_privilege_inventory_context_reproduction",
+      () => runRlsPrivilegeInventoryContextPhase({
+        state: {},
+        runSubstep: tracker.runSubstep,
+        async runReproduction() {
+          calls.push("inventory-context");
+          return validRlsInventoryContextReproductionResult({ migratorSchemaUsage: false });
+        }
+      })
+    ),
+    {
+      code: "rls_privilege_inventory_context_reproduction_invalid",
+      name: "LinuxGateFailure"
+    }
+  );
+  await assert.rejects(
+    phase("rls_runtime_write_contract_reproduction", async () => {
+      calls.push("forbidden-old-reproduction");
+    }),
+    { code: "linux_gate_phase_after_failure_refused", name: "LinuxGateFailure" }
+  );
+  await assert.rejects(
+    phase("rls_roles", async () => { calls.push("forbidden-gate-2"); }),
+    { code: "linux_gate_phase_after_failure_refused", name: "LinuxGateFailure" }
+  );
+  assert.deepEqual(calls, ["inventory-context"]);
+  assert.deepEqual(evidence.firstFailure, {
+    phase: "rls_privilege_inventory_context_reproduction",
+    code: "rls_privilege_inventory_context_reproduction_invalid"
+  });
+  assert.deepEqual(tracker.failure(), {
+    substep: "rls_inventory_role_reset",
+    causalCode: "rls_privilege_inventory_context_reproduction_invalid"
+  });
+});
+
+test("RLS write-contract orchestrator requires the canonical inventory-context proof", () => {
+  const options = {
+    state: {},
+    gates: { async rls() { return validRlsBaseGateResult(); } },
+    runSubstep: createRlsFailureProvenanceTracker().runSubstep,
+    async runReproduction() { return validRlsReproductionResult(); },
+    async runCorrected() { return validRlsRoleGateResult(); }
+  };
+  assert.throws(
+    () => createRlsRuntimeWriteContractOrchestrator(options),
+    {
+      code: "rls_privilege_inventory_context_reproduction_required",
+      name: "LinuxGateFailure"
+    }
+  );
+  assert.throws(
+    () => createRlsRuntimeWriteContractOrchestrator({
+      ...options,
+      inventoryContextReproduction: validRlsInventoryContextReproductionResult({
+        migratorSchemaUsage: false
+      })
+    }),
+    {
+      code: "rls_privilege_inventory_context_reproduction_required",
+      name: "LinuxGateFailure"
+    }
+  );
+});
+
 test("RLS reproduction and corrected evidence have exact frozen boolean inventories", () => {
   const reproduction = publicRlsRuntimeWriteContractReproductionEvidence(
     validRlsReproductionResult()
@@ -2034,6 +2191,7 @@ test("RLS orchestrator runs base then reproduction then corrected without publis
   const state = Object.freeze({ synthetic: true });
   const orchestrator = createRlsRuntimeWriteContractOrchestrator({
     state,
+    inventoryContextReproduction: validRlsInventoryContextReproductionResult(),
     gates: {
       async rls(request) {
         assert.equal(request.state, state);
@@ -2044,9 +2202,13 @@ test("RLS orchestrator runs base then reproduction then corrected without publis
     runSubstep: tracker.runSubstep,
     async runReproduction(receivedState, dependencies) {
       assert.equal(receivedState, state);
+      assert.deepEqual(
+        dependencies.inventoryContextReproduction,
+        validRlsInventoryContextReproductionResult()
+      );
       assert.equal(dependencies.legacyFailureCode({ code: "42501" }), "linux_gate_unclassified_failure");
       calls.push("reproduction");
-      await dependencies.runSubstep("rls_privilege_inventory", async () => {
+      await dependencies.runSubstep("rls_inventory_migrator_privilege_read", async () => {
         calls.push("inventory");
       });
       return validRlsReproductionResult();
@@ -2079,6 +2241,7 @@ test("RLS orchestrator refuses a noncanonical base result before reproduction", 
   const tracker = createRlsFailureProvenanceTracker();
   const orchestrator = createRlsRuntimeWriteContractOrchestrator({
     state: {},
+    inventoryContextReproduction: validRlsInventoryContextReproductionResult(),
     gates: {
       async rls() {
         calls.push("base");
@@ -2110,6 +2273,7 @@ test("RLS orchestrator attributes a noncanonical corrected result before later g
   const tracker = createRlsFailureProvenanceTracker();
   const orchestrator = createRlsRuntimeWriteContractOrchestrator({
     state: {},
+    inventoryContextReproduction: validRlsInventoryContextReproductionResult(),
     gates: { async rls() { return validRlsBaseGateResult(); } },
     runSubstep: tracker.runSubstep,
     async runReproduction() { return validRlsReproductionResult(); },
@@ -2133,6 +2297,7 @@ test("RLS reproduction divergence fails closed before corrected and later phases
   const tracker = createRlsFailureProvenanceTracker();
   const orchestrator = createRlsRuntimeWriteContractOrchestrator({
     state: {},
+    inventoryContextReproduction: validRlsInventoryContextReproductionResult(),
     gates: {
       async rls() {
         calls.push("base");
@@ -4359,6 +4524,7 @@ test("Linux gate source reuses product plans and has no external provider call",
   assert.doesNotMatch(physical, /\b(?:fetch|axios|https?\.request|tls\.connect|net\.connect)\s*\(/);
   const order = [
     'phase("migrations"',
+    'activePhase = "rls_privilege_inventory_context_reproduction";',
     'activePhase = "rls_runtime_write_contract_reproduction";',
     'phase("rls_roles"',
     'phase("concurrency_oauth_idempotency"',

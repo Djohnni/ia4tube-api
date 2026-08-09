@@ -52,28 +52,74 @@ function requireSubstepRunner(dependencies) {
   return dependencies.runSubstep;
 }
 
-async function runtimeWritePrivilegeInventory(pool) {
-  const result = await pool.query([
+const RLS_INVENTORY_RELATIONS = Object.freeze([
+  "social_audit_events",
+  "users"
+]);
+
+const RLS_INVENTORY_CONTEXT_RESULT = Object.freeze({
+  directSessionIdentityVerified: true,
+  directLoginSuperuser: false,
+  directLoginBypassRls: false,
+  directLoginCreateRole: false,
+  directLoginCanSetMigratorRole: true,
+  directLoginInheritsMigratorRole: false,
+  directSchemaUsage: false,
+  directNameResolutionRefused: true,
+  directTransactionPersisted: false,
+  directPoolUsableAfterRefusal: true,
+  migratorSessionIdentityPreserved: true,
+  migratorRoleActivated: true,
+  migratorSchemaUsage: true,
+  migratorInventorySucceeded: true,
+  roleResetAfterTransaction: true,
+  privilegesUnchanged: true,
+  aclUnchanged: true
+});
+
+function exactInventoryRelationRows(rows, code) {
+  if (!Array.isArray(rows) || rows.length !== RLS_INVENTORY_RELATIONS.length) fail(code);
+  const ordered = [...rows].sort((left, right) =>
+    String(left?.relation_name || "").localeCompare(String(right?.relation_name || ""))
+  );
+  if (ordered.map((row) => row?.relation_name).join(",") !== RLS_INVENTORY_RELATIONS.join(",")) {
+    fail(code);
+  }
+  return ordered;
+}
+
+function relationAclFingerprint(rows) {
+  const canonical = exactInventoryRelationRows(
+    rows,
+    "linux_gate_rls_privilege_inventory_relations_invalid"
+  ).map((row) => Object.freeze({
+    relationName: row.relation_name,
+    schemaAcl: row.schema_acl === null || row.schema_acl === undefined ? null : String(row.schema_acl),
+    relationAcl: row.relation_acl === null || row.relation_acl === undefined ? null : String(row.relation_acl)
+  }));
+  return crypto.createHash("sha256").update(JSON.stringify(canonical)).digest("hex");
+}
+
+async function runtimeWritePrivilegeInventory(client) {
+  if (!client || typeof client.query !== "function" || typeof client.release !== "function") {
+    fail("linux_gate_rls_privilege_inventory_client_required");
+  }
+  const result = await client.query([
     "SELECT",
-    " pg_has_role($1,$2,'SET') AS runtime_login_can_set_role,",
-    " has_table_privilege($1,'ia4tube_social.users','INSERT') AS runtime_login_core_user_insert,",
-    " has_table_privilege($2,'ia4tube_social.users','INSERT') AS core_user_insert,",
-    " has_table_privilege($2,'ia4tube_social.social_audit_events','INSERT') AS social_audit_insert,",
-    " EXISTS(",
-    "   SELECT 1",
-    "   FROM pg_catalog.pg_class relation",
-    "   JOIN pg_catalog.pg_namespace namespace ON namespace.oid=relation.relnamespace",
-    "   WHERE namespace.nspname='ia4tube_social'",
-    "     AND relation.relname='social_audit_events'",
-    "     AND relation.relrowsecurity",
-    "     AND relation.relforcerowsecurity",
-    " ) AS social_audit_rls_enabled,",
+    " relation.relname AS relation_name,",
+    " session_user=$1 AS session_user_is_migration,",
+    " current_user=$2 AS current_user_is_migrator,",
+    " has_schema_privilege(current_user,namespace.oid,'USAGE') AS schema_usage,",
+    " pg_has_role($3,$4,'SET') AS runtime_login_can_set_role,",
+    " has_table_privilege($3,relation.oid,'INSERT') AS runtime_login_insert,",
+    " has_table_privilege($4,relation.oid,'INSERT') AS runtime_insert,",
+    " (relation.relname='social_audit_events'",
+    "   AND relation.relrowsecurity",
+    "   AND relation.relforcerowsecurity) AS social_audit_rls_enabled,",
     " EXISTS(",
     "   SELECT 1",
     "   FROM pg_catalog.pg_policy policy",
-    "   JOIN pg_catalog.pg_class relation ON relation.oid=policy.polrelid",
-    "   JOIN pg_catalog.pg_namespace namespace ON namespace.oid=relation.relnamespace",
-    "   WHERE namespace.nspname='ia4tube_social'",
+    "   WHERE policy.polrelid=relation.oid",
     "     AND relation.relname='social_audit_events'",
     "     AND policy.polname='social_audit_events_company_scope'",
     "     AND policy.polcmd='*'",
@@ -90,27 +136,278 @@ async function runtimeWritePrivilegeInventory(pool) {
     "       length(replace(pg_catalog.pg_get_expr(policy.polwithcheck,policy.polrelid),'company_id',''))",
     "     )/length('company_id')>=2",
     "     AND position('ia4tube.company_id' IN pg_catalog.pg_get_expr(policy.polwithcheck,policy.polrelid))>0",
-    " ) AS social_audit_company_policy"
-  ].join("\n"), [RUNTIME_LOGIN, RUNTIME_ROLE]);
-  const row = result.rows?.[0];
-  if (!row) fail("linux_gate_rls_privilege_inventory_invalid");
+    " ) AS social_audit_company_policy,",
+    " namespace.nspacl::text AS schema_acl,",
+    " relation.relacl::text AS relation_acl",
+    "FROM pg_catalog.pg_class relation",
+    "JOIN pg_catalog.pg_namespace namespace ON namespace.oid=relation.relnamespace",
+    "WHERE namespace.nspname='ia4tube_social'",
+    "  AND relation.relname IN ('users','social_audit_events')",
+    "  AND relation.relkind IN ('r','p')",
+    "ORDER BY relation.relname"
+  ].join("\n"), [MIGRATION_LOGIN, MIGRATOR_ROLE, RUNTIME_LOGIN, RUNTIME_ROLE]);
+  const rows = exactInventoryRelationRows(
+    result.rows,
+    "linux_gate_rls_privilege_inventory_relations_invalid"
+  );
+  if (rows.some((row) =>
+    row.session_user_is_migration !== true ||
+    row.current_user_is_migrator !== true ||
+    row.schema_usage !== true
+  )) fail("linux_gate_rls_privilege_inventory_context_invalid");
+  const audit = rows[0];
+  const users = rows[1];
   return Object.freeze({
-    runtimeLoginCanSetRole: row.runtime_login_can_set_role === true,
-    runtimeLoginCoreUserInsert: row.runtime_login_core_user_insert === true,
-    coreUserInsert: row.core_user_insert === true,
-    socialAuditInsert: row.social_audit_insert === true,
-    socialAuditRlsEnabled: row.social_audit_rls_enabled === true,
-    socialAuditCompanyPolicy: row.social_audit_company_policy === true
+    sessionUserIsMigration: true,
+    currentUserIsMigrator: true,
+    schemaUsage: true,
+    runtimeLoginCanSetRole: rows.every((row) => row.runtime_login_can_set_role === true),
+    runtimeLoginCoreUserInsert: users.runtime_login_insert === true,
+    coreUserInsert: users.runtime_insert === true,
+    socialAuditInsert: audit.runtime_insert === true,
+    socialAuditRlsEnabled: audit.social_audit_rls_enabled === true,
+    socialAuditCompanyPolicy: audit.social_audit_company_policy === true,
+    relationCount: rows.length,
+    aclFingerprint: relationAclFingerprint(rows)
   });
 }
 
 function exactRuntimeWritePrivilegeInventory(left, right) {
-  return left.runtimeLoginCanSetRole === right.runtimeLoginCanSetRole &&
+  return left.sessionUserIsMigration === right.sessionUserIsMigration &&
+    left.currentUserIsMigrator === right.currentUserIsMigrator &&
+    left.schemaUsage === right.schemaUsage &&
+    left.runtimeLoginCanSetRole === right.runtimeLoginCanSetRole &&
     left.runtimeLoginCoreUserInsert === right.runtimeLoginCoreUserInsert &&
     left.coreUserInsert === right.coreUserInsert &&
     left.socialAuditInsert === right.socialAuditInsert &&
     left.socialAuditRlsEnabled === right.socialAuditRlsEnabled &&
-    left.socialAuditCompanyPolicy === right.socialAuditCompanyPolicy;
+    left.socialAuditCompanyPolicy === right.socialAuditCompanyPolicy &&
+    left.relationCount === right.relationCount &&
+    left.aclFingerprint === right.aclFingerprint;
+}
+
+function validRlsPrivilegeInventoryContextReproduction(candidate) {
+  return candidate &&
+    Object.getPrototypeOf(candidate) === Object.prototype &&
+    Object.keys(candidate).sort().join(",") ===
+      Object.keys(RLS_INVENTORY_CONTEXT_RESULT).sort().join(",") &&
+    Object.entries(RLS_INVENTORY_CONTEXT_RESULT).every(([key, value]) => candidate[key] === value);
+}
+
+async function directSessionIdentity(client) {
+  const result = await client.query([
+    "SELECT",
+    " session_user=$1 AS direct_session_identity,",
+    " current_user=$1 AS direct_current_identity,",
+    " login.rolsuper AS direct_superuser,",
+    " login.rolbypassrls AS direct_bypassrls,",
+    " login.rolcreaterole AS direct_createrole,",
+    " pg_has_role($1,$2,'SET') AS direct_can_set_migrator,",
+    " (login.rolinherit AND pg_has_role($1,$2,'MEMBER')) AS direct_inherits_migrator",
+    "FROM pg_catalog.pg_roles login",
+    "WHERE login.rolname=$1"
+  ].join("\n"), [MIGRATION_LOGIN, MIGRATOR_ROLE]);
+  const row = result.rows?.length === 1 ? result.rows[0] : null;
+  if (!row) fail("linux_gate_rls_inventory_direct_session_invalid");
+  return Object.freeze({
+    sessionIdentity: row.direct_session_identity === true,
+    currentIdentity: row.direct_current_identity === true,
+    superuser: row.direct_superuser === true,
+    bypassRls: row.direct_bypassrls === true,
+    createRole: row.direct_createrole === true,
+    canSetMigrator: row.direct_can_set_migrator === true,
+    inheritsMigrator: row.direct_inherits_migrator === true
+  });
+}
+
+function validDirectSessionIdentity(identity) {
+  return identity.sessionIdentity === true &&
+    identity.currentIdentity === true &&
+    identity.superuser === false &&
+    identity.bypassRls === false &&
+    identity.createRole === false &&
+    identity.canSetMigrator === true &&
+    identity.inheritsMigrator === false;
+}
+
+function exactDirectSessionIdentity(left, right) {
+  return left.sessionIdentity === right.sessionIdentity &&
+    left.currentIdentity === right.currentIdentity &&
+    left.superuser === right.superuser &&
+    left.bypassRls === right.bypassRls &&
+    left.createRole === right.createRole &&
+    left.canSetMigrator === right.canSetMigrator &&
+    left.inheritsMigrator === right.inheritsMigrator;
+}
+
+async function directAclSnapshot(client) {
+  const result = await client.query([
+    "SELECT",
+    " relation.relname AS relation_name,",
+    " has_schema_privilege(current_user,namespace.oid,'USAGE') AS direct_schema_usage,",
+    " namespace.nspacl::text AS schema_acl,",
+    " relation.relacl::text AS relation_acl",
+    "FROM pg_catalog.pg_class relation",
+    "JOIN pg_catalog.pg_namespace namespace ON namespace.oid=relation.relnamespace",
+    "WHERE namespace.nspname='ia4tube_social'",
+    "  AND relation.relname IN ('users','social_audit_events')",
+    "  AND relation.relkind IN ('r','p')",
+    "ORDER BY relation.relname"
+  ].join("\n"));
+  const rows = exactInventoryRelationRows(
+    result.rows,
+    "linux_gate_rls_inventory_acl_relations_invalid"
+  );
+  const schemaUsage = rows.every((row) => row.direct_schema_usage === true);
+  if (rows.some((row) => (row.direct_schema_usage === true) !== schemaUsage)) {
+    fail("linux_gate_rls_inventory_direct_schema_access_invalid");
+  }
+  return Object.freeze({
+    schemaUsage,
+    aclFingerprint: relationAclFingerprint(rows)
+  });
+}
+
+async function migratorRoleActivation(client) {
+  const result = await client.query([
+    "SELECT",
+    " session_user=$1 AS migrator_session_identity,",
+    " current_user=$2 AS migrator_current_identity,",
+    " has_schema_privilege(current_user,namespace.oid,'USAGE') AS migrator_schema_usage",
+    "FROM pg_catalog.pg_namespace namespace",
+    "WHERE namespace.nspname='ia4tube_social'"
+  ].join("\n"), [MIGRATION_LOGIN, MIGRATOR_ROLE]);
+  const row = result.rows?.length === 1 ? result.rows[0] : null;
+  if (!row || row.migrator_session_identity !== true || row.migrator_current_identity !== true) {
+    fail("linux_gate_rls_inventory_migrator_role_activation_invalid");
+  }
+  if (row.migrator_schema_usage !== true) {
+    fail("linux_gate_rls_inventory_migrator_schema_access_missing");
+  }
+}
+
+async function runRlsPrivilegeInventoryContextReproduction(state, dependencies = {}) {
+  const { withTransaction } = require("../src/persistence/postgres/pool");
+  const runSubstep = requireSubstepRunner(dependencies);
+  let directClient;
+  let directIdentity;
+  let beforeAcl;
+  let activatedInventory;
+  let primaryFailure;
+  try {
+    await runSubstep("rls_inventory_direct_session_identity", async () => {
+      directClient = await state.pools.migration.connect();
+      if (!directClient || typeof directClient.query !== "function" || typeof directClient.release !== "function") {
+        fail("linux_gate_rls_inventory_direct_client_invalid");
+      }
+      directIdentity = await directSessionIdentity(directClient);
+      if (!validDirectSessionIdentity(directIdentity)) {
+        fail("linux_gate_rls_inventory_direct_session_invalid");
+      }
+    });
+
+    await runSubstep("rls_inventory_direct_schema_access", async () => {
+      beforeAcl = await directAclSnapshot(directClient);
+      if (beforeAcl.schemaUsage !== false) {
+        fail("linux_gate_rls_inventory_direct_schema_access_unexpected");
+      }
+    });
+
+    await runSubstep("rls_inventory_direct_name_resolution_refusal", async () => {
+      await expectErrorCode(
+        () => directClient.query(
+          "SELECT has_table_privilege($1,'ia4tube_social.users','INSERT') AS direct_runtime_insert",
+          [RUNTIME_ROLE]
+        ),
+        "42501",
+        "linux_gate_rls_inventory_direct_name_resolution_invalid"
+      );
+      const usable = await directClient.query([
+        "SELECT",
+        " current_user=session_user AS direct_pool_usable,",
+        " pg_current_xact_id_if_assigned() IS NOT NULL AS direct_transaction_persisted"
+      ].join("\n"));
+      const row = usable.rows?.length === 1 ? usable.rows[0] : null;
+      if (!row || row.direct_pool_usable !== true || row.direct_transaction_persisted !== false) {
+        fail("linux_gate_rls_inventory_direct_pool_state_invalid");
+      }
+    });
+
+    await runSubstep("rls_inventory_migrator_role_activation", () => withTransaction(
+      state.pools.migration,
+      async (client) => {
+        await migratorRoleActivation(client);
+        activatedInventory = await runSubstep(
+          "rls_inventory_migrator_privilege_read",
+          () => runtimeWritePrivilegeInventory(client)
+        );
+        if (!activatedInventory.runtimeLoginCanSetRole) {
+          fail("linux_gate_rls_runtime_role_set_missing");
+        }
+        if (activatedInventory.runtimeLoginCoreUserInsert || activatedInventory.coreUserInsert) {
+          fail("linux_gate_rls_core_user_insert_privilege_unexpected");
+        }
+        if (!activatedInventory.socialAuditInsert) {
+          fail("linux_gate_rls_social_audit_insert_privilege_missing");
+        }
+        if (!activatedInventory.socialAuditRlsEnabled || !activatedInventory.socialAuditCompanyPolicy) {
+          fail("linux_gate_rls_social_audit_policy_invalid");
+        }
+        if (activatedInventory.aclFingerprint !== beforeAcl.aclFingerprint) {
+          fail("linux_gate_rls_inventory_acl_changed");
+        }
+      },
+      { role: MIGRATOR_ROLE }
+    ));
+
+    await runSubstep("rls_inventory_role_reset", async () => {
+      let resetClient;
+      let resetFailure;
+      try {
+        resetClient = await state.pools.migration.connect();
+        const resetIdentity = await directSessionIdentity(resetClient);
+        if (!validDirectSessionIdentity(resetIdentity) ||
+            !exactDirectSessionIdentity(directIdentity, resetIdentity)) {
+          fail("linux_gate_rls_inventory_role_reset_invalid");
+        }
+        const afterAcl = await directAclSnapshot(resetClient);
+        if (afterAcl.schemaUsage !== false) {
+          fail("linux_gate_rls_inventory_role_reset_invalid");
+        }
+        if (afterAcl.aclFingerprint !== beforeAcl.aclFingerprint ||
+            activatedInventory.aclFingerprint !== afterAcl.aclFingerprint) {
+          fail("linux_gate_rls_inventory_acl_changed");
+        }
+      } catch (error) {
+        resetFailure = error;
+      }
+      try {
+        resetClient?.release();
+      } catch (error) {
+        if (!resetFailure) resetFailure = error;
+      }
+      try {
+        directClient.release();
+        directClient = null;
+      } catch (error) {
+        if (!resetFailure) resetFailure = error;
+      }
+      if (resetFailure) throw resetFailure;
+    });
+
+    return Object.freeze({ ...RLS_INVENTORY_CONTEXT_RESULT });
+  } catch (error) {
+    primaryFailure = error;
+  } finally {
+    if (directClient) {
+      try {
+        directClient.release();
+      } catch (cleanupFailure) {
+        if (!primaryFailure) primaryFailure = cleanupFailure;
+      }
+    }
+  }
+  throw primaryFailure;
 }
 
 function validRlsRuntimeWriteContractReproduction(candidate) {
@@ -204,6 +501,9 @@ async function seedTenant(pool, fixture) {
 async function runRlsRuntimeWriteContractReproduction(state, dependencies = {}) {
   const { withTransaction } = require("../src/persistence/postgres/pool");
   const runSubstep = requireSubstepRunner(dependencies);
+  if (!validRlsPrivilegeInventoryContextReproduction(dependencies.inventoryContextReproduction)) {
+    fail("linux_gate_rls_inventory_context_reproduction_required");
+  }
   let a;
   let b;
   let candidateUserId;
@@ -214,8 +514,12 @@ async function runRlsRuntimeWriteContractReproduction(state, dependencies = {}) 
       await seedTenant(state.pools.migration, a.fixture);
       await seedTenant(state.pools.migration, b.fixture);
     });
-    const before = await runSubstep("rls_privilege_inventory", async () => {
-      const inventory = await runtimeWritePrivilegeInventory(state.pools.migration);
+    const before = await runSubstep("rls_inventory_migrator_privilege_read", async () => {
+      const inventory = await withTransaction(
+        state.pools.migration,
+        (client) => runtimeWritePrivilegeInventory(client),
+        { role: MIGRATOR_ROLE }
+      );
       if (!inventory.runtimeLoginCanSetRole) fail("linux_gate_rls_runtime_role_set_missing");
       if (inventory.runtimeLoginCoreUserInsert || inventory.coreUserInsert) {
         fail("linux_gate_rls_core_user_insert_privilege_unexpected");
@@ -260,8 +564,12 @@ async function runRlsRuntimeWriteContractReproduction(state, dependencies = {}) 
         fail("linux_gate_rls_runtime_pool_unusable_after_refusal");
       }
     });
-    await runSubstep("rls_privilege_inventory", async () => {
-      const after = await runtimeWritePrivilegeInventory(state.pools.migration);
+    await runSubstep("rls_inventory_migrator_privilege_read", async () => {
+      const after = await withTransaction(
+        state.pools.migration,
+        (client) => runtimeWritePrivilegeInventory(client),
+        { role: MIGRATOR_ROLE }
+      );
       if (!exactRuntimeWritePrivilegeInventory(before, after)) {
         fail("linux_gate_rls_runtime_privilege_changed");
       }
@@ -833,7 +1141,9 @@ module.exports = {
   runConcurrencyOAuthIdempotencyGate,
   runPersistedVaultGate,
   runRlsAndRoleGate,
+  runRlsPrivilegeInventoryContextReproduction,
   runRlsRuntimeWriteContractReproduction,
   runVaultSupplementalGate,
+  runtimeWritePrivilegeInventory,
   seedTenant
 };
