@@ -6,7 +6,8 @@ const os = require("node:os");
 const path = require("node:path");
 const test = require("node:test");
 const {
-  LOCAL_PHYSICAL_APPROVAL
+  LOCAL_PHYSICAL_APPROVAL,
+  runForwardOnlyRollbackGate
 } = require("../scripts/social-3a0p-local-backup-restore");
 const {
   MIGRATION_LOGIN,
@@ -154,7 +155,8 @@ function backupTransportFixture(options = {}) {
         Object.freeze(event);
         if (placeholderCreated) fs.unlinkSync(environment.SOCIAL_RESTORE_BUNDLE);
       }
-    }
+    },
+    ...(options.backupOverrides || {})
   };
   const executables = Object.freeze({
     psql: path.join(ownedRoot, "pgsql", "bin", "psql.exe"),
@@ -200,6 +202,7 @@ function backupTransportFixture(options = {}) {
     ...(options.planOptions || {})
   });
   return Object.freeze({
+    backup,
     configLoads,
     executables,
     ownedRoot,
@@ -239,6 +242,102 @@ function createLogicalBackupTransportBridge(contract) {
   });
 }
 
+function successfulLogicalBackupResult() {
+  return Object.freeze({
+    ok: true,
+    bundleFileFsyncConfirmed: true,
+    bundleRoundTripVerified: true,
+    bundleSize: 1,
+    bundleSha256: "b".repeat(64),
+    evidenceSha256: "e".repeat(64),
+    plaintextArtifactsAbsent: true,
+    temporaryWorkspaceCleanupConfirmed: true
+  });
+}
+
+function successfulLogicalRestoreResult() {
+  return Object.freeze({
+    ok: true,
+    evidenceSha256: "e".repeat(64),
+    runtimeIsolation: true,
+    vault: true,
+    compatibleWith2A: true,
+    plaintextArtifactsAbsent: true,
+    temporaryWorkspaceCleanupConfirmed: true
+  });
+}
+
+function provenanceDatabaseManager() {
+  const pool = Object.freeze({
+    async connect() {
+      throw new Error("synthetic_pool_must_not_connect");
+    }
+  });
+  const profiles = require("../src/persistence/postgres/backup-restore").SCHEMA_PROFILES;
+  return Object.freeze({
+    isAllowedDatabase() { return true; },
+    getPools() { return { provisioner: pool, runtime: {} }; },
+    async create(identity) {
+      return Object.freeze({ ...identity, createdByThisRun: true });
+    },
+    async reconcile(identity) {
+      return Object.freeze({ ...identity, status: "absent", createdByThisRun: false });
+    },
+    async assertCreated() { return true; },
+    async remove() { return true; },
+    async assertRemoved() { return true; },
+    async applyProfile() { return true; },
+    async verifyProfile(database, profileId) {
+      return profiles.find((profile) => profile.id === profileId);
+    },
+    async catalogFingerprint() { return "catalog"; },
+    async nonSocialFingerprint() { return "non-social"; },
+    async cleanupAll() {}
+  });
+}
+
+function provenanceRouterFixture({
+  confirmRollbackRestore = false,
+  executeRollbackRestore = false,
+  failures = new Map()
+} = {}) {
+  const bindings = new WeakMap();
+  const calls = [];
+  function bind(kind, operation, request) {
+    assert.equal(bindings.has(request), false);
+    bindings.set(request, { consumed: false, kind, operation });
+    return request;
+  }
+  async function run(kind, runner, request) {
+    const binding = bindings.get(request);
+    assert.ok(binding);
+    assert.equal(binding.kind, kind);
+    assert.equal(binding.consumed, false);
+    binding.consumed = true;
+    calls.push(Object.freeze({ kind, operation: binding.operation, runner, request }));
+    const failure = failures.get(binding.operation);
+    if (failure) throw failure;
+    if (binding.operation === "rollback_backup_0003") {
+      return successfulLogicalBackupResult();
+    }
+    if (binding.operation === "rollback_restore_0003") {
+      if (executeRollbackRestore) return runner(request);
+      if (confirmRollbackRestore) {
+        await request.verifyRestoredProfile();
+      }
+      return successfulLogicalRestoreResult();
+    }
+    return runner(request);
+  }
+  const router = Object.freeze({
+    bindBackup: (operation, request) => bind("backup", operation, request),
+    bindRestore: (operation, request) => bind("restore", operation, request),
+    runBackup: (runner, request) => run("backup", runner, request),
+    runRestore: (runner, request) => run("restore", runner, request)
+  });
+  return { bindings, calls, router };
+}
+
 function profileAwareRestoreBehaviorFixture(options = {}) {
   const created = [];
   const operations = [];
@@ -256,6 +355,7 @@ function profileAwareRestoreBehaviorFixture(options = {}) {
       return Object.freeze({
         async close() {
           closed.push(profileId);
+          if (options.closeFailure) throw options.closeFailure;
         },
         verifiers: Object.freeze({
           async verifyRuntimeIsolation() {
@@ -316,6 +416,68 @@ test("schema profile selection returns only the exact canonical frozen profile",
       }
     );
   }
+});
+
+test("optional backup/restore provenance dependency requires the exact four-method router API", async () => {
+  const base = {
+    approval: LOCAL_PHYSICAL_APPROVAL,
+    runMarker: RUN_MARKER,
+    target: TARGET,
+    state: {
+      target: TARGET,
+      materials: {},
+      environmentId: "00000000-0000-4000-8000-000000000001"
+    },
+    paths: { ownedRoot: OWNED_ROOT },
+    executables: EXECUTABLES,
+    processRunner: { async run() { throw new Error("must_not_spawn"); } },
+    PoolClass: class {},
+    repositoryRoot: path.resolve(__dirname, ".."),
+    randomBytes: (size) => Buffer.alloc(size, 7)
+  };
+  const databaseManager = provenanceDatabaseManager();
+  for (const candidate of [
+    null,
+    {},
+    { bindBackup() {}, bindRestore() {}, runBackup() {} },
+    { bindBackup() {}, bindRestore() {}, runRestore() {} },
+    { bindBackup: true, bindRestore() {}, runBackup() {}, runRestore() {} },
+    { bindBackup() {}, bindRestore: true, runBackup() {}, runRestore() {} },
+    { bindBackup() {}, bindRestore() {}, runBackup: true, runRestore() {} },
+    { bindBackup() {}, bindRestore() {}, runBackup() {}, runRestore: true },
+    { bindBackup() {}, bindRestore() {}, runBackup() {}, runRestore() {}, extra() {} },
+    Object.assign(Object.create(null), {
+      bindBackup() {},
+      bindRestore() {},
+      runBackup() {},
+      runRestore() {}
+    })
+  ]) {
+    assert.throws(
+      () => createWindowsPhysicalPlans({
+        ...base,
+        dependencies: {
+          databaseManager,
+          runTool: async () => ({ code: 0 }),
+          backupRestoreProvenance: candidate
+        }
+      }),
+      {
+        code: "windows_physical_backup_restore_provenance_invalid",
+        name: "WindowsPhysicalPlanFailure"
+      }
+    );
+  }
+
+  const plans = createWindowsPhysicalPlans({
+    ...base,
+    dependencies: {
+      databaseManager,
+      runTool: async () => ({ code: 0 }),
+      backupRestoreProvenance: provenanceRouterFixture().router
+    }
+  });
+  await plans.destroy();
 });
 
 function defaultRestoreBehaviorFacadeFixture(options = {}) {
@@ -727,10 +889,739 @@ test("backup plans require the fixed logical TLS identity and its bound internal
       assert.match(request.localBinding.targetFingerprint, /^[0-9a-f]{64}$/);
       assert.equal(request.localBinding.containerIdentityDigest, "c".repeat(64));
       assert.equal(request.runTool, boundRunTools.get(request.localBinding.database));
+      assert.equal(Object.hasOwn(request, "dependencies"), false);
     }
     assert.equal(fixture.runToolCalls.length, 0);
     assert.equal(fixture.pgDumpStarts.length, 0);
     assert.equal(fixture.processStarts.length, 0);
+  } finally {
+    await destroyBackupTransportFixture(fixture);
+  }
+});
+
+test("provenance binds and consumes only exact Gate 1 and Gate 5 outer operations", async () => {
+  const provenance = provenanceRouterFixture();
+  let fixture;
+  fixture = backupTransportFixture({
+    precreateBackupDirectory: false,
+    dependencies: {
+      backupRestoreProvenance: provenance.router,
+      createBackupTransportBridge: createLogicalBackupTransportBridge,
+      databaseManager: provenanceDatabaseManager()
+    }
+  });
+  try {
+    const rollback = await fixture.plans.createRollbackAdapter();
+    assert.equal(await rollback.captureCanonical0003(), true);
+    assert.equal(await rollback.backup0003(), true);
+    const proof = await rollback.createDisposable0003({
+      host: "127.0.0.1",
+      database: rollback.disposableDatabase,
+      profileId: "social-schema-0003",
+      runMarker: RUN_MARKER
+    });
+    assert.equal(await rollback.restore0003(proof), true);
+    await assert.rejects(
+      rollback.verifyRestored0003(proof),
+      { code: "windows_physical_restore_profile_validation_unconfirmed" }
+    );
+
+    const prepared = await fixture.plans.prepareBackupRestore();
+    const gate5Requests = [
+      [prepared.backup0003, "backup", successfulLogicalBackupResult()],
+      [prepared.restore0003, "restore", successfulLogicalRestoreResult()],
+      [prepared.backup0004, "backup", successfulLogicalBackupResult()],
+      [prepared.restore0004, "restore", successfulLogicalRestoreResult()]
+    ];
+    for (const [request, kind, expected] of gate5Requests) {
+      assert.equal(Object.isFrozen(request), true);
+      assert.equal(Object.hasOwn(request, "dependencies"), false);
+      const runner = async (candidate) => {
+        assert.equal(candidate, request);
+        return expected;
+      };
+      assert.deepEqual(
+        await (kind === "backup"
+          ? provenance.router.runBackup(runner, request)
+          : provenance.router.runRestore(runner, request)),
+        expected
+      );
+    }
+
+    assert.deepEqual(provenance.calls.map((call) => call.operation), [
+      "rollback_backup_0003",
+      "rollback_restore_0003",
+      "gate5_backup_0003",
+      "gate5_restore_0003",
+      "gate5_backup_0004",
+      "gate5_restore_0004"
+    ]);
+    for (const call of provenance.calls) {
+      assert.equal(Object.isFrozen(call.request), true);
+      assert.equal(Object.hasOwn(call.request, "operation"), false);
+      assert.equal(Object.hasOwn(call.request, "provenance"), false);
+    }
+
+    const source = fs.readFileSync(
+      path.resolve(__dirname, "../scripts/social-3a0p-local-windows-physical-plans.js"),
+      "utf8"
+    );
+    const labels = new Set(
+      [...source.matchAll(/"((?:rollback|gate5)_(?:backup|restore)_000[34])"/gu)]
+        .map((match) => match[1])
+    );
+    assert.deepEqual([...labels].sort(), [
+      "gate5_backup_0003",
+      "gate5_backup_0004",
+      "gate5_restore_0003",
+      "gate5_restore_0004",
+      "rollback_backup_0003",
+      "rollback_restore_0003"
+    ]);
+    assert.match(
+      source,
+      /restoreRequest\(plan0003, names\.tamper, profile0003\)/u
+    );
+    assert.match(
+      source,
+      /restoreRequest\(plan0003, names\.cross, profile0004\)/u
+    );
+    assert.doesNotMatch(source, /(?:tamper|cross)_(?:backup|restore)_/u);
+  } finally {
+    await destroyBackupTransportFixture(fixture);
+  }
+});
+
+test("rollback reuses only the closed confirmation from its tracked profile validation", async () => {
+  let profileValidationCalls = 0;
+  const profiles = require(
+    "../src/persistence/postgres/backup-restore"
+  ).SCHEMA_PROFILES;
+  const databaseManager = Object.freeze({
+    ...provenanceDatabaseManager(),
+    async verifyProfile(_database, profileId) {
+      profileValidationCalls += 1;
+      return profiles.find((profile) => profile.id === profileId);
+    }
+  });
+  const provenance = provenanceRouterFixture({
+    confirmRollbackRestore: true
+  });
+  const fixture = backupTransportFixture({
+    precreateBackupDirectory: false,
+    dependencies: {
+      backupRestoreProvenance: provenance.router,
+      createBackupTransportBridge: createLogicalBackupTransportBridge,
+      databaseManager
+    }
+  });
+  try {
+    const rollback = await fixture.plans.createRollbackAdapter();
+    assert.equal(await rollback.captureCanonical0003(), true);
+    assert.equal(await rollback.backup0003(), true);
+    const proof = await rollback.createDisposable0003({
+      host: "127.0.0.1",
+      database: rollback.disposableDatabase,
+      profileId: "social-schema-0003",
+      runMarker: RUN_MARKER
+    });
+    assert.equal(await rollback.restore0003(proof), true);
+    assert.equal(profileValidationCalls, 1);
+    assert.equal(await rollback.verifyRestored0003(proof), true);
+    assert.equal(profileValidationCalls, 1);
+  } finally {
+    await destroyBackupTransportFixture(fixture);
+  }
+});
+
+test("rollback rejects an invalid logical result before profile verification and preserves it over close", async () => {
+  const closingFailure = Object.assign(new Error("not persisted"), {
+    code: "synthetic_restore_verifier_close_failure"
+  });
+  const behavior = profileAwareRestoreBehaviorFixture({
+    closeFailure: closingFailure
+  });
+  const provenance = provenanceRouterFixture({
+    executeRollbackRestore: true
+  });
+  let profileValidationCalls = 0;
+  const profiles = require(
+    "../src/persistence/postgres/backup-restore"
+  ).SCHEMA_PROFILES;
+  const databaseManager = Object.freeze({
+    ...provenanceDatabaseManager(),
+    async verifyProfile(_database, profileId) {
+      profileValidationCalls += 1;
+      return profiles.find((profile) => profile.id === profileId);
+    }
+  });
+  const fixture = backupTransportFixture({
+    precreateBackupDirectory: false,
+    backupOverrides: {
+      async runLogicalRestore(request) {
+        await request.verifyRuntimeIsolation();
+        return Object.freeze({ ok: false });
+      }
+    },
+    dependencies: {
+      backupRestoreProvenance: provenance.router,
+      createBackupTransportBridge: createLogicalBackupTransportBridge,
+      databaseManager,
+      restoreBehavior: behavior.facade
+    }
+  });
+  try {
+    const rollback = await fixture.plans.createRollbackAdapter();
+    assert.equal(await rollback.captureCanonical0003(), true);
+    assert.equal(await rollback.backup0003(), true);
+    const proof = await rollback.createDisposable0003({
+      host: "127.0.0.1",
+      database: rollback.disposableDatabase,
+      profileId: "social-schema-0003",
+      runMarker: RUN_MARKER
+    });
+    await assert.rejects(
+      rollback.restore0003(proof),
+      {
+        code: "windows_physical_restore_execution_unconfirmed",
+        name: "WindowsPhysicalPlanFailure"
+      }
+    );
+    assert.equal(profileValidationCalls, 0);
+    assert.deepEqual(behavior.closed, ["social-schema-0003"]);
+  } finally {
+    await destroyBackupTransportFixture(fixture);
+  }
+});
+
+test("non-social verification keeps semantic or primary failure ahead of cleanup", async (t) => {
+  async function createCase({
+    observed = "non-social",
+    fingerprintFailure,
+    removeFailure,
+    assertRemoved = true
+  } = {}) {
+    const events = [];
+    let fingerprintCalls = 0;
+    const databaseManager = Object.freeze({
+      ...provenanceDatabaseManager(),
+      async nonSocialFingerprint() {
+        fingerprintCalls += 1;
+        events.push(`fingerprint:${fingerprintCalls}`);
+        if (fingerprintCalls === 1) return "non-social";
+        if (fingerprintFailure) throw fingerprintFailure;
+        return observed;
+      },
+      async remove() {
+        events.push("remove");
+        if (removeFailure) throw removeFailure;
+        return true;
+      },
+      async assertRemoved() {
+        events.push("assert-removed");
+        return assertRemoved;
+      }
+    });
+    const fixture = backupTransportFixture({
+      precreateBackupDirectory: false,
+      dependencies: { databaseManager }
+    });
+    const rollback = await fixture.plans.createRollbackAdapter();
+    assert.equal(await rollback.captureCanonical0003(), true);
+    return { events, fixture, rollback };
+  }
+
+  function callerAdapter(rollback) {
+    const always = async () => true;
+    return Object.freeze({
+      markedDisposable: true,
+      productionLike: false,
+      disposableDatabase: rollback.disposableDatabase,
+      runMarker: RUN_MARKER,
+      captureCanonical0003: always,
+      applyControlledFailing0004: always,
+      verifyTransactionRollback: always,
+      compareCanonical0003: always,
+      backup0003: always,
+      apply0004: always,
+      async createDisposable0003(identity) {
+        return Object.freeze({ ...identity, createdByThisRun: true });
+      },
+      async reconcileDisposable0003CreateFailure(identity) {
+        return Object.freeze({
+          ...identity,
+          createdByThisRun: false,
+          status: "absent"
+        });
+      },
+      assertDisposable0003Created: always,
+      restore0003: always,
+      verifyRestored0003: always,
+      removeDisposable0003: always,
+      assertDisposable0003Removed: always,
+      reapply0004: always,
+      verify0004Checksum: always,
+      verifyProfile0004: always,
+      verifyNonSocialUnchanged: () => rollback.verifyNonSocialUnchanged()
+    });
+  }
+
+  await t.test("changed result wins over remove failure at the canonical caller", async () => {
+    const removeFailure = Object.assign(new Error("not persisted"), {
+      code: "synthetic_source_remove_failure"
+    });
+    const item = await createCase({
+      observed: "changed",
+      removeFailure
+    });
+    try {
+      await assert.rejects(
+        runForwardOnlyRollbackGate({
+          approval: LOCAL_PHYSICAL_APPROVAL,
+          host: "127.0.0.1",
+          runMarker: RUN_MARKER,
+          adapter: callerAdapter(item.rollback)
+        }),
+        { code: "local_rollback_non_social_changed" }
+      );
+      assert.deepEqual(item.events, [
+        "fingerprint:1",
+        "fingerprint:2",
+        "remove",
+        "assert-removed"
+      ]);
+    } finally {
+      await destroyBackupTransportFixture(item.fixture);
+    }
+  });
+
+  await t.test("assertRemoved false becomes the closed cleanup code", async () => {
+    const item = await createCase({ assertRemoved: false });
+    try {
+      await assert.rejects(
+        item.rollback.verifyNonSocialUnchanged(),
+        {
+          code: "windows_physical_source_cleanup_unconfirmed",
+          name: "WindowsPhysicalPlanFailure"
+        }
+      );
+      assert.deepEqual(item.events, [
+        "fingerprint:1",
+        "fingerprint:2",
+        "remove",
+        "assert-removed"
+      ]);
+    } finally {
+      await destroyBackupTransportFixture(item.fixture);
+    }
+  });
+
+  await t.test("fingerprint exception wins while cleanup is still attempted", async () => {
+    const primary = Object.assign(new Error("not persisted"), {
+      code: "synthetic_non_social_fingerprint_failure"
+    });
+    const cleanup = Object.assign(new Error("not persisted"), {
+      code: "synthetic_source_remove_failure"
+    });
+    const item = await createCase({
+      fingerprintFailure: primary,
+      removeFailure: cleanup
+    });
+    try {
+      await assert.rejects(
+        item.rollback.verifyNonSocialUnchanged(),
+        (error) => error === primary
+      );
+      assert.deepEqual(item.events, [
+        "fingerprint:1",
+        "fingerprint:2",
+        "remove",
+        "assert-removed"
+      ]);
+    } finally {
+      await destroyBackupTransportFixture(item.fixture);
+    }
+  });
+});
+
+test("provenance failures propagate unchanged without direct-runner fallback", async () => {
+  const failures = new Map([
+    ["rollback_backup_0003", Object.assign(new Error("synthetic backup provenance failure"), {
+      code: "synthetic_backup_provenance_failure"
+    })],
+    ["rollback_restore_0003", Object.assign(new Error("synthetic restore provenance failure"), {
+      code: "synthetic_restore_provenance_failure"
+    })],
+    ["gate5_restore_0004", Object.assign(new Error("synthetic gate5 provenance failure"), {
+      code: "synthetic_gate5_provenance_failure"
+    })]
+  ]);
+  const activeFailures = new Map([
+    ["rollback_backup_0003", failures.get("rollback_backup_0003")]
+  ]);
+  const provenance = provenanceRouterFixture({ failures: activeFailures });
+  const fixture = backupTransportFixture({
+    precreateBackupDirectory: false,
+    dependencies: {
+      backupRestoreProvenance: provenance.router,
+      createBackupTransportBridge: createLogicalBackupTransportBridge,
+      databaseManager: provenanceDatabaseManager()
+    }
+  });
+  try {
+    const rollback = await fixture.plans.createRollbackAdapter();
+    assert.equal(await rollback.captureCanonical0003(), true);
+    await assert.rejects(
+      rollback.backup0003(),
+      (error) => error === failures.get("rollback_backup_0003")
+    );
+    assert.deepEqual(
+      provenance.calls.map((call) => call.operation),
+      ["rollback_backup_0003"]
+    );
+
+    activeFailures.delete("rollback_backup_0003");
+    assert.equal(await rollback.backup0003(), true);
+    const proof = await rollback.createDisposable0003({
+      host: "127.0.0.1",
+      database: rollback.disposableDatabase,
+      profileId: "social-schema-0003",
+      runMarker: RUN_MARKER
+    });
+    activeFailures.set(
+      "rollback_restore_0003",
+      failures.get("rollback_restore_0003")
+    );
+    await assert.rejects(
+      rollback.restore0003(proof),
+      (error) => error === failures.get("rollback_restore_0003")
+    );
+
+    activeFailures.delete("rollback_restore_0003");
+    activeFailures.set(
+      "gate5_restore_0004",
+      failures.get("gate5_restore_0004")
+    );
+    const prepared = await fixture.plans.prepareBackupRestore();
+    await assert.rejects(
+      provenance.router.runRestore(
+        async () => successfulLogicalRestoreResult(),
+        prepared.restore0004
+      ),
+      (error) => error === failures.get("gate5_restore_0004")
+    );
+    assert.equal(
+      provenance.calls.filter((call) =>
+        call.operation === "rollback_backup_0003").length,
+      2
+    );
+    assert.equal(
+      provenance.calls.filter((call) =>
+        call.operation === "rollback_restore_0003").length,
+      1
+    );
+    assert.equal(
+      provenance.calls.filter((call) =>
+        call.operation === "gate5_restore_0004").length,
+      1
+    );
+  } finally {
+    await destroyBackupTransportFixture(fixture);
+  }
+});
+
+test("tamper cleanup preserves the primary and attempts close, unlink and reconciliation", async (t) => {
+  const proxyFileSystem = (overrides) => new Proxy(fs, {
+    get(target, property) {
+      if (Object.hasOwn(overrides, property)) return overrides[property];
+      const value = Reflect.get(target, property);
+      return typeof value === "function" ? value.bind(target) : value;
+    }
+  });
+  async function tamperFixture(
+    overrides = {},
+    reconciliationFailure,
+    runFailure = Object.assign(new Error("not persisted"), {
+      code: "restore_encrypted_bundle_invalid"
+    })
+  ) {
+    let reconciliationCalls = 0;
+    const databaseManager = Object.freeze({
+      ...provenanceDatabaseManager(),
+      async reconcile(identity) {
+        reconciliationCalls += 1;
+        if (reconciliationFailure) throw reconciliationFailure;
+        return Object.freeze({
+          ...identity,
+          status: "absent",
+          createdByThisRun: false
+        });
+      }
+    });
+    const fixture = backupTransportFixture({
+      precreateBackupDirectory: false,
+      dependencies: {
+        createBackupTransportBridge: createLogicalBackupTransportBridge,
+        databaseManager,
+        fileSystem: proxyFileSystem(overrides),
+        async runProfileRestore() {
+          if (runFailure) throw runFailure;
+          return { accepted: true };
+        }
+      }
+    });
+    const prepared = await fixture.plans.prepareBackupRestore();
+    fs.writeFileSync(
+      prepared.backup0003.config.files.bundle,
+      "synthetic-encrypted-bundle",
+      { flag: "wx", mode: 0o600 }
+    );
+    return {
+      fixture,
+      prepared,
+      reconciliationCalls: () => reconciliationCalls
+    };
+  }
+
+  await t.test("primary plus unlink failure preserves the primary", async () => {
+    const primary = Object.assign(new Error("not persisted"), {
+      code: "synthetic_tamper_primary_failure"
+    });
+    const cleanup = Object.assign(new Error("not persisted"), {
+      code: "synthetic_tamper_unlink_failure"
+    });
+    const reconciliation = Object.assign(new Error("not persisted"), {
+      code: "synthetic_tamper_reconciliation_failure"
+    });
+    let unlinkCalls = 0;
+    const item = await tamperFixture(
+      {
+        fstatSync() { throw primary; },
+        unlinkSync() {
+          unlinkCalls += 1;
+          throw cleanup;
+        }
+      },
+      reconciliation
+    );
+    try {
+      await assert.rejects(
+        item.prepared.assertManifestTamperRefused(),
+        (error) => error === primary
+      );
+      assert.equal(unlinkCalls, 1);
+      assert.equal(item.reconciliationCalls(), 1);
+    } finally {
+      await destroyBackupTransportFixture(item.fixture);
+    }
+  });
+
+  await t.test("close failure still attempts unlink and reconciliation", async () => {
+    const primary = Object.assign(new Error("not persisted"), {
+      code: "synthetic_tamper_primary_failure"
+    });
+    const closing = Object.assign(new Error("not persisted"), {
+      code: "synthetic_tamper_close_failure"
+    });
+    const events = [];
+    const item = await tamperFixture({
+      closeSync(descriptor) {
+        events.push("close");
+        fs.closeSync(descriptor);
+        throw closing;
+      },
+      fstatSync() { throw primary; },
+      unlinkSync(candidate) {
+        events.push("unlink");
+        return fs.unlinkSync(candidate);
+      }
+    });
+    try {
+      await assert.rejects(
+        item.prepared.assertManifestTamperRefused(),
+        (error) => error === primary
+      );
+      assert.deepEqual(events, ["close", "unlink"]);
+      assert.equal(item.reconciliationCalls(), 1);
+    } finally {
+      await destroyBackupTransportFixture(item.fixture);
+    }
+  });
+
+  await t.test("cleanup-only failure propagates the first cleanup", async () => {
+    const cleanup = Object.assign(new Error("not persisted"), {
+      code: "synthetic_tamper_unlink_failure"
+    });
+    let unlinkCalls = 0;
+    const item = await tamperFixture({
+      unlinkSync() {
+        unlinkCalls += 1;
+        throw cleanup;
+      }
+    });
+    try {
+      await assert.rejects(
+        item.prepared.assertManifestTamperRefused(),
+        (error) => error === cleanup
+      );
+      assert.equal(unlinkCalls, 1);
+      assert.equal(item.reconciliationCalls(), 1);
+    } finally {
+      await destroyBackupTransportFixture(item.fixture);
+    }
+  });
+
+  await t.test("reconciliation-only failure propagates after file cleanup", async () => {
+    const reconciliation = Object.assign(new Error("not persisted"), {
+      code: "synthetic_tamper_reconciliation_failure"
+    });
+    const item = await tamperFixture({}, reconciliation);
+    try {
+      await assert.rejects(
+        item.prepared.assertManifestTamperRefused(),
+        (error) => error === reconciliation
+      );
+      assert.equal(item.reconciliationCalls(), 1);
+    } finally {
+      await destroyBackupTransportFixture(item.fixture);
+    }
+  });
+
+  await t.test("accepted tamper returns false despite reconciliation failure", async () => {
+    const reconciliation = Object.assign(new Error("not persisted"), {
+      code: "synthetic_tamper_reconciliation_failure"
+    });
+    const item = await tamperFixture({}, reconciliation, null);
+    try {
+      assert.equal(await item.prepared.assertManifestTamperRefused(), false);
+      assert.equal(item.reconciliationCalls(), 1);
+    } finally {
+      await destroyBackupTransportFixture(item.fixture);
+    }
+  });
+});
+
+test("cross-profile reconciliation never overwrites an unexpected primary", async (t) => {
+  async function crossFixture(runFailure, reconciliationFailure) {
+    let reconciliationCalls = 0;
+    const databaseManager = Object.freeze({
+      ...provenanceDatabaseManager(),
+      async reconcile(identity) {
+        reconciliationCalls += 1;
+        if (reconciliationFailure) throw reconciliationFailure;
+        return Object.freeze({
+          ...identity,
+          status: "absent",
+          createdByThisRun: false
+        });
+      }
+    });
+    const fixture = backupTransportFixture({
+      precreateBackupDirectory: false,
+      dependencies: {
+        createBackupTransportBridge: createLogicalBackupTransportBridge,
+        databaseManager,
+        async runProfileRestore() {
+          if (runFailure) throw runFailure;
+          return { accepted: true };
+        }
+      }
+    });
+    return {
+      fixture,
+      prepared: await fixture.plans.prepareBackupRestore(),
+      reconciliationCalls: () => reconciliationCalls
+    };
+  }
+
+  await t.test("unexpected primary wins over reconciliation failure", async () => {
+    const primary = Object.assign(new Error("not persisted"), {
+      code: "synthetic_cross_profile_primary_failure"
+    });
+    const reconciliation = Object.assign(new Error("not persisted"), {
+      code: "synthetic_cross_profile_reconciliation_failure"
+    });
+    const item = await crossFixture(primary, reconciliation);
+    try {
+      await assert.rejects(
+        item.prepared.assertCrossProfileRefused(),
+        (error) => error === primary
+      );
+      assert.equal(item.reconciliationCalls(), 1);
+    } finally {
+      await destroyBackupTransportFixture(item.fixture);
+    }
+  });
+
+  await t.test("reconciliation-only failure propagates", async () => {
+    const expectedRefusal = Object.assign(new Error("not persisted"), {
+      code: "local_backup_restore_cross_profile_refused"
+    });
+    const reconciliation = Object.assign(new Error("not persisted"), {
+      code: "synthetic_cross_profile_reconciliation_failure"
+    });
+    const item = await crossFixture(expectedRefusal, reconciliation);
+    try {
+      await assert.rejects(
+        item.prepared.assertCrossProfileRefused(),
+        (error) => error === reconciliation
+      );
+      assert.equal(item.reconciliationCalls(), 1);
+    } finally {
+      await destroyBackupTransportFixture(item.fixture);
+    }
+  });
+
+  await t.test("accepted cross-profile returns false despite reconciliation failure", async () => {
+    const reconciliation = Object.assign(new Error("not persisted"), {
+      code: "synthetic_cross_profile_reconciliation_failure"
+    });
+    const item = await crossFixture(null, reconciliation);
+    try {
+      assert.equal(await item.prepared.assertCrossProfileRefused(), false);
+      assert.equal(item.reconciliationCalls(), 1);
+    } finally {
+      await destroyBackupTransportFixture(item.fixture);
+    }
+  });
+});
+
+test("plan-directory rollback never overwrites the restore-work mkdir failure", async () => {
+  const primary = Object.assign(new Error("not persisted"), {
+    code: "synthetic_restore_work_mkdir_failure"
+  });
+  const cleanup = Object.assign(new Error("not persisted"), {
+    code: "synthetic_backup_directory_rmdir_failure"
+  });
+  let rmdirCalls = 0;
+  const fileSystem = new Proxy(fs, {
+    get(target, property) {
+      if (property === "mkdirSync") {
+        return (candidate, options) => {
+          if (path.basename(candidate) === "restore-work") throw primary;
+          return fs.mkdirSync(candidate, options);
+        };
+      }
+      if (property === "rmdirSync") {
+        return () => {
+          rmdirCalls += 1;
+          throw cleanup;
+        };
+      }
+      const value = Reflect.get(target, property);
+      return typeof value === "function" ? value.bind(target) : value;
+    }
+  });
+  const fixture = backupTransportFixture({
+    precreateBackupDirectory: false,
+    dependencies: { fileSystem }
+  });
+  try {
+    await assert.rejects(
+      fixture.plans.prepareBackupRestore(),
+      (error) => error === primary
+    );
+    assert.equal(rmdirCalls, 1);
   } finally {
     await destroyBackupTransportFixture(fixture);
   }

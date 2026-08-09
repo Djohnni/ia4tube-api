@@ -30,10 +30,13 @@ const {
   BRANCH,
   canonicalJson,
   containsMarkerInTree,
+  createBackupRestoreProvenanceTracker,
   createBackupTransportBridge,
   createDrainAwareRunTool,
   createGate1MigrationPoolLifecycle,
   createLinuxProfile0003PlansFacade,
+  createLinuxProfileBackupRunner,
+  createLinuxProfileRestoreRunner,
   createLinuxRestoreConfigFacade,
   createPhaseRunner,
   createPhysicalPoolDrainTracker,
@@ -51,6 +54,7 @@ const {
   publicBootstrapEvidence,
   publicPlatformEvidence,
   retirePrimaryPoolsBeforeBackup,
+  sanitizedBackupRestoreFailureProvenance,
   sanitizedFailureEvidence
 } = require("../scripts/social-3a0p-linux-gate");
 
@@ -1235,6 +1239,31 @@ test("restore target preparation refuses unexpected objects before role grant or
   assert.equal(events.at(-1), "ROLLBACK");
 });
 
+test("restore target rollback failure never overwrites the primary query failure", async () => {
+  const primary = Object.assign(new Error("not persisted"), {
+    code: "synthetic_restore_preparation_failure"
+  });
+  const rollback = Object.assign(new Error("not persisted"), {
+    code: "synthetic_restore_rollback_failure"
+  });
+  const events = [];
+  await assert.rejects(
+    prepareLinuxRestoreTarget({
+      database: "ia4tube_social_disposable_restore_0003_012345abcdef",
+      async query(text) {
+        events.push(String(text));
+        if (text === "BEGIN") return { rows: [] };
+        if (text === "ROLLBACK") throw rollback;
+        throw primary;
+      }
+    }),
+    (error) => error === primary
+  );
+  assert.equal(events.length, 3);
+  assert.equal(events[0], "BEGIN");
+  assert.equal(events.at(-1), "ROLLBACK");
+});
+
 test("restore inventory interception runs once only for an exact disposable target", async () => {
   const inventory = [
     "SELECT 0 AS application_schema_count,",
@@ -2183,19 +2212,35 @@ test("physical plan pool adapter refuses divergent logical or physical transport
 test("profile 0003 source fixture is seeded and verified with identical IDs after restore", async () => {
   const events = [];
   const databases = [];
+  const tracker = createBackupRestoreProvenanceTracker({
+    requireSpawnProof: false
+  });
+  let boundRestoreRequest;
   let uuidCall = 0;
   const uuids = [
     "11111111-1111-4111-8111-111111111111",
     "22222222-2222-4222-8222-222222222222"
   ];
   const basePlans = {
-    async prepareBackupRestore() {
+    async prepareBackupRestore(_state, preparationHooks) {
+      const verifyProfile0003FixtureRestored =
+        preparationHooks.installProfile0003RestoreVerification();
+      const verifyRestoredProfile = async () => {
+        events.push("profile-verified");
+        const profile = { id: "social-schema-0003" };
+        await verifyProfile0003FixtureRestored();
+        return profile;
+      };
+      boundRestoreRequest = {
+        localBinding: { database: "ia4tube_social_disposable_restore_0003_012345abcdef" },
+        async runTool() { return { code: 0 }; },
+        verifyRestoredProfile
+      };
+      tracker.bindRestore("gate5_restore_0003", boundRestoreRequest);
+      Object.freeze(boundRestoreRequest);
       return {
         backup0003: { localBinding: { database: "ia4tube_social_disposable_source_0003_012345abcdef" } },
-        restore0003: {
-          localBinding: { database: "ia4tube_social_disposable_restore_0003_012345abcdef" },
-          async verifyRestoredProfile() { events.push("profile-verified"); return { id: "social-schema-0003" }; }
-        }
+        restore0003: boundRestoreRequest
       };
     },
     async destroy() {}
@@ -2230,8 +2275,25 @@ test("profile 0003 source fixture is seeded and verified with identical IDs afte
     }
   });
   const plan = await adapter.plans.prepareBackupRestore();
+  assert.equal(plan.restore0003, boundRestoreRequest);
+  assert.equal(Object.isFrozen(plan.restore0003), true);
   assert.equal(events.filter((event) => String(event).startsWith("INSERT INTO")).length, 3);
-  assert.deepEqual(await plan.restore0003.verifyRestoredProfile(), { id: "social-schema-0003" });
+  const restoreRunner = createLinuxProfileRestoreRunner({
+    backupRestoreProvenance: tracker,
+    localBackup: {
+      async runProfileRestore(request) {
+        for (let index = 0; index < 4; index += 1) {
+          await request.runTool();
+        }
+        return request.verifyRestoredProfile();
+      }
+    }
+  });
+  assert.deepEqual(
+    await restoreRunner(plan.restore0003),
+    { id: "social-schema-0003" }
+  );
+  assert.equal(tracker.failure(), null);
   assert.deepEqual(databases, [
     "ia4tube_social_disposable_source_0003_012345abcdef",
     "ia4tube_social_disposable_restore_0003_012345abcdef"
@@ -2240,6 +2302,130 @@ test("profile 0003 source fixture is seeded and verified with identical IDs afte
   assert.equal(evidence.profile0003SyntheticFixtureRestored, true);
   assert.equal(evidence.profile0003FixtureRows, 3);
   assert.match(evidence.profile0003FixtureIdentitySha256, /^[0-9a-f]{64}$/);
+});
+
+test("profile 0003 migration-pool drain never overwrites the first operation failure", async () => {
+  const primary = Object.assign(new Error("not persisted"), {
+    code: "synthetic_profile_snapshot_failure"
+  });
+  const closing = Object.assign(new Error("not persisted"), {
+    code: "synthetic_profile_pool_close_failure"
+  });
+  const basePlans = {
+    async prepareBackupRestore(_state, preparationHooks) {
+      const observe =
+        preparationHooks.installProfile0003RestoreVerification();
+      return {
+        backup0003: {
+          localBinding: {
+            database:
+              "ia4tube_social_disposable_source_0003_012345abcdef"
+          }
+        },
+        restore0003: {
+          localBinding: {
+            database:
+              "ia4tube_social_disposable_restore_0003_012345abcdef"
+          },
+          async verifyRestoredProfile() {
+            await observe();
+            return { id: "social-schema-0003" };
+          }
+        }
+      };
+    }
+  };
+  const operationAndDrain = createLinuxProfile0003PlansFacade({
+    plans: basePlans,
+    makeMigrationPool() {
+      return {
+        async query() { throw primary; },
+        async end() { throw closing; }
+      };
+    },
+    async withTransactionImpl(pool, operation) {
+      return operation(pool);
+    }
+  });
+  await assert.rejects(
+    operationAndDrain.plans.prepareBackupRestore(),
+    (error) => error === primary
+  );
+
+  const drainOnly = createLinuxProfile0003PlansFacade({
+    plans: basePlans,
+    makeMigrationPool() {
+      return {
+        async query(text) {
+          if (String(text).includes("tenant_companies")) {
+            return { rows: [{
+              companies: 1,
+              users: 1,
+              memberships: 1,
+              tenant_companies: 1,
+              tenant_users: 1,
+              tenant_memberships: 1
+            }] };
+          }
+          return { rows: [] };
+        },
+        async end() { throw closing; }
+      };
+    },
+    async withTransactionImpl(pool, operation) {
+      return operation(pool);
+    }
+  });
+  await assert.rejects(
+    drainOnly.plans.prepareBackupRestore(),
+    (error) => error === closing
+  );
+
+  let restoreDrainCalls = 0;
+  const mismatchAndDrain = createLinuxProfile0003PlansFacade({
+    plans: basePlans,
+    makeMigrationPool(database) {
+      return {
+        database,
+        async query(text) {
+          if (String(text).includes("tenant_companies")) {
+            return { rows: [{
+              companies: 1,
+              users: 1,
+              memberships: 1,
+              tenant_companies: 1,
+              tenant_users: 1,
+              tenant_memberships: 1
+            }] };
+          }
+          return { rows: [] };
+        },
+        async end() {
+          if (database.includes("restore_0003")) {
+            restoreDrainCalls += 1;
+            throw closing;
+          }
+        }
+      };
+    },
+    async withTransactionImpl(pool, operation) {
+      const snapshot = await operation(pool);
+      if (!pool.database.includes("restore_0003")) return snapshot;
+      return Object.freeze({
+        ...snapshot,
+        identitySha256: "f".repeat(64)
+      });
+    }
+  });
+  const mismatchedPlan = await mismatchAndDrain.plans.prepareBackupRestore();
+  await assert.rejects(
+    mismatchedPlan.restore0003.verifyRestoredProfile(),
+    {
+      code: "linux_gate_profile0003_fixture_mismatch",
+      name: "LinuxGateFailure"
+    }
+  );
+  assert.equal(restoreDrainCalls, 1);
 });
 
 test("physical-plan ledger reads assume only the canonical migrator role", async () => {
@@ -2357,6 +2543,62 @@ test("backup provisioner clients delegate only ledger reads to the scoped migrat
   ]);
 });
 
+test("ledger migration-pool drain preserves the primary and propagates drain-only failure", async () => {
+  const primary = Object.assign(new Error("not persisted"), {
+    code: "synthetic_ledger_query_failure"
+  });
+  const closing = Object.assign(new Error("not persisted"), {
+    code: "synthetic_ledger_pool_close_failure"
+  });
+  const ledgerQuery = [
+    "SELECT version, checksum_sha256 AS checksum",
+    "FROM ia4tube_migrations.schema_migrations ORDER BY version"
+  ].join("\n");
+  class BasePool {
+    constructor(options) { this.options = options; }
+    async connect() {
+      return {
+        async query() { return { rows: [] }; },
+        release() {}
+      };
+    }
+    async end() {}
+  }
+  const operationAndDrain = createRoleScopedPlanPoolClass(
+    BasePool,
+    async () => { throw primary; },
+    () => ({ async end() { throw closing; } })
+  );
+  const firstPool = new operationAndDrain({
+    database: "ia4tube_social_local_restore",
+    user: "ia4tube_social_local_provisioner"
+  });
+  const firstClient = await firstPool.connect();
+  await assert.rejects(
+    firstClient.query(ledgerQuery),
+    (error) => error === primary
+  );
+  firstClient.release();
+  await operationAndDrain.closeAll();
+
+  const drainOnly = createRoleScopedPlanPoolClass(
+    BasePool,
+    async () => ({ rows: [{ version: "0001" }] }),
+    () => ({ async end() { throw closing; } })
+  );
+  const secondPool = new drainOnly({
+    database: "ia4tube_social_local_restore",
+    user: "ia4tube_social_local_provisioner"
+  });
+  const secondClient = await secondPool.connect();
+  await assert.rejects(
+    secondClient.query(ledgerQuery),
+    (error) => error === closing
+  );
+  secondClient.release();
+  await drainOnly.closeAll();
+});
+
 test("restore configs validate a future owned bundle without leaving a placeholder", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "ia4tube-linux-lazy-restore-"));
   const backupDirectory = path.join(root, "backups");
@@ -2391,6 +2633,143 @@ test("restore configs validate a future owned bundle without leaving a placehold
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
+});
+
+test("restore placeholder cleanup preserves the first failure and attempts every cleanup", async (t) => {
+  function fixture({ fileSystem, loadRestoreConfig }) {
+    const root = fs.mkdtempSync(
+      path.join(os.tmpdir(), "ia4tube-linux-placeholder-order-")
+    );
+    const backupDirectory = path.join(root, "backups");
+    fs.mkdirSync(backupDirectory);
+    const bundlePath = path.join(
+      backupDirectory,
+      "profile-0003-012345abcdef.ia4sb"
+    );
+    return {
+      bundlePath,
+      facade: createLinuxRestoreConfigFacade({
+        backupDirectory,
+        backupProduct: { loadRestoreConfig },
+        fileSystem
+      }),
+      root
+    };
+  }
+  const proxyFileSystem = (overrides) => new Proxy(fs, {
+    get(target, property) {
+      if (Object.hasOwn(overrides, property)) return overrides[property];
+      const value = Reflect.get(target, property);
+      return typeof value === "function" ? value.bind(target) : value;
+    }
+  });
+
+  await t.test("primary plus unlink failure preserves the primary", () => {
+    const primary = Object.assign(new Error("not persisted"), {
+      code: "synthetic_restore_config_primary_failure"
+    });
+    const cleanup = Object.assign(new Error("not persisted"), {
+      code: "synthetic_restore_placeholder_unlink_failure"
+    });
+    let unlinkCalls = 0;
+    const item = fixture({
+      fileSystem: proxyFileSystem({
+        unlinkSync() {
+          unlinkCalls += 1;
+          throw cleanup;
+        }
+      }),
+      loadRestoreConfig() { throw primary; }
+    });
+    try {
+      assert.throws(
+        () => item.facade.loadRestoreConfig({
+          SOCIAL_RESTORE_BUNDLE: item.bundlePath
+        }),
+        (error) => error === primary
+      );
+      assert.equal(unlinkCalls, 1);
+    } finally {
+      fs.rmSync(item.root, { recursive: true, force: true });
+    }
+  });
+
+  await t.test("descriptor close failure still attempts unlink and residual check", () => {
+    const primary = Object.assign(new Error("not persisted"), {
+      code: "synthetic_restore_placeholder_close_failure"
+    });
+    const cleanup = Object.assign(new Error("not persisted"), {
+      code: "synthetic_restore_placeholder_reclose_failure"
+    });
+    const events = [];
+    let closeCalls = 0;
+    const item = fixture({
+      fileSystem: proxyFileSystem({
+        closeSync(descriptor) {
+          closeCalls += 1;
+          events.push(`close-${closeCalls}`);
+          if (closeCalls === 1) {
+            fs.closeSync(descriptor);
+            throw primary;
+          }
+          throw cleanup;
+        },
+        existsSync(candidate) {
+          events.push("exists");
+          return fs.existsSync(candidate);
+        },
+        unlinkSync(candidate) {
+          events.push("unlink");
+          return fs.unlinkSync(candidate);
+        }
+      }),
+      loadRestoreConfig() {
+        throw new Error("loader must not run");
+      }
+    });
+    try {
+      assert.throws(
+        () => item.facade.loadRestoreConfig({
+          SOCIAL_RESTORE_BUNDLE: item.bundlePath
+        }),
+        (error) => error === primary
+      );
+      assert.deepEqual(events.slice(-4), [
+        "close-1", "close-2", "unlink", "exists"
+      ]);
+      assert.equal(fs.existsSync(item.bundlePath), false);
+    } finally {
+      fs.rmSync(item.root, { recursive: true, force: true });
+    }
+  });
+
+  await t.test("cleanup-only failure propagates the first cleanup", () => {
+    const cleanup = Object.assign(new Error("not persisted"), {
+      code: "synthetic_restore_placeholder_unlink_failure"
+    });
+    let residualChecks = 0;
+    const item = fixture({
+      fileSystem: proxyFileSystem({
+        existsSync(candidate) {
+          residualChecks += 1;
+          return fs.existsSync(candidate);
+        },
+        unlinkSync() { throw cleanup; }
+      }),
+      loadRestoreConfig() { return Object.freeze({ ok: true }); }
+    });
+    try {
+      assert.throws(
+        () => item.facade.loadRestoreConfig({
+          SOCIAL_RESTORE_BUNDLE: item.bundlePath
+        }),
+        (error) => error === cleanup
+      );
+      assert.equal(residualChecks >= 2, true);
+    } finally {
+      fs.rmSync(item.root, { recursive: true, force: true });
+    }
+  });
 });
 
 test("physical pool drain waits for remove after end resolves and ends only once", async () => {
@@ -2801,4 +3180,886 @@ test("Linux gate source reuses product plans and has no external provider call",
   ].map((needle) => gate.indexOf(needle));
   assert.ok(order.every((index) => index >= 0));
   assert.deepEqual([...order].sort((a, b) => a - b), order);
+});
+
+function spawnedToolRunner(tracker, outcomes) {
+  let call = 0;
+  const trackedSpawn = tracker.wrapSpawn(() => {
+    const child = new EventEmitter();
+    queueMicrotask(() => child.emit("spawn"));
+    return child;
+  });
+  return async () => {
+    trackedSpawn();
+    await new Promise((resolve) => queueMicrotask(resolve));
+    const code = outcomes[call] ?? 0;
+    call += 1;
+    return { code };
+  };
+}
+
+function bindAndRunProvenance(tracker, kind, operation, runner, request) {
+  if (kind === "backup") {
+    tracker.bindBackup(operation, request);
+    return tracker.runBackup(runner, request);
+  }
+  tracker.bindRestore(operation, request);
+  return tracker.runRestore(runner, request);
+}
+
+async function failAtExternalSubstep({ kind, operation, target, count }) {
+  const tracker = createBackupRestoreProvenanceTracker();
+  const outcomes = Array.from({ length: count }, (_, index) =>
+    index === target ? 1 : 0
+  );
+  const runTool = spawnedToolRunner(tracker, outcomes);
+  const runner = async (request) => {
+    for (let index = 0; index < count; index += 1) {
+      const result = await request.runTool();
+      if (result.code !== 0) {
+        const error = new Error("not persisted");
+        error.code = "backup_external_tool_failed";
+        throw error;
+      }
+    }
+    return { ok: true };
+  };
+  const request = { runTool };
+  await assert.rejects(
+    () => bindAndRunProvenance(
+      tracker,
+      kind,
+      operation,
+      runner,
+      request
+    ),
+    { code: "backup_external_tool_failed" }
+  );
+  return tracker.failure();
+}
+
+test("backup/restore provenance identifies each of the seven external positions", async (t) => {
+  const positions = [
+    ["backup", "rollback_backup_0003", 3, "backup_data_snapshot"],
+    ["backup", "rollback_backup_0003", 3, "backup_schema_archive"],
+    ["backup", "rollback_backup_0003", 3, "backup_schema_inventory"],
+    ["restore", "rollback_restore_0003", 4, "restore_schema_inventory"],
+    ["restore", "rollback_restore_0003", 4, "restore_schema_apply"],
+    ["restore", "rollback_restore_0003", 4, "restore_data_apply"],
+    ["restore", "rollback_restore_0003", 4, "restore_evidence_capture"]
+  ];
+  for (const [kind, operation, count, substep] of positions) {
+    await t.test(substep, async () => {
+      const target = (kind === "backup"
+        ? ["backup_data_snapshot", "backup_schema_archive", "backup_schema_inventory"]
+        : ["restore_schema_inventory", "restore_schema_apply", "restore_data_apply", "restore_evidence_capture"]
+      ).indexOf(substep);
+      const failure = await failAtExternalSubstep({
+        kind,
+        operation,
+        target,
+        count
+      });
+      assert.deepEqual(failure, {
+        operation,
+        substep,
+        boundary: "external_process",
+        causalCode: "backup_restore_external_transport_process_nonzero",
+        externalTransportProcessStarted: true,
+        substepExact: true
+      });
+      assert.equal(Object.isFrozen(failure), true);
+    });
+  }
+});
+
+test("provenance distinguishes real spawn, pre-spawn refusal and instrumentation unknown", async () => {
+  const preSpawn = createBackupRestoreProvenanceTracker();
+  const refusal = new Error("must not be persisted");
+  refusal.code = "linux_postgres_tool_transport_refused";
+  const preSpawnRequest = { async runTool() { throw refusal; } };
+  await assert.rejects(
+    () => bindAndRunProvenance(
+      preSpawn,
+      "restore",
+      "rollback_restore_0003",
+      async (request) => request.runTool(),
+      preSpawnRequest
+    ),
+    { code: refusal.code }
+  );
+  assert.deepEqual(preSpawn.failure(), {
+    operation: "rollback_restore_0003",
+    substep: "restore_schema_inventory",
+    boundary: "pre_execution_validation",
+    causalCode: refusal.code,
+    externalTransportProcessStarted: false,
+    substepExact: true
+  });
+
+  const unsafePreSpawn = createBackupRestoreProvenanceTracker();
+  const unsafePreSpawnRequest = {
+    async runTool() { throw new Error("must never reach evidence"); }
+  };
+  await assert.rejects(
+    () => bindAndRunProvenance(
+      unsafePreSpawn,
+      "backup",
+      "rollback_backup_0003",
+      async (request) => request.runTool(),
+      unsafePreSpawnRequest
+    )
+  );
+  assert.deepEqual(unsafePreSpawn.failure(), {
+    operation: "rollback_backup_0003",
+    substep: "backup_data_snapshot",
+    boundary: "pre_execution_validation",
+    causalCode: "backup_restore_pre_execution_validation_failed",
+    externalTransportProcessStarted: false,
+    substepExact: true
+  });
+
+  const unknown = createBackupRestoreProvenanceTracker();
+  const unknownRequest = { async runTool() { return { code: 0 }; } };
+  await assert.rejects(
+    () => bindAndRunProvenance(
+      unknown,
+      "backup",
+      "rollback_backup_0003",
+      async () => ({ ok: true }),
+      unknownRequest
+    ),
+    { code: "backup_restore_provenance_sequence_invalid" }
+  );
+  assert.deepEqual(unknown.failure(), {
+    operation: "rollback_backup_0003",
+    substep: "unknown",
+    boundary: "instrumentation",
+    causalCode: "backup_restore_provenance_sequence_invalid",
+    externalTransportProcessStarted: null,
+    substepExact: false
+  });
+});
+
+test("exact internal callbacks and unobservable internal intervals stay distinct", async () => {
+  const callbackTracker = createBackupRestoreProvenanceTracker();
+  const callbackTool = spawnedToolRunner(callbackTracker, [0, 0, 0, 0]);
+  const callbackFailure = new Error("not persisted");
+  callbackFailure.code = "synthetic_vault_verifier_failed";
+  const callbackRequest = {
+    runTool: callbackTool,
+    async verifyVault() { throw callbackFailure; }
+  };
+  await assert.rejects(
+    () => bindAndRunProvenance(
+      callbackTracker,
+      "restore",
+      "rollback_restore_0003",
+      async (request) => {
+        for (let index = 0; index < 4; index += 1) await request.runTool();
+        await request.verifyVault();
+      },
+      callbackRequest
+    ),
+    { code: callbackFailure.code }
+  );
+  assert.deepEqual(callbackTracker.failure(), {
+    operation: "rollback_restore_0003",
+    substep: "restore_vault",
+    boundary: "internal_callback",
+    causalCode: callbackFailure.code,
+    externalTransportProcessStarted: false,
+    substepExact: true
+  });
+
+  const intervalTracker = createBackupRestoreProvenanceTracker();
+  const intervalTool = spawnedToolRunner(intervalTracker, [0, 0]);
+  const intervalRequest = { runTool: intervalTool };
+  await assert.rejects(
+    () => bindAndRunProvenance(
+      intervalTracker,
+      "restore",
+      "rollback_restore_0003",
+      async (request) => {
+        await request.runTool();
+        await request.runTool();
+        throw new Error("unobservable internal detail");
+      },
+      intervalRequest
+    )
+  );
+  assert.deepEqual(intervalTracker.failure(), {
+    operation: "rollback_restore_0003",
+    substep: "restore_after_schema_apply",
+    boundary: "internal_interval",
+    causalCode: "backup_restore_internal_failure_unclassified",
+    externalTransportProcessStarted: false,
+    substepExact: false
+  });
+});
+
+test("known rollback wrappers expose only a safe causal code or the substep fallback", async () => {
+  for (const [cause, expected] of [
+    [
+      Object.assign(new Error("not persisted"), {
+        code: "synthetic_original_catalog_failure"
+      }),
+      "synthetic_original_catalog_failure"
+    ],
+    [undefined, "backup_restore_internal_callback_failed"],
+    [
+      Object.assign(new Error("not persisted"), {
+        code: "unsafe/path/with/details"
+      }),
+      "backup_restore_internal_callback_failed"
+    ]
+  ]) {
+    const tracker = createBackupRestoreProvenanceTracker({
+      requireSpawnProof: false
+    });
+    const wrapper = Object.assign(new Error("not persisted"), {
+      code: "postgres_rollback_failed"
+    });
+    if (cause !== undefined) wrapper.cause = cause;
+    const request = {
+      operator: {
+        async preflight() { throw wrapper; }
+      }
+    };
+    tracker.bindBackup("rollback_backup_0003", request);
+    await assert.rejects(
+      tracker.runBackup(
+        async (candidate) => candidate.operator.preflight(),
+        request
+      ),
+      (error) => error === wrapper
+    );
+    assert.equal(tracker.failure().substep, "backup_preflight");
+    assert.equal(tracker.failure().causalCode, expected);
+  }
+});
+
+test("operator callbacks are exact and cleanup cannot overwrite the first failure", async () => {
+  const operatorTracker = createBackupRestoreProvenanceTracker();
+  const preflightFailure = new Error("not persisted");
+  preflightFailure.code = "synthetic_backup_preflight_failed";
+  const operatorRequest = {
+    async runTool() { return { code: 0 }; },
+    operator: { async preflight() { throw preflightFailure; } }
+  };
+  await assert.rejects(
+    () => bindAndRunProvenance(
+      operatorTracker,
+      "backup",
+      "rollback_backup_0003",
+      async (request) => request.operator.preflight(),
+      operatorRequest
+    ),
+    { code: preflightFailure.code }
+  );
+  assert.equal(operatorTracker.failure().substep, "backup_preflight");
+  assert.equal(operatorTracker.failure().substepExact, true);
+
+  const firstTracker = createBackupRestoreProvenanceTracker();
+  const runTool = spawnedToolRunner(firstTracker, [1]);
+  const cleanupFailure = new Error("not persisted");
+  cleanupFailure.code = "synthetic_cleanup_failed";
+  const primaryFailure = new Error("not persisted");
+  const firstRequest = {
+    runTool,
+    operator: { async releaseLocks() { throw cleanupFailure; } }
+  };
+  await assert.rejects(
+    () => bindAndRunProvenance(
+      firstTracker,
+      "backup",
+      "rollback_backup_0003",
+      async (request) => {
+        try {
+          const result = await request.runTool();
+          if (result.code !== 0) throw primaryFailure;
+        } finally {
+          await request.operator.releaseLocks();
+        }
+      },
+      firstRequest
+    ),
+    (error) => error === primaryFailure
+  );
+  assert.deepEqual(firstTracker.failure(), {
+    operation: "rollback_backup_0003",
+    substep: "backup_data_snapshot",
+    boundary: "external_process",
+    causalCode: "backup_restore_external_transport_process_nonzero",
+    externalTransportProcessStarted: true,
+    substepExact: true
+  });
+});
+
+test("closing callbacks defer failure, preserve a known primary and fail closed on ambiguous order", async () => {
+  const primaryTracker = createBackupRestoreProvenanceTracker({
+    requireSpawnProof: false
+  });
+  const primary = Object.assign(new Error("not persisted"), {
+    code: "synthetic_primary_internal_failure"
+  });
+  const release = Object.assign(new Error("not persisted"), {
+    code: "synthetic_release_failure"
+  });
+  const primaryRequest = {
+    async runTool() { return { code: 0 }; },
+    operator: {
+      async preflight() { throw primary; },
+      async releaseLocks() { throw release; }
+    }
+  };
+  await assert.rejects(
+    () => bindAndRunProvenance(
+      primaryTracker,
+      "backup",
+      "rollback_backup_0003",
+      async (request) => {
+        try {
+          await request.operator.preflight();
+        } finally {
+          await request.operator.releaseLocks();
+        }
+      },
+      primaryRequest
+    ),
+    (error) => error === primary
+  );
+  assert.equal(primaryTracker.failure().substep, "backup_preflight");
+  assert.equal(primaryTracker.failure().causalCode, primary.code);
+
+  const releaseOnlyTracker = createBackupRestoreProvenanceTracker();
+  const releaseOnlyTool = spawnedToolRunner(releaseOnlyTracker, [0, 0, 0]);
+  const releaseOnly = Object.assign(new Error("not persisted"), {
+    code: "synthetic_release_only_failure"
+  });
+  const releaseOnlyRequest = {
+    runTool: releaseOnlyTool,
+    operator: { async releaseLocks() { throw releaseOnly; } }
+  };
+  await assert.rejects(
+    () => bindAndRunProvenance(
+      releaseOnlyTracker,
+      "backup",
+      "rollback_backup_0003",
+      async (request) => {
+        for (let index = 0; index < 3; index += 1) await request.runTool();
+        await request.operator.releaseLocks();
+      },
+      releaseOnlyRequest
+    ),
+    { code: releaseOnly.code, name: "LinuxGateFailure" }
+  );
+  assert.deepEqual(releaseOnlyTracker.failure(), {
+    operation: "rollback_backup_0003",
+    substep: "backup_lock_release",
+    boundary: "internal_callback",
+    causalCode: releaseOnly.code,
+    externalTransportProcessStarted: false,
+    substepExact: true
+  });
+
+  const ambiguousTracker = createBackupRestoreProvenanceTracker({
+    requireSpawnProof: false
+  });
+  const ambiguousPrimary = new Error("not persisted");
+  const ambiguousRequest = {
+    async runTool() { return { code: 0 }; },
+    operator: { async releaseLocks() { throw release; } }
+  };
+  await assert.rejects(
+    () => bindAndRunProvenance(
+      ambiguousTracker,
+      "backup",
+      "rollback_backup_0003",
+      async (request) => {
+        try {
+          throw ambiguousPrimary;
+        } finally {
+          await request.operator.releaseLocks();
+        }
+      },
+      ambiguousRequest
+    ),
+    (error) => error === ambiguousPrimary
+  );
+  assert.deepEqual(ambiguousTracker.failure(), {
+    operation: "rollback_backup_0003",
+    substep: "unknown",
+    boundary: "instrumentation",
+    causalCode: "backup_restore_provenance_closing_order_ambiguous",
+    externalTransportProcessStarted: null,
+    substepExact: false
+  });
+
+  const closeTracker = createBackupRestoreProvenanceTracker();
+  const closeTool = spawnedToolRunner(closeTracker, [0, 0, 0, 0]);
+  const closeFailure = Object.assign(new Error("not persisted"), {
+    code: "synthetic_verifier_close_failure"
+  });
+  const closeRequest = {
+    runTool: closeTool,
+    async closeVerifiers() { throw closeFailure; }
+  };
+  await assert.rejects(
+    () => bindAndRunProvenance(
+      closeTracker,
+      "restore",
+      "rollback_restore_0003",
+      async (request) => {
+        for (let index = 0; index < 4; index += 1) await request.runTool();
+        await request.closeVerifiers();
+      },
+      closeRequest
+    ),
+    { code: closeFailure.code, name: "LinuxGateFailure" }
+  );
+  assert.equal(closeTracker.failure().substep, "restore_verifier_cleanup");
+  assert.equal(closeTracker.failure().causalCode, closeFailure.code);
+});
+
+test("WeakMap provenance router refuses unbound, crossed and reused requests", async () => {
+  const forged = createBackupRestoreProvenanceTracker();
+  await assert.rejects(
+    () => forged.runBackup(async () => true, {
+      operation: "rollback_backup_0003"
+    }),
+    { code: "backup_restore_provenance_operation_invalid" }
+  );
+  assert.equal(forged.failure().operation, "unknown");
+
+  const crossed = createBackupRestoreProvenanceTracker();
+  const crossedRequest = {};
+  crossed.bindRestore("rollback_restore_0003", crossedRequest);
+  await assert.rejects(
+    () => crossed.runBackup(async () => true, crossedRequest),
+    { code: "backup_restore_provenance_operation_invalid" }
+  );
+  assert.equal(crossed.failure().operation, "rollback_restore_0003");
+
+  const reused = createBackupRestoreProvenanceTracker();
+  const reusedRequest = {
+    runTool: spawnedToolRunner(reused, [0, 0, 0])
+  };
+  reused.bindBackup("gate5_backup_0003", reusedRequest);
+  const runner = async (request) => {
+    for (let index = 0; index < 3; index += 1) await request.runTool();
+    return true;
+  };
+  assert.equal(await reused.runBackup(runner, reusedRequest), true);
+  await assert.rejects(
+    () => reused.runBackup(runner, reusedRequest),
+    { code: "backup_restore_provenance_operation_invalid" }
+  );
+  assert.deepEqual(reused.failure(), {
+    operation: "gate5_backup_0003",
+    substep: "unknown",
+    boundary: "instrumentation",
+    causalCode: "backup_restore_provenance_operation_invalid",
+    externalTransportProcessStarted: null,
+    substepExact: false
+  });
+});
+
+test("all six normal operations are accepted while tamper/cross stay outside provenance", async () => {
+  for (const [kind, operation, count] of [
+    ["backup", "rollback_backup_0003", 3],
+    ["backup", "gate5_backup_0003", 3],
+    ["backup", "gate5_backup_0004", 3],
+    ["restore", "rollback_restore_0003", 4],
+    ["restore", "gate5_restore_0003", 4],
+    ["restore", "gate5_restore_0004", 4]
+  ]) {
+    const tracker = createBackupRestoreProvenanceTracker();
+    const runTool = spawnedToolRunner(tracker, Array(count).fill(0));
+    const runner = async (request) => {
+      for (let index = 0; index < count; index += 1) await request.runTool();
+      return true;
+    };
+    const request = { runTool };
+    assert.equal(
+      await bindAndRunProvenance(
+        tracker,
+        kind,
+        operation,
+        runner,
+        request
+      ),
+      true
+    );
+    assert.equal(tracker.failure(), null);
+  }
+  const refused = createBackupRestoreProvenanceTracker();
+  const refusedRequest = { async runTool() { return { code: 0 }; } };
+  assert.throws(
+    () => refused.bindRestore(
+      "tamper_restore_0003",
+      refusedRequest
+    ),
+    { code: "backup_restore_provenance_binding_invalid" }
+  );
+  assert.equal(refused.failure().operation, "unknown");
+  assert.equal(refused.failure().boundary, "instrumentation");
+});
+
+test("provenance evidence and sanitized fallback have an exact secret-free schema", () => {
+  const provenance = {
+    operation: "rollback_restore_0003",
+    substep: "restore_data_apply",
+    boundary: "external_process",
+    causalCode: "backup_restore_external_transport_process_nonzero",
+    externalTransportProcessStarted: true,
+    substepExact: true
+  };
+  const closed = sanitizedBackupRestoreFailureProvenance(provenance);
+  assert.deepEqual(Object.keys(closed).sort(), [
+    "boundary",
+    "causalCode",
+    "externalTransportProcessStarted",
+    "operation",
+    "substep",
+    "substepExact"
+  ]);
+  const preserved = sanitizedFailureEvidence({
+    firstFailure: { phase: "migrations", code: "backup_external_tool_failed" },
+    backupRestoreFailureProvenance: provenance,
+    cleanup: {
+      cleanupCompleted: true,
+      containerResiduals: 0,
+      volumeResiduals: 0,
+      networkResiduals: 0,
+      listenerResiduals: 0,
+      temporaryRootResiduals: 0
+    }
+  });
+  assert.deepEqual(preserved.backupRestoreFailureProvenance, provenance);
+  const fallback = sanitizedFailureEvidence({
+    firstFailure: { phase: "migrations", code: "backup_external_tool_failed" },
+    backupRestoreFailureProvenance: {
+      ...provenance,
+      rawOutput: "forbidden"
+    },
+    cleanup: {
+      cleanupCompleted: true,
+      containerResiduals: 0,
+      volumeResiduals: 0,
+      networkResiduals: 0,
+      listenerResiduals: 0,
+      temporaryRootResiduals: 0
+    }
+  });
+  assert.deepEqual(fallback.backupRestoreFailureProvenance, {
+    operation: "unknown",
+    substep: "unknown",
+    boundary: "instrumentation",
+    causalCode: "backup_restore_provenance_invalid",
+    externalTransportProcessStarted: null,
+    substepExact: false
+  });
+  const serialized = canonicalJson(fallback);
+  for (const forbidden of [
+    "rawOutput", "stdout", "stderr", "password", "postgresql://",
+    "--dbname", "SELECT ", "C:\\", "/tmp/"
+  ]) {
+    assert.equal(serialized.includes(forbidden), false);
+  }
+  assert.equal(evidenceSafe(fallback), true);
+});
+
+test("provenance sanitizer rejects crossed kinds and unproved external transport", () => {
+  const invalid = {
+    operation: "unknown",
+    substep: "unknown",
+    boundary: "instrumentation",
+    causalCode: "backup_restore_provenance_invalid",
+    externalTransportProcessStarted: null,
+    substepExact: false
+  };
+  const candidates = [
+    {
+      operation: "rollback_backup_0003",
+      substep: "restore_schema_apply",
+      boundary: "external_process",
+      causalCode: "backup_restore_external_transport_process_failed",
+      externalTransportProcessStarted: true,
+      substepExact: true
+    },
+    {
+      operation: "rollback_restore_0003",
+      substep: "backup_schema_archive",
+      boundary: "external_process",
+      causalCode: "backup_restore_external_transport_process_failed",
+      externalTransportProcessStarted: true,
+      substepExact: true
+    },
+    {
+      operation: "unknown",
+      substep: "restore_schema_inventory",
+      boundary: "external_process",
+      causalCode: "backup_restore_external_transport_process_failed",
+      externalTransportProcessStarted: true,
+      substepExact: true
+    },
+    {
+      operation: "gate5_restore_0004",
+      substep: "restore_data_apply",
+      boundary: "external_process",
+      causalCode: "backup_restore_external_transport_process_failed",
+      externalTransportProcessStarted: null,
+      substepExact: true
+    }
+  ];
+  for (const candidate of candidates) {
+    assert.deepEqual(
+      sanitizedBackupRestoreFailureProvenance(candidate),
+      invalid
+    );
+  }
+});
+
+test("Linux profile backup composes the provenance runner with directory fsync", async () => {
+  let productCalls = 0;
+  let provenanceCalls = 0;
+  let fsyncRecords = 0;
+  const product = {
+    async runLogicalBackup() {
+      productCalls += 1;
+      return { bundleDirectoryFsyncConfirmed: true };
+    }
+  };
+  const localBackup = {
+    async runProfileBackup(request) {
+      return request.dependencies.runLogicalBackup({ synthetic: true });
+    }
+  };
+  const runner = createLinuxProfileBackupRunner({
+    localBackup,
+    backupProduct: product,
+    recordDirectoryFsync() { fsyncRecords += 1; }
+  });
+  const result = await runner({
+    dependencies: {
+      async runLogicalBackup(request) {
+        provenanceCalls += 1;
+        assert.equal(request.requireBundleDirectoryFsync, true);
+        return { bundleDirectoryFsyncConfirmed: true };
+      }
+    }
+  });
+  assert.equal(result.bundleDirectoryFsyncConfirmed, true);
+  assert.equal(provenanceCalls, 1);
+  assert.equal(productCalls, 0);
+  assert.equal(fsyncRecords, 1);
+});
+
+test("Linux Gate 5 outer runners keep backup, restore and closing failures inside provenance", async (t) => {
+  await t.test("backup directory fsync refusal remains in the outer backup interval", async () => {
+    const tracker = createBackupRestoreProvenanceTracker({
+      requireSpawnProof: false
+    });
+    let localCalls = 0;
+    const runner = createLinuxProfileBackupRunner({
+      localBackup: {
+        async runProfileBackup(request) {
+          localCalls += 1;
+          for (let index = 0; index < 3; index += 1) {
+            await request.runTool();
+          }
+          return request.dependencies.runLogicalBackup({ synthetic: true });
+        }
+      },
+      backupProduct: {
+        async runLogicalBackup() {
+          throw new Error("product fallback must not run");
+        }
+      },
+      backupRestoreProvenance: tracker,
+      recordDirectoryFsync() {
+        throw new Error("fsync must not be recorded");
+      }
+    });
+    const request = {
+      async runTool() { return { code: 0 }; },
+      dependencies: {
+        async runLogicalBackup() {
+          return { bundleDirectoryFsyncConfirmed: false };
+        }
+      }
+    };
+    tracker.bindBackup("gate5_backup_0003", request);
+    Object.freeze(request);
+    await assert.rejects(
+      runner(request),
+      { code: "linux_gate_bundle_directory_fsync_unconfirmed" }
+    );
+    assert.equal(localCalls, 1);
+    assert.deepEqual(tracker.failure(), {
+      operation: "gate5_backup_0003",
+      substep: "backup_after_schema_inventory",
+      boundary: "internal_interval",
+      causalCode: "backup_restore_internal_failure_unclassified",
+      externalTransportProcessStarted: false,
+      substepExact: false
+    });
+  });
+
+  await t.test("restore profile validation wins over verifier closing", async () => {
+    const tracker = createBackupRestoreProvenanceTracker({
+      requireSpawnProof: false
+    });
+    const primary = Object.assign(new Error("not persisted"), {
+      code: "synthetic_restored_profile_failure"
+    });
+    const closing = Object.assign(new Error("not persisted"), {
+      code: "synthetic_restore_closing_failure"
+    });
+    const runner = createLinuxProfileRestoreRunner({
+      backupRestoreProvenance: tracker,
+      localBackup: {
+        async runProfileRestore(request) {
+          for (let index = 0; index < 4; index += 1) {
+            await request.runTool();
+          }
+          try {
+            await request.verifyRestoredProfile();
+          } finally {
+            await request.closeVerifiers();
+          }
+        }
+      }
+    });
+    const request = {
+      async runTool() { return { code: 0 }; },
+      async verifyRestoredProfile() { throw primary; },
+      async closeVerifiers() { throw closing; }
+    };
+    tracker.bindRestore("gate5_restore_0003", request);
+    Object.freeze(request);
+    await assert.rejects(runner(request), (error) => error === primary);
+    assert.deepEqual(tracker.failure(), {
+      operation: "gate5_restore_0003",
+      substep: "restore_profile_validation",
+      boundary: "internal_callback",
+      causalCode: primary.code,
+      externalTransportProcessStarted: false,
+      substepExact: true
+    });
+  });
+
+  await t.test("restore closing-only failure is exact", async () => {
+    const tracker = createBackupRestoreProvenanceTracker({
+      requireSpawnProof: false
+    });
+    const closing = Object.assign(new Error("not persisted"), {
+      code: "synthetic_restore_closing_only_failure"
+    });
+    const runner = createLinuxProfileRestoreRunner({
+      backupRestoreProvenance: tracker,
+      localBackup: {
+        async runProfileRestore(request) {
+          for (let index = 0; index < 4; index += 1) {
+            await request.runTool();
+          }
+          await request.closeVerifiers();
+          return true;
+        }
+      }
+    });
+    const request = {
+      async runTool() { return { code: 0 }; },
+      async closeVerifiers() { throw closing; }
+    };
+    tracker.bindRestore("gate5_restore_0004", request);
+    Object.freeze(request);
+    await assert.rejects(runner(request), {
+      code: closing.code,
+      name: "LinuxGateFailure"
+    });
+    assert.deepEqual(tracker.failure(), {
+      operation: "gate5_restore_0004",
+      substep: "restore_verifier_cleanup",
+      boundary: "internal_callback",
+      causalCode: closing.code,
+      externalTransportProcessStarted: false,
+      substepExact: true
+    });
+  });
+
+  await t.test("unobserved primary plus closing failure is ambiguous", async () => {
+    const tracker = createBackupRestoreProvenanceTracker({
+      requireSpawnProof: false
+    });
+    const primary = new Error("not persisted");
+    const closing = Object.assign(new Error("not persisted"), {
+      code: "synthetic_restore_closing_failure"
+    });
+    const runner = createLinuxProfileRestoreRunner({
+      backupRestoreProvenance: tracker,
+      localBackup: {
+        async runProfileRestore(request) {
+          for (let index = 0; index < 4; index += 1) {
+            await request.runTool();
+          }
+          try {
+            throw primary;
+          } finally {
+            await request.closeVerifiers();
+          }
+        }
+      }
+    });
+    const request = {
+      async runTool() { return { code: 0 }; },
+      async closeVerifiers() { throw closing; }
+    };
+    tracker.bindRestore("gate5_restore_0004", request);
+    Object.freeze(request);
+    await assert.rejects(runner(request), (error) => error === primary);
+    assert.deepEqual(tracker.failure(), {
+      operation: "gate5_restore_0004",
+      substep: "unknown",
+      boundary: "instrumentation",
+      causalCode: "backup_restore_provenance_closing_order_ambiguous",
+      externalTransportProcessStarted: null,
+      substepExact: false
+    });
+  });
+
+  await t.test("unbound Gate 5 request is refused before the local runner", async () => {
+    const tracker = createBackupRestoreProvenanceTracker({
+      requireSpawnProof: false
+    });
+    let localCalls = 0;
+    const runner = createLinuxProfileBackupRunner({
+      backupRestoreProvenance: tracker,
+      localBackup: {
+        async runProfileBackup() {
+          localCalls += 1;
+          return true;
+        }
+      },
+      backupProduct: { async runLogicalBackup() { return true; } },
+      recordDirectoryFsync() {}
+    });
+    const request = Object.freeze({
+      async runTool() { return { code: 0 }; }
+    });
+    await assert.rejects(
+      runner(request),
+      { code: "backup_restore_provenance_operation_invalid" }
+    );
+    assert.equal(localCalls, 0);
+    assert.deepEqual(tracker.failure(), {
+      operation: "unknown",
+      substep: "unknown",
+      boundary: "instrumentation",
+      causalCode: "backup_restore_provenance_operation_invalid",
+      externalTransportProcessStarted: null,
+      substepExact: false
+    });
+  });
 });

@@ -2,49 +2,105 @@
 
 ## Limite e proveniência
 
-Esta sexta rota Linux isolada parte exclusivamente do commit
-`931d1986e1cc5864c4d28997a995a27aaa593fd6`. A branch predecessora
-`social/checkpoint-3a0p-linux-backup-transport-20260808` e todas as branches
+Esta sétima rota Linux isolada parte exclusivamente do commit
+`0f09b99b06fc99b5e176414d7f8365a996704f4a`. A branch predecessora
+`social/checkpoint-3a0p-linux-profile-aware-restore-20260808` e todas as branches
 anteriores permanecem preservadas, sem novo push ou edição.
 
 O workflow existe somente para a branch
-`social/checkpoint-3a0p-linux-profile-aware-restore-20260808`. O produto
+`social/checkpoint-3a0p-linux-restore-provenance-20260808`. O produto
 permanece idêntico a `fcfc92419021dae5f77baad731c634b10c275c5b`: `src/`,
 todo `db/` (inclusive `roles.sql`), `server.js`, `package.json` e `package-lock.json` não são
 alterados. PostgreSQL, SCRAM, roles, rede Docker e credenciais também não são
 alterados por esta correção.
 
-## Sexto disparo Linux isolado autorizado
+## Sétimo disparo Linux isolado autorizado
 
 O único gatilho autorizado é o primeiro e único `push` de criação da nova
 branch, sem exclusão ou force, cujo commit tenha a mensagem integral:
 
 ```text
-[run-social-3a0p-linux-gate] validate restored schema by profile
+[run-social-3a0p-linux-gate] preserve restore failure provenance
 ```
 
 O job exige `run_attempt == 1`, `created == true`, `deleted == false`,
 `forced == false`, `before` igual a 40 zeros e pai exato
-`931d1986e1cc5864c4d28997a995a27aaa593fd6`, além de diff nominal e
+`0f09b99b06fc99b5e176414d7f8365a996704f4a`, além de diff nominal e
 estritamente allowlisted. Não há `workflow_dispatch`, pull request, agenda,
 matriz ou retry automático. A regra operacional é: zero re-run, zero segundo
 push, zero PR, zero merge e zero deploy depois desta execução única.
 
-A allowlist do commit contém exatamente estes sete caminhos, sem curinga,
+A allowlist do commit contém exatamente estes nove caminhos, sem curinga,
 prefixo ou diretório inteiro:
 
 - `.github/workflows/social-3a0p-linux-physical-gates.yml`;
 - `docs/social-3a0p-linux-physical-gates.md`;
 - `scripts/social-3a0p-linux-gate.js`;
+- `scripts/social-3a0p-local-connector-physical-gates.js`;
 - `scripts/social-3a0p-local-windows-physical-plans.js`;
 - `tests/social-3a0p-linux-gate.test.js`;
+- `tests/social-3a0p-local-connector-physical-gates.test.js`;
 - `tests/social-3a0p-local-windows-physical-plans.test.js`;
 - `tests/social-3a0p-linux-workflow.test.js`.
 
 Qualquer outro caminho, inclusive outro workflow, `src/`, `db/`, migrations,
 roles, servidor ou dependências, encerra o job antes do gate.
 
-## Falha predecessora e prova focal do schema profile
+## Falha predecessora e procedência sanitizada
+
+O run predecessor `31282878969` (artifact `9028948591`, SHA-256 da evidência
+`12d26dc06ece482eb4a84249056484014aa9ff02517343b91b6ac00d96f1a2c7`)
+encerrou na fase `migrations` com o código sanitizado genérico
+`backup_external_tool_failed`. A evidência comprovou que ao menos um `pg_dump`
+e um `pg_restore` validados foram iniciados e concluídos, mas não preservou
+executável, subetapa, argumentos, origem interna da exceção, stdout ou stderr
+brutos. Por isso, ela não permite identificar qual operação posterior falhou
+nem afirmar que a origem foi necessariamente um processo externo.
+
+Esta rota altera exclusivamente o harness para preservar a procedência
+sanitizada da primeira falha dentro do backup/restore. O esquema fechado contém
+somente `operation`, `substep`, `boundary`, `causalCode`,
+`externalTransportProcessStarted` e `substepExact`. Uma subetapa é declarada
+exata somente quando diretamente observável (`substepExact=true`). O código
+causal é normalizado e nenhum desses campos registra SQL, argumentos completos,
+caminhos, bancos, credenciais, stdout ou stderr brutos.
+
+`pre_execution_validation` identifica uma subetapa externa conhecida cuja
+tentativa foi recusada antes do evento `spawn` do child de transporte no host;
+nesse caso, `externalTransportProcessStarted=false`. `external_process` exige
+que esse evento tenha sido observado e registra
+`externalTransportProcessStarted=true`. Isso comprova somente que o child do
+transporte Docker foi iniciado no host: não comprova que `pg_dump`, `pg_restore`
+ou `psql` iniciou dentro do contêiner, nem atribui necessariamente a causa da
+falha ao processo interno. `internal_callback` identifica um callback interno
+diretamente observado, também sem processo de transporte iniciado.
+
+`internal_interval` delimita apenas o intervalo entre duas fronteiras
+observáveis; por isso registra `substepExact=false` e não infere a origem interna
+exata. `instrumentation` registra `substep=unknown`,
+`externalTransportProcessStarted=null` e `substepExact=false`. A seleção
+profile-aware comprovada permanece intacta: 0003 usa o verifier 2A fixado e
+validado; 0004 usa o verifier atual; o profile vem somente de
+`SCHEMA_PROFILES`; não há fallback 0004 para 0003.
+
+Produto, migrations, roles, `pg_dump`, `pg_restore`, `psql` e seus contratos
+funcionais permanecem byte-idênticos. A instrumentação não corrige por
+inferência a falha física ainda desconhecida. Na primeira falha, preserva a
+primeira causa sanitizada sem permitir que o cleanup a sobrescreva, executa o
+cleanup e para sem repetir nem corrigir. Se a primeira procedência terminar em
+`internal_interval` ou `instrumentation`, a origem exata continua não
+comprovada. Nesse caso não será adicionado outro wrapper ou camada diagnóstica:
+o próximo passo recomendado será dividir o Gate 1 em etapas Linux nativas
+menores e independentes, sujeito a nova decisão.
+
+Não foram comprovados pelo run predecessor: restore integral do perfil 0003,
+validação exata do 0003 restaurado, reapply 0004 ou validação exata do 0004.
+O Gate 1 foi reprovado e os Gates 2 a 5 não foram executados. Cleanup terminou
+aprovado, com zero resíduos; não houve segundo push, retry, re-run, PR, merge ou
+deploy. OAuth real, Meta, Instagram, Render, staging e produção permaneceram
+intocados.
+
+## Prova focal do schema profile preservada
 
 O run predecessor `31271208390` (artifact `9025655493`, SHA-256 da evidência
 `4afe3e810d06f57b9b3af78627f5ab9c650073e80142a48a6de215b58585b7a3`)

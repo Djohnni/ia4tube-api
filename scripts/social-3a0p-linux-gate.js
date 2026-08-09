@@ -1,6 +1,7 @@
 "use strict";
 
 const crypto = require("node:crypto");
+const { spawn } = require("node:child_process");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
@@ -33,8 +34,8 @@ const {
   createPoolMetricsRegistry
 } = require("./social-3a0p-local-runtime-evidence-metrics");
 
-const BRANCH = "social/checkpoint-3a0p-linux-profile-aware-restore-20260808";
-const BASE_COMMIT = "931d1986e1cc5864c4d28997a995a27aaa593fd6";
+const BRANCH = "social/checkpoint-3a0p-linux-restore-provenance-20260808";
+const BASE_COMMIT = "0f09b99b06fc99b5e176414d7f8365a996704f4a";
 const PRODUCT_COMMIT = "fcfc92419021dae5f77baad731c634b10c275c5b";
 const MARKER = "[run-social-3a0p-linux-gate]";
 const RUN_MARKER_PREFIX = "ia4tube-social-3a0p-linux-";
@@ -45,6 +46,91 @@ const LEGACY_2A_COMMIT = "9deb1e04249026a7046d44d6cbf4e2da87b9a0a4";
 const PHYSICAL_POOL_DRAIN_TIMEOUT_MS = 10_000;
 const LOGICAL_DATABASE_PORT = 5432;
 const SAFE_FAILURE = /^[a-z][a-z0-9_]{2,119}$/;
+const BACKUP_RESTORE_PROVENANCE_KEYS = Object.freeze([
+  "boundary",
+  "causalCode",
+  "externalTransportProcessStarted",
+  "operation",
+  "substep",
+  "substepExact"
+].sort());
+const BACKUP_RESTORE_OPERATIONS = new Set([
+  "rollback_backup_0003",
+  "rollback_restore_0003",
+  "gate5_backup_0003",
+  "gate5_backup_0004",
+  "gate5_restore_0003",
+  "gate5_restore_0004",
+  "unknown"
+]);
+const BACKUP_PROVENANCE_OPERATIONS = new Set([
+  "rollback_backup_0003",
+  "gate5_backup_0003",
+  "gate5_backup_0004"
+]);
+const RESTORE_PROVENANCE_OPERATIONS = new Set([
+  "rollback_restore_0003",
+  "gate5_restore_0003",
+  "gate5_restore_0004"
+]);
+const BACKUP_RESTORE_BOUNDARIES = new Set([
+  "external_process",
+  "internal_callback",
+  "internal_interval",
+  "pre_execution_validation",
+  "instrumentation"
+]);
+const BACKUP_EXTERNAL_SUBSTEPS = Object.freeze([
+  "backup_data_snapshot",
+  "backup_schema_archive",
+  "backup_schema_inventory"
+]);
+const RESTORE_EXTERNAL_SUBSTEPS = Object.freeze([
+  "restore_schema_inventory",
+  "restore_schema_apply",
+  "restore_data_apply",
+  "restore_evidence_capture"
+]);
+const BACKUP_INTERNAL_INTERVALS = Object.freeze([
+  "backup_before_data_snapshot",
+  "backup_after_data_snapshot",
+  "backup_after_schema_archive",
+  "backup_after_schema_inventory"
+]);
+const RESTORE_INTERNAL_INTERVALS = Object.freeze([
+  "restore_before_schema_inventory",
+  "restore_after_schema_inventory",
+  "restore_after_schema_apply",
+  "restore_after_data_apply",
+  "restore_after_evidence_capture"
+]);
+const BACKUP_RESTORE_INTERNAL_CALLBACKS = new Set([
+  "backup_lock_acquire",
+  "backup_preflight",
+  "backup_policy_before_snapshot",
+  "backup_policy_after_snapshot",
+  "backup_catalog_evidence",
+  "backup_lock_release",
+  "restore_lock_acquire",
+  "restore_target_preflight",
+  "restore_policy_before_apply",
+  "restore_policy_after_data",
+  "restore_catalog_evidence",
+  "restore_runtime_isolation",
+  "restore_vault",
+  "restore_2a_compatibility",
+  "restore_profile_validation",
+  "restore_verifier_cleanup",
+  "restore_lock_release"
+]);
+const BACKUP_RESTORE_SUBSTEPS = new Set([
+  ...BACKUP_EXTERNAL_SUBSTEPS,
+  ...RESTORE_EXTERNAL_SUBSTEPS,
+  ...BACKUP_INTERNAL_INTERVALS,
+  ...RESTORE_INTERNAL_INTERVALS,
+  ...BACKUP_RESTORE_INTERNAL_CALLBACKS,
+  "unknown"
+]);
 const SAFE_PHASE = new Set([
   "platform", "durability", "postgres", "bootstrap", "migrations", "rls_roles",
   "concurrency_oauth_idempotency", "vault", "backup_restore", "metrics", "secret_scan", "cleanup"
@@ -98,6 +184,580 @@ function fail(code) {
 function failureCode(error) {
   const candidate = String(error?.code || error?.message || "");
   return SAFE_FAILURE.test(candidate) ? candidate : "linux_gate_unclassified_failure";
+}
+
+function backupRestoreCausalCode(error, fallback) {
+  const candidate = String(error?.code || "");
+  if (candidate === "postgres_rollback_failed") {
+    const cause = String(error?.cause?.code || "");
+    return SAFE_FAILURE.test(cause) ? cause : fallback;
+  }
+  return SAFE_FAILURE.test(candidate) ? candidate : fallback;
+}
+
+function sanitizedBackupRestoreFailureProvenance(candidate) {
+  if (candidate == null) return null;
+  const invalid = () => Object.freeze({
+    operation: "unknown",
+    substep: "unknown",
+    boundary: "instrumentation",
+    causalCode: "backup_restore_provenance_invalid",
+    externalTransportProcessStarted: null,
+    substepExact: false
+  });
+  if (
+    !candidate || Object.getPrototypeOf(candidate) !== Object.prototype ||
+    JSON.stringify(Object.keys(candidate).sort()) !==
+      JSON.stringify(BACKUP_RESTORE_PROVENANCE_KEYS) ||
+    !BACKUP_RESTORE_OPERATIONS.has(candidate.operation) ||
+    !BACKUP_RESTORE_SUBSTEPS.has(candidate.substep) ||
+    !BACKUP_RESTORE_BOUNDARIES.has(candidate.boundary) ||
+    !SAFE_FAILURE.test(String(candidate.causalCode || "")) ||
+    !new Set([true, false, null]).has(
+      candidate.externalTransportProcessStarted
+    ) ||
+    typeof candidate.substepExact !== "boolean"
+  ) {
+    return invalid();
+  }
+  const backupOperation = BACKUP_PROVENANCE_OPERATIONS.has(candidate.operation);
+  const restoreOperation = RESTORE_PROVENANCE_OPERATIONS.has(candidate.operation);
+  const backupSubstep = candidate.substep.startsWith("backup_");
+  const restoreSubstep = candidate.substep.startsWith("restore_");
+  const external = BACKUP_EXTERNAL_SUBSTEPS.includes(candidate.substep) ||
+    RESTORE_EXTERNAL_SUBSTEPS.includes(candidate.substep);
+  const internalCallback = BACKUP_RESTORE_INTERNAL_CALLBACKS.has(candidate.substep);
+  const internalInterval = BACKUP_INTERNAL_INTERVALS.includes(candidate.substep) ||
+    RESTORE_INTERNAL_INTERVALS.includes(candidate.substep);
+  if (
+    (candidate.operation === "unknown" && !(
+      candidate.substep === "unknown" && candidate.boundary === "instrumentation"
+    )) ||
+    (backupOperation && !backupSubstep && candidate.substep !== "unknown") ||
+    (restoreOperation && !restoreSubstep && candidate.substep !== "unknown") ||
+    (candidate.boundary === "external_process" && (
+      !external || candidate.substepExact !== true ||
+      candidate.externalTransportProcessStarted !== true
+    )) ||
+    (candidate.boundary === "pre_execution_validation" && (
+      !external || candidate.substepExact !== true ||
+      candidate.externalTransportProcessStarted !== false
+    )) ||
+    (candidate.boundary === "internal_callback" && (
+      !internalCallback || candidate.substepExact !== true ||
+      candidate.externalTransportProcessStarted !== false
+    )) ||
+    (candidate.boundary === "internal_interval" && (
+      !internalInterval || candidate.substepExact !== false ||
+      candidate.externalTransportProcessStarted !== false
+    )) ||
+    (candidate.boundary === "instrumentation" && (
+      candidate.substep !== "unknown" || candidate.substepExact !== false ||
+      candidate.externalTransportProcessStarted !== null
+    ))
+  ) {
+    return invalid();
+  }
+  return Object.freeze({
+    operation: candidate.operation,
+    substep: candidate.substep,
+    boundary: candidate.boundary,
+    causalCode: candidate.causalCode,
+    externalTransportProcessStarted:
+      candidate.externalTransportProcessStarted,
+    substepExact: candidate.substepExact
+  });
+}
+
+function createBackupRestoreProvenanceTracker(options = {}) {
+  const requireSpawnProof = options.requireSpawnProof !== false;
+  const requestBindings = new WeakMap();
+  let firstFailure = null;
+  let activeContext = null;
+
+  function record(candidate) {
+    if (firstFailure) return firstFailure;
+    firstFailure = sanitizedBackupRestoreFailureProvenance(candidate);
+    return firstFailure;
+  }
+
+  function recordInstrumentation(operation, causalCode) {
+    return record({
+      operation: BACKUP_RESTORE_OPERATIONS.has(operation) ? operation : "unknown",
+      substep: "unknown",
+      boundary: "instrumentation",
+      causalCode: SAFE_FAILURE.test(String(causalCode || ""))
+        ? causalCode
+        : "backup_restore_provenance_instrumentation_failed",
+      externalTransportProcessStarted: null,
+      substepExact: false
+    });
+  }
+
+  function wrapSpawn(spawnImpl) {
+    if (typeof spawnImpl !== "function") {
+      fail("backup_restore_provenance_spawn_invalid");
+    }
+    return function trackedSpawn(...args) {
+      const invocation = activeContext?.activeExternal || null;
+      if (invocation) invocation.externalTransportProcessStarted = false;
+      let child;
+      try {
+        child = spawnImpl(...args);
+      } catch (error) {
+        if (invocation) invocation.externalTransportProcessStarted = false;
+        throw error;
+      }
+      if (invocation && typeof child?.once === "function") {
+        child.once("spawn", () => {
+          invocation.externalTransportProcessStarted = true;
+        });
+        child.once("error", () => {
+          if (invocation.externalTransportProcessStarted !== true) {
+            invocation.externalTransportProcessStarted = false;
+          }
+        });
+      } else if (invocation) {
+        recordInstrumentation(
+          activeContext.operation,
+          "backup_restore_provenance_spawn_observer_invalid"
+        );
+      }
+      return child;
+    };
+  }
+
+  async function runInternalCallback(context, substep, operation, requireTrue = false) {
+    try {
+      const result = await operation();
+      if (requireTrue && result !== true) {
+        record({
+          operation: context.operation,
+          substep,
+          boundary: "internal_callback",
+          causalCode: "restore_behavioral_validation_failed",
+          externalTransportProcessStarted: false,
+          substepExact: true
+        });
+      }
+      return result;
+    } catch (error) {
+      record({
+        operation: context.operation,
+        substep,
+        boundary: "internal_callback",
+        causalCode: backupRestoreCausalCode(
+          error,
+          "backup_restore_internal_callback_failed"
+        ),
+        externalTransportProcessStarted: false,
+        substepExact: true
+      });
+      throw error;
+    }
+  }
+
+  async function runClosingCallback(context, substep, operation) {
+    try {
+      return await operation();
+    } catch (error) {
+      if (!context.deferredClosingFailure) {
+        context.deferredClosingFailure = Object.freeze({
+          error,
+          provenance: Object.freeze({
+            operation: context.operation,
+            substep,
+            boundary: "internal_callback",
+            causalCode: backupRestoreCausalCode(
+              error,
+              "backup_restore_internal_callback_failed"
+            ),
+            externalTransportProcessStarted: false,
+            substepExact: true
+          })
+        });
+      }
+      return undefined;
+    }
+  }
+
+  function wrapOperator(context, operator) {
+    if (!operator || typeof operator !== "object") return operator;
+    let policyCalls = 0;
+    const callback = (name, substep) => typeof operator[name] === "function"
+      ? (...args) => runInternalCallback(
+          context,
+          substep,
+          () => operator[name](...args)
+        )
+      : operator[name];
+    const wrapped = { ...operator };
+    if (context.kind === "backup") {
+      wrapped.acquireLocks = callback("acquireLocks", "backup_lock_acquire");
+      wrapped.preflight = callback("preflight", "backup_preflight");
+      if (typeof operator.assertTransientPoliciesAbsent === "function") {
+        wrapped.assertTransientPoliciesAbsent = (...args) => {
+          policyCalls += 1;
+          if (policyCalls > 2) {
+            recordInstrumentation(
+              context.operation,
+              "backup_restore_provenance_callback_sequence_invalid"
+            );
+            fail("backup_restore_provenance_callback_sequence_invalid");
+          }
+          return runInternalCallback(
+            context,
+            policyCalls === 1
+              ? "backup_policy_before_snapshot"
+              : "backup_policy_after_snapshot",
+            () => operator.assertTransientPoliciesAbsent(...args)
+          );
+        };
+      }
+      wrapped.collectCatalogEvidence = callback(
+        "collectCatalogEvidence",
+        "backup_catalog_evidence"
+      );
+      if (typeof operator.releaseLocks === "function") {
+        wrapped.releaseLocks = (...args) => runClosingCallback(
+          context,
+          "backup_lock_release",
+          () => operator.releaseLocks(...args)
+        );
+      }
+    } else {
+      wrapped.acquireLocks = callback("acquireLocks", "restore_lock_acquire");
+      wrapped.preflightEmptyTarget = callback(
+        "preflightEmptyTarget",
+        "restore_target_preflight"
+      );
+      if (typeof operator.assertTransientPoliciesAbsent === "function") {
+        wrapped.assertTransientPoliciesAbsent = (...args) => {
+          policyCalls += 1;
+          if (policyCalls > 2) {
+            recordInstrumentation(
+              context.operation,
+              "backup_restore_provenance_callback_sequence_invalid"
+            );
+            fail("backup_restore_provenance_callback_sequence_invalid");
+          }
+          return runInternalCallback(
+            context,
+            policyCalls === 1
+              ? "restore_policy_before_apply"
+              : "restore_policy_after_data",
+            () => operator.assertTransientPoliciesAbsent(...args)
+          );
+        };
+      }
+      wrapped.collectCatalogEvidence = callback(
+        "collectCatalogEvidence",
+        "restore_catalog_evidence"
+      );
+      if (typeof operator.releaseLocks === "function") {
+        wrapped.releaseLocks = (...args) => runClosingCallback(
+          context,
+          "restore_lock_release",
+          () => operator.releaseLocks(...args)
+        );
+      }
+    }
+    return Object.freeze(wrapped);
+  }
+
+  function wrapExternalRunner(context, runTool) {
+    if (typeof runTool !== "function") return runTool;
+    return async (...args) => {
+      const substep = context.externalSubsteps[context.externalIndex];
+      if (!substep) {
+        recordInstrumentation(
+          context.operation,
+          "backup_restore_provenance_sequence_invalid"
+        );
+        fail("backup_restore_provenance_sequence_invalid");
+      }
+      const invocation = {
+        externalTransportProcessStarted: requireSpawnProof ? false : null,
+        substep
+      };
+      context.activeExternal = invocation;
+      let result;
+      try {
+        result = await runTool(...args);
+      } catch (error) {
+        if (invocation.externalTransportProcessStarted === null) {
+          recordInstrumentation(
+            context.operation,
+            "backup_restore_provenance_spawn_unconfirmed"
+          );
+        } else {
+          record({
+            operation: context.operation,
+            substep,
+            boundary: invocation.externalTransportProcessStarted === true
+              ? "external_process"
+              : "pre_execution_validation",
+            causalCode: backupRestoreCausalCode(
+              error,
+              invocation.externalTransportProcessStarted === true
+                ? "backup_restore_external_transport_process_failed"
+                : "backup_restore_pre_execution_validation_failed"
+            ),
+            externalTransportProcessStarted:
+              invocation.externalTransportProcessStarted,
+            substepExact: true
+          });
+        }
+        throw error;
+      } finally {
+        context.activeExternal = null;
+      }
+      if (!result || !Number.isInteger(result.code)) {
+        if (invocation.externalTransportProcessStarted === true) {
+          record({
+            operation: context.operation,
+            substep,
+            boundary: "external_process",
+            causalCode:
+              "backup_restore_external_transport_process_result_invalid",
+            externalTransportProcessStarted: true,
+            substepExact: true
+          });
+        } else {
+          recordInstrumentation(
+            context.operation,
+            "backup_restore_provenance_spawn_unconfirmed"
+          );
+        }
+        return result;
+      }
+      if (result.code !== 0) {
+        if (invocation.externalTransportProcessStarted === true) {
+          record({
+            operation: context.operation,
+            substep,
+            boundary: "external_process",
+            causalCode:
+              "backup_restore_external_transport_process_nonzero",
+            externalTransportProcessStarted: true,
+            substepExact: true
+          });
+        } else {
+          recordInstrumentation(
+            context.operation,
+            "backup_restore_provenance_spawn_unconfirmed"
+          );
+        }
+        return result;
+      }
+      if (
+        requireSpawnProof &&
+        invocation.externalTransportProcessStarted !== true
+      ) {
+        recordInstrumentation(
+          context.operation,
+          "backup_restore_provenance_spawn_unconfirmed"
+        );
+        fail("backup_restore_provenance_spawn_unconfirmed");
+      }
+      context.externalIndex += 1;
+      return result;
+    };
+  }
+
+  function wrapVerifier(context, request, key, substep, requireTrue = false) {
+    if (typeof request[key] !== "function") return request[key];
+    return (...args) => runInternalCallback(
+      context,
+      substep,
+      () => request[key](...args),
+      requireTrue
+    );
+  }
+
+  function wrapClosingVerifier(context, request, key, substep) {
+    if (typeof request[key] !== "function") return request[key];
+    return (...args) => runClosingCallback(
+      context,
+      substep,
+      () => request[key](...args)
+    );
+  }
+
+  function trackedRequest(context, request) {
+    if (!request || typeof request !== "object" || Array.isArray(request)) {
+      recordInstrumentation(
+        context.operation,
+        "backup_restore_provenance_request_invalid"
+      );
+      fail("backup_restore_provenance_request_invalid");
+    }
+    const tracked = {
+      ...request,
+      runTool: wrapExternalRunner(context, request.runTool)
+    };
+    if (request.operator) tracked.operator = wrapOperator(context, request.operator);
+    const dependencies = request.dependencies && typeof request.dependencies === "object"
+      ? { ...request.dependencies }
+      : {};
+    const operatorFactory = dependencies.createPostgresBackupOperator ||
+      require("../src/persistence/postgres/backup-restore").createPostgresBackupOperator;
+    if (!request.operator && typeof operatorFactory === "function") {
+      dependencies.createPostgresBackupOperator = (pool) =>
+        wrapOperator(context, operatorFactory(pool));
+      tracked.dependencies = dependencies;
+    } else if (request.dependencies) {
+      tracked.dependencies = dependencies;
+    }
+    if (context.kind === "restore") {
+      tracked.verifyRuntimeIsolation = wrapVerifier(
+        context,
+        request,
+        "verifyRuntimeIsolation",
+        "restore_runtime_isolation",
+        true
+      );
+      tracked.verifyVault = wrapVerifier(
+        context,
+        request,
+        "verifyVault",
+        "restore_vault",
+        true
+      );
+      tracked.verify2ACompatibility = wrapVerifier(
+        context,
+        request,
+        "verify2ACompatibility",
+        "restore_2a_compatibility",
+        true
+      );
+      tracked.verifyRestoredProfile = wrapVerifier(
+        context,
+        request,
+        "verifyRestoredProfile",
+        "restore_profile_validation"
+      );
+      tracked.closeVerifiers = wrapClosingVerifier(
+        context,
+        request,
+        "closeVerifiers",
+        "restore_verifier_cleanup"
+      );
+    }
+    return tracked;
+  }
+
+  function bindOperation(kind, operation, request) {
+    const allowedOperations = kind === "backup"
+      ? BACKUP_PROVENANCE_OPERATIONS
+      : RESTORE_PROVENANCE_OPERATIONS;
+    if (
+      !allowedOperations.has(operation) || !request ||
+      Object.getPrototypeOf(request) !== Object.prototype ||
+      requestBindings.has(request)
+    ) {
+      recordInstrumentation(
+        BACKUP_RESTORE_OPERATIONS.has(operation) ? operation : "unknown",
+        "backup_restore_provenance_binding_invalid"
+      );
+      fail("backup_restore_provenance_binding_invalid");
+    }
+    requestBindings.set(request, { consumed: false, kind, operation });
+    return request;
+  }
+
+  async function runOperation(kind, runner, request) {
+    const binding = request && typeof request === "object"
+      ? requestBindings.get(request)
+      : null;
+    if (
+      !binding || binding.kind !== kind || binding.consumed === true ||
+      typeof runner !== "function" || activeContext
+    ) {
+      recordInstrumentation(
+        binding?.operation || "unknown",
+        "backup_restore_provenance_operation_invalid"
+      );
+      fail("backup_restore_provenance_operation_invalid");
+    }
+    binding.consumed = true;
+    const { operation } = binding;
+    const context = {
+      activeExternal: null,
+      deferredClosingFailure: null,
+      externalIndex: 0,
+      externalSubsteps: kind === "backup"
+        ? BACKUP_EXTERNAL_SUBSTEPS
+        : RESTORE_EXTERNAL_SUBSTEPS,
+      kind,
+      operation
+    };
+    activeContext = context;
+    try {
+      const result = await runner(trackedRequest(context, request));
+      if (context.deferredClosingFailure) {
+        record(context.deferredClosingFailure.provenance);
+        fail(context.deferredClosingFailure.provenance.causalCode);
+      }
+      if (context.externalIndex !== context.externalSubsteps.length) {
+        recordInstrumentation(
+          operation,
+          "backup_restore_provenance_sequence_invalid"
+        );
+        fail("backup_restore_provenance_sequence_invalid");
+      }
+      return result;
+    } catch (error) {
+      if (!firstFailure) {
+        if (context.deferredClosingFailure) {
+          recordInstrumentation(
+            operation,
+            "backup_restore_provenance_closing_order_ambiguous"
+          );
+        } else {
+          const intervals = kind === "backup"
+            ? BACKUP_INTERNAL_INTERVALS
+            : RESTORE_INTERNAL_INTERVALS;
+          record({
+            operation,
+            substep: intervals[context.externalIndex],
+            boundary: "internal_interval",
+            causalCode: "backup_restore_internal_failure_unclassified",
+            externalTransportProcessStarted: false,
+            substepExact: false
+          });
+        }
+      }
+      throw error;
+    } finally {
+      activeContext = null;
+    }
+  }
+
+  return Object.freeze({
+    bindBackup(operation, request) {
+      return bindOperation("backup", operation, request);
+    },
+    bindRestore(operation, request) {
+      return bindOperation("restore", operation, request);
+    },
+    captureUnobservedFailure() {
+      return recordInstrumentation(
+        activeContext?.operation || "unknown",
+        "backup_restore_provenance_unobserved"
+      );
+    },
+    failure() {
+      return firstFailure;
+    },
+    runBackup(runner, request) {
+      return runOperation("backup", runner, request);
+    },
+    runRestore(runner, request) {
+      return runOperation("restore", runner, request);
+    },
+    wrapSpawn
+  });
 }
 
 function canonicalJson(value) {
@@ -202,6 +862,10 @@ function sanitizedFailureEvidence(source, code = "linux_evidence_sanitization_fa
     status: "failed",
     phases: Object.freeze([]),
     firstFailure,
+    backupRestoreFailureProvenance:
+      sanitizedBackupRestoreFailureProvenance(
+        source?.backupRestoreFailureProvenance
+      ),
     cleanupFailure: typeof source?.cleanupFailure === "string" && SAFE_FAILURE.test(source.cleanupFailure)
       ? source.cleanupFailure
       : null,
@@ -425,11 +1089,31 @@ async function prepareLinuxRestoreTarget({ database, query }) {
     if (transactionStarted) {
       try {
         await query("ROLLBACK");
-      } catch {
-        fail("linux_gate_restore_target_rollback_failed");
-      }
+      } catch {}
     }
     throw error;
+  }
+}
+
+async function runWithFirstFailurePreserved(operation, closingOperation) {
+  if (
+    typeof operation !== "function" ||
+    typeof closingOperation !== "function"
+  ) {
+    fail("linux_gate_closing_operation_contract_invalid");
+  }
+  let operationFailed = false;
+  try {
+    return await operation();
+  } catch (error) {
+    operationFailed = true;
+    throw error;
+  } finally {
+    try {
+      await closingOperation();
+    } catch (error) {
+      if (!operationFailed) throw error;
+    }
   }
 }
 
@@ -513,54 +1197,73 @@ function createLinuxProfile0003PlansFacade({
   let sourceSnapshot;
   let restoredSnapshot;
   let prepared = false;
+  let restoreDatabase;
+  let verifierInstalled = false;
 
   async function useMigrationPool(database, operation) {
     if (typeof database !== "string" || !database) fail("linux_gate_profile0003_database_invalid");
     const pool = makeMigrationPool(database);
     if (!pool || typeof pool.end !== "function") fail("linux_gate_profile0003_fixture_pool_invalid");
     const drain = createPhysicalPoolDrainTracker(pool);
-    try {
-      return await operation(pool);
-    } finally {
-      await drain.end(() => pool.end());
-    }
+    return runWithFirstFailurePreserved(
+      () => operation(pool),
+      () => drain.end(() => pool.end())
+    );
   }
 
   const facade = Object.freeze({
     ...plans,
     async prepareBackupRestore(...args) {
-      if (prepared) fail("linux_gate_profile0003_plan_reused");
+      if (prepared || args.length > 1) {
+        fail("linux_gate_profile0003_plan_reused");
+      }
       prepared = true;
-      const plan = await plans.prepareBackupRestore(...args);
+      const preparationHooks = Object.freeze({
+        installProfile0003RestoreVerification() {
+          if (verifierInstalled) {
+            fail("linux_gate_profile0003_verifier_installation_invalid");
+          }
+          verifierInstalled = true;
+          return async function verifyProfile0003FixtureRestored() {
+            if (!sourceSnapshot || typeof restoreDatabase !== "string") {
+              fail("linux_gate_profile0003_fixture_state_invalid");
+            }
+            restoredSnapshot = await useMigrationPool(
+              restoreDatabase,
+              async (pool) => {
+                const candidate = await profile0003Snapshot(
+                  pool,
+                  fixture,
+                  { seed: false, withTransactionImpl }
+                );
+                if (canonicalJson(candidate) !== canonicalJson(sourceSnapshot)) {
+                  fail("linux_gate_profile0003_fixture_mismatch");
+                }
+                return candidate;
+              }
+            );
+          };
+        }
+      });
+      const plan = await plans.prepareBackupRestore(
+        args[0],
+        preparationHooks
+      );
       const sourceDatabase = plan?.backup0003?.localBinding?.database;
-      const restoreDatabase = plan?.restore0003?.localBinding?.database;
+      restoreDatabase = plan?.restore0003?.localBinding?.database;
       const verifyRestoredProfile = plan?.restore0003?.verifyRestoredProfile;
       if (
         !/^ia4tube_social_disposable_source_0003_[0-9a-f]{12}$/.test(String(sourceDatabase || "")) ||
         !/^ia4tube_social_disposable_restore_0003_[0-9a-f]{12}$/.test(String(restoreDatabase || "")) ||
-        typeof verifyRestoredProfile !== "function"
+        typeof verifyRestoredProfile !== "function" ||
+        verifierInstalled !== true
       ) fail("linux_gate_profile0003_plan_binding_invalid");
       sourceSnapshot = await useMigrationPool(sourceDatabase, (pool) => profile0003Snapshot(
         pool,
         fixture,
         { seed: true, withTransactionImpl }
       ));
-      const restore0003 = Object.freeze({
-        ...plan.restore0003,
-        async verifyRestoredProfile() {
-          const profile = await verifyRestoredProfile();
-          restoredSnapshot = await useMigrationPool(restoreDatabase, (pool) => profile0003Snapshot(
-            pool,
-            fixture,
-            { seed: false, withTransactionImpl }
-          ));
-          if (canonicalJson(restoredSnapshot) !== canonicalJson(sourceSnapshot)) {
-            fail("linux_gate_profile0003_fixture_mismatch");
-          }
-          return profile;
-        }
-      });
-      return Object.freeze({ ...plan, restore0003 });
+      return Object.freeze({ ...plan });
     }
   });
 
@@ -605,6 +1308,17 @@ function createLinuxRestoreConfigFacade({ backupProduct, backupDirectory, fileSy
       }
       let descriptor;
       let created = false;
+      let primaryFailed = false;
+      let primaryFailure;
+      let cleanupFailed = false;
+      let cleanupFailure;
+      let result;
+      const recordCleanupFailure = (error) => {
+        if (!cleanupFailed) {
+          cleanupFailed = true;
+          cleanupFailure = error;
+        }
+      };
       try {
         const directory = fileSystem.lstatSync(expectedDirectory);
         if (!directory.isDirectory() || directory.isSymbolicLink()) {
@@ -618,14 +1332,35 @@ function createLinuxRestoreConfigFacade({ backupProduct, backupDirectory, fileSy
         if (!placeholder.isFile() || placeholder.isSymbolicLink() || placeholder.size !== 0) {
           fail("linux_gate_restore_bundle_placeholder_invalid");
         }
-        return loadRestoreConfig(environment, options);
-      } finally {
-        if (descriptor !== undefined) fileSystem.closeSync(descriptor);
-        if (created && fileSystem.existsSync(bundlePath)) fileSystem.unlinkSync(bundlePath);
-        if (created && fileSystem.existsSync(bundlePath)) {
-          fail("linux_gate_restore_bundle_placeholder_cleanup_failed");
+        result = loadRestoreConfig(environment, options);
+      } catch (error) {
+        primaryFailed = true;
+        primaryFailure = error;
+      }
+      if (descriptor !== undefined) {
+        try {
+          fileSystem.closeSync(descriptor);
+        } catch (error) {
+          recordCleanupFailure(error);
         }
       }
+      if (created) {
+        try {
+          fileSystem.unlinkSync(bundlePath);
+        } catch (error) {
+          if (error?.code !== "ENOENT") recordCleanupFailure(error);
+        }
+        try {
+          if (fileSystem.existsSync(bundlePath)) {
+            fail("linux_gate_restore_bundle_placeholder_cleanup_failed");
+          }
+        } catch (error) {
+          recordCleanupFailure(error);
+        }
+      }
+      if (primaryFailed) throw primaryFailure;
+      if (cleanupFailed) throw cleanupFailure;
+      return result;
     }
   });
 }
@@ -817,6 +1552,71 @@ function createBackupTransportBridge(postgres, runTool, contract) {
     localBinding,
     runTool: boundRunTool
   });
+}
+
+function createLinuxProfileBackupRunner({
+  localBackup,
+  backupProduct,
+  backupRestoreProvenance,
+  recordDirectoryFsync
+}) {
+  if (
+    typeof localBackup?.runProfileBackup !== "function" ||
+    typeof backupProduct?.runLogicalBackup !== "function" ||
+    (backupRestoreProvenance !== undefined &&
+      typeof backupRestoreProvenance?.runBackup !== "function") ||
+    typeof recordDirectoryFsync !== "function"
+  ) {
+    fail("linux_gate_profile_backup_runner_invalid");
+  }
+  const execute = function executeLinuxProfileBackup(request) {
+    const requestDependencies = request?.dependencies || {};
+    const runLogicalBackup = requestDependencies.runLogicalBackup ||
+      backupProduct.runLogicalBackup;
+    return localBackup.runProfileBackup({
+      ...request,
+      dependencies: {
+        ...requestDependencies,
+        async runLogicalBackup(args) {
+          const result = await runLogicalBackup({
+            ...args,
+            requireBundleDirectoryFsync: true
+          });
+          if (result?.bundleDirectoryFsyncConfirmed !== true) {
+            fail("linux_gate_bundle_directory_fsync_unconfirmed");
+          }
+          recordDirectoryFsync();
+          return result;
+        }
+      }
+    });
+  };
+  return function linuxProfileBackup(request) {
+    if (backupRestoreProvenance === undefined) {
+      return execute(request);
+    }
+    return backupRestoreProvenance.runBackup(execute, request);
+  };
+}
+
+function createLinuxProfileRestoreRunner({
+  localBackup,
+  backupRestoreProvenance
+}) {
+  if (
+    typeof localBackup?.runProfileRestore !== "function" ||
+    (backupRestoreProvenance !== undefined &&
+      typeof backupRestoreProvenance?.runRestore !== "function")
+  ) {
+    fail("linux_gate_profile_restore_runner_invalid");
+  }
+  const execute = (request) => localBackup.runProfileRestore(request);
+  return function linuxProfileRestore(request) {
+    if (backupRestoreProvenance === undefined) {
+      return execute(request);
+    }
+    return backupRestoreProvenance.runRestore(execute, request);
+  };
 }
 
 function retiredPoolHandle() {
@@ -1249,17 +2049,16 @@ function createRoleScopedPlanPoolClass(
           if (typeof createMigrationPool !== "function") fail("linux_gate_backup_catalog_role_missing");
           const migrationPool = createMigrationPool(this.options?.database);
           const migrationDrain = createPhysicalPoolDrainTracker(migrationPool);
-          try {
-            return await withTransactionImpl(
+          return runWithFirstFailurePreserved(
+            () => withTransactionImpl(
               migrationPool,
               (migrationClient) => queryValues === undefined
                 ? migrationClient.query(text)
                 : migrationClient.query(text, queryValues),
               { role: MIGRATOR_ROLE }
-            );
-          } finally {
-            await migrationDrain.end(() => migrationPool.end());
-          }
+            ),
+            () => migrationDrain.end(() => migrationPool.end())
+          );
         };
         if (!callback) return operation();
         operation().then(
@@ -1763,7 +2562,12 @@ async function runLinuxGate(options = {}) {
   if (process.platform !== "linux" && options.allowNonLinux !== true) fail("linux_gate_linux_required");
   if (fs.existsSync(evidenceDirectory)) fail("linux_gate_evidence_collision");
   fs.mkdirSync(evidenceDirectory, { recursive: false, mode: 0o700 });
-  const runCommand = options.runCommand || commandRunner();
+  const backupRestoreProvenance = createBackupRestoreProvenanceTracker({
+    requireSpawnProof: options.runCommand === undefined
+  });
+  const runCommand = options.runCommand || commandRunner({
+    spawnImpl: backupRestoreProvenance.wrapSpawn(spawn)
+  });
   const poolMetrics = createPoolMetricsRegistry();
   const postgres = (options.createPostgres || createLinuxPostgres)({
     runnerTemp,
@@ -1783,6 +2587,7 @@ async function runLinuxGate(options = {}) {
     status: "running",
     phases: [],
     firstFailure: null,
+    backupRestoreFailureProvenance: null,
     cleanupFailure: null
   };
   let publishedEvidence = evidence;
@@ -1864,17 +2669,17 @@ async function runLinuxGate(options = {}) {
     const localBackup = require("./social-3a0p-local-backup-restore");
     const backupProduct = require("../src/persistence/postgres/backup-restore");
     let directoryFsyncBundles = 0;
-    const linuxProfileBackup = (request) => localBackup.runProfileBackup({
-      ...request,
-      dependencies: {
-        ...(request.dependencies || {}),
-        async runLogicalBackup(args) {
-          const result = await backupProduct.runLogicalBackup({ ...args, requireBundleDirectoryFsync: true });
-          if (result.bundleDirectoryFsyncConfirmed !== true) fail("linux_gate_bundle_directory_fsync_unconfirmed");
-          directoryFsyncBundles += 1;
-          return result;
-        }
+    const linuxProfileBackup = createLinuxProfileBackupRunner({
+      localBackup,
+      backupProduct,
+      backupRestoreProvenance,
+      recordDirectoryFsync() {
+        directoryFsyncBundles += 1;
       }
+    });
+    const linuxProfileRestore = createLinuxProfileRestoreRunner({
+      localBackup,
+      backupRestoreProvenance
     });
     const PhysicalPlanPool = createRoleScopedPlanPoolClass(
       postgres.InstrumentedPool,
@@ -1929,6 +2734,12 @@ async function runLinuxGate(options = {}) {
         createBackupTransportBridge(contract) {
           return createBackupTransportBridge(postgres, physicalRunTool, contract);
         },
+        backupRestoreProvenance: Object.freeze({
+          bindBackup: backupRestoreProvenance.bindBackup,
+          bindRestore: backupRestoreProvenance.bindRestore,
+          runBackup: backupRestoreProvenance.runBackup,
+          runRestore: backupRestoreProvenance.runRestore
+        }),
         runTool: physicalRunTool,
         restoreBehavior: restoreBehaviorFacade
       }
@@ -1959,7 +2770,10 @@ async function runLinuxGate(options = {}) {
     gates = require("./social-3a0p-local-connector-physical-gates").createConnectorPhysicalGates({
       plans,
       randomBytes: options.randomBytes || crypto.randomBytes,
-      dependencies: { runProfileBackup: linuxProfileBackup }
+      dependencies: {
+        runProfileBackup: linuxProfileBackup,
+        runProfileRestore: linuxProfileRestore
+      }
     });
     gates.assertConfigured();
     activePhase = "migrations";
@@ -2090,7 +2904,13 @@ async function runLinuxGate(options = {}) {
   } catch (error) {
     operationalFailure = error;
     evidence.status = "failed";
-    if (!evidence.firstFailure) evidence.firstFailure = { phase: activePhase, code: failureCode(error) };
+    const code = failureCode(error);
+    if (code === "backup_external_tool_failed" && !backupRestoreProvenance.failure()) {
+      backupRestoreProvenance.captureUnobservedFailure();
+    }
+    evidence.backupRestoreFailureProvenance =
+      backupRestoreProvenance.failure();
+    if (!evidence.firstFailure) evidence.firstFailure = { phase: activePhase, code };
   } finally {
     clearInterval(diskMonitor);
     sampleSpace();
@@ -2220,10 +3040,13 @@ module.exports = {
   canonicalJson,
   cleanupOnly,
   containsMarkerInTree,
+  createBackupRestoreProvenanceTracker,
   createDrainAwareRunTool,
   createBackupTransportBridge,
   createGate1MigrationPoolLifecycle,
   createLinuxProfile0003PlansFacade,
+  createLinuxProfileBackupRunner,
+  createLinuxProfileRestoreRunner,
   createLinuxRestoreConfigFacade,
   createPhaseRunner,
   createPhysicalPoolDrainTracker,
@@ -2245,6 +3068,7 @@ module.exports = {
   publicBootstrapEvidence,
   publicBackupTransportEvidence,
   retirePrimaryPoolsBeforeBackup,
+  sanitizedBackupRestoreFailureProvenance,
   sanitizedFailureEvidence,
   runLinuxGate
 };

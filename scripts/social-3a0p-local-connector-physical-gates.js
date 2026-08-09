@@ -445,37 +445,52 @@ async function backupRestoreGate(state, dependencies, plans) {
     ? await plans.prepareBackupRestore(state)
     : plans?.backupRestore;
   if (!plan) fail("connector_physical_backup_plan_missing");
+  let primaryFailed = false;
   try {
-    const backup0003 = await dependencies.runProfileBackup(plan.backup0003);
-    const restore0003 = await dependencies.runProfileRestore(plan.restore0003);
-    const backup0004 = await dependencies.runProfileBackup(plan.backup0004);
-    const restore0004 = await dependencies.runProfileRestore(plan.restore0004);
     const rollback = state.forwardOnlyRollback;
-    if (
-      backup0003.profileId !== "social-schema-0003" ||
-      backup0004.profileId !== "social-schema-0004" ||
-      restore0003.disposableTargetRemoved !== true ||
-      restore0004.disposableTargetRemoved !== true ||
-      rollback.operationalRestoreVerified !== true
-    ) {
+    if (rollback?.operationalRestoreVerified !== true) {
       fail("connector_physical_backup_restore_invalid");
     }
-    const individualBundles = [backup0003, backup0004].map((backup) => ({
-      size: Number(backup.evidence.bundleSize),
-      sha256: String(backup.evidence.bundleSha256 || ""),
-      tables: Number(backup.evidence.tableCount),
-      rlsPolicies: Number(backup.evidence.rlsTableCount)
-    }));
-    if (individualBundles.some((bundle) => (
-      !Number.isSafeInteger(bundle.size) ||
-      bundle.size < 1 ||
-      !/^[0-9a-f]{64}$/.test(bundle.sha256) ||
-      !Number.isSafeInteger(bundle.tables) ||
-      bundle.tables < 1 ||
-      !Number.isSafeInteger(bundle.rlsPolicies) ||
-      bundle.rlsPolicies < 1
-    ))) {
-      fail("connector_physical_backup_bundle_evidence_invalid");
+    const requireBackupResult = (backup, expectedProfileId) => {
+      if (backup?.profileId !== expectedProfileId) {
+        fail("connector_physical_backup_restore_invalid");
+      }
+      const bundle = {
+        size: Number(backup.evidence?.bundleSize),
+        sha256: String(backup.evidence?.bundleSha256 || ""),
+        tables: Number(backup.evidence?.tableCount),
+        rlsPolicies: Number(backup.evidence?.rlsTableCount)
+      };
+      if (
+        !Number.isSafeInteger(bundle.size) ||
+        bundle.size < 1 ||
+        !/^[0-9a-f]{64}$/.test(bundle.sha256) ||
+        !Number.isSafeInteger(bundle.tables) ||
+        bundle.tables < 1 ||
+        !Number.isSafeInteger(bundle.rlsPolicies) ||
+        bundle.rlsPolicies < 1
+      ) {
+        fail("connector_physical_backup_bundle_evidence_invalid");
+      }
+      return bundle;
+    };
+    const backup0003 = await dependencies.runProfileBackup(plan.backup0003);
+    const bundle0003 = requireBackupResult(
+      backup0003,
+      "social-schema-0003"
+    );
+    const restore0003 = await dependencies.runProfileRestore(plan.restore0003);
+    if (restore0003?.disposableTargetRemoved !== true) {
+      fail("connector_physical_backup_restore_invalid");
+    }
+    const backup0004 = await dependencies.runProfileBackup(plan.backup0004);
+    const bundle0004 = requireBackupResult(
+      backup0004,
+      "social-schema-0004"
+    );
+    const restore0004 = await dependencies.runProfileRestore(plan.restore0004);
+    if (restore0004?.disposableTargetRemoved !== true) {
+      fail("connector_physical_backup_restore_invalid");
     }
     // Tamper and cross-profile refusals are executed by the concrete plan so no
     // result is inferred from a unit-test-only JSON mutation.
@@ -492,17 +507,26 @@ async function backupRestoreGate(state, dependencies, plans) {
       operationalRollback: true,
       disposableRemoved: true,
       fileFsync: true,
-      bundle0003Size: individualBundles[0].size,
-      bundle0003Sha256: individualBundles[0].sha256,
-      bundle0003Tables: individualBundles[0].tables,
-      bundle0003RlsPolicies: individualBundles[0].rlsPolicies,
-      bundle0004Size: individualBundles[1].size,
-      bundle0004Sha256: individualBundles[1].sha256,
-      bundle0004Tables: individualBundles[1].tables,
-      bundle0004RlsPolicies: individualBundles[1].rlsPolicies
+      bundle0003Size: bundle0003.size,
+      bundle0003Sha256: bundle0003.sha256,
+      bundle0003Tables: bundle0003.tables,
+      bundle0003RlsPolicies: bundle0003.rlsPolicies,
+      bundle0004Size: bundle0004.size,
+      bundle0004Sha256: bundle0004.sha256,
+      bundle0004Tables: bundle0004.tables,
+      bundle0004RlsPolicies: bundle0004.rlsPolicies
     };
+  } catch (error) {
+    primaryFailed = true;
+    throw error;
   } finally {
-    if (typeof plan.cleanup === "function") await plan.cleanup();
+    if (typeof plan.cleanup === "function") {
+      try {
+        await plan.cleanup();
+      } catch (error) {
+        if (!primaryFailed) throw error;
+      }
+    }
   }
 }
 

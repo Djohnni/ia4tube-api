@@ -8,10 +8,10 @@ const test = require("node:test");
 const REPOSITORY_ROOT = path.resolve(__dirname, "..");
 const WORKFLOW_RELATIVE_PATH = ".github/workflows/social-3a0p-linux-physical-gates.yml";
 const WORKFLOW_PATH = path.join(REPOSITORY_ROOT, ...WORKFLOW_RELATIVE_PATH.split("/"));
-const BRANCH = "social/checkpoint-3a0p-linux-profile-aware-restore-20260808";
-const PARENT = "931d1986e1cc5864c4d28997a995a27aaa593fd6";
+const BRANCH = "social/checkpoint-3a0p-linux-restore-provenance-20260808";
+const PARENT = "0f09b99b06fc99b5e176414d7f8365a996704f4a";
 const ZERO_SHA = "0000000000000000000000000000000000000000";
-const MESSAGE = "[run-social-3a0p-linux-gate] validate restored schema by profile";
+const MESSAGE = "[run-social-3a0p-linux-gate] preserve restore failure provenance";
 const JOB_IF = [
   "github.event_name == 'push'",
   `github.ref == 'refs/heads/${BRANCH}'`,
@@ -32,8 +32,10 @@ const AUTHORIZED_FILES = Object.freeze([
   ".github/workflows/social-3a0p-linux-physical-gates.yml",
   "docs/social-3a0p-linux-physical-gates.md",
   "scripts/social-3a0p-linux-gate.js",
+  "scripts/social-3a0p-local-connector-physical-gates.js",
   "scripts/social-3a0p-local-windows-physical-plans.js",
   "tests/social-3a0p-linux-gate.test.js",
+  "tests/social-3a0p-local-connector-physical-gates.test.js",
   "tests/social-3a0p-local-windows-physical-plans.test.js",
   "tests/social-3a0p-linux-workflow.test.js"
 ]);
@@ -120,9 +122,11 @@ test("workflow scope refuses globs, directories and every non-allowlisted path",
     "scripts/social-3a0p-*",
     "scripts/social-3a0p-linux-postgres.js",
     "scripts/social-3a0p-local-backup-restore.js",
+    "scripts/social-3a0p-local-connector-physical-gates-helper.js",
     "tests/social-3a0p-*",
     "tests/social-3a0p-linux-postgres.test.js",
     "tests/social-3a0p-local-backup-restore.test.js",
+    "tests/social-3a0p-local-connector-physical-gates-extra.test.js",
     "docs/social-3a0p-*",
     "src/persistence/postgres/runtime-validation.js",
     "db/migrations/0004_social_connector_persistence.up.sql",
@@ -160,10 +164,10 @@ test("creation-push contract refuses wrong branch, parent, message, before, crea
   );
   assert.equal(accepted(authorized), true);
   for (const mutation of [
-    { ref: "refs/heads/social/checkpoint-3a0p-linux-backup-transport-20260808" },
-    { parent: "f47438ef12b03a5eb1f2965c2e68e3c6efd9f36a" },
+    { ref: "refs/heads/social/checkpoint-3a0p-linux-profile-aware-restore-20260808" },
+    { parent: "931d1986e1cc5864c4d28997a995a27aaa593fd6" },
     { before: PARENT },
-    { message: "[run-social-3a0p-linux-gate] bridge verified backup transport" },
+    { message: "[run-social-3a0p-linux-gate] validate restored schema by profile" },
     { created: false },
     { deleted: true },
     { forced: true },

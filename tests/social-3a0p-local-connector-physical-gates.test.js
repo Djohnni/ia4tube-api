@@ -189,6 +189,237 @@ test("concrete connector gates use the product contracts and physical plan runne
   gates.destroy();
 });
 
+test("backup/restore cleanup always runs without overwriting the first failure", async (t) => {
+  const state = {
+    target: { host: "127.0.0.1", port: 55432 },
+    pools: { migration: {}, runtime: {} },
+    forwardOnlyRollback: { operationalRestoreVerified: true }
+  };
+  function physicalPlan(cleanup, refusals = {}) {
+    return {
+      backup0003: { profileId: "social-schema-0003" },
+      restore0003: {},
+      backup0004: { profileId: "social-schema-0004" },
+      restore0004: {},
+      async assertManifestTamperRefused() {
+        return refusals.tamper !== false;
+      },
+      async assertCrossProfileRefused() {
+        return refusals.cross !== false;
+      },
+      cleanup
+    };
+  }
+  function physicalGates(dependencies, plan) {
+    return createConnectorPhysicalGates({
+      replaceDefaultDependencies: true,
+      dependencies,
+      randomBytes: (size) => Buffer.alloc(size, 5),
+      randomUUID: uuidFactory(),
+      plans: {
+        runMarker: RUN_MARKER,
+        backupRestore: plan
+      }
+    });
+  }
+
+  await t.test("primary plus cleanup preserves the primary", async () => {
+    const primary = Object.assign(new Error("not persisted"), {
+      code: "synthetic_backup_primary_failure"
+    });
+    const cleanup = Object.assign(new Error("not persisted"), {
+      code: "synthetic_backup_cleanup_failure"
+    });
+    let cleanupCalls = 0;
+    const dependencies = fakeDependencies();
+    dependencies.runProfileBackup = async () => { throw primary; };
+    const gates = physicalGates(
+      dependencies,
+      physicalPlan(async () => {
+        cleanupCalls += 1;
+        throw cleanup;
+      })
+    );
+    await assert.rejects(
+      gates.backupRestore({ state }),
+      (error) => error === primary
+    );
+    assert.equal(cleanupCalls, 1);
+    await gates.destroy();
+  });
+
+  await t.test("invalid rollback state stops before the first backup runner", async () => {
+    let runnerCalls = 0;
+    let cleanupCalls = 0;
+    const dependencies = fakeDependencies();
+    dependencies.runProfileBackup = async () => {
+      runnerCalls += 1;
+      throw new Error("later runner must not start");
+    };
+    const gates = physicalGates(
+      dependencies,
+      physicalPlan(async () => { cleanupCalls += 1; })
+    );
+    await assert.rejects(
+      gates.backupRestore({
+        state: {
+          ...state,
+          forwardOnlyRollback: { operationalRestoreVerified: false }
+        }
+      }),
+      { code: "connector_physical_backup_restore_invalid" }
+    );
+    assert.equal(runnerCalls, 0);
+    assert.equal(cleanupCalls, 1);
+    await gates.destroy();
+  });
+
+  await t.test("invalid first backup profile stops before restore", async () => {
+    let backupCalls = 0;
+    let restoreCalls = 0;
+    let cleanupCalls = 0;
+    const dependencies = fakeDependencies();
+    const runValidBackup = dependencies.runProfileBackup;
+    dependencies.runProfileBackup = async (plan) => {
+      backupCalls += 1;
+      return Object.freeze({
+        ...(await runValidBackup(plan)),
+        profileId: "social-schema-0004"
+      });
+    };
+    dependencies.runProfileRestore = async () => {
+      restoreCalls += 1;
+      throw new Error("later runner must not start");
+    };
+    const gates = physicalGates(
+      dependencies,
+      physicalPlan(async () => { cleanupCalls += 1; })
+    );
+    await assert.rejects(
+      gates.backupRestore({ state }),
+      { code: "connector_physical_backup_restore_invalid" }
+    );
+    assert.equal(backupCalls, 1);
+    assert.equal(restoreCalls, 0);
+    assert.equal(cleanupCalls, 1);
+    await gates.destroy();
+  });
+
+  await t.test("invalid first backup evidence stops before restore", async () => {
+    let backupCalls = 0;
+    let restoreCalls = 0;
+    let cleanupCalls = 0;
+    const dependencies = fakeDependencies();
+    const runValidBackup = dependencies.runProfileBackup;
+    dependencies.runProfileBackup = async (plan) => {
+      backupCalls += 1;
+      const result = await runValidBackup(plan);
+      return Object.freeze({
+        ...result,
+        evidence: Object.freeze({
+          ...result.evidence,
+          bundleSize: 0
+        })
+      });
+    };
+    dependencies.runProfileRestore = async () => {
+      restoreCalls += 1;
+      throw new Error("later runner must not start");
+    };
+    const gates = physicalGates(
+      dependencies,
+      physicalPlan(async () => { cleanupCalls += 1; })
+    );
+    await assert.rejects(
+      gates.backupRestore({ state }),
+      { code: "connector_physical_backup_bundle_evidence_invalid" }
+    );
+    assert.equal(backupCalls, 1);
+    assert.equal(restoreCalls, 0);
+    assert.equal(cleanupCalls, 1);
+    await gates.destroy();
+  });
+
+  await t.test("cleanup-only failure propagates", async () => {
+    const cleanup = Object.assign(new Error("not persisted"), {
+      code: "synthetic_backup_cleanup_failure"
+    });
+    let cleanupCalls = 0;
+    const gates = physicalGates(
+      fakeDependencies(),
+      physicalPlan(async () => {
+        cleanupCalls += 1;
+        throw cleanup;
+      })
+    );
+    await assert.rejects(
+      gates.backupRestore({ state }),
+      (error) => error === cleanup
+    );
+    assert.equal(cleanupCalls, 1);
+    await gates.destroy();
+  });
+
+  await t.test("success and cleanup success preserve the result", async () => {
+    let cleanupCalls = 0;
+    const gates = physicalGates(
+      fakeDependencies(),
+      physicalPlan(async () => { cleanupCalls += 1; })
+    );
+    const result = await gates.backupRestore({ state });
+    assert.equal(result.profile0003, true);
+    assert.equal(result.profile0004, true);
+    assert.equal(cleanupCalls, 1);
+    await gates.destroy();
+  });
+
+  await t.test("accepted tamper wins over outer cleanup failure", async () => {
+    const cleanup = Object.assign(new Error("not persisted"), {
+      code: "synthetic_backup_cleanup_failure"
+    });
+    let cleanupCalls = 0;
+    const gates = physicalGates(
+      fakeDependencies(),
+      physicalPlan(
+        async () => {
+          cleanupCalls += 1;
+          throw cleanup;
+        },
+        { tamper: false }
+      )
+    );
+    await assert.rejects(
+      gates.backupRestore({ state }),
+      { code: "connector_physical_manifest_tamper_accepted" }
+    );
+    assert.equal(cleanupCalls, 1);
+    await gates.destroy();
+  });
+
+  await t.test("accepted cross-profile wins over outer cleanup failure", async () => {
+    const cleanup = Object.assign(new Error("not persisted"), {
+      code: "synthetic_backup_cleanup_failure"
+    });
+    let cleanupCalls = 0;
+    const gates = physicalGates(
+      fakeDependencies(),
+      physicalPlan(
+        async () => {
+          cleanupCalls += 1;
+          throw cleanup;
+        },
+        { cross: false }
+      )
+    );
+    await assert.rejects(
+      gates.backupRestore({ state }),
+      { code: "connector_physical_cross_profile_accepted" }
+    );
+    assert.equal(cleanupCalls, 1);
+    await gates.destroy();
+  });
+});
+
 test("physical gate construction performs no PostgreSQL or external call", () => {
   let externalCalls = 0;
   const dependencies = fakeDependencies();

@@ -33,6 +33,16 @@ const SCHEMA_PROFILE_IDS = Object.freeze([
   SCHEMA_PROFILE_0003,
   SCHEMA_PROFILE_0004
 ]);
+const BACKUP_PROVENANCE_OPERATIONS = new Set([
+  "rollback_backup_0003",
+  "gate5_backup_0003",
+  "gate5_backup_0004"
+]);
+const RESTORE_PROVENANCE_OPERATIONS = new Set([
+  "rollback_restore_0003",
+  "gate5_restore_0003",
+  "gate5_restore_0004"
+]);
 const SAFE_IDENTIFIER = /^[a-z][a-z0-9_]{2,62}$/;
 const SAFE_ENVIRONMENT_NAMES = new Set([
   "SYSTEMROOT",
@@ -1104,6 +1114,11 @@ function createWindowsPhysicalPlans(options = {}) {
   const backup = options.dependencies?.backup || require("../src/persistence/postgres/backup-restore");
   const migrations = options.dependencies?.migrations || require("../src/persistence/postgres/migrations");
   const loginBootstrap = options.dependencies?.loginBootstrap || require("../src/persistence/postgres/login-bootstrap");
+  const runProfileRestoreImpl = options.dependencies?.runProfileRestore ||
+    runProfileRestore;
+  if (typeof runProfileRestoreImpl !== "function") {
+    fail("windows_physical_restore_runner_invalid");
+  }
   const legacy2ARoot = path.join(
     path.dirname(options.repositoryRoot),
     "social-checkpoint-2a-postgres-vault-20260729"
@@ -1161,6 +1176,22 @@ function createWindowsPhysicalPlans(options = {}) {
     typeof createBackupTransportBridge !== "function"
   ) {
     fail("windows_physical_backup_transport_bridge_invalid");
+  }
+  const backupRestoreProvenance =
+    options.dependencies?.backupRestoreProvenance;
+  if (
+    backupRestoreProvenance !== undefined && (
+      !backupRestoreProvenance ||
+      Object.getPrototypeOf(backupRestoreProvenance) !== Object.prototype ||
+      JSON.stringify(Object.keys(backupRestoreProvenance).sort()) !==
+        JSON.stringify(["bindBackup", "bindRestore", "runBackup", "runRestore"]) ||
+      typeof backupRestoreProvenance.bindBackup !== "function" ||
+      typeof backupRestoreProvenance.bindRestore !== "function" ||
+      typeof backupRestoreProvenance.runBackup !== "function" ||
+      typeof backupRestoreProvenance.runRestore !== "function"
+    )
+  ) {
+    fail("windows_physical_backup_restore_provenance_invalid");
   }
   const fileSystem = options.dependencies?.fileSystem || fs;
   const createdPlans = new Set();
@@ -1239,7 +1270,9 @@ function createWindowsPhysicalPlans(options = {}) {
         recursive: false
       });
     } catch (error) {
-      fileSystem.rmdirSync(path.join(paths.ownedRoot, "backups"));
+      try {
+        fileSystem.rmdirSync(path.join(paths.ownedRoot, "backups"));
+      } catch {}
       throw error;
     }
     planDirectoriesCreated = true;
@@ -1398,13 +1431,72 @@ function createWindowsPhysicalPlans(options = {}) {
     };
   }
 
-  function backupRequest(database, profile, label) {
+  function bindProvenanceOperation(request, kind, operation) {
+    if (operation === undefined || backupRestoreProvenance === undefined) {
+      return request;
+    }
+    const backupMode = kind === "backup";
+    const operations = backupMode
+      ? BACKUP_PROVENANCE_OPERATIONS
+      : RESTORE_PROVENANCE_OPERATIONS;
+    if (!operations.has(operation)) {
+      fail("windows_physical_backup_restore_provenance_operation_invalid");
+    }
+    const bound = backupMode
+      ? backupRestoreProvenance.bindBackup(operation, request)
+      : backupRestoreProvenance.bindRestore(operation, request);
+    if (bound !== request) {
+      fail("windows_physical_backup_restore_provenance_binding_invalid");
+    }
+    return bound;
+  }
+
+  function runRollbackBackup(request) {
+    if (backupRestoreProvenance === undefined) {
+      return runProfileBackup(request);
+    }
+    return backupRestoreProvenance.runBackup(
+      runProfileBackup,
+      request
+    );
+  }
+
+  function runRollbackRestore(request) {
+    const execute = async (candidate) => {
+      let primaryFailure;
+      try {
+        const result = await backup.runLogicalRestore(candidate);
+        if (result?.ok !== true) {
+          fail("windows_physical_restore_execution_unconfirmed");
+        }
+        await candidate.verifyRestoredProfile?.();
+        return result;
+      } catch (error) {
+        primaryFailure = error;
+        throw error;
+      } finally {
+        try {
+          await candidate.closeVerifiers?.();
+        } catch (closingError) {
+          if (!primaryFailure) throw closingError;
+        }
+      }
+    };
+    return backupRestoreProvenance === undefined
+      ? execute(request)
+      : backupRestoreProvenance.runRestore(
+          execute,
+          request
+        );
+  }
+
+  function backupRequest(database, profile, label, provenanceOperation) {
     const transport = requireBackupTransport(database);
     const config = backup.loadBackupConfig(
       connectionEnvironment("SOCIAL_BACKUP", database, label),
       { repositoryRoot: options.repositoryRoot }
     );
-    const request = {
+    const request = bindProvenanceOperation({
       approval: LOCAL_PHYSICAL_APPROVAL,
       profileRows: profile.migrationRows,
       config,
@@ -1413,11 +1505,17 @@ function createWindowsPhysicalPlans(options = {}) {
       pool: databaseManager.getPools(database).provisioner,
       runTool: transport.runTool,
       generatedAt: new Date().toISOString()
-    };
-    return Object.freeze({ request, config, profile });
+    }, "backup", provenanceOperation);
+    return Object.freeze({ request: Object.freeze(request), config, profile });
   }
 
-  function restoreRequest(sourcePlan, targetDatabase, expectedProfile) {
+  function restoreRequest(
+    sourcePlan,
+    targetDatabase,
+    expectedProfile,
+    provenanceOperation,
+    afterRestoredProfileVerified
+  ) {
     const transport = requireBackupTransport(targetDatabase);
     const env = connectionEnvironment(
       "SOCIAL_RESTORE",
@@ -1431,7 +1529,16 @@ function createWindowsPhysicalPlans(options = {}) {
     });
     const targetLifecycle = lifecycle(targetDatabase, expectedProfile.id);
     const behavior = restoreVerifiers(targetDatabase, expectedProfile.id);
-    return Object.freeze({
+    const baseVerifyRestoredProfile = () =>
+      databaseManager.verifyProfile(targetDatabase, expectedProfile.id);
+    const verifyRestoredProfile = afterRestoredProfileVerified === undefined
+      ? baseVerifyRestoredProfile
+      : async () => {
+          const profile = await baseVerifyRestoredProfile();
+          await afterRestoredProfileVerified();
+          return profile;
+        };
+    const request = bindProvenanceOperation({
       approval: LOCAL_PHYSICAL_APPROVAL,
       expectedProfile,
       config,
@@ -1443,10 +1550,11 @@ function createWindowsPhysicalPlans(options = {}) {
       verifyVault: behavior.verifyVault,
       verify2ACompatibility: behavior.verify2ACompatibility,
       closeVerifiers: behavior.closeVerifiers,
-      verifyRestoredProfile: () => databaseManager.verifyProfile(targetDatabase, expectedProfile.id),
+      verifyRestoredProfile,
       runMarker: binding.runMarker,
       lifecycle: targetLifecycle
-    });
+    }, "restore", provenanceOperation);
+    return Object.freeze(request);
   }
 
   async function createRollbackAdapter() {
@@ -1465,6 +1573,7 @@ function createWindowsPhysicalPlans(options = {}) {
     let nonSocial;
     let sourcePlan;
     let restoreConfig;
+    let restored0003ProfileConfirmation;
     const restoreLifecycle = lifecycle(names.rollbackRestore, profile0003.id);
     return Object.freeze({
       markedDisposable: true,
@@ -1493,8 +1602,13 @@ function createWindowsPhysicalPlans(options = {}) {
         return canonical === await databaseManager.catalogFingerprint(names.rollbackSource);
       },
       async backup0003() {
-        sourcePlan = backupRequest(names.rollbackSource, profile0003, `rollback-0003-${digest}`);
-        await runProfileBackup(sourcePlan.request);
+        sourcePlan = backupRequest(
+          names.rollbackSource,
+          profile0003,
+          `rollback-0003-${digest}`,
+          "rollback_backup_0003"
+        );
+        await runRollbackBackup(sourcePlan.request);
         return true;
       },
       async apply0004() {
@@ -1513,24 +1627,43 @@ function createWindowsPhysicalPlans(options = {}) {
           names.rollbackRestore,
           profile0003.id
         );
-        try {
-          const result = await backup.runLogicalRestore({
-            config: restoreConfig,
-            operator: backup.createPostgresBackupOperator(databaseManager.getPools(names.rollbackRestore).provisioner),
-            runTool: (plan) => transport.runTool(plan, transport.localBinding),
-            verifierTargetFingerprint: restoreConfig.targetFingerprint,
-            verifyRuntimeIsolation: behavior.verifyRuntimeIsolation,
-            verifyVault: behavior.verifyVault,
-            verify2ACompatibility: behavior.verify2ACompatibility
-          });
-          return result.ok === true;
-        } finally {
-          await behavior.closeVerifiers();
-        }
+        const request = Object.freeze(bindProvenanceOperation({
+          config: restoreConfig,
+          operator: backup.createPostgresBackupOperator(databaseManager.getPools(names.rollbackRestore).provisioner),
+          runTool: (plan) => transport.runTool(plan, transport.localBinding),
+          verifierTargetFingerprint: restoreConfig.targetFingerprint,
+          verifyRuntimeIsolation: behavior.verifyRuntimeIsolation,
+          verifyVault: behavior.verifyVault,
+          verify2ACompatibility: behavior.verify2ACompatibility,
+          async verifyRestoredProfile() {
+            const profile = await databaseManager.verifyProfile(
+              names.rollbackRestore,
+              profile0003.id
+            );
+            if (profile?.id !== profile0003.id) {
+              fail("windows_physical_restore_profile_validation_unconfirmed");
+            }
+            restored0003ProfileConfirmation = Object.freeze({
+              database: names.rollbackRestore,
+              profileId: profile0003.id,
+              runMarker: binding.runMarker
+            });
+            return profile;
+          },
+          closeVerifiers: behavior.closeVerifiers
+        }, "restore", "rollback_restore_0003"));
+        const result = await runRollbackRestore(request);
+        return result.ok === true;
       },
       async verifyRestored0003(proof) {
         exactProof(proof, restoreIdentity);
-        await databaseManager.verifyProfile(names.rollbackRestore, profile0003.id);
+        if (
+          restored0003ProfileConfirmation?.database !== names.rollbackRestore ||
+          restored0003ProfileConfirmation?.profileId !== profile0003.id ||
+          restored0003ProfileConfirmation?.runMarker !== binding.runMarker
+        ) {
+          fail("windows_physical_restore_profile_validation_unconfirmed");
+        }
         return true;
       },
       removeDisposable0003: (proof) => databaseManager.remove(exactProof(proof, restoreIdentity)),
@@ -1561,18 +1694,64 @@ function createWindowsPhysicalPlans(options = {}) {
         return true;
       },
       async verifyNonSocialUnchanged() {
-        const unchanged = nonSocial === await databaseManager.nonSocialFingerprint(names.rollbackSource);
-        if (sourceProof) {
-          await databaseManager.remove(sourceProof);
-          if ((await databaseManager.assertRemoved(sourceProof)) !== true) return false;
-          sourceProof = undefined;
+        let primaryFailed = false;
+        let primaryFailure;
+        let unchanged = false;
+        try {
+          unchanged = nonSocial === await databaseManager.nonSocialFingerprint(
+            names.rollbackSource
+          );
+        } catch (error) {
+          primaryFailed = true;
+          primaryFailure = error;
         }
-        return unchanged;
+        let cleanupFailed = false;
+        let cleanupFailure;
+        const recordCleanupFailure = (error) => {
+          if (!cleanupFailed) {
+            cleanupFailed = true;
+            cleanupFailure = error;
+          }
+        };
+        if (sourceProof) {
+          const proof = sourceProof;
+          try {
+            await databaseManager.remove(proof);
+          } catch (error) {
+            recordCleanupFailure(error);
+          }
+          try {
+            if ((await databaseManager.assertRemoved(proof)) !== true) {
+              recordCleanupFailure(new WindowsPhysicalPlanFailure(
+                "windows_physical_source_cleanup_unconfirmed"
+              ));
+            } else {
+              sourceProof = undefined;
+            }
+          } catch (error) {
+            recordCleanupFailure(error);
+          }
+        }
+        if (primaryFailed) throw primaryFailure;
+        if (!unchanged) return false;
+        if (cleanupFailed) throw cleanupFailure;
+        return true;
       }
     });
   }
 
-  async function prepareBackupRestore() {
+  async function prepareBackupRestore(_state, preparationHooks) {
+    if (
+      preparationHooks !== undefined && (
+        !preparationHooks ||
+        Object.getPrototypeOf(preparationHooks) !== Object.prototype ||
+        JSON.stringify(Object.keys(preparationHooks).sort()) !==
+          JSON.stringify(["installProfile0003RestoreVerification"]) ||
+        typeof preparationHooks.installProfile0003RestoreVerification !== "function"
+      )
+    ) {
+      fail("windows_physical_backup_restore_preparation_hooks_invalid");
+    }
     ensurePlanDirectories();
     const profile0003 = requireCanonicalSchemaProfile(
       backup.SCHEMA_PROFILES,
@@ -1582,20 +1761,60 @@ function createWindowsPhysicalPlans(options = {}) {
       backup.SCHEMA_PROFILES,
       "social-schema-0004"
     );
+    const verifyProfile0003FixtureRestored = preparationHooks === undefined
+      ? undefined
+      : preparationHooks.installProfile0003RestoreVerification();
+    if (
+      verifyProfile0003FixtureRestored !== undefined &&
+      typeof verifyProfile0003FixtureRestored !== "function"
+    ) {
+      fail("windows_physical_restore_profile_verifier_wrapper_invalid");
+    }
     const sourceProof = await databaseManager.create(identity(names.backupSource0003, profile0003.id));
     await databaseManager.applyProfile(names.backupSource0003, profile0003.id);
-    const plan0003 = backupRequest(names.backupSource0003, profile0003, `profile-0003-${digest}`);
-    const plan0004 = backupRequest(LOCAL_DATABASE, profile0004, `profile-0004-${digest}`);
+    const plan0003 = backupRequest(
+      names.backupSource0003,
+      profile0003,
+      `profile-0003-${digest}`,
+      "gate5_backup_0003"
+    );
+    const plan0004 = backupRequest(
+      LOCAL_DATABASE,
+      profile0004,
+      `profile-0004-${digest}`,
+      "gate5_backup_0004"
+    );
     const result = {
       backup0003: plan0003.request,
-      restore0003: restoreRequest(plan0003, names.restore0003, profile0003),
+      restore0003: restoreRequest(
+        plan0003,
+        names.restore0003,
+        profile0003,
+        "gate5_restore_0003",
+        verifyProfile0003FixtureRestored
+      ),
       backup0004: plan0004.request,
-      restore0004: restoreRequest(plan0004, names.restore0004, profile0004),
+      restore0004: restoreRequest(
+        plan0004,
+        names.restore0004,
+        profile0004,
+        "gate5_restore_0004"
+      ),
       async assertManifestTamperRefused() {
         const tampered = `${plan0003.config.files.bundle}.tampered`;
         let descriptor;
         let rejected = false;
+        let primaryFailed = false;
+        let primaryFailure;
+        let cleanupFailed = false;
+        let cleanupFailure;
         const tamperIdentity = identity(names.tamper, profile0003.id);
+        const recordCleanupFailure = (error) => {
+          if (!cleanupFailed) {
+            cleanupFailed = true;
+            cleanupFailure = error;
+          }
+        };
         try {
           fileSystem.copyFileSync(plan0003.config.files.bundle, tampered, fs.constants.COPYFILE_EXCL);
           descriptor = fileSystem.openSync(tampered, "r+");
@@ -1619,37 +1838,72 @@ function createWindowsPhysicalPlans(options = {}) {
             repositoryRoot: options.repositoryRoot
           });
           try {
-            await runProfileRestore({ ...request, config: tamperedConfig });
+            await runProfileRestoreImpl({ ...request, config: tamperedConfig });
           } catch (error) {
             if (error?.code !== "restore_encrypted_bundle_invalid") throw error;
             rejected = true;
           }
-        } finally {
-          if (descriptor !== undefined) fileSystem.closeSync(descriptor);
-          if (fileSystem.existsSync(tampered)) fileSystem.unlinkSync(tampered);
+        } catch (error) {
+          primaryFailed = true;
+          primaryFailure = error;
         }
-        const reconciliation = await databaseManager.reconcile(tamperIdentity);
-        if (reconciliation.status !== "absent") {
-          fail("windows_physical_tamper_cleanup_unconfirmed");
+        if (descriptor !== undefined) {
+          try {
+            fileSystem.closeSync(descriptor);
+          } catch (error) {
+            recordCleanupFailure(error);
+          }
         }
-        return rejected;
+        try {
+          fileSystem.unlinkSync(tampered);
+        } catch (error) {
+          if (error?.code !== "ENOENT") recordCleanupFailure(error);
+        }
+        try {
+          const reconciliation = await databaseManager.reconcile(tamperIdentity);
+          if (reconciliation.status !== "absent") {
+            fail("windows_physical_tamper_cleanup_unconfirmed");
+          }
+        } catch (error) {
+          recordCleanupFailure(error);
+        }
+        if (primaryFailed) throw primaryFailure;
+        if (!rejected) return false;
+        if (cleanupFailed) throw cleanupFailure;
+        return true;
       },
       async assertCrossProfileRefused() {
         const request = restoreRequest(plan0003, names.cross, profile0004);
         let rejected = false;
+        let primaryFailed = false;
+        let primaryFailure;
+        let reconciliationFailed = false;
+        let reconciliationFailure;
         try {
-          await runProfileRestore(request);
+          await runProfileRestoreImpl(request);
         } catch (error) {
-          if (error?.code !== "local_backup_restore_cross_profile_refused") throw error;
-          rejected = true;
+          if (error?.code === "local_backup_restore_cross_profile_refused") {
+            rejected = true;
+          } else {
+            primaryFailed = true;
+            primaryFailure = error;
+          }
         }
-        const reconciliation = await databaseManager.reconcile(
-          identity(names.cross, profile0004.id)
-        );
-        if (reconciliation.status !== "absent") {
-          fail("windows_physical_cross_profile_cleanup_unconfirmed");
+        try {
+          const reconciliation = await databaseManager.reconcile(
+            identity(names.cross, profile0004.id)
+          );
+          if (reconciliation.status !== "absent") {
+            fail("windows_physical_cross_profile_cleanup_unconfirmed");
+          }
+        } catch (error) {
+          reconciliationFailed = true;
+          reconciliationFailure = error;
         }
-        return rejected;
+        if (primaryFailed) throw primaryFailure;
+        if (!rejected) return false;
+        if (reconciliationFailed) throw reconciliationFailure;
+        return true;
       },
       async cleanup() {
         if ((await databaseManager.assertCreated(sourceProof)) === true) {
