@@ -2,31 +2,31 @@
 
 ## Limite e proveniência
 
-Esta décima rota Linux isolada parte exclusivamente do commit
-`77f0eb732497f9f8d4f1139e2a6ded80ac0a3476`. A branch predecessora
-`social/checkpoint-3a0p-linux-rls-runtime-write-contract-20260809` e todas as
+Esta décima primeira rota Linux isolada parte exclusivamente do commit
+`27231f7e11ae8e73599d99420e47fbf987bf03ec`. A branch predecessora
+`social/checkpoint-3a0p-linux-rls-inventory-context-20260809` e todas as
 branches anteriores permanecem preservadas, sem edição ou novo push.
 
 O workflow existe somente para a branch
-`social/checkpoint-3a0p-linux-rls-inventory-context-20260809`. O produto
+`social/checkpoint-3a0p-linux-rls-oid-inventory-20260809`. O produto
 permanece idêntico a `fcfc92419021dae5f77baad731c634b10c275c5b`: `src/`, todo
 `db/` (inclusive `roles.sql`), migrations, `server.js`, `package.json` e
 `package-lock.json` não são alterados. Esta rota não acrescenta grants, não
 altera políticas RLS e não modifica PostgreSQL, SCRAM, roles, backup, restore,
 rede Docker ou credenciais.
 
-## Décimo disparo Linux isolado autorizado
+## Décimo primeiro disparo Linux isolado autorizado
 
 O único gatilho autorizado é o primeiro e único `push` de criação da nova
 branch, sem exclusão ou force, cujo commit tenha a mensagem integral:
 
 ```text
-[run-social-3a0p-linux-gate] inspect RLS privileges under migrator role
+[run-social-3a0p-linux-gate] inspect runtime privileges by relation oid
 ```
 
 O job exige `run_attempt == 1`, `created == true`, `deleted == false`,
 `forced == false`, `before` igual a 40 zeros e pai exato
-`77f0eb732497f9f8d4f1139e2a6ded80ac0a3476`, além de diff nominal e
+`27231f7e11ae8e73599d99420e47fbf987bf03ec`, além de diff nominal e
 estritamente allowlisted. Não há `workflow_dispatch`, pull request, agenda,
 matriz ou retry automático. A regra operacional é: exatamente um push de
 criação, no máximo um run automático, zero re-run, zero segundo push, zero PR,
@@ -46,7 +46,41 @@ alterados, sem curinga, prefixo ou diretório inteiro:
 Qualquer outro caminho, inclusive outro workflow, `src/`, `db/`, migrations,
 roles, servidor ou dependências, encerra o job antes do gate.
 
-## Primeira falha física do run predecessor
+## Primeira divergência física do run predecessor
+
+O run físico `31308539550` (artifact `9036694430`, SHA-256 do JSON
+`0bf0bf72f0d40f2e0d73a87daaf3c42b002bddd2e07ac566a7dfb93cedd7aff4`,
+digest do artifact
+`sha256:8ffccf986a7de1716d33219d8b69d25b4a6317a69ef68c81a33984d4fb5f8ef8`)
+aprovou durabilidade, PostgreSQL, bootstrap, credenciais, Gate 1 e migrations.
+Na fase `rls_privilege_inventory_context_reproduction`, a sessão direta
+permaneceu login migration, confirmou `USAGE=false`, reproduziu a resolução
+textual recusada por `42501` e continuou utilizável. Dentro da transação,
+`session_user` permaneceu migration e `current_user` passou a `MIGRATOR_ROLE`.
+
+O run parou exatamente em `rls_inventory_migrator_role_activation`, com o
+código sanitizado `linux_gate_rls_inventory_migrator_schema_access_missing`,
+porque a migrator também observou `USAGE=false`. A leitura por OID, a
+reprodução antiga, o Gate 2 e os Gates 3 a 5 não foram executados. A transação
+foi revertida e o cleanup removeu contêiner, rede, volume, material sintético e
+raiz temporária, com todos os resíduos em zero. Não houve segundo push, retry,
+re-run, PR, merge ou deploy.
+
+Essa ausência de `USAGE` é o contrato correto de menor privilégio. A migration
+0001 concede `USAGE` do schema social somente à runtime; o executor de
+migrations aplica DDL com `SET LOCAL ROLE` para a owner. A migrator não é a
+owner nem a role operacional e não receberá novo grant. Nesta rota,
+`migratorSchemaUsage=false` é uma prova positiva, não uma falha.
+
+O inventário corrigido continua sob `MIGRATOR_ROLE`, localiza o namespace e
+exatamente as relações `users` e `social_audit_events` em `pg_catalog`, e usa
+diretamente seus OIDs em `has_schema_privilege`, `has_table_privilege` e
+`pg_policy`. O caminho não constrói `regclass` textual, não usa `to_regclass`,
+não interpola identificador externo e não depende de `USAGE` para resolver
+nomes. Nenhum grant, ACL, role, policy, migration ou byte de produto é
+alterado.
+
+## Run predecessor anterior preservado
 
 O run físico `31297947479` (artifact `9033565654`, SHA-256 do JSON
 `d24a6a52a59e564319015599d665c2a586c8264b1bafeb8aa050fa614f804b4d`)
@@ -56,24 +90,8 @@ Ele parou na fase `rls_runtime_write_contract_reproduction`, subetapa fechada
 `postgres_insufficient_privilege`. O Gate 2 corrigido e os Gates 3 a 5 não
 foram executados. O artifact foi aprovado, o cleanup removeu contêiner, rede,
 volume, credenciais e raiz temporária, e os contadores de resíduos ficaram em
-zero. Não houve segundo push, retry, re-run, PR, merge ou deploy.
-
-A causa estática que esta rota deverá comprovar é estritamente de contexto de
-role. A pool de migration autentica como `MIGRATION_LOGIN`; esse login possui
-`INHERIT FALSE` e autorização de `SET ROLE` para `MIGRATOR_ROLE`. Sem
-`SET LOCAL ROLE`, o login não herda `USAGE` no schema. A resolução textual de
-`ia4tube_social.users` e `ia4tube_social.social_audit_events` dentro de
-`has_table_privilege` pode, portanto, recusar com `42501` antes de produzir o
-inventário booleano. Esta rota não altera grants, ACLs, roles ou policies para
-contornar essa fronteira.
-
-A revisão estática local também mostra que `MIGRATOR_ROLE` é `NOINHERIT`, sua
-membership para a owner usa `INHERIT FALSE, SET TRUE` e o grant de `USAGE` do
-schema social é concedido somente à runtime. Assim, `migratorSchemaUsage=true`
-é uma hipótese física literal, não uma conclusão antecipada. Se o run observar
-`false`, deverá parar em `rls_inventory_migrator_role_activation`, antes da
-leitura OID, da reprodução antiga, do Gate 2 e dos Gates 3 a 5; o harness não
-concederá privilégio nem tentará mascarar a divergência.
+zero. A rota seguinte comprovou que a resolução textual sem contexto de role
+era recusada e que a migrator não possui `USAGE` no schema.
 
 ## Run anterior preservado
 
@@ -91,7 +109,7 @@ deploy. Essa evidência não identifica publicamente SQLSTATE, consulta,
 argumentos ou mensagem bruta e, isoladamente, não comprova a hipótese causal
 que esta rota deverá testar.
 
-## Contrato físico do contexto do inventário ainda pendente
+## Contrato físico do inventário OID ainda pendente
 
 Não existe declaração antecipada de aprovação física nesta rota. Depois do
 Gate 1, a subfase fechada `rls_privilege_inventory_context_reproduction`
@@ -107,17 +125,25 @@ deverá demonstrar, nesta ordem:
    mutação, persistência ou inutilização da pool;
 5. dentro de `withTransaction(state.pools.migration, callback,
    { role: MIGRATOR_ROLE })`, `session_user` permanece login migration,
-   `current_user` passa a migrator, o schema fica resolvível e o inventário
-   termina sem `42501`;
-6. o inventário resolve exatamente uma relação por OID para `users` e uma para
-   `social_audit_events`, exige `INSERT=false` na primeira, `INSERT=true` na
-   segunda e valida a policy RLS vinculada a `company_id`;
+   `current_user` passa a migrator e `USAGE` permanece `false` como prova
+   positiva de menor privilégio;
+6. o inventário localiza pelo catálogo exatamente uma relação por OID para
+   `users` e uma para `social_audit_events`, sem `regclass` textual ou
+   `to_regclass`, exige `INSERT=false` na primeira, `INSERT=true` na segunda e
+   valida RLS, FORCE RLS e a policy vinculada a `company_id`;
 7. depois da transação, outra conexão comprova reset de role e ACLs idênticas.
 
 Zero ou mais de uma relação por alvo reprova. O inventário recebe apenas o
 client transacional autorizado e não aceita pool genérico. As provas “antes” e
 “depois” usam o mesmo caminho sob `MIGRATOR_ROLE` e devem produzir inventários
 idênticos. Nenhuma consulta de inventário escreve dados ou DDL.
+
+O resultado sanitizado dessa fase possui exatamente 22 campos: os 17 campos
+anteriores com `migratorSchemaUsage=false`, mais
+`inventorySessionUserMigration=true`, `inventoryCurrentUserMigrator=true`,
+`oidInventoryUsed=true`, `textualRelationResolutionUsed=false` e
+`relationCount=2`. Nenhum nome de login, OID numérico, SQL ou identificador de
+relação é publicado no artifact.
 
 Somente depois dessa reprodução exata, `gates.rls({ state })` e a subfase
 `rls_runtime_write_contract_reproduction` deverão demonstrar:
@@ -150,17 +176,19 @@ segundo push, retry ou re-run.
 
 ## Evidência semântica e procedência do Gate 2
 
-O resultado da reprodução de contexto é fechado em 17 booleans:
+O resultado da reprodução de contexto é fechado em 22 campos:
 `directSessionIdentityVerified=true`, `directLoginSuperuser=false`,
 `directLoginBypassRls=false`, `directLoginCreateRole=false`,
 `directLoginCanSetMigratorRole=true`, `directLoginInheritsMigratorRole=false`,
 `directSchemaUsage=false`, `directNameResolutionRefused=true`,
 `directTransactionPersisted=false`, `directPoolUsableAfterRefusal=true`,
 `migratorSessionIdentityPreserved=true`, `migratorRoleActivated=true`,
-`migratorSchemaUsage=true`, `migratorInventorySucceeded=true`,
+`migratorSchemaUsage=false`, `migratorInventorySucceeded=true`,
 `roleResetAfterTransaction=true`, `privilegesUnchanged=true` e
-`aclUnchanged=true`. Qualquer chave, tipo ou valor divergente reprova antes da
-reprodução antiga.
+`aclUnchanged=true`, além de `inventorySessionUserMigration=true`,
+`inventoryCurrentUserMigrator=true`, `oidInventoryUsed=true`,
+`textualRelationResolutionUsed=false` e `relationCount=2`. Qualquer chave,
+tipo ou valor divergente reprova antes da reprodução antiga.
 
 O resultado sanitizado do Gate 2 usa campos separados para leitura e escrita:
 
@@ -571,8 +599,9 @@ ordem obrigatória e fail-closed é:
    snapshot, 0004, checksum, constraints/índices/RLS/FORCE RLS, falha
    transacional controlada, restauração 0003 e reaplicação 0004, sem migration
    down;
-7. executar a reprodução física fechada do contexto direto e do contexto sob
-   `MIGRATOR_ROLE`; qualquer divergência encerra antes da correção completa;
+7. executar a reprodução física fechada do contexto direto e o inventário
+   exclusivamente por OID sob `MIGRATOR_ROLE`, mantendo `USAGE=false`; qualquer
+   divergência encerra antes da reprodução antiga e dos gates posteriores;
 8. executar `gates.rls({ state })` e a reprodução física fechada do contrato
    antigo do Gate 2;
 9. somente se ambas as reproduções coincidirem integralmente, executar o

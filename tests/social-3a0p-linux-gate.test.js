@@ -121,8 +121,13 @@ function validRlsInventoryContextReproductionResult(overrides = {}) {
     directPoolUsableAfterRefusal: true,
     migratorSessionIdentityPreserved: true,
     migratorRoleActivated: true,
-    migratorSchemaUsage: true,
+    migratorSchemaUsage: false,
     migratorInventorySucceeded: true,
+    inventorySessionUserMigration: true,
+    inventoryCurrentUserMigrator: true,
+    oidInventoryUsed: true,
+    textualRelationResolutionUsed: false,
+    relationCount: 2,
     roleResetAfterTransaction: true,
     privilegesUnchanged: true,
     aclUnchanged: true,
@@ -2025,7 +2030,7 @@ test("RLS failure provenance preserves only the first closed substep and causal 
   assert.equal(evidenceSafe(fallback), true);
 });
 
-test("RLS inventory-context evidence is exact, frozen, boolean-only, and identity-free", () => {
+test("RLS OID inventory-context evidence is exact, frozen, semantic, and identity-free", () => {
   const evidence = publicRlsPrivilegeInventoryContextReproductionEvidence(
     validRlsInventoryContextReproductionResult()
   );
@@ -2034,23 +2039,45 @@ test("RLS inventory-context evidence is exact, frozen, boolean-only, and identit
     Object.keys(evidence).sort(),
     Object.keys(validRlsInventoryContextReproductionResult()).sort()
   );
-  assert.equal(Object.keys(evidence).length, 17);
-  assert.equal(Object.values(evidence).every((value) => typeof value === "boolean"), true);
+  assert.equal(Object.keys(evidence).length, 22);
+  assert.equal(evidence.migratorSchemaUsage, false);
+  assert.equal(evidence.inventorySessionUserMigration, true);
+  assert.equal(evidence.inventoryCurrentUserMigrator, true);
+  assert.equal(evidence.oidInventoryUsed, true);
+  assert.equal(evidence.textualRelationResolutionUsed, false);
+  assert.equal(evidence.relationCount, 2);
+  assert.equal(
+    Object.entries(evidence).every(([key, value]) =>
+      key === "relationCount" ? Number.isInteger(value) : typeof value === "boolean"
+    ),
+    true
+  );
   for (const forbidden of [
     "sessionUser", "currentUser", "login", "roleName", "sql", "arguments", "message"
   ]) {
     assert.equal(Object.hasOwn(evidence, forbidden), false);
   }
   assert.equal(evidenceSafe({ inventoryContextReproduction: evidence }), true);
-  assert.throws(
-    () => publicRlsPrivilegeInventoryContextReproductionEvidence(
-      validRlsInventoryContextReproductionResult({ migratorSchemaUsage: false })
-    ),
-    {
-      code: "rls_privilege_inventory_context_reproduction_invalid",
-      name: "LinuxGateFailure"
-    }
-  );
+  for (const divergence of [
+    { migratorSchemaUsage: true },
+    { inventorySessionUserMigration: false },
+    { inventoryCurrentUserMigrator: false },
+    { oidInventoryUsed: false },
+    { textualRelationResolutionUsed: true },
+    { relationCount: 1 },
+    { relationCount: 3 },
+    { unexpected: true }
+  ]) {
+    assert.throws(
+      () => publicRlsPrivilegeInventoryContextReproductionEvidence(
+        validRlsInventoryContextReproductionResult(divergence)
+      ),
+      {
+        code: "rls_privilege_inventory_context_reproduction_invalid",
+        name: "LinuxGateFailure"
+      }
+    );
+  }
 });
 
 test("RLS inventory-context phase passes only canonical state and the closed substep adapter", async () => {
@@ -2081,10 +2108,14 @@ test("RLS inventory-context phase passes only canonical state and the closed sub
   });
   assert.deepEqual(calls, ["direct-session", "migrator-role", "role-reset"]);
   assert.deepEqual(evidence, validRlsInventoryContextReproductionResult());
+  assert.equal(evidence.migratorSchemaUsage, false);
+  assert.equal(evidence.oidInventoryUsed, true);
+  assert.equal(evidence.textualRelationResolutionUsed, false);
+  assert.equal(evidence.relationCount, 2);
   assert.equal(tracker.failure(), null);
 });
 
-test("RLS inventory-context divergence stops before old reproduction and Gate 2", async () => {
+test("RLS OID inventory divergence stops before old reproduction and Gates 2 through 5", async () => {
   const tracker = createRlsFailureProvenanceTracker();
   const calls = [];
   const evidence = { phases: [], firstFailure: null };
@@ -2098,7 +2129,7 @@ test("RLS inventory-context divergence stops before old reproduction and Gate 2"
         runSubstep: tracker.runSubstep,
         async runReproduction() {
           calls.push("inventory-context");
-          return validRlsInventoryContextReproductionResult({ migratorSchemaUsage: false });
+          return validRlsInventoryContextReproductionResult({ migratorSchemaUsage: true });
         }
       })
     ),
@@ -2117,6 +2148,16 @@ test("RLS inventory-context divergence stops before old reproduction and Gate 2"
     phase("rls_roles", async () => { calls.push("forbidden-gate-2"); }),
     { code: "linux_gate_phase_after_failure_refused", name: "LinuxGateFailure" }
   );
+  for (const [name, marker] of [
+    ["concurrency_oauth_idempotency", "forbidden-gate-3"],
+    ["vault", "forbidden-gate-4"],
+    ["backup_restore", "forbidden-gate-5"]
+  ]) {
+    await assert.rejects(
+      phase(name, async () => { calls.push(marker); }),
+      { code: "linux_gate_phase_after_failure_refused", name: "LinuxGateFailure" }
+    );
+  }
   assert.deepEqual(calls, ["inventory-context"]);
   assert.deepEqual(evidence.firstFailure, {
     phase: "rls_privilege_inventory_context_reproduction",
@@ -2147,7 +2188,20 @@ test("RLS write-contract orchestrator requires the canonical inventory-context p
     () => createRlsRuntimeWriteContractOrchestrator({
       ...options,
       inventoryContextReproduction: validRlsInventoryContextReproductionResult({
-        migratorSchemaUsage: false
+        migratorSchemaUsage: true
+      })
+    }),
+    {
+      code: "rls_privilege_inventory_context_reproduction_required",
+      name: "LinuxGateFailure"
+    }
+  );
+  assert.throws(
+    () => createRlsRuntimeWriteContractOrchestrator({
+      ...options,
+      inventoryContextReproduction: validRlsInventoryContextReproductionResult({
+        oidInventoryUsed: false,
+        textualRelationResolutionUsed: true
       })
     }),
     {

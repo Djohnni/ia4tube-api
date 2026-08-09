@@ -37,8 +37,8 @@ const {
 } = require("./social-3a0p-local-runtime-evidence-metrics");
 
 const BRANCH =
-  "social/checkpoint-3a0p-linux-rls-inventory-context-20260809";
-const BASE_COMMIT = "77f0eb732497f9f8d4f1139e2a6ded80ac0a3476";
+  "social/checkpoint-3a0p-linux-rls-oid-inventory-20260809";
+const BASE_COMMIT = "27231f7e11ae8e73599d99420e47fbf987bf03ec";
 const PRODUCT_COMMIT = "fcfc92419021dae5f77baad731c634b10c275c5b";
 const MARKER = "[run-social-3a0p-linux-gate]";
 const RUN_MARKER_PREFIX = "ia4tube-social-3a0p-linux-";
@@ -172,11 +172,16 @@ const RLS_INVENTORY_CONTEXT_REPRODUCTION_RESULT = Object.freeze({
   directSchemaUsage: false,
   directSessionIdentityVerified: true,
   directTransactionPersisted: false,
+  inventoryCurrentUserMigrator: true,
+  inventorySessionUserMigration: true,
   migratorInventorySucceeded: true,
   migratorRoleActivated: true,
-  migratorSchemaUsage: true,
+  migratorSchemaUsage: false,
   migratorSessionIdentityPreserved: true,
+  oidInventoryUsed: true,
   privilegesUnchanged: true,
+  relationCount: 2,
+  textualRelationResolutionUsed: false,
   roleResetAfterTransaction: true
 });
 const RLS_BASE_GATE_RESULT = Object.freeze({

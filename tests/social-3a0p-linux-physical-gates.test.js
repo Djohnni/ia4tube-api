@@ -45,10 +45,15 @@ function inventoryContextProof(overrides = {}) {
     directNameResolutionRefused: true,
     directTransactionPersisted: false,
     directPoolUsableAfterRefusal: true,
+    inventorySessionUserMigration: true,
+    inventoryCurrentUserMigrator: true,
     migratorSessionIdentityPreserved: true,
     migratorRoleActivated: true,
-    migratorSchemaUsage: true,
+    migratorSchemaUsage: false,
     migratorInventorySucceeded: true,
+    oidInventoryUsed: true,
+    textualRelationResolutionUsed: false,
+    relationCount: 2,
     roleResetAfterTransaction: true,
     privilegesUnchanged: true,
     aclUnchanged: true,
@@ -67,36 +72,65 @@ function createInventoryContextDatabase(options = {}) {
     const schemaAcl = "{synthetic_schema_acl}";
     const base = [
       {
+        namespace_name: options.auditSchemaName ?? options.inventorySchemaName ?? "ia4tube_social",
+        namespace_oid: options.auditNamespaceOid ?? options.inventoryNamespaceOid ?? 4100,
         relation_name: "social_audit_events",
-        session_user_is_migration: client.sessionUser === MIGRATION_LOGIN,
-        current_user_is_migrator: client.currentUser === MIGRATOR_ROLE,
-        schema_usage: options.migratorSchemaUsage !== false,
+        relation_oid: options.auditRelationOid ?? 4101,
+        relation_kind: options.auditRelationKind ?? "r",
+        session_user_is_migration: options.inventorySessionUserMigration !== false &&
+          client.sessionUser === MIGRATION_LOGIN,
+        current_user_is_migrator: options.inventoryCurrentUserMigrator !== false &&
+          client.currentUser === MIGRATOR_ROLE,
+        schema_usage: options.migratorSchemaUsage === true,
         runtime_login_can_set_role: true,
         runtime_login_insert: false,
         runtime_insert: options.auditInsertPrivilege !== false,
         social_audit_rls_enabled: options.auditRlsEnabled !== false,
-        social_audit_company_policy: options.auditCompanyPolicy !== false,
+        social_audit_force_rls: options.auditForceRls !== false,
+        social_audit_policy_exists: options.auditPolicyExists !== false,
+        social_audit_policy_using: options.auditPolicyUsing !== false,
+        social_audit_policy_with_check: options.auditPolicyWithCheck !== false,
+        social_audit_policy_company_bound: options.auditPolicyCompanyBound !== false,
         schema_acl: schemaAcl,
         relation_acl: inventoryReads > 1 && options.inventoryAclMutationAfterFirst
           ? "{mutated_audit_acl}"
           : "{synthetic_audit_acl}"
       },
       {
+        namespace_name: options.userSchemaName ?? options.inventorySchemaName ?? "ia4tube_social",
+        namespace_oid: options.userNamespaceOid ?? options.inventoryNamespaceOid ?? 4100,
         relation_name: "users",
-        session_user_is_migration: client.sessionUser === MIGRATION_LOGIN,
-        current_user_is_migrator: client.currentUser === MIGRATOR_ROLE,
-        schema_usage: options.migratorSchemaUsage !== false,
+        relation_oid: options.userRelationOid ?? 4102,
+        relation_kind: options.userRelationKind ?? "r",
+        session_user_is_migration: options.inventorySessionUserMigration !== false &&
+          client.sessionUser === MIGRATION_LOGIN,
+        current_user_is_migrator: options.inventoryCurrentUserMigrator !== false &&
+          client.currentUser === MIGRATOR_ROLE,
+        schema_usage: options.migratorSchemaUsage === true,
         runtime_login_can_set_role: true,
         runtime_login_insert: false,
         runtime_insert: options.userInsertPrivilege === true,
         social_audit_rls_enabled: false,
-        social_audit_company_policy: false,
+        social_audit_force_rls: false,
+        social_audit_policy_exists: false,
+        social_audit_policy_using: false,
+        social_audit_policy_with_check: false,
+        social_audit_policy_company_bound: false,
         schema_acl: schemaAcl,
         relation_acl: "{synthetic_users_acl}"
       }
     ];
-    if (options.missingRelation) return base.slice(0, 1);
+    if (options.missingRelation || options.missingUsers) return base.slice(0, 1);
+    if (options.missingAudit) return base.slice(1);
     if (options.duplicateRelation) return [...base, { ...base[1] }];
+    if (Object.hasOwn(options, "userRuntimeLoginInsertRaw")) {
+      base[1].runtime_login_insert = options.userRuntimeLoginInsertRaw;
+    }
+    if (Object.hasOwn(options, "userRuntimeInsertRaw")) {
+      base[1].runtime_insert = options.userRuntimeInsertRaw;
+    }
+    if (options.omitUserRuntimeLoginInsert === true) delete base[1].runtime_login_insert;
+    if (options.omitUserRuntimeInsert === true) delete base[1].runtime_insert;
     return base;
   };
 
@@ -105,6 +139,7 @@ function createInventoryContextDatabase(options = {}) {
       this.sessionUser = MIGRATION_LOGIN;
       this.currentUser = MIGRATION_LOGIN;
       this.inTransaction = false;
+      this._txStatus = "I";
       this.checkedOut = true;
       clients.push(this);
     }
@@ -116,10 +151,16 @@ function createInventoryContextDatabase(options = {}) {
         values: [...values],
         sessionUser: this.sessionUser,
         currentUser: this.currentUser,
-        inTransaction: this.inTransaction
+        inTransaction: this.inTransaction,
+        transactionStatus: this._txStatus
       });
       if (sql === "BEGIN") {
         this.inTransaction = true;
+        if (options.transactionStatusAfterBegin === "absent") {
+          delete this._txStatus;
+        } else {
+          this._txStatus = options.transactionStatusAfterBegin ?? "T";
+        }
         return { rows: [] };
       }
       if (sql.startsWith("SET LOCAL ROLE")) {
@@ -129,6 +170,7 @@ function createInventoryContextDatabase(options = {}) {
       }
       if (sql === "COMMIT" || sql === "ROLLBACK") {
         this.inTransaction = false;
+        this._txStatus = "I";
         if (options.roleLeakAfterTransaction !== true) {
           this.currentUser = MIGRATION_LOGIN;
         }
@@ -151,7 +193,7 @@ function createInventoryContextDatabase(options = {}) {
         return { rows: [{
           migrator_session_identity: this.sessionUser === MIGRATION_LOGIN,
           migrator_current_identity: this.currentUser === MIGRATOR_ROLE,
-          migrator_schema_usage: options.migratorSchemaUsage !== false
+          migrator_schema_usage: options.migratorSchemaUsage === true
         }] };
       }
       if (sql.includes("AS relation_acl") && !sql.includes("AS runtime_insert")) {
@@ -211,6 +253,7 @@ function createInventoryContextDatabase(options = {}) {
     authorizedClient() {
       const client = new Client();
       client.inTransaction = true;
+      client._txStatus = "T";
       client.currentUser = MIGRATOR_ROLE;
       return client;
     },
@@ -234,6 +277,7 @@ function createRlsDatabase(options = {}) {
       this.invalidCompanyContext = false;
       this.manualScopeClient = false;
       this.inTransaction = false;
+      this._txStatus = "I";
       this.sessionUser = kind === "migration" ? MIGRATION_LOGIN : RUNTIME_LOGIN;
       this.currentUser = this.sessionUser;
     }
@@ -248,12 +292,14 @@ function createRlsDatabase(options = {}) {
       });
       if (sql === "BEGIN") {
         this.inTransaction = true;
+        this._txStatus = "T";
         return { rows: [] };
       }
       if (sql === "COMMIT" || sql === "ROLLBACK") {
         this.companyId = null;
         this.invalidCompanyContext = false;
         this.inTransaction = false;
+        this._txStatus = "I";
         this.currentUser = this.sessionUser;
         return { rows: [] };
       }
@@ -313,32 +359,50 @@ function createRlsDatabase(options = {}) {
         const schemaAcl = "{synthetic_schema_acl}";
         return { rows: [
           {
+            namespace_name: "ia4tube_social",
+            namespace_oid: 5100,
             relation_name: "social_audit_events",
+            relation_oid: 5101,
+            relation_kind: "r",
             session_user_is_migration: this.sessionUser === MIGRATION_LOGIN,
             current_user_is_migrator: this.currentUser === MIGRATOR_ROLE,
-            schema_usage: true,
+            schema_usage: false,
             runtime_login_can_set_role: options.runtimeLoginCanSetRole !== false,
             runtime_login_insert: false,
             runtime_insert: options.auditInsertPrivilege !== false,
             social_audit_rls_enabled: options.auditRlsEnabled !== false,
-            social_audit_company_policy: options.auditCompanyPolicy !== false &&
+            social_audit_force_rls: options.auditForceRls !== false,
+            social_audit_policy_exists: options.auditPolicyExists !== false &&
               options.auditPolicyAppliesToRuntime !== false,
+            social_audit_policy_using: options.auditPolicyUsing !== false,
+            social_audit_policy_with_check: options.auditPolicyWithCheck !== false,
+            social_audit_policy_company_bound: options.auditCompanyPolicy !== false &&
+              options.auditPolicyCompanyBound !== false,
             schema_acl: schemaAcl,
-            relation_acl: options.mutatePrivilegeAfterRefusal === true && inventoryCalls > 1
+            relation_acl: (options.mutatePrivilegeAfterRefusal === true ||
+              options.mutateAclAfterRefusal === true) && inventoryCalls > 1
               ? "{mutated_audit_acl}"
               : "{synthetic_audit_acl}"
           },
           {
+            namespace_name: "ia4tube_social",
+            namespace_oid: 5100,
             relation_name: "users",
+            relation_oid: 5102,
+            relation_kind: "r",
             session_user_is_migration: this.sessionUser === MIGRATION_LOGIN,
             current_user_is_migrator: this.currentUser === MIGRATOR_ROLE,
-            schema_usage: true,
+            schema_usage: false,
             runtime_login_can_set_role: options.runtimeLoginCanSetRole !== false,
             runtime_login_insert: options.runtimeLoginUserInsertPrivilege === true,
             runtime_insert: options.userInsertPrivilege === true ||
               (options.mutatePrivilegeAfterRefusal === true && inventoryCalls > 1),
             social_audit_rls_enabled: false,
-            social_audit_company_policy: false,
+            social_audit_force_rls: false,
+            social_audit_policy_exists: false,
+            social_audit_policy_using: false,
+            social_audit_policy_with_check: false,
+            social_audit_policy_company_bound: false,
             schema_acl: schemaAcl,
             relation_acl: "{synthetic_users_acl}"
           }
@@ -420,46 +484,126 @@ test("runtime privilege inventory refuses a raw pool before any query", async ()
   assert.equal(queried, false);
 });
 
-test("runtime privilege inventory uses an authorized transactional client and exact relation OIDs", async () => {
+test("runtime privilege inventory refuses an isolated client without the private transaction authorization", async () => {
   const database = createInventoryContextDatabase();
   const client = database.authorizedClient();
-  const inventory = await runtimeWritePrivilegeInventory(client);
-  assert.equal(inventory.sessionUserIsMigration, true);
-  assert.equal(inventory.currentUserIsMigrator, true);
-  assert.equal(inventory.schemaUsage, true);
-  assert.equal(inventory.runtimeLoginCanSetRole, true);
-  assert.equal(inventory.runtimeLoginCoreUserInsert, false);
-  assert.equal(inventory.coreUserInsert, false);
-  assert.equal(inventory.socialAuditInsert, true);
-  assert.equal(inventory.socialAuditRlsEnabled, true);
-  assert.equal(inventory.socialAuditCompanyPolicy, true);
-  assert.equal(inventory.relationCount, 2);
-  assert.match(inventory.aclFingerprint, /^[a-f0-9]{64}$/);
-
-  const query = database.calls.find((call) =>
-    call.sql.includes("AS relation_name") && call.sql.includes("AS runtime_insert")
+  await assert.rejects(
+    runtimeWritePrivilegeInventory(client),
+    { code: "linux_gate_rls_privilege_inventory_transaction_client_required" }
   );
-  assert.ok(query);
-  assert.equal(query.inTransaction, true);
-  assert.equal(query.currentUser, MIGRATOR_ROLE);
-  assert.deepEqual(query.values, [MIGRATION_LOGIN, MIGRATOR_ROLE, RUNTIME_LOGIN, RUNTIME_ROLE]);
-  assert.match(query.sql, /has_table_privilege\(\$4,\s*relation\.oid,\s*'INSERT'\)/);
-  assert.doesNotMatch(query.sql, /has_table_privilege\([^\n]*'ia4tube_social\./);
-  assert.doesNotMatch(
-    query.sql,
-    /(?:^|\n)\s*(?:INSERT|UPDATE|DELETE|GRANT|REVOKE|ALTER|CREATE|DROP|TRUNCATE)\b/m
-  );
+  assert.equal(database.inventoryReads, 0);
   client.release();
 });
 
+test("runtime privilege inventory refuses idle or missing physical transaction status", async () => {
+  for (const transactionStatusAfterBegin of ["I", "absent"]) {
+    const database = createInventoryContextDatabase({ transactionStatusAfterBegin });
+    const substeps = [];
+    await assert.rejects(
+      runRlsPrivilegeInventoryContextReproduction(database.state, {
+        async runSubstep(name, operation) {
+          substeps.push(name);
+          return operation();
+        }
+      }),
+      { code: "linux_gate_rls_privilege_inventory_transaction_client_required" }
+    );
+    assert.equal(substeps.at(-1), "rls_inventory_migrator_privilege_read");
+    assert.equal(database.inventoryReads, 0);
+    assert.equal(database.calls.some((call) => call.sql === "ROLLBACK"), true);
+  }
+});
+
 test("runtime privilege inventory refuses missing or duplicate catalog relations", async () => {
-  for (const options of [{ missingRelation: true }, { duplicateRelation: true }]) {
+  for (const options of [
+    { missingUsers: true },
+    { missingAudit: true },
+    { duplicateRelation: true }
+  ]) {
     const database = createInventoryContextDatabase(options);
     await assert.rejects(
-      runtimeWritePrivilegeInventory(database.authorizedClient()),
+      runRlsPrivilegeInventoryContextReproduction(database.state, {
+        runSubstep: (_name, operation) => operation()
+      }),
       { code: "linux_gate_rls_privilege_inventory_relations_invalid" }
     );
   }
+});
+
+test("runtime privilege inventory refuses identity, schema, OID and relkind drift", async () => {
+  for (const options of [
+    { inventorySessionUserMigration: false },
+    { inventoryCurrentUserMigrator: false },
+    { inventorySchemaName: "unexpected_schema" },
+    { userSchemaName: "unexpected_schema" },
+    { userRelationKind: "v" },
+    { inventoryNamespaceOid: 0 },
+    { userNamespaceOid: 4103 },
+    { userRelationOid: 0 },
+    { userRelationOid: 4101 }
+  ]) {
+    const database = createInventoryContextDatabase(options);
+    await assert.rejects(
+      runRlsPrivilegeInventoryContextReproduction(database.state, {
+        runSubstep: (_name, operation) => operation()
+      }),
+      { code: "linux_gate_rls_privilege_inventory_context_invalid" }
+    );
+  }
+});
+
+test("runtime privilege inventory refuses null or omitted negative users privileges", async () => {
+  for (const options of [
+    { userRuntimeLoginInsertRaw: null },
+    { omitUserRuntimeLoginInsert: true },
+    { userRuntimeInsertRaw: null },
+    { omitUserRuntimeInsert: true }
+  ]) {
+    const database = createInventoryContextDatabase(options);
+    const substeps = [];
+    await assert.rejects(
+      runRlsPrivilegeInventoryContextReproduction(database.state, {
+        async runSubstep(name, operation) {
+          substeps.push(name);
+          return operation();
+        }
+      }),
+      { code: "linux_gate_rls_core_user_insert_privilege_unexpected" }
+    );
+    assert.equal(substeps.at(-1), "rls_inventory_migrator_privilege_read");
+    assert.equal(database.inventoryReads, 1);
+  }
+});
+
+test("corrected inventory contains no textual regclass path outside the isolated negative proof", () => {
+  const inventorySource = runtimeWritePrivilegeInventory.toString();
+  assert.match(inventorySource, /pg_catalog\.pg_class/);
+  assert.match(inventorySource, /pg_catalog\.pg_namespace/);
+  assert.match(
+    inventorySource,
+    /has_schema_privilege\(current_user,namespace\.oid,'USAGE'\)/
+  );
+  assert.equal(
+    (inventorySource.match(/has_table_privilege\(\$[34],relation\.oid,'INSERT'\)/g) || []).length,
+    2
+  );
+  assert.match(inventorySource, /policy\.polrelid=relation\.oid/);
+  assert.doesNotMatch(inventorySource, /::\s*regclass|to_regclass/i);
+  assert.doesNotMatch(inventorySource, /pg_stat_activity|xact_start|query_start/);
+  assert.doesNotMatch(
+    inventorySource,
+    /has_table_privilege\([^\n]*['"]ia4tube_social\.(?:users|social_audit_events)/
+  );
+  const fullSource = fs.readFileSync(
+    path.join(ROOT, "scripts/social-3a0p-linux-physical-gates.js"),
+    "utf8"
+  );
+  assert.equal((fullSource.match(/'ia4tube_social\.users'/g) || []).length, 1);
+  assert.match(fullSource, /AS direct_runtime_insert/);
+  assert.match(fullSource, /const AUTHORIZED_RLS_INVENTORY_CLIENTS = new WeakSet\(\)/);
+  assert.match(fullSource, /AUTHORIZED_RLS_INVENTORY_CLIENTS\.add\(client\)/);
+  assert.match(fullSource, /AUTHORIZED_RLS_INVENTORY_CLIENTS\.delete\(client\)/);
+  assert.match(fullSource, /client\._txStatus !== "T"/);
 });
 
 test("inventory context reproduction closes direct refusal, migrator inventory, reset and ACL proof", async () => {
@@ -482,9 +626,27 @@ test("inventory context reproduction closes direct refusal, migrator inventory, 
     "rls_inventory_role_reset"
   ]);
   assert.equal(database.inventoryReads, 1);
-  assert.equal(database.calls.some((call) =>
+  const beginIndex = database.calls.findIndex((call) => call.sql === "BEGIN");
+  const roleIndex = database.calls.findIndex((call) =>
     call.sql === `SET LOCAL ROLE "${MIGRATOR_ROLE}"`
-  ), true);
+  );
+  const inventoryIndex = database.calls.findIndex((call) =>
+    call.sql.includes("AS relation_name") && call.sql.includes("AS runtime_insert")
+  );
+  const commitIndex = database.calls.findIndex((call, index) =>
+    index > inventoryIndex && call.sql === "COMMIT"
+  );
+  assert.ok(beginIndex >= 0 && beginIndex < roleIndex);
+  assert.ok(roleIndex < inventoryIndex && inventoryIndex < commitIndex);
+  assert.equal(database.calls[inventoryIndex].inTransaction, true);
+  assert.equal(database.calls[inventoryIndex].transactionStatus, "T");
+  assert.equal(database.calls[inventoryIndex].currentUser, MIGRATOR_ROLE);
+  assert.deepEqual(database.calls[inventoryIndex].values, [
+    MIGRATION_LOGIN,
+    MIGRATOR_ROLE,
+    RUNTIME_LOGIN,
+    RUNTIME_ROLE
+  ]);
   assert.equal(database.calls.some((call) =>
     call.sql.includes("AS direct_runtime_insert") && call.currentUser !== MIGRATION_LOGIN
   ), false);
@@ -494,6 +656,42 @@ test("inventory context reproduction closes direct refusal, migrator inventory, 
   assert.equal(database.calls.some((call) =>
     /(?:^|\n)\s*(?:INSERT|UPDATE|DELETE|GRANT|REVOKE|ALTER|CREATE|DROP|TRUNCATE)\b/m.test(call.sql)
   ), false);
+  const callCountAfterReproduction = database.calls.length;
+  await assert.rejects(
+    runtimeWritePrivilegeInventory(database.clients.at(-1)),
+    { code: "linux_gate_rls_privilege_inventory_transaction_client_required" }
+  );
+  assert.equal(database.calls.length, callCountAfterReproduction);
+});
+
+test("OID inventory refuses every RLS and exact policy component divergence", async () => {
+  for (const [options, code] of [
+    [{ auditRlsEnabled: false }, "linux_gate_rls_social_audit_rls_disabled"],
+    [{ auditForceRls: false }, "linux_gate_rls_social_audit_force_rls_disabled"],
+    [{ auditPolicyExists: false }, "linux_gate_rls_social_audit_policy_missing"],
+    [{ auditPolicyUsing: false }, "linux_gate_rls_social_audit_policy_using_missing"],
+    [
+      { auditPolicyWithCheck: false },
+      "linux_gate_rls_social_audit_policy_with_check_missing"
+    ],
+    [
+      { auditPolicyCompanyBound: false },
+      "linux_gate_rls_social_audit_policy_company_scope_missing"
+    ]
+  ]) {
+    const database = createInventoryContextDatabase(options);
+    const substeps = [];
+    await assert.rejects(
+      runRlsPrivilegeInventoryContextReproduction(database.state, {
+        async runSubstep(name, operation) {
+          substeps.push(name);
+          return operation();
+        }
+      }),
+      { code }
+    );
+    assert.equal(substeps.at(-1), "rls_inventory_migrator_privilege_read");
+  }
 });
 
 test("inventory context reproduction stops at each direct-session divergence", async () => {
@@ -536,8 +734,8 @@ test("inventory context reproduction stops at each direct-session divergence", a
   }
 });
 
-test("missing schema USAGE under MIGRATOR_ROLE stops before the OID inventory and Gate 2", async () => {
-  const database = createInventoryContextDatabase({ migratorSchemaUsage: false });
+test("unexpected schema USAGE under MIGRATOR_ROLE stops before the OID inventory and Gate 2", async () => {
+  const database = createInventoryContextDatabase({ migratorSchemaUsage: true });
   const substeps = [];
   await assert.rejects(
     runRlsPrivilegeInventoryContextReproduction(database.state, {
@@ -546,7 +744,7 @@ test("missing schema USAGE under MIGRATOR_ROLE stops before the OID inventory an
         return operation();
       }
     }),
-    { code: "linux_gate_rls_inventory_migrator_schema_access_missing" }
+    { code: "linux_gate_rls_inventory_migrator_schema_privilege_unexpected" }
   );
   assert.equal(substeps.at(-1), "rls_inventory_migrator_role_activation");
   assert.equal(substeps.includes("rls_inventory_migrator_privilege_read"), false);
@@ -684,9 +882,19 @@ test("reproduction fails closed when users refusal or audit write surface diverg
   for (const [options, code] of [
     [{ userInsertFailureCode: "23505" }, "linux_gate_rls_core_user_insert_reproduction_invalid"],
     [{ auditInsertPrivilege: false }, "linux_gate_rls_social_audit_insert_privilege_missing"],
-    [{ auditRlsEnabled: false }, "linux_gate_rls_social_audit_policy_invalid"],
-    [{ auditCompanyPolicy: false }, "linux_gate_rls_social_audit_policy_invalid"],
-    [{ auditPolicyAppliesToRuntime: false }, "linux_gate_rls_social_audit_policy_invalid"]
+    [{ auditRlsEnabled: false }, "linux_gate_rls_social_audit_rls_disabled"],
+    [{ auditForceRls: false }, "linux_gate_rls_social_audit_force_rls_disabled"],
+    [{ auditPolicyExists: false }, "linux_gate_rls_social_audit_policy_missing"],
+    [{ auditPolicyUsing: false }, "linux_gate_rls_social_audit_policy_using_missing"],
+    [
+      { auditPolicyWithCheck: false },
+      "linux_gate_rls_social_audit_policy_with_check_missing"
+    ],
+    [
+      { auditPolicyCompanyBound: false },
+      "linux_gate_rls_social_audit_policy_company_scope_missing"
+    ],
+    [{ auditPolicyAppliesToRuntime: false }, "linux_gate_rls_social_audit_policy_missing"]
   ]) {
     const database = createRlsDatabase(options);
     await assert.rejects(
@@ -709,6 +917,11 @@ test("every post-insert reproduction failure retains its exact closed substep", 
     [{ runtimePoolReusable: false }, "linux_gate_rls_runtime_pool_unusable_after_refusal", "rls_core_user_insert_refusal"],
     [
       { mutatePrivilegeAfterRefusal: true },
+      "linux_gate_rls_core_user_insert_privilege_unexpected",
+      "rls_inventory_migrator_privilege_read"
+    ],
+    [
+      { mutateAclAfterRefusal: true },
       "linux_gate_rls_runtime_privilege_changed",
       "rls_inventory_migrator_privilege_read"
     ]
