@@ -26,6 +26,7 @@ const {
   runConcurrencyOAuthIdempotencyGate,
   runPersistedVaultGate,
   runRlsAndRoleGate,
+  runRlsRuntimeWriteContractReproduction,
   runVaultSupplementalGate
 } = require("./social-3a0p-linux-physical-gates");
 const {
@@ -35,8 +36,8 @@ const {
 } = require("./social-3a0p-local-runtime-evidence-metrics");
 
 const BRANCH =
-  "social/checkpoint-3a0p-linux-profile0003-vault-bridge-20260808";
-const BASE_COMMIT = "ad453a930bce259f5b251a8324fc32ad388ce5b6";
+  "social/checkpoint-3a0p-linux-rls-runtime-write-contract-20260809";
+const BASE_COMMIT = "32309df0e44488420e1e3352c8d62d12e944a264";
 const PRODUCT_COMMIT = "fcfc92419021dae5f77baad731c634b10c275c5b";
 const MARKER = "[run-social-3a0p-linux-gate]";
 const RUN_MARKER_PREFIX = "ia4tube-social-3a0p-linux-";
@@ -133,9 +134,81 @@ const BACKUP_RESTORE_SUBSTEPS = new Set([
   "unknown"
 ]);
 const SAFE_PHASE = new Set([
-  "platform", "durability", "postgres", "bootstrap", "migrations", "rls_roles",
+  "platform", "durability", "postgres", "bootstrap", "migrations",
+  "rls_runtime_write_contract_reproduction", "rls_roles",
   "concurrency_oauth_idempotency", "vault", "backup_restore", "metrics", "secret_scan", "cleanup"
 ]);
+const RLS_SUBSTEPS = new Set([
+  "rls_base_gate",
+  "rls_seed_tenants",
+  "rls_privilege_inventory",
+  "rls_core_user_insert_reproduction",
+  "rls_core_user_insert_refusal",
+  "rls_bidirectional_read",
+  "rls_missing_context",
+  "rls_tampered_context",
+  "rls_own_social_write",
+  "rls_cross_tenant_write",
+  "rls_connection_scope_reset",
+  "rls_runtime_role_attributes"
+]);
+const RLS_BASE_GATE_RESULT = Object.freeze({
+  forceRls: true,
+  missingContextRefused: true,
+  physicalExecution: true,
+  syntheticCompanies: 2,
+  syntheticOnly: true,
+  tamperedContextRefused: true,
+  tenantIsolation: true
+});
+const RLS_REPRODUCTION_RESULT = Object.freeze({
+  oldGateLaterStagesReached: false,
+  runtimeCoreUserInsertPersisted: false,
+  runtimeCoreUserInsertPrivilege: false,
+  runtimeCoreUserInsertRefused: true,
+  runtimePoolUsableAfterRefusal: true,
+  runtimePrivilegesUnchanged: true,
+  runtimeWriteContractReproductionPassed: true,
+  socialAuditEventInsertPrivilege: true,
+  socialAuditEventsRlsProtected: true,
+  tenantSeedsCreatedByAdministrativeRole: true
+});
+const RLS_REPRODUCTION_EVIDENCE = Object.freeze({
+  baseRlsGatePassed: true,
+  oldGateLaterStagesReached: false,
+  runtimeCoreUserInsertPersisted: false,
+  runtimeCoreUserInsertPrivilege: false,
+  runtimeCoreUserInsertRefused: true,
+  runtimePoolUsableAfterRefusal: true,
+  runtimePrivilegesUnchanged: true,
+  socialAuditEventInsertPrivilege: true,
+  socialAuditEventsRlsProtected: true,
+  tenantSeedsCreatedByAdministrativeRole: true
+});
+const RLS_ROLE_GATE_RESULT = Object.freeze({
+  baseRlsGatePassed: true,
+  companyAOwnRead: true,
+  companyAOwnSocialWrite: true,
+  companyAToBReadRefused: true,
+  companyAToBWriteRefused: true,
+  companyBOwnRead: true,
+  companyBOwnSocialWrite: true,
+  companyBToAReadRefused: true,
+  companyBToAWriteRefused: true,
+  connectionScopeReset: true,
+  crossTenantRowsPersisted: false,
+  missingContextZeroRows: true,
+  runtimeBypassRls: false,
+  runtimeCoreUserInsertPersisted: false,
+  runtimeCoreUserInsertPrivilege: false,
+  runtimeCoreUserInsertRefused: true,
+  runtimeCreateDb: false,
+  runtimeCreateRole: false,
+  runtimeMigrationPrivileges: false,
+  runtimeSuperuser: false,
+  tamperedContextRefused: true,
+  tenantSeedsCreatedByAdministrativeRole: true
+});
 const LINUX_RESTORE_DATABASE =
   /^ia4tube_social_disposable_(?:rollback_0003|restore_0003|restore_0004|tamper|cross)_[0-9a-f]{12}$/;
 const LINUX_VERIFIER_DATABASE =
@@ -185,6 +258,174 @@ function fail(code) {
 function failureCode(error) {
   const candidate = String(error?.code || error?.message || "");
   return SAFE_FAILURE.test(candidate) ? candidate : "linux_gate_unclassified_failure";
+}
+
+function closedRlsCauseCode(error, depth = 0) {
+  const candidate = String(error?.code || "");
+  if (candidate === "42501") return "postgres_insufficient_privilege";
+  if (candidate === "22P02") return "postgres_invalid_text_representation";
+  if (candidate === "postgres_rollback_failed") {
+    if (
+      depth >= 4 || !error?.cause ||
+      typeof error.cause.code !== "string"
+    ) return "postgres_rollback_failed";
+    return closedRlsCauseCode(error.cause, depth + 1);
+  }
+  return SAFE_FAILURE.test(candidate) ? candidate : "postgres_rollback_failed";
+}
+
+function rlsFailureCode(error) {
+  if (String(error?.code || "") === "postgres_rollback_failed") {
+    return closedRlsCauseCode(error);
+  }
+  const sqlstate = String(error?.code || "");
+  if (sqlstate === "42501") return "postgres_insufficient_privilege";
+  if (sqlstate === "22P02") return "postgres_invalid_text_representation";
+  return failureCode(error);
+}
+
+function sanitizedRlsFailureProvenance(candidate) {
+  if (candidate == null) return null;
+  if (
+    !candidate || Object.getPrototypeOf(candidate) !== Object.prototype ||
+    JSON.stringify(Object.keys(candidate).sort()) !==
+      JSON.stringify(["causalCode", "substep"]) ||
+    !RLS_SUBSTEPS.has(candidate.substep) ||
+    !SAFE_FAILURE.test(String(candidate.causalCode || ""))
+  ) {
+    return null;
+  }
+  return Object.freeze({
+    substep: candidate.substep,
+    causalCode: candidate.causalCode
+  });
+}
+
+function createRlsFailureProvenanceTracker() {
+  let firstFailure = null;
+  async function runSubstep(substep, operation) {
+    if (!RLS_SUBSTEPS.has(substep) || typeof operation !== "function") {
+      fail("rls_failure_provenance_substep_invalid");
+    }
+    try {
+      return await operation();
+    } catch (error) {
+      const causalCode = rlsFailureCode(error);
+      if (!firstFailure) {
+        firstFailure = Object.freeze({ substep, causalCode });
+      }
+      throw new LinuxGateFailure(causalCode);
+    }
+  }
+  return Object.freeze({
+    runSubstep,
+    failure() { return firstFailure; }
+  });
+}
+
+function exactRlsResult(candidate, expected, code) {
+  if (
+    !candidate || Object.getPrototypeOf(candidate) !== Object.prototype ||
+    JSON.stringify(Object.keys(candidate).sort()) !==
+      JSON.stringify(Object.keys(expected).sort()) ||
+    Object.entries(expected).some(([key, value]) => candidate[key] !== value)
+  ) {
+    fail(code);
+  }
+  return expected;
+}
+
+function publicRlsRuntimeWriteContractReproductionEvidence(candidate) {
+  exactRlsResult(
+    candidate,
+    RLS_REPRODUCTION_RESULT,
+    "rls_runtime_write_contract_reproduction_invalid"
+  );
+  return RLS_REPRODUCTION_EVIDENCE;
+}
+
+function publicRlsRoleGateEvidence(candidate) {
+  return exactRlsResult(
+    candidate,
+    RLS_ROLE_GATE_RESULT,
+    "rls_role_gate_evidence_invalid"
+  );
+}
+
+function createRlsRuntimeWriteContractOrchestrator(options = {}) {
+  const {
+    state,
+    gates,
+    runSubstep,
+    legacyFailureCode = failureCode,
+    runReproduction = runRlsRuntimeWriteContractReproduction,
+    runCorrected = runRlsAndRoleGate
+  } = options;
+  if (
+    !state || !gates || typeof gates.rls !== "function" ||
+    typeof runSubstep !== "function" ||
+    typeof legacyFailureCode !== "function" ||
+    typeof runReproduction !== "function" ||
+    typeof runCorrected !== "function"
+  ) {
+    fail("rls_runtime_write_contract_orchestrator_invalid");
+  }
+  let status = "ready";
+  let reproduction = null;
+
+  async function reproduce() {
+    if (status !== "ready") fail("rls_runtime_write_contract_sequence_invalid");
+    status = "reproducing";
+    try {
+      await runSubstep("rls_base_gate", async () => {
+        const base = await gates.rls({ state });
+        exactRlsResult(base, RLS_BASE_GATE_RESULT, "rls_base_gate_evidence_invalid");
+      });
+      const candidate = await runReproduction(state, Object.freeze({
+        legacyFailureCode,
+        runSubstep
+      }));
+      await runSubstep(
+        "rls_core_user_insert_reproduction",
+        async () => exactRlsResult(
+          candidate,
+          RLS_REPRODUCTION_RESULT,
+          "rls_runtime_write_contract_reproduction_invalid"
+        )
+      );
+      reproduction = RLS_REPRODUCTION_RESULT;
+      status = "reproduced";
+      return publicRlsRuntimeWriteContractReproductionEvidence(reproduction);
+    } catch (error) {
+      status = "failed";
+      throw error;
+    }
+  }
+
+  async function correct() {
+    if (status !== "reproduced") {
+      fail("rls_runtime_write_contract_reproduction_required");
+    }
+    status = "correcting";
+    try {
+      const candidate = await runCorrected(state, Object.freeze({
+        baseRlsGatePassed: true,
+        reproduction,
+        runSubstep
+      }));
+      const evidence = await runSubstep(
+        "rls_runtime_role_attributes",
+        async () => publicRlsRoleGateEvidence(candidate)
+      );
+      status = "corrected";
+      return evidence;
+    } catch (error) {
+      status = "failed";
+      throw error;
+    }
+  }
+
+  return Object.freeze({ reproduce, correct });
 }
 
 function backupRestoreCausalCode(error, fallback) {
@@ -867,6 +1108,9 @@ function sanitizedFailureEvidence(source, code = "linux_evidence_sanitization_fa
       sanitizedBackupRestoreFailureProvenance(
         source?.backupRestoreFailureProvenance
       ),
+    rlsFailureProvenance: sanitizedRlsFailureProvenance(
+      source?.rlsFailureProvenance
+    ),
     cleanupFailure: typeof source?.cleanupFailure === "string" && SAFE_FAILURE.test(source.cleanupFailure)
       ? source.cleanupFailure
       : null,
@@ -2591,6 +2835,7 @@ async function runLinuxGate(options = {}) {
   const backupRestoreProvenance = createBackupRestoreProvenanceTracker({
     requireSpawnProof: options.runCommand === undefined
   });
+  const rlsFailureProvenance = createRlsFailureProvenanceTracker();
   const runCommand = options.runCommand || commandRunner({
     spawnImpl: backupRestoreProvenance.wrapSpawn(spawn)
   });
@@ -2614,6 +2859,7 @@ async function runLinuxGate(options = {}) {
     phases: [],
     firstFailure: null,
     backupRestoreFailureProvenance: null,
+    rlsFailureProvenance: null,
     cleanupFailure: null
   };
   let publishedEvidence = evidence;
@@ -2802,6 +3048,11 @@ async function runLinuxGate(options = {}) {
       }
     });
     gates.assertConfigured();
+    const rlsRuntimeWriteContract = createRlsRuntimeWriteContractOrchestrator({
+      state,
+      gates,
+      runSubstep: rlsFailureProvenance.runSubstep
+    });
     activePhase = "migrations";
     await phase("migrations", async () => {
       const base = await gates.migration({ state });
@@ -2810,12 +3061,13 @@ async function runLinuxGate(options = {}) {
       return Object.freeze({ ...base, ...catalog });
     });
     sampleSpace();
+    activePhase = "rls_runtime_write_contract_reproduction";
+    await phase(
+      "rls_runtime_write_contract_reproduction",
+      () => rlsRuntimeWriteContract.reproduce()
+    );
     activePhase = "rls_roles";
-    await phase("rls_roles", async () => {
-      const base = await gates.rls({ state });
-      const supplement = await runRlsAndRoleGate(state);
-      return Object.freeze({ ...base, ...supplement });
-    });
+    await phase("rls_roles", () => rlsRuntimeWriteContract.correct());
     activePhase = "concurrency_oauth_idempotency";
     await phase("concurrency_oauth_idempotency", async () => {
       const base = await gates.concurrency({ state });
@@ -2936,6 +3188,7 @@ async function runLinuxGate(options = {}) {
     }
     evidence.backupRestoreFailureProvenance =
       backupRestoreProvenance.failure();
+    evidence.rlsFailureProvenance = rlsFailureProvenance.failure();
     if (!evidence.firstFailure) evidence.firstFailure = { phase: activePhase, code };
   } finally {
     clearInterval(diskMonitor);
@@ -3077,6 +3330,8 @@ module.exports = {
   createPhaseRunner,
   createPhysicalPoolDrainTracker,
   createPrivatePlanPoolOptionsAdapter,
+  createRlsFailureProvenanceTracker,
+  createRlsRuntimeWriteContractOrchestrator,
   createRestoreBehaviorFacade,
   createRoleScopedPlanPoolClass,
   createVerifiedLoginCredentialPoolBridge,
@@ -3093,8 +3348,12 @@ module.exports = {
   publicPlatformEvidence,
   publicBootstrapEvidence,
   publicBackupTransportEvidence,
+  publicRlsRoleGateEvidence,
+  publicRlsRuntimeWriteContractReproductionEvidence,
   retirePrimaryPoolsBeforeBackup,
+  rlsFailureCode,
   sanitizedBackupRestoreFailureProvenance,
   sanitizedFailureEvidence,
+  sanitizedRlsFailureProvenance,
   runLinuxGate
 };

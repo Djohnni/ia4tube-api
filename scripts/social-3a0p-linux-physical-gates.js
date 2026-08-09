@@ -45,6 +45,100 @@ async function expectErrorCode(operation, expected, code) {
   fail(code);
 }
 
+function requireSubstepRunner(dependencies) {
+  if (typeof dependencies.runSubstep !== "function") {
+    fail("linux_gate_rls_substep_runner_required");
+  }
+  return dependencies.runSubstep;
+}
+
+async function runtimeWritePrivilegeInventory(pool) {
+  const result = await pool.query([
+    "SELECT",
+    " pg_has_role($1,$2,'SET') AS runtime_login_can_set_role,",
+    " has_table_privilege($1,'ia4tube_social.users','INSERT') AS runtime_login_core_user_insert,",
+    " has_table_privilege($2,'ia4tube_social.users','INSERT') AS core_user_insert,",
+    " has_table_privilege($2,'ia4tube_social.social_audit_events','INSERT') AS social_audit_insert,",
+    " EXISTS(",
+    "   SELECT 1",
+    "   FROM pg_catalog.pg_class relation",
+    "   JOIN pg_catalog.pg_namespace namespace ON namespace.oid=relation.relnamespace",
+    "   WHERE namespace.nspname='ia4tube_social'",
+    "     AND relation.relname='social_audit_events'",
+    "     AND relation.relrowsecurity",
+    "     AND relation.relforcerowsecurity",
+    " ) AS social_audit_rls_enabled,",
+    " EXISTS(",
+    "   SELECT 1",
+    "   FROM pg_catalog.pg_policy policy",
+    "   JOIN pg_catalog.pg_class relation ON relation.oid=policy.polrelid",
+    "   JOIN pg_catalog.pg_namespace namespace ON namespace.oid=relation.relnamespace",
+    "   WHERE namespace.nspname='ia4tube_social'",
+    "     AND relation.relname='social_audit_events'",
+    "     AND policy.polname='social_audit_events_company_scope'",
+    "     AND policy.polcmd='*'",
+    "     AND policy.polroles=ARRAY[0::oid]",
+    "     AND policy.polqual IS NOT NULL",
+    "     AND policy.polwithcheck IS NOT NULL",
+    "     AND (",
+    "       length(pg_catalog.pg_get_expr(policy.polqual,policy.polrelid))-",
+    "       length(replace(pg_catalog.pg_get_expr(policy.polqual,policy.polrelid),'company_id',''))",
+    "     )/length('company_id')>=2",
+    "     AND position('ia4tube.company_id' IN pg_catalog.pg_get_expr(policy.polqual,policy.polrelid))>0",
+    "     AND (",
+    "       length(pg_catalog.pg_get_expr(policy.polwithcheck,policy.polrelid))-",
+    "       length(replace(pg_catalog.pg_get_expr(policy.polwithcheck,policy.polrelid),'company_id',''))",
+    "     )/length('company_id')>=2",
+    "     AND position('ia4tube.company_id' IN pg_catalog.pg_get_expr(policy.polwithcheck,policy.polrelid))>0",
+    " ) AS social_audit_company_policy"
+  ].join("\n"), [RUNTIME_LOGIN, RUNTIME_ROLE]);
+  const row = result.rows?.[0];
+  if (!row) fail("linux_gate_rls_privilege_inventory_invalid");
+  return Object.freeze({
+    runtimeLoginCanSetRole: row.runtime_login_can_set_role === true,
+    runtimeLoginCoreUserInsert: row.runtime_login_core_user_insert === true,
+    coreUserInsert: row.core_user_insert === true,
+    socialAuditInsert: row.social_audit_insert === true,
+    socialAuditRlsEnabled: row.social_audit_rls_enabled === true,
+    socialAuditCompanyPolicy: row.social_audit_company_policy === true
+  });
+}
+
+function exactRuntimeWritePrivilegeInventory(left, right) {
+  return left.runtimeLoginCanSetRole === right.runtimeLoginCanSetRole &&
+    left.runtimeLoginCoreUserInsert === right.runtimeLoginCoreUserInsert &&
+    left.coreUserInsert === right.coreUserInsert &&
+    left.socialAuditInsert === right.socialAuditInsert &&
+    left.socialAuditRlsEnabled === right.socialAuditRlsEnabled &&
+    left.socialAuditCompanyPolicy === right.socialAuditCompanyPolicy;
+}
+
+function validRlsRuntimeWriteContractReproduction(candidate) {
+  return candidate &&
+    Object.keys(candidate).sort().join(",") === [
+      "oldGateLaterStagesReached",
+      "runtimeCoreUserInsertPersisted",
+      "runtimeCoreUserInsertPrivilege",
+      "runtimeCoreUserInsertRefused",
+      "runtimePoolUsableAfterRefusal",
+      "runtimePrivilegesUnchanged",
+      "runtimeWriteContractReproductionPassed",
+      "socialAuditEventInsertPrivilege",
+      "socialAuditEventsRlsProtected",
+      "tenantSeedsCreatedByAdministrativeRole"
+    ].sort().join(",") &&
+    candidate.runtimeWriteContractReproductionPassed === true &&
+    candidate.tenantSeedsCreatedByAdministrativeRole === true &&
+    candidate.runtimeCoreUserInsertPrivilege === false &&
+    candidate.runtimeCoreUserInsertRefused === true &&
+    candidate.runtimeCoreUserInsertPersisted === false &&
+    candidate.runtimePoolUsableAfterRefusal === true &&
+    candidate.runtimePrivilegesUnchanged === true &&
+    candidate.socialAuditEventInsertPrivilege === true &&
+    candidate.socialAuditEventsRlsProtected === true &&
+    candidate.oldGateLaterStagesReached === false;
+}
+
 function createTenant(label, dependencies = {}) {
   const randomUUID = dependencies.randomUUID || crypto.randomUUID;
   const identityKey = dependencies.identityKey || crypto.randomBytes(32);
@@ -107,104 +201,277 @@ async function seedTenant(pool, fixture) {
   }, { role: OWNER_ROLE, companyId: fixture.companyId });
 }
 
-async function runRlsAndRoleGate(state, dependencies = {}) {
+async function runRlsRuntimeWriteContractReproduction(state, dependencies = {}) {
   const { withTransaction } = require("../src/persistence/postgres/pool");
-  const a = createTenant("rls-a", dependencies);
-  const b = createTenant("rls-b", dependencies);
+  const runSubstep = requireSubstepRunner(dependencies);
+  let a;
+  let b;
+  let candidateUserId;
   try {
-    await seedTenant(state.pools.migration, a.fixture);
-    await seedTenant(state.pools.migration, b.fixture);
-    const ownA = await withTransaction(state.pools.runtime, (client) => client.query(
-      "SELECT COUNT(*)::integer AS n FROM ia4tube_social.companies WHERE id=$1", [a.fixture.companyId]
-    ), { role: RUNTIME_ROLE, companyId: a.fixture.companyId });
-    const crossA = await withTransaction(state.pools.runtime, (client) => client.query(
-      "SELECT COUNT(*)::integer AS n FROM ia4tube_social.companies WHERE id=$1", [b.fixture.companyId]
-    ), { role: RUNTIME_ROLE, companyId: a.fixture.companyId });
-    const ownB = await withTransaction(state.pools.runtime, (client) => client.query(
-      "SELECT COUNT(*)::integer AS n FROM ia4tube_social.companies WHERE id=$1", [b.fixture.companyId]
-    ), { role: RUNTIME_ROLE, companyId: b.fixture.companyId });
-    const crossB = await withTransaction(state.pools.runtime, (client) => client.query(
-      "SELECT COUNT(*)::integer AS n FROM ia4tube_social.companies WHERE id=$1", [a.fixture.companyId]
-    ), { role: RUNTIME_ROLE, companyId: b.fixture.companyId });
-    if ([ownA, crossA, ownB, crossB].map((result) => Number(result.rows[0].n)).join(",") !== "1,0,1,0") {
-      fail("linux_gate_rls_bidirectional_read_failed");
-    }
-    const missingContext = await withTransaction(state.pools.runtime, (client) => client.query(
-      "SELECT COUNT(*)::integer AS n FROM ia4tube_social.companies"
-    ), { role: RUNTIME_ROLE });
-    if (Number(missingContext.rows?.[0]?.n) !== 0) fail("linux_gate_rls_missing_context_visible");
-    await expectErrorCode(
+    await runSubstep("rls_seed_tenants", async () => {
+      a = createTenant("rls-reproduction-a", dependencies);
+      b = createTenant("rls-reproduction-b", dependencies);
+      await seedTenant(state.pools.migration, a.fixture);
+      await seedTenant(state.pools.migration, b.fixture);
+    });
+    const before = await runSubstep("rls_privilege_inventory", async () => {
+      const inventory = await runtimeWritePrivilegeInventory(state.pools.migration);
+      if (!inventory.runtimeLoginCanSetRole) fail("linux_gate_rls_runtime_role_set_missing");
+      if (inventory.runtimeLoginCoreUserInsert || inventory.coreUserInsert) {
+        fail("linux_gate_rls_core_user_insert_privilege_unexpected");
+      }
+      if (!inventory.socialAuditInsert) fail("linux_gate_rls_social_audit_insert_privilege_missing");
+      if (!inventory.socialAuditRlsEnabled || !inventory.socialAuditCompanyPolicy) {
+        fail("linux_gate_rls_social_audit_policy_invalid");
+      }
+      return inventory;
+    });
+
+    await runSubstep("rls_core_user_insert_reproduction", async () => {
+      candidateUserId = crypto.randomUUID();
+      await expectErrorCode(
+        () => withTransaction(state.pools.runtime, (client) => client.query(
+          "INSERT INTO ia4tube_social.users(company_id,id,login_key_digest) VALUES($1,$2,$3)",
+          [
+            a.fixture.companyId,
+            candidateUserId,
+            crypto.createHash("sha256").update(candidateUserId).digest("hex")
+          ]
+        ), { role: RUNTIME_ROLE, companyId: a.fixture.companyId }),
+        "42501",
+        "linux_gate_rls_core_user_insert_reproduction_invalid"
+      );
+      if (
+        typeof dependencies.legacyFailureCode !== "function" ||
+        dependencies.legacyFailureCode({ code: "42501" }) !== "linux_gate_unclassified_failure"
+      ) fail("linux_gate_rls_legacy_failure_classification_invalid");
+    });
+
+    await runSubstep("rls_core_user_insert_refusal", async () => {
+      const persisted = await withTransaction(state.pools.migration, (client) => client.query(
+        "SELECT COUNT(*)::integer AS n FROM ia4tube_social.users WHERE company_id=$1 AND id=$2",
+        [a.fixture.companyId, candidateUserId]
+      ), { role: OWNER_ROLE, companyId: a.fixture.companyId });
+      if (Number(persisted.rows?.[0]?.n) !== 0) fail("linux_gate_rls_core_user_insert_persisted");
+      const reusable = await withTransaction(state.pools.runtime, (client) => client.query(
+        "SELECT 1::integer AS n"
+      ), { role: RUNTIME_ROLE, companyId: a.fixture.companyId });
+      if (Number(reusable.rows?.[0]?.n) !== 1) {
+        fail("linux_gate_rls_runtime_pool_unusable_after_refusal");
+      }
+    });
+    await runSubstep("rls_privilege_inventory", async () => {
+      const after = await runtimeWritePrivilegeInventory(state.pools.migration);
+      if (!exactRuntimeWritePrivilegeInventory(before, after)) {
+        fail("linux_gate_rls_runtime_privilege_changed");
+      }
+    });
+    return Object.freeze({
+      runtimeWriteContractReproductionPassed: true,
+      tenantSeedsCreatedByAdministrativeRole: true,
+      runtimeCoreUserInsertPrivilege: false,
+      runtimeCoreUserInsertRefused: true,
+      runtimeCoreUserInsertPersisted: false,
+      runtimePoolUsableAfterRefusal: true,
+      runtimePrivilegesUnchanged: true,
+      socialAuditEventInsertPrivilege: true,
+      socialAuditEventsRlsProtected: true,
+      oldGateLaterStagesReached: false
+    });
+  } finally {
+    a?.identityKey.fill(0);
+    b?.identityKey.fill(0);
+  }
+}
+
+async function runRlsAndRoleGate(state, dependencies = {}) {
+  if (dependencies.baseRlsGatePassed !== true) {
+    fail("linux_gate_rls_base_gate_prerequisite_missing");
+  }
+  const { withTransaction } = require("../src/persistence/postgres/pool");
+  const runSubstep = requireSubstepRunner(dependencies);
+  let a;
+  let b;
+  try {
+    await runSubstep("rls_seed_tenants", async () => {
+      a = createTenant("rls-corrected-a", dependencies);
+      b = createTenant("rls-corrected-b", dependencies);
+      await seedTenant(state.pools.migration, a.fixture);
+      await seedTenant(state.pools.migration, b.fixture);
+    });
+    await runSubstep("rls_core_user_insert_refusal", async () => {
+      if (!validRlsRuntimeWriteContractReproduction(dependencies.reproduction)) {
+        fail("linux_gate_rls_runtime_write_reproduction_required");
+      }
+    });
+
+    await runSubstep("rls_bidirectional_read", async () => {
+      const ownA = await withTransaction(state.pools.runtime, (client) => client.query(
+        "SELECT COUNT(*)::integer AS n FROM ia4tube_social.companies WHERE id=$1", [a.fixture.companyId]
+      ), { role: RUNTIME_ROLE, companyId: a.fixture.companyId });
+      const crossA = await withTransaction(state.pools.runtime, (client) => client.query(
+        "SELECT COUNT(*)::integer AS n FROM ia4tube_social.companies WHERE id=$1", [b.fixture.companyId]
+      ), { role: RUNTIME_ROLE, companyId: a.fixture.companyId });
+      const ownB = await withTransaction(state.pools.runtime, (client) => client.query(
+        "SELECT COUNT(*)::integer AS n FROM ia4tube_social.companies WHERE id=$1", [b.fixture.companyId]
+      ), { role: RUNTIME_ROLE, companyId: b.fixture.companyId });
+      const crossB = await withTransaction(state.pools.runtime, (client) => client.query(
+        "SELECT COUNT(*)::integer AS n FROM ia4tube_social.companies WHERE id=$1", [a.fixture.companyId]
+      ), { role: RUNTIME_ROLE, companyId: b.fixture.companyId });
+      if ([ownA, crossA, ownB, crossB].map((result) => Number(result.rows[0].n)).join(",") !== "1,0,1,0") {
+        fail("linux_gate_rls_bidirectional_read_failed");
+      }
+    });
+
+    await runSubstep("rls_missing_context", async () => {
+      const missingContext = await withTransaction(state.pools.runtime, (client) => client.query(
+        "SELECT COUNT(*)::integer AS n FROM ia4tube_social.companies"
+      ), { role: RUNTIME_ROLE });
+      if (Number(missingContext.rows?.[0]?.n) !== 0) fail("linux_gate_rls_missing_context_visible");
+    });
+    await runSubstep("rls_tampered_context", () => expectErrorCode(
       () => withTransaction(state.pools.runtime, async (client) => {
         await client.query("SELECT set_config('ia4tube.company_id',$1,TRUE)", ["not-a-uuid"]);
         return client.query("SELECT COUNT(*)::integer AS n FROM ia4tube_social.companies");
       }, { role: RUNTIME_ROLE }),
       "22P02",
       "linux_gate_rls_tampered_context_invalid"
+    ));
+
+    const insertAuditEvent = (contextCompanyId, fixture, event, action) => withTransaction(
+      state.pools.runtime,
+      (client) => client.query([
+        "INSERT INTO ia4tube_social.social_audit_events(",
+        " company_id,id,event_id,actor_user_id,action,outcome,details_code",
+        ") VALUES($1,$2,$3,$4,$5,'succeeded',$6)"
+      ].join("\n"), [
+        fixture.companyId,
+        event.id,
+        event.eventId,
+        fixture.userId,
+        action,
+        "synthetic_linux_gate"
+      ]),
+      { role: RUNTIME_ROLE, companyId: contextCompanyId }
     );
-    const extraA = crypto.randomUUID();
-    const extraB = crypto.randomUUID();
-    const ownWriteA = await withTransaction(state.pools.runtime, (client) => client.query(
-      "INSERT INTO ia4tube_social.users(company_id,id,login_key_digest) VALUES($1,$2,$3)",
-      [a.fixture.companyId, extraA, crypto.createHash("sha256").update(extraA).digest("hex")]
-    ), { role: RUNTIME_ROLE, companyId: a.fixture.companyId });
-    const ownWriteB = await withTransaction(state.pools.runtime, (client) => client.query(
-      "INSERT INTO ia4tube_social.users(company_id,id,login_key_digest) VALUES($1,$2,$3)",
-      [b.fixture.companyId, extraB, crypto.createHash("sha256").update(extraB).digest("hex")]
-    ), { role: RUNTIME_ROLE, companyId: b.fixture.companyId });
-    if (ownWriteA.rowCount !== 1 || ownWriteB.rowCount !== 1) fail("linux_gate_rls_own_write_failed");
-    await expectErrorCode(
-      () => withTransaction(state.pools.runtime, (client) => client.query(
-        "INSERT INTO ia4tube_social.users(company_id,id,login_key_digest) VALUES($1,$2,$3)",
-        [b.fixture.companyId, crypto.randomUUID(), "e".repeat(64)]
-      ), { role: RUNTIME_ROLE, companyId: a.fixture.companyId }),
-      "42501",
-      "linux_gate_rls_cross_write_a_to_b_invalid"
-    );
-    await expectErrorCode(
-      () => withTransaction(state.pools.runtime, (client) => client.query(
-        "INSERT INTO ia4tube_social.users(company_id,id,login_key_digest) VALUES($1,$2,$3)",
-        [a.fixture.companyId, crypto.randomUUID(), "f".repeat(64)]
-      ), { role: RUNTIME_ROLE, companyId: b.fixture.companyId }),
-      "42501",
-      "linux_gate_rls_cross_write_b_to_a_invalid"
-    );
-    const reused = await state.pools.runtime.connect();
-    let connectionScopeReset = false;
-    try {
-      await reused.query("BEGIN");
-      await reused.query(`SET LOCAL ROLE ${RUNTIME_ROLE}`);
-      await reused.query("SELECT set_config('ia4tube.company_id',$1,TRUE)", [a.fixture.companyId]);
-      await reused.query("COMMIT");
-      await reused.query("BEGIN");
-      await reused.query(`SET LOCAL ROLE ${RUNTIME_ROLE}`);
-      await reused.query("SELECT set_config('ia4tube.company_id',$1,TRUE)", [b.fixture.companyId]);
-      const result = await reused.query("SELECT COUNT(*)::integer AS n FROM ia4tube_social.companies WHERE id=$1", [a.fixture.companyId]);
-      await reused.query("COMMIT");
-      connectionScopeReset = Number(result.rows[0].n) === 0;
-    } finally {
-      await reused.query("ROLLBACK").catch(() => {});
-      reused.release();
-    }
-    if (!connectionScopeReset) fail("linux_gate_rls_connection_context_leaked");
-    const attributes = await state.pools.migration.query([
-      "SELECT rolsuper,rolbypassrls,rolcreatedb,rolcreaterole,rolreplication,",
-      " pg_has_role($1,'ia4tube_social_migrator','MEMBER') AS migrator_member,",
-      " has_table_privilege($1,'ia4tube_migrations.schema_migrations','SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER') AS migration_table_privilege,",
-      " has_schema_privilege($1,'ia4tube_migrations','CREATE') AS migration_schema_create",
-      "FROM pg_catalog.pg_roles WHERE rolname=$1"
-    ].join("\n"), [RUNTIME_LOGIN]);
-    const role = attributes.rows?.[0];
-    if (!role || role.rolsuper || role.rolbypassrls || role.rolcreatedb || role.rolcreaterole || role.rolreplication || role.migrator_member || role.migration_table_privilege || role.migration_schema_create) {
-      fail("linux_gate_runtime_role_privileged");
-    }
+
+    await runSubstep("rls_own_social_write", async () => {
+      const ownEventA = Object.freeze({ id: crypto.randomUUID(), eventId: crypto.randomUUID() });
+      const ownEventB = Object.freeze({ id: crypto.randomUUID(), eventId: crypto.randomUUID() });
+      const ownWriteA = await insertAuditEvent(
+        a.fixture.companyId, a.fixture, ownEventA, "linux.gate.own_a"
+      );
+      const ownWriteB = await insertAuditEvent(
+        b.fixture.companyId, b.fixture, ownEventB, "linux.gate.own_b"
+      );
+      if (ownWriteA.rowCount !== 1 || ownWriteB.rowCount !== 1) {
+        fail("linux_gate_rls_own_social_write_failed");
+      }
+    });
+    await runSubstep("rls_cross_tenant_write", async () => {
+      const crossEventAToB = Object.freeze({ id: crypto.randomUUID(), eventId: crypto.randomUUID() });
+      const crossEventBToA = Object.freeze({ id: crypto.randomUUID(), eventId: crypto.randomUUID() });
+      await expectErrorCode(
+        () => insertAuditEvent(
+          a.fixture.companyId, b.fixture, crossEventAToB, "linux.gate.cross_a_to_b"
+        ),
+        "42501",
+        "linux_gate_rls_cross_write_a_to_b_invalid"
+      );
+      await expectErrorCode(
+        () => insertAuditEvent(
+          b.fixture.companyId, a.fixture, crossEventBToA, "linux.gate.cross_b_to_a"
+        ),
+        "42501",
+        "linux_gate_rls_cross_write_b_to_a_invalid"
+      );
+      const countCrossEvent = (fixture, event) => withTransaction(
+        state.pools.migration,
+        (client) => client.query([
+          "SELECT COUNT(*)::integer AS n",
+          "FROM ia4tube_social.social_audit_events",
+          "WHERE company_id=$1 AND id=$2"
+        ].join("\n"), [fixture.companyId, event.id]),
+        { role: OWNER_ROLE, companyId: fixture.companyId }
+      );
+      const [crossAToBRows, crossBToARows] = await Promise.all([
+        countCrossEvent(b.fixture, crossEventAToB),
+        countCrossEvent(a.fixture, crossEventBToA)
+      ]);
+      if (
+        Number(crossAToBRows.rows?.[0]?.n) !== 0 ||
+        Number(crossBToARows.rows?.[0]?.n) !== 0
+      ) fail("linux_gate_rls_cross_write_persisted");
+    });
+
+    await runSubstep("rls_connection_scope_reset", async () => {
+      const reused = await state.pools.runtime.connect();
+      let connectionScopeReset = false;
+      let primaryFailure = null;
+      try {
+        await reused.query("BEGIN");
+        await reused.query(`SET LOCAL ROLE ${RUNTIME_ROLE}`);
+        await reused.query("SELECT set_config('ia4tube.company_id',$1,TRUE)", [a.fixture.companyId]);
+        await reused.query("COMMIT");
+        await reused.query("BEGIN");
+        await reused.query(`SET LOCAL ROLE ${RUNTIME_ROLE}`);
+        await reused.query("SELECT set_config('ia4tube.company_id',$1,TRUE)", [b.fixture.companyId]);
+        const result = await reused.query(
+          "SELECT COUNT(*)::integer AS n FROM ia4tube_social.companies WHERE id=$1",
+          [a.fixture.companyId]
+        );
+        await reused.query("COMMIT");
+        connectionScopeReset = Number(result.rows[0].n) === 0;
+        if (!connectionScopeReset) fail("linux_gate_rls_connection_context_leaked");
+      } catch (error) {
+        primaryFailure = error;
+      }
+      let cleanupFailure = null;
+      try {
+        await reused.query("ROLLBACK");
+      } catch (error) {
+        cleanupFailure = error;
+      }
+      try {
+        await reused.release();
+      } catch (error) {
+        cleanupFailure ||= error;
+      }
+      if (primaryFailure) throw primaryFailure;
+      if (cleanupFailure) throw cleanupFailure;
+    });
+
+    await runSubstep("rls_runtime_role_attributes", async () => {
+      const attributes = await state.pools.migration.query([
+        "SELECT rolsuper,rolbypassrls,rolcreatedb,rolcreaterole,rolreplication,",
+        " pg_has_role($1,'ia4tube_social_migrator','MEMBER') AS migrator_member,",
+        " has_table_privilege($1,'ia4tube_migrations.schema_migrations','SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER') AS migration_table_privilege,",
+        " has_schema_privilege($1,'ia4tube_migrations','CREATE') AS migration_schema_create",
+        "FROM pg_catalog.pg_roles WHERE rolname=$1"
+      ].join("\n"), [RUNTIME_LOGIN]);
+      const role = attributes.rows?.[0];
+      if (!role || role.rolsuper || role.rolbypassrls || role.rolcreatedb || role.rolcreaterole || role.rolreplication || role.migrator_member || role.migration_table_privilege || role.migration_schema_create) {
+        fail("linux_gate_runtime_role_privileged");
+      }
+    });
+
     return Object.freeze({
-      companyAOwnReadWrite: true,
-      companyBOwnReadWrite: true,
-      companyAToBRefused: true,
-      companyBToARefused: true,
-      crossWriteRefused: true,
+      baseRlsGatePassed: true,
+      tenantSeedsCreatedByAdministrativeRole: true,
+      runtimeCoreUserInsertPrivilege: false,
+      runtimeCoreUserInsertRefused: true,
+      runtimeCoreUserInsertPersisted: false,
+      companyAOwnRead: true,
+      companyBOwnRead: true,
+      companyAToBReadRefused: true,
+      companyBToAReadRefused: true,
+      companyAOwnSocialWrite: true,
+      companyBOwnSocialWrite: true,
+      companyAToBWriteRefused: true,
+      companyBToAWriteRefused: true,
+      crossTenantRowsPersisted: false,
       missingContextZeroRows: true,
-      tamperedContextSqlStateRefused: true,
+      tamperedContextRefused: true,
       connectionScopeReset: true,
       runtimeSuperuser: false,
       runtimeBypassRls: false,
@@ -213,8 +480,8 @@ async function runRlsAndRoleGate(state, dependencies = {}) {
       runtimeMigrationPrivileges: false
     });
   } finally {
-    a.identityKey.fill(0);
-    b.identityKey.fill(0);
+    a?.identityKey.fill(0);
+    b?.identityKey.fill(0);
   }
 }
 
@@ -566,6 +833,7 @@ module.exports = {
   runConcurrencyOAuthIdempotencyGate,
   runPersistedVaultGate,
   runRlsAndRoleGate,
+  runRlsRuntimeWriteContractReproduction,
   runVaultSupplementalGate,
   seedTenant
 };

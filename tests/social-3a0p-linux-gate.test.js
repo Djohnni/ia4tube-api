@@ -60,6 +60,8 @@ const {
   createPhaseRunner,
   createPhysicalPoolDrainTracker,
   createPrivatePlanPoolOptionsAdapter,
+  createRlsFailureProvenanceTracker,
+  createRlsRuntimeWriteContractOrchestrator,
   createRestoreBehaviorFacade,
   createRoleScopedPlanPoolClass,
   createVerifiedLoginCredentialPoolBridge,
@@ -72,9 +74,13 @@ const {
   publicBackupTransportEvidence,
   publicBootstrapEvidence,
   publicPlatformEvidence,
+  publicRlsRoleGateEvidence,
+  publicRlsRuntimeWriteContractReproductionEvidence,
   retirePrimaryPoolsBeforeBackup,
+  rlsFailureCode,
   sanitizedBackupRestoreFailureProvenance,
-  sanitizedFailureEvidence
+  sanitizedFailureEvidence,
+  sanitizedRlsFailureProvenance
 } = require("../scripts/social-3a0p-linux-gate");
 
 const ROOT = path.resolve(__dirname, "..");
@@ -85,6 +91,63 @@ const PROFILE_0004_ONLY_RELATIONS = Object.freeze([
   "social_publications",
   "social_publication_attempts"
 ]);
+
+function validRlsBaseGateResult(overrides = {}) {
+  return {
+    physicalExecution: true,
+    syntheticOnly: true,
+    tenantIsolation: true,
+    missingContextRefused: true,
+    tamperedContextRefused: true,
+    forceRls: true,
+    syntheticCompanies: 2,
+    ...overrides
+  };
+}
+
+function validRlsReproductionResult(overrides = {}) {
+  return {
+    runtimeWriteContractReproductionPassed: true,
+    tenantSeedsCreatedByAdministrativeRole: true,
+    runtimeCoreUserInsertPrivilege: false,
+    runtimeCoreUserInsertRefused: true,
+    runtimeCoreUserInsertPersisted: false,
+    runtimePoolUsableAfterRefusal: true,
+    runtimePrivilegesUnchanged: true,
+    socialAuditEventInsertPrivilege: true,
+    socialAuditEventsRlsProtected: true,
+    oldGateLaterStagesReached: false,
+    ...overrides
+  };
+}
+
+function validRlsRoleGateResult(overrides = {}) {
+  return {
+    baseRlsGatePassed: true,
+    tenantSeedsCreatedByAdministrativeRole: true,
+    runtimeCoreUserInsertPrivilege: false,
+    runtimeCoreUserInsertRefused: true,
+    runtimeCoreUserInsertPersisted: false,
+    companyAOwnRead: true,
+    companyBOwnRead: true,
+    companyAToBReadRefused: true,
+    companyBToAReadRefused: true,
+    companyAOwnSocialWrite: true,
+    companyBOwnSocialWrite: true,
+    companyAToBWriteRefused: true,
+    companyBToAWriteRefused: true,
+    crossTenantRowsPersisted: false,
+    missingContextZeroRows: true,
+    tamperedContextRefused: true,
+    connectionScopeReset: true,
+    runtimeSuperuser: false,
+    runtimeBypassRls: false,
+    runtimeCreateDb: false,
+    runtimeCreateRole: false,
+    runtimeMigrationPrivileges: false,
+    ...overrides
+  };
+}
 
 function materializeFixedLegacy2AForTest() {
   const manifest = require("../src/persistence/postgres/legacy-2a-source-manifest.json");
@@ -1836,6 +1899,282 @@ test("first failed phase prevents every later gate", async () => {
   await assert.rejects(phase("bootstrap", async () => { calls.push("forbidden"); }));
   assert.deepEqual(calls, ["durability", "postgres"]);
   assert.deepEqual(evidence.firstFailure, { phase: "postgres", code: "synthetic_first_failure" });
+});
+
+test("RLS SQLSTATE classification is closed without broadening the legacy sanitizer", () => {
+  assert.equal(failureCode({ code: "42501" }), "linux_gate_unclassified_failure");
+  assert.equal(failureCode({ code: "22P02" }), "linux_gate_unclassified_failure");
+  assert.equal(rlsFailureCode({ code: "42501" }), "postgres_insufficient_privilege");
+  assert.equal(rlsFailureCode({ code: "22P02" }), "postgres_invalid_text_representation");
+  assert.equal(rlsFailureCode({ code: "linux_gate_rls_failed" }), "linux_gate_rls_failed");
+});
+
+test("RLS rollback wrapper preserves the primary SQLSTATE without publishing messages", async () => {
+  const primary = Object.assign(new Error("password=primary-must-not-appear"), {
+    code: "42501"
+  });
+  const rollback = Object.assign(new Error("password=rollback-must-not-appear"), {
+    code: "postgres_rollback_failed",
+    cause: primary
+  });
+  assert.equal(rlsFailureCode(rollback), "postgres_insufficient_privilege");
+  assert.equal(
+    rlsFailureCode({
+      code: "postgres_rollback_failed",
+      cause: { code: "postgres_rollback_failed", cause: { code: "22P02" } }
+    }),
+    "postgres_invalid_text_representation"
+  );
+  assert.equal(
+    rlsFailureCode({
+      code: "postgres_rollback_failed",
+      cause: { code: "42501 unsafe", message: "password=must-not-appear" }
+    }),
+    "postgres_rollback_failed"
+  );
+  assert.equal(
+    rlsFailureCode({
+      code: "postgres_rollback_failed",
+      message: "password=must-not-appear"
+    }),
+    "postgres_rollback_failed"
+  );
+
+  const tracker = createRlsFailureProvenanceTracker();
+  await assert.rejects(
+    tracker.runSubstep("rls_cross_tenant_write", async () => { throw rollback; }),
+    { code: "postgres_insufficient_privilege", name: "LinuxGateFailure" }
+  );
+  const serialized = canonicalJson(tracker.failure());
+  assert.equal(serialized.includes("primary-must-not-appear"), false);
+  assert.equal(serialized.includes("rollback-must-not-appear"), false);
+  assert.deepEqual(tracker.failure(), {
+    substep: "rls_cross_tenant_write",
+    causalCode: "postgres_insufficient_privilege"
+  });
+});
+
+test("RLS failure provenance preserves only the first closed substep and causal code", async () => {
+  const tracker = createRlsFailureProvenanceTracker();
+  await assert.rejects(
+    tracker.runSubstep("rls_core_user_insert_reproduction", async () => {
+      throw Object.assign(new Error("must not be published"), { code: "42501" });
+    }),
+    { code: "postgres_insufficient_privilege", name: "LinuxGateFailure" }
+  );
+  await assert.rejects(
+    tracker.runSubstep("rls_cross_tenant_write", async () => {
+      throw Object.assign(new Error("must not replace first"), { code: "22P02" });
+    }),
+    { code: "postgres_invalid_text_representation", name: "LinuxGateFailure" }
+  );
+  assert.deepEqual(tracker.failure(), {
+    substep: "rls_core_user_insert_reproduction",
+    causalCode: "postgres_insufficient_privilege"
+  });
+  assert.deepEqual(sanitizedRlsFailureProvenance(tracker.failure()), tracker.failure());
+  assert.equal(sanitizedRlsFailureProvenance({
+    ...tracker.failure(),
+    sql: "forbidden"
+  }), null);
+  assert.equal(sanitizedRlsFailureProvenance({
+    substep: "unknown",
+    causalCode: "postgres_insufficient_privilege"
+  }), null);
+  const fallback = sanitizedFailureEvidence({
+    firstFailure: {
+      phase: "rls_runtime_write_contract_reproduction",
+      code: "postgres_insufficient_privilege"
+    },
+    rlsFailureProvenance: tracker.failure(),
+    cleanup: {
+      cleanupCompleted: true,
+      containerResiduals: 0,
+      volumeResiduals: 0,
+      networkResiduals: 0,
+      listenerResiduals: 0,
+      temporaryRootResiduals: 0
+    }
+  });
+  assert.deepEqual(fallback.rlsFailureProvenance, tracker.failure());
+  assert.equal(evidenceSafe(fallback), true);
+});
+
+test("RLS reproduction and corrected evidence have exact frozen boolean inventories", () => {
+  const reproduction = publicRlsRuntimeWriteContractReproductionEvidence(
+    validRlsReproductionResult()
+  );
+  assert.equal(Object.isFrozen(reproduction), true);
+  assert.deepEqual(Object.keys(reproduction).sort(), [
+    "baseRlsGatePassed",
+    "oldGateLaterStagesReached",
+    "runtimeCoreUserInsertPersisted",
+    "runtimeCoreUserInsertPrivilege",
+    "runtimeCoreUserInsertRefused",
+    "runtimePoolUsableAfterRefusal",
+    "runtimePrivilegesUnchanged",
+    "socialAuditEventInsertPrivilege",
+    "socialAuditEventsRlsProtected",
+    "tenantSeedsCreatedByAdministrativeRole"
+  ].sort());
+  assert.equal(Object.values(reproduction).every((value) => typeof value === "boolean"), true);
+  assert.equal(Object.hasOwn(reproduction, "legacySanitizerClassification"), false);
+
+  const corrected = publicRlsRoleGateEvidence(validRlsRoleGateResult());
+  assert.equal(Object.isFrozen(corrected), true);
+  assert.deepEqual(Object.keys(corrected).sort(), Object.keys(validRlsRoleGateResult()).sort());
+  assert.equal(Object.keys(corrected).length, 22);
+  assert.equal(Object.values(corrected).every((value) => typeof value === "boolean"), true);
+  assert.equal(evidenceSafe({ reproduction, corrected, rlsFailureProvenance: null }), true);
+});
+
+test("RLS orchestrator runs base then reproduction then corrected without publishing legacy diagnostics", async () => {
+  const calls = [];
+  const tracker = createRlsFailureProvenanceTracker();
+  const state = Object.freeze({ synthetic: true });
+  const orchestrator = createRlsRuntimeWriteContractOrchestrator({
+    state,
+    gates: {
+      async rls(request) {
+        assert.equal(request.state, state);
+        calls.push("base");
+        return validRlsBaseGateResult();
+      }
+    },
+    runSubstep: tracker.runSubstep,
+    async runReproduction(receivedState, dependencies) {
+      assert.equal(receivedState, state);
+      assert.equal(dependencies.legacyFailureCode({ code: "42501" }), "linux_gate_unclassified_failure");
+      calls.push("reproduction");
+      await dependencies.runSubstep("rls_privilege_inventory", async () => {
+        calls.push("inventory");
+      });
+      return validRlsReproductionResult();
+    },
+    async runCorrected(receivedState, dependencies) {
+      assert.equal(receivedState, state);
+      assert.equal(dependencies.baseRlsGatePassed, true);
+      assert.deepEqual(dependencies.reproduction, validRlsReproductionResult());
+      calls.push("corrected");
+      await dependencies.runSubstep("rls_own_social_write", async () => {
+        calls.push("own-write");
+      });
+      return validRlsRoleGateResult();
+    }
+  });
+  const reproductionEvidence = await orchestrator.reproduce();
+  const correctedEvidence = await orchestrator.correct();
+  assert.deepEqual(calls, ["base", "reproduction", "inventory", "corrected", "own-write"]);
+  assert.equal(reproductionEvidence.baseRlsGatePassed, true);
+  assert.equal(correctedEvidence.companyAOwnSocialWrite, true);
+  assert.equal(correctedEvidence.companyBToAWriteRefused, true);
+  assert.equal(tracker.failure(), null);
+  assert.equal(canonicalJson({ reproductionEvidence, correctedEvidence }).includes(
+    "linux_gate_unclassified_failure"
+  ), false);
+});
+
+test("RLS orchestrator refuses a noncanonical base result before reproduction", async () => {
+  const calls = [];
+  const tracker = createRlsFailureProvenanceTracker();
+  const orchestrator = createRlsRuntimeWriteContractOrchestrator({
+    state: {},
+    gates: {
+      async rls() {
+        calls.push("base");
+        return validRlsBaseGateResult({ forceRls: false });
+      }
+    },
+    runSubstep: tracker.runSubstep,
+    async runReproduction() {
+      calls.push("forbidden-reproduction");
+      return validRlsReproductionResult();
+    },
+    async runCorrected() {
+      calls.push("forbidden-corrected");
+      return validRlsRoleGateResult();
+    }
+  });
+  await assert.rejects(
+    orchestrator.reproduce(),
+    { code: "rls_base_gate_evidence_invalid", name: "LinuxGateFailure" }
+  );
+  assert.deepEqual(calls, ["base"]);
+  assert.deepEqual(tracker.failure(), {
+    substep: "rls_base_gate",
+    causalCode: "rls_base_gate_evidence_invalid"
+  });
+});
+
+test("RLS orchestrator attributes a noncanonical corrected result before later gates", async () => {
+  const tracker = createRlsFailureProvenanceTracker();
+  const orchestrator = createRlsRuntimeWriteContractOrchestrator({
+    state: {},
+    gates: { async rls() { return validRlsBaseGateResult(); } },
+    runSubstep: tracker.runSubstep,
+    async runReproduction() { return validRlsReproductionResult(); },
+    async runCorrected() {
+      return validRlsRoleGateResult({ runtimeSuperuser: true });
+    }
+  });
+  await orchestrator.reproduce();
+  await assert.rejects(
+    orchestrator.correct(),
+    { code: "rls_role_gate_evidence_invalid", name: "LinuxGateFailure" }
+  );
+  assert.deepEqual(tracker.failure(), {
+    substep: "rls_runtime_role_attributes",
+    causalCode: "rls_role_gate_evidence_invalid"
+  });
+});
+
+test("RLS reproduction divergence fails closed before corrected and later phases", async () => {
+  const calls = [];
+  const tracker = createRlsFailureProvenanceTracker();
+  const orchestrator = createRlsRuntimeWriteContractOrchestrator({
+    state: {},
+    gates: {
+      async rls() {
+        calls.push("base");
+        return validRlsBaseGateResult();
+      }
+    },
+    runSubstep: tracker.runSubstep,
+    async runReproduction() {
+      calls.push("reproduction");
+      return validRlsReproductionResult({ runtimeCoreUserInsertPrivilege: true });
+    },
+    async runCorrected() {
+      calls.push("corrected");
+      return validRlsRoleGateResult();
+    }
+  });
+  await assert.rejects(
+    orchestrator.reproduce(),
+    { code: "rls_runtime_write_contract_reproduction_invalid", name: "LinuxGateFailure" }
+  );
+  await assert.rejects(
+    orchestrator.correct(),
+    { code: "rls_runtime_write_contract_reproduction_required", name: "LinuxGateFailure" }
+  );
+  assert.deepEqual(calls, ["base", "reproduction"]);
+  assert.deepEqual(tracker.failure(), {
+    substep: "rls_core_user_insert_reproduction",
+    causalCode: "rls_runtime_write_contract_reproduction_invalid"
+  });
+
+  const evidence = { phases: [], firstFailure: null };
+  const phase = createPhaseRunner(evidence);
+  await assert.rejects(phase("rls_runtime_write_contract_reproduction", () => {
+    throw new LinuxGateFailure("rls_runtime_write_contract_reproduction_invalid");
+  }));
+  await assert.rejects(phase("rls_roles", async () => {
+    calls.push("forbidden-corrected-phase");
+  }));
+  await assert.rejects(phase("concurrency_oauth_idempotency", async () => {
+    calls.push("forbidden-gate-3");
+  }));
+  assert.deepEqual(calls, ["base", "reproduction"]);
 });
 
 test("postgres failure evidence preserves only the closed sanitized diagnostics", async () => {
@@ -4020,6 +4359,7 @@ test("Linux gate source reuses product plans and has no external provider call",
   assert.doesNotMatch(physical, /\b(?:fetch|axios|https?\.request|tls\.connect|net\.connect)\s*\(/);
   const order = [
     'phase("migrations"',
+    'activePhase = "rls_runtime_write_contract_reproduction";',
     'phase("rls_roles"',
     'phase("concurrency_oauth_idempotency"',
     'phase("vault"',

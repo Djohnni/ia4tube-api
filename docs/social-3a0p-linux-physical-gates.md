@@ -2,49 +2,143 @@
 
 ## Limite e proveniência
 
-Esta oitava rota Linux isolada parte exclusivamente do commit
-`ad453a930bce259f5b251a8324fc32ad388ce5b6`. A branch predecessora
-`social/checkpoint-3a0p-linux-restore-provenance-20260808` e todas as branches
-anteriores permanecem preservadas, sem novo push ou edição.
+Esta nona rota Linux isolada parte exclusivamente do commit
+`32309df0e44488420e1e3352c8d62d12e944a264`. A branch predecessora
+`social/checkpoint-3a0p-linux-profile0003-vault-bridge-20260808` e todas as
+branches anteriores permanecem preservadas, sem edição ou novo push.
 
 O workflow existe somente para a branch
-`social/checkpoint-3a0p-linux-profile0003-vault-bridge-20260808`. O produto
-permanece idêntico a `fcfc92419021dae5f77baad731c634b10c275c5b`: `src/`,
-todo `db/` (inclusive `roles.sql`), `server.js`, `package.json` e `package-lock.json` não são
-alterados. PostgreSQL, SCRAM, roles, rede Docker e credenciais também não são
-alterados por esta correção.
+`social/checkpoint-3a0p-linux-rls-runtime-write-contract-20260809`. O produto
+permanece idêntico a `fcfc92419021dae5f77baad731c634b10c275c5b`: `src/`, todo
+`db/` (inclusive `roles.sql`), migrations, `server.js`, `package.json` e
+`package-lock.json` não são alterados. Esta rota não acrescenta grants, não
+altera políticas RLS e não modifica PostgreSQL, SCRAM, roles, backup, restore,
+rede Docker ou credenciais.
 
-## Oitavo disparo Linux isolado autorizado
+## Nono disparo Linux isolado autorizado
 
 O único gatilho autorizado é o primeiro e único `push` de criação da nova
 branch, sem exclusão ou force, cujo commit tenha a mensagem integral:
 
 ```text
-[run-social-3a0p-linux-gate] bridge profile 0003 vault repository
+[run-social-3a0p-linux-gate] align RLS write probe with runtime privileges
 ```
 
 O job exige `run_attempt == 1`, `created == true`, `deleted == false`,
 `forced == false`, `before` igual a 40 zeros e pai exato
-`ad453a930bce259f5b251a8324fc32ad388ce5b6`, além de diff nominal e
+`32309df0e44488420e1e3352c8d62d12e944a264`, além de diff nominal e
 estritamente allowlisted. Não há `workflow_dispatch`, pull request, agenda,
-matriz ou retry automático. A regra operacional é: zero re-run, zero segundo
-push, zero PR, zero merge e zero deploy depois desta execução única.
+matriz ou retry automático. A regra operacional é: exatamente um push de
+criação, no máximo um run automático, zero re-run, zero segundo push, zero PR,
+zero merge e zero deploy.
 
-A allowlist do commit contém exatamente estes sete caminhos, sem curinga,
-prefixo ou diretório inteiro:
+A allowlist do commit contém exatamente estes sete caminhos efetivamente
+alterados, sem curinga, prefixo ou diretório inteiro:
 
 - `.github/workflows/social-3a0p-linux-physical-gates.yml`;
 - `docs/social-3a0p-linux-physical-gates.md`;
 - `scripts/social-3a0p-linux-gate.js`;
-- `scripts/social-3a0p-local-windows-physical-plans.js`;
+- `scripts/social-3a0p-linux-physical-gates.js`;
 - `tests/social-3a0p-linux-gate.test.js`;
-- `tests/social-3a0p-local-windows-physical-plans.test.js`;
+- `tests/social-3a0p-linux-physical-gates.test.js`;
 - `tests/social-3a0p-linux-workflow.test.js`.
 
 Qualquer outro caminho, inclusive outro workflow, `src/`, `db/`, migrations,
 roles, servidor ou dependências, encerra o job antes do gate.
 
-## Falha física mais recente e reprodução focal do cofre
+## Run predecessor preservado
+
+O run físico `31292070642` (artifact `9031715895`, SHA-256 do JSON
+`54d2630c505f521cfa57554f6df70d47c1f896a72f0e1924493a1433af9d2c9c`)
+aprovou integralmente o Gate 1. Foram concluídos migrations, rollback,
+`pg_dump`, `pg_restore`, `restore_vault`, `verify2ACompatibility`, restauração e
+validação do profile 0003, reaplicação e validação do profile 0004; o campo
+`schemaProfileDiagnostics` permaneceu `null`.
+
+O mesmo run parou no Gate 2, fase `rls_roles`, com o código sanitizado
+`linux_gate_unclassified_failure`. Os Gates 3 a 5 não foram executados. Cleanup
+foi aprovado, com zero resíduos e sem segundo push, retry, re-run, PR, merge ou
+deploy. Essa evidência não identifica publicamente SQLSTATE, consulta,
+argumentos ou mensagem bruta e, isoladamente, não comprova a hipótese causal
+que esta rota deverá testar.
+
+## Contrato físico RLS ainda pendente
+
+Não existe declaração antecipada de aprovação física nesta rota. O único run
+autorizado deverá primeiro repetir `gates.rls({ state })` isoladamente e exigir
+seu sucesso. Depois, usando somente tenants sintéticos criados pela pool
+administrativa, a subfase fechada
+`rls_runtime_write_contract_reproduction` deverá demonstrar, nesta ordem:
+
+1. a role runtime não possui `INSERT` em `ia4tube_social.users`;
+2. a tentativa antiga de insert próprio em `users`, sob contexto A, é recusada
+   com SQLSTATE interno `42501`;
+3. nenhuma linha de usuário é persistida, a transação termina, a pool continua
+   utilizável e nenhum privilégio é alterado;
+4. a recusa ocorre antes das antigas etapas `ownWriteB`, escritas cruzadas,
+   reset de conexão e atributos da role;
+5. o sanitizador antigo classificaria o SQLSTATE numérico como
+   `linux_gate_unclassified_failure`, somente em diagnóstico interno controlado;
+6. a role runtime possui `INSERT` em
+   `ia4tube_social.social_audit_events` e a tabela possui política RLS aplicável
+   a `company_id`.
+
+Somente se todos esses fatos coincidirem exatamente com o contrato esperado, o
+mesmo processo executará o Gate 2 corrigido. A escrita positiva usará eventos
+sintéticos mínimos em `social_audit_events`: A/A e B/B deverão funcionar; A/B e
+B/A deverão ser recusados com `42501`; nenhum evento cruzado poderá persistir.
+O insert em `users` permanecerá como prova negativa explícita, nunca como grant
+ou escrita positiva. Gates 3, 4 e 5 somente serão chamados depois da aprovação
+do Gate 2 corrigido.
+
+Qualquer regressão do Gate 1 ou divergência na reprodução encerra o run antes do
+Gate 2 corrigido. Falha posterior preserva a primeira subetapa e causa
+sanitizadas, impede gates seguintes, executa cleanup e encerra sem correção,
+segundo push, retry ou re-run.
+
+## Evidência semântica e procedência do Gate 2
+
+O resultado sanitizado do Gate 2 usa campos separados para leitura e escrita:
+
+- `baseRlsGatePassed`;
+- `tenantSeedsCreatedByAdministrativeRole`;
+- `runtimeCoreUserInsertPrivilege=false`;
+- `runtimeCoreUserInsertRefused=true`;
+- `runtimeCoreUserInsertPersisted=false`;
+- `companyAOwnRead=true`;
+- `companyBOwnRead=true`;
+- `companyAToBReadRefused=true`;
+- `companyBToAReadRefused=true`;
+- `companyAOwnSocialWrite=true`;
+- `companyBOwnSocialWrite=true`;
+- `companyAToBWriteRefused=true`;
+- `companyBToAWriteRefused=true`;
+- `crossTenantRowsPersisted=false`;
+- `missingContextZeroRows=true`;
+- `tamperedContextRefused=true`;
+- `connectionScopeReset=true`;
+- `runtimeSuperuser=false`;
+- `runtimeBypassRls=false`;
+- `runtimeCreateDb=false`;
+- `runtimeCreateRole=false`;
+- `runtimeMigrationPrivileges=false`.
+
+Esses valores são expectativas do contrato; somente o artifact do run poderá
+convertê-los em prova física. A procedência admite somente as subetapas fechadas
+`rls_base_gate`, `rls_seed_tenants`, `rls_privilege_inventory`,
+`rls_core_user_insert_reproduction`, `rls_core_user_insert_refusal`,
+`rls_bidirectional_read`, `rls_missing_context`, `rls_tampered_context`,
+`rls_own_social_write`, `rls_cross_tenant_write`,
+`rls_connection_scope_reset` e `rls_runtime_role_attributes`. O mapeamento
+interno fechado é `42501` → `postgres_insufficient_privilege` e `22P02` →
+`postgres_invalid_text_representation`; uma recusa esperada aprova a prova, mas
+nenhum SQLSTATE bruto é publicado.
+
+SQL, argumentos, UUIDs, nome de banco, IP, hostname, senha, URL, stack, mensagem
+PostgreSQL, stdout, stderr, tokens e chaves são proibidos na evidência. Não há
+conexão externa, dado real, token, OAuth real ou publicação nesta rota.
+
+## Falha física histórica e reprodução focal do cofre
 
 O run físico anterior `31290136520` (artifact `9031104643`, SHA-256 da
 evidência
@@ -396,21 +490,43 @@ reprova o gate. Nenhuma garantia é inferida apenas por teste simulado.
 
 ## Ordem física dos gates
 
-Os gates são sequenciais e param na primeira falha:
+O workflow chama o gate físico exatamente uma vez. Dentro desse processo, a
+ordem obrigatória e fail-closed é:
 
-1. **Migrations e rollback** — 0001–0003, snapshot, 0004, checksum,
-   constraints/índices/RLS/FORCE RLS, falha transacional controlada, restauração
-   0003 e reaplicação 0004, sem migration down.
-2. **RLS e roles** — A/B em ambos os sentidos, leitura e escrita, contexto
-   ausente/adulterado, reutilização de conexão e atributos da role runtime.
-3. **Concorrência, OAuth e idempotência** — reserva concorrente de conexão,
-   consumo único/replay/expiração/cross-company de state sintético e corrida de
-   publicação com um único registro.
-4. **Cofre** — AES-256-GCM, AAD de empresa/provedor/conexão/finalidade,
-   adulterações, rotação e bloqueio da retirada de chave ainda usada.
-5. **Backup e restauração** — perfis 0003 e 0004, bundles individuais,
-   SHA-256, manifesto, `fsync` do arquivo e diretório, restauração isolada,
-   schema/dados/RLS/cofre, perfil cruzado e manifesto adulterado recusados.
+1. validar o contrato imutável do commit, branch, tentativa e allowlist;
+2. instalar dependências somente pelo lockfile, sem lifecycle scripts;
+3. executar a prova de durabilidade Linux e `O_NOFOLLOW`;
+4. iniciar e validar o PostgreSQL 18.4 descartável, sem porta publicada;
+5. concluir bootstrap e credenciais sintéticas;
+6. executar o **Gate 1 — migrations e rollback**, incluindo 0001–0003,
+   snapshot, 0004, checksum, constraints/índices/RLS/FORCE RLS, falha
+   transacional controlada, restauração 0003 e reaplicação 0004, sem migration
+   down;
+7. executar `gates.rls({ state })` e a reprodução física fechada do contrato
+   antigo do Gate 2;
+8. somente se a reprodução coincidir integralmente, executar o **Gate 2 — RLS e
+   roles corrigido**, com leituras A/B, recusa do insert runtime em `users`,
+   escritas próprias e cruzadas em `social_audit_events`, contexto
+   ausente/adulterado, reutilização de conexão e atributos da role runtime;
+9. somente depois do Gate 2, executar o **Gate 3 — concorrência, OAuth sintético
+   e idempotência**, incluindo reserva concorrente, consumo
+   único/replay/expiração/cross-company de state sintético e corrida de
+   publicação com um único registro;
+10. somente depois do Gate 3, executar o **Gate 4 — cofre**, com AES-256-GCM,
+    AAD de empresa/provedor/conexão/finalidade, adulterações, rotação e bloqueio
+    da retirada de chave ainda usada;
+11. somente depois do Gate 4, executar o **Gate 5 — backup e restauração**, com
+    perfis 0003 e 0004, bundles individuais, SHA-256, manifesto, `fsync` do
+    arquivo e diretório, restauração isolada, schema/dados/RLS/cofre e recusas
+    de perfil cruzado e manifesto adulterado;
+12. produzir métricas e executar a varredura sanitizada de segredos;
+13. executar cleanup integral;
+14. aprovar e enviar um único artifact sanitizado.
+
+Cada etapa posterior depende do sucesso da anterior. A reprodução antiga e o
+Gate 2 corrigido não são dois runs nem duas tentativas: são fases ordenadas da
+única invocação autorizada. Nenhuma dessas expectativas representa aprovação
+física antes da conclusão e conferência do artifact.
 
 O `fsync` definitivo do diretório do bundle é exigido e contado nos dois
 bundles do Gate 5. O bundle transitório usado internamente pelo rollback do

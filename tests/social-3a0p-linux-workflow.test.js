@@ -8,10 +8,10 @@ const test = require("node:test");
 const REPOSITORY_ROOT = path.resolve(__dirname, "..");
 const WORKFLOW_RELATIVE_PATH = ".github/workflows/social-3a0p-linux-physical-gates.yml";
 const WORKFLOW_PATH = path.join(REPOSITORY_ROOT, ...WORKFLOW_RELATIVE_PATH.split("/"));
-const BRANCH = "social/checkpoint-3a0p-linux-profile0003-vault-bridge-20260808";
-const PARENT = "ad453a930bce259f5b251a8324fc32ad388ce5b6";
+const BRANCH = "social/checkpoint-3a0p-linux-rls-runtime-write-contract-20260809";
+const PARENT = "32309df0e44488420e1e3352c8d62d12e944a264";
 const ZERO_SHA = "0000000000000000000000000000000000000000";
-const MESSAGE = "[run-social-3a0p-linux-gate] bridge profile 0003 vault repository";
+const MESSAGE = "[run-social-3a0p-linux-gate] align RLS write probe with runtime privileges";
 const JOB_IF = [
   "github.event_name == 'push'",
   `github.ref == 'refs/heads/${BRANCH}'`,
@@ -32,9 +32,9 @@ const AUTHORIZED_FILES = Object.freeze([
   ".github/workflows/social-3a0p-linux-physical-gates.yml",
   "docs/social-3a0p-linux-physical-gates.md",
   "scripts/social-3a0p-linux-gate.js",
-  "scripts/social-3a0p-local-windows-physical-plans.js",
+  "scripts/social-3a0p-linux-physical-gates.js",
   "tests/social-3a0p-linux-gate.test.js",
-  "tests/social-3a0p-local-windows-physical-plans.test.js",
+  "tests/social-3a0p-linux-physical-gates.test.js",
   "tests/social-3a0p-linux-workflow.test.js"
 ]);
 
@@ -164,10 +164,10 @@ test("creation-push contract refuses wrong branch, parent, message, before, crea
   );
   assert.equal(accepted(authorized), true);
   for (const mutation of [
-    { ref: "refs/heads/social/checkpoint-3a0p-linux-restore-provenance-20260808" },
-    { parent: "0f09b99b06fc99b5e176414d7f8365a996704f4a" },
+    { ref: "refs/heads/social/checkpoint-3a0p-linux-profile0003-vault-bridge-20260808" },
+    { parent: "ad453a930bce259f5b251a8324fc32ad388ce5b6" },
     { before: PARENT },
-    { message: "[run-social-3a0p-linux-gate] preserve restore failure provenance" },
+    { message: "[run-social-3a0p-linux-gate] bridge profile 0003 vault repository" },
     { created: false },
     { deleted: true },
     { forced: true },
@@ -205,6 +205,10 @@ test("workflow runs the physical gate exactly once and always cleans up", () => 
 
   const gate = steps.find((step) => step.id === "gate");
   assert.equal(gate.if, undefined);
+  assert.equal(
+    gate.name,
+    "Run old-contract reproduction before corrected Gate 2 once"
+  );
   const cleanup = steps.find((step) => step.id === "cleanup");
   assert.equal(cleanup.if, "always()");
   const finalizer = steps.at(-1);
