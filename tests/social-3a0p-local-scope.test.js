@@ -3,6 +3,7 @@
 const assert = require("node:assert/strict");
 const test = require("node:test");
 const {
+  ALLOWED_EXACT_FILES,
   assertHarnessOnlyChangedFiles,
   isHarnessOnlyFile,
   normalizeRepositoryFile
@@ -83,4 +84,67 @@ test("the exact Linux physical-gate workflow is the sole workflow exception", ()
       code: "harness_scope_product_change_refused"
     });
   }
+});
+
+test("test runner maintenance scope is confined to two exact files", async (t) => {
+  const contracts = Object.freeze([
+    Object.freeze(["scripts/run-node-tests.js", "allowed"]),
+    Object.freeze(["tests/node-test-runner-safety.test.js", "allowed"]),
+    Object.freeze(["scripts/run-node-test.js", "refused"]),
+    Object.freeze(["scripts/run-node-tests.js.bak", "refused"]),
+    Object.freeze(["scripts/subdir/run-node-tests.js", "refused"]),
+    Object.freeze(["tests/node-test-runner-safety.test.js.bak", "refused"]),
+    Object.freeze(["tests/subdir/node-test-runner-safety.test.js", "refused"]),
+    Object.freeze(["tests/other-existing.test.js", "refused"]),
+    Object.freeze(["scripts/", "refused"]),
+    Object.freeze(["tests/", "refused"]),
+    Object.freeze(["scripts/*", "refused"]),
+    Object.freeze(["tests/*", "refused"]),
+    Object.freeze(["C:/repo/scripts/run-node-tests.js", "invalid"]),
+    Object.freeze(["scripts/../run-node-tests.js", "invalid"]),
+    Object.freeze(["scripts\\run-node-tests.js", "allowed"]),
+    Object.freeze(["tests\\node-test-runner-safety.test.js", "allowed"])
+  ]);
+
+  assert.equal(contracts.length, 16);
+  for (const [file, expectation] of contracts) {
+    await t.test(`${expectation}: ${file}`, () => {
+      if (expectation === "allowed") {
+        assert.equal(isHarnessOnlyFile(file), true);
+        assert.deepEqual(assertHarnessOnlyChangedFiles([file]), {
+          harnessOnly: true,
+          changedFileCount: 1
+        });
+        return;
+      }
+      if (expectation === "invalid") {
+        assert.throws(() => normalizeRepositoryFile(file), {
+          code: "harness_scope_file_invalid"
+        });
+        return;
+      }
+      assert.equal(isHarnessOnlyFile(file), false);
+      assert.throws(() => assertHarnessOnlyChangedFiles([file]), {
+        code: "harness_scope_product_change_refused"
+      });
+    });
+  }
+
+  for (const file of [
+    "scripts/run-node-tests.js",
+    "tests/node-test-runner-safety.test.js"
+  ]) {
+    assert.equal(ALLOWED_EXACT_FILES.has(file), true);
+  }
+  assert.deepEqual([...ALLOWED_EXACT_FILES].sort(), [
+    ".github/workflows/social-3a0p-linux-physical-gates.yml",
+    "scripts/run-node-tests.js",
+    "tests/node-test-runner-safety.test.js",
+    "tests/social-postgres-real.test.js"
+  ]);
+  assert.equal(
+    [...ALLOWED_EXACT_FILES].some((file) => file.includes("*")),
+    false
+  );
+  assert.equal(isHarnessOnlyFile("tests/node-test-runner-safety-copy.test.js"), false);
 });
