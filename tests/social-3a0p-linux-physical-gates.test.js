@@ -12,6 +12,7 @@ const {
   runRlsAndRoleGate,
   runRlsPrivilegeInventoryContextReproduction,
   runRlsRuntimeWriteContractReproduction,
+  runRuntimeAttributesTextResolutionReproduction,
   runVaultSupplementalGate,
   runtimeWritePrivilegeInventory
 } = require("../scripts/social-3a0p-linux-physical-gates");
@@ -19,6 +20,7 @@ const {
 const ROOT = path.resolve(__dirname, "..");
 const MIGRATION_LOGIN = "ia4tube_social_local_migration";
 const MIGRATOR_ROLE = "ia4tube_social_migrator";
+const OWNER_ROLE = "ia4tube_social_owner";
 const RUNTIME_LOGIN = "ia4tube_social_local_runtime";
 const RUNTIME_ROLE = "ia4tube_social_runtime";
 
@@ -452,6 +454,221 @@ function createRlsDatabase(options = {}) {
   };
 }
 
+function createRuntimeAttributesDatabase(options = {}) {
+  const calls = [];
+  const clients = [];
+  const available = [];
+  const releaseErrors = [];
+  let identityReads = 0;
+  let textualReads = 0;
+  let privilegeReads = 0;
+  let catalogReads = 0;
+  let releaseCalls = 0;
+  let rollbackCalls = 0;
+
+  const privilegeRow = () => {
+    const row = {
+      inventory_session_identity: options.inventorySessionIdentity !== false,
+      inventory_current_identity: options.inventoryCurrentIdentity !== false,
+      runtime_login_superuser: false,
+      runtime_login_bypassrls: false,
+      runtime_login_createdb: false,
+      runtime_login_createrole: false,
+      runtime_login_replication: false,
+      runtime_role_superuser: false,
+      runtime_role_bypassrls: false,
+      runtime_role_createdb: false,
+      runtime_role_createrole: false,
+      runtime_role_replication: false,
+      runtime_login_migrator_member: false,
+      runtime_role_migrator_member: false,
+      runtime_login_owner_member: false,
+      runtime_role_owner_member: false,
+      runtime_login_schema_usage: false,
+      runtime_role_schema_usage: false,
+      runtime_login_schema_create: false,
+      runtime_role_schema_create: false,
+      runtime_login_table_select: false,
+      runtime_login_table_insert: false,
+      runtime_login_table_update: false,
+      runtime_login_table_delete: false,
+      runtime_login_table_truncate: false,
+      runtime_login_table_references: false,
+      runtime_login_table_trigger: false,
+      runtime_login_table_maintain: false,
+      runtime_role_table_select: false,
+      runtime_role_table_insert: false,
+      runtime_role_table_update: false,
+      runtime_role_table_delete: false,
+      runtime_role_table_truncate: false,
+      runtime_role_table_references: false,
+      runtime_role_table_trigger: false,
+      runtime_role_table_maintain: false,
+      ...(options.privilegeOverrides || {})
+    };
+    if (options.omitPrivilegeField) delete row[options.omitPrivilegeField];
+    return row;
+  };
+
+  const roleRows = () => {
+    const rows = [
+      { role_name: MIGRATOR_ROLE, role_oid: 6104 },
+      { role_name: OWNER_ROLE, role_oid: 6105 },
+      { role_name: RUNTIME_LOGIN, role_oid: 6101 },
+      { role_name: RUNTIME_ROLE, role_oid: 6103 }
+    ];
+    if (options.missingRole) return rows.filter((row) => row.role_name !== options.missingRole);
+    if (options.duplicateRole) return [...rows, { ...rows[0] }];
+    if (Object.hasOwn(options, "invalidRoleOid")) rows[0].role_oid = options.invalidRoleOid;
+    if (options.duplicateRoleOid) rows[1].role_oid = rows[0].role_oid;
+    if (options.unexpectedRoleName) rows[0].role_name = options.unexpectedRoleName;
+    return rows;
+  };
+
+  class Client {
+    constructor() {
+      this.sessionUser = MIGRATION_LOGIN;
+      this.currentUser = MIGRATION_LOGIN;
+      if (options.initialTransactionStatus !== "absent") {
+        this._txStatus = options.initialTransactionStatus ?? "I";
+      }
+      this.checkedOut = true;
+      clients.push(this);
+    }
+
+    async query(text, values = []) {
+      const sql = String(text);
+      calls.push({
+        sql,
+        values: [...values],
+        transactionStatus: this._txStatus,
+        sessionUser: this.sessionUser,
+        currentUser: this.currentUser
+      });
+      if (sql === "ROLLBACK") {
+        rollbackCalls += 1;
+        this._txStatus = "I";
+        if (options.rollbackFailureCode) throw postgresError(options.rollbackFailureCode);
+        return { rows: [] };
+      }
+      if (sql.includes("AS direct_session_identity")) {
+        identityReads += 1;
+        const row = {
+          direct_session_identity: options.directSessionIdentity !== false,
+          direct_current_identity: options.directCurrentIdentity !== false &&
+            !(options.resetIdentityDrift === true && identityReads >= 3),
+          direct_inherits_migrator: options.directInheritsMigrator === true,
+          direct_schema_usage: options.directSchemaUsage === true
+        };
+        if (options.omitDirectIdentityField) delete row[options.omitDirectIdentityField];
+        return { rows: [row] };
+      }
+      if (sql.includes("AS textual_runtime_privilege")) {
+        textualReads += 1;
+        if (options.afterTextTransactionStatus === "absent") {
+          delete this._txStatus;
+        } else if (options.afterTextTransactionStatus) {
+          this._txStatus = options.afterTextTransactionStatus;
+        }
+        if (options.textualQueryReturns === true) {
+          return { rows: [{ textual_runtime_privilege: false }] };
+        }
+        throw postgresError(options.textualFailureCode || "42501");
+      }
+      if (sql.includes("AS direct_pool_usable")) {
+        return { rows: [{
+          direct_pool_usable: options.directPoolUsable !== false,
+          direct_transaction_persisted: options.directTransactionPersisted === true
+        }] };
+      }
+      if (sql.includes("AS runtime_login_superuser")) {
+        privilegeReads += 1;
+        if (options.privilegeFailureCode) throw postgresError(options.privilegeFailureCode);
+        if (options.missingPrivilegeRow) return { rows: [] };
+        const row = privilegeRow();
+        return { rows: options.duplicatePrivilegeRow ? [row, { ...row }] : [row] };
+      }
+      if (sql.includes("AS namespace_name") && sql.includes("AS relation_name")) {
+        catalogReads += 1;
+        if (options.missingSchema || options.missingRelation) return { rows: [] };
+        const mutated = (options.mutateAclDuringText === true && textualReads > 0) ||
+          (options.mutateAclAfterPrivilege === true && privilegeReads > 0);
+        const row = {
+          namespace_name: options.schemaName ?? "ia4tube_migrations",
+          namespace_oid: options.schemaOid ?? 6100,
+          relation_name: options.relationName ?? "schema_migrations",
+          relation_oid: options.relationOid ?? 6101,
+          relation_kind: options.relationKind ?? "r",
+          schema_acl: mutated ? "{mutated_schema_acl}" : "{synthetic_schema_acl}",
+          relation_acl: mutated ? "{mutated_relation_acl}" : "{synthetic_relation_acl}"
+        };
+        return {
+          rows: options.duplicateSchema || options.duplicateRelation ? [row, { ...row }] : [row]
+        };
+      }
+      if (sql.includes("AS namespace_name")) {
+        catalogReads += 1;
+        if (options.missingSchema) return { rows: [] };
+        const mutated = (options.mutateAclDuringText === true && textualReads > 0) ||
+          (options.mutateAclAfterPrivilege === true && privilegeReads > 0);
+        const row = {
+          namespace_name: options.schemaName ?? "ia4tube_migrations",
+          namespace_oid: options.schemaOid ?? 6100,
+          schema_acl: mutated ? "{mutated_schema_acl}" : "{synthetic_schema_acl}"
+        };
+        return { rows: options.duplicateSchema ? [row, { ...row }] : [row] };
+      }
+      if (sql.includes("AS relation_name")) {
+        if (options.missingRelation) return { rows: [] };
+        const mutated = (options.mutateAclDuringText === true && textualReads > 0) ||
+          (options.mutateAclAfterPrivilege === true && privilegeReads > 0);
+        const row = {
+          relation_name: options.relationName ?? "schema_migrations",
+          relation_oid: options.relationOid ?? 6101,
+          relation_kind: options.relationKind ?? "r",
+          relation_acl: mutated ? "{mutated_relation_acl}" : "{synthetic_relation_acl}"
+        };
+        return { rows: options.duplicateRelation ? [row, { ...row }] : [row] };
+      }
+      if (sql.includes("AS role_name")) {
+        return { rows: roleRows() };
+      }
+      throw new Error(`unexpected runtime attributes query: ${sql}`);
+    }
+
+    release(error) {
+      if (!this.checkedOut) return;
+      releaseCalls += 1;
+      releaseErrors.push(error?.code || null);
+      this.checkedOut = false;
+      if (options.releaseFailureAt === releaseCalls) {
+        throw postgresError(options.releaseFailureCode || "runtime_attributes_release_failed");
+      }
+      available.push(this);
+    }
+  }
+
+  const migration = {
+    async connect() {
+      const client = available.pop() || new Client();
+      client.checkedOut = true;
+      return client;
+    }
+  };
+  return {
+    state: { pools: { migration } },
+    calls,
+    clients,
+    releaseErrors,
+    get catalogReads() { return catalogReads; },
+    get identityReads() { return identityReads; },
+    get privilegeReads() { return privilegeReads; },
+    get releaseCalls() { return releaseCalls; },
+    get rollbackCalls() { return rollbackCalls; },
+    get textualReads() { return textualReads; }
+  };
+}
+
 function reproductionProof(overrides = {}) {
   return Object.freeze({
     runtimeWriteContractReproductionPassed: true,
@@ -467,6 +684,413 @@ function reproductionProof(overrides = {}) {
     ...overrides
   });
 }
+
+function runtimeAttributesProof(overrides = {}) {
+  return Object.freeze({
+    runtimeLoginAttributesSafe: true,
+    runtimeRoleAttributesSafe: true,
+    runtimeLoginMigratorMember: false,
+    runtimeRoleMigratorMember: false,
+    runtimeLoginOwnerMember: false,
+    runtimeRoleOwnerMember: false,
+    runtimeLoginMigrationSchemaUsage: false,
+    runtimeRoleMigrationSchemaUsage: false,
+    runtimeLoginMigrationSchemaCreate: false,
+    runtimeRoleMigrationSchemaCreate: false,
+    runtimeLoginMigrationTablePrivileges: false,
+    runtimeRoleMigrationTablePrivileges: false,
+    migrationSchemaLocatedByOid: true,
+    migrationLedgerLocatedByOid: true,
+    textualResolutionUsed: false,
+    aclUnchanged: true,
+    ...overrides
+  });
+}
+
+test("runtime attributes phase exposes the closed OID contract", () => {
+  assert.equal(typeof runRuntimeAttributesTextResolutionReproduction, "function");
+  assert.equal(Object.keys(runtimeAttributesProof()).length, 16);
+});
+
+test("runtime attributes phase reproduces textual 42501 before the exact OID inventory", async () => {
+  const database = createRuntimeAttributesDatabase();
+  const substeps = [];
+  const result = await runRuntimeAttributesTextResolutionReproduction(database.state, {
+    async runSubstep(name, operation) {
+      substeps.push(name);
+      return operation();
+    }
+  });
+  assert.deepEqual(result, runtimeAttributesProof());
+  assert.deepEqual(Object.keys(result), Object.keys(runtimeAttributesProof()));
+  assert.deepEqual(substeps, [
+    "rls_runtime_attributes_direct_identity",
+    "rls_runtime_attributes_text_resolution_refusal",
+    "rls_runtime_attributes_oid_catalog",
+    "rls_runtime_attributes_oid_privileges",
+    "rls_runtime_attributes_acl_reset"
+  ]);
+  assert.equal(database.textualReads, 1);
+  assert.equal(database.privilegeReads, 1);
+  assert.equal(database.identityReads, 3);
+  const textualIndex = database.calls.findIndex((call) =>
+    call.sql.includes("AS textual_runtime_privilege")
+  );
+  const oidIndex = database.calls.findIndex((call) =>
+    call.sql.includes("AS runtime_login_superuser")
+  );
+  assert.ok(textualIndex >= 0 && textualIndex < oidIndex);
+  const textual = database.calls[textualIndex];
+  assert.deepEqual(textual.values, [RUNTIME_LOGIN]);
+  assert.equal(textual.transactionStatus, "I");
+  const oid = database.calls[oidIndex];
+  assert.deepEqual(oid.values, [
+    MIGRATION_LOGIN,
+    "6100",
+    "6101",
+    "6101",
+    "6103",
+    "6104",
+    "6105"
+  ]);
+  assert.match(oid.sql, /has_schema_privilege\(runtime_login\.oid,namespace\.oid,'USAGE'\)/);
+  assert.match(oid.sql, /has_table_privilege\(runtime_role\.oid,relation\.oid,'MAINTAIN'\)/);
+  assert.match(oid.sql, /pg_has_role\(runtime_role\.oid,owner_role\.oid,'MEMBER'\)/);
+  assert.equal((oid.sql.match(/has_table_privilege\(/g) || []).length, 16);
+  assert.equal((oid.sql.match(/has_schema_privilege\(/g) || []).length, 4);
+  assert.equal((oid.sql.match(/pg_has_role\(/g) || []).length, 4);
+  assert.doesNotMatch(oid.sql, /::\s*regclass|to_regclass|ia4tube_migrations\.schema_migrations/i);
+  assert.equal(database.calls.some((call) =>
+    /(?:^|\n)\s*(?:INSERT|UPDATE|DELETE|GRANT|REVOKE|ALTER|CREATE|DROP|TRUNCATE)\b/m.test(call.sql)
+  ), false);
+  assert.equal(database.clients.every((client) => client.checkedOut === false), true);
+});
+
+test("runtime attributes corrected path has one isolated textual relation and no fallback", () => {
+  const source = fs.readFileSync(
+    path.join(ROOT, "scripts/social-3a0p-linux-physical-gates.js"),
+    "utf8"
+  );
+  assert.equal((source.match(/'ia4tube_migrations\.schema_migrations'/g) || []).length, 1);
+  assert.equal((source.match(/AS textual_runtime_privilege/g) || []).length, 1);
+  assert.doesNotMatch(source, /::\s*regclass|to_regclass/i);
+  assert.match(source, /FROM pg_catalog\.pg_namespace namespace/);
+  assert.match(source, /FROM pg_catalog\.pg_class relation/);
+  assert.match(source, /WHERE relation\.relnamespace=\$1::oid/);
+  assert.match(source, /runtime_login\.oid=\$4::oid/);
+  assert.match(source, /owner_role\.oid=\$7::oid/);
+});
+
+test("runtime attributes textual reproduction fails closed before OID privilege results", async () => {
+  for (const [options, code] of [
+    [{ textualFailureCode: "22P02" }, "linux_gate_runtime_attributes_text_resolution_invalid"],
+    [{ textualQueryReturns: true }, "linux_gate_runtime_attributes_text_resolution_invalid"],
+    [{ directPoolUsable: false }, "linux_gate_runtime_attributes_pool_state_invalid"],
+    [{ directTransactionPersisted: true }, "linux_gate_runtime_attributes_pool_state_invalid"],
+    [{ mutateAclDuringText: true }, "linux_gate_runtime_attributes_acl_changed"]
+  ]) {
+    const database = createRuntimeAttributesDatabase(options);
+    const substeps = [];
+    await assert.rejects(
+      runRuntimeAttributesTextResolutionReproduction(database.state, {
+        async runSubstep(name, operation) {
+          substeps.push(name);
+          return operation();
+        }
+      }),
+      { code }
+    );
+    assert.equal(substeps.at(-1), "rls_runtime_attributes_text_resolution_refusal");
+    assert.equal(database.privilegeReads, 0);
+    assert.equal(database.clients.every((client) => client.checkedOut === false), true);
+  }
+});
+
+test("runtime attributes reproduction requires exact direct identity booleans", async () => {
+  for (const options of [
+    { directSessionIdentity: false },
+    { directCurrentIdentity: false },
+    { directInheritsMigrator: true },
+    { directSchemaUsage: true },
+    { omitDirectIdentityField: "direct_schema_usage" }
+  ]) {
+    const database = createRuntimeAttributesDatabase(options);
+    await assert.rejects(
+      runRuntimeAttributesTextResolutionReproduction(database.state, {
+        runSubstep: (_name, operation) => operation()
+      }),
+      { code: "linux_gate_runtime_attributes_direct_identity_invalid" }
+    );
+    assert.equal(database.textualReads, 0);
+    assert.equal(database.privilegeReads, 0);
+  }
+});
+
+test("runtime attributes reproduction requires idle physical state and cleans contaminated clients", async () => {
+  for (const initialTransactionStatus of ["T", "E", "absent"]) {
+    const database = createRuntimeAttributesDatabase({ initialTransactionStatus });
+    const substeps = [];
+    await assert.rejects(
+      runRuntimeAttributesTextResolutionReproduction(database.state, {
+        async runSubstep(name, operation) {
+          substeps.push(name);
+          return operation();
+        }
+      }),
+      { code: "linux_gate_runtime_attributes_transaction_state_invalid" }
+    );
+    assert.equal(substeps.at(-1), "rls_runtime_attributes_direct_identity");
+    assert.equal(database.rollbackCalls, initialTransactionStatus === "absent" ? 0 : 1);
+    assert.equal(database.releaseCalls, 1);
+  }
+  const afterText = createRuntimeAttributesDatabase({ afterTextTransactionStatus: "T" });
+  const substeps = [];
+  await assert.rejects(
+    runRuntimeAttributesTextResolutionReproduction(afterText.state, {
+      async runSubstep(name, operation) {
+        substeps.push(name);
+        return operation();
+      }
+    }),
+    { code: "linux_gate_runtime_attributes_transaction_state_invalid" }
+  );
+  assert.equal(substeps.at(-1), "rls_runtime_attributes_text_resolution_refusal");
+  assert.equal(afterText.rollbackCalls, 1);
+  assert.equal(afterText.releaseCalls, 1);
+});
+
+test("runtime attributes cleanup preserves primary and propagates cleanup-only failure", async () => {
+  const primary = createRuntimeAttributesDatabase({
+    initialTransactionStatus: "T",
+    rollbackFailureCode: "runtime_attributes_rollback_failed",
+    releaseFailureAt: 1
+  });
+  await assert.rejects(
+    runRuntimeAttributesTextResolutionReproduction(primary.state, {
+      runSubstep: (_name, operation) => operation()
+    }),
+    { code: "linux_gate_runtime_attributes_transaction_state_invalid" }
+  );
+  assert.equal(primary.rollbackCalls, 1);
+  assert.equal(primary.releaseCalls, 1);
+  assert.deepEqual(primary.releaseErrors, ["runtime_attributes_rollback_failed"]);
+
+  const cleanupOnly = createRuntimeAttributesDatabase({ releaseFailureAt: 3 });
+  const substeps = [];
+  await assert.rejects(
+    runRuntimeAttributesTextResolutionReproduction(cleanupOnly.state, {
+      async runSubstep(name, operation) {
+        substeps.push(name);
+        return operation();
+      }
+    }),
+    { code: "runtime_attributes_release_failed" }
+  );
+  assert.equal(substeps.at(-1), "rls_runtime_attributes_acl_reset");
+  assert.equal(cleanupOnly.releaseCalls, 3);
+});
+
+test("runtime attributes OID catalog refuses schema, relation, relkind and role drift", async () => {
+  for (const [options, code] of [
+    [{ missingSchema: true }, "linux_gate_runtime_attributes_migration_schema_invalid"],
+    [{ duplicateSchema: true }, "linux_gate_runtime_attributes_migration_schema_invalid"],
+    [{ schemaName: "unexpected_schema" }, "linux_gate_runtime_attributes_migration_schema_invalid"],
+    [{ schemaOid: 0 }, "linux_gate_runtime_attributes_migration_schema_invalid"],
+    [{ missingRelation: true }, "linux_gate_runtime_attributes_migration_ledger_invalid"],
+    [{ duplicateRelation: true }, "linux_gate_runtime_attributes_migration_ledger_invalid"],
+    [{ relationName: "unexpected_relation" }, "linux_gate_runtime_attributes_migration_ledger_invalid"],
+    [{ relationOid: 0 }, "linux_gate_runtime_attributes_migration_ledger_invalid"],
+    [{ relationKind: "v" }, "linux_gate_runtime_attributes_migration_ledger_kind_invalid"],
+    [{ missingRole: OWNER_ROLE }, "linux_gate_runtime_attributes_role_catalog_invalid"],
+    [{ duplicateRole: true }, "linux_gate_runtime_attributes_role_catalog_invalid"],
+    [{ invalidRoleOid: 0 }, "linux_gate_runtime_attributes_role_catalog_invalid"],
+    [{ duplicateRoleOid: true }, "linux_gate_runtime_attributes_role_catalog_invalid"],
+    [{ unexpectedRoleName: "unexpected_role" }, "linux_gate_runtime_attributes_role_catalog_invalid"]
+  ]) {
+    const database = createRuntimeAttributesDatabase(options);
+    const substeps = [];
+    await assert.rejects(
+      runRuntimeAttributesTextResolutionReproduction(database.state, {
+        async runSubstep(name, operation) {
+          substeps.push(name);
+          return operation();
+        }
+      }),
+      { code }
+    );
+    assert.equal(substeps.at(-1), "rls_runtime_attributes_oid_catalog");
+    assert.equal(database.textualReads, 1);
+    assert.equal(database.privilegeReads, 0);
+  }
+});
+
+test("runtime attributes OID inventory refuses unsafe attributes and memberships separately", async () => {
+  for (const [field, code] of [
+    ["runtime_login_superuser", "linux_gate_runtime_login_attributes_unsafe"],
+    ["runtime_login_bypassrls", "linux_gate_runtime_login_attributes_unsafe"],
+    ["runtime_login_createdb", "linux_gate_runtime_login_attributes_unsafe"],
+    ["runtime_login_createrole", "linux_gate_runtime_login_attributes_unsafe"],
+    ["runtime_login_replication", "linux_gate_runtime_login_attributes_unsafe"],
+    ["runtime_role_superuser", "linux_gate_runtime_role_attributes_unsafe"],
+    ["runtime_role_bypassrls", "linux_gate_runtime_role_attributes_unsafe"],
+    ["runtime_role_createdb", "linux_gate_runtime_role_attributes_unsafe"],
+    ["runtime_role_createrole", "linux_gate_runtime_role_attributes_unsafe"],
+    ["runtime_role_replication", "linux_gate_runtime_role_attributes_unsafe"],
+    ["runtime_login_migrator_member", "linux_gate_runtime_login_migrator_membership_unexpected"],
+    ["runtime_role_migrator_member", "linux_gate_runtime_role_migrator_membership_unexpected"],
+    ["runtime_login_owner_member", "linux_gate_runtime_login_owner_membership_unexpected"],
+    ["runtime_role_owner_member", "linux_gate_runtime_role_owner_membership_unexpected"]
+  ]) {
+    const database = createRuntimeAttributesDatabase({ privilegeOverrides: { [field]: true } });
+    await assert.rejects(
+      runRuntimeAttributesTextResolutionReproduction(database.state, {
+        runSubstep: (_name, operation) => operation()
+      }),
+      { code }
+    );
+  }
+});
+
+test("runtime attributes OID inventory refuses migration schema privileges separately", async () => {
+  for (const [field, code] of [
+    ["runtime_login_schema_usage", "linux_gate_runtime_login_migration_schema_usage_unexpected"],
+    ["runtime_role_schema_usage", "linux_gate_runtime_role_migration_schema_usage_unexpected"],
+    ["runtime_login_schema_create", "linux_gate_runtime_login_migration_schema_create_unexpected"],
+    ["runtime_role_schema_create", "linux_gate_runtime_role_migration_schema_create_unexpected"]
+  ]) {
+    const database = createRuntimeAttributesDatabase({ privilegeOverrides: { [field]: true } });
+    await assert.rejects(
+      runRuntimeAttributesTextResolutionReproduction(database.state, {
+        runSubstep: (_name, operation) => operation()
+      }),
+      { code }
+    );
+  }
+});
+
+test("runtime attributes OID inventory refuses every migration table privilege for both subjects", async () => {
+  const privileges = [
+    "select",
+    "insert",
+    "update",
+    "delete",
+    "truncate",
+    "references",
+    "trigger",
+    "maintain"
+  ];
+  for (const subject of ["runtime_login", "runtime_role"]) {
+    for (const privilege of privileges) {
+      const field = `${subject}_table_${privilege}`;
+      const database = createRuntimeAttributesDatabase({ privilegeOverrides: { [field]: true } });
+      await assert.rejects(
+        runRuntimeAttributesTextResolutionReproduction(database.state, {
+          runSubstep: (_name, operation) => operation()
+        }),
+        {
+          code: subject === "runtime_login"
+            ? "linux_gate_runtime_login_migration_table_privilege_unexpected"
+            : "linux_gate_runtime_role_migration_table_privilege_unexpected"
+        }
+      );
+    }
+  }
+});
+
+test("runtime attributes OID inventory refuses null and omitted security booleans", async () => {
+  const expectedCodes = {
+    runtime_login_superuser: "linux_gate_runtime_login_attributes_unsafe",
+    runtime_login_bypassrls: "linux_gate_runtime_login_attributes_unsafe",
+    runtime_login_createdb: "linux_gate_runtime_login_attributes_unsafe",
+    runtime_login_createrole: "linux_gate_runtime_login_attributes_unsafe",
+    runtime_login_replication: "linux_gate_runtime_login_attributes_unsafe",
+    runtime_role_superuser: "linux_gate_runtime_role_attributes_unsafe",
+    runtime_role_bypassrls: "linux_gate_runtime_role_attributes_unsafe",
+    runtime_role_createdb: "linux_gate_runtime_role_attributes_unsafe",
+    runtime_role_createrole: "linux_gate_runtime_role_attributes_unsafe",
+    runtime_role_replication: "linux_gate_runtime_role_attributes_unsafe",
+    runtime_login_migrator_member: "linux_gate_runtime_login_migrator_membership_unexpected",
+    runtime_role_migrator_member: "linux_gate_runtime_role_migrator_membership_unexpected",
+    runtime_login_owner_member: "linux_gate_runtime_login_owner_membership_unexpected",
+    runtime_role_owner_member: "linux_gate_runtime_role_owner_membership_unexpected",
+    runtime_login_schema_usage: "linux_gate_runtime_login_migration_schema_usage_unexpected",
+    runtime_role_schema_usage: "linux_gate_runtime_role_migration_schema_usage_unexpected",
+    runtime_login_schema_create: "linux_gate_runtime_login_migration_schema_create_unexpected",
+    runtime_role_schema_create: "linux_gate_runtime_role_migration_schema_create_unexpected"
+  };
+  for (const subject of ["runtime_login", "runtime_role"]) {
+    for (const privilege of [
+      "select", "insert", "update", "delete", "truncate", "references", "trigger", "maintain"
+    ]) {
+      expectedCodes[`${subject}_table_${privilege}`] = subject === "runtime_login"
+        ? "linux_gate_runtime_login_migration_table_privilege_unexpected"
+        : "linux_gate_runtime_role_migration_table_privilege_unexpected";
+    }
+  }
+  for (const [field, code] of Object.entries(expectedCodes)) {
+    for (const options of [
+      { privilegeOverrides: { [field]: null } },
+      { omitPrivilegeField: field }
+    ]) {
+      const database = createRuntimeAttributesDatabase(options);
+      await assert.rejects(
+        runRuntimeAttributesTextResolutionReproduction(database.state, {
+          runSubstep: (_name, operation) => operation()
+        }),
+        { code }
+      );
+    }
+  }
+});
+
+test("runtime attributes OID inventory refuses result drift and resets after exceptions", async () => {
+  for (const [options, code, lastSubstep] of [
+    [
+      { inventorySessionIdentity: false },
+      "linux_gate_runtime_attributes_oid_inventory_invalid",
+      "rls_runtime_attributes_oid_privileges"
+    ],
+    [
+      { inventoryCurrentIdentity: false },
+      "linux_gate_runtime_attributes_oid_inventory_invalid",
+      "rls_runtime_attributes_oid_privileges"
+    ],
+    [
+      { missingPrivilegeRow: true },
+      "linux_gate_runtime_attributes_oid_inventory_invalid",
+      "rls_runtime_attributes_oid_privileges"
+    ],
+    [
+      { duplicatePrivilegeRow: true },
+      "linux_gate_runtime_attributes_oid_inventory_invalid",
+      "rls_runtime_attributes_oid_privileges"
+    ],
+    [
+      { mutateAclAfterPrivilege: true },
+      "linux_gate_runtime_attributes_acl_changed",
+      "rls_runtime_attributes_acl_reset"
+    ],
+    [
+      { resetIdentityDrift: true },
+      "linux_gate_runtime_attributes_direct_identity_invalid",
+      "rls_runtime_attributes_acl_reset"
+    ]
+  ]) {
+    const database = createRuntimeAttributesDatabase(options);
+    const substeps = [];
+    await assert.rejects(
+      runRuntimeAttributesTextResolutionReproduction(database.state, {
+        async runSubstep(name, operation) {
+          substeps.push(name);
+          return operation();
+        }
+      }),
+      { code }
+    );
+    assert.equal(substeps.at(-1), lastSubstep);
+    assert.equal(database.clients.every((client) => client.checkedOut === false), true);
+  }
+});
 
 test("runtime privilege inventory refuses a raw pool before any query", async () => {
   let queried = false;
@@ -980,6 +1604,7 @@ test("corrected RLS gate has no fallback around base or reproduction prerequisit
     await assert.rejects(
       runRlsAndRoleGate(database.state, {
         baseRlsGatePassed: true,
+        runtimeAttributesTextResolutionReproduction: runtimeAttributesProof(),
         reproduction,
         async runSubstep(name, operation) {
           substeps.push(name);
@@ -995,11 +1620,31 @@ test("corrected RLS gate has no fallback around base or reproduction prerequisit
   }
 });
 
+test("corrected RLS gate requires the exact runtime attributes proof before tenant work", async () => {
+  for (const runtimeAttributesTextResolutionReproduction of [
+    undefined,
+    runtimeAttributesProof({ runtimeRoleMigrationTablePrivileges: true })
+  ]) {
+    const database = createRlsDatabase();
+    await assert.rejects(
+      runRlsAndRoleGate(database.state, {
+        baseRlsGatePassed: true,
+        reproduction: reproductionProof(),
+        runtimeAttributesTextResolutionReproduction,
+        runSubstep: (_name, operation) => operation()
+      }),
+      { code: "linux_gate_runtime_attributes_reproduction_required" }
+    );
+    assert.equal(database.calls.length, 0);
+  }
+});
+
 test("corrected RLS gate writes own audit events and rejects both cross-tenant directions", async () => {
   const database = createRlsDatabase();
   const substeps = [];
   const result = await runRlsAndRoleGate(database.state, {
     baseRlsGatePassed: true,
+    runtimeAttributesTextResolutionReproduction: runtimeAttributesProof(),
     reproduction: reproductionProof(),
     async runSubstep(name, operation) {
       substeps.push(name);
@@ -1014,8 +1659,7 @@ test("corrected RLS gate writes own audit events and rejects both cross-tenant d
     "rls_tampered_context",
     "rls_own_social_write",
     "rls_cross_tenant_write",
-    "rls_connection_scope_reset",
-    "rls_runtime_role_attributes"
+    "rls_connection_scope_reset"
   ]);
   assert.deepEqual(result, {
     baseRlsGatePassed: true,
@@ -1056,6 +1700,7 @@ test("corrected RLS gate detects any cross-tenant event that remains persisted",
   await assert.rejects(
     runRlsAndRoleGate(database.state, {
       baseRlsGatePassed: true,
+      runtimeAttributesTextResolutionReproduction: runtimeAttributesProof(),
       reproduction: reproductionProof(),
       runSubstep: (_name, operation) => operation()
     }),
@@ -1072,6 +1717,7 @@ test("connection reset preserves a primary failure while still attempting releas
   await assert.rejects(
     runRlsAndRoleGate(database.state, {
       baseRlsGatePassed: true,
+      runtimeAttributesTextResolutionReproduction: runtimeAttributesProof(),
       reproduction: reproductionProof(),
       async runSubstep(name, operation) {
         substeps.push(name);
@@ -1093,6 +1739,7 @@ test("connection reset propagates a release-only failure from its closed substep
   await assert.rejects(
     runRlsAndRoleGate(database.state, {
       baseRlsGatePassed: true,
+      runtimeAttributesTextResolutionReproduction: runtimeAttributesProof(),
       reproduction: reproductionProof(),
       async runSubstep(name, operation) {
         substeps.push(name);

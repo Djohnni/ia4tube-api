@@ -28,6 +28,7 @@ const {
   runRlsAndRoleGate,
   runRlsPrivilegeInventoryContextReproduction,
   runRlsRuntimeWriteContractReproduction,
+  runRuntimeAttributesTextResolutionReproduction,
   runVaultSupplementalGate
 } = require("./social-3a0p-linux-physical-gates");
 const {
@@ -37,8 +38,8 @@ const {
 } = require("./social-3a0p-local-runtime-evidence-metrics");
 
 const BRANCH =
-  "social/checkpoint-3a0p-linux-rls-oid-inventory-20260809";
-const BASE_COMMIT = "27231f7e11ae8e73599d99420e47fbf987bf03ec";
+  "social/checkpoint-3a0p-linux-runtime-attributes-oid-20260809";
+const BASE_COMMIT = "25b2669cfce85f8e2a2389c0ed128159dc6f83e1";
 const PRODUCT_COMMIT = "fcfc92419021dae5f77baad731c634b10c275c5b";
 const MARKER = "[run-social-3a0p-linux-gate]";
 const RUN_MARKER_PREFIX = "ia4tube-social-3a0p-linux-";
@@ -137,7 +138,8 @@ const BACKUP_RESTORE_SUBSTEPS = new Set([
 const SAFE_PHASE = new Set([
   "platform", "durability", "postgres", "bootstrap", "migrations",
   "rls_privilege_inventory_context_reproduction",
-  "rls_runtime_write_contract_reproduction", "rls_roles",
+  "rls_runtime_write_contract_reproduction",
+  "rls_runtime_attributes_text_resolution_reproduction", "rls_roles",
   "concurrency_oauth_idempotency", "vault", "backup_restore", "metrics", "secret_scan", "cleanup"
 ]);
 const RLS_SUBSTEPS = new Set([
@@ -152,6 +154,12 @@ const RLS_SUBSTEPS = new Set([
   "rls_inventory_role_reset",
   "rls_core_user_insert_reproduction",
   "rls_core_user_insert_refusal",
+  "rls_runtime_attributes_direct_identity",
+  "rls_runtime_attributes_text_resolution_refusal",
+  "rls_runtime_attributes_oid_catalog",
+  "rls_runtime_attributes_oid_privileges",
+  "rls_runtime_attributes_acl_reset",
+  "rls_runtime_attributes_evidence_validation",
   "rls_bidirectional_read",
   "rls_missing_context",
   "rls_tampered_context",
@@ -216,6 +224,24 @@ const RLS_REPRODUCTION_EVIDENCE = Object.freeze({
   socialAuditEventInsertPrivilege: true,
   socialAuditEventsRlsProtected: true,
   tenantSeedsCreatedByAdministrativeRole: true
+});
+const RLS_RUNTIME_ATTRIBUTES_TEXT_RESOLUTION_RESULT = Object.freeze({
+  runtimeLoginAttributesSafe: true,
+  runtimeRoleAttributesSafe: true,
+  runtimeLoginMigratorMember: false,
+  runtimeRoleMigratorMember: false,
+  runtimeLoginOwnerMember: false,
+  runtimeRoleOwnerMember: false,
+  runtimeLoginMigrationSchemaUsage: false,
+  runtimeRoleMigrationSchemaUsage: false,
+  runtimeLoginMigrationSchemaCreate: false,
+  runtimeRoleMigrationSchemaCreate: false,
+  runtimeLoginMigrationTablePrivileges: false,
+  runtimeRoleMigrationTablePrivileges: false,
+  migrationSchemaLocatedByOid: true,
+  migrationLedgerLocatedByOid: true,
+  textualResolutionUsed: false,
+  aclUnchanged: true
 });
 const RLS_ROLE_GATE_RESULT = Object.freeze({
   baseRlsGatePassed: true,
@@ -404,6 +430,33 @@ async function runRlsPrivilegeInventoryContextPhase(options = {}) {
   }
 }
 
+function publicRlsRuntimeAttributesTextResolutionReproductionEvidence(candidate) {
+  return exactRlsResult(
+    candidate,
+    RLS_RUNTIME_ATTRIBUTES_TEXT_RESOLUTION_RESULT,
+    "rls_runtime_attributes_text_resolution_reproduction_invalid"
+  );
+}
+
+async function runRlsRuntimeAttributesTextResolutionPhase(options = {}) {
+  const {
+    state,
+    runSubstep,
+    runReproduction = runRuntimeAttributesTextResolutionReproduction
+  } = options;
+  if (
+    !state || typeof runSubstep !== "function" ||
+    typeof runReproduction !== "function"
+  ) {
+    fail("rls_runtime_attributes_text_resolution_orchestrator_invalid");
+  }
+  const candidate = await runReproduction(state, Object.freeze({ runSubstep }));
+  return runSubstep(
+    "rls_runtime_attributes_evidence_validation",
+    async () => publicRlsRuntimeAttributesTextResolutionReproductionEvidence(candidate)
+  );
+}
+
 function publicRlsRoleGateEvidence(candidate) {
   return exactRlsResult(
     candidate,
@@ -469,15 +522,22 @@ function createRlsRuntimeWriteContractOrchestrator(options = {}) {
     }
   }
 
-  async function correct() {
+  async function correct(runtimeAttributesTextResolutionReproduction) {
     if (status !== "reproduced") {
       fail("rls_runtime_write_contract_reproduction_required");
     }
-    status = "correcting";
+    status = "validating_runtime_attributes";
     try {
+      const runtimeAttributes = exactRlsResult(
+        runtimeAttributesTextResolutionReproduction,
+        RLS_RUNTIME_ATTRIBUTES_TEXT_RESOLUTION_RESULT,
+        "rls_runtime_attributes_text_resolution_reproduction_required"
+      );
+      status = "correcting";
       const candidate = await runCorrected(state, Object.freeze({
         baseRlsGatePassed: true,
         reproduction,
+        runtimeAttributesTextResolutionReproduction: runtimeAttributes,
         runSubstep
       }));
       const evidence = await runSubstep(
@@ -3142,8 +3202,21 @@ async function runLinuxGate(options = {}) {
       "rls_runtime_write_contract_reproduction",
       () => rlsRuntimeWriteContract.reproduce()
     );
+    activePhase = "rls_runtime_attributes_text_resolution_reproduction";
+    const runtimeAttributesTextResolutionReproduction = await phase(
+      "rls_runtime_attributes_text_resolution_reproduction",
+      () => runRlsRuntimeAttributesTextResolutionPhase({
+        state,
+        runSubstep: rlsFailureProvenance.runSubstep
+      })
+    );
     activePhase = "rls_roles";
-    await phase("rls_roles", () => rlsRuntimeWriteContract.correct());
+    await phase(
+      "rls_roles",
+      () => rlsRuntimeWriteContract.correct(
+        runtimeAttributesTextResolutionReproduction
+      )
+    );
     activePhase = "concurrency_oauth_idempotency";
     await phase("concurrency_oauth_idempotency", async () => {
       const base = await gates.concurrency({ state });
@@ -3426,6 +3499,7 @@ module.exports = {
   publicBackupTransportEvidence,
   publicRlsPrivilegeInventoryContextReproductionEvidence,
   publicRlsRoleGateEvidence,
+  publicRlsRuntimeAttributesTextResolutionReproductionEvidence,
   publicRlsRuntimeWriteContractReproductionEvidence,
   retirePrimaryPoolsBeforeBackup,
   rlsFailureCode,
@@ -3433,5 +3507,6 @@ module.exports = {
   sanitizedFailureEvidence,
   sanitizedRlsFailureProvenance,
   runRlsPrivilegeInventoryContextPhase,
+  runRlsRuntimeAttributesTextResolutionPhase,
   runLinuxGate
 };

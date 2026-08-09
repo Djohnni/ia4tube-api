@@ -2,31 +2,31 @@
 
 ## Limite e proveniência
 
-Esta décima primeira rota Linux isolada parte exclusivamente do commit
-`27231f7e11ae8e73599d99420e47fbf987bf03ec`. A branch predecessora
-`social/checkpoint-3a0p-linux-rls-inventory-context-20260809` e todas as
+Esta décima segunda rota Linux isolada parte exclusivamente do commit
+`25b2669cfce85f8e2a2389c0ed128159dc6f83e1`. A branch predecessora
+`social/checkpoint-3a0p-linux-rls-oid-inventory-20260809` e todas as
 branches anteriores permanecem preservadas, sem edição ou novo push.
 
 O workflow existe somente para a branch
-`social/checkpoint-3a0p-linux-rls-oid-inventory-20260809`. O produto
+`social/checkpoint-3a0p-linux-runtime-attributes-oid-20260809`. O produto
 permanece idêntico a `fcfc92419021dae5f77baad731c634b10c275c5b`: `src/`, todo
 `db/` (inclusive `roles.sql`), migrations, `server.js`, `package.json` e
 `package-lock.json` não são alterados. Esta rota não acrescenta grants, não
 altera políticas RLS e não modifica PostgreSQL, SCRAM, roles, backup, restore,
 rede Docker ou credenciais.
 
-## Décimo primeiro disparo Linux isolado autorizado
+## Décimo segundo disparo Linux isolado autorizado
 
 O único gatilho autorizado é o primeiro e único `push` de criação da nova
 branch, sem exclusão ou force, cujo commit tenha a mensagem integral:
 
 ```text
-[run-social-3a0p-linux-gate] inspect runtime privileges by relation oid
+[run-social-3a0p-linux-gate] inspect runtime migration privileges by oid
 ```
 
 O job exige `run_attempt == 1`, `created == true`, `deleted == false`,
 `forced == false`, `before` igual a 40 zeros e pai exato
-`27231f7e11ae8e73599d99420e47fbf987bf03ec`, além de diff nominal e
+`25b2669cfce85f8e2a2389c0ed128159dc6f83e1`, além de diff nominal e
 estritamente allowlisted. Não há `workflow_dispatch`, pull request, agenda,
 matriz ou retry automático. A regra operacional é: exatamente um push de
 criação, no máximo um run automático, zero re-run, zero segundo push, zero PR,
@@ -46,39 +46,50 @@ alterados, sem curinga, prefixo ou diretório inteiro:
 Qualquer outro caminho, inclusive outro workflow, `src/`, `db/`, migrations,
 roles, servidor ou dependências, encerra o job antes do gate.
 
-## Primeira divergência física do run predecessor
+## Primeira falha física do run predecessor
 
-O run físico `31308539550` (artifact `9036694430`, SHA-256 do JSON
-`0bf0bf72f0d40f2e0d73a87daaf3c42b002bddd2e07ac566a7dfb93cedd7aff4`,
+O run físico `31311258155` (artifact `9037446208`, SHA-256 do JSON
+`df70fad1b4f35c16eb744cc7d5f46af67c90e55ea57021f833d5ee2e8cbd3292`,
 digest do artifact
-`sha256:8ffccf986a7de1716d33219d8b69d25b4a6317a69ef68c81a33984d4fb5f8ef8`)
-aprovou durabilidade, PostgreSQL, bootstrap, credenciais, Gate 1 e migrations.
-Na fase `rls_privilege_inventory_context_reproduction`, a sessão direta
-permaneceu login migration, confirmou `USAGE=false`, reproduziu a resolução
-textual recusada por `42501` e continuou utilizável. Dentro da transação,
-`session_user` permaneceu migration e `current_user` passou a `MIGRATOR_ROLE`.
+`sha256:368af46c28ff1ac01cc219d897e865dd6b2dc37dbf973573721546598cdd8fe5`)
+aprovou durabilidade, PostgreSQL, bootstrap, Gate 1, migrations, o inventário
+social por OID e a reprodução antiga do insert em `users`. O inventário
+comprovou `USAGE=false` tanto na sessão direta quanto sob `MIGRATOR_ROLE`, duas
+relações exatas por OID, privilégios runtime esperados, RLS, FORCE RLS, policy,
+reset e ACL idêntica.
 
-O run parou exatamente em `rls_inventory_migrator_role_activation`, com o
-código sanitizado `linux_gate_rls_inventory_migrator_schema_access_missing`,
-porque a migrator também observou `USAGE=false`. A leitura por OID, a
-reprodução antiga, o Gate 2 e os Gates 3 a 5 não foram executados. A transação
-foi revertida e o cleanup removeu contêiner, rede, volume, material sintético e
-raiz temporária, com todos os resíduos em zero. Não houve segundo push, retry,
-re-run, PR, merge ou deploy.
+O Gate 2 avançou por seed administrativo, leituras próprias e cruzadas,
+contexto ausente/adulterado, escritas próprias em `social_audit_events`,
+recusas A→B e B→A, zero linha cruzada e reutilização sem vazamento. Ele parou
+somente na subetapa final `rls_runtime_role_attributes`, com o código sanitizado
+`postgres_insufficient_privilege`. Gates 3 a 5 não foram executados. Cleanup
+removeu todos os recursos e registrou zero resíduo; não houve segundo push,
+retry, re-run, PR, merge ou deploy.
 
-Essa ausência de `USAGE` é o contrato correto de menor privilégio. A migration
-0001 concede `USAGE` do schema social somente à runtime; o executor de
-migrations aplica DDL com `SET LOCAL ROLE` para a owner. A migrator não é a
-owner nem a role operacional e não receberá novo grant. Nesta rota,
-`migratorSchemaUsage=false` é uma prova positiva, não uma falha.
+A causa estática desta rota é a resolução textual de
+`ia4tube_migrations.schema_migrations` em `has_table_privilege` pela pool
+autenticada como migration. O login possui membership `INHERIT FALSE` e não
+herda automaticamente o `USAGE` da migrator no schema de migrations. A menor
+consulta textual deve, portanto, reproduzir `42501` antes de produzir qualquer
+boolean de privilégio runtime.
 
-O inventário corrigido continua sob `MIGRATOR_ROLE`, localiza o namespace e
-exatamente as relações `users` e `social_audit_events` em `pg_catalog`, e usa
-diretamente seus OIDs em `has_schema_privilege`, `has_table_privilege` e
-`pg_policy`. O caminho não constrói `regclass` textual, não usa `to_regclass`,
-não interpola identificador externo e não depende de `USAGE` para resolver
-nomes. Nenhum grant, ACL, role, policy, migration ou byte de produto é
-alterado.
+A correção permanece somente no harness. O inventário final localizará em
+`pg_catalog` o schema de migrations, seu ledger e as roles fechadas, exigirá
+OIDs positivos e, entre as quatro roles, distintos, e usará apenas overloads
+por OID de
+`has_schema_privilege`, `has_table_privilege` e `pg_has_role`. Login e role
+runtime serão verificados separadamente para atributos, memberships,
+`USAGE`/`CREATE` e cada privilégio do ledger, inclusive `MAINTAIN`. Não haverá
+`regclass` textual, `to_regclass`, SQL dinâmico, fallback após `42501`, grant,
+alteração de ACL, role, policy, migration ou produto.
+
+## Run predecessor do inventário social preservado
+
+O run `31308539550` (artifact `9036694430`, SHA-256
+`0bf0bf72f0d40f2e0d73a87daaf3c42b002bddd2e07ac566a7dfb93cedd7aff4`)
+comprovou a recusa textual no schema social e que a migrator também possui
+`USAGE=false`. A rota seguinte alinhou essa ausência intencional e aprovou o
+inventário social integralmente por OID, sem alterar qualquer privilégio.
 
 ## Run predecessor anterior preservado
 
@@ -189,6 +200,47 @@ O resultado da reprodução de contexto é fechado em 22 campos:
 `inventoryCurrentUserMigrator=true`, `oidInventoryUsed=true`,
 `textualRelationResolutionUsed=false` e `relationCount=2`. Qualquer chave,
 tipo ou valor divergente reprova antes da reprodução antiga.
+
+## Contrato físico dos atributos runtime ainda pendente
+
+Depois das provas anteriores, a fase fechada
+`rls_runtime_attributes_text_resolution_reproduction` deverá executar uma
+única vez, nesta ordem:
+
+1. confirmar sessão direta na categoria migration, sem herança automática da
+   migrator e sem `USAGE` no schema `ia4tube_migrations`;
+2. executar somente a menor consulta negativa com o nome textual
+   `ia4tube_migrations.schema_migrations`, exigir `42501`, zero mutação, zero
+   transação persistida e pool utilizável;
+3. localizar exclusivamente em `pg_catalog` um schema de migrations, uma
+   relação ledger com relkind permitido e quatro roles distintas: login
+   runtime, role runtime, migrator e owner;
+4. usar somente os OIDs encontrados nos overloads de
+   `has_schema_privilege`, `has_table_privilege` e `pg_has_role`;
+5. verificar separadamente login e role runtime: atributos não privilegiados,
+   ausência de membership migrator/owner, ausência de `USAGE` e `CREATE` no
+   schema e ausência individual de `SELECT`, `INSERT`, `UPDATE`, `DELETE`,
+   `TRUNCATE`, `REFERENCES`, `TRIGGER` e `MAINTAIN` no ledger;
+6. confirmar ACL idêntica depois da prova.
+
+O caminho corrigido não contém `regclass` textual, `to_regclass`, nome
+schema-qualified em `has_table_privilege`, SQL dinâmico, entrada externa ou
+fallback após `42501`. Qualquer schema, relação, relkind, role, OID, atributo,
+membership ou privilégio divergente interrompe antes do Gate 2.
+
+O resultado público dessa fase possui exatamente 16 booleans:
+`runtimeLoginAttributesSafe=true`, `runtimeRoleAttributesSafe=true`,
+`runtimeLoginMigratorMember=false`, `runtimeRoleMigratorMember=false`,
+`runtimeLoginOwnerMember=false`, `runtimeRoleOwnerMember=false`,
+`runtimeLoginMigrationSchemaUsage=false`,
+`runtimeRoleMigrationSchemaUsage=false`,
+`runtimeLoginMigrationSchemaCreate=false`,
+`runtimeRoleMigrationSchemaCreate=false`,
+`runtimeLoginMigrationTablePrivileges=false`,
+`runtimeRoleMigrationTablePrivileges=false`,
+`migrationSchemaLocatedByOid=true`, `migrationLedgerLocatedByOid=true`,
+`textualResolutionUsed=false` e `aclUnchanged=true`. O artifact não recebe
+OID, SQL, nome de login, argumento, mensagem PostgreSQL, stack ou output bruto.
 
 O resultado sanitizado do Gate 2 usa campos separados para leitura e escrita:
 
@@ -604,27 +656,30 @@ ordem obrigatória e fail-closed é:
    divergência encerra antes da reprodução antiga e dos gates posteriores;
 8. executar `gates.rls({ state })` e a reprodução física fechada do contrato
    antigo do Gate 2;
-9. somente se ambas as reproduções coincidirem integralmente, executar o
+9. reproduzir a resolução textual recusada no ledger de migrations e executar
+   o inventário final dos atributos e privilégios de login e role runtime
+   exclusivamente por OID;
+10. somente se as três provas coincidirem integralmente, executar o
    **Gate 2 — RLS e
    roles corrigido**, com leituras A/B, recusa do insert runtime em `users`,
    escritas próprias e cruzadas em `social_audit_events`, contexto
    ausente/adulterado, reutilização de conexão e atributos da role runtime;
-10. somente depois do Gate 2, executar o **Gate 3 — concorrência, OAuth sintético
+11. somente depois do Gate 2, executar o **Gate 3 — concorrência, OAuth sintético
    e idempotência**, incluindo reserva concorrente, consumo
    único/replay/expiração/cross-company de state sintético e corrida de
    publicação com um único registro;
-11. somente depois do Gate 3, executar o **Gate 4 — cofre**, com AES-256-GCM,
+12. somente depois do Gate 3, executar o **Gate 4 — cofre**, com AES-256-GCM,
     AAD de empresa/provedor/conexão/finalidade, adulterações, rotação e bloqueio
     da retirada de chave ainda usada;
-12. somente depois do Gate 4, executar o **Gate 5 — backup e restauração**, com
+13. somente depois do Gate 4, executar o **Gate 5 — backup e restauração**, com
     perfis 0003 e 0004, bundles individuais, SHA-256, manifesto, `fsync` do
     arquivo e diretório, restauração isolada, schema/dados/RLS/cofre e recusas
     de perfil cruzado e manifesto adulterado;
-13. produzir métricas e executar a varredura sanitizada de segredos;
-14. executar cleanup integral;
-15. aprovar e enviar um único artifact sanitizado.
+14. produzir métricas e executar a varredura sanitizada de segredos;
+15. executar cleanup integral;
+16. aprovar e enviar um único artifact sanitizado.
 
-Cada etapa posterior depende do sucesso da anterior. As duas reproduções e o
+Cada etapa posterior depende do sucesso da anterior. As três provas e o
 Gate 2 corrigido não são runs nem tentativas separados: são fases ordenadas da
 única invocação autorizada. Nenhuma dessas expectativas representa aprovação
 física antes da conclusão e conferência do artifact.

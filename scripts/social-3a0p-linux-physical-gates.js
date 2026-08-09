@@ -83,6 +83,25 @@ const RLS_INVENTORY_CONTEXT_RESULT = Object.freeze({
   aclUnchanged: true
 });
 
+const RUNTIME_ATTRIBUTES_RESULT = Object.freeze({
+  runtimeLoginAttributesSafe: true,
+  runtimeRoleAttributesSafe: true,
+  runtimeLoginMigratorMember: false,
+  runtimeRoleMigratorMember: false,
+  runtimeLoginOwnerMember: false,
+  runtimeRoleOwnerMember: false,
+  runtimeLoginMigrationSchemaUsage: false,
+  runtimeRoleMigrationSchemaUsage: false,
+  runtimeLoginMigrationSchemaCreate: false,
+  runtimeRoleMigrationSchemaCreate: false,
+  runtimeLoginMigrationTablePrivileges: false,
+  runtimeRoleMigrationTablePrivileges: false,
+  migrationSchemaLocatedByOid: true,
+  migrationLedgerLocatedByOid: true,
+  textualResolutionUsed: false,
+  aclUnchanged: true
+});
+
 function exactInventoryRelationRows(rows, code) {
   if (!Array.isArray(rows) || rows.length !== RLS_INVENTORY_RELATIONS.length) fail(code);
   const ordered = [...rows].sort((left, right) =>
@@ -678,9 +697,468 @@ async function runRlsRuntimeWriteContractReproduction(state, dependencies = {}) 
   }
 }
 
+function validRuntimeAttributesTextResolutionReproduction(candidate) {
+  return candidate &&
+    Object.getPrototypeOf(candidate) === Object.prototype &&
+    Object.keys(candidate).sort().join(",") ===
+      Object.keys(RUNTIME_ATTRIBUTES_RESULT).sort().join(",") &&
+    Object.entries(RUNTIME_ATTRIBUTES_RESULT).every(([key, value]) => candidate[key] === value);
+}
+
+function validPositiveOid(value) {
+  return /^[1-9][0-9]*$/.test(String(value ?? ""));
+}
+
+function requireRuntimeAttributesClient(client) {
+  if (!client || typeof client.query !== "function" || typeof client.release !== "function") {
+    fail("linux_gate_runtime_attributes_client_invalid");
+  }
+  if (client._txStatus !== "I") {
+    fail("linux_gate_runtime_attributes_transaction_state_invalid");
+  }
+  return client;
+}
+
+function requireRuntimeAttributesIdleState(client) {
+  if (client?._txStatus !== "I") {
+    fail("linux_gate_runtime_attributes_transaction_state_invalid");
+  }
+}
+
+async function runtimeAttributesDirectIdentity(client) {
+  const result = await client.query([
+    "SELECT",
+    " session_user=$1 AS direct_session_identity,",
+    " current_user=$1 AS direct_current_identity,",
+    " pg_has_role(session_user,$2,'USAGE') AS direct_inherits_migrator,",
+    " has_schema_privilege(session_user,$3,'USAGE') AS direct_schema_usage"
+  ].join("\n"), [MIGRATION_LOGIN, MIGRATOR_ROLE, "ia4tube_migrations"]);
+  const row = result.rows?.length === 1 ? result.rows[0] : null;
+  if (!row ||
+      row.direct_session_identity !== true ||
+      row.direct_current_identity !== true ||
+      row.direct_inherits_migrator !== false ||
+      row.direct_schema_usage !== false) {
+    fail("linux_gate_runtime_attributes_direct_identity_invalid");
+  }
+}
+
+function runtimeAttributesRawAclFingerprint(rows) {
+  const canonical = (Array.isArray(rows) ? rows : []).map((row) => ({
+    namespaceName: String(row?.namespace_name ?? ""),
+    namespaceOid: String(row?.namespace_oid ?? ""),
+    relationName: String(row?.relation_name ?? ""),
+    relationOid: String(row?.relation_oid ?? ""),
+    relationKind: String(row?.relation_kind ?? ""),
+    namespaceAcl: row?.schema_acl === null || row?.schema_acl === undefined
+      ? null
+      : String(row.schema_acl),
+    relationAcl: row?.relation_acl === null || row?.relation_acl === undefined
+      ? null
+      : String(row.relation_acl)
+  })).sort((left, right) => JSON.stringify(left).localeCompare(JSON.stringify(right)));
+  return crypto.createHash("sha256").update(JSON.stringify(canonical)).digest("hex");
+}
+
+async function runtimeAttributesRawAclSnapshot(client) {
+  const result = await client.query([
+    "SELECT",
+    " namespace.nspname AS namespace_name,",
+    " namespace.oid AS namespace_oid,",
+    " relation.relname AS relation_name,",
+    " relation.oid AS relation_oid,",
+    " relation.relkind AS relation_kind,",
+    " namespace.nspacl::text AS schema_acl,",
+    " relation.relacl::text AS relation_acl",
+    "FROM pg_catalog.pg_namespace namespace",
+    "JOIN pg_catalog.pg_class relation ON relation.relnamespace=namespace.oid",
+    "WHERE namespace.nspname='ia4tube_migrations'",
+    "  AND relation.relname='schema_migrations'",
+    "ORDER BY namespace.oid,relation.oid"
+  ].join("\n"));
+  const rows = Array.isArray(result.rows) ? result.rows : [];
+  return Object.freeze({
+    rowCount: rows.length,
+    fingerprint: runtimeAttributesRawAclFingerprint(rows)
+  });
+}
+
+async function runtimeAttributesOidCatalog(client) {
+  const schemaResult = await client.query([
+    "SELECT",
+    " namespace.nspname AS namespace_name,",
+    " namespace.oid AS namespace_oid,",
+    " namespace.nspacl::text AS schema_acl",
+    "FROM pg_catalog.pg_namespace namespace",
+    "WHERE namespace.nspname='ia4tube_migrations'"
+  ].join("\n"));
+  if (schemaResult.rows?.length !== 1) {
+    fail("linux_gate_runtime_attributes_migration_schema_invalid");
+  }
+  const namespace = schemaResult.rows[0];
+  if (namespace.namespace_name !== "ia4tube_migrations" ||
+      !validPositiveOid(namespace.namespace_oid)) {
+    fail("linux_gate_runtime_attributes_migration_schema_invalid");
+  }
+
+  const relationResult = await client.query([
+    "SELECT",
+    " relation.relname AS relation_name,",
+    " relation.oid AS relation_oid,",
+    " relation.relkind AS relation_kind,",
+    " relation.relacl::text AS relation_acl",
+    "FROM pg_catalog.pg_class relation",
+    "WHERE relation.relnamespace=$1::oid",
+    "  AND relation.relname='schema_migrations'"
+  ].join("\n"), [namespace.namespace_oid]);
+  if (relationResult.rows?.length !== 1) {
+    fail("linux_gate_runtime_attributes_migration_ledger_invalid");
+  }
+  const relation = relationResult.rows[0];
+  if (relation.relation_name !== "schema_migrations" ||
+      !validPositiveOid(relation.relation_oid)) {
+    fail("linux_gate_runtime_attributes_migration_ledger_invalid");
+  }
+  if (!["r", "p"].includes(relation.relation_kind)) {
+    fail("linux_gate_runtime_attributes_migration_ledger_kind_invalid");
+  }
+
+  const rolesResult = await client.query([
+    "SELECT role.rolname AS role_name,role.oid AS role_oid",
+    "FROM pg_catalog.pg_roles role",
+    "WHERE role.rolname IN ($1,$2,$3,$4)",
+    "ORDER BY role.rolname"
+  ].join("\n"), [RUNTIME_LOGIN, RUNTIME_ROLE, MIGRATOR_ROLE, OWNER_ROLE]);
+  const expectedRoleNames = [RUNTIME_LOGIN, RUNTIME_ROLE, MIGRATOR_ROLE, OWNER_ROLE].sort();
+  const roleRows = Array.isArray(rolesResult.rows) ? rolesResult.rows : [];
+  const observedRoleNames = roleRows.map((row) => row?.role_name).sort();
+  const observedRoleOids = roleRows.map((row) => String(row?.role_oid ?? ""));
+  if (roleRows.length !== expectedRoleNames.length ||
+      observedRoleNames.join(",") !== expectedRoleNames.join(",") ||
+      observedRoleOids.some((oid) => !validPositiveOid(oid)) ||
+      new Set(observedRoleOids).size !== expectedRoleNames.length) {
+    fail("linux_gate_runtime_attributes_role_catalog_invalid");
+  }
+  const roleOids = Object.freeze(Object.fromEntries(
+    roleRows.map((row) => [row.role_name, String(row.role_oid)])
+  ));
+  return Object.freeze({
+    namespaceOid: String(namespace.namespace_oid),
+    relationOid: String(relation.relation_oid),
+    relationKind: relation.relation_kind,
+    roleOids,
+    aclFingerprint: runtimeAttributesRawAclFingerprint([{
+      namespace_name: namespace.namespace_name,
+      namespace_oid: namespace.namespace_oid,
+      relation_name: relation.relation_name,
+      relation_oid: relation.relation_oid,
+      relation_kind: relation.relation_kind,
+      schema_acl: namespace.schema_acl,
+      relation_acl: relation.relation_acl
+    }])
+  });
+}
+
+function exactRuntimeAttributesCatalog(left, right) {
+  return left.namespaceOid === right.namespaceOid &&
+    left.relationOid === right.relationOid &&
+    left.relationKind === right.relationKind &&
+    left.roleOids[RUNTIME_LOGIN] === right.roleOids[RUNTIME_LOGIN] &&
+    left.roleOids[RUNTIME_ROLE] === right.roleOids[RUNTIME_ROLE] &&
+    left.roleOids[MIGRATOR_ROLE] === right.roleOids[MIGRATOR_ROLE] &&
+    left.roleOids[OWNER_ROLE] === right.roleOids[OWNER_ROLE] &&
+    left.aclFingerprint === right.aclFingerprint;
+}
+
+async function runtimeAttributesOidPrivilegeInventory(client, catalog) {
+  const result = await client.query([
+    "SELECT",
+    " session_user=$1 AS inventory_session_identity,",
+    " current_user=$1 AS inventory_current_identity,",
+    " runtime_login.rolsuper AS runtime_login_superuser,",
+    " runtime_login.rolbypassrls AS runtime_login_bypassrls,",
+    " runtime_login.rolcreatedb AS runtime_login_createdb,",
+    " runtime_login.rolcreaterole AS runtime_login_createrole,",
+    " runtime_login.rolreplication AS runtime_login_replication,",
+    " runtime_role.rolsuper AS runtime_role_superuser,",
+    " runtime_role.rolbypassrls AS runtime_role_bypassrls,",
+    " runtime_role.rolcreatedb AS runtime_role_createdb,",
+    " runtime_role.rolcreaterole AS runtime_role_createrole,",
+    " runtime_role.rolreplication AS runtime_role_replication,",
+    " pg_has_role(runtime_login.oid,migrator_role.oid,'MEMBER')",
+    "   AS runtime_login_migrator_member,",
+    " pg_has_role(runtime_role.oid,migrator_role.oid,'MEMBER')",
+    "   AS runtime_role_migrator_member,",
+    " pg_has_role(runtime_login.oid,owner_role.oid,'MEMBER')",
+    "   AS runtime_login_owner_member,",
+    " pg_has_role(runtime_role.oid,owner_role.oid,'MEMBER')",
+    "   AS runtime_role_owner_member,",
+    " has_schema_privilege(runtime_login.oid,namespace.oid,'USAGE')",
+    "   AS runtime_login_schema_usage,",
+    " has_schema_privilege(runtime_role.oid,namespace.oid,'USAGE')",
+    "   AS runtime_role_schema_usage,",
+    " has_schema_privilege(runtime_login.oid,namespace.oid,'CREATE')",
+    "   AS runtime_login_schema_create,",
+    " has_schema_privilege(runtime_role.oid,namespace.oid,'CREATE')",
+    "   AS runtime_role_schema_create,",
+    " has_table_privilege(runtime_login.oid,relation.oid,'SELECT')",
+    "   AS runtime_login_table_select,",
+    " has_table_privilege(runtime_login.oid,relation.oid,'INSERT')",
+    "   AS runtime_login_table_insert,",
+    " has_table_privilege(runtime_login.oid,relation.oid,'UPDATE')",
+    "   AS runtime_login_table_update,",
+    " has_table_privilege(runtime_login.oid,relation.oid,'DELETE')",
+    "   AS runtime_login_table_delete,",
+    " has_table_privilege(runtime_login.oid,relation.oid,'TRUNCATE')",
+    "   AS runtime_login_table_truncate,",
+    " has_table_privilege(runtime_login.oid,relation.oid,'REFERENCES')",
+    "   AS runtime_login_table_references,",
+    " has_table_privilege(runtime_login.oid,relation.oid,'TRIGGER')",
+    "   AS runtime_login_table_trigger,",
+    " has_table_privilege(runtime_login.oid,relation.oid,'MAINTAIN')",
+    "   AS runtime_login_table_maintain,",
+    " has_table_privilege(runtime_role.oid,relation.oid,'SELECT')",
+    "   AS runtime_role_table_select,",
+    " has_table_privilege(runtime_role.oid,relation.oid,'INSERT')",
+    "   AS runtime_role_table_insert,",
+    " has_table_privilege(runtime_role.oid,relation.oid,'UPDATE')",
+    "   AS runtime_role_table_update,",
+    " has_table_privilege(runtime_role.oid,relation.oid,'DELETE')",
+    "   AS runtime_role_table_delete,",
+    " has_table_privilege(runtime_role.oid,relation.oid,'TRUNCATE')",
+    "   AS runtime_role_table_truncate,",
+    " has_table_privilege(runtime_role.oid,relation.oid,'REFERENCES')",
+    "   AS runtime_role_table_references,",
+    " has_table_privilege(runtime_role.oid,relation.oid,'TRIGGER')",
+    "   AS runtime_role_table_trigger,",
+    " has_table_privilege(runtime_role.oid,relation.oid,'MAINTAIN')",
+    "   AS runtime_role_table_maintain",
+    "FROM pg_catalog.pg_namespace namespace",
+    "JOIN pg_catalog.pg_class relation ON relation.relnamespace=namespace.oid",
+    "CROSS JOIN pg_catalog.pg_roles runtime_login",
+    "CROSS JOIN pg_catalog.pg_roles runtime_role",
+    "CROSS JOIN pg_catalog.pg_roles migrator_role",
+    "CROSS JOIN pg_catalog.pg_roles owner_role",
+    "WHERE namespace.oid=$2::oid",
+    "  AND relation.oid=$3::oid",
+    "  AND runtime_login.oid=$4::oid",
+    "  AND runtime_role.oid=$5::oid",
+    "  AND migrator_role.oid=$6::oid",
+    "  AND owner_role.oid=$7::oid"
+  ].join("\n"), [
+    MIGRATION_LOGIN,
+    catalog.namespaceOid,
+    catalog.relationOid,
+    catalog.roleOids[RUNTIME_LOGIN],
+    catalog.roleOids[RUNTIME_ROLE],
+    catalog.roleOids[MIGRATOR_ROLE],
+    catalog.roleOids[OWNER_ROLE]
+  ]);
+  const row = result.rows?.length === 1 ? result.rows[0] : null;
+  if (!row ||
+      row.inventory_session_identity !== true ||
+      row.inventory_current_identity !== true) {
+    fail("linux_gate_runtime_attributes_oid_inventory_invalid");
+  }
+  if ([
+    row.runtime_login_superuser,
+    row.runtime_login_bypassrls,
+    row.runtime_login_createdb,
+    row.runtime_login_createrole,
+    row.runtime_login_replication
+  ].some((value) => value !== false)) {
+    fail("linux_gate_runtime_login_attributes_unsafe");
+  }
+  if ([
+    row.runtime_role_superuser,
+    row.runtime_role_bypassrls,
+    row.runtime_role_createdb,
+    row.runtime_role_createrole,
+    row.runtime_role_replication
+  ].some((value) => value !== false)) {
+    fail("linux_gate_runtime_role_attributes_unsafe");
+  }
+  if (row.runtime_login_migrator_member !== false) {
+    fail("linux_gate_runtime_login_migrator_membership_unexpected");
+  }
+  if (row.runtime_role_migrator_member !== false) {
+    fail("linux_gate_runtime_role_migrator_membership_unexpected");
+  }
+  if (row.runtime_login_owner_member !== false) {
+    fail("linux_gate_runtime_login_owner_membership_unexpected");
+  }
+  if (row.runtime_role_owner_member !== false) {
+    fail("linux_gate_runtime_role_owner_membership_unexpected");
+  }
+  if (row.runtime_login_schema_usage !== false) {
+    fail("linux_gate_runtime_login_migration_schema_usage_unexpected");
+  }
+  if (row.runtime_role_schema_usage !== false) {
+    fail("linux_gate_runtime_role_migration_schema_usage_unexpected");
+  }
+  if (row.runtime_login_schema_create !== false) {
+    fail("linux_gate_runtime_login_migration_schema_create_unexpected");
+  }
+  if (row.runtime_role_schema_create !== false) {
+    fail("linux_gate_runtime_role_migration_schema_create_unexpected");
+  }
+  if ([
+    row.runtime_login_table_select,
+    row.runtime_login_table_insert,
+    row.runtime_login_table_update,
+    row.runtime_login_table_delete,
+    row.runtime_login_table_truncate,
+    row.runtime_login_table_references,
+    row.runtime_login_table_trigger,
+    row.runtime_login_table_maintain
+  ].some((value) => value !== false)) {
+    fail("linux_gate_runtime_login_migration_table_privilege_unexpected");
+  }
+  if ([
+    row.runtime_role_table_select,
+    row.runtime_role_table_insert,
+    row.runtime_role_table_update,
+    row.runtime_role_table_delete,
+    row.runtime_role_table_truncate,
+    row.runtime_role_table_references,
+    row.runtime_role_table_trigger,
+    row.runtime_role_table_maintain
+  ].some((value) => value !== false)) {
+    fail("linux_gate_runtime_role_migration_table_privilege_unexpected");
+  }
+}
+
+async function cleanupRuntimeAttributesClient(client) {
+  let cleanupFailure;
+  if (client?._txStatus === "T" || client?._txStatus === "E") {
+    try {
+      await client.query("ROLLBACK");
+    } catch (error) {
+      cleanupFailure = error;
+    }
+  }
+  try {
+    await client?.release(cleanupFailure);
+  } catch (error) {
+    cleanupFailure ||= error;
+  }
+  if (cleanupFailure) throw cleanupFailure;
+}
+
+async function runRuntimeAttributesTextResolutionReproduction(state, dependencies = {}) {
+  const runSubstep = requireSubstepRunner(dependencies);
+  let directClient;
+  let inventoryClient;
+  let resetClient;
+  let catalogBaseline;
+  let catalogBefore;
+  let primaryFailure;
+  try {
+    await runSubstep("rls_runtime_attributes_direct_identity", async () => {
+      directClient = await state.pools.migration.connect();
+      requireRuntimeAttributesClient(directClient);
+      await runtimeAttributesDirectIdentity(directClient);
+    });
+
+    await runSubstep("rls_runtime_attributes_text_resolution_refusal", async () => {
+      catalogBaseline = await runtimeAttributesRawAclSnapshot(directClient);
+      requireRuntimeAttributesIdleState(directClient);
+      await expectErrorCode(
+        () => directClient.query(
+          "SELECT has_table_privilege($1,'ia4tube_migrations.schema_migrations','SELECT') AS textual_runtime_privilege",
+          [RUNTIME_LOGIN]
+        ),
+        "42501",
+        "linux_gate_runtime_attributes_text_resolution_invalid"
+      );
+      const usable = await directClient.query([
+        "SELECT",
+        " current_user=session_user AS direct_pool_usable,",
+        " pg_current_xact_id_if_assigned() IS NOT NULL AS direct_transaction_persisted"
+      ].join("\n"));
+      const row = usable.rows?.length === 1 ? usable.rows[0] : null;
+      requireRuntimeAttributesIdleState(directClient);
+      if (!row ||
+          row.direct_pool_usable !== true ||
+          row.direct_transaction_persisted !== false) {
+        fail("linux_gate_runtime_attributes_pool_state_invalid");
+      }
+      const catalogAfterTextRefusal = await runtimeAttributesRawAclSnapshot(directClient);
+      if (catalogBaseline.rowCount !== catalogAfterTextRefusal.rowCount ||
+          catalogBaseline.fingerprint !== catalogAfterTextRefusal.fingerprint) {
+        fail("linux_gate_runtime_attributes_acl_changed");
+      }
+    });
+
+    await runSubstep("rls_runtime_attributes_oid_catalog", async () => {
+      const released = directClient;
+      directClient = null;
+      await cleanupRuntimeAttributesClient(released);
+      inventoryClient = await state.pools.migration.connect();
+      requireRuntimeAttributesClient(inventoryClient);
+      await runtimeAttributesDirectIdentity(inventoryClient);
+      catalogBefore = await runtimeAttributesOidCatalog(inventoryClient);
+      if (catalogBaseline.rowCount !== 1 ||
+          catalogBaseline.fingerprint !== catalogBefore.aclFingerprint) {
+        fail("linux_gate_runtime_attributes_acl_changed");
+      }
+    });
+
+    await runSubstep("rls_runtime_attributes_oid_privileges", async () => {
+      await runtimeAttributesOidPrivilegeInventory(inventoryClient, catalogBefore);
+      requireRuntimeAttributesIdleState(inventoryClient);
+    });
+
+    await runSubstep("rls_runtime_attributes_acl_reset", async () => {
+      const catalogAfter = await runtimeAttributesOidCatalog(inventoryClient);
+      requireRuntimeAttributesIdleState(inventoryClient);
+      if (catalogBaseline.rowCount !== 1 ||
+          catalogBaseline.fingerprint !== catalogAfter.aclFingerprint ||
+          !exactRuntimeAttributesCatalog(catalogBefore, catalogAfter)) {
+        fail("linux_gate_runtime_attributes_acl_changed");
+      }
+      const released = inventoryClient;
+      inventoryClient = null;
+      await cleanupRuntimeAttributesClient(released);
+      resetClient = await state.pools.migration.connect();
+      requireRuntimeAttributesClient(resetClient);
+      await runtimeAttributesDirectIdentity(resetClient);
+      const reset = resetClient;
+      resetClient = null;
+      await cleanupRuntimeAttributesClient(reset);
+    });
+  } catch (error) {
+    primaryFailure = error;
+  } finally {
+    for (const key of ["directClient", "inventoryClient", "resetClient"]) {
+      const client = key === "directClient"
+        ? directClient
+        : key === "inventoryClient"
+          ? inventoryClient
+          : resetClient;
+      if (!client) continue;
+      if (key === "directClient") directClient = null;
+      if (key === "inventoryClient") inventoryClient = null;
+      if (key === "resetClient") resetClient = null;
+      try {
+        await cleanupRuntimeAttributesClient(client);
+      } catch (cleanupFailure) {
+        if (!primaryFailure) primaryFailure = cleanupFailure;
+      }
+    }
+  }
+  if (primaryFailure) throw primaryFailure;
+  return Object.freeze({ ...RUNTIME_ATTRIBUTES_RESULT });
+}
+
 async function runRlsAndRoleGate(state, dependencies = {}) {
   if (dependencies.baseRlsGatePassed !== true) {
     fail("linux_gate_rls_base_gate_prerequisite_missing");
+  }
+  if (!validRuntimeAttributesTextResolutionReproduction(
+    dependencies.runtimeAttributesTextResolutionReproduction
+  )) {
+    fail("linux_gate_runtime_attributes_reproduction_required");
   }
   const { withTransaction } = require("../src/persistence/postgres/pool");
   const runSubstep = requireSubstepRunner(dependencies);
@@ -833,20 +1311,6 @@ async function runRlsAndRoleGate(state, dependencies = {}) {
       }
       if (primaryFailure) throw primaryFailure;
       if (cleanupFailure) throw cleanupFailure;
-    });
-
-    await runSubstep("rls_runtime_role_attributes", async () => {
-      const attributes = await state.pools.migration.query([
-        "SELECT rolsuper,rolbypassrls,rolcreatedb,rolcreaterole,rolreplication,",
-        " pg_has_role($1,'ia4tube_social_migrator','MEMBER') AS migrator_member,",
-        " has_table_privilege($1,'ia4tube_migrations.schema_migrations','SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER') AS migration_table_privilege,",
-        " has_schema_privilege($1,'ia4tube_migrations','CREATE') AS migration_schema_create",
-        "FROM pg_catalog.pg_roles WHERE rolname=$1"
-      ].join("\n"), [RUNTIME_LOGIN]);
-      const role = attributes.rows?.[0];
-      if (!role || role.rolsuper || role.rolbypassrls || role.rolcreatedb || role.rolcreaterole || role.rolreplication || role.migrator_member || role.migration_table_privilege || role.migration_schema_create) {
-        fail("linux_gate_runtime_role_privileged");
-      }
     });
 
     return Object.freeze({
@@ -1229,6 +1693,7 @@ module.exports = {
   runRlsAndRoleGate,
   runRlsPrivilegeInventoryContextReproduction,
   runRlsRuntimeWriteContractReproduction,
+  runRuntimeAttributesTextResolutionReproduction,
   runVaultSupplementalGate,
   runtimeWritePrivilegeInventory,
   seedTenant

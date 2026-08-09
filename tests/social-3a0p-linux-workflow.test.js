@@ -8,10 +8,10 @@ const test = require("node:test");
 const REPOSITORY_ROOT = path.resolve(__dirname, "..");
 const WORKFLOW_RELATIVE_PATH = ".github/workflows/social-3a0p-linux-physical-gates.yml";
 const WORKFLOW_PATH = path.join(REPOSITORY_ROOT, ...WORKFLOW_RELATIVE_PATH.split("/"));
-const BRANCH = "social/checkpoint-3a0p-linux-rls-oid-inventory-20260809";
-const PARENT = "27231f7e11ae8e73599d99420e47fbf987bf03ec";
+const BRANCH = "social/checkpoint-3a0p-linux-runtime-attributes-oid-20260809";
+const PARENT = "25b2669cfce85f8e2a2389c0ed128159dc6f83e1";
 const ZERO_SHA = "0000000000000000000000000000000000000000";
-const MESSAGE = "[run-social-3a0p-linux-gate] inspect runtime privileges by relation oid";
+const MESSAGE = "[run-social-3a0p-linux-gate] inspect runtime migration privileges by oid";
 const JOB_IF = [
   "github.event_name == 'push'",
   `github.ref == 'refs/heads/${BRANCH}'`,
@@ -164,10 +164,10 @@ test("creation-push contract refuses wrong branch, parent, message, before, crea
   );
   assert.equal(accepted(authorized), true);
   for (const mutation of [
-    { ref: "refs/heads/social/checkpoint-3a0p-linux-rls-inventory-context-20260809" },
-    { parent: "77f0eb732497f9f8d4f1139e2a6ded80ac0a3476" },
+    { ref: "refs/heads/social/checkpoint-3a0p-linux-rls-oid-inventory-20260809" },
+    { parent: "27231f7e11ae8e73599d99420e47fbf987bf03ec" },
     { before: PARENT },
-    { message: "[run-social-3a0p-linux-gate] inspect RLS privileges under migrator role" },
+    { message: "[run-social-3a0p-linux-gate] inspect runtime privileges by relation oid" },
     { created: false },
     { deleted: true },
     { forced: true },
@@ -207,7 +207,7 @@ test("workflow runs the physical gate exactly once and always cleans up", () => 
   assert.equal(gate.if, undefined);
   assert.equal(
     gate.name,
-    "Run OID privilege inventory under migrator role before corrected Gate 2 once"
+    "Run runtime migration privilege inventory by OID before later gates once"
   );
   const cleanup = steps.find((step) => step.id === "cleanup");
   assert.equal(cleanup.if, "always()");

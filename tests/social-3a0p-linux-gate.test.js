@@ -76,13 +76,15 @@ const {
   publicPlatformEvidence,
   publicRlsPrivilegeInventoryContextReproductionEvidence,
   publicRlsRoleGateEvidence,
+  publicRlsRuntimeAttributesTextResolutionReproductionEvidence,
   publicRlsRuntimeWriteContractReproductionEvidence,
   retirePrimaryPoolsBeforeBackup,
   rlsFailureCode,
   sanitizedBackupRestoreFailureProvenance,
   sanitizedFailureEvidence,
   sanitizedRlsFailureProvenance,
-  runRlsPrivilegeInventoryContextPhase
+  runRlsPrivilegeInventoryContextPhase,
+  runRlsRuntimeAttributesTextResolutionPhase
 } = require("../scripts/social-3a0p-linux-gate");
 
 const ROOT = path.resolve(__dirname, "..");
@@ -147,6 +149,28 @@ function validRlsReproductionResult(overrides = {}) {
     socialAuditEventInsertPrivilege: true,
     socialAuditEventsRlsProtected: true,
     oldGateLaterStagesReached: false,
+    ...overrides
+  };
+}
+
+function validRlsRuntimeAttributesTextResolutionResult(overrides = {}) {
+  return {
+    runtimeLoginAttributesSafe: true,
+    runtimeRoleAttributesSafe: true,
+    runtimeLoginMigratorMember: false,
+    runtimeRoleMigratorMember: false,
+    runtimeLoginOwnerMember: false,
+    runtimeRoleOwnerMember: false,
+    runtimeLoginMigrationSchemaUsage: false,
+    runtimeRoleMigrationSchemaUsage: false,
+    runtimeLoginMigrationSchemaCreate: false,
+    runtimeRoleMigrationSchemaCreate: false,
+    runtimeLoginMigrationTablePrivileges: false,
+    runtimeRoleMigrationTablePrivileges: false,
+    migrationSchemaLocatedByOid: true,
+    migrationLedgerLocatedByOid: true,
+    textualResolutionUsed: false,
+    aclUnchanged: true,
     ...overrides
   };
 }
@@ -2169,6 +2193,231 @@ test("RLS OID inventory divergence stops before old reproduction and Gates 2 thr
   });
 });
 
+test("RLS runtime-attributes OID evidence is exact, frozen, boolean, and identity-free", () => {
+  const expected = validRlsRuntimeAttributesTextResolutionResult();
+  const evidence = publicRlsRuntimeAttributesTextResolutionReproductionEvidence(expected);
+  assert.equal(Object.isFrozen(evidence), true);
+  assert.deepEqual(Object.keys(evidence).sort(), Object.keys(expected).sort());
+  assert.equal(Object.keys(evidence).length, 16);
+  assert.equal(Object.values(evidence).every((value) => typeof value === "boolean"), true);
+  assert.equal(evidence.runtimeLoginMigrationSchemaUsage, false);
+  assert.equal(evidence.runtimeRoleMigrationSchemaUsage, false);
+  assert.equal(evidence.migrationSchemaLocatedByOid, true);
+  assert.equal(evidence.migrationLedgerLocatedByOid, true);
+  assert.equal(evidence.textualResolutionUsed, false);
+  for (const forbidden of [
+    "sessionUser", "currentUser", "login", "roleName", "schemaName",
+    "relationName", "oid", "sql", "arguments", "message"
+  ]) {
+    assert.equal(Object.hasOwn(evidence, forbidden), false);
+  }
+  assert.equal(evidenceSafe({ runtimeAttributesTextResolutionReproduction: evidence }), true);
+  for (const [key, value] of Object.entries(expected)) {
+    assert.throws(
+      () => publicRlsRuntimeAttributesTextResolutionReproductionEvidence({
+        ...expected,
+        [key]: !value
+      }),
+      {
+        code: "rls_runtime_attributes_text_resolution_reproduction_invalid",
+        name: "LinuxGateFailure"
+      }
+    );
+  }
+  assert.throws(
+    () => publicRlsRuntimeAttributesTextResolutionReproductionEvidence({
+      ...expected,
+      unexpected: true
+    }),
+    {
+      code: "rls_runtime_attributes_text_resolution_reproduction_invalid",
+      name: "LinuxGateFailure"
+    }
+  );
+});
+
+test("RLS runtime-attributes phase calls the physical proof once with only the closed adapter", async () => {
+  const tracker = createRlsFailureProvenanceTracker();
+  const state = Object.freeze({ synthetic: true });
+  const calls = [];
+  const substeps = [];
+  const runSubstep = async (substep, operation) => {
+    substeps.push(substep);
+    return tracker.runSubstep(substep, operation);
+  };
+  const evidence = await runRlsRuntimeAttributesTextResolutionPhase({
+    state,
+    runSubstep,
+    async runReproduction(receivedState, dependencies) {
+      calls.push("reproduction");
+      assert.equal(receivedState, state);
+      assert.deepEqual(Object.keys(dependencies), ["runSubstep"]);
+      assert.equal(dependencies.runSubstep, runSubstep);
+      await dependencies.runSubstep(
+        "rls_runtime_attributes_direct_identity",
+        async () => { calls.push("direct-identity"); }
+      );
+      await dependencies.runSubstep(
+        "rls_runtime_attributes_text_resolution_refusal",
+        async () => { calls.push("text-refusal"); }
+      );
+      await dependencies.runSubstep(
+        "rls_runtime_attributes_oid_catalog",
+        async () => { calls.push("oid-catalog"); }
+      );
+      await dependencies.runSubstep(
+        "rls_runtime_attributes_oid_privileges",
+        async () => { calls.push("oid-privileges"); }
+      );
+      await dependencies.runSubstep(
+        "rls_runtime_attributes_acl_reset",
+        async () => { calls.push("acl-reset"); }
+      );
+      return validRlsRuntimeAttributesTextResolutionResult();
+    }
+  });
+  assert.deepEqual(calls, [
+    "reproduction", "direct-identity", "text-refusal", "oid-catalog",
+    "oid-privileges", "acl-reset"
+  ]);
+  assert.deepEqual(substeps, [
+    "rls_runtime_attributes_direct_identity",
+    "rls_runtime_attributes_text_resolution_refusal",
+    "rls_runtime_attributes_oid_catalog",
+    "rls_runtime_attributes_oid_privileges",
+    "rls_runtime_attributes_acl_reset",
+    "rls_runtime_attributes_evidence_validation"
+  ]);
+  assert.deepEqual(evidence, validRlsRuntimeAttributesTextResolutionResult());
+  assert.equal(tracker.failure(), null);
+});
+
+test("RLS runtime-attributes divergence stops before Gate 2 and Gates 3 through 5", async () => {
+  const tracker = createRlsFailureProvenanceTracker();
+  const calls = [];
+  const evidence = { phases: [], firstFailure: null };
+  const phase = createPhaseRunner(evidence);
+  await phase("migrations", async () => ({ gate1Passed: true }));
+  await phase(
+    "rls_privilege_inventory_context_reproduction",
+    async () => validRlsInventoryContextReproductionResult()
+  );
+  await phase(
+    "rls_runtime_write_contract_reproduction",
+    async () => ({ baseRlsGatePassed: true })
+  );
+  await assert.rejects(
+    phase(
+      "rls_runtime_attributes_text_resolution_reproduction",
+      () => runRlsRuntimeAttributesTextResolutionPhase({
+        state: {},
+        runSubstep: tracker.runSubstep,
+        async runReproduction() {
+          calls.push("runtime-attributes");
+          return validRlsRuntimeAttributesTextResolutionResult({
+            textualResolutionUsed: true
+          });
+        }
+      })
+    ),
+    {
+      code: "rls_runtime_attributes_text_resolution_reproduction_invalid",
+      name: "LinuxGateFailure"
+    }
+  );
+  for (const [name, marker] of [
+    ["rls_roles", "forbidden-gate-2"],
+    ["concurrency_oauth_idempotency", "forbidden-gate-3"],
+    ["vault", "forbidden-gate-4"],
+    ["backup_restore", "forbidden-gate-5"]
+  ]) {
+    await assert.rejects(
+      phase(name, async () => { calls.push(marker); }),
+      { code: "linux_gate_phase_after_failure_refused", name: "LinuxGateFailure" }
+    );
+  }
+  assert.deepEqual(calls, ["runtime-attributes"]);
+  assert.deepEqual(evidence.firstFailure, {
+    phase: "rls_runtime_attributes_text_resolution_reproduction",
+    code: "rls_runtime_attributes_text_resolution_reproduction_invalid"
+  });
+  assert.deepEqual(tracker.failure(), {
+    substep: "rls_runtime_attributes_evidence_validation",
+    causalCode: "rls_runtime_attributes_text_resolution_reproduction_invalid"
+  });
+});
+
+test("canonical runtime-attributes proof permits Gate 2 and simulated Gates 3 through 5 in order", async () => {
+  const calls = [];
+  const tracker = createRlsFailureProvenanceTracker();
+  const state = Object.freeze({ synthetic: true });
+  const evidence = { phases: [], firstFailure: null };
+  const phase = createPhaseRunner(evidence);
+  const orchestrator = createRlsRuntimeWriteContractOrchestrator({
+    state,
+    inventoryContextReproduction: validRlsInventoryContextReproductionResult(),
+    gates: {
+      async rls() {
+        calls.push("base");
+        return validRlsBaseGateResult();
+      }
+    },
+    runSubstep: tracker.runSubstep,
+    async runReproduction() {
+      calls.push("old-reproduction");
+      return validRlsReproductionResult();
+    },
+    async runCorrected(receivedState, dependencies) {
+      assert.equal(receivedState, state);
+      assert.deepEqual(
+        dependencies.runtimeAttributesTextResolutionReproduction,
+        validRlsRuntimeAttributesTextResolutionResult()
+      );
+      calls.push("gate-2");
+      return validRlsRoleGateResult();
+    }
+  });
+  await phase("migrations", async () => { calls.push("gate-1"); return { passed: true }; });
+  await phase(
+    "rls_privilege_inventory_context_reproduction",
+    async () => validRlsInventoryContextReproductionResult()
+  );
+  await phase(
+    "rls_runtime_write_contract_reproduction",
+    () => orchestrator.reproduce()
+  );
+  const runtimeAttributes = await phase(
+    "rls_runtime_attributes_text_resolution_reproduction",
+    () => runRlsRuntimeAttributesTextResolutionPhase({
+      state,
+      runSubstep: tracker.runSubstep,
+      async runReproduction() {
+        calls.push("runtime-attributes");
+        return validRlsRuntimeAttributesTextResolutionResult();
+      }
+    })
+  );
+  await phase("rls_roles", () => orchestrator.correct(runtimeAttributes));
+  await phase("concurrency_oauth_idempotency", async () => { calls.push("gate-3"); return {}; });
+  await phase("vault", async () => { calls.push("gate-4"); return {}; });
+  await phase("backup_restore", async () => { calls.push("gate-5"); return {}; });
+  assert.deepEqual(calls, [
+    "gate-1", "base", "old-reproduction", "runtime-attributes",
+    "gate-2", "gate-3", "gate-4", "gate-5"
+  ]);
+  assert.equal(evidence.firstFailure, null);
+  assert.deepEqual(evidence.phases.map(({ name, status }) => [name, status]), [
+    ["migrations", "passed"],
+    ["rls_privilege_inventory_context_reproduction", "passed"],
+    ["rls_runtime_write_contract_reproduction", "passed"],
+    ["rls_runtime_attributes_text_resolution_reproduction", "passed"],
+    ["rls_roles", "passed"],
+    ["concurrency_oauth_idempotency", "passed"],
+    ["vault", "passed"],
+    ["backup_restore", "passed"]
+  ]);
+});
+
 test("RLS write-contract orchestrator requires the canonical inventory-context proof", () => {
   const options = {
     state: {},
@@ -2271,6 +2520,10 @@ test("RLS orchestrator runs base then reproduction then corrected without publis
       assert.equal(receivedState, state);
       assert.equal(dependencies.baseRlsGatePassed, true);
       assert.deepEqual(dependencies.reproduction, validRlsReproductionResult());
+      assert.deepEqual(
+        dependencies.runtimeAttributesTextResolutionReproduction,
+        validRlsRuntimeAttributesTextResolutionResult()
+      );
       calls.push("corrected");
       await dependencies.runSubstep("rls_own_social_write", async () => {
         calls.push("own-write");
@@ -2279,7 +2532,9 @@ test("RLS orchestrator runs base then reproduction then corrected without publis
     }
   });
   const reproductionEvidence = await orchestrator.reproduce();
-  const correctedEvidence = await orchestrator.correct();
+  const correctedEvidence = await orchestrator.correct(
+    validRlsRuntimeAttributesTextResolutionResult()
+  );
   assert.deepEqual(calls, ["base", "reproduction", "inventory", "corrected", "own-write"]);
   assert.equal(reproductionEvidence.baseRlsGatePassed, true);
   assert.equal(correctedEvidence.companyAOwnSocialWrite, true);
@@ -2288,6 +2543,47 @@ test("RLS orchestrator runs base then reproduction then corrected without publis
   assert.equal(canonicalJson({ reproductionEvidence, correctedEvidence }).includes(
     "linux_gate_unclassified_failure"
   ), false);
+});
+
+test("RLS orchestrator requires the canonical runtime-attributes proof and has no fallback", async () => {
+  for (const proof of [
+    undefined,
+    validRlsRuntimeAttributesTextResolutionResult({ migrationSchemaLocatedByOid: false }),
+    validRlsRuntimeAttributesTextResolutionResult({ textualResolutionUsed: true }),
+    validRlsRuntimeAttributesTextResolutionResult({ unexpected: true })
+  ]) {
+    const calls = [];
+    const orchestrator = createRlsRuntimeWriteContractOrchestrator({
+      state: {},
+      inventoryContextReproduction: validRlsInventoryContextReproductionResult(),
+      gates: { async rls() { calls.push("base"); return validRlsBaseGateResult(); } },
+      runSubstep: createRlsFailureProvenanceTracker().runSubstep,
+      async runReproduction() {
+        calls.push("reproduction");
+        return validRlsReproductionResult();
+      },
+      async runCorrected() {
+        calls.push("forbidden-corrected");
+        return validRlsRoleGateResult();
+      }
+    });
+    await orchestrator.reproduce();
+    await assert.rejects(
+      orchestrator.correct(proof),
+      {
+        code: "rls_runtime_attributes_text_resolution_reproduction_required",
+        name: "LinuxGateFailure"
+      }
+    );
+    await assert.rejects(
+      orchestrator.correct(validRlsRuntimeAttributesTextResolutionResult()),
+      {
+        code: "rls_runtime_write_contract_reproduction_required",
+        name: "LinuxGateFailure"
+      }
+    );
+    assert.deepEqual(calls, ["base", "reproduction"]);
+  }
 });
 
 test("RLS orchestrator refuses a noncanonical base result before reproduction", async () => {
@@ -2337,7 +2633,7 @@ test("RLS orchestrator attributes a noncanonical corrected result before later g
   });
   await orchestrator.reproduce();
   await assert.rejects(
-    orchestrator.correct(),
+    orchestrator.correct(validRlsRuntimeAttributesTextResolutionResult()),
     { code: "rls_role_gate_evidence_invalid", name: "LinuxGateFailure" }
   );
   assert.deepEqual(tracker.failure(), {
@@ -4580,7 +4876,8 @@ test("Linux gate source reuses product plans and has no external provider call",
     'phase("migrations"',
     'activePhase = "rls_privilege_inventory_context_reproduction";',
     'activePhase = "rls_runtime_write_contract_reproduction";',
-    'phase("rls_roles"',
+    'activePhase = "rls_runtime_attributes_text_resolution_reproduction";',
+    'activePhase = "rls_roles";',
     'phase("concurrency_oauth_idempotency"',
     'phase("vault"',
     'phase("backup_restore"'
