@@ -38,18 +38,98 @@ const {
 } = require("./social-3a0p-local-runtime-evidence-metrics");
 
 const BRANCH =
-  "social/checkpoint-3a0p-linux-runtime-attributes-oid-20260809";
-const BASE_COMMIT = "25b2669cfce85f8e2a2389c0ed128159dc6f83e1";
+  "social/checkpoint-3a0p-linux-gate3-failure-provenance-20260809";
+const BASE_COMMIT = "8eb4c4d71c6593f9c3e448be6ac52b1b0e8ba931";
 const PRODUCT_COMMIT = "fcfc92419021dae5f77baad731c634b10c275c5b";
 const MARKER = "[run-social-3a0p-linux-gate]";
 const RUN_MARKER_PREFIX = "ia4tube-social-3a0p-linux-";
 const EVIDENCE_FILE = "social-3a0p-linux-physical-gates-evidence.json";
 const EVIDENCE_HASH_FILE = "social-3a0p-linux-physical-gates-evidence.sha256";
+const GATE_PROCESS_STATUS_FILE = "social-3a0p-linux-gate-process-status.json";
+const GATE_PROCESS_STATUS_HASH_FILE = "social-3a0p-linux-gate-process-status.sha256";
 const SANITIZED_MARKER = ".sanitized-approved";
 const LEGACY_2A_COMMIT = "9deb1e04249026a7046d44d6cbf4e2da87b9a0a4";
 const PHYSICAL_POOL_DRAIN_TIMEOUT_MS = 10_000;
 const LOGICAL_DATABASE_PORT = 5432;
 const SAFE_FAILURE = /^[a-z][a-z0-9_]{2,119}$/;
+const GATE3_PROVENANCE_KEYS = Object.freeze([
+  "causalCode",
+  "exitCode",
+  "externalProcessStarted",
+  "lastCompletedSubstep",
+  "operation",
+  "operationClass",
+  "signal",
+  "substep"
+].sort());
+const GATE3_SUBSTEP_DEFINITIONS = Object.freeze({
+  B1: Object.freeze({ operation: "base", operationClass: "internal_setup" }),
+  B2: Object.freeze({ operation: "base", operationClass: "postgres_transaction" }),
+  B3: Object.freeze({ operation: "base", operationClass: "internal_setup" }),
+  B4: Object.freeze({ operation: "base", operationClass: "postgres_transaction" }),
+  B5: Object.freeze({ operation: "base", operationClass: "postgres_transaction" }),
+  B6: Object.freeze({ operation: "base", operationClass: "postgres_concurrent_transactions" }),
+  B7: Object.freeze({ operation: "base", operationClass: "internal_validation" }),
+  B8: Object.freeze({ operation: "base", operationClass: "postgres_transaction" }),
+  B9: Object.freeze({ operation: "base", operationClass: "postgres_transaction" }),
+  B10: Object.freeze({ operation: "base", operationClass: "internal_validation" }),
+  S1: Object.freeze({ operation: "supplemental", operationClass: "internal_setup" }),
+  S2: Object.freeze({ operation: "supplemental", operationClass: "postgres_transaction" }),
+  S3: Object.freeze({ operation: "supplemental", operationClass: "postgres_transaction" }),
+  S4: Object.freeze({ operation: "supplemental", operationClass: "internal_setup" }),
+  S5: Object.freeze({ operation: "supplemental", operationClass: "postgres_concurrent_transactions" }),
+  S6: Object.freeze({ operation: "supplemental", operationClass: "internal_validation" }),
+  S7: Object.freeze({ operation: "supplemental", operationClass: "postgres_inventory" }),
+  S8: Object.freeze({ operation: "supplemental", operationClass: "internal_setup" }),
+  S9: Object.freeze({ operation: "supplemental", operationClass: "postgres_transaction" }),
+  S10: Object.freeze({ operation: "supplemental", operationClass: "postgres_concurrent_transactions" }),
+  S11: Object.freeze({ operation: "supplemental", operationClass: "internal_validation" }),
+  S12: Object.freeze({ operation: "supplemental", operationClass: "postgres_concurrent_transactions" }),
+  S13: Object.freeze({ operation: "supplemental", operationClass: "internal_setup" }),
+  S14: Object.freeze({ operation: "supplemental", operationClass: "postgres_transaction" }),
+  S15: Object.freeze({ operation: "supplemental", operationClass: "postgres_transaction" }),
+  S16: Object.freeze({ operation: "supplemental", operationClass: "postgres_transaction" }),
+  S17: Object.freeze({ operation: "supplemental", operationClass: "postgres_inventory" }),
+  S18: Object.freeze({ operation: "supplemental", operationClass: "postgres_transaction" }),
+  S19: Object.freeze({ operation: "supplemental", operationClass: "postgres_transaction" }),
+  S20: Object.freeze({ operation: "supplemental", operationClass: "postgres_transaction" }),
+  S21: Object.freeze({ operation: "supplemental", operationClass: "internal_setup" }),
+  S22: Object.freeze({ operation: "supplemental", operationClass: "postgres_concurrent_transactions" }),
+  S23: Object.freeze({ operation: "supplemental", operationClass: "internal_validation" }),
+  S24: Object.freeze({ operation: "supplemental", operationClass: "postgres_transaction" }),
+  S25: Object.freeze({ operation: "supplemental", operationClass: "postgres_transaction" }),
+  S26: Object.freeze({ operation: "supplemental", operationClass: "postgres_transaction" }),
+  S27: Object.freeze({ operation: "supplemental", operationClass: "postgres_transaction" }),
+  S28: Object.freeze({ operation: "supplemental", operationClass: "postgres_inventory" }),
+  S29: Object.freeze({ operation: "supplemental", operationClass: "internal_validation" }),
+  S30: Object.freeze({ operation: "supplemental", operationClass: "memory_cleanup" })
+});
+const GATE3_SUBSTEP_ORDER = Object.freeze(Object.keys(GATE3_SUBSTEP_DEFINITIONS));
+const GATE3_SUBSTEP_INDEX = new Map(
+  GATE3_SUBSTEP_ORDER.map((substep, index) => [substep, index])
+);
+const GATE3_NODE_ERROR_CODES = new Set([
+  "EAI_AGAIN",
+  "ECONNABORTED",
+  "ECONNREFUSED",
+  "ECONNRESET",
+  "EHOSTUNREACH",
+  "ENETUNREACH",
+  "ENOTFOUND",
+  "EPIPE",
+  "ETIMEDOUT"
+]);
+const GATE_PROCESS_SIGNALS = new Set([
+  "SIGHUP", "SIGINT", "SIGQUIT", "SIGILL", "SIGTRAP", "SIGABRT",
+  "SIGBUS", "SIGFPE", "SIGKILL", "SIGUSR1", "SIGSEGV", "SIGUSR2",
+  "SIGPIPE", "SIGALRM", "SIGTERM", "SIGSTKFLT", "SIGCHLD", "SIGCONT",
+  "SIGSTOP", "SIGTSTP", "SIGTTIN", "SIGTTOU", "SIGURG", "SIGXCPU",
+  "SIGXFSZ", "SIGVTALRM", "SIGPROF", "SIGWINCH", "SIGIO", "SIGPWR",
+  "SIGSYS"
+]);
+const GATE_PROCESS_STATUS_KEYS = Object.freeze([
+  "exitCode", "signal", "stderrStored", "stdoutStored", "timedOut"
+].sort());
 const BACKUP_RESTORE_PROVENANCE_KEYS = Object.freeze([
   "boundary",
   "causalCode",
@@ -316,6 +396,256 @@ function fail(code) {
 function failureCode(error) {
   const candidate = String(error?.code || error?.message || "");
   return SAFE_FAILURE.test(candidate) ? candidate : "linux_gate_unclassified_failure";
+}
+
+function gate3CodeFromCandidate(candidate) {
+  if (typeof candidate !== "string" || candidate.length === 0) {
+    return "gate3_error_code_unavailable";
+  }
+  if (SAFE_FAILURE.test(candidate)) return candidate;
+  if (GATE3_NODE_ERROR_CODES.has(candidate)) {
+    return `gate3_error_code_${candidate.toLowerCase()}`;
+  }
+  if (/^[0-9A-Za-z]{5}$/.test(candidate)) {
+    return `gate3_error_code_${candidate.toLowerCase()}`;
+  }
+  return "gate3_error_code_unsupported";
+}
+
+function gate3FailureCode(error) {
+  const candidate = typeof error?.code === "string" ? error.code : "";
+  if (candidate === "postgres_rollback_failed") {
+    if (typeof error?.cause?.code === "string") {
+      return gate3CodeFromCandidate(error.cause.code);
+    }
+    return "postgres_rollback_failed";
+  }
+  if (candidate.length > 0) return gate3CodeFromCandidate(candidate);
+  if (error instanceof TypeError) return "gate3_type_error";
+  return "gate3_error_code_unavailable";
+}
+
+function sanitizedGate3FailureProvenance(candidate) {
+  if (candidate == null) return null;
+  if (
+    !candidate || Object.getPrototypeOf(candidate) !== Object.prototype ||
+    JSON.stringify(Object.keys(candidate).sort()) !==
+      JSON.stringify(GATE3_PROVENANCE_KEYS)
+  ) return null;
+  const definition = GATE3_SUBSTEP_DEFINITIONS[candidate.substep];
+  const lastCompletedDefinition = candidate.lastCompletedSubstep == null
+    ? null
+    : GATE3_SUBSTEP_DEFINITIONS[candidate.lastCompletedSubstep];
+  if (
+    !definition ||
+    candidate.operation !== definition.operation ||
+    candidate.operationClass !== definition.operationClass ||
+    !SAFE_FAILURE.test(String(candidate.causalCode || "")) ||
+    candidate.externalProcessStarted !== false ||
+    candidate.exitCode !== null ||
+    candidate.signal !== null ||
+    (candidate.lastCompletedSubstep !== null && (
+      !lastCompletedDefinition ||
+      GATE3_SUBSTEP_INDEX.get(candidate.lastCompletedSubstep) >=
+        GATE3_SUBSTEP_INDEX.get(candidate.substep)
+    ))
+  ) return null;
+  return Object.freeze({
+    operation: candidate.operation,
+    substep: candidate.substep,
+    operationClass: candidate.operationClass,
+    causalCode: candidate.causalCode,
+    lastCompletedSubstep: candidate.lastCompletedSubstep,
+    externalProcessStarted: false,
+    exitCode: null,
+    signal: null
+  });
+}
+
+function createGate3FailureProvenanceTracker() {
+  let firstFailure = null;
+  let lastCompletedSubstep = null;
+
+  async function runSubstep(operation, substep, operationClass, execute) {
+    const definition = GATE3_SUBSTEP_DEFINITIONS[substep];
+    if (
+      !definition || definition.operation !== operation ||
+      definition.operationClass !== operationClass ||
+      typeof execute !== "function"
+    ) {
+      fail("gate3_failure_provenance_substep_invalid");
+    }
+    try {
+      const result = await execute();
+      if (!firstFailure) lastCompletedSubstep = substep;
+      return result;
+    } catch (error) {
+      if (!firstFailure) {
+        firstFailure = Object.freeze({
+          operation,
+          substep,
+          operationClass,
+          causalCode: gate3FailureCode(error),
+          lastCompletedSubstep,
+          externalProcessStarted: false,
+          exitCode: null,
+          signal: null
+        });
+      }
+      throw error;
+    }
+  }
+
+  function forOperation(operation) {
+    if (!new Set(["base", "supplemental"]).has(operation)) {
+      fail("gate3_failure_provenance_operation_invalid");
+    }
+    return async function runGate3Substep(substep, operationClass, execute) {
+      return runSubstep(operation, substep, operationClass, execute);
+    };
+  }
+
+  return Object.freeze({
+    failure() { return firstFailure; },
+    forOperation,
+    runSubstep
+  });
+}
+
+function sanitizedGateProcessStatus(candidate) {
+  if (
+    !candidate || Object.getPrototypeOf(candidate) !== Object.prototype ||
+    JSON.stringify(Object.keys(candidate).sort()) !==
+      JSON.stringify(GATE_PROCESS_STATUS_KEYS) ||
+    !(candidate.exitCode === null || (
+      Number.isSafeInteger(candidate.exitCode) && candidate.exitCode >= 0
+    )) ||
+    !(candidate.signal === null || GATE_PROCESS_SIGNALS.has(candidate.signal)) ||
+    typeof candidate.timedOut !== "boolean" ||
+    candidate.stdoutStored !== false ||
+    candidate.stderrStored !== false ||
+    (candidate.signal !== null && candidate.exitCode !== null) ||
+    (candidate.timedOut === true && candidate.exitCode !== null)
+  ) return null;
+  return Object.freeze({
+    exitCode: candidate.exitCode,
+    signal: candidate.signal,
+    timedOut: candidate.timedOut,
+    stdoutStored: false,
+    stderrStored: false
+  });
+}
+
+function gateProcessStatusFromChildResult(candidate = {}) {
+  const signal = candidate.signal == null ? null : String(candidate.signal);
+  const status = sanitizedGateProcessStatus({
+    exitCode: signal || candidate.timedOut === true
+      ? null
+      : candidate.exitCode,
+    signal,
+    timedOut: candidate.timedOut === true,
+    stdoutStored: false,
+    stderrStored: false
+  });
+  if (!status) fail("linux_gate_process_status_invalid");
+  return status;
+}
+
+function writeGateProcessStatus(options = {}) {
+  const evidenceDirectory = path.resolve(String(options.evidenceDirectory || ""));
+  if (!evidenceDirectory) {
+    fail("linux_gate_process_status_directory_invalid");
+  }
+  if (!fs.existsSync(evidenceDirectory)) {
+    fs.mkdirSync(evidenceDirectory, { recursive: false, mode: 0o700 });
+  }
+  if (!fs.statSync(evidenceDirectory).isDirectory()) {
+    fail("linux_gate_process_status_directory_invalid");
+  }
+  const status = sanitizedGateProcessStatus(options.status);
+  if (!status) fail("linux_gate_process_status_invalid");
+  const serialized = `${canonicalJson(status)}\n`;
+  const digest = crypto.createHash("sha256").update(serialized).digest("hex");
+  fs.writeFileSync(
+    path.join(evidenceDirectory, GATE_PROCESS_STATUS_FILE),
+    serialized,
+    { flag: "wx", mode: 0o600 }
+  );
+  fs.writeFileSync(
+    path.join(evidenceDirectory, GATE_PROCESS_STATUS_HASH_FILE),
+    `${digest}  ${GATE_PROCESS_STATUS_FILE}\n`,
+    { flag: "wx", mode: 0o600 }
+  );
+  return status;
+}
+
+async function runGateProcessSupervisor(options = {}) {
+  const runnerTemp = path.resolve(options.runnerTemp || process.env.RUNNER_TEMP || "");
+  const evidenceDirectory = path.resolve(
+    options.evidenceDirectory ||
+    process.env.SOCIAL_3A0P_EVIDENCE_DIR ||
+    path.join(runnerTemp, "social-3a0p-linux-gate-evidence")
+  );
+  const spawnImpl = options.spawnImpl || spawn;
+  const timeoutMs = options.timeoutMs === undefined ? 50 * 60_000 : options.timeoutMs;
+  const killGraceMs = options.killGraceMs === undefined ? 10_000 : options.killGraceMs;
+  if (
+    typeof spawnImpl !== "function" ||
+    !Number.isSafeInteger(timeoutMs) || timeoutMs < 1 ||
+    !Number.isSafeInteger(killGraceMs) || killGraceMs < 1
+  ) fail("linux_gate_process_supervisor_invalid");
+
+  let child;
+  try {
+    child = spawnImpl(process.execPath, [__filename, "--run"], {
+      env: process.env,
+      stdio: "inherit",
+      windowsHide: true
+    });
+  } catch {
+    const status = gateProcessStatusFromChildResult({
+      exitCode: null,
+      signal: null,
+      timedOut: false
+    });
+    writeGateProcessStatus({ evidenceDirectory, status });
+    return Object.freeze({ status, workflowExitCode: 1 });
+  }
+
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    let timedOut = false;
+    let killTimer = null;
+    const finish = (exitCode, signal) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeoutTimer);
+      if (killTimer) clearTimeout(killTimer);
+      try {
+        const status = gateProcessStatusFromChildResult({
+          exitCode,
+          signal,
+          timedOut
+        });
+        writeGateProcessStatus({ evidenceDirectory, status });
+        resolve(Object.freeze({
+          status,
+          workflowExitCode: status.exitCode === 0 && status.timedOut === false ? 0 : 1
+        }));
+      } catch (error) {
+        reject(error);
+      }
+    };
+    const timeoutTimer = setTimeout(() => {
+      timedOut = true;
+      try { child.kill("SIGTERM"); } catch { /* closed status remains fail-closed */ }
+      killTimer = setTimeout(() => {
+        try { child.kill("SIGKILL"); } catch { /* closed status remains fail-closed */ }
+      }, killGraceMs);
+    }, timeoutMs);
+    child.once("error", () => finish(null, null));
+    child.once("close", (exitCode, signal) => finish(exitCode, signal));
+  });
 }
 
 function closedRlsCauseCode(error, depth = 0) {
@@ -1235,6 +1565,9 @@ function sanitizedFailureEvidence(source, code = "linux_evidence_sanitization_fa
       sanitizedBackupRestoreFailureProvenance(
         source?.backupRestoreFailureProvenance
       ),
+    gate3FailureProvenance: sanitizedGate3FailureProvenance(
+      source?.gate3FailureProvenance
+    ),
     rlsFailureProvenance: sanitizedRlsFailureProvenance(
       source?.rlsFailureProvenance
     ),
@@ -2963,6 +3296,7 @@ async function runLinuxGate(options = {}) {
     requireSpawnProof: options.runCommand === undefined
   });
   const rlsFailureProvenance = createRlsFailureProvenanceTracker();
+  const gate3FailureProvenance = createGate3FailureProvenanceTracker();
   const runCommand = options.runCommand || commandRunner({
     spawnImpl: backupRestoreProvenance.wrapSpawn(spawn)
   });
@@ -2986,6 +3320,7 @@ async function runLinuxGate(options = {}) {
     phases: [],
     firstFailure: null,
     backupRestoreFailureProvenance: null,
+    gate3FailureProvenance: null,
     rlsFailureProvenance: null,
     cleanupFailure: null
   };
@@ -3170,6 +3505,7 @@ async function runLinuxGate(options = {}) {
       plans,
       randomBytes: options.randomBytes || crypto.randomBytes,
       dependencies: {
+        runGate3Substep: gate3FailureProvenance.forOperation("base"),
         runProfileBackup: linuxProfileBackup,
         runProfileRestore: linuxProfileRestore
       }
@@ -3220,7 +3556,13 @@ async function runLinuxGate(options = {}) {
     activePhase = "concurrency_oauth_idempotency";
     await phase("concurrency_oauth_idempotency", async () => {
       const base = await gates.concurrency({ state });
-      const supplement = await runConcurrencyOAuthIdempotencyGate(state, sensitiveMarkers);
+      const supplement = await runConcurrencyOAuthIdempotencyGate(
+        state,
+        sensitiveMarkers,
+        Object.freeze({
+          runGate3Substep: gate3FailureProvenance.forOperation("supplemental")
+        })
+      );
       return Object.freeze({ ...base, ...supplement });
     });
     activePhase = "vault";
@@ -3337,6 +3679,7 @@ async function runLinuxGate(options = {}) {
     }
     evidence.backupRestoreFailureProvenance =
       backupRestoreProvenance.failure();
+    evidence.gate3FailureProvenance = gate3FailureProvenance.failure();
     evidence.rlsFailureProvenance = rlsFailureProvenance.failure();
     if (!evidence.firstFailure) evidence.firstFailure = { phase: activePhase, code };
   } finally {
@@ -3375,6 +3718,7 @@ async function runLinuxGate(options = {}) {
       });
     }
     evidence.backupTransport = publicBackupTransportEvidence(postgres);
+    evidence.gate3FailureProvenance = gate3FailureProvenance.failure();
     evidence.schemaProfileDiagnostics =
       restoreBehaviorFacade?.schemaProfileDiagnostics() || null;
     evidence.cleanup = cleanupResult || { cleanupCompleted: false };
@@ -3438,10 +3782,18 @@ async function cleanupOnly(options = {}) {
 
 async function main() {
   const argument = process.argv.slice(2);
-  if (argument.length !== 1 || !new Set(["--run", "--cleanup"]).has(argument[0])) fail("linux_gate_cli_invalid");
+  if (
+    argument.length !== 1 ||
+    !new Set(["--run", "--supervise-run", "--cleanup"]).has(argument[0])
+  ) fail("linux_gate_cli_invalid");
   if (argument[0] === "--cleanup") {
     const result = await cleanupOnly();
     process.stdout.write(`${JSON.stringify(result)}\n`);
+    return;
+  }
+  if (argument[0] === "--supervise-run") {
+    const supervised = await runGateProcessSupervisor();
+    if (supervised.workflowExitCode !== 0) process.exitCode = 1;
     return;
   }
   const result = await runLinuxGate();
@@ -3461,6 +3813,8 @@ module.exports = {
   BRANCH,
   EVIDENCE_FILE,
   EVIDENCE_HASH_FILE,
+  GATE_PROCESS_STATUS_FILE,
+  GATE_PROCESS_STATUS_HASH_FILE,
   LinuxGateFailure,
   MARKER,
   PRODUCT_COMMIT,
@@ -3472,6 +3826,7 @@ module.exports = {
   createDrainAwareRunTool,
   createBackupTransportBridge,
   createGate1MigrationPoolLifecycle,
+  createGate3FailureProvenanceTracker,
   createLinuxProfile0003PlansFacade,
   createLinuxProfileBackupRunner,
   createLinuxProfileRestoreRunner,
@@ -3487,6 +3842,8 @@ module.exports = {
   evidenceSafe,
   failureCode,
   freeBytes,
+  gate3FailureCode,
+  gateProcessStatusFromChildResult,
   isLinuxRestoreDatabase,
   isRestoreEmptyTargetInventoryQuery,
   materializeLegacy2ASource,
@@ -3505,8 +3862,12 @@ module.exports = {
   rlsFailureCode,
   sanitizedBackupRestoreFailureProvenance,
   sanitizedFailureEvidence,
+  sanitizedGate3FailureProvenance,
+  sanitizedGateProcessStatus,
   sanitizedRlsFailureProvenance,
   runRlsPrivilegeInventoryContextPhase,
   runRlsRuntimeAttributesTextResolutionPhase,
-  runLinuxGate
+  runGateProcessSupervisor,
+  runLinuxGate,
+  writeGateProcessStatus
 };

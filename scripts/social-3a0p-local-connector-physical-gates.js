@@ -294,60 +294,85 @@ async function rlsGate(state, dependencies, fixtures) {
 }
 
 async function concurrencyGate(state, dependencies, identityKey, fixtures) {
+  const runSubstep = typeof dependencies.runGate3Substep === "function"
+    ? dependencies.runGate3Substep
+    : (_substep, _operationClass, operation) => operation();
   const fixture = fixtures[0];
-  const context = contextFor(dependencies, identityKey, fixture);
-  const scope = dependencies.createPostgresConnectorStore({
-    pool: state.pools.runtime,
-    runtimeRole: RUNTIME_ROLE
-  }).scope(context);
-  await scope.saveConnection({
+  const setup = await runSubstep("B1", "internal_setup", () => {
+    const context = contextFor(dependencies, identityKey, fixture);
+    const scope = dependencies.createPostgresConnectorStore({
+      pool: state.pools.runtime,
+      runtimeRole: RUNTIME_ROLE
+    }).scope(context);
+    return { context, scope };
+  });
+  const { context, scope } = setup;
+  await runSubstep("B2", "postgres_transaction", () => scope.saveConnection({
     companyId: fixture.companyId,
     id: fixture.connectionId,
     provider: "instagram",
     state: "authorization_pending",
     account: null,
     revision: 1
-  }, null);
+  }, null));
 
-  const oauth = dependencies.createPostgresOAuthRepository({
-    pool: state.pools.runtime,
-    runtimeRole: RUNTIME_ROLE
-  }).scope(context);
-  const rawState = `synthetic-state-${crypto.randomBytes(32).toString("hex")}`;
-  const sessionJti = `synthetic-session-${crypto.randomBytes(16).toString("hex")}`;
-  const authorization = {
-    authorizationHandle: fixture.authorizationId,
-    connectionId: fixture.connectionId,
-    purpose: "connect",
-    state: rawState,
-    redirectUri: "https://synthetic.invalid/social/oauth/callback",
-    sessionJti,
-    expiresAt: new Date(Date.now() + 5 * 60_000)
-  };
-  const created = await oauth.createAuthorization(authorization);
-  if (created.authorizationHandle !== fixture.authorizationId) {
-    fail("connector_physical_oauth_idempotency_invalid");
-  }
-  const consumed = await oauth.consumeAuthorization({
-    authorizationHandle: fixture.authorizationId,
-    state: rawState,
-    redirectUri: authorization.redirectUri,
-    sessionJti
+  const oauthMaterial = await runSubstep("B3", "internal_setup", () => {
+    const oauth = dependencies.createPostgresOAuthRepository({
+      pool: state.pools.runtime,
+      runtimeRole: RUNTIME_ROLE
+    }).scope(context);
+    const rawState = `synthetic-state-${crypto.randomBytes(32).toString("hex")}`;
+    const sessionJti = `synthetic-session-${crypto.randomBytes(16).toString("hex")}`;
+    const authorization = {
+      authorizationHandle: fixture.authorizationId,
+      connectionId: fixture.connectionId,
+      purpose: "connect",
+      state: rawState,
+      redirectUri: "https://synthetic.invalid/social/oauth/callback",
+      sessionJti,
+      expiresAt: new Date(Date.now() + 5 * 60_000)
+    };
+    return { authorization, oauth, rawState, sessionJti };
   });
-  if (consumed.status !== "consumed") fail("connector_physical_oauth_lifecycle_invalid");
+  const { authorization, oauth, rawState, sessionJti } = oauthMaterial;
+  await runSubstep("B4", "postgres_transaction", async () => {
+    const created = await oauth.createAuthorization(authorization);
+    if (created.authorizationHandle !== fixture.authorizationId) {
+      fail("connector_physical_oauth_idempotency_invalid");
+    }
+  });
+  await runSubstep("B5", "postgres_transaction", async () => {
+    const consumed = await oauth.consumeAuthorization({
+      authorizationHandle: fixture.authorizationId,
+      state: rawState,
+      redirectUri: authorization.redirectUri,
+      sessionJti
+    });
+    if (consumed.status !== "consumed") {
+      fail("connector_physical_oauth_lifecycle_invalid");
+    }
+  });
 
   const request = {
     capability: "beginAuthorization",
     operationId: fixture.operationId,
     digest: "d".repeat(64)
   };
-  const contenders = await Promise.all([
-    scope.beginIdempotency(request),
-    scope.beginIdempotency(request)
-  ]);
-  const statuses = contenders.map((item) => item.status).sort();
-  if (statuses.join(",") !== "acquired,pending") fail("connector_physical_idempotency_race_invalid");
-  await scope.completeIdempotency({
+  const contenders = await runSubstep(
+    "B6",
+    "postgres_concurrent_transactions",
+    () => Promise.all([
+      scope.beginIdempotency(request),
+      scope.beginIdempotency(request)
+    ])
+  );
+  await runSubstep("B7", "internal_validation", () => {
+    const statuses = contenders.map((item) => item.status).sort();
+    if (statuses.join(",") !== "acquired,pending") {
+      fail("connector_physical_idempotency_race_invalid");
+    }
+  });
+  await runSubstep("B8", "postgres_transaction", () => scope.completeIdempotency({
     capability: request.capability,
     operationId: request.operationId,
     digest: request.digest,
@@ -360,21 +385,27 @@ async function concurrencyGate(state, dependencies, identityKey, fixtures) {
       authorizationHandle: fixture.authorizationId
     },
     errorCode: null
+  }));
+  await runSubstep("B9", "postgres_transaction", async () => {
+    const replay = await scope.beginIdempotency(request);
+    if (replay.status !== "completed") {
+      fail("connector_physical_idempotency_replay_invalid");
+    }
   });
-  const replay = await scope.beginIdempotency(request);
-  if (replay.status !== "completed") fail("connector_physical_idempotency_replay_invalid");
-  state.syntheticOauthDigests = {
-    state: crypto.createHash("sha256").update(rawState).digest("hex"),
-    session: crypto.createHash("sha256").update(sessionJti).digest("hex")
-  };
-  return {
-    physicalExecution: true,
-    syntheticOnly: true,
-    concurrencySafe: true,
-    oauthSynthetic: true,
-    idempotencySafe: true,
-    externalCallsAbsent: true
-  };
+  return runSubstep("B10", "internal_validation", () => {
+    state.syntheticOauthDigests = {
+      state: crypto.createHash("sha256").update(rawState).digest("hex"),
+      session: crypto.createHash("sha256").update(sessionJti).digest("hex")
+    };
+    return {
+      physicalExecution: true,
+      syntheticOnly: true,
+      concurrencySafe: true,
+      oauthSynthetic: true,
+      idempotencySafe: true,
+      externalCallsAbsent: true
+    };
+  });
 }
 
 async function vaultGate(state, dependencies, randomBytes, randomUUID) {

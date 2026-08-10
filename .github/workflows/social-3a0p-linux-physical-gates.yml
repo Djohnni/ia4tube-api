@@ -3,7 +3,7 @@
   "on": {
     "push": {
       "branches": [
-        "social/checkpoint-3a0p-linux-runtime-attributes-oid-20260809"
+        "social/checkpoint-3a0p-linux-gate3-failure-provenance-20260809"
       ]
     }
   },
@@ -15,16 +15,18 @@
     "cancel-in-progress": false
   },
   "env": {
-    "SOCIAL_3A0P_AUTHORIZED_PARENT": "25b2669cfce85f8e2a2389c0ed128159dc6f83e1",
+    "SOCIAL_3A0P_AUTHORIZED_PARENT": "8eb4c4d71c6593f9c3e448be6ac52b1b0e8ba931",
+    "SOCIAL_3A0P_MAINTENANCE_PARENT": "9b98de25a42a21f7ebd229bf5581a78bfed80b2e",
+    "SOCIAL_3A0P_MAINTENANCE_MESSAGE": "[test] serialize process-lifecycle security tests",
     "SOCIAL_3A0P_PRODUCT_COMMIT": "fcfc92419021dae5f77baad731c634b10c275c5b",
-    "SOCIAL_3A0P_AUTHORIZED_MESSAGE": "[run-social-3a0p-linux-gate] inspect runtime migration privileges by oid",
+    "SOCIAL_3A0P_AUTHORIZED_MESSAGE": "[run-social-3a0p-linux-gate] classify Gate 3 failure provenance",
     "POSTGRES_CONNECTIVITY_MODE": "internal_bridge_direct_v1",
     "POSTGRES_BACKUP_CONNECTIVITY_MODE": "logical_dns_to_internal_container_v1",
     "SOCIAL_3A0P_POSTGRES_IMAGE": "docker.io/library/postgres:18.4-bookworm@sha256:7e6103cf85f88f7a0eddb3ec0b1ba8940eba098ed118ade25a729ca9daee5568"
   },
   "jobs": {
     "physical-gates": {
-      "if": "github.event_name == 'push' && github.ref == 'refs/heads/social/checkpoint-3a0p-linux-runtime-attributes-oid-20260809' && github.event.created == true && github.event.deleted == false && github.event.forced == false && github.event.before == '0000000000000000000000000000000000000000' && github.event.head_commit.message == '[run-social-3a0p-linux-gate] inspect runtime migration privileges by oid' && github.run_attempt == 1",
+      "if": "github.event_name == 'push' && github.ref == 'refs/heads/social/checkpoint-3a0p-linux-gate3-failure-provenance-20260809' && github.event.created == true && github.event.deleted == false && github.event.forced == false && github.event.before == '0000000000000000000000000000000000000000' && github.event.head_commit.message == '[run-social-3a0p-linux-gate] classify Gate 3 failure provenance' && github.run_attempt == 1",
       "runs-on": "ubuntu-24.04",
       "timeout-minutes": 60,
       "defaults": {
@@ -48,7 +50,7 @@
             "AUTHORIZED_MESSAGE": "${{ github.event.head_commit.message }}",
             "AUTHORIZED_ATTEMPT": "${{ github.run_attempt }}"
           },
-          "run": "set -euo pipefail\ntest \"$AUTHORIZED_ATTEMPT\" = \"1\"\ntest \"$AUTHORIZED_MESSAGE\" = \"$SOCIAL_3A0P_AUTHORIZED_MESSAGE\"\ntest \"$(git rev-parse HEAD)\" = \"$AUTHORIZED_SHA\"\ntest \"$(git rev-parse HEAD^)\" = \"$SOCIAL_3A0P_AUTHORIZED_PARENT\"\ntest \"$(git log -1 --pretty=%B)\" = \"$SOCIAL_3A0P_AUTHORIZED_MESSAGE\"\ngit diff --quiet \"$SOCIAL_3A0P_PRODUCT_COMMIT\" HEAD -- src db migrations server.js package.json package-lock.json\nwhile IFS= read -r changed; do\n  case \"$changed\" in\n    .github/workflows/social-3a0p-linux-physical-gates.yml|docs/social-3a0p-linux-physical-gates.md|scripts/social-3a0p-linux-gate.js|scripts/social-3a0p-linux-physical-gates.js|tests/social-3a0p-linux-gate.test.js|tests/social-3a0p-linux-physical-gates.test.js|tests/social-3a0p-linux-workflow.test.js) ;;\n    *) exit 1 ;;\n  esac\ndone < <(git diff --name-only \"$SOCIAL_3A0P_AUTHORIZED_PARENT\" HEAD)\ntest ! -e \"$RUNNER_TEMP/social-3a0p-linux-gate-evidence\""
+          "run": "set -euo pipefail\ntest \"$AUTHORIZED_ATTEMPT\" = \"1\"\ntest \"$AUTHORIZED_MESSAGE\" = \"$SOCIAL_3A0P_AUTHORIZED_MESSAGE\"\ntest \"$(git rev-parse HEAD)\" = \"$AUTHORIZED_SHA\"\ntest \"$(git rev-parse HEAD^)\" = \"$SOCIAL_3A0P_AUTHORIZED_PARENT\"\ntest \"$(git rev-parse \"$SOCIAL_3A0P_AUTHORIZED_PARENT^\")\" = \"$SOCIAL_3A0P_MAINTENANCE_PARENT\"\ntest \"$(git log -1 --pretty=%B)\" = \"$SOCIAL_3A0P_AUTHORIZED_MESSAGE\"\ntest \"$(git log -1 --pretty=%B \"$SOCIAL_3A0P_AUTHORIZED_PARENT\")\" = \"$SOCIAL_3A0P_MAINTENANCE_MESSAGE\"\ntest \"$(git rev-list --count \"$SOCIAL_3A0P_MAINTENANCE_PARENT..HEAD\")\" = \"2\"\ntest \"$(git rev-list --parents -n 1 HEAD | wc -w)\" = \"2\"\ntest \"$(git rev-list --parents -n 1 \"$SOCIAL_3A0P_AUTHORIZED_PARENT\" | wc -w)\" = \"2\"\ngit diff --quiet \"$SOCIAL_3A0P_PRODUCT_COMMIT\" HEAD -- src db migrations roles.sql server.js package.json package-lock.json\nmaintenance_count=0\nwhile IFS= read -r maintenance_changed; do\n  case \"$maintenance_changed\" in\n    scripts/run-node-tests.js|scripts/social-3a0p-local-scope.js|tests/node-test-runner-safety.test.js|tests/social-3a0p-local-scope.test.js) ;;\n    *) exit 1 ;;\n  esac\n  maintenance_count=$((maintenance_count + 1))\ndone < <(git diff --name-only \"$SOCIAL_3A0P_MAINTENANCE_PARENT\" \"$SOCIAL_3A0P_AUTHORIZED_PARENT\")\ntest \"$maintenance_count\" = \"4\"\nfeature_count=0\nwhile IFS= read -r feature_changed; do\n  case \"$feature_changed\" in\n    .github/workflows/social-3a0p-linux-physical-gates.yml|docs/social-3a0p-linux-physical-gates.md|scripts/social-3a0p-linux-gate.js|scripts/social-3a0p-local-connector-physical-gates.js|scripts/social-3a0p-linux-physical-gates.js|tests/social-3a0p-linux-gate.test.js|tests/social-3a0p-local-connector-physical-gates.test.js|tests/social-3a0p-linux-physical-gates.test.js|tests/social-3a0p-linux-workflow.test.js) ;;\n    *) exit 1 ;;\n  esac\n  feature_count=$((feature_count + 1))\ndone < <(git diff --name-only \"$SOCIAL_3A0P_AUTHORIZED_PARENT\" HEAD)\ntest \"$feature_count\" = \"9\"\ntest ! -e \"$RUNNER_TEMP/social-3a0p-linux-gate-evidence\""
         },
         {
           "name": "Set up Node.js",
@@ -63,15 +65,19 @@
           "run": "npm ci --ignore-scripts --no-audit --no-fund"
         },
         {
-          "name": "Run runtime migration privilege inventory by OID before later gates once",
+          "name": "Run stabilized automated tests once",
+          "run": "npm test"
+        },
+        {
+          "name": "Run Gate 3 failure provenance diagnostic once",
           "id": "gate",
-          "run": "set +e\nnode scripts/social-3a0p-linux-gate.js --run\ngate_status=$?\nset -e\necho \"gate_exit_code=$gate_status\" >> \"$GITHUB_OUTPUT\"\nexit 0"
+          "run": "set +e\nnode scripts/social-3a0p-linux-gate.js --supervise-run\ngate_status=$?\nset -e\necho \"gate_exit_code=$gate_status\" >> \"$GITHUB_OUTPUT\"\nexit 0"
         },
         {
           "name": "Approve sanitized evidence for upload",
           "id": "evidence",
           "if": "always()",
-          "run": "set -euo pipefail\nevidence_dir=\"$RUNNER_TEMP/social-3a0p-linux-gate-evidence\"\nevidence_json=\"$evidence_dir/social-3a0p-linux-physical-gates-evidence.json\"\nevidence_sha=\"$evidence_dir/social-3a0p-linux-physical-gates-evidence.sha256\"\nsanitized_marker=\"$evidence_dir/.sanitized-approved\"\nupload=false\nif test -f \"$evidence_json\" && test -f \"$evidence_sha\" && test -f \"$sanitized_marker\"; then\n  expected_hash=\"$(cut -d ' ' -f 1 \"$evidence_sha\")\"\n  actual_hash=\"$(sha256sum \"$evidence_json\" | cut -d ' ' -f 1)\"\n  if test \"${#expected_hash}\" = \"64\" && test \"$expected_hash\" = \"$actual_hash\"; then\n    upload=true\n  fi\nfi\necho \"upload=$upload\" >> \"$GITHUB_OUTPUT\""
+          "run": "set -euo pipefail\nevidence_dir=\"$RUNNER_TEMP/social-3a0p-linux-gate-evidence\"\nevidence_json=\"$evidence_dir/social-3a0p-linux-physical-gates-evidence.json\"\nevidence_sha=\"$evidence_dir/social-3a0p-linux-physical-gates-evidence.sha256\"\nprocess_json=\"$evidence_dir/social-3a0p-linux-gate-process-status.json\"\nprocess_sha=\"$evidence_dir/social-3a0p-linux-gate-process-status.sha256\"\nsanitized_marker=\"$evidence_dir/.sanitized-approved\"\nupload=false\nif test -f \"$evidence_json\" && test -f \"$evidence_sha\" && test -f \"$process_json\" && test -f \"$process_sha\" && test -f \"$sanitized_marker\"; then\n  expected_hash=\"$(cut -d ' ' -f 1 \"$evidence_sha\")\"\n  actual_hash=\"$(sha256sum \"$evidence_json\" | cut -d ' ' -f 1)\"\n  expected_process_hash=\"$(cut -d ' ' -f 1 \"$process_sha\")\"\n  actual_process_hash=\"$(sha256sum \"$process_json\" | cut -d ' ' -f 1)\"\n  if test \"${#expected_hash}\" = \"64\" && test \"$expected_hash\" = \"$actual_hash\" && test \"${#expected_process_hash}\" = \"64\" && test \"$expected_process_hash\" = \"$actual_process_hash\" && GATE_PROCESS_STATUS_FILE=\"$process_json\" node -e 'const fs=require(\"node:fs\");const gate=require(\"./scripts/social-3a0p-linux-gate\");const value=JSON.parse(fs.readFileSync(process.env.GATE_PROCESS_STATUS_FILE,\"utf8\"));if(!gate.sanitizedGateProcessStatus(value))process.exit(1)'; then\n    upload=true\n  fi\nfi\necho \"upload=$upload\" >> \"$GITHUB_OUTPUT\""
         },
         {
           "name": "Upload the single sanitized evidence artifact",
@@ -79,7 +85,7 @@
           "uses": "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a",
           "with": {
             "name": "social-3a0p-linux-physical-gates-evidence",
-            "path": "${{ runner.temp }}/social-3a0p-linux-gate-evidence/social-3a0p-linux-physical-gates-evidence.json\n${{ runner.temp }}/social-3a0p-linux-gate-evidence/social-3a0p-linux-physical-gates-evidence.sha256",
+            "path": "${{ runner.temp }}/social-3a0p-linux-gate-evidence/social-3a0p-linux-physical-gates-evidence.json\n${{ runner.temp }}/social-3a0p-linux-gate-evidence/social-3a0p-linux-physical-gates-evidence.sha256\n${{ runner.temp }}/social-3a0p-linux-gate-evidence/social-3a0p-linux-gate-process-status.json\n${{ runner.temp }}/social-3a0p-linux-gate-evidence/social-3a0p-linux-gate-process-status.sha256",
             "if-no-files-found": "error",
             "compression-level": 0,
             "overwrite": false,

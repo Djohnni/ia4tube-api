@@ -9,6 +9,7 @@ const {
   createLocalVerifierPoolClass,
   createTenant,
   databaseContainsMarker,
+  runConcurrencyOAuthIdempotencyGate,
   runRlsAndRoleGate,
   runRlsPrivilegeInventoryContextReproduction,
   runRlsRuntimeWriteContractReproduction,
@@ -24,6 +25,57 @@ const OWNER_ROLE = "ia4tube_social_owner";
 const RUNTIME_LOGIN = "ia4tube_social_local_runtime";
 const RUNTIME_ROLE = "ia4tube_social_runtime";
 
+const SUPPLEMENTAL_GATE3_SUBSTEPS = Object.freeze([
+  ["S1", "supplemental_tenant_create", "internal_setup"],
+  ["S2", "supplemental_tenant_a_seed", "postgres_transaction"],
+  ["S3", "supplemental_tenant_b_seed", "postgres_transaction"],
+  ["S4", "supplemental_connector_store_setup", "internal_setup"],
+  ["S5", "supplemental_connection_reservation_race", "postgres_concurrent_transactions"],
+  ["S6", "supplemental_connection_reservation_validation", "internal_validation"],
+  ["S7", "supplemental_blocking_connection_inventory", "postgres_inventory"],
+  ["S8", "supplemental_oauth_repository_material_setup", "internal_setup"],
+  ["S9", "supplemental_oauth_authorization_create", "postgres_transaction"],
+  ["S10", "supplemental_oauth_consume_race", "postgres_concurrent_transactions"],
+  ["S11", "supplemental_oauth_consume_validation", "internal_validation"],
+  ["S12", "supplemental_oauth_replay_cross_tenant", "postgres_concurrent_transactions"],
+  ["S13", "supplemental_expired_oauth_material_setup", "internal_setup"],
+  ["S14", "supplemental_expired_oauth_create", "postgres_transaction"],
+  ["S15", "supplemental_oauth_force_expiry", "postgres_transaction"],
+  ["S16", "supplemental_expired_oauth_consume", "postgres_transaction"],
+  ["S17", "supplemental_plaintext_absence_inventory", "postgres_inventory"],
+  ["S18", "supplemental_winner_disconnect", "postgres_transaction"],
+  ["S19", "supplemental_connected_tenant_a_seed", "postgres_transaction"],
+  ["S20", "supplemental_connected_tenant_b_seed", "postgres_transaction"],
+  ["S21", "supplemental_publication_material_setup", "internal_setup"],
+  ["S22", "supplemental_publication_idempotency_race", "postgres_concurrent_transactions"],
+  ["S23", "supplemental_publication_race_validation", "internal_validation"],
+  ["S24", "supplemental_publication_complete", "postgres_transaction"],
+  ["S25", "supplemental_publication_replay", "postgres_transaction"],
+  ["S26", "supplemental_publication_changed_hash_refusal", "postgres_transaction"],
+  ["S27", "supplemental_publication_cross_tenant_key", "postgres_transaction"],
+  ["S28", "supplemental_publication_persistence_inventory", "postgres_inventory"],
+  ["S29", "supplemental_final_assertion_result", "internal_validation"],
+  ["S30", "supplemental_identity_key_zeroing", "memory_cleanup"]
+]);
+
+const SUPPLEMENTAL_GATE3_RESULT = Object.freeze({
+  connectionReservationsConcurrent: 2,
+  blockingConnections: 1,
+  secondConnectionConflict: true,
+  oauthSingleConsumer: true,
+  oauthSecondConsumeRefused: true,
+  oauthReplayRefused: true,
+  oauthExpiredRefused: true,
+  oauthCrossCompanyRefused: true,
+  oauthPlaintextAbsent: true,
+  sameRequestReused: true,
+  changedHashConflict: true,
+  crossTenantKeyAccepted: true,
+  publicationRows: 1,
+  duplicateAttempts: 0,
+  externalCalls: 0
+});
+
 function postgresError(code) {
   return Object.assign(new Error("synthetic postgres refusal"), { code });
 }
@@ -33,6 +85,200 @@ function legacyFailureCode(error) {
   return /^[a-z][a-z0-9_]{2,119}$/.test(candidate)
     ? candidate
     : "linux_gate_unclassified_failure";
+}
+
+async function withSupplementalGate3Doubles(operation, options = {}) {
+  const poolModule = require("../src/persistence/postgres/pool");
+  const connectorModule = require("../src/persistence/postgres/social-connector-store");
+  const oauthModule = require("../src/persistence/postgres/social-oauth-repository");
+  const originals = {
+    withTransaction: poolModule.withTransaction,
+    createPostgresConnectorStore: connectorModule.createPostgresConnectorStore,
+    createPostgresOAuthRepository: oauthModule.createPostgresOAuthRepository,
+    randomBytes: crypto.randomBytes,
+    now: Date.now
+  };
+  const observations = {
+    transactions: [],
+    queries: [],
+    connectorCalls: [],
+    oauthCalls: []
+  };
+  const snapshot = (value) => JSON.parse(JSON.stringify(value));
+  const postgresRefusal = (code) => Object.assign(new Error("synthetic refusal"), { code });
+  const state = {
+    pools: {
+      migration: Object.freeze({ label: "migration" }),
+      runtime: Object.freeze({ label: "runtime" })
+    }
+  };
+  let winningConnectionId;
+  let reservationCall = 0;
+  let connectorScope = 0;
+  let oauthConsumeCall = 0;
+  let oauthScope = 0;
+  let publicationRaceCall = 0;
+  let publicationCompleted = false;
+  let randomCall = 0;
+
+  poolModule.withTransaction = async (pool, callback, transactionOptions = {}) => {
+    observations.transactions.push({
+      pool: pool === state.pools.migration ? "migration" : "runtime",
+      options: snapshot(transactionOptions)
+    });
+    const client = {
+      async query(text, values = []) {
+        const sql = String(text);
+        observations.queries.push({ text: sql, values: snapshot(values) });
+        if (sql.includes("SELECT id::text AS id FROM ia4tube_social.social_connections")) {
+          return { rows: [{ id: winningConnectionId }] };
+        }
+        if (sql.includes(") AS present")) return { rows: [{ present: false }] };
+        if (sql.includes("AS publications,")) {
+          return { rows: [{ publications: 1, attempts: 0 }] };
+        }
+        return { rows: [] };
+      }
+    };
+    return callback(client);
+  };
+  connectorModule.createPostgresConnectorStore = () => ({
+    scope(context) {
+      const tenant = connectorScope++ === 0 ? "a" : "b";
+      return Object.freeze({
+        async saveConnection(record, expectedRevision) {
+          observations.connectorCalls.push({
+            method: "saveConnection",
+            tenant,
+            arguments: snapshot([record, expectedRevision])
+          });
+          if (record.state === "authorization_pending") {
+            reservationCall += 1;
+            if (reservationCall === 1) {
+              winningConnectionId = record.id;
+              return Object.freeze({ ...record });
+            }
+            throw postgresRefusal("state_transition_invalid");
+          }
+          return Object.freeze({ ...record });
+        },
+        async beginIdempotency(input) {
+          observations.connectorCalls.push({
+            method: "beginIdempotency",
+            tenant,
+            arguments: snapshot([input])
+          });
+          if (tenant === "b") return Object.freeze({ status: "acquired" });
+          if (input.digest === "f".repeat(64)) throw postgresRefusal("idempotency_conflict");
+          if (publicationCompleted) return Object.freeze({ status: "completed" });
+          publicationRaceCall += 1;
+          return Object.freeze({ status: publicationRaceCall === 1 ? "acquired" : "pending" });
+        },
+        async completeIdempotency(input) {
+          observations.connectorCalls.push({
+            method: "completeIdempotency",
+            tenant,
+            arguments: snapshot([input])
+          });
+          publicationCompleted = true;
+          return true;
+        }
+      });
+    }
+  });
+  oauthModule.createPostgresOAuthRepository = () => ({
+    scope(context) {
+      const tenant = oauthScope++ === 0 ? "a" : "b";
+      return Object.freeze({
+        async createAuthorization(input) {
+          observations.oauthCalls.push({
+            method: "createAuthorization",
+            tenant,
+            arguments: snapshot([input])
+          });
+          return true;
+        },
+        async consumeAuthorization(input) {
+          observations.oauthCalls.push({
+            method: "consumeAuthorization",
+            tenant,
+            arguments: snapshot([input])
+          });
+          oauthConsumeCall += 1;
+          if (oauthConsumeCall === 1) return Object.freeze({ status: "consumed" });
+          throw postgresRefusal("authorization_expired");
+        }
+      });
+    }
+  });
+  crypto.randomBytes = (size) => Buffer.alloc(size, ++randomCall);
+  Date.now = () => 1_800_000_000_000;
+
+  try {
+    const identityKey = options.identityKey || Buffer.alloc(32, 0x5a);
+    let uuid = 0;
+    const dependencies = {
+      identityKey,
+      randomUUID() {
+        uuid += 1;
+        return `00000000-0000-4000-8000-${String(uuid).padStart(12, "0")}`;
+      }
+    };
+    const sensitiveMarkers = [];
+    const value = await operation({
+      state,
+      dependencies,
+      sensitiveMarkers,
+      identityKey,
+      observations
+    });
+    return value;
+  } finally {
+    poolModule.withTransaction = originals.withTransaction;
+    connectorModule.createPostgresConnectorStore = originals.createPostgresConnectorStore;
+    oauthModule.createPostgresOAuthRepository = originals.createPostgresOAuthRepository;
+    crypto.randomBytes = originals.randomBytes;
+    Date.now = originals.now;
+  }
+}
+
+async function executeSupplementalGate3(options = {}) {
+  return withSupplementalGate3Doubles(async (fixture) => {
+    const runnerCalls = [];
+    const operationCounts = new Map();
+    const dependencies = { ...fixture.dependencies };
+    if (options.runGate3Substep) {
+      dependencies.runGate3Substep = async (substep, operationClass, operation) => {
+        runnerCalls.push({ substep, operationClass });
+        const countedOperation = async () => {
+          operationCounts.set(substep, (operationCounts.get(substep) || 0) + 1);
+          return operation();
+        };
+        return options.runGate3Substep(substep, operationClass, countedOperation);
+      };
+    }
+    let result;
+    let thrown;
+    let didThrow = false;
+    try {
+      result = await runConcurrencyOAuthIdempotencyGate(
+        fixture.state,
+        fixture.sensitiveMarkers,
+        dependencies
+      );
+    } catch (error) {
+      didThrow = true;
+      thrown = error;
+    }
+    return {
+      ...fixture,
+      result,
+      thrown,
+      didThrow,
+      runnerCalls,
+      operationCounts
+    };
+  }, options);
 }
 
 function inventoryContextProof(overrides = {}) {
@@ -1838,6 +2084,152 @@ test("database plaintext probe is parameterized and never interpolates the marke
   assert.deepEqual(call.values, [marker]);
   assert.match(call.text, /social_encrypted_credentials/);
   assert.doesNotMatch(call.text, /social_credentials\b/);
+});
+
+test("supplemental Gate 3 exposes every closed S1-S30 pass-through boundary", () => {
+  assert.equal(typeof runConcurrencyOAuthIdempotencyGate, "function");
+  const source = fs.readFileSync(path.join(ROOT, "scripts/social-3a0p-linux-physical-gates.js"), "utf8");
+  for (const [substep, _description, operationClass] of SUPPLEMENTAL_GATE3_SUBSTEPS) {
+    assert.match(source, new RegExp(
+      `runGate3Substep\\(\\s*[\"']${substep}[\"']\\s*,\\s*[\"']${operationClass}[\"']`
+    ));
+  }
+  assert.match(source, /runGate3Substep\("S5", "postgres_concurrent_transactions", \(\) =>\s*Promise\.allSettled\(\[/);
+  assert.match(source, /runGate3Substep\("S10", "postgres_concurrent_transactions", \(\) =>\s*Promise\.allSettled\(\[/);
+  assert.match(source, /runGate3Substep\("S12", "postgres_concurrent_transactions", \(\) => Promise\.all\(\[/);
+  assert.match(source, /runGate3Substep\("S22", "postgres_concurrent_transactions", \(\) =>\s*Promise\.all\(\[/);
+  assert.equal((source.match(/runGate3Substep\("S(?:[1-9]|[12][0-9]|30)"/g) || []).length, 30);
+});
+
+test("supplemental Gate 3 pass-through preserves success result, calls, arguments and cleanup", async () => {
+  const baseline = await executeSupplementalGate3();
+  const instrumented = await executeSupplementalGate3({
+    runGate3Substep: (_substep, _operationClass, operation) => operation()
+  });
+
+  assert.equal(baseline.didThrow, false);
+  assert.equal(instrumented.didThrow, false);
+  assert.deepEqual(baseline.result, SUPPLEMENTAL_GATE3_RESULT);
+  assert.deepEqual(instrumented.result, baseline.result);
+  assert.deepEqual(instrumented.observations, baseline.observations);
+  assert.deepEqual(instrumented.sensitiveMarkers, baseline.sensitiveMarkers);
+  assert.deepEqual(
+    instrumented.runnerCalls,
+    SUPPLEMENTAL_GATE3_SUBSTEPS.map(([substep, _description, operationClass]) => ({
+      substep,
+      operationClass
+    }))
+  );
+  assert.deepEqual(
+    [...instrumented.operationCounts.entries()],
+    SUPPLEMENTAL_GATE3_SUBSTEPS.map(([substep]) => [substep, 1])
+  );
+  assert.equal(instrumented.observations.transactions.length, 9);
+  assert.equal(instrumented.observations.queries.length, 13);
+  assert.equal(instrumented.observations.connectorCalls.length, 9);
+  assert.equal(instrumented.observations.oauthCalls.length, 7);
+  assert.equal(instrumented.identityKey.every((byte) => byte === 0), true);
+  assert.equal(Object.isFrozen(instrumented.result), true);
+});
+
+test("supplemental Gate 3 rethrows the same error at every S1-S30 boundary and still cleans up", async (context) => {
+  const errorShapes = [
+    () => Object.assign(new Error("dsn=postgres://secret SQL SELECT stdout stderr"), { code: "23505" }),
+    () => Object.assign(new Error("dsn=postgres://secret SQL SELECT stdout stderr"), { code: "57014" }),
+    () => Object.assign(new Error("dsn=postgres://secret SQL SELECT stdout stderr"), { code: "ECONNRESET" }),
+    () => Object.assign(new Error("dsn=postgres://secret SQL SELECT stdout stderr"), { code: "ETIMEDOUT" }),
+    () => new TypeError("dsn=postgres://secret SQL SELECT stdout stderr"),
+    () => new Error("dsn=postgres://secret SQL SELECT stdout stderr")
+  ];
+
+  for (let index = 0; index < SUPPLEMENTAL_GATE3_SUBSTEPS.length; index += 1) {
+    const [target, description] = SUPPLEMENTAL_GATE3_SUBSTEPS[index];
+    await context.test(`${target} ${description}`, async () => {
+      const failure = errorShapes[index % errorShapes.length]();
+      const execution = await executeSupplementalGate3({
+        runGate3Substep: async (substep, _operationClass, operation) => {
+          if (substep !== target) return operation();
+          if (substep === "S30") {
+            await operation();
+          }
+          throw failure;
+        }
+      });
+      const expectedSteps = SUPPLEMENTAL_GATE3_SUBSTEPS
+        .slice(0, index + 1)
+        .map(([substep]) => substep);
+      if (target !== "S30") expectedSteps.push("S30");
+
+      assert.equal(execution.didThrow, true);
+      assert.strictEqual(execution.thrown, failure);
+      assert.deepEqual(execution.runnerCalls.map(({ substep }) => substep), expectedSteps);
+      assert.equal(execution.runnerCalls.filter(({ substep }) => substep === target).length, 1);
+      assert.equal(execution.runnerCalls.filter(({ substep }) => substep === "S30").length, 1);
+      if (target !== "S1") {
+        assert.equal(execution.identityKey.every((byte) => byte === 0), true);
+      }
+      const publicTrace = JSON.stringify({ runnerCalls: execution.runnerCalls });
+      assert.doesNotMatch(publicTrace, /postgres:\/\/|secret|SELECT|stdout|stderr/i);
+    });
+  }
+});
+
+test("supplemental Gate 3 first failure wins over a later S30 failure", async () => {
+  const primary = Object.assign(new Error("primary secret"), { code: "57014" });
+  const cleanup = Object.assign(new Error("cleanup secret"), { code: "ECONNRESET" });
+  const execution = await executeSupplementalGate3({
+    runGate3Substep: async (substep, _operationClass, operation) => {
+      if (substep === "S10") throw primary;
+      if (substep === "S30") {
+        await operation();
+        throw cleanup;
+      }
+      return operation();
+    }
+  });
+
+  assert.equal(execution.didThrow, true);
+  assert.strictEqual(execution.thrown, primary);
+  assert.deepEqual(execution.runnerCalls.map(({ substep }) => substep), [
+    "S1", "S2", "S3", "S4", "S5", "S6", "S7", "S8", "S9", "S10", "S30"
+  ]);
+  assert.equal(execution.identityKey.every((byte) => byte === 0), true);
+});
+
+test("supplemental Gate 3 propagates an S30-only failure after zeroing identity material", async () => {
+  const cleanup = Object.assign(new Error("cleanup secret"), { code: "ETIMEDOUT" });
+  const execution = await executeSupplementalGate3({
+    runGate3Substep: async (substep, _operationClass, operation) => {
+      const value = await operation();
+      if (substep === "S30") throw cleanup;
+      return value;
+    }
+  });
+
+  assert.equal(execution.didThrow, true);
+  assert.strictEqual(execution.thrown, cleanup);
+  assert.equal(execution.identityKey.every((byte) => byte === 0), true);
+  assert.equal(execution.operationCounts.get("S30"), 1);
+});
+
+test("supplemental Gate 3 attempts both identity-key zeroing operations and preserves the first cleanup error", async () => {
+  const identityKey = Buffer.alloc(32, 0x6b);
+  const cleanup = Object.assign(new Error("first fill failed"), { code: "ECONNRESET" });
+  let fillCalls = 0;
+  Object.defineProperty(identityKey, "fill", {
+    configurable: true,
+    value(...arguments_) {
+      fillCalls += 1;
+      if (fillCalls === 1) throw cleanup;
+      return Buffer.prototype.fill.call(this, ...arguments_);
+    }
+  });
+  const execution = await executeSupplementalGate3({ identityKey });
+
+  assert.equal(execution.didThrow, true);
+  assert.strictEqual(execution.thrown, cleanup);
+  assert.equal(fillCalls, 2);
+  assert.equal(identityKey.every((byte) => byte === 0), true);
 });
 
 test("vault supplemental gate proves connection and AAD binding without persistence", async () => {

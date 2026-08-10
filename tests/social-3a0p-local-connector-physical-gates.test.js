@@ -7,6 +7,18 @@ const {
 } = require("../scripts/social-3a0p-local-connector-physical-gates");
 
 const RUN_MARKER = "ia4tube-social-3a0p-connector-test-0001";
+const BASE_GATE3_BOUNDARIES = Object.freeze([
+  Object.freeze(["B1", "internal_setup", "base_context_store_setup"]),
+  Object.freeze(["B2", "postgres_transaction", "base_initial_connection_save"]),
+  Object.freeze(["B3", "internal_setup", "base_oauth_repository_material_setup"]),
+  Object.freeze(["B4", "postgres_transaction", "base_oauth_authorization_create"]),
+  Object.freeze(["B5", "postgres_transaction", "base_oauth_authorization_consume"]),
+  Object.freeze(["B6", "postgres_concurrent_transactions", "base_idempotency_race"]),
+  Object.freeze(["B7", "internal_validation", "base_idempotency_race_validation"]),
+  Object.freeze(["B8", "postgres_transaction", "base_idempotency_complete"]),
+  Object.freeze(["B9", "postgres_transaction", "base_idempotency_replay"]),
+  Object.freeze(["B10", "internal_validation", "base_digest_result_finalization"])
+]);
 
 function uuidFactory() {
   let value = 0;
@@ -127,6 +139,180 @@ function fakeDependencies() {
   };
   return dependencies;
 }
+
+function createConcurrencyHarness(dependencies = fakeDependencies()) {
+  const state = {
+    target: Object.freeze({ host: "127.0.0.1", port: 55432 }),
+    pools: Object.freeze({ migration: {}, runtime: {} })
+  };
+  const gates = createConnectorPhysicalGates({
+    replaceDefaultDependencies: true,
+    dependencies,
+    randomBytes: (size) => Buffer.alloc(size, 5),
+    randomUUID: uuidFactory(),
+    plans: { runMarker: RUN_MARKER }
+  });
+  return Object.freeze({ gates, state });
+}
+
+test("Gate 3 base B1-B10 runner is optional pass-through with exact success result and order", async () => {
+  const baselineHarness = createConcurrencyHarness();
+  const baseline = await baselineHarness.gates.concurrency({ state: baselineHarness.state });
+  await baselineHarness.gates.destroy();
+
+  const observed = [];
+  const operationCalls = new Map();
+  const instrumentedDependencies = fakeDependencies();
+  instrumentedDependencies.runGate3Substep = async (substep, operationClass, operation) => {
+    observed.push([substep, operationClass]);
+    assert.equal(typeof operation, "function");
+    operationCalls.set(substep, (operationCalls.get(substep) || 0) + 1);
+    return operation();
+  };
+  const instrumentedHarness = createConcurrencyHarness(instrumentedDependencies);
+  const instrumented = await instrumentedHarness.gates.concurrency({
+    state: instrumentedHarness.state
+  });
+  await instrumentedHarness.gates.destroy();
+
+  assert.deepEqual(instrumented, baseline);
+  assert.deepEqual(
+    observed,
+    BASE_GATE3_BOUNDARIES.map(([substep, operationClass]) => [substep, operationClass])
+  );
+  assert.deepEqual(
+    [...operationCalls.entries()],
+    BASE_GATE3_BOUNDARIES.map(([substep]) => [substep, 1])
+  );
+});
+
+test("Gate 3 base B1-B10 preserves the exact runner error and stops at its boundary", async (t) => {
+  for (const [targetIndex, [targetSubstep]] of BASE_GATE3_BOUNDARIES.entries()) {
+    await t.test(targetSubstep, async () => {
+      const sentinel = Object.assign(
+        new Error("must remain the same object"),
+        { code: "23505" }
+      );
+      const observed = [];
+      const operationCalls = [];
+      const dependencies = fakeDependencies();
+      dependencies.runGate3Substep = async (substep, operationClass, operation) => {
+        observed.push([substep, operationClass]);
+        operationCalls.push(substep);
+        const result = await operation();
+        if (substep === targetSubstep) throw sentinel;
+        return result;
+      };
+      const harness = createConcurrencyHarness(dependencies);
+      try {
+        await assert.rejects(
+          harness.gates.concurrency({
+            state: harness.state
+          }),
+          (error) => error === sentinel
+        );
+      } finally {
+        await harness.gates.destroy();
+      }
+      assert.deepEqual(
+        observed,
+        BASE_GATE3_BOUNDARIES
+          .slice(0, targetIndex + 1)
+          .map(([substep, operationClass]) => [substep, operationClass])
+      );
+      assert.deepEqual(
+        operationCalls,
+        BASE_GATE3_BOUNDARIES.slice(0, targetIndex + 1).map(([substep]) => substep)
+      );
+    });
+  }
+});
+
+test("Gate 3 base instrumentation preserves exact arguments and Promise.all concurrency", async () => {
+  const dependencies = fakeDependencies();
+  const calls = [];
+  const beginRequests = [];
+  let beginSequence = 0;
+  let activeBegins = 0;
+  let maximumActiveBegins = 0;
+  let releaseRace;
+  const race = new Promise((resolve) => { releaseRace = resolve; });
+  dependencies.createPostgresConnectorStore = (options) => ({
+    scope(context) {
+      calls.push(["store-scope", options, context]);
+      return {
+        async saveConnection(record, expectedRevision) {
+          calls.push(["save", record, expectedRevision]);
+          return Object.freeze({ saved: true });
+        },
+        async beginIdempotency(request) {
+          beginRequests.push(request);
+          beginSequence += 1;
+          if (beginSequence <= 2) {
+            const contender = beginSequence;
+            activeBegins += 1;
+            maximumActiveBegins = Math.max(maximumActiveBegins, activeBegins);
+            if (beginSequence === 2) releaseRace();
+            await race;
+            activeBegins -= 1;
+            return Object.freeze({ status: contender === 1 ? "acquired" : "pending" });
+          }
+          return Object.freeze({ status: "completed" });
+        },
+        async completeIdempotency(record) {
+          calls.push(["complete", record]);
+          return Object.freeze({ status: "completed" });
+        }
+      };
+    }
+  });
+  dependencies.createPostgresOAuthRepository = (options) => ({
+    scope(context) {
+      calls.push(["oauth-scope", options, context]);
+      return {
+        async createAuthorization(input) {
+          calls.push(["oauth-create", input]);
+          return Object.freeze({ authorizationHandle: input.authorizationHandle });
+        },
+        async consumeAuthorization(input) {
+          calls.push(["oauth-consume", input]);
+          return Object.freeze({ status: "consumed" });
+        }
+      };
+    }
+  });
+  dependencies.runGate3Substep = (_substep, _operationClass, operation) => operation();
+  const harness = createConcurrencyHarness(dependencies);
+  try {
+    await harness.gates.concurrency({
+      state: harness.state
+    });
+  } finally {
+    await harness.gates.destroy();
+  }
+
+  assert.equal(maximumActiveBegins, 2);
+  assert.equal(beginRequests.length, 3);
+  assert.equal(beginRequests[0], beginRequests[1]);
+  assert.equal(beginRequests[1], beginRequests[2]);
+  const storeScope = calls.find(([name]) => name === "store-scope");
+  const oauthScope = calls.find(([name]) => name === "oauth-scope");
+  assert.equal(storeScope[1].pool, harness.state.pools.runtime);
+  assert.equal(oauthScope[1].pool, harness.state.pools.runtime);
+  assert.equal(storeScope[1].runtimeRole, "ia4tube_social_runtime");
+  assert.equal(oauthScope[1].runtimeRole, "ia4tube_social_runtime");
+  assert.equal(storeScope[2], oauthScope[2]);
+  const save = calls.find(([name]) => name === "save");
+  assert.equal(save[1].companyId, storeScope[2].companyId);
+  assert.equal(save[1].provider, "instagram");
+  assert.equal(save[2], null);
+  const created = calls.find(([name]) => name === "oauth-create")[1];
+  const consumed = calls.find(([name]) => name === "oauth-consume")[1];
+  assert.equal(created.authorizationHandle, consumed.authorizationHandle);
+  assert.equal(created.state, consumed.state);
+  assert.equal(created.redirectUri, consumed.redirectUri);
+  assert.equal(created.sessionJti, consumed.sessionJti);
+});
 
 test("concrete connector gates use the product contracts and physical plan runner", async () => {
   const runtimePool = {

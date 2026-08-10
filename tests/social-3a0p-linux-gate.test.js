@@ -47,12 +47,15 @@ const {
 const {
   BASE_COMMIT,
   BRANCH,
+  GATE_PROCESS_STATUS_FILE,
+  GATE_PROCESS_STATUS_HASH_FILE,
   canonicalJson,
   containsMarkerInTree,
   createBackupRestoreProvenanceTracker,
   createBackupTransportBridge,
   createDrainAwareRunTool,
   createGate1MigrationPoolLifecycle,
+  createGate3FailureProvenanceTracker,
   createLinuxProfile0003PlansFacade,
   createLinuxProfileBackupRunner,
   createLinuxProfileRestoreRunner,
@@ -67,6 +70,8 @@ const {
   createVerifiedLoginCredentialPoolBridge,
   evidenceSafe,
   failureCode,
+  gate3FailureCode,
+  gateProcessStatusFromChildResult,
   isLinuxRestoreDatabase,
   isRestoreEmptyTargetInventoryQuery,
   migrationEvidence,
@@ -82,9 +87,13 @@ const {
   rlsFailureCode,
   sanitizedBackupRestoreFailureProvenance,
   sanitizedFailureEvidence,
+  sanitizedGate3FailureProvenance,
+  sanitizedGateProcessStatus,
   sanitizedRlsFailureProvenance,
   runRlsPrivilegeInventoryContextPhase,
-  runRlsRuntimeAttributesTextResolutionPhase
+  runRlsRuntimeAttributesTextResolutionPhase,
+  runGateProcessSupervisor,
+  writeGateProcessStatus
 } = require("../scripts/social-3a0p-linux-gate");
 
 const ROOT = path.resolve(__dirname, "..");
@@ -2005,6 +2014,384 @@ test("RLS rollback wrapper preserves the primary SQLSTATE without publishing mes
   assert.deepEqual(tracker.failure(), {
     substep: "rls_cross_tenant_write",
     causalCode: "postgres_insufficient_privilege"
+  });
+});
+
+const GATE3_BOUNDARIES = Object.freeze([
+  ["base", "B1", "internal_setup"],
+  ["base", "B2", "postgres_transaction"],
+  ["base", "B3", "internal_setup"],
+  ["base", "B4", "postgres_transaction"],
+  ["base", "B5", "postgres_transaction"],
+  ["base", "B6", "postgres_concurrent_transactions"],
+  ["base", "B7", "internal_validation"],
+  ["base", "B8", "postgres_transaction"],
+  ["base", "B9", "postgres_transaction"],
+  ["base", "B10", "internal_validation"],
+  ["supplemental", "S1", "internal_setup"],
+  ["supplemental", "S2", "postgres_transaction"],
+  ["supplemental", "S3", "postgres_transaction"],
+  ["supplemental", "S4", "internal_setup"],
+  ["supplemental", "S5", "postgres_concurrent_transactions"],
+  ["supplemental", "S6", "internal_validation"],
+  ["supplemental", "S7", "postgres_inventory"],
+  ["supplemental", "S8", "internal_setup"],
+  ["supplemental", "S9", "postgres_transaction"],
+  ["supplemental", "S10", "postgres_concurrent_transactions"],
+  ["supplemental", "S11", "internal_validation"],
+  ["supplemental", "S12", "postgres_concurrent_transactions"],
+  ["supplemental", "S13", "internal_setup"],
+  ["supplemental", "S14", "postgres_transaction"],
+  ["supplemental", "S15", "postgres_transaction"],
+  ["supplemental", "S16", "postgres_transaction"],
+  ["supplemental", "S17", "postgres_inventory"],
+  ["supplemental", "S18", "postgres_transaction"],
+  ["supplemental", "S19", "postgres_transaction"],
+  ["supplemental", "S20", "postgres_transaction"],
+  ["supplemental", "S21", "internal_setup"],
+  ["supplemental", "S22", "postgres_concurrent_transactions"],
+  ["supplemental", "S23", "internal_validation"],
+  ["supplemental", "S24", "postgres_transaction"],
+  ["supplemental", "S25", "postgres_transaction"],
+  ["supplemental", "S26", "postgres_transaction"],
+  ["supplemental", "S27", "postgres_transaction"],
+  ["supplemental", "S28", "postgres_inventory"],
+  ["supplemental", "S29", "internal_validation"],
+  ["supplemental", "S30", "memory_cleanup"]
+]);
+
+test("Gate 3 causal classification is closed and never serializes raw error context", () => {
+  assert.equal(gate3FailureCode({ code: "linux_safe_failure" }), "linux_safe_failure");
+  assert.equal(gate3FailureCode({ code: "23505" }), "gate3_error_code_23505");
+  assert.equal(gate3FailureCode({ code: "57014" }), "gate3_error_code_57014");
+  assert.equal(gate3FailureCode({ code: "ECONNRESET" }), "gate3_error_code_econnreset");
+  assert.equal(gate3FailureCode({ code: "ETIMEDOUT" }), "gate3_error_code_etimedout");
+  assert.equal(gate3FailureCode({ code: "EPIPE" }), "gate3_error_code_epipe");
+  assert.equal(gate3FailureCode(new TypeError("postgresql://user:secret@host/db SELECT forbidden")), "gate3_type_error");
+  assert.equal(gate3FailureCode(new Error("password=secret stdout=forbidden stderr=forbidden")), "gate3_error_code_unavailable");
+  assert.equal(gate3FailureCode({ code: "UNSUPPORTED SECRET", message: "SELECT forbidden" }), "gate3_error_code_unsupported");
+  assert.equal(gate3FailureCode({
+    code: "postgres_rollback_failed",
+    message: "password=rollback-secret",
+    cause: { code: "23505", message: "SELECT secret" }
+  }), "gate3_error_code_23505");
+  assert.equal(gate3FailureCode({
+    code: "postgres_rollback_failed",
+    cause: { code: "UNSUPPORTED SECRET", message: "stderr secret" }
+  }), "gate3_error_code_unsupported");
+  assert.equal(gate3FailureCode({ code: "postgres_rollback_failed" }), "postgres_rollback_failed");
+});
+
+test("Gate 3 tracker accepts exactly B1-B10 and S1-S30 with their operation classes", async () => {
+  for (const [operation, substep, operationClass] of GATE3_BOUNDARIES) {
+    const tracker = createGate3FailureProvenanceTracker();
+    const marker = Object.freeze({ operation, substep });
+    assert.equal(
+      await tracker.forOperation(operation)(substep, operationClass, async () => marker),
+      marker
+    );
+    assert.equal(tracker.failure(), null);
+  }
+  const tracker = createGate3FailureProvenanceTracker();
+  await assert.rejects(
+    tracker.runSubstep("base", "S1", "internal_setup", async () => true),
+    { code: "gate3_failure_provenance_substep_invalid" }
+  );
+  await assert.rejects(
+    tracker.runSubstep("base", "B1", "postgres_transaction", async () => true),
+    { code: "gate3_failure_provenance_substep_invalid" }
+  );
+});
+
+test("Gate 3 tracker rethrows the same error and freezes first failure before later cleanup", async () => {
+  const tracker = createGate3FailureProvenanceTracker();
+  const runBase = tracker.forOperation("base");
+  const runSupplemental = tracker.forOperation("supplemental");
+  const marker = Object.freeze({ passed: true });
+  assert.equal(await runBase("B1", "internal_setup", async () => marker), marker);
+
+  const primary = Object.assign(
+    new Error("postgresql://user:password@host/db SELECT secret stdout secret stderr secret"),
+    { code: "23505", constraint: "forbidden_constraint" }
+  );
+  await assert.rejects(
+    runBase("B2", "postgres_transaction", async () => { throw primary; }),
+    (error) => error === primary
+  );
+  const first = tracker.failure();
+  assert.equal(Object.isFrozen(first), true);
+  assert.deepEqual(first, {
+    operation: "base",
+    substep: "B2",
+    operationClass: "postgres_transaction",
+    causalCode: "gate3_error_code_23505",
+    lastCompletedSubstep: "B1",
+    externalProcessStarted: false,
+    exitCode: null,
+    signal: null
+  });
+
+  const secondary = Object.assign(new Error("cleanup secret"), { code: "ETIMEDOUT" });
+  await assert.rejects(
+    runSupplemental("S30", "memory_cleanup", async () => { throw secondary; }),
+    (error) => error === secondary
+  );
+  assert.equal(tracker.failure(), first);
+  const serialized = canonicalJson(first);
+  for (const forbidden of [
+    "password", "SELECT", "stdout", "stderr", "constraint", "forbidden", "cleanup secret"
+  ]) assert.equal(serialized.includes(forbidden), false, forbidden);
+});
+
+test("Gate 3 provenance sanitizer rejects impossible shapes and survives fallback", () => {
+  const provenance = Object.freeze({
+    operation: "supplemental",
+    substep: "S17",
+    operationClass: "postgres_inventory",
+    causalCode: "gate3_error_code_econnreset",
+    lastCompletedSubstep: "S16",
+    externalProcessStarted: false,
+    exitCode: null,
+    signal: null
+  });
+  assert.deepEqual(sanitizedGate3FailureProvenance(provenance), provenance);
+  assert.equal(Object.isFrozen(sanitizedGate3FailureProvenance(provenance)), true);
+  for (const invalid of [
+    { ...provenance, operation: "base" },
+    { ...provenance, operationClass: "postgres_transaction" },
+    { ...provenance, lastCompletedSubstep: "S18" },
+    { ...provenance, externalProcessStarted: true },
+    { ...provenance, exitCode: 1 },
+    { ...provenance, signal: "SIGTERM" },
+    { ...provenance, message: "secret" }
+  ]) assert.equal(sanitizedGate3FailureProvenance(invalid), null);
+
+  const fallback = sanitizedFailureEvidence({
+    firstFailure: {
+      phase: "concurrency_oauth_idempotency",
+      code: "linux_gate_unclassified_failure"
+    },
+    gate3FailureProvenance: {
+      ...provenance,
+      message: "postgresql://user:secret@host/db"
+    },
+    cleanup: {
+      cleanupCompleted: true,
+      containerResiduals: 0,
+      volumeResiduals: 0,
+      networkResiduals: 0,
+      listenerResiduals: 0,
+      temporaryRootResiduals: 0
+    }
+  });
+  assert.equal(fallback.gate3FailureProvenance, null);
+  assert.equal(evidenceSafe(fallback), true);
+  assert.equal(canonicalJson(fallback).includes("secret"), false);
+
+  const preserved = sanitizedFailureEvidence({
+    firstFailure: {
+      phase: "concurrency_oauth_idempotency",
+      code: "linux_gate_unclassified_failure"
+    },
+    gate3FailureProvenance: provenance,
+    cleanup: {
+      cleanupCompleted: true,
+      containerResiduals: 0,
+      volumeResiduals: 0,
+      networkResiduals: 0,
+      listenerResiduals: 0,
+      temporaryRootResiduals: 0
+    }
+  });
+  assert.deepEqual(preserved.gate3FailureProvenance, provenance);
+  assert.equal(evidenceSafe({ gate3FailureProvenance: provenance }), true);
+});
+
+test("gate process status sidecar is closed, hashed, and stores no streams", () => {
+  const exited = Object.freeze({
+    exitCode: 1,
+    signal: null,
+    timedOut: false,
+    stdoutStored: false,
+    stderrStored: false
+  });
+  assert.deepEqual(gateProcessStatusFromChildResult({
+    exitCode: 1,
+    signal: null,
+    timedOut: false
+  }), exited);
+  assert.deepEqual(gateProcessStatusFromChildResult({
+    exitCode: 137,
+    signal: null,
+    timedOut: false
+  }), {
+    exitCode: 137,
+    signal: null,
+    timedOut: false,
+    stdoutStored: false,
+    stderrStored: false
+  });
+  assert.deepEqual(gateProcessStatusFromChildResult({
+    exitCode: null,
+    signal: "SIGKILL",
+    timedOut: false
+  }), {
+    exitCode: null,
+    signal: "SIGKILL",
+    timedOut: false,
+    stdoutStored: false,
+    stderrStored: false
+  });
+  assert.deepEqual(sanitizedGateProcessStatus({
+    exitCode: null,
+    signal: "SIGTERM",
+    timedOut: true,
+    stdoutStored: false,
+    stderrStored: false
+  }), {
+    exitCode: null,
+    signal: "SIGTERM",
+    timedOut: true,
+    stdoutStored: false,
+    stderrStored: false
+  });
+  assert.equal(sanitizedGateProcessStatus({
+    ...exited,
+    stdoutStored: "forbidden"
+  }), null);
+
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "social-gate3-process-status-"));
+  try {
+    const result = writeGateProcessStatus({ evidenceDirectory: directory, status: exited });
+    assert.deepEqual(result, exited);
+    const jsonPath = path.join(directory, GATE_PROCESS_STATUS_FILE);
+    const hashPath = path.join(directory, GATE_PROCESS_STATUS_HASH_FILE);
+    const serialized = fs.readFileSync(jsonPath, "utf8");
+    const expectedHash = fs.readFileSync(hashPath, "utf8").slice(0, 64);
+    assert.equal(
+      crypto.createHash("sha256").update(serialized).digest("hex"),
+      expectedHash
+    );
+    assert.deepEqual(JSON.parse(serialized), result);
+    assert.equal(Object.hasOwn(JSON.parse(serialized), "stdout"), false);
+    assert.equal(Object.hasOwn(JSON.parse(serialized), "stderr"), false);
+    for (const forbidden of ["password", "token", "postgresql://"]) {
+      assert.equal(serialized.includes(forbidden), false);
+    }
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: false });
+  }
+});
+
+test("gate process supervisor records the actual signal and timeout without storing streams", async () => {
+  const directory = path.join(
+    fs.mkdtempSync(path.join(os.tmpdir(), "social-gate3-supervisor-")),
+    "evidence"
+  );
+  const child = new EventEmitter();
+  const kills = [];
+  child.kill = (signal) => {
+    kills.push(signal);
+    setImmediate(() => child.emit("close", null, signal));
+    return true;
+  };
+  try {
+    const result = await runGateProcessSupervisor({
+      evidenceDirectory: directory,
+      killGraceMs: 100,
+      runnerTemp: os.tmpdir(),
+      spawnImpl(executable, args, options) {
+        assert.equal(executable, process.execPath);
+        assert.deepEqual(args.slice(-1), ["--run"]);
+        assert.equal(options.stdio, "inherit");
+        assert.equal(Object.hasOwn(options, "shell"), false);
+        return child;
+      },
+      timeoutMs: 5
+    });
+    assert.deepEqual(kills, ["SIGTERM"]);
+    assert.deepEqual(result, {
+      status: {
+        exitCode: null,
+        signal: "SIGTERM",
+        timedOut: true,
+        stdoutStored: false,
+        stderrStored: false
+      },
+      workflowExitCode: 1
+    });
+    const serialized = fs.readFileSync(
+      path.join(directory, GATE_PROCESS_STATUS_FILE),
+      "utf8"
+    );
+    assert.deepEqual(JSON.parse(serialized), result.status);
+    assert.equal(serialized.includes("stdout\":"), false);
+    assert.equal(serialized.includes("stderr\":"), false);
+  } finally {
+    fs.rmSync(path.dirname(directory), { recursive: true, force: false });
+  }
+});
+
+test("gate process supervisor distinguishes normal exit, signal, and sidecar failure", async (t) => {
+  async function runClosed(exitCode, signal, directory) {
+    const child = new EventEmitter();
+    child.kill = () => true;
+    setImmediate(() => child.emit("close", exitCode, signal));
+    return runGateProcessSupervisor({
+      evidenceDirectory: directory,
+      killGraceMs: 100,
+      runnerTemp: os.tmpdir(),
+      spawnImpl() { return child; },
+      timeoutMs: 1_000
+    });
+  }
+
+  await t.test("normal exit", async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "social-gate3-normal-"));
+    try {
+      const result = await runClosed(0, null, path.join(root, "evidence"));
+      assert.deepEqual(result.status, {
+        exitCode: 0,
+        signal: null,
+        timedOut: false,
+        stdoutStored: false,
+        stderrStored: false
+      });
+      assert.equal(result.workflowExitCode, 0);
+    } finally {
+      fs.rmSync(root, { recursive: true, force: false });
+    }
+  });
+
+  await t.test("real signal", async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "social-gate3-signal-"));
+    try {
+      const result = await runClosed(null, "SIGABRT", path.join(root, "evidence"));
+      assert.deepEqual(result.status, {
+        exitCode: null,
+        signal: "SIGABRT",
+        timedOut: false,
+        stdoutStored: false,
+        stderrStored: false
+      });
+      assert.equal(result.workflowExitCode, 1);
+    } finally {
+      fs.rmSync(root, { recursive: true, force: false });
+    }
+  });
+
+  await t.test("sidecar collision rejects", async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "social-gate3-collision-"));
+    const directory = path.join(root, "evidence");
+    fs.mkdirSync(directory);
+    fs.writeFileSync(path.join(directory, GATE_PROCESS_STATUS_FILE), "occupied", {
+      flag: "wx"
+    });
+    try {
+      await assert.rejects(runClosed(0, null, directory), { code: "EEXIST" });
+    } finally {
+      fs.rmSync(root, { recursive: true, force: false });
+    }
   });
 });
 

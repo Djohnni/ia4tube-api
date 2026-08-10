@@ -1370,117 +1370,176 @@ async function runConcurrencyOAuthIdempotencyGate(state, sensitiveMarkers, depen
   const { createPostgresConnectorStore } = require("../src/persistence/postgres/social-connector-store");
   const { createPostgresOAuthRepository } = require("../src/persistence/postgres/social-oauth-repository");
   const { withTransaction } = require("../src/persistence/postgres/pool");
-  const a = createTenant("concurrency-a", dependencies);
-  const b = createTenant("concurrency-b", dependencies);
+  const runGate3Substep = typeof dependencies.runGate3Substep === "function"
+    ? dependencies.runGate3Substep
+    : (_substep, _operationClass, operation) => operation();
+  let a;
+  let b;
+  let primaryFailure;
+  let primaryFailed = false;
+  let result;
   try {
-    await seedTenant(state.pools.migration, a.fixture);
-    await seedTenant(state.pools.migration, b.fixture);
-    const storeA = createPostgresConnectorStore({ pool: state.pools.runtime, runtimeRole: RUNTIME_ROLE }).scope(a.context);
-    const storeB = createPostgresConnectorStore({ pool: state.pools.runtime, runtimeRole: RUNTIME_ROLE }).scope(b.context);
-    const connectionRecord = (id) => ({
-      companyId: a.fixture.companyId, id, provider: "instagram",
-      state: "authorization_pending", account: null, revision: 1
+    await runGate3Substep("S1", "internal_setup", async () => {
+      a = createTenant("concurrency-a", dependencies);
+      b = createTenant("concurrency-b", dependencies);
     });
-    const reservations = await Promise.allSettled([
-      storeA.saveConnection(connectionRecord(a.fixture.connectionId), null),
-      storeA.saveConnection(connectionRecord(a.fixture.secondConnectionId), null)
-    ]);
-    exactRejection(reservations, 1, "linux_gate_connection_reservation_race_invalid", "state_transition_invalid");
-    const winning = reservations[0].status === "fulfilled" ? a.fixture.connectionId : a.fixture.secondConnectionId;
-    const blocking = await withTransaction(state.pools.migration, (client) => client.query(
-      "SELECT id::text AS id FROM ia4tube_social.social_connections WHERE company_id=$1 AND provider='instagram' AND status IN('pending','active','authorization_pending','connected','reconnect_required','disconnecting') ORDER BY id LIMIT 2",
-      [a.fixture.companyId]
-    ), { role: OWNER_ROLE, companyId: a.fixture.companyId });
-    if (blocking.rows?.length !== 1 || blocking.rows[0].id !== winning) fail("linux_gate_connection_blocking_identity_invalid");
+    await runGate3Substep("S2", "postgres_transaction", () =>
+      seedTenant(state.pools.migration, a.fixture));
+    await runGate3Substep("S3", "postgres_transaction", () =>
+      seedTenant(state.pools.migration, b.fixture));
 
-    const oauthA = createPostgresOAuthRepository({ pool: state.pools.runtime, runtimeRole: RUNTIME_ROLE }).scope(a.context);
-    const oauthB = createPostgresOAuthRepository({ pool: state.pools.runtime, runtimeRole: RUNTIME_ROLE }).scope(b.context);
-    const rawState = `synthetic-linux-state-${crypto.randomBytes(32).toString("hex")}`;
-    const session = `synthetic-linux-session-${crypto.randomBytes(20).toString("hex")}`;
-    sensitiveMarkers.push(rawState, session);
-    const redirectUri = "https://synthetic.invalid/social/oauth/callback";
-    const input = {
-      authorizationHandle: a.fixture.authorizationId,
-      connectionId: winning,
-      purpose: "connect",
-      state: rawState,
-      redirectUri,
-      sessionJti: session,
-      expiresAt: new Date(Date.now() + 300_000)
-    };
-    await oauthA.createAuthorization(input);
-    const consume = {
-      authorizationHandle: input.authorizationHandle,
-      state: rawState,
-      redirectUri,
-      sessionJti: session
-    };
-    const consumers = await Promise.allSettled([
-      oauthA.consumeAuthorization(consume),
-      oauthA.consumeAuthorization(consume)
-    ]);
-    exactRejection(consumers, 1, "linux_gate_oauth_single_consumer_invalid", "authorization_expired");
-    await Promise.all([
+    let storeA;
+    let storeB;
+    let connectionRecord;
+    await runGate3Substep("S4", "internal_setup", async () => {
+      storeA = createPostgresConnectorStore({ pool: state.pools.runtime, runtimeRole: RUNTIME_ROLE }).scope(a.context);
+      storeB = createPostgresConnectorStore({ pool: state.pools.runtime, runtimeRole: RUNTIME_ROLE }).scope(b.context);
+      connectionRecord = (id) => ({
+        companyId: a.fixture.companyId, id, provider: "instagram",
+        state: "authorization_pending", account: null, revision: 1
+      });
+    });
+    const reservations = await runGate3Substep("S5", "postgres_concurrent_transactions", () =>
+      Promise.allSettled([
+        storeA.saveConnection(connectionRecord(a.fixture.connectionId), null),
+        storeA.saveConnection(connectionRecord(a.fixture.secondConnectionId), null)
+      ]));
+    let winning;
+    await runGate3Substep("S6", "internal_validation", async () => {
+      exactRejection(reservations, 1, "linux_gate_connection_reservation_race_invalid", "state_transition_invalid");
+      winning = reservations[0].status === "fulfilled" ? a.fixture.connectionId : a.fixture.secondConnectionId;
+    });
+    await runGate3Substep("S7", "postgres_inventory", async () => {
+      const blocking = await withTransaction(state.pools.migration, (client) => client.query(
+        "SELECT id::text AS id FROM ia4tube_social.social_connections WHERE company_id=$1 AND provider='instagram' AND status IN('pending','active','authorization_pending','connected','reconnect_required','disconnecting') ORDER BY id LIMIT 2",
+        [a.fixture.companyId]
+      ), { role: OWNER_ROLE, companyId: a.fixture.companyId });
+      if (blocking.rows?.length !== 1 || blocking.rows[0].id !== winning) fail("linux_gate_connection_blocking_identity_invalid");
+    });
+
+    let oauthA;
+    let oauthB;
+    let rawState;
+    let session;
+    let redirectUri;
+    let input;
+    let consume;
+    await runGate3Substep("S8", "internal_setup", async () => {
+      oauthA = createPostgresOAuthRepository({ pool: state.pools.runtime, runtimeRole: RUNTIME_ROLE }).scope(a.context);
+      oauthB = createPostgresOAuthRepository({ pool: state.pools.runtime, runtimeRole: RUNTIME_ROLE }).scope(b.context);
+      rawState = `synthetic-linux-state-${crypto.randomBytes(32).toString("hex")}`;
+      session = `synthetic-linux-session-${crypto.randomBytes(20).toString("hex")}`;
+      sensitiveMarkers.push(rawState, session);
+      redirectUri = "https://synthetic.invalid/social/oauth/callback";
+      input = {
+        authorizationHandle: a.fixture.authorizationId,
+        connectionId: winning,
+        purpose: "connect",
+        state: rawState,
+        redirectUri,
+        sessionJti: session,
+        expiresAt: new Date(Date.now() + 300_000)
+      };
+      consume = {
+        authorizationHandle: input.authorizationHandle,
+        state: rawState,
+        redirectUri,
+        sessionJti: session
+      };
+    });
+    await runGate3Substep("S9", "postgres_transaction", () => oauthA.createAuthorization(input));
+    const consumers = await runGate3Substep("S10", "postgres_concurrent_transactions", () =>
+      Promise.allSettled([
+        oauthA.consumeAuthorization(consume),
+        oauthA.consumeAuthorization(consume)
+      ]));
+    await runGate3Substep("S11", "internal_validation", async () => {
+      exactRejection(consumers, 1, "linux_gate_oauth_single_consumer_invalid", "authorization_expired");
+    });
+    await runGate3Substep("S12", "postgres_concurrent_transactions", () => Promise.all([
       expectErrorCode(() => oauthA.consumeAuthorization(consume), "authorization_expired", "linux_gate_oauth_replay_invalid"),
       expectErrorCode(() => oauthB.consumeAuthorization(consume), "authorization_expired", "linux_gate_oauth_cross_company_invalid")
-    ]);
-    const expiredState = `synthetic-linux-expired-${crypto.randomBytes(32).toString("hex")}`;
-    const expiredSession = `synthetic-linux-expired-session-${crypto.randomBytes(20).toString("hex")}`;
-    sensitiveMarkers.push(expiredState, expiredSession);
-    const expiredInput = {
-      authorizationHandle: a.fixture.expiredAuthorizationId,
-      connectionId: winning,
-      purpose: "connect",
-      state: expiredState,
-      redirectUri,
-      sessionJti: expiredSession,
-      expiresAt: new Date(Date.now() + 300_000)
-    };
-    await oauthA.createAuthorization(expiredInput);
-    await withTransaction(state.pools.migration, (client) => client.query(
-      "UPDATE ia4tube_social.social_oauth_transactions SET expires_at=CURRENT_TIMESTAMP-INTERVAL '1 second' WHERE company_id=$1 AND id=$2",
-      [a.fixture.companyId, a.fixture.expiredAuthorizationId]
-    ), { role: OWNER_ROLE, companyId: a.fixture.companyId });
-    await expectErrorCode(() => oauthA.consumeAuthorization({
-      authorizationHandle: expiredInput.authorizationHandle,
-      state: expiredState,
-      redirectUri,
-      sessionJti: expiredSession
-    }), "authorization_expired", "linux_gate_oauth_expired_invalid");
-    if (
-      await databaseContainsMarker(state.pools.migration, rawState, a.fixture.companyId) ||
-      await databaseContainsMarker(state.pools.migration, expiredState, a.fixture.companyId)
-    ) {
-      fail("linux_gate_oauth_plaintext_persisted");
-    }
+    ]));
 
-    await storeA.saveConnection({
-      companyId: a.fixture.companyId, id: winning, provider: "instagram",
-      state: "disconnected", account: null, revision: 2
-    }, 1);
-    await insertConnectedConnection(state.pools.migration, a.fixture);
-    await insertConnectedConnection(state.pools.migration, b.fixture);
-    const digest = crypto.createHash("sha256").update("synthetic-linux-publication").digest("hex");
-    const request = (tenant, fixture) => ({
-      capability: "publishImage",
-      operationId: a.fixture.operationId,
-      digest,
-      payload: {
-        operationId: a.fixture.operationId,
-        publicationId: fixture.publicationId,
-        connectionId: fixture.activeConnectionId,
-        image: { mediaId: `synthetic-media-${tenant}`, mimeType: "image/jpeg" },
-        caption: "Synthetic Linux caption"
+    let expiredState;
+    let expiredSession;
+    let expiredInput;
+    await runGate3Substep("S13", "internal_setup", async () => {
+      expiredState = `synthetic-linux-expired-${crypto.randomBytes(32).toString("hex")}`;
+      expiredSession = `synthetic-linux-expired-session-${crypto.randomBytes(20).toString("hex")}`;
+      sensitiveMarkers.push(expiredState, expiredSession);
+      expiredInput = {
+        authorizationHandle: a.fixture.expiredAuthorizationId,
+        connectionId: winning,
+        purpose: "connect",
+        state: expiredState,
+        redirectUri,
+        sessionJti: expiredSession,
+        expiresAt: new Date(Date.now() + 300_000)
+      };
+    });
+    await runGate3Substep("S14", "postgres_transaction", () => oauthA.createAuthorization(expiredInput));
+    await runGate3Substep("S15", "postgres_transaction", () =>
+      withTransaction(state.pools.migration, (client) => client.query(
+        "UPDATE ia4tube_social.social_oauth_transactions SET expires_at=CURRENT_TIMESTAMP-INTERVAL '1 second' WHERE company_id=$1 AND id=$2",
+        [a.fixture.companyId, a.fixture.expiredAuthorizationId]
+      ), { role: OWNER_ROLE, companyId: a.fixture.companyId }));
+    await runGate3Substep("S16", "postgres_transaction", () => expectErrorCode(
+      () => oauthA.consumeAuthorization({
+        authorizationHandle: expiredInput.authorizationHandle,
+        state: expiredState,
+        redirectUri,
+        sessionJti: expiredSession
+      }),
+      "authorization_expired",
+      "linux_gate_oauth_expired_invalid"
+    ));
+    await runGate3Substep("S17", "postgres_inventory", async () => {
+      if (
+        await databaseContainsMarker(state.pools.migration, rawState, a.fixture.companyId) ||
+        await databaseContainsMarker(state.pools.migration, expiredState, a.fixture.companyId)
+      ) {
+        fail("linux_gate_oauth_plaintext_persisted");
       }
     });
-    const publicationRace = await Promise.all([
-      storeA.beginIdempotency(request("a", a.fixture)),
-      storeA.beginIdempotency(request("a", a.fixture))
-    ]);
-    if (publicationRace.map((item) => item.status).sort().join(",") !== "acquired,pending") {
-      fail("linux_gate_publication_idempotency_race_invalid");
-    }
-    await storeA.completeIdempotency({
+
+    await runGate3Substep("S18", "postgres_transaction", () => storeA.saveConnection({
+      companyId: a.fixture.companyId, id: winning, provider: "instagram",
+      state: "disconnected", account: null, revision: 2
+    }, 1));
+    await runGate3Substep("S19", "postgres_transaction", () =>
+      insertConnectedConnection(state.pools.migration, a.fixture));
+    await runGate3Substep("S20", "postgres_transaction", () =>
+      insertConnectedConnection(state.pools.migration, b.fixture));
+
+    let digest;
+    let request;
+    await runGate3Substep("S21", "internal_setup", async () => {
+      digest = crypto.createHash("sha256").update("synthetic-linux-publication").digest("hex");
+      request = (tenant, fixture) => ({
+        capability: "publishImage",
+        operationId: a.fixture.operationId,
+        digest,
+        payload: {
+          operationId: a.fixture.operationId,
+          publicationId: fixture.publicationId,
+          connectionId: fixture.activeConnectionId,
+          image: { mediaId: `synthetic-media-${tenant}`, mimeType: "image/jpeg" },
+          caption: "Synthetic Linux caption"
+        }
+      });
+    });
+    const publicationRace = await runGate3Substep("S22", "postgres_concurrent_transactions", () =>
+      Promise.all([
+        storeA.beginIdempotency(request("a", a.fixture)),
+        storeA.beginIdempotency(request("a", a.fixture))
+      ]));
+    await runGate3Substep("S23", "internal_validation", async () => {
+      if (publicationRace.map((item) => item.status).sort().join(",") !== "acquired,pending") {
+        fail("linux_gate_publication_idempotency_race_invalid");
+      }
+    });
+    await runGate3Substep("S24", "postgres_transaction", () => storeA.completeIdempotency({
       capability: "publishImage", operationId: a.fixture.operationId, digest,
       result: {
         publicationId: a.fixture.publicationId,
@@ -1492,25 +1551,31 @@ async function runConcurrencyOAuthIdempotencyGate(state, sensitiveMarkers, depen
         revision: 3
       },
       errorCode: null
+    }));
+    await runGate3Substep("S25", "postgres_transaction", async () => {
+      const replay = await storeA.beginIdempotency(request("a", a.fixture));
+      if (replay.status !== "completed") fail("linux_gate_idempotency_same_request_not_reused");
     });
-    const replay = await storeA.beginIdempotency(request("a", a.fixture));
-    if (replay.status !== "completed") fail("linux_gate_idempotency_same_request_not_reused");
-    await expectErrorCode(
+    await runGate3Substep("S26", "postgres_transaction", () => expectErrorCode(
       () => storeA.beginIdempotency({ ...request("a", a.fixture), digest: "f".repeat(64) }),
       "idempotency_conflict",
       "linux_gate_idempotency_changed_hash_invalid"
-    );
-    const crossTenant = await storeB.beginIdempotency(request("b", b.fixture));
-    if (crossTenant.status !== "acquired") fail("linux_gate_idempotency_cross_tenant_refused");
-    const rows = await withTransaction(state.pools.migration, (client) => client.query([
-      "SELECT",
-      " (SELECT COUNT(*)::integer FROM ia4tube_social.social_publications WHERE company_id=$1 AND id=$2) AS publications,",
-      " (SELECT COUNT(*)::integer FROM ia4tube_social.social_publication_attempts WHERE company_id=$1 AND publication_id=$2) AS attempts"
-    ].join("\n"), [a.fixture.companyId, a.fixture.publicationId]), { role: OWNER_ROLE, companyId: a.fixture.companyId });
-    if (Number(rows.rows[0].publications) !== 1 || Number(rows.rows[0].attempts) !== 0) {
-      fail("linux_gate_publication_duplicate_detected");
-    }
-    return Object.freeze({
+    ));
+    await runGate3Substep("S27", "postgres_transaction", async () => {
+      const crossTenant = await storeB.beginIdempotency(request("b", b.fixture));
+      if (crossTenant.status !== "acquired") fail("linux_gate_idempotency_cross_tenant_refused");
+    });
+    await runGate3Substep("S28", "postgres_inventory", async () => {
+      const rows = await withTransaction(state.pools.migration, (client) => client.query([
+        "SELECT",
+        " (SELECT COUNT(*)::integer FROM ia4tube_social.social_publications WHERE company_id=$1 AND id=$2) AS publications,",
+        " (SELECT COUNT(*)::integer FROM ia4tube_social.social_publication_attempts WHERE company_id=$1 AND publication_id=$2) AS attempts"
+      ].join("\n"), [a.fixture.companyId, a.fixture.publicationId]), { role: OWNER_ROLE, companyId: a.fixture.companyId });
+      if (Number(rows.rows[0].publications) !== 1 || Number(rows.rows[0].attempts) !== 0) {
+        fail("linux_gate_publication_duplicate_detected");
+      }
+    });
+    result = await runGate3Substep("S29", "internal_validation", async () => Object.freeze({
       connectionReservationsConcurrent: 2,
       blockingConnections: 1,
       secondConnectionConflict: true,
@@ -1526,11 +1591,36 @@ async function runConcurrencyOAuthIdempotencyGate(state, sensitiveMarkers, depen
       publicationRows: 1,
       duplicateAttempts: 0,
       externalCalls: 0
-    });
+    }));
+  } catch (error) {
+    primaryFailed = true;
+    primaryFailure = error;
   } finally {
-    a.identityKey.fill(0);
-    b.identityKey.fill(0);
+    try {
+      await runGate3Substep("S30", "memory_cleanup", async () => {
+        let cleanupFailure;
+        let cleanupFailed = false;
+        for (const tenant of [a, b]) {
+          try {
+            tenant?.identityKey.fill(0);
+          } catch (error) {
+            if (!cleanupFailed) {
+              cleanupFailed = true;
+              cleanupFailure = error;
+            }
+          }
+        }
+        if (cleanupFailed) throw cleanupFailure;
+      });
+    } catch (error) {
+      if (!primaryFailed) {
+        primaryFailed = true;
+        primaryFailure = error;
+      }
+    }
   }
+  if (primaryFailed) throw primaryFailure;
+  return result;
 }
 
 async function runVaultSupplementalGate(state, sensitiveMarkers) {

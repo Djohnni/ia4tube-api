@@ -2,49 +2,160 @@
 
 ## Limite e proveniência
 
-Esta décima segunda rota Linux isolada parte exclusivamente do commit
-`25b2669cfce85f8e2a2389c0ed128159dc6f83e1`. A branch predecessora
-`social/checkpoint-3a0p-linux-rls-oid-inventory-20260809` e todas as
+Esta décima terceira rota Linux isolada tem como pai imediato o commit local de
+manutenção `8eb4c4d71c6593f9c3e448be6ac52b1b0e8ba931`, com a mensagem exata
+`[test] serialize process-lifecycle security tests`. O pai exato da manutenção é
+`9b98de25a42a21f7ebd229bf5581a78bfed80b2e`; portanto, a cadeia fechada é
+`HEAD da feature` → `8eb4c4d71c6593f9c3e448be6ac52b1b0e8ba931` →
+`9b98de25a42a21f7ebd229bf5581a78bfed80b2e`. A branch predecessora
+`social/checkpoint-3a0p-linux-runtime-attributes-oid-20260809` e todas as
 branches anteriores permanecem preservadas, sem edição ou novo push.
 
 O workflow existe somente para a branch
-`social/checkpoint-3a0p-linux-runtime-attributes-oid-20260809`. O produto
+`social/checkpoint-3a0p-linux-gate3-failure-provenance-20260809`. O produto
 permanece idêntico a `fcfc92419021dae5f77baad731c634b10c275c5b`: `src/`, todo
 `db/` (inclusive `roles.sql`), migrations, `server.js`, `package.json` e
 `package-lock.json` não são alterados. Esta rota não acrescenta grants, não
 altera políticas RLS e não modifica PostgreSQL, SCRAM, roles, backup, restore,
 rede Docker ou credenciais.
 
-## Décimo segundo disparo Linux isolado autorizado
+## Décimo terceiro disparo Linux isolado autorizado
 
 O único gatilho autorizado é o primeiro e único `push` de criação da nova
 branch, sem exclusão ou force, cujo commit tenha a mensagem integral:
 
 ```text
-[run-social-3a0p-linux-gate] inspect runtime migration privileges by oid
+[run-social-3a0p-linux-gate] classify Gate 3 failure provenance
 ```
 
 O job exige `run_attempt == 1`, `created == true`, `deleted == false`,
-`forced == false`, `before` igual a 40 zeros e pai exato
-`25b2669cfce85f8e2a2389c0ed128159dc6f83e1`, além de diff nominal e
-estritamente allowlisted. Não há `workflow_dispatch`, pull request, agenda,
-matriz ou retry automático. A regra operacional é: exatamente um push de
-criação, no máximo um run automático, zero re-run, zero segundo push, zero PR,
-zero merge e zero deploy.
+`forced == false`, `before` igual a 40 zeros, pai exato
+`8eb4c4d71c6593f9c3e448be6ac52b1b0e8ba931` e avô exato
+`9b98de25a42a21f7ebd229bf5581a78bfed80b2e`, além de diffs nominais e
+estritamente allowlisted. Também exige a mensagem exata da manutenção e estes
+quatro caminhos como seu inventário fechado:
 
-A allowlist do commit contém exatamente estes sete caminhos efetivamente
-alterados, sem curinga, prefixo ou diretório inteiro:
+- `scripts/run-node-tests.js`;
+- `scripts/social-3a0p-local-scope.js`;
+- `tests/node-test-runner-safety.test.js`;
+- `tests/social-3a0p-local-scope.test.js`.
+
+Não há `workflow_dispatch`, pull request, agenda, matriz ou retry automático. A
+regra operacional é: exatamente um push de criação, no máximo um run automático,
+zero re-run, zero segundo push, zero PR, zero merge e zero deploy.
+
+A allowlist do diff da feature contra o commit de manutenção contém exatamente
+estes nove caminhos efetivamente alterados, sem curinga, prefixo ou diretório
+inteiro:
 
 - `.github/workflows/social-3a0p-linux-physical-gates.yml`;
 - `docs/social-3a0p-linux-physical-gates.md`;
 - `scripts/social-3a0p-linux-gate.js`;
+- `scripts/social-3a0p-local-connector-physical-gates.js`;
 - `scripts/social-3a0p-linux-physical-gates.js`;
 - `tests/social-3a0p-linux-gate.test.js`;
+- `tests/social-3a0p-local-connector-physical-gates.test.js`;
 - `tests/social-3a0p-linux-physical-gates.test.js`;
 - `tests/social-3a0p-linux-workflow.test.js`.
 
 Qualquer outro caminho, inclusive outro workflow, `src/`, `db/`, migrations,
 roles, servidor ou dependências, encerra o job antes do gate.
+
+O comando canônico `npm test` usa `scripts/run-node-tests.js`. A primeira etapa
+executa, em série e com `--test-concurrency=1`, exatamente estes seis testes de
+ciclo de vida de processo, que permanecem byte-idênticos:
+
+- `tests/body-parser-security.test.js`;
+- `tests/checkpoint-a-security.test.js`;
+- `tests/fcm-token-encryption.test.js`;
+- `tests/social-2b0-config-security.test.js`;
+- `tests/social-foundation-integration.test.js`;
+- `tests/zip-downloads.test.js`.
+
+Somente se essa etapa passar, o runner executa uma vez os demais testes
+automatizados na etapa concorrente já existente. Cada teste descoberto pertence
+a exatamente uma etapa; `tests/social-postgres-real.test.js` continua reservado
+ao gate físico dedicado. Não há retry, repetição, shell ou timeout acrescentado
+pelo runner.
+
+## Falha física do Gate 3 que autoriza somente diagnóstico
+
+O run físico `31318701548` (artifact `9039524578`, SHA-256 da evidência
+`9a6317903e36ec6511045356711f1c9be0a2746192b87ac1addce3bda81cb1f4`,
+digest do artifact
+`sha256:db3432dd4987a4eaed07466c5efcbdff44c7a4d4b954bfa726b51b9b046e4511`)
+aprovou integralmente o Gate 1, o contrato OID/textual de 16 campos e o Gate 2.
+O Gate 3 `concurrency_oauth_idempotency` iniciou e falhou em 47 ms com
+`linux_gate_unclassified_failure`, sem publicar resultado ou subetapa. Gates 4
+e 5 não foram executados. O cleanup foi aprovado, com todos os resíduos em
+zero.
+
+Essa evidência não distingue a metade `base` da `supplemental`. O Gate 3 antigo
+só publicava o merge depois de ambas concluírem, e o classificador global
+reduzia SQLSTATE numérico, códigos Node maiúsculos e erros sem código ao mesmo
+valor genérico. Portanto, a causa física do run `31318701548` não é
+comprovável: não se infere PostgreSQL, constraint, timeout, rede, produto ou
+instrumentação. O call graph contém apenas criptografia local e PostgreSQL;
+não há subprocesso nem chamada a provedor externo dentro do Gate 3.
+
+O patch desta rota é exclusivamente diagnóstico. Um tracker compartilhado,
+first-write-wins e sem leitura de mensagem/stack marca estas fronteiras sem
+alterar chamadas, argumentos, SQL, transações, concorrência, `Promise.all`,
+`Promise.allSettled`, resultados ou erros:
+
+| ID | Operação base | Classe |
+|---|---|---|
+| B1 | contexto e store | `internal_setup` |
+| B2 | gravação inicial da conexão | `postgres_transaction` |
+| B3 | repository e material OAuth | `internal_setup` |
+| B4 | criação da autorização | `postgres_transaction` |
+| B5 | consumo da autorização | `postgres_transaction` |
+| B6 | corrida de idempotência | `postgres_concurrent_transactions` |
+| B7 | validação da corrida | `internal_validation` |
+| B8 | conclusão idempotente | `postgres_transaction` |
+| B9 | replay idempotente | `postgres_transaction` |
+| B10 | digests e resultado final | `internal_validation` |
+
+| ID | Operação suplementar | Classe |
+|---|---|---|
+| S1 | criação dos tenants | `internal_setup` |
+| S2–S3 | seed administrativo A e B | `postgres_transaction` |
+| S4 | store do connector | `internal_setup` |
+| S5 | corrida de reserva | `postgres_concurrent_transactions` |
+| S6 | validação e vencedor | `internal_validation` |
+| S7 | inventário bloqueante | `postgres_inventory` |
+| S8 | repositories e material OAuth | `internal_setup` |
+| S9 | criação OAuth | `postgres_transaction` |
+| S10 | corrida de consumo | `postgres_concurrent_transactions` |
+| S11 | validação do consumo | `internal_validation` |
+| S12 | replay e isolamento cross-tenant | `postgres_concurrent_transactions` |
+| S13 | material da autorização expirada | `internal_setup` |
+| S14–S16 | criação, expiração e consumo | `postgres_transaction` |
+| S17 | inventário de plaintext | `postgres_inventory` |
+| S18–S20 | disconnect e conexões A/B | `postgres_transaction` |
+| S21 | material da publicação | `internal_setup` |
+| S22 | corrida de publicação | `postgres_concurrent_transactions` |
+| S23 | validação da corrida | `internal_validation` |
+| S24–S27 | conclusão, replay, conflito e cross-tenant | `postgres_transaction` |
+| S28 | inventário persistido final | `postgres_inventory` |
+| S29 | asserções e resultado | `internal_validation` |
+| S30 | zeragem das identity keys | `memory_cleanup` |
+
+Em falha, `gate3FailureProvenance` contém exatamente `operation`, `substep`,
+`operationClass`, `causalCode`, `lastCompletedSubstep`,
+`externalProcessStarted=false`, `exitCode=null` e `signal=null`. Códigos seguros
+são preservados; SQLSTATE de cinco caracteres e a allowlist fechada de códigos
+Node recebem prefixo `gate3_error_code_`; `TypeError`, ausência e formato não
+suportado recebem códigos fixos. Para `postgres_rollback_failed`, somente
+`cause.code` pode ser consultado. Nenhum texto de erro é serializado.
+
+Um supervisor externo ao Gate 3 executa o processo do gate uma única vez com
+streams herdados, nunca armazenados, e produz o sidecar separado
+`gateProcessStatus` com `exitCode`, signal fechado, `timedOut`,
+`stdoutStored=false` e `stderrStored=false`. Timeout explícito ocorre antes do
+limite do job para permitir sidecar e cleanup. Se a nova execução ainda não
+produzir uma subetapa fechada, não haverá ampliação automática: o run para e a
+recomendação será dividir o Gate 3 em fases Linux nativas independentes.
 
 ## Primeira falha física do run predecessor
 
@@ -712,7 +823,9 @@ identidade e contagens específicas são comprovadas depois do restore.
 Um único artifact contém:
 
 - `social-3a0p-linux-physical-gates-evidence.json`;
-- `social-3a0p-linux-physical-gates-evidence.sha256`.
+- `social-3a0p-linux-physical-gates-evidence.sha256`;
+- `social-3a0p-linux-gate-process-status.json`;
+- `social-3a0p-linux-gate-process-status.sha256`.
 
 A serialização é canônica. Somente fases, booleans, contagens, durações, hashes,
 versões e códigos normalizados são permitidos. URL de conexão, senha, state,
@@ -720,7 +833,9 @@ token, SQL com valores, dump bruto, ambiente e log bruto são recusados. O marke
 `.sanitized-approved` só é criado depois da varredura e não é enviado no
 artifact.
 
-O artifact tem retenção de sete dias.
+Os dois JSONs têm sidecars SHA-256 independentes. O status do processo contém
+somente código de saída, signal fechado, timeout e os dois flags negativos de
+armazenamento de streams. O artifact tem retenção de sete dias.
 
 Na primeira falha, gates posteriores não são chamados. O erro primário é
 preservado, o finalizador remove somente container, volume, rede e caminhos do
