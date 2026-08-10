@@ -1,14 +1,14 @@
 # Checkpoint Social 3A-0P — gates físicos Linux isolados
 
-## Contrato canônico da estabilidade nativa no Windows hospedado
+## Contrato canônico do diagnóstico ambiental do Windows PowerShell hospedado
 
 Esta rota existe somente na branch
-`social/checkpoint-3a0p-windows-native-test-stability-20260810`, criada a partir
-do commit exato `e2072df65d371fd7c0cf8429fb072dc437df2d27`. O único commit autorizado
+`social/checkpoint-3a0p-windows-powershell-env-provenance-20260810`, criada a
+partir do commit exato `02b8ae2ba09fecae4e0dac99bc2f8a6d557fc027`. O único commit autorizado
 deve ter esse commit como pai imediato e a mensagem integral:
 
 ```text
-[run-social-3a0p-linux-gate] stabilize hosted Windows native tests
+[run-social-3a0p-linux-gate] diagnose hosted Windows PowerShell environment
 ```
 
 O produto permanece idêntico a `fcfc92419021dae5f77baad731c634b10c275c5b`:
@@ -16,6 +16,9 @@ O produto permanece idêntico a `fcfc92419021dae5f77baad731c634b10c275c5b`:
 `package.json` e `package-lock.json` não são alterados. A rota não acrescenta
 grants, não muda políticas RLS e não modifica schema, SCRAM, roles, produto,
 backup, restore, dependências ou os testes de segurança antigos.
+Esta rota é exclusivamente diagnóstica: não corrige os dois testes que
+falharam, não aumenta seus timeouts e não executa `npm test`, o job Linux ou os
+Gates físicos no run hospedado.
 
 ## Resultados comprovados das rotas anteriores
 
@@ -74,6 +77,26 @@ artifact físico foi produzido e não houve recurso físico a limpar. Não há
 autorização para re-run desses runs nem para segundo push nas branches
 anteriores.
 
+O run `31438190270`, no commit
+`02b8ae2ba09fecae4e0dac99bc2f8a6d557fc027`, aprovou o guard imutável,
+checkout, Node 24, `npm ci`, a neutralização das cinco variáveis PostgreSQL
+conhecidas e a verificação de zero outra variável `PG...` não vazia. A etapa
+serial executou os 41 testes com concorrência 1: 39 foram aprovados e os dois
+testes File.Replace expiraram sequencialmente, cada um em aproximadamente 20
+segundos, com `spawnSync powershell.exe` e `ETIMEDOUT`. O teste de firewall foi
+aprovado no mesmo ambiente hospedado.
+
+A etapa concorrente não começou. O job Linux permaneceu ignorado; o pré-gate,
+os Gates 1–5 e qualquer artifact físico não começaram. A verificação final
+confirmou Git limpo. Produto e ambientes externos permaneceram intactos. A
+classificação fechada é
+`windows_powershell_minimal_child_environment_startup_timeout`: o executável
+exato e o runner hospedado já foram comprovados funcionais, enquanto os dois
+processos que recebem o ambiente filho fechado de oito chaves atingem o mesmo
+timeout. Esses fatos delimitam a divergência ao contrato ambiental reduzido
+e/ou à descoberta de módulos, mas não comprovam ainda uma variável causal
+específica.
+
 ## Correção precedente e preservada do ambiente da suíte Windows
 
 Depois de `npm ci`, somente a etapa `Run stabilized automated tests once` recebe
@@ -93,10 +116,10 @@ inesperadas não vazias for diferente de zero, a etapa escreve somente
 `windows_runner_postgres_environment_not_clean`, encerra com código `1` e não
 executa `npm test`.
 
-Com contagem zero, a etapa executa `npm test` exatamente uma vez, preserva
+Com contagem zero, a etapa executava `npm test` exatamente uma vez, preservava
 `$LASTEXITCODE`, falha fechado se o código estiver indisponível e termina com o
-código real da suíte. Este é somente o contrato da correção; não afirma que um
-novo run tenha sido iniciado, concluído ou aprovado.
+código real da suíte. Esse contrato pertence ao commit predecessor; sua
+execução e seu resultado estão registrados acima no run `31438190270`.
 
 ## Estabilização fechada dos testes nativos Windows
 
@@ -134,12 +157,73 @@ outro código continuam sendo falha.
 A assertion estática preservada comprova que a detecção de elevação e a recusa
 ocorrem antes de `Get-NetFirewallProfile`, `Get-NetFirewallSetting` e
 `Get-NetFirewallRule`, sem leitura anterior nem operação de mutação. O helper de
-produção não é alterado. Este texto especifica a correção local e não afirma
-que uma nova execução hospedada já tenha ocorrido.
+produção não é alterado. O resultado hospedado dessa correção está registrado
+acima no run `31438190270`.
+
+## Probe fechado de procedência ambiental do Windows PowerShell 5.1
+
+O probe diagnóstico funciona somente em `win32` e inicia diretamente o
+`powershell.exe` absoluto derivado de `SystemRoot`. Cada processo usa
+`spawnSync`, `shell=false`, `windowsHide=true`, `cwd` exato em `System32`,
+argumentos separados e timeout preservado de 20.000 ms. Ele não usa
+`cmd.exe`, `-EncodedCommand`, perfil PowerShell, rede, banco, GitHub, ambientes
+externos, Gate físico, artifact ou escrita no repositório.
+
+O ambiente base contém exatamente `ComSpec`, `PATH`, `PATHEXT`, `SystemDrive`,
+`SystemRoot`, `TEMP`, `TMP` e `WINDIR`; `process.env` nunca é herdado
+integralmente. O probe executa, na ordem e sem retry, exatamente estes sete
+perfis fechados:
+
+1. `P0_BASE`: somente o ambiente base;
+2. `P1_SYSTEM_MODULE_PATH`: P0 mais `PSModulePath`, exclusivamente para o
+   diretório de módulos do sistema do Windows PowerShell 5.1;
+3. `P2_SYSTEM_MODULE_PATH_CACHE_NUL`: P1 mais
+   `PSModuleAnalysisCachePath=NUL`;
+4. `P3_USER_CACHE_PATHS`: P0 mais os valores atuais de `LOCALAPPDATA` e
+   `APPDATA`, ou `unavailable` se algum estiver ausente;
+5. `P4_USER_HOME_PATHS`: P0 mais `USERPROFILE`, `HOMEDRIVE`, `HOMEPATH`,
+   `LOCALAPPDATA` e `APPDATA`, ou `unavailable` se algum estiver ausente;
+6. `P5_CLOSED_COMPLETE`: P4 mais o `PSModulePath` fechado do sistema;
+7. `P6_CLOSED_COMPLETE_CACHE_NUL`: P5 mais
+   `PSModuleAnalysisCachePath=NUL`.
+
+Para cada perfil disponível, três processos distintos executam uma vez, nesta
+ordem: `STARTUP` exige `exit 0`; `UTILITY` cria somente `{ok=true}`, usa
+`ConvertTo-Json` e valida internamente o JSON sintético; `EXACT_HELPERS`
+executa, em uma única sessão, os dois helpers PowerShell exatos e suas fixtures
+sintéticas, sem arquivo real ou `File.Replace`, e valida somente
+`argumentHelper=true` e `exceptionHelper=true`. Status diferente de zero ou
+nulo, signal, timeout, erro de spawn, stderr, stdout inesperado, segredo ou
+caminho de usuário fazem o perfil reprovar fechado. Cada combinação de perfil
+e operação é iniciada no máximo uma vez.
+
+Para cada combinação, a saída pública contém somente estas chaves fixas, sem
+stdout, stderr, comando, argumentos, valor ambiental, caminho ou hash:
+
+```text
+powershell_env_probe_profile=<ID>
+powershell_env_probe_operation=<STARTUP|UTILITY|EXACT_HELPERS>
+powershell_env_probe_started=<true|false>
+powershell_env_probe_completed=<true|false>
+powershell_env_probe_timeout=<true|false>
+powershell_env_probe_status_class=<zero|nonzero|null|unavailable>
+powershell_env_probe_signal_present=<true|false>
+powershell_env_probe_elapsed_class=<under_1s|1_to_5s|5_to_20s|timeout>
+```
+
+Depois dos 21 resultados possíveis, o probe lista somente os IDs dos perfis
+que concluíram e validaram `EXACT_HELPERS`. O primeiro na ordem P0–P6 é
+publicado como `windows_powershell_minimum_approved_profile`. O processo sempre
+encerra intencionalmente com código não zero e exatamente uma classificação:
+`windows_powershell_environment_profile_captured`, se houver perfil aprovado,
+ou `windows_powershell_environment_profile_unresolved`, se não houver. Isso
+impede `npm test`, o job Linux e os Gates físicos. Este contrato local não
+afirma que o probe real já tenha sido executado nem antecipa qual perfil será
+aprovado no runner hospedado.
 
 ## Cadeia imutável e inventários fechados
 
-A cadeia autorizada é linear e contém sete commits entre a base da manutenção
+A cadeia autorizada é linear e contém oito commits entre a base da manutenção
 e o novo `HEAD`:
 
 1. `8eb4c4d71c6593f9c3e448be6ac52b1b0e8ba931`, pai
@@ -194,7 +278,7 @@ e o novo `HEAD`:
    `scripts/social-3a0p-linux-gate.js`,
    `tests/social-3a0p-linux-gate.test.js` e
    `tests/social-3a0p-linux-workflow.test.js`.
-7. O novo `HEAD`, pai exato
+7. `02b8ae2ba09fecae4e0dac99bc2f8a6d557fc027`, pai exato
    `e2072df65d371fd7c0cf8429fb072dc437df2d27`, mensagem
    `[run-social-3a0p-linux-gate] stabilize hosted Windows native tests` e
    inventário fechado: `.github/workflows/social-3a0p-linux-physical-gates.yml`,
@@ -204,26 +288,37 @@ e o novo `HEAD`:
    `tests/social-3a0p-linux-gate.test.js`,
    `tests/social-3a0p-linux-workflow.test.js` e
    `tests/social-3a0p-local-firewall-nonmutation.test.js`.
+8. O novo `HEAD`, pai exato
+   `02b8ae2ba09fecae4e0dac99bc2f8a6d557fc027`, mensagem
+   `[run-social-3a0p-linux-gate] diagnose hosted Windows PowerShell environment`
+   e inventário fechado:
+   `.github/workflows/social-3a0p-linux-physical-gates.yml`,
+   `docs/social-3a0p-linux-physical-gates.md`,
+   `scripts/social-3a0p-linux-gate.js`,
+   `scripts/social-3a0p-windows-powershell-env-probe.js`,
+   `tests/social-3a0p-linux-gate.test.js`,
+   `tests/social-3a0p-linux-workflow.test.js` e
+   `tests/social-3a0p-windows-powershell-env-probe.test.js`.
 
 Os guards dos dois jobs verificam pais, mensagens, ancestralidade linear,
-contagem sete e cada um desses inventários sem prefixo, glob ou diretório
+contagem oito e cada um desses inventários sem prefixo, glob ou diretório
 inteiro.
 
-## Limite intencional da rota corretiva
+## Limite intencional da rota diagnóstica
 
 O único workflow run autorizado contém os mesmos dois jobs hospedados e nenhuma
-matriz. Depois do contrato imutável, checkout, Node 24 e instalação pelo
-lockfile, o job Windows neutraliza somente os cinco nomes conhecidos na etapa da
-suíte, aplica o guard amplo e executa `npm test` exatamente uma vez se o ambiente
-estiver limpo. O runner executa primeiro o manifesto serial fechado de nove
-arquivos e somente então a etapa concorrente dos demais testes.
+matriz. O job Windows executa, nesta ordem, checkout, guard imutável, Node 24,
+instalação pelo lockfile, o probe diagnóstico exatamente uma vez e a
+verificação de Git limpo com `always()`. Ele não executa `npm test`, o manifesto
+serial nem a etapa concorrente, não cria artifact e falha intencionalmente após
+publicar somente o resultado sanitizado do probe.
 
 O job `physical-gates`, em `ubuntu-24.04`, continua dependente do sucesso de
-`windows-automated-tests`; portanto só pode iniciar após a aprovação integral do
-job Windows. O pré-gate Linux, a prova física de durabilidade,
-PostgreSQL/Docker, Gates 1–5, evidência, artifact e cleanup preservam seus
-contratos anteriores. Este documento não afirma que a nova execução física já
-tenha ocorrido nem antecipa seu resultado.
+`windows-automated-tests`; portanto permanece ignorado quando o diagnóstico
+encerra intencionalmente. O pré-gate Linux, a prova física de durabilidade,
+PostgreSQL/Docker, Gates 1–5, evidência, artifact e cleanup físico não iniciam.
+Este documento não afirma que a nova execução hospedada já tenha ocorrido nem
+antecipa seu resultado.
 
 ## Manifesto fechado do pré-gate Linux
 
