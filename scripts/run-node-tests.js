@@ -15,7 +15,10 @@ const PROCESS_LIFECYCLE_TEST_FILES = Object.freeze([
   "fcm-token-encryption.test.js",
   "social-2b0-config-security.test.js",
   "social-foundation-integration.test.js",
-  "zip-downloads.test.js"
+  "zip-downloads.test.js",
+  "social-3a0p-local-file-replace-argument-powershell.test.js",
+  "social-3a0p-local-file-replace-powershell-diagnostic.test.js",
+  "social-3a0p-local-firewall-nonmutation.test.js"
 ]);
 
 function runnerError(code) {

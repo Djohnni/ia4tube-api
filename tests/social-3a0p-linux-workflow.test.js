@@ -8,19 +8,21 @@ const test = require("node:test");
 const REPOSITORY_ROOT = path.resolve(__dirname, "..");
 const WORKFLOW_RELATIVE_PATH = ".github/workflows/social-3a0p-linux-physical-gates.yml";
 const WORKFLOW_PATH = path.join(REPOSITORY_ROOT, ...WORKFLOW_RELATIVE_PATH.split("/"));
-const BRANCH = "social/checkpoint-3a0p-windows-pg-env-clean-20260810";
-const AUTHORIZED_PARENT = "7e6b0d8ed71daf75481f28a88832c4748f4ee648";
+const BRANCH = "social/checkpoint-3a0p-windows-native-test-stability-20260810";
+const AUTHORIZED_PARENT = "e2072df65d371fd7c0cf8429fb072dc437df2d27";
+const ENVIRONMENT_CLEAN_PARENT = "7e6b0d8ed71daf75481f28a88832c4748f4ee648";
 const IDENTIFICATION_PARENT = "aec92c0bf2a91608f69635fc459b28e125281fda";
 const SANITIZATION_PARENT = "c5c211e27bd1db080234c890f06528192100c859";
 const NATIVE_PREFLIGHT_PARENT = "b0d13299fb7226288e9a9d7bd531be751b539891";
 const PROVENANCE_PARENT = "8eb4c4d71c6593f9c3e448be6ac52b1b0e8ba931";
 const MAINTENANCE_PARENT = "9b98de25a42a21f7ebd229bf5581a78bfed80b2e";
+const ENVIRONMENT_CLEAN_MESSAGE = "[run-social-3a0p-linux-gate] neutralize hosted Windows PostgreSQL defaults";
 const IDENTIFICATION_MESSAGE = "[run-social-3a0p-linux-gate] identify hosted Windows PostgreSQL environment";
 const SANITIZATION_MESSAGE = "[run-social-3a0p-linux-gate] sanitize hosted Windows PostgreSQL environment";
 const NATIVE_PREFLIGHT_MESSAGE = "[run-social-3a0p-linux-gate] split native pre-gate test environments";
 const PROVENANCE_MESSAGE = "[run-social-3a0p-linux-gate] classify Gate 3 failure provenance";
 const MAINTENANCE_MESSAGE = "[test] serialize process-lifecycle security tests";
-const MESSAGE = "[run-social-3a0p-linux-gate] neutralize hosted Windows PostgreSQL defaults";
+const MESSAGE = "[run-social-3a0p-linux-gate] stabilize hosted Windows native tests";
 const ZERO_SHA = "0000000000000000000000000000000000000000";
 const JOB_IF = [
   "github.event_name == 'push'",
@@ -78,12 +80,22 @@ const IDENTIFICATION_FILES = Object.freeze([
   "tests/social-3a0p-linux-gate.test.js",
   "tests/social-3a0p-linux-workflow.test.js"
 ]);
-const AUTHORIZED_FILES = Object.freeze([
+const ENVIRONMENT_CLEAN_FILES = Object.freeze([
   ".github/workflows/social-3a0p-linux-physical-gates.yml",
   "docs/social-3a0p-linux-physical-gates.md",
   "scripts/social-3a0p-linux-gate.js",
   "tests/social-3a0p-linux-gate.test.js",
   "tests/social-3a0p-linux-workflow.test.js"
+]);
+const AUTHORIZED_FILES = Object.freeze([
+  ".github/workflows/social-3a0p-linux-physical-gates.yml",
+  "docs/social-3a0p-linux-physical-gates.md",
+  "scripts/run-node-tests.js",
+  "scripts/social-3a0p-linux-gate.js",
+  "tests/node-test-runner-safety.test.js",
+  "tests/social-3a0p-linux-gate.test.js",
+  "tests/social-3a0p-linux-workflow.test.js",
+  "tests/social-3a0p-local-firewall-nonmutation.test.js"
 ]);
 const WINDOWS_STABILIZED_TEST_RUN = `$ErrorActionPreference = "Stop"
 $PSNativeCommandUseErrorActionPreference = $false
@@ -148,6 +160,7 @@ function assertGuardInventory(source, style) {
         "$nativePreflightFiles = @",
         "$sanitizationFiles = @",
         "$identificationFiles = @",
+        "$environmentCleanFiles = @",
         "$authorizedFiles = @"
       ]
     : [
@@ -156,6 +169,7 @@ function assertGuardInventory(source, style) {
         "native_preflight_files=",
         "sanitization_files=",
         "identification_files=",
+        "environment_clean_files=",
         "authorized_files="
       ];
   assert.deepEqual(extractQuotedArray(source, declarations[0]), MAINTENANCE_FILES);
@@ -163,7 +177,8 @@ function assertGuardInventory(source, style) {
   assert.deepEqual(extractQuotedArray(source, declarations[2]), NATIVE_PREFLIGHT_FILES);
   assert.deepEqual(extractQuotedArray(source, declarations[3]), SANITIZATION_FILES);
   assert.deepEqual(extractQuotedArray(source, declarations[4]), IDENTIFICATION_FILES);
-  assert.deepEqual(extractQuotedArray(source, declarations[5]), AUTHORIZED_FILES);
+  assert.deepEqual(extractQuotedArray(source, declarations[5]), ENVIRONMENT_CLEAN_FILES);
+  assert.deepEqual(extractQuotedArray(source, declarations[6]), AUTHORIZED_FILES);
   assert.equal(source.includes("*"), false);
 }
 
@@ -205,15 +220,17 @@ test("workflow permits only the exact first creation push and has two ordered na
   });
 });
 
-test("both jobs enforce the new commit and preserve the five earlier commit contracts", () => {
+test("both jobs enforce the new commit and preserve the six earlier commit contracts", () => {
   const { workflow } = readWorkflow();
   const { windows, physical } = jobs(workflow);
   assert.equal(workflow.env.SOCIAL_3A0P_AUTHORIZED_PARENT, AUTHORIZED_PARENT);
+  assert.equal(workflow.env.SOCIAL_3A0P_ENVIRONMENT_CLEAN_PARENT, ENVIRONMENT_CLEAN_PARENT);
   assert.equal(workflow.env.SOCIAL_3A0P_IDENTIFICATION_PARENT, IDENTIFICATION_PARENT);
   assert.equal(workflow.env.SOCIAL_3A0P_SANITIZATION_PARENT, SANITIZATION_PARENT);
   assert.equal(workflow.env.SOCIAL_3A0P_NATIVE_PREFLIGHT_PARENT, NATIVE_PREFLIGHT_PARENT);
   assert.equal(workflow.env.SOCIAL_3A0P_PROVENANCE_PARENT, PROVENANCE_PARENT);
   assert.equal(workflow.env.SOCIAL_3A0P_MAINTENANCE_PARENT, MAINTENANCE_PARENT);
+  assert.equal(workflow.env.SOCIAL_3A0P_ENVIRONMENT_CLEAN_MESSAGE, ENVIRONMENT_CLEAN_MESSAGE);
   assert.equal(workflow.env.SOCIAL_3A0P_IDENTIFICATION_MESSAGE, IDENTIFICATION_MESSAGE);
   assert.equal(workflow.env.SOCIAL_3A0P_SANITIZATION_MESSAGE, SANITIZATION_MESSAGE);
   assert.equal(workflow.env.SOCIAL_3A0P_NATIVE_PREFLIGHT_MESSAGE, NATIVE_PREFLIGHT_MESSAGE);
@@ -234,11 +251,13 @@ test("both jobs enforce the new commit and preserve the five earlier commit cont
   assertGuardInventory(linuxGuard.run, "bash");
   for (const guard of [windowsGuard.run, linuxGuard.run]) {
     assert.ok(guard.includes("SOCIAL_3A0P_AUTHORIZED_PARENT"));
+    assert.ok(guard.includes("SOCIAL_3A0P_ENVIRONMENT_CLEAN_PARENT"));
     assert.ok(guard.includes("SOCIAL_3A0P_IDENTIFICATION_PARENT"));
     assert.ok(guard.includes("SOCIAL_3A0P_SANITIZATION_PARENT"));
     assert.ok(guard.includes("SOCIAL_3A0P_NATIVE_PREFLIGHT_PARENT"));
     assert.ok(guard.includes("SOCIAL_3A0P_PROVENANCE_PARENT"));
     assert.ok(guard.includes("SOCIAL_3A0P_MAINTENANCE_PARENT"));
+    assert.ok(guard.includes("SOCIAL_3A0P_ENVIRONMENT_CLEAN_MESSAGE"));
     assert.ok(guard.includes("SOCIAL_3A0P_IDENTIFICATION_MESSAGE"));
     assert.ok(guard.includes("SOCIAL_3A0P_SANITIZATION_MESSAGE"));
     assert.ok(guard.includes("SOCIAL_3A0P_NATIVE_PREFLIGHT_MESSAGE"));
@@ -258,20 +277,23 @@ test("both jobs enforce the new commit and preserve the five earlier commit cont
   for (const contract of [
     'Assert-Equal (Get-GitText -Arguments @("rev-parse", "HEAD")) $env:AUTHORIZED_SHA',
     'Assert-Equal (Get-GitText -Arguments @("rev-parse", "HEAD^")) $env:SOCIAL_3A0P_AUTHORIZED_PARENT',
-    'Assert-Equal (Get-GitText -Arguments @("rev-parse", "$($env:SOCIAL_3A0P_AUTHORIZED_PARENT)^")) $env:SOCIAL_3A0P_IDENTIFICATION_PARENT',
+    'Assert-Equal (Get-GitText -Arguments @("rev-parse", "$($env:SOCIAL_3A0P_AUTHORIZED_PARENT)^")) $env:SOCIAL_3A0P_ENVIRONMENT_CLEAN_PARENT',
+    'Assert-Equal (Get-GitText -Arguments @("rev-parse", "$($env:SOCIAL_3A0P_ENVIRONMENT_CLEAN_PARENT)^")) $env:SOCIAL_3A0P_IDENTIFICATION_PARENT',
     'Assert-Equal (Get-GitText -Arguments @("rev-parse", "$($env:SOCIAL_3A0P_IDENTIFICATION_PARENT)^")) $env:SOCIAL_3A0P_SANITIZATION_PARENT',
     'Assert-Equal (Get-GitText -Arguments @("rev-parse", "$($env:SOCIAL_3A0P_SANITIZATION_PARENT)^")) $env:SOCIAL_3A0P_NATIVE_PREFLIGHT_PARENT',
     'Assert-Equal (Get-GitText -Arguments @("rev-parse", "$($env:SOCIAL_3A0P_NATIVE_PREFLIGHT_PARENT)^")) $env:SOCIAL_3A0P_PROVENANCE_PARENT',
     'Assert-Equal (Get-GitText -Arguments @("rev-parse", "$($env:SOCIAL_3A0P_PROVENANCE_PARENT)^")) $env:SOCIAL_3A0P_MAINTENANCE_PARENT',
     'Assert-Equal (Get-GitText -Arguments @("log", "-1", "--pretty=%B")) $env:SOCIAL_3A0P_AUTHORIZED_MESSAGE',
-    'Assert-Equal (Get-GitText -Arguments @("log", "-1", "--pretty=%B", $env:SOCIAL_3A0P_AUTHORIZED_PARENT)) $env:SOCIAL_3A0P_IDENTIFICATION_MESSAGE',
+    'Assert-Equal (Get-GitText -Arguments @("log", "-1", "--pretty=%B", $env:SOCIAL_3A0P_AUTHORIZED_PARENT)) $env:SOCIAL_3A0P_ENVIRONMENT_CLEAN_MESSAGE',
+    'Assert-Equal (Get-GitText -Arguments @("log", "-1", "--pretty=%B", $env:SOCIAL_3A0P_ENVIRONMENT_CLEAN_PARENT)) $env:SOCIAL_3A0P_IDENTIFICATION_MESSAGE',
     'Assert-Equal (Get-GitText -Arguments @("log", "-1", "--pretty=%B", $env:SOCIAL_3A0P_IDENTIFICATION_PARENT)) $env:SOCIAL_3A0P_SANITIZATION_MESSAGE',
     'Assert-Equal (Get-GitText -Arguments @("log", "-1", "--pretty=%B", $env:SOCIAL_3A0P_SANITIZATION_PARENT)) $env:SOCIAL_3A0P_NATIVE_PREFLIGHT_MESSAGE',
     'Assert-Equal (Get-GitText -Arguments @("log", "-1", "--pretty=%B", $env:SOCIAL_3A0P_NATIVE_PREFLIGHT_PARENT)) $env:SOCIAL_3A0P_PROVENANCE_MESSAGE',
     'Assert-Equal (Get-GitText -Arguments @("log", "-1", "--pretty=%B", $env:SOCIAL_3A0P_PROVENANCE_PARENT)) $env:SOCIAL_3A0P_MAINTENANCE_MESSAGE',
-    'Assert-Equal (Get-GitText -Arguments @("rev-list", "--count", $commitRange)) "6"',
+    'Assert-Equal (Get-GitText -Arguments @("rev-list", "--count", $commitRange)) "7"',
     'Assert-SingleParent "HEAD"',
     'Assert-SingleParent $env:SOCIAL_3A0P_AUTHORIZED_PARENT',
+    'Assert-SingleParent $env:SOCIAL_3A0P_ENVIRONMENT_CLEAN_PARENT',
     'Assert-SingleParent $env:SOCIAL_3A0P_IDENTIFICATION_PARENT',
     'Assert-SingleParent $env:SOCIAL_3A0P_SANITIZATION_PARENT',
     'Assert-SingleParent $env:SOCIAL_3A0P_NATIVE_PREFLIGHT_PARENT',
@@ -281,6 +303,7 @@ test("both jobs enforce the new commit and preserve the five earlier commit cont
     'Assert-ExactFiles $nativePreflightChanged $nativePreflightFiles',
     'Assert-ExactFiles $sanitizationChanged $sanitizationFiles',
     'Assert-ExactFiles $identificationChanged $identificationFiles',
+    'Assert-ExactFiles $environmentCleanChanged $environmentCleanFiles',
     'Assert-ExactFiles $authorizedChanged $authorizedFiles'
   ]) {
     assert.ok(windowsGuard.run.includes(contract), contract);
@@ -288,13 +311,15 @@ test("both jobs enforce the new commit and preserve the five earlier commit cont
   for (const contract of [
     'test "$(git rev-parse HEAD)" = "$AUTHORIZED_SHA"',
     'test "$(git rev-parse HEAD^)" = "$SOCIAL_3A0P_AUTHORIZED_PARENT"',
-    'test "$(git rev-parse "$SOCIAL_3A0P_AUTHORIZED_PARENT^")" = "$SOCIAL_3A0P_IDENTIFICATION_PARENT"',
+    'test "$(git rev-parse "$SOCIAL_3A0P_AUTHORIZED_PARENT^")" = "$SOCIAL_3A0P_ENVIRONMENT_CLEAN_PARENT"',
+    'test "$(git rev-parse "$SOCIAL_3A0P_ENVIRONMENT_CLEAN_PARENT^")" = "$SOCIAL_3A0P_IDENTIFICATION_PARENT"',
     'test "$(git rev-parse "$SOCIAL_3A0P_IDENTIFICATION_PARENT^")" = "$SOCIAL_3A0P_SANITIZATION_PARENT"',
     'test "$(git rev-parse "$SOCIAL_3A0P_SANITIZATION_PARENT^")" = "$SOCIAL_3A0P_NATIVE_PREFLIGHT_PARENT"',
     'test "$(git rev-parse "$SOCIAL_3A0P_NATIVE_PREFLIGHT_PARENT^")" = "$SOCIAL_3A0P_PROVENANCE_PARENT"',
     'test "$(git rev-parse "$SOCIAL_3A0P_PROVENANCE_PARENT^")" = "$SOCIAL_3A0P_MAINTENANCE_PARENT"',
     'test "$(git log -1 --pretty=%B)" = "$SOCIAL_3A0P_AUTHORIZED_MESSAGE"',
-    'test "$(git log -1 --pretty=%B "$SOCIAL_3A0P_AUTHORIZED_PARENT")" = "$SOCIAL_3A0P_IDENTIFICATION_MESSAGE"',
+    'test "$(git log -1 --pretty=%B "$SOCIAL_3A0P_AUTHORIZED_PARENT")" = "$SOCIAL_3A0P_ENVIRONMENT_CLEAN_MESSAGE"',
+    'test "$(git log -1 --pretty=%B "$SOCIAL_3A0P_ENVIRONMENT_CLEAN_PARENT")" = "$SOCIAL_3A0P_IDENTIFICATION_MESSAGE"',
     'test "$(git log -1 --pretty=%B "$SOCIAL_3A0P_IDENTIFICATION_PARENT")" = "$SOCIAL_3A0P_SANITIZATION_MESSAGE"',
     'test "$(git log -1 --pretty=%B "$SOCIAL_3A0P_SANITIZATION_PARENT")" = "$SOCIAL_3A0P_NATIVE_PREFLIGHT_MESSAGE"',
     'test "$(git log -1 --pretty=%B "$SOCIAL_3A0P_NATIVE_PREFLIGHT_PARENT")" = "$SOCIAL_3A0P_PROVENANCE_MESSAGE"',
@@ -303,12 +328,13 @@ test("both jobs enforce the new commit and preserve the five earlier commit cont
     'assert_exact_changed_files "$SOCIAL_3A0P_PROVENANCE_PARENT" "$SOCIAL_3A0P_NATIVE_PREFLIGHT_PARENT" "${provenance_files[@]}"',
     'assert_exact_changed_files "$SOCIAL_3A0P_NATIVE_PREFLIGHT_PARENT" "$SOCIAL_3A0P_SANITIZATION_PARENT" "${native_preflight_files[@]}"',
     'assert_exact_changed_files "$SOCIAL_3A0P_SANITIZATION_PARENT" "$SOCIAL_3A0P_IDENTIFICATION_PARENT" "${sanitization_files[@]}"',
-    'assert_exact_changed_files "$SOCIAL_3A0P_IDENTIFICATION_PARENT" "$SOCIAL_3A0P_AUTHORIZED_PARENT" "${identification_files[@]}"',
+    'assert_exact_changed_files "$SOCIAL_3A0P_IDENTIFICATION_PARENT" "$SOCIAL_3A0P_ENVIRONMENT_CLEAN_PARENT" "${identification_files[@]}"',
+    'assert_exact_changed_files "$SOCIAL_3A0P_ENVIRONMENT_CLEAN_PARENT" "$SOCIAL_3A0P_AUTHORIZED_PARENT" "${environment_clean_files[@]}"',
     'assert_exact_changed_files "$SOCIAL_3A0P_AUTHORIZED_PARENT" HEAD "${authorized_files[@]}"'
   ]) {
     assert.ok(linuxGuard.run.includes(contract), contract);
   }
-  assert.ok(linuxGuard.run.includes('test "$(git rev-list --count "$SOCIAL_3A0P_MAINTENANCE_PARENT..HEAD")" = "6"'));
+  assert.ok(linuxGuard.run.includes('test "$(git rev-list --count "$SOCIAL_3A0P_MAINTENANCE_PARENT..HEAD")" = "7"'));
 });
 
 test("actions are pinned and each native job installs its own lockfile without cache or scripts", () => {

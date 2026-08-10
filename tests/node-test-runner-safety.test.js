@@ -13,13 +13,22 @@ const {
   validateTestPartition
 } = require("../scripts/run-node-tests");
 
-const EXPECTED_SERIAL_FILES = Object.freeze([
+const PREVIOUS_SERIAL_FILES = Object.freeze([
   "body-parser-security.test.js",
   "checkpoint-a-security.test.js",
   "fcm-token-encryption.test.js",
   "social-2b0-config-security.test.js",
   "social-foundation-integration.test.js",
   "zip-downloads.test.js"
+]);
+const ADDED_WINDOWS_NATIVE_SERIAL_FILES = Object.freeze([
+  "social-3a0p-local-file-replace-argument-powershell.test.js",
+  "social-3a0p-local-file-replace-powershell-diagnostic.test.js",
+  "social-3a0p-local-firewall-nonmutation.test.js"
+]);
+const EXPECTED_SERIAL_FILES = Object.freeze([
+  ...PREVIOUS_SERIAL_FILES,
+  ...ADDED_WINDOWS_NATIVE_SERIAL_FILES
 ]);
 const SYNTHETIC_TEST_DIRECTORY = path.resolve("synthetic-runner-tests");
 const SYNTHETIC_REPOSITORY_ROOT = path.resolve("synthetic-runner-root");
@@ -116,11 +125,24 @@ test("2. the ordinary runner keeps every dedicated physical gate excluded", () =
   assert.equal(discovered.includes("social-postgres-real.test.js"), false);
 });
 
-test("3. every closed serial-manifest file exists among automated tests", () => {
+test("3. the closed serial manifest contains the six previous and three native Windows files", () => {
   const repositoryTests = discoverAutomatedTests(path.resolve(__dirname)).map((file) =>
     path.basename(file)
   );
+  const previousSet = new Set(PREVIOUS_SERIAL_FILES);
   assert.deepEqual(PROCESS_LIFECYCLE_TEST_FILES, EXPECTED_SERIAL_FILES);
+  assert.equal(PROCESS_LIFECYCLE_TEST_FILES.length, 9);
+  assert.deepEqual(
+    PROCESS_LIFECYCLE_TEST_FILES.filter((name) => previousSet.has(name)),
+    PREVIOUS_SERIAL_FILES
+  );
+  for (const name of ADDED_WINDOWS_NATIVE_SERIAL_FILES) {
+    assert.equal(
+      PROCESS_LIFECYCLE_TEST_FILES.filter((candidate) => candidate === name).length,
+      1,
+      name
+    );
+  }
   for (const name of EXPECTED_SERIAL_FILES) assert.ok(repositoryTests.includes(name), name);
 });
 

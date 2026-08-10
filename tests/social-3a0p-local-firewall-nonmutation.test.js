@@ -19,6 +19,10 @@ const {
   validateLoopbackNonmutationContext
 } = require("../scripts/social-3a0p-local-firewall-nonmutation");
 
+const ELEVATED_REFUSAL_CODE = "firewall_nonmutation_elevated_refused";
+const UNEXPECTED_POWERSHELL_FAILURE_CODE =
+  "firewall_nonmutation_unexpected_failure";
+
 function profile(overrides = {}) {
   return {
     name: "Domain",
@@ -103,6 +107,35 @@ test("mode is accepted only for local non-elevated Windows loopback", () => {
 
 test("PowerShell is a three-component ActiveStore batch read without filters or per-rule queries", () => {
   const script = firewallLightEvidencePowerShell();
+  const elevationDetection =
+    "$elevated=$principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator);";
+  const elevatedRefusal =
+    `if($elevated){throw '${ELEVATED_REFUSAL_CODE}'};`;
+  const elevationDetectionIndex = script.indexOf(elevationDetection);
+  const elevatedRefusalIndex = script.indexOf(elevatedRefusal);
+  const elevatedRefusalEnd = elevatedRefusalIndex + elevatedRefusal.length;
+  assert.notEqual(elevationDetectionIndex, -1);
+  assert.notEqual(elevatedRefusalIndex, -1);
+  assert.ok(elevationDetectionIndex < elevatedRefusalIndex);
+  for (const read of [
+    "Get-NetFirewallProfile",
+    "Get-NetFirewallSetting",
+    "Get-NetFirewallRule"
+  ]) {
+    assert.ok(script.indexOf(read) >= elevatedRefusalEnd);
+  }
+  assert.doesNotMatch(
+    script.slice(0, elevatedRefusalEnd),
+    /Get-NetFirewall(?:Profile|Setting|Rule)\b/
+  );
+  assert.deepEqual(proveLoopbackNonmutationExecutablePath({ command: script }), {
+    firewallMutationCommandsAbsent: true,
+    uacElevationCommandsAbsent: true,
+    scheduledTaskMutationCommandsAbsent: true,
+    serviceMutationCommandsAbsent: true,
+    localUserMutationCommandsAbsent: true,
+    executableSourcesChecked: 1
+  });
   assert.equal((script.match(/Get-NetFirewallProfile\b/g) || []).length, 1);
   assert.equal((script.match(/Get-NetFirewallSetting\b/g) || []).length, 1);
   assert.equal((script.match(/Get-NetFirewallRule\b/g) || []).length, 1);
@@ -127,9 +160,7 @@ test("PowerShell is a three-component ActiveStore batch read without filters or 
   assert.match(script, /StringComparer\]::Ordinal/);
 });
 
-test("PowerShell sintético canonicaliza ordem e detecta mudanças funcionais", {
-  skip: process.platform !== "win32"
-}, () => {
+test("PowerShell sintético canonicaliza em contexto não elevado e recusa contexto elevado", () => {
   const powershell = path.join(
     process.env.SystemRoot,
     "System32/WindowsPowerShell/v1.0/powershell.exe"
@@ -146,6 +177,18 @@ test("PowerShell sintético canonicaliza ordem e detecta mudanças funcionais", 
       "function Get-NetFirewallSetting{[CmdletBinding()]param([string]$PolicyStore);[pscustomobject]@{Exemptions=@('Teredo','NeighborDiscovery');EnableStatefulFtp='False';EnableStatefulPptp='False';RequireFullAuthSupport='True';CertValidationLevel='None';AllowIPsecThroughNAT='None';MaxSAIdleTimeSeconds=300;KeyEncoding='Utf8';EnablePacketQueuing='None'}};",
       `function Get-NetFirewallRule{[CmdletBinding()]param([string]$PolicyStore);$ruleA=[pscustomobject]@{Name='rule-a';Enabled='True';Direction='Inbound';Action='${ruleAction}';Profile='Domain';PolicyStoreSourceType='Local'};$ruleB=[pscustomobject]@{Name='rule-b';Enabled='False';Direction='Outbound';Action='Allow';Profile='Private';PolicyStoreSourceType='Local'};${rules}};`
     ].join("");
+    const helper = firewallLightEvidencePowerShell();
+    const command = [
+      "try{",
+      fixtures,
+      helper,
+      ";}catch{",
+      "$code=[string]$_.Exception.Message;",
+      `if($code-ceq'${ELEVATED_REFUSAL_CODE}'){`,
+      `[Console]::Error.Write('${ELEVATED_REFUSAL_CODE}');exit 1};`,
+      `[Console]::Error.Write('${UNEXPECTED_POWERSHELL_FAILURE_CODE}');exit 2`,
+      "}"
+    ].join("");
     const result = spawnSync(
       powershell,
       [
@@ -153,15 +196,68 @@ test("PowerShell sintético canonicaliza ordem e detecta mudanças funcionais", 
         "-NoProfile",
         "-NonInteractive",
         "-Command",
-        `${fixtures}${firewallLightEvidencePowerShell()}`
+        command
       ],
       { encoding: "utf8", windowsHide: true }
     );
-    assert.equal(result.status, 0, result.stderr);
+    assert.ok(result.error === undefined, "firewall_nonmutation_spawn_failed");
+    assert.ok(result.signal === null, "firewall_nonmutation_process_signaled");
+    assert.ok(
+      Number.isInteger(result.status),
+      "firewall_nonmutation_process_status_missing"
+    );
+    assert.ok(
+      typeof result.stdout === "string" && typeof result.stderr === "string",
+      "firewall_nonmutation_process_output_invalid"
+    );
+    return { command, result };
+  };
+
+  const first = run();
+  if (first.result.status !== 0) {
+    assert.ok(
+      Number.isInteger(first.result.status) && first.result.status !== 0,
+      "firewall_nonmutation_refusal_status_invalid"
+    );
+    const stdout = first.result.stdout;
+    const stderr = first.result.stderr;
+    const causalCodes = [...new Set(
+      stderr.match(/\bfirewall_nonmutation_[a-z0-9_]+\b/g) || []
+    )];
+    assert.ok(stdout === "", "firewall_nonmutation_partial_stdout_refused");
+    assert.ok(
+      stderr === ELEVATED_REFUSAL_CODE,
+      "firewall_nonmutation_unknown_stderr_refused"
+    );
+    assert.deepEqual(causalCodes, [ELEVATED_REFUSAL_CODE]);
+    assert.doesNotMatch(`${stdout}${stderr}`, /[{}\[\]]/);
+    assert.doesNotMatch(
+      `${stdout}${stderr}`,
+      /(?:postgres(?:ql)?:\/\/|password|passwd|token|secret|cookie|credential|dsn)/i
+    );
+    assert.deepEqual(
+      proveLoopbackNonmutationExecutablePath({ command: first.command }),
+      {
+        firewallMutationCommandsAbsent: true,
+        uacElevationCommandsAbsent: true,
+        scheduledTaskMutationCommandsAbsent: true,
+        serviceMutationCommandsAbsent: true,
+        localUserMutationCommandsAbsent: true,
+        executableSourcesChecked: 1
+      }
+    );
+    return;
+  }
+
+  const parseSuccessfulEvidence = ({ result }) => {
+    assert.ok(result.status === 0, "firewall_nonmutation_process_failed");
+    assert.ok(result.signal === null, "firewall_nonmutation_process_signaled");
+    assert.ok(result.stderr === "", "firewall_nonmutation_unexpected_stderr");
+    assert.ok(result.stdout.trim() !== "", "firewall_nonmutation_stdout_missing");
     return JSON.parse(result.stdout.trim());
   };
 
-  const original = run();
+  const original = parseSuccessfulEvidence(first);
   const expected = buildFirewallLightEvidence({
     profiles: [
       profile({ name: "Domain", enabled: "True" }),
@@ -190,16 +286,16 @@ test("PowerShell sintético canonicaliza ordem e detecta mudanças funcionais", 
     validateFirewallLightEvidence(original),
     expected
   );
-  const reordered = run({ reverse: true });
+  const reordered = parseSuccessfulEvidence(run({ reverse: true }));
   assert.equal(original.aggregateSha256, reordered.aggregateSha256);
   assert.deepEqual(original.components, reordered.components);
 
-  const changedRule = run({ ruleAction: "Allow" });
+  const changedRule = parseSuccessfulEvidence(run({ ruleAction: "Allow" }));
   assert.notEqual(
     original.components[2].sha256,
     changedRule.components[2].sha256
   );
-  const changedProfile = run({ profileEnabled: "False" });
+  const changedProfile = parseSuccessfulEvidence(run({ profileEnabled: "False" }));
   assert.notEqual(
     original.components[0].sha256,
     changedProfile.components[0].sha256

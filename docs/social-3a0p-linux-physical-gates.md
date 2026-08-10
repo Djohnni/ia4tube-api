@@ -1,14 +1,14 @@
 # Checkpoint Social 3A-0P — gates físicos Linux isolados
 
-## Contrato canônico da correção hospedada
+## Contrato canônico da estabilidade nativa no Windows hospedado
 
 Esta rota existe somente na branch
-`social/checkpoint-3a0p-windows-pg-env-clean-20260810`, criada a partir do
-commit exato `7e6b0d8ed71daf75481f28a88832c4748f4ee648`. O único commit autorizado
+`social/checkpoint-3a0p-windows-native-test-stability-20260810`, criada a partir
+do commit exato `e2072df65d371fd7c0cf8429fb072dc437df2d27`. O único commit autorizado
 deve ter esse commit como pai imediato e a mensagem integral:
 
 ```text
-[run-social-3a0p-linux-gate] neutralize hosted Windows PostgreSQL defaults
+[run-social-3a0p-linux-gate] stabilize hosted Windows native tests
 ```
 
 O produto permanece idêntico a `fcfc92419021dae5f77baad731c634b10c275c5b`:
@@ -44,10 +44,37 @@ O diagnóstico encerrou intencionalmente com
 O job Linux foi corretamente ignorado; o pré-gate Linux, a prova física e os
 Gates 1–5 não começaram. Nenhum artifact físico foi produzido, não houve recurso
 físico a limpar e zero resíduos foram observados. Produto e ambientes externos
-permaneceram intactos. Não há autorização para re-run desses runs nem para
-segundo push nas branches anteriores.
+permaneceram intactos.
 
-## Correção fechada do ambiente da suíte Windows
+O run `31431876846`, no commit
+`e2072df65d371fd7c0cf8429fb072dc437df2d27`, comprovou que o guard imutável,
+checkout, Node 24, `npm ci` e a neutralização exclusiva de `PGBIN`, `PGDATA`,
+`PGROOT`, `PGPASSWORD` e `PGUSER` funcionaram. A contagem de outras variáveis
+`PG...` não vazias foi zero, `npm test` iniciou, a etapa serial aprovou 27 de 27
+testes e a etapa concorrente iniciou. O Git permaneceu limpo.
+
+A etapa concorrente teve exatamente três falhas comprovadas. Os testes
+`the exact PowerShell helper observes null before binding and typed empty string distinctly`,
+em `tests/social-3a0p-local-file-replace-argument-powershell.test.js`, e
+`the exact PowerShell sanitizer walks synthetic exceptions without file I/O`,
+em `tests/social-3a0p-local-file-replace-powershell-diagnostic.test.js`,
+atingiram o timeout interno preservado de 20.000 ms em `spawnSync` de
+`powershell.exe`, com `ETIMEDOUT` e `SIGTERM`. O teste
+`PowerShell sintético canonicaliza ordem e detecta mudanças funcionais`, em
+`tests/social-3a0p-local-firewall-nonmutation.test.js`, recebeu exatamente
+`firewall_nonmutation_elevated_refused`: o helper detectou elevação antes de
+qualquer leitura do firewall e falhou fechado como projetado.
+
+A classificação canônica é
+`windows_hosted_runner_native_test_execution_contract_mismatch`, com as
+subcausas `windows_powershell_process_tests_concurrent_timeout` e
+`windows_firewall_nonmutation_elevated_context_refused`. O job Linux foi
+corretamente ignorado; o pré-gate Linux e os Gates 1–5 não começaram. Nenhum
+artifact físico foi produzido e não houve recurso físico a limpar. Não há
+autorização para re-run desses runs nem para segundo push nas branches
+anteriores.
+
+## Correção precedente e preservada do ambiente da suíte Windows
 
 Depois de `npm ci`, somente a etapa `Run stabilized automated tests once` recebe
 um mapa ambiental explícito com exatamente `PGBIN`, `PGDATA`, `PGROOT`,
@@ -71,9 +98,48 @@ Com contagem zero, a etapa executa `npm test` exatamente uma vez, preserva
 código real da suíte. Este é somente o contrato da correção; não afirma que um
 novo run tenha sido iniciado, concluído ou aprovado.
 
+## Estabilização fechada dos testes nativos Windows
+
+O manifesto serial literal de `scripts/run-node-tests.js` preserva seus seis
+caminhos anteriores, na mesma ordem relativa, e acrescenta exatamente os três
+testes nativos comprovados pelo run anterior. O manifesto final contém:
+
+1. `tests/body-parser-security.test.js`;
+2. `tests/checkpoint-a-security.test.js`;
+3. `tests/fcm-token-encryption.test.js`;
+4. `tests/social-2b0-config-security.test.js`;
+5. `tests/social-foundation-integration.test.js`;
+6. `tests/zip-downloads.test.js`;
+7. `tests/social-3a0p-local-file-replace-argument-powershell.test.js`;
+8. `tests/social-3a0p-local-file-replace-powershell-diagnostic.test.js`;
+9. `tests/social-3a0p-local-firewall-nonmutation.test.js`.
+
+Esses nove arquivos executam uma única vez com `--test-concurrency=1`. Os
+demais testes continuam na etapa concorrente, sem flag de concorrência, e cada
+arquivo descoberto pertence a exatamente uma etapa. Não há glob, diretório
+inteiro, retry, repetição, shell ou timeout acrescentado pelo runner. Os
+timeouts internos de 20.000 ms dos dois testes de File.Replace permanecem
+inalterados, assim como seus arquivos e o helper PowerShell correspondente.
+
+O único teste de firewall sintético reconhece exclusivamente o resultado real
+do helper. Em contexto não elevado, exige status zero, signal nulo e stderr
+vazio antes de executar todas as provas preservadas de canonicalização, ordem,
+regra, perfil, componentes e hashes. Em contexto elevado, aceita somente status
+não zero associado ao código exato `firewall_nonmutation_elevated_refused`, com
+stdout vazio, sem JSON parcial, segredo ou mutação, e não executa as três
+invocações restantes de canonicalização. Erro de spawn, timeout, `ETIMEDOUT`,
+signal, ausência de status, executável ausente, stderr desconhecido ou qualquer
+outro código continuam sendo falha.
+
+A assertion estática preservada comprova que a detecção de elevação e a recusa
+ocorrem antes de `Get-NetFirewallProfile`, `Get-NetFirewallSetting` e
+`Get-NetFirewallRule`, sem leitura anterior nem operação de mutação. O helper de
+produção não é alterado. Este texto especifica a correção local e não afirma
+que uma nova execução hospedada já tenha ocorrido.
+
 ## Cadeia imutável e inventários fechados
 
-A cadeia autorizada é linear e contém seis commits entre a base da manutenção
+A cadeia autorizada é linear e contém sete commits entre a base da manutenção
 e o novo `HEAD`:
 
 1. `8eb4c4d71c6593f9c3e448be6ac52b1b0e8ba931`, pai
@@ -120,17 +186,27 @@ e o novo `HEAD`:
    `scripts/social-3a0p-linux-gate.js`,
    `tests/social-3a0p-linux-gate.test.js` e
    `tests/social-3a0p-linux-workflow.test.js`.
-6. O novo `HEAD`, pai exato
+6. `e2072df65d371fd7c0cf8429fb072dc437df2d27`, pai exato
    `7e6b0d8ed71daf75481f28a88832c4748f4ee648`, mensagem
    `[run-social-3a0p-linux-gate] neutralize hosted Windows PostgreSQL defaults`
-   e inventário fechado: `.github/workflows/social-3a0p-linux-physical-gates.yml`,
+   e inventário exato: `.github/workflows/social-3a0p-linux-physical-gates.yml`,
    `docs/social-3a0p-linux-physical-gates.md`,
    `scripts/social-3a0p-linux-gate.js`,
    `tests/social-3a0p-linux-gate.test.js` e
    `tests/social-3a0p-linux-workflow.test.js`.
+7. O novo `HEAD`, pai exato
+   `e2072df65d371fd7c0cf8429fb072dc437df2d27`, mensagem
+   `[run-social-3a0p-linux-gate] stabilize hosted Windows native tests` e
+   inventário fechado: `.github/workflows/social-3a0p-linux-physical-gates.yml`,
+   `docs/social-3a0p-linux-physical-gates.md`, `scripts/run-node-tests.js`,
+   `scripts/social-3a0p-linux-gate.js`,
+   `tests/node-test-runner-safety.test.js`,
+   `tests/social-3a0p-linux-gate.test.js`,
+   `tests/social-3a0p-linux-workflow.test.js` e
+   `tests/social-3a0p-local-firewall-nonmutation.test.js`.
 
 Os guards dos dois jobs verificam pais, mensagens, ancestralidade linear,
-contagem seis e cada um desses inventários sem prefixo, glob ou diretório
+contagem sete e cada um desses inventários sem prefixo, glob ou diretório
 inteiro.
 
 ## Limite intencional da rota corretiva
@@ -138,8 +214,9 @@ inteiro.
 O único workflow run autorizado contém os mesmos dois jobs hospedados e nenhuma
 matriz. Depois do contrato imutável, checkout, Node 24 e instalação pelo
 lockfile, o job Windows neutraliza somente os cinco nomes conhecidos na etapa da
-suíte, aplica o guard amplo e executa a suíte estabilizada exatamente uma vez se
-o ambiente estiver limpo.
+suíte, aplica o guard amplo e executa `npm test` exatamente uma vez se o ambiente
+estiver limpo. O runner executa primeiro o manifesto serial fechado de nove
+arquivos e somente então a etapa concorrente dos demais testes.
 
 O job `physical-gates`, em `ubuntu-24.04`, continua dependente do sucesso de
 `windows-automated-tests`; portanto só pode iniciar após a aprovação integral do
