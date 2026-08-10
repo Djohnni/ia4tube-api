@@ -38,8 +38,8 @@ const {
 } = require("./social-3a0p-local-runtime-evidence-metrics");
 
 const BRANCH =
-  "social/checkpoint-3a0p-linux-gate3-failure-provenance-20260809";
-const BASE_COMMIT = "8eb4c4d71c6593f9c3e448be6ac52b1b0e8ba931";
+  "social/checkpoint-3a0p-linux-native-preflight-20260810";
+const BASE_COMMIT = "b0d13299fb7226288e9a9d7bd531be751b539891";
 const PRODUCT_COMMIT = "fcfc92419021dae5f77baad731c634b10c275c5b";
 const MARKER = "[run-social-3a0p-linux-gate]";
 const RUN_MARKER_PREFIX = "ia4tube-social-3a0p-linux-";

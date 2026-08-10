@@ -697,6 +697,14 @@ function restoreBehaviorFacadeFixture(options = {}) {
 }
 
 test("evidence provenance matches the authorized workflow branch and parent", () => {
+  assert.equal(
+    BRANCH,
+    "social/checkpoint-3a0p-linux-native-preflight-20260810"
+  );
+  assert.equal(
+    BASE_COMMIT,
+    "b0d13299fb7226288e9a9d7bd531be751b539891"
+  );
   const workflow = JSON.parse(fs.readFileSync(
     path.join(ROOT, ".github", "workflows", "social-3a0p-linux-physical-gates.yml"),
     "utf8"

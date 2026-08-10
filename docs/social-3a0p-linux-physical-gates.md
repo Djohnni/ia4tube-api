@@ -1,82 +1,119 @@
 # Checkpoint Social 3A-0P — gates físicos Linux isolados
 
-## Limite e proveniência
+## Contrato canônico da rota nativa
 
-Esta décima terceira rota Linux isolada tem como pai imediato o commit local de
-manutenção `8eb4c4d71c6593f9c3e448be6ac52b1b0e8ba931`, com a mensagem exata
-`[test] serialize process-lifecycle security tests`. O pai exato da manutenção é
-`9b98de25a42a21f7ebd229bf5581a78bfed80b2e`; portanto, a cadeia fechada é
-`HEAD da feature` → `8eb4c4d71c6593f9c3e448be6ac52b1b0e8ba931` →
-`9b98de25a42a21f7ebd229bf5581a78bfed80b2e`. A branch predecessora
-`social/checkpoint-3a0p-linux-runtime-attributes-oid-20260809` e todas as
-branches anteriores permanecem preservadas, sem edição ou novo push.
-
-O workflow existe somente para a branch
-`social/checkpoint-3a0p-linux-gate3-failure-provenance-20260809`. O produto
-permanece idêntico a `fcfc92419021dae5f77baad731c634b10c275c5b`: `src/`, todo
-`db/` (inclusive `roles.sql`), migrations, `server.js`, `package.json` e
-`package-lock.json` não são alterados. Esta rota não acrescenta grants, não
-altera políticas RLS e não modifica PostgreSQL, SCRAM, roles, backup, restore,
-rede Docker ou credenciais.
-
-## Décimo terceiro disparo Linux isolado autorizado
-
-O único gatilho autorizado é o primeiro e único `push` de criação da nova
-branch, sem exclusão ou force, cujo commit tenha a mensagem integral:
+Esta rota existe somente na branch
+`social/checkpoint-3a0p-linux-native-preflight-20260810`, criada a partir do
+commit exato `b0d13299fb7226288e9a9d7bd531be751b539891`. O único commit autorizado
+deve ter esse commit como pai imediato e a mensagem integral:
 
 ```text
-[run-social-3a0p-linux-gate] classify Gate 3 failure provenance
+[run-social-3a0p-linux-gate] split native pre-gate test environments
 ```
 
-O job exige `run_attempt == 1`, `created == true`, `deleted == false`,
-`forced == false`, `before` igual a 40 zeros, pai exato
-`8eb4c4d71c6593f9c3e448be6ac52b1b0e8ba931` e avô exato
-`9b98de25a42a21f7ebd229bf5581a78bfed80b2e`, além de diffs nominais e
-estritamente allowlisted. Também exige a mensagem exata da manutenção e estes
-quatro caminhos como seu inventário fechado:
+O produto permanece idêntico a `fcfc92419021dae5f77baad731c634b10c275c5b`:
+`src/`, todo `db/` (inclusive `roles.sql`), migrations, `server.js`,
+`package.json` e `package-lock.json` não são alterados. A rota não acrescenta
+grants, não muda políticas RLS e não modifica schema, SCRAM, roles, produto,
+backup, restore ou dependências.
 
-- `scripts/run-node-tests.js`;
-- `scripts/social-3a0p-local-scope.js`;
-- `tests/node-test-runner-safety.test.js`;
-- `tests/social-3a0p-local-scope.test.js`.
+## Classificação comprovada do run anterior
 
-Não há `workflow_dispatch`, pull request, agenda, matriz ou retry automático. A
-regra operacional é: exatamente um push de criação, no máximo um run automático,
-zero re-run, zero segundo push, zero PR, zero merge e zero deploy.
+O run `31397433621`, no commit
+`b0d13299fb7226288e9a9d7bd531be751b539891`, aprovou checkout, cadeia de
+commits, contrato imutável, instalação de 154 pacotes e a etapa serial completa
+com 27 de 27 testes. A etapa concorrente iniciou, mas executou sob Ubuntu
+fixtures automatizadas escritas para recursos nativos do Windows. A primeira
+falha foi o subteste de custódia DPAPI em
+`tests/social-3a0p-local-harness.test.js`, com o código sanitizado
+`harness_resource_path_refused`; ao todo, 37 testes falharam. Os Gates 1–5 não
+começaram, o diagnóstico físico do Gate 3 não começou, nenhum artifact foi
+gerado e `cleanupCompleted=true`, com zero resíduo.
 
-A allowlist do diff da feature contra o commit de manutenção contém exatamente
-estes nove caminhos efetivamente alterados, sem curinga, prefixo ou diretório
-inteiro:
+A classificação canônica é
+`linux_pre_gate_windows_fixture_incompatibility`. Ela não autoriza correção
+individual dos 37 testes, re-run do run anterior ou segundo push na branch
+anterior.
 
-- `.github/workflows/social-3a0p-linux-physical-gates.yml`;
-- `docs/social-3a0p-linux-physical-gates.md`;
-- `scripts/social-3a0p-linux-gate.js`;
-- `scripts/social-3a0p-local-connector-physical-gates.js`;
-- `scripts/social-3a0p-linux-physical-gates.js`;
-- `tests/social-3a0p-linux-gate.test.js`;
-- `tests/social-3a0p-local-connector-physical-gates.test.js`;
-- `tests/social-3a0p-linux-physical-gates.test.js`;
-- `tests/social-3a0p-linux-workflow.test.js`.
+## Três camadas de prova nativa
 
-Qualquer outro caminho, inclusive outro workflow, `src/`, `db/`, migrations,
-roles, servidor ou dependências, encerra o job antes do gate.
+O único workflow run contém dois jobs hospedados, sem matriz:
 
-O comando canônico `npm test` usa `scripts/run-node-tests.js`. A primeira etapa
-executa, em série e com `--test-concurrency=1`, exatamente estes seis testes de
-ciclo de vida de processo, que permanecem byte-idênticos:
+1. `windows-automated-tests`, em runner Windows oficial, instala pelo lockfile e
+   executa `npm test` exatamente uma vez com o runner estabilizado. Essa camada
+   cobre a suíte automatizada completa, inclusive DPAPI, `taskkill`, PowerShell,
+   caminhos Windows, executáveis `.exe`, ACL NTFS, adapters/entry Windows, ZIP
+   protegido e fixtures Windows de backup/restore.
+2. `physical-gates`, em `ubuntu-24.04`, depende obrigatoriamente de
+   `windows-automated-tests`. Ele valida o contrato imutável, instala pelo
+   lockfile e executa exatamente uma vez o runner pré-gate Linux fechado. Não
+   executa `npm test` novamente no Ubuntu.
+3. Somente depois do pré-gate Linux aprovado, o mesmo job Linux executa uma vez
+   a prova física de durabilidade, `O_NOFOLLOW`, PostgreSQL/Docker e Gates 1–5,
+   seguida de evidência sanitizada e cleanup.
 
-- `tests/body-parser-security.test.js`;
-- `tests/checkpoint-a-security.test.js`;
-- `tests/fcm-token-encryption.test.js`;
-- `tests/social-2b0-config-security.test.js`;
-- `tests/social-foundation-integration.test.js`;
-- `tests/zip-downloads.test.js`.
+Falha no job Windows impede o job Linux. Falha no pré-gate impede o gate físico.
+A suíte Windows, o pré-gate Linux e a prova física são complementares; nenhuma
+das três substitui outra.
 
-Somente se essa etapa passar, o runner executa uma vez os demais testes
-automatizados na etapa concorrente já existente. Cada teste descoberto pertence
-a exatamente uma etapa; `tests/social-postgres-real.test.js` continua reservado
-ao gate físico dedicado. Não há retry, repetição, shell ou timeout acrescentado
-pelo runner.
+## Manifesto fechado do pré-gate Linux
+
+`scripts/social-3a0p-linux-pre-gate-tests.js` executa, em ordem determinística,
+exatamente uma vez cada um destes oito caminhos literais:
+
+1. `tests/social-3a0p-local-scope.test.js` — allowlist exata, normalização e
+   recusa de caminhos desconhecidos, absolutos ou com traversal.
+2. `tests/social-3a0p-linux-pre-gate-tests.test.js` — manifesto congelado,
+   execução única, preservação de `cwd`/ambiente/stdio e falha fechada do runner.
+3. `tests/social-3a0p-linux-workflow.test.js` — trigger, branch, cadeia, escopo,
+   dependência entre jobs, artifact e cleanup do workflow.
+4. `tests/social-3a0p-linux-durability.test.js` — `fsync`, `O_NOFOLLOW`, recusas
+   de symlink e zero resíduo no filesystem Linux.
+5. `tests/social-3a0p-linux-postgres.test.js` — imagem pinada, rede Docker
+   interna, zero porta publicada, transporte Linux e cleanup fail-closed.
+6. `tests/social-3a0p-local-connector-physical-gates.test.js` — adapters e
+   planos simulados dos Gates 1–5, incluindo Gate 3 base B1–B10.
+7. `tests/social-3a0p-linux-physical-gates.test.js` — RLS/Gate 2, Gate 3
+   sintético e supplemental S1–S30, sem endpoint de provedor ou OAuth real.
+8. `tests/social-3a0p-linux-gate.test.js` — orquestração, procedência Gate 3,
+   sanitização, sidecars SHA-256, primeira falha, artifact e cleanup.
+
+O runner não usa glob, descoberta ampla, shell, retry, repetição ou timeout
+novo. Arquivo duplicado, ausente, extra, absoluto, Windows-local, fora da
+allowlist ou com traversal reprova antes da execução. Erro de spawn, signal ou
+status `null` também falha fechado. A primeira falha impede os arquivos
+seguintes; o runner não executa o gate físico nem cria artifact.
+
+## Ressalva sobre nomes históricos de módulos
+
+O gate Linux reutiliza partes puras e injetáveis do módulo historicamente
+denominado `social-3a0p-local-windows-physical-plans.js`, inclusive a fábrica
+de planos físicos e a seleção de repository por profile. No caminho Linux, os
+executáveis são injetados como `/usr/bin/psql`, `/usr/bin/pg_dump` e
+`/usr/bin/pg_restore`, e o transporte permanece o contêiner Linux descartável.
+Da mesma forma, o módulo de métricas reutiliza apenas o tipo de erro fechado de
+um core histórico que também contém funções DPAPI não alcançadas.
+
+Essa reutilização nominal não executa DPAPI, `taskkill`, PowerShell, caminho
+`C:\`, executável `.exe`, ACL NTFS nem pacote PostgreSQL Windows no pré-gate. Os
+testes Windows-native continuam exclusivamente no job Windows. A garantia é de
+ausência de operação ou fixture Windows no caminho executado, não a alegação
+incorreta de que o grafo de módulos não contém nomes históricos do Windows.
+
+## Contrato Gate 3 preservado e regras de parada
+
+O contrato de falha do Gate 3 permanece com exatamente oito campos, sem adição,
+remoção ou mudança semântica: `operation`, `substep`, `operationClass`,
+`causalCode`, `lastCompletedSubstep`, `externalProcessStarted`, `exitCode` e
+`signal`. Stdout, stderr, mensagem, stack, SQL, DSN, senha, token e credencial
+não são serializados.
+
+O workflow aceita somente o primeiro push de criação da branch, com
+`run_attempt=1`, `before` igual a 40 zeros, pai e mensagem exatos. Não há
+`workflow_dispatch`, pull request, agenda, matriz ou retry. Na primeira falha,
+as etapas posteriores não iniciam, a evidência disponível permanece
+sanitizada, o cleanup roda sempre e o workflow termina sem correção automática.
+São proibidos segundo push, retry, re-run, PR, merge e deploy.
 
 ## Falha física do Gate 3 que autoriza somente diagnóstico
 
@@ -681,7 +718,8 @@ nem amplia o adapter geral.
 
 ## Supply chain fechada
 
-- Runner: `ubuntu-24.04`.
+- Runners: Windows hospedado oficial para `windows-automated-tests` e
+  `ubuntu-24.04` para `physical-gates`.
 - Permissões: somente `contents: read`.
 - Node: linha 24, compatível com `>=20 <25`.
 - Instalação: `npm ci --ignore-scripts --no-audit --no-fund`.
@@ -750,8 +788,9 @@ reprova o gate. Nenhuma garantia é inferida apenas por teste simulado.
 
 ## Ordem física dos gates
 
-O workflow chama o gate físico exatamente uma vez. Dentro desse processo, a
-ordem obrigatória e fail-closed é:
+Depois de o job Windows e o pré-gate Linux terminarem verdes, o workflow chama
+o gate físico exatamente uma vez. Dentro desse processo, a ordem obrigatória e
+fail-closed é:
 
 1. validar o contrato imutável do commit, branch, tentativa e allowlist;
 2. instalar dependências somente pelo lockfile, sem lifecycle scripts;
