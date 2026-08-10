@@ -8,15 +8,17 @@ const test = require("node:test");
 const REPOSITORY_ROOT = path.resolve(__dirname, "..");
 const WORKFLOW_RELATIVE_PATH = ".github/workflows/social-3a0p-linux-physical-gates.yml";
 const WORKFLOW_PATH = path.join(REPOSITORY_ROOT, ...WORKFLOW_RELATIVE_PATH.split("/"));
-const BRANCH = "social/checkpoint-3a0p-windows-runner-pg-env-20260810";
-const AUTHORIZED_PARENT = "c5c211e27bd1db080234c890f06528192100c859";
+const BRANCH = "social/checkpoint-3a0p-windows-pg-env-provenance-20260810";
+const AUTHORIZED_PARENT = "aec92c0bf2a91608f69635fc459b28e125281fda";
+const SANITIZATION_PARENT = "c5c211e27bd1db080234c890f06528192100c859";
 const NATIVE_PREFLIGHT_PARENT = "b0d13299fb7226288e9a9d7bd531be751b539891";
 const PROVENANCE_PARENT = "8eb4c4d71c6593f9c3e448be6ac52b1b0e8ba931";
 const MAINTENANCE_PARENT = "9b98de25a42a21f7ebd229bf5581a78bfed80b2e";
+const SANITIZATION_MESSAGE = "[run-social-3a0p-linux-gate] sanitize hosted Windows PostgreSQL environment";
 const NATIVE_PREFLIGHT_MESSAGE = "[run-social-3a0p-linux-gate] split native pre-gate test environments";
 const PROVENANCE_MESSAGE = "[run-social-3a0p-linux-gate] classify Gate 3 failure provenance";
 const MAINTENANCE_MESSAGE = "[test] serialize process-lifecycle security tests";
-const MESSAGE = "[run-social-3a0p-linux-gate] sanitize hosted Windows PostgreSQL environment";
+const MESSAGE = "[run-social-3a0p-linux-gate] identify hosted Windows PostgreSQL environment";
 const ZERO_SHA = "0000000000000000000000000000000000000000";
 const JOB_IF = [
   "github.event_name == 'push'",
@@ -60,6 +62,13 @@ const NATIVE_PREFLIGHT_FILES = Object.freeze([
   "tests/social-3a0p-linux-pre-gate-tests.test.js",
   "tests/social-3a0p-linux-workflow.test.js"
 ]);
+const SANITIZATION_FILES = Object.freeze([
+  ".github/workflows/social-3a0p-linux-physical-gates.yml",
+  "docs/social-3a0p-linux-physical-gates.md",
+  "scripts/social-3a0p-linux-gate.js",
+  "tests/social-3a0p-linux-gate.test.js",
+  "tests/social-3a0p-linux-workflow.test.js"
+]);
 const AUTHORIZED_FILES = Object.freeze([
   ".github/workflows/social-3a0p-linux-physical-gates.yml",
   "docs/social-3a0p-linux-physical-gates.md",
@@ -67,34 +76,34 @@ const AUTHORIZED_FILES = Object.freeze([
   "tests/social-3a0p-linux-gate.test.js",
   "tests/social-3a0p-linux-workflow.test.js"
 ]);
-const WINDOWS_AUTOMATED_TEST_RUN = `$ErrorActionPreference = "Stop"
-$PSNativeCommandUseErrorActionPreference = $false
-$unexpectedPostgresEnvironmentCount = @(
+const WINDOWS_POSTGRES_ENVIRONMENT_DIAGNOSTIC_RUN = `$ErrorActionPreference = "Stop"
+$postgresEnvironmentNames = @(
   [System.Environment]::GetEnvironmentVariables(
     [System.EnvironmentVariableTarget]::Process
   ).Keys |
     ForEach-Object { [string]$_ } |
     Where-Object {
       $_ -cmatch '^PG[A-Z0-9_]+$' -and
-        -not [string]::IsNullOrEmpty(
+        -not [string]::IsNullOrWhiteSpace(
           [System.Environment]::GetEnvironmentVariable(
             $_,
             [System.EnvironmentVariableTarget]::Process
           )
         )
-    }
-).Count
-if ($unexpectedPostgresEnvironmentCount -ne 0) {
-  [Console]::Error.WriteLine("windows_runner_postgres_environment_not_clean")
+    } |
+    ForEach-Object { $_.ToUpperInvariant() } |
+    Sort-Object -Unique
+)
+[Console]::Out.WriteLine("windows_runner_postgres_environment_name_count=$($postgresEnvironmentNames.Count)")
+foreach ($postgresEnvironmentName in $postgresEnvironmentNames) {
+  [Console]::Out.WriteLine("windows_runner_postgres_environment_name=$postgresEnvironmentName")
+}
+if ($postgresEnvironmentNames.Count -eq 0) {
+  [Console]::Error.WriteLine("windows_runner_postgres_environment_not_reproduced")
   exit 1
 }
-npm test
-$testStatus = $LASTEXITCODE
-if ($null -eq $testStatus) {
-  [Console]::Error.WriteLine("windows_runner_npm_exit_code_unavailable")
-  exit 1
-}
-exit $testStatus`;
+[Console]::Error.WriteLine("windows_runner_postgres_environment_provenance_captured")
+exit 1`;
 
 function readWorkflow() {
   const source = fs.readFileSync(WORKFLOW_PATH, "utf8");
@@ -125,13 +134,21 @@ function assertGuardInventory(source, style) {
         "$maintenanceFiles = @",
         "$provenanceFiles = @",
         "$nativePreflightFiles = @",
+        "$sanitizationFiles = @",
         "$authorizedFiles = @"
       ]
-    : ["maintenance_files=", "provenance_files=", "native_preflight_files=", "authorized_files="];
+    : [
+        "maintenance_files=",
+        "provenance_files=",
+        "native_preflight_files=",
+        "sanitization_files=",
+        "authorized_files="
+      ];
   assert.deepEqual(extractQuotedArray(source, declarations[0]), MAINTENANCE_FILES);
   assert.deepEqual(extractQuotedArray(source, declarations[1]), PROVENANCE_FILES);
   assert.deepEqual(extractQuotedArray(source, declarations[2]), NATIVE_PREFLIGHT_FILES);
-  assert.deepEqual(extractQuotedArray(source, declarations[3]), AUTHORIZED_FILES);
+  assert.deepEqual(extractQuotedArray(source, declarations[3]), SANITIZATION_FILES);
+  assert.deepEqual(extractQuotedArray(source, declarations[4]), AUTHORIZED_FILES);
   assert.equal(source.includes("*"), false);
 }
 
@@ -149,7 +166,7 @@ test("workflow permits only the exact first creation push and has two ordered na
   assert.deepEqual(workflow.on, { push: { branches: [BRANCH] } });
   assert.deepEqual(workflow.permissions, { contents: "read" });
   assert.deepEqual(workflow.concurrency, {
-    group: "social-3a0p-windows-runner-pg-env",
+    group: "social-3a0p-windows-pg-env-provenance",
     "cancel-in-progress": false
   });
 
@@ -173,13 +190,15 @@ test("workflow permits only the exact first creation push and has two ordered na
   });
 });
 
-test("both jobs enforce the new commit and preserve the three earlier commit contracts", () => {
+test("both jobs enforce the new commit and preserve the four earlier commit contracts", () => {
   const { workflow } = readWorkflow();
   const { windows, physical } = jobs(workflow);
   assert.equal(workflow.env.SOCIAL_3A0P_AUTHORIZED_PARENT, AUTHORIZED_PARENT);
+  assert.equal(workflow.env.SOCIAL_3A0P_SANITIZATION_PARENT, SANITIZATION_PARENT);
   assert.equal(workflow.env.SOCIAL_3A0P_NATIVE_PREFLIGHT_PARENT, NATIVE_PREFLIGHT_PARENT);
   assert.equal(workflow.env.SOCIAL_3A0P_PROVENANCE_PARENT, PROVENANCE_PARENT);
   assert.equal(workflow.env.SOCIAL_3A0P_MAINTENANCE_PARENT, MAINTENANCE_PARENT);
+  assert.equal(workflow.env.SOCIAL_3A0P_SANITIZATION_MESSAGE, SANITIZATION_MESSAGE);
   assert.equal(workflow.env.SOCIAL_3A0P_NATIVE_PREFLIGHT_MESSAGE, NATIVE_PREFLIGHT_MESSAGE);
   assert.equal(workflow.env.SOCIAL_3A0P_PROVENANCE_MESSAGE, PROVENANCE_MESSAGE);
   assert.equal(workflow.env.SOCIAL_3A0P_MAINTENANCE_MESSAGE, MAINTENANCE_MESSAGE);
@@ -198,9 +217,11 @@ test("both jobs enforce the new commit and preserve the three earlier commit con
   assertGuardInventory(linuxGuard.run, "bash");
   for (const guard of [windowsGuard.run, linuxGuard.run]) {
     assert.ok(guard.includes("SOCIAL_3A0P_AUTHORIZED_PARENT"));
+    assert.ok(guard.includes("SOCIAL_3A0P_SANITIZATION_PARENT"));
     assert.ok(guard.includes("SOCIAL_3A0P_NATIVE_PREFLIGHT_PARENT"));
     assert.ok(guard.includes("SOCIAL_3A0P_PROVENANCE_PARENT"));
     assert.ok(guard.includes("SOCIAL_3A0P_MAINTENANCE_PARENT"));
+    assert.ok(guard.includes("SOCIAL_3A0P_SANITIZATION_MESSAGE"));
     assert.ok(guard.includes("SOCIAL_3A0P_NATIVE_PREFLIGHT_MESSAGE"));
     assert.ok(guard.includes("SOCIAL_3A0P_PROVENANCE_MESSAGE"));
     assert.ok(guard.includes("SOCIAL_3A0P_MAINTENANCE_MESSAGE"));
@@ -218,17 +239,25 @@ test("both jobs enforce the new commit and preserve the three earlier commit con
   for (const contract of [
     'Assert-Equal (Get-GitText -Arguments @("rev-parse", "HEAD")) $env:AUTHORIZED_SHA',
     'Assert-Equal (Get-GitText -Arguments @("rev-parse", "HEAD^")) $env:SOCIAL_3A0P_AUTHORIZED_PARENT',
-    'Assert-Equal (Get-GitText -Arguments @("rev-parse", "$($env:SOCIAL_3A0P_AUTHORIZED_PARENT)^")) $env:SOCIAL_3A0P_NATIVE_PREFLIGHT_PARENT',
+    'Assert-Equal (Get-GitText -Arguments @("rev-parse", "$($env:SOCIAL_3A0P_AUTHORIZED_PARENT)^")) $env:SOCIAL_3A0P_SANITIZATION_PARENT',
+    'Assert-Equal (Get-GitText -Arguments @("rev-parse", "$($env:SOCIAL_3A0P_SANITIZATION_PARENT)^")) $env:SOCIAL_3A0P_NATIVE_PREFLIGHT_PARENT',
     'Assert-Equal (Get-GitText -Arguments @("rev-parse", "$($env:SOCIAL_3A0P_NATIVE_PREFLIGHT_PARENT)^")) $env:SOCIAL_3A0P_PROVENANCE_PARENT',
     'Assert-Equal (Get-GitText -Arguments @("rev-parse", "$($env:SOCIAL_3A0P_PROVENANCE_PARENT)^")) $env:SOCIAL_3A0P_MAINTENANCE_PARENT',
-    'Assert-Equal (Get-GitText -Arguments @("rev-list", "--count", $commitRange)) "4"',
+    'Assert-Equal (Get-GitText -Arguments @("log", "-1", "--pretty=%B")) $env:SOCIAL_3A0P_AUTHORIZED_MESSAGE',
+    'Assert-Equal (Get-GitText -Arguments @("log", "-1", "--pretty=%B", $env:SOCIAL_3A0P_AUTHORIZED_PARENT)) $env:SOCIAL_3A0P_SANITIZATION_MESSAGE',
+    'Assert-Equal (Get-GitText -Arguments @("log", "-1", "--pretty=%B", $env:SOCIAL_3A0P_SANITIZATION_PARENT)) $env:SOCIAL_3A0P_NATIVE_PREFLIGHT_MESSAGE',
+    'Assert-Equal (Get-GitText -Arguments @("log", "-1", "--pretty=%B", $env:SOCIAL_3A0P_NATIVE_PREFLIGHT_PARENT)) $env:SOCIAL_3A0P_PROVENANCE_MESSAGE',
+    'Assert-Equal (Get-GitText -Arguments @("log", "-1", "--pretty=%B", $env:SOCIAL_3A0P_PROVENANCE_PARENT)) $env:SOCIAL_3A0P_MAINTENANCE_MESSAGE',
+    'Assert-Equal (Get-GitText -Arguments @("rev-list", "--count", $commitRange)) "5"',
     'Assert-SingleParent "HEAD"',
     'Assert-SingleParent $env:SOCIAL_3A0P_AUTHORIZED_PARENT',
+    'Assert-SingleParent $env:SOCIAL_3A0P_SANITIZATION_PARENT',
     'Assert-SingleParent $env:SOCIAL_3A0P_NATIVE_PREFLIGHT_PARENT',
     'Assert-SingleParent $env:SOCIAL_3A0P_PROVENANCE_PARENT',
     'Assert-ExactFiles $maintenanceChanged $maintenanceFiles',
     'Assert-ExactFiles $provenanceChanged $provenanceFiles',
     'Assert-ExactFiles $nativePreflightChanged $nativePreflightFiles',
+    'Assert-ExactFiles $sanitizationChanged $sanitizationFiles',
     'Assert-ExactFiles $authorizedChanged $authorizedFiles'
   ]) {
     assert.ok(windowsGuard.run.includes(contract), contract);
@@ -236,17 +265,24 @@ test("both jobs enforce the new commit and preserve the three earlier commit con
   for (const contract of [
     'test "$(git rev-parse HEAD)" = "$AUTHORIZED_SHA"',
     'test "$(git rev-parse HEAD^)" = "$SOCIAL_3A0P_AUTHORIZED_PARENT"',
-    'test "$(git rev-parse "$SOCIAL_3A0P_AUTHORIZED_PARENT^")" = "$SOCIAL_3A0P_NATIVE_PREFLIGHT_PARENT"',
+    'test "$(git rev-parse "$SOCIAL_3A0P_AUTHORIZED_PARENT^")" = "$SOCIAL_3A0P_SANITIZATION_PARENT"',
+    'test "$(git rev-parse "$SOCIAL_3A0P_SANITIZATION_PARENT^")" = "$SOCIAL_3A0P_NATIVE_PREFLIGHT_PARENT"',
     'test "$(git rev-parse "$SOCIAL_3A0P_NATIVE_PREFLIGHT_PARENT^")" = "$SOCIAL_3A0P_PROVENANCE_PARENT"',
     'test "$(git rev-parse "$SOCIAL_3A0P_PROVENANCE_PARENT^")" = "$SOCIAL_3A0P_MAINTENANCE_PARENT"',
+    'test "$(git log -1 --pretty=%B)" = "$SOCIAL_3A0P_AUTHORIZED_MESSAGE"',
+    'test "$(git log -1 --pretty=%B "$SOCIAL_3A0P_AUTHORIZED_PARENT")" = "$SOCIAL_3A0P_SANITIZATION_MESSAGE"',
+    'test "$(git log -1 --pretty=%B "$SOCIAL_3A0P_SANITIZATION_PARENT")" = "$SOCIAL_3A0P_NATIVE_PREFLIGHT_MESSAGE"',
+    'test "$(git log -1 --pretty=%B "$SOCIAL_3A0P_NATIVE_PREFLIGHT_PARENT")" = "$SOCIAL_3A0P_PROVENANCE_MESSAGE"',
+    'test "$(git log -1 --pretty=%B "$SOCIAL_3A0P_PROVENANCE_PARENT")" = "$SOCIAL_3A0P_MAINTENANCE_MESSAGE"',
     'assert_exact_changed_files "$SOCIAL_3A0P_MAINTENANCE_PARENT" "$SOCIAL_3A0P_PROVENANCE_PARENT" "${maintenance_files[@]}"',
     'assert_exact_changed_files "$SOCIAL_3A0P_PROVENANCE_PARENT" "$SOCIAL_3A0P_NATIVE_PREFLIGHT_PARENT" "${provenance_files[@]}"',
-    'assert_exact_changed_files "$SOCIAL_3A0P_NATIVE_PREFLIGHT_PARENT" "$SOCIAL_3A0P_AUTHORIZED_PARENT" "${native_preflight_files[@]}"',
+    'assert_exact_changed_files "$SOCIAL_3A0P_NATIVE_PREFLIGHT_PARENT" "$SOCIAL_3A0P_SANITIZATION_PARENT" "${native_preflight_files[@]}"',
+    'assert_exact_changed_files "$SOCIAL_3A0P_SANITIZATION_PARENT" "$SOCIAL_3A0P_AUTHORIZED_PARENT" "${sanitization_files[@]}"',
     'assert_exact_changed_files "$SOCIAL_3A0P_AUTHORIZED_PARENT" HEAD "${authorized_files[@]}"'
   ]) {
     assert.ok(linuxGuard.run.includes(contract), contract);
   }
-  assert.ok(linuxGuard.run.includes('test "$(git rev-list --count "$SOCIAL_3A0P_MAINTENANCE_PARENT..HEAD")" = "4"'));
+  assert.ok(linuxGuard.run.includes('test "$(git rev-list --count "$SOCIAL_3A0P_MAINTENANCE_PARENT..HEAD")" = "5"'));
 });
 
 test("actions are pinned and each native job installs its own lockfile without cache or scripts", () => {
@@ -277,15 +313,17 @@ test("actions are pinned and each native job installs its own lockfile without c
   }
 });
 
-test("the complete suite sanitizes only the Windows test step and runs exactly once", () => {
+test("Windows captures only closed PostgreSQL environment names and then fails intentionally", () => {
   const { source, workflow } = readWorkflow();
   const { windows, physical } = jobs(workflow);
-  assert.equal(source.match(/npm test/g)?.length, 1);
-  const automated = windows.steps.find((step) => step.name === "Run stabilized automated tests once");
-  assert.equal(automated.name, "Run stabilized automated tests once");
-  assert.deepEqual(automated.env, { PGBIN: "", PGDATA: "", PGROOT: "" });
-  assert.deepEqual(Object.keys(automated.env), ["PGBIN", "PGDATA", "PGROOT"]);
-  assert.equal(Object.values(automated.env).every((value) => value === ""), true);
+  assert.equal(source.includes("npm test"), false);
+  const diagnostic = windows.steps.find(
+    (step) => step.name === "Identify hosted Windows PostgreSQL environment names"
+  );
+  assert.ok(diagnostic);
+  assert.deepEqual(diagnostic.env, { PGBIN: "", PGDATA: "", PGROOT: "" });
+  assert.deepEqual(Object.keys(diagnostic.env), ["PGBIN", "PGDATA", "PGROOT"]);
+  assert.equal(Object.values(diagnostic.env).every((value) => value === ""), true);
   assert.equal(Object.hasOwn(workflow.env, "PGBIN"), false);
   assert.equal(Object.hasOwn(workflow.env, "PGDATA"), false);
   assert.equal(Object.hasOwn(workflow.env, "PGROOT"), false);
@@ -296,21 +334,46 @@ test("the complete suite sanitizes only the Windows test step and runs exactly o
   const stepsWithKnownPgEnv = Object.values(workflow.jobs).flatMap((job) => job.steps).filter(
     (step) => ["PGBIN", "PGDATA", "PGROOT"].some((name) => Object.hasOwn(step.env || {}, name))
   );
-  assert.deepEqual(stepsWithKnownPgEnv, [automated]);
+  assert.deepEqual(stepsWithKnownPgEnv, [diagnostic]);
 
-  const run = automated.run;
-  assert.equal(run, WINDOWS_AUTOMATED_TEST_RUN);
+  const run = diagnostic.run;
+  assert.equal(run, WINDOWS_POSTGRES_ENVIRONMENT_DIAGNOSTIC_RUN);
   assert.equal(run.startsWith('$ErrorActionPreference = "Stop"\n'), true);
   assert.ok(run.includes("[System.Environment]::GetEnvironmentVariables("));
   assert.ok(run.includes("[System.EnvironmentVariableTarget]::Process"));
+  assert.ok(run.includes(".Keys |"));
+  assert.ok(run.includes("ForEach-Object { [string]$_ } |"));
   assert.ok(run.includes("-cmatch '^PG[A-Z0-9_]+$'"));
   assert.ok(run.includes("[System.Environment]::GetEnvironmentVariable("));
-  assert.ok(run.includes("[string]::IsNullOrEmpty"));
-  assert.ok(run.includes("windows_runner_postgres_environment_not_clean"));
-  assert.ok(run.includes("$LASTEXITCODE"));
-  assert.ok(run.includes("exit $testStatus"));
-  assert.equal(run.match(/^npm test$/gm)?.length, 1);
-  assert.ok(run.indexOf("windows_runner_postgres_environment_not_clean") < run.indexOf("npm test"));
+  assert.ok(run.includes("[string]::IsNullOrWhiteSpace"));
+  assert.ok(run.includes("ForEach-Object { $_.ToUpperInvariant() } |"));
+  assert.ok(run.includes("Sort-Object -Unique"));
+  assert.ok(run.includes("windows_runner_postgres_environment_name_count=$($postgresEnvironmentNames.Count)"));
+  assert.ok(run.includes("windows_runner_postgres_environment_name=$postgresEnvironmentName"));
+  assert.ok(run.includes("windows_runner_postgres_environment_provenance_captured"));
+  assert.ok(run.includes("windows_runner_postgres_environment_not_reproduced"));
+  assert.ok(run.includes("if ($postgresEnvironmentNames.Count -eq 0)"));
+  assert.equal(run.match(/^\s*exit 1$/gm)?.length, 2);
+  assert.equal(run.trimEnd().endsWith("exit 1"), true);
+
+  const castIndex = run.indexOf("ForEach-Object { [string]$_ } |");
+  const filterIndex = run.indexOf("Where-Object {");
+  const normalizeIndex = run.indexOf("ForEach-Object { $_.ToUpperInvariant() } |");
+  const sortIndex = run.indexOf("Sort-Object -Unique");
+  assert.ok(castIndex < filterIndex);
+  assert.ok(filterIndex < normalizeIndex);
+  assert.ok(normalizeIndex < sortIndex);
+
+  assert.deepEqual(
+    run.split("\n").filter((line) => line.includes("WriteLine(")),
+    [
+      '[Console]::Out.WriteLine("windows_runner_postgres_environment_name_count=$($postgresEnvironmentNames.Count)")',
+      '  [Console]::Out.WriteLine("windows_runner_postgres_environment_name=$postgresEnvironmentName")',
+      '  [Console]::Error.WriteLine("windows_runner_postgres_environment_not_reproduced")',
+      '[Console]::Error.WriteLine("windows_runner_postgres_environment_provenance_captured")'
+    ]
+  );
+  assert.equal(run.includes(".Value"), false);
   const postgresEnvironmentName = /^PG[A-Z0-9_]+$/;
   for (const name of [
     "PGHOST",
@@ -320,7 +383,7 @@ test("the complete suite sanitizes only the Windows test step and runs exactly o
   ]) {
     assert.match(name, postgresEnvironmentName);
   }
-  for (const name of ["PG", "pgHOST", "PG-HOST"]) {
+  for (const name of ["PG", "pgHOST", "PG-HOST", " PGHOST", "PGHOST="]) {
     assert.doesNotMatch(name, postgresEnvironmentName);
   }
   for (const forbidden of [
@@ -330,6 +393,10 @@ test("the complete suite sanitizes only the Windows test step and runs exactly o
     "SetEnvironmentVariable",
     "Get-ChildItem Env:",
     "Get-Item Env:",
+    "gci env:",
+    "dir env:",
+    "ConvertTo-Json",
+    "GITHUB_STEP_SUMMARY",
     "Write-Host",
     "Write-Output",
     "Write-Information",
@@ -338,6 +405,7 @@ test("the complete suite sanitizes only the Windows test step and runs exactly o
   ]) {
     assert.equal(run.includes(forbidden), false, forbidden);
   }
+  assert.equal(run.toLowerCase().includes("$_.value"), false);
   assert.equal(physical.steps.some((step) => step.run?.includes("npm test")), false);
   assert.equal(
     physical.steps.some((step) => step.run?.split("\n").some(
@@ -346,7 +414,14 @@ test("the complete suite sanitizes only the Windows test step and runs exactly o
     false
   );
 
+  const installIndex = windows.steps.findIndex(
+    (step) => step.run === "npm ci --ignore-scripts --no-audit --no-fund"
+  );
+  const diagnosticIndex = windows.steps.indexOf(diagnostic);
   const clean = windows.steps.find((step) => step.name === "Confirm automated tests left Git unchanged");
+  const cleanIndex = windows.steps.indexOf(clean);
+  assert.ok(installIndex < diagnosticIndex);
+  assert.ok(diagnosticIndex < cleanIndex);
   assert.equal(clean.if, "always()");
   assert.ok(clean.run.includes("git status --porcelain=v1 --untracked-files=all"));
   assert.ok(clean.run.includes("$LASTEXITCODE"));

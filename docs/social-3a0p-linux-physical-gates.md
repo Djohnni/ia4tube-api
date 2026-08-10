@@ -1,14 +1,14 @@
 # Checkpoint Social 3A-0P — gates físicos Linux isolados
 
-## Contrato canônico da correção hospedada
+## Contrato canônico da rota diagnóstica hospedada
 
 Esta rota existe somente na branch
-`social/checkpoint-3a0p-windows-runner-pg-env-20260810`, criada a partir do
-commit exato `c5c211e27bd1db080234c890f06528192100c859`. O único commit autorizado
+`social/checkpoint-3a0p-windows-pg-env-provenance-20260810`, criada a partir do
+commit exato `aec92c0bf2a91608f69635fc459b28e125281fda`. O único commit autorizado
 deve ter esse commit como pai imediato e a mensagem integral:
 
 ```text
-[run-social-3a0p-linux-gate] sanitize hosted Windows PostgreSQL environment
+[run-social-3a0p-linux-gate] identify hosted Windows PostgreSQL environment
 ```
 
 O produto permanece idêntico a `fcfc92419021dae5f77baad731c634b10c275c5b`:
@@ -17,21 +17,20 @@ O produto permanece idêntico a `fcfc92419021dae5f77baad731c634b10c275c5b`:
 grants, não muda políticas RLS e não modifica schema, SCRAM, roles, produto,
 backup, restore, dependências ou os testes de segurança antigos.
 
-## Causa comprovada do run anterior
+## Resultado comprovado do run anterior
 
-O run `31407042184`, no commit
-`c5c211e27bd1db080234c890f06528192100c859`, executou o job
-`windows-automated-tests` na imagem oficial `windows-2025-vs2026`, versão
-`20260803.193.1`. A imagem hospedada definiu `PGBIN`, `PGDATA` e `PGROOT` com
-valores não vazios. Esses nomes são metadados da instalação PostgreSQL da
-imagem, mas também correspondem à proteção ampla `^PG[A-Z0-9_]+$` do produto.
+O run `31417497190`, no commit
+`aec92c0bf2a91608f69635fc459b28e125281fda`, aprovou o guard canônico, checkout,
+Node 24, `npm ci` e a verificação final de Git limpo no job hospedado
+`windows-automated-tests`. Na etapa da suíte, `PGBIN`, `PGDATA` e `PGROOT` foram
+neutralizadas, mas permaneceu pelo menos uma outra variável de processo não
+vazia cujo nome correspondia exatamente a `^PG[A-Z0-9_]+$`.
 
-O teste `tests/checkpoint-a-security.test.js` copiou `process.env` integralmente
-para o processo filho. Antes de validar `JWT_SECRET`, `server.js` executou a
-fronteira de credenciais privilegiadas e recusou o ambiente com o código fechado
-`web_service_libpq_environment_override_forbidden`. As cinco falhas da etapa
-serial decorreram da mesma precedência de validação. A classificação canônica é
-`windows_hosted_runner_postgres_installation_environment_collision`.
+O job terminou com `windows_runner_postgres_environment_not_clean` antes de
+iniciar `npm test`. O nome e o valor da variável restante não foram publicados,
+portanto não há evidência para identificá-la nem para inferir sua finalidade. A
+classificação canônica é
+`windows_hosted_runner_postgres_environment_name_unresolved`.
 
 O job Linux foi corretamente ignorado; o pré-gate Linux, a prova física e os
 Gates 1–5 não começaram. Nenhum artifact físico foi produzido, não houve recurso
@@ -39,29 +38,34 @@ físico a limpar e zero resíduos foram observados. Produto e ambientes externos
 permaneceram intactos. Não há autorização para re-run desse run nem para segundo
 push na branch anterior.
 
-## Neutralização mínima e fail-closed no Windows
+## Diagnóstico fechado de nomes no Windows
 
-Somente a etapa Windows `Run stabilized automated tests once` recebe `PGBIN`,
-`PGDATA` e `PGROOT` como strings vazias. Esses três nomes não são definidos no
-ambiente global, no job inteiro nem no job Linux. A proteção ampla do produto
-contra variáveis `PG...` permanece inalterada.
+Depois de `npm ci`, a etapa
+`Identify hosted Windows PostgreSQL environment names` recebe exclusivamente
+`PGBIN`, `PGDATA` e `PGROOT` como strings vazias. Esses três nomes não são
+definidos no ambiente global, no job inteiro, no job Linux nem em outra etapa. A
+proteção ampla do produto contra variáveis `PG...` permanece inalterada.
 
-Antes de iniciar a suíte, o PowerShell enumera somente nomes ambientais,
-seleciona os que correspondem exatamente a `^PG[A-Z0-9_]+$` e considera apenas
-os que ainda têm valor não vazio. Qualquer quarta variável — inclusive
-`PGHOST`, `PGPORT`, `PGUSER`, `PGPASSWORD` ou outro override — encerra a etapa
-com `windows_runner_postgres_environment_not_clean`, sem imprimir nome, valor,
-caminho ou credencial. Não existe wildcard, remoção genérica ou alteração
-permanente da máquina hospedada.
+Com `$ErrorActionPreference = "Stop"`, a etapa enumera as variáveis do processo
+atual, seleciona somente entradas cujo nome corresponde exatamente a
+`^PG[A-Z0-9_]+$` e cujo valor não é nulo, vazio ou composto apenas por espaços.
+Ela extrai somente os nomes, normaliza-os para maiúsculas, ordena-os e remove
+duplicatas. Valores não são transportados para a coleção de saída, serializados,
+resumidos, medidos, convertidos em hash nem impressos.
 
-Depois dessa verificação, a etapa executa uma única linha funcional `npm test`,
-captura `$LASTEXITCODE` e propaga o código real, sem retry. Esta descrição é o
-contrato da nova rota; não afirma que um novo run já tenha sido executado ou
-aprovado.
+A saída permitida contém somente
+`windows_runner_postgres_environment_name_count=<QUANTIDADE>` e, para cada nome,
+`windows_runner_postgres_environment_name=<NOME>`. Com um ou mais nomes, a etapa
+falha intencionalmente com
+`windows_runner_postgres_environment_provenance_captured`; com zero nomes, falha
+com `windows_runner_postgres_environment_not_reproduced`. Em ambos os casos,
+`npm test` não é executado, o job Linux permanece impedido, Gates 1–5 não são
+executados e nenhum artifact é criado. Este é apenas o contrato diagnóstico; não
+afirma que um novo run tenha sido iniciado, concluído ou aprovado.
 
 ## Cadeia imutável e inventários fechados
 
-A cadeia autorizada é linear e contém quatro commits entre a base da manutenção
+A cadeia autorizada é linear e contém cinco commits entre a base da manutenção
 e o novo `HEAD`:
 
 1. `8eb4c4d71c6593f9c3e448be6ac52b1b0e8ba931`, pai
@@ -92,9 +96,17 @@ e o novo `HEAD`:
    `tests/social-3a0p-linux-gate.test.js`,
    `tests/social-3a0p-linux-pre-gate-tests.test.js` e
    `tests/social-3a0p-linux-workflow.test.js`.
-4. O novo `HEAD`, pai exato
+4. `aec92c0bf2a91608f69635fc459b28e125281fda`, pai
    `c5c211e27bd1db080234c890f06528192100c859`, mensagem
    `[run-social-3a0p-linux-gate] sanitize hosted Windows PostgreSQL environment`
+   e inventário exato: `.github/workflows/social-3a0p-linux-physical-gates.yml`,
+   `docs/social-3a0p-linux-physical-gates.md`,
+   `scripts/social-3a0p-linux-gate.js`,
+   `tests/social-3a0p-linux-gate.test.js` e
+   `tests/social-3a0p-linux-workflow.test.js`.
+5. O novo `HEAD`, pai exato
+   `aec92c0bf2a91608f69635fc459b28e125281fda`, mensagem
+   `[run-social-3a0p-linux-gate] identify hosted Windows PostgreSQL environment`
    e inventário fechado: `.github/workflows/social-3a0p-linux-physical-gates.yml`,
    `docs/social-3a0p-linux-physical-gates.md`,
    `scripts/social-3a0p-linux-gate.js`,
@@ -102,31 +114,21 @@ e o novo `HEAD`:
    `tests/social-3a0p-linux-workflow.test.js`.
 
 Os guards dos dois jobs verificam pais, mensagens, ancestralidade linear,
-contagem quatro e cada um desses inventários sem prefixo, glob ou diretório
+contagem cinco e cada um desses inventários sem prefixo, glob ou diretório
 inteiro.
 
-## Três camadas de prova nativa
+## Limite intencional da rota diagnóstica
 
-O único workflow run autorizado contém dois jobs hospedados, sem matriz:
+O único workflow run autorizado contém os mesmos dois jobs hospedados e nenhuma
+matriz, mas somente `windows-automated-tests` pode começar nesta rota. Depois do
+contrato imutável, checkout, Node 24, instalação pelo lockfile e diagnóstico dos
+nomes ambientais, o job Windows termina intencionalmente em falha fechada.
 
-1. `windows-automated-tests`, em runner Windows oficial, instala pelo lockfile,
-   neutraliza somente os três metadados PostgreSQL conhecidos na etapa da suíte,
-   recusa qualquer outro `PG...` não vazio e executa `npm test` exatamente uma
-   vez com o runner estabilizado. Essa camada cobre a suíte automatizada completa,
-   inclusive DPAPI, `taskkill`, PowerShell, caminhos Windows, executáveis `.exe`,
-   ACL NTFS, adapters/entry Windows, ZIP protegido e fixtures Windows de
-   backup/restore.
-2. `physical-gates`, em `ubuntu-24.04`, depende obrigatoriamente de
-   `windows-automated-tests`. Ele valida o contrato imutável, instala pelo
-   lockfile e executa exatamente uma vez o runner pré-gate Linux fechado. Não
-   executa `npm test` novamente no Ubuntu.
-3. Somente depois do pré-gate Linux aprovado, o mesmo job Linux executa uma vez
-   a prova física de durabilidade, `O_NOFOLLOW`, PostgreSQL/Docker e Gates 1–5,
-   seguida de evidência sanitizada e cleanup.
-
-Falha no job Windows impede o job Linux. Falha no pré-gate impede o gate físico.
-A suíte Windows, o pré-gate Linux e a prova física são complementares; nenhuma
-das três substitui outra.
+O job `physical-gates`, em `ubuntu-24.04`, continua dependente do sucesso de
+`windows-automated-tests` e, por isso, permanece ignorado. A suíte Windows, o
+pré-gate Linux, a prova física de durabilidade, PostgreSQL/Docker, Gates 1–5,
+evidência e upload de artifact não são executados. A lógica preservada dessas
+camadas não é alterada nem reaberta por esta rota diagnóstica.
 
 ## Manifesto fechado do pré-gate Linux
 
