@@ -1,49 +1,121 @@
 # Checkpoint Social 3A-0P — gates físicos Linux isolados
 
-## Contrato canônico da rota nativa
+## Contrato canônico da correção hospedada
 
 Esta rota existe somente na branch
-`social/checkpoint-3a0p-linux-native-preflight-20260810`, criada a partir do
-commit exato `b0d13299fb7226288e9a9d7bd531be751b539891`. O único commit autorizado
+`social/checkpoint-3a0p-windows-runner-pg-env-20260810`, criada a partir do
+commit exato `c5c211e27bd1db080234c890f06528192100c859`. O único commit autorizado
 deve ter esse commit como pai imediato e a mensagem integral:
 
 ```text
-[run-social-3a0p-linux-gate] split native pre-gate test environments
+[run-social-3a0p-linux-gate] sanitize hosted Windows PostgreSQL environment
 ```
 
 O produto permanece idêntico a `fcfc92419021dae5f77baad731c634b10c275c5b`:
 `src/`, todo `db/` (inclusive `roles.sql`), migrations, `server.js`,
 `package.json` e `package-lock.json` não são alterados. A rota não acrescenta
 grants, não muda políticas RLS e não modifica schema, SCRAM, roles, produto,
-backup, restore ou dependências.
+backup, restore, dependências ou os testes de segurança antigos.
 
-## Classificação comprovada do run anterior
+## Causa comprovada do run anterior
 
-O run `31397433621`, no commit
-`b0d13299fb7226288e9a9d7bd531be751b539891`, aprovou checkout, cadeia de
-commits, contrato imutável, instalação de 154 pacotes e a etapa serial completa
-com 27 de 27 testes. A etapa concorrente iniciou, mas executou sob Ubuntu
-fixtures automatizadas escritas para recursos nativos do Windows. A primeira
-falha foi o subteste de custódia DPAPI em
-`tests/social-3a0p-local-harness.test.js`, com o código sanitizado
-`harness_resource_path_refused`; ao todo, 37 testes falharam. Os Gates 1–5 não
-começaram, o diagnóstico físico do Gate 3 não começou, nenhum artifact foi
-gerado e `cleanupCompleted=true`, com zero resíduo.
+O run `31407042184`, no commit
+`c5c211e27bd1db080234c890f06528192100c859`, executou o job
+`windows-automated-tests` na imagem oficial `windows-2025-vs2026`, versão
+`20260803.193.1`. A imagem hospedada definiu `PGBIN`, `PGDATA` e `PGROOT` com
+valores não vazios. Esses nomes são metadados da instalação PostgreSQL da
+imagem, mas também correspondem à proteção ampla `^PG[A-Z0-9_]+$` do produto.
 
-A classificação canônica é
-`linux_pre_gate_windows_fixture_incompatibility`. Ela não autoriza correção
-individual dos 37 testes, re-run do run anterior ou segundo push na branch
-anterior.
+O teste `tests/checkpoint-a-security.test.js` copiou `process.env` integralmente
+para o processo filho. Antes de validar `JWT_SECRET`, `server.js` executou a
+fronteira de credenciais privilegiadas e recusou o ambiente com o código fechado
+`web_service_libpq_environment_override_forbidden`. As cinco falhas da etapa
+serial decorreram da mesma precedência de validação. A classificação canônica é
+`windows_hosted_runner_postgres_installation_environment_collision`.
+
+O job Linux foi corretamente ignorado; o pré-gate Linux, a prova física e os
+Gates 1–5 não começaram. Nenhum artifact físico foi produzido, não houve recurso
+físico a limpar e zero resíduos foram observados. Produto e ambientes externos
+permaneceram intactos. Não há autorização para re-run desse run nem para segundo
+push na branch anterior.
+
+## Neutralização mínima e fail-closed no Windows
+
+Somente a etapa Windows `Run stabilized automated tests once` recebe `PGBIN`,
+`PGDATA` e `PGROOT` como strings vazias. Esses três nomes não são definidos no
+ambiente global, no job inteiro nem no job Linux. A proteção ampla do produto
+contra variáveis `PG...` permanece inalterada.
+
+Antes de iniciar a suíte, o PowerShell enumera somente nomes ambientais,
+seleciona os que correspondem exatamente a `^PG[A-Z0-9_]+$` e considera apenas
+os que ainda têm valor não vazio. Qualquer quarta variável — inclusive
+`PGHOST`, `PGPORT`, `PGUSER`, `PGPASSWORD` ou outro override — encerra a etapa
+com `windows_runner_postgres_environment_not_clean`, sem imprimir nome, valor,
+caminho ou credencial. Não existe wildcard, remoção genérica ou alteração
+permanente da máquina hospedada.
+
+Depois dessa verificação, a etapa executa uma única linha funcional `npm test`,
+captura `$LASTEXITCODE` e propaga o código real, sem retry. Esta descrição é o
+contrato da nova rota; não afirma que um novo run já tenha sido executado ou
+aprovado.
+
+## Cadeia imutável e inventários fechados
+
+A cadeia autorizada é linear e contém quatro commits entre a base da manutenção
+e o novo `HEAD`:
+
+1. `8eb4c4d71c6593f9c3e448be6ac52b1b0e8ba931`, pai
+   `9b98de25a42a21f7ebd229bf5581a78bfed80b2e`, mensagem
+   `[test] serialize process-lifecycle security tests` e inventário exato:
+   `scripts/run-node-tests.js`, `scripts/social-3a0p-local-scope.js`,
+   `tests/node-test-runner-safety.test.js` e
+   `tests/social-3a0p-local-scope.test.js`.
+2. `b0d13299fb7226288e9a9d7bd531be751b539891`, pai
+   `8eb4c4d71c6593f9c3e448be6ac52b1b0e8ba931`, mensagem
+   `[run-social-3a0p-linux-gate] classify Gate 3 failure provenance` e
+   inventário exato: `.github/workflows/social-3a0p-linux-physical-gates.yml`,
+   `docs/social-3a0p-linux-physical-gates.md`,
+   `scripts/social-3a0p-linux-gate.js`,
+   `scripts/social-3a0p-local-connector-physical-gates.js`,
+   `scripts/social-3a0p-linux-physical-gates.js`,
+   `tests/social-3a0p-linux-gate.test.js`,
+   `tests/social-3a0p-local-connector-physical-gates.test.js`,
+   `tests/social-3a0p-linux-physical-gates.test.js` e
+   `tests/social-3a0p-linux-workflow.test.js`.
+3. `c5c211e27bd1db080234c890f06528192100c859`, pai
+   `b0d13299fb7226288e9a9d7bd531be751b539891`, mensagem
+   `[run-social-3a0p-linux-gate] split native pre-gate test environments` e
+   inventário exato: `.github/workflows/social-3a0p-linux-physical-gates.yml`,
+   `docs/social-3a0p-linux-physical-gates.md`,
+   `scripts/social-3a0p-linux-gate.js`,
+   `scripts/social-3a0p-linux-pre-gate-tests.js`,
+   `tests/social-3a0p-linux-gate.test.js`,
+   `tests/social-3a0p-linux-pre-gate-tests.test.js` e
+   `tests/social-3a0p-linux-workflow.test.js`.
+4. O novo `HEAD`, pai exato
+   `c5c211e27bd1db080234c890f06528192100c859`, mensagem
+   `[run-social-3a0p-linux-gate] sanitize hosted Windows PostgreSQL environment`
+   e inventário fechado: `.github/workflows/social-3a0p-linux-physical-gates.yml`,
+   `docs/social-3a0p-linux-physical-gates.md`,
+   `scripts/social-3a0p-linux-gate.js`,
+   `tests/social-3a0p-linux-gate.test.js` e
+   `tests/social-3a0p-linux-workflow.test.js`.
+
+Os guards dos dois jobs verificam pais, mensagens, ancestralidade linear,
+contagem quatro e cada um desses inventários sem prefixo, glob ou diretório
+inteiro.
 
 ## Três camadas de prova nativa
 
-O único workflow run contém dois jobs hospedados, sem matriz:
+O único workflow run autorizado contém dois jobs hospedados, sem matriz:
 
-1. `windows-automated-tests`, em runner Windows oficial, instala pelo lockfile e
-   executa `npm test` exatamente uma vez com o runner estabilizado. Essa camada
-   cobre a suíte automatizada completa, inclusive DPAPI, `taskkill`, PowerShell,
-   caminhos Windows, executáveis `.exe`, ACL NTFS, adapters/entry Windows, ZIP
-   protegido e fixtures Windows de backup/restore.
+1. `windows-automated-tests`, em runner Windows oficial, instala pelo lockfile,
+   neutraliza somente os três metadados PostgreSQL conhecidos na etapa da suíte,
+   recusa qualquer outro `PG...` não vazio e executa `npm test` exatamente uma
+   vez com o runner estabilizado. Essa camada cobre a suíte automatizada completa,
+   inclusive DPAPI, `taskkill`, PowerShell, caminhos Windows, executáveis `.exe`,
+   ACL NTFS, adapters/entry Windows, ZIP protegido e fixtures Windows de
+   backup/restore.
 2. `physical-gates`, em `ubuntu-24.04`, depende obrigatoriamente de
    `windows-automated-tests`. Ele valida o contrato imutável, instala pelo
    lockfile e executa exatamente uma vez o runner pré-gate Linux fechado. Não

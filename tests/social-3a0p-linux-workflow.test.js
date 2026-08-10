@@ -8,13 +8,15 @@ const test = require("node:test");
 const REPOSITORY_ROOT = path.resolve(__dirname, "..");
 const WORKFLOW_RELATIVE_PATH = ".github/workflows/social-3a0p-linux-physical-gates.yml";
 const WORKFLOW_PATH = path.join(REPOSITORY_ROOT, ...WORKFLOW_RELATIVE_PATH.split("/"));
-const BRANCH = "social/checkpoint-3a0p-linux-native-preflight-20260810";
-const AUTHORIZED_PARENT = "b0d13299fb7226288e9a9d7bd531be751b539891";
+const BRANCH = "social/checkpoint-3a0p-windows-runner-pg-env-20260810";
+const AUTHORIZED_PARENT = "c5c211e27bd1db080234c890f06528192100c859";
+const NATIVE_PREFLIGHT_PARENT = "b0d13299fb7226288e9a9d7bd531be751b539891";
 const PROVENANCE_PARENT = "8eb4c4d71c6593f9c3e448be6ac52b1b0e8ba931";
 const MAINTENANCE_PARENT = "9b98de25a42a21f7ebd229bf5581a78bfed80b2e";
+const NATIVE_PREFLIGHT_MESSAGE = "[run-social-3a0p-linux-gate] split native pre-gate test environments";
 const PROVENANCE_MESSAGE = "[run-social-3a0p-linux-gate] classify Gate 3 failure provenance";
 const MAINTENANCE_MESSAGE = "[test] serialize process-lifecycle security tests";
-const MESSAGE = "[run-social-3a0p-linux-gate] split native pre-gate test environments";
+const MESSAGE = "[run-social-3a0p-linux-gate] sanitize hosted Windows PostgreSQL environment";
 const ZERO_SHA = "0000000000000000000000000000000000000000";
 const JOB_IF = [
   "github.event_name == 'push'",
@@ -49,7 +51,7 @@ const PROVENANCE_FILES = Object.freeze([
   "tests/social-3a0p-linux-physical-gates.test.js",
   "tests/social-3a0p-linux-workflow.test.js"
 ]);
-const AUTHORIZED_FILES = Object.freeze([
+const NATIVE_PREFLIGHT_FILES = Object.freeze([
   ".github/workflows/social-3a0p-linux-physical-gates.yml",
   "docs/social-3a0p-linux-physical-gates.md",
   "scripts/social-3a0p-linux-gate.js",
@@ -58,6 +60,41 @@ const AUTHORIZED_FILES = Object.freeze([
   "tests/social-3a0p-linux-pre-gate-tests.test.js",
   "tests/social-3a0p-linux-workflow.test.js"
 ]);
+const AUTHORIZED_FILES = Object.freeze([
+  ".github/workflows/social-3a0p-linux-physical-gates.yml",
+  "docs/social-3a0p-linux-physical-gates.md",
+  "scripts/social-3a0p-linux-gate.js",
+  "tests/social-3a0p-linux-gate.test.js",
+  "tests/social-3a0p-linux-workflow.test.js"
+]);
+const WINDOWS_AUTOMATED_TEST_RUN = `$ErrorActionPreference = "Stop"
+$PSNativeCommandUseErrorActionPreference = $false
+$unexpectedPostgresEnvironmentCount = @(
+  [System.Environment]::GetEnvironmentVariables(
+    [System.EnvironmentVariableTarget]::Process
+  ).Keys |
+    ForEach-Object { [string]$_ } |
+    Where-Object {
+      $_ -cmatch '^PG[A-Z0-9_]+$' -and
+        -not [string]::IsNullOrEmpty(
+          [System.Environment]::GetEnvironmentVariable(
+            $_,
+            [System.EnvironmentVariableTarget]::Process
+          )
+        )
+    }
+).Count
+if ($unexpectedPostgresEnvironmentCount -ne 0) {
+  [Console]::Error.WriteLine("windows_runner_postgres_environment_not_clean")
+  exit 1
+}
+npm test
+$testStatus = $LASTEXITCODE
+if ($null -eq $testStatus) {
+  [Console]::Error.WriteLine("windows_runner_npm_exit_code_unavailable")
+  exit 1
+}
+exit $testStatus`;
 
 function readWorkflow() {
   const source = fs.readFileSync(WORKFLOW_PATH, "utf8");
@@ -84,11 +121,17 @@ function extractQuotedArray(source, declaration) {
 
 function assertGuardInventory(source, style) {
   const declarations = style === "powershell"
-    ? ["$maintenanceFiles = @", "$provenanceFiles = @", "$authorizedFiles = @"]
-    : ["maintenance_files=", "provenance_files=", "authorized_files="];
+    ? [
+        "$maintenanceFiles = @",
+        "$provenanceFiles = @",
+        "$nativePreflightFiles = @",
+        "$authorizedFiles = @"
+      ]
+    : ["maintenance_files=", "provenance_files=", "native_preflight_files=", "authorized_files="];
   assert.deepEqual(extractQuotedArray(source, declarations[0]), MAINTENANCE_FILES);
   assert.deepEqual(extractQuotedArray(source, declarations[1]), PROVENANCE_FILES);
-  assert.deepEqual(extractQuotedArray(source, declarations[2]), AUTHORIZED_FILES);
+  assert.deepEqual(extractQuotedArray(source, declarations[2]), NATIVE_PREFLIGHT_FILES);
+  assert.deepEqual(extractQuotedArray(source, declarations[3]), AUTHORIZED_FILES);
   assert.equal(source.includes("*"), false);
 }
 
@@ -106,7 +149,7 @@ test("workflow permits only the exact first creation push and has two ordered na
   assert.deepEqual(workflow.on, { push: { branches: [BRANCH] } });
   assert.deepEqual(workflow.permissions, { contents: "read" });
   assert.deepEqual(workflow.concurrency, {
-    group: "social-3a0p-linux-native-preflight",
+    group: "social-3a0p-windows-runner-pg-env",
     "cancel-in-progress": false
   });
 
@@ -130,12 +173,14 @@ test("workflow permits only the exact first creation push and has two ordered na
   });
 });
 
-test("both jobs enforce the new commit and preserve both earlier commit contracts", () => {
+test("both jobs enforce the new commit and preserve the three earlier commit contracts", () => {
   const { workflow } = readWorkflow();
   const { windows, physical } = jobs(workflow);
   assert.equal(workflow.env.SOCIAL_3A0P_AUTHORIZED_PARENT, AUTHORIZED_PARENT);
+  assert.equal(workflow.env.SOCIAL_3A0P_NATIVE_PREFLIGHT_PARENT, NATIVE_PREFLIGHT_PARENT);
   assert.equal(workflow.env.SOCIAL_3A0P_PROVENANCE_PARENT, PROVENANCE_PARENT);
   assert.equal(workflow.env.SOCIAL_3A0P_MAINTENANCE_PARENT, MAINTENANCE_PARENT);
+  assert.equal(workflow.env.SOCIAL_3A0P_NATIVE_PREFLIGHT_MESSAGE, NATIVE_PREFLIGHT_MESSAGE);
   assert.equal(workflow.env.SOCIAL_3A0P_PROVENANCE_MESSAGE, PROVENANCE_MESSAGE);
   assert.equal(workflow.env.SOCIAL_3A0P_MAINTENANCE_MESSAGE, MAINTENANCE_MESSAGE);
   assert.equal(workflow.env.SOCIAL_3A0P_AUTHORIZED_MESSAGE, MESSAGE);
@@ -153,8 +198,10 @@ test("both jobs enforce the new commit and preserve both earlier commit contract
   assertGuardInventory(linuxGuard.run, "bash");
   for (const guard of [windowsGuard.run, linuxGuard.run]) {
     assert.ok(guard.includes("SOCIAL_3A0P_AUTHORIZED_PARENT"));
+    assert.ok(guard.includes("SOCIAL_3A0P_NATIVE_PREFLIGHT_PARENT"));
     assert.ok(guard.includes("SOCIAL_3A0P_PROVENANCE_PARENT"));
     assert.ok(guard.includes("SOCIAL_3A0P_MAINTENANCE_PARENT"));
+    assert.ok(guard.includes("SOCIAL_3A0P_NATIVE_PREFLIGHT_MESSAGE"));
     assert.ok(guard.includes("SOCIAL_3A0P_PROVENANCE_MESSAGE"));
     assert.ok(guard.includes("SOCIAL_3A0P_MAINTENANCE_MESSAGE"));
     assert.ok(guard.includes("SOCIAL_3A0P_PRODUCT_COMMIT"));
@@ -171,14 +218,17 @@ test("both jobs enforce the new commit and preserve both earlier commit contract
   for (const contract of [
     'Assert-Equal (Get-GitText -Arguments @("rev-parse", "HEAD")) $env:AUTHORIZED_SHA',
     'Assert-Equal (Get-GitText -Arguments @("rev-parse", "HEAD^")) $env:SOCIAL_3A0P_AUTHORIZED_PARENT',
-    'Assert-Equal (Get-GitText -Arguments @("rev-parse", "$($env:SOCIAL_3A0P_AUTHORIZED_PARENT)^")) $env:SOCIAL_3A0P_PROVENANCE_PARENT',
+    'Assert-Equal (Get-GitText -Arguments @("rev-parse", "$($env:SOCIAL_3A0P_AUTHORIZED_PARENT)^")) $env:SOCIAL_3A0P_NATIVE_PREFLIGHT_PARENT',
+    'Assert-Equal (Get-GitText -Arguments @("rev-parse", "$($env:SOCIAL_3A0P_NATIVE_PREFLIGHT_PARENT)^")) $env:SOCIAL_3A0P_PROVENANCE_PARENT',
     'Assert-Equal (Get-GitText -Arguments @("rev-parse", "$($env:SOCIAL_3A0P_PROVENANCE_PARENT)^")) $env:SOCIAL_3A0P_MAINTENANCE_PARENT',
-    'Assert-Equal (Get-GitText -Arguments @("rev-list", "--count", $commitRange)) "3"',
+    'Assert-Equal (Get-GitText -Arguments @("rev-list", "--count", $commitRange)) "4"',
     'Assert-SingleParent "HEAD"',
     'Assert-SingleParent $env:SOCIAL_3A0P_AUTHORIZED_PARENT',
+    'Assert-SingleParent $env:SOCIAL_3A0P_NATIVE_PREFLIGHT_PARENT',
     'Assert-SingleParent $env:SOCIAL_3A0P_PROVENANCE_PARENT',
     'Assert-ExactFiles $maintenanceChanged $maintenanceFiles',
     'Assert-ExactFiles $provenanceChanged $provenanceFiles',
+    'Assert-ExactFiles $nativePreflightChanged $nativePreflightFiles',
     'Assert-ExactFiles $authorizedChanged $authorizedFiles'
   ]) {
     assert.ok(windowsGuard.run.includes(contract), contract);
@@ -186,15 +236,17 @@ test("both jobs enforce the new commit and preserve both earlier commit contract
   for (const contract of [
     'test "$(git rev-parse HEAD)" = "$AUTHORIZED_SHA"',
     'test "$(git rev-parse HEAD^)" = "$SOCIAL_3A0P_AUTHORIZED_PARENT"',
-    'test "$(git rev-parse "$SOCIAL_3A0P_AUTHORIZED_PARENT^")" = "$SOCIAL_3A0P_PROVENANCE_PARENT"',
+    'test "$(git rev-parse "$SOCIAL_3A0P_AUTHORIZED_PARENT^")" = "$SOCIAL_3A0P_NATIVE_PREFLIGHT_PARENT"',
+    'test "$(git rev-parse "$SOCIAL_3A0P_NATIVE_PREFLIGHT_PARENT^")" = "$SOCIAL_3A0P_PROVENANCE_PARENT"',
     'test "$(git rev-parse "$SOCIAL_3A0P_PROVENANCE_PARENT^")" = "$SOCIAL_3A0P_MAINTENANCE_PARENT"',
     'assert_exact_changed_files "$SOCIAL_3A0P_MAINTENANCE_PARENT" "$SOCIAL_3A0P_PROVENANCE_PARENT" "${maintenance_files[@]}"',
-    'assert_exact_changed_files "$SOCIAL_3A0P_PROVENANCE_PARENT" "$SOCIAL_3A0P_AUTHORIZED_PARENT" "${provenance_files[@]}"',
+    'assert_exact_changed_files "$SOCIAL_3A0P_PROVENANCE_PARENT" "$SOCIAL_3A0P_NATIVE_PREFLIGHT_PARENT" "${provenance_files[@]}"',
+    'assert_exact_changed_files "$SOCIAL_3A0P_NATIVE_PREFLIGHT_PARENT" "$SOCIAL_3A0P_AUTHORIZED_PARENT" "${native_preflight_files[@]}"',
     'assert_exact_changed_files "$SOCIAL_3A0P_AUTHORIZED_PARENT" HEAD "${authorized_files[@]}"'
   ]) {
     assert.ok(linuxGuard.run.includes(contract), contract);
   }
-  assert.ok(linuxGuard.run.includes('test "$(git rev-list --count "$SOCIAL_3A0P_MAINTENANCE_PARENT..HEAD")" = "3"'));
+  assert.ok(linuxGuard.run.includes('test "$(git rev-list --count "$SOCIAL_3A0P_MAINTENANCE_PARENT..HEAD")" = "4"'));
 });
 
 test("actions are pinned and each native job installs its own lockfile without cache or scripts", () => {
@@ -225,13 +277,68 @@ test("actions are pinned and each native job installs its own lockfile without c
   }
 });
 
-test("the complete automated suite runs exactly once and only on native Windows", () => {
+test("the complete suite sanitizes only the Windows test step and runs exactly once", () => {
   const { source, workflow } = readWorkflow();
   const { windows, physical } = jobs(workflow);
-  assert.equal(source.match(/"run": "npm test"/g)?.length, 1);
-  const automated = windows.steps.find((step) => step.run === "npm test");
+  assert.equal(source.match(/npm test/g)?.length, 1);
+  const automated = windows.steps.find((step) => step.name === "Run stabilized automated tests once");
   assert.equal(automated.name, "Run stabilized automated tests once");
-  assert.equal(physical.steps.some((step) => step.run === "npm test"), false);
+  assert.deepEqual(automated.env, { PGBIN: "", PGDATA: "", PGROOT: "" });
+  assert.deepEqual(Object.keys(automated.env), ["PGBIN", "PGDATA", "PGROOT"]);
+  assert.equal(Object.values(automated.env).every((value) => value === ""), true);
+  assert.equal(Object.hasOwn(workflow.env, "PGBIN"), false);
+  assert.equal(Object.hasOwn(workflow.env, "PGDATA"), false);
+  assert.equal(Object.hasOwn(workflow.env, "PGROOT"), false);
+  assert.equal(Object.hasOwn(windows, "env"), false);
+  for (const name of ["PGBIN", "PGDATA", "PGROOT"]) {
+    assert.equal(Object.hasOwn(physical.env, name), false, name);
+  }
+  const stepsWithKnownPgEnv = Object.values(workflow.jobs).flatMap((job) => job.steps).filter(
+    (step) => ["PGBIN", "PGDATA", "PGROOT"].some((name) => Object.hasOwn(step.env || {}, name))
+  );
+  assert.deepEqual(stepsWithKnownPgEnv, [automated]);
+
+  const run = automated.run;
+  assert.equal(run, WINDOWS_AUTOMATED_TEST_RUN);
+  assert.equal(run.startsWith('$ErrorActionPreference = "Stop"\n'), true);
+  assert.ok(run.includes("[System.Environment]::GetEnvironmentVariables("));
+  assert.ok(run.includes("[System.EnvironmentVariableTarget]::Process"));
+  assert.ok(run.includes("-cmatch '^PG[A-Z0-9_]+$'"));
+  assert.ok(run.includes("[System.Environment]::GetEnvironmentVariable("));
+  assert.ok(run.includes("[string]::IsNullOrEmpty"));
+  assert.ok(run.includes("windows_runner_postgres_environment_not_clean"));
+  assert.ok(run.includes("$LASTEXITCODE"));
+  assert.ok(run.includes("exit $testStatus"));
+  assert.equal(run.match(/^npm test$/gm)?.length, 1);
+  assert.ok(run.indexOf("windows_runner_postgres_environment_not_clean") < run.indexOf("npm test"));
+  const postgresEnvironmentName = /^PG[A-Z0-9_]+$/;
+  for (const name of [
+    "PGHOST",
+    "PGPASSWORD",
+    "PGSERVICEFILE",
+    "PGUNRECOGNIZED_FOURTH_OVERRIDE"
+  ]) {
+    assert.match(name, postgresEnvironmentName);
+  }
+  for (const name of ["PG", "pgHOST", "PG-HOST"]) {
+    assert.doesNotMatch(name, postgresEnvironmentName);
+  }
+  for (const forbidden of [
+    "PG*",
+    "Remove-Item",
+    "Set-Item",
+    "SetEnvironmentVariable",
+    "Get-ChildItem Env:",
+    "Get-Item Env:",
+    "Write-Host",
+    "Write-Output",
+    "Write-Information",
+    "Write-Verbose",
+    "Write-Debug"
+  ]) {
+    assert.equal(run.includes(forbidden), false, forbidden);
+  }
+  assert.equal(physical.steps.some((step) => step.run?.includes("npm test")), false);
   assert.equal(
     physical.steps.some((step) => step.run?.split("\n").some(
       (line) => line.trim().startsWith("node scripts/run-node-tests.js")
