@@ -1,15 +1,15 @@
 # Checkpoint Social 3A-0P — gates físicos Linux isolados
 
-## Contrato canônico do handoff de capacidade de migration do Gate 4
+## Contrato canônico da propriedade lazy dos verificadores de restore do Gate 5
 
 Esta rota existe somente na branch
-`social/checkpoint-3a0p-linux-vault-migration-pool-handoff-20260811`,
+`social/checkpoint-3a0p-linux-gate5-lazy-verifier-ownership-20260811`,
 criada a partir do commit exato
-`590681a25fd87c3b4d41c09e739f07f167784d86`. O único
+`95c8c9ad12719012e3d94aea9dfd13d7c6103cc2`. O único
 commit autorizado deve ter esse commit como pai imediato e a mensagem integral:
 
 ```text
-[run-social-3a0p-linux-gate] hand off migration capacity to persisted vault verifier
+[run-social-3a0p-linux-gate] defer restore verifier ownership check
 ```
 
 O produto permanece idêntico a `fcfc92419021dae5f77baad731c634b10c275c5b`:
@@ -18,11 +18,13 @@ O produto permanece idêntico a `fcfc92419021dae5f77baad731c634b10c275c5b`:
 grants, não muda políticas RLS e não modifica schema, SCRAM, roles, produto,
 backup, restore, dependências ou os testes de segurança antigos. Os helpers
 PowerShell testados e o protocolo `IA4REC1` permanecem byte-semanticamente
-inalterados. A alteração atual é exclusivamente de lifecycle no harness físico:
-ela aposenta o pool primário de migration como a primeira operação de V21,
-antes de construir ou usar qualquer pool verifier persistido, liberando a
-capacidade da role migration para o verificador. Não altera AES-256-GCM, AAD,
-rotação, persistência, limites, grants, tamanho de pool ou cleanup.
+inalterados. A alteração atual fica no harness físico Windows: a checagem de
+propriedade do banco descartável deixa de ocorrer durante a construção do
+request e passa a ocorrer no primeiro uso lazy de um verificador, depois de
+`lifecycle.create`, `lifecycle.assertCreated`, restore físico e validação do
+perfil. A proteção não é removida, banco arbitrário continua recusado e nenhum
+banco é adicionado prematuramente ao conjunto `owned`. Não há retry, espera ou
+conexão diagnóstica nova.
 O workflow mantém a rota normal: `npm test` uma vez no Windows e, somente após
 seu sucesso, o job Linux físico preservado.
 
@@ -410,6 +412,41 @@ Não há retry, nova conexão diagnóstica, mudança de `CONNECTION LIMIT`, aume
 o run histórico e o contrato do handoff; não afirma execução, envio ou aprovação
 de um novo run desta branch.
 
+## Run físico histórico `31516944065` e classificação canônica do Gate 5
+
+O run `31516944065`, `run_attempt=1`, terminou com status `completed/failure` no
+commit `95c8c9ad12719012e3d94aea9dfd13d7c6103cc2`, pai exato
+`590681a25fd87c3b4d41c09e739f07f167784d86`. O job Windows, o pré-gate Linux,
+durabilidade, `O_NOFOLLOW`, PostgreSQL/bootstrap e os Gates 1, 2, 3 e 4 foram
+aprovados. V21, V22, V23, V24 e V25 concluíram. A primeira falha ocorreu na
+preparação do Gate 5, em `phase=backup_restore`, com o código preservado
+`windows_physical_verifier_database_refused`. O cleanup foi aprovado e terminou
+com zero resíduo.
+
+As validações locais relacionadas aprovaram `381/381`; o secret scan registrou
+zero correspondência; `npm test` concluiu 1.419 testes com zero falha; e os
+94/94 arquivos protegidos permaneceram intactos. No artifact histórico,
+`gate4FailureProvenance`, `gate4ConnectionCapacityDiagnostics` e
+`backupRestoreFailureProvenance` permaneceram `null`; `signal=null`,
+`timedOut=false`, `stdoutStored=false` e `stderrStored=false`. Não se fabrica
+procedência de backup/restore: a falha aconteceu durante `prepareBackupRestore`,
+antes da primeira operação física vinculada.
+
+A classificação canônica é
+`gate5_restore_verifier_ownership_checked_before_disposable_creation`. Na
+construção de cada request, `restoreVerifiers` consultava imediatamente
+`databaseManager.isAllowedDatabase(database)`, embora o banco descartável só se
+tornasse propriedade do run depois de `lifecycle.create` e da confirmação por
+`lifecycle.assertCreated`. Como a facade e o gate já eram lazy, a correção
+preserva a validação e a desloca para o primeiro `get()`, imediatamente antes da
+construção da facade, das URLs e de qualquer pool verificador. Preparar os
+requests não cria verifier, conexão, query, banco ou ownership; primeiro uso
+antes da propriedade confirmada continua recusado com o mesmo código.
+
+O run histórico não é repetido e não é reclassificado como aprovado. Esta rota
+não afirma ainda commit, push ou run novo, nem altera Gate 4, backup, restore,
+PostgreSQL, roles, migrations ou produto.
+
 ## Contrato fechado de `gate4FailureProvenance`
 
 `gate4FailureProvenance` permanece `null` quando o Gate 4 não falha. Quando o
@@ -751,7 +788,7 @@ e o novo `HEAD`:
     `tests/social-3a0p-linux-gate.test.js`,
     `tests/social-3a0p-linux-physical-gates.test.js` e
     `tests/social-3a0p-linux-workflow.test.js`.
-13. O novo `HEAD`, pai exato
+13. `95c8c9ad12719012e3d94aea9dfd13d7c6103cc2`, pai exato
     `590681a25fd87c3b4d41c09e739f07f167784d86`, mensagem
     `[run-social-3a0p-linux-gate] hand off migration capacity to persisted vault verifier`
     e inventário fechado de exatamente sete caminhos:
@@ -762,9 +799,20 @@ e o novo `HEAD`:
     `tests/social-3a0p-linux-gate.test.js`,
     `tests/social-3a0p-linux-physical-gates.test.js` e
     `tests/social-3a0p-linux-workflow.test.js`.
+14. O novo `HEAD`, pai exato
+    `95c8c9ad12719012e3d94aea9dfd13d7c6103cc2`, mensagem
+    `[run-social-3a0p-linux-gate] defer restore verifier ownership check`
+    e inventário fechado de exatamente sete caminhos:
+    `.github/workflows/social-3a0p-linux-physical-gates.yml`,
+    `docs/social-3a0p-linux-physical-gates.md`,
+    `scripts/social-3a0p-linux-gate.js`,
+    `scripts/social-3a0p-local-windows-physical-plans.js`,
+    `tests/social-3a0p-linux-gate.test.js`,
+    `tests/social-3a0p-local-windows-physical-plans.test.js` e
+    `tests/social-3a0p-linux-workflow.test.js`.
 
 Os guards dos dois jobs verificam pais, mensagens, ancestralidade linear,
-contagem treze e cada um desses inventários sem prefixo, glob ou diretório
+contagem catorze e cada um desses inventários sem prefixo, glob ou diretório
 inteiro.
 
 ## Restauração da rota executável normal

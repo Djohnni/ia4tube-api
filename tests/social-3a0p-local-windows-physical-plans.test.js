@@ -7,7 +7,8 @@ const path = require("node:path");
 const test = require("node:test");
 const {
   LOCAL_PHYSICAL_APPROVAL,
-  runForwardOnlyRollbackGate
+  runForwardOnlyRollbackGate,
+  runProfileRestore
 } = require("../scripts/social-3a0p-local-backup-restore");
 const {
   MIGRATION_LOGIN,
@@ -135,8 +136,25 @@ function backupTransportFixture(options = {}) {
   const databaseManager = {
     isAllowedDatabase() { return true; },
     getPools() { return { provisioner: {} }; },
-    async create(identity) { return Object.freeze({ ...identity, created: true }); },
+    async create(identity) {
+      return Object.freeze({ ...identity, createdByThisRun: true });
+    },
+    async reconcile(identity) {
+      return Object.freeze({
+        ...identity,
+        createdByThisRun: false,
+        status: "absent"
+      });
+    },
+    async assertCreated() { return true; },
+    async remove() { return true; },
+    async assertRemoved() { return true; },
     async applyProfile() { return true; },
+    async verifyProfile(_database, profileId) {
+      return productBackup.SCHEMA_PROFILES.find(
+        (profile) => profile.id === profileId
+      );
+    },
     async cleanupAll() {}
   };
   const backup = {
@@ -423,6 +441,257 @@ function profileAwareRestoreBehaviorFixture(options = {}) {
     operations,
     schemaValidations
   });
+}
+
+function lazyRestoreOwnershipDatabaseManagerFixture(options = {}) {
+  const events = options.events || [];
+  const owned = new Set(["ia4tube_social_local"]);
+  const profiles = require(
+    "../src/persistence/postgres/backup-restore"
+  ).SCHEMA_PROFILES;
+  const calls = {
+    allowed: [],
+    assertedCreated: [],
+    assertedRemoved: [],
+    connections: 0,
+    created: [],
+    poolRequests: [],
+    profileVerifications: [],
+    queries: 0,
+    reconciled: [],
+    removed: []
+  };
+  const isRestoreTarget = (database) =>
+    String(database).includes("_disposable_restore_");
+  const provisionerPool = Object.freeze({
+    async connect() {
+      calls.connections += 1;
+      throw Object.assign(new Error("synthetic_pool_must_not_connect"), {
+        code: "synthetic_pool_must_not_connect"
+      });
+    }
+  });
+  const manager = Object.freeze({
+    isAllowedDatabase(database) {
+      calls.allowed.push(database);
+      if (isRestoreTarget(database)) {
+        events.push("verifier_ownership_checked");
+      }
+      return owned.has(database);
+    },
+    getPools(database) {
+      calls.poolRequests.push(database);
+      return Object.freeze({ provisioner: provisionerPool, runtime: {} });
+    },
+    async create(identity) {
+      calls.created.push(identity.database);
+      if (isRestoreTarget(identity.database)) {
+        events.push("lifecycle_create_started");
+        if (options.createFailure) throw options.createFailure;
+      }
+      owned.add(identity.database);
+      if (isRestoreTarget(identity.database)) {
+        events.push("lifecycle_create_completed");
+      }
+      return Object.freeze({
+        createdByThisRun: true,
+        database: identity.database,
+        host: identity.host,
+        profileId: identity.profileId,
+        runMarker: identity.runMarker
+      });
+    },
+    async reconcile(identity) {
+      calls.reconciled.push(identity.database);
+      const databaseOwned = owned.has(identity.database);
+      return Object.freeze({
+        createdByThisRun: databaseOwned,
+        database: identity.database,
+        host: identity.host,
+        profileId: identity.profileId,
+        runMarker: identity.runMarker,
+        status: databaseOwned ? "owned" : "absent"
+      });
+    },
+    async assertCreated(proof) {
+      calls.assertedCreated.push(proof.database);
+      if (isRestoreTarget(proof.database)) {
+        events.push("lifecycle_assert_created");
+        if (options.assertCreatedFailure) {
+          throw options.assertCreatedFailure;
+        }
+        if (options.assertCreatedResult === false) return false;
+      }
+      return owned.has(proof.database);
+    },
+    async remove(proof) {
+      calls.removed.push(proof.database);
+      if (isRestoreTarget(proof.database)) events.push("lifecycle_remove");
+      owned.delete(proof.database);
+      return true;
+    },
+    async assertRemoved(proof) {
+      calls.assertedRemoved.push(proof.database);
+      if (isRestoreTarget(proof.database)) {
+        events.push("lifecycle_assert_removed");
+      }
+      return !owned.has(proof.database);
+    },
+    async applyProfile() {
+      return true;
+    },
+    async verifyProfile(database, profileId) {
+      calls.profileVerifications.push([database, profileId]);
+      if (isRestoreTarget(database) && options.profileValidationFailure) {
+        throw options.profileValidationFailure;
+      }
+      return profiles.find((profile) => profile.id === profileId);
+    },
+    async catalogFingerprint() {
+      return "synthetic-catalog";
+    },
+    async nonSocialFingerprint() {
+      return "synthetic-non-social";
+    },
+    async cleanupAll() {
+      for (const database of [...owned]) {
+        if (database !== "ia4tube_social_local") owned.delete(database);
+      }
+    }
+  });
+  return Object.freeze({
+    calls,
+    forget(database) {
+      owned.delete(database);
+    },
+    manager,
+    owned
+  });
+}
+
+function lazyRestoreBehaviorFixture(options = {}) {
+  const events = options.events || [];
+  const calls = {
+    closed: [],
+    created: [],
+    poolConnections: 0,
+    poolConstructions: [],
+    poolQueries: 0,
+    operations: []
+  };
+  class SyntheticVerifierPool {
+    constructor(configuration) {
+      calls.poolConstructions.push(Object.freeze({
+        database: configuration.database,
+        host: configuration.host,
+        max: configuration.max,
+        port: configuration.port,
+        ssl: configuration.ssl,
+        user: configuration.user
+      }));
+    }
+    async connect() {
+      calls.poolConnections += 1;
+      throw Object.assign(new Error("synthetic_verifier_pool_must_not_connect"), {
+        code: "synthetic_verifier_pool_must_not_connect"
+      });
+    }
+    async end() {}
+  }
+  const verifierPoolOptions = (databaseUrl, max) => {
+    const connection = new URL(databaseUrl);
+    for (const key of [...connection.searchParams.keys()]) {
+      connection.searchParams.delete(key);
+    }
+    return Object.freeze({
+      connectionString: connection.toString(),
+      max,
+      min: 0,
+      ssl: Object.freeze({
+        checkServerIdentity() {},
+        minVersion: "TLSv1.2",
+        rejectUnauthorized: true,
+        servername: "local.ia4tube.invalid"
+      })
+    });
+  };
+  const facade = Object.freeze({
+    createRestoreBehaviorVerifiers(configuration) {
+      const migrationTarget = new URL(configuration.migrationDatabaseUrl);
+      const database = decodeURIComponent(migrationTarget.pathname.slice(1));
+      const profileId = configuration.expectedProfileId;
+      calls.created.push(Object.freeze({ database, profileId }));
+      events.push("verifier_created");
+      if (options.createFailure) throw options.createFailure;
+      const PoolClass = configuration.dependencies.PoolClass;
+      new PoolClass(verifierPoolOptions(
+        configuration.migrationDatabaseUrl,
+        1
+      ));
+      new PoolClass(verifierPoolOptions(
+        configuration.runtimeDatabaseUrl,
+        2
+      ));
+      let closed = false;
+      const operation = async (name, event, failure) => {
+        calls.operations.push([database, profileId, name]);
+        events.push(event);
+        if (failure) throw failure;
+        return true;
+      };
+      return Object.freeze({
+        async close() {
+          if (closed) return;
+          closed = true;
+          calls.closed.push([database, profileId]);
+          events.push("verifier_closed");
+          if (options.closeFailure) throw options.closeFailure;
+        },
+        verifiers: Object.freeze({
+          verifyRuntimeIsolation: () => operation(
+            "runtime",
+            "runtime_isolation",
+            options.runtimeFailure
+          ),
+          verifyVault: () => operation("vault", "vault", options.vaultFailure),
+          verify2ACompatibility: () => operation(
+            "2a",
+            "compatibility_2a",
+            options.compatibilityFailure
+          )
+        })
+      });
+    },
+    schemaProfileDiagnostics() {
+      return null;
+    },
+    async verifyRuntimeSchemaForProfile() {
+      return Object.freeze({ valid: true });
+    }
+  });
+  return Object.freeze({ calls, facade, PoolClass: SyntheticVerifierPool });
+}
+
+function lazyRestoreOwnershipPlanFixture(options = {}) {
+  const events = options.events || [];
+  const ownership = lazyRestoreOwnershipDatabaseManagerFixture({
+    events,
+    ...(options.database || {})
+  });
+  const behavior = lazyRestoreBehaviorFixture({
+    events,
+    ...(options.behavior || {})
+  });
+  const fixture = backupTransportFixture({
+    precreateBackupDirectory: false,
+    dependencies: {
+      createBackupTransportBridge: createLogicalBackupTransportBridge,
+      databaseManager: ownership.manager,
+      restoreBehavior: behavior.facade
+    },
+    planOptions: { PoolClass: behavior.PoolClass }
+  });
+  return Object.freeze({ behavior, events, fixture, ownership });
 }
 
 test("schema profile selection returns only the exact canonical frozen profile", () => {
@@ -891,6 +1160,506 @@ test("default Windows restore facade treats a validated legacy loader failure as
   assert.equal(fixture.calls.legacySchema.length, 0);
 });
 
+test("restore ownership check exists once inside the first lazy get without retry", () => {
+  const source = fs.readFileSync(
+    path.resolve(
+      __dirname,
+      "../scripts/social-3a0p-local-windows-physical-plans.js"
+    ),
+    "utf8"
+  );
+  const start = source.indexOf(
+    "function restoreVerifiers(database, expectedProfileId, ownershipLatch)"
+  );
+  const end = source.indexOf("function ensurePlanDirectories()", start);
+  assert.ok(start >= 0);
+  assert.ok(end > start);
+  const body = source.slice(start, end);
+  const ownershipChecks = body.match(
+    /databaseManager\.isAllowedDatabase\(database\)/gu
+  ) || [];
+  assert.equal(ownershipChecks.length, 1);
+  assert.ok(body.indexOf("const get = () =>") < body.indexOf(ownershipChecks[0]));
+  assert.ok(
+    body.indexOf(ownershipChecks[0]) <
+      body.indexOf("requireRestoreBehaviorFacade(restoreBehavior)")
+  );
+  assert.match(body, /ownershipLatch\.isConfirmed\(\) !== true/u);
+  assert.doesNotMatch(body, /\b(?:retry|setTimeout|setInterval|sleep)\b/iu);
+  assert.doesNotMatch(body, /owned\.add/u);
+});
+
+test("Gate 5 restore ownership is lazy, assertion-latched and isolated per request", async () => {
+  const item = lazyRestoreOwnershipPlanFixture();
+  try {
+    const prepared = await item.fixture.plans.prepareBackupRestore();
+    const request0003 = prepared.restore0003;
+    const request0004 = prepared.restore0004;
+    const database0003 = request0003.lifecycle.database;
+    const database0004 = request0004.lifecycle.database;
+    assert.match(database0003, /_disposable_restore_0003_[0-9a-f]{12}$/u);
+    assert.match(database0004, /_disposable_restore_0004_[0-9a-f]{12}$/u);
+    assert.notEqual(database0003, database0004);
+    assert.equal(item.ownership.owned.has(database0003), false);
+    assert.equal(item.ownership.owned.has(database0004), false);
+    assert.deepEqual(
+      item.ownership.calls.allowed.filter((database) =>
+        [database0003, database0004].includes(database)),
+      []
+    );
+    assert.deepEqual(item.behavior.calls.created, []);
+    assert.deepEqual(item.behavior.calls.poolConstructions, []);
+    assert.equal(item.behavior.calls.poolConnections, 0);
+    assert.equal(item.behavior.calls.poolQueries, 0);
+    assert.equal(item.ownership.calls.connections, 0);
+    assert.equal(item.ownership.calls.queries, 0);
+    assert.equal(item.fixture.processStarts.length, 0);
+    assert.equal(item.fixture.runToolCalls.length, 0);
+    assert.equal(item.fixture.pgDumpStarts.length, 0);
+
+    await assert.rejects(
+      request0003.verifyRuntimeIsolation(),
+      {
+        code: "windows_physical_verifier_database_refused",
+        name: "WindowsPhysicalPlanFailure"
+      }
+    );
+    assert.deepEqual(item.behavior.calls.created, []);
+    assert.deepEqual(item.behavior.calls.poolConstructions, []);
+
+    const identity0003 = {
+      database: request0003.lifecycle.database,
+      host: request0003.lifecycle.host,
+      profileId: request0003.lifecycle.profileId,
+      runMarker: request0003.lifecycle.runMarker
+    };
+    const targetCreateCallsBefore = item.ownership.calls.created.length;
+    for (const candidate of [
+      { ...identity0003, database: "arbitrary_database" },
+      { ...identity0003, database: `${database0003}_similar` },
+      { ...identity0003, profileId: "social-schema-0004" },
+      {
+        ...identity0003,
+        runMarker: "ia4tube-social-3a0p-physical-plan-other-run-0001"
+      }
+    ]) {
+      await assert.rejects(
+        Promise.resolve().then(() => request0003.lifecycle.create(candidate)),
+        {
+          code: "windows_physical_database_identity_invalid",
+          name: "WindowsPhysicalPlanFailure"
+        }
+      );
+    }
+    assert.equal(
+      item.ownership.calls.created.length,
+      targetCreateCallsBefore
+    );
+
+    const proof0003 = await request0003.lifecycle.create(identity0003);
+    assert.equal(item.ownership.owned.has(database0003), true);
+    assert.equal(item.ownership.owned.has(database0004), false);
+    await assert.rejects(
+      request0003.verifyRuntimeIsolation(),
+      { code: "windows_physical_verifier_database_refused" }
+    );
+    assert.deepEqual(item.behavior.calls.created, []);
+    assert.deepEqual(item.behavior.calls.poolConstructions, []);
+    assert.deepEqual(
+      item.ownership.calls.allowed.filter((database) =>
+        database === database0003),
+      []
+    );
+
+    assert.equal(await request0003.lifecycle.assertCreated(proof0003), true);
+    assert.equal(await request0003.verifyRuntimeIsolation(), true);
+    assert.equal(await request0003.verifyVault(), true);
+    assert.equal(await request0003.verify2ACompatibility(), true);
+    assert.equal(item.behavior.calls.created.length, 1);
+    assert.deepEqual(item.behavior.calls.created[0], {
+      database: database0003,
+      profileId: "social-schema-0003"
+    });
+    assert.deepEqual(
+      item.ownership.calls.allowed.filter((database) =>
+        database === database0003),
+      [database0003]
+    );
+    assert.equal(item.behavior.calls.poolConstructions.length, 2);
+    assert.deepEqual(
+      item.behavior.calls.poolConstructions.map((pool) => [
+        pool.database,
+        pool.user,
+        pool.max,
+        pool.host,
+        pool.port,
+        pool.ssl
+      ]),
+      [
+        [database0003, MIGRATION_LOGIN, 1, "127.0.0.1", 5432, false],
+        [database0003, RUNTIME_LOGIN, 2, "127.0.0.1", 5432, false]
+      ]
+    );
+    assert.equal(item.behavior.calls.poolConnections, 0);
+    assert.equal(item.behavior.calls.poolQueries, 0);
+    assert.equal(item.ownership.calls.connections, 0);
+    assert.equal(item.ownership.calls.queries, 0);
+    await request0003.closeVerifiers();
+    await request0003.closeVerifiers();
+    assert.deepEqual(item.behavior.calls.closed, [
+      [database0003, "social-schema-0003"]
+    ]);
+    await assert.rejects(
+      request0003.verifyVault(),
+      { code: "windows_physical_restore_verifier_closed" }
+    );
+
+    const identity0004 = {
+      database: request0004.lifecycle.database,
+      host: request0004.lifecycle.host,
+      profileId: request0004.lifecycle.profileId,
+      runMarker: request0004.lifecycle.runMarker
+    };
+    let proof0004 = await request0004.lifecycle.create(identity0004);
+    assert.equal(await request0004.lifecycle.assertCreated(proof0004), true);
+    assert.equal(await request0004.lifecycle.remove(proof0004), true);
+    await assert.rejects(
+      request0004.verifyRuntimeIsolation(),
+      { code: "windows_physical_verifier_database_refused" }
+    );
+    assert.equal(item.behavior.calls.created.length, 1);
+    assert.equal(item.behavior.calls.poolConstructions.length, 2);
+    assert.equal(await request0004.lifecycle.assertRemoved(proof0004), true);
+
+    proof0004 = await request0004.lifecycle.create(identity0004);
+    assert.equal(await request0004.lifecycle.assertCreated(proof0004), true);
+    item.ownership.forget(database0004);
+    await assert.rejects(
+      request0004.verifyRuntimeIsolation(),
+      { code: "windows_physical_verifier_database_refused" }
+    );
+    assert.equal(item.behavior.calls.created.length, 1);
+    assert.equal(item.behavior.calls.poolConstructions.length, 2);
+
+    proof0004 = await request0004.lifecycle.create(identity0004);
+    await assert.rejects(
+      request0004.verifyRuntimeIsolation(),
+      { code: "windows_physical_verifier_database_refused" }
+    );
+    assert.equal(item.behavior.calls.created.length, 1);
+    assert.equal(item.behavior.calls.poolConstructions.length, 2);
+    assert.equal(await request0004.lifecycle.assertCreated(proof0004), true);
+    assert.equal(await request0004.verifyRuntimeIsolation(), true);
+    assert.equal(item.behavior.calls.created.length, 2);
+    assert.deepEqual(
+      item.behavior.calls.created.map((created) => created.database),
+      [database0003, database0004]
+    );
+    assert.equal(item.behavior.calls.poolConstructions.length, 4);
+    await request0004.closeVerifiers();
+    assert.equal(item.behavior.calls.closed.length, 2);
+    assert.equal(await request0003.lifecycle.remove(proof0003), true);
+    assert.equal(await request0003.lifecycle.assertRemoved(proof0003), true);
+    assert.equal(await request0004.lifecycle.remove(proof0004), true);
+    assert.equal(await request0004.lifecycle.assertRemoved(proof0004), true);
+  } finally {
+    await destroyBackupTransportFixture(item.fixture);
+  }
+});
+
+test("closing a prepared Gate 5 restore before first use remains connection-free", async () => {
+  const item = lazyRestoreOwnershipPlanFixture();
+  try {
+    const prepared = await item.fixture.plans.prepareBackupRestore();
+    const request = prepared.restore0004;
+    const database = request.lifecycle.database;
+    await request.closeVerifiers();
+    await request.closeVerifiers();
+    assert.deepEqual(item.behavior.calls.created, []);
+    assert.deepEqual(item.behavior.calls.closed, []);
+    assert.deepEqual(item.behavior.calls.poolConstructions, []);
+    assert.equal(item.behavior.calls.poolConnections, 0);
+    assert.equal(item.ownership.calls.connections, 0);
+    assert.deepEqual(
+      item.ownership.calls.allowed.filter((candidate) =>
+        candidate === database),
+      []
+    );
+    await assert.rejects(
+      request.verifyRuntimeIsolation(),
+      {
+        code: "windows_physical_restore_verifier_closed",
+        name: "WindowsPhysicalPlanFailure"
+      }
+    );
+    assert.deepEqual(item.behavior.calls.created, []);
+  } finally {
+    await destroyBackupTransportFixture(item.fixture);
+  }
+});
+
+test("synthetic profile restore orders ownership before one lazy verifier gate", async () => {
+  const events = [];
+  const item = lazyRestoreOwnershipPlanFixture({ events });
+  try {
+    const prepared = await item.fixture.plans.prepareBackupRestore();
+    const request = prepared.restore0003;
+    events.push("request_prepared");
+    const evidence = await runProfileRestore({
+      ...request,
+      dependencies: {
+        createPostgresBackupOperator() {
+          return Object.freeze({ synthetic: true });
+        },
+        async runLogicalRestore(configuration) {
+          events.push("restore_started");
+          events.push("restore_completed");
+          events.push("profile_validation_completed");
+          assert.equal(await configuration.verifyRuntimeIsolation(), true);
+          assert.equal(await configuration.verifyVault(), true);
+          assert.equal(await configuration.verify2ACompatibility(), true);
+          return successfulLogicalRestoreResult();
+        }
+      }
+    });
+    assert.equal(evidence.profileId, "social-schema-0003");
+    assert.deepEqual(events, [
+      "request_prepared",
+      "lifecycle_create_started",
+      "lifecycle_create_completed",
+      "lifecycle_assert_created",
+      "restore_started",
+      "restore_completed",
+      "profile_validation_completed",
+      "verifier_ownership_checked",
+      "verifier_created",
+      "runtime_isolation",
+      "vault",
+      "compatibility_2a",
+      "verifier_closed",
+      "lifecycle_remove",
+      "lifecycle_assert_removed"
+    ]);
+    assert.equal(item.behavior.calls.created.length, 1);
+    assert.equal(item.behavior.calls.poolConstructions.length, 2);
+    assert.equal(item.behavior.calls.poolConnections, 0);
+    assert.equal(item.behavior.calls.poolQueries, 0);
+    assert.equal(item.ownership.calls.connections, 0);
+    assert.equal(item.ownership.calls.queries, 0);
+    assert.equal(item.ownership.owned.has(request.lifecycle.database), false);
+  } finally {
+    await destroyBackupTransportFixture(item.fixture);
+  }
+});
+
+test("restore verifier construction stays absent across every earlier failure boundary", async (t) => {
+  const operatorDependencies = (runLogicalRestore) => ({
+    createPostgresBackupOperator() {
+      return Object.freeze({ synthetic: true });
+    },
+    runLogicalRestore
+  });
+
+  await t.test("lifecycle create failure", async () => {
+    const failure = Object.assign(new Error("not persisted"), {
+      code: "synthetic_lifecycle_create_failure"
+    });
+    const item = lazyRestoreOwnershipPlanFixture({
+      database: { createFailure: failure }
+    });
+    try {
+      const prepared = await item.fixture.plans.prepareBackupRestore();
+      await assert.rejects(
+        runProfileRestore({
+          ...prepared.restore0003,
+          dependencies: operatorDependencies(async () => {
+            throw new Error("restore_must_not_start");
+          })
+        }),
+        { code: failure.code }
+      );
+      assert.deepEqual(item.behavior.calls.created, []);
+      assert.deepEqual(item.behavior.calls.poolConstructions, []);
+      assert.equal(item.behavior.calls.poolConnections, 0);
+    } finally {
+      await destroyBackupTransportFixture(item.fixture);
+    }
+  });
+
+  await t.test("assertCreated false", async () => {
+    const item = lazyRestoreOwnershipPlanFixture({
+      database: { assertCreatedResult: false }
+    });
+    try {
+      const prepared = await item.fixture.plans.prepareBackupRestore();
+      await assert.rejects(
+        runProfileRestore({
+          ...prepared.restore0003,
+          dependencies: operatorDependencies(async () => {
+            throw new Error("restore_must_not_start");
+          })
+        }),
+        { code: "local_restore_disposable_create_unconfirmed" }
+      );
+      assert.deepEqual(item.behavior.calls.created, []);
+      assert.deepEqual(item.behavior.calls.poolConstructions, []);
+      assert.equal(item.behavior.calls.poolConnections, 0);
+    } finally {
+      await destroyBackupTransportFixture(item.fixture);
+    }
+  });
+
+  await t.test("assertCreated exception remains exact and cannot arm ownership", async () => {
+    const failure = Object.assign(new Error("not persisted"), {
+      code: "synthetic_assert_created_failure"
+    });
+    const item = lazyRestoreOwnershipPlanFixture({
+      database: { assertCreatedFailure: failure }
+    });
+    try {
+      const prepared = await item.fixture.plans.prepareBackupRestore();
+      const request = prepared.restore0003;
+      const identity = {
+        database: request.lifecycle.database,
+        host: request.lifecycle.host,
+        profileId: request.lifecycle.profileId,
+        runMarker: request.lifecycle.runMarker
+      };
+      const proof = await request.lifecycle.create(identity);
+      await assert.rejects(
+        request.lifecycle.assertCreated(proof),
+        (error) => error === failure && error.code === failure.code
+      );
+      await assert.rejects(
+        request.verifyRuntimeIsolation(),
+        { code: "windows_physical_verifier_database_refused" }
+      );
+      assert.deepEqual(item.behavior.calls.created, []);
+      assert.deepEqual(item.behavior.calls.poolConstructions, []);
+      assert.equal(item.behavior.calls.poolConnections, 0);
+      assert.equal(await request.lifecycle.remove(proof), true);
+      assert.equal(await request.lifecycle.assertRemoved(proof), true);
+    } finally {
+      await destroyBackupTransportFixture(item.fixture);
+    }
+  });
+
+  await t.test("physical restore failure", async () => {
+    const failure = Object.assign(new Error("not persisted"), {
+      code: "synthetic_physical_restore_failure"
+    });
+    const item = lazyRestoreOwnershipPlanFixture();
+    try {
+      const prepared = await item.fixture.plans.prepareBackupRestore();
+      await assert.rejects(
+        runProfileRestore({
+          ...prepared.restore0003,
+          dependencies: operatorDependencies(async () => {
+            throw failure;
+          })
+        }),
+        { code: failure.code }
+      );
+      assert.deepEqual(item.behavior.calls.created, []);
+      assert.deepEqual(item.behavior.calls.poolConstructions, []);
+      assert.equal(item.behavior.calls.poolConnections, 0);
+    } finally {
+      await destroyBackupTransportFixture(item.fixture);
+    }
+  });
+
+  await t.test("restored profile validation failure", async () => {
+    const failure = Object.assign(new Error("not persisted"), {
+      code: "synthetic_profile_validation_failure"
+    });
+    const item = lazyRestoreOwnershipPlanFixture({
+      database: { profileValidationFailure: failure }
+    });
+    try {
+      const prepared = await item.fixture.plans.prepareBackupRestore();
+      await assert.rejects(
+        runProfileRestore({
+          ...prepared.restore0003,
+          dependencies: operatorDependencies(async () =>
+            successfulLogicalRestoreResult())
+        }),
+        { code: failure.code }
+      );
+      assert.deepEqual(item.behavior.calls.created, []);
+      assert.deepEqual(item.behavior.calls.poolConstructions, []);
+      assert.equal(item.behavior.calls.poolConnections, 0);
+    } finally {
+      await destroyBackupTransportFixture(item.fixture);
+    }
+  });
+
+  await t.test("facade failure after ownership preserves its identity", async () => {
+    const failure = Object.assign(new Error("not persisted"), {
+      code: "synthetic_restore_facade_failure"
+    });
+    const item = lazyRestoreOwnershipPlanFixture({
+      behavior: { createFailure: failure }
+    });
+    try {
+      const prepared = await item.fixture.plans.prepareBackupRestore();
+      const request = prepared.restore0003;
+      const identity = {
+        database: request.lifecycle.database,
+        host: request.lifecycle.host,
+        profileId: request.lifecycle.profileId,
+        runMarker: request.lifecycle.runMarker
+      };
+      const proof = await request.lifecycle.create(identity);
+      assert.equal(await request.lifecycle.assertCreated(proof), true);
+      await assert.rejects(
+        request.verifyRuntimeIsolation(),
+        (error) => error === failure
+      );
+      assert.equal(item.behavior.calls.created.length, 1);
+      assert.deepEqual(item.behavior.calls.poolConstructions, []);
+      assert.equal(item.behavior.calls.poolConnections, 0);
+      await request.closeVerifiers();
+      assert.equal(await request.lifecycle.remove(proof), true);
+      assert.equal(await request.lifecycle.assertRemoved(proof), true);
+    } finally {
+      await destroyBackupTransportFixture(item.fixture);
+    }
+  });
+
+  await t.test("close failure cannot mask the primary verifier failure", async () => {
+    const primary = Object.assign(new Error("not persisted"), {
+      code: "synthetic_runtime_verifier_failure"
+    });
+    const cleanup = Object.assign(new Error("not persisted"), {
+      code: "synthetic_verifier_close_failure"
+    });
+    const item = lazyRestoreOwnershipPlanFixture({
+      behavior: { closeFailure: cleanup, runtimeFailure: primary }
+    });
+    try {
+      const prepared = await item.fixture.plans.prepareBackupRestore();
+      await assert.rejects(
+        runProfileRestore({
+          ...prepared.restore0003,
+          dependencies: operatorDependencies(async (configuration) => {
+            await configuration.verifyRuntimeIsolation();
+            throw new Error("unreachable");
+          })
+        }),
+        (error) =>
+          error.code === primary.code &&
+          error.cleanupFailureCode === cleanup.code
+      );
+      assert.equal(item.behavior.calls.created.length, 1);
+      assert.equal(item.behavior.calls.closed.length, 1);
+      assert.equal(item.behavior.calls.poolConstructions.length, 2);
+      assert.equal(item.behavior.calls.poolConnections, 0);
+    } finally {
+      await destroyBackupTransportFixture(item.fixture);
+    }
+  });
+});
+
 test("Gate 5 restore verifiers bind 0003 and 0004 across runtime, vault and 2A and close once", async () => {
   const behavior = profileAwareRestoreBehaviorFixture();
   const fixture = backupTransportFixture({
@@ -906,6 +1675,14 @@ test("Gate 5 restore verifiers bind 0003 and 0004 across runtime, vault and 2A a
       [prepared.restore0003, "social-schema-0003"],
       [prepared.restore0004, "social-schema-0004"]
     ]) {
+      const identity = {
+        database: request.lifecycle.database,
+        host: request.lifecycle.host,
+        profileId: request.lifecycle.profileId,
+        runMarker: request.lifecycle.runMarker
+      };
+      const proof = await request.lifecycle.create(identity);
+      assert.equal(await request.lifecycle.assertCreated(proof), true);
       assert.equal(await request.verifyRuntimeIsolation(), true);
       assert.equal(await request.verifyVault(), true);
       assert.equal(await request.verify2ACompatibility(), true);
@@ -919,6 +1696,8 @@ test("Gate 5 restore verifiers bind 0003 and 0004 across runtime, vault and 2A a
         }
       );
       assert.equal(request.expectedProfile.id, profileId);
+      assert.equal(await request.lifecycle.remove(proof), true);
+      assert.equal(await request.lifecycle.assertRemoved(proof), true);
     }
     assert.deepEqual(behavior.created, [
       "social-schema-0003",
@@ -954,16 +1733,27 @@ test("profile verifier creation failure never falls back from 0004 to 0003", asy
   });
   try {
     const prepared = await fixture.plans.prepareBackupRestore();
+    const request = prepared.restore0004;
+    const identity = {
+      database: request.lifecycle.database,
+      host: request.lifecycle.host,
+      profileId: request.lifecycle.profileId,
+      runMarker: request.lifecycle.runMarker
+    };
+    const proof = await request.lifecycle.create(identity);
+    assert.equal(await request.lifecycle.assertCreated(proof), true);
     await assert.rejects(
       Promise.resolve().then(() =>
-        prepared.restore0004.verifyRuntimeIsolation()
+        request.verifyRuntimeIsolation()
       ),
       { code: "synthetic_profile_verifier_failure" }
     );
     assert.deepEqual(behavior.created, ["social-schema-0004"]);
     assert.deepEqual(behavior.operations, []);
     assert.deepEqual(behavior.closed, []);
-    await prepared.restore0004.closeVerifiers();
+    await request.closeVerifiers();
+    assert.equal(await request.lifecycle.remove(proof), true);
+    assert.equal(await request.lifecycle.assertRemoved(proof), true);
   } finally {
     await destroyBackupTransportFixture(fixture);
   }
@@ -1034,7 +1824,7 @@ test("rollback wires 0003 and requires the current 0004 schema verifier after re
     );
     assert.match(
       source,
-      /restoreVerifiers\(\s*names\.rollbackRestore,\s*profile0003\.id\s*\)/u
+      /restoreVerifiers\(\s*names\.rollbackRestore,\s*profile0003\.id,\s*restoreOwnershipLatch\s*\)/u
     );
   } finally {
     await destroyBackupTransportFixture(fixture);
@@ -1179,6 +1969,7 @@ test("provenance binds and consumes only exact Gate 1 and Gate 5 outer operation
       profileId: "social-schema-0003",
       runMarker: RUN_MARKER
     });
+    assert.equal(await rollback.assertDisposable0003Created(proof), true);
     assert.equal(await rollback.restore0003(proof), true);
     await assert.rejects(
       rollback.verifyRestored0003(proof),
@@ -1284,6 +2075,7 @@ test("rollback reuses only the closed confirmation from its tracked profile vali
       profileId: "social-schema-0003",
       runMarker: RUN_MARKER
     });
+    assert.equal(await rollback.assertDisposable0003Created(proof), true);
     assert.equal(await rollback.restore0003(proof), true);
     assert.equal(profileValidationCalls, 1);
     assert.equal(await rollback.verifyRestored0003(proof), true);
@@ -1339,6 +2131,7 @@ test("rollback rejects an invalid logical result before profile verification and
       profileId: "social-schema-0003",
       runMarker: RUN_MARKER
     });
+    assert.equal(await rollback.assertDisposable0003Created(proof), true);
     await assert.rejects(
       rollback.restore0003(proof),
       {
@@ -1547,6 +2340,7 @@ test("provenance failures propagate unchanged without direct-runner fallback", a
       profileId: "social-schema-0003",
       runMarker: RUN_MARKER
     });
+    assert.equal(await rollback.assertDisposable0003Created(proof), true);
     activeFailures.set(
       "rollback_restore_0003",
       failures.get("rollback_restore_0003")

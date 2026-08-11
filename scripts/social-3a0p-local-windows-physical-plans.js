@@ -1344,8 +1344,30 @@ function createWindowsPhysicalPlans(options = {}) {
   const createdPlans = new Set();
   let planDirectoriesCreated = false;
 
-  function restoreVerifiers(database, expectedProfileId) {
-    if (!databaseManager.isAllowedDatabase(database)) {
+  function createRestoreVerifierOwnershipLatch() {
+    let confirmed = false;
+    return Object.freeze({
+      confirm() {
+        confirmed = true;
+        return true;
+      },
+      isConfirmed() {
+        return confirmed;
+      },
+      reset() {
+        confirmed = false;
+        return true;
+      }
+    });
+  }
+
+  function restoreVerifiers(database, expectedProfileId, ownershipLatch) {
+    if (
+      !ownershipLatch ||
+      typeof ownershipLatch.confirm !== "function" ||
+      typeof ownershipLatch.isConfirmed !== "function" ||
+      typeof ownershipLatch.reset !== "function"
+    ) {
       fail("windows_physical_verifier_database_refused");
     }
     const expectedProfile = requireCanonicalSchemaProfile(
@@ -1361,6 +1383,12 @@ function createWindowsPhysicalPlans(options = {}) {
     const get = () => {
       if (closed) fail("windows_physical_restore_verifier_closed");
       if (!gate) {
+        if (
+          ownershipLatch.isConfirmed() !== true ||
+          !databaseManager.isAllowedDatabase(database)
+        ) {
+          fail("windows_physical_verifier_database_refused");
+        }
         const facade = requireRestoreBehaviorFacade(restoreBehavior);
         const verifierTarget = { host: LOCAL_VERIFIER_HOST, port: binding.target.port };
         gate = facade.createRestoreBehaviorVerifiers({
@@ -1394,9 +1422,9 @@ function createWindowsPhysicalPlans(options = {}) {
       return gate;
     };
     return Object.freeze({
-      verifyRuntimeIsolation: () => get().verifiers.verifyRuntimeIsolation(),
-      verifyVault: () => get().verifiers.verifyVault(),
-      verify2ACompatibility: () => get().verifiers.verify2ACompatibility(),
+      verifyRuntimeIsolation: async () => get().verifiers.verifyRuntimeIsolation(),
+      verifyVault: async () => get().verifiers.verifyVault(),
+      verify2ACompatibility: async () => get().verifiers.verify2ACompatibility(),
       async closeVerifiers() {
         if (closed) return;
         closed = true;
@@ -1434,16 +1462,30 @@ function createWindowsPhysicalPlans(options = {}) {
     });
   }
 
-  function lifecycle(database, profileId) {
+  function lifecycle(database, profileId, ownershipLatch) {
     const expected = identity(database, profileId);
     return Object.freeze({
       markedDisposable: true,
       productionLike: false,
       ...expected,
-      create: (candidate) => databaseManager.create(exactIdentity(candidate, expected)),
+      create(candidate) {
+        const exact = exactIdentity(candidate, expected);
+        ownershipLatch.reset();
+        return databaseManager.create(exact);
+      },
       reconcileCreateFailure: (candidate) => databaseManager.reconcile(exactIdentity(candidate, expected)),
-      assertCreated: (proof) => databaseManager.assertCreated(exactProof(proof, expected)),
-      remove: (proof) => databaseManager.remove(exactProof(proof, expected)),
+      async assertCreated(proof) {
+        const exact = exactProof(proof, expected);
+        ownershipLatch.reset();
+        const confirmed = await databaseManager.assertCreated(exact);
+        if (confirmed === true) ownershipLatch.confirm();
+        return confirmed;
+      },
+      remove(proof) {
+        const exact = exactProof(proof, expected);
+        ownershipLatch.reset();
+        return databaseManager.remove(exact);
+      },
       assertRemoved: (proof) => databaseManager.assertRemoved(exactProof(proof, expected))
     });
   }
@@ -1674,8 +1716,17 @@ function createWindowsPhysicalPlans(options = {}) {
     const config = backup.loadRestoreConfig(env, {
       repositoryRoot: options.repositoryRoot
     });
-    const targetLifecycle = lifecycle(targetDatabase, expectedProfile.id);
-    const behavior = restoreVerifiers(targetDatabase, expectedProfile.id);
+    const ownershipLatch = createRestoreVerifierOwnershipLatch();
+    const targetLifecycle = lifecycle(
+      targetDatabase,
+      expectedProfile.id,
+      ownershipLatch
+    );
+    const behavior = restoreVerifiers(
+      targetDatabase,
+      expectedProfile.id,
+      ownershipLatch
+    );
     const baseVerifyRestoredProfile = () =>
       databaseManager.verifyProfile(targetDatabase, expectedProfile.id);
     const verifyRestoredProfile = afterRestoredProfileVerified === undefined
@@ -1721,7 +1772,12 @@ function createWindowsPhysicalPlans(options = {}) {
     let sourcePlan;
     let restoreConfig;
     let restored0003ProfileConfirmation;
-    const restoreLifecycle = lifecycle(names.rollbackRestore, profile0003.id);
+    const restoreOwnershipLatch = createRestoreVerifierOwnershipLatch();
+    const restoreLifecycle = lifecycle(
+      names.rollbackRestore,
+      profile0003.id,
+      restoreOwnershipLatch
+    );
     return Object.freeze({
       markedDisposable: true,
       productionLike: false,
@@ -1761,9 +1817,10 @@ function createWindowsPhysicalPlans(options = {}) {
       async apply0004() {
         return databaseManager.applyProfile(names.rollbackSource, profile0004.id);
       },
-      createDisposable0003: (candidate) => databaseManager.create(exactIdentity(candidate, restoreIdentity)),
-      reconcileDisposable0003CreateFailure: (candidate) => databaseManager.reconcile(exactIdentity(candidate, restoreIdentity)),
-      assertDisposable0003Created: (proof) => databaseManager.assertCreated(exactProof(proof, restoreIdentity)),
+      createDisposable0003: restoreLifecycle.create,
+      reconcileDisposable0003CreateFailure:
+        restoreLifecycle.reconcileCreateFailure,
+      assertDisposable0003Created: restoreLifecycle.assertCreated,
       async restore0003(proof) {
         exactProof(proof, restoreIdentity);
         const transport = requireBackupTransport(names.rollbackRestore);
@@ -1772,7 +1829,8 @@ function createWindowsPhysicalPlans(options = {}) {
         restoreConfig = backup.loadRestoreConfig(env, { repositoryRoot: options.repositoryRoot });
         const behavior = restoreVerifiers(
           names.rollbackRestore,
-          profile0003.id
+          profile0003.id,
+          restoreOwnershipLatch
         );
         const request = Object.freeze(bindProvenanceOperation({
           config: restoreConfig,
@@ -1813,8 +1871,8 @@ function createWindowsPhysicalPlans(options = {}) {
         }
         return true;
       },
-      removeDisposable0003: (proof) => databaseManager.remove(exactProof(proof, restoreIdentity)),
-      assertDisposable0003Removed: (proof) => databaseManager.assertRemoved(exactProof(proof, restoreIdentity)),
+      removeDisposable0003: restoreLifecycle.remove,
+      assertDisposable0003Removed: restoreLifecycle.assertRemoved,
       async reapply0004() {
         return databaseManager.applyProfile(names.rollbackSource, profile0004.id);
       },
