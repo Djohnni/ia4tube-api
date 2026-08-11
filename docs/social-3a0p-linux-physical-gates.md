@@ -1,14 +1,14 @@
 # Checkpoint Social 3A-0P — gates físicos Linux isolados
 
-## Contrato canônico do transporte fechado dos testes Windows PowerShell
+## Contrato canônico da fixture temporal sintética do Gate 3 S15
 
 Esta rota existe somente na branch
-`social/checkpoint-3a0p-windows-powershell-closed-transport-20260810`, criada a
-partir do commit exato `3bdc9ce290400079418f64dfbf088d093c2fff24`. O único commit autorizado
+`social/checkpoint-3a0p-linux-oauth-expiry-fixture-20260810`, criada a partir do
+commit exato `10bd725af02129a6d2795d82dc6d7230c8b7f898`. O único commit autorizado
 deve ter esse commit como pai imediato e a mensagem integral:
 
 ```text
-[run-social-3a0p-linux-gate] use closed PowerShell diagnostic transport
+[run-social-3a0p-linux-gate] preserve synthetic OAuth expiry ordering
 ```
 
 O produto permanece idêntico a `fcfc92419021dae5f77baad731c634b10c275c5b`:
@@ -16,12 +16,13 @@ O produto permanece idêntico a `fcfc92419021dae5f77baad731c634b10c275c5b`:
 `package.json` e `package-lock.json` não são alterados. A rota não acrescenta
 grants, não muda políticas RLS e não modifica schema, SCRAM, roles, produto,
 backup, restore, dependências ou os testes de segurança antigos. Os helpers
-PowerShell testados permanecem byte-idênticos, assim como os objetos sintéticos,
-os validadores JavaScript e as assertions funcionais. A única correção nos dois
-testes substitui `ConvertTo-Json` e o `JSON.parse` consumidor pelo protocolo
-escalar fechado `IA4REC1`, sem aumentar o timeout de 20.000 ms. O workflow
-restaura a rota normal: `npm test` uma vez no Windows e, somente após seu
-sucesso, o job Linux físico preservado.
+PowerShell testados e o protocolo `IA4REC1` permanecem byte-semanticamente
+inalterados. A correção atual está contida exclusivamente na fixture sintética
+S15 do harness físico descartável: ela preserva a constraint de produto e
+restaura a ordem `created_at < expires_at < CURRENT_TIMESTAMP` sem espera,
+retry, relógio global ou timestamp na evidência. O workflow mantém a rota
+normal: `npm test` uma vez no Windows e, somente após seu sucesso, o job Linux
+físico preservado.
 
 ## Resultados comprovados das rotas anteriores
 
@@ -244,6 +245,55 @@ ou `windows_powershell_environment_profile_unresolved`, se não houver. O run
 O arquivo do probe permanece no histórico e no repositório, mas não integra a
 rota executável atual do workflow.
 
+## Run físico anterior e causa comprovada do S15
+
+O run `31447048809`, no commit
+`10bd725af02129a6d2795d82dc6d7230c8b7f898`, aprovou no Windows os 125 testes
+seriais e a etapa concorrente com 1.313 aprovações, zero falhas, 2 skips e 5
+TODOs. No Linux, aprovou o pré-gate, os Gates 1 e 2, o Gate 3 base B1–B10 e as
+subetapas suplementares S1–S14. A primeira falha ocorreu em S15; Gates 4 e 5
+não foram executados. O cleanup foi aprovado, com zero resíduos e zero segredo
+exposto.
+
+A procedência sanitizada da primeira falha foi: fase
+`concurrency_oauth_idempotency`, substep `S15`, operation
+`supplemental_oauth_force_expiry`, operationClass `postgres_transaction`,
+causalCode `gate3_error_code_23514`, lastCompletedSubstep `S14`,
+externalProcessStarted `false`, exitCode `null` e signal `null`.
+
+A causa comprovada é
+`gate3_s15_synthetic_expiry_fixture_violates_creation_order`. O S15 anterior
+alterava isoladamente `expires_at` para um segundo antes do horário atual. Como
+S14 acabara de criar a autorização, essa mutação produzia
+`expires_at < created_at` e o PostgreSQL recusava corretamente a linha com
+SQLSTATE `23514`. A migration permanece correta e byte-idêntica: a constraint
+`social_oauth_transactions_expiry_after_creation` exige
+`expires_at > created_at`.
+
+## Correção temporal sintética fechada do S15
+
+S13 continua preparando o material sintético, S14 continua criando a
+autorização pelo repositório OAuth real do produto, S15 continua sendo uma
+mutação controlada no PostgreSQL descartável e S16 continua exigindo a recusa
+`authorization_expired`. Somente S15 muda: uma única instrução SQL parametrizada
+atualiza simultaneamente `created_at` para dois segundos antes do horário atual
+e `expires_at` para um segundo antes do horário atual. Assim, a fixture satisfaz
+deterministicamente `created_at < expires_at < CURRENT_TIMESTAMP`.
+
+A atualização permanece limitada ao `company_id` e `id` sintéticos exatos e
+recusa linhas com `consumed_at`, `cancelled_at` ou `failed_at` preenchidos. O
+`RETURNING` comprova internamente, por booleanos fechados, a identidade do alvo,
+a ordem temporal e os três estados nulos; exatamente uma linha deve ser
+atingida. Nenhum ID ou timestamp é transportado para a evidência. Alvo ausente
+ou múltiplo falha como `linux_gate_oauth_force_expiry_target_invalid`; relação
+temporal inválida falha como
+`linux_gate_oauth_force_expiry_temporal_order_invalid`.
+
+Não há `setTimeout`, sleep, timer, alteração de timezone, mock global de `Date`,
+retry ou espera baseada em relógio externo. Este documento registra somente o
+resultado físico anterior e o contrato da correção; nenhum run desta nova
+branch é declarado como executado ou aprovado.
+
 ## Protocolo escalar fechado IA4REC1
 
 Os dois testes File.Replace continuam iniciando diretamente o Windows
@@ -288,7 +338,7 @@ Falhas de processo e protocolo são publicadas somente como
 
 ## Cadeia imutável e inventários fechados
 
-A cadeia autorizada é linear e contém nove commits entre a base da manutenção
+A cadeia autorizada é linear e contém dez commits entre a base da manutenção
 e o novo `HEAD`:
 
 1. `8eb4c4d71c6593f9c3e448be6ac52b1b0e8ba931`, pai
@@ -364,7 +414,7 @@ e o novo `HEAD`:
    `tests/social-3a0p-linux-gate.test.js`,
    `tests/social-3a0p-linux-workflow.test.js` e
    `tests/social-3a0p-windows-powershell-env-probe.test.js`.
-9. O novo `HEAD`, pai exato
+9. `10bd725af02129a6d2795d82dc6d7230c8b7f898`, pai exato
    `3bdc9ce290400079418f64dfbf088d093c2fff24`, mensagem
    `[run-social-3a0p-linux-gate] use closed PowerShell diagnostic transport` e
    inventário fechado:
@@ -375,9 +425,20 @@ e o novo `HEAD`:
    `tests/social-3a0p-linux-workflow.test.js`,
    `tests/social-3a0p-local-file-replace-argument-powershell.test.js` e
    `tests/social-3a0p-local-file-replace-powershell-diagnostic.test.js`.
+10. O novo `HEAD`, pai exato
+    `10bd725af02129a6d2795d82dc6d7230c8b7f898`, mensagem
+    `[run-social-3a0p-linux-gate] preserve synthetic OAuth expiry ordering` e
+    inventário fechado:
+    `.github/workflows/social-3a0p-linux-physical-gates.yml`,
+    `docs/social-3a0p-linux-physical-gates.md`,
+    `scripts/social-3a0p-linux-gate.js`,
+    `scripts/social-3a0p-linux-physical-gates.js`,
+    `tests/social-3a0p-linux-gate.test.js`,
+    `tests/social-3a0p-linux-physical-gates.test.js` e
+    `tests/social-3a0p-linux-workflow.test.js`.
 
 Os guards dos dois jobs verificam pais, mensagens, ancestralidade linear,
-contagem nove e cada um desses inventários sem prefixo, glob ou diretório
+contagem dez e cada um desses inventários sem prefixo, glob ou diretório
 inteiro.
 
 ## Restauração da rota executável normal

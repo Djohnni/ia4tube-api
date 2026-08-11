@@ -38,8 +38,8 @@ const {
 } = require("./social-3a0p-local-runtime-evidence-metrics");
 
 const BRANCH =
-  "social/checkpoint-3a0p-windows-powershell-closed-transport-20260810";
-const BASE_COMMIT = "3bdc9ce290400079418f64dfbf088d093c2fff24";
+  "social/checkpoint-3a0p-linux-oauth-expiry-fixture-20260810";
+const BASE_COMMIT = "10bd725af02129a6d2795d82dc6d7230c8b7f898";
 const PRODUCT_COMMIT = "fcfc92419021dae5f77baad731c634b10c275c5b";
 const MARKER = "[run-social-3a0p-linux-gate]";
 const RUN_MARKER_PREFIX = "ia4tube-social-3a0p-linux-";

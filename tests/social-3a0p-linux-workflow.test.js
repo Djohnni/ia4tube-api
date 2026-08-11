@@ -8,8 +8,9 @@ const test = require("node:test");
 const REPOSITORY_ROOT = path.resolve(__dirname, "..");
 const WORKFLOW_RELATIVE_PATH = ".github/workflows/social-3a0p-linux-physical-gates.yml";
 const WORKFLOW_PATH = path.join(REPOSITORY_ROOT, ...WORKFLOW_RELATIVE_PATH.split("/"));
-const BRANCH = "social/checkpoint-3a0p-windows-powershell-closed-transport-20260810";
-const AUTHORIZED_PARENT = "3bdc9ce290400079418f64dfbf088d093c2fff24";
+const BRANCH = "social/checkpoint-3a0p-linux-oauth-expiry-fixture-20260810";
+const AUTHORIZED_PARENT = "10bd725af02129a6d2795d82dc6d7230c8b7f898";
+const CLOSED_TRANSPORT_PARENT = "3bdc9ce290400079418f64dfbf088d093c2fff24";
 const ENV_PROVENANCE_PARENT = "02b8ae2ba09fecae4e0dac99bc2f8a6d557fc027";
 const NATIVE_STABILITY_PARENT = "e2072df65d371fd7c0cf8429fb072dc437df2d27";
 const ENVIRONMENT_CLEAN_PARENT = "7e6b0d8ed71daf75481f28a88832c4748f4ee648";
@@ -26,7 +27,8 @@ const PROVENANCE_MESSAGE = "[run-social-3a0p-linux-gate] classify Gate 3 failure
 const MAINTENANCE_MESSAGE = "[test] serialize process-lifecycle security tests";
 const NATIVE_STABILITY_MESSAGE = "[run-social-3a0p-linux-gate] stabilize hosted Windows native tests";
 const ENV_PROVENANCE_MESSAGE = "[run-social-3a0p-linux-gate] diagnose hosted Windows PowerShell environment";
-const MESSAGE = "[run-social-3a0p-linux-gate] use closed PowerShell diagnostic transport";
+const CLOSED_TRANSPORT_MESSAGE = "[run-social-3a0p-linux-gate] use closed PowerShell diagnostic transport";
+const MESSAGE = "[run-social-3a0p-linux-gate] preserve synthetic OAuth expiry ordering";
 const ZERO_SHA = "0000000000000000000000000000000000000000";
 const JOB_IF = [
   "github.event_name == 'push'",
@@ -110,7 +112,7 @@ const ENV_PROVENANCE_FILES = Object.freeze([
   "tests/social-3a0p-linux-workflow.test.js",
   "tests/social-3a0p-windows-powershell-env-probe.test.js"
 ]);
-const AUTHORIZED_FILES = Object.freeze([
+const CLOSED_TRANSPORT_FILES = Object.freeze([
   ".github/workflows/social-3a0p-linux-physical-gates.yml",
   "docs/social-3a0p-linux-physical-gates.md",
   "scripts/social-3a0p-linux-gate.js",
@@ -118,6 +120,15 @@ const AUTHORIZED_FILES = Object.freeze([
   "tests/social-3a0p-linux-workflow.test.js",
   "tests/social-3a0p-local-file-replace-argument-powershell.test.js",
   "tests/social-3a0p-local-file-replace-powershell-diagnostic.test.js"
+]);
+const AUTHORIZED_FILES = Object.freeze([
+  ".github/workflows/social-3a0p-linux-physical-gates.yml",
+  "docs/social-3a0p-linux-physical-gates.md",
+  "scripts/social-3a0p-linux-gate.js",
+  "scripts/social-3a0p-linux-physical-gates.js",
+  "tests/social-3a0p-linux-gate.test.js",
+  "tests/social-3a0p-linux-physical-gates.test.js",
+  "tests/social-3a0p-linux-workflow.test.js"
 ]);
 const POWERSHELL_ENV_PROBE_COMMAND = "node scripts/social-3a0p-windows-powershell-env-probe.js";
 const WINDOWS_STABILIZED_TEST_RUN = `$ErrorActionPreference = "Stop"
@@ -186,6 +197,7 @@ function assertGuardInventory(source, style) {
         "$environmentCleanFiles = @",
         "$nativeStabilityFiles = @",
         "$environmentProvenanceFiles = @",
+        "$closedTransportFiles = @",
         "$authorizedFiles = @"
       ]
     : [
@@ -197,6 +209,7 @@ function assertGuardInventory(source, style) {
         "environment_clean_files=",
         "native_stability_files=",
         "environment_provenance_files=",
+        "closed_transport_files=",
         "authorized_files="
       ];
   assert.deepEqual(extractQuotedArray(source, declarations[0]), MAINTENANCE_FILES);
@@ -207,11 +220,12 @@ function assertGuardInventory(source, style) {
   assert.deepEqual(extractQuotedArray(source, declarations[5]), ENVIRONMENT_CLEAN_FILES);
   assert.deepEqual(extractQuotedArray(source, declarations[6]), NATIVE_STABILITY_FILES);
   assert.deepEqual(extractQuotedArray(source, declarations[7]), ENV_PROVENANCE_FILES);
-  assert.deepEqual(extractQuotedArray(source, declarations[8]), AUTHORIZED_FILES);
+  assert.deepEqual(extractQuotedArray(source, declarations[8]), CLOSED_TRANSPORT_FILES);
+  assert.deepEqual(extractQuotedArray(source, declarations[9]), AUTHORIZED_FILES);
   assert.equal(source.includes("*"), false);
 }
 
-test("closed PowerShell transport is the repository's sole workflow and is strict JSON", () => {
+test("synthetic OAuth expiry fixture is the repository's sole workflow and is strict JSON", () => {
   const entries = fs.readdirSync(path.dirname(WORKFLOW_PATH), { withFileTypes: true });
   assert.equal(entries.length, 1);
   assert.equal(entries[0].isFile(), true);
@@ -225,7 +239,7 @@ test("workflow permits only the exact first creation push and has two ordered na
   assert.deepEqual(workflow.on, { push: { branches: [BRANCH] } });
   assert.deepEqual(workflow.permissions, { contents: "read" });
   assert.deepEqual(workflow.concurrency, {
-    group: "social-3a0p-windows-powershell-closed-transport",
+    group: "social-3a0p-linux-oauth-expiry-fixture",
     "cancel-in-progress": false
   });
 
@@ -249,10 +263,11 @@ test("workflow permits only the exact first creation push and has two ordered na
   });
 });
 
-test("both jobs enforce the closed-transport commit and preserve all eight earlier commit contracts", () => {
+test("both jobs enforce the OAuth expiry fixture commit and preserve all nine earlier commit contracts", () => {
   const { workflow } = readWorkflow();
   const { windows, physical } = jobs(workflow);
   assert.equal(workflow.env.SOCIAL_3A0P_AUTHORIZED_PARENT, AUTHORIZED_PARENT);
+  assert.equal(workflow.env.SOCIAL_3A0P_CLOSED_TRANSPORT_PARENT, CLOSED_TRANSPORT_PARENT);
   assert.equal(workflow.env.SOCIAL_3A0P_ENV_PROVENANCE_PARENT, ENV_PROVENANCE_PARENT);
   assert.equal(workflow.env.SOCIAL_3A0P_NATIVE_STABILITY_PARENT, NATIVE_STABILITY_PARENT);
   assert.equal(workflow.env.SOCIAL_3A0P_ENVIRONMENT_CLEAN_PARENT, ENVIRONMENT_CLEAN_PARENT);
@@ -269,6 +284,7 @@ test("both jobs enforce the closed-transport commit and preserve all eight earli
   assert.equal(workflow.env.SOCIAL_3A0P_MAINTENANCE_MESSAGE, MAINTENANCE_MESSAGE);
   assert.equal(workflow.env.SOCIAL_3A0P_NATIVE_STABILITY_MESSAGE, NATIVE_STABILITY_MESSAGE);
   assert.equal(workflow.env.SOCIAL_3A0P_ENV_PROVENANCE_MESSAGE, ENV_PROVENANCE_MESSAGE);
+  assert.equal(workflow.env.SOCIAL_3A0P_CLOSED_TRANSPORT_MESSAGE, CLOSED_TRANSPORT_MESSAGE);
   assert.equal(workflow.env.SOCIAL_3A0P_AUTHORIZED_MESSAGE, MESSAGE);
 
   const windowsGuard = windows.steps.find((step) => step.name === "Verify immutable execution contract");
@@ -284,6 +300,7 @@ test("both jobs enforce the closed-transport commit and preserve all eight earli
   assertGuardInventory(linuxGuard.run, "bash");
   for (const guard of [windowsGuard.run, linuxGuard.run]) {
     assert.ok(guard.includes("SOCIAL_3A0P_AUTHORIZED_PARENT"));
+    assert.ok(guard.includes("SOCIAL_3A0P_CLOSED_TRANSPORT_PARENT"));
     assert.ok(guard.includes("SOCIAL_3A0P_ENV_PROVENANCE_PARENT"));
     assert.ok(guard.includes("SOCIAL_3A0P_NATIVE_STABILITY_PARENT"));
     assert.ok(guard.includes("SOCIAL_3A0P_ENVIRONMENT_CLEAN_PARENT"));
@@ -300,6 +317,7 @@ test("both jobs enforce the closed-transport commit and preserve all eight earli
     assert.ok(guard.includes("SOCIAL_3A0P_MAINTENANCE_MESSAGE"));
     assert.ok(guard.includes("SOCIAL_3A0P_NATIVE_STABILITY_MESSAGE"));
     assert.ok(guard.includes("SOCIAL_3A0P_ENV_PROVENANCE_MESSAGE"));
+    assert.ok(guard.includes("SOCIAL_3A0P_CLOSED_TRANSPORT_MESSAGE"));
     assert.ok(guard.includes("SOCIAL_3A0P_PRODUCT_COMMIT"));
     assert.ok(guard.includes("src"));
     assert.ok(guard.includes("db"));
@@ -314,7 +332,8 @@ test("both jobs enforce the closed-transport commit and preserve all eight earli
   for (const contract of [
     'Assert-Equal (Get-GitText -Arguments @("rev-parse", "HEAD")) $env:AUTHORIZED_SHA',
     'Assert-Equal (Get-GitText -Arguments @("rev-parse", "HEAD^")) $env:SOCIAL_3A0P_AUTHORIZED_PARENT',
-    'Assert-Equal (Get-GitText -Arguments @("rev-parse", "$($env:SOCIAL_3A0P_AUTHORIZED_PARENT)^")) $env:SOCIAL_3A0P_ENV_PROVENANCE_PARENT',
+    'Assert-Equal (Get-GitText -Arguments @("rev-parse", "$($env:SOCIAL_3A0P_AUTHORIZED_PARENT)^")) $env:SOCIAL_3A0P_CLOSED_TRANSPORT_PARENT',
+    'Assert-Equal (Get-GitText -Arguments @("rev-parse", "$($env:SOCIAL_3A0P_CLOSED_TRANSPORT_PARENT)^")) $env:SOCIAL_3A0P_ENV_PROVENANCE_PARENT',
     'Assert-Equal (Get-GitText -Arguments @("rev-parse", "$($env:SOCIAL_3A0P_ENV_PROVENANCE_PARENT)^")) $env:SOCIAL_3A0P_NATIVE_STABILITY_PARENT',
     'Assert-Equal (Get-GitText -Arguments @("rev-parse", "$($env:SOCIAL_3A0P_NATIVE_STABILITY_PARENT)^")) $env:SOCIAL_3A0P_ENVIRONMENT_CLEAN_PARENT',
     'Assert-Equal (Get-GitText -Arguments @("rev-parse", "$($env:SOCIAL_3A0P_ENVIRONMENT_CLEAN_PARENT)^")) $env:SOCIAL_3A0P_IDENTIFICATION_PARENT',
@@ -323,7 +342,8 @@ test("both jobs enforce the closed-transport commit and preserve all eight earli
     'Assert-Equal (Get-GitText -Arguments @("rev-parse", "$($env:SOCIAL_3A0P_NATIVE_PREFLIGHT_PARENT)^")) $env:SOCIAL_3A0P_PROVENANCE_PARENT',
     'Assert-Equal (Get-GitText -Arguments @("rev-parse", "$($env:SOCIAL_3A0P_PROVENANCE_PARENT)^")) $env:SOCIAL_3A0P_MAINTENANCE_PARENT',
     'Assert-Equal (Get-GitText -Arguments @("log", "-1", "--pretty=%B")) $env:SOCIAL_3A0P_AUTHORIZED_MESSAGE',
-    'Assert-Equal (Get-GitText -Arguments @("log", "-1", "--pretty=%B", $env:SOCIAL_3A0P_AUTHORIZED_PARENT)) $env:SOCIAL_3A0P_ENV_PROVENANCE_MESSAGE',
+    'Assert-Equal (Get-GitText -Arguments @("log", "-1", "--pretty=%B", $env:SOCIAL_3A0P_AUTHORIZED_PARENT)) $env:SOCIAL_3A0P_CLOSED_TRANSPORT_MESSAGE',
+    'Assert-Equal (Get-GitText -Arguments @("log", "-1", "--pretty=%B", $env:SOCIAL_3A0P_CLOSED_TRANSPORT_PARENT)) $env:SOCIAL_3A0P_ENV_PROVENANCE_MESSAGE',
     'Assert-Equal (Get-GitText -Arguments @("log", "-1", "--pretty=%B", $env:SOCIAL_3A0P_ENV_PROVENANCE_PARENT)) $env:SOCIAL_3A0P_NATIVE_STABILITY_MESSAGE',
     'Assert-Equal (Get-GitText -Arguments @("log", "-1", "--pretty=%B", $env:SOCIAL_3A0P_NATIVE_STABILITY_PARENT)) $env:SOCIAL_3A0P_ENVIRONMENT_CLEAN_MESSAGE',
     'Assert-Equal (Get-GitText -Arguments @("log", "-1", "--pretty=%B", $env:SOCIAL_3A0P_ENVIRONMENT_CLEAN_PARENT)) $env:SOCIAL_3A0P_IDENTIFICATION_MESSAGE',
@@ -331,9 +351,10 @@ test("both jobs enforce the closed-transport commit and preserve all eight earli
     'Assert-Equal (Get-GitText -Arguments @("log", "-1", "--pretty=%B", $env:SOCIAL_3A0P_SANITIZATION_PARENT)) $env:SOCIAL_3A0P_NATIVE_PREFLIGHT_MESSAGE',
     'Assert-Equal (Get-GitText -Arguments @("log", "-1", "--pretty=%B", $env:SOCIAL_3A0P_NATIVE_PREFLIGHT_PARENT)) $env:SOCIAL_3A0P_PROVENANCE_MESSAGE',
     'Assert-Equal (Get-GitText -Arguments @("log", "-1", "--pretty=%B", $env:SOCIAL_3A0P_PROVENANCE_PARENT)) $env:SOCIAL_3A0P_MAINTENANCE_MESSAGE',
-    'Assert-Equal (Get-GitText -Arguments @("rev-list", "--count", $commitRange)) "9"',
+    'Assert-Equal (Get-GitText -Arguments @("rev-list", "--count", $commitRange)) "10"',
     'Assert-SingleParent "HEAD"',
     'Assert-SingleParent $env:SOCIAL_3A0P_AUTHORIZED_PARENT',
+    'Assert-SingleParent $env:SOCIAL_3A0P_CLOSED_TRANSPORT_PARENT',
     'Assert-SingleParent $env:SOCIAL_3A0P_ENV_PROVENANCE_PARENT',
     'Assert-SingleParent $env:SOCIAL_3A0P_NATIVE_STABILITY_PARENT',
     'Assert-SingleParent $env:SOCIAL_3A0P_ENVIRONMENT_CLEAN_PARENT',
@@ -349,6 +370,7 @@ test("both jobs enforce the closed-transport commit and preserve all eight earli
     'Assert-ExactFiles $environmentCleanChanged $environmentCleanFiles',
     'Assert-ExactFiles $nativeStabilityChanged $nativeStabilityFiles',
     'Assert-ExactFiles $environmentProvenanceChanged $environmentProvenanceFiles',
+    'Assert-ExactFiles $closedTransportChanged $closedTransportFiles',
     'Assert-ExactFiles $authorizedChanged $authorizedFiles'
   ]) {
     assert.ok(windowsGuard.run.includes(contract), contract);
@@ -356,7 +378,8 @@ test("both jobs enforce the closed-transport commit and preserve all eight earli
   for (const contract of [
     'test "$(git rev-parse HEAD)" = "$AUTHORIZED_SHA"',
     'test "$(git rev-parse HEAD^)" = "$SOCIAL_3A0P_AUTHORIZED_PARENT"',
-    'test "$(git rev-parse "$SOCIAL_3A0P_AUTHORIZED_PARENT^")" = "$SOCIAL_3A0P_ENV_PROVENANCE_PARENT"',
+    'test "$(git rev-parse "$SOCIAL_3A0P_AUTHORIZED_PARENT^")" = "$SOCIAL_3A0P_CLOSED_TRANSPORT_PARENT"',
+    'test "$(git rev-parse "$SOCIAL_3A0P_CLOSED_TRANSPORT_PARENT^")" = "$SOCIAL_3A0P_ENV_PROVENANCE_PARENT"',
     'test "$(git rev-parse "$SOCIAL_3A0P_ENV_PROVENANCE_PARENT^")" = "$SOCIAL_3A0P_NATIVE_STABILITY_PARENT"',
     'test "$(git rev-parse "$SOCIAL_3A0P_NATIVE_STABILITY_PARENT^")" = "$SOCIAL_3A0P_ENVIRONMENT_CLEAN_PARENT"',
     'test "$(git rev-parse "$SOCIAL_3A0P_ENVIRONMENT_CLEAN_PARENT^")" = "$SOCIAL_3A0P_IDENTIFICATION_PARENT"',
@@ -365,7 +388,8 @@ test("both jobs enforce the closed-transport commit and preserve all eight earli
     'test "$(git rev-parse "$SOCIAL_3A0P_NATIVE_PREFLIGHT_PARENT^")" = "$SOCIAL_3A0P_PROVENANCE_PARENT"',
     'test "$(git rev-parse "$SOCIAL_3A0P_PROVENANCE_PARENT^")" = "$SOCIAL_3A0P_MAINTENANCE_PARENT"',
     'test "$(git log -1 --pretty=%B)" = "$SOCIAL_3A0P_AUTHORIZED_MESSAGE"',
-    'test "$(git log -1 --pretty=%B "$SOCIAL_3A0P_AUTHORIZED_PARENT")" = "$SOCIAL_3A0P_ENV_PROVENANCE_MESSAGE"',
+    'test "$(git log -1 --pretty=%B "$SOCIAL_3A0P_AUTHORIZED_PARENT")" = "$SOCIAL_3A0P_CLOSED_TRANSPORT_MESSAGE"',
+    'test "$(git log -1 --pretty=%B "$SOCIAL_3A0P_CLOSED_TRANSPORT_PARENT")" = "$SOCIAL_3A0P_ENV_PROVENANCE_MESSAGE"',
     'test "$(git log -1 --pretty=%B "$SOCIAL_3A0P_ENV_PROVENANCE_PARENT")" = "$SOCIAL_3A0P_NATIVE_STABILITY_MESSAGE"',
     'test "$(git log -1 --pretty=%B "$SOCIAL_3A0P_NATIVE_STABILITY_PARENT")" = "$SOCIAL_3A0P_ENVIRONMENT_CLEAN_MESSAGE"',
     'test "$(git log -1 --pretty=%B "$SOCIAL_3A0P_ENVIRONMENT_CLEAN_PARENT")" = "$SOCIAL_3A0P_IDENTIFICATION_MESSAGE"',
@@ -380,12 +404,13 @@ test("both jobs enforce the closed-transport commit and preserve all eight earli
     'assert_exact_changed_files "$SOCIAL_3A0P_IDENTIFICATION_PARENT" "$SOCIAL_3A0P_ENVIRONMENT_CLEAN_PARENT" "${identification_files[@]}"',
     'assert_exact_changed_files "$SOCIAL_3A0P_ENVIRONMENT_CLEAN_PARENT" "$SOCIAL_3A0P_NATIVE_STABILITY_PARENT" "${environment_clean_files[@]}"',
     'assert_exact_changed_files "$SOCIAL_3A0P_NATIVE_STABILITY_PARENT" "$SOCIAL_3A0P_ENV_PROVENANCE_PARENT" "${native_stability_files[@]}"',
-    'assert_exact_changed_files "$SOCIAL_3A0P_ENV_PROVENANCE_PARENT" "$SOCIAL_3A0P_AUTHORIZED_PARENT" "${environment_provenance_files[@]}"',
+    'assert_exact_changed_files "$SOCIAL_3A0P_ENV_PROVENANCE_PARENT" "$SOCIAL_3A0P_CLOSED_TRANSPORT_PARENT" "${environment_provenance_files[@]}"',
+    'assert_exact_changed_files "$SOCIAL_3A0P_CLOSED_TRANSPORT_PARENT" "$SOCIAL_3A0P_AUTHORIZED_PARENT" "${closed_transport_files[@]}"',
     'assert_exact_changed_files "$SOCIAL_3A0P_AUTHORIZED_PARENT" HEAD "${authorized_files[@]}"'
   ]) {
     assert.ok(linuxGuard.run.includes(contract), contract);
   }
-  assert.ok(linuxGuard.run.includes('test "$(git rev-list --count "$SOCIAL_3A0P_MAINTENANCE_PARENT..HEAD")" = "9"'));
+  assert.ok(linuxGuard.run.includes('test "$(git rev-list --count "$SOCIAL_3A0P_MAINTENANCE_PARENT..HEAD")" = "10"'));
 });
 
 test("actions are pinned and each native job installs its own lockfile without cache or scripts", () => {

@@ -1480,10 +1480,42 @@ async function runConcurrencyOAuthIdempotencyGate(state, sensitiveMarkers, depen
     });
     await runGate3Substep("S14", "postgres_transaction", () => oauthA.createAuthorization(expiredInput));
     await runGate3Substep("S15", "postgres_transaction", () =>
-      withTransaction(state.pools.migration, (client) => client.query(
-        "UPDATE ia4tube_social.social_oauth_transactions SET expires_at=CURRENT_TIMESTAMP-INTERVAL '1 second' WHERE company_id=$1 AND id=$2",
-        [a.fixture.companyId, a.fixture.expiredAuthorizationId]
-      ), { role: OWNER_ROLE, companyId: a.fixture.companyId }));
+      withTransaction(state.pools.migration, async (client) => {
+        const forcedExpiry = await client.query([
+          "UPDATE ia4tube_social.social_oauth_transactions",
+          "SET created_at=CURRENT_TIMESTAMP-INTERVAL '2 seconds',",
+          " expires_at=CURRENT_TIMESTAMP-INTERVAL '1 second'",
+          "WHERE company_id=$1 AND id=$2",
+          " AND consumed_at IS NULL",
+          " AND cancelled_at IS NULL",
+          " AND failed_at IS NULL",
+          "RETURNING",
+          " id=$2 AS id_matches,",
+          " expires_at>created_at AS expiry_after_creation,",
+          " expires_at<CURRENT_TIMESTAMP AS expiry_before_current,",
+          " consumed_at IS NULL AS consumed_at_is_null,",
+          " cancelled_at IS NULL AS cancelled_at_is_null,",
+          " failed_at IS NULL AS failed_at_is_null"
+        ].join("\n"), [a.fixture.companyId, a.fixture.expiredAuthorizationId]);
+        if (forcedExpiry?.rowCount !== 1 || forcedExpiry.rows?.length !== 1) {
+          fail("linux_gate_oauth_force_expiry_target_invalid");
+        }
+        const proof = forcedExpiry.rows[0];
+        if (
+          proof?.id_matches !== true ||
+          proof?.consumed_at_is_null !== true ||
+          proof?.cancelled_at_is_null !== true ||
+          proof?.failed_at_is_null !== true
+        ) {
+          fail("linux_gate_oauth_force_expiry_target_invalid");
+        }
+        if (
+          proof.expiry_after_creation !== true ||
+          proof.expiry_before_current !== true
+        ) {
+          fail("linux_gate_oauth_force_expiry_temporal_order_invalid");
+        }
+      }, { role: OWNER_ROLE, companyId: a.fixture.companyId }));
     await runGate3Substep("S16", "postgres_transaction", () => expectErrorCode(
       () => oauthA.consumeAuthorization({
         authorizationHandle: expiredInput.authorizationHandle,

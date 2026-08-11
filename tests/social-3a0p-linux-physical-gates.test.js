@@ -130,6 +130,21 @@ async function withSupplementalGate3Doubles(operation, options = {}) {
       async query(text, values = []) {
         const sql = String(text);
         observations.queries.push({ text: sql, values: snapshot(values) });
+        if (sql.includes("UPDATE ia4tube_social.social_oauth_transactions")) {
+          if ((options.s15TargetState || "open") !== "open") {
+            return { rowCount: 0, rows: [] };
+          }
+          const proof = {
+            id_matches: options.s15IdMatches !== false,
+            expiry_after_creation: options.s15ExpiryAfterCreation !== false,
+            expiry_before_current: options.s15ExpiryBeforeCurrent !== false,
+            consumed_at_is_null: options.s15ConsumedAtIsNull !== false,
+            cancelled_at_is_null: options.s15CancelledAtIsNull !== false,
+            failed_at_is_null: options.s15FailedAtIsNull !== false
+          };
+          const rowCount = options.s15RowCount ?? 1;
+          return { rowCount, rows: Array.from({ length: rowCount }, () => ({ ...proof })) };
+        }
         if (sql.includes("SELECT id::text AS id FROM ia4tube_social.social_connections")) {
           return { rows: [{ id: winningConnectionId }] };
         }
@@ -279,6 +294,22 @@ async function executeSupplementalGate3(options = {}) {
       operationCounts
     };
   }, options);
+}
+
+function supplementalGate3Source() {
+  return fs.readFileSync(
+    path.join(ROOT, "scripts/social-3a0p-linux-physical-gates.js"),
+    "utf8"
+  );
+}
+
+function supplementalSubstepSource(source, current, next) {
+  const start = source.indexOf(`await runGate3Substep("${current}"`);
+  const end = source.indexOf(`await runGate3Substep("${next}"`, start);
+  assert.notEqual(start, -1);
+  assert.notEqual(end, -1);
+  assert.equal(end > start, true);
+  return source.slice(start, end);
 }
 
 function inventoryContextProof(overrides = {}) {
@@ -2099,6 +2130,147 @@ test("supplemental Gate 3 exposes every closed S1-S30 pass-through boundary", ()
   assert.match(source, /runGate3Substep\("S12", "postgres_concurrent_transactions", \(\) => Promise\.all\(\[/);
   assert.match(source, /runGate3Substep\("S22", "postgres_concurrent_transactions", \(\) =>\s*Promise\.all\(\[/);
   assert.equal((source.match(/runGate3Substep\("S(?:[1-9]|[12][0-9]|30)"/g) || []).length, 30);
+});
+
+test("S13-S16 S15 keeps the closed substep contract and deterministic SQL fixture", () => {
+  const source = supplementalGate3Source();
+  const s15 = supplementalSubstepSource(source, "S15", "S16");
+  const s13 = source.indexOf('await runGate3Substep("S13"');
+  const s14 = source.indexOf('await runGate3Substep("S14"');
+  const s15Index = source.indexOf('await runGate3Substep("S15"');
+  const s16 = source.indexOf('await runGate3Substep("S16"');
+
+  assert.deepEqual(SUPPLEMENTAL_GATE3_SUBSTEPS.slice(12, 16), [
+    ["S13", "supplemental_expired_oauth_material_setup", "internal_setup"],
+    ["S14", "supplemental_expired_oauth_create", "postgres_transaction"],
+    ["S15", "supplemental_oauth_force_expiry", "postgres_transaction"],
+    ["S16", "supplemental_expired_oauth_consume", "postgres_transaction"]
+  ]);
+  assert.equal(s13 < s14 && s14 < s15Index && s15Index < s16, true);
+  assert.equal((s15.match(/client\.query\(/g) || []).length, 1);
+  assert.match(s15, /SET created_at=CURRENT_TIMESTAMP-INTERVAL '2 seconds',/);
+  assert.match(s15, /expires_at=CURRENT_TIMESTAMP-INTERVAL '1 second'/);
+  assert.match(s15, /WHERE company_id=\$1 AND id=\$2/);
+  assert.match(s15, /AND consumed_at IS NULL/);
+  assert.match(s15, /AND cancelled_at IS NULL/);
+  assert.match(s15, /AND failed_at IS NULL/);
+  assert.match(s15, /id=\$2 AS id_matches/);
+  assert.match(s15, /expires_at>created_at AS expiry_after_creation/);
+  assert.match(s15, /expires_at<CURRENT_TIMESTAMP AS expiry_before_current/);
+  assert.match(s15, /consumed_at IS NULL AS consumed_at_is_null/);
+  assert.match(s15, /cancelled_at IS NULL AS cancelled_at_is_null/);
+  assert.match(s15, /failed_at IS NULL AS failed_at_is_null/);
+  assert.match(s15, /\[a\.fixture\.companyId, a\.fixture\.expiredAuthorizationId\]/);
+  assert.equal((s15.match(/\sAS\s[a-z_]+/g) || []).length, 6);
+  assert.match(s15, /forcedExpiry\?\.rowCount !== 1/);
+  assert.match(s15, /forcedExpiry\.rows\?\.length !== 1/);
+  assert.match(s15, /linux_gate_oauth_force_expiry_target_invalid/);
+  assert.match(s15, /linux_gate_oauth_force_expiry_temporal_order_invalid/);
+  assert.doesNotMatch(s15, /SET\s+expires_at\s*=\s*CURRENT_TIMESTAMP\s*-\s*INTERVAL/i);
+  assert.doesNotMatch(
+    s15,
+    /\b(?:setTimeout|setInterval|sleep|retry|globalThis)\b|Date\.now|Date\s*=|process\.env\.TZ|timezone/i
+  );
+});
+
+test("S13-S16 S15 accepts one open target and permits S16 authorization_expired", async () => {
+  const execution = await executeSupplementalGate3({
+    runGate3Substep: (_substep, _operationClass, operation) => operation()
+  });
+  const ordered = execution.runnerCalls.map(({ substep }) => substep);
+  const s15Query = execution.observations.queries.find(({ text }) =>
+    text.includes("UPDATE ia4tube_social.social_oauth_transactions"));
+
+  assert.equal(execution.didThrow, false);
+  assert.deepEqual(ordered.slice(12, 16), ["S13", "S14", "S15", "S16"]);
+  assert.equal(execution.operationCounts.get("S15"), 1);
+  assert.equal(execution.operationCounts.get("S16"), 1);
+  assert.equal(s15Query.values.length, 2);
+  assert.deepEqual(execution.result, SUPPLEMENTAL_GATE3_RESULT);
+  assert.equal(execution.result.oauthExpiredRefused, true);
+  assert.doesNotMatch(
+    JSON.stringify(execution.result),
+    /synthetic-linux|00000000|created_at|expires_at|\d{4}-\d{2}-\d{2}T/
+  );
+  assert.match(
+    supplementalSubstepSource(supplementalGate3Source(), "S16", "S17"),
+    /"authorization_expired"/
+  );
+});
+
+test("S13-S16 S15 refuses closed or mismatched targets before S16", async () => {
+  const refusedTargets = [
+    "consumed",
+    "cancelled",
+    "failed",
+    "wrong_company",
+    "wrong_authorization"
+  ];
+  for (const s15TargetState of refusedTargets) {
+    const execution = await executeSupplementalGate3({
+      s15TargetState,
+      runGate3Substep: (_substep, _operationClass, operation) => operation()
+    });
+    const steps = execution.runnerCalls.map(({ substep }) => substep);
+    assert.equal(execution.didThrow, true);
+    assert.equal(execution.thrown?.code, "linux_gate_oauth_force_expiry_target_invalid");
+    assert.deepEqual(steps.slice(-2), ["S15", "S30"]);
+    assert.equal(steps.some((substep) => /^S(?:1[6-9]|2[0-9])$/.test(substep)), false);
+    assert.equal(steps.filter((substep) => substep === "S30").length, 1);
+  }
+});
+
+test("S13-S16 S15 requires exactly one returned target row", async () => {
+  for (const s15RowCount of [0, 2]) {
+    const execution = await executeSupplementalGate3({
+      s15RowCount,
+      runGate3Substep: (_substep, _operationClass, operation) => operation()
+    });
+    assert.equal(execution.didThrow, true);
+    assert.equal(execution.thrown?.code, "linux_gate_oauth_force_expiry_target_invalid");
+    assert.equal(execution.runnerCalls.some(({ substep }) => substep === "S16"), false);
+  }
+});
+
+test("S13-S16 S15 refuses invalid identity or open-state proof", async () => {
+  const invalidProofs = [
+    "s15IdMatches",
+    "s15ConsumedAtIsNull",
+    "s15CancelledAtIsNull",
+    "s15FailedAtIsNull"
+  ];
+  for (const option of invalidProofs) {
+    const execution = await executeSupplementalGate3({
+      [option]: false,
+      runGate3Substep: (_substep, _operationClass, operation) => operation()
+    });
+    assert.equal(execution.didThrow, true);
+    assert.equal(execution.thrown?.code, "linux_gate_oauth_force_expiry_target_invalid");
+    assert.equal(execution.runnerCalls.some(({ substep }) => substep === "S16"), false);
+  }
+});
+
+test("S13-S16 S15 refuses invalid temporal proof", async () => {
+  for (const option of ["s15ExpiryAfterCreation", "s15ExpiryBeforeCurrent"]) {
+    const execution = await executeSupplementalGate3({
+      [option]: false,
+      runGate3Substep: (_substep, _operationClass, operation) => operation()
+    });
+    assert.equal(execution.didThrow, true);
+    assert.equal(
+      execution.thrown?.code,
+      "linux_gate_oauth_force_expiry_temporal_order_invalid"
+    );
+    assert.equal(execution.runnerCalls.some(({ substep }) => substep === "S16"), false);
+  }
+});
+
+test("S13-S16 migration keeps OAuth expiry after creation constraint", () => {
+  const migration = fs.readFileSync(path.join(
+    ROOT,
+    "db/migrations/0002_social_connections_and_vault.up.sql"
+  ), "utf8");
+  assert.match(migration, /CONSTRAINT social_oauth_transactions_expiry_after_creation\s+CHECK \(expires_at > created_at\)/);
 });
 
 test("supplemental Gate 3 pass-through preserves success result, calls, arguments and cleanup", async () => {
