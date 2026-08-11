@@ -38,8 +38,8 @@ const {
 } = require("./social-3a0p-local-runtime-evidence-metrics");
 
 const BRANCH =
-  "social/checkpoint-3a0p-linux-vault-connection-capacity-provenance-20260811";
-const BASE_COMMIT = "7d211ae664d40c4e8f7f51e478ac7da8f6715d0b";
+  "social/checkpoint-3a0p-linux-vault-migration-pool-handoff-20260811";
+const BASE_COMMIT = "590681a25fd87c3b4d41c09e739f07f167784d86";
 const PRODUCT_COMMIT = "fcfc92419021dae5f77baad731c634b10c275c5b";
 const MARKER = "[run-social-3a0p-linux-gate]";
 const RUN_MARKER_PREFIX = "ia4tube-social-3a0p-linux-";
@@ -891,21 +891,34 @@ function classifyNormalizedGate4ConnectionCapacity(normalized) {
   const failures = gate4CapacityCategoryFailures(pools);
   const failedCategoryDetermined = failures.migration !== failures.runtime;
   const anyCapacityFailure = failures.migration || failures.runtime;
-  const serverReached = failedCategoryDetermined &&
+  const serverLimitObserved =
     snapshot.server.clientConnectionsBeforeV22Failure >=
       snapshot.server.maxConnections;
-  const databaseReached = anyCapacityFailure &&
+  const databaseLimitObserved =
     snapshot.database.connectionLimit >= 0 &&
     snapshot.database.clientConnectionsBeforeV22Failure >=
       snapshot.database.connectionLimit;
-  const runtimeReached = failures.runtime &&
+  const runtimeLimitObserved =
     snapshot.roles.runtime.connectionLimit >= 0 &&
     snapshot.roles.runtime.clientConnectionsBeforeV22Failure >=
       snapshot.roles.runtime.connectionLimit;
-  const migrationReached = failures.migration &&
+  const serverReached = failedCategoryDetermined && serverLimitObserved;
+  const databaseReached = anyCapacityFailure && databaseLimitObserved;
+  const runtimeReached = failures.runtime && runtimeLimitObserved;
+  const migrationSqlCounterReached = failures.migration &&
     snapshot.roles.migration.connectionLimit >= 0 &&
     snapshot.roles.migration.clientConnectionsBeforeV22Failure >=
       snapshot.roles.migration.connectionLimit;
+  const migrationHarnessCapacityReached =
+    pools.mainMigration.configuredMax === 2 &&
+    snapshot.roles.migration.connectionLimit >= 0 &&
+    pools.mainMigration.totalCount >= snapshot.roles.migration.connectionLimit &&
+    pools.mainMigration.idleCount === pools.mainMigration.totalCount &&
+    pools.mainMigration.waitingCount === 0 &&
+    pools.verifierMigration.connectionCapacityFailures > 0 &&
+    pools.verifierMigration.connectSucceeded === 0 &&
+    !serverLimitObserved && !databaseLimitObserved && !runtimeLimitObserved;
+  const migrationReached = migrationSqlCounterReached || migrationHarnessCapacityReached;
   const reached = [
     [serverReached, "server_connection_slots_reached"],
     [databaseReached, "database_connection_limit_reached"],
@@ -3063,11 +3076,23 @@ function createLinuxProfileRestoreRunner({
   };
 }
 
+const retiredPoolHandles = new WeakSet();
+const primaryRuntimeEndAfterMigrationHandoff = new WeakMap();
+
 function retiredPoolHandle() {
-  return Object.freeze({
+  const handle = Object.freeze({
     retired: true,
     async end() { return undefined; }
   });
+  retiredPoolHandles.add(handle);
+  return handle;
+}
+
+function isRetiredPoolHandle(candidate) {
+  return Boolean(
+    candidate && retiredPoolHandles.has(candidate) &&
+    candidate.retired === true && typeof candidate.end === "function"
+  );
 }
 
 function createGate1MigrationPoolLifecycle({ plans, state, createMigrationPool }) {
@@ -3159,21 +3184,140 @@ function createGate1MigrationPoolLifecycle({ plans, state, createMigrationPool }
 }
 
 async function retirePrimaryPoolsBeforeBackup(state) {
-  const migration = state?.pools?.migration;
-  const runtime = state?.pools?.runtime;
+  const pools = state?.pools;
+  const migration = pools?.migration;
+  const runtime = pools?.runtime;
   if (!migration || typeof migration.end !== "function" || !runtime || typeof runtime.end !== "function") {
     fail("linux_gate_primary_migration_pool_invalid");
   }
+  const migrationRetired = isRetiredPoolHandle(migration);
+  const runtimeRetired = isRetiredPoolHandle(runtime);
+  const migrationEnd = migration.end;
+  const handedOffRuntimeEnd = migrationRetired && !runtimeRetired
+    ? primaryRuntimeEndAfterMigrationHandoff.get(runtime)
+    : null;
+  const runtimeEnd = handedOffRuntimeEnd || runtime.end;
+  if (
+    (runtimeRetired && !migrationRetired) ||
+    (migrationRetired && !runtimeRetired && (
+      typeof handedOffRuntimeEnd !== "function" || runtime.end !== handedOffRuntimeEnd
+    ))
+  ) {
+    fail("linux_gate_primary_migration_pool_invalid");
+  }
+  const identitiesIntact = () => Boolean(
+    state.pools === pools && pools.migration === migration && pools.runtime === runtime &&
+    migration.end === migrationEnd && runtime.end === runtimeEnd
+  );
+  const retire = (pool, endOperation) => isRetiredPoolHandle(pool)
+    ? pool.end()
+    : createPhysicalPoolDrainTracker(pool).end(() => {
+      if (!identitiesIntact()) fail("linux_gate_primary_migration_pool_invalid");
+      return endOperation.call(pool);
+    });
   const closed = await Promise.allSettled([
-    createPhysicalPoolDrainTracker(migration).end(() => migration.end()),
-    createPhysicalPoolDrainTracker(runtime).end(() => runtime.end())
+    retire(migration, migrationEnd),
+    retire(runtime, runtimeEnd)
   ]);
   if (closed.some((result) => result.status !== "fulfilled")) {
     fail("linux_gate_primary_pool_retirement_failed");
   }
-  const retired = retiredPoolHandle();
-  state.pools = Object.freeze({ migration: retired, runtime: retired });
+  if (!identitiesIntact()) fail("linux_gate_primary_migration_pool_invalid");
+  state.pools = Object.freeze({
+    migration: retiredPoolHandle(),
+    runtime: retiredPoolHandle()
+  });
+  if (handedOffRuntimeEnd) primaryRuntimeEndAfterMigrationHandoff.delete(runtime);
   return true;
+}
+
+async function retirePrimaryMigrationPoolBeforePersistedVault(state) {
+  const pools = state?.pools;
+  const migration = pools?.migration;
+  const runtime = pools?.runtime;
+  const migrationEnd = migration?.end;
+  const runtimeEnd = runtime?.end;
+  const waitingCountBeforeRetirement = migration?.waitingCount;
+  const allMigrationClientsIdleBeforeRetirement = Boolean(
+    Number.isSafeInteger(migration?.totalCount) && migration.totalCount >= 0 &&
+    Number.isSafeInteger(migration?.idleCount) && migration.idleCount >= 0 &&
+    migration.idleCount === migration.totalCount
+  );
+  if (
+    !migration || isRetiredPoolHandle(migration) || migration.retired === true ||
+    typeof migrationEnd !== "function" || migration.end !== migrationEnd ||
+    migration.linuxMetricsLifecycle?.state !== "active" ||
+    !runtime || isRetiredPoolHandle(runtime) || runtime.retired === true ||
+    typeof runtimeEnd !== "function" || runtime.end !== runtimeEnd ||
+    runtime.linuxMetricsLifecycle?.state !== "active" ||
+    migration.options?.user !== MIGRATION_LOGIN ||
+    migration.options?.database !== DATABASE ||
+    migration.options?.max !== 2 ||
+    waitingCountBeforeRetirement !== 0 ||
+    !allMigrationClientsIdleBeforeRetirement
+  ) {
+    fail("linux_gate_primary_migration_pool_handoff_refused");
+  }
+  const runtimeIdentity = runtime;
+  let migrationPoolEndCalls = 0;
+  await createPhysicalPoolDrainTracker(migration).end(() => {
+    const totalCountAtEnd = migration.totalCount;
+    const idleCountAtEnd = migration.idleCount;
+    const waitingCountAtEnd = migration.waitingCount;
+    if (
+      state.pools !== pools || state.pools.migration !== migration ||
+      state.pools.runtime !== runtimeIdentity ||
+      isRetiredPoolHandle(migration) || migration.retired === true ||
+      migration.end !== migrationEnd ||
+      migration.linuxMetricsLifecycle?.state !== "active" ||
+      isRetiredPoolHandle(runtimeIdentity) || runtimeIdentity.retired === true ||
+      runtimeIdentity.end !== runtimeEnd ||
+      runtimeIdentity.linuxMetricsLifecycle?.state !== "active" ||
+      migration.options?.user !== MIGRATION_LOGIN ||
+      migration.options?.database !== DATABASE ||
+      migration.options?.max !== 2 ||
+      !Number.isSafeInteger(totalCountAtEnd) || totalCountAtEnd < 0 ||
+      !Number.isSafeInteger(idleCountAtEnd) || idleCountAtEnd < 0 ||
+      !Number.isSafeInteger(waitingCountAtEnd) || waitingCountAtEnd !== 0 ||
+      idleCountAtEnd !== totalCountAtEnd
+    ) {
+      fail("linux_gate_primary_migration_pool_handoff_refused");
+    }
+    migrationPoolEndCalls += 1;
+    return migrationEnd.call(migration);
+  });
+  if (
+    migrationPoolEndCalls !== 1 ||
+    state.pools !== pools || state.pools.migration !== migration ||
+    state.pools.runtime !== runtimeIdentity ||
+    migration.end !== migrationEnd || runtimeIdentity.end !== runtimeEnd ||
+    migration.linuxMetricsLifecycle?.state !== "closed" ||
+    runtimeIdentity.linuxMetricsLifecycle?.state !== "active"
+  ) {
+    fail("linux_gate_primary_migration_pool_handoff_unconfirmed");
+  }
+  state.pools = Object.freeze({
+    migration: retiredPoolHandle(),
+    runtime: runtimeIdentity
+  });
+  const proof = Object.freeze({
+    migrationPoolRetired: isRetiredPoolHandle(state.pools.migration),
+    migrationPoolEndCalls,
+    runtimePoolPreserved:
+      state.pools.runtime === runtimeIdentity &&
+      runtimeIdentity.linuxMetricsLifecycle?.state === "active",
+    waitingCountBeforeRetirement,
+    allMigrationClientsIdleBeforeRetirement
+  });
+  if (
+    proof.migrationPoolRetired !== true || proof.migrationPoolEndCalls !== 1 ||
+    proof.runtimePoolPreserved !== true || proof.waitingCountBeforeRetirement !== 0 ||
+    proof.allMigrationClientsIdleBeforeRetirement !== true
+  ) {
+    fail("linux_gate_primary_migration_pool_handoff_unconfirmed");
+  }
+  primaryRuntimeEndAfterMigrationHandoff.set(runtimeIdentity, runtimeEnd);
+  return proof;
 }
 
 function isPrivateIpv4(value) {
@@ -4337,7 +4481,28 @@ async function runLinuxGate(options = {}) {
         Object.freeze({
           runGate4Substep: gate4FailureProvenance.forOperation("persisted"),
           recordGate4ConnectionCapacityDiagnostics:
-            gate4ConnectionCapacityDiagnostics.record
+            gate4ConnectionCapacityDiagnostics.record,
+          retirePrimaryMigrationPoolBeforePersistedVault: async () => {
+            const proof = await retirePrimaryMigrationPoolBeforePersistedVault(state);
+            const keys = [
+              "allMigrationClientsIdleBeforeRetirement",
+              "migrationPoolEndCalls",
+              "migrationPoolRetired",
+              "runtimePoolPreserved",
+              "waitingCountBeforeRetirement"
+            ];
+            if (
+              !proof || Object.getPrototypeOf(proof) !== Object.prototype ||
+              !Object.isFrozen(proof) ||
+              JSON.stringify(Object.keys(proof).sort()) !== JSON.stringify(keys) ||
+              proof.migrationPoolRetired !== true || proof.migrationPoolEndCalls !== 1 ||
+              proof.runtimePoolPreserved !== true || proof.waitingCountBeforeRetirement !== 0 ||
+              proof.allMigrationClientsIdleBeforeRetirement !== true
+            ) {
+              fail("linux_gate_primary_migration_pool_handoff_proof_invalid");
+            }
+            return true;
+          }
         })
       );
       gate4FailureProvenance.requireComplete();
@@ -4670,6 +4835,7 @@ module.exports = {
   publicRlsRoleGateEvidence,
   publicRlsRuntimeAttributesTextResolutionReproductionEvidence,
   publicRlsRuntimeWriteContractReproductionEvidence,
+  retirePrimaryMigrationPoolBeforePersistedVault,
   retirePrimaryPoolsBeforeBackup,
   rlsFailureCode,
   sanitizedBackupRestoreFailureProvenance,

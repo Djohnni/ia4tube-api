@@ -2066,13 +2066,61 @@ function createGate4ConnectionCapacityCapture(state) {
   });
 }
 
+function createVerifierPoolCleanupRegistry() {
+  const pools = [];
+
+  function register(pool) {
+    if (!pool || typeof pool !== "object" || typeof pool.end !== "function") {
+      fail("linux_gate_verifier_pool_cleanup_contract_invalid");
+    }
+    const originalEnd = pool.end.bind(pool);
+    let endPromise;
+    Object.defineProperty(pool, "end", {
+      configurable: true,
+      enumerable: false,
+      writable: false,
+      value(...args) {
+        if (!endPromise) {
+          try {
+            endPromise = Promise.resolve(originalEnd(...args));
+          } catch (error) {
+            endPromise = Promise.reject(error);
+          }
+        }
+        return endPromise;
+      }
+    });
+    pools.push(pool);
+    return pool;
+  }
+
+  async function closeAll() {
+    let firstFailure;
+    for (const pool of [...pools].reverse()) {
+      try {
+        await pool.end();
+      } catch (error) {
+        if (!firstFailure) firstFailure = error;
+      }
+    }
+    if (firstFailure) throw firstFailure;
+    return true;
+  }
+
+  return Object.freeze({ closeAll, register });
+}
+
 function createLocalVerifierPoolClass({
   PoolClass,
   port,
   database,
   passwords,
-  gate4ConnectionCapacityCapture = null
+  gate4ConnectionCapacityCapture = null,
+  registerVerifierPool = (pool) => pool
 }) {
+  if (typeof registerVerifierPool !== "function") {
+    fail("linux_gate_verifier_pool_cleanup_contract_invalid");
+  }
   return class LinuxLocalVerifierPool {
     constructor(configuration) {
       let parsed;
@@ -2094,9 +2142,17 @@ function createLocalVerifierPoolClass({
         password,
         ssl: false
       });
+      const registeredPool = registerVerifierPool(pool);
+      if (registeredPool !== pool) {
+        fail("linux_gate_verifier_pool_cleanup_contract_invalid");
+      }
       return gate4ConnectionCapacityCapture
-        ? gate4ConnectionCapacityCapture.instrumentVerifierPool(login, pool, configuration.max)
-        : pool;
+        ? gate4ConnectionCapacityCapture.instrumentVerifierPool(
+          login,
+          registeredPool,
+          configuration.max
+        )
+        : registeredPool;
     }
   };
 }
@@ -2119,7 +2175,8 @@ async function runPersistedVaultGate(
   legacy2ARoot,
   {
     runGate4Substep = async (_substep, _operationClass, operation) => operation(),
-    recordGate4ConnectionCapacityDiagnostics
+    recordGate4ConnectionCapacityDiagnostics,
+    retirePrimaryMigrationPoolBeforePersistedVault
   } = {}
 ) {
   let setup = {};
@@ -2127,6 +2184,8 @@ async function runPersistedVaultGate(
   let result;
   let primaryFailure;
   let primaryFailed = false;
+  let primaryMigrationPoolRetired = false;
+  const verifierPoolCleanup = createVerifierPoolCleanupRegistry();
   const gate4ConnectionCapacityCapture =
     typeof recordGate4ConnectionCapacityDiagnostics === "function"
       ? createGate4ConnectionCapacityCapture(state)
@@ -2156,6 +2215,13 @@ async function runPersistedVaultGate(
     });
     if (returnedSetup !== undefined) setup = returnedSetup;
     const returnedGate = await runGate4Substep("V21", "postgres_verifier_setup", async () => {
+      if (typeof retirePrimaryMigrationPoolBeforePersistedVault !== "function") {
+        fail("linux_gate_primary_migration_pool_retirement_invalid");
+      }
+      if ((await retirePrimaryMigrationPoolBeforePersistedVault()) !== true) {
+        fail("linux_gate_primary_migration_pool_retirement_invalid");
+      }
+      primaryMigrationPoolRetired = true;
       let plaintextIndex = 0;
       gate = setup.original.createRestoreBehaviorVerifiers({
         env: {},
@@ -2177,13 +2243,17 @@ async function runPersistedVaultGate(
             port: state.target.port,
             database: state.database,
             passwords: setup.passwords,
-            gate4ConnectionCapacityCapture
+            gate4ConnectionCapacityCapture,
+            registerVerifierPool: verifierPoolCleanup.register
           })
         }
       });
       return gate;
     });
     if (gate === undefined && returnedGate !== undefined) gate = returnedGate;
+    if (primaryMigrationPoolRetired !== true) {
+      fail("linux_gate_primary_migration_pool_retirement_invalid");
+    }
     gate4ConnectionCapacityCapture?.arm();
     try {
       await runGate4Substep("V22", "postgres_runtime_isolation", async () => {
@@ -2217,7 +2287,23 @@ async function runPersistedVaultGate(
   } finally {
     try {
       await runGate4Substep("V24", "postgres_verifier_cleanup", async () => {
-        if (gate) await gate.close();
+        let cleanupFailure;
+        let cleanupFailed = false;
+        try {
+          if (gate) await gate.close();
+        } catch (error) {
+          cleanupFailed = true;
+          cleanupFailure = error;
+        }
+        try {
+          await verifierPoolCleanup.closeAll();
+        } catch (error) {
+          if (!cleanupFailed) {
+            cleanupFailed = true;
+            cleanupFailure = error;
+          }
+        }
+        if (cleanupFailed) throw cleanupFailure;
       });
     } catch (error) {
       if (!primaryFailed) {

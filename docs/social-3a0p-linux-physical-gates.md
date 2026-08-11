@@ -1,15 +1,15 @@
 # Checkpoint Social 3A-0P — gates físicos Linux isolados
 
-## Contrato canônico da procedência sanitizada de capacidade do Gate 4
+## Contrato canônico do handoff de capacidade de migration do Gate 4
 
 Esta rota existe somente na branch
-`social/checkpoint-3a0p-linux-vault-connection-capacity-provenance-20260811`,
+`social/checkpoint-3a0p-linux-vault-migration-pool-handoff-20260811`,
 criada a partir do commit exato
-`7d211ae664d40c4e8f7f51e478ac7da8f6715d0b`. O único
+`590681a25fd87c3b4d41c09e739f07f167784d86`. O único
 commit autorizado deve ter esse commit como pai imediato e a mensagem integral:
 
 ```text
-[run-social-3a0p-linux-gate] classify Gate 4 connection capacity
+[run-social-3a0p-linux-gate] hand off migration capacity to persisted vault verifier
 ```
 
 O produto permanece idêntico a `fcfc92419021dae5f77baad731c634b10c275c5b`:
@@ -18,10 +18,11 @@ O produto permanece idêntico a `fcfc92419021dae5f77baad731c634b10c275c5b`:
 grants, não muda políticas RLS e não modifica schema, SCRAM, roles, produto,
 backup, restore, dependências ou os testes de segurança antigos. Os helpers
 PowerShell testados e o protocolo `IA4REC1` permanecem byte-semanticamente
-inalterados. A alteração atual é exclusivamente diagnóstica no harness físico:
-ela complementa a primeira falha V22/53300 já preservada com limites e
-contadores sanitizados, sem corrigir capacidade, alterar AES-256-GCM, AAD,
-rotação, persistência, pools ou cleanup.
+inalterados. A alteração atual é exclusivamente de lifecycle no harness físico:
+ela aposenta o pool primário de migration como a primeira operação de V21,
+antes de construir ou usar qualquer pool verifier persistido, liberando a
+capacidade da role migration para o verificador. Não altera AES-256-GCM, AAD,
+rotação, persistência, limites, grants, tamanho de pool ou cleanup.
 O workflow mantém a rota normal: `npm test` uma vez no Windows e, somente após
 seu sucesso, o job Linux físico preservado.
 
@@ -352,15 +353,62 @@ V21 foram concluídas; V22 encontrou a falha; V23–V25 não executaram. Portant
 o cofre base, o cofre suplementar e a criação dos verificadores persistidos
 foram aprovados, mas o isolamento runtime persistido não foi concluído e a
 verificação criptográfica persistida V23 não iniciou. A classificação canônica
-da presente rota é
+daquela rota, antes da fotografia de capacidade posterior, era
 `gate4_v22_postgres_connection_capacity_source_unresolved`.
 
 Esse resultado comprova somente a classe de capacidade `53300`. Ele não
 atribui a origem a AES-256-GCM, AAD, ciphertext, nonce, auth tag, chave,
 rotação, registro de chaves, RLS, login runtime ou migration específico,
-`max_connections`, `CONNECTION LIMIT` ou vazamento de pool. Este documento
-registra esse run anterior e o contrato diagnóstico abaixo; não declara que a
-nova branch tenha sido executada, aprovada ou enviada.
+`max_connections`, `CONNECTION LIMIT` ou vazamento de pool. A rota diagnóstica
+posterior preservada a seguir delimitou a origem sem reescrever esse resultado.
+
+## Run físico histórico `31503517228` e classificação canônica
+
+O run `31503517228`, `run_attempt=1`, terminou com status
+`completed/failure` no commit `590681a25fd87c3b4d41c09e739f07f167784d86`,
+pai exato `7d211ae664d40c4e8f7f51e478ac7da8f6715d0b`. O job Windows, o
+pré-gate Linux e os Gates 1, 2 e 3 foram aprovados. A primeira falha permaneceu
+em `phase=vault`, `operation=persisted`, `substep=V22`,
+`operationClass=postgres_runtime_isolation`,
+`causalCode=gate4_error_code_53300`, `lastCompletedSubstep=V21`,
+`externalProcessStarted=false`, `exitCode=null` e `signal=null`. O Gate 5 não
+foi executado e o cleanup terminou aprovado.
+
+O artifact histórico publicou literalmente
+`classification=capacity_snapshot_inconclusive`; esse valor permanece parte da
+evidência imutável e não é reescrito. A fotografia estava disponível e continha
+os doze campos PostgreSQL numéricos, com zero campo nulo. A reclassificação
+canônica posterior desses números e dos contadores fechados de pool é
+`gate4_v22_primary_migration_pool_consumes_entire_migration_role_capacity`.
+Ela identifica o pool primário de migration ainda residente como consumidor de
+toda a capacidade da role migration antes de o verifier persistido tentar sua
+conexão; não atribui causalidade ao provisioner, ao runtime, à criptografia ou à
+migration de produto.
+
+O SHA-256 do JSON de evidência é
+`bb75e43761b967a921fbc025771ed5989102e97ce89a8a0af4b4897edc0562e2`; o
+SHA-256 do JSON de status do processo é
+`26564ca3007f7f91c7b77edadbe4122d82804ea0626a3958f21292d1b067f342`; e o
+digest do artifact é
+`sha256:69f49ac64a7f281badfb5996bc302a672842d3da45652285d7eab523a941f5fe`.
+
+## Handoff fechado do pool primário de migration
+
+Após V19 e V20, V21 continua sendo uma única subetapa
+`postgres_verifier_setup`. Dentro dela, a primeira operação obrigatória aposenta
+e drena exatamente uma vez o pool primário de migration. Somente depois da
+conclusão comprovada dessa aposentadoria os verificadores persistidos podem ser
+construídos ou usar seus próprios pools. V22 só pode começar depois de V21
+concluir integralmente.
+
+O pool primário de migration não é recriado e permanece marcado como aposentado
+até Gate 5 e cleanup. O pool runtime primário permanece ativo e é aposentado na
+fase normal anterior ao Gate 5. Falha no drain ou na aposentadoria reprova V21
+fechado; o cleanup não executa `end()` duas vezes nem substitui a primeira falha.
+Não há retry, nova conexão diagnóstica, mudança de `CONNECTION LIMIT`, aumento de
+`max`, grant, role, migration, produto ou ordem V20–V25. Este documento registra
+o run histórico e o contrato do handoff; não afirma execução, envio ou aprovação
+de um novo run desta branch.
 
 ## Contrato fechado de `gate4FailureProvenance`
 
@@ -581,7 +629,7 @@ Falhas de processo e protocolo são publicadas somente como
 
 ## Cadeia imutável e inventários fechados
 
-A cadeia autorizada é linear e contém doze commits entre a base da manutenção
+A cadeia autorizada é linear e contém treze commits entre a base da manutenção
 e o novo `HEAD`:
 
 1. `8eb4c4d71c6593f9c3e448be6ac52b1b0e8ba931`, pai
@@ -692,7 +740,7 @@ e o novo `HEAD`:
     `tests/social-3a0p-linux-physical-gates.test.js`,
     `tests/social-3a0p-local-connector-physical-gates.test.js` e
     `tests/social-3a0p-linux-workflow.test.js`.
-12. O novo `HEAD`, pai exato
+12. `590681a25fd87c3b4d41c09e739f07f167784d86`, pai exato
     `7d211ae664d40c4e8f7f51e478ac7da8f6715d0b`, mensagem
     `[run-social-3a0p-linux-gate] classify Gate 4 connection capacity` e
     inventário fechado de exatamente sete caminhos:
@@ -703,9 +751,20 @@ e o novo `HEAD`:
     `tests/social-3a0p-linux-gate.test.js`,
     `tests/social-3a0p-linux-physical-gates.test.js` e
     `tests/social-3a0p-linux-workflow.test.js`.
+13. O novo `HEAD`, pai exato
+    `590681a25fd87c3b4d41c09e739f07f167784d86`, mensagem
+    `[run-social-3a0p-linux-gate] hand off migration capacity to persisted vault verifier`
+    e inventário fechado de exatamente sete caminhos:
+    `.github/workflows/social-3a0p-linux-physical-gates.yml`,
+    `docs/social-3a0p-linux-physical-gates.md`,
+    `scripts/social-3a0p-linux-gate.js`,
+    `scripts/social-3a0p-linux-physical-gates.js`,
+    `tests/social-3a0p-linux-gate.test.js`,
+    `tests/social-3a0p-linux-physical-gates.test.js` e
+    `tests/social-3a0p-linux-workflow.test.js`.
 
 Os guards dos dois jobs verificam pais, mensagens, ancestralidade linear,
-contagem doze e cada um desses inventários sem prefixo, glob ou diretório
+contagem treze e cada um desses inventários sem prefixo, glob ou diretório
 inteiro.
 
 ## Restauração da rota executável normal

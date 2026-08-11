@@ -10,6 +10,7 @@ const os = require("node:os");
 const path = require("node:path");
 const test = require("node:test");
 const {
+  DATABASE,
   LinuxPostgresFailure,
   instrumentedPoolClass
 } = require("../scripts/social-3a0p-linux-postgres");
@@ -49,6 +50,7 @@ const {
   BRANCH,
   GATE_PROCESS_STATUS_FILE,
   GATE_PROCESS_STATUS_HASH_FILE,
+  LinuxGateFailure,
   canonicalJson,
   classifyGate4ConnectionCapacityDiagnostics,
   containsMarkerInTree,
@@ -88,6 +90,7 @@ const {
   publicRlsRoleGateEvidence,
   publicRlsRuntimeAttributesTextResolutionReproductionEvidence,
   publicRlsRuntimeWriteContractReproductionEvidence,
+  retirePrimaryMigrationPoolBeforePersistedVault,
   retirePrimaryPoolsBeforeBackup,
   rlsFailureCode,
   sanitizedBackupRestoreFailureProvenance,
@@ -706,11 +709,11 @@ function restoreBehaviorFacadeFixture(options = {}) {
 test("evidence provenance matches the authorized workflow branch and parent", () => {
   assert.equal(
     BRANCH,
-    "social/checkpoint-3a0p-linux-vault-connection-capacity-provenance-20260811"
+    "social/checkpoint-3a0p-linux-vault-migration-pool-handoff-20260811"
   );
   assert.equal(
     BASE_COMMIT,
-    "7d211ae664d40c4e8f7f51e478ac7da8f6715d0b"
+    "590681a25fd87c3b4d41c09e739f07f167784d86"
   );
   const workflow = JSON.parse(fs.readFileSync(
     path.join(ROOT, ".github", "workflows", "social-3a0p-linux-physical-gates.yml"),
@@ -2204,6 +2207,82 @@ function gate4MigrationCapacityFailure(overrides = {}) {
   return raw;
 }
 
+function gate4HistoricalMigrationCapacityFailure(overrides = {}) {
+  return gate4CapacityRaw({
+    server: {
+      maxConnections: 100,
+      reservedConnections: 0,
+      superuserReservedConnections: 3,
+      clientConnectionsBeforeV22Failure: 3,
+      ...(overrides.server || {})
+    },
+    database: {
+      connectionLimit: -1,
+      clientConnectionsBeforeV22Failure: 3,
+      ...(overrides.database || {})
+    },
+    roles: {
+      provisioner: {
+        connectionLimit: -1,
+        clientConnectionsBeforeV22Failure: 0,
+        ...(overrides.roles?.provisioner || {})
+      },
+      migration: {
+        connectionLimit: 2,
+        clientConnectionsBeforeV22Failure: 0,
+        ...(overrides.roles?.migration || {})
+      },
+      runtime: {
+        connectionLimit: 9,
+        clientConnectionsBeforeV22Failure: 3,
+        ...(overrides.roles?.runtime || {})
+      }
+    },
+    pools: {
+      mainMigration: {
+        configuredMax: 2,
+        totalCount: 2,
+        idleCount: 2,
+        waitingCount: 0,
+        connectAttempts: 2,
+        connectSucceeded: 2,
+        connectionCapacityFailures: 0,
+        ...(overrides.pools?.mainMigration || {})
+      },
+      mainRuntime: {
+        configuredMax: 3,
+        totalCount: 2,
+        idleCount: 2,
+        waitingCount: 0,
+        connectAttempts: 2,
+        connectSucceeded: 2,
+        connectionCapacityFailures: 0,
+        ...(overrides.pools?.mainRuntime || {})
+      },
+      verifierMigration: {
+        configuredMax: 1,
+        totalCount: 0,
+        idleCount: 0,
+        waitingCount: 0,
+        connectAttempts: 1,
+        connectSucceeded: 0,
+        connectionCapacityFailures: 1,
+        ...(overrides.pools?.verifierMigration || {})
+      },
+      verifierRuntime: {
+        configuredMax: 2,
+        totalCount: 2,
+        idleCount: 2,
+        waitingCount: 0,
+        connectAttempts: 2,
+        connectSucceeded: 2,
+        connectionCapacityFailures: 0,
+        ...(overrides.pools?.verifierRuntime || {})
+      }
+    }
+  });
+}
+
 function gate4UnavailableSnapshot(overrides = {}) {
   const raw = gate4CapacityRaw(overrides);
   raw.server = {
@@ -2858,6 +2937,83 @@ test("Gate 4 connection capacity role and collision attribution are category-clo
     classifyGate4ConnectionCapacityDiagnostics(unavailableCollision),
     "capacity_snapshot_inconclusive"
   );
+});
+
+test("Gate 4 historical migration capacity collision has a closed pool-owned classification", () => {
+  const historical = gate4HistoricalMigrationCapacityFailure();
+  assert.equal(
+    classifyGate4ConnectionCapacityDiagnostics(historical),
+    "migration_role_connection_limit_reached"
+  );
+  assert.equal(
+    classifyGate4ConnectionCapacityDiagnostics(gate4HistoricalMigrationCapacityFailure({
+      pools: { mainMigration: { totalCount: 1, idleCount: 1 } }
+    })),
+    "capacity_snapshot_inconclusive"
+  );
+  assert.equal(
+    classifyGate4ConnectionCapacityDiagnostics(gate4HistoricalMigrationCapacityFailure({
+      pools: { mainMigration: { idleCount: 1 } }
+    })),
+    "capacity_snapshot_inconclusive"
+  );
+  assert.equal(
+    classifyGate4ConnectionCapacityDiagnostics(gate4HistoricalMigrationCapacityFailure({
+      pools: {
+        verifierMigration: {
+          connectAttempts: 0,
+          connectSucceeded: 0,
+          connectionCapacityFailures: 0
+        }
+      }
+    })),
+    "capacity_snapshot_inconclusive"
+  );
+  assert.equal(
+    classifyGate4ConnectionCapacityDiagnostics(gate4HistoricalMigrationCapacityFailure({
+      server: { clientConnectionsBeforeV22Failure: 100 }
+    })),
+    "server_connection_slots_reached"
+  );
+  assert.equal(
+    classifyGate4ConnectionCapacityDiagnostics(gate4HistoricalMigrationCapacityFailure({
+      database: { connectionLimit: 3, clientConnectionsBeforeV22Failure: 3 }
+    })),
+    "database_connection_limit_reached"
+  );
+  assert.equal(
+    classifyGate4ConnectionCapacityDiagnostics(gate4HistoricalMigrationCapacityFailure({
+      roles: { runtime: { connectionLimit: 3, clientConnectionsBeforeV22Failure: 3 } }
+    })),
+    "capacity_snapshot_inconclusive"
+  );
+  assert.equal(
+    classifyGate4ConnectionCapacityDiagnostics(gate4HistoricalMigrationCapacityFailure({
+      pools: { mainMigration: { waitingCount: 1 } }
+    })),
+    "capacity_snapshot_inconclusive"
+  );
+  assert.equal(
+    classifyGate4ConnectionCapacityDiagnostics(gate4HistoricalMigrationCapacityFailure({
+      pools: {
+        verifierMigration: {
+          totalCount: 0,
+          connectAttempts: 2,
+          connectSucceeded: 1,
+          connectionCapacityFailures: 1
+        }
+      }
+    })),
+    "capacity_snapshot_inconclusive"
+  );
+  assert.equal(
+    classifyGate4ConnectionCapacityDiagnostics(gate4HistoricalMigrationCapacityFailure({
+      pools: { mainMigration: { configuredMax: 3 } }
+    })),
+    "capacity_snapshot_inconclusive"
+  );
+  assert.equal(historical.roles.migration.clientConnectionsBeforeV22Failure, 0);
+  assert.equal(historical.roles.provisioner.connectionLimit, -1);
 });
 
 test("Gate 4 connection capacity pool counters are strict and observational", () => {
@@ -6419,6 +6575,266 @@ test("a plan pool waits for pending removals from every database before connecti
   clientC.release();
   await ScopedPool.awaitPendingRemovals();
   await ScopedPool.closeAll();
+});
+
+function primaryMigrationPoolHandoffFixture(overrides = {}) {
+  const events = [];
+  const clients = [{}, {}];
+  let migrationEndCalls = 0;
+  let runtimeEndCalls = 0;
+  const migration = new EventEmitter();
+  migration.options = {
+    user: LOGIN_VERIFIER_FIXTURE.migrationLogin,
+    database: DATABASE,
+    max: 2,
+    ...(overrides.options || {})
+  };
+  migration.totalCount = overrides.totalCount ?? 2;
+  migration.idleCount = overrides.idleCount ?? 2;
+  migration.waitingCount = overrides.waitingCount ?? 0;
+  migration._clients = clients;
+  migration.linuxMetricsLifecycle = {
+    state: overrides.migrationLifecycleState || "active"
+  };
+  migration.end = async () => {
+    migrationEndCalls += 1;
+    events.push("migration-end");
+    migration.linuxMetricsLifecycle.state = "draining";
+    if (overrides.endError) {
+      migration.linuxMetricsLifecycle.state = "closed";
+      throw overrides.endError;
+    }
+    for (const client of migration._clients.splice(0)) {
+      migration.emit("remove", client);
+    }
+    migration.linuxMetricsLifecycle.state = "closed";
+  };
+  const runtime = {
+    linuxMetricsLifecycle: {
+      state: overrides.runtimeLifecycleState || "active"
+    },
+    async end() {
+      runtimeEndCalls += 1;
+      events.push("runtime-end");
+      this.linuxMetricsLifecycle.state = "closed";
+    }
+  };
+  const state = { pools: Object.freeze({ migration, runtime }) };
+  return {
+    events,
+    migration,
+    runtime,
+    state,
+    migrationEndCalls: () => migrationEndCalls,
+    runtimeEndCalls: () => runtimeEndCalls
+  };
+}
+
+test("persisted vault handoff retires only the exact idle primary migration pool", async () => {
+  const fixture = primaryMigrationPoolHandoffFixture();
+  const proof = await retirePrimaryMigrationPoolBeforePersistedVault(fixture.state);
+  assert.deepEqual(proof, {
+    migrationPoolRetired: true,
+    migrationPoolEndCalls: 1,
+    runtimePoolPreserved: true,
+    waitingCountBeforeRetirement: 0,
+    allMigrationClientsIdleBeforeRetirement: true
+  });
+  assert.equal(Object.isFrozen(proof), true);
+  assert.equal(fixture.migrationEndCalls(), 1);
+  assert.equal(fixture.runtimeEndCalls(), 0);
+  assert.equal(fixture.state.pools.migration.retired, true);
+  assert.equal(fixture.state.pools.runtime, fixture.runtime);
+  await fixture.state.pools.migration.end();
+  assert.equal(fixture.migrationEndCalls(), 1);
+  await assert.rejects(
+    retirePrimaryMigrationPoolBeforePersistedVault(fixture.state),
+    { code: "linux_gate_primary_migration_pool_handoff_refused" }
+  );
+  assert.deepEqual(fixture.events, ["migration-end"]);
+});
+
+test("persisted vault handoff rejects every unsafe primary migration pool state before end", async () => {
+  const invalid = [
+    { label: "borrowed client", overrides: { totalCount: 2, idleCount: 1 } },
+    { label: "waiting client", overrides: { waitingCount: 1 } },
+    { label: "non-idle pool", overrides: { totalCount: 2, idleCount: 0 } },
+    { label: "non-integer counters", overrides: { totalCount: "2", idleCount: "2" } },
+    { label: "negative counters", overrides: { totalCount: -1, idleCount: -1 } },
+    { label: "wrong max", overrides: { options: { max: 3 } } },
+    { label: "wrong login", overrides: { options: { user: LOGIN_VERIFIER_FIXTURE.runtimeLogin } } },
+    { label: "wrong database", overrides: { options: { database: "ia4tube_social_other" } } },
+    { label: "inactive migration", overrides: { migrationLifecycleState: "closed" } },
+    { label: "inactive runtime", overrides: { runtimeLifecycleState: "closed" } }
+  ];
+  for (const item of invalid) {
+    const fixture = primaryMigrationPoolHandoffFixture(item.overrides);
+    await assert.rejects(
+      retirePrimaryMigrationPoolBeforePersistedVault(fixture.state),
+      { code: "linux_gate_primary_migration_pool_handoff_refused" },
+      item.label
+    );
+    assert.equal(fixture.migrationEndCalls(), 0, item.label);
+    assert.equal(fixture.runtimeEndCalls(), 0, item.label);
+    assert.equal(fixture.state.pools.migration, fixture.migration, item.label);
+    assert.equal(fixture.state.pools.runtime, fixture.runtime, item.label);
+  }
+  const missing = { pools: Object.freeze({ migration: null, runtime: { async end() {} } }) };
+  await assert.rejects(
+    retirePrimaryMigrationPoolBeforePersistedVault(missing),
+    { code: "linux_gate_primary_migration_pool_handoff_refused" }
+  );
+});
+
+test("persisted vault handoff revalidates every mutable pool precondition in the drain microtask", async () => {
+  const mutations = [
+    {
+      label: "login",
+      mutate(migration) { migration.options.user = LOGIN_VERIFIER_FIXTURE.runtimeLogin; }
+    },
+    {
+      label: "database",
+      mutate(migration) { migration.options.database = "ia4tube_social_other"; }
+    },
+    {
+      label: "max",
+      mutate(migration) { migration.options.max = 3; }
+    },
+    {
+      label: "negative equal counters",
+      mutate(migration) {
+        migration.totalCount = -1;
+        migration.idleCount = -1;
+      }
+    },
+    {
+      label: "string equal counters",
+      mutate(migration) {
+        migration.totalCount = "2";
+        migration.idleCount = "2";
+      }
+    },
+    {
+      label: "waiting client",
+      mutate(migration) { migration.waitingCount = 1; }
+    },
+    {
+      label: "migration end method",
+      mutate(migration, _runtime, replacement) {
+        migration.end = async () => { replacement.calls += 1; };
+      }
+    },
+    {
+      label: "runtime end method",
+      mutate(_migration, runtime, replacement) {
+        runtime.end = async () => { replacement.calls += 1; };
+      }
+    }
+  ];
+  for (const item of mutations) {
+    const fixture = primaryMigrationPoolHandoffFixture();
+    const pools = fixture.state.pools;
+    const replacement = { calls: 0 };
+    queueMicrotask(() => item.mutate(fixture.migration, fixture.runtime, replacement));
+    await assert.rejects(
+      retirePrimaryMigrationPoolBeforePersistedVault(fixture.state),
+      (error) => (
+        error instanceof LinuxGateFailure &&
+        error.code === "linux_gate_primary_migration_pool_handoff_refused"
+      ),
+      item.label
+    );
+    assert.equal(fixture.migrationEndCalls(), 0, item.label);
+    assert.equal(fixture.runtimeEndCalls(), 0, item.label);
+    assert.equal(fixture.state.pools, pools, item.label);
+    assert.equal(fixture.state.pools.migration, fixture.migration, item.label);
+    assert.equal(fixture.state.pools.runtime, fixture.runtime, item.label);
+    assert.equal(fixture.migration.linuxMetricsLifecycle.state, "active", item.label);
+    assert.equal(fixture.runtime.linuxMetricsLifecycle.state, "active", item.label);
+    assert.equal(replacement.calls, 0, item.label);
+    assert.deepEqual(fixture.events, [], item.label);
+  }
+});
+
+test("persisted vault handoff preserves the exact physical end failure without a second end", async () => {
+  const primary = Object.assign(new Error("synthetic migration end failure"), {
+    code: "synthetic_migration_end_failure"
+  });
+  const fixture = primaryMigrationPoolHandoffFixture({ endError: primary });
+  await assert.rejects(
+    retirePrimaryMigrationPoolBeforePersistedVault(fixture.state),
+    (error) => error === primary
+  );
+  assert.equal(fixture.migrationEndCalls(), 1);
+  assert.equal(fixture.runtimeEndCalls(), 0);
+  assert.equal(fixture.state.pools.migration, fixture.migration);
+  assert.equal(fixture.state.pools.runtime, fixture.runtime);
+});
+
+test("backup accepts the migration handoff and never double-ends either real primary pool", async () => {
+  const fixture = primaryMigrationPoolHandoffFixture();
+  await retirePrimaryMigrationPoolBeforePersistedVault(fixture.state);
+  assert.equal(await retirePrimaryPoolsBeforeBackup(fixture.state), true);
+  assert.equal(fixture.migrationEndCalls(), 1);
+  assert.equal(fixture.runtimeEndCalls(), 1);
+  assert.equal(fixture.state.pools.migration.retired, true);
+  assert.equal(fixture.state.pools.runtime.retired, true);
+  assert.equal(await retirePrimaryPoolsBeforeBackup(fixture.state), true);
+  await fixture.state.pools.migration.end();
+  await fixture.state.pools.runtime.end();
+  assert.equal(fixture.migrationEndCalls(), 1);
+  assert.equal(fixture.runtimeEndCalls(), 1);
+  assert.deepEqual(fixture.events, ["migration-end", "runtime-end"]);
+});
+
+test("backup rejects a replaced runtime pool or end method after the migration handoff", async () => {
+  for (const scenario of ["end method", "pool identity"]) {
+    const fixture = primaryMigrationPoolHandoffFixture();
+    await retirePrimaryMigrationPoolBeforePersistedVault(fixture.state);
+    let replacementEndCalls = 0;
+    if (scenario === "end method") {
+      fixture.runtime.end = async () => { replacementEndCalls += 1; };
+    } else {
+      fixture.state.pools = Object.freeze({
+        migration: fixture.state.pools.migration,
+        runtime: {
+          linuxMetricsLifecycle: { state: "active" },
+          async end() { replacementEndCalls += 1; }
+        }
+      });
+    }
+    const poolsBeforeBackup = fixture.state.pools;
+    await assert.rejects(
+      retirePrimaryPoolsBeforeBackup(fixture.state),
+      { code: "linux_gate_primary_migration_pool_invalid" },
+      scenario
+    );
+    assert.equal(fixture.migrationEndCalls(), 1, scenario);
+    assert.equal(fixture.runtimeEndCalls(), 0, scenario);
+    assert.equal(replacementEndCalls, 0, scenario);
+    assert.equal(fixture.state.pools, poolsBeforeBackup, scenario);
+    assert.equal(fixture.state.pools.migration.retired, true, scenario);
+    assert.equal(fixture.runtime.linuxMetricsLifecycle.state, "active", scenario);
+  }
+});
+
+test("persisted vault handoff contains no retry, sleep, query, connection or capacity mutation", () => {
+  const source = String(retirePrimaryMigrationPoolBeforePersistedVault);
+  for (const forbidden of ["retry", "sleep", "setTimeout", ".connect(", ".query(", "connectionLimit", ".max ="]) {
+    assert.equal(source.includes(forbidden), false, forbidden);
+  }
+  assert.deepEqual(
+    GATE4_BOUNDARIES.slice(18).map(([operation, substep]) => [operation, substep]),
+    [
+      ["supplemental", "V19"],
+      ["persisted", "V20"],
+      ["persisted", "V21"],
+      ["persisted", "V22"],
+      ["persisted", "V23"],
+      ["persisted", "V24"],
+      ["persisted", "V25"]
+    ]
+  );
 });
 
 test("backup phase retires both primary pools without double-ending them", async () => {

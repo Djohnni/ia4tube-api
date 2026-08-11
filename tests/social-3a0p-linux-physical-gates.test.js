@@ -103,6 +103,7 @@ const PERSISTED_GATE4_SUBSTEPS = Object.freeze([
 function syntheticPersistedGate4Harness(options = {}) {
   const observations = {
     closeCalls: 0,
+    retirementCalls: 0,
     runtimeIsolationCalls: 0,
     vaultCalls: 0
   };
@@ -131,7 +132,27 @@ function syntheticPersistedGate4Harness(options = {}) {
     persistedA: Buffer.alloc(48, 0x61),
     persistedB: Buffer.alloc(48, 0x62)
   };
-  return { gate, observations, setup };
+  async function retirePrimaryMigrationPoolBeforePersistedVault() {
+    observations.retirementCalls += 1;
+    if (options.retirementError) throw options.retirementError;
+    return options.retirementResult === undefined
+      ? true
+      : options.retirementResult;
+  }
+  return {
+    gate,
+    observations,
+    retirePrimaryMigrationPoolBeforePersistedVault,
+    setup
+  };
+}
+
+function syntheticPersistedGate4State() {
+  return {
+    PoolClass: class SyntheticPool {},
+    database: "synthetic",
+    target: { port: 5432 }
+  };
 }
 
 const COMPLETE_GATE4_CAPACITY_ROW = Object.freeze({
@@ -161,9 +182,12 @@ function syntheticGate4CapacityHarness(options = {}) {
     closeCalls: 0,
     events: [],
     functionalClients: [],
+    lifecycleEvents: options.lifecycleEvents || [],
     poolQueryCalls: 0,
     records: [],
+    retirementCalls: 0,
     snapshotCalls: [],
+    underlyingEndCalls: { migration: 0, runtime: 0 },
     underlyingConnectCalls: { migration: 0, runtime: 0 },
     verifierPools: {}
   };
@@ -174,6 +198,7 @@ function syntheticGate4CapacityHarness(options = {}) {
   class FakePool {
     constructor(configuration) {
       this.category = configuration.user === MIGRATION_LOGIN ? "migration" : "runtime";
+      observations.lifecycleEvents.push(`pool:${this.category}`);
       this.options = { max: configuration.max };
       const counts = options.verifierCounts?.[this.category] || (
         this.category === "migration"
@@ -186,6 +211,7 @@ function syntheticGate4CapacityHarness(options = {}) {
     }
 
     connect(callback) {
+      observations.lifecycleEvents.push(`connect:${this.category}`);
       observations.underlyingConnectCalls[this.category] += 1;
       const outcome = plan[this.category].shift() || "success";
       const error = outcome === "53300"
@@ -222,7 +248,10 @@ function syntheticGate4CapacityHarness(options = {}) {
       throw new Error("private pool query must not be used");
     }
 
-    async end() {}
+    async end() {
+      observations.underlyingEndCalls[this.category] += 1;
+      observations.lifecycleEvents.push(`end:${this.category}`);
+    }
   }
 
   const passwordByLogin = {
@@ -244,6 +273,7 @@ function syntheticGate4CapacityHarness(options = {}) {
     databaseUrl,
     original: {
       createRestoreBehaviorVerifiers(configuration) {
+        observations.lifecycleEvents.push("verifier-setup");
         const PoolClass = configuration.dependencies.PoolClass;
         const ssl = { rejectUnauthorized: true, servername: "local.ia4tube.invalid" };
         observations.verifierPools.migration = new PoolClass({
@@ -251,6 +281,9 @@ function syntheticGate4CapacityHarness(options = {}) {
           ssl,
           max: 1
         });
+        if (options.verifierFactoryErrorAfterMigration) {
+          throw options.verifierFactoryErrorAfterMigration;
+        }
         observations.verifierPools.runtime = new PoolClass({
           connectionString: configuration.runtimeDatabaseUrl,
           ssl,
@@ -259,8 +292,8 @@ function syntheticGate4CapacityHarness(options = {}) {
         return {
           async close() {
             observations.closeCalls += 1;
-            await observations.verifierPools.migration.end();
             await observations.verifierPools.runtime.end();
+            await observations.verifierPools.migration.end();
           },
           verifiers: {
             async verifyRuntimeIsolation() {
@@ -320,12 +353,24 @@ function syntheticGate4CapacityHarness(options = {}) {
       try {
         result = await runPersistedVaultGate(state, [], "synthetic-unused-root", {
           async runGate4Substep(substep, _operationClass, operation) {
+            observations.lifecycleEvents.push(substep);
             if (substep === "V20") return setup;
             return operation();
           },
           recordGate4ConnectionCapacityDiagnostics(candidate) {
             observations.records.push(candidate);
             if (options.recorderError) throw options.recorderError;
+          },
+          async retirePrimaryMigrationPoolBeforePersistedVault(...arguments_) {
+            observations.retirementCalls += 1;
+            observations.lifecycleEvents.push("handoff");
+            if (options.retirementError) throw options.retirementError;
+            if (arguments_.length !== 0) {
+              throw new Error("retirement callback received unexpected arguments");
+            }
+            return options.retirementResult === undefined
+              ? true
+              : options.retirementResult;
           }
         });
       } catch (error) {
@@ -2856,15 +2901,24 @@ test("vault supplemental Gate 4 retains V11 resources when the runner fails afte
 
 test("persisted Gate 4 instrumentation executes V20-V25 with synthetic dependencies only", async () => {
   const calls = [];
-  const { gate, observations, setup } = syntheticPersistedGate4Harness();
-  const result = await runPersistedVaultGate({}, [], "synthetic-unused-root", {
+  const {
+    observations,
+    retirePrimaryMigrationPoolBeforePersistedVault,
+    setup
+  } = syntheticPersistedGate4Harness();
+  const result = await runPersistedVaultGate(
+    syntheticPersistedGate4State(),
+    [],
+    "synthetic-unused-root",
+    {
     async runGate4Substep(substep, operationClass, operation) {
       calls.push([substep, operationClass]);
       if (substep === "V20") return setup;
-      if (substep === "V21") return gate;
       return operation();
+    },
+      retirePrimaryMigrationPoolBeforePersistedVault
     }
-  });
+  );
 
   assert.deepEqual(calls, PERSISTED_GATE4_SUBSTEPS);
   assert.deepEqual(result, {
@@ -2876,9 +2930,284 @@ test("persisted Gate 4 instrumentation executes V20-V25 with synthetic dependenc
   });
   assert.deepEqual(observations, {
     closeCalls: 1,
+    retirementCalls: 1,
     runtimeIsolationCalls: 1,
     vaultCalls: 1
   });
+  assert.equal(setup.persistedA.every((byte) => byte === 0), true);
+  assert.equal(setup.persistedB.every((byte) => byte === 0), true);
+});
+
+test("Gate 4 hands off the primary migration pool inside V21 before verifier setup and connects", async () => {
+  const lifecycleEvents = [];
+  const markers = [];
+  const supplementalState = { materials: { vault: Buffer.alloc(32, 11) } };
+  await runVaultSupplementalGate(supplementalState, markers, {
+    async runGate4Substep(substep, _operationClass, operation) {
+      if (substep === "V19") lifecycleEvents.push("V19");
+      return operation();
+    }
+  });
+
+  const harness = syntheticGate4CapacityHarness({
+    lifecycleEvents,
+    runtimePlan: ["success", "success"]
+  });
+  const { result, thrown } = await harness.run();
+
+  assert.equal(thrown, undefined);
+  assert.equal(result.runtimeIsolationPrerequisite, true);
+  assert.deepEqual(lifecycleEvents, [
+    "V19",
+    "V20",
+    "V21",
+    "handoff",
+    "verifier-setup",
+    "pool:migration",
+    "pool:runtime",
+    "V22",
+    "connect:runtime",
+    "connect:runtime",
+    "V23",
+    "V24",
+    "end:runtime",
+    "end:migration",
+    "V25"
+  ]);
+  assert.equal(harness.observations.retirementCalls, 1);
+  assert.equal(harness.observations.verifierPools.migration.options.max, 1);
+  assert.equal(harness.observations.verifierPools.runtime.options.max, 2);
+  assert.equal(harness.observations.closeCalls, 1);
+  assert.deepEqual(harness.observations.underlyingEndCalls, {
+    migration: 1,
+    runtime: 1
+  });
+  assert.equal(harness.setup.persistedA.every((byte) => byte === 0), true);
+  assert.equal(harness.setup.persistedB.every((byte) => byte === 0), true);
+  supplementalState.materials.vault.fill(0);
+  for (let marker = 0; marker < markers.length; marker += 1) markers[marker] = "";
+});
+
+test("Gate 4 verifierMigration connects successfully only after the V21 handoff", async () => {
+  const harness = syntheticGate4CapacityHarness({
+    functionalConnections: [
+      { category: "migration", callback: false },
+      { category: "runtime", callback: false }
+    ],
+    migrationPlan: ["success"],
+    runtimePlan: ["success"]
+  });
+  const { result, thrown } = await harness.run();
+
+  assert.equal(thrown, undefined);
+  assert.equal(result.runtimeIsolationPrerequisite, true);
+  assert.equal(harness.observations.retirementCalls, 1);
+  assert.equal(harness.observations.underlyingConnectCalls.migration, 1);
+  assert.equal(harness.observations.underlyingConnectCalls.runtime, 1);
+  assert.equal(harness.observations.records.length, 0);
+  const handoffIndex = harness.observations.lifecycleEvents.indexOf("handoff");
+  const migrationPoolIndex = harness.observations.lifecycleEvents.indexOf("pool:migration");
+  const v22Index = harness.observations.lifecycleEvents.indexOf("V22");
+  const migrationConnectIndex = harness.observations.lifecycleEvents.indexOf("connect:migration");
+  assert.ok(handoffIndex >= 0 && migrationPoolIndex > handoffIndex);
+  assert.ok(v22Index > migrationPoolIndex && migrationConnectIndex > v22Index);
+  assert.equal(harness.observations.verifierPools.migration.options.max, 1);
+  assert.equal(harness.observations.verifierPools.runtime.options.max, 2);
+  assert.deepEqual(harness.observations.underlyingEndCalls, {
+    migration: 1,
+    runtime: 1
+  });
+});
+
+test("Gate 4 refuses a V21 runner that returns without executing the mandatory handoff", async () => {
+  const calls = [];
+  const {
+    gate,
+    observations,
+    retirePrimaryMigrationPoolBeforePersistedVault,
+    setup
+  } = syntheticPersistedGate4Harness();
+  let thrown;
+  try {
+    await runPersistedVaultGate({}, [], "synthetic-unused-root", {
+      retirePrimaryMigrationPoolBeforePersistedVault,
+      async runGate4Substep(substep, _operationClass, operation) {
+        calls.push(substep);
+        if (substep === "V20") return setup;
+        if (substep === "V21") return gate;
+        return operation();
+      }
+    });
+  } catch (error) {
+    thrown = error;
+  }
+
+  assert.equal(thrown?.code, "linux_gate_primary_migration_pool_retirement_invalid");
+  assert.equal(observations.retirementCalls, 0);
+  assert.equal(observations.runtimeIsolationCalls, 0);
+  assert.equal(observations.closeCalls, 1);
+  assert.deepEqual(calls, ["V20", "V21", "V24", "V25"]);
+  assert.equal(setup.persistedA.every((byte) => byte === 0), true);
+  assert.equal(setup.persistedB.every((byte) => byte === 0), true);
+});
+
+test("Gate 4 closes a verifier pool created before a partial V21 factory failure", async () => {
+  const factoryFailure = Object.assign(new Error("private verifier factory failure"), {
+    code: "synthetic_verifier_factory_failure"
+  });
+  const harness = syntheticGate4CapacityHarness({
+    verifierFactoryErrorAfterMigration: factoryFailure
+  });
+  const { thrown } = await harness.run();
+
+  assert.strictEqual(thrown, factoryFailure);
+  assert.equal(harness.observations.retirementCalls, 1);
+  assert.ok(harness.observations.verifierPools.migration);
+  assert.equal(harness.observations.verifierPools.runtime, undefined);
+  assert.equal(harness.observations.closeCalls, 0);
+  assert.deepEqual(harness.observations.underlyingConnectCalls, {
+    migration: 0,
+    runtime: 0
+  });
+  assert.deepEqual(harness.observations.underlyingEndCalls, {
+    migration: 1,
+    runtime: 0
+  });
+  assert.deepEqual(harness.observations.lifecycleEvents, [
+    "V20",
+    "V21",
+    "handoff",
+    "verifier-setup",
+    "pool:migration",
+    "V24",
+    "end:migration",
+    "V25"
+  ]);
+  assert.equal(harness.setup.persistedA.every((byte) => byte === 0), true);
+  assert.equal(harness.setup.persistedB.every((byte) => byte === 0), true);
+});
+
+test("Gate 4 rejects a missing or unsuccessful V21 migration pool handoff before verifier work", async (t) => {
+  for (const scenario of ["missing", "invalid-result"]) {
+    await t.test(scenario, async () => {
+      const calls = [];
+      let verifierSetupCalls = 0;
+      let verifierPoolConstructions = 0;
+      let verifierMigrationConnectCalls = 0;
+      const { gate, setup } = syntheticPersistedGate4Harness();
+      setup.original = {
+        createRestoreBehaviorVerifiers() {
+          verifierSetupCalls += 1;
+          return gate;
+        }
+      };
+      class SyntheticVerifierPool {
+        constructor() {
+          verifierPoolConstructions += 1;
+        }
+        connect() {
+          verifierMigrationConnectCalls += 1;
+          throw new Error("verifier connect must remain unreachable");
+        }
+      }
+      const dependencies = {
+        async runGate4Substep(substep, _operationClass, operation) {
+          calls.push(substep);
+          if (substep === "V20") return setup;
+          return operation();
+        }
+      };
+      if (scenario === "invalid-result") {
+        dependencies.retirePrimaryMigrationPoolBeforePersistedVault =
+          async () => false;
+      }
+      let thrown;
+      try {
+        await runPersistedVaultGate({
+          PoolClass: SyntheticVerifierPool,
+          database: "synthetic",
+          target: { port: 5432 }
+        }, [], "synthetic-unused-root", dependencies);
+      } catch (error) {
+        thrown = error;
+      }
+
+      assert.equal(thrown?.message, "linux_gate_primary_migration_pool_retirement_invalid");
+      assert.deepEqual(calls, ["V20", "V21", "V24", "V25"]);
+      assert.equal(verifierSetupCalls, 0);
+      assert.equal(verifierPoolConstructions, 0);
+      assert.equal(verifierMigrationConnectCalls, 0);
+      assert.equal(calls.includes("V22"), false);
+      assert.equal(setup.persistedA.every((byte) => byte === 0), true);
+      assert.equal(setup.persistedB.every((byte) => byte === 0), true);
+    });
+  }
+});
+
+test("Gate 4 preserves the exact V21 handoff error over later cleanup failures", async () => {
+  const calls = [];
+  const handoffFailure = Object.assign(new Error("private handoff failure"), {
+    code: "ECONNRESET"
+  });
+  const verifierCleanupFailure = new Error("private verifier cleanup failure");
+  const materialCleanupFailure = new Error("private material cleanup failure");
+  let handoffCalls = 0;
+  let verifierSetupCalls = 0;
+  let verifierPoolConstructions = 0;
+  let verifierMigrationConnectCalls = 0;
+  const { gate, setup } = syntheticPersistedGate4Harness();
+  setup.original = {
+    createRestoreBehaviorVerifiers() {
+      verifierSetupCalls += 1;
+      return gate;
+    }
+  };
+  class SyntheticVerifierPool {
+    constructor() {
+      verifierPoolConstructions += 1;
+    }
+    connect() {
+      verifierMigrationConnectCalls += 1;
+      throw new Error("verifier connect must remain unreachable");
+    }
+  }
+  let thrown;
+  try {
+    await runPersistedVaultGate({
+      PoolClass: SyntheticVerifierPool,
+      database: "synthetic",
+      target: { port: 5432 }
+    }, [], "synthetic-unused-root", {
+      async retirePrimaryMigrationPoolBeforePersistedVault(...arguments_) {
+        handoffCalls += 1;
+        assert.equal(arguments_.length, 0);
+        throw handoffFailure;
+      },
+      async runGate4Substep(substep, _operationClass, operation) {
+        calls.push(substep);
+        if (substep === "V20") return setup;
+        if (substep === "V24") {
+          await operation();
+          throw verifierCleanupFailure;
+        }
+        if (substep === "V25") {
+          await operation();
+          throw materialCleanupFailure;
+        }
+        return operation();
+      }
+    });
+  } catch (error) {
+    thrown = error;
+  }
+
+  assert.strictEqual(thrown, handoffFailure);
+  assert.equal(handoffCalls, 1);
+  assert.deepEqual(calls, ["V20", "V21", "V24", "V25"]);
+  assert.equal(verifierSetupCalls, 0);
+  assert.equal(verifierPoolConstructions, 0);
+  assert.equal(verifierMigrationConnectCalls, 0);
+  assert.equal(calls.includes("V22"), false);
   assert.equal(setup.persistedA.every((byte) => byte === 0), true);
   assert.equal(setup.persistedB.every((byte) => byte === 0), true);
 });
@@ -3163,11 +3492,15 @@ test("persisted Gate 4 injection preserves each V20-V25 failure without a databa
   for (const [index, [target]] of PERSISTED_GATE4_SUBSTEPS.entries()) {
     await t.test(target, async () => {
       const calls = [];
-      const { gate, setup } = syntheticPersistedGate4Harness();
+      const {
+        observations,
+        retirePrimaryMigrationPoolBeforePersistedVault,
+        setup
+      } = syntheticPersistedGate4Harness();
       const failure = Object.assign(new Error(`private ${target}`), { code: "23505" });
       let thrown;
       try {
-        await runPersistedVaultGate({}, [], "synthetic-unused-root", {
+        await runPersistedVaultGate(syntheticPersistedGate4State(), [], "synthetic-unused-root", {
           async runGate4Substep(substep, operationClass, operation) {
             calls.push([substep, operationClass]);
             if (substep === target) {
@@ -3175,9 +3508,9 @@ test("persisted Gate 4 injection preserves each V20-V25 failure without a databa
               throw failure;
             }
             if (substep === "V20") return setup;
-            if (substep === "V21") return gate;
             return operation();
-          }
+          },
+          retirePrimaryMigrationPoolBeforePersistedVault
         });
       } catch (error) {
         thrown = error;
@@ -3192,6 +3525,7 @@ test("persisted Gate 4 injection preserves each V20-V25 failure without a databa
         V25: ["V20", "V21", "V22", "V23", "V24", "V25"]
       };
       assert.strictEqual(thrown, failure);
+      assert.equal(observations.retirementCalls, index >= 2 ? 1 : 0);
       assert.deepEqual(calls.map(([substep]) => substep), expectedCalls[target]);
       const expectedCoreLength = Math.min(index, 3) + 1;
       assert.deepEqual(
@@ -3208,17 +3542,20 @@ test("persisted Gate 4 injection preserves each V20-V25 failure without a databa
 
 test("persisted Gate 4 primary failure wins over V24 and V25 cleanup failures", async () => {
   const calls = [];
-  const { gate, setup } = syntheticPersistedGate4Harness();
+  const {
+    observations,
+    retirePrimaryMigrationPoolBeforePersistedVault,
+    setup
+  } = syntheticPersistedGate4Harness();
   const primary = Object.assign(new Error("private primary"), { code: "23514" });
   const verifierCleanup = Object.assign(new Error("private verifier cleanup"), { code: "ECONNRESET" });
   const materialCleanup = Object.assign(new Error("private material cleanup"), { code: "ERANGE" });
   let thrown;
   try {
-    await runPersistedVaultGate({}, [], "synthetic-unused-root", {
+    await runPersistedVaultGate(syntheticPersistedGate4State(), [], "synthetic-unused-root", {
       async runGate4Substep(substep, _operationClass, operation) {
         calls.push(substep);
         if (substep === "V20") return setup;
-        if (substep === "V21") return gate;
         if (substep === "V22") throw primary;
         if (substep === "V24") throw verifierCleanup;
         if (substep === "V25") {
@@ -3226,12 +3563,14 @@ test("persisted Gate 4 primary failure wins over V24 and V25 cleanup failures", 
           throw materialCleanup;
         }
         return operation();
-      }
+      },
+      retirePrimaryMigrationPoolBeforePersistedVault
     });
   } catch (error) {
     thrown = error;
   }
   assert.strictEqual(thrown, primary);
+  assert.equal(observations.retirementCalls, 1);
   assert.deepEqual(calls, ["V20", "V21", "V22", "V24", "V25"]);
   assert.equal(setup.persistedA.every((byte) => byte === 0), true);
   assert.equal(setup.persistedB.every((byte) => byte === 0), true);
@@ -3259,7 +3598,8 @@ test("persisted Gate 4 retains partial V20 material when the runner fails after 
           throw failure;
         }
         return operation();
-      }
+      },
+      async retirePrimaryMigrationPoolBeforePersistedVault() { return true; }
     });
   } catch (error) {
     thrown = error;
@@ -3274,7 +3614,11 @@ test("persisted Gate 4 retains partial V20 material when the runner fails after 
 test("persisted Gate 4 retains V21 verifier when the runner fails after creation", async () => {
   const failure = Object.assign(new Error("private post-verifier failure"), { code: "ETIMEDOUT" });
   const calls = [];
-  const { gate, observations, setup } = syntheticPersistedGate4Harness();
+  const {
+    observations,
+    retirePrimaryMigrationPoolBeforePersistedVault,
+    setup
+  } = syntheticPersistedGate4Harness();
   let thrown;
   try {
     await runPersistedVaultGate({
@@ -3290,13 +3634,15 @@ test("persisted Gate 4 retains V21 verifier when the runner fails after creation
           throw failure;
         }
         return operation();
-      }
+      },
+      retirePrimaryMigrationPoolBeforePersistedVault
     });
   } catch (error) {
     thrown = error;
   }
   assert.strictEqual(thrown, failure);
   assert.deepEqual(calls, ["V20", "V21", "V24", "V25"]);
+  assert.equal(observations.retirementCalls, 1);
   assert.equal(observations.closeCalls, 1);
   assert.equal(setup.persistedA.every((byte) => byte === 0), true);
   assert.equal(setup.persistedB.every((byte) => byte === 0), true);
@@ -3304,20 +3650,25 @@ test("persisted Gate 4 retains V21 verifier when the runner fails after creation
 
 test("persisted Gate 4 records a V24 close failure first and still executes V25", async () => {
   const closeFailure = Object.assign(new Error("private close"), { code: "ECONNRESET" });
-  const { gate, observations, setup } = syntheticPersistedGate4Harness({ closeError: closeFailure });
+  const {
+    observations,
+    retirePrimaryMigrationPoolBeforePersistedVault,
+    setup
+  } = syntheticPersistedGate4Harness({ closeError: closeFailure });
   let thrown;
   try {
-    await runPersistedVaultGate({}, [], "synthetic-unused-root", {
+    await runPersistedVaultGate(syntheticPersistedGate4State(), [], "synthetic-unused-root", {
       async runGate4Substep(substep, _operationClass, operation) {
         if (substep === "V20") return setup;
-        if (substep === "V21") return gate;
         return operation();
-      }
+      },
+      retirePrimaryMigrationPoolBeforePersistedVault
     });
   } catch (error) {
     thrown = error;
   }
   assert.strictEqual(thrown, closeFailure);
+  assert.equal(observations.retirementCalls, 1);
   assert.equal(observations.closeCalls, 1);
   assert.equal(setup.persistedA.every((byte) => byte === 0), true);
   assert.equal(setup.persistedB.every((byte) => byte === 0), true);
