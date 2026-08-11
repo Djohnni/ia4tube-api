@@ -1,30 +1,35 @@
 # Checkpoint Social 3A-0P — gates físicos Linux isolados
 
-## Contrato canônico da propriedade lazy dos verificadores de restore do Gate 5
+## Contrato canônico das constraints de perfil no catálogo do Gate 5
 
 Esta rota existe somente na branch
-`social/checkpoint-3a0p-linux-gate5-lazy-verifier-ownership-20260811`,
+`social/checkpoint-3a0p-gate5-profile-constraint-catalog-20260811`,
 criada a partir do commit exato
-`95c8c9ad12719012e3d94aea9dfd13d7c6103cc2`. O único
+`d5b80c57454bd3759d8fc996120ffab6734062ee`. O único
 commit autorizado deve ter esse commit como pai imediato e a mensagem integral:
 
 ```text
-[run-social-3a0p-linux-gate] defer restore verifier ownership check
+[run-social-3a0p-linux-gate] align backup catalog with schema profile constraints
 ```
 
-O produto permanece idêntico a `fcfc92419021dae5f77baad731c634b10c275c5b`:
-`src/`, todo `db/` (inclusive `roles.sql`), migrations, `server.js`,
-`package.json` e `package-lock.json` não são alterados. A rota não acrescenta
-grants, não muda políticas RLS e não modifica schema, SCRAM, roles, produto,
-backup, restore, dependências ou os testes de segurança antigos. Os helpers
-PowerShell testados e o protocolo `IA4REC1` permanecem byte-semanticamente
-inalterados. A alteração atual fica no harness físico Windows: a checagem de
-propriedade do banco descartável deixa de ocorrer durante a construção do
-request e passa a ocorrer no primeiro uso lazy de um verificador, depois de
-`lifecycle.create`, `lifecycle.assertCreated`, restore físico e validação do
-perfil. A proteção não é removida, banco arbitrário continua recusado e nenhum
-banco é adicionado prematuramente ao conjunto `owned`. Não há retry, espera ou
-conexão diagnóstica nova.
+A única alteração autorizada dentro de `src/` é
+`src/persistence/postgres/backup-restore.js`; todo o restante de `src/`, todo
+`db/` (inclusive `roles.sql` e `db/migrations/checksums.json`), migrations,
+`server.js`, `package.json` e `package-lock.json` permanecem idênticos a
+`fcfc92419021dae5f77baad731c634b10c275c5b`. A rota não acrescenta grant, não
+muda RLS, schema, SCRAM, roles, migration, checksum, manifest, transporte,
+criptografia, dependência ou produto não autorizado. Os helpers PowerShell e o
+protocolo `IA4REC1` permanecem byte-semanticamente inalterados.
+
+A alteração atual corrige somente o contrato interno usado por
+`collectCatalogEvidence`: cada perfil declara, por identidade completa de
+schema, tabela, nome e tipo, quais constraints obrigatórias podem aparecer com
+`validated=false`. O perfil `social-schema-0003` possui conjunto vazio; o perfil
+`social-schema-0004` possui exatamente C01–C05. `validated=true` continua sendo
+um estado mais forte e aceito, qualquer constraint desconhecida não validada é
+recusada e o digest continua refletindo o estado real observado. Nenhuma
+constraint é validada artificialmente e nenhum nome ou definition é publicado
+na evidência.
 O workflow mantém a rota normal: `npm test` uma vez no Windows e, somente após
 seu sucesso, o job Linux físico preservado.
 
@@ -443,9 +448,85 @@ construção da facade, das URLs e de qualquer pool verificador. Preparar os
 requests não cria verifier, conexão, query, banco ou ownership; primeiro uso
 antes da propriedade confirmada continua recusado com o mesmo código.
 
-O run histórico não é repetido e não é reclassificado como aprovado. Esta rota
-não afirma ainda commit, push ou run novo, nem altera Gate 4, backup, restore,
-PostgreSQL, roles, migrations ou produto.
+O run histórico não é repetido e não é reclassificado como aprovado. A rota
+encerrada não afirmava commit, push ou run posterior e não alterava Gate 4,
+backup, restore, PostgreSQL, roles, migrations ou produto.
+
+## Run físico histórico `31528815502` e contrato C01–C05 do Gate 5
+
+O run `31528815502`, `run_attempt=1` e `pushAttempts=1`, ocorreu no commit
+`d5b80c57454bd3759d8fc996120ffab6734062ee`, pai exato
+`95c8c9ad12719012e3d94aea9dfd13d7c6103cc2`. O job Windows aprovou seus 1.431
+testes, com 1.424 aprovados, zero falha, 2 ignorados e 5 TODO; o pré-gate Linux
+aprovou `149/149`. Durabilidade, `O_NOFOLLOW`, PostgreSQL descartável,
+bootstrap e os Gates 1, 2, 3 e 4 foram aprovados. V21–V25 concluíram,
+`gate4FailureProvenance=null` e
+`gate4ConnectionCapacityDiagnostics=null`.
+
+A preparação do Gate 5, o backup 0003 e o restore 0003 foram aprovados. A
+primeira falha física ocorreu no backup 0004, em `phase=backup_restore`, com
+`code=backup_catalog_state_invalid`. A procedência fechada preservada é:
+
+- `operation=gate5_backup_0004`;
+- `substep=backup_after_schema_inventory`;
+- `boundary=internal_interval`;
+- `causalCode=backup_restore_internal_failure_unclassified`;
+- `externalTransportProcessStarted=false`;
+- `substepExact=false`.
+
+O processo supervisor terminou com `exitCode=1`, `signal=null`,
+`timedOut=false`, `stdoutStored=false` e `stderrStored=false`. O transporte e o
+`pg_dump` do backup 0004 não começaram; marcadores globais anteriores pertencem
+às operações 0003 já concluídas. Restore 0004, manifest tamper refusal,
+cross-profile refusal, métricas e secret scan físico remoto não executaram.
+
+O artifact histórico `social-3a0p-linux-physical-gates-evidence`, ID
+`9116088828`, possui digest
+`sha256:0a9d5f1920ef21e84869fd77d62cbecf1c758110aebc550e386a124a549cccf0`.
+O SHA-256 do JSON de evidência é
+`5fce8a14acf70bb3f47b6ff649a3f65235a3b94c3ca2a9ddb48c247cae73e143`; o
+SHA-256 do status do processo é
+`26564ca3007f7f91c7b77edadbe4122d82804ea0626a3958f21292d1b067f342`; e a
+imagem PostgreSQL permaneceu pinada em
+`sha256:7e6103cf85f88f7a0eddb3ec0b1ba8940eba098ed118ade25a729ca9daee5568`.
+O cleanup foi aprovado, com `cleanupCompleted=true`, `cleanupFailure=null` e
+zero resíduo de container, rede, volume, listener ou raiz temporária. Esses
+valores e o artifact histórico não são reescritos.
+
+A classificação canônica é
+`gate5_backup_0004_profile_constraint_validation_contract_mismatch`. A migration
+0004 cria deliberadamente cinco constraints `NOT VALID`, mas a coleta anterior
+exigia que todas as constraints retornadas tivessem `validated=true`. O perfil
+0003 passava porque ainda não continha essas cinco identidades; o perfil 0004
+era recusado depois do inventário e antes do transporte externo.
+
+O contrato fechado e imutável do perfil 0004 contém exatamente:
+
+- C01: `ia4tube_social.social_external_accounts`,
+  `social_external_accounts_instagram_professional`, tipo `check` (`pgType=c`);
+- C02: `ia4tube_social.social_oauth_transactions`,
+  `social_oauth_transactions_connection_fk`, tipo `foreign_key` (`pgType=f`);
+- C03: `ia4tube_social.social_audit_events`,
+  `social_audit_events_reference_provider_present`, tipo `check` (`pgType=c`);
+- C04: `ia4tube_social.social_audit_events`,
+  `social_audit_events_connection_provider_fk`, tipo `foreign_key`
+  (`pgType=f`);
+- C05: `ia4tube_social.social_audit_events`,
+  `social_audit_events_publication_provider_fk`, tipo `foreign_key`
+  (`pgType=f`).
+
+Cada identidade exige schema, tabela, nome e tipo exatos. C01–C05 devem existir
+e podem estar todas validadas, todas não validadas ou em estado misto; nenhuma
+sexta constraint não validada é aceita. O perfil 0003 não herda essa lista e
+recusa qualquer `validated=false`. A FK obrigatória
+`social_encrypted_credentials_key_version_fk` continua exigida. O campo público
+`requiredConstraintsPresent` mantém o nome e passa a representar presença
+integral do contrato do perfil, FK do cofre presente e ausência de constraint
+desconhecida não validada. `constraintDigest` continua cobrindo todas as
+constraints, definição, tipo e valor real de `validated`.
+
+Esta rota não valida C01–C05, não altera a migration 0004, checksums, manifest ou
+evidência pública e não afirma commit, push ou run novo.
 
 ## Contrato fechado de `gate4FailureProvenance`
 
@@ -799,7 +880,7 @@ e o novo `HEAD`:
     `tests/social-3a0p-linux-gate.test.js`,
     `tests/social-3a0p-linux-physical-gates.test.js` e
     `tests/social-3a0p-linux-workflow.test.js`.
-14. O novo `HEAD`, pai exato
+14. `d5b80c57454bd3759d8fc996120ffab6734062ee`, pai exato
     `95c8c9ad12719012e3d94aea9dfd13d7c6103cc2`, mensagem
     `[run-social-3a0p-linux-gate] defer restore verifier ownership check`
     e inventário fechado de exatamente sete caminhos:
@@ -810,9 +891,26 @@ e o novo `HEAD`:
     `tests/social-3a0p-linux-gate.test.js`,
     `tests/social-3a0p-local-windows-physical-plans.test.js` e
     `tests/social-3a0p-linux-workflow.test.js`.
+15. O novo `HEAD`, pai exato
+    `d5b80c57454bd3759d8fc996120ffab6734062ee`, mensagem
+    `[run-social-3a0p-linux-gate] align backup catalog with schema profile constraints`
+    e inventário fechado de exatamente treze caminhos:
+    `.github/workflows/social-3a0p-linux-physical-gates.yml`,
+    `docs/social-3a0p-linux-physical-gates.md`,
+    `scripts/social-3a0p-linux-gate.js`,
+    `scripts/social-3a0p-local-scope.js`,
+    `src/persistence/postgres/backup-restore.js`,
+    `tests/social-3a0p-current-diff-scope.test.js`,
+    `tests/social-3a0p-linux-gate.test.js`,
+    `tests/social-3a0p-linux-workflow.test.js`,
+    `tests/social-3a0p-local-backup-restore.test.js`,
+    `tests/social-3a0p-local-scope.test.js`,
+    `tests/social-3a0p-local-windows-physical-plans.test.js`,
+    `tests/social-postgres-backup-restore.test.js` e
+    `tests/social-postgres-migrations.test.js`.
 
 Os guards dos dois jobs verificam pais, mensagens, ancestralidade linear,
-contagem catorze e cada um desses inventários sem prefixo, glob ou diretório
+contagem quinze e cada um desses inventários sem prefixo, glob ou diretório
 inteiro.
 
 ## Restauração da rota executável normal

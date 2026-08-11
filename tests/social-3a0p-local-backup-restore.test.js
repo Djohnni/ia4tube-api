@@ -221,7 +221,12 @@ function lifecycle(profileId, events = [], overrides = {}) {
   return { ...base, ...overrides };
 }
 
-function dependencies(events = [], overrides = {}, observedProfile = profile0004) {
+function dependencies(
+  events = [],
+  overrides = {},
+  observedProfile = profile0004,
+  catalogFailure
+) {
   return {
     createPostgresBackupOperator(pool) {
       events.push(["operator", pool.id]);
@@ -233,12 +238,23 @@ function dependencies(events = [], overrides = {}, observedProfile = profile0004
           return observedProfile;
         },
         async assertTransientPoliciesAbsent() {},
-        async collectCatalogEvidence() {},
+        async collectCatalogEvidence(_config, schemaProfile) {
+          events.push(["catalog-profile", schemaProfile.id]);
+          if (catalogFailure) throw catalogFailure;
+          return { requiredConstraintsPresent: true };
+        },
         async releaseLocks() {}
       };
     },
     async runLogicalBackup(options) {
-      await options.operator.preflight();
+      const schemaProfile = await options.operator.preflight(options.config);
+      await options.operator.collectCatalogEvidence(
+        options.config,
+        schemaProfile
+      );
+      await options.runTool(Object.freeze({
+        kind: "synthetic-pg-dump-after-catalog"
+      }));
       events.push([
         "backup",
         options.requireBundleDirectoryFsync
@@ -445,7 +461,7 @@ test("disposable lifecycle requires an exact loopback marked target", () => {
 });
 
 for (const profile of [profile0003, profile0004]) {
-  test(`backup ${profile.id} reuses the definitive runner and reports Windows durability honestly`, async () => {
+  test(`backup ${profile.id} validates its catalog before transport and reports Windows durability honestly`, async () => {
     const events = [];
     const config = backupConfig();
     const result = await runProfileBackup({
@@ -455,7 +471,10 @@ for (const profile of [profile0003, profile0004]) {
       config,
       localBinding: bindingFor(config),
       pool: { id: `backup-${profile.id}` },
-      runTool: async () => ({ code: 0, stdout: "" }),
+      runTool: async () => {
+        events.push(["transport-profile", profile.id]);
+        return { code: 0, stdout: "" };
+      },
       dependencies: dependencies(events, {}, profile)
     });
     assert.equal(result.profileId, profile.id);
@@ -472,10 +491,47 @@ for (const profile of [profile0003, profile0004]) {
     assert.deepEqual(events, [
       ["operator", `backup-${profile.id}`],
       ["preflight-profile", profile.id],
+      ["catalog-profile", profile.id],
+      ["transport-profile", profile.id],
       ["backup", false]
     ]);
   });
 }
+
+test("an invalid 0004 catalog is refused before the bound transport", async () => {
+  const events = [];
+  const config = backupConfig();
+  let transportStarts = 0;
+  await assert.rejects(
+    runProfileBackup({
+      approval: LOCAL_PHYSICAL_APPROVAL,
+      runMarker,
+      profileRows: profile0004.migrationRows,
+      config,
+      localBinding: bindingFor(config),
+      pool: { id: "backup-0004-invalid-catalog" },
+      runTool: async () => {
+        transportStarts += 1;
+        return { code: 0, stdout: "" };
+      },
+      dependencies: dependencies(
+        events,
+        {},
+        profile0004,
+        Object.assign(new Error("synthetic catalog refusal"), {
+          code: "backup_catalog_state_invalid"
+        })
+      )
+    }),
+    { code: "backup_catalog_state_invalid" }
+  );
+  assert.deepEqual(events, [
+    ["operator", "backup-0004-invalid-catalog"],
+    ["preflight-profile", profile0004.id],
+    ["catalog-profile", profile0004.id]
+  ]);
+  assert.equal(transportStarts, 0);
+});
 
 test("restore closes behavioral verifier sessions before removing the disposable database", async () => {
   const events = [];

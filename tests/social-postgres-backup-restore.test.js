@@ -99,6 +99,67 @@ const tools = Object.freeze({
   restore: "C:\\PostgreSQL\\18\\bin\\pg_restore.exe",
   psql: "C:\\PostgreSQL\\18\\bin\\psql.exe"
 });
+const VAULT_CONSTRAINT = Object.freeze({
+  schema_name: "ia4tube_social",
+  table_name: "social_encrypted_credentials",
+  constraint_name: "social_encrypted_credentials_key_version_fk",
+  constraint_type: "f"
+});
+const PROFILE_0004_UNVALIDATED_CONSTRAINTS = Object.freeze([
+  Object.freeze({
+    schema_name: "ia4tube_social",
+    table_name: "social_external_accounts",
+    constraint_name: "social_external_accounts_instagram_professional",
+    constraint_type: "c"
+  }),
+  Object.freeze({
+    schema_name: "ia4tube_social",
+    table_name: "social_oauth_transactions",
+    constraint_name: "social_oauth_transactions_connection_fk",
+    constraint_type: "f"
+  }),
+  Object.freeze({
+    schema_name: "ia4tube_social",
+    table_name: "social_audit_events",
+    constraint_name: "social_audit_events_reference_provider_present",
+    constraint_type: "c"
+  }),
+  Object.freeze({
+    schema_name: "ia4tube_social",
+    table_name: "social_audit_events",
+    constraint_name: "social_audit_events_connection_provider_fk",
+    constraint_type: "f"
+  }),
+  Object.freeze({
+    schema_name: "ia4tube_social",
+    table_name: "social_audit_events",
+    constraint_name: "social_audit_events_publication_provider_fk",
+    constraint_type: "f"
+  })
+]);
+
+function catalogConstraintRow(constraint, validated = true, overrides = {}) {
+  return {
+    ...constraint,
+    validated,
+    definition: `synthetic-${constraint.constraint_name}`,
+    ...overrides
+  };
+}
+
+function profile0004ConstraintRows(validated = false) {
+  return [
+    catalogConstraintRow(VAULT_CONSTRAINT, true),
+    ...PROFILE_0004_UNVALIDATED_CONSTRAINTS.map((constraint, index) => (
+      catalogConstraintRow(
+        constraint,
+        typeof validated === "function"
+          ? validated(constraint, index)
+          : validated
+      )
+    ))
+  ];
+}
 
 function temporaryDirectory(t) {
   const directory = fs.mkdtempSync(
@@ -250,6 +311,92 @@ function safePermanentLogin() {
     cluster_ownership_dependency: false,
     table_truncate: false
   };
+}
+
+function catalogInspectionClient(profile, constraintRows) {
+  return {
+    async query(text) {
+      if (text.includes("pg_advisory_lock")) return { rows: [{}] };
+      if (text.includes("pg_advisory_unlock")) {
+        return { rows: [{ unlocked: true }] };
+      }
+      if (text.includes("login_bootstrap_infrastructure")) {
+        return { rows: [safeBootstrapInfrastructure()] };
+      }
+      if (text.includes("login_bootstrap_login */")) {
+        return { rows: [safePermanentLogin()] };
+      }
+      if (text.includes("AS rls_table_count")) {
+        return {
+          rows: [{
+            rls_table_count: profile.rlsTables.length,
+            enabled_rls_table_count: profile.rlsTables.length,
+            forced_rls_table_count: profile.rlsTables.length
+          }]
+        };
+      }
+      if (text.startsWith("SELECT rolname, rolcanlogin")) {
+        return {
+          rows: [OWNER_ROLE, MIGRATOR_ROLE, RUNTIME_ROLE].map(
+            (rolname) => ({
+              rolname,
+              rolcanlogin: false,
+              rolsuper: false,
+              rolcreatedb: false,
+              rolcreaterole: false,
+              rolinherit: false,
+              rolreplication: false,
+              rolbypassrls: false
+            })
+          )
+        };
+      }
+      if (text.startsWith("SELECT granted.rolname")) {
+        return {
+          rows: [{
+            granted_role: OWNER_ROLE,
+            member_role: MIGRATOR_ROLE,
+            admin_option: false,
+            inherit_option: false,
+            set_option: true
+          }]
+        };
+      }
+      if (text.startsWith("SELECT tablename, policyname")) {
+        return { rows: [] };
+      }
+      if (text.includes("constraint_info.conname")) {
+        return { rows: constraintRows.map((row) => ({ ...row })) };
+      }
+      if (text.includes("AS compatible_with_2a")) {
+        return { rows: [{ compatible_with_2a: true }] };
+      }
+      if (text.includes("transient_policy_count")) {
+        return { rows: [{ transient_policy_count: 0 }] };
+      }
+      throw new Error("unexpected catalog contract query");
+    },
+    release() {}
+  };
+}
+
+async function collectProfileCatalog(t, profile, constraintRows) {
+  const directory = temporaryDirectory(t);
+  const config = loadBackupConfig(backupEnvironment(directory), {
+    repositoryRoot: root
+  });
+  const client = catalogInspectionClient(profile, constraintRows);
+  const operator = createPostgresBackupOperator({
+    async connect() {
+      return client;
+    }
+  });
+  await operator.acquireLocks([MIGRATION_LOCK_ID, BACKUP_LOCK_ID]);
+  try {
+    return await operator.collectCatalogEvidence(config, profile);
+  } finally {
+    await operator.releaseLocks([BACKUP_LOCK_ID, MIGRATION_LOCK_ID]);
+  }
 }
 
 function safeSnapshot(overrides = {}) {
@@ -790,17 +937,7 @@ test("operator uses only provisioner locks and catalog inspection", async (t) =>
         return { rows: [] };
       }
       if (text.includes("constraint_info.conname")) {
-        return {
-          rows: [{
-            schema_name: "ia4tube_social",
-            table_name: "social_encrypted_credentials",
-            constraint_name:
-              "social_encrypted_credentials_key_version_fk",
-            constraint_type: "f",
-            validated: true,
-            definition: "synthetic"
-          }]
-        };
+        return { rows: profile0004ConstraintRows(false) };
       }
       if (text.includes("AS compatible_with_2a")) {
         return { rows: [{ compatible_with_2a: true }] };
@@ -824,6 +961,7 @@ test("operator uses only provisioner locks and catalog inspection", async (t) =>
   await operator.releaseLocks([BACKUP_LOCK_ID, MIGRATION_LOCK_ID]);
 
   assert.equal(catalog.runtimeEscalationPossible, false);
+  assert.equal(catalog.requiredConstraintsPresent, true);
   assert.deepEqual(
     loginChecks.map((values) => values[2]),
     [2, 9, 2, 9, 2, 9]
@@ -843,6 +981,209 @@ test("operator uses only provisioner locks and catalog inspection", async (t) =>
         /\b(?:INSERT|UPDATE|DELETE|TRUNCATE|ALTER|DROP)\b/i.test(text)
     ),
     false
+  );
+});
+
+test("catalog constraints are closed per authenticated schema profile", async (t) => {
+  const profile0003 = SCHEMA_PROFILES[0];
+  const profile0004 = SCHEMA_PROFILES[1];
+
+  async function accepted(context, profile, rows) {
+    const catalog = await collectProfileCatalog(context, profile, rows);
+    assert.equal(catalog.requiredConstraintsPresent, true);
+    const evidence = normalizeEvidence(
+      profileEvidence(profile, { catalog }),
+      profile
+    );
+    assert.equal(evidence.catalog.requiredConstraintsPresent, true);
+    return { catalog, evidence };
+  }
+
+  async function refused(context, profile, rows) {
+    const catalog = await collectProfileCatalog(context, profile, rows);
+    assert.equal(catalog.requiredConstraintsPresent, false);
+    assert.throws(
+      () => normalizeEvidence(profileEvidence(profile, { catalog }), profile),
+      { code: "backup_catalog_state_invalid" }
+    );
+    return catalog;
+  }
+
+  await t.test("0003 accepts a fully validated catalog", async (context) => {
+    await accepted(
+      context,
+      profile0003,
+      [catalogConstraintRow(VAULT_CONSTRAINT, true)]
+    );
+  });
+
+  await t.test("0003 refuses every unvalidated constraint", async (context) => {
+    await refused(context, profile0003, [
+      catalogConstraintRow(VAULT_CONSTRAINT, true),
+      catalogConstraintRow(PROFILE_0004_UNVALIDATED_CONSTRAINTS[0], false)
+    ]);
+  });
+
+  await t.test("0004 accepts all five intentional constraints unvalidated", async (context) => {
+    await accepted(context, profile0004, profile0004ConstraintRows(false));
+  });
+
+  await t.test("0004 accepts all five constraints validated", async (context) => {
+    await accepted(context, profile0004, profile0004ConstraintRows(true));
+  });
+
+  await t.test("0004 accepts a mixed validation state", async (context) => {
+    await accepted(
+      context,
+      profile0004,
+      profile0004ConstraintRows((_constraint, index) => index % 2 === 0)
+    );
+  });
+
+  for (const required of PROFILE_0004_UNVALIDATED_CONSTRAINTS) {
+    await t.test(`0004 refuses missing ${required.constraint_name}`, async (context) => {
+      await refused(
+        context,
+        profile0004,
+        profile0004ConstraintRows(false).filter(
+          (row) => row.constraint_name !== required.constraint_name
+        )
+      );
+    });
+  }
+
+  await t.test("0004 refuses a sixth unvalidated constraint", async (context) => {
+    await refused(context, profile0004, [
+      ...profile0004ConstraintRows(false),
+      catalogConstraintRow({
+        schema_name: "ia4tube_social",
+        table_name: "social_connections",
+        constraint_name: "social_connections_sixth_unvalidated",
+        constraint_type: "c"
+      }, false)
+    ]);
+  });
+
+  for (const [field, value] of [
+    ["schema_name", "ia4tube_social_admin"],
+    ["table_name", "social_connections"],
+    ["constraint_name", "social_external_accounts_professional"],
+    ["constraint_type", "f"]
+  ]) {
+    await t.test(`0004 refuses an authorized identity with wrong ${field}`, async (context) => {
+      const rows = profile0004ConstraintRows(false);
+      rows[1] = { ...rows[1], [field]: value };
+      await refused(context, profile0004, rows);
+    });
+  }
+
+  await t.test("0004 accepts an additional validated constraint", async (context) => {
+    await accepted(context, profile0004, [
+      ...profile0004ConstraintRows(false),
+      catalogConstraintRow({
+        schema_name: "ia4tube_social",
+        table_name: "social_connections",
+        constraint_name: "social_connections_additional_validated",
+        constraint_type: "c"
+      }, true)
+    ]);
+  });
+
+  await t.test("every profile requires the exact vault foreign key", async (context) => {
+    await refused(
+      context,
+      profile0004,
+      profile0004ConstraintRows(false).filter(
+        (row) => row.constraint_name !== VAULT_CONSTRAINT.constraint_name
+      )
+    );
+  });
+
+  for (const invalid of [undefined, "false"]) {
+    await t.test(`validated state ${String(invalid)} is refused`, async (context) => {
+      const rows = profile0004ConstraintRows(false);
+      if (invalid === undefined) delete rows[1].validated;
+      else rows[1].validated = invalid;
+      await refused(context, profile0004, rows);
+    });
+  }
+
+  await t.test("0003 does not inherit the 0004 allowlist", async (context) => {
+    await refused(context, profile0003, [
+      catalogConstraintRow(VAULT_CONSTRAINT, true),
+      ...PROFILE_0004_UNVALIDATED_CONSTRAINTS.map((constraint) => (
+        catalogConstraintRow(constraint, false)
+      ))
+    ]);
+  });
+
+  await t.test("a similar prefix never authorizes an unvalidated constraint", async (context) => {
+    await refused(context, profile0004, [
+      ...profile0004ConstraintRows(false),
+      catalogConstraintRow({
+        schema_name: "ia4tube_social",
+        table_name: "social_external_accounts",
+        constraint_name:
+          "social_external_accounts_instagram_professional_similar",
+        constraint_type: "c"
+      }, false)
+    ]);
+  });
+
+  await t.test("duplicate canonical identities are refused", async (context) => {
+    const rows = profile0004ConstraintRows(false);
+    rows.push({ ...rows[1] });
+    await refused(context, profile0004, rows);
+  });
+
+  await t.test("an unknown profile is refused as invalid catalog state", async (context) => {
+    await assert.rejects(
+      collectProfileCatalog(
+        context,
+        { ...profile0004, id: "social-schema-unknown" },
+        profile0004ConstraintRows(false)
+      ),
+      { code: "backup_catalog_state_invalid" }
+    );
+  });
+
+  await t.test("constraint digest preserves the observed validation state", async (context) => {
+    const unvalidated = await collectProfileCatalog(
+      context,
+      profile0004,
+      profile0004ConstraintRows(false)
+    );
+    const validated = await collectProfileCatalog(
+      context,
+      profile0004,
+      profile0004ConstraintRows(true)
+    );
+    assert.notEqual(unvalidated.constraintDigest, validated.constraintDigest);
+  });
+
+  await t.test("public evidence contains no constraint names or definitions", async (context) => {
+    const { evidence } = await accepted(
+      context,
+      profile0004,
+      profile0004ConstraintRows(false)
+    );
+    const serialized = JSON.stringify(evidence);
+    for (const constraint of [
+      VAULT_CONSTRAINT,
+      ...PROFILE_0004_UNVALIDATED_CONSTRAINTS
+    ]) {
+      assert.equal(serialized.includes(constraint.constraint_name), false);
+    }
+    assert.equal(serialized.includes("synthetic-"), false);
+  });
+
+  assert.throws(
+    () => normalizeEvidence(profileEvidence(profile0004, {
+      catalog: profileCatalog(profile0004, {
+        requiredConstraintsPresent: false
+      })
+    })),
+    { code: "backup_catalog_state_invalid" }
   );
 });
 
@@ -1398,6 +1739,41 @@ test("backup workflow completes against an exact pre-0004 ledger without future 
   }
 });
 
+test("backup refuses an invalid profile catalog before external transport", async (t) => {
+  const directory = temporaryDirectory(t);
+  const config = loadBackupConfig(backupEnvironment(directory), {
+    repositoryRoot: root
+  });
+  const events = [];
+  let toolCalls = 0;
+  await assert.rejects(
+    runLogicalBackup({
+      config,
+      operator: mockOperator(
+        events,
+        safeCatalog({ requiredConstraintsPresent: false })
+      ),
+      async runTool() {
+        toolCalls += 1;
+        return { code: 0, stdout: "" };
+      },
+      generatedAt: "2026-08-11T12:00:00.000Z"
+    }),
+    { code: "backup_catalog_state_invalid" }
+  );
+  assert.equal(toolCalls, 0);
+  assert.equal(
+    events.filter((event) => event[0] === "catalog").length,
+    1
+  );
+  assert.deepEqual(events.at(-1), [
+    "release",
+    BACKUP_LOCK_ID,
+    MIGRATION_LOCK_ID
+  ]);
+  assert.equal(fs.existsSync(config.workspace.path), false);
+});
+
 test("backup workflow produces a verified bundle and always releases locks", async (t) => {
   assert.equal(MIGRATION_LOCK_ID, ADVISORY_LOCK_ID);
   const directory = temporaryDirectory(t);
@@ -1409,6 +1785,7 @@ test("backup workflow produces a verified bundle and always releases locks", asy
   const plans = [];
   async function runTool(plan) {
     plans.push(plan);
+    events.push(["tool", plan.executable]);
     assert.equal(fs.existsSync(config.workspace.path), true);
     assert.equal(
       fs.existsSync(
@@ -1482,6 +1859,10 @@ test("backup workflow produces a verified bundle and always releases locks", asy
     BACKUP_LOCK_ID,
     MIGRATION_LOCK_ID
   ]);
+  const catalogAt = events.findIndex((event) => event[0] === "catalog");
+  const firstToolAt = events.findIndex((event) => event[0] === "tool");
+  assert.equal(events.filter((event) => event[0] === "catalog").length, 1);
+  assert.ok(catalogAt >= 0 && catalogAt < firstToolAt);
   assert.equal(
     plans.some((plan) => plan.args.some((arg) => arg.includes("--snapshot"))),
     false

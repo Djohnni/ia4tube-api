@@ -129,6 +129,47 @@ const SCHEMA_PROFILES = Object.freeze([
     rlsTables: RLS_TABLES
   })
 ]);
+const REQUIRED_VAULT_CONSTRAINT = Object.freeze({
+  schema: "ia4tube_social",
+  table: "social_encrypted_credentials",
+  name: "social_encrypted_credentials_key_version_fk",
+  type: "f"
+});
+const ALLOWED_UNVALIDATED_CONSTRAINTS_BY_PROFILE = Object.freeze({
+  "social-schema-0003": Object.freeze([]),
+  "social-schema-0004": Object.freeze([
+    Object.freeze({
+      schema: "ia4tube_social",
+      table: "social_external_accounts",
+      name: "social_external_accounts_instagram_professional",
+      type: "c"
+    }),
+    Object.freeze({
+      schema: "ia4tube_social",
+      table: "social_oauth_transactions",
+      name: "social_oauth_transactions_connection_fk",
+      type: "f"
+    }),
+    Object.freeze({
+      schema: "ia4tube_social",
+      table: "social_audit_events",
+      name: "social_audit_events_reference_provider_present",
+      type: "c"
+    }),
+    Object.freeze({
+      schema: "ia4tube_social",
+      table: "social_audit_events",
+      name: "social_audit_events_connection_provider_fk",
+      type: "f"
+    }),
+    Object.freeze({
+      schema: "ia4tube_social",
+      table: "social_audit_events",
+      name: "social_audit_events_publication_provider_fk",
+      type: "f"
+    })
+  ])
+});
 const CURRENT_SCHEMA_PROFILE = SCHEMA_PROFILES.at(-1);
 const TOOL_BASENAMES = Object.freeze({
   dump: new Set(["pg_dump", "pg_dump.exe"]),
@@ -147,11 +188,65 @@ function migrationRowsDigest(rows) {
     .digest("hex");
 }
 
-function schemaProfileById(value) {
+function schemaProfileById(
+  value,
+  failureCode = "backup_schema_profile_invalid"
+) {
   const id = typeof value === "string" ? value : value?.id;
   const profile = SCHEMA_PROFILES.find((candidate) => candidate.id === id);
-  if (!profile) fail("backup_schema_profile_invalid");
+  if (!profile) fail(failureCode);
   return profile;
+}
+
+function constraintIdentity(value) {
+  const parts = [value?.schema, value?.table, value?.name, value?.type];
+  if (parts.some((part) => typeof part !== "string" || part.length === 0)) {
+    return null;
+  }
+  return JSON.stringify(parts);
+}
+
+function catalogConstraintsMatchProfile(profile, rows) {
+  const allowed = ALLOWED_UNVALIDATED_CONSTRAINTS_BY_PROFILE[profile?.id];
+  if (!allowed || !Array.isArray(rows)) return false;
+  const allowedIdentities = new Set(
+    allowed.map((constraint) => constraintIdentity(constraint))
+  );
+  if (
+    allowedIdentities.size !== allowed.length ||
+    allowedIdentities.has(null)
+  ) return false;
+
+  const observedIdentities = new Set();
+  const unvalidatedIdentities = new Set();
+  for (const row of rows) {
+    const identity = constraintIdentity({
+      schema: row?.schema_name,
+      table: row?.table_name,
+      name: row?.constraint_name,
+      type: row?.constraint_type
+    });
+    if (
+      !identity ||
+      typeof row?.validated !== "boolean" ||
+      typeof row?.definition !== "string" ||
+      row.definition.length === 0 ||
+      observedIdentities.has(identity)
+    ) return false;
+    observedIdentities.add(identity);
+    if (!row.validated) unvalidatedIdentities.add(identity);
+  }
+
+  const vaultIdentity = constraintIdentity(REQUIRED_VAULT_CONSTRAINT);
+  return (
+    observedIdentities.has(vaultIdentity) &&
+    allowed.every((constraint) => (
+      observedIdentities.has(constraintIdentity(constraint))
+    )) &&
+    [...unvalidatedIdentities].every((identity) => (
+      allowedIdentities.has(identity)
+    ))
+  );
 }
 
 function normalizeRawMigrationRows(rows) {
@@ -1441,6 +1536,42 @@ function normalizeMigrationEvidence(rows, expectedSchemaProfile) {
   return Object.freeze({ migrations, profile });
 }
 
+function normalizeCatalogEvidence(catalog, profile) {
+  if (
+    !catalog ||
+    Number(catalog.rlsTableCount) !== profile.rlsTables.length ||
+    Number(catalog.forcedRlsTableCount) !== profile.rlsTables.length ||
+    Number(catalog.transientPolicyCount) !== 0 ||
+    Number(catalog.canonicalRoleCount) !== 3 ||
+    catalog.runtimeEscalationPossible !== false ||
+    catalog.requiredConstraintsPresent !== true ||
+    catalog.compatibleWith2A !== true
+  ) {
+    fail("backup_catalog_state_invalid");
+  }
+  return Object.freeze({
+    rlsTableCount: profile.rlsTables.length,
+    forcedRlsTableCount: profile.rlsTables.length,
+    transientPolicyCount: 0,
+    canonicalRoleCount: 3,
+    runtimeEscalationPossible: false,
+    requiredConstraintsPresent: true,
+    compatibleWith2A: true,
+    policyDigest: requireSha256(
+      String(catalog.policyDigest || "").toLowerCase(),
+      "backup_policy_digest"
+    ),
+    constraintDigest: requireSha256(
+      String(catalog.constraintDigest || "").toLowerCase(),
+      "backup_constraint_digest"
+    ),
+    roleDigest: requireSha256(
+      String(catalog.roleDigest || "").toLowerCase(),
+      "backup_role_digest"
+    )
+  });
+}
+
 function normalizeEvidence(raw, expectedSchemaProfile) {
   const migrationState = normalizeMigrationEvidence(
     raw?.migrations,
@@ -1466,43 +1597,11 @@ function normalizeEvidence(raw, expectedSchemaProfile) {
   ) {
     fail("backup_table_counts_invalid");
   }
-  const catalog = raw?.catalog;
-  if (
-    !catalog ||
-    Number(catalog.rlsTableCount) !== profile.rlsTables.length ||
-    Number(catalog.forcedRlsTableCount) !== profile.rlsTables.length ||
-    Number(catalog.transientPolicyCount) !== 0 ||
-    Number(catalog.canonicalRoleCount) !== 3 ||
-    catalog.runtimeEscalationPossible ||
-    !catalog.requiredConstraintsPresent ||
-    !catalog.compatibleWith2A
-  ) {
-    fail("backup_catalog_state_invalid");
-  }
+  const catalog = normalizeCatalogEvidence(raw?.catalog, profile);
   return Object.freeze({
     tableCounts: Object.freeze(tableCounts),
     migrations: migrationState.migrations,
-    catalog: Object.freeze({
-      rlsTableCount: profile.rlsTables.length,
-      forcedRlsTableCount: profile.rlsTables.length,
-      transientPolicyCount: 0,
-      canonicalRoleCount: 3,
-      runtimeEscalationPossible: false,
-      requiredConstraintsPresent: true,
-      compatibleWith2A: true,
-      policyDigest: requireSha256(
-        String(catalog.policyDigest || "").toLowerCase(),
-        "backup_policy_digest"
-      ),
-      constraintDigest: requireSha256(
-        String(catalog.constraintDigest || "").toLowerCase(),
-        "backup_constraint_digest"
-      ),
-      roleDigest: requireSha256(
-        String(catalog.roleDigest || "").toLowerCase(),
-        "backup_role_digest"
-      )
-    })
+    catalog
   });
 }
 
@@ -1994,7 +2093,10 @@ function createPostgresBackupOperator(pool) {
     config,
     schemaProfile = CURRENT_SCHEMA_PROFILE
   ) {
-    const profile = schemaProfileById(schemaProfile);
+    const profile = schemaProfileById(
+      schemaProfile,
+      "backup_catalog_state_invalid"
+    );
     const permanentLogins = await inspectPermanentLogins(config);
     const state = await querySafe(
       [
@@ -2112,9 +2214,6 @@ function createPostgresBackupOperator(pool) {
     const roleRows = roles.rows || [];
     const membershipRows = memberships.rows || [];
     const constraintRows = constraints.rows || [];
-    const required = new Set(
-      constraintRows.map((row) => row.constraint_name)
-    );
     const canonicalRoleAttributesExact =
       roleRows.length === 3 &&
       roleRows.every(
@@ -2146,9 +2245,10 @@ function createPostgresBackupOperator(pool) {
       canonicalRoleCount: roleRows.length,
       runtimeEscalationPossible:
         !canonicalRoleAttributesExact || !canonicalMembershipExact,
-      requiredConstraintsPresent:
-        constraintRows.every((row) => row.validated) &&
-        required.has("social_encrypted_credentials_key_version_fk"),
+      requiredConstraintsPresent: catalogConstraintsMatchProfile(
+        profile,
+        constraintRows
+      ),
       compatibleWith2A:
         compatibility.rows?.[0]?.compatible_with_2a === true,
       policyDigest: digestRows(policies.rows),
@@ -2265,6 +2365,10 @@ async function runLogicalBackup({
     assertFreshOutput(config, fileSystem);
     const schemaProfile = schemaProfileById(await operator.preflight(config));
     await operator.assertTransientPoliciesAbsent();
+    const catalog = normalizeCatalogEvidence(
+      await operator.collectCatalogEvidence(config, schemaProfile),
+      schemaProfile
+    );
 
     const data = psqlPlan(
       config.tools.psql,
@@ -2293,10 +2397,6 @@ async function runLogicalBackup({
     const snapshotEvidence = readSmallJson(
       config.files.evidencePartial,
       fileSystem
-    );
-    const catalog = await operator.collectCatalogEvidence(
-      config,
-      schemaProfile
     );
     const evidence = normalizeEvidence({
       ...snapshotEvidence,

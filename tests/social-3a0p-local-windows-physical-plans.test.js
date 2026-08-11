@@ -1857,6 +1857,35 @@ test("current backup chain rejects loopback verify-full in loadBackupConfig befo
   }
 });
 
+test("the shared backup core validates the profile catalog before external transport", () => {
+  const source = fs.readFileSync(
+    path.resolve(__dirname, "../src/persistence/postgres/backup-restore.js"),
+    "utf8"
+  );
+  const start = source.indexOf("async function runLogicalBackup(");
+  const end = source.indexOf(
+    "async function withExtractedVersionedBundle(",
+    start
+  );
+  assert.ok(start >= 0);
+  assert.ok(end > start);
+  const body = source.slice(start, end);
+  const preflight = body.indexOf("await operator.preflight(config)");
+  const validation = body.indexOf("const catalog = normalizeCatalogEvidence(");
+  const catalog = body.indexOf("await operator.collectCatalogEvidence(");
+  const firstTransport = body.indexOf("await runToolChecked(");
+  const schemaTransport = body.indexOf("schemaDumpPlan(");
+  assert.ok(preflight >= 0);
+  assert.ok(validation > preflight);
+  assert.ok(catalog > validation);
+  assert.ok(firstTransport > catalog);
+  assert.ok(schemaTransport > catalog);
+  assert.equal(
+    body.match(/await operator\.collectCatalogEvidence\(/gu)?.length,
+    1
+  );
+});
+
 test("backup plans require the fixed logical TLS identity and its bound internal-container transport", async () => {
   const logicalHost = "backup.local.ia4tube.invalid";
   const connectivityMode = "logical_dns_to_internal_container_v1";
@@ -1896,6 +1925,20 @@ test("backup plans require the fixed logical TLS identity and its bound internal
   });
   try {
     const prepared = await fixture.plans.prepareBackupRestore();
+    const { resolveSchemaProfile } = require(
+      "../src/persistence/postgres/backup-restore"
+    );
+    assert.deepEqual([
+      ["backup0003", resolveSchemaProfile(prepared.backup0003.profileRows).id],
+      ["restore0003", prepared.restore0003.expectedProfile.id],
+      ["backup0004", resolveSchemaProfile(prepared.backup0004.profileRows).id],
+      ["restore0004", prepared.restore0004.expectedProfile.id]
+    ], [
+      ["backup0003", "social-schema-0003"],
+      ["restore0003", "social-schema-0003"],
+      ["backup0004", "social-schema-0004"],
+      ["restore0004", "social-schema-0004"]
+    ]);
     assert.equal(bridgeCalls.length, 4);
     assert.equal(fixture.configLoads.length, 2);
     assert.equal(fixture.restoreConfigLoads.length, 2);

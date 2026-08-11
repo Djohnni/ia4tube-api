@@ -5,7 +5,10 @@ const path = require("node:path");
 const ALLOWED_EXACT_FILES = new Set([
   ".github/workflows/social-3a0p-linux-physical-gates.yml",
   "scripts/run-node-tests.js",
+  "src/persistence/postgres/backup-restore.js",
   "tests/node-test-runner-safety.test.js",
+  "tests/social-postgres-backup-restore.test.js",
+  "tests/social-postgres-migrations.test.js",
   "tests/social-postgres-real.test.js"
 ]);
 const ALLOWED_PREFIXES = Object.freeze([
@@ -75,8 +78,11 @@ function assertHarnessOnlyChangedFiles(files) {
   if (
     normalized.some(
       (file) =>
-        FORBIDDEN_PRODUCT_FILES.has(file) ||
-        FORBIDDEN_PRODUCT_PREFIXES.some((prefix) => file.startsWith(prefix))
+        !ALLOWED_EXACT_FILES.has(file) &&
+        (
+          FORBIDDEN_PRODUCT_FILES.has(file) ||
+          FORBIDDEN_PRODUCT_PREFIXES.some((prefix) => file.startsWith(prefix))
+        )
     )
   ) {
     refuse("harness_scope_product_change_refused");

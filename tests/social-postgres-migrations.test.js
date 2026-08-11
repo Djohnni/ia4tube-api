@@ -613,6 +613,72 @@ test("migration 0004 keeps legacy rows valid and adds only the minimum connector
     sql,
     /social_audit_events_reference_provider_present[\s\S]*?connection_id IS NULL[\s\S]*?publication_id IS NULL[\s\S]*?provider IS NOT NULL[\s\S]*?NOT VALID/
   );
+  const intentionalNotValidConstraints = [];
+  for (const statement of sql.matchAll(
+    /^[ \t]*ALTER TABLE[ \t]+([a-z_][a-z0-9_]*)\.([a-z_][a-z0-9_]*)([\s\S]*?);/gm
+  )) {
+    const constraints = statement[3]
+      .split(/(?:^|[\r\n])[ \t]*ADD CONSTRAINT[ \t]+/g)
+      .slice(1);
+    for (const body of constraints) {
+      if (!/\bNOT[ \t]+VALID\b/.test(body)) continue;
+      const constraint = body.match(
+        /^([a-z_][a-z0-9_]*)[ \t\r\n]+(CHECK|FOREIGN KEY)\b/
+      );
+      assert.ok(constraint);
+      intentionalNotValidConstraints.push({
+        schema: statement[1],
+        table: statement[2],
+        name: constraint[1],
+        pgType: constraint[2] === "CHECK" ? "c" : "f"
+      });
+    }
+  }
+  const compareConstraintIdentity = (left, right) => {
+    const leftIdentity = [left.schema, left.table, left.name, left.pgType]
+      .join("\u0000");
+    const rightIdentity = [right.schema, right.table, right.name, right.pgType]
+      .join("\u0000");
+    return leftIdentity < rightIdentity ? -1 : leftIdentity > rightIdentity ? 1 : 0;
+  };
+  intentionalNotValidConstraints.sort(compareConstraintIdentity);
+  const expectedIntentionalNotValidConstraints = [
+    {
+      schema: "ia4tube_social",
+      table: "social_external_accounts",
+      name: "social_external_accounts_instagram_professional",
+      pgType: "c"
+    },
+    {
+      schema: "ia4tube_social",
+      table: "social_oauth_transactions",
+      name: "social_oauth_transactions_connection_fk",
+      pgType: "f"
+    },
+    {
+      schema: "ia4tube_social",
+      table: "social_audit_events",
+      name: "social_audit_events_reference_provider_present",
+      pgType: "c"
+    },
+    {
+      schema: "ia4tube_social",
+      table: "social_audit_events",
+      name: "social_audit_events_connection_provider_fk",
+      pgType: "f"
+    },
+    {
+      schema: "ia4tube_social",
+      table: "social_audit_events",
+      name: "social_audit_events_publication_provider_fk",
+      pgType: "f"
+    }
+  ].sort(compareConstraintIdentity);
+  assert.equal(intentionalNotValidConstraints.length, 5);
+  assert.deepEqual(
+    intentionalNotValidConstraints,
+    expectedIntentionalNotValidConstraints
+  );
   assert.deepEqual(
     [...sql.matchAll(/CREATE TABLE ia4tube_social\.([a-z_]+) \(/g)].map(
       (match) => match[1]

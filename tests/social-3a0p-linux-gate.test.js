@@ -709,11 +709,11 @@ function restoreBehaviorFacadeFixture(options = {}) {
 test("evidence provenance matches the authorized workflow branch and parent", () => {
   assert.equal(
     BRANCH,
-    "social/checkpoint-3a0p-linux-gate5-lazy-verifier-ownership-20260811"
+    "social/checkpoint-3a0p-gate5-profile-constraint-catalog-20260811"
   );
   assert.equal(
     BASE_COMMIT,
-    "95c8c9ad12719012e3d94aea9dfd13d7c6103cc2"
+    "d5b80c57454bd3759d8fc996120ffab6734062ee"
   );
   const workflow = JSON.parse(fs.readFileSync(
     path.join(ROOT, ".github", "workflows", "social-3a0p-linux-physical-gates.yml"),

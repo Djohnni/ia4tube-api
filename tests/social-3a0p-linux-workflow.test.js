@@ -8,8 +8,9 @@ const test = require("node:test");
 const REPOSITORY_ROOT = path.resolve(__dirname, "..");
 const WORKFLOW_RELATIVE_PATH = ".github/workflows/social-3a0p-linux-physical-gates.yml";
 const WORKFLOW_PATH = path.join(REPOSITORY_ROOT, ...WORKFLOW_RELATIVE_PATH.split("/"));
-const BRANCH = "social/checkpoint-3a0p-linux-gate5-lazy-verifier-ownership-20260811";
-const AUTHORIZED_PARENT = "95c8c9ad12719012e3d94aea9dfd13d7c6103cc2";
+const BRANCH = "social/checkpoint-3a0p-gate5-profile-constraint-catalog-20260811";
+const AUTHORIZED_PARENT = "d5b80c57454bd3759d8fc996120ffab6734062ee";
+const LAZY_VERIFIER_OWNERSHIP_PARENT = "95c8c9ad12719012e3d94aea9dfd13d7c6103cc2";
 const MIGRATION_POOL_HANDOFF_PARENT = "590681a25fd87c3b4d41c09e739f07f167784d86";
 const CONNECTION_CAPACITY_PARENT = "7d211ae664d40c4e8f7f51e478ac7da8f6715d0b";
 const VAULT_FAILURE_PROVENANCE_PARENT = "6fbcbdb75d3cbc0adea365530fa5c8fed1f01314";
@@ -36,7 +37,8 @@ const OAUTH_EXPIRY_FIXTURE_MESSAGE = "[run-social-3a0p-linux-gate] preserve synt
 const VAULT_FAILURE_PROVENANCE_MESSAGE = "[run-social-3a0p-linux-gate] classify Gate 4 vault failure provenance";
 const CONNECTION_CAPACITY_MESSAGE = "[run-social-3a0p-linux-gate] classify Gate 4 connection capacity";
 const MIGRATION_POOL_HANDOFF_MESSAGE = "[run-social-3a0p-linux-gate] hand off migration capacity to persisted vault verifier";
-const MESSAGE = "[run-social-3a0p-linux-gate] defer restore verifier ownership check";
+const LAZY_VERIFIER_OWNERSHIP_MESSAGE = "[run-social-3a0p-linux-gate] defer restore verifier ownership check";
+const MESSAGE = "[run-social-3a0p-linux-gate] align backup catalog with schema profile constraints";
 const ZERO_SHA = "0000000000000000000000000000000000000000";
 const JOB_IF = [
   "github.event_name == 'push'",
@@ -167,7 +169,7 @@ const MIGRATION_POOL_HANDOFF_FILES = Object.freeze([
   "tests/social-3a0p-linux-physical-gates.test.js",
   "tests/social-3a0p-linux-workflow.test.js"
 ]);
-const AUTHORIZED_FILES = Object.freeze([
+const LAZY_VERIFIER_OWNERSHIP_FILES = Object.freeze([
   ".github/workflows/social-3a0p-linux-physical-gates.yml",
   "docs/social-3a0p-linux-physical-gates.md",
   "scripts/social-3a0p-linux-gate.js",
@@ -175,6 +177,21 @@ const AUTHORIZED_FILES = Object.freeze([
   "tests/social-3a0p-linux-gate.test.js",
   "tests/social-3a0p-local-windows-physical-plans.test.js",
   "tests/social-3a0p-linux-workflow.test.js"
+]);
+const AUTHORIZED_FILES = Object.freeze([
+  ".github/workflows/social-3a0p-linux-physical-gates.yml",
+  "docs/social-3a0p-linux-physical-gates.md",
+  "scripts/social-3a0p-linux-gate.js",
+  "scripts/social-3a0p-local-scope.js",
+  "src/persistence/postgres/backup-restore.js",
+  "tests/social-3a0p-current-diff-scope.test.js",
+  "tests/social-3a0p-linux-gate.test.js",
+  "tests/social-3a0p-linux-workflow.test.js",
+  "tests/social-3a0p-local-backup-restore.test.js",
+  "tests/social-3a0p-local-scope.test.js",
+  "tests/social-3a0p-local-windows-physical-plans.test.js",
+  "tests/social-postgres-backup-restore.test.js",
+  "tests/social-postgres-migrations.test.js"
 ]);
 const POWERSHELL_ENV_PROBE_COMMAND = "node scripts/social-3a0p-windows-powershell-env-probe.js";
 const WINDOWS_STABILIZED_TEST_RUN = `$ErrorActionPreference = "Stop"
@@ -248,6 +265,7 @@ function assertGuardInventory(source, style) {
         "$vaultFailureProvenanceFiles = @",
         "$connectionCapacityFiles = @",
         "$migrationPoolHandoffFiles = @",
+        "$lazyVerifierOwnershipFiles = @",
         "$authorizedFiles = @"
       ]
     : [
@@ -264,6 +282,7 @@ function assertGuardInventory(source, style) {
         "vault_failure_provenance_files=",
         "connection_capacity_files=",
         "migration_pool_handoff_files=",
+        "lazy_verifier_ownership_files=",
         "authorized_files="
       ];
   assert.deepEqual(extractQuotedArray(source, declarations[0]), MAINTENANCE_FILES);
@@ -279,11 +298,12 @@ function assertGuardInventory(source, style) {
   assert.deepEqual(extractQuotedArray(source, declarations[10]), VAULT_FAILURE_PROVENANCE_FILES);
   assert.deepEqual(extractQuotedArray(source, declarations[11]), CONNECTION_CAPACITY_FILES);
   assert.deepEqual(extractQuotedArray(source, declarations[12]), MIGRATION_POOL_HANDOFF_FILES);
-  assert.deepEqual(extractQuotedArray(source, declarations[13]), AUTHORIZED_FILES);
+  assert.deepEqual(extractQuotedArray(source, declarations[13]), LAZY_VERIFIER_OWNERSHIP_FILES);
+  assert.deepEqual(extractQuotedArray(source, declarations[14]), AUTHORIZED_FILES);
   assert.equal(source.includes("*"), false);
 }
 
-test("Gate 5 lazy verifier ownership is the repository's sole workflow and is strict JSON", () => {
+test("Gate 5 profile constraint catalog is the repository's sole workflow and is strict JSON", () => {
   const entries = fs.readdirSync(path.dirname(WORKFLOW_PATH), { withFileTypes: true });
   assert.equal(entries.length, 1);
   assert.equal(entries[0].isFile(), true);
@@ -321,10 +341,14 @@ test("workflow permits only the exact first creation push and has two ordered na
   });
 });
 
-test("both jobs enforce Gate 5 lazy verifier ownership and preserve all thirteen earlier commit contracts", () => {
+test("both jobs enforce the Gate 5 profile constraint catalog and preserve all fourteen earlier commit contracts", () => {
   const { workflow } = readWorkflow();
   const { windows, physical } = jobs(workflow);
   assert.equal(workflow.env.SOCIAL_3A0P_AUTHORIZED_PARENT, AUTHORIZED_PARENT);
+  assert.equal(
+    workflow.env.SOCIAL_3A0P_LAZY_VERIFIER_OWNERSHIP_PARENT,
+    LAZY_VERIFIER_OWNERSHIP_PARENT
+  );
   assert.equal(
     workflow.env.SOCIAL_3A0P_MIGRATION_POOL_HANDOFF_PARENT,
     MIGRATION_POOL_HANDOFF_PARENT
@@ -366,6 +390,10 @@ test("both jobs enforce Gate 5 lazy verifier ownership and preserve all thirteen
     workflow.env.SOCIAL_3A0P_MIGRATION_POOL_HANDOFF_MESSAGE,
     MIGRATION_POOL_HANDOFF_MESSAGE
   );
+  assert.equal(
+    workflow.env.SOCIAL_3A0P_LAZY_VERIFIER_OWNERSHIP_MESSAGE,
+    LAZY_VERIFIER_OWNERSHIP_MESSAGE
+  );
   assert.equal(workflow.env.SOCIAL_3A0P_AUTHORIZED_MESSAGE, MESSAGE);
 
   const windowsGuard = windows.steps.find((step) => step.name === "Verify immutable execution contract");
@@ -381,6 +409,7 @@ test("both jobs enforce Gate 5 lazy verifier ownership and preserve all thirteen
   assertGuardInventory(linuxGuard.run, "bash");
   for (const guard of [windowsGuard.run, linuxGuard.run]) {
     assert.ok(guard.includes("SOCIAL_3A0P_AUTHORIZED_PARENT"));
+    assert.ok(guard.includes("SOCIAL_3A0P_LAZY_VERIFIER_OWNERSHIP_PARENT"));
     assert.ok(guard.includes("SOCIAL_3A0P_MIGRATION_POOL_HANDOFF_PARENT"));
     assert.ok(guard.includes("SOCIAL_3A0P_CONNECTION_CAPACITY_PARENT"));
     assert.ok(guard.includes("SOCIAL_3A0P_VAULT_FAILURE_PROVENANCE_PARENT"));
@@ -407,6 +436,7 @@ test("both jobs enforce Gate 5 lazy verifier ownership and preserve all thirteen
     assert.ok(guard.includes("SOCIAL_3A0P_VAULT_FAILURE_PROVENANCE_MESSAGE"));
     assert.ok(guard.includes("SOCIAL_3A0P_CONNECTION_CAPACITY_MESSAGE"));
     assert.ok(guard.includes("SOCIAL_3A0P_MIGRATION_POOL_HANDOFF_MESSAGE"));
+    assert.ok(guard.includes("SOCIAL_3A0P_LAZY_VERIFIER_OWNERSHIP_MESSAGE"));
     assert.ok(guard.includes("SOCIAL_3A0P_PRODUCT_COMMIT"));
     assert.ok(guard.includes("src"));
     assert.ok(guard.includes("db"));
@@ -415,13 +445,15 @@ test("both jobs enforce Gate 5 lazy verifier ownership and preserve all thirteen
     assert.ok(guard.includes("server.js"));
     assert.ok(guard.includes("package.json"));
     assert.ok(guard.includes("package-lock.json"));
+    assert.ok(guard.includes("src/persistence/postgres/backup-restore.js"));
     assert.ok(guard.includes("social-3a0p-linux-gate-evidence"));
   }
   assert.ok(windowsGuard.run.includes("$LASTEXITCODE"));
   for (const contract of [
     'Assert-Equal (Get-GitText -Arguments @("rev-parse", "HEAD")) $env:AUTHORIZED_SHA',
     'Assert-Equal (Get-GitText -Arguments @("rev-parse", "HEAD^")) $env:SOCIAL_3A0P_AUTHORIZED_PARENT',
-    'Assert-Equal (Get-GitText -Arguments @("rev-parse", "$($env:SOCIAL_3A0P_AUTHORIZED_PARENT)^")) $env:SOCIAL_3A0P_MIGRATION_POOL_HANDOFF_PARENT',
+    'Assert-Equal (Get-GitText -Arguments @("rev-parse", "$($env:SOCIAL_3A0P_AUTHORIZED_PARENT)^")) $env:SOCIAL_3A0P_LAZY_VERIFIER_OWNERSHIP_PARENT',
+    'Assert-Equal (Get-GitText -Arguments @("rev-parse", "$($env:SOCIAL_3A0P_LAZY_VERIFIER_OWNERSHIP_PARENT)^")) $env:SOCIAL_3A0P_MIGRATION_POOL_HANDOFF_PARENT',
     'Assert-Equal (Get-GitText -Arguments @("rev-parse", "$($env:SOCIAL_3A0P_MIGRATION_POOL_HANDOFF_PARENT)^")) $env:SOCIAL_3A0P_CONNECTION_CAPACITY_PARENT',
     'Assert-Equal (Get-GitText -Arguments @("rev-parse", "$($env:SOCIAL_3A0P_CONNECTION_CAPACITY_PARENT)^")) $env:SOCIAL_3A0P_VAULT_FAILURE_PROVENANCE_PARENT',
     'Assert-Equal (Get-GitText -Arguments @("rev-parse", "$($env:SOCIAL_3A0P_VAULT_FAILURE_PROVENANCE_PARENT)^")) $env:SOCIAL_3A0P_OAUTH_EXPIRY_FIXTURE_PARENT',
@@ -435,7 +467,8 @@ test("both jobs enforce Gate 5 lazy verifier ownership and preserve all thirteen
     'Assert-Equal (Get-GitText -Arguments @("rev-parse", "$($env:SOCIAL_3A0P_NATIVE_PREFLIGHT_PARENT)^")) $env:SOCIAL_3A0P_PROVENANCE_PARENT',
     'Assert-Equal (Get-GitText -Arguments @("rev-parse", "$($env:SOCIAL_3A0P_PROVENANCE_PARENT)^")) $env:SOCIAL_3A0P_MAINTENANCE_PARENT',
     'Assert-Equal (Get-GitText -Arguments @("log", "-1", "--pretty=%B")) $env:SOCIAL_3A0P_AUTHORIZED_MESSAGE',
-    'Assert-Equal (Get-GitText -Arguments @("log", "-1", "--pretty=%B", $env:SOCIAL_3A0P_AUTHORIZED_PARENT)) $env:SOCIAL_3A0P_MIGRATION_POOL_HANDOFF_MESSAGE',
+    'Assert-Equal (Get-GitText -Arguments @("log", "-1", "--pretty=%B", $env:SOCIAL_3A0P_AUTHORIZED_PARENT)) $env:SOCIAL_3A0P_LAZY_VERIFIER_OWNERSHIP_MESSAGE',
+    'Assert-Equal (Get-GitText -Arguments @("log", "-1", "--pretty=%B", $env:SOCIAL_3A0P_LAZY_VERIFIER_OWNERSHIP_PARENT)) $env:SOCIAL_3A0P_MIGRATION_POOL_HANDOFF_MESSAGE',
     'Assert-Equal (Get-GitText -Arguments @("log", "-1", "--pretty=%B", $env:SOCIAL_3A0P_MIGRATION_POOL_HANDOFF_PARENT)) $env:SOCIAL_3A0P_CONNECTION_CAPACITY_MESSAGE',
     'Assert-Equal (Get-GitText -Arguments @("log", "-1", "--pretty=%B", $env:SOCIAL_3A0P_CONNECTION_CAPACITY_PARENT)) $env:SOCIAL_3A0P_VAULT_FAILURE_PROVENANCE_MESSAGE',
     'Assert-Equal (Get-GitText -Arguments @("log", "-1", "--pretty=%B", $env:SOCIAL_3A0P_VAULT_FAILURE_PROVENANCE_PARENT)) $env:SOCIAL_3A0P_OAUTH_EXPIRY_FIXTURE_MESSAGE',
@@ -448,9 +481,10 @@ test("both jobs enforce Gate 5 lazy verifier ownership and preserve all thirteen
     'Assert-Equal (Get-GitText -Arguments @("log", "-1", "--pretty=%B", $env:SOCIAL_3A0P_SANITIZATION_PARENT)) $env:SOCIAL_3A0P_NATIVE_PREFLIGHT_MESSAGE',
     'Assert-Equal (Get-GitText -Arguments @("log", "-1", "--pretty=%B", $env:SOCIAL_3A0P_NATIVE_PREFLIGHT_PARENT)) $env:SOCIAL_3A0P_PROVENANCE_MESSAGE',
     'Assert-Equal (Get-GitText -Arguments @("log", "-1", "--pretty=%B", $env:SOCIAL_3A0P_PROVENANCE_PARENT)) $env:SOCIAL_3A0P_MAINTENANCE_MESSAGE',
-    'Assert-Equal (Get-GitText -Arguments @("rev-list", "--count", $commitRange)) "14"',
+    'Assert-Equal (Get-GitText -Arguments @("rev-list", "--count", $commitRange)) "15"',
     'Assert-SingleParent "HEAD"',
     'Assert-SingleParent $env:SOCIAL_3A0P_AUTHORIZED_PARENT',
+    'Assert-SingleParent $env:SOCIAL_3A0P_LAZY_VERIFIER_OWNERSHIP_PARENT',
     'Assert-SingleParent $env:SOCIAL_3A0P_MIGRATION_POOL_HANDOFF_PARENT',
     'Assert-SingleParent $env:SOCIAL_3A0P_CONNECTION_CAPACITY_PARENT',
     'Assert-SingleParent $env:SOCIAL_3A0P_VAULT_FAILURE_PROVENANCE_PARENT',
@@ -477,17 +511,22 @@ test("both jobs enforce Gate 5 lazy verifier ownership and preserve all thirteen
     'Assert-ExactFiles $vaultFailureProvenanceChanged $vaultFailureProvenanceFiles',
     '$connectionCapacityChanged = @(Invoke-GitLines -Arguments @("diff", "--name-only", $env:SOCIAL_3A0P_CONNECTION_CAPACITY_PARENT, $env:SOCIAL_3A0P_MIGRATION_POOL_HANDOFF_PARENT))',
     'Assert-ExactFiles $connectionCapacityChanged $connectionCapacityFiles',
-    '$migrationPoolHandoffChanged = @(Invoke-GitLines -Arguments @("diff", "--name-only", $env:SOCIAL_3A0P_MIGRATION_POOL_HANDOFF_PARENT, $env:SOCIAL_3A0P_AUTHORIZED_PARENT))',
+    '$migrationPoolHandoffChanged = @(Invoke-GitLines -Arguments @("diff", "--name-only", $env:SOCIAL_3A0P_MIGRATION_POOL_HANDOFF_PARENT, $env:SOCIAL_3A0P_LAZY_VERIFIER_OWNERSHIP_PARENT))',
     'Assert-ExactFiles $migrationPoolHandoffChanged $migrationPoolHandoffFiles',
+    '$lazyVerifierOwnershipChanged = @(Invoke-GitLines -Arguments @("diff", "--name-only", $env:SOCIAL_3A0P_LAZY_VERIFIER_OWNERSHIP_PARENT, $env:SOCIAL_3A0P_AUTHORIZED_PARENT))',
+    'Assert-ExactFiles $lazyVerifierOwnershipChanged $lazyVerifierOwnershipFiles',
     '$authorizedChanged = @(Invoke-GitLines -Arguments @("diff", "--name-only", $env:SOCIAL_3A0P_AUTHORIZED_PARENT, "HEAD"))',
-    'Assert-ExactFiles $authorizedChanged $authorizedFiles'
+    'Assert-ExactFiles $authorizedChanged $authorizedFiles',
+    '$productChanged = @(Invoke-GitLines -Arguments @("diff", "--name-only", $env:SOCIAL_3A0P_PRODUCT_COMMIT, "HEAD", "--", "src", "db", "migrations", "roles.sql", "server.js", "package.json", "package-lock.json"))',
+    'Assert-ExactFiles $productChanged @("src/persistence/postgres/backup-restore.js")'
   ]) {
     assert.ok(windowsGuard.run.includes(contract), contract);
   }
   for (const contract of [
     'test "$(git rev-parse HEAD)" = "$AUTHORIZED_SHA"',
     'test "$(git rev-parse HEAD^)" = "$SOCIAL_3A0P_AUTHORIZED_PARENT"',
-    'test "$(git rev-parse "$SOCIAL_3A0P_AUTHORIZED_PARENT^")" = "$SOCIAL_3A0P_MIGRATION_POOL_HANDOFF_PARENT"',
+    'test "$(git rev-parse "$SOCIAL_3A0P_AUTHORIZED_PARENT^")" = "$SOCIAL_3A0P_LAZY_VERIFIER_OWNERSHIP_PARENT"',
+    'test "$(git rev-parse "$SOCIAL_3A0P_LAZY_VERIFIER_OWNERSHIP_PARENT^")" = "$SOCIAL_3A0P_MIGRATION_POOL_HANDOFF_PARENT"',
     'test "$(git rev-parse "$SOCIAL_3A0P_MIGRATION_POOL_HANDOFF_PARENT^")" = "$SOCIAL_3A0P_CONNECTION_CAPACITY_PARENT"',
     'test "$(git rev-parse "$SOCIAL_3A0P_CONNECTION_CAPACITY_PARENT^")" = "$SOCIAL_3A0P_VAULT_FAILURE_PROVENANCE_PARENT"',
     'test "$(git rev-parse "$SOCIAL_3A0P_VAULT_FAILURE_PROVENANCE_PARENT^")" = "$SOCIAL_3A0P_OAUTH_EXPIRY_FIXTURE_PARENT"',
@@ -501,7 +540,8 @@ test("both jobs enforce Gate 5 lazy verifier ownership and preserve all thirteen
     'test "$(git rev-parse "$SOCIAL_3A0P_NATIVE_PREFLIGHT_PARENT^")" = "$SOCIAL_3A0P_PROVENANCE_PARENT"',
     'test "$(git rev-parse "$SOCIAL_3A0P_PROVENANCE_PARENT^")" = "$SOCIAL_3A0P_MAINTENANCE_PARENT"',
     'test "$(git log -1 --pretty=%B)" = "$SOCIAL_3A0P_AUTHORIZED_MESSAGE"',
-    'test "$(git log -1 --pretty=%B "$SOCIAL_3A0P_AUTHORIZED_PARENT")" = "$SOCIAL_3A0P_MIGRATION_POOL_HANDOFF_MESSAGE"',
+    'test "$(git log -1 --pretty=%B "$SOCIAL_3A0P_AUTHORIZED_PARENT")" = "$SOCIAL_3A0P_LAZY_VERIFIER_OWNERSHIP_MESSAGE"',
+    'test "$(git log -1 --pretty=%B "$SOCIAL_3A0P_LAZY_VERIFIER_OWNERSHIP_PARENT")" = "$SOCIAL_3A0P_MIGRATION_POOL_HANDOFF_MESSAGE"',
     'test "$(git log -1 --pretty=%B "$SOCIAL_3A0P_MIGRATION_POOL_HANDOFF_PARENT")" = "$SOCIAL_3A0P_CONNECTION_CAPACITY_MESSAGE"',
     'test "$(git log -1 --pretty=%B "$SOCIAL_3A0P_CONNECTION_CAPACITY_PARENT")" = "$SOCIAL_3A0P_VAULT_FAILURE_PROVENANCE_MESSAGE"',
     'test "$(git log -1 --pretty=%B "$SOCIAL_3A0P_VAULT_FAILURE_PROVENANCE_PARENT")" = "$SOCIAL_3A0P_OAUTH_EXPIRY_FIXTURE_MESSAGE"',
@@ -516,6 +556,7 @@ test("both jobs enforce Gate 5 lazy verifier ownership and preserve all thirteen
     'test "$(git log -1 --pretty=%B "$SOCIAL_3A0P_PROVENANCE_PARENT")" = "$SOCIAL_3A0P_MAINTENANCE_MESSAGE"',
     'test "$(git rev-list --parents -n 1 "$SOCIAL_3A0P_VAULT_FAILURE_PROVENANCE_PARENT" | wc -w)" = "2"',
     'test "$(git rev-list --parents -n 1 "$SOCIAL_3A0P_OAUTH_EXPIRY_FIXTURE_PARENT" | wc -w)" = "2"',
+    'test "$(git rev-list --parents -n 1 "$SOCIAL_3A0P_LAZY_VERIFIER_OWNERSHIP_PARENT" | wc -w)" = "2"',
     'test "$(git rev-list --parents -n 1 "$SOCIAL_3A0P_MIGRATION_POOL_HANDOFF_PARENT" | wc -w)" = "2"',
     'test "$(git rev-list --parents -n 1 "$SOCIAL_3A0P_CONNECTION_CAPACITY_PARENT" | wc -w)" = "2"',
     'assert_exact_changed_files "$SOCIAL_3A0P_MAINTENANCE_PARENT" "$SOCIAL_3A0P_PROVENANCE_PARENT" "${maintenance_files[@]}"',
@@ -530,12 +571,15 @@ test("both jobs enforce Gate 5 lazy verifier ownership and preserve all thirteen
     'assert_exact_changed_files "$SOCIAL_3A0P_OAUTH_EXPIRY_FIXTURE_PARENT" "$SOCIAL_3A0P_VAULT_FAILURE_PROVENANCE_PARENT" "${oauth_expiry_fixture_files[@]}"',
     'assert_exact_changed_files "$SOCIAL_3A0P_VAULT_FAILURE_PROVENANCE_PARENT" "$SOCIAL_3A0P_CONNECTION_CAPACITY_PARENT" "${vault_failure_provenance_files[@]}"',
     'assert_exact_changed_files "$SOCIAL_3A0P_CONNECTION_CAPACITY_PARENT" "$SOCIAL_3A0P_MIGRATION_POOL_HANDOFF_PARENT" "${connection_capacity_files[@]}"',
-    'assert_exact_changed_files "$SOCIAL_3A0P_MIGRATION_POOL_HANDOFF_PARENT" "$SOCIAL_3A0P_AUTHORIZED_PARENT" "${migration_pool_handoff_files[@]}"',
-    'assert_exact_changed_files "$SOCIAL_3A0P_AUTHORIZED_PARENT" HEAD "${authorized_files[@]}"'
+    'assert_exact_changed_files "$SOCIAL_3A0P_MIGRATION_POOL_HANDOFF_PARENT" "$SOCIAL_3A0P_LAZY_VERIFIER_OWNERSHIP_PARENT" "${migration_pool_handoff_files[@]}"',
+    'assert_exact_changed_files "$SOCIAL_3A0P_LAZY_VERIFIER_OWNERSHIP_PARENT" "$SOCIAL_3A0P_AUTHORIZED_PARENT" "${lazy_verifier_ownership_files[@]}"',
+    'assert_exact_changed_files "$SOCIAL_3A0P_AUTHORIZED_PARENT" HEAD "${authorized_files[@]}"',
+    'product_changed="$(git diff --name-only "$SOCIAL_3A0P_PRODUCT_COMMIT" HEAD -- src db migrations roles.sql server.js package.json package-lock.json)"',
+    'test "$product_changed" = "src/persistence/postgres/backup-restore.js"'
   ]) {
     assert.ok(linuxGuard.run.includes(contract), contract);
   }
-  assert.ok(linuxGuard.run.includes('test "$(git rev-list --count "$SOCIAL_3A0P_MAINTENANCE_PARENT..HEAD")" = "14"'));
+  assert.ok(linuxGuard.run.includes('test "$(git rev-list --count "$SOCIAL_3A0P_MAINTENANCE_PARENT..HEAD")" = "15"'));
 });
 
 test("actions are pinned and each native job installs its own lockfile without cache or scripts", () => {

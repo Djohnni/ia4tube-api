@@ -9,17 +9,65 @@ const {
   normalizeRepositoryFile
 } = require("../scripts/social-3a0p-local-scope");
 
-test("harness scope accepts only the checkpoint scripts, tests and docs", () => {
+test("checkpoint scope accepts harness files and the exact catalog source", () => {
   const files = [
     "scripts/social-3a0p-local-harness-core.js",
+    "src/persistence/postgres/backup-restore.js",
     "tests/social-3a0p-local-harness.test.js",
     "docs/social-3a0p-local-physical-harness.md",
+    "tests/social-postgres-backup-restore.test.js",
+    "tests/social-postgres-migrations.test.js",
     "tests/social-postgres-real.test.js"
   ];
   assert.deepEqual(assertHarnessOnlyChangedFiles(files), {
     harnessOnly: true,
     changedFileCount: files.length
   });
+});
+
+test("catalog test exceptions are confined to two exact paths", () => {
+  for (const file of [
+    "tests/social-postgres-backup-restore.test.js",
+    "tests/social-postgres-migrations.test.js"
+  ]) {
+    assert.equal(isHarnessOnlyFile(file), true);
+    assert.deepEqual(assertHarnessOnlyChangedFiles([file]), {
+      harnessOnly: true,
+      changedFileCount: 1
+    });
+  }
+  for (const file of [
+    "tests/social-postgres-backup-restore-copy.test.js",
+    "tests/social-postgres-migration.test.js",
+    "tests/social-postgres-other.test.js",
+    "tests/subdir/social-postgres-backup-restore.test.js"
+  ]) {
+    assert.equal(isHarnessOnlyFile(file), false);
+    assert.throws(() => assertHarnessOnlyChangedFiles([file]), {
+      code: "harness_scope_product_change_refused"
+    });
+  }
+});
+
+test("catalog source exception is confined to one exact product path", () => {
+  const catalogSource = "src/persistence/postgres/backup-restore.js";
+  assert.equal(isHarnessOnlyFile(catalogSource), true);
+  assert.deepEqual(assertHarnessOnlyChangedFiles([catalogSource]), {
+    harnessOnly: true,
+    changedFileCount: 1
+  });
+  for (const file of [
+    "src/persistence/postgres/backup-restore.js.bak",
+    "src/persistence/postgres/backup_restore.js",
+    "src/persistence/postgres/restore-behavior-verifiers.js",
+    "src/persistence/postgres/subdir/backup-restore.js",
+    "src/PERSISTENCE/postgres/backup-restore.js"
+  ]) {
+    assert.equal(isHarnessOnlyFile(file), false);
+    assert.throws(() => assertHarnessOnlyChangedFiles([file]), {
+      code: "harness_scope_product_change_refused"
+    });
+  }
 });
 
 test("harness scope refuses every product or dependency change", () => {
@@ -139,7 +187,10 @@ test("test runner maintenance scope is confined to two exact files", async (t) =
   assert.deepEqual([...ALLOWED_EXACT_FILES].sort(), [
     ".github/workflows/social-3a0p-linux-physical-gates.yml",
     "scripts/run-node-tests.js",
+    "src/persistence/postgres/backup-restore.js",
     "tests/node-test-runner-safety.test.js",
+    "tests/social-postgres-backup-restore.test.js",
+    "tests/social-postgres-migrations.test.js",
     "tests/social-postgres-real.test.js"
   ]);
   assert.equal(
