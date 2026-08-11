@@ -409,57 +409,98 @@ async function concurrencyGate(state, dependencies, identityKey, fixtures) {
 }
 
 async function vaultGate(state, dependencies, randomBytes, randomUUID) {
-  const keyV1 = state.materials.vault;
-  const keyV2 = randomBytes(32);
-  const plaintext = Buffer.from("synthetic-vault-physical-gate", "utf8");
-  const context = {
-    companyId: uuid(randomUUID),
-    provider: "instagram",
-    credentialId: uuid(randomUUID),
-    credentialType: "access_token",
-    subjectType: "connection",
-    subjectId: uuid(randomUUID)
-  };
-  const versionV1 = dependencies.deriveVaultKeyVersion(1, keyV1);
-  const versionV2 = dependencies.deriveVaultKeyVersion(2, keyV2);
+  const runSubstep = typeof dependencies.runGate4Substep === "function"
+    ? dependencies.runGate4Substep
+    : (_substep, _operationClass, operation) => operation();
+  let keyV1;
+  let keyV2;
+  let plaintext;
+  let context;
+  let versionV1;
+  let versionV2;
   let oldVault;
   let currentVault;
+  let envelope;
+  let primaryFailed = false;
+  let primaryError;
   try {
-    oldVault = dependencies.createSocialVault({
-      keyring: { activeVersion: versionV1, keys: new Map([[versionV1, keyV1]]) },
-      expectedKeyringFingerprint: dependencies.vaultKeyringFingerprint(versionV1, [versionV1])
+    await runSubstep("V01", "memory_setup", () => {
+      keyV1 = state.materials.vault;
+      keyV2 = randomBytes(32);
+      plaintext = Buffer.from("synthetic-vault-physical-gate", "utf8");
+      context = {
+        companyId: uuid(randomUUID),
+        provider: "instagram",
+        credentialId: uuid(randomUUID),
+        credentialType: "access_token",
+        subjectType: "connection",
+        subjectId: uuid(randomUUID)
+      };
+      versionV1 = dependencies.deriveVaultKeyVersion(1, keyV1);
+      versionV2 = dependencies.deriveVaultKeyVersion(2, keyV2);
     });
-    const envelope = oldVault.encrypt(plaintext, context);
-    const roundTrip = oldVault.decrypt(envelope, context);
-    if (!roundTrip.equals(plaintext)) fail("connector_physical_vault_roundtrip_invalid");
-    roundTrip.fill(0);
-    let aadRefused = false;
-    try {
-      oldVault.decrypt(envelope, { ...context, companyId: uuid(randomUUID) });
-    } catch {
-      aadRefused = true;
-    }
-    if (!aadRefused) fail("connector_physical_vault_aad_invalid");
-    currentVault = dependencies.createSocialVault({
-      keyring: {
-        activeVersion: versionV2,
-        keys: new Map([[versionV1, keyV1], [versionV2, keyV2]])
-      },
-      expectedKeyringFingerprint: dependencies.vaultKeyringFingerprint(versionV2, [versionV1, versionV2])
+    await runSubstep("V02", "memory_crypto", () => {
+      oldVault = dependencies.createSocialVault({
+        keyring: { activeVersion: versionV1, keys: new Map([[versionV1, keyV1]]) },
+        expectedKeyringFingerprint: dependencies.vaultKeyringFingerprint(versionV1, [versionV1])
+      });
     });
-    const rotated = currentVault.rotate(envelope, context);
-    if (!rotated.changed || rotated.envelope.keyVersion !== versionV2) {
-      fail("connector_physical_vault_rotation_invalid");
-    }
-    const after = currentVault.decrypt(rotated.envelope, context);
-    if (!after.equals(plaintext)) fail("connector_physical_vault_rotation_invalid");
-    after.fill(0);
-  } finally {
-    oldVault?.destroy();
-    currentVault?.destroy();
-    keyV2.fill(0);
-    plaintext.fill(0);
+    await runSubstep("V03", "memory_crypto", () => {
+      envelope = oldVault.encrypt(plaintext, context);
+    });
+    await runSubstep("V04", "memory_validation", () => {
+      const roundTrip = oldVault.decrypt(envelope, context);
+      if (!roundTrip.equals(plaintext)) fail("connector_physical_vault_roundtrip_invalid");
+      roundTrip.fill(0);
+    });
+    await runSubstep("V05", "memory_validation", () => {
+      let aadRefused = false;
+      try {
+        oldVault.decrypt(envelope, { ...context, companyId: uuid(randomUUID) });
+      } catch {
+        aadRefused = true;
+      }
+      if (!aadRefused) fail("connector_physical_vault_aad_invalid");
+    });
+    await runSubstep("V06", "memory_crypto", () => {
+      currentVault = dependencies.createSocialVault({
+        keyring: {
+          activeVersion: versionV2,
+          keys: new Map([[versionV1, keyV1], [versionV2, keyV2]])
+        },
+        expectedKeyringFingerprint: dependencies.vaultKeyringFingerprint(versionV2, [versionV1, versionV2])
+      });
+    });
+    let rotated;
+    await runSubstep("V07", "memory_crypto", () => {
+      rotated = currentVault.rotate(envelope, context);
+      if (!rotated.changed || rotated.envelope.keyVersion !== versionV2) {
+        fail("connector_physical_vault_rotation_invalid");
+      }
+    });
+    await runSubstep("V08", "memory_validation", () => {
+      const after = currentVault.decrypt(rotated.envelope, context);
+      if (!after.equals(plaintext)) fail("connector_physical_vault_rotation_invalid");
+      after.fill(0);
+    });
+  } catch (error) {
+    primaryFailed = true;
+    primaryError = error;
   }
+  try {
+    await runSubstep("V09", "memory_cleanup", () => {
+      oldVault?.destroy();
+      currentVault?.destroy();
+      keyV2?.fill(0);
+      plaintext?.fill(0);
+    });
+  } catch (error) {
+    if (!primaryFailed) {
+      primaryFailed = true;
+      primaryError = error;
+    }
+  }
+  if (primaryFailed) throw primaryError;
   return {
     physicalExecution: true,
     syntheticOnly: true,

@@ -1,14 +1,14 @@
 # Checkpoint Social 3A-0P — gates físicos Linux isolados
 
-## Contrato canônico da fixture temporal sintética do Gate 3 S15
+## Contrato canônico da procedência sanitizada do Gate 4
 
 Esta rota existe somente na branch
-`social/checkpoint-3a0p-linux-oauth-expiry-fixture-20260810`, criada a partir do
-commit exato `10bd725af02129a6d2795d82dc6d7230c8b7f898`. O único commit autorizado
-deve ter esse commit como pai imediato e a mensagem integral:
+`social/checkpoint-3a0p-linux-vault-failure-provenance-20260811`, criada a
+partir do commit exato `6fbcbdb75d3cbc0adea365530fa5c8fed1f01314`. O único
+commit autorizado deve ter esse commit como pai imediato e a mensagem integral:
 
 ```text
-[run-social-3a0p-linux-gate] preserve synthetic OAuth expiry ordering
+[run-social-3a0p-linux-gate] classify Gate 4 vault failure provenance
 ```
 
 O produto permanece idêntico a `fcfc92419021dae5f77baad731c634b10c275c5b`:
@@ -17,12 +17,11 @@ O produto permanece idêntico a `fcfc92419021dae5f77baad731c634b10c275c5b`:
 grants, não muda políticas RLS e não modifica schema, SCRAM, roles, produto,
 backup, restore, dependências ou os testes de segurança antigos. Os helpers
 PowerShell testados e o protocolo `IA4REC1` permanecem byte-semanticamente
-inalterados. A correção atual está contida exclusivamente na fixture sintética
-S15 do harness físico descartável: ela preserva a constraint de produto e
-restaura a ordem `created_at < expires_at < CURRENT_TIMESTAMP` sem espera,
-retry, relógio global ou timestamp na evidência. O workflow mantém a rota
-normal: `npm test` uma vez no Windows e, somente após seu sucesso, o job Linux
-físico preservado.
+inalterados. A alteração atual é exclusivamente diagnóstica no harness físico:
+ela preserva a primeira subetapa interna que falhar no Gate 4 sem corrigir o
+cofre por hipótese, alterar AES-256-GCM, AAD, rotação, persistência ou cleanup.
+O workflow mantém a rota normal: `npm test` uma vez no Windows e, somente após
+seu sucesso, o job Linux físico preservado.
 
 ## Resultados comprovados das rotas anteriores
 
@@ -294,6 +293,110 @@ retry ou espera baseada em relógio externo. Este documento registra somente o
 resultado físico anterior e o contrato da correção; nenhum run desta nova
 branch é declarado como executado ou aprovado.
 
+## Run físico anterior preservado e bloqueio do Gate 4
+
+O run `31454372842`, `run_attempt=1`, executou o commit
+`6fbcbdb75d3cbc0adea365530fa5c8fed1f01314`. A suíte local preservada continha
+1.452 testes: 1.445 aprovados, zero falhas, 2 ignorados e 5 pendentes; as
+auditorias npm completa e runtime registraram zero vulnerabilidades. No run
+hospedado, Windows, pré-gate Linux, Gate 1, reproduções OID/RLS, Gate 2 e Gate 3
+foram aprovados integralmente. S15 atualizou exatamente uma autorização
+sintética aberta e comprovou `created_at < expires_at < CURRENT_TIMESTAMP`; S16
+confirmou `authorization_expired`.
+
+O Gate 4 foi reprovado com `linux_gate_unclassified_failure`. Nenhuma subetapa
+interna do cofre foi publicada e o Gate 5 não iniciou. O cleanup foi aprovado e
+todos os resíduos terminaram em zero. O artifact preservado chama-se
+`social-3a0p-linux-physical-gates-evidence`, com digest
+`sha256:b76d68b208605210e3ff055deb399faa2eed0fd395697c3584ee6dae076c5a69`.
+O SHA-256 do JSON é
+`f7b3718652f6b4d87baa48f688e35e504ef2e71fcd0f014a5bdbd5f4bcdcba22` e o
+SHA-256 do status do processo é
+`26564ca3007f7f91c7b77edadbe4122d82804ea0626a3958f21292d1b067f342`.
+Os streams não foram armazenados; o processo registrou `exitCode=1`,
+`signal=null` e `timedOut=false`.
+
+A classificação canônica é
+`gate4_vault_internal_failure_provenance_unavailable`. A evidência não comprova
+a causa interna. Portanto, ela não atribui a falha a AES-256-GCM, PostgreSQL,
+rotação, AAD, registro de chaves, serviço de credenciais, isolamento ou cleanup.
+Este documento não declara novo run, novo resultado físico ou causa posterior.
+
+## Contrato fechado de `gate4FailureProvenance`
+
+`gate4FailureProvenance` permanece `null` quando o Gate 4 não falha. Quando o
+Gate 4 falha, ele contém exatamente estes oito campos, sem chave extra ou
+ausente:
+
+1. `operation`;
+2. `substep`;
+3. `operationClass`;
+4. `causalCode`;
+5. `lastCompletedSubstep`;
+6. `externalProcessStarted`;
+7. `exitCode`;
+8. `signal`.
+
+As únicas operações permitidas são `base`, `supplemental` e `persisted`. Como o
+Gate 4 não inicia processo externo próprio, os três campos físicos são sempre
+`externalProcessStarted=false`, `exitCode=null` e `signal=null`. O tracker
+`createGate4FailureProvenanceTracker` é separado do tracker do Gate 3, aceita
+somente as definições literais abaixo, executa cada subetapa no máximo uma vez,
+preserva a primeira falha e mantém em `lastCompletedSubstep` somente a última
+subetapa concluída antes dela. Ele não registra argumentos, retorno, objeto
+`Error`, `message`, `stack`, `cause` ou query.
+
+| Substep | Operation | Significado fechado | Operation class |
+| --- | --- | --- | --- |
+| V01 | `base` | `base_setup` | `memory_setup` |
+| V02 | `base` | `base_vault_v1_create` | `memory_crypto` |
+| V03 | `base` | `base_encrypt` | `memory_crypto` |
+| V04 | `base` | `base_round_trip` | `memory_validation` |
+| V05 | `base` | `base_aad_refusal` | `memory_validation` |
+| V06 | `base` | `base_vault_v2_create` | `memory_crypto` |
+| V07 | `base` | `base_rotate` | `memory_crypto` |
+| V08 | `base` | `base_rotated_round_trip` | `memory_validation` |
+| V09 | `base` | `base_cleanup` | `memory_cleanup` |
+| V10 | `supplemental` | `supplemental_setup` | `memory_setup` |
+| V11 | `supplemental` | `supplemental_vault_create` | `memory_crypto` |
+| V12 | `supplemental` | `supplemental_encrypt` | `memory_crypto` |
+| V13 | `supplemental` | `supplemental_round_trip` | `memory_validation` |
+| V14 | `supplemental` | `supplemental_company_aad_refusal` | `memory_validation` |
+| V15 | `supplemental` | `supplemental_provider_aad_refusal` | `memory_validation` |
+| V16 | `supplemental` | `supplemental_subject_aad_refusal` | `memory_validation` |
+| V17 | `supplemental` | `supplemental_credential_aad_refusal` | `memory_validation` |
+| V18 | `supplemental` | `supplemental_ciphertext_tamper_refusal` | `memory_validation` |
+| V19 | `supplemental` | `supplemental_cleanup` | `memory_cleanup` |
+| V20 | `persisted` | `persisted_setup` | `memory_setup` |
+| V21 | `persisted` | `persisted_verifier_create` | `postgres_verifier_setup` |
+| V22 | `persisted` | `persisted_runtime_isolation` | `postgres_runtime_isolation` |
+| V23 | `persisted` | `persisted_vault_verification` | `postgres_vault_verification` |
+| V24 | `persisted` | `persisted_verifier_close` | `postgres_verifier_cleanup` |
+| V25 | `persisted` | `persisted_material_cleanup` | `memory_cleanup` |
+
+A ordem funcional permanece estritamente `base` V01–V09, `supplemental`
+V10–V19 e `persisted` V20–V25. Falha na base impede supplemental e persisted;
+falha supplemental impede persisted; falha persisted impede o Gate 5. Somente a
+aprovação integral de V01–V25 permite iniciar o Gate 5. Os cleanups aplicáveis
+continuam sendo tentados, mas falha de cleanup nunca substitui a falha primária;
+se cleanup for a primeira falha, ele próprio é registrado.
+
+O sanitizer causal específico do Gate 4 preserva somente um código que já
+satisfaça `^[a-z][a-z0-9_]{2,119}$`. SQLSTATE ou código alfanumérico de exatamente
+cinco caracteres e códigos Node conhecidos tornam-se
+`gate4_error_code_<codigo_em_minusculas>`. Para
+`postgres_rollback_failed`, somente `cause.code` pode ser inspecionado, com
+profundidade limitada. `TypeError` torna-se `gate4_type_error`; `RangeError`,
+`gate4_range_error`; qualquer outro caso,
+`gate4_error_code_unavailable`. Mensagem, stack e cause nunca são publicados.
+
+Se nenhuma subetapa válida tiver observado a falha, o gate falha fechado com
+`gate4_failure_provenance_unobserved` em vez de fabricar procedência. A
+evidência rejeita chave, plaintext, ciphertext, nonce, auth tag, UUID, SQL,
+argumentos, caminhos, ambiente, stdout, stderr, stack, mensagem ou objeto de
+erro bruto. O fallback sanitizado preserva `gate4FailureProvenance` somente
+depois da validação integral desse contrato.
+
 ## Protocolo escalar fechado IA4REC1
 
 Os dois testes File.Replace continuam iniciando diretamente o Windows
@@ -338,7 +441,7 @@ Falhas de processo e protocolo são publicadas somente como
 
 ## Cadeia imutável e inventários fechados
 
-A cadeia autorizada é linear e contém dez commits entre a base da manutenção
+A cadeia autorizada é linear e contém onze commits entre a base da manutenção
 e o novo `HEAD`:
 
 1. `8eb4c4d71c6593f9c3e448be6ac52b1b0e8ba931`, pai
@@ -425,7 +528,7 @@ e o novo `HEAD`:
    `tests/social-3a0p-linux-workflow.test.js`,
    `tests/social-3a0p-local-file-replace-argument-powershell.test.js` e
    `tests/social-3a0p-local-file-replace-powershell-diagnostic.test.js`.
-10. O novo `HEAD`, pai exato
+10. `6fbcbdb75d3cbc0adea365530fa5c8fed1f01314`, pai exato
     `10bd725af02129a6d2795d82dc6d7230c8b7f898`, mensagem
     `[run-social-3a0p-linux-gate] preserve synthetic OAuth expiry ordering` e
     inventário fechado:
@@ -436,9 +539,22 @@ e o novo `HEAD`:
     `tests/social-3a0p-linux-gate.test.js`,
     `tests/social-3a0p-linux-physical-gates.test.js` e
     `tests/social-3a0p-linux-workflow.test.js`.
+11. O novo `HEAD`, pai exato
+    `6fbcbdb75d3cbc0adea365530fa5c8fed1f01314`, mensagem
+    `[run-social-3a0p-linux-gate] classify Gate 4 vault failure provenance` e
+    inventário fechado de exatamente nove caminhos:
+    `.github/workflows/social-3a0p-linux-physical-gates.yml`,
+    `docs/social-3a0p-linux-physical-gates.md`,
+    `scripts/social-3a0p-linux-gate.js`,
+    `scripts/social-3a0p-linux-physical-gates.js`,
+    `scripts/social-3a0p-local-connector-physical-gates.js`,
+    `tests/social-3a0p-linux-gate.test.js`,
+    `tests/social-3a0p-linux-physical-gates.test.js`,
+    `tests/social-3a0p-local-connector-physical-gates.test.js` e
+    `tests/social-3a0p-linux-workflow.test.js`.
 
 Os guards dos dois jobs verificam pais, mensagens, ancestralidade linear,
-contagem dez e cada um desses inventários sem prefixo, glob ou diretório
+contagem onze e cada um desses inventários sem prefixo, glob ou diretório
 inteiro.
 
 ## Restauração da rota executável normal
@@ -1219,9 +1335,11 @@ fail-closed é:
    e idempotência**, incluindo reserva concorrente, consumo
    único/replay/expiração/cross-company de state sintético e corrida de
    publicação com um único registro;
-12. somente depois do Gate 3, executar o **Gate 4 — cofre**, com AES-256-GCM,
-    AAD de empresa/provedor/conexão/finalidade, adulterações, rotação e bloqueio
-    da retirada de chave ainda usada;
+12. somente depois do Gate 3, executar o **Gate 4 — cofre**, em V01–V25 e na
+    ordem fechada base, supplemental e persisted, com AES-256-GCM, AAD de
+    empresa/provedor/conexão/finalidade, adulterações, rotação e bloqueio da
+    retirada de chave ainda usada; qualquer falha preserva a primeira
+    procedência sanitizada e impede o Gate 5;
 13. somente depois do Gate 4, executar o **Gate 5 — backup e restauração**, com
     perfis 0003 e 0004, bundles individuais, SHA-256, manifesto, `fsync` do
     arquivo e diretório, restauração isolada, schema/dados/RLS/cofre e recusas
@@ -1272,6 +1390,14 @@ versões e códigos normalizados são permitidos. URL de conexão, senha, state,
 token, SQL com valores, dump bruto, ambiente e log bruto são recusados. O marker
 `.sanitized-approved` só é criado depois da varredura e não é enviado no
 artifact.
+
+Tanto a evidência normal quanto a evidência de falha e o fallback sanitizado
+incluem `gate4FailureProvenance`. O valor é `null` fora de uma falha observada no
+Gate 4 e, dentro dela, só pode ser o objeto validado de oito campos definido
+acima. Falhas anteriores ao Gate 4 mantêm esse campo `null`; os contratos
+`gate3FailureProvenance`, `rlsFailureProvenance`,
+`backupRestoreFailureProvenance`, `schemaProfileDiagnostics` e status do
+processo permanecem semanticamente inalterados.
 
 Os dois JSONs têm sidecars SHA-256 independentes. O status do processo contém
 somente código de saída, signal fechado, timeout e os dois flags negativos de

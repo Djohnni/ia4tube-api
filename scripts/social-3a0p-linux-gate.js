@@ -38,8 +38,8 @@ const {
 } = require("./social-3a0p-local-runtime-evidence-metrics");
 
 const BRANCH =
-  "social/checkpoint-3a0p-linux-oauth-expiry-fixture-20260810";
-const BASE_COMMIT = "10bd725af02129a6d2795d82dc6d7230c8b7f898";
+  "social/checkpoint-3a0p-linux-vault-failure-provenance-20260811";
+const BASE_COMMIT = "6fbcbdb75d3cbc0adea365530fa5c8fed1f01314";
 const PRODUCT_COMMIT = "fcfc92419021dae5f77baad731c634b10c275c5b";
 const MARKER = "[run-social-3a0p-linux-gate]";
 const RUN_MARKER_PREFIX = "ia4tube-social-3a0p-linux-";
@@ -108,6 +108,48 @@ const GATE3_SUBSTEP_ORDER = Object.freeze(Object.keys(GATE3_SUBSTEP_DEFINITIONS)
 const GATE3_SUBSTEP_INDEX = new Map(
   GATE3_SUBSTEP_ORDER.map((substep, index) => [substep, index])
 );
+const GATE4_PROVENANCE_KEYS = Object.freeze([
+  "causalCode",
+  "exitCode",
+  "externalProcessStarted",
+  "lastCompletedSubstep",
+  "operation",
+  "operationClass",
+  "signal",
+  "substep"
+].sort());
+const GATE4_SUBSTEP_DEFINITIONS = Object.freeze({
+  V01: Object.freeze({ operation: "base", operationClass: "memory_setup" }),
+  V02: Object.freeze({ operation: "base", operationClass: "memory_crypto" }),
+  V03: Object.freeze({ operation: "base", operationClass: "memory_crypto" }),
+  V04: Object.freeze({ operation: "base", operationClass: "memory_validation" }),
+  V05: Object.freeze({ operation: "base", operationClass: "memory_validation" }),
+  V06: Object.freeze({ operation: "base", operationClass: "memory_crypto" }),
+  V07: Object.freeze({ operation: "base", operationClass: "memory_crypto" }),
+  V08: Object.freeze({ operation: "base", operationClass: "memory_validation" }),
+  V09: Object.freeze({ operation: "base", operationClass: "memory_cleanup" }),
+  V10: Object.freeze({ operation: "supplemental", operationClass: "memory_setup" }),
+  V11: Object.freeze({ operation: "supplemental", operationClass: "memory_crypto" }),
+  V12: Object.freeze({ operation: "supplemental", operationClass: "memory_crypto" }),
+  V13: Object.freeze({ operation: "supplemental", operationClass: "memory_validation" }),
+  V14: Object.freeze({ operation: "supplemental", operationClass: "memory_validation" }),
+  V15: Object.freeze({ operation: "supplemental", operationClass: "memory_validation" }),
+  V16: Object.freeze({ operation: "supplemental", operationClass: "memory_validation" }),
+  V17: Object.freeze({ operation: "supplemental", operationClass: "memory_validation" }),
+  V18: Object.freeze({ operation: "supplemental", operationClass: "memory_validation" }),
+  V19: Object.freeze({ operation: "supplemental", operationClass: "memory_cleanup" }),
+  V20: Object.freeze({ operation: "persisted", operationClass: "memory_setup" }),
+  V21: Object.freeze({ operation: "persisted", operationClass: "postgres_verifier_setup" }),
+  V22: Object.freeze({ operation: "persisted", operationClass: "postgres_runtime_isolation" }),
+  V23: Object.freeze({ operation: "persisted", operationClass: "postgres_vault_verification" }),
+  V24: Object.freeze({ operation: "persisted", operationClass: "postgres_verifier_cleanup" }),
+  V25: Object.freeze({ operation: "persisted", operationClass: "memory_cleanup" })
+});
+const GATE4_SUBSTEP_ORDER = Object.freeze(Object.keys(GATE4_SUBSTEP_DEFINITIONS));
+const GATE4_SUBSTEP_INDEX = new Map(
+  GATE4_SUBSTEP_ORDER.map((substep, index) => [substep, index])
+);
+const GATE4_CLEANUP_SUBSTEPS = new Set(["V09", "V19", "V24", "V25"]);
 const GATE3_NODE_ERROR_CODES = new Set([
   "EAI_AGAIN",
   "ECONNABORTED",
@@ -119,6 +161,7 @@ const GATE3_NODE_ERROR_CODES = new Set([
   "EPIPE",
   "ETIMEDOUT"
 ]);
+const GATE4_NODE_ERROR_CODES = new Set(GATE3_NODE_ERROR_CODES);
 const GATE_PROCESS_SIGNALS = new Set([
   "SIGHUP", "SIGINT", "SIGQUIT", "SIGILL", "SIGTRAP", "SIGABRT",
   "SIGBUS", "SIGFPE", "SIGKILL", "SIGUSR1", "SIGSEGV", "SIGUSR2",
@@ -508,6 +551,163 @@ function createGate3FailureProvenanceTracker() {
   return Object.freeze({
     failure() { return firstFailure; },
     forOperation,
+    runSubstep
+  });
+}
+
+function gate4CodeFromCandidate(candidate) {
+  if (typeof candidate !== "string" || candidate.length === 0) {
+    return "gate4_error_code_unavailable";
+  }
+  if (SAFE_FAILURE.test(candidate)) return candidate;
+  if (
+    GATE4_NODE_ERROR_CODES.has(candidate) ||
+    /^[0-9A-Za-z]{5}$/.test(candidate)
+  ) {
+    return `gate4_error_code_${candidate.toLowerCase()}`;
+  }
+  return "gate4_error_code_unavailable";
+}
+
+function gate4FailureCode(error) {
+  const candidate = typeof error?.code === "string" ? error.code : "";
+  if (candidate === "postgres_rollback_failed") {
+    if (typeof error?.cause?.code === "string") {
+      return gate4CodeFromCandidate(error.cause.code);
+    }
+    return "postgres_rollback_failed";
+  }
+  if (candidate.length > 0) return gate4CodeFromCandidate(candidate);
+  if (error instanceof TypeError) return "gate4_type_error";
+  if (error instanceof RangeError) return "gate4_range_error";
+  return "gate4_error_code_unavailable";
+}
+
+function sanitizedGate4FailureProvenance(candidate) {
+  if (candidate == null) return null;
+  const descriptors = candidate && Object.getPrototypeOf(candidate) === Object.prototype
+    ? Object.getOwnPropertyDescriptors(candidate)
+    : null;
+  if (
+    !candidate || Object.getPrototypeOf(candidate) !== Object.prototype ||
+    JSON.stringify(Object.keys(candidate).sort()) !==
+      JSON.stringify(GATE4_PROVENANCE_KEYS) ||
+    !Object.values(descriptors).every((descriptor) => (
+      Object.hasOwn(descriptor, "value") && descriptor.enumerable === true
+    ))
+  ) return null;
+  const definition = GATE4_SUBSTEP_DEFINITIONS[candidate.substep];
+  const substepIndex = GATE4_SUBSTEP_INDEX.get(candidate.substep);
+  const expectedLastCompletedSubstep = substepIndex === 0
+    ? null
+    : GATE4_SUBSTEP_ORDER[substepIndex - 1];
+  if (
+    !definition ||
+    candidate.operation !== definition.operation ||
+    candidate.operationClass !== definition.operationClass ||
+    typeof candidate.causalCode !== "string" ||
+    !SAFE_FAILURE.test(candidate.causalCode) ||
+    candidate.externalProcessStarted !== false ||
+    candidate.exitCode !== null ||
+    candidate.signal !== null ||
+    candidate.lastCompletedSubstep !== expectedLastCompletedSubstep
+  ) return null;
+  return Object.freeze({
+    operation: candidate.operation,
+    substep: candidate.substep,
+    operationClass: candidate.operationClass,
+    causalCode: candidate.causalCode,
+    lastCompletedSubstep: candidate.lastCompletedSubstep,
+    externalProcessStarted: false,
+    exitCode: null,
+    signal: null
+  });
+}
+
+function createGate4FailureProvenanceTracker() {
+  let firstFailure = null;
+  let lastCompletedSubstep = null;
+  let highestObservedIndex = -1;
+  let inFlight = false;
+  const observedSubsteps = new Set();
+
+  async function runSubstep(operation, substep, operationClass, execute) {
+    if (inFlight) fail("gate4_failure_provenance_reentrancy_refused");
+    const definition = GATE4_SUBSTEP_DEFINITIONS[substep];
+    const index = GATE4_SUBSTEP_INDEX.get(substep);
+    let cleanupSequenceValid = false;
+    if (firstFailure?.operation === "base") {
+      cleanupSequenceValid = substep === "V09" && index > highestObservedIndex;
+    } else if (firstFailure?.operation === "supplemental") {
+      cleanupSequenceValid = substep === "V19" && index > highestObservedIndex;
+    } else if (firstFailure?.operation === "persisted") {
+      cleanupSequenceValid = highestObservedIndex < GATE4_SUBSTEP_INDEX.get("V24")
+        ? substep === "V24"
+        : highestObservedIndex === GATE4_SUBSTEP_INDEX.get("V24") && substep === "V25";
+    }
+    const sequenceValid = firstFailure
+      ? GATE4_CLEANUP_SUBSTEPS.has(substep) && cleanupSequenceValid
+      : index === highestObservedIndex + 1;
+    if (
+      !definition || definition.operation !== operation ||
+      definition.operationClass !== operationClass ||
+      typeof execute !== "function" ||
+      observedSubsteps.has(substep) ||
+      !sequenceValid
+    ) {
+      fail("gate4_failure_provenance_substep_invalid");
+    }
+    observedSubsteps.add(substep);
+    highestObservedIndex = index;
+    inFlight = true;
+    try {
+      const result = await execute();
+      if (!firstFailure) lastCompletedSubstep = substep;
+      return result;
+    } catch (error) {
+      if (!firstFailure) {
+        firstFailure = Object.freeze({
+          operation,
+          substep,
+          operationClass,
+          causalCode: gate4FailureCode(error),
+          lastCompletedSubstep,
+          externalProcessStarted: false,
+          exitCode: null,
+          signal: null
+        });
+      }
+      throw error;
+    } finally {
+      inFlight = false;
+    }
+  }
+
+  function forOperation(operation) {
+    if (!new Set(["base", "supplemental", "persisted"]).has(operation)) {
+      fail("gate4_failure_provenance_operation_invalid");
+    }
+    return async function runGate4Substep(substep, operationClass, execute) {
+      return runSubstep(operation, substep, operationClass, execute);
+    };
+  }
+
+  return Object.freeze({
+    failure() { return firstFailure; },
+    forOperation,
+    requireFailure() {
+      if (!firstFailure) fail("gate4_failure_provenance_unobserved");
+      return firstFailure;
+    },
+    requireComplete() {
+      if (
+        firstFailure !== null ||
+        observedSubsteps.size !== GATE4_SUBSTEP_ORDER.length ||
+        highestObservedIndex !== GATE4_SUBSTEP_ORDER.length - 1 ||
+        lastCompletedSubstep !== "V25"
+      ) fail("gate4_failure_provenance_incomplete");
+      return true;
+    },
     runSubstep
   });
 }
@@ -1524,11 +1724,26 @@ function evidenceSafe(value, depth = 0) {
   }
   if (Array.isArray(value)) return value.length <= 100 && value.every((item) => evidenceSafe(item, depth + 1));
   if (!value || Object.getPrototypeOf(value) !== Object.prototype || Object.keys(value).length > 100) return false;
+  if (
+    Object.hasOwn(value, "firstFailure") &&
+    Object.hasOwn(value, "gate4FailureProvenance")
+  ) {
+    const gate4 = sanitizedGate4FailureProvenance(value.gate4FailureProvenance);
+    const phase = value.firstFailure?.phase;
+    const code = value.firstFailure?.code;
+    if (phase !== "vault") {
+      if (value.gate4FailureProvenance !== null) return false;
+    } else if (code === "gate4_failure_provenance_unobserved") {
+      if (value.gate4FailureProvenance !== null) return false;
+    } else if (!gate4 || code !== gate4.causalCode) return false;
+  }
   return Object.entries(value).every(([key, item]) => (
     /^[a-zA-Z][a-zA-Z0-9_]{0,79}$/.test(key) &&
     !/(password|connectionString|databaseUrl|rawState|token|secret|environmentVariables)/i.test(key) &&
     !/^(?:databaseHost|containerId|networkId|ipAddress|subnet|gateway)$/i.test(key) &&
-    evidenceSafe(item, depth + 1)
+    (key === "gate4FailureProvenance"
+      ? item === null || sanitizedGate4FailureProvenance(item) !== null
+      : evidenceSafe(item, depth + 1))
   ));
 }
 
@@ -1551,6 +1766,24 @@ function sanitizedFailureEvidence(source, code = "linux_evidence_sanitization_fa
     listenerResiduals: count("listenerResiduals"),
     temporaryRootResiduals: count("temporaryRootResiduals")
   });
+  const sanitizedGate4 = sanitizedGate4FailureProvenance(
+    source?.gate4FailureProvenance
+  );
+  let publishedFirstFailure = firstFailure;
+  let gate4FailureProvenance = null;
+  if (firstFailure.phase === "vault") {
+    if (
+      firstFailure.code !== "gate4_failure_provenance_unobserved" &&
+      sanitizedGate4 && firstFailure.code === sanitizedGate4.causalCode
+    ) {
+      gate4FailureProvenance = sanitizedGate4;
+    } else if (firstFailure.code !== "gate4_failure_provenance_unobserved") {
+      publishedFirstFailure = Object.freeze({
+        phase: "vault",
+        code: "gate4_failure_provenance_unobserved"
+      });
+    }
+  }
   return Object.freeze({
     format: 1,
     kind: "ia4tube-social-3a0p-linux-physical-gates",
@@ -1560,7 +1793,7 @@ function sanitizedFailureEvidence(source, code = "linux_evidence_sanitization_fa
     imageDigest: IMAGE_DIGEST,
     status: "failed",
     phases: Object.freeze([]),
-    firstFailure,
+    firstFailure: publishedFirstFailure,
     backupRestoreFailureProvenance:
       sanitizedBackupRestoreFailureProvenance(
         source?.backupRestoreFailureProvenance
@@ -1568,6 +1801,7 @@ function sanitizedFailureEvidence(source, code = "linux_evidence_sanitization_fa
     gate3FailureProvenance: sanitizedGate3FailureProvenance(
       source?.gate3FailureProvenance
     ),
+    gate4FailureProvenance,
     rlsFailureProvenance: sanitizedRlsFailureProvenance(
       source?.rlsFailureProvenance
     ),
@@ -3243,16 +3477,26 @@ async function migrationEvidence(state, dependencies = {}) {
 }
 
 function createPhaseRunner(evidence) {
-  return async function phase(name, operation) {
+  return async function phase(name, operation, options = {}) {
     if (!SAFE_PHASE.has(name)) fail("linux_gate_phase_invalid");
     if (evidence.firstFailure) fail("linux_gate_phase_after_failure_refused");
+    if (
+      !options || Object.getPrototypeOf(options) !== Object.prototype ||
+      Object.keys(options).some((key) => key !== "classifyFailure") ||
+      (options.classifyFailure !== undefined && typeof options.classifyFailure !== "function")
+    ) fail("linux_gate_phase_options_invalid");
     const started = Date.now();
     try {
       const result = await operation();
       evidence.phases.push({ name, status: "passed", durationMs: Date.now() - started, result });
       return result;
     } catch (error) {
-      const code = failureCode(error);
+      const code = options.classifyFailure === undefined
+        ? failureCode(error)
+        : options.classifyFailure();
+      if (typeof code !== "string" || !SAFE_FAILURE.test(code)) {
+        fail("linux_gate_phase_failure_code_invalid");
+      }
       evidence.firstFailure = { phase: name, code };
       const failedPhase = { name, status: "failed", durationMs: Date.now() - started, code };
       if (name === "postgres") {
@@ -3297,6 +3541,7 @@ async function runLinuxGate(options = {}) {
   });
   const rlsFailureProvenance = createRlsFailureProvenanceTracker();
   const gate3FailureProvenance = createGate3FailureProvenanceTracker();
+  const gate4FailureProvenance = createGate4FailureProvenanceTracker();
   const runCommand = options.runCommand || commandRunner({
     spawnImpl: backupRestoreProvenance.wrapSpawn(spawn)
   });
@@ -3321,6 +3566,7 @@ async function runLinuxGate(options = {}) {
     firstFailure: null,
     backupRestoreFailureProvenance: null,
     gate3FailureProvenance: null,
+    gate4FailureProvenance: null,
     rlsFailureProvenance: null,
     cleanupFailure: null
   };
@@ -3506,6 +3752,7 @@ async function runLinuxGate(options = {}) {
       randomBytes: options.randomBytes || crypto.randomBytes,
       dependencies: {
         runGate3Substep: gate3FailureProvenance.forOperation("base"),
+        runGate4Substep: gate4FailureProvenance.forOperation("base"),
         runProfileBackup: linuxProfileBackup,
         runProfileRestore: linuxProfileRestore
       }
@@ -3568,10 +3815,29 @@ async function runLinuxGate(options = {}) {
     activePhase = "vault";
     await phase("vault", async () => {
       const base = await gates.vault({ state });
-      const supplement = await runVaultSupplementalGate(state, sensitiveMarkers);
-      const persisted = await runPersistedVaultGate(state, sensitiveMarkers, legacy2ARoot);
+      const supplement = await runVaultSupplementalGate(
+        state,
+        sensitiveMarkers,
+        Object.freeze({
+          runGate4Substep: gate4FailureProvenance.forOperation("supplemental")
+        })
+      );
+      const persisted = await runPersistedVaultGate(
+        state,
+        sensitiveMarkers,
+        legacy2ARoot,
+        Object.freeze({
+          runGate4Substep: gate4FailureProvenance.forOperation("persisted")
+        })
+      );
+      gate4FailureProvenance.requireComplete();
       return Object.freeze({ ...base, ...supplement, ...persisted });
-    });
+    }, Object.freeze({
+      classifyFailure() {
+        return gate4FailureProvenance.failure()?.causalCode ||
+          "gate4_failure_provenance_unobserved";
+      }
+    }));
     activePhase = "backup_restore";
     await phase("backup_restore", async () => {
       await retirePrimaryPoolsBeforeBackup(state);
@@ -3673,13 +3939,35 @@ async function runLinuxGate(options = {}) {
   } catch (error) {
     operationalFailure = error;
     evidence.status = "failed";
-    const code = failureCode(error);
+    let code = activePhase === "vault"
+      ? "gate4_failure_provenance_unobserved"
+      : failureCode(error);
+    if (activePhase === "vault") {
+      try {
+        const observedFailure = gate4FailureProvenance.requireFailure();
+        code = observedFailure.causalCode;
+        evidence.firstFailure = { phase: "vault", code };
+        const failedVaultPhase = evidence.phases.find((entry) => (
+          entry?.name === "vault" && entry?.status === "failed"
+        ));
+        if (failedVaultPhase) failedVaultPhase.code = code;
+      } catch (provenanceError) {
+        code = "gate4_failure_provenance_unobserved";
+        operationalFailure = provenanceError;
+        evidence.firstFailure = { phase: "vault", code };
+        const failedVaultPhase = evidence.phases.find((entry) => (
+          entry?.name === "vault" && entry?.status === "failed"
+        ));
+        if (failedVaultPhase) failedVaultPhase.code = code;
+      }
+    }
     if (code === "backup_external_tool_failed" && !backupRestoreProvenance.failure()) {
       backupRestoreProvenance.captureUnobservedFailure();
     }
     evidence.backupRestoreFailureProvenance =
       backupRestoreProvenance.failure();
     evidence.gate3FailureProvenance = gate3FailureProvenance.failure();
+    evidence.gate4FailureProvenance = gate4FailureProvenance.failure();
     evidence.rlsFailureProvenance = rlsFailureProvenance.failure();
     if (!evidence.firstFailure) evidence.firstFailure = { phase: activePhase, code };
   } finally {
@@ -3719,6 +4007,7 @@ async function runLinuxGate(options = {}) {
     }
     evidence.backupTransport = publicBackupTransportEvidence(postgres);
     evidence.gate3FailureProvenance = gate3FailureProvenance.failure();
+    evidence.gate4FailureProvenance = gate4FailureProvenance.failure();
     evidence.schemaProfileDiagnostics =
       restoreBehaviorFacade?.schemaProfileDiagnostics() || null;
     evidence.cleanup = cleanupResult || { cleanupCompleted: false };
@@ -3827,6 +4116,7 @@ module.exports = {
   createBackupTransportBridge,
   createGate1MigrationPoolLifecycle,
   createGate3FailureProvenanceTracker,
+  createGate4FailureProvenanceTracker,
   createLinuxProfile0003PlansFacade,
   createLinuxProfileBackupRunner,
   createLinuxProfileRestoreRunner,
@@ -3843,6 +4133,7 @@ module.exports = {
   failureCode,
   freeBytes,
   gate3FailureCode,
+  gate4FailureCode,
   gateProcessStatusFromChildResult,
   isLinuxRestoreDatabase,
   isRestoreEmptyTargetInventoryQuery,
@@ -3863,6 +4154,7 @@ module.exports = {
   sanitizedBackupRestoreFailureProvenance,
   sanitizedFailureEvidence,
   sanitizedGate3FailureProvenance,
+  sanitizedGate4FailureProvenance,
   sanitizedGateProcessStatus,
   sanitizedRlsFailureProvenance,
   runRlsPrivilegeInventoryContextPhase,

@@ -1655,57 +1655,135 @@ async function runConcurrencyOAuthIdempotencyGate(state, sensitiveMarkers, depen
   return result;
 }
 
-async function runVaultSupplementalGate(state, sensitiveMarkers) {
-  const { createSocialVault } = require("../src/social/vault");
-  const { deriveVaultKeyVersion, vaultKeyringFingerprint } = require("../src/social/vault-key-version");
-  const token = Buffer.from(`synthetic-linux-token-${crypto.randomBytes(32).toString("hex")}`, "utf8");
-  sensitiveMarkers.push(token.toString("utf8"));
-  const key = state.materials.vault;
-  const version = deriveVaultKeyVersion(1, key);
-  const vault = createSocialVault({
-    keyring: { activeVersion: version, keys: new Map([[version, key]]) },
-    expectedKeyringFingerprint: vaultKeyringFingerprint(version, [version])
-  });
-  const context = {
-    companyId: crypto.randomUUID(),
-    provider: "instagram",
-    credentialId: crypto.randomUUID(),
-    credentialType: "access_token",
-    subjectType: "connection",
-    subjectId: crypto.randomUUID()
-  };
+async function runVaultSupplementalGate(
+  state,
+  sensitiveMarkers,
+  { runGate4Substep = async (_substep, _operationClass, operation) => operation() } = {}
+) {
+  let setup = {};
+  let vault;
+  let result;
+  let primaryFailure;
+  let primaryFailed = false;
+
   try {
-    const envelope = vault.encrypt(token, context);
-    const correct = vault.decrypt(envelope, context);
-    const correctRoundTrip = correct.equals(token);
-    correct.fill(0);
+    const returnedSetup = await runGate4Substep("V10", "memory_setup", async () => {
+      setup.createSocialVault = require("../src/social/vault").createSocialVault;
+      const keyVersion = require("../src/social/vault-key-version");
+      setup.deriveVaultKeyVersion = keyVersion.deriveVaultKeyVersion;
+      setup.vaultKeyringFingerprint = keyVersion.vaultKeyringFingerprint;
+      setup.token = Buffer.from(`synthetic-linux-token-${crypto.randomBytes(32).toString("hex")}`, "utf8");
+      sensitiveMarkers.push(setup.token.toString("utf8"));
+      setup.key = state.materials.vault;
+      setup.version = setup.deriveVaultKeyVersion(1, setup.key);
+      setup.context = {
+        companyId: crypto.randomUUID(),
+        provider: "instagram",
+        credentialId: crypto.randomUUID(),
+        credentialType: "access_token",
+        subjectType: "connection",
+        subjectId: crypto.randomUUID()
+      };
+      return setup;
+    });
+    if (returnedSetup !== undefined) setup = returnedSetup;
+    const returnedVault = await runGate4Substep("V11", "memory_crypto", async () => {
+      vault = setup.createSocialVault({
+        keyring: { activeVersion: setup.version, keys: new Map([[setup.version, setup.key]]) },
+        expectedKeyringFingerprint: setup.vaultKeyringFingerprint(setup.version, [setup.version])
+      });
+      return vault;
+    });
+    if (vault === undefined && returnedVault !== undefined) vault = returnedVault;
+    const envelope = await runGate4Substep(
+      "V12",
+      "memory_crypto",
+      async () => vault.encrypt(setup.token, setup.context)
+    );
+    await runGate4Substep("V13", "memory_validation", async () => {
+      const correct = vault.decrypt(envelope, setup.context);
+      try {
+        if (!correct.equals(setup.token)) fail("linux_gate_vault_context_validation_failed");
+      } finally {
+        correct.fill(0);
+      }
+    });
     const rejected = async (operation) => {
       try { operation(); return false; } catch (error) { return error?.code === "vault_authentication_failed"; }
     };
-    const companyChanged = await rejected(() => vault.decrypt(envelope, { ...context, companyId: crypto.randomUUID() }));
-    const providerChanged = await rejected(() => vault.decrypt(envelope, { ...context, provider: "facebook" }));
-    const connectionChanged = await rejected(() => vault.decrypt(envelope, { ...context, subjectId: crypto.randomUUID() }));
-    const aadChanged = await rejected(() => vault.decrypt(envelope, { ...context, credentialType: "refresh_token" }));
-    const tampered = { ...envelope, ciphertext: Buffer.from(envelope.ciphertext) };
-    tampered.ciphertext[0] ^= 0xff;
-    const ciphertextChanged = await rejected(() => vault.decrypt(tampered, context));
-    tampered.ciphertext.fill(0);
-    if (!correctRoundTrip || !companyChanged || !providerChanged || !connectionChanged || !aadChanged || !ciphertextChanged) {
-      fail("linux_gate_vault_context_validation_failed");
-    }
-    return Object.freeze({
-      algorithm: "AES-256-GCM",
-      aadBound: true,
-      companyChangeRefused: true,
-      providerChangeRefused: true,
-      connectionChangeRefused: true,
-      ciphertextTamperRefused: true,
-      aadTamperRefused: true
+    await runGate4Substep("V14", "memory_validation", async () => {
+      if (!await rejected(() => vault.decrypt(envelope, { ...setup.context, companyId: crypto.randomUUID() }))) {
+        fail("linux_gate_vault_context_validation_failed");
+      }
     });
+    await runGate4Substep("V15", "memory_validation", async () => {
+      if (!await rejected(() => vault.decrypt(envelope, { ...setup.context, provider: "facebook" }))) {
+        fail("linux_gate_vault_context_validation_failed");
+      }
+    });
+    await runGate4Substep("V16", "memory_validation", async () => {
+      if (!await rejected(() => vault.decrypt(envelope, { ...setup.context, subjectId: crypto.randomUUID() }))) {
+        fail("linux_gate_vault_context_validation_failed");
+      }
+    });
+    await runGate4Substep("V17", "memory_validation", async () => {
+      if (!await rejected(() => vault.decrypt(envelope, { ...setup.context, credentialType: "refresh_token" }))) {
+        fail("linux_gate_vault_context_validation_failed");
+      }
+    });
+    result = await runGate4Substep("V18", "memory_validation", async () => {
+      const tampered = { ...envelope, ciphertext: Buffer.from(envelope.ciphertext) };
+      try {
+        tampered.ciphertext[0] ^= 0xff;
+        if (!await rejected(() => vault.decrypt(tampered, setup.context))) {
+          fail("linux_gate_vault_context_validation_failed");
+        }
+      } finally {
+        tampered.ciphertext.fill(0);
+      }
+      return Object.freeze({
+        algorithm: "AES-256-GCM",
+        aadBound: true,
+        companyChangeRefused: true,
+        providerChangeRefused: true,
+        connectionChangeRefused: true,
+        ciphertextTamperRefused: true,
+        aadTamperRefused: true
+      });
+    });
+  } catch (error) {
+    primaryFailed = true;
+    primaryFailure = error;
   } finally {
-    vault.destroy();
-    token.fill(0);
+    try {
+      await runGate4Substep("V19", "memory_cleanup", async () => {
+        let cleanupFailure;
+        let cleanupFailed = false;
+        try {
+          vault?.destroy();
+        } catch (error) {
+          cleanupFailed = true;
+          cleanupFailure = error;
+        }
+        try {
+          setup?.token?.fill(0);
+        } catch (error) {
+          if (!cleanupFailed) {
+            cleanupFailed = true;
+            cleanupFailure = error;
+          }
+        }
+        if (cleanupFailed) throw cleanupFailure;
+      });
+    } catch (error) {
+      if (!primaryFailed) {
+        primaryFailed = true;
+        primaryFailure = error;
+      }
+    }
   }
+  if (primaryFailed) throw primaryFailure;
+  return result;
 }
 
 function createLocalVerifierPoolClass({ PoolClass, port, database, passwords }) {
@@ -1746,62 +1824,127 @@ function createRestoreBehaviorFacade(legacy2ARoot) {
   });
 }
 
-async function runPersistedVaultGate(state, sensitiveMarkers, legacy2ARoot) {
-  const original = require("../src/persistence/postgres/restore-behavior-verifiers");
-  const passwords = {
-    [MIGRATION_LOGIN]: state.passwords[MIGRATION_LOGIN],
-    [RUNTIME_LOGIN]: state.passwords[RUNTIME_LOGIN]
-  };
-  const databaseUrl = (login) => {
-    const value = new URL(`postgresql://${VERIFIER_HOST}:${state.target.port}/${state.database}`);
-    value.username = login;
-    value.password = passwords[login];
-    value.searchParams.set("sslmode", "verify-full");
-    return value.toString();
-  };
-  const persistedA = Buffer.from(`persisted-a-${crypto.randomBytes(18).toString("hex")}`.slice(0, 48), "utf8");
-  const persistedB = Buffer.from(`persisted-b-${crypto.randomBytes(18).toString("hex")}`.slice(0, 48), "utf8");
-  if (persistedA.length !== 48 || persistedB.length !== 48) fail("linux_gate_persisted_marker_invalid");
-  sensitiveMarkers.push(persistedA.toString("utf8"), persistedB.toString("utf8"));
-  let plaintextIndex = 0;
-  const gate = original.createRestoreBehaviorVerifiers({
-    env: {},
-    migrationDatabaseUrl: databaseUrl(MIGRATION_LOGIN),
-    runtimeDatabaseUrl: databaseUrl(RUNTIME_LOGIN),
-    expectedMigrationLogin: MIGRATION_LOGIN,
-    expectedRuntimeLogin: RUNTIME_LOGIN,
-    legacy2ARoot,
-    randomBytes(size) {
-      if (size === 48) {
-        const source = plaintextIndex++ === 0 ? persistedA : persistedB;
-        return Buffer.from(source);
-      }
-      return crypto.randomBytes(size);
-    },
-    dependencies: {
-      PoolClass: createLocalVerifierPoolClass({
-        PoolClass: state.PoolClass,
-        port: state.target.port,
-        database: state.database,
-        passwords
-      })
-    }
-  });
+async function runPersistedVaultGate(
+  state,
+  sensitiveMarkers,
+  legacy2ARoot,
+  { runGate4Substep = async (_substep, _operationClass, operation) => operation() } = {}
+) {
+  let setup = {};
+  let gate;
+  let result;
+  let primaryFailure;
+  let primaryFailed = false;
+
   try {
-    if ((await gate.verifiers.verifyRuntimeIsolation()) !== true) fail("linux_gate_persisted_runtime_isolation_failed");
-    if ((await gate.verifiers.verifyVault()) !== true) fail("linux_gate_persisted_vault_failed");
-    return Object.freeze({
-      runtimeIsolationPrerequisite: true,
-      persistedRoundTrip: true,
-      keyRotation: true,
-      retirementWhileInUseRefused: true,
-      plaintextDatabaseAbsent: true
+    const returnedSetup = await runGate4Substep("V20", "memory_setup", async () => {
+      setup.original = require("../src/persistence/postgres/restore-behavior-verifiers");
+      setup.passwords = {
+        [MIGRATION_LOGIN]: state.passwords[MIGRATION_LOGIN],
+        [RUNTIME_LOGIN]: state.passwords[RUNTIME_LOGIN]
+      };
+      setup.databaseUrl = (login) => {
+        const value = new URL(`postgresql://${VERIFIER_HOST}:${state.target.port}/${state.database}`);
+        value.username = login;
+        value.password = setup.passwords[login];
+        value.searchParams.set("sslmode", "verify-full");
+        return value.toString();
+      };
+      setup.persistedA = Buffer.from(`persisted-a-${crypto.randomBytes(18).toString("hex")}`.slice(0, 48), "utf8");
+      setup.persistedB = Buffer.from(`persisted-b-${crypto.randomBytes(18).toString("hex")}`.slice(0, 48), "utf8");
+      if (setup.persistedA.length !== 48 || setup.persistedB.length !== 48) {
+        fail("linux_gate_persisted_marker_invalid");
+      }
+      sensitiveMarkers.push(setup.persistedA.toString("utf8"), setup.persistedB.toString("utf8"));
+      return setup;
     });
+    if (returnedSetup !== undefined) setup = returnedSetup;
+    const returnedGate = await runGate4Substep("V21", "postgres_verifier_setup", async () => {
+      let plaintextIndex = 0;
+      gate = setup.original.createRestoreBehaviorVerifiers({
+        env: {},
+        migrationDatabaseUrl: setup.databaseUrl(MIGRATION_LOGIN),
+        runtimeDatabaseUrl: setup.databaseUrl(RUNTIME_LOGIN),
+        expectedMigrationLogin: MIGRATION_LOGIN,
+        expectedRuntimeLogin: RUNTIME_LOGIN,
+        legacy2ARoot,
+        randomBytes(size) {
+          if (size === 48) {
+            const source = plaintextIndex++ === 0 ? setup.persistedA : setup.persistedB;
+            return Buffer.from(source);
+          }
+          return crypto.randomBytes(size);
+        },
+        dependencies: {
+          PoolClass: createLocalVerifierPoolClass({
+            PoolClass: state.PoolClass,
+            port: state.target.port,
+            database: state.database,
+            passwords: setup.passwords
+          })
+        }
+      });
+      return gate;
+    });
+    if (gate === undefined && returnedGate !== undefined) gate = returnedGate;
+    await runGate4Substep("V22", "postgres_runtime_isolation", async () => {
+      if ((await gate.verifiers.verifyRuntimeIsolation()) !== true) {
+        fail("linux_gate_persisted_runtime_isolation_failed");
+      }
+    });
+    result = await runGate4Substep("V23", "postgres_vault_verification", async () => {
+      if ((await gate.verifiers.verifyVault()) !== true) fail("linux_gate_persisted_vault_failed");
+      return Object.freeze({
+        runtimeIsolationPrerequisite: true,
+        persistedRoundTrip: true,
+        keyRotation: true,
+        retirementWhileInUseRefused: true,
+        plaintextDatabaseAbsent: true
+      });
+    });
+  } catch (error) {
+    primaryFailed = true;
+    primaryFailure = error;
   } finally {
-    await gate.close();
-    persistedA.fill(0);
-    persistedB.fill(0);
+    try {
+      await runGate4Substep("V24", "postgres_verifier_cleanup", async () => {
+        if (gate) await gate.close();
+      });
+    } catch (error) {
+      if (!primaryFailed) {
+        primaryFailed = true;
+        primaryFailure = error;
+      }
+    }
+    try {
+      await runGate4Substep("V25", "memory_cleanup", async () => {
+        let cleanupFailure;
+        let cleanupFailed = false;
+        try {
+          setup?.persistedA?.fill(0);
+        } catch (error) {
+          cleanupFailed = true;
+          cleanupFailure = error;
+        }
+        try {
+          setup?.persistedB?.fill(0);
+        } catch (error) {
+          if (!cleanupFailed) {
+            cleanupFailed = true;
+            cleanupFailure = error;
+          }
+        }
+        if (cleanupFailed) throw cleanupFailure;
+      });
+    } catch (error) {
+      if (!primaryFailed) {
+        primaryFailed = true;
+        primaryFailure = error;
+      }
+    }
   }
+  if (primaryFailed) throw primaryFailure;
+  return result;
 }
 
 module.exports = {

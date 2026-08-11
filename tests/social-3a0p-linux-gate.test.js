@@ -56,6 +56,7 @@ const {
   createDrainAwareRunTool,
   createGate1MigrationPoolLifecycle,
   createGate3FailureProvenanceTracker,
+  createGate4FailureProvenanceTracker,
   createLinuxProfile0003PlansFacade,
   createLinuxProfileBackupRunner,
   createLinuxProfileRestoreRunner,
@@ -71,6 +72,7 @@ const {
   evidenceSafe,
   failureCode,
   gate3FailureCode,
+  gate4FailureCode,
   gateProcessStatusFromChildResult,
   isLinuxRestoreDatabase,
   isRestoreEmptyTargetInventoryQuery,
@@ -88,6 +90,7 @@ const {
   sanitizedBackupRestoreFailureProvenance,
   sanitizedFailureEvidence,
   sanitizedGate3FailureProvenance,
+  sanitizedGate4FailureProvenance,
   sanitizedGateProcessStatus,
   sanitizedRlsFailureProvenance,
   runRlsPrivilegeInventoryContextPhase,
@@ -699,11 +702,11 @@ function restoreBehaviorFacadeFixture(options = {}) {
 test("evidence provenance matches the authorized workflow branch and parent", () => {
   assert.equal(
     BRANCH,
-    "social/checkpoint-3a0p-linux-oauth-expiry-fixture-20260810"
+    "social/checkpoint-3a0p-linux-vault-failure-provenance-20260811"
   );
   assert.equal(
     BASE_COMMIT,
-    "10bd725af02129a6d2795d82dc6d7230c8b7f898"
+    "6fbcbdb75d3cbc0adea365530fa5c8fed1f01314"
   );
   const workflow = JSON.parse(fs.readFileSync(
     path.join(ROOT, ".github", "workflows", "social-3a0p-linux-physical-gates.yml"),
@@ -1953,7 +1956,11 @@ test("unsafe evidence is replaced by a minimal sanitized failure", () => {
     databaseUrl: "postgresql://synthetic:unsafe@invalid/db"
   });
   assert.equal(fallback.status, "failed");
-  assert.deepEqual(fallback.firstFailure, { phase: "vault", code: "linux_gate_vault_failed" });
+  assert.deepEqual(fallback.firstFailure, {
+    phase: "vault",
+    code: "gate4_failure_provenance_unobserved"
+  });
+  assert.equal(fallback.gate4FailureProvenance, null);
   assert.equal(fallback.sanitizationFailure, true);
   assert.equal(Object.hasOwn(fallback, "databaseUrl"), false);
   assert.equal(evidenceSafe(fallback), true);
@@ -2066,6 +2073,34 @@ const GATE3_BOUNDARIES = Object.freeze([
   ["supplemental", "S28", "postgres_inventory"],
   ["supplemental", "S29", "internal_validation"],
   ["supplemental", "S30", "memory_cleanup"]
+]);
+
+const GATE4_BOUNDARIES = Object.freeze([
+  ["base", "V01", "memory_setup"],
+  ["base", "V02", "memory_crypto"],
+  ["base", "V03", "memory_crypto"],
+  ["base", "V04", "memory_validation"],
+  ["base", "V05", "memory_validation"],
+  ["base", "V06", "memory_crypto"],
+  ["base", "V07", "memory_crypto"],
+  ["base", "V08", "memory_validation"],
+  ["base", "V09", "memory_cleanup"],
+  ["supplemental", "V10", "memory_setup"],
+  ["supplemental", "V11", "memory_crypto"],
+  ["supplemental", "V12", "memory_crypto"],
+  ["supplemental", "V13", "memory_validation"],
+  ["supplemental", "V14", "memory_validation"],
+  ["supplemental", "V15", "memory_validation"],
+  ["supplemental", "V16", "memory_validation"],
+  ["supplemental", "V17", "memory_validation"],
+  ["supplemental", "V18", "memory_validation"],
+  ["supplemental", "V19", "memory_cleanup"],
+  ["persisted", "V20", "memory_setup"],
+  ["persisted", "V21", "postgres_verifier_setup"],
+  ["persisted", "V22", "postgres_runtime_isolation"],
+  ["persisted", "V23", "postgres_vault_verification"],
+  ["persisted", "V24", "postgres_verifier_cleanup"],
+  ["persisted", "V25", "memory_cleanup"]
 ]);
 
 test("Gate 3 causal classification is closed and never serializes raw error context", () => {
@@ -2213,6 +2248,473 @@ test("Gate 3 provenance sanitizer rejects impossible shapes and survives fallbac
   });
   assert.deepEqual(preserved.gate3FailureProvenance, provenance);
   assert.equal(evidenceSafe({ gate3FailureProvenance: provenance }), true);
+});
+
+test("Gate 4 causal classification is closed and never reads raw messages", () => {
+  assert.equal(gate4FailureCode({ code: "linux_safe_failure" }), "linux_safe_failure");
+  assert.equal(gate4FailureCode({ code: "23514" }), "gate4_error_code_23514");
+  assert.equal(gate4FailureCode({ code: "23505" }), "gate4_error_code_23505");
+  assert.equal(gate4FailureCode({ code: "ETIMEDOUT" }), "gate4_error_code_etimedout");
+  assert.equal(gate4FailureCode({ code: "EPIPE" }), "gate4_error_code_epipe");
+  assert.equal(gate4FailureCode(new TypeError("plaintext token SQL UUID")), "gate4_type_error");
+  assert.equal(gate4FailureCode(new RangeError("ciphertext nonce auth tag")), "gate4_range_error");
+  assert.equal(gate4FailureCode(new Error("postgresql://user:secret@host/db")), "gate4_error_code_unavailable");
+  assert.equal(gate4FailureCode({ code: "UNSUPPORTED SECRET" }), "gate4_error_code_unavailable");
+  assert.equal(gate4FailureCode({
+    code: "postgres_rollback_failed",
+    cause: { code: "23514", cause: { code: "forbidden_nested" }, message: "secret" }
+  }), "gate4_error_code_23514");
+  assert.equal(gate4FailureCode({ code: "postgres_rollback_failed" }), "postgres_rollback_failed");
+});
+
+test("Gate 4 tracker accepts exactly V01-V25 once in deterministic order", async () => {
+  const tracker = createGate4FailureProvenanceTracker();
+  const calls = [];
+  for (const [operation, substep, operationClass] of GATE4_BOUNDARIES) {
+    const marker = Object.freeze({ substep });
+    assert.equal(
+      await tracker.forOperation(operation)(substep, operationClass, async () => {
+        calls.push(substep);
+        return marker;
+      }),
+      marker
+    );
+  }
+  assert.deepEqual(calls, GATE4_BOUNDARIES.map(([, substep]) => substep));
+  assert.equal(new Set(calls).size, 25);
+  assert.equal(tracker.failure(), null);
+  assert.equal(tracker.requireComplete(), true);
+  assert.throws(
+    () => tracker.forOperation("unknown"),
+    { code: "gate4_failure_provenance_operation_invalid" }
+  );
+});
+
+test("Gate 4 tracker classifies an injected first failure at every V01-V25 boundary", async () => {
+  for (let targetIndex = 0; targetIndex < GATE4_BOUNDARIES.length; targetIndex += 1) {
+    const tracker = createGate4FailureProvenanceTracker();
+    const calls = [];
+    for (let index = 0; index < targetIndex; index += 1) {
+      const [operation, substep, operationClass] = GATE4_BOUNDARIES[index];
+      await tracker.runSubstep(operation, substep, operationClass, async () => {
+        calls.push(substep);
+        return true;
+      });
+    }
+    const [operation, substep, operationClass] = GATE4_BOUNDARIES[targetIndex];
+    const injected = Object.assign(
+      new Error("plaintext ciphertext nonce auth tag UUID SQL token stack"),
+      { code: "23514", query: "SELECT forbidden" }
+    );
+    await assert.rejects(
+      tracker.runSubstep(operation, substep, operationClass, async () => {
+        calls.push(substep);
+        throw injected;
+      }),
+      (error) => error === injected
+    );
+    assert.deepEqual(tracker.failure(), {
+      operation,
+      substep,
+      operationClass,
+      causalCode: "gate4_error_code_23514",
+      lastCompletedSubstep: targetIndex === 0
+        ? null
+        : GATE4_BOUNDARIES[targetIndex - 1][1],
+      externalProcessStarted: false,
+      exitCode: null,
+      signal: null
+    });
+    assert.deepEqual(
+      calls,
+      GATE4_BOUNDARIES.slice(0, targetIndex + 1).map(([, boundary]) => boundary)
+    );
+  }
+});
+
+test("Gate 4 tracker refuses wrong classes, repetition, skips, and backward jumps", async () => {
+  const wrongClass = createGate4FailureProvenanceTracker();
+  await assert.rejects(
+    wrongClass.runSubstep("base", "V01", "memory_crypto", async () => true),
+    { code: "gate4_failure_provenance_substep_invalid" }
+  );
+  const wrongOperation = createGate4FailureProvenanceTracker();
+  await assert.rejects(
+    wrongOperation.runSubstep("supplemental", "V01", "memory_setup", async () => true),
+    { code: "gate4_failure_provenance_substep_invalid" }
+  );
+  const unknown = createGate4FailureProvenanceTracker();
+  await assert.rejects(
+    unknown.runSubstep("base", "V99", "memory_setup", async () => true),
+    { code: "gate4_failure_provenance_substep_invalid" }
+  );
+  const skipped = createGate4FailureProvenanceTracker();
+  await skipped.runSubstep("base", "V01", "memory_setup", async () => true);
+  await assert.rejects(
+    skipped.runSubstep("base", "V03", "memory_crypto", async () => true),
+    { code: "gate4_failure_provenance_substep_invalid" }
+  );
+  await assert.rejects(
+    skipped.runSubstep("base", "V01", "memory_setup", async () => true),
+    { code: "gate4_failure_provenance_substep_invalid" }
+  );
+  const backward = createGate4FailureProvenanceTracker();
+  await backward.runSubstep("base", "V01", "memory_setup", async () => true);
+  await backward.runSubstep("base", "V02", "memory_crypto", async () => true);
+  await assert.rejects(
+    backward.runSubstep("base", "V01", "memory_setup", async () => true),
+    { code: "gate4_failure_provenance_substep_invalid" }
+  );
+});
+
+test("Gate 4 tracker freezes the first failure and never lets cleanup mask it", async () => {
+  const tracker = createGate4FailureProvenanceTracker();
+  await tracker.runSubstep("base", "V01", "memory_setup", async () => true);
+  const primary = Object.assign(
+    new Error("plaintext ciphertext nonce auth tag UUID SQL token"),
+    { code: "23505", query: "SELECT forbidden", cause: { code: "secret" } }
+  );
+  await assert.rejects(
+    tracker.runSubstep("base", "V02", "memory_crypto", async () => { throw primary; }),
+    (error) => error === primary
+  );
+  const first = tracker.failure();
+  assert.deepEqual(first, {
+    operation: "base",
+    substep: "V02",
+    operationClass: "memory_crypto",
+    causalCode: "gate4_error_code_23505",
+    lastCompletedSubstep: "V01",
+    externalProcessStarted: false,
+    exitCode: null,
+    signal: null
+  });
+  const cleanup = Object.assign(new Error("cleanup secret"), { code: "ETIMEDOUT" });
+  await assert.rejects(
+    tracker.runSubstep("base", "V09", "memory_cleanup", async () => { throw cleanup; }),
+    (error) => error === cleanup
+  );
+  assert.equal(tracker.failure(), first);
+  const serialized = canonicalJson(first);
+  for (const forbidden of [
+    "plaintext", "ciphertext", "nonce", "auth tag", "UUID", "SELECT",
+    "query", "cause", "cleanup secret"
+  ]) assert.equal(serialized.includes(forbidden), false, forbidden);
+});
+
+test("Gate 4 tracker records cleanup when cleanup is the first failure", async () => {
+  const tracker = createGate4FailureProvenanceTracker();
+  for (const [operation, substep, operationClass] of GATE4_BOUNDARIES.slice(0, 8)) {
+    await tracker.runSubstep(operation, substep, operationClass, async () => true);
+  }
+  const cleanup = new RangeError("secret cleanup stack");
+  await assert.rejects(
+    tracker.runSubstep("base", "V09", "memory_cleanup", async () => { throw cleanup; }),
+    (error) => error === cleanup
+  );
+  assert.deepEqual(tracker.failure(), {
+    operation: "base",
+    substep: "V09",
+    operationClass: "memory_cleanup",
+    causalCode: "gate4_range_error",
+    lastCompletedSubstep: "V08",
+    externalProcessStarted: false,
+    exitCode: null,
+    signal: null
+  });
+});
+
+test("Gate 4 provenance sanitizer enforces the exact eight-field shape", () => {
+  const provenance = Object.freeze({
+    operation: "persisted",
+    substep: "V23",
+    operationClass: "postgres_vault_verification",
+    causalCode: "gate4_error_code_23514",
+    lastCompletedSubstep: "V22",
+    externalProcessStarted: false,
+    exitCode: null,
+    signal: null
+  });
+  assert.deepEqual(sanitizedGate4FailureProvenance(provenance), provenance);
+  const firstBoundary = {
+    ...provenance,
+    operation: "base",
+    substep: "V01",
+    operationClass: "memory_setup",
+    lastCompletedSubstep: null
+  };
+  assert.deepEqual(sanitizedGate4FailureProvenance(firstBoundary), firstBoundary);
+  assert.deepEqual(Object.keys(provenance).sort(), [
+    "causalCode", "exitCode", "externalProcessStarted", "lastCompletedSubstep",
+    "operation", "operationClass", "signal", "substep"
+  ]);
+  const { signal: _signal, ...missing } = provenance;
+  for (const invalid of [
+    missing,
+    { ...provenance, message: "secret" },
+    { ...provenance, operation: "supplemental" },
+    { ...provenance, operationClass: "memory_crypto" },
+    { ...provenance, lastCompletedSubstep: null },
+    { ...provenance, lastCompletedSubstep: "V01" },
+    { ...provenance, lastCompletedSubstep: "V24" },
+    { ...provenance, causalCode: { toString: () => "safe_code", secret: "value" } },
+    { ...provenance, externalProcessStarted: true },
+    { ...provenance, exitCode: 1 },
+    { ...provenance, signal: "SIGTERM" }
+  ]) {
+    assert.equal(sanitizedGate4FailureProvenance(invalid), null);
+    assert.equal(evidenceSafe({ gate4FailureProvenance: invalid }), false);
+  }
+  assert.equal(evidenceSafe({ gate4FailureProvenance: provenance }), true);
+  assert.equal(evidenceSafe({ gate4FailureProvenance: null }), true);
+});
+
+test("Gate 4 provenance survives only validated failure fallback evidence", () => {
+  const provenance = {
+    operation: "supplemental",
+    substep: "V18",
+    operationClass: "memory_validation",
+    causalCode: "gate4_type_error",
+    lastCompletedSubstep: "V17",
+    externalProcessStarted: false,
+    exitCode: null,
+    signal: null
+  };
+  const source = {
+    firstFailure: { phase: "vault", code: "gate4_type_error" },
+    gate4FailureProvenance: provenance,
+    cleanup: {
+      cleanupCompleted: true,
+      containerResiduals: 0,
+      volumeResiduals: 0,
+      networkResiduals: 0,
+      listenerResiduals: 0,
+      temporaryRootResiduals: 0
+    }
+  };
+  const preserved = sanitizedFailureEvidence(source);
+  assert.deepEqual(preserved.gate4FailureProvenance, provenance);
+  for (const firstFailure of [
+    { phase: "rls_roles", code: "gate4_type_error" },
+    { phase: "vault", code: "gate4_range_error" },
+    { phase: "vault", code: "gate4_failure_provenance_unobserved" }
+  ]) {
+    const mismatched = { ...source, firstFailure };
+    const sanitized = sanitizedFailureEvidence(mismatched);
+    assert.equal(sanitized.gate4FailureProvenance, null);
+    assert.deepEqual(
+      sanitized.firstFailure,
+      firstFailure.phase === "vault" && firstFailure.code !== "gate4_failure_provenance_unobserved"
+        ? { phase: "vault", code: "gate4_failure_provenance_unobserved" }
+        : firstFailure
+    );
+    assert.equal(evidenceSafe(mismatched), false);
+  }
+  const rejected = sanitizedFailureEvidence({
+    ...source,
+    gate4FailureProvenance: { ...provenance, sql: "SELECT secret" }
+  });
+  assert.equal(rejected.gate4FailureProvenance, null);
+  assert.deepEqual(rejected.firstFailure, {
+    phase: "vault",
+    code: "gate4_failure_provenance_unobserved"
+  });
+  assert.equal(canonicalJson(rejected).includes("SELECT"), false);
+  assert.equal(evidenceSafe(preserved), true);
+  assert.equal(evidenceSafe({
+    ...source,
+    gate4FailureProvenance: null
+  }), false);
+});
+
+test("Gate 4 tracker refuses an unobserved failure without fabricating provenance", () => {
+  const tracker = createGate4FailureProvenanceTracker();
+  assert.equal(tracker.failure(), null);
+  assert.throws(
+    () => tracker.requireFailure(),
+    { code: "gate4_failure_provenance_unobserved" }
+  );
+  assert.equal(tracker.failure(), null);
+});
+
+test("Gate 4 tracker refuses success until the complete V01-V25 tail is observed", async () => {
+  const empty = createGate4FailureProvenanceTracker();
+  assert.throws(
+    () => empty.requireComplete(),
+    { code: "gate4_failure_provenance_incomplete" }
+  );
+  const withoutPersisted = createGate4FailureProvenanceTracker();
+  for (const [operation, substep, operationClass] of GATE4_BOUNDARIES.slice(0, 19)) {
+    await withoutPersisted.runSubstep(operation, substep, operationClass, async () => true);
+  }
+  assert.throws(
+    () => withoutPersisted.requireComplete(),
+    { code: "gate4_failure_provenance_incomplete" }
+  );
+  const withoutV25 = createGate4FailureProvenanceTracker();
+  for (const [operation, substep, operationClass] of GATE4_BOUNDARIES.slice(0, 24)) {
+    await withoutV25.runSubstep(operation, substep, operationClass, async () => true);
+  }
+  assert.throws(
+    () => withoutV25.requireComplete(),
+    { code: "gate4_failure_provenance_incomplete" }
+  );
+});
+
+test("Gate 4 tracker refuses reentrancy without consuming the pending next boundary", async () => {
+  const tracker = createGate4FailureProvenanceTracker();
+  let releaseFirst;
+  let markStarted;
+  const firstStarted = new Promise((resolve) => { markStarted = resolve; });
+  const holdFirst = new Promise((resolve) => { releaseFirst = resolve; });
+  const first = tracker.runSubstep("base", "V01", "memory_setup", async () => {
+    markStarted();
+    await holdFirst;
+    return true;
+  });
+  await firstStarted;
+  await assert.rejects(
+    tracker.runSubstep("base", "V02", "memory_crypto", async () => true),
+    { code: "gate4_failure_provenance_reentrancy_refused" }
+  );
+  releaseFirst();
+  assert.equal(await first, true);
+  assert.equal(
+    await tracker.runSubstep("base", "V02", "memory_crypto", async () => "after"),
+    "after"
+  );
+  assert.equal(tracker.failure(), null);
+});
+
+test("Gate 4 tracker requires V24 before V25 after a persisted failure", async () => {
+  const tracker = createGate4FailureProvenanceTracker();
+  for (const [operation, substep, operationClass] of GATE4_BOUNDARIES.slice(0, 20)) {
+    await tracker.runSubstep(operation, substep, operationClass, async () => true);
+  }
+  const primary = Object.assign(new Error("private persisted failure"), { code: "23514" });
+  await assert.rejects(
+    tracker.runSubstep("persisted", "V21", "postgres_verifier_setup", async () => {
+      throw primary;
+    }),
+    (error) => error === primary
+  );
+  await assert.rejects(
+    tracker.runSubstep("persisted", "V25", "memory_cleanup", async () => true),
+    { code: "gate4_failure_provenance_substep_invalid" }
+  );
+  assert.equal(
+    await tracker.runSubstep("persisted", "V24", "postgres_verifier_cleanup", async () => "closed"),
+    "closed"
+  );
+  assert.equal(
+    await tracker.runSubstep("persisted", "V25", "memory_cleanup", async () => "wiped"),
+    "wiped"
+  );
+  assert.deepEqual(tracker.failure(), {
+    operation: "persisted",
+    substep: "V21",
+    operationClass: "postgres_verifier_setup",
+    causalCode: "gate4_error_code_23514",
+    lastCompletedSubstep: "V20",
+    externalProcessStarted: false,
+    exitCode: null,
+    signal: null
+  });
+});
+
+test("Gate 4 failure blocks Gate 5 while complete Gate 4 permits Gate 5", async () => {
+  const failedEvidence = { phases: [], firstFailure: null };
+  const failedPhase = createPhaseRunner(failedEvidence);
+  const failedTracker = createGate4FailureProvenanceTracker();
+  const calls = [];
+  await assert.rejects(
+    failedPhase("vault", () => failedTracker.runSubstep(
+      "base",
+      "V01",
+      "memory_setup",
+      async () => {
+        calls.push("gate-4");
+        throw Object.assign(new Error("secret"), { code: "23514" });
+      }
+    ))
+  );
+  await assert.rejects(
+    failedPhase("backup_restore", async () => { calls.push("forbidden-gate-5"); }),
+    { code: "linux_gate_phase_after_failure_refused" }
+  );
+  assert.deepEqual(calls, ["gate-4"]);
+  assert.equal(failedTracker.failure().substep, "V01");
+
+  const passedEvidence = { phases: [], firstFailure: null };
+  const passedPhase = createPhaseRunner(passedEvidence);
+  const passedTracker = createGate4FailureProvenanceTracker();
+  await passedPhase("vault", async () => {
+    calls.push("gate-4-passed");
+    for (const [operation, substep, operationClass] of GATE4_BOUNDARIES) {
+      await passedTracker.runSubstep(operation, substep, operationClass, async () => true);
+    }
+    return passedTracker.requireComplete();
+  });
+  await passedPhase("backup_restore", async () => { calls.push("gate-5"); });
+  assert.deepEqual(calls, ["gate-4", "gate-4-passed", "gate-5"]);
+});
+
+test("Gate 4 tracker is wired into normal, failed, and sanitized fallback evidence", () => {
+  const source = fs.readFileSync(
+    path.join(ROOT, "scripts", "social-3a0p-linux-gate.js"),
+    "utf8"
+  );
+  for (const needle of [
+    "const gate4FailureProvenance = createGate4FailureProvenanceTracker();",
+    "gate4FailureProvenance: null",
+    'runGate4Substep: gate4FailureProvenance.forOperation("base")',
+    'runGate4Substep: gate4FailureProvenance.forOperation("supplemental")',
+    'runGate4Substep: gate4FailureProvenance.forOperation("persisted")',
+    "gate4FailureProvenance.requireComplete();",
+    "gate4FailureProvenance.requireFailure();",
+    "evidence.gate4FailureProvenance = gate4FailureProvenance.failure();",
+    "source?.gate4FailureProvenance"
+  ]) assert.ok(source.includes(needle), needle);
+  const baseIndex = source.indexOf('gate4FailureProvenance.forOperation("base")');
+  const supplementalIndex = source.indexOf('gate4FailureProvenance.forOperation("supplemental")');
+  const persistedIndex = source.indexOf('gate4FailureProvenance.forOperation("persisted")');
+  assert.ok(baseIndex >= 0 && baseIndex < supplementalIndex && supplementalIndex < persistedIndex);
+
+  const beforeGate4 = sanitizedFailureEvidence({
+    firstFailure: { phase: "rls_roles", code: "linux_gate_unclassified_failure" },
+    cleanup: {
+      cleanupCompleted: true,
+      containerResiduals: 0,
+      volumeResiduals: 0,
+      networkResiduals: 0,
+      listenerResiduals: 0,
+      temporaryRootResiduals: 0
+    }
+  });
+  assert.equal(beforeGate4.gate4FailureProvenance, null);
+  assert.equal(evidenceSafe(beforeGate4), true);
+});
+
+test("Gate 4 phase classification never stores the raw error message fallback", async () => {
+  const evidence = { phases: [], firstFailure: null };
+  const phase = createPhaseRunner(evidence);
+  const raw = new Error("raw_vault_message_must_not_be_stored");
+  let classifierArguments = -1;
+  await assert.rejects(
+    phase("vault", async () => { throw raw; }, {
+      classifyFailure(...args) {
+        classifierArguments = args.length;
+        return "gate4_error_code_unavailable";
+      }
+    }),
+    (error) => error === raw
+  );
+  assert.equal(classifierArguments, 0);
+  assert.deepEqual(evidence.firstFailure, {
+    phase: "vault",
+    code: "gate4_error_code_unavailable"
+  });
+  assert.equal(canonicalJson(evidence).includes(raw.message), false);
 });
 
 test("gate process status sidecar is closed, hashed, and stores no streams", () => {

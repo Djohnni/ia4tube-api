@@ -10,6 +10,7 @@ const {
   createTenant,
   databaseContainsMarker,
   runConcurrencyOAuthIdempotencyGate,
+  runPersistedVaultGate,
   runRlsAndRoleGate,
   runRlsPrivilegeInventoryContextReproduction,
   runRlsRuntimeWriteContractReproduction,
@@ -75,6 +76,62 @@ const SUPPLEMENTAL_GATE3_RESULT = Object.freeze({
   duplicateAttempts: 0,
   externalCalls: 0
 });
+
+const SUPPLEMENTAL_GATE4_SUBSTEPS = Object.freeze([
+  ["V10", "memory_setup"],
+  ["V11", "memory_crypto"],
+  ["V12", "memory_crypto"],
+  ["V13", "memory_validation"],
+  ["V14", "memory_validation"],
+  ["V15", "memory_validation"],
+  ["V16", "memory_validation"],
+  ["V17", "memory_validation"],
+  ["V18", "memory_validation"],
+  ["V19", "memory_cleanup"]
+]);
+
+const PERSISTED_GATE4_SUBSTEPS = Object.freeze([
+  ["V20", "memory_setup"],
+  ["V21", "postgres_verifier_setup"],
+  ["V22", "postgres_runtime_isolation"],
+  ["V23", "postgres_vault_verification"],
+  ["V24", "postgres_verifier_cleanup"],
+  ["V25", "memory_cleanup"]
+]);
+
+function syntheticPersistedGate4Harness(options = {}) {
+  const observations = {
+    closeCalls: 0,
+    runtimeIsolationCalls: 0,
+    vaultCalls: 0
+  };
+  const gate = {
+    async close() {
+      observations.closeCalls += 1;
+      if (options.closeError) throw options.closeError;
+    },
+    verifiers: {
+      async verifyRuntimeIsolation() {
+        observations.runtimeIsolationCalls += 1;
+        return true;
+      },
+      async verifyVault() {
+        observations.vaultCalls += 1;
+        return true;
+      }
+    }
+  };
+  const setup = {
+    databaseUrl() { return "postgresql://synthetic.invalid/synthetic"; },
+    original: {
+      createRestoreBehaviorVerifiers() { return gate; }
+    },
+    passwords: Object.freeze({}),
+    persistedA: Buffer.alloc(48, 0x61),
+    persistedB: Buffer.alloc(48, 0x62)
+  };
+  return { gate, observations, setup };
+}
 
 function postgresError(code) {
   return Object.assign(new Error("synthetic postgres refusal"), { code });
@@ -2421,6 +2478,326 @@ test("vault supplemental gate proves connection and AAD binding without persiste
   assert.match(markers[0], /^synthetic-linux-token-/);
   state.materials.vault.fill(0);
   markers[0] = "";
+});
+
+test("vault supplemental Gate 4 instrumentation executes V10-V19 once in closed order", async () => {
+  const calls = [];
+  const markers = [];
+  const state = { materials: { vault: Buffer.alloc(32, 11) } };
+  const result = await runVaultSupplementalGate(state, markers, {
+    async runGate4Substep(substep, operationClass, operation) {
+      calls.push([substep, operationClass]);
+      return operation();
+    }
+  });
+
+  assert.deepEqual(calls, SUPPLEMENTAL_GATE4_SUBSTEPS);
+  assert.deepEqual(result, {
+    algorithm: "AES-256-GCM",
+    aadBound: true,
+    companyChangeRefused: true,
+    providerChangeRefused: true,
+    connectionChangeRefused: true,
+    ciphertextTamperRefused: true,
+    aadTamperRefused: true
+  });
+  assert.equal(markers.length, 1);
+  state.materials.vault.fill(0);
+  markers[0] = "";
+});
+
+test("vault supplemental Gate 4 injection preserves each V10-V19 failure and stops non-cleanup work", async (t) => {
+  for (const [index, [target]] of SUPPLEMENTAL_GATE4_SUBSTEPS.entries()) {
+    await t.test(target, async () => {
+      const calls = [];
+      const markers = [];
+      const state = { materials: { vault: Buffer.alloc(32, 11) } };
+      const failure = Object.assign(new Error(`private ${target}`), { code: "ETIMEDOUT" });
+      let thrown;
+      try {
+        await runVaultSupplementalGate(state, markers, {
+          async runGate4Substep(substep, operationClass, operation) {
+            calls.push([substep, operationClass]);
+            if (substep === target) {
+              if (substep === "V19") await operation();
+              throw failure;
+            }
+            return operation();
+          }
+        });
+      } catch (error) {
+        thrown = error;
+      }
+
+      const expected = SUPPLEMENTAL_GATE4_SUBSTEPS
+        .slice(0, index + 1)
+        .map(([substep]) => substep);
+      if (target !== "V19") expected.push("V19");
+      assert.strictEqual(thrown, failure);
+      assert.deepEqual(calls.map(([substep]) => substep), expected);
+      assert.deepEqual(
+        calls.filter(([substep]) => substep !== "V19"),
+        SUPPLEMENTAL_GATE4_SUBSTEPS.slice(0, index + 1).filter(([substep]) => substep !== "V19")
+      );
+      state.materials.vault.fill(0);
+      for (let marker = 0; marker < markers.length; marker += 1) markers[marker] = "";
+    });
+  }
+});
+
+test("vault supplemental Gate 4 primary failure wins over a later V19 failure", async () => {
+  const primary = Object.assign(new Error("private primary"), { code: "23514" });
+  const cleanup = Object.assign(new Error("private cleanup"), { code: "ECONNRESET" });
+  const state = { materials: { vault: Buffer.alloc(32, 11) } };
+  let thrown;
+  try {
+    await runVaultSupplementalGate(state, [], {
+      async runGate4Substep(substep, _operationClass, operation) {
+        if (substep === "V14") throw primary;
+        if (substep === "V19") {
+          await operation();
+          throw cleanup;
+        }
+        return operation();
+      }
+    });
+  } catch (error) {
+    thrown = error;
+  }
+  assert.strictEqual(thrown, primary);
+  state.materials.vault.fill(0);
+});
+
+test("vault supplemental Gate 4 retains V11 resources when the runner fails after creation", async () => {
+  const failure = Object.assign(new Error("private post-create failure"), { code: "ETIMEDOUT" });
+  const token = Buffer.alloc(48, 0x74);
+  const observations = { destroyCalls: 0 };
+  const vault = {
+    destroy() { observations.destroyCalls += 1; }
+  };
+  const setup = {
+    context: Object.freeze({}),
+    createSocialVault() { return vault; },
+    key: Buffer.alloc(32, 0x6b),
+    token,
+    version: "synthetic-version",
+    vaultKeyringFingerprint() { return "synthetic-fingerprint"; }
+  };
+  const calls = [];
+  let thrown;
+  try {
+    await runVaultSupplementalGate({}, [], {
+      async runGate4Substep(substep, _operationClass, operation) {
+        calls.push(substep);
+        if (substep === "V10") return setup;
+        if (substep === "V11") {
+          await operation();
+          throw failure;
+        }
+        return operation();
+      }
+    });
+  } catch (error) {
+    thrown = error;
+  }
+  assert.strictEqual(thrown, failure);
+  assert.deepEqual(calls, ["V10", "V11", "V19"]);
+  assert.equal(observations.destroyCalls, 1);
+  assert.equal(token.every((byte) => byte === 0), true);
+  setup.key.fill(0);
+});
+
+test("persisted Gate 4 instrumentation executes V20-V25 with synthetic dependencies only", async () => {
+  const calls = [];
+  const { gate, observations, setup } = syntheticPersistedGate4Harness();
+  const result = await runPersistedVaultGate({}, [], "synthetic-unused-root", {
+    async runGate4Substep(substep, operationClass, operation) {
+      calls.push([substep, operationClass]);
+      if (substep === "V20") return setup;
+      if (substep === "V21") return gate;
+      return operation();
+    }
+  });
+
+  assert.deepEqual(calls, PERSISTED_GATE4_SUBSTEPS);
+  assert.deepEqual(result, {
+    runtimeIsolationPrerequisite: true,
+    persistedRoundTrip: true,
+    keyRotation: true,
+    retirementWhileInUseRefused: true,
+    plaintextDatabaseAbsent: true
+  });
+  assert.deepEqual(observations, {
+    closeCalls: 1,
+    runtimeIsolationCalls: 1,
+    vaultCalls: 1
+  });
+  assert.equal(setup.persistedA.every((byte) => byte === 0), true);
+  assert.equal(setup.persistedB.every((byte) => byte === 0), true);
+});
+
+test("persisted Gate 4 injection preserves each V20-V25 failure without a database or process", async (t) => {
+  for (const [index, [target]] of PERSISTED_GATE4_SUBSTEPS.entries()) {
+    await t.test(target, async () => {
+      const calls = [];
+      const { gate, setup } = syntheticPersistedGate4Harness();
+      const failure = Object.assign(new Error(`private ${target}`), { code: "23505" });
+      let thrown;
+      try {
+        await runPersistedVaultGate({}, [], "synthetic-unused-root", {
+          async runGate4Substep(substep, operationClass, operation) {
+            calls.push([substep, operationClass]);
+            if (substep === target) {
+              if (substep === "V25") await operation();
+              throw failure;
+            }
+            if (substep === "V20") return setup;
+            if (substep === "V21") return gate;
+            return operation();
+          }
+        });
+      } catch (error) {
+        thrown = error;
+      }
+
+      const expectedCalls = {
+        V20: ["V20", "V24", "V25"],
+        V21: ["V20", "V21", "V24", "V25"],
+        V22: ["V20", "V21", "V22", "V24", "V25"],
+        V23: ["V20", "V21", "V22", "V23", "V24", "V25"],
+        V24: ["V20", "V21", "V22", "V23", "V24", "V25"],
+        V25: ["V20", "V21", "V22", "V23", "V24", "V25"]
+      };
+      assert.strictEqual(thrown, failure);
+      assert.deepEqual(calls.map(([substep]) => substep), expectedCalls[target]);
+      const expectedCoreLength = Math.min(index, 3) + 1;
+      assert.deepEqual(
+        calls.filter(([substep]) => !new Set(["V24", "V25"]).has(substep)),
+        PERSISTED_GATE4_SUBSTEPS.slice(0, expectedCoreLength)
+      );
+      if (target !== "V20") {
+        assert.equal(setup.persistedA.every((byte) => byte === 0), true);
+        assert.equal(setup.persistedB.every((byte) => byte === 0), true);
+      }
+    });
+  }
+});
+
+test("persisted Gate 4 primary failure wins over V24 and V25 cleanup failures", async () => {
+  const calls = [];
+  const { gate, setup } = syntheticPersistedGate4Harness();
+  const primary = Object.assign(new Error("private primary"), { code: "23514" });
+  const verifierCleanup = Object.assign(new Error("private verifier cleanup"), { code: "ECONNRESET" });
+  const materialCleanup = Object.assign(new Error("private material cleanup"), { code: "ERANGE" });
+  let thrown;
+  try {
+    await runPersistedVaultGate({}, [], "synthetic-unused-root", {
+      async runGate4Substep(substep, _operationClass, operation) {
+        calls.push(substep);
+        if (substep === "V20") return setup;
+        if (substep === "V21") return gate;
+        if (substep === "V22") throw primary;
+        if (substep === "V24") throw verifierCleanup;
+        if (substep === "V25") {
+          await operation();
+          throw materialCleanup;
+        }
+        return operation();
+      }
+    });
+  } catch (error) {
+    thrown = error;
+  }
+  assert.strictEqual(thrown, primary);
+  assert.deepEqual(calls, ["V20", "V21", "V22", "V24", "V25"]);
+  assert.equal(setup.persistedA.every((byte) => byte === 0), true);
+  assert.equal(setup.persistedB.every((byte) => byte === 0), true);
+});
+
+test("persisted Gate 4 retains partial V20 material when the runner fails after setup", async () => {
+  const failure = Object.assign(new Error("private post-setup failure"), { code: "ETIMEDOUT" });
+  const calls = [];
+  const markers = [];
+  let capturedSetup;
+  let thrown;
+  try {
+    await runPersistedVaultGate({
+      database: "synthetic",
+      passwords: {
+        [MIGRATION_LOGIN]: "synthetic-migration-password",
+        [RUNTIME_LOGIN]: "synthetic-runtime-password"
+      },
+      target: { port: 5432 }
+    }, markers, "synthetic-unused-root", {
+      async runGate4Substep(substep, _operationClass, operation) {
+        calls.push(substep);
+        if (substep === "V20") {
+          capturedSetup = await operation();
+          throw failure;
+        }
+        return operation();
+      }
+    });
+  } catch (error) {
+    thrown = error;
+  }
+  assert.strictEqual(thrown, failure);
+  assert.deepEqual(calls, ["V20", "V24", "V25"]);
+  assert.equal(capturedSetup.persistedA.every((byte) => byte === 0), true);
+  assert.equal(capturedSetup.persistedB.every((byte) => byte === 0), true);
+  for (let marker = 0; marker < markers.length; marker += 1) markers[marker] = "";
+});
+
+test("persisted Gate 4 retains V21 verifier when the runner fails after creation", async () => {
+  const failure = Object.assign(new Error("private post-verifier failure"), { code: "ETIMEDOUT" });
+  const calls = [];
+  const { gate, observations, setup } = syntheticPersistedGate4Harness();
+  let thrown;
+  try {
+    await runPersistedVaultGate({
+      PoolClass: class SyntheticPool {},
+      database: "synthetic",
+      target: { port: 5432 }
+    }, [], "synthetic-unused-root", {
+      async runGate4Substep(substep, _operationClass, operation) {
+        calls.push(substep);
+        if (substep === "V20") return setup;
+        if (substep === "V21") {
+          await operation();
+          throw failure;
+        }
+        return operation();
+      }
+    });
+  } catch (error) {
+    thrown = error;
+  }
+  assert.strictEqual(thrown, failure);
+  assert.deepEqual(calls, ["V20", "V21", "V24", "V25"]);
+  assert.equal(observations.closeCalls, 1);
+  assert.equal(setup.persistedA.every((byte) => byte === 0), true);
+  assert.equal(setup.persistedB.every((byte) => byte === 0), true);
+});
+
+test("persisted Gate 4 records a V24 close failure first and still executes V25", async () => {
+  const closeFailure = Object.assign(new Error("private close"), { code: "ECONNRESET" });
+  const { gate, observations, setup } = syntheticPersistedGate4Harness({ closeError: closeFailure });
+  let thrown;
+  try {
+    await runPersistedVaultGate({}, [], "synthetic-unused-root", {
+      async runGate4Substep(substep, _operationClass, operation) {
+        if (substep === "V20") return setup;
+        if (substep === "V21") return gate;
+        return operation();
+      }
+    });
+  } catch (error) {
+    thrown = error;
+  }
+  assert.strictEqual(thrown, closeFailure);
+  assert.equal(observations.closeCalls, 1);
+  assert.equal(setup.persistedA.every((byte) => byte === 0), true);
+  assert.equal(setup.persistedB.every((byte) => byte === 0), true);
 });
 
 test("Linux physical adapter contains no provider endpoint, customer data or real OAuth path", () => {

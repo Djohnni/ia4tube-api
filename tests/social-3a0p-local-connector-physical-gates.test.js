@@ -19,6 +19,17 @@ const BASE_GATE3_BOUNDARIES = Object.freeze([
   Object.freeze(["B9", "postgres_transaction", "base_idempotency_replay"]),
   Object.freeze(["B10", "internal_validation", "base_digest_result_finalization"])
 ]);
+const BASE_GATE4_BOUNDARIES = Object.freeze([
+  Object.freeze(["V01", "memory_setup", "base_setup"]),
+  Object.freeze(["V02", "memory_crypto", "base_vault_v1_create"]),
+  Object.freeze(["V03", "memory_crypto", "base_encrypt"]),
+  Object.freeze(["V04", "memory_validation", "base_round_trip"]),
+  Object.freeze(["V05", "memory_validation", "base_aad_refusal"]),
+  Object.freeze(["V06", "memory_crypto", "base_vault_v2_create"]),
+  Object.freeze(["V07", "memory_crypto", "base_rotate"]),
+  Object.freeze(["V08", "memory_validation", "base_rotated_round_trip"]),
+  Object.freeze(["V09", "memory_cleanup", "base_cleanup"])
+]);
 
 function uuidFactory() {
   let value = 0;
@@ -153,6 +164,28 @@ function createConcurrencyHarness(dependencies = fakeDependencies()) {
     plans: { runMarker: RUN_MARKER }
   });
   return Object.freeze({ gates, state });
+}
+
+function createVaultHarness(dependencies = fakeDependencies(), options = {}) {
+  const state = {
+    target: Object.freeze({ host: "127.0.0.1", port: 55432 }),
+    pools: Object.freeze({ migration: {}, runtime: {} }),
+    materials: Object.freeze({ vault: Buffer.alloc(32, 7) })
+  };
+  const generated = [];
+  const randomBytes = options.randomBytes || ((size) => {
+    const value = Buffer.alloc(size, 5);
+    generated.push(value);
+    return value;
+  });
+  const gates = createConnectorPhysicalGates({
+    replaceDefaultDependencies: true,
+    dependencies,
+    randomBytes,
+    randomUUID: uuidFactory(),
+    plans: { runMarker: RUN_MARKER }
+  });
+  return Object.freeze({ gates, generated, state });
 }
 
 test("Gate 3 base B1-B10 runner is optional pass-through with exact success result and order", async () => {
@@ -312,6 +345,257 @@ test("Gate 3 base instrumentation preserves exact arguments and Promise.all conc
   assert.equal(created.state, consumed.state);
   assert.equal(created.redirectUri, consumed.redirectUri);
   assert.equal(created.sessionJti, consumed.sessionJti);
+});
+
+test("Gate 4 base V01-V09 runner is optional pass-through with exact success result and order", async () => {
+  const baselineHarness = createVaultHarness();
+  let baseline;
+  try {
+    baseline = await baselineHarness.gates.vault({ state: baselineHarness.state });
+  } finally {
+    await baselineHarness.gates.destroy();
+  }
+
+  const observed = [];
+  const operationCalls = new Map();
+  const instrumentedDependencies = fakeDependencies();
+  instrumentedDependencies.runGate4Substep = async (substep, operationClass, operation) => {
+    observed.push([substep, operationClass]);
+    assert.equal(typeof operation, "function");
+    operationCalls.set(substep, (operationCalls.get(substep) || 0) + 1);
+    return operation();
+  };
+  const instrumentedHarness = createVaultHarness(instrumentedDependencies);
+  let instrumented;
+  try {
+    instrumented = await instrumentedHarness.gates.vault({
+      state: instrumentedHarness.state
+    });
+  } finally {
+    await instrumentedHarness.gates.destroy();
+  }
+
+  assert.deepEqual(instrumented, baseline);
+  assert.deepEqual(
+    observed,
+    BASE_GATE4_BOUNDARIES.map(([substep, operationClass]) => [substep, operationClass])
+  );
+  assert.deepEqual(
+    [...operationCalls.entries()],
+    BASE_GATE4_BOUNDARIES.map(([substep]) => [substep, 1])
+  );
+});
+
+test("Gate 4 base V01-V09 preserves the exact runner error, always cleans up, and stops functional work at its boundary", async (t) => {
+  for (const [targetIndex, [targetSubstep]] of BASE_GATE4_BOUNDARIES.entries()) {
+    await t.test(targetSubstep, async () => {
+      const sentinel = Object.assign(
+        new Error("must remain the same object"),
+        { code: "23514" }
+      );
+      const observed = [];
+      const operationCalls = [];
+      const destroyCalls = [];
+      let plaintextReference = null;
+      const dependencies = fakeDependencies();
+      const createSocialVault = dependencies.createSocialVault;
+      dependencies.createSocialVault = (options) => {
+        const vault = createSocialVault(options);
+        return {
+          encrypt(plaintext, context) {
+            plaintextReference = plaintext;
+            return vault.encrypt(plaintext, context);
+          },
+          decrypt: (envelope, context) => vault.decrypt(envelope, context),
+          rotate: (envelope, context) => vault.rotate(envelope, context),
+          destroy() {
+            destroyCalls.push(options.keyring.activeVersion);
+            return vault.destroy();
+          }
+        };
+      };
+      dependencies.runGate4Substep = async (substep, operationClass, operation) => {
+        observed.push([substep, operationClass]);
+        operationCalls.push(substep);
+        const result = await operation();
+        if (substep === targetSubstep) throw sentinel;
+        return result;
+      };
+      const harness = createVaultHarness(dependencies);
+      try {
+        await assert.rejects(
+          harness.gates.vault({ state: harness.state }),
+          (error) => error === sentinel
+        );
+      } finally {
+        await harness.gates.destroy();
+      }
+
+      const expectedBoundaries = targetSubstep === "V09"
+        ? BASE_GATE4_BOUNDARIES
+        : [
+            ...BASE_GATE4_BOUNDARIES.slice(0, targetIndex + 1),
+            BASE_GATE4_BOUNDARIES.at(-1)
+          ];
+      assert.deepEqual(
+        observed,
+        expectedBoundaries.map(([substep, operationClass]) => [substep, operationClass])
+      );
+      assert.deepEqual(
+        operationCalls,
+        expectedBoundaries.map(([substep]) => substep)
+      );
+      assert.deepEqual(
+        destroyCalls,
+        targetIndex < 1 ? [] : targetIndex < 5 ? ["v1"] : ["v1", "v2"]
+      );
+      assert.equal(harness.generated.length, 2);
+      assert.equal(harness.generated[1].every((value) => value === 0), true);
+      if (targetIndex >= 2) {
+        assert.ok(plaintextReference);
+        assert.equal(plaintextReference.every((value) => value === 0), true);
+      }
+    });
+  }
+});
+
+test("Gate 4 base V01-V09 preserves a primary failure over cleanup and propagates cleanup-only failure", async (t) => {
+  await t.test("primary plus cleanup preserves the primary Error identity", async () => {
+    const primary = Object.assign(new Error("not persisted"), { code: "23514" });
+    const cleanup = Object.assign(new Error("not persisted"), { code: "ETIMEDOUT" });
+    const observed = [];
+    const dependencies = fakeDependencies();
+    dependencies.runGate4Substep = async (substep, operationClass, operation) => {
+      observed.push([substep, operationClass]);
+      const result = await operation();
+      if (substep === "V03") throw primary;
+      if (substep === "V09") throw cleanup;
+      return result;
+    };
+    const harness = createVaultHarness(dependencies);
+    try {
+      await assert.rejects(
+        harness.gates.vault({ state: harness.state }),
+        (error) => error === primary
+      );
+    } finally {
+      await harness.gates.destroy();
+    }
+    assert.deepEqual(
+      observed,
+      [
+        ["V01", "memory_setup"],
+        ["V02", "memory_crypto"],
+        ["V03", "memory_crypto"],
+        ["V09", "memory_cleanup"]
+      ]
+    );
+  });
+
+  await t.test("cleanup as the first failure preserves its Error identity", async () => {
+    const cleanup = Object.assign(new Error("not persisted"), { code: "ETIMEDOUT" });
+    const dependencies = fakeDependencies();
+    dependencies.runGate4Substep = async (substep, _operationClass, operation) => {
+      const result = await operation();
+      if (substep === "V09") throw cleanup;
+      return result;
+    };
+    const harness = createVaultHarness(dependencies);
+    try {
+      await assert.rejects(
+        harness.gates.vault({ state: harness.state }),
+        (error) => error === cleanup
+      );
+    } finally {
+      await harness.gates.destroy();
+    }
+  });
+});
+
+test("Gate 4 base V01-V09 instrumentation preserves exact vault arguments and cleanup order", async () => {
+  async function observe(instrumented) {
+    const calls = [];
+    const dependencies = fakeDependencies();
+    dependencies.deriveVaultKeyVersion = (generation, key) => {
+      calls.push(["derive", generation, key.length, key[0]]);
+      return `v${generation}`;
+    };
+    dependencies.vaultKeyringFingerprint = (activeVersion, versions) => {
+      calls.push(["fingerprint", activeVersion, [...versions]]);
+      return `${activeVersion}:${versions.join(",")}`;
+    };
+    dependencies.createSocialVault = ({ keyring, expectedKeyringFingerprint }) => {
+      calls.push([
+        "create",
+        keyring.activeVersion,
+        [...keyring.keys].map(([version, key]) => [version, key.length, key[0]]),
+        expectedKeyringFingerprint
+      ]);
+      return {
+        encrypt(plaintext, context) {
+          calls.push(["encrypt", keyring.activeVersion, plaintext.toString("utf8"), { ...context }]);
+          return {
+            keyVersion: keyring.activeVersion,
+            plaintext: Buffer.from(plaintext),
+            context: JSON.stringify(context)
+          };
+        },
+        decrypt(envelope, context) {
+          calls.push(["decrypt", keyring.activeVersion, envelope.keyVersion, { ...context }]);
+          if (envelope.context !== JSON.stringify(context)) throw new Error("synthetic_aad_mismatch");
+          return Buffer.from(envelope.plaintext);
+        },
+        rotate(envelope, context) {
+          calls.push(["rotate", keyring.activeVersion, envelope.keyVersion, { ...context }]);
+          return {
+            changed: true,
+            envelope: { ...envelope, keyVersion: keyring.activeVersion }
+          };
+        },
+        destroy() {
+          calls.push(["destroy", keyring.activeVersion]);
+        }
+      };
+    };
+    if (instrumented) {
+      dependencies.runGate4Substep = (_substep, _operationClass, operation) => operation();
+    }
+    const harness = createVaultHarness(dependencies);
+    let result;
+    try {
+      result = await harness.gates.vault({ state: harness.state });
+    } finally {
+      await harness.gates.destroy();
+    }
+    return { calls, result };
+  }
+
+  const baseline = await observe(false);
+  const instrumented = await observe(true);
+  assert.deepEqual(instrumented, baseline);
+  assert.deepEqual(
+    instrumented.calls.map(([name]) => name),
+    [
+      "derive",
+      "derive",
+      "fingerprint",
+      "create",
+      "encrypt",
+      "decrypt",
+      "decrypt",
+      "fingerprint",
+      "create",
+      "rotate",
+      "decrypt",
+      "destroy",
+      "destroy"
+    ]
+  );
+  assert.deepEqual(instrumented.calls[0], ["derive", 1, 32, 7]);
+  assert.deepEqual(instrumented.calls[1], ["derive", 2, 32, 5]);
+  assert.equal(instrumented.calls[4][2], "synthetic-vault-physical-gate");
+  assert.equal(instrumented.calls[8][1], "v2");
+  assert.deepEqual(instrumented.calls.slice(-2), [["destroy", "v1"], ["destroy", "v2"]]);
 });
 
 test("concrete connector gates use the product contracts and physical plan runner", async () => {
