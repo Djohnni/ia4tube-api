@@ -1,24 +1,27 @@
 # Checkpoint Social 3A-0P — gates físicos Linux isolados
 
-## Contrato canônico do diagnóstico ambiental do Windows PowerShell hospedado
+## Contrato canônico do transporte fechado dos testes Windows PowerShell
 
 Esta rota existe somente na branch
-`social/checkpoint-3a0p-windows-powershell-env-provenance-20260810`, criada a
-partir do commit exato `02b8ae2ba09fecae4e0dac99bc2f8a6d557fc027`. O único commit autorizado
+`social/checkpoint-3a0p-windows-powershell-closed-transport-20260810`, criada a
+partir do commit exato `3bdc9ce290400079418f64dfbf088d093c2fff24`. O único commit autorizado
 deve ter esse commit como pai imediato e a mensagem integral:
 
 ```text
-[run-social-3a0p-linux-gate] diagnose hosted Windows PowerShell environment
+[run-social-3a0p-linux-gate] use closed PowerShell diagnostic transport
 ```
 
 O produto permanece idêntico a `fcfc92419021dae5f77baad731c634b10c275c5b`:
 `src/`, todo `db/` (inclusive `roles.sql`), migrations, `server.js`,
 `package.json` e `package-lock.json` não são alterados. A rota não acrescenta
 grants, não muda políticas RLS e não modifica schema, SCRAM, roles, produto,
-backup, restore, dependências ou os testes de segurança antigos.
-Esta rota é exclusivamente diagnóstica: não corrige os dois testes que
-falharam, não aumenta seus timeouts e não executa `npm test`, o job Linux ou os
-Gates físicos no run hospedado.
+backup, restore, dependências ou os testes de segurança antigos. Os helpers
+PowerShell testados permanecem byte-idênticos, assim como os objetos sintéticos,
+os validadores JavaScript e as assertions funcionais. A única correção nos dois
+testes substitui `ConvertTo-Json` e o `JSON.parse` consumidor pelo protocolo
+escalar fechado `IA4REC1`, sem aumentar o timeout de 20.000 ms. O workflow
+restaura a rota normal: `npm test` uma vez no Windows e, somente após seu
+sucesso, o job Linux físico preservado.
 
 ## Resultados comprovados das rotas anteriores
 
@@ -89,7 +92,7 @@ aprovado no mesmo ambiente hospedado.
 A etapa concorrente não começou. O job Linux permaneceu ignorado; o pré-gate,
 os Gates 1–5 e qualquer artifact físico não começaram. A verificação final
 confirmou Git limpo. Produto e ambientes externos permaneceram intactos. A
-classificação fechada é
+classificação intermediária daquele run foi
 `windows_powershell_minimal_child_environment_startup_timeout`: o executável
 exato e o runner hospedado já foram comprovados funcionais, enquanto os dois
 processos que recebem o ambiente filho fechado de oito chaves atingem o mesmo
@@ -97,7 +100,27 @@ timeout. Esses fatos delimitam a divergência ao contrato ambiental reduzido
 e/ou à descoberta de módulos, mas não comprovam ainda uma variável causal
 específica.
 
-## Correção precedente e preservada do ambiente da suíte Windows
+O run diagnóstico `31442408607`, no commit
+`3bdc9ce290400079418f64dfbf088d093c2fff24`, executou cada combinação dos
+perfis ambientais fechados P0–P6 e das operações `STARTUP`, `UTILITY` e
+`EXACT_HELPERS` exatamente uma vez. `STARTUP` e `EXACT_HELPERS` foram aprovadas
+nos sete perfis; `UTILITY`, cuja única operação relevante era
+`[ordered]@{ok=$true}|ConvertTo-Json -Compress`, atingiu o timeout preservado em
+todos eles. Portanto o PowerShell iniciou, os dois helpers reais e os objetos
+sintéticos concluíram, e nenhuma das adições fechadas de `PSModulePath`,
+`PSModuleAnalysisCachePath`, `LOCALAPPDATA`, `APPDATA`, `USERPROFILE`,
+`HOMEDRIVE` ou `HOMEPATH` alterou o resultado de `UTILITY`.
+
+A classificação canônica comprovada é
+`windows_powershell_converttojson_test_transport_timeout`. Ela isola a falha no
+caminho de serialização/transporte usado pelos dois testes via
+`ConvertTo-Json`; não a atribui ao startup, aos helpers, aos objetos sintéticos,
+à concorrência ou a um dos perfis ambientais fechados. Nesse run, `npm test`
+não foi executado, o job Linux permaneceu ignorado e os Gates 1–5, artifact e
+recursos físicos não começaram. Não há autorização para re-run nem segundo
+push nessa branch diagnóstica.
+
+## Ambiente fechado restaurado da suíte Windows
 
 Depois de `npm ci`, somente a etapa `Run stabilized automated tests once` recebe
 um mapa ambiental explícito com exatamente `PGBIN`, `PGDATA`, `PGROOT`,
@@ -116,10 +139,9 @@ inesperadas não vazias for diferente de zero, a etapa escreve somente
 `windows_runner_postgres_environment_not_clean`, encerra com código `1` e não
 executa `npm test`.
 
-Com contagem zero, a etapa executava `npm test` exatamente uma vez, preservava
+Com contagem zero, a etapa executa `npm test` exatamente uma vez, preserva
 `$LASTEXITCODE`, falha fechado se o código estiver indisponível e termina com o
-código real da suíte. Esse contrato pertence ao commit predecessor; sua
-execução e seu resultado estão registrados acima no run `31438190270`.
+código real da suíte. A rota diagnóstica especial não substitui mais essa etapa.
 
 ## Estabilização fechada dos testes nativos Windows
 
@@ -142,7 +164,8 @@ demais testes continuam na etapa concorrente, sem flag de concorrência, e cada
 arquivo descoberto pertence a exatamente uma etapa. Não há glob, diretório
 inteiro, retry, repetição, shell ou timeout acrescentado pelo runner. Os
 timeouts internos de 20.000 ms dos dois testes de File.Replace permanecem
-inalterados, assim como seus arquivos e o helper PowerShell correspondente.
+inalterados. Somente o transporte dentro desses dois arquivos muda; os helpers
+PowerShell correspondentes permanecem byte-idênticos.
 
 O único teste de firewall sintético reconhece exclusivamente o resultado real
 do helper. Em contexto não elevado, exige status zero, signal nulo e stderr
@@ -160,7 +183,7 @@ ocorrem antes de `Get-NetFirewallProfile`, `Get-NetFirewallSetting` e
 produção não é alterado. O resultado hospedado dessa correção está registrado
 acima no run `31438190270`.
 
-## Probe fechado de procedência ambiental do Windows PowerShell 5.1
+## Probe histórico de procedência ambiental do Windows PowerShell 5.1
 
 O probe diagnóstico funciona somente em `win32` e inicia diretamente o
 `powershell.exe` absoluto derivado de `SystemRoot`. Cada processo usa
@@ -216,14 +239,56 @@ que concluíram e validaram `EXACT_HELPERS`. O primeiro na ordem P0–P6 é
 publicado como `windows_powershell_minimum_approved_profile`. O processo sempre
 encerra intencionalmente com código não zero e exatamente uma classificação:
 `windows_powershell_environment_profile_captured`, se houver perfil aprovado,
-ou `windows_powershell_environment_profile_unresolved`, se não houver. Isso
-impede `npm test`, o job Linux e os Gates físicos. Este contrato local não
-afirma que o probe real já tenha sido executado nem antecipa qual perfil será
-aprovado no runner hospedado.
+ou `windows_powershell_environment_profile_unresolved`, se não houver. O run
+`31442408607` executou esse contrato e produziu o resultado comprovado acima.
+O arquivo do probe permanece no histórico e no repositório, mas não integra a
+rota executável atual do workflow.
+
+## Protocolo escalar fechado IA4REC1
+
+Os dois testes File.Replace continuam iniciando diretamente o Windows
+PowerShell 5.1 absoluto, no máximo uma vez cada, com `NoLogo`, `NoProfile`,
+`NonInteractive`, `Command`, `cwd` em `System32`, ambiente mínimo preservado,
+`shell=false`, `windowsHide=true` e timeout de 20.000 ms. Seus helpers e fixtures
+sintéticas permanecem byte-idênticos. Somente a serialização de saída muda:
+`ConvertTo-Json` e o `JSON.parse` consumidor são removidos desses dois testes.
+
+Cada escalar é emitido exclusivamente por `[Console]::Out.WriteLine(...)` no
+formato literal `IA4REC1|<RECORD>|<FIELD>|<TYPE>|<PAYLOAD>`. O teste de
+argumento aceita somente os records `untyped`, `typed`, `reflection` e
+`reflectionShape`; o teste de exceção aceita somente `exception1`,
+`exception2` e `exception3`. Os tipos fechados são `null`, `bool`, `int` e
+`string`. Payloads nulos são vazios, booleanos são exatamente `true` ou
+`false`, inteiros usam representação decimal canônica e segura para Node, e
+strings não vazias pertencem somente ao alfabeto
+`A-Z a-z 0-9 _ . : -`. Nenhum componente admite `|`, CR, LF ou NUL.
+
+O teste de argumento exige exatamente 43 linhas, na ordem literal: 13 de
+`untyped`, 13 de `typed`, 13 de `reflection` e 4 de `reflectionShape`. O teste
+de exceção exige exatamente 51 linhas, na ordem literal: 17 de `exception1`,
+17 de `exception2` e 17 de `exception3`.
+
+O parser Node exige versão, records, fields, ordem e número de linhas exatos;
+recusa linhas intermediárias vazias, duplicadas, ausentes, extras ou fora de
+ordem, tipos e payloads inválidos, caminhos, usuário, SID, canário, mensagens,
+stacks, credenciais, segredos, tokens, URIs PostgreSQL e cabeçalhos de
+autorização. Depois da reconstrução integral, os mesmos validadores JavaScript
+permanecem a autoridade final para os três diagnósticos de argumento e os três
+diagnósticos de exceção, seguidos pelas assertions funcionais preservadas.
+
+Falhas de processo e protocolo são publicadas somente como
+`powershell_closed_transport_timeout`,
+`powershell_closed_transport_spawn_failed`,
+`powershell_closed_transport_status_missing`,
+`powershell_closed_transport_signal_refused`,
+`powershell_closed_transport_process_failed`,
+`powershell_closed_transport_stderr_refused` ou
+`powershell_closed_transport_protocol_invalid`. Comando, `spawnargs`, objeto
+`Error`, stdout e stderr brutos nunca são publicados.
 
 ## Cadeia imutável e inventários fechados
 
-A cadeia autorizada é linear e contém oito commits entre a base da manutenção
+A cadeia autorizada é linear e contém nove commits entre a base da manutenção
 e o novo `HEAD`:
 
 1. `8eb4c4d71c6593f9c3e448be6ac52b1b0e8ba931`, pai
@@ -288,7 +353,7 @@ e o novo `HEAD`:
    `tests/social-3a0p-linux-gate.test.js`,
    `tests/social-3a0p-linux-workflow.test.js` e
    `tests/social-3a0p-local-firewall-nonmutation.test.js`.
-8. O novo `HEAD`, pai exato
+8. `3bdc9ce290400079418f64dfbf088d093c2fff24`, pai exato
    `02b8ae2ba09fecae4e0dac99bc2f8a6d557fc027`, mensagem
    `[run-social-3a0p-linux-gate] diagnose hosted Windows PowerShell environment`
    e inventário fechado:
@@ -299,26 +364,37 @@ e o novo `HEAD`:
    `tests/social-3a0p-linux-gate.test.js`,
    `tests/social-3a0p-linux-workflow.test.js` e
    `tests/social-3a0p-windows-powershell-env-probe.test.js`.
+9. O novo `HEAD`, pai exato
+   `3bdc9ce290400079418f64dfbf088d093c2fff24`, mensagem
+   `[run-social-3a0p-linux-gate] use closed PowerShell diagnostic transport` e
+   inventário fechado:
+   `.github/workflows/social-3a0p-linux-physical-gates.yml`,
+   `docs/social-3a0p-linux-physical-gates.md`,
+   `scripts/social-3a0p-linux-gate.js`,
+   `tests/social-3a0p-linux-gate.test.js`,
+   `tests/social-3a0p-linux-workflow.test.js`,
+   `tests/social-3a0p-local-file-replace-argument-powershell.test.js` e
+   `tests/social-3a0p-local-file-replace-powershell-diagnostic.test.js`.
 
 Os guards dos dois jobs verificam pais, mensagens, ancestralidade linear,
-contagem oito e cada um desses inventários sem prefixo, glob ou diretório
+contagem nove e cada um desses inventários sem prefixo, glob ou diretório
 inteiro.
 
-## Limite intencional da rota diagnóstica
+## Restauração da rota executável normal
 
 O único workflow run autorizado contém os mesmos dois jobs hospedados e nenhuma
 matriz. O job Windows executa, nesta ordem, checkout, guard imutável, Node 24,
-instalação pelo lockfile, o probe diagnóstico exatamente uma vez e a
-verificação de Git limpo com `always()`. Ele não executa `npm test`, o manifesto
-serial nem a etapa concorrente, não cria artifact e falha intencionalmente após
-publicar somente o resultado sanitizado do probe.
+instalação pelo lockfile, neutralização somente de `PGBIN`, `PGDATA`, `PGROOT`,
+`PGPASSWORD` e `PGUSER`, confirmação de zero outra variável `PG...` não vazia,
+`npm test` exatamente uma vez e a verificação de Git limpo com `always()`. O
+probe ambiental histórico não é executado como etapa separada.
 
 O job `physical-gates`, em `ubuntu-24.04`, continua dependente do sucesso de
-`windows-automated-tests`; portanto permanece ignorado quando o diagnóstico
-encerra intencionalmente. O pré-gate Linux, a prova física de durabilidade,
-PostgreSQL/Docker, Gates 1–5, evidência, artifact e cleanup físico não iniciam.
-Este documento não afirma que a nova execução hospedada já tenha ocorrido nem
-antecipa seu resultado.
+`windows-automated-tests`. Somente após o Windows aprovar, ele executa o guard,
+`npm ci`, pré-gate Linux, durabilidade, PostgreSQL descartável, bootstrap,
+Gates 1–5 em ordem e condicionados ao anterior, métricas, evidência, artifact e
+cleanup preservados. Este documento não afirma que a nova execução hospedada
+já tenha ocorrido nem antecipa seu resultado.
 
 ## Manifesto fechado do pré-gate Linux
 

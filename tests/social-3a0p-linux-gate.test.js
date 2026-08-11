@@ -699,11 +699,11 @@ function restoreBehaviorFacadeFixture(options = {}) {
 test("evidence provenance matches the authorized workflow branch and parent", () => {
   assert.equal(
     BRANCH,
-    "social/checkpoint-3a0p-windows-powershell-env-provenance-20260810"
+    "social/checkpoint-3a0p-windows-powershell-closed-transport-20260810"
   );
   assert.equal(
     BASE_COMMIT,
-    "02b8ae2ba09fecae4e0dac99bc2f8a6d557fc027"
+    "3bdc9ce290400079418f64dfbf088d093c2fff24"
   );
   const workflow = JSON.parse(fs.readFileSync(
     path.join(ROOT, ".github", "workflows", "social-3a0p-linux-physical-gates.yml"),
