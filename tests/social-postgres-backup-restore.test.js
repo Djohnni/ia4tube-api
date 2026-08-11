@@ -1679,6 +1679,102 @@ test("legacy format-2 0003 bundle restores with its exact authenticated table se
   assert.equal(psqlCalls, 2);
 });
 
+test("logical restore 0003 and 0004 independently dispatch runtime, vault, and 2A before workspace cleanup", async (t) => {
+  const specifications = [
+    Object.freeze({
+      profile: SCHEMA_PROFILES[0],
+      authority: Object.freeze({
+        activationMarkerGeneration: 0,
+        activeOperationalKeyGeneration: null,
+        randomCandidate: 1000000041
+      })
+    }),
+    Object.freeze({
+      profile: SCHEMA_PROFILES[1],
+      authority: Object.freeze({
+        activationMarkerGeneration: 3,
+        activeOperationalKeyGeneration: 1900000000,
+        randomCandidate: 1000000041
+      })
+    })
+  ];
+  const runs = [];
+
+  for (const specification of specifications) {
+    const { authority, profile } = specification;
+    const bundle = await createEncryptedFixture(t, profile);
+    const config = loadRestoreConfig(
+      restoreEnvironment(bundle.directory, bundle.config.files.bundle),
+      { repositoryRoot: root }
+    );
+    const events = [];
+    const verifications = [];
+    let psqlCalls = 0;
+    let restoreWorkspace;
+    const result = await runLogicalRestore({
+      config,
+      operator: mockOperator(events, profileCatalog(profile), profile),
+      verifierTargetFingerprint: config.targetFingerprint,
+      async runTool(plan) {
+        if (plan.executable === tools.restore && plan.args[0] === "--list") {
+          return { code: 0, stdout: archiveList(profile) };
+        }
+        if (plan.executable === tools.psql && ++psqlCalls === 2) {
+          const evidenceFile = planOutputFile(plan);
+          assert.ok(evidenceFile);
+          restoreWorkspace = path.dirname(evidenceFile);
+          fs.writeFileSync(
+            evidenceFile,
+            JSON.stringify(profileSnapshot(profile))
+          );
+        }
+        return { code: 0, stdout: "" };
+      },
+      async verifyRuntimeIsolation() {
+        verifications.push("runtime");
+        return true;
+      },
+      async verifyVault() {
+        verifications.push("vault");
+        if (profile.id === "social-schema-0004") {
+          assert.ok(
+            authority.activeOperationalKeyGeneration > authority.randomCandidate
+          );
+          assert.ok(
+            authority.activationMarkerGeneration <
+              authority.activeOperationalKeyGeneration
+          );
+        }
+        return true;
+      },
+      async verify2ACompatibility() {
+        verifications.push("2a");
+        return true;
+      }
+    });
+
+    assert.equal(result.ok, true);
+    assert.equal(result.compatibleWith2A, true);
+    assert.equal(psqlCalls, 2);
+    assert.deepEqual(verifications, ["runtime", "vault", "2a"]);
+    assert.ok(restoreWorkspace);
+    assert.equal(fs.existsSync(restoreWorkspace), false);
+    runs.push(Object.freeze({
+      authority,
+      config,
+      events,
+      restoreWorkspace,
+      verifications
+    }));
+  }
+
+  assert.notEqual(runs[0].authority, runs[1].authority);
+  assert.notEqual(runs[0].config, runs[1].config);
+  assert.notEqual(runs[0].events, runs[1].events);
+  assert.notEqual(runs[0].restoreWorkspace, runs[1].restoreWorkspace);
+  assert.notEqual(runs[0].verifications, runs[1].verifications);
+});
+
 test("legacy format-2 exception is limited to the exact 0003 contract", (t) => {
   const current = createBundle(t, SCHEMA_PROFILES[1]);
   const disguisedCurrent = JSON.parse(JSON.stringify(current.manifest));

@@ -6,9 +6,11 @@ const ALLOWED_EXACT_FILES = new Set([
   ".github/workflows/social-3a0p-linux-physical-gates.yml",
   "scripts/run-node-tests.js",
   "src/persistence/postgres/backup-restore.js",
+  "src/persistence/postgres/restore-behavior-verifiers.js",
   "tests/node-test-runner-safety.test.js",
   "tests/social-postgres-backup-restore.test.js",
   "tests/social-postgres-migrations.test.js",
+  "tests/social-postgres-restore-behavior-verifiers.test.js",
   "tests/social-postgres-real.test.js"
 ]);
 const ALLOWED_PREFIXES = Object.freeze([

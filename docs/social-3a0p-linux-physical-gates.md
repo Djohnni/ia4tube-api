@@ -1,12 +1,71 @@
 # Checkpoint Social 3A-0P — gates físicos Linux isolados
 
-## Contrato canônico das constraints de perfil no catálogo do Gate 5
+## Contrato canônico do piso monotônico do `restore_vault` no Gate 5
 
 Esta rota existe somente na branch
+`social/checkpoint-3a0p-gate5-restore-vault-generation-floor-20260811`,
+criada a partir do commit exato
+`6eac518e4001e816ae554e299c34ef7ab54c1cfd`. O único commit autorizado deve
+ter esse commit como pai imediato e a mensagem integral:
+
+```text
+[run-social-3a0p-linux-gate] anchor restore vault generations to restored authority
+```
+
+A única alteração atual autorizada dentro de `src/` é
+`src/persistence/postgres/restore-behavior-verifiers.js`. No diff cumulativo
+desde `fcfc92419021dae5f77baad731c634b10c275c5b`, somente esse arquivo e o
+`src/persistence/postgres/backup-restore.js` da rota predecessora podem diferir.
+Todo `db/` (inclusive `roles.sql` e `db/migrations/checksums.json`), migrations,
+`server.js`, `package.json`, `package-lock.json`, o registro real de chaves, o
+parser canônico, o transporte de backup/restore, o manifest, a criptografia e o
+protocolo `IA4REC1` permanecem byte-semanticamente inalterados.
+
+Dentro de `verifyVault`, o registry é criado antes da derivação das versões e
+`currentAuthority()` é consultado exatamente uma vez, antes de qualquer
+`register`, store ou ativação. Quando existe autoridade restaurada,
+`parseVaultKeyVersion(previous.activeKeyVersion).generation` fornece o piso
+operacional; `previous.generation`, que representa a sequência dos marcadores
+de ativação, não é usado como piso. O candidato aleatório preservado é produzido
+por exatamente uma chamada a `randomInt`, e `baseGeneration` é o maior valor
+entre esse candidato e a geração operacional ativa mais um. As versões V1 e V2
+são consecutivas e ambas maiores que a versão restaurada.
+
+As duas gerações são validadas como inteiros seguros positivos antes de qualquer
+mutação. Ausência de espaço para duas gerações consecutivas falha fechada com
+`restore_behavior_vault_generation_exhausted`, sem registro, credencial ou
+alteração da autoridade. A mesma fotografia `previous` é reutilizada como
+`expectedActiveKeyVersion`; conflito concorrente continua produzindo
+`vault_key_activation_conflict`, sem retry, recomputação ou segunda leitura.
+
+O run predecessor `31541682483`, `run_attempt=1`, terminou na primeira falha
+física em `gate5_restore_0004 / restore_vault`, com classificação
+`gate5_restore_vault_generation_floor_not_anchored_to_restored_authority` e
+código `vault_key_activation_generation_not_monotonic`. O transporte externo do
+restore 0004 já havia concluído; a falha ocorreu no callback interno, sem expor
+a geração física. O artifact histórico e sua procedência permanecem
+inalterados, sem autorização para re-run ou segundo push naquela branch.
+
+O artifact histórico `9120952869`, de nome
+`social-3a0p-linux-physical-gates-evidence`, possui digest
+`sha256:ef4dede5ade8e7da1e2a4beb355bd5a3f9b58e371abb0b3efe41c382ae3c35cf`.
+O SHA-256 da evidência é
+`f0fedec4290c53f3b2d0519b4e617fe6459150323bdfe456a20e77a34849d02f` e o
+SHA-256 do status do processo é
+`26564ca3007f7f91c7b77edadbe4122d82804ea0626a3958f21292d1b067f342`.
+O cleanup concluiu com zero resíduo de container, rede, volume, processo e
+listener.
+
+O workflow mantém a rota normal: `npm test` uma vez no Windows e, somente após
+seu sucesso, o job Linux físico preservado.
+
+## Contrato histórico das constraints de perfil no catálogo do Gate 5
+
+Essa rota predecessora existiu somente na branch
 `social/checkpoint-3a0p-gate5-profile-constraint-catalog-20260811`,
 criada a partir do commit exato
 `d5b80c57454bd3759d8fc996120ffab6734062ee`. O único
-commit autorizado deve ter esse commit como pai imediato e a mensagem integral:
+commit autorizado teve esse commit como pai imediato e a mensagem integral:
 
 ```text
 [run-social-3a0p-linux-gate] align backup catalog with schema profile constraints
@@ -21,7 +80,7 @@ muda RLS, schema, SCRAM, roles, migration, checksum, manifest, transporte,
 criptografia, dependência ou produto não autorizado. Os helpers PowerShell e o
 protocolo `IA4REC1` permanecem byte-semanticamente inalterados.
 
-A alteração atual corrige somente o contrato interno usado por
+A alteração predecessora corrigiu somente o contrato interno usado por
 `collectCatalogEvidence`: cada perfil declara, por identidade completa de
 schema, tabela, nome e tipo, quais constraints obrigatórias podem aparecer com
 `validated=false`. O perfil `social-schema-0003` possui conjunto vazio; o perfil
@@ -891,7 +950,7 @@ e o novo `HEAD`:
     `tests/social-3a0p-linux-gate.test.js`,
     `tests/social-3a0p-local-windows-physical-plans.test.js` e
     `tests/social-3a0p-linux-workflow.test.js`.
-15. O novo `HEAD`, pai exato
+15. `6eac518e4001e816ae554e299c34ef7ab54c1cfd`, pai exato
     `d5b80c57454bd3759d8fc996120ffab6734062ee`, mensagem
     `[run-social-3a0p-linux-gate] align backup catalog with schema profile constraints`
     e inventário fechado de exatamente treze caminhos:
@@ -908,9 +967,26 @@ e o novo `HEAD`:
     `tests/social-3a0p-local-windows-physical-plans.test.js`,
     `tests/social-postgres-backup-restore.test.js` e
     `tests/social-postgres-migrations.test.js`.
+16. O novo `HEAD`, pai exato
+    `6eac518e4001e816ae554e299c34ef7ab54c1cfd`, mensagem
+    `[run-social-3a0p-linux-gate] anchor restore vault generations to restored authority`
+    e inventário fechado de exatamente treze caminhos:
+    `.github/workflows/social-3a0p-linux-physical-gates.yml`,
+    `docs/social-3a0p-linux-physical-gates.md`,
+    `scripts/social-3a0p-linux-gate.js`,
+    `scripts/social-3a0p-local-scope.js`,
+    `src/persistence/postgres/restore-behavior-verifiers.js`,
+    `tests/social-3a0p-current-diff-scope.test.js`,
+    `tests/social-3a0p-linux-gate.test.js`,
+    `tests/social-3a0p-linux-workflow.test.js`,
+    `tests/social-3a0p-local-backup-restore.test.js`,
+    `tests/social-3a0p-local-scope.test.js`,
+    `tests/social-3a0p-local-windows-physical-plans.test.js`,
+    `tests/social-postgres-backup-restore.test.js` e
+    `tests/social-postgres-restore-behavior-verifiers.test.js`.
 
 Os guards dos dois jobs verificam pais, mensagens, ancestralidade linear,
-contagem quinze e cada um desses inventários sem prefixo, glob ou diretório
+contagem dezesseis e cada um desses inventários sem prefixo, glob ou diretório
 inteiro.
 
 ## Restauração da rota executável normal

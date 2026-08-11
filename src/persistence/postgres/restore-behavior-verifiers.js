@@ -41,6 +41,7 @@ const {
 } = require("../../social/vault");
 const {
   deriveVaultKeyVersion,
+  parseVaultKeyVersion,
   vaultKeyringFingerprint
 } = require("../../social/vault-key-version");
 const {
@@ -91,6 +92,7 @@ const DEFAULT_DEPENDENCIES = Object.freeze({
   createVaultKeyRegistryAdmin,
   createVaultKeyRotationService,
   deriveVaultKeyVersion,
+  parseVaultKeyVersion,
   verifyRuntimeRole,
   verifyRuntimeSchema,
   vaultKeyringFingerprint,
@@ -912,45 +914,78 @@ function createRestoreBehaviorVerifiers(options = {}) {
       "restore_behavior_runtime_gate_required"
     );
     const { companyA, companyB } = state.fixtures;
-    const keyV1 = randomBytes(32);
-    const keyV2 = randomBytes(32);
-    ensure(
-      Buffer.isBuffer(keyV1) &&
-        keyV1.length === 32 &&
-        Buffer.isBuffer(keyV2) &&
-        keyV2.length === 32,
-      "restore_behavior_random_key_invalid"
-    );
-    const baseGeneration =
-      1000000000 + randomInt(1000000000);
-    const versionV1 = dependencies.deriveVaultKeyVersion(
-      baseGeneration,
-      keyV1
-    );
-    const versionV2 = dependencies.deriveVaultKeyVersion(
-      baseGeneration + 1,
-      keyV2
-    );
-    const plaintextA = randomBytes(48);
-    const plaintextB = randomBytes(48);
-    ensure(
-      Buffer.isBuffer(plaintextA) &&
-        plaintextA.length === 48 &&
-        Buffer.isBuffer(plaintextB) &&
-        plaintextB.length === 48,
-      "restore_behavior_random_plaintext_invalid"
-    );
+    let keyV1;
+    let keyV2;
+    let plaintextA;
+    let plaintextB;
     let vaultV1;
     let vaultV2;
     let raw;
     let envelope;
     try {
+      keyV1 = randomBytes(32);
+      keyV2 = randomBytes(32);
+      ensure(
+        Buffer.isBuffer(keyV1) &&
+          keyV1.length === 32 &&
+          Buffer.isBuffer(keyV2) &&
+          keyV2.length === 32,
+        "restore_behavior_random_key_invalid"
+      );
       const registry = dependencies.createVaultKeyRegistryAdmin({
         pool: migrationPool,
         ownerRole: OWNER_ROLE
       });
+      const previous = await registry.currentAuthority();
+      let restoredActiveGeneration = null;
+      if (previous !== null) {
+        restoredActiveGeneration =
+          dependencies.parseVaultKeyVersion(
+            previous?.activeKeyVersion
+          ).generation;
+        if (
+          !Number.isSafeInteger(restoredActiveGeneration) ||
+          restoredActiveGeneration < 1 ||
+          restoredActiveGeneration > Number.MAX_SAFE_INTEGER - 2
+        ) {
+          fail("restore_behavior_vault_generation_exhausted");
+        }
+      }
+      const randomCandidate =
+        1000000000 + randomInt(1000000000);
+      const baseGeneration =
+        restoredActiveGeneration === null
+          ? randomCandidate
+          : Math.max(
+              randomCandidate,
+              restoredActiveGeneration + 1
+            );
+      if (
+        !Number.isSafeInteger(baseGeneration) ||
+        baseGeneration < 1 ||
+        baseGeneration > Number.MAX_SAFE_INTEGER - 1
+      ) {
+        fail("restore_behavior_vault_generation_exhausted");
+      }
+      const versionV1 = dependencies.deriveVaultKeyVersion(
+        baseGeneration,
+        keyV1
+      );
+      const versionV2 = dependencies.deriveVaultKeyVersion(
+        baseGeneration + 1,
+        keyV2
+      );
       await registry.register({ keyVersion: versionV1 });
       await registry.register({ keyVersion: versionV2 });
+      plaintextA = randomBytes(48);
+      plaintextB = randomBytes(48);
+      ensure(
+        Buffer.isBuffer(plaintextA) &&
+          plaintextA.length === 48 &&
+          Buffer.isBuffer(plaintextB) &&
+          plaintextB.length === 48,
+        "restore_behavior_random_plaintext_invalid"
+      );
       const readable = [versionV1, versionV2];
       vaultV1 = dependencies.createSocialVault({
         keyring: {
@@ -1081,7 +1116,6 @@ function createRestoreBehaviorVerifiers(options = {}) {
         vault: vaultV2,
         backoff: async () => undefined
       });
-      const previous = await registry.currentAuthority();
       const first = await rotation.rotateTenant({
         companyId: companyA.companyId,
         credentialIds: [companyA.credentialId],
@@ -1149,13 +1183,15 @@ function createRestoreBehaviorVerifiers(options = {}) {
     } finally {
       vaultV1?.destroy();
       vaultV2?.destroy();
-      keyV1.fill(0);
-      plaintextB.fill(0);
+      if (Buffer.isBuffer(keyV1)) keyV1.fill(0);
+      if (!state.vaultVerified && Buffer.isBuffer(keyV2)) {
+        keyV2.fill(0);
+      }
+      if (Buffer.isBuffer(plaintextB)) plaintextB.fill(0);
       wipeEnvelope(raw);
       wipeEnvelope(envelope);
       if (!state.vaultVerified) {
-        keyV2.fill(0);
-        plaintextA.fill(0);
+        if (Buffer.isBuffer(plaintextA)) plaintextA.fill(0);
       }
     }
   }

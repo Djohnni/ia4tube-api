@@ -9,7 +9,10 @@ const {
 } = require("../scripts/social-3a0p-local-scope");
 
 const BASE_COMMIT = "fcfc92419021dae5f77baad731c634b10c275c5b";
-const AUTHORIZED_PRODUCT_FILE = "src/persistence/postgres/backup-restore.js";
+const AUTHORIZED_PRODUCT_FILES = Object.freeze([
+  "src/persistence/postgres/backup-restore.js",
+  "src/persistence/postgres/restore-behavior-verifiers.js"
+]);
 const ROOT = path.resolve(__dirname, "..");
 
 function gitLines(args) {
@@ -29,7 +32,7 @@ function gitLines(args) {
     .filter(Boolean);
 }
 
-test("o diff físico atual contém somente o catálogo e o harness autorizados", () => {
+test("o diff físico atual contém somente as fontes e o harness autorizados", () => {
   const changed = gitLines(["diff", "--name-only", BASE_COMMIT]);
   const untracked = gitLines(["ls-files", "--others", "--exclude-standard"]);
   const files = [...new Set([...changed, ...untracked])].sort();
@@ -40,7 +43,7 @@ test("o diff físico atual contém somente o catálogo e o harness autorizados",
   });
 });
 
-test("somente o catálogo autorizado difere no produto; o restante permanece na base", () => {
+test("somente as duas fontes autorizadas diferem no produto; o restante permanece na base", () => {
   const productDiff = gitLines([
     "diff",
     "--name-only",
@@ -53,5 +56,5 @@ test("somente o catálogo autorizado difere no produto; o restante permanece na 
     "package.json",
     "package-lock.json"
   ]);
-  assert.deepEqual(productDiff, [AUTHORIZED_PRODUCT_FILE]);
+  assert.deepEqual(productDiff, AUTHORIZED_PRODUCT_FILES);
 });

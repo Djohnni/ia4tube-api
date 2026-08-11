@@ -24,6 +24,7 @@ const {
 } = require("../src/social/vault");
 const {
   deriveVaultKeyVersion,
+  parseVaultKeyVersion: parseCanonicalVaultKeyVersion,
   vaultKeyringFingerprint
 } = require("../src/social/vault-key-version");
 const {
@@ -103,6 +104,7 @@ function makeRepository(world) {
   }
 
   async function storeEncryptedCredential(input) {
+    world.calls.push({ event: "credential_store" });
     if (!world.registry.registered.has(input.keyVersion)) {
       throw codedError("23503", {
         constraint: "social_encrypted_credentials_key_version_fk"
@@ -187,12 +189,31 @@ function makeRepository(world) {
 
 function makeRegistry(world) {
   async function register({ keyVersion }) {
+    world.calls.push({ event: "registry_register", keyVersion });
+    world.registry.registrationCalls += 1;
     const registered = !world.registry.registered.has(keyVersion);
     world.registry.registered.add(keyVersion);
+    if (
+      world.registry.registrationCalls === 2 &&
+      world.registry.concurrentActiveKeyVersion &&
+      !world.registry.concurrentChangeApplied
+    ) {
+      world.registry.registered.add(
+        world.registry.concurrentActiveKeyVersion
+      );
+      world.registry.active =
+        world.registry.concurrentActiveKeyVersion;
+      world.registry.generation += 1;
+      world.registry.concurrentChangeApplied = true;
+      world.calls.push({
+        event: "registry_concurrent_authority_change"
+      });
+    }
     return Object.freeze({ keyVersion, registered });
   }
 
   async function currentAuthority() {
+    world.calls.push({ event: "registry_current_authority" });
     return world.registry.active
       ? Object.freeze({
           activeKeyVersion: world.registry.active,
@@ -202,6 +223,12 @@ function makeRegistry(world) {
   }
 
   async function withActiveVersion(input, operation) {
+    world.calls.push({
+      event: "registry_with_active_version",
+      expectedActiveKeyVersion:
+        input.expectedActiveKeyVersion ?? null,
+      keyVersion: input.keyVersion
+    });
     if (
       world.registry.active &&
       world.registry.active !== input.keyVersion &&
@@ -217,6 +244,16 @@ function makeRegistry(world) {
     }
     const activated = world.registry.active !== input.keyVersion;
     if (activated) {
+      if (
+        world.registry.active &&
+        parseCanonicalVaultKeyVersion(input.keyVersion).generation <=
+          parseCanonicalVaultKeyVersion(world.registry.active)
+            .generation
+      ) {
+        throw codedError(
+          "vault_key_activation_generation_not_monotonic"
+        );
+      }
       world.registry.active = input.keyVersion;
       world.registry.generation += 1;
     }
@@ -263,8 +300,20 @@ function createSyntheticWorld(options = {}) {
   const memberships = new Map();
   const connections = new Map();
   const credentials = new Map();
+  const activeOperationalKeyGeneration =
+    options.activeOperationalKeyGeneration === undefined
+      ? 77
+      : options.activeOperationalKeyGeneration;
   const existingKey = Buffer.alloc(32, 77);
-  const existingVersion = deriveVaultKeyVersion(77, existingKey);
+  const existingVersion =
+    options.activeKeyVersion !== undefined
+      ? options.activeKeyVersion
+      : activeOperationalKeyGeneration === null
+        ? null
+        : deriveVaultKeyVersion(
+            activeOperationalKeyGeneration,
+            existingKey
+          );
   existingKey.fill(0);
   const world = {
     calls,
@@ -276,8 +325,18 @@ function createSyntheticWorld(options = {}) {
     pools,
     registry: {
       active: existingVersion,
-      generation: 7,
-      registered: new Set([existingVersion]),
+      concurrentActiveKeyVersion: null,
+      concurrentChangeApplied: false,
+      generation:
+        options.activationMarkerGeneration === undefined
+          ? existingVersion === null
+            ? 0
+            : 7
+          : options.activationMarkerGeneration,
+      registered: new Set(
+        existingVersion === null ? [] : [existingVersion]
+      ),
+      registrationCalls: 0,
       retired: new Set()
     },
     transientPolicyCount: options.transientPolicyCount || 0
@@ -425,6 +484,10 @@ function createSyntheticWorld(options = {}) {
     },
     createVaultKeyRotationService,
     deriveVaultKeyVersion,
+    parseVaultKeyVersion(value) {
+      calls.push({ event: "parse_vault_key_version" });
+      return parseCanonicalVaultKeyVersion(value);
+    },
     async verifyRuntimeRole(pool, role) {
       calls.push({ event: "current_role", kind: pool.kind, role });
       return true;
@@ -498,12 +561,23 @@ function createSyntheticWorld(options = {}) {
     return value;
   }
 
+  const randomCandidate =
+    options.randomCandidate === undefined
+      ? 1000000041
+      : options.randomCandidate;
+  function randomInt(maximum) {
+    assert.equal(maximum, 1000000000);
+    calls.push({ event: "random_int" });
+    return randomCandidate - 1000000000;
+  }
+
   return {
     dependencies,
     legacy,
     randomBytes,
-    randomInt: () => 41,
+    randomInt,
     randomUuid,
+    registry,
     repository,
     world
   };
@@ -525,6 +599,372 @@ function createGate(worldOptions = {}) {
   });
   return { gate, ...synthetic };
 }
+
+test("vault generations use one restored-authority snapshot and the operational floor", async (t) => {
+  const scenarios = [
+    {
+      name: "no active authority preserves the random candidate",
+      options: {
+        activationMarkerGeneration: 0,
+        activeOperationalKeyGeneration: null,
+        randomCandidate: 1000000041
+      },
+      expectedGeneration: 1000000041,
+      parserCalls: 0
+    },
+    {
+      name: "an active generation below the candidate preserves the candidate",
+      options: {
+        activationMarkerGeneration: 2000000000,
+        activeOperationalKeyGeneration: 1000000010,
+        randomCandidate: 1000000041
+      },
+      expectedGeneration: 1000000041,
+      parserCalls: 1
+    },
+    {
+      name: "an active generation equal to the candidate advances by one",
+      options: {
+        activationMarkerGeneration: 3,
+        activeOperationalKeyGeneration: 1000000041,
+        randomCandidate: 1000000041
+      },
+      expectedGeneration: 1000000042,
+      parserCalls: 1
+    },
+    {
+      name: "a restored operational generation above the candidate sets the floor",
+      options: {
+        activationMarkerGeneration: 2,
+        activeOperationalKeyGeneration: 1000000200,
+        randomCandidate: 1000000041
+      },
+      expectedGeneration: 1000000201,
+      parserCalls: 1
+    },
+    {
+      name: "the last two consecutive safe generations remain available",
+      options: {
+        activationMarkerGeneration: 6,
+        activeOperationalKeyGeneration:
+          Number.MAX_SAFE_INTEGER - 2,
+        randomCandidate: 1000000041
+      },
+      expectedGeneration: Number.MAX_SAFE_INTEGER - 1,
+      parserCalls: 1
+    }
+  ];
+
+  for (const scenario of scenarios) {
+    await t.test(scenario.name, async () => {
+      const { gate, world } = createGate(scenario.options);
+      const restoredActiveKeyVersion = world.registry.active;
+      try {
+        assert.equal(
+          await gate.verifiers.verifyRuntimeIsolation(),
+          true
+        );
+        assert.equal(await gate.verifiers.verifyVault(), true);
+
+        const events = world.calls.map((entry) => entry.event);
+        const registrations = world.calls.filter(
+          (entry) => entry.event === "registry_register"
+        );
+        const firstGeneration = parseCanonicalVaultKeyVersion(
+          registrations[0].keyVersion
+        ).generation;
+        const secondGeneration = parseCanonicalVaultKeyVersion(
+          registrations[1].keyVersion
+        ).generation;
+        assert.equal(firstGeneration, scenario.expectedGeneration);
+        assert.equal(secondGeneration, firstGeneration + 1);
+        if (scenario.options.activeOperationalKeyGeneration !== null) {
+          assert.ok(
+            firstGeneration >
+              scenario.options.activeOperationalKeyGeneration
+          );
+          assert.ok(
+            secondGeneration >
+              scenario.options.activeOperationalKeyGeneration
+          );
+        }
+        assert.equal(
+          events.filter(
+            (event) => event === "registry_current_authority"
+          ).length,
+          1
+        );
+        assert.equal(
+          events.filter((event) => event === "random_int").length,
+          1
+        );
+        assert.equal(
+          events.filter(
+            (event) => event === "parse_vault_key_version"
+          ).length,
+          scenario.parserCalls
+        );
+
+        const registryIndex = events.indexOf("registry_created");
+        const snapshotIndex = events.indexOf(
+          "registry_current_authority"
+        );
+        const parserIndex = events.indexOf(
+          "parse_vault_key_version"
+        );
+        const randomIndex = events.indexOf("random_int");
+        const registerIndexes = events
+          .map((event, index) =>
+            event === "registry_register" ? index : -1
+          )
+          .filter((index) => index !== -1);
+        const storeIndex = events.indexOf("credential_store");
+        assert.ok(registerIndexes.length >= 2);
+        assert.ok(registryIndex < snapshotIndex);
+        if (scenario.parserCalls === 1) {
+          assert.ok(snapshotIndex < parserIndex);
+          assert.ok(parserIndex < randomIndex);
+        } else {
+          assert.ok(snapshotIndex < randomIndex);
+        }
+        assert.ok(randomIndex < registerIndexes[0]);
+        assert.ok(snapshotIndex < registerIndexes[0]);
+        assert.ok(snapshotIndex < registerIndexes[1]);
+        assert.ok(registerIndexes[0] < storeIndex);
+        assert.ok(registerIndexes[1] < storeIndex);
+
+        const firstActivation = world.calls.find(
+          (entry) => entry.event === "registry_with_active_version"
+        );
+        assert.equal(
+          firstActivation.expectedActiveKeyVersion,
+          restoredActiveKeyVersion
+        );
+      } finally {
+        await gate.close();
+      }
+      assert.ok(
+        world.generatedBuffers.every((buffer) =>
+          buffer.every((value) => value === 0)
+        )
+      );
+    });
+  }
+});
+
+test("invalid restored authority fails before candidate selection, register, and store", async () => {
+  const { gate, world } = createGate({
+    activationMarkerGeneration: 4,
+    activeKeyVersion: "synthetic-invalid-active-version",
+    randomCandidate: 1000000041
+  });
+  const originalAuthority = world.registry.active;
+  try {
+    assert.equal(await gate.verifiers.verifyRuntimeIsolation(), true);
+    await assert.rejects(gate.verifiers.verifyVault(), {
+      code: "key_version_invalid"
+    });
+  } finally {
+    await gate.close();
+  }
+  const events = world.calls.map((entry) => entry.event);
+  assert.equal(
+    events.filter(
+      (event) => event === "registry_current_authority"
+    ).length,
+    1
+  );
+  assert.equal(
+    events.filter(
+      (event) => event === "parse_vault_key_version"
+    ).length,
+    1
+  );
+  assert.equal(events.includes("random_int"), false);
+  assert.equal(events.includes("registry_register"), false);
+  assert.equal(events.includes("credential_store"), false);
+  assert.equal(world.registry.active, originalAuthority);
+  assert.ok(
+    world.generatedBuffers.every((buffer) =>
+      buffer.every((value) => value === 0)
+    )
+  );
+});
+
+test("restored authority without room for two consecutive generations fails without mutation", async () => {
+  const { gate, world } = createGate({
+    activationMarkerGeneration: 5,
+    activeOperationalKeyGeneration: Number.MAX_SAFE_INTEGER - 1,
+    randomCandidate: 1000000041
+  });
+  const originalAuthority = world.registry.active;
+  const originalRegistrations = new Set(world.registry.registered);
+  try {
+    assert.equal(await gate.verifiers.verifyRuntimeIsolation(), true);
+    await assert.rejects(gate.verifiers.verifyVault(), {
+      code: "restore_behavior_vault_generation_exhausted",
+      name: "RestoreBehaviorVerifierError"
+    });
+  } finally {
+    await gate.close();
+  }
+  const events = world.calls.map((entry) => entry.event);
+  assert.equal(
+    events.filter(
+      (event) => event === "registry_current_authority"
+    ).length,
+    1
+  );
+  assert.equal(
+    events.filter(
+      (event) => event === "parse_vault_key_version"
+    ).length,
+    1
+  );
+  assert.equal(events.includes("random_int"), false);
+  assert.equal(events.includes("registry_register"), false);
+  assert.equal(events.includes("credential_store"), false);
+  assert.equal(world.registry.active, originalAuthority);
+  assert.deepEqual(world.registry.registered, originalRegistrations);
+  assert.ok(
+    world.generatedBuffers.every((buffer) =>
+      buffer.every((value) => value === 0)
+    )
+  );
+});
+
+test("authority changed after the snapshot preserves conflict without retry or recomputation", async () => {
+  const { gate, world } = createGate({
+    activationMarkerGeneration: 8,
+    activeOperationalKeyGeneration: 1000000010,
+    randomCandidate: 1000000041
+  });
+  const restoredActiveKeyVersion = world.registry.active;
+  const concurrentKey = Buffer.alloc(32, 94);
+  const concurrentActiveKeyVersion = deriveVaultKeyVersion(
+    1000000300,
+    concurrentKey
+  );
+  world.registry.concurrentActiveKeyVersion =
+    concurrentActiveKeyVersion;
+  try {
+    assert.equal(await gate.verifiers.verifyRuntimeIsolation(), true);
+    await assert.rejects(gate.verifiers.verifyVault(), {
+      code: "vault_key_activation_conflict"
+    });
+  } finally {
+    await gate.close();
+    concurrentKey.fill(0);
+  }
+
+  const events = world.calls.map((entry) => entry.event);
+  assert.equal(
+    events.filter(
+      (event) => event === "registry_current_authority"
+    ).length,
+    1
+  );
+  assert.equal(
+    events.filter(
+      (event) => event === "parse_vault_key_version"
+    ).length,
+    1
+  );
+  assert.equal(
+    events.filter((event) => event === "random_int").length,
+    1
+  );
+  assert.equal(
+    events.filter(
+      (event) => event === "registry_with_active_version"
+    ).length,
+    1
+  );
+  assert.equal(
+    events.filter(
+      (event) => event === "registry_concurrent_authority_change"
+    ).length,
+    1
+  );
+  const firstActivation = world.calls.find(
+    (entry) => entry.event === "registry_with_active_version"
+  );
+  assert.equal(
+    firstActivation.expectedActiveKeyVersion,
+    restoredActiveKeyVersion
+  );
+  assert.equal(world.registry.active, concurrentActiveKeyVersion);
+  assert.ok(
+    events.indexOf("registry_current_authority") <
+      events.indexOf("registry_concurrent_authority_change")
+  );
+  assert.ok(
+    events.indexOf("registry_concurrent_authority_change") <
+      events.indexOf("registry_with_active_version")
+  );
+  assert.ok(
+    world.generatedBuffers.every((buffer) =>
+      buffer.every((value) => value === 0)
+    )
+  );
+});
+
+test("synthetic registry preserves lower, equal, and conflicting activation refusals", async () => {
+  const { registry, world } = createSyntheticWorld({
+    activationMarkerGeneration: 2,
+    activeOperationalKeyGeneration: 1000000200,
+    randomCandidate: 1000000041
+  });
+  const activeKeyVersion = world.registry.active;
+  const lowerKey = Buffer.alloc(32, 91);
+  const equalKey = Buffer.alloc(32, 92);
+  const higherKey = Buffer.alloc(32, 93);
+  try {
+    const lowerVersion = deriveVaultKeyVersion(1000000199, lowerKey);
+    const equalVersion = deriveVaultKeyVersion(1000000200, equalKey);
+    const higherVersion = deriveVaultKeyVersion(1000000201, higherKey);
+    await registry.register({ keyVersion: lowerVersion });
+    await registry.register({ keyVersion: equalVersion });
+    await registry.register({ keyVersion: higherVersion });
+
+    await assert.rejects(
+      registry.withActiveVersion(
+        {
+          keyVersion: lowerVersion,
+          expectedActiveKeyVersion: activeKeyVersion
+        },
+        async () => true
+      ),
+      { code: "vault_key_activation_generation_not_monotonic" }
+    );
+    await assert.rejects(
+      registry.withActiveVersion(
+        {
+          keyVersion: equalVersion,
+          expectedActiveKeyVersion: activeKeyVersion
+        },
+        async () => true
+      ),
+      { code: "vault_key_activation_generation_not_monotonic" }
+    );
+    await assert.rejects(
+      registry.withActiveVersion(
+        {
+          keyVersion: higherVersion,
+          expectedActiveKeyVersion: lowerVersion
+        },
+        async () => true
+      ),
+      { code: "vault_key_activation_conflict" }
+    );
+    assert.equal(world.registry.active, activeKeyVersion);
+    assert.equal(world.registry.generation, 2);
+  } finally {
+    lowerKey.fill(0);
+    equalKey.fill(0);
+    higherKey.fill(0);
+  }
+});
 
 test("targets require separate exact logins and verified TLS", () => {
   const targets = inspectSeparatedTargets({

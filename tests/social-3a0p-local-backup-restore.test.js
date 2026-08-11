@@ -65,13 +65,13 @@ function backupConfig() {
   };
 }
 
-function restoreConfig() {
+function restoreConfig(database = restoreDatabase) {
   return {
     target: {
       public: {
         host: EXACT_LOOPBACK_HOST,
         port: "55432",
-        database: restoreDatabase,
+        database,
         login: "ia4tube_social_local_migration"
       }
     }
@@ -181,19 +181,23 @@ function restoreResult(overrides = {}) {
 }
 
 function lifecycle(profileId, events = [], overrides = {}) {
+  const {
+    database = restoreDatabase,
+    ...lifecycleOverrides
+  } = overrides;
   let exists = false;
   const base = {
     markedDisposable: true,
     productionLike: false,
     host: EXACT_LOOPBACK_HOST,
-    database: restoreDatabase,
+    database,
     profileId,
     runMarker,
     async create(identity) {
       events.push("create");
-      assert.deepEqual(identity, ownershipIdentity(profileId));
+      assert.deepEqual(identity, ownershipIdentity(profileId, database));
       exists = true;
-      return ownershipProof(profileId);
+      return ownershipProof(profileId, database);
     },
     async reconcileCreateFailure(identity) {
       events.push("reconcile-create");
@@ -218,7 +222,7 @@ function lifecycle(profileId, events = [], overrides = {}) {
       return !exists && proof.createdByThisRun === true;
     }
   };
-  return { ...base, ...overrides };
+  return { ...base, ...lifecycleOverrides };
 }
 
 function dependencies(
@@ -869,6 +873,109 @@ for (const profile of [profile0003, profile0004]) {
     ]);
   });
 }
+
+test("restore 0003 and 0004 keep verifier state, pools, authorities, buffers, and cleanup independent", async () => {
+  const specifications = [
+    Object.freeze({
+      profile: profile0003,
+      database: "ia4tube_social_disposable_restore_0003_independent",
+      authority: Object.freeze({
+        activationMarkerGeneration: 0,
+        activeOperationalKeyGeneration: null,
+        randomCandidate: 1000000041
+      })
+    }),
+    Object.freeze({
+      profile: profile0004,
+      database: "ia4tube_social_disposable_restore_0004_independent",
+      authority: Object.freeze({
+        activationMarkerGeneration: 3,
+        activeOperationalKeyGeneration: 1900000000,
+        randomCandidate: 1000000041
+      })
+    })
+  ];
+  const runs = [];
+
+  for (const [index, specification] of specifications.entries()) {
+    const { authority, database, profile } = specification;
+    const events = [];
+    const pool = Object.freeze({ id: `restore-${profile.id}-independent` });
+    const registry = { profileId: profile.id, vaultVerified: false };
+    const syntheticBuffer = Buffer.alloc(4, index + 1);
+    const config = restoreConfig(database);
+    const result = await runProfileRestore(restoreRequest(profile, events, {
+      config,
+      localBinding: bindingFor(config, "restore"),
+      pool,
+      lifecycle: lifecycle(profile.id, events, { database }),
+      async verifyRuntimeIsolation() {
+        events.push("runtime");
+        return true;
+      },
+      async verifyVault() {
+        events.push("vault");
+        assert.equal(registry.profileId, profile.id);
+        if (profile === profile0004) {
+          assert.ok(
+            authority.activeOperationalKeyGeneration > authority.randomCandidate
+          );
+          assert.ok(
+            authority.activationMarkerGeneration <
+              authority.activeOperationalKeyGeneration
+          );
+        }
+        registry.vaultVerified = true;
+        return true;
+      },
+      async verify2ACompatibility() {
+        events.push("2a");
+        assert.equal(registry.vaultVerified, true);
+        return true;
+      },
+      async verifyRestoredProfile() {
+        events.push("profile");
+        return profile;
+      },
+      async closeVerifiers() {
+        events.push("close");
+        syntheticBuffer.fill(0);
+      },
+      dependencies: dependencies(events, {
+        async runLogicalRestore(options) {
+          events.push(["restore", options.operator.pool.id]);
+          assert.equal(await options.verifyRuntimeIsolation(), true);
+          assert.equal(await options.verifyVault(), true);
+          assert.equal(await options.verify2ACompatibility(), true);
+          return restoreResult();
+        }
+      }, profile)
+    }));
+
+    assert.equal(result.profileId, profile.id);
+    assert.equal(result.disposableTargetRemoved, true);
+    assert.deepEqual(events, [
+      "create",
+      "assert-created",
+      ["operator", pool.id],
+      ["restore", pool.id],
+      "runtime",
+      "vault",
+      "2a",
+      "profile",
+      "close",
+      "remove",
+      "assert-removed"
+    ]);
+    assert.deepEqual([...syntheticBuffer], [0, 0, 0, 0]);
+    runs.push({ authority, pool, registry, syntheticBuffer });
+  }
+
+  assert.notEqual(runs[0].authority, runs[1].authority);
+  assert.notEqual(runs[0].pool, runs[1].pool);
+  assert.notEqual(runs[0].registry, runs[1].registry);
+  assert.notEqual(runs[0].syntheticBuffer, runs[1].syntheticBuffer);
+});
 
 test("restore removes its disposable target after a runner failure", async () => {
   const events = [];

@@ -706,14 +706,14 @@ function restoreBehaviorFacadeFixture(options = {}) {
   });
 }
 
-test("evidence provenance matches the authorized workflow branch and parent", () => {
+test("evidence provenance matches the restore-vault generation-floor branch and parent", () => {
   assert.equal(
     BRANCH,
-    "social/checkpoint-3a0p-gate5-profile-constraint-catalog-20260811"
+    "social/checkpoint-3a0p-gate5-restore-vault-generation-floor-20260811"
   );
   assert.equal(
     BASE_COMMIT,
-    "d5b80c57454bd3759d8fc996120ffab6734062ee"
+    "6eac518e4001e816ae554e299c34ef7ab54c1cfd"
   );
   const workflow = JSON.parse(fs.readFileSync(
     path.join(ROOT, ".github", "workflows", "social-3a0p-linux-physical-gates.yml"),
