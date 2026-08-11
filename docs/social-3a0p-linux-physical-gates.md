@@ -1,14 +1,15 @@
 # Checkpoint Social 3A-0P — gates físicos Linux isolados
 
-## Contrato canônico da procedência sanitizada do Gate 4
+## Contrato canônico da procedência sanitizada de capacidade do Gate 4
 
 Esta rota existe somente na branch
-`social/checkpoint-3a0p-linux-vault-failure-provenance-20260811`, criada a
-partir do commit exato `6fbcbdb75d3cbc0adea365530fa5c8fed1f01314`. O único
+`social/checkpoint-3a0p-linux-vault-connection-capacity-provenance-20260811`,
+criada a partir do commit exato
+`7d211ae664d40c4e8f7f51e478ac7da8f6715d0b`. O único
 commit autorizado deve ter esse commit como pai imediato e a mensagem integral:
 
 ```text
-[run-social-3a0p-linux-gate] classify Gate 4 vault failure provenance
+[run-social-3a0p-linux-gate] classify Gate 4 connection capacity
 ```
 
 O produto permanece idêntico a `fcfc92419021dae5f77baad731c634b10c275c5b`:
@@ -18,8 +19,9 @@ grants, não muda políticas RLS e não modifica schema, SCRAM, roles, produto,
 backup, restore, dependências ou os testes de segurança antigos. Os helpers
 PowerShell testados e o protocolo `IA4REC1` permanecem byte-semanticamente
 inalterados. A alteração atual é exclusivamente diagnóstica no harness físico:
-ela preserva a primeira subetapa interna que falhar no Gate 4 sem corrigir o
-cofre por hipótese, alterar AES-256-GCM, AAD, rotação, persistência ou cleanup.
+ela complementa a primeira falha V22/53300 já preservada com limites e
+contadores sanitizados, sem corrigir capacidade, alterar AES-256-GCM, AAD,
+rotação, persistência, pools ou cleanup.
 O workflow mantém a rota normal: `npm test` uma vez no Windows e, somente após
 seu sucesso, o job Linux físico preservado.
 
@@ -320,7 +322,45 @@ A classificação canônica é
 `gate4_vault_internal_failure_provenance_unavailable`. A evidência não comprova
 a causa interna. Portanto, ela não atribui a falha a AES-256-GCM, PostgreSQL,
 rotação, AAD, registro de chaves, serviço de credenciais, isolamento ou cleanup.
-Este documento não declara novo run, novo resultado físico ou causa posterior.
+Essa era a classificação comprovada naquele run, antes da instrumentação de
+subetapas executada no run preservado a seguir.
+
+## Run físico `31459668323` preservado
+
+O run `31459668323`, `run_attempt=1`, executou o commit
+`7d211ae664d40c4e8f7f51e478ac7da8f6715d0b`, cujo pai exato é
+`6fbcbdb75d3cbc0adea365530fa5c8fed1f01314`. A validação local preservada
+registrou 1.508 testes: 1.501 aprovados, zero falhas, 2 ignorados e 5 pendentes.
+No run hospedado, Windows, pré-gate Linux e Gates 1, 2 e 3 foram aprovados. O
+Gate 4 falhou, o Gate 5 não iniciou, o artifact foi aprovado e o cleanup
+terminou aprovado com resíduos zero.
+
+A primeira falha comprovada permaneceu em `phase=vault`, com o objeto fechado
+`gate4FailureProvenance` igual semanticamente a:
+
+- `operation=persisted`;
+- `substep=V22`;
+- `operationClass=postgres_runtime_isolation`;
+- `causalCode=gate4_error_code_53300`;
+- `lastCompletedSubstep=V21`;
+- `externalProcessStarted=false`;
+- `exitCode=null`;
+- `signal=null`.
+
+O SQLSTATE `53300` significa `too_many_connections`. V01–V09, V10–V19, V20 e
+V21 foram concluídas; V22 encontrou a falha; V23–V25 não executaram. Portanto,
+o cofre base, o cofre suplementar e a criação dos verificadores persistidos
+foram aprovados, mas o isolamento runtime persistido não foi concluído e a
+verificação criptográfica persistida V23 não iniciou. A classificação canônica
+da presente rota é
+`gate4_v22_postgres_connection_capacity_source_unresolved`.
+
+Esse resultado comprova somente a classe de capacidade `53300`. Ele não
+atribui a origem a AES-256-GCM, AAD, ciphertext, nonce, auth tag, chave,
+rotação, registro de chaves, RLS, login runtime ou migration específico,
+`max_connections`, `CONNECTION LIMIT` ou vazamento de pool. Este documento
+registra esse run anterior e o contrato diagnóstico abaixo; não declara que a
+nova branch tenha sido executada, aprovada ou enviada.
 
 ## Contrato fechado de `gate4FailureProvenance`
 
@@ -397,6 +437,106 @@ argumentos, caminhos, ambiente, stdout, stderr, stack, mensagem ou objeto de
 erro bruto. O fallback sanitizado preserva `gate4FailureProvenance` somente
 depois da validação integral desse contrato.
 
+## Contrato fechado de `gate4ConnectionCapacityDiagnostics`
+
+`gate4ConnectionCapacityDiagnostics` é `null` quando V22 não falha com
+`gate4_error_code_53300`. Quando e somente quando essa combinação ocorre, ele é
+um objeto fechado com exatamente oito chaves: `version`, `capturedAtSubstep`,
+`sqlstate`, `server`, `database`, `roles`, `pools` e `classification`. Não há
+campo `snapshotAvailable`, `diagnosticsAvailable`, `captureError` ou qualquer
+outra chave superior. Os valores fixos são `version=1`,
+`capturedAtSubstep=V22` e `sqlstate=53300`.
+
+`server` contém exatamente `maxConnections`, `reservedConnections`,
+`superuserReservedConnections` e `clientConnectionsBeforeV22Failure`.
+`database` contém exatamente `connectionLimit` e
+`clientConnectionsBeforeV22Failure`. `roles` contém exatamente as categorias
+observacionais `provisioner`, `migration` e `runtime`; cada uma contém somente
+`connectionLimit` e `clientConnectionsBeforeV22Failure`. O nome antigo
+`clientConnectionsBeforeV22` é recusado.
+
+A fotografia PostgreSQL é tudo-ou-nada. Quando disponível, todos os doze
+campos derivados do banco são inteiros não nulos: `maxConnections` é maior que
+zero; reservas e contagens são maiores ou iguais a zero; limites de banco e
+roles aceitam somente `-1` ou inteiro maior ou igual a zero. Quando
+indisponível, todos os doze campos são `null`. Fotografia parcialmente nula é
+inválida; zero, `-1`, defaults do PostgreSQL, documentação ou valores de outro
+run nunca substituem indisponibilidade. Nesse estado, a classificação é
+obrigatoriamente `capacity_snapshot_inconclusive`.
+
+`pools` contém exatamente `mainMigration`, `mainRuntime`,
+`verifierMigration` e `verifierRuntime`. Cada pool contém exatamente
+`configuredMax`, `totalCount`, `idleCount`, `waitingCount`, `connectAttempts`,
+`connectSucceeded` e `connectionCapacityFailures`. Esses contadores são sempre
+inteiros locais e nunca `null`; `configuredMax` é maior que zero e os demais
+são maiores ou iguais a zero. `connectionCapacityFailures` conta somente
+falhas `53300`. Configuração completa, connection string, login, senha, host e
+`application_name` não entram na evidência.
+
+As únicas sete classificações permitidas são:
+
+1. `server_connection_slots_reached`;
+2. `database_connection_limit_reached`;
+3. `runtime_role_connection_limit_reached`;
+4. `migration_role_connection_limit_reached`;
+5. `multiple_connection_limits_reached`;
+6. `verifier_pool_capacity_collision`;
+7. `capacity_snapshot_inconclusive`.
+
+`provisioner_role_connection_limit_reached` não pertence à allowlist. Os
+números de `roles.provisioner` permanecem observacionais, nunca selecionam uma
+causa e não participam da classificação múltipla.
+
+A classificação usa somente aritmética comprovável sobre uma fotografia
+integral. Servidor é selecionado apenas quando limites, reservas e a categoria
+do pool que recebeu `53300` comprovam a indisponibilidade de slot sem depender
+de atributo não observado. Banco exige limite não negativo, contagem maior ou
+igual ao limite e ao menos um pool com falha de capacidade. Runtime exige o
+mesmo limite atingido em `roles.runtime` e falha em `mainRuntime` ou
+`verifierRuntime`; migration exige a condição equivalente e falha em
+`mainMigration` ou `verifierMigration`. `multiple_connection_limits_reached`
+exige duas ou mais condições comprovadas entre servidor, banco, runtime e
+migration.
+
+`verifier_pool_capacity_collision` exige fotografia integral, nenhuma dessas
+quatro capacidades comprovadamente atingida, falha em `verifierMigration` ou
+`verifierRuntime` e contadores que comprovem sobreposição com o pool principal
+da mesma categoria. Operando nulo, categoria causal indeterminada, fotografia
+ausente ou parcial, aritmética insuficiente ou qualquer ambiguidade produzem
+`capacity_snapshot_inconclusive`; nenhuma conclusão é fabricada.
+
+A captura é armada imediatamente antes de V22, com latch local fechado
+`not_attempted`, `captured` ou `unavailable`, que não entra na evidência. A
+primeira conexão funcional que o próprio V22 já abrir executa a fotografia no
+mesmo client, no máximo uma vez, antes de devolvê-lo ao fluxo funcional quando
+o wrapper permitir. A segunda conexão nunca repete a fotografia. Não há novo
+pool, `pool.connect()` ou `pool.query()` diagnóstico, client administrativo ou
+provisioner, `psql`, shell, processo externo, retenção adicional, alteração de
+tamanho, retry ou segunda tentativa. A quantidade de conexões diagnósticas
+adicionais é exatamente zero.
+
+Se a primeira tentativa funcional de V22 já falhar com `53300`, a fotografia
+não é tentada e todos os campos PostgreSQL ficam `null`. Se o mesmo client abrir
+mas a consulta falhar, a fotografia inteira torna-se indisponível, não é
+repetida e V22 continua normalmente. Se V22 passar, o campo superior permanece
+`null`, mesmo que a fotografia tenha falhado. A contagem
+`clientConnectionsBeforeV22Failure` significa o valor obtido durante V22,
+depois que ao menos uma conexão funcional abriu e antes da primeira falha
+`53300` preservada; não significa o estado anterior ao início de V22.
+
+A consulta no mesmo client obtém somente inteiros necessários de configurações
+de conexão, `pg_database`, `pg_roles` e `pg_stat_activity`, parametrizando os
+identificadores sintéticos esperados e contando somente client backends. PID,
+query, `application_name`, `client_addr`, `backend_start`, state, login físico,
+nome do banco, host, IP, URL, senha, stdout, stderr, mensagem, stack, cause e o
+objeto `Error` não são selecionados nem armazenados.
+
+`gate4FailureProvenance` continua soberano e byte-semanticamente inalterado.
+Falha da fotografia, sanitização, classificação ou cleanup diagnóstico nunca
+substitui V22/53300. O novo campo é somente complemento numérico; erro
+diagnóstico degrada para fotografia toda `null` e
+`capacity_snapshot_inconclusive`, sem mascarar a primeira falha.
+
 ## Protocolo escalar fechado IA4REC1
 
 Os dois testes File.Replace continuam iniciando diretamente o Windows
@@ -441,7 +581,7 @@ Falhas de processo e protocolo são publicadas somente como
 
 ## Cadeia imutável e inventários fechados
 
-A cadeia autorizada é linear e contém onze commits entre a base da manutenção
+A cadeia autorizada é linear e contém doze commits entre a base da manutenção
 e o novo `HEAD`:
 
 1. `8eb4c4d71c6593f9c3e448be6ac52b1b0e8ba931`, pai
@@ -539,7 +679,7 @@ e o novo `HEAD`:
     `tests/social-3a0p-linux-gate.test.js`,
     `tests/social-3a0p-linux-physical-gates.test.js` e
     `tests/social-3a0p-linux-workflow.test.js`.
-11. O novo `HEAD`, pai exato
+11. `7d211ae664d40c4e8f7f51e478ac7da8f6715d0b`, pai exato
     `6fbcbdb75d3cbc0adea365530fa5c8fed1f01314`, mensagem
     `[run-social-3a0p-linux-gate] classify Gate 4 vault failure provenance` e
     inventário fechado de exatamente nove caminhos:
@@ -552,9 +692,20 @@ e o novo `HEAD`:
     `tests/social-3a0p-linux-physical-gates.test.js`,
     `tests/social-3a0p-local-connector-physical-gates.test.js` e
     `tests/social-3a0p-linux-workflow.test.js`.
+12. O novo `HEAD`, pai exato
+    `7d211ae664d40c4e8f7f51e478ac7da8f6715d0b`, mensagem
+    `[run-social-3a0p-linux-gate] classify Gate 4 connection capacity` e
+    inventário fechado de exatamente sete caminhos:
+    `.github/workflows/social-3a0p-linux-physical-gates.yml`,
+    `docs/social-3a0p-linux-physical-gates.md`,
+    `scripts/social-3a0p-linux-gate.js`,
+    `scripts/social-3a0p-linux-physical-gates.js`,
+    `tests/social-3a0p-linux-gate.test.js`,
+    `tests/social-3a0p-linux-physical-gates.test.js` e
+    `tests/social-3a0p-linux-workflow.test.js`.
 
 Os guards dos dois jobs verificam pais, mensagens, ancestralidade linear,
-contagem onze e cada um desses inventários sem prefixo, glob ou diretório
+contagem doze e cada um desses inventários sem prefixo, glob ou diretório
 inteiro.
 
 ## Restauração da rota executável normal
@@ -1394,7 +1545,12 @@ artifact.
 Tanto a evidência normal quanto a evidência de falha e o fallback sanitizado
 incluem `gate4FailureProvenance`. O valor é `null` fora de uma falha observada no
 Gate 4 e, dentro dela, só pode ser o objeto validado de oito campos definido
-acima. Falhas anteriores ao Gate 4 mantêm esse campo `null`; os contratos
+acima. Esses mesmos três caminhos incluem
+`gate4ConnectionCapacityDiagnostics`: ele é `null` salvo na combinação fechada
+V22/`gate4_error_code_53300`, quando preserva somente o objeto numérico
+integralmente validado. O fallback rejeita fotografia parcialmente nula,
+classificação fora da allowlist e qualquer chave extra ou sensível. Falhas
+anteriores ao Gate 4 mantêm os dois campos `null`; os contratos
 `gate3FailureProvenance`, `rlsFailureProvenance`,
 `backupRestoreFailureProvenance`, `schemaProfileDiagnostics` e status do
 processo permanecem semanticamente inalterados.

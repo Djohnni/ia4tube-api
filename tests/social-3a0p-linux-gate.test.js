@@ -50,12 +50,15 @@ const {
   GATE_PROCESS_STATUS_FILE,
   GATE_PROCESS_STATUS_HASH_FILE,
   canonicalJson,
+  classifyGate4ConnectionCapacityDiagnostics,
   containsMarkerInTree,
   createBackupRestoreProvenanceTracker,
   createBackupTransportBridge,
   createDrainAwareRunTool,
   createGate1MigrationPoolLifecycle,
   createGate3FailureProvenanceTracker,
+  createGate4ConnectionCapacityDiagnostics,
+  createGate4ConnectionCapacityDiagnosticsRecorder,
   createGate4FailureProvenanceTracker,
   createLinuxProfile0003PlansFacade,
   createLinuxProfileBackupRunner,
@@ -90,6 +93,7 @@ const {
   sanitizedBackupRestoreFailureProvenance,
   sanitizedFailureEvidence,
   sanitizedGate3FailureProvenance,
+  sanitizedGate4ConnectionCapacityDiagnostics,
   sanitizedGate4FailureProvenance,
   sanitizedGateProcessStatus,
   sanitizedRlsFailureProvenance,
@@ -702,11 +706,11 @@ function restoreBehaviorFacadeFixture(options = {}) {
 test("evidence provenance matches the authorized workflow branch and parent", () => {
   assert.equal(
     BRANCH,
-    "social/checkpoint-3a0p-linux-vault-failure-provenance-20260811"
+    "social/checkpoint-3a0p-linux-vault-connection-capacity-provenance-20260811"
   );
   assert.equal(
     BASE_COMMIT,
-    "6fbcbdb75d3cbc0adea365530fa5c8fed1f01314"
+    "7d211ae664d40c4e8f7f51e478ac7da8f6715d0b"
   );
   const workflow = JSON.parse(fs.readFileSync(
     path.join(ROOT, ".github", "workflows", "social-3a0p-linux-physical-gates.yml"),
@@ -2103,6 +2107,138 @@ const GATE4_BOUNDARIES = Object.freeze([
   ["persisted", "V25", "memory_cleanup"]
 ]);
 
+function gate4CapacityPool(overrides = {}) {
+  return {
+    configuredMax: 2,
+    totalCount: 0,
+    idleCount: 0,
+    waitingCount: 0,
+    connectAttempts: 0,
+    connectSucceeded: 0,
+    connectionCapacityFailures: 0,
+    ...overrides
+  };
+}
+
+function gate4CapacityRaw(overrides = {}) {
+  const roleOverrides = overrides.roles || {};
+  const poolOverrides = overrides.pools || {};
+  return {
+    server: {
+      maxConnections: 100,
+      reservedConnections: 5,
+      superuserReservedConnections: 3,
+      clientConnectionsBeforeV22Failure: 20,
+      ...(overrides.server || {})
+    },
+    database: {
+      connectionLimit: -1,
+      clientConnectionsBeforeV22Failure: 20,
+      ...(overrides.database || {})
+    },
+    roles: {
+      provisioner: {
+        connectionLimit: -1,
+        clientConnectionsBeforeV22Failure: 0,
+        ...(roleOverrides.provisioner || {})
+      },
+      migration: {
+        connectionLimit: -1,
+        clientConnectionsBeforeV22Failure: 1,
+        ...(roleOverrides.migration || {})
+      },
+      runtime: {
+        connectionLimit: -1,
+        clientConnectionsBeforeV22Failure: 1,
+        ...(roleOverrides.runtime || {})
+      }
+    },
+    pools: {
+      mainMigration: gate4CapacityPool({
+        configuredMax: 2,
+        totalCount: 1,
+        idleCount: 1,
+        ...(poolOverrides.mainMigration || {})
+      }),
+      mainRuntime: gate4CapacityPool({
+        configuredMax: 3,
+        totalCount: 1,
+        idleCount: 1,
+        ...(poolOverrides.mainRuntime || {})
+      }),
+      verifierMigration: gate4CapacityPool({
+        configuredMax: 1,
+        ...(poolOverrides.verifierMigration || {})
+      }),
+      verifierRuntime: gate4CapacityPool({
+        configuredMax: 2,
+        ...(poolOverrides.verifierRuntime || {})
+      })
+    }
+  };
+}
+
+function gate4RuntimeCapacityFailure(overrides = {}) {
+  const raw = gate4CapacityRaw(overrides);
+  raw.pools.verifierRuntime = gate4CapacityPool({
+    configuredMax: 2,
+    totalCount: 1,
+    connectAttempts: 2,
+    connectSucceeded: 1,
+    connectionCapacityFailures: 1,
+    ...(overrides.pools?.verifierRuntime || {})
+  });
+  return raw;
+}
+
+function gate4MigrationCapacityFailure(overrides = {}) {
+  const raw = gate4CapacityRaw(overrides);
+  raw.pools.verifierMigration = gate4CapacityPool({
+    configuredMax: 1,
+    totalCount: 1,
+    connectAttempts: 2,
+    connectSucceeded: 1,
+    connectionCapacityFailures: 1,
+    ...(overrides.pools?.verifierMigration || {})
+  });
+  return raw;
+}
+
+function gate4UnavailableSnapshot(overrides = {}) {
+  const raw = gate4CapacityRaw(overrides);
+  raw.server = {
+    maxConnections: null,
+    reservedConnections: null,
+    superuserReservedConnections: null,
+    clientConnectionsBeforeV22Failure: null
+  };
+  raw.database = {
+    connectionLimit: null,
+    clientConnectionsBeforeV22Failure: null
+  };
+  for (const category of ["provisioner", "migration", "runtime"]) {
+    raw.roles[category] = {
+      connectionLimit: null,
+      clientConnectionsBeforeV22Failure: null
+    };
+  }
+  return raw;
+}
+
+function gate4V22CapacityFailureProvenance(overrides = {}) {
+  return {
+    operation: "persisted",
+    substep: "V22",
+    operationClass: "postgres_runtime_isolation",
+    causalCode: "gate4_error_code_53300",
+    lastCompletedSubstep: "V21",
+    externalProcessStarted: false,
+    exitCode: null,
+    signal: null,
+    ...overrides
+  };
+}
+
 test("Gate 3 causal classification is closed and never serializes raw error context", () => {
   assert.equal(gate3FailureCode({ code: "linux_safe_failure" }), "linux_safe_failure");
   assert.equal(gate3FailureCode({ code: "23505" }), "gate3_error_code_23505");
@@ -2265,6 +2401,739 @@ test("Gate 4 causal classification is closed and never reads raw messages", () =
     cause: { code: "23514", cause: { code: "forbidden_nested" }, message: "secret" }
   }), "gate4_error_code_23514");
   assert.equal(gate4FailureCode({ code: "postgres_rollback_failed" }), "postgres_rollback_failed");
+});
+
+test("Gate 4 connection capacity diagnostics expose only the exact closed schema", () => {
+  const raw = gate4RuntimeCapacityFailure({
+    roles: {
+      runtime: {
+        connectionLimit: 1,
+        clientConnectionsBeforeV22Failure: 1
+      }
+    }
+  });
+  const diagnostics = createGate4ConnectionCapacityDiagnostics(raw);
+  assert.ok(diagnostics);
+  assert.deepEqual(Object.keys(diagnostics).sort(), [
+    "capturedAtSubstep", "classification", "database", "pools", "roles",
+    "server", "sqlstate", "version"
+  ]);
+  assert.equal(diagnostics.version, 1);
+  assert.equal(diagnostics.capturedAtSubstep, "V22");
+  assert.equal(diagnostics.sqlstate, "53300");
+  assert.equal(diagnostics.classification, "runtime_role_connection_limit_reached");
+  assert.deepEqual(Object.keys(diagnostics.server).sort(), [
+    "clientConnectionsBeforeV22Failure", "maxConnections",
+    "reservedConnections", "superuserReservedConnections"
+  ]);
+  assert.deepEqual(Object.keys(diagnostics.database).sort(), [
+    "clientConnectionsBeforeV22Failure", "connectionLimit"
+  ]);
+  assert.deepEqual(Object.keys(diagnostics.roles).sort(), [
+    "migration", "provisioner", "runtime"
+  ]);
+  for (const category of ["provisioner", "migration", "runtime"]) {
+    assert.deepEqual(Object.keys(diagnostics.roles[category]).sort(), [
+      "clientConnectionsBeforeV22Failure", "connectionLimit"
+    ]);
+  }
+  assert.deepEqual(Object.keys(diagnostics.pools).sort(), [
+    "mainMigration", "mainRuntime", "verifierMigration", "verifierRuntime"
+  ]);
+  for (const pool of Object.values(diagnostics.pools)) {
+    assert.deepEqual(Object.keys(pool).sort(), [
+      "configuredMax", "connectAttempts", "connectSucceeded",
+      "connectionCapacityFailures", "idleCount", "totalCount", "waitingCount"
+    ]);
+    for (const value of Object.values(pool)) assert.equal(Number.isSafeInteger(value), true);
+    assert.equal(Object.isFrozen(pool), true);
+  }
+  for (const value of [
+    ...Object.values(diagnostics.server),
+    ...Object.values(diagnostics.database),
+    ...Object.values(diagnostics.roles.provisioner),
+    ...Object.values(diagnostics.roles.migration),
+    ...Object.values(diagnostics.roles.runtime)
+  ]) assert.equal(Number.isSafeInteger(value), true);
+  assert.equal(Object.isFrozen(diagnostics), true);
+  assert.equal(Object.isFrozen(diagnostics.server), true);
+  assert.equal(Object.isFrozen(diagnostics.database), true);
+  assert.equal(Object.isFrozen(diagnostics.roles), true);
+  assert.equal(Object.isFrozen(diagnostics.pools), true);
+  assert.deepEqual(sanitizedGate4ConnectionCapacityDiagnostics(diagnostics), diagnostics);
+  assert.equal(Object.hasOwn(diagnostics.server, "clientConnectionsBeforeV22"), false);
+
+  const serialized = canonicalJson(diagnostics);
+  for (const forbidden of [
+    "databaseName", "roleName", "pid", "application_name", "query", "host",
+    "127.0.0.1", "postgresql://", "password", "message", "stack", "cause",
+    "stdout", "stderr", "error"
+  ]) assert.equal(serialized.toLowerCase().includes(forbidden.toLowerCase()), false, forbidden);
+});
+
+test("Gate 4 connection capacity snapshot is strictly all-values or all-null", () => {
+  const unavailableRaw = gate4UnavailableSnapshot({
+    pools: {
+      verifierRuntime: {
+        totalCount: 1,
+        connectAttempts: 2,
+        connectSucceeded: 1,
+        connectionCapacityFailures: 1
+      }
+    }
+  });
+  const unavailable = createGate4ConnectionCapacityDiagnostics(unavailableRaw);
+  assert.ok(unavailable);
+  assert.equal(unavailable.classification, "capacity_snapshot_inconclusive");
+  const postgresValues = [
+    ...Object.values(unavailable.server),
+    ...Object.values(unavailable.database),
+    ...Object.values(unavailable.roles.provisioner),
+    ...Object.values(unavailable.roles.migration),
+    ...Object.values(unavailable.roles.runtime)
+  ];
+  assert.equal(postgresValues.length, 12);
+  assert.equal(postgresValues.every((value) => value === null), true);
+  for (const pool of Object.values(unavailable.pools)) {
+    assert.equal(Object.values(pool).every(Number.isSafeInteger), true);
+  }
+  assert.deepEqual(sanitizedGate4ConnectionCapacityDiagnostics(unavailable), unavailable);
+
+  const partialRaw = gate4RuntimeCapacityFailure();
+  partialRaw.server.maxConnections = null;
+  assert.equal(createGate4ConnectionCapacityDiagnostics(partialRaw), null);
+  assert.equal(
+    sanitizedGate4ConnectionCapacityDiagnostics({
+      ...unavailable,
+      server: { ...unavailable.server, maxConnections: 100 }
+    }),
+    null
+  );
+  const zeroRaw = gate4RuntimeCapacityFailure();
+  zeroRaw.server.maxConnections = 0;
+  assert.equal(createGate4ConnectionCapacityDiagnostics(zeroRaw), null);
+  assert.equal(
+    sanitizedGate4ConnectionCapacityDiagnostics({
+      ...unavailable,
+      server: { ...unavailable.server, maxConnections: 0 }
+    }),
+    null
+  );
+  assert.equal(classifyGate4ConnectionCapacityDiagnostics(partialRaw), "capacity_snapshot_inconclusive");
+  assert.equal(classifyGate4ConnectionCapacityDiagnostics(zeroRaw), "capacity_snapshot_inconclusive");
+});
+
+test("Gate 4 connection capacity sanitizer refuses coercion, legacy names and invalid limits", () => {
+  const valid = createGate4ConnectionCapacityDiagnostics(gate4RuntimeCapacityFailure());
+  assert.ok(valid);
+  const oldServer = { ...valid.server };
+  oldServer.clientConnectionsBeforeV22 = oldServer.clientConnectionsBeforeV22Failure;
+  delete oldServer.clientConnectionsBeforeV22Failure;
+  const oldDatabase = { ...valid.database };
+  oldDatabase.clientConnectionsBeforeV22 = oldDatabase.clientConnectionsBeforeV22Failure;
+  delete oldDatabase.clientConnectionsBeforeV22Failure;
+  const oldRuntime = { ...valid.roles.runtime };
+  oldRuntime.clientConnectionsBeforeV22 = oldRuntime.clientConnectionsBeforeV22Failure;
+  delete oldRuntime.clientConnectionsBeforeV22Failure;
+  const getter = { ...valid };
+  Object.defineProperty(getter, "classification", {
+    enumerable: true,
+    get() { throw new Error("secret getter must not run"); }
+  });
+  const invalidCandidates = [
+    { ...valid, version: "1" },
+    { ...valid, capturedAtSubstep: "v22" },
+    { ...valid, sqlstate: 53300 },
+    { ...valid, classification: "provisioner_role_connection_limit_reached" },
+    { ...valid, classification: "capacity_snapshot_inconclusive" },
+    { ...valid, server: oldServer },
+    { ...valid, database: oldDatabase },
+    { ...valid, roles: { ...valid.roles, runtime: oldRuntime } },
+    { ...valid, server: { ...valid.server, maxConnections: 1.5 } },
+    { ...valid, server: { ...valid.server, reservedConnections: -1 } },
+    {
+      ...valid,
+      server: {
+        ...valid.server,
+        reservedConnections: valid.server.maxConnections - 1,
+        superuserReservedConnections: 1
+      }
+    },
+    { ...valid, database: { ...valid.database, connectionLimit: -2 } },
+    {
+      ...valid,
+      roles: {
+        ...valid.roles,
+        runtime: { ...valid.roles.runtime, clientConnectionsBeforeV22Failure: "1" }
+      }
+    },
+    {
+      ...valid,
+      pools: {
+        ...valid.pools,
+        verifierRuntime: { ...valid.pools.verifierRuntime, configuredMax: 0 }
+      }
+    },
+    {
+      ...valid,
+      pools: {
+        ...valid.pools,
+        verifierRuntime: { ...valid.pools.verifierRuntime, waitingCount: -1 }
+      }
+    },
+    { ...valid, extra: 1 },
+    getter
+  ];
+  for (const candidate of invalidCandidates) {
+    assert.equal(sanitizedGate4ConnectionCapacityDiagnostics(candidate), null);
+  }
+  const acceptedMinusOne = gate4RuntimeCapacityFailure({
+    database: { connectionLimit: -1 },
+    roles: {
+      provisioner: { connectionLimit: -1 },
+      migration: { connectionLimit: -1 },
+      runtime: { connectionLimit: -1 }
+    }
+  });
+  assert.ok(createGate4ConnectionCapacityDiagnostics(acceptedMinusOne));
+  for (const field of [
+    ["server", "maxConnections"],
+    ["server", "clientConnectionsBeforeV22Failure"],
+    ["database", "clientConnectionsBeforeV22Failure"]
+  ]) {
+    const raw = gate4RuntimeCapacityFailure();
+    raw[field[0]][field[1]] = Number.MAX_SAFE_INTEGER + 1;
+    assert.equal(createGate4ConnectionCapacityDiagnostics(raw), null);
+  }
+});
+
+test("Gate 4 connection capacity classifier proves only the seven authorized outcomes", () => {
+  const server = gate4RuntimeCapacityFailure({
+    server: {
+      maxConnections: 20,
+      reservedConnections: 5,
+      superuserReservedConnections: 3,
+      clientConnectionsBeforeV22Failure: 20
+    }
+  });
+  assert.equal(
+    classifyGate4ConnectionCapacityDiagnostics(server),
+    "server_connection_slots_reached"
+  );
+  const serverWithoutObservedFailure = gate4CapacityRaw({
+    server: { clientConnectionsBeforeV22Failure: 100 }
+  });
+  assert.equal(
+    classifyGate4ConnectionCapacityDiagnostics(serverWithoutObservedFailure),
+    "capacity_snapshot_inconclusive"
+  );
+  const reservedArithmeticOnly = gate4RuntimeCapacityFailure({
+    server: { clientConnectionsBeforeV22Failure: 92 }
+  });
+  assert.equal(
+    classifyGate4ConnectionCapacityDiagnostics(reservedArithmeticOnly),
+    "verifier_pool_capacity_collision"
+  );
+  const database = gate4RuntimeCapacityFailure({
+    database: {
+      connectionLimit: 20,
+      clientConnectionsBeforeV22Failure: 20
+    }
+  });
+  assert.equal(
+    classifyGate4ConnectionCapacityDiagnostics(database),
+    "database_connection_limit_reached"
+  );
+  const runtime = gate4RuntimeCapacityFailure({
+    roles: {
+      runtime: {
+        connectionLimit: 1,
+        clientConnectionsBeforeV22Failure: 1
+      }
+    }
+  });
+  assert.equal(
+    classifyGate4ConnectionCapacityDiagnostics(runtime),
+    "runtime_role_connection_limit_reached"
+  );
+  const migration = gate4MigrationCapacityFailure({
+    roles: {
+      migration: {
+        connectionLimit: 1,
+        clientConnectionsBeforeV22Failure: 1
+      }
+    }
+  });
+  assert.equal(
+    classifyGate4ConnectionCapacityDiagnostics(migration),
+    "migration_role_connection_limit_reached"
+  );
+  const multiple = gate4RuntimeCapacityFailure({
+    database: {
+      connectionLimit: 20,
+      clientConnectionsBeforeV22Failure: 20
+    },
+    roles: {
+      provisioner: {
+        connectionLimit: 0,
+        clientConnectionsBeforeV22Failure: 99
+      },
+      runtime: {
+        connectionLimit: 1,
+        clientConnectionsBeforeV22Failure: 1
+      }
+    }
+  });
+  assert.equal(
+    classifyGate4ConnectionCapacityDiagnostics(multiple),
+    "multiple_connection_limits_reached"
+  );
+  assert.equal(
+    classifyGate4ConnectionCapacityDiagnostics(gate4RuntimeCapacityFailure()),
+    "verifier_pool_capacity_collision"
+  );
+  assert.equal(
+    classifyGate4ConnectionCapacityDiagnostics(gate4UnavailableSnapshot()),
+    "capacity_snapshot_inconclusive"
+  );
+  const provisionerOnly = gate4CapacityRaw({
+    roles: {
+      provisioner: {
+        connectionLimit: 0,
+        clientConnectionsBeforeV22Failure: 50
+      }
+    }
+  });
+  assert.equal(
+    classifyGate4ConnectionCapacityDiagnostics(provisionerOnly),
+    "capacity_snapshot_inconclusive"
+  );
+  const provisionerIgnored = gate4RuntimeCapacityFailure({
+    roles: {
+      provisioner: {
+        connectionLimit: 0,
+        clientConnectionsBeforeV22Failure: 50
+      }
+    }
+  });
+  assert.equal(
+    classifyGate4ConnectionCapacityDiagnostics(provisionerIgnored),
+    classifyGate4ConnectionCapacityDiagnostics(gate4RuntimeCapacityFailure())
+  );
+});
+
+test("Gate 4 connection capacity role and collision attribution are category-closed", () => {
+  const runtimeFailureMigrationLimit = gate4RuntimeCapacityFailure({
+    roles: {
+      migration: {
+        connectionLimit: 1,
+        clientConnectionsBeforeV22Failure: 1
+      }
+    }
+  });
+  assert.equal(
+    classifyGate4ConnectionCapacityDiagnostics(runtimeFailureMigrationLimit),
+    "verifier_pool_capacity_collision"
+  );
+  const migrationFailureRuntimeLimit = gate4MigrationCapacityFailure({
+    roles: {
+      runtime: {
+        connectionLimit: 1,
+        clientConnectionsBeforeV22Failure: 1
+      }
+    }
+  });
+  assert.equal(
+    classifyGate4ConnectionCapacityDiagnostics(migrationFailureRuntimeLimit),
+    "verifier_pool_capacity_collision"
+  );
+  const mainRuntimeFailure = gate4CapacityRaw({
+    roles: {
+      runtime: {
+        connectionLimit: 1,
+        clientConnectionsBeforeV22Failure: 1
+      }
+    },
+    pools: {
+      mainRuntime: {
+        connectAttempts: 1,
+        connectionCapacityFailures: 1
+      }
+    }
+  });
+  assert.equal(
+    classifyGate4ConnectionCapacityDiagnostics(mainRuntimeFailure),
+    "runtime_role_connection_limit_reached"
+  );
+  const noVerifierOverlap = gate4RuntimeCapacityFailure({
+    pools: {
+      verifierRuntime: {
+        totalCount: 0,
+        connectAttempts: 1,
+        connectSucceeded: 0,
+        connectionCapacityFailures: 1
+      }
+    }
+  });
+  assert.equal(
+    classifyGate4ConnectionCapacityDiagnostics(noVerifierOverlap),
+    "capacity_snapshot_inconclusive"
+  );
+  const ambiguous = gate4RuntimeCapacityFailure({
+    pools: {
+      verifierMigration: {
+        totalCount: 1,
+        connectAttempts: 2,
+        connectSucceeded: 1,
+        connectionCapacityFailures: 1
+      }
+    }
+  });
+  assert.equal(
+    classifyGate4ConnectionCapacityDiagnostics(ambiguous),
+    "capacity_snapshot_inconclusive"
+  );
+  const ambiguousSingleRole = gate4RuntimeCapacityFailure({
+    roles: {
+      runtime: {
+        connectionLimit: 1,
+        clientConnectionsBeforeV22Failure: 1
+      }
+    },
+    pools: {
+      verifierMigration: {
+        totalCount: 1,
+        connectAttempts: 2,
+        connectSucceeded: 1,
+        connectionCapacityFailures: 1
+      }
+    }
+  });
+  assert.equal(
+    classifyGate4ConnectionCapacityDiagnostics(ambiguousSingleRole),
+    "capacity_snapshot_inconclusive"
+  );
+  const ambiguousMultiple = gate4RuntimeCapacityFailure({
+    roles: {
+      migration: {
+        connectionLimit: 1,
+        clientConnectionsBeforeV22Failure: 1
+      },
+      runtime: {
+        connectionLimit: 1,
+        clientConnectionsBeforeV22Failure: 1
+      }
+    },
+    pools: {
+      verifierMigration: {
+        totalCount: 1,
+        connectAttempts: 2,
+        connectSucceeded: 1,
+        connectionCapacityFailures: 1
+      }
+    }
+  });
+  assert.equal(
+    classifyGate4ConnectionCapacityDiagnostics(ambiguousMultiple),
+    "multiple_connection_limits_reached"
+  );
+  const noMainOverlap = gate4RuntimeCapacityFailure({
+    pools: { mainRuntime: { totalCount: 0, idleCount: 0 } }
+  });
+  assert.equal(
+    classifyGate4ConnectionCapacityDiagnostics(noMainOverlap),
+    "capacity_snapshot_inconclusive"
+  );
+  const unavailableCollision = gate4UnavailableSnapshot({
+    pools: {
+      verifierRuntime: {
+        totalCount: 1,
+        connectAttempts: 2,
+        connectSucceeded: 1,
+        connectionCapacityFailures: 1
+      }
+    }
+  });
+  assert.equal(
+    classifyGate4ConnectionCapacityDiagnostics(unavailableCollision),
+    "capacity_snapshot_inconclusive"
+  );
+});
+
+test("Gate 4 connection capacity pool counters are strict and observational", () => {
+  const valid = gate4RuntimeCapacityFailure();
+  const before = canonicalJson(valid);
+  assert.ok(createGate4ConnectionCapacityDiagnostics(valid));
+  assert.equal(canonicalJson(valid), before);
+  const invalidPoolChanges = [
+    { totalCount: 3 },
+    { totalCount: 0, idleCount: 1 },
+    { connectAttempts: 0, connectSucceeded: 1 },
+    { connectAttempts: 1, connectSucceeded: 1, connectionCapacityFailures: 1 },
+    { connectionCapacityFailures: -1 },
+    { waitingCount: 0.5 },
+    { connectAttempts: "2" }
+  ];
+  for (const change of invalidPoolChanges) {
+    const raw = gate4RuntimeCapacityFailure({
+      pools: { verifierRuntime: change }
+    });
+    assert.equal(createGate4ConnectionCapacityDiagnostics(raw), null);
+  }
+  const classifierSource = [
+    createGate4ConnectionCapacityDiagnostics,
+    classifyGate4ConnectionCapacityDiagnostics,
+    createGate4ConnectionCapacityDiagnosticsRecorder
+  ].map(String).join("\n");
+  for (const forbidden of [".connect(", ".query(", "retry", "setTimeout", "spawn("]) {
+    assert.equal(classifierSource.includes(forbidden), false, forbidden);
+  }
+});
+
+test("Gate 4 connection capacity recorder is first-write, immutable and V22-53300-only", () => {
+  const recorder = createGate4ConnectionCapacityDiagnosticsRecorder();
+  const raw = gate4RuntimeCapacityFailure({
+    roles: {
+      runtime: {
+        connectionLimit: 1,
+        clientConnectionsBeforeV22Failure: 1
+      }
+    }
+  });
+  assert.equal(recorder.attempted(), false);
+  assert.equal(recorder.record(raw), true);
+  assert.equal(recorder.attempted(), true);
+  const provenance = gate4V22CapacityFailureProvenance();
+  const first = recorder.forFailure(provenance);
+  assert.equal(first.classification, "runtime_role_connection_limit_reached");
+  raw.roles.runtime.connectionLimit = 99;
+  assert.equal(recorder.forFailure(provenance), first);
+  assert.equal(first.roles.runtime.connectionLimit, 1);
+  assert.equal(recorder.record(gate4MigrationCapacityFailure()), false);
+  assert.equal(recorder.forFailure(provenance), first);
+  for (const invalidProvenance of [
+    { ...provenance, operation: "supplemental" },
+    {
+      ...provenance,
+      substep: "V23",
+      operationClass: "postgres_vault_verification",
+      lastCompletedSubstep: "V22"
+    },
+    { ...provenance, operationClass: "postgres_vault_verification" },
+    { ...provenance, causalCode: "gate4_error_code_23505" },
+    { ...provenance, lastCompletedSubstep: "V20" },
+    { ...provenance, externalProcessStarted: true },
+    { ...provenance, exitCode: 1 },
+    { ...provenance, signal: "SIGTERM" }
+  ]) assert.equal(recorder.forFailure(invalidProvenance), null);
+
+  const partial = gate4RuntimeCapacityFailure();
+  partial.server.maxConnections = null;
+  assert.equal(createGate4ConnectionCapacityDiagnostics(partial), null);
+  const fallbackRecorder = createGate4ConnectionCapacityDiagnosticsRecorder();
+  assert.equal(fallbackRecorder.record(partial), true);
+  const inconclusive = fallbackRecorder.forFailure(provenance);
+  assert.equal(inconclusive.classification, "capacity_snapshot_inconclusive");
+  assert.equal(
+    [
+      ...Object.values(inconclusive.server),
+      ...Object.values(inconclusive.database),
+      ...Object.values(inconclusive.roles.provisioner),
+      ...Object.values(inconclusive.roles.migration),
+      ...Object.values(inconclusive.roles.runtime)
+    ].every((value) => value === null),
+    true
+  );
+  const hostileRecorder = createGate4ConnectionCapacityDiagnosticsRecorder();
+  const hostile = new Proxy({}, {
+    getPrototypeOf() { throw new Error("secret snapshot error"); }
+  });
+  assert.doesNotThrow(() => hostileRecorder.record(hostile));
+  assert.equal(hostileRecorder.record(raw), false);
+  assert.equal(hostileRecorder.forFailure(provenance), null);
+});
+
+test("Gate 4 connection capacity evidence and fallback require exact V22-53300 correlation", () => {
+  const provenance = gate4V22CapacityFailureProvenance();
+  const diagnostics = createGate4ConnectionCapacityDiagnostics(
+    gate4RuntimeCapacityFailure({
+      roles: {
+        runtime: {
+          connectionLimit: 1,
+          clientConnectionsBeforeV22Failure: 1
+        }
+      }
+    })
+  );
+  const source = {
+    firstFailure: { phase: "vault", code: "gate4_error_code_53300" },
+    gate4FailureProvenance: provenance,
+    gate4ConnectionCapacityDiagnostics: diagnostics,
+    cleanup: {
+      cleanupCompleted: true,
+      containerResiduals: 0,
+      volumeResiduals: 0,
+      networkResiduals: 0,
+      listenerResiduals: 0,
+      temporaryRootResiduals: 0
+    }
+  };
+  assert.equal(evidenceSafe(source), true);
+  const hiddenDiagnostics = { ...source };
+  Object.defineProperty(hiddenDiagnostics, "gate4ConnectionCapacityDiagnostics", {
+    enumerable: false,
+    value: diagnostics
+  });
+  assert.equal(evidenceSafe(hiddenDiagnostics), false);
+  const fallback = sanitizedFailureEvidence(source);
+  assert.deepEqual(fallback.gate4FailureProvenance, provenance);
+  assert.deepEqual(fallback.gate4ConnectionCapacityDiagnostics, diagnostics);
+  assert.equal(evidenceSafe(fallback), true);
+  assert.equal(evidenceSafe({ ...source, gate4ConnectionCapacityDiagnostics: null }), false);
+  const { gate4ConnectionCapacityDiagnostics: _missing, ...withoutDiagnostics } = source;
+  assert.equal(evidenceSafe(withoutDiagnostics), false);
+  for (const mismatch of [
+    { ...source, firstFailure: { phase: "rls_roles", code: "gate4_error_code_53300" } },
+    { ...source, firstFailure: { phase: "vault", code: "gate4_error_code_23505" } },
+    {
+      ...source,
+      gate4FailureProvenance: {
+        ...provenance,
+        causalCode: "gate4_error_code_23505"
+      }
+    }
+  ]) assert.equal(evidenceSafe(mismatch), false);
+  assert.equal(evidenceSafe({
+    firstFailure: { phase: "rls_roles", code: "linux_gate_unclassified_failure" },
+    gate4FailureProvenance: null,
+    gate4ConnectionCapacityDiagnostics: null
+  }), true);
+  assert.equal(evidenceSafe({
+    firstFailure: null,
+    gate4FailureProvenance: null,
+    gate4ConnectionCapacityDiagnostics: null
+  }), true);
+
+  const invalidClassification = {
+    ...diagnostics,
+    classification: "capacity_snapshot_inconclusive"
+  };
+  assert.equal(sanitizedGate4ConnectionCapacityDiagnostics(invalidClassification), null);
+  const degraded = sanitizedFailureEvidence({
+    ...source,
+    gate4ConnectionCapacityDiagnostics: invalidClassification
+  });
+  assert.equal(
+    degraded.gate4ConnectionCapacityDiagnostics.classification,
+    "capacity_snapshot_inconclusive"
+  );
+  assert.equal(
+    Object.values(degraded.gate4ConnectionCapacityDiagnostics.server)
+      .every((value) => value === null),
+    true
+  );
+  assert.equal(evidenceSafe(degraded), true);
+});
+
+test("Gate 4 connection capacity diagnostics discard sensitive and raw failure context", () => {
+ const raw = gate4RuntimeCapacityFailure();
+  // Synthetic test-only canaries used exclusively to prove evidence rejection.
+  function buildSyntheticEvidenceCredentialUrlCanary() {
+    const syntheticUrl = new URL("https://fixture.invalid/");
+    const syntheticUsernameComponents = ["evidence", "fixture"];
+    const syntheticPasswordComponents = ["negative", "canary"];
+    syntheticUrl.username = syntheticUsernameComponents.join("-");
+    syntheticUrl.password = syntheticPasswordComponents.join("-");
+    return syntheticUrl.href;
+  }
+  const SYNTHETIC_EVIDENCE_CREDENTIAL_URL_CANARY =
+    buildSyntheticEvidenceCredentialUrlCanary();
+  const SYNTHETIC_EVIDENCE_SENSITIVE_ASSIGNMENT_CANARY = "synthetic_password";
+  assert.equal(typeof SYNTHETIC_EVIDENCE_CREDENTIAL_URL_CANARY, "string");
+  const parsedSyntheticEvidenceCredentialUrlCanary =
+    new URL(SYNTHETIC_EVIDENCE_CREDENTIAL_URL_CANARY);
+  assert.equal(
+    parsedSyntheticEvidenceCredentialUrlCanary.hostname.endsWith(".invalid"),
+    true
+  );
+  assert.notEqual(parsedSyntheticEvidenceCredentialUrlCanary.username, "");
+  assert.notEqual(parsedSyntheticEvidenceCredentialUrlCanary.password, "");
+  assert.equal(parsedSyntheticEvidenceCredentialUrlCanary.search, "");
+  assert.equal(parsedSyntheticEvidenceCredentialUrlCanary.hash, "");
+
+ const forbiddenCandidates = {
+    databaseName: "synthetic_database",
+    roleName: "synthetic_role",
+    pid: 1234,
+    application_name: "synthetic_application",
+    query: "SELECT secret",
+    host: "127.0.0.1",
+    url: SYNTHETIC_EVIDENCE_CREDENTIAL_URL_CANARY,
+    password: SYNTHETIC_EVIDENCE_SENSITIVE_ASSIGNMENT_CANARY,
+    error: new Error("raw secret"),
+    message: "raw message",
+    stack: "raw stack",
+    cause: { code: "53300" },
+    uuid: "123e4567-e89b-12d3-a456-426614174000",
+    stdout: "raw stdout",
+    stderr: "raw stderr"
+  };
+  for (const [key, value] of Object.entries(forbiddenCandidates)) {
+    assert.equal(
+      createGate4ConnectionCapacityDiagnostics({ ...raw, [key]: value }),
+      null,
+      key
+    );
+  }
+  const diagnostics = createGate4ConnectionCapacityDiagnostics(raw);
+  const tainted = {
+    ...diagnostics,
+    query: "SELECT secret_uuid_123e4567-e89b-12d3-a456-426614174000"
+  };
+  assert.equal(sanitizedGate4ConnectionCapacityDiagnostics(tainted), null);
+  const fallback = sanitizedFailureEvidence({
+    firstFailure: { phase: "vault", code: "gate4_error_code_53300" },
+    gate4FailureProvenance: gate4V22CapacityFailureProvenance(),
+    gate4ConnectionCapacityDiagnostics: tainted,
+    cleanup: {
+      cleanupCompleted: true,
+      containerResiduals: 0,
+      volumeResiduals: 0,
+      networkResiduals: 0,
+      listenerResiduals: 0,
+      temporaryRootResiduals: 0
+    }
+  });
+  const serialized = canonicalJson(fallback);
+  for (const forbidden of [
+    "SELECT", "secret_uuid", "123e4567-e89b-12d3-a456-426614174000",
+    "postgresql://", "password", "stdout", "stderr", "message", "stack", "cause"
+  ]) assert.equal(serialized.includes(forbidden), false, forbidden);
+  assert.equal(
+    fallback.gate4ConnectionCapacityDiagnostics.classification,
+    "capacity_snapshot_inconclusive"
+  );
+  assert.equal(evidenceSafe(fallback), true);
+});
+
+test("Gate 4 connection capacity recorder is wired without changing Gate 4 provenance", () => {
+  const source = fs.readFileSync(
+    path.join(ROOT, "scripts", "social-3a0p-linux-gate.js"),
+    "utf8"
+  );
+  for (const needle of [
+    "createGate4ConnectionCapacityDiagnosticsRecorder();",
+    "gate4ConnectionCapacityDiagnostics: null",
+    "recordGate4ConnectionCapacityDiagnostics:",
+    "gate4ConnectionCapacityDiagnostics.record",
+    "gate4ConnectionCapacityDiagnostics.forFailure("
+  ]) assert.ok(source.includes(needle), needle);
+  const provenance = gate4V22CapacityFailureProvenance();
+  assert.deepEqual(sanitizedGate4FailureProvenance(provenance), provenance);
+  assert.deepEqual(Object.keys(provenance).sort(), [
+    "causalCode", "exitCode", "externalProcessStarted", "lastCompletedSubstep",
+    "operation", "operationClass", "signal", "substep"
+  ]);
 });
 
 test("Gate 4 tracker accepts exactly V01-V25 once in deterministic order", async () => {

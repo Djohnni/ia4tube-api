@@ -38,8 +38,8 @@ const {
 } = require("./social-3a0p-local-runtime-evidence-metrics");
 
 const BRANCH =
-  "social/checkpoint-3a0p-linux-vault-failure-provenance-20260811";
-const BASE_COMMIT = "6fbcbdb75d3cbc0adea365530fa5c8fed1f01314";
+  "social/checkpoint-3a0p-linux-vault-connection-capacity-provenance-20260811";
+const BASE_COMMIT = "7d211ae664d40c4e8f7f51e478ac7da8f6715d0b";
 const PRODUCT_COMMIT = "fcfc92419021dae5f77baad731c634b10c275c5b";
 const MARKER = "[run-social-3a0p-linux-gate]";
 const RUN_MARKER_PREFIX = "ia4tube-social-3a0p-linux-";
@@ -150,6 +150,52 @@ const GATE4_SUBSTEP_INDEX = new Map(
   GATE4_SUBSTEP_ORDER.map((substep, index) => [substep, index])
 );
 const GATE4_CLEANUP_SUBSTEPS = new Set(["V09", "V19", "V24", "V25"]);
+const GATE4_CONNECTION_CAPACITY_DIAGNOSTIC_KEYS = Object.freeze([
+  "capturedAtSubstep",
+  "classification",
+  "database",
+  "pools",
+  "roles",
+  "server",
+  "sqlstate",
+  "version"
+].sort());
+const GATE4_CONNECTION_CAPACITY_RAW_KEYS = Object.freeze([
+  "database", "pools", "roles", "server"
+].sort());
+const GATE4_CONNECTION_CAPACITY_SERVER_KEYS = Object.freeze([
+  "clientConnectionsBeforeV22Failure",
+  "maxConnections",
+  "reservedConnections",
+  "superuserReservedConnections"
+].sort());
+const GATE4_CONNECTION_CAPACITY_LIMIT_KEYS = Object.freeze([
+  "clientConnectionsBeforeV22Failure", "connectionLimit"
+].sort());
+const GATE4_CONNECTION_CAPACITY_ROLE_KEYS = Object.freeze([
+  "migration", "provisioner", "runtime"
+].sort());
+const GATE4_CONNECTION_CAPACITY_POOL_NAMES = Object.freeze([
+  "mainMigration", "mainRuntime", "verifierMigration", "verifierRuntime"
+].sort());
+const GATE4_CONNECTION_CAPACITY_POOL_KEYS = Object.freeze([
+  "configuredMax",
+  "connectAttempts",
+  "connectSucceeded",
+  "connectionCapacityFailures",
+  "idleCount",
+  "totalCount",
+  "waitingCount"
+].sort());
+const GATE4_CONNECTION_CAPACITY_CLASSIFICATIONS = new Set([
+  "server_connection_slots_reached",
+  "database_connection_limit_reached",
+  "runtime_role_connection_limit_reached",
+  "migration_role_connection_limit_reached",
+  "multiple_connection_limits_reached",
+  "verifier_pool_capacity_collision",
+  "capacity_snapshot_inconclusive"
+]);
 const GATE3_NODE_ERROR_CODES = new Set([
   "EAI_AGAIN",
   "ECONNABORTED",
@@ -621,6 +667,401 @@ function sanitizedGate4FailureProvenance(candidate) {
     externalProcessStarted: false,
     exitCode: null,
     signal: null
+  });
+}
+
+function gate4CapacityDataValues(candidate, keys) {
+  try {
+    if (!candidate || Object.getPrototypeOf(candidate) !== Object.prototype) return null;
+    if (Object.getOwnPropertySymbols(candidate).length !== 0) return null;
+    const descriptors = Object.getOwnPropertyDescriptors(candidate);
+    const names = Object.keys(descriptors).sort();
+    if (
+      names.length !== keys.length ||
+      names.some((name, index) => name !== keys[index])
+    ) return null;
+    const values = {};
+    for (const key of keys) {
+      const descriptor = descriptors[key];
+      if (
+        !descriptor || !Object.hasOwn(descriptor, "value") ||
+        descriptor.enumerable !== true
+      ) return null;
+      values[key] = descriptor.value;
+    }
+    return values;
+  } catch {
+    return null;
+  }
+}
+
+function gate4CapacityPool(candidate) {
+  const values = gate4CapacityDataValues(
+    candidate,
+    GATE4_CONNECTION_CAPACITY_POOL_KEYS
+  );
+  if (!values) return null;
+  for (const key of GATE4_CONNECTION_CAPACITY_POOL_KEYS) {
+    if (
+      !Number.isSafeInteger(values[key]) ||
+      (key === "configuredMax" ? values[key] <= 0 : values[key] < 0)
+    ) return null;
+  }
+  if (
+    values.idleCount > values.totalCount ||
+    values.totalCount > values.configuredMax ||
+    values.connectSucceeded > values.connectAttempts ||
+    values.connectionCapacityFailures >
+      values.connectAttempts - values.connectSucceeded
+  ) return null;
+  return Object.freeze({
+    configuredMax: values.configuredMax,
+    totalCount: values.totalCount,
+    idleCount: values.idleCount,
+    waitingCount: values.waitingCount,
+    connectAttempts: values.connectAttempts,
+    connectSucceeded: values.connectSucceeded,
+    connectionCapacityFailures: values.connectionCapacityFailures
+  });
+}
+
+function gate4CapacityPools(candidate) {
+  const values = gate4CapacityDataValues(
+    candidate,
+    GATE4_CONNECTION_CAPACITY_POOL_NAMES
+  );
+  if (!values) return null;
+  const mainMigration = gate4CapacityPool(values.mainMigration);
+  const mainRuntime = gate4CapacityPool(values.mainRuntime);
+  const verifierMigration = gate4CapacityPool(values.verifierMigration);
+  const verifierRuntime = gate4CapacityPool(values.verifierRuntime);
+  if (!mainMigration || !mainRuntime || !verifierMigration || !verifierRuntime) {
+    return null;
+  }
+  return Object.freeze({
+    mainMigration,
+    mainRuntime,
+    verifierMigration,
+    verifierRuntime
+  });
+}
+
+function unavailableGate4CapacitySnapshot() {
+  const unavailableLimit = () => Object.freeze({
+    connectionLimit: null,
+    clientConnectionsBeforeV22Failure: null
+  });
+  return Object.freeze({
+    available: false,
+    server: Object.freeze({
+      maxConnections: null,
+      reservedConnections: null,
+      superuserReservedConnections: null,
+      clientConnectionsBeforeV22Failure: null
+    }),
+    database: unavailableLimit(),
+    roles: Object.freeze({
+      provisioner: unavailableLimit(),
+      migration: unavailableLimit(),
+      runtime: unavailableLimit()
+    })
+  });
+}
+
+function gate4CapacitySnapshot(serverCandidate, databaseCandidate, rolesCandidate) {
+  const server = gate4CapacityDataValues(
+    serverCandidate,
+    GATE4_CONNECTION_CAPACITY_SERVER_KEYS
+  );
+  const database = gate4CapacityDataValues(
+    databaseCandidate,
+    GATE4_CONNECTION_CAPACITY_LIMIT_KEYS
+  );
+  const roles = gate4CapacityDataValues(
+    rolesCandidate,
+    GATE4_CONNECTION_CAPACITY_ROLE_KEYS
+  );
+  if (!server || !database || !roles) return null;
+  const provisioner = gate4CapacityDataValues(
+    roles.provisioner,
+    GATE4_CONNECTION_CAPACITY_LIMIT_KEYS
+  );
+  const migration = gate4CapacityDataValues(
+    roles.migration,
+    GATE4_CONNECTION_CAPACITY_LIMIT_KEYS
+  );
+  const runtime = gate4CapacityDataValues(
+    roles.runtime,
+    GATE4_CONNECTION_CAPACITY_LIMIT_KEYS
+  );
+  if (!provisioner || !migration || !runtime) return null;
+  const allValues = [
+    server.maxConnections,
+    server.reservedConnections,
+    server.superuserReservedConnections,
+    server.clientConnectionsBeforeV22Failure,
+    database.connectionLimit,
+    database.clientConnectionsBeforeV22Failure,
+    provisioner.connectionLimit,
+    provisioner.clientConnectionsBeforeV22Failure,
+    migration.connectionLimit,
+    migration.clientConnectionsBeforeV22Failure,
+    runtime.connectionLimit,
+    runtime.clientConnectionsBeforeV22Failure
+  ];
+  if (allValues.every((value) => value === null)) {
+    return unavailableGate4CapacitySnapshot();
+  }
+  if (allValues.some((value) => value === null)) return null;
+  if (
+    !Number.isSafeInteger(server.maxConnections) || server.maxConnections <= 0 ||
+    !Number.isSafeInteger(server.reservedConnections) || server.reservedConnections < 0 ||
+    !Number.isSafeInteger(server.superuserReservedConnections) ||
+      server.superuserReservedConnections < 0 ||
+    server.reservedConnections + server.superuserReservedConnections >=
+      server.maxConnections ||
+    !Number.isSafeInteger(server.clientConnectionsBeforeV22Failure) ||
+      server.clientConnectionsBeforeV22Failure < 0
+  ) return null;
+  for (const item of [database, provisioner, migration, runtime]) {
+    if (
+      !Number.isSafeInteger(item.connectionLimit) ||
+      !(item.connectionLimit === -1 || item.connectionLimit >= 0) ||
+      !Number.isSafeInteger(item.clientConnectionsBeforeV22Failure) ||
+      item.clientConnectionsBeforeV22Failure < 0
+    ) return null;
+  }
+  const limit = (item) => Object.freeze({
+    connectionLimit: item.connectionLimit,
+    clientConnectionsBeforeV22Failure: item.clientConnectionsBeforeV22Failure
+  });
+  return Object.freeze({
+    available: true,
+    server: Object.freeze({
+      maxConnections: server.maxConnections,
+      reservedConnections: server.reservedConnections,
+      superuserReservedConnections: server.superuserReservedConnections,
+      clientConnectionsBeforeV22Failure: server.clientConnectionsBeforeV22Failure
+    }),
+    database: limit(database),
+    roles: Object.freeze({
+      provisioner: limit(provisioner),
+      migration: limit(migration),
+      runtime: limit(runtime)
+    })
+  });
+}
+
+function normalizedGate4ConnectionCapacityRaw(candidate) {
+  const values = gate4CapacityDataValues(
+    candidate,
+    GATE4_CONNECTION_CAPACITY_RAW_KEYS
+  );
+  if (!values) return null;
+  const pools = gate4CapacityPools(values.pools);
+  const snapshot = gate4CapacitySnapshot(
+    values.server,
+    values.database,
+    values.roles
+  );
+  if (!pools || !snapshot) return null;
+  return Object.freeze({ pools, snapshot });
+}
+
+function gate4CapacityCategoryFailures(pools) {
+  return Object.freeze({
+    migration:
+      pools.mainMigration.connectionCapacityFailures > 0 ||
+      pools.verifierMigration.connectionCapacityFailures > 0,
+    runtime:
+      pools.mainRuntime.connectionCapacityFailures > 0 ||
+      pools.verifierRuntime.connectionCapacityFailures > 0
+  });
+}
+
+function gate4VerifierPoolCollision(main, verifier) {
+  return verifier.connectionCapacityFailures > 0 &&
+    verifier.connectAttempts > verifier.connectSucceeded &&
+    main.totalCount > 0 && verifier.totalCount > 0;
+}
+
+function classifyNormalizedGate4ConnectionCapacity(normalized) {
+  if (!normalized?.snapshot?.available) return "capacity_snapshot_inconclusive";
+  const { snapshot, pools } = normalized;
+  const failures = gate4CapacityCategoryFailures(pools);
+  const failedCategoryDetermined = failures.migration !== failures.runtime;
+  const anyCapacityFailure = failures.migration || failures.runtime;
+  const serverReached = failedCategoryDetermined &&
+    snapshot.server.clientConnectionsBeforeV22Failure >=
+      snapshot.server.maxConnections;
+  const databaseReached = anyCapacityFailure &&
+    snapshot.database.connectionLimit >= 0 &&
+    snapshot.database.clientConnectionsBeforeV22Failure >=
+      snapshot.database.connectionLimit;
+  const runtimeReached = failures.runtime &&
+    snapshot.roles.runtime.connectionLimit >= 0 &&
+    snapshot.roles.runtime.clientConnectionsBeforeV22Failure >=
+      snapshot.roles.runtime.connectionLimit;
+  const migrationReached = failures.migration &&
+    snapshot.roles.migration.connectionLimit >= 0 &&
+    snapshot.roles.migration.clientConnectionsBeforeV22Failure >=
+      snapshot.roles.migration.connectionLimit;
+  const reached = [
+    [serverReached, "server_connection_slots_reached"],
+    [databaseReached, "database_connection_limit_reached"],
+    [runtimeReached, "runtime_role_connection_limit_reached"],
+    [migrationReached, "migration_role_connection_limit_reached"]
+  ].filter(([condition]) => condition);
+  if (reached.length > 1) return "multiple_connection_limits_reached";
+  if (reached.length === 1) {
+    const classification = reached[0][1];
+    if (
+      !failedCategoryDetermined &&
+      (
+        classification === "runtime_role_connection_limit_reached" ||
+        classification === "migration_role_connection_limit_reached"
+      )
+    ) return "capacity_snapshot_inconclusive";
+    return classification;
+  }
+  const migrationCollision = gate4VerifierPoolCollision(
+    pools.mainMigration,
+    pools.verifierMigration
+  );
+  const runtimeCollision = gate4VerifierPoolCollision(
+    pools.mainRuntime,
+    pools.verifierRuntime
+  );
+  if (
+    failures.migration !== failures.runtime &&
+    migrationCollision !== runtimeCollision &&
+    (migrationCollision || runtimeCollision)
+  ) return "verifier_pool_capacity_collision";
+  return "capacity_snapshot_inconclusive";
+}
+
+function classifyGate4ConnectionCapacityDiagnostics(candidate) {
+  try {
+    const normalized = normalizedGate4ConnectionCapacityRaw(candidate);
+    return normalized
+      ? classifyNormalizedGate4ConnectionCapacity(normalized)
+      : "capacity_snapshot_inconclusive";
+  } catch {
+    return "capacity_snapshot_inconclusive";
+  }
+}
+
+function gate4ConnectionCapacityDiagnosticFromNormalized(normalized, classification) {
+  return Object.freeze({
+    version: 1,
+    capturedAtSubstep: "V22",
+    sqlstate: "53300",
+    server: normalized.snapshot.server,
+    database: normalized.snapshot.database,
+    roles: normalized.snapshot.roles,
+    pools: normalized.pools,
+    classification
+  });
+}
+
+function createGate4ConnectionCapacityDiagnostics(candidate) {
+  try {
+    const normalized = normalizedGate4ConnectionCapacityRaw(candidate);
+    if (!normalized) return null;
+    return gate4ConnectionCapacityDiagnosticFromNormalized(
+      normalized,
+      classifyNormalizedGate4ConnectionCapacity(normalized)
+    );
+  } catch {
+    return null;
+  }
+}
+
+function sanitizedGate4ConnectionCapacityDiagnostics(candidate) {
+  try {
+    if (candidate == null) return null;
+    const values = gate4CapacityDataValues(
+      candidate,
+      GATE4_CONNECTION_CAPACITY_DIAGNOSTIC_KEYS
+    );
+    if (
+      !values || values.version !== 1 ||
+      values.capturedAtSubstep !== "V22" ||
+      values.sqlstate !== "53300" ||
+      typeof values.classification !== "string" ||
+      !GATE4_CONNECTION_CAPACITY_CLASSIFICATIONS.has(values.classification)
+    ) return null;
+    const normalized = normalizedGate4ConnectionCapacityRaw({
+      server: values.server,
+      database: values.database,
+      roles: values.roles,
+      pools: values.pools
+    });
+    if (!normalized) return null;
+    const classification = classifyNormalizedGate4ConnectionCapacity(normalized);
+    if (values.classification !== classification) return null;
+    return gate4ConnectionCapacityDiagnosticFromNormalized(
+      normalized,
+      classification
+    );
+  } catch {
+    return null;
+  }
+}
+
+function gate4ConnectionCapacityInconclusiveFromCandidate(candidate) {
+  try {
+    if (!candidate || Object.getPrototypeOf(candidate) !== Object.prototype) return null;
+    const descriptor = Object.getOwnPropertyDescriptor(candidate, "pools");
+    if (
+      !descriptor || !Object.hasOwn(descriptor, "value") ||
+      descriptor.enumerable !== true
+    ) return null;
+    const pools = gate4CapacityPools(descriptor.value);
+    if (!pools) return null;
+    return gate4ConnectionCapacityDiagnosticFromNormalized(
+      Object.freeze({
+        pools,
+        snapshot: unavailableGate4CapacitySnapshot()
+      }),
+      "capacity_snapshot_inconclusive"
+    );
+  } catch {
+    return null;
+  }
+}
+
+function isGate4ConnectionCapacityFailure(candidate) {
+  const provenance = sanitizedGate4FailureProvenance(candidate);
+  return provenance !== null &&
+    provenance.operation === "persisted" &&
+    provenance.substep === "V22" &&
+    provenance.operationClass === "postgres_runtime_isolation" &&
+    provenance.causalCode === "gate4_error_code_53300" &&
+    provenance.lastCompletedSubstep === "V21" &&
+    provenance.externalProcessStarted === false &&
+    provenance.exitCode === null &&
+    provenance.signal === null;
+}
+
+function createGate4ConnectionCapacityDiagnosticsRecorder() {
+  let attempted = false;
+  let diagnostics = null;
+  function record(candidate) {
+    if (attempted) return false;
+    attempted = true;
+    diagnostics = createGate4ConnectionCapacityDiagnostics(candidate) ||
+      gate4ConnectionCapacityInconclusiveFromCandidate(candidate);
+    return diagnostics !== null;
+  }
+  return Object.freeze({
+    attempted() { return attempted; },
+    forFailure(provenance) {
+      return isGate4ConnectionCapacityFailure(provenance)
+        ? diagnostics
+        : null;
+    },
+    record
   });
 }
 
@@ -1713,6 +2154,47 @@ function publicPlatformEvidence(runnerTemp, runCommand) {
   });
 }
 
+function gate4ConnectionCapacityEvidenceCorrelated(value) {
+  try {
+    const diagnosticsDescriptor = Object.getOwnPropertyDescriptor(
+      value,
+      "gate4ConnectionCapacityDiagnostics"
+    );
+    const provenanceDescriptor = Object.getOwnPropertyDescriptor(
+      value,
+      "gate4FailureProvenance"
+    );
+    const firstFailureDescriptor = Object.getOwnPropertyDescriptor(
+      value,
+      "firstFailure"
+    );
+    for (const descriptor of [
+      diagnosticsDescriptor,
+      provenanceDescriptor,
+      firstFailureDescriptor
+    ]) {
+      if (
+        descriptor &&
+        (!Object.hasOwn(descriptor, "value") || descriptor.enumerable !== true)
+      ) return false;
+    }
+    const diagnosticsPresent = diagnosticsDescriptor !== undefined;
+    const diagnostics = diagnosticsDescriptor?.value;
+    const provenance = provenanceDescriptor?.value;
+    const firstFailure = firstFailureDescriptor?.value;
+    const capacityFailure = firstFailure?.phase === "vault" &&
+      firstFailure?.code === "gate4_error_code_53300" &&
+      isGate4ConnectionCapacityFailure(provenance);
+    if (capacityFailure) {
+      return diagnosticsPresent &&
+        sanitizedGate4ConnectionCapacityDiagnostics(diagnostics) !== null;
+    }
+    return !diagnosticsPresent || diagnostics === null;
+  } catch {
+    return false;
+  }
+}
+
 function evidenceSafe(value, depth = 0) {
   if (depth > 12) fail("linux_evidence_depth_invalid");
   if (value === null || typeof value === "boolean") return true;
@@ -1724,6 +2206,7 @@ function evidenceSafe(value, depth = 0) {
   }
   if (Array.isArray(value)) return value.length <= 100 && value.every((item) => evidenceSafe(item, depth + 1));
   if (!value || Object.getPrototypeOf(value) !== Object.prototype || Object.keys(value).length > 100) return false;
+  if (!gate4ConnectionCapacityEvidenceCorrelated(value)) return false;
   if (
     Object.hasOwn(value, "firstFailure") &&
     Object.hasOwn(value, "gate4FailureProvenance")
@@ -1743,7 +2226,9 @@ function evidenceSafe(value, depth = 0) {
     !/^(?:databaseHost|containerId|networkId|ipAddress|subnet|gateway)$/i.test(key) &&
     (key === "gate4FailureProvenance"
       ? item === null || sanitizedGate4FailureProvenance(item) !== null
-      : evidenceSafe(item, depth + 1))
+      : key === "gate4ConnectionCapacityDiagnostics"
+        ? item === null || sanitizedGate4ConnectionCapacityDiagnostics(item) !== null
+        : evidenceSafe(item, depth + 1))
   ));
 }
 
@@ -1784,6 +2269,25 @@ function sanitizedFailureEvidence(source, code = "linux_evidence_sanitization_fa
       });
     }
   }
+  let gate4ConnectionCapacityDiagnostics = null;
+  if (
+    publishedFirstFailure.phase === "vault" &&
+    publishedFirstFailure.code === "gate4_error_code_53300" &&
+    isGate4ConnectionCapacityFailure(gate4FailureProvenance)
+  ) {
+    const descriptor = source && typeof source === "object"
+      ? Object.getOwnPropertyDescriptor(
+        source,
+        "gate4ConnectionCapacityDiagnostics"
+      )
+      : null;
+    const candidate = descriptor && Object.hasOwn(descriptor, "value")
+      ? descriptor.value
+      : null;
+    gate4ConnectionCapacityDiagnostics =
+      sanitizedGate4ConnectionCapacityDiagnostics(candidate) ||
+      gate4ConnectionCapacityInconclusiveFromCandidate(candidate);
+  }
   return Object.freeze({
     format: 1,
     kind: "ia4tube-social-3a0p-linux-physical-gates",
@@ -1802,6 +2306,7 @@ function sanitizedFailureEvidence(source, code = "linux_evidence_sanitization_fa
       source?.gate3FailureProvenance
     ),
     gate4FailureProvenance,
+    gate4ConnectionCapacityDiagnostics,
     rlsFailureProvenance: sanitizedRlsFailureProvenance(
       source?.rlsFailureProvenance
     ),
@@ -3542,6 +4047,8 @@ async function runLinuxGate(options = {}) {
   const rlsFailureProvenance = createRlsFailureProvenanceTracker();
   const gate3FailureProvenance = createGate3FailureProvenanceTracker();
   const gate4FailureProvenance = createGate4FailureProvenanceTracker();
+  const gate4ConnectionCapacityDiagnostics =
+    createGate4ConnectionCapacityDiagnosticsRecorder();
   const runCommand = options.runCommand || commandRunner({
     spawnImpl: backupRestoreProvenance.wrapSpawn(spawn)
   });
@@ -3567,6 +4074,7 @@ async function runLinuxGate(options = {}) {
     backupRestoreFailureProvenance: null,
     gate3FailureProvenance: null,
     gate4FailureProvenance: null,
+    gate4ConnectionCapacityDiagnostics: null,
     rlsFailureProvenance: null,
     cleanupFailure: null
   };
@@ -3827,7 +4335,9 @@ async function runLinuxGate(options = {}) {
         sensitiveMarkers,
         legacy2ARoot,
         Object.freeze({
-          runGate4Substep: gate4FailureProvenance.forOperation("persisted")
+          runGate4Substep: gate4FailureProvenance.forOperation("persisted"),
+          recordGate4ConnectionCapacityDiagnostics:
+            gate4ConnectionCapacityDiagnostics.record
         })
       );
       gate4FailureProvenance.requireComplete();
@@ -3968,6 +4478,10 @@ async function runLinuxGate(options = {}) {
       backupRestoreProvenance.failure();
     evidence.gate3FailureProvenance = gate3FailureProvenance.failure();
     evidence.gate4FailureProvenance = gate4FailureProvenance.failure();
+    evidence.gate4ConnectionCapacityDiagnostics =
+      gate4ConnectionCapacityDiagnostics.forFailure(
+        evidence.gate4FailureProvenance
+      );
     evidence.rlsFailureProvenance = rlsFailureProvenance.failure();
     if (!evidence.firstFailure) evidence.firstFailure = { phase: activePhase, code };
   } finally {
@@ -4008,6 +4522,10 @@ async function runLinuxGate(options = {}) {
     evidence.backupTransport = publicBackupTransportEvidence(postgres);
     evidence.gate3FailureProvenance = gate3FailureProvenance.failure();
     evidence.gate4FailureProvenance = gate4FailureProvenance.failure();
+    evidence.gate4ConnectionCapacityDiagnostics =
+      gate4ConnectionCapacityDiagnostics.forFailure(
+        evidence.gate4FailureProvenance
+      );
     evidence.schemaProfileDiagnostics =
       restoreBehaviorFacade?.schemaProfileDiagnostics() || null;
     evidence.cleanup = cleanupResult || { cleanupCompleted: false };
@@ -4111,11 +4629,14 @@ module.exports = {
   canonicalJson,
   cleanupOnly,
   containsMarkerInTree,
+  classifyGate4ConnectionCapacityDiagnostics,
   createBackupRestoreProvenanceTracker,
   createDrainAwareRunTool,
   createBackupTransportBridge,
   createGate1MigrationPoolLifecycle,
   createGate3FailureProvenanceTracker,
+  createGate4ConnectionCapacityDiagnostics,
+  createGate4ConnectionCapacityDiagnosticsRecorder,
   createGate4FailureProvenanceTracker,
   createLinuxProfile0003PlansFacade,
   createLinuxProfileBackupRunner,
@@ -4154,6 +4675,7 @@ module.exports = {
   sanitizedBackupRestoreFailureProvenance,
   sanitizedFailureEvidence,
   sanitizedGate3FailureProvenance,
+  sanitizedGate4ConnectionCapacityDiagnostics,
   sanitizedGate4FailureProvenance,
   sanitizedGateProcessStatus,
   sanitizedRlsFailureProvenance,

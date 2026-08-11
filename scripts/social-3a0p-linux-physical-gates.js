@@ -1786,7 +1786,293 @@ async function runVaultSupplementalGate(
   return result;
 }
 
-function createLocalVerifierPoolClass({ PoolClass, port, database, passwords }) {
+const GATE4_CONNECTION_CAPACITY_SNAPSHOT_COLUMNS = Object.freeze([
+  "serverMaxConnections",
+  "serverReservedConnections",
+  "serverSuperuserReservedConnections",
+  "serverClientConnectionsBeforeV22Failure",
+  "databaseConnectionLimit",
+  "databaseClientConnectionsBeforeV22Failure",
+  "provisionerConnectionLimit",
+  "provisionerClientConnectionsBeforeV22Failure",
+  "migrationConnectionLimit",
+  "migrationClientConnectionsBeforeV22Failure",
+  "runtimeConnectionLimit",
+  "runtimeClientConnectionsBeforeV22Failure"
+]);
+
+const GATE4_CONNECTION_CAPACITY_SNAPSHOT_SQL = [
+  "SELECT",
+  " current_setting('max_connections')::integer AS \"serverMaxConnections\",",
+  " current_setting('reserved_connections')::integer AS \"serverReservedConnections\",",
+  " current_setting('superuser_reserved_connections')::integer AS \"serverSuperuserReservedConnections\",",
+  " (SELECT COUNT(*)::integer FROM pg_catalog.pg_stat_activity",
+  "   WHERE backend_type='client backend') AS \"serverClientConnectionsBeforeV22Failure\",",
+  " (SELECT datconnlimit::integer FROM pg_catalog.pg_database",
+  "   WHERE datname=$1) AS \"databaseConnectionLimit\",",
+  " (SELECT COUNT(*)::integer FROM pg_catalog.pg_stat_activity",
+  "   WHERE backend_type='client backend'",
+  "     AND datname=$1)",
+  "   AS \"databaseClientConnectionsBeforeV22Failure\",",
+  " (SELECT rolconnlimit::integer FROM pg_catalog.pg_roles",
+  "   WHERE rolname=$2) AS \"provisionerConnectionLimit\",",
+  " (SELECT COUNT(*)::integer FROM pg_catalog.pg_stat_activity",
+  "   WHERE backend_type='client backend'",
+  "     AND usename=$2)",
+  "   AS \"provisionerClientConnectionsBeforeV22Failure\",",
+  " (SELECT rolconnlimit::integer FROM pg_catalog.pg_roles",
+  "   WHERE rolname=$3) AS \"migrationConnectionLimit\",",
+  " (SELECT COUNT(*)::integer FROM pg_catalog.pg_stat_activity",
+  "   WHERE backend_type='client backend'",
+  "     AND usename=$3)",
+  "   AS \"migrationClientConnectionsBeforeV22Failure\",",
+  " (SELECT rolconnlimit::integer FROM pg_catalog.pg_roles",
+  "   WHERE rolname=$4) AS \"runtimeConnectionLimit\",",
+  " (SELECT COUNT(*)::integer FROM pg_catalog.pg_stat_activity",
+  "   WHERE backend_type='client backend'",
+  "     AND usename=$4)",
+  "   AS \"runtimeClientConnectionsBeforeV22Failure\""
+].join("\n");
+
+function unavailableGate4ConnectionCapacitySnapshot() {
+  const role = () => Object.freeze({
+    connectionLimit: null,
+    clientConnectionsBeforeV22Failure: null
+  });
+  return Object.freeze({
+    server: Object.freeze({
+      maxConnections: null,
+      reservedConnections: null,
+      superuserReservedConnections: null,
+      clientConnectionsBeforeV22Failure: null
+    }),
+    database: Object.freeze({
+      connectionLimit: null,
+      clientConnectionsBeforeV22Failure: null
+    }),
+    roles: Object.freeze({
+      provisioner: role(),
+      migration: role(),
+      runtime: role()
+    })
+  });
+}
+
+function parseGate4ConnectionCapacitySnapshot(result) {
+  if (!Array.isArray(result?.rows) || result.rows.length !== 1) return null;
+  const row = result.rows[0];
+  if (
+    !row || Object.getPrototypeOf(row) !== Object.prototype ||
+    Object.keys(row).sort().join("\n") !== [...GATE4_CONNECTION_CAPACITY_SNAPSHOT_COLUMNS].sort().join("\n")
+  ) return null;
+  const nonnegative = (value) => Number.isSafeInteger(value) && value >= 0;
+  const connectionLimit = (value) => Number.isSafeInteger(value) && (value === -1 || value >= 0);
+  if (
+    !Number.isSafeInteger(row.serverMaxConnections) || row.serverMaxConnections <= 0 ||
+    !nonnegative(row.serverReservedConnections) ||
+    !nonnegative(row.serverSuperuserReservedConnections) ||
+    !nonnegative(row.serverClientConnectionsBeforeV22Failure) ||
+    !connectionLimit(row.databaseConnectionLimit) ||
+    !nonnegative(row.databaseClientConnectionsBeforeV22Failure) ||
+    !connectionLimit(row.provisionerConnectionLimit) ||
+    !nonnegative(row.provisionerClientConnectionsBeforeV22Failure) ||
+    !connectionLimit(row.migrationConnectionLimit) ||
+    !nonnegative(row.migrationClientConnectionsBeforeV22Failure) ||
+    !connectionLimit(row.runtimeConnectionLimit) ||
+    !nonnegative(row.runtimeClientConnectionsBeforeV22Failure)
+  ) return null;
+  const role = (prefix) => Object.freeze({
+    connectionLimit: row[`${prefix}ConnectionLimit`],
+    clientConnectionsBeforeV22Failure: row[`${prefix}ClientConnectionsBeforeV22Failure`]
+  });
+  return Object.freeze({
+    server: Object.freeze({
+      maxConnections: row.serverMaxConnections,
+      reservedConnections: row.serverReservedConnections,
+      superuserReservedConnections: row.serverSuperuserReservedConnections,
+      clientConnectionsBeforeV22Failure: row.serverClientConnectionsBeforeV22Failure
+    }),
+    database: Object.freeze({
+      connectionLimit: row.databaseConnectionLimit,
+      clientConnectionsBeforeV22Failure: row.databaseClientConnectionsBeforeV22Failure
+    }),
+    roles: Object.freeze({
+      provisioner: role("provisioner"),
+      migration: role("migration"),
+      runtime: role("runtime")
+    })
+  });
+}
+
+function gate4ConnectionCapacityPoolSnapshot(entry) {
+  const result = {
+    configuredMax: entry?.configuredMax,
+    totalCount: entry?.pool?.totalCount,
+    idleCount: entry?.pool?.idleCount,
+    waitingCount: entry?.pool?.waitingCount,
+    connectAttempts: entry?.connectAttempts,
+    connectSucceeded: entry?.connectSucceeded,
+    connectionCapacityFailures: entry?.connectionCapacityFailures
+  };
+  if (
+    !Number.isSafeInteger(result.configuredMax) || result.configuredMax <= 0 ||
+    Object.entries(result).some(([key, value]) =>
+      key !== "configuredMax" && (!Number.isSafeInteger(value) || value < 0)
+    )
+  ) fail("linux_gate_connection_capacity_pool_counters_invalid");
+  return Object.freeze(result);
+}
+
+function createGate4ConnectionCapacityCapture(state) {
+  const pools = {
+    mainMigration: {
+      pool: state?.pools?.migration,
+      configuredMax: state?.pools?.migration?.options?.max,
+      connectAttempts: 0,
+      connectSucceeded: 0,
+      connectionCapacityFailures: 0
+    },
+    mainRuntime: {
+      pool: state?.pools?.runtime,
+      configuredMax: state?.pools?.runtime?.options?.max,
+      connectAttempts: 0,
+      connectSucceeded: 0,
+      connectionCapacityFailures: 0
+    },
+    verifierMigration: null,
+    verifierRuntime: null
+  };
+  let armed = false;
+  let latch = "not_attempted";
+  let snapshot = null;
+
+  async function captureOnFunctionalClient(client) {
+    if (!armed || latch !== "not_attempted") return;
+    latch = "unavailable";
+    if (!client || typeof client.query !== "function") return;
+    try {
+      const result = await client.query(GATE4_CONNECTION_CAPACITY_SNAPSHOT_SQL, [
+        state.database,
+        PROVISIONER_LOGIN,
+        MIGRATION_LOGIN,
+        RUNTIME_LOGIN
+      ]);
+      const parsed = parseGate4ConnectionCapacitySnapshot(result);
+      if (parsed) {
+        snapshot = parsed;
+        latch = "captured";
+      }
+    } catch {}
+  }
+
+  function instrumentVerifierPool(login, pool, configuredMax) {
+    const category = login === MIGRATION_LOGIN
+      ? "verifierMigration"
+      : login === RUNTIME_LOGIN
+        ? "verifierRuntime"
+        : null;
+    if (
+      !category || pools[category] !== null || !pool || typeof pool.connect !== "function" ||
+      !Number.isSafeInteger(configuredMax) || configuredMax <= 0
+    ) fail("linux_gate_connection_capacity_verifier_pool_invalid");
+    const entry = {
+      pool,
+      configuredMax,
+      connectAttempts: 0,
+      connectSucceeded: 0,
+      connectionCapacityFailures: 0
+    };
+    pools[category] = entry;
+    const connect = pool.connect.bind(pool);
+    const recordFailure = (error) => {
+      if (error?.code === "53300") {
+        entry.connectionCapacityFailures += 1;
+        if (armed && latch === "not_attempted") latch = "unavailable";
+      }
+    };
+    const connected = async (client) => {
+      entry.connectSucceeded += 1;
+      await captureOnFunctionalClient(client);
+      return client;
+    };
+    Object.defineProperty(pool, "connect", {
+      configurable: true,
+      enumerable: false,
+      writable: false,
+      value(...args) {
+        entry.connectAttempts += 1;
+        const callbackIndex = typeof args.at(-1) === "function" ? args.length - 1 : -1;
+        if (callbackIndex >= 0) {
+          const callback = args[callbackIndex];
+          const delegated = [...args];
+          delegated[callbackIndex] = (...callbackArgs) => {
+            const [error, client] = callbackArgs;
+            if (error) {
+              recordFailure(error);
+              callback(...callbackArgs);
+              return;
+            }
+            entry.connectSucceeded += 1;
+            void captureOnFunctionalClient(client).then(
+              () => callback(...callbackArgs),
+              () => callback(...callbackArgs)
+            );
+          };
+          try {
+            return connect(...delegated);
+          } catch (error) {
+            recordFailure(error);
+            throw error;
+          }
+        }
+        let pending;
+        try {
+          pending = connect(...args);
+        } catch (error) {
+          recordFailure(error);
+          throw error;
+        }
+        return Promise.resolve(pending).then(
+          connected,
+          (error) => {
+            recordFailure(error);
+            throw error;
+          }
+        );
+      }
+    });
+    return pool;
+  }
+
+  return Object.freeze({
+    arm() { armed = true; },
+    instrumentVerifierPool,
+    candidate() {
+      const databaseSnapshot = latch === "captured" && snapshot
+        ? snapshot
+        : unavailableGate4ConnectionCapacitySnapshot();
+      return Object.freeze({
+        server: databaseSnapshot.server,
+        database: databaseSnapshot.database,
+        roles: databaseSnapshot.roles,
+        pools: Object.freeze({
+          mainMigration: gate4ConnectionCapacityPoolSnapshot(pools.mainMigration),
+          mainRuntime: gate4ConnectionCapacityPoolSnapshot(pools.mainRuntime),
+          verifierMigration: gate4ConnectionCapacityPoolSnapshot(pools.verifierMigration),
+          verifierRuntime: gate4ConnectionCapacityPoolSnapshot(pools.verifierRuntime)
+        })
+      });
+    }
+  });
+}
+
+function createLocalVerifierPoolClass({
+  PoolClass,
+  port,
+  database,
+  passwords,
+  gate4ConnectionCapacityCapture = null
+}) {
   return class LinuxLocalVerifierPool {
     constructor(configuration) {
       let parsed;
@@ -1798,7 +2084,7 @@ function createLocalVerifierPoolClass({ PoolClass, port, database, passwords }) 
         decodeURIComponent(parsed.pathname.slice(1)) !== database || password !== passwords[login] ||
         configuration.ssl?.rejectUnauthorized !== true || configuration.ssl?.servername !== VERIFIER_HOST
       ) fail("linux_gate_verifier_target_invalid");
-      return new PoolClass({
+      const pool = new PoolClass({
         ...configuration,
         connectionString: undefined,
         host: LOOPBACK,
@@ -1808,6 +2094,9 @@ function createLocalVerifierPoolClass({ PoolClass, port, database, passwords }) 
         password,
         ssl: false
       });
+      return gate4ConnectionCapacityCapture
+        ? gate4ConnectionCapacityCapture.instrumentVerifierPool(login, pool, configuration.max)
+        : pool;
     }
   };
 }
@@ -1828,13 +2117,20 @@ async function runPersistedVaultGate(
   state,
   sensitiveMarkers,
   legacy2ARoot,
-  { runGate4Substep = async (_substep, _operationClass, operation) => operation() } = {}
+  {
+    runGate4Substep = async (_substep, _operationClass, operation) => operation(),
+    recordGate4ConnectionCapacityDiagnostics
+  } = {}
 ) {
   let setup = {};
   let gate;
   let result;
   let primaryFailure;
   let primaryFailed = false;
+  const gate4ConnectionCapacityCapture =
+    typeof recordGate4ConnectionCapacityDiagnostics === "function"
+      ? createGate4ConnectionCapacityCapture(state)
+      : null;
 
   try {
     const returnedSetup = await runGate4Substep("V20", "memory_setup", async () => {
@@ -1880,18 +2176,31 @@ async function runPersistedVaultGate(
             PoolClass: state.PoolClass,
             port: state.target.port,
             database: state.database,
-            passwords: setup.passwords
+            passwords: setup.passwords,
+            gate4ConnectionCapacityCapture
           })
         }
       });
       return gate;
     });
     if (gate === undefined && returnedGate !== undefined) gate = returnedGate;
-    await runGate4Substep("V22", "postgres_runtime_isolation", async () => {
-      if ((await gate.verifiers.verifyRuntimeIsolation()) !== true) {
-        fail("linux_gate_persisted_runtime_isolation_failed");
+    gate4ConnectionCapacityCapture?.arm();
+    try {
+      await runGate4Substep("V22", "postgres_runtime_isolation", async () => {
+        if ((await gate.verifiers.verifyRuntimeIsolation()) !== true) {
+          fail("linux_gate_persisted_runtime_isolation_failed");
+        }
+      });
+    } catch (error) {
+      if (error?.code === "53300" && gate4ConnectionCapacityCapture) {
+        try {
+          recordGate4ConnectionCapacityDiagnostics(
+            gate4ConnectionCapacityCapture.candidate()
+          );
+        } catch {}
       }
-    });
+      throw error;
+    }
     result = await runGate4Substep("V23", "postgres_vault_verification", async () => {
       if ((await gate.verifiers.verifyVault()) !== true) fail("linux_gate_persisted_vault_failed");
       return Object.freeze({

@@ -23,6 +23,7 @@ const ROOT = path.resolve(__dirname, "..");
 const MIGRATION_LOGIN = "ia4tube_social_local_migration";
 const MIGRATOR_ROLE = "ia4tube_social_migrator";
 const OWNER_ROLE = "ia4tube_social_owner";
+const PROVISIONER_LOGIN = "ia4tube_social_local_provisioner";
 const RUNTIME_LOGIN = "ia4tube_social_local_runtime";
 const RUNTIME_ROLE = "ia4tube_social_runtime";
 
@@ -131,6 +132,252 @@ function syntheticPersistedGate4Harness(options = {}) {
     persistedB: Buffer.alloc(48, 0x62)
   };
   return { gate, observations, setup };
+}
+
+const COMPLETE_GATE4_CAPACITY_ROW = Object.freeze({
+  serverMaxConnections: 20,
+  serverReservedConnections: 0,
+  serverSuperuserReservedConnections: 3,
+  serverClientConnectionsBeforeV22Failure: 17,
+  databaseConnectionLimit: -1,
+  databaseClientConnectionsBeforeV22Failure: 12,
+  provisionerConnectionLimit: 2,
+  provisionerClientConnectionsBeforeV22Failure: 0,
+  migrationConnectionLimit: 5,
+  migrationClientConnectionsBeforeV22Failure: 4,
+  runtimeConnectionLimit: 8,
+  runtimeClientConnectionsBeforeV22Failure: 8
+});
+
+function syntheticGate4CapacityHarness(options = {}) {
+  const migrationPassword = "m".repeat(48);
+  const runtimePassword = "r".repeat(48);
+  const plan = {
+    migration: [...(options.migrationPlan || [])],
+    runtime: [...(options.runtimePlan || ["success", "53300"])]
+  };
+  const observations = {
+    callbackReleases: [],
+    closeCalls: 0,
+    events: [],
+    functionalClients: [],
+    poolQueryCalls: 0,
+    records: [],
+    snapshotCalls: [],
+    underlyingConnectCalls: { migration: 0, runtime: 0 },
+    verifierPools: {}
+  };
+  const capacityFailure = Object.assign(new Error("private capacity failure"), { code: "53300" });
+  const otherFailure = Object.assign(new Error("private non-capacity failure"), { code: "08006" });
+  let clientSequence = 0;
+
+  class FakePool {
+    constructor(configuration) {
+      this.category = configuration.user === MIGRATION_LOGIN ? "migration" : "runtime";
+      this.options = { max: configuration.max };
+      const counts = options.verifierCounts?.[this.category] || (
+        this.category === "migration"
+          ? { totalCount: 1, idleCount: 1, waitingCount: 0 }
+          : { totalCount: 2, idleCount: 1, waitingCount: 0 }
+      );
+      this.totalCount = counts.totalCount;
+      this.idleCount = counts.idleCount;
+      this.waitingCount = counts.waitingCount;
+    }
+
+    connect(callback) {
+      observations.underlyingConnectCalls[this.category] += 1;
+      const outcome = plan[this.category].shift() || "success";
+      const error = outcome === "53300"
+        ? capacityFailure
+        : outcome === "08006"
+          ? otherFailure
+          : null;
+      let client;
+      if (!error) {
+        const id = `${this.category}-${++clientSequence}`;
+        client = {
+          id,
+          async query(text, values) {
+            observations.events.push(`snapshot:${id}`);
+            observations.snapshotCalls.push({ client, text, values });
+            if (options.snapshotError) throw options.snapshotError;
+            return { rows: [{ ...(options.snapshotRow || COMPLETE_GATE4_CAPACITY_ROW) }] };
+          },
+          release() {
+            observations.events.push(`release:${id}`);
+          }
+        };
+      }
+      if (typeof callback === "function") {
+        if (error) callback(error);
+        else callback(null, client, client.release);
+        return undefined;
+      }
+      return error ? Promise.reject(error) : Promise.resolve(client);
+    }
+
+    query() {
+      observations.poolQueryCalls += 1;
+      throw new Error("private pool query must not be used");
+    }
+
+    async end() {}
+  }
+
+  const passwordByLogin = {
+    [MIGRATION_LOGIN]: migrationPassword,
+    [RUNTIME_LOGIN]: runtimePassword
+  };
+  const databaseUrl = (login) => {
+    const value = new URL("postgresql://local.ia4tube.invalid:5432/ia4tube_social_local");
+    value.username = login;
+    value.password = passwordByLogin[login];
+    value.searchParams.set("sslmode", "verify-full");
+    return value.toString();
+  };
+  const functionalConnections = options.functionalConnections || [
+    { category: "runtime", callback: false },
+    { category: "runtime", callback: false }
+  ];
+  const setup = {
+    databaseUrl,
+    original: {
+      createRestoreBehaviorVerifiers(configuration) {
+        const PoolClass = configuration.dependencies.PoolClass;
+        const ssl = { rejectUnauthorized: true, servername: "local.ia4tube.invalid" };
+        observations.verifierPools.migration = new PoolClass({
+          connectionString: configuration.migrationDatabaseUrl,
+          ssl,
+          max: 1
+        });
+        observations.verifierPools.runtime = new PoolClass({
+          connectionString: configuration.runtimeDatabaseUrl,
+          ssl,
+          max: 2
+        });
+        return {
+          async close() {
+            observations.closeCalls += 1;
+            await observations.verifierPools.migration.end();
+            await observations.verifierPools.runtime.end();
+          },
+          verifiers: {
+            async verifyRuntimeIsolation() {
+              for (const operation of functionalConnections) {
+                const pool = observations.verifierPools[operation.category];
+                const client = operation.callback
+                  ? await new Promise((resolve, reject) => {
+                    pool.connect((error, connectedClient, release) => {
+                      if (error) return reject(error);
+                      observations.callbackReleases.push(release);
+                      return resolve(connectedClient);
+                    });
+                  })
+                  : await pool.connect();
+                observations.events.push(`functional:${client.id}`);
+                observations.functionalClients.push(client);
+                client.release();
+              }
+              if (options.afterConnectionsError) throw options.afterConnectionsError;
+              return true;
+            },
+            async verifyVault() { return true; }
+          }
+        };
+      }
+    },
+    passwords: passwordByLogin,
+    persistedA: Buffer.alloc(48, 0x61),
+    persistedB: Buffer.alloc(48, 0x62)
+  };
+  const pool = (max, totalCount, idleCount, waitingCount) => ({
+    options: { max },
+    totalCount,
+    idleCount,
+    waitingCount
+  });
+  const state = {
+    PoolClass: FakePool,
+    database: "ia4tube_social_local",
+    passwords: passwordByLogin,
+    pools: {
+      migration: pool(2, 1, 1, 0),
+      runtime: pool(3, 2, 1, 0)
+    },
+    target: { port: 5432 }
+  };
+
+  return {
+    capacityFailure,
+    otherFailure,
+    observations,
+    setup,
+    state,
+    async run() {
+      let result;
+      let thrown;
+      try {
+        result = await runPersistedVaultGate(state, [], "synthetic-unused-root", {
+          async runGate4Substep(substep, _operationClass, operation) {
+            if (substep === "V20") return setup;
+            return operation();
+          },
+          recordGate4ConnectionCapacityDiagnostics(candidate) {
+            observations.records.push(candidate);
+            if (options.recorderError) throw options.recorderError;
+          }
+        });
+      } catch (error) {
+        thrown = error;
+      }
+      return { result, thrown };
+    }
+  };
+}
+
+function assertUnavailableGate4CapacitySnapshot(candidate) {
+  assert.deepEqual(candidate.server, {
+    maxConnections: null,
+    reservedConnections: null,
+    superuserReservedConnections: null,
+    clientConnectionsBeforeV22Failure: null
+  });
+  assert.deepEqual(candidate.database, {
+    connectionLimit: null,
+    clientConnectionsBeforeV22Failure: null
+  });
+  for (const role of Object.values(candidate.roles)) {
+    assert.deepEqual(role, {
+      connectionLimit: null,
+      clientConnectionsBeforeV22Failure: null
+    });
+  }
+}
+
+function assertGate4PoolCountersNumeric(candidate) {
+  assert.deepEqual(Object.keys(candidate.pools), [
+    "mainMigration",
+    "mainRuntime",
+    "verifierMigration",
+    "verifierRuntime"
+  ]);
+  for (const pool of Object.values(candidate.pools)) {
+    assert.deepEqual(Object.keys(pool), [
+      "configuredMax",
+      "totalCount",
+      "idleCount",
+      "waitingCount",
+      "connectAttempts",
+      "connectSucceeded",
+      "connectionCapacityFailures"
+    ]);
+    for (const value of Object.values(pool)) {
+      assert.equal(Number.isSafeInteger(value), true);
+      assert.ok(value >= 0);
+    }
+    assert.ok(pool.configuredMax > 0);
+  }
 }
 
 function postgresError(code) {
@@ -2634,6 +2881,282 @@ test("persisted Gate 4 instrumentation executes V20-V25 with synthetic dependenc
   });
   assert.equal(setup.persistedA.every((byte) => byte === 0), true);
   assert.equal(setup.persistedB.every((byte) => byte === 0), true);
+});
+
+test("Gate 4 V22 capacity diagnostics use one same-client snapshot and emit closed raw counters", async () => {
+  const harness = syntheticGate4CapacityHarness();
+  const { thrown } = await harness.run();
+  const { observations } = harness;
+
+  assert.strictEqual(thrown, harness.capacityFailure);
+  assert.equal(observations.records.length, 1);
+  const candidate = observations.records[0];
+  assert.deepEqual(Object.keys(candidate), ["server", "database", "roles", "pools"]);
+  assert.deepEqual(candidate.server, {
+    maxConnections: 20,
+    reservedConnections: 0,
+    superuserReservedConnections: 3,
+    clientConnectionsBeforeV22Failure: 17
+  });
+  assert.deepEqual(candidate.database, {
+    connectionLimit: -1,
+    clientConnectionsBeforeV22Failure: 12
+  });
+  assert.deepEqual(candidate.roles, {
+    provisioner: { connectionLimit: 2, clientConnectionsBeforeV22Failure: 0 },
+    migration: { connectionLimit: 5, clientConnectionsBeforeV22Failure: 4 },
+    runtime: { connectionLimit: 8, clientConnectionsBeforeV22Failure: 8 }
+  });
+  assertGate4PoolCountersNumeric(candidate);
+  assert.deepEqual(candidate.pools.mainMigration, {
+    configuredMax: 2,
+    totalCount: 1,
+    idleCount: 1,
+    waitingCount: 0,
+    connectAttempts: 0,
+    connectSucceeded: 0,
+    connectionCapacityFailures: 0
+  });
+  assert.deepEqual(candidate.pools.mainRuntime, {
+    configuredMax: 3,
+    totalCount: 2,
+    idleCount: 1,
+    waitingCount: 0,
+    connectAttempts: 0,
+    connectSucceeded: 0,
+    connectionCapacityFailures: 0
+  });
+  assert.deepEqual(candidate.pools.verifierRuntime, {
+    configuredMax: 2,
+    totalCount: 2,
+    idleCount: 1,
+    waitingCount: 0,
+    connectAttempts: 2,
+    connectSucceeded: 1,
+    connectionCapacityFailures: 1
+  });
+  assert.equal(observations.underlyingConnectCalls.runtime, 2);
+  assert.equal(observations.underlyingConnectCalls.migration, 0);
+  assert.equal(observations.poolQueryCalls, 0);
+  assert.equal(observations.snapshotCalls.length, 1);
+  assert.strictEqual(observations.snapshotCalls[0].client, observations.functionalClients[0]);
+  assert.deepEqual(observations.events.slice(0, 2), [
+    `snapshot:${observations.functionalClients[0].id}`,
+    `functional:${observations.functionalClients[0].id}`
+  ]);
+  assert.deepEqual(observations.snapshotCalls[0].values, [
+    "ia4tube_social_local",
+    PROVISIONER_LOGIN,
+    MIGRATION_LOGIN,
+    RUNTIME_LOGIN
+  ]);
+  assert.doesNotMatch(
+    observations.snapshotCalls[0].text,
+    /pg_backend_pid|application_name|client_addr|backend_start|\bstate\b/i
+  );
+  assert.equal(Object.isFrozen(candidate), true);
+  assert.equal(Object.isFrozen(candidate.server), true);
+  assert.equal(Object.isFrozen(candidate.roles.runtime), true);
+  assert.equal(Object.isFrozen(candidate.pools.verifierRuntime), true);
+  assert.throws(() => { candidate.server.maxConnections = 99; }, TypeError);
+  const serialized = JSON.stringify(candidate);
+  for (const forbidden of [
+    "ia4tube_social_local",
+    PROVISIONER_LOGIN,
+    MIGRATION_LOGIN,
+    RUNTIME_LOGIN,
+    "private capacity failure",
+    "postgresql://",
+    "local.ia4tube.invalid",
+    "password",
+    "stack",
+    "cause"
+  ]) assert.equal(serialized.includes(forbidden), false, forbidden);
+});
+
+test("Gate 4 V22 first connect 53300 records all-null SQL fields without retry", async () => {
+  const harness = syntheticGate4CapacityHarness({
+    functionalConnections: [{ category: "runtime", callback: true }],
+    runtimePlan: ["53300"]
+  });
+  const { thrown } = await harness.run();
+
+  assert.strictEqual(thrown, harness.capacityFailure);
+  assert.equal(harness.observations.snapshotCalls.length, 0);
+  assert.equal(harness.observations.poolQueryCalls, 0);
+  assert.equal(harness.observations.underlyingConnectCalls.runtime, 1);
+  assert.equal(harness.observations.callbackReleases.length, 0);
+  assert.equal(harness.observations.records.length, 1);
+  const candidate = harness.observations.records[0];
+  assertUnavailableGate4CapacitySnapshot(candidate);
+  assertGate4PoolCountersNumeric(candidate);
+  assert.deepEqual(candidate.pools.verifierRuntime, {
+    configuredMax: 2,
+    totalCount: 2,
+    idleCount: 1,
+    waitingCount: 0,
+    connectAttempts: 1,
+    connectSucceeded: 0,
+    connectionCapacityFailures: 1
+  });
+});
+
+test("Gate 4 V22 snapshot failure is swallowed once and never masks or retries 53300", async () => {
+  const snapshotError = new Error("private snapshot failure");
+  const harness = syntheticGate4CapacityHarness({
+    functionalConnections: [
+      { category: "runtime", callback: false },
+      { category: "runtime", callback: false },
+      { category: "runtime", callback: false }
+    ],
+    runtimePlan: ["success", "success", "53300"],
+    snapshotError
+  });
+  const { thrown } = await harness.run();
+
+  assert.strictEqual(thrown, harness.capacityFailure);
+  assert.equal(harness.observations.snapshotCalls.length, 1);
+  assert.equal(harness.observations.underlyingConnectCalls.runtime, 3);
+  assert.equal(harness.observations.functionalClients.length, 2);
+  assert.equal(harness.observations.records.length, 1);
+  const candidate = harness.observations.records[0];
+  assertUnavailableGate4CapacitySnapshot(candidate);
+  assertGate4PoolCountersNumeric(candidate);
+  assert.deepEqual(candidate.pools.verifierRuntime, {
+    configuredMax: 2,
+    totalCount: 2,
+    idleCount: 1,
+    waitingCount: 0,
+    connectAttempts: 3,
+    connectSucceeded: 2,
+    connectionCapacityFailures: 1
+  });
+});
+
+test("Gate 4 V22 verifier instrumentation preserves callback connect and its release argument", async () => {
+  const harness = syntheticGate4CapacityHarness({
+    functionalConnections: [
+      { category: "runtime", callback: true },
+      { category: "runtime", callback: false }
+    ]
+  });
+  const { thrown } = await harness.run();
+
+  assert.strictEqual(thrown, harness.capacityFailure);
+  assert.equal(harness.observations.snapshotCalls.length, 1);
+  assert.equal(harness.observations.callbackReleases.length, 1);
+  assert.strictEqual(
+    harness.observations.callbackReleases[0],
+    harness.observations.functionalClients[0].release
+  );
+  assert.equal(harness.observations.underlyingConnectCalls.runtime, 2);
+  assert.deepEqual(harness.observations.records[0].pools.verifierRuntime, {
+    configuredMax: 2,
+    totalCount: 2,
+    idleCount: 1,
+    waitingCount: 0,
+    connectAttempts: 2,
+    connectSucceeded: 1,
+    connectionCapacityFailures: 1
+  });
+});
+
+test("Gate 4 V22 passing path never publishes a captured capacity snapshot", async () => {
+  const harness = syntheticGate4CapacityHarness({
+    runtimePlan: ["success", "success"]
+  });
+  const { result, thrown } = await harness.run();
+
+  assert.equal(thrown, undefined);
+  assert.equal(result.runtimeIsolationPrerequisite, true);
+  assert.equal(harness.observations.snapshotCalls.length, 1);
+  assert.equal(harness.observations.underlyingConnectCalls.runtime, 2);
+  assert.equal(harness.observations.records.length, 0);
+  assert.equal(harness.observations.closeCalls, 1);
+});
+
+test("Gate 4 V22 non-53300 failure never publishes capacity diagnostics", async () => {
+  const harness = syntheticGate4CapacityHarness({
+    functionalConnections: [{ category: "runtime", callback: false }],
+    runtimePlan: ["08006"]
+  });
+  const { thrown } = await harness.run();
+
+  assert.strictEqual(thrown, harness.otherFailure);
+  assert.equal(harness.observations.snapshotCalls.length, 0);
+  assert.equal(harness.observations.underlyingConnectCalls.runtime, 1);
+  assert.equal(harness.observations.records.length, 0);
+  assert.equal(harness.observations.closeCalls, 1);
+});
+
+test("Gate 4 V22 partial SQL snapshot becomes coherently all-null without a second attempt", async () => {
+  const partial = { ...COMPLETE_GATE4_CAPACITY_ROW };
+  delete partial.runtimeClientConnectionsBeforeV22Failure;
+  const harness = syntheticGate4CapacityHarness({ snapshotRow: partial });
+  const { thrown } = await harness.run();
+
+  assert.strictEqual(thrown, harness.capacityFailure);
+  assert.equal(harness.observations.snapshotCalls.length, 1);
+  assert.equal(harness.observations.underlyingConnectCalls.runtime, 2);
+  assert.equal(harness.observations.records.length, 1);
+  assertUnavailableGate4CapacitySnapshot(harness.observations.records[0]);
+  assertGate4PoolCountersNumeric(harness.observations.records[0]);
+});
+
+test("Gate 4 V22 recorder failure cannot replace the original 53300 or cleanup", async () => {
+  const recorderError = new Error("private recorder failure");
+  const harness = syntheticGate4CapacityHarness({ recorderError });
+  const { thrown } = await harness.run();
+
+  assert.strictEqual(thrown, harness.capacityFailure);
+  assert.equal(harness.observations.records.length, 1);
+  assert.equal(harness.observations.closeCalls, 1);
+  assert.equal(harness.setup.persistedA.every((value) => value === 0), true);
+  assert.equal(harness.setup.persistedB.every((value) => value === 0), true);
+});
+
+test("Gate 4 V22 migration 53300 increments only verifierMigration capacity counters", async () => {
+  const harness = syntheticGate4CapacityHarness({
+    functionalConnections: [{ category: "migration", callback: false }],
+    migrationPlan: ["53300"],
+    runtimePlan: []
+  });
+  const { thrown } = await harness.run();
+
+  assert.strictEqual(thrown, harness.capacityFailure);
+  const candidate = harness.observations.records[0];
+  assertUnavailableGate4CapacitySnapshot(candidate);
+  assert.equal(candidate.pools.verifierMigration.connectAttempts, 1);
+  assert.equal(candidate.pools.verifierMigration.connectSucceeded, 0);
+  assert.equal(candidate.pools.verifierMigration.connectionCapacityFailures, 1);
+  assert.equal(candidate.pools.verifierRuntime.connectAttempts, 0);
+  assert.equal(candidate.pools.verifierRuntime.connectSucceeded, 0);
+  assert.equal(candidate.pools.verifierRuntime.connectionCapacityFailures, 0);
+  assert.equal(harness.observations.underlyingConnectCalls.migration, 1);
+  assert.equal(harness.observations.underlyingConnectCalls.runtime, 0);
+});
+
+test("Gate 4 V22 query-level 53300 is not miscounted as a pool connect failure", async () => {
+  const harness = syntheticGate4CapacityHarness({
+    afterConnectionsError: Object.assign(new Error("private query refusal"), { code: "53300" }),
+    functionalConnections: [{ category: "runtime", callback: false }],
+    runtimePlan: ["success"]
+  });
+  const { thrown } = await harness.run();
+
+  assert.equal(thrown?.code, "53300");
+  assert.equal(harness.observations.snapshotCalls.length, 1);
+  assert.equal(harness.observations.records.length, 1);
+  assert.equal(harness.observations.records[0].server.maxConnections, 20);
+  assert.deepEqual(harness.observations.records[0].pools.verifierRuntime, {
+    configuredMax: 2,
+    totalCount: 2,
+    idleCount: 1,
+    waitingCount: 0,
+    connectAttempts: 1,
+    connectSucceeded: 1,
+    connectionCapacityFailures: 0
+  });
 });
 
 test("persisted Gate 4 injection preserves each V20-V25 failure without a database or process", async (t) => {
