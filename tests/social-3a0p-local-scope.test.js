@@ -11,57 +11,50 @@ const {
 } = require("../scripts/social-3a0p-local-scope");
 
 const AUTHORIZED_FILES = Object.freeze([
+  ".github/workflows/social-3b0-instagram-oauth-local-contract.yml",
+  "docs/social-3b0-instagram-oauth-local-contract.md",
   "scripts/social-3a0p-local-scope.js",
-  "server.js",
-  "src/persistence/postgres/social-oauth-repository.js",
-  "src/social/auth-adapter.js",
-  "src/social/credential-service.js",
-  "src/social/oauth/instagram-config.js",
-  "src/social/oauth/instagram-oauth-router.js",
-  "src/social/oauth/instagram-oauth-service.js",
-  "src/social/oauth/instagram-provider.js",
-  "src/social/oauth/instagram-state-envelope.js",
-  "src/social/runtime.js",
-  "src/social/server-runtime.js",
+  "scripts/social-3b0-linux-physical-gate.js",
   "tests/social-3a0p-current-diff-scope.test.js",
+  "tests/social-3a0p-linux-workflow.test.js",
   "tests/social-3a0p-local-scope.test.js",
-  "tests/social-3b0-instagram-oauth-crypto-provider.test.js",
-  "tests/social-3b0-instagram-oauth-routes.test.js",
-  "tests/social-connector-persistence.test.js",
-  "tests/social-server-runtime.test.js"
+  "tests/social-3b0-linux-physical-gate.test.js",
+  "tests/social-3b0-linux-workflow.test.js"
 ]);
 
-test("OAuth 3B-0 scope accepts exactly the eighteen authorized paths", () => {
-  assert.equal(AUTHORIZED_FILES.length, 18);
+test("remote OAuth 3B-0 scope accepts exactly the nine infrastructure paths", () => {
+  assert.equal(AUTHORIZED_FILES.length, 9);
   assert.deepEqual(ALLOWED_PREFIXES, []);
   assert.deepEqual(
     [...ALLOWED_EXACT_FILES].sort(),
     [...AUTHORIZED_FILES].sort()
   );
-  assert.equal(ALLOWED_EXACT_FILES.size, 18);
+  assert.equal(ALLOWED_EXACT_FILES.size, 9);
   for (const file of AUTHORIZED_FILES) {
     assert.equal(isHarnessOnlyFile(file), true, file);
   }
   assert.deepEqual(assertHarnessOnlyChangedFiles([...AUTHORIZED_FILES]), {
     harnessOnly: true,
-    changedFileCount: 18
+    changedFileCount: 9
   });
 });
 
-test("OAuth 3B-0 scope refuses variants, globs, subpaths and case changes", () => {
+test("remote OAuth 3B-0 scope refuses variants, globs, subpaths and case changes", () => {
   for (const file of [
-    "server.js.bak",
-    "SERVER.js",
-    "src/social/oauth/",
-    "src/social/oauth/*.js",
-    "src/social/oauth/instagram-config.js.bak",
-    "src/social/oauth/subdir/instagram-config.js",
-    "src/social/oauth/Instagram-config.js",
-    "src/social/oauth/instagram-state-envelope.test.js",
-    "tests/social-3b0-instagram-oauth-state-envelope.test.js",
-    "tests/social-3b0-instagram-oauth-routes.test.js.bak",
-    "tests/subdir/social-3b0-instagram-oauth-routes.test.js",
-    "tests/SOCIAL-3B0-INSTAGRAM-OAUTH-ROUTES.TEST.JS"
+    ".github/workflows/social-3b0-instagram-oauth-local-contract.yml.bak",
+    ".github/workflows/SOCIAL-3B0-INSTAGRAM-OAUTH-LOCAL-CONTRACT.YML",
+    ".github/workflows/*.yml",
+    "docs/social-3b0-instagram-oauth-local-contract.md.bak",
+    "docs/subdir/social-3b0-instagram-oauth-local-contract.md",
+    "scripts/social-3b0-*.js",
+    "scripts/social-3b0-linux-physical-gate.js.bak",
+    "scripts/subdir/social-3b0-linux-physical-gate.js",
+    "tests/social-3a0p-linux-workflow.test.js.bak",
+    "tests/SOCIAL-3A0P-LINUX-WORKFLOW.TEST.JS",
+    "tests/subdir/social-3a0p-linux-workflow.test.js",
+    "tests/social-3b0-linux-physical-gate.test.js.bak",
+    "tests/subdir/social-3b0-linux-workflow.test.js",
+    "tests/SOCIAL-3B0-LINUX-WORKFLOW.TEST.JS"
   ]) {
     assert.equal(isHarnessOnlyFile(file), false, file);
     assert.throws(() => assertHarnessOnlyChangedFiles([file]), {
@@ -70,8 +63,14 @@ test("OAuth 3B-0 scope refuses variants, globs, subpaths and case changes", () =
   }
 });
 
-test("OAuth 3B-0 scope refuses every product or dependency path outside its allowlist", () => {
+test("remote OAuth 3B-0 scope refuses product, dependency and historical paths", () => {
   for (const file of [
+    "server.js",
+    "src/social/oauth/instagram-config.js",
+    "src/social/oauth/instagram-oauth-router.js",
+    "src/social/oauth/instagram-oauth-service.js",
+    "src/social/oauth/instagram-provider.js",
+    "src/social/oauth/instagram-state-envelope.js",
     "src/social/identity.js",
     "src/social/vault.js",
     "src/social/connectors/service.js",
@@ -84,6 +83,8 @@ test("OAuth 3B-0 scope refuses every product or dependency path outside its allo
     "package-lock.json",
     ".github/workflows/social-3a0p-linux-physical-gates.yml",
     "docs/social-3a0p-linux-physical-gates.md",
+    "tests/social-3b0-instagram-oauth-crypto-provider.test.js",
+    "tests/social-3b0-instagram-oauth-routes.test.js",
     "app.html"
   ]) {
     assert.equal(isHarnessOnlyFile(file), false, file);
@@ -97,14 +98,14 @@ test("OAuth 3B-0 scope refuses every product or dependency path outside its allo
   }
 });
 
-test("OAuth 3B-0 scope rejects traversal and absolute paths", () => {
+test("remote OAuth 3B-0 scope rejects traversal and absolute paths", () => {
   for (const file of [
-    "../server.js",
-    "tests/../server.js",
-    "C:/repo/server.js",
-    "/repo/server.js",
-    "./tests/social-3b0-instagram-oauth-routes.test.js",
-    "tests//social-3b0-instagram-oauth-routes.test.js"
+    "../scripts/social-3b0-linux-physical-gate.js",
+    "tests/../scripts/social-3b0-linux-physical-gate.js",
+    "C:/repo/scripts/social-3b0-linux-physical-gate.js",
+    "/repo/scripts/social-3b0-linux-physical-gate.js",
+    "./tests/social-3b0-linux-workflow.test.js",
+    "tests//social-3b0-linux-workflow.test.js"
   ]) {
     assert.throws(() => normalizeRepositoryFile(file), {
       code: "harness_scope_file_invalid"
@@ -112,11 +113,11 @@ test("OAuth 3B-0 scope rejects traversal and absolute paths", () => {
   }
 });
 
-test("OAuth 3B-0 scope normalizes only path separators", () => {
-  const windowsPath = "src\\social\\oauth\\instagram-config.js";
+test("remote OAuth 3B-0 scope normalizes only path separators", () => {
+  const windowsPath = "scripts\\social-3b0-linux-physical-gate.js";
   assert.equal(
     normalizeRepositoryFile(windowsPath),
-    "src/social/oauth/instagram-config.js"
+    "scripts/social-3b0-linux-physical-gate.js"
   );
   assert.equal(isHarnessOnlyFile(windowsPath), true);
   assert.deepEqual(assertHarnessOnlyChangedFiles([windowsPath]), {
@@ -125,7 +126,7 @@ test("OAuth 3B-0 scope normalizes only path separators", () => {
   });
 });
 
-test("OAuth 3B-0 scope has no wildcard or directory-wide exception", () => {
+test("remote OAuth 3B-0 scope has no wildcard or directory-wide exception", () => {
   assert.equal(
     [...ALLOWED_EXACT_FILES].some(
       (file) => file.includes("*") || file.endsWith("/")

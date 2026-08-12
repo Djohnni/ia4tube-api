@@ -1,0 +1,620 @@
+"use strict";
+
+const assert = require("node:assert/strict");
+const crypto = require("node:crypto");
+const { EventEmitter } = require("node:events");
+const fs = require("node:fs");
+const http = require("node:http");
+const net = require("node:net");
+const os = require("node:os");
+const path = require("node:path");
+const test = require("node:test");
+
+const gate = require("../scripts/social-3b0-linux-physical-gate");
+const historicGate = require("../scripts/social-3a0p-linux-gate");
+const {
+  INSTAGRAM_OAUTH_REDIRECT_URI,
+  loadInstagramOAuthConfig
+} = require("../src/social/oauth/instagram-config");
+
+const SHA = "a".repeat(40);
+
+function environment(overrides = {}) {
+  return Object.freeze({
+    RUNNER_TEMP: overrides.RUNNER_TEMP,
+    GITHUB_RUN_ID: overrides.GITHUB_RUN_ID || "73190",
+    SOCIAL_3B0_BRANCH: gate.BRANCH,
+    SOCIAL_3B0_SHA: SHA,
+    SOCIAL_3B0_RUN_ATTEMPT: "1",
+    SOCIAL_3B0_WINDOWS_STATUS: "passed",
+    SOCIAL_3B0_PRE_GATE_STATUS: "passed",
+    SOCIAL_3B0_POSTGRES_IMAGE: gate.IMAGE,
+    POSTGRES_CONNECTIVITY_MODE: "internal_bridge_direct_v1",
+    POSTGRES_BACKUP_CONNECTIVITY_MODE:
+      "logical_dns_to_internal_container_v1",
+    SOCIAL_3A0P_POSTGRES_IMAGE: gate.IMAGE,
+    SOCIAL_INSTAGRAM_ENABLED: "false",
+    SOCIAL_EXTERNAL_CONNECTION_ENABLED: "false",
+    SOCIAL_EXTERNAL_PUBLICATION_ENABLED: "false"
+  });
+}
+
+function passedEvidence() {
+  const evidence = gate.baseEvidence({
+    branch: gate.BRANCH,
+    sha: SHA,
+    runAttempt: 1
+  });
+  evidence.gates1To5 = Object.freeze(gate.GATE_DEFINITIONS.map((entry) =>
+    Object.freeze({ ...entry, status: "passed" })
+  ));
+  evidence.substeps = Object.freeze(gate.SUBSTEP_IDS.map((id) =>
+    Object.freeze({ id, status: "passed" })
+  ));
+  evidence.counts = gate.EXPECTED_COUNTS;
+  evidence.secretScan = Object.freeze({
+    status: "passed",
+    historicPhysicalPassed: true,
+    oauthEvidencePassed: true
+  });
+  evidence.cleanup = Object.freeze({
+    cleanupCompleted: true,
+    intermediateEvidenceRemoved: true,
+    syntheticMaterialsCleared: true
+  });
+  evidence.residuals = gate.zeroResiduals();
+  evidence.status = "passed";
+  return evidence;
+}
+
+function zeroCleanup() {
+  return Object.freeze({
+    cleanupCompleted: true,
+    artifactDirectoryRemoved: true,
+    intermediateEvidenceRemoved: true,
+    residuals: gate.zeroResiduals()
+  });
+}
+
+function fakeChild({ exitCode = 1, emitSpawn = true } = {}) {
+  return function spawnImpl() {
+    const child = new EventEmitter();
+    child.kill = () => true;
+    queueMicrotask(() => {
+      if (emitSpawn) child.emit("spawn");
+      child.emit(emitSpawn ? "close" : "error", emitSpawn ? exitCode : null, null);
+    });
+    return child;
+  };
+}
+
+test("Social 3B physical gate freezes branch, phase, image and bounded budgets", () => {
+  assert.equal(
+    gate.BRANCH,
+    "social/checkpoint-3b0-instagram-oauth-local-contract-20260812"
+  );
+  assert.equal(gate.PHASE, "instagram_oauth_local_contract");
+  assert.equal(
+    gate.IMAGE,
+    "docker.io/library/postgres:18.4-bookworm@" +
+      "sha256:7e6103cf85f88f7a0eddb3ec0b1ba8940eba098ed118ade25a729ca9daee5568"
+  );
+  assert.equal(gate.WORKER_TIMEOUT_MS, 44 * 60_000);
+  assert.equal(gate.HISTORIC_TIMEOUT_MS, 36 * 60_000);
+  assert.ok(gate.HISTORIC_TIMEOUT_MS < gate.WORKER_TIMEOUT_MS);
+  assert.ok(gate.WORKER_TIMEOUT_MS < 60 * 60_000);
+  assert.deepEqual(gate.SUBSTEP_IDS, Array.from(
+    { length: 22 },
+    (_unused, index) => `O${String(index + 1).padStart(2, "0")}`
+  ));
+});
+
+test("remote environment requires every external runtime gate to remain exactly false", () => {
+  const runnerTemp = path.join(os.tmpdir(), "social-3b0-environment-contract");
+  const valid = environment({ RUNNER_TEMP: runnerTemp });
+  assert.deepEqual(gate.validateEnvironment(valid), {
+    branch: gate.BRANCH,
+    sha: SHA,
+    runAttempt: 1
+  });
+  for (const name of [
+    "SOCIAL_INSTAGRAM_ENABLED",
+    "SOCIAL_EXTERNAL_CONNECTION_ENABLED",
+    "SOCIAL_EXTERNAL_PUBLICATION_ENABLED"
+  ]) {
+    assert.throws(
+      () => gate.validateEnvironment({ ...valid, [name]: "true" }),
+      (error) => error?.code === "social_3b0_environment_invalid"
+    );
+    const missing = { ...valid };
+    delete missing[name];
+    assert.throws(
+      () => gate.validateEnvironment(missing),
+      (error) => error?.code === "social_3b0_environment_invalid"
+    );
+  }
+});
+
+test("evidence contract requires exact Gates, O01-O22, counts, scans and zero residuals", () => {
+  const evidence = passedEvidence();
+  assert.equal(gate.evidenceSafe(evidence), true);
+
+  for (const secretScan of [
+    { status: "passed", historicPhysicalPassed: false, oauthEvidencePassed: true },
+    { status: "passed", historicPhysicalPassed: true, oauthEvidencePassed: false },
+    { status: "not_run", historicPhysicalPassed: true, oauthEvidencePassed: true },
+    { status: "failed", historicPhysicalPassed: true, oauthEvidencePassed: true }
+  ]) {
+    assert.equal(gate.evidenceSafe({ ...evidence, secretScan }), false);
+  }
+  assert.equal(gate.evidenceSafe({
+    ...evidence,
+    counts: { ...gate.EXPECTED_COUNTS, credentialWrites: 1 }
+  }), false);
+  assert.equal(gate.evidenceSafe({
+    ...evidence,
+    residuals: { ...gate.zeroResiduals(), timers: 1 }
+  }), false);
+  assert.equal(gate.evidenceSafe({
+    ...evidence,
+    cleanup: { ...evidence.cleanup, cleanupCompleted: false }
+  }), false);
+  assert.equal(gate.evidenceSafe({
+    ...evidence,
+    substeps: evidence.substeps.map((entry) => entry.id === "O22"
+      ? { ...entry, status: "failed" }
+      : entry)
+  }), false);
+  assert.equal(gate.evidenceSafe({
+    ...evidence,
+    state: crypto.randomBytes(24).toString("base64url")
+  }), false);
+});
+
+test("closed first failure preserves observed process facts without sensitive fields", () => {
+  const failure = gate.closedFirstFailure({
+    job: "linux_physical_gates",
+    phase: "backup_restore",
+    lastCompletedSubstep: "vault",
+    causalCode: "backup_external_tool_failed",
+    externalProcessStarted: true,
+    exitCode: 7,
+    signal: null,
+    timedOut: false
+  });
+  assert.deepEqual(Object.keys(failure).sort(), [
+    "causalCode",
+    "exitCode",
+    "externalProcessStarted",
+    "job",
+    "lastCompletedSubstep",
+    "phase",
+    "signal",
+    "substep",
+    "timedOut"
+  ].sort());
+  assert.equal(failure.externalProcessStarted, true);
+  assert.equal(failure.exitCode, 7);
+  assert.equal(JSON.stringify(failure).includes("stdout"), false);
+  assert.equal(JSON.stringify(failure).includes("stderr"), false);
+});
+
+test("historic Gates 2-4 preserve their sanitized failing and last completed substeps", () => {
+  const cases = [
+    {
+      firstPhase: "rls_roles",
+      lastCompletedPhase: "rls_runtime_attributes_text_resolution_reproduction",
+      firstCode: "postgres_insufficient_privilege",
+      evidenceKey: "rlsFailureProvenance",
+      provenance: {
+        substep: "rls_cross_tenant_write",
+        causalCode: "postgres_insufficient_privilege"
+      },
+      expectedSubstep: "rls_cross_tenant_write",
+      expectedLast: "rls_runtime_attributes_text_resolution_reproduction"
+    },
+    {
+      firstPhase: "concurrency_oauth_idempotency",
+      lastCompletedPhase: "rls_roles",
+      firstCode: "gate3_type_error",
+      evidenceKey: "gate3FailureProvenance",
+      provenance: {
+        operation: "base",
+        substep: "B2",
+        operationClass: "postgres_transaction",
+        causalCode: "gate3_type_error",
+        lastCompletedSubstep: "B1",
+        externalProcessStarted: false,
+        exitCode: null,
+        signal: null
+      },
+      expectedSubstep: "B2",
+      expectedLast: "B1"
+    },
+    {
+      firstPhase: "vault",
+      lastCompletedPhase: "concurrency_oauth_idempotency",
+      firstCode: "gate4_type_error",
+      evidenceKey: "gate4FailureProvenance",
+      provenance: {
+        operation: "base",
+        substep: "V02",
+        operationClass: "memory_crypto",
+        causalCode: "gate4_type_error",
+        lastCompletedSubstep: "V01",
+        externalProcessStarted: false,
+        exitCode: null,
+        signal: null
+      },
+      expectedSubstep: "V02",
+      expectedLast: "V01"
+    }
+  ];
+  for (const item of cases) {
+    const details = gate.historicFailureDetails({
+      historic: historicGate,
+      evidence: {
+        firstFailure: { phase: item.firstPhase, code: item.firstCode },
+        [item.evidenceKey]: item.provenance
+      },
+      firstPhase: item.firstPhase,
+      lastCompletedPhase: item.lastCompletedPhase,
+      backupRestoreFailureProvenance: null
+    });
+    assert.equal(details.substep, item.expectedSubstep);
+    assert.equal(details.lastCompletedSubstep, item.expectedLast);
+    const closed = gate.closedFirstFailure({
+      job: "linux_physical_gates",
+      phase: item.firstPhase,
+      substep: details.substep,
+      lastCompletedSubstep: details.lastCompletedSubstep,
+      causalCode: details.causalCode,
+      externalProcessStarted: details.externalProcessStarted,
+      exitCode: details.exitCode,
+      signal: details.signal,
+      timedOut: false
+    });
+    assert.equal(closed.substep, item.expectedSubstep);
+    assert.equal(closed.lastCompletedSubstep, item.expectedLast);
+  }
+});
+
+test("blocked response body uses one timer, aborts, cancels and releases without a residual", async () => {
+  const appMaterial = crypto.randomBytes(32);
+  const config = loadInstagramOAuthConfig(Object.freeze({
+    SOCIAL_INSTAGRAM_ENABLED: "true",
+    SOCIAL_EXTERNAL_CONNECTION_ENABLED: "true",
+    SOCIAL_EXTERNAL_PUBLICATION_ENABLED: "false",
+    INSTAGRAM_APP_ID: "73190",
+    INSTAGRAM_APP_SECRET: appMaterial.toString("base64url"),
+    INSTAGRAM_OAUTH_REDIRECT_URI,
+    INSTAGRAM_GRAPH_API_VERSION: "v24.0"
+  }));
+  try {
+    const proof = await gate.runBlockedBodyProof(config);
+    assert.deepEqual(proof, { active: 0, clearCalls: 1, setCalls: 1 });
+  } finally {
+    appMaterial.fill(0);
+  }
+});
+
+test("timeout owns and terminates the complete Linux process group without a residual", async () => {
+  const signals = [];
+  let groupAlive = true;
+  let spawnOptions;
+  let child;
+  const spawnImpl = (_executable, _args, options) => {
+    spawnOptions = options;
+    child = new EventEmitter();
+    child.pid = 4242;
+    child.kill = () => assert.fail("direct child kill bypassed the process group");
+    queueMicrotask(() => child.emit("spawn"));
+    return child;
+  };
+  const processKill = (target, signal) => {
+    assert.equal(target, -4242);
+    if (signal === 0) {
+      if (groupAlive) return true;
+      const error = new Error("missing process group");
+      error.code = "ESRCH";
+      throw error;
+    }
+    signals.push(signal);
+    if (signal === "SIGKILL") {
+      groupAlive = false;
+      queueMicrotask(() => child.emit("close", null, "SIGKILL"));
+    }
+    return true;
+  };
+  const result = await gate.childOnce(process.execPath, ["synthetic-worker"], {
+    spawnImpl,
+    timeoutMs: 1,
+    killGraceMs: 1,
+    ownsProcessGroup: true,
+    platform: "linux",
+    processKill
+  });
+  assert.equal(spawnOptions.detached, true);
+  assert.deepEqual(signals, ["SIGTERM", "SIGKILL"]);
+  assert.equal(result.started, true);
+  assert.equal(result.timedOut, true);
+  assert.equal(result.signal, "SIGKILL");
+  assert.equal(result.processResiduals, 0);
+});
+
+test("application firewall refuses http, Socket and fetch non-loopback before I/O and restores globals", async () => {
+  const originalRequest = http.request;
+  const originalConnect = net.Socket.prototype.connect;
+  const originalFetch = globalThis.fetch;
+  const loopbackServer = net.createServer((socket) => socket.end());
+  await new Promise((resolve, reject) => {
+    loopbackServer.once("error", reject);
+    loopbackServer.listen(0, "127.0.0.1", resolve);
+  });
+  const guard = gate.installApplicationNetworkGuard(new Set([
+    "127.0.0.1",
+    "172.18.0.2"
+  ]));
+  try {
+    const address = loopbackServer.address();
+    await new Promise((resolve, reject) => {
+      const socket = net.createConnection({
+        host: "127.0.0.1",
+        port: address.port
+      });
+      socket.once("connect", () => {
+        socket.end();
+        resolve();
+      });
+      socket.once("error", reject);
+    });
+    assert.throws(
+      () => http.request({ host: "198.51.100.1", port: 80, path: "/" }),
+      (error) => error?.code === "social_3b0_non_loopback_network_refused"
+    );
+    const socket = new net.Socket();
+    assert.throws(
+      () => socket.connect(80, "203.0.113.1"),
+      (error) => error?.code === "social_3b0_non_loopback_network_refused"
+    );
+    if (typeof originalFetch === "function") {
+      await assert.rejects(
+        globalThis.fetch("https://example.invalid/"),
+        (error) => error?.code === "social_3b0_non_loopback_network_refused"
+      );
+    }
+    const observed = guard.snapshot();
+    assert.equal(observed.externalConnections, 0);
+    assert.equal(observed.deniedAttempts, typeof originalFetch === "function" ? 3 : 2);
+  } finally {
+    guard.restore();
+    await new Promise((resolve) => loopbackServer.close(resolve));
+  }
+  assert.equal(http.request, originalRequest);
+  assert.equal(net.Socket.prototype.connect, originalConnect);
+  assert.equal(globalThis.fetch, originalFetch);
+});
+
+test("worker crash still publishes exactly four sanitized files after measured cleanup", async () => {
+  const runnerTemp = fs.mkdtempSync(path.join(os.tmpdir(), "social-3b0-crash-"));
+  const directory = path.join(runnerTemp, gate.ARTIFACT_DIRECTORY);
+  const outputPath = path.join(directory, gate.EVIDENCE_FILE);
+  const processStatusPath = path.join(directory, gate.PROCESS_STATUS_FILE);
+  try {
+    const result = await gate.superviseInstagramOAuthPhysicalGate({
+      runnerTemp,
+      outputPath,
+      processStatusPath,
+      repositoryRoot: path.join(__dirname, ".."),
+      environment: environment({ RUNNER_TEMP: runnerTemp }),
+      spawnImpl: fakeChild({ exitCode: 19 }),
+      cleanupImpl: async () => zeroCleanup(),
+      timeoutMs: 1000
+    });
+    assert.equal(result.ok, false);
+    assert.deepEqual(fs.readdirSync(directory).sort(), [
+      gate.EVIDENCE_FILE,
+      gate.EVIDENCE_HASH_FILE,
+      gate.PROCESS_STATUS_FILE,
+      gate.PROCESS_STATUS_HASH_FILE
+    ].sort());
+    const evidence = JSON.parse(fs.readFileSync(outputPath, "utf8"));
+    assert.equal(gate.evidenceSafe(evidence), true);
+    assert.equal(evidence.status, "failed");
+    assert.equal(evidence.firstFailure.externalProcessStarted, true);
+    assert.equal(evidence.firstFailure.exitCode, 19);
+    assert.equal(evidence.cleanup.cleanupCompleted, true);
+    assert.deepEqual(evidence.residuals, gate.zeroResiduals());
+    assert.equal(evidence.substeps[21].status, "passed");
+    gate.verifySidecar(outputPath, path.join(directory, gate.EVIDENCE_HASH_FILE));
+    gate.verifySidecar(
+      processStatusPath,
+      path.join(directory, gate.PROCESS_STATUS_HASH_FILE)
+    );
+  } finally {
+    fs.rmSync(runnerTemp, { recursive: true, force: true });
+  }
+});
+
+test("compensating cleanup failure downgrades passed worker evidence and O22", async () => {
+  const runnerTemp = fs.mkdtempSync(path.join(os.tmpdir(), "social-3b0-cleanup-"));
+  const directory = path.join(runnerTemp, gate.ARTIFACT_DIRECTORY);
+  const outputPath = path.join(directory, gate.EVIDENCE_FILE);
+  const processStatusPath = path.join(directory, gate.PROCESS_STATUS_FILE);
+  let wroteWorkerEvidence = false;
+  let workerWriteError = null;
+  const spawnImpl = (_executable, _args, options) => {
+    const child = new EventEmitter();
+    child.kill = (signal) => {
+      queueMicrotask(() => child.emit("close", null, signal));
+      return true;
+    };
+    queueMicrotask(() => {
+      try {
+        const evidence = passedEvidence();
+        gate.writePayload(
+          path.join(options.env.RUNNER_TEMP, gate.ARTIFACT_DIRECTORY,
+            gate.EVIDENCE_FILE),
+          path.join(options.env.RUNNER_TEMP, gate.ARTIFACT_DIRECTORY,
+            gate.EVIDENCE_HASH_FILE),
+          evidence
+        );
+        wroteWorkerEvidence = true;
+        child.emit("spawn");
+        child.emit("close", 0, null);
+      } catch (error) {
+        workerWriteError = error;
+        child.emit("error", error);
+      }
+    });
+    return child;
+  };
+  try {
+    const result = await gate.superviseInstagramOAuthPhysicalGate({
+      runnerTemp,
+      outputPath,
+      processStatusPath,
+      repositoryRoot: path.join(__dirname, ".."),
+      environment: environment({ RUNNER_TEMP: runnerTemp, GITHUB_RUN_ID: "73193" }),
+      spawnImpl,
+      cleanupImpl: async () => Object.freeze({
+        cleanupCompleted: false,
+        artifactDirectoryRemoved: false,
+        intermediateEvidenceRemoved: true,
+        residuals: Object.freeze({ ...gate.zeroResiduals(), timers: 1 })
+      }),
+      timeoutMs: 1000
+    });
+    if (workerWriteError) throw workerWriteError;
+    assert.equal(wroteWorkerEvidence, true);
+    assert.equal(result.ok, false);
+    const evidence = JSON.parse(fs.readFileSync(outputPath, "utf8"));
+    assert.equal(gate.evidenceSafe(evidence), true);
+    assert.equal(evidence.status, "failed");
+    assert.equal(evidence.firstFailure.causalCode, "social_3b0_cleanup_incomplete");
+    assert.equal(evidence.cleanup.cleanupCompleted, false);
+    assert.equal(evidence.residuals.timers, 1);
+    assert.equal(evidence.substeps[21].status, "failed");
+  } finally {
+    fs.rmSync(runnerTemp, { recursive: true, force: true });
+  }
+});
+
+test("spawn refusal records that no worker process started and still closes the artifact", async () => {
+  const runnerTemp = fs.mkdtempSync(path.join(os.tmpdir(), "social-3b0-spawn-"));
+  const directory = path.join(runnerTemp, gate.ARTIFACT_DIRECTORY);
+  const outputPath = path.join(directory, gate.EVIDENCE_FILE);
+  try {
+    await gate.superviseInstagramOAuthPhysicalGate({
+      runnerTemp,
+      outputPath,
+      processStatusPath: path.join(directory, gate.PROCESS_STATUS_FILE),
+      repositoryRoot: path.join(__dirname, ".."),
+      environment: environment({ RUNNER_TEMP: runnerTemp, GITHUB_RUN_ID: "73191" }),
+      spawnImpl: fakeChild({ emitSpawn: false }),
+      cleanupImpl: async () => zeroCleanup(),
+      timeoutMs: 1000
+    });
+    const evidence = JSON.parse(fs.readFileSync(outputPath, "utf8"));
+    assert.equal(evidence.firstFailure.externalProcessStarted, false);
+    assert.equal(evidence.firstFailure.exitCode, null);
+    assert.equal(evidence.firstFailure.timedOut, false);
+  } finally {
+    fs.rmSync(runnerTemp, { recursive: true, force: true });
+  }
+});
+
+test("historic Gate failure preserves its first cause and never starts the OAuth contract", async () => {
+  const runnerTemp = fs.mkdtempSync(path.join(os.tmpdir(), "social-3b0-historic-"));
+  const directory = path.join(runnerTemp, gate.ARTIFACT_DIRECTORY);
+  fs.mkdirSync(directory, { mode: 0o700 });
+  const outputPath = path.join(directory, gate.EVIDENCE_FILE);
+  const provenance = Object.freeze({
+    operation: "restore",
+    substep: "bundle_authentication",
+    boundary: "before_transport",
+    causalCode: "backup_bundle_authentication_failed",
+    externalTransportProcessStarted: false,
+    substepExact: true
+  });
+  let oauthCalled = false;
+  try {
+    const result = await gate.runInstagramOAuthPhysicalGate({
+      runnerTemp,
+      outputPath,
+      repositoryRoot: path.join(__dirname, ".."),
+      environment: environment({ RUNNER_TEMP: runnerTemp, GITHUB_RUN_ID: "73192" }),
+      runHistoricPhysicalGates: async () => Object.freeze({
+        ok: false,
+        gates1To5: Object.freeze(gate.GATE_DEFINITIONS.map((entry, index) =>
+          Object.freeze({ ...entry, status: index < 4 ? "passed" : "failed" })
+        )),
+        backupRestoreFailureProvenance: provenance,
+        historicSecretScanPassed: true,
+        processResiduals: 0,
+        firstFailure: gate.closedFirstFailure({
+          job: "linux_physical_gates",
+          phase: "backup_restore",
+          lastCompletedSubstep: "vault",
+          causalCode: "backup_bundle_authentication_failed",
+          externalProcessStarted: false,
+          exitCode: 1,
+          timedOut: false
+        }),
+        intermediateEvidenceRemoved: true
+      }),
+      runPhysicalOAuthContract: async () => {
+        oauthCalled = true;
+        assert.fail("OAuth contract ran after a historic Gate failure");
+      }
+    });
+    assert.equal(result.ok, false);
+    assert.equal(oauthCalled, false);
+    const evidence = JSON.parse(fs.readFileSync(outputPath, "utf8"));
+    assert.equal(evidence.firstFailure.phase, "backup_restore");
+    assert.equal(
+      evidence.firstFailure.causalCode,
+      "backup_bundle_authentication_failed"
+    );
+    assert.equal(evidence.firstFailure.lastCompletedSubstep, "vault");
+    assert.deepEqual(evidence.backupRestoreFailureProvenance, provenance);
+    assert.equal(evidence.substeps.every((entry) => entry.status === "skipped"), true);
+  } finally {
+    fs.rmSync(runnerTemp, { recursive: true, force: true });
+  }
+});
+
+test("source keeps the physical O01-O22 proofs and closed cleanup interfaces", () => {
+  const source = fs.readFileSync(
+    path.join(__dirname, "..", "scripts", "social-3b0-linux-physical-gate.js"),
+    "utf8"
+  );
+  for (const id of gate.SUBSTEP_IDS.slice(0, 21)) {
+    assert.match(source, new RegExp(`ledger\\.run\\(\"${id}\"`));
+  }
+  assert.ok(source.includes("ledger.passCleanup()"));
+  assert.ok(source.includes("ledger.failCleanup(cleanupFailure)"));
+  for (const marker of [
+    "createLinuxPostgres",
+    "createInstagramOAuthRouter",
+    "openForCallback",
+    "relrowsecurity AND relforcerowsecurity",
+    "withDecryptedCredential",
+    "cancelled_at",
+    "containsSyntheticMarkerInTree",
+    "scanDataDirectoryMarkers",
+    "installApplicationNetworkGuard",
+    "social_3b0_non_loopback_network_refused",
+    "secret_scan",
+    "cleanupInstagramOAuthPhysicalGate",
+    "artifactDirectoryRemoved"
+  ]) assert.match(source, new RegExp(marker));
+  for (const marker of [
+    "detached: ownsProcessGroup",
+    "ownsProcessGroup: false",
+    "processKill(-child.pid, signal)",
+    "child.processResiduals",
+    "postgres.materials",
+    "rememberSensitive"
+  ]) assert.ok(source.includes(marker), marker);
+});

@@ -8,6 +8,10 @@ const test = require("node:test");
 const REPOSITORY_ROOT = path.resolve(__dirname, "..");
 const WORKFLOW_RELATIVE_PATH = ".github/workflows/social-3a0p-linux-physical-gates.yml";
 const WORKFLOW_PATH = path.join(REPOSITORY_ROOT, ...WORKFLOW_RELATIVE_PATH.split("/"));
+const APPROVED_WORKFLOW_NAMES = Object.freeze([
+  "social-3a0p-linux-physical-gates.yml",
+  "social-3b0-instagram-oauth-local-contract.yml"
+]);
 const BRANCH = "social/checkpoint-3a0p-gate5-cross-profile-plan-binding-20260811";
 const AUTHORIZED_PARENT = "dc0eb35ec0e005d145900dd6427a51db022f0da3";
 const BUNDLE_TAMPER_REFUSAL_PARENT = "3c1ba942033a94ba6480145664543d906805544b";
@@ -355,12 +359,21 @@ function assertGuardInventory(source, style) {
   assert.equal(source.includes("*"), false);
 }
 
-test("Gate 5 cross-profile plan binding is the repository's sole workflow and is strict JSON", () => {
+test("repository contains exactly the approved 3A-0P and 3B-0 workflows and both are strict JSON", () => {
   const entries = fs.readdirSync(path.dirname(WORKFLOW_PATH), { withFileTypes: true });
-  assert.equal(entries.length, 1);
-  assert.equal(entries[0].isFile(), true);
-  assert.equal(entries[0].name, path.basename(WORKFLOW_PATH));
-  assert.doesNotThrow(() => JSON.parse(fs.readFileSync(WORKFLOW_PATH, "utf8")));
+  assert.equal(entries.length, 2);
+  assert.deepEqual(
+    entries.map((entry) => entry.name).sort(),
+    [...APPROVED_WORKFLOW_NAMES].sort()
+  );
+  for (const entry of entries) {
+    assert.equal(entry.isFile(), true, entry.name);
+    const workflowPath = path.join(path.dirname(WORKFLOW_PATH), entry.name);
+    const stat = fs.lstatSync(workflowPath);
+    assert.equal(stat.isFile(), true, entry.name);
+    assert.equal(stat.isSymbolicLink(), false, entry.name);
+    assert.doesNotThrow(() => JSON.parse(fs.readFileSync(workflowPath, "utf8")));
+  }
 });
 
 test("workflow permits only the exact first creation push and has two ordered native jobs", () => {

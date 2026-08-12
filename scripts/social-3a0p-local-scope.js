@@ -3,24 +3,15 @@
 const path = require("node:path");
 
 const ALLOWED_EXACT_FILES = new Set([
+  ".github/workflows/social-3b0-instagram-oauth-local-contract.yml",
+  "docs/social-3b0-instagram-oauth-local-contract.md",
   "scripts/social-3a0p-local-scope.js",
-  "server.js",
-  "src/persistence/postgres/social-oauth-repository.js",
-  "src/social/auth-adapter.js",
-  "src/social/credential-service.js",
-  "src/social/oauth/instagram-config.js",
-  "src/social/oauth/instagram-oauth-router.js",
-  "src/social/oauth/instagram-oauth-service.js",
-  "src/social/oauth/instagram-provider.js",
-  "src/social/oauth/instagram-state-envelope.js",
-  "src/social/runtime.js",
-  "src/social/server-runtime.js",
+  "scripts/social-3b0-linux-physical-gate.js",
   "tests/social-3a0p-current-diff-scope.test.js",
+  "tests/social-3a0p-linux-workflow.test.js",
   "tests/social-3a0p-local-scope.test.js",
-  "tests/social-3b0-instagram-oauth-crypto-provider.test.js",
-  "tests/social-3b0-instagram-oauth-routes.test.js",
-  "tests/social-connector-persistence.test.js",
-  "tests/social-server-runtime.test.js"
+  "tests/social-3b0-linux-physical-gate.test.js",
+  "tests/social-3b0-linux-workflow.test.js"
 ]);
 const ALLOWED_PREFIXES = Object.freeze([]);
 const FORBIDDEN_PRODUCT_PREFIXES = Object.freeze([

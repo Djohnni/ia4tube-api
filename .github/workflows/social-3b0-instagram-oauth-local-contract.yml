@@ -1,0 +1,194 @@
+{
+  "name": "Social 3B-0 Instagram OAuth local contract remote validation",
+  "on": {
+    "push": {
+      "branches": [
+        "social/checkpoint-3b0-instagram-oauth-local-contract-20260812"
+      ]
+    }
+  },
+  "permissions": {
+    "contents": "read"
+  },
+  "concurrency": {
+    "group": "social-3b0-instagram-oauth-local-contract-${{ github.ref }}",
+    "cancel-in-progress": false
+  },
+  "env": {
+    "SOCIAL_3B0_FUNCTIONAL_COMMIT": "33e3ea7abcea7f5dc51780c3a1efd4743352fe40",
+    "SOCIAL_3B0_FUNCTIONAL_PARENT": "3dc3d8be62438216509f061f6c1a26ee39c9b5dc",
+    "SOCIAL_3B0_INFRA_MESSAGE": "[run-social-3b0] validate Instagram OAuth contract remotely",
+    "SOCIAL_3B0_FUNCTIONAL_MESSAGE": "[social-3b0] implement local Instagram OAuth authorize callback exchange",
+    "SOCIAL_3B0_FUNCTIONAL_PARENT_MESSAGE": "[run-social-3a0p-linux-gate] refuse cross-profile restore before transport"
+  },
+  "jobs": {
+    "windows-automated-tests": {
+      "if": "github.event_name == 'push' && github.ref == 'refs/heads/social/checkpoint-3b0-instagram-oauth-local-contract-20260812' && github.event.created == true && github.event.deleted == false && github.event.forced == false && github.event.before == '0000000000000000000000000000000000000000' && github.event.head_commit.message == '[run-social-3b0] validate Instagram OAuth contract remotely' && github.run_attempt == 1",
+      "runs-on": "windows-2025",
+      "timeout-minutes": 60,
+      "steps": [
+        {
+          "name": "Checkout the authorized two-commit chain",
+          "uses": "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+          "with": {
+            "fetch-depth": 0,
+            "persist-credentials": false
+          }
+        },
+        {
+          "name": "Verify the immutable two-commit execution contract",
+          "shell": "pwsh",
+          "env": {
+            "AUTHORIZED_SHA": "${{ github.sha }}",
+            "AUTHORIZED_MESSAGE": "${{ github.event.head_commit.message }}",
+            "AUTHORIZED_ATTEMPT": "${{ github.run_attempt }}"
+          },
+          "run": "$ErrorActionPreference = 'Stop'\nfunction Fail-Closed { throw 'immutable_execution_contract_failed' }\nfunction Invoke-GitLines { param([string[]]$Arguments) $output = @(& git @Arguments); if ($LASTEXITCODE -ne 0) { Fail-Closed }; return $output }\nfunction Get-GitText { param([string[]]$Arguments) $lines = @(Invoke-GitLines -Arguments $Arguments); return (($lines -join \"`n\").TrimEnd()) }\nfunction Assert-Equal { param([string]$Actual, [string]$Expected) if ($Actual -cne $Expected) { Fail-Closed } }\nfunction Assert-SingleParent { param([string]$Commit) $line = Get-GitText -Arguments @('rev-list', '--parents', '-n', '1', $Commit); if (($line -split '\\s+').Count -ne 2) { Fail-Closed } }\nfunction Assert-ExactFiles { param([string[]]$Actual, [string[]]$Expected) if ($Actual.Count -ne $Expected.Count) { Fail-Closed }; foreach ($file in $Actual) { if ($Expected -cnotcontains $file) { Fail-Closed } }; foreach ($file in $Expected) { if ($Actual -cnotcontains $file) { Fail-Closed } } }\nfunction Assert-RegularBlobs { param([string]$Tree, [string[]]$Files) foreach ($file in $Files) { $entry = Get-GitText -Arguments @('ls-tree', $Tree, '--', $file); if (-not $entry.StartsWith('100644 blob ')) { Fail-Closed } } }\n$functionalFiles = @(\n  'scripts/social-3a0p-local-scope.js',\n  'server.js',\n  'src/persistence/postgres/social-oauth-repository.js',\n  'src/social/auth-adapter.js',\n  'src/social/credential-service.js',\n  'src/social/oauth/instagram-config.js',\n  'src/social/oauth/instagram-oauth-router.js',\n  'src/social/oauth/instagram-oauth-service.js',\n  'src/social/oauth/instagram-provider.js',\n  'src/social/oauth/instagram-state-envelope.js',\n  'src/social/runtime.js',\n  'src/social/server-runtime.js',\n  'tests/social-3a0p-current-diff-scope.test.js',\n  'tests/social-3a0p-local-scope.test.js',\n  'tests/social-3b0-instagram-oauth-crypto-provider.test.js',\n  'tests/social-3b0-instagram-oauth-routes.test.js',\n  'tests/social-connector-persistence.test.js',\n  'tests/social-server-runtime.test.js'\n)\n$infrastructureFiles = @(\n  '.github/workflows/social-3b0-instagram-oauth-local-contract.yml',\n  'docs/social-3b0-instagram-oauth-local-contract.md',\n  'scripts/social-3b0-linux-physical-gate.js',\n  'tests/social-3a0p-linux-workflow.test.js',\n  'tests/social-3b0-linux-physical-gate.test.js',\n  'tests/social-3b0-linux-workflow.test.js',\n  'scripts/social-3a0p-local-scope.js',\n  'tests/social-3a0p-local-scope.test.js',\n  'tests/social-3a0p-current-diff-scope.test.js'\n)\nAssert-Equal $env:AUTHORIZED_ATTEMPT '1'\nAssert-Equal $env:AUTHORIZED_MESSAGE $env:SOCIAL_3B0_INFRA_MESSAGE\nAssert-Equal (Get-GitText -Arguments @('rev-parse', 'HEAD')) $env:AUTHORIZED_SHA\nAssert-Equal (Get-GitText -Arguments @('rev-parse', 'HEAD^')) $env:SOCIAL_3B0_FUNCTIONAL_COMMIT\nAssert-Equal (Get-GitText -Arguments @('rev-parse', \"$($env:SOCIAL_3B0_FUNCTIONAL_COMMIT)^\")) $env:SOCIAL_3B0_FUNCTIONAL_PARENT\nAssert-Equal (Get-GitText -Arguments @('rev-list', '--count', \"$($env:SOCIAL_3B0_FUNCTIONAL_PARENT)..HEAD\")) '2'\nAssert-SingleParent 'HEAD'\nAssert-SingleParent $env:SOCIAL_3B0_FUNCTIONAL_COMMIT\nAssert-SingleParent $env:SOCIAL_3B0_FUNCTIONAL_PARENT\nAssert-Equal (Get-GitText -Arguments @('log', '-1', '--pretty=%B')) $env:SOCIAL_3B0_INFRA_MESSAGE\nAssert-Equal (Get-GitText -Arguments @('log', '-1', '--pretty=%B', $env:SOCIAL_3B0_FUNCTIONAL_COMMIT)) $env:SOCIAL_3B0_FUNCTIONAL_MESSAGE\nAssert-Equal (Get-GitText -Arguments @('log', '-1', '--pretty=%B', $env:SOCIAL_3B0_FUNCTIONAL_PARENT)) $env:SOCIAL_3B0_FUNCTIONAL_PARENT_MESSAGE\n$functionalChanged = @(Invoke-GitLines -Arguments @('diff-tree', '--no-commit-id', '--name-only', '-r', $env:SOCIAL_3B0_FUNCTIONAL_COMMIT))\n$infrastructureChanged = @(Invoke-GitLines -Arguments @('diff-tree', '--no-commit-id', '--name-only', '-r', 'HEAD'))\nAssert-ExactFiles $functionalChanged $functionalFiles\nAssert-ExactFiles $infrastructureChanged $infrastructureFiles\nAssert-RegularBlobs $env:SOCIAL_3B0_FUNCTIONAL_COMMIT $functionalFiles\nAssert-RegularBlobs 'HEAD' $infrastructureFiles\n$protectedChanged = @(Invoke-GitLines -Arguments @('diff', '--name-only', $env:SOCIAL_3B0_FUNCTIONAL_PARENT, 'HEAD', '--', '.github/workflows/social-3a0p-linux-physical-gates.yml', 'db/migrations', 'db/postgres/roles.sql', 'package.json', 'package-lock.json'))\nif ($protectedChanged.Count -ne 0) { Fail-Closed }\nAssert-Equal (Get-GitText -Arguments @('rev-parse', 'HEAD:.github/workflows/social-3a0p-linux-physical-gates.yml')) '7d66809ba2495aa6d2c4c8dc4d2f5ff03c991693'\n$changes = @(Invoke-GitLines -Arguments @('status', '--porcelain=v1', '--untracked-files=all'))\nif ($changes.Count -ne 0) { Fail-Closed }"
+        },
+        {
+          "name": "Set up Node.js 24",
+          "uses": "actions/setup-node@820762786026740c76f36085b0efc47a31fe5020",
+          "with": {
+            "node-version": "24",
+            "package-manager-cache": false
+          }
+        },
+        {
+          "name": "Install locked dependencies without lifecycle scripts",
+          "shell": "pwsh",
+          "run": "npm ci --ignore-scripts --no-audit --no-fund"
+        },
+        {
+          "name": "Run the stabilized complete Windows suite exactly once",
+          "shell": "pwsh",
+          "env": {
+            "PGBIN": "",
+            "PGDATA": "",
+            "PGROOT": "",
+            "PGPASSWORD": "",
+            "PGUSER": ""
+          },
+          "run": "$ErrorActionPreference = 'Stop'\n$PSNativeCommandUseErrorActionPreference = $false\n$unexpectedPostgresEnvironmentCount = 0\nforeach ($environmentKey in [System.Environment]::GetEnvironmentVariables([System.EnvironmentVariableTarget]::Process).Keys) {\n  $environmentName = [string]$environmentKey\n  if ($environmentName -cmatch '^PG[A-Z0-9_]+$' -and -not [string]::IsNullOrWhiteSpace([System.Environment]::GetEnvironmentVariable($environmentName, [System.EnvironmentVariableTarget]::Process))) { $unexpectedPostgresEnvironmentCount++ }\n}\nif ($unexpectedPostgresEnvironmentCount -ne 0) { [Console]::Error.WriteLine('windows_runner_postgres_environment_not_clean'); exit 1 }\n$global:LASTEXITCODE = $null\n& 'C:\\Program Files\\nodejs\\npm.cmd' test\n$testStatus = $global:LASTEXITCODE\nif ($null -eq $testStatus) { [Console]::Error.WriteLine('windows_runner_npm_exit_code_unavailable'); exit 1 }\nexit $testStatus"
+        },
+        {
+          "name": "Confirm the Windows suite left Git unchanged",
+          "if": "always()",
+          "shell": "pwsh",
+          "run": "$changes = @(& git status --porcelain=v1 --untracked-files=all)\nif ($LASTEXITCODE -ne 0 -or $changes.Count -ne 0) { throw 'windows_suite_changed_git' }\n$residualProcesses = @(Get-Process -Name node,nodejs,postgres -ErrorAction SilentlyContinue)\n$residualProcessCount = $residualProcesses.Count\nif ($residualProcessCount -ne 0) { throw 'windows_suite_residual_process' }\n$residualListeners = @(Get-NetTCPConnection -State Listen -ErrorAction Stop | Where-Object { $_.OwningProcess -in $residualProcesses.Id }).Count\nif ($residualListeners -ne 0) { throw 'windows_suite_residual_listener' }"
+        }
+      ]
+    },
+    "linux-physical-validation": {
+      "needs": "windows-automated-tests",
+      "if": "needs['windows-automated-tests'].result == 'success' && github.event_name == 'push' && github.ref == 'refs/heads/social/checkpoint-3b0-instagram-oauth-local-contract-20260812' && github.event.created == true && github.event.deleted == false && github.event.forced == false && github.event.before == '0000000000000000000000000000000000000000' && github.event.head_commit.message == '[run-social-3b0] validate Instagram OAuth contract remotely' && github.run_attempt == 1",
+      "runs-on": "ubuntu-24.04",
+      "timeout-minutes": 60,
+      "steps": [
+        {
+          "name": "Checkout the authorized two-commit chain",
+          "uses": "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+          "with": {
+            "fetch-depth": 0,
+            "persist-credentials": false
+          }
+        },
+        {
+          "name": "Verify the immutable two-commit execution contract",
+          "shell": "bash",
+          "env": {
+            "AUTHORIZED_SHA": "${{ github.sha }}",
+            "AUTHORIZED_MESSAGE": "${{ github.event.head_commit.message }}",
+            "AUTHORIZED_ATTEMPT": "${{ github.run_attempt }}"
+          },
+          "run": "set -euo pipefail\nfail_closed() { printf '%s\\n' immutable_execution_contract_failed >&2; exit 1; }\nassert_single_parent() { local -a row; read -r -a row <<< \"$(git rev-list --parents -n 1 \"$1\")\"; test \"${#row[@]}\" -eq 2 || fail_closed; }\nassert_exact_files() { local commit=\"$1\"; shift; local -a expected=(\"$@\"); local -a actual=(); mapfile -t actual < <(git diff-tree --no-commit-id --name-only -r \"$commit\"); test \"${#actual[@]}\" -eq \"${#expected[@]}\" || fail_closed; local file allowed found; for file in \"${actual[@]}\"; do found=false; for allowed in \"${expected[@]}\"; do if test \"$file\" = \"$allowed\"; then found=true; break; fi; done; test \"$found\" = true || fail_closed; done; }\nassert_regular_blobs() { local tree=\"$1\"; shift; local file entry; for file in \"$@\"; do entry=\"$(git ls-tree \"$tree\" -- \"$file\")\"; case \"$entry\" in '100644 blob '*) ;; *) fail_closed ;; esac; done; }\nfunctional_files=(\n  'scripts/social-3a0p-local-scope.js'\n  'server.js'\n  'src/persistence/postgres/social-oauth-repository.js'\n  'src/social/auth-adapter.js'\n  'src/social/credential-service.js'\n  'src/social/oauth/instagram-config.js'\n  'src/social/oauth/instagram-oauth-router.js'\n  'src/social/oauth/instagram-oauth-service.js'\n  'src/social/oauth/instagram-provider.js'\n  'src/social/oauth/instagram-state-envelope.js'\n  'src/social/runtime.js'\n  'src/social/server-runtime.js'\n  'tests/social-3a0p-current-diff-scope.test.js'\n  'tests/social-3a0p-local-scope.test.js'\n  'tests/social-3b0-instagram-oauth-crypto-provider.test.js'\n  'tests/social-3b0-instagram-oauth-routes.test.js'\n  'tests/social-connector-persistence.test.js'\n  'tests/social-server-runtime.test.js'\n)\ninfrastructure_files=(\n  '.github/workflows/social-3b0-instagram-oauth-local-contract.yml'\n  'docs/social-3b0-instagram-oauth-local-contract.md'\n  'scripts/social-3b0-linux-physical-gate.js'\n  'tests/social-3a0p-linux-workflow.test.js'\n  'tests/social-3b0-linux-physical-gate.test.js'\n  'tests/social-3b0-linux-workflow.test.js'\n  'scripts/social-3a0p-local-scope.js'\n  'tests/social-3a0p-local-scope.test.js'\n  'tests/social-3a0p-current-diff-scope.test.js'\n)\ntest \"$AUTHORIZED_ATTEMPT\" = '1' || fail_closed\ntest \"$AUTHORIZED_MESSAGE\" = \"$SOCIAL_3B0_INFRA_MESSAGE\" || fail_closed\ntest \"$(git rev-parse HEAD)\" = \"$AUTHORIZED_SHA\" || fail_closed\ntest \"$(git rev-parse HEAD^)\" = \"$SOCIAL_3B0_FUNCTIONAL_COMMIT\" || fail_closed\ntest \"$(git rev-parse \"$SOCIAL_3B0_FUNCTIONAL_COMMIT^\")\" = \"$SOCIAL_3B0_FUNCTIONAL_PARENT\" || fail_closed\ntest \"$(git rev-list --count \"$SOCIAL_3B0_FUNCTIONAL_PARENT..HEAD\")\" = '2' || fail_closed\nassert_single_parent HEAD\nassert_single_parent \"$SOCIAL_3B0_FUNCTIONAL_COMMIT\"\nassert_single_parent \"$SOCIAL_3B0_FUNCTIONAL_PARENT\"\ntest \"$(git log -1 --pretty=%B)\" = \"$SOCIAL_3B0_INFRA_MESSAGE\" || fail_closed\ntest \"$(git log -1 --pretty=%B \"$SOCIAL_3B0_FUNCTIONAL_COMMIT\")\" = \"$SOCIAL_3B0_FUNCTIONAL_MESSAGE\" || fail_closed\ntest \"$(git log -1 --pretty=%B \"$SOCIAL_3B0_FUNCTIONAL_PARENT\")\" = \"$SOCIAL_3B0_FUNCTIONAL_PARENT_MESSAGE\" || fail_closed\nassert_exact_files \"$SOCIAL_3B0_FUNCTIONAL_COMMIT\" \"${functional_files[@]}\"\nassert_exact_files HEAD \"${infrastructure_files[@]}\"\nassert_regular_blobs \"$SOCIAL_3B0_FUNCTIONAL_COMMIT\" \"${functional_files[@]}\"\nassert_regular_blobs HEAD \"${infrastructure_files[@]}\"\ntest -z \"$(git diff --name-only \"$SOCIAL_3B0_FUNCTIONAL_PARENT\" HEAD -- '.github/workflows/social-3a0p-linux-physical-gates.yml' 'db/migrations' 'db/postgres/roles.sql' 'package.json' 'package-lock.json')\" || fail_closed\ntest \"$(git rev-parse 'HEAD:.github/workflows/social-3a0p-linux-physical-gates.yml')\" = '7d66809ba2495aa6d2c4c8dc4d2f5ff03c991693' || fail_closed\ntest -z \"$(git status --porcelain=v1 --untracked-files=all)\" || fail_closed\ntest ! -e \"$RUNNER_TEMP/social-3b0-instagram-oauth-local-contract-evidence\" || fail_closed"
+        },
+        {
+          "name": "Set up Node.js 24",
+          "uses": "actions/setup-node@820762786026740c76f36085b0efc47a31fe5020",
+          "with": {
+            "node-version": "24",
+            "package-manager-cache": false
+          }
+        },
+        {
+          "name": "Install locked dependencies without lifecycle scripts",
+          "shell": "bash",
+          "run": "npm ci --ignore-scripts --no-audit --no-fund"
+        },
+        {
+          "name": "Run the closed Linux pre-gate tests exactly once",
+          "id": "pre_gate",
+          "shell": "bash",
+          "run": "set -euo pipefail\nnode scripts/social-3a0p-linux-pre-gate-tests.js\nnode --test tests/social-3b0-instagram-oauth-crypto-provider.test.js tests/social-3b0-instagram-oauth-routes.test.js tests/social-3b0-linux-workflow.test.js tests/social-3b0-linux-physical-gate.test.js tests/social-3a0p-current-diff-scope.test.js\necho 'status=passed' >> \"$GITHUB_OUTPUT\""
+        },
+        {
+          "name": "Run the combined Gates 1-5 and Social 3B-0 supervisor exactly once",
+          "id": "gate",
+          "shell": "bash",
+          "env": {
+            "SOCIAL_3B0_BRANCH": "${{ github.ref_name }}",
+            "SOCIAL_3B0_SHA": "${{ github.sha }}",
+            "SOCIAL_3B0_RUN_ATTEMPT": "${{ github.run_attempt }}",
+            "SOCIAL_3B0_WINDOWS_STATUS": "passed",
+            "SOCIAL_3B0_PRE_GATE_STATUS": "${{ steps.pre_gate.outputs.status }}",
+            "SOCIAL_3B0_POSTGRES_IMAGE": "docker.io/library/postgres:18.4-bookworm@sha256:7e6103cf85f88f7a0eddb3ec0b1ba8940eba098ed118ade25a729ca9daee5568",
+            "SOCIAL_3A0P_POSTGRES_IMAGE": "docker.io/library/postgres:18.4-bookworm@sha256:7e6103cf85f88f7a0eddb3ec0b1ba8940eba098ed118ade25a729ca9daee5568",
+            "POSTGRES_CONNECTIVITY_MODE": "internal_bridge_direct_v1",
+            "POSTGRES_BACKUP_CONNECTIVITY_MODE": "logical_dns_to_internal_container_v1",
+            "SOCIAL_INSTAGRAM_ENABLED": "false",
+            "SOCIAL_EXTERNAL_CONNECTION_ENABLED": "false",
+            "SOCIAL_EXTERNAL_PUBLICATION_ENABLED": "false"
+          },
+          "run": "set -euo pipefail\nevidence_dir=\"$RUNNER_TEMP/social-3b0-instagram-oauth-local-contract-evidence\"\ntest ! -e \"$evidence_dir\"\nset +e\nnode scripts/social-3b0-linux-physical-gate.js --output \"$evidence_dir/social-3b0-instagram-oauth-local-contract-evidence.json\" --process-status-output \"$evidence_dir/social-3b0-instagram-oauth-local-contract-process-status.json\"\ngate_status=$?\nset -e\necho \"gate_exit_code=$gate_status\" >> \"$GITHUB_OUTPUT\"\nexit 0"
+        },
+        {
+          "name": "Approve only closed sanitized evidence",
+          "id": "evidence",
+          "if": "always()",
+          "shell": "bash",
+          "env": {
+            "EXPECTED_BRANCH": "${{ github.ref_name }}",
+            "EXPECTED_SHA": "${{ github.sha }}",
+            "EXPECTED_ATTEMPT": "${{ github.run_attempt }}"
+          },
+          "run": "set -euo pipefail\nevidence_dir=\"$RUNNER_TEMP/social-3b0-instagram-oauth-local-contract-evidence\"\nevidence_json=\"$evidence_dir/social-3b0-instagram-oauth-local-contract-evidence.json\"\nevidence_sha=\"$evidence_dir/social-3b0-instagram-oauth-local-contract-evidence.sha256\"\nprocess_json=\"$evidence_dir/social-3b0-instagram-oauth-local-contract-process-status.json\"\nprocess_sha=\"$evidence_dir/social-3b0-instagram-oauth-local-contract-process-status.sha256\"\nupload=false\nsuccess=false\nif test -d \"$evidence_dir\"; then\n  mapfile -t entries < <(find \"$evidence_dir\" -mindepth 1 -maxdepth 1 -printf '%f\\n' | LC_ALL=C sort)\n  expected=(\n    'social-3b0-instagram-oauth-local-contract-evidence.json'\n    'social-3b0-instagram-oauth-local-contract-evidence.sha256'\n    'social-3b0-instagram-oauth-local-contract-process-status.json'\n    'social-3b0-instagram-oauth-local-contract-process-status.sha256'\n  )\n  mapfile -t expected < <(printf '%s\\n' \"${expected[@]}\" | LC_ALL=C sort)\n  exact=true\n  test \"${#entries[@]}\" -eq 4 || exact=false\n  for index in 0 1 2 3; do test \"${entries[$index]:-}\" = \"${expected[$index]}\" || exact=false; done\n  for file in \"$evidence_json\" \"$evidence_sha\" \"$process_json\" \"$process_sha\"; do test -f \"$file\" && test ! -L \"$file\" || exact=false; done\n  if test \"$exact\" = true; then\n    set +e\n    validation=\"$(EVIDENCE_JSON=\"$evidence_json\" EVIDENCE_SHA=\"$evidence_sha\" PROCESS_JSON=\"$process_json\" PROCESS_SHA=\"$process_sha\" node <<'NODE' 2>/dev/null\n'use strict';\nconst crypto = require('node:crypto');\nconst fs = require('node:fs');\nconst path = require('node:path');\nconst { evidenceSafe, sanitizeProcessStatus } = require('./scripts/social-3b0-linux-physical-gate');\nconst readJson = (file) => JSON.parse(fs.readFileSync(file, 'utf8'));\nconst verifySidecar = (file, sidecar) => {\n  const digest = crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex');\n  const expected = Buffer.from(`${digest}  ${path.basename(file)}\\n`, 'utf8');\n  return fs.readFileSync(sidecar).equals(expected);\n};\nconst evidence = readJson(process.env.EVIDENCE_JSON);\nconst processStatus = readJson(process.env.PROCESS_JSON);\nconst gateShape = [\n  ['G01', 'migrations'],\n  ['G02', 'rls_roles'],\n  ['G03', 'concurrency_oauth_idempotency'],\n  ['G04', 'vault'],\n  ['G05', 'backup_restore']\n];\nconst residualShape = ['containers', 'networks', 'volumes', 'temporaryRoots', 'postgresConnections', 'httpServers', 'listeners', 'timers', 'readers', 'nodeProcesses'];\nconst closedStatus = (value) => value === 'passed' || value === 'failed' || value === 'skipped';\nconst exactIds = Array.isArray(evidence.substeps) && evidence.substeps.length === 22 && evidence.substeps.every((entry, index) => entry?.id === `O${String(index + 1).padStart(2, '0')}` && closedStatus(entry?.status));\nconst exactGates = Array.isArray(evidence.gates1To5) && evidence.gates1To5.length === gateShape.length && evidence.gates1To5.every((entry, index) => entry?.id === gateShape[index][0] && entry?.phase === gateShape[index][1] && closedStatus(entry?.status));\nconst exactResiduals = evidence.residuals && Object.keys(evidence.residuals).sort().join(',') === [...residualShape].sort().join(',') && residualShape.every((key) => Number.isSafeInteger(evidence.residuals[key]) && evidence.residuals[key] >= 0);\nconst safe = evidenceSafe(evidence) === true && sanitizeProcessStatus(processStatus) !== null && verifySidecar(process.env.EVIDENCE_JSON, process.env.EVIDENCE_SHA) && verifySidecar(process.env.PROCESS_JSON, process.env.PROCESS_SHA) && evidence.branch === process.env.EXPECTED_BRANCH && evidence.sha === process.env.EXPECTED_SHA && evidence.runAttempt === Number(process.env.EXPECTED_ATTEMPT) && evidence.phase === 'instagram_oauth_local_contract' && evidence.windows?.status === 'passed' && evidence.preGateLinux?.status === 'passed' && exactGates && exactIds && exactResiduals && evidence.externalMetaCalls === 0 && evidence.externalInstagramCalls === 0 && evidence.externalGraphApiCalls === 0 && evidence.externalPublicationCalls === 0 && evidence.publicationCalls === 0 && evidence.realTokenCount === 0;\nif (!safe) process.exit(1);\nconst passed = evidence.gates1To5.every((entry) => entry.status === 'passed') && evidence.substeps.every((entry) => entry.status === 'passed') && evidence.secretScan?.status === 'passed' && evidence.secretScan?.historicPhysicalPassed === true && evidence.secretScan?.oauthEvidencePassed === true && evidence.firstFailure === null && evidence.backupRestoreFailureProvenance === null && evidence.cleanup?.cleanupCompleted === true && residualShape.every((key) => evidence.residuals[key] === 0) && processStatus.exitCode === 0 && processStatus.signal === null && processStatus.timedOut === false && processStatus.stdoutStored === false && processStatus.stderrStored === false;\nprocess.stdout.write(passed ? 'true' : 'false');\nNODE\n)\"\n    validation_status=$?\n    set -e\n    if test \"$validation_status\" -eq 0 && { test \"$validation\" = true || test \"$validation\" = false; }; then upload=true; success=\"$validation\"; fi\n  fi\nfi\necho \"upload=$upload\" >> \"$GITHUB_OUTPUT\"\necho \"success=$success\" >> \"$GITHUB_OUTPUT\"\nexit 0"
+        },
+        {
+          "name": "Upload the single sanitized evidence artifact",
+          "id": "upload",
+          "if": "always() && steps.evidence.outputs.upload == 'true'",
+          "uses": "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a",
+          "with": {
+            "name": "social-3b0-instagram-oauth-local-contract-evidence",
+            "path": "${{ runner.temp }}/social-3b0-instagram-oauth-local-contract-evidence/social-3b0-instagram-oauth-local-contract-evidence.json\n${{ runner.temp }}/social-3b0-instagram-oauth-local-contract-evidence/social-3b0-instagram-oauth-local-contract-evidence.sha256\n${{ runner.temp }}/social-3b0-instagram-oauth-local-contract-evidence/social-3b0-instagram-oauth-local-contract-process-status.json\n${{ runner.temp }}/social-3b0-instagram-oauth-local-contract-evidence/social-3b0-instagram-oauth-local-contract-process-status.sha256",
+            "if-no-files-found": "error",
+            "compression-level": 0,
+            "overwrite": false,
+            "include-hidden-files": false,
+            "retention-days": 7
+          }
+        },
+        {
+          "name": "Clean every owned disposable resource",
+          "id": "cleanup",
+          "if": "always()",
+          "shell": "bash",
+          "run": "set +e\nnode scripts/social-3b0-linux-physical-gate.js --cleanup\ncleanup_status=$?\nset -e\necho \"cleanup_exit_code=$cleanup_status\" >> \"$GITHUB_OUTPUT\"\nexit 0"
+        },
+        {
+          "name": "Enforce the single first-attempt result",
+          "if": "always()",
+          "shell": "bash",
+          "env": {
+            "GATE_EXIT_CODE": "${{ steps.gate.outputs.gate_exit_code }}",
+            "CLEANUP_EXIT_CODE": "${{ steps.cleanup.outputs.cleanup_exit_code }}",
+            "EVIDENCE_UPLOAD_APPROVED": "${{ steps.evidence.outputs.upload }}",
+            "EVIDENCE_SUCCESS": "${{ steps.evidence.outputs.success }}",
+            "UPLOAD_OUTCOME": "${{ steps.upload.outcome }}"
+          },
+          "run": "set -euo pipefail\ntest \"$GATE_EXIT_CODE\" = '0'\ntest \"$CLEANUP_EXIT_CODE\" = '0'\ntest \"$EVIDENCE_UPLOAD_APPROVED\" = 'true'\ntest \"$EVIDENCE_SUCCESS\" = 'true'\ntest \"$UPLOAD_OUTCOME\" = 'success'\ntest ! -e \"$RUNNER_TEMP/social-3b0-instagram-oauth-local-contract-evidence\"\ntest -z \"$(git status --porcelain=v1 --untracked-files=all)\""
+        }
+      ]
+    }
+  }
+}

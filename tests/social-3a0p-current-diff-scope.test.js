@@ -8,40 +8,19 @@ const {
   assertHarnessOnlyChangedFiles
 } = require("../scripts/social-3a0p-local-scope");
 
-const BASE_COMMIT = "3dc3d8be62438216509f061f6c1a26ee39c9b5dc";
+const BASE_COMMIT = "33e3ea7abcea7f5dc51780c3a1efd4743352fe40";
 const AUTHORIZED_CHANGED_FILES = Object.freeze([
+  ".github/workflows/social-3b0-instagram-oauth-local-contract.yml",
+  "docs/social-3b0-instagram-oauth-local-contract.md",
   "scripts/social-3a0p-local-scope.js",
-  "server.js",
-  "src/persistence/postgres/social-oauth-repository.js",
-  "src/social/auth-adapter.js",
-  "src/social/credential-service.js",
-  "src/social/oauth/instagram-config.js",
-  "src/social/oauth/instagram-oauth-router.js",
-  "src/social/oauth/instagram-oauth-service.js",
-  "src/social/oauth/instagram-provider.js",
-  "src/social/oauth/instagram-state-envelope.js",
-  "src/social/runtime.js",
-  "src/social/server-runtime.js",
+  "scripts/social-3b0-linux-physical-gate.js",
   "tests/social-3a0p-current-diff-scope.test.js",
+  "tests/social-3a0p-linux-workflow.test.js",
   "tests/social-3a0p-local-scope.test.js",
-  "tests/social-3b0-instagram-oauth-crypto-provider.test.js",
-  "tests/social-3b0-instagram-oauth-routes.test.js",
-  "tests/social-connector-persistence.test.js",
-  "tests/social-server-runtime.test.js"
+  "tests/social-3b0-linux-physical-gate.test.js",
+  "tests/social-3b0-linux-workflow.test.js"
 ]);
-const AUTHORIZED_PRODUCT_FILES = Object.freeze([
-  "server.js",
-  "src/persistence/postgres/social-oauth-repository.js",
-  "src/social/auth-adapter.js",
-  "src/social/credential-service.js",
-  "src/social/oauth/instagram-config.js",
-  "src/social/oauth/instagram-oauth-router.js",
-  "src/social/oauth/instagram-oauth-service.js",
-  "src/social/oauth/instagram-provider.js",
-  "src/social/oauth/instagram-state-envelope.js",
-  "src/social/runtime.js",
-  "src/social/server-runtime.js"
-]);
+const AUTHORIZED_PRODUCT_FILES = Object.freeze([]);
 const ROOT = path.resolve(__dirname, "..");
 
 function gitLines(args) {
@@ -61,18 +40,18 @@ function gitLines(args) {
     .filter(Boolean);
 }
 
-test("o diff fisico OAuth 3B-0 contem exatamente os dezoito caminhos autorizados", () => {
+test("o segundo commit OAuth 3B-0 contem exatamente os nove caminhos de infraestrutura", () => {
   const changed = gitLines(["diff", "--name-only", BASE_COMMIT]);
   const untracked = gitLines(["ls-files", "--others", "--exclude-standard"]);
   const files = [...new Set([...changed, ...untracked])].sort();
   assert.deepEqual(files, [...AUTHORIZED_CHANGED_FILES].sort());
   assert.deepEqual(assertHarnessOnlyChangedFiles(files), {
     harnessOnly: true,
-    changedFileCount: 18
+    changedFileCount: 9
   });
 });
 
-test("somente os onze caminhos de produto OAuth autorizados diferem da base 3dc3", () => {
+test("nenhum caminho de produto difere da base funcional 33e3", () => {
   const productPaths = [
     "src",
     "db",
