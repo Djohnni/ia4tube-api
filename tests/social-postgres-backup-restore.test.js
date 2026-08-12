@@ -549,6 +549,75 @@ async function createLegacy0003EncryptedFixture(t) {
   return { ...bundle, encrypted, legacyManifest, profile };
 }
 
+test("logical restore preserves the exact last-byte bundle authentication failure before tools and verifiers", async (t) => {
+  const bundle = await createEncryptedFixture(t);
+  const descriptor = fs.openSync(bundle.config.files.bundle, "r+");
+  const lastByte = Buffer.alloc(1);
+  try {
+    const size = fs.fstatSync(descriptor).size;
+    assert.ok(size > 0);
+    assert.equal(fs.readSync(descriptor, lastByte, 0, 1, size - 1), 1);
+    lastByte[0] ^= 0xff;
+    assert.equal(fs.writeSync(descriptor, lastByte, 0, 1, size - 1), 1);
+    fs.fsyncSync(descriptor);
+  } finally {
+    lastByte.fill(0);
+    fs.closeSync(descriptor);
+  }
+
+  const config = loadRestoreConfig(
+    restoreEnvironment(bundle.directory, bundle.config.files.bundle),
+    { repositoryRoot: root }
+  );
+  const events = [];
+  const calls = {
+    tools: 0,
+    runtimeIsolation: 0,
+    vault: 0,
+    compatibility2A: 0
+  };
+  await assert.rejects(
+    runLogicalRestore({
+      config,
+      operator: mockOperator(events),
+      verifierTargetFingerprint: config.targetFingerprint,
+      async runTool() {
+        calls.tools += 1;
+        assert.fail("no PostgreSQL tool may run after bundle authentication fails");
+      },
+      async verifyRuntimeIsolation() {
+        calls.runtimeIsolation += 1;
+        assert.fail("runtime isolation must not inspect unauthenticated plaintext");
+      },
+      async verifyVault() {
+        calls.vault += 1;
+        assert.fail("vault verification must not inspect unauthenticated plaintext");
+      },
+      async verify2ACompatibility() {
+        calls.compatibility2A += 1;
+        assert.fail("2A verification must not inspect unauthenticated plaintext");
+      }
+    }),
+    (error) => {
+      assert.equal(error?.name, "EncryptedBackupBundleError");
+      assert.equal(error?.code, "backup_bundle_authentication_failed");
+      return true;
+    }
+  );
+  assert.deepEqual(calls, {
+    tools: 0,
+    runtimeIsolation: 0,
+    vault: 0,
+    compatibility2A: 0
+  });
+  assert.deepEqual(events, [
+    ["acquire", MIGRATION_LOCK_ID, BACKUP_LOCK_ID],
+    ["preflight-empty"],
+    ["policies-absent"],
+    ["release", BACKUP_LOCK_ID, MIGRATION_LOCK_ID]
+  ]);
+});
+
 test("backup and restore configs require exact protected isolated targets", (t) => {
   const directory = temporaryDirectory(t);
   const config = loadBackupConfig(backupEnvironment(directory), {

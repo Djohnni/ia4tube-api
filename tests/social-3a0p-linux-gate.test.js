@@ -706,14 +706,14 @@ function restoreBehaviorFacadeFixture(options = {}) {
   });
 }
 
-test("evidence provenance matches the restore-vault generation-floor branch and parent", () => {
+test("evidence provenance matches the exact bundle-tamper-refusal branch and parent", () => {
   assert.equal(
     BRANCH,
-    "social/checkpoint-3a0p-gate5-restore-vault-generation-floor-20260811"
+    "social/checkpoint-3a0p-gate5-bundle-tamper-refusal-20260811"
   );
   assert.equal(
     BASE_COMMIT,
-    "6eac518e4001e816ae554e299c34ef7ab54c1cfd"
+    "3c1ba942033a94ba6480145664543d906805544b"
   );
   const workflow = JSON.parse(fs.readFileSync(
     path.join(ROOT, ".github", "workflows", "social-3a0p-linux-physical-gates.yml"),

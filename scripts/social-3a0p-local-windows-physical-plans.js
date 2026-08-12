@@ -2045,8 +2045,11 @@ function createWindowsPhysicalPlans(options = {}) {
           try {
             await runProfileRestoreImpl({ ...request, config: tamperedConfig });
           } catch (error) {
-            if (error?.code !== "restore_encrypted_bundle_invalid") throw error;
-            rejected = true;
+            if (error?.code === "backup_bundle_authentication_failed") {
+              rejected = true;
+            } else {
+              throw error;
+            }
           }
         } catch (error) {
           primaryFailed = true;

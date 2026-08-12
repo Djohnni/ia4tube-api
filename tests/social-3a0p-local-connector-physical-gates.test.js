@@ -5,6 +5,9 @@ const test = require("node:test");
 const {
   createConnectorPhysicalGates
 } = require("../scripts/social-3a0p-local-connector-physical-gates");
+const {
+  createBackupRestoreProvenanceTracker
+} = require("../scripts/social-3a0p-linux-gate");
 
 const RUN_MARKER = "ia4tube-social-3a0p-connector-test-0001";
 const BASE_GATE3_BOUNDARIES = Object.freeze([
@@ -657,6 +660,211 @@ test("concrete connector gates use the product contracts and physical plan runne
   assert.equal(backup.bundle0004Tables, 8);
   assert.equal(backup.bundle0004RlsPolicies, 10);
   gates.destroy();
+});
+
+test("Gate 5 sequences tracked normal operations before exact untracked refusal checks", async (t) => {
+  const normalOperations = Object.freeze([
+    Object.freeze(["backup", "gate5_backup_0003", "social-schema-0003"]),
+    Object.freeze(["restore", "gate5_restore_0003", "social-schema-0003"]),
+    Object.freeze(["backup", "gate5_backup_0004", "social-schema-0004"]),
+    Object.freeze(["restore", "gate5_restore_0004", "social-schema-0004"])
+  ]);
+  const normalOrder = normalOperations.map(([, operation]) => operation);
+  const canonicalTamperCode = "backup_bundle_authentication_failed";
+  const canonicalCrossProfileCode =
+    "local_backup_restore_cross_profile_refused";
+  const state = {
+    target: { host: "127.0.0.1", port: 55432 },
+    pools: { migration: {}, runtime: {} },
+    forwardOnlyRollback: { operationalRestoreVerified: true }
+  };
+
+  function exactRefusal(error, expectedCode) {
+    try {
+      throw error;
+    } catch (candidate) {
+      if (candidate?.code === expectedCode) return true;
+      throw candidate;
+    }
+  }
+
+  function createFixture(options = {}) {
+    const tracker = createBackupRestoreProvenanceTracker({
+      requireSpawnProof: false
+    });
+    const requests = {};
+    for (const [kind, operation, profileId] of normalOperations) {
+      const request = Object.freeze({
+        profileId,
+        async runTool() { return { code: 0 }; }
+      });
+      requests[operation] = request;
+      if (kind === "backup") tracker.bindBackup(operation, request);
+      else tracker.bindRestore(operation, request);
+    }
+
+    const events = [];
+    const dependencies = fakeDependencies();
+    const productBackup = dependencies.runProfileBackup;
+    const productRestore = dependencies.runProfileRestore;
+    dependencies.runProfileBackup = async (request) => {
+      const operation = normalOperations.find(
+        ([kind, name]) => kind === "backup" && requests[name] === request
+      )?.[1];
+      assert.ok(operation);
+      events.push(operation);
+      return tracker.runBackup(async (trackedRequest) => {
+        if (operation === options.failOperation) throw options.failure;
+        for (let index = 0; index < 3; index += 1) {
+          await trackedRequest.runTool();
+        }
+        return productBackup(trackedRequest);
+      }, request);
+    };
+    dependencies.runProfileRestore = async (request) => {
+      const operation = normalOperations.find(
+        ([kind, name]) => kind === "restore" && requests[name] === request
+      )?.[1];
+      assert.ok(operation);
+      events.push(operation);
+      return tracker.runRestore(async (trackedRequest) => {
+        if (operation === options.failOperation) throw options.failure;
+        for (let index = 0; index < 4; index += 1) {
+          await trackedRequest.runTool();
+        }
+        return productRestore(trackedRequest);
+      }, request);
+    };
+
+    const tamperError = options.tamperError || Object.assign(
+      new Error("synthetic exact tamper refusal"),
+      { code: canonicalTamperCode }
+    );
+    const crossError = options.crossError || Object.assign(
+      new Error("synthetic exact cross-profile refusal"),
+      { code: canonicalCrossProfileCode }
+    );
+    const plan = {
+      backup0003: requests.gate5_backup_0003,
+      restore0003: requests.gate5_restore_0003,
+      backup0004: requests.gate5_backup_0004,
+      restore0004: requests.gate5_restore_0004,
+      async assertManifestTamperRefused() {
+        events.push("tamper");
+        return exactRefusal(tamperError, canonicalTamperCode);
+      },
+      async assertCrossProfileRefused() {
+        events.push("cross");
+        return exactRefusal(crossError, canonicalCrossProfileCode);
+      },
+      async cleanup() { events.push("cleanup"); }
+    };
+    const gates = createConnectorPhysicalGates({
+      replaceDefaultDependencies: true,
+      dependencies,
+      randomBytes: (size) => Buffer.alloc(size, 5),
+      randomUUID: uuidFactory(),
+      plans: { runMarker: RUN_MARKER, backupRestore: plan }
+    });
+    return { events, gates, tracker };
+  }
+
+  await t.test("canonical tamper and cross-profile codes approve the final Gate 5 result", async () => {
+    const fixture = createFixture();
+    try {
+      const result = await fixture.gates.backupRestore({ state });
+      assert.deepEqual(fixture.events, [
+        ...normalOrder,
+        "tamper",
+        "cross",
+        "cleanup"
+      ]);
+      assert.equal(result.physicalExecution, true);
+      assert.equal(result.profile0003, true);
+      assert.equal(result.profile0004, true);
+      assert.equal(result.manifestTamperRefused, true);
+      assert.equal(result.crossProfileRefused, true);
+      assert.equal(result.operationalRollback, true);
+      assert.equal(result.disposableRemoved, true);
+      assert.equal(fixture.tracker.failure(), null);
+    } finally {
+      await fixture.gates.destroy();
+    }
+  });
+
+  await t.test("legacy tamper refusal is propagated outside normal-operation provenance", async () => {
+    const legacy = Object.assign(new Error("synthetic legacy refusal"), {
+      code: "restore_encrypted_bundle_invalid"
+    });
+    const fixture = createFixture({ tamperError: legacy });
+    try {
+      await assert.rejects(
+        fixture.gates.backupRestore({ state }),
+        (error) => error === legacy
+      );
+      assert.deepEqual(fixture.events, [
+        ...normalOrder,
+        "tamper",
+        "cleanup"
+      ]);
+      assert.equal(fixture.tracker.failure(), null);
+    } finally {
+      await fixture.gates.destroy();
+    }
+  });
+
+  await t.test("non-exact cross-profile refusal is propagated outside normal-operation provenance", async () => {
+    const nonExact = Object.assign(new Error("synthetic non-exact refusal"), {
+      code: `${canonicalCrossProfileCode}_other`
+    });
+    const fixture = createFixture({ crossError: nonExact });
+    try {
+      await assert.rejects(
+        fixture.gates.backupRestore({ state }),
+        (error) => error === nonExact
+      );
+      assert.deepEqual(fixture.events, [
+        ...normalOrder,
+        "tamper",
+        "cross",
+        "cleanup"
+      ]);
+      assert.equal(fixture.tracker.failure(), null);
+    } finally {
+      await fixture.gates.destroy();
+    }
+  });
+
+  for (const [kind, operation] of normalOperations) {
+    await t.test(`${operation} failure is propagated with current provenance`, async () => {
+      const failure = Object.assign(new Error("synthetic normal-operation failure"), {
+        code: `synthetic_${operation}_failure`
+      });
+      const fixture = createFixture({ failOperation: operation, failure });
+      try {
+        await assert.rejects(
+          fixture.gates.backupRestore({ state }),
+          (error) => error === failure
+        );
+        assert.deepEqual(fixture.events, [
+          ...normalOrder.slice(0, normalOrder.indexOf(operation) + 1),
+          "cleanup"
+        ]);
+        assert.deepEqual(fixture.tracker.failure(), {
+          operation,
+          substep: kind === "backup"
+            ? "backup_before_data_snapshot"
+            : "restore_before_schema_inventory",
+          boundary: "internal_interval",
+          causalCode: "backup_restore_internal_failure_unclassified",
+          externalTransportProcessStarted: false,
+          substepExact: false
+        });
+      } finally {
+        await fixture.gates.destroy();
+      }
+    });
+  }
 });
 
 test("backup/restore cleanup always runs without overwriting the first failure", async (t) => {

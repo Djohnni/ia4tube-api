@@ -1,18 +1,70 @@
 # Checkpoint Social 3A-0P — gates físicos Linux isolados
 
-## Contrato canônico do piso monotônico do `restore_vault` no Gate 5
+## Contrato canônico da recusa exata de adulteração do bundle no Gate 5
 
 Esta rota existe somente na branch
+`social/checkpoint-3a0p-gate5-bundle-tamper-refusal-20260811`, criada a partir
+do commit exato `3c1ba942033a94ba6480145664543d906805544b`. O único
+commit autorizado deve ter esse commit como pai imediato e a mensagem integral:
+
+```text
+[run-social-3a0p-linux-gate] accept exact encrypted bundle tamper refusal
+```
+
+A correção pertence exclusivamente ao harness físico. Em
+`assertManifestTamperRefused`, a adulteração preservada copia o bundle 0003,
+altera exatamente o último byte, executa `fsync`, tenta uma única restauração e
+aceita somente a igualdade exata
+`error?.code === "backup_bundle_authentication_failed"`. O código anterior
+`restore_encrypted_bundle_invalid`, códigos por prefixo, classes amplas, regex,
+fallbacks e erros genéricos permanecem recusados. Qualquer erro diferente é
+propagado; ausência de erro retorna `false`.
+
+O núcleo criptográfico, a autenticação AES-256-GCM, o formato do bundle,
+backup, restore, migrations, checksums, roles, RLS, `IA4REC1`, Gates 1–4 e todo
+produto em `src/` permanecem byte-semanticamente inalterados. A cópia exclusiva,
+fechamento do descriptor, remoção do arquivo adulterado, reconciliação do banco
+descartável, precedência do erro primário, tentativa de todos os cleanups,
+cross-profile separado e zero retry também permanecem preservados.
+
+O run predecessor `31547449605`, `run_attempt=1`, completou Windows, pré-gate
+Linux, durabilidade, O_NOFOLLOW, PostgreSQL descartável, bootstrap, Gates 1–4 e
+as quatro operações normais de backup/restore do Gate 5 antes da recusa de
+tamper. Seu `firstFailure.code` foi `backup_bundle_authentication_failed` e
+`backupRestoreFailureProvenance` foi `null`, porque tamper e cross-profile ficam
+intencionalmente fora da procedência reservada às seis operações normais. A
+causa desta rota é
+`gate5_expected_bundle_tamper_refusal_code_contract_mismatch`: o bundle recusou
+corretamente a adulteração, enquanto o harness esperava outro código. Essa
+classificação corrige o contrato do harness e não reclassifica o artifact
+histórico.
+
+O artifact histórico `9123038255`, de nome
+`social-3a0p-linux-physical-gates-evidence`, conserva o digest
+`sha256:f62e14e1ef3353f5cf36c24025e62b40d09de2678ba3544b150538cfb4c1ff8e`,
+o SHA-256 da evidência
+`3e7bc85cd2c12e2527c18f9e3ac05b5d1c63f8880bf9048859c2dd2f4d0f81a9` e o
+SHA-256 do status do processo
+`26564ca3007f7f91c7b77edadbe4122d82804ea0626a3958f21292d1b067f342`.
+Seu cleanup concluiu, `cleanupFailure=null`, e todos os resíduos permaneceram em
+zero. Nenhum desses fatos ou sidecars é alterado por esta rota.
+
+O workflow mantém a rota normal: `npm test` uma vez no Windows e, somente após
+seu sucesso, o job Linux físico preservado.
+
+## Contrato histórico do piso monotônico do `restore_vault` no Gate 5
+
+Essa rota predecessora existiu somente na branch
 `social/checkpoint-3a0p-gate5-restore-vault-generation-floor-20260811`,
 criada a partir do commit exato
-`6eac518e4001e816ae554e299c34ef7ab54c1cfd`. O único commit autorizado deve
-ter esse commit como pai imediato e a mensagem integral:
+`6eac518e4001e816ae554e299c34ef7ab54c1cfd`. O único commit autorizado teve
+esse commit como pai imediato e a mensagem integral:
 
 ```text
 [run-social-3a0p-linux-gate] anchor restore vault generations to restored authority
 ```
 
-A única alteração atual autorizada dentro de `src/` é
+A única alteração autorizada dentro de `src/` foi
 `src/persistence/postgres/restore-behavior-verifiers.js`. No diff cumulativo
 desde `fcfc92419021dae5f77baad731c634b10c275c5b`, somente esse arquivo e o
 `src/persistence/postgres/backup-restore.js` da rota predecessora podem diferir.
@@ -967,7 +1019,7 @@ e o novo `HEAD`:
     `tests/social-3a0p-local-windows-physical-plans.test.js`,
     `tests/social-postgres-backup-restore.test.js` e
     `tests/social-postgres-migrations.test.js`.
-16. O novo `HEAD`, pai exato
+16. `3c1ba942033a94ba6480145664543d906805544b`, pai exato
     `6eac518e4001e816ae554e299c34ef7ab54c1cfd`, mensagem
     `[run-social-3a0p-linux-gate] anchor restore vault generations to restored authority`
     e inventário fechado de exatamente treze caminhos:
@@ -984,9 +1036,22 @@ e o novo `HEAD`:
     `tests/social-3a0p-local-windows-physical-plans.test.js`,
     `tests/social-postgres-backup-restore.test.js` e
     `tests/social-postgres-restore-behavior-verifiers.test.js`.
+17. O novo `HEAD`, pai exato
+    `3c1ba942033a94ba6480145664543d906805544b`, mensagem
+    `[run-social-3a0p-linux-gate] accept exact encrypted bundle tamper refusal`
+    e inventário fechado de exatamente nove caminhos:
+    `.github/workflows/social-3a0p-linux-physical-gates.yml`,
+    `docs/social-3a0p-linux-physical-gates.md`,
+    `scripts/social-3a0p-linux-gate.js`,
+    `scripts/social-3a0p-local-windows-physical-plans.js`,
+    `tests/social-3a0p-linux-gate.test.js`,
+    `tests/social-3a0p-linux-workflow.test.js`,
+    `tests/social-3a0p-local-connector-physical-gates.test.js`,
+    `tests/social-3a0p-local-windows-physical-plans.test.js` e
+    `tests/social-postgres-backup-restore.test.js`.
 
 Os guards dos dois jobs verificam pais, mensagens, ancestralidade linear,
-contagem dezesseis e cada um desses inventários sem prefixo, glob ou diretório
+contagem dezessete e cada um desses inventários sem prefixo, glob ou diretório
 inteiro.
 
 ## Restauração da rota executável normal

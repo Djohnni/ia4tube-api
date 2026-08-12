@@ -1,6 +1,7 @@
 "use strict";
 
 const assert = require("node:assert/strict");
+const crypto = require("node:crypto");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
@@ -2568,20 +2569,28 @@ test("tamper cleanup preserves the primary and attempts close, unlink and reconc
     overrides = {},
     reconciliationFailure,
     runFailure = Object.assign(new Error("not persisted"), {
-      code: "restore_encrypted_bundle_invalid"
-    })
+      code: "backup_bundle_authentication_failed"
+    }),
+    observeRestore
   ) {
     let reconciliationCalls = 0;
+    const reconciliationIdentities = [];
+    const reconciliationResults = [];
+    const restoreAttempts = [];
+    const behavior = profileAwareRestoreBehaviorFixture();
     const databaseManager = Object.freeze({
       ...provenanceDatabaseManager(),
       async reconcile(identity) {
         reconciliationCalls += 1;
+        reconciliationIdentities.push(identity);
         if (reconciliationFailure) throw reconciliationFailure;
-        return Object.freeze({
+        const result = Object.freeze({
           ...identity,
           status: "absent",
           createdByThisRun: false
         });
+        reconciliationResults.push(result);
+        return result;
       }
     });
     const fixture = backupTransportFixture({
@@ -2590,23 +2599,198 @@ test("tamper cleanup preserves the primary and attempts close, unlink and reconc
         createBackupTransportBridge: createLogicalBackupTransportBridge,
         databaseManager,
         fileSystem: proxyFileSystem(overrides),
-        async runProfileRestore() {
+        restoreBehavior: behavior.facade,
+        async runProfileRestore(request) {
+          restoreAttempts.push(request);
+          if (observeRestore) await observeRestore(request);
           if (runFailure) throw runFailure;
           return { accepted: true };
         }
       }
     });
     const prepared = await fixture.plans.prepareBackupRestore();
+    const bundleContent = Buffer.from("synthetic-encrypted-bundle", "utf8");
     fs.writeFileSync(
       prepared.backup0003.config.files.bundle,
-      "synthetic-encrypted-bundle",
+      bundleContent,
       { flag: "wx", mode: 0o600 }
     );
     return {
+      behavior,
+      bundleContent,
       fixture,
       prepared,
-      reconciliationCalls: () => reconciliationCalls
+      reconciliationCalls: () => reconciliationCalls,
+      reconciliationIdentities,
+      reconciliationResults,
+      restoreAttempts,
+      tamperedPath: `${prepared.backup0003.config.files.bundle}.tampered`
     };
+  }
+
+  await t.test("exact authentication refusal mutates only the last byte and completes every cleanup", async () => {
+    const expectedRefusal = Object.assign(new Error("not persisted"), {
+      code: "backup_bundle_authentication_failed"
+    });
+    const ioEvents = [];
+    let item;
+    item = await tamperFixture(
+      {
+        openSync(candidate, flags) {
+          ioEvents.push(["open", candidate, flags]);
+          return fs.openSync(candidate, flags);
+        },
+        readSync(descriptor, buffer, offset, length, position) {
+          ioEvents.push(["read", offset, length, position]);
+          return fs.readSync(
+            descriptor,
+            buffer,
+            offset,
+            length,
+            position
+          );
+        },
+        writeSync(descriptor, buffer, offset, length, position) {
+          ioEvents.push([
+            "write",
+            offset,
+            length,
+            position,
+            buffer[0]
+          ]);
+          return fs.writeSync(
+            descriptor,
+            buffer,
+            offset,
+            length,
+            position
+          );
+        },
+        fsyncSync(descriptor) {
+          ioEvents.push(["fsync"]);
+          return fs.fsyncSync(descriptor);
+        },
+        closeSync(descriptor) {
+          ioEvents.push(["close"]);
+          return fs.closeSync(descriptor);
+        },
+        unlinkSync(candidate) {
+          ioEvents.push(["unlink", candidate]);
+          return fs.unlinkSync(candidate);
+        }
+      },
+      undefined,
+      expectedRefusal,
+      async (request) => {
+        assert.equal(item.restoreAttempts.length, 1);
+        assert.equal(request.config.bundlePath, item.tamperedPath);
+        const tampered = fs.readFileSync(item.tamperedPath);
+        assert.equal(tampered.length, item.bundleContent.length);
+        assert.deepEqual(
+          tampered.subarray(0, -1),
+          item.bundleContent.subarray(0, -1)
+        );
+        assert.equal(
+          tampered.at(-1),
+          item.bundleContent.at(-1) ^ 0xff
+        );
+        assert.equal(
+          fs.readFileSync(
+            item.prepared.backup0003.config.files.bundle
+          ).equals(item.bundleContent),
+          true
+        );
+      }
+    );
+    try {
+      assert.equal(
+        await item.prepared.assertManifestTamperRefused(),
+        true
+      );
+      assert.equal(item.restoreAttempts.length, 1);
+      assert.deepEqual(ioEvents, [
+        ["open", item.tamperedPath, "r+"],
+        ["read", 0, 1, item.bundleContent.length - 1],
+        [
+          "write",
+          0,
+          1,
+          item.bundleContent.length - 1,
+          item.bundleContent.at(-1) ^ 0xff
+        ],
+        ["fsync"],
+        ["close"],
+        ["unlink", item.tamperedPath]
+      ]);
+      assert.equal(fs.existsSync(item.tamperedPath), false);
+      assert.equal(item.reconciliationCalls(), 1);
+      assert.equal(item.reconciliationIdentities.length, 1);
+      assert.equal(item.reconciliationResults.length, 1);
+      assert.equal(item.reconciliationResults[0].status, "absent");
+      assert.deepEqual(item.behavior.created, []);
+      assert.deepEqual(item.behavior.operations, []);
+      assert.deepEqual(item.behavior.closed, []);
+      assert.deepEqual(item.behavior.instances, []);
+      for (const verifier of ["runtime", "vault", "2a"]) {
+        assert.equal(
+          item.behavior.operations.filter(
+            (operation) => operation[1] === verifier
+          ).length,
+          0
+        );
+      }
+      assert.equal(item.fixture.runToolCalls.length, 0);
+      assert.equal(item.fixture.processStarts.length, 0);
+      assert.equal(
+        item.fixture.runToolCalls.filter((call) =>
+          path.basename(String(call?.executable || "")) ===
+            "pg_restore.exe"
+        ).length,
+        0
+      );
+    } finally {
+      await destroyBackupTransportFixture(item.fixture);
+    }
+  });
+
+  for (const code of [
+    "restore_encrypted_bundle_invalid",
+    "backup_bundle_header_invalid",
+    "backup_bundle_source_fingerprint_mismatch",
+    "backup_bundle_outro",
+    null
+  ]) {
+    await t.test(
+      code === null
+        ? "an error without a code remains unexpected"
+        : `${code} remains unexpected`,
+      async () => {
+        const unexpected = new Error("not persisted");
+        if (code !== null) unexpected.code = code;
+        const item = await tamperFixture(
+          {},
+          undefined,
+          unexpected
+        );
+        try {
+          await assert.rejects(
+            item.prepared.assertManifestTamperRefused(),
+            (error) => error === unexpected
+          );
+          assert.equal(item.restoreAttempts.length, 1);
+          assert.equal(item.reconciliationCalls(), 1);
+          assert.equal(item.reconciliationResults.length, 1);
+          assert.equal(item.reconciliationResults[0].status, "absent");
+          assert.equal(fs.existsSync(item.tamperedPath), false);
+          assert.deepEqual(item.behavior.created, []);
+          assert.deepEqual(item.behavior.operations, []);
+          assert.equal(item.fixture.runToolCalls.length, 0);
+          assert.equal(item.fixture.processStarts.length, 0);
+        } finally {
+          await destroyBackupTransportFixture(item.fixture);
+        }
+      }
+    );
   }
 
   await t.test("primary plus unlink failure preserves the primary", async () => {
@@ -2713,6 +2897,27 @@ test("tamper cleanup preserves the primary and attempts close, unlink and reconc
     }
   });
 
+  await t.test("accepted tamper returns false after one attempt and complete cleanup", async () => {
+    const item = await tamperFixture({}, undefined, null);
+    try {
+      assert.equal(
+        await item.prepared.assertManifestTamperRefused(),
+        false
+      );
+      assert.equal(item.restoreAttempts.length, 1);
+      assert.equal(item.reconciliationCalls(), 1);
+      assert.equal(item.reconciliationResults.length, 1);
+      assert.equal(item.reconciliationResults[0].status, "absent");
+      assert.equal(fs.existsSync(item.tamperedPath), false);
+      assert.deepEqual(item.behavior.created, []);
+      assert.deepEqual(item.behavior.operations, []);
+      assert.equal(item.fixture.runToolCalls.length, 0);
+      assert.equal(item.fixture.processStarts.length, 0);
+    } finally {
+      await destroyBackupTransportFixture(item.fixture);
+    }
+  });
+
   await t.test("accepted tamper returns false despite reconciliation failure", async () => {
     const reconciliation = Object.assign(new Error("not persisted"), {
       code: "synthetic_tamper_reconciliation_failure"
@@ -2720,11 +2925,58 @@ test("tamper cleanup preserves the primary and attempts close, unlink and reconc
     const item = await tamperFixture({}, reconciliation, null);
     try {
       assert.equal(await item.prepared.assertManifestTamperRefused(), false);
+      assert.equal(item.restoreAttempts.length, 1);
       assert.equal(item.reconciliationCalls(), 1);
+      assert.equal(fs.existsSync(item.tamperedPath), false);
     } finally {
       await destroyBackupTransportFixture(item.fixture);
     }
   });
+});
+
+test("tamper uses one exact refusal code and preserves the cross-profile implementation byte-for-byte", () => {
+  const source = fs.readFileSync(
+    path.resolve(
+      __dirname,
+      "../scripts/social-3a0p-local-windows-physical-plans.js"
+    ),
+    "utf8"
+  ).replace(/\r\n/gu, "\n");
+  const section = (startMarker, endMarker) => {
+    const start = source.indexOf(startMarker);
+    const end = source.indexOf(endMarker, start);
+    assert.notEqual(start, -1);
+    assert.notEqual(end, -1);
+    return source.slice(start, end);
+  };
+  const tamper = section(
+    "      async assertManifestTamperRefused() {",
+    "      async assertCrossProfileRefused() {"
+  );
+  assert.match(
+    tamper,
+    /error\?\.code === "backup_bundle_authentication_failed"/u
+  );
+  assert.equal(
+    [...tamper.matchAll(/backup_bundle_[a-z_]+/gu)].map(
+      (match) => match[0]
+    ).join("\n"),
+    "backup_bundle_authentication_failed"
+  );
+  assert.doesNotMatch(tamper, /startsWith|restore_encrypted_bundle_invalid/u);
+
+  const crossProfile = section(
+    "      async assertCrossProfileRefused() {",
+    "      async cleanup() {"
+  );
+  assert.equal(
+    crypto.createHash("sha256").update(crossProfile).digest("hex"),
+    "967f3c8b278ceb18615d436f4e9da78bbc0f43fdd8de4456a4501aa73537a2fa"
+  );
+  assert.match(
+    crossProfile,
+    /error\?\.code === "local_backup_restore_cross_profile_refused"/u
+  );
 });
 
 test("cross-profile reconciliation never overwrites an unexpected primary", async (t) => {

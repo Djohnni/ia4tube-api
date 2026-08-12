@@ -38,8 +38,8 @@ const {
 } = require("./social-3a0p-local-runtime-evidence-metrics");
 
 const BRANCH =
-  "social/checkpoint-3a0p-gate5-restore-vault-generation-floor-20260811";
-const BASE_COMMIT = "6eac518e4001e816ae554e299c34ef7ab54c1cfd";
+  "social/checkpoint-3a0p-gate5-bundle-tamper-refusal-20260811";
+const BASE_COMMIT = "3c1ba942033a94ba6480145664543d906805544b";
 const PRODUCT_COMMIT = "fcfc92419021dae5f77baad731c634b10c275c5b";
 const MARKER = "[run-social-3a0p-linux-gate]";
 const RUN_MARKER_PREFIX = "ia4tube-social-3a0p-linux-";
