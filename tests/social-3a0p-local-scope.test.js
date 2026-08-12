@@ -4,93 +4,92 @@ const assert = require("node:assert/strict");
 const test = require("node:test");
 const {
   ALLOWED_EXACT_FILES,
+  ALLOWED_PREFIXES,
   assertHarnessOnlyChangedFiles,
   isHarnessOnlyFile,
   normalizeRepositoryFile
 } = require("../scripts/social-3a0p-local-scope");
 
-test("checkpoint scope accepts harness files and the two exact authorized sources", () => {
-  const files = [
-    "scripts/social-3a0p-local-harness-core.js",
-    "src/persistence/postgres/backup-restore.js",
-    "src/persistence/postgres/restore-behavior-verifiers.js",
-    "tests/social-3a0p-local-harness.test.js",
-    "docs/social-3a0p-local-physical-harness.md",
-    "tests/social-postgres-backup-restore.test.js",
-    "tests/social-postgres-migrations.test.js",
-    "tests/social-postgres-restore-behavior-verifiers.test.js",
-    "tests/social-postgres-real.test.js"
-  ];
-  assert.deepEqual(assertHarnessOnlyChangedFiles(files), {
+const AUTHORIZED_FILES = Object.freeze([
+  "scripts/social-3a0p-local-scope.js",
+  "server.js",
+  "src/persistence/postgres/social-oauth-repository.js",
+  "src/social/auth-adapter.js",
+  "src/social/credential-service.js",
+  "src/social/oauth/instagram-config.js",
+  "src/social/oauth/instagram-oauth-router.js",
+  "src/social/oauth/instagram-oauth-service.js",
+  "src/social/oauth/instagram-provider.js",
+  "src/social/oauth/instagram-state-envelope.js",
+  "src/social/runtime.js",
+  "src/social/server-runtime.js",
+  "tests/social-3a0p-current-diff-scope.test.js",
+  "tests/social-3a0p-local-scope.test.js",
+  "tests/social-3b0-instagram-oauth-crypto-provider.test.js",
+  "tests/social-3b0-instagram-oauth-routes.test.js",
+  "tests/social-connector-persistence.test.js",
+  "tests/social-server-runtime.test.js"
+]);
+
+test("OAuth 3B-0 scope accepts exactly the eighteen authorized paths", () => {
+  assert.equal(AUTHORIZED_FILES.length, 18);
+  assert.deepEqual(ALLOWED_PREFIXES, []);
+  assert.deepEqual(
+    [...ALLOWED_EXACT_FILES].sort(),
+    [...AUTHORIZED_FILES].sort()
+  );
+  assert.equal(ALLOWED_EXACT_FILES.size, 18);
+  for (const file of AUTHORIZED_FILES) {
+    assert.equal(isHarnessOnlyFile(file), true, file);
+  }
+  assert.deepEqual(assertHarnessOnlyChangedFiles([...AUTHORIZED_FILES]), {
     harnessOnly: true,
-    changedFileCount: files.length
+    changedFileCount: 18
   });
 });
 
-test("non-harness PostgreSQL test exceptions are confined to three exact paths", () => {
+test("OAuth 3B-0 scope refuses variants, globs, subpaths and case changes", () => {
   for (const file of [
-    "tests/social-postgres-backup-restore.test.js",
-    "tests/social-postgres-migrations.test.js",
-    "tests/social-postgres-restore-behavior-verifiers.test.js"
+    "server.js.bak",
+    "SERVER.js",
+    "src/social/oauth/",
+    "src/social/oauth/*.js",
+    "src/social/oauth/instagram-config.js.bak",
+    "src/social/oauth/subdir/instagram-config.js",
+    "src/social/oauth/Instagram-config.js",
+    "src/social/oauth/instagram-state-envelope.test.js",
+    "tests/social-3b0-instagram-oauth-state-envelope.test.js",
+    "tests/social-3b0-instagram-oauth-routes.test.js.bak",
+    "tests/subdir/social-3b0-instagram-oauth-routes.test.js",
+    "tests/SOCIAL-3B0-INSTAGRAM-OAUTH-ROUTES.TEST.JS"
   ]) {
-    assert.equal(isHarnessOnlyFile(file), true);
-    assert.deepEqual(assertHarnessOnlyChangedFiles([file]), {
-      harnessOnly: true,
-      changedFileCount: 1
-    });
-  }
-  for (const file of [
-    "tests/social-postgres-backup-restore-copy.test.js",
-    "tests/social-postgres-migration.test.js",
-    "tests/social-postgres-restore-behavior-verifier.test.js",
-    "tests/social-postgres-other.test.js",
-    "tests/subdir/social-postgres-backup-restore.test.js"
-  ]) {
-    assert.equal(isHarnessOnlyFile(file), false);
+    assert.equal(isHarnessOnlyFile(file), false, file);
     assert.throws(() => assertHarnessOnlyChangedFiles([file]), {
       code: "harness_scope_product_change_refused"
     });
   }
 });
 
-test("source exceptions are confined to the two exact authorized product paths", () => {
-  for (const source of [
-    "src/persistence/postgres/backup-restore.js",
-    "src/persistence/postgres/restore-behavior-verifiers.js"
-  ]) {
-    assert.equal(isHarnessOnlyFile(source), true);
-    assert.deepEqual(assertHarnessOnlyChangedFiles([source]), {
-      harnessOnly: true,
-      changedFileCount: 1
-    });
-  }
+test("OAuth 3B-0 scope refuses every product or dependency path outside its allowlist", () => {
   for (const file of [
-    "src/persistence/postgres/backup-restore.js.bak",
-    "src/persistence/postgres/backup_restore.js",
-    "src/persistence/postgres/restore-behavior-verifiers.js.bak",
-    "src/persistence/postgres/subdir/backup-restore.js",
-    "src/PERSISTENCE/postgres/backup-restore.js"
-  ]) {
-    assert.equal(isHarnessOnlyFile(file), false);
-    assert.throws(() => assertHarnessOnlyChangedFiles([file]), {
-      code: "harness_scope_product_change_refused"
-    });
-  }
-});
-
-test("harness scope refuses every product or dependency change", () => {
-  for (const file of [
-    "src/social/connector.js",
-    "db/migrations/0004_social.sql",
-    "migrations/0004_social.sql",
-    "server.js",
+    "src/social/identity.js",
+    "src/social/vault.js",
+    "src/social/connectors/service.js",
+    "src/persistence/postgres/social-repository.js",
+    "src/persistence/postgres/social-connector-store.js",
+    "db/migrations/0004_social_connector_persistence.up.sql",
+    "migrations/0005_social_oauth.sql",
+    "db/postgres/roles.sql",
     "package.json",
     "package-lock.json",
+    ".github/workflows/social-3a0p-linux-physical-gates.yml",
+    "docs/social-3a0p-linux-physical-gates.md",
     "app.html"
   ]) {
+    assert.equal(isHarnessOnlyFile(file), false, file);
     assert.throws(
       () => assertHarnessOnlyChangedFiles([
-        "scripts/social-3a0p-local-harness-core.js",
+        "scripts/social-3a0p-local-scope.js",
         file
       ]),
       { code: "harness_scope_product_change_refused" }
@@ -98,14 +97,14 @@ test("harness scope refuses every product or dependency change", () => {
   }
 });
 
-test("harness scope rejects path traversal and absolute paths", () => {
+test("OAuth 3B-0 scope rejects traversal and absolute paths", () => {
   for (const file of [
     "../server.js",
     "tests/../server.js",
     "C:/repo/server.js",
     "/repo/server.js",
-    "./tests/social-3a0p-local-harness.test.js",
-    "tests//social-3a0p-local-harness.test.js"
+    "./tests/social-3b0-instagram-oauth-routes.test.js",
+    "tests//social-3b0-instagram-oauth-routes.test.js"
   ]) {
     assert.throws(() => normalizeRepositoryFile(file), {
       code: "harness_scope_file_invalid"
@@ -113,99 +112,25 @@ test("harness scope rejects path traversal and absolute paths", () => {
   }
 });
 
-test("surgical loopback test change remains confined to its exact path", () => {
-  assert.equal(isHarnessOnlyFile("tests/social-postgres-real.test.js"), true);
-  assert.equal(isHarnessOnlyFile("tests/other-existing.test.js"), false);
-  assert.equal(isHarnessOnlyFile("scripts/run-real-postgres-tests.js"), false);
-});
-
-test("the exact Linux physical-gate workflow is the sole workflow exception", () => {
-  const workflow = ".github/workflows/social-3a0p-linux-physical-gates.yml";
-  assert.equal(isHarnessOnlyFile(workflow), true);
-  assert.deepEqual(assertHarnessOnlyChangedFiles([workflow]), {
+test("OAuth 3B-0 scope normalizes only path separators", () => {
+  const windowsPath = "src\\social\\oauth\\instagram-config.js";
+  assert.equal(
+    normalizeRepositoryFile(windowsPath),
+    "src/social/oauth/instagram-config.js"
+  );
+  assert.equal(isHarnessOnlyFile(windowsPath), true);
+  assert.deepEqual(assertHarnessOnlyChangedFiles([windowsPath]), {
     harnessOnly: true,
     changedFileCount: 1
   });
-
-  for (const file of [
-    ".github/workflows/",
-    ".github/workflows/*",
-    ".github/workflows/other.yml",
-    ".github/workflows/social-3a0p-linux-physical-gates.yaml",
-    ".github/workflows/social-3a0p-linux-physical-gates.yml/other",
-    ".github/workflows/SOCIAL-3A0P-LINUX-PHYSICAL-GATES.YML"
-  ]) {
-    assert.equal(isHarnessOnlyFile(file), false);
-    assert.throws(() => assertHarnessOnlyChangedFiles([file]), {
-      code: "harness_scope_product_change_refused"
-    });
-  }
 });
 
-test("test runner maintenance scope is confined to two exact files", async (t) => {
-  const contracts = Object.freeze([
-    Object.freeze(["scripts/run-node-tests.js", "allowed"]),
-    Object.freeze(["tests/node-test-runner-safety.test.js", "allowed"]),
-    Object.freeze(["scripts/run-node-test.js", "refused"]),
-    Object.freeze(["scripts/run-node-tests.js.bak", "refused"]),
-    Object.freeze(["scripts/subdir/run-node-tests.js", "refused"]),
-    Object.freeze(["tests/node-test-runner-safety.test.js.bak", "refused"]),
-    Object.freeze(["tests/subdir/node-test-runner-safety.test.js", "refused"]),
-    Object.freeze(["tests/other-existing.test.js", "refused"]),
-    Object.freeze(["scripts/", "refused"]),
-    Object.freeze(["tests/", "refused"]),
-    Object.freeze(["scripts/*", "refused"]),
-    Object.freeze(["tests/*", "refused"]),
-    Object.freeze(["C:/repo/scripts/run-node-tests.js", "invalid"]),
-    Object.freeze(["scripts/../run-node-tests.js", "invalid"]),
-    Object.freeze(["scripts\\run-node-tests.js", "allowed"]),
-    Object.freeze(["tests\\node-test-runner-safety.test.js", "allowed"])
-  ]);
-
-  assert.equal(contracts.length, 16);
-  for (const [file, expectation] of contracts) {
-    await t.test(`${expectation}: ${file}`, () => {
-      if (expectation === "allowed") {
-        assert.equal(isHarnessOnlyFile(file), true);
-        assert.deepEqual(assertHarnessOnlyChangedFiles([file]), {
-          harnessOnly: true,
-          changedFileCount: 1
-        });
-        return;
-      }
-      if (expectation === "invalid") {
-        assert.throws(() => normalizeRepositoryFile(file), {
-          code: "harness_scope_file_invalid"
-        });
-        return;
-      }
-      assert.equal(isHarnessOnlyFile(file), false);
-      assert.throws(() => assertHarnessOnlyChangedFiles([file]), {
-        code: "harness_scope_product_change_refused"
-      });
-    });
-  }
-
-  for (const file of [
-    "scripts/run-node-tests.js",
-    "tests/node-test-runner-safety.test.js"
-  ]) {
-    assert.equal(ALLOWED_EXACT_FILES.has(file), true);
-  }
-  assert.deepEqual([...ALLOWED_EXACT_FILES].sort(), [
-    ".github/workflows/social-3a0p-linux-physical-gates.yml",
-    "scripts/run-node-tests.js",
-    "src/persistence/postgres/backup-restore.js",
-    "src/persistence/postgres/restore-behavior-verifiers.js",
-    "tests/node-test-runner-safety.test.js",
-    "tests/social-postgres-backup-restore.test.js",
-    "tests/social-postgres-migrations.test.js",
-    "tests/social-postgres-real.test.js",
-    "tests/social-postgres-restore-behavior-verifiers.test.js"
-  ]);
+test("OAuth 3B-0 scope has no wildcard or directory-wide exception", () => {
   assert.equal(
-    [...ALLOWED_EXACT_FILES].some((file) => file.includes("*")),
+    [...ALLOWED_EXACT_FILES].some(
+      (file) => file.includes("*") || file.endsWith("/")
+    ),
     false
   );
-  assert.equal(isHarnessOnlyFile("tests/node-test-runner-safety-copy.test.js"), false);
+  assert.equal(ALLOWED_PREFIXES.length, 0);
 });

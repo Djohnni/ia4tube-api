@@ -104,6 +104,42 @@ function isConstraintError(error, code, constraint) {
   return false;
 }
 
+function strictObject(value, allowedKeys) {
+  if (
+    !value ||
+    typeof value !== "object" ||
+    Array.isArray(value) ||
+    Object.getPrototypeOf(value) !== Object.prototype
+  ) {
+    postgresFail(
+      "credential_operation_invalid",
+      "Operacao com credencial recusada."
+    );
+  }
+  for (const key of Object.keys(value)) {
+    const descriptor = Object.getOwnPropertyDescriptor(value, key);
+    if (
+      !allowedKeys.includes(key) ||
+      !descriptor ||
+      descriptor.get ||
+      descriptor.set
+    ) {
+      postgresFail(
+        "credential_operation_invalid",
+        "Operacao com credencial recusada."
+      );
+    }
+  }
+  return value;
+}
+
+function clearEnvelope(envelope) {
+  if (!envelope || typeof envelope !== "object") return;
+  for (const field of ["ciphertext", "nonce", "authTag"]) {
+    if (Buffer.isBuffer(envelope[field])) envelope[field].fill(0);
+  }
+}
+
 function createSocialCredentialService(options = {}) {
   const repository = options.repository;
   const vault = options.vault;
@@ -240,6 +276,92 @@ function createSocialCredentialService(options = {}) {
     }
   }
 
+  async function withEncryptedConnectionCredential(input = {}, operation) {
+    const plaintextDescriptor = input && typeof input === "object"
+      ? Object.getOwnPropertyDescriptor(input, "plaintext")
+      : null;
+    const plaintext = plaintextDescriptor &&
+      !plaintextDescriptor.get && !plaintextDescriptor.set
+      ? plaintextDescriptor.value
+      : null;
+    if (!Buffer.isBuffer(plaintext) || plaintext.length < 1) {
+      postgresFail(
+        "credential_plaintext_invalid",
+        "Material da credencial recusado."
+      );
+    }
+    let envelope;
+    let sealed;
+    try {
+      if (typeof operation !== "function") {
+        postgresFail(
+          "credential_operation_required",
+          "Operacao com credencial obrigatoria."
+        );
+      }
+      const source = strictObject(input, [
+        "companyId",
+        "connectionId",
+        "credentialId",
+        "provider",
+        "credentialType",
+        "plaintext",
+        "expiresAt"
+      ]);
+      const context = contextFromInput({
+        companyId: source.companyId,
+        connectionId: source.connectionId,
+        credentialId: source.credentialId,
+        provider: source.provider,
+        credentialType: source.credentialType
+      });
+      const expiresAt = optionalExpiry(source.expiresAt);
+      sealed = vault.encrypt(plaintext, context);
+      envelope = Object.freeze({
+        id: context.credentialId,
+        credentialType: context.credentialType,
+        ciphertext: sealed.ciphertext,
+        nonce: sealed.nonce,
+        authTag: sealed.authTag,
+        keyVersion: sealed.keyVersion,
+        aadVersion: sealed.aadVersion,
+        expiresAt
+      });
+      try {
+        return await operation(envelope);
+      } catch (error) {
+        if (
+          isConstraintError(
+            error,
+            "23503",
+            CREDENTIAL_KEY_FOREIGN_KEY
+          )
+        ) {
+          postgresFail(
+            "vault_active_key_not_registered",
+            "Chave ativa do cofre nao registrada."
+          );
+        }
+        if (
+          isConstraintError(
+            error,
+            "23505",
+            "social_encrypted_credentials_key_nonce_unique"
+          )
+        ) {
+          postgresFail(
+            "credential_nonce_collision",
+            "Nonce criptografico indisponivel."
+          );
+        }
+        throw error;
+      }
+    } finally {
+      clearEnvelope(envelope || sealed);
+      plaintext.fill(0);
+    }
+  }
+
   async function rotateUsing(
     { companyId, credentialId } = {},
     includeInactive
@@ -350,13 +472,15 @@ function createSocialCredentialService(options = {}) {
     rotateForKeyLifecycle,
     store,
     tenantKeyInventory,
-    withDecryptedCredential
+    withDecryptedCredential,
+    withEncryptedConnectionCredential
   });
 }
 
 module.exports = {
   contextFromInput,
   contextFromRow,
+  clearEnvelope,
   createSocialCredentialService,
   envelopeFromRow,
   isConstraintError,

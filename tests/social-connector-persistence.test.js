@@ -29,6 +29,9 @@ const {
   createPostgresOAuthRepository
 } = require("../src/persistence/postgres/social-oauth-repository");
 const {
+  createSocialCredentialService
+} = require("../src/social/credential-service");
+const {
   ERROR_DEFINITIONS
 } = require("../src/social/connectors/errors");
 const {
@@ -279,6 +282,78 @@ function oauthConsumeInput(overrides = {}) {
     state: SYNTHETIC_STATE,
     redirectUri: SYNTHETIC_REDIRECT,
     sessionJti: SYNTHETIC_SESSION_JTI,
+    purpose: "connect",
+    ...overrides
+  };
+}
+
+function oauthExpireInput(overrides = {}) {
+  return oauthConsumeInput({
+    observedAt: new Date(),
+    ...overrides
+  });
+}
+
+function credentialServiceHarness() {
+  const contexts = [];
+  const sealed = [];
+  const repository = {
+    async storeEncryptedCredential() {},
+    async findEncryptedCredential() {},
+    async rotateEncryptedCredential() {},
+    async listCredentialKeyVersions() { return []; }
+  };
+  const vault = {
+    encrypt(plaintext, context) {
+      contexts.push(context);
+      const envelope = {
+        ciphertext: Buffer.from("sealed-synthetic-token", "utf8"),
+        nonce: Buffer.alloc(12, 71),
+        authTag: Buffer.alloc(16, 73),
+        keyVersion: "social-kek-v1",
+        aadVersion: 1
+      };
+      sealed.push(envelope);
+      assert.equal(plaintext.toString("utf8"), SYNTHETIC_SECRET_MARKER);
+      return envelope;
+    },
+    decrypt() { return Buffer.from("unused", "utf8"); },
+    rotate() { return { changed: false, envelope: {} }; }
+  };
+  return Object.freeze({
+    contexts,
+    sealed,
+    service: createSocialCredentialService({ repository, vault })
+  });
+}
+
+function sha256(value) {
+  return crypto.createHash("sha256").update(value, "utf8").digest("hex");
+}
+
+function oauthAuthorizationRow(overrides = {}) {
+  return {
+    id: IDS.transaction,
+    connection_id: IDS.connection,
+    purpose: "connect",
+    state_digest: sha256(SYNTHETIC_STATE),
+    redirect_uri_digest: sha256(SYNTHETIC_REDIRECT),
+    session_jti_digest: sha256(SYNTHETIC_SESSION_JTI),
+    expires_at: new Date(Date.now() + 5 * 60 * 1000),
+    consumed_at: null,
+    cancelled_at: null,
+    failed_at: null,
+    failure_code: null,
+    ...overrides
+  };
+}
+
+function oauthTerminalRow(overrides = {}) {
+  return {
+    id: IDS.transaction,
+    connection_id: IDS.connection,
+    purpose: "connect",
+    expires_at: new Date(Date.now() + 5 * 60 * 1000),
     ...overrides
   };
 }
@@ -513,6 +588,68 @@ test("credential activation rejects plaintext material before opening a transact
     }
   ));
   assert.equal(pool.calls.length, 0);
+});
+
+test("credential service seals once with final connection AAD and clears plaintext and envelope buffers", async () => {
+  const harness = credentialServiceHarness();
+  const plaintext = Buffer.from(SYNTHETIC_SECRET_MARKER, "utf8");
+  let callbackEnvelope;
+  const result = await harness.service.withEncryptedConnectionCredential({
+    companyId: CONTEXT_A.companyId,
+    connectionId: IDS.connection,
+    credentialId: IDS.credential,
+    provider: "instagram",
+    credentialType: "access_token",
+    plaintext,
+    expiresAt: credentialEnvelope().expiresAt
+  }, async (envelope) => {
+    callbackEnvelope = envelope;
+    assert.notEqual(envelope.ciphertext.length, 0);
+    assert.equal(Object.hasOwn(envelope, "plaintext"), false);
+    return Object.freeze({ stored: true });
+  });
+  assert.deepEqual(result, { stored: true });
+  assert.equal(harness.contexts.length, 1);
+  assert.deepEqual(harness.contexts[0], {
+    companyId: CONTEXT_A.companyId,
+    provider: "instagram",
+    credentialId: IDS.credential,
+    credentialType: "access_token",
+    subjectType: "connection",
+    subjectId: IDS.connection
+  });
+  assert.ok(plaintext.every((byte) => byte === 0));
+  for (const field of ["ciphertext", "nonce", "authTag"]) {
+    assert.ok(callbackEnvelope[field].every((byte) => byte === 0));
+    assert.ok(harness.sealed[0][field].every((byte) => byte === 0));
+  }
+  assert.equal(JSON.stringify(result).includes(SYNTHETIC_SECRET_MARKER), false);
+});
+
+test("credential service clears token and sealed buffers when the transactional callback fails", async () => {
+  const harness = credentialServiceHarness();
+  const plaintext = Buffer.from(SYNTHETIC_SECRET_MARKER, "utf8");
+  let callbackEnvelope;
+  await assert.rejects(
+    harness.service.withEncryptedConnectionCredential({
+      companyId: CONTEXT_A.companyId,
+      connectionId: IDS.connection,
+      credentialId: IDS.credential,
+      provider: "instagram",
+      credentialType: "access_token",
+      plaintext
+    }, async (envelope) => {
+      callbackEnvelope = envelope;
+      throw Object.assign(new Error("synthetic_transaction_failure"), {
+        code: "synthetic_transaction_failure"
+      });
+    }),
+    { code: "synthetic_transaction_failure" }
+  );
+  assert.ok(plaintext.every((byte) => byte === 0));
+  for (const field of ["ciphertext", "nonce", "authTag"]) {
+    assert.ok(callbackEnvelope[field].every((byte) => byte === 0));
+  }
 });
 
 test("connection, professional account and encrypted credential activate atomically", async () => {
@@ -1379,6 +1516,412 @@ test("OAuth creation stores digests, never raw state or session binding", async 
   }
 });
 
+test("pending connection and OAuth authorization are created atomically under one tenant lock", async () => {
+  const expiresAt = oauthInput().expiresAt;
+  const pool = createFakePool(async (call) => {
+      if (/^UPDATE ia4tube_social\.social_oauth_transactions/is.test(call.text)) {
+        return { rows: [], rowCount: 0 };
+      }
+      if (/JOIN LATERAL/is.test(call.text)) {
+        return { rows: [], rowCount: 0 };
+      }
+      if (/INSERT INTO ia4tube_social\.social_connections/is.test(call.text)) {
+      return { rows: [{ id: IDS.connection, revision: 1 }], rowCount: 1 };
+    }
+    if (/INSERT INTO ia4tube_social\.social_oauth_transactions/is.test(
+      call.text
+    )) {
+      return { rows: [{
+        id: IDS.transaction,
+        connection_id: IDS.connection,
+        purpose: "connect",
+        expires_at: expiresAt
+      }], rowCount: 1 };
+    }
+    if (/INSERT INTO ia4tube_social\.social_audit_events/is.test(call.text)) {
+      return { rows: [{}], rowCount: 1 };
+    }
+    return { rows: [], rowCount: 0 };
+  });
+  const result = await createPostgresOAuthRepository({
+    pool,
+    runtimeRole: RUNTIME_ROLE
+  }).scope(CONTEXT_A).createAuthorizationWithPendingConnection(
+    oauthInput({ expiresAt })
+  );
+  assert.deepEqual(result, {
+    authorizationHandle: IDS.transaction,
+    connectionId: IDS.connection,
+    purpose: "connect",
+    expiresAt,
+    status: "pending",
+    revision: 1
+  });
+  assertScopedTransaction(pool, CONTEXT_A.companyId);
+  assert.equal(
+    pool.calls.filter((call) => /pg_advisory_xact_lock/i.test(call.text)).length,
+    1
+  );
+  const calls = productCalls(pool);
+  const connectionInsert = calls.findIndex((call) =>
+    /INSERT INTO ia4tube_social\.social_connections/is.test(call.text)
+  );
+  const authorizationInsert = calls.findIndex((call) =>
+    /INSERT INTO ia4tube_social\.social_oauth_transactions/is.test(call.text)
+  );
+  assert.ok(connectionInsert >= 0);
+  assert.ok(authorizationInsert > connectionInsert);
+  assert.match(calls[connectionInsert].text, /'authorization_pending'/i);
+  assert.match(calls[connectionInsert].text, /created_by_user_id/i);
+  assert.match(calls[connectionInsert].text, /revision/i);
+  assert.deepEqual(calls[connectionInsert].values, [
+    CONTEXT_A.companyId,
+    IDS.connection,
+    "instagram",
+    CONTEXT_A.userId
+  ]);
+  assert.equal(
+    calls.some((call) => /social_external_accounts/i.test(call.text)),
+    false
+  );
+  assert.ok(calls.some((call) =>
+    call.values.includes("to_authorization_pending")
+  ));
+  assert.ok(calls.some((call) =>
+    call.values.includes("purpose_connect")
+  ));
+  const serialized = JSON.stringify(pool.calls);
+  assert.equal(serialized.includes(SYNTHETIC_STATE), false);
+  assert.equal(serialized.includes(SYNTHETIC_SESSION_JTI), false);
+  assert.equal(serialized.includes(SYNTHETIC_REDIRECT), false);
+});
+
+test("OAuth insert failure rolls back the pending connection and emits no audit", async () => {
+  const pool = createFakePool(async (call) => {
+    if (/^UPDATE ia4tube_social\.social_oauth_transactions/is.test(call.text)) {
+      return { rows: [], rowCount: 0 };
+    }
+    if (/INSERT INTO ia4tube_social\.social_connections/is.test(call.text)) {
+      return { rows: [{ id: IDS.connection, revision: 1 }], rowCount: 1 };
+    }
+    if (/INSERT INTO ia4tube_social\.social_oauth_transactions/is.test(
+      call.text
+    )) {
+      return { rows: [], rowCount: 0 };
+    }
+    return { rows: [], rowCount: 0 };
+  });
+  await assert.rejects(
+    createPostgresOAuthRepository({
+      pool,
+      runtimeRole: RUNTIME_ROLE
+    }).scope(CONTEXT_A).createAuthorizationWithPendingConnection(oauthInput()),
+    { code: "idempotency_conflict" }
+  );
+  assert.equal(
+    pool.calls.some((call) => call.text.trim() === "ROLLBACK"),
+    true
+  );
+  assert.equal(
+    pool.calls.some((call) => call.text.trim() === "COMMIT"),
+    false
+  );
+  assert.equal(
+    productCalls(pool).some((call) =>
+      /INSERT INTO ia4tube_social\.social_audit_events/is.test(call.text)
+    ),
+    false
+  );
+});
+
+test("reconnect reuses the exact reconnect-required connection and advances its revision", async () => {
+  const requestedConnectionId = "30000000-0000-4000-8000-000000000013";
+  const expiresAt = oauthInput().expiresAt;
+  const pool = createFakePool(async (call) => {
+    if (/^UPDATE ia4tube_social\.social_oauth_transactions/is.test(call.text)) {
+      return { rows: [], rowCount: 0 };
+    }
+    if (/JOIN LATERAL/is.test(call.text)) return { rows: [], rowCount: 0 };
+    if (/FROM ia4tube_social\.social_connections/is.test(call.text)) {
+      return { rows: [{ id: IDS.connection, revision: 5 }], rowCount: 1 };
+    }
+    if (/UPDATE ia4tube_social\.social_connections/is.test(call.text)) {
+      return { rows: [{ id: IDS.connection, revision: 6 }], rowCount: 1 };
+    }
+    if (/INSERT INTO ia4tube_social\.social_oauth_transactions/is.test(
+      call.text
+    )) {
+      return { rows: [{
+        id: IDS.transaction,
+        connection_id: IDS.connection,
+        purpose: "reconnect",
+        expires_at: expiresAt
+      }], rowCount: 1 };
+    }
+    if (/INSERT INTO ia4tube_social\.social_audit_events/is.test(call.text)) {
+      return { rows: [{}], rowCount: 1 };
+    }
+    return { rows: [], rowCount: 0 };
+  });
+  const result = await createPostgresOAuthRepository({
+    pool,
+    runtimeRole: RUNTIME_ROLE
+  }).scope(CONTEXT_A).createAuthorizationWithPendingConnection(oauthInput({
+    connectionId: requestedConnectionId,
+    purpose: "reconnect",
+    expiresAt
+  }));
+  assert.deepEqual(result, {
+    authorizationHandle: IDS.transaction,
+    connectionId: IDS.connection,
+    purpose: "reconnect",
+    expiresAt,
+    status: "pending",
+    revision: 6
+  });
+  const calls = productCalls(pool);
+  assert.equal(
+    calls.some((call) =>
+      /INSERT INTO ia4tube_social\.social_connections/is.test(call.text)
+    ),
+    false
+  );
+  const transitioned = calls.find((call) =>
+    /UPDATE ia4tube_social\.social_connections/is.test(call.text)
+  );
+  assert.match(transitioned.text, /status='authorization_pending'/i);
+  assert.match(transitioned.text, /status='reconnect_required'/i);
+  assert.deepEqual(transitioned.values, [
+    CONTEXT_A.companyId,
+    IDS.connection,
+    "instagram",
+    5
+  ]);
+  const authorization = calls.find((call) =>
+    /INSERT INTO ia4tube_social\.social_oauth_transactions/is.test(call.text)
+  );
+  assert.equal(authorization.values[2], IDS.connection);
+  for (const audit of calls.filter((call) =>
+    /INSERT INTO ia4tube_social\.social_audit_events/is.test(call.text)
+  )) {
+    assert.ok(audit.values.includes(IDS.connection));
+    assert.equal(audit.values.includes(requestedConnectionId), false);
+  }
+});
+
+test("a terminal pending connection is recoverable only without its exact authorization credential", async () => {
+  const previousAuthorizationId =
+    "30000000-0000-4000-8000-000000000014";
+  const nextConnectionId = "30000000-0000-4000-8000-000000000015";
+  const expiresAt = oauthInput().expiresAt;
+  const pool = createFakePool(async (call) => {
+    if (/^UPDATE ia4tube_social\.social_oauth_transactions/is.test(call.text)) {
+      return { rows: [], rowCount: 0 };
+    }
+    if (/JOIN LATERAL/is.test(call.text)) {
+      return { rows: [{
+        id: IDS.connection,
+        revision: 1,
+        authorization_id: previousAuthorizationId,
+        purpose: "connect",
+        consumed_at: new Date(Date.now() - 11 * 60 * 1000),
+        expires_at: new Date(Date.now() - 60 * 1000)
+      }], rowCount: 1 };
+    }
+    if (/UPDATE ia4tube_social\.social_connections/is.test(call.text)) {
+      if (call.values[1] === IDS.connection) {
+        return { rows: [{ id: IDS.connection, revision: 2 }], rowCount: 1 };
+      }
+      return { rows: [], rowCount: 0 };
+    }
+    if (/INSERT INTO ia4tube_social\.social_connections/is.test(call.text)) {
+      return { rows: [{ id: nextConnectionId, revision: 1 }], rowCount: 1 };
+    }
+    if (/INSERT INTO ia4tube_social\.social_oauth_transactions/is.test(
+      call.text
+    )) {
+      return { rows: [{
+        id: IDS.transaction,
+        connection_id: nextConnectionId,
+        purpose: "connect",
+        expires_at: expiresAt
+      }], rowCount: 1 };
+    }
+    if (/INSERT INTO ia4tube_social\.social_audit_events/is.test(call.text)) {
+      return { rows: [{}], rowCount: 1 };
+    }
+    return { rows: [], rowCount: 0 };
+  });
+  const result = await createPostgresOAuthRepository({
+    pool,
+    runtimeRole: RUNTIME_ROLE
+  }).scope(CONTEXT_A).createAuthorizationWithPendingConnection(oauthInput({
+    connectionId: nextConnectionId,
+    expiresAt
+  }));
+  assert.equal(result.connectionId, nextConnectionId);
+  const recovery = productCalls(pool).find((call) => /JOIN LATERAL/is.test(
+    call.text
+  ));
+  assert.match(recovery.text, /credential\.id=terminal\.authorization_id/i);
+  assert.match(recovery.text, /credential\.revoked_at IS NULL/i);
+  assert.match(recovery.text, /open_oauth\.consumed_at IS NULL/i);
+  assert.match(
+    recovery.text,
+    /terminal\.consumed_at IS NULL\s+OR terminal\.expires_at <= CURRENT_TIMESTAMP/i
+  );
+  assert.match(recovery.text, /FOR UPDATE OF c/i);
+  assert.ok(productCalls(pool).some((call) =>
+    call.values.includes("provider_result_unknown")
+  ));
+  assert.ok(productCalls(pool).some((call) =>
+    call.values.includes("to_failed")
+  ));
+});
+
+test("terminal pending recovery rolls back when the replacement authorization cannot be inserted", async () => {
+  const previousAuthorizationId =
+    "30000000-0000-4000-8000-000000000016";
+  const nextConnectionId = "30000000-0000-4000-8000-000000000017";
+  const pool = createFakePool(async (call) => {
+    if (/^UPDATE ia4tube_social\.social_oauth_transactions/is.test(call.text)) {
+      return {
+        rows: [{ connection_id: IDS.connection }],
+        rowCount: 1
+      };
+    }
+    if (/JOIN LATERAL/is.test(call.text)) {
+      return { rows: [{
+        id: IDS.connection,
+        revision: 4,
+        authorization_id: previousAuthorizationId,
+        purpose: "connect",
+        consumed_at: new Date(Date.now() - 11 * 60 * 1000),
+        expires_at: new Date(Date.now() - 60 * 1000)
+      }], rowCount: 1 };
+    }
+    if (/UPDATE ia4tube_social\.social_connections/is.test(call.text)) {
+      return { rows: [{ id: IDS.connection, revision: 5 }], rowCount: 1 };
+    }
+    if (/INSERT INTO ia4tube_social\.social_connections/is.test(call.text)) {
+      return { rows: [{ id: nextConnectionId, revision: 1 }], rowCount: 1 };
+    }
+    if (/INSERT INTO ia4tube_social\.social_oauth_transactions/is.test(
+      call.text
+    )) {
+      return { rows: [], rowCount: 0 };
+    }
+    if (/INSERT INTO ia4tube_social\.social_audit_events/is.test(call.text)) {
+      return { rows: [{}], rowCount: 1 };
+    }
+    return { rows: [], rowCount: 0 };
+  });
+  await assert.rejects(
+    createPostgresOAuthRepository({
+      pool,
+      runtimeRole: RUNTIME_ROLE
+    }).scope(CONTEXT_A).createAuthorizationWithPendingConnection(oauthInput({
+      connectionId: nextConnectionId
+    })),
+    { code: "idempotency_conflict" }
+  );
+  assert.equal(
+    pool.calls.some((call) => call.text.trim() === "ROLLBACK"),
+    true
+  );
+  assert.equal(
+    pool.calls.some((call) => call.text.trim() === "COMMIT"),
+    false
+  );
+  const calls = productCalls(pool);
+  const expiration = calls.findIndex((call) =>
+    /^UPDATE ia4tube_social\.social_oauth_transactions/is.test(call.text)
+  );
+  const recovery = calls.findIndex((call) => /JOIN LATERAL/is.test(call.text));
+  const replacement = calls.findIndex((call) =>
+    /INSERT INTO ia4tube_social\.social_oauth_transactions/is.test(call.text)
+  );
+  assert.ok(expiration >= 0);
+  assert.ok(recovery > expiration);
+  assert.ok(replacement > recovery);
+  assert.match(calls[expiration].text, /expires_at <= CURRENT_TIMESTAMP/i);
+  assert.ok(calls.some((call) =>
+    call.values.includes("authorization_expired")
+  ));
+});
+
+test("atomic authorization terminalizes an abandoned expired OAuth before replacing its pending connection", async () => {
+  const previousAuthorizationId =
+    "30000000-0000-4000-8000-000000000018";
+  const nextConnectionId = "30000000-0000-4000-8000-000000000019";
+  const expiresAt = oauthInput().expiresAt;
+  const pool = createFakePool(async (call) => {
+    if (/^UPDATE ia4tube_social\.social_oauth_transactions/is.test(call.text)) {
+      return {
+        rows: [{ connection_id: IDS.connection }],
+        rowCount: 1
+      };
+    }
+    if (/JOIN LATERAL/is.test(call.text)) {
+      return { rows: [{
+        id: IDS.connection,
+        revision: 2,
+        authorization_id: previousAuthorizationId,
+        purpose: "connect",
+        consumed_at: null,
+        expires_at: new Date(Date.now() - 1000)
+      }], rowCount: 1 };
+    }
+    if (/UPDATE ia4tube_social\.social_connections/is.test(call.text)) {
+      return { rows: [{ id: IDS.connection, revision: 3 }], rowCount: 1 };
+    }
+    if (/INSERT INTO ia4tube_social\.social_connections/is.test(call.text)) {
+      return { rows: [{ id: nextConnectionId, revision: 1 }], rowCount: 1 };
+    }
+    if (/INSERT INTO ia4tube_social\.social_oauth_transactions/is.test(
+      call.text
+    )) {
+      return { rows: [{
+        id: IDS.transaction,
+        connection_id: nextConnectionId,
+        purpose: "connect",
+        expires_at: expiresAt
+      }], rowCount: 1 };
+    }
+    if (/INSERT INTO ia4tube_social\.social_audit_events/is.test(call.text)) {
+      return { rows: [{}], rowCount: 1 };
+    }
+    return { rows: [], rowCount: 0 };
+  });
+  const result = await createPostgresOAuthRepository({
+    pool,
+    runtimeRole: RUNTIME_ROLE
+  }).scope(CONTEXT_A).createAuthorizationWithPendingConnection(oauthInput({
+    connectionId: nextConnectionId,
+    expiresAt
+  }));
+  assert.equal(result.connectionId, nextConnectionId);
+  const calls = productCalls(pool);
+  const expiration = calls.findIndex((call) =>
+    /^UPDATE ia4tube_social\.social_oauth_transactions/is.test(call.text)
+  );
+  const recovery = calls.findIndex((call) => /JOIN LATERAL/is.test(call.text));
+  const newConnection = calls.findIndex((call) =>
+    /INSERT INTO ia4tube_social\.social_connections/is.test(call.text)
+  );
+  assert.ok(expiration >= 0);
+  assert.ok(recovery > expiration);
+  assert.ok(newConnection > recovery);
+  assert.match(calls[expiration].text, /failed_at=CURRENT_TIMESTAMP/i);
+  assert.match(calls[expiration].text, /failure_code='authorization_expired'/i);
+  assert.match(calls[expiration].text, /expires_at <= CURRENT_TIMESTAMP/i);
+  assert.ok(calls.some((call) =>
+    call.values.includes("authorization_expired")
+  ));
+  assert.ok(calls.some((call) => call.values.includes("to_failed")));
+  assertScopedTransaction(pool, CONTEXT_A.companyId);
+});
+
 test("OAuth creation closes expired pending transactions before inserting a new one", async () => {
   const pool = createFakePool(async (call) => {
     if (/^UPDATE ia4tube_social\.social_oauth_transactions/is.test(call.text)) {
@@ -1417,30 +1960,82 @@ test("OAuth creation closes expired pending transactions before inserting a new 
   assert.ok(expirationAudit.values.includes("authorization_expired"));
 });
 
-test("OAuth consume binds state, redirect, session and connection in one atomic update", async () => {
+test("OAuth consume locks identity, timing-validates bindings and CAS-terminalizes once", async () => {
   const pool = createFakePool(async (call) => {
-    if (/UPDATE .*oauth/is.test(call.text)) {
-      return { rows: [{
-        id: IDS.transaction,
-        company_id: CONTEXT_A.companyId,
-        connection_id: IDS.connection,
-        purpose: "connect",
-        status: "consumed",
-        consumed_at: new Date()
-      }] };
+    if (/FROM ia4tube_social\.social_oauth_transactions/is.test(call.text)) {
+      return { rows: [oauthAuthorizationRow()] };
     }
-    return { rows: [] };
+    if (/FROM ia4tube_social\.social_connections/is.test(call.text)) {
+      return { rows: [{ id: IDS.connection, revision: 7 }], rowCount: 1 };
+    }
+    if (/^UPDATE ia4tube_social\.social_oauth_transactions/is.test(call.text)) {
+      return { rows: [oauthTerminalRow()], rowCount: 1 };
+    }
+    if (/INSERT INTO ia4tube_social\.social_audit_events/is.test(call.text)) {
+      return { rows: [{}], rowCount: 1 };
+    }
+    return { rows: [], rowCount: 0 };
   });
   const repository = createPostgresOAuthRepository({
     pool,
     runtimeRole: RUNTIME_ROLE
   }).scope(CONTEXT_A);
-  await repository.consumeAuthorization(oauthConsumeInput());
-  const [consume] = productCalls(pool);
-  assert.match(consume.text, /^UPDATE /i);
+  const callbackObservedAt = new Date();
+  const result = await repository.consumeAuthorization(oauthConsumeInput({
+    observedAt: callbackObservedAt
+  }));
+  assert.equal(result.status, "consumed");
+  assert.equal(result.connectionRevision, 7);
+  const calls = productCalls(pool);
+  const selected = calls.find((call) =>
+    /FROM ia4tube_social\.social_oauth_transactions/is.test(call.text)
+  );
+  const consume = calls.find((call) =>
+    /^UPDATE ia4tube_social\.social_oauth_transactions/is.test(call.text)
+  );
+  const connection = calls.find((call) =>
+    /FROM ia4tube_social\.social_connections/is.test(call.text)
+  );
+  assert.ok(selected);
+  assert.ok(connection);
+  assert.ok(consume);
+  assert.match(connection.text, /status='authorization_pending'/i);
+  assert.match(connection.text, /FOR UPDATE/i);
+  assert.ok(calls.indexOf(consume) > calls.indexOf(selected));
+  assert.ok(calls.indexOf(connection) > calls.indexOf(consume));
+  assert.match(selected.text, /FOR UPDATE/i);
+  assert.match(selected.text, /initiated_by_user_id\s*=\s*\$4/i);
+  assert.match(selected.text, /purpose\s*=\s*\$5/i);
+  assert.doesNotMatch(selected.text, /state_digest\s*=/i);
+  assert.doesNotMatch(selected.text, /redirect_uri_digest\s*=/i);
+  assert.doesNotMatch(selected.text, /session_jti_digest\s*=/i);
+  assert.deepEqual(selected.values, [
+    CONTEXT_A.companyId,
+    IDS.transaction,
+    "instagram",
+    CONTEXT_A.userId,
+    "connect"
+  ]);
+  assert.match(consume.text, /SET consumed_at\s*=\s*CURRENT_TIMESTAMP/i);
   assert.match(consume.text, /consumed_at\s+IS\s+NULL/i);
-  assert.match(consume.text, /expires_at\s*>/i);
+  assert.match(consume.text, /cancelled_at\s+IS\s+NULL/i);
+  assert.match(consume.text, /failed_at\s+IS\s+NULL/i);
+  assert.match(consume.text, /expires_at\s*>\s*\$6/i);
   assert.match(consume.text, /RETURNING/i);
+  assert.deepEqual(consume.values, [
+    CONTEXT_A.companyId,
+    IDS.transaction,
+    "instagram",
+    CONTEXT_A.userId,
+    "connect",
+    callbackObservedAt,
+    null
+  ]);
+  assertParameterized(selected, [
+    SYNTHETIC_STATE,
+    SYNTHETIC_SESSION_JTI,
+    SYNTHETIC_REDIRECT
+  ]);
   assertParameterized(consume, [
     SYNTHETIC_STATE,
     SYNTHETIC_SESSION_JTI,
@@ -1453,11 +2048,17 @@ test("OAuth consume binds state, redirect, session and connection in one atomic 
     false
   );
   assert.equal(values.some((value) => value.includes(SYNTHETIC_REDIRECT)), false);
+  const source = fs.readFileSync(path.join(
+    ROOT,
+    "src/persistence/postgres/social-oauth-repository.js"
+  ), "utf8");
+  assert.match(source, /crypto\.timingSafeEqual\(/);
+  assert.match(source, /Buffer\.alloc\(DIGEST_BYTES\)/);
 });
 
 test("OAuth state owned by another company is refused under authenticated tenant scope", async () => {
   const pool = createFakePool(async (call) => {
-    if (/UPDATE .*oauth/is.test(call.text)) {
+    if (/FROM ia4tube_social\.social_oauth_transactions/is.test(call.text)) {
       assert.equal(call.values[0], CONTEXT_B.companyId);
       assert.notEqual(call.values[0], CONTEXT_A.companyId);
       return { rows: [] };
@@ -1482,14 +2083,33 @@ test("OAuth state owned by another company is refused under authenticated tenant
     [CONTEXT_B.companyId]
   );
   assert.deepEqual(pool.counts(), { connectCount: 1, releaseCount: 1 });
-  const [consume] = productCalls(pool);
-  assert.ok(consume);
-  assert.match(consume.text, /company_id\s*=\s*\$1/i);
+  const [selected] = productCalls(pool);
+  assert.ok(selected);
+  assert.match(selected.text, /company_id\s*=\s*\$1/i);
+  assert.match(selected.text, /FOR UPDATE/i);
+  assert.equal(
+    productCalls(pool).some((call) =>
+      /^UPDATE ia4tube_social\.social_oauth_transactions/is.test(call.text)
+    ),
+    false
+  );
   assert.equal(JSON.stringify(pool.calls).includes(SYNTHETIC_STATE), false);
 });
 
-test("OAuth replay, expiry or tampered binding is indistinguishable and refused", async () => {
-  const pool = createFakePool(async () => ({ rows: [] }));
+test("OAuth replay, purpose mismatch or tampered digest binding is uniformly refused", async () => {
+  let updateAttempts = 0;
+  const pool = createFakePool(async (call) => {
+    if (/FROM ia4tube_social\.social_oauth_transactions/is.test(call.text)) {
+      return call.values[4] === "connect"
+        ? { rows: [oauthAuthorizationRow()] }
+        : { rows: [] };
+    }
+    if (/^UPDATE ia4tube_social\.social_oauth_transactions/is.test(call.text)) {
+      updateAttempts += 1;
+      return { rows: [], rowCount: 0 };
+    }
+    return { rows: [], rowCount: 0 };
+  });
   const repository = createPostgresOAuthRepository({
     pool,
     runtimeRole: RUNTIME_ROLE
@@ -1500,7 +2120,8 @@ test("OAuth replay, expiry or tampered binding is indistinguishable and refused"
     oauthConsumeInput({ redirectUri: `${SYNTHETIC_REDIRECT}/tampered` }),
     oauthConsumeInput({
       sessionJti: `${SYNTHETIC_SESSION_JTI}-tampered`
-    })
+    }),
+    oauthConsumeInput({ purpose: "reconnect" })
   ]) {
     await assert.rejects(
       repository.consumeAuthorization(input),
@@ -1517,9 +2138,839 @@ test("OAuth replay, expiry or tampered binding is indistinguishable and refused"
       }
     );
   }
+  assert.equal(updateAttempts, 1);
   const serialized = JSON.stringify(pool.calls);
   assert.equal(serialized.includes(SYNTHETIC_STATE), false);
   assert.equal(serialized.includes(SYNTHETIC_SESSION_JTI), false);
+});
+
+test("legacy OAuth terminals allow omitted purpose while expireAuthorization requires it", async () => {
+  const pool = createFakePool(async (call) => {
+    if (/FROM ia4tube_social\.social_oauth_transactions/is.test(call.text)) {
+      return { rows: [oauthAuthorizationRow()] };
+    }
+    if (/^UPDATE ia4tube_social\.social_oauth_transactions/is.test(call.text)) {
+      return { rows: [oauthTerminalRow()], rowCount: 1 };
+    }
+    if (/INSERT INTO ia4tube_social\.social_audit_events/is.test(call.text)) {
+      return { rows: [{}], rowCount: 1 };
+    }
+    return { rows: [], rowCount: 0 };
+  });
+  const repository = createPostgresOAuthRepository({
+    pool,
+    runtimeRole: RUNTIME_ROLE
+  }).scope(CONTEXT_A);
+  const withoutPurpose = oauthConsumeInput();
+  delete withoutPurpose.purpose;
+  assert.equal(
+    (await repository.consumeAuthorization(withoutPurpose)).status,
+    "consumed"
+  );
+  assert.equal(
+    (await repository.cancelAuthorization(withoutPurpose)).status,
+    "cancelled"
+  );
+  assert.equal(
+    (await repository.failAuthorization({
+      ...withoutPurpose,
+      failureCode: "authorization_cancelled"
+    })).status,
+    "failed"
+  );
+  const scopedSelects = productCalls(pool).filter((call) =>
+    /FROM ia4tube_social\.social_oauth_transactions/is.test(call.text)
+  );
+  assert.equal(scopedSelects.length, 3);
+  for (const selected of scopedSelects) {
+    assert.doesNotMatch(selected.text, /purpose\s*=/i);
+    assert.deepEqual(selected.values, [
+      CONTEXT_A.companyId,
+      IDS.transaction,
+      "instagram",
+      CONTEXT_A.userId
+    ]);
+  }
+  const callsBeforeInvalidPurpose = pool.calls.length;
+  await assert.rejects(
+    repository.consumeAuthorization({
+      ...withoutPurpose,
+      purpose: "publish"
+    }),
+    { code: "connector_contract_invalid" }
+  );
+  assert.equal(pool.calls.length, callsBeforeInvalidPurpose);
+  const callsBeforeExpire = pool.calls.length;
+  await assert.rejects(
+    repository.expireAuthorization(withoutPurpose),
+    { code: "connector_contract_invalid" }
+  );
+  assert.equal(pool.calls.length, callsBeforeExpire);
+});
+
+test("OAuth cancel and fail preserve purpose binding and emit only safe terminal audits", async () => {
+  const cases = [
+    {
+      method: "cancelAuthorization",
+      input: oauthConsumeInput(),
+      timestampColumn: "cancelled_at",
+      status: "cancelled",
+      failureCode: null,
+      action: "social.authorization.cancelled",
+      outcome: "succeeded",
+      detailsCode: null
+    },
+    {
+      method: "failAuthorization",
+      input: oauthConsumeInput({ failureCode: "authorization_cancelled" }),
+      timestampColumn: "failed_at",
+      status: "failed",
+      failureCode: "authorization_cancelled",
+      action: "social.authorization.failed",
+      outcome: "failed",
+      detailsCode: "authorization_cancelled"
+    }
+  ];
+  for (const item of cases) {
+    const pool = createFakePool(async (call) => {
+      if (/FROM ia4tube_social\.social_oauth_transactions/is.test(call.text)) {
+        return { rows: [oauthAuthorizationRow()] };
+      }
+      if (/^UPDATE ia4tube_social\.social_oauth_transactions/is.test(call.text)) {
+        return { rows: [oauthTerminalRow()], rowCount: 1 };
+      }
+      if (/INSERT INTO ia4tube_social\.social_audit_events/is.test(call.text)) {
+        return { rows: [{}], rowCount: 1 };
+      }
+      return { rows: [], rowCount: 0 };
+    });
+    const repository = createPostgresOAuthRepository({
+      pool,
+      runtimeRole: RUNTIME_ROLE
+    }).scope(CONTEXT_A);
+    const result = await repository[item.method](item.input);
+    assert.equal(result.status, item.status);
+    const calls = productCalls(pool);
+    const selected = calls.find((call) =>
+      /FROM ia4tube_social\.social_oauth_transactions/is.test(call.text)
+    );
+    const updated = calls.find((call) =>
+      /^UPDATE ia4tube_social\.social_oauth_transactions/is.test(call.text)
+    );
+    const audit = calls.find((call) =>
+      /INSERT INTO ia4tube_social\.social_audit_events/is.test(call.text)
+    );
+    assert.ok(selected);
+    assert.ok(updated);
+    assert.ok(audit);
+    assert.match(selected.text, /purpose\s*=\s*\$5/i);
+    assert.match(selected.text, /FOR UPDATE/i);
+    assert.match(
+      updated.text,
+      new RegExp(`SET ${item.timestampColumn}\\s*=\\s*CURRENT_TIMESTAMP`, "i")
+    );
+    assert.equal(updated.values[4], "connect");
+    assert.equal(updated.values[5], item.failureCode);
+    assert.ok(audit.values.includes(item.action));
+    assert.ok(audit.values.includes(item.outcome));
+    if (item.detailsCode) assert.ok(audit.values.includes(item.detailsCode));
+    assert.equal(JSON.stringify(pool.calls).includes(SYNTHETIC_STATE), false);
+    assert.equal(
+      JSON.stringify(pool.calls).includes(SYNTHETIC_SESSION_JTI),
+      false
+    );
+  }
+});
+
+test("OAuth exposes cancellation only after every digest binding authenticates", async () => {
+  const cancelledRow = oauthAuthorizationRow({
+    cancelled_at: new Date(Date.now() - 1000)
+  });
+  for (const [input, code] of [
+    [oauthConsumeInput(), "authorization_cancelled"],
+    [
+      oauthConsumeInput({ state: `${SYNTHETIC_STATE}-tampered` }),
+      "authorization_expired"
+    ]
+  ]) {
+    let updateAttempts = 0;
+    const pool = createFakePool(async (call) => {
+      if (/FROM ia4tube_social\.social_oauth_transactions/is.test(call.text)) {
+        return { rows: [cancelledRow] };
+      }
+      if (/^UPDATE ia4tube_social\.social_oauth_transactions/is.test(call.text)) {
+        updateAttempts += 1;
+      }
+      return { rows: [], rowCount: 0 };
+    });
+    await assert.rejects(
+      createPostgresOAuthRepository({
+        pool,
+        runtimeRole: RUNTIME_ROLE
+      }).scope(CONTEXT_A).consumeAuthorization(input),
+      { code }
+    );
+    assert.equal(updateAttempts, 0);
+    assert.equal(
+      productCalls(pool).some((call) =>
+        /INSERT INTO ia4tube_social\.social_audit_events/is.test(call.text)
+      ),
+      false
+    );
+  }
+});
+
+test("expireAuthorization authenticates bindings and terminalizes only an expired pending row", async () => {
+  const expiredAt = new Date(Date.now() - 1000);
+  const pool = createFakePool(async (call) => {
+    if (/FROM ia4tube_social\.social_oauth_transactions/is.test(call.text)) {
+      return { rows: [oauthAuthorizationRow({ expires_at: expiredAt })] };
+    }
+    if (/FROM ia4tube_social\.social_connections/is.test(call.text)) {
+      return { rows: [{ id: IDS.connection, revision: 9 }], rowCount: 1 };
+    }
+    if (/^UPDATE ia4tube_social\.social_oauth_transactions/is.test(call.text)) {
+      return {
+        rows: [oauthTerminalRow({ expires_at: expiredAt })],
+        rowCount: 1
+      };
+    }
+    if (/INSERT INTO ia4tube_social\.social_audit_events/is.test(call.text)) {
+      return { rows: [{}], rowCount: 1 };
+    }
+    return { rows: [], rowCount: 0 };
+  });
+  const result = await createPostgresOAuthRepository({
+    pool,
+    runtimeRole: RUNTIME_ROLE
+  }).scope(CONTEXT_A).expireAuthorization(oauthExpireInput());
+  assert.equal(result.status, "expired");
+  assert.equal(result.connectionRevision, 9);
+  const calls = productCalls(pool);
+  const selected = calls.find((call) =>
+    /FROM ia4tube_social\.social_oauth_transactions/is.test(call.text)
+  );
+  const expired = calls.find((call) =>
+    /^UPDATE ia4tube_social\.social_oauth_transactions/is.test(call.text)
+  );
+  const audit = calls.find((call) =>
+    /INSERT INTO ia4tube_social\.social_audit_events/is.test(call.text)
+  );
+  assert.ok(selected);
+  assert.ok(expired);
+  assert.ok(audit);
+  assert.match(selected.text, /FOR UPDATE/i);
+  assert.match(expired.text, /SET failed_at\s*=\s*CURRENT_TIMESTAMP/i);
+  assert.match(expired.text, /expires_at\s*<=\s*\$6/i);
+  assert.match(expired.text, /consumed_at\s+IS\s+NULL/i);
+  assert.match(expired.text, /cancelled_at\s+IS\s+NULL/i);
+  assert.match(expired.text, /failed_at\s+IS\s+NULL/i);
+  assert.equal(expired.values[5] instanceof Date, true);
+  assert.equal(expired.values[6], "authorization_expired");
+  assert.ok(audit.values.includes("social.authorization.failed"));
+  assert.ok(audit.values.includes("failed"));
+  assert.ok(audit.values.includes("authorization_expired"));
+});
+
+test("expireAuthorization refuses unexpired, terminal or digest-mismatched rows without audit", async () => {
+  const cases = [
+    {
+      row: oauthAuthorizationRow(),
+      input: oauthExpireInput(),
+      code: "authorization_expired"
+    },
+    {
+      row: oauthAuthorizationRow({
+        expires_at: new Date(Date.now() - 1000),
+        consumed_at: new Date(Date.now() - 500)
+      }),
+      input: oauthExpireInput(),
+      code: "social_oauth_state_already_consumed"
+    },
+    {
+      row: oauthAuthorizationRow({ expires_at: new Date(Date.now() - 1000) }),
+      input: oauthExpireInput({ state: `${SYNTHETIC_STATE}-tampered` }),
+      code: "authorization_expired"
+    }
+  ];
+  for (const item of cases) {
+    let updateAttempts = 0;
+    const pool = createFakePool(async (call) => {
+      if (/FROM ia4tube_social\.social_oauth_transactions/is.test(call.text)) {
+        return { rows: [item.row] };
+      }
+      if (/^UPDATE ia4tube_social\.social_oauth_transactions/is.test(call.text)) {
+        updateAttempts += 1;
+        const expired = item.row.expires_at.getTime() <= Date.now();
+        const pending = !item.row.consumed_at &&
+          !item.row.cancelled_at && !item.row.failed_at;
+        return expired && pending
+          ? { rows: [oauthTerminalRow({ expires_at: item.row.expires_at })] }
+          : { rows: [] };
+      }
+      return { rows: [], rowCount: 0 };
+    });
+    await assert.rejects(
+      createPostgresOAuthRepository({
+        pool,
+        runtimeRole: RUNTIME_ROLE
+      }).scope(CONTEXT_A).expireAuthorization(item.input),
+      { code: item.code }
+    );
+    assert.equal(
+      productCalls(pool).some((call) =>
+        /INSERT INTO ia4tube_social\.social_audit_events/is.test(call.text)
+      ),
+      false
+    );
+    if (item.input.state !== SYNTHETIC_STATE) {
+      assert.equal(updateAttempts, 0);
+    }
+  }
+});
+
+test("OAuth terminal CAS permits one concurrent consumer and audits only the winner", async () => {
+  let won = false;
+  let updateAttempts = 0;
+  const pool = createFakePool(async (call) => {
+    if (/FROM ia4tube_social\.social_oauth_transactions/is.test(call.text)) {
+      return { rows: [oauthAuthorizationRow(won
+        ? { consumed_at: new Date() }
+        : {})] };
+    }
+    if (/^UPDATE ia4tube_social\.social_oauth_transactions/is.test(call.text)) {
+      updateAttempts += 1;
+      if (won) return { rows: [], rowCount: 0 };
+      won = true;
+      return { rows: [oauthTerminalRow()], rowCount: 1 };
+    }
+    if (/INSERT INTO ia4tube_social\.social_audit_events/is.test(call.text)) {
+      return { rows: [{}], rowCount: 1 };
+    }
+    return { rows: [], rowCount: 0 };
+  });
+  const repository = createPostgresOAuthRepository({
+    pool,
+    runtimeRole: RUNTIME_ROLE
+  }).scope(CONTEXT_A);
+  const settled = await Promise.allSettled([
+    repository.consumeAuthorization(oauthConsumeInput()),
+    repository.consumeAuthorization(oauthConsumeInput())
+  ]);
+  const fulfilled = settled.filter((item) => item.status === "fulfilled");
+  const rejected = settled.filter((item) => item.status === "rejected");
+  assert.equal(fulfilled.length, 1);
+  assert.equal(fulfilled[0].value.status, "consumed");
+  assert.equal(rejected.length, 1);
+  assert.equal(
+    rejected[0].reason?.code,
+    "authorization_expired"
+  );
+  assert.equal(updateAttempts, 2);
+  assert.equal(
+    productCalls(pool).filter((call) =>
+      /INSERT INTO ia4tube_social\.social_audit_events/is.test(call.text)
+    ).length,
+    1
+  );
+  for (const update of productCalls(pool).filter((call) =>
+    /^UPDATE ia4tube_social\.social_oauth_transactions/is.test(call.text)
+  )) {
+    assert.match(update.text, /consumed_at\s+IS\s+NULL/i);
+    assert.match(update.text, /cancelled_at\s+IS\s+NULL/i);
+    assert.match(update.text, /failed_at\s+IS\s+NULL/i);
+  }
+});
+
+test("fixed-size digest comparison refuses malformed stored digests before CAS", async () => {
+  let updateAttempts = 0;
+  const pool = createFakePool(async (call) => {
+    if (/FROM ia4tube_social\.social_oauth_transactions/is.test(call.text)) {
+      return { rows: [oauthAuthorizationRow({ state_digest: "bad" })] };
+    }
+    if (/^UPDATE ia4tube_social\.social_oauth_transactions/is.test(call.text)) {
+      updateAttempts += 1;
+    }
+    return { rows: [], rowCount: 0 };
+  });
+  await assert.rejects(
+    createPostgresOAuthRepository({
+      pool,
+      runtimeRole: RUNTIME_ROLE
+    }).scope(CONTEXT_A).consumeAuthorization(oauthConsumeInput()),
+    { code: "authorization_expired" }
+  );
+  assert.equal(updateAttempts, 0);
+});
+
+test("consumed authorization stores one connection-bound encrypted credential without activation or account discovery", async () => {
+  const expiresAt = credentialEnvelope().expiresAt;
+  const pool = createFakePool(async (call) => {
+    if (/FROM ia4tube_social\.social_oauth_transactions/is.test(call.text)) {
+      return { rows: [{
+        id: IDS.transaction,
+        connection_id: IDS.connection,
+        purpose: "connect"
+      }] };
+    }
+    if (/FROM ia4tube_social\.social_connections/is.test(call.text)) {
+      return { rows: [{ id: IDS.connection, revision: 1 }] };
+    }
+    if (/UPDATE ia4tube_social\.social_encrypted_credentials/is.test(
+      call.text
+    )) {
+      return { rows: [], rowCount: 0 };
+    }
+    if (/INSERT INTO ia4tube_social\.social_encrypted_credentials/is.test(
+      call.text
+    )) {
+      return { rows: [{
+        id: IDS.transaction,
+        credential_type: "access_token",
+        key_version: "social-kek-v1",
+        aad_version: 1,
+        expires_at: expiresAt,
+        revision: 1
+      }], rowCount: 1 };
+    }
+    if (/INSERT INTO ia4tube_social\.social_audit_events/is.test(call.text)) {
+      return { rows: [{}], rowCount: 1 };
+    }
+    return { rows: [], rowCount: 0 };
+  });
+  const oauth = createPostgresOAuthRepository({
+    pool,
+    runtimeRole: RUNTIME_ROLE
+  }).scope(CONTEXT_A);
+  const harness = credentialServiceHarness();
+  const plaintext = Buffer.from(SYNTHETIC_SECRET_MARKER, "utf8");
+  const result = await harness.service.withEncryptedConnectionCredential({
+    companyId: CONTEXT_A.companyId,
+    connectionId: IDS.connection,
+    credentialId: IDS.transaction,
+    provider: "instagram",
+    credentialType: "access_token",
+    plaintext,
+    expiresAt
+  }, (envelope) => oauth.storeConsumedAuthorizationCredential({
+    authorizationHandle: IDS.transaction,
+    connectionId: IDS.connection,
+    purpose: "connect",
+    expectedRevision: 1
+  }, envelope));
+  assert.deepEqual(result, {
+    authorizationHandle: IDS.transaction,
+    connectionId: IDS.connection,
+    purpose: "connect",
+    status: "credential_stored",
+    revision: 1,
+    credential: {
+      id: IDS.transaction,
+      credentialType: "access_token",
+      keyVersion: "social-kek-v1",
+      aadVersion: 1,
+      expiresAt,
+      revision: 1
+    }
+  });
+  assert.ok(plaintext.every((byte) => byte === 0));
+  assertScopedTransaction(pool, CONTEXT_A.companyId);
+  assert.equal(
+    pool.calls.filter((call) => /pg_advisory_xact_lock/i.test(call.text)).length,
+    1
+  );
+  const calls = productCalls(pool);
+  const authorizationRead = calls.findIndex((call) =>
+    /FROM ia4tube_social\.social_oauth_transactions/is.test(call.text)
+  );
+  const connectionRead = calls.findIndex((call) =>
+    /FROM ia4tube_social\.social_connections/is.test(call.text)
+  );
+  const credentialInsert = calls.findIndex((call) =>
+    /INSERT INTO ia4tube_social\.social_encrypted_credentials/is.test(
+      call.text
+    )
+  );
+  assert.ok(authorizationRead >= 0);
+  assert.ok(connectionRead > authorizationRead);
+  assert.ok(credentialInsert > connectionRead);
+  assert.match(calls[authorizationRead].text, /consumed_at IS NOT NULL/i);
+  assert.match(calls[authorizationRead].text, /connection_id=\$4/i);
+  assert.match(calls[authorizationRead].text, /initiated_by_user_id=\$5/i);
+  assert.match(calls[authorizationRead].text, /purpose=\$6/i);
+  assert.deepEqual(calls[authorizationRead].values, [
+    CONTEXT_A.companyId,
+    IDS.transaction,
+    "instagram",
+    IDS.connection,
+    CONTEXT_A.userId,
+    "connect"
+  ]);
+  assert.match(calls[connectionRead].text, /status='authorization_pending'/i);
+  assert.match(calls[connectionRead].text, /revision=\$4/i);
+  assert.match(calls[credentialInsert].text, /connection_id/i);
+  assert.doesNotMatch(calls[credentialInsert].text, /oauth_transaction_id/i);
+  assert.equal(
+    calls.some((call) =>
+      /UPDATE ia4tube_social\.social_connections/i.test(call.text) ||
+      /social_external_accounts/i.test(call.text)
+    ),
+    false
+  );
+  assert.equal(Object.hasOwn(result.credential, "ciphertext"), false);
+  assert.equal(Object.hasOwn(result.credential, "nonce"), false);
+  assert.equal(Object.hasOwn(result.credential, "authTag"), false);
+  assert.equal(JSON.stringify(pool.calls).includes(SYNTHETIC_SECRET_MARKER), false);
+  assert.ok(calls.some((call) =>
+    call.values.includes("credential_encrypted")
+  ));
+});
+
+test("credential insert failure rolls back replacement and leaves no stored audit", async () => {
+  const pool = createFakePool(async (call) => {
+    if (/FROM ia4tube_social\.social_oauth_transactions/is.test(call.text)) {
+      return { rows: [{
+        id: IDS.transaction,
+        connection_id: IDS.connection,
+        purpose: "connect"
+      }] };
+    }
+    if (/FROM ia4tube_social\.social_connections/is.test(call.text)) {
+      return { rows: [{ id: IDS.connection, revision: 1 }] };
+    }
+    if (/UPDATE ia4tube_social\.social_encrypted_credentials/is.test(
+      call.text
+    )) {
+      return { rows: [{ id: "synthetic-prior-credential" }], rowCount: 1 };
+    }
+    if (/INSERT INTO ia4tube_social\.social_encrypted_credentials/is.test(
+      call.text
+    )) {
+      return { rows: [], rowCount: 0 };
+    }
+    return { rows: [], rowCount: 0 };
+  });
+  const harness = credentialServiceHarness();
+  const plaintext = Buffer.from(SYNTHETIC_SECRET_MARKER, "utf8");
+  await assert.rejects(
+    harness.service.withEncryptedConnectionCredential({
+      companyId: CONTEXT_A.companyId,
+      connectionId: IDS.connection,
+      credentialId: IDS.transaction,
+      provider: "instagram",
+      credentialType: "access_token",
+      plaintext
+    }, (envelope) => createPostgresOAuthRepository({
+      pool,
+      runtimeRole: RUNTIME_ROLE
+    }).scope(CONTEXT_A).storeConsumedAuthorizationCredential({
+      authorizationHandle: IDS.transaction,
+      connectionId: IDS.connection,
+      purpose: "connect",
+      expectedRevision: 1
+    }, envelope)),
+    { code: "idempotency_conflict" }
+  );
+  assert.ok(plaintext.every((byte) => byte === 0));
+  assert.equal(
+    pool.calls.some((call) => call.text.trim() === "ROLLBACK"),
+    true
+  );
+  assert.equal(
+    pool.calls.some((call) => call.text.trim() === "COMMIT"),
+    false
+  );
+  assert.equal(
+    productCalls(pool).some((call) =>
+      /INSERT INTO ia4tube_social\.social_audit_events/is.test(call.text)
+    ),
+    false
+  );
+});
+
+test("credential bridge refuses authorization and pending-revision mismatches before writing material", async () => {
+  for (const refuseAt of ["authorization", "connection"]) {
+    const pool = createFakePool(async (call) => {
+      if (/FROM ia4tube_social\.social_oauth_transactions/is.test(call.text)) {
+        return refuseAt === "authorization"
+          ? { rows: [] }
+          : { rows: [{
+            id: IDS.transaction,
+            connection_id: IDS.connection,
+            purpose: "connect"
+          }] };
+      }
+      if (/FROM ia4tube_social\.social_connections/is.test(call.text)) {
+        return { rows: [] };
+      }
+      return { rows: [], rowCount: 0 };
+    });
+    await assert.rejects(
+      createPostgresOAuthRepository({
+        pool,
+        runtimeRole: RUNTIME_ROLE
+      }).scope(CONTEXT_A).storeConsumedAuthorizationCredential({
+        authorizationHandle: IDS.transaction,
+        connectionId: IDS.connection,
+        purpose: "connect",
+        expectedRevision: 1
+      }, credentialEnvelope({ id: IDS.transaction })),
+      { code: refuseAt === "authorization"
+        ? "authorization_expired"
+        : "state_transition_invalid" }
+    );
+    assert.equal(
+      productCalls(pool).some((call) =>
+        /(?:UPDATE|INSERT INTO) ia4tube_social\.social_encrypted_credentials/i
+          .test(call.text)
+      ),
+      false
+    );
+  }
+});
+
+test("stale callback revision cannot store a credential or terminalize a newer connection generation", async () => {
+  const staleRevision = 6;
+  const storePool = createFakePool(async (call) => {
+    if (/FROM ia4tube_social\.social_oauth_transactions/is.test(call.text)) {
+      return { rows: [{
+        id: IDS.transaction,
+        connection_id: IDS.connection,
+        purpose: "reconnect"
+      }] };
+    }
+    if (/FROM ia4tube_social\.social_connections/is.test(call.text)) {
+      return { rows: [], rowCount: 0 };
+    }
+    return { rows: [], rowCount: 0 };
+  });
+  await assert.rejects(
+    createPostgresOAuthRepository({
+      pool: storePool,
+      runtimeRole: RUNTIME_ROLE
+    }).scope(CONTEXT_A).storeConsumedAuthorizationCredential({
+      authorizationHandle: IDS.transaction,
+      connectionId: IDS.connection,
+      purpose: "reconnect",
+      expectedRevision: staleRevision
+    }, credentialEnvelope({ id: IDS.transaction })),
+    { code: "state_transition_invalid" }
+  );
+  const staleRead = productCalls(storePool).find((call) =>
+    /FROM ia4tube_social\.social_connections/is.test(call.text)
+  );
+  assert.match(staleRead.text, /revision=\$4/i);
+  assert.equal(staleRead.values[3], staleRevision);
+  assert.equal(
+    productCalls(storePool).some((call) =>
+      /(?:UPDATE|INSERT INTO) ia4tube_social\.social_encrypted_credentials/i
+        .test(call.text)
+    ),
+    false
+  );
+
+  const failPool = createFakePool(async (call) => {
+    if (/FROM ia4tube_social\.social_oauth_transactions/is.test(call.text)) {
+      return { rows: [{
+        id: IDS.transaction,
+        connection_id: IDS.connection,
+        purpose: "reconnect"
+      }] };
+    }
+    if (/UPDATE ia4tube_social\.social_connections/is.test(call.text)) {
+      return { rows: [], rowCount: 0 };
+    }
+    return { rows: [], rowCount: 0 };
+  });
+  await assert.rejects(
+    createPostgresOAuthRepository({
+      pool: failPool,
+      runtimeRole: RUNTIME_ROLE
+    }).scope(CONTEXT_A).failAuthorizationConnection({
+      authorizationHandle: IDS.transaction,
+      connectionId: IDS.connection,
+      purpose: "reconnect",
+      expectedRevision: staleRevision,
+      failureCode: "provider_result_unknown",
+      terminalStatus: "consumed"
+    }),
+    { code: "state_transition_invalid" }
+  );
+  const staleUpdate = productCalls(failPool).find((call) =>
+    /UPDATE ia4tube_social\.social_connections/is.test(call.text)
+  );
+  assert.match(staleUpdate.text, /revision=\$5/i);
+  assert.equal(staleUpdate.values[4], staleRevision);
+  assert.equal(
+    productCalls(failPool).some((call) =>
+      /INSERT INTO ia4tube_social\.social_audit_events/i.test(call.text)
+    ),
+    false
+  );
+});
+
+test("new callback credential and cleanup bridges require an explicit connection revision", async () => {
+  const repository = createPostgresOAuthRepository({
+    pool: createFakePool(),
+    runtimeRole: RUNTIME_ROLE
+  }).scope(CONTEXT_A);
+  await assert.rejects(
+    repository.storeConsumedAuthorizationCredential({
+      authorizationHandle: IDS.transaction,
+      connectionId: IDS.connection,
+      purpose: "connect"
+    }, credentialEnvelope({ id: IDS.transaction })),
+    { code: "connector_contract_invalid" }
+  );
+  await assert.rejects(
+    repository.failAuthorizationConnection({
+      authorizationHandle: IDS.transaction,
+      connectionId: IDS.connection,
+      purpose: "connect",
+      failureCode: "provider_result_unknown",
+      terminalStatus: "consumed"
+    }),
+    { code: "connector_contract_invalid" }
+  );
+});
+
+test("failAuthorizationConnection validates the exact terminal and only moves pending connection to failed", async () => {
+  const cases = [
+    {
+      terminalStatus: "consumed",
+      failureCode: "provider_temporary_failure",
+      purpose: "connect",
+      status: "failed",
+      sql: /consumed_at IS NOT NULL/i
+    },
+    {
+      terminalStatus: "cancelled",
+      failureCode: "authorization_cancelled",
+      purpose: "connect",
+      status: "failed",
+      sql: /cancelled_at IS NOT NULL/i
+    },
+    {
+      terminalStatus: "expired",
+      failureCode: "authorization_expired",
+      purpose: "connect",
+      status: "failed",
+      sql: /failure_code='authorization_expired'/i
+    },
+    {
+      terminalStatus: "consumed",
+      failureCode: "provider_result_unknown",
+      purpose: "reconnect",
+      status: "reconnect_required",
+      sql: /consumed_at IS NOT NULL/i
+    }
+  ];
+  for (const item of cases) {
+    const pool = createFakePool(async (call) => {
+      if (/FROM ia4tube_social\.social_oauth_transactions/is.test(call.text)) {
+        return { rows: [{
+          id: IDS.transaction,
+          connection_id: IDS.connection,
+          purpose: "connect"
+        }] };
+      }
+      if (/UPDATE ia4tube_social\.social_connections/is.test(call.text)) {
+        return { rows: [{ id: IDS.connection, revision: 2 }], rowCount: 1 };
+      }
+      if (/INSERT INTO ia4tube_social\.social_audit_events/is.test(call.text)) {
+        return { rows: [{}], rowCount: 1 };
+      }
+      return { rows: [], rowCount: 0 };
+    });
+    const result = await createPostgresOAuthRepository({
+      pool,
+      runtimeRole: RUNTIME_ROLE
+    }).scope(CONTEXT_A).failAuthorizationConnection({
+      authorizationHandle: IDS.transaction,
+      connectionId: IDS.connection,
+      purpose: item.purpose,
+      expectedRevision: 1,
+      failureCode: item.failureCode,
+      terminalStatus: item.terminalStatus
+    });
+    assert.deepEqual(result, {
+      authorizationHandle: IDS.transaction,
+      connectionId: IDS.connection,
+      purpose: item.purpose,
+      terminalStatus: item.terminalStatus,
+      failureCode: item.failureCode,
+      status: item.status,
+      revision: 2
+    });
+    const calls = productCalls(pool);
+    const authorization = calls.find((call) =>
+      /FROM ia4tube_social\.social_oauth_transactions/is.test(call.text)
+    );
+    const connection = calls.find((call) =>
+      /UPDATE ia4tube_social\.social_connections/is.test(call.text)
+    );
+    assert.match(authorization.text, item.sql);
+    assert.match(authorization.text, /FOR UPDATE/i);
+    assert.match(connection.text, /SET status=\$4/i);
+    assert.match(connection.text, /status='authorization_pending'/i);
+    assert.match(connection.text, /revision=\$5/i);
+    assert.equal(connection.values[3], item.status);
+    assert.ok(calls.some((call) => call.values.includes(
+      item.status === "reconnect_required"
+        ? "to_reconnect_required"
+        : "to_failed"
+    )));
+    assert.ok(calls.some((call) => call.values.includes(item.failureCode)));
+    assert.equal(
+      calls.some((call) =>
+        /social_encrypted_credentials|social_external_accounts/i.test(call.text)
+      ),
+      false
+    );
+  }
+});
+
+test("failAuthorizationConnection rejects terminal mismatch without touching the connection", async () => {
+  const pool = createFakePool(async (call) => {
+    if (/FROM ia4tube_social\.social_oauth_transactions/is.test(call.text)) {
+      return { rows: [] };
+    }
+    return { rows: [], rowCount: 0 };
+  });
+  const repository = createPostgresOAuthRepository({
+    pool,
+    runtimeRole: RUNTIME_ROLE
+  }).scope(CONTEXT_A);
+  await assert.rejects(
+    repository.failAuthorizationConnection({
+      authorizationHandle: IDS.transaction,
+      connectionId: IDS.connection,
+      purpose: "connect",
+      expectedRevision: 1,
+      failureCode: "authorization_expired",
+      terminalStatus: "expired"
+    }),
+    { code: "authorization_expired" }
+  );
+  assert.equal(
+    productCalls(pool).some((call) =>
+      /UPDATE ia4tube_social\.social_connections/i.test(call.text)
+    ),
+    false
+  );
+  const callsBeforeInvalid = pool.calls.length;
+  await assert.rejects(
+    repository.failAuthorizationConnection({
+      authorizationHandle: IDS.transaction,
+      connectionId: IDS.connection,
+      purpose: "connect",
+      expectedRevision: 1,
+      failureCode: "provider_temporary_failure",
+      terminalStatus: "cancelled"
+    }),
+    { code: "connector_contract_invalid" }
+  );
+  assert.equal(pool.calls.length, callsBeforeInvalid);
 });
 
 test("audit appends only the approved structured allowlist with parameterized SQL", async () => {

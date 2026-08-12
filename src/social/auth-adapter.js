@@ -3,6 +3,9 @@
 const { postgresFail } = require("../persistence/postgres/errors");
 const { deriveSocialIdentity } = require("./identity");
 const {
+  isAuthenticatedInstagramOAuthState
+} = require("./oauth/instagram-state-envelope");
+const {
   SESSION_AUDIENCE,
   SESSION_ISSUER
 } = require("./reauth");
@@ -64,7 +67,31 @@ function createSocialAuthAdapter(identityConfig = {}) {
     return principal;
   }
 
-  return Object.freeze({ fromVerifiedJwt });
+  function fromAuthenticatedOAuthState(state) {
+    if (!isAuthenticatedInstagramOAuthState(state)) {
+      postgresFail(
+        "social_oauth_state_invalid",
+        "State OAuth Instagram recusado."
+      );
+    }
+    const principal = Object.freeze({
+      tokenVersion: null,
+      issuer: "ia4tube-social-oauth-state-v1",
+      audience: "instagram-oauth-callback",
+      subject: null,
+      jti: state.sessionJti,
+      companyId: state.companyId,
+      userId: state.userId,
+      derivationVersion: identityConfig.derivationVersion
+    });
+    AUTHENTICATED_SOCIAL_PRINCIPALS.add(principal);
+    return principal;
+  }
+
+  return Object.freeze({
+    fromAuthenticatedOAuthState,
+    fromVerifiedJwt
+  });
 }
 
 module.exports = {

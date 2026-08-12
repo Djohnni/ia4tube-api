@@ -44,6 +44,18 @@ const { postgresFail } = require("../persistence/postgres/errors");
 const {
   assertSocialSecretSeparation
 } = require("./secret-separation");
+const {
+  loadInstagramOAuthConfig
+} = require("./oauth/instagram-config");
+const {
+  createInstagramOAuthStateEnvelope
+} = require("./oauth/instagram-state-envelope");
+const {
+  createInstagramProvider
+} = require("./oauth/instagram-provider");
+const {
+  createInstagramOAuthService
+} = require("./oauth/instagram-oauth-service");
 
 function createDisabledRuntime() {
   return Object.freeze({
@@ -55,13 +67,35 @@ function createDisabledRuntime() {
 async function createSocialRuntime(options = {}) {
   const env = options.env || process.env;
   assertWebServiceDatabaseCredentialBoundary(env);
+  const instagramConfig = loadInstagramOAuthConfig(env);
   const config = loadRuntimePostgresConfig(env);
-  if (!config.enabled) return createDisabledRuntime();
+  if (!config.enabled) {
+    if (
+      instagramConfig.instagramEnabled ||
+      instagramConfig.externalConnectionEnabled
+    ) {
+      postgresFail(
+        "social_instagram_persistence_required",
+        "Persistencia social obrigatoria para OAuth Instagram."
+      );
+    }
+    return createDisabledRuntime();
+  }
+  if (
+    instagramConfig.externalConnectionEnabled &&
+    !instagramConfig.instagramEnabled
+  ) {
+    postgresFail(
+      "social_instagram_configuration_invalid",
+      "Configuracao OAuth Instagram recusada."
+    );
+  }
 
   let identityConfig;
   let vaultKeyring;
   let pool;
   let vault;
+  let instagramStateEnvelope;
   try {
     identityConfig = parseIdentityConfig(env);
     vaultKeyring = parseVaultKeyring(env);
@@ -97,21 +131,54 @@ async function createSocialRuntime(options = {}) {
       vault
     });
     const reauth = createSocialReauthService({ repository: social });
+    const oauthRepository = createPostgresOAuthRepository({
+      pool,
+      runtimeRole: config.role
+    });
     const connectorPersistence = Object.freeze({
       audit: createPostgresConnectorAudit({
         pool,
         runtimeRole: config.role
       }),
-      oauth: createPostgresOAuthRepository({
-        pool,
-        runtimeRole: config.role
-      }),
+      oauth: oauthRepository,
       store: createPostgresConnectorStore({
         pool,
         runtimeRole: config.role
       })
     });
     const authAdapter = createSocialAuthAdapter(identityConfig);
+    let instagramOAuth = null;
+    if (instagramConfig.enabled) {
+      instagramStateEnvelope = createInstagramOAuthStateEnvelope({
+        derivationKey: identityConfig.key,
+        keyVersion: identityConfig.derivationVersion,
+        redirectUri: instagramConfig.redirectUri,
+        clock: options.clock || Date.now,
+        randomBytes: options.randomBytes
+      });
+      const transport = options.instagramTransport || globalThis.fetch;
+      const instagramProvider = createInstagramProvider({
+        config: instagramConfig,
+        transport,
+        setTimeout: options.setTimeout,
+        clearTimeout: options.clearTimeout
+      });
+      instagramOAuth = createInstagramOAuthService({
+        config: instagramConfig,
+        stateEnvelope: instagramStateEnvelope,
+        provider: instagramProvider,
+        oauthRepository,
+        credentials,
+        authAdapter,
+        clock: options.clock || Date.now,
+        randomUUID: options.randomUUID,
+        environment: env.NODE_ENV === "test"
+          ? "test"
+          : env.NODE_ENV === "production"
+            ? "production"
+            : "staging"
+      });
+    }
     let closed = false;
     function assertOpen() {
       if (closed) {
@@ -126,6 +193,7 @@ async function createSocialRuntime(options = {}) {
       companies,
       connectorPersistence,
       credentials,
+      instagramOAuth,
       reauth,
       auth: Object.freeze({
         fromVerifiedJwt(claims) {
@@ -146,12 +214,14 @@ async function createSocialRuntime(options = {}) {
       async close() {
         if (closed) return;
         closed = true;
+        if (instagramStateEnvelope) instagramStateEnvelope.destroy();
         vault.destroy();
         identityConfig.key.fill(0);
         await closePostgresPool(pool);
       }
     });
   } catch (error) {
+    if (instagramStateEnvelope) instagramStateEnvelope.destroy();
     if (vault) vault.destroy();
     if (vaultKeyring) {
       for (const key of vaultKeyring.keys.values()) key.fill(0);

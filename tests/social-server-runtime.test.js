@@ -18,6 +18,7 @@ test("disabled social persistence preserves startup without creating a runtime",
     }
   });
   assert.equal(state.enabled, false);
+  assert.equal(state.instagramOAuth, null);
   assert.equal(createCalls, 0);
   await state.close();
   assert.equal(createCalls, 0);
@@ -99,6 +100,66 @@ test("enabled runtime must return a closeable initialized instance", async () =>
       env: { SOCIAL_PERSISTENCE_ENABLED: "true" },
       async createRuntime() {
         return { enabled: false };
+      }
+    }),
+    { code: "social_server_runtime_initialization_failed" }
+  );
+});
+
+test("server runtime exposes only the closed Instagram OAuth facade", async () => {
+  const facade = Object.freeze({
+    async authorize() {},
+    async callback() {}
+  });
+  const transport = async () => {};
+  const clock = () => 123;
+  const randomBytes = () => Buffer.alloc(32);
+  const randomUUID = () => "11111111-1111-4111-8111-111111111111";
+  const setTimer = () => 1;
+  const clearTimer = () => {};
+  let received;
+  const state = await initializeSocialServerRuntime({
+    env: { SOCIAL_PERSISTENCE_ENABLED: "true" },
+    instagramTransport: transport,
+    clock,
+    randomBytes,
+    randomUUID,
+    setTimeout: setTimer,
+    clearTimeout: clearTimer,
+    async createRuntime(options) {
+      received = options;
+      return {
+        enabled: true,
+        instagramOAuth: facade,
+        async close() {}
+      };
+    }
+  });
+  assert.equal(state.instagramOAuth, facade);
+  assert.equal(received.instagramTransport, transport);
+  assert.equal(received.clock, clock);
+  assert.equal(received.randomBytes, randomBytes);
+  assert.equal(received.randomUUID, randomUUID);
+  assert.equal(received.setTimeout, setTimer);
+  assert.equal(received.clearTimeout, clearTimer);
+  assert.deepEqual(Object.keys(state).sort(), [
+    "close",
+    "enabled",
+    "instagramOAuth"
+  ]);
+  await state.close();
+});
+
+test("server runtime refuses an incomplete Instagram OAuth facade", async () => {
+  await assert.rejects(
+    initializeSocialServerRuntime({
+      env: { SOCIAL_PERSISTENCE_ENABLED: "true" },
+      async createRuntime() {
+        return {
+          enabled: true,
+          instagramOAuth: { async authorize() {} },
+          async close() {}
+        };
       }
     }),
     { code: "social_server_runtime_initialization_failed" }

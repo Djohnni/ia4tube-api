@@ -9,6 +9,9 @@ const {
   installSocialRuntimeShutdown,
   safeErrorCode
 } = require("./src/social/server-runtime");
+const {
+  createInstagramOAuthRouter
+} = require("./src/social/oauth/instagram-oauth-router");
 
 const express = require("express");
 const cors = require("cors");
@@ -63,6 +66,7 @@ const { createPublicUrlConfig } = require("./src/config/public-urls");
 const { streamDirectoryZip } = require("./src/zip/zip-stream");
 
 const app = express();
+let socialRuntimeState = null;
 app.disable("x-powered-by");
 app.set("trust proxy", 1);
 
@@ -375,7 +379,7 @@ const clientUploadConcurrencyLimit = createConcurrencyLimiter({
   message: "Ja existe um envio de imagem em andamento."
 });
 
-app.use(["/auth", "/oauth"], (_req, res, next) => {
+app.use(["/auth", "/oauth", "/v1/social"], (_req, res, next) => {
   res.setHeader("Cache-Control", "no-store");
   res.setHeader("Pragma", "no-cache");
   return next();
@@ -401,6 +405,7 @@ const analyticsJsonParser = express.json({ limit: "256kb" });
 function isSecuritySensitiveBodyRoute(req) {
   const routePath = String(req.path || "").toLowerCase();
   return routePath === "/bot/mobile-analytics/login" ||
+    routePath === "/v1/social/connections/instagram/authorization" ||
     routePath === "/oauth" ||
     routePath.startsWith("/oauth/") ||
     routePath === "/auth" ||
@@ -470,7 +475,7 @@ const futureOauthRateLimit = createRateLimiter({
   keyGenerator: securityRateLimitKey,
   code: "oauth_rate_limit"
 });
-app.use(["/oauth", "/v1/social/oauth"], futureOauthRateLimit);
+app.use(["/oauth", "/v1/social"], futureOauthRateLimit);
 
 app.get(["/mobile_analytics.html", "/public/mobile_analytics.html"], (_req, res) => {
   res.setHeader("Cache-Control", "no-store");
@@ -1770,6 +1775,15 @@ function auth(req, res, next) {
     return res.status(401).json({ ok: false, error: "Token inválido" });
   }
 }
+
+app.use("/v1/social", createInstagramOAuthRouter({
+  authenticate: auth,
+  getService() {
+    return socialRuntimeState?.enabled
+      ? socialRuntimeState.instagramOAuth
+      : null;
+  }
+}));
 
 function botRunnerAuth(req, res, next) {
   const h = req.headers.authorization || "";
@@ -7979,7 +7993,6 @@ function startBackgroundTasks() {
 }
 
 async function startApiServer() {
-  let socialRuntimeState;
   try {
     socialRuntimeState = await initializeSocialServerRuntime({
       env: process.env,
