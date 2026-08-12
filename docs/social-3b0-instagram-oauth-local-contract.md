@@ -1,4 +1,4 @@
-# Social 3B-0 — validação remota do contrato OAuth local do Instagram
+# Social 3B-0 — Gate 3 replay e evidência remota do contrato OAuth local
 
 ## Base local preservada
 
@@ -11,11 +11,11 @@ funcional é `33e3ea7abcea7f5dc51780c3a1efd4743352fe40`, tem como pai imediato
 [social-3b0] implement local Instagram OAuth authorize callback exchange
 ```
 
-Esse commit contém exatamente os dezoito caminhos funcionais aprovados. O
-segundo commit não reescreve, altera, faz amend, rebase ou squash desse commit.
-Os guards deste segundo commit comparam o novo diff diretamente contra `33e3`;
-assim, alterações no produto, no contrato OAuth, no repositório, no cofre, em
-RLS, migrations, roles ou dependências são recusadas.
+Esse commit contém exatamente os dezoito caminhos funcionais aprovados. Os
+commits posteriores não reescrevem, alteram, fazem amend, rebase ou squash
+desse commit. Os guards preservam uma comparação independente com `33e3`;
+assim, alterações no produto, no contrato OAuth funcional, no repositório, no
+cofre, em RLS, migrations, roles ou dependências são recusadas.
 
 Os resultados locais já concluídos no snapshot funcional foram:
 
@@ -55,10 +55,51 @@ Seu inventário é fechado em exatamente nove caminhos literais:
 8. `tests/social-3b0-linux-physical-gate.test.js`;
 9. `tests/social-3b0-linux-workflow.test.js`.
 
-Não há prefixo, glob, diretório inteiro ou décimo caminho autorizado. Os três
-arquivos de escopo são alterados apenas para trocar a allowlist funcional pela
-allowlist literal deste commit de infraestrutura e para fixar `33e3` como a
-base do diff corrente.
+Não há prefixo, glob ou diretório inteiro autorizado nesse inventário. Esse
+commit foi executado uma única vez no run `31617802460`, attempt 1, que parou
+na primeira falha física do Gate 3, substep S11, com o código fechado
+`linux_gate_oauth_single_consumer_invalid`. Windows e o pré-gate Linux foram
+aprovados; G01 e G02 foram aprovados; G04, G05 e O01–O21 não foram executados;
+O22 concluiu o cleanup. O artifact histórico `9150034902` permanece
+inalterado. Nele `externalRenderCalls` estava ausente e deve ser reportado como
+indisponível, nunca inferido como zero.
+
+## Terceiro commit — correção fechada
+
+A nova rota pertence à branch exata
+`social/checkpoint-3b0-gate3-consumed-state-contract-20260812`, parte do commit
+`7bff67ac0c1acdd37473889a3f8b5c2017b30c9c` e usa a mensagem exata:
+
+```text
+[run-social-3b0] align Gate 3 replay and remote evidence contracts
+```
+
+Seu inventário é fechado em exatamente dez caminhos literais:
+
+1. `.github/workflows/social-3b0-instagram-oauth-local-contract.yml`;
+2. `docs/social-3b0-instagram-oauth-local-contract.md`;
+3. `scripts/social-3a0p-linux-physical-gates.js`;
+4. `scripts/social-3a0p-local-scope.js`;
+5. `scripts/social-3b0-linux-physical-gate.js`;
+6. `tests/social-3a0p-current-diff-scope.test.js`;
+7. `tests/social-3a0p-linux-physical-gates.test.js`;
+8. `tests/social-3a0p-local-scope.test.js`;
+9. `tests/social-3b0-linux-physical-gate.test.js`;
+10. `tests/social-3b0-linux-workflow.test.js`.
+
+Não há décimo primeiro caminho, prefixo, glob ou exceção de diretório. Os
+guards distinguem os dezoito caminhos funcionais de `33e3`, os nove caminhos
+de infraestrutura de `7bff` e os dez caminhos desta correção. O diff corrente
+usa `7bff` como base; a proteção de produto continua ancorada separadamente em
+`33e3`.
+
+O Gate 3 preserva S10 com dois consumidores concorrentes e
+`Promise.allSettled`. S11 exige um vencedor e um perdedor cujo código exato é
+`social_oauth_state_already_consumed`. O replay posterior no mesmo tenant em
+S12 exige o mesmo código específico. A tentativa cross-tenant em S12 continua
+exigindo `authorization_expired`, sem revelar a existência do state em outra
+empresa. A autorização realmente expirada em S16 também continua exigindo
+`authorization_expired`. O repositório OAuth funcional não é alterado.
 
 ## Workflow remoto separado
 
@@ -70,22 +111,21 @@ acionado somente pelo primeiro `push` da branch exata. Não há
 As permissões são somente `contents: read`, as Actions são fixadas por SHA
 completo, a concorrência é exclusiva da branch e `cancel-in-progress` é falso.
 
-O guard remoto deve aceitar somente `event=push`, criação da branch com
+O guard remoto deve aceitar somente `event=push`, criação da nova branch com
 `github.event.before` composto por quarenta zeros, `github.event.created=true`,
-`forced=false`, `deleted=false`, `run_attempt=1` e a mensagem exata do segundo
+`forced=false`, `deleted=false`, `run_attempt=1` e a mensagem exata do terceiro
 commit. A cadeia aceita é exclusivamente:
 
 ```text
 HEAD remoto
-  -> commit de infraestrutura
+  -> 7bff67ac0c1acdd37473889a3f8b5c2017b30c9c
   -> 33e3ea7abcea7f5dc51780c3a1efd4743352fe40
   -> 3dc3d8be62438216509f061f6c1a26ee39c9b5dc
 ```
 
 Cada commit deve ter exatamente um pai. O guard verifica os dezoito caminhos
-do commit funcional e os nove caminhos do commit de infraestrutura como
-inventários distintos; os dezoito caminhos não precisam reaparecer no segundo
-commit.
+do commit funcional, os nove caminhos do commit de infraestrutura anterior e
+os dez caminhos do commit corrente como inventários distintos.
 
 ## Jobs e limites operacionais
 
@@ -154,6 +194,16 @@ Gates 1–5 e O01–O22, contagens, primeira falha e estado de cleanup. State, c
 token, App Secret, identidades físicas, JTI, authorization handle, ciphertext,
 nonce, tag, AAD, URL de autorização, body, headers, stdout e stderr são
 proibidos.
+
+Todo artifact novo inclui obrigatoriamente os contadores inteiros seguros e
+não negativos `externalMetaCalls`, `externalInstagramCalls`,
+`externalGraphApiCalls`, `externalRenderCalls`, `externalPublicationCalls`,
+`publicationCalls` e `realTokenCount`. A aprovação exige exatamente zero em
+todos eles. `externalRenderCalls` é somente um contador: URL, host, domínio ou
+ID de serviço Render continuam proibidos. O campo também deve existir em
+evidência de falha e fallback sanitizado; ausência, `null`, string, valor
+negativo, valor não zero, nome aproximado ou campo sinônimo adicional são
+recusados.
 
 O cleanup é obrigatório também em falha e remove container, rede, volume,
 diretório temporário, banco, material sintético, arquivos intermediários,

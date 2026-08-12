@@ -1454,10 +1454,10 @@ async function runConcurrencyOAuthIdempotencyGate(state, sensitiveMarkers, depen
         oauthA.consumeAuthorization(consume)
       ]));
     await runGate3Substep("S11", "internal_validation", async () => {
-      exactRejection(consumers, 1, "linux_gate_oauth_single_consumer_invalid", "authorization_expired");
+      exactRejection(consumers, 1, "linux_gate_oauth_single_consumer_invalid", "social_oauth_state_already_consumed");
     });
     await runGate3Substep("S12", "postgres_concurrent_transactions", () => Promise.all([
-      expectErrorCode(() => oauthA.consumeAuthorization(consume), "authorization_expired", "linux_gate_oauth_replay_invalid"),
+      expectErrorCode(() => oauthA.consumeAuthorization(consume), "social_oauth_state_already_consumed", "linux_gate_oauth_replay_invalid"),
       expectErrorCode(() => oauthB.consumeAuthorization(consume), "authorization_expired", "linux_gate_oauth_cross_company_invalid")
     ]));
 

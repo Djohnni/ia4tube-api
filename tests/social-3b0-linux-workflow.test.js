@@ -32,11 +32,14 @@ const HISTORICAL_WORKFLOW_SHA256 =
   "92ea893458ce8125bde7e316ea7fdc8b72015245f132175ecf2b4037f512fff6";
 const HISTORICAL_WORKFLOW_BLOB = "7d66809ba2495aa6d2c4c8dc4d2f5ff03c991693";
 const BRANCH =
-  "social/checkpoint-3b0-instagram-oauth-local-contract-20260812";
+  "social/checkpoint-3b0-gate3-consumed-state-contract-20260812";
 const ZERO_SHA = "0000000000000000000000000000000000000000";
+const PRIOR_INFRA_COMMIT = "7bff67ac0c1acdd37473889a3f8b5c2017b30c9c";
 const FUNCTIONAL_COMMIT = "33e3ea7abcea7f5dc51780c3a1efd4743352fe40";
 const FUNCTIONAL_PARENT = "3dc3d8be62438216509f061f6c1a26ee39c9b5dc";
-const INFRA_MESSAGE =
+const CORRECTION_MESSAGE =
+  "[run-social-3b0] align Gate 3 replay and remote evidence contracts";
+const PRIOR_INFRA_MESSAGE =
   "[run-social-3b0] validate Instagram OAuth contract remotely";
 const FUNCTIONAL_MESSAGE =
   "[social-3b0] implement local Instagram OAuth authorize callback exchange";
@@ -58,7 +61,7 @@ const JOB_IF = [
   "github.event.deleted == false",
   "github.event.forced == false",
   `github.event.before == '${ZERO_SHA}'`,
-  `github.event.head_commit.message == '${INFRA_MESSAGE}'`,
+  `github.event.head_commit.message == '${CORRECTION_MESSAGE}'`,
   "github.run_attempt == 1"
 ].join(" && ");
 const FUNCTIONAL_FILES = Object.freeze([
@@ -81,7 +84,7 @@ const FUNCTIONAL_FILES = Object.freeze([
   "tests/social-connector-persistence.test.js",
   "tests/social-server-runtime.test.js"
 ]);
-const INFRASTRUCTURE_FILES = Object.freeze([
+const PRIOR_INFRASTRUCTURE_FILES = Object.freeze([
   ".github/workflows/social-3b0-instagram-oauth-local-contract.yml",
   "docs/social-3b0-instagram-oauth-local-contract.md",
   "scripts/social-3b0-linux-physical-gate.js",
@@ -91,6 +94,18 @@ const INFRASTRUCTURE_FILES = Object.freeze([
   "scripts/social-3a0p-local-scope.js",
   "tests/social-3a0p-local-scope.test.js",
   "tests/social-3a0p-current-diff-scope.test.js"
+]);
+const CURRENT_CORRECTION_FILES = Object.freeze([
+  ".github/workflows/social-3b0-instagram-oauth-local-contract.yml",
+  "docs/social-3b0-instagram-oauth-local-contract.md",
+  "scripts/social-3a0p-linux-physical-gates.js",
+  "scripts/social-3a0p-local-scope.js",
+  "scripts/social-3b0-linux-physical-gate.js",
+  "tests/social-3a0p-current-diff-scope.test.js",
+  "tests/social-3a0p-linux-physical-gates.test.js",
+  "tests/social-3a0p-local-scope.test.js",
+  "tests/social-3b0-linux-physical-gate.test.js",
+  "tests/social-3b0-linux-workflow.test.js"
 ]);
 const PRE_GATE_TEST_FILES = Object.freeze([
   "tests/social-3b0-instagram-oauth-crypto-provider.test.js",
@@ -228,13 +243,18 @@ test("all Actions are full-SHA pinned and artifact upload occurs once", () => {
   assert.equal(uses.filter((value) => value === ACTIONS.uploadArtifact).length, 1);
 });
 
-test("both jobs enforce the first immutable push and the exact two-commit chain", () => {
+test("both jobs enforce the first immutable push and the exact three-commit correction chain", () => {
   const windows = WORKFLOW.jobs["windows-automated-tests"];
   const linux = WORKFLOW.jobs["linux-physical-validation"];
+  assert.equal(FUNCTIONAL_FILES.length, 18);
+  assert.equal(PRIOR_INFRASTRUCTURE_FILES.length, 9);
+  assert.equal(CURRENT_CORRECTION_FILES.length, 10);
   assert.deepEqual(WORKFLOW.env, {
+    SOCIAL_3B0_PRIOR_INFRA_COMMIT: PRIOR_INFRA_COMMIT,
     SOCIAL_3B0_FUNCTIONAL_COMMIT: FUNCTIONAL_COMMIT,
     SOCIAL_3B0_FUNCTIONAL_PARENT: FUNCTIONAL_PARENT,
-    SOCIAL_3B0_INFRA_MESSAGE: INFRA_MESSAGE,
+    SOCIAL_3B0_CORRECTION_MESSAGE: CORRECTION_MESSAGE,
+    SOCIAL_3B0_PRIOR_INFRA_MESSAGE: PRIOR_INFRA_MESSAGE,
     SOCIAL_3B0_FUNCTIONAL_MESSAGE: FUNCTIONAL_MESSAGE,
     SOCIAL_3B0_FUNCTIONAL_PARENT_MESSAGE: FUNCTIONAL_PARENT_MESSAGE
   });
@@ -246,30 +266,48 @@ test("both jobs enforce the first immutable push and the exact two-commit chain"
   assert.equal(linux.needs, "windows-automated-tests");
 
   const guards = [
-    step(windows, "Verify the immutable two-commit execution contract").run,
-    step(linux, "Verify the immutable two-commit execution contract").run
+    step(windows, "Verify the immutable three-commit correction contract").run,
+    step(linux, "Verify the immutable three-commit correction contract").run
   ];
   assert.deepEqual(
     extractSingleQuotedLines(
       guards[0],
-      "$infrastructureFiles = @(\n",
-      ")\nAssert-Equal"
+      "$priorInfrastructureFiles = @(\n",
+      ")\n$currentCorrectionFiles = @("
     ),
-    INFRASTRUCTURE_FILES
+    PRIOR_INFRASTRUCTURE_FILES
   );
   assert.deepEqual(
     extractSingleQuotedLines(
       guards[1],
-      "infrastructure_files=(\n",
+      "prior_infrastructure_files=(\n",
+      ")\ncurrent_correction_files=("
+    ),
+    PRIOR_INFRASTRUCTURE_FILES
+  );
+  assert.deepEqual(
+    extractSingleQuotedLines(
+      guards[0],
+      "$currentCorrectionFiles = @(\n",
+      ")\nAssert-Equal"
+    ),
+    CURRENT_CORRECTION_FILES
+  );
+  assert.deepEqual(
+    extractSingleQuotedLines(
+      guards[1],
+      "current_correction_files=(\n",
       ")\ntest \"$AUTHORIZED_ATTEMPT\""
     ),
-    INFRASTRUCTURE_FILES
+    CURRENT_CORRECTION_FILES
   );
   for (const guard of guards) {
     for (const value of [
+      "SOCIAL_3B0_PRIOR_INFRA_COMMIT",
       "SOCIAL_3B0_FUNCTIONAL_COMMIT",
       "SOCIAL_3B0_FUNCTIONAL_PARENT",
-      "SOCIAL_3B0_INFRA_MESSAGE",
+      "SOCIAL_3B0_CORRECTION_MESSAGE",
+      "SOCIAL_3B0_PRIOR_INFRA_MESSAGE",
       "SOCIAL_3B0_FUNCTIONAL_MESSAGE",
       "SOCIAL_3B0_FUNCTIONAL_PARENT_MESSAGE",
       HISTORICAL_WORKFLOW_BLOB
@@ -277,7 +315,8 @@ test("both jobs enforce the first immutable push and the exact two-commit chain"
       assert.ok(guard.includes(value));
     }
     for (const file of FUNCTIONAL_FILES) assert.ok(guard.includes(file));
-    for (const file of INFRASTRUCTURE_FILES) assert.ok(guard.includes(file));
+    for (const file of PRIOR_INFRASTRUCTURE_FILES) assert.ok(guard.includes(file));
+    for (const file of CURRENT_CORRECTION_FILES) assert.ok(guard.includes(file));
     for (const file of [
       HISTORICAL_WORKFLOW_RELATIVE_PATH,
       "db/migrations",
@@ -294,16 +333,46 @@ test("both jobs enforce the first immutable push and the exact two-commit chain"
   }
   assert.match(
     guards[0],
+    /rev-list', '--count',[^\n]+SOCIAL_3B0_FUNCTIONAL_PARENT[^\n]+HEAD[^\n]+\)\) '3'/
+  );
+  assert.match(
+    guards[1],
+    /rev-list --count [^\n]+SOCIAL_3B0_FUNCTIONAL_PARENT[^\n]+HEAD[^\n]+ = '3'/
+  );
+  for (const fragment of [
+    "@('rev-parse', 'HEAD^')) $env:SOCIAL_3B0_PRIOR_INFRA_COMMIT",
+    "@('rev-parse', \"$($env:SOCIAL_3B0_PRIOR_INFRA_COMMIT)^\")) $env:SOCIAL_3B0_FUNCTIONAL_COMMIT",
+    "@('rev-parse', \"$($env:SOCIAL_3B0_FUNCTIONAL_COMMIT)^\")) $env:SOCIAL_3B0_FUNCTIONAL_PARENT",
+    "@('log', '-1', '--pretty=%B')) $env:SOCIAL_3B0_CORRECTION_MESSAGE",
+    "@('log', '-1', '--pretty=%B', $env:SOCIAL_3B0_PRIOR_INFRA_COMMIT)) $env:SOCIAL_3B0_PRIOR_INFRA_MESSAGE"
+  ]) assert.ok(guards[0].includes(fragment), fragment);
+  for (const fragment of [
+    "git rev-parse HEAD^)\" = \"$SOCIAL_3B0_PRIOR_INFRA_COMMIT",
+    "git rev-parse \"$SOCIAL_3B0_PRIOR_INFRA_COMMIT^\")\" = \"$SOCIAL_3B0_FUNCTIONAL_COMMIT",
+    "git rev-parse \"$SOCIAL_3B0_FUNCTIONAL_COMMIT^\")\" = \"$SOCIAL_3B0_FUNCTIONAL_PARENT",
+    "git log -1 --pretty=%B)\" = \"$SOCIAL_3B0_CORRECTION_MESSAGE",
+    "git log -1 --pretty=%B \"$SOCIAL_3B0_PRIOR_INFRA_COMMIT\")\" = \"$SOCIAL_3B0_PRIOR_INFRA_MESSAGE"
+  ]) assert.ok(guards[1].includes(fragment), fragment);
+  assert.match(
+    guards[0],
     /Assert-RegularBlobs \$env:SOCIAL_3B0_FUNCTIONAL_COMMIT \$functionalFiles/
   );
-  assert.match(guards[0], /Assert-RegularBlobs 'HEAD' \$infrastructureFiles/);
+  assert.match(
+    guards[0],
+    /Assert-RegularBlobs \$env:SOCIAL_3B0_PRIOR_INFRA_COMMIT \$priorInfrastructureFiles/
+  );
+  assert.match(guards[0], /Assert-RegularBlobs 'HEAD' \$currentCorrectionFiles/);
   assert.match(
     guards[1],
     /assert_regular_blobs "\$SOCIAL_3B0_FUNCTIONAL_COMMIT" "\$\{functional_files\[@\]\}"/
   );
   assert.match(
     guards[1],
-    /assert_regular_blobs HEAD "\$\{infrastructure_files\[@\]\}"/
+    /assert_regular_blobs "\$SOCIAL_3B0_PRIOR_INFRA_COMMIT" "\$\{prior_infrastructure_files\[@\]\}"/
+  );
+  assert.match(
+    guards[1],
+    /assert_regular_blobs HEAD "\$\{current_correction_files\[@\]\}"/
   );
 });
 
@@ -476,6 +545,7 @@ test("evidence approval is fail-closed, hash-bound, and preserves safe failure e
     "evidence.externalMetaCalls === 0",
     "evidence.externalInstagramCalls === 0",
     "evidence.externalGraphApiCalls === 0",
+    "evidence.externalRenderCalls === 0",
     "evidence.externalPublicationCalls === 0",
     "evidence.publicationCalls === 0",
     "evidence.realTokenCount === 0",
@@ -488,6 +558,10 @@ test("evidence approval is fail-closed, hash-bound, and preserves safe failure e
   ]) {
     assert.ok(evidence.run.includes(fragment));
   }
+  assert.equal(
+    occurrences(evidence.run, "evidence.externalRenderCalls === 0"),
+    1
+  );
   assert.equal(
     occurrences(evidence.run, "String(index + 1).padStart(2, '0')"),
     1

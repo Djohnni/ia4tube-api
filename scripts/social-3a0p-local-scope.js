@@ -5,10 +5,11 @@ const path = require("node:path");
 const ALLOWED_EXACT_FILES = new Set([
   ".github/workflows/social-3b0-instagram-oauth-local-contract.yml",
   "docs/social-3b0-instagram-oauth-local-contract.md",
+  "scripts/social-3a0p-linux-physical-gates.js",
   "scripts/social-3a0p-local-scope.js",
   "scripts/social-3b0-linux-physical-gate.js",
   "tests/social-3a0p-current-diff-scope.test.js",
-  "tests/social-3a0p-linux-workflow.test.js",
+  "tests/social-3a0p-linux-physical-gates.test.js",
   "tests/social-3a0p-local-scope.test.js",
   "tests/social-3b0-linux-physical-gate.test.js",
   "tests/social-3b0-linux-workflow.test.js"

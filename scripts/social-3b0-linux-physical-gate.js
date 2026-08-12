@@ -11,7 +11,7 @@ const tls = require("node:tls");
 const path = require("node:path");
 
 const BRANCH =
-  "social/checkpoint-3b0-instagram-oauth-local-contract-20260812";
+  "social/checkpoint-3b0-gate3-consumed-state-contract-20260812";
 const PHASE = "instagram_oauth_local_contract";
 const IMAGE =
   "docker.io/library/postgres:18.4-bookworm@" +
@@ -106,6 +106,7 @@ const EVIDENCE_KEYS = Object.freeze([
   "externalInstagramCalls",
   "externalMetaCalls",
   "externalPublicationCalls",
+  "externalRenderCalls",
   "firstFailure",
   "format",
   "gates1To5",
@@ -367,10 +368,12 @@ function evidenceSafe(candidate) {
     "externalInstagramCalls",
     "externalMetaCalls",
     "externalPublicationCalls",
+    "externalRenderCalls",
     "publicationCalls",
     "realTokenCount"
   ]) {
-    if (candidate[key] !== 0) return false;
+    const value = candidate[key];
+    if (!Number.isSafeInteger(value) || value < 0 || value !== 0) return false;
   }
   if (candidate.status === "passed") {
     if (
@@ -1309,6 +1312,7 @@ async function runPhysicalOAuthContract(options = {}) {
     instagram: 0,
     meta: 0,
     publication: 0,
+    render: 0,
     realTokens: 0
   };
   const readers = new Set();
@@ -2221,6 +2225,7 @@ async function runPhysicalOAuthContract(options = {}) {
       external.instagram = network.externalConnections;
       external.meta = network.externalConnections;
       external.publication = network.externalConnections;
+      external.render = network.externalConnections;
       counts.publicationCalls = 0;
     });
     await ledger.run("O21", async () => {
@@ -2383,6 +2388,7 @@ function baseEvidence(identity) {
     externalInstagramCalls: 0,
     externalGraphApiCalls: 0,
     externalPublicationCalls: 0,
+    externalRenderCalls: 0,
     realTokenCount: 0,
     publicationCalls: 0,
     status: "failed"
@@ -2449,6 +2455,7 @@ async function runInstagramOAuthPhysicalGate(options = {}) {
     evidence.externalInstagramCalls = oauth.external.instagram;
     evidence.externalGraphApiCalls = oauth.external.graph;
     evidence.externalPublicationCalls = oauth.external.publication;
+    evidence.externalRenderCalls = oauth.external.render;
     evidence.realTokenCount = oauth.external.realTokens;
     evidence.publicationCalls = oauth.counts.publicationCalls;
     evidence.secretScan = Object.freeze({

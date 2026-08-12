@@ -91,7 +91,7 @@ function fakeChild({ exitCode = 1, emitSpawn = true } = {}) {
 test("Social 3B physical gate freezes branch, phase, image and bounded budgets", () => {
   assert.equal(
     gate.BRANCH,
-    "social/checkpoint-3b0-instagram-oauth-local-contract-20260812"
+    "social/checkpoint-3b0-gate3-consumed-state-contract-20260812"
   );
   assert.equal(gate.PHASE, "instagram_oauth_local_contract");
   assert.equal(
@@ -136,8 +136,15 @@ test("remote environment requires every external runtime gate to remain exactly 
 });
 
 test("evidence contract requires exact Gates, O01-O22, counts, scans and zero residuals", () => {
+  const base = gate.baseEvidence({
+    branch: gate.BRANCH,
+    sha: SHA,
+    runAttempt: 1
+  });
+  assert.equal(base.externalRenderCalls, 0);
   const evidence = passedEvidence();
   assert.equal(gate.evidenceSafe(evidence), true);
+  assert.equal(evidence.externalRenderCalls, 0);
 
   for (const secretScan of [
     { status: "passed", historicPhysicalPassed: false, oauthEvidencePassed: true },
@@ -168,6 +175,35 @@ test("evidence contract requires exact Gates, O01-O22, counts, scans and zero re
   assert.equal(gate.evidenceSafe({
     ...evidence,
     state: crypto.randomBytes(24).toString("base64url")
+  }), false);
+});
+
+test("external render evidence rejects missing, malformed, nonzero and aliased counters", () => {
+  const evidence = passedEvidence();
+  const missing = { ...evidence };
+  delete missing.externalRenderCalls;
+  assert.equal(gate.evidenceSafe(missing), false);
+
+  for (const externalRenderCalls of [
+    null,
+    "0",
+    -1,
+    1,
+    Number.MAX_SAFE_INTEGER + 1
+  ]) {
+    assert.equal(gate.evidenceSafe({
+      ...evidence,
+      externalRenderCalls
+    }), false);
+  }
+
+  assert.equal(gate.evidenceSafe({
+    ...missing,
+    externalRendererCalls: 0
+  }), false);
+  assert.equal(gate.evidenceSafe({
+    ...evidence,
+    renderCalls: 0
   }), false);
 });
 
@@ -426,6 +462,7 @@ test("worker crash still publishes exactly four sanitized files after measured c
     assert.equal(evidence.cleanup.cleanupCompleted, true);
     assert.deepEqual(evidence.residuals, gate.zeroResiduals());
     assert.equal(evidence.substeps[21].status, "passed");
+    assert.equal(evidence.externalRenderCalls, 0);
     gate.verifySidecar(outputPath, path.join(directory, gate.EVIDENCE_HASH_FILE));
     gate.verifySidecar(
       processStatusPath,
@@ -495,6 +532,7 @@ test("compensating cleanup failure downgrades passed worker evidence and O22", a
     assert.equal(evidence.cleanup.cleanupCompleted, false);
     assert.equal(evidence.residuals.timers, 1);
     assert.equal(evidence.substeps[21].status, "failed");
+    assert.equal(evidence.externalRenderCalls, 0);
   } finally {
     fs.rmSync(runnerTemp, { recursive: true, force: true });
   }
@@ -579,6 +617,7 @@ test("historic Gate failure preserves its first cause and never starts the OAuth
     assert.equal(evidence.firstFailure.lastCompletedSubstep, "vault");
     assert.deepEqual(evidence.backupRestoreFailureProvenance, provenance);
     assert.equal(evidence.substeps.every((entry) => entry.status === "skipped"), true);
+    assert.equal(evidence.externalRenderCalls, 0);
   } finally {
     fs.rmSync(runnerTemp, { recursive: true, force: true });
   }
@@ -605,6 +644,7 @@ test("source keeps the physical O01-O22 proofs and closed cleanup interfaces", (
     "scanDataDirectoryMarkers",
     "installApplicationNetworkGuard",
     "social_3b0_non_loopback_network_refused",
+    "external.render = network.externalConnections",
     "secret_scan",
     "cleanupInstagramOAuthPhysicalGate",
     "artifactDirectoryRemoved"

@@ -26,6 +26,8 @@ const OWNER_ROLE = "ia4tube_social_owner";
 const PROVISIONER_LOGIN = "ia4tube_social_local_provisioner";
 const RUNTIME_LOGIN = "ia4tube_social_local_runtime";
 const RUNTIME_ROLE = "ia4tube_social_runtime";
+const OAUTH_CONSUMED_STATE_CODE = "social_oauth_state_already_consumed";
+const OAUTH_EXPIRED_CODE = "authorization_expired";
 
 const SUPPLEMENTAL_GATE3_SUBSTEPS = Object.freeze([
   ["S1", "supplemental_tenant_create", "internal_setup"],
@@ -451,10 +453,31 @@ async function withSupplementalGate3Doubles(operation, options = {}) {
     transactions: [],
     queries: [],
     connectorCalls: [],
-    oauthCalls: []
+    oauthCalls: [],
+    oauthOutcomes: []
   };
   const snapshot = (value) => JSON.parse(JSON.stringify(value));
   const postgresRefusal = (code) => Object.assign(new Error("synthetic refusal"), { code });
+  const hasOwn = (value, key) => Object.prototype.hasOwnProperty.call(value, key);
+  const configuredCode = (name, fallback) => hasOwn(options, name) ? options[name] : fallback;
+  const s10ConsumerOutcomes = options.s10ConsumerOutcomes || [
+    Object.freeze({ status: "fulfilled" }),
+    Object.freeze({ status: "rejected", code: OAUTH_CONSUMED_STATE_CODE })
+  ];
+  const settleOAuthConsume = (tenant, outcome) => {
+    if (outcome?.status === "fulfilled") {
+      observations.oauthOutcomes.push({ tenant, status: "fulfilled" });
+      return Object.freeze({ status: "consumed" });
+    }
+    const refusal = new Error("synthetic refusal");
+    const observed = { tenant, status: "rejected" };
+    if (hasOwn(outcome || {}, "code")) {
+      refusal.code = outcome.code;
+      observed.code = outcome.code;
+    }
+    observations.oauthOutcomes.push(observed);
+    throw refusal;
+  };
   const state = {
     pools: {
       migration: Object.freeze({ label: "migration" }),
@@ -464,8 +487,10 @@ async function withSupplementalGate3Doubles(operation, options = {}) {
   let winningConnectionId;
   let reservationCall = 0;
   let connectorScope = 0;
-  let oauthConsumeCall = 0;
+  let s10ConsumeCall = 0;
   let oauthScope = 0;
+  let primaryAuthorizationHandle;
+  let expiredAuthorizationHandle;
   let publicationRaceCall = 0;
   let publicationCompleted = false;
   let randomCall = 0;
@@ -560,6 +585,11 @@ async function withSupplementalGate3Doubles(operation, options = {}) {
             tenant,
             arguments: snapshot([input])
           });
+          if (tenant === "a" && primaryAuthorizationHandle === undefined) {
+            primaryAuthorizationHandle = input.authorizationHandle;
+          } else if (tenant === "a" && input.authorizationHandle !== primaryAuthorizationHandle) {
+            expiredAuthorizationHandle = input.authorizationHandle;
+          }
           return true;
         },
         async consumeAuthorization(input) {
@@ -568,9 +598,36 @@ async function withSupplementalGate3Doubles(operation, options = {}) {
             tenant,
             arguments: snapshot([input])
           });
-          oauthConsumeCall += 1;
-          if (oauthConsumeCall === 1) return Object.freeze({ status: "consumed" });
-          throw postgresRefusal("authorization_expired");
+          if (tenant === "b") {
+            return settleOAuthConsume(tenant, {
+              status: "rejected",
+              code: configuredCode("crossTenantCode", OAUTH_EXPIRED_CODE)
+            });
+          }
+          if (
+            expiredAuthorizationHandle !== undefined &&
+            input.authorizationHandle === expiredAuthorizationHandle
+          ) {
+            return settleOAuthConsume(tenant, {
+              status: "rejected",
+              code: configuredCode("expiredCode", OAUTH_EXPIRED_CODE)
+            });
+          }
+          if (input.authorizationHandle === primaryAuthorizationHandle && s10ConsumeCall < 2) {
+            const outcome = s10ConsumerOutcomes[s10ConsumeCall];
+            s10ConsumeCall += 1;
+            return settleOAuthConsume(tenant, outcome);
+          }
+          if (input.authorizationHandle === primaryAuthorizationHandle) {
+            return settleOAuthConsume(tenant, {
+              status: "rejected",
+              code: configuredCode("sameTenantReplayCode", OAUTH_CONSUMED_STATE_CODE)
+            });
+          }
+          return settleOAuthConsume(tenant, {
+            status: "rejected",
+            code: OAUTH_EXPIRED_CODE
+          });
         }
       });
     }
@@ -2479,6 +2536,245 @@ test("supplemental Gate 3 exposes every closed S1-S30 pass-through boundary", ()
   assert.match(source, /runGate3Substep\("S12", "postgres_concurrent_transactions", \(\) => Promise\.all\(\[/);
   assert.match(source, /runGate3Substep\("S22", "postgres_concurrent_transactions", \(\) =>\s*Promise\.all\(\[/);
   assert.equal((source.match(/runGate3Substep\("S(?:[1-9]|[12][0-9]|30)"/g) || []).length, 30);
+});
+
+test("S10-S12 source closes the consumed-state, cross-tenant and expiry code boundaries", () => {
+  const source = supplementalGate3Source();
+  const s10 = supplementalSubstepSource(source, "S10", "S11");
+  const s11 = supplementalSubstepSource(source, "S11", "S12");
+  const s12 = supplementalSubstepSource(source, "S12", "S13");
+  const s16 = supplementalSubstepSource(source, "S16", "S17");
+  const closedContract = [s10, s11, s12].join("\n");
+  const exactRejectionSource = source.slice(
+    source.indexOf("function exactRejection"),
+    source.indexOf("async function expectErrorCode")
+  );
+  const expectErrorCodeSource = source.slice(
+    source.indexOf("async function expectErrorCode"),
+    source.indexOf("function requireSubstepRunner")
+  );
+
+  assert.match(s10, /Promise\.allSettled\(\[/);
+  assert.equal((s10.match(/oauthA\.consumeAuthorization\(consume\)/g) || []).length, 2);
+  assert.doesNotMatch(s10, /oauthB\.consumeAuthorization/);
+  assert.match(
+    s11,
+    /exactRejection\(consumers, 1, "linux_gate_oauth_single_consumer_invalid", "social_oauth_state_already_consumed"\)/
+  );
+  assert.doesNotMatch(s11, /"authorization_expired"/);
+  assert.match(
+    s12,
+    /expectErrorCode\(\(\) => oauthA\.consumeAuthorization\(consume\), "social_oauth_state_already_consumed", "linux_gate_oauth_replay_invalid"\)/
+  );
+  assert.match(
+    s12,
+    /expectErrorCode\(\(\) => oauthB\.consumeAuthorization\(consume\), "authorization_expired", "linux_gate_oauth_cross_company_invalid"\)/
+  );
+  assert.equal((closedContract.match(/"social_oauth_state_already_consumed"/g) || []).length, 2);
+  assert.equal((closedContract.match(/"authorization_expired"/g) || []).length, 1);
+  assert.doesNotMatch(
+    closedContract,
+    /\.(?:includes|startsWith|endsWith|match|test)\s*\(|\bRegExp\b|\bnew\s+Set\b|\bcatch\b|\|\|/
+  );
+  assert.match(exactRejectionSource, /item\.reason\?\.code === rejectedCode/);
+  assert.match(expectErrorCodeSource, /if \(error\?\.code === expected\) return true;\s*fail\(code\);/);
+  assert.doesNotMatch(
+    `${exactRejectionSource}\n${expectErrorCodeSource}`,
+    /\.(?:includes|startsWith|endsWith|match|test)\s*\(|\bRegExp\b|\bnew\s+Set\b/
+  );
+  assert.match(s16, /"authorization_expired"/);
+  assert.doesNotMatch(s16, /"social_oauth_state_already_consumed"/);
+});
+
+test("S10-S12 synthetic contract permits either winner and preserves every exact refusal context", async () => {
+  const raceOrders = [
+    [
+      { status: "fulfilled" },
+      { status: "rejected", code: OAUTH_CONSUMED_STATE_CODE }
+    ],
+    [
+      { status: "rejected", code: OAUTH_CONSUMED_STATE_CODE },
+      { status: "fulfilled" }
+    ]
+  ];
+
+  for (const s10ConsumerOutcomes of raceOrders) {
+    const execution = await executeSupplementalGate3({
+      s10ConsumerOutcomes,
+      runGate3Substep: (_substep, _operationClass, operation) => operation()
+    });
+    const oauthCreates = execution.observations.oauthCalls.filter(
+      ({ method }) => method === "createAuthorization"
+    );
+    const oauthConsumes = execution.observations.oauthCalls.filter(
+      ({ method }) => method === "consumeAuthorization"
+    );
+    const primaryHandle = oauthCreates[0].arguments[0].authorizationHandle;
+    const expiredHandle = oauthCreates[1].arguments[0].authorizationHandle;
+    const expectedRaceOutcomes = s10ConsumerOutcomes.map((outcome) => outcome.status === "fulfilled"
+      ? { tenant: "a", status: "fulfilled" }
+      : { tenant: "a", status: "rejected", code: outcome.code });
+
+    assert.equal(execution.didThrow, false);
+    assert.deepEqual(execution.result, SUPPLEMENTAL_GATE3_RESULT);
+    assert.equal(JSON.stringify(execution.result), JSON.stringify(SUPPLEMENTAL_GATE3_RESULT));
+    assert.equal(execution.result.externalCalls, 0);
+    assert.equal(Object.isFrozen(execution.result), true);
+    assert.deepEqual(
+      execution.runnerCalls.map(({ substep }) => substep),
+      SUPPLEMENTAL_GATE3_SUBSTEPS.map(([substep]) => substep)
+    );
+    assert.deepEqual(
+      [...execution.operationCounts.entries()],
+      SUPPLEMENTAL_GATE3_SUBSTEPS.map(([substep]) => [substep, 1])
+    );
+    assert.equal(oauthCreates.length, 2);
+    assert.equal(oauthCreates.every(({ tenant }) => tenant === "a"), true);
+    assert.equal(execution.observations.oauthCalls.some(
+      ({ method, tenant }) => method === "createAuthorization" && tenant === "b"
+    ), false);
+    assert.equal(oauthConsumes.length, 5);
+    assert.deepEqual(oauthConsumes.map(({ tenant }) => tenant), ["a", "a", "a", "b", "a"]);
+    assert.deepEqual(
+      oauthConsumes.map(({ arguments: [input] }) => input.authorizationHandle),
+      [primaryHandle, primaryHandle, primaryHandle, primaryHandle, expiredHandle]
+    );
+    assert.deepEqual(oauthConsumes[2].arguments[0], oauthConsumes[3].arguments[0]);
+    assert.deepEqual(execution.observations.oauthOutcomes, [
+      ...expectedRaceOutcomes,
+      { tenant: "a", status: "rejected", code: OAUTH_CONSUMED_STATE_CODE },
+      { tenant: "b", status: "rejected", code: OAUTH_EXPIRED_CODE },
+      { tenant: "a", status: "rejected", code: OAUTH_EXPIRED_CODE }
+    ]);
+    assert.equal(
+      execution.observations.oauthOutcomes[3].code === OAUTH_CONSUMED_STATE_CODE,
+      false
+    );
+    assert.equal(execution.identityKey.every((byte) => byte === 0), true);
+  }
+});
+
+test("S10-S12 S11 rejects every non-exact race result and still performs S30", async (context) => {
+  const scenarios = [
+    {
+      name: "both consumers win",
+      outcomes: [{ status: "fulfilled" }, { status: "fulfilled" }]
+    },
+    {
+      name: "both consumers fail",
+      outcomes: [
+        { status: "rejected", code: OAUTH_CONSUMED_STATE_CODE },
+        { status: "rejected", code: OAUTH_CONSUMED_STATE_CODE }
+      ]
+    },
+    {
+      name: "the loser returns authorization_expired",
+      outcomes: [
+        { status: "fulfilled" },
+        { status: "rejected", code: OAUTH_EXPIRED_CODE }
+      ]
+    },
+    {
+      name: "the loser returns an unknown code",
+      outcomes: [
+        { status: "fulfilled" },
+        { status: "rejected", code: "social_oauth_state_unknown" }
+      ]
+    },
+    {
+      name: "the loser has no code property",
+      outcomes: [{ status: "fulfilled" }, { status: "rejected" }]
+    },
+    {
+      name: "the loser returns a prefixed impostor",
+      outcomes: [
+        { status: "fulfilled" },
+        { status: "rejected", code: `${OAUTH_CONSUMED_STATE_CODE}_extra` }
+      ]
+    }
+  ];
+
+  for (const scenario of scenarios) {
+    await context.test(scenario.name, async () => {
+      const execution = await executeSupplementalGate3({
+        s10ConsumerOutcomes: scenario.outcomes,
+        runGate3Substep: (_substep, _operationClass, operation) => operation()
+      });
+      const steps = execution.runnerCalls.map(({ substep }) => substep);
+
+      assert.equal(execution.didThrow, true);
+      assert.equal(execution.thrown?.code, "linux_gate_oauth_single_consumer_invalid");
+      assert.deepEqual(steps.slice(-2), ["S11", "S30"]);
+      assert.equal(steps.includes("S12"), false);
+      assert.equal(execution.operationCounts.get("S10"), 1);
+      assert.equal(execution.operationCounts.get("S11"), 1);
+      assert.equal(execution.operationCounts.has("S12"), false);
+      assert.equal(execution.operationCounts.get("S30"), 1);
+      assert.equal(execution.observations.oauthOutcomes.length, 2);
+      assert.equal(execution.identityKey.every((byte) => byte === 0), true);
+    });
+  }
+});
+
+test("S10-S12 refuses same-tenant and cross-tenant code swaps without disclosure", async (context) => {
+  const scenarios = [
+    {
+      name: "same-tenant consumed replay cannot collapse to authorization_expired",
+      options: { sameTenantReplayCode: OAUTH_EXPIRED_CODE },
+      failureCode: "linux_gate_oauth_replay_invalid"
+    },
+    {
+      name: "cross-tenant lookup cannot reveal a consumed authorization",
+      options: { crossTenantCode: OAUTH_CONSUMED_STATE_CODE },
+      failureCode: "linux_gate_oauth_cross_company_invalid"
+    }
+  ];
+
+  for (const scenario of scenarios) {
+    await context.test(scenario.name, async () => {
+      const execution = await executeSupplementalGate3({
+        ...scenario.options,
+        runGate3Substep: (_substep, _operationClass, operation) => operation()
+      });
+      const steps = execution.runnerCalls.map(({ substep }) => substep);
+      const oauthConsumes = execution.observations.oauthCalls.filter(
+        ({ method }) => method === "consumeAuthorization"
+      );
+
+      assert.equal(execution.didThrow, true);
+      assert.equal(execution.thrown?.code, scenario.failureCode);
+      assert.deepEqual(steps.slice(-2), ["S12", "S30"]);
+      assert.equal(steps.includes("S13"), false);
+      assert.equal(execution.operationCounts.get("S12"), 1);
+      assert.equal(execution.operationCounts.get("S30"), 1);
+      assert.equal(oauthConsumes.length, 4);
+      assert.deepEqual(oauthConsumes.map(({ tenant }) => tenant), ["a", "a", "a", "b"]);
+      assert.deepEqual(oauthConsumes[2].arguments[0], oauthConsumes[3].arguments[0]);
+      assert.equal(execution.observations.oauthOutcomes.length, 4);
+      assert.equal(execution.identityKey.every((byte) => byte === 0), true);
+    });
+  }
+});
+
+test("S16 refuses the consumed-state code for a truly expired authorization", async () => {
+  const execution = await executeSupplementalGate3({
+    expiredCode: OAUTH_CONSUMED_STATE_CODE,
+    runGate3Substep: (_substep, _operationClass, operation) => operation()
+  });
+  const steps = execution.runnerCalls.map(({ substep }) => substep);
+
+  assert.equal(execution.didThrow, true);
+  assert.equal(execution.thrown?.code, "linux_gate_oauth_expired_invalid");
+  assert.deepEqual(steps.slice(-2), ["S16", "S30"]);
+  assert.equal(steps.includes("S17"), false);
+  assert.equal(execution.operationCounts.get("S16"), 1);
+  assert.equal(execution.operationCounts.get("S30"), 1);
+  assert.deepEqual(execution.observations.oauthOutcomes.at(-1), {
+    tenant: "a",
+    status: "rejected",
+    code: OAUTH_CONSUMED_STATE_CODE
+  });
+  assert.equal(execution.identityKey.every((byte) => byte === 0), true);
 });
 
 test("S13-S16 S15 keeps the closed substep contract and deterministic SQL fixture", () => {
