@@ -8,6 +8,12 @@ const {
 const {
   createBackupRestoreProvenanceTracker
 } = require("../scripts/social-3a0p-linux-gate");
+const {
+  assertRestoreRequestProfileBinding
+} = require("../scripts/social-3a0p-local-windows-physical-plans");
+const {
+  SCHEMA_PROFILES
+} = require("../src/persistence/postgres/backup-restore");
 
 const RUN_MARKER = "ia4tube-social-3a0p-connector-test-0001";
 const BASE_GATE3_BOUNDARIES = Object.freeze([
@@ -663,6 +669,12 @@ test("concrete connector gates use the product contracts and physical plan runne
 });
 
 test("Gate 5 sequences tracked normal operations before exact untracked refusal checks", async (t) => {
+  const profile0003 = SCHEMA_PROFILES.find(
+    (profile) => profile.id === "social-schema-0003"
+  );
+  const profile0004 = SCHEMA_PROFILES.find(
+    (profile) => profile.id === "social-schema-0004"
+  );
   const normalOperations = Object.freeze([
     Object.freeze(["backup", "gate5_backup_0003", "social-schema-0003"]),
     Object.freeze(["restore", "gate5_restore_0003", "social-schema-0003"]),
@@ -673,6 +685,15 @@ test("Gate 5 sequences tracked normal operations before exact untracked refusal 
   const canonicalTamperCode = "backup_bundle_authentication_failed";
   const canonicalCrossProfileCode =
     "local_backup_restore_cross_profile_refused";
+  const crossRuntimeDiagnostic = Object.freeze({
+    expectedProfile: profile0004.id,
+    sourceProfile: profile0003.id,
+    expectedRelationCount: 16,
+    observedRelationCount: 13,
+    missingRelationCount: 3,
+    ownerMismatchCount: 0,
+    kindMismatchCount: 0
+  });
   const state = {
     target: { host: "127.0.0.1", port: 55432 },
     pools: { migration: {}, runtime: {} },
@@ -704,6 +725,15 @@ test("Gate 5 sequences tracked normal operations before exact untracked refusal 
     }
 
     const events = [];
+    const crossEffects = {
+      databaseCreate: 0,
+      databaseGetPools: 0,
+      databaseReconcile: 0,
+      requireBackupTransport: 0,
+      restoreStarted: false,
+      runProfileRestore: 0,
+      runtimeVerifier: 0
+    };
     const dependencies = fakeDependencies();
     const productBackup = dependencies.runProfileBackup;
     const productRestore = dependencies.runProfileRestore;
@@ -755,7 +785,31 @@ test("Gate 5 sequences tracked normal operations before exact untracked refusal 
       },
       async assertCrossProfileRefused() {
         events.push("cross");
-        return exactRefusal(crossError, canonicalCrossProfileCode);
+        let rejected = false;
+        try {
+          if (options.crossError) throw crossError;
+          assertRestoreRequestProfileBinding(
+            SCHEMA_PROFILES,
+            { profile: profile0003 },
+            profile0004
+          );
+          crossEffects.requireBackupTransport += 1;
+          crossEffects.databaseGetPools += 1;
+          crossEffects.databaseCreate += 1;
+          crossEffects.restoreStarted = true;
+          crossEffects.runProfileRestore += 1;
+          crossEffects.runtimeVerifier += 1;
+        } catch (error) {
+          if (error?.code === canonicalCrossProfileCode) {
+            rejected = true;
+          } else {
+            throw error;
+          }
+        }
+        if (crossEffects.restoreStarted) {
+          crossEffects.databaseReconcile += 1;
+        }
+        return rejected;
       },
       async cleanup() { events.push("cleanup"); }
     };
@@ -766,7 +820,7 @@ test("Gate 5 sequences tracked normal operations before exact untracked refusal 
       randomUUID: uuidFactory(),
       plans: { runMarker: RUN_MARKER, backupRestore: plan }
     });
-    return { events, gates, tracker };
+    return { crossEffects, crossRuntimeDiagnostic, events, gates, tracker };
   }
 
   await t.test("canonical tamper and cross-profile codes approve the final Gate 5 result", async () => {
@@ -786,6 +840,24 @@ test("Gate 5 sequences tracked normal operations before exact untracked refusal 
       assert.equal(result.crossProfileRefused, true);
       assert.equal(result.operationalRollback, true);
       assert.equal(result.disposableRemoved, true);
+      assert.deepEqual(fixture.crossRuntimeDiagnostic, {
+        expectedProfile: "social-schema-0004",
+        sourceProfile: "social-schema-0003",
+        expectedRelationCount: 16,
+        observedRelationCount: 13,
+        missingRelationCount: 3,
+        ownerMismatchCount: 0,
+        kindMismatchCount: 0
+      });
+      assert.deepEqual(fixture.crossEffects, {
+        databaseCreate: 0,
+        databaseGetPools: 0,
+        databaseReconcile: 0,
+        requireBackupTransport: 0,
+        restoreStarted: false,
+        runProfileRestore: 0,
+        runtimeVerifier: 0
+      });
       assert.equal(fixture.tracker.failure(), null);
     } finally {
       await fixture.gates.destroy();
@@ -813,9 +885,9 @@ test("Gate 5 sequences tracked normal operations before exact untracked refusal 
     }
   });
 
-  await t.test("non-exact cross-profile refusal is propagated outside normal-operation provenance", async () => {
-    const nonExact = Object.assign(new Error("synthetic non-exact refusal"), {
-      code: `${canonicalCrossProfileCode}_other`
+  await t.test("relation-owner mismatch is not accepted as cross-profile refusal and stays outside normal-operation provenance", async () => {
+    const nonExact = Object.assign(new Error("synthetic relation-owner mismatch"), {
+      code: "postgres_relation_owner_mismatch"
     });
     const fixture = createFixture({ crossError: nonExact });
     try {

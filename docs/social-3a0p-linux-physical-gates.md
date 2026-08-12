@@ -1,6 +1,70 @@
 # Checkpoint Social 3A-0P — gates físicos Linux isolados
 
-## Contrato canônico da recusa exata de adulteração do bundle no Gate 5
+## Contrato canônico da recusa cross-profile no limite do plano interno
+
+Esta rota existe somente na branch
+`social/checkpoint-3a0p-gate5-cross-profile-plan-binding-20260811`, criada a
+partir do commit exato `dc0eb35ec0e005d145900dd6427a51db022f0da3`.
+O único commit autorizado deve ter esse commit como pai imediato e a mensagem
+integral:
+
+```text
+[run-social-3a0p-linux-gate] refuse cross-profile restore before transport
+```
+
+A correção pertence exclusivamente ao harness físico. No início de
+`restoreRequest`, antes de transporte, configuração, lifecycle, banco ou
+verificador, os perfis de `sourcePlan.profile` e `expectedProfile` são
+resolvidos contra `backup.SCHEMA_PROFILES`. Ambos devem ser exatamente os
+objetos canônicos retornados. Somente então o helper existente
+`assertProfileBinding` compara as identidades: `0003 → 0003` e `0004 → 0004`
+continuam permitidos; `0003 → 0004` e `0004 → 0003` são recusados exatamente
+com `local_backup_restore_cross_profile_refused`. Objetos forjados que apenas
+reutilizem um `id` são recusados como request ou source plan inválido.
+
+A recusa conhecida ocorre antes de `requireBackupTransport`,
+`connectionEnvironment`, `loadRestoreConfig`, construção de lifecycle e
+verificadores, `databaseManager.getPools`, criação de pool ou banco,
+`runProfileRestoreImpl`, `pg_restore`, `psql`, facade e verificadores. Como a
+criação física não começou, a recusa preflight não abre conexão e não solicita
+reconciliação. Falhas posteriores preservam a reconciliação e a precedência de
+cleanup existentes. Não há retry, fallback de perfil ou reconhecimento por
+contagem de relações.
+
+O run predecessor `31551652801`, `run_attempt=1` e `pushAttempts=1`, aprovou
+Windows, pré-gate Linux, durabilidade, PostgreSQL/bootstrap, Gates 1–4, backup
+e restore 0003, backup e restore 0004 e a recusa de tamper com
+`backup_bundle_authentication_failed`. O cross-profile falhou com
+`postgres_relation_owner_mismatch` antes de métricas e secret scan remoto. A
+evidência sanitizada registrou `expectedRelationCount=16`,
+`observedRelationCount=13`, `missingRelationCount=3`, `ownerMismatchCount=0`,
+`kindMismatchCount=0` e `unexpectedRelationCount=0`, compatível exatamente com
+bundle 0003 restaurado e verificador 0004 executado depois. As três relações
+exclusivas do contrato 0004 são `social_idempotency_operations`,
+`social_publications` e `social_publication_attempts`.
+
+A classificação canônica é
+`gate5_cross_profile_source_plan_binding_missing_before_restore`. A correção
+não aceita `postgres_relation_owner_mismatch` como sucesso, não reduz o
+inventário 0004 de 16 para 13 e não altera runtime validation, backup, restore,
+migrations, roles, RLS ou produto. `backupRestoreFailureProvenance` conserva o
+schema existente; tamper e cross-profile continuam fora da procedência das
+seis operações normais.
+
+O artifact histórico `9124520557`, de nome
+`social-3a0p-linux-physical-gates-evidence`, conserva o digest
+`sha256:795a869fc838a48167386d6a7d021702b5be158e7ce522cab80acb987a6d266c`,
+o SHA-256 da evidência
+`334c242ace3e0ba7fd7dd5bf62d8bb52dfdc0145c3847d7625a0e3899848b431`
+e o SHA-256 do process-status
+`26564ca3007f7f91c7b77edadbe4122d82804ea0626a3958f21292d1b067f342`.
+O PostgreSQL permaneceu pinado em
+`sha256:7e6103cf85f88f7a0eddb3ec0b1ba8940eba098ed118ade25a729ca9daee5568`.
+O cleanup registrou `cleanupCompleted=true`, `cleanupFailure=null` e zero
+resíduo de container, rede, volume, processo, listener e temporário. Esses
+dados são históricos, imutáveis e não são reclassificados por esta rota.
+
+## Contrato predecessor da recusa exata de adulteração do bundle no Gate 5
 
 Esta rota existe somente na branch
 `social/checkpoint-3a0p-gate5-bundle-tamper-refusal-20260811`, criada a partir
@@ -1036,7 +1100,7 @@ e o novo `HEAD`:
     `tests/social-3a0p-local-windows-physical-plans.test.js`,
     `tests/social-postgres-backup-restore.test.js` e
     `tests/social-postgres-restore-behavior-verifiers.test.js`.
-17. O novo `HEAD`, pai exato
+17. `dc0eb35ec0e005d145900dd6427a51db022f0da3`, pai exato
     `3c1ba942033a94ba6480145664543d906805544b`, mensagem
     `[run-social-3a0p-linux-gate] accept exact encrypted bundle tamper refusal`
     e inventário fechado de exatamente nove caminhos:
@@ -1049,9 +1113,22 @@ e o novo `HEAD`:
     `tests/social-3a0p-local-connector-physical-gates.test.js`,
     `tests/social-3a0p-local-windows-physical-plans.test.js` e
     `tests/social-postgres-backup-restore.test.js`.
+18. O novo `HEAD`, pai exato
+    `dc0eb35ec0e005d145900dd6427a51db022f0da3`, mensagem
+    `[run-social-3a0p-linux-gate] refuse cross-profile restore before transport`
+    e inventário fechado de exatamente nove caminhos:
+    `.github/workflows/social-3a0p-linux-physical-gates.yml`,
+    `docs/social-3a0p-linux-physical-gates.md`,
+    `scripts/social-3a0p-linux-gate.js`,
+    `scripts/social-3a0p-local-windows-physical-plans.js`,
+    `tests/social-3a0p-linux-gate.test.js`,
+    `tests/social-3a0p-linux-workflow.test.js`,
+    `tests/social-3a0p-local-backup-restore.test.js`,
+    `tests/social-3a0p-local-connector-physical-gates.test.js` e
+    `tests/social-3a0p-local-windows-physical-plans.test.js`.
 
 Os guards dos dois jobs verificam pais, mensagens, ancestralidade linear,
-contagem dezessete e cada um desses inventários sem prefixo, glob ou diretório
+contagem dezoito e cada um desses inventários sem prefixo, glob ou diretório
 inteiro.
 
 ## Restauração da rota executável normal

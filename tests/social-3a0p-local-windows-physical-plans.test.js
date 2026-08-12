@@ -21,6 +21,7 @@ const {
   createLocalPgToolRunner,
   createProfile0003SocialRepositoryBridge,
   createWindowsPhysicalPlans,
+  assertRestoreRequestProfileBinding,
   requireCanonicalSchemaProfile
 } = require("../scripts/social-3a0p-local-windows-physical-plans");
 
@@ -1397,6 +1398,154 @@ test("Gate 5 restore ownership is lazy, assertion-latched and isolated per reque
   }
 });
 
+test("restore request profile binding requires exact canonical identities in both directions", () => {
+  const profiles = require(
+    "../src/persistence/postgres/backup-restore"
+  ).SCHEMA_PROFILES;
+  const [profile0003, profile0004] = profiles;
+  const sourcePlan = (profile) => Object.freeze({ profile });
+
+  for (const profile of profiles) {
+    const binding = assertRestoreRequestProfileBinding(
+      profiles,
+      sourcePlan(profile),
+      profile
+    );
+    assert.equal(Object.isFrozen(binding), true);
+    assert.equal(binding.sourceProfile, profile);
+    assert.equal(binding.expectedProfile, profile);
+  }
+
+  for (const [sourceProfile, expectedProfile] of [
+    [profile0003, profile0004],
+    [profile0004, profile0003]
+  ]) {
+    assert.throws(
+      () => assertRestoreRequestProfileBinding(
+        profiles,
+        sourcePlan(sourceProfile),
+        expectedProfile
+      ),
+      {
+        code: "local_backup_restore_cross_profile_refused",
+        name: "LocalBackupRestoreFailure"
+      }
+    );
+  }
+
+  for (const candidate of [
+    undefined,
+    null,
+    Object.freeze({}),
+    Object.freeze({ profile: undefined }),
+    Object.freeze({ profile: Object.freeze({ ...profile0003 }) })
+  ]) {
+    assert.throws(
+      () => assertRestoreRequestProfileBinding(
+        profiles,
+        candidate,
+        profile0003
+      ),
+      {
+        code: "windows_physical_restore_source_plan_invalid",
+        name: "WindowsPhysicalPlanFailure"
+      }
+    );
+  }
+
+  for (const candidate of [
+    undefined,
+    null,
+    Object.freeze({ ...profile0003 }),
+    Object.freeze({ id: "social-schema-unknown" })
+  ]) {
+    assert.throws(
+      () => assertRestoreRequestProfileBinding(
+        profiles,
+        sourcePlan(profile0003),
+        candidate
+      ),
+      {
+        code: "windows_physical_restore_request_invalid",
+        name: "WindowsPhysicalPlanFailure"
+      }
+    );
+  }
+});
+
+test("restore request binds profiles before transport, configuration, lifecycle and verifiers", () => {
+  const source = fs.readFileSync(
+    path.resolve(
+      __dirname,
+      "../scripts/social-3a0p-local-windows-physical-plans.js"
+    ),
+    "utf8"
+  ).replace(/\r\n/gu, "\n");
+  const start = source.indexOf("  function restoreRequest(");
+  const end = source.indexOf("  async function createRollbackAdapter()", start);
+  assert.ok(start >= 0);
+  assert.ok(end > start);
+  const restoreRequest = source.slice(start, end);
+  const binding = restoreRequest.indexOf(
+    "assertRestoreRequestProfileBinding("
+  );
+  const transport = restoreRequest.indexOf(
+    "requireBackupTransport(targetDatabase)"
+  );
+  const environment = restoreRequest.indexOf("connectionEnvironment(");
+  const configuration = restoreRequest.indexOf("backup.loadRestoreConfig(");
+  const latch = restoreRequest.indexOf(
+    "createRestoreVerifierOwnershipLatch()"
+  );
+  const lifecycle = restoreRequest.indexOf("lifecycle(");
+  const verifiers = restoreRequest.indexOf("restoreVerifiers(");
+  const pools = restoreRequest.indexOf("databaseManager.getPools(");
+  assert.ok(binding >= 0);
+  assert.ok(transport > binding);
+  assert.ok(environment > transport);
+  assert.ok(configuration > environment);
+  assert.ok(latch > configuration);
+  assert.ok(lifecycle > latch);
+  assert.ok(verifiers > lifecycle);
+  assert.ok(pools > verifiers);
+});
+
+test("runtime relation inventories remain exact for profiles 0003 and 0004", () => {
+  const backup = require("../src/persistence/postgres/backup-restore");
+  const runtime = require("../src/persistence/postgres/runtime-validation");
+  const [profile0003, profile0004] = backup.SCHEMA_PROFILES;
+  const profile0003Relations = new Set([
+    ...profile0003.rlsTables,
+    "runtime_schema_contract"
+  ]);
+  const profile0004Relations = new Set([
+    ...profile0004.rlsTables,
+    "runtime_schema_contract"
+  ]);
+  const missingFrom0003 = [...profile0004Relations]
+    .filter((relation) => !profile0003Relations.has(relation));
+
+  assert.equal(profile0003Relations.size, 13);
+  assert.equal(profile0004Relations.size, 16);
+  assert.deepEqual(missingFrom0003, [
+    "social_idempotency_operations",
+    "social_publications",
+    "social_publication_attempts"
+  ]);
+  assert.deepEqual(runtime.TENANT_TABLES, profile0004.rlsTables);
+
+  const source = fs.readFileSync(
+    path.resolve(__dirname, "../src/persistence/postgres/runtime-validation.js"),
+    "utf8"
+  ).replace(/\r\n/gu, "\n");
+  assert.match(source, /\.\.\.TENANT_TABLES\.map\(\(table\) => \[table, "r"\]\)/u);
+  assert.match(source, /entry\.owner_name !== ownerRole/u);
+  assert.match(
+    source,
+    /tables\.rows\?\.length !== TENANT_TABLES\.length/u
+  );
+});
+
 test("closing a prepared Gate 5 restore before first use remains connection-free", async () => {
   const item = lazyRestoreOwnershipPlanFixture();
   try {
@@ -1656,9 +1805,9 @@ test("restore verifier construction stays absent across every earlier failure bo
     }
   });
 
-  await t.test("close failure cannot mask the primary verifier failure", async () => {
+  await t.test("same-profile owner mismatch propagates and cannot be masked by close failure", async () => {
     const primary = Object.assign(new Error("not persisted"), {
-      code: "synthetic_runtime_verifier_failure"
+      code: "postgres_relation_owner_mismatch"
     });
     const cleanup = Object.assign(new Error("not persisted"), {
       code: "synthetic_verifier_close_failure"
@@ -2683,6 +2832,7 @@ test("tamper cleanup preserves the primary and attempts close, unlink and reconc
       expectedRefusal,
       async (request) => {
         assert.equal(item.restoreAttempts.length, 1);
+        assert.equal(request.expectedProfile.id, "social-schema-0003");
         assert.equal(request.config.bundlePath, item.tamperedPath);
         const tampered = fs.readFileSync(item.tamperedPath);
         assert.equal(tampered.length, item.bundleContent.length);
@@ -2934,7 +3084,7 @@ test("tamper cleanup preserves the primary and attempts close, unlink and reconc
   });
 });
 
-test("tamper uses one exact refusal code and preserves the cross-profile implementation byte-for-byte", () => {
+test("tamper keeps its exact refusal while cross-profile guards request creation and reconciliation", () => {
   const source = fs.readFileSync(
     path.resolve(
       __dirname,
@@ -2969,99 +3119,138 @@ test("tamper uses one exact refusal code and preserves the cross-profile impleme
     "      async assertCrossProfileRefused() {",
     "      async cleanup() {"
   );
-  assert.equal(
-    crypto.createHash("sha256").update(crossProfile).digest("hex"),
-    "967f3c8b278ceb18615d436f4e9da78bbc0f43fdd8de4456a4501aa73537a2fa"
-  );
   assert.match(
     crossProfile,
     /error\?\.code === "local_backup_restore_cross_profile_refused"/u
   );
+  const protectedStart = crossProfile.indexOf("try {");
+  const request = crossProfile.indexOf(
+    "restoreRequest(plan0003, names.cross, profile0004)"
+  );
+  const started = crossProfile.indexOf("restoreStarted = true");
+  const restore = crossProfile.indexOf("await runProfileRestoreImpl(request)");
+  const reconcileGuard = crossProfile.indexOf("if (restoreStarted)");
+  const reconcile = crossProfile.indexOf("databaseManager.reconcile(");
+  assert.ok(protectedStart >= 0);
+  assert.ok(request > protectedStart);
+  assert.ok(started > request);
+  assert.ok(restore > started);
+  assert.ok(reconcileGuard > restore);
+  assert.ok(reconcile > reconcileGuard);
+  assert.doesNotMatch(crossProfile, /setTimeout|\bretry\b|\bsleep\b/u);
 });
 
-test("cross-profile reconciliation never overwrites an unexpected primary", async (t) => {
-  async function crossFixture(runFailure, reconciliationFailure) {
-    let reconciliationCalls = 0;
-    const databaseManager = Object.freeze({
-      ...provenanceDatabaseManager(),
-      async reconcile(identity) {
-        reconciliationCalls += 1;
-        if (reconciliationFailure) throw reconciliationFailure;
+test("cross-profile is refused before transport, mutation, verifier construction or cleanup", async () => {
+  const events = [];
+  const ownership = lazyRestoreOwnershipDatabaseManagerFixture({ events });
+  const behavior = lazyRestoreBehaviorFixture({ events });
+  const bridgeCalls = [];
+  const transportToolCalls = [];
+  const restoreAttempts = [];
+  const runtimeVerifierReceipts = [];
+  const relationMismatch = Object.assign(new Error("not persisted"), {
+    code: "postgres_relation_owner_mismatch"
+  });
+  const regression = Object.freeze({
+    expectedProfile: "social-schema-0004",
+    sourceProfile: "social-schema-0003",
+    expectedRelationCount: 16,
+    observedRelationCount: 13,
+    missingRelationCount: 3,
+    ownerMismatchCount: 0,
+    kindMismatchCount: 0,
+    unexpectedRelationCount: 0,
+    missingRelations: Object.freeze([
+      "social_idempotency_operations",
+      "social_publications",
+      "social_publication_attempts"
+    ])
+  });
+  const fixture = backupTransportFixture({
+    precreateBackupDirectory: false,
+    planOptions: { PoolClass: behavior.PoolClass },
+    dependencies: {
+      createBackupTransportBridge(contract) {
+        bridgeCalls.push(contract);
+        const bridge = createLogicalBackupTransportBridge(contract);
         return Object.freeze({
-          ...identity,
-          status: "absent",
-          createdByThisRun: false
+          ...bridge,
+          async runTool(plan) {
+            transportToolCalls.push(plan);
+            return Object.freeze({ code: 0, stdout: "", stderr: "" });
+          }
         });
+      },
+      databaseManager: ownership.manager,
+      restoreBehavior: behavior.facade,
+      async runProfileRestore(request) {
+        restoreAttempts.push(request);
+        runtimeVerifierReceipts.push(regression);
+        throw relationMismatch;
       }
+    }
+  });
+  try {
+    const prepared = await fixture.plans.prepareBackupRestore();
+    const before = Object.freeze({
+      bridgeCalls: bridgeCalls.length,
+      created: ownership.calls.created.length,
+      poolRequests: ownership.calls.poolRequests.length,
+      restoreConfigLoads: fixture.restoreConfigLoads.length
     });
-    const fixture = backupTransportFixture({
-      precreateBackupDirectory: false,
-      dependencies: {
-        createBackupTransportBridge: createLogicalBackupTransportBridge,
-        databaseManager,
-        async runProfileRestore() {
-          if (runFailure) throw runFailure;
-          return { accepted: true };
-        }
-      }
+
+    assert.equal(await prepared.assertCrossProfileRefused(), true);
+
+    assert.equal(bridgeCalls.length, before.bridgeCalls);
+    assert.equal(fixture.restoreConfigLoads.length, before.restoreConfigLoads);
+    assert.equal(ownership.calls.created.length, before.created);
+    assert.equal(ownership.calls.poolRequests.length, before.poolRequests);
+    assert.deepEqual(ownership.calls.reconciled, []);
+    assert.equal(
+      ownership.calls.created.some((database) => database.includes("_cross_")),
+      false
+    );
+    assert.equal(
+      ownership.calls.poolRequests.some((database) => database.includes("_cross_")),
+      false
+    );
+    assert.equal(
+      ownership.calls.removed.some((database) => database.includes("_cross_")),
+      false
+    );
+    assert.deepEqual(restoreAttempts, []);
+    assert.deepEqual(runtimeVerifierReceipts, []);
+    assert.deepEqual(behavior.calls.created, []);
+    assert.deepEqual(behavior.calls.poolConstructions, []);
+    assert.deepEqual(behavior.calls.operations, []);
+    assert.equal(behavior.calls.poolConnections, 0);
+    assert.equal(ownership.calls.connections, 0);
+    assert.deepEqual(transportToolCalls, []);
+    assert.deepEqual(fixture.runToolCalls, []);
+    assert.deepEqual(fixture.pgDumpStarts, []);
+    assert.deepEqual(fixture.processStarts, []);
+    assert.deepEqual(regression, {
+      expectedProfile: "social-schema-0004",
+      sourceProfile: "social-schema-0003",
+      expectedRelationCount: 16,
+      observedRelationCount: 13,
+      missingRelationCount: 3,
+      ownerMismatchCount: 0,
+      kindMismatchCount: 0,
+      unexpectedRelationCount: 0,
+      missingRelations: [
+        "social_idempotency_operations",
+        "social_publications",
+        "social_publication_attempts"
+      ]
     });
-    return {
-      fixture,
-      prepared: await fixture.plans.prepareBackupRestore(),
-      reconciliationCalls: () => reconciliationCalls
-    };
+    assert.notEqual(
+      relationMismatch.code,
+      "local_backup_restore_cross_profile_refused"
+    );
+  } finally {
+    await destroyBackupTransportFixture(fixture);
   }
-
-  await t.test("unexpected primary wins over reconciliation failure", async () => {
-    const primary = Object.assign(new Error("not persisted"), {
-      code: "synthetic_cross_profile_primary_failure"
-    });
-    const reconciliation = Object.assign(new Error("not persisted"), {
-      code: "synthetic_cross_profile_reconciliation_failure"
-    });
-    const item = await crossFixture(primary, reconciliation);
-    try {
-      await assert.rejects(
-        item.prepared.assertCrossProfileRefused(),
-        (error) => error === primary
-      );
-      assert.equal(item.reconciliationCalls(), 1);
-    } finally {
-      await destroyBackupTransportFixture(item.fixture);
-    }
-  });
-
-  await t.test("reconciliation-only failure propagates", async () => {
-    const expectedRefusal = Object.assign(new Error("not persisted"), {
-      code: "local_backup_restore_cross_profile_refused"
-    });
-    const reconciliation = Object.assign(new Error("not persisted"), {
-      code: "synthetic_cross_profile_reconciliation_failure"
-    });
-    const item = await crossFixture(expectedRefusal, reconciliation);
-    try {
-      await assert.rejects(
-        item.prepared.assertCrossProfileRefused(),
-        (error) => error === reconciliation
-      );
-      assert.equal(item.reconciliationCalls(), 1);
-    } finally {
-      await destroyBackupTransportFixture(item.fixture);
-    }
-  });
-
-  await t.test("accepted cross-profile returns false despite reconciliation failure", async () => {
-    const reconciliation = Object.assign(new Error("not persisted"), {
-      code: "synthetic_cross_profile_reconciliation_failure"
-    });
-    const item = await crossFixture(null, reconciliation);
-    try {
-      assert.equal(await item.prepared.assertCrossProfileRefused(), false);
-      assert.equal(item.reconciliationCalls(), 1);
-    } finally {
-      await destroyBackupTransportFixture(item.fixture);
-    }
-  });
 });
 
 test("plan-directory rollback never overwrites the restore-work mkdir failure", async () => {

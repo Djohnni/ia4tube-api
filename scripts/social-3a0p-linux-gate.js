@@ -38,8 +38,8 @@ const {
 } = require("./social-3a0p-local-runtime-evidence-metrics");
 
 const BRANCH =
-  "social/checkpoint-3a0p-gate5-bundle-tamper-refusal-20260811";
-const BASE_COMMIT = "3c1ba942033a94ba6480145664543d906805544b";
+  "social/checkpoint-3a0p-gate5-cross-profile-plan-binding-20260811";
+const BASE_COMMIT = "dc0eb35ec0e005d145900dd6427a51db022f0da3";
 const PRODUCT_COMMIT = "fcfc92419021dae5f77baad731c634b10c275c5b";
 const MARKER = "[run-social-3a0p-linux-gate]";
 const RUN_MARKER_PREFIX = "ia4tube-social-3a0p-linux-";

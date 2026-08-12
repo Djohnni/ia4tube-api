@@ -706,14 +706,14 @@ function restoreBehaviorFacadeFixture(options = {}) {
   });
 }
 
-test("evidence provenance matches the exact bundle-tamper-refusal branch and parent", () => {
+test("evidence provenance matches the exact cross-profile-plan-binding branch and parent", () => {
   assert.equal(
     BRANCH,
-    "social/checkpoint-3a0p-gate5-bundle-tamper-refusal-20260811"
+    "social/checkpoint-3a0p-gate5-cross-profile-plan-binding-20260811"
   );
   assert.equal(
     BASE_COMMIT,
-    "3c1ba942033a94ba6480145664543d906805544b"
+    "dc0eb35ec0e005d145900dd6427a51db022f0da3"
   );
   const workflow = JSON.parse(fs.readFileSync(
     path.join(ROOT, ".github", "workflows", "social-3a0p-linux-physical-gates.yml"),

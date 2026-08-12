@@ -383,11 +383,22 @@ test("an unknown migration ledger is refused", () => {
   );
 });
 
-test("profile binding rejects 0003 interpreted as 0004", () => {
-  assert.throws(
-    () => assertProfileBinding(profile0003, profile0004),
-    { message: "local_backup_restore_cross_profile_refused" }
-  );
+test("profile binding rejects both cross-profile directions with only the exact refusal code", () => {
+  assert.equal(assertProfileBinding(profile0003, profile0003), true);
+  assert.equal(assertProfileBinding(profile0004, profile0004), true);
+  for (const [expectedProfile, sourceProfile] of [
+    [profile0003, profile0004],
+    [profile0004, profile0003]
+  ]) {
+    assert.throws(
+      () => assertProfileBinding(expectedProfile, sourceProfile),
+      (error) => {
+        assert.equal(error.code, "local_backup_restore_cross_profile_refused");
+        assert.equal(error.message, "local_backup_restore_cross_profile_refused");
+        return true;
+      }
+    );
+  }
 });
 
 test("manifest binding invokes the definitive validator contract", () => {
@@ -1202,6 +1213,37 @@ test("restore rejects a different profile and still removes the target", async (
     { message: "local_backup_restore_cross_profile_refused" }
   );
   assert.deepEqual(events.slice(-2), ["remove", "assert-removed"]);
+});
+
+test("same-profile restore propagates relation-owner mismatch without classifying it as cross-profile success", async () => {
+  const events = [];
+  const ownerMismatch = Object.assign(
+    new Error("synthetic relation-owner mismatch"),
+    { code: "postgres_relation_owner_mismatch" }
+  );
+  await assert.rejects(
+    runProfileRestore(restoreRequest(profile0004, events, {
+      dependencies: dependencies(events, {
+        async runLogicalRestore() {
+          events.push("owner-mismatch");
+          throw ownerMismatch;
+        }
+      })
+    })),
+    (error) => {
+      assert.equal(error.code, "postgres_relation_owner_mismatch");
+      assert.notEqual(
+        error.code,
+        "local_backup_restore_cross_profile_refused"
+      );
+      return true;
+    }
+  );
+  assert.deepEqual(events.slice(-3), [
+    "owner-mismatch",
+    "remove",
+    "assert-removed"
+  ]);
 });
 
 test("restore refuses an unmarked target without creating it", async () => {

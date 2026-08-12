@@ -10,6 +10,7 @@ const path = require("node:path");
 const {
   LOCAL_PHYSICAL_APPROVAL,
   RUN_MARKER_PATTERN,
+  assertProfileBinding,
   runProfileBackup,
   runProfileRestore
 } = require("./social-3a0p-local-backup-restore");
@@ -147,6 +148,73 @@ function requireCanonicalSchemaProfile(schemaProfiles, expectedProfileId) {
   }
   if (!canonical) fail("windows_physical_schema_profile_invalid");
   return canonical;
+}
+
+function resolveCanonicalRestoreProfile(
+  schemaProfiles,
+  candidate,
+  failureCode
+) {
+  if (!candidate || Object.getPrototypeOf(candidate) !== Object.prototype) {
+    fail(failureCode);
+  }
+  const idDescriptor = Object.getOwnPropertyDescriptor(candidate, "id");
+  if (!idDescriptor || !("value" in idDescriptor)) fail(failureCode);
+  let canonical;
+  try {
+    canonical = requireCanonicalSchemaProfile(
+      schemaProfiles,
+      idDescriptor.value
+    );
+  } catch (error) {
+    if (
+      error instanceof WindowsPhysicalPlanFailure &&
+      error.code === "windows_physical_schema_profile_invalid"
+    ) {
+      fail(failureCode);
+    }
+    throw error;
+  }
+  return canonical;
+}
+
+function assertRestoreRequestProfileBinding(
+  schemaProfiles,
+  sourcePlan,
+  expectedProfile
+) {
+  if (!sourcePlan || Object.getPrototypeOf(sourcePlan) !== Object.prototype) {
+    fail("windows_physical_restore_source_plan_invalid");
+  }
+  const profileDescriptor = Object.getOwnPropertyDescriptor(
+    sourcePlan,
+    "profile"
+  );
+  if (!profileDescriptor || !("value" in profileDescriptor)) {
+    fail("windows_physical_restore_source_plan_invalid");
+  }
+  const sourceProfile = profileDescriptor.value;
+  const canonicalSourceProfile = resolveCanonicalRestoreProfile(
+    schemaProfiles,
+    sourceProfile,
+    "windows_physical_restore_source_plan_invalid"
+  );
+  const canonicalExpectedProfile = resolveCanonicalRestoreProfile(
+    schemaProfiles,
+    expectedProfile,
+    "windows_physical_restore_request_invalid"
+  );
+  if (sourceProfile !== canonicalSourceProfile) {
+    fail("windows_physical_restore_source_plan_invalid");
+  }
+  if (expectedProfile !== canonicalExpectedProfile) {
+    fail("windows_physical_restore_request_invalid");
+  }
+  assertProfileBinding(canonicalExpectedProfile, canonicalSourceProfile);
+  return Object.freeze({
+    expectedProfile: canonicalExpectedProfile,
+    sourceProfile: canonicalSourceProfile
+  });
 }
 
 function requireExactFrozenMethodObject(candidate, methodNames, code) {
@@ -1705,6 +1773,12 @@ function createWindowsPhysicalPlans(options = {}) {
     provenanceOperation,
     afterRestoredProfileVerified
   ) {
+    const profileBinding = assertRestoreRequestProfileBinding(
+      backup.SCHEMA_PROFILES,
+      sourcePlan,
+      expectedProfile
+    );
+    const canonicalExpectedProfile = profileBinding.expectedProfile;
     const transport = requireBackupTransport(targetDatabase);
     const env = connectionEnvironment(
       "SOCIAL_RESTORE",
@@ -1719,16 +1793,19 @@ function createWindowsPhysicalPlans(options = {}) {
     const ownershipLatch = createRestoreVerifierOwnershipLatch();
     const targetLifecycle = lifecycle(
       targetDatabase,
-      expectedProfile.id,
+      canonicalExpectedProfile.id,
       ownershipLatch
     );
     const behavior = restoreVerifiers(
       targetDatabase,
-      expectedProfile.id,
+      canonicalExpectedProfile.id,
       ownershipLatch
     );
     const baseVerifyRestoredProfile = () =>
-      databaseManager.verifyProfile(targetDatabase, expectedProfile.id);
+      databaseManager.verifyProfile(
+        targetDatabase,
+        canonicalExpectedProfile.id
+      );
     const verifyRestoredProfile = afterRestoredProfileVerified === undefined
       ? baseVerifyRestoredProfile
       : async () => {
@@ -1738,7 +1815,7 @@ function createWindowsPhysicalPlans(options = {}) {
         };
     const request = bindProvenanceOperation({
       approval: LOCAL_PHYSICAL_APPROVAL,
-      expectedProfile,
+      expectedProfile: canonicalExpectedProfile,
       config,
       localBinding: transport.localBinding,
       pool: databaseManager.getPools(targetDatabase).provisioner,
@@ -2081,13 +2158,15 @@ function createWindowsPhysicalPlans(options = {}) {
         return true;
       },
       async assertCrossProfileRefused() {
-        const request = restoreRequest(plan0003, names.cross, profile0004);
         let rejected = false;
+        let restoreStarted = false;
         let primaryFailed = false;
         let primaryFailure;
         let reconciliationFailed = false;
         let reconciliationFailure;
         try {
+          const request = restoreRequest(plan0003, names.cross, profile0004);
+          restoreStarted = true;
           await runProfileRestoreImpl(request);
         } catch (error) {
           if (error?.code === "local_backup_restore_cross_profile_refused") {
@@ -2097,16 +2176,18 @@ function createWindowsPhysicalPlans(options = {}) {
             primaryFailure = error;
           }
         }
-        try {
-          const reconciliation = await databaseManager.reconcile(
-            identity(names.cross, profile0004.id)
-          );
-          if (reconciliation.status !== "absent") {
-            fail("windows_physical_cross_profile_cleanup_unconfirmed");
+        if (restoreStarted) {
+          try {
+            const reconciliation = await databaseManager.reconcile(
+              identity(names.cross, profile0004.id)
+            );
+            if (reconciliation.status !== "absent") {
+              fail("windows_physical_cross_profile_cleanup_unconfirmed");
+            }
+          } catch (error) {
+            reconciliationFailed = true;
+            reconciliationFailure = error;
           }
-        } catch (error) {
-          reconciliationFailed = true;
-          reconciliationFailure = error;
         }
         if (primaryFailed) throw primaryFailure;
         if (!rejected) return false;
@@ -2156,6 +2237,7 @@ module.exports = {
   RUNTIME_LOGIN,
   WindowsPhysicalPlanFailure,
   assertLocalToolPlan,
+  assertRestoreRequestProfileBinding,
   assertRunBinding,
   createDefaultRestoreBehaviorFacade,
   createLocalPgToolRunner,
