@@ -3,6 +3,7 @@
 const assert = require("node:assert/strict");
 const crypto = require("node:crypto");
 const { EventEmitter } = require("node:events");
+const express = require("express");
 const fs = require("node:fs");
 const http = require("node:http");
 const net = require("node:net");
@@ -88,10 +89,81 @@ function fakeChild({ exitCode = 1, emitSpawn = true } = {}) {
   };
 }
 
+function controlledHttpTransport({ destroyEmitsClose = true } = {}) {
+  const request = new EventEmitter();
+  let responseCallback;
+  let endCallback;
+  let payload = null;
+  let endCalls = 0;
+  const requestImpl = (options, onResponse) => {
+    responseCallback = onResponse;
+    request.options = options;
+    request.end = (candidate, encoding, callback) => {
+      endCalls += 1;
+      if (Buffer.isBuffer(candidate)) payload = candidate;
+      endCallback = typeof callback === "function"
+        ? callback
+        : typeof encoding === "function"
+          ? encoding
+          : typeof candidate === "function"
+            ? candidate
+            : null;
+      return request;
+    };
+    return request;
+  };
+  const startResponse = (statusCode = 200) => {
+    const response = new EventEmitter();
+    response.statusCode = statusCode;
+    response.destroyCalls = 0;
+    response.resumeCalls = 0;
+    response.resume = () => {
+      response.resumeCalls += 1;
+      return response;
+    };
+    response.destroy = () => {
+      response.destroyCalls += 1;
+      if (destroyEmitsClose) response.emit("close");
+    };
+    responseCallback(response);
+    return response;
+  };
+  const respond = (serialized, statusCode = 200) => {
+    const response = startResponse(statusCode);
+    if (serialized !== null) response.emit("data", Buffer.from(serialized));
+    response.emit("end");
+    response.emit("close");
+    return response;
+  };
+  return {
+    request,
+    requestImpl,
+    respond,
+    startResponse,
+    get endCallback() { return endCallback; },
+    get endCalls() { return endCalls; },
+    get payload() { return payload; }
+  };
+}
+
+async function closeLoopbackServer(server, sockets) {
+  const socketClosures = [...sockets].map((socket) => new Promise((resolve) => {
+    socket.once("close", resolve);
+  }));
+  for (const socket of sockets) socket.destroy();
+  if (typeof server.closeAllConnections === "function") {
+    server.closeAllConnections();
+  }
+  const serverClosure = new Promise((resolve, reject) => {
+    server.close((error) => error ? reject(error) : resolve());
+  });
+  await Promise.all([serverClosure, ...socketClosures]);
+}
+
 test("Social 3B physical gate freezes branch, phase, image and bounded budgets", () => {
   assert.equal(
     gate.BRANCH,
-    "social/checkpoint-3b0-gate3-consumed-state-contract-20260812"
+    "social/checkpoint-3b0-o05-loopback-json-flush-20260812"
   );
   assert.equal(gate.PHASE, "instagram_oauth_local_contract");
   assert.equal(
@@ -133,6 +205,548 @@ test("remote environment requires every external runtime gate to remain exactly 
       (error) => error?.code === "social_3b0_environment_invalid"
     );
   }
+});
+
+test("httpJsonRequest preserves the JSON payload through real loopback parser and Bearer boundaries", async () => {
+  const originalRequest = http.request;
+  const expectedBody = Object.freeze({ purpose: "connect" });
+  const expectedSerialized = JSON.stringify(expectedBody);
+  const validAuthorization = ["Bearer", "fixture-valid"].join(" ");
+  const invalidAuthorization = ["Bearer", "fixture-invalid"].join(" ");
+  const rawBodies = [];
+  const parsedBodies = [];
+  const sockets = new Set();
+  let authenticationCalls = 0;
+  let handlerCalls = 0;
+  let parserFailures = 0;
+  let delayedRequests = 0;
+  const app = express();
+  app.use(express.json({
+    verify(_request, _response, buffer) {
+      rawBodies.push(Buffer.from(buffer));
+    }
+  }));
+  app.post(
+    "/v1/social/connections/instagram/authorization",
+    (request, response, next) => {
+      authenticationCalls += 1;
+      parsedBodies.push(request.body);
+      if (request.headers.authorization !== validAuthorization) {
+        response.status(401).json({ code: "synthetic_unauthorized" });
+        return;
+      }
+      next();
+    },
+    (request, response) => {
+      handlerCalls += 1;
+      response.status(201).json({
+        status: "authorization_pending",
+        purpose: request.body.purpose
+      });
+    }
+  );
+  app.use((_error, _request, response, _next) => {
+    parserFailures += 1;
+    response.status(400).json({ code: "synthetic_parser_refusal" });
+  });
+  const server = http.createServer(app);
+  server.on("connection", (socket) => {
+    sockets.add(socket);
+    socket.once("close", () => sockets.delete(socket));
+  });
+  await new Promise((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", resolve);
+  });
+  const address = server.address();
+  assert.equal(typeof address, "object");
+  assert.equal(address.address, "127.0.0.1");
+
+  http.request = (options, onResponse) => {
+    const actual = originalRequest(options, onResponse);
+    const originalWrite = actual.write.bind(actual);
+    const originalEnd = actual.end.bind(actual);
+    let retainedPayload = null;
+    delayedRequests += 1;
+    actual.write = (candidate) => {
+      retainedPayload = candidate;
+      return true;
+    };
+    actual.end = (candidate, encoding, callback) => {
+      if (Buffer.isBuffer(candidate)) retainedPayload = candidate;
+      const completion = typeof callback === "function"
+        ? callback
+        : typeof encoding === "function"
+          ? encoding
+          : typeof candidate === "function"
+            ? candidate
+            : undefined;
+      setImmediate(() => {
+        actual.write = originalWrite;
+        actual.end = originalEnd;
+        if (retainedPayload) originalEnd(retainedPayload, completion);
+        else originalEnd(completion);
+      });
+      return actual;
+    };
+    return actual;
+  };
+
+  try {
+    const missing = await gate.httpJsonRequest({
+      port: address.port,
+      method: "POST",
+      route: "/v1/social/connections/instagram/authorization",
+      body: expectedBody
+    });
+    const invalid = await gate.httpJsonRequest({
+      port: address.port,
+      method: "POST",
+      route: "/v1/social/connections/instagram/authorization",
+      headers: { authorization: invalidAuthorization },
+      body: expectedBody
+    });
+    const valid = await gate.httpJsonRequest({
+      port: address.port,
+      method: "POST",
+      route: "/v1/social/connections/instagram/authorization",
+      headers: { authorization: validAuthorization },
+      body: expectedBody
+    });
+
+    assert.equal(missing.status, 401);
+    assert.equal(invalid.status, 401);
+    assert.deepEqual(valid, {
+      status: 201,
+      value: { status: "authorization_pending", purpose: "connect" }
+    });
+    assert.equal(delayedRequests, 3);
+    assert.equal(authenticationCalls, 3);
+    assert.equal(handlerCalls, 1);
+    assert.equal(parserFailures, 0);
+    assert.equal(rawBodies.length, 3);
+    assert.equal(rawBodies.every((buffer) => buffer.toString("utf8") === expectedSerialized), true);
+    assert.equal(rawBodies.every((buffer) => !buffer.includes(0)), true);
+    assert.deepEqual(parsedBodies, [expectedBody, expectedBody, expectedBody]);
+  } finally {
+    http.request = originalRequest;
+    for (const buffer of rawBodies) buffer.fill(0);
+    await closeLoopbackServer(server, sockets);
+  }
+  assert.equal(server.listening, false);
+  assert.equal(sockets.size, 0);
+  assert.equal(http.request, originalRequest);
+});
+
+test("httpJsonRequest retains one payload until finish and accepts a response started after finish", async () => {
+  const control = controlledHttpTransport();
+  const resultPromise = gate.httpJsonRequest({
+    port: 7443,
+    method: "POST",
+    route: "/v1/social/test",
+    body: { purpose: "connect" },
+    requestImpl: control.requestImpl
+  });
+  const retained = control.payload;
+  assert.ok(Buffer.isBuffer(retained));
+  assert.equal(retained.toString("utf8"), JSON.stringify({ purpose: "connect" }));
+  assert.equal(control.endCalls, 1);
+  let wipeCalls = 0;
+  const originalFill = retained.fill.bind(retained);
+  retained.fill = (...args) => {
+    wipeCalls += 1;
+    return originalFill(...args);
+  };
+
+  control.request.emit("finish");
+  assert.equal(retained.every((byte) => byte === 0), true);
+  assert.equal(wipeCalls, 1);
+  control.endCallback?.();
+  const response = control.startResponse(200);
+  control.request.emit("close");
+  assert.equal(wipeCalls, 1);
+  response.emit("data", Buffer.from('{"ok":true}'));
+  response.emit("end");
+  response.emit("close");
+  assert.deepEqual(await resultPromise, { status: 200, value: { ok: true } });
+  assert.equal(wipeCalls, 1);
+  assert.deepEqual(control.request.eventNames(), []);
+  assert.deepEqual(response.eventNames(), []);
+});
+
+test("httpJsonRequest rejects finish-close-before-response once and destroys a late response", async () => {
+  const control = controlledHttpTransport();
+  let responseChunkFactoryCalls = 0;
+  const resultPromise = gate.httpJsonRequest({
+    port: 7443,
+    method: "POST",
+    route: "/v1/social/test",
+    body: { purpose: "connect" },
+    requestImpl: control.requestImpl,
+    responseChunkFactory(chunk) {
+      responseChunkFactoryCalls += 1;
+      return Buffer.from(chunk);
+    }
+  });
+  const retained = control.payload;
+  let wipeCalls = 0;
+  let resolveCalls = 0;
+  let rejectCalls = 0;
+  const originalFill = retained.fill.bind(retained);
+  retained.fill = (...args) => {
+    wipeCalls += 1;
+    return originalFill(...args);
+  };
+  const observed = resultPromise.then(
+    (value) => {
+      resolveCalls += 1;
+      return value;
+    },
+    (error) => {
+      rejectCalls += 1;
+      throw error;
+    }
+  );
+
+  control.request.emit("finish");
+  control.endCallback?.();
+  control.request.emit("close");
+  await assert.rejects(
+    observed,
+    (error) => error?.code === "social_3b0_loopback_request_closed"
+  );
+  assert.equal(retained.every((byte) => byte === 0), true);
+  assert.equal(wipeCalls, 1);
+  assert.equal(resolveCalls, 0);
+  assert.equal(rejectCalls, 1);
+  assert.deepEqual(control.request.eventNames(), []);
+
+  const lateResponse = control.startResponse(200);
+  lateResponse.emit("data", Buffer.from('{"late":true}'));
+  lateResponse.emit("end");
+  assert.equal(lateResponse.resumeCalls, 1);
+  assert.equal(lateResponse.destroyCalls, 1);
+  assert.equal(responseChunkFactoryCalls, 0);
+  assert.equal(resolveCalls, 0);
+  assert.equal(rejectCalls, 1);
+  assert.equal(wipeCalls, 1);
+  assert.deepEqual(lateResponse.eventNames(), []);
+});
+
+test("httpJsonRequest rejects a real loopback peer close before response without residual resources", async () => {
+  const sockets = new Set();
+  let responseCallbacks = 0;
+  let dnsCalls = 0;
+  let bodyExact = false;
+  let bodyContainsNull = true;
+  const server = http.createServer((request) => {
+    const chunks = [];
+    let total = 0;
+    request.on("data", (chunk) => {
+      const copy = Buffer.from(chunk);
+      chunks.push(copy);
+      total += copy.length;
+    });
+    request.once("end", () => {
+      const serialized = Buffer.concat(chunks, total);
+      for (const chunk of chunks) chunk.fill(0);
+      chunks.length = 0;
+      bodyExact = serialized.toString("utf8") === JSON.stringify({ purpose: "connect" });
+      bodyContainsNull = serialized.includes(0);
+      serialized.fill(0);
+      request.socket.destroy();
+    });
+  });
+  server.on("connection", (socket) => {
+    sockets.add(socket);
+    socket.once("close", () => sockets.delete(socket));
+  });
+  await new Promise((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", resolve);
+  });
+  const address = server.address();
+  assert.equal(typeof address, "object");
+  assert.equal(address.address, "127.0.0.1");
+
+  try {
+    const requestImpl = (options, onResponse) => {
+      assert.equal(options.host, "127.0.0.1");
+      return http.request({
+        ...options,
+        agent: false,
+        lookup(hostname, _options, callback) {
+          dnsCalls += 1;
+          callback(new Error(`unexpected lookup for ${hostname}`));
+        }
+      }, (response) => {
+        responseCallbacks += 1;
+        onResponse(response);
+      });
+    };
+    await assert.rejects(
+      gate.httpJsonRequest({
+        port: address.port,
+        method: "POST",
+        route: "/v1/social/test",
+        body: { purpose: "connect" },
+        requestImpl
+      }),
+      (error) => error?.code === "social_3b0_loopback_request_closed"
+    );
+    assert.equal(bodyExact, true);
+    assert.equal(bodyContainsNull, false);
+    assert.equal(responseCallbacks, 0);
+    assert.equal(dnsCalls, 0);
+  } finally {
+    await closeLoopbackServer(server, sockets);
+  }
+  assert.equal(server.listening, false);
+  assert.equal(sockets.size, 0);
+});
+
+test("httpJsonRequest wipes on error or premature close and settles each failure once", async (context) => {
+  for (const scenario of ["error", "close"]) {
+    await context.test(scenario, async () => {
+      const control = controlledHttpTransport();
+      const resultPromise = gate.httpJsonRequest({
+        port: 7443,
+        method: "POST",
+        route: "/v1/social/test",
+        body: { purpose: "connect" },
+        requestImpl: control.requestImpl
+      });
+      const retained = control.payload;
+      let wipeCalls = 0;
+      let rejectionCalls = 0;
+      const originalFill = retained.fill.bind(retained);
+      retained.fill = (...args) => {
+        wipeCalls += 1;
+        return originalFill(...args);
+      };
+      const observed = resultPromise.catch((error) => {
+        rejectionCalls += 1;
+        throw error;
+      });
+      if (scenario === "error") {
+        control.request.emit("error", new Error("synthetic transport refusal"));
+        control.request.emit("close");
+      } else {
+        control.request.emit("close");
+      }
+      await assert.rejects(
+        observed,
+        (error) => error?.code === (scenario === "error"
+          ? "social_3b0_loopback_request_failed"
+          : "social_3b0_loopback_request_closed") &&
+          !String(error?.message).includes("synthetic transport refusal")
+      );
+      assert.equal(retained.every((byte) => byte === 0), true);
+      assert.equal(wipeCalls, 1);
+      assert.equal(rejectionCalls, 1);
+    });
+  }
+});
+
+test("httpJsonRequest absorbs aborted-error-close and drains a response after request failure", async (context) => {
+  await context.test("aborted then error then close", async () => {
+    const control = controlledHttpTransport({ destroyEmitsClose: false });
+    const resultPromise = gate.httpJsonRequest({
+      port: 7443,
+      method: "GET",
+      route: "/v1/social/test",
+      requestImpl: control.requestImpl
+    });
+    control.request.emit("finish");
+    control.endCallback?.();
+    const response = control.startResponse(200);
+    response.emit("data", Buffer.from('{"partial":'));
+    response.emit("aborted");
+    response.emit("error", new Error("synthetic post-abort detail"));
+    response.emit("close");
+    await assert.rejects(
+      resultPromise,
+      (error) => error?.code === "social_3b0_loopback_response_failed" &&
+        !String(error?.message).includes("synthetic post-abort detail")
+    );
+    assert.equal(response.resumeCalls, 1);
+    assert.equal(response.destroyCalls, 1);
+    assert.deepEqual(response.eventNames(), []);
+    assert.deepEqual(control.request.eventNames(), []);
+  });
+
+  await context.test("request error after response start", async () => {
+    const control = controlledHttpTransport({ destroyEmitsClose: false });
+    const resultPromise = gate.httpJsonRequest({
+      port: 7443,
+      method: "GET",
+      route: "/v1/social/test",
+      requestImpl: control.requestImpl
+    });
+    control.request.emit("finish");
+    control.endCallback?.();
+    const response = control.startResponse(200);
+    response.emit("data", Buffer.from('{"partial":'));
+    control.request.emit("error", new Error("synthetic request detail"));
+    response.emit("error", new Error("synthetic drained detail"));
+    response.emit("close");
+    await assert.rejects(
+      resultPromise,
+      (error) => error?.code === "social_3b0_loopback_request_failed" &&
+        !String(error?.message).includes("synthetic request detail")
+    );
+    assert.equal(response.resumeCalls, 1);
+    assert.equal(response.destroyCalls, 1);
+    assert.deepEqual(response.eventNames(), []);
+    assert.deepEqual(control.request.eventNames(), []);
+  });
+});
+
+test("httpJsonRequest preserves null bodies, JSON parsing, response limits and loopback pinning", async (context) => {
+  await context.test("null and invalid JSON responses", async () => {
+    const control = controlledHttpTransport();
+    const resultPromise = gate.httpJsonRequest({
+      port: 7443,
+      method: "GET",
+      route: "/v1/social/test",
+      requestImpl: control.requestImpl
+    });
+    assert.equal(control.payload, null);
+    assert.equal(control.request.options.host, "127.0.0.1");
+    control.request.emit("finish");
+    control.endCallback?.();
+    control.respond("not-json", 202);
+    assert.deepEqual(await resultPromise, { status: 202, value: null });
+  });
+
+  await context.test("oversized response", async () => {
+    const control = controlledHttpTransport();
+    const resultPromise = gate.httpJsonRequest({
+      port: 7443,
+      method: "GET",
+      route: "/v1/social/test",
+      requestImpl: control.requestImpl
+    });
+    control.request.emit("finish");
+    control.endCallback?.();
+    const response = control.respond("x".repeat(64 * 1024 + 1), 200);
+    await assert.rejects(
+      resultPromise,
+      (error) => error?.code === "social_3b0_loopback_response_too_large"
+    );
+    assert.equal(response.destroyCalls, 1);
+  });
+
+  await context.test("response chunks and response errors", async () => {
+    const control = controlledHttpTransport();
+    let observedCopy;
+    const resultPromise = gate.httpJsonRequest({
+      port: 7443,
+      method: "GET",
+      route: "/v1/social/test",
+      requestImpl: control.requestImpl,
+      responseChunkFactory(chunk) {
+        observedCopy = Buffer.from(chunk);
+        return observedCopy;
+      }
+    });
+    control.request.emit("finish");
+    control.endCallback?.();
+    control.respond('{"ok":true}', 200);
+    assert.deepEqual(await resultPromise, { status: 200, value: { ok: true } });
+    assert.ok(Buffer.isBuffer(observedCopy));
+    assert.equal(observedCopy.every((byte) => byte === 0), true);
+
+    const failed = controlledHttpTransport();
+    const failedPromise = gate.httpJsonRequest({
+      port: 7443,
+      method: "GET",
+      route: "/v1/social/test",
+      requestImpl: failed.requestImpl
+    });
+    failed.request.emit("finish");
+    failed.endCallback?.();
+    const failedResponse = failed.startResponse(200);
+    failedResponse.emit("data", Buffer.from('{"partial":'));
+    failedResponse.emit("error", new Error("synthetic response detail"));
+    failedResponse.emit("close");
+    await assert.rejects(
+      failedPromise,
+      (error) => error?.code === "social_3b0_loopback_response_failed" &&
+        !String(error?.message).includes("synthetic response detail")
+    );
+  });
+
+  let requestCalls = 0;
+  assert.throws(
+    () => gate.httpJsonRequest({
+      port: 7443,
+      method: "GET",
+      route: "https://example.invalid/v1/social/test",
+      requestImpl() { requestCalls += 1; }
+    }),
+    (error) => error?.code === "social_3b0_loopback_request_invalid"
+  );
+  assert.equal(requestCalls, 0);
+});
+
+test("O05 refusal predicates preserve four exact and non-overlapping causal codes", () => {
+  const valid = Object.freeze({
+    missingStatus: 401,
+    invalidStatus: 401,
+    beforeCount: 0,
+    afterCount: 0,
+    bearerAccepts: 0
+  });
+  assert.equal(gate.assertAuthorizeRefusalContract(valid), true);
+  const scenarios = [
+    ["missingStatus", 400, "social_3b0_authorize_missing_bearer_status_invalid"],
+    ["invalidStatus", 400, "social_3b0_authorize_invalid_bearer_status_invalid"],
+    ["afterCount", 1, "social_3b0_authorize_refusal_persistence_invalid"],
+    ["bearerAccepts", 1, "social_3b0_authorize_refusal_acceptance_invalid"]
+  ];
+  for (const [field, value, code] of scenarios) {
+    assert.throws(
+      () => gate.assertAuthorizeRefusalContract({ ...valid, [field]: value }),
+      (error) => error?.code === code && error?.message === code
+    );
+    assert.throws(
+      () => gate.assertAuthorizeRefusalContract({ ...valid, [field]: value }),
+      (error) => !String(error?.code).startsWith(`${code}_`)
+    );
+  }
+});
+
+test("O05 source preserves refusal ordering, request counts and the valid authorize contract", () => {
+  const source = fs.readFileSync(
+    path.join(__dirname, "..", "scripts", "social-3b0-linux-physical-gate.js"),
+    "utf8"
+  );
+  const start = source.indexOf('await ledger.run("O05"');
+  const end = source.indexOf('await ledger.run("O06"', start);
+  const o05 = source.slice(start, end);
+  assert.ok(start >= 0 && end > start);
+  assert.equal((o05.match(/counts\.authorizeRequests \+= 1/g) || []).length, 3);
+  assert.match(o05, /assertAuthorizeRefusalContract\(\{/);
+  assert.match(o05, /missingStatus: missing\.status/);
+  assert.match(o05, /invalidStatus: invalid\.status/);
+  assert.match(o05, /beforeCount: Number\(before\.rows/);
+  assert.match(o05, /afterCount: Number\(afterRefusal\.rows/);
+  assert.match(o05, /bearerAccepts\s*\n\s*\}\);/);
+  assert.doesNotMatch(o05, /social_3b0_authorize_bearer_refusal_invalid/);
+  assert.match(o05, /response\.status !== 201/);
+  assert.match(o05, /response\.value\?\.status !== "authorization_pending"/);
+  assert.match(o05, /bearerAccepts !== 1/);
+  assert.match(o05, /fail\("social_3b0_authorize_http_invalid"\)/);
+  const refusalCheck = o05.indexOf("assertAuthorizeRefusalContract({");
+  const validRequest = o05.indexOf("const response = await httpJsonRequest({");
+  const requestCounts = [...o05.matchAll(/counts\.authorizeRequests \+= 1/g)]
+    .map((match) => match.index);
+  assert.equal(requestCounts.filter((index) => index < refusalCheck).length, 2);
+  assert.equal(requestCounts.filter((index) => index > validRequest).length, 1);
+  assert.ok(refusalCheck < validRequest);
+  assert.ok(o05.indexOf("response.status !== 201") < o05.indexOf("primaryState = new URL"));
+  assert.doesNotMatch(o05, /startsWith|endsWith|\.includes\(|\bRegExp\b|\|\|\s*\[|catch\s*\(/);
 });
 
 test("evidence contract requires exact Gates, O01-O22, counts, scans and zero residuals", () => {

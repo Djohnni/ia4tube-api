@@ -11,7 +11,7 @@ const tls = require("node:tls");
 const path = require("node:path");
 
 const BRANCH =
-  "social/checkpoint-3b0-gate3-consumed-state-contract-20260812";
+  "social/checkpoint-3b0-o05-loopback-json-flush-20260812";
 const PHASE = "instagram_oauth_local_contract";
 const IMAGE =
   "docker.io/library/postgres:18.4-bookworm@" +
@@ -1063,53 +1063,260 @@ function streamJson(payload, readers) {
   });
 }
 
-function httpJsonRequest({ port, method, route, headers = {}, body = null }) {
+function httpJsonRequest({
+  port,
+  method,
+  route,
+  headers = {},
+  body = null,
+  requestImpl = http.request,
+  responseChunkFactory = (chunk) => Buffer.from(chunk)
+}) {
   if (
     !Number.isSafeInteger(port) || port < 1 ||
-    !route.startsWith("/v1/social/")
+    typeof route !== "string" ||
+    !route.startsWith("/v1/social/") ||
+    typeof requestImpl !== "function" ||
+    typeof responseChunkFactory !== "function"
   ) fail("social_3b0_loopback_request_invalid");
-  const payload = body === null ? null : Buffer.from(JSON.stringify(body), "utf8");
+  let payload = body === null ? null : Buffer.from(JSON.stringify(body), "utf8");
   return new Promise((resolve, reject) => {
-    const request = http.request({
-      host: LOOPBACK,
-      port,
-      method,
-      path: route,
-      headers: {
-        accept: "application/json",
-        ...(payload ? {
-          "content-type": "application/json",
-          "content-length": String(payload.length)
-        } : {}),
-        ...headers
+    let settled = false;
+    let requestFinished = false;
+    let responseStarted = false;
+    let responseResult = null;
+    let activeResponse = null;
+    let payloadWiped = payload === null;
+    let wipeResponseChunks = () => {};
+    let cleanupRequestListeners = () => {};
+    let cleanupResponseListeners = () => {};
+    const wipePayloadOnce = () => {
+      if (payloadWiped) return false;
+      payloadWiped = true;
+      payload.fill(0);
+      payload = null;
+      return true;
+    };
+    const settleOnce = (kind, value) => {
+      if (settled) return false;
+      settled = true;
+      cleanupRequestListeners();
+      if (kind === "resolve") resolve(value);
+      else reject(value);
+      return true;
+    };
+    const resolveIfReady = () => {
+      if (!requestFinished || responseResult === null) return false;
+      return settleOnce("resolve", responseResult);
+    };
+    const discardResponse = (response, alreadyClosed = false) => {
+      cleanupResponseListeners();
+      if (activeResponse === response) activeResponse = null;
+      if (!response || alreadyClosed) return;
+      const absorbError = () => {};
+      const removeGuard = () => {
+        response.removeListener("error", absorbError);
+        response.removeListener("close", removeGuard);
+      };
+      response.on("error", absorbError);
+      response.once("close", removeGuard);
+      try {
+        if (typeof response.resume === "function") response.resume();
+      } catch {}
+      try {
+        if (typeof response.destroy === "function") response.destroy();
+      } catch {}
+    };
+    const refuseOnce = (code, options = {}) => {
+      wipePayloadOnce();
+      wipeResponseChunks();
+      if (options.discardActiveResponse) {
+        discardResponse(activeResponse, options.responseAlreadyClosed === true);
+      } else {
+        cleanupResponseListeners();
       }
-    }, (response) => {
+      settleOnce("reject", new Social3B0PhysicalGateFailure(code));
+    };
+    const onResponse = (response) => {
+      responseStarted = true;
+      if (settled) {
+        discardResponse(response);
+        return;
+      }
+      activeResponse = response;
       const chunks = [];
       let total = 0;
-      response.on("data", (chunk) => {
-        total += chunk.length;
-        if (total > 64 * 1024) {
-          response.destroy();
+      let responseEnded = false;
+      wipeResponseChunks = () => {
+        for (const chunk of chunks) chunk.fill(0);
+        chunks.length = 0;
+        total = 0;
+      };
+      const onResponseData = (chunk) => {
+        if (responseEnded || settled) return;
+        let copy;
+        try { copy = responseChunkFactory(chunk); }
+        catch {
+          responseEnded = true;
+          refuseOnce("social_3b0_loopback_response_failed", {
+            discardActiveResponse: true
+          });
           return;
         }
-        chunks.push(Buffer.from(chunk));
-      });
-      response.once("end", () => {
+        if (!Buffer.isBuffer(copy)) {
+          responseEnded = true;
+          refuseOnce("social_3b0_loopback_response_failed", {
+            discardActiveResponse: true
+          });
+          return;
+        }
+        total += chunk.length;
+        if (total > 64 * 1024) {
+          copy.fill(0);
+          responseEnded = true;
+          wipeResponseChunks();
+          refuseOnce("social_3b0_loopback_response_too_large", {
+            discardActiveResponse: true
+          });
+          return;
+        }
+        chunks.push(copy);
+      };
+      const onResponseEnd = () => {
+        if (responseEnded || settled) return;
+        responseEnded = true;
         const serialized = Buffer.concat(chunks, total);
-        for (const chunk of chunks) chunk.fill(0);
+        wipeResponseChunks();
         let value;
         try { value = JSON.parse(serialized.toString("utf8")); }
         catch { value = null; }
         serialized.fill(0);
-        resolve(Object.freeze({ status: response.statusCode, value }));
-      });
-      response.once("error", reject);
-    });
-    request.once("error", reject);
-    if (payload) request.write(payload);
-    request.end();
-    if (payload) payload.fill(0);
+        responseResult = Object.freeze({
+          status: response.statusCode,
+          value
+        });
+        cleanupResponseListeners();
+        activeResponse = null;
+        resolveIfReady();
+      };
+      const refuseResponseOnce = (alreadyClosed = false) => {
+        if (responseEnded) return;
+        responseEnded = true;
+        wipeResponseChunks();
+        refuseOnce("social_3b0_loopback_response_failed", {
+          discardActiveResponse: true,
+          responseAlreadyClosed: alreadyClosed
+        });
+      };
+      const onResponseAborted = () => refuseResponseOnce(false);
+      const onResponseError = () => refuseResponseOnce(false);
+      const onResponseClose = () => {
+        if (!responseEnded) refuseResponseOnce(true);
+      };
+      cleanupResponseListeners = () => {
+        response.removeListener("data", onResponseData);
+        response.removeListener("end", onResponseEnd);
+        response.removeListener("aborted", onResponseAborted);
+        response.removeListener("error", onResponseError);
+        response.removeListener("close", onResponseClose);
+        cleanupResponseListeners = () => {};
+      };
+      response.on("data", onResponseData);
+      response.once("end", onResponseEnd);
+      response.once("aborted", onResponseAborted);
+      response.once("error", onResponseError);
+      response.once("close", onResponseClose);
+    };
+    let request;
+    try {
+      request = requestImpl({
+        host: LOOPBACK,
+        port,
+        method,
+        path: route,
+        headers: {
+          accept: "application/json",
+          ...(payload ? {
+            "content-type": "application/json",
+            "content-length": String(payload.length)
+          } : {}),
+          ...headers
+        }
+      }, onResponse);
+    } catch {
+      refuseOnce("social_3b0_loopback_request_failed");
+      return;
+    }
+    if (
+      request === null || typeof request !== "object" ||
+      typeof request.once !== "function" ||
+      typeof request.end !== "function"
+    ) {
+      refuseOnce("social_3b0_loopback_request_failed");
+      return;
+    }
+    const finishRequestOnce = (error) => {
+      if (error) {
+        refuseOnce("social_3b0_loopback_request_failed");
+        return;
+      }
+      requestFinished = true;
+      wipePayloadOnce();
+      resolveIfReady();
+    };
+    const onRequestError = () => {
+      refuseOnce(
+        requestFinished && !responseStarted
+          ? "social_3b0_loopback_request_closed"
+          : "social_3b0_loopback_request_failed",
+        { discardActiveResponse: responseStarted }
+      );
+    };
+    const onRequestClose = () => {
+      if (!responseStarted) {
+        refuseOnce("social_3b0_loopback_request_closed");
+      }
+    };
+    cleanupRequestListeners = () => {
+      request.removeListener("finish", finishRequestOnce);
+      request.removeListener("error", onRequestError);
+      request.removeListener("close", onRequestClose);
+      cleanupRequestListeners = () => {};
+    };
+    request.once("finish", finishRequestOnce);
+    request.once("error", onRequestError);
+    request.once("close", onRequestClose);
+    try {
+      if (payload) request.end(payload, finishRequestOnce);
+      else request.end(finishRequestOnce);
+    } catch {
+      refuseOnce("social_3b0_loopback_request_failed");
+    }
   });
+}
+
+function assertAuthorizeRefusalContract({
+  missingStatus,
+  invalidStatus,
+  beforeCount,
+  afterCount,
+  bearerAccepts
+}) {
+  if (missingStatus !== 401) {
+    fail("social_3b0_authorize_missing_bearer_status_invalid");
+  }
+  if (invalidStatus !== 401) {
+    fail("social_3b0_authorize_invalid_bearer_status_invalid");
+  }
+  if (
+    !Number.isSafeInteger(beforeCount) || beforeCount < 0 ||
+    !Number.isSafeInteger(afterCount) || afterCount < 0 ||
+    beforeCount !== afterCount
+  ) fail("social_3b0_authorize_refusal_persistence_invalid");
+  if (bearerAccepts !== 0) {
+    fail("social_3b0_authorize_refusal_acceptance_invalid");
+  }
+  return true;
 }
 
 function listenLoopback(app) {
@@ -1787,11 +1994,13 @@ async function runPhysicalOAuthContract(options = {}) {
         ),
         { role: RUNTIME_ROLE, companyId: tenantA.fixture.companyId }
       );
-      if (
-        missing.status !== 401 || invalid.status !== 401 ||
-        Number(before.rows?.[0]?.count) !== Number(afterRefusal.rows?.[0]?.count) ||
-        bearerAccepts !== 0
-      ) fail("social_3b0_authorize_bearer_refusal_invalid");
+      assertAuthorizeRefusalContract({
+        missingStatus: missing.status,
+        invalidStatus: invalid.status,
+        beforeCount: Number(before.rows?.[0]?.count),
+        afterCount: Number(afterRefusal.rows?.[0]?.count),
+        bearerAccepts
+      });
       const response = await httpJsonRequest({
         port: serverPort,
         method: "POST",
@@ -2852,6 +3061,7 @@ module.exports = {
   SUBSTEP_IDS,
   WORKER_TIMEOUT_MS,
   Social3B0PhysicalGateFailure,
+  assertAuthorizeRefusalContract,
   artifactPaths,
   baseEvidence,
   canonicalJson,
@@ -2860,6 +3070,7 @@ module.exports = {
   cleanupInstagramOAuthPhysicalGate,
   evidenceSafe,
   historicFailureDetails,
+  httpJsonRequest,
   installApplicationNetworkGuard,
   parseCli,
   runBlockedBodyProof,

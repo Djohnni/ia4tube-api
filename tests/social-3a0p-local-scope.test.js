@@ -13,34 +13,32 @@ const {
 const AUTHORIZED_FILES = Object.freeze([
   ".github/workflows/social-3b0-instagram-oauth-local-contract.yml",
   "docs/social-3b0-instagram-oauth-local-contract.md",
-  "scripts/social-3a0p-linux-physical-gates.js",
   "scripts/social-3a0p-local-scope.js",
   "scripts/social-3b0-linux-physical-gate.js",
   "tests/social-3a0p-current-diff-scope.test.js",
-  "tests/social-3a0p-linux-physical-gates.test.js",
   "tests/social-3a0p-local-scope.test.js",
   "tests/social-3b0-linux-physical-gate.test.js",
   "tests/social-3b0-linux-workflow.test.js"
 ]);
 
-test("Gate 3 replay and remote evidence scope accepts exactly ten paths", () => {
-  assert.equal(AUTHORIZED_FILES.length, 10);
+test("O05 loopback JSON flush scope accepts exactly eight paths", () => {
+  assert.equal(AUTHORIZED_FILES.length, 8);
   assert.deepEqual(ALLOWED_PREFIXES, []);
   assert.deepEqual(
     [...ALLOWED_EXACT_FILES].sort(),
     [...AUTHORIZED_FILES].sort()
   );
-  assert.equal(ALLOWED_EXACT_FILES.size, 10);
+  assert.equal(ALLOWED_EXACT_FILES.size, 8);
   for (const file of AUTHORIZED_FILES) {
     assert.equal(isHarnessOnlyFile(file), true, file);
   }
   assert.deepEqual(assertHarnessOnlyChangedFiles([...AUTHORIZED_FILES]), {
     harnessOnly: true,
-    changedFileCount: 10
+    changedFileCount: 8
   });
 });
 
-test("Gate 3 replay and remote evidence scope refuses variants, globs, subpaths and case changes", () => {
+test("O05 loopback JSON flush scope refuses variants, globs, subpaths and case changes", () => {
   for (const file of [
     ".github/workflows/social-3b0-instagram-oauth-local-contract.yml.bak",
     ".github/workflows/SOCIAL-3B0-INSTAGRAM-OAUTH-LOCAL-CONTRACT.YML",
@@ -66,7 +64,7 @@ test("Gate 3 replay and remote evidence scope refuses variants, globs, subpaths 
   }
 });
 
-test("Gate 3 replay and remote evidence scope refuses product, dependency and historical paths", () => {
+test("O05 loopback JSON flush scope refuses product, dependency and historical paths", () => {
   for (const file of [
     "server.js",
     "src/social/oauth/instagram-config.js",
@@ -86,6 +84,8 @@ test("Gate 3 replay and remote evidence scope refuses product, dependency and hi
     "package-lock.json",
     ".github/workflows/social-3a0p-linux-physical-gates.yml",
     "docs/social-3a0p-linux-physical-gates.md",
+    "scripts/social-3a0p-linux-physical-gates.js",
+    "tests/social-3a0p-linux-physical-gates.test.js",
     "tests/social-3a0p-linux-workflow.test.js",
     "tests/social-3b0-instagram-oauth-crypto-provider.test.js",
     "tests/social-3b0-instagram-oauth-routes.test.js",
@@ -102,7 +102,7 @@ test("Gate 3 replay and remote evidence scope refuses product, dependency and hi
   }
 });
 
-test("Gate 3 replay and remote evidence scope rejects traversal and absolute paths", () => {
+test("O05 loopback JSON flush scope rejects traversal and absolute paths", () => {
   for (const file of [
     "../scripts/social-3b0-linux-physical-gate.js",
     "tests/../scripts/social-3b0-linux-physical-gate.js",
@@ -117,7 +117,7 @@ test("Gate 3 replay and remote evidence scope rejects traversal and absolute pat
   }
 });
 
-test("Gate 3 replay and remote evidence scope normalizes only path separators", () => {
+test("O05 loopback JSON flush scope normalizes only path separators", () => {
   const windowsPath = "scripts\\social-3b0-linux-physical-gate.js";
   assert.equal(
     normalizeRepositoryFile(windowsPath),
@@ -130,7 +130,7 @@ test("Gate 3 replay and remote evidence scope normalizes only path separators", 
   });
 });
 
-test("Gate 3 replay and remote evidence scope has no wildcard or directory-wide exception", () => {
+test("O05 loopback JSON flush scope has no wildcard or directory-wide exception", () => {
   assert.equal(
     [...ALLOWED_EXACT_FILES].some(
       (file) => file.includes("*") || file.endsWith("/")

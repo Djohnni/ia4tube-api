@@ -1,4 +1,4 @@
-# Social 3B-0 — Gate 3 replay e evidência remota do contrato OAuth local
+# Social 3B-0 — O05 loopback JSON flush e contrato OAuth local
 
 ## Base local preservada
 
@@ -66,8 +66,9 @@ indisponível, nunca inferido como zero.
 
 ## Terceiro commit — correção fechada
 
-A nova rota pertence à branch exata
-`social/checkpoint-3b0-gate3-consumed-state-contract-20260812`, parte do commit
+A terceira rota pertence à branch exata
+`social/checkpoint-3b0-gate3-consumed-state-contract-20260812`. Seu commit é
+`27cd350a253ab3ff07a915570eb41f291bbd1b42`, tem como pai imediato
 `7bff67ac0c1acdd37473889a3f8b5c2017b30c9c` e usa a mensagem exata:
 
 ```text
@@ -88,10 +89,10 @@ Seu inventário é fechado em exatamente dez caminhos literais:
 10. `tests/social-3b0-linux-workflow.test.js`.
 
 Não há décimo primeiro caminho, prefixo, glob ou exceção de diretório. Os
-guards distinguem os dezoito caminhos funcionais de `33e3`, os nove caminhos
-de infraestrutura de `7bff` e os dez caminhos desta correção. O diff corrente
-usa `7bff` como base; a proteção de produto continua ancorada separadamente em
-`33e3`.
+guards daquela rota distinguiam os dezoito caminhos funcionais de `33e3`, os
+nove caminhos de infraestrutura de `7bff` e os dez caminhos dessa correção. O
+diff daquela rota usou `7bff` como base; a proteção de produto permaneceu
+ancorada separadamente em `33e3`.
 
 O Gate 3 preserva S10 com dois consumidores concorrentes e
 `Promise.allSettled`. S11 exige um vencedor e um perdedor cujo código exato é
@@ -100,6 +101,74 @@ S12 exige o mesmo código específico. A tentativa cross-tenant em S12 continua
 exigindo `authorization_expired`, sem revelar a existência do state em outra
 empresa. A autorização realmente expirada em S16 também continua exigindo
 `authorization_expired`. O repositório OAuth funcional não é alterado.
+
+As validações locais dessa correção encerraram com focal S10–S12 em 12/12,
+Gate 3 completo em 144/144, gate físico sintético em 14/14, workflow em 11/11,
+escopo em 8/8 e suíte completa com 1.694 testes lógicos, 1.687 aprovados, zero
+falhas, dois ignorados e cinco TODO. O scan canônico teve zero achados; as
+auditorias npm completa e runtime tiveram zero vulnerabilidades.
+
+O único push dessa branch iniciou o run `31622235155`, attempt 1. Windows, o
+pré-gate Linux, G01–G05 e O01–O04 foram aprovados. O05 falhou com a primeira
+causa sanitizada `social_3b0_authorize_bearer_refusal_invalid`; O06–O21 ficaram
+`skipped`, O22 foi aprovado, o secret scan remoto permaneceu `not_run` e
+`backupRestoreFailureProvenance` permaneceu `null`. A primeira falha registrou
+`job=linux_physical_gate`,
+`phase=instagram_oauth_local_contract`, `substep=O05`,
+`lastCompletedSubstep=O04`, `externalProcessStarted=null`, `exitCode=null`,
+`signal=null` e `timedOut=false`. O supervisor registrou `exitCode=1`, `signal=null`,
+`timedOut=false` e nenhum stdout ou stderr armazenado. Não houve segundo push,
+retry ou re-run.
+
+O artifact histórico `9151753459`, nome
+`social-3b0-instagram-oauth-local-contract-evidence` e digest
+`sha256:0b03e60bc73b259c5ee60bcf4c606b174bbf3d1a3c7b8dafe943c732e66e9fec`,
+permanece inalterado. Seu evidence SHA-256 é
+`5b59296159c672cfd9e5983d1cbbe9b914ed67fd897dcf7b01b68d49d7c606ea` e o
+process-status SHA-256 é
+`26564ca3007f7f91c7b77edadbe4122d82804ea0626a3958f21292d1b067f342`.
+Ele registrou `authorizeRequests=2`, `callbackRequests=0`,
+`syntheticExchangeCalls=0`, `credentialWrites=0`, `publicationCalls=0`,
+`externalMetaCalls=0`, `externalInstagramCalls=0`, `externalGraphApiCalls=0`,
+`externalRenderCalls=0`, `externalPublicationCalls=0` e `realTokenCount=0`, além
+de cleanup concluído, material sintético limpo e os dez resíduos em zero. O
+status HTTP que causou a divergência não foi publicado e não é inferido.
+
+## Quarto commit — correção fechada do helper loopback
+
+A quarta rota parte exatamente de `27cd350a253ab3ff07a915570eb41f291bbd1b42`
+na branch
+`social/checkpoint-3b0-o05-loopback-json-flush-20260812` e reserva a mensagem:
+
+```text
+[run-social-3b0] preserve loopback JSON payload until request flush
+```
+
+Seu inventário é fechado em exatamente oito caminhos literais:
+
+1. `.github/workflows/social-3b0-instagram-oauth-local-contract.yml`;
+2. `docs/social-3b0-instagram-oauth-local-contract.md`;
+3. `scripts/social-3a0p-local-scope.js`;
+4. `scripts/social-3b0-linux-physical-gate.js`;
+5. `tests/social-3a0p-current-diff-scope.test.js`;
+6. `tests/social-3a0p-local-scope.test.js`;
+7. `tests/social-3b0-linux-physical-gate.test.js`;
+8. `tests/social-3b0-linux-workflow.test.js`.
+
+Não há nono caminho, prefixo, glob ou exceção de diretório. O diff corrente
+usa `27cd` como base, enquanto a proteção dos dezoito blobs funcionais continua
+ancorada separadamente em `33e3`.
+
+A causa fechada é
+`social_3b0_loopback_json_payload_zeroed_before_request_flush`, limitada ao
+helper físico `httpJsonRequest`. O payload JSON deve permanecer íntegro até a
+confirmação de consumo pelo request e ser zerado uma única vez depois de
+`finish`, ou antes da rejeição em erro ou fechamento prematuro. A procedência de
+O05 distingue, sem publicar status ou corpo, Bearer ausente, Bearer inválido,
+persistência indevida, aceitação indevida e o contrato da requisição válida.
+OAuth funcional, autenticação Bearer do produto, parser do produto, state AEAD,
+repositório, RLS e cofre permanecem inalterados. Nenhum resultado desta quarta
+rota é antecipado neste documento.
 
 ## Workflow remoto separado
 
@@ -113,19 +182,21 @@ completo, a concorrência é exclusiva da branch e `cancel-in-progress` é falso
 
 O guard remoto deve aceitar somente `event=push`, criação da nova branch com
 `github.event.before` composto por quarenta zeros, `github.event.created=true`,
-`forced=false`, `deleted=false`, `run_attempt=1` e a mensagem exata do terceiro
+`forced=false`, `deleted=false`, `run_attempt=1` e a mensagem exata do quarto
 commit. A cadeia aceita é exclusivamente:
 
 ```text
 HEAD remoto
+  -> 27cd350a253ab3ff07a915570eb41f291bbd1b42
   -> 7bff67ac0c1acdd37473889a3f8b5c2017b30c9c
   -> 33e3ea7abcea7f5dc51780c3a1efd4743352fe40
   -> 3dc3d8be62438216509f061f6c1a26ee39c9b5dc
 ```
 
-Cada commit deve ter exatamente um pai. O guard verifica os dezoito caminhos
-do commit funcional, os nove caminhos do commit de infraestrutura anterior e
-os dez caminhos do commit corrente como inventários distintos.
+Cada commit deve ter exatamente um pai. O guard verifica separadamente os
+dezoito caminhos do commit funcional, os nove caminhos do commit de
+infraestrutura, os dez caminhos da correção anterior e os oito caminhos do
+commit corrente.
 
 ## Jobs e limites operacionais
 
@@ -213,4 +284,5 @@ evidência, sidecars e cleanup forem aprovados, com `firstFailure=null` e todos
 os resíduos em zero.
 
 Nenhum resultado remoto, SHA de evidência, digest de artifact ou conclusão do
-run é registrado neste documento antes de ser efetivamente observado.
+run da quarta rota é registrado neste documento antes de ser efetivamente
+observado.
