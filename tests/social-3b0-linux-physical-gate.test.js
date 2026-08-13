@@ -14,6 +14,9 @@ const test = require("node:test");
 const gate = require("../scripts/social-3b0-linux-physical-gate");
 const historicGate = require("../scripts/social-3a0p-linux-gate");
 const {
+  PROCESS_LIFECYCLE_TEST_FILES
+} = require("../scripts/run-node-tests");
+const {
   INSTAGRAM_OAUTH_REDIRECT_URI,
   loadInstagramOAuthConfig
 } = require("../src/social/oauth/instagram-config");
@@ -410,11 +413,88 @@ async function closeLoopbackServer(server, sockets) {
   await Promise.all([serverClosure, ...socketClosures]);
 }
 
-test("Social 3B physical gate freezes branch, phase, image and bounded budgets", () => {
+test("Social 3B physical gate freezes the Exact9 native-process serialization route", () => {
   assert.equal(
     gate.BRANCH,
-    "social/checkpoint-3b0-o22-cleanup-provenance-20260812"
+    "social/checkpoint-3b0-windows-native-process-serialization-20260813"
   );
+  assert.equal(
+    gate.COMMIT_MESSAGE,
+    "[run-social-3b0] serialize native Windows process tests"
+  );
+  assert.equal(
+    gate.PARENT_COMMIT,
+    "1eae6c50003c523ad80a473a5554eb9f84770389"
+  );
+  assert.deepEqual(gate.HISTORIC_COMMIT_CHAIN, [
+    {
+      level: "functional_parent",
+      sha: "3dc3d8be62438216509f061f6c1a26ee39c9b5dc"
+    },
+    {
+      level: "functional",
+      sha: "33e3ea7abcea7f5dc51780c3a1efd4743352fe40"
+    },
+    {
+      level: "prior_infrastructure",
+      sha: "7bff67ac0c1acdd37473889a3f8b5c2017b30c9c"
+    },
+    {
+      level: "previous_correction",
+      sha: "27cd350a253ab3ff07a915570eb41f291bbd1b42"
+    },
+    {
+      level: "o05",
+      sha: "ad3c162aaee04bb66d79ea3c35c3d75297e8d0ab"
+    },
+    {
+      level: "o12",
+      sha: "1febe1211b0021d8c35cdfb840f581fd76ce39e7"
+    },
+    { level: "o22", sha: gate.PARENT_COMMIT }
+  ]);
+  assert.equal(
+    gate.HISTORIC_COMMIT_CHAIN.at(-1).sha,
+    gate.PARENT_COMMIT
+  );
+  assert.deepEqual(gate.CORRECTION_FILES, [
+    ".github/workflows/social-3b0-instagram-oauth-local-contract.yml",
+    "scripts/run-node-tests.js",
+    "scripts/social-3a0p-local-scope.js",
+    "scripts/social-3b0-linux-physical-gate.js",
+    "tests/node-test-runner-safety.test.js",
+    "tests/social-3a0p-current-diff-scope.test.js",
+    "tests/social-3a0p-local-scope.test.js",
+    "tests/social-3b0-linux-physical-gate.test.js",
+    "tests/social-3b0-linux-workflow.test.js"
+  ]);
+  assert.equal(gate.CORRECTION_FILES.length, 9);
+  assert.equal(new Set(gate.CORRECTION_FILES).size, 9);
+  assert.deepEqual(gate.WINDOWS_NATIVE_SERIAL_TEST_FILES, [
+    "social-3a0p-local-safe-zip-extract.test.js",
+    "social-postgres-tls.test.js"
+  ]);
+  assert.equal(PROCESS_LIFECYCLE_TEST_FILES.length, 11);
+  assert.equal(new Set(PROCESS_LIFECYCLE_TEST_FILES).size, 11);
+  for (const name of gate.WINDOWS_NATIVE_SERIAL_TEST_FILES) {
+    assert.equal(
+      PROCESS_LIFECYCLE_TEST_FILES.filter((candidate) => candidate === name).length,
+      1,
+      name
+    );
+    assert.equal(gate.CORRECTION_FILES.includes(`tests/${name}`), false, name);
+  }
+  for (const protectedPath of [
+    "scripts/social-3a0p-local-safe-zip-extract.ps1",
+    "tests/helpers/local-tls-handshake.js"
+  ]) assert.equal(gate.CORRECTION_FILES.includes(protectedPath), false);
+  assert.equal(Object.isFrozen(gate.HISTORIC_COMMIT_CHAIN), true);
+  assert.equal(
+    gate.HISTORIC_COMMIT_CHAIN.every((entry) => Object.isFrozen(entry)),
+    true
+  );
+  assert.equal(Object.isFrozen(gate.CORRECTION_FILES), true);
+  assert.equal(Object.isFrozen(gate.WINDOWS_NATIVE_SERIAL_TEST_FILES), true);
   assert.equal(gate.PHASE, "instagram_oauth_local_contract");
   assert.equal(
     gate.IMAGE,
@@ -429,6 +509,37 @@ test("Social 3B physical gate freezes branch, phase, image and bounded budgets",
     { length: 22 },
     (_unused, index) => `O${String(index + 1).padStart(2, "0")}`
   ));
+  const o22Evidence = passedEvidence();
+  assert.equal(o22Evidence.substeps.at(-1).id, "O22");
+  assert.equal(o22Evidence.substeps.at(-1).status, "passed");
+  assert.equal(o22Evidence.cleanupFailureProvenance, null);
+  assert.equal(gate.evidenceSafe(o22Evidence), true);
+});
+
+test("Linux physical gate does not prewarm or alter the ZIP/TLS native environment", () => {
+  const source = fs.readFileSync(
+    path.join(__dirname, "..", "scripts", "social-3b0-linux-physical-gate.js"),
+    "utf8"
+  );
+  assert.doesNotMatch(source, /\b(?:prewarm|openssl(?:\.exe)?|powershell(?:\.exe)?)\b/i);
+  assert.doesNotMatch(
+    source,
+    /(?:process\.env|environment|env)\.PATH\s*=/
+  );
+  const valid = environment({
+    RUNNER_TEMP: path.join(os.tmpdir(), "social-3b0-environment-contract")
+  });
+  assert.equal(
+    Object.keys(valid).some((name) =>
+      /^(?:PATH|OPENSSL|POWERSHELL|PREWARM)(?:_|$)/i.test(name)
+    ),
+    false
+  );
+  assert.deepEqual(gate.validateEnvironment(valid), {
+    branch: gate.BRANCH,
+    sha: SHA,
+    runAttempt: 1
+  });
 });
 
 test("remote environment requires every external runtime gate to remain exactly false", () => {

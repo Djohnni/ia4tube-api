@@ -9,16 +9,21 @@ const {
   assertHarnessOnlyChangedFiles
 } = require("../scripts/social-3a0p-local-scope");
 
-const ROUTE_BASE_COMMIT = "1febe1211b0021d8c35cdfb840f581fd76ce39e7";
+const ROUTE_BRANCH =
+  "social/checkpoint-3b0-windows-native-process-serialization-20260813";
+const ROUTE_BASE_COMMIT = "1eae6c50003c523ad80a473a5554eb9f84770389";
 const FUNCTIONAL_COMMIT = "33e3ea7abcea7f5dc51780c3a1efd4743352fe40";
 const POST_COMMIT_PROOF_HEAD = "ffffffffffffffffffffffffffffffffffffffff";
 const GIT_TIMEOUT_MS = 20_000;
 const GIT_MAX_BUFFER_BYTES = 1024 * 1024;
 const AUTHORIZED_CHANGED_FILES = Object.freeze([
   ".github/workflows/social-3b0-instagram-oauth-local-contract.yml",
-  "docs/social-3b0-instagram-oauth-local-contract.md",
+  "scripts/run-node-tests.js",
+  "scripts/social-3a0p-local-scope.js",
   "scripts/social-3b0-linux-physical-gate.js",
+  "tests/node-test-runner-safety.test.js",
   "tests/social-3a0p-current-diff-scope.test.js",
+  "tests/social-3a0p-local-scope.test.js",
   "tests/social-3b0-linux-physical-gate.test.js",
   "tests/social-3b0-linux-workflow.test.js"
 ]);
@@ -550,14 +555,14 @@ function runMandatoryContractProofs() {
     proofCount += 1;
   }
 
-  // 1. Local mode recognizes exactly the six authorized paths.
+  // 1. Local mode recognizes exactly the nine authorized paths.
   proof(() => {
     const result = assertRouteInventory(makeLocalSnapshot());
     assert.equal(result.mode, "local");
     assert.deepEqual(result.files, [...AUTHORIZED_CHANGED_FILES].sort());
   });
 
-  // 2. Post-commit mode recognizes exactly the same six paths.
+  // 2. Post-commit mode recognizes exactly the same nine paths.
   proof(() => {
     const result = assertRouteInventory(makePostCommitSnapshot());
     assert.equal(result.mode, "post_commit");
@@ -584,13 +589,13 @@ function runMandatoryContractProofs() {
     );
   });
 
-  // 5. A seventh changed path is refused.
+  // 5. A tenth changed path is refused.
   proof(() => {
     assert.throws(
       () => assertRouteInventory(makeLocalSnapshot({
         unstagedTrackedFiles: [
           ...AUTHORIZED_CHANGED_FILES,
-          "tests/seventh-scope-path.test.js"
+          "tests/tenth-scope-path.test.js"
         ]
       })),
       { code: "scope_unstaged_refused" }
@@ -869,9 +874,13 @@ function runMandatoryContractProofs() {
 
 const sharedSnapshotCache = createSnapshotCache(() => buildGitSnapshot());
 
-test("a correcao O22 contem exatamente os seis caminhos autorizados", () => {
+test("a serializacao nativa Windows contem exatamente os nove caminhos autorizados", () => {
   const result = assertRouteInventory(sharedSnapshotCache.read());
-  assert.equal(AUTHORIZED_CHANGED_FILES.length, 6);
+  assert.equal(
+    ROUTE_BRANCH,
+    "social/checkpoint-3b0-windows-native-process-serialization-20260813"
+  );
+  assert.equal(AUTHORIZED_CHANGED_FILES.length, 9);
   assert.deepEqual(result.files, [...AUTHORIZED_CHANGED_FILES].sort());
   assert.equal(
     result.mode === "local" || result.mode === "post_commit",

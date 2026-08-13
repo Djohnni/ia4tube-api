@@ -18,7 +18,9 @@ const PROCESS_LIFECYCLE_TEST_FILES = Object.freeze([
   "zip-downloads.test.js",
   "social-3a0p-local-file-replace-argument-powershell.test.js",
   "social-3a0p-local-file-replace-powershell-diagnostic.test.js",
-  "social-3a0p-local-firewall-nonmutation.test.js"
+  "social-3a0p-local-firewall-nonmutation.test.js",
+  "social-3a0p-local-safe-zip-extract.test.js",
+  "social-postgres-tls.test.js"
 ]);
 
 function runnerError(code) {

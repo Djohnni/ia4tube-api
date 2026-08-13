@@ -24,7 +24,9 @@ const PREVIOUS_SERIAL_FILES = Object.freeze([
 const ADDED_WINDOWS_NATIVE_SERIAL_FILES = Object.freeze([
   "social-3a0p-local-file-replace-argument-powershell.test.js",
   "social-3a0p-local-file-replace-powershell-diagnostic.test.js",
-  "social-3a0p-local-firewall-nonmutation.test.js"
+  "social-3a0p-local-firewall-nonmutation.test.js",
+  "social-3a0p-local-safe-zip-extract.test.js",
+  "social-postgres-tls.test.js"
 ]);
 const EXPECTED_SERIAL_FILES = Object.freeze([
   ...PREVIOUS_SERIAL_FILES,
@@ -125,13 +127,13 @@ test("2. the ordinary runner keeps every dedicated physical gate excluded", () =
   assert.equal(discovered.includes("social-postgres-real.test.js"), false);
 });
 
-test("3. the closed serial manifest contains the six previous and three native Windows files", () => {
+test("3. the closed serial manifest contains the six previous and five native Windows files", () => {
   const repositoryTests = discoverAutomatedTests(path.resolve(__dirname)).map((file) =>
     path.basename(file)
   );
   const previousSet = new Set(PREVIOUS_SERIAL_FILES);
   assert.deepEqual(PROCESS_LIFECYCLE_TEST_FILES, EXPECTED_SERIAL_FILES);
-  assert.equal(PROCESS_LIFECYCLE_TEST_FILES.length, 9);
+  assert.equal(PROCESS_LIFECYCLE_TEST_FILES.length, 11);
   assert.deepEqual(
     PROCESS_LIFECYCLE_TEST_FILES.filter((name) => previousSet.has(name)),
     PREVIOUS_SERIAL_FILES

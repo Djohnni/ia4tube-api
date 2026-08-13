@@ -3,8 +3,10 @@
 const assert = require("node:assert/strict");
 const test = require("node:test");
 const {
+  AUTHORIZED_BRANCH,
   ALLOWED_EXACT_FILES,
   ALLOWED_PREFIXES,
+  ROUTE_BASE_COMMIT,
   assertHarnessOnlyChangedFiles,
   isHarnessOnlyFile,
   normalizeRepositoryFile
@@ -12,39 +14,71 @@ const {
 
 const AUTHORIZED_FILES = Object.freeze([
   ".github/workflows/social-3b0-instagram-oauth-local-contract.yml",
-  "docs/social-3b0-instagram-oauth-local-contract.md",
+  "scripts/run-node-tests.js",
   "scripts/social-3a0p-local-scope.js",
   "scripts/social-3b0-linux-physical-gate.js",
+  "tests/node-test-runner-safety.test.js",
   "tests/social-3a0p-current-diff-scope.test.js",
   "tests/social-3a0p-local-scope.test.js",
   "tests/social-3b0-linux-physical-gate.test.js",
   "tests/social-3b0-linux-workflow.test.js"
 ]);
 
-test("O05 loopback JSON flush scope accepts exactly eight paths", () => {
-  assert.equal(AUTHORIZED_FILES.length, 8);
+test("Windows native process serialization scope accepts exactly nine paths", () => {
+  assert.equal(
+    AUTHORIZED_BRANCH,
+    "social/checkpoint-3b0-windows-native-process-serialization-20260813"
+  );
+  assert.equal(
+    ROUTE_BASE_COMMIT,
+    "1eae6c50003c523ad80a473a5554eb9f84770389"
+  );
+  assert.equal(AUTHORIZED_FILES.length, 9);
   assert.deepEqual(ALLOWED_PREFIXES, []);
   assert.deepEqual(
     [...ALLOWED_EXACT_FILES].sort(),
     [...AUTHORIZED_FILES].sort()
   );
-  assert.equal(ALLOWED_EXACT_FILES.size, 8);
+  assert.equal(ALLOWED_EXACT_FILES.size, 9);
   for (const file of AUTHORIZED_FILES) {
     assert.equal(isHarnessOnlyFile(file), true, file);
   }
   assert.deepEqual(assertHarnessOnlyChangedFiles([...AUTHORIZED_FILES]), {
     harnessOnly: true,
-    changedFileCount: 8
+    changedFileCount: 9
   });
+  for (const candidate of [
+    AUTHORIZED_FILES.slice(0, 2),
+    AUTHORIZED_FILES.slice(0, 6),
+    AUTHORIZED_FILES.slice(0, -1)
+  ]) {
+    assert.throws(() => assertHarnessOnlyChangedFiles(candidate), {
+      code: "harness_scope_inventory_refused"
+    });
+  }
+  assert.throws(
+    () => assertHarnessOnlyChangedFiles([
+      ...AUTHORIZED_FILES,
+      AUTHORIZED_FILES[0]
+    ]),
+    { code: "harness_scope_duplicate_refused" }
+  );
+  assert.throws(
+    () => assertHarnessOnlyChangedFiles([
+      ...AUTHORIZED_FILES,
+      "tests/tenth-path.test.js"
+    ]),
+    { code: "harness_scope_product_change_refused" }
+  );
 });
 
-test("O05 loopback JSON flush scope refuses variants, globs, subpaths and case changes", () => {
+test("Windows native process serialization scope refuses variants, globs, subpaths and case changes", () => {
   for (const file of [
     ".github/workflows/social-3b0-instagram-oauth-local-contract.yml.bak",
     ".github/workflows/SOCIAL-3B0-INSTAGRAM-OAUTH-LOCAL-CONTRACT.YML",
     ".github/workflows/*.yml",
-    "docs/social-3b0-instagram-oauth-local-contract.md.bak",
-    "docs/subdir/social-3b0-instagram-oauth-local-contract.md",
+    "scripts/run-node-tests.js.bak",
+    "scripts/RUN-NODE-TESTS.JS",
     "scripts/social-3b0-*.js",
     "scripts/social-3a0p-linux-physical-gates.js.bak",
     "scripts/subdir/social-3a0p-linux-physical-gates.js",
@@ -64,7 +98,7 @@ test("O05 loopback JSON flush scope refuses variants, globs, subpaths and case c
   }
 });
 
-test("O05 loopback JSON flush scope refuses product, dependency and historical paths", () => {
+test("Windows native process serialization scope refuses product, dependency and historical paths", () => {
   for (const file of [
     "server.js",
     "src/social/oauth/instagram-config.js",
@@ -82,6 +116,7 @@ test("O05 loopback JSON flush scope refuses product, dependency and historical p
     "db/postgres/roles.sql",
     "package.json",
     "package-lock.json",
+    "docs/social-3b0-instagram-oauth-local-contract.md",
     ".github/workflows/social-3a0p-linux-physical-gates.yml",
     "docs/social-3a0p-linux-physical-gates.md",
     "scripts/social-3a0p-linux-physical-gates.js",
@@ -102,7 +137,7 @@ test("O05 loopback JSON flush scope refuses product, dependency and historical p
   }
 });
 
-test("O05 loopback JSON flush scope rejects traversal and absolute paths", () => {
+test("Windows native process serialization scope rejects traversal and absolute paths", () => {
   for (const file of [
     "../scripts/social-3b0-linux-physical-gate.js",
     "tests/../scripts/social-3b0-linux-physical-gate.js",
@@ -117,20 +152,19 @@ test("O05 loopback JSON flush scope rejects traversal and absolute paths", () =>
   }
 });
 
-test("O05 loopback JSON flush scope normalizes only path separators", () => {
+test("Windows native process serialization scope normalizes only path separators", () => {
   const windowsPath = "scripts\\social-3b0-linux-physical-gate.js";
   assert.equal(
     normalizeRepositoryFile(windowsPath),
     "scripts/social-3b0-linux-physical-gate.js"
   );
   assert.equal(isHarnessOnlyFile(windowsPath), true);
-  assert.deepEqual(assertHarnessOnlyChangedFiles([windowsPath]), {
-    harnessOnly: true,
-    changedFileCount: 1
+  assert.throws(() => assertHarnessOnlyChangedFiles([windowsPath]), {
+    code: "harness_scope_inventory_refused"
   });
 });
 
-test("O05 loopback JSON flush scope has no wildcard or directory-wide exception", () => {
+test("Windows native process serialization scope has no wildcard or directory-wide exception", () => {
   assert.equal(
     [...ALLOWED_EXACT_FILES].some(
       (file) => file.includes("*") || file.endsWith("/")

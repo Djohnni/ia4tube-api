@@ -2,11 +2,16 @@
 
 const path = require("node:path");
 
+const AUTHORIZED_BRANCH =
+  "social/checkpoint-3b0-windows-native-process-serialization-20260813";
+const ROUTE_BASE_COMMIT = "1eae6c50003c523ad80a473a5554eb9f84770389";
+
 const ALLOWED_EXACT_FILES = new Set([
   ".github/workflows/social-3b0-instagram-oauth-local-contract.yml",
-  "docs/social-3b0-instagram-oauth-local-contract.md",
+  "scripts/run-node-tests.js",
   "scripts/social-3a0p-local-scope.js",
   "scripts/social-3b0-linux-physical-gate.js",
+  "tests/node-test-runner-safety.test.js",
   "tests/social-3a0p-current-diff-scope.test.js",
   "tests/social-3a0p-local-scope.test.js",
   "tests/social-3b0-linux-physical-gate.test.js",
@@ -69,6 +74,9 @@ function assertHarnessOnlyChangedFiles(files) {
     refuse("harness_scope_change_list_invalid");
   }
   const normalized = files.map(normalizeRepositoryFile);
+  if (new Set(normalized).size !== normalized.length) {
+    refuse("harness_scope_duplicate_refused");
+  }
   if (normalized.some((file) => !isHarnessOnlyFile(file))) {
     refuse("harness_scope_product_change_refused");
   }
@@ -84,6 +92,12 @@ function assertHarnessOnlyChangedFiles(files) {
   ) {
     refuse("harness_scope_product_change_refused");
   }
+  if (
+    normalized.length !== ALLOWED_EXACT_FILES.size ||
+    [...ALLOWED_EXACT_FILES].some((file) => !normalized.includes(file))
+  ) {
+    refuse("harness_scope_inventory_refused");
+  }
   return Object.freeze({
     harnessOnly: true,
     changedFileCount: normalized.length
@@ -91,11 +105,13 @@ function assertHarnessOnlyChangedFiles(files) {
 }
 
 module.exports = {
+  AUTHORIZED_BRANCH,
   ALLOWED_EXACT_FILES,
   ALLOWED_PREFIXES,
   FORBIDDEN_PRODUCT_FILES,
   FORBIDDEN_PRODUCT_PREFIXES,
   HarnessScopeFailure,
+  ROUTE_BASE_COMMIT,
   assertHarnessOnlyChangedFiles,
   isHarnessOnlyFile,
   normalizeRepositoryFile

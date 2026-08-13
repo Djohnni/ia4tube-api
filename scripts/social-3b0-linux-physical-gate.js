@@ -11,7 +11,52 @@ const tls = require("node:tls");
 const path = require("node:path");
 
 const BRANCH =
-  "social/checkpoint-3b0-o22-cleanup-provenance-20260812";
+  "social/checkpoint-3b0-windows-native-process-serialization-20260813";
+const COMMIT_MESSAGE =
+  "[run-social-3b0] serialize native Windows process tests";
+const PARENT_COMMIT = "1eae6c50003c523ad80a473a5554eb9f84770389";
+const HISTORIC_COMMIT_CHAIN = Object.freeze([
+  Object.freeze({
+    level: "functional_parent",
+    sha: "3dc3d8be62438216509f061f6c1a26ee39c9b5dc"
+  }),
+  Object.freeze({
+    level: "functional",
+    sha: "33e3ea7abcea7f5dc51780c3a1efd4743352fe40"
+  }),
+  Object.freeze({
+    level: "prior_infrastructure",
+    sha: "7bff67ac0c1acdd37473889a3f8b5c2017b30c9c"
+  }),
+  Object.freeze({
+    level: "previous_correction",
+    sha: "27cd350a253ab3ff07a915570eb41f291bbd1b42"
+  }),
+  Object.freeze({
+    level: "o05",
+    sha: "ad3c162aaee04bb66d79ea3c35c3d75297e8d0ab"
+  }),
+  Object.freeze({
+    level: "o12",
+    sha: "1febe1211b0021d8c35cdfb840f581fd76ce39e7"
+  }),
+  Object.freeze({ level: "o22", sha: PARENT_COMMIT })
+]);
+const CORRECTION_FILES = Object.freeze([
+  ".github/workflows/social-3b0-instagram-oauth-local-contract.yml",
+  "scripts/run-node-tests.js",
+  "scripts/social-3a0p-local-scope.js",
+  "scripts/social-3b0-linux-physical-gate.js",
+  "tests/node-test-runner-safety.test.js",
+  "tests/social-3a0p-current-diff-scope.test.js",
+  "tests/social-3a0p-local-scope.test.js",
+  "tests/social-3b0-linux-physical-gate.test.js",
+  "tests/social-3b0-linux-workflow.test.js"
+]);
+const WINDOWS_NATIVE_SERIAL_TEST_FILES = Object.freeze([
+  "social-3a0p-local-safe-zip-extract.test.js",
+  "social-postgres-tls.test.js"
+]);
 const PHASE = "instagram_oauth_local_contract";
 const IMAGE =
   "docker.io/library/postgres:18.4-bookworm@" +
@@ -3406,16 +3451,21 @@ module.exports = {
   BRANCH,
   CLEANUP_FAILURE_PROVENANCE_KEYS,
   CLEANUP_OPERATIONS,
+  COMMIT_MESSAGE,
+  CORRECTION_FILES,
   EVIDENCE_FILE,
   EVIDENCE_HASH_FILE,
   EXPECTED_COUNTS,
   GATE_DEFINITIONS,
+  HISTORIC_COMMIT_CHAIN,
   IMAGE,
   HISTORIC_TIMEOUT_MS,
+  PARENT_COMMIT,
   PHASE,
   PROCESS_STATUS_FILE,
   PROCESS_STATUS_HASH_FILE,
   SUBSTEP_IDS,
+  WINDOWS_NATIVE_SERIAL_TEST_FILES,
   WORKER_TIMEOUT_MS,
   Social3B0PhysicalGateFailure,
   assertAuthorizeRefusalContract,
