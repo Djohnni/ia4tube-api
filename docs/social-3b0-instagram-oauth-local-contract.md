@@ -1,4 +1,4 @@
-# Social 3B-0 — O12 credencial pendente e contrato OAuth local
+# Social 3B-0 — procedência do primeiro cleanup O22 e contrato OAuth local
 
 ## Base local preservada
 
@@ -237,8 +237,138 @@ plaintext físico existe somente dentro da prova, é comparado por digest e
 zerado em `finally`; buffers físicos também são zerados. Não se cria API,
 segundo cofre, segunda chave, conta externa ou transição para `active`. O13
 continua exigindo `authorization_pending`, zero external accounts,
-`accountDiscoveryCalls=0` e zero publicação. Nenhum resultado desta quinta rota
-é antecipado neste documento.
+`accountDiscoveryCalls=0` e zero publicação.
+
+Essa quinta rota foi concluída no commit
+`1febe1211b0021d8c35cdfb840f581fd76ce39e7`, filho imediato de `ad3c`, com a
+mensagem reservada acima e exatamente os seis caminhos declarados. As
+validações locais preservadas incluem O12 em 42/42, O13 em 1/1, gate físico
+sintético em 73/73, workflow em 11/11, escopo em 8/8, secret scan canônico
+aprovado e auditorias npm completa e runtime com zero vulnerabilidades. O teste
+isolado de body-parser foi aprovado, sem timeout e sem resíduos. A suíte
+completa substituta terminou com 125/125 no estágio serial e, no estágio
+concorrente, 1.628 testes, 1.621 aprovados, zero falhas, dois ignorados e cinco
+TODO.
+
+O único push dessa branch iniciou o run histórico `31653513120`, attempt 1.
+Windows, pré-gate Linux, G01–G05 e O01–O21 foram aprovados. A primeira falha
+física ocorreu em O22. O secret scan OAuth remoto foi aprovado e
+`backupRestoreFailureProvenance` permaneceu `null`. A primeira falha permanece,
+sem reclassificação: `job=linux_physical_gate`,
+`phase=instagram_oauth_local_contract`, `substep=O22`,
+`lastCompletedSubstep=O21`, `causalCode=social_3b0_cleanup_incomplete`,
+`externalProcessStarted=null`, `exitCode=null`, `signal=null` e
+`timedOut=false`. O process-status registrou `exitCode=1`, `signal=null`,
+`timedOut=false`, `stdoutStored=false` e `stderrStored=false`.
+
+O artifact histórico `9163501259`, nome
+`social-3b0-instagram-oauth-local-contract-evidence`, permanece inalterado e
+não recebe retroativamente o schema desta sexta rota. Seu digest é
+`sha256:fd99df69dc4222afd0e9f01201f694939c1fd8f242cb453e89851a8a41d6c32a`,
+o Evidence SHA-256 é
+`fd1b0b14a77d1e5cae310a9ea615d86f5531e0d1a511ec2f11905b7db48ec892` e o
+Process-status SHA-256 é
+`26564ca3007f7f91c7b77edadbe4122d82804ea0626a3958f21292d1b067f342`.
+Ele registrou `authorizeRequests=6`, `callbackRequests=8`,
+`syntheticExchangeCalls=2`, `credentialWrites=2`, `concurrencyWinners=1`,
+`replayRefusals=1`, `blockedBodyAborts=1`, `cancellationExchanges=0`,
+`accountDiscoveryCalls=0`, `publicationCalls=0`, `externalMetaCalls=0`,
+`externalInstagramCalls=0`, `externalGraphApiCalls=0`,
+`externalRenderCalls=0`, `externalPublicationCalls=0` e `realTokenCount=0`.
+O cleanup compensatório final registrou `cleanupCompleted=true`,
+`intermediateEvidenceRemoved=true`, `syntheticMaterialsCleared=true` e zero em
+containers, networks, volumes, temporary roots, conexões PostgreSQL, servidores
+HTTP, listeners, timers, readers e processos Node. Não houve segundo push,
+retry ou re-run.
+
+A classificação desta parada histórica é
+`social_3b0_o22_first_attempt_cleanup_failure_provenance_missing`, limitada à
+superfície `physical_gate_cleanup_observability_only`. O artifact prova apenas
+que a primeira tentativa de cleanup foi considerada incompleta, a causa
+específica não foi preservada, o cleanup compensatório terminou sem resíduos e
+o primeiro erro continuou preservado. Ele não prova qual recurso ou operação
+causou a falha e não pode ser reclassificado como aprovado.
+
+## Sexto commit — procedência fechada da primeira tentativa de O22
+
+A sexta rota parte exatamente de
+`1febe1211b0021d8c35cdfb840f581fd76ce39e7`, na branch
+`social/checkpoint-3b0-o22-cleanup-provenance-20260812`, e reserva a mensagem:
+
+```text
+[run-social-3b0] capture first-attempt O22 cleanup provenance
+```
+
+Seu inventário é fechado em exatamente seis caminhos literais:
+
+1. `.github/workflows/social-3b0-instagram-oauth-local-contract.yml`;
+2. `docs/social-3b0-instagram-oauth-local-contract.md`;
+3. `scripts/social-3b0-linux-physical-gate.js`;
+4. `tests/social-3a0p-current-diff-scope.test.js`;
+5. `tests/social-3b0-linux-physical-gate.test.js`;
+6. `tests/social-3b0-linux-workflow.test.js`.
+
+Não há sétimo caminho, prefixo, glob ou exceção de diretório. O diff corrente
+usa `1febe` como base; a proteção dos dezoito blobs funcionais permanece
+ancorada separadamente em `33e3`. Esta rota altera somente a observabilidade do
+primeiro cleanup O22. Ela não muda a ordem, as operações ou o comportamento do
+cleanup e não adiciona espera, retry, polling ou segunda tentativa ao worker.
+
+O campo fechado `cleanupFailureProvenance` vale `null` quando a primeira
+tentativa de cleanup do worker é integralmente aprovada. Quando essa primeira
+tentativa falha, seu schema exato é:
+
+```json
+{
+  "operation": "<enum fechado>",
+  "causalCode": "<código fechado>",
+  "cleanupErrorCount": 0,
+  "postgresCleanupCompleted": null,
+  "firstAttemptSyntheticMaterialsCleared": false,
+  "firstAttemptResiduals": {
+    "containers": 0,
+    "httpServers": 0,
+    "listeners": 0,
+    "networks": 0,
+    "nodeProcesses": 0,
+    "postgresConnections": 0,
+    "readers": 0,
+    "temporaryRoots": 0,
+    "timers": 0,
+    "volumes": 0
+  }
+}
+```
+
+Todos os contadores devem ser inteiros seguros, não negativos e sem coerção.
+`postgresCleanupCompleted` aceita somente `true`, `false` ou `null`, e
+`firstAttemptSyntheticMaterialsCleared` é booleano. `operation` aceita somente
+`network_guard_restore`, `http_server_close`, `state_envelope_destroy`,
+`vault_destroy`, `postgres_cleanup_call`, `postgres_cleanup_result` ou
+`residual_validation`.
+
+A primeira operação que lança é preservada, todas as operações continuam sendo
+tentadas e `cleanupErrorCount` contabiliza todas as operações que lançaram.
+Mensagem, stack e identificadores físicos nunca entram na evidência. Um erro
+lançado conserva somente seu código seguro fechado; caso contrário usa
+`social_3b0_cleanup_operation_failed`. PostgreSQL retornando cleanup incompleto
+usa `social_3b0_postgres_cleanup_incomplete`; residual não zero sem erro lançado
+usa `social_3b0_cleanup_residuals_nonzero`.
+
+A fotografia é formada depois de todas as operações da primeira tentativa e
+antes de `failCleanup`, do supervisor compensatório e de qualquer reescrita da
+evidência. O supervisor pode atualizar cleanup e resíduos finais, além de
+`intermediateEvidenceRemoved`, mas não pode substituir a operação, o código, a
+contagem de erros, o resultado PostgreSQL, o estado do material sintético ou os
+dez resíduos da primeira tentativa.
+
+Se a primeira tentativa O22 falhar, O22 e o status geral permanecem `failed`,
+`firstFailure` permanece em O22 e a provenance é não nula, mesmo que a
+compensação posterior conclua o cleanup e leve os resíduos finais a zero. Se
+uma falha funcional anterior ocorrer e o primeiro cleanup passar, O22 pode ser
+`passed`, a primeira falha anterior permanece e a provenance é `null`. O run
+integralmente aprovado exige O22 `passed`, `firstFailure=null` e provenance
+`null`.
 
 ## Workflow remoto separado
 
@@ -252,11 +382,12 @@ completo, a concorrência é exclusiva da branch e `cancel-in-progress` é falso
 
 O guard remoto deve aceitar somente `event=push`, criação da nova branch com
 `github.event.before` composto por quarenta zeros, `github.event.created=true`,
-`forced=false`, `deleted=false`, `run_attempt=1` e a mensagem exata do quinto
+`forced=false`, `deleted=false`, `run_attempt=1` e a mensagem exata do sexto
 commit. A cadeia aceita é exclusivamente:
 
 ```text
 HEAD remoto
+  -> 1febe1211b0021d8c35cdfb840f581fd76ce39e7
   -> ad3c162aaee04bb66d79ea3c35c3d75297e8d0ab
   -> 27cd350a253ab3ff07a915570eb41f291bbd1b42
   -> 7bff67ac0c1acdd37473889a3f8b5c2017b30c9c
@@ -267,7 +398,8 @@ HEAD remoto
 Cada commit deve ter exatamente um pai. O guard verifica separadamente os
 dezoito caminhos do commit funcional `33e3`, os nove caminhos da infraestrutura
 `7bff`, os dez caminhos da correção Gate 3 em `27cd`, os oito caminhos da
-correção O05 em `ad3c` e os seis caminhos da correção O12 no HEAD corrente.
+correção O05 em `ad3c`, os seis caminhos da correção O12 em `1febe` e os seis
+caminhos da correção O22 no HEAD corrente.
 
 ## Jobs e limites operacionais
 
@@ -316,7 +448,7 @@ O gate registra exclusivamente O01–O22:
 - O19: feature flags desligadas bloqueiam operação externa;
 - O20: zero publicação, container, publish ou permalink;
 - O21: auditoria sanitizada sem state, code ou token;
-- O22: cleanup integral.
+- O22: primeira tentativa de cleanup integral, com procedência fechada em falha.
 
 O gate não executa OAuth real, Meta, Instagram, Graph API, Render, staging,
 produção ou publicação. Conexões de aplicação não loopback são recusadas. O
@@ -348,6 +480,19 @@ evidência de falha e fallback sanitizado; ausência, `null`, string, valor
 negativo, valor não zero, nome aproximado ou campo sinônimo adicional são
 recusados.
 
+Todo artifact novo também inclui obrigatoriamente `cleanupFailureProvenance`.
+O schema recusa campo ausente ou adicional, operação ou código desconhecido,
+contador negativo, fracionário ou textual, residual ausente ou adicional,
+provenance não nula em sucesso, provenance nula quando `firstFailure` está em
+O22, O22 aprovado com primeira falha em O22, O22 falho sem provenance e
+compensação que apague a fotografia da primeira tentativa.
+
+Uma evidência de falha que cumpra integralmente esse schema fechado continua
+aprovada para upload, com resultado de sucesso falso, para preservar a
+procedência sanitizada. O enforcement somente aprova quando `status=passed`,
+`firstFailure=null`, O22 está `passed`, `cleanupFailureProvenance=null` e cada
+resíduo final é zero, além de todas as condições históricas já exigidas.
+
 O cleanup é obrigatório também em falha e remove container, rede, volume,
 diretório temporário, banco, material sintético, arquivos intermediários,
 servidor, timers, readers, processos e listeners. O enforcement remoto retorna
@@ -356,5 +501,5 @@ evidência, sidecars e cleanup forem aprovados, com `firstFailure=null` e todos
 os resíduos em zero.
 
 Nenhum resultado remoto, SHA de evidência, digest de artifact ou conclusão do
-run da quinta rota é registrado neste documento antes de ser efetivamente
+run da sexta rota é registrado neste documento antes de ser efetivamente
 observado.

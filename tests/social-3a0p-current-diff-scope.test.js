@@ -9,7 +9,7 @@ const {
   assertHarnessOnlyChangedFiles
 } = require("../scripts/social-3a0p-local-scope");
 
-const ROUTE_BASE_COMMIT = "ad3c162aaee04bb66d79ea3c35c3d75297e8d0ab";
+const ROUTE_BASE_COMMIT = "1febe1211b0021d8c35cdfb840f581fd76ce39e7";
 const FUNCTIONAL_COMMIT = "33e3ea7abcea7f5dc51780c3a1efd4743352fe40";
 const POST_COMMIT_PROOF_HEAD = "ffffffffffffffffffffffffffffffffffffffff";
 const GIT_TIMEOUT_MS = 20_000;
@@ -869,7 +869,7 @@ function runMandatoryContractProofs() {
 
 const sharedSnapshotCache = createSnapshotCache(() => buildGitSnapshot());
 
-test("a correcao O12 contem exatamente os seis caminhos autorizados", () => {
+test("a correcao O22 contem exatamente os seis caminhos autorizados", () => {
   const result = assertRouteInventory(sharedSnapshotCache.read());
   assert.equal(AUTHORIZED_CHANGED_FILES.length, 6);
   assert.deepEqual(result.files, [...AUTHORIZED_CHANGED_FILES].sort());

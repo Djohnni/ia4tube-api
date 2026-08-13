@@ -11,7 +11,7 @@ const tls = require("node:tls");
 const path = require("node:path");
 
 const BRANCH =
-  "social/checkpoint-3b0-o12-pending-credential-visibility-20260812";
+  "social/checkpoint-3b0-o22-cleanup-provenance-20260812";
 const PHASE = "instagram_oauth_local_contract";
 const IMAGE =
   "docker.io/library/postgres:18.4-bookworm@" +
@@ -73,6 +73,23 @@ const RESIDUAL_KEYS = Object.freeze([
   "timers",
   "volumes"
 ].sort());
+const CLEANUP_OPERATIONS = new Set([
+  "network_guard_restore",
+  "http_server_close",
+  "state_envelope_destroy",
+  "vault_destroy",
+  "postgres_cleanup_call",
+  "postgres_cleanup_result",
+  "residual_validation"
+]);
+const CLEANUP_FAILURE_PROVENANCE_KEYS = Object.freeze([
+  "operation",
+  "causalCode",
+  "cleanupErrorCount",
+  "postgresCleanupCompleted",
+  "firstAttemptSyntheticMaterialsCleared",
+  "firstAttemptResiduals"
+].sort());
 const COUNT_KEYS = Object.freeze([
   "accountDiscoveryCalls",
   "authorizeRequests",
@@ -101,6 +118,7 @@ const EVIDENCE_KEYS = Object.freeze([
   "backupRestoreFailureProvenance",
   "branch",
   "cleanup",
+  "cleanupFailureProvenance",
   "counts",
   "externalGraphApiCalls",
   "externalInstagramCalls",
@@ -397,6 +415,76 @@ function zeroResiduals() {
   return Object.freeze(Object.fromEntries(RESIDUAL_KEYS.map((key) => [key, 0])));
 }
 
+function createCleanupAttemptTracker() {
+  let firstThrown = null;
+  let firstError = null;
+  let cleanupErrorCount = 0;
+  return Object.freeze({
+    async capture(operation, action) {
+      if (!CLEANUP_OPERATIONS.has(operation) || typeof action !== "function") {
+        fail("social_3b0_cleanup_capture_contract_invalid");
+      }
+      try {
+        return await action();
+      } catch (error) {
+        cleanupErrorCount += 1;
+        if (firstThrown === null) {
+          firstThrown = Object.freeze({
+            operation,
+            causalCode: failureCode(
+              error,
+              "social_3b0_cleanup_operation_failed"
+            )
+          });
+          firstError = error;
+        }
+        return undefined;
+      }
+    },
+    errorCount() { return cleanupErrorCount; },
+    firstError() { return firstError; },
+    snapshot(input) {
+      if (
+        !plainObject(input) ||
+        !new Set([true, false, null]).has(input.postgresCleanupCompleted) ||
+        typeof input.firstAttemptSyntheticMaterialsCleared !== "boolean" ||
+        !exactKeys(input.firstAttemptResiduals, RESIDUAL_KEYS) ||
+        Object.values(input.firstAttemptResiduals).some((item) =>
+          !Number.isSafeInteger(item) || item < 0
+        )
+      ) fail("social_3b0_cleanup_snapshot_contract_invalid");
+      let failure = firstThrown;
+      if (failure === null && input.postgresCleanupCompleted === false) {
+        failure = Object.freeze({
+          operation: "postgres_cleanup_result",
+          causalCode: "social_3b0_postgres_cleanup_incomplete"
+        });
+      }
+      if (
+        failure === null &&
+        Object.values(input.firstAttemptResiduals).some((item) => item !== 0)
+      ) {
+        failure = Object.freeze({
+          operation: "residual_validation",
+          causalCode: "social_3b0_cleanup_residuals_nonzero"
+        });
+      }
+      if (failure === null) return null;
+      return Object.freeze({
+        operation: failure.operation,
+        causalCode: failure.causalCode,
+        cleanupErrorCount,
+        postgresCleanupCompleted: input.postgresCleanupCompleted,
+        firstAttemptSyntheticMaterialsCleared:
+          input.firstAttemptSyntheticMaterialsCleared,
+        firstAttemptResiduals: Object.freeze({
+          ...input.firstAttemptResiduals
+        })
+      });
+    }
+  });
+}
+
 function zeroCounts() {
   return Object.freeze(Object.fromEntries(COUNT_KEYS.map((key) => [key, 0])));
 }
@@ -453,6 +541,45 @@ function validBackupRestoreFailureProvenance(value) {
   );
 }
 
+function validCleanupFailureProvenance(value) {
+  if (value === null) return true;
+  if (
+    !exactKeys(value, CLEANUP_FAILURE_PROVENANCE_KEYS) ||
+    !CLEANUP_OPERATIONS.has(value.operation) ||
+    typeof value.causalCode !== "string" ||
+    !SAFE_FAILURE.test(value.causalCode) ||
+    !Number.isSafeInteger(value.cleanupErrorCount) ||
+    value.cleanupErrorCount < 0 ||
+    !new Set([true, false, null]).has(value.postgresCleanupCompleted) ||
+    typeof value.firstAttemptSyntheticMaterialsCleared !== "boolean" ||
+    !exactKeys(value.firstAttemptResiduals, RESIDUAL_KEYS) ||
+    Object.values(value.firstAttemptResiduals).some((item) =>
+      !Number.isSafeInteger(item) || item < 0
+    )
+  ) return false;
+  const thrownOperation = !new Set([
+    "postgres_cleanup_result", "residual_validation"
+  ]).has(value.operation);
+  if (thrownOperation !== (value.cleanupErrorCount > 0)) return false;
+  if (
+    value.operation === "postgres_cleanup_result" &&
+    (
+      value.causalCode !== "social_3b0_postgres_cleanup_incomplete" ||
+      value.postgresCleanupCompleted !== false ||
+      value.cleanupErrorCount !== 0
+    )
+  ) return false;
+  if (
+    value.operation === "residual_validation" &&
+    (
+      value.causalCode !== "social_3b0_cleanup_residuals_nonzero" ||
+      value.cleanupErrorCount !== 0 ||
+      !Object.values(value.firstAttemptResiduals).some((item) => item !== 0)
+    )
+  ) return false;
+  return true;
+}
+
 function evidenceSafe(candidate) {
   if (!exactKeys(candidate, EVIDENCE_KEYS) || !walkEvidence(candidate)) return false;
   if (
@@ -476,6 +603,7 @@ function evidenceSafe(candidate) {
     !validBackupRestoreFailureProvenance(
       candidate.backupRestoreFailureProvenance
     ) ||
+    !validCleanupFailureProvenance(candidate.cleanupFailureProvenance) ||
     !exactKeys(candidate.secretScan, [
       "historicPhysicalPassed", "oauthEvidencePassed", "status"
     ].sort()) ||
@@ -525,10 +653,16 @@ function evidenceSafe(candidate) {
   }
   const cleanupSubstepStatus = candidate.substeps[21].status;
   if (
-    (candidate.cleanup.cleanupCompleted === true &&
-      cleanupSubstepStatus !== "passed") ||
-    (candidate.cleanup.cleanupCompleted === false &&
-      cleanupSubstepStatus === "passed")
+    (cleanupSubstepStatus === "failed" &&
+      candidate.cleanupFailureProvenance === null) ||
+    (candidate.cleanupFailureProvenance !== null &&
+      cleanupSubstepStatus !== "failed") ||
+    (candidate.firstFailure?.substep === "O22" && (
+      cleanupSubstepStatus !== "failed" ||
+      candidate.cleanupFailureProvenance === null
+    )) ||
+    (cleanupSubstepStatus === "passed" &&
+      candidate.firstFailure?.substep === "O22")
   ) return false;
   for (const key of [
     "externalGraphApiCalls",
@@ -550,6 +684,8 @@ function evidenceSafe(candidate) {
       candidate.secretScan.historicPhysicalPassed !== true ||
       candidate.secretScan.oauthEvidencePassed !== true ||
       candidate.backupRestoreFailureProvenance !== null ||
+      candidate.cleanupFailureProvenance !== null ||
+      candidate.substeps[21].status !== "passed" ||
       candidate.cleanup.cleanupCompleted !== true ||
       candidate.cleanup.intermediateEvidenceRemoved !== true ||
       candidate.cleanup.syntheticMaterialsCleared !== true ||
@@ -1709,6 +1845,7 @@ async function runPhysicalOAuthContract(options = {}) {
   let isolationAuthorizationHeader = "";
   let physicalFailure = null;
   let cleanupFailure = null;
+  let cleanupFailureProvenance = null;
   let vaultEncryptCalls = 0;
   let vaultDecryptCalls = 0;
   let credentialStoreCalls = 0;
@@ -2687,20 +2824,29 @@ async function runPhysicalOAuthContract(options = {}) {
   } catch (error) {
     physicalFailure = error;
   } finally {
-    const cleanupErrors = [];
-    const captureCleanup = async (operation) => {
-      try { await operation(); } catch (error) { cleanupErrors.push(error); }
-    };
-    await captureCleanup(async () => networkGuard?.restore());
+    const cleanupAttempt = createCleanupAttemptTracker();
+    await cleanupAttempt.capture(
+      "network_guard_restore",
+      async () => networkGuard?.restore()
+    );
     networkGuard = null;
-    await captureCleanup(() => closeServer(server));
+    await cleanupAttempt.capture(
+      "http_server_close",
+      () => closeServer(server)
+    );
     const httpServerResiduals = server?.listening === true ? 1 : 0;
     const httpSocketResiduals = SERVER_SOCKETS.get(server)?.size || 0;
     server = null;
     serverPort = 0;
-    await captureCleanup(async () => stateEnvelope?.destroy());
+    await cleanupAttempt.capture(
+      "state_envelope_destroy",
+      async () => stateEnvelope?.destroy()
+    );
     stateEnvelope = null;
-    await captureCleanup(async () => vault?.destroy());
+    await cleanupAttempt.capture(
+      "vault_destroy",
+      async () => vault?.destroy()
+    );
     vault = null;
     for (const reader of readers) reader.fill(0);
     readers.clear();
@@ -2711,9 +2857,11 @@ async function runPhysicalOAuthContract(options = {}) {
     for (const material of materials) material.fill(0);
     sensitiveStrings.clear();
     let postgresCleanup = null;
+    let postgresCleanupReturned = false;
     if (postgres) {
-      await captureCleanup(async () => {
+      await cleanupAttempt.capture("postgres_cleanup_call", async () => {
         postgresCleanup = await postgres.cleanup();
+        postgresCleanupReturned = true;
       });
     }
     residuals = {
@@ -2733,15 +2881,25 @@ async function runPhysicalOAuthContract(options = {}) {
     const syntheticMaterialsCleared = materials.every((material) =>
       material.every((byte) => byte === 0)
     );
+    const postgresCleanupCompleted = !postgres
+      ? null
+      : postgresCleanupReturned
+        ? postgresCleanup?.cleanupCompleted === true
+        : null;
+    cleanupFailureProvenance = cleanupAttempt.snapshot({
+      postgresCleanupCompleted,
+      firstAttemptSyntheticMaterialsCleared: syntheticMaterialsCleared,
+      firstAttemptResiduals: residuals
+    });
     cleanup = {
-      cleanupCompleted: cleanupErrors.length === 0 &&
+      cleanupCompleted: cleanupAttempt.errorCount() === 0 &&
         (!postgres || postgresCleanup?.cleanupCompleted === true) &&
         Object.values(residuals).every((value) => value === 0),
       intermediateEvidenceRemoved: true,
       syntheticMaterialsCleared
     };
-    if (cleanupErrors.length > 0 || !cleanup.cleanupCompleted) {
-      cleanupFailure = cleanupErrors[0] || new Social3B0PhysicalGateFailure(
+    if (cleanupAttempt.errorCount() > 0 || !cleanup.cleanupCompleted) {
+      cleanupFailure = cleanupAttempt.firstError() || new Social3B0PhysicalGateFailure(
         "social_3b0_cleanup_incomplete"
       );
       ledger.failCleanup(cleanupFailure);
@@ -2764,6 +2922,7 @@ async function runPhysicalOAuthContract(options = {}) {
     substeps: ledger.snapshot(),
     counts: Object.freeze({ ...counts }),
     cleanup: Object.freeze({ ...cleanup }),
+    cleanupFailureProvenance,
     residuals: Object.freeze({ ...residuals }),
     external: Object.freeze({ ...external }),
     secretScanPassed: ledger.snapshot()[20].status === "passed"
@@ -2793,6 +2952,7 @@ function baseEvidence(identity) {
     }),
     firstFailure: null,
     backupRestoreFailureProvenance: null,
+    cleanupFailureProvenance: null,
     cleanup: Object.freeze({
       cleanupCompleted: false,
       intermediateEvidenceRemoved: false,
@@ -2861,6 +3021,7 @@ async function runInstagramOAuthPhysicalGate(options = {}) {
       });
     evidence.substeps = oauth.substeps;
     evidence.counts = oauth.counts;
+    evidence.cleanupFailureProvenance = oauth.cleanupFailureProvenance;
     evidence.cleanup = Object.freeze({
       ...oauth.cleanup,
       intermediateEvidenceRemoved: historic.intermediateEvidenceRemoved
@@ -3147,11 +3308,6 @@ async function superviseInstagramOAuthPhysicalGate(options = {}) {
         fallback.cleanup.syntheticMaterialsCleared === true
     });
     fallback.residuals = effectiveCleanup.residuals;
-    const substeps = fallback.substeps.map((entry) => ({ ...entry }));
-    substeps[21].status = effectiveCleanup.cleanupCompleted ? "passed" : "failed";
-    fallback.substeps = Object.freeze(
-      substeps.map((entry) => Object.freeze(entry))
-    );
     if (!evidenceSafe(fallback)) {
       const closed = baseEvidence(identity);
       closed.firstFailure = closedFirstFailure({
@@ -3169,13 +3325,6 @@ async function superviseInstagramOAuthPhysicalGate(options = {}) {
         syntheticMaterialsCleared: false
       });
       closed.residuals = effectiveCleanup.residuals;
-      if (effectiveCleanup.cleanupCompleted) {
-        const substeps = closed.substeps.map((entry) => ({ ...entry }));
-        substeps[21].status = "passed";
-        closed.substeps = Object.freeze(
-          substeps.map((entry) => Object.freeze(entry))
-        );
-      }
       evidence = closed;
     } else {
       evidence = fallback;
@@ -3255,6 +3404,8 @@ if (require.main === module) {
 module.exports = {
   ARTIFACT_DIRECTORY,
   BRANCH,
+  CLEANUP_FAILURE_PROVENANCE_KEYS,
+  CLEANUP_OPERATIONS,
   EVIDENCE_FILE,
   EVIDENCE_HASH_FILE,
   EXPECTED_COUNTS,
@@ -3275,6 +3426,7 @@ module.exports = {
   childOnce,
   closedFirstFailure,
   cleanupInstagramOAuthPhysicalGate,
+  createCleanupAttemptTracker,
   evidenceSafe,
   historicFailureDetails,
   httpJsonRequest,
@@ -3287,6 +3439,7 @@ module.exports = {
   sanitizeProcessStatus,
   superviseInstagramOAuthPhysicalGate,
   validateEnvironment,
+  validCleanupFailureProvenance,
   verifyPendingCredentialPhysicalProof,
   verifySidecar,
   writePayload,

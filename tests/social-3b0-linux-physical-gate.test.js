@@ -228,6 +228,96 @@ function passedEvidence() {
   return evidence;
 }
 
+function cleanupSnapshot(tracker, overrides = {}) {
+  return tracker.snapshot({
+    postgresCleanupCompleted: true,
+    firstAttemptSyntheticMaterialsCleared: true,
+    firstAttemptResiduals: gate.zeroResiduals(),
+    ...overrides
+  });
+}
+
+function cleanupProvenance(overrides = {}) {
+  return Object.freeze({
+    operation: "http_server_close",
+    causalCode: "social_3b0_cleanup_operation_failed",
+    cleanupErrorCount: 1,
+    postgresCleanupCompleted: true,
+    firstAttemptSyntheticMaterialsCleared: true,
+    firstAttemptResiduals: gate.zeroResiduals(),
+    ...overrides
+  });
+}
+
+function failedO22Evidence(overrides = {}) {
+  const evidence = passedEvidence();
+  const provenance = overrides.cleanupFailureProvenance || cleanupProvenance();
+  evidence.status = "failed";
+  evidence.firstFailure = gate.closedFirstFailure({
+    phase: gate.PHASE,
+    substep: "O22",
+    lastCompletedSubstep: "O21",
+    causalCode: provenance.causalCode
+  });
+  evidence.cleanupFailureProvenance = provenance;
+  evidence.substeps = Object.freeze(evidence.substeps.map((entry) =>
+    Object.freeze(entry.id === "O22" ? { ...entry, status: "failed" } : entry)
+  ));
+  if (overrides.cleanup) evidence.cleanup = Object.freeze(overrides.cleanup);
+  if (overrides.residuals) evidence.residuals = Object.freeze(overrides.residuals);
+  return evidence;
+}
+
+async function supervisedEvidenceFixture({
+  workerEvidence,
+  exitCode = 1,
+  cleanupResult = zeroCleanup(),
+  runId = "73200"
+}) {
+  const runnerTemp = fs.mkdtempSync(path.join(os.tmpdir(), "social-3b0-provenance-"));
+  const directory = path.join(runnerTemp, gate.ARTIFACT_DIRECTORY);
+  const outputPath = path.join(directory, gate.EVIDENCE_FILE);
+  const processStatusPath = path.join(directory, gate.PROCESS_STATUS_FILE);
+  const spawnImpl = (_executable, _args, options) => {
+    const child = new EventEmitter();
+    child.kill = () => true;
+    queueMicrotask(() => {
+      try {
+        if (workerEvidence !== undefined) {
+          gate.writePayload(
+            path.join(options.env.RUNNER_TEMP, gate.ARTIFACT_DIRECTORY,
+              gate.EVIDENCE_FILE),
+            path.join(options.env.RUNNER_TEMP, gate.ARTIFACT_DIRECTORY,
+              gate.EVIDENCE_HASH_FILE),
+            workerEvidence
+          );
+        }
+        child.emit("spawn");
+        child.emit("close", exitCode, null);
+      } catch (error) {
+        child.emit("error", error);
+      }
+    });
+    return child;
+  };
+  try {
+    const result = await gate.superviseInstagramOAuthPhysicalGate({
+      runnerTemp,
+      outputPath,
+      processStatusPath,
+      repositoryRoot: path.join(__dirname, ".."),
+      environment: environment({ RUNNER_TEMP: runnerTemp, GITHUB_RUN_ID: runId }),
+      spawnImpl,
+      cleanupImpl: async () => cleanupResult,
+      timeoutMs: 1000
+    });
+    const serialized = fs.readFileSync(outputPath, "utf8");
+    return Object.freeze({ result, evidence: JSON.parse(serialized), serialized });
+  } finally {
+    fs.rmSync(runnerTemp, { recursive: true, force: true });
+  }
+}
+
 function zeroCleanup() {
   return Object.freeze({
     cleanupCompleted: true,
@@ -323,7 +413,7 @@ async function closeLoopbackServer(server, sockets) {
 test("Social 3B physical gate freezes branch, phase, image and bounded budgets", () => {
   assert.equal(
     gate.BRANCH,
-    "social/checkpoint-3b0-o12-pending-credential-visibility-20260812"
+    "social/checkpoint-3b0-o22-cleanup-provenance-20260812"
   );
   assert.equal(gate.PHASE, "instagram_oauth_local_contract");
   assert.equal(
@@ -1463,6 +1553,344 @@ test("evidence contract requires exact Gates, O01-O22, counts, scans and zero re
   }), false);
 });
 
+test("cleanupFailureProvenance 1: an integral first cleanup attempt produces null", async () => {
+  const tracker = gate.createCleanupAttemptTracker();
+  for (const operation of [
+    "network_guard_restore",
+    "http_server_close",
+    "state_envelope_destroy",
+    "vault_destroy",
+    "postgres_cleanup_call"
+  ]) {
+    await tracker.capture(operation, async () => true);
+  }
+  assert.equal(cleanupSnapshot(tracker), null);
+  assert.equal(gate.validCleanupFailureProvenance(null), true);
+  assert.equal(gate.baseEvidence({
+    branch: gate.BRANCH,
+    sha: SHA,
+    runAttempt: 1
+  }).cleanupFailureProvenance, null);
+});
+
+for (const [number, operation] of [
+  [2, "network_guard_restore"],
+  [3, "http_server_close"],
+  [4, "state_envelope_destroy"],
+  [5, "vault_destroy"],
+  [6, "postgres_cleanup_call"]
+]) {
+  test(`cleanupFailureProvenance ${number}: a thrown cleanup error records ${operation}`, async () => {
+    const tracker = gate.createCleanupAttemptTracker();
+    const error = new Error("fixture cleanup failure");
+    error.code = `social_3b0_fixture_${operation}_failed`;
+    await tracker.capture(operation, async () => { throw error; });
+    const provenance = cleanupSnapshot(tracker, {
+      postgresCleanupCompleted: operation === "postgres_cleanup_call" ? null : true
+    });
+    assert.equal(provenance.operation, operation);
+    assert.equal(provenance.causalCode, error.code);
+    assert.equal(provenance.cleanupErrorCount, 1);
+    assert.deepEqual(
+      Object.keys(provenance).sort(),
+      gate.CLEANUP_FAILURE_PROVENANCE_KEYS
+    );
+    assert.equal(gate.validCleanupFailureProvenance(provenance), true);
+  });
+}
+
+test("cleanupFailureProvenance 7: an incomplete PostgreSQL result has its closed cause", () => {
+  const provenance = cleanupSnapshot(gate.createCleanupAttemptTracker(), {
+    postgresCleanupCompleted: false
+  });
+  assert.equal(provenance.operation, "postgres_cleanup_result");
+  assert.equal(
+    provenance.causalCode,
+    "social_3b0_postgres_cleanup_incomplete"
+  );
+  assert.equal(provenance.cleanupErrorCount, 0);
+  assert.equal(gate.validCleanupFailureProvenance(provenance), true);
+});
+
+test("cleanupFailureProvenance 8: a nonzero residual has its closed validation cause", () => {
+  const firstAttemptResiduals = { ...gate.zeroResiduals(), timers: 1 };
+  const provenance = cleanupSnapshot(gate.createCleanupAttemptTracker(), {
+    firstAttemptResiduals,
+    firstAttemptSyntheticMaterialsCleared: false
+  });
+  assert.equal(provenance.operation, "residual_validation");
+  assert.equal(
+    provenance.causalCode,
+    "social_3b0_cleanup_residuals_nonzero"
+  );
+  assert.equal(provenance.cleanupErrorCount, 0);
+  assert.equal(provenance.firstAttemptSyntheticMaterialsCleared, false);
+  assert.deepEqual(provenance.firstAttemptResiduals, firstAttemptResiduals);
+});
+
+test("cleanupFailureProvenance 9: every residual is observed in isolation", () => {
+  const residualKeys = Object.keys(gate.zeroResiduals());
+  assert.equal(residualKeys.length, 10);
+  for (const key of residualKeys) {
+    const firstAttemptResiduals = { ...gate.zeroResiduals(), [key]: 1 };
+    const provenance = cleanupSnapshot(gate.createCleanupAttemptTracker(), {
+      firstAttemptResiduals
+    });
+    assert.equal(provenance.operation, "residual_validation", key);
+    assert.equal(provenance.firstAttemptResiduals[key], 1, key);
+    assert.deepEqual(
+      Object.entries(provenance.firstAttemptResiduals)
+        .filter(([, value]) => value !== 0),
+      [[key, 1]],
+      key
+    );
+  }
+});
+
+test("cleanupFailureProvenance 10: the first thrown operation wins", async () => {
+  const tracker = gate.createCleanupAttemptTracker();
+  const first = Object.assign(new Error("first"), {
+    code: "social_3b0_first_cleanup_failed"
+  });
+  const later = Object.assign(new Error("later"), {
+    code: "social_3b0_later_cleanup_failed"
+  });
+  await tracker.capture("network_guard_restore", async () => { throw first; });
+  await tracker.capture("http_server_close", async () => { throw later; });
+  const provenance = cleanupSnapshot(tracker);
+  assert.equal(provenance.operation, "network_guard_restore");
+  assert.equal(provenance.causalCode, first.code);
+});
+
+test("cleanupFailureProvenance 11: all thrown cleanup operations are counted", async () => {
+  const tracker = gate.createCleanupAttemptTracker();
+  const thrownOperations = [
+    "network_guard_restore",
+    "http_server_close",
+    "state_envelope_destroy",
+    "vault_destroy",
+    "postgres_cleanup_call"
+  ];
+  for (const operation of thrownOperations) {
+    await tracker.capture(operation, async () => {
+      throw new Error("count-only fixture");
+    });
+  }
+  assert.equal(cleanupSnapshot(tracker, {
+    postgresCleanupCompleted: null
+  }).cleanupErrorCount, thrownOperations.length);
+});
+
+test("cleanupFailureProvenance 12: messages and stacks never enter evidence", async () => {
+  const marker = "sensitive-cleanup-message-and-stack";
+  const tracker = gate.createCleanupAttemptTracker();
+  const error = new Error(marker);
+  error.code = "not a closed code";
+  error.stack = `${marker}\nprivate stack material`;
+  await tracker.capture("vault_destroy", async () => { throw error; });
+  const provenance = cleanupSnapshot(tracker);
+  const serialized = JSON.stringify(provenance);
+  assert.equal(provenance.causalCode, "social_3b0_cleanup_operation_failed");
+  assert.equal(serialized.includes(marker), false);
+  assert.equal(serialized.includes("private stack material"), false);
+  assert.deepEqual(
+    Object.keys(provenance).sort(),
+    gate.CLEANUP_FAILURE_PROVENANCE_KEYS
+  );
+});
+
+test("cleanupFailureProvenance rejects open schemas and unsafe scalar or residual values", () => {
+  const valid = cleanupProvenance();
+  assert.equal(gate.validCleanupFailureProvenance(valid), true);
+  const missing = { ...valid };
+  delete missing.operation;
+  const missingResidual = { ...valid.firstAttemptResiduals };
+  delete missingResidual.timers;
+  const invalid = [
+    missing,
+    { ...valid, unexpected: 0 },
+    { ...valid, operation: "unknown_cleanup" },
+    { ...valid, causalCode: "not a closed code" },
+    { ...valid, cleanupErrorCount: -1 },
+    { ...valid, cleanupErrorCount: 1.5 },
+    { ...valid, cleanupErrorCount: "1" },
+    { ...valid, cleanupErrorCount: Number.MAX_SAFE_INTEGER + 1 },
+    { ...valid, postgresCleanupCompleted: "true" },
+    { ...valid, firstAttemptSyntheticMaterialsCleared: 1 },
+    { ...valid, firstAttemptResiduals: missingResidual },
+    { ...valid, firstAttemptResiduals: { ...valid.firstAttemptResiduals, extra: 0 } },
+    { ...valid, firstAttemptResiduals: { ...valid.firstAttemptResiduals, timers: -1 } },
+    { ...valid, firstAttemptResiduals: { ...valid.firstAttemptResiduals, timers: 0.5 } },
+    { ...valid, firstAttemptResiduals: { ...valid.firstAttemptResiduals, timers: "0" } },
+    {
+      ...valid,
+      firstAttemptResiduals: {
+        ...valid.firstAttemptResiduals,
+        timers: Number.MAX_SAFE_INTEGER + 1
+      }
+    }
+  ];
+  for (const candidate of invalid) {
+    assert.equal(gate.validCleanupFailureProvenance(candidate), false);
+  }
+  const passed = passedEvidence();
+  const missingEvidenceField = { ...passed };
+  delete missingEvidenceField.cleanupFailureProvenance;
+  assert.equal(gate.evidenceSafe(missingEvidenceField), false);
+  assert.equal(gate.evidenceSafe({ ...passed, cleanupFailureDetail: null }), false);
+});
+
+test("cleanupFailureProvenance 13: compensating cleanup preserves first provenance", async () => {
+  const firstAttemptResiduals = { ...gate.zeroResiduals(), timers: 2 };
+  const provenance = cleanupProvenance({
+    operation: "state_envelope_destroy",
+    causalCode: "social_3b0_state_cleanup_failed",
+    cleanupErrorCount: 2,
+    postgresCleanupCompleted: true,
+    firstAttemptResiduals
+  });
+  const workerEvidence = failedO22Evidence({
+    cleanupFailureProvenance: provenance,
+    cleanup: {
+      cleanupCompleted: false,
+      intermediateEvidenceRemoved: true,
+      syntheticMaterialsCleared: true
+    },
+    residuals: firstAttemptResiduals
+  });
+  assert.equal(gate.evidenceSafe(workerEvidence), true);
+  const supervised = await supervisedEvidenceFixture({
+    workerEvidence,
+    cleanupResult: zeroCleanup(),
+    runId: "73213"
+  });
+  assert.equal(supervised.result.ok, false);
+  assert.deepEqual(supervised.evidence.cleanupFailureProvenance, provenance);
+  assert.equal(supervised.evidence.substeps[21].status, "failed");
+  assert.equal(supervised.evidence.firstFailure.substep, "O22");
+  assert.equal(supervised.evidence.cleanup.cleanupCompleted, true);
+});
+
+test("cleanupFailureProvenance 14: final zero residuals do not erase first residuals", async () => {
+  const firstAttemptResiduals = { ...gate.zeroResiduals(), containers: 1 };
+  const provenance = cleanupProvenance({
+    operation: "residual_validation",
+    causalCode: "social_3b0_cleanup_residuals_nonzero",
+    cleanupErrorCount: 0,
+    firstAttemptResiduals
+  });
+  const supervised = await supervisedEvidenceFixture({
+    workerEvidence: failedO22Evidence({
+      cleanupFailureProvenance: provenance,
+      cleanup: {
+        cleanupCompleted: false,
+        intermediateEvidenceRemoved: true,
+        syntheticMaterialsCleared: true
+      },
+      residuals: firstAttemptResiduals
+    }),
+    cleanupResult: zeroCleanup(),
+    runId: "73214"
+  });
+  assert.deepEqual(supervised.evidence.residuals, gate.zeroResiduals());
+  assert.deepEqual(
+    supervised.evidence.cleanupFailureProvenance.firstAttemptResiduals,
+    firstAttemptResiduals
+  );
+});
+
+test("cleanupFailureProvenance 15: O22 remains failed after its first attempt fails", () => {
+  const failed = failedO22Evidence();
+  const passedO22 = failed.substeps.map((entry) => entry.id === "O22"
+    ? { ...entry, status: "passed" }
+    : entry);
+  assert.equal(gate.evidenceSafe(failed), true);
+  assert.equal(failed.substeps[21].status, "failed");
+  assert.equal(failed.firstFailure.substep, "O22");
+  assert.notEqual(failed.cleanupFailureProvenance, null);
+  assert.equal(gate.evidenceSafe({
+    ...failed,
+    cleanupFailureProvenance: null
+  }), false);
+  assert.equal(gate.evidenceSafe({
+    ...failed,
+    substeps: passedO22
+  }), false);
+  assert.equal(gate.evidenceSafe({
+    ...failed,
+    firstFailure: gate.closedFirstFailure({
+      phase: gate.PHASE,
+      substep: "O22",
+      lastCompletedSubstep: "O21",
+      causalCode: "social_3b0_cleanup_operation_failed"
+    }),
+    substeps: passedO22,
+    cleanupFailureProvenance: null
+  }), false);
+});
+
+test("cleanupFailureProvenance 16: an earlier functional failure keeps passed O22", () => {
+  const evidence = passedEvidence();
+  evidence.status = "failed";
+  evidence.firstFailure = gate.closedFirstFailure({
+    phase: gate.PHASE,
+    substep: "O13",
+    lastCompletedSubstep: "O12",
+    causalCode: "social_3b0_fixture_functional_failure"
+  });
+  evidence.substeps = Object.freeze(evidence.substeps.map((entry, index) =>
+    Object.freeze(index === 12
+      ? { ...entry, status: "failed" }
+      : index > 12 && index < 21
+        ? { ...entry, status: "skipped" }
+        : entry)
+  ));
+  assert.equal(evidence.substeps[21].status, "passed");
+  assert.equal(evidence.cleanupFailureProvenance, null);
+  assert.equal(gate.evidenceSafe(evidence), true);
+});
+
+test("cleanupFailureProvenance 17: an integral passed run requires null provenance", () => {
+  const evidence = passedEvidence();
+  assert.equal(evidence.status, "passed");
+  assert.equal(evidence.firstFailure, null);
+  assert.equal(evidence.substeps[21].status, "passed");
+  assert.equal(evidence.cleanupFailureProvenance, null);
+  assert.equal(gate.evidenceSafe(evidence), true);
+  assert.equal(gate.evidenceSafe({
+    ...evidence,
+    cleanupFailureProvenance: cleanupProvenance()
+  }), false);
+});
+
+test("cleanupFailureProvenance 18: sanitized fallback retains only the closed schema", async () => {
+  const marker = "sensitive cleanup exception detail";
+  const invalidWorkerEvidence = failedO22Evidence();
+  invalidWorkerEvidence.cleanupFailureProvenance = {
+    ...invalidWorkerEvidence.cleanupFailureProvenance,
+    message: marker,
+    stack: marker
+  };
+  assert.equal(gate.evidenceSafe(invalidWorkerEvidence), false);
+  const supervised = await supervisedEvidenceFixture({
+    workerEvidence: invalidWorkerEvidence,
+    cleanupResult: zeroCleanup(),
+    runId: "73218"
+  });
+  const base = gate.baseEvidence({
+    branch: gate.BRANCH,
+    sha: SHA,
+    runAttempt: 1
+  });
+  assert.equal(gate.evidenceSafe(supervised.evidence), true);
+  assert.deepEqual(Object.keys(supervised.evidence).sort(), Object.keys(base).sort());
+  assert.equal(supervised.evidence.cleanupFailureProvenance, null);
+  assert.equal(supervised.evidence.substeps[21].status, "skipped");
+  assert.equal(supervised.serialized.includes(marker), false);
+  assert.equal("message" in supervised.evidence, false);
+  assert.equal("stack" in supervised.evidence, false);
+});
+
 test("external render evidence rejects missing, malformed, nonzero and aliased counters", () => {
   const evidence = passedEvidence();
   const missing = { ...evidence };
@@ -1746,7 +2174,8 @@ test("worker crash still publishes exactly four sanitized files after measured c
     assert.equal(evidence.firstFailure.exitCode, 19);
     assert.equal(evidence.cleanup.cleanupCompleted, true);
     assert.deepEqual(evidence.residuals, gate.zeroResiduals());
-    assert.equal(evidence.substeps[21].status, "passed");
+    assert.equal(evidence.substeps[21].status, "skipped");
+    assert.equal(evidence.cleanupFailureProvenance, null);
     assert.equal(evidence.externalRenderCalls, 0);
     gate.verifySidecar(outputPath, path.join(directory, gate.EVIDENCE_HASH_FILE));
     gate.verifySidecar(
@@ -1758,7 +2187,7 @@ test("worker crash still publishes exactly four sanitized files after measured c
   }
 });
 
-test("compensating cleanup failure downgrades passed worker evidence and O22", async () => {
+test("compensating cleanup failure downgrades the run without rewriting worker O22", async () => {
   const runnerTemp = fs.mkdtempSync(path.join(os.tmpdir(), "social-3b0-cleanup-"));
   const directory = path.join(runnerTemp, gate.ARTIFACT_DIRECTORY);
   const outputPath = path.join(directory, gate.EVIDENCE_FILE);
@@ -1816,7 +2245,8 @@ test("compensating cleanup failure downgrades passed worker evidence and O22", a
     assert.equal(evidence.firstFailure.causalCode, "social_3b0_cleanup_incomplete");
     assert.equal(evidence.cleanup.cleanupCompleted, false);
     assert.equal(evidence.residuals.timers, 1);
-    assert.equal(evidence.substeps[21].status, "failed");
+    assert.equal(evidence.substeps[21].status, "passed");
+    assert.equal(evidence.cleanupFailureProvenance, null);
     assert.equal(evidence.externalRenderCalls, 0);
   } finally {
     fs.rmSync(runnerTemp, { recursive: true, force: true });
