@@ -11,7 +11,7 @@ const tls = require("node:tls");
 const path = require("node:path");
 
 const BRANCH =
-  "social/checkpoint-3b0-o05-loopback-json-flush-20260812";
+  "social/checkpoint-3b0-o12-pending-credential-visibility-20260812";
 const PHASE = "instagram_oauth_local_contract";
 const IMAGE =
   "docker.io/library/postgres:18.4-bookworm@" +
@@ -224,6 +224,173 @@ function canonicalJson(value) {
 
 function sha256(value) {
   return crypto.createHash("sha256").update(value).digest("hex");
+}
+
+const PENDING_CREDENTIAL_ROW_KEYS = Object.freeze([
+  "aad_version",
+  "auth_tag",
+  "ciphertext",
+  "company_id",
+  "connection_id",
+  "credential_type",
+  "expires_at",
+  "id",
+  "key_version",
+  "nonce",
+  "oauth_transaction_id",
+  "provider",
+  "revoked_at"
+].sort());
+
+function clearPendingCredentialRows(rows) {
+  if (!Array.isArray(rows)) return;
+  for (const row of rows) {
+    if (!row || typeof row !== "object") continue;
+    for (const field of ["ciphertext", "nonce", "auth_tag"]) {
+      if (Buffer.isBuffer(row[field])) row[field].fill(0);
+    }
+  }
+}
+
+function assertPendingCredentialPhysicalRow(row, expected, marker) {
+  if (
+    !plainObject(row) ||
+    !plainObject(expected) ||
+    !exactKeys(row, PENDING_CREDENTIAL_ROW_KEYS) ||
+    row.company_id !== expected.companyId ||
+    row.id !== expected.credentialId ||
+    row.connection_id !== expected.connectionId ||
+    row.provider !== expected.provider ||
+    row.credential_type !== expected.credentialType ||
+    row.oauth_transaction_id !== null ||
+    row.revoked_at !== null
+  ) {
+    fail("social_3b0_pending_credential_row_invalid");
+  }
+  if (
+    !Buffer.isBuffer(marker) || marker.length < 1 ||
+    !Buffer.isBuffer(row.ciphertext) || row.ciphertext.length < 1 ||
+    !Buffer.isBuffer(row.nonce) || row.nonce.length !== 12 ||
+    !Buffer.isBuffer(row.auth_tag) || row.auth_tag.length !== 16 ||
+    row.aad_version !== 1 ||
+    row.ciphertext.includes(marker)
+  ) {
+    fail("social_3b0_credential_ciphertext_invalid");
+  }
+  return row;
+}
+
+async function verifyPendingCredentialPhysicalProof(options = {}) {
+  const rows = options.result?.rows;
+  const expected = options.expected;
+  const syntheticMaterial = options.syntheticMaterial;
+  const evidenceCounts = options.evidenceCounts;
+  let marker;
+  let physicalPlaintext;
+  let operationalValue;
+  try {
+    if (
+      !Array.isArray(rows) || rows.length !== 1 ||
+      !Buffer.isBuffer(syntheticMaterial) || syntheticMaterial.length < 1 ||
+      typeof options.credentials?.withDecryptedCredential !== "function" ||
+      typeof options.vault?.decrypt !== "function" ||
+      typeof options.contextFromRow !== "function" ||
+      typeof options.envelopeFromRow !== "function" ||
+      typeof options.readBoundary !== "function" ||
+      typeof options.operationCounts !== "function" ||
+      !plainObject(evidenceCounts)
+    ) {
+      fail("social_3b0_pending_credential_row_invalid");
+    }
+    marker = Buffer.from(syntheticMaterial.toString("base64url"), "utf8");
+    const row = assertPendingCredentialPhysicalRow(rows[0], expected, marker);
+    marker.fill(0);
+    marker = null;
+
+    let operationalError;
+    let operationalRejected = false;
+    let operationalCallbackCalls = 0;
+    try {
+      operationalValue = await options.credentials.withDecryptedCredential({
+        companyId: expected.companyId,
+        credentialId: expected.credentialId
+      }, async (plaintext) => {
+        operationalCallbackCalls += 1;
+        if (Buffer.isBuffer(plaintext)) plaintext.fill(0);
+        return null;
+      });
+    } catch (error) {
+      operationalRejected = true;
+      operationalError = error;
+    } finally {
+      if (Buffer.isBuffer(operationalValue)) operationalValue.fill(0);
+      operationalValue = null;
+    }
+    if (operationalCallbackCalls !== 0 || !operationalRejected) {
+      fail("social_3b0_pending_credential_unexpectedly_operational");
+    }
+    if (operationalError?.code !== "credential_not_found") {
+      fail("social_3b0_pending_credential_visibility_guard_invalid");
+    }
+    operationalError = null;
+
+    try {
+      physicalPlaintext = options.vault.decrypt(
+        options.envelopeFromRow(row),
+        options.contextFromRow(row, {
+          companyId: expected.companyId,
+          credentialId: expected.credentialId
+        })
+      );
+      if (
+        !Buffer.isBuffer(physicalPlaintext) ||
+        !SHA256.test(String(options.expectedDigest || "")) ||
+        sha256(physicalPlaintext) !== options.expectedDigest
+      ) {
+        fail("social_3b0_pending_credential_vault_proof_invalid");
+      }
+    } catch (error) {
+      if (
+        error instanceof Social3B0PhysicalGateFailure &&
+        error.code === "social_3b0_pending_credential_vault_proof_invalid"
+      ) {
+        throw error;
+      }
+      fail("social_3b0_pending_credential_vault_proof_invalid");
+    } finally {
+      if (Buffer.isBuffer(physicalPlaintext)) physicalPlaintext.fill(0);
+      physicalPlaintext = null;
+    }
+
+    const localCounts = options.operationCounts();
+    if (
+      !plainObject(localCounts) ||
+      localCounts.vaultEncryptCalls !== 1 ||
+      localCounts.vaultDecryptCalls !== 1 ||
+      localCounts.credentialStoreCalls !== 1 ||
+      evidenceCounts.credentialWrites !== 0
+    ) {
+      fail("social_3b0_credential_single_write_invalid");
+    }
+
+    const boundary = await options.readBoundary();
+    if (
+      !plainObject(boundary) ||
+      boundary.status !== "authorization_pending" ||
+      boundary.externalAccounts !== 0 ||
+      evidenceCounts.accountDiscoveryCalls !== 0 ||
+      evidenceCounts.publicationCalls !== 0
+    ) {
+      fail("social_3b0_account_discovery_boundary_invalid");
+    }
+    evidenceCounts.credentialWrites += 1;
+    return true;
+  } finally {
+    if (Buffer.isBuffer(physicalPlaintext)) physicalPlaintext.fill(0);
+    if (Buffer.isBuffer(operationalValue)) operationalValue.fill(0);
+    if (Buffer.isBuffer(marker)) marker.fill(0);
+    clearPendingCredentialRows(rows);
+  }
 }
 
 function zeroResiduals() {
@@ -1543,6 +1710,7 @@ async function runPhysicalOAuthContract(options = {}) {
   let physicalFailure = null;
   let cleanupFailure = null;
   let vaultEncryptCalls = 0;
+  let vaultDecryptCalls = 0;
   let credentialStoreCalls = 0;
   let timerResiduals = 0;
   let networkGuard = null;
@@ -1587,7 +1755,11 @@ async function runPhysicalOAuthContract(options = {}) {
     const { createPostgresOAuthRepository } = require(
       "../src/persistence/postgres/social-oauth-repository"
     );
-    const { createSocialCredentialService } = require(
+    const {
+      contextFromRow,
+      createSocialCredentialService,
+      envelopeFromRow
+    } = require(
       "../src/social/credential-service"
     );
     const {
@@ -1610,7 +1782,10 @@ async function runPhysicalOAuthContract(options = {}) {
     const { createInstagramProvider } = require(
       "../src/social/oauth/instagram-provider"
     );
-    const { createInstagramOAuthService } = require(
+    const {
+      INSTAGRAM_OAUTH_CREDENTIAL_TYPE,
+      createInstagramOAuthService
+    } = require(
       "../src/social/oauth/instagram-oauth-service"
     );
     const { createInstagramOAuthRouter } = require(
@@ -1822,6 +1997,10 @@ async function runPhysicalOAuthContract(options = {}) {
       encrypt(...args) {
         vaultEncryptCalls += 1;
         return rawVault.encrypt(...args);
+      },
+      decrypt(...args) {
+        vaultDecryptCalls += 1;
+        return rawVault.decrypt(...args);
       }
     });
     keyring.keys.get(vaultVersion).fill(0);
@@ -2149,37 +2328,61 @@ async function runPhysicalOAuthContract(options = {}) {
       const result = await withTransaction(
         bootstrap.pools.runtime,
         (client) => client.query([
-          "SELECT ciphertext,nonce,auth_tag",
+          "SELECT company_id,id,provider,connection_id,oauth_transaction_id,",
+          "  credential_type,ciphertext,nonce,auth_tag,key_version,aad_version,",
+          "  expires_at,revoked_at",
           "FROM ia4tube_social.social_encrypted_credentials",
-          "WHERE company_id=$1 AND id=$2 AND connection_id=$3",
-          "  AND revoked_at IS NULL"
+          "WHERE company_id=$1 AND id=$2"
         ].join("\n"), [
           tenantA.fixture.companyId,
-          primaryPayload.authorizationHandle,
-          primaryRow.connection_id
+          primaryPayload.authorizationHandle
         ]),
         { role: RUNTIME_ROLE, companyId: tenantA.fixture.companyId }
       );
-      const row = result.rows?.[0];
-      const marker = Buffer.from(syntheticMaterial.toString("base64url"), "utf8");
-      try {
-        if (
-          result.rows?.length !== 1 ||
-          !Buffer.isBuffer(row.ciphertext) || row.ciphertext.length < 1 ||
-          !Buffer.isBuffer(row.nonce) || row.nonce.length !== 12 ||
-          !Buffer.isBuffer(row.auth_tag) || row.auth_tag.length !== 16 ||
-          row.ciphertext.includes(marker)
-        ) fail("social_3b0_credential_ciphertext_invalid");
-      } finally { marker.fill(0); }
-      const decryptedDigest = await credentials.withDecryptedCredential({
-        companyId: tenantA.fixture.companyId,
-        credentialId: primaryPayload.authorizationHandle
-      }, async (plaintext) => sha256(plaintext));
-      if (
-        decryptedDigest !== expectedCredentialDigest ||
-        vaultEncryptCalls !== 1 || credentialStoreCalls !== 1
-      ) fail("social_3b0_credential_single_write_invalid");
-      counts.credentialWrites += 1;
+      await verifyPendingCredentialPhysicalProof({
+        result,
+        expected: Object.freeze({
+          companyId: tenantA.fixture.companyId,
+          credentialId: primaryPayload.authorizationHandle,
+          connectionId: primaryRow.connection_id,
+          provider: INSTAGRAM_PROVIDER,
+          credentialType: INSTAGRAM_OAUTH_CREDENTIAL_TYPE
+        }),
+        syntheticMaterial,
+        expectedDigest: expectedCredentialDigest,
+        credentials,
+        vault,
+        contextFromRow,
+        envelopeFromRow,
+        operationCounts: () => Object.freeze({
+          vaultEncryptCalls,
+          vaultDecryptCalls,
+          credentialStoreCalls
+        }),
+        evidenceCounts: counts,
+        readBoundary: async () => {
+          const boundary = await withTransaction(
+            bootstrap.pools.runtime,
+            (client) => client.query([
+              "SELECT c.status,",
+              " (SELECT COUNT(*)::integer",
+              "  FROM ia4tube_social.social_external_accounts a",
+              "  WHERE a.company_id=$1) AS accounts",
+              "FROM ia4tube_social.social_connections c",
+              "WHERE c.company_id=$1 AND c.id=$2"
+            ].join("\n"), [tenantA.fixture.companyId, primaryRow.connection_id]),
+            { role: RUNTIME_ROLE, companyId: tenantA.fixture.companyId }
+          );
+          return Object.freeze({
+            status: boundary.rows?.length === 1
+              ? boundary.rows[0].status
+              : null,
+            externalAccounts: boundary.rows?.length === 1
+              ? Number(boundary.rows[0].accounts)
+              : -1
+          });
+        }
+      });
     });
     await ledger.run("O13", async () => {
       const result = await withTransaction(
@@ -2196,7 +2399,9 @@ async function runPhysicalOAuthContract(options = {}) {
       );
       if (
         result.rows?.[0]?.status !== "authorization_pending" ||
-        Number(result.rows[0].accounts) !== 0
+        Number(result.rows[0].accounts) !== 0 ||
+        counts.accountDiscoveryCalls !== 0 ||
+        counts.publicationCalls !== 0
       ) fail("social_3b0_account_discovery_boundary_invalid");
     });
     await ledger.run("O14", async () => {
@@ -2412,7 +2617,8 @@ async function runPhysicalOAuthContract(options = {}) {
       if (
         Number(result.rows?.[0]?.publications) !== 0 ||
         Number(result.rows?.[0]?.attempts) !== 0 ||
-        vaultEncryptCalls !== 2 || credentialStoreCalls !== 2 ||
+        vaultEncryptCalls !== 2 || vaultDecryptCalls !== 1 ||
+        credentialStoreCalls !== 2 ||
         providerTransportCalls.tokenExchange !==
           counts.syntheticExchangeCalls ||
         providerTransportCalls.mediaContainer !== 0 ||
@@ -3062,6 +3268,7 @@ module.exports = {
   WORKER_TIMEOUT_MS,
   Social3B0PhysicalGateFailure,
   assertAuthorizeRefusalContract,
+  assertPendingCredentialPhysicalRow,
   artifactPaths,
   baseEvidence,
   canonicalJson,
@@ -3080,6 +3287,7 @@ module.exports = {
   sanitizeProcessStatus,
   superviseInstagramOAuthPhysicalGate,
   validateEnvironment,
+  verifyPendingCredentialPhysicalProof,
   verifySidecar,
   writePayload,
   zeroCounts,

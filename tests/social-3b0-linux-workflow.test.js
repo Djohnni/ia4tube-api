@@ -32,13 +32,16 @@ const HISTORICAL_WORKFLOW_SHA256 =
   "92ea893458ce8125bde7e316ea7fdc8b72015245f132175ecf2b4037f512fff6";
 const HISTORICAL_WORKFLOW_BLOB = "7d66809ba2495aa6d2c4c8dc4d2f5ff03c991693";
 const BRANCH =
-  "social/checkpoint-3b0-o05-loopback-json-flush-20260812";
+  "social/checkpoint-3b0-o12-pending-credential-visibility-20260812";
 const ZERO_SHA = "0000000000000000000000000000000000000000";
+const O05_CORRECTION_COMMIT = "ad3c162aaee04bb66d79ea3c35c3d75297e8d0ab";
 const PREVIOUS_CORRECTION_COMMIT = "27cd350a253ab3ff07a915570eb41f291bbd1b42";
 const PRIOR_INFRA_COMMIT = "7bff67ac0c1acdd37473889a3f8b5c2017b30c9c";
 const FUNCTIONAL_COMMIT = "33e3ea7abcea7f5dc51780c3a1efd4743352fe40";
 const FUNCTIONAL_PARENT = "3dc3d8be62438216509f061f6c1a26ee39c9b5dc";
 const CORRECTION_MESSAGE =
+  "[run-social-3b0] verify pending credential without operational activation";
+const O05_CORRECTION_MESSAGE =
   "[run-social-3b0] preserve loopback JSON payload until request flush";
 const PREVIOUS_CORRECTION_MESSAGE =
   "[run-social-3b0] align Gate 3 replay and remote evidence contracts";
@@ -110,13 +113,21 @@ const PREVIOUS_CORRECTION_FILES = Object.freeze([
   "tests/social-3b0-linux-physical-gate.test.js",
   "tests/social-3b0-linux-workflow.test.js"
 ]);
-const CURRENT_CORRECTION_FILES = Object.freeze([
+const O05_CORRECTION_FILES = Object.freeze([
   ".github/workflows/social-3b0-instagram-oauth-local-contract.yml",
   "docs/social-3b0-instagram-oauth-local-contract.md",
   "scripts/social-3a0p-local-scope.js",
   "scripts/social-3b0-linux-physical-gate.js",
   "tests/social-3a0p-current-diff-scope.test.js",
   "tests/social-3a0p-local-scope.test.js",
+  "tests/social-3b0-linux-physical-gate.test.js",
+  "tests/social-3b0-linux-workflow.test.js"
+]);
+const CURRENT_CORRECTION_FILES = Object.freeze([
+  ".github/workflows/social-3b0-instagram-oauth-local-contract.yml",
+  "docs/social-3b0-instagram-oauth-local-contract.md",
+  "scripts/social-3b0-linux-physical-gate.js",
+  "tests/social-3a0p-current-diff-scope.test.js",
   "tests/social-3b0-linux-physical-gate.test.js",
   "tests/social-3b0-linux-workflow.test.js"
 ]);
@@ -256,19 +267,22 @@ test("all Actions are full-SHA pinned and artifact upload occurs once", () => {
   assert.equal(uses.filter((value) => value === ACTIONS.uploadArtifact).length, 1);
 });
 
-test("both jobs enforce the first immutable push and the exact four-commit correction chain", () => {
+test("both jobs enforce the first immutable push and the exact five-commit correction chain", () => {
   const windows = WORKFLOW.jobs["windows-automated-tests"];
   const linux = WORKFLOW.jobs["linux-physical-validation"];
   assert.equal(FUNCTIONAL_FILES.length, 18);
   assert.equal(PRIOR_INFRASTRUCTURE_FILES.length, 9);
   assert.equal(PREVIOUS_CORRECTION_FILES.length, 10);
-  assert.equal(CURRENT_CORRECTION_FILES.length, 8);
+  assert.equal(O05_CORRECTION_FILES.length, 8);
+  assert.equal(CURRENT_CORRECTION_FILES.length, 6);
   assert.deepEqual(WORKFLOW.env, {
+    SOCIAL_3B0_O05_CORRECTION_COMMIT: O05_CORRECTION_COMMIT,
     SOCIAL_3B0_PREVIOUS_CORRECTION_COMMIT: PREVIOUS_CORRECTION_COMMIT,
     SOCIAL_3B0_PRIOR_INFRA_COMMIT: PRIOR_INFRA_COMMIT,
     SOCIAL_3B0_FUNCTIONAL_COMMIT: FUNCTIONAL_COMMIT,
     SOCIAL_3B0_FUNCTIONAL_PARENT: FUNCTIONAL_PARENT,
     SOCIAL_3B0_CORRECTION_MESSAGE: CORRECTION_MESSAGE,
+    SOCIAL_3B0_O05_CORRECTION_MESSAGE: O05_CORRECTION_MESSAGE,
     SOCIAL_3B0_PREVIOUS_CORRECTION_MESSAGE: PREVIOUS_CORRECTION_MESSAGE,
     SOCIAL_3B0_PRIOR_INFRA_MESSAGE: PRIOR_INFRA_MESSAGE,
     SOCIAL_3B0_FUNCTIONAL_MESSAGE: FUNCTIONAL_MESSAGE,
@@ -282,8 +296,8 @@ test("both jobs enforce the first immutable push and the exact four-commit corre
   assert.equal(linux.needs, "windows-automated-tests");
 
   const guards = [
-    step(windows, "Verify the immutable four-commit correction contract").run,
-    step(linux, "Verify the immutable four-commit correction contract").run
+    step(windows, "Verify the immutable five-commit correction contract").run,
+    step(linux, "Verify the immutable five-commit correction contract").run
   ];
   assert.deepEqual(
     extractSingleQuotedLines(
@@ -305,7 +319,7 @@ test("both jobs enforce the first immutable push and the exact four-commit corre
     extractSingleQuotedLines(
       guards[0],
       "$previousCorrectionFiles = @(\n",
-      ")\n$currentCorrectionFiles = @("
+      ")\n$o05CorrectionFiles = @("
     ),
     PREVIOUS_CORRECTION_FILES
   );
@@ -313,9 +327,25 @@ test("both jobs enforce the first immutable push and the exact four-commit corre
     extractSingleQuotedLines(
       guards[1],
       "previous_correction_files=(\n",
-      ")\ncurrent_correction_files=("
+      ")\no05_correction_files=("
     ),
     PREVIOUS_CORRECTION_FILES
+  );
+  assert.deepEqual(
+    extractSingleQuotedLines(
+      guards[0],
+      "$o05CorrectionFiles = @(\n",
+      ")\n$currentCorrectionFiles = @("
+    ),
+    O05_CORRECTION_FILES
+  );
+  assert.deepEqual(
+    extractSingleQuotedLines(
+      guards[1],
+      "o05_correction_files=(\n",
+      ")\ncurrent_correction_files=("
+    ),
+    O05_CORRECTION_FILES
   );
   assert.deepEqual(
     extractSingleQuotedLines(
@@ -335,11 +365,13 @@ test("both jobs enforce the first immutable push and the exact four-commit corre
   );
   for (const guard of guards) {
     for (const value of [
+      "SOCIAL_3B0_O05_CORRECTION_COMMIT",
       "SOCIAL_3B0_PREVIOUS_CORRECTION_COMMIT",
       "SOCIAL_3B0_PRIOR_INFRA_COMMIT",
       "SOCIAL_3B0_FUNCTIONAL_COMMIT",
       "SOCIAL_3B0_FUNCTIONAL_PARENT",
       "SOCIAL_3B0_CORRECTION_MESSAGE",
+      "SOCIAL_3B0_O05_CORRECTION_MESSAGE",
       "SOCIAL_3B0_PREVIOUS_CORRECTION_MESSAGE",
       "SOCIAL_3B0_PRIOR_INFRA_MESSAGE",
       "SOCIAL_3B0_FUNCTIONAL_MESSAGE",
@@ -351,6 +383,7 @@ test("both jobs enforce the first immutable push and the exact four-commit corre
     for (const file of FUNCTIONAL_FILES) assert.ok(guard.includes(file));
     for (const file of PRIOR_INFRASTRUCTURE_FILES) assert.ok(guard.includes(file));
     for (const file of PREVIOUS_CORRECTION_FILES) assert.ok(guard.includes(file));
+    for (const file of O05_CORRECTION_FILES) assert.ok(guard.includes(file));
     for (const file of CURRENT_CORRECTION_FILES) assert.ok(guard.includes(file));
     for (const file of [
       HISTORICAL_WORKFLOW_RELATIVE_PATH,
@@ -368,27 +401,31 @@ test("both jobs enforce the first immutable push and the exact four-commit corre
   }
   assert.match(
     guards[0],
-    /rev-list', '--count',[^\n]+SOCIAL_3B0_FUNCTIONAL_PARENT[^\n]+HEAD[^\n]+\)\) '4'/
+    /rev-list', '--count',[^\n]+SOCIAL_3B0_FUNCTIONAL_PARENT[^\n]+HEAD[^\n]+\)\) '5'/
   );
   assert.match(
     guards[1],
-    /rev-list --count [^\n]+SOCIAL_3B0_FUNCTIONAL_PARENT[^\n]+HEAD[^\n]+ = '4'/
+    /rev-list --count [^\n]+SOCIAL_3B0_FUNCTIONAL_PARENT[^\n]+HEAD[^\n]+ = '5'/
   );
   for (const fragment of [
-    "@('rev-parse', 'HEAD^')) $env:SOCIAL_3B0_PREVIOUS_CORRECTION_COMMIT",
+    "@('rev-parse', 'HEAD^')) $env:SOCIAL_3B0_O05_CORRECTION_COMMIT",
+    "@('rev-parse', \"$($env:SOCIAL_3B0_O05_CORRECTION_COMMIT)^\")) $env:SOCIAL_3B0_PREVIOUS_CORRECTION_COMMIT",
     "@('rev-parse', \"$($env:SOCIAL_3B0_PREVIOUS_CORRECTION_COMMIT)^\")) $env:SOCIAL_3B0_PRIOR_INFRA_COMMIT",
     "@('rev-parse', \"$($env:SOCIAL_3B0_PRIOR_INFRA_COMMIT)^\")) $env:SOCIAL_3B0_FUNCTIONAL_COMMIT",
     "@('rev-parse', \"$($env:SOCIAL_3B0_FUNCTIONAL_COMMIT)^\")) $env:SOCIAL_3B0_FUNCTIONAL_PARENT",
     "@('log', '-1', '--pretty=%B')) $env:SOCIAL_3B0_CORRECTION_MESSAGE",
+    "@('log', '-1', '--pretty=%B', $env:SOCIAL_3B0_O05_CORRECTION_COMMIT)) $env:SOCIAL_3B0_O05_CORRECTION_MESSAGE",
     "@('log', '-1', '--pretty=%B', $env:SOCIAL_3B0_PREVIOUS_CORRECTION_COMMIT)) $env:SOCIAL_3B0_PREVIOUS_CORRECTION_MESSAGE",
     "@('log', '-1', '--pretty=%B', $env:SOCIAL_3B0_PRIOR_INFRA_COMMIT)) $env:SOCIAL_3B0_PRIOR_INFRA_MESSAGE"
   ]) assert.ok(guards[0].includes(fragment), fragment);
   for (const fragment of [
-    "git rev-parse HEAD^)\" = \"$SOCIAL_3B0_PREVIOUS_CORRECTION_COMMIT",
+    "git rev-parse HEAD^)\" = \"$SOCIAL_3B0_O05_CORRECTION_COMMIT",
+    "git rev-parse \"$SOCIAL_3B0_O05_CORRECTION_COMMIT^\")\" = \"$SOCIAL_3B0_PREVIOUS_CORRECTION_COMMIT",
     "git rev-parse \"$SOCIAL_3B0_PREVIOUS_CORRECTION_COMMIT^\")\" = \"$SOCIAL_3B0_PRIOR_INFRA_COMMIT",
     "git rev-parse \"$SOCIAL_3B0_PRIOR_INFRA_COMMIT^\")\" = \"$SOCIAL_3B0_FUNCTIONAL_COMMIT",
     "git rev-parse \"$SOCIAL_3B0_FUNCTIONAL_COMMIT^\")\" = \"$SOCIAL_3B0_FUNCTIONAL_PARENT",
     "git log -1 --pretty=%B)\" = \"$SOCIAL_3B0_CORRECTION_MESSAGE",
+    "git log -1 --pretty=%B \"$SOCIAL_3B0_O05_CORRECTION_COMMIT\")\" = \"$SOCIAL_3B0_O05_CORRECTION_MESSAGE",
     "git log -1 --pretty=%B \"$SOCIAL_3B0_PREVIOUS_CORRECTION_COMMIT\")\" = \"$SOCIAL_3B0_PREVIOUS_CORRECTION_MESSAGE",
     "git log -1 --pretty=%B \"$SOCIAL_3B0_PRIOR_INFRA_COMMIT\")\" = \"$SOCIAL_3B0_PRIOR_INFRA_MESSAGE"
   ]) assert.ok(guards[1].includes(fragment), fragment);
@@ -396,12 +433,14 @@ test("both jobs enforce the first immutable push and the exact four-commit corre
     /Assert-ExactFiles \$functionalChanged \$functionalFiles/,
     /Assert-ExactFiles \$priorInfrastructureChanged \$priorInfrastructureFiles/,
     /Assert-ExactFiles \$previousCorrectionChanged \$previousCorrectionFiles/,
+    /Assert-ExactFiles \$o05CorrectionChanged \$o05CorrectionFiles/,
     /Assert-ExactFiles \$currentCorrectionChanged \$currentCorrectionFiles/
   ]) assert.match(guards[0], pattern);
   for (const pattern of [
     /assert_exact_files "\$SOCIAL_3B0_FUNCTIONAL_COMMIT" "\$\{functional_files\[@\]\}"/,
     /assert_exact_files "\$SOCIAL_3B0_PRIOR_INFRA_COMMIT" "\$\{prior_infrastructure_files\[@\]\}"/,
     /assert_exact_files "\$SOCIAL_3B0_PREVIOUS_CORRECTION_COMMIT" "\$\{previous_correction_files\[@\]\}"/,
+    /assert_exact_files "\$SOCIAL_3B0_O05_CORRECTION_COMMIT" "\$\{o05_correction_files\[@\]\}"/,
     /assert_exact_files HEAD "\$\{current_correction_files\[@\]\}"/
   ]) assert.match(guards[1], pattern);
   assert.match(
@@ -415,6 +454,10 @@ test("both jobs enforce the first immutable push and the exact four-commit corre
   assert.match(
     guards[0],
     /Assert-RegularBlobs \$env:SOCIAL_3B0_PREVIOUS_CORRECTION_COMMIT \$previousCorrectionFiles/
+  );
+  assert.match(
+    guards[0],
+    /Assert-RegularBlobs \$env:SOCIAL_3B0_O05_CORRECTION_COMMIT \$o05CorrectionFiles/
   );
   assert.match(guards[0], /Assert-RegularBlobs 'HEAD' \$currentCorrectionFiles/);
   assert.match(
@@ -431,6 +474,10 @@ test("both jobs enforce the first immutable push and the exact four-commit corre
   );
   assert.match(
     guards[1],
+    /assert_regular_blobs "\$SOCIAL_3B0_O05_CORRECTION_COMMIT" "\$\{o05_correction_files\[@\]\}"/
+  );
+  assert.match(
+    guards[1],
     /assert_regular_blobs HEAD "\$\{current_correction_files\[@\]\}"/
   );
 });
@@ -441,7 +488,7 @@ test("Windows runs the locked full suite naturally and exactly once", () => {
   assert.equal(windows["timeout-minutes"], 60);
 
   const checkout = windows.steps[0];
-  assert.equal(checkout.name, "Checkout the authorized four-commit correction chain");
+  assert.equal(checkout.name, "Checkout the authorized five-commit correction chain");
   assert.equal(checkout.uses, ACTIONS.checkout);
   assert.deepEqual(checkout.with, {
     "fetch-depth": 0,
@@ -488,7 +535,7 @@ test("Linux pre-gate is closed and the combined supervisor is invoked once", () 
   assert.equal(linux["timeout-minutes"], 60);
   assert.equal(
     linux.steps[0].name,
-    "Checkout the authorized four-commit correction chain"
+    "Checkout the authorized five-commit correction chain"
   );
   const preGate = step(linux, "Run the closed Linux pre-gate tests exactly once");
   assert.equal(

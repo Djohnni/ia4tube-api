@@ -1,4 +1,4 @@
-# Social 3B-0 — O05 loopback JSON flush e contrato OAuth local
+# Social 3B-0 — O12 credencial pendente e contrato OAuth local
 
 ## Base local preservada
 
@@ -167,8 +167,78 @@ confirmação de consumo pelo request e ser zerado uma única vez depois de
 O05 distingue, sem publicar status ou corpo, Bearer ausente, Bearer inválido,
 persistência indevida, aceitação indevida e o contrato da requisição válida.
 OAuth funcional, autenticação Bearer do produto, parser do produto, state AEAD,
-repositório, RLS e cofre permanecem inalterados. Nenhum resultado desta quarta
-rota é antecipado neste documento.
+repositório, RLS e cofre permanecem inalterados.
+
+Essa quarta rota foi concluída no commit
+`ad3c162aaee04bb66d79ea3c35c3d75297e8d0ab`, filho imediato de `27cd`, com a
+mensagem reservada acima e exatamente os oito caminhos declarados. Seu único
+push iniciou o run histórico `31635646419`, attempt 1. Windows, pré-gate Linux,
+G01–G05 e O01–O11 foram aprovados; O12 falhou; O13–O21 ficaram `skipped`; O22
+concluiu o cleanup. O secret scan OAuth remoto ficou `not_run`.
+
+A primeira falha histórica permanece, sem reclassificação:
+`job=linux_physical_gate`, `phase=instagram_oauth_local_contract`,
+`substep=O12`, `lastCompletedSubstep=O11`, `causalCode=credential_not_found`,
+`externalProcessStarted=null`, `exitCode=null`, `signal=null` e
+`timedOut=false`. O supervisor registrou `exitCode=1`, `signal=null`,
+`timedOut=false`, `stdoutStored=false` e `stderrStored=false`.
+
+O artifact histórico `9156947951`, nome
+`social-3b0-instagram-oauth-local-contract-evidence`, permanece inalterado. Seu
+digest é
+`sha256:ffa0cd90627fb7aa4f1e0059919ee5962660893bed62ac78db8d5d9a9b43daa6`,
+o Evidence SHA-256 é
+`7ec82a5bdfcd80941e751b192b780d5f9e8b6e23d50194c5ce3a144eb6150fba` e o
+Process-status SHA-256 é
+`26564ca3007f7f91c7b77edadbe4122d82804ea0626a3958f21292d1b067f342`.
+Ele registrou `authorizeRequests=3`, `callbackRequests=3`,
+`syntheticExchangeCalls=1`, `credentialWrites=0`, `accountDiscoveryCalls=0`,
+`publicationCalls=0`, `externalMetaCalls=0`, `externalInstagramCalls=0`,
+`externalGraphApiCalls=0`, `externalRenderCalls=0`,
+`externalPublicationCalls=0` e `realTokenCount=0`. O cleanup foi concluído,
+`intermediateEvidenceRemoved=true`, `syntheticMaterialsCleared=true` e os dez
+resíduos ficaram em zero. Não houve segundo push, retry ou re-run.
+
+## Quinto commit — prova física da credencial pendente
+
+A quinta rota parte exatamente de
+`ad3c162aaee04bb66d79ea3c35c3d75297e8d0ab`, na branch
+`social/checkpoint-3b0-o12-pending-credential-visibility-20260812`, e reserva a
+mensagem:
+
+```text
+[run-social-3b0] verify pending credential without operational activation
+```
+
+Seu inventário é fechado em exatamente seis caminhos literais:
+
+1. `.github/workflows/social-3b0-instagram-oauth-local-contract.yml`;
+2. `docs/social-3b0-instagram-oauth-local-contract.md`;
+3. `scripts/social-3b0-linux-physical-gate.js`;
+4. `tests/social-3a0p-current-diff-scope.test.js`;
+5. `tests/social-3b0-linux-physical-gate.test.js`;
+6. `tests/social-3b0-linux-workflow.test.js`.
+
+Não há sétimo caminho, prefixo, glob ou exceção de diretório. O diff corrente
+usa `ad3c` como base. Os dois paths de escopo permanecem byte-idênticos porque
+a allowlist literal existente já contém os seis caminhos desta rota.
+
+A causa fechada é
+`social_3b0_o12_pending_credential_operational_visibility_contract_mismatch`.
+O callback já persistiu uma única credencial cifrada, vinculada a uma conexão
+`authorization_pending`. A recusa interna `credential_not_found` pelo caminho
+operacional é esperada e preservada: esse caminho continua aceitando somente
+conexões `active` ou `connected`.
+
+O12 deve provar simultaneamente que a linha física existe e tem envelope
+válido, que o mesmo cofre autentica e decripta o material sintético com seu AAD,
+e que o acesso operacional permanece recusado antes de account discovery. O
+plaintext físico existe somente dentro da prova, é comparado por digest e
+zerado em `finally`; buffers físicos também são zerados. Não se cria API,
+segundo cofre, segunda chave, conta externa ou transição para `active`. O13
+continua exigindo `authorization_pending`, zero external accounts,
+`accountDiscoveryCalls=0` e zero publicação. Nenhum resultado desta quinta rota
+é antecipado neste documento.
 
 ## Workflow remoto separado
 
@@ -182,11 +252,12 @@ completo, a concorrência é exclusiva da branch e `cancel-in-progress` é falso
 
 O guard remoto deve aceitar somente `event=push`, criação da nova branch com
 `github.event.before` composto por quarenta zeros, `github.event.created=true`,
-`forced=false`, `deleted=false`, `run_attempt=1` e a mensagem exata do quarto
+`forced=false`, `deleted=false`, `run_attempt=1` e a mensagem exata do quinto
 commit. A cadeia aceita é exclusivamente:
 
 ```text
 HEAD remoto
+  -> ad3c162aaee04bb66d79ea3c35c3d75297e8d0ab
   -> 27cd350a253ab3ff07a915570eb41f291bbd1b42
   -> 7bff67ac0c1acdd37473889a3f8b5c2017b30c9c
   -> 33e3ea7abcea7f5dc51780c3a1efd4743352fe40
@@ -194,9 +265,9 @@ HEAD remoto
 ```
 
 Cada commit deve ter exatamente um pai. O guard verifica separadamente os
-dezoito caminhos do commit funcional, os nove caminhos do commit de
-infraestrutura, os dez caminhos da correção anterior e os oito caminhos do
-commit corrente.
+dezoito caminhos do commit funcional `33e3`, os nove caminhos da infraestrutura
+`7bff`, os dez caminhos da correção Gate 3 em `27cd`, os oito caminhos da
+correção O05 em `ad3c` e os seis caminhos da correção O12 no HEAD corrente.
 
 ## Jobs e limites operacionais
 
@@ -234,8 +305,9 @@ O gate registra exclusivamente O01–O22:
 - O09: tenant A instalado somente após autenticação AEAD;
 - O10: sessão consumida sob FORCE RLS;
 - O11: exchange sintético chamado exatamente uma vez;
-- O12: token sintético cifrado exatamente uma vez;
-- O13: conexão não ativada antes de account discovery;
+- O12: credencial pendente persistida e autenticada fisicamente pelo cofre,
+  mas recusada pelo caminho operacional;
+- O13: conexão não ativada antes de account discovery e zero external accounts;
 - O14: replay recusado sem novo exchange;
 - O15: callbacks concorrentes produzem um vencedor;
 - O16: state de A não alcança B;
@@ -284,5 +356,5 @@ evidência, sidecars e cleanup forem aprovados, com `firstFailure=null` e todos
 os resíduos em zero.
 
 Nenhum resultado remoto, SHA de evidência, digest de artifact ou conclusão do
-run da quarta rota é registrado neste documento antes de ser efetivamente
+run da quinta rota é registrado neste documento antes de ser efetivamente
 observado.

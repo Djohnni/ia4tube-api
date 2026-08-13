@@ -17,8 +17,168 @@ const {
   INSTAGRAM_OAUTH_REDIRECT_URI,
   loadInstagramOAuthConfig
 } = require("../src/social/oauth/instagram-config");
+const {
+  contextFromRow,
+  envelopeFromRow
+} = require("../src/social/credential-service");
+const { createSocialVault } = require("../src/social/vault");
+const {
+  deriveVaultKeyVersion,
+  vaultKeyringFingerprint
+} = require("../src/social/vault-key-version");
 
 const SHA = "a".repeat(40);
+const O12_COMPANY_ID = "11111111-1111-4111-8111-111111111111";
+const O12_CREDENTIAL_ID = "22222222-2222-4222-8222-222222222222";
+const O12_CONNECTION_ID = "33333333-3333-4333-8333-333333333333";
+const O12_CREDENTIAL_TYPE = "instagram_user_access_token";
+
+function sha256(value) {
+  return crypto.createHash("sha256").update(value).digest("hex");
+}
+
+function clonePendingCredentialRow(row, overrides = {}) {
+  return {
+    ...row,
+    ciphertext: Buffer.from(row.ciphertext),
+    nonce: Buffer.from(row.nonce),
+    auth_tag: Buffer.from(row.auth_tag),
+    ...overrides
+  };
+}
+
+function assertPendingCredentialBuffersCleared(rows) {
+  for (const row of rows || []) {
+    for (const field of ["ciphertext", "nonce", "auth_tag"]) {
+      if (!Buffer.isBuffer(row?.[field])) continue;
+      assert.equal(row[field].every((byte) => byte === 0), true, field);
+    }
+  }
+}
+
+function createPendingCredentialFixture({ encryptionContext = {} } = {}) {
+  const keyMaterial = crypto.randomBytes(32);
+  const keyVersion = deriveVaultKeyVersion(1, keyMaterial);
+  const keyringMaterial = Buffer.from(keyMaterial);
+  const keyring = {
+    activeVersion: keyVersion,
+    keys: new Map([[keyVersion, keyringMaterial]])
+  };
+  const rawVault = createSocialVault({
+    keyring,
+    expectedKeyringFingerprint: vaultKeyringFingerprint(keyVersion, [keyVersion])
+  });
+  keyringMaterial.fill(0);
+  keyring.keys.clear();
+  keyMaterial.fill(0);
+
+  const syntheticMaterial = crypto.randomBytes(32);
+  const marker = Buffer.from(syntheticMaterial.toString("base64url"), "utf8");
+  const expected = {
+    companyId: O12_COMPANY_ID,
+    credentialId: O12_CREDENTIAL_ID,
+    connectionId: O12_CONNECTION_ID,
+    provider: "instagram",
+    credentialType: O12_CREDENTIAL_TYPE
+  };
+  const context = {
+    companyId: expected.companyId,
+    provider: expected.provider,
+    credentialId: expected.credentialId,
+    credentialType: expected.credentialType,
+    subjectType: "connection",
+    subjectId: expected.connectionId,
+    ...encryptionContext
+  };
+  const envelope = rawVault.encrypt(marker, context);
+  const expectedDigest = sha256(marker);
+  marker.fill(0);
+  const row = {
+    company_id: expected.companyId,
+    id: expected.credentialId,
+    provider: expected.provider,
+    connection_id: expected.connectionId,
+    oauth_transaction_id: null,
+    credential_type: expected.credentialType,
+    ciphertext: envelope.ciphertext,
+    nonce: envelope.nonce,
+    auth_tag: envelope.authTag,
+    key_version: envelope.keyVersion,
+    aad_version: envelope.aadVersion,
+    expires_at: null,
+    revoked_at: null
+  };
+  const decryptedPlaintexts = [];
+  let vaultDecryptCalls = 0;
+  const vault = Object.freeze({
+    ...rawVault,
+    decrypt(...args) {
+      vaultDecryptCalls += 1;
+      const plaintext = rawVault.decrypt(...args);
+      decryptedPlaintexts.push(plaintext);
+      return plaintext;
+    }
+  });
+  let operationalReads = 0;
+  let operationalCallbackCalls = 0;
+  const credentials = Object.freeze({
+    async withDecryptedCredential(_identity, _operation) {
+      operationalReads += 1;
+      const error = new Error("pending credential unavailable");
+      error.code = "credential_not_found";
+      throw error;
+    }
+  });
+  const evidenceCounts = { ...gate.zeroCounts() };
+  const options = (overrides = {}) => ({
+    result: { rows: [row] },
+    expected,
+    syntheticMaterial,
+    expectedDigest,
+    credentials,
+    vault,
+    contextFromRow,
+    envelopeFromRow,
+    operationCounts: () => ({
+      vaultEncryptCalls: 1,
+      vaultDecryptCalls,
+      credentialStoreCalls: 1
+    }),
+    evidenceCounts,
+    readBoundary: async () => {
+      assert.equal(decryptedPlaintexts.length, 1);
+      assert.equal(decryptedPlaintexts[0].every((byte) => byte === 0), true);
+      return {
+        status: "authorization_pending",
+        externalAccounts: 0
+      };
+    },
+    ...overrides
+  });
+  return {
+    credentials,
+    decryptedPlaintexts,
+    evidenceCounts,
+    expected,
+    expectedDigest,
+    options,
+    rawVault,
+    row,
+    syntheticMaterial,
+    get operationalCallbackCalls() { return operationalCallbackCalls; },
+    get operationalReads() { return operationalReads; },
+    get vaultDecryptCalls() { return vaultDecryptCalls; },
+    recordOperationalCallback() { operationalCallbackCalls += 1; },
+    destroy() {
+      rawVault.destroy();
+      syntheticMaterial.fill(0);
+      for (const plaintext of decryptedPlaintexts) plaintext.fill(0);
+      for (const field of ["ciphertext", "nonce", "auth_tag"]) {
+        if (Buffer.isBuffer(row[field])) row[field].fill(0);
+      }
+    }
+  };
+}
 
 function environment(overrides = {}) {
   return Object.freeze({
@@ -163,7 +323,7 @@ async function closeLoopbackServer(server, sockets) {
 test("Social 3B physical gate freezes branch, phase, image and bounded budgets", () => {
   assert.equal(
     gate.BRANCH,
-    "social/checkpoint-3b0-o05-loopback-json-flush-20260812"
+    "social/checkpoint-3b0-o12-pending-credential-visibility-20260812"
   );
   assert.equal(gate.PHASE, "instagram_oauth_local_contract");
   assert.equal(
@@ -747,6 +907,517 @@ test("O05 source preserves refusal ordering, request counts and the valid author
   assert.ok(refusalCheck < validRequest);
   assert.ok(o05.indexOf("response.status !== 201") < o05.indexOf("primaryState = new URL"));
   assert.doesNotMatch(o05, /startsWith|endsWith|\.includes\(|\bRegExp\b|\|\|\s*\[|catch\s*\(/);
+});
+
+test("O12 accepts one encrypted pending credential and proves it with the real vault", async () => {
+  const fixture = createPendingCredentialFixture();
+  const syntheticToken = fixture.syntheticMaterial.toString("base64url");
+  try {
+    const result = await gate.verifyPendingCredentialPhysicalProof(
+      fixture.options()
+    );
+    assert.equal(result, true);
+    assert.equal(fixture.operationalReads, 1);
+    assert.equal(fixture.operationalCallbackCalls, 0);
+    assert.equal(fixture.vaultDecryptCalls, 1);
+    assert.equal(fixture.evidenceCounts.credentialWrites, 1);
+    assert.equal(fixture.evidenceCounts.accountDiscoveryCalls, 0);
+    assert.equal(fixture.evidenceCounts.publicationCalls, 0);
+    assert.equal(fixture.decryptedPlaintexts.length, 1);
+    assert.equal(
+      fixture.decryptedPlaintexts[0].every((byte) => byte === 0),
+      true
+    );
+    assertPendingCredentialBuffersCleared([fixture.row]);
+    assert.equal(JSON.stringify(result).includes(syntheticToken), false);
+  } finally {
+    fixture.destroy();
+  }
+});
+
+test("O12 rejects every malformed physical pending credential row and clears its buffers", async (context) => {
+  const alternateCompany = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+  const alternateCredential = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+  const alternateConnection = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+  const alternateTransaction = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
+  const cases = [
+    {
+      name: "missing row",
+      code: "social_3b0_pending_credential_row_invalid",
+      rows: () => []
+    },
+    {
+      name: "more than one row",
+      code: "social_3b0_pending_credential_row_invalid",
+      rows: (fixture) => [
+        fixture.row,
+        clonePendingCredentialRow(fixture.row)
+      ]
+    },
+    {
+      name: "company mismatch",
+      code: "social_3b0_pending_credential_row_invalid",
+      rows: (fixture) => [{ ...fixture.row, company_id: alternateCompany }]
+    },
+    {
+      name: "credential id mismatch",
+      code: "social_3b0_pending_credential_row_invalid",
+      rows: (fixture) => [{ ...fixture.row, id: alternateCredential }]
+    },
+    {
+      name: "connection id mismatch",
+      code: "social_3b0_pending_credential_row_invalid",
+      rows: (fixture) => [{ ...fixture.row, connection_id: alternateConnection }]
+    },
+    {
+      name: "provider mismatch",
+      code: "social_3b0_pending_credential_row_invalid",
+      rows: (fixture) => [{ ...fixture.row, provider: "facebook" }]
+    },
+    {
+      name: "credential type mismatch",
+      code: "social_3b0_pending_credential_row_invalid",
+      rows: (fixture) => [{ ...fixture.row, credential_type: "other_token" }]
+    },
+    {
+      name: "oauth transaction is not null",
+      code: "social_3b0_pending_credential_row_invalid",
+      rows: (fixture) => [{
+        ...fixture.row,
+        oauth_transaction_id: alternateTransaction
+      }]
+    },
+    {
+      name: "revoked timestamp is not null",
+      code: "social_3b0_pending_credential_row_invalid",
+      rows: (fixture) => [{ ...fixture.row, revoked_at: new Date(0) }]
+    },
+    {
+      name: "empty ciphertext",
+      code: "social_3b0_credential_ciphertext_invalid",
+      rows: (fixture) => [{ ...fixture.row, ciphertext: Buffer.alloc(0) }]
+    },
+    {
+      name: "nonce is not twelve bytes",
+      code: "social_3b0_credential_ciphertext_invalid",
+      rows: (fixture) => [{ ...fixture.row, nonce: Buffer.alloc(11, 1) }]
+    },
+    {
+      name: "authentication tag is not sixteen bytes",
+      code: "social_3b0_credential_ciphertext_invalid",
+      rows: (fixture) => [{ ...fixture.row, auth_tag: Buffer.alloc(15, 1) }]
+    },
+    {
+      name: "AAD version is not one",
+      code: "social_3b0_credential_ciphertext_invalid",
+      rows: (fixture) => [{ ...fixture.row, aad_version: 2 }]
+    },
+    {
+      name: "ciphertext contains the synthetic plaintext",
+      code: "social_3b0_credential_ciphertext_invalid",
+      rows: (fixture) => [{
+        ...fixture.row,
+        ciphertext: Buffer.from(
+          fixture.syntheticMaterial.toString("base64url"),
+          "utf8"
+        )
+      }]
+    }
+  ];
+  for (const entry of cases) {
+    await context.test(entry.name, async () => {
+      const fixture = createPendingCredentialFixture();
+      const rows = entry.rows(fixture);
+      try {
+        await assert.rejects(
+          gate.verifyPendingCredentialPhysicalProof(
+            fixture.options({ result: { rows } })
+          ),
+          (error) => error?.code === entry.code
+        );
+        assert.equal(fixture.operationalReads, 0);
+        assert.equal(fixture.vaultDecryptCalls, 0);
+        assert.equal(fixture.evidenceCounts.credentialWrites, 0);
+        assertPendingCredentialBuffersCleared(rows);
+      } finally {
+        fixture.destroy();
+        for (const row of rows) {
+          for (const field of ["ciphertext", "nonce", "auth_tag"]) {
+            if (Buffer.isBuffer(row?.[field])) row[field].fill(0);
+          }
+        }
+      }
+    });
+  }
+});
+
+test("O12 requires exact credential_not_found and never accepts an operational plaintext", async (context) => {
+  await context.test("exact pending refusal is accepted without invoking the callback", async () => {
+    const fixture = createPendingCredentialFixture();
+    try {
+      assert.equal(
+        await gate.verifyPendingCredentialPhysicalProof(fixture.options()),
+        true
+      );
+      assert.equal(fixture.operationalReads, 1);
+      assert.equal(fixture.operationalCallbackCalls, 0);
+    } finally {
+      fixture.destroy();
+    }
+  });
+
+  await context.test("resolved plaintext is rejected and zeroed", async () => {
+    const fixture = createPendingCredentialFixture();
+    const resolved = Buffer.from(
+      fixture.syntheticMaterial.toString("base64url"),
+      "utf8"
+    );
+    try {
+      await assert.rejects(
+        gate.verifyPendingCredentialPhysicalProof(fixture.options({
+          credentials: {
+            async withDecryptedCredential() { return resolved; }
+          }
+        })),
+        (error) =>
+          error?.code === "social_3b0_pending_credential_unexpectedly_operational"
+      );
+      assert.equal(resolved.every((byte) => byte === 0), true);
+      assert.equal(fixture.vaultDecryptCalls, 0);
+    } finally {
+      resolved.fill(0);
+      fixture.destroy();
+    }
+  });
+
+  await context.test("an invoked operational callback is rejected even if credential_not_found follows", async () => {
+    const fixture = createPendingCredentialFixture();
+    const delivered = Buffer.from(
+      fixture.syntheticMaterial.toString("base64url"),
+      "utf8"
+    );
+    try {
+      await assert.rejects(
+        gate.verifyPendingCredentialPhysicalProof(fixture.options({
+          credentials: {
+            async withDecryptedCredential(_identity, operation) {
+              fixture.recordOperationalCallback();
+              await operation(delivered);
+              const error = new Error("pending credential unavailable");
+              error.code = "credential_not_found";
+              throw error;
+            }
+          }
+        })),
+        (error) =>
+          error?.code === "social_3b0_pending_credential_unexpectedly_operational"
+      );
+      assert.equal(fixture.operationalCallbackCalls, 1);
+      assert.equal(delivered.every((byte) => byte === 0), true);
+      assert.equal(fixture.vaultDecryptCalls, 0);
+    } finally {
+      delivered.fill(0);
+      fixture.destroy();
+    }
+  });
+
+  for (const refusal of [
+    { name: "different code", value: "credential_expired" },
+    { name: "prefixed code", value: "credential_not_found_pending" },
+    { name: "missing code", value: undefined },
+    { name: "undefined rejection", value: undefined, bare: true },
+    { name: "null rejection", value: null, bare: true }
+  ]) {
+    await context.test(`${refusal.name} is rejected`, async () => {
+      const fixture = createPendingCredentialFixture();
+      try {
+        await assert.rejects(
+          gate.verifyPendingCredentialPhysicalProof(fixture.options({
+            credentials: {
+              async withDecryptedCredential() {
+                if (refusal.bare) throw refusal.value;
+                const error = new Error("wrong refusal");
+                error.code = refusal.value;
+                throw error;
+              }
+            }
+          })),
+          (error) =>
+            error?.code === "social_3b0_pending_credential_visibility_guard_invalid"
+        );
+        assert.equal(fixture.vaultDecryptCalls, 0);
+      } finally {
+        fixture.destroy();
+      }
+    });
+  }
+});
+
+test("O12 physical proof binds row context, real vault AAD, digest and zeroization", async (context) => {
+  await context.test("context and envelope are derived from the selected row", async () => {
+    const fixture = createPendingCredentialFixture();
+    let contextRow;
+    let envelopeRow;
+    let contextExpected;
+    try {
+      await gate.verifyPendingCredentialPhysicalProof(fixture.options({
+        contextFromRow(row, expected) {
+          contextRow = row;
+          contextExpected = expected;
+          return contextFromRow(row, expected);
+        },
+        envelopeFromRow(row) {
+          envelopeRow = row;
+          return envelopeFromRow(row);
+        }
+      }));
+      assert.equal(contextRow, fixture.row);
+      assert.equal(envelopeRow, fixture.row);
+      assert.deepEqual(contextExpected, {
+        companyId: fixture.expected.companyId,
+        credentialId: fixture.expected.credentialId
+      });
+      assert.equal(fixture.decryptedPlaintexts[0].every((byte) => byte === 0), true);
+      assertPendingCredentialBuffersCleared([fixture.row]);
+    } finally {
+      fixture.destroy();
+    }
+  });
+
+  await context.test("AAD mismatch is rejected by the real vault", async () => {
+    const fixture = createPendingCredentialFixture({
+      encryptionContext: {
+        subjectId: "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee"
+      }
+    });
+    try {
+      await assert.rejects(
+        gate.verifyPendingCredentialPhysicalProof(fixture.options()),
+        (error) =>
+          error?.code === "social_3b0_pending_credential_vault_proof_invalid"
+      );
+      assert.equal(fixture.vaultDecryptCalls, 1);
+      assertPendingCredentialBuffersCleared([fixture.row]);
+    } finally {
+      fixture.destroy();
+    }
+  });
+
+  await context.test("a different vault cannot authenticate the envelope", async () => {
+    const fixture = createPendingCredentialFixture();
+    const other = createPendingCredentialFixture();
+    try {
+      await assert.rejects(
+        gate.verifyPendingCredentialPhysicalProof(fixture.options({
+          vault: other.options().vault,
+          operationCounts: () => ({
+            vaultEncryptCalls: 1,
+            vaultDecryptCalls: other.vaultDecryptCalls,
+            credentialStoreCalls: 1
+          })
+        })),
+        (error) =>
+          error?.code === "social_3b0_pending_credential_vault_proof_invalid"
+      );
+      assert.equal(other.vaultDecryptCalls, 1);
+      assertPendingCredentialBuffersCleared([fixture.row]);
+    } finally {
+      fixture.destroy();
+      other.destroy();
+    }
+  });
+
+  await context.test("digest mismatch zeroes plaintext and physical buffers", async () => {
+    const fixture = createPendingCredentialFixture();
+    try {
+      await assert.rejects(
+        gate.verifyPendingCredentialPhysicalProof(fixture.options({
+          expectedDigest: "0".repeat(64)
+        })),
+        (error) =>
+          error?.code === "social_3b0_pending_credential_vault_proof_invalid"
+      );
+      assert.equal(fixture.decryptedPlaintexts.length, 1);
+      assert.equal(fixture.decryptedPlaintexts[0].every((byte) => byte === 0), true);
+      assertPendingCredentialBuffersCleared([fixture.row]);
+    } finally {
+      fixture.destroy();
+    }
+  });
+});
+
+test("O12 enforces one encrypt, decrypt, store and credentialWrites increment", async (context) => {
+  for (const entry of [
+    ["vault encrypt", { vaultEncryptCalls: 0, vaultDecryptCalls: 1, credentialStoreCalls: 1 }],
+    ["vault decrypt", { vaultEncryptCalls: 1, vaultDecryptCalls: 0, credentialStoreCalls: 1 }],
+    ["credential store", { vaultEncryptCalls: 1, vaultDecryptCalls: 1, credentialStoreCalls: 0 }]
+  ]) {
+    await context.test(`${entry[0]} count mismatch`, async () => {
+      const fixture = createPendingCredentialFixture();
+      try {
+        await assert.rejects(
+          gate.verifyPendingCredentialPhysicalProof(fixture.options({
+            operationCounts: () => ({ ...entry[1] })
+          })),
+          (error) => error?.code === "social_3b0_credential_single_write_invalid"
+        );
+        assert.equal(fixture.evidenceCounts.credentialWrites, 0);
+      } finally {
+        fixture.destroy();
+      }
+    });
+  }
+
+  await context.test("a pre-existing credential write is rejected", async () => {
+    const fixture = createPendingCredentialFixture();
+    fixture.evidenceCounts.credentialWrites = 1;
+    try {
+      await assert.rejects(
+        gate.verifyPendingCredentialPhysicalProof(fixture.options()),
+        (error) => error?.code === "social_3b0_credential_single_write_invalid"
+      );
+      assert.equal(fixture.evidenceCounts.credentialWrites, 1);
+    } finally {
+      fixture.destroy();
+    }
+  });
+});
+
+test("O12 keeps authorization pending with zero accounts, discovery and publication", async (context) => {
+  const cases = [
+    {
+      name: "connection activated before O13",
+      override: () => ({
+        readBoundary: async () => ({ status: "active", externalAccounts: 0 })
+      })
+    },
+    {
+      name: "external account created before O13",
+      override: () => ({
+        readBoundary: async () => ({
+          status: "authorization_pending",
+          externalAccounts: 1
+        })
+      })
+    },
+    {
+      name: "account discovery called",
+      override: (fixture) => ({
+        evidenceCounts: {
+          ...fixture.evidenceCounts,
+          accountDiscoveryCalls: 1
+        }
+      })
+    },
+    {
+      name: "publication called",
+      override: (fixture) => ({
+        evidenceCounts: {
+          ...fixture.evidenceCounts,
+          publicationCalls: 1
+        }
+      })
+    }
+  ];
+  for (const entry of cases) {
+    await context.test(entry.name, async () => {
+      const fixture = createPendingCredentialFixture();
+      const overrides = entry.override(fixture);
+      try {
+        await assert.rejects(
+          gate.verifyPendingCredentialPhysicalProof(
+            fixture.options(overrides)
+          ),
+          (error) => error?.code === "social_3b0_account_discovery_boundary_invalid"
+        );
+        assert.equal((overrides.evidenceCounts || fixture.evidenceCounts).credentialWrites, 0);
+      } finally {
+        fixture.destroy();
+      }
+    });
+  }
+});
+
+test("O12 never returns or propagates synthetic credential material", async () => {
+  const fixture = createPendingCredentialFixture();
+  const syntheticToken = fixture.syntheticMaterial.toString("base64url");
+  const unsafe = new Error(syntheticToken);
+  unsafe.code = "credential_expired";
+  try {
+    let observed;
+    try {
+      await gate.verifyPendingCredentialPhysicalProof(fixture.options({
+        credentials: {
+          async withDecryptedCredential() { throw unsafe; }
+        }
+      }));
+    } catch (error) {
+      observed = error;
+    }
+    assert.equal(
+      observed?.code,
+      "social_3b0_pending_credential_visibility_guard_invalid"
+    );
+    assert.equal(String(observed?.message || "").includes(syntheticToken), false);
+    assert.equal(JSON.stringify(observed || {}).includes(syntheticToken), false);
+    assert.equal(JSON.stringify(fixture.evidenceCounts).includes(syntheticToken), false);
+    assertPendingCredentialBuffersCleared([fixture.row]);
+  } finally {
+    fixture.destroy();
+  }
+});
+
+test("O12 source keeps physical proof separate from the fail-closed operational repository", () => {
+  const source = fs.readFileSync(
+    path.join(__dirname, "..", "scripts", "social-3b0-linux-physical-gate.js"),
+    "utf8"
+  );
+  const start = source.indexOf('await ledger.run("O12"');
+  const end = source.indexOf('await ledger.run("O13"', start);
+  const o12 = source.slice(start, end);
+  const helperStart = source.indexOf("async function verifyPendingCredentialPhysicalProof");
+  const helperEnd = source.indexOf("function zeroResiduals", helperStart);
+  const helper = source.slice(helperStart, helperEnd);
+  assert.ok(start >= 0 && end > start && helperStart >= 0 && helperEnd > helperStart);
+  for (const field of [
+    "company_id", "id", "provider", "connection_id", "oauth_transaction_id",
+    "credential_type", "ciphertext", "nonce", "auth_tag", "key_version",
+    "aad_version", "expires_at", "revoked_at"
+  ]) assert.match(o12, new RegExp(`\\b${field}\\b`));
+  assert.match(o12, /verifyPendingCredentialPhysicalProof\(\{/);
+  assert.match(o12, /credentials,/);
+  assert.match(o12, /vault,/);
+  assert.match(o12, /contextFromRow,/);
+  assert.match(o12, /envelopeFromRow,/);
+  assert.match(helper, /withDecryptedCredential\(\{/);
+  assert.match(helper, /operationalRejected = true/);
+  assert.match(helper, /operationalError\?\.code !== "credential_not_found"/);
+  assert.match(helper, /options\.vault\.decrypt\(/);
+  assert.match(helper, /options\.envelopeFromRow\(row\)/);
+  assert.match(helper, /options\.contextFromRow\(row,/);
+  assert.match(helper, /physicalPlaintext\.fill\(0\)/);
+  assert.match(helper, /clearPendingCredentialRows\(rows\)/);
+  assert.doesNotMatch(o12 + helper, /findEncryptedCredentialForKeyRotation/);
+  assert.doesNotMatch(o12 + helper, /createDecipheriv|createDecipher|setAAD|setAuthTag/);
+  assert.doesNotMatch(o12 + helper, /console\.|stdout|stderr/);
+  assert.doesNotMatch(o12, /\bUPDATE\b|\bINSERT\b|\bDELETE\b/);
+  assert.doesNotMatch(o12, /status\s*=\s*["']active["']/);
+});
+
+test("O13 remains a second independent pending, account, discovery and publication boundary", () => {
+  const source = fs.readFileSync(
+    path.join(__dirname, "..", "scripts", "social-3b0-linux-physical-gate.js"),
+    "utf8"
+  );
+  const start = source.indexOf('await ledger.run("O13"');
+  const end = source.indexOf('await ledger.run("O14"', start);
+  const o13 = source.slice(start, end);
+  assert.ok(start >= 0 && end > start);
+  assert.match(o13, /status !== "authorization_pending"/);
+  assert.match(o13, /Number\(result\.rows\[0\]\.accounts\) !== 0/);
+  assert.match(o13, /counts\.accountDiscoveryCalls !== 0/);
+  assert.match(o13, /counts\.publicationCalls !== 0/);
+  assert.doesNotMatch(o13, /\bUPDATE\b|\bINSERT\b|\bDELETE\b|status\s*=\s*["']active["']/);
 });
 
 test("evidence contract requires exact Gates, O01-O22, counts, scans and zero residuals", () => {
