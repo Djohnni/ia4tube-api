@@ -413,18 +413,79 @@ async function closeLoopbackServer(server, sockets) {
   await Promise.all([serverClosure, ...socketClosures]);
 }
 
-test("Social 3B physical gate freezes the Exact9 native-process serialization route", () => {
+function controlledSocketBarrier({
+  includeIdle = true,
+  includeAll = true,
+  serverError = null,
+  serverCallbackSynchronous = false,
+  idleError = null,
+  allError = null
+} = {}) {
+  const server = new EventEmitter();
+  const sockets = [new EventEmitter(), new EventEmitter()];
+  const calls = [];
+  let serverCallback = null;
+  gate.trackServerSockets(server);
+  for (const socket of sockets) server.emit("connection", socket);
+  server.close = (callback) => {
+    calls.push("server.close");
+    serverCallback = callback;
+    if (serverCallbackSynchronous) callback(serverError);
+  };
+  if (includeIdle) {
+    server.closeIdleConnections = () => {
+      calls.push("server.closeIdleConnections");
+      if (idleError) throw idleError;
+    };
+  }
+  if (includeAll) {
+    server.closeAllConnections = () => {
+      calls.push("server.closeAllConnections");
+      if (allError) throw allError;
+    };
+  }
+  return {
+    calls,
+    server,
+    sockets,
+    emitServerClose(error = serverError) {
+      assert.equal(typeof serverCallback, "function");
+      serverCallback(error);
+    },
+    emitSocketClose(index) {
+      sockets[index].emit("close");
+    }
+  };
+}
+
+function observePromise(promise) {
+  const observation = { status: "pending", reason: null };
+  promise.then(
+    () => { observation.status = "fulfilled"; },
+    (error) => {
+      observation.status = "rejected";
+      observation.reason = error;
+    }
+  );
+  return observation;
+}
+
+async function flushBarrierMicrotasks() {
+  for (let index = 0; index < 6; index += 1) await Promise.resolve();
+}
+
+test("Social 3B physical gate freezes the Exact7 loopback socket close route", () => {
   assert.equal(
     gate.BRANCH,
-    "social/checkpoint-3b0-windows-native-process-serialization-20260813"
+    "social/checkpoint-3b0-o22-loopback-socket-close-barrier-20260813"
   );
   assert.equal(
     gate.COMMIT_MESSAGE,
-    "[run-social-3b0] serialize native Windows process tests"
+    "[run-social-3b0] await loopback socket close barrier"
   );
   assert.equal(
     gate.PARENT_COMMIT,
-    "1eae6c50003c523ad80a473a5554eb9f84770389"
+    "84061704e214ec5f293fa5f2c9443d9832d42e1e"
   );
   assert.deepEqual(gate.HISTORIC_COMMIT_CHAIN, [
     {
@@ -451,7 +512,14 @@ test("Social 3B physical gate freezes the Exact9 native-process serialization ro
       level: "o12",
       sha: "1febe1211b0021d8c35cdfb840f581fd76ce39e7"
     },
-    { level: "o22", sha: gate.PARENT_COMMIT }
+    {
+      level: "o22",
+      sha: "1eae6c50003c523ad80a473a5554eb9f84770389"
+    },
+    {
+      level: "windows_native_process_serialization",
+      sha: gate.PARENT_COMMIT
+    }
   ]);
   assert.equal(
     gate.HISTORIC_COMMIT_CHAIN.at(-1).sha,
@@ -459,17 +527,15 @@ test("Social 3B physical gate freezes the Exact9 native-process serialization ro
   );
   assert.deepEqual(gate.CORRECTION_FILES, [
     ".github/workflows/social-3b0-instagram-oauth-local-contract.yml",
-    "scripts/run-node-tests.js",
     "scripts/social-3a0p-local-scope.js",
     "scripts/social-3b0-linux-physical-gate.js",
-    "tests/node-test-runner-safety.test.js",
     "tests/social-3a0p-current-diff-scope.test.js",
     "tests/social-3a0p-local-scope.test.js",
     "tests/social-3b0-linux-physical-gate.test.js",
     "tests/social-3b0-linux-workflow.test.js"
   ]);
-  assert.equal(gate.CORRECTION_FILES.length, 9);
-  assert.equal(new Set(gate.CORRECTION_FILES).size, 9);
+  assert.equal(gate.CORRECTION_FILES.length, 7);
+  assert.equal(new Set(gate.CORRECTION_FILES).size, 7);
   assert.deepEqual(gate.WINDOWS_NATIVE_SERIAL_TEST_FILES, [
     "social-3a0p-local-safe-zip-extract.test.js",
     "social-postgres-tls.test.js"
@@ -514,6 +580,333 @@ test("Social 3B physical gate freezes the Exact9 native-process serialization ro
   assert.equal(o22Evidence.substeps.at(-1).status, "passed");
   assert.equal(o22Evidence.cleanupFailureProvenance, null);
   assert.equal(gate.evidenceSafe(o22Evidence), true);
+});
+
+test("socket close barrier 1: captures exactly two owned sockets before shutdown", async () => {
+  const control = controlledSocketBarrier();
+  assert.equal(gate.trackedServerSocketCount(control.server), 2);
+  const barrier = gate.closeServer(control.server);
+  await flushBarrierMicrotasks();
+  assert.deepEqual(control.calls, [
+    "server.close",
+    "server.closeIdleConnections",
+    "server.closeAllConnections"
+  ]);
+  control.emitServerClose();
+  control.emitSocketClose(0);
+  control.emitSocketClose(1);
+  await barrier;
+  assert.equal(gate.trackedServerSocketCount(control.server), 0);
+});
+
+test("socket close barrier 2: server callback can precede both socket close events", async () => {
+  const control = controlledSocketBarrier();
+  const barrier = gate.closeServer(control.server);
+  const observed = observePromise(barrier);
+  await flushBarrierMicrotasks();
+  control.emitServerClose();
+  await flushBarrierMicrotasks();
+  assert.equal(observed.status, "pending");
+  assert.equal(gate.trackedServerSocketCount(control.server), 2);
+  control.emitSocketClose(0);
+  control.emitSocketClose(1);
+  await barrier;
+});
+
+test("socket close barrier 3: callback-only completion stays pending and repeated close is idempotent", async () => {
+  const control = controlledSocketBarrier();
+  const first = gate.closeServer(control.server);
+  const second = gate.closeServer(control.server);
+  const observed = observePromise(first);
+  assert.equal(second, first);
+  await flushBarrierMicrotasks();
+  control.emitServerClose();
+  await flushBarrierMicrotasks();
+  assert.equal(observed.status, "pending");
+  assert.deepEqual(control.calls, [
+    "server.close",
+    "server.closeIdleConnections",
+    "server.closeAllConnections"
+  ]);
+  control.emitSocketClose(0);
+  control.emitSocketClose(1);
+  await first;
+});
+
+test("socket close barrier 4: one closed socket leaves the barrier pending and tracker at one", async () => {
+  const control = controlledSocketBarrier();
+  const barrier = gate.closeServer(control.server);
+  const observed = observePromise(barrier);
+  await flushBarrierMicrotasks();
+  control.emitServerClose();
+  control.emitSocketClose(0);
+  await flushBarrierMicrotasks();
+  assert.equal(observed.status, "pending");
+  assert.equal(gate.trackedServerSocketCount(control.server), 1);
+  control.emitSocketClose(1);
+  await barrier;
+});
+
+test("socket close barrier 5: both close events resolve only after the tracker reaches zero", async () => {
+  const control = controlledSocketBarrier();
+  const barrier = gate.closeServer(control.server);
+  const observed = observePromise(barrier);
+  await flushBarrierMicrotasks();
+  control.emitSocketClose(0);
+  control.emitSocketClose(1);
+  await flushBarrierMicrotasks();
+  assert.equal(gate.trackedServerSocketCount(control.server), 0);
+  assert.equal(observed.status, "pending");
+  control.emitServerClose();
+  await barrier;
+  assert.equal(observed.status, "fulfilled");
+});
+
+test("socket close barrier 6: server close error is propagated only after both sockets drain", async () => {
+  const serverError = Object.assign(new Error("fixture server close"), {
+    code: "social_3b0_fixture_server_close_failed"
+  });
+  const laterError = Object.assign(new Error("fixture later close"), {
+    code: "social_3b0_fixture_later_close_failed"
+  });
+  const control = controlledSocketBarrier({
+    serverError,
+    serverCallbackSynchronous: true,
+    idleError: laterError
+  });
+  const barrier = gate.closeServer(control.server);
+  const observed = observePromise(barrier);
+  await flushBarrierMicrotasks();
+  control.emitSocketClose(0);
+  await flushBarrierMicrotasks();
+  assert.equal(observed.status, "pending");
+  assert.equal(gate.trackedServerSocketCount(control.server), 1);
+  control.emitSocketClose(1);
+  await assert.rejects(barrier, (error) => error === serverError);
+  assert.equal(gate.trackedServerSocketCount(control.server), 0);
+  assert.equal(observed.reason, serverError);
+});
+
+test("socket close barrier 7: closeIdleConnections remains part of the drain", async () => {
+  const control = controlledSocketBarrier({ includeAll: false });
+  const barrier = gate.closeServer(control.server);
+  await flushBarrierMicrotasks();
+  assert.deepEqual(control.calls, [
+    "server.close",
+    "server.closeIdleConnections"
+  ]);
+  control.emitServerClose();
+  control.emitSocketClose(0);
+  control.emitSocketClose(1);
+  await barrier;
+});
+
+test("socket close barrier 8: closeAllConnections remains part of the drain", async () => {
+  const control = controlledSocketBarrier({ includeIdle: false });
+  const barrier = gate.closeServer(control.server);
+  await flushBarrierMicrotasks();
+  assert.deepEqual(control.calls, [
+    "server.close",
+    "server.closeAllConnections"
+  ]);
+  control.emitServerClose();
+  control.emitSocketClose(0);
+  control.emitSocketClose(1);
+  await barrier;
+});
+
+test("socket close barrier 9: compatible servers without idle or all helpers remain safe", async () => {
+  const control = controlledSocketBarrier({
+    includeIdle: false,
+    includeAll: false
+  });
+  const barrier = gate.closeServer(control.server);
+  await flushBarrierMicrotasks();
+  assert.deepEqual(control.calls, ["server.close"]);
+  control.emitServerClose();
+  control.emitSocketClose(0);
+  control.emitSocketClose(1);
+  await barrier;
+  assert.equal(gate.trackedServerSocketCount(control.server), 0);
+  await gate.closeServer(null);
+});
+
+test("socket close barrier 10: two sockets may close in reverse order", async () => {
+  const control = controlledSocketBarrier();
+  const barrier = gate.closeServer(control.server);
+  await flushBarrierMicrotasks();
+  control.emitServerClose();
+  control.emitSocketClose(1);
+  assert.equal(gate.trackedServerSocketCount(control.server), 1);
+  control.emitSocketClose(0);
+  await barrier;
+  assert.equal(gate.trackedServerSocketCount(control.server), 0);
+});
+
+test("socket close barrier 11: nearly simultaneous socket events complete one barrier", async () => {
+  const control = controlledSocketBarrier();
+  control.server.close = (callback) => {
+    control.calls.push("server.close");
+    control.emitSocketClose(0);
+    control.emitSocketClose(1);
+    callback();
+  };
+  const barrier = gate.closeServer(control.server);
+  await barrier;
+  assert.equal(gate.trackedServerSocketCount(control.server), 0);
+  assert.equal(control.calls.filter((entry) => entry === "server.close").length, 1);
+});
+
+test("socket close barrier 12: real loopback drains two concurrent HTTP connections", async () => {
+  const responses = [];
+  let requestCount = 0;
+  const listener = await gate.listenLoopback((_request, response) => {
+    requestCount += 1;
+    responses.push(response);
+    if (requestCount === 2) {
+      for (const pending of responses) pending.end("ok");
+    }
+  });
+  const agent = new http.Agent({ keepAlive: true, maxSockets: 2 });
+  const request = () => new Promise((resolve, reject) => {
+    const outgoing = http.get({
+      agent,
+      host: "127.0.0.1",
+      port: listener.port,
+      path: "/socket-close-barrier"
+    }, (response) => {
+      response.resume();
+      response.once("end", resolve);
+    });
+    outgoing.once("error", reject);
+  });
+  let capturedSockets = -1;
+  try {
+    await Promise.all([request(), request()]);
+    capturedSockets = gate.trackedServerSocketCount(listener.server);
+    await gate.closeServer(listener.server);
+  } finally {
+    agent.destroy();
+    if (listener.server.listening) {
+      listener.server.closeAllConnections?.();
+      await new Promise((resolve) => listener.server.close(resolve));
+    }
+  }
+  assert.equal(requestCount, 2);
+  assert.equal(capturedSockets, 2);
+  assert.equal(listener.server.listening, false);
+  assert.equal(gate.trackedServerSocketCount(listener.server), 0);
+});
+
+test("socket close barrier 13: O22 fails when one genuinely open socket remains", async () => {
+  const control = controlledSocketBarrier();
+  const barrier = gate.closeServer(control.server);
+  await flushBarrierMicrotasks();
+  control.emitServerClose();
+  control.emitSocketClose(0);
+  const firstAttemptResiduals = {
+    ...gate.zeroResiduals(),
+    listeners: gate.trackedServerSocketCount(control.server)
+  };
+  const provenance = cleanupSnapshot(gate.createCleanupAttemptTracker(), {
+    firstAttemptResiduals
+  });
+  const evidence = failedO22Evidence({
+    cleanupFailureProvenance: provenance,
+    cleanup: {
+      cleanupCompleted: false,
+      intermediateEvidenceRemoved: true,
+      syntheticMaterialsCleared: true
+    },
+    residuals: firstAttemptResiduals
+  });
+  assert.equal(firstAttemptResiduals.listeners, 1);
+  assert.equal(provenance.operation, "residual_validation");
+  assert.equal(evidence.substeps[21].status, "failed");
+  assert.equal(evidence.firstFailure.substep, "O22");
+  assert.equal(gate.evidenceSafe(evidence), true);
+  control.emitSocketClose(1);
+  await barrier;
+});
+
+test("socket close barrier 14: O22 passes only with its first snapshot entirely zero", async () => {
+  const control = controlledSocketBarrier();
+  const barrier = gate.closeServer(control.server);
+  await flushBarrierMicrotasks();
+  control.emitServerClose();
+  control.emitSocketClose(0);
+  control.emitSocketClose(1);
+  await barrier;
+  const firstAttemptResiduals = {
+    ...gate.zeroResiduals(),
+    listeners: gate.trackedServerSocketCount(control.server)
+  };
+  assert.deepEqual(firstAttemptResiduals, gate.zeroResiduals());
+  assert.equal(cleanupSnapshot(gate.createCleanupAttemptTracker(), {
+    firstAttemptResiduals
+  }), null);
+  const evidence = passedEvidence();
+  assert.equal(evidence.substeps[21].status, "passed");
+  assert.equal(evidence.firstFailure, null);
+  assert.equal(evidence.cleanupFailureProvenance, null);
+  assert.deepEqual(evidence.residuals, gate.zeroResiduals());
+  assert.equal(gate.evidenceSafe(evidence), true);
+  for (const key of Object.keys(gate.zeroResiduals())) {
+    assert.equal(gate.evidenceSafe({
+      ...evidence,
+      residuals: { ...gate.zeroResiduals(), [key]: 1 }
+    }), false, key);
+  }
+});
+
+test("socket close barrier 15: functional, first O22 and compensating cleanup evidence stay separate", async () => {
+  const functional = passedEvidence();
+  functional.status = "failed";
+  functional.firstFailure = gate.closedFirstFailure({
+    phase: gate.PHASE,
+    substep: "O13",
+    lastCompletedSubstep: "O12",
+    causalCode: "social_3b0_fixture_functional_failure"
+  });
+  functional.substeps = Object.freeze(functional.substeps.map((entry, index) =>
+    Object.freeze(index === 12
+      ? { ...entry, status: "failed" }
+      : index > 12 && index < 21
+        ? { ...entry, status: "skipped" }
+        : entry)
+  ));
+  assert.equal(functional.substeps[21].status, "passed");
+  assert.equal(functional.cleanupFailureProvenance, null);
+  assert.equal(gate.evidenceSafe(functional), true);
+
+  const firstAttemptResiduals = { ...gate.zeroResiduals(), listeners: 1 };
+  const provenance = cleanupProvenance({
+    operation: "residual_validation",
+    causalCode: "social_3b0_cleanup_residuals_nonzero",
+    cleanupErrorCount: 0,
+    firstAttemptResiduals
+  });
+  const supervised = await supervisedEvidenceFixture({
+    workerEvidence: failedO22Evidence({
+      cleanupFailureProvenance: provenance,
+      cleanup: {
+        cleanupCompleted: false,
+        intermediateEvidenceRemoved: true,
+        syntheticMaterialsCleared: true
+      },
+      residuals: firstAttemptResiduals
+    }),
+    cleanupResult: zeroCleanup(),
+    runId: "73222"
+  });
+  assert.equal(supervised.evidence.firstFailure.substep, "O22");
+  assert.equal(supervised.evidence.substeps[21].status, "failed");
+  assert.equal(
+    supervised.evidence.cleanupFailureProvenance.firstAttemptResiduals.listeners,
+    1
+  );
+  assert.equal(supervised.evidence.cleanup.cleanupCompleted, true);
+  assert.deepEqual(supervised.evidence.residuals, gate.zeroResiduals());
 });
 
 test("Linux physical gate does not prewarm or alter the ZIP/TLS native environment", () => {

@@ -14,43 +14,40 @@ const {
 
 const AUTHORIZED_FILES = Object.freeze([
   ".github/workflows/social-3b0-instagram-oauth-local-contract.yml",
-  "scripts/run-node-tests.js",
   "scripts/social-3a0p-local-scope.js",
   "scripts/social-3b0-linux-physical-gate.js",
-  "tests/node-test-runner-safety.test.js",
   "tests/social-3a0p-current-diff-scope.test.js",
   "tests/social-3a0p-local-scope.test.js",
   "tests/social-3b0-linux-physical-gate.test.js",
   "tests/social-3b0-linux-workflow.test.js"
 ]);
 
-test("Windows native process serialization scope accepts exactly nine paths", () => {
+test("O22 loopback socket close barrier scope accepts exactly seven paths", () => {
   assert.equal(
     AUTHORIZED_BRANCH,
-    "social/checkpoint-3b0-windows-native-process-serialization-20260813"
+    "social/checkpoint-3b0-o22-loopback-socket-close-barrier-20260813"
   );
   assert.equal(
     ROUTE_BASE_COMMIT,
-    "1eae6c50003c523ad80a473a5554eb9f84770389"
+    "84061704e214ec5f293fa5f2c9443d9832d42e1e"
   );
-  assert.equal(AUTHORIZED_FILES.length, 9);
+  assert.equal(AUTHORIZED_FILES.length, 7);
   assert.deepEqual(ALLOWED_PREFIXES, []);
   assert.deepEqual(
     [...ALLOWED_EXACT_FILES].sort(),
     [...AUTHORIZED_FILES].sort()
   );
-  assert.equal(ALLOWED_EXACT_FILES.size, 9);
+  assert.equal(ALLOWED_EXACT_FILES.size, 7);
   for (const file of AUTHORIZED_FILES) {
     assert.equal(isHarnessOnlyFile(file), true, file);
   }
   assert.deepEqual(assertHarnessOnlyChangedFiles([...AUTHORIZED_FILES]), {
     harnessOnly: true,
-    changedFileCount: 9
+    changedFileCount: 7
   });
   for (const candidate of [
     AUTHORIZED_FILES.slice(0, 2),
-    AUTHORIZED_FILES.slice(0, 6),
-    AUTHORIZED_FILES.slice(0, -1)
+    AUTHORIZED_FILES.slice(0, 6)
   ]) {
     assert.throws(() => assertHarnessOnlyChangedFiles(candidate), {
       code: "harness_scope_inventory_refused"
@@ -66,13 +63,21 @@ test("Windows native process serialization scope accepts exactly nine paths", ()
   assert.throws(
     () => assertHarnessOnlyChangedFiles([
       ...AUTHORIZED_FILES,
-      "tests/tenth-path.test.js"
+      "scripts/run-node-tests.js",
+      "tests/node-test-runner-safety.test.js"
+    ]),
+    { code: "harness_scope_product_change_refused" }
+  );
+  assert.throws(
+    () => assertHarnessOnlyChangedFiles([
+      ...AUTHORIZED_FILES,
+      "tests/eighth-path.test.js"
     ]),
     { code: "harness_scope_product_change_refused" }
   );
 });
 
-test("Windows native process serialization scope refuses variants, globs, subpaths and case changes", () => {
+test("O22 loopback socket close barrier scope refuses variants, globs, subpaths and case changes", () => {
   for (const file of [
     ".github/workflows/social-3b0-instagram-oauth-local-contract.yml.bak",
     ".github/workflows/SOCIAL-3B0-INSTAGRAM-OAUTH-LOCAL-CONTRACT.YML",
@@ -98,7 +103,7 @@ test("Windows native process serialization scope refuses variants, globs, subpat
   }
 });
 
-test("Windows native process serialization scope refuses product, dependency and historical paths", () => {
+test("O22 loopback socket close barrier scope refuses product, dependency and historical paths", () => {
   for (const file of [
     "server.js",
     "src/social/oauth/instagram-config.js",
@@ -116,6 +121,8 @@ test("Windows native process serialization scope refuses product, dependency and
     "db/postgres/roles.sql",
     "package.json",
     "package-lock.json",
+    "scripts/run-node-tests.js",
+    "tests/node-test-runner-safety.test.js",
     "docs/social-3b0-instagram-oauth-local-contract.md",
     ".github/workflows/social-3a0p-linux-physical-gates.yml",
     "docs/social-3a0p-linux-physical-gates.md",
@@ -137,7 +144,7 @@ test("Windows native process serialization scope refuses product, dependency and
   }
 });
 
-test("Windows native process serialization scope rejects traversal and absolute paths", () => {
+test("O22 loopback socket close barrier scope rejects traversal and absolute paths", () => {
   for (const file of [
     "../scripts/social-3b0-linux-physical-gate.js",
     "tests/../scripts/social-3b0-linux-physical-gate.js",
@@ -152,7 +159,7 @@ test("Windows native process serialization scope rejects traversal and absolute 
   }
 });
 
-test("Windows native process serialization scope normalizes only path separators", () => {
+test("O22 loopback socket close barrier scope normalizes only path separators", () => {
   const windowsPath = "scripts\\social-3b0-linux-physical-gate.js";
   assert.equal(
     normalizeRepositoryFile(windowsPath),
@@ -164,7 +171,7 @@ test("Windows native process serialization scope normalizes only path separators
   });
 });
 
-test("Windows native process serialization scope has no wildcard or directory-wide exception", () => {
+test("O22 loopback socket close barrier scope has no wildcard or directory-wide exception", () => {
   assert.equal(
     [...ALLOWED_EXACT_FILES].some(
       (file) => file.includes("*") || file.endsWith("/")

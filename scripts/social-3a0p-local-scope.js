@@ -3,15 +3,13 @@
 const path = require("node:path");
 
 const AUTHORIZED_BRANCH =
-  "social/checkpoint-3b0-windows-native-process-serialization-20260813";
-const ROUTE_BASE_COMMIT = "1eae6c50003c523ad80a473a5554eb9f84770389";
+  "social/checkpoint-3b0-o22-loopback-socket-close-barrier-20260813";
+const ROUTE_BASE_COMMIT = "84061704e214ec5f293fa5f2c9443d9832d42e1e";
 
 const ALLOWED_EXACT_FILES = new Set([
   ".github/workflows/social-3b0-instagram-oauth-local-contract.yml",
-  "scripts/run-node-tests.js",
   "scripts/social-3a0p-local-scope.js",
   "scripts/social-3b0-linux-physical-gate.js",
-  "tests/node-test-runner-safety.test.js",
   "tests/social-3a0p-current-diff-scope.test.js",
   "tests/social-3a0p-local-scope.test.js",
   "tests/social-3b0-linux-physical-gate.test.js",

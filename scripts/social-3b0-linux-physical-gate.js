@@ -11,10 +11,10 @@ const tls = require("node:tls");
 const path = require("node:path");
 
 const BRANCH =
-  "social/checkpoint-3b0-windows-native-process-serialization-20260813";
+  "social/checkpoint-3b0-o22-loopback-socket-close-barrier-20260813";
 const COMMIT_MESSAGE =
-  "[run-social-3b0] serialize native Windows process tests";
-const PARENT_COMMIT = "1eae6c50003c523ad80a473a5554eb9f84770389";
+  "[run-social-3b0] await loopback socket close barrier";
+const PARENT_COMMIT = "84061704e214ec5f293fa5f2c9443d9832d42e1e";
 const HISTORIC_COMMIT_CHAIN = Object.freeze([
   Object.freeze({
     level: "functional_parent",
@@ -40,14 +40,19 @@ const HISTORIC_COMMIT_CHAIN = Object.freeze([
     level: "o12",
     sha: "1febe1211b0021d8c35cdfb840f581fd76ce39e7"
   }),
-  Object.freeze({ level: "o22", sha: PARENT_COMMIT })
+  Object.freeze({
+    level: "o22",
+    sha: "1eae6c50003c523ad80a473a5554eb9f84770389"
+  }),
+  Object.freeze({
+    level: "windows_native_process_serialization",
+    sha: PARENT_COMMIT
+  })
 ]);
 const CORRECTION_FILES = Object.freeze([
   ".github/workflows/social-3b0-instagram-oauth-local-contract.yml",
-  "scripts/run-node-tests.js",
   "scripts/social-3a0p-local-scope.js",
   "scripts/social-3b0-linux-physical-gate.js",
-  "tests/node-test-runner-safety.test.js",
   "tests/social-3a0p-current-diff-scope.test.js",
   "tests/social-3a0p-local-scope.test.js",
   "tests/social-3b0-linux-physical-gate.test.js",
@@ -74,6 +79,7 @@ const ARTIFACT_DIRECTORY =
 const HISTORIC_DIRECTORY_PREFIX = "social-3b0-3a0-intermediate-";
 const LOOPBACK = "127.0.0.1";
 const SERVER_SOCKETS = new WeakMap();
+const SERVER_CLOSURES = new WeakMap();
 const IDENTITY_VERSION = "social-id-v1";
 const IDENTITY_NAMESPACE = "41cb8c58-0bf4-4bd9-83b2-3f2f96dfe29f";
 // Leave enough of the immutable 60 minute job budget for evidence publication,
@@ -1667,15 +1673,26 @@ function assertAuthorizeRefusalContract({
   return true;
 }
 
+function trackServerSockets(server) {
+  const existing = SERVER_SOCKETS.get(server);
+  if (existing) return existing;
+  const sockets = new Set();
+  SERVER_SOCKETS.set(server, sockets);
+  server.on("connection", (socket) => {
+    sockets.add(socket);
+    socket.once("close", () => sockets.delete(socket));
+  });
+  return sockets;
+}
+
+function trackedServerSocketCount(server) {
+  return SERVER_SOCKETS.get(server)?.size || 0;
+}
+
 function listenLoopback(app) {
   return new Promise((resolve, reject) => {
     const server = http.createServer(app);
-    const sockets = new Set();
-    SERVER_SOCKETS.set(server, sockets);
-    server.on("connection", (socket) => {
-      sockets.add(socket);
-      socket.once("close", () => sockets.delete(socket));
-    });
+    trackServerSockets(server);
     server.once("error", reject);
     server.listen(0, LOOPBACK, () => {
       const address = server.address();
@@ -1697,11 +1714,54 @@ function listenLoopback(app) {
 
 function closeServer(server) {
   if (!server) return Promise.resolve();
-  return new Promise((resolve, reject) => {
-    server.close((error) => error ? reject(error) : resolve());
-    server.closeIdleConnections?.();
-    server.closeAllConnections?.();
+  const existing = SERVER_CLOSURES.get(server);
+  if (existing) return existing;
+
+  const sockets = SERVER_SOCKETS.get(server);
+  const ownedSockets = Object.freeze([...(sockets || [])]);
+  const socketClosures = ownedSockets.map((socket) => new Promise((resolve) => {
+    socket.once("close", resolve);
+  }));
+  let resolveClosure;
+  let rejectClosure;
+  const closure = new Promise((resolve, reject) => {
+    resolveClosure = resolve;
+    rejectClosure = reject;
   });
+  SERVER_CLOSURES.set(server, closure);
+
+  let firstError = null;
+  const captureError = (error) => {
+    if (error && firstError === null) firstError = error;
+  };
+  const serverClosure = new Promise((resolve) => {
+    try {
+      server.close((error) => {
+        captureError(error);
+        resolve();
+      });
+    } catch (error) {
+      captureError(error);
+      resolve();
+    }
+  });
+  for (const operation of ["closeIdleConnections", "closeAllConnections"]) {
+    try {
+      if (typeof server[operation] === "function") server[operation]();
+    } catch (error) {
+      captureError(error);
+    }
+  }
+  Promise.all([serverClosure, ...socketClosures]).then(() => {
+    if (sockets && sockets.size !== 0) {
+      captureError(new Social3B0PhysicalGateFailure(
+        "social_3b0_loopback_socket_close_incomplete"
+      ));
+    }
+    if (firstError) rejectClosure(firstError);
+    else resolveClosure();
+  }, rejectClosure);
+  return closure;
 }
 
 function installApplicationNetworkGuard(allowedHosts) {
@@ -2880,7 +2940,7 @@ async function runPhysicalOAuthContract(options = {}) {
       () => closeServer(server)
     );
     const httpServerResiduals = server?.listening === true ? 1 : 0;
-    const httpSocketResiduals = SERVER_SOCKETS.get(server)?.size || 0;
+    const httpSocketResiduals = trackedServerSocketCount(server);
     server = null;
     serverPort = 0;
     await cleanupAttempt.capture(
@@ -3474,6 +3534,7 @@ module.exports = {
   baseEvidence,
   canonicalJson,
   childOnce,
+  closeServer,
   closedFirstFailure,
   cleanupInstagramOAuthPhysicalGate,
   createCleanupAttemptTracker,
@@ -3481,6 +3542,7 @@ module.exports = {
   historicFailureDetails,
   httpJsonRequest,
   installApplicationNetworkGuard,
+  listenLoopback,
   parseCli,
   runBlockedBodyProof,
   runHistoricPhysicalGates,
@@ -3488,6 +3550,8 @@ module.exports = {
   runPhysicalOAuthContract,
   sanitizeProcessStatus,
   superviseInstagramOAuthPhysicalGate,
+  trackServerSockets,
+  trackedServerSocketCount,
   validateEnvironment,
   validCleanupFailureProvenance,
   verifyPendingCredentialPhysicalProof,
