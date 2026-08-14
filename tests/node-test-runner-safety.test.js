@@ -28,9 +28,12 @@ const ADDED_WINDOWS_NATIVE_SERIAL_FILES = Object.freeze([
   "social-3a0p-local-safe-zip-extract.test.js",
   "social-postgres-tls.test.js"
 ]);
+const CURRENT_DIFF_SCOPE_SERIAL_FILE =
+  "social-3a0p-current-diff-scope.test.js";
 const EXPECTED_SERIAL_FILES = Object.freeze([
   ...PREVIOUS_SERIAL_FILES,
-  ...ADDED_WINDOWS_NATIVE_SERIAL_FILES
+  ...ADDED_WINDOWS_NATIVE_SERIAL_FILES,
+  CURRENT_DIFF_SCOPE_SERIAL_FILE
 ]);
 const SYNTHETIC_TEST_DIRECTORY = path.resolve("synthetic-runner-tests");
 const SYNTHETIC_REPOSITORY_ROOT = path.resolve("synthetic-runner-root");
@@ -127,16 +130,20 @@ test("2. the ordinary runner keeps every dedicated physical gate excluded", () =
   assert.equal(discovered.includes("social-postgres-real.test.js"), false);
 });
 
-test("3. the closed serial manifest contains the six previous and five native Windows files", () => {
+test("3. the closed serial manifest preserves eleven files and adds only current-diff scope", () => {
   const repositoryTests = discoverAutomatedTests(path.resolve(__dirname)).map((file) =>
     path.basename(file)
   );
-  const previousSet = new Set(PREVIOUS_SERIAL_FILES);
+  const previousManifest = [
+    ...PREVIOUS_SERIAL_FILES,
+    ...ADDED_WINDOWS_NATIVE_SERIAL_FILES
+  ];
+  const previousSet = new Set(previousManifest);
   assert.deepEqual(PROCESS_LIFECYCLE_TEST_FILES, EXPECTED_SERIAL_FILES);
-  assert.equal(PROCESS_LIFECYCLE_TEST_FILES.length, 11);
+  assert.equal(PROCESS_LIFECYCLE_TEST_FILES.length, 12);
   assert.deepEqual(
     PROCESS_LIFECYCLE_TEST_FILES.filter((name) => previousSet.has(name)),
-    PREVIOUS_SERIAL_FILES
+    previousManifest
   );
   for (const name of ADDED_WINDOWS_NATIVE_SERIAL_FILES) {
     assert.equal(
@@ -145,6 +152,12 @@ test("3. the closed serial manifest contains the six previous and five native Wi
       name
     );
   }
+  assert.equal(
+    PROCESS_LIFECYCLE_TEST_FILES.filter(
+      (candidate) => candidate === CURRENT_DIFF_SCOPE_SERIAL_FILE
+    ).length,
+    1
+  );
   for (const name of EXPECTED_SERIAL_FILES) assert.ok(repositoryTests.includes(name), name);
 });
 
