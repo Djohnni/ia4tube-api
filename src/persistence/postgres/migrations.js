@@ -5,7 +5,8 @@ const fs = require("node:fs");
 const path = require("node:path");
 const {
   SOCIAL_MIGRATOR_ROLE,
-  SOCIAL_OWNER_ROLE
+  SOCIAL_OWNER_ROLE,
+  SOCIAL_RUNTIME_ROLE
 } = require("./config");
 const { postgresFail } = require("./errors");
 const {
@@ -24,6 +25,163 @@ const GLOBAL_VAULT_REGISTRY_MIGRATION =
   "0003_global_vault_key_registry";
 const SOCIAL_CONNECTOR_PERSISTENCE_MIGRATION =
   "0004_social_connector_persistence";
+const EXACT_FROM_PROFILE = "social-schema-0003";
+const EXACT_TO_PROFILE = "social-schema-0004";
+const EXACT_PENDING_MIGRATIONS = Object.freeze([
+  SOCIAL_CONNECTOR_PERSISTENCE_MIGRATION
+]);
+const EXACT_BASE_MIGRATIONS = Object.freeze([
+  "0001_social_multitenant_foundation",
+  "0002_social_connections_and_vault",
+  GLOBAL_VAULT_REGISTRY_MIGRATION
+]);
+const EXACT_TARGET_MIGRATIONS = Object.freeze([
+  ...EXACT_BASE_MIGRATIONS,
+  SOCIAL_CONNECTOR_PERSISTENCE_MIGRATION
+]);
+const EXACT_BASE_TABLES = Object.freeze([
+  "companies",
+  "users",
+  "company_memberships",
+  "legacy_entity_mappings",
+  "social_connections",
+  "social_external_accounts",
+  "social_destinations",
+  "social_connection_scopes",
+  "social_oauth_transactions",
+  "social_encrypted_credentials",
+  "social_reauth_grants",
+  "social_audit_events"
+]);
+const EXACT_CONNECTOR_TABLES = Object.freeze([
+  "social_idempotency_operations",
+  "social_publications",
+  "social_publication_attempts"
+]);
+const EXACT_PROFILE_TABLES = Object.freeze({
+  [EXACT_FROM_PROFILE]: EXACT_BASE_TABLES,
+  [EXACT_TO_PROFILE]: Object.freeze([
+    ...EXACT_BASE_TABLES,
+    ...EXACT_CONNECTOR_TABLES
+  ])
+});
+const EXACT_RUNTIME_TABLE_GRANTS = Object.freeze({
+  runtime_schema_contract: ["SELECT"],
+  social_connections: ["INSERT", "SELECT"],
+  social_external_accounts: ["INSERT", "SELECT"],
+  social_destinations: ["INSERT", "SELECT"],
+  social_connection_scopes: ["DELETE", "INSERT", "SELECT"],
+  social_oauth_transactions: ["INSERT", "SELECT"],
+  social_encrypted_credentials: ["INSERT", "SELECT"],
+  social_reauth_grants: ["INSERT", "SELECT"],
+  social_idempotency_operations: ["INSERT", "SELECT"],
+  social_publications: ["INSERT", "SELECT"],
+  social_publication_attempts: ["INSERT", "SELECT"],
+  social_audit_events: ["INSERT", "SELECT"]
+});
+const EXACT_RUNTIME_COLUMN_GRANTS = Object.freeze({
+  companies: {
+    id: ["SELECT"],
+    name: ["SELECT"],
+    status: ["SELECT"],
+    identity_derivation_version: ["SELECT"],
+    created_at: ["SELECT"],
+    updated_at: ["SELECT"]
+  },
+  users: {
+    company_id: ["SELECT"],
+    id: ["SELECT"],
+    password_hash: ["SELECT"],
+    status: ["SELECT"],
+    auth_version: ["SELECT"]
+  },
+  company_memberships: {
+    company_id: ["SELECT"],
+    user_id: ["SELECT"],
+    role: ["SELECT"],
+    status: ["SELECT"],
+    created_at: ["SELECT"],
+    updated_at: ["SELECT"]
+  },
+  social_connections: {
+    status: ["UPDATE"],
+    connected_at: ["UPDATE"],
+    expires_at: ["UPDATE"],
+    revoked_at: ["UPDATE"],
+    disconnected_at: ["UPDATE"],
+    updated_at: ["UPDATE"],
+    revision: ["UPDATE"]
+  },
+  social_external_accounts: {
+    username: ["UPDATE"],
+    display_name: ["UPDATE"],
+    account_type: ["UPDATE"],
+    status: ["UPDATE"],
+    updated_at: ["UPDATE"]
+  },
+  social_destinations: {
+    display_name: ["UPDATE"],
+    status: ["UPDATE"],
+    updated_at: ["UPDATE"]
+  },
+  social_connection_scopes: {
+    expires_at: ["UPDATE"]
+  },
+  social_oauth_transactions: {
+    consumed_at: ["UPDATE"],
+    cancelled_at: ["UPDATE"],
+    failed_at: ["UPDATE"],
+    failure_code: ["UPDATE"]
+  },
+  social_encrypted_credentials: {
+    connection_id: ["UPDATE"],
+    oauth_transaction_id: ["UPDATE"],
+    ciphertext: ["UPDATE"],
+    nonce: ["UPDATE"],
+    auth_tag: ["UPDATE"],
+    key_version: ["UPDATE"],
+    expires_at: ["UPDATE"],
+    revoked_at: ["UPDATE"],
+    updated_at: ["UPDATE"],
+    revision: ["UPDATE"]
+  },
+  social_reauth_grants: {
+    consumed_at: ["UPDATE"]
+  },
+  social_idempotency_operations: {
+    status: ["UPDATE"],
+    result_payload: ["UPDATE"],
+    error_code: ["UPDATE"],
+    updated_at: ["UPDATE"],
+    revision: ["UPDATE"]
+  },
+  social_publications: {
+    state: ["UPDATE"],
+    confirmed_provider_reference: ["UPDATE"],
+    reconciliation_reference: ["UPDATE"],
+    error_code: ["UPDATE"],
+    published_at: ["UPDATE"],
+    updated_at: ["UPDATE"],
+    revision: ["UPDATE"]
+  },
+  social_publication_attempts: {
+    state: ["UPDATE"],
+    error_code: ["UPDATE"],
+    provider_reference: ["UPDATE"],
+    finished_at: ["UPDATE"],
+    duration_ms: ["UPDATE"],
+    retry_after: ["UPDATE"],
+    updated_at: ["UPDATE"],
+    revision: ["UPDATE"]
+  }
+});
+const EXACT_0004_NOT_VALID_CONSTRAINTS = Object.freeze([
+  "social_external_accounts|social_external_accounts_instagram_professional|c",
+  "social_oauth_transactions|social_oauth_transactions_connection_fk|f",
+  "social_audit_events|social_audit_events_reference_provider_present|c",
+  "social_audit_events|social_audit_events_connection_provider_fk|f",
+  "social_audit_events|social_audit_events_publication_provider_fk|f"
+]);
 const SOCIAL_CONNECTION_STATUS_CONSTRAINT_REPLACEMENTS = Object.freeze([
   "social_connections_status_allowed",
   "social_connections_status_timestamp_consistent"
@@ -59,6 +217,365 @@ function exactAclMatches(rows, expected) {
     if (!actual.has(item)) return false;
   }
   return true;
+}
+
+function exactSetMatches(actual, expected) {
+  if (actual.size !== expected.size) return false;
+  for (const value of expected) {
+    if (!actual.has(value)) return false;
+  }
+  return true;
+}
+
+function exactProfileTables(profile) {
+  const tables = EXACT_PROFILE_TABLES[profile];
+  if (!tables) {
+    postgresFail(
+      "migration_exact_profile_invalid",
+      "Perfil fisico de migration recusado."
+    );
+  }
+  return tables;
+}
+
+function canonicalPolicyExpression(value) {
+  return String(value || "")
+    .toLowerCase()
+    .replace(/::text\b/g, "")
+    .replace(/[\s()]+/g, "");
+}
+
+function expectedPolicyExpression(scopeColumn) {
+  return (
+    `${scopeColumn}=nullifcurrent_setting` +
+    "'ia4tube.company_id',true,''::uuid"
+  );
+}
+
+function expectedExactTableGrantSet(profile, runtimeRole, ownerRole) {
+  const tables = new Set(exactProfileTables(profile));
+  const expected = new Set();
+  for (const [table, privileges] of Object.entries(
+    EXACT_RUNTIME_TABLE_GRANTS
+  )) {
+    if (table !== "runtime_schema_contract" && !tables.has(table)) continue;
+    for (const privilege of privileges) {
+      expected.add(
+        `${runtimeRole}|${table}|${privilege}|false|${ownerRole}`
+      );
+    }
+  }
+  return expected;
+}
+
+function expectedExactColumnGrantSet(profile, runtimeRole, ownerRole) {
+  const tables = new Set(exactProfileTables(profile));
+  const expected = new Set();
+  for (const [table, columns] of Object.entries(
+    EXACT_RUNTIME_COLUMN_GRANTS
+  )) {
+    if (!tables.has(table)) continue;
+    for (const [column, privileges] of Object.entries(columns)) {
+      if (
+        profile === EXACT_FROM_PROFILE &&
+        (
+          (table === "social_oauth_transactions" &&
+            ["failed_at", "failure_code"].includes(column)) ||
+          (table === "social_encrypted_credentials" &&
+            ["connection_id", "oauth_transaction_id"].includes(column))
+        )
+      ) {
+        continue;
+      }
+      for (const privilege of privileges) {
+        expected.add(
+          `${runtimeRole}|${table}|${column}|${privilege}|false|` +
+            ownerRole
+        );
+      }
+    }
+  }
+  return expected;
+}
+
+function exactTableAclRowKey(row) {
+  return (
+    `${String(row.grantee).toLowerCase()}|${row.table_name}|` +
+    `${String(row.privilege_type).toUpperCase()}|` +
+    `${Boolean(row.is_grantable)}|` +
+    String(row.grantor_name).toLowerCase()
+  );
+}
+
+function exactColumnAclRowKey(row) {
+  return (
+    `${String(row.grantee).toLowerCase()}|${row.table_name}|` +
+    `${row.column_name}|${String(row.privilege_type).toUpperCase()}|` +
+    `${Boolean(row.is_grantable)}|` +
+    String(row.grantor_name).toLowerCase()
+  );
+}
+
+async function verifySocialPhysicalProfile(
+  client,
+  profile,
+  ownerRole = SOCIAL_OWNER_ROLE,
+  runtimeRole = SOCIAL_RUNTIME_ROLE
+) {
+  const tables = exactProfileTables(profile);
+  const expectedRelations = new Map([
+    ...tables.map((table) => [table, "r"]),
+    ["runtime_schema_contract", "v"]
+  ]);
+
+  const schema = await client.query(
+    [
+      "SELECT owner.rolname AS owner_name,",
+      "  (",
+      "    SELECT COUNT(*)::integer",
+      "    FROM pg_catalog.pg_proc routine",
+      "    WHERE routine.pronamespace = namespace.oid",
+      "  ) AS routine_count",
+      "FROM pg_catalog.pg_namespace namespace",
+      "JOIN pg_catalog.pg_roles owner",
+      "  ON owner.oid = namespace.nspowner",
+      "WHERE namespace.nspname = 'ia4tube_social'"
+    ].join("\n")
+  );
+  if (
+    schema.rows?.length !== 1 ||
+    schema.rows[0].owner_name !== ownerRole ||
+    Number(schema.rows[0].routine_count) !== 0
+  ) {
+    postgresFail(
+      "migration_exact_schema_profile_mismatch",
+      "Schema social diverge do perfil exato."
+    );
+  }
+
+  const relations = await client.query(
+    [
+      "SELECT relation.relname, relation.relkind AS object_kind,",
+      "  owner.rolname AS owner_name, relation.relrowsecurity,",
+      "  relation.relforcerowsecurity",
+      "FROM pg_catalog.pg_class relation",
+      "JOIN pg_catalog.pg_namespace namespace",
+      "  ON namespace.oid = relation.relnamespace",
+      "JOIN pg_catalog.pg_roles owner ON owner.oid = relation.relowner",
+      "WHERE namespace.nspname = 'ia4tube_social'",
+      "  AND relation.relkind IN ('r', 'p', 'v', 'm', 'S', 'f')",
+      "ORDER BY relation.relname"
+    ].join("\n")
+  );
+  if (
+    relations.rows?.length !== expectedRelations.size ||
+    relations.rows.some(
+      (row) =>
+        expectedRelations.get(row.relname) !== row.object_kind ||
+        row.owner_name !== ownerRole ||
+        (
+          row.object_kind === "r" &&
+          (!row.relrowsecurity || !row.relforcerowsecurity)
+        )
+    )
+  ) {
+    postgresFail(
+      "migration_exact_relation_profile_mismatch",
+      "Relacoes sociais divergem do perfil exato."
+    );
+  }
+
+  const policies = await client.query(
+    [
+      "SELECT tablename, policyname, permissive, roles, cmd, qual, with_check",
+      "FROM pg_catalog.pg_policies",
+      "WHERE schemaname = 'ia4tube_social'",
+      "ORDER BY tablename, policyname"
+    ].join("\n")
+  );
+  if (policies.rows?.length !== tables.length) {
+    postgresFail(
+      "migration_exact_rls_profile_mismatch",
+      "Policies sociais divergem do perfil exato."
+    );
+  }
+  const policyByTable = new Map();
+  for (const policy of policies.rows || []) {
+    if (policyByTable.has(policy.tablename)) {
+      postgresFail(
+        "migration_exact_rls_profile_mismatch",
+        "Policies sociais divergem do perfil exato."
+      );
+    }
+    policyByTable.set(policy.tablename, policy);
+  }
+  for (const table of tables) {
+    const policy = policyByTable.get(table);
+    const roles = Array.isArray(policy?.roles)
+      ? policy.roles.map((item) => String(item).toLowerCase())
+      : String(policy?.roles || "").toLowerCase() === "{public}"
+        ? ["public"]
+        : [];
+    const scopeColumn = table === "companies" ? "id" : "company_id";
+    const expectedExpression = expectedPolicyExpression(scopeColumn);
+    if (
+      !policy ||
+      policy.policyname !== `${table}_company_scope` ||
+      policy.permissive !== "PERMISSIVE" ||
+      roles.length !== 1 ||
+      roles[0] !== "public" ||
+      policy.cmd !== "ALL" ||
+      canonicalPolicyExpression(policy.qual) !== expectedExpression ||
+      canonicalPolicyExpression(policy.with_check) !== expectedExpression
+    ) {
+      postgresFail(
+        "migration_exact_rls_profile_mismatch",
+        "Policies sociais divergem do perfil exato."
+      );
+    }
+  }
+
+  const schemaAclRows = await client.query(
+    [
+      "SELECT COALESCE(grantee.rolname, 'PUBLIC') AS grantee,",
+      "  expanded_acl.privilege_type, expanded_acl.is_grantable,",
+      "  grantor.rolname AS grantor_name",
+      "FROM pg_catalog.pg_namespace namespace",
+      "CROSS JOIN LATERAL pg_catalog.aclexplode(",
+      "  COALESCE(namespace.nspacl,",
+      "    pg_catalog.acldefault('n', namespace.nspowner))",
+      ") expanded_acl",
+      "LEFT JOIN pg_catalog.pg_roles grantee",
+      "  ON grantee.oid = expanded_acl.grantee",
+      "LEFT JOIN pg_catalog.pg_roles grantor",
+      "  ON grantor.oid = expanded_acl.grantor",
+      "WHERE namespace.nspname = 'ia4tube_social'",
+      "  AND expanded_acl.grantee <> namespace.nspowner",
+      "ORDER BY grantee, expanded_acl.privilege_type"
+    ].join("\n")
+  );
+  if (
+    !exactAclMatches(
+      schemaAclRows.rows,
+      new Set([`${runtimeRole}|USAGE|false|${ownerRole}`])
+    )
+  ) {
+    postgresFail(
+      "migration_exact_grants_profile_mismatch",
+      "ACL social diverge do perfil exato."
+    );
+  }
+
+  const tableAclRows = await client.query(
+    [
+      "SELECT COALESCE(grantee.rolname, 'PUBLIC') AS grantee,",
+      "  relation.relname AS table_name, expanded_acl.privilege_type,",
+      "  expanded_acl.is_grantable, grantor.rolname AS grantor_name",
+      "FROM pg_catalog.pg_class relation",
+      "JOIN pg_catalog.pg_namespace namespace",
+      "  ON namespace.oid = relation.relnamespace",
+      "CROSS JOIN LATERAL pg_catalog.aclexplode(",
+      "  COALESCE(relation.relacl,",
+      "    pg_catalog.acldefault('r', relation.relowner))",
+      ") expanded_acl",
+      "LEFT JOIN pg_catalog.pg_roles grantee",
+      "  ON grantee.oid = expanded_acl.grantee",
+      "LEFT JOIN pg_catalog.pg_roles grantor",
+      "  ON grantor.oid = expanded_acl.grantor",
+      "WHERE namespace.nspname = 'ia4tube_social'",
+      "  AND relation.relkind IN ('r', 'p', 'v')",
+      "  AND expanded_acl.grantee <> relation.relowner",
+      "ORDER BY grantee, table_name, expanded_acl.privilege_type"
+    ].join("\n")
+  );
+  const actualTableGrants = new Set(
+    (tableAclRows.rows || []).map(exactTableAclRowKey)
+  );
+  if (
+    !exactSetMatches(
+      actualTableGrants,
+      expectedExactTableGrantSet(profile, runtimeRole, ownerRole)
+    )
+  ) {
+    postgresFail(
+      "migration_exact_grants_profile_mismatch",
+      "ACL social diverge do perfil exato."
+    );
+  }
+
+  const columnAclRows = await client.query(
+    [
+      "SELECT COALESCE(grantee.rolname, 'PUBLIC') AS grantee,",
+      "  relation.relname AS table_name, attribute.attname AS column_name,",
+      "  expanded_acl.privilege_type, expanded_acl.is_grantable,",
+      "  grantor.rolname AS grantor_name",
+      "FROM pg_catalog.pg_attribute attribute",
+      "JOIN pg_catalog.pg_class relation",
+      "  ON relation.oid = attribute.attrelid",
+      "JOIN pg_catalog.pg_namespace namespace",
+      "  ON namespace.oid = relation.relnamespace",
+      "CROSS JOIN LATERAL pg_catalog.aclexplode(attribute.attacl) expanded_acl",
+      "LEFT JOIN pg_catalog.pg_roles grantee",
+      "  ON grantee.oid = expanded_acl.grantee",
+      "LEFT JOIN pg_catalog.pg_roles grantor",
+      "  ON grantor.oid = expanded_acl.grantor",
+      "WHERE namespace.nspname = 'ia4tube_social'",
+      "  AND attribute.attnum > 0 AND NOT attribute.attisdropped",
+      "  AND expanded_acl.grantee <> relation.relowner",
+      "ORDER BY grantee, table_name, column_name,",
+      "  expanded_acl.privilege_type"
+    ].join("\n")
+  );
+  const actualColumnGrants = new Set(
+    (columnAclRows.rows || []).map(exactColumnAclRowKey)
+  );
+  if (
+    !exactSetMatches(
+      actualColumnGrants,
+      expectedExactColumnGrantSet(profile, runtimeRole, ownerRole)
+    )
+  ) {
+    postgresFail(
+      "migration_exact_grants_profile_mismatch",
+      "ACL social diverge do perfil exato."
+    );
+  }
+
+  const notValidConstraints = await client.query(
+    [
+      "SELECT relation.relname AS table_name, constraint_info.conname,",
+      "  constraint_info.contype",
+      "FROM pg_catalog.pg_constraint constraint_info",
+      "JOIN pg_catalog.pg_class relation",
+      "  ON relation.oid = constraint_info.conrelid",
+      "JOIN pg_catalog.pg_namespace namespace",
+      "  ON namespace.oid = relation.relnamespace",
+      "WHERE namespace.nspname = 'ia4tube_social'",
+      "  AND NOT constraint_info.convalidated",
+      "ORDER BY constraint_info.conname"
+    ].join("\n")
+  );
+  const expectedNotValid =
+    profile === EXACT_TO_PROFILE
+      ? new Set(EXACT_0004_NOT_VALID_CONSTRAINTS)
+      : new Set();
+  const actualNotValid = new Set(
+    (notValidConstraints.rows || []).map(
+      (row) => `${row.table_name}|${row.conname}|${row.contype}`
+    )
+  );
+  if (!exactSetMatches(actualNotValid, expectedNotValid)) {
+    postgresFail(
+      "migration_exact_constraints_profile_mismatch",
+      "Constraints sociais divergem do perfil exato."
+    );
+  }
+
+  return Object.freeze({
+    profile,
+    relationCount: expectedRelations.size,
+    tableCount: tables.length
+  });
 }
 
 function sha256(value) {
@@ -274,6 +791,155 @@ async function readAppliedMigrations(client) {
   return Array.isArray(result.rows) ? result.rows : [];
 }
 
+async function verifyExistingLedgerContract(client, ownerRole, migratorRole) {
+  if (!(await ledgerExists(client))) {
+    postgresFail(
+      "migration_exact_ledger_missing",
+      "Ledger existente e obrigatorio para o modo exato."
+    );
+  }
+  const structure = await client.query(
+    [
+      "SELECT",
+      "  pg_get_userbyid(table_class.relowner) = $2 AS owned,",
+      "  COUNT(column_info.column_name)::integer = 4 AS column_count_valid,",
+      "  BOOL_AND(",
+      "    CASE column_info.ordinal_position",
+      "      WHEN 1 THEN column_info.column_name = 'version'",
+      "        AND column_info.data_type = 'text'",
+      "        AND column_info.is_nullable = 'NO'",
+      "      WHEN 2 THEN column_info.column_name = 'checksum_sha256'",
+      "        AND column_info.data_type = 'character'",
+      "        AND column_info.character_maximum_length = 64",
+      "        AND column_info.is_nullable = 'NO'",
+      "      WHEN 3 THEN column_info.column_name = 'applied_at'",
+      "        AND column_info.data_type = 'timestamp with time zone'",
+      "        AND column_info.is_nullable = 'NO'",
+      "      WHEN 4 THEN column_info.column_name = 'execution_ms'",
+      "        AND column_info.data_type = 'bigint'",
+      "        AND column_info.is_nullable = 'NO'",
+      "      ELSE FALSE",
+      "    END",
+      "  ) AS columns_valid,",
+      "  EXISTS (",
+      "    SELECT 1",
+      "    FROM information_schema.table_constraints constraint_info",
+      "    JOIN information_schema.key_column_usage key_info",
+      "      ON key_info.constraint_schema = constraint_info.constraint_schema",
+      "      AND key_info.constraint_name = constraint_info.constraint_name",
+      "    WHERE constraint_info.table_schema = 'ia4tube_migrations'",
+      "      AND constraint_info.table_name = 'schema_migrations'",
+      "      AND constraint_info.constraint_type = 'PRIMARY KEY'",
+      "    GROUP BY constraint_info.constraint_name",
+      "    HAVING COUNT(*) = 1 AND MIN(key_info.column_name) = 'version'",
+      "  ) AS primary_key_valid,",
+      "  has_table_privilege($1::name,",
+      "    'ia4tube_migrations.schema_migrations', 'SELECT')",
+      "    AS migrator_select,",
+      "  has_table_privilege($1::name,",
+      "    'ia4tube_migrations.schema_migrations', 'INSERT')",
+      "    AS migrator_insert,",
+      "  has_table_privilege($1,",
+      "    'ia4tube_migrations.schema_migrations', 'UPDATE')",
+      "    AS migrator_update,",
+      "  has_table_privilege($1,",
+      "    'ia4tube_migrations.schema_migrations', 'DELETE')",
+      "    AS migrator_delete",
+      "FROM pg_catalog.pg_class table_class",
+      "JOIN pg_catalog.pg_namespace namespace",
+      "  ON namespace.oid = table_class.relnamespace",
+      "JOIN information_schema.columns column_info",
+      "  ON column_info.table_schema = namespace.nspname",
+      "  AND column_info.table_name = table_class.relname",
+      "WHERE namespace.nspname = 'ia4tube_migrations'",
+      "  AND table_class.relname = 'schema_migrations'",
+      "GROUP BY table_class.relowner, table_class.relacl"
+    ].join("\n"),
+    [migratorRole, ownerRole]
+  );
+  const ledger = structure.rows?.[0];
+  if (
+    !ledger?.owned ||
+    !ledger.column_count_valid ||
+    !ledger.columns_valid ||
+    !ledger.primary_key_valid ||
+    !ledger.migrator_select ||
+    !ledger.migrator_insert ||
+    ledger.migrator_update ||
+    ledger.migrator_delete
+  ) {
+    postgresFail(
+      "migration_ledger_structure_invalid",
+      "Ledger de migrations recusado."
+    );
+  }
+  const tableAcl = await client.query(
+    [
+      "SELECT COALESCE(grantee.rolname, 'PUBLIC') AS grantee,",
+      "  expanded_acl.privilege_type, expanded_acl.is_grantable,",
+      "  grantor.rolname AS grantor_name",
+      "FROM pg_catalog.pg_class relation",
+      "JOIN pg_catalog.pg_namespace namespace",
+      "  ON namespace.oid = relation.relnamespace",
+      "CROSS JOIN LATERAL pg_catalog.aclexplode(",
+      "  COALESCE(relation.relacl,",
+      "    pg_catalog.acldefault('r', relation.relowner))",
+      ") expanded_acl",
+      "LEFT JOIN pg_catalog.pg_roles grantee",
+      "  ON grantee.oid = expanded_acl.grantee",
+      "LEFT JOIN pg_catalog.pg_roles grantor",
+      "  ON grantor.oid = expanded_acl.grantor",
+      "WHERE namespace.nspname = 'ia4tube_migrations'",
+      "  AND relation.relname = 'schema_migrations'",
+      "  AND expanded_acl.grantee <> relation.relowner",
+      "ORDER BY grantee, expanded_acl.privilege_type"
+    ].join("\n")
+  );
+  if (
+    !exactAclMatches(
+      tableAcl.rows,
+      new Set([
+        `${migratorRole}|INSERT|false|${ownerRole}`,
+        `${migratorRole}|SELECT|false|${ownerRole}`
+      ])
+    )
+  ) {
+    postgresFail(
+      "migration_ledger_acl_invalid",
+      "ACL do ledger de migrations recusada."
+    );
+  }
+  const columnAcl = await client.query(
+    [
+      "SELECT attribute.attname AS column_name,",
+      "  COALESCE(grantee.rolname, 'PUBLIC') AS grantee,",
+      "  expanded_acl.privilege_type, expanded_acl.is_grantable,",
+      "  grantor.rolname AS grantor_name",
+      "FROM pg_catalog.pg_attribute attribute",
+      "JOIN pg_catalog.pg_class relation",
+      "  ON relation.oid = attribute.attrelid",
+      "JOIN pg_catalog.pg_namespace namespace",
+      "  ON namespace.oid = relation.relnamespace",
+      "CROSS JOIN LATERAL pg_catalog.aclexplode(attribute.attacl) expanded_acl",
+      "LEFT JOIN pg_catalog.pg_roles grantee",
+      "  ON grantee.oid = expanded_acl.grantee",
+      "LEFT JOIN pg_catalog.pg_roles grantor",
+      "  ON grantor.oid = expanded_acl.grantor",
+      "WHERE namespace.nspname = 'ia4tube_migrations'",
+      "  AND relation.relname = 'schema_migrations'",
+      "  AND attribute.attnum > 0 AND NOT attribute.attisdropped",
+      "  AND expanded_acl.grantee <> relation.relowner"
+    ].join("\n")
+  );
+  if ((columnAcl.rows || []).length !== 0) {
+    postgresFail(
+      "migration_ledger_acl_invalid",
+      "ACL por coluna do ledger de migrations recusada."
+    );
+  }
+  return true;
+}
+
 function compareMigrationState(local, applied) {
   const localByVersion = new Map(
     local.map((migration) => [migration.version, migration])
@@ -332,6 +998,116 @@ function compareMigrationState(local, applied) {
     })
   );
   return Object.freeze(status);
+}
+
+function exactArrayMatches(actual, expected) {
+  return (
+    Array.isArray(actual) &&
+    actual.length === expected.length &&
+    actual.every((value, index) => value === expected[index])
+  );
+}
+
+function validateExactMigrationRequest(request, options = {}) {
+  const requireRecovery = Boolean(options.requireRecovery);
+  if (
+    !request ||
+    request.fromProfile !== EXACT_FROM_PROFILE ||
+    request.toProfile !== EXACT_TO_PROFILE ||
+    !exactArrayMatches(request.expectedPending, EXACT_PENDING_MIGRATIONS)
+  ) {
+    postgresFail(
+      "migration_exact_request_invalid",
+      "Contrato da migration exata recusado."
+    );
+  }
+  if (!requireRecovery) {
+    if (
+      request.recoveryReference !== undefined ||
+      request.recoveryCapturedAt !== undefined
+    ) {
+      postgresFail(
+        "migration_exact_recovery_not_allowed",
+        "Evidencia de recovery recusada no plano read-only."
+      );
+    }
+    return Object.freeze({
+      fromProfile: EXACT_FROM_PROFILE,
+      toProfile: EXACT_TO_PROFILE,
+      expectedPending: EXACT_PENDING_MIGRATIONS
+    });
+  }
+
+  const recoveryReference = request.recoveryReference;
+  const recoveryCapturedAt = request.recoveryCapturedAt;
+  if (
+    typeof recoveryReference !== "string" ||
+    !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/.test(recoveryReference)
+  ) {
+    postgresFail(
+      "migration_exact_recovery_reference_invalid",
+      "Referencia de recovery recusada."
+    );
+  }
+  const recoveryTimestamp = Date.parse(recoveryCapturedAt);
+  const canonicalRecoveryTimestamp =
+    typeof recoveryCapturedAt === "string" &&
+    /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/.test(recoveryCapturedAt)
+      ? recoveryCapturedAt.replace(/Z$/, ".000Z")
+      : recoveryCapturedAt;
+  if (
+    typeof recoveryCapturedAt !== "string" ||
+    !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?Z$/.test(
+      recoveryCapturedAt
+    ) ||
+    !Number.isFinite(recoveryTimestamp) ||
+    new Date(recoveryTimestamp).toISOString() !== canonicalRecoveryTimestamp
+  ) {
+    postgresFail(
+      "migration_exact_recovery_timestamp_invalid",
+      "Timestamp de recovery recusado."
+    );
+  }
+  return Object.freeze({
+    fromProfile: EXACT_FROM_PROFILE,
+    toProfile: EXACT_TO_PROFILE,
+    expectedPending: EXACT_PENDING_MIGRATIONS,
+    recoveryReference,
+    recoveryCapturedAt
+  });
+}
+
+function exactMigrationState(local, applied, profile) {
+  const status = compareMigrationState(local, applied);
+  const appliedVersions = status
+    .filter((item) => item.state === "applied")
+    .map((item) => item.version);
+  const observedPending = status
+    .filter((item) => item.state === "pending")
+    .map((item) => item.version);
+  const expectedApplied =
+    profile === EXACT_FROM_PROFILE
+      ? EXACT_BASE_MIGRATIONS
+      : profile === EXACT_TO_PROFILE
+        ? EXACT_TARGET_MIGRATIONS
+        : null;
+  const expectedPending =
+    profile === EXACT_FROM_PROFILE ? EXACT_PENDING_MIGRATIONS : [];
+  if (
+    !expectedApplied ||
+    !exactArrayMatches(appliedVersions, expectedApplied) ||
+    !exactArrayMatches(observedPending, expectedPending)
+  ) {
+    postgresFail(
+      "exact_pending_set_mismatch",
+      "Conjunto pendente diverge da migration exata."
+    );
+  }
+  return Object.freeze({
+    appliedVersions: Object.freeze([...appliedVersions]),
+    observedPending: Object.freeze([...observedPending]),
+    status
+  });
 }
 
 async function ensureLedger(client, ownerRole, migratorRole) {
@@ -907,11 +1683,11 @@ function targetFingerprint(target) {
   return sha256(normalized);
 }
 
-function assertApplyTarget(target, env = process.env) {
-  if (!target || target.approval !== APPLY_APPROVAL) {
+function assertMigrationTarget(target, env = process.env) {
+  if (!target) {
     postgresFail(
-      "migration_apply_not_approved",
-      "Aplicacao de migrations nao autorizada."
+      "migration_target_not_verified",
+      "Destino da migration nao foi confirmado."
     );
   }
   const expectedFingerprint = String(
@@ -951,16 +1727,47 @@ function assertApplyTarget(target, env = process.env) {
   }
 }
 
-async function verifyTargetMarker(client, migratorRole, target) {
-  const result = await withRoleTransaction(client, migratorRole, () =>
-    client.query(
-      [
-        "SELECT environment_id::text, environment_name",
-        "FROM ia4tube_migrations.environment_identity",
-        "WHERE singleton = TRUE"
-      ].join("\n")
+function assertExactDisposableTarget(target) {
+  const environment = String(target?.environment || "").toLowerCase();
+  const host = String(target?.host || "").toLowerCase();
+  const database = String(target?.database || "");
+  const loopbackHost = new Set(["localhost", "127.0.0.1", "::1"]).has(host);
+  if (
+    !["local", "test"].includes(environment) ||
+    !loopbackHost ||
+    !/^ia4tube_social_test_[a-z0-9_]+$/.test(database) ||
+    /(^|[-_.])(prod|production|stage|staging|live|main)([-_.]|$)/i.test(
+      database
     )
+  ) {
+    postgresFail(
+      "migration_exact_target_not_disposable",
+      "Modo exato permitido somente em PostgreSQL descartavel local."
+    );
+  }
+}
+
+function assertApplyTarget(target, env = process.env) {
+  if (!target || target.approval !== APPLY_APPROVAL) {
+    postgresFail(
+      "migration_apply_not_approved",
+      "Aplicacao de migrations nao autorizada."
+    );
+  }
+  return assertMigrationTarget(target, env);
+}
+
+async function readTargetMarker(client) {
+  return client.query(
+    [
+      "SELECT environment_id::text, environment_name",
+      "FROM ia4tube_migrations.environment_identity",
+      "WHERE singleton = TRUE"
+    ].join("\n")
   );
+}
+
+function assertTargetMarker(result, target) {
   const row = result.rows?.[0];
   if (
     !row ||
@@ -975,6 +1782,13 @@ async function verifyTargetMarker(client, migratorRole, target) {
   }
 }
 
+async function verifyTargetMarker(client, migratorRole, target) {
+  const result = await withRoleTransaction(client, migratorRole, () =>
+    readTargetMarker(client)
+  );
+  assertTargetMarker(result, target);
+}
+
 async function withAdvisoryLock(client, operation) {
   await client.query("SELECT pg_advisory_lock($1::bigint)", [
     ADVISORY_LOCK_ID
@@ -986,26 +1800,38 @@ async function withAdvisoryLock(client, operation) {
     operationError = error;
     throw error;
   } finally {
-    let unlocked;
-    try {
-      const result = await client.query(
-        "SELECT pg_advisory_unlock($1::bigint) AS unlocked",
-        [ADVISORY_LOCK_ID]
-      );
-      unlocked = result.rows?.[0]?.unlocked;
-    } catch (error) {
-      const failure = new Error("migration_advisory_unlock_failed");
-      failure.code = "migration_advisory_unlock_failed";
-      failure.discardClient = true;
-      failure.cause = operationError || error;
-      throw failure;
-    }
-    if (unlocked !== true) {
-      const failure = new Error("migration_advisory_unlock_not_owned");
-      failure.code = "migration_advisory_unlock_not_owned";
-      failure.discardClient = true;
-      failure.cause = operationError;
-      throw failure;
+    if (!operationError?.skipAdvisoryUnlock) {
+      let unlocked;
+      try {
+        const result = await client.query(
+          "SELECT pg_advisory_unlock($1::bigint) AS unlocked",
+          [ADVISORY_LOCK_ID]
+        );
+        unlocked = result.rows?.[0]?.unlocked;
+      } catch (error) {
+        const failure = new Error("migration_advisory_unlock_failed");
+        failure.code = "migration_advisory_unlock_failed";
+        failure.discardClient = true;
+        failure.applied = operationError?.applied;
+        failure.outcomeUnknown = operationError?.outcomeUnknown;
+        failure.retryAllowed = operationError?.retryAllowed;
+        failure.requiresReadOnlyInspection =
+          operationError?.requiresReadOnlyInspection;
+        failure.cause = operationError || error;
+        throw failure;
+      }
+      if (unlocked !== true) {
+        const failure = new Error("migration_advisory_unlock_not_owned");
+        failure.code = "migration_advisory_unlock_not_owned";
+        failure.discardClient = true;
+        failure.applied = operationError?.applied;
+        failure.outcomeUnknown = operationError?.outcomeUnknown;
+        failure.retryAllowed = operationError?.retryAllowed;
+        failure.requiresReadOnlyInspection =
+          operationError?.requiresReadOnlyInspection;
+        failure.cause = operationError;
+        throw failure;
+      }
     }
   }
 }
@@ -1046,6 +1872,147 @@ async function applyOne(client, migration, ownerRole) {
       rollbackError.cause = error;
       throw rollbackError;
     }
+    throw error;
+  }
+}
+
+async function rollbackExactTransaction(client, cause) {
+  try {
+    await client.query("ROLLBACK");
+    } catch (rollbackError) {
+      rollbackError.code = "migration_exact_rollback_failed";
+      rollbackError.discardClient = true;
+      rollbackError.skipAdvisoryUnlock = true;
+      rollbackError.cause = cause;
+      throw rollbackError;
+  }
+}
+
+async function runExactReadOnlyTransaction(client, operation) {
+  await client.query(
+    "BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY"
+  );
+  let rollbackAttempted = false;
+  try {
+    const result = await operation();
+    rollbackAttempted = true;
+    try {
+      await client.query("ROLLBACK");
+    } catch (error) {
+      error.code = "migration_exact_rollback_failed";
+      error.discardClient = true;
+      error.skipAdvisoryUnlock = true;
+      throw error;
+    }
+    return result;
+  } catch (error) {
+    if (!rollbackAttempted) {
+      await rollbackExactTransaction(client, error);
+    }
+    throw error;
+  }
+}
+
+async function exactGateWithinTransaction(
+  client,
+  local,
+  profile,
+  migratorRole,
+  ownerRole,
+  target
+) {
+  await verifyMigrationSession(client, migratorRole, ownerRole);
+  await verifyMigrationInfrastructure(client, migratorRole, ownerRole);
+  await client.query(`SET LOCAL ROLE ${quoteIdentifier(migratorRole)}`);
+  assertTargetMarker(await readTargetMarker(client), target);
+  await verifyExistingLedgerContract(client, ownerRole, migratorRole);
+  const migrationState = exactMigrationState(
+    local,
+    await readAppliedMigrations(client),
+    profile
+  );
+  const physical = await verifySocialPhysicalProfile(
+    client,
+    profile,
+    ownerRole,
+    SOCIAL_RUNTIME_ROLE
+  );
+  return Object.freeze({ migrationState, physical });
+}
+
+async function applyExactWithinTransaction(
+  client,
+  local,
+  migratorRole,
+  ownerRole,
+  target
+) {
+  await client.query("BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ");
+  let commitAttempted = false;
+  try {
+    const before = await exactGateWithinTransaction(
+      client,
+      local,
+      EXACT_FROM_PROFILE,
+      migratorRole,
+      ownerRole,
+      target
+    );
+    const migration = local.find(
+      (entry) => entry.version === SOCIAL_CONNECTOR_PERSISTENCE_MIGRATION
+    );
+    if (!migration) {
+      postgresFail(
+        "migration_exact_manifest_mismatch",
+        "Migration exata nao consta no manifesto autenticado."
+      );
+    }
+
+    await client.query(`SET LOCAL ROLE ${quoteIdentifier(ownerRole)}`);
+    const started = process.hrtime.bigint();
+    await client.query(migration.sql);
+    const elapsed = Number((process.hrtime.bigint() - started) / 1000000n);
+    await client.query(
+      [
+        `INSERT INTO ${LEDGER_NAME} (`,
+        "  version, checksum_sha256, execution_ms",
+        ") VALUES ($1, $2, $3)"
+      ].join("\n"),
+      [migration.version, migration.sha256, elapsed]
+    );
+
+    await client.query(`SET LOCAL ROLE ${quoteIdentifier(migratorRole)}`);
+    await verifyExistingLedgerContract(client, ownerRole, migratorRole);
+    const after = exactMigrationState(
+      local,
+      await readAppliedMigrations(client),
+      EXACT_TO_PROFILE
+    );
+    const physical = await verifySocialPhysicalProfile(
+      client,
+      EXACT_TO_PROFILE,
+      ownerRole,
+      SOCIAL_RUNTIME_ROLE
+    );
+
+    commitAttempted = true;
+    try {
+      await client.query("COMMIT");
+    } catch (error) {
+      const failure = new Error("migration_exact_commit_outcome_unknown");
+      failure.code = "migration_exact_commit_outcome_unknown";
+      failure.discardClient = true;
+      failure.skipAdvisoryUnlock = true;
+      failure.outcomeUnknown = true;
+      failure.retryAllowed = false;
+      failure.requiresReadOnlyInspection = true;
+      failure.cause = error;
+      throw failure;
+    }
+    return Object.freeze({ before, after, physical });
+  } catch (error) {
+    if (commitAttempted) throw error;
+    await rollbackExactTransaction(client, error);
     throw error;
   }
 }
@@ -1135,12 +2102,136 @@ function createMigrationRunner(options = {}) {
     }
   }
 
-  return Object.freeze({ apply, inspect, validate });
+  async function planExact(request, env = process.env) {
+    const exactRequest = validateExactMigrationRequest(request);
+    assertMigrationTarget(target, env);
+    assertExactDisposableTarget(target);
+    const local = readManifest(manifestOptions);
+    const client = await pool.connect();
+    let releaseError;
+    try {
+      await verifyMigrationSession(client, migratorRole, ownerRole);
+      await verifyMigrationInfrastructure(client, migratorRole, ownerRole);
+      const gate = await withAdvisoryLock(client, () =>
+        runExactReadOnlyTransaction(client, () =>
+          exactGateWithinTransaction(
+            client,
+            local,
+            EXACT_FROM_PROFILE,
+            migratorRole,
+            ownerRole,
+            target
+          )
+        )
+      );
+      return Object.freeze({
+        fromProfile: exactRequest.fromProfile,
+        toProfile: exactRequest.toProfile,
+        expectedPending: Object.freeze([...exactRequest.expectedPending]),
+        observedPending: Object.freeze([
+          ...gate.migrationState.observedPending
+        ]),
+        planApproved: true
+      });
+    } catch (error) {
+      if (error?.discardClient) releaseError = error;
+      throw error;
+    } finally {
+      client.release(releaseError);
+    }
+  }
+
+  async function applyExact(request, env = process.env) {
+    const exactRequest = validateExactMigrationRequest(request, {
+      requireRecovery: true
+    });
+    assertApplyTarget(target, env);
+    assertExactDisposableTarget(target);
+    const local = readManifest(manifestOptions);
+    const client = await pool.connect();
+    let releaseError;
+    let commitCompleted = false;
+    try {
+      await verifyMigrationSession(client, migratorRole, ownerRole);
+      await verifyMigrationInfrastructure(client, migratorRole, ownerRole);
+      const applied = await withAdvisoryLock(client, async () => {
+        const transaction = await applyExactWithinTransaction(
+          client,
+          local,
+          migratorRole,
+          ownerRole,
+          target
+        );
+        commitCompleted = true;
+        let finalGate;
+        try {
+          finalGate = await runExactReadOnlyTransaction(client, () =>
+            exactGateWithinTransaction(
+              client,
+              local,
+              EXACT_TO_PROFILE,
+              migratorRole,
+              ownerRole,
+              target
+            )
+          );
+        } catch (error) {
+          const failure = new Error(
+            "migration_exact_postcommit_validation_failed"
+          );
+          failure.code = "migration_exact_postcommit_validation_failed";
+          failure.applied = true;
+          failure.retryAllowed = false;
+          failure.requiresReadOnlyInspection = true;
+          failure.discardClient = Boolean(error?.discardClient);
+          failure.skipAdvisoryUnlock = Boolean(
+            error?.discardClient || error?.skipAdvisoryUnlock
+          );
+          failure.cause = error;
+          throw failure;
+        }
+        return Object.freeze({ transaction, finalGate });
+      });
+      return Object.freeze({
+        fromProfile: exactRequest.fromProfile,
+        toProfile: exactRequest.toProfile,
+        expectedPending: Object.freeze([...exactRequest.expectedPending]),
+        observedPending: Object.freeze([
+          ...applied.transaction.before.migrationState.observedPending
+        ]),
+        appliedMigration: SOCIAL_CONNECTOR_PERSISTENCE_MIGRATION,
+        finalProfile: applied.finalGate.physical.profile,
+        postCommitValidated: true,
+        recoveryReferenceDigest: sha256(exactRequest.recoveryReference),
+        recoveryCapturedAt: exactRequest.recoveryCapturedAt,
+        recoveryEvidenceExternallyVerified: false
+      });
+    } catch (error) {
+      if (commitCompleted) {
+        error.applied = true;
+        error.retryAllowed = false;
+        error.requiresReadOnlyInspection = true;
+      }
+      if (error?.discardClient) releaseError = error;
+      throw error;
+    } finally {
+      client.release(releaseError);
+    }
+  }
+
+  return Object.freeze({ apply, applyExact, inspect, planExact, validate });
 }
 
 module.exports = {
   ADVISORY_LOCK_ID,
   APPLY_APPROVAL,
+  EXACT_BASE_MIGRATIONS,
+  EXACT_BASE_TABLES,
+  EXACT_CONNECTOR_TABLES,
+  EXACT_FROM_PROFILE,
+  EXACT_PENDING_MIGRATIONS,
+  EXACT_TARGET_MIGRATIONS,
+  EXACT_TO_PROFILE,
   GLOBAL_VAULT_BACKFILL_POLICY,
   GLOBAL_VAULT_BACKFILL_POLICY_CREATE,
   GLOBAL_VAULT_BACKFILL_POLICY_DROP,
@@ -1150,15 +2241,21 @@ module.exports = {
   MIGRATION_FILE_PATTERN,
   PRODUCTION_APPROVAL,
   assertApplyTarget,
+  assertExactDisposableTarget,
+  assertMigrationTarget,
   assertNonDestructiveSql,
   compareMigrationState,
   createMigrationRunner,
+  exactMigrationState,
   readManifest,
   readMigrationState,
   sha256,
   targetFingerprint,
   verifyMigrationInfrastructure,
+  verifyExistingLedgerContract,
   verifyMigrationSession,
+  verifySocialPhysicalProfile,
   verifyTargetMarker,
+  validateExactMigrationRequest,
   withRoleTransaction
 };

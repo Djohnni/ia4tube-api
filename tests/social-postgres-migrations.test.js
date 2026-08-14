@@ -12,6 +12,12 @@ const {
 const {
   ADVISORY_LOCK_ID,
   APPLY_APPROVAL,
+  EXACT_BASE_MIGRATIONS,
+  EXACT_BASE_TABLES,
+  EXACT_CONNECTOR_TABLES,
+  EXACT_FROM_PROFILE,
+  EXACT_PENDING_MIGRATIONS,
+  EXACT_TO_PROFILE,
   GLOBAL_VAULT_BACKFILL_POLICY,
   GLOBAL_VAULT_BACKFILL_POLICY_CREATE,
   GLOBAL_VAULT_BACKFILL_POLICY_DROP,
@@ -30,6 +36,10 @@ const {
   verifyMigrationSession,
   verifyTargetMarker
 } = require("../src/persistence/postgres/migrations");
+const {
+  main: migrationCliMain,
+  parseMigrationCommand
+} = require("../scripts/social-db-migrate");
 
 const root = path.resolve(__dirname, "..");
 const environmentId = "77777777-7777-4777-8777-777777777777";
@@ -40,9 +50,239 @@ const baseTarget = Object.freeze({
   productionApproval: "",
   host: "localhost",
   port: "55432",
-  database: "ia4tube_social_test",
+  database: "ia4tube_social_test_exact_runner",
   username: "synthetic_migrator"
 });
+
+const exactPlanRequest = Object.freeze({
+  fromProfile: EXACT_FROM_PROFILE,
+  expectedPending: EXACT_PENDING_MIGRATIONS,
+  toProfile: EXACT_TO_PROFILE
+});
+const exactApplyRequest = Object.freeze({
+  ...exactPlanRequest,
+  recoveryReference: "synthetic-recovery-reference-0004",
+  recoveryCapturedAt: "2026-08-13T12:00:00.000Z"
+});
+const exactApprovalEnvironment = Object.freeze({
+  SOCIAL_MIGRATION_TARGET_FINGERPRINT: targetFingerprint(baseTarget)
+});
+
+function exactCliEnvironment() {
+  const syntheticProtocol = "postgresql:";
+  const syntheticCredential = "synthetic_password";
+  const syntheticDatabaseUrl = new URL(
+    `${syntheticProtocol}//localhost`
+  );
+  syntheticDatabaseUrl.hostname = baseTarget.host;
+  syntheticDatabaseUrl.port = baseTarget.port;
+  syntheticDatabaseUrl.pathname = `/${baseTarget.database}`;
+  syntheticDatabaseUrl.username = baseTarget.username;
+  syntheticDatabaseUrl.password = syntheticCredential;
+  const databaseUrl = syntheticDatabaseUrl.toString();
+  return {
+    NODE_ENV: "test",
+    SOCIAL_MIGRATIONS_DATABASE_URL: databaseUrl,
+    SOCIAL_DATABASE_EXPECTED_TARGET_FINGERPRINT:
+      databaseTargetFingerprint(new URL(databaseUrl)),
+    SOCIAL_MIGRATIONS_EXPECTED_LOGIN: "synthetic_migrator",
+    SOCIAL_DATABASE_EXPECTED_RUNTIME_LOGIN: "synthetic_runtime",
+    SOCIAL_DATABASE_OWNER_ROLE: "ia4tube_social_owner",
+    SOCIAL_DATABASE_MIGRATOR_ROLE: "ia4tube_social_migrator",
+    SOCIAL_MIGRATION_ENVIRONMENT: "test",
+    SOCIAL_MIGRATION_APPROVED: APPLY_APPROVAL,
+    SOCIAL_MIGRATION_PRODUCTION_APPROVAL: "",
+    SOCIAL_MIGRATION_EXPECTED_ENVIRONMENT_ID: environmentId,
+    SOCIAL_MIGRATION_TARGET_FINGERPRINT: targetFingerprint(baseTarget),
+    SOCIAL_DATABASE_ALLOW_INSECURE_LOCALHOST: "true"
+  };
+}
+
+function exactApplyArgv() {
+  return [
+    "apply-exact",
+    `--from-profile=${EXACT_FROM_PROFILE}`,
+    `--expect-pending=${SOCIAL_CONNECTOR_PERSISTENCE_MIGRATION}`,
+    `--to-profile=${EXACT_TO_PROFILE}`,
+    `--recovery-reference=${exactApplyRequest.recoveryReference}`,
+    `--recovery-captured-at=${exactApplyRequest.recoveryCapturedAt}`
+  ];
+}
+
+const exactRuntimeTableGrants = Object.freeze({
+  runtime_schema_contract: ["SELECT"],
+  social_connections: ["INSERT", "SELECT"],
+  social_external_accounts: ["INSERT", "SELECT"],
+  social_destinations: ["INSERT", "SELECT"],
+  social_connection_scopes: ["DELETE", "INSERT", "SELECT"],
+  social_oauth_transactions: ["INSERT", "SELECT"],
+  social_encrypted_credentials: ["INSERT", "SELECT"],
+  social_reauth_grants: ["INSERT", "SELECT"],
+  social_idempotency_operations: ["INSERT", "SELECT"],
+  social_publications: ["INSERT", "SELECT"],
+  social_publication_attempts: ["INSERT", "SELECT"],
+  social_audit_events: ["INSERT", "SELECT"]
+});
+
+const exactRuntimeColumnGrants = Object.freeze({
+  companies: {
+    id: ["SELECT"], name: ["SELECT"], status: ["SELECT"],
+    identity_derivation_version: ["SELECT"], created_at: ["SELECT"],
+    updated_at: ["SELECT"]
+  },
+  users: {
+    company_id: ["SELECT"], id: ["SELECT"], password_hash: ["SELECT"],
+    status: ["SELECT"], auth_version: ["SELECT"]
+  },
+  company_memberships: {
+    company_id: ["SELECT"], user_id: ["SELECT"], role: ["SELECT"],
+    status: ["SELECT"], created_at: ["SELECT"], updated_at: ["SELECT"]
+  },
+  social_connections: {
+    status: ["UPDATE"], connected_at: ["UPDATE"], expires_at: ["UPDATE"],
+    revoked_at: ["UPDATE"], disconnected_at: ["UPDATE"],
+    updated_at: ["UPDATE"], revision: ["UPDATE"]
+  },
+  social_external_accounts: {
+    username: ["UPDATE"], display_name: ["UPDATE"],
+    account_type: ["UPDATE"], status: ["UPDATE"], updated_at: ["UPDATE"]
+  },
+  social_destinations: {
+    display_name: ["UPDATE"], status: ["UPDATE"], updated_at: ["UPDATE"]
+  },
+  social_connection_scopes: { expires_at: ["UPDATE"] },
+  social_oauth_transactions: {
+    consumed_at: ["UPDATE"], cancelled_at: ["UPDATE"],
+    failed_at: ["UPDATE"], failure_code: ["UPDATE"]
+  },
+  social_encrypted_credentials: {
+    connection_id: ["UPDATE"], oauth_transaction_id: ["UPDATE"],
+    ciphertext: ["UPDATE"], nonce: ["UPDATE"], auth_tag: ["UPDATE"],
+    key_version: ["UPDATE"], expires_at: ["UPDATE"],
+    revoked_at: ["UPDATE"], updated_at: ["UPDATE"], revision: ["UPDATE"]
+  },
+  social_reauth_grants: { consumed_at: ["UPDATE"] },
+  social_idempotency_operations: {
+    status: ["UPDATE"], result_payload: ["UPDATE"], error_code: ["UPDATE"],
+    updated_at: ["UPDATE"], revision: ["UPDATE"]
+  },
+  social_publications: {
+    state: ["UPDATE"], confirmed_provider_reference: ["UPDATE"],
+    reconciliation_reference: ["UPDATE"], error_code: ["UPDATE"],
+    published_at: ["UPDATE"], updated_at: ["UPDATE"], revision: ["UPDATE"]
+  },
+  social_publication_attempts: {
+    state: ["UPDATE"], error_code: ["UPDATE"],
+    provider_reference: ["UPDATE"], finished_at: ["UPDATE"],
+    duration_ms: ["UPDATE"], retry_after: ["UPDATE"],
+    updated_at: ["UPDATE"], revision: ["UPDATE"]
+  }
+});
+
+const exactNotValidConstraints = Object.freeze([
+  ["social_external_accounts", "social_external_accounts_instagram_professional", "c"],
+  ["social_oauth_transactions", "social_oauth_transactions_connection_fk", "f"],
+  ["social_audit_events", "social_audit_events_reference_provider_present", "c"],
+  ["social_audit_events", "social_audit_events_connection_provider_fk", "f"],
+  ["social_audit_events", "social_audit_events_publication_provider_fk", "f"]
+]);
+
+function exactTables(profile) {
+  return profile === EXACT_TO_PROFILE
+    ? [...EXACT_BASE_TABLES, ...EXACT_CONNECTOR_TABLES]
+    : [...EXACT_BASE_TABLES];
+}
+
+function exactPhysicalRows(profile, kind) {
+  const tables = new Set(exactTables(profile));
+  const common = {
+    grantee: "ia4tube_social_runtime",
+    is_grantable: false,
+    grantor_name: "ia4tube_social_owner"
+  };
+  if (kind === "schema") {
+    return [{ owner_name: "ia4tube_social_owner", routine_count: 0 }];
+  }
+  if (kind === "relations") {
+    return [
+      ...[...tables].sort().map((relname) => ({
+        relname,
+        object_kind: "r",
+        owner_name: "ia4tube_social_owner",
+        relrowsecurity: true,
+        relforcerowsecurity: true
+      })),
+      {
+        relname: "runtime_schema_contract",
+        object_kind: "v",
+        owner_name: "ia4tube_social_owner",
+        relrowsecurity: false,
+        relforcerowsecurity: false
+      }
+    ].sort((left, right) => left.relname.localeCompare(right.relname));
+  }
+  if (kind === "policies") {
+    return [...tables].sort().map((table) => {
+      const column = table === "companies" ? "id" : "company_id";
+      const expression =
+        `(${column} = NULLIF(current_setting('ia4tube.company_id', true), '')::uuid)`;
+      return {
+        tablename: table,
+        policyname: `${table}_company_scope`,
+        permissive: "PERMISSIVE",
+        roles: ["public"],
+        cmd: "ALL",
+        qual: expression,
+        with_check: expression
+      };
+    });
+  }
+  if (kind === "schemaAcl") {
+    return [{ ...common, privilege_type: "USAGE" }];
+  }
+  if (kind === "tableAcl") {
+    const rows = [];
+    for (const [table, privileges] of Object.entries(exactRuntimeTableGrants)) {
+      if (table !== "runtime_schema_contract" && !tables.has(table)) continue;
+      for (const privilege_type of privileges) {
+        rows.push({ ...common, table_name: table, privilege_type });
+      }
+    }
+    return rows;
+  }
+  if (kind === "columnAcl") {
+    const rows = [];
+    for (const [table, columns] of Object.entries(exactRuntimeColumnGrants)) {
+      if (!tables.has(table)) continue;
+      for (const [column_name, privileges] of Object.entries(columns)) {
+        if (
+          profile === EXACT_FROM_PROFILE &&
+          ((table === "social_oauth_transactions" &&
+            ["failed_at", "failure_code"].includes(column_name)) ||
+            (table === "social_encrypted_credentials" &&
+              ["connection_id", "oauth_transaction_id"].includes(column_name)))
+        ) continue;
+        for (const privilege_type of privileges) {
+          rows.push({
+            ...common,
+            table_name: table,
+            column_name,
+            privilege_type
+          });
+        }
+      }
+    }
+    return rows;
+  }
+  if (kind === "constraints") {
+    return profile === EXACT_TO_PROFILE
+      ? exactNotValidConstraints.map(([table_name, conname, contype]) => ({
+          table_name, conname, contype
+        }))
+      : [];
+  }
+  throw new Error(`unknown exact fixture kind: ${kind}`);
+}
 
 function safePrincipalAccess(overrides = {}) {
   return {
@@ -70,7 +310,10 @@ function migrationPool(options = {}) {
     lockQueue: [],
     lockWaits: 0,
     activeLocks: 0,
-    maxActiveLocks: 0
+    maxActiveLocks: 0,
+    physicalProfile: options.physicalProfile || null,
+    exactMigrationExecutions: 0,
+    commitAttempts: 0
   };
 
   function safeRoleRow() {
@@ -143,13 +386,23 @@ function migrationPool(options = {}) {
         ) {
           throw new Error("synthetic migration failure");
         }
-        if (text === "BEGIN") {
-          transaction = { ledgerRows: [] };
+        if (text === "BEGIN" || text.startsWith("BEGIN TRANSACTION")) {
+          transaction = {
+            ledgerRows: [],
+            physicalProfile: state.physicalProfile
+          };
           return { rows: [] };
         }
         if (text === "COMMIT") {
-          if (transaction) state.applied.push(...transaction.ledgerRows);
+          state.commitAttempts += 1;
+          if (transaction && options.commitOutcomeApplied !== false) {
+            state.applied.push(...transaction.ledgerRows);
+            state.physicalProfile = transaction.physicalProfile;
+          }
           transaction = null;
+          if (options.commitThrows) {
+            throw new Error("synthetic commit outcome unknown");
+          }
           return { rows: [] };
         }
         if (text === "ROLLBACK") {
@@ -287,7 +540,12 @@ function migrationPool(options = {}) {
           text.includes("FROM ia4tube_migrations.schema_migrations") &&
           text.includes("ORDER BY version")
         ) {
-          return { rows: state.applied.map((row) => ({ ...row })) };
+          return {
+            rows: [
+              ...state.applied,
+              ...(transaction?.ledgerRows || [])
+            ].map((row) => ({ ...row }))
+          };
         }
         if (
           text.includes("INSERT INTO ia4tube_migrations.schema_migrations")
@@ -300,6 +558,80 @@ function migrationPool(options = {}) {
           if (transaction) transaction.ledgerRows.push(row);
           else state.applied.push(row);
           return { rows: [] };
+        }
+        if (
+          text.includes(
+            "CREATE TABLE ia4tube_social.social_idempotency_operations"
+          )
+        ) {
+          state.exactMigrationExecutions += 1;
+          if (transaction) transaction.physicalProfile = EXACT_TO_PROFILE;
+          if (options.exactMigrationDelayMs) {
+            await new Promise((resolve) =>
+              setTimeout(resolve, options.exactMigrationDelayMs)
+            );
+          }
+          return { rows: [] };
+        }
+        const activeProfile =
+          transaction?.physicalProfile || state.physicalProfile;
+        const physicalRows = (kind) => {
+          let rows = exactPhysicalRows(activeProfile, kind).map((row) => ({
+            ...row
+          }));
+          if (typeof options.mutateExactRows === "function") {
+            rows = options.mutateExactRows({
+              kind,
+              profile: activeProfile,
+              rows,
+              state
+            }) || rows;
+          }
+          return { rows };
+        };
+        if (
+          text.includes("WHERE namespace.nspname = 'ia4tube_social'") &&
+          text.includes("AS routine_count")
+        ) {
+          return physicalRows("schema");
+        }
+        if (
+          text.includes("WHERE namespace.nspname = 'ia4tube_social'") &&
+          text.includes("relation.relkind IN ('r', 'p', 'v', 'm', 'S', 'f')")
+        ) {
+          return physicalRows("relations");
+        }
+        if (
+          text.includes("FROM pg_catalog.pg_policies") &&
+          text.includes("WHERE schemaname = 'ia4tube_social'")
+        ) {
+          return physicalRows("policies");
+        }
+        if (
+          text.includes("FROM pg_catalog.pg_namespace namespace") &&
+          text.includes("WHERE namespace.nspname = 'ia4tube_social'") &&
+          text.includes("expanded_acl")
+        ) {
+          return physicalRows("schemaAcl");
+        }
+        if (
+          text.includes("WHERE namespace.nspname = 'ia4tube_social'") &&
+          text.includes("relation.relkind IN ('r', 'p', 'v')") &&
+          text.includes("expanded_acl")
+        ) {
+          return physicalRows("tableAcl");
+        }
+        if (
+          text.includes("WHERE namespace.nspname = 'ia4tube_social'") &&
+          text.includes("attribute.attacl")
+        ) {
+          return physicalRows("columnAcl");
+        }
+        if (
+          text.includes("WHERE namespace.nspname = 'ia4tube_social'") &&
+          text.includes("NOT constraint_info.convalidated")
+        ) {
+          return physicalRows("constraints");
         }
         if (text.includes("pg_advisory_lock")) {
           if (state.lockOwner === null) {
@@ -348,6 +680,16 @@ function migrationPool(options = {}) {
         return { rows: [] };
       },
       release(error) {
+        if (error?.discardClient && state.lockOwner === clientId) {
+          const next = state.lockQueue.shift();
+          if (next) {
+            state.lockOwner = next.clientId;
+            next.resolve();
+          } else {
+            state.lockOwner = null;
+            state.activeLocks -= 1;
+          }
+        }
         state.released = true;
         state.releaseErrors.push(error);
         state.releaseError = error;
@@ -373,6 +715,252 @@ function runnerFor(harness, target = baseTarget) {
     target
   });
 }
+
+function exactAppliedRows(count = EXACT_BASE_MIGRATIONS.length) {
+  return readManifest({ root }).slice(0, count).map((migration) => ({
+    version: migration.version,
+    checksum_sha256: migration.sha256,
+    applied_at: new Date("2026-08-13T00:00:00.000Z"),
+    execution_ms: 1
+  }));
+}
+
+function exactMigrationHarness(overrides = {}) {
+  return migrationPool({
+    ledgerExists: true,
+    applied: exactAppliedRows(),
+    physicalProfile: EXACT_FROM_PROFILE,
+    ...overrides
+  });
+}
+
+function syntheticManifestWith0005() {
+  const manifest = readManifest({ root });
+  const directory = fs.mkdtempSync(
+    path.join(os.tmpdir(), "ia4tube-social-exact-0005-")
+  );
+  const synthetic = {
+    version: "0005_synthetic_future",
+    file: "0005_synthetic_future.up.sql",
+    sql: "SELECT 1;\n"
+  };
+  const entries = [];
+  for (const migration of [...manifest, synthetic]) {
+    fs.writeFileSync(
+      path.join(directory, migration.file),
+      migration.sql,
+      "utf8"
+    );
+    entries.push({
+      version: migration.version,
+      file: migration.file,
+      sha256: migration.sha256 || sha256(Buffer.from(migration.sql, "utf8"))
+    });
+  }
+  const manifestPath = path.join(directory, "checksums.json");
+  fs.writeFileSync(
+    manifestPath,
+    `${JSON.stringify({ format: 1, migrations: entries }, null, 2)}\n`,
+    "utf8"
+  );
+  return {
+    directory,
+    options: { migrationsDirectory: directory, manifestPath }
+  };
+}
+
+test("exact CLI parser accepts only the frozen plan and apply argument sets", () => {
+  const common = [
+    `--from-profile=${EXACT_FROM_PROFILE}`,
+    `--expect-pending=${SOCIAL_CONNECTOR_PERSISTENCE_MIGRATION}`,
+    `--to-profile=${EXACT_TO_PROFILE}`
+  ];
+  assert.deepEqual(
+    parseMigrationCommand(["plan-exact", ...common]),
+    { command: "plan-exact", request: exactPlanRequest }
+  );
+  assert.deepEqual(
+    parseMigrationCommand([
+      "apply-exact",
+      ...common,
+      "--recovery-reference=synthetic-recovery-reference-0004",
+      "--recovery-captured-at=2026-08-13T12:00:00.000Z"
+    ]),
+    { command: "apply-exact", request: exactApplyRequest }
+  );
+
+  for (const command of ["status", "validate", "apply"]) {
+    assert.deepEqual(parseMigrationCommand([command]), {
+      command,
+      request: undefined
+    });
+    assert.deepEqual(parseMigrationCommand([command, "legacy-extra"]), {
+      command,
+      request: undefined
+    });
+  }
+});
+
+test("exact CLI parser refuses malformed, unknown, duplicate and missing arguments", () => {
+  const common = [
+    `--from-profile=${EXACT_FROM_PROFILE}`,
+    `--expect-pending=${SOCIAL_CONNECTOR_PERSISTENCE_MIGRATION}`,
+    `--to-profile=${EXACT_TO_PROFILE}`
+  ];
+  const refused = [
+    { argv: [], code: "migration_command_invalid" },
+    { argv: ["unknown"], code: "migration_command_invalid" },
+    {
+      argv: ["plan-exact", ...common, "--unknown=value"],
+      code: "migration_exact_argument_set_invalid"
+    },
+    {
+      argv: ["plan-exact", ...common, common[0]],
+      code: "migration_exact_argument_duplicate"
+    },
+    {
+      argv: ["plan-exact", ...common.slice(0, 2)],
+      code: "migration_exact_argument_set_invalid"
+    },
+    {
+      argv: ["plan-exact", "--from-profile", ...common.slice(1)],
+      code: "migration_exact_argument_invalid"
+    },
+    {
+      argv: ["plan-exact", "--from-profile=social-schema-9999", ...common.slice(1)],
+      code: "migration_exact_from_profile_invalid"
+    },
+    {
+      argv: ["plan-exact", common[0], common[1], "--to-profile=social-schema-9999"],
+      code: "migration_exact_to_profile_invalid"
+    },
+    {
+      argv: ["plan-exact", common[0], "--expect-pending=0005_unknown", common[2]],
+      code: "migration_exact_pending_migration_invalid"
+    },
+    {
+      argv: ["apply-exact", ...common],
+      code: "migration_exact_argument_set_invalid"
+    },
+    {
+      argv: [
+        "apply-exact", ...common,
+        "--recovery-reference=contains space",
+        "--recovery-captured-at=2026-08-13T12:00:00.000Z"
+      ],
+      code: "migration_exact_recovery_reference_invalid"
+    },
+    {
+      argv: [
+        "apply-exact", ...common,
+        "--recovery-reference=synthetic-reference",
+        "--recovery-captured-at=2026-02-30T12:00:00.000Z"
+      ],
+      code: "migration_exact_recovery_timestamp_invalid"
+    }
+  ];
+  for (const candidate of refused) {
+    assert.throws(
+      () => parseMigrationCommand(candidate.argv),
+      { code: candidate.code }
+    );
+  }
+});
+
+test("invalid exact CLI input is refused before configuration or pool creation", async () => {
+  let poolConstructed = false;
+  class ForbiddenPool {
+    constructor() {
+      poolConstructed = true;
+      throw new Error("pool must not be constructed");
+    }
+  }
+  let stdout = "";
+  let stderr = "";
+  const status = await migrationCliMain({
+    argv: ["apply-exact", "--unknown=value"],
+    env: {},
+    PoolClass: ForbiddenPool,
+    stdout: { write: (value) => { stdout += value; } },
+    stderr: { write: (value) => { stderr += value; } }
+  });
+  assert.equal(status, 2);
+  assert.equal(poolConstructed, false);
+  assert.equal(stdout, "");
+  assert.deepEqual(JSON.parse(stderr), {
+    ok: false,
+    code: "migration_exact_argument_set_invalid"
+  });
+});
+
+test("exact CLI serializes commit ambiguity without leaking recovery evidence", async () => {
+  const harness = exactMigrationHarness({
+    commitThrows: true,
+    commitOutcomeApplied: true
+  });
+  let stdout = "";
+  let stderr = "";
+  let closed = false;
+  const status = await migrationCliMain({
+    argv: exactApplyArgv(),
+    env: exactCliEnvironment(),
+    createPoolImpl: () => harness.pool,
+    closePoolImpl: async () => { closed = true; },
+    stdout: { write: (value) => { stdout += value; } },
+    stderr: { write: (value) => { stderr += value; } }
+  });
+  assert.equal(status, 1);
+  assert.equal(stdout, "");
+  assert.deepEqual(JSON.parse(stderr), {
+    ok: false,
+    code: "migration_exact_commit_outcome_unknown",
+    outcomeUnknown: true,
+    retryAllowed: false,
+    requiresReadOnlyInspection: true
+  });
+  assert.equal(stderr.includes(exactApplyRequest.recoveryReference), false);
+  assert.equal(closed, true);
+  assert.equal(harness.state.commitAttempts, 1);
+  assert.equal(harness.state.exactMigrationExecutions, 1);
+});
+
+test("exact CLI marks postcommit validation failure as applied and non-retryable", async () => {
+  let socialSchemaReads = 0;
+  const harness = exactMigrationHarness({
+    failOn(text) {
+      if (
+        text.includes("WHERE namespace.nspname = 'ia4tube_social'") &&
+        text.includes("AS routine_count")
+      ) {
+        socialSchemaReads += 1;
+        return socialSchemaReads === 3;
+      }
+      return false;
+    }
+  });
+  let stdout = "";
+  let stderr = "";
+  const status = await migrationCliMain({
+    argv: exactApplyArgv(),
+    env: exactCliEnvironment(),
+    createPoolImpl: () => harness.pool,
+    closePoolImpl: async () => undefined,
+    stdout: { write: (value) => { stdout += value; } },
+    stderr: { write: (value) => { stderr += value; } }
+  });
+  assert.equal(status, 1);
+  assert.equal(stdout, "");
+  assert.deepEqual(JSON.parse(stderr), {
+    ok: false,
+    code: "migration_exact_postcommit_validation_failed",
+    applied: true,
+    retryAllowed: false,
+    requiresReadOnlyInspection: true
+  });
+  assert.equal(stderr.includes(exactApplyRequest.recoveryReference), false);
+  assert.equal(harness.state.commitAttempts, 1);
+  assert.equal(harness.state.physicalProfile, EXACT_TO_PROFILE);
+});
 
 test("manifest freezes ordered LF-only migration checksums", () => {
   const migrations = readManifest({ root });
@@ -1231,6 +1819,328 @@ test("status and validate are read-only when the ledger is absent", async () => 
   assert.equal(harness.state.released, true);
 });
 
+test("plan-exact authenticates canonical 0003 and remains strictly read-only", async () => {
+  const harness = exactMigrationHarness();
+  const result = await runnerFor(harness).planExact(
+    exactPlanRequest,
+    exactApprovalEnvironment
+  );
+  assert.deepEqual(result, {
+    fromProfile: EXACT_FROM_PROFILE,
+    toProfile: EXACT_TO_PROFILE,
+    expectedPending: [SOCIAL_CONNECTOR_PERSISTENCE_MIGRATION],
+    observedPending: [SOCIAL_CONNECTOR_PERSISTENCE_MIGRATION],
+    planApproved: true
+  });
+  const forbidden = /^(CREATE|ALTER|DROP|GRANT|REVOKE|INSERT|UPDATE|DELETE|TRUNCATE)\b/i;
+  assert.equal(
+    harness.state.queries.some((query) => forbidden.test(query.text.trimStart())),
+    false
+  );
+  assert.equal(
+    harness.state.queries.some((query) =>
+      query.text.includes("CREATE TABLE IF NOT EXISTS ia4tube_migrations.schema_migrations")
+    ),
+    false
+  );
+  assert.equal(harness.state.exactMigrationExecutions, 0);
+  assert.equal(harness.state.applied.length, 3);
+  assert.equal(harness.state.physicalProfile, EXACT_FROM_PROFILE);
+  assert.ok(
+    harness.state.queries.some((query) =>
+      query.text === "BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY"
+    )
+  );
+  assert.ok(harness.state.queries.some((query) => query.text === "ROLLBACK"));
+  assert.equal(harness.state.released, true);
+});
+
+test("plan-exact refuses every non-exact ledger state and a future 0005", async () => {
+  const manifest = readManifest({ root });
+  const states = [
+    { name: "empty", applied: [], code: "exact_pending_set_mismatch" },
+    {
+      name: "already applied",
+      applied: exactAppliedRows(4),
+      physicalProfile: EXACT_TO_PROFILE,
+      code: "exact_pending_set_mismatch"
+    },
+    {
+      name: "partial ledger",
+      applied: exactAppliedRows(2),
+      code: "exact_pending_set_mismatch"
+    },
+    {
+      name: "unknown migration",
+      applied: [
+        ...exactAppliedRows(),
+        { version: "9999_unknown", checksum_sha256: "a".repeat(64) }
+      ],
+      code: "unknown_applied_migration"
+    },
+    {
+      name: "checksum mismatch",
+      applied: exactAppliedRows().map((row, index) =>
+        index === 1 ? { ...row, checksum_sha256: "0".repeat(64) } : row
+      ),
+      code: "applied_migration_checksum_mismatch"
+    },
+    {
+      name: "ledger gap",
+      applied: [exactAppliedRows()[0], exactAppliedRows()[2]],
+      code: "migration_ledger_order_invalid"
+    },
+    {
+      name: "duplicate ledger row",
+      applied: [exactAppliedRows()[0], exactAppliedRows()[0]],
+      code: "migration_ledger_invalid"
+    }
+  ];
+  assert.equal(manifest.length, 4);
+  for (const candidate of states) {
+    const harness = exactMigrationHarness({
+      applied: candidate.applied,
+      physicalProfile: candidate.physicalProfile || EXACT_FROM_PROFILE
+    });
+    await assert.rejects(
+      runnerFor(harness).planExact(exactPlanRequest, exactApprovalEnvironment),
+      { code: candidate.code },
+      candidate.name
+    );
+    assert.equal(harness.state.exactMigrationExecutions, 0, candidate.name);
+  }
+
+  const synthetic = syntheticManifestWith0005();
+  try {
+    const harness = exactMigrationHarness();
+    const runner = createMigrationRunner({
+      pool: harness.pool,
+      ownerRole: "ia4tube_social_owner",
+      migratorRole: "ia4tube_social_migrator",
+      target: baseTarget,
+      manifestOptions: synthetic.options
+    });
+    await assert.rejects(
+      runner.planExact(exactPlanRequest, exactApprovalEnvironment),
+      { code: "exact_pending_set_mismatch" }
+    );
+    assert.equal(harness.state.exactMigrationExecutions, 0);
+  } finally {
+    fs.rmSync(synthetic.directory, { recursive: true, force: true });
+  }
+});
+
+test("plan-exact requires an existing immutable ledger contract", async () => {
+  const missing = exactMigrationHarness({ ledgerExists: false });
+  await assert.rejects(
+    runnerFor(missing).planExact(exactPlanRequest, exactApprovalEnvironment),
+    { code: "migration_exact_ledger_missing" }
+  );
+  assert.equal(
+    missing.state.queries.some((query) =>
+      query.text.includes("CREATE TABLE IF NOT EXISTS")
+    ),
+    false
+  );
+
+  const invalid = exactMigrationHarness({
+    ledgerStructure: {
+      owned: false,
+      column_count_valid: true,
+      columns_valid: true,
+      primary_key_valid: true,
+      migrator_select: true,
+      migrator_insert: true,
+      migrator_update: false,
+      migrator_delete: false
+    }
+  });
+  await assert.rejects(
+    runnerFor(invalid).planExact(exactPlanRequest, exactApprovalEnvironment),
+    { code: "migration_ledger_structure_invalid" }
+  );
+
+  const invalidAcl = exactMigrationHarness({
+    ledgerAcl: [
+      {
+        grantee: "ia4tube_social_migrator",
+        privilege_type: "SELECT",
+        is_grantable: true,
+        grantor_name: "ia4tube_social_owner"
+      }
+    ]
+  });
+  await assert.rejects(
+    runnerFor(invalidAcl).planExact(exactPlanRequest, exactApprovalEnvironment),
+    { code: "migration_ledger_acl_invalid" }
+  );
+});
+
+test("plan-exact closes every physical 0003 profile dimension", async () => {
+  const drifts = [
+    {
+      name: "schema owner",
+      kind: "schema",
+      code: "migration_exact_schema_profile_mismatch",
+      mutate: (rows) => [{ ...rows[0], owner_name: "unexpected_owner" }]
+    },
+    {
+      name: "extra relation",
+      kind: "relations",
+      code: "migration_exact_relation_profile_mismatch",
+      mutate: (rows) => [...rows, { ...rows[0], relname: "unexpected_table" }]
+    },
+    {
+      name: "missing relation",
+      kind: "relations",
+      code: "migration_exact_relation_profile_mismatch",
+      mutate: (rows) => rows.slice(1)
+    },
+    {
+      name: "relation owner",
+      kind: "relations",
+      code: "migration_exact_relation_profile_mismatch",
+      mutate: (rows) => [{ ...rows[0], owner_name: "unexpected_owner" }, ...rows.slice(1)]
+    },
+    {
+      name: "relkind",
+      kind: "relations",
+      code: "migration_exact_relation_profile_mismatch",
+      mutate: (rows) => [{ ...rows[0], object_kind: "p" }, ...rows.slice(1)]
+    },
+    {
+      name: "force rls",
+      kind: "relations",
+      code: "migration_exact_relation_profile_mismatch",
+      mutate: (rows) => [{ ...rows[0], relforcerowsecurity: false }, ...rows.slice(1)]
+    },
+    {
+      name: "rls",
+      kind: "relations",
+      code: "migration_exact_relation_profile_mismatch",
+      mutate: (rows) => [{ ...rows[0], relrowsecurity: false }, ...rows.slice(1)]
+    },
+    {
+      name: "policy",
+      kind: "policies",
+      code: "migration_exact_rls_profile_mismatch",
+      mutate: (rows) => [{ ...rows[0], cmd: "SELECT" }, ...rows.slice(1)]
+    },
+    {
+      name: "policy expression",
+      kind: "policies",
+      code: "migration_exact_rls_profile_mismatch",
+      mutate: (rows) => [{ ...rows[0], with_check: "TRUE" }, ...rows.slice(1)]
+    },
+    {
+      name: "schema acl",
+      kind: "schemaAcl",
+      code: "migration_exact_grants_profile_mismatch",
+      mutate: (rows) => [...rows, { ...rows[0], grantee: "unexpected_reader" }]
+    },
+    {
+      name: "schema grant option",
+      kind: "schemaAcl",
+      code: "migration_exact_grants_profile_mismatch",
+      mutate: (rows) => [{ ...rows[0], is_grantable: true }]
+    },
+    {
+      name: "table acl",
+      kind: "tableAcl",
+      code: "migration_exact_grants_profile_mismatch",
+      mutate: (rows) => rows.slice(1)
+    },
+    {
+      name: "column acl",
+      kind: "columnAcl",
+      code: "migration_exact_grants_profile_mismatch",
+      mutate: (rows) => rows.slice(1)
+    },
+    {
+      name: "unvalidated constraint",
+      kind: "constraints",
+      code: "migration_exact_constraints_profile_mismatch",
+      mutate: (rows) => [{
+        table_name: "social_connections",
+        conname: "unexpected_not_valid",
+        contype: "c"
+      }, ...rows]
+    }
+  ];
+  for (const drift of drifts) {
+    const harness = exactMigrationHarness({
+      mutateExactRows({ kind, rows }) {
+        return kind === drift.kind ? drift.mutate(rows) : rows;
+      }
+    });
+    await assert.rejects(
+      runnerFor(harness).planExact(exactPlanRequest, exactApprovalEnvironment),
+      { code: drift.code },
+      drift.name
+    );
+    assert.equal(harness.state.exactMigrationExecutions, 0, drift.name);
+  }
+});
+
+test("exact modes refuse staging, non-loopback and non-disposable databases before connecting", async () => {
+  const targets = [
+    { ...baseTarget, environment: "staging" },
+    { ...baseTarget, host: "postgres.example.invalid" },
+    { ...baseTarget, database: "ia4tube_social_test" },
+    { ...baseTarget, database: "ia4tube_social_test_staging_copy" }
+  ];
+  for (const target of targets) {
+    const harness = exactMigrationHarness();
+    await assert.rejects(
+      runnerFor(harness, target).planExact(exactPlanRequest, {
+        SOCIAL_MIGRATION_TARGET_FINGERPRINT: targetFingerprint(target)
+      }),
+      { code: "migration_exact_target_not_disposable" }
+    );
+    assert.equal(harness.state.connected, 0);
+  }
+});
+
+test("exact runner validates the frozen request and synthetic recovery before connecting", async () => {
+  const candidates = [
+    {
+      invoke: (runner) => runner.planExact(
+        { ...exactPlanRequest, expectedPending: [] },
+        exactApprovalEnvironment
+      ),
+      code: "migration_exact_request_invalid"
+    },
+    {
+      invoke: (runner) => runner.planExact(
+        { ...exactPlanRequest, recoveryReference: "not-allowed" },
+        exactApprovalEnvironment
+      ),
+      code: "migration_exact_recovery_not_allowed"
+    },
+    {
+      invoke: (runner) => runner.applyExact(
+        exactPlanRequest,
+        exactApprovalEnvironment
+      ),
+      code: "migration_exact_recovery_reference_invalid"
+    },
+    {
+      invoke: (runner) => runner.applyExact(
+        { ...exactApplyRequest, recoveryCapturedAt: "2026-02-30T12:00:00.000Z" },
+        exactApprovalEnvironment
+      ),
+      code: "migration_exact_recovery_timestamp_invalid"
+    }
+  ];
+  for (const candidate of candidates) {
+    const harness = exactMigrationHarness();
+    await assert.rejects(candidate.invoke(runnerFor(harness)), {
+      code: candidate.code
+    });
+    assert.equal(harness.state.connected, 0);
+  }
+});
+
 test("apply takes an advisory lock and records SQL plus checksum atomically", async () => {
   const target = baseTarget;
   const harness = migrationPool();
@@ -1475,6 +2385,368 @@ test("migration 0004 rolls back atomically and never records a partial ledger ro
   );
 });
 
+test("apply-exact commits canonical 0004, ledger and physical validation as one unit", async () => {
+  const harness = exactMigrationHarness();
+  const result = await runnerFor(harness).applyExact(
+    exactApplyRequest,
+    exactApprovalEnvironment
+  );
+  assert.deepEqual(result, {
+    fromProfile: EXACT_FROM_PROFILE,
+    toProfile: EXACT_TO_PROFILE,
+    expectedPending: [SOCIAL_CONNECTOR_PERSISTENCE_MIGRATION],
+    observedPending: [SOCIAL_CONNECTOR_PERSISTENCE_MIGRATION],
+    appliedMigration: SOCIAL_CONNECTOR_PERSISTENCE_MIGRATION,
+    finalProfile: EXACT_TO_PROFILE,
+    postCommitValidated: true,
+    recoveryReferenceDigest: sha256(exactApplyRequest.recoveryReference),
+    recoveryCapturedAt: exactApplyRequest.recoveryCapturedAt,
+    recoveryEvidenceExternallyVerified: false
+  });
+  assert.equal(
+    JSON.stringify(result).includes(exactApplyRequest.recoveryReference),
+    false
+  );
+  assert.equal(harness.state.exactMigrationExecutions, 1);
+  assert.equal(harness.state.commitAttempts, 1);
+  assert.equal(harness.state.physicalProfile, EXACT_TO_PROFILE);
+  assert.deepEqual(
+    harness.state.applied.map((row) => row.version),
+    EXACT_BASE_MIGRATIONS.concat(SOCIAL_CONNECTOR_PERSISTENCE_MIGRATION)
+  );
+
+  const texts = harness.state.queries.map((query) => query.text);
+  const migrationIndex = texts.findIndex((text) =>
+    text.includes("CREATE TABLE ia4tube_social.social_idempotency_operations")
+  );
+  const ledgerIndex = texts.findIndex(
+    (text, index) =>
+      index > migrationIndex &&
+      text.includes("INSERT INTO ia4tube_migrations.schema_migrations")
+  );
+  const commitIndex = texts.indexOf("COMMIT");
+  const relationProfileReads = texts
+    .map((text, index) => ({ text, index }))
+    .filter(({ text }) =>
+      text.includes("relation.relkind IN ('r', 'p', 'v', 'm', 'S', 'f')")
+    )
+    .map(({ index }) => index);
+  assert.ok(migrationIndex >= 0);
+  assert.ok(ledgerIndex > migrationIndex);
+  assert.equal(relationProfileReads.length, 3);
+  assert.ok(relationProfileReads[0] < migrationIndex);
+  assert.ok(relationProfileReads[1] > ledgerIndex);
+  assert.ok(relationProfileReads[1] < commitIndex);
+  assert.ok(relationProfileReads[2] > commitIndex);
+  assert.equal(
+    texts.some((text) =>
+      text.includes("CREATE TABLE IF NOT EXISTS ia4tube_migrations.schema_migrations")
+    ),
+    false
+  );
+  const firstFunctionalMutation = texts.find((text) =>
+    /^(CREATE|ALTER|DROP|GRANT|REVOKE|INSERT|UPDATE|DELETE|TRUNCATE)\b/i.test(
+      text.trimStart()
+    )
+  );
+  assert.ok(
+    firstFunctionalMutation.includes(
+      "ALTER TABLE ia4tube_social.social_connections"
+    )
+  );
+  assert.equal(texts.at(-1).includes("pg_advisory_unlock"), true);
+  assert.equal(harness.state.released, true);
+});
+
+test("apply-exact rolls back every failure point before COMMIT", async () => {
+  const cases = [
+    {
+      name: "migration beginning",
+      options: {
+        failOn: (text) =>
+          text.startsWith("ALTER TABLE ia4tube_social.social_connections")
+      },
+      code: undefined
+    },
+    {
+      name: "migration middle",
+      options: {
+        failOn: (text) =>
+          text.includes("CREATE TABLE ia4tube_social.social_publication_attempts")
+      },
+      code: undefined
+    },
+    {
+      name: "before ledger",
+      options: {
+        failOn: (text, values) =>
+          text.includes("INSERT INTO ia4tube_migrations.schema_migrations") &&
+          values[0] === SOCIAL_CONNECTOR_PERSISTENCE_MIGRATION
+      },
+      code: undefined
+    },
+    {
+      name: "after ledger",
+      options: (() => {
+        let reads = 0;
+        return {
+          failOn: (text) => {
+            if (
+              text.includes("WHERE namespace.nspname = 'ia4tube_social'") &&
+              text.includes("AS routine_count")
+            ) {
+              reads += 1;
+              return reads === 2;
+            }
+            return false;
+          }
+        };
+      })(),
+      code: undefined
+    },
+    {
+      name: "precommit profile validation",
+      options: {
+        mutateExactRows({ kind, profile, rows }) {
+          if (kind !== "constraints" || profile !== EXACT_TO_PROFILE) return rows;
+          return rows.map((row, index) =>
+            index === 0 ? { ...row, table_name: "wrong_table" } : row
+          );
+        }
+      },
+      code: "migration_exact_constraints_profile_mismatch"
+    }
+  ];
+
+  for (const candidate of cases) {
+    const harness = exactMigrationHarness(candidate.options);
+    await assert.rejects(
+      runnerFor(harness).applyExact(exactApplyRequest, exactApprovalEnvironment),
+      candidate.code ? { code: candidate.code } : /synthetic migration failure/,
+      candidate.name
+    );
+    assert.deepEqual(
+      harness.state.applied.map((row) => row.version),
+      EXACT_BASE_MIGRATIONS,
+      candidate.name
+    );
+    assert.equal(harness.state.physicalProfile, EXACT_FROM_PROFILE, candidate.name);
+    assert.equal(harness.state.commitAttempts, 0, candidate.name);
+    assert.ok(
+      harness.state.queries.some((query) => query.text === "ROLLBACK"),
+      candidate.name
+    );
+    assert.equal(
+      harness.state.queries.at(-1).text.includes("pg_advisory_unlock"),
+      true,
+      candidate.name
+    );
+  }
+});
+
+test("apply-exact reports postcommit validation failure without claiming rollback", async () => {
+  let socialSchemaReads = 0;
+  const harness = exactMigrationHarness({
+    failOn(text) {
+      if (
+        text.includes("WHERE namespace.nspname = 'ia4tube_social'") &&
+        text.includes("AS routine_count")
+      ) {
+        socialSchemaReads += 1;
+        return socialSchemaReads === 3;
+      }
+      return false;
+    }
+  });
+  let failure;
+  try {
+    await runnerFor(harness).applyExact(
+      exactApplyRequest,
+      exactApprovalEnvironment
+    );
+    assert.fail("postcommit validation failure must be explicit");
+  } catch (error) {
+    failure = error;
+  }
+  assert.equal(failure.code, "migration_exact_postcommit_validation_failed");
+  assert.equal(failure.applied, true);
+  assert.equal(failure.retryAllowed, false);
+  assert.equal(failure.requiresReadOnlyInspection, true);
+  assert.equal(Boolean(failure.discardClient), false);
+  assert.equal(harness.state.commitAttempts, 1);
+  assert.equal(harness.state.physicalProfile, EXACT_TO_PROFILE);
+  assert.equal(
+    harness.state.applied.filter(
+      (row) => row.version === SOCIAL_CONNECTOR_PERSISTENCE_MIGRATION
+    ).length,
+    1
+  );
+  assert.equal(harness.state.exactMigrationExecutions, 1);
+  assert.equal(harness.state.queries.at(-1).text.includes("pg_advisory_unlock"), true);
+});
+
+test("apply-exact classifies an ambiguous COMMIT and never retries or rolls back", async () => {
+  const harness = exactMigrationHarness({
+    commitThrows: true,
+    commitOutcomeApplied: true
+  });
+  let failure;
+  try {
+    await runnerFor(harness).applyExact(
+      exactApplyRequest,
+      exactApprovalEnvironment
+    );
+    assert.fail("ambiguous commit must fail closed");
+  } catch (error) {
+    failure = error;
+  }
+  assert.equal(failure.code, "migration_exact_commit_outcome_unknown");
+  assert.equal(failure.discardClient, true);
+  assert.equal(failure.applied, undefined);
+  assert.equal(failure.outcomeUnknown, true);
+  assert.equal(failure.retryAllowed, false);
+  assert.equal(failure.requiresReadOnlyInspection, true);
+  assert.equal(harness.state.commitAttempts, 1);
+  assert.equal(harness.state.exactMigrationExecutions, 1);
+  assert.equal(harness.state.physicalProfile, EXACT_TO_PROFILE);
+  assert.equal(
+    harness.state.applied.filter(
+      (row) => row.version === SOCIAL_CONNECTOR_PERSISTENCE_MIGRATION
+    ).length,
+    1
+  );
+  const commitIndex = harness.state.queries.findIndex(
+    (query) => query.text === "COMMIT"
+  );
+  assert.ok(commitIndex >= 0);
+  assert.equal(
+    harness.state.queries.slice(commitIndex + 1).some(
+      (query) => query.text === "ROLLBACK" ||
+        query.text.includes("pg_advisory_unlock") ||
+        query.text.includes("social_idempotency_operations")
+    ),
+    false
+  );
+  assert.equal(harness.state.releaseError, failure);
+  assert.equal(harness.state.activeLocks, 0);
+});
+
+test("apply-exact discards the client when its rollback cannot be confirmed", async () => {
+  const harness = exactMigrationHarness({
+    failOn: (text) =>
+      text.includes("CREATE TABLE ia4tube_social.social_publication_attempts"),
+    rollbackFails: true
+  });
+  let failure;
+  try {
+    await runnerFor(harness).applyExact(
+      exactApplyRequest,
+      exactApprovalEnvironment
+    );
+    assert.fail("rollback failure must discard the client");
+  } catch (error) {
+    failure = error;
+  }
+  assert.equal(failure.code, "migration_exact_rollback_failed");
+  assert.equal(failure.discardClient, true);
+  assert.equal(harness.state.releaseError, failure);
+  assert.equal(harness.state.commitAttempts, 0);
+});
+
+test("apply-exact discards a committed session when postcommit rollback is unconfirmed", async () => {
+  const harness = exactMigrationHarness({ rollbackFails: true });
+  let failure;
+  try {
+    await runnerFor(harness).applyExact(
+      exactApplyRequest,
+      exactApprovalEnvironment
+    );
+    assert.fail("postcommit rollback failure must fail closed");
+  } catch (error) {
+    failure = error;
+  }
+  assert.equal(failure.code, "migration_exact_postcommit_validation_failed");
+  assert.equal(failure.applied, true);
+  assert.equal(failure.retryAllowed, false);
+  assert.equal(failure.requiresReadOnlyInspection, true);
+  assert.equal(failure.discardClient, true);
+  assert.equal(failure.skipAdvisoryUnlock, true);
+  assert.equal(failure.cause?.code, "migration_exact_rollback_failed");
+  assert.equal(harness.state.commitAttempts, 1);
+  assert.equal(harness.state.exactMigrationExecutions, 1);
+  assert.equal(harness.state.physicalProfile, EXACT_TO_PROFILE);
+  assert.equal(
+    harness.state.queries.some((query) =>
+      query.text.includes("pg_advisory_unlock")
+    ),
+    false
+  );
+  assert.equal(harness.state.releaseError, failure);
+  assert.equal(harness.state.activeLocks, 0);
+});
+
+test("apply-exact marks postcommit advisory unlock failures as applied and non-retryable", async () => {
+  for (const options of [
+    { unlockValue: false },
+    { unlockThrows: true }
+  ]) {
+    const harness = exactMigrationHarness(options);
+    let failure;
+    try {
+      await runnerFor(harness).applyExact(
+        exactApplyRequest,
+        exactApprovalEnvironment
+      );
+      assert.fail("postcommit unlock failure must fail closed");
+    } catch (error) {
+      failure = error;
+    }
+    assert.ok([
+      "migration_advisory_unlock_not_owned",
+      "migration_advisory_unlock_failed"
+    ].includes(failure.code));
+    assert.equal(failure.applied, true);
+    assert.equal(failure.retryAllowed, false);
+    assert.equal(failure.requiresReadOnlyInspection, true);
+    assert.equal(failure.discardClient, true);
+    assert.equal(harness.state.commitAttempts, 1);
+    assert.equal(harness.state.exactMigrationExecutions, 1);
+    assert.equal(harness.state.physicalProfile, EXACT_TO_PROFILE);
+    assert.equal(
+      harness.state.applied.filter(
+        (row) => row.version === SOCIAL_CONNECTOR_PERSISTENCE_MIGRATION
+      ).length,
+      1
+    );
+    assert.equal(harness.state.releaseError, failure);
+    assert.equal(harness.state.activeLocks, 0);
+  }
+});
+
+test("two apply-exact runners produce one winner and one pending-set refusal", async () => {
+  const harness = exactMigrationHarness({ exactMigrationDelayMs: 10 });
+  const outcomes = await Promise.allSettled([
+    runnerFor(harness).applyExact(exactApplyRequest, exactApprovalEnvironment),
+    runnerFor(harness).applyExact(exactApplyRequest, exactApprovalEnvironment)
+  ]);
+  const fulfilled = outcomes.filter((outcome) => outcome.status === "fulfilled");
+  const rejected = outcomes.filter((outcome) => outcome.status === "rejected");
+  assert.equal(fulfilled.length, 1);
+  assert.equal(rejected.length, 1);
+  assert.equal(rejected[0].reason?.code, "exact_pending_set_mismatch");
+  assert.equal(fulfilled[0].value.appliedMigration, SOCIAL_CONNECTOR_PERSISTENCE_MIGRATION);
+  assert.equal(harness.state.lockWaits, 1);
+  assert.equal(harness.state.maxActiveLocks, 1);
+  assert.equal(harness.state.activeLocks, 0);
+  assert.equal(harness.state.exactMigrationExecutions, 1);
+  assert.equal(
+    harness.state.applied.filter(
+      (row) => row.version === SOCIAL_CONNECTOR_PERSISTENCE_MIGRATION
+    ).length,
+    1
+  );
+});
+
 test("reapplying all four migrations is idempotent at the ledger boundary", async () => {
   const harness = migrationPool();
   const runner = runnerFor(harness);
@@ -1661,4 +2933,10 @@ test("physical gate retains CLI, startup, RLS and both vault markers", () => {
   assert.match(source, /synthetic-refresh-token-B-/);
   assert.match(source, /provisioner_inherit/);
   assert.match(source, /table_truncate/);
+  assert.match(source, /proveExact0004Route/);
+  assert.match(source, /runnerA\.planExact/);
+  assert.match(source, /runnerA\.applyExact/);
+  assert.match(source, /exact_pending_set_mismatch/);
+  assert.match(source, /recoveryEvidenceExternallyVerified/);
+  assert.match(source, /readExactCatalogSnapshot/);
 });
