@@ -14,7 +14,8 @@ const test = require("node:test");
 const gate = require("../scripts/social-3b0-linux-physical-gate");
 const historicGate = require("../scripts/social-3a0p-linux-gate");
 const {
-  PROCESS_LIFECYCLE_TEST_FILES
+  PROCESS_LIFECYCLE_TEST_FILES,
+  partitionAutomatedTests
 } = require("../scripts/run-node-tests");
 const {
   INSTAGRAM_OAUTH_REDIRECT_URI,
@@ -540,8 +541,50 @@ test("Social 3B physical gate freezes the Exact7 loopback socket close route", (
     "social-3a0p-local-safe-zip-extract.test.js",
     "social-postgres-tls.test.js"
   ]);
-  assert.equal(PROCESS_LIFECYCLE_TEST_FILES.length, 11);
-  assert.equal(new Set(PROCESS_LIFECYCLE_TEST_FILES).size, 11);
+  const expectedProcessLifecycleTestFiles = [
+    "body-parser-security.test.js",
+    "checkpoint-a-security.test.js",
+    "fcm-token-encryption.test.js",
+    "social-2b0-config-security.test.js",
+    "social-foundation-integration.test.js",
+    "zip-downloads.test.js",
+    "social-3a0p-local-file-replace-argument-powershell.test.js",
+    "social-3a0p-local-file-replace-powershell-diagnostic.test.js",
+    "social-3a0p-local-firewall-nonmutation.test.js",
+    "social-3a0p-local-safe-zip-extract.test.js",
+    "social-postgres-tls.test.js",
+    "social-3a0p-current-diff-scope.test.js"
+  ];
+  assert.deepEqual(PROCESS_LIFECYCLE_TEST_FILES, expectedProcessLifecycleTestFiles);
+  assert.equal(PROCESS_LIFECYCLE_TEST_FILES.length, 12);
+  assert.equal(new Set(PROCESS_LIFECYCLE_TEST_FILES).size, 12);
+  assert.equal(
+    PROCESS_LIFECYCLE_TEST_FILES.filter(
+      (name) => name === "social-3a0p-current-diff-scope.test.js"
+    ).length,
+    1
+  );
+  assert.equal(
+    PROCESS_LIFECYCLE_TEST_FILES.includes("social-3a0p-local-scope.test.js"),
+    false
+  );
+  const partition = partitionAutomatedTests(
+    [...expectedProcessLifecycleTestFiles, "social-3a0p-local-scope.test.js"]
+      .map((name) => path.join(__dirname, name))
+      .sort()
+  );
+  const serialNames = partition.serial.map((file) => path.basename(file));
+  const concurrentNames = partition.concurrent.map((file) => path.basename(file));
+  assert.deepEqual(serialNames, expectedProcessLifecycleTestFiles);
+  assert.equal(
+    serialNames.filter((name) => name === "social-3a0p-current-diff-scope.test.js").length,
+    1
+  );
+  assert.equal(
+    concurrentNames.includes("social-3a0p-current-diff-scope.test.js"),
+    false
+  );
+  assert.deepEqual(concurrentNames, ["social-3a0p-local-scope.test.js"]);
   for (const name of gate.WINDOWS_NATIVE_SERIAL_TEST_FILES) {
     assert.equal(
       PROCESS_LIFECYCLE_TEST_FILES.filter((candidate) => candidate === name).length,
