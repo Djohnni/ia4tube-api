@@ -1,6 +1,9 @@
 "use strict";
 
 const assert = require("node:assert/strict");
+const crypto = require("node:crypto");
+const { execFileSync } = require("node:child_process");
+const fs = require("node:fs");
 const path = require("node:path");
 const test = require("node:test");
 
@@ -28,13 +31,23 @@ const ADDED_WINDOWS_NATIVE_SERIAL_FILES = Object.freeze([
   "social-3a0p-local-safe-zip-extract.test.js",
   "social-postgres-tls.test.js"
 ]);
+const CURRENT_DIFF_SCOPE_SERIAL_FILE =
+  "social-3a0p-current-diff-scope.test.js";
 const EXPECTED_SERIAL_FILES = Object.freeze([
   ...PREVIOUS_SERIAL_FILES,
-  ...ADDED_WINDOWS_NATIVE_SERIAL_FILES
+  ...ADDED_WINDOWS_NATIVE_SERIAL_FILES,
+  CURRENT_DIFF_SCOPE_SERIAL_FILE
 ]);
 const SYNTHETIC_TEST_DIRECTORY = path.resolve("synthetic-runner-tests");
 const SYNTHETIC_REPOSITORY_ROOT = path.resolve("synthetic-runner-root");
 const SYNTHETIC_EXECUTABLE = path.resolve("synthetic-node");
+const REPOSITORY_ROOT = path.resolve(__dirname, "..");
+const SAFE_EVIDENCE_COMMIT = "8534817574a22dbd144a835c9f3585c44ee11c96";
+const REAL_POSTGRES_TEST = "tests/social-postgres-real.test.js";
+const REAL_POSTGRES_TEST_LF_SHA256 =
+  "1097566cd85b74e8ec3fd53cfc1248a98a32d5a905f1c02d348b4498169f833a";
+const REAL_POSTGRES_TEST_FILTERED_OID =
+  "9d87dfa5ec0b69a3a6b54bcee428b87078d526ad";
 
 function directoryEntry(name, isFile = true) {
   return {
@@ -127,16 +140,20 @@ test("2. the ordinary runner keeps every dedicated physical gate excluded", () =
   assert.equal(discovered.includes("social-postgres-real.test.js"), false);
 });
 
-test("3. the closed serial manifest contains the six previous and five native Windows files", () => {
+test("3. the closed serial manifest preserves eleven files and adds only current-diff scope", () => {
   const repositoryTests = discoverAutomatedTests(path.resolve(__dirname)).map((file) =>
     path.basename(file)
   );
-  const previousSet = new Set(PREVIOUS_SERIAL_FILES);
+  const previousManifest = [
+    ...PREVIOUS_SERIAL_FILES,
+    ...ADDED_WINDOWS_NATIVE_SERIAL_FILES
+  ];
+  const previousSet = new Set(previousManifest);
   assert.deepEqual(PROCESS_LIFECYCLE_TEST_FILES, EXPECTED_SERIAL_FILES);
-  assert.equal(PROCESS_LIFECYCLE_TEST_FILES.length, 11);
+  assert.equal(PROCESS_LIFECYCLE_TEST_FILES.length, 12);
   assert.deepEqual(
     PROCESS_LIFECYCLE_TEST_FILES.filter((name) => previousSet.has(name)),
-    PREVIOUS_SERIAL_FILES
+    previousManifest
   );
   for (const name of ADDED_WINDOWS_NATIVE_SERIAL_FILES) {
     assert.equal(
@@ -145,6 +162,12 @@ test("3. the closed serial manifest contains the six previous and five native Wi
       name
     );
   }
+  assert.equal(
+    PROCESS_LIFECYCLE_TEST_FILES.filter(
+      (candidate) => candidate === CURRENT_DIFF_SCOPE_SERIAL_FILE
+    ).length,
+    1
+  );
   for (const name of EXPECTED_SERIAL_FILES) assert.ok(repositoryTests.includes(name), name);
 });
 
@@ -312,4 +335,108 @@ test("23. partitioning preserves the exact total automated-test count", () => {
   assert.equal(plan.serial.length + plan.concurrent.length, discovered.length);
   const { calls } = invokeRunner();
   assert.equal(calls.flatMap(testFileArguments).length, discovered.length);
+});
+
+test("24. real PostgreSQL migration binding is exported, unique and the only blob delta", () => {
+  const migrationsPath = path.join(
+    REPOSITORY_ROOT,
+    "src",
+    "persistence",
+    "postgres",
+    "migrations.js"
+  );
+  const realTestPath = path.join(
+    REPOSITORY_ROOT,
+    "tests",
+    "social-postgres-real.test.js"
+  );
+  const migrationsSource = fs.readFileSync(migrationsPath, "utf8")
+    .replaceAll("\r\n", "\n");
+  const rawRealTest = fs.readFileSync(realTestPath, "utf8");
+  const realTestSource = rawRealTest.replaceAll("\r\n", "\n");
+  assert.equal(migrationsSource.includes("\r"), false);
+  assert.equal(realTestSource.includes("\r"), false);
+
+  const exportBlock = /module\.exports\s*=\s*\{([^{}]*)\};/.exec(
+    migrationsSource
+  );
+  assert.ok(exportBlock);
+  assert.equal(
+    (exportBlock[1].match(/\bGLOBAL_VAULT_REGISTRY_MIGRATION\b/g) || []).length,
+    1
+  );
+  const importBlock = /const \{([^{}]*)\} = require\("\.\.\/src\/persistence\/postgres\/migrations"\);/.exec(
+    realTestSource
+  );
+  assert.ok(importBlock);
+  const importedNames = importBlock[1].split(",").map((name) => name.trim());
+  assert.equal(
+    importedNames.filter((name) => name === "GLOBAL_VAULT_REGISTRY_MIGRATION").length,
+    1
+  );
+  assert.equal(
+    (realTestSource.match(/\bGLOBAL_VAULT_REGISTRY_MIGRATION\b/g) || []).length,
+    4
+  );
+  const sourceWithoutImport = realTestSource.replace(
+    "  GLOBAL_VAULT_REGISTRY_MIGRATION,\n",
+    ""
+  );
+  assert.equal(
+    /\b(?:const|let|var)\s+GLOBAL_VAULT_REGISTRY_MIGRATION\b/.test(
+      sourceWithoutImport
+    ),
+    false
+  );
+  for (const expression of [
+    /\(item\) => item\.version === GLOBAL_VAULT_REGISTRY_MIGRATION/,
+    /\(migration\) => migration\.version === GLOBAL_VAULT_REGISTRY_MIGRATION/,
+    /\[GLOBAL_VAULT_REGISTRY_MIGRATION\]/
+  ]) assert.equal((sourceWithoutImport.match(expression) || []).length, 1);
+  assert.equal(realTestSource.includes("0003_global_vault_key_registry"), false);
+  assert.equal(
+    realTestSource.split("  GLOBAL_VAULT_REGISTRY_MIGRATION,\n").length - 1,
+    1
+  );
+
+  const historical = execFileSync(
+    "git",
+    ["cat-file", "blob", `${SAFE_EVIDENCE_COMMIT}:${REAL_POSTGRES_TEST}`],
+    {
+      cwd: REPOSITORY_ROOT,
+      encoding: null,
+      windowsHide: true,
+      stdio: ["ignore", "pipe", "ignore"],
+      timeout: 20_000,
+      maxBuffer: 2 * 1024 * 1024,
+      env: {
+        ...process.env,
+        GIT_OPTIONAL_LOCKS: "0",
+        GIT_TERMINAL_PROMPT: "0"
+      }
+    }
+  );
+  assert.deepEqual(Buffer.from(sourceWithoutImport, "utf8"), historical);
+  const canonical = Buffer.from(realTestSource, "utf8");
+  assert.equal(
+    crypto.createHash("sha256").update(canonical).digest("hex"),
+    REAL_POSTGRES_TEST_LF_SHA256
+  );
+  const filteredOid = execFileSync(
+    "git",
+    ["hash-object", `--path=${REAL_POSTGRES_TEST}`, "--", REAL_POSTGRES_TEST],
+    {
+      cwd: REPOSITORY_ROOT,
+      encoding: "utf8",
+      windowsHide: true,
+      stdio: ["ignore", "pipe", "ignore"],
+      timeout: 20_000,
+      env: {
+        ...process.env,
+        GIT_OPTIONAL_LOCKS: "0",
+        GIT_TERMINAL_PROMPT: "0"
+      }
+    }
+  ).trim();
+  assert.equal(filteredOid, REAL_POSTGRES_TEST_FILTERED_OID);
 });
