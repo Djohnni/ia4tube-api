@@ -14,6 +14,7 @@ const {
   databaseTargetFingerprint
 } = require("../src/persistence/postgres/config");
 const {
+  createPhysicalPhaseEmitter,
   LOOPBACK_MODE,
   PostgresGateRefusal,
   RENDER_REMOTE_MODE,
@@ -23,7 +24,12 @@ const {
 const {
   ADVISORY_LOCK_ID,
   APPLY_APPROVAL,
+  EXACT_FROM_PROFILE,
+  EXACT_PENDING_MIGRATIONS,
+  EXACT_TO_PROFILE,
   GLOBAL_VAULT_BACKFILL_POLICY,
+  GLOBAL_VAULT_REGISTRY_MIGRATION,
+  SOCIAL_CONNECTOR_PERSISTENCE_MIGRATION,
   compareMigrationState,
   createMigrationRunner,
   readManifest,
@@ -63,6 +69,18 @@ const RUNTIME_ROLE = "ia4tube_social_runtime";
 const IDENTITY_VERSION = "v1";
 const FOUNDATION_MIGRATION_VERSION =
   "0001_social_multitenant_foundation";
+const EXACT_RECOVERY_REFERENCE = "synthetic-pg18-recovery-reference-0004";
+const EXACT_RECOVERY_CAPTURED_AT = "2026-08-13T12:00:00.000Z";
+const EXACT_PLAN_REQUEST = Object.freeze({
+  fromProfile: EXACT_FROM_PROFILE,
+  expectedPending: EXACT_PENDING_MIGRATIONS,
+  toProfile: EXACT_TO_PROFILE
+});
+const EXACT_APPLY_REQUEST = Object.freeze({
+  ...EXACT_PLAN_REQUEST,
+  recoveryReference: EXACT_RECOVERY_REFERENCE,
+  recoveryCapturedAt: EXACT_RECOVERY_CAPTURED_AT
+});
 const BACKFILL_VERSION_V1 = deriveVaultKeyVersion(
   101,
   Buffer.alloc(32, 101)
@@ -171,12 +189,13 @@ function migrationCliEnvironment(configuration) {
   return env;
 }
 
-function runMigrationCli(command, configuration) {
+function runMigrationCli(command, configuration, flags = []) {
   const result = spawnSync(
     process.execPath,
     [
       path.join(__dirname, "..", "scripts", "social-db-migrate.js"),
-      command
+      command,
+      ...flags
     ],
     {
       cwd: path.join(__dirname, ".."),
@@ -1621,6 +1640,328 @@ async function proveMigrationRollback(
   } finally {
     fs.rmSync(directory, { recursive: true, force: true });
   }
+}
+
+function exactCliFlags({ apply = false } = {}) {
+  return [
+    `--from-profile=${EXACT_FROM_PROFILE}`,
+    `--expect-pending=${SOCIAL_CONNECTOR_PERSISTENCE_MIGRATION}`,
+    `--to-profile=${EXACT_TO_PROFILE}`,
+    ...(apply
+      ? [
+          `--recovery-reference=${EXACT_RECOVERY_REFERENCE}`,
+          `--recovery-captured-at=${EXACT_RECOVERY_CAPTURED_AT}`
+        ]
+      : [])
+  ];
+}
+
+async function readExactCatalogSnapshot(pool) {
+  const result = await pool.query(
+    [
+      "SELECT jsonb_build_object(",
+      "  'ledger', (",
+      "    SELECT COALESCE(jsonb_agg(jsonb_build_array(",
+      "      version, checksum_sha256) ORDER BY version), '[]'::jsonb)",
+      "    FROM ia4tube_migrations.schema_migrations",
+      "  ),",
+      "  'relations', (",
+      "    SELECT COALESCE(jsonb_agg(jsonb_build_array(",
+      "      namespace.nspname, relation.relname, relation.relkind,",
+      "      owner.rolname, relation.relrowsecurity,",
+      "      relation.relforcerowsecurity, relation.relacl::text",
+      "    ) ORDER BY namespace.nspname, relation.relname), '[]'::jsonb)",
+      "    FROM pg_catalog.pg_class relation",
+      "    JOIN pg_catalog.pg_namespace namespace",
+      "      ON namespace.oid = relation.relnamespace",
+      "    JOIN pg_catalog.pg_roles owner ON owner.oid = relation.relowner",
+      "    WHERE namespace.nspname = ANY($1::text[])",
+      "      AND relation.relkind IN ('r','p','v','m','S','f')",
+      "  ),",
+      "  'columns', (",
+      "    SELECT COALESCE(jsonb_agg(jsonb_build_array(",
+      "      namespace.nspname, relation.relname, attribute.attnum,",
+      "      attribute.attname, pg_catalog.format_type(",
+      "        attribute.atttypid, attribute.atttypmod),",
+      "      attribute.attnotnull, attribute.attacl::text,",
+      "      pg_catalog.pg_get_expr(default_value.adbin,",
+      "        default_value.adrelid, true)",
+      "    ) ORDER BY namespace.nspname, relation.relname, attribute.attnum),",
+      "    '[]'::jsonb)",
+      "    FROM pg_catalog.pg_attribute attribute",
+      "    JOIN pg_catalog.pg_class relation",
+      "      ON relation.oid = attribute.attrelid",
+      "    JOIN pg_catalog.pg_namespace namespace",
+      "      ON namespace.oid = relation.relnamespace",
+      "    LEFT JOIN pg_catalog.pg_attrdef default_value",
+      "      ON default_value.adrelid = attribute.attrelid",
+      "      AND default_value.adnum = attribute.attnum",
+      "    WHERE namespace.nspname = ANY($1::text[])",
+      "      AND attribute.attnum > 0 AND NOT attribute.attisdropped",
+      "  ),",
+      "  'constraints', (",
+      "    SELECT COALESCE(jsonb_agg(jsonb_build_array(",
+      "      namespace.nspname, relation.relname, constraint_info.conname,",
+      "      constraint_info.contype, constraint_info.convalidated,",
+      "      pg_catalog.pg_get_constraintdef(constraint_info.oid, true)",
+      "    ) ORDER BY namespace.nspname, relation.relname,",
+      "      constraint_info.conname), '[]'::jsonb)",
+      "    FROM pg_catalog.pg_constraint constraint_info",
+      "    JOIN pg_catalog.pg_class relation",
+      "      ON relation.oid = constraint_info.conrelid",
+      "    JOIN pg_catalog.pg_namespace namespace",
+      "      ON namespace.oid = relation.relnamespace",
+      "    WHERE namespace.nspname = ANY($1::text[])",
+      "  ),",
+      "  'indexes', (",
+      "    SELECT COALESCE(jsonb_agg(jsonb_build_array(",
+      "      namespace.nspname, table_info.relname, index_info.relname,",
+      "      pg_catalog.pg_get_indexdef(index_info.oid)",
+      "    ) ORDER BY namespace.nspname, table_info.relname,",
+      "      index_info.relname), '[]'::jsonb)",
+      "    FROM pg_catalog.pg_index index_catalog",
+      "    JOIN pg_catalog.pg_class table_info",
+      "      ON table_info.oid = index_catalog.indrelid",
+      "    JOIN pg_catalog.pg_class index_info",
+      "      ON index_info.oid = index_catalog.indexrelid",
+      "    JOIN pg_catalog.pg_namespace namespace",
+      "      ON namespace.oid = table_info.relnamespace",
+      "    WHERE namespace.nspname = ANY($1::text[])",
+      "  ),",
+      "  'policies', (",
+      "    SELECT COALESCE(jsonb_agg(to_jsonb(policy_info)",
+      "      ORDER BY schemaname, tablename, policyname), '[]'::jsonb)",
+      "    FROM pg_catalog.pg_policies policy_info",
+      "    WHERE schemaname = ANY($1::text[])",
+      "  )",
+      ")::text AS snapshot"
+    ].join("\n"),
+    [["ia4tube_migrations", "ia4tube_social", "ia4tube_social_admin"]]
+  );
+  assert.equal(result.rowCount, 1);
+  return result.rows[0].snapshot;
+}
+
+async function insertExact0004Conflict(pool, fixture) {
+  const conflictingConnectionId = randomUuid();
+  await withTransaction(
+    pool,
+    (client) => client.query(
+      [
+        "INSERT INTO ia4tube_social.social_connections (",
+        "  company_id, id, provider, created_by_user_id",
+        ") VALUES ($1, $2, 'instagram', $3)"
+      ].join("\n"),
+      [fixture.companyId, conflictingConnectionId, fixture.userId]
+    ),
+    { role: OWNER_ROLE, companyId: fixture.companyId }
+  );
+  return conflictingConnectionId;
+}
+
+async function removeExact0004Conflict(pool, fixture, connectionId) {
+  await withTransaction(
+    pool,
+    (client) => client.query(
+      [
+        "DELETE FROM ia4tube_social.social_connections",
+        "WHERE company_id = $1 AND id = $2"
+      ].join("\n"),
+      [fixture.companyId, connectionId]
+    ),
+    { role: OWNER_ROLE, companyId: fixture.companyId }
+  );
+}
+
+async function countExact0004Conflict(pool, fixture, connectionId) {
+  const result = await withTransaction(
+    pool,
+    (client) => client.query(
+      [
+        "SELECT COUNT(*)::integer AS connection_count",
+        "FROM ia4tube_social.social_connections",
+        "WHERE company_id = $1 AND id = $2"
+      ].join("\n"),
+      [fixture.companyId, connectionId]
+    ),
+    { role: OWNER_ROLE, companyId: fixture.companyId }
+  );
+  return result.rows[0].connection_count;
+}
+
+async function proveExact0004Route(
+  migrationPoolA,
+  migrationPoolB,
+  configuration,
+  companyWithLegacyConnection
+) {
+  assert.equal(configuration.mode, LOOPBACK_MODE);
+  const runnerA = migrationRunner(migrationPoolA, configuration);
+  const runnerB = migrationRunner(migrationPoolB, configuration);
+  const beforePlan = await readExactCatalogSnapshot(migrationPoolA);
+  const plan = await runnerA.planExact(
+    EXACT_PLAN_REQUEST,
+    configuration.approvalEnvironment
+  );
+  assert.deepEqual(plan, {
+    fromProfile: EXACT_FROM_PROFILE,
+    toProfile: EXACT_TO_PROFILE,
+    expectedPending: [SOCIAL_CONNECTOR_PERSISTENCE_MIGRATION],
+    observedPending: [SOCIAL_CONNECTOR_PERSISTENCE_MIGRATION],
+    planApproved: true
+  });
+  assert.equal(await readExactCatalogSnapshot(migrationPoolA), beforePlan);
+  assert.deepEqual(
+    runMigrationCli("plan-exact", configuration, exactCliFlags()),
+    plan
+  );
+  assert.equal(await readExactCatalogSnapshot(migrationPoolA), beforePlan);
+
+  const manifest = readManifest();
+  const futureSql = "SELECT 1;\n";
+  const futureManifest = temporaryMigrationManifest(
+    [
+      ...manifest,
+      {
+        version: "0005_synthetic_future",
+        file: "0005_synthetic_future.up.sql",
+        sql: futureSql,
+        sha256: migrationSha256(Buffer.from(futureSql, "utf8"))
+      }
+    ],
+    "exact-0005-refusal"
+  );
+  try {
+    const futureRunner = migrationRunner(
+      migrationPoolA,
+      configuration,
+      futureManifest.options
+    );
+    await assert.rejects(
+      futureRunner.planExact(
+        EXACT_PLAN_REQUEST,
+        configuration.approvalEnvironment
+      ),
+      { code: "exact_pending_set_mismatch" }
+    );
+    assert.equal(await readExactCatalogSnapshot(migrationPoolA), beforePlan);
+  } finally {
+    fs.rmSync(futureManifest.directory, { recursive: true, force: true });
+  }
+
+  const conflictId = await insertExact0004Conflict(
+    migrationPoolA,
+    companyWithLegacyConnection
+  );
+  try {
+    const beforeRollback = await readExactCatalogSnapshot(migrationPoolA);
+    await assert.rejects(
+      runnerA.applyExact(
+        EXACT_APPLY_REQUEST,
+        configuration.approvalEnvironment
+      ),
+      (error) => error?.code === "P0001"
+    );
+    assert.equal(
+      await readExactCatalogSnapshot(migrationPoolA),
+      beforeRollback,
+      "A falha do preflight canonico deve reverter DDL e ledger da 0004."
+    );
+    const rollbackState = await migrationPoolA.query(
+      [
+        "SELECT",
+        "  to_regclass('ia4tube_social.social_idempotency_operations')",
+        "    IS NULL AS new_table_absent,",
+        "  NOT EXISTS (",
+        "    SELECT 1 FROM ia4tube_migrations.schema_migrations",
+        "    WHERE version = $1",
+        "  ) AS ledger_row_absent"
+      ].join("\n"),
+      [SOCIAL_CONNECTOR_PERSISTENCE_MIGRATION]
+    );
+    assert.deepEqual(rollbackState.rows[0], {
+      new_table_absent: true,
+      ledger_row_absent: true
+    });
+    assert.equal(
+      await countExact0004Conflict(
+        migrationPoolA,
+        companyWithLegacyConnection,
+        conflictId
+      ),
+      1,
+      "A falha da 0004 nao pode alterar os dados preexistentes."
+    );
+  } finally {
+    await removeExact0004Conflict(
+      migrationPoolA,
+      companyWithLegacyConnection,
+      conflictId
+    );
+    assert.equal(
+      await countExact0004Conflict(
+        migrationPoolA,
+        companyWithLegacyConnection,
+        conflictId
+      ),
+      0
+    );
+  }
+
+  await migrationPoolA.query("SET lock_timeout = 0");
+  await migrationPoolB.query("SET lock_timeout = 0");
+  const outcomes = await Promise.allSettled([
+    runnerA.applyExact(
+      EXACT_APPLY_REQUEST,
+      configuration.approvalEnvironment
+    ),
+    runnerB.applyExact(
+      EXACT_APPLY_REQUEST,
+      configuration.approvalEnvironment
+    )
+  ]);
+  const fulfilled = outcomes.filter((outcome) => outcome.status === "fulfilled");
+  const rejected = outcomes.filter((outcome) => outcome.status === "rejected");
+  assert.equal(fulfilled.length, 1);
+  assert.equal(rejected.length, 1);
+  assert.equal(rejected[0].reason?.code, "exact_pending_set_mismatch");
+  const result = fulfilled[0].value;
+  assert.equal(result.appliedMigration, SOCIAL_CONNECTOR_PERSISTENCE_MIGRATION);
+  assert.equal(result.finalProfile, EXACT_TO_PROFILE);
+  assert.equal(result.postCommitValidated, true);
+  assert.equal(result.recoveryEvidenceExternallyVerified, false);
+  assert.equal(result.recoveryReferenceDigest, digest(EXACT_RECOVERY_REFERENCE));
+  assert.equal(JSON.stringify(result).includes(EXACT_RECOVERY_REFERENCE), false);
+
+  const final = await migrationPoolA.query(
+    [
+      "SELECT",
+      "  (SELECT COUNT(*)::integer",
+      "   FROM ia4tube_migrations.schema_migrations",
+      "   WHERE version = $1) AS ledger_rows,",
+      "  (SELECT COUNT(*)::integer",
+      "   FROM pg_catalog.pg_class relation",
+      "   JOIN pg_catalog.pg_namespace namespace",
+      "     ON namespace.oid = relation.relnamespace",
+      "   WHERE namespace.nspname = 'ia4tube_social'",
+      "     AND relation.relname = ANY($2::text[])) AS connector_relations"
+    ].join("\n"),
+    [
+      SOCIAL_CONNECTOR_PERSISTENCE_MIGRATION,
+      [
+        "social_idempotency_operations",
+        "social_publications",
+        "social_publication_attempts"
+      ]
+    ]
+  );
+  assert.equal(final.rows[0].ledger_rows, 1);
+  assert.equal(final.rows[0].connector_relations, 3);
+  await assert.rejects(
+    runnerA.planExact(EXACT_PLAN_REQUEST, configuration.approvalEnvironment),
+    { code: "exact_pending_set_mismatch" }
+  );
+  return { runnerA, runnerB };
 }
 
 function tenantFixture(label) {
@@ -3466,6 +3807,7 @@ test(
   "real PostgreSQL proves migrations, physical RLS, vault and reauthentication",
   { skip: skipReason, timeout: 900000 },
   async () => {
+    const physicalPhases = createPhysicalPhaseEmitter();
     const configuration = loadRealTestConfiguration();
     const pools = [];
     const redactedErrors = [];
@@ -3484,7 +3826,9 @@ test(
     pools.push(provisionerPool);
 
     try {
+      physicalPhases.startMain("physical_target_preflight");
       await preflightPhysicalTarget(provisionerPool, configuration);
+      physicalPhases.completeMain("physical_target_preflight");
 
       const migrationPoolA = createPool(
         configuration.migrationUrl,
@@ -3512,21 +3856,28 @@ test(
       );
       pools.push(migrationPoolA, migrationPoolB, runtimePool, contextPool);
 
+      physicalPhases.startMain("role_provisioning");
       await provisionRolesAndMarker(
         provisionerPool,
         configuration,
         membershipState
       );
+      physicalPhases.completeMain("role_provisioning");
+      physicalPhases.startMain("direct_connect_boundary");
       await proveDirectConnectIsRequired(
         provisionerPool,
         configuration
       );
+      physicalPhases.completeMain("direct_connect_boundary");
+      physicalPhases.startMain("startup_unmigrated");
       await proveStartupBoundary(
         provisionerPool,
         configuration,
         false
       );
+      physicalPhases.completeMain("startup_unmigrated");
 
+      physicalPhases.startMain("migration_0001_0002");
       const manifest = readManifest();
       const prefixManifest = temporaryMigrationManifest(
         manifest.slice(0, 2),
@@ -3555,7 +3906,9 @@ test(
           force: true
         });
       }
+      physicalPhases.completeMain("migration_0001_0002");
 
+      physicalPhases.startMain("pre_registry_seed");
       const companyC = tenantFixture("Backfill-C");
       const companyD = tenantFixture("Backfill-D");
       const backfillPasswordHash = await bcrypt.hash(
@@ -3590,6 +3943,8 @@ test(
         companyC,
         companyD
       );
+      physicalPhases.completeMain("pre_registry_seed");
+      physicalPhases.startMain("migration_0003_rollback");
       await provePopulated0003Rollback(
         migrationPoolA,
         runtimePool,
@@ -3598,7 +3953,9 @@ test(
         companyD,
         backfillSnapshots
       );
+      physicalPhases.completeMain("migration_0003_rollback");
 
+      physicalPhases.startMain("migration_0003_apply");
       const registryMigrationIndex = manifest.findIndex(
         (migration) => migration.version === GLOBAL_VAULT_REGISTRY_MIGRATION
       );
@@ -3639,17 +3996,32 @@ test(
           force: true
         });
       }
+      physicalPhases.completeMain("migration_0003_apply");
 
-      const runnerA = migrationRunner(migrationPoolA, configuration);
-      const runnerB = migrationRunner(migrationPoolB, configuration);
-      await proveMigrationConcurrency(
-        runnerA,
-        runnerB,
-        configuration,
-        manifest
-          .slice(registryMigrationIndex + 1)
-          .map((migration) => migration.version)
-      );
+      physicalPhases.startMain("exact_0004_plan_apply");
+      let runnerA;
+      let runnerB;
+      if (configuration.mode === LOOPBACK_MODE) {
+        ({ runnerA, runnerB } = await proveExact0004Route(
+          migrationPoolA,
+          migrationPoolB,
+          configuration,
+          companyC
+        ));
+      } else {
+        runnerA = migrationRunner(migrationPoolA, configuration);
+        runnerB = migrationRunner(migrationPoolB, configuration);
+        await proveMigrationConcurrency(
+          runnerA,
+          runnerB,
+          configuration,
+          manifest
+            .slice(registryMigrationIndex + 1)
+            .map((migration) => migration.version)
+        );
+      }
+      physicalPhases.completeMain("exact_0004_plan_apply");
+      physicalPhases.startMain("post_migration_validation");
       await proveAdvisoryLock(
         migrationPoolA,
         runnerB,
@@ -3661,6 +4033,8 @@ test(
       assert.ok(migrationPoolBIndex >= 0);
       await migrationPoolB.end();
       pools.splice(migrationPoolBIndex, 1);
+      physicalPhases.completeMain("post_migration_validation");
+      physicalPhases.startMain("migration_cli");
       await proveMigrationCli(configuration);
       await proveProvisionerEffectiveAccess(provisionerPool);
       await proveTargetRefusals(
@@ -3672,7 +4046,9 @@ test(
         migrationPoolA,
         configuration
       );
+      physicalPhases.completeMain("migration_cli");
 
+      physicalPhases.startMain("runtime_role_schema");
       await verifyRuntimeRole(runtimePool, RUNTIME_ROLE);
       await verifyRuntimeSchema(runtimePool, RUNTIME_ROLE);
       await proveStartupBoundary(
@@ -3680,6 +4056,8 @@ test(
         configuration,
         true
       );
+      physicalPhases.completeMain("runtime_role_schema");
+      physicalPhases.startMain("runtime_permission_negatives");
       await assert.rejects(
         verifyRuntimeRole(migrationPoolA, RUNTIME_ROLE),
         (error) =>
@@ -3732,7 +4110,9 @@ test(
         ),
         (error) => error?.code === "42501"
       );
+      physicalPhases.completeMain("runtime_permission_negatives");
 
+      physicalPhases.startMain("tenant_rls");
       const companyA = tenantFixture("A");
       const companyB = tenantFixture("B");
       const syntheticPassword = `Synthetic-Password-${randomUuid()}`;
@@ -3761,7 +4141,9 @@ test(
         companyB
       );
       await proveRlsMutations(runtimePool, companyA, companyB);
+      physicalPhases.completeMain("tenant_rls");
 
+      physicalPhases.startMain("vault_persistence");
       const credentialPlaintexts = await proveVaultPersistence(
         migrationPoolA,
         runtimePool,
@@ -3771,6 +4153,8 @@ test(
         companyB,
         redactedErrors
       );
+      physicalPhases.completeMain("vault_persistence");
+      physicalPhases.startMain("reauthentication");
       const reauthSecrets = await proveReauthentication(
         migrationPoolA,
         repository,
@@ -3795,7 +4179,9 @@ test(
         assert.equal(errorText.includes(reauthSecrets.grantToken), false);
         assert.equal(errorText.includes(reauthSecrets.expiringToken), false);
       }
+      physicalPhases.completeMain("reauthentication");
     } finally {
+      physicalPhases.startCleanup();
       const createdState = { ...membershipState };
       const membershipCleanup = await Promise.allSettled([
         revokeTestRoleMemberships(
@@ -3827,6 +4213,7 @@ test(
         true,
         "Sessoes, locks e privilegios temporarios devem ser limpos."
       );
+      physicalPhases.completeCleanup();
     }
   }
 );

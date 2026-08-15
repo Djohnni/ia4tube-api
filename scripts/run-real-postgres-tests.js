@@ -3,23 +3,8 @@
 const crypto = require("node:crypto");
 const net = require("node:net");
 const path = require("node:path");
-const { spawnSync } = require("node:child_process");
-const {
-  assertNoAmbientPostgresEnvironment
-} = require("../src/persistence/postgres/config");
-const {
-  loadSystemPostgresTls
-} = require("../src/persistence/postgres/tls");
-const {
-  PAID_STAGING_PUBLIC_TARGET
-} = require(
-  "../src/persistence/postgres/staging-provisioner"
-);
-const {
-  DISPOSABLE_DATABASE_NAME
-} = require(
-  "../src/persistence/postgres/disposable-database-lifecycle"
-);
+const { spawn } = require("node:child_process");
+const { StringDecoder } = require("node:string_decoder");
 
 const APPROVAL = "RUN_SOCIAL_POSTGRES_REAL_TESTS";
 const REMOTE_APPROVAL = "RUN_SOCIAL_POSTGRES_RENDER_FREE_DISPOSABLE";
@@ -58,6 +43,1416 @@ const CONNECTION_NAMES = [
   "SOCIAL_TEST_MIGRATION_DATABASE_URL",
   "SOCIAL_TEST_RUNTIME_DATABASE_URL"
 ];
+const EVIDENCE_SCHEMA_VERSION = 3;
+const SAFE_EVENT_PREFIX = "IA4TUBE_SAFE_EVENT=";
+const TAP_TITLE =
+  "real PostgreSQL proves migrations, physical RLS, vault and reauthentication";
+const TAP_SUBTEST_TITLE = `# Subtest: ${TAP_TITLE}`;
+const SAFE_OUTPUT_LIMIT = 16 * 1024 * 1024;
+const SAFE_LINE_LIMIT = 8192;
+const PHYSICAL_MAIN_PHASES = Object.freeze([
+  "physical_target_preflight",
+  "role_provisioning",
+  "direct_connect_boundary",
+  "startup_unmigrated",
+  "migration_0001_0002",
+  "pre_registry_seed",
+  "migration_0003_rollback",
+  "migration_0003_apply",
+  "exact_0004_plan_apply",
+  "post_migration_validation",
+  "migration_cli",
+  "runtime_role_schema",
+  "runtime_permission_negatives",
+  "tenant_rls",
+  "vault_persistence",
+  "reauthentication"
+]);
+const PHYSICAL_CLEANUP_PHASE = "final_cleanup";
+const PHYSICAL_PHASES = Object.freeze([
+  ...PHYSICAL_MAIN_PHASES,
+  PHYSICAL_CLEANUP_PHASE
+]);
+const SAFE_PERMISSION_CODES = Object.freeze(["42501", "EACCES", "EPERM"]);
+const SAFE_PERMISSION_ORIGINS = Object.freeze([
+  "postgres_sqlstate",
+  "os_filesystem",
+  "os_process",
+  "unknown"
+]);
+const SAFE_SOURCE_BASENAMES = Object.freeze([
+  "social-postgres-real.test.js",
+  "migrations.js",
+  "pool.js",
+  "runtime-validation.js",
+  "social-repository.js",
+  "vault-key-registry-admin.js",
+  "credential-service.js",
+  "reauth.js",
+  "vault.js",
+  "vault-key-rotation-service.js",
+  "server.js"
+]);
+const SAFE_LINE_BUCKETS = Object.freeze([
+  "1-499",
+  "500-999",
+  "1000-1499",
+  "1500-1999",
+  "2000-2499",
+  "2500-2999",
+  "3000-3499",
+  "3500-3999",
+  "4000-4499",
+  "unknown"
+]);
+const FILESYSTEM_SYSCALLS = Object.freeze([
+  "access",
+  "chmod",
+  "chown",
+  "copyfile",
+  "link",
+  "lstat",
+  "mkdir",
+  "mkdtemp",
+  "open",
+  "opendir",
+  "read",
+  "readdir",
+  "readlink",
+  "realpath",
+  "rename",
+  "rmdir",
+  "stat",
+  "symlink",
+  "truncate",
+  "unlink",
+  "utimes",
+  "write"
+]);
+const PROCESS_SYSCALLS = Object.freeze([
+  "exec",
+  "execfile",
+  "execve",
+  "fork",
+  "kill",
+  "spawn",
+  "spawnsync"
+]);
+const STDERR_CATEGORIES = Object.freeze([
+  "npm_script_missing",
+  "module_not_found",
+  "syntax_error",
+  "reference_error",
+  "type_error",
+  "permission_denied",
+  "connection_refused",
+  "tls_hostname",
+  "environment_contract",
+  "postgres_authentication",
+  "postgres_schema",
+  "tap_failure",
+  "unknown"
+]);
+const FIRST_FAILURE_STAGES = Object.freeze([
+  "postgres_start",
+  "postgres_bootstrap",
+  "composed_process",
+  "npm",
+  "runner_load",
+  "environment_gate",
+  "node_test_spawn",
+  "node_test_bootstrap",
+  "tap_start",
+  "test_discovery",
+  "test_execution",
+  "safe_event_protocol",
+  "physical_timeout",
+  "cleanup",
+  "artifact",
+  "unknown"
+]);
+const SAFE_ERROR_CODES = Object.freeze([
+  "MODULE_NOT_FOUND",
+  "ERR_MODULE_NOT_FOUND",
+  "EACCES",
+  "EPERM",
+  "ECONNREFUSED",
+  "ERR_TLS_CERT_ALTNAME_INVALID",
+  "28P01",
+  "3F000",
+  "42P01",
+  "42703",
+  "42501",
+  "ERR_TEST_FAILURE",
+  "guard_failed",
+  "test_process_failed",
+  "safe_output_limit_exceeded",
+  "safe_event_protocol_invalid",
+  "tap_contract_failed",
+  "test_timeout"
+]);
+const SAFE_MODULE_NAMES = Object.freeze([
+  "social-postgres-real.test.js",
+  "run-real-postgres-tests.js",
+  "bcryptjs",
+  "pg",
+  "config.js",
+  "tls.js",
+  "staging-provisioner.js",
+  "disposable-database-lifecycle.js",
+  "login-bootstrap.js",
+  "errors.js",
+  "validation.js",
+  "migrations.js",
+  "pool.js",
+  "runtime-validation.js",
+  "social-repository.js",
+  "vault-key-registry-admin.js",
+  "credential-service.js",
+  "reauth.js",
+  "vault.js",
+  "vault-key-version.js",
+  "vault-key-rotation-service.js"
+]);
+const SAFE_SIGNALS = new Set([
+  "SIGABRT",
+  "SIGBUS",
+  "SIGFPE",
+  "SIGHUP",
+  "SIGILL",
+  "SIGINT",
+  "SIGKILL",
+  "SIGPIPE",
+  "SIGQUIT",
+  "SIGSEGV",
+  "SIGTERM",
+  "SIGTRAP"
+]);
+const STDERR_CATEGORY_SET = new Set(STDERR_CATEGORIES);
+const FIRST_FAILURE_STAGE_SET = new Set(FIRST_FAILURE_STAGES);
+const SAFE_ERROR_CODE_SET = new Set(SAFE_ERROR_CODES);
+const SAFE_MODULE_NAME_SET = new Set(SAFE_MODULE_NAMES);
+const PHYSICAL_MAIN_PHASE_SET = new Set(PHYSICAL_MAIN_PHASES);
+const PHYSICAL_BOUNDARY_FAILURE_STAGE_SET = new Set([
+  "safe_event_protocol",
+  "test_execution"
+]);
+const SAFE_PERMISSION_CODE_SET = new Set(SAFE_PERMISSION_CODES);
+const SAFE_PERMISSION_ORIGIN_SET = new Set(SAFE_PERMISSION_ORIGINS);
+const SAFE_SOURCE_BASENAME_SET = new Set(SAFE_SOURCE_BASENAMES);
+const SAFE_LINE_BUCKET_SET = new Set(SAFE_LINE_BUCKETS);
+const FILESYSTEM_SYSCALL_SET = new Set(FILESYSTEM_SYSCALLS);
+const PROCESS_SYSCALL_SET = new Set(PROCESS_SYSCALLS);
+let cachedGateDependencies;
+
+function gateDependencies() {
+  if (cachedGateDependencies) return cachedGateDependencies;
+  const {
+    assertNoAmbientPostgresEnvironment
+  } = require("../src/persistence/postgres/config");
+  const {
+    loadSystemPostgresTls
+  } = require("../src/persistence/postgres/tls");
+  const {
+    PAID_STAGING_PUBLIC_TARGET
+  } = require("../src/persistence/postgres/staging-provisioner");
+  const {
+    DISPOSABLE_DATABASE_NAME
+  } = require("../src/persistence/postgres/disposable-database-lifecycle");
+  cachedGateDependencies = Object.freeze({
+    assertNoAmbientPostgresEnvironment,
+    loadSystemPostgresTls,
+    PAID_STAGING_PUBLIC_TARGET,
+    DISPOSABLE_DATABASE_NAME
+  });
+  return cachedGateDependencies;
+}
+
+function canonicalJson(value) {
+  if (Array.isArray(value)) {
+    return `[${value.map((item) => canonicalJson(item)).join(",")}]`;
+  }
+  if (value && typeof value === "object") {
+    return `{${Object.keys(value).sort().map((key) =>
+      `${JSON.stringify(key)}:${canonicalJson(value[key])}`
+    ).join(",")}}`;
+  }
+  return JSON.stringify(value);
+}
+
+function exactKeys(value, expected) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const actual = Object.keys(value).sort();
+  const wanted = [...expected].sort();
+  return actual.length === wanted.length &&
+    actual.every((key, index) => key === wanted[index]);
+}
+
+function nullableMainPhase(value) {
+  return value === null || PHYSICAL_MAIN_PHASE_SET.has(value);
+}
+
+function safeSourceFieldsValid(basename, bucket) {
+  if (!SAFE_LINE_BUCKET_SET.has(bucket)) return false;
+  if (basename === null) return bucket === "unknown";
+  return SAFE_SOURCE_BASENAME_SET.has(basename);
+}
+
+function physicalSnapshotValid(event) {
+  if (!exactKeys(event, [
+    "cleanupCompleted",
+    "cleanupStarted",
+    "event",
+    "evidenceSchemaVersion",
+    "lastMainPhaseCompleted",
+    "lastMainPhaseStarted",
+    "sequence"
+  ])) return false;
+  if (
+    !nullableMainPhase(event.lastMainPhaseStarted) ||
+    !nullableMainPhase(event.lastMainPhaseCompleted) ||
+    typeof event.cleanupStarted !== "boolean" ||
+    typeof event.cleanupCompleted !== "boolean" ||
+    (event.cleanupCompleted && !event.cleanupStarted)
+  ) return false;
+  const startedIndex = event.lastMainPhaseStarted === null
+    ? -1
+    : PHYSICAL_MAIN_PHASES.indexOf(event.lastMainPhaseStarted);
+  const completedIndex = event.lastMainPhaseCompleted === null
+    ? -1
+    : PHYSICAL_MAIN_PHASES.indexOf(event.lastMainPhaseCompleted);
+  const mainProgress = startedIndex - completedIndex;
+  if (mainProgress !== 0 && mainProgress !== 1) return false;
+  const mainActive = mainProgress === 1;
+  const allMainCompleted =
+    startedIndex === PHYSICAL_MAIN_PHASES.length - 1 &&
+    completedIndex === PHYSICAL_MAIN_PHASES.length - 1;
+  if (
+    event.cleanupStarted &&
+    !mainActive &&
+    !allMainCompleted
+  ) return false;
+  return true;
+}
+
+function failureFieldsValid(event) {
+  if (
+    typeof event.failureDuringCleanup !== "boolean" ||
+    !(
+      event.failurePhase === null ||
+      PHYSICAL_MAIN_PHASE_SET.has(event.failurePhase) ||
+      event.failurePhase === PHYSICAL_CLEANUP_PHASE
+    ) ||
+    !SAFE_PERMISSION_ORIGIN_SET.has(event.safePermissionOrigin) ||
+    !safeSourceFieldsValid(
+      event.safeSourceBasename,
+      event.safeLineBucket
+    )
+  ) return false;
+  if (
+    (event.failureDuringCleanup &&
+      event.failurePhase !== PHYSICAL_CLEANUP_PHASE) ||
+    (!event.failureDuringCleanup &&
+      event.failurePhase === PHYSICAL_CLEANUP_PHASE)
+  ) return false;
+  if (
+    !PHYSICAL_BOUNDARY_FAILURE_STAGE_SET.has(event.firstFailureStage) &&
+    (event.failureDuringCleanup || event.failurePhase !== null)
+  ) return false;
+
+  if (event.stderrCategory !== "permission_denied") {
+    return event.safePermissionOrigin === "unknown" &&
+      event.safeSourceBasename === null &&
+      event.safeLineBucket === "unknown";
+  }
+  if (
+    event.firstFailureStage === "test_execution" &&
+    event.failurePhase === null
+  ) return false;
+  if (
+    event.safeErrorCode !== null &&
+    !SAFE_PERMISSION_CODE_SET.has(event.safeErrorCode)
+  ) return false;
+  if (event.safeErrorCode === "42501") {
+    return event.safePermissionOrigin === "postgres_sqlstate";
+  }
+  if (
+    event.safeErrorCode === "EACCES" ||
+    event.safeErrorCode === "EPERM"
+  ) {
+    return ["os_filesystem", "os_process", "unknown"]
+      .includes(event.safePermissionOrigin);
+  }
+  return event.safePermissionOrigin === "unknown";
+}
+
+function validateSafeEvent(event) {
+  if (
+    !event ||
+    event.evidenceSchemaVersion !== EVIDENCE_SCHEMA_VERSION ||
+    !Number.isSafeInteger(event.sequence) ||
+    event.sequence < 1 ||
+    typeof event.event !== "string"
+  ) return false;
+  const markerFields = new Map([
+    ["runnerReached", "runnerReached"],
+    ["gateValidated", "gateValidated"],
+    ["nodeTestSpawnAttempted", "nodeTestSpawnAttempted"],
+    ["nodeTestProcessCreated", "nodeTestProcessCreated"],
+    ["tapStarted", "tapStarted"],
+    ["tapTitleObserved", "tapTitleObserved"],
+    ["firstTestDiscovered", "firstTestDiscovered"]
+  ]);
+  if (markerFields.has(event.event)) {
+    const field = markerFields.get(event.event);
+    return exactKeys(event, [
+      "event",
+      "evidenceSchemaVersion",
+      "sequence",
+      field
+    ]) && event[field] === true;
+  }
+  if (
+    event.event === "mainPhaseStarted" ||
+    event.event === "mainPhaseCompleted"
+  ) {
+    return exactKeys(event, [
+      "event",
+      "evidenceSchemaVersion",
+      "phase",
+      "sequence"
+    ]) && PHYSICAL_MAIN_PHASE_SET.has(event.phase);
+  }
+  if (
+    event.event === "cleanupStarted" ||
+    event.event === "cleanupCompleted"
+  ) {
+    return exactKeys(event, [
+      "event",
+      "evidenceSchemaVersion",
+      "phase",
+      "sequence"
+    ]) && event.phase === PHYSICAL_CLEANUP_PHASE;
+  }
+  if (event.event === "physicalPhaseSnapshot") {
+    return physicalSnapshotValid(event);
+  }
+  if (event.event === "nodeTestClosed") {
+    const exitObserved = Number.isSafeInteger(event.nodeTestExitCode) &&
+      event.nodeTestExitCode >= 0 && event.nodeTestSignal === null &&
+      event.nodeTestTimedOut === false;
+    const signalObserved = event.nodeTestExitCode === null &&
+      typeof event.nodeTestSignal === "string" &&
+      SAFE_SIGNALS.has(event.nodeTestSignal) &&
+      event.nodeTestTimedOut === null;
+    return exactKeys(event, [
+      "event",
+      "evidenceSchemaVersion",
+      "nodeTestExitCode",
+      "nodeTestSignal",
+      "nodeTestTimedOut",
+      "sequence"
+    ]) && (exitObserved || signalObserved);
+  }
+  if (event.event === "failure") {
+    return exactKeys(event, [
+      "event",
+      "evidenceSchemaVersion",
+      "failureDuringCleanup",
+      "failurePhase",
+      "firstFailureStage",
+      "safeErrorCode",
+      "safeLineBucket",
+      "safeModuleName",
+      "safePermissionOrigin",
+      "safeSourceBasename",
+      "sequence",
+      "stderrCategory"
+    ]) &&
+      FIRST_FAILURE_STAGE_SET.has(event.firstFailureStage) &&
+      STDERR_CATEGORY_SET.has(event.stderrCategory) &&
+      (event.safeErrorCode === null ||
+        SAFE_ERROR_CODE_SET.has(event.safeErrorCode)) &&
+      (event.safeModuleName === null ||
+        SAFE_MODULE_NAME_SET.has(event.safeModuleName)) &&
+      (event.safeModuleName === null ||
+        event.stderrCategory === "module_not_found") &&
+      failureFieldsValid(event);
+  }
+  return false;
+}
+
+function safeEventLine(event) {
+  if (!validateSafeEvent(event)) throw new Error("safe_event_invalid");
+  return SAFE_EVENT_PREFIX + canonicalJson(event) + "\n";
+}
+
+function sanitizedModuleName(candidate) {
+  if (typeof candidate !== "string") return null;
+  const normalized = candidate.replaceAll("\\", "/");
+  const basename = path.posix.basename(normalized);
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,95}$/.test(basename)) return null;
+  return SAFE_MODULE_NAME_SET.has(basename) ? basename : null;
+}
+
+function sanitizedSourceBasename(candidate) {
+  if (typeof candidate !== "string") return null;
+  const normalized = candidate.replaceAll("\\", "/");
+  const basename = path.posix.basename(normalized);
+  return SAFE_SOURCE_BASENAME_SET.has(basename) ? basename : null;
+}
+
+function safeLineBucket(lineNumber) {
+  if (!Number.isSafeInteger(lineNumber) || lineNumber < 1 || lineNumber > 4499) {
+    return "unknown";
+  }
+  if (lineNumber < 500) return "1-499";
+  const start = Math.floor(lineNumber / 500) * 500;
+  return `${start}-${start + 499}`;
+}
+
+function safeSourceFromLine(line) {
+  const match = /^\s*at(?:\s+.*?)?\s+\(?(?:file:\/\/\/)?(.+):(\d+):(\d+)\)?\s*$/.exec(
+    String(line || "")
+  );
+  if (!match) return null;
+  const safeSourceBasename = sanitizedSourceBasename(match[1]);
+  if (safeSourceBasename === null) return null;
+  const lineNumber = Number(match[2]);
+  return Object.freeze({
+    safeSourceBasename,
+    safeLineBucket: safeLineBucket(lineNumber)
+  });
+}
+
+function safeCodeFromLine(line) {
+  for (const code of SAFE_ERROR_CODES) {
+    const escaped = code.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    if (new RegExp(`(?:^|[^A-Za-z0-9_])${escaped}(?:$|[^A-Za-z0-9_])`).test(line)) {
+      return code;
+    }
+  }
+  return null;
+}
+
+function safeModuleFromLine(line) {
+  const match = /(?:Cannot find (?:module|package)|ERR_MODULE_NOT_FOUND)[^'"\r\n]*['"]([^'"\r\n]+)['"]/.exec(line);
+  return match ? sanitizedModuleName(match[1]) : null;
+}
+
+function permissionCodesFromLine(line) {
+  const value = String(line || "");
+  const structured = /^\s*(?:(?:code|sqlstate)\s*[:=]\s*)?['"]?(42501|EACCES|EPERM)['"]?\s*,?\s*$/i.exec(
+    value
+  );
+  if (
+    !structured &&
+    !/permission denied/i.test(value) &&
+    !/\b(?:EACCES|EPERM)\b/i.test(value)
+  ) {
+    return Object.freeze([]);
+  }
+  const codes = new Set();
+  for (const match of value.matchAll(/\b(42501|EACCES|EPERM)\b/gi)) {
+    codes.add(match[1].toUpperCase());
+  }
+  return Object.freeze([...codes]);
+}
+
+function permissionOriginFromSyscall(candidate) {
+  if (typeof candidate !== "string") return null;
+  const syscall = candidate.trim().split(/\s+/, 1)[0].toLowerCase();
+  if (FILESYSTEM_SYSCALL_SET.has(syscall)) return "os_filesystem";
+  if (PROCESS_SYSCALL_SET.has(syscall)) return "os_process";
+  return null;
+}
+
+function permissionOriginFromLine(line) {
+  const match = /^\s*(?:#\s*)?syscall\s*:\s*['"]?([A-Za-z][A-Za-z0-9_]*)/i.exec(
+    String(line || "")
+  );
+  return match ? permissionOriginFromSyscall(match[1]) : null;
+}
+
+function classifySafeLine(line) {
+  const value = String(line || "");
+  let stderrCategory = "unknown";
+  if (/Missing script:\s*["']test:postgres-real["']/.test(value)) {
+    stderrCategory = "npm_script_missing";
+  } else if (/\b(?:MODULE_NOT_FOUND|ERR_MODULE_NOT_FOUND)\b|Cannot find (?:module|package)/.test(value)) {
+    stderrCategory = "module_not_found";
+  } else if (/(?:^|\s)SyntaxError:/.test(value)) {
+    stderrCategory = "syntax_error";
+  } else if (/(?:^|\s)ReferenceError:/.test(value)) {
+    stderrCategory = "reference_error";
+  } else if (/(?:^|\s)TypeError:/.test(value)) {
+    stderrCategory = "type_error";
+  } else if (/\b(?:42501|EACCES|EPERM)\b|permission denied/i.test(value)) {
+    stderrCategory = "permission_denied";
+  } else if (/\bECONNREFUSED\b|connection refused/i.test(value)) {
+    stderrCategory = "connection_refused";
+  } else if (/\bERR_TLS_CERT_ALTNAME_INVALID\b|TLS[^\r\n]{0,80}hostname|hostname[^\r\n]{0,80}TLS/i.test(value)) {
+    stderrCategory = "tls_hostname";
+  } else if (/\b28P01\b|password authentication failed/i.test(value)) {
+    stderrCategory = "postgres_authentication";
+  } else if (/\b(?:3F000|42P01|42703)\b|(?:schema|relation)[^\r\n]{0,80}does not exist/i.test(value)) {
+    stderrCategory = "postgres_schema";
+  }
+  return Object.freeze({
+    stderrCategory,
+    safeErrorCode: safeCodeFromLine(value),
+    safeModuleName:
+      stderrCategory === "module_not_found" ? safeModuleFromLine(value) : null
+  });
+}
+
+function createSafeDiagnosticAggregator() {
+  let stderrCategory = null;
+  let safeErrorCode = null;
+  let safeModuleName = null;
+  let safeSource = null;
+  let invalid = false;
+  let finished = false;
+  const permissionCodes = new Set();
+  const permissionOrigins = new Set();
+
+  function observe(line) {
+    if (finished) {
+      invalid = true;
+      return;
+    }
+    const value = String(line || "");
+    const candidate = classifySafeLine(value);
+    if (stderrCategory === null && candidate.stderrCategory !== "unknown") {
+      stderrCategory = candidate.stderrCategory;
+      if (stderrCategory !== "permission_denied") {
+        safeErrorCode = candidate.safeErrorCode;
+        safeModuleName = candidate.safeModuleName;
+      }
+    }
+    if (stderrCategory !== "permission_denied") return;
+
+    if (safeSource === null) {
+      const sourceCandidate = safeSourceFromLine(value);
+      if (sourceCandidate !== null) safeSource = sourceCandidate;
+    }
+    for (const code of permissionCodesFromLine(value)) {
+      permissionCodes.add(code);
+    }
+    const origin = permissionOriginFromLine(value);
+    if (origin !== null) permissionOrigins.add(origin);
+  }
+
+  function observeError(error) {
+    observe([error?.name, error?.code, error?.message]
+      .filter(Boolean).join(" "));
+    if (stderrCategory !== "permission_denied") return;
+    if (typeof error?.code === "string" &&
+        SAFE_PERMISSION_CODE_SET.has(error.code.toUpperCase())) {
+      permissionCodes.add(error.code.toUpperCase());
+    }
+    const origin = permissionOriginFromSyscall(error?.syscall);
+    if (origin !== null) permissionOrigins.add(origin);
+    if (typeof error?.stack === "string") {
+      for (const line of error.stack.split(/\r?\n/)) {
+        if (safeSource === null) {
+          const sourceCandidate = safeSourceFromLine(line);
+          if (sourceCandidate !== null) safeSource = sourceCandidate;
+        }
+      }
+    }
+  }
+
+  function finish() {
+    finished = true;
+    if (stderrCategory === null) stderrCategory = "unknown";
+    let safePermissionOrigin = "unknown";
+    if (stderrCategory === "permission_denied") {
+      if (permissionCodes.size > 1 || permissionOrigins.size > 1) {
+        invalid = true;
+      } else if (permissionCodes.size === 1) {
+        [safeErrorCode] = permissionCodes;
+        if (safeErrorCode === "42501") {
+          if (permissionOrigins.size !== 0) invalid = true;
+          else safePermissionOrigin = "postgres_sqlstate";
+        } else if (permissionOrigins.size === 1) {
+          [safePermissionOrigin] = permissionOrigins;
+        }
+      }
+      if (invalid) {
+        safeErrorCode = null;
+        safePermissionOrigin = "unknown";
+      }
+      safeModuleName = null;
+    }
+    return Object.freeze({
+      safeDiagnosticValid: !invalid,
+      stderrCategory,
+      safeErrorCode,
+      safeModuleName,
+      safePermissionOrigin,
+      safeSourceBasename:
+        stderrCategory === "permission_denied"
+          ? safeSource?.safeSourceBasename || null
+          : null,
+      safeLineBucket:
+        stderrCategory === "permission_denied"
+          ? safeSource?.safeLineBucket || "unknown"
+          : "unknown"
+    });
+  }
+
+  return Object.freeze({ observe, observeError, finish });
+}
+
+function createLineFramer(onLine) {
+  const states = {
+    stdout: { decoder: new StringDecoder("utf8"), carry: "" },
+    stderr: { decoder: new StringDecoder("utf8"), carry: "" }
+  };
+  let bytes = 0;
+  let overflow = false;
+  function push(channel, chunk) {
+    if (!Object.prototype.hasOwnProperty.call(states, channel)) {
+      overflow = true;
+      return;
+    }
+    const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+    bytes += buffer.length;
+    if (bytes > SAFE_OUTPUT_LIMIT) overflow = true;
+    const state = states[channel];
+    const joined = state.carry + state.decoder.write(buffer);
+    const parts = joined.split("\n");
+    state.carry = parts.pop();
+    if (Buffer.byteLength(state.carry, "utf8") > SAFE_LINE_LIMIT) {
+      overflow = true;
+      state.carry = "";
+    }
+    for (const item of parts) {
+      if (Buffer.byteLength(item, "utf8") > SAFE_LINE_LIMIT) overflow = true;
+      else onLine(channel, item.endsWith("\r") ? item.slice(0, -1) : item);
+    }
+  }
+  function finish() {
+    for (const [channel, state] of Object.entries(states)) {
+      const tail = state.carry + state.decoder.end();
+      if (tail) {
+        if (Buffer.byteLength(tail, "utf8") > SAFE_LINE_LIMIT) overflow = true;
+        else onLine(channel, tail.endsWith("\r") ? tail.slice(0, -1) : tail);
+      }
+      state.carry = "";
+    }
+    return Object.freeze({ bytes, overflow });
+  }
+  return Object.freeze({ push, finish });
+}
+
+function createPhysicalPhaseProtocol() {
+  let expectedSequence = 1;
+  let nextMainPhaseIndex = 0;
+  let activeMainPhase = null;
+  let lastMainPhaseStarted = null;
+  let lastMainPhaseCompleted = null;
+  let cleanupStarted = false;
+  let cleanupCompleted = false;
+  let protocolInvalid = false;
+  let finished = false;
+
+  function invalidate() {
+    protocolInvalid = true;
+  }
+
+  function accept(event) {
+    if (
+      finished ||
+      protocolInvalid ||
+      !validateSafeEvent(event) ||
+      event.sequence !== expectedSequence
+    ) {
+      invalidate();
+      return false;
+    }
+    if (event.event === "mainPhaseStarted") {
+      if (
+        cleanupStarted ||
+        activeMainPhase !== null ||
+        event.phase !== PHYSICAL_MAIN_PHASES[nextMainPhaseIndex]
+      ) {
+        invalidate();
+        return false;
+      }
+      activeMainPhase = event.phase;
+      lastMainPhaseStarted = event.phase;
+    } else if (event.event === "mainPhaseCompleted") {
+      if (
+        cleanupStarted ||
+        activeMainPhase !== event.phase ||
+        event.phase !== PHYSICAL_MAIN_PHASES[nextMainPhaseIndex]
+      ) {
+        invalidate();
+        return false;
+      }
+      activeMainPhase = null;
+      lastMainPhaseCompleted = event.phase;
+      nextMainPhaseIndex += 1;
+    } else if (event.event === "cleanupStarted") {
+      if (
+        cleanupStarted ||
+        cleanupCompleted ||
+        !(
+          activeMainPhase !== null ||
+          nextMainPhaseIndex === PHYSICAL_MAIN_PHASES.length
+        )
+      ) {
+        invalidate();
+        return false;
+      }
+      cleanupStarted = true;
+    } else if (event.event === "cleanupCompleted") {
+      if (!cleanupStarted || cleanupCompleted) {
+        invalidate();
+        return false;
+      }
+      cleanupCompleted = true;
+    } else {
+      invalidate();
+      return false;
+    }
+    expectedSequence += 1;
+    return true;
+  }
+
+  function finish() {
+    finished = true;
+    return Object.freeze({
+      protocolValid: !protocolInvalid,
+      eventCount: expectedSequence - 1,
+      lastMainPhaseStarted,
+      lastMainPhaseCompleted,
+      cleanupStarted,
+      cleanupCompleted
+    });
+  }
+
+  return Object.freeze({ accept, finish, invalidate });
+}
+
+function createPhysicalPhaseEmitter(
+  writeLine = (line) => process.stderr.write(line)
+) {
+  if (typeof writeLine !== "function") {
+    throw new TypeError("physical_phase_writer_invalid");
+  }
+  const protocol = createPhysicalPhaseProtocol();
+  let sequence = 0;
+
+  function emit(event, phase) {
+    sequence += 1;
+    const value = {
+      event,
+      evidenceSchemaVersion: EVIDENCE_SCHEMA_VERSION,
+      phase,
+      sequence
+    };
+    if (!protocol.accept(value)) {
+      throw new Error("physical_phase_protocol_invalid");
+    }
+    writeLine(safeEventLine(value));
+  }
+
+  return Object.freeze({
+    startMain: (phase) => emit("mainPhaseStarted", phase),
+    completeMain: (phase) => emit("mainPhaseCompleted", phase),
+    startCleanup: () => emit("cleanupStarted", PHYSICAL_CLEANUP_PHASE),
+    completeCleanup: () => emit("cleanupCompleted", PHYSICAL_CLEANUP_PHASE)
+  });
+}
+
+function childSafeEventBody(line) {
+  const prefixes = [
+    SAFE_EVENT_PREFIX,
+    `# ${SAFE_EVENT_PREFIX}`,
+    `    # ${SAFE_EVENT_PREFIX}`
+  ];
+  for (const prefix of prefixes) {
+    if (line.startsWith(prefix)) {
+      return Object.freeze({ matched: true, body: line.slice(prefix.length) });
+    }
+  }
+  return Object.freeze({
+    matched: line.includes(SAFE_EVENT_PREFIX),
+    body: null
+  });
+}
+
+function createNodeTestObserver(onMarker = () => {}) {
+  const totals = { tests: [], pass: [], fail: [], skipped: [], cancelled: [] };
+  const markers = {
+    tapStarted: false,
+    tapTitleObserved: false,
+    firstTestDiscovered: false
+  };
+  const diagnostic = createSafeDiagnosticAggregator();
+  const physicalPhases = createPhysicalPhaseProtocol();
+  function mark(name) {
+    if (markers[name]) return;
+    markers[name] = true;
+    onMarker(name);
+  }
+  const framer = createLineFramer((channel, line) => {
+    const safeChildEvent = childSafeEventBody(line);
+    if (safeChildEvent.matched) {
+      if (safeChildEvent.body === null) {
+        physicalPhases.invalidate();
+        return;
+      }
+      let event;
+      try {
+        event = JSON.parse(safeChildEvent.body);
+      } catch {
+        physicalPhases.invalidate();
+        return;
+      }
+      if (
+        canonicalJson(event) !== safeChildEvent.body ||
+        !physicalPhases.accept(event)
+      ) physicalPhases.invalidate();
+      return;
+    }
+    if (channel === "stdout") {
+      if (line === "TAP version 13") mark("tapStarted");
+      if (line === TAP_SUBTEST_TITLE) mark("tapTitleObserved");
+      if (line.startsWith("# Subtest: ")) mark("firstTestDiscovered");
+      const total = /^(?:#|\u2139)\s*(tests|pass|fail|skipped|cancelled)\s+([0-9]+)\s*$/.exec(line);
+      if (total) totals[total[1]].push(Number(total[2]));
+    }
+    diagnostic.observe(line);
+  });
+  function finish() {
+    const framed = framer.finish();
+    const physicalPhaseFacts = physicalPhases.finish();
+    const one = (name) => totals[name].length === 1 ? totals[name][0] : null;
+    const tapFail = one("fail");
+    const diagnosticFacts = diagnostic.finish();
+    const stderrCategory =
+      diagnosticFacts.stderrCategory === "unknown" &&
+      tapFail !== null && tapFail > 0
+        ? "tap_failure"
+        : diagnosticFacts.stderrCategory;
+    return Object.freeze({
+      overflow: framed.overflow,
+      tapStarted: markers.tapStarted,
+      tapTitleObserved: markers.tapTitleObserved,
+      firstTestDiscovered: markers.firstTestDiscovered,
+      tapTests: one("tests"),
+      tapPass: one("pass"),
+      tapFail,
+      tapSkipped: one("skipped"),
+      tapCancelled: one("cancelled"),
+      phaseProtocolValid: physicalPhaseFacts.protocolValid,
+      phaseEventCount: physicalPhaseFacts.eventCount,
+      lastMainPhaseStarted: physicalPhaseFacts.lastMainPhaseStarted,
+      lastMainPhaseCompleted: physicalPhaseFacts.lastMainPhaseCompleted,
+      cleanupStarted: physicalPhaseFacts.cleanupStarted,
+      cleanupCompleted: physicalPhaseFacts.cleanupCompleted,
+      safeDiagnosticValid: diagnosticFacts.safeDiagnosticValid,
+      stderrCategory,
+      safeErrorCode: diagnosticFacts.safeErrorCode,
+      safeModuleName: diagnosticFacts.safeModuleName,
+      safePermissionOrigin: diagnosticFacts.safePermissionOrigin,
+      safeSourceBasename: diagnosticFacts.safeSourceBasename,
+      safeLineBucket: diagnosticFacts.safeLineBucket
+    });
+  }
+  return Object.freeze({ push: framer.push, finish });
+}
+
+function createSafeEventCollector() {
+  const seen = new Set();
+  const state = {
+    runnerReached: null,
+    gateValidated: null,
+    nodeTestSpawnAttempted: null,
+    nodeTestProcessCreated: null,
+    nodeTestExitCode: null,
+    nodeTestSignal: null,
+    nodeTestTimedOut: null,
+    tapStarted: null,
+    tapTitleObserved: null,
+    firstTestDiscovered: null,
+    lastMainPhaseStarted: null,
+    lastMainPhaseCompleted: null,
+    cleanupStarted: null,
+    cleanupCompleted: null,
+    failureDuringCleanup: null,
+    failurePhase: null,
+    stderrCategory: null,
+    safeErrorCode: null,
+    safeModuleName: null,
+    safePermissionOrigin: null,
+    safeSourceBasename: null,
+    safeLineBucket: null,
+    firstFailureStage: null
+  };
+  let expectedSequence = 1;
+  let protocolInvalid = false;
+  let closed = false;
+  let failure = false;
+  const rawDiagnostic = createSafeDiagnosticAggregator();
+  function invalidate() {
+    protocolInvalid = true;
+  }
+  function markerAllowed(name) {
+    if (failure || closed || seen.has(name)) return false;
+    if (name === "runnerReached") return seen.size === 0;
+    if (name === "gateValidated") return state.runnerReached === true;
+    if (name === "nodeTestSpawnAttempted") return state.gateValidated === true;
+    if (name === "nodeTestProcessCreated") {
+      return state.nodeTestSpawnAttempted === true;
+    }
+    if (name === "tapStarted") return state.nodeTestProcessCreated === true;
+    if (name === "tapTitleObserved" || name === "firstTestDiscovered") {
+      return state.tapStarted === true;
+    }
+    if (name === "physicalPhaseSnapshot") {
+      return state.nodeTestProcessCreated === true;
+    }
+    return false;
+  }
+  function nullFailureBoundary(event) {
+    return event.failureDuringCleanup === false &&
+      event.failurePhase === null;
+  }
+  function snapshotFailureBoundary() {
+    const mainActive =
+      PHYSICAL_MAIN_PHASE_SET.has(state.lastMainPhaseStarted) &&
+      state.lastMainPhaseStarted !== state.lastMainPhaseCompleted;
+    if (mainActive) {
+      return Object.freeze({
+        failureDuringCleanup: false,
+        failurePhase: state.lastMainPhaseStarted
+      });
+    }
+    if (state.cleanupStarted === true && state.cleanupCompleted === false) {
+      return Object.freeze({
+        failureDuringCleanup: true,
+        failurePhase: PHYSICAL_CLEANUP_PHASE
+      });
+    }
+    return Object.freeze({ failureDuringCleanup: false, failurePhase: null });
+  }
+  function failureBoundaryMatchesSnapshot(event) {
+    const expected = snapshotFailureBoundary();
+    return event.failureDuringCleanup === expected.failureDuringCleanup &&
+      event.failurePhase === expected.failurePhase;
+  }
+  function failureAllowed(event) {
+    if (failure || seen.has("failure") || state.runnerReached !== true) return false;
+    if (event.firstFailureStage === "runner_load" ||
+        event.firstFailureStage === "environment_gate") {
+      return state.gateValidated !== true &&
+        state.nodeTestSpawnAttempted !== true && !closed &&
+        nullFailureBoundary(event);
+    }
+    if (event.firstFailureStage === "node_test_spawn") {
+      return state.nodeTestSpawnAttempted === true &&
+        state.nodeTestProcessCreated !== true && !closed &&
+        nullFailureBoundary(event);
+    }
+    if (event.firstFailureStage === "node_test_bootstrap") {
+      return state.nodeTestProcessCreated === true &&
+        nullFailureBoundary(event);
+    }
+    if (event.firstFailureStage === "safe_event_protocol") {
+      if (seen.has("physicalPhaseSnapshot")) {
+        return closed && failureBoundaryMatchesSnapshot(event);
+      }
+      return !closed && nullFailureBoundary(event);
+    }
+    if (!closed) return false;
+    if (event.firstFailureStage === "tap_start") {
+      return state.tapStarted !== true && nullFailureBoundary(event);
+    }
+    if (event.firstFailureStage === "test_discovery") {
+      return state.tapStarted === true &&
+        state.firstTestDiscovered !== true &&
+        nullFailureBoundary(event);
+    }
+    if (event.firstFailureStage === "test_execution") {
+      return state.firstTestDiscovered === true &&
+        failureBoundaryMatchesSnapshot(event);
+    }
+    return false;
+  }
+  function applyEvent(event) {
+    if (
+      protocolInvalid ||
+      !validateSafeEvent(event) ||
+      event.sequence !== expectedSequence
+    ) {
+      invalidate();
+      return;
+    }
+    expectedSequence += 1;
+    if ([
+      "runnerReached",
+      "gateValidated",
+      "nodeTestSpawnAttempted",
+      "nodeTestProcessCreated",
+      "tapStarted",
+      "tapTitleObserved",
+      "firstTestDiscovered"
+    ].includes(event.event)) {
+      if (!markerAllowed(event.event)) {
+        invalidate();
+        return;
+      }
+      seen.add(event.event);
+      state[event.event] = true;
+      return;
+    }
+    if (event.event === "physicalPhaseSnapshot") {
+      if (!markerAllowed(event.event)) {
+        invalidate();
+        return;
+      }
+      seen.add(event.event);
+      state.lastMainPhaseStarted = event.lastMainPhaseStarted;
+      state.lastMainPhaseCompleted = event.lastMainPhaseCompleted;
+      state.cleanupStarted = event.cleanupStarted;
+      state.cleanupCompleted = event.cleanupCompleted;
+      return;
+    }
+    if (event.event === "nodeTestClosed") {
+      if (
+        failure ||
+        closed ||
+        state.nodeTestProcessCreated !== true ||
+        !seen.has("physicalPhaseSnapshot") ||
+        seen.has("nodeTestClosed")
+      ) {
+        invalidate();
+        return;
+      }
+      closed = true;
+      seen.add(event.event);
+      state.nodeTestExitCode = event.nodeTestExitCode;
+      state.nodeTestSignal = event.nodeTestSignal;
+      state.nodeTestTimedOut = event.nodeTestTimedOut;
+      return;
+    }
+    if (event.event === "failure") {
+      if (!failureAllowed(event)) {
+        invalidate();
+        return;
+      }
+      failure = true;
+      seen.add(event.event);
+      state.stderrCategory = event.stderrCategory;
+      state.safeErrorCode = event.safeErrorCode;
+      state.safeModuleName = event.safeModuleName;
+      state.failureDuringCleanup = event.failureDuringCleanup;
+      state.failurePhase = event.failurePhase;
+      state.safePermissionOrigin = event.safePermissionOrigin;
+      state.safeSourceBasename = event.safeSourceBasename;
+      state.safeLineBucket = event.safeLineBucket;
+      state.firstFailureStage = event.firstFailureStage;
+      return;
+    }
+    invalidate();
+  }
+  const framer = createLineFramer((channel, line) => {
+    if (line.startsWith(SAFE_EVENT_PREFIX)) {
+      if (channel !== "stdout") {
+        invalidate();
+        return;
+      }
+      const body = line.slice(SAFE_EVENT_PREFIX.length);
+      let event;
+      try {
+        event = JSON.parse(body);
+      } catch {
+        invalidate();
+        return;
+      }
+      if (canonicalJson(event) !== body) {
+        invalidate();
+        return;
+      }
+      applyEvent(event);
+      return;
+    }
+    if (channel === "stderr") rawDiagnostic.observe(line);
+  });
+  function finish() {
+    const framed = framer.finish();
+    const rawClassification = rawDiagnostic.finish();
+    if (framed.overflow) invalidate();
+    if (!rawClassification.safeDiagnosticValid) invalidate();
+    if (protocolInvalid && !failure) {
+      const boundary = seen.has("physicalPhaseSnapshot")
+        ? snapshotFailureBoundary()
+        : { failureDuringCleanup: false, failurePhase: null };
+      state.stderrCategory = "unknown";
+      state.safeErrorCode = framed.overflow
+        ? "safe_output_limit_exceeded"
+        : "safe_event_protocol_invalid";
+      state.safeModuleName = null;
+      state.failureDuringCleanup = boundary.failureDuringCleanup;
+      state.failurePhase = boundary.failurePhase;
+      state.safePermissionOrigin = "unknown";
+      state.safeSourceBasename = null;
+      state.safeLineBucket = "unknown";
+      state.firstFailureStage = "safe_event_protocol";
+    } else if (!failure && rawClassification.stderrCategory !== "unknown") {
+      state.stderrCategory = rawClassification.stderrCategory;
+      state.safeErrorCode = rawClassification.safeErrorCode;
+      state.safeModuleName = rawClassification.safeModuleName;
+      state.safePermissionOrigin = rawClassification.safePermissionOrigin;
+      state.safeSourceBasename = rawClassification.safeSourceBasename;
+      state.safeLineBucket = rawClassification.safeLineBucket;
+    }
+    return Object.freeze({
+      protocolValid: !protocolInvalid,
+      closed,
+      failure,
+      eventCount: expectedSequence - 1,
+      ...state
+    });
+  }
+  return Object.freeze({ push: framer.push, finish });
+}
+
+function safeFailureFromError(error, fallbackCategory = "unknown") {
+  const diagnostic = createSafeDiagnosticAggregator();
+  diagnostic.observeError(error);
+  const classified = diagnostic.finish();
+  if (!classified.safeDiagnosticValid) {
+    return Object.freeze({
+      firstFailureStage: "safe_event_protocol",
+      stderrCategory: "unknown",
+      safeErrorCode: "safe_event_protocol_invalid",
+      safeModuleName: null,
+      safePermissionOrigin: "unknown",
+      safeSourceBasename: null,
+      safeLineBucket: "unknown"
+    });
+  }
+  return Object.freeze({
+    stderrCategory:
+      classified.stderrCategory === "unknown"
+        ? fallbackCategory
+        : classified.stderrCategory,
+    safeErrorCode: classified.safeErrorCode,
+    safeModuleName: classified.safeModuleName,
+    safePermissionOrigin: classified.safePermissionOrigin,
+    safeSourceBasename: classified.safeSourceBasename,
+    safeLineBucket: classified.safeLineBucket
+  });
+}
+
+function emptyFailureBoundary() {
+  return Object.freeze({ failureDuringCleanup: false, failurePhase: null });
+}
+
+function physicalFailureBoundary(facts) {
+  if (
+    PHYSICAL_MAIN_PHASE_SET.has(facts.lastMainPhaseStarted) &&
+    facts.lastMainPhaseStarted !== facts.lastMainPhaseCompleted
+  ) {
+    return Object.freeze({
+      failureDuringCleanup: false,
+      failurePhase: facts.lastMainPhaseStarted
+    });
+  }
+  if (facts.cleanupStarted && !facts.cleanupCompleted) {
+    return Object.freeze({
+      failureDuringCleanup: true,
+      failurePhase: PHYSICAL_CLEANUP_PHASE
+    });
+  }
+  return emptyFailureBoundary();
+}
+
+function physicalPhaseContractValid(facts, result) {
+  if (!facts.phaseProtocolValid) return false;
+  if (facts.firstTestDiscovered && facts.lastMainPhaseStarted === null) {
+    return false;
+  }
+  if (result.status !== 0 || result.signal !== null) return true;
+  return facts.lastMainPhaseStarted === PHYSICAL_MAIN_PHASES.at(-1) &&
+    facts.lastMainPhaseCompleted === PHYSICAL_MAIN_PHASES.at(-1) &&
+    facts.cleanupStarted === true && facts.cleanupCompleted === true;
+}
+
+function nodeTestFailure(facts, result) {
+  const exactTap = facts.tapStarted &&
+    facts.tapTitleObserved &&
+    facts.firstTestDiscovered &&
+    facts.tapTests === 1 &&
+    facts.tapPass === 1 &&
+    facts.tapFail === 0 &&
+    facts.tapSkipped === 0 &&
+    facts.tapCancelled === 0;
+  const phaseContractValid = physicalPhaseContractValid(facts, result);
+  const boundary = physicalFailureBoundary(facts);
+  if (result.status === 0 && result.signal === null &&
+      !facts.overflow && exactTap && phaseContractValid &&
+      facts.safeDiagnosticValid) return null;
+  if (!phaseContractValid || !facts.safeDiagnosticValid) {
+    return Object.freeze({
+      ...boundary,
+      firstFailureStage: "safe_event_protocol",
+      stderrCategory: "unknown",
+      safeErrorCode: "safe_event_protocol_invalid",
+      safeModuleName: null,
+      safePermissionOrigin: "unknown",
+      safeSourceBasename: null,
+      safeLineBucket: "unknown"
+    });
+  }
+  let firstFailureStage = "node_test_bootstrap";
+  if (facts.firstTestDiscovered) firstFailureStage = "test_execution";
+  else if (facts.tapStarted) firstFailureStage = "test_discovery";
+  else if (result.status === 0) firstFailureStage = "tap_start";
+  let stderrCategory = facts.stderrCategory;
+  if (stderrCategory === "unknown" && facts.tapStarted) {
+    stderrCategory = "tap_failure";
+  }
+  let safeErrorCode = facts.safeErrorCode;
+  if (facts.overflow) safeErrorCode = "safe_output_limit_exceeded";
+  else if (safeErrorCode === null && result.status === 0) {
+    safeErrorCode = "tap_contract_failed";
+  } else if (
+    safeErrorCode === null &&
+    result.status !== 0 &&
+    stderrCategory !== "permission_denied"
+  ) {
+    safeErrorCode = "ERR_TEST_FAILURE";
+  }
+  if (
+    firstFailureStage === "test_execution" &&
+    stderrCategory === "permission_denied" &&
+    boundary.failurePhase === null
+  ) {
+    return Object.freeze({
+      ...boundary,
+      firstFailureStage: "safe_event_protocol",
+      stderrCategory: "unknown",
+      safeErrorCode: "safe_event_protocol_invalid",
+      safeModuleName: null,
+      safePermissionOrigin: "unknown",
+      safeSourceBasename: null,
+      safeLineBucket: "unknown"
+    });
+  }
+  return Object.freeze({
+    ...(firstFailureStage === "test_execution"
+      ? boundary
+      : emptyFailureBoundary()),
+    firstFailureStage,
+    stderrCategory,
+    safeErrorCode,
+    safeModuleName:
+      stderrCategory === "module_not_found" ? facts.safeModuleName : null,
+    safePermissionOrigin:
+      stderrCategory === "permission_denied"
+        ? facts.safePermissionOrigin
+        : "unknown",
+    safeSourceBasename:
+      stderrCategory === "permission_denied"
+        ? facts.safeSourceBasename
+        : null,
+    safeLineBucket:
+      stderrCategory === "permission_denied"
+        ? facts.safeLineBucket
+        : "unknown"
+  });
+}
+
+function runNodeTest({
+  configuration,
+  env,
+  onCreated,
+  onMarker,
+  spawnImpl = spawn
+}) {
+  return new Promise((resolve) => {
+    const observer = createNodeTestObserver(onMarker);
+    let child;
+    try {
+      child = spawnImpl(
+        process.execPath,
+        [
+          "--test-reporter=tap",
+          "--test-reporter-destination=stdout",
+          "--test",
+          path.resolve(__dirname, "..", "tests", "social-postgres-real.test.js")
+        ],
+        {
+          cwd: path.resolve(__dirname, ".."),
+          env: {
+            ...env,
+            SOCIAL_REAL_POSTGRES_REQUIRED: "true",
+            SOCIAL_TEST_GATE_VALIDATED_FINGERPRINT: configuration.fingerprint
+          },
+          shell: false,
+          stdio: ["ignore", "pipe", "pipe"],
+          windowsHide: true
+        }
+      );
+    } catch (error) {
+      resolve(Object.freeze({
+        created: false,
+        error,
+        status: null,
+        signal: null,
+        facts: null
+      }));
+      return;
+    }
+    let created = false;
+    let settled = false;
+    let streamError = false;
+    if (child.stdout) {
+      child.stdout.on("data", (chunk) => observer.push("stdout", chunk));
+      child.stdout.once("error", () => { streamError = true; });
+    }
+    if (child.stderr) {
+      child.stderr.on("data", (chunk) => observer.push("stderr", chunk));
+      child.stderr.once("error", () => { streamError = true; });
+    }
+    child.once("spawn", () => {
+      created = true;
+      onCreated();
+    });
+    child.once("error", (error) => {
+      if (settled) return;
+      settled = true;
+      resolve(Object.freeze({
+        created,
+        error,
+        status: null,
+        signal: null,
+        facts: null
+      }));
+    });
+    child.once("close", (status, signal) => {
+      if (settled) return;
+      settled = true;
+      const facts = observer.finish();
+      resolve(Object.freeze({
+        created,
+        error: streamError ? Object.assign(new Error("stream_error"), {
+          code: "test_process_failed"
+        }) : null,
+        status,
+        signal,
+        facts
+      }));
+    });
+  });
+}
 
 class PostgresGateRefusal extends Error {
   constructor(code) {
@@ -210,6 +1605,12 @@ function secureConnection(raw, configuration) {
 }
 
 function validateGateEnvironment(env = process.env) {
+  const {
+    assertNoAmbientPostgresEnvironment,
+    loadSystemPostgresTls,
+    PAID_STAGING_PUBLIC_TARGET,
+    DISPOSABLE_DATABASE_NAME
+  } = gateDependencies();
   if (env.NODE_TLS_REJECT_UNAUTHORIZED === "0") {
     refuse("node_tls_verification_disabled");
   }
@@ -402,54 +1803,158 @@ function validateGateEnvironment(env = process.env) {
   return Object.freeze(configuration);
 }
 
-function main(env = process.env) {
+async function main(env = process.env, options = {}) {
+  const writeLine = options.writeLine || ((line) => process.stdout.write(line));
+  const validateGateEnvironmentImpl =
+    options.validateGateEnvironmentImpl || validateGateEnvironment;
+  const runNodeTestImpl = options.runNodeTestImpl || runNodeTest;
+  let sequence = 0;
+  function emit(event, fields) {
+    sequence += 1;
+    writeLine(safeEventLine({
+      event,
+      evidenceSchemaVersion: EVIDENCE_SCHEMA_VERSION,
+      sequence,
+      ...fields
+    }));
+  }
+  function emitFailure(firstFailureStage, failureFacts) {
+    const effectiveFailureStage =
+      failureFacts.firstFailureStage || firstFailureStage;
+    emit("failure", {
+      failureDuringCleanup: failureFacts.failureDuringCleanup ?? false,
+      failurePhase: failureFacts.failurePhase ?? null,
+      firstFailureStage: effectiveFailureStage,
+      safeErrorCode: failureFacts.safeErrorCode,
+      safeModuleName: failureFacts.safeModuleName,
+      safePermissionOrigin: failureFacts.safePermissionOrigin ?? "unknown",
+      safeSourceBasename: failureFacts.safeSourceBasename ?? null,
+      safeLineBucket: failureFacts.safeLineBucket ?? "unknown",
+      stderrCategory: failureFacts.stderrCategory
+    });
+  }
+
+  emit("runnerReached", { runnerReached: true });
   let configuration;
   try {
-    configuration = validateGateEnvironment(env);
+    configuration = validateGateEnvironmentImpl(env);
   } catch (error) {
-    const code =
-      error instanceof PostgresGateRefusal ? error.code : "guard_failed";
-    process.stderr.write(`Teste PostgreSQL real recusado: ${code}.\n`);
+    if (error instanceof PostgresGateRefusal) {
+      emitFailure("environment_gate", {
+        stderrCategory: "environment_contract",
+        safeErrorCode: "guard_failed",
+        safeModuleName: null
+      });
+    } else {
+      emitFailure("runner_load", safeFailureFromError(error));
+    }
     return 2;
   }
 
-  const result = spawnSync(
-    process.execPath,
-    [
-      "--test",
-      path.resolve(__dirname, "..", "tests", "social-postgres-real.test.js")
-    ],
-    {
-      cwd: path.resolve(__dirname, ".."),
-      env: {
-        ...env,
-        SOCIAL_REAL_POSTGRES_REQUIRED: "true",
-        SOCIAL_TEST_GATE_VALIDATED_FINGERPRINT: configuration.fingerprint
-      },
-      stdio: "inherit"
-    }
-  );
-  if (result.error || result.status === null) {
-    process.stderr.write(
-      "Teste PostgreSQL real recusado: test_process_failed.\n"
+  emit("gateValidated", { gateValidated: true });
+  emit("nodeTestSpawnAttempted", { nodeTestSpawnAttempted: true });
+  let result;
+  try {
+    result = await runNodeTestImpl({
+      configuration,
+      env,
+      spawnImpl: options.spawnImpl || spawn,
+      onCreated: () => emit("nodeTestProcessCreated", {
+        nodeTestProcessCreated: true
+      }),
+      onMarker: (name) => emit(name, { [name]: true })
+    });
+  } catch (error) {
+    emitFailure("node_test_spawn", safeFailureFromError(error));
+    return 2;
+  }
+
+  if (!result.created || result.facts === null) {
+    emitFailure(
+      result.created ? "node_test_bootstrap" : "node_test_spawn",
+      safeFailureFromError(result.error, "unknown")
     );
     return 2;
   }
-  return result.status;
+
+  emit("physicalPhaseSnapshot", {
+    lastMainPhaseStarted: result.facts.lastMainPhaseStarted,
+    lastMainPhaseCompleted: result.facts.lastMainPhaseCompleted,
+    cleanupStarted: result.facts.cleanupStarted,
+    cleanupCompleted: result.facts.cleanupCompleted
+  });
+  const nodeTestTimedOut = result.signal === null ? false : null;
+  emit("nodeTestClosed", {
+    nodeTestExitCode: result.status,
+    nodeTestSignal: result.signal,
+    nodeTestTimedOut
+  });
+  let failureFacts;
+  if (result.error) {
+    const safeErrorFailure = safeFailureFromError(result.error);
+    const firstFailureStage = safeErrorFailure.firstFailureStage ||
+      "node_test_bootstrap";
+    failureFacts = {
+      ...(firstFailureStage === "safe_event_protocol"
+        ? physicalFailureBoundary(result.facts)
+        : emptyFailureBoundary()),
+      ...safeErrorFailure,
+      firstFailureStage
+    };
+  } else {
+    failureFacts = nodeTestFailure(result.facts, result);
+  }
+  if (failureFacts) {
+    emitFailure(failureFacts.firstFailureStage, failureFacts);
+    if (Number.isSafeInteger(result.status) && result.status !== 0) {
+      return result.status;
+    }
+    return 1;
+  }
+  return 0;
 }
 
-if (require.main === module) process.exit(main());
+if (require.main === module) {
+  main().then(
+    (code) => { process.exitCode = code; },
+    () => { process.exitCode = 2; }
+  );
+}
 
 module.exports = {
   APPROVAL,
+  EVIDENCE_SCHEMA_VERSION,
+  FIRST_FAILURE_STAGES,
   LOOPBACK_MODE,
+  PHYSICAL_CLEANUP_PHASE,
+  PHYSICAL_MAIN_PHASES,
+  PHYSICAL_PHASES,
   PAID_STAGING_DISPOSABLE_APPROVAL,
   PostgresGateRefusal,
   REMOTE_APPROVAL,
   REMOTE_DATABASE,
   RENDER_PAID_STAGING_DISPOSABLE_MODE,
   RENDER_REMOTE_MODE,
+  SAFE_ERROR_CODES,
+  SAFE_EVENT_PREFIX,
+  SAFE_LINE_BUCKETS,
+  SAFE_MODULE_NAMES,
+  SAFE_PERMISSION_CODES,
+  SAFE_PERMISSION_ORIGINS,
+  SAFE_SOURCE_BASENAMES,
+  STDERR_CATEGORIES,
+  TAP_TITLE,
+  canonicalJson,
+  classifySafeLine,
+  createNodeTestObserver,
+  createPhysicalPhaseEmitter,
+  createPhysicalPhaseProtocol,
+  createSafeDiagnosticAggregator,
+  createSafeEventCollector,
   main,
+  runNodeTest,
+  safeEventLine,
+  safeLineBucket,
   secureConnection,
   targetFingerprint,
   validateGateEnvironment

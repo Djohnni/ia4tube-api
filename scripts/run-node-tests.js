@@ -20,7 +20,8 @@ const PROCESS_LIFECYCLE_TEST_FILES = Object.freeze([
   "social-3a0p-local-file-replace-powershell-diagnostic.test.js",
   "social-3a0p-local-firewall-nonmutation.test.js",
   "social-3a0p-local-safe-zip-extract.test.js",
-  "social-postgres-tls.test.js"
+  "social-postgres-tls.test.js",
+  "social-3a0p-current-diff-scope.test.js"
 ]);
 
 function runnerError(code) {

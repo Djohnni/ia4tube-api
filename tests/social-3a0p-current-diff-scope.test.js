@@ -10,22 +10,39 @@ const {
 } = require("../scripts/social-3a0p-local-scope");
 
 const ROUTE_BRANCH =
-  "social/checkpoint-3b0-o22-loopback-socket-close-barrier-20260813";
-const ROUTE_BASE_COMMIT = "84061704e214ec5f293fa5f2c9443d9832d42e1e";
-const FUNCTIONAL_COMMIT = "33e3ea7abcea7f5dc51780c3a1efd4743352fe40";
+  "social/checkpoint-3b0-exact-0004-runner-linux-permission-boundary-20260814";
+const ROUTE_BASE_COMMIT = "13e38b875db2a220514fe06113663c517c975592";
+const FUNCTIONAL_COMMIT = ROUTE_BASE_COMMIT;
 const POST_COMMIT_PROOF_HEAD = "ffffffffffffffffffffffffffffffffffffffff";
 const GIT_TIMEOUT_MS = 20_000;
 const GIT_MAX_BUFFER_BYTES = 1024 * 1024;
 const AUTHORIZED_CHANGED_FILES = Object.freeze([
-  ".github/workflows/social-3b0-instagram-oauth-local-contract.yml",
+  ".github/workflows/social-3b0-exact-0004-runner-linux.yml",
+  "scripts/run-node-tests.js",
+  "scripts/run-real-postgres-tests.js",
   "scripts/social-3a0p-local-scope.js",
-  "scripts/social-3b0-linux-physical-gate.js",
+  "scripts/social-db-migrate.js",
+  "src/persistence/postgres/migrations.js",
+  "tests/node-test-runner-safety.test.js",
   "tests/social-3a0p-current-diff-scope.test.js",
+  "tests/social-3a0p-linux-workflow.test.js",
   "tests/social-3a0p-local-scope.test.js",
+  "tests/social-3b0-exact-0004-runner-linux-workflow.test.js",
   "tests/social-3b0-linux-physical-gate.test.js",
-  "tests/social-3b0-linux-workflow.test.js"
+  "tests/social-postgres-migrations.test.js",
+  "tests/social-postgres-real.test.js"
 ]);
-const AUTHORIZED_PRODUCT_FILES = Object.freeze([]);
+const LOCAL_UNTRACKED_FILES = Object.freeze([
+  ".github/workflows/social-3b0-exact-0004-runner-linux.yml",
+  "tests/social-3b0-exact-0004-runner-linux-workflow.test.js"
+]);
+const LOCAL_UNTRACKED_FILE_SET = new Set(LOCAL_UNTRACKED_FILES);
+const LOCAL_UNSTAGED_TRACKED_FILES = Object.freeze(
+  AUTHORIZED_CHANGED_FILES.filter((file) => !LOCAL_UNTRACKED_FILE_SET.has(file))
+);
+const AUTHORIZED_PRODUCT_FILES = Object.freeze([
+  "src/persistence/postgres/migrations.js"
+]);
 const PROTECTED_PRODUCT_DIRECTORIES = Object.freeze([
   "src",
   "db",
@@ -411,10 +428,14 @@ function assertRouteInventory(snapshotInput) {
       "scope_route_committed_refused"
     );
     assertExactFiles(snapshot.stagedFiles, [], "scope_staged_refused");
-    assertExactFiles(snapshot.untrackedFiles, [], "scope_untracked_refused");
+    assertExactFiles(
+      snapshot.untrackedFiles,
+      LOCAL_UNTRACKED_FILES,
+      "scope_untracked_refused"
+    );
     assertExactFiles(
       snapshot.unstagedTrackedFiles,
-      AUTHORIZED_CHANGED_FILES,
+      LOCAL_UNSTAGED_TRACKED_FILES,
       "scope_unstaged_refused"
     );
   } else {
@@ -471,9 +492,11 @@ function assertNoProtectedProductChanges(snapshotInput) {
     snapshot.unstagedTrackedFiles,
     snapshot.untrackedFiles
   ).filter(isProtectedProductPath);
-  if (productFiles.length !== 0) {
-    refuse("scope_product_change_refused");
-  }
+  assertExactFiles(
+    productFiles,
+    AUTHORIZED_PRODUCT_FILES,
+    "scope_product_change_refused"
+  );
   return Object.freeze(productFiles);
 }
 
@@ -483,8 +506,8 @@ function makeLocalSnapshot(overrides = {}) {
     routeCommittedFiles: [],
     functionalCommittedFiles: [],
     stagedFiles: [],
-    unstagedTrackedFiles: [...AUTHORIZED_CHANGED_FILES],
-    untrackedFiles: [],
+    unstagedTrackedFiles: [...LOCAL_UNSTAGED_TRACKED_FILES],
+    untrackedFiles: [...LOCAL_UNTRACKED_FILES],
     ...overrides
   };
 }
@@ -525,8 +548,8 @@ function createCapturedSuccessfulSpawn() {
     Buffer.alloc(0),
     Buffer.alloc(0),
     Buffer.alloc(0),
-    encodeNulPaths(AUTHORIZED_CHANGED_FILES),
-    Buffer.alloc(0)
+    encodeNulPaths(LOCAL_UNSTAGED_TRACKED_FILES),
+    encodeNulPaths(LOCAL_UNTRACKED_FILES)
   ];
   return Object.freeze({
     calls,
@@ -553,14 +576,14 @@ function runMandatoryContractProofs() {
     proofCount += 1;
   }
 
-  // 1. Local mode recognizes exactly the seven authorized paths.
+  // 1. Local mode recognizes exactly the fourteen authorized paths.
   proof(() => {
     const result = assertRouteInventory(makeLocalSnapshot());
     assert.equal(result.mode, "local");
     assert.deepEqual(result.files, [...AUTHORIZED_CHANGED_FILES].sort());
   });
 
-  // 2. Post-commit mode recognizes exactly the same seven paths.
+  // 2. Post-commit mode recognizes exactly the same fourteen paths.
   proof(() => {
     const result = assertRouteInventory(makePostCommitSnapshot());
     assert.equal(result.mode, "post_commit");
@@ -587,21 +610,31 @@ function runMandatoryContractProofs() {
     );
   });
 
-  // 5. An eighth changed path is refused.
+  // 5. Exact12, Exact13 and Exact15 changed-path inventories are refused.
   proof(() => {
-    assert.throws(
-      () => assertRouteInventory(makeLocalSnapshot({
-        unstagedTrackedFiles: [
-          ...AUTHORIZED_CHANGED_FILES,
-          "tests/eighth-scope-path.test.js"
-        ]
-      })),
-      { code: "scope_unstaged_refused" }
-    );
+    for (const unstagedTrackedFiles of [
+      LOCAL_UNSTAGED_TRACKED_FILES.slice(0, 10),
+      LOCAL_UNSTAGED_TRACKED_FILES.slice(0, 11),
+      [
+        ...LOCAL_UNSTAGED_TRACKED_FILES,
+        "tests/fifteenth-scope-path.test.js"
+      ]
+    ]) {
+      assert.throws(
+        () => assertRouteInventory(makeLocalSnapshot({
+          unstagedTrackedFiles
+        })),
+        { code: "scope_unstaged_refused" }
+      );
+    }
   });
 
   // 6. Product paths are refused from every required snapshot source.
   proof(() => {
+    assert.deepEqual(
+      assertNoProtectedProductChanges(makeLocalSnapshot()),
+      [...AUTHORIZED_PRODUCT_FILES].sort()
+    );
     for (const field of [
       "functionalCommittedFiles",
       "stagedFiles",
@@ -872,13 +905,13 @@ function runMandatoryContractProofs() {
 
 const sharedSnapshotCache = createSnapshotCache(() => buildGitSnapshot());
 
-test("a barreira de fechamento O22 contem exatamente os sete caminhos autorizados", () => {
+test("a barreira do runner exato 0004 contem exatamente os quatorze caminhos autorizados", () => {
   const result = assertRouteInventory(sharedSnapshotCache.read());
   assert.equal(
     ROUTE_BRANCH,
-    "social/checkpoint-3b0-o22-loopback-socket-close-barrier-20260813"
+    "social/checkpoint-3b0-exact-0004-runner-linux-permission-boundary-20260814"
   );
-  assert.equal(AUTHORIZED_CHANGED_FILES.length, 7);
+  assert.equal(AUTHORIZED_CHANGED_FILES.length, 14);
   assert.deepEqual(result.files, [...AUTHORIZED_CHANGED_FILES].sort());
   assert.equal(
     result.mode === "local" || result.mode === "post_commit",
@@ -888,7 +921,7 @@ test("a barreira de fechamento O22 contem exatamente os sete caminhos autorizado
   assert.equal(runMandatoryContractProofs(), 17);
 });
 
-test("nenhum caminho de produto difere da base funcional 33e3", () => {
+test("somente o runner canonico de migrations difere da base da rota", () => {
   const productFiles = assertNoProtectedProductChanges(
     sharedSnapshotCache.read()
   );

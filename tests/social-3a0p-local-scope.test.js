@@ -13,41 +13,48 @@ const {
 } = require("../scripts/social-3a0p-local-scope");
 
 const AUTHORIZED_FILES = Object.freeze([
-  ".github/workflows/social-3b0-instagram-oauth-local-contract.yml",
+  ".github/workflows/social-3b0-exact-0004-runner-linux.yml",
+  "scripts/run-node-tests.js",
+  "scripts/run-real-postgres-tests.js",
   "scripts/social-3a0p-local-scope.js",
-  "scripts/social-3b0-linux-physical-gate.js",
+  "scripts/social-db-migrate.js",
+  "src/persistence/postgres/migrations.js",
+  "tests/node-test-runner-safety.test.js",
   "tests/social-3a0p-current-diff-scope.test.js",
+  "tests/social-3a0p-linux-workflow.test.js",
   "tests/social-3a0p-local-scope.test.js",
+  "tests/social-3b0-exact-0004-runner-linux-workflow.test.js",
   "tests/social-3b0-linux-physical-gate.test.js",
-  "tests/social-3b0-linux-workflow.test.js"
+  "tests/social-postgres-migrations.test.js",
+  "tests/social-postgres-real.test.js"
 ]);
 
-test("O22 loopback socket close barrier scope accepts exactly seven paths", () => {
+test("exact 0004 runner scope accepts exactly fourteen paths", () => {
   assert.equal(
     AUTHORIZED_BRANCH,
-    "social/checkpoint-3b0-o22-loopback-socket-close-barrier-20260813"
+    "social/checkpoint-3b0-exact-0004-runner-linux-permission-boundary-20260814"
   );
   assert.equal(
     ROUTE_BASE_COMMIT,
-    "84061704e214ec5f293fa5f2c9443d9832d42e1e"
+    "13e38b875db2a220514fe06113663c517c975592"
   );
-  assert.equal(AUTHORIZED_FILES.length, 7);
+  assert.equal(AUTHORIZED_FILES.length, 14);
   assert.deepEqual(ALLOWED_PREFIXES, []);
   assert.deepEqual(
     [...ALLOWED_EXACT_FILES].sort(),
     [...AUTHORIZED_FILES].sort()
   );
-  assert.equal(ALLOWED_EXACT_FILES.size, 7);
+  assert.equal(ALLOWED_EXACT_FILES.size, 14);
   for (const file of AUTHORIZED_FILES) {
     assert.equal(isHarnessOnlyFile(file), true, file);
   }
   assert.deepEqual(assertHarnessOnlyChangedFiles([...AUTHORIZED_FILES]), {
     harnessOnly: true,
-    changedFileCount: 7
+    changedFileCount: 14
   });
   for (const candidate of [
-    AUTHORIZED_FILES.slice(0, 2),
-    AUTHORIZED_FILES.slice(0, 6)
+    AUTHORIZED_FILES.slice(0, 12),
+    AUTHORIZED_FILES.slice(0, 13)
   ]) {
     assert.throws(() => assertHarnessOnlyChangedFiles(candidate), {
       code: "harness_scope_inventory_refused"
@@ -63,27 +70,21 @@ test("O22 loopback socket close barrier scope accepts exactly seven paths", () =
   assert.throws(
     () => assertHarnessOnlyChangedFiles([
       ...AUTHORIZED_FILES,
-      "scripts/run-node-tests.js",
-      "tests/node-test-runner-safety.test.js"
-    ]),
-    { code: "harness_scope_product_change_refused" }
-  );
-  assert.throws(
-    () => assertHarnessOnlyChangedFiles([
-      ...AUTHORIZED_FILES,
-      "tests/eighth-path.test.js"
+      "tests/fifteenth-path.test.js"
     ]),
     { code: "harness_scope_product_change_refused" }
   );
 });
 
-test("O22 loopback socket close barrier scope refuses variants, globs, subpaths and case changes", () => {
+test("exact 0004 runner scope refuses variants, globs, subpaths and case changes", () => {
   for (const file of [
     ".github/workflows/social-3b0-instagram-oauth-local-contract.yml.bak",
     ".github/workflows/SOCIAL-3B0-INSTAGRAM-OAUTH-LOCAL-CONTRACT.YML",
     ".github/workflows/*.yml",
     "scripts/run-node-tests.js.bak",
     "scripts/RUN-NODE-TESTS.JS",
+    "scripts/run-real-postgres-tests.js.bak",
+    "scripts/RUN-REAL-POSTGRES-TESTS.JS",
     "scripts/social-3b0-*.js",
     "scripts/social-3a0p-linux-physical-gates.js.bak",
     "scripts/subdir/social-3a0p-linux-physical-gates.js",
@@ -103,7 +104,7 @@ test("O22 loopback socket close barrier scope refuses variants, globs, subpaths 
   }
 });
 
-test("O22 loopback socket close barrier scope refuses product, dependency and historical paths", () => {
+test("exact 0004 runner scope refuses unauthorized product, dependency and historical paths", () => {
   for (const file of [
     "server.js",
     "src/social/oauth/instagram-config.js",
@@ -121,14 +122,11 @@ test("O22 loopback socket close barrier scope refuses product, dependency and hi
     "db/postgres/roles.sql",
     "package.json",
     "package-lock.json",
-    "scripts/run-node-tests.js",
-    "tests/node-test-runner-safety.test.js",
     "docs/social-3b0-instagram-oauth-local-contract.md",
     ".github/workflows/social-3a0p-linux-physical-gates.yml",
     "docs/social-3a0p-linux-physical-gates.md",
     "scripts/social-3a0p-linux-physical-gates.js",
     "tests/social-3a0p-linux-physical-gates.test.js",
-    "tests/social-3a0p-linux-workflow.test.js",
     "tests/social-3b0-instagram-oauth-crypto-provider.test.js",
     "tests/social-3b0-instagram-oauth-routes.test.js",
     "app.html"
@@ -144,7 +142,7 @@ test("O22 loopback socket close barrier scope refuses product, dependency and hi
   }
 });
 
-test("O22 loopback socket close barrier scope rejects traversal and absolute paths", () => {
+test("exact 0004 runner scope rejects traversal and absolute paths", () => {
   for (const file of [
     "../scripts/social-3b0-linux-physical-gate.js",
     "tests/../scripts/social-3b0-linux-physical-gate.js",
@@ -159,11 +157,11 @@ test("O22 loopback socket close barrier scope rejects traversal and absolute pat
   }
 });
 
-test("O22 loopback socket close barrier scope normalizes only path separators", () => {
-  const windowsPath = "scripts\\social-3b0-linux-physical-gate.js";
+test("exact 0004 runner scope normalizes only path separators", () => {
+  const windowsPath = "scripts\\social-db-migrate.js";
   assert.equal(
     normalizeRepositoryFile(windowsPath),
-    "scripts/social-3b0-linux-physical-gate.js"
+    "scripts/social-db-migrate.js"
   );
   assert.equal(isHarnessOnlyFile(windowsPath), true);
   assert.throws(() => assertHarnessOnlyChangedFiles([windowsPath]), {
@@ -171,7 +169,7 @@ test("O22 loopback socket close barrier scope normalizes only path separators", 
   });
 });
 
-test("O22 loopback socket close barrier scope has no wildcard or directory-wide exception", () => {
+test("exact 0004 runner scope has no wildcard or directory-wide exception", () => {
   assert.equal(
     [...ALLOWED_EXACT_FILES].some(
       (file) => file.includes("*") || file.endsWith("/")

@@ -1,6 +1,9 @@
 "use strict";
 
 const assert = require("node:assert/strict");
+const crypto = require("node:crypto");
+const { execFileSync } = require("node:child_process");
+const fs = require("node:fs");
 const path = require("node:path");
 const test = require("node:test");
 
@@ -28,13 +31,41 @@ const ADDED_WINDOWS_NATIVE_SERIAL_FILES = Object.freeze([
   "social-3a0p-local-safe-zip-extract.test.js",
   "social-postgres-tls.test.js"
 ]);
+const CURRENT_DIFF_SCOPE_SERIAL_FILE =
+  "social-3a0p-current-diff-scope.test.js";
 const EXPECTED_SERIAL_FILES = Object.freeze([
   ...PREVIOUS_SERIAL_FILES,
-  ...ADDED_WINDOWS_NATIVE_SERIAL_FILES
+  ...ADDED_WINDOWS_NATIVE_SERIAL_FILES,
+  CURRENT_DIFF_SCOPE_SERIAL_FILE
 ]);
 const SYNTHETIC_TEST_DIRECTORY = path.resolve("synthetic-runner-tests");
 const SYNTHETIC_REPOSITORY_ROOT = path.resolve("synthetic-runner-root");
 const SYNTHETIC_EXECUTABLE = path.resolve("synthetic-node");
+const REPOSITORY_ROOT = path.resolve(__dirname, "..");
+const SAFE_EVIDENCE_COMMIT = "8534817574a22dbd144a835c9f3585c44ee11c96";
+const REAL_POSTGRES_TEST = "tests/social-postgres-real.test.js";
+const REAL_POSTGRES_TEST_LF_SHA256 =
+  "0435be028c5e3d1aa04e2094ae60f92e17528434ec63f5c31516db803fb190c7";
+const REAL_POSTGRES_TEST_FILTERED_OID =
+  "caa0cf840214a1ce6572c8f338a92dd4d8146e87";
+const PHYSICAL_MAIN_PHASES = Object.freeze([
+  "physical_target_preflight",
+  "role_provisioning",
+  "direct_connect_boundary",
+  "startup_unmigrated",
+  "migration_0001_0002",
+  "pre_registry_seed",
+  "migration_0003_rollback",
+  "migration_0003_apply",
+  "exact_0004_plan_apply",
+  "post_migration_validation",
+  "migration_cli",
+  "runtime_role_schema",
+  "runtime_permission_negatives",
+  "tenant_rls",
+  "vault_persistence",
+  "reauthentication"
+]);
 
 function directoryEntry(name, isFile = true) {
   return {
@@ -127,16 +158,20 @@ test("2. the ordinary runner keeps every dedicated physical gate excluded", () =
   assert.equal(discovered.includes("social-postgres-real.test.js"), false);
 });
 
-test("3. the closed serial manifest contains the six previous and five native Windows files", () => {
+test("3. the closed serial manifest preserves eleven files and adds only current-diff scope", () => {
   const repositoryTests = discoverAutomatedTests(path.resolve(__dirname)).map((file) =>
     path.basename(file)
   );
-  const previousSet = new Set(PREVIOUS_SERIAL_FILES);
+  const previousManifest = [
+    ...PREVIOUS_SERIAL_FILES,
+    ...ADDED_WINDOWS_NATIVE_SERIAL_FILES
+  ];
+  const previousSet = new Set(previousManifest);
   assert.deepEqual(PROCESS_LIFECYCLE_TEST_FILES, EXPECTED_SERIAL_FILES);
-  assert.equal(PROCESS_LIFECYCLE_TEST_FILES.length, 11);
+  assert.equal(PROCESS_LIFECYCLE_TEST_FILES.length, 12);
   assert.deepEqual(
     PROCESS_LIFECYCLE_TEST_FILES.filter((name) => previousSet.has(name)),
-    PREVIOUS_SERIAL_FILES
+    previousManifest
   );
   for (const name of ADDED_WINDOWS_NATIVE_SERIAL_FILES) {
     assert.equal(
@@ -145,6 +180,12 @@ test("3. the closed serial manifest contains the six previous and five native Wi
       name
     );
   }
+  assert.equal(
+    PROCESS_LIFECYCLE_TEST_FILES.filter(
+      (candidate) => candidate === CURRENT_DIFF_SCOPE_SERIAL_FILE
+    ).length,
+    1
+  );
   for (const name of EXPECTED_SERIAL_FILES) assert.ok(repositoryTests.includes(name), name);
 });
 
@@ -312,4 +353,145 @@ test("23. partitioning preserves the exact total automated-test count", () => {
   assert.equal(plan.serial.length + plan.concurrent.length, discovered.length);
   const { calls } = invokeRunner();
   assert.equal(calls.flatMap(testFileArguments).length, discovered.length);
+});
+
+test("24. real PostgreSQL changes are only the binding and allowlisted phase markers", () => {
+  const migrationsPath = path.join(
+    REPOSITORY_ROOT,
+    "src",
+    "persistence",
+    "postgres",
+    "migrations.js"
+  );
+  const realTestPath = path.join(
+    REPOSITORY_ROOT,
+    "tests",
+    "social-postgres-real.test.js"
+  );
+  const migrationsSource = fs.readFileSync(migrationsPath, "utf8")
+    .replaceAll("\r\n", "\n");
+  const rawRealTest = fs.readFileSync(realTestPath, "utf8");
+  const realTestSource = rawRealTest.replaceAll("\r\n", "\n");
+  assert.equal(migrationsSource.includes("\r"), false);
+  assert.equal(realTestSource.includes("\r"), false);
+
+  const exportBlock = /module\.exports\s*=\s*\{([^{}]*)\};/.exec(
+    migrationsSource
+  );
+  assert.ok(exportBlock);
+  assert.equal(
+    (exportBlock[1].match(/\bGLOBAL_VAULT_REGISTRY_MIGRATION\b/g) || []).length,
+    1
+  );
+  const importBlock = /const \{([^{}]*)\} = require\("\.\.\/src\/persistence\/postgres\/migrations"\);/.exec(
+    realTestSource
+  );
+  assert.ok(importBlock);
+  const importedNames = importBlock[1].split(",").map((name) => name.trim());
+  assert.equal(
+    importedNames.filter((name) => name === "GLOBAL_VAULT_REGISTRY_MIGRATION").length,
+    1
+  );
+  assert.equal(
+    (realTestSource.match(/\bGLOBAL_VAULT_REGISTRY_MIGRATION\b/g) || []).length,
+    4
+  );
+  const sourceWithoutBinding = realTestSource.replace(
+    "  GLOBAL_VAULT_REGISTRY_MIGRATION,\n",
+    ""
+  );
+  assert.equal(
+    /\b(?:const|let|var)\s+GLOBAL_VAULT_REGISTRY_MIGRATION\b/.test(
+      sourceWithoutBinding
+    ),
+    false
+  );
+  for (const expression of [
+    /\(item\) => item\.version === GLOBAL_VAULT_REGISTRY_MIGRATION/,
+    /\(migration\) => migration\.version === GLOBAL_VAULT_REGISTRY_MIGRATION/,
+    /\[GLOBAL_VAULT_REGISTRY_MIGRATION\]/
+  ]) assert.equal((sourceWithoutBinding.match(expression) || []).length, 1);
+  assert.equal(realTestSource.includes("0003_global_vault_key_registry"), false);
+  assert.equal(
+    realTestSource.split("  GLOBAL_VAULT_REGISTRY_MIGRATION,\n").length - 1,
+    1
+  );
+
+  const expectedMarkers = PHYSICAL_MAIN_PHASES.flatMap((phase) => [
+    `startMain:${phase}`,
+    `completeMain:${phase}`
+  ]).concat(["startCleanup", "completeCleanup"]);
+  const observedMarkers = [
+    ...realTestSource.matchAll(
+      /^      physicalPhases\.(?:(startMain|completeMain)\("([a-z0-9_]+)"\)|(startCleanup|completeCleanup)\(\));$/gm
+    )
+  ].map((match) => match[1] ? `${match[1]}:${match[2]}` : match[3]);
+  assert.equal(PHYSICAL_MAIN_PHASES.length, 16);
+  assert.equal(expectedMarkers.length, 34);
+  assert.deepEqual(observedMarkers, expectedMarkers);
+  assert.equal(
+    (realTestSource.match(/\bphysicalPhases\./g) || []).length,
+    34
+  );
+  assert.equal(
+    (realTestSource.match(/\bcreatePhysicalPhaseEmitter\b/g) || []).length,
+    2
+  );
+
+  const authorizedInstrumentation = [
+    "  createPhysicalPhaseEmitter,\n",
+    "    const physicalPhases = createPhysicalPhaseEmitter();\n",
+    ...PHYSICAL_MAIN_PHASES.flatMap((phase) => [
+      `      physicalPhases.startMain("${phase}");\n`,
+      `      physicalPhases.completeMain("${phase}");\n`
+    ]),
+    "      physicalPhases.startCleanup();\n",
+    "      physicalPhases.completeCleanup();\n"
+  ];
+  let baselineCandidate = sourceWithoutBinding;
+  for (const line of authorizedInstrumentation) {
+    assert.equal(baselineCandidate.split(line).length - 1, 1, line.trim());
+    baselineCandidate = baselineCandidate.replace(line, "");
+  }
+
+  const historical = execFileSync(
+    "git",
+    ["cat-file", "blob", `${SAFE_EVIDENCE_COMMIT}:${REAL_POSTGRES_TEST}`],
+    {
+      cwd: REPOSITORY_ROOT,
+      encoding: null,
+      windowsHide: true,
+      stdio: ["ignore", "pipe", "ignore"],
+      timeout: 20_000,
+      maxBuffer: 2 * 1024 * 1024,
+      env: {
+        ...process.env,
+        GIT_OPTIONAL_LOCKS: "0",
+        GIT_TERMINAL_PROMPT: "0"
+      }
+    }
+  );
+  assert.deepEqual(Buffer.from(baselineCandidate, "utf8"), historical);
+  const canonical = Buffer.from(realTestSource, "utf8");
+  assert.equal(
+    crypto.createHash("sha256").update(canonical).digest("hex"),
+    REAL_POSTGRES_TEST_LF_SHA256
+  );
+  const filteredOid = execFileSync(
+    "git",
+    ["hash-object", `--path=${REAL_POSTGRES_TEST}`, "--", REAL_POSTGRES_TEST],
+    {
+      cwd: REPOSITORY_ROOT,
+      encoding: "utf8",
+      windowsHide: true,
+      stdio: ["ignore", "pipe", "ignore"],
+      timeout: 20_000,
+      env: {
+        ...process.env,
+        GIT_OPTIONAL_LOCKS: "0",
+        GIT_TERMINAL_PROMPT: "0"
+      }
+    }
+  ).trim();
+  assert.equal(filteredOid, REAL_POSTGRES_TEST_FILTERED_OID);
 });

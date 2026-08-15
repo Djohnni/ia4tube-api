@@ -10,6 +10,7 @@ const WORKFLOW_RELATIVE_PATH = ".github/workflows/social-3a0p-linux-physical-gat
 const WORKFLOW_PATH = path.join(REPOSITORY_ROOT, ...WORKFLOW_RELATIVE_PATH.split("/"));
 const APPROVED_WORKFLOW_NAMES = Object.freeze([
   "social-3a0p-linux-physical-gates.yml",
+  "social-3b0-exact-0004-runner-linux.yml",
   "social-3b0-instagram-oauth-local-contract.yml"
 ]);
 const BRANCH = "social/checkpoint-3a0p-gate5-cross-profile-plan-binding-20260811";
@@ -359,9 +360,9 @@ function assertGuardInventory(source, style) {
   assert.equal(source.includes("*"), false);
 }
 
-test("repository contains exactly the approved 3A-0P and 3B-0 workflows and both are strict JSON", () => {
+test("repository contains exactly the three approved 3A-0P and 3B-0 workflows and all are strict JSON", () => {
   const entries = fs.readdirSync(path.dirname(WORKFLOW_PATH), { withFileTypes: true });
-  assert.equal(entries.length, 2);
+  assert.equal(entries.length, 3);
   assert.deepEqual(
     entries.map((entry) => entry.name).sort(),
     [...APPROVED_WORKFLOW_NAMES].sort()
