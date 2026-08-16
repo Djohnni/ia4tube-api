@@ -46,9 +46,9 @@ const SAFE_EVIDENCE_COMMIT = "8534817574a22dbd144a835c9f3585c44ee11c96";
 const PERMISSION_BOUNDARY_COMMIT = "555d71eacbde76ceffdd03d64731e03849978c17";
 const REAL_POSTGRES_TEST = "tests/social-postgres-real.test.js";
 const REAL_POSTGRES_TEST_LF_SHA256 =
-  "47d8d35369fb9a028bd3d5d2b0b9e42f1e91b914447fb7547c8421f8d2b2232b";
+  "27a4d1ebbccda40711fd1a78a2f170efa3128690b86588be0c7ab515345f49d0";
 const REAL_POSTGRES_TEST_FILTERED_OID =
-  "ad9e879bd6546f9a54b3687602aa0479ad1a0027";
+  "bebdc618879cabd589dbe93a3b6a2c9a172aa98e";
 const PHYSICAL_MAIN_PHASES = Object.freeze([
   "physical_target_preflight",
   "role_provisioning",
@@ -153,6 +153,62 @@ function closedSourceSection(source, startMarker, endMarker) {
   const end = source.indexOf(endMarker, start + startMarker.length);
   assert.notEqual(end, -1, endMarker);
   return source.slice(start, end);
+}
+
+function assertOidBoundaryContract(source) {
+  const exactFragments = [
+    "NOT member.rolinherit AS login_noinherit",
+    "NOT membership.inherit_option AS membership_noinherit",
+    "membership.set_option AS set_role_allowed",
+    "current_user = session_user AS login_role_active",
+    "member.oid AS member_oid",
+    "namespace.oid AS namespace_oid",
+    "relation.oid AS relation_oid",
+    "relation.relkind AS relation_kind",
+    "NOT pg_catalog.has_schema_privilege(",
+    "member.oid, namespace.oid, 'USAGE'",
+    "NOT pg_catalog.has_table_privilege(",
+    "member.oid, relation.oid, 'SELECT'",
+    "JOIN pg_catalog.pg_roles member",
+    "ON member.oid = membership.member",
+    "JOIN pg_catalog.pg_namespace namespace",
+    "ON namespace.nspname = 'ia4tube_migrations'",
+    "JOIN pg_catalog.pg_class relation",
+    "ON relation.relnamespace = namespace.oid",
+    "AND relation.relname = 'schema_migrations'",
+    "AND relation.relkind = 'r'",
+    "AND member.rolname = session_user",
+    "AND member.oid IS NOT NULL",
+    "AND namespace.oid IS NOT NULL",
+    "AND relation.oid IS NOT NULL",
+    "assert.equal(boundary.rowCount, 1);",
+    "assert.equal(Number.isInteger(oid) && oid > 0, true);",
+    'assert.equal(relationKind, "r");',
+    "await pool.query(ledgerRead);",
+    'sanitized.code = error?.code === "42501" ? "42501" : "unknown";',
+    '(error) => error?.code === "42501"',
+    "(client) => client.query(ledgerRead)",
+    "{ role: MIGRATOR_ROLE }"
+  ];
+  for (const fragment of exactFragments) {
+    assert.equal(source.split(fragment).length - 1, 1, fragment);
+  }
+  assert.equal(source.includes("::regclass"), false);
+  assert.equal(source.includes("to_regclass"), false);
+  assert.equal(
+    source.includes(
+      "session_user, 'ia4tube_migrations.schema_migrations', 'SELECT'"
+    ),
+    false
+  );
+  assert.equal((source.match(/\bpool\.query\(/g) || []).length, 2);
+  assert.equal((source.match(/\bwithTransaction\(/g) || []).length, 1);
+  const boundary = source.indexOf("const boundary = await pool.query(");
+  const direct = source.indexOf("await pool.query(ledgerRead);");
+  const allowed = source.indexOf("const allowed = await withTransaction(");
+  assert.notEqual(boundary, -1);
+  assert.equal(boundary < direct, true);
+  assert.equal(direct < allowed, true);
 }
 
 test("1. automated test discovery remains deterministically ordered", () => {
@@ -404,24 +460,48 @@ test("24. exact 0004 production ledger reads use the migrator role only", () => 
       "  NOT membership.inherit_option AS membership_noinherit,",
       "  membership.set_option AS set_role_allowed,",
       "  current_user = session_user AS login_role_active,",
-      "  NOT has_schema_privilege(",
-      "    session_user, 'ia4tube_migrations', 'USAGE'",
+      "  member.oid AS member_oid,",
+      "  namespace.oid AS namespace_oid,",
+      "  relation.oid AS relation_oid,",
+      "  relation.relkind AS relation_kind,",
+      "  NOT pg_catalog.has_schema_privilege(",
+      "    member.oid, namespace.oid, 'USAGE'",
       "  ) AS direct_schema_usage_absent,",
-      "  NOT has_table_privilege(",
-      "    session_user, 'ia4tube_migrations.schema_migrations', 'SELECT'",
+      "  NOT pg_catalog.has_table_privilege(",
+      "    member.oid, relation.oid, 'SELECT'",
       "  ) AS direct_ledger_select_absent",
       "FROM pg_catalog.pg_auth_members membership",
       "JOIN pg_catalog.pg_roles granted",
       "  ON granted.oid = membership.roleid",
       "JOIN pg_catalog.pg_roles member",
       "  ON member.oid = membership.member",
+      "JOIN pg_catalog.pg_namespace namespace",
+      "  ON namespace.nspname = 'ia4tube_migrations'",
+      "JOIN pg_catalog.pg_class relation",
+      "  ON relation.relnamespace = namespace.oid",
+      "  AND relation.relname = 'schema_migrations'",
+      "  AND relation.relkind = 'r'",
       "WHERE granted.rolname = $1",
-      "  AND member.rolname = session_user"
+      "  AND member.rolname = session_user",
+      "  AND member.oid IS NOT NULL",
+      "  AND namespace.oid IS NOT NULL",
+      "  AND relation.oid IS NOT NULL"
     ].join("\n"),
     [MIGRATOR_ROLE]
   );
   assert.equal(boundary.rowCount, 1);
-  assert.deepEqual(boundary.rows[0], {
+  const {
+    member_oid: memberOid,
+    namespace_oid: namespaceOid,
+    relation_oid: relationOid,
+    relation_kind: relationKind,
+    ...boundaryFacts
+  } = boundary.rows[0];
+  for (const oid of [memberOid, namespaceOid, relationOid]) {
+    assert.equal(Number.isInteger(oid) && oid > 0, true);
+  }
+  assert.equal(relationKind, "r");
+  assert.deepEqual(boundaryFacts, {
     login_noinherit: true,
     membership_noinherit: true,
     set_role_allowed: true,
@@ -832,13 +912,14 @@ test("25. exact 0004 NOINHERIT boundary refuses direct ledger reads without raw 
     "async function proveMigratorExplicitRoleBoundary(pool) {",
     "async function readExactCatalogSnapshot(pool) {"
   );
+  assertOidBoundaryContract(roleBoundaryHelper);
   for (const contract of [
     "NOT member.rolinherit AS login_noinherit",
     "NOT membership.inherit_option AS membership_noinherit",
     "membership.set_option AS set_role_allowed",
     "current_user = session_user AS login_role_active",
-    "session_user, 'ia4tube_migrations', 'USAGE'",
-    "session_user, 'ia4tube_migrations.schema_migrations', 'SELECT'",
+    "member.oid, namespace.oid, 'USAGE'",
+    "member.oid, relation.oid, 'SELECT'",
     "WHERE granted.rolname = $1",
     "AND member.rolname = session_user",
     "[MIGRATOR_ROLE]",
@@ -912,4 +993,92 @@ test("25. exact 0004 NOINHERIT boundary refuses direct ledger reads without raw 
     ),
     true
   );
+});
+
+test("26. exact 0004 ledger OID boundary rejects incomplete or textual contracts", () => {
+  const realTestSource = fs.readFileSync(
+    path.join(REPOSITORY_ROOT, "tests", "social-postgres-real.test.js"),
+    "utf8"
+  ).replaceAll("\r\n", "\n");
+  const source = closedSourceSection(
+    realTestSource,
+    "async function proveMigratorExplicitRoleBoundary(pool) {",
+    "async function readExactCatalogSnapshot(pool) {"
+  );
+  assertOidBoundaryContract(source);
+  const replace = (before, after) =>
+    replaceExactlyOnce(source, before, after, before);
+  const mutations = [
+    ["role absent", replace("      \"  AND member.rolname = session_user\",\n", "")],
+    [
+      "role duplicated",
+      replace(
+        "      \"  AND member.rolname = session_user\",\n",
+        "      \"  AND member.rolname = session_user\",\n      \"  AND member.rolname = session_user\",\n"
+      )
+    ],
+    ["schema absent", replace("      \"  ON namespace.nspname = 'ia4tube_migrations'\",\n", "")],
+    [
+      "schema duplicated",
+      replace(
+        "      \"  ON namespace.nspname = 'ia4tube_migrations'\",\n",
+        "      \"  ON namespace.nspname = 'ia4tube_migrations'\",\n      \"  ON namespace.nspname = 'ia4tube_migrations'\",\n"
+      )
+    ],
+    ["relation absent", replace("      \"  AND relation.relname = 'schema_migrations'\",\n", "")],
+    [
+      "relation duplicated",
+      replace(
+        "      \"  AND relation.relname = 'schema_migrations'\",\n",
+        "      \"  AND relation.relname = 'schema_migrations'\",\n      \"  AND relation.relname = 'schema_migrations'\",\n"
+      )
+    ],
+    [
+      "relkind divergent",
+      replace(
+        "      \"  AND relation.relkind = 'r'\",",
+        "      \"  AND relation.relkind = 'v'\","
+      )
+    ],
+    [
+      "member OID null guard removed",
+      replace(
+        "      \"  AND member.oid IS NOT NULL\",\n",
+        ""
+      )
+    ],
+    [
+      "namespace OID null guard removed",
+      replace(
+        "      \"  AND namespace.oid IS NOT NULL\",\n",
+        ""
+      )
+    ],
+    [
+      "relation OID null guard removed",
+      replace(
+        "      \"  AND relation.oid IS NOT NULL\"\n",
+        ""
+      )
+    ],
+    [
+      "textual privilege resolution",
+      replace(
+        "      \"    member.oid, relation.oid, 'SELECT'\",",
+        "      \"    session_user, 'ia4tube_migrations.schema_migrations', 'SELECT'\","
+      )
+    ],
+    [
+      "direct negative removed",
+      replace("        await pool.query(ledgerRead);", "        await Promise.resolve();")
+    ],
+    ["positive role removed", replace("    { role: MIGRATOR_ROLE }", "    {}")]
+  ];
+  for (const [label, mutated] of mutations) {
+    assert.throws(
+      () => assertOidBoundaryContract(mutated),
+      (error) => error?.code === "ERR_ASSERTION",
+      label
+    );
+  }
 });

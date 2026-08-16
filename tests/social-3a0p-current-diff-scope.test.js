@@ -10,9 +10,10 @@ const {
 } = require("../scripts/social-3a0p-local-scope");
 
 const ROUTE_BRANCH =
-  "social/checkpoint-3b0-exact-0004-runner-linux-snapshot-role-binding-20260815";
+  "social/checkpoint-3b0-exact-0004-runner-linux-ledger-oid-boundary-20260816";
 const ROUTE_BASE_COMMIT = "13e38b875db2a220514fe06113663c517c975592";
-const FUNCTIONAL_COMMIT = ROUTE_BASE_COMMIT;
+const ROUTE_PARENT_COMMIT = "05689e6d23e65c6df33e3db79633126114dea540";
+const FUNCTIONAL_COMMIT = ROUTE_PARENT_COMMIT;
 const POST_COMMIT_PROOF_HEAD = "ffffffffffffffffffffffffffffffffffffffff";
 const GIT_TIMEOUT_MS = 20_000;
 const GIT_MAX_BUFFER_BYTES = 1024 * 1024;
@@ -36,17 +37,20 @@ const AUTHORIZED_CHANGED_FILES = Object.freeze([
   "tests/social-postgres-migrations.test.js",
   "tests/social-postgres-real.test.js"
 ]);
-const LOCAL_UNTRACKED_FILES = Object.freeze([
+const INCREMENTAL_CHANGED_FILES = Object.freeze([
   ".github/workflows/social-3b0-exact-0004-runner-linux.yml",
-  "tests/social-3b0-exact-0004-runner-linux-workflow.test.js"
+  "scripts/social-3a0p-local-scope.js",
+  "tests/node-test-runner-safety.test.js",
+  "tests/social-3a0p-current-diff-scope.test.js",
+  "tests/social-3a0p-local-scope.test.js",
+  "tests/social-3b0-exact-0004-runner-linux-workflow.test.js",
+  "tests/social-postgres-real.test.js"
 ]);
-const LOCAL_UNTRACKED_FILE_SET = new Set(LOCAL_UNTRACKED_FILES);
-const LOCAL_UNSTAGED_TRACKED_FILES = Object.freeze(
-  AUTHORIZED_CHANGED_FILES.filter((file) => !LOCAL_UNTRACKED_FILE_SET.has(file))
-);
-const AUTHORIZED_PRODUCT_FILES = Object.freeze([
-  "src/persistence/postgres/migrations.js"
+const LOCAL_UNTRACKED_FILES = Object.freeze([]);
+const LOCAL_UNSTAGED_TRACKED_FILES = Object.freeze([
+  ...INCREMENTAL_CHANGED_FILES
 ]);
+const AUTHORIZED_PRODUCT_FILES = Object.freeze([]);
 const PROTECTED_PRODUCT_DIRECTORIES = Object.freeze([
   "src",
   "db",
@@ -424,14 +428,19 @@ function assertExactFiles(actual, expected, code) {
 
 function assertRouteInventory(snapshotInput) {
   const snapshot = validateSnapshot(snapshotInput);
-  const localMode = snapshot.head === ROUTE_BASE_COMMIT;
+  const localMode = snapshot.head === ROUTE_PARENT_COMMIT;
   if (localMode) {
     assertExactFiles(
       snapshot.routeCommittedFiles,
-      [],
+      AUTHORIZED_CHANGED_FILES,
       "scope_route_committed_refused"
     );
     assertExactFiles(snapshot.stagedFiles, [], "scope_staged_refused");
+    assertExactFiles(
+      snapshot.functionalCommittedFiles,
+      [],
+      "scope_incremental_committed_refused"
+    );
     assertExactFiles(
       snapshot.untrackedFiles,
       LOCAL_UNTRACKED_FILES,
@@ -449,6 +458,11 @@ function assertRouteInventory(snapshotInput) {
       "scope_route_committed_refused"
     );
     assertExactFiles(snapshot.stagedFiles, [], "scope_staged_refused");
+    assertExactFiles(
+      snapshot.functionalCommittedFiles,
+      INCREMENTAL_CHANGED_FILES,
+      "scope_incremental_committed_refused"
+    );
     assertExactFiles(
       snapshot.unstagedTrackedFiles,
       [],
@@ -506,8 +520,8 @@ function assertNoProtectedProductChanges(snapshotInput) {
 
 function makeLocalSnapshot(overrides = {}) {
   return {
-    head: ROUTE_BASE_COMMIT,
-    routeCommittedFiles: [],
+    head: ROUTE_PARENT_COMMIT,
+    routeCommittedFiles: [...AUTHORIZED_CHANGED_FILES],
     functionalCommittedFiles: [],
     stagedFiles: [],
     unstagedTrackedFiles: [...LOCAL_UNSTAGED_TRACKED_FILES],
@@ -520,7 +534,7 @@ function makePostCommitSnapshot(overrides = {}) {
   return {
     head: POST_COMMIT_PROOF_HEAD,
     routeCommittedFiles: [...AUTHORIZED_CHANGED_FILES],
-    functionalCommittedFiles: [],
+    functionalCommittedFiles: [...INCREMENTAL_CHANGED_FILES],
     stagedFiles: [],
     unstagedTrackedFiles: [],
     untrackedFiles: [],
@@ -548,8 +562,8 @@ function successfulSpawnResult(stdout) {
 function createCapturedSuccessfulSpawn() {
   const calls = [];
   const outputs = [
-    Buffer.from(ROUTE_BASE_COMMIT + "\n", "utf8"),
-    Buffer.alloc(0),
+    Buffer.from(ROUTE_PARENT_COMMIT + "\n", "utf8"),
+    encodeNulPaths(AUTHORIZED_CHANGED_FILES),
     Buffer.alloc(0),
     Buffer.alloc(0),
     encodeNulPaths(LOCAL_UNSTAGED_TRACKED_FILES),
@@ -614,11 +628,11 @@ function runMandatoryContractProofs() {
     );
   });
 
-  // 5. Exact16, Exact17 and Exact19 changed-path inventories are refused.
+  // 5. Incomplete and expanded incremental inventories are refused.
   proof(() => {
     for (const unstagedTrackedFiles of [
-      LOCAL_UNSTAGED_TRACKED_FILES.slice(0, 14),
-      LOCAL_UNSTAGED_TRACKED_FILES.slice(0, 15),
+      LOCAL_UNSTAGED_TRACKED_FILES.slice(0, 5),
+      LOCAL_UNSTAGED_TRACKED_FILES.slice(0, 6),
       [
         ...LOCAL_UNSTAGED_TRACKED_FILES,
         "tests/nineteenth-scope-path.test.js"
@@ -825,7 +839,7 @@ function runMandatoryContractProofs() {
 
   // 14. Snapshot success and failure are each calculated at most once.
   proof(() => {
-    const snapshotValue = Object.freeze({ head: ROUTE_BASE_COMMIT });
+    const snapshotValue = Object.freeze({ head: ROUTE_PARENT_COMMIT });
     let successCalls = 0;
     const successCache = createSnapshotCache(() => {
       successCalls += 1;
@@ -861,7 +875,7 @@ function runMandatoryContractProofs() {
       capturedCalls.map((call) => call.args),
       [
         ["rev-parse", "--verify", "HEAD"],
-        ...createPathCommandSpecifications(ROUTE_BASE_COMMIT)
+        ...createPathCommandSpecifications(ROUTE_PARENT_COMMIT)
           .map((specification) => [...specification.args])
       ]
     );
@@ -913,7 +927,7 @@ test("a barreira do runner exato 0004 contem exatamente os dezoito caminhos auto
   const result = assertRouteInventory(sharedSnapshotCache.read());
   assert.equal(
     ROUTE_BRANCH,
-    "social/checkpoint-3b0-exact-0004-runner-linux-snapshot-role-binding-20260815"
+    "social/checkpoint-3b0-exact-0004-runner-linux-ledger-oid-boundary-20260816"
   );
   assert.equal(AUTHORIZED_CHANGED_FILES.length, 18);
   assert.deepEqual(result.files, [...AUTHORIZED_CHANGED_FILES].sort());
@@ -925,7 +939,7 @@ test("a barreira do runner exato 0004 contem exatamente os dezoito caminhos auto
   assert.equal(runMandatoryContractProofs(), 17);
 });
 
-test("somente o runner canonico de migrations difere da base da rota", () => {
+test("nenhum arquivo de produto difere do pai imediato da rota", () => {
   const productFiles = assertNoProtectedProductChanges(
     sharedSnapshotCache.read()
   );

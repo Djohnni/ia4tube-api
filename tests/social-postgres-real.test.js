@@ -1664,24 +1664,48 @@ async function proveMigratorExplicitRoleBoundary(pool) {
       "  NOT membership.inherit_option AS membership_noinherit,",
       "  membership.set_option AS set_role_allowed,",
       "  current_user = session_user AS login_role_active,",
-      "  NOT has_schema_privilege(",
-      "    session_user, 'ia4tube_migrations', 'USAGE'",
+      "  member.oid AS member_oid,",
+      "  namespace.oid AS namespace_oid,",
+      "  relation.oid AS relation_oid,",
+      "  relation.relkind AS relation_kind,",
+      "  NOT pg_catalog.has_schema_privilege(",
+      "    member.oid, namespace.oid, 'USAGE'",
       "  ) AS direct_schema_usage_absent,",
-      "  NOT has_table_privilege(",
-      "    session_user, 'ia4tube_migrations.schema_migrations', 'SELECT'",
+      "  NOT pg_catalog.has_table_privilege(",
+      "    member.oid, relation.oid, 'SELECT'",
       "  ) AS direct_ledger_select_absent",
       "FROM pg_catalog.pg_auth_members membership",
       "JOIN pg_catalog.pg_roles granted",
       "  ON granted.oid = membership.roleid",
       "JOIN pg_catalog.pg_roles member",
       "  ON member.oid = membership.member",
+      "JOIN pg_catalog.pg_namespace namespace",
+      "  ON namespace.nspname = 'ia4tube_migrations'",
+      "JOIN pg_catalog.pg_class relation",
+      "  ON relation.relnamespace = namespace.oid",
+      "  AND relation.relname = 'schema_migrations'",
+      "  AND relation.relkind = 'r'",
       "WHERE granted.rolname = $1",
-      "  AND member.rolname = session_user"
+      "  AND member.rolname = session_user",
+      "  AND member.oid IS NOT NULL",
+      "  AND namespace.oid IS NOT NULL",
+      "  AND relation.oid IS NOT NULL"
     ].join("\n"),
     [MIGRATOR_ROLE]
   );
   assert.equal(boundary.rowCount, 1);
-  assert.deepEqual(boundary.rows[0], {
+  const {
+    member_oid: memberOid,
+    namespace_oid: namespaceOid,
+    relation_oid: relationOid,
+    relation_kind: relationKind,
+    ...boundaryFacts
+  } = boundary.rows[0];
+  for (const oid of [memberOid, namespaceOid, relationOid]) {
+    assert.equal(Number.isInteger(oid) && oid > 0, true);
+  }
+  assert.equal(relationKind, "r");
+  assert.deepEqual(boundaryFacts, {
     login_noinherit: true,
     membership_noinherit: true,
     set_role_allowed: true,

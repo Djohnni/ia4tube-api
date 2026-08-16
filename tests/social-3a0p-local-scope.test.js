@@ -7,6 +7,7 @@ const {
   ALLOWED_EXACT_FILES,
   ALLOWED_PREFIXES,
   ROUTE_BASE_COMMIT,
+  ROUTE_PARENT_COMMIT,
   assertHarnessOnlyChangedFiles,
   isHarnessOnlyFile,
   normalizeRepositoryFile
@@ -36,11 +37,15 @@ const AUTHORIZED_FILES = Object.freeze([
 test("exact 0004 runner scope accepts exactly eighteen paths", () => {
   assert.equal(
     AUTHORIZED_BRANCH,
-    "social/checkpoint-3b0-exact-0004-runner-linux-snapshot-role-binding-20260815"
+    "social/checkpoint-3b0-exact-0004-runner-linux-ledger-oid-boundary-20260816"
   );
   assert.equal(
     ROUTE_BASE_COMMIT,
     "13e38b875db2a220514fe06113663c517c975592"
+  );
+  assert.equal(
+    ROUTE_PARENT_COMMIT,
+    "05689e6d23e65c6df33e3db79633126114dea540"
   );
   assert.equal(AUTHORIZED_FILES.length, 18);
   assert.deepEqual(ALLOWED_PREFIXES, []);

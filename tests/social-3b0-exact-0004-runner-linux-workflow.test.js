@@ -12,11 +12,12 @@ const ROOT = path.resolve(__dirname, "..");
 const RELATIVE = ".github/workflows/social-3b0-exact-0004-runner-linux.yml";
 const FILE = path.join(ROOT, ...RELATIVE.split("/"));
 const BRANCH =
-  "social/checkpoint-3b0-exact-0004-runner-linux-snapshot-role-binding-20260815";
+  "social/checkpoint-3b0-exact-0004-runner-linux-ledger-oid-boundary-20260816";
 const BASE = "13e38b875db2a220514fe06113663c517c975592";
+const PARENT = "05689e6d23e65c6df33e3db79633126114dea540";
 const SOURCE_COMMIT = "8534817574a22dbd144a835c9f3585c44ee11c96";
 const MESSAGE =
-  "[run-social-3b0] bind exact 0004 snapshots to migrator role";
+  "[run-social-3b0] resolve exact 0004 ledger privilege by oid";
 const IMAGE =
   "docker.io/library/postgres:18.4-bookworm@sha256:7e6103cf85f88f7a0eddb3ec0b1ba8940eba098ed118ade25a729ca9daee5568";
 const CHECKOUT = "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1";
@@ -34,8 +35,12 @@ const PRESERVED_FUNCTIONAL_FILES = Object.freeze([
 ]);
 const REAL_TEST_FILE = "tests/social-postgres-real.test.js";
 const REAL_TEST_LF_SHA256 =
-  "47d8d35369fb9a028bd3d5d2b0b9e42f1e91b914447fb7547c8421f8d2b2232b";
+  "27a4d1ebbccda40711fd1a78a2f170efa3128690b86588be0c7ab515345f49d0";
 const REAL_TEST_FILTERED_OID =
+  "bebdc618879cabd589dbe93a3b6a2c9a172aa98e";
+const PARENT_REAL_TEST_LF_SHA256 =
+  "47d8d35369fb9a028bd3d5d2b0b9e42f1e91b914447fb7547c8421f8d2b2232b";
+const PARENT_REAL_TEST_FILTERED_OID =
   "ad9e879bd6546f9a54b3687602aa0479ad1a0027";
 const PERMISSION_BOUNDARY_COMMIT =
   "555d71eacbde76ceffdd03d64731e03849978c17";
@@ -94,6 +99,15 @@ const EXACT18 = Object.freeze([
   "tests/social-3b0-exact-0004-runner-linux-workflow.test.js",
   "tests/social-3b0-linux-physical-gate.test.js",
   "tests/social-postgres-migrations.test.js",
+  "tests/social-postgres-real.test.js"
+]);
+const INCREMENTAL7 = Object.freeze([
+  ".github/workflows/social-3b0-exact-0004-runner-linux.yml",
+  "scripts/social-3a0p-local-scope.js",
+  "tests/node-test-runner-safety.test.js",
+  "tests/social-3a0p-current-diff-scope.test.js",
+  "tests/social-3a0p-local-scope.test.js",
+  "tests/social-3b0-exact-0004-runner-linux-workflow.test.js",
   "tests/social-postgres-real.test.js"
 ]);
 const LEGACY_EVIDENCE_KEYS = Object.freeze([
@@ -188,7 +202,7 @@ function stepByName(currentJob, name) {
 }
 
 function bashExpectedInventory(source) {
-  const startToken = "expected=(\n";
+  const startToken = "\nexpected=(\n";
   const endToken = "\n)\nmapfile -d '' actual";
   assert.equal(source.split(startToken).length - 1, 1);
   const start = source.indexOf(startToken) + startToken.length;
@@ -325,6 +339,20 @@ function physicalTestPinMap(source) {
   return matches[0];
 }
 
+function bashIncrementalInventory(source) {
+  const startToken = "incremental_expected=(\n";
+  const endToken = "\n)\nmapfile -d '' incremental_actual";
+  assert.equal(source.split(startToken).length - 1, 1);
+  const start = source.indexOf(startToken) + startToken.length;
+  const end = source.indexOf(endToken, start);
+  assert.ok(end > start);
+  return source.slice(start, end).split("\n").map((line) => {
+    const match = /^  '([^']+)'$/.exec(line);
+    assert.ok(match, line);
+    return match[1];
+  });
+}
+
 function cleanupPinMap(source) {
   const matches = associativePinMaps(source).filter(({ pins }) => (
     Object.keys(pins).length === CLEANUP_FILES.length &&
@@ -392,7 +420,7 @@ function git(args, encoding = "utf8") {
     encoding,
     windowsHide: true,
     stdio: ["ignore", "pipe", "ignore"],
-    timeout: 20_000,
+    timeout: 60_000,
     maxBuffer: 4 * 1024 * 1024,
     env: {
       ...process.env,
@@ -419,10 +447,11 @@ test("Exact-0004 Linux workflow is strict JSON with the one authorized trigger",
   assert.equal(source.includes("permissions: write"), false);
 });
 
-test("Exact-0004 Linux workflow fixes branch, parent, message, first push and Exact18", () => {
+test("Exact-0004 Linux workflow fixes branch, immediate parent, ancestral base, message and Exact18", () => {
   const { source, workflow } = read();
   assert.deepEqual(workflow.env, {
     SOCIAL_EXACT_BASE: BASE,
+    SOCIAL_EXACT_PARENT: PARENT,
     SOCIAL_EXACT_BRANCH: BRANCH,
     SOCIAL_EXACT_MESSAGE: MESSAGE,
     SOCIAL_EXACT_POSTGRES_IMAGE: IMAGE
@@ -439,20 +468,66 @@ test("Exact-0004 Linux workflow fixes branch, parent, message, first push and Ex
     "github.run_attempt == 1"
   ]) assert.ok(currentJob.if.includes(fragment), fragment);
   const guard = stepByName(currentJob, "Verify immutable Exact18 contract").run;
-  assert.ok(guard.includes("git rev-parse HEAD^"));
+  assert.ok(
+    guard.includes(
+      '[[ "$(git rev-parse HEAD^)" == "${SOCIAL_EXACT_PARENT}" ]] || fail'
+    )
+  );
   assert.ok(guard.includes("git rev-list --parents -n 1 HEAD"));
-  assert.ok(guard.includes("git diff-tree --no-commit-id --name-only -r --no-renames -z"));
-  assert.ok(guard.includes("${#actual[@]}") && guard.includes("${#expected[@]}"));
+  assert.ok(guard.includes('${parents[1]}" == "${SOCIAL_EXACT_PARENT}'));
+  assert.ok(guard.includes(
+    "mapfile -d '' incremental_actual < <(git diff-tree --no-commit-id --name-only -r --no-renames -z \"${SOCIAL_EXACT_PARENT}\" HEAD --)"
+  ));
+  assert.ok(guard.includes(
+    '[[ "${#incremental_actual[@]}" == "${#incremental_expected[@]}" ]] || fail'
+  ));
+  assert.ok(guard.includes(
+    '[[ "$(printf \'%s\\n\' "${incremental_actual_sorted[@]}")" == "$(printf \'%s\\n\' "${incremental_expected_sorted[@]}")" ]] || fail'
+  ));
+  assert.ok(guard.includes(
+    "mapfile -d '' actual < <(git diff-tree --no-commit-id --name-only -r --no-renames -z \"${SOCIAL_EXACT_BASE}\" HEAD --)"
+  ));
+  assert.ok(guard.includes(
+    '[[ "${#actual[@]}" == "${#expected[@]}" ]] || fail'
+  ));
+  assert.ok(guard.includes(
+    '[[ "$(printf \'%s\\n\' "${actual_sorted[@]}")" == "$(printf \'%s\\n\' "${expected_sorted[@]}")" ]] || fail'
+  ));
   assert.equal(EXACT18.length, 18);
   assert.equal(new Set(EXACT18).size, 18);
   const guardInventory = bashExpectedInventory(guard);
   assert.deepEqual(guardInventory, EXACT18);
+  assert.deepEqual(bashIncrementalInventory(guard), INCREMENTAL7);
   const physical = stepByName(
     currentJob,
     "Run the one-shot PostgreSQL 18 Exact-0004 proof"
   );
   const finalize = stepByName(currentJob, "Finalize sanitized four-file evidence");
   const enforcement = stepByName(currentJob, "Enforce final Exact-0004 result");
+  assert.ok(
+    physical.run.includes(
+      "safeRouteEnv=new Set(['SOCIAL_EXACT_BASE','SOCIAL_EXACT_PARENT'"
+    )
+  );
+  assert.equal(
+    physical.run.split("parent:process.env.SOCIAL_EXACT_PARENT").length - 1,
+    1
+  );
+  assert.equal(
+    finalize.run.split("parent:process.env.SOCIAL_EXACT_PARENT").length - 1,
+    1
+  );
+  assert.ok(
+    finalize.run.includes("value.parent!==process.env.SOCIAL_EXACT_PARENT")
+  );
+  assert.ok(
+    enforcement.run.includes(
+      "evidence.parent!==process.env.SOCIAL_EXACT_PARENT"
+    )
+  );
+  assert.equal(source.includes("parent:process.env.SOCIAL_EXACT_BASE"), false);
+  assert.ok(guard.includes('${SOCIAL_EXACT_PARENT}:$file'));
+  assert.ok(guard.includes('${SOCIAL_EXACT_BASE}:$file'));
   const physicalInventory = inlineInventory(physical.run, "inventory");
   const finalizeInventory = inlineInventory(finalize.run, "inventory");
   const enforcementInventory = inlineInventory(
@@ -519,6 +594,8 @@ test("Exact-0004 Linux workflow fixes branch, parent, message, first push and Ex
     false
   );
   for (const stale of [
+    "social/checkpoint-3b0-exact-0004-runner-linux-snapshot-role-binding-20260815",
+    "[run-social-3b0] bind exact 0004 snapshots to migrator role",
     "social/checkpoint-3b0-exact-0004-runner-linux-permission-boundary-20260814",
     "[run-social-3b0] pinpoint exact 0004 permission boundary",
     PERMISSION_BOUNDARY_COMMIT,
@@ -874,7 +951,150 @@ test("cleanup pins come from canonical Git LF blobs", () => {
   }
 });
 
-test("snapshot-role binding is the exact functional delta from the failed permission-boundary proof", () => {
+test("ledger OID correction is exact atop snapshot-role binding and preserves its historical proof", () => {
+  const parentBytes = git([
+    "cat-file",
+    "blob",
+    `${PARENT}:${REAL_TEST_FILE}`
+  ], null);
+  assert.ok(Buffer.isBuffer(parentBytes));
+  assert.equal(
+    crypto.createHash("sha256").update(parentBytes).digest("hex"),
+    PARENT_REAL_TEST_LF_SHA256
+  );
+  assert.equal(gitBlobOid(parentBytes), PARENT_REAL_TEST_FILTERED_OID);
+  const parentSource = parentBytes.toString("utf8");
+  const latestSource = canonicalLfBytes(REAL_TEST_FILE).toString("utf8");
+  const helperSignature =
+    "async function proveMigratorExplicitRoleBoundary(pool) {";
+  const parentHelper = inlineFunction(parentSource, helperSignature);
+  const latestHelper = inlineFunction(latestSource, helperSignature);
+  const physicalReadMarker = "  const ledgerRead =";
+  const parentMarker = parentHelper.indexOf(physicalReadMarker);
+  const latestMarker = latestHelper.indexOf(physicalReadMarker);
+  assert.ok(parentMarker > 0);
+  assert.ok(latestMarker > 0);
+  assert.equal(latestHelper.slice(latestMarker), parentHelper.slice(parentMarker));
+  const rewriteExactlyOnce = (source, before, after, label) => {
+    assert.equal(source.split(before).length - 1, 1, label);
+    return source.replace(before, after);
+  };
+  let expectedLatestHelper = parentHelper;
+  expectedLatestHelper = rewriteExactlyOnce(
+    expectedLatestHelper,
+    [
+      '      "  NOT has_schema_privilege(",',
+      '      "    session_user, \'ia4tube_migrations\', \'USAGE\'",',
+      '      "  ) AS direct_schema_usage_absent,",',
+      '      "  NOT has_table_privilege(",',
+      '      "    session_user, \'ia4tube_migrations.schema_migrations\', \'SELECT\'",'
+    ].join("\n"),
+    [
+      '      "  member.oid AS member_oid,",',
+      '      "  namespace.oid AS namespace_oid,",',
+      '      "  relation.oid AS relation_oid,",',
+      '      "  relation.relkind AS relation_kind,",',
+      '      "  NOT pg_catalog.has_schema_privilege(",',
+      '      "    member.oid, namespace.oid, \'USAGE\'",',
+      '      "  ) AS direct_schema_usage_absent,",',
+      '      "  NOT pg_catalog.has_table_privilege(",',
+      '      "    member.oid, relation.oid, \'SELECT\'",'
+    ].join("\n"),
+    "OID privilege operands"
+  );
+  expectedLatestHelper = rewriteExactlyOnce(
+    expectedLatestHelper,
+    [
+      '      "JOIN pg_catalog.pg_roles member",',
+      '      "  ON member.oid = membership.member",'
+    ].join("\n"),
+    [
+      '      "JOIN pg_catalog.pg_roles member",',
+      '      "  ON member.oid = membership.member",',
+      '      "JOIN pg_catalog.pg_namespace namespace",',
+      '      "  ON namespace.nspname = \'ia4tube_migrations\'",',
+      '      "JOIN pg_catalog.pg_class relation",',
+      '      "  ON relation.relnamespace = namespace.oid",',
+      '      "  AND relation.relname = \'schema_migrations\'",',
+      '      "  AND relation.relkind = \'r\'",'
+    ].join("\n"),
+    "catalog OID joins"
+  );
+  expectedLatestHelper = rewriteExactlyOnce(
+    expectedLatestHelper,
+    [
+      '      "WHERE granted.rolname = $1",',
+      '      "  AND member.rolname = session_user"'
+    ].join("\n"),
+    [
+      '      "WHERE granted.rolname = $1",',
+      '      "  AND member.rolname = session_user",',
+      '      "  AND member.oid IS NOT NULL",',
+      '      "  AND namespace.oid IS NOT NULL",',
+      '      "  AND relation.oid IS NOT NULL"'
+    ].join("\n"),
+    "catalog OID guards"
+  );
+  expectedLatestHelper = rewriteExactlyOnce(
+    expectedLatestHelper,
+    [
+      "  assert.equal(boundary.rowCount, 1);",
+      "  assert.deepEqual(boundary.rows[0], {"
+    ].join("\n"),
+    [
+      "  assert.equal(boundary.rowCount, 1);",
+      "  const {",
+      "    member_oid: memberOid,",
+      "    namespace_oid: namespaceOid,",
+      "    relation_oid: relationOid,",
+      "    relation_kind: relationKind,",
+      "    ...boundaryFacts",
+      "  } = boundary.rows[0];",
+      "  for (const oid of [memberOid, namespaceOid, relationOid]) {",
+      "    assert.equal(Number.isInteger(oid) && oid > 0, true);",
+      "  }",
+      '  assert.equal(relationKind, "r");',
+      "  assert.deepEqual(boundaryFacts, {"
+    ].join("\n"),
+    "OID result authentication"
+  );
+  assert.equal(latestHelper, expectedLatestHelper);
+  for (const fragment of [
+    "pg_catalog.pg_namespace namespace",
+    "pg_catalog.pg_class relation",
+    "member.oid, namespace.oid, 'USAGE'",
+    "member.oid, relation.oid, 'SELECT'",
+    "relation.relkind = 'r'",
+    "member.oid IS NOT NULL",
+    "namespace.oid IS NOT NULL",
+    "relation.oid IS NOT NULL",
+    "Number.isInteger(oid) && oid > 0",
+    'assert.equal(relationKind, "r")'
+  ]) assert.ok(latestHelper.includes(fragment), fragment);
+  assert.ok(
+    parentHelper.includes(
+      "session_user, 'ia4tube_migrations.schema_migrations', 'SELECT'"
+    )
+  );
+  assert.equal(
+    latestHelper.includes(
+      "session_user, 'ia4tube_migrations.schema_migrations', 'SELECT'"
+    ),
+    false
+  );
+  for (const forbidden of [
+    /\berror\?\.(?:message|stack|detail|hint|where|schema|table|column|constraint)\b/,
+    /\bString\(error/,
+    /\bJSON\.stringify\(error/,
+    /\bconsole\./,
+    /\bprocess\.(?:stdout|stderr)\.write/,
+    /\bcause\s*[:=]/,
+    /\b(?:GRANT|REVOKE|ALTER\s+(?:ROLE|USER)|SET\s+SESSION\s+AUTHORIZATION)\b/i
+  ]) assert.equal(forbidden.test(latestHelper), false, String(forbidden));
+  assert.equal(latestSource.split(latestHelper).length - 1, 1);
+  const normalizedLatest = latestSource.replace(latestHelper, parentHelper);
+  assert.equal(normalizedLatest, parentSource);
+
   const predecessorBytes = git([
     "cat-file",
     "blob",
@@ -891,7 +1111,7 @@ test("snapshot-role binding is the exact functional delta from the failed permis
   );
 
   const predecessorSource = predecessorBytes.toString("utf8");
-  const currentSource = canonicalLfBytes(REAL_TEST_FILE).toString("utf8");
+  const currentSource = parentSource;
   const literals = (source) => [
     ...source.matchAll(
       /"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|`(?:\\.|[^`\\])*`/g
@@ -903,8 +1123,6 @@ test("snapshot-role binding is the exact functional delta from the failed permis
     return source.split(before).join(after);
   };
 
-  const helperSignature =
-    "async function proveMigratorExplicitRoleBoundary(pool) {";
   assert.equal(currentSource.split(helperSignature).length - 1, 1);
   assert.equal(predecessorSource.includes(helperSignature), false);
   const helper = inlineFunction(currentSource, helperSignature);
