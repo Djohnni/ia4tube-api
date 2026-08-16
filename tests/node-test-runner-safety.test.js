@@ -1,6 +1,9 @@
 "use strict";
 
 const assert = require("node:assert/strict");
+const crypto = require("node:crypto");
+const { execFileSync } = require("node:child_process");
+const fs = require("node:fs");
 const path = require("node:path");
 const test = require("node:test");
 
@@ -28,13 +31,42 @@ const ADDED_WINDOWS_NATIVE_SERIAL_FILES = Object.freeze([
   "social-3a0p-local-safe-zip-extract.test.js",
   "social-postgres-tls.test.js"
 ]);
+const CURRENT_DIFF_SCOPE_SERIAL_FILE =
+  "social-3a0p-current-diff-scope.test.js";
 const EXPECTED_SERIAL_FILES = Object.freeze([
   ...PREVIOUS_SERIAL_FILES,
-  ...ADDED_WINDOWS_NATIVE_SERIAL_FILES
+  ...ADDED_WINDOWS_NATIVE_SERIAL_FILES,
+  CURRENT_DIFF_SCOPE_SERIAL_FILE
 ]);
 const SYNTHETIC_TEST_DIRECTORY = path.resolve("synthetic-runner-tests");
 const SYNTHETIC_REPOSITORY_ROOT = path.resolve("synthetic-runner-root");
 const SYNTHETIC_EXECUTABLE = path.resolve("synthetic-node");
+const REPOSITORY_ROOT = path.resolve(__dirname, "..");
+const SAFE_EVIDENCE_COMMIT = "8534817574a22dbd144a835c9f3585c44ee11c96";
+const PERMISSION_BOUNDARY_COMMIT = "555d71eacbde76ceffdd03d64731e03849978c17";
+const REAL_POSTGRES_TEST = "tests/social-postgres-real.test.js";
+const REAL_POSTGRES_TEST_LF_SHA256 =
+  "47d8d35369fb9a028bd3d5d2b0b9e42f1e91b914447fb7547c8421f8d2b2232b";
+const REAL_POSTGRES_TEST_FILTERED_OID =
+  "ad9e879bd6546f9a54b3687602aa0479ad1a0027";
+const PHYSICAL_MAIN_PHASES = Object.freeze([
+  "physical_target_preflight",
+  "role_provisioning",
+  "direct_connect_boundary",
+  "startup_unmigrated",
+  "migration_0001_0002",
+  "pre_registry_seed",
+  "migration_0003_rollback",
+  "migration_0003_apply",
+  "exact_0004_plan_apply",
+  "post_migration_validation",
+  "migration_cli",
+  "runtime_role_schema",
+  "runtime_permission_negatives",
+  "tenant_rls",
+  "vault_persistence",
+  "reauthentication"
+]);
 
 function directoryEntry(name, isFile = true) {
   return {
@@ -108,6 +140,21 @@ function testFileArguments(call) {
   return call.args.filter((argument) => argument.endsWith(".test.js"));
 }
 
+function replaceExactlyOnce(source, current, previous, label) {
+  const first = source.indexOf(current);
+  assert.notEqual(first, -1, label);
+  assert.equal(source.indexOf(current, first + current.length), -1, label);
+  return `${source.slice(0, first)}${previous}${source.slice(first + current.length)}`;
+}
+
+function closedSourceSection(source, startMarker, endMarker) {
+  const start = source.indexOf(startMarker);
+  assert.notEqual(start, -1, startMarker);
+  const end = source.indexOf(endMarker, start + startMarker.length);
+  assert.notEqual(end, -1, endMarker);
+  return source.slice(start, end);
+}
+
 test("1. automated test discovery remains deterministically ordered", () => {
   const discovered = discover([
     "zeta.test.js",
@@ -127,16 +174,20 @@ test("2. the ordinary runner keeps every dedicated physical gate excluded", () =
   assert.equal(discovered.includes("social-postgres-real.test.js"), false);
 });
 
-test("3. the closed serial manifest contains the six previous and five native Windows files", () => {
+test("3. the closed serial manifest preserves eleven files and adds only current-diff scope", () => {
   const repositoryTests = discoverAutomatedTests(path.resolve(__dirname)).map((file) =>
     path.basename(file)
   );
-  const previousSet = new Set(PREVIOUS_SERIAL_FILES);
+  const previousManifest = [
+    ...PREVIOUS_SERIAL_FILES,
+    ...ADDED_WINDOWS_NATIVE_SERIAL_FILES
+  ];
+  const previousSet = new Set(previousManifest);
   assert.deepEqual(PROCESS_LIFECYCLE_TEST_FILES, EXPECTED_SERIAL_FILES);
-  assert.equal(PROCESS_LIFECYCLE_TEST_FILES.length, 11);
+  assert.equal(PROCESS_LIFECYCLE_TEST_FILES.length, 12);
   assert.deepEqual(
     PROCESS_LIFECYCLE_TEST_FILES.filter((name) => previousSet.has(name)),
-    PREVIOUS_SERIAL_FILES
+    previousManifest
   );
   for (const name of ADDED_WINDOWS_NATIVE_SERIAL_FILES) {
     assert.equal(
@@ -145,6 +196,12 @@ test("3. the closed serial manifest contains the six previous and five native Wi
       name
     );
   }
+  assert.equal(
+    PROCESS_LIFECYCLE_TEST_FILES.filter(
+      (candidate) => candidate === CURRENT_DIFF_SCOPE_SERIAL_FILE
+    ).length,
+    1
+  );
   for (const name of EXPECTED_SERIAL_FILES) assert.ok(repositoryTests.includes(name), name);
 });
 
@@ -312,4 +369,547 @@ test("23. partitioning preserves the exact total automated-test count", () => {
   assert.equal(plan.serial.length + plan.concurrent.length, discovered.length);
   const { calls } = invokeRunner();
   assert.equal(calls.flatMap(testFileArguments).length, discovered.length);
+});
+
+test("24. exact 0004 production ledger reads use the migrator role only", () => {
+  const migrationsPath = path.join(
+    REPOSITORY_ROOT,
+    "src",
+    "persistence",
+    "postgres",
+    "migrations.js"
+  );
+  const realTestPath = path.join(
+    REPOSITORY_ROOT,
+    "tests",
+    "social-postgres-real.test.js"
+  );
+  const migrationsSource = fs.readFileSync(migrationsPath, "utf8")
+    .replaceAll("\r\n", "\n");
+  const rawRealTest = fs.readFileSync(realTestPath, "utf8");
+  const realTestSource = rawRealTest.replaceAll("\r\n", "\n");
+  assert.equal(migrationsSource.includes("\r"), false);
+  assert.equal(realTestSource.includes("\r"), false);
+
+  const roleBoundaryHelper = closedSourceSection(
+    realTestSource,
+    "async function proveMigratorExplicitRoleBoundary(pool) {",
+    "async function readExactCatalogSnapshot(pool) {"
+  );
+  const authorizedRoleBoundaryHelper = String.raw`async function proveMigratorExplicitRoleBoundary(pool) {
+  const boundary = await pool.query(
+    [
+      "SELECT",
+      "  NOT member.rolinherit AS login_noinherit,",
+      "  NOT membership.inherit_option AS membership_noinherit,",
+      "  membership.set_option AS set_role_allowed,",
+      "  current_user = session_user AS login_role_active,",
+      "  NOT has_schema_privilege(",
+      "    session_user, 'ia4tube_migrations', 'USAGE'",
+      "  ) AS direct_schema_usage_absent,",
+      "  NOT has_table_privilege(",
+      "    session_user, 'ia4tube_migrations.schema_migrations', 'SELECT'",
+      "  ) AS direct_ledger_select_absent",
+      "FROM pg_catalog.pg_auth_members membership",
+      "JOIN pg_catalog.pg_roles granted",
+      "  ON granted.oid = membership.roleid",
+      "JOIN pg_catalog.pg_roles member",
+      "  ON member.oid = membership.member",
+      "WHERE granted.rolname = $1",
+      "  AND member.rolname = session_user"
+    ].join("\n"),
+    [MIGRATOR_ROLE]
+  );
+  assert.equal(boundary.rowCount, 1);
+  assert.deepEqual(boundary.rows[0], {
+    login_noinherit: true,
+    membership_noinherit: true,
+    set_role_allowed: true,
+    login_role_active: true,
+    direct_schema_usage_absent: true,
+    direct_ledger_select_absent: true
+  });
+
+  const ledgerRead =
+    "SELECT COUNT(*)::integer AS ledger_count " +
+    "FROM ia4tube_migrations.schema_migrations";
+  await assert.rejects(
+    async () => {
+      try {
+        await pool.query(ledgerRead);
+      } catch (error) {
+        const sanitized = new Error("migration_login_direct_ledger_refused");
+        sanitized.code = error?.code === "42501" ? "42501" : "unknown";
+        throw sanitized;
+      }
+    },
+    (error) => error?.code === "42501"
+  );
+  const allowed = await withTransaction(
+    pool,
+    (client) => client.query(ledgerRead),
+    { role: MIGRATOR_ROLE }
+  );
+  assert.equal(allowed.rowCount, 1);
+  assert.equal(Number.isInteger(allowed.rows[0].ledger_count), true);
+}
+
+`;
+  assert.equal(roleBoundaryHelper, authorizedRoleBoundaryHelper);
+
+  const snapshotSource = closedSourceSection(
+    realTestSource,
+    "async function readExactCatalogSnapshot(pool) {",
+    "async function insertExact0004Conflict(pool, fixture) {"
+  );
+  const exactRouteSource = closedSourceSection(
+    realTestSource,
+    "async function proveExact0004Route(",
+    "function tenantFixture(label) {"
+  );
+  const productionSnapshotSource = `${snapshotSource}${exactRouteSource}`;
+  assert.equal(
+    (productionSnapshotSource.match(
+      /ia4tube_migrations\.schema_migrations/g
+    ) || []).length,
+    3
+  );
+  assert.equal(
+    snapshotSource.startsWith(
+      [
+        "async function readExactCatalogSnapshot(pool) {",
+        "  const result = await withTransaction(",
+        "    pool,",
+        "    (client) => client.query("
+      ].join("\n")
+    ),
+    true
+  );
+  assert.equal(
+    (snapshotSource.match(/\{ role: MIGRATOR_ROLE \}/g) || []).length,
+    1
+  );
+  assert.equal(snapshotSource.includes("await pool.query("), false);
+  assert.equal(
+    exactRouteSource.includes(
+      "const rollbackState = await migrationPoolA.query("
+    ),
+    false
+  );
+  assert.equal(
+    exactRouteSource.includes("const final = await migrationPoolA.query("),
+    false
+  );
+  assert.equal(
+    (exactRouteSource.match(/\{ role: MIGRATOR_ROLE \}/g) || []).length,
+    2
+  );
+  assert.equal(
+    (exactRouteSource.match(/\brunnerA\.planExact\(/g) || []).length,
+    2
+  );
+  assert.equal(
+    (exactRouteSource.match(/\bfutureRunner\.planExact\(/g) || []).length,
+    1
+  );
+  assert.equal(
+    (exactRouteSource.match(/\brunnerA\.applyExact\(/g) || []).length,
+    2
+  );
+  assert.equal(
+    (exactRouteSource.match(/\brunnerB\.applyExact\(/g) || []).length,
+    1
+  );
+  const boundaryCall = exactRouteSource.indexOf(
+    "  await proveMigratorExplicitRoleBoundary(migrationPoolA);"
+  );
+  const firstSnapshot = exactRouteSource.indexOf(
+    "  const beforePlan = await readExactCatalogSnapshot(migrationPoolA);"
+  );
+  const firstPlan = exactRouteSource.indexOf(
+    "  const plan = await runnerA.planExact("
+  );
+  assert.notEqual(boundaryCall, -1);
+  assert.equal(boundaryCall < firstSnapshot, true);
+  assert.equal(firstSnapshot < firstPlan, true);
+
+  const authorizedPermissionReplacements = [
+    {
+      label: "closed explicit-role negative",
+      current: authorizedRoleBoundaryHelper,
+      previous: ""
+    },
+    {
+      label: "negative invocation before the first snapshot",
+      current: "  await proveMigratorExplicitRoleBoundary(migrationPoolA);\n",
+      previous: ""
+    },
+    {
+      label: "catalog snapshot explicit-role opening",
+      current: [
+        "async function readExactCatalogSnapshot(pool) {",
+        "  const result = await withTransaction(",
+        "    pool,",
+        "    (client) => client.query(",
+        "      ["
+      ].join("\n"),
+      previous: [
+        "async function readExactCatalogSnapshot(pool) {",
+        "  const result = await pool.query(",
+        "    ["
+      ].join("\n")
+    },
+    {
+      label: "catalog snapshot explicit-role closing",
+      current: [
+        "      ].join(\"\\n\"),",
+        "      [[\"ia4tube_migrations\", \"ia4tube_social\", \"ia4tube_social_admin\"]]",
+        "    ),",
+        "    { role: MIGRATOR_ROLE }",
+        "  );"
+      ].join("\n"),
+      previous: [
+        "    ].join(\"\\n\"),",
+        "    [[\"ia4tube_migrations\", \"ia4tube_social\", \"ia4tube_social_admin\"]]",
+        "  );"
+      ].join("\n")
+    },
+    {
+      label: "rollback snapshot explicit-role opening",
+      current: [
+        "    const rollbackState = await withTransaction(",
+        "      migrationPoolA,",
+        "      (client) => client.query(",
+        "        ["
+      ].join("\n"),
+      previous: [
+        "    const rollbackState = await migrationPoolA.query(",
+        "      ["
+      ].join("\n")
+    },
+    {
+      label: "rollback snapshot explicit-role closing",
+      current: [
+        "        ].join(\"\\n\"),",
+        "        [SOCIAL_CONNECTOR_PERSISTENCE_MIGRATION]",
+        "      ),",
+        "      { role: MIGRATOR_ROLE }",
+        "    );"
+      ].join("\n"),
+      previous: [
+        "      ].join(\"\\n\"),",
+        "      [SOCIAL_CONNECTOR_PERSISTENCE_MIGRATION]",
+        "    );"
+      ].join("\n")
+    },
+    {
+      label: "final snapshot explicit-role opening",
+      current: [
+        "  const final = await withTransaction(",
+        "    migrationPoolA,",
+        "    (client) => client.query(",
+        "      ["
+      ].join("\n"),
+      previous: [
+        "  const final = await migrationPoolA.query(",
+        "    ["
+      ].join("\n")
+    },
+    {
+      label: "final snapshot explicit-role closing",
+      current: [
+        "      ].join(\"\\n\"),",
+        "      [",
+        "        SOCIAL_CONNECTOR_PERSISTENCE_MIGRATION,",
+        "        [",
+        "          \"social_idempotency_operations\",",
+        "          \"social_publications\",",
+        "          \"social_publication_attempts\"",
+        "        ]",
+        "      ]",
+        "    ),",
+        "    { role: MIGRATOR_ROLE }",
+        "  );"
+      ].join("\n"),
+      previous: [
+        "    ].join(\"\\n\"),",
+        "    [",
+        "      SOCIAL_CONNECTOR_PERSISTENCE_MIGRATION,",
+        "      [",
+        "        \"social_idempotency_operations\",",
+        "        \"social_publications\",",
+        "        \"social_publication_attempts\"",
+        "      ]",
+        "    ]",
+        "  );"
+      ].join("\n")
+    }
+  ];
+  assert.equal(
+    /\b(?:GRANT|REVOKE|CREATE\s+(?:ROLE|USER)|ALTER\s+(?:ROLE|USER))\b/i.test(
+      authorizedPermissionReplacements.map(({ current }) => current).join("\n")
+    ),
+    false
+  );
+  let permissionBoundaryCandidate = realTestSource;
+  for (const { current, previous, label } of authorizedPermissionReplacements) {
+    permissionBoundaryCandidate = replaceExactlyOnce(
+      permissionBoundaryCandidate,
+      current,
+      previous,
+      label
+    );
+  }
+  const permissionBoundaryHistorical = execFileSync(
+    "git",
+    [
+      "cat-file",
+      "blob",
+      `${PERMISSION_BOUNDARY_COMMIT}:${REAL_POSTGRES_TEST}`
+    ],
+    {
+      cwd: REPOSITORY_ROOT,
+      encoding: null,
+      windowsHide: true,
+      stdio: ["ignore", "pipe", "ignore"],
+      timeout: 20_000,
+      maxBuffer: 2 * 1024 * 1024,
+      env: {
+        ...process.env,
+        GIT_OPTIONAL_LOCKS: "0",
+        GIT_TERMINAL_PROMPT: "0"
+      }
+    }
+  );
+  assert.deepEqual(
+    Buffer.from(permissionBoundaryCandidate, "utf8"),
+    permissionBoundaryHistorical
+  );
+
+  const exportBlock = /module\.exports\s*=\s*\{([^{}]*)\};/.exec(
+    migrationsSource
+  );
+  assert.ok(exportBlock);
+  assert.equal(
+    (exportBlock[1].match(/\bGLOBAL_VAULT_REGISTRY_MIGRATION\b/g) || []).length,
+    1
+  );
+  const importBlock = /const \{([^{}]*)\} = require\("\.\.\/src\/persistence\/postgres\/migrations"\);/.exec(
+    realTestSource
+  );
+  assert.ok(importBlock);
+  const importedNames = importBlock[1].split(",").map((name) => name.trim());
+  assert.equal(
+    importedNames.filter((name) => name === "GLOBAL_VAULT_REGISTRY_MIGRATION").length,
+    1
+  );
+  assert.equal(
+    (realTestSource.match(/\bGLOBAL_VAULT_REGISTRY_MIGRATION\b/g) || []).length,
+    4
+  );
+  const sourceWithoutBinding = permissionBoundaryCandidate.replace(
+    "  GLOBAL_VAULT_REGISTRY_MIGRATION,\n",
+    ""
+  );
+  assert.equal(
+    /\b(?:const|let|var)\s+GLOBAL_VAULT_REGISTRY_MIGRATION\b/.test(
+      sourceWithoutBinding
+    ),
+    false
+  );
+  for (const expression of [
+    /\(item\) => item\.version === GLOBAL_VAULT_REGISTRY_MIGRATION/,
+    /\(migration\) => migration\.version === GLOBAL_VAULT_REGISTRY_MIGRATION/,
+    /\[GLOBAL_VAULT_REGISTRY_MIGRATION\]/
+  ]) assert.equal((sourceWithoutBinding.match(expression) || []).length, 1);
+  assert.equal(realTestSource.includes("0003_global_vault_key_registry"), false);
+  assert.equal(
+    realTestSource.split("  GLOBAL_VAULT_REGISTRY_MIGRATION,\n").length - 1,
+    1
+  );
+
+  const expectedMarkers = PHYSICAL_MAIN_PHASES.flatMap((phase) => [
+    `startMain:${phase}`,
+    `completeMain:${phase}`
+  ]).concat(["startCleanup", "completeCleanup"]);
+  const observedMarkers = [
+    ...realTestSource.matchAll(
+      /^      physicalPhases\.(?:(startMain|completeMain)\("([a-z0-9_]+)"\)|(startCleanup|completeCleanup)\(\));$/gm
+    )
+  ].map((match) => match[1] ? `${match[1]}:${match[2]}` : match[3]);
+  assert.equal(PHYSICAL_MAIN_PHASES.length, 16);
+  assert.equal(expectedMarkers.length, 34);
+  assert.deepEqual(observedMarkers, expectedMarkers);
+  assert.equal(
+    (realTestSource.match(/\bphysicalPhases\./g) || []).length,
+    34
+  );
+  assert.equal(
+    (realTestSource.match(/\bcreatePhysicalPhaseEmitter\b/g) || []).length,
+    2
+  );
+
+  const authorizedInstrumentation = [
+    "  createPhysicalPhaseEmitter,\n",
+    "    const physicalPhases = createPhysicalPhaseEmitter();\n",
+    ...PHYSICAL_MAIN_PHASES.flatMap((phase) => [
+      `      physicalPhases.startMain("${phase}");\n`,
+      `      physicalPhases.completeMain("${phase}");\n`
+    ]),
+    "      physicalPhases.startCleanup();\n",
+    "      physicalPhases.completeCleanup();\n"
+  ];
+  let baselineCandidate = sourceWithoutBinding;
+  for (const line of authorizedInstrumentation) {
+    assert.equal(baselineCandidate.split(line).length - 1, 1, line.trim());
+    baselineCandidate = baselineCandidate.replace(line, "");
+  }
+
+  const historical = execFileSync(
+    "git",
+    ["cat-file", "blob", `${SAFE_EVIDENCE_COMMIT}:${REAL_POSTGRES_TEST}`],
+    {
+      cwd: REPOSITORY_ROOT,
+      encoding: null,
+      windowsHide: true,
+      stdio: ["ignore", "pipe", "ignore"],
+      timeout: 20_000,
+      maxBuffer: 2 * 1024 * 1024,
+      env: {
+        ...process.env,
+        GIT_OPTIONAL_LOCKS: "0",
+        GIT_TERMINAL_PROMPT: "0"
+      }
+    }
+  );
+  assert.deepEqual(Buffer.from(baselineCandidate, "utf8"), historical);
+  const canonical = Buffer.from(realTestSource, "utf8");
+  assert.equal(
+    crypto.createHash("sha256").update(canonical).digest("hex"),
+    REAL_POSTGRES_TEST_LF_SHA256
+  );
+  const filteredOid = execFileSync(
+    "git",
+    ["hash-object", `--path=${REAL_POSTGRES_TEST}`, "--", REAL_POSTGRES_TEST],
+    {
+      cwd: REPOSITORY_ROOT,
+      encoding: "utf8",
+      windowsHide: true,
+      stdio: ["ignore", "pipe", "ignore"],
+      timeout: 20_000,
+      env: {
+        ...process.env,
+        GIT_OPTIONAL_LOCKS: "0",
+        GIT_TERMINAL_PROMPT: "0"
+      }
+    }
+  ).trim();
+  assert.equal(filteredOid, REAL_POSTGRES_TEST_FILTERED_OID);
+});
+
+test("25. exact 0004 NOINHERIT boundary refuses direct ledger reads without raw error leakage", () => {
+  const realTestPath = path.join(
+    REPOSITORY_ROOT,
+    "tests",
+    "social-postgres-real.test.js"
+  );
+  const poolPath = path.join(
+    REPOSITORY_ROOT,
+    "src",
+    "persistence",
+    "postgres",
+    "pool.js"
+  );
+  const realTestSource = fs.readFileSync(realTestPath, "utf8")
+    .replaceAll("\r\n", "\n");
+  const poolSource = fs.readFileSync(poolPath, "utf8")
+    .replaceAll("\r\n", "\n");
+  assert.equal(realTestSource.includes("\r"), false);
+  assert.equal(poolSource.includes("\r"), false);
+
+  const roleBoundaryHelper = closedSourceSection(
+    realTestSource,
+    "async function proveMigratorExplicitRoleBoundary(pool) {",
+    "async function readExactCatalogSnapshot(pool) {"
+  );
+  for (const contract of [
+    "NOT member.rolinherit AS login_noinherit",
+    "NOT membership.inherit_option AS membership_noinherit",
+    "membership.set_option AS set_role_allowed",
+    "current_user = session_user AS login_role_active",
+    "session_user, 'ia4tube_migrations', 'USAGE'",
+    "session_user, 'ia4tube_migrations.schema_migrations', 'SELECT'",
+    "WHERE granted.rolname = $1",
+    "AND member.rolname = session_user",
+    "[MIGRATOR_ROLE]",
+    "login_noinherit: true",
+    "membership_noinherit: true",
+    "set_role_allowed: true",
+    "login_role_active: true",
+    "direct_schema_usage_absent: true",
+    "direct_ledger_select_absent: true"
+  ]) assert.equal(roleBoundaryHelper.includes(contract), true, contract);
+  assert.equal(
+    (roleBoundaryHelper.match(/\bawait assert\.rejects\(/g) || []).length,
+    1
+  );
+  assert.equal(
+    (roleBoundaryHelper.match(/\bawait pool\.query\(ledgerRead\)/g) || []).length,
+    1
+  );
+  assert.equal(
+    roleBoundaryHelper.includes(
+      'sanitized.code = error?.code === "42501" ? "42501" : "unknown";'
+    ),
+    true
+  );
+  assert.equal(
+    roleBoundaryHelper.includes('(error) => error?.code === "42501"'),
+    true
+  );
+  assert.equal(
+    (roleBoundaryHelper.match(/\(client\) => client\.query\(ledgerRead\)/g) || [])
+      .length,
+    1
+  );
+  assert.equal(
+    (roleBoundaryHelper.match(/\{ role: MIGRATOR_ROLE \}/g) || []).length,
+    1
+  );
+  assert.equal(roleBoundaryHelper.includes("assert.equal(allowed.rowCount, 1);"), true);
+  const directRead = roleBoundaryHelper.indexOf("await pool.query(ledgerRead);");
+  const roleRead = roleBoundaryHelper.indexOf("const allowed = await withTransaction(");
+  assert.notEqual(directRead, -1);
+  assert.equal(directRead < roleRead, true);
+
+  for (const rawErrorSurface of [
+    /error\??\.message\b/,
+    /error\??\.stack\b/,
+    /error\??\.detail\b/,
+    /error\??\.hint\b/,
+    /error\??\.where\b/,
+    /\bString\(error\)/,
+    /\bJSON\.stringify\(error\)/,
+    /\bconsole\./,
+    /\bthrow\s+error\b/,
+    /\bcause\s*[:=]/
+  ]) assert.equal(rawErrorSurface.test(roleBoundaryHelper), false, rawErrorSurface);
+  assert.equal(
+    /\b(?:GRANT|REVOKE|CREATE\s+(?:ROLE|USER)|ALTER\s+(?:ROLE|USER))\b/i.test(
+      roleBoundaryHelper
+    ),
+    false
+  );
+
+  const withTransactionSource = closedSourceSection(
+    poolSource,
+    "async function withTransaction(pool, operation, options = {}) {",
+    "async function verifyRuntimeRole(pool, role) {"
+  );
+  assert.equal(
+    withTransactionSource.includes(
+      "await client.query(`SET LOCAL ROLE ${quoteIdentifier(options.role)}`);"
+    ),
+    true
+  );
 });

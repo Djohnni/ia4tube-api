@@ -9,12 +9,15 @@ const http = require("node:http");
 const net = require("node:net");
 const os = require("node:os");
 const path = require("node:path");
+const { PassThrough } = require("node:stream");
 const test = require("node:test");
 
 const gate = require("../scripts/social-3b0-linux-physical-gate");
 const historicGate = require("../scripts/social-3a0p-linux-gate");
+const realPostgresRunner = require("../scripts/run-real-postgres-tests");
 const {
-  PROCESS_LIFECYCLE_TEST_FILES
+  PROCESS_LIFECYCLE_TEST_FILES,
+  partitionAutomatedTests
 } = require("../scripts/run-node-tests");
 const {
   INSTAGRAM_OAUTH_REDIRECT_URI,
@@ -35,6 +38,1047 @@ const O12_COMPANY_ID = "11111111-1111-4111-8111-111111111111";
 const O12_CREDENTIAL_ID = "22222222-2222-4222-8222-222222222222";
 const O12_CONNECTION_ID = "33333333-3333-4333-8333-333333333333";
 const O12_CREDENTIAL_TYPE = "instagram_user_access_token";
+
+function collectSafeRunnerLines(lines, channel = "stdout") {
+  const collector = realPostgresRunner.createSafeEventCollector();
+  for (const line of lines) {
+    const split = Math.max(1, Math.floor(Buffer.byteLength(line, "utf8") / 2));
+    const body = Buffer.from(line, "utf8");
+    collector.push(channel, body.subarray(0, split));
+    collector.push(channel, body.subarray(split));
+  }
+  return collector.finish();
+}
+
+function untrustedSafeEvent(value) {
+  return realPostgresRunner.SAFE_EVENT_PREFIX +
+    realPostgresRunner.canonicalJson(value) + "\n";
+}
+
+function exactTapRunnerArguments() {
+  return [
+    "--test-reporter=tap",
+    "--test-reporter-destination=stdout",
+    "--test",
+    path.resolve(__dirname, "social-postgres-real.test.js")
+  ];
+}
+
+function assertExactTapRunnerArguments(args) {
+  assert.deepEqual(args, exactTapRunnerArguments());
+}
+
+function safeEventNames(lines) {
+  return lines.map((line) => JSON.parse(
+    line.slice(realPostgresRunner.SAFE_EVENT_PREFIX.length)
+  ).event);
+}
+
+function physicalPhaseLines({ complete = true } = {}) {
+  const lines = [];
+  const phases = realPostgresRunner.createPhysicalPhaseEmitter(
+    (line) => lines.push(line)
+  );
+  for (const phase of realPostgresRunner.PHYSICAL_MAIN_PHASES) {
+    phases.startMain(phase);
+    if (!complete) break;
+    phases.completeMain(phase);
+  }
+  if (complete) {
+    phases.startCleanup();
+    phases.completeCleanup();
+  }
+  return lines;
+}
+
+function observeNodeLines(entries) {
+  const observer = realPostgresRunner.createNodeTestObserver();
+  for (const { channel, line } of entries) {
+    const body = Buffer.from(line, "utf8");
+    const split = Math.max(1, Math.floor(body.length / 2));
+    observer.push(channel, body.subarray(0, split));
+    observer.push(channel, body.subarray(split));
+  }
+  return observer.finish();
+}
+
+async function runSyntheticReporterFailure({
+  stdoutLines,
+  stderrLines,
+  phaseLines = []
+}) {
+  const emitted = [];
+  let spawnArguments;
+  const spawnImpl = (_executable, args) => {
+    spawnArguments = args;
+    const child = new EventEmitter();
+    child.stdout = new PassThrough();
+    child.stderr = new PassThrough();
+    queueMicrotask(() => {
+      child.emit("spawn");
+      child.stdout.end([...stdoutLines, ""].join("\n"));
+      child.stderr.end([...phaseLines, ...stderrLines, ""].join("\n"));
+      setImmediate(() => child.emit("close", 1, null));
+    });
+    return child;
+  };
+  const exitCode = await realPostgresRunner.main({}, {
+    spawnImpl,
+    validateGateEnvironmentImpl: () => ({ fingerprint: "f".repeat(64) }),
+    writeLine: (line) => emitted.push(line)
+  });
+  assertExactTapRunnerArguments(spawnArguments);
+  return Object.freeze({
+    emitted: Object.freeze(emitted),
+    exitCode,
+    facts: collectSafeRunnerLines(emitted)
+  });
+}
+
+test("real PostgreSQL runner emits one canonical safe lifecycle without raw TAP", async () => {
+  const emitted = [];
+  let spawnArguments;
+  let spawnOptions;
+  const spawnImpl = (_executable, args, options) => {
+    spawnArguments = args;
+    spawnOptions = options;
+    const child = new EventEmitter();
+    child.stdout = new PassThrough();
+    child.stderr = new PassThrough();
+    queueMicrotask(() => {
+      child.emit("spawn");
+      child.stdout.end([
+        "TAP version 13",
+        `# Subtest: ${realPostgresRunner.TAP_TITLE}`,
+        `ok 1 - ${realPostgresRunner.TAP_TITLE}`,
+        "1..1",
+        "# tests 1",
+        "# pass 1",
+        "# fail 0",
+        "# skipped 0",
+        "# cancelled 0",
+        ""
+      ].join("\n"));
+      child.stderr.end([...physicalPhaseLines(), ""].join("\n"));
+      setImmediate(() => child.emit("close", 0, null));
+    });
+    return child;
+  };
+  const exitCode = await realPostgresRunner.main({}, {
+    spawnImpl,
+    validateGateEnvironmentImpl: () => ({ fingerprint: "a".repeat(64) }),
+    writeLine: (line) => emitted.push(line)
+  });
+  assert.equal(exitCode, 0);
+  assertExactTapRunnerArguments(spawnArguments);
+  assert.equal(spawnOptions.shell, false);
+  assert.deepEqual(spawnOptions.stdio, ["ignore", "pipe", "pipe"]);
+  assert.equal(emitted.length, 9);
+  assert.deepEqual(safeEventNames(emitted), [
+    "runnerReached",
+    "gateValidated",
+    "nodeTestSpawnAttempted",
+    "nodeTestProcessCreated",
+    "tapStarted",
+    "tapTitleObserved",
+    "firstTestDiscovered",
+    "physicalPhaseSnapshot",
+    "nodeTestClosed"
+  ]);
+  assert.equal(emitted.every((line) =>
+    line.startsWith(realPostgresRunner.SAFE_EVENT_PREFIX)), true);
+  assert.equal(emitted.some((line) => line.includes("TAP version 13")), false);
+  assert.equal(emitted.some((line) =>
+    line.includes(realPostgresRunner.TAP_TITLE)), false);
+  const facts = collectSafeRunnerLines(emitted);
+  assert.equal(facts.protocolValid, true);
+  assert.equal(facts.eventCount, 9);
+  for (const name of [
+    "runnerReached",
+    "gateValidated",
+    "nodeTestSpawnAttempted",
+    "nodeTestProcessCreated",
+    "tapStarted",
+    "tapTitleObserved",
+    "firstTestDiscovered"
+  ]) assert.equal(facts[name], true, name);
+  assert.equal(facts.nodeTestExitCode, 0);
+  assert.equal(facts.nodeTestSignal, null);
+  assert.equal(facts.nodeTestTimedOut, false);
+  assert.equal(facts.lastMainPhaseStarted, "reauthentication");
+  assert.equal(facts.lastMainPhaseCompleted, "reauthentication");
+  assert.equal(facts.cleanupStarted, true);
+  assert.equal(facts.cleanupCompleted, true);
+  assert.equal(facts.failureDuringCleanup, null);
+  assert.equal(facts.failurePhase, null);
+  assert.equal(facts.safePermissionOrigin, null);
+  assert.equal(facts.safeSourceBasename, null);
+  assert.equal(facts.safeLineBucket, null);
+  assert.equal(facts.firstFailureStage, null);
+  assert.equal(facts.stderrCategory, null);
+});
+
+test("real PostgreSQL runner refuses implicit and alternate reporter contracts", () => {
+  const expected = exactTapRunnerArguments();
+  assertExactTapRunnerArguments(expected);
+  const mutations = [
+    ["--test", expected[3]],
+    ["--test-reporter=spec", ...expected.slice(1)],
+    ["--test-reporter=dot", ...expected.slice(1)],
+    ["--test-reporter=junit", ...expected.slice(1)],
+    [expected[0], "--test-reporter-destination=stderr", ...expected.slice(2)],
+    [expected[1], expected[0], ...expected.slice(2)],
+    [...expected.slice(0, 3), path.resolve(__dirname, "different.test.js")]
+  ];
+  for (const mutation of mutations) {
+    assert.throws(() => assertExactTapRunnerArguments(mutation));
+  }
+});
+
+test("real PostgreSQL runner classifies ReferenceError before TAP as bootstrap", async () => {
+  const rawSentinel = "ReferenceError: raw_bootstrap_sentinel";
+  const result = await runSyntheticReporterFailure({
+    stdoutLines: [],
+    stderrLines: [rawSentinel]
+  });
+  assert.equal(result.exitCode, 1);
+  assert.equal(result.facts.protocolValid, true);
+  assert.equal(result.facts.nodeTestProcessCreated, true);
+  assert.equal(result.facts.tapStarted, null);
+  assert.equal(result.facts.firstTestDiscovered, null);
+  assert.equal(result.facts.firstFailureStage, "node_test_bootstrap");
+  assert.equal(result.facts.stderrCategory, "reference_error");
+  assert.equal(result.emitted.some((line) => line.includes(rawSentinel)), false);
+});
+
+test("real PostgreSQL runner classifies ReferenceError after discovery as test execution", async () => {
+  const rawSentinel = "ReferenceError: raw_execution_sentinel";
+  const result = await runSyntheticReporterFailure({
+    stdoutLines: [
+      "TAP version 13",
+      `# Subtest: ${realPostgresRunner.TAP_TITLE}`
+    ],
+    phaseLines: physicalPhaseLines({ complete: false }),
+    stderrLines: [rawSentinel]
+  });
+  assert.equal(result.exitCode, 1);
+  assert.equal(result.facts.protocolValid, true);
+  assert.equal(result.facts.tapStarted, true);
+  assert.equal(result.facts.tapTitleObserved, true);
+  assert.equal(result.facts.firstTestDiscovered, true);
+  assert.equal(result.facts.firstFailureStage, "test_execution");
+  assert.equal(result.facts.stderrCategory, "reference_error");
+  assert.equal(result.emitted.some((line) => line.includes(rawSentinel)), false);
+});
+
+test("real PostgreSQL runner preserves a sanitized gate refusal before spawn", async () => {
+  const emitted = [];
+  const exitCode = await realPostgresRunner.main({}, {
+    validateGateEnvironmentImpl: () => {
+      throw new realPostgresRunner.PostgresGateRefusal(
+        "explicit_approval_missing"
+      );
+    },
+    writeLine: (line) => emitted.push(line)
+  });
+  assert.equal(exitCode, 2);
+  assert.equal(emitted.length, 2);
+  const facts = collectSafeRunnerLines(emitted);
+  assert.equal(facts.protocolValid, true);
+  assert.equal(facts.runnerReached, true);
+  assert.equal(facts.gateValidated, null);
+  assert.equal(facts.nodeTestSpawnAttempted, null);
+  assert.equal(facts.firstFailureStage, "environment_gate");
+  assert.equal(facts.stderrCategory, "environment_contract");
+  assert.equal(facts.safeErrorCode, "guard_failed");
+  assert.equal(facts.safeModuleName, null);
+});
+
+test("real PostgreSQL runner classifies module failure without preserving its line", async () => {
+  const emitted = [];
+  const spawnImpl = () => {
+    const child = new EventEmitter();
+    child.stdout = new PassThrough();
+    child.stderr = new PassThrough();
+    queueMicrotask(() => {
+      child.emit("spawn");
+      child.stdout.end([
+        "TAP version 13",
+        "Error: Cannot find module 'pg' MODULE_NOT_FOUND",
+        ""
+      ].join("\n"));
+      child.stderr.end(
+        [...physicalPhaseLines({ complete: false }), ""].join("\n")
+      );
+      setImmediate(() => child.emit("close", 1, null));
+    });
+    return child;
+  };
+  const exitCode = await realPostgresRunner.main({}, {
+    spawnImpl,
+    validateGateEnvironmentImpl: () => ({ fingerprint: "b".repeat(64) }),
+    writeLine: (line) => emitted.push(line)
+  });
+  assert.equal(exitCode, 1);
+  assert.equal(emitted.some((line) => line.includes("Cannot find")), false);
+  const facts = collectSafeRunnerLines(emitted);
+  assert.equal(facts.protocolValid, true);
+  assert.equal(facts.nodeTestProcessCreated, true);
+  assert.equal(facts.nodeTestExitCode, 1);
+  assert.equal(facts.firstFailureStage, "test_discovery");
+  assert.equal(facts.stderrCategory, "module_not_found");
+  assert.equal(facts.safeErrorCode, "MODULE_NOT_FOUND");
+  assert.equal(facts.safeModuleName, "pg");
+});
+
+test("real PostgreSQL runner distinguishes discovery from the expected TAP title", () => {
+  const observed = [];
+  const observer = realPostgresRunner.createNodeTestObserver(
+    (name) => observed.push(name)
+  );
+  observer.push("stdout", Buffer.from([
+    "TAP version 13",
+    "# Subtest: synthetic unexpected title",
+    ""
+  ].join("\n"), "utf8"));
+  const facts = observer.finish();
+  assert.equal(facts.tapStarted, true);
+  assert.equal(facts.tapTitleObserved, false);
+  assert.equal(facts.firstTestDiscovered, true);
+  assert.deepEqual(observed, ["tapStarted", "firstTestDiscovered"]);
+});
+
+test("real PostgreSQL runner preserves an observable spawn refusal", async () => {
+  const emitted = [];
+  const exitCode = await realPostgresRunner.main({}, {
+    spawnImpl: () => {
+      throw Object.assign(new Error("synthetic refusal"), { code: "EACCES" });
+    },
+    validateGateEnvironmentImpl: () => ({ fingerprint: "c".repeat(64) }),
+    writeLine: (line) => emitted.push(line)
+  });
+  assert.equal(exitCode, 2);
+  const facts = collectSafeRunnerLines(emitted);
+  assert.equal(facts.protocolValid, true);
+  assert.equal(facts.nodeTestSpawnAttempted, true);
+  assert.equal(facts.nodeTestProcessCreated, null);
+  assert.equal(facts.nodeTestExitCode, null);
+  assert.equal(facts.firstFailureStage, "node_test_spawn");
+  assert.equal(facts.stderrCategory, "permission_denied");
+  assert.equal(facts.safeErrorCode, "EACCES");
+});
+
+test("real PostgreSQL runner preserves a signal close without inventing timeout", async () => {
+  const emitted = [];
+  const spawnImpl = () => {
+    const child = new EventEmitter();
+    child.stdout = new PassThrough();
+    child.stderr = new PassThrough();
+    queueMicrotask(() => {
+      child.emit("spawn");
+      child.stdout.end([
+        "TAP version 13",
+        `# Subtest: ${realPostgresRunner.TAP_TITLE}`,
+        "# tests 1",
+        "# pass 1",
+        "# fail 0",
+        "# skipped 0",
+        "# cancelled 0",
+        ""
+      ].join("\n"));
+      child.stderr.end(
+        [...physicalPhaseLines({ complete: false }), ""].join("\n")
+      );
+      setImmediate(() => child.emit("close", null, "SIGTERM"));
+    });
+    return child;
+  };
+  const exitCode = await realPostgresRunner.main({}, {
+    spawnImpl,
+    validateGateEnvironmentImpl: () => ({ fingerprint: "d".repeat(64) }),
+    writeLine: (line) => emitted.push(line)
+  });
+  assert.equal(exitCode, 1);
+  const facts = collectSafeRunnerLines(emitted);
+  assert.equal(facts.protocolValid, true);
+  assert.equal(facts.nodeTestProcessCreated, true);
+  assert.equal(facts.nodeTestExitCode, null);
+  assert.equal(facts.nodeTestSignal, "SIGTERM");
+  assert.equal(facts.nodeTestTimedOut, null);
+  assert.equal(facts.firstFailureStage, "test_execution");
+});
+
+test("protocol group 1: physical phases accept only the complete ordered main and cleanup lifecycle", () => {
+  assert.deepEqual(realPostgresRunner.PHYSICAL_PHASES, [
+    "physical_target_preflight",
+    "role_provisioning",
+    "direct_connect_boundary",
+    "startup_unmigrated",
+    "migration_0001_0002",
+    "pre_registry_seed",
+    "migration_0003_rollback",
+    "migration_0003_apply",
+    "exact_0004_plan_apply",
+    "post_migration_validation",
+    "migration_cli",
+    "runtime_role_schema",
+    "runtime_permission_negatives",
+    "tenant_rls",
+    "vault_persistence",
+    "reauthentication",
+    "final_cleanup"
+  ]);
+  const facts = observeNodeLines(physicalPhaseLines().map((line) => ({
+    channel: "stderr",
+    line
+  })));
+  assert.equal(facts.phaseProtocolValid, true);
+  assert.equal(facts.phaseEventCount, 34);
+  assert.equal(facts.lastMainPhaseStarted, "reauthentication");
+  assert.equal(facts.lastMainPhaseCompleted, "reauthentication");
+  assert.equal(facts.cleanupStarted, true);
+  assert.equal(facts.cleanupCompleted, true);
+});
+
+test("protocol group 1: physical phases refuse jumps, repeats, unknowns, extras and post-cleanup markers", () => {
+  const version = realPostgresRunner.EVIDENCE_SCHEMA_VERSION;
+  const event = (name, phase, sequence, extra = {}) => untrustedSafeEvent({
+    event: name,
+    evidenceSchemaVersion: version,
+    phase,
+    sequence,
+    ...extra
+  });
+  const first = event(
+    "mainPhaseStarted",
+    "physical_target_preflight",
+    1
+  );
+  const firstDone = event(
+    "mainPhaseCompleted",
+    "physical_target_preflight",
+    2
+  );
+  const complete = physicalPhaseLines();
+  const invalidCases = [
+    [event("mainPhaseStarted", "role_provisioning", 1)],
+    [first, event("mainPhaseStarted", "physical_target_preflight", 2)],
+    [event("mainPhaseStarted", "unknown_phase", 1)],
+    [event("mainPhaseStarted", "physical_target_preflight", 1, {
+      extra: true
+    })],
+    [realPostgresRunner.SAFE_EVENT_PREFIX + "{invalid}\n"],
+    [
+      first,
+      firstDone,
+      event("mainPhaseStarted", "direct_connect_boundary", 3)
+    ],
+    [
+      ...complete,
+      event("mainPhaseStarted", "physical_target_preflight", 35)
+    ]
+  ];
+  for (const lines of invalidCases) {
+    const facts = observeNodeLines(lines.map((line) => ({
+      channel: "stderr",
+      line
+    })));
+    assert.equal(facts.phaseProtocolValid, false);
+  }
+});
+
+test("protocol group 1: physical snapshot keeps main and cleanup boundaries separate", () => {
+  const functionalLines = [];
+  const functional = realPostgresRunner.createPhysicalPhaseEmitter(
+    (line) => functionalLines.push(line)
+  );
+  functional.startMain("physical_target_preflight");
+  functional.startCleanup();
+  functional.completeCleanup();
+  const functionalFacts = observeNodeLines(functionalLines.map((line) => ({
+    channel: "stderr",
+    line
+  })));
+  assert.equal(functionalFacts.phaseProtocolValid, true);
+  assert.equal(
+    functionalFacts.lastMainPhaseStarted,
+    "physical_target_preflight"
+  );
+  assert.equal(functionalFacts.lastMainPhaseCompleted, null);
+  assert.equal(functionalFacts.cleanupStarted, true);
+  assert.equal(functionalFacts.cleanupCompleted, true);
+
+  const cleanupLines = [];
+  const cleanup = realPostgresRunner.createPhysicalPhaseEmitter(
+    (line) => cleanupLines.push(line)
+  );
+  for (const phase of realPostgresRunner.PHYSICAL_MAIN_PHASES) {
+    cleanup.startMain(phase);
+    cleanup.completeMain(phase);
+  }
+  cleanup.startCleanup();
+  const cleanupFacts = observeNodeLines(cleanupLines.map((line) => ({
+    channel: "stderr",
+    line
+  })));
+  assert.equal(cleanupFacts.phaseProtocolValid, true);
+  assert.equal(cleanupFacts.lastMainPhaseCompleted, "reauthentication");
+  assert.equal(cleanupFacts.cleanupStarted, true);
+  assert.equal(cleanupFacts.cleanupCompleted, false);
+});
+
+test("protocol group 1: impossible snapshots and incoherent failure boundaries fail closed", () => {
+  const version = realPostgresRunner.EVIDENCE_SCHEMA_VERSION;
+  const snapshot = (overrides = {}) => ({
+    event: "physicalPhaseSnapshot",
+    evidenceSchemaVersion: version,
+    lastMainPhaseStarted: null,
+    lastMainPhaseCompleted: null,
+    cleanupStarted: false,
+    cleanupCompleted: false,
+    sequence: 1,
+    ...overrides
+  });
+  const invalidSnapshots = [
+    snapshot({
+      lastMainPhaseStarted: "direct_connect_boundary",
+      lastMainPhaseCompleted: "physical_target_preflight"
+    }),
+    snapshot({
+      lastMainPhaseStarted: "role_provisioning",
+      lastMainPhaseCompleted: "role_provisioning",
+      cleanupStarted: true
+    }),
+    snapshot({
+      lastMainPhaseStarted: "reauthentication",
+      lastMainPhaseCompleted: "reauthentication",
+      cleanupCompleted: true
+    })
+  ];
+  for (const event of invalidSnapshots) {
+    assert.throws(
+      () => realPostgresRunner.safeEventLine(event),
+      /safe_event_invalid/
+    );
+  }
+
+  const failure = (overrides = {}) => ({
+    event: "failure",
+    evidenceSchemaVersion: version,
+    failureDuringCleanup: false,
+    failurePhase: null,
+    firstFailureStage: "runner_load",
+    safeErrorCode: null,
+    safeLineBucket: "unknown",
+    safeModuleName: null,
+    safePermissionOrigin: "unknown",
+    safeSourceBasename: null,
+    sequence: 1,
+    stderrCategory: "unknown",
+    ...overrides
+  });
+  assert.throws(() => realPostgresRunner.safeEventLine(failure({
+    failurePhase: "physical_target_preflight"
+  })), /safe_event_invalid/);
+  assert.throws(() => realPostgresRunner.safeEventLine(failure({
+    firstFailureStage: "test_execution",
+    safeErrorCode: "42501",
+    safePermissionOrigin: "postgres_sqlstate",
+    stderrCategory: "permission_denied"
+  })), /safe_event_invalid/);
+
+  const lifecycle = [
+    realPostgresRunner.safeEventLine({
+      event: "runnerReached",
+      evidenceSchemaVersion: version,
+      runnerReached: true,
+      sequence: 1
+    }),
+    realPostgresRunner.safeEventLine({
+      event: "gateValidated",
+      evidenceSchemaVersion: version,
+      gateValidated: true,
+      sequence: 2
+    }),
+    realPostgresRunner.safeEventLine({
+      event: "nodeTestSpawnAttempted",
+      evidenceSchemaVersion: version,
+      nodeTestSpawnAttempted: true,
+      sequence: 3
+    }),
+    realPostgresRunner.safeEventLine({
+      event: "nodeTestProcessCreated",
+      evidenceSchemaVersion: version,
+      nodeTestProcessCreated: true,
+      sequence: 4
+    }),
+    realPostgresRunner.safeEventLine({
+      event: "tapStarted",
+      evidenceSchemaVersion: version,
+      tapStarted: true,
+      sequence: 5
+    }),
+    realPostgresRunner.safeEventLine({
+      event: "firstTestDiscovered",
+      evidenceSchemaVersion: version,
+      firstTestDiscovered: true,
+      sequence: 6
+    }),
+    realPostgresRunner.safeEventLine(snapshot({
+      lastMainPhaseStarted: "physical_target_preflight",
+      sequence: 7
+    })),
+    realPostgresRunner.safeEventLine({
+      event: "nodeTestClosed",
+      evidenceSchemaVersion: version,
+      nodeTestExitCode: 1,
+      nodeTestSignal: null,
+      nodeTestTimedOut: false,
+      sequence: 8
+    })
+  ];
+  for (const firstFailureStage of [
+    "safe_event_protocol",
+    "test_execution"
+  ]) {
+    const facts = collectSafeRunnerLines([
+      ...lifecycle,
+      realPostgresRunner.safeEventLine(failure({
+        failurePhase: "role_provisioning",
+        firstFailureStage,
+        safeErrorCode: firstFailureStage === "safe_event_protocol"
+          ? "safe_event_protocol_invalid"
+          : "ERR_TEST_FAILURE",
+        sequence: 9,
+        stderrCategory: firstFailureStage === "safe_event_protocol"
+          ? "unknown"
+          : "tap_failure"
+      }))
+    ]);
+    assert.equal(facts.protocolValid, false);
+    assert.equal(facts.failure, false);
+    assert.equal(facts.firstFailureStage, "safe_event_protocol");
+    assert.equal(facts.failureDuringCleanup, false);
+    assert.equal(facts.failurePhase, "physical_target_preflight");
+  }
+});
+
+test("protocol group 1: outer failure preserves the first functional boundary and distinguishes cleanup", async () => {
+  const functionalLines = [];
+  const functionalPhases = realPostgresRunner.createPhysicalPhaseEmitter(
+    (line) => functionalLines.push(line)
+  );
+  functionalPhases.startMain("physical_target_preflight");
+  functionalPhases.startCleanup();
+  functionalPhases.completeCleanup();
+  const functional = await runSyntheticReporterFailure({
+    stdoutLines: [
+      "TAP version 13",
+      `# Subtest: ${realPostgresRunner.TAP_TITLE}`
+    ],
+    phaseLines: functionalLines,
+    stderrLines: ["permission denied", "code: '42501'"]
+  });
+  assert.equal(functional.facts.protocolValid, true);
+  assert.equal(functional.facts.eventCount, 10);
+  assert.equal(functional.facts.failureDuringCleanup, false);
+  assert.equal(functional.facts.failurePhase, "physical_target_preflight");
+  assert.equal(functional.facts.lastMainPhaseCompleted, null);
+  assert.equal(functional.facts.cleanupStarted, true);
+  assert.equal(functional.facts.cleanupCompleted, true);
+  assert.equal(functional.facts.safeErrorCode, "42501");
+  assert.equal(
+    functional.facts.safePermissionOrigin,
+    "postgres_sqlstate"
+  );
+
+  const cleanupLines = [];
+  const cleanupPhases = realPostgresRunner.createPhysicalPhaseEmitter(
+    (line) => cleanupLines.push(line)
+  );
+  for (const phase of realPostgresRunner.PHYSICAL_MAIN_PHASES) {
+    cleanupPhases.startMain(phase);
+    cleanupPhases.completeMain(phase);
+  }
+  cleanupPhases.startCleanup();
+  const cleanup = await runSyntheticReporterFailure({
+    stdoutLines: [
+      "TAP version 13",
+      `# Subtest: ${realPostgresRunner.TAP_TITLE}`
+    ],
+    phaseLines: cleanupLines,
+    stderrLines: ["EPERM permission denied", "syscall: 'spawn'"]
+  });
+  assert.equal(cleanup.facts.protocolValid, true);
+  assert.equal(cleanup.facts.failureDuringCleanup, true);
+  assert.equal(cleanup.facts.failurePhase, "final_cleanup");
+  assert.equal(cleanup.facts.safeErrorCode, "EPERM");
+  assert.equal(cleanup.facts.safePermissionOrigin, "os_process");
+});
+
+test("classifier group 2: permission diagnostics aggregate a later SQLSTATE across channels without raw output", () => {
+  const raw = "permission denied raw-sensitive-sentinel";
+  const facts = observeNodeLines([
+    { channel: "stdout", line: raw + "\n" },
+    { channel: "stderr", line: "code: 'ERR_TEST_FAILURE'\n" },
+    { channel: "stderr", line: "code: '42501'\n" },
+    {
+      channel: "stderr",
+      line: "    at probe (/home/runner/private/tests/" +
+        "social-postgres-real.test.js:3827:19)\n"
+    }
+  ]);
+  assert.equal(facts.stderrCategory, "permission_denied");
+  assert.equal(facts.safeErrorCode, "42501");
+  assert.equal(facts.safePermissionOrigin, "postgres_sqlstate");
+  assert.equal(facts.safeSourceBasename, "social-postgres-real.test.js");
+  assert.equal(facts.safeLineBucket, "3500-3999");
+  const serialized = JSON.stringify(facts);
+  assert.equal(serialized.includes(raw), false);
+  assert.equal(serialized.includes("/home/runner/private"), false);
+  assert.equal(serialized.includes("3827"), false);
+  const sqlstateFirst = observeNodeLines([
+    { channel: "stderr", line: "42501\n" },
+    { channel: "stdout", line: "permission denied\n" }
+  ]);
+  assert.equal(sqlstateFirst.stderrCategory, "permission_denied");
+  assert.equal(sqlstateFirst.safeErrorCode, "42501");
+  assert.equal(sqlstateFirst.safePermissionOrigin, "postgres_sqlstate");
+});
+
+test("classifier group 2: permission diagnostics authenticate OS origins and fail closed on conflicting codes", () => {
+  const filesystem = observeNodeLines([
+    { channel: "stderr", line: "EACCES permission denied\n" },
+    { channel: "stdout", line: "syscall: 'open'\n" }
+  ]);
+  assert.equal(filesystem.safeErrorCode, "EACCES");
+  assert.equal(filesystem.safePermissionOrigin, "os_filesystem");
+  const processFacts = observeNodeLines([
+    { channel: "stdout", line: "EPERM permission denied\n" },
+    { channel: "stderr", line: "syscall: 'spawn'\n" }
+  ]);
+  assert.equal(processFacts.safeErrorCode, "EPERM");
+  assert.equal(processFacts.safePermissionOrigin, "os_process");
+  const unknown = observeNodeLines([
+    { channel: "stderr", line: "EACCES permission denied\n" }
+  ]);
+  assert.equal(unknown.safePermissionOrigin, "unknown");
+  const conflict = observeNodeLines([
+    { channel: "stdout", line: "permission denied\n" },
+    { channel: "stderr", line: "code: '42501'\n" },
+    { channel: "stdout", line: "EACCES permission denied\n" }
+  ]);
+  assert.equal(conflict.stderrCategory, "permission_denied");
+  assert.equal(conflict.safeDiagnosticValid, false);
+  assert.equal(conflict.safeErrorCode, null);
+  assert.equal(conflict.safePermissionOrigin, "unknown");
+});
+
+test("classifier group 2: same-line permission conflicts propagate through collectors and errors", async () => {
+  const sameLine = "permission denied 42501 EACCES\n";
+  const diagnostic = observeNodeLines([
+    { channel: "stderr", line: sameLine }
+  ]);
+  assert.equal(diagnostic.stderrCategory, "permission_denied");
+  assert.equal(diagnostic.safeDiagnosticValid, false);
+  assert.equal(diagnostic.safeErrorCode, null);
+  assert.equal(diagnostic.safePermissionOrigin, "unknown");
+
+  const version = realPostgresRunner.EVIDENCE_SCHEMA_VERSION;
+  const runner = realPostgresRunner.safeEventLine({
+    event: "runnerReached",
+    evidenceSchemaVersion: version,
+    runnerReached: true,
+    sequence: 1
+  });
+  const rawCollector = realPostgresRunner.createSafeEventCollector();
+  rawCollector.push("stdout", Buffer.from(runner));
+  rawCollector.push("stderr", Buffer.from(sameLine));
+  const rawFacts = rawCollector.finish();
+  assert.equal(rawFacts.protocolValid, false);
+  assert.equal(rawFacts.firstFailureStage, "safe_event_protocol");
+  assert.equal(rawFacts.safeErrorCode, "safe_event_protocol_invalid");
+
+  const firstFailure = realPostgresRunner.safeEventLine({
+    event: "failure",
+    evidenceSchemaVersion: version,
+    failureDuringCleanup: false,
+    failurePhase: null,
+    firstFailureStage: "environment_gate",
+    safeErrorCode: "guard_failed",
+    safeLineBucket: "unknown",
+    safeModuleName: null,
+    safePermissionOrigin: "unknown",
+    safeSourceBasename: null,
+    sequence: 2,
+    stderrCategory: "environment_contract"
+  });
+  const preservedCollector = realPostgresRunner.createSafeEventCollector();
+  preservedCollector.push("stdout", Buffer.from(runner + firstFailure));
+  preservedCollector.push("stderr", Buffer.from(sameLine));
+  const preserved = preservedCollector.finish();
+  assert.equal(preserved.protocolValid, false);
+  assert.equal(preserved.firstFailureStage, "environment_gate");
+  assert.equal(preserved.stderrCategory, "environment_contract");
+  assert.equal(preserved.safeErrorCode, "guard_failed");
+
+  const emitted = [];
+  const conflictingError = Object.assign(
+    new Error("permission denied 42501"),
+    { code: "EACCES", syscall: "open" }
+  );
+  const exitCode = await realPostgresRunner.main({}, {
+    runNodeTestImpl: async ({ onCreated }) => {
+      onCreated();
+      return {
+        created: true,
+        error: conflictingError,
+        facts: {
+          lastMainPhaseStarted: "role_provisioning",
+          lastMainPhaseCompleted: "physical_target_preflight",
+          cleanupStarted: true,
+          cleanupCompleted: true
+        },
+        signal: null,
+        status: 1
+      };
+    },
+    validateGateEnvironmentImpl: () => ({ fingerprint: "e".repeat(64) }),
+    writeLine: (line) => emitted.push(line)
+  });
+  const errorFacts = collectSafeRunnerLines(emitted);
+  assert.equal(exitCode, 1);
+  assert.equal(errorFacts.protocolValid, true);
+  assert.equal(errorFacts.failure, true);
+  assert.equal(errorFacts.eventCount, 7);
+  assert.equal(errorFacts.firstFailureStage, "safe_event_protocol");
+  assert.equal(errorFacts.failureDuringCleanup, false);
+  assert.equal(errorFacts.failurePhase, "role_provisioning");
+  assert.equal(errorFacts.stderrCategory, "unknown");
+  assert.equal(errorFacts.safeErrorCode, "safe_event_protocol_invalid");
+});
+
+test("classifier group 2: first diagnostic category is immutable", () => {
+  const immutable = observeNodeLines([
+    { channel: "stderr", line: "ReferenceError: first-category\n" },
+    { channel: "stdout", line: "42501\n" },
+    { channel: "stderr", line: "permission denied\n" }
+  ]);
+  assert.equal(immutable.stderrCategory, "reference_error");
+  assert.equal(immutable.safeErrorCode, null);
+  assert.equal(immutable.safePermissionOrigin, "unknown");
+});
+
+test("safe source group 3: sources stay allowlisted and bucketed", () => {
+  const rawPath = "/home/runner/private/tests/social-postgres-real.test.js";
+  const acceptedSource = observeNodeLines([
+    { channel: "stderr", line: "permission denied\n" },
+    { channel: "stderr", line: "code: '42501'\n" },
+    {
+      channel: "stderr",
+      line: `    at probe (${rawPath}:3827:19)\n`
+    }
+  ]);
+  assert.equal(acceptedSource.safeSourceBasename, "social-postgres-real.test.js");
+  assert.equal(acceptedSource.safeLineBucket, "3500-3999");
+  const serializedAccepted = JSON.stringify(acceptedSource);
+  assert.equal(serializedAccepted.includes(rawPath), false);
+  assert.equal(serializedAccepted.includes("3827"), false);
+  assert.equal(serializedAccepted.includes("at probe"), false);
+
+  const refusedSource = observeNodeLines([
+    { channel: "stderr", line: "permission denied\n" },
+    { channel: "stderr", line: "code: '42501'\n" },
+    {
+      channel: "stderr",
+      line: "    at probe (/private/outside-secret.js:731:2)\n"
+    }
+  ]);
+  assert.equal(refusedSource.safeSourceBasename, null);
+  assert.equal(refusedSource.safeLineBucket, "unknown");
+  assert.deepEqual([
+    realPostgresRunner.safeLineBucket(1),
+    realPostgresRunner.safeLineBucket(499),
+    realPostgresRunner.safeLineBucket(500),
+    realPostgresRunner.safeLineBucket(4499),
+    realPostgresRunner.safeLineBucket(4500)
+  ], ["1-499", "1-499", "500-999", "4000-4499", "unknown"]);
+});
+
+test("protocol group 1: safe event collector refuses duplicates, JSON, fields, enums, modules and order", () => {
+  const version = realPostgresRunner.EVIDENCE_SCHEMA_VERSION;
+  const runner = realPostgresRunner.safeEventLine({
+    event: "runnerReached",
+    evidenceSchemaVersion: version,
+    runnerReached: true,
+    sequence: 1
+  });
+  const invalidCases = [
+    [runner, runner.replace('"sequence":1', '"sequence":2')],
+    [realPostgresRunner.SAFE_EVENT_PREFIX + "{invalid}\n"],
+    [untrustedSafeEvent({
+      event: "runnerReached",
+      evidenceSchemaVersion: version,
+      extra: true,
+      runnerReached: true,
+      sequence: 1
+    })],
+    [runner, untrustedSafeEvent({
+      event: "failure",
+      evidenceSchemaVersion: version,
+      firstFailureStage: "environment_gate",
+      safeErrorCode: "guard_failed",
+      safeModuleName: null,
+      sequence: 2,
+      stderrCategory: "outside_enum"
+    })],
+    [runner, untrustedSafeEvent({
+      event: "failure",
+      evidenceSchemaVersion: version,
+      firstFailureStage: "environment_gate",
+      safeErrorCode: "guard_failed",
+      safeModuleName: "outside.js",
+      sequence: 2,
+      stderrCategory: "module_not_found"
+    })],
+    [runner, realPostgresRunner.safeEventLine({
+      event: "nodeTestSpawnAttempted",
+      evidenceSchemaVersion: version,
+      nodeTestSpawnAttempted: true,
+      sequence: 2
+    })],
+    [
+      runner,
+      realPostgresRunner.safeEventLine({
+        event: "gateValidated",
+        evidenceSchemaVersion: version,
+        gateValidated: true,
+        sequence: 2
+      }),
+      realPostgresRunner.safeEventLine({
+        event: "nodeTestSpawnAttempted",
+        evidenceSchemaVersion: version,
+        nodeTestSpawnAttempted: true,
+        sequence: 3
+      }),
+      realPostgresRunner.safeEventLine({
+        event: "nodeTestProcessCreated",
+        evidenceSchemaVersion: version,
+        nodeTestProcessCreated: true,
+        sequence: 4
+      }),
+      realPostgresRunner.safeEventLine({
+        event: "firstTestDiscovered",
+        evidenceSchemaVersion: version,
+        firstTestDiscovered: true,
+        sequence: 5
+      })
+    ],
+    [
+      runner,
+      untrustedSafeEvent({
+        event: "failure",
+        evidenceSchemaVersion: version,
+        firstFailureStage: "postgres_start",
+        safeErrorCode: null,
+        safeModuleName: null,
+        sequence: 2,
+        stderrCategory: "unknown"
+      })
+    ],
+    [
+      runner,
+      realPostgresRunner.safeEventLine({
+        event: "gateValidated",
+        evidenceSchemaVersion: version,
+        gateValidated: true,
+        sequence: 2
+      }),
+      realPostgresRunner.safeEventLine({
+        event: "nodeTestSpawnAttempted",
+        evidenceSchemaVersion: version,
+        nodeTestSpawnAttempted: true,
+        sequence: 3
+      }),
+      realPostgresRunner.safeEventLine({
+        event: "nodeTestProcessCreated",
+        evidenceSchemaVersion: version,
+        nodeTestProcessCreated: true,
+        sequence: 4
+      }),
+      untrustedSafeEvent({
+        event: "nodeTestClosed",
+        evidenceSchemaVersion: version,
+        nodeTestExitCode: -1,
+        nodeTestSignal: "SIGTERM",
+        nodeTestTimedOut: false,
+        sequence: 5
+      })
+    ]
+  ];
+  for (const lines of invalidCases) {
+    const facts = collectSafeRunnerLines(lines);
+    assert.equal(facts.protocolValid, false);
+    assert.equal(facts.firstFailureStage, "safe_event_protocol");
+    assert.equal(facts.safeModuleName, null);
+  }
+  const stderrFacts = collectSafeRunnerLines([runner], "stderr");
+  assert.equal(stderrFacts.protocolValid, false);
+  assert.equal(stderrFacts.firstFailureStage, "safe_event_protocol");
+  const firstFailure = realPostgresRunner.safeEventLine({
+    event: "failure",
+    evidenceSchemaVersion: version,
+    failureDuringCleanup: false,
+    failurePhase: null,
+    firstFailureStage: "environment_gate",
+    safeErrorCode: "guard_failed",
+    safeLineBucket: "unknown",
+    safeModuleName: null,
+    safePermissionOrigin: "unknown",
+    safeSourceBasename: null,
+    sequence: 2,
+    stderrCategory: "environment_contract"
+  });
+  const preserved = collectSafeRunnerLines([
+    runner,
+    firstFailure,
+    runner.replace('"sequence":1', '"sequence":3')
+  ]);
+  assert.equal(preserved.protocolValid, false);
+  assert.equal(preserved.firstFailureStage, "environment_gate");
+  assert.equal(preserved.stderrCategory, "environment_contract");
+  assert.equal(preserved.safeErrorCode, "guard_failed");
+});
+
+test("classifier group 2: safe stderr classifier uses only closed categories, codes and module basenames", () => {
+  const cases = [
+    ["npm ERR! Missing script: \"test:postgres-real\"", "npm_script_missing"],
+    ["SyntaxError: synthetic", "syntax_error"],
+    ["ReferenceError: synthetic", "reference_error"],
+    ["TypeError: synthetic", "type_error"],
+    ["EACCES permission denied", "permission_denied"],
+    ["ECONNREFUSED connection refused", "connection_refused"],
+    ["ERR_TLS_CERT_ALTNAME_INVALID", "tls_hostname"],
+    ["28P01 password authentication failed", "postgres_authentication"],
+    ["42P01 relation does not exist", "postgres_schema"],
+    ["unrecognized diagnostic", "unknown"]
+  ];
+  for (const [line, category] of cases) {
+    assert.equal(
+      realPostgresRunner.classifySafeLine(line).stderrCategory,
+      category,
+      line
+    );
+  }
+  const allowed = realPostgresRunner.classifySafeLine(
+    "Error: Cannot find module 'pg' MODULE_NOT_FOUND"
+  );
+  assert.equal(allowed.safeModuleName, "pg");
+  const refused = realPostgresRunner.classifySafeLine(
+    "Error: Cannot find module '../../outside.js' MODULE_NOT_FOUND"
+  );
+  assert.equal(refused.safeModuleName, null);
+});
 
 function sha256(value) {
   return crypto.createHash("sha256").update(value).digest("hex");
@@ -540,8 +1584,50 @@ test("Social 3B physical gate freezes the Exact7 loopback socket close route", (
     "social-3a0p-local-safe-zip-extract.test.js",
     "social-postgres-tls.test.js"
   ]);
-  assert.equal(PROCESS_LIFECYCLE_TEST_FILES.length, 11);
-  assert.equal(new Set(PROCESS_LIFECYCLE_TEST_FILES).size, 11);
+  const expectedProcessLifecycleTestFiles = [
+    "body-parser-security.test.js",
+    "checkpoint-a-security.test.js",
+    "fcm-token-encryption.test.js",
+    "social-2b0-config-security.test.js",
+    "social-foundation-integration.test.js",
+    "zip-downloads.test.js",
+    "social-3a0p-local-file-replace-argument-powershell.test.js",
+    "social-3a0p-local-file-replace-powershell-diagnostic.test.js",
+    "social-3a0p-local-firewall-nonmutation.test.js",
+    "social-3a0p-local-safe-zip-extract.test.js",
+    "social-postgres-tls.test.js",
+    "social-3a0p-current-diff-scope.test.js"
+  ];
+  assert.deepEqual(PROCESS_LIFECYCLE_TEST_FILES, expectedProcessLifecycleTestFiles);
+  assert.equal(PROCESS_LIFECYCLE_TEST_FILES.length, 12);
+  assert.equal(new Set(PROCESS_LIFECYCLE_TEST_FILES).size, 12);
+  assert.equal(
+    PROCESS_LIFECYCLE_TEST_FILES.filter(
+      (name) => name === "social-3a0p-current-diff-scope.test.js"
+    ).length,
+    1
+  );
+  assert.equal(
+    PROCESS_LIFECYCLE_TEST_FILES.includes("social-3a0p-local-scope.test.js"),
+    false
+  );
+  const partition = partitionAutomatedTests(
+    [...expectedProcessLifecycleTestFiles, "social-3a0p-local-scope.test.js"]
+      .map((name) => path.join(__dirname, name))
+      .sort()
+  );
+  const serialNames = partition.serial.map((file) => path.basename(file));
+  const concurrentNames = partition.concurrent.map((file) => path.basename(file));
+  assert.deepEqual(serialNames, expectedProcessLifecycleTestFiles);
+  assert.equal(
+    serialNames.filter((name) => name === "social-3a0p-current-diff-scope.test.js").length,
+    1
+  );
+  assert.equal(
+    concurrentNames.includes("social-3a0p-current-diff-scope.test.js"),
+    false
+  );
+  assert.deepEqual(concurrentNames, ["social-3a0p-local-scope.test.js"]);
   for (const name of gate.WINDOWS_NATIVE_SERIAL_TEST_FILES) {
     assert.equal(
       PROCESS_LIFECYCLE_TEST_FILES.filter((candidate) => candidate === name).length,

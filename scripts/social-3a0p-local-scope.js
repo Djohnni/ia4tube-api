@@ -3,17 +3,28 @@
 const path = require("node:path");
 
 const AUTHORIZED_BRANCH =
-  "social/checkpoint-3b0-o22-loopback-socket-close-barrier-20260813";
-const ROUTE_BASE_COMMIT = "84061704e214ec5f293fa5f2c9443d9832d42e1e";
+  "social/checkpoint-3b0-exact-0004-runner-linux-snapshot-role-binding-20260815";
+const ROUTE_BASE_COMMIT = "13e38b875db2a220514fe06113663c517c975592";
 
 const ALLOWED_EXACT_FILES = new Set([
-  ".github/workflows/social-3b0-instagram-oauth-local-contract.yml",
+  ".github/workflows/social-3b0-exact-0004-runner-linux.yml",
+  "scripts/run-node-tests.js",
+  "scripts/run-real-postgres-tests.js",
   "scripts/social-3a0p-local-scope.js",
-  "scripts/social-3b0-linux-physical-gate.js",
+  "scripts/social-db-migrate.js",
+  "src/persistence/postgres/migrations.js",
+  "tests/free_art_campaigns.test.js",
+  "tests/free_art_campaigns_notifications.test.js",
+  "tests/monthly_planning_photo_items.test.js",
+  "tests/node-test-runner-safety.test.js",
+  "tests/product_discovery.test.js",
   "tests/social-3a0p-current-diff-scope.test.js",
+  "tests/social-3a0p-linux-workflow.test.js",
   "tests/social-3a0p-local-scope.test.js",
+  "tests/social-3b0-exact-0004-runner-linux-workflow.test.js",
   "tests/social-3b0-linux-physical-gate.test.js",
-  "tests/social-3b0-linux-workflow.test.js"
+  "tests/social-postgres-migrations.test.js",
+  "tests/social-postgres-real.test.js"
 ]);
 const ALLOWED_PREFIXES = Object.freeze([]);
 const FORBIDDEN_PRODUCT_PREFIXES = Object.freeze([
