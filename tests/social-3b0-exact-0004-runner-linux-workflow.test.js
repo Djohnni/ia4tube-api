@@ -12,13 +12,13 @@ const ROOT = path.resolve(__dirname, "..");
 const RELATIVE = ".github/workflows/social-3b0-exact-0004-runner-linux.yml";
 const FILE = path.join(ROOT, ...RELATIVE.split("/"));
 const BRANCH =
-  "social/checkpoint-3b0-exact-0004-runner-linux-conflict-outcome-evidence-20260820";
+  "social/checkpoint-3b0-exact-0004-runner-linux-force-rls-conflict-gate-20260820";
 const BASE = "13e38b875db2a220514fe06113663c517c975592";
-const PARENT = "376c56fded62033071540996ea728ef77714ce38";
+const PARENT = "1de14105800db3ad024e15700d7e23fb2b41282c";
 const PLAN_SUBPHASE_PARENT = "73433e1b2d856e073db452ebe17815bec296bba0";
 const SOURCE_COMMIT = "8534817574a22dbd144a835c9f3585c44ee11c96";
 const MESSAGE =
-  "[run-social-3b0] preserve exact 0004 conflict outcome";
+  "[run-social-3b0] make exact 0004 conflict gate RLS independent";
 const IMAGE =
   "docker.io/library/postgres:18.4-bookworm@sha256:7e6103cf85f88f7a0eddb3ec0b1ba8940eba098ed118ade25a729ca9daee5568";
 const CHECKOUT = "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1";
@@ -27,26 +27,64 @@ const UPLOAD = "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
 const RUNNER_FILE = "scripts/run-real-postgres-tests.js";
 const RUNNER_MODULE = "./scripts/run-real-postgres-tests";
 const RUNNER_LF_SHA256 =
-  "2a8a91e0f6351afbb4304002a4fb7cd4e689602ecfbc8af418c957dcfa7da0a6";
-const RUNNER_FILTERED_OID = "6eca94aae046b248a278484863c2caf6001acc4d";
+  "35d6ca544868957e44fa1787dfef6c3967ebf106e277877b70f9fae15e2e67bd";
+const RUNNER_FILTERED_OID = "a62d4607bf60345e05c1b42a5dfccd221950b227";
 const PARENT_RUNNER_LF_SHA256 =
-  "2e30395d6ff015f16fdf99469028e48576cfca942a35b0b88a29e2b208d15a16";
+  "2a8a91e0f6351afbb4304002a4fb7cd4e689602ecfbc8af418c957dcfa7da0a6";
 const PARENT_RUNNER_FILTERED_OID =
-  "18fa43cbc8014ffdf9ce4ac986f3133bf8a51cdd";
+  "6eca94aae046b248a278484863c2caf6001acc4d";
 const PRESERVED_FUNCTIONAL_FILES = Object.freeze([
   "scripts/social-db-migrate.js",
-  "src/persistence/postgres/migrations.js",
-  "tests/social-postgres-migrations.test.js"
+  "src/persistence/postgres/migrations.js"
+]);
+const MIGRATION_FILE =
+  "db/migrations/0004_social_connector_persistence.up.sql";
+const CHECKSUM_FILE = "db/migrations/checksums.json";
+const MIGRATION_TEST_FILE = "tests/social-postgres-migrations.test.js";
+const NODE_TEST_FILE = "tests/node-test-runner-safety.test.js";
+const PHYSICAL_TEST_FILE = "tests/social-3b0-linux-physical-gate.test.js";
+const MIGRATION_LF_SHA256 = Object.freeze({
+  [MIGRATION_FILE]:
+    "91f6efc611903c40e16bd37828d5b9c1a03dfae222e1d13b5dc97f81ffde1b5d",
+  [CHECKSUM_FILE]:
+    "7bea25acc2a2fa899029129e75a8d66a182032264e3a3713ae4abe66e593fdc9",
+  [MIGRATION_TEST_FILE]:
+    "32fc1c73967c289b45908100e07c8bb64a0785a4dcdd70cd2e8dc537764fe450"
+});
+const MIGRATION_FILTERED_OID = Object.freeze({
+  [MIGRATION_FILE]: "a564b9d4c01e5220b857a86523bb5ff8c3498b17",
+  [CHECKSUM_FILE]: "1751b76e571d94cfb62898f7eb483061b549fc55",
+  [MIGRATION_TEST_FILE]: "2457f6a399690117c90e702107d4981df16f5d0b"
+});
+const PROTECTED_FILES = Object.freeze([
+  "db/migrations/0001_social_multitenant_foundation.up.sql",
+  "db/migrations/0002_social_connections_and_vault.up.sql",
+  "db/migrations/0003_global_vault_key_registry.up.sql",
+  "db/postgres/roles.sql",
+  "package.json",
+  "package-lock.json"
 ]);
 const REAL_TEST_FILE = "tests/social-postgres-real.test.js";
 const REAL_TEST_LF_SHA256 =
-  "d07054524efec8ac48b720eed8df7a39d2db6a8a5cda6249b80c30ec73b33a66";
+  "e3912a2b174e7199c76035264ebe455da00848c3c61259138b9ea0b77c3e5117";
 const REAL_TEST_FILTERED_OID =
-  "926b6050fcb89b528126eb6fbf72f70624556a4b";
+  "9d841c0290b2abb102bb3ce2f7e76bc8a80fe84a";
 const PARENT_REAL_TEST_LF_SHA256 =
-  "0c6f7fff3bb031e5fd13f6220cc19d6bdaf24160e435bbe533404c28f7f7be20";
+  "d07054524efec8ac48b720eed8df7a39d2db6a8a5cda6249b80c30ec73b33a66";
 const PARENT_REAL_TEST_FILTERED_OID =
-  "c6c4bcce192d33940d99d7395bde9ba79fc78ea1";
+  "926b6050fcb89b528126eb6fbf72f70624556a4b";
+const INSTRUMENTED_LF_SHA256 = Object.freeze({
+  [NODE_TEST_FILE]:
+    "91e81e4d38c39eefb208bfdc0e050ea1a36f1b1f3de64f8364c91ea6f282ff17",
+  [PHYSICAL_TEST_FILE]:
+    "c9dc030f19a1b26bd82eea9cc2f1399568edd1efe864e84ad4aef484158bbafc",
+  [REAL_TEST_FILE]: REAL_TEST_LF_SHA256
+});
+const INSTRUMENTED_FILTERED_OID = Object.freeze({
+  [NODE_TEST_FILE]: "cd6967f8dfd6784c0e3c7b33199202b074ee1d24",
+  [PHYSICAL_TEST_FILE]: "367717f49cc845d5e022fc5eaa2823cf55c0f2cc",
+  [REAL_TEST_FILE]: REAL_TEST_FILTERED_OID
+});
 const PLAN_SUBPHASE_PARENT_REAL_TEST_LF_SHA256 =
   "27a4d1ebbccda40711fd1a78a2f170efa3128690b86588be0c7ab515345f49d0";
 const PLAN_SUBPHASE_PARENT_REAL_TEST_FILTERED_OID =
@@ -98,8 +136,10 @@ const CLEANUP_FILTERED_OID = Object.freeze({
   "tests/monthly_planning_photo_items.test.js": "3cf126c205f77395a470170460e7914577625845",
   "tests/product_discovery.test.js": "e2db596e3837d4ff232f647647d5076d7f0320e0"
 });
-const EXACT18 = Object.freeze([
+const EXACT20 = Object.freeze([
   ".github/workflows/social-3b0-exact-0004-runner-linux.yml",
+  "db/migrations/0004_social_connector_persistence.up.sql",
+  "db/migrations/checksums.json",
   "scripts/run-node-tests.js",
   RUNNER_FILE,
   "scripts/social-3a0p-local-scope.js",
@@ -116,8 +156,10 @@ const EXACT18 = Object.freeze([
   "tests/social-postgres-migrations.test.js",
   "tests/social-postgres-real.test.js"
 ]);
-const INCREMENTAL9 = Object.freeze([
+const INCREMENTAL12 = Object.freeze([
   ".github/workflows/social-3b0-exact-0004-runner-linux.yml",
+  "db/migrations/0004_social_connector_persistence.up.sql",
+  "db/migrations/checksums.json",
   "scripts/run-real-postgres-tests.js",
   "scripts/social-3a0p-local-scope.js",
   "tests/node-test-runner-safety.test.js",
@@ -125,6 +167,7 @@ const INCREMENTAL9 = Object.freeze([
   "tests/social-3a0p-local-scope.test.js",
   "tests/social-3b0-exact-0004-runner-linux-workflow.test.js",
   "tests/social-3b0-linux-physical-gate.test.js",
+  "tests/social-postgres-migrations.test.js",
   "tests/social-postgres-real.test.js"
 ]);
 const LEGACY_EVIDENCE_KEYS = Object.freeze([
@@ -232,6 +275,8 @@ const EXACT0004_SUBPHASES = Object.freeze([
   "synthetic_0005_negative",
   "conflicting_0004_negative",
   "rollback_verification",
+  "conflicting_external_account_0004_negative",
+  "external_account_rollback_verification",
   "apply_exact",
   "concurrency",
   "final_snapshot",
@@ -310,6 +355,8 @@ const EXACT0004_OPERATION_BY_SUBPHASE = Object.freeze({
   synthetic_0005_negative: "negative_gate",
   conflicting_0004_negative: "negative_gate",
   rollback_verification: "rollback_check",
+  conflicting_external_account_0004_negative: "negative_gate",
+  external_account_rollback_verification: "rollback_check",
   apply_exact: "apply",
   concurrency: "concurrency",
   final_snapshot: "final_validation",
@@ -510,6 +557,14 @@ function associativePinMaps(source) {
   });
 }
 
+function namedPinMap(source, name) {
+  const matches = associativePinMaps(source).filter((entry) =>
+    entry.name === name
+  );
+  assert.equal(matches.length, 1, `${name} pin map`);
+  return matches[0];
+}
+
 function runnerPinMap(source) {
   const matches = associativePinMaps(source).filter(({ pins }) =>
     Object.prototype.hasOwnProperty.call(pins, RUNNER_FILE)
@@ -529,6 +584,20 @@ function physicalTestPinMap(source) {
 function bashIncrementalInventory(source) {
   const startToken = "incremental_expected=(\n";
   const endToken = "\n)\nmapfile -d '' incremental_actual";
+  assert.equal(source.split(startToken).length - 1, 1);
+  const start = source.indexOf(startToken) + startToken.length;
+  const end = source.indexOf(endToken, start);
+  assert.ok(end > start);
+  return source.slice(start, end).split("\n").map((line) => {
+    const match = /^  '([^']+)'$/.exec(line);
+    assert.ok(match, line);
+    return match[1];
+  });
+}
+
+function bashProtectedInventory(source) {
+  const startToken = "protected=(\n";
+  const endToken = "\n)\nfor file in \"${protected[@]}\";";
   assert.equal(source.split(startToken).length - 1, 1);
   const start = source.indexOf(startToken) + startToken.length;
   const end = source.indexOf(endToken, start);
@@ -634,7 +703,7 @@ test("Exact-0004 Linux workflow is strict JSON with the one authorized trigger",
   assert.equal(source.includes("permissions: write"), false);
 });
 
-test("Exact-0004 Linux workflow fixes branch, immediate parent, ancestral base, message and Exact18", () => {
+test("Exact-0004 Linux workflow fixes branch, immediate parent, ancestral base, message and Exact20", () => {
   const { source, workflow } = read();
   assert.deepEqual(workflow.env, {
     SOCIAL_EXACT_BASE: BASE,
@@ -654,7 +723,7 @@ test("Exact-0004 Linux workflow fixes branch, immediate parent, ancestral base, 
     `github.event.head_commit.message == '${MESSAGE}'`,
     "github.run_attempt == 1"
   ]) assert.ok(currentJob.if.includes(fragment), fragment);
-  const guard = stepByName(currentJob, "Verify immutable Exact18 contract").run;
+  const guard = stepByName(currentJob, "Verify immutable Exact20 contract").run;
   assert.ok(
     guard.includes(
       '[[ "$(git rev-parse HEAD^)" == "${SOCIAL_EXACT_PARENT}" ]] || fail'
@@ -680,13 +749,14 @@ test("Exact-0004 Linux workflow fixes branch, immediate parent, ancestral base, 
   assert.ok(guard.includes(
     '[[ "$(printf \'%s\\n\' "${actual_sorted[@]}")" == "$(printf \'%s\\n\' "${expected_sorted[@]}")" ]] || fail'
   ));
-  assert.equal(EXACT18.length, 18);
-  assert.equal(new Set(EXACT18).size, 18);
+  assert.equal(EXACT20.length, 20);
+  assert.equal(new Set(EXACT20).size, 20);
   const guardInventory = bashExpectedInventory(guard);
-  assert.deepEqual(guardInventory, EXACT18);
-  assert.equal(INCREMENTAL9.length, 9);
-  assert.equal(new Set(INCREMENTAL9).size, 9);
-  assert.deepEqual(bashIncrementalInventory(guard), INCREMENTAL9);
+  assert.deepEqual(guardInventory, EXACT20);
+  assert.equal(INCREMENTAL12.length, 12);
+  assert.equal(new Set(INCREMENTAL12).size, 12);
+  assert.deepEqual(bashIncrementalInventory(guard), INCREMENTAL12);
+  assert.deepEqual(bashProtectedInventory(guard), PROTECTED_FILES);
   const physical = stepByName(
     currentJob,
     "Run the one-shot PostgreSQL 18 Exact-0004 proof"
@@ -729,7 +799,7 @@ test("Exact-0004 Linux workflow fixes branch, immediate parent, ancestral base, 
     ["finalizer", finalizeInventory],
     ["enforcement", enforcementInventory]
   ]) {
-    assert.deepEqual(inventory, EXACT18, name);
+    assert.deepEqual(inventory, EXACT20, name);
     assert.equal(
       inventory.filter((file) => file === RUNNER_FILE).length,
       1,
@@ -738,10 +808,11 @@ test("Exact-0004 Linux workflow fixes branch, immediate parent, ancestral base, 
   }
   const { pins: runnerPins } = runnerPinMap(guard);
   assert.deepEqual(runnerPins, { [RUNNER_FILE]: RUNNER_LF_SHA256 });
+  assert.deepEqual(namedPinMap(guard, "migration").pins, MIGRATION_LF_SHA256);
   const { name: physicalPinMapName, pins: physicalPins } =
     physicalTestPinMap(guard);
   assert.equal(physicalPinMapName, "instrumented");
-  assert.deepEqual(physicalPins, { [REAL_TEST_FILE]: REAL_TEST_LF_SHA256 });
+  assert.deepEqual(physicalPins, INSTRUMENTED_LF_SHA256);
   const { pins: cleanupPins } = cleanupPinMap(guard);
   assert.deepEqual(cleanupPins, CLEANUP_LF_SHA256);
   assert.equal(
@@ -799,6 +870,7 @@ test("Exact-0004 Linux workflow fixes branch, immediate parent, ancestral base, 
     "eb92d862c70a78a907e82628cd6a5768ecc8f113570dd13ba5d3ca8cc15f8f98",
     HISTORICAL_REAL_TEST_LF_SHA256
   ]) assert.equal(source.includes(stale), false, stale);
+  assert.equal((guard.match(/migration=\(/g) || []).length, 1);
   assert.equal((guard.match(/functional=\(/g) || []).length, 1);
   assert.equal((guard.match(/instrumented=\(/g) || []).length, 1);
   assert.ok(guard.includes("100644") && guard.includes("blob"));
@@ -808,14 +880,14 @@ test("functional and instrumented pins come from canonical Git blobs", () => {
   const { workflow } = read();
   const guard = stepByName(
     job(workflow),
-    "Verify immutable Exact18 contract"
+    "Verify immutable Exact20 contract"
   ).run;
   const pins = functionalPins(guard);
   const { name: physicalPinMapName, pins: physicalPins } =
     physicalTestPinMap(guard);
   assert.equal(physicalPinMapName, "instrumented");
   assert.deepEqual(Object.keys(pins), FUNCTIONAL_FILES);
-  assert.deepEqual(physicalPins, { [REAL_TEST_FILE]: REAL_TEST_LF_SHA256 });
+  assert.deepEqual(physicalPins, INSTRUMENTED_LF_SHA256);
   let materializationDiffers = false;
   for (const file of PRESERVED_FUNCTIONAL_FILES) {
     const stat = fs.lstatSync(path.join(ROOT, ...file.split("/")));
@@ -915,10 +987,155 @@ test("functional and instrumented pins come from canonical Git blobs", () => {
     REAL_TEST_FILE
   ]).trim();
   if (rawRealTestOid !== REAL_TEST_FILTERED_OID) materializationDiffers = true;
+  for (const file of [NODE_TEST_FILE, PHYSICAL_TEST_FILE]) {
+    const canonical = canonicalLfBytes(file);
+    assert.equal(
+      crypto.createHash("sha256").update(canonical).digest("hex"),
+      INSTRUMENTED_LF_SHA256[file],
+      file
+    );
+    assert.equal(gitBlobOid(canonical), INSTRUMENTED_FILTERED_OID[file], file);
+    assert.equal(
+      git(["hash-object", `--path=${file}`, "--", file]).trim(),
+      INSTRUMENTED_FILTERED_OID[file],
+      file
+    );
+  }
   if (process.platform === "win32") assert.equal(materializationDiffers, true);
   for (const formerPin of FORMER_WINDOWS_WORKTREE_PINS) {
     assert.equal(Object.values(pins).includes(formerPin), false, formerPin);
     assert.equal(Object.values(physicalPins).includes(formerPin), false, formerPin);
+  }
+});
+
+test("0004 conflict gates are physical, checksum-bound and reconstruct only the authorized parent delta", () => {
+  const { workflow } = read();
+  const guard = stepByName(
+    job(workflow),
+    "Verify immutable Exact20 contract"
+  ).run;
+  assert.deepEqual(namedPinMap(guard, "migration").pins, MIGRATION_LF_SHA256);
+
+  for (const file of Object.keys(MIGRATION_LF_SHA256)) {
+    const canonical = canonicalLfBytes(file);
+    assert.equal(
+      crypto.createHash("sha256").update(canonical).digest("hex"),
+      MIGRATION_LF_SHA256[file],
+      file
+    );
+    assert.equal(gitBlobOid(canonical), MIGRATION_FILTERED_OID[file], file);
+    assert.equal(
+      git(["hash-object", `--path=${file}`, "--", file]).trim(),
+      MIGRATION_FILTERED_OID[file],
+      file
+    );
+  }
+
+  const migrationSource = canonicalLfBytes(MIGRATION_FILE).toString("utf8");
+  const parentMigrationSource = git([
+    "cat-file",
+    "blob",
+    `${PARENT}:${MIGRATION_FILE}`
+  ], null).toString("utf8");
+  const currentStart = migrationSource.indexOf(
+    "DO $social_connector_blocking_connection_gate$"
+  );
+  const parentStart = parentMigrationSource.indexOf(
+    "DO $social_connector_preflight$"
+  );
+  const nextStatement =
+    "ALTER TABLE ia4tube_social.social_external_accounts";
+  const currentEnd = migrationSource.indexOf(nextStatement, currentStart);
+  const parentEnd = parentMigrationSource.indexOf(nextStatement, parentStart);
+  assert.ok(currentStart >= 0 && currentEnd > currentStart);
+  assert.ok(parentStart >= 0 && parentEnd > parentStart);
+  const currentGateBlock = migrationSource.slice(currentStart, currentEnd);
+  const parentGateBlock = parentMigrationSource.slice(parentStart, parentEnd);
+  assert.equal(
+    migrationSource.replace(currentGateBlock, parentGateBlock),
+    parentMigrationSource
+  );
+
+  const gates = [
+    {
+      delimiter: "social_connector_blocking_connection_gate",
+      index: "social_connections_instagram_blocking_company_unique",
+      message: "social_connector_blocking_connection_conflict"
+    },
+    {
+      delimiter: "social_connector_active_account_gate",
+      index: "social_external_accounts_instagram_active_company_unique",
+      message: "social_connector_active_account_conflict"
+    }
+  ];
+  for (const gate of gates) {
+    const expression = new RegExp(
+      `DO \\$${gate.delimiter}\\$([\\s\\S]*?)` +
+      `\\$${gate.delimiter}\\$;`,
+      "g"
+    );
+    const matches = [...migrationSource.matchAll(expression)];
+    assert.equal(matches.length, 1, gate.delimiter);
+    const body = matches[0][1];
+    assert.equal(
+      body.split(`CREATE UNIQUE INDEX ${gate.index}`).length - 1,
+      1,
+      gate.index
+    );
+    assert.deepEqual(
+      [...body.matchAll(/\bWHEN\s+([a-z_][a-z0-9_]*)\s+THEN\b/g)]
+        .map((match) => match[1]),
+      ["unique_violation"]
+    );
+    assert.deepEqual(
+      [...body.matchAll(/\bERRCODE\s*=\s*'([^']+)'/g)]
+        .map((match) => match[1]),
+      ["23514"]
+    );
+    assert.deepEqual(
+      [...body.matchAll(/\bMESSAGE\s*=\s*'([^']+)'/g)]
+        .map((match) => match[1]),
+      [gate.message]
+    );
+    assert.equal(/\bWHEN\s+OTHERS\b/i.test(body), false);
+    assert.equal(/\bSELECT\b/i.test(body), false);
+    assert.equal(/\bCONCURRENTLY\b/i.test(body), false);
+  }
+  assert.equal(/DO \$social_connector_preflight\$/i.test(migrationSource), false);
+  assert.equal(
+    /SELECT\s+1\s+FROM\s+ia4tube_social\.(?:social_connections|social_external_accounts)/i
+      .test(migrationSource),
+    false
+  );
+  assert.equal(/\bCREATE\s+(?:UNIQUE\s+)?INDEX\s+CONCURRENTLY\b/i.test(
+    migrationSource
+  ), false);
+  assert.equal(/(?:^|\n)\s*(?:COMMIT|ROLLBACK)\s*;/i.test(migrationSource), false);
+
+  const checksumSource = canonicalLfBytes(CHECKSUM_FILE).toString("utf8");
+  const parentChecksumSource = git([
+    "cat-file",
+    "blob",
+    `${PARENT}:${CHECKSUM_FILE}`
+  ], null).toString("utf8");
+  const currentChecksums = JSON.parse(checksumSource).migrations;
+  const parentChecksums = JSON.parse(parentChecksumSource).migrations;
+  assert.deepEqual(currentChecksums.slice(0, 3), parentChecksums.slice(0, 3));
+  assert.equal(currentChecksums[3].version, "0004_social_connector_persistence");
+  assert.equal(currentChecksums[3].sha256, MIGRATION_LF_SHA256[MIGRATION_FILE]);
+  assert.equal(
+    checksumSource.replace(
+      MIGRATION_LF_SHA256[MIGRATION_FILE],
+      parentChecksums[3].sha256
+    ),
+    parentChecksumSource
+  );
+
+  assert.deepEqual(bashProtectedInventory(guard), PROTECTED_FILES);
+  for (const file of PROTECTED_FILES) {
+    const parentOid = git(["rev-parse", `${PARENT}:${file}`]).trim();
+    const baseOid = git(["rev-parse", `${BASE}:${file}`]).trim();
+    assert.equal(parentOid, baseOid, file);
   }
 });
 
@@ -1123,7 +1340,7 @@ test("cleanup pins come from canonical Git LF blobs", () => {
   const { workflow } = read();
   const guard = stepByName(
     job(workflow),
-    "Verify immutable Exact18 contract"
+    "Verify immutable Exact20 contract"
   ).run;
   const { name, pins } = cleanupPinMap(guard);
   assert.equal(name, "cleanup");
@@ -1472,17 +1689,9 @@ test("conflict Promise outcome is observed without changing the exact assertion"
   assert.equal(gitBlobOid(currentBytes), REAL_TEST_FILTERED_OID);
   const currentSource = currentBytes.toString("utf8");
   const staleExpectation = '      (error) => error?.code === "P0001"';
-  const parentExpectation = '      (error) => error?.code === "23514"';
+  const externalAccountExpectation =
+    '      (error) => error?.code === "23514"';
   const observedExpectation = '        const matched = error?.code === "23514";';
-  const parentAssertion = [
-    "    await assert.rejects(",
-    "      runnerA.applyExact(",
-    "        EXACT_APPLY_REQUEST,",
-    "        configuration.approvalEnvironment",
-    "      ),",
-    parentExpectation,
-    "    );"
-  ].join("\n");
   const observedAssertion = [
     "    physicalPhases.markExact0004ConflictingNegativeAttempted();",
     "    const observedConflictingNegativePromise =",
@@ -1504,39 +1713,12 @@ test("conflict Promise outcome is observed without changing the exact assertion"
     "    );"
   ].join("\n");
   assert.equal(parentSource.includes(staleExpectation), false);
-  assert.equal(parentSource.split(parentExpectation).length - 1, 1);
+  assert.equal(parentSource.split(observedAssertion).length - 1, 1);
   assert.equal(currentSource.split(observedExpectation).length - 1, 1);
-  assert.equal(currentSource.includes(parentExpectation), false);
+  assert.equal(currentSource.split(observedAssertion).length - 1, 1);
+  assert.equal(parentSource.includes(externalAccountExpectation), false);
+  assert.equal(currentSource.split(externalAccountExpectation).length - 1, 1);
   assert.equal(currentSource.includes(staleExpectation), false);
-  assert.equal(
-    currentSource.replace(observedAssertion, parentAssertion),
-    parentSource
-  );
-
-  const migrationSource = canonicalLfBytes(
-    "db/migrations/0004_social_connector_persistence.up.sql"
-  ).toString("utf8");
-  const blockingMessage =
-    "MESSAGE = 'social_connector_blocking_connection_conflict'";
-  const blockingMessageIndex = migrationSource.indexOf(blockingMessage);
-  const blockingStart = migrationSource.lastIndexOf(
-    "  IF EXISTS (",
-    blockingMessageIndex
-  );
-  const blockingEnd = migrationSource.indexOf("  END IF;", blockingMessageIndex);
-  assert.notEqual(blockingMessageIndex, -1);
-  assert.notEqual(blockingStart, -1);
-  assert.notEqual(blockingEnd, -1);
-  const blockingPreflight = migrationSource.slice(
-    blockingStart,
-    blockingEnd + "  END IF;".length
-  );
-  assert.equal(
-    blockingPreflight.split("      ERRCODE = '23514',").length - 1,
-    1
-  );
-  assert.equal(blockingPreflight.includes("ERRCODE = 'P0001'"), false);
-  assert.equal(blockingPreflight.includes(blockingMessage), true);
 
   const markerExpression =
     /physicalPhases\.(start|complete)Exact0004Subphase\(\s*"([^"]+)"\s*\)/g;
@@ -1551,6 +1733,7 @@ test("conflict Promise outcome is observed without changing the exact assertion"
     markers.filter(({ kind }) => kind === "complete").map(({ subphase }) => subphase),
     EXACT0004_SUBPHASES.slice(0, -2)
   );
+  assert.equal((currentSource.match(/\bphysicalPhases\./g) || []).length, 70);
   assert.equal(
     currentSource.split("physicalPhases.markExact0004DatabaseMutationAttempted();")
       .length - 1,
@@ -1585,7 +1768,10 @@ test("conflict Promise outcome is observed without changing the exact assertion"
     1
   );
   assert.equal(conflictingBlock.includes(staleExpectation), false);
-  assert.equal(conflictingBlock.includes(blockingMessage), false);
+  assert.equal(
+    conflictingBlock.includes("social_connector_blocking_connection_conflict"),
+    false
+  );
   for (const forbidden of [
     "error.message",
     "error.stack",
@@ -1618,93 +1804,92 @@ test("conflict Promise outcome is observed without changing the exact assertion"
   const rollbackComplete = currentSource.indexOf(
     'physicalPhases.completeExact0004Subphase("rollback_verification")'
   );
+  const externalStart = currentSource.indexOf(
+    'physicalPhases.startExact0004Subphase(\n    "conflicting_external_account_0004_negative"'
+  );
+  const externalComplete = currentSource.indexOf(
+    'physicalPhases.completeExact0004Subphase(\n      "conflicting_external_account_0004_negative"'
+  );
+  const externalRollbackStart = currentSource.indexOf(
+    'physicalPhases.startExact0004Subphase(\n      "external_account_rollback_verification"'
+  );
+  const externalRollbackComplete = currentSource.indexOf(
+    'physicalPhases.completeExact0004Subphase(\n    "external_account_rollback_verification"'
+  );
   const positiveApply = currentSource.indexOf(
     'physicalPhases.startExact0004Subphase("apply_exact")'
   );
   assert.ok(conflictingCompleteIndex < rollbackStart);
   assert.ok(rollbackStart < rollbackComplete);
-  assert.ok(rollbackComplete < positiveApply);
-
-  const planParentBytes = git([
-    "cat-file",
-    "blob",
-    `${PLAN_SUBPHASE_PARENT}:${REAL_TEST_FILE}`
-  ], null);
-  assert.ok(Buffer.isBuffer(planParentBytes));
-  assert.equal(
-    crypto.createHash("sha256").update(planParentBytes).digest("hex"),
-    PLAN_SUBPHASE_PARENT_REAL_TEST_LF_SHA256
-  );
-  assert.equal(
-    gitBlobOid(planParentBytes),
-    PLAN_SUBPHASE_PARENT_REAL_TEST_FILTERED_OID
-  );
-  const planParentSource = planParentBytes.toString("utf8");
-
-  const stripMarkers = (source) => source
-    .replace(
-      /^[ ]*physicalPhases\.(?:start|complete)Exact0004Subphase\(\s*"[^"]+"\s*\);\n/gm,
-      ""
-    )
-    .replace(
-      /^[ ]*physicalPhases\.markExact0004DatabaseMutationAttempted\(\);\n/gm,
-      ""
-    );
-  const helperSignature = "async function proveMigratorExplicitRoleBoundary(";
-  const routeSignature = "async function proveExact0004Route(";
-  const parentHelper = inlineFunction(planParentSource, helperSignature);
-  const currentHelper = inlineFunction(currentSource, helperSignature);
-  const normalizedHelper = stripMarkers(currentHelper)
-    .replace("pool, physicalPhases", "pool")
-    .replace(
-      [
-        "    (client) => {",
-        "      return client.query(ledgerRead);",
-        "    },"
-      ].join("\n"),
-      "    (client) => client.query(ledgerRead),"
-    );
-  assert.equal(normalizedHelper, parentHelper);
-
-  const parentRoute = inlineFunction(planParentSource, routeSignature);
-  const currentRoute = inlineFunction(currentSource, routeSignature);
-  const normalizedRoute = stripMarkers(
-    currentRoute.replace(observedAssertion, parentAssertion)
-  )
-    .replace(parentExpectation, staleExpectation)
-    .replace(",\n  physicalPhases\n)", "\n)")
-    .replace(
-      "proveMigratorExplicitRoleBoundary(migrationPoolA, physicalPhases)",
-      "proveMigratorExplicitRoleBoundary(migrationPoolA)"
-    );
-  assert.equal(normalizedRoute, parentRoute);
-
-  const currentCallTail = [
-    "          companyC,",
-    "          physicalPhases",
-    "        ));"
-  ].join("\n");
-  const parentCallTail = ["          companyC", "        ));"].join("\n");
-  assert.equal(currentSource.split(currentCallTail).length - 1, 1);
-  let normalizedSource = currentSource
-    .replace(currentHelper, parentHelper)
-    .replace(currentRoute, parentRoute)
-    .replace(currentCallTail, parentCallTail);
-  assert.equal(normalizedSource, planParentSource);
+  assert.ok(rollbackComplete < externalStart);
+  assert.ok(externalStart < externalComplete);
+  assert.ok(externalComplete < externalRollbackStart);
+  assert.ok(externalRollbackStart < externalRollbackComplete);
+  assert.ok(externalRollbackComplete < positiveApply);
+  const externalBlock = currentSource.slice(externalStart, externalRollbackComplete);
+  for (const required of [
+    "insertExact0004ExternalAccountConflict(",
+    "countExact0004ActiveExternalAccounts(",
+    "readExact0004OwnerExternalAccountVisibility(",
+    'error?.code === "23514"',
+    "social_connections_instagram_blocking_company_unique",
+    "social_external_accounts_instagram_active_company_unique",
+    "ledger_row_absent: true",
+    "O rollback da 0004 deve preservar as duas contas conflitantes."
+  ]) assert.equal(externalBlock.includes(required), true, required);
+  for (const required of [
+    "readExact0004OwnerConnectionVisibility(",
+    "FORCE RLS deve ocultar do owner sem company_id as duas conexoes fisicas.",
+    "O rollback da 0004 deve preservar as duas conexoes conflitantes."
+  ]) assert.equal(currentSource.includes(required), true, required);
+  assert.equal((currentSource.match(/\berror\?\.code === "23514"/g) || []).length, 2);
   for (const forbidden of [
     "error.message",
     "error.stack",
     "JSON.stringify(error)",
     "process.stdout.write",
     "process.stderr.write"
-  ]) assert.equal(currentHelper.includes(forbidden), false, forbidden);
+  ]) assert.equal(currentSource.includes(forbidden), false, forbidden);
+
+  const helperStart = currentSource.indexOf(
+    "async function countExact0004BlockingConnections("
+  );
+  const routeSignature = "async function proveExact0004Route(";
+  const helperEnd = currentSource.indexOf(routeSignature, helperStart);
+  assert.ok(helperStart >= 0 && helperEnd > helperStart);
+  const authorizedHelpers = currentSource.slice(helperStart, helperEnd);
+  for (const helper of [
+    "countExact0004BlockingConnections",
+    "readExact0004OwnerConnectionVisibility",
+    "insertExact0004ExternalAccountConflict",
+    "removeExact0004ExternalAccountConflict",
+    "countExact0004ActiveExternalAccounts",
+    "readExact0004OwnerExternalAccountVisibility"
+  ]) assert.equal(authorizedHelpers.includes(`async function ${helper}(`), true);
+  const withoutAuthorizedHelpers = currentSource.replace(authorizedHelpers, "");
+  const currentRoute = inlineFunction(withoutAuthorizedHelpers, routeSignature);
+  const parentRoute = inlineFunction(parentSource, routeSignature);
+  assert.equal(
+    withoutAuthorizedHelpers.replace(currentRoute, parentRoute),
+    parentSource
+  );
+  for (const authorizedRouteProof of [
+    "conflicting_external_account_0004_negative",
+    "external_account_rollback_verification",
+    "blocking_connection_index_absent",
+    "active_account_index_absent",
+    "index_catalog.indisunique",
+    "index_catalog.indisvalid",
+    "index_catalog.indisready",
+    "connector_indexes"
+  ]) assert.equal(currentRoute.includes(authorizedRouteProof), true);
 });
 
 test("instrumented runner pin is the canonical filtered LF blob", () => {
   const { workflow } = read();
   const guard = stepByName(
     job(workflow),
-    "Verify immutable Exact18 contract"
+    "Verify immutable Exact20 contract"
   ).run;
   const { pins } = runnerPinMap(guard);
   assert.deepEqual(pins, { [RUNNER_FILE]: RUNNER_LF_SHA256 });
@@ -1731,11 +1916,11 @@ test("instrumented runner pin is the canonical filtered LF blob", () => {
   assert.equal(gitBlobOid(parent), PARENT_RUNNER_FILTERED_OID);
   assert.notEqual(RUNNER_FILTERED_OID, PARENT_RUNNER_FILTERED_OID);
   const parentRunnerSource = parent.toString("utf8");
-  assert.ok(parentRunnerSource.includes("const EVIDENCE_SCHEMA_VERSION = 4;"));
-  assert.equal(parentRunnerSource.includes("conflictingNegativePromiseOutcome"), false);
+  assert.ok(parentRunnerSource.includes("const EVIDENCE_SCHEMA_VERSION = 5;"));
+  assert.ok(parentRunnerSource.includes("conflictingNegativePromiseOutcome"));
   const runnerSource = canonical.toString("utf8");
   for (const fragment of [
-    "const EVIDENCE_SCHEMA_VERSION = 5;",
+    "const EVIDENCE_SCHEMA_VERSION = 6;",
     "EXACT_0004_SUBPHASES",
     "EXACT_0004_EXECUTION_SUBPHASES",
     "EXACT_0004_OPERATION_CLASSES",
@@ -1752,6 +1937,28 @@ test("instrumented runner pin is the canonical filtered LF blob", () => {
     "exact0004EvidenceValid",
     "exact0004OperationClass"
   ]) assert.ok(runnerSource.includes(fragment), fragment);
+  for (const subphase of [
+    "conflicting_external_account_0004_negative",
+    "external_account_rollback_verification"
+  ]) {
+    assert.equal(runnerSource.split(`  "${subphase}",`).length - 1, 1);
+    assert.equal(parentRunnerSource.includes(subphase), false);
+  }
+  assert.equal(
+    runnerSource
+      .replace("const EVIDENCE_SCHEMA_VERSION = 6;", "const EVIDENCE_SCHEMA_VERSION = 5;")
+      .replace('  "conflicting_external_account_0004_negative",\n', "")
+      .replace('  "external_account_rollback_verification",\n', "")
+      .replace(
+        '  conflicting_external_account_0004_negative: "negative_gate",\n',
+        ""
+      )
+      .replace(
+        '  external_account_rollback_verification: "rollback_check",\n',
+        ""
+      ),
+    parentRunnerSource
+  );
   const exactReporterArguments = [
     "        [",
     "          \"--test-reporter=tap\",",
@@ -1843,7 +2050,13 @@ test("one-shot proof reuses canonical Linux PostgreSQL with digest and no publis
     "shell:false",
     "profileBefore='0003'",
     "profileAfter='0004'",
-    "verifyFinalProfile"
+    "verifyFinalProfile",
+    "pg_catalog.pg_index",
+    "indisunique",
+    "indisvalid",
+    "indisready",
+    "social_connections_instagram_blocking_company_unique",
+    "social_external_accounts_instagram_active_company_unique"
   ]) assert.ok(physical.run.includes(fragment), fragment);
   assert.equal((physical.run.match(/'run','test:postgres-real'/g) || []).length, 1);
   assert.equal((source.match(/npm run test:postgres-real/g) || []).length, 0);
@@ -2352,6 +2565,24 @@ test("Exact-0004 subphase artifact boundary is closed and mutation-coherent", ()
     failureBeforeFirstMutation: false,
     ...CONFLICTING_NEGATIVE_SUCCESS
   });
+  const validExternalAccountFailure = Object.freeze({
+    ...validConflictFailure,
+    lastExact0004SubphaseStarted:
+      "conflicting_external_account_0004_negative",
+    lastExact0004SubphaseCompleted: "rollback_verification",
+    exact0004FailureSubphase: "conflicting_external_account_0004_negative",
+    safeSqlState: "23514"
+  });
+  const validExternalAccountRollbackFailure = Object.freeze({
+    ...validConflictFailure,
+    lastExact0004SubphaseStarted: "external_account_rollback_verification",
+    lastExact0004SubphaseCompleted:
+      "conflicting_external_account_0004_negative",
+    exact0004FailureSubphase: "external_account_rollback_verification",
+    safeSqlState: "P0001",
+    safeErrorClass: "postgres_sqlstate",
+    safeOperationClass: "rollback_check"
+  });
   const validConflictOutcomes = Object.freeze([
     Object.freeze({
       label: "rejected_23514_matched",
@@ -2432,7 +2663,7 @@ test("Exact-0004 subphase artifact boundary is closed and mutation-coherent", ()
     ["completion_without_start", { planExactInvoked: false, planExactCompleted: true }],
     ["apply_without_plan", {
       lastExact0004SubphaseStarted: "apply_exact",
-      lastExact0004SubphaseCompleted: "rollback_verification",
+      lastExact0004SubphaseCompleted: "external_account_rollback_verification",
       exact0004FailureSubphase: "apply_exact",
       safeOperationClass: "apply",
       planExactInvoked: true,
@@ -2505,6 +2736,16 @@ test("Exact-0004 subphase artifact boundary is closed and mutation-coherent", ()
       true,
       `validator_${index + 1}:post_exact`
     );
+    assert.equal(
+      validate(validExternalAccountFailure),
+      true,
+      `validator_${index + 1}:external_account_negative`
+    );
+    assert.equal(
+      validate(validExternalAccountRollbackFailure),
+      true,
+      `validator_${index + 1}:external_account_rollback`
+    );
     for (const fixture of validConflictOutcomes) {
       const firstFailure = fixture.value.firstFailure;
       assert.equal(
@@ -2546,7 +2787,7 @@ test("Exact-0004 subphase artifact boundary is closed and mutation-coherent", ()
   }
 });
 
-test("evidence keeps legacy schema 1 and uses the closed safe schema 5", () => {
+test("evidence keeps legacy schema 1 and uses the closed safe schema 6", () => {
   const { source, workflow } = read();
   const currentJob = job(workflow);
   const physical = stepByName(
@@ -2579,7 +2820,7 @@ test("evidence keeps legacy schema 1 and uses the closed safe schema 5", () => {
     assert.match(run, new RegExp(`${valueName}\\.schemaVersion\\s*!==\\s*1`));
     assert.match(
       run,
-      new RegExp(`${valueName}\\.evidenceSchemaVersion\\s*!==\\s*5`)
+      new RegExp(`${valueName}\\.evidenceSchemaVersion\\s*!==\\s*6`)
     );
     assert.match(
       run,
@@ -2749,10 +2990,11 @@ test("evidence keeps legacy schema 1 and uses the closed safe schema 5", () => {
       `enforcement:${successFragment}`);
   }
   assert.ok(
-    finalize.run.includes("evidenceSchemaVersion:5") &&
+    finalize.run.includes("evidenceSchemaVersion:6") &&
     finalize.run.includes("safeLineBucket:'unknown'")
   );
   assert.equal(source.includes("evidenceSchemaVersion:4"), false);
+  assert.equal(source.includes("evidenceSchemaVersion:5"), false);
   assert.equal(source.includes("evidenceSchemaVersion:3"), false);
   for (const key of EVIDENCE_KEYS) assert.ok(source.includes(key), key);
   for (const key of PROCESS_STATUS_KEYS) assert.ok(source.includes(key), key);

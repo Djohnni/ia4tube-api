@@ -1122,10 +1122,23 @@ test("migration 0004 keeps legacy rows valid and adds only the minimum connector
     ),
     "utf8"
   );
-  const blockingIndex = sql.match(
+  const blockingGate = sql.match(
+    /DO \$social_connector_blocking_connection_gate\$[\s\S]*?\$social_connector_blocking_connection_gate\$;/
+  )?.[0];
+  const activeAccountGate = sql.match(
+    /DO \$social_connector_active_account_gate\$[\s\S]*?\$social_connector_active_account_gate\$;/
+  )?.[0];
+  assert.ok(blockingGate);
+  assert.ok(activeAccountGate);
+  assert.ok(sql.indexOf(blockingGate) < sql.indexOf(activeAccountGate));
+  const blockingIndex = blockingGate.match(
     /CREATE UNIQUE INDEX social_connections_instagram_blocking_company_unique[\s\S]*?;/
   )?.[0];
+  const activeAccountIndex = activeAccountGate.match(
+    /CREATE UNIQUE INDEX social_external_accounts_instagram_active_company_unique[\s\S]*?;/
+  )?.[0];
   assert.ok(blockingIndex);
+  assert.ok(activeAccountIndex);
   const statusAllowed = sql.match(
     /ADD CONSTRAINT social_connections_status_allowed[\s\S]*?(?=\n\s*ADD CONSTRAINT social_connections_status_timestamp_consistent)/
   )?.[0];
@@ -1159,23 +1172,56 @@ test("migration 0004 keeps legacy rows valid and adds only the minimum connector
     ]
   );
   assert.match(
-    sql,
+    activeAccountIndex,
     /CREATE UNIQUE INDEX social_external_accounts_instagram_active_company_unique[\s\S]*?ON ia4tube_social\.social_external_accounts \(company_id\)[\s\S]*?provider = 'instagram' AND status = 'active'/
   );
-  const preflight = sql.match(
-    /DO \$social_connector_preflight\$[\s\S]*?\$social_connector_preflight\$;/
-  )?.[0];
-  assert.ok(preflight);
-  assert.match(
-    preflight,
-    /social_connections[\s\S]*?GROUP BY company_id[\s\S]*?HAVING COUNT\(\*\) > 1[\s\S]*?social_connector_blocking_connection_conflict/
+  for (const [gate, message] of [
+    [blockingGate, "social_connector_blocking_connection_conflict"],
+    [activeAccountGate, "social_connector_active_account_conflict"]
+  ]) {
+    assert.ok(gate.indexOf("CREATE UNIQUE INDEX") < gate.indexOf("EXCEPTION"));
+    assert.equal((gate.match(/^EXCEPTION$/gm) || []).length, 1);
+    assert.equal((gate.match(/\bRAISE EXCEPTION USING\b/g) || []).length, 1);
+    assert.deepEqual(
+      [...gate.matchAll(/\bWHEN\s+([a-z_][a-z0-9_]*)\s+THEN\b/g)].map(
+        (match) => match[1]
+      ),
+      ["unique_violation"]
+    );
+    assert.deepEqual(
+      [...gate.matchAll(/\bERRCODE\s*=\s*'([^']+)'/g)].map(
+        (match) => match[1]
+      ),
+      ["23514"]
+    );
+    assert.deepEqual(
+      [...gate.matchAll(/\bMESSAGE\s*=\s*'([^']+)'/g)].map(
+        (match) => match[1]
+      ),
+      [message]
+    );
+    assert.doesNotMatch(gate, /\bCONCURRENTLY\b/i);
+  }
+  assert.equal(
+    (sql.match(/DO \$social_connector_(?:blocking_connection|active_account)_gate\$/g) || [])
+      .length,
+    2
   );
-  assert.match(
-    preflight,
-    /social_external_accounts[\s\S]*?GROUP BY company_id[\s\S]*?HAVING COUNT\(\*\) > 1[\s\S]*?social_connector_active_account_conflict/
+  assert.doesNotMatch(sql, /DO \$social_connector_preflight\$/);
+  assert.doesNotMatch(
+    sql,
+    /SELECT\s+1\s+FROM\s+ia4tube_social\.(?:social_connections|social_external_accounts)/i
   );
-  assert.equal((preflight.match(/RAISE EXCEPTION/g) || []).length, 2);
-  assert.doesNotMatch(preflight, /SELECT\s+(company_id|id|external_id|username)\b/i);
+  assert.doesNotMatch(sql, /GROUP BY\s+company_id[\s\S]*?HAVING\s+COUNT\(\*\)\s*>\s*1/i);
+  assert.doesNotMatch(sql, /\bCONCURRENTLY\b/i);
+  assert.doesNotMatch(sql, /(?:^|\n)\s*(?:COMMIT|ROLLBACK)\s*;/i);
+  assert.ok(
+    sql.indexOf(activeAccountGate) <
+      sql.indexOf(
+        "ALTER TABLE ia4tube_social.social_external_accounts",
+        sql.indexOf(activeAccountGate)
+      )
+  );
   assert.match(
     sql,
     /status = 'reconnect_required'[\s\S]*?revoked_at IS NULL[\s\S]*?disconnected_at IS NULL/
@@ -2355,9 +2401,9 @@ test("a later migration rollback preserves only committed checksums", async () =
   );
 });
 
-test("migration 0004 rolls back atomically and never records a partial ledger row", async () => {
+test("migration 0004 physical gates roll back atomically and never record a partial ledger row", async () => {
   const harness = migrationPool({
-    failOn: "CREATE TABLE ia4tube_social.social_publication_attempts"
+    failOn: "CREATE UNIQUE INDEX social_external_accounts_instagram_active_company_unique"
   });
   await assert.rejects(
     runnerFor(harness).apply({
@@ -2383,6 +2429,20 @@ test("migration 0004 rolls back atomically and never records a partial ledger ro
   assert.ok(
     harness.state.queries.some((query) => query.text === "ROLLBACK")
   );
+  const texts = harness.state.queries.map((query) => query.text);
+  const beginIndex = texts.lastIndexOf("BEGIN");
+  const migrationIndex = texts.findIndex((text) =>
+    text.includes("DO $social_connector_blocking_connection_gate$")
+  );
+  const rollbackIndex = texts.indexOf("ROLLBACK", migrationIndex);
+  assert.ok(beginIndex >= 0);
+  assert.ok(beginIndex < migrationIndex);
+  assert.ok(migrationIndex < rollbackIndex);
+  assert.match(
+    texts[migrationIndex],
+    /DO \$social_connector_active_account_gate\$[\s\S]*?CREATE UNIQUE INDEX social_external_accounts_instagram_active_company_unique/
+  );
+  assert.equal(texts.indexOf("COMMIT", migrationIndex), -1);
 });
 
 test("apply-exact commits canonical 0004, ledger and physical validation as one unit", async () => {

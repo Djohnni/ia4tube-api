@@ -547,6 +547,7 @@ test("real PostgreSQL runner preserves a signal close without inventing timeout"
 });
 
 test("protocol group 1: physical phases accept only the complete ordered main and cleanup lifecycle", async () => {
+  assert.equal(realPostgresRunner.EVIDENCE_SCHEMA_VERSION, 6);
   assert.deepEqual(realPostgresRunner.PHYSICAL_PHASES, [
     "physical_target_preflight",
     "role_provisioning",
@@ -566,12 +567,28 @@ test("protocol group 1: physical phases accept only the complete ordered main an
     "reauthentication",
     "final_cleanup"
   ]);
-  const facts = observeNodeLines((await physicalPhaseLines()).map((line) => ({
+  const completePhaseLines = await physicalPhaseLines();
+  const facts = observeNodeLines(completePhaseLines.map((line) => ({
     channel: "stderr",
     line
   })));
   assert.equal(facts.phaseProtocolValid, true);
-  assert.equal(facts.phaseEventCount, 66);
+  assert.equal(facts.phaseEventCount, 70);
+  const exactBoundaryEvents = completePhaseLines.map((line) => JSON.parse(
+    line.slice(realPostgresRunner.SAFE_EVENT_PREFIX.length)
+  )).filter((event) => [
+    "exact0004SubphaseStarted",
+    "exact0004SubphaseCompleted"
+  ].includes(event.event));
+  assert.deepEqual(
+    exactBoundaryEvents.map((event) => [event.event, event.subphase]),
+    realPostgresRunner.EXACT_0004_EXECUTION_SUBPHASES.flatMap(
+      (subphase) => [
+        ["exact0004SubphaseStarted", subphase],
+        ["exact0004SubphaseCompleted", subphase]
+      ]
+    )
+  );
   assert.equal(facts.lastMainPhaseStarted, "reauthentication");
   assert.equal(facts.lastMainPhaseCompleted, "reauthentication");
   assert.equal(facts.lastExact0004SubphaseStarted, "final_snapshot");
@@ -629,6 +646,22 @@ test("protocol group 1: physical phases refuse jumps, repeats, unknowns, extras 
     2
   );
   const complete = await physicalPhaseLines();
+  const skippedExternalAccountGate = complete.map((line) => {
+    const candidate = JSON.parse(
+      line.slice(realPostgresRunner.SAFE_EVENT_PREFIX.length)
+    );
+    if (
+      candidate.event === "exact0004SubphaseStarted" &&
+      candidate.subphase === "conflicting_external_account_0004_negative"
+    ) {
+      return untrustedSafeEvent({
+        ...candidate,
+        operationClass: "apply",
+        subphase: "apply_exact"
+      });
+    }
+    return line;
+  });
   const invalidCases = [
     [event("mainPhaseStarted", "role_provisioning", 1)],
     [first, event("mainPhaseStarted", "physical_target_preflight", 2)],
@@ -644,8 +677,9 @@ test("protocol group 1: physical phases refuse jumps, repeats, unknowns, extras 
     ],
     [
       ...complete,
-      event("mainPhaseStarted", "physical_target_preflight", 67)
-    ]
+      event("mainPhaseStarted", "physical_target_preflight", 71)
+    ],
+    skippedExternalAccountGate
   ];
   for (const lines of invalidCases) {
     const facts = observeNodeLines(lines.map((line) => ({
@@ -712,12 +746,20 @@ test("protocol group 1: exact 0004 evidence is closed, ordered, immutable and sa
     "synthetic_0005_negative",
     "conflicting_0004_negative",
     "rollback_verification",
+    "conflicting_external_account_0004_negative",
+    "external_account_rollback_verification",
     "apply_exact",
     "concurrency",
     "final_snapshot",
     "unknown",
     "not_reached"
   ]);
+  assert.equal(realPostgresRunner.EXACT_0004_SUBPHASES.length, 18);
+  assert.equal(
+    realPostgresRunner.EXACT_0004_EXECUTION_SUBPHASES.length,
+    16
+  );
+  assert.equal(realPostgresRunner.EXACT_0004_EVIDENCE_FIELDS.length, 18);
   assert.deepEqual(realPostgresRunner.EXACT_0004_OPERATION_CLASSES, [
     "catalog_read",
     "privilege_check",
@@ -769,6 +811,8 @@ test("protocol group 1: exact 0004 evidence is closed, ordered, immutable and sa
     synthetic_0005_negative: "negative_gate",
     conflicting_0004_negative: "negative_gate",
     rollback_verification: "rollback_check",
+    conflicting_external_account_0004_negative: "negative_gate",
+    external_account_rollback_verification: "rollback_check",
     apply_exact: "apply",
     concurrency: "concurrency",
     final_snapshot: "final_validation"
@@ -964,6 +1008,89 @@ test("protocol group 1: exact 0004 evidence is closed, ordered, immutable and sa
   assert.equal(afterMutation.facts.safeErrorClass, "postgres_sqlstate");
   assert.equal(afterMutation.facts.databaseMutationAttempted, true);
   assert.equal(afterMutation.facts.failureBeforeFirstMutation, false);
+
+  const externalAccountGateFailure = await runSyntheticReporterFailure({
+    stdoutLines: tapPrefix,
+    phaseLines: await exact0004FailurePhaseLines(
+      "conflicting_external_account_0004_negative",
+      { mutationAttempted: true }
+    ),
+    stderrLines: ["AssertionError ERR_ASSERTION", "code: '23514'"]
+  });
+  assert.equal(
+    externalAccountGateFailure.facts.lastExact0004SubphaseStarted,
+    "conflicting_external_account_0004_negative"
+  );
+  assert.equal(
+    externalAccountGateFailure.facts.lastExact0004SubphaseCompleted,
+    "rollback_verification"
+  );
+  assert.equal(
+    externalAccountGateFailure.facts.exact0004FailureSubphase,
+    "conflicting_external_account_0004_negative"
+  );
+  assert.equal(
+    externalAccountGateFailure.facts.safeOperationClass,
+    "negative_gate"
+  );
+  assert.equal(externalAccountGateFailure.facts.safeSqlState, "23514");
+  assert.equal(
+    externalAccountGateFailure.facts.safeErrorClass,
+    "assertion_failure"
+  );
+  assert.equal(
+    externalAccountGateFailure.facts.conflictingNegativeAssertionMatched,
+    true
+  );
+
+  const externalAccountRollbackFailure = await runSyntheticReporterFailure({
+    stdoutLines: tapPrefix,
+    phaseLines: await exact0004FailurePhaseLines(
+      "external_account_rollback_verification",
+      { mutationAttempted: true }
+    ),
+    stderrLines: ["code: 'P0001'"]
+  });
+  assert.equal(
+    externalAccountRollbackFailure.facts.lastExact0004SubphaseStarted,
+    "external_account_rollback_verification"
+  );
+  assert.equal(
+    externalAccountRollbackFailure.facts.lastExact0004SubphaseCompleted,
+    "conflicting_external_account_0004_negative"
+  );
+  assert.equal(
+    externalAccountRollbackFailure.facts.exact0004FailureSubphase,
+    "external_account_rollback_verification"
+  );
+  assert.equal(
+    externalAccountRollbackFailure.facts.safeOperationClass,
+    "rollback_check"
+  );
+  assert.equal(externalAccountRollbackFailure.facts.safeSqlState, "P0001");
+  assert.equal(
+    externalAccountRollbackFailure.facts.safeErrorClass,
+    "postgres_sqlstate"
+  );
+
+  const externalAccountGateEvidence = Object.fromEntries(
+    realPostgresRunner.EXACT_0004_EVIDENCE_FIELDS.map((field) => [
+      field,
+      externalAccountGateFailure.facts[field]
+    ])
+  );
+  assert.equal(realPostgresRunner.exact0004EvidenceValid(
+    externalAccountGateEvidence,
+    { failureEvent: true }
+  ), true);
+  assert.equal(realPostgresRunner.exact0004EvidenceValid({
+    ...externalAccountGateEvidence,
+    safeOperationClass: "rollback_check"
+  }, { failureEvent: true }), false);
+  assert.equal(realPostgresRunner.exact0004EvidenceValid({
+    ...externalAccountGateEvidence,
+    lastExact0004SubphaseCompleted: "conflicting_0004_negative"
+  }, { failureEvent: true }), false);
 
   const invalidSqlState = await runSyntheticReporterFailure({
     stdoutLines: tapPrefix,

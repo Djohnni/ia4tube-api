@@ -18,6 +18,7 @@ const {
 const {
   CONFLICTING_NEGATIVE_FULFILLED_RESULT_CLASSES,
   CONFLICTING_NEGATIVE_PROMISE_OUTCOMES,
+  EVIDENCE_SCHEMA_VERSION,
   EXACT_0004_ERROR_CLASSES,
   EXACT_0004_EVIDENCE_FIELDS,
   EXACT_0004_EXECUTION_SUBPHASES,
@@ -64,9 +65,9 @@ const SAFE_EVIDENCE_COMMIT = "8534817574a22dbd144a835c9f3585c44ee11c96";
 const PERMISSION_BOUNDARY_COMMIT = "555d71eacbde76ceffdd03d64731e03849978c17";
 const REAL_POSTGRES_TEST = "tests/social-postgres-real.test.js";
 const REAL_POSTGRES_TEST_LF_SHA256 =
-  "d07054524efec8ac48b720eed8df7a39d2db6a8a5cda6249b80c30ec73b33a66";
+  "e3912a2b174e7199c76035264ebe455da00848c3c61259138b9ea0b77c3e5117";
 const REAL_POSTGRES_TEST_FILTERED_OID =
-  "926b6050fcb89b528126eb6fbf72f70624556a4b";
+  "9d841c0290b2abb102bb3ce2f7e76bc8a80fe84a";
 const PHYSICAL_MAIN_PHASES = Object.freeze([
   "physical_target_preflight",
   "role_provisioning",
@@ -653,7 +654,7 @@ test("24. exact 0004 production ledger reads use the migrator role only", () => 
     (productionSnapshotSource.match(
       /ia4tube_migrations\.schema_migrations/g
     ) || []).length,
-    3
+    4
   );
   assert.equal(
     snapshotSource.startsWith(
@@ -683,7 +684,7 @@ test("24. exact 0004 production ledger reads use the migrator role only", () => 
   );
   assert.equal(
     (exactRouteSource.match(/\{ role: MIGRATOR_ROLE \}/g) || []).length,
-    2
+    3
   );
   assert.equal(
     (exactRouteSource.match(/\brunnerA\.planExact\(/g) || []).length,
@@ -695,10 +696,16 @@ test("24. exact 0004 production ledger reads use the migrator role only", () => 
   );
   assert.equal(
     (exactRouteSource.match(/\brunnerA\.applyExact\(/g) || []).length,
-    2
+    3
   );
   assert.equal(
     (exactRouteSource.match(/\brunnerB\.applyExact\(/g) || []).length,
+    1
+  );
+  assert.equal(
+    (exactRouteSource.match(
+      /physicalPhases\.observeExact0004ConflictingNegative\(/g
+    ) || []).length,
     1
   );
   const boundaryCall = exactRouteSource.indexOf(
@@ -861,6 +868,28 @@ test("24. exact 0004 production ledger reads use the migrator role only", () => 
       ].join("\n")
     }
   ];
+  const externalAccountInstrumentation = [
+    [
+      "  physicalPhases.startExact0004Subphase(",
+      '    "conflicting_external_account_0004_negative"',
+      "  );"
+    ].join("\n") + "\n",
+    [
+      "    physicalPhases.completeExact0004Subphase(",
+      '      "conflicting_external_account_0004_negative"',
+      "    );"
+    ].join("\n") + "\n",
+    [
+      "    physicalPhases.startExact0004Subphase(",
+      '      "external_account_rollback_verification"',
+      "    );"
+    ].join("\n") + "\n",
+    [
+      "  physicalPhases.completeExact0004Subphase(",
+      '    "external_account_rollback_verification"',
+      "  );"
+    ].join("\n") + "\n"
+  ];
   const exact0004Instrumentation = [
     '  physicalPhases.startExact0004Subphase("snapshot_before_plan");\n',
     '  physicalPhases.completeExact0004Subphase("snapshot_before_plan");\n',
@@ -879,6 +908,7 @@ test("24. exact 0004 production ledger reads use the migrator role only", () => 
     ].join("\n") + "\n",
     '    physicalPhases.startExact0004Subphase("rollback_verification");\n',
     '  physicalPhases.completeExact0004Subphase("rollback_verification");\n',
+    ...externalAccountInstrumentation,
     '  physicalPhases.startExact0004Subphase("apply_exact");\n',
     '  physicalPhases.completeExact0004Subphase("apply_exact");\n',
     '  physicalPhases.startExact0004Subphase("concurrency");\n',
@@ -917,8 +947,159 @@ test("24. exact 0004 production ledger reads use the migrator role only", () => 
       "    );"
     ].join("\n")
   };
-  let permissionBoundaryCandidate = replaceExactlyOnce(
+  const forceRlsHelperBlock = closedSourceSection(
     realTestSource,
+    "async function countExact0004BlockingConnections(pool, fixture) {",
+    "async function proveExact0004Route("
+  );
+  const externalAccountRoute = closedSourceSection(
+    realTestSource,
+    [
+      "  physicalPhases.startExact0004Subphase(",
+      '    "conflicting_external_account_0004_negative"',
+      "  );"
+    ].join("\n"),
+    '  await migrationPoolA.query("SET lock_timeout = 0");'
+  );
+  const forceRlsConflictGateReplacements = [
+    {
+      label: "force-RLS conflict fixture helpers",
+      current: forceRlsHelperBlock,
+      previous: ""
+    },
+    {
+      label: "external-account negative and rollback route",
+      current: externalAccountRoute,
+      previous: externalAccountInstrumentation.join("")
+    },
+    {
+      label: "connection force-RLS visibility proof",
+      current: [
+        "    assert.equal(",
+        "      await countExact0004BlockingConnections(",
+        "        migrationPoolA,",
+        "        companyWithLegacyConnection",
+        "      ),",
+        "      2",
+        "    );",
+        "    assert.deepEqual(",
+        "      await readExact0004OwnerConnectionVisibility(migrationPoolB),",
+        "      {",
+        "        company_id_setting: null,",
+        "        company_id_setting_absent: true,",
+        "        connection_count: 0",
+        "      },",
+        '      "FORCE RLS deve ocultar do owner sem company_id as duas conexoes fisicas."',
+        "    );",
+        ""
+      ].join("\n"),
+      previous: ""
+    },
+    {
+      label: "connection rollback index observations",
+      current: [
+        '        "  to_regclass(",',
+        '        "    \'ia4tube_social.social_connections_instagram_blocking_company_unique\'",',
+        '        "  ) IS NULL AS blocking_connection_index_absent,",',
+        '        "  to_regclass(",',
+        '        "    \'ia4tube_social.social_external_accounts_instagram_active_company_unique\'",',
+        '        "  ) IS NULL AS active_account_index_absent,",',
+        ""
+      ].join("\n"),
+      previous: ""
+    },
+    {
+      label: "connection rollback index expectations",
+      current: [
+        "      blocking_connection_index_absent: true,",
+        "      active_account_index_absent: true,",
+        ""
+      ].join("\n"),
+      previous: ""
+    },
+    {
+      label: "connection rollback preserves both rows",
+      current: [
+        "    assert.equal(",
+        "      await countExact0004BlockingConnections(",
+        "        migrationPoolA,",
+        "        companyWithLegacyConnection",
+        "      ),",
+        "      2,",
+        '      "O rollback da 0004 deve preservar as duas conexoes conflitantes."',
+        "    );",
+        ""
+      ].join("\n"),
+      previous: ""
+    },
+    {
+      label: "connection fixture restoration proof",
+      current: [
+        "    assert.equal(",
+        "      await countExact0004BlockingConnections(",
+        "        migrationPoolA,",
+        "        companyWithLegacyConnection",
+        "      ),",
+        "      1,",
+        '      "O cleanup deve restaurar a fixture de conexao original."',
+        "    );",
+        ""
+      ].join("\n"),
+      previous: ""
+    },
+    {
+      label: "final exact index catalog proof",
+      current: [
+        '      "     AND relation.relname = ANY($2::text[])) AS connector_relations,",',
+        '      "  (SELECT COUNT(*)::integer",',
+        '      "   FROM pg_catalog.pg_index index_catalog",',
+        '      "   JOIN pg_catalog.pg_class relation",',
+        '      "     ON relation.oid = index_catalog.indexrelid",',
+        '      "   JOIN pg_catalog.pg_namespace namespace",',
+        '      "     ON namespace.oid = relation.relnamespace",',
+        '      "   WHERE namespace.nspname = \'ia4tube_social\'",',
+        '      "     AND relation.relkind = \'i\'",',
+        '      "     AND index_catalog.indisunique",',
+        '      "     AND index_catalog.indisvalid",',
+        '      "     AND index_catalog.indisready",',
+        '      "     AND relation.relname = ANY($3::text[])) AS connector_indexes"'
+      ].join("\n"),
+      previous:
+        '      "     AND relation.relname = ANY($2::text[])) AS connector_relations"'
+    },
+    {
+      label: "final exact index catalog parameters",
+      current: [
+        '          "social_publication_attempts"',
+        "        ],",
+        "        [",
+        '          "social_connections_instagram_blocking_company_unique",',
+        '          "social_external_accounts_instagram_active_company_unique"',
+        "        ]"
+      ].join("\n"),
+      previous: [
+        '          "social_publication_attempts"',
+        "        ]"
+      ].join("\n")
+    },
+    {
+      label: "final exact index count assertion",
+      current: "  assert.equal(final.rows[0].connector_indexes, 2);\n",
+      previous: ""
+    }
+  ];
+  let permissionBoundaryCandidate = realTestSource;
+  for (const { current, previous, label } of
+    forceRlsConflictGateReplacements) {
+    permissionBoundaryCandidate = replaceExactlyOnce(
+      permissionBoundaryCandidate,
+      current,
+      previous,
+      label
+    );
+  }
+  permissionBoundaryCandidate = replaceExactlyOnce(
+    permissionBoundaryCandidate,
     conflictingNegativeOutcomeReplacement.current,
     conflictingNegativeOutcomeReplacement.previous,
     "conflicting negative outcome observation"
@@ -1037,7 +1218,7 @@ test("24. exact 0004 production ledger reads use the migrator role only", () => 
   assert.deepEqual(observedMarkers, expectedMarkers);
   assert.equal(
     (realTestSource.match(/\bphysicalPhases\./g) || []).length,
-    66
+    70
   );
   assert.equal(
     (realTestSource.match(/\bcreatePhysicalPhaseEmitter\b/g) || []).length,
@@ -1343,6 +1524,8 @@ test("27. exact 0004 plan subphase evidence stays closed and observational", asy
     "synthetic_0005_negative",
     "conflicting_0004_negative",
     "rollback_verification",
+    "conflicting_external_account_0004_negative",
+    "external_account_rollback_verification",
     "apply_exact",
     "concurrency",
     "final_snapshot"
@@ -1406,7 +1589,9 @@ test("27. exact 0004 plan subphase evidence stays closed and observational", asy
     ["42501", "23514", "P0001", "unknown", "not_observed"]
   );
   assert.equal(new Set(EXACT_0004_EVIDENCE_FIELDS).size, 18);
-  assert.equal(new Set(EXACT_0004_SUBPHASES).size, 16);
+  assert.equal(EVIDENCE_SCHEMA_VERSION, 6);
+  assert.equal(new Set(EXACT_0004_EXECUTION_SUBPHASES).size, 16);
+  assert.equal(new Set(EXACT_0004_SUBPHASES).size, 18);
   for (const forbidden of [
     "message",
     "stack",
@@ -1575,6 +1760,14 @@ test("27. exact 0004 plan subphase evidence stays closed and observational", asy
     true
   );
   assert.equal(exact0004OperationClass("plan_exact"), "plan");
+  assert.equal(
+    exact0004OperationClass("conflicting_external_account_0004_negative"),
+    "negative_gate"
+  );
+  assert.equal(
+    exact0004OperationClass("external_account_rollback_verification"),
+    "rollback_check"
+  );
   assert.equal(exact0004OperationClass("not_reached"), "unknown");
   for (const invalid of [
     { ...successful, planExactInvoked: false },
@@ -1604,6 +1797,35 @@ test("27. exact 0004 plan subphase evidence stays closed and observational", asy
     "utf8"
   ).replaceAll("\r\n", "\n");
   assert.equal(realTestSource.includes("\r"), false);
+  const forceRlsFixtureHelpers = closedSourceSection(
+    realTestSource,
+    "async function countExact0004BlockingConnections(pool, fixture) {",
+    "async function proveExact0004Route("
+  );
+  assert.equal(
+    forceRlsFixtureHelpers.split(
+      "current_setting('ia4tube.company_id', true) IS NULL"
+    ).length - 1,
+    2
+  );
+  assert.equal(
+    forceRlsFixtureHelpers.includes(
+      '"  company_id, id, connection_id, provider, external_id, username,"'
+    ),
+    true
+  );
+  assert.equal(
+    forceRlsFixtureHelpers.includes('"  account_type, status"'),
+    true
+  );
+  assert.equal(
+    forceRlsFixtureHelpers.split("'business'").length - 1,
+    2
+  );
+  assert.equal(
+    forceRlsFixtureHelpers.split("exact_0004_${accountIds[").length - 1,
+    2
+  );
   const observedCalls = [
     ...realTestSource.matchAll(
       /physicalPhases\.(startExact0004Subphase|completeExact0004Subphase)\(\s*"([a-z0-9_]+)"\s*\);/g
@@ -1688,6 +1910,157 @@ test("27. exact 0004 plan subphase evidence stays closed and observational", asy
     ),
     false
   );
+  assert.equal(
+    conflictingRoute.includes("countExact0004BlockingConnections("),
+    true
+  );
+  assert.equal(
+    conflictingRoute.includes("readExact0004OwnerConnectionVisibility("),
+    true
+  );
+  assert.equal(
+    realTestSource.split(
+      "physicalPhases.observeExact0004ConflictingNegative("
+    ).length - 1,
+    1
+  );
+  assert.equal(
+    realTestSource.split(
+      "physicalPhases.markExact0004ConflictingNegativeAttempted();"
+    ).length - 1,
+    1
+  );
+  assert.equal(
+    realTestSource.split(
+      "physicalPhases.markExact0004ConflictingNegativeAssertionMatched("
+    ).length - 1,
+    1
+  );
+
+  const connectionRollbackComplete = observedCalls.find(
+    ({ kind, subphase }) =>
+      kind === "completeExact0004Subphase" &&
+      subphase === "rollback_verification"
+  );
+  const externalAccountStart = observedCalls.find(
+    ({ kind, subphase }) =>
+      kind === "startExact0004Subphase" &&
+      subphase === "conflicting_external_account_0004_negative"
+  );
+  const externalAccountComplete = observedCalls.find(
+    ({ kind, subphase }) =>
+      kind === "completeExact0004Subphase" &&
+      subphase === "conflicting_external_account_0004_negative"
+  );
+  const externalAccountRollbackStart = observedCalls.find(
+    ({ kind, subphase }) =>
+      kind === "startExact0004Subphase" &&
+      subphase === "external_account_rollback_verification"
+  );
+  const externalAccountRollbackComplete = observedCalls.find(
+    ({ kind, subphase }) =>
+      kind === "completeExact0004Subphase" &&
+      subphase === "external_account_rollback_verification"
+  );
+  const applyStart = observedCalls.find(
+    ({ kind, subphase }) =>
+      kind === "startExact0004Subphase" && subphase === "apply_exact"
+  );
+  for (const call of [
+    connectionRollbackComplete,
+    externalAccountStart,
+    externalAccountComplete,
+    externalAccountRollbackStart,
+    externalAccountRollbackComplete,
+    applyStart
+  ]) assert.ok(call);
+  assert.equal(
+    connectionRollbackComplete.index < externalAccountStart.index,
+    true
+  );
+  assert.equal(externalAccountStart.index < externalAccountComplete.index, true);
+  assert.equal(
+    externalAccountComplete.index < externalAccountRollbackStart.index,
+    true
+  );
+  assert.equal(
+    externalAccountRollbackStart.index < externalAccountRollbackComplete.index,
+    true
+  );
+  assert.equal(externalAccountRollbackComplete.index < applyStart.index, true);
+
+  const connectionRollbackRoute = realTestSource.slice(
+    rollbackStart,
+    externalAccountStart.index
+  );
+  for (const token of [
+    "social_connections_instagram_blocking_company_unique",
+    "social_external_accounts_instagram_active_company_unique",
+    "countExact0004BlockingConnections(",
+    "O rollback da 0004 deve preservar as duas conexoes conflitantes.",
+    "O cleanup deve restaurar a fixture de conexao original."
+  ]) assert.equal(connectionRollbackRoute.includes(token), true, token);
+
+  const externalAccountNegativeRoute = realTestSource.slice(
+    externalAccountStart.index,
+    externalAccountRollbackStart.index
+  );
+  const externalAccountNegativeTokens = [
+    "const externalAccountCountBefore =",
+    "insertExact0004ExternalAccountConflict(",
+    "new Set(conflictingExternalAccountIds).size, 2",
+    "countExact0004ActiveExternalAccounts(",
+    "readExact0004OwnerExternalAccountVisibility(",
+    "const beforeExternalAccountRollback =",
+    "runnerA.applyExact(",
+    '(error) => error?.code === "23514"',
+    'physicalPhases.completeExact0004Subphase(\n      "conflicting_external_account_0004_negative"'
+  ];
+  for (const token of externalAccountNegativeTokens) {
+    assert.equal(externalAccountNegativeRoute.includes(token), true, token);
+  }
+  for (const forbidden of [
+    "observeExact0004ConflictingNegative(",
+    "markExact0004ConflictingNegativeAttempted();",
+    "markExact0004ConflictingNegativeAssertionMatched(",
+    'error?.code === "P0001"',
+    "error?.message",
+    "error?.stack",
+    "error?.detail",
+    "error?.hint",
+    "error?.where"
+  ]) assert.equal(externalAccountNegativeRoute.includes(forbidden), false, forbidden);
+
+  const externalAccountRollbackRoute = realTestSource.slice(
+    externalAccountRollbackStart.index,
+    applyStart.index
+  );
+  for (const token of [
+    "beforeExternalAccountRollback",
+    "const externalAccountRollbackState = await withTransaction(",
+    "social_connections_instagram_blocking_company_unique",
+    "social_external_accounts_instagram_active_company_unique",
+    "ledger_row_absent: true",
+    "O rollback da 0004 deve preservar as duas contas conflitantes.",
+    "removeExact0004ExternalAccountConflict(",
+    "O cleanup deve restaurar a fixture anterior ao conflito de contas."
+  ]) assert.equal(externalAccountRollbackRoute.includes(token), true, token);
+
+  const exactRouteSource = closedSourceSection(
+    realTestSource,
+    "async function proveExact0004Route(",
+    "function tenantFixture(label) {"
+  );
+  for (const token of [
+    "FROM pg_catalog.pg_index index_catalog",
+    "ON relation.oid = index_catalog.indexrelid",
+    "index_catalog.indisunique",
+    "index_catalog.indisvalid",
+    "index_catalog.indisready",
+    "social_connections_instagram_blocking_company_unique",
+    "social_external_accounts_instagram_active_company_unique",
+    "assert.equal(final.rows[0].connector_indexes, 2);"
+  ]) assert.equal(exactRouteSource.includes(token), true, token);
 
   function activeConflictingNegativeEmitter() {
     const lines = [];

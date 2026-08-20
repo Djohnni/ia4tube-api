@@ -19,7 +19,7 @@
     {
       "version": "0004_social_connector_persistence",
       "file": "0004_social_connector_persistence.up.sql",
-      "sha256": "2c1547b872bc967e9a7ae1e67b9691e1079657fb9dd09706c406234af49d7311"
+      "sha256": "91f6efc611903c40e16bd37828d5b9c1a03dfae222e1d13b5dc97f81ffde1b5d"
     }
   ]
 }

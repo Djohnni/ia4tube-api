@@ -15,6 +15,8 @@ const {
 
 const AUTHORIZED_FILES = Object.freeze([
   ".github/workflows/social-3b0-exact-0004-runner-linux.yml",
+  "db/migrations/0004_social_connector_persistence.up.sql",
+  "db/migrations/checksums.json",
   "scripts/run-node-tests.js",
   "scripts/run-real-postgres-tests.js",
   "scripts/social-3a0p-local-scope.js",
@@ -34,10 +36,10 @@ const AUTHORIZED_FILES = Object.freeze([
   "tests/social-postgres-real.test.js"
 ]);
 
-test("exact 0004 runner scope accepts exactly eighteen paths", () => {
+test("exact 0004 runner scope accepts exactly twenty paths", () => {
   assert.equal(
     AUTHORIZED_BRANCH,
-    "social/checkpoint-3b0-exact-0004-runner-linux-conflict-outcome-evidence-20260820"
+    "social/checkpoint-3b0-exact-0004-runner-linux-force-rls-conflict-gate-20260820"
   );
   assert.equal(
     ROUTE_BASE_COMMIT,
@@ -45,25 +47,25 @@ test("exact 0004 runner scope accepts exactly eighteen paths", () => {
   );
   assert.equal(
     ROUTE_PARENT_COMMIT,
-    "376c56fded62033071540996ea728ef77714ce38"
+    "1de14105800db3ad024e15700d7e23fb2b41282c"
   );
-  assert.equal(AUTHORIZED_FILES.length, 18);
+  assert.equal(AUTHORIZED_FILES.length, 20);
   assert.deepEqual(ALLOWED_PREFIXES, []);
   assert.deepEqual(
     [...ALLOWED_EXACT_FILES].sort(),
     [...AUTHORIZED_FILES].sort()
   );
-  assert.equal(ALLOWED_EXACT_FILES.size, 18);
+  assert.equal(ALLOWED_EXACT_FILES.size, 20);
   for (const file of AUTHORIZED_FILES) {
     assert.equal(isHarnessOnlyFile(file), true, file);
   }
   assert.deepEqual(assertHarnessOnlyChangedFiles([...AUTHORIZED_FILES]), {
     harnessOnly: true,
-    changedFileCount: 18
+    changedFileCount: 20
   });
   for (const candidate of [
-    AUTHORIZED_FILES.slice(0, 16),
-    AUTHORIZED_FILES.slice(0, 17)
+    AUTHORIZED_FILES.slice(0, 18),
+    AUTHORIZED_FILES.slice(0, 19)
   ]) {
     assert.throws(() => assertHarnessOnlyChangedFiles(candidate), {
       code: "harness_scope_inventory_refused"
@@ -79,7 +81,7 @@ test("exact 0004 runner scope accepts exactly eighteen paths", () => {
   assert.throws(
     () => assertHarnessOnlyChangedFiles([
       ...AUTHORIZED_FILES,
-      "tests/nineteenth-path.test.js"
+      "tests/twenty-first-path.test.js"
     ]),
     { code: "harness_scope_product_change_refused" }
   );
@@ -126,7 +128,7 @@ test("exact 0004 runner scope refuses unauthorized product, dependency and histo
     "src/social/connectors/service.js",
     "src/persistence/postgres/social-repository.js",
     "src/persistence/postgres/social-connector-store.js",
-    "db/migrations/0004_social_connector_persistence.up.sql",
+    "db/migrations/0005_unauthorized.sql",
     "migrations/0005_social_oauth.sql",
     "db/postgres/roles.sql",
     "package.json",

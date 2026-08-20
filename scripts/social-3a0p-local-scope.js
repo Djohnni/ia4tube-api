@@ -3,12 +3,14 @@
 const path = require("node:path");
 
 const AUTHORIZED_BRANCH =
-  "social/checkpoint-3b0-exact-0004-runner-linux-conflict-outcome-evidence-20260820";
+  "social/checkpoint-3b0-exact-0004-runner-linux-force-rls-conflict-gate-20260820";
 const ROUTE_BASE_COMMIT = "13e38b875db2a220514fe06113663c517c975592";
-const ROUTE_PARENT_COMMIT = "376c56fded62033071540996ea728ef77714ce38";
+const ROUTE_PARENT_COMMIT = "1de14105800db3ad024e15700d7e23fb2b41282c";
 
 const ALLOWED_EXACT_FILES = new Set([
   ".github/workflows/social-3b0-exact-0004-runner-linux.yml",
+  "db/migrations/0004_social_connector_persistence.up.sql",
+  "db/migrations/checksums.json",
   "scripts/run-node-tests.js",
   "scripts/run-real-postgres-tests.js",
   "scripts/social-3a0p-local-scope.js",

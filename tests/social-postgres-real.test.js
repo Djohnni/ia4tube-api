@@ -1891,6 +1891,139 @@ async function countExact0004Conflict(pool, fixture, connectionId) {
   return result.rows[0].connection_count;
 }
 
+async function countExact0004BlockingConnections(pool, fixture) {
+  const result = await withTransaction(
+    pool,
+    (client) => client.query(
+      [
+        "SELECT COUNT(*)::integer AS connection_count",
+        "FROM ia4tube_social.social_connections",
+        "WHERE company_id = $1 AND provider = 'instagram'",
+        "  AND status IN (",
+        "    'pending', 'active', 'authorization_pending', 'connected',",
+        "    'reconnect_required', 'disconnecting'",
+        "  )"
+      ].join("\n"),
+      [fixture.companyId]
+    ),
+    { role: OWNER_ROLE, companyId: fixture.companyId }
+  );
+  return result.rows[0].connection_count;
+}
+
+async function readExact0004OwnerConnectionVisibility(pool) {
+  const result = await withTransaction(
+    pool,
+    (client) => client.query(
+      [
+        "SELECT",
+        "  current_setting('ia4tube.company_id', true)",
+        "    AS company_id_setting,",
+        "  current_setting('ia4tube.company_id', true) IS NULL",
+        "    AS company_id_setting_absent,",
+        "  (SELECT COUNT(*)::integer",
+        "   FROM ia4tube_social.social_connections",
+        "   WHERE provider = 'instagram'",
+        "     AND status IN (",
+        "       'pending', 'active', 'authorization_pending', 'connected',",
+        "       'reconnect_required', 'disconnecting'",
+        "     )) AS connection_count"
+      ].join("\n")
+    ),
+    { role: OWNER_ROLE }
+  );
+  return Object.freeze({
+    company_id_setting: result.rows[0].company_id_setting,
+    company_id_setting_absent: result.rows[0].company_id_setting_absent,
+    connection_count: result.rows[0].connection_count
+  });
+}
+
+async function insertExact0004ExternalAccountConflict(pool, fixture) {
+  const accountIds = Object.freeze([randomUuid(), randomUuid()]);
+  await withTransaction(
+    pool,
+    (client) => client.query(
+      [
+        "INSERT INTO ia4tube_social.social_external_accounts (",
+        "  company_id, id, connection_id, provider, external_id, username,",
+        "  account_type, status",
+        ") VALUES",
+        "  ($1, $2, $4, 'instagram', $5, $6, 'business', 'active'),",
+        "  ($1, $3, $4, 'instagram', $7, $8, 'business', 'active')"
+      ].join("\n"),
+      [
+        fixture.companyId,
+        accountIds[0],
+        accountIds[1],
+        fixture.connectionId,
+        `exact-0004-external-${accountIds[0]}`,
+        `exact_0004_${accountIds[0].replaceAll("-", "")}`,
+        `exact-0004-external-${accountIds[1]}`,
+        `exact_0004_${accountIds[1].replaceAll("-", "")}`
+      ]
+    ),
+    { role: OWNER_ROLE, companyId: fixture.companyId }
+  );
+  return accountIds;
+}
+
+async function removeExact0004ExternalAccountConflict(pool, fixture, accountIds) {
+  await withTransaction(
+    pool,
+    (client) => client.query(
+      [
+        "DELETE FROM ia4tube_social.social_external_accounts",
+        "WHERE company_id = $1 AND id IN ($2, $3)"
+      ].join("\n"),
+      [fixture.companyId, ...accountIds]
+    ),
+    { role: OWNER_ROLE, companyId: fixture.companyId }
+  );
+}
+
+async function countExact0004ActiveExternalAccounts(pool, fixture) {
+  const result = await withTransaction(
+    pool,
+    (client) => client.query(
+      [
+        "SELECT COUNT(*)::integer AS account_count",
+        "FROM ia4tube_social.social_external_accounts",
+        "WHERE company_id = $1 AND connection_id = $2",
+        "  AND provider = 'instagram' AND status = 'active'"
+      ].join("\n"),
+      [fixture.companyId, fixture.connectionId]
+    ),
+    { role: OWNER_ROLE, companyId: fixture.companyId }
+  );
+  return result.rows[0].account_count;
+}
+
+async function readExact0004OwnerExternalAccountVisibility(pool) {
+  const result = await withTransaction(
+    pool,
+    (client) => client.query(
+      [
+        "SELECT",
+        "  current_setting('ia4tube.company_id', true)",
+        "    AS company_id_setting,",
+        "  current_setting('ia4tube.company_id', true) IS NULL",
+        "    AS company_id_setting_absent,",
+        "  (SELECT COUNT(*)::integer",
+        "   FROM ia4tube_social.social_external_accounts",
+        "   WHERE provider = 'instagram' AND status = 'active')",
+        "    AS account_count"
+      ].join("\n")
+    ),
+    { role: OWNER_ROLE }
+  );
+  return Object.freeze({
+    company_id_setting: result.rows[0].company_id_setting,
+    company_id_setting_absent: result.rows[0].company_id_setting_absent,
+    account_count: result.rows[0].account_count
+  });
+}
+
 async function proveExact0004Route(
   migrationPoolA,
   migrationPoolB,
@@ -1968,6 +2101,22 @@ async function proveExact0004Route(
     companyWithLegacyConnection
   );
   try {
+    assert.equal(
+      await countExact0004BlockingConnections(
+        migrationPoolA,
+        companyWithLegacyConnection
+      ),
+      2
+    );
+    assert.deepEqual(
+      await readExact0004OwnerConnectionVisibility(migrationPoolB),
+      {
+        company_id_setting: null,
+        company_id_setting_absent: true,
+        connection_count: 0
+      },
+      "FORCE RLS deve ocultar do owner sem company_id as duas conexoes fisicas."
+    );
     const beforeRollback = await readExactCatalogSnapshot(migrationPoolA);
     physicalPhases.markExact0004ConflictingNegativeAttempted();
     const observedConflictingNegativePromise =
@@ -2003,6 +2152,12 @@ async function proveExact0004Route(
         "SELECT",
         "  to_regclass('ia4tube_social.social_idempotency_operations')",
         "    IS NULL AS new_table_absent,",
+        "  to_regclass(",
+        "    'ia4tube_social.social_connections_instagram_blocking_company_unique'",
+        "  ) IS NULL AS blocking_connection_index_absent,",
+        "  to_regclass(",
+        "    'ia4tube_social.social_external_accounts_instagram_active_company_unique'",
+        "  ) IS NULL AS active_account_index_absent,",
         "  NOT EXISTS (",
         "    SELECT 1 FROM ia4tube_migrations.schema_migrations",
         "    WHERE version = $1",
@@ -2014,6 +2169,8 @@ async function proveExact0004Route(
     );
     assert.deepEqual(rollbackState.rows[0], {
       new_table_absent: true,
+      blocking_connection_index_absent: true,
+      active_account_index_absent: true,
       ledger_row_absent: true
     });
     assert.equal(
@@ -2024,6 +2181,14 @@ async function proveExact0004Route(
       ),
       1,
       "A falha da 0004 nao pode alterar os dados preexistentes."
+    );
+    assert.equal(
+      await countExact0004BlockingConnections(
+        migrationPoolA,
+        companyWithLegacyConnection
+      ),
+      2,
+      "O rollback da 0004 deve preservar as duas conexoes conflitantes."
     );
   } finally {
     await removeExact0004Conflict(
@@ -2039,8 +2204,122 @@ async function proveExact0004Route(
       ),
       0
     );
+    assert.equal(
+      await countExact0004BlockingConnections(
+        migrationPoolA,
+        companyWithLegacyConnection
+      ),
+      1,
+      "O cleanup deve restaurar a fixture de conexao original."
+    );
   }
   physicalPhases.completeExact0004Subphase("rollback_verification");
+
+  physicalPhases.startExact0004Subphase(
+    "conflicting_external_account_0004_negative"
+  );
+  const externalAccountCountBefore = await countExact0004ActiveExternalAccounts(
+    migrationPoolA,
+    companyWithLegacyConnection
+  );
+  assert.equal(externalAccountCountBefore, 0);
+  const conflictingExternalAccountIds =
+    await insertExact0004ExternalAccountConflict(
+      migrationPoolA,
+      companyWithLegacyConnection
+    );
+  assert.equal(new Set(conflictingExternalAccountIds).size, 2);
+  try {
+    assert.equal(
+      await countExact0004ActiveExternalAccounts(
+        migrationPoolA,
+        companyWithLegacyConnection
+      ),
+      2
+    );
+    assert.deepEqual(
+      await readExact0004OwnerExternalAccountVisibility(migrationPoolB),
+      {
+        company_id_setting: null,
+        company_id_setting_absent: true,
+        account_count: 0
+      },
+      "FORCE RLS deve ocultar do owner sem company_id as duas contas fisicas."
+    );
+    const beforeExternalAccountRollback =
+      await readExactCatalogSnapshot(migrationPoolA);
+    await assert.rejects(
+      runnerA.applyExact(
+        EXACT_APPLY_REQUEST,
+        configuration.approvalEnvironment
+      ),
+      (error) => error?.code === "23514"
+    );
+    physicalPhases.completeExact0004Subphase(
+      "conflicting_external_account_0004_negative"
+    );
+    physicalPhases.startExact0004Subphase(
+      "external_account_rollback_verification"
+    );
+    assert.equal(
+      await readExactCatalogSnapshot(migrationPoolA),
+      beforeExternalAccountRollback,
+      "A falha do gate de contas deve reverter todo o DDL e ledger da 0004."
+    );
+    const externalAccountRollbackState = await withTransaction(
+      migrationPoolA,
+      (client) => client.query(
+        [
+          "SELECT",
+          "  to_regclass('ia4tube_social.social_idempotency_operations')",
+          "    IS NULL AS new_table_absent,",
+          "  to_regclass(",
+          "    'ia4tube_social.social_connections_instagram_blocking_company_unique'",
+          "  ) IS NULL AS blocking_connection_index_absent,",
+          "  to_regclass(",
+          "    'ia4tube_social.social_external_accounts_instagram_active_company_unique'",
+          "  ) IS NULL AS active_account_index_absent,",
+          "  NOT EXISTS (",
+          "    SELECT 1 FROM ia4tube_migrations.schema_migrations",
+          "    WHERE version = $1",
+          "  ) AS ledger_row_absent"
+        ].join("\n"),
+        [SOCIAL_CONNECTOR_PERSISTENCE_MIGRATION]
+      ),
+      { role: MIGRATOR_ROLE }
+    );
+    assert.deepEqual(externalAccountRollbackState.rows[0], {
+      new_table_absent: true,
+      blocking_connection_index_absent: true,
+      active_account_index_absent: true,
+      ledger_row_absent: true
+    });
+    assert.equal(
+      await countExact0004ActiveExternalAccounts(
+        migrationPoolA,
+        companyWithLegacyConnection
+      ),
+      2,
+      "O rollback da 0004 deve preservar as duas contas conflitantes."
+    );
+  } finally {
+    await removeExact0004ExternalAccountConflict(
+      migrationPoolA,
+      companyWithLegacyConnection,
+      conflictingExternalAccountIds
+    );
+    assert.equal(
+      await countExact0004ActiveExternalAccounts(
+        migrationPoolA,
+        companyWithLegacyConnection
+      ),
+      externalAccountCountBefore,
+      "O cleanup deve restaurar a fixture anterior ao conflito de contas."
+    );
+  }
+  physicalPhases.completeExact0004Subphase(
+    "external_account_rollback_verification"
+  );
 
   await migrationPoolA.query("SET lock_timeout = 0");
   await migrationPoolB.query("SET lock_timeout = 0");
@@ -2085,7 +2364,19 @@ async function proveExact0004Route(
       "   JOIN pg_catalog.pg_namespace namespace",
       "     ON namespace.oid = relation.relnamespace",
       "   WHERE namespace.nspname = 'ia4tube_social'",
-      "     AND relation.relname = ANY($2::text[])) AS connector_relations"
+      "     AND relation.relname = ANY($2::text[])) AS connector_relations,",
+      "  (SELECT COUNT(*)::integer",
+      "   FROM pg_catalog.pg_index index_catalog",
+      "   JOIN pg_catalog.pg_class relation",
+      "     ON relation.oid = index_catalog.indexrelid",
+      "   JOIN pg_catalog.pg_namespace namespace",
+      "     ON namespace.oid = relation.relnamespace",
+      "   WHERE namespace.nspname = 'ia4tube_social'",
+      "     AND relation.relkind = 'i'",
+      "     AND index_catalog.indisunique",
+      "     AND index_catalog.indisvalid",
+      "     AND index_catalog.indisready",
+      "     AND relation.relname = ANY($3::text[])) AS connector_indexes"
       ].join("\n"),
       [
         SOCIAL_CONNECTOR_PERSISTENCE_MIGRATION,
@@ -2093,6 +2384,10 @@ async function proveExact0004Route(
           "social_idempotency_operations",
           "social_publications",
           "social_publication_attempts"
+        ],
+        [
+          "social_connections_instagram_blocking_company_unique",
+          "social_external_accounts_instagram_active_company_unique"
         ]
       ]
     ),
@@ -2100,6 +2395,7 @@ async function proveExact0004Route(
   );
   assert.equal(final.rows[0].ledger_rows, 1);
   assert.equal(final.rows[0].connector_relations, 3);
+  assert.equal(final.rows[0].connector_indexes, 2);
   await assert.rejects(
     runnerA.planExact(EXACT_PLAN_REQUEST, configuration.approvalEnvironment),
     { code: "exact_pending_set_mismatch" }

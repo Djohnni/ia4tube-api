@@ -59,11 +59,10 @@ ALTER TABLE ia4tube_social.social_connections
       )
     );
 
-DO $social_connector_preflight$
+DO $social_connector_blocking_connection_gate$
 BEGIN
-  IF EXISTS (
-    SELECT 1
-    FROM ia4tube_social.social_connections
+  CREATE UNIQUE INDEX social_connections_instagram_blocking_company_unique
+    ON ia4tube_social.social_connections (company_id)
     WHERE provider = 'instagram'
       AND status IN (
         'pending',
@@ -72,44 +71,27 @@ BEGIN
         'connected',
         'reconnect_required',
         'disconnecting'
-      )
-    GROUP BY company_id
-    HAVING COUNT(*) > 1
-  ) THEN
+      );
+EXCEPTION
+  WHEN unique_violation THEN
     RAISE EXCEPTION USING
       ERRCODE = '23514',
       MESSAGE = 'social_connector_blocking_connection_conflict';
-  END IF;
+END
+$social_connector_blocking_connection_gate$;
 
-  IF EXISTS (
-    SELECT 1
-    FROM ia4tube_social.social_external_accounts
-    WHERE provider = 'instagram' AND status = 'active'
-    GROUP BY company_id
-    HAVING COUNT(*) > 1
-  ) THEN
+DO $social_connector_active_account_gate$
+BEGIN
+  CREATE UNIQUE INDEX social_external_accounts_instagram_active_company_unique
+    ON ia4tube_social.social_external_accounts (company_id)
+    WHERE provider = 'instagram' AND status = 'active';
+EXCEPTION
+  WHEN unique_violation THEN
     RAISE EXCEPTION USING
       ERRCODE = '23514',
       MESSAGE = 'social_connector_active_account_conflict';
-  END IF;
 END
-$social_connector_preflight$;
-
-CREATE UNIQUE INDEX social_connections_instagram_blocking_company_unique
-  ON ia4tube_social.social_connections (company_id)
-  WHERE provider = 'instagram'
-    AND status IN (
-      'pending',
-      'active',
-      'authorization_pending',
-      'connected',
-      'reconnect_required',
-      'disconnecting'
-    );
-
-CREATE UNIQUE INDEX social_external_accounts_instagram_active_company_unique
-  ON ia4tube_social.social_external_accounts (company_id)
-  WHERE provider = 'instagram' AND status = 'active';
+$social_connector_active_account_gate$;
 
 ALTER TABLE ia4tube_social.social_external_accounts
   ADD CONSTRAINT social_external_accounts_instagram_professional

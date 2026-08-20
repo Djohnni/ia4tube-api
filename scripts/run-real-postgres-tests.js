@@ -43,7 +43,7 @@ const CONNECTION_NAMES = [
   "SOCIAL_TEST_MIGRATION_DATABASE_URL",
   "SOCIAL_TEST_RUNTIME_DATABASE_URL"
 ];
-const EVIDENCE_SCHEMA_VERSION = 5;
+const EVIDENCE_SCHEMA_VERSION = 6;
 const SAFE_EVENT_PREFIX = "IA4TUBE_SAFE_EVENT=";
 const TAP_TITLE =
   "real PostgreSQL proves migrations, physical RLS, vault and reauthentication";
@@ -85,6 +85,8 @@ const EXACT_0004_SUBPHASES = Object.freeze([
   "synthetic_0005_negative",
   "conflicting_0004_negative",
   "rollback_verification",
+  "conflicting_external_account_0004_negative",
+  "external_account_rollback_verification",
   "apply_exact",
   "concurrency",
   "final_snapshot",
@@ -170,6 +172,8 @@ const EXACT_0004_OPERATION_BY_SUBPHASE = Object.freeze({
   synthetic_0005_negative: "negative_gate",
   conflicting_0004_negative: "negative_gate",
   rollback_verification: "rollback_check",
+  conflicting_external_account_0004_negative: "negative_gate",
+  external_account_rollback_verification: "rollback_check",
   apply_exact: "apply",
   concurrency: "concurrency",
   final_snapshot: "final_validation",
