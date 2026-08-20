@@ -63,11 +63,13 @@ const SYNTHETIC_EXECUTABLE = path.resolve("synthetic-node");
 const REPOSITORY_ROOT = path.resolve(__dirname, "..");
 const SAFE_EVIDENCE_COMMIT = "8534817574a22dbd144a835c9f3585c44ee11c96";
 const PERMISSION_BOUNDARY_COMMIT = "555d71eacbde76ceffdd03d64731e03849978c17";
+const ROLLBACK_CATALOG_PARENT_COMMIT =
+  "5a109bc775ac9e35bdcdaabec16d329509d9125f";
 const REAL_POSTGRES_TEST = "tests/social-postgres-real.test.js";
 const REAL_POSTGRES_TEST_LF_SHA256 =
-  "e3912a2b174e7199c76035264ebe455da00848c3c61259138b9ea0b77c3e5117";
+  "329890ff2e56c034a778b3277f46254795749ebc78feaf3c2e8d4ea760ee64c7";
 const REAL_POSTGRES_TEST_FILTERED_OID =
-  "9d841c0290b2abb102bb3ce2f7e76bc8a80fe84a";
+  "cad3660ccc8d972aff5770701ff836f29c61e615";
 const PHYSICAL_MAIN_PHASES = Object.freeze([
   "physical_target_preflight",
   "role_provisioning",
@@ -649,6 +651,158 @@ test("24. exact 0004 production ledger reads use the migrator role only", () => 
     "async function proveExact0004Route(",
     "function tenantFixture(label) {"
   );
+  const authorizedRollbackCatalogLookup = String.raw`    const rollbackState = await withTransaction(
+      migrationPoolA,
+      (client) => client.query(
+        [
+          "WITH target_namespace AS (",
+          "  SELECT namespace.oid",
+          "  FROM pg_catalog.pg_namespace namespace",
+          "  WHERE namespace.nspname = 'ia4tube_social'",
+          "), target_relations AS (",
+          "  SELECT relation.relname, relation.relkind",
+          "  FROM target_namespace namespace",
+          "  JOIN pg_catalog.pg_class relation",
+          "    ON relation.relnamespace = namespace.oid",
+          "  WHERE relation.relname IN (",
+          "    'social_idempotency_operations',",
+          "    'social_connections_instagram_blocking_company_unique',",
+          "    'social_external_accounts_instagram_active_company_unique'",
+          "  )",
+          ")",
+          "SELECT",
+          "  (SELECT COUNT(*)::integer FROM target_namespace)",
+          "    AS social_schema_count,",
+          "  (SELECT COUNT(*)::integer FROM target_relations",
+          "   WHERE relname = 'social_idempotency_operations')",
+          "    AS new_table_count,",
+          "  (SELECT COUNT(*)::integer FROM target_relations",
+          "   WHERE relname =",
+          "     'social_connections_instagram_blocking_company_unique')",
+          "    AS blocking_connection_index_count,",
+          "  (SELECT COUNT(*)::integer FROM target_relations",
+          "   WHERE relname =",
+          "     'social_external_accounts_instagram_active_company_unique')",
+          "    AS active_account_index_count,",
+          "  (SELECT COUNT(*)::integer FROM target_relations",
+          "   WHERE (relname = 'social_idempotency_operations'",
+          "     AND relkind <> 'r')",
+          "     OR (relname IN (",
+          "       'social_connections_instagram_blocking_company_unique',",
+          "       'social_external_accounts_instagram_active_company_unique'",
+          "     ) AND relkind <> 'i')) AS unexpected_relkind_count,",
+          "  (SELECT COUNT(*)::integer",
+          "   FROM ia4tube_migrations.schema_migrations",
+          "   WHERE version = $1) AS ledger_row_count"
+        ].join("\n"),
+        [SOCIAL_CONNECTOR_PERSISTENCE_MIGRATION]
+      ),
+      { role: MIGRATOR_ROLE }
+    );
+    assert.equal(rollbackState.rowCount, 1);
+    assert.deepEqual(rollbackState.rows, [{
+      social_schema_count: 1,
+      new_table_count: 0,
+      blocking_connection_index_count: 0,
+      active_account_index_count: 0,
+      unexpected_relkind_count: 0,
+      ledger_row_count: 0
+    }]);
+`;
+  const parentRollbackTextualLookup = String.raw`    const rollbackState = await withTransaction(
+      migrationPoolA,
+      (client) => client.query(
+        [
+        "SELECT",
+        "  to_regclass('ia4tube_social.social_idempotency_operations')",
+        "    IS NULL AS new_table_absent,",
+        "  to_regclass(",
+        "    'ia4tube_social.social_connections_instagram_blocking_company_unique'",
+        "  ) IS NULL AS blocking_connection_index_absent,",
+        "  to_regclass(",
+        "    'ia4tube_social.social_external_accounts_instagram_active_company_unique'",
+        "  ) IS NULL AS active_account_index_absent,",
+        "  NOT EXISTS (",
+        "    SELECT 1 FROM ia4tube_migrations.schema_migrations",
+        "    WHERE version = $1",
+        "  ) AS ledger_row_absent"
+        ].join("\n"),
+        [SOCIAL_CONNECTOR_PERSISTENCE_MIGRATION]
+      ),
+      { role: MIGRATOR_ROLE }
+    );
+    assert.deepEqual(rollbackState.rows[0], {
+      new_table_absent: true,
+      blocking_connection_index_absent: true,
+      active_account_index_absent: true,
+      ledger_row_absent: true
+    });
+`;
+  const rollbackCatalogLookupSource = closedSourceSection(
+    exactRouteSource,
+    "    const rollbackState = await withTransaction(",
+    "    assert.equal(\n      await countExact0004Conflict("
+  );
+  assert.equal(rollbackCatalogLookupSource, authorizedRollbackCatalogLookup);
+  assert.equal(rollbackCatalogLookupSource.includes("to_regclass"), false);
+  assert.equal(/::\s*regclass/i.test(rollbackCatalogLookupSource), false);
+  assert.equal(
+    (rollbackCatalogLookupSource.match(/COUNT\(\*\)::integer/g) || []).length,
+    6
+  );
+  for (const catalogContract of [
+    "FROM pg_catalog.pg_namespace namespace",
+    "JOIN pg_catalog.pg_class relation",
+    "ON relation.relnamespace = namespace.oid",
+    "WHERE namespace.nspname = 'ia4tube_social'",
+    "social_schema_count: 1",
+    "new_table_count: 0",
+    "blocking_connection_index_count: 0",
+    "active_account_index_count: 0",
+    "unexpected_relkind_count: 0",
+    "ledger_row_count: 0"
+  ]) {
+    assert.equal(
+      rollbackCatalogLookupSource.split(catalogContract).length - 1,
+      1,
+      catalogContract
+    );
+  }
+  assert.equal(
+    (exactRouteSource.match(/\bto_regclass\s*\(/g) || []).length,
+    3
+  );
+  const rollbackCatalogParentCandidate = replaceExactlyOnce(
+    realTestSource,
+    authorizedRollbackCatalogLookup,
+    parentRollbackTextualLookup,
+    "first rollback catalog lookup"
+  );
+  const rollbackCatalogParent = execFileSync(
+    "git",
+    [
+      "cat-file",
+      "blob",
+      `${ROLLBACK_CATALOG_PARENT_COMMIT}:${REAL_POSTGRES_TEST}`
+    ],
+    {
+      cwd: REPOSITORY_ROOT,
+      encoding: null,
+      windowsHide: true,
+      stdio: ["ignore", "pipe", "ignore"],
+      timeout: 20_000,
+      maxBuffer: 2 * 1024 * 1024,
+      env: {
+        ...process.env,
+        GIT_OPTIONAL_LOCKS: "0",
+        GIT_TERMINAL_PROMPT: "0"
+      }
+    }
+  );
+  assert.deepEqual(
+    Buffer.from(rollbackCatalogParentCandidate, "utf8"),
+    rollbackCatalogParent
+  );
   const productionSnapshotSource = `${snapshotSource}${exactRouteSource}`;
   assert.equal(
     (productionSnapshotSource.match(
@@ -1088,7 +1242,7 @@ test("24. exact 0004 production ledger reads use the migrator role only", () => 
       previous: ""
     }
   ];
-  let permissionBoundaryCandidate = realTestSource;
+  let permissionBoundaryCandidate = rollbackCatalogParentCandidate;
   for (const { current, previous, label } of
     forceRlsConflictGateReplacements) {
     permissionBoundaryCandidate = replaceExactlyOnce(

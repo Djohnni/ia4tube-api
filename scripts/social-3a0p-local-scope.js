@@ -3,9 +3,9 @@
 const path = require("node:path");
 
 const AUTHORIZED_BRANCH =
-  "social/checkpoint-3b0-exact-0004-runner-linux-force-rls-conflict-gate-20260820";
+  "social/checkpoint-3b0-exact-0004-runner-linux-rollback-catalog-lookup-20260820";
 const ROUTE_BASE_COMMIT = "13e38b875db2a220514fe06113663c517c975592";
-const ROUTE_PARENT_COMMIT = "1de14105800db3ad024e15700d7e23fb2b41282c";
+const ROUTE_PARENT_COMMIT = "5a109bc775ac9e35bdcdaabec16d329509d9125f";
 
 const ALLOWED_EXACT_FILES = new Set([
   ".github/workflows/social-3b0-exact-0004-runner-linux.yml",

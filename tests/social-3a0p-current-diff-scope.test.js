@@ -10,9 +10,9 @@ const {
 } = require("../scripts/social-3a0p-local-scope");
 
 const ROUTE_BRANCH =
-  "social/checkpoint-3b0-exact-0004-runner-linux-force-rls-conflict-gate-20260820";
+  "social/checkpoint-3b0-exact-0004-runner-linux-rollback-catalog-lookup-20260820";
 const ROUTE_BASE_COMMIT = "13e38b875db2a220514fe06113663c517c975592";
-const ROUTE_PARENT_COMMIT = "1de14105800db3ad024e15700d7e23fb2b41282c";
+const ROUTE_PARENT_COMMIT = "5a109bc775ac9e35bdcdaabec16d329509d9125f";
 const FUNCTIONAL_COMMIT = ROUTE_PARENT_COMMIT;
 const POST_COMMIT_PROOF_HEAD = "ffffffffffffffffffffffffffffffffffffffff";
 const GIT_TIMEOUT_MS = 20_000;
@@ -39,35 +39,21 @@ const AUTHORIZED_CHANGED_FILES = Object.freeze([
   "tests/social-postgres-migrations.test.js",
   "tests/social-postgres-real.test.js"
 ]);
-const PARENT_COMMITTED_FILES = Object.freeze(
-  AUTHORIZED_CHANGED_FILES.filter(
-    (file) =>
-      file !== "db/migrations/0004_social_connector_persistence.up.sql" &&
-      file !== "db/migrations/checksums.json"
-  )
-);
+const PARENT_COMMITTED_FILES = Object.freeze([...AUTHORIZED_CHANGED_FILES]);
 const INCREMENTAL_CHANGED_FILES = Object.freeze([
   ".github/workflows/social-3b0-exact-0004-runner-linux.yml",
-  "db/migrations/0004_social_connector_persistence.up.sql",
-  "db/migrations/checksums.json",
-  "scripts/run-real-postgres-tests.js",
   "scripts/social-3a0p-local-scope.js",
   "tests/node-test-runner-safety.test.js",
   "tests/social-3a0p-current-diff-scope.test.js",
   "tests/social-3a0p-local-scope.test.js",
   "tests/social-3b0-exact-0004-runner-linux-workflow.test.js",
-  "tests/social-3b0-linux-physical-gate.test.js",
-  "tests/social-postgres-migrations.test.js",
   "tests/social-postgres-real.test.js"
 ]);
 const LOCAL_UNTRACKED_FILES = Object.freeze([]);
 const LOCAL_UNSTAGED_TRACKED_FILES = Object.freeze([
   ...INCREMENTAL_CHANGED_FILES
 ]);
-const AUTHORIZED_PRODUCT_FILES = Object.freeze([
-  "db/migrations/0004_social_connector_persistence.up.sql",
-  "db/migrations/checksums.json"
-]);
+const AUTHORIZED_PRODUCT_FILES = Object.freeze([]);
 const PROTECTED_PRODUCT_DIRECTORIES = Object.freeze([
   "src",
   "db",
@@ -645,14 +631,14 @@ function runMandatoryContractProofs() {
     );
   });
 
-  // 5. Incomplete Incremental12 inventories and any thirteenth path are refused.
+  // 5. Incomplete Incremental7 inventories and any eighth path are refused.
   proof(() => {
     for (const unstagedTrackedFiles of [
-      LOCAL_UNSTAGED_TRACKED_FILES.slice(0, 7),
-      LOCAL_UNSTAGED_TRACKED_FILES.slice(0, 8),
+      LOCAL_UNSTAGED_TRACKED_FILES.slice(0, 5),
+      LOCAL_UNSTAGED_TRACKED_FILES.slice(0, 6),
       [
         ...LOCAL_UNSTAGED_TRACKED_FILES,
-        "tests/thirteenth-incremental-path.test.js"
+        "tests/eighth-incremental-path.test.js"
       ]
     ]) {
       assert.throws(
@@ -944,11 +930,11 @@ test("a barreira do runner exato 0004 contem exatamente os vinte caminhos autori
   const result = assertRouteInventory(sharedSnapshotCache.read());
   assert.equal(
     ROUTE_BRANCH,
-    "social/checkpoint-3b0-exact-0004-runner-linux-force-rls-conflict-gate-20260820"
+    "social/checkpoint-3b0-exact-0004-runner-linux-rollback-catalog-lookup-20260820"
   );
   assert.equal(
     ROUTE_PARENT_COMMIT,
-    "1de14105800db3ad024e15700d7e23fb2b41282c"
+    "5a109bc775ac9e35bdcdaabec16d329509d9125f"
   );
   assert.equal(
     ROUTE_BASE_COMMIT,
@@ -956,10 +942,10 @@ test("a barreira do runner exato 0004 contem exatamente os vinte caminhos autori
   );
   assert.equal(AUTHORIZED_CHANGED_FILES.length, 20);
   assert.equal(new Set(AUTHORIZED_CHANGED_FILES).size, 20);
-  assert.equal(PARENT_COMMITTED_FILES.length, 18);
-  assert.equal(new Set(PARENT_COMMITTED_FILES).size, 18);
-  assert.equal(INCREMENTAL_CHANGED_FILES.length, 12);
-  assert.equal(new Set(INCREMENTAL_CHANGED_FILES).size, 12);
+  assert.equal(PARENT_COMMITTED_FILES.length, 20);
+  assert.equal(new Set(PARENT_COMMITTED_FILES).size, 20);
+  assert.equal(INCREMENTAL_CHANGED_FILES.length, 7);
+  assert.equal(new Set(INCREMENTAL_CHANGED_FILES).size, 7);
   assert.deepEqual(LOCAL_UNSTAGED_TRACKED_FILES, INCREMENTAL_CHANGED_FILES);
   assert.deepEqual(LOCAL_UNTRACKED_FILES, []);
   assert.deepEqual(result.files, [...AUTHORIZED_CHANGED_FILES].sort());

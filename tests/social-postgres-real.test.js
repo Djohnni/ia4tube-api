@@ -2149,30 +2149,59 @@ async function proveExact0004Route(
       migrationPoolA,
       (client) => client.query(
         [
-        "SELECT",
-        "  to_regclass('ia4tube_social.social_idempotency_operations')",
-        "    IS NULL AS new_table_absent,",
-        "  to_regclass(",
-        "    'ia4tube_social.social_connections_instagram_blocking_company_unique'",
-        "  ) IS NULL AS blocking_connection_index_absent,",
-        "  to_regclass(",
-        "    'ia4tube_social.social_external_accounts_instagram_active_company_unique'",
-        "  ) IS NULL AS active_account_index_absent,",
-        "  NOT EXISTS (",
-        "    SELECT 1 FROM ia4tube_migrations.schema_migrations",
-        "    WHERE version = $1",
-        "  ) AS ledger_row_absent"
+          "WITH target_namespace AS (",
+          "  SELECT namespace.oid",
+          "  FROM pg_catalog.pg_namespace namespace",
+          "  WHERE namespace.nspname = 'ia4tube_social'",
+          "), target_relations AS (",
+          "  SELECT relation.relname, relation.relkind",
+          "  FROM target_namespace namespace",
+          "  JOIN pg_catalog.pg_class relation",
+          "    ON relation.relnamespace = namespace.oid",
+          "  WHERE relation.relname IN (",
+          "    'social_idempotency_operations',",
+          "    'social_connections_instagram_blocking_company_unique',",
+          "    'social_external_accounts_instagram_active_company_unique'",
+          "  )",
+          ")",
+          "SELECT",
+          "  (SELECT COUNT(*)::integer FROM target_namespace)",
+          "    AS social_schema_count,",
+          "  (SELECT COUNT(*)::integer FROM target_relations",
+          "   WHERE relname = 'social_idempotency_operations')",
+          "    AS new_table_count,",
+          "  (SELECT COUNT(*)::integer FROM target_relations",
+          "   WHERE relname =",
+          "     'social_connections_instagram_blocking_company_unique')",
+          "    AS blocking_connection_index_count,",
+          "  (SELECT COUNT(*)::integer FROM target_relations",
+          "   WHERE relname =",
+          "     'social_external_accounts_instagram_active_company_unique')",
+          "    AS active_account_index_count,",
+          "  (SELECT COUNT(*)::integer FROM target_relations",
+          "   WHERE (relname = 'social_idempotency_operations'",
+          "     AND relkind <> 'r')",
+          "     OR (relname IN (",
+          "       'social_connections_instagram_blocking_company_unique',",
+          "       'social_external_accounts_instagram_active_company_unique'",
+          "     ) AND relkind <> 'i')) AS unexpected_relkind_count,",
+          "  (SELECT COUNT(*)::integer",
+          "   FROM ia4tube_migrations.schema_migrations",
+          "   WHERE version = $1) AS ledger_row_count"
         ].join("\n"),
         [SOCIAL_CONNECTOR_PERSISTENCE_MIGRATION]
       ),
       { role: MIGRATOR_ROLE }
     );
-    assert.deepEqual(rollbackState.rows[0], {
-      new_table_absent: true,
-      blocking_connection_index_absent: true,
-      active_account_index_absent: true,
-      ledger_row_absent: true
-    });
+    assert.equal(rollbackState.rowCount, 1);
+    assert.deepEqual(rollbackState.rows, [{
+      social_schema_count: 1,
+      new_table_count: 0,
+      blocking_connection_index_count: 0,
+      active_account_index_count: 0,
+      unexpected_relkind_count: 0,
+      ledger_row_count: 0
+    }]);
     assert.equal(
       await countExact0004Conflict(
         migrationPoolA,

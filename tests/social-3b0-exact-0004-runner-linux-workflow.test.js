@@ -12,13 +12,14 @@ const ROOT = path.resolve(__dirname, "..");
 const RELATIVE = ".github/workflows/social-3b0-exact-0004-runner-linux.yml";
 const FILE = path.join(ROOT, ...RELATIVE.split("/"));
 const BRANCH =
-  "social/checkpoint-3b0-exact-0004-runner-linux-force-rls-conflict-gate-20260820";
+  "social/checkpoint-3b0-exact-0004-runner-linux-rollback-catalog-lookup-20260820";
 const BASE = "13e38b875db2a220514fe06113663c517c975592";
-const PARENT = "1de14105800db3ad024e15700d7e23fb2b41282c";
+const PARENT = "5a109bc775ac9e35bdcdaabec16d329509d9125f";
+const FORCE_RLS_PARENT = "1de14105800db3ad024e15700d7e23fb2b41282c";
 const PLAN_SUBPHASE_PARENT = "73433e1b2d856e073db452ebe17815bec296bba0";
 const SOURCE_COMMIT = "8534817574a22dbd144a835c9f3585c44ee11c96";
 const MESSAGE =
-  "[run-social-3b0] make exact 0004 conflict gate RLS independent";
+  "[run-social-3b0] verify exact 0004 rollback through catalogs";
 const IMAGE =
   "docker.io/library/postgres:18.4-bookworm@sha256:7e6103cf85f88f7a0eddb3ec0b1ba8940eba098ed118ade25a729ca9daee5568";
 const CHECKOUT = "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1";
@@ -29,9 +30,9 @@ const RUNNER_MODULE = "./scripts/run-real-postgres-tests";
 const RUNNER_LF_SHA256 =
   "35d6ca544868957e44fa1787dfef6c3967ebf106e277877b70f9fae15e2e67bd";
 const RUNNER_FILTERED_OID = "a62d4607bf60345e05c1b42a5dfccd221950b227";
-const PARENT_RUNNER_LF_SHA256 =
+const FORCE_RLS_PARENT_RUNNER_LF_SHA256 =
   "2a8a91e0f6351afbb4304002a4fb7cd4e689602ecfbc8af418c957dcfa7da0a6";
-const PARENT_RUNNER_FILTERED_OID =
+const FORCE_RLS_PARENT_RUNNER_FILTERED_OID =
   "6eca94aae046b248a278484863c2caf6001acc4d";
 const PRESERVED_FUNCTIONAL_FILES = Object.freeze([
   "scripts/social-db-migrate.js",
@@ -66,22 +67,26 @@ const PROTECTED_FILES = Object.freeze([
 ]);
 const REAL_TEST_FILE = "tests/social-postgres-real.test.js";
 const REAL_TEST_LF_SHA256 =
-  "e3912a2b174e7199c76035264ebe455da00848c3c61259138b9ea0b77c3e5117";
+  "329890ff2e56c034a778b3277f46254795749ebc78feaf3c2e8d4ea760ee64c7";
 const REAL_TEST_FILTERED_OID =
-  "9d841c0290b2abb102bb3ce2f7e76bc8a80fe84a";
+  "cad3660ccc8d972aff5770701ff836f29c61e615";
 const PARENT_REAL_TEST_LF_SHA256 =
-  "d07054524efec8ac48b720eed8df7a39d2db6a8a5cda6249b80c30ec73b33a66";
+  "e3912a2b174e7199c76035264ebe455da00848c3c61259138b9ea0b77c3e5117";
 const PARENT_REAL_TEST_FILTERED_OID =
+  "9d841c0290b2abb102bb3ce2f7e76bc8a80fe84a";
+const FORCE_RLS_PARENT_REAL_TEST_LF_SHA256 =
+  "d07054524efec8ac48b720eed8df7a39d2db6a8a5cda6249b80c30ec73b33a66";
+const FORCE_RLS_PARENT_REAL_TEST_FILTERED_OID =
   "926b6050fcb89b528126eb6fbf72f70624556a4b";
 const INSTRUMENTED_LF_SHA256 = Object.freeze({
   [NODE_TEST_FILE]:
-    "91e81e4d38c39eefb208bfdc0e050ea1a36f1b1f3de64f8364c91ea6f282ff17",
+    "6ea16ca8ab6243c7f209228c99aeb50963f6b3f7f4a83fbafbd04e85cb80fe54",
   [PHYSICAL_TEST_FILE]:
     "c9dc030f19a1b26bd82eea9cc2f1399568edd1efe864e84ad4aef484158bbafc",
   [REAL_TEST_FILE]: REAL_TEST_LF_SHA256
 });
 const INSTRUMENTED_FILTERED_OID = Object.freeze({
-  [NODE_TEST_FILE]: "cd6967f8dfd6784c0e3c7b33199202b074ee1d24",
+  [NODE_TEST_FILE]: "7b510c2c1ef04b08ed65608927903b03b73bbacb",
   [PHYSICAL_TEST_FILE]: "367717f49cc845d5e022fc5eaa2823cf55c0f2cc",
   [REAL_TEST_FILE]: REAL_TEST_FILTERED_OID
 });
@@ -156,18 +161,13 @@ const EXACT20 = Object.freeze([
   "tests/social-postgres-migrations.test.js",
   "tests/social-postgres-real.test.js"
 ]);
-const INCREMENTAL12 = Object.freeze([
+const INCREMENTAL7 = Object.freeze([
   ".github/workflows/social-3b0-exact-0004-runner-linux.yml",
-  "db/migrations/0004_social_connector_persistence.up.sql",
-  "db/migrations/checksums.json",
-  "scripts/run-real-postgres-tests.js",
   "scripts/social-3a0p-local-scope.js",
   "tests/node-test-runner-safety.test.js",
   "tests/social-3a0p-current-diff-scope.test.js",
   "tests/social-3a0p-local-scope.test.js",
   "tests/social-3b0-exact-0004-runner-linux-workflow.test.js",
-  "tests/social-3b0-linux-physical-gate.test.js",
-  "tests/social-postgres-migrations.test.js",
   "tests/social-postgres-real.test.js"
 ]);
 const LEGACY_EVIDENCE_KEYS = Object.freeze([
@@ -753,9 +753,9 @@ test("Exact-0004 Linux workflow fixes branch, immediate parent, ancestral base, 
   assert.equal(new Set(EXACT20).size, 20);
   const guardInventory = bashExpectedInventory(guard);
   assert.deepEqual(guardInventory, EXACT20);
-  assert.equal(INCREMENTAL12.length, 12);
-  assert.equal(new Set(INCREMENTAL12).size, 12);
-  assert.deepEqual(bashIncrementalInventory(guard), INCREMENTAL12);
+  assert.equal(INCREMENTAL7.length, 7);
+  assert.equal(new Set(INCREMENTAL7).size, 7);
+  assert.deepEqual(bashIncrementalInventory(guard), INCREMENTAL7);
   assert.deepEqual(bashProtectedInventory(guard), PROTECTED_FILES);
   const physical = stepByName(
     currentJob,
@@ -817,8 +817,8 @@ test("Exact-0004 Linux workflow fixes branch, immediate parent, ancestral base, 
   assert.deepEqual(cleanupPins, CLEANUP_LF_SHA256);
   assert.equal(
     source.split(`'${RUNNER_FILE}'`).length - 1,
-    6,
-    "six semantic runner path positions"
+    5,
+    "five semantic runner path positions"
   );
   const imports = physicalRunnerImports(physical.run);
   assert.equal(imports.length, 1);
@@ -1035,7 +1035,7 @@ test("0004 conflict gates are physical, checksum-bound and reconstruct only the 
   const parentMigrationSource = git([
     "cat-file",
     "blob",
-    `${PARENT}:${MIGRATION_FILE}`
+    `${FORCE_RLS_PARENT}:${MIGRATION_FILE}`
   ], null).toString("utf8");
   const currentStart = migrationSource.indexOf(
     "DO $social_connector_blocking_connection_gate$"
@@ -1116,7 +1116,7 @@ test("0004 conflict gates are physical, checksum-bound and reconstruct only the 
   const parentChecksumSource = git([
     "cat-file",
     "blob",
-    `${PARENT}:${CHECKSUM_FILE}`
+    `${FORCE_RLS_PARENT}:${CHECKSUM_FILE}`
   ], null).toString("utf8");
   const currentChecksums = JSON.parse(checksumSource).migrations;
   const parentChecksums = JSON.parse(parentChecksumSource).migrations;
@@ -1668,25 +1668,30 @@ test("ledger OID parent remains exact atop snapshot-role binding and preserves i
   assert.equal(reconstructed, predecessorSource);
 });
 
-test("conflict Promise outcome is observed without changing the exact assertion", () => {
+test("historical FORCE-RLS conflict proof remains exact", () => {
   const parentBytes = git([
     "cat-file",
     "blob",
-    `${PARENT}:${REAL_TEST_FILE}`
+    `${FORCE_RLS_PARENT}:${REAL_TEST_FILE}`
   ], null);
   assert.ok(Buffer.isBuffer(parentBytes));
   assert.equal(
     crypto.createHash("sha256").update(parentBytes).digest("hex"),
-    PARENT_REAL_TEST_LF_SHA256
+    FORCE_RLS_PARENT_REAL_TEST_LF_SHA256
   );
-  assert.equal(gitBlobOid(parentBytes), PARENT_REAL_TEST_FILTERED_OID);
+  assert.equal(gitBlobOid(parentBytes), FORCE_RLS_PARENT_REAL_TEST_FILTERED_OID);
   const parentSource = parentBytes.toString("utf8");
-  const currentBytes = canonicalLfBytes(REAL_TEST_FILE);
+  const currentBytes = git([
+    "cat-file",
+    "blob",
+    `${PARENT}:${REAL_TEST_FILE}`
+  ], null);
+  assert.ok(Buffer.isBuffer(currentBytes));
   assert.equal(
     crypto.createHash("sha256").update(currentBytes).digest("hex"),
-    REAL_TEST_LF_SHA256
+    PARENT_REAL_TEST_LF_SHA256
   );
-  assert.equal(gitBlobOid(currentBytes), REAL_TEST_FILTERED_OID);
+  assert.equal(gitBlobOid(currentBytes), PARENT_REAL_TEST_FILTERED_OID);
   const currentSource = currentBytes.toString("utf8");
   const staleExpectation = '      (error) => error?.code === "P0001"';
   const externalAccountExpectation =
@@ -1885,6 +1890,187 @@ test("conflict Promise outcome is observed without changing the exact assertion"
   ]) assert.equal(currentRoute.includes(authorizedRouteProof), true);
 });
 
+test("rollback verification uses exact catalog cardinalities and reconstructs only its parent delta", () => {
+  const parentBytes = git([
+    "cat-file",
+    "blob",
+    `${PARENT}:${REAL_TEST_FILE}`
+  ], null);
+  assert.ok(Buffer.isBuffer(parentBytes));
+  assert.equal(
+    crypto.createHash("sha256").update(parentBytes).digest("hex"),
+    PARENT_REAL_TEST_LF_SHA256
+  );
+  assert.equal(gitBlobOid(parentBytes), PARENT_REAL_TEST_FILTERED_OID);
+  const currentBytes = canonicalLfBytes(REAL_TEST_FILE);
+  assert.equal(
+    crypto.createHash("sha256").update(currentBytes).digest("hex"),
+    REAL_TEST_LF_SHA256
+  );
+  assert.equal(gitBlobOid(currentBytes), REAL_TEST_FILTERED_OID);
+  const parentSource = parentBytes.toString("utf8");
+  const currentSource = currentBytes.toString("utf8");
+
+  const subphaseBody = (source, name) => {
+    const token = `"${name}"`;
+    assert.equal(source.split(token).length - 1, 2, name);
+    const start = source.indexOf(token);
+    const end = source.indexOf(token, start + token.length);
+    assert.ok(start >= 0 && end > start, name);
+    return source.slice(start + token.length, end);
+  };
+  const rollbackProof = (source) => {
+    const body = subphaseBody(source, "rollback_verification");
+    const startToken = "    const rollbackState = await withTransaction(";
+    const endToken = [
+      "    assert.equal(",
+      "      await countExact0004Conflict(",
+      "        migrationPoolA,",
+      "        companyWithLegacyConnection,",
+      "        conflictId",
+      "      ),",
+      "      1,"
+    ].join("\n");
+    assert.equal(body.split(startToken).length - 1, 1);
+    assert.equal(body.split(endToken).length - 1, 1);
+    const start = body.indexOf(startToken);
+    const end = body.indexOf(endToken, start);
+    assert.ok(end > start);
+    return body.slice(start, end);
+  };
+  const parentRollback = subphaseBody(parentSource, "rollback_verification");
+  const currentRollback = subphaseBody(currentSource, "rollback_verification");
+  const parentProof = rollbackProof(parentSource);
+  const currentProof = rollbackProof(currentSource);
+
+  const validateCatalogProof = (proof) => {
+    for (const fragment of [
+      '          "WITH target_namespace AS (",',
+      '          "  FROM pg_catalog.pg_namespace namespace",',
+      '          "  WHERE namespace.nspname = \'ia4tube_social\'",',
+      '          "  JOIN pg_catalog.pg_class relation",',
+      '          "    ON relation.relnamespace = namespace.oid",',
+      '          "  WHERE relation.relname IN (",',
+      '          "  (SELECT COUNT(*)::integer FROM target_namespace)",',
+      '          "    AS social_schema_count,",',
+      '          "    AS new_table_count,",',
+      '          "    AS blocking_connection_index_count,",',
+      '          "    AS active_account_index_count,",',
+      '          "     AND relkind <> \'r\')",',
+      '          "     ) AND relkind <> \'i\')) AS unexpected_relkind_count,",',
+      '          "   FROM ia4tube_migrations.schema_migrations",',
+      '          "   WHERE version = $1) AS ledger_row_count"',
+      "      { role: MIGRATOR_ROLE }",
+      "    assert.equal(rollbackState.rowCount, 1);",
+      "      social_schema_count: 1,",
+      "      new_table_count: 0,",
+      "      blocking_connection_index_count: 0,",
+      "      active_account_index_count: 0,",
+      "      unexpected_relkind_count: 0,",
+      "      ledger_row_count: 0"
+    ]) assert.equal(proof.includes(fragment), true, fragment);
+    assert.equal((proof.match(/COUNT\(\*\)::integer/g) || []).length, 6);
+    assert.equal(
+      proof.split("social_idempotency_operations").length - 1,
+      3
+    );
+    assert.equal(
+      proof.split("social_connections_instagram_blocking_company_unique").length - 1,
+      3
+    );
+    assert.equal(
+      proof.split("social_external_accounts_instagram_active_company_unique").length - 1,
+      3
+    );
+    assert.equal(/\bto_regclass\s*\(/i.test(proof), false);
+    assert.equal(/::\s*regclass\b/i.test(proof), false);
+    assert.equal(/\bSET\s+(?:LOCAL\s+)?ROLE\b/i.test(proof), false);
+    assert.equal(/\b(?:GRANT|REVOKE|ALTER\s+(?:ROLE|USER))\b/i.test(proof), false);
+  };
+  validateCatalogProof(currentProof);
+
+  const mutate = (source, before, after, label) => {
+    assert.ok(source.includes(before), label);
+    const mutated = source.replace(before, after);
+    assert.notEqual(mutated, source, label);
+    return mutated;
+  };
+  for (const [label, mutated] of [
+    [
+      "relation_absent_from_catalog_target",
+      mutate(
+        currentProof,
+        "social_idempotency_operations",
+        "synthetic_absent_relation_0004",
+        "relation absent"
+      )
+    ],
+    [
+      "relation_present_after_rollback",
+      mutate(currentProof, "      new_table_count: 0,", "      new_table_count: 1,", "relation present")
+    ],
+    [
+      "schema_absent",
+      mutate(currentProof, "      social_schema_count: 1,", "      social_schema_count: 0,", "schema absent")
+    ],
+    [
+      "schema_duplicate",
+      mutate(currentProof, "      social_schema_count: 1,", "      social_schema_count: 2,", "schema duplicate")
+    ],
+    [
+      "unexpected_cardinality",
+      mutate(currentProof, "rollbackState.rowCount, 1", "rollbackState.rowCount, 2", "cardinality")
+    ],
+    [
+      "unexpected_relkind",
+      mutate(
+        currentProof,
+        "      unexpected_relkind_count: 0,",
+        "      unexpected_relkind_count: 1,",
+        "relkind"
+      )
+    ],
+    [
+      "textual_regclass_resolution",
+      mutate(
+        currentProof,
+        '          "WITH target_namespace AS (",',
+        '          "SELECT to_regclass(\'ia4tube_social.social_idempotency_operations\')",',
+        "to_regclass"
+      )
+    ]
+  ]) {
+    assert.throws(() => validateCatalogProof(mutated), assert.AssertionError, label);
+  }
+
+  assert.equal(/\bto_regclass\s*\(/i.test(parentRollback), true);
+  assert.equal(/\bto_regclass\s*\(/i.test(currentRollback), false);
+  assert.equal(/::\s*regclass\b/i.test(currentRollback), false);
+  assert.equal(parentSource.split(parentProof).length - 1, 1);
+  assert.equal(currentSource.split(currentProof).length - 1, 1);
+  assert.equal(currentSource.replace(currentProof, parentProof), parentSource);
+
+  const parentExternalRollback = subphaseBody(
+    parentSource,
+    "external_account_rollback_verification"
+  );
+  const currentExternalRollback = subphaseBody(
+    currentSource,
+    "external_account_rollback_verification"
+  );
+  assert.equal(currentExternalRollback, parentExternalRollback);
+  assert.equal(
+    (currentExternalRollback.match(/\bto_regclass\s*\(/g) || []).length,
+    3
+  );
+  for (const fragment of [
+    "new_table_absent: true",
+    "blocking_connection_index_absent: true",
+    "active_account_index_absent: true",
+    "ledger_row_absent: true"
+  ]) assert.equal(currentExternalRollback.includes(fragment), true, fragment);
+});
+
 test("instrumented runner pin is the canonical filtered LF blob", () => {
   const { workflow } = read();
   const guard = stepByName(
@@ -1906,15 +2092,15 @@ test("instrumented runner pin is the canonical filtered LF blob", () => {
   const parent = git([
     "cat-file",
     "blob",
-    `${PARENT}:${RUNNER_FILE}`
+    `${FORCE_RLS_PARENT}:${RUNNER_FILE}`
   ], null);
   assert.ok(Buffer.isBuffer(parent));
   assert.equal(
     crypto.createHash("sha256").update(parent).digest("hex"),
-    PARENT_RUNNER_LF_SHA256
+    FORCE_RLS_PARENT_RUNNER_LF_SHA256
   );
-  assert.equal(gitBlobOid(parent), PARENT_RUNNER_FILTERED_OID);
-  assert.notEqual(RUNNER_FILTERED_OID, PARENT_RUNNER_FILTERED_OID);
+  assert.equal(gitBlobOid(parent), FORCE_RLS_PARENT_RUNNER_FILTERED_OID);
+  assert.notEqual(RUNNER_FILTERED_OID, FORCE_RLS_PARENT_RUNNER_FILTERED_OID);
   const parentRunnerSource = parent.toString("utf8");
   assert.ok(parentRunnerSource.includes("const EVIDENCE_SCHEMA_VERSION = 5;"));
   assert.ok(parentRunnerSource.includes("conflictingNegativePromiseOutcome"));
