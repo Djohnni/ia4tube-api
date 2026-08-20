@@ -12,12 +12,12 @@ const ROOT = path.resolve(__dirname, "..");
 const RELATIVE = ".github/workflows/social-3b0-exact-0004-runner-linux.yml";
 const FILE = path.join(ROOT, ...RELATIVE.split("/"));
 const BRANCH =
-  "social/checkpoint-3b0-exact-0004-runner-linux-ledger-oid-boundary-20260816";
+  "social/checkpoint-3b0-exact-0004-runner-linux-plan-subphase-evidence-20260816";
 const BASE = "13e38b875db2a220514fe06113663c517c975592";
-const PARENT = "05689e6d23e65c6df33e3db79633126114dea540";
+const PARENT = "73433e1b2d856e073db452ebe17815bec296bba0";
 const SOURCE_COMMIT = "8534817574a22dbd144a835c9f3585c44ee11c96";
 const MESSAGE =
-  "[run-social-3b0] resolve exact 0004 ledger privilege by oid";
+  "[run-social-3b0] expose exact 0004 plan subphase safely";
 const IMAGE =
   "docker.io/library/postgres:18.4-bookworm@sha256:7e6103cf85f88f7a0eddb3ec0b1ba8940eba098ed118ade25a729ca9daee5568";
 const CHECKOUT = "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1";
@@ -26,8 +26,12 @@ const UPLOAD = "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
 const RUNNER_FILE = "scripts/run-real-postgres-tests.js";
 const RUNNER_MODULE = "./scripts/run-real-postgres-tests";
 const RUNNER_LF_SHA256 =
+  "2e30395d6ff015f16fdf99469028e48576cfca942a35b0b88a29e2b208d15a16";
+const RUNNER_FILTERED_OID = "18fa43cbc8014ffdf9ce4ac986f3133bf8a51cdd";
+const PARENT_RUNNER_LF_SHA256 =
   "efac7d0ce2c0bcd4b1fc83c692b610749de0e842badbb71e4d66e9f384e5673d";
-const RUNNER_FILTERED_OID = "dec34f1bc10ee2d1f06737bb07f6bca4ec5770f5";
+const PARENT_RUNNER_FILTERED_OID =
+  "dec34f1bc10ee2d1f06737bb07f6bca4ec5770f5";
 const PRESERVED_FUNCTIONAL_FILES = Object.freeze([
   "scripts/social-db-migrate.js",
   "src/persistence/postgres/migrations.js",
@@ -35,12 +39,18 @@ const PRESERVED_FUNCTIONAL_FILES = Object.freeze([
 ]);
 const REAL_TEST_FILE = "tests/social-postgres-real.test.js";
 const REAL_TEST_LF_SHA256 =
-  "27a4d1ebbccda40711fd1a78a2f170efa3128690b86588be0c7ab515345f49d0";
+  "593f79407358d997c03e1cb536e90dd9bf0fef091d3bd376916ddad17c21ff3a";
 const REAL_TEST_FILTERED_OID =
-  "bebdc618879cabd589dbe93a3b6a2c9a172aa98e";
+  "d8212114d6e7590c91d1170d62778eed7b58dbb6";
 const PARENT_REAL_TEST_LF_SHA256 =
-  "47d8d35369fb9a028bd3d5d2b0b9e42f1e91b914447fb7547c8421f8d2b2232b";
+  "27a4d1ebbccda40711fd1a78a2f170efa3128690b86588be0c7ab515345f49d0";
 const PARENT_REAL_TEST_FILTERED_OID =
+  "bebdc618879cabd589dbe93a3b6a2c9a172aa98e";
+const LEDGER_OID_PREDECESSOR_COMMIT =
+  "05689e6d23e65c6df33e3db79633126114dea540";
+const LEDGER_OID_PREDECESSOR_REAL_TEST_LF_SHA256 =
+  "47d8d35369fb9a028bd3d5d2b0b9e42f1e91b914447fb7547c8421f8d2b2232b";
+const LEDGER_OID_PREDECESSOR_REAL_TEST_FILTERED_OID =
   "ad9e879bd6546f9a54b3687602aa0479ad1a0027";
 const PERMISSION_BOUNDARY_COMMIT =
   "555d71eacbde76ceffdd03d64731e03849978c17";
@@ -101,13 +111,15 @@ const EXACT18 = Object.freeze([
   "tests/social-postgres-migrations.test.js",
   "tests/social-postgres-real.test.js"
 ]);
-const INCREMENTAL7 = Object.freeze([
+const INCREMENTAL9 = Object.freeze([
   ".github/workflows/social-3b0-exact-0004-runner-linux.yml",
+  "scripts/run-real-postgres-tests.js",
   "scripts/social-3a0p-local-scope.js",
   "tests/node-test-runner-safety.test.js",
   "tests/social-3a0p-current-diff-scope.test.js",
   "tests/social-3a0p-local-scope.test.js",
   "tests/social-3b0-exact-0004-runner-linux-workflow.test.js",
+  "tests/social-3b0-linux-physical-gate.test.js",
   "tests/social-postgres-real.test.js"
 ]);
 const LEGACY_EVIDENCE_KEYS = Object.freeze([
@@ -160,12 +172,28 @@ const SAFE_EVIDENCE_KEYS = Object.freeze([
   "safeSourceBasename",
   "safeLineBucket"
 ]);
+const EXACT0004_EVIDENCE_KEYS = Object.freeze([
+  "lastExact0004SubphaseStarted",
+  "lastExact0004SubphaseCompleted",
+  "exact0004FailureSubphase",
+  "safeSqlState",
+  "safeErrorClass",
+  "safeOperationClass",
+  "planExactInvoked",
+  "planExactCompleted",
+  "applyExactInvoked",
+  "applyExactCompleted",
+  "databaseMutationAttempted",
+  "failureBeforeFirstMutation"
+]);
 const EVIDENCE_KEYS = Object.freeze([
   ...LEGACY_EVIDENCE_KEYS,
-  ...SAFE_EVIDENCE_KEYS
+  ...SAFE_EVIDENCE_KEYS,
+  ...EXACT0004_EVIDENCE_KEYS
 ]);
 const RUNNER_FACT_KEYS = Object.freeze([
   ...SAFE_EVIDENCE_KEYS.filter((key) => key !== "evidenceSchemaVersion"),
+  ...EXACT0004_EVIDENCE_KEYS,
   "cleanupCompleted"
 ]);
 const PROCESS_STATUS_KEYS = Object.freeze([
@@ -181,6 +209,73 @@ const PERMISSION_ORIGINS = Object.freeze([
   "os_process",
   "unknown"
 ]);
+const EXACT0004_SUBPHASES = Object.freeze([
+  "oid_catalog_lookup",
+  "direct_privilege_boolean_check",
+  "direct_ledger_read_negative",
+  "set_local_migrator_role",
+  "role_ledger_read_positive",
+  "snapshot_before_plan",
+  "plan_exact",
+  "plan_snapshot_compare",
+  "synthetic_0005_negative",
+  "conflicting_0004_negative",
+  "rollback_verification",
+  "apply_exact",
+  "concurrency",
+  "final_snapshot",
+  "unknown",
+  "not_reached"
+]);
+const SAFE_OPERATION_CLASSES = Object.freeze([
+  "catalog_read",
+  "privilege_check",
+  "direct_negative_read",
+  "role_switch",
+  "role_positive_read",
+  "schema_snapshot",
+  "plan",
+  "negative_gate",
+  "rollback_check",
+  "apply",
+  "concurrency",
+  "final_validation",
+  "unknown"
+]);
+const SAFE_ERROR_CLASSES = Object.freeze([
+  "postgres_sqlstate",
+  "assertion_failure",
+  "environment_contract",
+  "process_failure",
+  "timeout",
+  "unexpected_result",
+  "unknown"
+]);
+const SAFE_SQL_STATES = Object.freeze([
+  "42501",
+  "23514",
+  "P0001",
+  "unknown",
+  "not_observed"
+]);
+const EXACT0004_OPERATION_BY_SUBPHASE = Object.freeze({
+  oid_catalog_lookup: "catalog_read",
+  direct_privilege_boolean_check: "privilege_check",
+  direct_ledger_read_negative: "direct_negative_read",
+  set_local_migrator_role: "role_switch",
+  role_ledger_read_positive: "role_positive_read",
+  snapshot_before_plan: "schema_snapshot",
+  plan_exact: "plan",
+  plan_snapshot_compare: "schema_snapshot",
+  synthetic_0005_negative: "negative_gate",
+  conflicting_0004_negative: "negative_gate",
+  rollback_verification: "rollback_check",
+  apply_exact: "apply",
+  concurrency: "concurrency",
+  final_snapshot: "final_validation",
+  unknown: "unknown",
+  not_reached: "unknown"
+});
 
 function read() {
   const stat = fs.lstatSync(FILE);
@@ -276,19 +371,39 @@ function boundaryValidator(source) {
   const physicalPhases = inlineInventory(source, "physicalPhases");
   const permissionOrigins = inlineClosedSet(source, "permissionOrigins");
   assert.deepEqual(permissionOrigins, PERMISSION_ORIGINS);
+  const exact0004Subphases = inlineClosedSet(source, "exact0004Subphases");
+  const safeOperationClasses = inlineClosedSet(source, "safeOperationClasses");
+  const safeErrorClasses = inlineClosedSet(source, "safeErrorClasses");
+  const safeSqlStates = inlineClosedSet(source, "safeSqlStates");
+  assert.deepEqual(exact0004Subphases, EXACT0004_SUBPHASES);
+  assert.deepEqual(safeOperationClasses, SAFE_OPERATION_CLASSES);
+  assert.deepEqual(safeErrorClasses, SAFE_ERROR_CLASSES);
+  assert.deepEqual(safeSqlStates, SAFE_SQL_STATES);
   return Function(
     "mainPhases",
     "phaseSet",
     "permissionOrigins",
     "safeSources",
     "lineBuckets",
+    "exact0004Route",
+    "exact0004Subphases",
+    "safeOperationClasses",
+    "safeErrorClasses",
+    "safeSqlStates",
+    "exact0004OperationBySubphase",
     `"use strict";${inlineFunction(source, signature)};return validBoundary;`
   )(
     physicalPhases.slice(0, -1),
     new Set(physicalPhases),
     new Set(permissionOrigins),
     new Set(inlineClosedSet(source, "safeSources")),
-    new Set(inlineClosedSet(source, "lineBuckets"))
+    new Set(inlineClosedSet(source, "lineBuckets")),
+    EXACT0004_SUBPHASES.slice(0, -2),
+    new Set(exact0004Subphases),
+    new Set(safeOperationClasses),
+    new Set(safeErrorClasses),
+    new Set(safeSqlStates),
+    EXACT0004_OPERATION_BY_SUBPHASE
   );
 }
 
@@ -497,7 +612,9 @@ test("Exact-0004 Linux workflow fixes branch, immediate parent, ancestral base, 
   assert.equal(new Set(EXACT18).size, 18);
   const guardInventory = bashExpectedInventory(guard);
   assert.deepEqual(guardInventory, EXACT18);
-  assert.deepEqual(bashIncrementalInventory(guard), INCREMENTAL7);
+  assert.equal(INCREMENTAL9.length, 9);
+  assert.equal(new Set(INCREMENTAL9).size, 9);
+  assert.deepEqual(bashIncrementalInventory(guard), INCREMENTAL9);
   const physical = stepByName(
     currentJob,
     "Run the one-shot PostgreSQL 18 Exact-0004 proof"
@@ -557,8 +674,8 @@ test("Exact-0004 Linux workflow fixes branch, immediate parent, ancestral base, 
   assert.deepEqual(cleanupPins, CLEANUP_LF_SHA256);
   assert.equal(
     source.split(`'${RUNNER_FILE}'`).length - 1,
-    5,
-    "five semantic runner path positions"
+    6,
+    "six semantic runner path positions"
   );
   const imports = physicalRunnerImports(physical.run);
   assert.equal(imports.length, 1);
@@ -594,6 +711,8 @@ test("Exact-0004 Linux workflow fixes branch, immediate parent, ancestral base, 
     false
   );
   for (const stale of [
+    "social/checkpoint-3b0-exact-0004-runner-linux-ledger-oid-boundary-20260816",
+    "[run-social-3b0] resolve exact 0004 ledger privilege by oid",
     "social/checkpoint-3b0-exact-0004-runner-linux-snapshot-role-binding-20260815",
     "[run-social-3b0] bind exact 0004 snapshots to migrator role",
     "social/checkpoint-3b0-exact-0004-runner-linux-permission-boundary-20260814",
@@ -951,7 +1070,7 @@ test("cleanup pins come from canonical Git LF blobs", () => {
   }
 });
 
-test("ledger OID correction is exact atop snapshot-role binding and preserves its historical proof", () => {
+test("ledger OID parent remains exact atop snapshot-role binding and preserves its historical proof", () => {
   const parentBytes = git([
     "cat-file",
     "blob",
@@ -964,10 +1083,25 @@ test("ledger OID correction is exact atop snapshot-role binding and preserves it
   );
   assert.equal(gitBlobOid(parentBytes), PARENT_REAL_TEST_FILTERED_OID);
   const parentSource = parentBytes.toString("utf8");
-  const latestSource = canonicalLfBytes(REAL_TEST_FILE).toString("utf8");
+  const ledgerPredecessorBytes = git([
+    "cat-file",
+    "blob",
+    `${LEDGER_OID_PREDECESSOR_COMMIT}:${REAL_TEST_FILE}`
+  ], null);
+  assert.ok(Buffer.isBuffer(ledgerPredecessorBytes));
+  assert.equal(
+    crypto.createHash("sha256").update(ledgerPredecessorBytes).digest("hex"),
+    LEDGER_OID_PREDECESSOR_REAL_TEST_LF_SHA256
+  );
+  assert.equal(
+    gitBlobOid(ledgerPredecessorBytes),
+    LEDGER_OID_PREDECESSOR_REAL_TEST_FILTERED_OID
+  );
+  const ledgerPredecessorSource = ledgerPredecessorBytes.toString("utf8");
+  const latestSource = parentSource;
   const helperSignature =
     "async function proveMigratorExplicitRoleBoundary(pool) {";
-  const parentHelper = inlineFunction(parentSource, helperSignature);
+  const parentHelper = inlineFunction(ledgerPredecessorSource, helperSignature);
   const latestHelper = inlineFunction(latestSource, helperSignature);
   const physicalReadMarker = "  const ledgerRead =";
   const parentMarker = parentHelper.indexOf(physicalReadMarker);
@@ -1093,7 +1227,7 @@ test("ledger OID correction is exact atop snapshot-role binding and preserves it
   ]) assert.equal(forbidden.test(latestHelper), false, String(forbidden));
   assert.equal(latestSource.split(latestHelper).length - 1, 1);
   const normalizedLatest = latestSource.replace(latestHelper, parentHelper);
-  assert.equal(normalizedLatest, parentSource);
+  assert.equal(normalizedLatest, ledgerPredecessorSource);
 
   const predecessorBytes = git([
     "cat-file",
@@ -1239,6 +1373,114 @@ test("ledger OID correction is exact atop snapshot-role binding and preserves it
   assert.equal(reconstructed, predecessorSource);
 });
 
+test("plan-subphase evidence is exact atop the ledger OID parent", () => {
+  const parentBytes = git([
+    "cat-file",
+    "blob",
+    `${PARENT}:${REAL_TEST_FILE}`
+  ], null);
+  assert.ok(Buffer.isBuffer(parentBytes));
+  assert.equal(
+    crypto.createHash("sha256").update(parentBytes).digest("hex"),
+    PARENT_REAL_TEST_LF_SHA256
+  );
+  assert.equal(gitBlobOid(parentBytes), PARENT_REAL_TEST_FILTERED_OID);
+  const parentSource = parentBytes.toString("utf8");
+  const currentBytes = canonicalLfBytes(REAL_TEST_FILE);
+  assert.equal(
+    crypto.createHash("sha256").update(currentBytes).digest("hex"),
+    REAL_TEST_LF_SHA256
+  );
+  assert.equal(gitBlobOid(currentBytes), REAL_TEST_FILTERED_OID);
+  const currentSource = currentBytes.toString("utf8");
+
+  const markerExpression =
+    /physicalPhases\.(start|complete)Exact0004Subphase\(\s*"([^"]+)"\s*\)/g;
+  const markers = [...currentSource.matchAll(markerExpression)].map((match) =>
+    Object.freeze({ kind: match[1], subphase: match[2] })
+  );
+  assert.deepEqual(
+    markers.filter(({ kind }) => kind === "start").map(({ subphase }) => subphase),
+    EXACT0004_SUBPHASES.slice(0, -2)
+  );
+  assert.deepEqual(
+    markers.filter(({ kind }) => kind === "complete").map(({ subphase }) => subphase),
+    EXACT0004_SUBPHASES.slice(0, -2)
+  );
+  assert.equal(
+    currentSource.split("physicalPhases.markExact0004DatabaseMutationAttempted();")
+      .length - 1,
+    1
+  );
+  assert.ok(
+    currentSource.indexOf(
+      'physicalPhases.startExact0004Subphase("conflicting_0004_negative")'
+    ) < currentSource.indexOf(
+      "physicalPhases.markExact0004DatabaseMutationAttempted();"
+    )
+  );
+  assert.ok(
+    currentSource.indexOf(
+      "physicalPhases.markExact0004DatabaseMutationAttempted();"
+    ) < currentSource.indexOf("const conflictId = await insertExact0004Conflict(")
+  );
+
+  const stripMarkers = (source) => source
+    .replace(
+      /^[ ]*physicalPhases\.(?:start|complete)Exact0004Subphase\(\s*"[^"]+"\s*\);\n/gm,
+      ""
+    )
+    .replace(
+      /^[ ]*physicalPhases\.markExact0004DatabaseMutationAttempted\(\);\n/gm,
+      ""
+    );
+  const helperSignature = "async function proveMigratorExplicitRoleBoundary(";
+  const routeSignature = "async function proveExact0004Route(";
+  const parentHelper = inlineFunction(parentSource, helperSignature);
+  const currentHelper = inlineFunction(currentSource, helperSignature);
+  const normalizedHelper = stripMarkers(currentHelper)
+    .replace("pool, physicalPhases", "pool")
+    .replace(
+      [
+        "    (client) => {",
+        "      return client.query(ledgerRead);",
+        "    },"
+      ].join("\n"),
+      "    (client) => client.query(ledgerRead),"
+    );
+  assert.equal(normalizedHelper, parentHelper);
+
+  const parentRoute = inlineFunction(parentSource, routeSignature);
+  const currentRoute = inlineFunction(currentSource, routeSignature);
+  const normalizedRoute = stripMarkers(currentRoute)
+    .replace(",\n  physicalPhases\n)", "\n)")
+    .replace(
+      "proveMigratorExplicitRoleBoundary(migrationPoolA, physicalPhases)",
+      "proveMigratorExplicitRoleBoundary(migrationPoolA)"
+    );
+  assert.equal(normalizedRoute, parentRoute);
+
+  const currentCallTail = [
+    "          companyC,",
+    "          physicalPhases",
+    "        ));"
+  ].join("\n");
+  const parentCallTail = ["          companyC", "        ));"].join("\n");
+  assert.equal(currentSource.split(currentCallTail).length - 1, 1);
+  let normalizedSource = currentSource
+    .replace(currentHelper, parentHelper)
+    .replace(currentRoute, parentRoute)
+    .replace(currentCallTail, parentCallTail);
+  assert.equal(normalizedSource, parentSource);
+  for (const forbidden of [
+    "error.message",
+    "error.stack",
+    "JSON.stringify(error)",
+    "process.stdout.write",
+    "process.stderr.write"
+  ]) assert.equal(currentHelper.includes(forbidden), false, forbidden);
+});
+
 test("instrumented runner pin is the canonical filtered LF blob", () => {
   const { workflow } = read();
   const guard = stepByName(
@@ -1257,7 +1499,32 @@ test("instrumented runner pin is the canonical filtered LF blob", () => {
     git(["hash-object", `--path=${RUNNER_FILE}`, "--", RUNNER_FILE]).trim(),
     RUNNER_FILTERED_OID
   );
+  const parent = git([
+    "cat-file",
+    "blob",
+    `${PARENT}:${RUNNER_FILE}`
+  ], null);
+  assert.ok(Buffer.isBuffer(parent));
+  assert.equal(
+    crypto.createHash("sha256").update(parent).digest("hex"),
+    PARENT_RUNNER_LF_SHA256
+  );
+  assert.equal(gitBlobOid(parent), PARENT_RUNNER_FILTERED_OID);
+  assert.notEqual(RUNNER_FILTERED_OID, PARENT_RUNNER_FILTERED_OID);
   const runnerSource = canonical.toString("utf8");
+  for (const fragment of [
+    "const EVIDENCE_SCHEMA_VERSION = 4;",
+    "EXACT_0004_SUBPHASES",
+    "EXACT_0004_EXECUTION_SUBPHASES",
+    "EXACT_0004_OPERATION_CLASSES",
+    "EXACT_0004_ERROR_CLASSES",
+    "EXACT_0004_EVIDENCE_FIELDS",
+    "SAFE_SQL_STATES",
+    "SAFE_SQL_STATE_VALUES",
+    "emptyExact0004Evidence",
+    "exact0004EvidenceValid",
+    "exact0004OperationClass"
+  ]) assert.ok(runnerSource.includes(fragment), fragment);
   const exactReporterArguments = [
     "        [",
     "          \"--test-reporter=tap\",",
@@ -1554,6 +1821,22 @@ test("boundary validators reject weakened phase and diagnostic states", () => {
     "value.firstFailureStage==='test_execution'&&value.failurePhase===null",
     "value.stderrCategory==='permission_denied'&&value.failurePhase===null",
     "value.safePermissionOrigin!=='unknown'||value.safeSourceBasename!==null||value.safeLineBucket!=='unknown'",
+    "!exact0004Subphases.has(exactStarted)",
+    "value.planExactCompleted&&!value.planExactInvoked",
+    "value.applyExactCompleted&&!value.applyExactInvoked",
+    "value.applyExactInvoked&&!value.planExactCompleted",
+    "value.applyExactInvoked&&!value.databaseMutationAttempted",
+    "value.failureBeforeFirstMutation===value.databaseMutationAttempted",
+    "(value.failurePhase==='exact_0004_plan_apply')!==(exactFailure!=='not_reached')",
+    "exactStartedIndex<conflictIndex&&value.databaseMutationAttempted",
+    "exactStartedIndex!==exactCompletedIndex+1",
+    "const exactMainIndex=mainPhases.indexOf('exact_0004_plan_apply')",
+    "const exactBefore=startedIndex<exactMainIndex",
+    "const exactActive=startedIndex===exactMainIndex&&completedIndex===exactMainIndex-1",
+    "const exactAfter=completedIndex>=exactMainIndex",
+    "exactBefore&&!exactDefaults",
+    "exactActive&&exactFailure==='not_reached'",
+    "exactAfter&&!exactFinal",
   ];
   const weakenedGuards = [
     "completedIndex>startedIndex||startedIndex-completedIndex>1",
@@ -1600,7 +1883,19 @@ test("boundary validators reject weakened phase and diagnostic states", () => {
     safeModuleName: null,
     safePermissionOrigin: "postgres_sqlstate",
     safeSourceBasename: null,
-    safeLineBucket: "unknown"
+    safeLineBucket: "unknown",
+    lastExact0004SubphaseStarted: "not_reached",
+    lastExact0004SubphaseCompleted: "not_reached",
+    exact0004FailureSubphase: "not_reached",
+    safeSqlState: "not_observed",
+    safeErrorClass: "unknown",
+    safeOperationClass: "unknown",
+    planExactInvoked: false,
+    planExactCompleted: false,
+    applyExactInvoked: false,
+    applyExactCompleted: false,
+    databaseMutationAttempted: false,
+    failureBeforeFirstMutation: false
   });
   const boundaryFixtures = Object.freeze([
     Object.freeze({
@@ -1615,6 +1910,29 @@ test("boundary validators reject weakened phase and diagnostic states", () => {
         failurePhase: "physical_target_preflight"
       }),
       expected: true
+    }),
+    Object.freeze({
+      label: "pre_exact_sqlstate_is_not_exact_evidence",
+      value: Object.freeze({
+        ...boundaryBase,
+        failurePhase: "physical_target_preflight",
+        safeSqlState: "42501",
+        safeErrorClass: "postgres_sqlstate"
+      }),
+      expected: false
+    }),
+    Object.freeze({
+      label: "pre_exact_progress_is_not_exact_evidence",
+      value: Object.freeze({
+        ...boundaryBase,
+        failurePhase: "physical_target_preflight",
+        lastExact0004SubphaseStarted: "oid_catalog_lookup",
+        exact0004FailureSubphase: "oid_catalog_lookup",
+        safeSqlState: "unknown",
+        safeOperationClass: "catalog_read",
+        failureBeforeFirstMutation: true
+      }),
+      expected: false
     }),
     Object.freeze({
       label: "permission_42501_requires_postgres_sqlstate",
@@ -1632,7 +1950,9 @@ test("boundary validators reject weakened phase and diagnostic states", () => {
         safeErrorCode: "EACCES",
         safePermissionOrigin: "os_filesystem",
         safeSourceBasename: "migrations.js",
-        safeLineBucket: "1-499"
+        safeLineBucket: "1-499",
+        safeSqlState: "not_observed",
+        safeErrorClass: "unknown"
       }),
       expected: true
     }),
@@ -1644,7 +1964,9 @@ test("boundary validators reject weakened phase and diagnostic states", () => {
         safeErrorCode: "EPERM",
         safePermissionOrigin: "os_process",
         safeSourceBasename: "server.js",
-        safeLineBucket: "1-499"
+        safeLineBucket: "1-499",
+        safeSqlState: "not_observed",
+        safeErrorClass: "unknown"
       }),
       expected: true
     }),
@@ -1654,7 +1976,9 @@ test("boundary validators reject weakened phase and diagnostic states", () => {
         ...boundaryBase,
         failurePhase: "physical_target_preflight",
         safeErrorCode: null,
-        safePermissionOrigin: "unknown"
+        safePermissionOrigin: "unknown",
+        safeSqlState: "not_observed",
+        safeErrorClass: "unknown"
       }),
       expected: true
     }),
@@ -1690,7 +2014,9 @@ test("boundary validators reject weakened phase and diagnostic states", () => {
         ...boundaryBase,
         stderrCategory: "reference_error",
         safeErrorCode: null,
-        safePermissionOrigin: "unknown"
+        safePermissionOrigin: "unknown",
+        safeSqlState: "not_observed",
+        safeErrorClass: "unknown"
       }),
       expected: true
     })
@@ -1721,7 +2047,163 @@ test("boundary validators reject weakened phase and diagnostic states", () => {
   assert.ok(instrumentedGuard.includes('sha256sum "$file"'));
 });
 
-test("evidence keeps legacy schema 1 and uses the closed safe schema 3", () => {
+test("Exact-0004 subphase artifact boundary is closed and mutation-coherent", () => {
+  const { workflow } = read();
+  const currentJob = job(workflow);
+  const runs = currentJob.steps
+    .map((step) => step.run)
+    .filter((run) => typeof run === "string" && run.includes("function validBoundary(value){"));
+  assert.equal(runs.length, 2);
+  for (const run of runs) {
+    assert.deepEqual(
+      inlineInventory(run, "exact0004Route"),
+      EXACT0004_SUBPHASES.slice(0, -2)
+    );
+    assert.deepEqual(inlineClosedSet(run, "exact0004Subphases"), EXACT0004_SUBPHASES);
+    assert.deepEqual(inlineClosedSet(run, "safeOperationClasses"), SAFE_OPERATION_CLASSES);
+    assert.deepEqual(inlineClosedSet(run, "safeErrorClasses"), SAFE_ERROR_CLASSES);
+    assert.deepEqual(inlineClosedSet(run, "safeSqlStates"), SAFE_SQL_STATES);
+  }
+
+  const validPlanFailure = Object.freeze({
+    lastMainPhaseStarted: "exact_0004_plan_apply",
+    lastMainPhaseCompleted: "migration_0003_apply",
+    cleanupStarted: false,
+    cleanupCompleted: false,
+    failureDuringCleanup: false,
+    failurePhase: "exact_0004_plan_apply",
+    firstFailure: "real_postgres_test_failed",
+    firstFailureStage: "test_execution",
+    stderrCategory: "postgres_schema",
+    safeErrorCode: "42501",
+    safeModuleName: null,
+    safePermissionOrigin: "unknown",
+    safeSourceBasename: null,
+    safeLineBucket: "unknown",
+    lastExact0004SubphaseStarted: "plan_exact",
+    lastExact0004SubphaseCompleted: "snapshot_before_plan",
+    exact0004FailureSubphase: "plan_exact",
+    safeSqlState: "42501",
+    safeErrorClass: "postgres_sqlstate",
+    safeOperationClass: "plan",
+    planExactInvoked: true,
+    planExactCompleted: false,
+    applyExactInvoked: false,
+    applyExactCompleted: false,
+    databaseMutationAttempted: false,
+    failureBeforeFirstMutation: true
+  });
+  const validAssertionFailure = Object.freeze({
+    ...validPlanFailure,
+    safeSqlState: "23514",
+    safeErrorClass: "assertion_failure"
+  });
+  const validPostExactFailure = Object.freeze({
+    ...validPlanFailure,
+    lastMainPhaseStarted: "post_migration_validation",
+    lastMainPhaseCompleted: "exact_0004_plan_apply",
+    failurePhase: "post_migration_validation",
+    stderrCategory: "tap_failure",
+    safeErrorCode: "ERR_TEST_FAILURE",
+    lastExact0004SubphaseStarted: "final_snapshot",
+    lastExact0004SubphaseCompleted: "final_snapshot",
+    exact0004FailureSubphase: "not_reached",
+    safeSqlState: "not_observed",
+    safeErrorClass: "unknown",
+    safeOperationClass: "unknown",
+    planExactCompleted: true,
+    applyExactInvoked: true,
+    applyExactCompleted: true,
+    databaseMutationAttempted: true,
+    failureBeforeFirstMutation: false
+  });
+  const invalidMutations = Object.freeze([
+    ["unknown_subphase", { lastExact0004SubphaseStarted: "outside_allowlist" }],
+    ["completion_without_start", { planExactInvoked: false, planExactCompleted: true }],
+    ["apply_without_plan", {
+      lastExact0004SubphaseStarted: "apply_exact",
+      lastExact0004SubphaseCompleted: "rollback_verification",
+      exact0004FailureSubphase: "apply_exact",
+      safeOperationClass: "apply",
+      planExactInvoked: true,
+      planExactCompleted: false,
+      applyExactInvoked: true
+    }],
+    ["sqlstate_outside_allowlist", { safeSqlState: "XXXXX" }],
+    ["operation_class_mismatch", { safeOperationClass: "schema_snapshot" }],
+    ["mutation_boundary_conflict", {
+      databaseMutationAttempted: true,
+      failureBeforeFirstMutation: false
+    }],
+    ["completed_subphase_cannot_be_failure", {
+      lastExact0004SubphaseCompleted: "plan_exact",
+      planExactCompleted: true
+    }],
+    ["post_conflict_requires_mutation_marker", {
+      lastExact0004SubphaseStarted: "rollback_verification",
+      lastExact0004SubphaseCompleted: "conflicting_0004_negative",
+      exact0004FailureSubphase: "rollback_verification",
+      safeOperationClass: "rollback_check",
+      databaseMutationAttempted: false,
+      failureBeforeFirstMutation: true,
+      planExactCompleted: true
+    }],
+    ["exact_main_failure_without_subphase", {
+      exact0004FailureSubphase: "not_reached",
+      safeSqlState: "not_observed",
+      safeErrorClass: "unknown",
+      safeOperationClass: "unknown",
+      failureBeforeFirstMutation: false
+    }],
+    ["subphase_order_divergence", {
+      lastExact0004SubphaseCompleted: "oid_catalog_lookup"
+    }]
+  ]);
+  for (const [index, validate] of runs.map(boundaryValidator).entries()) {
+    assert.equal(validate(validPlanFailure), true, `validator_${index + 1}:valid`);
+    assert.equal(
+      validate(validAssertionFailure),
+      true,
+      `validator_${index + 1}:assertion_23514`
+    );
+    assert.equal(
+      validate(validPostExactFailure),
+      true,
+      `validator_${index + 1}:post_exact`
+    );
+    for (const [label, mutation] of [
+      ["post_exact_defaults", {
+        lastExact0004SubphaseStarted: "not_reached",
+        lastExact0004SubphaseCompleted: "not_reached",
+        planExactInvoked: false,
+        planExactCompleted: false,
+        applyExactInvoked: false,
+        applyExactCompleted: false,
+        databaseMutationAttempted: false
+      }],
+      ["post_exact_sqlstate", {
+        safeSqlState: "42501",
+        safeErrorClass: "postgres_sqlstate"
+      }],
+      ["post_exact_apply_incomplete", { applyExactCompleted: false }]
+    ]) {
+      assert.equal(
+        validate({ ...validPostExactFailure, ...mutation }),
+        false,
+        `validator_${index + 1}:${label}`
+      );
+    }
+    for (const [label, mutation] of invalidMutations) {
+      assert.equal(
+        validate({ ...validPlanFailure, ...mutation }),
+        false,
+        `validator_${index + 1}:${label}`
+      );
+    }
+  }
+});
+
+test("evidence keeps legacy schema 1 and uses the closed safe schema 4", () => {
   const { source, workflow } = read();
   const currentJob = job(workflow);
   const physical = stepByName(
@@ -1732,9 +2214,10 @@ test("evidence keeps legacy schema 1 and uses the closed safe schema 3", () => {
   const enforcement = stepByName(currentJob, "Enforce final Exact-0004 result");
   assert.equal(LEGACY_EVIDENCE_KEYS.length, 23);
   assert.equal(SAFE_EVIDENCE_KEYS.length, 23);
-  assert.equal(EVIDENCE_KEYS.length, 46);
-  assert.equal(new Set(EVIDENCE_KEYS).size, 46);
-  assert.equal(RUNNER_FACT_KEYS.length, 23);
+  assert.equal(EXACT0004_EVIDENCE_KEYS.length, 12);
+  assert.equal(EVIDENCE_KEYS.length, 58);
+  assert.equal(new Set(EVIDENCE_KEYS).size, 58);
+  assert.equal(RUNNER_FACT_KEYS.length, 35);
   assert.equal(PROCESS_STATUS_KEYS.length, 5);
   const expectedEvidenceKeys = [...EVIDENCE_KEYS].sort();
   const expectedStatusKeys = [...PROCESS_STATUS_KEYS].sort();
@@ -1753,7 +2236,7 @@ test("evidence keeps legacy schema 1 and uses the closed safe schema 3", () => {
     assert.match(run, new RegExp(`${valueName}\\.schemaVersion\\s*!==\\s*1`));
     assert.match(
       run,
-      new RegExp(`${valueName}\\.evidenceSchemaVersion\\s*!==\\s*3`)
+      new RegExp(`${valueName}\\.evidenceSchemaVersion\\s*!==\\s*4`)
     );
     assert.match(
       run,
@@ -1784,9 +2267,13 @@ test("evidence keeps legacy schema 1 and uses the closed safe schema 3", () => {
       "reauthentication",
       "final_cleanup",
       "postgres_sqlstate",
+      "23514",
+      "P0001",
       "os_filesystem",
       "os_process",
       "4000-4499",
+      "final_snapshot",
+      "failureBeforeFirstMutation",
       "validBoundary"
     ]) assert.ok(run.includes(boundaryFragment), `${name}:${boundaryFragment}`);
   }
@@ -1834,8 +2321,25 @@ test("evidence keeps legacy schema 1 and uses the closed safe schema 3", () => {
   for (const booleanDefault of [
     "cleanupStarted",
     "cleanupCompleted",
-    "failureDuringCleanup"
+    "failureDuringCleanup",
+    "planExactInvoked",
+    "planExactCompleted",
+    "applyExactInvoked",
+    "applyExactCompleted",
+    "databaseMutationAttempted",
+    "failureBeforeFirstMutation"
   ]) assert.ok(physical.run.includes(`${booleanDefault}:false`), booleanDefault);
+  for (const defaultFragment of [
+    "lastExact0004SubphaseStarted:'not_reached'",
+    "lastExact0004SubphaseCompleted:'not_reached'",
+    "exact0004FailureSubphase:'not_reached'",
+    "safeSqlState:'not_observed'",
+    "safeErrorClass:'unknown'",
+    "safeOperationClass:'unknown'"
+  ]) {
+    assert.ok(physical.run.includes(defaultFragment), `physical:${defaultFragment}`);
+    assert.ok(finalize.run.includes(defaultFragment), `fallback:${defaultFragment}`);
+  }
   assert.ok(
     physical.run.includes(
       "evidence.testFileLoaded=evidence.tapTitleObserved"
@@ -1856,10 +2360,29 @@ test("evidence keeps legacy schema 1 and uses the closed safe schema 3", () => {
   assert.ok(physical.run.includes("evidence.testsPassed=passed?1:0"));
   assert.ok(physical.run.includes("evidence.testsFailed=passed?0:1"));
   assert.ok(physical.run.includes("result.facts.eventCount===9"));
+  for (const successFragment of [
+    "evidence.lastExact0004SubphaseStarted==='final_snapshot'",
+    "evidence.lastExact0004SubphaseCompleted==='final_snapshot'",
+    "evidence.exact0004FailureSubphase==='not_reached'",
+    "evidence.safeSqlState==='not_observed'",
+    "evidence.safeErrorClass==='unknown'",
+    "evidence.safeOperationClass==='unknown'",
+    "evidence.planExactInvoked===true",
+    "evidence.planExactCompleted===true",
+    "evidence.applyExactInvoked===true",
+    "evidence.applyExactCompleted===true",
+    "evidence.databaseMutationAttempted===true",
+    "evidence.failureBeforeFirstMutation===false"
+  ]) {
+    assert.ok(physical.run.includes(successFragment), `physical:${successFragment}`);
+    assert.ok(enforcement.run.includes(successFragment.replace("===", "!==")),
+      `enforcement:${successFragment}`);
+  }
   assert.ok(
-    finalize.run.includes("evidenceSchemaVersion:3") &&
+    finalize.run.includes("evidenceSchemaVersion:4") &&
     finalize.run.includes("safeLineBucket:'unknown'")
   );
+  assert.equal(source.includes("evidenceSchemaVersion:3"), false);
   for (const key of EVIDENCE_KEYS) assert.ok(source.includes(key), key);
   for (const key of PROCESS_STATUS_KEYS) assert.ok(source.includes(key), key);
   assert.equal(source.includes("process.env.DATABASE_URL"), false);

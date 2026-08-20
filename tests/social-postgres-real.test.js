@@ -1656,7 +1656,8 @@ function exactCliFlags({ apply = false } = {}) {
   ];
 }
 
-async function proveMigratorExplicitRoleBoundary(pool) {
+async function proveMigratorExplicitRoleBoundary(pool, physicalPhases) {
+  physicalPhases.startExact0004Subphase("oid_catalog_lookup");
   const boundary = await pool.query(
     [
       "SELECT",
@@ -1693,6 +1694,10 @@ async function proveMigratorExplicitRoleBoundary(pool) {
     ].join("\n"),
     [MIGRATOR_ROLE]
   );
+  physicalPhases.completeExact0004Subphase("oid_catalog_lookup");
+  physicalPhases.startExact0004Subphase(
+    "direct_privilege_boolean_check"
+  );
   assert.equal(boundary.rowCount, 1);
   const {
     member_oid: memberOid,
@@ -1713,10 +1718,14 @@ async function proveMigratorExplicitRoleBoundary(pool) {
     direct_schema_usage_absent: true,
     direct_ledger_select_absent: true
   });
+  physicalPhases.completeExact0004Subphase(
+    "direct_privilege_boolean_check"
+  );
 
   const ledgerRead =
     "SELECT COUNT(*)::integer AS ledger_count " +
     "FROM ia4tube_migrations.schema_migrations";
+  physicalPhases.startExact0004Subphase("direct_ledger_read_negative");
   await assert.rejects(
     async () => {
       try {
@@ -1729,13 +1738,20 @@ async function proveMigratorExplicitRoleBoundary(pool) {
     },
     (error) => error?.code === "42501"
   );
+  physicalPhases.completeExact0004Subphase("direct_ledger_read_negative");
+  physicalPhases.startExact0004Subphase("set_local_migrator_role");
   const allowed = await withTransaction(
     pool,
-    (client) => client.query(ledgerRead),
+    (client) => {
+      physicalPhases.completeExact0004Subphase("set_local_migrator_role");
+      physicalPhases.startExact0004Subphase("role_ledger_read_positive");
+      return client.query(ledgerRead);
+    },
     { role: MIGRATOR_ROLE }
   );
   assert.equal(allowed.rowCount, 1);
   assert.equal(Number.isInteger(allowed.rows[0].ledger_count), true);
+  physicalPhases.completeExact0004Subphase("role_ledger_read_positive");
 }
 
 async function readExactCatalogSnapshot(pool) {
@@ -1879,13 +1895,17 @@ async function proveExact0004Route(
   migrationPoolA,
   migrationPoolB,
   configuration,
-  companyWithLegacyConnection
+  companyWithLegacyConnection,
+  physicalPhases
 ) {
   assert.equal(configuration.mode, LOOPBACK_MODE);
   const runnerA = migrationRunner(migrationPoolA, configuration);
   const runnerB = migrationRunner(migrationPoolB, configuration);
-  await proveMigratorExplicitRoleBoundary(migrationPoolA);
+  await proveMigratorExplicitRoleBoundary(migrationPoolA, physicalPhases);
+  physicalPhases.startExact0004Subphase("snapshot_before_plan");
   const beforePlan = await readExactCatalogSnapshot(migrationPoolA);
+  physicalPhases.completeExact0004Subphase("snapshot_before_plan");
+  physicalPhases.startExact0004Subphase("plan_exact");
   const plan = await runnerA.planExact(
     EXACT_PLAN_REQUEST,
     configuration.approvalEnvironment
@@ -1897,13 +1917,17 @@ async function proveExact0004Route(
     observedPending: [SOCIAL_CONNECTOR_PERSISTENCE_MIGRATION],
     planApproved: true
   });
+  physicalPhases.completeExact0004Subphase("plan_exact");
+  physicalPhases.startExact0004Subphase("plan_snapshot_compare");
   assert.equal(await readExactCatalogSnapshot(migrationPoolA), beforePlan);
   assert.deepEqual(
     runMigrationCli("plan-exact", configuration, exactCliFlags()),
     plan
   );
   assert.equal(await readExactCatalogSnapshot(migrationPoolA), beforePlan);
+  physicalPhases.completeExact0004Subphase("plan_snapshot_compare");
 
+  physicalPhases.startExact0004Subphase("synthetic_0005_negative");
   const manifest = readManifest();
   const futureSql = "SELECT 1;\n";
   const futureManifest = temporaryMigrationManifest(
@@ -1935,7 +1959,10 @@ async function proveExact0004Route(
   } finally {
     fs.rmSync(futureManifest.directory, { recursive: true, force: true });
   }
+  physicalPhases.completeExact0004Subphase("synthetic_0005_negative");
 
+  physicalPhases.startExact0004Subphase("conflicting_0004_negative");
+  physicalPhases.markExact0004DatabaseMutationAttempted();
   const conflictId = await insertExact0004Conflict(
     migrationPoolA,
     companyWithLegacyConnection
@@ -1949,6 +1976,10 @@ async function proveExact0004Route(
       ),
       (error) => error?.code === "P0001"
     );
+    physicalPhases.completeExact0004Subphase(
+      "conflicting_0004_negative"
+    );
+    physicalPhases.startExact0004Subphase("rollback_verification");
     assert.equal(
       await readExactCatalogSnapshot(migrationPoolA),
       beforeRollback,
@@ -1998,9 +2029,11 @@ async function proveExact0004Route(
       0
     );
   }
+  physicalPhases.completeExact0004Subphase("rollback_verification");
 
   await migrationPoolA.query("SET lock_timeout = 0");
   await migrationPoolB.query("SET lock_timeout = 0");
+  physicalPhases.startExact0004Subphase("apply_exact");
   const outcomes = await Promise.allSettled([
     runnerA.applyExact(
       EXACT_APPLY_REQUEST,
@@ -2011,6 +2044,8 @@ async function proveExact0004Route(
       configuration.approvalEnvironment
     )
   ]);
+  physicalPhases.completeExact0004Subphase("apply_exact");
+  physicalPhases.startExact0004Subphase("concurrency");
   const fulfilled = outcomes.filter((outcome) => outcome.status === "fulfilled");
   const rejected = outcomes.filter((outcome) => outcome.status === "rejected");
   assert.equal(fulfilled.length, 1);
@@ -2023,7 +2058,9 @@ async function proveExact0004Route(
   assert.equal(result.recoveryEvidenceExternallyVerified, false);
   assert.equal(result.recoveryReferenceDigest, digest(EXACT_RECOVERY_REFERENCE));
   assert.equal(JSON.stringify(result).includes(EXACT_RECOVERY_REFERENCE), false);
+  physicalPhases.completeExact0004Subphase("concurrency");
 
+  physicalPhases.startExact0004Subphase("final_snapshot");
   const final = await withTransaction(
     migrationPoolA,
     (client) => client.query(
@@ -2056,6 +2093,7 @@ async function proveExact0004Route(
     runnerA.planExact(EXACT_PLAN_REQUEST, configuration.approvalEnvironment),
     { code: "exact_pending_set_mismatch" }
   );
+  physicalPhases.completeExact0004Subphase("final_snapshot");
   return { runnerA, runnerB };
 }
 
@@ -4101,7 +4139,8 @@ test(
           migrationPoolA,
           migrationPoolB,
           configuration,
-          companyC
+          companyC,
+          physicalPhases
         ));
       } else {
         runnerA = migrationRunner(migrationPoolA, configuration);

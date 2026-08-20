@@ -43,7 +43,7 @@ const CONNECTION_NAMES = [
   "SOCIAL_TEST_MIGRATION_DATABASE_URL",
   "SOCIAL_TEST_RUNTIME_DATABASE_URL"
 ];
-const EVIDENCE_SCHEMA_VERSION = 3;
+const EVIDENCE_SCHEMA_VERSION = 4;
 const SAFE_EVENT_PREFIX = "IA4TUBE_SAFE_EVENT=";
 const TAP_TITLE =
   "real PostgreSQL proves migrations, physical RLS, vault and reauthentication";
@@ -73,6 +73,89 @@ const PHYSICAL_PHASES = Object.freeze([
   ...PHYSICAL_MAIN_PHASES,
   PHYSICAL_CLEANUP_PHASE
 ]);
+const EXACT_0004_SUBPHASES = Object.freeze([
+  "oid_catalog_lookup",
+  "direct_privilege_boolean_check",
+  "direct_ledger_read_negative",
+  "set_local_migrator_role",
+  "role_ledger_read_positive",
+  "snapshot_before_plan",
+  "plan_exact",
+  "plan_snapshot_compare",
+  "synthetic_0005_negative",
+  "conflicting_0004_negative",
+  "rollback_verification",
+  "apply_exact",
+  "concurrency",
+  "final_snapshot",
+  "unknown",
+  "not_reached"
+]);
+const EXACT_0004_EXECUTION_SUBPHASES = Object.freeze(
+  EXACT_0004_SUBPHASES.slice(0, -2)
+);
+const EXACT_0004_OPERATION_CLASSES = Object.freeze([
+  "catalog_read",
+  "privilege_check",
+  "direct_negative_read",
+  "role_switch",
+  "role_positive_read",
+  "schema_snapshot",
+  "plan",
+  "negative_gate",
+  "rollback_check",
+  "apply",
+  "concurrency",
+  "final_validation",
+  "unknown"
+]);
+const EXACT_0004_ERROR_CLASSES = Object.freeze([
+  "postgres_sqlstate",
+  "assertion_failure",
+  "environment_contract",
+  "process_failure",
+  "timeout",
+  "unexpected_result",
+  "unknown"
+]);
+const SAFE_SQL_STATES = Object.freeze(["42501", "23514", "P0001"]);
+const SAFE_SQL_STATE_VALUES = Object.freeze([
+  ...SAFE_SQL_STATES,
+  "unknown",
+  "not_observed"
+]);
+const EXACT_0004_EVIDENCE_FIELDS = Object.freeze([
+  "lastExact0004SubphaseStarted",
+  "lastExact0004SubphaseCompleted",
+  "exact0004FailureSubphase",
+  "safeSqlState",
+  "safeErrorClass",
+  "safeOperationClass",
+  "planExactInvoked",
+  "planExactCompleted",
+  "applyExactInvoked",
+  "applyExactCompleted",
+  "databaseMutationAttempted",
+  "failureBeforeFirstMutation"
+]);
+const EXACT_0004_OPERATION_BY_SUBPHASE = Object.freeze({
+  oid_catalog_lookup: "catalog_read",
+  direct_privilege_boolean_check: "privilege_check",
+  direct_ledger_read_negative: "direct_negative_read",
+  set_local_migrator_role: "role_switch",
+  role_ledger_read_positive: "role_positive_read",
+  snapshot_before_plan: "schema_snapshot",
+  plan_exact: "plan",
+  plan_snapshot_compare: "schema_snapshot",
+  synthetic_0005_negative: "negative_gate",
+  conflicting_0004_negative: "negative_gate",
+  rollback_verification: "rollback_check",
+  apply_exact: "apply",
+  concurrency: "concurrency",
+  final_snapshot: "final_validation",
+  unknown: "unknown",
+  not_reached: "unknown"
+});
 const SAFE_PERMISSION_CODES = Object.freeze(["42501", "EACCES", "EPERM"]);
 const SAFE_PERMISSION_ORIGINS = Object.freeze([
   "postgres_sqlstate",
@@ -183,6 +266,8 @@ const SAFE_ERROR_CODES = Object.freeze([
   "42P01",
   "42703",
   "42501",
+  "23514",
+  "P0001",
   "ERR_TEST_FAILURE",
   "guard_failed",
   "test_process_failed",
@@ -241,6 +326,13 @@ const SAFE_PERMISSION_CODE_SET = new Set(SAFE_PERMISSION_CODES);
 const SAFE_PERMISSION_ORIGIN_SET = new Set(SAFE_PERMISSION_ORIGINS);
 const SAFE_SOURCE_BASENAME_SET = new Set(SAFE_SOURCE_BASENAMES);
 const SAFE_LINE_BUCKET_SET = new Set(SAFE_LINE_BUCKETS);
+const EXACT_0004_SUBPHASE_SET = new Set(EXACT_0004_SUBPHASES);
+const EXACT_0004_OPERATION_CLASS_SET = new Set(
+  EXACT_0004_OPERATION_CLASSES
+);
+const EXACT_0004_ERROR_CLASS_SET = new Set(EXACT_0004_ERROR_CLASSES);
+const SAFE_SQL_STATE_SET = new Set(SAFE_SQL_STATES);
+const SAFE_SQL_STATE_VALUE_SET = new Set(SAFE_SQL_STATE_VALUES);
 const FILESYSTEM_SYSCALL_SET = new Set(FILESYSTEM_SYSCALLS);
 const PROCESS_SYSCALL_SET = new Set(PROCESS_SYSCALLS);
 let cachedGateDependencies;
@@ -298,6 +390,124 @@ function safeSourceFieldsValid(basename, bucket) {
   return SAFE_SOURCE_BASENAME_SET.has(basename);
 }
 
+function emptyExact0004Evidence({ failureObserved = false } = {}) {
+  return Object.freeze({
+    lastExact0004SubphaseStarted: "not_reached",
+    lastExact0004SubphaseCompleted: "not_reached",
+    exact0004FailureSubphase: "not_reached",
+    safeSqlState: failureObserved ? "unknown" : "not_observed",
+    safeErrorClass: "unknown",
+    safeOperationClass: "unknown",
+    planExactInvoked: false,
+    planExactCompleted: false,
+    applyExactInvoked: false,
+    applyExactCompleted: false,
+    databaseMutationAttempted: false,
+    failureBeforeFirstMutation: false
+  });
+}
+
+function exact0004OperationClass(subphase) {
+  return EXACT_0004_OPERATION_BY_SUBPHASE[subphase] || "unknown";
+}
+
+function exact0004ProgressValid(value) {
+  const started = value.lastExact0004SubphaseStarted;
+  const completed = value.lastExact0004SubphaseCompleted;
+  if (started === "not_reached") return completed === "not_reached";
+  if (started === "unknown") {
+    return completed === "unknown" || completed === "not_reached";
+  }
+  const startedIndex = EXACT_0004_EXECUTION_SUBPHASES.indexOf(started);
+  if (startedIndex < 0) return false;
+  if (completed === "not_reached") return startedIndex === 0;
+  const completedIndex = EXACT_0004_EXECUTION_SUBPHASES.indexOf(completed);
+  return completedIndex >= 0 &&
+    (startedIndex === completedIndex || startedIndex === completedIndex + 1);
+}
+
+function exact0004EvidenceValid(value, { failureEvent = false } = {}) {
+  if (
+    !EXACT_0004_SUBPHASE_SET.has(value.lastExact0004SubphaseStarted) ||
+    !EXACT_0004_SUBPHASE_SET.has(value.lastExact0004SubphaseCompleted) ||
+    !EXACT_0004_SUBPHASE_SET.has(value.exact0004FailureSubphase) ||
+    !SAFE_SQL_STATE_VALUE_SET.has(value.safeSqlState) ||
+    !EXACT_0004_ERROR_CLASS_SET.has(value.safeErrorClass) ||
+    !EXACT_0004_OPERATION_CLASS_SET.has(value.safeOperationClass) ||
+    !exact0004ProgressValid(value)
+  ) return false;
+  for (const field of [
+    "planExactInvoked",
+    "planExactCompleted",
+    "applyExactInvoked",
+    "applyExactCompleted",
+    "databaseMutationAttempted",
+    "failureBeforeFirstMutation"
+  ]) {
+    if (typeof value[field] !== "boolean") return false;
+  }
+  if (
+    (value.planExactCompleted && !value.planExactInvoked) ||
+    (value.applyExactCompleted && !value.applyExactInvoked) ||
+    (value.applyExactInvoked && !value.planExactCompleted) ||
+    (value.applyExactInvoked && !value.databaseMutationAttempted) ||
+    (value.failureBeforeFirstMutation && value.databaseMutationAttempted)
+  ) return false;
+  const started = value.lastExact0004SubphaseStarted;
+  const completed = value.lastExact0004SubphaseCompleted;
+  const startedIndex = EXACT_0004_EXECUTION_SUBPHASES.indexOf(started);
+  const completedIndex = EXACT_0004_EXECUTION_SUBPHASES.indexOf(completed);
+  if (started === "not_reached" && (
+    value.planExactInvoked || value.planExactCompleted ||
+    value.applyExactInvoked || value.applyExactCompleted ||
+    value.databaseMutationAttempted
+  )) return false;
+  if (startedIndex >= 0) {
+    const planIndex = EXACT_0004_EXECUTION_SUBPHASES.indexOf("plan_exact");
+    const conflictIndex = EXACT_0004_EXECUTION_SUBPHASES.indexOf(
+      "conflicting_0004_negative"
+    );
+    const applyIndex = EXACT_0004_EXECUTION_SUBPHASES.indexOf("apply_exact");
+    if (
+      value.planExactInvoked !== (startedIndex >= planIndex) ||
+      value.planExactCompleted !== (completedIndex >= planIndex) ||
+      value.applyExactInvoked !== (startedIndex >= applyIndex) ||
+      value.applyExactCompleted !== (completedIndex >= applyIndex) ||
+      (startedIndex < conflictIndex && value.databaseMutationAttempted) ||
+      ((startedIndex > conflictIndex || completedIndex >= conflictIndex) &&
+        !value.databaseMutationAttempted)
+    ) return false;
+  }
+  const failureSubphase = value.exact0004FailureSubphase;
+  const failureIndex = EXACT_0004_EXECUTION_SUBPHASES.indexOf(failureSubphase);
+  if (
+    value.safeOperationClass !== exact0004OperationClass(failureSubphase) ||
+    (failureIndex >= 0 && (
+      started !== failureSubphase || startedIndex !== completedIndex + 1
+    )) ||
+    (failureSubphase === "not_reached" && (
+      value.failureBeforeFirstMutation ||
+      value.safeSqlState !== "not_observed" ||
+      value.safeErrorClass !== "unknown"
+    )) ||
+    (failureSubphase !== "not_reached" &&
+      value.failureBeforeFirstMutation !== !value.databaseMutationAttempted)
+  ) return false;
+  const observedSqlState = SAFE_SQL_STATE_SET.has(value.safeSqlState);
+  if (
+    (observedSqlState && ![
+      "postgres_sqlstate",
+      "assertion_failure"
+    ].includes(value.safeErrorClass)) ||
+    (!observedSqlState && value.safeErrorClass === "postgres_sqlstate") ||
+    (value.safeSqlState === "not_observed" &&
+      value.safeErrorClass !== "unknown") ||
+    (failureEvent && failureSubphase !== "not_reached" &&
+      value.safeSqlState === "not_observed")
+  ) return false;
+  return true;
+}
+
 function physicalSnapshotValid(event) {
   if (!exactKeys(event, [
     "cleanupCompleted",
@@ -306,7 +516,8 @@ function physicalSnapshotValid(event) {
     "evidenceSchemaVersion",
     "lastMainPhaseCompleted",
     "lastMainPhaseStarted",
-    "sequence"
+    "sequence",
+    ...EXACT_0004_EVIDENCE_FIELDS
   ])) return false;
   if (
     !nullableMainPhase(event.lastMainPhaseStarted) ||
@@ -332,11 +543,41 @@ function physicalSnapshotValid(event) {
     !mainActive &&
     !allMainCompleted
   ) return false;
+  const exactMainIndex = PHYSICAL_MAIN_PHASES.indexOf(
+    "exact_0004_plan_apply"
+  );
+  const exactMainActive =
+    startedIndex === exactMainIndex && completedIndex === exactMainIndex - 1;
+  if (
+    !exact0004EvidenceValid(event) ||
+    (startedIndex < exactMainIndex && EXACT_0004_EVIDENCE_FIELDS.some(
+      (field) => event[field] !== emptyExact0004Evidence()[field]
+    )) ||
+    (exactMainActive && (
+      event.exact0004FailureSubphase === "not_reached" ||
+      event.safeSqlState === "not_observed"
+    )) ||
+    (completedIndex >= exactMainIndex && (
+      event.lastExact0004SubphaseStarted !== "final_snapshot" ||
+      event.lastExact0004SubphaseCompleted !== "final_snapshot" ||
+      event.exact0004FailureSubphase !== "not_reached" ||
+      event.safeSqlState !== "not_observed" ||
+      event.safeErrorClass !== "unknown" ||
+      event.safeOperationClass !== "unknown" ||
+      event.planExactInvoked !== true ||
+      event.planExactCompleted !== true ||
+      event.applyExactInvoked !== true ||
+      event.applyExactCompleted !== true ||
+      event.databaseMutationAttempted !== true ||
+      event.failureBeforeFirstMutation !== false
+    ))
+  ) return false;
   return true;
 }
 
 function failureFieldsValid(event) {
   if (
+    !exact0004EvidenceValid(event, { failureEvent: true }) ||
     typeof event.failureDuringCleanup !== "boolean" ||
     !(
       event.failurePhase === null ||
@@ -353,7 +594,11 @@ function failureFieldsValid(event) {
     (event.failureDuringCleanup &&
       event.failurePhase !== PHYSICAL_CLEANUP_PHASE) ||
     (!event.failureDuringCleanup &&
-      event.failurePhase === PHYSICAL_CLEANUP_PHASE)
+      event.failurePhase === PHYSICAL_CLEANUP_PHASE) ||
+    (event.failurePhase === "exact_0004_plan_apply" &&
+      event.exact0004FailureSubphase === "not_reached") ||
+    (event.failurePhase !== "exact_0004_plan_apply" &&
+      event.exact0004FailureSubphase !== "not_reached")
   ) return false;
   if (
     !PHYSICAL_BOUNDARY_FAILURE_STAGE_SET.has(event.firstFailureStage) &&
@@ -424,6 +669,28 @@ function validateSafeEvent(event) {
     ]) && PHYSICAL_MAIN_PHASE_SET.has(event.phase);
   }
   if (
+    event.event === "exact0004SubphaseStarted" ||
+    event.event === "exact0004SubphaseCompleted"
+  ) {
+    return exactKeys(event, [
+      "event",
+      "evidenceSchemaVersion",
+      "operationClass",
+      "sequence",
+      "subphase"
+    ]) &&
+      EXACT_0004_EXECUTION_SUBPHASES.includes(event.subphase) &&
+      event.operationClass === exact0004OperationClass(event.subphase);
+  }
+  if (event.event === "exact0004DatabaseMutationAttempted") {
+    return exactKeys(event, [
+      "databaseMutationAttempted",
+      "event",
+      "evidenceSchemaVersion",
+      "sequence"
+    ]) && event.databaseMutationAttempted === true;
+  }
+  if (
     event.event === "cleanupStarted" ||
     event.event === "cleanupCompleted"
   ) {
@@ -467,7 +734,8 @@ function validateSafeEvent(event) {
       "safePermissionOrigin",
       "safeSourceBasename",
       "sequence",
-      "stderrCategory"
+      "stderrCategory",
+      ...EXACT_0004_EVIDENCE_FIELDS
     ]) &&
       FIRST_FAILURE_STAGE_SET.has(event.firstFailureStage) &&
       STDERR_CATEGORY_SET.has(event.stderrCategory) &&
@@ -533,6 +801,39 @@ function safeCodeFromLine(line) {
     }
   }
   return null;
+}
+
+function safeSqlStatesFromLine(line) {
+  const value = String(line || "");
+  const states = [];
+  for (const sqlState of SAFE_SQL_STATES) {
+    const escaped = sqlState.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    if (new RegExp(
+      `(?:^|[^A-Za-z0-9_])${escaped}(?:$|[^A-Za-z0-9_])`
+    ).test(value)) states.push(sqlState);
+  }
+  return Object.freeze(states);
+}
+
+function safeErrorClassFromLine(line) {
+  const value = String(line || "");
+  if (/\b(?:AssertionError|ERR_ASSERTION)\b/.test(value)) {
+    return "assertion_failure";
+  }
+  if (safeSqlStatesFromLine(value).length > 0) return "postgres_sqlstate";
+  if (/\b(?:environment_contract|guard_failed)\b/.test(value)) {
+    return "environment_contract";
+  }
+  if (/\b(?:test_timeout|ETIMEDOUT|timed out|timeout)\b/i.test(value)) {
+    return "timeout";
+  }
+  if (/\b(?:ERR_CHILD_PROCESS|process_failure|spawn|process failed)\b/i.test(value)) {
+    return "process_failure";
+  }
+  if (/\b(?:unexpected_result|unexpected result)\b/i.test(value)) {
+    return "unexpected_result";
+  }
+  return "unknown";
 }
 
 function safeModuleFromLine(line) {
@@ -611,10 +912,12 @@ function createSafeDiagnosticAggregator() {
   let safeErrorCode = null;
   let safeModuleName = null;
   let safeSource = null;
+  let safeErrorClass = null;
   let invalid = false;
   let finished = false;
   const permissionCodes = new Set();
   const permissionOrigins = new Set();
+  const safeSqlStates = new Set();
 
   function observe(line) {
     if (finished) {
@@ -623,6 +926,13 @@ function createSafeDiagnosticAggregator() {
     }
     const value = String(line || "");
     const candidate = classifySafeLine(value);
+    for (const sqlState of safeSqlStatesFromLine(value)) {
+      safeSqlStates.add(sqlState);
+    }
+    const errorClass = safeErrorClassFromLine(value);
+    if (safeErrorClass === null && errorClass !== "unknown") {
+      safeErrorClass = errorClass;
+    }
     if (stderrCategory === null && candidate.stderrCategory !== "unknown") {
       stderrCategory = candidate.stderrCategory;
       if (stderrCategory !== "permission_denied") {
@@ -646,6 +956,11 @@ function createSafeDiagnosticAggregator() {
   function observeError(error) {
     observe([error?.name, error?.code, error?.message]
       .filter(Boolean).join(" "));
+    const nested = [error?.actual, error?.cause];
+    for (const candidate of nested) {
+      if (!candidate || typeof candidate !== "object") continue;
+      observe([candidate.name, candidate.code].filter(Boolean).join(" "));
+    }
     if (stderrCategory !== "permission_denied") return;
     if (typeof error?.code === "string" &&
         SAFE_PERMISSION_CODE_SET.has(error.code.toUpperCase())) {
@@ -667,6 +982,9 @@ function createSafeDiagnosticAggregator() {
     finished = true;
     if (stderrCategory === null) stderrCategory = "unknown";
     let safePermissionOrigin = "unknown";
+    let safeSqlState = "not_observed";
+    if (safeSqlStates.size > 1) invalid = true;
+    else if (safeSqlStates.size === 1) [safeSqlState] = safeSqlStates;
     if (stderrCategory === "permission_denied") {
       if (permissionCodes.size > 1 || permissionOrigins.size > 1) {
         invalid = true;
@@ -685,11 +1003,22 @@ function createSafeDiagnosticAggregator() {
       }
       safeModuleName = null;
     }
+    if (invalid) {
+      safeSqlState = "unknown";
+      safeErrorClass = "unknown";
+    } else if (
+      SAFE_SQL_STATE_SET.has(safeSqlState) &&
+      (safeErrorClass === null || safeErrorClass === "unknown")
+    ) {
+      safeErrorClass = "postgres_sqlstate";
+    }
     return Object.freeze({
       safeDiagnosticValid: !invalid,
       stderrCategory,
       safeErrorCode,
       safeModuleName,
+      safeSqlState,
+      safeErrorClass: safeErrorClass || "unknown",
       safePermissionOrigin,
       safeSourceBasename:
         stderrCategory === "permission_denied"
@@ -753,6 +1082,15 @@ function createPhysicalPhaseProtocol() {
   let activeMainPhase = null;
   let lastMainPhaseStarted = null;
   let lastMainPhaseCompleted = null;
+  let nextExact0004SubphaseIndex = 0;
+  let activeExact0004Subphase = null;
+  let lastExact0004SubphaseStarted = "not_reached";
+  let lastExact0004SubphaseCompleted = "not_reached";
+  let planExactInvoked = false;
+  let planExactCompleted = false;
+  let applyExactInvoked = false;
+  let applyExactCompleted = false;
+  let databaseMutationAttempted = false;
   let cleanupStarted = false;
   let cleanupCompleted = false;
   let protocolInvalid = false;
@@ -772,7 +1110,49 @@ function createPhysicalPhaseProtocol() {
       invalidate();
       return false;
     }
-    if (event.event === "mainPhaseStarted") {
+    if (event.event === "exact0004SubphaseStarted") {
+      if (
+        cleanupStarted ||
+        activeMainPhase !== "exact_0004_plan_apply" ||
+        activeExact0004Subphase !== null ||
+        event.subphase !==
+          EXACT_0004_EXECUTION_SUBPHASES[nextExact0004SubphaseIndex]
+      ) {
+        invalidate();
+        return false;
+      }
+      activeExact0004Subphase = event.subphase;
+      lastExact0004SubphaseStarted = event.subphase;
+      if (event.subphase === "plan_exact") planExactInvoked = true;
+      if (event.subphase === "apply_exact") applyExactInvoked = true;
+    } else if (event.event === "exact0004SubphaseCompleted") {
+      if (
+        cleanupStarted ||
+        activeMainPhase !== "exact_0004_plan_apply" ||
+        activeExact0004Subphase !== event.subphase ||
+        event.subphase !==
+          EXACT_0004_EXECUTION_SUBPHASES[nextExact0004SubphaseIndex]
+      ) {
+        invalidate();
+        return false;
+      }
+      activeExact0004Subphase = null;
+      lastExact0004SubphaseCompleted = event.subphase;
+      nextExact0004SubphaseIndex += 1;
+      if (event.subphase === "plan_exact") planExactCompleted = true;
+      if (event.subphase === "apply_exact") applyExactCompleted = true;
+    } else if (event.event === "exact0004DatabaseMutationAttempted") {
+      if (
+        cleanupStarted ||
+        activeMainPhase !== "exact_0004_plan_apply" ||
+        activeExact0004Subphase !== "conflicting_0004_negative" ||
+        databaseMutationAttempted
+      ) {
+        invalidate();
+        return false;
+      }
+      databaseMutationAttempted = true;
+    } else if (event.event === "mainPhaseStarted") {
       if (
         cleanupStarted ||
         activeMainPhase !== null ||
@@ -791,6 +1171,19 @@ function createPhysicalPhaseProtocol() {
       ) {
         invalidate();
         return false;
+      }
+      if (event.phase === "exact_0004_plan_apply") {
+        if (
+          activeExact0004Subphase !== null ||
+          nextExact0004SubphaseIndex !==
+            EXACT_0004_EXECUTION_SUBPHASES.length ||
+          !planExactCompleted ||
+          !applyExactCompleted ||
+          !databaseMutationAttempted
+        ) {
+          invalidate();
+          return false;
+        }
       }
       activeMainPhase = null;
       lastMainPhaseCompleted = event.phase;
@@ -824,11 +1217,29 @@ function createPhysicalPhaseProtocol() {
 
   function finish() {
     finished = true;
+    const exact0004Active = activeMainPhase === "exact_0004_plan_apply";
+    const exact0004FailureSubphase = exact0004Active
+      ? activeExact0004Subphase || "unknown"
+      : "not_reached";
     return Object.freeze({
       protocolValid: !protocolInvalid,
       eventCount: expectedSequence - 1,
       lastMainPhaseStarted,
       lastMainPhaseCompleted,
+      lastExact0004SubphaseStarted,
+      lastExact0004SubphaseCompleted,
+      exact0004FailureSubphase,
+      safeSqlState: exact0004Active ? "unknown" : "not_observed",
+      safeErrorClass: "unknown",
+      safeOperationClass:
+        exact0004OperationClass(exact0004FailureSubphase),
+      planExactInvoked,
+      planExactCompleted,
+      applyExactInvoked,
+      applyExactCompleted,
+      databaseMutationAttempted,
+      failureBeforeFirstMutation:
+        exact0004Active && !databaseMutationAttempted,
       cleanupStarted,
       cleanupCompleted
     });
@@ -846,13 +1257,13 @@ function createPhysicalPhaseEmitter(
   const protocol = createPhysicalPhaseProtocol();
   let sequence = 0;
 
-  function emit(event, phase) {
+  function emit(event, fields) {
     sequence += 1;
     const value = {
       event,
       evidenceSchemaVersion: EVIDENCE_SCHEMA_VERSION,
-      phase,
-      sequence
+      sequence,
+      ...fields
     };
     if (!protocol.accept(value)) {
       throw new Error("physical_phase_protocol_invalid");
@@ -861,10 +1272,28 @@ function createPhysicalPhaseEmitter(
   }
 
   return Object.freeze({
-    startMain: (phase) => emit("mainPhaseStarted", phase),
-    completeMain: (phase) => emit("mainPhaseCompleted", phase),
-    startCleanup: () => emit("cleanupStarted", PHYSICAL_CLEANUP_PHASE),
-    completeCleanup: () => emit("cleanupCompleted", PHYSICAL_CLEANUP_PHASE)
+    startMain: (phase) => emit("mainPhaseStarted", { phase }),
+    completeMain: (phase) => emit("mainPhaseCompleted", { phase }),
+    startExact0004Subphase: (subphase) =>
+      emit("exact0004SubphaseStarted", {
+        operationClass: exact0004OperationClass(subphase),
+        subphase
+      }),
+    completeExact0004Subphase: (subphase) =>
+      emit("exact0004SubphaseCompleted", {
+        operationClass: exact0004OperationClass(subphase),
+        subphase
+      }),
+    markExact0004DatabaseMutationAttempted: () =>
+      emit("exact0004DatabaseMutationAttempted", {
+        databaseMutationAttempted: true
+      }),
+    startCleanup: () => emit("cleanupStarted", {
+      phase: PHYSICAL_CLEANUP_PHASE
+    }),
+    completeCleanup: () => emit("cleanupCompleted", {
+      phase: PHYSICAL_CLEANUP_PHASE
+    })
   });
 }
 
@@ -939,6 +1368,13 @@ function createNodeTestObserver(onMarker = () => {}) {
       tapFail !== null && tapFail > 0
         ? "tap_failure"
         : diagnosticFacts.stderrCategory;
+    const exact0004FailureObserved =
+      physicalPhaseFacts.exact0004FailureSubphase !== "not_reached";
+    const safeSqlState = exact0004FailureObserved
+      ? diagnosticFacts.safeSqlState === "not_observed"
+        ? "unknown"
+        : diagnosticFacts.safeSqlState
+      : "not_observed";
     return Object.freeze({
       overflow: framed.overflow,
       tapStarted: markers.tapStarted,
@@ -953,6 +1389,25 @@ function createNodeTestObserver(onMarker = () => {}) {
       phaseEventCount: physicalPhaseFacts.eventCount,
       lastMainPhaseStarted: physicalPhaseFacts.lastMainPhaseStarted,
       lastMainPhaseCompleted: physicalPhaseFacts.lastMainPhaseCompleted,
+      lastExact0004SubphaseStarted:
+        physicalPhaseFacts.lastExact0004SubphaseStarted,
+      lastExact0004SubphaseCompleted:
+        physicalPhaseFacts.lastExact0004SubphaseCompleted,
+      exact0004FailureSubphase:
+        physicalPhaseFacts.exact0004FailureSubphase,
+      safeSqlState,
+      safeErrorClass: exact0004FailureObserved
+        ? diagnosticFacts.safeErrorClass
+        : "unknown",
+      safeOperationClass: physicalPhaseFacts.safeOperationClass,
+      planExactInvoked: physicalPhaseFacts.planExactInvoked,
+      planExactCompleted: physicalPhaseFacts.planExactCompleted,
+      applyExactInvoked: physicalPhaseFacts.applyExactInvoked,
+      applyExactCompleted: physicalPhaseFacts.applyExactCompleted,
+      databaseMutationAttempted:
+        physicalPhaseFacts.databaseMutationAttempted,
+      failureBeforeFirstMutation:
+        physicalPhaseFacts.failureBeforeFirstMutation,
       cleanupStarted: physicalPhaseFacts.cleanupStarted,
       cleanupCompleted: physicalPhaseFacts.cleanupCompleted,
       safeDiagnosticValid: diagnosticFacts.safeDiagnosticValid,
@@ -982,6 +1437,7 @@ function createSafeEventCollector() {
     firstTestDiscovered: null,
     lastMainPhaseStarted: null,
     lastMainPhaseCompleted: null,
+    ...emptyExact0004Evidence(),
     cleanupStarted: null,
     cleanupCompleted: null,
     failureDuringCleanup: null,
@@ -1048,6 +1504,16 @@ function createSafeEventCollector() {
   }
   function failureAllowed(event) {
     if (failure || seen.has("failure") || state.runnerReached !== true) return false;
+    if (seen.has("physicalPhaseSnapshot")) {
+      if (EXACT_0004_EVIDENCE_FIELDS.some(
+        (field) => event[field] !== state[field]
+      )) return false;
+    } else {
+      const emptyExact0004 = emptyExact0004Evidence();
+      if (EXACT_0004_EVIDENCE_FIELDS.some(
+        (field) => event[field] !== emptyExact0004[field]
+      )) return false;
+    }
     if (event.firstFailureStage === "runner_load" ||
         event.firstFailureStage === "environment_gate") {
       return state.gateValidated !== true &&
@@ -1119,6 +1585,9 @@ function createSafeEventCollector() {
       seen.add(event.event);
       state.lastMainPhaseStarted = event.lastMainPhaseStarted;
       state.lastMainPhaseCompleted = event.lastMainPhaseCompleted;
+      for (const field of EXACT_0004_EVIDENCE_FIELDS) {
+        state[field] = event[field];
+      }
       state.cleanupStarted = event.cleanupStarted;
       state.cleanupCompleted = event.cleanupCompleted;
       return;
@@ -1157,6 +1626,11 @@ function createSafeEventCollector() {
       state.safeSourceBasename = event.safeSourceBasename;
       state.safeLineBucket = event.safeLineBucket;
       state.firstFailureStage = event.firstFailureStage;
+      if (!seen.has("physicalPhaseSnapshot")) {
+        for (const field of EXACT_0004_EVIDENCE_FIELDS) {
+          state[field] = event[field];
+        }
+      }
       return;
     }
     invalidate();
@@ -1235,7 +1709,9 @@ function safeFailureFromError(error, fallbackCategory = "unknown") {
       safeModuleName: null,
       safePermissionOrigin: "unknown",
       safeSourceBasename: null,
-      safeLineBucket: "unknown"
+      safeLineBucket: "unknown",
+      safeSqlState: "unknown",
+      safeErrorClass: "unknown"
     });
   }
   return Object.freeze({
@@ -1247,8 +1723,34 @@ function safeFailureFromError(error, fallbackCategory = "unknown") {
     safeModuleName: classified.safeModuleName,
     safePermissionOrigin: classified.safePermissionOrigin,
     safeSourceBasename: classified.safeSourceBasename,
-    safeLineBucket: classified.safeLineBucket
+    safeLineBucket: classified.safeLineBucket,
+    safeSqlState: classified.safeSqlState === "not_observed"
+      ? "unknown"
+      : classified.safeSqlState,
+    safeErrorClass: classified.safeErrorClass !== "unknown"
+      ? classified.safeErrorClass
+      : fallbackCategory === "environment_contract"
+        ? "environment_contract"
+        : "process_failure"
   });
+}
+
+function exact0004EvidenceFromFacts(facts) {
+  const defaults = emptyExact0004Evidence();
+  const result = {};
+  for (const field of EXACT_0004_EVIDENCE_FIELDS) {
+    result[field] = facts?.[field] ?? defaults[field];
+  }
+  if (
+    result.exact0004FailureSubphase !== "not_reached" &&
+    result.safeSqlState === "not_observed"
+  ) {
+    result.safeSqlState = "unknown";
+  } else if (result.exact0004FailureSubphase === "not_reached") {
+    result.safeSqlState = "not_observed";
+    result.safeErrorClass = "unknown";
+  }
+  return Object.freeze(result);
 }
 
 function emptyFailureBoundary() {
@@ -1286,6 +1788,7 @@ function physicalPhaseContractValid(facts, result) {
 }
 
 function nodeTestFailure(facts, result) {
+  const exact0004Evidence = exact0004EvidenceFromFacts(facts);
   const exactTap = facts.tapStarted &&
     facts.tapTitleObserved &&
     facts.firstTestDiscovered &&
@@ -1301,6 +1804,7 @@ function nodeTestFailure(facts, result) {
       facts.safeDiagnosticValid) return null;
   if (!phaseContractValid || !facts.safeDiagnosticValid) {
     return Object.freeze({
+      ...exact0004Evidence,
       ...boundary,
       firstFailureStage: "safe_event_protocol",
       stderrCategory: "unknown",
@@ -1336,6 +1840,7 @@ function nodeTestFailure(facts, result) {
     boundary.failurePhase === null
   ) {
     return Object.freeze({
+      ...exact0004Evidence,
       ...boundary,
       firstFailureStage: "safe_event_protocol",
       stderrCategory: "unknown",
@@ -1347,6 +1852,7 @@ function nodeTestFailure(facts, result) {
     });
   }
   return Object.freeze({
+    ...exact0004Evidence,
     ...(firstFailureStage === "test_execution"
       ? boundary
       : emptyFailureBoundary()),
@@ -1821,6 +2327,7 @@ async function main(env = process.env, options = {}) {
   function emitFailure(firstFailureStage, failureFacts) {
     const effectiveFailureStage =
       failureFacts.firstFailureStage || firstFailureStage;
+    const exact0004Evidence = exact0004EvidenceFromFacts(failureFacts);
     emit("failure", {
       failureDuringCleanup: failureFacts.failureDuringCleanup ?? false,
       failurePhase: failureFacts.failurePhase ?? null,
@@ -1830,7 +2337,8 @@ async function main(env = process.env, options = {}) {
       safePermissionOrigin: failureFacts.safePermissionOrigin ?? "unknown",
       safeSourceBasename: failureFacts.safeSourceBasename ?? null,
       safeLineBucket: failureFacts.safeLineBucket ?? "unknown",
-      stderrCategory: failureFacts.stderrCategory
+      stderrCategory: failureFacts.stderrCategory,
+      ...exact0004Evidence
     });
   }
 
@@ -1843,7 +2351,9 @@ async function main(env = process.env, options = {}) {
       emitFailure("environment_gate", {
         stderrCategory: "environment_contract",
         safeErrorCode: "guard_failed",
-        safeModuleName: null
+        safeModuleName: null,
+        safeSqlState: "unknown",
+        safeErrorClass: "environment_contract"
       });
     } else {
       emitFailure("runner_load", safeFailureFromError(error));
@@ -1877,11 +2387,26 @@ async function main(env = process.env, options = {}) {
     return 2;
   }
 
+  const resultErrorFailure = result.error
+    ? safeFailureFromError(result.error)
+    : null;
+  const baseResultExact0004Evidence = exact0004EvidenceFromFacts(result.facts);
+  const resultExact0004Evidence = {
+    ...baseResultExact0004Evidence,
+    ...(resultErrorFailure &&
+      baseResultExact0004Evidence.exact0004FailureSubphase !== "not_reached"
+      ? {
+          safeSqlState: resultErrorFailure.safeSqlState,
+          safeErrorClass: resultErrorFailure.safeErrorClass
+        }
+      : {})
+  };
   emit("physicalPhaseSnapshot", {
     lastMainPhaseStarted: result.facts.lastMainPhaseStarted,
     lastMainPhaseCompleted: result.facts.lastMainPhaseCompleted,
     cleanupStarted: result.facts.cleanupStarted,
-    cleanupCompleted: result.facts.cleanupCompleted
+    cleanupCompleted: result.facts.cleanupCompleted,
+    ...resultExact0004Evidence
   });
   const nodeTestTimedOut = result.signal === null ? false : null;
   emit("nodeTestClosed", {
@@ -1891,13 +2416,17 @@ async function main(env = process.env, options = {}) {
   });
   let failureFacts;
   if (result.error) {
-    const safeErrorFailure = safeFailureFromError(result.error);
+    const safeErrorFailure = resultErrorFailure;
+    const errorBoundary = physicalFailureBoundary(result.facts);
     const firstFailureStage = safeErrorFailure.firstFailureStage ||
-      "node_test_bootstrap";
+      (errorBoundary.failurePhase === null
+        ? "node_test_bootstrap"
+        : "safe_event_protocol");
     failureFacts = {
       ...(firstFailureStage === "safe_event_protocol"
-        ? physicalFailureBoundary(result.facts)
+        ? errorBoundary
         : emptyFailureBoundary()),
+      ...resultExact0004Evidence,
       ...safeErrorFailure,
       firstFailureStage
     };
@@ -1924,6 +2453,11 @@ if (require.main === module) {
 module.exports = {
   APPROVAL,
   EVIDENCE_SCHEMA_VERSION,
+  EXACT_0004_ERROR_CLASSES,
+  EXACT_0004_EVIDENCE_FIELDS,
+  EXACT_0004_EXECUTION_SUBPHASES,
+  EXACT_0004_OPERATION_CLASSES,
+  EXACT_0004_SUBPHASES,
   FIRST_FAILURE_STAGES,
   LOOPBACK_MODE,
   PHYSICAL_CLEANUP_PHASE,
@@ -1941,6 +2475,8 @@ module.exports = {
   SAFE_MODULE_NAMES,
   SAFE_PERMISSION_CODES,
   SAFE_PERMISSION_ORIGINS,
+  SAFE_SQL_STATES,
+  SAFE_SQL_STATE_VALUES,
   SAFE_SOURCE_BASENAMES,
   STDERR_CATEGORIES,
   TAP_TITLE,
@@ -1951,6 +2487,9 @@ module.exports = {
   createPhysicalPhaseProtocol,
   createSafeDiagnosticAggregator,
   createSafeEventCollector,
+  emptyExact0004Evidence,
+  exact0004EvidenceValid,
+  exact0004OperationClass,
   main,
   runNodeTest,
   safeEventLine,

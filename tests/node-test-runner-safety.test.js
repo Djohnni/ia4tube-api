@@ -15,6 +15,18 @@ const {
   partitionAutomatedTests,
   validateTestPartition
 } = require("../scripts/run-node-tests");
+const {
+  EXACT_0004_ERROR_CLASSES,
+  EXACT_0004_EVIDENCE_FIELDS,
+  EXACT_0004_EXECUTION_SUBPHASES,
+  EXACT_0004_OPERATION_CLASSES,
+  EXACT_0004_SUBPHASES,
+  SAFE_SQL_STATES,
+  SAFE_SQL_STATE_VALUES,
+  emptyExact0004Evidence,
+  exact0004EvidenceValid,
+  exact0004OperationClass
+} = require("../scripts/run-real-postgres-tests");
 
 const PREVIOUS_SERIAL_FILES = Object.freeze([
   "body-parser-security.test.js",
@@ -46,9 +58,9 @@ const SAFE_EVIDENCE_COMMIT = "8534817574a22dbd144a835c9f3585c44ee11c96";
 const PERMISSION_BOUNDARY_COMMIT = "555d71eacbde76ceffdd03d64731e03849978c17";
 const REAL_POSTGRES_TEST = "tests/social-postgres-real.test.js";
 const REAL_POSTGRES_TEST_LF_SHA256 =
-  "27a4d1ebbccda40711fd1a78a2f170efa3128690b86588be0c7ab515345f49d0";
+  "593f79407358d997c03e1cb536e90dd9bf0fef091d3bd376916ddad17c21ff3a";
 const REAL_POSTGRES_TEST_FILTERED_OID =
-  "bebdc618879cabd589dbe93a3b6a2c9a172aa98e";
+  "d8212114d6e7590c91d1170d62778eed7b58dbb6";
 const PHYSICAL_MAIN_PHASES = Object.freeze([
   "physical_target_preflight",
   "role_provisioning",
@@ -187,7 +199,7 @@ function assertOidBoundaryContract(source) {
     "await pool.query(ledgerRead);",
     'sanitized.code = error?.code === "42501" ? "42501" : "unknown";',
     '(error) => error?.code === "42501"',
-    "(client) => client.query(ledgerRead)",
+    "return client.query(ledgerRead);",
     "{ role: MIGRATOR_ROLE }"
   ];
   for (const fragment of exactFragments) {
@@ -449,7 +461,7 @@ test("24. exact 0004 production ledger reads use the migrator role only", () => 
 
   const roleBoundaryHelper = closedSourceSection(
     realTestSource,
-    "async function proveMigratorExplicitRoleBoundary(pool) {",
+    "async function proveMigratorExplicitRoleBoundary(pool, physicalPhases) {",
     "async function readExactCatalogSnapshot(pool) {"
   );
   const authorizedRoleBoundaryHelper = String.raw`async function proveMigratorExplicitRoleBoundary(pool) {
@@ -535,7 +547,90 @@ test("24. exact 0004 production ledger reads use the migrator role only", () => 
 }
 
 `;
-  assert.equal(roleBoundaryHelper, authorizedRoleBoundaryHelper);
+  const roleBoundaryInstrumentationReplacements = [
+    {
+      label: "role boundary observational parameter",
+      current:
+        "async function proveMigratorExplicitRoleBoundary(pool, physicalPhases) {",
+      previous: "async function proveMigratorExplicitRoleBoundary(pool) {"
+    },
+    {
+      label: "OID catalog lookup start",
+      current:
+        '  physicalPhases.startExact0004Subphase("oid_catalog_lookup");\n',
+      previous: ""
+    },
+    {
+      label: "OID catalog lookup completion",
+      current:
+        '  physicalPhases.completeExact0004Subphase("oid_catalog_lookup");\n',
+      previous: ""
+    },
+    {
+      label: "privilege boolean check start",
+      current: [
+        "  physicalPhases.startExact0004Subphase(",
+        '    "direct_privilege_boolean_check"',
+        "  );"
+      ].join("\n") + "\n",
+      previous: ""
+    },
+    {
+      label: "privilege boolean check completion",
+      current: [
+        "  physicalPhases.completeExact0004Subphase(",
+        '    "direct_privilege_boolean_check"',
+        "  );"
+      ].join("\n") + "\n",
+      previous: ""
+    },
+    {
+      label: "direct ledger negative start",
+      current:
+        '  physicalPhases.startExact0004Subphase("direct_ledger_read_negative");\n',
+      previous: ""
+    },
+    {
+      label: "direct ledger negative completion",
+      current:
+        '  physicalPhases.completeExact0004Subphase("direct_ledger_read_negative");\n',
+      previous: ""
+    },
+    {
+      label: "role switch start",
+      current:
+        '  physicalPhases.startExact0004Subphase("set_local_migrator_role");\n',
+      previous: ""
+    },
+    {
+      label: "role switch and role ledger callback boundary",
+      current: [
+        "    (client) => {",
+        '      physicalPhases.completeExact0004Subphase("set_local_migrator_role");',
+        '      physicalPhases.startExact0004Subphase("role_ledger_read_positive");',
+        "      return client.query(ledgerRead);",
+        "    },"
+      ].join("\n"),
+      previous: "    (client) => client.query(ledgerRead),"
+    },
+    {
+      label: "role ledger positive completion",
+      current:
+        '  physicalPhases.completeExact0004Subphase("role_ledger_read_positive");\n',
+      previous: ""
+    }
+  ];
+  let roleBoundaryBaseline = roleBoundaryHelper;
+  for (const { current, previous, label } of
+    roleBoundaryInstrumentationReplacements) {
+    roleBoundaryBaseline = replaceExactlyOnce(
+      roleBoundaryBaseline,
+      current,
+      previous,
+      label
+    );
+  }
+  assert.equal(roleBoundaryBaseline, authorizedRoleBoundaryHelper);
 
   const snapshotSource = closedSourceSection(
     realTestSource,
@@ -601,7 +696,7 @@ test("24. exact 0004 production ledger reads use the migrator role only", () => 
     1
   );
   const boundaryCall = exactRouteSource.indexOf(
-    "  await proveMigratorExplicitRoleBoundary(migrationPoolA);"
+    "  await proveMigratorExplicitRoleBoundary(migrationPoolA, physicalPhases);"
   );
   const firstSnapshot = exactRouteSource.indexOf(
     "  const beforePlan = await readExactCatalogSnapshot(migrationPoolA);"
@@ -616,12 +711,13 @@ test("24. exact 0004 production ledger reads use the migrator role only", () => 
   const authorizedPermissionReplacements = [
     {
       label: "closed explicit-role negative",
-      current: authorizedRoleBoundaryHelper,
+      current: roleBoundaryHelper,
       previous: ""
     },
     {
       label: "negative invocation before the first snapshot",
-      current: "  await proveMigratorExplicitRoleBoundary(migrationPoolA);\n",
+      current:
+        "  await proveMigratorExplicitRoleBoundary(migrationPoolA, physicalPhases);\n",
       previous: ""
     },
     {
@@ -731,6 +827,59 @@ test("24. exact 0004 production ledger reads use the migrator role only", () => 
     ),
     false
   );
+  const exactRouteInstrumentationReplacements = [
+    {
+      label: "exact route observational parameter",
+      current: [
+        "  companyWithLegacyConnection,",
+        "  physicalPhases",
+        ") {"
+      ].join("\n"),
+      previous: [
+        "  companyWithLegacyConnection",
+        ") {"
+      ].join("\n")
+    },
+    {
+      label: "exact route observational argument",
+      current: [
+        "          configuration,",
+        "          companyC,",
+        "          physicalPhases",
+        "        ));"
+      ].join("\n"),
+      previous: [
+        "          configuration,",
+        "          companyC",
+        "        ));"
+      ].join("\n")
+    }
+  ];
+  const exact0004Instrumentation = [
+    '  physicalPhases.startExact0004Subphase("snapshot_before_plan");\n',
+    '  physicalPhases.completeExact0004Subphase("snapshot_before_plan");\n',
+    '  physicalPhases.startExact0004Subphase("plan_exact");\n',
+    '  physicalPhases.completeExact0004Subphase("plan_exact");\n',
+    '  physicalPhases.startExact0004Subphase("plan_snapshot_compare");\n',
+    '  physicalPhases.completeExact0004Subphase("plan_snapshot_compare");\n',
+    '  physicalPhases.startExact0004Subphase("synthetic_0005_negative");\n',
+    '  physicalPhases.completeExact0004Subphase("synthetic_0005_negative");\n',
+    '  physicalPhases.startExact0004Subphase("conflicting_0004_negative");\n',
+    "  physicalPhases.markExact0004DatabaseMutationAttempted();\n",
+    [
+      "    physicalPhases.completeExact0004Subphase(",
+      '      "conflicting_0004_negative"',
+      "    );"
+    ].join("\n") + "\n",
+    '    physicalPhases.startExact0004Subphase("rollback_verification");\n',
+    '  physicalPhases.completeExact0004Subphase("rollback_verification");\n',
+    '  physicalPhases.startExact0004Subphase("apply_exact");\n',
+    '  physicalPhases.completeExact0004Subphase("apply_exact");\n',
+    '  physicalPhases.startExact0004Subphase("concurrency");\n',
+    '  physicalPhases.completeExact0004Subphase("concurrency");\n',
+    '  physicalPhases.startExact0004Subphase("final_snapshot");\n',
+    '  physicalPhases.completeExact0004Subphase("final_snapshot");\n'
+  ];
   let permissionBoundaryCandidate = realTestSource;
   for (const { current, previous, label } of authorizedPermissionReplacements) {
     permissionBoundaryCandidate = replaceExactlyOnce(
@@ -738,6 +887,24 @@ test("24. exact 0004 production ledger reads use the migrator role only", () => 
       current,
       previous,
       label
+    );
+  }
+  let permissionBoundaryHistoricalCandidate = permissionBoundaryCandidate;
+  for (const { current, previous, label } of
+    exactRouteInstrumentationReplacements) {
+    permissionBoundaryHistoricalCandidate = replaceExactlyOnce(
+      permissionBoundaryHistoricalCandidate,
+      current,
+      previous,
+      label
+    );
+  }
+  for (const line of exact0004Instrumentation) {
+    permissionBoundaryHistoricalCandidate = replaceExactlyOnce(
+      permissionBoundaryHistoricalCandidate,
+      line,
+      "",
+      line.trim()
     );
   }
   const permissionBoundaryHistorical = execFileSync(
@@ -762,7 +929,7 @@ test("24. exact 0004 production ledger reads use the migrator role only", () => 
     }
   );
   assert.deepEqual(
-    Buffer.from(permissionBoundaryCandidate, "utf8"),
+    Buffer.from(permissionBoundaryHistoricalCandidate, "utf8"),
     permissionBoundaryHistorical
   );
 
@@ -822,7 +989,7 @@ test("24. exact 0004 production ledger reads use the migrator role only", () => 
   assert.deepEqual(observedMarkers, expectedMarkers);
   assert.equal(
     (realTestSource.match(/\bphysicalPhases\./g) || []).length,
-    34
+    63
   );
   assert.equal(
     (realTestSource.match(/\bcreatePhysicalPhaseEmitter\b/g) || []).length,
@@ -836,10 +1003,20 @@ test("24. exact 0004 production ledger reads use the migrator role only", () => 
       `      physicalPhases.startMain("${phase}");\n`,
       `      physicalPhases.completeMain("${phase}");\n`
     ]),
+    ...exact0004Instrumentation,
     "      physicalPhases.startCleanup();\n",
     "      physicalPhases.completeCleanup();\n"
   ];
   let baselineCandidate = sourceWithoutBinding;
+  for (const { current, previous, label } of
+    exactRouteInstrumentationReplacements) {
+    baselineCandidate = replaceExactlyOnce(
+      baselineCandidate,
+      current,
+      previous,
+      label
+    );
+  }
   for (const line of authorizedInstrumentation) {
     assert.equal(baselineCandidate.split(line).length - 1, 1, line.trim());
     baselineCandidate = baselineCandidate.replace(line, "");
@@ -909,7 +1086,7 @@ test("25. exact 0004 NOINHERIT boundary refuses direct ledger reads without raw 
 
   const roleBoundaryHelper = closedSourceSection(
     realTestSource,
-    "async function proveMigratorExplicitRoleBoundary(pool) {",
+    "async function proveMigratorExplicitRoleBoundary(pool, physicalPhases) {",
     "async function readExactCatalogSnapshot(pool) {"
   );
   assertOidBoundaryContract(roleBoundaryHelper);
@@ -949,8 +1126,7 @@ test("25. exact 0004 NOINHERIT boundary refuses direct ledger reads without raw 
     true
   );
   assert.equal(
-    (roleBoundaryHelper.match(/\(client\) => client\.query\(ledgerRead\)/g) || [])
-      .length,
+    (roleBoundaryHelper.match(/return client\.query\(ledgerRead\);/g) || []).length,
     1
   );
   assert.equal(
@@ -1002,7 +1178,7 @@ test("26. exact 0004 ledger OID boundary rejects incomplete or textual contracts
   ).replaceAll("\r\n", "\n");
   const source = closedSourceSection(
     realTestSource,
-    "async function proveMigratorExplicitRoleBoundary(pool) {",
+    "async function proveMigratorExplicitRoleBoundary(pool, physicalPhases) {",
     "async function readExactCatalogSnapshot(pool) {"
   );
   assertOidBoundaryContract(source);
@@ -1081,4 +1257,210 @@ test("26. exact 0004 ledger OID boundary rejects incomplete or textual contracts
       label
     );
   }
+});
+
+test("27. exact 0004 plan subphase evidence stays closed and observational", () => {
+  const evidenceFields = [
+    "lastExact0004SubphaseStarted",
+    "lastExact0004SubphaseCompleted",
+    "exact0004FailureSubphase",
+    "safeSqlState",
+    "safeErrorClass",
+    "safeOperationClass",
+    "planExactInvoked",
+    "planExactCompleted",
+    "applyExactInvoked",
+    "applyExactCompleted",
+    "databaseMutationAttempted",
+    "failureBeforeFirstMutation"
+  ];
+  const executionSubphases = [
+    "oid_catalog_lookup",
+    "direct_privilege_boolean_check",
+    "direct_ledger_read_negative",
+    "set_local_migrator_role",
+    "role_ledger_read_positive",
+    "snapshot_before_plan",
+    "plan_exact",
+    "plan_snapshot_compare",
+    "synthetic_0005_negative",
+    "conflicting_0004_negative",
+    "rollback_verification",
+    "apply_exact",
+    "concurrency",
+    "final_snapshot"
+  ];
+  const operationClasses = [
+    "catalog_read",
+    "privilege_check",
+    "direct_negative_read",
+    "role_switch",
+    "role_positive_read",
+    "schema_snapshot",
+    "plan",
+    "negative_gate",
+    "rollback_check",
+    "apply",
+    "concurrency",
+    "final_validation",
+    "unknown"
+  ];
+  const errorClasses = [
+    "postgres_sqlstate",
+    "assertion_failure",
+    "environment_contract",
+    "process_failure",
+    "timeout",
+    "unexpected_result",
+    "unknown"
+  ];
+  assert.deepEqual(EXACT_0004_EVIDENCE_FIELDS, evidenceFields);
+  assert.deepEqual(EXACT_0004_EXECUTION_SUBPHASES, executionSubphases);
+  assert.deepEqual(
+    EXACT_0004_SUBPHASES,
+    [...executionSubphases, "unknown", "not_reached"]
+  );
+  assert.deepEqual(EXACT_0004_OPERATION_CLASSES, operationClasses);
+  assert.deepEqual(EXACT_0004_ERROR_CLASSES, errorClasses);
+  assert.deepEqual(SAFE_SQL_STATES, ["42501", "23514", "P0001"]);
+  assert.deepEqual(
+    SAFE_SQL_STATE_VALUES,
+    ["42501", "23514", "P0001", "unknown", "not_observed"]
+  );
+  assert.equal(new Set(EXACT_0004_EVIDENCE_FIELDS).size, 12);
+  assert.equal(new Set(EXACT_0004_SUBPHASES).size, 16);
+  for (const forbidden of [
+    "message",
+    "stack",
+    "detail",
+    "hint",
+    "where",
+    "query",
+    "parameters",
+    "stdout",
+    "stderr"
+  ]) {
+    assert.equal(evidenceFields.includes(forbidden), false, forbidden);
+  }
+
+  const empty = emptyExact0004Evidence();
+  assert.deepEqual(empty, {
+    lastExact0004SubphaseStarted: "not_reached",
+    lastExact0004SubphaseCompleted: "not_reached",
+    exact0004FailureSubphase: "not_reached",
+    safeSqlState: "not_observed",
+    safeErrorClass: "unknown",
+    safeOperationClass: "unknown",
+    planExactInvoked: false,
+    planExactCompleted: false,
+    applyExactInvoked: false,
+    applyExactCompleted: false,
+    databaseMutationAttempted: false,
+    failureBeforeFirstMutation: false
+  });
+  assert.equal(Object.isFrozen(empty), true);
+  assert.equal(exact0004EvidenceValid(empty), true);
+
+  const successful = {
+    ...empty,
+    lastExact0004SubphaseStarted: "final_snapshot",
+    lastExact0004SubphaseCompleted: "final_snapshot",
+    planExactInvoked: true,
+    planExactCompleted: true,
+    applyExactInvoked: true,
+    applyExactCompleted: true,
+    databaseMutationAttempted: true
+  };
+  assert.equal(exact0004EvidenceValid(successful), true);
+  const beforeFirstMutationFailure = {
+    ...emptyExact0004Evidence({ failureObserved: true }),
+    lastExact0004SubphaseStarted: "plan_exact",
+    lastExact0004SubphaseCompleted: "snapshot_before_plan",
+    exact0004FailureSubphase: "plan_exact",
+    safeErrorClass: "assertion_failure",
+    safeOperationClass: "plan",
+    planExactInvoked: true,
+    failureBeforeFirstMutation: true
+  };
+  assert.equal(
+    exact0004EvidenceValid(beforeFirstMutationFailure, {
+      failureEvent: true
+    }),
+    true
+  );
+  assert.equal(exact0004OperationClass("plan_exact"), "plan");
+  assert.equal(exact0004OperationClass("not_reached"), "unknown");
+  for (const invalid of [
+    { ...successful, planExactInvoked: false },
+    { ...successful, applyExactInvoked: false },
+    { ...successful, databaseMutationAttempted: false },
+    { ...successful, failureBeforeFirstMutation: true },
+    { ...successful, safeSqlState: "42P01" },
+    {
+      ...beforeFirstMutationFailure,
+      safeSqlState: "unknown",
+      safeErrorClass: "postgres_sqlstate"
+    },
+    {
+      ...beforeFirstMutationFailure,
+      safeOperationClass: "schema_snapshot"
+    }
+  ]) assert.equal(exact0004EvidenceValid(invalid), false);
+
+  const realTestSource = fs.readFileSync(
+    path.join(REPOSITORY_ROOT, ...REAL_POSTGRES_TEST.split("/")),
+    "utf8"
+  ).replaceAll("\r\n", "\n");
+  assert.equal(realTestSource.includes("\r"), false);
+  const observedCalls = [
+    ...realTestSource.matchAll(
+      /physicalPhases\.(startExact0004Subphase|completeExact0004Subphase)\(\s*"([a-z0-9_]+)"\s*\);/g
+    )
+  ].map((match) => ({
+    index: match.index,
+    kind: match[1],
+    subphase: match[2]
+  }));
+  assert.deepEqual(
+    observedCalls.map(({ kind, subphase }) => `${kind}:${subphase}`),
+    executionSubphases.flatMap((subphase) => [
+      `startExact0004Subphase:${subphase}`,
+      `completeExact0004Subphase:${subphase}`
+    ])
+  );
+  assert.equal(
+    realTestSource.split(
+      "physicalPhases.markExact0004DatabaseMutationAttempted();"
+    ).length - 1,
+    1
+  );
+  const conflictingStart = observedCalls.find(
+    ({ kind, subphase }) =>
+      kind === "startExact0004Subphase" &&
+      subphase === "conflicting_0004_negative"
+  );
+  const conflictingComplete = observedCalls.find(
+    ({ kind, subphase }) =>
+      kind === "completeExact0004Subphase" &&
+      subphase === "conflicting_0004_negative"
+  );
+  const mutationAttempt = realTestSource.indexOf(
+    "physicalPhases.markExact0004DatabaseMutationAttempted();"
+  );
+  assert.ok(conflictingStart);
+  assert.ok(conflictingComplete);
+  assert.equal(conflictingStart.index < mutationAttempt, true);
+  assert.equal(mutationAttempt < conflictingComplete.index, true);
+  assert.equal(
+    realTestSource.split(
+      "async function proveMigratorExplicitRoleBoundary(pool, physicalPhases) {"
+    ).length - 1,
+    1
+  );
+  assert.equal(
+    realTestSource.split(
+      "await proveMigratorExplicitRoleBoundary(migrationPoolA, physicalPhases);"
+    ).length - 1,
+    1
+  );
 });

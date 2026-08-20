@@ -3,9 +3,9 @@
 const path = require("node:path");
 
 const AUTHORIZED_BRANCH =
-  "social/checkpoint-3b0-exact-0004-runner-linux-ledger-oid-boundary-20260816";
+  "social/checkpoint-3b0-exact-0004-runner-linux-plan-subphase-evidence-20260816";
 const ROUTE_BASE_COMMIT = "13e38b875db2a220514fe06113663c517c975592";
-const ROUTE_PARENT_COMMIT = "05689e6d23e65c6df33e3db79633126114dea540";
+const ROUTE_PARENT_COMMIT = "73433e1b2d856e073db452ebe17815bec296bba0";
 
 const ALLOWED_EXACT_FILES = new Set([
   ".github/workflows/social-3b0-exact-0004-runner-linux.yml",

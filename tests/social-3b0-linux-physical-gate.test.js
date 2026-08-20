@@ -74,6 +74,27 @@ function safeEventNames(lines) {
   ).event);
 }
 
+function exact0004Evidence(
+  overrides = {},
+  { failureObserved = false } = {}
+) {
+  return {
+    ...realPostgresRunner.emptyExact0004Evidence({ failureObserved }),
+    ...overrides
+  };
+}
+
+function completeExact0004Subphases(phases) {
+  for (const subphase of
+    realPostgresRunner.EXACT_0004_EXECUTION_SUBPHASES) {
+    phases.startExact0004Subphase(subphase);
+    if (subphase === "conflicting_0004_negative") {
+      phases.markExact0004DatabaseMutationAttempted();
+    }
+    phases.completeExact0004Subphase(subphase);
+  }
+}
+
 function physicalPhaseLines({ complete = true } = {}) {
   const lines = [];
   const phases = realPostgresRunner.createPhysicalPhaseEmitter(
@@ -82,12 +103,56 @@ function physicalPhaseLines({ complete = true } = {}) {
   for (const phase of realPostgresRunner.PHYSICAL_MAIN_PHASES) {
     phases.startMain(phase);
     if (!complete) break;
+    if (phase === "exact_0004_plan_apply") {
+      completeExact0004Subphases(phases);
+    }
     phases.completeMain(phase);
   }
   if (complete) {
     phases.startCleanup();
     phases.completeCleanup();
   }
+  return lines;
+}
+
+function exact0004FailurePhaseLines(
+  subphase,
+  { mutationAttempted = false } = {}
+) {
+  const targetIndex =
+    realPostgresRunner.EXACT_0004_EXECUTION_SUBPHASES.indexOf(subphase);
+  const mutationIndex =
+    realPostgresRunner.EXACT_0004_EXECUTION_SUBPHASES.indexOf(
+      "conflicting_0004_negative"
+    );
+  if (
+    targetIndex < 0 ||
+    (mutationAttempted && targetIndex < mutationIndex) ||
+    (!mutationAttempted && targetIndex > mutationIndex)
+  ) throw new Error("synthetic_exact_0004_boundary_invalid");
+  const lines = [];
+  const phases = realPostgresRunner.createPhysicalPhaseEmitter(
+    (line) => lines.push(line)
+  );
+  for (const phase of realPostgresRunner.PHYSICAL_MAIN_PHASES) {
+    phases.startMain(phase);
+    if (phase !== "exact_0004_plan_apply") {
+      phases.completeMain(phase);
+      continue;
+    }
+    for (const candidate of
+      realPostgresRunner.EXACT_0004_EXECUTION_SUBPHASES) {
+      phases.startExact0004Subphase(candidate);
+      if (candidate === "conflicting_0004_negative" && mutationAttempted) {
+        phases.markExact0004DatabaseMutationAttempted();
+      }
+      if (candidate === subphase) break;
+      phases.completeExact0004Subphase(candidate);
+    }
+    break;
+  }
+  phases.startCleanup();
+  phases.completeCleanup();
   return lines;
 }
 
@@ -207,6 +272,18 @@ test("real PostgreSQL runner emits one canonical safe lifecycle without raw TAP"
   assert.equal(facts.nodeTestTimedOut, false);
   assert.equal(facts.lastMainPhaseStarted, "reauthentication");
   assert.equal(facts.lastMainPhaseCompleted, "reauthentication");
+  assert.equal(facts.lastExact0004SubphaseStarted, "final_snapshot");
+  assert.equal(facts.lastExact0004SubphaseCompleted, "final_snapshot");
+  assert.equal(facts.exact0004FailureSubphase, "not_reached");
+  assert.equal(facts.safeSqlState, "not_observed");
+  assert.equal(facts.safeErrorClass, "unknown");
+  assert.equal(facts.safeOperationClass, "unknown");
+  assert.equal(facts.planExactInvoked, true);
+  assert.equal(facts.planExactCompleted, true);
+  assert.equal(facts.applyExactInvoked, true);
+  assert.equal(facts.applyExactCompleted, true);
+  assert.equal(facts.databaseMutationAttempted, true);
+  assert.equal(facts.failureBeforeFirstMutation, false);
   assert.equal(facts.cleanupStarted, true);
   assert.equal(facts.cleanupCompleted, true);
   assert.equal(facts.failureDuringCleanup, null);
@@ -268,6 +345,12 @@ test("real PostgreSQL runner classifies ReferenceError after discovery as test e
   assert.equal(result.facts.firstTestDiscovered, true);
   assert.equal(result.facts.firstFailureStage, "test_execution");
   assert.equal(result.facts.stderrCategory, "reference_error");
+  assert.deepEqual(
+    Object.fromEntries(realPostgresRunner.EXACT_0004_EVIDENCE_FIELDS.map(
+      (field) => [field, result.facts[field]]
+    )),
+    realPostgresRunner.emptyExact0004Evidence()
+  );
   assert.equal(result.emitted.some((line) => line.includes(rawSentinel)), false);
 });
 
@@ -433,11 +516,36 @@ test("protocol group 1: physical phases accept only the complete ordered main an
     line
   })));
   assert.equal(facts.phaseProtocolValid, true);
-  assert.equal(facts.phaseEventCount, 34);
+  assert.equal(facts.phaseEventCount, 63);
   assert.equal(facts.lastMainPhaseStarted, "reauthentication");
   assert.equal(facts.lastMainPhaseCompleted, "reauthentication");
+  assert.equal(facts.lastExact0004SubphaseStarted, "final_snapshot");
+  assert.equal(facts.lastExact0004SubphaseCompleted, "final_snapshot");
+  assert.equal(facts.exact0004FailureSubphase, "not_reached");
+  assert.equal(facts.safeSqlState, "not_observed");
+  assert.equal(facts.safeErrorClass, "unknown");
+  assert.equal(facts.safeOperationClass, "unknown");
+  assert.equal(facts.planExactInvoked, true);
+  assert.equal(facts.planExactCompleted, true);
+  assert.equal(facts.applyExactInvoked, true);
+  assert.equal(facts.applyExactCompleted, true);
+  assert.equal(facts.databaseMutationAttempted, true);
+  assert.equal(facts.failureBeforeFirstMutation, false);
   assert.equal(facts.cleanupStarted, true);
   assert.equal(facts.cleanupCompleted, true);
+  const missingExact0004Subphases =
+    realPostgresRunner.createPhysicalPhaseEmitter(() => {});
+  for (const phase of realPostgresRunner.PHYSICAL_MAIN_PHASES) {
+    missingExact0004Subphases.startMain(phase);
+    if (phase === "exact_0004_plan_apply") {
+      assert.throws(
+        () => missingExact0004Subphases.completeMain(phase),
+        /physical_phase_protocol_invalid/
+      );
+      break;
+    }
+    missingExact0004Subphases.completeMain(phase);
+  }
 });
 
 test("protocol group 1: physical phases refuse jumps, repeats, unknowns, extras and post-cleanup markers", () => {
@@ -475,7 +583,7 @@ test("protocol group 1: physical phases refuse jumps, repeats, unknowns, extras 
     ],
     [
       ...complete,
-      event("mainPhaseStarted", "physical_target_preflight", 35)
+      event("mainPhaseStarted", "physical_target_preflight", 64)
     ]
   ];
   for (const lines of invalidCases) {
@@ -514,6 +622,9 @@ test("protocol group 1: physical snapshot keeps main and cleanup boundaries sepa
   );
   for (const phase of realPostgresRunner.PHYSICAL_MAIN_PHASES) {
     cleanup.startMain(phase);
+    if (phase === "exact_0004_plan_apply") {
+      completeExact0004Subphases(cleanup);
+    }
     cleanup.completeMain(phase);
   }
   cleanup.startCleanup();
@@ -527,6 +638,318 @@ test("protocol group 1: physical snapshot keeps main and cleanup boundaries sepa
   assert.equal(cleanupFacts.cleanupCompleted, false);
 });
 
+test("protocol group 1: exact 0004 evidence is closed, ordered, immutable and sanitized", async () => {
+  assert.deepEqual(realPostgresRunner.EXACT_0004_SUBPHASES, [
+    "oid_catalog_lookup",
+    "direct_privilege_boolean_check",
+    "direct_ledger_read_negative",
+    "set_local_migrator_role",
+    "role_ledger_read_positive",
+    "snapshot_before_plan",
+    "plan_exact",
+    "plan_snapshot_compare",
+    "synthetic_0005_negative",
+    "conflicting_0004_negative",
+    "rollback_verification",
+    "apply_exact",
+    "concurrency",
+    "final_snapshot",
+    "unknown",
+    "not_reached"
+  ]);
+  assert.deepEqual(realPostgresRunner.EXACT_0004_OPERATION_CLASSES, [
+    "catalog_read",
+    "privilege_check",
+    "direct_negative_read",
+    "role_switch",
+    "role_positive_read",
+    "schema_snapshot",
+    "plan",
+    "negative_gate",
+    "rollback_check",
+    "apply",
+    "concurrency",
+    "final_validation",
+    "unknown"
+  ]);
+  assert.deepEqual(realPostgresRunner.EXACT_0004_ERROR_CLASSES, [
+    "postgres_sqlstate",
+    "assertion_failure",
+    "environment_contract",
+    "process_failure",
+    "timeout",
+    "unexpected_result",
+    "unknown"
+  ]);
+  assert.deepEqual(realPostgresRunner.SAFE_SQL_STATES, [
+    "42501",
+    "23514",
+    "P0001"
+  ]);
+  const operationBySubphase = {
+    oid_catalog_lookup: "catalog_read",
+    direct_privilege_boolean_check: "privilege_check",
+    direct_ledger_read_negative: "direct_negative_read",
+    set_local_migrator_role: "role_switch",
+    role_ledger_read_positive: "role_positive_read",
+    snapshot_before_plan: "schema_snapshot",
+    plan_exact: "plan",
+    plan_snapshot_compare: "schema_snapshot",
+    synthetic_0005_negative: "negative_gate",
+    conflicting_0004_negative: "negative_gate",
+    rollback_verification: "rollback_check",
+    apply_exact: "apply",
+    concurrency: "concurrency",
+    final_snapshot: "final_validation"
+  };
+  for (const [subphase, operationClass] of
+    Object.entries(operationBySubphase)) {
+    assert.equal(
+      realPostgresRunner.exact0004OperationClass(subphase),
+      operationClass
+    );
+  }
+  assert.equal(realPostgresRunner.exact0004OperationClass("unknown"), "unknown");
+  assert.equal(
+    realPostgresRunner.exact0004OperationClass("not_reached"),
+    "unknown"
+  );
+
+  const allowedFailure = exact0004Evidence({
+    lastExact0004SubphaseStarted: "oid_catalog_lookup",
+    lastExact0004SubphaseCompleted: "not_reached",
+    exact0004FailureSubphase: "oid_catalog_lookup",
+    safeSqlState: "42501",
+    safeErrorClass: "postgres_sqlstate",
+    safeOperationClass: "catalog_read",
+    failureBeforeFirstMutation: true
+  }, { failureObserved: true });
+  assert.equal(realPostgresRunner.exact0004EvidenceValid(
+    allowedFailure,
+    { failureEvent: true }
+  ), true);
+  for (const invalid of [
+    { ...allowedFailure, lastExact0004SubphaseStarted: "outside_enum" },
+    { ...allowedFailure, exact0004FailureSubphase: "outside_enum" },
+    { ...allowedFailure, safeSqlState: "57014" },
+    { ...allowedFailure, safeErrorClass: "outside_enum" },
+    { ...allowedFailure, safeOperationClass: "outside_enum" },
+    {
+      ...realPostgresRunner.emptyExact0004Evidence(),
+      lastExact0004SubphaseCompleted: "oid_catalog_lookup"
+    }
+  ]) {
+    assert.equal(realPostgresRunner.exact0004EvidenceValid(
+      invalid,
+      { failureEvent: true }
+    ), false);
+  }
+
+  function emitterAtExact0004() {
+    const emitter = realPostgresRunner.createPhysicalPhaseEmitter(() => {});
+    for (const phase of realPostgresRunner.PHYSICAL_MAIN_PHASES) {
+      emitter.startMain(phase);
+      if (phase === "exact_0004_plan_apply") return emitter;
+      emitter.completeMain(phase);
+    }
+    throw new Error("synthetic_exact_0004_phase_missing");
+  }
+  assert.throws(
+    () => emitterAtExact0004().startExact0004Subphase("outside_enum"),
+    /physical_phase_protocol_invalid/
+  );
+  assert.throws(
+    () => emitterAtExact0004().completeExact0004Subphase(
+      "oid_catalog_lookup"
+    ),
+    /physical_phase_protocol_invalid/
+  );
+  const duplicate = emitterAtExact0004();
+  duplicate.startExact0004Subphase("oid_catalog_lookup");
+  assert.throws(
+    () => duplicate.startExact0004Subphase("oid_catalog_lookup"),
+    /physical_phase_protocol_invalid/
+  );
+
+  const tapPrefix = [
+    "TAP version 13",
+    `# Subtest: ${realPostgresRunner.TAP_TITLE}`
+  ];
+  const beforeMutation = await runSyntheticReporterFailure({
+    stdoutLines: tapPrefix,
+    phaseLines: exact0004FailurePhaseLines("oid_catalog_lookup"),
+    stderrLines: ["permission denied", "code: '42501'"]
+  });
+  assert.equal(beforeMutation.facts.exact0004FailureSubphase,
+    "oid_catalog_lookup");
+  assert.equal(beforeMutation.facts.safeOperationClass, "catalog_read");
+  assert.equal(beforeMutation.facts.safeSqlState, "42501");
+  assert.equal(beforeMutation.facts.safeErrorClass, "postgres_sqlstate");
+  assert.equal(beforeMutation.facts.databaseMutationAttempted, false);
+  assert.equal(beforeMutation.facts.failureBeforeFirstMutation, true);
+
+  const rawSql = "SELECT raw_sql_sentinel FROM private_table";
+  const rawMessage = "raw_message_sentinel";
+  const rawStack =
+    "    at probe (C:\\private\\raw_stack_sentinel.js:997:3)";
+  const rawSecret = [
+    "postgres",
+    "://",
+    ["raw_user", "raw_password"].join(":"),
+    "@",
+    ["fixture.example.invalid", "raw"].join("/"),
+    "?",
+    ["token", "raw_token"].join("=")
+  ].join("");
+  const assertionFailure = await runSyntheticReporterFailure({
+    stdoutLines: tapPrefix,
+    phaseLines: exact0004FailurePhaseLines(
+      "direct_privilege_boolean_check"
+    ),
+    stderrLines: [
+      "AssertionError ERR_ASSERTION",
+      "code: '23514'",
+      rawSql,
+      rawMessage,
+      rawStack,
+      rawSecret
+    ]
+  });
+  assert.equal(assertionFailure.facts.safeSqlState, "23514");
+  assert.equal(assertionFailure.facts.safeErrorClass, "assertion_failure");
+  const sanitized = JSON.stringify({
+    emitted: assertionFailure.emitted,
+    facts: assertionFailure.facts
+  });
+  for (const forbidden of [
+    rawSql,
+    rawMessage,
+    rawStack,
+    "C:\\private",
+    "raw_password",
+    "raw_token"
+  ]) assert.equal(sanitized.includes(forbidden), false, forbidden);
+  for (const forbiddenKey of [
+    "query",
+    "params",
+    "message",
+    "detail",
+    "hint",
+    "where",
+    "stack",
+    "stdout",
+    "stderr",
+    "env",
+    "url",
+    "login",
+    "password",
+    "token",
+    "key",
+    "fixture"
+  ]) assert.equal(Object.hasOwn(assertionFailure.facts, forbiddenKey), false);
+
+  const nestedDiagnostic =
+    realPostgresRunner.createSafeDiagnosticAggregator();
+  const wrappedAssertion = new Error("root_message_must_not_escape");
+  wrappedAssertion.name = "AssertionError";
+  wrappedAssertion.code = "ERR_ASSERTION";
+  wrappedAssertion.actual = {
+    name: "DatabaseError",
+    code: "23514",
+    message: "P0001 nested_actual_message_must_not_be_observed",
+    stack: "42501 nested_actual_stack_must_not_be_observed"
+  };
+  wrappedAssertion.cause = {
+    name: "Error",
+    message: "environment_contract nested_cause_must_not_be_observed",
+    stack: "C:\\private\\nested_cause_stack.js:9:1"
+  };
+  nestedDiagnostic.observeError(wrappedAssertion);
+  const nestedFacts = nestedDiagnostic.finish();
+  assert.equal(nestedFacts.safeDiagnosticValid, true);
+  assert.equal(nestedFacts.safeSqlState, "23514");
+  assert.equal(nestedFacts.safeErrorClass, "assertion_failure");
+  const nestedSerialized = JSON.stringify(nestedFacts);
+  for (const forbidden of [
+    "root_message_must_not_escape",
+    "nested_actual_message_must_not_be_observed",
+    "nested_actual_stack_must_not_be_observed",
+    "nested_cause_must_not_be_observed",
+    "nested_cause_stack"
+  ]) assert.equal(nestedSerialized.includes(forbidden), false, forbidden);
+
+  const afterMutation = await runSyntheticReporterFailure({
+    stdoutLines: tapPrefix,
+    phaseLines: exact0004FailurePhaseLines(
+      "rollback_verification",
+      { mutationAttempted: true }
+    ),
+    stderrLines: ["code: 'P0001'"]
+  });
+  assert.equal(afterMutation.facts.exact0004FailureSubphase,
+    "rollback_verification");
+  assert.equal(afterMutation.facts.safeOperationClass, "rollback_check");
+  assert.equal(afterMutation.facts.safeSqlState, "P0001");
+  assert.equal(afterMutation.facts.safeErrorClass, "postgres_sqlstate");
+  assert.equal(afterMutation.facts.databaseMutationAttempted, true);
+  assert.equal(afterMutation.facts.failureBeforeFirstMutation, false);
+
+  const invalidSqlState = await runSyntheticReporterFailure({
+    stdoutLines: tapPrefix,
+    phaseLines: exact0004FailurePhaseLines("oid_catalog_lookup"),
+    stderrLines: ["code: '57014'"]
+  });
+  assert.equal(invalidSqlState.facts.safeSqlState, "unknown");
+  const missingSqlState = await runSyntheticReporterFailure({
+    stdoutLines: tapPrefix,
+    phaseLines: exact0004FailurePhaseLines("oid_catalog_lookup"),
+    stderrLines: ["AssertionError ERR_ASSERTION"]
+  });
+  assert.equal(missingSqlState.facts.safeSqlState, "unknown");
+  assert.equal(missingSqlState.facts.safeErrorClass, "assertion_failure");
+
+  const appendedAfterFailure = beforeMutation.emitted[0]
+    .replace('"sequence":1', '"sequence":11');
+  const preserved = collectSafeRunnerLines([
+    ...beforeMutation.emitted,
+    appendedAfterFailure
+  ]);
+  assert.equal(preserved.protocolValid, false);
+  assert.equal(preserved.firstFailureStage, "test_execution");
+  assert.equal(preserved.exact0004FailureSubphase, "oid_catalog_lookup");
+  assert.equal(preserved.safeSqlState, "42501");
+  assert.equal(preserved.safeErrorClass, "postgres_sqlstate");
+
+  const failureEvent = JSON.parse(beforeMutation.emitted.at(-1)
+    .slice(realPostgresRunner.SAFE_EVENT_PREFIX.length));
+  assert.deepEqual(Object.keys(failureEvent).sort(), [
+    "applyExactCompleted",
+    "applyExactInvoked",
+    "databaseMutationAttempted",
+    "event",
+    "evidenceSchemaVersion",
+    "exact0004FailureSubphase",
+    "failureBeforeFirstMutation",
+    "failureDuringCleanup",
+    "failurePhase",
+    "firstFailureStage",
+    "lastExact0004SubphaseCompleted",
+    "lastExact0004SubphaseStarted",
+    "planExactCompleted",
+    "planExactInvoked",
+    "safeErrorClass",
+    "safeErrorCode",
+    "safeLineBucket",
+    "safeModuleName",
+    "safeOperationClass",
+    "safePermissionOrigin",
+    "safeSourceBasename",
+    "safeSqlState",
+    "sequence",
+    "stderrCategory"
+  ].sort());
+});
+
 test("protocol group 1: impossible snapshots and incoherent failure boundaries fail closed", () => {
   const version = realPostgresRunner.EVIDENCE_SCHEMA_VERSION;
   const snapshot = (overrides = {}) => ({
@@ -536,6 +959,7 @@ test("protocol group 1: impossible snapshots and incoherent failure boundaries f
     lastMainPhaseCompleted: null,
     cleanupStarted: false,
     cleanupCompleted: false,
+    ...exact0004Evidence(),
     sequence: 1,
     ...overrides
   });
@@ -553,6 +977,28 @@ test("protocol group 1: impossible snapshots and incoherent failure boundaries f
       lastMainPhaseStarted: "reauthentication",
       lastMainPhaseCompleted: "reauthentication",
       cleanupCompleted: true
+    }),
+    snapshot({
+      lastMainPhaseStarted: "migration_0003_apply",
+      lastMainPhaseCompleted: "migration_0003_apply",
+      lastExact0004SubphaseStarted: "final_snapshot",
+      lastExact0004SubphaseCompleted: "final_snapshot",
+      planExactInvoked: true,
+      planExactCompleted: true,
+      applyExactInvoked: true,
+      applyExactCompleted: true,
+      databaseMutationAttempted: true
+    }),
+    snapshot({
+      lastMainPhaseStarted: "post_migration_validation",
+      lastMainPhaseCompleted: "post_migration_validation"
+    }),
+    snapshot({
+      lastMainPhaseStarted: "post_migration_validation",
+      lastMainPhaseCompleted: "exact_0004_plan_apply",
+      lastExact0004SubphaseStarted: "plan_exact",
+      lastExact0004SubphaseCompleted: "snapshot_before_plan",
+      planExactInvoked: true
     })
   ];
   for (const event of invalidSnapshots) {
@@ -573,6 +1019,7 @@ test("protocol group 1: impossible snapshots and incoherent failure boundaries f
     safeModuleName: null,
     safePermissionOrigin: "unknown",
     safeSourceBasename: null,
+    ...exact0004Evidence(),
     sequence: 1,
     stderrCategory: "unknown",
     ...overrides
@@ -586,6 +1033,24 @@ test("protocol group 1: impossible snapshots and incoherent failure boundaries f
     safePermissionOrigin: "postgres_sqlstate",
     stderrCategory: "permission_denied"
   })), /safe_event_invalid/);
+  const contaminatedPrestart = collectSafeRunnerLines([
+    realPostgresRunner.safeEventLine({
+      event: "runnerReached",
+      evidenceSchemaVersion: version,
+      runnerReached: true,
+      sequence: 1
+    }),
+    untrustedSafeEvent(failure({
+      safeSqlState: "42501",
+      safeErrorClass: "postgres_sqlstate",
+      sequence: 2
+    }))
+  ]);
+  assert.equal(contaminatedPrestart.protocolValid, false);
+  assert.equal(contaminatedPrestart.failure, false);
+  assert.equal(contaminatedPrestart.firstFailureStage, "safe_event_protocol");
+  assert.equal(contaminatedPrestart.safeSqlState, "not_observed");
+  assert.equal(contaminatedPrestart.safeErrorClass, "unknown");
 
   const lifecycle = [
     realPostgresRunner.safeEventLine({
@@ -698,6 +1163,9 @@ test("protocol group 1: outer failure preserves the first functional boundary an
   );
   for (const phase of realPostgresRunner.PHYSICAL_MAIN_PHASES) {
     cleanupPhases.startMain(phase);
+    if (phase === "exact_0004_plan_apply") {
+      completeExact0004Subphases(cleanupPhases);
+    }
     cleanupPhases.completeMain(phase);
   }
   cleanupPhases.startCleanup();
@@ -714,6 +1182,20 @@ test("protocol group 1: outer failure preserves the first functional boundary an
   assert.equal(cleanup.facts.failurePhase, "final_cleanup");
   assert.equal(cleanup.facts.safeErrorCode, "EPERM");
   assert.equal(cleanup.facts.safePermissionOrigin, "os_process");
+  assert.deepEqual(
+    Object.fromEntries(realPostgresRunner.EXACT_0004_EVIDENCE_FIELDS.map(
+      (field) => [field, cleanup.facts[field]]
+    )),
+    exact0004Evidence({
+      lastExact0004SubphaseStarted: "final_snapshot",
+      lastExact0004SubphaseCompleted: "final_snapshot",
+      planExactInvoked: true,
+      planExactCompleted: true,
+      applyExactInvoked: true,
+      applyExactCompleted: true,
+      databaseMutationAttempted: true
+    })
+  );
 });
 
 test("classifier group 2: permission diagnostics aggregate a later SQLSTATE across channels without raw output", () => {
@@ -810,6 +1292,7 @@ test("classifier group 2: same-line permission conflicts propagate through colle
     safeModuleName: null,
     safePermissionOrigin: "unknown",
     safeSourceBasename: null,
+    ...exact0004Evidence(),
     sequence: 2,
     stderrCategory: "environment_contract"
   });
@@ -1036,6 +1519,7 @@ test("protocol group 1: safe event collector refuses duplicates, JSON, fields, e
     safeModuleName: null,
     safePermissionOrigin: "unknown",
     safeSourceBasename: null,
+    ...exact0004Evidence(),
     sequence: 2,
     stderrCategory: "environment_contract"
   });
