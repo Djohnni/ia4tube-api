@@ -12,13 +12,13 @@ const ROOT = path.resolve(__dirname, "..");
 const RELATIVE = ".github/workflows/social-3b0-exact-0004-runner-linux.yml";
 const FILE = path.join(ROOT, ...RELATIVE.split("/"));
 const BRANCH =
-  "social/checkpoint-3b0-exact-0004-runner-linux-conflict-sqlstate-20260820";
+  "social/checkpoint-3b0-exact-0004-runner-linux-conflict-outcome-evidence-20260820";
 const BASE = "13e38b875db2a220514fe06113663c517c975592";
-const PARENT = "53bae8b3457b515b0e656d5b37fce4dc04d5e89f";
+const PARENT = "376c56fded62033071540996ea728ef77714ce38";
 const PLAN_SUBPHASE_PARENT = "73433e1b2d856e073db452ebe17815bec296bba0";
 const SOURCE_COMMIT = "8534817574a22dbd144a835c9f3585c44ee11c96";
 const MESSAGE =
-  "[run-social-3b0] align exact 0004 conflict SQLSTATE";
+  "[run-social-3b0] preserve exact 0004 conflict outcome";
 const IMAGE =
   "docker.io/library/postgres:18.4-bookworm@sha256:7e6103cf85f88f7a0eddb3ec0b1ba8940eba098ed118ade25a729ca9daee5568";
 const CHECKOUT = "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1";
@@ -27,8 +27,8 @@ const UPLOAD = "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
 const RUNNER_FILE = "scripts/run-real-postgres-tests.js";
 const RUNNER_MODULE = "./scripts/run-real-postgres-tests";
 const RUNNER_LF_SHA256 =
-  "2e30395d6ff015f16fdf99469028e48576cfca942a35b0b88a29e2b208d15a16";
-const RUNNER_FILTERED_OID = "18fa43cbc8014ffdf9ce4ac986f3133bf8a51cdd";
+  "2a8a91e0f6351afbb4304002a4fb7cd4e689602ecfbc8af418c957dcfa7da0a6";
+const RUNNER_FILTERED_OID = "6eca94aae046b248a278484863c2caf6001acc4d";
 const PARENT_RUNNER_LF_SHA256 =
   "2e30395d6ff015f16fdf99469028e48576cfca942a35b0b88a29e2b208d15a16";
 const PARENT_RUNNER_FILTERED_OID =
@@ -40,13 +40,13 @@ const PRESERVED_FUNCTIONAL_FILES = Object.freeze([
 ]);
 const REAL_TEST_FILE = "tests/social-postgres-real.test.js";
 const REAL_TEST_LF_SHA256 =
-  "0c6f7fff3bb031e5fd13f6220cc19d6bdaf24160e435bbe533404c28f7f7be20";
+  "d07054524efec8ac48b720eed8df7a39d2db6a8a5cda6249b80c30ec73b33a66";
 const REAL_TEST_FILTERED_OID =
-  "c6c4bcce192d33940d99d7395bde9ba79fc78ea1";
+  "926b6050fcb89b528126eb6fbf72f70624556a4b";
 const PARENT_REAL_TEST_LF_SHA256 =
-  "593f79407358d997c03e1cb536e90dd9bf0fef091d3bd376916ddad17c21ff3a";
+  "0c6f7fff3bb031e5fd13f6220cc19d6bdaf24160e435bbe533404c28f7f7be20";
 const PARENT_REAL_TEST_FILTERED_OID =
-  "d8212114d6e7590c91d1170d62778eed7b58dbb6";
+  "c6c4bcce192d33940d99d7395bde9ba79fc78ea1";
 const PLAN_SUBPHASE_PARENT_REAL_TEST_LF_SHA256 =
   "27a4d1ebbccda40711fd1a78a2f170efa3128690b86588be0c7ab515345f49d0";
 const PLAN_SUBPHASE_PARENT_REAL_TEST_FILTERED_OID =
@@ -116,13 +116,15 @@ const EXACT18 = Object.freeze([
   "tests/social-postgres-migrations.test.js",
   "tests/social-postgres-real.test.js"
 ]);
-const INCREMENTAL7 = Object.freeze([
+const INCREMENTAL9 = Object.freeze([
   ".github/workflows/social-3b0-exact-0004-runner-linux.yml",
+  "scripts/run-real-postgres-tests.js",
   "scripts/social-3a0p-local-scope.js",
   "tests/node-test-runner-safety.test.js",
   "tests/social-3a0p-current-diff-scope.test.js",
   "tests/social-3a0p-local-scope.test.js",
   "tests/social-3b0-exact-0004-runner-linux-workflow.test.js",
+  "tests/social-3b0-linux-physical-gate.test.js",
   "tests/social-postgres-real.test.js"
 ]);
 const LEGACY_EVIDENCE_KEYS = Object.freeze([
@@ -187,7 +189,13 @@ const EXACT0004_EVIDENCE_KEYS = Object.freeze([
   "applyExactInvoked",
   "applyExactCompleted",
   "databaseMutationAttempted",
-  "failureBeforeFirstMutation"
+  "failureBeforeFirstMutation",
+  "conflictingNegativeAttempted",
+  "conflictingNegativePromiseOutcome",
+  "conflictingNegativeObservedSqlState",
+  "conflictingNegativeFulfilledResultClass",
+  "conflictingNegativeAssertionMatched",
+  "conflictingNegativeRejectedBeforeAssertion"
 ]);
 const EVIDENCE_KEYS = Object.freeze([
   ...LEGACY_EVIDENCE_KEYS,
@@ -261,6 +269,35 @@ const SAFE_SQL_STATES = Object.freeze([
   "unknown",
   "not_observed"
 ]);
+const CONFLICTING_NEGATIVE_PROMISE_OUTCOMES = Object.freeze([
+  "not_started",
+  "fulfilled",
+  "rejected",
+  "unknown"
+]);
+const CONFLICTING_NEGATIVE_FULFILLED_RESULT_CLASSES = Object.freeze([
+  "not_observed",
+  "empty",
+  "applied_0004",
+  "other",
+  "unknown"
+]);
+const CONFLICTING_NEGATIVE_DEFAULTS = Object.freeze({
+  conflictingNegativeAttempted: false,
+  conflictingNegativePromiseOutcome: "not_started",
+  conflictingNegativeObservedSqlState: "not_observed",
+  conflictingNegativeFulfilledResultClass: "not_observed",
+  conflictingNegativeAssertionMatched: null,
+  conflictingNegativeRejectedBeforeAssertion: null
+});
+const CONFLICTING_NEGATIVE_SUCCESS = Object.freeze({
+  conflictingNegativeAttempted: true,
+  conflictingNegativePromiseOutcome: "rejected",
+  conflictingNegativeObservedSqlState: "23514",
+  conflictingNegativeFulfilledResultClass: "not_observed",
+  conflictingNegativeAssertionMatched: true,
+  conflictingNegativeRejectedBeforeAssertion: true
+});
 const EXACT0004_OPERATION_BY_SUBPHASE = Object.freeze({
   oid_catalog_lookup: "catalog_read",
   direct_privilege_boolean_check: "privilege_check",
@@ -378,10 +415,28 @@ function boundaryValidator(source) {
   const safeOperationClasses = inlineClosedSet(source, "safeOperationClasses");
   const safeErrorClasses = inlineClosedSet(source, "safeErrorClasses");
   const safeSqlStates = inlineClosedSet(source, "safeSqlStates");
+  const conflictingNegativePromiseOutcomes = inlineClosedSet(
+    source,
+    "conflictingNegativePromiseOutcomes"
+  );
+  const conflictingNegativeFulfilledResultClasses = inlineClosedSet(
+    source,
+    "conflictingNegativeFulfilledResultClasses"
+  );
   assert.deepEqual(exact0004Subphases, EXACT0004_SUBPHASES);
   assert.deepEqual(safeOperationClasses, SAFE_OPERATION_CLASSES);
   assert.deepEqual(safeErrorClasses, SAFE_ERROR_CLASSES);
   assert.deepEqual(safeSqlStates, SAFE_SQL_STATES);
+  assert.deepEqual(
+    conflictingNegativePromiseOutcomes,
+    CONFLICTING_NEGATIVE_PROMISE_OUTCOMES
+  );
+  assert.deepEqual(
+    conflictingNegativeFulfilledResultClasses,
+    CONFLICTING_NEGATIVE_FULFILLED_RESULT_CLASSES
+  );
+  const sqlStatePattern = "const postgresSqlState=/^[0-9A-Z]{5}$/;";
+  assert.equal(source.split(sqlStatePattern).length - 1, 1);
   return Function(
     "mainPhases",
     "phaseSet",
@@ -393,8 +448,19 @@ function boundaryValidator(source) {
     "safeOperationClasses",
     "safeErrorClasses",
     "safeSqlStates",
+    "postgresSqlState",
+    "conflictingNegativePromiseOutcomes",
+    "conflictingNegativeFulfilledResultClasses",
     "exact0004OperationBySubphase",
-    `"use strict";${inlineFunction(source, signature)};return validBoundary;`
+    [
+      '"use strict";',
+      inlineFunction(source, "function validConflictingNegative(value){"),
+      ";",
+      inlineFunction(source, "function conflictingNegativeSucceeded(value){"),
+      ";",
+      inlineFunction(source, signature),
+      ";return validBoundary;"
+    ].join("")
   )(
     physicalPhases.slice(0, -1),
     new Set(physicalPhases),
@@ -406,6 +472,9 @@ function boundaryValidator(source) {
     new Set(safeOperationClasses),
     new Set(safeErrorClasses),
     new Set(safeSqlStates),
+    /^[0-9A-Z]{5}$/,
+    new Set(conflictingNegativePromiseOutcomes),
+    new Set(conflictingNegativeFulfilledResultClasses),
     EXACT0004_OPERATION_BY_SUBPHASE
   );
 }
@@ -615,9 +684,9 @@ test("Exact-0004 Linux workflow fixes branch, immediate parent, ancestral base, 
   assert.equal(new Set(EXACT18).size, 18);
   const guardInventory = bashExpectedInventory(guard);
   assert.deepEqual(guardInventory, EXACT18);
-  assert.equal(INCREMENTAL7.length, 7);
-  assert.equal(new Set(INCREMENTAL7).size, 7);
-  assert.deepEqual(bashIncrementalInventory(guard), INCREMENTAL7);
+  assert.equal(INCREMENTAL9.length, 9);
+  assert.equal(new Set(INCREMENTAL9).size, 9);
+  assert.deepEqual(bashIncrementalInventory(guard), INCREMENTAL9);
   const physical = stepByName(
     currentJob,
     "Run the one-shot PostgreSQL 18 Exact-0004 proof"
@@ -677,8 +746,8 @@ test("Exact-0004 Linux workflow fixes branch, immediate parent, ancestral base, 
   assert.deepEqual(cleanupPins, CLEANUP_LF_SHA256);
   assert.equal(
     source.split(`'${RUNNER_FILE}'`).length - 1,
-    5,
-    "five semantic runner path positions"
+    6,
+    "six semantic runner path positions"
   );
   const imports = physicalRunnerImports(physical.run);
   assert.equal(imports.length, 1);
@@ -714,6 +783,9 @@ test("Exact-0004 Linux workflow fixes branch, immediate parent, ancestral base, 
     false
   );
   for (const stale of [
+    "social/checkpoint-3b0-exact-0004-runner-linux-conflict-sqlstate-20260820",
+    "[run-social-3b0] align exact 0004 conflict SQLSTATE",
+    "53bae8b3457b515b0e656d5b37fce4dc04d5e89f",
     "social/checkpoint-3b0-exact-0004-runner-linux-ledger-oid-boundary-20260816",
     "[run-social-3b0] resolve exact 0004 ledger privilege by oid",
     "social/checkpoint-3b0-exact-0004-runner-linux-snapshot-role-binding-20260815",
@@ -1379,7 +1451,7 @@ test("ledger OID parent remains exact atop snapshot-role binding and preserves i
   assert.equal(reconstructed, predecessorSource);
 });
 
-test("conflict SQLSTATE is exact atop the preserved plan-subphase evidence", () => {
+test("conflict Promise outcome is observed without changing the exact assertion", () => {
   const parentBytes = git([
     "cat-file",
     "blob",
@@ -1400,13 +1472,44 @@ test("conflict SQLSTATE is exact atop the preserved plan-subphase evidence", () 
   assert.equal(gitBlobOid(currentBytes), REAL_TEST_FILTERED_OID);
   const currentSource = currentBytes.toString("utf8");
   const staleExpectation = '      (error) => error?.code === "P0001"';
-  const canonicalExpectation = '      (error) => error?.code === "23514"';
-  assert.equal(parentSource.split(staleExpectation).length - 1, 1);
-  assert.equal(parentSource.includes(canonicalExpectation), false);
-  assert.equal(currentSource.split(canonicalExpectation).length - 1, 1);
+  const parentExpectation = '      (error) => error?.code === "23514"';
+  const observedExpectation = '        const matched = error?.code === "23514";';
+  const parentAssertion = [
+    "    await assert.rejects(",
+    "      runnerA.applyExact(",
+    "        EXACT_APPLY_REQUEST,",
+    "        configuration.approvalEnvironment",
+    "      ),",
+    parentExpectation,
+    "    );"
+  ].join("\n");
+  const observedAssertion = [
+    "    physicalPhases.markExact0004ConflictingNegativeAttempted();",
+    "    const observedConflictingNegativePromise =",
+    "      physicalPhases.observeExact0004ConflictingNegative(",
+    "        runnerA.applyExact(",
+    "          EXACT_APPLY_REQUEST,",
+    "          configuration.approvalEnvironment",
+    "        )",
+    "      );",
+    "    await assert.rejects(",
+    "      observedConflictingNegativePromise,",
+    "      (error) => {",
+    observedExpectation,
+    "        physicalPhases.markExact0004ConflictingNegativeAssertionMatched(",
+    "          matched",
+    "        );",
+    "        return matched;",
+    "      }",
+    "    );"
+  ].join("\n");
+  assert.equal(parentSource.includes(staleExpectation), false);
+  assert.equal(parentSource.split(parentExpectation).length - 1, 1);
+  assert.equal(currentSource.split(observedExpectation).length - 1, 1);
+  assert.equal(currentSource.includes(parentExpectation), false);
   assert.equal(currentSource.includes(staleExpectation), false);
   assert.equal(
-    currentSource.replace(canonicalExpectation, staleExpectation),
+    currentSource.replace(observedAssertion, parentAssertion),
     parentSource
   );
 
@@ -1478,7 +1581,7 @@ test("conflict SQLSTATE is exact atop the preserved plan-subphase evidence", () 
     conflictingCompleteIndex
   );
   assert.equal(
-    conflictingBlock.split(canonicalExpectation).length - 1,
+    conflictingBlock.split(observedExpectation).length - 1,
     1
   );
   assert.equal(conflictingBlock.includes(staleExpectation), false);
@@ -1494,6 +1597,20 @@ test("conflict SQLSTATE is exact atop the preserved plan-subphase evidence", () 
   assert.ok(
     conflictingBlock.indexOf("const conflictId = await insertExact0004Conflict(") <
       conflictingBlock.indexOf("runnerA.applyExact(")
+  );
+  for (const marker of [
+    "physicalPhases.markExact0004ConflictingNegativeAttempted();",
+    "physicalPhases.observeExact0004ConflictingNegative(",
+    "physicalPhases.markExact0004ConflictingNegativeAssertionMatched("
+  ]) assert.equal(conflictingBlock.split(marker).length - 1, 1, marker);
+  assert.equal(conflictingBlock.split("runnerA.applyExact(").length - 1, 1);
+  assert.ok(
+    conflictingBlock.indexOf("physicalPhases.markExact0004ConflictingNegativeAttempted();") <
+      conflictingBlock.indexOf("runnerA.applyExact(")
+  );
+  assert.ok(
+    conflictingBlock.indexOf("runnerA.applyExact(") <
+      conflictingBlock.indexOf("await assert.rejects(")
   );
   const rollbackStart = currentSource.indexOf(
     'physicalPhases.startExact0004Subphase("rollback_verification")'
@@ -1551,8 +1668,10 @@ test("conflict SQLSTATE is exact atop the preserved plan-subphase evidence", () 
 
   const parentRoute = inlineFunction(planParentSource, routeSignature);
   const currentRoute = inlineFunction(currentSource, routeSignature);
-  const normalizedRoute = stripMarkers(currentRoute)
-    .replace(canonicalExpectation, staleExpectation)
+  const normalizedRoute = stripMarkers(
+    currentRoute.replace(observedAssertion, parentAssertion)
+  )
+    .replace(parentExpectation, staleExpectation)
     .replace(",\n  physicalPhases\n)", "\n)")
     .replace(
       "proveMigratorExplicitRoleBoundary(migrationPoolA, physicalPhases)",
@@ -1610,10 +1729,13 @@ test("instrumented runner pin is the canonical filtered LF blob", () => {
     PARENT_RUNNER_LF_SHA256
   );
   assert.equal(gitBlobOid(parent), PARENT_RUNNER_FILTERED_OID);
-  assert.equal(RUNNER_FILTERED_OID, PARENT_RUNNER_FILTERED_OID);
+  assert.notEqual(RUNNER_FILTERED_OID, PARENT_RUNNER_FILTERED_OID);
+  const parentRunnerSource = parent.toString("utf8");
+  assert.ok(parentRunnerSource.includes("const EVIDENCE_SCHEMA_VERSION = 4;"));
+  assert.equal(parentRunnerSource.includes("conflictingNegativePromiseOutcome"), false);
   const runnerSource = canonical.toString("utf8");
   for (const fragment of [
-    "const EVIDENCE_SCHEMA_VERSION = 4;",
+    "const EVIDENCE_SCHEMA_VERSION = 5;",
     "EXACT_0004_SUBPHASES",
     "EXACT_0004_EXECUTION_SUBPHASES",
     "EXACT_0004_OPERATION_CLASSES",
@@ -1621,6 +1743,11 @@ test("instrumented runner pin is the canonical filtered LF blob", () => {
     "EXACT_0004_EVIDENCE_FIELDS",
     "SAFE_SQL_STATES",
     "SAFE_SQL_STATE_VALUES",
+    "POSTGRES_SQL_STATE",
+    "CONFLICTING_NEGATIVE_PROMISE_OUTCOMES",
+    "CONFLICTING_NEGATIVE_FULFILLED_RESULT_CLASSES",
+    "conflictingNegativeEvidenceValid",
+    "conflictingNegativeSucceeded",
     "emptyExact0004Evidence",
     "exact0004EvidenceValid",
     "exact0004OperationClass"
@@ -1995,7 +2122,8 @@ test("boundary validators reject weakened phase and diagnostic states", () => {
     applyExactInvoked: false,
     applyExactCompleted: false,
     databaseMutationAttempted: false,
-    failureBeforeFirstMutation: false
+    failureBeforeFirstMutation: false,
+    ...CONFLICTING_NEGATIVE_DEFAULTS
   });
   const boundaryFixtures = Object.freeze([
     Object.freeze({
@@ -2163,6 +2291,18 @@ test("Exact-0004 subphase artifact boundary is closed and mutation-coherent", ()
     assert.deepEqual(inlineClosedSet(run, "safeOperationClasses"), SAFE_OPERATION_CLASSES);
     assert.deepEqual(inlineClosedSet(run, "safeErrorClasses"), SAFE_ERROR_CLASSES);
     assert.deepEqual(inlineClosedSet(run, "safeSqlStates"), SAFE_SQL_STATES);
+    assert.deepEqual(
+      inlineClosedSet(run, "conflictingNegativePromiseOutcomes"),
+      CONFLICTING_NEGATIVE_PROMISE_OUTCOMES
+    );
+    assert.deepEqual(
+      inlineClosedSet(run, "conflictingNegativeFulfilledResultClasses"),
+      CONFLICTING_NEGATIVE_FULFILLED_RESULT_CLASSES
+    );
+    assert.equal(
+      run.split("const postgresSqlState=/^[0-9A-Z]{5}$/;").length - 1,
+      1
+    );
   }
 
   const validPlanFailure = Object.freeze({
@@ -2191,13 +2331,82 @@ test("Exact-0004 subphase artifact boundary is closed and mutation-coherent", ()
     applyExactInvoked: false,
     applyExactCompleted: false,
     databaseMutationAttempted: false,
-    failureBeforeFirstMutation: true
+    failureBeforeFirstMutation: true,
+    ...CONFLICTING_NEGATIVE_DEFAULTS
   });
   const validAssertionFailure = Object.freeze({
     ...validPlanFailure,
     safeSqlState: "23514",
     safeErrorClass: "assertion_failure"
   });
+  const validConflictFailure = Object.freeze({
+    ...validPlanFailure,
+    lastExact0004SubphaseStarted: "conflicting_0004_negative",
+    lastExact0004SubphaseCompleted: "synthetic_0005_negative",
+    exact0004FailureSubphase: "conflicting_0004_negative",
+    safeSqlState: "unknown",
+    safeErrorClass: "assertion_failure",
+    safeOperationClass: "negative_gate",
+    planExactCompleted: true,
+    databaseMutationAttempted: true,
+    failureBeforeFirstMutation: false,
+    ...CONFLICTING_NEGATIVE_SUCCESS
+  });
+  const validConflictOutcomes = Object.freeze([
+    Object.freeze({
+      label: "rejected_23514_matched",
+      value: Object.freeze({ ...validConflictFailure })
+    }),
+    Object.freeze({
+      label: "rejected_other_sqlstate_unmatched",
+      value: Object.freeze({
+        ...validConflictFailure,
+        conflictingNegativeObservedSqlState: "40001",
+        conflictingNegativeAssertionMatched: false
+      })
+    }),
+    Object.freeze({
+      label: "fulfilled_empty",
+      value: Object.freeze({
+        ...validConflictFailure,
+        conflictingNegativePromiseOutcome: "fulfilled",
+        conflictingNegativeObservedSqlState: "not_observed",
+        conflictingNegativeFulfilledResultClass: "empty",
+        conflictingNegativeAssertionMatched: null,
+        conflictingNegativeRejectedBeforeAssertion: false
+      })
+    }),
+    Object.freeze({
+      label: "fulfilled_applied_0004",
+      value: Object.freeze({
+        ...validConflictFailure,
+        conflictingNegativePromiseOutcome: "fulfilled",
+        conflictingNegativeObservedSqlState: "not_observed",
+        conflictingNegativeFulfilledResultClass: "applied_0004",
+        conflictingNegativeAssertionMatched: null,
+        conflictingNegativeRejectedBeforeAssertion: false
+      })
+    }),
+    Object.freeze({
+      label: "rejected_without_code_is_unknown",
+      value: Object.freeze({
+        ...validConflictFailure,
+        conflictingNegativeObservedSqlState: "unknown",
+        conflictingNegativeAssertionMatched: false
+      })
+    }),
+    Object.freeze({
+      label: "attempted_but_outcome_not_preserved_is_closed_unknown",
+      value: Object.freeze({
+        ...validConflictFailure,
+        conflictingNegativePromiseOutcome: "unknown",
+        conflictingNegativeObservedSqlState: "unknown",
+        conflictingNegativeFulfilledResultClass: "unknown",
+        conflictingNegativeAssertionMatched: null,
+        conflictingNegativeRejectedBeforeAssertion: null
+      })
+    })
+  ]);
   const validPostExactFailure = Object.freeze({
     ...validPlanFailure,
     lastMainPhaseStarted: "post_migration_validation",
@@ -2215,7 +2424,8 @@ test("Exact-0004 subphase artifact boundary is closed and mutation-coherent", ()
     applyExactInvoked: true,
     applyExactCompleted: true,
     databaseMutationAttempted: true,
-    failureBeforeFirstMutation: false
+    failureBeforeFirstMutation: false,
+    ...CONFLICTING_NEGATIVE_SUCCESS
   });
   const invalidMutations = Object.freeze([
     ["unknown_subphase", { lastExact0004SubphaseStarted: "outside_allowlist" }],
@@ -2257,6 +2467,30 @@ test("Exact-0004 subphase artifact boundary is closed and mutation-coherent", ()
     }],
     ["subphase_order_divergence", {
       lastExact0004SubphaseCompleted: "oid_catalog_lookup"
+    }],
+    ["invalid_observed_sqlstate", {
+      ...validConflictFailure,
+      conflictingNegativeObservedSqlState: "23-14"
+    }],
+    ["rejected_match_disagrees_with_sqlstate", {
+      ...validConflictFailure,
+      conflictingNegativeObservedSqlState: "40001",
+      conflictingNegativeAssertionMatched: true
+    }],
+    ["fulfilled_cannot_store_sqlstate", {
+      ...validConflictFailure,
+      conflictingNegativePromiseOutcome: "fulfilled",
+      conflictingNegativeFulfilledResultClass: "empty",
+      conflictingNegativeAssertionMatched: null,
+      conflictingNegativeRejectedBeforeAssertion: false
+    }],
+    ["fulfilled_cannot_store_raw_result_class", {
+      ...validConflictFailure,
+      conflictingNegativePromiseOutcome: "fulfilled",
+      conflictingNegativeObservedSqlState: "not_observed",
+      conflictingNegativeFulfilledResultClass: "raw_result",
+      conflictingNegativeAssertionMatched: null,
+      conflictingNegativeRejectedBeforeAssertion: false
     }]
   ]);
   for (const [index, validate] of runs.map(boundaryValidator).entries()) {
@@ -2271,6 +2505,15 @@ test("Exact-0004 subphase artifact boundary is closed and mutation-coherent", ()
       true,
       `validator_${index + 1}:post_exact`
     );
+    for (const fixture of validConflictOutcomes) {
+      const firstFailure = fixture.value.firstFailure;
+      assert.equal(
+        validate(fixture.value),
+        true,
+        `validator_${index + 1}:${fixture.label}`
+      );
+      assert.equal(fixture.value.firstFailure, firstFailure);
+    }
     for (const [label, mutation] of [
       ["post_exact_defaults", {
         lastExact0004SubphaseStarted: "not_reached",
@@ -2303,7 +2546,7 @@ test("Exact-0004 subphase artifact boundary is closed and mutation-coherent", ()
   }
 });
 
-test("evidence keeps legacy schema 1 and uses the closed safe schema 4", () => {
+test("evidence keeps legacy schema 1 and uses the closed safe schema 5", () => {
   const { source, workflow } = read();
   const currentJob = job(workflow);
   const physical = stepByName(
@@ -2314,10 +2557,10 @@ test("evidence keeps legacy schema 1 and uses the closed safe schema 4", () => {
   const enforcement = stepByName(currentJob, "Enforce final Exact-0004 result");
   assert.equal(LEGACY_EVIDENCE_KEYS.length, 23);
   assert.equal(SAFE_EVIDENCE_KEYS.length, 23);
-  assert.equal(EXACT0004_EVIDENCE_KEYS.length, 12);
-  assert.equal(EVIDENCE_KEYS.length, 58);
-  assert.equal(new Set(EVIDENCE_KEYS).size, 58);
-  assert.equal(RUNNER_FACT_KEYS.length, 35);
+  assert.equal(EXACT0004_EVIDENCE_KEYS.length, 18);
+  assert.equal(EVIDENCE_KEYS.length, 64);
+  assert.equal(new Set(EVIDENCE_KEYS).size, 64);
+  assert.equal(RUNNER_FACT_KEYS.length, 41);
   assert.equal(PROCESS_STATUS_KEYS.length, 5);
   const expectedEvidenceKeys = [...EVIDENCE_KEYS].sort();
   const expectedStatusKeys = [...PROCESS_STATUS_KEYS].sort();
@@ -2336,7 +2579,7 @@ test("evidence keeps legacy schema 1 and uses the closed safe schema 4", () => {
     assert.match(run, new RegExp(`${valueName}\\.schemaVersion\\s*!==\\s*1`));
     assert.match(
       run,
-      new RegExp(`${valueName}\\.evidenceSchemaVersion\\s*!==\\s*4`)
+      new RegExp(`${valueName}\\.evidenceSchemaVersion\\s*!==\\s*5`)
     );
     assert.match(
       run,
@@ -2358,6 +2601,16 @@ test("evidence keeps legacy schema 1 and uses the closed safe schema 4", () => {
       "stdout",
       "stderr",
       "stack",
+      "message",
+      "query",
+      "parameters",
+      "detail",
+      "hint",
+      "where",
+      "result",
+      "rawResult",
+      "absolutePath",
+      "secret",
       "environment",
       "url",
       "password"
@@ -2374,6 +2627,11 @@ test("evidence keeps legacy schema 1 and uses the closed safe schema 4", () => {
       "4000-4499",
       "final_snapshot",
       "failureBeforeFirstMutation",
+      "conflictingNegativePromiseOutcome",
+      "conflictingNegativeObservedSqlState",
+      "conflictingNegativeFulfilledResultClass",
+      "conflictingNegativeAssertionMatched",
+      "conflictingNegativeRejectedBeforeAssertion",
       "validBoundary"
     ]) assert.ok(run.includes(boundaryFragment), `${name}:${boundaryFragment}`);
   }
@@ -2416,7 +2674,9 @@ test("evidence keeps legacy schema 1 and uses the closed safe schema 4", () => {
     "failurePhase",
     "safePermissionOrigin",
     "safeSourceBasename",
-    "safeLineBucket"
+    "safeLineBucket",
+    "conflictingNegativeAssertionMatched",
+    "conflictingNegativeRejectedBeforeAssertion"
   ]) assert.ok(physical.run.includes(`${nullable}:null`), nullable);
   for (const booleanDefault of [
     "cleanupStarted",
@@ -2427,7 +2687,8 @@ test("evidence keeps legacy schema 1 and uses the closed safe schema 4", () => {
     "applyExactInvoked",
     "applyExactCompleted",
     "databaseMutationAttempted",
-    "failureBeforeFirstMutation"
+    "failureBeforeFirstMutation",
+    "conflictingNegativeAttempted"
   ]) assert.ok(physical.run.includes(`${booleanDefault}:false`), booleanDefault);
   for (const defaultFragment of [
     "lastExact0004SubphaseStarted:'not_reached'",
@@ -2435,7 +2696,10 @@ test("evidence keeps legacy schema 1 and uses the closed safe schema 4", () => {
     "exact0004FailureSubphase:'not_reached'",
     "safeSqlState:'not_observed'",
     "safeErrorClass:'unknown'",
-    "safeOperationClass:'unknown'"
+    "safeOperationClass:'unknown'",
+    "conflictingNegativePromiseOutcome:'not_started'",
+    "conflictingNegativeObservedSqlState:'not_observed'",
+    "conflictingNegativeFulfilledResultClass:'not_observed'"
   ]) {
     assert.ok(physical.run.includes(defaultFragment), `physical:${defaultFragment}`);
     assert.ok(finalize.run.includes(defaultFragment), `fallback:${defaultFragment}`);
@@ -2472,16 +2736,23 @@ test("evidence keeps legacy schema 1 and uses the closed safe schema 4", () => {
     "evidence.applyExactInvoked===true",
     "evidence.applyExactCompleted===true",
     "evidence.databaseMutationAttempted===true",
-    "evidence.failureBeforeFirstMutation===false"
+    "evidence.failureBeforeFirstMutation===false",
+    "evidence.conflictingNegativeAttempted===true",
+    "evidence.conflictingNegativePromiseOutcome==='rejected'",
+    "evidence.conflictingNegativeObservedSqlState==='23514'",
+    "evidence.conflictingNegativeFulfilledResultClass==='not_observed'",
+    "evidence.conflictingNegativeAssertionMatched===true",
+    "evidence.conflictingNegativeRejectedBeforeAssertion===true"
   ]) {
     assert.ok(physical.run.includes(successFragment), `physical:${successFragment}`);
     assert.ok(enforcement.run.includes(successFragment.replace("===", "!==")),
       `enforcement:${successFragment}`);
   }
   assert.ok(
-    finalize.run.includes("evidenceSchemaVersion:4") &&
+    finalize.run.includes("evidenceSchemaVersion:5") &&
     finalize.run.includes("safeLineBucket:'unknown'")
   );
+  assert.equal(source.includes("evidenceSchemaVersion:4"), false);
   assert.equal(source.includes("evidenceSchemaVersion:3"), false);
   for (const key of EVIDENCE_KEYS) assert.ok(source.includes(key), key);
   for (const key of PROCESS_STATUS_KEYS) assert.ok(source.includes(key), key);

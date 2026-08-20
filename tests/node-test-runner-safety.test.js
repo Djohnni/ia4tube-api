@@ -16,13 +16,19 @@ const {
   validateTestPartition
 } = require("../scripts/run-node-tests");
 const {
+  CONFLICTING_NEGATIVE_FULFILLED_RESULT_CLASSES,
+  CONFLICTING_NEGATIVE_PROMISE_OUTCOMES,
   EXACT_0004_ERROR_CLASSES,
   EXACT_0004_EVIDENCE_FIELDS,
   EXACT_0004_EXECUTION_SUBPHASES,
   EXACT_0004_OPERATION_CLASSES,
   EXACT_0004_SUBPHASES,
+  SAFE_EVENT_PREFIX,
   SAFE_SQL_STATES,
   SAFE_SQL_STATE_VALUES,
+  conflictingNegativeEvidenceValid,
+  createPhysicalPhaseEmitter,
+  emptyConflictingNegativeEvidence,
   emptyExact0004Evidence,
   exact0004EvidenceValid,
   exact0004OperationClass
@@ -58,9 +64,9 @@ const SAFE_EVIDENCE_COMMIT = "8534817574a22dbd144a835c9f3585c44ee11c96";
 const PERMISSION_BOUNDARY_COMMIT = "555d71eacbde76ceffdd03d64731e03849978c17";
 const REAL_POSTGRES_TEST = "tests/social-postgres-real.test.js";
 const REAL_POSTGRES_TEST_LF_SHA256 =
-  "0c6f7fff3bb031e5fd13f6220cc19d6bdaf24160e435bbe533404c28f7f7be20";
+  "d07054524efec8ac48b720eed8df7a39d2db6a8a5cda6249b80c30ec73b33a66";
 const REAL_POSTGRES_TEST_FILTERED_OID =
-  "c6c4bcce192d33940d99d7395bde9ba79fc78ea1";
+  "926b6050fcb89b528126eb6fbf72f70624556a4b";
 const PHYSICAL_MAIN_PHASES = Object.freeze([
   "physical_target_preflight",
   "role_provisioning",
@@ -880,8 +886,45 @@ test("24. exact 0004 production ledger reads use the migrator role only", () => 
     '  physicalPhases.startExact0004Subphase("final_snapshot");\n',
     '  physicalPhases.completeExact0004Subphase("final_snapshot");\n'
   ];
+  const conflictingNegativeOutcomeReplacement = {
+    current: [
+      "    physicalPhases.markExact0004ConflictingNegativeAttempted();",
+      "    const observedConflictingNegativePromise =",
+      "      physicalPhases.observeExact0004ConflictingNegative(",
+      "        runnerA.applyExact(",
+      "          EXACT_APPLY_REQUEST,",
+      "          configuration.approvalEnvironment",
+      "        )",
+      "      );",
+      "    await assert.rejects(",
+      "      observedConflictingNegativePromise,",
+      "      (error) => {",
+      '        const matched = error?.code === "23514";',
+      "        physicalPhases.markExact0004ConflictingNegativeAssertionMatched(",
+      "          matched",
+      "        );",
+      "        return matched;",
+      "      }",
+      "    );"
+    ].join("\n"),
+    previous: [
+      "    await assert.rejects(",
+      "      runnerA.applyExact(",
+      "        EXACT_APPLY_REQUEST,",
+      "        configuration.approvalEnvironment",
+      "      ),",
+      '      (error) => error?.code === "23514"',
+      "    );"
+    ].join("\n")
+  };
   let permissionBoundaryCandidate = replaceExactlyOnce(
     realTestSource,
+    conflictingNegativeOutcomeReplacement.current,
+    conflictingNegativeOutcomeReplacement.previous,
+    "conflicting negative outcome observation"
+  );
+  permissionBoundaryCandidate = replaceExactlyOnce(
+    permissionBoundaryCandidate,
     '      (error) => error?.code === "23514"',
     '      (error) => error?.code === "P0001"',
     "canonical conflict SQLSTATE expectation"
@@ -994,7 +1037,7 @@ test("24. exact 0004 production ledger reads use the migrator role only", () => 
   assert.deepEqual(observedMarkers, expectedMarkers);
   assert.equal(
     (realTestSource.match(/\bphysicalPhases\./g) || []).length,
-    63
+    66
   );
   assert.equal(
     (realTestSource.match(/\bcreatePhysicalPhaseEmitter\b/g) || []).length,
@@ -1264,7 +1307,15 @@ test("26. exact 0004 ledger OID boundary rejects incomplete or textual contracts
   }
 });
 
-test("27. exact 0004 plan subphase evidence stays closed and observational", () => {
+test("27. exact 0004 plan subphase evidence stays closed and observational", async () => {
+  const conflictingNegativeEvidenceFields = [
+    "conflictingNegativeAttempted",
+    "conflictingNegativePromiseOutcome",
+    "conflictingNegativeObservedSqlState",
+    "conflictingNegativeFulfilledResultClass",
+    "conflictingNegativeAssertionMatched",
+    "conflictingNegativeRejectedBeforeAssertion"
+  ];
   const evidenceFields = [
     "lastExact0004SubphaseStarted",
     "lastExact0004SubphaseCompleted",
@@ -1277,7 +1328,8 @@ test("27. exact 0004 plan subphase evidence stays closed and observational", () 
     "applyExactInvoked",
     "applyExactCompleted",
     "databaseMutationAttempted",
-    "failureBeforeFirstMutation"
+    "failureBeforeFirstMutation",
+    ...conflictingNegativeEvidenceFields
   ];
   const executionSubphases = [
     "oid_catalog_lookup",
@@ -1319,6 +1371,19 @@ test("27. exact 0004 plan subphase evidence stays closed and observational", () 
     "unexpected_result",
     "unknown"
   ];
+  const promiseOutcomes = [
+    "not_started",
+    "fulfilled",
+    "rejected",
+    "unknown"
+  ];
+  const fulfilledResultClasses = [
+    "not_observed",
+    "empty",
+    "applied_0004",
+    "other",
+    "unknown"
+  ];
   assert.deepEqual(EXACT_0004_EVIDENCE_FIELDS, evidenceFields);
   assert.deepEqual(EXACT_0004_EXECUTION_SUBPHASES, executionSubphases);
   assert.deepEqual(
@@ -1327,12 +1392,20 @@ test("27. exact 0004 plan subphase evidence stays closed and observational", () 
   );
   assert.deepEqual(EXACT_0004_OPERATION_CLASSES, operationClasses);
   assert.deepEqual(EXACT_0004_ERROR_CLASSES, errorClasses);
+  assert.deepEqual(
+    CONFLICTING_NEGATIVE_PROMISE_OUTCOMES,
+    promiseOutcomes
+  );
+  assert.deepEqual(
+    CONFLICTING_NEGATIVE_FULFILLED_RESULT_CLASSES,
+    fulfilledResultClasses
+  );
   assert.deepEqual(SAFE_SQL_STATES, ["42501", "23514", "P0001"]);
   assert.deepEqual(
     SAFE_SQL_STATE_VALUES,
     ["42501", "23514", "P0001", "unknown", "not_observed"]
   );
-  assert.equal(new Set(EXACT_0004_EVIDENCE_FIELDS).size, 12);
+  assert.equal(new Set(EXACT_0004_EVIDENCE_FIELDS).size, 18);
   assert.equal(new Set(EXACT_0004_SUBPHASES).size, 16);
   for (const forbidden of [
     "message",
@@ -1348,6 +1421,21 @@ test("27. exact 0004 plan subphase evidence stays closed and observational", () 
     assert.equal(evidenceFields.includes(forbidden), false, forbidden);
   }
 
+  const emptyConflictingNegative = emptyConflictingNegativeEvidence();
+  assert.deepEqual(emptyConflictingNegative, {
+    conflictingNegativeAttempted: false,
+    conflictingNegativePromiseOutcome: "not_started",
+    conflictingNegativeObservedSqlState: "not_observed",
+    conflictingNegativeFulfilledResultClass: "not_observed",
+    conflictingNegativeAssertionMatched: null,
+    conflictingNegativeRejectedBeforeAssertion: null
+  });
+  assert.equal(Object.isFrozen(emptyConflictingNegative), true);
+  assert.equal(
+    conflictingNegativeEvidenceValid(emptyConflictingNegative),
+    true
+  );
+
   const empty = emptyExact0004Evidence();
   assert.deepEqual(empty, {
     lastExact0004SubphaseStarted: "not_reached",
@@ -1361,7 +1449,8 @@ test("27. exact 0004 plan subphase evidence stays closed and observational", () 
     applyExactInvoked: false,
     applyExactCompleted: false,
     databaseMutationAttempted: false,
-    failureBeforeFirstMutation: false
+    failureBeforeFirstMutation: false,
+    ...emptyConflictingNegative
   });
   assert.equal(Object.isFrozen(empty), true);
   assert.equal(exact0004EvidenceValid(empty), true);
@@ -1374,9 +1463,101 @@ test("27. exact 0004 plan subphase evidence stays closed and observational", () 
     planExactCompleted: true,
     applyExactInvoked: true,
     applyExactCompleted: true,
-    databaseMutationAttempted: true
+    databaseMutationAttempted: true,
+    conflictingNegativeAttempted: true,
+    conflictingNegativePromiseOutcome: "rejected",
+    conflictingNegativeObservedSqlState: "23514",
+    conflictingNegativeFulfilledResultClass: "not_observed",
+    conflictingNegativeAssertionMatched: true,
+    conflictingNegativeRejectedBeforeAssertion: true
   };
   assert.equal(exact0004EvidenceValid(successful), true);
+  const rejectedDifferentSqlState = {
+    ...emptyConflictingNegative,
+    conflictingNegativeAttempted: true,
+    conflictingNegativePromiseOutcome: "rejected",
+    conflictingNegativeObservedSqlState: "P0001",
+    conflictingNegativeAssertionMatched: false,
+    conflictingNegativeRejectedBeforeAssertion: true
+  };
+  const rejectedWithoutCode = {
+    ...rejectedDifferentSqlState,
+    conflictingNegativeObservedSqlState: "unknown"
+  };
+  const fulfilledEmpty = {
+    ...emptyConflictingNegative,
+    conflictingNegativeAttempted: true,
+    conflictingNegativePromiseOutcome: "fulfilled",
+    conflictingNegativeFulfilledResultClass: "empty",
+    conflictingNegativeRejectedBeforeAssertion: false
+  };
+  const fulfilledApplied0004 = {
+    ...fulfilledEmpty,
+    conflictingNegativeFulfilledResultClass: "applied_0004"
+  };
+  const unknownOutcome = {
+    ...emptyConflictingNegative,
+    conflictingNegativeAttempted: true,
+    conflictingNegativePromiseOutcome: "unknown",
+    conflictingNegativeObservedSqlState: "unknown",
+    conflictingNegativeFulfilledResultClass: "unknown"
+  };
+  for (const valid of [
+    {
+      ...emptyConflictingNegative,
+      conflictingNegativeAttempted: true,
+      conflictingNegativePromiseOutcome: "rejected",
+      conflictingNegativeObservedSqlState: "23514",
+      conflictingNegativeAssertionMatched: true,
+      conflictingNegativeRejectedBeforeAssertion: true
+    },
+    rejectedDifferentSqlState,
+    rejectedWithoutCode,
+    fulfilledEmpty,
+    fulfilledApplied0004,
+    { ...fulfilledEmpty, conflictingNegativeFulfilledResultClass: "other" },
+    { ...fulfilledEmpty, conflictingNegativeFulfilledResultClass: "unknown" },
+    unknownOutcome
+  ]) assert.equal(conflictingNegativeEvidenceValid(valid), true);
+  for (const invalid of [
+    { ...emptyConflictingNegative, conflictingNegativeAttempted: true },
+    {
+      ...rejectedDifferentSqlState,
+      conflictingNegativePromiseOutcome: "outside_enum"
+    },
+    {
+      ...rejectedDifferentSqlState,
+      conflictingNegativeObservedSqlState: "invalid_sqlstate"
+    },
+    {
+      ...rejectedDifferentSqlState,
+      conflictingNegativeFulfilledResultClass: "other"
+    },
+    {
+      ...rejectedDifferentSqlState,
+      conflictingNegativeAssertionMatched: true
+    },
+    {
+      ...rejectedDifferentSqlState,
+      conflictingNegativeRejectedBeforeAssertion: false
+    },
+    {
+      ...fulfilledEmpty,
+      conflictingNegativeObservedSqlState: "23514"
+    },
+    {
+      ...fulfilledEmpty,
+      conflictingNegativeFulfilledResultClass: "not_observed"
+    },
+    {
+      ...fulfilledEmpty,
+      conflictingNegativeAssertionMatched: false
+    },
+    {
+      ...unknownOutcome,
+      conflictingNegativeRejectedBeforeAssertion: true
+    }
+  ]) assert.equal(conflictingNegativeEvidenceValid(invalid), false);
   const beforeFirstMutationFailure = {
     ...emptyExact0004Evidence({ failureObserved: true }),
     lastExact0004SubphaseStarted: "plan_exact",
@@ -1400,6 +1581,12 @@ test("27. exact 0004 plan subphase evidence stays closed and observational", () 
     { ...successful, applyExactInvoked: false },
     { ...successful, databaseMutationAttempted: false },
     { ...successful, failureBeforeFirstMutation: true },
+    { ...successful, conflictingNegativeAttempted: false },
+    { ...successful, conflictingNegativePromiseOutcome: "fulfilled" },
+    { ...successful, conflictingNegativeObservedSqlState: "P0001" },
+    { ...successful, conflictingNegativeFulfilledResultClass: "other" },
+    { ...successful, conflictingNegativeAssertionMatched: false },
+    { ...successful, conflictingNegativeRejectedBeforeAssertion: false },
     { ...successful, safeSqlState: "42P01" },
     {
       ...beforeFirstMutationFailure,
@@ -1456,6 +1643,295 @@ test("27. exact 0004 plan subphase evidence stays closed and observational", () 
   assert.ok(conflictingComplete);
   assert.equal(conflictingStart.index < mutationAttempt, true);
   assert.equal(mutationAttempt < conflictingComplete.index, true);
+  const rollbackStart = realTestSource.indexOf(
+    'physicalPhases.startExact0004Subphase("rollback_verification")',
+    conflictingComplete.index
+  );
+  assert.notEqual(rollbackStart, -1);
+  const conflictingRoute = realTestSource.slice(
+    conflictingStart.index,
+    rollbackStart
+  );
+  const conflictingRouteTokens = [
+    "physicalPhases.markExact0004DatabaseMutationAttempted();",
+    "const conflictId = await insertExact0004Conflict(",
+    "physicalPhases.markExact0004ConflictingNegativeAttempted();",
+    "physicalPhases.observeExact0004ConflictingNegative(",
+    "runnerA.applyExact(",
+    "await assert.rejects(",
+    'const matched = error?.code === "23514";',
+    "physicalPhases.markExact0004ConflictingNegativeAssertionMatched(",
+    "return matched;",
+    'physicalPhases.completeExact0004Subphase(\n      "conflicting_0004_negative"'
+  ];
+  for (const token of conflictingRouteTokens) {
+    assert.equal(
+      conflictingRoute.split(token).length - 1,
+      1,
+      token
+    );
+  }
+  const conflictingRoutePositions = conflictingRouteTokens.map(
+    (token) => conflictingRoute.indexOf(token)
+  );
+  assert.deepEqual(
+    [...conflictingRoutePositions].sort((left, right) => left - right),
+    conflictingRoutePositions
+  );
+  assert.equal(
+    conflictingRoute.includes('error?.code === "P0001"'),
+    false
+  );
+  assert.equal(
+    /error\?\.(?:message|stack|detail|hint|where)|\b(?:query|parameters)\b/.test(
+      conflictingRoute
+    ),
+    false
+  );
+
+  function activeConflictingNegativeEmitter() {
+    const lines = [];
+    const physicalPhases = createPhysicalPhaseEmitter(
+      (line) => lines.push(line)
+    );
+    for (const phase of PHYSICAL_MAIN_PHASES) {
+      physicalPhases.startMain(phase);
+      if (phase !== "exact_0004_plan_apply") {
+        physicalPhases.completeMain(phase);
+        continue;
+      }
+      for (const subphase of executionSubphases) {
+        physicalPhases.startExact0004Subphase(subphase);
+        if (subphase === "conflicting_0004_negative") {
+          physicalPhases.markExact0004DatabaseMutationAttempted();
+          physicalPhases.markExact0004ConflictingNegativeAttempted();
+          return { lines, physicalPhases };
+        }
+        physicalPhases.completeExact0004Subphase(subphase);
+      }
+    }
+    throw new Error("synthetic_conflicting_negative_subphase_missing");
+  }
+
+  function parsedSafeEvents(lines) {
+    return lines.map((line) => {
+      assert.equal(line.startsWith(SAFE_EVENT_PREFIX), true);
+      return JSON.parse(line.slice(SAFE_EVENT_PREFIX.length));
+    });
+  }
+
+  async function observeConflict({ outcome, value }) {
+    const { lines, physicalPhases } = activeConflictingNegativeEmitter();
+    let applyExactCalls = 0;
+    let fulfillmentIdentityPreserved = null;
+    let predicateCalls = 0;
+    let rejectionIdentityPreserved = null;
+    let assertionFailure = null;
+    const applyExactOnce = () => {
+      applyExactCalls += 1;
+      return outcome === "fulfilled"
+        ? Promise.resolve(value)
+        : Promise.reject(value);
+    };
+    const observedPromise =
+      physicalPhases.observeExact0004ConflictingNegative(applyExactOnce());
+    try {
+      await assert.rejects(
+        observedPromise,
+        (error) => {
+          predicateCalls += 1;
+          rejectionIdentityPreserved = error === value;
+          const matched = error?.code === "23514";
+          physicalPhases.markExact0004ConflictingNegativeAssertionMatched(
+            matched
+          );
+          return matched;
+        }
+      );
+    } catch (error) {
+      assertionFailure = error;
+    }
+    if (outcome === "fulfilled") {
+      fulfillmentIdentityPreserved = await observedPromise === value;
+    }
+    assert.equal(applyExactCalls, 1);
+    const events = parsedSafeEvents(lines);
+    const attemptedIndex = events.findIndex(
+      ({ event }) => event === "exact0004ConflictingNegativeAttempted"
+    );
+    const settledIndex = events.findIndex(
+      ({ event }) => event === "exact0004ConflictingNegativePromiseSettled"
+    );
+    const assertionIndex = events.findIndex(
+      ({ event }) => event === "exact0004ConflictingNegativeAssertionMatched"
+    );
+    assert.notEqual(attemptedIndex, -1);
+    assert.equal(attemptedIndex < settledIndex, true);
+    assert.equal(
+      outcome === "rejected"
+        ? settledIndex < assertionIndex
+        : assertionIndex === -1,
+      true
+    );
+    const attempted = events[attemptedIndex];
+    const settled = events[settledIndex];
+    const assertion = assertionIndex === -1 ? null : events[assertionIndex];
+    const evidence = {
+      conflictingNegativeAttempted:
+        attempted.conflictingNegativeAttempted,
+      conflictingNegativePromiseOutcome:
+        settled.conflictingNegativePromiseOutcome,
+      conflictingNegativeObservedSqlState:
+        settled.conflictingNegativeObservedSqlState,
+      conflictingNegativeFulfilledResultClass:
+        settled.conflictingNegativeFulfilledResultClass,
+      conflictingNegativeAssertionMatched:
+        assertion?.conflictingNegativeAssertionMatched ?? null,
+      conflictingNegativeRejectedBeforeAssertion:
+        settled.conflictingNegativeRejectedBeforeAssertion
+    };
+    assert.deepEqual(Object.keys(evidence), conflictingNegativeEvidenceFields);
+    assert.equal(conflictingNegativeEvidenceValid(evidence), true);
+    return {
+      applyExactCalls,
+      assertionFailure,
+      evidence,
+      fulfillmentIdentityPreserved,
+      lines,
+      predicateCalls,
+      rejectionIdentityPreserved
+    };
+  }
+
+  const correctError = Object.assign(
+    new Error("raw_correct_message_must_not_escape"),
+    {
+      code: "23514",
+      detail: "raw_correct_detail_must_not_escape",
+      hint: "raw_correct_hint_must_not_escape"
+    }
+  );
+  const correctRejection = await observeConflict({
+    outcome: "rejected",
+    value: correctError
+  });
+  assert.equal(correctRejection.assertionFailure, null);
+  assert.equal(correctRejection.predicateCalls, 1);
+  assert.equal(correctRejection.rejectionIdentityPreserved, true);
+  assert.deepEqual(correctRejection.evidence, {
+    conflictingNegativeAttempted: true,
+    conflictingNegativePromiseOutcome: "rejected",
+    conflictingNegativeObservedSqlState: "23514",
+    conflictingNegativeFulfilledResultClass: "not_observed",
+    conflictingNegativeAssertionMatched: true,
+    conflictingNegativeRejectedBeforeAssertion: true
+  });
+
+  const differentSqlState = await observeConflict({
+    outcome: "rejected",
+    value: Object.assign(new Error("raw_other_state_must_not_escape"), {
+      code: "P0001"
+    })
+  });
+  assert.equal(differentSqlState.assertionFailure?.code, "ERR_ASSERTION");
+  assert.equal(differentSqlState.predicateCalls, 1);
+  assert.equal(differentSqlState.rejectionIdentityPreserved, true);
+  assert.deepEqual(differentSqlState.evidence, rejectedDifferentSqlState);
+
+  const fulfilledNothing = await observeConflict({
+    outcome: "fulfilled",
+    value: undefined
+  });
+  assert.equal(fulfilledNothing.assertionFailure?.code, "ERR_ASSERTION");
+  assert.equal(fulfilledNothing.predicateCalls, 0);
+  assert.equal(fulfilledNothing.rejectionIdentityPreserved, null);
+  assert.equal(fulfilledNothing.fulfillmentIdentityPreserved, true);
+  assert.deepEqual(fulfilledNothing.evidence, fulfilledEmpty);
+
+  const rawTokenKey = ["to", "ken"].join("");
+  const rawTokenValue = ["raw", "token", "must", "not", "escape"].join("_");
+  const appliedResult = {
+    appliedMigration: "0004_social_connector_persistence",
+    parameters: ["raw_parameter_must_not_escape"],
+    query: "SELECT raw_sql_must_not_escape",
+    [rawTokenKey]: rawTokenValue
+  };
+  const fulfilledApplied = await observeConflict({
+    outcome: "fulfilled",
+    value: appliedResult
+  });
+  assert.equal(fulfilledApplied.assertionFailure?.code, "ERR_ASSERTION");
+  assert.equal(fulfilledApplied.predicateCalls, 0);
+  assert.equal(fulfilledApplied.fulfillmentIdentityPreserved, true);
+  assert.deepEqual(fulfilledApplied.evidence, fulfilledApplied0004);
+
+  const missingCodeError = new Error("raw_missing_code_must_not_escape");
+  missingCodeError.stack =
+    "raw_stack_must_not_escape C:\\private\\outcome.js:9:1";
+  const missingCode = await observeConflict({
+    outcome: "rejected",
+    value: missingCodeError
+  });
+  assert.equal(missingCode.assertionFailure?.code, "ERR_ASSERTION");
+  assert.deepEqual(missingCode.evidence, rejectedWithoutCode);
+
+  const invalidCode = await observeConflict({
+    outcome: "rejected",
+    value: Object.assign(new Error("raw_invalid_code_must_not_escape"), {
+      code: "invalid_sqlstate"
+    })
+  });
+  assert.equal(invalidCode.assertionFailure?.code, "ERR_ASSERTION");
+  assert.deepEqual(invalidCode.evidence, rejectedWithoutCode);
+
+  const fulfilledArray = await observeConflict({
+    outcome: "fulfilled",
+    value: []
+  });
+  assert.equal(
+    fulfilledArray.evidence.conflictingNegativeFulfilledResultClass,
+    "other"
+  );
+  const throwingResult = {};
+  Object.defineProperty(throwingResult, "appliedMigration", {
+    get() {
+      throw new Error("raw_getter_failure_must_not_escape");
+    }
+  });
+  const fulfilledUnknown = await observeConflict({
+    outcome: "fulfilled",
+    value: throwingResult
+  });
+  assert.equal(
+    fulfilledUnknown.evidence.conflictingNegativeFulfilledResultClass,
+    "unknown"
+  );
+
+  const serializedEvidence = [
+    correctRejection,
+    differentSqlState,
+    fulfilledNothing,
+    fulfilledApplied,
+    missingCode,
+    invalidCode,
+    fulfilledArray,
+    fulfilledUnknown
+  ].flatMap(({ lines }) => lines).join("");
+  for (const forbidden of [
+    "raw_correct_message_must_not_escape",
+    "raw_correct_detail_must_not_escape",
+    "raw_correct_hint_must_not_escape",
+    "raw_other_state_must_not_escape",
+    "raw_parameter_must_not_escape",
+    "raw_sql_must_not_escape",
+    rawTokenValue,
+    "raw_missing_code_must_not_escape",
+    "raw_stack_must_not_escape",
+    "C:\\private",
+    "raw_invalid_code_must_not_escape",
+    "invalid_sqlstate",
+    "raw_getter_failure_must_not_escape"
+  ]) assert.equal(serializedEvidence.includes(forbidden), false, forbidden);
   assert.equal(
     realTestSource.split(
       "async function proveMigratorExplicitRoleBoundary(pool, physicalPhases) {"

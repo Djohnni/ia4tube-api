@@ -1969,12 +1969,23 @@ async function proveExact0004Route(
   );
   try {
     const beforeRollback = await readExactCatalogSnapshot(migrationPoolA);
+    physicalPhases.markExact0004ConflictingNegativeAttempted();
+    const observedConflictingNegativePromise =
+      physicalPhases.observeExact0004ConflictingNegative(
+        runnerA.applyExact(
+          EXACT_APPLY_REQUEST,
+          configuration.approvalEnvironment
+        )
+      );
     await assert.rejects(
-      runnerA.applyExact(
-        EXACT_APPLY_REQUEST,
-        configuration.approvalEnvironment
-      ),
-      (error) => error?.code === "23514"
+      observedConflictingNegativePromise,
+      (error) => {
+        const matched = error?.code === "23514";
+        physicalPhases.markExact0004ConflictingNegativeAssertionMatched(
+          matched
+        );
+        return matched;
+      }
     );
     physicalPhases.completeExact0004Subphase(
       "conflicting_0004_negative"

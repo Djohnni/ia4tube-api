@@ -43,7 +43,7 @@ const CONNECTION_NAMES = [
   "SOCIAL_TEST_MIGRATION_DATABASE_URL",
   "SOCIAL_TEST_RUNTIME_DATABASE_URL"
 ];
-const EVIDENCE_SCHEMA_VERSION = 4;
+const EVIDENCE_SCHEMA_VERSION = 5;
 const SAFE_EVENT_PREFIX = "IA4TUBE_SAFE_EVENT=";
 const TAP_TITLE =
   "real PostgreSQL proves migrations, physical RLS, vault and reauthentication";
@@ -124,6 +124,20 @@ const SAFE_SQL_STATE_VALUES = Object.freeze([
   "unknown",
   "not_observed"
 ]);
+const POSTGRES_SQL_STATE = /^[0-9A-Z]{5}$/;
+const CONFLICTING_NEGATIVE_PROMISE_OUTCOMES = Object.freeze([
+  "not_started",
+  "fulfilled",
+  "rejected",
+  "unknown"
+]);
+const CONFLICTING_NEGATIVE_FULFILLED_RESULT_CLASSES = Object.freeze([
+  "not_observed",
+  "empty",
+  "applied_0004",
+  "other",
+  "unknown"
+]);
 const EXACT_0004_EVIDENCE_FIELDS = Object.freeze([
   "lastExact0004SubphaseStarted",
   "lastExact0004SubphaseCompleted",
@@ -136,7 +150,13 @@ const EXACT_0004_EVIDENCE_FIELDS = Object.freeze([
   "applyExactInvoked",
   "applyExactCompleted",
   "databaseMutationAttempted",
-  "failureBeforeFirstMutation"
+  "failureBeforeFirstMutation",
+  "conflictingNegativeAttempted",
+  "conflictingNegativePromiseOutcome",
+  "conflictingNegativeObservedSqlState",
+  "conflictingNegativeFulfilledResultClass",
+  "conflictingNegativeAssertionMatched",
+  "conflictingNegativeRejectedBeforeAssertion"
 ]);
 const EXACT_0004_OPERATION_BY_SUBPHASE = Object.freeze({
   oid_catalog_lookup: "catalog_read",
@@ -333,6 +353,12 @@ const EXACT_0004_OPERATION_CLASS_SET = new Set(
 const EXACT_0004_ERROR_CLASS_SET = new Set(EXACT_0004_ERROR_CLASSES);
 const SAFE_SQL_STATE_SET = new Set(SAFE_SQL_STATES);
 const SAFE_SQL_STATE_VALUE_SET = new Set(SAFE_SQL_STATE_VALUES);
+const CONFLICTING_NEGATIVE_PROMISE_OUTCOME_SET = new Set(
+  CONFLICTING_NEGATIVE_PROMISE_OUTCOMES
+);
+const CONFLICTING_NEGATIVE_FULFILLED_RESULT_CLASS_SET = new Set(
+  CONFLICTING_NEGATIVE_FULFILLED_RESULT_CLASSES
+);
 const FILESYSTEM_SYSCALL_SET = new Set(FILESYSTEM_SYSCALLS);
 const PROCESS_SYSCALL_SET = new Set(PROCESS_SYSCALLS);
 let cachedGateDependencies;
@@ -390,6 +416,114 @@ function safeSourceFieldsValid(basename, bucket) {
   return SAFE_SOURCE_BASENAME_SET.has(basename);
 }
 
+function emptyConflictingNegativeEvidence() {
+  return Object.freeze({
+    conflictingNegativeAttempted: false,
+    conflictingNegativePromiseOutcome: "not_started",
+    conflictingNegativeObservedSqlState: "not_observed",
+    conflictingNegativeFulfilledResultClass: "not_observed",
+    conflictingNegativeAssertionMatched: null,
+    conflictingNegativeRejectedBeforeAssertion: null
+  });
+}
+
+function sanitizedPostgresSqlState(error) {
+  try {
+    const code = error?.code;
+    return typeof code === "string" && POSTGRES_SQL_STATE.test(code)
+      ? code
+      : "unknown";
+  } catch {
+    return "unknown";
+  }
+}
+
+function conflictingNegativeFulfilledResultClass(value) {
+  if (value === undefined || value === null) return "empty";
+  try {
+    if (
+      typeof value === "object" &&
+      !Array.isArray(value) &&
+      Object.hasOwn(value, "appliedMigration") &&
+      value.appliedMigration === "0004_social_connector_persistence"
+    ) return "applied_0004";
+  } catch {
+    return "unknown";
+  }
+  return "other";
+}
+
+function conflictingNegativeEvidenceValid(value) {
+  if (
+    typeof value.conflictingNegativeAttempted !== "boolean" ||
+    !CONFLICTING_NEGATIVE_PROMISE_OUTCOME_SET.has(
+      value.conflictingNegativePromiseOutcome
+    ) ||
+    typeof value.conflictingNegativeObservedSqlState !== "string" ||
+    !(
+      value.conflictingNegativeObservedSqlState === "not_observed" ||
+      value.conflictingNegativeObservedSqlState === "unknown" ||
+      POSTGRES_SQL_STATE.test(value.conflictingNegativeObservedSqlState)
+    ) ||
+    !CONFLICTING_NEGATIVE_FULFILLED_RESULT_CLASS_SET.has(
+      value.conflictingNegativeFulfilledResultClass
+    ) ||
+    ![
+      true,
+      false,
+      null
+    ].includes(value.conflictingNegativeAssertionMatched) ||
+    ![
+      true,
+      false,
+      null
+    ].includes(value.conflictingNegativeRejectedBeforeAssertion)
+  ) return false;
+  if (!value.conflictingNegativeAttempted) {
+    return value.conflictingNegativePromiseOutcome === "not_started" &&
+      value.conflictingNegativeObservedSqlState === "not_observed" &&
+      value.conflictingNegativeFulfilledResultClass === "not_observed" &&
+      value.conflictingNegativeAssertionMatched === null &&
+      value.conflictingNegativeRejectedBeforeAssertion === null;
+  }
+  if (value.conflictingNegativePromiseOutcome === "unknown") {
+    return value.conflictingNegativeObservedSqlState === "unknown" &&
+      value.conflictingNegativeFulfilledResultClass === "unknown" &&
+      value.conflictingNegativeAssertionMatched === null &&
+      value.conflictingNegativeRejectedBeforeAssertion === null;
+  }
+  if (value.conflictingNegativePromiseOutcome === "fulfilled") {
+    return value.conflictingNegativeObservedSqlState === "not_observed" &&
+      [
+        "empty",
+        "applied_0004",
+        "other",
+        "unknown"
+      ].includes(value.conflictingNegativeFulfilledResultClass) &&
+      value.conflictingNegativeAssertionMatched === null &&
+      value.conflictingNegativeRejectedBeforeAssertion === false;
+  }
+  if (value.conflictingNegativePromiseOutcome !== "rejected") return false;
+  const observedSqlState = value.conflictingNegativeObservedSqlState;
+  const observedSqlStateValid = observedSqlState === "unknown" ||
+    POSTGRES_SQL_STATE.test(observedSqlState);
+  const assertionMatched = value.conflictingNegativeAssertionMatched;
+  return observedSqlStateValid &&
+    value.conflictingNegativeFulfilledResultClass === "not_observed" &&
+    value.conflictingNegativeRejectedBeforeAssertion === true &&
+    (assertionMatched === null ||
+      assertionMatched === (observedSqlState === "23514"));
+}
+
+function conflictingNegativeSucceeded(value) {
+  return value.conflictingNegativeAttempted === true &&
+    value.conflictingNegativePromiseOutcome === "rejected" &&
+    value.conflictingNegativeObservedSqlState === "23514" &&
+    value.conflictingNegativeFulfilledResultClass === "not_observed" &&
+    value.conflictingNegativeAssertionMatched === true &&
+    value.conflictingNegativeRejectedBeforeAssertion === true;
+}
+
 function emptyExact0004Evidence({ failureObserved = false } = {}) {
   return Object.freeze({
     lastExact0004SubphaseStarted: "not_reached",
@@ -403,7 +537,8 @@ function emptyExact0004Evidence({ failureObserved = false } = {}) {
     applyExactInvoked: false,
     applyExactCompleted: false,
     databaseMutationAttempted: false,
-    failureBeforeFirstMutation: false
+    failureBeforeFirstMutation: false,
+    ...emptyConflictingNegativeEvidence()
   });
 }
 
@@ -434,6 +569,7 @@ function exact0004EvidenceValid(value, { failureEvent = false } = {}) {
     !SAFE_SQL_STATE_VALUE_SET.has(value.safeSqlState) ||
     !EXACT_0004_ERROR_CLASS_SET.has(value.safeErrorClass) ||
     !EXACT_0004_OPERATION_CLASS_SET.has(value.safeOperationClass) ||
+    !conflictingNegativeEvidenceValid(value) ||
     !exact0004ProgressValid(value)
   ) return false;
   for (const field of [
@@ -451,7 +587,9 @@ function exact0004EvidenceValid(value, { failureEvent = false } = {}) {
     (value.applyExactCompleted && !value.applyExactInvoked) ||
     (value.applyExactInvoked && !value.planExactCompleted) ||
     (value.applyExactInvoked && !value.databaseMutationAttempted) ||
-    (value.failureBeforeFirstMutation && value.databaseMutationAttempted)
+    (value.failureBeforeFirstMutation && value.databaseMutationAttempted) ||
+    (value.conflictingNegativeAttempted &&
+      !value.databaseMutationAttempted)
   ) return false;
   const started = value.lastExact0004SubphaseStarted;
   const completed = value.lastExact0004SubphaseCompleted;
@@ -460,8 +598,9 @@ function exact0004EvidenceValid(value, { failureEvent = false } = {}) {
   if (started === "not_reached" && (
     value.planExactInvoked || value.planExactCompleted ||
     value.applyExactInvoked || value.applyExactCompleted ||
-    value.databaseMutationAttempted
+    value.databaseMutationAttempted || value.conflictingNegativeAttempted
   )) return false;
+  if (started === "unknown" && value.conflictingNegativeAttempted) return false;
   if (startedIndex >= 0) {
     const planIndex = EXACT_0004_EXECUTION_SUBPHASES.indexOf("plan_exact");
     const conflictIndex = EXACT_0004_EXECUTION_SUBPHASES.indexOf(
@@ -475,7 +614,10 @@ function exact0004EvidenceValid(value, { failureEvent = false } = {}) {
       value.applyExactCompleted !== (completedIndex >= applyIndex) ||
       (startedIndex < conflictIndex && value.databaseMutationAttempted) ||
       ((startedIndex > conflictIndex || completedIndex >= conflictIndex) &&
-        !value.databaseMutationAttempted)
+        !value.databaseMutationAttempted) ||
+      (startedIndex < conflictIndex && value.conflictingNegativeAttempted) ||
+      ((startedIndex > conflictIndex || completedIndex >= conflictIndex) &&
+        !conflictingNegativeSucceeded(value))
     ) return false;
   }
   const failureSubphase = value.exact0004FailureSubphase;
@@ -569,7 +711,8 @@ function physicalSnapshotValid(event) {
       event.applyExactInvoked !== true ||
       event.applyExactCompleted !== true ||
       event.databaseMutationAttempted !== true ||
-      event.failureBeforeFirstMutation !== false
+      event.failureBeforeFirstMutation !== false ||
+      !conflictingNegativeSucceeded(event)
     ))
   ) return false;
   return true;
@@ -689,6 +832,48 @@ function validateSafeEvent(event) {
       "evidenceSchemaVersion",
       "sequence"
     ]) && event.databaseMutationAttempted === true;
+  }
+  if (event.event === "exact0004ConflictingNegativeAttempted") {
+    return exactKeys(event, [
+      "conflictingNegativeAttempted",
+      "event",
+      "evidenceSchemaVersion",
+      "sequence"
+    ]) && event.conflictingNegativeAttempted === true;
+  }
+  if (event.event === "exact0004ConflictingNegativePromiseSettled") {
+    return exactKeys(event, [
+      "conflictingNegativeFulfilledResultClass",
+      "conflictingNegativeObservedSqlState",
+      "conflictingNegativePromiseOutcome",
+      "conflictingNegativeRejectedBeforeAssertion",
+      "event",
+      "evidenceSchemaVersion",
+      "sequence"
+    ]) && [
+      "fulfilled",
+      "rejected"
+    ].includes(event.conflictingNegativePromiseOutcome) &&
+      conflictingNegativeEvidenceValid({
+        conflictingNegativeAttempted: true,
+        conflictingNegativePromiseOutcome:
+          event.conflictingNegativePromiseOutcome,
+        conflictingNegativeObservedSqlState:
+          event.conflictingNegativeObservedSqlState,
+        conflictingNegativeFulfilledResultClass:
+          event.conflictingNegativeFulfilledResultClass,
+        conflictingNegativeAssertionMatched: null,
+        conflictingNegativeRejectedBeforeAssertion:
+          event.conflictingNegativeRejectedBeforeAssertion
+      });
+  }
+  if (event.event === "exact0004ConflictingNegativeAssertionMatched") {
+    return exactKeys(event, [
+      "conflictingNegativeAssertionMatched",
+      "event",
+      "evidenceSchemaVersion",
+      "sequence"
+    ]) && typeof event.conflictingNegativeAssertionMatched === "boolean";
   }
   if (
     event.event === "cleanupStarted" ||
@@ -1091,6 +1276,12 @@ function createPhysicalPhaseProtocol() {
   let applyExactInvoked = false;
   let applyExactCompleted = false;
   let databaseMutationAttempted = false;
+  let conflictingNegativeAttempted = false;
+  let conflictingNegativePromiseOutcome = "not_started";
+  let conflictingNegativeObservedSqlState = "not_observed";
+  let conflictingNegativeFulfilledResultClass = "not_observed";
+  let conflictingNegativeAssertionMatched = null;
+  let conflictingNegativeRejectedBeforeAssertion = null;
   let cleanupStarted = false;
   let cleanupCompleted = false;
   let protocolInvalid = false;
@@ -1136,6 +1327,20 @@ function createPhysicalPhaseProtocol() {
         invalidate();
         return false;
       }
+      if (
+        event.subphase === "conflicting_0004_negative" &&
+        !conflictingNegativeSucceeded({
+          conflictingNegativeAttempted,
+          conflictingNegativePromiseOutcome,
+          conflictingNegativeObservedSqlState,
+          conflictingNegativeFulfilledResultClass,
+          conflictingNegativeAssertionMatched,
+          conflictingNegativeRejectedBeforeAssertion
+        })
+      ) {
+        invalidate();
+        return false;
+      }
       activeExact0004Subphase = null;
       lastExact0004SubphaseCompleted = event.subphase;
       nextExact0004SubphaseIndex += 1;
@@ -1152,6 +1357,57 @@ function createPhysicalPhaseProtocol() {
         return false;
       }
       databaseMutationAttempted = true;
+    } else if (event.event === "exact0004ConflictingNegativeAttempted") {
+      if (
+        cleanupStarted ||
+        activeMainPhase !== "exact_0004_plan_apply" ||
+        activeExact0004Subphase !== "conflicting_0004_negative" ||
+        !databaseMutationAttempted ||
+        conflictingNegativeAttempted
+      ) {
+        invalidate();
+        return false;
+      }
+      conflictingNegativeAttempted = true;
+    } else if (
+      event.event === "exact0004ConflictingNegativePromiseSettled"
+    ) {
+      if (
+        cleanupStarted ||
+        activeMainPhase !== "exact_0004_plan_apply" ||
+        activeExact0004Subphase !== "conflicting_0004_negative" ||
+        !conflictingNegativeAttempted ||
+        conflictingNegativePromiseOutcome !== "not_started"
+      ) {
+        invalidate();
+        return false;
+      }
+      conflictingNegativePromiseOutcome =
+        event.conflictingNegativePromiseOutcome;
+      conflictingNegativeObservedSqlState =
+        event.conflictingNegativeObservedSqlState;
+      conflictingNegativeFulfilledResultClass =
+        event.conflictingNegativeFulfilledResultClass;
+      conflictingNegativeRejectedBeforeAssertion =
+        event.conflictingNegativeRejectedBeforeAssertion;
+    } else if (
+      event.event === "exact0004ConflictingNegativeAssertionMatched"
+    ) {
+      if (
+        cleanupStarted ||
+        activeMainPhase !== "exact_0004_plan_apply" ||
+        activeExact0004Subphase !== "conflicting_0004_negative" ||
+        conflictingNegativePromiseOutcome !== "rejected" ||
+        conflictingNegativeRejectedBeforeAssertion !== true ||
+        conflictingNegativeAssertionMatched !== null ||
+        event.conflictingNegativeAssertionMatched !==
+          (conflictingNegativeObservedSqlState === "23514")
+      ) {
+        invalidate();
+        return false;
+      }
+      conflictingNegativeAssertionMatched =
+        event.conflictingNegativeAssertionMatched;
     } else if (event.event === "mainPhaseStarted") {
       if (
         cleanupStarted ||
@@ -1221,6 +1477,9 @@ function createPhysicalPhaseProtocol() {
     const exact0004FailureSubphase = exact0004Active
       ? activeExact0004Subphase || "unknown"
       : "not_reached";
+    const conflictingNegativeOutcomeUnobserved =
+      conflictingNegativeAttempted &&
+      conflictingNegativePromiseOutcome === "not_started";
     return Object.freeze({
       protocolValid: !protocolInvalid,
       eventCount: expectedSequence - 1,
@@ -1240,6 +1499,21 @@ function createPhysicalPhaseProtocol() {
       databaseMutationAttempted,
       failureBeforeFirstMutation:
         exact0004Active && !databaseMutationAttempted,
+      conflictingNegativeAttempted,
+      conflictingNegativePromiseOutcome:
+        conflictingNegativeOutcomeUnobserved
+          ? "unknown"
+          : conflictingNegativePromiseOutcome,
+      conflictingNegativeObservedSqlState:
+        conflictingNegativeOutcomeUnobserved
+          ? "unknown"
+          : conflictingNegativeObservedSqlState,
+      conflictingNegativeFulfilledResultClass:
+        conflictingNegativeOutcomeUnobserved
+          ? "unknown"
+          : conflictingNegativeFulfilledResultClass,
+      conflictingNegativeAssertionMatched,
+      conflictingNegativeRejectedBeforeAssertion,
       cleanupStarted,
       cleanupCompleted
     });
@@ -1287,6 +1561,37 @@ function createPhysicalPhaseEmitter(
     markExact0004DatabaseMutationAttempted: () =>
       emit("exact0004DatabaseMutationAttempted", {
         databaseMutationAttempted: true
+      }),
+    markExact0004ConflictingNegativeAttempted: () =>
+      emit("exact0004ConflictingNegativeAttempted", {
+        conflictingNegativeAttempted: true
+      }),
+    observeExact0004ConflictingNegative: (promise) =>
+      Promise.resolve(promise).then(
+        (value) => {
+          emit("exact0004ConflictingNegativePromiseSettled", {
+            conflictingNegativePromiseOutcome: "fulfilled",
+            conflictingNegativeObservedSqlState: "not_observed",
+            conflictingNegativeFulfilledResultClass:
+              conflictingNegativeFulfilledResultClass(value),
+            conflictingNegativeRejectedBeforeAssertion: false
+          });
+          return value;
+        },
+        (error) => {
+          emit("exact0004ConflictingNegativePromiseSettled", {
+            conflictingNegativePromiseOutcome: "rejected",
+            conflictingNegativeObservedSqlState:
+              sanitizedPostgresSqlState(error),
+            conflictingNegativeFulfilledResultClass: "not_observed",
+            conflictingNegativeRejectedBeforeAssertion: true
+          });
+          throw error;
+        }
+      ),
+    markExact0004ConflictingNegativeAssertionMatched: (matched) =>
+      emit("exact0004ConflictingNegativeAssertionMatched", {
+        conflictingNegativeAssertionMatched: matched
       }),
     startCleanup: () => emit("cleanupStarted", {
       phase: PHYSICAL_CLEANUP_PHASE
@@ -1408,6 +1713,18 @@ function createNodeTestObserver(onMarker = () => {}) {
         physicalPhaseFacts.databaseMutationAttempted,
       failureBeforeFirstMutation:
         physicalPhaseFacts.failureBeforeFirstMutation,
+      conflictingNegativeAttempted:
+        physicalPhaseFacts.conflictingNegativeAttempted,
+      conflictingNegativePromiseOutcome:
+        physicalPhaseFacts.conflictingNegativePromiseOutcome,
+      conflictingNegativeObservedSqlState:
+        physicalPhaseFacts.conflictingNegativeObservedSqlState,
+      conflictingNegativeFulfilledResultClass:
+        physicalPhaseFacts.conflictingNegativeFulfilledResultClass,
+      conflictingNegativeAssertionMatched:
+        physicalPhaseFacts.conflictingNegativeAssertionMatched,
+      conflictingNegativeRejectedBeforeAssertion:
+        physicalPhaseFacts.conflictingNegativeRejectedBeforeAssertion,
       cleanupStarted: physicalPhaseFacts.cleanupStarted,
       cleanupCompleted: physicalPhaseFacts.cleanupCompleted,
       safeDiagnosticValid: diagnosticFacts.safeDiagnosticValid,
@@ -2452,6 +2769,8 @@ if (require.main === module) {
 
 module.exports = {
   APPROVAL,
+  CONFLICTING_NEGATIVE_FULFILLED_RESULT_CLASSES,
+  CONFLICTING_NEGATIVE_PROMISE_OUTCOMES,
   EVIDENCE_SCHEMA_VERSION,
   EXACT_0004_ERROR_CLASSES,
   EXACT_0004_EVIDENCE_FIELDS,
@@ -2487,6 +2806,8 @@ module.exports = {
   createPhysicalPhaseProtocol,
   createSafeDiagnosticAggregator,
   createSafeEventCollector,
+  conflictingNegativeEvidenceValid,
+  emptyConflictingNegativeEvidence,
   emptyExact0004Evidence,
   exact0004EvidenceValid,
   exact0004OperationClass,

@@ -84,18 +84,34 @@ function exact0004Evidence(
   };
 }
 
-function completeExact0004Subphases(phases) {
+async function completeConflictingNegative(phases) {
+  phases.markExact0004ConflictingNegativeAttempted();
+  const error = Object.assign(new Error("synthetic conflict"), {
+    code: "23514"
+  });
+  await assert.rejects(
+    phases.observeExact0004ConflictingNegative(Promise.reject(error)),
+    (observed) => {
+      const matched = observed?.code === "23514";
+      phases.markExact0004ConflictingNegativeAssertionMatched(matched);
+      return matched && observed === error;
+    }
+  );
+}
+
+async function completeExact0004Subphases(phases) {
   for (const subphase of
     realPostgresRunner.EXACT_0004_EXECUTION_SUBPHASES) {
     phases.startExact0004Subphase(subphase);
     if (subphase === "conflicting_0004_negative") {
       phases.markExact0004DatabaseMutationAttempted();
+      await completeConflictingNegative(phases);
     }
     phases.completeExact0004Subphase(subphase);
   }
 }
 
-function physicalPhaseLines({ complete = true } = {}) {
+async function physicalPhaseLines({ complete = true } = {}) {
   const lines = [];
   const phases = realPostgresRunner.createPhysicalPhaseEmitter(
     (line) => lines.push(line)
@@ -104,7 +120,7 @@ function physicalPhaseLines({ complete = true } = {}) {
     phases.startMain(phase);
     if (!complete) break;
     if (phase === "exact_0004_plan_apply") {
-      completeExact0004Subphases(phases);
+      await completeExact0004Subphases(phases);
     }
     phases.completeMain(phase);
   }
@@ -115,7 +131,7 @@ function physicalPhaseLines({ complete = true } = {}) {
   return lines;
 }
 
-function exact0004FailurePhaseLines(
+async function exact0004FailurePhaseLines(
   subphase,
   { mutationAttempted = false } = {}
 ) {
@@ -147,6 +163,9 @@ function exact0004FailurePhaseLines(
         phases.markExact0004DatabaseMutationAttempted();
       }
       if (candidate === subphase) break;
+      if (candidate === "conflicting_0004_negative") {
+        await completeConflictingNegative(phases);
+      }
       phases.completeExact0004Subphase(candidate);
     }
     break;
@@ -154,6 +173,30 @@ function exact0004FailurePhaseLines(
   phases.startCleanup();
   phases.completeCleanup();
   return lines;
+}
+
+function activeConflictingNegativeEmitter() {
+  const lines = [];
+  const phases = realPostgresRunner.createPhysicalPhaseEmitter(
+    (line) => lines.push(line)
+  );
+  for (const phase of realPostgresRunner.PHYSICAL_MAIN_PHASES) {
+    phases.startMain(phase);
+    if (phase !== "exact_0004_plan_apply") {
+      phases.completeMain(phase);
+      continue;
+    }
+    for (const subphase of
+      realPostgresRunner.EXACT_0004_EXECUTION_SUBPHASES) {
+      phases.startExact0004Subphase(subphase);
+      if (subphase === "conflicting_0004_negative") {
+        phases.markExact0004DatabaseMutationAttempted();
+        return { lines, phases };
+      }
+      phases.completeExact0004Subphase(subphase);
+    }
+  }
+  throw new Error("synthetic_conflicting_negative_subphase_missing");
 }
 
 function observeNodeLines(entries) {
@@ -202,6 +245,7 @@ async function runSyntheticReporterFailure({
 
 test("real PostgreSQL runner emits one canonical safe lifecycle without raw TAP", async () => {
   const emitted = [];
+  const phaseLines = await physicalPhaseLines();
   let spawnArguments;
   let spawnOptions;
   const spawnImpl = (_executable, args, options) => {
@@ -224,7 +268,7 @@ test("real PostgreSQL runner emits one canonical safe lifecycle without raw TAP"
         "# cancelled 0",
         ""
       ].join("\n"));
-      child.stderr.end([...physicalPhaseLines(), ""].join("\n"));
+      child.stderr.end([...phaseLines, ""].join("\n"));
       setImmediate(() => child.emit("close", 0, null));
     });
     return child;
@@ -284,6 +328,15 @@ test("real PostgreSQL runner emits one canonical safe lifecycle without raw TAP"
   assert.equal(facts.applyExactCompleted, true);
   assert.equal(facts.databaseMutationAttempted, true);
   assert.equal(facts.failureBeforeFirstMutation, false);
+  assert.equal(facts.conflictingNegativeAttempted, true);
+  assert.equal(facts.conflictingNegativePromiseOutcome, "rejected");
+  assert.equal(facts.conflictingNegativeObservedSqlState, "23514");
+  assert.equal(
+    facts.conflictingNegativeFulfilledResultClass,
+    "not_observed"
+  );
+  assert.equal(facts.conflictingNegativeAssertionMatched, true);
+  assert.equal(facts.conflictingNegativeRejectedBeforeAssertion, true);
   assert.equal(facts.cleanupStarted, true);
   assert.equal(facts.cleanupCompleted, true);
   assert.equal(facts.failureDuringCleanup, null);
@@ -335,7 +388,7 @@ test("real PostgreSQL runner classifies ReferenceError after discovery as test e
       "TAP version 13",
       `# Subtest: ${realPostgresRunner.TAP_TITLE}`
     ],
-    phaseLines: physicalPhaseLines({ complete: false }),
+    phaseLines: await physicalPhaseLines({ complete: false }),
     stderrLines: [rawSentinel]
   });
   assert.equal(result.exitCode, 1);
@@ -379,6 +432,7 @@ test("real PostgreSQL runner preserves a sanitized gate refusal before spawn", a
 
 test("real PostgreSQL runner classifies module failure without preserving its line", async () => {
   const emitted = [];
+  const phaseLines = await physicalPhaseLines({ complete: false });
   const spawnImpl = () => {
     const child = new EventEmitter();
     child.stdout = new PassThrough();
@@ -391,7 +445,7 @@ test("real PostgreSQL runner classifies module failure without preserving its li
         ""
       ].join("\n"));
       child.stderr.end(
-        [...physicalPhaseLines({ complete: false }), ""].join("\n")
+        [...phaseLines, ""].join("\n")
       );
       setImmediate(() => child.emit("close", 1, null));
     });
@@ -453,6 +507,7 @@ test("real PostgreSQL runner preserves an observable spawn refusal", async () =>
 
 test("real PostgreSQL runner preserves a signal close without inventing timeout", async () => {
   const emitted = [];
+  const phaseLines = await physicalPhaseLines({ complete: false });
   const spawnImpl = () => {
     const child = new EventEmitter();
     child.stdout = new PassThrough();
@@ -470,7 +525,7 @@ test("real PostgreSQL runner preserves a signal close without inventing timeout"
         ""
       ].join("\n"));
       child.stderr.end(
-        [...physicalPhaseLines({ complete: false }), ""].join("\n")
+        [...phaseLines, ""].join("\n")
       );
       setImmediate(() => child.emit("close", null, "SIGTERM"));
     });
@@ -491,7 +546,7 @@ test("real PostgreSQL runner preserves a signal close without inventing timeout"
   assert.equal(facts.firstFailureStage, "test_execution");
 });
 
-test("protocol group 1: physical phases accept only the complete ordered main and cleanup lifecycle", () => {
+test("protocol group 1: physical phases accept only the complete ordered main and cleanup lifecycle", async () => {
   assert.deepEqual(realPostgresRunner.PHYSICAL_PHASES, [
     "physical_target_preflight",
     "role_provisioning",
@@ -511,12 +566,12 @@ test("protocol group 1: physical phases accept only the complete ordered main an
     "reauthentication",
     "final_cleanup"
   ]);
-  const facts = observeNodeLines(physicalPhaseLines().map((line) => ({
+  const facts = observeNodeLines((await physicalPhaseLines()).map((line) => ({
     channel: "stderr",
     line
   })));
   assert.equal(facts.phaseProtocolValid, true);
-  assert.equal(facts.phaseEventCount, 63);
+  assert.equal(facts.phaseEventCount, 66);
   assert.equal(facts.lastMainPhaseStarted, "reauthentication");
   assert.equal(facts.lastMainPhaseCompleted, "reauthentication");
   assert.equal(facts.lastExact0004SubphaseStarted, "final_snapshot");
@@ -531,6 +586,12 @@ test("protocol group 1: physical phases accept only the complete ordered main an
   assert.equal(facts.applyExactCompleted, true);
   assert.equal(facts.databaseMutationAttempted, true);
   assert.equal(facts.failureBeforeFirstMutation, false);
+  assert.equal(facts.conflictingNegativeAttempted, true);
+  assert.equal(facts.conflictingNegativePromiseOutcome, "rejected");
+  assert.equal(facts.conflictingNegativeObservedSqlState, "23514");
+  assert.equal(facts.conflictingNegativeFulfilledResultClass, "not_observed");
+  assert.equal(facts.conflictingNegativeAssertionMatched, true);
+  assert.equal(facts.conflictingNegativeRejectedBeforeAssertion, true);
   assert.equal(facts.cleanupStarted, true);
   assert.equal(facts.cleanupCompleted, true);
   const missingExact0004Subphases =
@@ -548,7 +609,7 @@ test("protocol group 1: physical phases accept only the complete ordered main an
   }
 });
 
-test("protocol group 1: physical phases refuse jumps, repeats, unknowns, extras and post-cleanup markers", () => {
+test("protocol group 1: physical phases refuse jumps, repeats, unknowns, extras and post-cleanup markers", async () => {
   const version = realPostgresRunner.EVIDENCE_SCHEMA_VERSION;
   const event = (name, phase, sequence, extra = {}) => untrustedSafeEvent({
     event: name,
@@ -567,7 +628,7 @@ test("protocol group 1: physical phases refuse jumps, repeats, unknowns, extras 
     "physical_target_preflight",
     2
   );
-  const complete = physicalPhaseLines();
+  const complete = await physicalPhaseLines();
   const invalidCases = [
     [event("mainPhaseStarted", "role_provisioning", 1)],
     [first, event("mainPhaseStarted", "physical_target_preflight", 2)],
@@ -583,7 +644,7 @@ test("protocol group 1: physical phases refuse jumps, repeats, unknowns, extras 
     ],
     [
       ...complete,
-      event("mainPhaseStarted", "physical_target_preflight", 64)
+      event("mainPhaseStarted", "physical_target_preflight", 67)
     ]
   ];
   for (const lines of invalidCases) {
@@ -595,7 +656,7 @@ test("protocol group 1: physical phases refuse jumps, repeats, unknowns, extras 
   }
 });
 
-test("protocol group 1: physical snapshot keeps main and cleanup boundaries separate", () => {
+test("protocol group 1: physical snapshot keeps main and cleanup boundaries separate", async () => {
   const functionalLines = [];
   const functional = realPostgresRunner.createPhysicalPhaseEmitter(
     (line) => functionalLines.push(line)
@@ -623,7 +684,7 @@ test("protocol group 1: physical snapshot keeps main and cleanup boundaries sepa
   for (const phase of realPostgresRunner.PHYSICAL_MAIN_PHASES) {
     cleanup.startMain(phase);
     if (phase === "exact_0004_plan_apply") {
-      completeExact0004Subphases(cleanup);
+      await completeExact0004Subphases(cleanup);
     }
     cleanup.completeMain(phase);
   }
@@ -686,6 +747,16 @@ test("protocol group 1: exact 0004 evidence is closed, ordered, immutable and sa
     "23514",
     "P0001"
   ]);
+  assert.deepEqual(realPostgresRunner.CONFLICTING_NEGATIVE_PROMISE_OUTCOMES, [
+    "not_started",
+    "fulfilled",
+    "rejected",
+    "unknown"
+  ]);
+  assert.deepEqual(
+    realPostgresRunner.CONFLICTING_NEGATIVE_FULFILLED_RESULT_CLASSES,
+    ["not_observed", "empty", "applied_0004", "other", "unknown"]
+  );
   const operationBySubphase = {
     oid_catalog_lookup: "catalog_read",
     direct_privilege_boolean_check: "privilege_check",
@@ -777,7 +848,7 @@ test("protocol group 1: exact 0004 evidence is closed, ordered, immutable and sa
   ];
   const beforeMutation = await runSyntheticReporterFailure({
     stdoutLines: tapPrefix,
-    phaseLines: exact0004FailurePhaseLines("oid_catalog_lookup"),
+    phaseLines: await exact0004FailurePhaseLines("oid_catalog_lookup"),
     stderrLines: ["permission denied", "code: '42501'"]
   });
   assert.equal(beforeMutation.facts.exact0004FailureSubphase,
@@ -803,7 +874,7 @@ test("protocol group 1: exact 0004 evidence is closed, ordered, immutable and sa
   ].join("");
   const assertionFailure = await runSyntheticReporterFailure({
     stdoutLines: tapPrefix,
-    phaseLines: exact0004FailurePhaseLines(
+    phaseLines: await exact0004FailurePhaseLines(
       "direct_privilege_boolean_check"
     ),
     stderrLines: [
@@ -880,7 +951,7 @@ test("protocol group 1: exact 0004 evidence is closed, ordered, immutable and sa
 
   const afterMutation = await runSyntheticReporterFailure({
     stdoutLines: tapPrefix,
-    phaseLines: exact0004FailurePhaseLines(
+    phaseLines: await exact0004FailurePhaseLines(
       "rollback_verification",
       { mutationAttempted: true }
     ),
@@ -896,13 +967,13 @@ test("protocol group 1: exact 0004 evidence is closed, ordered, immutable and sa
 
   const invalidSqlState = await runSyntheticReporterFailure({
     stdoutLines: tapPrefix,
-    phaseLines: exact0004FailurePhaseLines("oid_catalog_lookup"),
+    phaseLines: await exact0004FailurePhaseLines("oid_catalog_lookup"),
     stderrLines: ["code: '57014'"]
   });
   assert.equal(invalidSqlState.facts.safeSqlState, "unknown");
   const missingSqlState = await runSyntheticReporterFailure({
     stdoutLines: tapPrefix,
-    phaseLines: exact0004FailurePhaseLines("oid_catalog_lookup"),
+    phaseLines: await exact0004FailurePhaseLines("oid_catalog_lookup"),
     stderrLines: ["AssertionError ERR_ASSERTION"]
   });
   assert.equal(missingSqlState.facts.safeSqlState, "unknown");
@@ -925,6 +996,12 @@ test("protocol group 1: exact 0004 evidence is closed, ordered, immutable and sa
   assert.deepEqual(Object.keys(failureEvent).sort(), [
     "applyExactCompleted",
     "applyExactInvoked",
+    "conflictingNegativeAssertionMatched",
+    "conflictingNegativeAttempted",
+    "conflictingNegativeFulfilledResultClass",
+    "conflictingNegativeObservedSqlState",
+    "conflictingNegativePromiseOutcome",
+    "conflictingNegativeRejectedBeforeAssertion",
     "databaseMutationAttempted",
     "event",
     "evidenceSchemaVersion",
@@ -948,6 +1025,374 @@ test("protocol group 1: exact 0004 evidence is closed, ordered, immutable and sa
     "sequence",
     "stderrCategory"
   ].sort());
+});
+
+test("protocol group 1: conflicting 0004 Promise outcome evidence is closed and observational", async () => {
+  const empty = realPostgresRunner.emptyConflictingNegativeEvidence();
+  assert.deepEqual(empty, {
+    conflictingNegativeAttempted: false,
+    conflictingNegativePromiseOutcome: "not_started",
+    conflictingNegativeObservedSqlState: "not_observed",
+    conflictingNegativeFulfilledResultClass: "not_observed",
+    conflictingNegativeAssertionMatched: null,
+    conflictingNegativeRejectedBeforeAssertion: null
+  });
+  assert.equal(Object.isFrozen(empty), true);
+  assert.equal(realPostgresRunner.conflictingNegativeEvidenceValid(empty), true);
+  for (const invalid of [
+    { ...empty, conflictingNegativeAttempted: true },
+    { ...empty, conflictingNegativePromiseOutcome: "outside_enum" },
+    { ...empty, conflictingNegativeObservedSqlState: "12-xy" },
+    {
+      ...empty,
+      conflictingNegativeAttempted: true,
+      conflictingNegativePromiseOutcome: "rejected",
+      conflictingNegativeObservedSqlState: "23514",
+      conflictingNegativeAssertionMatched: false,
+      conflictingNegativeRejectedBeforeAssertion: true
+    },
+    {
+      ...empty,
+      conflictingNegativeAttempted: true,
+      conflictingNegativePromiseOutcome: "fulfilled",
+      conflictingNegativeFulfilledResultClass: "empty",
+      conflictingNegativeRejectedBeforeAssertion: true
+    }
+  ]) {
+    assert.equal(
+      realPostgresRunner.conflictingNegativeEvidenceValid(invalid),
+      false
+    );
+  }
+  const attemptedWithoutMutation = exact0004Evidence({
+    lastExact0004SubphaseStarted: "conflicting_0004_negative",
+    lastExact0004SubphaseCompleted: "synthetic_0005_negative",
+    exact0004FailureSubphase: "conflicting_0004_negative",
+    safeSqlState: "unknown",
+    safeErrorClass: "assertion_failure",
+    safeOperationClass: "negative_gate",
+    planExactInvoked: true,
+    planExactCompleted: true,
+    databaseMutationAttempted: false,
+    failureBeforeFirstMutation: true,
+    conflictingNegativeAttempted: true,
+    conflictingNegativePromiseOutcome: "unknown",
+    conflictingNegativeObservedSqlState: "unknown",
+    conflictingNegativeFulfilledResultClass: "unknown"
+  }, { failureObserved: true });
+  assert.equal(
+    realPostgresRunner.conflictingNegativeEvidenceValid(
+      attemptedWithoutMutation
+    ),
+    true
+  );
+  assert.equal(
+    realPostgresRunner.exact0004EvidenceValid(attemptedWithoutMutation, {
+      failureEvent: true
+    }),
+    false
+  );
+
+  const physicalFacts = (lines) => observeNodeLines(lines.map((line) => ({
+    channel: "stderr",
+    line
+  })));
+  async function rejectedScenario(error) {
+    const route = activeConflictingNegativeEmitter();
+    route.phases.markExact0004ConflictingNegativeAttempted();
+    let predicateError = null;
+    const assertion = assert.rejects(
+      route.phases.observeExact0004ConflictingNegative(
+        Promise.reject(error)
+      ),
+      (observed) => {
+        predicateError = observed;
+        const matched = observed?.code === "23514";
+        route.phases.markExact0004ConflictingNegativeAssertionMatched(
+          matched
+        );
+        return matched;
+      }
+    );
+    let assertionError = null;
+    try {
+      await assertion;
+    } catch (errorFromAssertion) {
+      assertionError = errorFromAssertion;
+    }
+    assert.equal(predicateError, error);
+    return {
+      assertionError,
+      facts: physicalFacts(route.lines),
+      ...route
+    };
+  }
+  async function fulfilledScenario(value) {
+    const route = activeConflictingNegativeEmitter();
+    route.phases.markExact0004ConflictingNegativeAttempted();
+    const observed = route.phases.observeExact0004ConflictingNegative(
+      Promise.resolve(value)
+    );
+    let predicateCalled = false;
+    await assert.rejects(
+      assert.rejects(observed, () => {
+        predicateCalled = true;
+        return true;
+      }),
+      (error) => error?.code === "ERR_ASSERTION"
+    );
+    assert.equal(predicateCalled, false);
+    assert.equal(await observed, value);
+    return { facts: physicalFacts(route.lines), ...route };
+  }
+
+  const correctError = Object.assign(new Error("correct raw message"), {
+    code: "23514"
+  });
+  const correct = await rejectedScenario(correctError);
+  assert.equal(correct.assertionError, null);
+  assert.equal(correct.facts.conflictingNegativeAttempted, true);
+  assert.equal(correct.facts.conflictingNegativePromiseOutcome, "rejected");
+  assert.equal(correct.facts.conflictingNegativeObservedSqlState, "23514");
+  assert.equal(
+    correct.facts.conflictingNegativeFulfilledResultClass,
+    "not_observed"
+  );
+  assert.equal(correct.facts.conflictingNegativeAssertionMatched, true);
+  assert.equal(
+    correct.facts.conflictingNegativeRejectedBeforeAssertion,
+    true
+  );
+  correct.phases.completeExact0004Subphase("conflicting_0004_negative");
+
+  const differentError = Object.assign(new Error("different raw message"), {
+    code: "42P01"
+  });
+  const different = await rejectedScenario(differentError);
+  assert.equal(different.assertionError?.code, "ERR_ASSERTION");
+  assert.equal(different.facts.conflictingNegativePromiseOutcome, "rejected");
+  assert.equal(different.facts.conflictingNegativeObservedSqlState, "42P01");
+  assert.equal(different.facts.conflictingNegativeAssertionMatched, false);
+  assert.throws(
+    () => different.phases.completeExact0004Subphase(
+      "conflicting_0004_negative"
+    ),
+    /physical_phase_protocol_invalid/
+  );
+
+  const emptyFulfillment = await fulfilledScenario(undefined);
+  assert.equal(
+    emptyFulfillment.facts.conflictingNegativePromiseOutcome,
+    "fulfilled"
+  );
+  assert.equal(
+    emptyFulfillment.facts.conflictingNegativeFulfilledResultClass,
+    "empty"
+  );
+  assert.equal(
+    emptyFulfillment.facts.conflictingNegativeObservedSqlState,
+    "not_observed"
+  );
+  assert.equal(
+    emptyFulfillment.facts.conflictingNegativeAssertionMatched,
+    null
+  );
+  assert.equal(
+    emptyFulfillment.facts.conflictingNegativeRejectedBeforeAssertion,
+    false
+  );
+
+  const rawSecretKey = ["se", "cret"].join("");
+  const rawSecretValue = ["raw", "secret", "sentinel"].join("_");
+  const rawAppliedResult = {
+    appliedMigration: "0004_social_connector_persistence",
+    query: "SELECT raw_sql_sentinel FROM private_table",
+    parameters: ["raw_parameter_sentinel"],
+    [rawSecretKey]: rawSecretValue,
+    path: "C:\\private\\raw_result_sentinel.json"
+  };
+  const appliedFulfillment = await fulfilledScenario(rawAppliedResult);
+  assert.equal(
+    appliedFulfillment.facts.conflictingNegativeFulfilledResultClass,
+    "applied_0004"
+  );
+  const arrayFulfillment = await fulfilledScenario([]);
+  assert.equal(
+    arrayFulfillment.facts.conflictingNegativeFulfilledResultClass,
+    "other"
+  );
+  const getterResult = {};
+  Object.defineProperty(getterResult, "appliedMigration", {
+    enumerable: true,
+    get() {
+      throw new Error("raw_getter_message_sentinel");
+    }
+  });
+  const unknownFulfillment = await fulfilledScenario(getterResult);
+  assert.equal(
+    unknownFulfillment.facts.conflictingNegativeFulfilledResultClass,
+    "unknown"
+  );
+
+  const interrupted = activeConflictingNegativeEmitter();
+  interrupted.phases.markExact0004ConflictingNegativeAttempted();
+  const interruptedFacts = physicalFacts(interrupted.lines);
+  assert.equal(
+    interruptedFacts.conflictingNegativePromiseOutcome,
+    "unknown"
+  );
+  assert.equal(
+    interruptedFacts.conflictingNegativeObservedSqlState,
+    "unknown"
+  );
+  assert.equal(
+    interruptedFacts.conflictingNegativeFulfilledResultClass,
+    "unknown"
+  );
+  assert.equal(interruptedFacts.conflictingNegativeAssertionMatched, null);
+  assert.equal(
+    interruptedFacts.conflictingNegativeRejectedBeforeAssertion,
+    null
+  );
+
+  const noCodeError = new Error("raw_no_code_message_sentinel");
+  noCodeError.stack =
+    "Error: raw_no_code_message_sentinel\n" +
+    "    at probe (C:\\private\\raw_stack_sentinel.js:991:7)";
+  const noCode = await rejectedScenario(noCodeError);
+  assert.equal(noCode.assertionError?.code, "ERR_ASSERTION");
+  assert.equal(noCode.facts.conflictingNegativePromiseOutcome, "rejected");
+  assert.equal(noCode.facts.conflictingNegativeObservedSqlState, "unknown");
+  assert.equal(noCode.facts.conflictingNegativeAssertionMatched, false);
+
+  const invalidCode = "12-xy";
+  const invalidSqlState = await rejectedScenario(Object.assign(
+    new Error("raw_invalid_sqlstate_message_sentinel"),
+    { code: invalidCode }
+  ));
+  assert.equal(invalidSqlState.assertionError?.code, "ERR_ASSERTION");
+  assert.equal(
+    invalidSqlState.facts.conflictingNegativeObservedSqlState,
+    "unknown"
+  );
+  assert.equal(
+    JSON.stringify(invalidSqlState.lines).includes(invalidCode),
+    false
+  );
+
+  const firstFailure = await runSyntheticReporterFailure({
+    stdoutLines: [
+      "TAP version 13",
+      `# Subtest: ${realPostgresRunner.TAP_TITLE}`
+    ],
+    phaseLines: different.lines,
+    stderrLines: ["AssertionError ERR_ASSERTION"]
+  });
+  assert.equal(firstFailure.facts.protocolValid, true);
+  assert.equal(firstFailure.facts.failure, true);
+  assert.equal(
+    firstFailure.facts.conflictingNegativeObservedSqlState,
+    "42P01"
+  );
+  assert.equal(
+    firstFailure.facts.conflictingNegativeAssertionMatched,
+    false
+  );
+  const laterFailure = JSON.parse(firstFailure.emitted.at(-1).slice(
+    realPostgresRunner.SAFE_EVENT_PREFIX.length
+  ));
+  laterFailure.sequence += 1;
+  laterFailure.conflictingNegativeObservedSqlState = "23514";
+  laterFailure.conflictingNegativeAssertionMatched = true;
+  const preservedFirstFailure = collectSafeRunnerLines([
+    ...firstFailure.emitted,
+    realPostgresRunner.safeEventLine(laterFailure)
+  ]);
+  assert.equal(preservedFirstFailure.protocolValid, false);
+  assert.equal(
+    preservedFirstFailure.conflictingNegativeObservedSqlState,
+    "42P01"
+  );
+  assert.equal(
+    preservedFirstFailure.conflictingNegativeAssertionMatched,
+    false
+  );
+
+  const duplicateAttempt = activeConflictingNegativeEmitter();
+  duplicateAttempt.phases.markExact0004ConflictingNegativeAttempted();
+  assert.throws(
+    () => duplicateAttempt.phases
+      .markExact0004ConflictingNegativeAttempted(),
+    /physical_phase_protocol_invalid/
+  );
+  const outOfOrderSettlement = activeConflictingNegativeEmitter();
+  await assert.rejects(
+    outOfOrderSettlement.phases.observeExact0004ConflictingNegative(
+      Promise.resolve(null)
+    ),
+    /physical_phase_protocol_invalid/
+  );
+  const outOfOrderAssertion = activeConflictingNegativeEmitter();
+  assert.throws(
+    () => outOfOrderAssertion.phases
+      .markExact0004ConflictingNegativeAssertionMatched(false),
+    /physical_phase_protocol_invalid/
+  );
+  const duplicateSettlement = activeConflictingNegativeEmitter();
+  duplicateSettlement.phases.markExact0004ConflictingNegativeAttempted();
+  assert.equal(
+    await duplicateSettlement.phases.observeExact0004ConflictingNegative(
+      Promise.resolve(null)
+    ),
+    null
+  );
+  await assert.rejects(
+    duplicateSettlement.phases.observeExact0004ConflictingNegative(
+      Promise.resolve(null)
+    ),
+    /physical_phase_protocol_invalid/
+  );
+
+  const serialized = JSON.stringify({
+    applied: appliedFulfillment.facts,
+    appliedLines: appliedFulfillment.lines,
+    invalid: invalidSqlState.facts,
+    invalidLines: invalidSqlState.lines,
+    noCode: noCode.facts,
+    noCodeLines: noCode.lines,
+    unknownFulfillment: unknownFulfillment.facts,
+    unknownFulfillmentLines: unknownFulfillment.lines
+  });
+  for (const forbidden of [
+    rawAppliedResult.query,
+    rawAppliedResult.parameters[0],
+    rawAppliedResult[rawSecretKey],
+    rawAppliedResult.path,
+    noCodeError.message,
+    noCodeError.stack,
+    "raw_getter_message_sentinel",
+    "C:\\private",
+    invalidCode
+  ]) assert.equal(serialized.includes(forbidden), false, forbidden);
+  for (const forbiddenKey of [
+    "sql",
+    "query",
+    "parameters",
+    "message",
+    "detail",
+    "hint",
+    "where",
+    "stack",
+    "path",
+    "url",
+    "secret"
+  ]) {
+    assert.equal(
+      Object.hasOwn(appliedFulfillment.facts, forbiddenKey),
+      false,
+      forbiddenKey
+    );
+  }
 });
 
 test("protocol group 1: impossible snapshots and incoherent failure boundaries fail closed", () => {
@@ -1164,7 +1609,7 @@ test("protocol group 1: outer failure preserves the first functional boundary an
   for (const phase of realPostgresRunner.PHYSICAL_MAIN_PHASES) {
     cleanupPhases.startMain(phase);
     if (phase === "exact_0004_plan_apply") {
-      completeExact0004Subphases(cleanupPhases);
+      await completeExact0004Subphases(cleanupPhases);
     }
     cleanupPhases.completeMain(phase);
   }
@@ -1193,7 +1638,13 @@ test("protocol group 1: outer failure preserves the first functional boundary an
       planExactCompleted: true,
       applyExactInvoked: true,
       applyExactCompleted: true,
-      databaseMutationAttempted: true
+      databaseMutationAttempted: true,
+      conflictingNegativeAttempted: true,
+      conflictingNegativePromiseOutcome: "rejected",
+      conflictingNegativeObservedSqlState: "23514",
+      conflictingNegativeFulfilledResultClass: "not_observed",
+      conflictingNegativeAssertionMatched: true,
+      conflictingNegativeRejectedBeforeAssertion: true
     })
   );
 });
