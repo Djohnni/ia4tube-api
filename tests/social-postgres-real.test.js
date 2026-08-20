@@ -1974,7 +1974,7 @@ async function proveExact0004Route(
         EXACT_APPLY_REQUEST,
         configuration.approvalEnvironment
       ),
-      (error) => error?.code === "P0001"
+      (error) => error?.code === "23514"
     );
     physicalPhases.completeExact0004Subphase(
       "conflicting_0004_negative"

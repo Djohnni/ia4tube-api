@@ -12,12 +12,13 @@ const ROOT = path.resolve(__dirname, "..");
 const RELATIVE = ".github/workflows/social-3b0-exact-0004-runner-linux.yml";
 const FILE = path.join(ROOT, ...RELATIVE.split("/"));
 const BRANCH =
-  "social/checkpoint-3b0-exact-0004-runner-linux-plan-subphase-evidence-20260816";
+  "social/checkpoint-3b0-exact-0004-runner-linux-conflict-sqlstate-20260820";
 const BASE = "13e38b875db2a220514fe06113663c517c975592";
-const PARENT = "73433e1b2d856e073db452ebe17815bec296bba0";
+const PARENT = "53bae8b3457b515b0e656d5b37fce4dc04d5e89f";
+const PLAN_SUBPHASE_PARENT = "73433e1b2d856e073db452ebe17815bec296bba0";
 const SOURCE_COMMIT = "8534817574a22dbd144a835c9f3585c44ee11c96";
 const MESSAGE =
-  "[run-social-3b0] expose exact 0004 plan subphase safely";
+  "[run-social-3b0] align exact 0004 conflict SQLSTATE";
 const IMAGE =
   "docker.io/library/postgres:18.4-bookworm@sha256:7e6103cf85f88f7a0eddb3ec0b1ba8940eba098ed118ade25a729ca9daee5568";
 const CHECKOUT = "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1";
@@ -29,9 +30,9 @@ const RUNNER_LF_SHA256 =
   "2e30395d6ff015f16fdf99469028e48576cfca942a35b0b88a29e2b208d15a16";
 const RUNNER_FILTERED_OID = "18fa43cbc8014ffdf9ce4ac986f3133bf8a51cdd";
 const PARENT_RUNNER_LF_SHA256 =
-  "efac7d0ce2c0bcd4b1fc83c692b610749de0e842badbb71e4d66e9f384e5673d";
+  "2e30395d6ff015f16fdf99469028e48576cfca942a35b0b88a29e2b208d15a16";
 const PARENT_RUNNER_FILTERED_OID =
-  "dec34f1bc10ee2d1f06737bb07f6bca4ec5770f5";
+  "18fa43cbc8014ffdf9ce4ac986f3133bf8a51cdd";
 const PRESERVED_FUNCTIONAL_FILES = Object.freeze([
   "scripts/social-db-migrate.js",
   "src/persistence/postgres/migrations.js",
@@ -39,12 +40,16 @@ const PRESERVED_FUNCTIONAL_FILES = Object.freeze([
 ]);
 const REAL_TEST_FILE = "tests/social-postgres-real.test.js";
 const REAL_TEST_LF_SHA256 =
-  "593f79407358d997c03e1cb536e90dd9bf0fef091d3bd376916ddad17c21ff3a";
+  "0c6f7fff3bb031e5fd13f6220cc19d6bdaf24160e435bbe533404c28f7f7be20";
 const REAL_TEST_FILTERED_OID =
-  "d8212114d6e7590c91d1170d62778eed7b58dbb6";
+  "c6c4bcce192d33940d99d7395bde9ba79fc78ea1";
 const PARENT_REAL_TEST_LF_SHA256 =
-  "27a4d1ebbccda40711fd1a78a2f170efa3128690b86588be0c7ab515345f49d0";
+  "593f79407358d997c03e1cb536e90dd9bf0fef091d3bd376916ddad17c21ff3a";
 const PARENT_REAL_TEST_FILTERED_OID =
+  "d8212114d6e7590c91d1170d62778eed7b58dbb6";
+const PLAN_SUBPHASE_PARENT_REAL_TEST_LF_SHA256 =
+  "27a4d1ebbccda40711fd1a78a2f170efa3128690b86588be0c7ab515345f49d0";
+const PLAN_SUBPHASE_PARENT_REAL_TEST_FILTERED_OID =
   "bebdc618879cabd589dbe93a3b6a2c9a172aa98e";
 const LEDGER_OID_PREDECESSOR_COMMIT =
   "05689e6d23e65c6df33e3db79633126114dea540";
@@ -111,15 +116,13 @@ const EXACT18 = Object.freeze([
   "tests/social-postgres-migrations.test.js",
   "tests/social-postgres-real.test.js"
 ]);
-const INCREMENTAL9 = Object.freeze([
+const INCREMENTAL7 = Object.freeze([
   ".github/workflows/social-3b0-exact-0004-runner-linux.yml",
-  "scripts/run-real-postgres-tests.js",
   "scripts/social-3a0p-local-scope.js",
   "tests/node-test-runner-safety.test.js",
   "tests/social-3a0p-current-diff-scope.test.js",
   "tests/social-3a0p-local-scope.test.js",
   "tests/social-3b0-exact-0004-runner-linux-workflow.test.js",
-  "tests/social-3b0-linux-physical-gate.test.js",
   "tests/social-postgres-real.test.js"
 ]);
 const LEGACY_EVIDENCE_KEYS = Object.freeze([
@@ -612,9 +615,9 @@ test("Exact-0004 Linux workflow fixes branch, immediate parent, ancestral base, 
   assert.equal(new Set(EXACT18).size, 18);
   const guardInventory = bashExpectedInventory(guard);
   assert.deepEqual(guardInventory, EXACT18);
-  assert.equal(INCREMENTAL9.length, 9);
-  assert.equal(new Set(INCREMENTAL9).size, 9);
-  assert.deepEqual(bashIncrementalInventory(guard), INCREMENTAL9);
+  assert.equal(INCREMENTAL7.length, 7);
+  assert.equal(new Set(INCREMENTAL7).size, 7);
+  assert.deepEqual(bashIncrementalInventory(guard), INCREMENTAL7);
   const physical = stepByName(
     currentJob,
     "Run the one-shot PostgreSQL 18 Exact-0004 proof"
@@ -674,8 +677,8 @@ test("Exact-0004 Linux workflow fixes branch, immediate parent, ancestral base, 
   assert.deepEqual(cleanupPins, CLEANUP_LF_SHA256);
   assert.equal(
     source.split(`'${RUNNER_FILE}'`).length - 1,
-    6,
-    "six semantic runner path positions"
+    5,
+    "five semantic runner path positions"
   );
   const imports = physicalRunnerImports(physical.run);
   assert.equal(imports.length, 1);
@@ -1074,14 +1077,17 @@ test("ledger OID parent remains exact atop snapshot-role binding and preserves i
   const parentBytes = git([
     "cat-file",
     "blob",
-    `${PARENT}:${REAL_TEST_FILE}`
+    `${PLAN_SUBPHASE_PARENT}:${REAL_TEST_FILE}`
   ], null);
   assert.ok(Buffer.isBuffer(parentBytes));
   assert.equal(
     crypto.createHash("sha256").update(parentBytes).digest("hex"),
-    PARENT_REAL_TEST_LF_SHA256
+    PLAN_SUBPHASE_PARENT_REAL_TEST_LF_SHA256
   );
-  assert.equal(gitBlobOid(parentBytes), PARENT_REAL_TEST_FILTERED_OID);
+  assert.equal(
+    gitBlobOid(parentBytes),
+    PLAN_SUBPHASE_PARENT_REAL_TEST_FILTERED_OID
+  );
   const parentSource = parentBytes.toString("utf8");
   const ledgerPredecessorBytes = git([
     "cat-file",
@@ -1373,7 +1379,7 @@ test("ledger OID parent remains exact atop snapshot-role binding and preserves i
   assert.equal(reconstructed, predecessorSource);
 });
 
-test("plan-subphase evidence is exact atop the ledger OID parent", () => {
+test("conflict SQLSTATE is exact atop the preserved plan-subphase evidence", () => {
   const parentBytes = git([
     "cat-file",
     "blob",
@@ -1393,6 +1399,41 @@ test("plan-subphase evidence is exact atop the ledger OID parent", () => {
   );
   assert.equal(gitBlobOid(currentBytes), REAL_TEST_FILTERED_OID);
   const currentSource = currentBytes.toString("utf8");
+  const staleExpectation = '      (error) => error?.code === "P0001"';
+  const canonicalExpectation = '      (error) => error?.code === "23514"';
+  assert.equal(parentSource.split(staleExpectation).length - 1, 1);
+  assert.equal(parentSource.includes(canonicalExpectation), false);
+  assert.equal(currentSource.split(canonicalExpectation).length - 1, 1);
+  assert.equal(currentSource.includes(staleExpectation), false);
+  assert.equal(
+    currentSource.replace(canonicalExpectation, staleExpectation),
+    parentSource
+  );
+
+  const migrationSource = canonicalLfBytes(
+    "db/migrations/0004_social_connector_persistence.up.sql"
+  ).toString("utf8");
+  const blockingMessage =
+    "MESSAGE = 'social_connector_blocking_connection_conflict'";
+  const blockingMessageIndex = migrationSource.indexOf(blockingMessage);
+  const blockingStart = migrationSource.lastIndexOf(
+    "  IF EXISTS (",
+    blockingMessageIndex
+  );
+  const blockingEnd = migrationSource.indexOf("  END IF;", blockingMessageIndex);
+  assert.notEqual(blockingMessageIndex, -1);
+  assert.notEqual(blockingStart, -1);
+  assert.notEqual(blockingEnd, -1);
+  const blockingPreflight = migrationSource.slice(
+    blockingStart,
+    blockingEnd + "  END IF;".length
+  );
+  assert.equal(
+    blockingPreflight.split("      ERRCODE = '23514',").length - 1,
+    1
+  );
+  assert.equal(blockingPreflight.includes("ERRCODE = 'P0001'"), false);
+  assert.equal(blockingPreflight.includes(blockingMessage), true);
 
   const markerExpression =
     /physicalPhases\.(start|complete)Exact0004Subphase\(\s*"([^"]+)"\s*\)/g;
@@ -1424,6 +1465,64 @@ test("plan-subphase evidence is exact atop the ledger OID parent", () => {
       "physicalPhases.markExact0004DatabaseMutationAttempted();"
     ) < currentSource.indexOf("const conflictId = await insertExact0004Conflict(")
   );
+  const conflictingStartIndex = currentSource.indexOf(
+    'physicalPhases.startExact0004Subphase("conflicting_0004_negative")'
+  );
+  const conflictingCompleteIndex = currentSource.indexOf(
+    'physicalPhases.completeExact0004Subphase(\n      "conflicting_0004_negative"'
+  );
+  assert.ok(conflictingStartIndex >= 0);
+  assert.ok(conflictingCompleteIndex > conflictingStartIndex);
+  const conflictingBlock = currentSource.slice(
+    conflictingStartIndex,
+    conflictingCompleteIndex
+  );
+  assert.equal(
+    conflictingBlock.split(canonicalExpectation).length - 1,
+    1
+  );
+  assert.equal(conflictingBlock.includes(staleExpectation), false);
+  assert.equal(conflictingBlock.includes(blockingMessage), false);
+  for (const forbidden of [
+    "error.message",
+    "error.stack",
+    "error.detail",
+    "error.hint",
+    "error.where",
+    "JSON.stringify(error)"
+  ]) assert.equal(conflictingBlock.includes(forbidden), false, forbidden);
+  assert.ok(
+    conflictingBlock.indexOf("const conflictId = await insertExact0004Conflict(") <
+      conflictingBlock.indexOf("runnerA.applyExact(")
+  );
+  const rollbackStart = currentSource.indexOf(
+    'physicalPhases.startExact0004Subphase("rollback_verification")'
+  );
+  const rollbackComplete = currentSource.indexOf(
+    'physicalPhases.completeExact0004Subphase("rollback_verification")'
+  );
+  const positiveApply = currentSource.indexOf(
+    'physicalPhases.startExact0004Subphase("apply_exact")'
+  );
+  assert.ok(conflictingCompleteIndex < rollbackStart);
+  assert.ok(rollbackStart < rollbackComplete);
+  assert.ok(rollbackComplete < positiveApply);
+
+  const planParentBytes = git([
+    "cat-file",
+    "blob",
+    `${PLAN_SUBPHASE_PARENT}:${REAL_TEST_FILE}`
+  ], null);
+  assert.ok(Buffer.isBuffer(planParentBytes));
+  assert.equal(
+    crypto.createHash("sha256").update(planParentBytes).digest("hex"),
+    PLAN_SUBPHASE_PARENT_REAL_TEST_LF_SHA256
+  );
+  assert.equal(
+    gitBlobOid(planParentBytes),
+    PLAN_SUBPHASE_PARENT_REAL_TEST_FILTERED_OID
+  );
+  const planParentSource = planParentBytes.toString("utf8");
 
   const stripMarkers = (source) => source
     .replace(
@@ -1436,7 +1535,7 @@ test("plan-subphase evidence is exact atop the ledger OID parent", () => {
     );
   const helperSignature = "async function proveMigratorExplicitRoleBoundary(";
   const routeSignature = "async function proveExact0004Route(";
-  const parentHelper = inlineFunction(parentSource, helperSignature);
+  const parentHelper = inlineFunction(planParentSource, helperSignature);
   const currentHelper = inlineFunction(currentSource, helperSignature);
   const normalizedHelper = stripMarkers(currentHelper)
     .replace("pool, physicalPhases", "pool")
@@ -1450,9 +1549,10 @@ test("plan-subphase evidence is exact atop the ledger OID parent", () => {
     );
   assert.equal(normalizedHelper, parentHelper);
 
-  const parentRoute = inlineFunction(parentSource, routeSignature);
+  const parentRoute = inlineFunction(planParentSource, routeSignature);
   const currentRoute = inlineFunction(currentSource, routeSignature);
   const normalizedRoute = stripMarkers(currentRoute)
+    .replace(canonicalExpectation, staleExpectation)
     .replace(",\n  physicalPhases\n)", "\n)")
     .replace(
       "proveMigratorExplicitRoleBoundary(migrationPoolA, physicalPhases)",
@@ -1471,7 +1571,7 @@ test("plan-subphase evidence is exact atop the ledger OID parent", () => {
     .replace(currentHelper, parentHelper)
     .replace(currentRoute, parentRoute)
     .replace(currentCallTail, parentCallTail);
-  assert.equal(normalizedSource, parentSource);
+  assert.equal(normalizedSource, planParentSource);
   for (const forbidden of [
     "error.message",
     "error.stack",
@@ -1510,7 +1610,7 @@ test("instrumented runner pin is the canonical filtered LF blob", () => {
     PARENT_RUNNER_LF_SHA256
   );
   assert.equal(gitBlobOid(parent), PARENT_RUNNER_FILTERED_OID);
-  assert.notEqual(RUNNER_FILTERED_OID, PARENT_RUNNER_FILTERED_OID);
+  assert.equal(RUNNER_FILTERED_OID, PARENT_RUNNER_FILTERED_OID);
   const runnerSource = canonical.toString("utf8");
   for (const fragment of [
     "const EVIDENCE_SCHEMA_VERSION = 4;",

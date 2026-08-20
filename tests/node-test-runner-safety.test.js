@@ -58,9 +58,9 @@ const SAFE_EVIDENCE_COMMIT = "8534817574a22dbd144a835c9f3585c44ee11c96";
 const PERMISSION_BOUNDARY_COMMIT = "555d71eacbde76ceffdd03d64731e03849978c17";
 const REAL_POSTGRES_TEST = "tests/social-postgres-real.test.js";
 const REAL_POSTGRES_TEST_LF_SHA256 =
-  "593f79407358d997c03e1cb536e90dd9bf0fef091d3bd376916ddad17c21ff3a";
+  "0c6f7fff3bb031e5fd13f6220cc19d6bdaf24160e435bbe533404c28f7f7be20";
 const REAL_POSTGRES_TEST_FILTERED_OID =
-  "d8212114d6e7590c91d1170d62778eed7b58dbb6";
+  "c6c4bcce192d33940d99d7395bde9ba79fc78ea1";
 const PHYSICAL_MAIN_PHASES = Object.freeze([
   "physical_target_preflight",
   "role_provisioning",
@@ -880,7 +880,12 @@ test("24. exact 0004 production ledger reads use the migrator role only", () => 
     '  physicalPhases.startExact0004Subphase("final_snapshot");\n',
     '  physicalPhases.completeExact0004Subphase("final_snapshot");\n'
   ];
-  let permissionBoundaryCandidate = realTestSource;
+  let permissionBoundaryCandidate = replaceExactlyOnce(
+    realTestSource,
+    '      (error) => error?.code === "23514"',
+    '      (error) => error?.code === "P0001"',
+    "canonical conflict SQLSTATE expectation"
+  );
   for (const { current, previous, label } of authorizedPermissionReplacements) {
     permissionBoundaryCandidate = replaceExactlyOnce(
       permissionBoundaryCandidate,

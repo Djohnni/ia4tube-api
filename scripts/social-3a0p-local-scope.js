@@ -3,9 +3,9 @@
 const path = require("node:path");
 
 const AUTHORIZED_BRANCH =
-  "social/checkpoint-3b0-exact-0004-runner-linux-plan-subphase-evidence-20260816";
+  "social/checkpoint-3b0-exact-0004-runner-linux-conflict-sqlstate-20260820";
 const ROUTE_BASE_COMMIT = "13e38b875db2a220514fe06113663c517c975592";
-const ROUTE_PARENT_COMMIT = "73433e1b2d856e073db452ebe17815bec296bba0";
+const ROUTE_PARENT_COMMIT = "53bae8b3457b515b0e656d5b37fce4dc04d5e89f";
 
 const ALLOWED_EXACT_FILES = new Set([
   ".github/workflows/social-3b0-exact-0004-runner-linux.yml",
