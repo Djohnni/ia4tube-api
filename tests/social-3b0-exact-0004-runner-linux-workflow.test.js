@@ -12,14 +12,15 @@ const ROOT = path.resolve(__dirname, "..");
 const RELATIVE = ".github/workflows/social-3b0-exact-0004-runner-linux.yml";
 const FILE = path.join(ROOT, ...RELATIVE.split("/"));
 const BRANCH =
-  "social/checkpoint-3b0-exact-0004-runner-linux-rollback-catalog-lookup-20260820";
+  "social/checkpoint-3b0-exact-0004-runner-linux-external-account-rollback-catalog-20260820";
 const BASE = "13e38b875db2a220514fe06113663c517c975592";
-const PARENT = "5a109bc775ac9e35bdcdaabec16d329509d9125f";
+const PARENT = "76e650c18beadc9768666285440445d2fc2e367e";
+const FIRST_ROLLBACK_PARENT = "5a109bc775ac9e35bdcdaabec16d329509d9125f";
 const FORCE_RLS_PARENT = "1de14105800db3ad024e15700d7e23fb2b41282c";
 const PLAN_SUBPHASE_PARENT = "73433e1b2d856e073db452ebe17815bec296bba0";
 const SOURCE_COMMIT = "8534817574a22dbd144a835c9f3585c44ee11c96";
 const MESSAGE =
-  "[run-social-3b0] verify exact 0004 rollback through catalogs";
+  "[run-social-3b0] verify external account rollback through catalogs";
 const IMAGE =
   "docker.io/library/postgres:18.4-bookworm@sha256:7e6103cf85f88f7a0eddb3ec0b1ba8940eba098ed118ade25a729ca9daee5568";
 const CHECKOUT = "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1";
@@ -67,12 +68,16 @@ const PROTECTED_FILES = Object.freeze([
 ]);
 const REAL_TEST_FILE = "tests/social-postgres-real.test.js";
 const REAL_TEST_LF_SHA256 =
-  "329890ff2e56c034a778b3277f46254795749ebc78feaf3c2e8d4ea760ee64c7";
+  "bfa29707855f99c4823286109633f8b83c4593b8f46ab749e7939e4605022d89";
 const REAL_TEST_FILTERED_OID =
-  "cad3660ccc8d972aff5770701ff836f29c61e615";
+  "c7c5c13f0886209bc75e31e426ef1db24a9e5277";
 const PARENT_REAL_TEST_LF_SHA256 =
-  "e3912a2b174e7199c76035264ebe455da00848c3c61259138b9ea0b77c3e5117";
+  "329890ff2e56c034a778b3277f46254795749ebc78feaf3c2e8d4ea760ee64c7";
 const PARENT_REAL_TEST_FILTERED_OID =
+  "cad3660ccc8d972aff5770701ff836f29c61e615";
+const FIRST_ROLLBACK_PARENT_REAL_TEST_LF_SHA256 =
+  "e3912a2b174e7199c76035264ebe455da00848c3c61259138b9ea0b77c3e5117";
+const FIRST_ROLLBACK_PARENT_REAL_TEST_FILTERED_OID =
   "9d841c0290b2abb102bb3ce2f7e76bc8a80fe84a";
 const FORCE_RLS_PARENT_REAL_TEST_LF_SHA256 =
   "d07054524efec8ac48b720eed8df7a39d2db6a8a5cda6249b80c30ec73b33a66";
@@ -80,13 +85,13 @@ const FORCE_RLS_PARENT_REAL_TEST_FILTERED_OID =
   "926b6050fcb89b528126eb6fbf72f70624556a4b";
 const INSTRUMENTED_LF_SHA256 = Object.freeze({
   [NODE_TEST_FILE]:
-    "6ea16ca8ab6243c7f209228c99aeb50963f6b3f7f4a83fbafbd04e85cb80fe54",
+    "2b561c3b9399f9cb6351bd73cd2d317b74d46ef7525d67d054b2e1a5e2235324",
   [PHYSICAL_TEST_FILE]:
     "c9dc030f19a1b26bd82eea9cc2f1399568edd1efe864e84ad4aef484158bbafc",
   [REAL_TEST_FILE]: REAL_TEST_LF_SHA256
 });
 const INSTRUMENTED_FILTERED_OID = Object.freeze({
-  [NODE_TEST_FILE]: "7b510c2c1ef04b08ed65608927903b03b73bbacb",
+  [NODE_TEST_FILE]: "41359b42bc4fc5cbc11ec0b0bc4407d728ebde9c",
   [PHYSICAL_TEST_FILE]: "367717f49cc845d5e022fc5eaa2823cf55c0f2cc",
   [REAL_TEST_FILE]: REAL_TEST_FILTERED_OID
 });
@@ -1890,11 +1895,25 @@ test("historical FORCE-RLS conflict proof remains exact", () => {
   ]) assert.equal(currentRoute.includes(authorizedRouteProof), true);
 });
 
-test("rollback verification uses exact catalog cardinalities and reconstructs only its parent delta", () => {
+test("rollback catalog proofs reject mutants and reconstruct only their parent deltas", () => {
+  const firstRollbackParentBytes = git([
+    "cat-file",
+    "blob",
+    FIRST_ROLLBACK_PARENT + ":" + REAL_TEST_FILE
+  ], null);
+  assert.ok(Buffer.isBuffer(firstRollbackParentBytes));
+  assert.equal(
+    crypto.createHash("sha256").update(firstRollbackParentBytes).digest("hex"),
+    FIRST_ROLLBACK_PARENT_REAL_TEST_LF_SHA256
+  );
+  assert.equal(
+    gitBlobOid(firstRollbackParentBytes),
+    FIRST_ROLLBACK_PARENT_REAL_TEST_FILTERED_OID
+  );
   const parentBytes = git([
     "cat-file",
     "blob",
-    `${PARENT}:${REAL_TEST_FILE}`
+    PARENT + ":" + REAL_TEST_FILE
   ], null);
   assert.ok(Buffer.isBuffer(parentBytes));
   assert.equal(
@@ -1908,42 +1927,211 @@ test("rollback verification uses exact catalog cardinalities and reconstructs on
     REAL_TEST_LF_SHA256
   );
   assert.equal(gitBlobOid(currentBytes), REAL_TEST_FILTERED_OID);
+  const firstRollbackParentSource = firstRollbackParentBytes.toString("utf8");
   const parentSource = parentBytes.toString("utf8");
   const currentSource = currentBytes.toString("utf8");
 
+  const transactionRollbackSignature =
+    "async function proveTransactionRollback(pool, fixture) {";
+  const transactionRollbackHelper = inlineFunction(
+    currentSource,
+    transactionRollbackSignature
+  );
+  const parentTransactionRollbackHelper = inlineFunction(
+    parentSource,
+    transactionRollbackSignature
+  );
+  const authorizedTransactionRollbackInsert = String.raw`        await client.query(
+          [
+            "INSERT INTO ia4tube_social.social_connections (",
+            "  company_id, id, provider, status, created_by_user_id",
+            ") VALUES ($1, $2, 'instagram', 'error', $3)"
+          ].join("\n"),
+          [fixture.companyId, connectionId, fixture.userId]
+        );`;
+  const parentTransactionRollbackInsert = String.raw`        await client.query(
+          [
+            "INSERT INTO ia4tube_social.social_connections (",
+            "  company_id, id, provider, created_by_user_id",
+            ") VALUES ($1, $2, 'instagram', $3)"
+          ].join("\n"),
+          [fixture.companyId, connectionId, fixture.userId]
+        );`;
+  assert.equal(
+    transactionRollbackHelper.split(authorizedTransactionRollbackInsert).length - 1,
+    1
+  );
+  assert.equal(
+    (
+      transactionRollbackHelper.match(
+        /INSERT INTO ia4tube_social\.social_connections \(/g
+      ) || []
+    ).length,
+    1
+  );
+  assert.equal(transactionRollbackHelper.includes("pending"), false);
+  assert.equal(transactionRollbackHelper.includes("23505"), false);
+  assert.equal(
+    transactionRollbackHelper.split(
+      '        throw new Error("synthetic_transaction_rollback");'
+    ).length - 1,
+    1
+  );
+  assert.equal(
+    transactionRollbackHelper.split(
+      "    /synthetic_transaction_rollback/"
+    ).length - 1,
+    1
+  );
+  assert.equal(
+    transactionRollbackHelper.split("  await assert.rejects(").length - 1,
+    1
+  );
+  assert.equal(
+    transactionRollbackHelper.split(
+      "    { role: RUNTIME_ROLE, companyId: fixture.companyId }"
+    ).length - 1,
+    2
+  );
+  const insertIndex = transactionRollbackHelper.indexOf(
+    authorizedTransactionRollbackInsert
+  );
+  const throwIndex = transactionRollbackHelper.indexOf(
+    '        throw new Error("synthetic_transaction_rollback");'
+  );
+  const postRollbackQueryIndex = transactionRollbackHelper.indexOf(
+    '          "SELECT id FROM ia4tube_social.social_connections"'
+  );
+  const absenceAssertionIndex = transactionRollbackHelper.indexOf(
+    "  assert.equal(result.rowCount, 0);"
+  );
+  assert.ok(insertIndex >= 0 && insertIndex < throwIndex);
+  assert.ok(throwIndex < postRollbackQueryIndex);
+  assert.ok(postRollbackQueryIndex < absenceAssertionIndex);
+  assert.equal(
+    transactionRollbackHelper.split(
+      '          "WHERE company_id = $1 AND id = $2"'
+    ).length - 1,
+    1
+  );
+  assert.equal(
+    transactionRollbackHelper.split(
+      "        [fixture.companyId, connectionId]"
+    ).length - 1,
+    1
+  );
+  assert.equal(
+    transactionRollbackHelper.replace(
+      authorizedTransactionRollbackInsert,
+      parentTransactionRollbackInsert
+    ),
+    parentTransactionRollbackHelper
+  );
+
+  const closedSection = (source, startToken, endToken) => {
+    assert.equal(source.split(startToken).length - 1, 1, startToken);
+    const start = source.indexOf(startToken);
+    const end = source.indexOf(endToken, start + startToken.length);
+    assert.ok(start >= 0 && end > start, endToken);
+    return source.slice(start, end);
+  };
+  const migrationSource = canonicalLfBytes(MIGRATION_FILE).toString("utf8");
+  const statusConstraints = closedSection(
+    migrationSource,
+    "  ADD CONSTRAINT social_connections_status_allowed",
+    "DO $social_connector_blocking_connection_gate$"
+  );
+  assert.equal(statusConstraints.split("        'error',").length - 1, 1);
+  assert.equal(
+    statusConstraints.split(
+      "        status IN ('error', 'disconnecting', 'failed') AND\n" +
+      "        revoked_at IS NULL AND\n" +
+      "        disconnected_at IS NULL"
+    ).length - 1,
+    1
+  );
+  const blockingIndex = closedSection(
+    migrationSource,
+    "  CREATE UNIQUE INDEX social_connections_instagram_blocking_company_unique",
+    "EXCEPTION"
+  );
+  assert.equal(blockingIndex.split("WHERE provider = 'instagram'").length - 1, 1);
+  assert.equal(blockingIndex.split("        'pending',").length - 1, 1);
+  assert.equal(blockingIndex.split("        'active',").length - 1, 1);
+  assert.equal(blockingIndex.includes("'error'"), false);
+
+  assert.equal(
+    currentSource.split(authorizedTransactionRollbackInsert).length - 1,
+    1
+  );
+  const transactionRollbackParentCandidate = currentSource.replace(
+    authorizedTransactionRollbackInsert,
+    parentTransactionRollbackInsert
+  );
+
   const subphaseBody = (source, name) => {
-    const token = `"${name}"`;
+    const token = '"' + name + '"';
     assert.equal(source.split(token).length - 1, 2, name);
     const start = source.indexOf(token);
     const end = source.indexOf(token, start + token.length);
     assert.ok(start >= 0 && end > start, name);
     return source.slice(start + token.length, end);
   };
-  const rollbackProof = (source) => {
-    const body = subphaseBody(source, "rollback_verification");
-    const startToken = "    const rollbackState = await withTransaction(";
-    const endToken = [
-      "    assert.equal(",
-      "      await countExact0004Conflict(",
-      "        migrationPoolA,",
-      "        companyWithLegacyConnection,",
-      "        conflictId",
-      "      ),",
-      "      1,"
-    ].join("\n");
-    assert.equal(body.split(startToken).length - 1, 1);
-    assert.equal(body.split(endToken).length - 1, 1);
+  const rollbackProof = (source, name, stateVariable, endToken) => {
+    const body = subphaseBody(source, name);
+    const startToken =
+      "    const " + stateVariable + " = await withTransaction(";
+    assert.equal(body.split(startToken).length - 1, 1, name);
+    assert.equal(body.split(endToken).length - 1, 1, name);
     const start = body.indexOf(startToken);
     const end = body.indexOf(endToken, start);
-    assert.ok(end > start);
+    assert.ok(end > start, name);
     return body.slice(start, end);
   };
+  const connectionEndToken = [
+    "    assert.equal(",
+    "      await countExact0004Conflict(",
+    "        migrationPoolA,",
+    "        companyWithLegacyConnection,",
+    "        conflictId",
+    "      ),",
+    "      1,"
+  ].join("\n");
+  const externalAccountEndToken = [
+    "    assert.equal(",
+    "      await countExact0004ActiveExternalAccounts(",
+    "        migrationPoolA,",
+    "        companyWithLegacyConnection",
+    "      ),",
+    "      2,"
+  ].join("\n");
+
+  const firstRollbackParentRollback = subphaseBody(
+    firstRollbackParentSource,
+    "rollback_verification"
+  );
   const parentRollback = subphaseBody(parentSource, "rollback_verification");
   const currentRollback = subphaseBody(currentSource, "rollback_verification");
-  const parentProof = rollbackProof(parentSource);
-  const currentProof = rollbackProof(currentSource);
+  const firstRollbackParentProof = rollbackProof(
+    firstRollbackParentSource,
+    "rollback_verification",
+    "rollbackState",
+    connectionEndToken
+  );
+  const parentProof = rollbackProof(
+    parentSource,
+    "rollback_verification",
+    "rollbackState",
+    connectionEndToken
+  );
+  const currentProof = rollbackProof(
+    currentSource,
+    "rollback_verification",
+    "rollbackState",
+    connectionEndToken
+  );
 
-  const validateCatalogProof = (proof) => {
+  const validateCatalogProof = (proof, stateVariable) => {
     for (const fragment of [
       '          "WITH target_namespace AS (",',
       '          "  FROM pg_catalog.pg_namespace namespace",',
@@ -1960,8 +2148,10 @@ test("rollback verification uses exact catalog cardinalities and reconstructs on
       '          "     ) AND relkind <> \'i\')) AS unexpected_relkind_count,",',
       '          "   FROM ia4tube_migrations.schema_migrations",',
       '          "   WHERE version = $1) AS ledger_row_count"',
+      "        [SOCIAL_CONNECTOR_PERSISTENCE_MIGRATION]",
       "      { role: MIGRATOR_ROLE }",
-      "    assert.equal(rollbackState.rowCount, 1);",
+      "    assert.equal(" + stateVariable + ".rowCount, 1);",
+      "    assert.deepEqual(" + stateVariable + ".rows, [{",
       "      social_schema_count: 1,",
       "      new_table_count: 0,",
       "      blocking_connection_index_count: 0,",
@@ -1971,84 +2161,135 @@ test("rollback verification uses exact catalog cardinalities and reconstructs on
     ]) assert.equal(proof.includes(fragment), true, fragment);
     assert.equal((proof.match(/COUNT\(\*\)::integer/g) || []).length, 6);
     assert.equal(
-      proof.split("social_idempotency_operations").length - 1,
-      3
+      (proof.match(/\bpg_catalog\.pg_namespace\b/g) || []).length,
+      1
     );
+    assert.equal((proof.match(/\bpg_catalog\.pg_class\b/g) || []).length, 1);
     assert.equal(
-      proof.split("social_connections_instagram_blocking_company_unique").length - 1,
-      3
+      (proof.match(/\bia4tube_migrations\.schema_migrations\b/g) || []).length,
+      1
     );
-    assert.equal(
-      proof.split("social_external_accounts_instagram_active_company_unique").length - 1,
-      3
-    );
+    for (const objectName of [
+      "social_idempotency_operations",
+      "social_connections_instagram_blocking_company_unique",
+      "social_external_accounts_instagram_active_company_unique"
+    ]) assert.equal(proof.split(objectName).length - 1, 3, objectName);
+    assert.equal((proof.match(/relkind <> 'r'/g) || []).length, 1);
+    assert.equal((proof.match(/relkind <> 'i'/g) || []).length, 1);
     assert.equal(/\bto_regclass\s*\(/i.test(proof), false);
     assert.equal(/::\s*regclass\b/i.test(proof), false);
     assert.equal(/\bSET\s+(?:LOCAL\s+)?ROLE\b/i.test(proof), false);
     assert.equal(/\b(?:GRANT|REVOKE|ALTER\s+(?:ROLE|USER))\b/i.test(proof), false);
   };
-  validateCatalogProof(currentProof);
-
   const mutate = (source, before, after, label) => {
     assert.ok(source.includes(before), label);
     const mutated = source.replace(before, after);
     assert.notEqual(mutated, source, label);
     return mutated;
   };
-  for (const [label, mutated] of [
-    [
-      "relation_absent_from_catalog_target",
-      mutate(
-        currentProof,
-        "social_idempotency_operations",
-        "synthetic_absent_relation_0004",
-        "relation absent"
-      )
-    ],
-    [
-      "relation_present_after_rollback",
-      mutate(currentProof, "      new_table_count: 0,", "      new_table_count: 1,", "relation present")
-    ],
-    [
-      "schema_absent",
-      mutate(currentProof, "      social_schema_count: 1,", "      social_schema_count: 0,", "schema absent")
-    ],
-    [
-      "schema_duplicate",
-      mutate(currentProof, "      social_schema_count: 1,", "      social_schema_count: 2,", "schema duplicate")
-    ],
-    [
-      "unexpected_cardinality",
-      mutate(currentProof, "rollbackState.rowCount, 1", "rollbackState.rowCount, 2", "cardinality")
-    ],
-    [
-      "unexpected_relkind",
-      mutate(
-        currentProof,
-        "      unexpected_relkind_count: 0,",
-        "      unexpected_relkind_count: 1,",
-        "relkind"
-      )
-    ],
-    [
-      "textual_regclass_resolution",
-      mutate(
-        currentProof,
-        '          "WITH target_namespace AS (",',
-        '          "SELECT to_regclass(\'ia4tube_social.social_idempotency_operations\')",',
-        "to_regclass"
-      )
-    ]
-  ]) {
-    assert.throws(() => validateCatalogProof(mutated), assert.AssertionError, label);
-  }
+  const rejectCatalogMutants = (proof, stateVariable, prefix) => {
+    for (const [label, mutated] of [
+      [
+        "object_absent_from_catalog_target",
+        mutate(
+          proof,
+          "social_idempotency_operations",
+          "synthetic_absent_relation_0004",
+          prefix + ":object absent"
+        )
+      ],
+      [
+        "object_unexpectedly_present_after_rollback",
+        mutate(
+          proof,
+          "      new_table_count: 0,",
+          "      new_table_count: 1,",
+          prefix + ":object present"
+        )
+      ],
+      [
+        "schema_absent",
+        mutate(
+          proof,
+          "      social_schema_count: 1,",
+          "      social_schema_count: 0,",
+          prefix + ":schema absent"
+        )
+      ],
+      [
+        "schema_duplicate",
+        mutate(
+          proof,
+          "      social_schema_count: 1,",
+          "      social_schema_count: 2,",
+          prefix + ":schema duplicate"
+        )
+      ],
+      [
+        "unexpected_cardinality",
+        mutate(
+          proof,
+          stateVariable + ".rowCount, 1",
+          stateVariable + ".rowCount, 2",
+          prefix + ":cardinality"
+        )
+      ],
+      [
+        "unexpected_relkind",
+        mutate(
+          proof,
+          "      unexpected_relkind_count: 0,",
+          "      unexpected_relkind_count: 1,",
+          prefix + ":relkind"
+        )
+      ],
+      [
+        "textual_to_regclass_reintroduced",
+        mutate(
+          proof,
+          '          "WITH target_namespace AS (",',
+          '          "SELECT to_regclass(\'ia4tube_social.social_idempotency_operations\')",',
+          prefix + ":to_regclass"
+        )
+      ],
+      [
+        "textual_regclass_cast_reintroduced",
+        mutate(
+          proof,
+          '          "WITH target_namespace AS (",',
+          '          "SELECT \'ia4tube_social.social_idempotency_operations\'::regclass",',
+          prefix + ":regclass cast"
+        )
+      ]
+    ]) {
+      assert.throws(
+        () => validateCatalogProof(mutated, stateVariable),
+        assert.AssertionError,
+        prefix + ":" + label
+      );
+    }
+  };
 
-  assert.equal(/\bto_regclass\s*\(/i.test(parentRollback), true);
+  validateCatalogProof(parentProof, "rollbackState");
+  validateCatalogProof(currentProof, "rollbackState");
+  rejectCatalogMutants(parentProof, "rollbackState", "first_rollback");
+  assert.equal(currentProof, parentProof);
+  assert.equal(currentRollback, parentRollback);
+  assert.equal(
+    (firstRollbackParentRollback.match(/\bto_regclass\s*\(/g) || []).length,
+    3
+  );
+  assert.equal(/\bto_regclass\s*\(/i.test(parentRollback), false);
+  assert.equal(/::\s*regclass\b/i.test(parentRollback), false);
   assert.equal(/\bto_regclass\s*\(/i.test(currentRollback), false);
   assert.equal(/::\s*regclass\b/i.test(currentRollback), false);
+  assert.equal(firstRollbackParentSource.split(firstRollbackParentProof).length - 1, 1);
   assert.equal(parentSource.split(parentProof).length - 1, 1);
   assert.equal(currentSource.split(currentProof).length - 1, 1);
-  assert.equal(currentSource.replace(currentProof, parentProof), parentSource);
+  assert.equal(
+    parentSource.replace(parentProof, firstRollbackParentProof),
+    firstRollbackParentSource
+  );
 
   const parentExternalRollback = subphaseBody(
     parentSource,
@@ -2058,17 +2299,55 @@ test("rollback verification uses exact catalog cardinalities and reconstructs on
     currentSource,
     "external_account_rollback_verification"
   );
-  assert.equal(currentExternalRollback, parentExternalRollback);
+  const parentExternalProof = rollbackProof(
+    parentSource,
+    "external_account_rollback_verification",
+    "externalAccountRollbackState",
+    externalAccountEndToken
+  );
+  const currentExternalProof = rollbackProof(
+    currentSource,
+    "external_account_rollback_verification",
+    "externalAccountRollbackState",
+    externalAccountEndToken
+  );
+  validateCatalogProof(
+    currentExternalProof,
+    "externalAccountRollbackState"
+  );
+  rejectCatalogMutants(
+    currentExternalProof,
+    "externalAccountRollbackState",
+    "external_account_rollback"
+  );
   assert.equal(
-    (currentExternalRollback.match(/\bto_regclass\s*\(/g) || []).length,
+    currentExternalProof.replaceAll(
+      "externalAccountRollbackState",
+      "rollbackState"
+    ),
+    parentProof
+  );
+  assert.equal(
+    (parentExternalRollback.match(/\bto_regclass\s*\(/g) || []).length,
     3
   );
+  assert.equal(/\bto_regclass\s*\(/i.test(currentExternalRollback), false);
+  assert.equal(/::\s*regclass\b/i.test(currentExternalRollback), false);
   for (const fragment of [
     "new_table_absent: true",
     "blocking_connection_index_absent: true",
     "active_account_index_absent: true",
     "ledger_row_absent: true"
-  ]) assert.equal(currentExternalRollback.includes(fragment), true, fragment);
+  ]) assert.equal(parentExternalRollback.includes(fragment), true, fragment);
+  assert.equal(parentSource.split(parentExternalProof).length - 1, 1);
+  assert.equal(currentSource.split(currentExternalProof).length - 1, 1);
+  assert.equal(
+    transactionRollbackParentCandidate.replace(
+      currentExternalProof,
+      parentExternalProof
+    ),
+    parentSource
+  );
 });
 
 test("instrumented runner pin is the canonical filtered LF blob", () => {

@@ -63,13 +63,19 @@ const SYNTHETIC_EXECUTABLE = path.resolve("synthetic-node");
 const REPOSITORY_ROOT = path.resolve(__dirname, "..");
 const SAFE_EVIDENCE_COMMIT = "8534817574a22dbd144a835c9f3585c44ee11c96";
 const PERMISSION_BOUNDARY_COMMIT = "555d71eacbde76ceffdd03d64731e03849978c17";
+const EXTERNAL_ACCOUNT_ROLLBACK_CATALOG_PARENT_COMMIT =
+  "76e650c18beadc9768666285440445d2fc2e367e";
+const EXTERNAL_ACCOUNT_ROLLBACK_CATALOG_PARENT_LF_SHA256 =
+  "329890ff2e56c034a778b3277f46254795749ebc78feaf3c2e8d4ea760ee64c7";
+const EXTERNAL_ACCOUNT_ROLLBACK_CATALOG_PARENT_FILTERED_OID =
+  "cad3660ccc8d972aff5770701ff836f29c61e615";
 const ROLLBACK_CATALOG_PARENT_COMMIT =
   "5a109bc775ac9e35bdcdaabec16d329509d9125f";
 const REAL_POSTGRES_TEST = "tests/social-postgres-real.test.js";
 const REAL_POSTGRES_TEST_LF_SHA256 =
-  "329890ff2e56c034a778b3277f46254795749ebc78feaf3c2e8d4ea760ee64c7";
+  "bfa29707855f99c4823286109633f8b83c4593b8f46ab749e7939e4605022d89";
 const REAL_POSTGRES_TEST_FILTERED_OID =
-  "cad3660ccc8d972aff5770701ff836f29c61e615";
+  "c7c5c13f0886209bc75e31e426ef1db24a9e5277";
 const PHYSICAL_MAIN_PHASES = Object.freeze([
   "physical_target_preflight",
   "role_provisioning",
@@ -461,12 +467,140 @@ test("24. exact 0004 production ledger reads use the migrator role only", () => 
     "tests",
     "social-postgres-real.test.js"
   );
+  const exactMigrationPath = path.join(
+    REPOSITORY_ROOT,
+    "db",
+    "migrations",
+    "0004_social_connector_persistence.up.sql"
+  );
   const migrationsSource = fs.readFileSync(migrationsPath, "utf8")
     .replaceAll("\r\n", "\n");
   const rawRealTest = fs.readFileSync(realTestPath, "utf8");
   const realTestSource = rawRealTest.replaceAll("\r\n", "\n");
+  const exactMigrationSource = fs.readFileSync(exactMigrationPath, "utf8")
+    .replaceAll("\r\n", "\n");
   assert.equal(migrationsSource.includes("\r"), false);
   assert.equal(realTestSource.includes("\r"), false);
+  assert.equal(exactMigrationSource.includes("\r"), false);
+
+  const transactionRollbackHelper = closedSourceSection(
+    realTestSource,
+    "async function proveTransactionRollback(pool, fixture) {",
+    "async function provePoolContextCleanup(pool, fixture) {"
+  );
+  const authorizedTransactionRollbackInsert = String.raw`        await client.query(
+          [
+            "INSERT INTO ia4tube_social.social_connections (",
+            "  company_id, id, provider, status, created_by_user_id",
+            ") VALUES ($1, $2, 'instagram', 'error', $3)"
+          ].join("\n"),
+          [fixture.companyId, connectionId, fixture.userId]
+        );`;
+  const parentTransactionRollbackInsert = String.raw`        await client.query(
+          [
+            "INSERT INTO ia4tube_social.social_connections (",
+            "  company_id, id, provider, created_by_user_id",
+            ") VALUES ($1, $2, 'instagram', $3)"
+          ].join("\n"),
+          [fixture.companyId, connectionId, fixture.userId]
+        );`;
+  assert.equal(
+    transactionRollbackHelper.split(authorizedTransactionRollbackInsert).length - 1,
+    1
+  );
+  assert.equal(
+    (
+      transactionRollbackHelper.match(
+        /INSERT INTO ia4tube_social\.social_connections \(/g
+      ) || []
+    ).length,
+    1
+  );
+  assert.equal(transactionRollbackHelper.includes("pending"), false);
+  assert.equal(transactionRollbackHelper.includes("23505"), false);
+  assert.equal(
+    transactionRollbackHelper.split(
+      '        throw new Error("synthetic_transaction_rollback");'
+    ).length - 1,
+    1
+  );
+  assert.equal(
+    transactionRollbackHelper.split(
+      "    /synthetic_transaction_rollback/"
+    ).length - 1,
+    1
+  );
+  assert.equal(
+    transactionRollbackHelper.split("  await assert.rejects(").length - 1,
+    1
+  );
+  assert.equal(
+    transactionRollbackHelper.split(
+      "    { role: RUNTIME_ROLE, companyId: fixture.companyId }"
+    ).length - 1,
+    2
+  );
+  const insertIndex = transactionRollbackHelper.indexOf(
+    authorizedTransactionRollbackInsert
+  );
+  const throwIndex = transactionRollbackHelper.indexOf(
+    '        throw new Error("synthetic_transaction_rollback");'
+  );
+  const postRollbackQueryIndex = transactionRollbackHelper.indexOf(
+    '          "SELECT id FROM ia4tube_social.social_connections"'
+  );
+  const absenceAssertionIndex = transactionRollbackHelper.indexOf(
+    "  assert.equal(result.rowCount, 0);"
+  );
+  assert.ok(insertIndex >= 0 && insertIndex < throwIndex);
+  assert.ok(throwIndex < postRollbackQueryIndex);
+  assert.ok(postRollbackQueryIndex < absenceAssertionIndex);
+  assert.equal(
+    transactionRollbackHelper.split(
+      '          "WHERE company_id = $1 AND id = $2"'
+    ).length - 1,
+    1
+  );
+  assert.equal(
+    transactionRollbackHelper.split(
+      "        [fixture.companyId, connectionId]"
+    ).length - 1,
+    1
+  );
+
+  const statusConstraints = closedSourceSection(
+    exactMigrationSource,
+    "  ADD CONSTRAINT social_connections_status_allowed",
+    "DO $social_connector_blocking_connection_gate$"
+  );
+  assert.equal(
+    statusConstraints.split("        'error',").length - 1,
+    1
+  );
+  assert.equal(
+    statusConstraints.split(
+      "        status IN ('error', 'disconnecting', 'failed') AND\n" +
+      "        revoked_at IS NULL AND\n" +
+      "        disconnected_at IS NULL"
+    ).length - 1,
+    1
+  );
+  const blockingIndex = closedSourceSection(
+    exactMigrationSource,
+    "  CREATE UNIQUE INDEX social_connections_instagram_blocking_company_unique",
+    "EXCEPTION"
+  );
+  assert.equal(blockingIndex.split("WHERE provider = 'instagram'").length - 1, 1);
+  assert.equal(blockingIndex.split("        'pending',").length - 1, 1);
+  assert.equal(blockingIndex.split("        'active',").length - 1, 1);
+  assert.equal(blockingIndex.includes("'error'"), false);
+
+  const transactionRollbackParentCandidate = replaceExactlyOnce(
+    realTestSource,
+    authorizedTransactionRollbackInsert,
+    parentTransactionRollbackInsert,
+    "tenant rollback disposable connection status"
+  );
 
   const roleBoundaryHelper = closedSourceSection(
     realTestSource,
@@ -738,42 +872,174 @@ test("24. exact 0004 production ledger reads use the migrator role only", () => 
       ledger_row_absent: true
     });
 `;
+  const authorizedExternalAccountRollbackCatalogLookup =
+    authorizedRollbackCatalogLookup.replaceAll(
+      "rollbackState",
+      "externalAccountRollbackState"
+    );
+  const parentExternalAccountRollbackTextualLookup = String.raw`    const externalAccountRollbackState = await withTransaction(
+      migrationPoolA,
+      (client) => client.query(
+        [
+          "SELECT",
+          "  to_regclass('ia4tube_social.social_idempotency_operations')",
+          "    IS NULL AS new_table_absent,",
+          "  to_regclass(",
+          "    'ia4tube_social.social_connections_instagram_blocking_company_unique'",
+          "  ) IS NULL AS blocking_connection_index_absent,",
+          "  to_regclass(",
+          "    'ia4tube_social.social_external_accounts_instagram_active_company_unique'",
+          "  ) IS NULL AS active_account_index_absent,",
+          "  NOT EXISTS (",
+          "    SELECT 1 FROM ia4tube_migrations.schema_migrations",
+          "    WHERE version = $1",
+          "  ) AS ledger_row_absent"
+        ].join("\n"),
+        [SOCIAL_CONNECTOR_PERSISTENCE_MIGRATION]
+      ),
+      { role: MIGRATOR_ROLE }
+    );
+    assert.deepEqual(externalAccountRollbackState.rows[0], {
+      new_table_absent: true,
+      blocking_connection_index_absent: true,
+      active_account_index_absent: true,
+      ledger_row_absent: true
+    });
+`;
   const rollbackCatalogLookupSource = closedSourceSection(
     exactRouteSource,
     "    const rollbackState = await withTransaction(",
     "    assert.equal(\n      await countExact0004Conflict("
   );
-  assert.equal(rollbackCatalogLookupSource, authorizedRollbackCatalogLookup);
-  assert.equal(rollbackCatalogLookupSource.includes("to_regclass"), false);
-  assert.equal(/::\s*regclass/i.test(rollbackCatalogLookupSource), false);
-  assert.equal(
-    (rollbackCatalogLookupSource.match(/COUNT\(\*\)::integer/g) || []).length,
-    6
+  const externalAccountRollbackVerificationSource = closedSourceSection(
+    exactRouteSource,
+    [
+      "    physicalPhases.startExact0004Subphase(",
+      '      "external_account_rollback_verification"',
+      "    );"
+    ].join("\n"),
+    [
+      "  physicalPhases.completeExact0004Subphase(",
+      '    "external_account_rollback_verification"',
+      "  );"
+    ].join("\n")
   );
-  for (const catalogContract of [
+  const externalAccountRollbackCatalogLookupSource = closedSourceSection(
+    externalAccountRollbackVerificationSource,
+    "    const externalAccountRollbackState = await withTransaction(",
+    "    assert.equal(\n      await countExact0004ActiveExternalAccounts("
+  );
+  assert.equal(rollbackCatalogLookupSource, authorizedRollbackCatalogLookup);
+  assert.equal(
+    externalAccountRollbackCatalogLookupSource,
+    authorizedExternalAccountRollbackCatalogLookup
+  );
+  assert.equal(
+    externalAccountRollbackVerificationSource.includes("to_regclass"),
+    false
+  );
+  assert.equal(
+    /::\s*regclass/i.test(externalAccountRollbackVerificationSource),
+    false
+  );
+  const rollbackCatalogContracts = [
     "FROM pg_catalog.pg_namespace namespace",
     "JOIN pg_catalog.pg_class relation",
     "ON relation.relnamespace = namespace.oid",
     "WHERE namespace.nspname = 'ia4tube_social'",
+    "AND relkind <> 'r'",
+    "AND relkind <> 'i'",
+    "FROM ia4tube_migrations.schema_migrations",
+    "WHERE version = $1",
     "social_schema_count: 1",
     "new_table_count: 0",
     "blocking_connection_index_count: 0",
     "active_account_index_count: 0",
     "unexpected_relkind_count: 0",
     "ledger_row_count: 0"
+  ];
+  const rollbackCatalogObjectNames = [
+    "social_idempotency_operations",
+    "social_connections_instagram_blocking_company_unique",
+    "social_external_accounts_instagram_active_company_unique"
+  ];
+  for (const [label, lookupSource] of [
+    ["connection rollback", rollbackCatalogLookupSource],
+    ["external-account rollback", externalAccountRollbackCatalogLookupSource]
   ]) {
+    assert.equal(lookupSource.includes("to_regclass"), false, label);
+    assert.equal(/::\s*regclass/i.test(lookupSource), false, label);
     assert.equal(
-      rollbackCatalogLookupSource.split(catalogContract).length - 1,
-      1,
-      catalogContract
+      (lookupSource.match(/COUNT\(\*\)::integer/g) || []).length,
+      6,
+      label
     );
+    for (const catalogContract of rollbackCatalogContracts) {
+      assert.equal(
+        lookupSource.split(catalogContract).length - 1,
+        1,
+        `${label}: ${catalogContract}`
+      );
+    }
+    for (const objectName of rollbackCatalogObjectNames) {
+      assert.equal(
+        lookupSource.split(objectName).length - 1,
+        3,
+        `${label}: ${objectName}`
+      );
+    }
   }
   assert.equal(
     (exactRouteSource.match(/\bto_regclass\s*\(/g) || []).length,
-    3
+    0
+  );
+  assert.equal(/::\s*regclass/i.test(exactRouteSource), false);
+  const externalAccountRollbackCatalogParentCandidate = replaceExactlyOnce(
+    transactionRollbackParentCandidate,
+    authorizedExternalAccountRollbackCatalogLookup,
+    parentExternalAccountRollbackTextualLookup,
+    "external-account rollback catalog lookup"
+  );
+  const externalAccountRollbackCatalogParent = execFileSync(
+    "git",
+    [
+      "cat-file",
+      "blob",
+      `${EXTERNAL_ACCOUNT_ROLLBACK_CATALOG_PARENT_COMMIT}:${REAL_POSTGRES_TEST}`
+    ],
+    {
+      cwd: REPOSITORY_ROOT,
+      encoding: null,
+      windowsHide: true,
+      stdio: ["ignore", "pipe", "ignore"],
+      timeout: 20_000,
+      maxBuffer: 2 * 1024 * 1024,
+      env: {
+        ...process.env,
+        GIT_OPTIONAL_LOCKS: "0",
+        GIT_TERMINAL_PROMPT: "0"
+      }
+    }
+  );
+  assert.equal(
+    crypto.createHash("sha256")
+      .update(externalAccountRollbackCatalogParent)
+      .digest("hex"),
+    EXTERNAL_ACCOUNT_ROLLBACK_CATALOG_PARENT_LF_SHA256
+  );
+  assert.equal(
+    crypto.createHash("sha1")
+      .update(`blob ${externalAccountRollbackCatalogParent.length}\0`)
+      .update(externalAccountRollbackCatalogParent)
+      .digest("hex"),
+    EXTERNAL_ACCOUNT_ROLLBACK_CATALOG_PARENT_FILTERED_OID
+  );
+  assert.deepEqual(
+    Buffer.from(externalAccountRollbackCatalogParentCandidate, "utf8"),
+    externalAccountRollbackCatalogParent
   );
   const rollbackCatalogParentCandidate = replaceExactlyOnce(
-    realTestSource,
+    externalAccountRollbackCatalogParentCandidate,
     authorizedRollbackCatalogLookup,
     parentRollbackTextualLookup,
     "first rollback catalog lookup"
@@ -1107,7 +1373,7 @@ test("24. exact 0004 production ledger reads use the migrator role only", () => 
     "async function proveExact0004Route("
   );
   const externalAccountRoute = closedSourceSection(
-    realTestSource,
+    externalAccountRollbackCatalogParentCandidate,
     [
       "  physicalPhases.startExact0004Subphase(",
       '    "conflicting_external_account_0004_negative"',
@@ -2194,7 +2460,7 @@ test("27. exact 0004 plan subphase evidence stays closed and observational", asy
     "const externalAccountRollbackState = await withTransaction(",
     "social_connections_instagram_blocking_company_unique",
     "social_external_accounts_instagram_active_company_unique",
-    "ledger_row_absent: true",
+    "ledger_row_count: 0",
     "O rollback da 0004 deve preservar as duas contas conflitantes.",
     "removeExact0004ExternalAccountConflict(",
     "O cleanup deve restaurar a fixture anterior ao conflito de contas."

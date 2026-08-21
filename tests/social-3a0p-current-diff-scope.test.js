@@ -10,9 +10,9 @@ const {
 } = require("../scripts/social-3a0p-local-scope");
 
 const ROUTE_BRANCH =
-  "social/checkpoint-3b0-exact-0004-runner-linux-rollback-catalog-lookup-20260820";
+  "social/checkpoint-3b0-exact-0004-runner-linux-external-account-rollback-catalog-20260820";
 const ROUTE_BASE_COMMIT = "13e38b875db2a220514fe06113663c517c975592";
-const ROUTE_PARENT_COMMIT = "5a109bc775ac9e35bdcdaabec16d329509d9125f";
+const ROUTE_PARENT_COMMIT = "76e650c18beadc9768666285440445d2fc2e367e";
 const FUNCTIONAL_COMMIT = ROUTE_PARENT_COMMIT;
 const POST_COMMIT_PROOF_HEAD = "ffffffffffffffffffffffffffffffffffffffff";
 const GIT_TIMEOUT_MS = 20_000;
@@ -930,11 +930,11 @@ test("a barreira do runner exato 0004 contem exatamente os vinte caminhos autori
   const result = assertRouteInventory(sharedSnapshotCache.read());
   assert.equal(
     ROUTE_BRANCH,
-    "social/checkpoint-3b0-exact-0004-runner-linux-rollback-catalog-lookup-20260820"
+    "social/checkpoint-3b0-exact-0004-runner-linux-external-account-rollback-catalog-20260820"
   );
   assert.equal(
     ROUTE_PARENT_COMMIT,
-    "5a109bc775ac9e35bdcdaabec16d329509d9125f"
+    "76e650c18beadc9768666285440445d2fc2e367e"
   );
   assert.equal(
     ROUTE_BASE_COMMIT,
