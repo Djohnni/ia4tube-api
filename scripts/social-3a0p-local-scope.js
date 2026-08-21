@@ -3,9 +3,9 @@
 const path = require("node:path");
 
 const AUTHORIZED_BRANCH =
-  "social/checkpoint-3b0-exact-0004-runner-linux-external-account-rollback-catalog-20260820";
+  "social/checkpoint-3b0-exact-0004-runner-linux-physical-step-entry-evidence-20260820";
 const ROUTE_BASE_COMMIT = "13e38b875db2a220514fe06113663c517c975592";
-const ROUTE_PARENT_COMMIT = "76e650c18beadc9768666285440445d2fc2e367e";
+const ROUTE_PARENT_COMMIT = "fc0b94c7eb80034d30dc5226b8bb38a0ea095dc9";
 
 const ALLOWED_EXACT_FILES = new Set([
   ".github/workflows/social-3b0-exact-0004-runner-linux.yml",

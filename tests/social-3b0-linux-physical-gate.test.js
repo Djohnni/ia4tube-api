@@ -5025,3 +5025,699 @@ test("source keeps the physical O01-O22 proofs and closed cleanup interfaces", (
     "rememberSensitive"
   ]) assert.ok(source.includes(marker), marker);
 });
+
+const EXACT_0004_ARTIFACT_FILES = Object.freeze([
+  "evidence.json",
+  "evidence.json.sha256",
+  "process-status.json",
+  "process-status.json.sha256"
+]);
+
+function exact0004ProtocolFixture(context, environmentOverrides = {}) {
+  const runnerTemp = fs.mkdtempSync(
+    path.join(os.tmpdir(), "social-3b0-exact-0004-entry-")
+  );
+  context.after(() => {
+    fs.rmSync(runnerTemp, { recursive: true, force: true });
+  });
+  const environment = {
+    RUNNER_TEMP: runnerTemp,
+    ENTRY_OUTCOME: "success",
+    PHYSICAL_OUTCOME: "failure",
+    CLEANUP_OUTCOME: "success",
+    TRANSPORT_OUTCOME: "success",
+    LEGACY_FINALIZE_OUTCOME: "success",
+    FINALIZE_OUTCOME: "success",
+    UPLOAD_OUTCOME: "success",
+    SOCIAL_EXACT_BRANCH:
+      "social/checkpoint-3b0-exact-0004-runner-linux-physical-step-entry-evidence-20260820",
+    GITHUB_SHA: "b".repeat(40),
+    SOCIAL_EXACT_PARENT: "a".repeat(40),
+    ...environmentOverrides
+  };
+  const files = realPostgresRunner.exact0004CheckpointPaths(environment);
+  fs.mkdirSync(files.artifactDirectory, { recursive: true, mode: 0o700 });
+  return Object.freeze({ environment, files });
+}
+
+function exact0004ReadCheckpoint(fixture) {
+  return JSON.parse(fs.readFileSync(fixture.files.checkpoint, "utf8"));
+}
+
+function exact0004WriteJson(file, value) {
+  fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
+  fs.writeFileSync(file, JSON.stringify(value) + "\n", { mode: 0o600 });
+}
+
+function exact0004LegacyArtifact(fixture, overrides = {}) {
+  const addedKeys = new Set(
+    realPostgresRunner.EXACT_0004_ARTIFACT_ADDED_KEYS
+  );
+  const legacyKeys = realPostgresRunner.EXACT_0004_ARTIFACT_KEYS.filter(
+    (key) => !addedKeys.has(key)
+  );
+  const artifact = Object.fromEntries(legacyKeys.map((key) => [key, null]));
+  return Object.assign(artifact, {
+    schemaVersion: 1,
+    evidenceSchemaVersion: realPostgresRunner.EVIDENCE_SCHEMA_VERSION,
+    branch: fixture.environment.SOCIAL_EXACT_BRANCH,
+    commit: fixture.environment.GITHUB_SHA,
+    parent: fixture.environment.SOCIAL_EXACT_PARENT,
+    inventory: [...realPostgresRunner.EXACT_0004_INVENTORY],
+    runner: "ubuntu-24.04",
+    nodeVersion: process.version,
+    postgresImageDigest: "sha256:" + "c".repeat(64),
+    postgresStarted: false,
+    testProcessStarted: false,
+    testFileLoaded: null,
+    testsDiscovered: 0,
+    testsPassed: 0,
+    testsFailed: 0,
+    planExactPassed: false,
+    applyExactPassed: false,
+    concurrencyPassed: false,
+    rollbackPassed: false,
+    profileBefore: "not_observed",
+    profileAfter: "not_observed",
+    firstFailure: null,
+    runnerReached: null,
+    gateValidated: null,
+    nodeTestSpawnAttempted: false,
+    nodeTestProcessCreated: false,
+    cleanupStarted: false,
+    failureDuringCleanup: false,
+    failurePhase: null,
+    safePermissionOrigin: null,
+    safeLineBucket: null,
+    cleanupCompleted: false,
+    residuals: {
+      containers: 0,
+      volumes: 0,
+      networks: 0,
+      postgresProcesses: 0,
+      auxiliaryProcesses: 0,
+      listeners: 0,
+      temp: 0,
+      intermediateFiles: 0
+    },
+    ...realPostgresRunner.emptyExact0004Evidence(),
+    ...overrides
+  });
+}
+
+function exact0004GreenLegacyOverrides() {
+  return {
+    postgresStarted: true,
+    testProcessStarted: true,
+    testFileLoaded: true,
+    testsDiscovered: 1,
+    testsPassed: 1,
+    testsFailed: 0,
+    planExactPassed: true,
+    applyExactPassed: true,
+    concurrencyPassed: true,
+    rollbackPassed: true,
+    profileBefore: "0003",
+    profileAfter: "0004",
+    runnerReached: true,
+    gateValidated: true,
+    nodeTestSpawnAttempted: true,
+    nodeTestProcessCreated: true,
+    nodeTestExitCode: 0,
+    nodeTestSignal: null,
+    nodeTestTimedOut: false,
+    tapStarted: true,
+    tapTitleObserved: true,
+    firstTestDiscovered: true,
+    lastMainPhaseStarted: "reauthentication",
+    lastMainPhaseCompleted: "reauthentication",
+    lastExact0004SubphaseStarted: "final_snapshot",
+    lastExact0004SubphaseCompleted: "final_snapshot",
+    exact0004FailureSubphase: "not_reached",
+    safeSqlState: "not_observed",
+    safeErrorClass: "unknown",
+    safeOperationClass: "unknown",
+    planExactInvoked: true,
+    planExactCompleted: true,
+    applyExactInvoked: true,
+    applyExactCompleted: true,
+    databaseMutationAttempted: true,
+    failureBeforeFirstMutation: false,
+    conflictingNegativeAttempted: true,
+    conflictingNegativePromiseOutcome: "rejected",
+    conflictingNegativeObservedSqlState: "23514",
+    conflictingNegativeFulfilledResultClass: "not_observed",
+    conflictingNegativeAssertionMatched: true,
+    conflictingNegativeRejectedBeforeAssertion: true
+  };
+}
+
+function exact0004FunctionalFailureLegacyOverrides() {
+  return {
+    ...exact0004GreenLegacyOverrides(),
+    testsPassed: 0,
+    testsFailed: 1,
+    nodeTestExitCode: 1,
+    firstFailure: "functional_test_failure",
+    firstFailureStage: "test_execution",
+    lastMainPhaseStarted: "tenant_rls",
+    lastMainPhaseCompleted: "runtime_permission_negatives",
+    failureDuringCleanup: false,
+    failurePhase: "tenant_rls",
+    stderrCategory: "unknown",
+    safeErrorCode: null,
+    safeModuleName: null,
+    safePermissionOrigin: "unknown",
+    safeSourceBasename: null,
+    safeLineBucket: "unknown"
+  };
+}
+
+function exact0004ZeroCleanup(overrides = {}) {
+  return {
+    cleanupCompleted: true,
+    containerResiduals: 0,
+    volumeResiduals: 0,
+    networkResiduals: 0,
+    listenerResiduals: 0,
+    temporaryRootResiduals: 0,
+    ...overrides
+  };
+}
+
+function exact0004WriteProcessStatus(fixture, overrides = {}) {
+  const status = {
+    exitCode: 0,
+    signal: null,
+    timedOut: false,
+    stdoutStored: false,
+    stderrStored: false,
+    ...overrides
+  };
+  exact0004WriteJson(fixture.files.processState, status);
+  const statusFile = path.join(
+    fixture.files.artifactDirectory,
+    "process-status.json"
+  );
+  exact0004WriteJson(statusFile, status);
+  const body = fs.readFileSync(statusFile);
+  const digest = crypto.createHash("sha256").update(body).digest("hex");
+  fs.writeFileSync(
+    statusFile + ".sha256",
+    digest + "  process-status.json\n",
+    { mode: 0o600 }
+  );
+  return status;
+}
+
+function exact0004FinalizeFixture(fixture, {
+  evidenceState = "valid",
+  cleanupState = exact0004ZeroCleanup(),
+  legacyOverrides = {},
+  processStatus = {}
+} = {}) {
+  exact0004WriteJson(
+    path.join(fixture.files.artifactDirectory, "evidence.json"),
+    exact0004LegacyArtifact(fixture, legacyOverrides)
+  );
+  if (evidenceState === "valid") {
+    exact0004WriteJson(fixture.files.evidenceState, {
+      evidenceSchemaVersion: realPostgresRunner.EVIDENCE_SCHEMA_VERSION
+    });
+  } else if (evidenceState === "partial") {
+    exact0004WriteJson(fixture.files.evidenceState + ".tmp-fixture", {
+      evidenceSchemaVersion: realPostgresRunner.EVIDENCE_SCHEMA_VERSION
+    });
+  } else {
+    assert.equal(evidenceState, "missing");
+  }
+  exact0004WriteProcessStatus(fixture, processStatus);
+  if (cleanupState !== null) {
+    realPostgresRunner.writeExact0004CleanupState(
+      cleanupState,
+      fixture.environment
+    );
+  }
+  realPostgresRunner.snapshotExact0004PhysicalTransport(
+    fixture.environment
+  );
+  realPostgresRunner.finalizeExact0004Artifact(fixture.environment);
+  return JSON.parse(fs.readFileSync(
+    path.join(fixture.files.artifactDirectory, "evidence.json"),
+    "utf8"
+  ));
+}
+
+function exact0004LoadPhysicalScript(fixture) {
+  realPostgresRunner.initializeExact0004PhysicalCheckpoint(
+    fixture.environment
+  );
+  realPostgresRunner.enterExact0004PhysicalStep(fixture.environment);
+  realPostgresRunner.attemptExact0004PhysicalScriptLoad(
+    fixture.environment
+  );
+  return realPostgresRunner.startExact0004PhysicalObservation(
+    fixture.environment
+  );
+}
+
+function exact0004CompleteGreenPhysicalRoute(fixture) {
+  const observation = exact0004LoadPhysicalScript(fixture);
+  observation.launcherSpawnAttempted();
+  observation.launcherProcessCreated();
+  observation.postgresStartAttempted();
+  observation.postgresStarted();
+  observation.safeEvent("nodeTestSpawnAttempted");
+  observation.safeEvent("nodeTestProcessCreated");
+  observation.launcherClosed(0, null, false, 0);
+  observation.cleanupStarted();
+  observation.cleanupCompleted(true, 0);
+  return observation;
+}
+
+function exact0004VerifySidecar(directory, name) {
+  const file = path.join(directory, name);
+  const body = fs.readFileSync(file);
+  const digest = crypto.createHash("sha256").update(body).digest("hex");
+  assert.equal(
+    fs.readFileSync(file + ".sha256", "utf8"),
+    digest + "  " + name + "\n"
+  );
+}
+
+function exact0004HasRawOutputKey(value) {
+  if (value === null || typeof value !== "object") return false;
+  const forbidden = new Set([
+    "command",
+    "environment",
+    "path",
+    "stack",
+    "stdout",
+    "stderr",
+    "rawStdout",
+    "rawStderr",
+    "stdoutLines",
+    "stderrLines"
+  ]);
+  return Object.entries(value).some(([key, entry]) =>
+    forbidden.has(key) || exact0004HasRawOutputKey(entry)
+  );
+}
+
+test("Exact-0004 entry evidence 01 classifies a skipped step as A not admitted", (context) => {
+  const fixture = exact0004ProtocolFixture(context, {
+    ENTRY_OUTCOME: "skipped",
+    PHYSICAL_OUTCOME: "skipped"
+  });
+  realPostgresRunner.initializeExact0004PhysicalCheckpoint(
+    fixture.environment
+  );
+  const artifact = exact0004FinalizeFixture(fixture, {
+    evidenceState: "missing"
+  });
+  assert.equal(artifact.physicalStepAdmitted, false);
+  assert.equal(artifact.physicalStepEntered, false);
+  assert.equal(artifact.physicalScriptLoadAttempted, false);
+  assert.equal(artifact.firstFailure, "physical_step_not_admitted");
+  assert.equal(artifact.firstFailureStage, "physical_admission");
+
+  const skippedWithMarkers = exact0004ProtocolFixture(context, {
+    ENTRY_OUTCOME: "failure",
+    PHYSICAL_OUTCOME: "skipped"
+  });
+  exact0004LoadPhysicalScript(skippedWithMarkers);
+  const skippedWithMarkersArtifact = exact0004FinalizeFixture(
+    skippedWithMarkers,
+    { evidenceState: "missing" }
+  );
+  assert.equal(
+    skippedWithMarkersArtifact.firstFailure,
+    "physical_step_failure_evidence_insufficient"
+  );
+
+  const physicalRanAfterInitFailure = exact0004ProtocolFixture(context, {
+    ENTRY_OUTCOME: "failure",
+    PHYSICAL_OUTCOME: "failure"
+  });
+  exact0004LoadPhysicalScript(physicalRanAfterInitFailure);
+  const physicalRanArtifact = exact0004FinalizeFixture(
+    physicalRanAfterInitFailure,
+    { evidenceState: "missing" }
+  );
+  assert.equal(physicalRanArtifact.physicalStepAdmitted, true);
+  assert.equal(physicalRanArtifact.physicalStepEntered, true);
+  assert.equal(
+    physicalRanArtifact.firstFailure,
+    "physical_step_failure_evidence_insufficient"
+  );
+
+  const admittedWithoutEntry = exact0004ProtocolFixture(context, {
+    ENTRY_OUTCOME: "failure",
+    PHYSICAL_OUTCOME: "failure"
+  });
+  realPostgresRunner.initializeExact0004PhysicalCheckpoint(
+    admittedWithoutEntry.environment
+  );
+  const admittedWithoutEntryArtifact = exact0004FinalizeFixture(
+    admittedWithoutEntry,
+    { evidenceState: "missing" }
+  );
+  assert.equal(admittedWithoutEntryArtifact.physicalStepAdmitted, true);
+  assert.equal(admittedWithoutEntryArtifact.physicalStepEntered, false);
+  assert.equal(
+    admittedWithoutEntryArtifact.firstFailure,
+    "physical_step_failure_evidence_insufficient"
+  );
+});
+
+test("Exact-0004 entry evidence 02 distinguishes B command resolution from C script load", (context) => {
+  const commandFixture = exact0004ProtocolFixture(context);
+  realPostgresRunner.initializeExact0004PhysicalCheckpoint(
+    commandFixture.environment
+  );
+  realPostgresRunner.enterExact0004PhysicalStep(commandFixture.environment);
+  const commandArtifact = exact0004FinalizeFixture(commandFixture, {
+    evidenceState: "missing"
+  });
+  assert.equal(commandArtifact.physicalStepAdmitted, true);
+  assert.equal(commandArtifact.physicalStepEntered, true);
+  assert.equal(commandArtifact.physicalScriptLoadAttempted, false);
+  assert.equal(
+    commandArtifact.firstFailure,
+    "physical_step_command_resolution_failed_prestart"
+  );
+
+  const loadFixture = exact0004ProtocolFixture(context);
+  realPostgresRunner.initializeExact0004PhysicalCheckpoint(
+    loadFixture.environment
+  );
+  realPostgresRunner.enterExact0004PhysicalStep(loadFixture.environment);
+  realPostgresRunner.attemptExact0004PhysicalScriptLoad(
+    loadFixture.environment
+  );
+  const loadArtifact = exact0004FinalizeFixture(loadFixture, {
+    evidenceState: "missing"
+  });
+  assert.equal(loadArtifact.physicalScriptLoadAttempted, true);
+  assert.equal(loadArtifact.physicalScriptLoaded, false);
+  assert.equal(
+    loadArtifact.firstFailure,
+    "physical_step_script_load_failed_prestart"
+  );
+});
+
+test("Exact-0004 entry evidence 03 classifies D when sudo spawn is attempted and refused", (context) => {
+  const fixture = exact0004ProtocolFixture(context);
+  const observation = exact0004LoadPhysicalScript(fixture);
+  observation.launcherSpawnAttempted();
+  observation.failure("physical_launcher_spawn");
+  const artifact = exact0004FinalizeFixture(fixture, {
+    evidenceState: "missing",
+    legacyOverrides: {
+      firstFailure: "exact0004_orchestration_failed",
+      firstFailureStage: "composed_process"
+    }
+  });
+  assert.equal(artifact.physicalLauncherSpawnAttempted, true);
+  assert.equal(artifact.physicalLauncherProcessCreated, false);
+  assert.equal(artifact.safeAuxiliaryProcessClass, "sudo");
+  assert.equal(artifact.firstFailure, "physical_step_launcher_spawn_failed");
+  assert.equal(artifact.firstFailureStage, "physical_launcher_spawn");
+  assert.deepEqual(
+    [artifact.testsDiscovered, artifact.testsPassed, artifact.testsFailed],
+    [0, 0, 0]
+  );
+});
+
+test("Exact-0004 entry evidence 04 classifies E with the created launcher result intact", (context) => {
+  const fixture = exact0004ProtocolFixture(context);
+  const observation = exact0004LoadPhysicalScript(fixture);
+  observation.launcherSpawnAttempted();
+  observation.launcherProcessCreated();
+  observation.launcherClosed(0, null, false, 1);
+  const artifact = exact0004FinalizeFixture(fixture, {
+    evidenceState: "missing",
+    legacyOverrides: {
+      firstFailure: "physical_step_no_evidence",
+      firstFailureStage: "artifact"
+    }
+  });
+  assert.equal(artifact.physicalLauncherProcessCreated, true);
+  assert.equal(artifact.physicalLauncherExitCode, 0);
+  assert.equal(artifact.physicalLauncherSignal, null);
+  assert.equal(artifact.physicalLauncherTimedOut, false);
+  assert.equal(
+    artifact.firstFailure,
+    "physical_step_process_created_before_evidence_failure"
+  );
+});
+
+test("Exact-0004 entry evidence 05 persists pre-PostgreSQL evidence and classifies F partial transport", (context) => {
+  const fixture = exact0004ProtocolFixture(context);
+  exact0004LoadPhysicalScript(fixture);
+  const beforePostgres = exact0004ReadCheckpoint(fixture);
+  assert.equal(fs.statSync(fixture.files.checkpoint).isFile(), true);
+  assert.equal(beforePostgres.physicalScriptLoaded, true);
+  assert.equal(beforePostgres.postgresStartAttempted, false);
+  assert.equal(beforePostgres.postgresStarted, false);
+  const artifact = exact0004FinalizeFixture(fixture, {
+    evidenceState: "partial"
+  });
+  assert.equal(artifact.physicalEvidenceState, "partial");
+  assert.equal(artifact.firstFailure, "physical_step_evidence_writer_failed");
+  assert.equal(artifact.firstFailureStage, "physical_evidence");
+});
+
+test("Exact-0004 entry evidence 06 finalizer maps absent physical evidence only to J", (context) => {
+  const fixture = exact0004ProtocolFixture(context);
+  exact0004LoadPhysicalScript(fixture);
+  const artifact = exact0004FinalizeFixture(fixture, {
+    evidenceState: "missing",
+    legacyOverrides: {
+      firstFailure: "physical_step_no_evidence",
+      firstFailureStage: "artifact"
+    }
+  });
+  assert.equal(artifact.physicalEvidenceState, "missing");
+  assert.equal(
+    artifact.firstFailure,
+    "physical_step_failure_evidence_insufficient"
+  );
+  assert.equal(artifact.firstFailureStage, "physical_evidence");
+  assert.deepEqual(
+    [artifact.testsDiscovered, artifact.testsPassed, artifact.testsFailed],
+    [0, 0, 0]
+  );
+});
+
+test("Exact-0004 entry evidence 07 classifies G when an owned resource has no cleanup start", (context) => {
+  const fixture = exact0004ProtocolFixture(context);
+  const observation = exact0004LoadPhysicalScript(fixture);
+  observation.launcherSpawnAttempted();
+  observation.launcherProcessCreated();
+  observation.launcherClosed(1, null, false, 1);
+  const artifact = exact0004FinalizeFixture(fixture, {
+    cleanupState: null
+  });
+  assert.equal(artifact.cleanupStarted, false);
+  assert.equal(artifact.cleanupCompleted, false);
+  assert.equal(artifact.firstFailure, "physical_step_cleanup_not_started");
+  assert.equal(artifact.firstFailureStage, "cleanup");
+});
+
+test("Exact-0004 entry evidence 08 records completed cleanup with every route residual zero", (context) => {
+  const fixture = exact0004ProtocolFixture(context, {
+    PHYSICAL_OUTCOME: "success"
+  });
+  exact0004CompleteGreenPhysicalRoute(fixture);
+  const artifact = exact0004FinalizeFixture(fixture, {
+    legacyOverrides: exact0004GreenLegacyOverrides()
+  });
+  assert.equal(artifact.cleanupStarted, true);
+  assert.equal(artifact.cleanupCompleted, true);
+  assert.equal(artifact.cleanupFailure, null);
+  assert.deepEqual(Object.values(artifact.residuals), Array(8).fill(0));
+  assert.equal(artifact.firstFailure, null);
+});
+
+test("Exact-0004 entry evidence 09 classifies H only for an owned launcher residual", (context) => {
+  const fixture = exact0004ProtocolFixture(context);
+  const observation = exact0004LoadPhysicalScript(fixture);
+  observation.launcherSpawnAttempted();
+  observation.launcherProcessCreated();
+  observation.failure("cleanup");
+  observation.cleanupStarted();
+  const artifact = exact0004FinalizeFixture(fixture, {
+    cleanupState: exact0004ZeroCleanup({ cleanupCompleted: false }),
+    legacyOverrides: {
+      firstFailure: "final_residuals_nonzero",
+      firstFailureStage: "cleanup"
+    }
+  });
+  assert.equal(artifact.auxiliaryProcessCount, 1);
+  assert.equal(artifact.auxiliaryProcessOwnedByRoute, true);
+  assert.equal(artifact.residuals.auxiliaryProcesses, 1);
+  assert.equal(
+    artifact.firstFailure,
+    "physical_step_cleanup_incomplete_with_owned_auxiliary_process"
+  );
+});
+
+test("Exact-0004 entry evidence 10 keeps I external allowlisted identity outside route residuals", (context) => {
+  const fixture = exact0004ProtocolFixture(context);
+  exact0004LoadPhysicalScript(fixture);
+  realPostgresRunner.updateExact0004Checkpoint({
+    auxiliaryProcessCount: 1,
+    safeAuxiliaryProcessClass: "github_runner_tool",
+    auxiliaryProcessOwnedByRoute: false
+  }, fixture.environment);
+  const artifact = exact0004FinalizeFixture(fixture);
+  assert.equal(artifact.physicalLauncherSpawnAttempted, false);
+  assert.equal(artifact.physicalLauncherProcessCreated, false);
+  assert.equal(artifact.auxiliaryProcessCount, 1);
+  assert.equal(artifact.safeAuxiliaryProcessClass, "github_runner_tool");
+  assert.equal(artifact.auxiliaryProcessOwnedByRoute, false);
+  assert.equal(artifact.residuals.auxiliaryProcesses, 0);
+  assert.equal(
+    artifact.firstFailure,
+    "physical_step_auxiliary_process_not_owned_by_route"
+  );
+  assert.equal(artifact.firstFailureStage, "artifact");
+  assert.ok(realPostgresRunner.EXACT_0004_PHYSICAL_FAILURE_CODES.includes(
+    "physical_step_auxiliary_process_not_owned_by_route"
+  ));
+});
+
+test("Exact-0004 entry evidence 11 preserves the first failure and separates later cleanup failure", (context) => {
+  const fixture = exact0004ProtocolFixture(context);
+  const observation = exact0004LoadPhysicalScript(fixture);
+  observation.launcherSpawnAttempted();
+  observation.launcherProcessCreated();
+  observation.postgresStartAttempted();
+  observation.postgresStarted();
+  observation.safeEvent("nodeTestSpawnAttempted");
+  observation.safeEvent("nodeTestProcessCreated");
+  observation.launcherClosed(1, null, false, 0);
+  observation.failure("test_execution");
+  observation.cleanupStarted();
+  observation.cleanupCompleted(false, 0);
+  assert.equal(
+    exact0004ReadCheckpoint(fixture).firstFailureStage,
+    "test_execution"
+  );
+  const artifact = exact0004FinalizeFixture(fixture, {
+    cleanupState: exact0004ZeroCleanup(),
+    legacyOverrides: exact0004FunctionalFailureLegacyOverrides()
+  });
+  assert.equal(artifact.firstFailure, "functional_test_failure");
+  assert.equal(artifact.firstFailureStage, "test_execution");
+  assert.equal(artifact.cleanupCompleted, true);
+  assert.equal(artifact.cleanupFailure, "physical_cleanup_incomplete");
+  assert.equal(artifact.failureDuringCleanup, true);
+  assert.deepEqual(Object.values(artifact.residuals), Array(8).fill(0));
+  assert.ok(realPostgresRunner.EXACT_0004_CLEANUP_FAILURE_CODES.includes(
+    artifact.cleanupFailure
+  ));
+});
+
+test("Exact-0004 entry evidence 12 accepted observer callbacks contain no raw stdout or stderr", () => {
+  const accepted = [];
+  const collector = realPostgresRunner.createSafeEventCollector({
+    onAcceptedEvent: (name, snapshot) => accepted.push({ name, snapshot })
+  });
+  collector.push("stdout", Buffer.from(realPostgresRunner.safeEventLine({
+    event: "runnerReached",
+    evidenceSchemaVersion: realPostgresRunner.EVIDENCE_SCHEMA_VERSION,
+    runnerReached: true,
+    sequence: 1
+  })));
+  collector.push("stdout", Buffer.from("private stdout payload\n"));
+  collector.push("stderr", Buffer.from("private stderr payload\n"));
+  const facts = collector.finish();
+  assert.equal(accepted.length, 1);
+  assert.equal(accepted[0].name, "runnerReached");
+  assert.equal(exact0004HasRawOutputKey(accepted[0].snapshot), false);
+  assert.equal(exact0004HasRawOutputKey(facts), false);
+  assert.doesNotMatch(JSON.stringify(accepted), /private (stdout|stderr) payload/);
+  assert.doesNotMatch(JSON.stringify(facts), /private (stdout|stderr) payload/);
+});
+
+test("Exact-0004 entry evidence 13 never transports a secret-like raw canary", () => {
+  const secretCanary = "secret-canary-" + "7".repeat(48);
+  const accepted = [];
+  const collector = realPostgresRunner.createSafeEventCollector({
+    onAcceptedEvent: (name, snapshot) => accepted.push({ name, snapshot })
+  });
+  collector.push("stdout", Buffer.from(realPostgresRunner.safeEventLine({
+    event: "runnerReached",
+    evidenceSchemaVersion: realPostgresRunner.EVIDENCE_SCHEMA_VERSION,
+    runnerReached: true,
+    sequence: 1
+  })));
+  collector.push("stdout", Buffer.from(secretCanary + "\n"));
+  const facts = collector.finish();
+  assert.equal(JSON.stringify(accepted).includes(secretCanary), false);
+  assert.equal(JSON.stringify(facts).includes(secretCanary), false);
+  assert.equal(
+    Object.prototype.hasOwnProperty.call(facts, "environment"),
+    false
+  );
+  assert.equal(Object.prototype.hasOwnProperty.call(facts, "token"), false);
+  assert.equal(Object.prototype.hasOwnProperty.call(facts, "password"), false);
+});
+
+test("Exact-0004 entry evidence 14 final artifact has schema 2 and exactly four authenticated files", (context) => {
+  const fixture = exact0004ProtocolFixture(context, {
+    PHYSICAL_OUTCOME: "success"
+  });
+  exact0004CompleteGreenPhysicalRoute(fixture);
+  const artifact = exact0004FinalizeFixture(fixture, {
+    legacyOverrides: exact0004GreenLegacyOverrides()
+  });
+  assert.equal(
+    artifact.schemaVersion,
+    realPostgresRunner.EXACT_0004_ARTIFACT_SCHEMA_VERSION
+  );
+  assert.equal(
+    artifact.evidenceSchemaVersion,
+    realPostgresRunner.EVIDENCE_SCHEMA_VERSION
+  );
+  assert.equal(realPostgresRunner.EXACT_0004_ARTIFACT_KEYS.length, 80);
+  assert.equal(Object.keys(artifact).length, 80);
+  assert.equal(exact0004HasRawOutputKey(artifact), false);
+  assert.ok(realPostgresRunner.EXACT_0004_AUXILIARY_PROCESS_CLASSES.includes(
+    artifact.safeAuxiliaryProcessClass
+  ));
+  assert.equal(
+    artifact.cleanupFailure === null ||
+      realPostgresRunner.EXACT_0004_CLEANUP_FAILURE_CODES.includes(
+        artifact.cleanupFailure
+      ),
+    true
+  );
+  assert.equal(realPostgresRunner.EXACT_0004_CLEANUP_FAILURE_CODES.length, 6);
+  assert.deepEqual(
+    fs.readdirSync(fixture.files.artifactDirectory).sort(),
+    [...EXACT_0004_ARTIFACT_FILES].sort()
+  );
+  exact0004VerifySidecar(fixture.files.artifactDirectory, "evidence.json");
+  exact0004VerifySidecar(
+    fixture.files.artifactDirectory,
+    "process-status.json"
+  );
+  for (const stateFile of [
+    fixture.files.checkpoint,
+    fixture.files.evidenceState,
+    fixture.files.processState,
+    fixture.files.cleanupState,
+    fixture.files.assessment
+  ]) {
+    const temporaryPrefix = path.basename(stateFile) + ".tmp-";
+    assert.deepEqual(
+      fs.readdirSync(path.dirname(stateFile)).filter(
+        (name) => name.startsWith(temporaryPrefix)
+      ),
+      []
+    );
+  }
+});

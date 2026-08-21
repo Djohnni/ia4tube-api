@@ -1,9 +1,10 @@
 "use strict";
 
 const crypto = require("node:crypto");
+const fs = require("node:fs");
 const net = require("node:net");
 const path = require("node:path");
-const { spawn } = require("node:child_process");
+const { execFileSync, spawn } = require("node:child_process");
 const { StringDecoder } = require("node:string_decoder");
 
 const APPROVAL = "RUN_SOCIAL_POSTGRES_REAL_TESTS";
@@ -44,6 +45,86 @@ const CONNECTION_NAMES = [
   "SOCIAL_TEST_RUNTIME_DATABASE_URL"
 ];
 const EVIDENCE_SCHEMA_VERSION = 6;
+const EXACT_0004_ARTIFACT_SCHEMA_VERSION = 2;
+const EXACT_0004_CHECKPOINT_SCHEMA_VERSION = 1;
+const EXACT_0004_CHECKPOINT_KEYS = Object.freeze([
+  "checkpointSchemaVersion",
+  "physicalStepAdmitted",
+  "physicalStepEntered",
+  "physicalScriptLoadAttempted",
+  "physicalScriptLoaded",
+  "physicalLauncherSpawnAttempted",
+  "physicalLauncherProcessCreated",
+  "physicalLauncherExitCode",
+  "physicalLauncherSignal",
+  "physicalLauncherTimedOut",
+  "postgresStartAttempted",
+  "postgresStarted",
+  "nodeTestSpawnAttempted",
+  "nodeTestProcessCreated",
+  "cleanupStarted",
+  "cleanupCompleted",
+  "auxiliaryProcessCount",
+  "safeAuxiliaryProcessClass",
+  "auxiliaryProcessOwnedByRoute",
+  "firstFailureStage"
+]);
+const EXACT_0004_AUXILIARY_PROCESS_CLASSES = Object.freeze([
+  "node",
+  "sudo",
+  "timeout",
+  "nsenter",
+  "docker",
+  "postgres",
+  "shell",
+  "github_runner_tool",
+  "other_allowlisted",
+  "unknown",
+  "not_observed"
+]);
+const EXACT_0004_CHECKPOINT_FAILURE_STAGES = Object.freeze([
+  "physical_admission",
+  "physical_entry",
+  "physical_script_load",
+  "physical_launcher_spawn",
+  "postgres_start",
+  "postgres_bootstrap",
+  "composed_process",
+  "npm",
+  "runner_load",
+  "environment_gate",
+  "node_test_spawn",
+  "node_test_bootstrap",
+  "tap_start",
+  "test_discovery",
+  "test_execution",
+  "safe_event_protocol",
+  "physical_timeout",
+  "cleanup",
+  "artifact",
+  "physical_evidence",
+  "unknown"
+]);
+const EXACT_0004_PHYSICAL_FAILURE_CODES = Object.freeze([
+  "physical_step_not_admitted",
+  "physical_step_command_resolution_failed_prestart",
+  "physical_step_script_load_failed_prestart",
+  "physical_step_launcher_spawn_failed",
+  "physical_step_process_created_before_evidence_failure",
+  "physical_step_evidence_writer_failed",
+  "physical_step_cleanup_not_started",
+  "physical_step_cleanup_incomplete_with_owned_auxiliary_process",
+  "physical_step_auxiliary_process_not_owned_by_route",
+  "physical_step_failure_evidence_insufficient"
+]);
+const EXACT_0004_CLEANUP_FAILURE_CODES = Object.freeze([
+  "physical_cleanup_incomplete",
+  "final_cleanup_state_missing",
+  "final_cleanup_state_partial",
+  "final_cleanup_state_invalid",
+  "final_cleanup_incomplete",
+  "final_residuals_nonzero"
+]);
 const SAFE_EVENT_PREFIX = "IA4TUBE_SAFE_EVENT=";
 const TAP_TITLE =
   "real PostgreSQL proves migrations, physical RLS, vault and reauthentication";
@@ -1743,7 +1824,10 @@ function createNodeTestObserver(onMarker = () => {}) {
   return Object.freeze({ push: framer.push, finish });
 }
 
-function createSafeEventCollector() {
+function createSafeEventCollector(options = {}) {
+  const onAcceptedEvent = typeof options.onAcceptedEvent === "function"
+    ? options.onAcceptedEvent
+    : () => {};
   const seen = new Set();
   const state = {
     runnerReached: null,
@@ -1778,6 +1862,14 @@ function createSafeEventCollector() {
   const rawDiagnostic = createSafeDiagnosticAggregator();
   function invalidate() {
     protocolInvalid = true;
+  }
+  function notifyAcceptedEvent(name) {
+    try {
+      onAcceptedEvent(name, Object.freeze({ ...state }));
+    } catch {
+      // The observer is deliberately non-authoritative. Its durable transport
+      // is validated independently by the workflow finalizer.
+    }
   }
   function markerAllowed(name) {
     if (failure || closed || seen.has(name)) return false;
@@ -1896,6 +1988,7 @@ function createSafeEventCollector() {
       }
       seen.add(event.event);
       state[event.event] = true;
+      notifyAcceptedEvent(event.event);
       return;
     }
     if (event.event === "physicalPhaseSnapshot") {
@@ -1911,6 +2004,7 @@ function createSafeEventCollector() {
       }
       state.cleanupStarted = event.cleanupStarted;
       state.cleanupCompleted = event.cleanupCompleted;
+      notifyAcceptedEvent(event.event);
       return;
     }
     if (event.event === "nodeTestClosed") {
@@ -1929,6 +2023,7 @@ function createSafeEventCollector() {
       state.nodeTestExitCode = event.nodeTestExitCode;
       state.nodeTestSignal = event.nodeTestSignal;
       state.nodeTestTimedOut = event.nodeTestTimedOut;
+      notifyAcceptedEvent(event.event);
       return;
     }
     if (event.event === "failure") {
@@ -1952,6 +2047,7 @@ function createSafeEventCollector() {
           state[field] = event[field];
         }
       }
+      notifyAcceptedEvent(event.event);
       return;
     }
     invalidate();
@@ -2764,8 +2860,1390 @@ async function main(env = process.env, options = {}) {
   return 0;
 }
 
+let exact0004CheckpointWriteSequence = 0;
+
+function exact0004CheckpointPaths(env = process.env) {
+  if (typeof env.RUNNER_TEMP !== "string" || env.RUNNER_TEMP.length === 0) {
+    throw Object.assign(new Error("exact0004_runner_temp_invalid"), {
+      code: "exact0004_runner_temp_invalid"
+    });
+  }
+  const temporaryRoot = path.resolve(env.RUNNER_TEMP);
+  return Object.freeze({
+    temporaryRoot,
+    checkpoint: path.join(temporaryRoot, "exact0004-entry-checkpoint.json"),
+    evidenceState: path.join(temporaryRoot, "exact0004-evidence-state.json"),
+    processState: path.join(temporaryRoot, "exact0004-process-state.json"),
+    cleanupState: path.join(temporaryRoot, "exact0004-cleanup-state.json"),
+    assessment: path.join(temporaryRoot, "exact0004-transport-assessment.json"),
+    artifactDirectory: path.join(
+      temporaryRoot,
+      "social-3b0-exact-0004-runner-linux-evidence"
+    )
+  });
+}
+
+function exact0004CheckpointDefaults() {
+  return {
+    checkpointSchemaVersion: EXACT_0004_CHECKPOINT_SCHEMA_VERSION,
+    physicalStepAdmitted: false,
+    physicalStepEntered: false,
+    physicalScriptLoadAttempted: false,
+    physicalScriptLoaded: false,
+    physicalLauncherSpawnAttempted: false,
+    physicalLauncherProcessCreated: false,
+    physicalLauncherExitCode: null,
+    physicalLauncherSignal: null,
+    physicalLauncherTimedOut: null,
+    postgresStartAttempted: false,
+    postgresStarted: false,
+    nodeTestSpawnAttempted: false,
+    nodeTestProcessCreated: false,
+    cleanupStarted: false,
+    cleanupCompleted: false,
+    auxiliaryProcessCount: 0,
+    safeAuxiliaryProcessClass: "not_observed",
+    auxiliaryProcessOwnedByRoute: false,
+    firstFailureStage: null
+  };
+}
+
+function validExact0004Checkpoint(value) {
+  if (!exactKeys(value, EXACT_0004_CHECKPOINT_KEYS) ||
+      value.checkpointSchemaVersion !== EXACT_0004_CHECKPOINT_SCHEMA_VERSION) {
+    return false;
+  }
+  for (const key of [
+    "physicalStepAdmitted",
+    "physicalStepEntered",
+    "physicalScriptLoadAttempted",
+    "physicalScriptLoaded",
+    "physicalLauncherSpawnAttempted",
+    "physicalLauncherProcessCreated",
+    "postgresStartAttempted",
+    "postgresStarted",
+    "nodeTestSpawnAttempted",
+    "nodeTestProcessCreated",
+    "cleanupStarted",
+    "cleanupCompleted",
+    "auxiliaryProcessOwnedByRoute"
+  ]) {
+    if (typeof value[key] !== "boolean") return false;
+  }
+  if (!Number.isSafeInteger(value.auxiliaryProcessCount) ||
+      value.auxiliaryProcessCount < 0 || value.auxiliaryProcessCount > 1 ||
+      !EXACT_0004_AUXILIARY_PROCESS_CLASSES.includes(
+        value.safeAuxiliaryProcessClass
+      ) ||
+      !(value.firstFailureStage === null ||
+        EXACT_0004_CHECKPOINT_FAILURE_STAGES.includes(
+          value.firstFailureStage
+        ))) {
+    return false;
+  }
+  const noLauncherResult = value.physicalLauncherExitCode === null &&
+    value.physicalLauncherSignal === null &&
+    value.physicalLauncherTimedOut === null;
+  const launcherExited = Number.isSafeInteger(value.physicalLauncherExitCode) &&
+    value.physicalLauncherExitCode >= 0 &&
+    value.physicalLauncherSignal === null &&
+    typeof value.physicalLauncherTimedOut === "boolean";
+  const launcherSignaled = value.physicalLauncherExitCode === null &&
+    SAFE_SIGNALS.has(value.physicalLauncherSignal) &&
+    typeof value.physicalLauncherTimedOut === "boolean";
+  if (!noLauncherResult && !launcherExited && !launcherSignaled) return false;
+  if (value.physicalStepEntered && !value.physicalStepAdmitted ||
+      value.physicalScriptLoadAttempted && !value.physicalStepEntered ||
+      value.physicalScriptLoaded && !value.physicalScriptLoadAttempted ||
+      value.physicalLauncherSpawnAttempted && !value.physicalScriptLoaded ||
+      value.physicalLauncherProcessCreated &&
+        !value.physicalLauncherSpawnAttempted ||
+      value.physicalLauncherProcessCreated &&
+        !value.auxiliaryProcessOwnedByRoute ||
+      value.postgresStartAttempted && !value.physicalScriptLoaded ||
+      value.postgresStarted && !value.postgresStartAttempted ||
+      value.nodeTestSpawnAttempted &&
+        !value.physicalLauncherProcessCreated ||
+      value.nodeTestProcessCreated && !value.nodeTestSpawnAttempted ||
+      value.cleanupCompleted && !value.cleanupStarted ||
+      value.auxiliaryProcessOwnedByRoute &&
+        !value.physicalLauncherProcessCreated ||
+      value.auxiliaryProcessCount > 0 &&
+        value.safeAuxiliaryProcessClass === "not_observed") {
+    return false;
+  }
+  if (value.physicalLauncherSpawnAttempted &&
+      value.auxiliaryProcessOwnedByRoute &&
+      value.safeAuxiliaryProcessClass !== "sudo") return false;
+  if (!value.physicalLauncherProcessCreated && !noLauncherResult) return false;
+  return true;
+}
+
+function readExact0004Json(file) {
+  try {
+    return JSON.parse(fs.readFileSync(file, "utf8"));
+  } catch {
+    return null;
+  }
+}
+
+function writeExact0004FileAtomic(file, body) {
+  exact0004CheckpointWriteSequence += 1;
+  const temporaryFile = `${file}.tmp-${process.pid}-` +
+    String(exact0004CheckpointWriteSequence);
+  const descriptor = fs.openSync(temporaryFile, "wx", 0o600);
+  try {
+    fs.writeFileSync(descriptor, body);
+    fs.fsyncSync(descriptor);
+  } finally {
+    fs.closeSync(descriptor);
+  }
+  fs.renameSync(temporaryFile, file);
+  let directoryDescriptor = null;
+  try {
+    directoryDescriptor = fs.openSync(path.dirname(file), "r");
+    fs.fsyncSync(directoryDescriptor);
+  } catch (error) {
+    if (process.platform !== "win32") throw error;
+  } finally {
+    if (directoryDescriptor !== null) fs.closeSync(directoryDescriptor);
+  }
+}
+
+function writeExact0004JsonAtomic(file, value) {
+  writeExact0004FileAtomic(file, JSON.stringify(value) + "\n");
+}
+
+function updateExact0004Checkpoint(patch, env = process.env) {
+  const { checkpoint } = exact0004CheckpointPaths(env);
+  const current = readExact0004Json(checkpoint);
+  if (!validExact0004Checkpoint(current) ||
+      patch === null || typeof patch !== "object" || Array.isArray(patch) ||
+      Object.keys(patch).some((key) =>
+        !EXACT_0004_CHECKPOINT_KEYS.includes(key) ||
+        key === "checkpointSchemaVersion"
+      )) {
+    throw Object.assign(new Error("exact0004_checkpoint_invalid"), {
+      code: "exact0004_checkpoint_invalid"
+    });
+  }
+  const next = { ...current, ...patch };
+  if (current.firstFailureStage !== null &&
+      next.firstFailureStage !== current.firstFailureStage) {
+    next.firstFailureStage = current.firstFailureStage;
+  }
+  if (!validExact0004Checkpoint(next)) {
+    throw Object.assign(new Error("exact0004_checkpoint_transition_invalid"), {
+      code: "exact0004_checkpoint_transition_invalid"
+    });
+  }
+  writeExact0004JsonAtomic(checkpoint, next);
+  return Object.freeze(next);
+}
+
+function initializeExact0004PhysicalCheckpoint(env = process.env) {
+  const { checkpoint } = exact0004CheckpointPaths(env);
+  const initial = exact0004CheckpointDefaults();
+  if (!validExact0004Checkpoint(initial) || fs.existsSync(checkpoint)) {
+    throw Object.assign(new Error("exact0004_checkpoint_initialization_refused"), {
+      code: "exact0004_checkpoint_initialization_refused"
+    });
+  }
+  writeExact0004JsonAtomic(checkpoint, initial);
+  return 0;
+}
+
+function enterExact0004PhysicalStep(env = process.env) {
+  updateExact0004Checkpoint({
+    physicalStepAdmitted: true,
+    physicalStepEntered: true
+  }, env);
+  return 0;
+}
+
+function attemptExact0004PhysicalScriptLoad(env = process.env) {
+  updateExact0004Checkpoint({ physicalScriptLoadAttempted: true }, env);
+  return 0;
+}
+
+function observeExact0004Checkpoint(patch, env = process.env) {
+  try {
+    updateExact0004Checkpoint(patch, env);
+    return true;
+  } catch (error) {
+    if (!["exact0004_checkpoint_invalid",
+      "exact0004_checkpoint_transition_invalid"].includes(error && error.code)) {
+      try {
+        updateExact0004Checkpoint({
+          firstFailureStage: "physical_evidence"
+        }, env);
+      } catch {
+        // The independent transport snapshot classifies any surviving atomic
+        // temporary as partial while preserving the last valid checkpoint.
+      }
+    }
+    return false;
+  }
+}
+
+function startExact0004PhysicalObservation(env = process.env) {
+  const initial = readExact0004Json(exact0004CheckpointPaths(env).checkpoint);
+  if (!validExact0004Checkpoint(initial) ||
+      initial.physicalStepEntered !== true ||
+      initial.physicalScriptLoadAttempted !== true ||
+      initial.physicalScriptLoaded !== false) {
+    throw Object.assign(new Error("exact0004_checkpoint_load_refused"), {
+      code: "exact0004_checkpoint_load_refused"
+    });
+  }
+  updateExact0004Checkpoint({ physicalScriptLoaded: true }, env);
+  let launcherProcessCreated = false;
+  const observe = (patch) => observeExact0004Checkpoint(patch, env);
+  const failure = (stage) => observe({
+    firstFailureStage: EXACT_0004_CHECKPOINT_FAILURE_STAGES.includes(stage)
+      ? stage
+      : "unknown"
+  });
+  const safeEvent = (name, snapshot) => {
+    if (name === "nodeTestSpawnAttempted") {
+      observe({ nodeTestSpawnAttempted: true });
+    } else if (name === "nodeTestProcessCreated") {
+      observe({ nodeTestProcessCreated: true });
+    } else if (name === "failure" && snapshot) {
+      failure(snapshot.firstFailureStage);
+    }
+  };
+  return Object.freeze({
+    cleanupCompleted(completed, auxiliaryResiduals) {
+      const auxiliaryProcessCount = Number.isSafeInteger(auxiliaryResiduals) &&
+        auxiliaryResiduals > 0 ? 1 : 0;
+      observe({
+        cleanupCompleted: completed === true && auxiliaryProcessCount === 0,
+        auxiliaryProcessCount,
+        ...(completed === true ? {} : { firstFailureStage: "cleanup" })
+      });
+    },
+    cleanupStarted() {
+      observe({ cleanupStarted: true });
+    },
+    failure,
+    launcherClosed(code, signal, timedOut, auxiliaryResiduals) {
+      if (!launcherProcessCreated) return;
+      observe({
+        physicalLauncherExitCode: Number.isSafeInteger(code) ? code : null,
+        physicalLauncherSignal: typeof signal === "string" ? signal : null,
+        physicalLauncherTimedOut: timedOut === true,
+        auxiliaryProcessCount: Number.isSafeInteger(auxiliaryResiduals) &&
+          auxiliaryResiduals > 0 ? 1 : 0
+      });
+    },
+    launcherProcessCreated() {
+      launcherProcessCreated = true;
+      observe({
+        physicalLauncherProcessCreated: true,
+        auxiliaryProcessCount: 1,
+        auxiliaryProcessOwnedByRoute: true
+      });
+    },
+    launcherSpawnAttempted() {
+      observe({
+        physicalLauncherSpawnAttempted: true,
+        safeAuxiliaryProcessClass: "sudo"
+      });
+    },
+    postgresStartAttempted() {
+      observe({ postgresStartAttempted: true });
+    },
+    postgresStarted() {
+      observe({ postgresStarted: true });
+    },
+    safeEvent
+  });
+}
+
+function exact0004TemporaryFilesFor(file) {
+  const directory = path.dirname(file);
+  const prefix = path.basename(file) + ".tmp-";
+  try {
+    return fs.readdirSync(directory).filter((name) => name.startsWith(prefix));
+  } catch {
+    return [];
+  }
+}
+
+function inspectExact0004JsonTransport(file, validator, parsedState = "valid") {
+  const temporaryFiles = exact0004TemporaryFilesFor(file);
+  if (!fs.existsSync(file)) {
+    return Object.freeze({
+      state: temporaryFiles.length === 0 ? "missing" : "partial",
+      value: null
+    });
+  }
+  const value = readExact0004Json(file);
+  if (temporaryFiles.length !== 0) {
+    return Object.freeze({ state: "partial", value });
+  }
+  if (value === null) return Object.freeze({ state: "partial", value: null });
+  if (typeof validator === "function" && !validator(value)) {
+    return Object.freeze({ state: "invalid", value });
+  }
+  return Object.freeze({ state: parsedState, value });
+}
+
+function validExact0004CleanupState(value) {
+  const keys = [
+    "cleanupCompleted",
+    "containerResiduals",
+    "volumeResiduals",
+    "networkResiduals",
+    "listenerResiduals",
+    "temporaryRootResiduals"
+  ];
+  return exactKeys(value, keys) &&
+    typeof value.cleanupCompleted === "boolean" &&
+    keys.slice(1).every((key) =>
+      Number.isSafeInteger(value[key]) && value[key] >= 0
+    );
+}
+
+function writeExact0004CleanupState(value, env = process.env) {
+  const projected = Object.fromEntries([
+    "cleanupCompleted",
+    "containerResiduals",
+    "volumeResiduals",
+    "networkResiduals",
+    "listenerResiduals",
+    "temporaryRootResiduals"
+  ].map((key) => [key, value && value[key]]));
+  if (!validExact0004CleanupState(projected)) {
+    throw Object.assign(new Error("exact0004_cleanup_state_invalid"), {
+      code: "exact0004_cleanup_state_invalid"
+    });
+  }
+  writeExact0004JsonAtomic(
+    exact0004CheckpointPaths(env).cleanupState,
+    projected
+  );
+  return 0;
+}
+
+function validExact0004ProcessStatus(value) {
+  const keys = [
+    "exitCode", "signal", "timedOut", "stdoutStored", "stderrStored"
+  ];
+  if (!exactKeys(value, keys) || typeof value.timedOut !== "boolean" ||
+      value.stdoutStored !== false || value.stderrStored !== false) return false;
+  const noResult = value.exitCode === null && value.signal === null;
+  const exited = Number.isSafeInteger(value.exitCode) && value.exitCode >= 0 &&
+    value.signal === null;
+  const signaled = value.exitCode === null &&
+    SAFE_SIGNALS.has(value.signal);
+  return noResult || exited || signaled;
+}
+
+function snapshotExact0004PhysicalTransport(env = process.env) {
+  const files = exact0004CheckpointPaths(env);
+  const entry = inspectExact0004JsonTransport(
+    files.checkpoint,
+    validExact0004Checkpoint
+  );
+  const evidence = inspectExact0004JsonTransport(
+    files.evidenceState,
+    null,
+    "present"
+  );
+  const status = inspectExact0004JsonTransport(
+    files.processState,
+    validExact0004ProcessStatus
+  );
+  const cleanup = inspectExact0004JsonTransport(
+    files.cleanupState,
+    validExact0004CleanupState
+  );
+  const assessment = {
+    assessmentSchemaVersion: 1,
+    entryCheckpointState: entry.state,
+    physicalEvidenceTransportState: evidence.state,
+    processStatusTransportState: status.state,
+    cleanupState: cleanup.state,
+    cleanup: cleanup.state === "valid"
+      ? Object.fromEntries([
+        "cleanupCompleted",
+        "containerResiduals",
+        "volumeResiduals",
+        "networkResiduals",
+        "listenerResiduals",
+        "temporaryRootResiduals"
+      ].map((key) => [key, cleanup.value[key]]))
+      : null
+  };
+  writeExact0004JsonAtomic(files.assessment, assessment);
+  return 0;
+}
+
+const EXACT_0004_LEGACY_ARTIFACT_KEYS = Object.freeze([
+  "schemaVersion", "evidenceSchemaVersion", "branch", "commit", "parent",
+  "inventory", "runner", "nodeVersion", "postgresImageDigest",
+  "postgresStarted", "testProcessStarted", "testFileLoaded",
+  "testsDiscovered", "testsPassed", "testsFailed", "planExactPassed",
+  "applyExactPassed", "concurrencyPassed", "rollbackPassed", "profileBefore",
+  "profileAfter", "firstFailure", "runnerReached", "gateValidated",
+  "nodeTestSpawnAttempted", "nodeTestProcessCreated", "nodeTestExitCode",
+  "nodeTestSignal", "nodeTestTimedOut", "tapStarted", "tapTitleObserved",
+  "firstTestDiscovered", "stderrCategory", "safeErrorCode", "safeModuleName",
+  "firstFailureStage", "lastMainPhaseStarted", "lastMainPhaseCompleted",
+  "lastExact0004SubphaseStarted", "lastExact0004SubphaseCompleted",
+  "exact0004FailureSubphase", "safeSqlState", "safeErrorClass",
+  "safeOperationClass", "planExactInvoked", "planExactCompleted",
+  "applyExactInvoked", "applyExactCompleted", "databaseMutationAttempted",
+  "failureBeforeFirstMutation", "conflictingNegativeAttempted",
+  "conflictingNegativePromiseOutcome", "conflictingNegativeObservedSqlState",
+  "conflictingNegativeFulfilledResultClass",
+  "conflictingNegativeAssertionMatched",
+  "conflictingNegativeRejectedBeforeAssertion", "cleanupStarted",
+  "failureDuringCleanup", "failurePhase", "safePermissionOrigin",
+  "safeSourceBasename", "safeLineBucket", "cleanupCompleted", "residuals"
+]);
+const EXACT_0004_ARTIFACT_ADDED_KEYS = Object.freeze([
+  "physicalEntryCheckpointState",
+  "physicalEvidenceState",
+  "physicalStepAdmitted",
+  "physicalStepEntered",
+  "physicalScriptLoadAttempted",
+  "physicalScriptLoaded",
+  "physicalLauncherSpawnAttempted",
+  "physicalLauncherProcessCreated",
+  "physicalLauncherExitCode",
+  "physicalLauncherSignal",
+  "physicalLauncherTimedOut",
+  "postgresStartAttempted",
+  "auxiliaryProcessCount",
+  "safeAuxiliaryProcessClass",
+  "auxiliaryProcessOwnedByRoute",
+  "cleanupFailure"
+]);
+const EXACT_0004_ARTIFACT_KEYS = Object.freeze([
+  ...EXACT_0004_LEGACY_ARTIFACT_KEYS,
+  ...EXACT_0004_ARTIFACT_ADDED_KEYS
+]);
+const EXACT_0004_RESIDUAL_KEYS = Object.freeze([
+  "containers", "volumes", "networks", "postgresProcesses",
+  "auxiliaryProcesses", "listeners", "temp", "intermediateFiles"
+]);
+const EXACT_0004_INVENTORY = Object.freeze([
+  ".github/workflows/social-3b0-exact-0004-runner-linux.yml",
+  "db/migrations/0004_social_connector_persistence.up.sql",
+  "db/migrations/checksums.json",
+  "scripts/run-node-tests.js",
+  "scripts/run-real-postgres-tests.js",
+  "scripts/social-3a0p-local-scope.js",
+  "scripts/social-db-migrate.js",
+  "src/persistence/postgres/migrations.js",
+  "tests/free_art_campaigns.test.js",
+  "tests/free_art_campaigns_notifications.test.js",
+  "tests/monthly_planning_photo_items.test.js",
+  "tests/node-test-runner-safety.test.js",
+  "tests/product_discovery.test.js",
+  "tests/social-3a0p-current-diff-scope.test.js",
+  "tests/social-3a0p-linux-workflow.test.js",
+  "tests/social-3a0p-local-scope.test.js",
+  "tests/social-3b0-exact-0004-runner-linux-workflow.test.js",
+  "tests/social-3b0-linux-physical-gate.test.js",
+  "tests/social-postgres-migrations.test.js",
+  "tests/social-postgres-real.test.js"
+]);
+const EXACT_0004_ARTIFACT_STATE_SET = new Set([
+  "missing", "partial", "invalid", "valid"
+]);
+const EXACT_0004_ARTIFACT_FAILURE_STAGE_SET = new Set(
+  EXACT_0004_CHECKPOINT_FAILURE_STAGES
+);
+
+function validExact0004ArtifactBoundary(value, failed) {
+  if (!nullableMainPhase(value.lastMainPhaseStarted) ||
+      !nullableMainPhase(value.lastMainPhaseCompleted) ||
+      !exact0004EvidenceValid(value)) return false;
+  const startedIndex = value.lastMainPhaseStarted === null ? -1 :
+    PHYSICAL_MAIN_PHASES.indexOf(value.lastMainPhaseStarted);
+  const completedIndex = value.lastMainPhaseCompleted === null ? -1 :
+    PHYSICAL_MAIN_PHASES.indexOf(value.lastMainPhaseCompleted);
+  const mainProgress = startedIndex - completedIndex;
+  if (![0, 1].includes(mainProgress) ||
+      value.failurePhase !== null &&
+        value.failurePhase !== PHYSICAL_CLEANUP_PHASE &&
+        (!PHYSICAL_MAIN_PHASE_SET.has(value.failurePhase) ||
+          mainProgress !== 1 || value.failurePhase !== value.lastMainPhaseStarted) ||
+      (value.failurePhase === PHYSICAL_CLEANUP_PHASE) !==
+        (value.firstFailureStage === "cleanup")) return false;
+
+  const exactMainIndex = PHYSICAL_MAIN_PHASES.indexOf(
+    "exact_0004_plan_apply"
+  );
+  const exactBefore = startedIndex < exactMainIndex;
+  const exactActive = startedIndex === exactMainIndex &&
+    completedIndex === exactMainIndex - 1;
+  const exactAfter = completedIndex >= exactMainIndex;
+  const defaults = emptyExact0004Evidence();
+  const exactDefaults = EXACT_0004_EVIDENCE_FIELDS.every(
+    (field) => value[field] === defaults[field]
+  );
+  const exactFinal =
+    value.lastExact0004SubphaseStarted === "final_snapshot" &&
+    value.lastExact0004SubphaseCompleted === "final_snapshot" &&
+    value.exact0004FailureSubphase === "not_reached" &&
+    value.safeSqlState === "not_observed" &&
+    value.safeErrorClass === "unknown" &&
+    value.safeOperationClass === "unknown" &&
+    value.planExactInvoked === true &&
+    value.planExactCompleted === true &&
+    value.applyExactInvoked === true &&
+    value.applyExactCompleted === true &&
+    value.databaseMutationAttempted === true &&
+    value.failureBeforeFirstMutation === false &&
+    conflictingNegativeSucceeded(value);
+  if (exactBefore && !exactDefaults ||
+      exactActive && value.exact0004FailureSubphase === "not_reached" ||
+      exactAfter && !exactFinal ||
+      (value.failurePhase === "exact_0004_plan_apply") !==
+        (value.exact0004FailureSubphase !== "not_reached") ||
+      value.exact0004FailureSubphase !== "not_reached" && !failed) return false;
+  return true;
+}
+
+function validExact0004ArtifactFailure(value) {
+  const failed = value.firstFailure !== null;
+  if (!(value.firstFailure === null ||
+      /^[a-z0-9_]{3,96}$/.test(value.firstFailure)) ||
+      failed !== (value.firstFailureStage !== null) ||
+      value.firstFailureStage !== null &&
+        !EXACT_0004_ARTIFACT_FAILURE_STAGE_SET.has(value.firstFailureStage) ||
+      value.stderrCategory !== null &&
+        !STDERR_CATEGORY_SET.has(value.stderrCategory) ||
+      value.safeErrorCode !== null &&
+        !SAFE_ERROR_CODE_SET.has(value.safeErrorCode) ||
+      value.safeModuleName !== null &&
+        !SAFE_MODULE_NAME_SET.has(value.safeModuleName) ||
+      value.safeModuleName !== null &&
+        value.stderrCategory !== "module_not_found") return false;
+  if (!failed) {
+    return value.stderrCategory === null && value.safeErrorCode === null &&
+      value.safeModuleName === null && value.failureDuringCleanup === false &&
+      value.failurePhase === null && value.safePermissionOrigin === null &&
+      value.safeSourceBasename === null && value.safeLineBucket === null;
+  }
+  if (value.stderrCategory === null ||
+      !SAFE_PERMISSION_ORIGIN_SET.has(value.safePermissionOrigin) ||
+      !safeSourceFieldsValid(
+        value.safeSourceBasename,
+        value.safeLineBucket
+      )) return false;
+  if (value.stderrCategory !== "permission_denied") {
+    return value.safePermissionOrigin === "unknown" &&
+      value.safeSourceBasename === null && value.safeLineBucket === "unknown";
+  }
+  if (value.failurePhase === null ||
+      value.safeErrorCode !== null &&
+        !SAFE_PERMISSION_CODE_SET.has(value.safeErrorCode)) return false;
+  if (value.safeErrorCode === "42501") {
+    return value.safePermissionOrigin === "postgres_sqlstate";
+  }
+  if (["EACCES", "EPERM"].includes(value.safeErrorCode)) {
+    return ["os_filesystem", "os_process", "unknown"].includes(
+      value.safePermissionOrigin
+    );
+  }
+  return value.safeErrorCode === null &&
+    value.safePermissionOrigin === "unknown";
+}
+
+function validExact0004Artifact(value) {
+  if (!exactKeys(value, EXACT_0004_ARTIFACT_KEYS) ||
+      value.schemaVersion !== EXACT_0004_ARTIFACT_SCHEMA_VERSION ||
+      value.evidenceSchemaVersion !== EVIDENCE_SCHEMA_VERSION ||
+      typeof value.branch !== "string" || value.branch.length < 1 ||
+      value.branch.length > 160 || /[\r\n]/.test(value.branch) ||
+      !/^[0-9a-f]{40}$/.test(value.commit) ||
+      !/^[0-9a-f]{40}$/.test(value.parent) ||
+      !Array.isArray(value.inventory) ||
+      JSON.stringify(value.inventory) !== JSON.stringify(EXACT_0004_INVENTORY) ||
+      value.runner !== "ubuntu-24.04" ||
+      !/^v[0-9]+\.[0-9]+\.[0-9]+$/.test(value.nodeVersion) ||
+      !/^sha256:[0-9a-f]{64}$/.test(value.postgresImageDigest)) return false;
+  for (const key of [
+    "postgresStarted", "testProcessStarted", "planExactPassed",
+    "applyExactPassed", "concurrencyPassed", "rollbackPassed",
+    "nodeTestSpawnAttempted", "nodeTestProcessCreated", "cleanupStarted",
+    "cleanupCompleted", "failureDuringCleanup", "physicalStepAdmitted",
+    "physicalStepEntered", "physicalScriptLoadAttempted",
+    "physicalScriptLoaded", "physicalLauncherSpawnAttempted",
+    "physicalLauncherProcessCreated", "postgresStartAttempted",
+    "auxiliaryProcessOwnedByRoute"
+  ]) if (typeof value[key] !== "boolean") return false;
+  for (const key of [
+    "testFileLoaded", "runnerReached", "gateValidated", "tapStarted",
+    "tapTitleObserved", "firstTestDiscovered"
+  ]) if (![null, true].includes(value[key])) return false;
+  for (const key of ["testsDiscovered", "testsPassed", "testsFailed"]) {
+    if (!Number.isSafeInteger(value[key]) || value[key] < 0 || value[key] > 1) {
+      return false;
+    }
+  }
+  if (!value.nodeTestProcessCreated && (
+    value.testsDiscovered !== 0 || value.testsPassed !== 0 ||
+    value.testsFailed !== 0
+  )) return false;
+  if (!["not_observed", "0003"].includes(value.profileBefore) ||
+      !["not_observed", "0004"].includes(value.profileAfter) ||
+      value.testFileLoaded !== value.tapTitleObserved ||
+      value.testsDiscovered !== (value.firstTestDiscovered === true ? 1 : 0) ||
+      value.testsPassed === 1 && value.testsDiscovered !== 1 ||
+      value.testsPassed === 1 && value.testsFailed === 1 ||
+      value.gateValidated === true && value.runnerReached !== true ||
+      value.nodeTestSpawnAttempted && value.physicalEvidenceState === "valid" &&
+        value.gateValidated !== true ||
+      value.nodeTestProcessCreated && !value.nodeTestSpawnAttempted ||
+      value.tapStarted === true && !value.nodeTestProcessCreated ||
+      value.tapTitleObserved === true && value.tapStarted !== true ||
+      value.firstTestDiscovered === true && value.tapStarted !== true) return false;
+  const noNodeResult = value.nodeTestExitCode === null &&
+    value.nodeTestSignal === null && value.nodeTestTimedOut === null;
+  const nodeExited = Number.isSafeInteger(value.nodeTestExitCode) &&
+    value.nodeTestExitCode >= 0 && value.nodeTestSignal === null &&
+    value.nodeTestTimedOut === false;
+  const nodeSignaled = value.nodeTestExitCode === null &&
+    SAFE_SIGNALS.has(value.nodeTestSignal) && value.nodeTestTimedOut === null;
+  if (!noNodeResult && !nodeExited && !nodeSignaled ||
+      !value.nodeTestProcessCreated && !noNodeResult) return false;
+  const failed = value.firstFailure !== null;
+  if (!validExact0004ArtifactFailure(value) ||
+      !validExact0004ArtifactBoundary(value, failed) ||
+      !EXACT_0004_ARTIFACT_STATE_SET.has(value.physicalEntryCheckpointState) ||
+      !EXACT_0004_ARTIFACT_STATE_SET.has(value.physicalEvidenceState) ||
+      value.physicalStepEntered && !value.physicalStepAdmitted ||
+      value.physicalScriptLoadAttempted && !value.physicalStepEntered ||
+      value.physicalScriptLoaded && !value.physicalScriptLoadAttempted ||
+      value.physicalLauncherSpawnAttempted && !value.physicalScriptLoaded ||
+      value.physicalLauncherProcessCreated &&
+        !value.physicalLauncherSpawnAttempted ||
+      value.physicalLauncherProcessCreated &&
+        !value.auxiliaryProcessOwnedByRoute ||
+      value.postgresStartAttempted && !value.physicalScriptLoaded ||
+      value.postgresStarted && !value.postgresStartAttempted ||
+      value.testProcessStarted && !value.physicalLauncherProcessCreated ||
+      value.nodeTestSpawnAttempted && !value.physicalLauncherProcessCreated ||
+      value.nodeTestProcessCreated && !value.nodeTestSpawnAttempted ||
+      value.cleanupCompleted && !value.cleanupStarted ||
+      !value.cleanupStarted && value.failureDuringCleanup ||
+      value.cleanupFailure !== null && value.cleanupStarted &&
+        !value.failureDuringCleanup ||
+      !value.physicalStepAdmitted && (
+        value.physicalStepEntered || value.physicalScriptLoadAttempted ||
+        value.physicalScriptLoaded || value.physicalLauncherSpawnAttempted ||
+        value.physicalLauncherProcessCreated || value.postgresStartAttempted ||
+        value.postgresStarted || value.auxiliaryProcessCount !== 0 ||
+        value.safeAuxiliaryProcessClass !== "not_observed" ||
+        value.auxiliaryProcessOwnedByRoute
+      )) return false;
+  const noLauncherResult = value.physicalLauncherExitCode === null &&
+    value.physicalLauncherSignal === null &&
+    value.physicalLauncherTimedOut === null;
+  const launcherExited = Number.isSafeInteger(value.physicalLauncherExitCode) &&
+    value.physicalLauncherExitCode >= 0 &&
+    value.physicalLauncherSignal === null &&
+    typeof value.physicalLauncherTimedOut === "boolean";
+  const launcherSignaled = value.physicalLauncherExitCode === null &&
+    SAFE_SIGNALS.has(value.physicalLauncherSignal) &&
+    typeof value.physicalLauncherTimedOut === "boolean";
+  if ((!noLauncherResult && !launcherExited && !launcherSignaled) ||
+      !value.physicalLauncherProcessCreated && !noLauncherResult ||
+      !Number.isSafeInteger(value.auxiliaryProcessCount) ||
+      value.auxiliaryProcessCount < 0 || value.auxiliaryProcessCount > 1 ||
+      !EXACT_0004_AUXILIARY_PROCESS_CLASSES.includes(
+        value.safeAuxiliaryProcessClass) ||
+      value.physicalLauncherSpawnAttempted &&
+        value.auxiliaryProcessOwnedByRoute &&
+        value.safeAuxiliaryProcessClass !== "sudo" ||
+      value.auxiliaryProcessOwnedByRoute &&
+        !value.physicalLauncherProcessCreated ||
+      value.auxiliaryProcessCount > 0 &&
+        value.safeAuxiliaryProcessClass === "not_observed") return false;
+  if (!exactKeys(value.residuals, EXACT_0004_RESIDUAL_KEYS) ||
+      EXACT_0004_RESIDUAL_KEYS.some((key) =>
+        !Number.isSafeInteger(value.residuals[key]) || value.residuals[key] < 0) ||
+      value.residuals.auxiliaryProcesses !==
+        (value.auxiliaryProcessOwnedByRoute ? value.auxiliaryProcessCount : 0)) {
+    return false;
+  }
+  if (!(value.cleanupFailure === null ||
+      EXACT_0004_CLEANUP_FAILURE_CODES.includes(value.cleanupFailure)) ||
+      value.cleanupFailure === null && !value.cleanupCompleted ||
+      value.cleanupFailure !== null &&
+        value.cleanupFailure !== "physical_cleanup_incomplete" &&
+        value.cleanupCompleted ||
+      value.cleanupFailure === "physical_cleanup_incomplete" &&
+        !value.cleanupStarted) return false;
+  if (EXACT_0004_PHYSICAL_FAILURE_CODES.includes(value.firstFailure)) {
+    const causal = {
+      physical_step_not_admitted: !value.physicalStepAdmitted,
+      physical_step_command_resolution_failed_prestart:
+        value.physicalStepAdmitted && value.physicalStepEntered &&
+          !value.physicalScriptLoadAttempted,
+      physical_step_script_load_failed_prestart:
+        value.physicalScriptLoadAttempted && !value.physicalScriptLoaded,
+      physical_step_launcher_spawn_failed:
+        value.physicalLauncherSpawnAttempted &&
+          !value.physicalLauncherProcessCreated,
+      physical_step_process_created_before_evidence_failure:
+        value.physicalLauncherProcessCreated &&
+          value.physicalEvidenceState !== "valid",
+      physical_step_evidence_writer_failed:
+        value.firstFailureStage === "physical_evidence",
+      physical_step_cleanup_not_started:
+        !value.cleanupStarted && (
+          value.physicalLauncherProcessCreated || value.postgresStartAttempted
+        ),
+      physical_step_cleanup_incomplete_with_owned_auxiliary_process:
+        value.cleanupStarted && !value.cleanupCompleted &&
+          value.auxiliaryProcessOwnedByRoute && value.auxiliaryProcessCount > 0,
+      physical_step_auxiliary_process_not_owned_by_route:
+        !value.physicalLauncherProcessCreated &&
+          !value.auxiliaryProcessOwnedByRoute &&
+          value.auxiliaryProcessCount > 0 &&
+          value.safeAuxiliaryProcessClass !== "not_observed" &&
+          value.residuals.auxiliaryProcesses === 0,
+      physical_step_failure_evidence_insufficient: true
+    };
+    if (causal[value.firstFailure] !== true) return false;
+  }
+  return true;
+}
+
+function validExact0004Assessment(value) {
+  const states = new Set(["missing", "partial", "invalid", "valid"]);
+  const evidenceStates = new Set([
+    "missing", "partial", "invalid", "present", "valid"
+  ]);
+  return exactKeys(value, [
+    "assessmentSchemaVersion",
+    "entryCheckpointState",
+    "physicalEvidenceTransportState",
+    "processStatusTransportState",
+    "cleanupState",
+    "cleanup"
+  ]) && value.assessmentSchemaVersion === 1 &&
+    states.has(value.entryCheckpointState) &&
+    evidenceStates.has(value.physicalEvidenceTransportState) &&
+    evidenceStates.has(value.processStatusTransportState) &&
+    states.has(value.cleanupState) &&
+    (value.cleanupState === "valid"
+      ? validExact0004CleanupState(value.cleanup)
+      : value.cleanup === null);
+}
+
+function finalizeExact0004Artifact(env = process.env) {
+  const files = exact0004CheckpointPaths(env);
+  const assessment = readExact0004Json(files.assessment);
+  if (!validExact0004Assessment(assessment)) {
+    throw Object.assign(new Error("exact0004_transport_assessment_invalid"), {
+      code: "exact0004_transport_assessment_invalid"
+    });
+  }
+  const evidenceFile = path.join(files.artifactDirectory, "evidence.json");
+  const evidenceSidecar = evidenceFile + ".sha256";
+  const legacy = readExact0004Json(evidenceFile);
+  if (!exactKeys(legacy, EXACT_0004_LEGACY_ARTIFACT_KEYS)) {
+    throw Object.assign(new Error("exact0004_legacy_artifact_invalid"), {
+      code: "exact0004_legacy_artifact_invalid"
+    });
+  }
+  const entryCandidate = readExact0004Json(files.checkpoint);
+  const entryCheckpointValid = validExact0004Checkpoint(entryCandidate);
+  const checkpointDefaults = exact0004CheckpointDefaults();
+  const entry = entryCheckpointValid
+    ? entryCandidate
+    : checkpointDefaults;
+  const checkpointPhysicalMarkersObserved = entryCheckpointValid &&
+    EXACT_0004_CHECKPOINT_KEYS.slice(1).some(
+      (key) => entry[key] !== checkpointDefaults[key]
+    );
+  const legacyEvidenceFallback =
+    legacy.firstFailure === "physical_step_no_evidence" &&
+    legacy.firstFailureStage === "artifact";
+  const legacyStatusFallback = legacy.firstFailure === "process_status_invalid" &&
+    legacy.firstFailureStage === "artifact";
+  const legacyCleanupFallback = [
+    "final_cleanup_incomplete", "final_residuals_nonzero"
+  ].includes(legacy.firstFailure) && legacy.firstFailureStage === "cleanup";
+  const legacyFallback = legacyEvidenceFallback || legacyStatusFallback ||
+    legacyCleanupFallback;
+  const evidenceTransportState =
+    assessment.physicalEvidenceTransportState === "present"
+      ? legacyEvidenceFallback ? "invalid" : "valid"
+      : assessment.physicalEvidenceTransportState;
+  const statusTransportState = assessment.processStatusTransportState === "present"
+    ? legacyStatusFallback ? "invalid" : "valid"
+    : assessment.processStatusTransportState;
+  const physicalEvidenceState = evidenceTransportState !== "valid"
+    ? evidenceTransportState
+    : statusTransportState;
+  const cleanup = assessment.cleanupState === "valid"
+    ? assessment.cleanup
+    : null;
+  const cleanupCounter = (name) => cleanup &&
+    Number.isSafeInteger(cleanup[name]) ? cleanup[name] : 1;
+  const physicalStepAdmitted = ["success", "failure", "cancelled"].includes(
+    env.PHYSICAL_OUTCOME
+  ) || checkpointPhysicalMarkersObserved;
+  const physicalStepEntered = physicalStepAdmitted &&
+    entry.physicalStepEntered === true;
+  const physicalScriptLoadAttempted = physicalStepEntered &&
+    entry.physicalScriptLoadAttempted === true;
+  const physicalScriptLoaded = physicalScriptLoadAttempted &&
+    entry.physicalScriptLoaded === true;
+  const physicalLauncherSpawnAttempted = physicalScriptLoaded &&
+    entry.physicalLauncherSpawnAttempted === true;
+  const physicalLauncherProcessCreated = physicalLauncherSpawnAttempted &&
+    entry.physicalLauncherProcessCreated === true;
+  const auxiliaryProcessOwnedByRoute = physicalLauncherProcessCreated &&
+    entry.auxiliaryProcessOwnedByRoute === true;
+  const auxiliaryProcessCount = physicalStepAdmitted
+    ? entry.auxiliaryProcessCount
+    : 0;
+  const residuals = {
+    containers: cleanupCounter("containerResiduals"),
+    volumes: cleanupCounter("volumeResiduals"),
+    networks: cleanupCounter("networkResiduals"),
+    postgresProcesses: cleanupCounter("containerResiduals"),
+    auxiliaryProcesses: auxiliaryProcessOwnedByRoute
+      ? auxiliaryProcessCount
+      : 0,
+    listeners: cleanupCounter("listenerResiduals"),
+    temp: cleanupCounter("temporaryRootResiduals"),
+    intermediateFiles: 0
+  };
+  const residualsZero = Object.values(residuals).every((value) => value === 0);
+  const cleanupStarted = entry.cleanupStarted === true || cleanup !== null;
+  const cleanupCompleted = cleanupStarted && cleanup !== null &&
+    cleanup.cleanupCompleted === true && residualsZero;
+  const physicalCleanupFailureObserved = entryCheckpointValid &&
+    physicalScriptLoaded && entry.cleanupStarted === true &&
+    entry.cleanupCompleted === false;
+  let firstFailure = legacyFallback ? null : legacy.firstFailure;
+  let firstFailureStage = legacyFallback ? null : legacy.firstFailureStage;
+  let physicalFailureRefinedLegacy = false;
+  const physicalFailureRefinesLegacy = (code, stage) => {
+    if (!entryCheckpointValid || entry.firstFailureStage !== stage) return false;
+    if (code === "physical_step_launcher_spawn_failed") {
+      return legacy.firstFailure === "exact0004_orchestration_failed" &&
+        legacy.firstFailureStage === "composed_process";
+    }
+    if (code ===
+        "physical_step_cleanup_incomplete_with_owned_auxiliary_process") {
+      return [
+        "auxiliary_process_cleanup_failed",
+        "linux_cleanup_incomplete"
+      ].includes(legacy.firstFailure) && legacy.firstFailureStage === "cleanup";
+    }
+    return false;
+  };
+  const recordFirstFailure = (code, stage) => {
+    if (firstFailure === null && firstFailureStage === null) {
+      firstFailure = code;
+      firstFailureStage = stage;
+      return;
+    }
+    if (physicalFailureRefinesLegacy(code, stage)) {
+      firstFailure = code;
+      firstFailureStage = stage;
+      physicalFailureRefinedLegacy = true;
+    }
+  };
+  let cleanupFailure = null;
+  if (physicalCleanupFailureObserved) {
+    cleanupFailure = "physical_cleanup_incomplete";
+  } else if (!cleanupCompleted) {
+    cleanupFailure = cleanup === null
+      ? `final_cleanup_state_${assessment.cleanupState}`
+      : residualsZero
+        ? "final_cleanup_incomplete"
+        : "final_residuals_nonzero";
+  }
+  const insufficient = (stage = "physical_evidence") => ({
+    code: "physical_step_failure_evidence_insufficient",
+    stage
+  });
+  const classifyPhysicalFailure = () => {
+    if (env.PHYSICAL_OUTCOME === "skipped") {
+      if (checkpointPhysicalMarkersObserved || ["partial", "invalid"].includes(
+        assessment.entryCheckpointState
+      )) return insufficient("physical_admission");
+      return {
+        code: "physical_step_not_admitted",
+        stage: "physical_admission"
+      };
+    }
+    if (entryCheckpointValid && [
+      "postgres_start",
+      "postgres_bootstrap",
+      "composed_process",
+      "npm",
+      "runner_load",
+      "environment_gate",
+      "node_test_spawn",
+      "node_test_bootstrap",
+      "tap_start",
+      "test_discovery",
+      "test_execution",
+      "safe_event_protocol",
+      "physical_timeout"
+    ].includes(entry.firstFailureStage)) {
+      return insufficient(entry.firstFailureStage);
+    }
+    if (physicalLauncherProcessCreated && physicalEvidenceState !== "valid") {
+      return {
+        code: "physical_step_process_created_before_evidence_failure",
+        stage: "physical_evidence"
+      };
+    }
+    if (entryCheckpointValid && entry.firstFailureStage !== null) {
+      if (entry.firstFailureStage === "cleanup") {
+        if (!cleanupStarted) {
+          return {
+            code: "physical_step_cleanup_not_started",
+            stage: "cleanup"
+          };
+        }
+        if (auxiliaryProcessOwnedByRoute && auxiliaryProcessCount > 0) {
+          return {
+            code:
+              "physical_step_cleanup_incomplete_with_owned_auxiliary_process",
+            stage: "cleanup"
+          };
+        }
+        return insufficient("cleanup");
+      }
+      if (entry.firstFailureStage === "physical_evidence") {
+        return {
+          code: "physical_step_evidence_writer_failed",
+          stage: "physical_evidence"
+        };
+      }
+      if (!["physical_admission", "physical_entry", "physical_script_load",
+        "physical_launcher_spawn"].includes(entry.firstFailureStage)) {
+        return insufficient(entry.firstFailureStage);
+      }
+    }
+    if (assessment.entryCheckpointState === "partial") {
+      return {
+        code: "physical_step_evidence_writer_failed",
+        stage: "physical_evidence"
+      };
+    }
+    if (!entryCheckpointValid) return insufficient();
+    if (physicalStepEntered && !physicalScriptLoadAttempted) {
+      return {
+        code: "physical_step_command_resolution_failed_prestart",
+        stage: "physical_entry"
+      };
+    }
+    if (physicalScriptLoadAttempted && !physicalScriptLoaded) {
+      return {
+        code: "physical_step_script_load_failed_prestart",
+        stage: "physical_script_load"
+      };
+    }
+    if (physicalLauncherSpawnAttempted && !physicalLauncherProcessCreated) {
+      return {
+        code: "physical_step_launcher_spawn_failed",
+        stage: "physical_launcher_spawn"
+      };
+    }
+    if (!physicalStepAdmitted) {
+      return insufficient("physical_admission");
+    }
+    if (!physicalStepEntered) {
+      return insufficient("physical_entry");
+    }
+    if (assessment.entryCheckpointState !== "valid") return insufficient();
+    if (physicalEvidenceState === "partial") {
+      return {
+        code: "physical_step_evidence_writer_failed",
+        stage: "physical_evidence"
+      };
+    }
+    if (physicalEvidenceState !== "valid") return insufficient();
+    if (env.PHYSICAL_OUTCOME === "failure" && firstFailure === null &&
+        !physicalLauncherProcessCreated &&
+        !auxiliaryProcessOwnedByRoute && auxiliaryProcessCount > 0 &&
+        entry.safeAuxiliaryProcessClass !== "not_observed") {
+      return {
+        code: "physical_step_auxiliary_process_not_owned_by_route",
+        stage: "artifact"
+      };
+    }
+    const attributableResourceCreated = physicalLauncherProcessCreated ||
+      entry.postgresStartAttempted === true;
+    if (attributableResourceCreated && !cleanupStarted) {
+      return {
+        code: "physical_step_cleanup_not_started",
+        stage: "cleanup"
+      };
+    }
+    if (!cleanupCompleted && auxiliaryProcessOwnedByRoute &&
+        auxiliaryProcessCount > 0) {
+      return {
+        code: "physical_step_cleanup_incomplete_with_owned_auxiliary_process",
+        stage: "cleanup"
+      };
+    }
+    if (env.CLEANUP_OUTCOME !== "success") return insufficient("cleanup");
+    if (env.TRANSPORT_OUTCOME !== "success" ||
+        env.LEGACY_FINALIZE_OUTCOME !== "success") {
+      return insufficient("artifact");
+    }
+    if (cleanupFailure !== null || env.PHYSICAL_OUTCOME !== "success") {
+      return insufficient(cleanupFailure !== null ? "cleanup" : "unknown");
+    }
+    return null;
+  };
+  const physicalFailure = classifyPhysicalFailure();
+  if (physicalFailure !== null) {
+    if (!EXACT_0004_PHYSICAL_FAILURE_CODES.includes(physicalFailure.code)) {
+      throw new Error("exact0004_physical_failure_class_invalid");
+    }
+    recordFirstFailure(physicalFailure.code, physicalFailure.stage);
+  }
+  const physicalEvidenceValid = physicalEvidenceState === "valid";
+  const nodeTestSpawnAttempted = physicalLauncherProcessCreated &&
+    (entry.nodeTestSpawnAttempted === true ||
+      physicalEvidenceValid && legacy.nodeTestSpawnAttempted === true);
+  const nodeTestProcessCreated = physicalLauncherProcessCreated &&
+    (entry.nodeTestProcessCreated === true ||
+      physicalEvidenceValid && legacy.nodeTestProcessCreated === true);
+  const artifact = {
+    ...legacy,
+    schemaVersion: EXACT_0004_ARTIFACT_SCHEMA_VERSION,
+    testsDiscovered: nodeTestProcessCreated ? legacy.testsDiscovered : 0,
+    testsPassed: nodeTestProcessCreated ? legacy.testsPassed : 0,
+    testsFailed: nodeTestProcessCreated ? legacy.testsFailed : 0,
+    postgresStarted: physicalScriptLoaded &&
+      (entry.postgresStarted === true ||
+        physicalEvidenceValid && legacy.postgresStarted === true),
+    nodeTestSpawnAttempted,
+    nodeTestProcessCreated,
+    cleanupStarted,
+    cleanupCompleted,
+    firstFailure,
+    firstFailureStage,
+    failureDuringCleanup: (!legacyCleanupFallback &&
+      legacy.failureDuringCleanup === true) ||
+      physicalCleanupFailureObserved ||
+      (cleanupStarted && cleanupFailure !== null),
+    failurePhase: firstFailureStage === "cleanup"
+      ? "final_cleanup"
+      : physicalFailureRefinedLegacy || legacy.failurePhase === "final_cleanup"
+        ? null
+        : legacy.failurePhase,
+    stderrCategory: physicalFailureRefinedLegacy
+      ? "unknown"
+      : firstFailure !== null && legacy.stderrCategory === null
+      ? "unknown"
+      : legacy.stderrCategory,
+    safeErrorCode: physicalFailureRefinedLegacy ? null : legacy.safeErrorCode,
+    safeModuleName: physicalFailureRefinedLegacy ? null : legacy.safeModuleName,
+    safePermissionOrigin: physicalFailureRefinedLegacy
+      ? "unknown"
+      : firstFailure !== null && legacy.safePermissionOrigin === null
+        ? "unknown"
+        : legacy.safePermissionOrigin,
+    safeSourceBasename: physicalFailureRefinedLegacy
+      ? null
+      : legacy.safeSourceBasename,
+    safeLineBucket: physicalFailureRefinedLegacy
+      ? "unknown"
+      : firstFailure !== null && legacy.safeLineBucket === null
+        ? "unknown"
+        : legacy.safeLineBucket,
+    residuals,
+    physicalEntryCheckpointState: assessment.entryCheckpointState,
+    physicalEvidenceState,
+    physicalStepAdmitted,
+    physicalStepEntered,
+    physicalScriptLoadAttempted,
+    physicalScriptLoaded,
+    physicalLauncherSpawnAttempted,
+    physicalLauncherProcessCreated,
+    physicalLauncherExitCode: physicalLauncherProcessCreated
+      ? entry.physicalLauncherExitCode
+      : null,
+    physicalLauncherSignal: physicalLauncherProcessCreated
+      ? entry.physicalLauncherSignal
+      : null,
+    physicalLauncherTimedOut: physicalLauncherProcessCreated
+      ? entry.physicalLauncherTimedOut
+      : null,
+    postgresStartAttempted: physicalScriptLoaded &&
+      (entry.postgresStartAttempted === true ||
+        physicalEvidenceValid && legacy.postgresStarted === true),
+    auxiliaryProcessCount,
+    safeAuxiliaryProcessClass: !physicalStepAdmitted
+      ? "not_observed"
+      : entryCheckpointValid
+      ? entry.safeAuxiliaryProcessClass
+      : "unknown",
+    auxiliaryProcessOwnedByRoute,
+    cleanupFailure
+  };
+  if (!validExact0004Artifact(artifact)) {
+    throw Object.assign(new Error("exact0004_artifact_schema_invalid"), {
+      code: "exact0004_artifact_schema_invalid"
+    });
+  }
+  writeExact0004JsonAtomic(evidenceFile, artifact);
+  const body = fs.readFileSync(evidenceFile);
+  const sidecarBody = crypto.createHash("sha256").update(body).digest("hex") +
+    "  evidence.json\n";
+  writeExact0004FileAtomic(evidenceSidecar, sidecarBody);
+  const consumedTransportFiles = [
+    files.checkpoint,
+    files.assessment,
+    files.evidenceState,
+    files.processState,
+    files.cleanupState
+  ];
+  for (const file of consumedTransportFiles) {
+    fs.rmSync(file, { force: true });
+    for (const temporary of exact0004TemporaryFilesFor(file)) {
+      fs.rmSync(path.join(path.dirname(file), temporary), { force: true });
+    }
+  }
+  if (consumedTransportFiles.some((file) => fs.existsSync(file) ||
+      exact0004TemporaryFilesFor(file).length !== 0)) {
+    throw Object.assign(new Error("exact0004_intermediate_cleanup_failed"), {
+      code: "exact0004_intermediate_cleanup_failed"
+    });
+  }
+  return 0;
+}
+
+function enforceExact0004Artifact(env = process.env) {
+  const files = exact0004CheckpointPaths(env);
+  let validationFailure = null;
+  try {
+    const expectedFiles = [
+      "evidence.json",
+      "evidence.json.sha256",
+      "process-status.json",
+      "process-status.json.sha256"
+    ];
+    const actualFiles = fs.readdirSync(files.artifactDirectory).sort();
+    if (JSON.stringify(actualFiles) !==
+        JSON.stringify([...expectedFiles].sort())) {
+      throw new Error("exact0004_artifact_inventory_invalid");
+    }
+    for (const name of expectedFiles) {
+      const stat = fs.lstatSync(path.join(files.artifactDirectory, name));
+      if (!stat.isFile() || stat.isSymbolicLink()) {
+        throw new Error("exact0004_artifact_file_invalid");
+      }
+    }
+    for (const name of ["evidence.json", "process-status.json"]) {
+      const body = fs.readFileSync(path.join(files.artifactDirectory, name));
+      const digest = crypto.createHash("sha256").update(body).digest("hex");
+      const sidecar = fs.readFileSync(
+        path.join(files.artifactDirectory, name + ".sha256"),
+        "utf8"
+      );
+      if (sidecar !== `${digest}  ${name}\n`) {
+        throw new Error("exact0004_artifact_hash_invalid");
+      }
+    }
+    const evidence = readExact0004Json(
+      path.join(files.artifactDirectory, "evidence.json")
+    );
+    const status = readExact0004Json(
+      path.join(files.artifactDirectory, "process-status.json")
+    );
+    const imageReference = env.SOCIAL_EXACT_POSTGRES_IMAGE;
+    const imageSeparator = typeof imageReference === "string"
+      ? imageReference.lastIndexOf("@")
+      : -1;
+    const expectedImageDigest = imageSeparator > 0
+      ? imageReference.slice(imageSeparator + 1)
+      : null;
+    if (!validExact0004Artifact(evidence) ||
+        evidence.branch !== env.SOCIAL_EXACT_BRANCH ||
+        evidence.commit !== env.GITHUB_SHA ||
+        evidence.parent !== env.SOCIAL_EXACT_PARENT ||
+        evidence.runner !== "ubuntu-24.04" ||
+        !/^v24\./.test(evidence.nodeVersion) ||
+        evidence.postgresImageDigest !== expectedImageDigest ||
+        evidence.physicalEntryCheckpointState !== "valid" ||
+        evidence.physicalEvidenceState !== "valid") {
+      throw new Error("exact0004_artifact_identity_invalid");
+    }
+    for (const key of [
+      "physicalStepAdmitted",
+      "physicalStepEntered",
+      "physicalScriptLoadAttempted",
+      "physicalScriptLoaded",
+      "physicalLauncherSpawnAttempted",
+      "physicalLauncherProcessCreated",
+      "postgresStartAttempted",
+      "postgresStarted",
+      "testProcessStarted",
+      "testFileLoaded",
+      "planExactPassed",
+      "applyExactPassed",
+      "concurrencyPassed",
+      "rollbackPassed",
+      "runnerReached",
+      "gateValidated",
+      "nodeTestSpawnAttempted",
+      "nodeTestProcessCreated",
+      "tapStarted",
+      "tapTitleObserved",
+      "firstTestDiscovered",
+      "cleanupStarted",
+      "cleanupCompleted"
+    ]) {
+      if (evidence[key] !== true) {
+        throw new Error("exact0004_artifact_required_marker_invalid");
+      }
+    }
+    const exactResult = {
+      testsDiscovered: 1,
+      testsPassed: 1,
+      testsFailed: 0,
+      profileBefore: "0003",
+      profileAfter: "0004",
+      nodeTestExitCode: 0,
+      nodeTestSignal: null,
+      nodeTestTimedOut: false,
+      stderrCategory: null,
+      safeErrorCode: null,
+      safeModuleName: null,
+      firstFailure: null,
+      firstFailureStage: null,
+      lastMainPhaseStarted: "reauthentication",
+      lastMainPhaseCompleted: "reauthentication",
+      lastExact0004SubphaseStarted: "final_snapshot",
+      lastExact0004SubphaseCompleted: "final_snapshot",
+      exact0004FailureSubphase: "not_reached",
+      safeSqlState: "not_observed",
+      safeErrorClass: "unknown",
+      safeOperationClass: "unknown",
+      planExactInvoked: true,
+      planExactCompleted: true,
+      applyExactInvoked: true,
+      applyExactCompleted: true,
+      databaseMutationAttempted: true,
+      failureBeforeFirstMutation: false,
+      conflictingNegativeAttempted: true,
+      conflictingNegativePromiseOutcome: "rejected",
+      conflictingNegativeObservedSqlState: "23514",
+      conflictingNegativeFulfilledResultClass: "not_observed",
+      conflictingNegativeAssertionMatched: true,
+      conflictingNegativeRejectedBeforeAssertion: true,
+      failureDuringCleanup: false,
+      failurePhase: null,
+      safePermissionOrigin: null,
+      safeSourceBasename: null,
+      safeLineBucket: null,
+      physicalLauncherExitCode: 0,
+      physicalLauncherSignal: null,
+      physicalLauncherTimedOut: false,
+      auxiliaryProcessCount: 0,
+      safeAuxiliaryProcessClass: "sudo",
+      auxiliaryProcessOwnedByRoute: true,
+      cleanupFailure: null
+    };
+    for (const [key, expected] of Object.entries(exactResult)) {
+      if (evidence[key] !== expected) {
+        throw new Error("exact0004_artifact_result_invalid");
+      }
+    }
+    if (evidence.testFileLoaded !== evidence.tapTitleObserved ||
+        EXACT_0004_RESIDUAL_KEYS.some((key) => evidence.residuals[key] !== 0)) {
+      throw new Error("exact0004_artifact_result_invalid");
+    }
+    if (!validExact0004ProcessStatus(status) || status.exitCode !== 0 ||
+        status.signal !== null || status.timedOut !== false ||
+        status.stdoutStored !== false || status.stderrStored !== false ||
+        status.exitCode !== evidence.physicalLauncherExitCode ||
+        status.signal !== evidence.physicalLauncherSignal ||
+        status.timedOut !== evidence.physicalLauncherTimedOut) {
+      throw new Error("exact0004_process_status_invalid");
+    }
+    for (const name of [
+      "ENTRY_OUTCOME",
+      "PHYSICAL_OUTCOME",
+      "CLEANUP_OUTCOME",
+      "TRANSPORT_OUTCOME",
+      "LEGACY_FINALIZE_OUTCOME",
+      "FINALIZE_OUTCOME",
+      "UPLOAD_OUTCOME"
+    ]) {
+      if (env[name] !== "success") {
+        throw new Error("exact0004_step_outcome_failed");
+      }
+    }
+  } catch (error) {
+    validationFailure = error;
+  }
+  let cleanupFailure = null;
+  try {
+    fs.rmSync(files.artifactDirectory, { recursive: true, force: true });
+    if (fs.existsSync(files.artifactDirectory)) {
+      throw new Error("exact0004_artifact_cleanup_failed");
+    }
+  } catch (error) {
+    cleanupFailure = error;
+  }
+  let worktreeFailure = null;
+  try {
+    const worktreeStatus = execFileSync(
+      "git",
+      ["status", "--porcelain=v1", "--untracked-files=all"],
+      {
+        cwd: process.cwd(),
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "ignore"],
+        timeout: 20_000,
+        maxBuffer: 1024 * 1024,
+        env: {
+          ...env,
+          GIT_OPTIONAL_LOCKS: "0",
+          GIT_TERMINAL_PROMPT: "0"
+        }
+      }
+    );
+    if (worktreeStatus !== "") throw new Error("exact0004_worktree_not_clean");
+  } catch (error) {
+    worktreeFailure = error;
+  }
+  if (validationFailure) throw validationFailure;
+  if (cleanupFailure) throw cleanupFailure;
+  if (worktreeFailure) throw worktreeFailure;
+  return 0;
+}
+
 if (require.main === module) {
-  main().then(
+  const mode = process.argv[2];
+  const operation = mode === "--exact-0004-checkpoint-init"
+    ? () => initializeExact0004PhysicalCheckpoint()
+    : mode === "--exact-0004-checkpoint-enter"
+      ? () => enterExact0004PhysicalStep()
+      : mode === "--exact-0004-checkpoint-load-attempt"
+        ? () => attemptExact0004PhysicalScriptLoad()
+        : mode === "--exact-0004-transport-snapshot"
+          ? () => snapshotExact0004PhysicalTransport()
+          : mode === "--exact-0004-artifact-finalize"
+            ? () => finalizeExact0004Artifact()
+            : mode === "--exact-0004-artifact-enforce"
+              ? () => enforceExact0004Artifact()
+              : () => main();
+  Promise.resolve().then(operation).then(
     (code) => { process.exitCode = code; },
     () => { process.exitCode = 2; }
   );
@@ -2776,11 +4254,22 @@ module.exports = {
   CONFLICTING_NEGATIVE_FULFILLED_RESULT_CLASSES,
   CONFLICTING_NEGATIVE_PROMISE_OUTCOMES,
   EVIDENCE_SCHEMA_VERSION,
+  EXACT_0004_ARTIFACT_ADDED_KEYS,
+  EXACT_0004_ARTIFACT_KEYS,
+  EXACT_0004_ARTIFACT_SCHEMA_VERSION,
+  EXACT_0004_AUXILIARY_PROCESS_CLASSES,
+  EXACT_0004_CLEANUP_FAILURE_CODES,
+  EXACT_0004_CHECKPOINT_FAILURE_STAGES,
+  EXACT_0004_CHECKPOINT_KEYS,
+  EXACT_0004_CHECKPOINT_SCHEMA_VERSION,
+  EXACT_0004_PHYSICAL_FAILURE_CODES,
   EXACT_0004_ERROR_CLASSES,
   EXACT_0004_EVIDENCE_FIELDS,
   EXACT_0004_EXECUTION_SUBPHASES,
+  EXACT_0004_INVENTORY,
   EXACT_0004_OPERATION_CLASSES,
   EXACT_0004_SUBPHASES,
+  EXACT_0004_RESIDUAL_KEYS,
   FIRST_FAILURE_STAGES,
   LOOPBACK_MODE,
   PHYSICAL_CLEANUP_PHASE,
@@ -2803,6 +4292,7 @@ module.exports = {
   SAFE_SOURCE_BASENAMES,
   STDERR_CATEGORIES,
   TAP_TITLE,
+  attemptExact0004PhysicalScriptLoad,
   canonicalJson,
   classifySafeLine,
   createNodeTestObserver,
@@ -2814,12 +4304,29 @@ module.exports = {
   emptyConflictingNegativeEvidence,
   emptyExact0004Evidence,
   exact0004EvidenceValid,
+  exact0004CheckpointDefaults,
+  exact0004CheckpointPaths,
   exact0004OperationClass,
+  enterExact0004PhysicalStep,
+  enforceExact0004Artifact,
+  finalizeExact0004Artifact,
+  inspectExact0004JsonTransport,
+  initializeExact0004PhysicalCheckpoint,
   main,
+  observeExact0004Checkpoint,
   runNodeTest,
   safeEventLine,
   safeLineBucket,
   secureConnection,
+  snapshotExact0004PhysicalTransport,
+  startExact0004PhysicalObservation,
   targetFingerprint,
-  validateGateEnvironment
+  updateExact0004Checkpoint,
+  validExact0004Assessment,
+  validExact0004Artifact,
+  validExact0004Checkpoint,
+  validExact0004CleanupState,
+  validExact0004ProcessStatus,
+  validateGateEnvironment,
+  writeExact0004CleanupState
 };

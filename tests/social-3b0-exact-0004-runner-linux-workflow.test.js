@@ -7,30 +7,42 @@ const fs = require("node:fs");
 const path = require("node:path");
 const test = require("node:test");
 const { TextDecoder } = require("node:util");
+const RUNNER_CONTRACT = require("../scripts/run-real-postgres-tests");
 
 const ROOT = path.resolve(__dirname, "..");
 const RELATIVE = ".github/workflows/social-3b0-exact-0004-runner-linux.yml";
 const FILE = path.join(ROOT, ...RELATIVE.split("/"));
+const WORKFLOW_LF_SHA256 =
+  "908010553b1924563c887700ed5b61f9084a88973a02765e0c447e7866838222";
+const WORKFLOW_FILTERED_OID = "13d0015eff6d9024663518130083373edfc145e1";
 const BRANCH =
-  "social/checkpoint-3b0-exact-0004-runner-linux-external-account-rollback-catalog-20260820";
+  "social/checkpoint-3b0-exact-0004-runner-linux-physical-step-entry-evidence-20260820";
 const BASE = "13e38b875db2a220514fe06113663c517c975592";
-const PARENT = "76e650c18beadc9768666285440445d2fc2e367e";
+const PARENT = "fc0b94c7eb80034d30dc5226b8bb38a0ea095dc9";
+const ROLLBACK_CATALOG_PARENT = "76e650c18beadc9768666285440445d2fc2e367e";
 const FIRST_ROLLBACK_PARENT = "5a109bc775ac9e35bdcdaabec16d329509d9125f";
 const FORCE_RLS_PARENT = "1de14105800db3ad024e15700d7e23fb2b41282c";
 const PLAN_SUBPHASE_PARENT = "73433e1b2d856e073db452ebe17815bec296bba0";
 const SOURCE_COMMIT = "8534817574a22dbd144a835c9f3585c44ee11c96";
 const MESSAGE =
-  "[run-social-3b0] verify external account rollback through catalogs";
+  "[run-social-3b0] preserve exact 0004 physical step entry evidence";
 const IMAGE =
   "docker.io/library/postgres:18.4-bookworm@sha256:7e6103cf85f88f7a0eddb3ec0b1ba8940eba098ed118ade25a729ca9daee5568";
+const ARTIFACT_SCHEMA_VERSION = 2;
+const EVENT_SCHEMA_VERSION = 6;
+const CHECKPOINT_SCHEMA_VERSION = 1;
 const CHECKOUT = "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1";
 const SETUP_NODE = "actions/setup-node@820762786026740c76f36085b0efc47a31fe5020";
 const UPLOAD = "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a";
 const RUNNER_FILE = "scripts/run-real-postgres-tests.js";
 const RUNNER_MODULE = "./scripts/run-real-postgres-tests";
 const RUNNER_LF_SHA256 =
+  "de4bf8e5a3fcff249046efac2fc20bfc2062371ecfcd49a8d218cf810489cd2d";
+const RUNNER_FILTERED_OID = "d9ced62d72fa0bf69cb262878bb9813e4378eecb";
+const PARENT_RUNNER_LF_SHA256 =
   "35d6ca544868957e44fa1787dfef6c3967ebf106e277877b70f9fae15e2e67bd";
-const RUNNER_FILTERED_OID = "a62d4607bf60345e05c1b42a5dfccd221950b227";
+const PARENT_RUNNER_FILTERED_OID =
+  "a62d4607bf60345e05c1b42a5dfccd221950b227";
 const FORCE_RLS_PARENT_RUNNER_LF_SHA256 =
   "2a8a91e0f6351afbb4304002a4fb7cd4e689602ecfbc8af418c957dcfa7da0a6";
 const FORCE_RLS_PARENT_RUNNER_FILTERED_OID =
@@ -45,6 +57,22 @@ const CHECKSUM_FILE = "db/migrations/checksums.json";
 const MIGRATION_TEST_FILE = "tests/social-postgres-migrations.test.js";
 const NODE_TEST_FILE = "tests/node-test-runner-safety.test.js";
 const PHYSICAL_TEST_FILE = "tests/social-3b0-linux-physical-gate.test.js";
+const PHYSICAL_ENTRY_FOCAL_TITLES = Object.freeze([
+  "Exact-0004 entry evidence 01 classifies a skipped step as A not admitted",
+  "Exact-0004 entry evidence 02 distinguishes B command resolution from C script load",
+  "Exact-0004 entry evidence 03 classifies D when sudo spawn is attempted and refused",
+  "Exact-0004 entry evidence 04 classifies E with the created launcher result intact",
+  "Exact-0004 entry evidence 05 persists pre-PostgreSQL evidence and classifies F partial transport",
+  "Exact-0004 entry evidence 06 finalizer maps absent physical evidence only to J",
+  "Exact-0004 entry evidence 07 classifies G when an owned resource has no cleanup start",
+  "Exact-0004 entry evidence 08 records completed cleanup with every route residual zero",
+  "Exact-0004 entry evidence 09 classifies H only for an owned launcher residual",
+  "Exact-0004 entry evidence 10 keeps I external allowlisted identity outside route residuals",
+  "Exact-0004 entry evidence 11 preserves the first failure and separates later cleanup failure",
+  "Exact-0004 entry evidence 12 accepted observer callbacks contain no raw stdout or stderr",
+  "Exact-0004 entry evidence 13 never transports a secret-like raw canary",
+  "Exact-0004 entry evidence 14 final artifact has schema 2 and exactly four authenticated files"
+]);
 const MIGRATION_LF_SHA256 = Object.freeze({
   [MIGRATION_FILE]:
     "91f6efc611903c40e16bd37828d5b9c1a03dfae222e1d13b5dc97f81ffde1b5d",
@@ -66,14 +94,22 @@ const PROTECTED_FILES = Object.freeze([
   "package.json",
   "package-lock.json"
 ]);
+const PROTECTED8 = Object.freeze([
+  ...PROTECTED_FILES,
+  ...PRESERVED_FUNCTIONAL_FILES
+]);
 const REAL_TEST_FILE = "tests/social-postgres-real.test.js";
 const REAL_TEST_LF_SHA256 =
   "bfa29707855f99c4823286109633f8b83c4593b8f46ab749e7939e4605022d89";
 const REAL_TEST_FILTERED_OID =
   "c7c5c13f0886209bc75e31e426ef1db24a9e5277";
 const PARENT_REAL_TEST_LF_SHA256 =
-  "329890ff2e56c034a778b3277f46254795749ebc78feaf3c2e8d4ea760ee64c7";
+  "bfa29707855f99c4823286109633f8b83c4593b8f46ab749e7939e4605022d89";
 const PARENT_REAL_TEST_FILTERED_OID =
+  "c7c5c13f0886209bc75e31e426ef1db24a9e5277";
+const ROLLBACK_CATALOG_PARENT_REAL_TEST_LF_SHA256 =
+  "329890ff2e56c034a778b3277f46254795749ebc78feaf3c2e8d4ea760ee64c7";
+const ROLLBACK_CATALOG_PARENT_REAL_TEST_FILTERED_OID =
   "cad3660ccc8d972aff5770701ff836f29c61e615";
 const FIRST_ROLLBACK_PARENT_REAL_TEST_LF_SHA256 =
   "e3912a2b174e7199c76035264ebe455da00848c3c61259138b9ea0b77c3e5117";
@@ -87,14 +123,18 @@ const INSTRUMENTED_LF_SHA256 = Object.freeze({
   [NODE_TEST_FILE]:
     "2b561c3b9399f9cb6351bd73cd2d317b74d46ef7525d67d054b2e1a5e2235324",
   [PHYSICAL_TEST_FILE]:
-    "c9dc030f19a1b26bd82eea9cc2f1399568edd1efe864e84ad4aef484158bbafc",
+    "bd29dc52c4bf1837a0a8fff70c50b07da64153c9052f4747aff2c5f2165ab2ef",
   [REAL_TEST_FILE]: REAL_TEST_LF_SHA256
 });
 const INSTRUMENTED_FILTERED_OID = Object.freeze({
   [NODE_TEST_FILE]: "41359b42bc4fc5cbc11ec0b0bc4407d728ebde9c",
-  [PHYSICAL_TEST_FILE]: "367717f49cc845d5e022fc5eaa2823cf55c0f2cc",
+  [PHYSICAL_TEST_FILE]: "29e34656e461ef7ec9c89781213611e6fdbefd61",
   [REAL_TEST_FILE]: REAL_TEST_FILTERED_OID
 });
+const PARENT_PHYSICAL_TEST_LF_SHA256 =
+  "c9dc030f19a1b26bd82eea9cc2f1399568edd1efe864e84ad4aef484158bbafc";
+const PARENT_PHYSICAL_TEST_FILTERED_OID =
+  "367717f49cc845d5e022fc5eaa2823cf55c0f2cc";
 const PLAN_SUBPHASE_PARENT_REAL_TEST_LF_SHA256 =
   "27a4d1ebbccda40711fd1a78a2f170efa3128690b86588be0c7ab515345f49d0";
 const PLAN_SUBPHASE_PARENT_REAL_TEST_FILTERED_OID =
@@ -168,12 +208,12 @@ const EXACT20 = Object.freeze([
 ]);
 const INCREMENTAL7 = Object.freeze([
   ".github/workflows/social-3b0-exact-0004-runner-linux.yml",
+  "scripts/run-real-postgres-tests.js",
   "scripts/social-3a0p-local-scope.js",
-  "tests/node-test-runner-safety.test.js",
   "tests/social-3a0p-current-diff-scope.test.js",
   "tests/social-3a0p-local-scope.test.js",
   "tests/social-3b0-exact-0004-runner-linux-workflow.test.js",
-  "tests/social-postgres-real.test.js"
+  "tests/social-3b0-linux-physical-gate.test.js"
 ]);
 const LEGACY_EVIDENCE_KEYS = Object.freeze([
   "schemaVersion",
@@ -245,10 +285,58 @@ const EXACT0004_EVIDENCE_KEYS = Object.freeze([
   "conflictingNegativeAssertionMatched",
   "conflictingNegativeRejectedBeforeAssertion"
 ]);
-const EVIDENCE_KEYS = Object.freeze([
+const PHYSICAL_ENTRY_EVIDENCE_KEYS = Object.freeze([
+  "physicalStepAdmitted",
+  "physicalStepEntered",
+  "physicalScriptLoadAttempted",
+  "physicalScriptLoaded",
+  "physicalLauncherSpawnAttempted",
+  "physicalLauncherProcessCreated",
+  "physicalLauncherExitCode",
+  "physicalLauncherSignal",
+  "physicalLauncherTimedOut",
+  "postgresStartAttempted",
+  "auxiliaryProcessCount",
+  "safeAuxiliaryProcessClass",
+  "auxiliaryProcessOwnedByRoute"
+]);
+const PHYSICAL_TRANSPORT_EVIDENCE_KEYS = Object.freeze([
+  "physicalEntryCheckpointState",
+  "physicalEvidenceState"
+]);
+const CLEANUP_EVIDENCE_KEYS = Object.freeze(["cleanupFailure"]);
+const CHECKPOINT_KEYS = Object.freeze([
+  "checkpointSchemaVersion",
+  "physicalStepAdmitted",
+  "physicalStepEntered",
+  "physicalScriptLoadAttempted",
+  "physicalScriptLoaded",
+  "physicalLauncherSpawnAttempted",
+  "physicalLauncherProcessCreated",
+  "physicalLauncherExitCode",
+  "physicalLauncherSignal",
+  "physicalLauncherTimedOut",
+  "postgresStartAttempted",
+  "postgresStarted",
+  "nodeTestSpawnAttempted",
+  "nodeTestProcessCreated",
+  "cleanupStarted",
+  "cleanupCompleted",
+  "auxiliaryProcessCount",
+  "safeAuxiliaryProcessClass",
+  "auxiliaryProcessOwnedByRoute",
+  "firstFailureStage"
+]);
+const LEGACY_ARTIFACT_EVIDENCE_KEYS = Object.freeze([
   ...LEGACY_EVIDENCE_KEYS,
   ...SAFE_EVIDENCE_KEYS,
   ...EXACT0004_EVIDENCE_KEYS
+]);
+const EVIDENCE_KEYS = Object.freeze([
+  ...LEGACY_ARTIFACT_EVIDENCE_KEYS,
+  ...PHYSICAL_TRANSPORT_EVIDENCE_KEYS,
+  ...PHYSICAL_ENTRY_EVIDENCE_KEYS,
+  ...CLEANUP_EVIDENCE_KEYS
 ]);
 const RUNNER_FACT_KEYS = Object.freeze([
   ...SAFE_EVIDENCE_KEYS.filter((key) => key !== "evidenceSchemaVersion"),
@@ -261,6 +349,72 @@ const PROCESS_STATUS_KEYS = Object.freeze([
   "timedOut",
   "stdoutStored",
   "stderrStored"
+]);
+const RESIDUAL_KEYS = Object.freeze([
+  "containers",
+  "volumes",
+  "networks",
+  "postgresProcesses",
+  "auxiliaryProcesses",
+  "listeners",
+  "temp",
+  "intermediateFiles"
+]);
+const CLEANUP_FAILURE_CODES = Object.freeze([
+  "physical_cleanup_incomplete",
+  "final_cleanup_state_missing",
+  "final_cleanup_state_partial",
+  "final_cleanup_state_invalid",
+  "final_cleanup_incomplete",
+  "final_residuals_nonzero"
+]);
+const AUXILIARY_PROCESS_CLASSES = Object.freeze([
+  "node",
+  "sudo",
+  "timeout",
+  "nsenter",
+  "docker",
+  "postgres",
+  "shell",
+  "github_runner_tool",
+  "other_allowlisted",
+  "unknown",
+  "not_observed"
+]);
+const CHECKPOINT_FAILURE_STAGES = Object.freeze([
+  "physical_admission",
+  "physical_entry",
+  "physical_script_load",
+  "physical_launcher_spawn",
+  "postgres_start",
+  "postgres_bootstrap",
+  "composed_process",
+  "npm",
+  "runner_load",
+  "environment_gate",
+  "node_test_spawn",
+  "node_test_bootstrap",
+  "tap_start",
+  "test_discovery",
+  "test_execution",
+  "safe_event_protocol",
+  "physical_timeout",
+  "cleanup",
+  "artifact",
+  "physical_evidence",
+  "unknown"
+]);
+const PHYSICAL_FAILURE_CODES = Object.freeze([
+  "physical_step_not_admitted",
+  "physical_step_command_resolution_failed_prestart",
+  "physical_step_script_load_failed_prestart",
+  "physical_step_launcher_spawn_failed",
+  "physical_step_process_created_before_evidence_failure",
+  "physical_step_evidence_writer_failed",
+  "physical_step_cleanup_not_started",
+  "physical_step_cleanup_incomplete_with_owned_auxiliary_process",
+  "physical_step_auxiliary_process_not_owned_by_route",
+  "physical_step_failure_evidence_insufficient"
 ]);
 const PERMISSION_ORIGINS = Object.freeze([
   "postgres_sqlstate",
@@ -693,6 +847,16 @@ function git(args, encoding = "utf8") {
 
 test("Exact-0004 Linux workflow is strict JSON with the one authorized trigger", () => {
   const { source, workflow } = read();
+  const canonical = canonicalLfBytes(RELATIVE);
+  assert.equal(
+    crypto.createHash("sha256").update(canonical).digest("hex"),
+    WORKFLOW_LF_SHA256
+  );
+  assert.equal(gitBlobOid(canonical), WORKFLOW_FILTERED_OID);
+  assert.equal(
+    git(["hash-object", `--path=${RELATIVE}`, "--", RELATIVE]).trim(),
+    WORKFLOW_FILTERED_OID
+  );
   assert.deepEqual(workflow.on, { push: { branches: [BRANCH] } });
   assert.deepEqual(workflow.permissions, { contents: "read" });
   assert.deepEqual(workflow.concurrency, {
@@ -762,12 +926,19 @@ test("Exact-0004 Linux workflow fixes branch, immediate parent, ancestral base, 
   assert.equal(new Set(INCREMENTAL7).size, 7);
   assert.deepEqual(bashIncrementalInventory(guard), INCREMENTAL7);
   assert.deepEqual(bashProtectedInventory(guard), PROTECTED_FILES);
+  assert.equal(PROTECTED8.length, 8);
+  assert.equal(new Set(PROTECTED8).size, 8);
   const physical = stepByName(
     currentJob,
     "Run the one-shot PostgreSQL 18 Exact-0004 proof"
   );
+  const legacyFinalize = stepByName(
+    currentJob,
+    "Build legacy sanitized four-file evidence"
+  );
   const finalize = stepByName(currentJob, "Finalize sanitized four-file evidence");
   const enforcement = stepByName(currentJob, "Enforce final Exact-0004 result");
+  const runnerSource = canonicalLfBytes(RUNNER_FILE).toString("utf8");
   assert.ok(
     physical.run.includes(
       "safeRouteEnv=new Set(['SOCIAL_EXACT_BASE','SOCIAL_EXACT_PARENT'"
@@ -778,31 +949,32 @@ test("Exact-0004 Linux workflow fixes branch, immediate parent, ancestral base, 
     1
   );
   assert.equal(
-    finalize.run.split("parent:process.env.SOCIAL_EXACT_PARENT").length - 1,
+    legacyFinalize.run.split("parent:process.env.SOCIAL_EXACT_PARENT").length - 1,
     1
   );
   assert.ok(
-    finalize.run.includes("value.parent!==process.env.SOCIAL_EXACT_PARENT")
+    legacyFinalize.run.includes("value.parent!==process.env.SOCIAL_EXACT_PARENT")
   );
   assert.ok(
-    enforcement.run.includes(
-      "evidence.parent!==process.env.SOCIAL_EXACT_PARENT"
-    )
+    runnerSource.includes("evidence.parent !== env.SOCIAL_EXACT_PARENT")
+  );
+  assert.equal(
+    finalize.run,
+    `node ${RUNNER_FILE} --exact-0004-artifact-finalize`
+  );
+  assert.equal(
+    enforcement.run,
+    `node ${RUNNER_FILE} --exact-0004-artifact-enforce`
   );
   assert.equal(source.includes("parent:process.env.SOCIAL_EXACT_BASE"), false);
   assert.ok(guard.includes('${SOCIAL_EXACT_PARENT}:$file'));
   assert.ok(guard.includes('${SOCIAL_EXACT_BASE}:$file'));
   const physicalInventory = inlineInventory(physical.run, "inventory");
-  const finalizeInventory = inlineInventory(finalize.run, "inventory");
-  const enforcementInventory = inlineInventory(
-    enforcement.run,
-    "expectedInventory"
-  );
+  const finalizeInventory = inlineInventory(legacyFinalize.run, "inventory");
   for (const [name, inventory] of [
     ["guard", guardInventory],
     ["physical", physicalInventory],
-    ["finalizer", finalizeInventory],
-    ["enforcement", enforcementInventory]
+    ["legacy-finalizer", finalizeInventory]
   ]) {
     assert.deepEqual(inventory, EXACT20, name);
     assert.equal(
@@ -859,6 +1031,9 @@ test("Exact-0004 Linux workflow fixes branch, immediate parent, ancestral base, 
     false
   );
   for (const stale of [
+    "social/checkpoint-3b0-exact-0004-runner-linux-external-account-rollback-catalog-20260820",
+    "[run-social-3b0] verify external account rollback through catalogs",
+    "76e650c18beadc9768666285440445d2fc2e367e",
     "social/checkpoint-3b0-exact-0004-runner-linux-conflict-sqlstate-20260820",
     "[run-social-3b0] align exact 0004 conflict SQLSTATE",
     "53bae8b3457b515b0e656d5b37fce4dc04d5e89f",
@@ -956,6 +1131,21 @@ test("functional and instrumented pins come from canonical Git blobs", () => {
     crypto.createHash("sha256").update(currentBytes).digest("hex"),
     REAL_TEST_LF_SHA256
   );
+  const immediateParentBytes = git([
+    "cat-file",
+    "blob",
+    `${PARENT}:${REAL_TEST_FILE}`
+  ], null);
+  assert.ok(Buffer.isBuffer(immediateParentBytes));
+  assert.equal(
+    crypto.createHash("sha256").update(immediateParentBytes).digest("hex"),
+    PARENT_REAL_TEST_LF_SHA256
+  );
+  assert.equal(
+    gitBlobOid(immediateParentBytes),
+    PARENT_REAL_TEST_FILTERED_OID
+  );
+  assert.deepEqual(immediateParentBytes, currentBytes);
   assert.equal(physicalPins[REAL_TEST_FILE], REAL_TEST_LF_SHA256);
   assert.equal(gitBlobOid(currentBytes), REAL_TEST_FILTERED_OID);
   assert.equal(
@@ -1006,6 +1196,35 @@ test("functional and instrumented pins come from canonical Git blobs", () => {
       file
     );
   }
+  const parentPhysicalTest = git([
+    "cat-file",
+    "blob",
+    `${PARENT}:${PHYSICAL_TEST_FILE}`
+  ], null);
+  assert.ok(Buffer.isBuffer(parentPhysicalTest));
+  assert.equal(
+    crypto.createHash("sha256").update(parentPhysicalTest).digest("hex"),
+    PARENT_PHYSICAL_TEST_LF_SHA256
+  );
+  assert.equal(
+    gitBlobOid(parentPhysicalTest),
+    PARENT_PHYSICAL_TEST_FILTERED_OID
+  );
+  assert.notEqual(
+    INSTRUMENTED_FILTERED_OID[PHYSICAL_TEST_FILE],
+    PARENT_PHYSICAL_TEST_FILTERED_OID
+  );
+  const physicalTestSource = canonicalLfBytes(PHYSICAL_TEST_FILE)
+    .toString("utf8");
+  const physicalEntryFocals = [...physicalTestSource.matchAll(
+    /^test\("(Exact-0004 entry evidence [^"]+)"/gm
+  )].map((match) => match[1]);
+  assert.deepEqual(physicalEntryFocals, PHYSICAL_ENTRY_FOCAL_TITLES);
+  assert.equal(PHYSICAL_ENTRY_FOCAL_TITLES.length, 14);
+  assert.equal(
+    parentPhysicalTest.toString("utf8").includes("Exact-0004 entry evidence"),
+    false
+  );
   if (process.platform === "win32") assert.equal(materializationDiffers, true);
   for (const formerPin of FORMER_WINDOWS_WORKTREE_PINS) {
     assert.equal(Object.values(pins).includes(formerPin), false, formerPin);
@@ -1689,14 +1908,17 @@ test("historical FORCE-RLS conflict proof remains exact", () => {
   const currentBytes = git([
     "cat-file",
     "blob",
-    `${PARENT}:${REAL_TEST_FILE}`
+    `${ROLLBACK_CATALOG_PARENT}:${REAL_TEST_FILE}`
   ], null);
   assert.ok(Buffer.isBuffer(currentBytes));
   assert.equal(
     crypto.createHash("sha256").update(currentBytes).digest("hex"),
-    PARENT_REAL_TEST_LF_SHA256
+    ROLLBACK_CATALOG_PARENT_REAL_TEST_LF_SHA256
   );
-  assert.equal(gitBlobOid(currentBytes), PARENT_REAL_TEST_FILTERED_OID);
+  assert.equal(
+    gitBlobOid(currentBytes),
+    ROLLBACK_CATALOG_PARENT_REAL_TEST_FILTERED_OID
+  );
   const currentSource = currentBytes.toString("utf8");
   const staleExpectation = '      (error) => error?.code === "P0001"';
   const externalAccountExpectation =
@@ -1913,14 +2135,17 @@ test("rollback catalog proofs reject mutants and reconstruct only their parent d
   const parentBytes = git([
     "cat-file",
     "blob",
-    PARENT + ":" + REAL_TEST_FILE
+    ROLLBACK_CATALOG_PARENT + ":" + REAL_TEST_FILE
   ], null);
   assert.ok(Buffer.isBuffer(parentBytes));
   assert.equal(
     crypto.createHash("sha256").update(parentBytes).digest("hex"),
-    PARENT_REAL_TEST_LF_SHA256
+    ROLLBACK_CATALOG_PARENT_REAL_TEST_LF_SHA256
   );
-  assert.equal(gitBlobOid(parentBytes), PARENT_REAL_TEST_FILTERED_OID);
+  assert.equal(
+    gitBlobOid(parentBytes),
+    ROLLBACK_CATALOG_PARENT_REAL_TEST_FILTERED_OID
+  );
   const currentBytes = canonicalLfBytes(REAL_TEST_FILE);
   assert.equal(
     crypto.createHash("sha256").update(currentBytes).digest("hex"),
@@ -2368,21 +2593,42 @@ test("instrumented runner pin is the canonical filtered LF blob", () => {
     git(["hash-object", `--path=${RUNNER_FILE}`, "--", RUNNER_FILE]).trim(),
     RUNNER_FILTERED_OID
   );
-  const parent = git([
+  const immediateParent = git([
+    "cat-file",
+    "blob",
+    `${PARENT}:${RUNNER_FILE}`
+  ], null);
+  assert.ok(Buffer.isBuffer(immediateParent));
+  assert.equal(
+    crypto.createHash("sha256").update(immediateParent).digest("hex"),
+    PARENT_RUNNER_LF_SHA256
+  );
+  assert.equal(gitBlobOid(immediateParent), PARENT_RUNNER_FILTERED_OID);
+  const forceRlsParent = git([
     "cat-file",
     "blob",
     `${FORCE_RLS_PARENT}:${RUNNER_FILE}`
   ], null);
-  assert.ok(Buffer.isBuffer(parent));
+  assert.ok(Buffer.isBuffer(forceRlsParent));
   assert.equal(
-    crypto.createHash("sha256").update(parent).digest("hex"),
+    crypto.createHash("sha256").update(forceRlsParent).digest("hex"),
     FORCE_RLS_PARENT_RUNNER_LF_SHA256
   );
-  assert.equal(gitBlobOid(parent), FORCE_RLS_PARENT_RUNNER_FILTERED_OID);
+  assert.equal(
+    gitBlobOid(forceRlsParent),
+    FORCE_RLS_PARENT_RUNNER_FILTERED_OID
+  );
+  assert.notEqual(RUNNER_FILTERED_OID, PARENT_RUNNER_FILTERED_OID);
   assert.notEqual(RUNNER_FILTERED_OID, FORCE_RLS_PARENT_RUNNER_FILTERED_OID);
-  const parentRunnerSource = parent.toString("utf8");
-  assert.ok(parentRunnerSource.includes("const EVIDENCE_SCHEMA_VERSION = 5;"));
-  assert.ok(parentRunnerSource.includes("conflictingNegativePromiseOutcome"));
+  const parentRunnerSource = immediateParent.toString("utf8");
+  const forceRlsParentRunnerSource = forceRlsParent.toString("utf8");
+  assert.ok(parentRunnerSource.includes("const EVIDENCE_SCHEMA_VERSION = 6;"));
+  assert.ok(forceRlsParentRunnerSource.includes(
+    "const EVIDENCE_SCHEMA_VERSION = 5;"
+  ));
+  assert.ok(forceRlsParentRunnerSource.includes(
+    "conflictingNegativePromiseOutcome"
+  ));
   const runnerSource = canonical.toString("utf8");
   for (const fragment of [
     "const EVIDENCE_SCHEMA_VERSION = 6;",
@@ -2400,17 +2646,31 @@ test("instrumented runner pin is the canonical filtered LF blob", () => {
     "conflictingNegativeSucceeded",
     "emptyExact0004Evidence",
     "exact0004EvidenceValid",
-    "exact0004OperationClass"
+    "exact0004OperationClass",
+    "EXACT_0004_ARTIFACT_SCHEMA_VERSION",
+    "EXACT_0004_CHECKPOINT_SCHEMA_VERSION",
+    "EXACT_0004_CHECKPOINT_KEYS",
+    "EXACT_0004_AUXILIARY_PROCESS_CLASSES",
+    "EXACT_0004_CHECKPOINT_FAILURE_STAGES",
+    "EXACT_0004_PHYSICAL_FAILURE_CODES",
+    "initializeExact0004PhysicalCheckpoint",
+    "enterExact0004PhysicalStep",
+    "attemptExact0004PhysicalScriptLoad",
+    "startExact0004PhysicalObservation",
+    "snapshotExact0004PhysicalTransport",
+    "finalizeExact0004Artifact",
+    "enforceExact0004Artifact"
   ]) assert.ok(runnerSource.includes(fragment), fragment);
   for (const subphase of [
     "conflicting_external_account_0004_negative",
     "external_account_rollback_verification"
   ]) {
     assert.equal(runnerSource.split(`  "${subphase}",`).length - 1, 1);
-    assert.equal(parentRunnerSource.includes(subphase), false);
+    assert.equal(parentRunnerSource.split(`  "${subphase}",`).length - 1, 1);
+    assert.equal(forceRlsParentRunnerSource.includes(subphase), false);
   }
   assert.equal(
-    runnerSource
+    parentRunnerSource
       .replace("const EVIDENCE_SCHEMA_VERSION = 6;", "const EVIDENCE_SCHEMA_VERSION = 5;")
       .replace('  "conflicting_external_account_0004_negative",\n', "")
       .replace('  "external_account_rollback_verification",\n', "")
@@ -2422,7 +2682,7 @@ test("instrumented runner pin is the canonical filtered LF blob", () => {
         '  external_account_rollback_verification: "rollback_check",\n',
         ""
       ),
-    parentRunnerSource
+    forceRlsParentRunnerSource
   );
   const exactReporterArguments = [
     "        [",
@@ -2468,6 +2728,275 @@ test("Exact-0004 Linux workflow pins supply chain and installs once without scri
   assert.equal((source.match(/actions\/[a-z-]+@[0-9a-f]{40}/g) || []).length, 3);
   assert.equal(source.includes("@main"), false);
   assert.equal(source.includes("@master"), false);
+});
+
+test("physical entry, atomic transport and the A-J boundary are closed before PostgreSQL", () => {
+  const { source, workflow } = read();
+  const currentJob = job(workflow);
+  assert.equal(currentJob.steps.length, 12);
+  assert.deepEqual(currentJob.steps.map((step) => step.name), [
+    "Checkout authorized commit",
+    "Verify immutable Exact20 contract",
+    "Set up Node 24",
+    "Install dependencies without lifecycle scripts",
+    "Initialize physical checkpoint",
+    "Run the one-shot PostgreSQL 18 Exact-0004 proof",
+    "Cleanup owned PostgreSQL resources",
+    "Snapshot physical transport state",
+    "Build legacy sanitized four-file evidence",
+    "Finalize sanitized four-file evidence",
+    "Upload sanitized evidence",
+    "Enforce final Exact-0004 result"
+  ]);
+
+  const initialize = stepByName(currentJob, "Initialize physical checkpoint");
+  const physical = stepByName(
+    currentJob,
+    "Run the one-shot PostgreSQL 18 Exact-0004 proof"
+  );
+  const cleanup = stepByName(currentJob, "Cleanup owned PostgreSQL resources");
+  const transport = stepByName(currentJob, "Snapshot physical transport state");
+  const legacyFinalize = stepByName(
+    currentJob,
+    "Build legacy sanitized four-file evidence"
+  );
+  const finalize = stepByName(currentJob, "Finalize sanitized four-file evidence");
+  const upload = stepByName(currentJob, "Upload sanitized evidence");
+  const enforcement = stepByName(currentJob, "Enforce final Exact-0004 result");
+
+  assert.deepEqual(
+    { id: initialize.id, shell: initialize.shell,
+      continueOnError: initialize["continue-on-error"], run: initialize.run },
+    { id: "entry", shell: "bash", continueOnError: true,
+      run: `node ${RUNNER_FILE} --exact-0004-checkpoint-init` }
+  );
+  const defaults = RUNNER_CONTRACT.exact0004CheckpointDefaults();
+  assert.deepEqual(Object.keys(defaults), CHECKPOINT_KEYS);
+  assert.equal(defaults.checkpointSchemaVersion, CHECKPOINT_SCHEMA_VERSION);
+  for (const key of [
+    "physicalStepAdmitted",
+    "physicalStepEntered",
+    "physicalScriptLoadAttempted",
+    "physicalScriptLoaded"
+  ]) assert.equal(defaults[key], false, key);
+
+  assert.equal(physical.id, "physical");
+  assert.equal(physical.shell, "bash");
+  assert.equal(physical["continue-on-error"], true);
+  assert.deepEqual(physical.run.split("\n").slice(0, 5), [
+    `node ${RUNNER_FILE} --exact-0004-checkpoint-enter`,
+    `node ${RUNNER_FILE} --exact-0004-checkpoint-load-attempt`,
+    "node <<'NODE'",
+    "'use strict';",
+    `const physicalCheckpoint=require('${RUNNER_MODULE}').startExact0004PhysicalObservation();`
+  ]);
+  assert.equal(
+    physical.run.split("startExact0004PhysicalObservation()").length - 1,
+    1
+  );
+  assert.ok(
+    physical.run.indexOf("startExact0004PhysicalObservation()") <
+      physical.run.indexOf("require('node:crypto')")
+  );
+  assert.equal(source.includes("NODE_OPTIONS"), false);
+  assert.equal(source.includes("--require"), false);
+  assert.equal(source.includes("preload"), false);
+  assert.ok(physical.run.includes(
+    "function safeFailure(stage,category='unknown',code=null,moduleName=null){" +
+    "if(stage==='cleanup')cleanupFailureObserved=true;" +
+    "if(evidence.firstFailureStage!==null)return;"
+  ));
+  assert.ok(physical.run.includes(
+    "evidence.cleanupCompleted=Boolean(" +
+    "evidence.cleanupCompleted===true&&cleanup&&" +
+    "cleanup.cleanupCompleted===true&&auxiliaryResiduals===0&&" +
+    "!cleanupFailureObserved)"
+  ));
+
+  assert.equal(cleanup.id, "cleanup");
+  assert.equal(cleanup.if, "always()");
+  assert.equal(cleanup["continue-on-error"], true);
+  assert.ok(cleanup.run.includes("writeExact0004CleanupState"));
+  assert.ok(cleanup.run.includes("writeExact0004CleanupState(value)"));
+  assert.deepEqual(
+    { id: transport.id, if: transport.if, shell: transport.shell,
+      continueOnError: transport["continue-on-error"], run: transport.run },
+    { id: "transport", if: "always()", shell: "bash",
+      continueOnError: true,
+      run: `node ${RUNNER_FILE} --exact-0004-transport-snapshot` }
+  );
+  assert.equal(legacyFinalize.id, "legacy_finalize");
+  assert.equal(legacyFinalize.if, "always()");
+  assert.deepEqual(
+    { id: finalize.id, if: finalize.if, shell: finalize.shell,
+      run: finalize.run },
+    { id: "finalize", if: "always()", shell: "bash",
+      run: `node ${RUNNER_FILE} --exact-0004-artifact-finalize` }
+  );
+  assert.deepEqual(finalize.env, {
+    ENTRY_OUTCOME: "${{ steps.entry.outcome }}",
+    PHYSICAL_OUTCOME: "${{ steps.physical.outcome }}",
+    CLEANUP_OUTCOME: "${{ steps.cleanup.outcome }}",
+    TRANSPORT_OUTCOME: "${{ steps.transport.outcome }}",
+    LEGACY_FINALIZE_OUTCOME: "${{ steps.legacy_finalize.outcome }}"
+  });
+  assert.equal(upload.if, "always() && steps.finalize.outcome == 'success'");
+  assert.equal(enforcement.if, "always()");
+  assert.equal(enforcement.shell, "bash");
+  assert.equal(
+    enforcement.run,
+    `node ${RUNNER_FILE} --exact-0004-artifact-enforce`
+  );
+  assert.deepEqual(enforcement.env, {
+    ...finalize.env,
+    FINALIZE_OUTCOME: "${{ steps.finalize.outcome }}",
+    UPLOAD_OUTCOME: "${{ steps.upload.outcome }}"
+  });
+
+  assert.equal(RUNNER_CONTRACT.EXACT_0004_ARTIFACT_SCHEMA_VERSION,
+    ARTIFACT_SCHEMA_VERSION);
+  assert.equal(RUNNER_CONTRACT.EVIDENCE_SCHEMA_VERSION, EVENT_SCHEMA_VERSION);
+  assert.equal(RUNNER_CONTRACT.EXACT_0004_CHECKPOINT_SCHEMA_VERSION,
+    CHECKPOINT_SCHEMA_VERSION);
+  assert.deepEqual(RUNNER_CONTRACT.EXACT_0004_CHECKPOINT_KEYS, CHECKPOINT_KEYS);
+  assert.deepEqual(
+    RUNNER_CONTRACT.EXACT_0004_AUXILIARY_PROCESS_CLASSES,
+    AUXILIARY_PROCESS_CLASSES
+  );
+  assert.deepEqual(
+    RUNNER_CONTRACT.EXACT_0004_CHECKPOINT_FAILURE_STAGES,
+    CHECKPOINT_FAILURE_STAGES
+  );
+  assert.deepEqual(
+    RUNNER_CONTRACT.EXACT_0004_PHYSICAL_FAILURE_CODES,
+    PHYSICAL_FAILURE_CODES
+  );
+  assert.deepEqual(RUNNER_CONTRACT.EXACT_0004_INVENTORY, EXACT20);
+  assert.deepEqual(RUNNER_CONTRACT.EXACT_0004_RESIDUAL_KEYS, RESIDUAL_KEYS);
+  assert.deepEqual(
+    RUNNER_CONTRACT.EXACT_0004_CLEANUP_FAILURE_CODES,
+    CLEANUP_FAILURE_CODES
+  );
+  assert.deepEqual(
+    RUNNER_CONTRACT.EXACT_0004_ARTIFACT_ADDED_KEYS,
+    [
+      ...PHYSICAL_TRANSPORT_EVIDENCE_KEYS,
+      ...PHYSICAL_ENTRY_EVIDENCE_KEYS,
+      ...CLEANUP_EVIDENCE_KEYS
+    ]
+  );
+  assert.deepEqual(
+    [...RUNNER_CONTRACT.EXACT_0004_ARTIFACT_KEYS].sort(),
+    [...EVIDENCE_KEYS].sort()
+  );
+
+  const runnerSource = canonicalLfBytes(RUNNER_FILE).toString("utf8");
+  for (const fragment of [
+    'fs.openSync(temporaryFile, "wx", 0o600)',
+    "fs.fsyncSync(descriptor)",
+    "fs.renameSync(temporaryFile, file)",
+    'fs.openSync(path.dirname(file), "r")',
+    "fs.fsyncSync(directoryDescriptor)",
+    'state: temporaryFiles.length === 0 ? "missing" : "partial"',
+    'return Object.freeze({ state: "invalid", value })',
+    "if (current.firstFailureStage !== null &&",
+    "next.firstFailureStage !== current.firstFailureStage",
+    "next.firstFailureStage = current.firstFailureStage",
+    "if (firstFailure === null && firstFailureStage === null) {",
+    "if (physicalFailureRefinesLegacy(code, stage)) {",
+    "function validExact0004Artifact(value) {",
+    "if (!validExact0004Artifact(artifact))",
+    "if (!validExact0004Artifact(evidence) ||",
+    'failurePhase: firstFailureStage === "cleanup"',
+    "auxiliaryProcesses: auxiliaryProcessOwnedByRoute",
+    "? auxiliaryProcessCount",
+    ": 0"
+  ]) assert.ok(runnerSource.includes(fragment), fragment);
+  const finalizerStart = runnerSource.indexOf(
+    "function finalizeExact0004Artifact(env = process.env) {"
+  );
+  const finalizerEnd = runnerSource.indexOf(
+    "function enforceExact0004Artifact(env = process.env) {"
+  );
+  assert.notEqual(finalizerStart, -1);
+  assert.ok(finalizerEnd > finalizerStart);
+  const finalizerSource = runnerSource.slice(finalizerStart, finalizerEnd);
+  assert.equal(finalizerSource.includes("env.ENTRY_OUTCOME"), false);
+  assert.ok(finalizerSource.includes([
+    "  const physicalStepAdmitted = [\"success\", \"failure\", \"cancelled\"].includes(",
+    "    env.PHYSICAL_OUTCOME",
+    "  ) || checkpointPhysicalMarkersObserved;"
+  ].join("\n")));
+  assert.ok(finalizerSource.includes([
+    "    if (env.PHYSICAL_OUTCOME === \"skipped\") {",
+    "      if (checkpointPhysicalMarkersObserved || [\"partial\", \"invalid\"].includes(",
+    "        assessment.entryCheckpointState",
+    "      )) return insufficient(\"physical_admission\");",
+    "      return {",
+    "        code: \"physical_step_not_admitted\",",
+    "        stage: \"physical_admission\"",
+    "      };",
+    "    }"
+  ].join("\n")));
+  assert.ok(finalizerSource.includes([
+    "  const physicalFailureRefinesLegacy = (code, stage) => {",
+    "    if (!entryCheckpointValid || entry.firstFailureStage !== stage) return false;",
+    "    if (code === \"physical_step_launcher_spawn_failed\") {",
+    "      return legacy.firstFailure === \"exact0004_orchestration_failed\" &&",
+    "        legacy.firstFailureStage === \"composed_process\";",
+    "    }",
+    "    if (code ===",
+    "        \"physical_step_cleanup_incomplete_with_owned_auxiliary_process\") {",
+    "      return [",
+    "        \"auxiliary_process_cleanup_failed\",",
+    "        \"linux_cleanup_incomplete\"",
+    "      ].includes(legacy.firstFailure) && legacy.firstFailureStage === \"cleanup\";",
+    "    }",
+    "    return false;",
+    "  };"
+  ].join("\n")));
+  assert.ok(finalizerSource.includes([
+    "    if (env.PHYSICAL_OUTCOME === \"failure\" && firstFailure === null &&",
+    "        !physicalLauncherProcessCreated &&",
+    "        !auxiliaryProcessOwnedByRoute && auxiliaryProcessCount > 0 &&",
+    "        entry.safeAuxiliaryProcessClass !== \"not_observed\") {",
+    "      return {",
+    "        code: \"physical_step_auxiliary_process_not_owned_by_route\",",
+    "        stage: \"artifact\"",
+    "      };",
+    "    }"
+  ].join("\n")));
+  assert.ok(finalizerSource.includes([
+    "  const cleanupCompleted = cleanupStarted && cleanup !== null &&",
+    "    cleanup.cleanupCompleted === true && residualsZero;",
+    "  const physicalCleanupFailureObserved = entryCheckpointValid &&",
+    "    physicalScriptLoaded && entry.cleanupStarted === true &&",
+    "    entry.cleanupCompleted === false;"
+  ].join("\n")));
+  assert.ok(finalizerSource.includes([
+    "  if (physicalCleanupFailureObserved) {",
+    "    cleanupFailure = \"physical_cleanup_incomplete\";",
+    "  } else if (!cleanupCompleted) {"
+  ].join("\n")));
+  assert.ok(finalizerSource.includes([
+    "    testsDiscovered: nodeTestProcessCreated ? legacy.testsDiscovered : 0,",
+    "    testsPassed: nodeTestProcessCreated ? legacy.testsPassed : 0,",
+    "    testsFailed: nodeTestProcessCreated ? legacy.testsFailed : 0,"
+  ].join("\n")));
+  assert.ok(runnerSource.includes([
+    "  if (!value.nodeTestProcessCreated && (",
+    "    value.testsDiscovered !== 0 || value.testsPassed !== 0 ||",
+    "    value.testsFailed !== 0",
+    "  )) return false;"
+  ].join("\n")));
+  for (const fragment of [
+    "value.residuals.auxiliaryProcesses === 0",
+    "value.cleanupFailure !== \"physical_cleanup_incomplete\" &&",
+    "value.cleanupFailure === \"physical_cleanup_incomplete\" &&",
+    "physicalCleanupFailureObserved ||"
+  ]) assert.ok(runnerSource.includes(fragment), fragment);
+  assert.equal(runnerSource.includes("stdoutStored: true"), false);
+  assert.equal(runnerSource.includes("stderrStored: true"), false);
 });
 
 test("one-shot proof reuses canonical Linux PostgreSQL with digest and no published port", () => {
@@ -2633,7 +3162,9 @@ test("one-shot proof authenticates safe runner phases, TAP facts and first failu
     /evidence\.safeLineBucket===null/
   ]) assert.match(run, expression);
   assert.equal(
-    (run.match(/createSafeEventCollector\(\)/g) || []).length,
+    (run.match(
+      /createSafeEventCollector\(\{onAcceptedEvent:physicalCheckpoint\.safeEvent\}\)/g
+    ) || []).length,
     1
   );
   assert.match(run, /\.push\('stdout',chunk\)/);
@@ -2652,16 +3183,22 @@ test("cleanup is always, owned, fail-closed and evidence is exactly four regular
   const { source, workflow } = read();
   const currentJob = job(workflow);
   const cleanup = stepByName(currentJob, "Cleanup owned PostgreSQL resources");
+  const legacyFinalize = stepByName(
+    currentJob,
+    "Build legacy sanitized four-file evidence"
+  );
   const finalize = stepByName(currentJob, "Finalize sanitized four-file evidence");
   const upload = stepByName(currentJob, "Upload sanitized evidence");
   const enforcement = stepByName(currentJob, "Enforce final Exact-0004 result");
+  const runnerSource = canonicalLfBytes(RUNNER_FILE).toString("utf8");
   assert.equal(cleanup.if, "always()");
   assert.equal(cleanup["continue-on-error"], true);
   assert.ok(cleanup.run.includes("createLinuxPostgres"));
   assert.ok(cleanup.run.includes(".cleanup()"));
+  assert.ok(cleanup.run.includes("writeExact0004CleanupState(value)"));
   assert.equal(finalize.if, "always()");
-  assert.ok(finalize.run.includes("stat.isFile()"));
-  assert.ok(finalize.run.includes("stat.isSymbolicLink()"));
+  assert.ok(legacyFinalize.run.includes("stat.isFile()"));
+  assert.ok(legacyFinalize.run.includes("stat.isSymbolicLink()"));
   assert.equal(upload.uses, UPLOAD);
   assert.equal(upload.with.name, "social-3b0-exact-0004-runner-linux-evidence");
   assert.deepEqual(upload.with.path.split("\n").map((file) => path.basename(file)), [
@@ -2672,23 +3209,23 @@ test("cleanup is always, owned, fail-closed and evidence is exactly four regular
   ]);
   assert.equal(upload.with["if-no-files-found"], "error");
   assert.equal(enforcement.if, "always()");
-  assert.ok(enforcement.run.includes("Object.values(evidence.residuals)"));
-  assert.ok(enforcement.run.includes("evidence.firstFailure!==null"));
-  assert.ok(enforcement.run.includes("status.stdoutStored!==false"));
-  assert.ok(enforcement.run.includes("status.stderrStored!==false"));
-  assert.ok(enforcement.run.includes("fs.rmSync(directory"));
-  assert.ok(enforcement.run.includes("execFileSync('git'"));
-  assert.ok(enforcement.run.includes("worktree_not_clean"));
-  assert.ok(enforcement.run.includes("worktreeFailure"));
-  assert.ok(enforcement.run.includes("GIT_OPTIONAL_LOCKS:'0'"));
-  assert.ok(enforcement.run.includes("GIT_TERMINAL_PROMPT:'0'"));
-  assert.ok(enforcement.run.includes("timeout:20000"));
-  assert.ok(enforcement.run.includes("maxBuffer:1024*1024"));
-  assert.ok(finalize.run.includes("auxiliaryProcesses"));
-  assert.ok(finalize.run.includes("validBoundary(value)"));
-  assert.ok(enforcement.run.includes("validBoundary(evidence)"));
+  for (const fragment of [
+    "EXACT_0004_RESIDUAL_KEYS.some((key) => evidence.residuals[key] !== 0)",
+    "firstFailure: null",
+    "status.stdoutStored !== false",
+    "status.stderrStored !== false",
+    "fs.rmSync(files.artifactDirectory",
+    'execFileSync(\n      "git"',
+    "exact0004_worktree_not_clean",
+    'GIT_OPTIONAL_LOCKS: "0"',
+    'GIT_TERMINAL_PROMPT: "0"',
+    "timeout: 20_000",
+    "maxBuffer: 1024 * 1024"
+  ]) assert.ok(runnerSource.includes(fragment), fragment);
+  assert.ok(legacyFinalize.run.includes("auxiliaryProcesses"));
+  assert.ok(legacyFinalize.run.includes("validBoundary(value)"));
   assert.ok(
-    finalize.run.includes(
+    legacyFinalize.run.includes(
       "evidence.cleanupCompleted===true&&cleanup&&cleanup.cleanupCompleted===true"
     )
   );
@@ -2711,7 +3248,7 @@ test("boundary validators reject weakened phase and diagnostic states", () => {
     .map((step) => step.run)
     .filter((run) => typeof run === "string" && run.includes("function validBoundary(value){"));
 
-  assert.equal(runs.length, 2);
+  assert.equal(runs.length, 1);
   const requiredGuards = [
     "const phaseDelta=startedIndex-completedIndex",
     "phaseDelta!==0&&phaseDelta!==1",
@@ -2757,7 +3294,7 @@ test("boundary validators reject weakened phase and diagnostic states", () => {
 
   const allRuns = currentJob.steps.map((step) => step.run || "").join("\n");
   const validatorSignature = "function validBoundary(value){";
-  assert.equal(allRuns.split(validatorSignature).length - 1, 2);
+  assert.equal(allRuns.split(validatorSignature).length - 1, 1);
   const permissionOriginDeclaration =
     "const permissionOrigins=new Set(['postgres_sqlstate','os_filesystem','os_process','unknown']);";
   const permissionOriginExtraDeclaration =
@@ -2959,7 +3496,7 @@ test("Exact-0004 subphase artifact boundary is closed and mutation-coherent", ()
   const runs = currentJob.steps
     .map((step) => step.run)
     .filter((run) => typeof run === "string" && run.includes("function validBoundary(value){"));
-  assert.equal(runs.length, 2);
+  assert.equal(runs.length, 1);
   for (const run of runs) {
     assert.deepEqual(
       inlineInventory(run, "exact0004Route"),
@@ -3252,95 +3789,110 @@ test("Exact-0004 subphase artifact boundary is closed and mutation-coherent", ()
   }
 });
 
-test("evidence keeps legacy schema 1 and uses the closed safe schema 6", () => {
+test("artifact envelope is schema 2 over legacy schema 1 and safe-event schema 6", () => {
   const { source, workflow } = read();
   const currentJob = job(workflow);
   const physical = stepByName(
     currentJob,
     "Run the one-shot PostgreSQL 18 Exact-0004 proof"
   );
+  const legacyFinalize = stepByName(
+    currentJob,
+    "Build legacy sanitized four-file evidence"
+  );
   const finalize = stepByName(currentJob, "Finalize sanitized four-file evidence");
   const enforcement = stepByName(currentJob, "Enforce final Exact-0004 result");
+  const runnerSource = canonicalLfBytes(RUNNER_FILE).toString("utf8");
   assert.equal(LEGACY_EVIDENCE_KEYS.length, 23);
   assert.equal(SAFE_EVIDENCE_KEYS.length, 23);
   assert.equal(EXACT0004_EVIDENCE_KEYS.length, 18);
-  assert.equal(EVIDENCE_KEYS.length, 64);
-  assert.equal(new Set(EVIDENCE_KEYS).size, 64);
+  assert.equal(LEGACY_ARTIFACT_EVIDENCE_KEYS.length, 64);
+  assert.equal(PHYSICAL_TRANSPORT_EVIDENCE_KEYS.length, 2);
+  assert.equal(PHYSICAL_ENTRY_EVIDENCE_KEYS.length, 13);
+  assert.equal(CLEANUP_EVIDENCE_KEYS.length, 1);
+  assert.equal(EVIDENCE_KEYS.length, 80);
+  assert.equal(new Set(EVIDENCE_KEYS).size, 80);
+  assert.equal(CHECKPOINT_KEYS.length, 20);
+  assert.equal(new Set(CHECKPOINT_KEYS).size, 20);
+  assert.equal(AUXILIARY_PROCESS_CLASSES.length, 11);
+  assert.equal(new Set(AUXILIARY_PROCESS_CLASSES).size, 11);
+  assert.equal(CHECKPOINT_FAILURE_STAGES.length, 21);
+  assert.equal(new Set(CHECKPOINT_FAILURE_STAGES).size, 21);
+  assert.equal(PHYSICAL_FAILURE_CODES.length, 10);
+  assert.equal(new Set(PHYSICAL_FAILURE_CODES).size, 10);
+  assert.equal(RESIDUAL_KEYS.length, 8);
+  assert.equal(new Set(RESIDUAL_KEYS).size, 8);
+  assert.equal(CLEANUP_FAILURE_CODES.length, 6);
+  assert.equal(new Set(CLEANUP_FAILURE_CODES).size, 6);
   assert.equal(RUNNER_FACT_KEYS.length, 41);
   assert.equal(PROCESS_STATUS_KEYS.length, 5);
-  const expectedEvidenceKeys = [...EVIDENCE_KEYS].sort();
+  const expectedLegacyKeys = [...LEGACY_ARTIFACT_EVIDENCE_KEYS].sort();
   const expectedStatusKeys = [...PROCESS_STATUS_KEYS].sort();
-  for (const [name, run] of [
-    ["finalizer", finalize.run],
-    ["enforcement", enforcement.run]
+  const evidenceTuple = inlineArrayContaining(
+    legacyFinalize.run,
+    "evidenceSchemaVersion"
+  );
+  const statusTuple = inlineArrayContaining(legacyFinalize.run, "stdoutStored");
+  assert.deepEqual([...evidenceTuple.values].sort(), expectedLegacyKeys);
+  assert.deepEqual([...statusTuple.values].sort(), expectedStatusKeys);
+  assertExactKeysCall(legacyFinalize.run, "value", evidenceTuple.name);
+  assertExactKeysCall(legacyFinalize.run, "value", statusTuple.name);
+  assert.match(legacyFinalize.run, /value\.schemaVersion\s*!==\s*1/);
+  assert.match(legacyFinalize.run, /value\.evidenceSchemaVersion\s*!==\s*6/);
+  assert.match(
+    legacyFinalize.run,
+    /value\.testFileLoaded\s*!==\s*value\.tapTitleObserved/
+  );
+  for (const forbidden of [
+    "protocolValid",
+    "closed",
+    "failure",
+    "eventCount",
+    "tapTests",
+    "tapPass",
+    "tapFail",
+    "tapSkipped",
+    "tapCancelled",
+    "stdout",
+    "stderr",
+    "stack",
+    "message",
+    "query",
+    "parameters",
+    "detail",
+    "hint",
+    "where",
+    "result",
+    "rawResult",
+    "absolutePath",
+    "secret",
+    "environment",
+    "url",
+    "password"
   ]) {
-    const evidenceTuple = inlineArrayContaining(run, "evidenceSchemaVersion");
-    const statusTuple = inlineArrayContaining(run, "stdoutStored");
-    assert.deepEqual([...evidenceTuple.values].sort(), expectedEvidenceKeys, name);
-    assert.deepEqual([...statusTuple.values].sort(), expectedStatusKeys, name);
-    const valueName = name === "finalizer" ? "value" : "evidence";
-    const statusName = name === "finalizer" ? "value" : "status";
-    assertExactKeysCall(run, valueName, evidenceTuple.name);
-    assertExactKeysCall(run, statusName, statusTuple.name);
-    assert.match(run, new RegExp(`${valueName}\\.schemaVersion\\s*!==\\s*1`));
-    assert.match(
-      run,
-      new RegExp(`${valueName}\\.evidenceSchemaVersion\\s*!==\\s*6`)
-    );
-    assert.match(
-      run,
-      new RegExp(
-        `${valueName}\\.testFileLoaded\\s*!==\\s*` +
-        `${valueName}\\.tapTitleObserved`
-      )
-    );
-    for (const forbidden of [
-      "protocolValid",
-      "closed",
-      "failure",
-      "eventCount",
-      "tapTests",
-      "tapPass",
-      "tapFail",
-      "tapSkipped",
-      "tapCancelled",
-      "stdout",
-      "stderr",
-      "stack",
-      "message",
-      "query",
-      "parameters",
-      "detail",
-      "hint",
-      "where",
-      "result",
-      "rawResult",
-      "absolutePath",
-      "secret",
-      "environment",
-      "url",
-      "password"
-    ]) assert.equal(evidenceTuple.values.includes(forbidden), false, forbidden);
-    for (const boundaryFragment of [
-      "physical_target_preflight",
-      "reauthentication",
-      "final_cleanup",
-      "postgres_sqlstate",
-      "23514",
-      "P0001",
-      "os_filesystem",
-      "os_process",
-      "4000-4499",
-      "final_snapshot",
-      "failureBeforeFirstMutation",
-      "conflictingNegativePromiseOutcome",
-      "conflictingNegativeObservedSqlState",
-      "conflictingNegativeFulfilledResultClass",
-      "conflictingNegativeAssertionMatched",
-      "conflictingNegativeRejectedBeforeAssertion",
-      "validBoundary"
-    ]) assert.ok(run.includes(boundaryFragment), `${name}:${boundaryFragment}`);
+    assert.equal(evidenceTuple.values.includes(forbidden), false, forbidden);
+    assert.equal(EVIDENCE_KEYS.includes(forbidden), false, forbidden);
   }
+  for (const boundaryFragment of [
+    "physical_target_preflight",
+    "reauthentication",
+    "final_cleanup",
+    "postgres_sqlstate",
+    "23514",
+    "P0001",
+    "os_filesystem",
+    "os_process",
+    "4000-4499",
+    "final_snapshot",
+    "failureBeforeFirstMutation",
+    "conflictingNegativePromiseOutcome",
+    "conflictingNegativeObservedSqlState",
+    "conflictingNegativeFulfilledResultClass",
+    "conflictingNegativeAssertionMatched",
+    "conflictingNegativeRejectedBeforeAssertion",
+    "validBoundary"
+  ]) assert.ok(legacyFinalize.run.includes(boundaryFragment), boundaryFragment);
+
   assert.ok(physical.run.includes("schemaVersion:1"));
   assert.ok(
     physical.run.includes(
@@ -3408,7 +3960,10 @@ test("evidence keeps legacy schema 1 and uses the closed safe schema 6", () => {
     "conflictingNegativeFulfilledResultClass:'not_observed'"
   ]) {
     assert.ok(physical.run.includes(defaultFragment), `physical:${defaultFragment}`);
-    assert.ok(finalize.run.includes(defaultFragment), `fallback:${defaultFragment}`);
+    assert.ok(
+      legacyFinalize.run.includes(defaultFragment),
+      `fallback:${defaultFragment}`
+    );
   }
   assert.ok(
     physical.run.includes(
@@ -3428,7 +3983,10 @@ test("evidence keeps legacy schema 1 and uses the closed safe schema 6", () => {
     )
   );
   assert.ok(physical.run.includes("evidence.testsPassed=passed?1:0"));
-  assert.ok(physical.run.includes("evidence.testsFailed=passed?0:1"));
+  assert.ok(physical.run.includes(
+    "evidence.testsFailed=passed?0:" +
+    "evidence.nodeTestProcessCreated===true?1:0"
+  ));
   assert.ok(physical.run.includes("result.facts.eventCount===9"));
   for (const successFragment of [
     "evidence.lastExact0004SubphaseStarted==='final_snapshot'",
@@ -3451,18 +4009,61 @@ test("evidence keeps legacy schema 1 and uses the closed safe schema 6", () => {
     "evidence.conflictingNegativeRejectedBeforeAssertion===true"
   ]) {
     assert.ok(physical.run.includes(successFragment), `physical:${successFragment}`);
-    assert.ok(enforcement.run.includes(successFragment.replace("===", "!==")),
-      `enforcement:${successFragment}`);
   }
   assert.ok(
-    finalize.run.includes("evidenceSchemaVersion:6") &&
-    finalize.run.includes("safeLineBucket:'unknown'")
+    legacyFinalize.run.includes("evidenceSchemaVersion:6") &&
+    legacyFinalize.run.includes("safeLineBucket:'unknown'")
   );
+  assert.equal(
+    finalize.run,
+    `node ${RUNNER_FILE} --exact-0004-artifact-finalize`
+  );
+  assert.equal(
+    enforcement.run,
+    `node ${RUNNER_FILE} --exact-0004-artifact-enforce`
+  );
+  assert.ok(runnerSource.includes(
+    "schemaVersion: EXACT_0004_ARTIFACT_SCHEMA_VERSION"
+  ));
+  assert.ok(runnerSource.includes(
+    "value.schemaVersion !== EXACT_0004_ARTIFACT_SCHEMA_VERSION"
+  ));
+  assert.ok(runnerSource.includes(
+    "value.evidenceSchemaVersion !== EVIDENCE_SCHEMA_VERSION"
+  ));
+  for (const key of [
+    "physicalStepAdmitted",
+    "physicalStepEntered",
+    "physicalScriptLoadAttempted",
+    "physicalScriptLoaded",
+    "physicalLauncherSpawnAttempted",
+    "physicalLauncherProcessCreated",
+    "postgresStartAttempted",
+    "postgresStarted",
+    "nodeTestSpawnAttempted",
+    "nodeTestProcessCreated",
+    "cleanupStarted",
+    "cleanupCompleted"
+  ]) assert.ok(runnerSource.includes(`"${key}"`), key);
+  for (const fragment of [
+    "physicalLauncherExitCode: 0",
+    "physicalLauncherSignal: null",
+    "physicalLauncherTimedOut: false",
+    "auxiliaryProcessCount: 0",
+    'safeAuxiliaryProcessClass: "sudo"',
+    "auxiliaryProcessOwnedByRoute: true",
+    "cleanupFailure: null",
+    "EXACT_0004_RESIDUAL_KEYS.some((key) => evidence.residuals[key] !== 0)"
+  ]) assert.ok(runnerSource.includes(fragment), fragment);
   assert.equal(source.includes("evidenceSchemaVersion:4"), false);
   assert.equal(source.includes("evidenceSchemaVersion:5"), false);
   assert.equal(source.includes("evidenceSchemaVersion:3"), false);
-  for (const key of EVIDENCE_KEYS) assert.ok(source.includes(key), key);
-  for (const key of PROCESS_STATUS_KEYS) assert.ok(source.includes(key), key);
+  for (const key of EVIDENCE_KEYS) {
+    assert.ok(source.includes(key) || runnerSource.includes(key), key);
+  }
+  for (const key of PROCESS_STATUS_KEYS) {
+    assert.ok(source.includes(key) || runnerSource.includes(key), key);
+  }
   assert.equal(source.includes("process.env.DATABASE_URL"), false);
   assert.equal(source.includes("process.env.SOCIAL_MIGRATIONS_DATABASE_URL"), false);
   assert.equal(source.includes("process.env.PGPASSWORD"), false);

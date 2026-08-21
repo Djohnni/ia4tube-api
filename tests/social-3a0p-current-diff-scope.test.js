@@ -10,9 +10,9 @@ const {
 } = require("../scripts/social-3a0p-local-scope");
 
 const ROUTE_BRANCH =
-  "social/checkpoint-3b0-exact-0004-runner-linux-external-account-rollback-catalog-20260820";
+  "social/checkpoint-3b0-exact-0004-runner-linux-physical-step-entry-evidence-20260820";
 const ROUTE_BASE_COMMIT = "13e38b875db2a220514fe06113663c517c975592";
-const ROUTE_PARENT_COMMIT = "76e650c18beadc9768666285440445d2fc2e367e";
+const ROUTE_PARENT_COMMIT = "fc0b94c7eb80034d30dc5226b8bb38a0ea095dc9";
 const FUNCTIONAL_COMMIT = ROUTE_PARENT_COMMIT;
 const POST_COMMIT_PROOF_HEAD = "ffffffffffffffffffffffffffffffffffffffff";
 const GIT_TIMEOUT_MS = 20_000;
@@ -42,12 +42,12 @@ const AUTHORIZED_CHANGED_FILES = Object.freeze([
 const PARENT_COMMITTED_FILES = Object.freeze([...AUTHORIZED_CHANGED_FILES]);
 const INCREMENTAL_CHANGED_FILES = Object.freeze([
   ".github/workflows/social-3b0-exact-0004-runner-linux.yml",
+  "scripts/run-real-postgres-tests.js",
   "scripts/social-3a0p-local-scope.js",
-  "tests/node-test-runner-safety.test.js",
   "tests/social-3a0p-current-diff-scope.test.js",
   "tests/social-3a0p-local-scope.test.js",
   "tests/social-3b0-exact-0004-runner-linux-workflow.test.js",
-  "tests/social-postgres-real.test.js"
+  "tests/social-3b0-linux-physical-gate.test.js"
 ]);
 const LOCAL_UNTRACKED_FILES = Object.freeze([]);
 const LOCAL_UNSTAGED_TRACKED_FILES = Object.freeze([
@@ -930,11 +930,11 @@ test("a barreira do runner exato 0004 contem exatamente os vinte caminhos autori
   const result = assertRouteInventory(sharedSnapshotCache.read());
   assert.equal(
     ROUTE_BRANCH,
-    "social/checkpoint-3b0-exact-0004-runner-linux-external-account-rollback-catalog-20260820"
+    "social/checkpoint-3b0-exact-0004-runner-linux-physical-step-entry-evidence-20260820"
   );
   assert.equal(
     ROUTE_PARENT_COMMIT,
-    "76e650c18beadc9768666285440445d2fc2e367e"
+    "fc0b94c7eb80034d30dc5226b8bb38a0ea095dc9"
   );
   assert.equal(
     ROUTE_BASE_COMMIT,
