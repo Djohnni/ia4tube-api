@@ -32,6 +32,7 @@ const {
   assertNonDestructiveSql,
   compareMigrationState,
   createMigrationRunner,
+  readStagingExactCatalogSnapshot,
   readManifest,
   sha256,
   stagingExactApprovalValue,
@@ -2508,6 +2509,35 @@ test("plan-staging-exact authenticates 0003 plus its frozen full catalog read-on
   assert.ok(harness.state.queries.some((query) =>
     query.text === "BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY"
   ));
+});
+
+test("staging catalog uses a PostgreSQL 18-safe collation alias", async () => {
+  const queries = [];
+  await readStagingExactCatalogSnapshot({
+    async query(text) {
+      queries.push(text);
+      return { rows: [] };
+    }
+  });
+  const columns = queries.find((text) =>
+    text.includes("FROM pg_catalog.pg_attribute") &&
+    text.includes("attribute.attcollation")
+  );
+  assert.equal(typeof columns, "string");
+  assert.match(
+    columns,
+    /collation_info\.collname::text AS collation_name/
+  );
+  assert.match(
+    columns,
+    /LEFT JOIN pg_catalog\.pg_collation collation_info/
+  );
+  assert.match(
+    columns,
+    /ON collation_info\.oid = NULLIF\(attribute\.attcollation, 0\)/
+  );
+  assert.doesNotMatch(columns, /\bcollation\./i);
+  assert.doesNotMatch(columns, /pg_collation\s+collation\b/i);
 });
 
 test("plan-staging-exact refuses a partial 0004 catalog footprint before mutation", async () => {

@@ -8,6 +8,7 @@ const {
   APPROVAL,
   IMAGE_DIGEST,
   MODE,
+  SYNTHETIC_ROLE_DROP_ORDER,
   forbiddenEnvironmentName,
   parseArguments,
   parseLoopbackAdminUrl,
@@ -33,6 +34,7 @@ const scriptPath = path.join(
   "social-staging-exact-0004-disposable-proof.js"
 );
 const branch = "social/checkpoint-3c0-staging-exact-preparation-20260824";
+const failedCandidate = "6d40924489559ee0d4ffb4111931171c334127b7";
 const digest = "a".repeat(64);
 
 function workflow() {
@@ -49,11 +51,37 @@ test("disposable staging-exact workflow has one restricted push route", () => {
   });
   const job = value.jobs["staging-exact-0004-disposable"];
   assert.match(job.if, /github\.event_name == 'push'/);
-  assert.match(job.if, /github\.event\.created == true/);
+  assert.match(job.if, /github\.event\.created == false/);
   assert.match(job.if, /github\.event\.forced == false/);
+  assert.match(job.if, new RegExp(`github\\.event\\.before == '${failedCandidate}'`));
   assert.match(job.if, /github\.run_attempt == 1/);
   assert.equal(job["runs-on"], "ubuntu-24.04");
   assert.equal(job["timeout-minutes"], 30);
+  const checkout = job.steps[0];
+  assert.equal(checkout.with["fetch-depth"], 2);
+  const boundary = job.steps[1].run;
+  assert.match(boundary, /git show -s --format=%P HEAD/);
+  assert.match(boundary, new RegExp(failedCandidate));
+  assert.match(boundary, /\[staging-exact\] fix PG18 disposable proof/);
+  for (const file of [
+    ".github/workflows/social-staging-exact-0004-disposable.yml",
+    "scripts/social-staging-exact-0004-disposable-proof.js",
+    "src/persistence/postgres/migrations.js",
+    "tests/social-postgres-migrations.test.js",
+    "tests/social-staging-exact-0004-disposable-workflow.test.js"
+  ]) assert.match(boundary, new RegExp(file.replaceAll(".", "\\.")));
+});
+
+test("synthetic cleanup drops membership roles before their grantor", () => {
+  assert.equal(Object.isFrozen(SYNTHETIC_ROLE_DROP_ORDER), true);
+  assert.deepEqual(SYNTHETIC_ROLE_DROP_ORDER, [
+    "ia4tube_social_staging_migration",
+    "ia4tube_social_staging_runtime",
+    "ia4tube_social_migrator",
+    "ia4tube_social_runtime",
+    "ia4tube_social_owner",
+    "ia4tube_social_staging_user"
+  ]);
 });
 
 test("workflow uses only a pinned local PostgreSQL 18.4 service", () => {
@@ -99,6 +127,18 @@ test("workflow actions are immutable and no real secret is referenced", () => {
   assert.match(serialized, /--verify/);
   assert.match(serialized, /catalog-0003\.json/);
   assert.match(serialized, /catalog-0004\.json/);
+  const steps = value.jobs["staging-exact-0004-disposable"].steps;
+  const contract = steps.find((step) =>
+    step.name === "Validate the disposable workflow contract"
+  );
+  for (const file of [
+    "tests/social-postgres-migrations.test.js",
+    "tests/social-postgres-staging-exact-0004-cli.test.js",
+    "tests/social-postgres-staging-exact-0004.test.js",
+    "tests/social-staging-exact-0004-disposable-workflow.test.js"
+  ]) assert.match(contract.run, new RegExp(file.replaceAll(".", "\\.")));
+  assert.equal(steps.at(-1).name, "Remove local evidence and confirm clean checkout");
+  assert.equal(steps.at(-1).if, "always()");
 });
 
 test("proof harness calls the dedicated route and owns complete cleanup", () => {
@@ -109,6 +149,8 @@ test("proof harness calls the dedicated route and owns complete cleanup", () => 
   assert.match(source, /stagingExactCatalogDigest/);
   assert.match(source, /DROP DATABASE IF EXISTS/);
   assert.match(source, /DROP ROLE IF EXISTS/);
+  assert.match(source, /cleanupError/);
+  assert.match(source, /staging_exact_disposable_cleanup_incomplete/);
   assert.match(source, /secondApplyRefused/);
   assert.match(source, /realStagingAccessed: false/);
   assert.doesNotMatch(source, /require\("node:(?:http|https|net|tls)"\)/);

@@ -37,6 +37,14 @@ const RUNTIME_ROLE = "ia4tube_social_runtime";
 const PROVISIONER_LOGIN = PAID_STAGING_PUBLIC_TARGET.provisionerLogin;
 const MIGRATION_LOGIN = PAID_STAGING_PUBLIC_TARGET.migrationLogin;
 const RUNTIME_LOGIN = PAID_STAGING_PUBLIC_TARGET.runtimeLogin;
+const SYNTHETIC_ROLE_DROP_ORDER = Object.freeze([
+  MIGRATION_LOGIN,
+  RUNTIME_LOGIN,
+  MIGRATOR_ROLE,
+  RUNTIME_ROLE,
+  OWNER_ROLE,
+  PROVISIONER_LOGIN
+]);
 const TARGET_DATABASE = "ia4tube_social_test_exact_0004_target";
 const REFERENCE_DATABASE = "ia4tube_social_test_exact_0004_reference";
 const REFERENCE_MARKER = "00000000-0000-4000-8000-000000000004";
@@ -373,14 +381,7 @@ async function dropSyntheticResources(adminPool) {
       `DROP DATABASE IF EXISTS ${quoteIdentifier(database)}`
     );
   }
-  for (const role of [
-    MIGRATION_LOGIN,
-    RUNTIME_LOGIN,
-    PROVISIONER_LOGIN,
-    MIGRATOR_ROLE,
-    RUNTIME_ROLE,
-    OWNER_ROLE
-  ]) {
+  for (const role of SYNTHETIC_ROLE_DROP_ORDER) {
     await adminPool.query(`DROP ROLE IF EXISTS ${quoteIdentifier(role)}`);
   }
 }
@@ -505,6 +506,7 @@ async function runProof(env, outputDirectory) {
   let secondApplyCode = null;
   let versionNum = 0;
   let primaryError;
+  let cleanupError;
   try {
     const version = await adminPool.query(
       "SELECT current_setting('server_version_num')::integer AS version_num"
@@ -632,27 +634,39 @@ async function runProof(env, outputDirectory) {
   } finally {
     for (const activePool of pools.reverse()) {
       await activePool.end().catch((error) => {
-        if (!primaryError) primaryError = error;
+        if (!cleanupError) cleanupError = error;
       });
     }
     if (baselineManifest) {
-      fs.rmSync(baselineManifest.directory, { recursive: true, force: true });
+      try {
+        fs.rmSync(baselineManifest.directory, { recursive: true, force: true });
+      } catch (error) {
+        if (!cleanupError) cleanupError = error;
+      }
     }
     await dropSyntheticResources(adminPool).catch((error) => {
-      if (!primaryError) primaryError = error;
+      if (!cleanupError) cleanupError = error;
     });
   }
 
   let residuals;
   try {
     residuals = await residualCounts(adminPool, runnerTemp);
+  } catch (error) {
+    if (!cleanupError) cleanupError = error;
   } finally {
-    await adminPool.end();
+    await adminPool.end().catch((error) => {
+      if (!cleanupError) cleanupError = error;
+    });
   }
-  if (primaryError) throw primaryError;
-  if (RESIDUAL_KEYS.some((key) => residuals[key] !== 0)) {
+  if (
+    cleanupError ||
+    !residuals ||
+    RESIDUAL_KEYS.some((key) => residuals[key] !== 0)
+  ) {
     fail("staging_exact_disposable_cleanup_incomplete");
   }
+  if (primaryError) throw primaryError;
 
   const catalog0003FileSha256 = writeJsonArtifact(
     output,
@@ -803,6 +817,7 @@ module.exports = {
   IMAGE_DIGEST,
   MODE,
   RESIDUAL_KEYS,
+  SYNTHETIC_ROLE_DROP_ORDER,
   forbiddenEnvironmentName,
   main,
   parseArguments,

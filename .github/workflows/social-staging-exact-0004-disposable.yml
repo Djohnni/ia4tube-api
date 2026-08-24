@@ -22,7 +22,7 @@
   },
   "jobs": {
     "staging-exact-0004-disposable": {
-      "if": "github.event_name == 'push' && github.ref == 'refs/heads/social/checkpoint-3c0-staging-exact-preparation-20260824' && github.event.created == true && github.event.deleted == false && github.event.forced == false && github.event.before == '0000000000000000000000000000000000000000' && github.run_attempt == 1",
+      "if": "github.event_name == 'push' && github.ref == 'refs/heads/social/checkpoint-3c0-staging-exact-preparation-20260824' && github.event.created == false && github.event.deleted == false && github.event.forced == false && github.event.before == '6d40924489559ee0d4ffb4111931171c334127b7' && github.run_attempt == 1",
       "runs-on": "ubuntu-24.04",
       "timeout-minutes": 30,
       "services": {
@@ -44,14 +44,14 @@
           "name": "Checkout candidate without credentials",
           "uses": "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
           "with": {
-            "fetch-depth": 1,
+            "fetch-depth": 2,
             "persist-credentials": false
           }
         },
         {
           "name": "Verify one-shot synthetic route boundary",
           "shell": "bash",
-          "run": "set -euo pipefail\n[[ \"${GITHUB_EVENT_NAME}\" == \"push\" ]]\n[[ \"${GITHUB_REF}\" == \"refs/heads/social/checkpoint-3c0-staging-exact-preparation-20260824\" ]]\n[[ \"${GITHUB_RUN_ATTEMPT}\" == \"1\" ]]\n[[ \"$(git rev-parse HEAD)\" == \"${GITHUB_SHA}\" ]]\n[[ -z \"$(git status --porcelain=v1 --untracked-files=all)\" ]]\n[[ \"$(sha256sum db/migrations/0004_social_connector_persistence.up.sql | cut -d' ' -f1)\" == \"91f6efc611903c40e16bd37828d5b9c1a03dfae222e1d13b5dc97f81ffde1b5d\" ]]\n[[ \"$(sha256sum db/migrations/checksums.json | cut -d' ' -f1)\" == \"7bea25acc2a2fa899029129e75a8d66a182032264e3a3713ae4abe66e593fdc9\" ]]"
+          "run": "set -euo pipefail\n[[ \"${GITHUB_EVENT_NAME}\" == \"push\" ]]\n[[ \"${GITHUB_REF}\" == \"refs/heads/social/checkpoint-3c0-staging-exact-preparation-20260824\" ]]\n[[ \"${GITHUB_RUN_ATTEMPT}\" == \"1\" ]]\n[[ \"$(git rev-parse HEAD)\" == \"${GITHUB_SHA}\" ]]\n[[ \"$(git show -s --format=%P HEAD)\" == \"6d40924489559ee0d4ffb4111931171c334127b7\" ]]\n[[ \"$(git show -s --format=%s HEAD)\" == \"[staging-exact] fix PG18 disposable proof\" ]]\nexpected=\"$(printf '%s\\n' '.github/workflows/social-staging-exact-0004-disposable.yml' 'scripts/social-staging-exact-0004-disposable-proof.js' 'src/persistence/postgres/migrations.js' 'tests/social-postgres-migrations.test.js' 'tests/social-staging-exact-0004-disposable-workflow.test.js')\"\nactual=\"$(git diff --name-only 6d40924489559ee0d4ffb4111931171c334127b7 HEAD | sort)\"\n[[ \"${actual}\" == \"${expected}\" ]]\n[[ -z \"$(git status --porcelain=v1 --untracked-files=all)\" ]]\n[[ \"$(sha256sum db/migrations/0004_social_connector_persistence.up.sql | cut -d' ' -f1)\" == \"91f6efc611903c40e16bd37828d5b9c1a03dfae222e1d13b5dc97f81ffde1b5d\" ]]\n[[ \"$(sha256sum db/migrations/checksums.json | cut -d' ' -f1)\" == \"7bea25acc2a2fa899029129e75a8d66a182032264e3a3713ae4abe66e593fdc9\" ]]"
         },
         {
           "name": "Set up Node 24",
@@ -69,7 +69,7 @@
         {
           "name": "Validate the disposable workflow contract",
           "shell": "bash",
-          "run": "node --test tests/social-staging-exact-0004-disposable-workflow.test.js"
+          "run": "node --test tests/social-postgres-migrations.test.js tests/social-postgres-staging-exact-0004-cli.test.js tests/social-postgres-staging-exact-0004.test.js tests/social-staging-exact-0004-disposable-workflow.test.js"
         },
         {
           "name": "Prove staging-exact 0004 on synthetic PostgreSQL 18.4",
@@ -96,6 +96,7 @@
         },
         {
           "name": "Remove local evidence and confirm clean checkout",
+          "if": "always()",
           "shell": "bash",
           "run": "set -euo pipefail\nrm -rf -- \"${RUNNER_TEMP}/social-staging-exact-0004-disposable-evidence\"\n[[ ! -e \"${RUNNER_TEMP}/social-staging-exact-0004-disposable-evidence\" ]]\n[[ -z \"$(git status --porcelain=v1 --untracked-files=all)\" ]]"
         }
