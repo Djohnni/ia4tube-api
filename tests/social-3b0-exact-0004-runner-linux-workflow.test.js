@@ -13,23 +13,27 @@ const ROOT = path.resolve(__dirname, "..");
 const RELATIVE = ".github/workflows/social-3b0-exact-0004-runner-linux.yml";
 const FILE = path.join(ROOT, ...RELATIVE.split("/"));
 const WORKFLOW_LF_SHA256 =
+  "dc21f2c5ee4e27e491abd560cb4d292f41cb21f2b09db9f1c7eb7e88aa3be85c";
+const WORKFLOW_FILTERED_OID = "ac9973e557e95c7ab41634d5abdfd36986f9e0af";
+const PARENT_WORKFLOW_LF_SHA256 =
   "36a54b43a543229b15f457c83b9c4fe2e10382bf076af78aeb6528750c95b260";
-const WORKFLOW_FILTERED_OID = "6a4466a3edaa4d1795e6292b6bab26e80f6b53ab";
+const PARENT_WORKFLOW_FILTERED_OID =
+  "6a4466a3edaa4d1795e6292b6bab26e80f6b53ab";
 const BRANCH =
-  "social/checkpoint-3b0-exact-0004-runner-linux-lifecycle-clean-worktree-fixture-20260821";
+  "social/checkpoint-3b0-exact-0004-runner-linux-authenticated-profile-cleanup-evidence-20260823";
 const BASE = "13e38b875db2a220514fe06113663c517c975592";
-const PARENT = "87e5f6e076ef9035a8a6cdfd1eae02db75cbf077";
+const PARENT = "86fde733f9aef75b83d343209cb4811db440dbcc";
 const ROLLBACK_CATALOG_PARENT = "76e650c18beadc9768666285440445d2fc2e367e";
 const FIRST_ROLLBACK_PARENT = "5a109bc775ac9e35bdcdaabec16d329509d9125f";
 const FORCE_RLS_PARENT = "1de14105800db3ad024e15700d7e23fb2b41282c";
 const PLAN_SUBPHASE_PARENT = "73433e1b2d856e073db452ebe17815bec296bba0";
 const SOURCE_COMMIT = "8534817574a22dbd144a835c9f3585c44ee11c96";
 const MESSAGE =
-  "[run-social-3b0] preserve exact 0004 lifecycle evidence with isolated clean-worktree fixture";
+  "[run-social-3b0] authenticate exact 0004 profile and cleanup evidence";
 const IMAGE =
   "docker.io/library/postgres:18.4-bookworm@sha256:7e6103cf85f88f7a0eddb3ec0b1ba8940eba098ed118ade25a729ca9daee5568";
 const ARTIFACT_SCHEMA_VERSION = 2;
-const EVENT_SCHEMA_VERSION = 6;
+const EVENT_SCHEMA_VERSION = 7;
 const CHECKPOINT_SCHEMA_VERSION = 2;
 const CHECKOUT = "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1";
 const SETUP_NODE = "actions/setup-node@820762786026740c76f36085b0efc47a31fe5020";
@@ -37,20 +41,28 @@ const UPLOAD = "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
 const RUNNER_FILE = "scripts/run-real-postgres-tests.js";
 const RUNNER_MODULE = "./scripts/run-real-postgres-tests";
 const RUNNER_LF_SHA256 =
-  "6afc393f457be74780ac1dbf93ced50f7de8857ee461b3abf4bea482c32a92ef";
-const RUNNER_FILTERED_OID = "60b56d6e3e98848dfa09b61cb63352d397460854";
+  "e756d50bd206953b8c30bdfb2875f1b7a52e2cd485ff85631c8f14b0efb2824d";
+const RUNNER_FILTERED_OID = "d6f0d47e082886efd393f4b27f038b8adca747e4";
 const PARENT_RUNNER_LF_SHA256 =
-  "de4bf8e5a3fcff249046efac2fc20bfc2062371ecfcd49a8d218cf810489cd2d";
+  "6afc393f457be74780ac1dbf93ced50f7de8857ee461b3abf4bea482c32a92ef";
 const PARENT_RUNNER_FILTERED_OID =
-  "d9ced62d72fa0bf69cb262878bb9813e4378eecb";
+  "60b56d6e3e98848dfa09b61cb63352d397460854";
 const FORCE_RLS_PARENT_RUNNER_LF_SHA256 =
   "2a8a91e0f6351afbb4304002a4fb7cd4e689602ecfbc8af418c957dcfa7da0a6";
 const FORCE_RLS_PARENT_RUNNER_FILTERED_OID =
   "6eca94aae046b248a278484863c2caf6001acc4d";
 const PRESERVED_FUNCTIONAL_FILES = Object.freeze([
-  "scripts/social-db-migrate.js",
-  "src/persistence/postgres/migrations.js"
+  "scripts/social-db-migrate.js"
 ]);
+const MIGRATIONS_FILE = "src/persistence/postgres/migrations.js";
+const MIGRATIONS_LF_SHA256 =
+  "344c03ceb16acc1931c02228a6df2812ba1207fce38b66e275fc0e75d5bb939b";
+const MIGRATIONS_FILTERED_OID =
+  "42fd84c312a500eb4f6da0b4af98ffb009ac6dae";
+const PARENT_MIGRATIONS_LF_SHA256 =
+  "72b0b99979d6753d7d0cb15199e05ee51435dae010b6be406fb957665f1262fb";
+const PARENT_MIGRATIONS_FILTERED_OID =
+  "5399bf5b77d9ccc658cf6fb127b1fdf5b9b095a8";
 const MIGRATION_FILE =
   "db/migrations/0004_social_connector_persistence.up.sql";
 const CHECKSUM_FILE = "db/migrations/checksums.json";
@@ -66,6 +78,7 @@ const PHYSICAL_ENTRY_FOCAL_TITLES = Object.freeze([
   "Exact-0004 entry evidence 06 finalizer maps absent physical evidence only to J",
   "Exact-0004 entry evidence 07 classifies G when an owned resource has no cleanup start",
   "Exact-0004 entry evidence 08 records completed cleanup with every route residual zero",
+  "Exact-0004 entry evidence 08b rejects a workflow-only profile before literal",
   "Exact-0004 entry evidence 09 classifies H only for an owned launcher residual",
   "Exact-0004 entry evidence 10 keeps I external allowlisted identity outside route residuals",
   "Exact-0004 entry evidence 11 preserves the first failure and separates later cleanup failure",
@@ -79,13 +92,17 @@ const MIGRATION_LF_SHA256 = Object.freeze({
   [CHECKSUM_FILE]:
     "7bea25acc2a2fa899029129e75a8d66a182032264e3a3713ae4abe66e593fdc9",
   [MIGRATION_TEST_FILE]:
-    "32fc1c73967c289b45908100e07c8bb64a0785a4dcdd70cd2e8dc537764fe450"
+    "0c9cc75f568d0bd028cabfec65a58da0f249cf212c909762d7118a4a796c8645"
 });
 const MIGRATION_FILTERED_OID = Object.freeze({
   [MIGRATION_FILE]: "a564b9d4c01e5220b857a86523bb5ff8c3498b17",
   [CHECKSUM_FILE]: "1751b76e571d94cfb62898f7eb483061b549fc55",
-  [MIGRATION_TEST_FILE]: "2457f6a399690117c90e702107d4981df16f5d0b"
+  [MIGRATION_TEST_FILE]: "edc20e9bee0ee89bd6054061d39903e744dba1ca"
 });
+const PARENT_MIGRATION_TEST_LF_SHA256 =
+  "32fc1c73967c289b45908100e07c8bb64a0785a4dcdd70cd2e8dc537764fe450";
+const PARENT_MIGRATION_TEST_FILTERED_OID =
+  "2457f6a399690117c90e702107d4981df16f5d0b";
 const PROTECTED_FILES = Object.freeze([
   "db/migrations/0001_social_multitenant_foundation.up.sql",
   "db/migrations/0002_social_connections_and_vault.up.sql",
@@ -94,18 +111,24 @@ const PROTECTED_FILES = Object.freeze([
   "package.json",
   "package-lock.json"
 ]);
-const PROTECTED8 = Object.freeze([
+const PROTECTED7 = Object.freeze([
   ...PROTECTED_FILES,
   ...PRESERVED_FUNCTIONAL_FILES
 ]);
 const REAL_TEST_FILE = "tests/social-postgres-real.test.js";
 const REAL_TEST_LF_SHA256 =
-  "87b30c210aa665342d57c6255d16fdf8cab406a843a9534fc14eb9dc10612035";
+  "10d8eb4081b858a51fd4d785a467a531a9c40024f943c80a6f89e87c3228bc1b";
 const REAL_TEST_FILTERED_OID =
-  "a7ec1f7a27c152e98d65e38204052034ca02ca0c";
+  "3fcf05a3ef9f612a1ba2dd897cf874f37807b631";
 const PARENT_REAL_TEST_LF_SHA256 =
-  "bfa29707855f99c4823286109633f8b83c4593b8f46ab749e7939e4605022d89";
+  "87b30c210aa665342d57c6255d16fdf8cab406a843a9534fc14eb9dc10612035";
 const PARENT_REAL_TEST_FILTERED_OID =
+  "a7ec1f7a27c152e98d65e38204052034ca02ca0c";
+const LIFECYCLE_EVIDENCE_PARENT =
+  "87e5f6e076ef9035a8a6cdfd1eae02db75cbf077";
+const LIFECYCLE_EVIDENCE_PARENT_REAL_TEST_LF_SHA256 =
+  "bfa29707855f99c4823286109633f8b83c4593b8f46ab749e7939e4605022d89";
+const LIFECYCLE_EVIDENCE_PARENT_REAL_TEST_FILTERED_OID =
   "c7c5c13f0886209bc75e31e426ef1db24a9e5277";
 const ROLLBACK_CATALOG_PARENT_REAL_TEST_LF_SHA256 =
   "329890ff2e56c034a778b3277f46254795749ebc78feaf3c2e8d4ea760ee64c7";
@@ -121,20 +144,24 @@ const FORCE_RLS_PARENT_REAL_TEST_FILTERED_OID =
   "926b6050fcb89b528126eb6fbf72f70624556a4b";
 const INSTRUMENTED_LF_SHA256 = Object.freeze({
   [NODE_TEST_FILE]:
-    "2b561c3b9399f9cb6351bd73cd2d317b74d46ef7525d67d054b2e1a5e2235324",
+    "1b5a470826324b0d7c78e12a161c769e9072aad6035f33776b4c67d4263456bc",
   [PHYSICAL_TEST_FILE]:
-    "c6b773d0e61fd599ed6cd2c5e0fd8470cf1324560c6557bb80eb7e66ec2c6928",
+    "0a5980f6969bfe0c3afa0a42b90d84b12c017d7eed1cc7c52c15e7d6b3f660d1",
   [REAL_TEST_FILE]: REAL_TEST_LF_SHA256
 });
 const INSTRUMENTED_FILTERED_OID = Object.freeze({
-  [NODE_TEST_FILE]: "41359b42bc4fc5cbc11ec0b0bc4407d728ebde9c",
-  [PHYSICAL_TEST_FILE]: "62f52e100f6aeed3f39358a897b8b3e1dbbc2174",
+  [NODE_TEST_FILE]: "443214587faf8d2bfb11f202f77bc6b1b3a5a06d",
+  [PHYSICAL_TEST_FILE]: "28f133a39e75c68f1d6157d04a4b7d89497a129e",
   [REAL_TEST_FILE]: REAL_TEST_FILTERED_OID
 });
 const PARENT_PHYSICAL_TEST_LF_SHA256 =
-  "bd29dc52c4bf1837a0a8fff70c50b07da64153c9052f4747aff2c5f2165ab2ef";
+  "c6b773d0e61fd599ed6cd2c5e0fd8470cf1324560c6557bb80eb7e66ec2c6928";
 const PARENT_PHYSICAL_TEST_FILTERED_OID =
-  "29e34656e461ef7ec9c89781213611e6fdbefd61";
+  "62f52e100f6aeed3f39358a897b8b3e1dbbc2174";
+const PARENT_NODE_TEST_LF_SHA256 =
+  "2b561c3b9399f9cb6351bd73cd2d317b74d46ef7525d67d054b2e1a5e2235324";
+const PARENT_NODE_TEST_FILTERED_OID =
+  "41359b42bc4fc5cbc11ec0b0bc4407d728ebde9c";
 const PLAN_SUBPHASE_PARENT_REAL_TEST_LF_SHA256 =
   "27a4d1ebbccda40711fd1a78a2f170efa3128690b86588be0c7ab515345f49d0";
 const PLAN_SUBPHASE_PARENT_REAL_TEST_FILTERED_OID =
@@ -157,7 +184,8 @@ const HISTORICAL_REAL_TEST_FILTERED_OID =
   "82674f00f94537f3b1ae82567d0d11284ba2ed2e";
 const REAL_TEST_BINDING_LINE = "  GLOBAL_VAULT_REGISTRY_MIGRATION,\n";
 const FUNCTIONAL_FILES = Object.freeze([
-  ...PRESERVED_FUNCTIONAL_FILES
+  ...PRESERVED_FUNCTIONAL_FILES,
+  MIGRATIONS_FILE
 ]);
 const FORMER_WINDOWS_WORKTREE_PINS = Object.freeze([
   "526abe4b610d9c9ae9fb8af2b263f1e37974c3e3d8bc6a51cb8c1ba90f5816fd",
@@ -206,14 +234,17 @@ const EXACT20 = Object.freeze([
   "tests/social-postgres-migrations.test.js",
   "tests/social-postgres-real.test.js"
 ]);
-const INCREMENTAL8 = Object.freeze([
+const INCREMENTAL11 = Object.freeze([
   ".github/workflows/social-3b0-exact-0004-runner-linux.yml",
   "scripts/run-real-postgres-tests.js",
   "scripts/social-3a0p-local-scope.js",
+  MIGRATIONS_FILE,
+  NODE_TEST_FILE,
   "tests/social-3a0p-current-diff-scope.test.js",
   "tests/social-3a0p-local-scope.test.js",
   "tests/social-3b0-exact-0004-runner-linux-workflow.test.js",
   "tests/social-3b0-linux-physical-gate.test.js",
+  MIGRATION_TEST_FILE,
   REAL_TEST_FILE
 ]);
 const LEGACY_EVIDENCE_KEYS = Object.freeze([
@@ -346,7 +377,9 @@ const EVIDENCE_KEYS = Object.freeze([
 const RUNNER_FACT_KEYS = Object.freeze([
   ...SAFE_EVIDENCE_KEYS.slice(1, 5),
   "testFileLoaded",
-  ...SAFE_EVIDENCE_KEYS.slice(5, 17),
+  ...SAFE_EVIDENCE_KEYS.slice(5, 11),
+  "profileBefore",
+  ...SAFE_EVIDENCE_KEYS.slice(11, 17),
   ...EXACT0004_EVIDENCE_KEYS,
   SAFE_EVIDENCE_KEYS[17],
   "cleanupCompleted",
@@ -866,6 +899,18 @@ test("Exact-0004 Linux workflow is strict JSON with the one authorized trigger",
     git(["hash-object", `--path=${RELATIVE}`, "--", RELATIVE]).trim(),
     WORKFLOW_FILTERED_OID
   );
+  const parentWorkflow = git([
+    "cat-file",
+    "blob",
+    `${PARENT}:${RELATIVE}`
+  ], null);
+  assert.ok(Buffer.isBuffer(parentWorkflow));
+  assert.equal(
+    crypto.createHash("sha256").update(parentWorkflow).digest("hex"),
+    PARENT_WORKFLOW_LF_SHA256
+  );
+  assert.equal(gitBlobOid(parentWorkflow), PARENT_WORKFLOW_FILTERED_OID);
+  assert.notEqual(WORKFLOW_FILTERED_OID, PARENT_WORKFLOW_FILTERED_OID);
   assert.deepEqual(workflow.on, { push: { branches: [BRANCH] } });
   assert.deepEqual(workflow.permissions, { contents: "read" });
   assert.deepEqual(workflow.concurrency, {
@@ -931,12 +976,12 @@ test("Exact-0004 Linux workflow fixes branch, immediate parent, ancestral base, 
   assert.equal(new Set(EXACT20).size, 20);
   const guardInventory = bashExpectedInventory(guard);
   assert.deepEqual(guardInventory, EXACT20);
-  assert.equal(INCREMENTAL8.length, 8);
-  assert.equal(new Set(INCREMENTAL8).size, 8);
-  assert.deepEqual(bashIncrementalInventory(guard), INCREMENTAL8);
+  assert.equal(INCREMENTAL11.length, 11);
+  assert.equal(new Set(INCREMENTAL11).size, 11);
+  assert.deepEqual(bashIncrementalInventory(guard), INCREMENTAL11);
   assert.deepEqual(bashProtectedInventory(guard), PROTECTED_FILES);
-  assert.equal(PROTECTED8.length, 8);
-  assert.equal(new Set(PROTECTED8).size, 8);
+  assert.equal(PROTECTED7.length, 7);
+  assert.equal(new Set(PROTECTED7).size, 7);
   const physical = stepByName(
     currentJob,
     "Run the one-shot PostgreSQL 18 Exact-0004 proof"
@@ -1113,6 +1158,34 @@ test("functional and instrumented pins come from canonical Git blobs", () => {
     ]).trim();
     if (rawWorktreeOid !== candidateOid) materializationDiffers = true;
   }
+  const migrationsBytes = canonicalLfBytes(MIGRATIONS_FILE);
+  assert.equal(
+    crypto.createHash("sha256").update(migrationsBytes).digest("hex"),
+    MIGRATIONS_LF_SHA256
+  );
+  assert.equal(gitBlobOid(migrationsBytes), MIGRATIONS_FILTERED_OID);
+  assert.equal(
+    git([
+      "hash-object",
+      `--path=${MIGRATIONS_FILE}`,
+      "--",
+      MIGRATIONS_FILE
+    ]).trim(),
+    MIGRATIONS_FILTERED_OID
+  );
+  assert.equal(pins[MIGRATIONS_FILE], MIGRATIONS_LF_SHA256);
+  const parentMigrations = git([
+    "cat-file",
+    "blob",
+    `${PARENT}:${MIGRATIONS_FILE}`
+  ], null);
+  assert.ok(Buffer.isBuffer(parentMigrations));
+  assert.equal(
+    crypto.createHash("sha256").update(parentMigrations).digest("hex"),
+    PARENT_MIGRATIONS_LF_SHA256
+  );
+  assert.equal(gitBlobOid(parentMigrations), PARENT_MIGRATIONS_FILTERED_OID);
+  assert.notDeepEqual(parentMigrations, migrationsBytes);
   const historicalEntry = git([
     "ls-tree",
     SOURCE_COMMIT,
@@ -1155,23 +1228,28 @@ test("functional and instrumented pins come from canonical Git blobs", () => {
     PARENT_REAL_TEST_FILTERED_OID
   );
   assert.notDeepEqual(immediateParentBytes, currentBytes);
-  const markerBlock = [
-    "{",
-    "  const marker = process.env.SOCIAL_TEST_FILE_LOAD_MARKER;",
-    "  if (typeof marker === \"string\" && /^[0-9a-f]{64}$/.test(marker)) {",
-    "    process.stderr.write(",
-    "      \"IA4TUBE_SAFE_EVENT=\" +",
-    "      `{\"event\":\"realTestFileLoaded\",\"evidenceSchemaVersion\":6,` +",
-    "      `\"marker\":\"${marker}\",\"sequence\":1}\\n`",
-    "    );",
-    "  }",
-    "}",
-    "",
-    ""
+  const candidateMarker = '\"evidenceSchemaVersion\":7';
+  const parentMarker = '\"evidenceSchemaVersion\":6';
+  const candidatePlanCompletion = [
+    '  physicalPhases.completeExact0004Subphase("plan_exact", {',
+    "    physicalProfileBefore: plan.fromProfile",
+    "  });"
   ].join("\n");
-  assert.equal(currentBytes.toString("utf8").split(markerBlock).length - 1, 1);
+  const parentPlanCompletion =
+    '  physicalPhases.completeExact0004Subphase("plan_exact");';
+  const currentRealTestSource = currentBytes.toString("utf8");
+  assert.equal(currentRealTestSource.split(candidateMarker).length - 1, 1);
+  assert.equal(
+    currentRealTestSource.split(candidatePlanCompletion).length - 1,
+    1
+  );
   assert.deepEqual(
-    Buffer.from(currentBytes.toString("utf8").replace(markerBlock, ""), "utf8"),
+    Buffer.from(
+      currentRealTestSource
+        .replace(candidateMarker, parentMarker)
+        .replace(candidatePlanCompletion, parentPlanCompletion),
+      "utf8"
+    ),
     immediateParentBytes
   );
   assert.equal(physicalPins[REAL_TEST_FILE], REAL_TEST_LF_SHA256);
@@ -1224,6 +1302,21 @@ test("functional and instrumented pins come from canonical Git blobs", () => {
       file
     );
   }
+  const parentNodeTest = git([
+    "cat-file",
+    "blob",
+    `${PARENT}:${NODE_TEST_FILE}`
+  ], null);
+  assert.ok(Buffer.isBuffer(parentNodeTest));
+  assert.equal(
+    crypto.createHash("sha256").update(parentNodeTest).digest("hex"),
+    PARENT_NODE_TEST_LF_SHA256
+  );
+  assert.equal(gitBlobOid(parentNodeTest), PARENT_NODE_TEST_FILTERED_OID);
+  assert.notEqual(
+    INSTRUMENTED_FILTERED_OID[NODE_TEST_FILE],
+    PARENT_NODE_TEST_FILTERED_OID
+  );
   const parentPhysicalTest = git([
     "cat-file",
     "blob",
@@ -1248,10 +1341,10 @@ test("functional and instrumented pins come from canonical Git blobs", () => {
     /^test\("(Exact-0004 entry evidence [^"]+)"/gm
   )].map((match) => match[1]);
   assert.deepEqual(physicalEntryFocals, PHYSICAL_ENTRY_FOCAL_TITLES);
-  assert.equal(PHYSICAL_ENTRY_FOCAL_TITLES.length, 14);
+  assert.equal(PHYSICAL_ENTRY_FOCAL_TITLES.length, 15);
   const parentPhysicalSource = parentPhysicalTest.toString("utf8");
   assert.equal(parentPhysicalSource.includes("Exact-0004 entry evidence"), true);
-  assert.equal(parentPhysicalSource.includes("Exact-0004 lifecycle evidence"), false);
+  assert.equal(parentPhysicalSource.includes("Exact-0004 lifecycle evidence"), true);
   const physicalLifecycleFocals = [...physicalTestSource.matchAll(
     /^test\("(Exact-0004 lifecycle evidence ([0-9]{2}) [^"]+)"/gm
   )];
@@ -1289,6 +1382,24 @@ test("0004 conflict gates are physical, checksum-bound and reconstruct only the 
       file
     );
   }
+  const parentMigrationTest = git([
+    "cat-file",
+    "blob",
+    `${PARENT}:${MIGRATION_TEST_FILE}`
+  ], null);
+  assert.ok(Buffer.isBuffer(parentMigrationTest));
+  assert.equal(
+    crypto.createHash("sha256").update(parentMigrationTest).digest("hex"),
+    PARENT_MIGRATION_TEST_LF_SHA256
+  );
+  assert.equal(
+    gitBlobOid(parentMigrationTest),
+    PARENT_MIGRATION_TEST_FILTERED_OID
+  );
+  assert.notEqual(
+    MIGRATION_FILTERED_OID[MIGRATION_TEST_FILE],
+    PARENT_MIGRATION_TEST_FILTERED_OID
+  );
 
   const migrationSource = canonicalLfBytes(MIGRATION_FILE).toString("utf8");
   const parentMigrationSource = git([
@@ -2190,6 +2301,88 @@ test("rollback catalog proofs reject mutants and reconstruct only their parent d
   const firstRollbackParentSource = firstRollbackParentBytes.toString("utf8");
   const parentSource = parentBytes.toString("utf8");
   const currentSource = currentBytes.toString("utf8");
+  const replaceRouteLayerExactlyOnce = (source, candidate, replacement, label) => {
+    assert.equal(source.split(candidate).length - 1, 1, label);
+    return source.replace(candidate, replacement);
+  };
+  const currentFileLoadMarkerBlock = [
+    "{",
+    "  const marker = process.env.SOCIAL_TEST_FILE_LOAD_MARKER;",
+    "  if (typeof marker === \"string\" && /^[0-9a-f]{64}$/.test(marker)) {",
+    "    process.stderr.write(",
+    "      \"IA4TUBE_SAFE_EVENT=\" +",
+    "      `{\"event\":\"realTestFileLoaded\",\"evidenceSchemaVersion\":7,` +",
+    "      `\"marker\":\"${marker}\",\"sequence\":1}\\n`",
+    "    );",
+    "  }",
+    "}",
+    "",
+    ""
+  ].join("\n");
+  const preRouteFileLoadMarkerBlock = currentFileLoadMarkerBlock.replace(
+    '"evidenceSchemaVersion":7',
+    '"evidenceSchemaVersion":6'
+  );
+  const currentPlanCompletion = [
+    '  physicalPhases.completeExact0004Subphase("plan_exact", {',
+    "    physicalProfileBefore: plan.fromProfile",
+    "  });"
+  ].join("\n");
+  const preRoutePlanCompletion =
+    '  physicalPhases.completeExact0004Subphase("plan_exact");';
+  let immediateParentCandidate = replaceRouteLayerExactlyOnce(
+    currentSource,
+    currentFileLoadMarkerBlock,
+    preRouteFileLoadMarkerBlock,
+    "current route evidence schema"
+  );
+  immediateParentCandidate = replaceRouteLayerExactlyOnce(
+    immediateParentCandidate,
+    currentPlanCompletion,
+    preRoutePlanCompletion,
+    "current route authenticated physical profile"
+  );
+  const immediateParentBytes = git([
+    "cat-file",
+    "blob",
+    PARENT + ":" + REAL_TEST_FILE
+  ], null);
+  assert.ok(Buffer.isBuffer(immediateParentBytes));
+  assert.equal(
+    crypto.createHash("sha256").update(immediateParentBytes).digest("hex"),
+    PARENT_REAL_TEST_LF_SHA256
+  );
+  assert.equal(
+    gitBlobOid(immediateParentBytes),
+    PARENT_REAL_TEST_FILTERED_OID
+  );
+  assert.equal(immediateParentCandidate, immediateParentBytes.toString("utf8"));
+  const lifecycleEvidenceParentCandidate = replaceRouteLayerExactlyOnce(
+    immediateParentCandidate,
+    preRouteFileLoadMarkerBlock,
+    "",
+    "authenticated real test file-load lifecycle evidence"
+  );
+  const lifecycleEvidenceParentBytes = git([
+    "cat-file",
+    "blob",
+    LIFECYCLE_EVIDENCE_PARENT + ":" + REAL_TEST_FILE
+  ], null);
+  assert.ok(Buffer.isBuffer(lifecycleEvidenceParentBytes));
+  assert.equal(
+    crypto.createHash("sha256")
+      .update(lifecycleEvidenceParentBytes)
+      .digest("hex"),
+    LIFECYCLE_EVIDENCE_PARENT_REAL_TEST_LF_SHA256
+  );
+  assert.equal(
+    gitBlobOid(lifecycleEvidenceParentBytes),
+    LIFECYCLE_EVIDENCE_PARENT_REAL_TEST_FILTERED_OID
+  );
+  assert.equal(
+    lifecycleEvidenceParentCandidate,
+    lifecycleEvidenceParentBytes.toString("utf8")
+  );
 
   const transactionRollbackSignature =
     "async function proveTransactionRollback(pool, fixture) {";
@@ -2324,10 +2517,11 @@ test("rollback catalog proofs reject mutants and reconstruct only their parent d
     currentSource.split(authorizedTransactionRollbackInsert).length - 1,
     1
   );
-  const transactionRollbackParentCandidate = currentSource.replace(
-    authorizedTransactionRollbackInsert,
-    parentTransactionRollbackInsert
-  );
+  const transactionRollbackParentCandidate =
+    lifecycleEvidenceParentCandidate.replace(
+      authorizedTransactionRollbackInsert,
+      parentTransactionRollbackInsert
+    );
 
   const subphaseBody = (source, name) => {
     const token = '"' + name + '"';
@@ -2666,7 +2860,7 @@ test("instrumented runner pin is the canonical filtered LF blob", () => {
   ));
   const runnerSource = canonical.toString("utf8");
   for (const fragment of [
-    "const EVIDENCE_SCHEMA_VERSION = 6;",
+    "const EVIDENCE_SCHEMA_VERSION = 7;",
     "EXACT_0004_SUBPHASES",
     "EXACT_0004_EXECUTION_SUBPHASES",
     "EXACT_0004_OPERATION_CLASSES",
@@ -2705,21 +2899,15 @@ test("instrumented runner pin is the canonical filtered LF blob", () => {
     assert.equal(parentRunnerSource.split(`  "${subphase}",`).length - 1, 1);
     assert.equal(forceRlsParentRunnerSource.includes(subphase), false);
   }
-  assert.equal(
-    parentRunnerSource
-      .replace("const EVIDENCE_SCHEMA_VERSION = 6;", "const EVIDENCE_SCHEMA_VERSION = 5;")
-      .replace('  "conflicting_external_account_0004_negative",\n', "")
-      .replace('  "external_account_rollback_verification",\n', "")
-      .replace(
-        '  conflicting_external_account_0004_negative: "negative_gate",\n',
-        ""
-      )
-      .replace(
-        '  external_account_rollback_verification: "rollback_check",\n',
-        ""
-      ),
-    forceRlsParentRunnerSource
-  );
+  for (const candidateOnly of [
+    '"physicalProfileBefore"',
+    'physicalProfileBefore: "not_observed"',
+    'state.profileBefore = event.physicalProfileBefore === "social-schema-0003"',
+    "value.profileBefore !== runnerLifecycle.profileBefore"
+  ]) {
+    assert.ok(runnerSource.includes(candidateOnly), candidateOnly);
+    assert.equal(parentRunnerSource.includes(candidateOnly), false, candidateOnly);
+  }
   const exactReporterArguments = [
     "        [",
     "          \"--test-reporter=tap\",",
@@ -3129,7 +3317,6 @@ test("one-shot proof reuses canonical Linux PostgreSQL with digest and no publis
     "ia4tube_social_test_",
     "postgresql://127.0.0.1:5432/",
     "shell:false",
-    "profileBefore='0003'",
     "profileAfter='0004'",
     "verifyFinalProfile",
     "pg_catalog.pg_index",
@@ -3139,6 +3326,30 @@ test("one-shot proof reuses canonical Linux PostgreSQL with digest and no publis
     "social_connections_instagram_blocking_company_unique",
     "social_external_accounts_instagram_active_company_unique"
   ]) assert.ok(physical.run.includes(fragment), fragment);
+  assert.doesNotMatch(physical.run, /evidence\.profileBefore\s*=(?!=)/);
+  assert.equal(
+    (physical.run.match(/evidence\.profileBefore==='0003'/g) || []).length,
+    1
+  );
+  assert.ok(physical.run.includes("'profileBefore'"));
+  const safeFactCopy =
+    "for(const key of safeFactKeys)evidence[key]=result.facts[key];";
+  assert.equal((physical.run.split(safeFactCopy).length - 1), 1);
+  assert.ok(physical.run.indexOf(safeFactCopy) < physical.run.indexOf("const passed="));
+  assert.ok(physical.run.includes("'failureDuringCleanup'"));
+  assert.ok(
+    physical.run.indexOf(safeFactCopy) <
+      physical.run.indexOf("evidence.failureDuringCleanup===false")
+  );
+  assert.equal(
+    (physical.run.match(/evidence\.profileAfter\s*=(?!=)'0004'/g) || []).length,
+    1
+  );
+  assert.equal(
+    physical.run.indexOf("evidence.profileAfter='0004'") >
+      physical.run.indexOf("if(await verifyFinalProfile(database))"),
+    true
+  );
   assert.equal((physical.run.match(/'run','test:postgres-real'/g) || []).length, 1);
   assert.equal((source.match(/npm run test:postgres-real/g) || []).length, 0);
   assert.equal(physical.run.includes("--publish"), false);
@@ -3251,6 +3462,7 @@ test("one-shot proof authenticates independent file-load, TAP and lifecycle fact
     /evidence\.tapStarted===true/,
     /evidence\.tapTitleObserved===true/,
     /evidence\.firstTestDiscovered===true/,
+    /evidence\.profileBefore==='0003'/,
     /evidence\.stderrCategory===null/,
     /evidence\.safeErrorCode===null/,
     /evidence\.safeModuleName===null/,
@@ -3314,7 +3526,9 @@ test("cleanup is always, owned, fail-closed and evidence is exactly four regular
   assert.equal(upload.with["if-no-files-found"], "error");
   assert.equal(enforcement.if, "always()");
   for (const fragment of [
-    "EXACT_0004_RESIDUAL_KEYS.some((key) => evidence.residuals[key] !== 0)",
+    "EXACT_0004_RESIDUAL_KEYS.some(\n" +
+      "      (key) => evidence.residuals[key] !== 0\n" +
+      "    )",
     "firstFailure: null",
     "status.stdoutStored !== false",
     "status.stderrStored !== false",
@@ -3893,7 +4107,7 @@ test("Exact-0004 subphase artifact boundary is closed and mutation-coherent", ()
   }
 });
 
-test("artifact envelope is schema 2 over legacy schema 1 and safe-event schema 6", () => {
+test("artifact envelope is schema 2 over legacy schema 1 and safe-event schema 7", () => {
   const { source, workflow } = read();
   const currentJob = job(workflow);
   const physical = stepByName(
@@ -3931,11 +4145,13 @@ test("artifact envelope is schema 2 over legacy schema 1 and safe-event schema 6
   assert.equal(new Set(RESIDUAL_KEYS).size, 8);
   assert.equal(CLEANUP_FAILURE_CODES.length, 6);
   assert.equal(new Set(CLEANUP_FAILURE_CODES).size, 6);
-  assert.equal(RUNNER_FACT_KEYS.length, 42);
+  assert.equal(RUNNER_FACT_KEYS.length, 43);
+  assert.equal(RUNNER_FACT_KEYS.includes("physicalProfileBefore"), false);
+  assert.equal(EVIDENCE_KEYS.includes("physicalProfileBefore"), false);
   assert.equal(PROCESS_STATUS_KEYS.length, 5);
   assert.ok(realTestSource.includes("SOCIAL_TEST_FILE_LOAD_MARKER"));
   assert.ok(realTestSource.includes('"event":"realTestFileLoaded"'));
-  assert.ok(realTestSource.includes('"evidenceSchemaVersion":6'));
+  assert.ok(realTestSource.includes('"evidenceSchemaVersion":7'));
   assert.ok(
     realTestSource.indexOf("process.stderr.write") <
       realTestSource.indexOf('const assert = require("node:assert/strict")')
@@ -3966,7 +4182,7 @@ test("artifact envelope is schema 2 over legacy schema 1 and safe-event schema 6
   assertExactKeysCall(legacyFinalize.run, "value", evidenceTuple.name);
   assertExactKeysCall(legacyFinalize.run, "value", statusTuple.name);
   assert.match(legacyFinalize.run, /value\.schemaVersion\s*!==\s*1/);
-  assert.match(legacyFinalize.run, /value\.evidenceSchemaVersion\s*!==\s*6/);
+  assert.match(legacyFinalize.run, /value\.evidenceSchemaVersion\s*!==\s*7/);
   assert.doesNotMatch(
     legacyFinalize.run,
     /value\.testFileLoaded\s*!==\s*value\.tapTitleObserved/
@@ -4138,12 +4354,13 @@ test("artifact envelope is schema 2 over legacy schema 1 and safe-event schema 6
     "evidence.conflictingNegativeObservedSqlState==='23514'",
     "evidence.conflictingNegativeFulfilledResultClass==='not_observed'",
     "evidence.conflictingNegativeAssertionMatched===true",
-    "evidence.conflictingNegativeRejectedBeforeAssertion===true"
+    "evidence.conflictingNegativeRejectedBeforeAssertion===true",
+    "evidence.profileBefore==='0003'"
   ]) {
     assert.ok(physical.run.includes(successFragment), `physical:${successFragment}`);
   }
   assert.ok(
-    legacyFinalize.run.includes("evidenceSchemaVersion:6") &&
+    legacyFinalize.run.includes("evidenceSchemaVersion:7") &&
     legacyFinalize.run.includes("safeLineBucket:'unknown'")
   );
   assert.equal(
@@ -4185,7 +4402,9 @@ test("artifact envelope is schema 2 over legacy schema 1 and safe-event schema 6
     'safeAuxiliaryProcessClass: "sudo"',
     "auxiliaryProcessOwnedByRoute: true",
     "cleanupFailure: null",
-    "EXACT_0004_RESIDUAL_KEYS.some((key) => evidence.residuals[key] !== 0)"
+    "EXACT_0004_RESIDUAL_KEYS.some(\n" +
+      "      (key) => evidence.residuals[key] !== 0\n" +
+      "    )"
   ]) assert.ok(runnerSource.includes(fragment), fragment);
   for (const fragment of [
     "const EXACT_0004_LIFECYCLE_LIMIT = 64;",
@@ -4244,6 +4463,7 @@ test("artifact envelope is schema 2 over legacy schema 1 and safe-event schema 6
   ]) assert.ok(runnerSource.includes(fragment), fragment);
   assert.equal(source.includes("evidenceSchemaVersion:4"), false);
   assert.equal(source.includes("evidenceSchemaVersion:5"), false);
+  assert.equal(source.includes("evidenceSchemaVersion:6"), false);
   assert.equal(source.includes("evidenceSchemaVersion:3"), false);
   for (const key of EVIDENCE_KEYS) {
     assert.ok(source.includes(key) || runnerSource.includes(key), key);

@@ -44,7 +44,7 @@ const CONNECTION_NAMES = [
   "SOCIAL_TEST_MIGRATION_DATABASE_URL",
   "SOCIAL_TEST_RUNTIME_DATABASE_URL"
 ];
-const EVIDENCE_SCHEMA_VERSION = 6;
+const EVIDENCE_SCHEMA_VERSION = 7;
 const EXACT_0004_ARTIFACT_SCHEMA_VERSION = 2;
 const EXACT_0004_CHECKPOINT_SCHEMA_VERSION = 2;
 const REAL_TEST_FILE_LOAD_EVENT = "realTestFileLoaded";
@@ -225,6 +225,10 @@ const CONFLICTING_NEGATIVE_FULFILLED_RESULT_CLASSES = Object.freeze([
   "applied_0004",
   "other",
   "unknown"
+]);
+const EXACT_0004_PHYSICAL_PROFILE_BEFORE_VALUES = new Set([
+  "not_observed",
+  "social-schema-0003"
 ]);
 const EXACT_0004_EVIDENCE_FIELDS = Object.freeze([
   "lastExact0004SubphaseStarted",
@@ -779,6 +783,7 @@ function physicalSnapshotValid(event) {
     "evidenceSchemaVersion",
     "lastMainPhaseCompleted",
     "lastMainPhaseStarted",
+    "physicalProfileBefore",
     "sequence",
     ...EXACT_0004_EVIDENCE_FIELDS
   ])) return false;
@@ -787,6 +792,11 @@ function physicalSnapshotValid(event) {
     !nullableMainPhase(event.lastMainPhaseCompleted) ||
     typeof event.cleanupStarted !== "boolean" ||
     typeof event.cleanupCompleted !== "boolean" ||
+    !EXACT_0004_PHYSICAL_PROFILE_BEFORE_VALUES.has(
+      event.physicalProfileBefore
+    ) ||
+    event.planExactCompleted !==
+      (event.physicalProfileBefore === "social-schema-0003") ||
     (event.cleanupCompleted && !event.cleanupStarted)
   ) return false;
   const startedIndex = event.lastMainPhaseStarted === null
@@ -999,10 +1009,7 @@ function validateSafeEvent(event) {
       "sequence"
     ]) && PHYSICAL_MAIN_PHASE_SET.has(event.phase);
   }
-  if (
-    event.event === "exact0004SubphaseStarted" ||
-    event.event === "exact0004SubphaseCompleted"
-  ) {
+  if (event.event === "exact0004SubphaseStarted") {
     return exactKeys(event, [
       "event",
       "evidenceSchemaVersion",
@@ -1012,6 +1019,21 @@ function validateSafeEvent(event) {
     ]) &&
       EXACT_0004_EXECUTION_SUBPHASES.includes(event.subphase) &&
       event.operationClass === exact0004OperationClass(event.subphase);
+  }
+  if (event.event === "exact0004SubphaseCompleted") {
+    const fields = [
+      "event",
+      "evidenceSchemaVersion",
+      "operationClass",
+      "sequence",
+      "subphase"
+    ];
+    if (event.subphase === "plan_exact") fields.push("physicalProfileBefore");
+    return exactKeys(event, fields) &&
+      EXACT_0004_EXECUTION_SUBPHASES.includes(event.subphase) &&
+      event.operationClass === exact0004OperationClass(event.subphase) &&
+      (event.subphase !== "plan_exact" ||
+        event.physicalProfileBefore === "social-schema-0003");
   }
   if (event.event === "exact0004DatabaseMutationAttempted") {
     return exactKeys(event, [
@@ -1655,6 +1677,7 @@ function createPhysicalPhaseProtocol(options = {}) {
   let lastExact0004SubphaseCompleted = "not_reached";
   let planExactInvoked = false;
   let planExactCompleted = false;
+  let physicalProfileBefore = "not_observed";
   let applyExactInvoked = false;
   let applyExactCompleted = false;
   let databaseMutationAttempted = false;
@@ -1740,7 +1763,10 @@ function createPhysicalPhaseProtocol(options = {}) {
       activeExact0004Subphase = null;
       lastExact0004SubphaseCompleted = event.subphase;
       nextExact0004SubphaseIndex += 1;
-      if (event.subphase === "plan_exact") planExactCompleted = true;
+      if (event.subphase === "plan_exact") {
+        physicalProfileBefore = event.physicalProfileBefore;
+        planExactCompleted = true;
+      }
       if (event.subphase === "apply_exact") applyExactCompleted = true;
     } else if (event.event === "exact0004DatabaseMutationAttempted") {
       if (
@@ -1890,6 +1916,7 @@ function createPhysicalPhaseProtocol(options = {}) {
         exact0004OperationClass(exact0004FailureSubphase),
       planExactInvoked,
       planExactCompleted,
+      physicalProfileBefore,
       applyExactInvoked,
       applyExactCompleted,
       databaseMutationAttempted,
@@ -1958,6 +1985,20 @@ function createPhysicalPhaseEmitter(
     writeLine(safeEventLine(value));
   }
 
+  function completeExact0004Subphase(subphase, fields = {}) {
+    const expectedFields = subphase === "plan_exact"
+      ? ["physicalProfileBefore"]
+      : [];
+    if (!exactKeys(fields, expectedFields)) {
+      throw new TypeError("physical_phase_completion_fields_invalid");
+    }
+    emit("exact0004SubphaseCompleted", {
+      operationClass: exact0004OperationClass(subphase),
+      subphase,
+      ...fields
+    });
+  }
+
   return Object.freeze({
     startMain: (phase) => emit("mainPhaseStarted", { phase }),
     completeMain: (phase) => emit("mainPhaseCompleted", { phase }),
@@ -1966,11 +2007,7 @@ function createPhysicalPhaseEmitter(
         operationClass: exact0004OperationClass(subphase),
         subphase
       }),
-    completeExact0004Subphase: (subphase) =>
-      emit("exact0004SubphaseCompleted", {
-        operationClass: exact0004OperationClass(subphase),
-        subphase
-      }),
+    completeExact0004Subphase,
     markExact0004DatabaseMutationAttempted: () =>
       emit("exact0004DatabaseMutationAttempted", {
         databaseMutationAttempted: true
@@ -2147,6 +2184,7 @@ function createNodeTestObserver(onMarker = () => {}, options = {}) {
       safeOperationClass: physicalPhaseFacts.safeOperationClass,
       planExactInvoked: physicalPhaseFacts.planExactInvoked,
       planExactCompleted: physicalPhaseFacts.planExactCompleted,
+      physicalProfileBefore: physicalPhaseFacts.physicalProfileBefore,
       applyExactInvoked: physicalPhaseFacts.applyExactInvoked,
       applyExactCompleted: physicalPhaseFacts.applyExactCompleted,
       databaseMutationAttempted:
@@ -2208,6 +2246,8 @@ function createSafeEventCollector(options = {}) {
     lastMainPhaseStarted: null,
     lastMainPhaseCompleted: null,
     ...emptyExact0004Evidence(),
+    physicalProfileBefore: "not_observed",
+    profileBefore: "not_observed",
     cleanupStarted: null,
     cleanupCompleted: null,
     failureDuringCleanup: null,
@@ -2433,8 +2473,15 @@ function createSafeEventCollector(options = {}) {
       for (const field of EXACT_0004_EVIDENCE_FIELDS) {
         state[field] = event[field];
       }
+      state.physicalProfileBefore = event.physicalProfileBefore;
+      state.profileBefore = event.physicalProfileBefore === "social-schema-0003"
+        ? "0003"
+        : "not_observed";
       state.cleanupStarted = event.cleanupStarted;
       state.cleanupCompleted = event.cleanupCompleted;
+      if (event.cleanupStarted === true && event.cleanupCompleted === true) {
+        state.failureDuringCleanup = false;
+      }
       notifyAcceptedEvent(event);
       return;
     }
@@ -3280,6 +3327,7 @@ async function main(env = process.env, options = {}) {
     lastMainPhaseCompleted: result.facts.lastMainPhaseCompleted,
     cleanupStarted: result.facts.cleanupStarted,
     cleanupCompleted: result.facts.cleanupCompleted,
+    physicalProfileBefore: result.facts.physicalProfileBefore,
     ...resultExact0004Evidence
   });
   let failureFacts;
@@ -4114,6 +4162,7 @@ function validExact0004Artifact(value) {
   const runnerLifecycle = exact0004RunnerFactsFromLifecycle(
     value.lifecycleEvidence
   );
+  if (value.profileBefore !== runnerLifecycle.profileBefore) return false;
   const lifecycleByName = new Map(
     value.lifecycleEvidence.map((entry) => [entry.event, entry])
   );
@@ -4858,6 +4907,9 @@ function finalizeExact0004Artifact(env = process.env) {
       ? runnerLifecycle.nodeTestTimedOut
       : physicalEvidenceValid ? legacy.nodeTestTimedOut : null,
     ...phaseProjection,
+    profileBefore: runnerPhaseObserved
+      ? runnerLifecycle.profileBefore
+      : legacy.profileBefore,
     postgresStarted: physicalScriptLoaded &&
       (entry.postgresStarted === true ||
         lifecycleByName.has("postgresStarted") ||

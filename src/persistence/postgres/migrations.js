@@ -2125,7 +2125,7 @@ function createMigrationRunner(options = {}) {
         )
       );
       return Object.freeze({
-        fromProfile: exactRequest.fromProfile,
+        fromProfile: gate.physical.profile,
         toProfile: exactRequest.toProfile,
         expectedPending: Object.freeze([...exactRequest.expectedPending]),
         observedPending: Object.freeze([

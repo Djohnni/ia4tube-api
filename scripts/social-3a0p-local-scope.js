@@ -3,9 +3,9 @@
 const path = require("node:path");
 
 const AUTHORIZED_BRANCH =
-  "social/checkpoint-3b0-exact-0004-runner-linux-lifecycle-evidence-preservation-20260821";
+  "social/checkpoint-3b0-exact-0004-runner-linux-authenticated-profile-cleanup-evidence-20260823";
 const ROUTE_BASE_COMMIT = "13e38b875db2a220514fe06113663c517c975592";
-const ROUTE_PARENT_COMMIT = "87e5f6e076ef9035a8a6cdfd1eae02db75cbf077";
+const ROUTE_PARENT_COMMIT = "86fde733f9aef75b83d343209cb4811db440dbcc";
 
 const ALLOWED_EXACT_FILES = new Set([
   ".github/workflows/social-3b0-exact-0004-runner-linux.yml",

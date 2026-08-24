@@ -5,7 +5,7 @@
   if (typeof marker === "string" && /^[0-9a-f]{64}$/.test(marker)) {
     process.stderr.write(
       "IA4TUBE_SAFE_EVENT=" +
-      `{"event":"realTestFileLoaded","evidenceSchemaVersion":6,` +
+      `{"event":"realTestFileLoaded","evidenceSchemaVersion":7,` +
       `"marker":"${marker}","sequence":1}\n`
     );
   }
@@ -2061,7 +2061,9 @@ async function proveExact0004Route(
     observedPending: [SOCIAL_CONNECTOR_PERSISTENCE_MIGRATION],
     planApproved: true
   });
-  physicalPhases.completeExact0004Subphase("plan_exact");
+  physicalPhases.completeExact0004Subphase("plan_exact", {
+    physicalProfileBefore: plan.fromProfile
+  });
   physicalPhases.startExact0004Subphase("plan_snapshot_compare");
   assert.equal(await readExactCatalogSnapshot(migrationPoolA), beforePlan);
   assert.deepEqual(

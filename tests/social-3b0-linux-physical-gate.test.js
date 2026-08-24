@@ -35,6 +35,7 @@ const {
 } = require("../src/social/vault-key-version");
 
 const SHA = "a".repeat(40);
+const EXACT_0004_PHYSICAL_PROFILE_BEFORE = "social-schema-0003";
 const O12_COMPANY_ID = "11111111-1111-4111-8111-111111111111";
 const O12_CREDENTIAL_ID = "22222222-2222-4222-8222-222222222222";
 const O12_CONNECTION_ID = "33333333-3333-4333-8333-333333333333";
@@ -126,6 +127,12 @@ function exact0004Evidence(
   };
 }
 
+function exact0004CompletionFields(subphase) {
+  return subphase === "plan_exact"
+    ? { physicalProfileBefore: EXACT_0004_PHYSICAL_PROFILE_BEFORE }
+    : {};
+}
+
 async function completeConflictingNegative(phases) {
   phases.markExact0004ConflictingNegativeAttempted();
   const error = Object.assign(new Error("synthetic conflict"), {
@@ -149,7 +156,10 @@ async function completeExact0004Subphases(phases) {
       phases.markExact0004DatabaseMutationAttempted();
       await completeConflictingNegative(phases);
     }
-    phases.completeExact0004Subphase(subphase);
+    phases.completeExact0004Subphase(
+      subphase,
+      exact0004CompletionFields(subphase)
+    );
   }
 }
 
@@ -208,7 +218,10 @@ async function exact0004FailurePhaseLines(
       if (candidate === "conflicting_0004_negative") {
         await completeConflictingNegative(phases);
       }
-      phases.completeExact0004Subphase(candidate);
+      phases.completeExact0004Subphase(
+        candidate,
+        exact0004CompletionFields(candidate)
+      );
     }
     break;
   }
@@ -235,7 +248,10 @@ function activeConflictingNegativeEmitter() {
         phases.markExact0004DatabaseMutationAttempted();
         return { lines, phases };
       }
-      phases.completeExact0004Subphase(subphase);
+      phases.completeExact0004Subphase(
+        subphase,
+        exact0004CompletionFields(subphase)
+      );
     }
   }
   throw new Error("synthetic_conflicting_negative_subphase_missing");
@@ -388,6 +404,11 @@ test("real PostgreSQL runner emits one canonical safe lifecycle without raw TAP"
   assert.equal(facts.safeOperationClass, "unknown");
   assert.equal(facts.planExactInvoked, true);
   assert.equal(facts.planExactCompleted, true);
+  assert.equal(
+    facts.physicalProfileBefore,
+    EXACT_0004_PHYSICAL_PROFILE_BEFORE
+  );
+  assert.equal(facts.profileBefore, "0003");
   assert.equal(facts.applyExactInvoked, true);
   assert.equal(facts.applyExactCompleted, true);
   assert.equal(facts.databaseMutationAttempted, true);
@@ -403,7 +424,7 @@ test("real PostgreSQL runner emits one canonical safe lifecycle without raw TAP"
   assert.equal(facts.conflictingNegativeRejectedBeforeAssertion, true);
   assert.equal(facts.cleanupStarted, true);
   assert.equal(facts.cleanupCompleted, true);
-  assert.equal(facts.failureDuringCleanup, null);
+  assert.equal(facts.failureDuringCleanup, false);
   assert.equal(facts.failurePhase, null);
   assert.equal(facts.safePermissionOrigin, null);
   assert.equal(facts.safeSourceBasename, null);
@@ -617,7 +638,7 @@ test("real PostgreSQL runner preserves a signal close without inventing timeout"
 });
 
 test("protocol group 1: physical phases accept only the complete ordered main and cleanup lifecycle", async () => {
-  assert.equal(realPostgresRunner.EVIDENCE_SCHEMA_VERSION, 6);
+  assert.equal(realPostgresRunner.EVIDENCE_SCHEMA_VERSION, 7);
   assert.deepEqual(realPostgresRunner.PHYSICAL_PHASES, [
     "physical_target_preflight",
     "role_provisioning",
@@ -669,6 +690,10 @@ test("protocol group 1: physical phases accept only the complete ordered main an
   assert.equal(facts.safeOperationClass, "unknown");
   assert.equal(facts.planExactInvoked, true);
   assert.equal(facts.planExactCompleted, true);
+  assert.equal(
+    facts.physicalProfileBefore,
+    EXACT_0004_PHYSICAL_PROFILE_BEFORE
+  );
   assert.equal(facts.applyExactInvoked, true);
   assert.equal(facts.applyExactCompleted, true);
   assert.equal(facts.databaseMutationAttempted, true);
@@ -681,6 +706,26 @@ test("protocol group 1: physical phases accept only the complete ordered main an
   assert.equal(facts.conflictingNegativeRejectedBeforeAssertion, true);
   assert.equal(facts.cleanupStarted, true);
   assert.equal(facts.cleanupCompleted, true);
+  const planCompletion = exactBoundaryEvents.find((event) =>
+    event.event === "exact0004SubphaseCompleted" &&
+      event.subphase === "plan_exact"
+  );
+  assert.ok(planCompletion);
+  assert.deepEqual(
+    Object.keys(planCompletion).sort(),
+    [
+      "event",
+      "evidenceSchemaVersion",
+      "operationClass",
+      "physicalProfileBefore",
+      "sequence",
+      "subphase"
+    ]
+  );
+  assert.equal(
+    planCompletion.physicalProfileBefore,
+    EXACT_0004_PHYSICAL_PROFILE_BEFORE
+  );
   const missingExact0004Subphases =
     realPostgresRunner.createPhysicalPhaseEmitter(() => {});
   for (const phase of realPostgresRunner.PHYSICAL_MAIN_PHASES) {
@@ -694,6 +739,85 @@ test("protocol group 1: physical phases accept only the complete ordered main an
     }
     missingExact0004Subphases.completeMain(phase);
   }
+});
+
+test("protocol group 1: authenticated profile before is canonical, allowlisted and bound only to plan completion", () => {
+  function emitterAtPlanCompletion(writeLine = () => {}) {
+    const emitter = realPostgresRunner.createPhysicalPhaseEmitter(writeLine);
+    for (const phase of realPostgresRunner.PHYSICAL_MAIN_PHASES) {
+      emitter.startMain(phase);
+      if (phase !== "exact_0004_plan_apply") {
+        emitter.completeMain(phase);
+        continue;
+      }
+      for (const subphase of
+        realPostgresRunner.EXACT_0004_EXECUTION_SUBPHASES) {
+        emitter.startExact0004Subphase(subphase);
+        if (subphase === "plan_exact") return emitter;
+        emitter.completeExact0004Subphase(
+          subphase,
+          exact0004CompletionFields(subphase)
+        );
+      }
+    }
+    throw new Error("synthetic_plan_exact_subphase_missing");
+  }
+
+  const acceptedLines = [];
+  const accepted = emitterAtPlanCompletion((line) => acceptedLines.push(line));
+  accepted.completeExact0004Subphase("plan_exact", {
+    physicalProfileBefore: EXACT_0004_PHYSICAL_PROFILE_BEFORE
+  });
+  const acceptedEvent = JSON.parse(acceptedLines.at(-1).slice(
+    realPostgresRunner.SAFE_EVENT_PREFIX.length
+  ));
+  assert.equal(acceptedEvent.event, "exact0004SubphaseCompleted");
+  assert.equal(acceptedEvent.subphase, "plan_exact");
+  assert.equal(
+    acceptedEvent.physicalProfileBefore,
+    EXACT_0004_PHYSICAL_PROFILE_BEFORE
+  );
+  assert.equal(Object.hasOwn(acceptedEvent, "profileBefore"), false);
+
+  assert.throws(
+    () => emitterAtPlanCompletion().completeExact0004Subphase("plan_exact"),
+    /physical_phase_completion_fields_invalid/
+  );
+  assert.throws(
+    () => emitterAtPlanCompletion().completeExact0004Subphase("plan_exact", {
+      physicalProfileBefore: EXACT_0004_PHYSICAL_PROFILE_BEFORE,
+      profileBefore: "0003"
+    }),
+    /physical_phase_completion_fields_invalid/
+  );
+  for (const physicalProfileBefore of [
+    "social-schema-0004",
+    "0003",
+    "arbitrary-profile",
+    null
+  ]) {
+    assert.throws(
+      () => emitterAtPlanCompletion().completeExact0004Subphase(
+        "plan_exact",
+        { physicalProfileBefore }
+      ),
+      /physical_phase_protocol_invalid/
+    );
+  }
+
+  const outsidePlan = realPostgresRunner.createPhysicalPhaseEmitter(() => {});
+  for (const phase of realPostgresRunner.PHYSICAL_MAIN_PHASES) {
+    outsidePlan.startMain(phase);
+    if (phase === "exact_0004_plan_apply") break;
+    outsidePlan.completeMain(phase);
+  }
+  outsidePlan.startExact0004Subphase("oid_catalog_lookup");
+  assert.throws(
+    () => outsidePlan.completeExact0004Subphase("oid_catalog_lookup", {
+      physicalProfileBefore: EXACT_0004_PHYSICAL_PROFILE_BEFORE
+    }),
+    /physical_phase_completion_fields_invalid/
+  );
 });
 
 test("protocol group 1: physical phases refuse jumps, repeats, unknowns, extras and post-cleanup markers", async () => {
@@ -1602,6 +1726,7 @@ test("protocol group 1: impossible snapshots and incoherent failure boundaries f
     evidenceSchemaVersion: version,
     lastMainPhaseStarted: null,
     lastMainPhaseCompleted: null,
+    physicalProfileBefore: "not_observed",
     cleanupStarted: false,
     cleanupCompleted: false,
     ...exact0004Evidence(),
@@ -1990,7 +2115,8 @@ test("classifier group 2: same-line permission conflicts propagate through colle
           lastMainPhaseStarted: "role_provisioning",
           lastMainPhaseCompleted: "physical_target_preflight",
           cleanupStarted: true,
-          cleanupCompleted: true
+          cleanupCompleted: true,
+          physicalProfileBefore: "not_observed"
         },
         signal: null,
         status: 1
@@ -5267,8 +5393,8 @@ function exact0004LegacyArtifact(fixture, overrides = {}) {
     firstFailure: null,
     runnerReached: null,
     gateValidated: null,
-    nodeTestSpawnAttempted: false,
-    nodeTestProcessCreated: false,
+    nodeTestSpawnAttempted: null,
+    nodeTestProcessCreated: null,
     cleanupStarted: false,
     failureDuringCleanup: false,
     failurePhase: null,
@@ -5514,6 +5640,7 @@ function exact0004GreenRunnerEvents() {
     exact0004RunnerEvent("physicalPhaseSnapshot", 12, {
       cleanupCompleted: true,
       cleanupStarted: true,
+      physicalProfileBefore: EXACT_0004_PHYSICAL_PROFILE_BEFORE,
       ...snapshotFields
     })
   ];
@@ -5768,15 +5895,61 @@ test("Exact-0004 entry evidence 08 records completed cleanup with every route re
   const fixture = exact0004ProtocolFixture(context, {
     PHYSICAL_OUTCOME: "success"
   });
+  const intermediate = collectSafeRunnerLines(
+    exact0004GreenRunnerEvents().map((event) =>
+      realPostgresRunner.safeEventLine(event)
+    )
+  );
   exact0004CompleteGreenPhysicalRoute(fixture);
   const artifact = exact0004FinalizeFixture(fixture, {
     legacyOverrides: exact0004GreenLegacyOverrides()
   });
+  assert.equal(intermediate.protocolValid, true);
+  assert.equal(intermediate.physicalProfileBefore,
+    EXACT_0004_PHYSICAL_PROFILE_BEFORE);
+  assert.equal(intermediate.profileBefore, "0003");
+  assert.equal(intermediate.failureDuringCleanup, false);
   assert.equal(artifact.cleanupStarted, true);
   assert.equal(artifact.cleanupCompleted, true);
   assert.equal(artifact.cleanupFailure, null);
+  assert.equal(artifact.profileBefore, intermediate.profileBefore);
+  assert.equal(
+    artifact.failureDuringCleanup,
+    intermediate.failureDuringCleanup
+  );
   assert.deepEqual(Object.values(artifact.residuals), Array(8).fill(0));
   assert.equal(artifact.firstFailure, null);
+  assert.equal(realPostgresRunner.validExact0004Artifact(artifact), true);
+});
+
+test("Exact-0004 entry evidence 08b rejects a workflow-only profile before literal", (context) => {
+  const fixture = exact0004ProtocolFixture(context, {
+    PHYSICAL_OUTCOME: "success"
+  });
+  exact0004CompleteGreenPhysicalRoute(fixture);
+  const artifact = exact0004FinalizeFixture(fixture, {
+    legacyOverrides: exact0004GreenLegacyOverrides()
+  });
+  const physicalSnapshot = artifact.lifecycleEvidence.find(
+    ({ event }) => event === "physicalPhaseSnapshot"
+  );
+  assert.ok(physicalSnapshot);
+  assert.equal(
+    physicalSnapshot.facts.physicalProfileBefore,
+    EXACT_0004_PHYSICAL_PROFILE_BEFORE
+  );
+  assert.equal(artifact.profileBefore, "0003");
+  assert.equal(realPostgresRunner.validExact0004Artifact({
+    ...artifact,
+    lifecycleEvidence: artifact.lifecycleEvidence.filter(
+      ({ event }) => event !== "physicalPhaseSnapshot"
+    ),
+    profileBefore: "0003"
+  }), false);
+  assert.equal(realPostgresRunner.validExact0004Artifact({
+    ...artifact,
+    profileBefore: "not_observed"
+  }), false);
 });
 
 test("Exact-0004 entry evidence 09 classifies H only for an owned launcher residual", (context) => {
@@ -5787,11 +5960,7 @@ test("Exact-0004 entry evidence 09 classifies H only for an owned launcher resid
   observation.failure("cleanup");
   observation.cleanupStarted();
   const artifact = exact0004FinalizeFixture(fixture, {
-    cleanupState: exact0004ZeroCleanup({ cleanupCompleted: false }),
-    legacyOverrides: {
-      firstFailure: "final_residuals_nonzero",
-      firstFailureStage: "cleanup"
-    }
+    cleanupState: exact0004ZeroCleanup({ cleanupCompleted: false })
   });
   assert.equal(artifact.auxiliaryProcessCount, 1);
   assert.equal(artifact.auxiliaryProcessOwnedByRoute, true);
@@ -5840,6 +6009,8 @@ test("Exact-0004 entry evidence 11 preserves the first failure and separates lat
   observation.launcherProcessCreated();
   exact0004AppendRunnerEvents(observation, exact0004CreatedRunnerEvents());
   observation.launcherClosed(1, null, false);
+  observation.auxiliaryResidualBeforeKill(0);
+  observation.auxiliaryResidualFinal(0);
   observation.failure("test_execution");
   observation.cleanupStarted();
   observation.cleanupCompleted(false, 0);
@@ -5849,7 +6020,11 @@ test("Exact-0004 entry evidence 11 preserves the first failure and separates lat
   );
   const artifact = exact0004FinalizeFixture(fixture, {
     cleanupState: exact0004ZeroCleanup(),
-    legacyOverrides: exact0004FunctionalFailureLegacyOverrides()
+    legacyOverrides: {
+      ...exact0004FunctionalFailureLegacyOverrides(),
+      profileBefore: "not_observed",
+      profileAfter: "not_observed"
+    }
   });
   assert.equal(artifact.firstFailure, "functional_test_failure");
   assert.equal(artifact.firstFailureStage, "test_execution");
@@ -5878,6 +6053,9 @@ test("Exact-0004 entry evidence 12 accepted observer callbacks contain no raw st
   const facts = collector.finish();
   assert.equal(accepted.length, 1);
   assert.equal(accepted[0].name, "runnerReached");
+  assert.equal(facts.physicalProfileBefore, "not_observed");
+  assert.equal(facts.profileBefore, "not_observed");
+  assert.equal(facts.failureDuringCleanup, null);
   assert.equal(exact0004HasRawOutputKey(accepted[0].snapshot), false);
   assert.equal(exact0004HasRawOutputKey(facts), false);
   assert.doesNotMatch(JSON.stringify(accepted), /private (stdout|stderr) payload/);

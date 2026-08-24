@@ -1878,6 +1878,7 @@ test("plan-exact authenticates canonical 0003 and remains strictly read-only", a
     observedPending: [SOCIAL_CONNECTOR_PERSISTENCE_MIGRATION],
     planApproved: true
   });
+  assert.equal(result.fromProfile, harness.state.physicalProfile);
   const forbidden = /^(CREATE|ALTER|DROP|GRANT|REVOKE|INSERT|UPDATE|DELETE|TRUNCATE)\b/i;
   assert.equal(
     harness.state.queries.some((query) => forbidden.test(query.text.trimStart())),
@@ -1899,6 +1900,41 @@ test("plan-exact authenticates canonical 0003 and remains strictly read-only", a
   );
   assert.ok(harness.state.queries.some((query) => query.text === "ROLLBACK"));
   assert.equal(harness.state.released, true);
+});
+
+test("plan-exact returns the physical gate profile instead of echoing the request", () => {
+  const source = fs.readFileSync(
+    path.join(root, "src", "persistence", "postgres", "migrations.js"),
+    "utf8"
+  );
+  const planExactSource = source.slice(
+    source.indexOf("  async function planExact("),
+    source.indexOf("  async function applyExact(")
+  );
+  assert.match(planExactSource, /fromProfile:\s*gate\.physical\.profile/);
+  assert.doesNotMatch(
+    planExactSource,
+    /fromProfile:\s*exactRequest\.fromProfile/
+  );
+});
+
+test("plan-exact cannot publish requested 0003 when the physical gate is 0004", async () => {
+  const harness = exactMigrationHarness({ physicalProfile: EXACT_TO_PROFILE });
+  let result;
+  await assert.rejects(
+    async () => {
+      result = await runnerFor(harness).planExact(
+        exactPlanRequest,
+        exactApprovalEnvironment
+      );
+    },
+    { code: "migration_exact_relation_profile_mismatch" }
+  );
+  assert.equal(exactPlanRequest.fromProfile, EXACT_FROM_PROFILE);
+  assert.equal(result, undefined);
+  assert.equal(harness.state.physicalProfile, EXACT_TO_PROFILE);
+  assert.equal(harness.state.exactMigrationExecutions, 0);
+  assert.ok(harness.state.queries.some((query) => query.text === "ROLLBACK"));
 });
 
 test("plan-exact refuses every non-exact ledger state and a future 0005", async () => {

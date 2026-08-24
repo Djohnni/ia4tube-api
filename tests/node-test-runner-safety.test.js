@@ -69,13 +69,24 @@ const EXTERNAL_ACCOUNT_ROLLBACK_CATALOG_PARENT_LF_SHA256 =
   "329890ff2e56c034a778b3277f46254795749ebc78feaf3c2e8d4ea760ee64c7";
 const EXTERNAL_ACCOUNT_ROLLBACK_CATALOG_PARENT_FILTERED_OID =
   "cad3660ccc8d972aff5770701ff836f29c61e615";
+const PRE_ROUTE_BASE_COMMIT = "86fde733f9aef75b83d343209cb4811db440dbcc";
+const PRE_ROUTE_BASE_LF_SHA256 =
+  "87b30c210aa665342d57c6255d16fdf8cab406a843a9534fc14eb9dc10612035";
+const PRE_ROUTE_BASE_FILTERED_OID =
+  "a7ec1f7a27c152e98d65e38204052034ca02ca0c";
+const LIFECYCLE_EVIDENCE_PARENT_COMMIT =
+  "87e5f6e076ef9035a8a6cdfd1eae02db75cbf077";
+const LIFECYCLE_EVIDENCE_PARENT_LF_SHA256 =
+  "bfa29707855f99c4823286109633f8b83c4593b8f46ab749e7939e4605022d89";
+const LIFECYCLE_EVIDENCE_PARENT_FILTERED_OID =
+  "c7c5c13f0886209bc75e31e426ef1db24a9e5277";
 const ROLLBACK_CATALOG_PARENT_COMMIT =
   "5a109bc775ac9e35bdcdaabec16d329509d9125f";
 const REAL_POSTGRES_TEST = "tests/social-postgres-real.test.js";
 const REAL_POSTGRES_TEST_LF_SHA256 =
-  "bfa29707855f99c4823286109633f8b83c4593b8f46ab749e7939e4605022d89";
+  "10d8eb4081b858a51fd4d785a467a531a9c40024f943c80a6f89e87c3228bc1b";
 const REAL_POSTGRES_TEST_FILTERED_OID =
-  "c7c5c13f0886209bc75e31e426ef1db24a9e5277";
+  "3fcf05a3ef9f612a1ba2dd897cf874f37807b631";
 const PHYSICAL_MAIN_PHASES = Object.freeze([
   "physical_target_preflight",
   "role_provisioning",
@@ -483,6 +494,102 @@ test("24. exact 0004 production ledger reads use the migrator role only", () => 
   assert.equal(realTestSource.includes("\r"), false);
   assert.equal(exactMigrationSource.includes("\r"), false);
 
+  const readRealTestBlob = (commit) => execFileSync(
+    "git",
+    ["cat-file", "blob", `${commit}:${REAL_POSTGRES_TEST}`],
+    {
+      cwd: REPOSITORY_ROOT,
+      encoding: null,
+      windowsHide: true,
+      stdio: ["ignore", "pipe", "ignore"],
+      timeout: 20_000,
+      maxBuffer: 2 * 1024 * 1024,
+      env: {
+        ...process.env,
+        GIT_OPTIONAL_LOCKS: "0",
+        GIT_TERMINAL_PROMPT: "0"
+      }
+    }
+  );
+  const assertRealTestBlob = (blob, sha256, filteredOid) => {
+    assert.equal(
+      crypto.createHash("sha256").update(blob).digest("hex"),
+      sha256
+    );
+    assert.equal(
+      crypto.createHash("sha1")
+        .update(`blob ${blob.length}\0`)
+        .update(blob)
+        .digest("hex"),
+      filteredOid
+    );
+  };
+  const currentFileLoadMarkerBlock = [
+    "{",
+    "  const marker = process.env.SOCIAL_TEST_FILE_LOAD_MARKER;",
+    "  if (typeof marker === \"string\" && /^[0-9a-f]{64}$/.test(marker)) {",
+    "    process.stderr.write(",
+    "      \"IA4TUBE_SAFE_EVENT=\" +",
+    "      `{\"event\":\"realTestFileLoaded\",\"evidenceSchemaVersion\":7,` +",
+    "      `\"marker\":\"${marker}\",\"sequence\":1}\\n`",
+    "    );",
+    "  }",
+    "}",
+    "",
+    ""
+  ].join("\n");
+  const preRouteFileLoadMarkerBlock = currentFileLoadMarkerBlock.replace(
+    '"evidenceSchemaVersion":7',
+    '"evidenceSchemaVersion":6'
+  );
+  const currentPlanCompletion = [
+    '  physicalPhases.completeExact0004Subphase("plan_exact", {',
+    "    physicalProfileBefore: plan.fromProfile",
+    "  });"
+  ].join("\n");
+  const preRoutePlanCompletion =
+    '  physicalPhases.completeExact0004Subphase("plan_exact");';
+  let preRouteBaseCandidate = replaceExactlyOnce(
+    realTestSource,
+    currentFileLoadMarkerBlock,
+    preRouteFileLoadMarkerBlock,
+    "current route evidence schema"
+  );
+  preRouteBaseCandidate = replaceExactlyOnce(
+    preRouteBaseCandidate,
+    currentPlanCompletion,
+    preRoutePlanCompletion,
+    "current route authenticated physical profile"
+  );
+  const preRouteBase = readRealTestBlob(PRE_ROUTE_BASE_COMMIT);
+  assertRealTestBlob(
+    preRouteBase,
+    PRE_ROUTE_BASE_LF_SHA256,
+    PRE_ROUTE_BASE_FILTERED_OID
+  );
+  assert.deepEqual(
+    Buffer.from(preRouteBaseCandidate, "utf8"),
+    preRouteBase
+  );
+  const lifecycleEvidenceParentCandidate = replaceExactlyOnce(
+    preRouteBaseCandidate,
+    preRouteFileLoadMarkerBlock,
+    "",
+    "authenticated real test file-load lifecycle evidence"
+  );
+  const lifecycleEvidenceParent = readRealTestBlob(
+    LIFECYCLE_EVIDENCE_PARENT_COMMIT
+  );
+  assertRealTestBlob(
+    lifecycleEvidenceParent,
+    LIFECYCLE_EVIDENCE_PARENT_LF_SHA256,
+    LIFECYCLE_EVIDENCE_PARENT_FILTERED_OID
+  );
+  assert.deepEqual(
+    Buffer.from(lifecycleEvidenceParentCandidate, "utf8"),
+    lifecycleEvidenceParent
+  );
+
   const transactionRollbackHelper = closedSourceSection(
     realTestSource,
     "async function proveTransactionRollback(pool, fixture) {",
@@ -596,7 +703,7 @@ test("24. exact 0004 production ledger reads use the migrator role only", () => 
   assert.equal(blockingIndex.includes("'error'"), false);
 
   const transactionRollbackParentCandidate = replaceExactlyOnce(
-    realTestSource,
+    lifecycleEvidenceParentCandidate,
     authorizedTransactionRollbackInsert,
     parentTransactionRollbackInsert,
     "tenant rollback disposable connection status"
@@ -2009,7 +2116,7 @@ test("27. exact 0004 plan subphase evidence stays closed and observational", asy
     ["42501", "23514", "P0001", "unknown", "not_observed"]
   );
   assert.equal(new Set(EXACT_0004_EVIDENCE_FIELDS).size, 18);
-  assert.equal(EVIDENCE_SCHEMA_VERSION, 6);
+  assert.equal(EVIDENCE_SCHEMA_VERSION, 7);
   assert.equal(new Set(EXACT_0004_EXECUTION_SUBPHASES).size, 16);
   assert.equal(new Set(EXACT_0004_SUBPHASES).size, 18);
   for (const forbidden of [
@@ -2248,9 +2355,10 @@ test("27. exact 0004 plan subphase evidence stays closed and observational", asy
   );
   const observedCalls = [
     ...realTestSource.matchAll(
-      /physicalPhases\.(startExact0004Subphase|completeExact0004Subphase)\(\s*"([a-z0-9_]+)"\s*\);/g
+      /physicalPhases\.(startExact0004Subphase|completeExact0004Subphase)\(\s*"([a-z0-9_]+)"(\s*,\s*\{\s*physicalProfileBefore:\s*plan\.fromProfile\s*\})?\s*\);/g
     )
   ].map((match) => ({
+    hasPhysicalProfileBefore: match[3] !== undefined,
     index: match.index,
     kind: match[1],
     subphase: match[2]
@@ -2261,6 +2369,36 @@ test("27. exact 0004 plan subphase evidence stays closed and observational", asy
       `startExact0004Subphase:${subphase}`,
       `completeExact0004Subphase:${subphase}`
     ])
+  );
+  assert.deepEqual(
+    observedCalls.filter(({ hasPhysicalProfileBefore }) =>
+      hasPhysicalProfileBefore
+    ).map(({ kind, subphase }) => ({ kind, subphase })),
+    [{ kind: "completeExact0004Subphase", subphase: "plan_exact" }]
+  );
+  const planStart = observedCalls.find(({ kind, subphase }) =>
+    kind === "startExact0004Subphase" && subphase === "plan_exact"
+  );
+  const planComplete = observedCalls.find(({ kind, subphase }) =>
+    kind === "completeExact0004Subphase" && subphase === "plan_exact"
+  );
+  assert.ok(planStart);
+  assert.ok(planComplete);
+  const planSnapshotCompareStart = realTestSource.indexOf(
+    'physicalPhases.startExact0004Subphase("plan_snapshot_compare")',
+    planComplete.index
+  );
+  assert.notEqual(planSnapshotCompareStart, -1);
+  const planRoute = realTestSource.slice(
+    planStart.index,
+    planSnapshotCompareStart
+  );
+  assert.equal(planRoute.includes("physicalProfileBefore: plan.fromProfile"), true);
+  assert.equal(
+    /physicalProfileBefore:\s*(?:EXACT_FROM_PROFILE|["']social-schema-0003["'])/.test(
+      planRoute
+    ),
+    false
   );
   assert.equal(
     realTestSource.split(
@@ -2500,7 +2638,12 @@ test("27. exact 0004 plan subphase evidence stays closed and observational", asy
           physicalPhases.markExact0004ConflictingNegativeAttempted();
           return { lines, physicalPhases };
         }
-        physicalPhases.completeExact0004Subphase(subphase);
+        physicalPhases.completeExact0004Subphase(
+          subphase,
+          subphase === "plan_exact"
+            ? { physicalProfileBefore: "social-schema-0003" }
+            : {}
+        );
       }
     }
     throw new Error("synthetic_conflicting_negative_subphase_missing");
