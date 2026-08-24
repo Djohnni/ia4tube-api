@@ -1,0 +1,105 @@
+{
+  "name": "Social staging exact 0004 disposable PostgreSQL 18.4 proof",
+  "on": {
+    "push": {
+      "branches": [
+        "social/checkpoint-3c0-staging-exact-preparation-20260824"
+      ]
+    }
+  },
+  "permissions": {
+    "contents": "read"
+  },
+  "concurrency": {
+    "group": "social-staging-exact-0004-disposable",
+    "cancel-in-progress": false
+  },
+  "env": {
+    "SOCIAL_STAGING_EXACT_DISPOSABLE_MODE": "synthetic_runner_local_only_v1",
+    "SOCIAL_STAGING_EXACT_DISPOSABLE_APPROVED": "RUN_SOCIAL_STAGING_EXACT_0004_DISPOSABLE_PG18",
+    "SOCIAL_STAGING_EXACT_POSTGRES_IMAGE_DIGEST": "sha256:7e6103cf85f88f7a0eddb3ec0b1ba8940eba098ed118ade25a729ca9daee5568",
+    "SOCIAL_STAGING_EXACT_DISPOSABLE_URL": "postgresql://postgres:Synthetic_Exact_0004_Only%21@127.0.0.1:5432/postgres"
+  },
+  "jobs": {
+    "staging-exact-0004-disposable": {
+      "if": "github.event_name == 'push' && github.ref == 'refs/heads/social/checkpoint-3c0-staging-exact-preparation-20260824' && github.event.created == true && github.event.deleted == false && github.event.forced == false && github.event.before == '0000000000000000000000000000000000000000' && github.run_attempt == 1",
+      "runs-on": "ubuntu-24.04",
+      "timeout-minutes": 30,
+      "services": {
+        "postgres": {
+          "image": "docker.io/library/postgres:18.4-bookworm@sha256:7e6103cf85f88f7a0eddb3ec0b1ba8940eba098ed118ade25a729ca9daee5568",
+          "env": {
+            "POSTGRES_USER": "postgres",
+            "POSTGRES_PASSWORD": "Synthetic_Exact_0004_Only!",
+            "POSTGRES_DB": "postgres"
+          },
+          "ports": [
+            "5432:5432"
+          ],
+          "options": "--health-cmd \"pg_isready -U postgres -d postgres\" --health-interval 2s --health-timeout 5s --health-retries 30"
+        }
+      },
+      "steps": [
+        {
+          "name": "Checkout candidate without credentials",
+          "uses": "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+          "with": {
+            "fetch-depth": 1,
+            "persist-credentials": false
+          }
+        },
+        {
+          "name": "Verify one-shot synthetic route boundary",
+          "shell": "bash",
+          "run": "set -euo pipefail\n[[ \"${GITHUB_EVENT_NAME}\" == \"push\" ]]\n[[ \"${GITHUB_REF}\" == \"refs/heads/social/checkpoint-3c0-staging-exact-preparation-20260824\" ]]\n[[ \"${GITHUB_RUN_ATTEMPT}\" == \"1\" ]]\n[[ \"$(git rev-parse HEAD)\" == \"${GITHUB_SHA}\" ]]\n[[ -z \"$(git status --porcelain=v1 --untracked-files=all)\" ]]\n[[ \"$(sha256sum db/migrations/0004_social_connector_persistence.up.sql | cut -d' ' -f1)\" == \"91f6efc611903c40e16bd37828d5b9c1a03dfae222e1d13b5dc97f81ffde1b5d\" ]]\n[[ \"$(sha256sum db/migrations/checksums.json | cut -d' ' -f1)\" == \"7bea25acc2a2fa899029129e75a8d66a182032264e3a3713ae4abe66e593fdc9\" ]]"
+        },
+        {
+          "name": "Set up Node 24",
+          "uses": "actions/setup-node@820762786026740c76f36085b0efc47a31fe5020",
+          "with": {
+            "node-version": "24",
+            "package-manager-cache": false
+          }
+        },
+        {
+          "name": "Install dependencies without lifecycle scripts",
+          "shell": "bash",
+          "run": "npm ci --ignore-scripts --no-audit --no-fund"
+        },
+        {
+          "name": "Validate the disposable workflow contract",
+          "shell": "bash",
+          "run": "node --test tests/social-staging-exact-0004-disposable-workflow.test.js"
+        },
+        {
+          "name": "Prove staging-exact 0004 on synthetic PostgreSQL 18.4",
+          "shell": "bash",
+          "run": "set -euo pipefail\nnode scripts/social-staging-exact-0004-disposable-proof.js --run --output=\"${RUNNER_TEMP}/social-staging-exact-0004-disposable-evidence\""
+        },
+        {
+          "name": "Verify sanitized snapshots and zero-residual evidence",
+          "shell": "bash",
+          "run": "set -euo pipefail\nnode scripts/social-staging-exact-0004-disposable-proof.js --verify --output=\"${RUNNER_TEMP}/social-staging-exact-0004-disposable-evidence\""
+        },
+        {
+          "name": "Upload synthetic proof evidence",
+          "uses": "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a",
+          "with": {
+            "name": "social-staging-exact-0004-disposable-evidence",
+            "path": "${{ runner.temp }}/social-staging-exact-0004-disposable-evidence/catalog-0003.json\n${{ runner.temp }}/social-staging-exact-0004-disposable-evidence/catalog-0003.json.sha256\n${{ runner.temp }}/social-staging-exact-0004-disposable-evidence/catalog-0004.json\n${{ runner.temp }}/social-staging-exact-0004-disposable-evidence/catalog-0004.json.sha256\n${{ runner.temp }}/social-staging-exact-0004-disposable-evidence/evidence.json\n${{ runner.temp }}/social-staging-exact-0004-disposable-evidence/evidence.json.sha256",
+            "if-no-files-found": "error",
+            "compression-level": 0,
+            "overwrite": false,
+            "include-hidden-files": false,
+            "retention-days": 7
+          }
+        },
+        {
+          "name": "Remove local evidence and confirm clean checkout",
+          "shell": "bash",
+          "run": "set -euo pipefail\nrm -rf -- \"${RUNNER_TEMP}/social-staging-exact-0004-disposable-evidence\"\n[[ ! -e \"${RUNNER_TEMP}/social-staging-exact-0004-disposable-evidence\" ]]\n[[ -z \"$(git status --porcelain=v1 --untracked-files=all)\" ]]"
+        }
+      ]
+    }
+  }
+}

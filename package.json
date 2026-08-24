@@ -8,6 +8,7 @@
     "test": "node scripts/run-node-tests.js",
     "test:postgres-real": "node scripts/run-real-postgres-tests.js",
     "db:social": "node scripts/social-db-migrate.js",
+    "db:social:staging-exact-0004": "node scripts/social-db-staging-exact-0004.js",
     "db:social:bootstrap-logins": "node scripts/social-db-bootstrap-logins.js"
   },
   "engines": {

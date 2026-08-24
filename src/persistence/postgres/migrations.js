@@ -14,6 +14,9 @@ const {
   principalAccessIsUnsafe,
   quoteIdentifier
 } = require("./pool");
+const {
+  PAID_STAGING_PUBLIC_TARGET
+} = require("./staging-provisioner");
 
 const MIGRATION_FILE_PATTERN = /^(\d{4}_[a-z0-9_]+)\.up\.sql$/;
 const ADVISORY_LOCK_ID = "483178116797201191";
@@ -30,6 +33,12 @@ const EXACT_TO_PROFILE = "social-schema-0004";
 const EXACT_PENDING_MIGRATIONS = Object.freeze([
   SOCIAL_CONNECTOR_PERSISTENCE_MIGRATION
 ]);
+const STAGING_EXACT_0004_SQL_SHA256 =
+  "91f6efc611903c40e16bd37828d5b9c1a03dfae222e1d13b5dc97f81ffde1b5d";
+const STAGING_EXACT_APPROVAL_PREFIX =
+  "APPLY_SOCIAL_STAGING_EXACT_0004";
+const STAGING_EXACT_WEB_SERVICE_ID = "srv-d9itiiurnols73fsbmmg";
+const STAGING_EXACT_DATABASE_SERVICE_ID = "dpg-d9l8u27qj5pc738k3rvg-a";
 const EXACT_BASE_MIGRATIONS = Object.freeze([
   "0001_social_multitenant_foundation",
   "0002_social_connections_and_vault",
@@ -575,6 +584,304 @@ async function verifySocialPhysicalProfile(
     profile,
     relationCount: expectedRelations.size,
     tableCount: tables.length
+  });
+}
+
+function canonicalCatalogRows(rows, fields) {
+  return (rows || []).map((row) => {
+    const result = {};
+    for (const field of fields) {
+      const value = row[field];
+      result[field] = value === undefined ? null : value;
+    }
+    return result;
+  });
+}
+
+async function readStagingExactCatalogSnapshot(client) {
+  const relations = await client.query(
+    [
+      "SELECT namespace.nspname::text AS schema_name,",
+      "  relation.relname::text AS relation_name,",
+      "  relation.relkind::text AS relation_kind,",
+      "  owner.rolname::text AS owner_name,",
+      "  relation.relpersistence::text AS persistence,",
+      "  relation.relrowsecurity, relation.relforcerowsecurity,",
+      "  relation.relreplident::text AS replica_identity,",
+      "  access_method.amname::text AS access_method,",
+      "  tablespace.spcname::text AS tablespace_name,",
+      "  relation.reloptions",
+      "FROM pg_catalog.pg_class relation",
+      "JOIN pg_catalog.pg_namespace namespace",
+      "  ON namespace.oid = relation.relnamespace",
+      "JOIN pg_catalog.pg_roles owner ON owner.oid = relation.relowner",
+      "LEFT JOIN pg_catalog.pg_am access_method",
+      "  ON access_method.oid = relation.relam",
+      "LEFT JOIN pg_catalog.pg_tablespace tablespace",
+      "  ON tablespace.oid = relation.reltablespace",
+      "WHERE namespace.nspname IN ('ia4tube_migrations', 'ia4tube_social')",
+      "  AND relation.relkind IN ('r', 'p', 'v', 'm', 'S', 'f')",
+      "ORDER BY namespace.nspname, relation.relname"
+    ].join("\n")
+  );
+  const columns = await client.query(
+    [
+      "SELECT namespace.nspname::text AS schema_name,",
+      "  relation.relname::text AS relation_name,",
+      "  attribute.attnum::integer AS ordinal_position,",
+      "  attribute.attname::text AS column_name,",
+      "  pg_catalog.format_type(attribute.atttypid, attribute.atttypmod)::text",
+      "    AS data_type,",
+      "  attribute.attnotnull, attribute.attidentity::text AS identity_kind,",
+      "  attribute.attgenerated::text AS generated_kind,",
+      "  pg_catalog.pg_get_expr(default_value.adbin,",
+      "    default_value.adrelid, TRUE)::text AS default_definition,",
+      "  collation.collname::text AS collation_name",
+      "FROM pg_catalog.pg_attribute attribute",
+      "JOIN pg_catalog.pg_class relation ON relation.oid = attribute.attrelid",
+      "JOIN pg_catalog.pg_namespace namespace",
+      "  ON namespace.oid = relation.relnamespace",
+      "LEFT JOIN pg_catalog.pg_attrdef default_value",
+      "  ON default_value.adrelid = attribute.attrelid",
+      "  AND default_value.adnum = attribute.attnum",
+      "LEFT JOIN pg_catalog.pg_collation collation",
+      "  ON collation.oid = NULLIF(attribute.attcollation, 0)",
+      "WHERE namespace.nspname IN ('ia4tube_migrations', 'ia4tube_social')",
+      "  AND relation.relkind IN ('r', 'p', 'v', 'm', 'f')",
+      "  AND attribute.attnum > 0 AND NOT attribute.attisdropped",
+      "ORDER BY namespace.nspname, relation.relname, attribute.attnum"
+    ].join("\n")
+  );
+  const constraints = await client.query(
+    [
+      "SELECT namespace.nspname::text AS schema_name,",
+      "  relation.relname::text AS relation_name,",
+      "  constraint_info.conname::text AS constraint_name,",
+      "  constraint_info.contype::text AS constraint_type,",
+      "  constraint_info.convalidated, constraint_info.condeferrable,",
+      "  constraint_info.condeferred,",
+      "  pg_catalog.pg_get_constraintdef(constraint_info.oid, TRUE)::text",
+      "    AS definition",
+      "FROM pg_catalog.pg_constraint constraint_info",
+      "JOIN pg_catalog.pg_class relation",
+      "  ON relation.oid = constraint_info.conrelid",
+      "JOIN pg_catalog.pg_namespace namespace",
+      "  ON namespace.oid = relation.relnamespace",
+      "WHERE namespace.nspname IN ('ia4tube_migrations', 'ia4tube_social')",
+      "ORDER BY namespace.nspname, relation.relname, constraint_info.conname"
+    ].join("\n")
+  );
+  const indexes = await client.query(
+    [
+      "SELECT namespace.nspname::text AS schema_name,",
+      "  table_relation.relname::text AS relation_name,",
+      "  index_relation.relname::text AS index_name,",
+      "  owner.rolname::text AS owner_name,",
+      "  index_info.indisunique, index_info.indisprimary,",
+      "  index_info.indisexclusion, index_info.indisvalid,",
+      "  index_info.indisready, index_info.indislive,",
+      "  pg_catalog.pg_get_indexdef(index_relation.oid)::text AS definition,",
+      "  pg_catalog.pg_get_expr(index_info.indpred,",
+      "    index_info.indrelid, TRUE)::text AS predicate",
+      "FROM pg_catalog.pg_index index_info",
+      "JOIN pg_catalog.pg_class table_relation",
+      "  ON table_relation.oid = index_info.indrelid",
+      "JOIN pg_catalog.pg_class index_relation",
+      "  ON index_relation.oid = index_info.indexrelid",
+      "JOIN pg_catalog.pg_namespace namespace",
+      "  ON namespace.oid = table_relation.relnamespace",
+      "JOIN pg_catalog.pg_roles owner ON owner.oid = index_relation.relowner",
+      "WHERE namespace.nspname IN ('ia4tube_migrations', 'ia4tube_social')",
+      "ORDER BY namespace.nspname, table_relation.relname,",
+      "  index_relation.relname"
+    ].join("\n")
+  );
+  const views = await client.query(
+    [
+      "SELECT namespace.nspname::text AS schema_name,",
+      "  relation.relname::text AS relation_name,",
+      "  relation.relkind::text AS relation_kind,",
+      "  pg_catalog.pg_get_viewdef(relation.oid, TRUE)::text AS definition",
+      "FROM pg_catalog.pg_class relation",
+      "JOIN pg_catalog.pg_namespace namespace",
+      "  ON namespace.oid = relation.relnamespace",
+      "WHERE namespace.nspname IN ('ia4tube_migrations', 'ia4tube_social')",
+      "  AND relation.relkind IN ('v', 'm')",
+      "ORDER BY namespace.nspname, relation.relname"
+    ].join("\n")
+  );
+  const triggers = await client.query(
+    [
+      "SELECT namespace.nspname::text AS schema_name,",
+      "  relation.relname::text AS relation_name,",
+      "  trigger_info.tgname::text AS trigger_name,",
+      "  trigger_info.tgenabled::text AS enabled_kind,",
+      "  pg_catalog.pg_get_triggerdef(trigger_info.oid, TRUE)::text",
+      "    AS definition",
+      "FROM pg_catalog.pg_trigger trigger_info",
+      "JOIN pg_catalog.pg_class relation",
+      "  ON relation.oid = trigger_info.tgrelid",
+      "JOIN pg_catalog.pg_namespace namespace",
+      "  ON namespace.oid = relation.relnamespace",
+      "WHERE namespace.nspname IN ('ia4tube_migrations', 'ia4tube_social')",
+      "  AND NOT trigger_info.tgisinternal",
+      "ORDER BY namespace.nspname, relation.relname, trigger_info.tgname"
+    ].join("\n")
+  );
+  const rules = await client.query(
+    [
+      "SELECT namespace.nspname::text AS schema_name,",
+      "  relation.relname::text AS relation_name,",
+      "  rule_info.rulename::text AS rule_name,",
+      "  rule_info.ev_type::text AS event_type,",
+      "  rule_info.is_instead,",
+      "  pg_catalog.pg_get_ruledef(rule_info.oid, TRUE)::text AS definition",
+      "FROM pg_catalog.pg_rewrite rule_info",
+      "JOIN pg_catalog.pg_class relation",
+      "  ON relation.oid = rule_info.ev_class",
+      "JOIN pg_catalog.pg_namespace namespace",
+      "  ON namespace.oid = relation.relnamespace",
+      "WHERE namespace.nspname IN ('ia4tube_migrations', 'ia4tube_social')",
+      "  AND rule_info.rulename <> '_RETURN'",
+      "ORDER BY namespace.nspname, relation.relname, rule_info.rulename"
+    ].join("\n")
+  );
+  const sequences = await client.query(
+    [
+      "SELECT namespace.nspname::text AS schema_name,",
+      "  relation.relname::text AS relation_name,",
+      "  pg_catalog.format_type(sequence_info.seqtypid, NULL)::text",
+      "    AS data_type,",
+      "  sequence_info.seqstart::text, sequence_info.seqincrement::text,",
+      "  sequence_info.seqmax::text, sequence_info.seqmin::text,",
+      "  sequence_info.seqcache::text, sequence_info.seqcycle",
+      "FROM pg_catalog.pg_sequence sequence_info",
+      "JOIN pg_catalog.pg_class relation",
+      "  ON relation.oid = sequence_info.seqrelid",
+      "JOIN pg_catalog.pg_namespace namespace",
+      "  ON namespace.oid = relation.relnamespace",
+      "WHERE namespace.nspname IN ('ia4tube_migrations', 'ia4tube_social')",
+      "ORDER BY namespace.nspname, relation.relname"
+    ].join("\n")
+  );
+  const routines = await client.query(
+    [
+      "SELECT namespace.nspname::text AS schema_name,",
+      "  routine.proname::text AS routine_name,",
+      "  routine.prokind::text AS routine_kind,",
+      "  owner.rolname::text AS owner_name,",
+      "  language.lanname::text AS language_name,",
+      "  routine.prosecdef, routine.provolatile::text AS volatility,",
+      "  routine.proparallel::text AS parallel_kind,",
+      "  pg_catalog.pg_get_function_identity_arguments(routine.oid)::text",
+      "    AS identity_arguments,",
+      "  pg_catalog.pg_get_function_result(routine.oid)::text AS result_type,",
+      "  pg_catalog.pg_get_functiondef(routine.oid)::text AS definition",
+      "FROM pg_catalog.pg_proc routine",
+      "JOIN pg_catalog.pg_namespace namespace",
+      "  ON namespace.oid = routine.pronamespace",
+      "JOIN pg_catalog.pg_roles owner ON owner.oid = routine.proowner",
+      "JOIN pg_catalog.pg_language language ON language.oid = routine.prolang",
+      "WHERE namespace.nspname IN ('ia4tube_migrations', 'ia4tube_social')",
+      "ORDER BY namespace.nspname, routine.proname,",
+      "  pg_catalog.pg_get_function_identity_arguments(routine.oid)"
+    ].join("\n")
+  );
+  const types = await client.query(
+    [
+      "SELECT namespace.nspname::text AS schema_name,",
+      "  type_info.typname::text AS type_name,",
+      "  type_info.typtype::text AS type_kind,",
+      "  type_info.typcategory::text AS category,",
+      "  owner.rolname::text AS owner_name,",
+      "  type_info.typnotnull, type_info.typdefault::text AS default_value,",
+      "  type_info.typelem::regtype::text AS element_type",
+      "FROM pg_catalog.pg_type type_info",
+      "JOIN pg_catalog.pg_namespace namespace",
+      "  ON namespace.oid = type_info.typnamespace",
+      "JOIN pg_catalog.pg_roles owner ON owner.oid = type_info.typowner",
+      "WHERE namespace.nspname IN ('ia4tube_migrations', 'ia4tube_social')",
+      "ORDER BY namespace.nspname, type_info.typname"
+    ].join("\n")
+  );
+  return Object.freeze({
+    relations: Object.freeze(canonicalCatalogRows(relations.rows, [
+      "schema_name", "relation_name", "relation_kind", "owner_name",
+      "persistence", "relrowsecurity", "relforcerowsecurity",
+      "replica_identity", "access_method", "tablespace_name", "reloptions"
+    ])),
+    columns: Object.freeze(canonicalCatalogRows(columns.rows, [
+      "schema_name", "relation_name", "ordinal_position", "column_name",
+      "data_type", "attnotnull", "identity_kind", "generated_kind",
+      "default_definition", "collation_name"
+    ])),
+    constraints: Object.freeze(canonicalCatalogRows(constraints.rows, [
+      "schema_name", "relation_name", "constraint_name", "constraint_type",
+      "convalidated", "condeferrable", "condeferred", "definition"
+    ])),
+    indexes: Object.freeze(canonicalCatalogRows(indexes.rows, [
+      "schema_name", "relation_name", "index_name", "owner_name",
+      "indisunique", "indisprimary", "indisexclusion", "indisvalid",
+      "indisready", "indislive", "definition", "predicate"
+    ])),
+    views: Object.freeze(canonicalCatalogRows(views.rows, [
+      "schema_name", "relation_name", "relation_kind", "definition"
+    ])),
+    triggers: Object.freeze(canonicalCatalogRows(triggers.rows, [
+      "schema_name", "relation_name", "trigger_name", "enabled_kind",
+      "definition"
+    ])),
+    rules: Object.freeze(canonicalCatalogRows(rules.rows, [
+      "schema_name", "relation_name", "rule_name", "event_type",
+      "is_instead", "definition"
+    ])),
+    sequences: Object.freeze(canonicalCatalogRows(sequences.rows, [
+      "schema_name", "relation_name", "data_type", "seqstart",
+      "seqincrement", "seqmax", "seqmin", "seqcache", "seqcycle"
+    ])),
+    routines: Object.freeze(canonicalCatalogRows(routines.rows, [
+      "schema_name", "routine_name", "routine_kind", "owner_name",
+      "language_name", "prosecdef", "volatility", "parallel_kind",
+      "identity_arguments", "result_type", "definition"
+    ])),
+    types: Object.freeze(canonicalCatalogRows(types.rows, [
+      "schema_name", "type_name", "type_kind", "category", "owner_name",
+      "typnotnull", "default_value", "element_type"
+    ]))
+  });
+}
+
+function stagingExactCatalogDigest(snapshot) {
+  return sha256(Buffer.from(JSON.stringify(snapshot), "utf8"));
+}
+
+async function verifyStagingExactCatalogSnapshot(client, expectedDigest) {
+  if (!/^[0-9a-f]{64}$/.test(String(expectedDigest || ""))) {
+    postgresFail(
+      "migration_staging_exact_catalog_digest_invalid",
+      "Digest do catalogo staging recusado."
+    );
+  }
+  const snapshot = await readStagingExactCatalogSnapshot(client);
+  const actualDigest = stagingExactCatalogDigest(snapshot);
+  if (actualDigest !== expectedDigest) {
+    postgresFail(
+      "migration_staging_exact_catalog_mismatch",
+      "Catalogo fisico staging diverge do perfil congelado."
+    );
+  }
+  return Object.freeze({
+    sha256: actualDigest,
+    relationCount: snapshot.relations.length,
+    columnCount: snapshot.columns.length,
+    constraintCount: snapshot.constraints.length,
+    indexCount: snapshot.indexes.length,
+    viewCount: snapshot.views.length,
+    triggerCount: snapshot.triggers.length,
+    ruleCount: snapshot.rules.length,
+    sequenceCount: snapshot.sequences.length,
+    routineCount: snapshot.routines.length,
+    typeCount: snapshot.types.length
   });
 }
 
@@ -1747,6 +2054,115 @@ function assertExactDisposableTarget(target) {
   }
 }
 
+function stagingExactApprovalValue(packageDigest, recoveryEvidenceDigest) {
+  return [
+    STAGING_EXACT_APPROVAL_PREFIX,
+    PAID_STAGING_PUBLIC_TARGET.environmentId,
+    STAGING_EXACT_0004_SQL_SHA256,
+    recoveryEvidenceDigest,
+    packageDigest
+  ].join(":");
+}
+
+function assertExactStagingTarget(target, request) {
+  const expected = PAID_STAGING_PUBLIC_TARGET;
+  if (
+    String(target?.environment || "").toLowerCase() !== "staging" ||
+    String(target?.environmentId || "").toLowerCase() !==
+      expected.environmentId ||
+    String(target?.host || "").toLowerCase() !== expected.host ||
+    String(target?.port || "5432") !== expected.port ||
+    String(target?.database || "") !== expected.database ||
+    String(target?.username || "").toLowerCase() !==
+      expected.migrationLogin ||
+    String(target?.productionApproval || "") !== ""
+  ) {
+    postgresFail(
+      "migration_staging_exact_target_mismatch",
+      "Destino staging da migration exata diverge."
+    );
+  }
+  if (
+    request.stagingApproval !== stagingExactApprovalValue(
+      request.executionPackageDigest,
+      request.recoveryEvidenceDigest
+    )
+  ) {
+    postgresFail(
+      "migration_staging_exact_approval_invalid",
+      "Aprovacao staging da migration exata recusada."
+    );
+  }
+}
+
+function assertCanonicalStagingExactManifest(local) {
+  if (
+    !Array.isArray(local) ||
+    local.length !== EXACT_TARGET_MIGRATIONS.length ||
+    local.some(
+      (migration, index) =>
+        migration.version !== EXACT_TARGET_MIGRATIONS[index]
+    )
+  ) {
+    postgresFail(
+      "migration_staging_exact_manifest_mismatch",
+      "Manifesto da migration exata staging diverge."
+    );
+  }
+  const migration = local.find(
+    (entry) => entry.version === SOCIAL_CONNECTOR_PERSISTENCE_MIGRATION
+  );
+  if (!migration || migration.sha256 !== STAGING_EXACT_0004_SQL_SHA256) {
+    postgresFail(
+      "migration_staging_exact_0004_pin_mismatch",
+      "Pin independente da migration 0004 diverge."
+    );
+  }
+}
+
+function validateStagingExactMigrationRequest(request) {
+  const exact = validateExactMigrationRequest(request, {
+    requireRecovery: true
+  });
+  const shaFields = [
+    "executionPackageDigest",
+    "recoveryEvidenceDigest",
+    "beforeCatalogSha256",
+    "afterCatalogSha256"
+  ];
+  if (
+    shaFields.some(
+      (field) => !/^[0-9a-f]{64}$/.test(String(request[field] || ""))
+    ) ||
+    request.migrationSha256 !== STAGING_EXACT_0004_SQL_SHA256 ||
+    request.recoveryStatus !== "AVAILABLE" ||
+    request.recoveryConcurrentOperation !== "NONE" ||
+    request.renderWebServiceId !== STAGING_EXACT_WEB_SERVICE_ID ||
+    request.renderDatabaseServiceId !== STAGING_EXACT_DATABASE_SERVICE_ID ||
+    request.databaseMarkerUuid !== PAID_STAGING_PUBLIC_TARGET.environmentId ||
+    request.recoveryEvidenceExternallyVerified !== undefined
+  ) {
+    postgresFail(
+      "migration_staging_exact_request_invalid",
+      "Contrato staging da migration exata recusado."
+    );
+  }
+  return Object.freeze({
+    ...exact,
+    migrationSha256: STAGING_EXACT_0004_SQL_SHA256,
+    executionPackageDigest: request.executionPackageDigest,
+    recoveryEvidenceDigest: request.recoveryEvidenceDigest,
+    beforeCatalogSha256: request.beforeCatalogSha256,
+    afterCatalogSha256: request.afterCatalogSha256,
+    recoveryStatus: "AVAILABLE",
+    recoveryConcurrentOperation: "NONE",
+    renderWebServiceId: STAGING_EXACT_WEB_SERVICE_ID,
+    renderDatabaseServiceId: STAGING_EXACT_DATABASE_SERVICE_ID,
+    databaseMarkerUuid: PAID_STAGING_PUBLIC_TARGET.environmentId,
+    stagingApproval: request.stagingApproval
+  });
+}
+
 function assertApplyTarget(target, env = process.env) {
   if (!target || target.approval !== APPLY_APPROVAL) {
     postgresFail(
@@ -1940,6 +2356,34 @@ async function exactGateWithinTransaction(
   return Object.freeze({ migrationState, physical });
 }
 
+async function stagingExactGateWithinTransaction(
+  client,
+  local,
+  profile,
+  migratorRole,
+  ownerRole,
+  target,
+  expectedCatalogDigest
+) {
+  const gate = await exactGateWithinTransaction(
+    client,
+    local,
+    profile,
+    migratorRole,
+    ownerRole,
+    target
+  );
+  const catalog = await verifyStagingExactCatalogSnapshot(
+    client,
+    expectedCatalogDigest
+  );
+  return Object.freeze({
+    migrationState: gate.migrationState,
+    physical: gate.physical,
+    catalog
+  });
+}
+
 async function applyExactWithinTransaction(
   client,
   local,
@@ -2010,6 +2454,85 @@ async function applyExactWithinTransaction(
       throw failure;
     }
     return Object.freeze({ before, after, physical });
+  } catch (error) {
+    if (commitAttempted) throw error;
+    await rollbackExactTransaction(client, error);
+    throw error;
+  }
+}
+
+async function applyStagingExactWithinTransaction(
+  client,
+  local,
+  migratorRole,
+  ownerRole,
+  target,
+  request
+) {
+  await client.query("BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ");
+  let commitAttempted = false;
+  try {
+    const before = await stagingExactGateWithinTransaction(
+      client,
+      local,
+      EXACT_FROM_PROFILE,
+      migratorRole,
+      ownerRole,
+      target,
+      request.beforeCatalogSha256
+    );
+    const migration = local.find(
+      (entry) => entry.version === SOCIAL_CONNECTOR_PERSISTENCE_MIGRATION
+    );
+    if (
+      !migration ||
+      migration.sha256 !== STAGING_EXACT_0004_SQL_SHA256
+    ) {
+      postgresFail(
+        "migration_staging_exact_0004_pin_mismatch",
+        "Pin independente da migration 0004 diverge."
+      );
+    }
+
+    await client.query(`SET LOCAL ROLE ${quoteIdentifier(ownerRole)}`);
+    const started = process.hrtime.bigint();
+    await client.query(migration.sql);
+    const elapsed = Number((process.hrtime.bigint() - started) / 1000000n);
+    await client.query(
+      [
+        `INSERT INTO ${LEDGER_NAME} (`,
+        "  version, checksum_sha256, execution_ms",
+        ") VALUES ($1, $2, $3)"
+      ].join("\n"),
+      [migration.version, migration.sha256, elapsed]
+    );
+
+    await client.query(`SET LOCAL ROLE ${quoteIdentifier(migratorRole)}`);
+    const after = await stagingExactGateWithinTransaction(
+      client,
+      local,
+      EXACT_TO_PROFILE,
+      migratorRole,
+      ownerRole,
+      target,
+      request.afterCatalogSha256
+    );
+
+    commitAttempted = true;
+    try {
+      await client.query("COMMIT");
+    } catch (error) {
+      const failure = new Error("migration_exact_commit_outcome_unknown");
+      failure.code = "migration_exact_commit_outcome_unknown";
+      failure.discardClient = true;
+      failure.skipAdvisoryUnlock = true;
+      failure.outcomeUnknown = true;
+      failure.retryAllowed = false;
+      failure.requiresReadOnlyInspection = true;
+      failure.cause = error;
+      throw failure;
+    }
+    return Object.freeze({ before, after });
   } catch (error) {
     if (commitAttempted) throw error;
     await rollbackExactTransaction(client, error);
@@ -2219,7 +2742,147 @@ function createMigrationRunner(options = {}) {
     }
   }
 
-  return Object.freeze({ apply, applyExact, inspect, planExact, validate });
+  async function planStagingExact(request, env = process.env) {
+    const exactRequest = validateStagingExactMigrationRequest(request);
+    assertMigrationTarget(target, env);
+    assertExactStagingTarget(target, exactRequest);
+    const local = readManifest(manifestOptions);
+    assertCanonicalStagingExactManifest(local);
+    const client = await pool.connect();
+    let releaseError;
+    try {
+      await verifyMigrationSession(client, migratorRole, ownerRole);
+      await verifyMigrationInfrastructure(client, migratorRole, ownerRole);
+      const gate = await withAdvisoryLock(client, () =>
+        runExactReadOnlyTransaction(client, () =>
+          stagingExactGateWithinTransaction(
+            client,
+            local,
+            EXACT_FROM_PROFILE,
+            migratorRole,
+            ownerRole,
+            target,
+            exactRequest.beforeCatalogSha256
+          )
+        )
+      );
+      return Object.freeze({
+        fromProfile: gate.physical.profile,
+        toProfile: exactRequest.toProfile,
+        expectedPending: Object.freeze([...exactRequest.expectedPending]),
+        observedPending: Object.freeze([
+          ...gate.migrationState.observedPending
+        ]),
+        beforeCatalogSha256: gate.catalog.sha256,
+        migrationSha256: exactRequest.migrationSha256,
+        executionPackageDigest: exactRequest.executionPackageDigest,
+        recoveryEvidenceDigest: exactRequest.recoveryEvidenceDigest,
+        planApproved: true,
+        readOnly: true
+      });
+    } catch (error) {
+      if (error?.discardClient) releaseError = error;
+      throw error;
+    } finally {
+      client.release(releaseError);
+    }
+  }
+
+  async function applyStagingExact(request, env = process.env) {
+    const exactRequest = validateStagingExactMigrationRequest(request);
+    assertApplyTarget(target, env);
+    assertExactStagingTarget(target, exactRequest);
+    const preflight = await planStagingExact(exactRequest, env);
+    const local = readManifest(manifestOptions);
+    assertCanonicalStagingExactManifest(local);
+    const client = await pool.connect();
+    let releaseError;
+    let commitCompleted = false;
+    try {
+      await verifyMigrationSession(client, migratorRole, ownerRole);
+      await verifyMigrationInfrastructure(client, migratorRole, ownerRole);
+      const applied = await withAdvisoryLock(client, async () => {
+        const transaction = await applyStagingExactWithinTransaction(
+          client,
+          local,
+          migratorRole,
+          ownerRole,
+          target,
+          exactRequest
+        );
+        commitCompleted = true;
+        let finalGate;
+        try {
+          finalGate = await runExactReadOnlyTransaction(client, () =>
+            stagingExactGateWithinTransaction(
+              client,
+              local,
+              EXACT_TO_PROFILE,
+              migratorRole,
+              ownerRole,
+              target,
+              exactRequest.afterCatalogSha256
+            )
+          );
+        } catch (error) {
+          const failure = new Error(
+            "migration_exact_postcommit_validation_failed"
+          );
+          failure.code = "migration_exact_postcommit_validation_failed";
+          failure.applied = true;
+          failure.retryAllowed = false;
+          failure.requiresReadOnlyInspection = true;
+          failure.discardClient = Boolean(error?.discardClient);
+          failure.skipAdvisoryUnlock = Boolean(
+            error?.discardClient || error?.skipAdvisoryUnlock
+          );
+          failure.cause = error;
+          throw failure;
+        }
+        return Object.freeze({ transaction, finalGate });
+      });
+      return Object.freeze({
+        fromProfile: exactRequest.fromProfile,
+        toProfile: exactRequest.toProfile,
+        expectedPending: Object.freeze([...exactRequest.expectedPending]),
+        observedPending: Object.freeze([
+          ...applied.transaction.before.migrationState.observedPending
+        ]),
+        appliedMigration: SOCIAL_CONNECTOR_PERSISTENCE_MIGRATION,
+        finalProfile: applied.finalGate.physical.profile,
+        finalCatalogSha256: applied.finalGate.catalog.sha256,
+        postCommitValidated: true,
+        recoveryReferenceDigest: sha256(exactRequest.recoveryReference),
+        recoveryCapturedAt: exactRequest.recoveryCapturedAt,
+        recoveryEvidenceDigest: exactRequest.recoveryEvidenceDigest,
+        recoveryEvidenceExternallyVerified: false,
+        recoveryEvidencePackageBound: true,
+        executionPackageDigest: exactRequest.executionPackageDigest,
+        preflightCatalogSha256: preflight.beforeCatalogSha256,
+        retryAllowed: false
+      });
+    } catch (error) {
+      if (commitCompleted) {
+        error.applied = true;
+        error.retryAllowed = false;
+        error.requiresReadOnlyInspection = true;
+      }
+      if (error?.discardClient) releaseError = error;
+      throw error;
+    } finally {
+      client.release(releaseError);
+    }
+  }
+
+  return Object.freeze({
+    apply,
+    applyExact,
+    applyStagingExact,
+    inspect,
+    planExact,
+    planStagingExact,
+    validate
+  });
 }
 
 module.exports = {
@@ -2237,19 +2900,28 @@ module.exports = {
   GLOBAL_VAULT_BACKFILL_POLICY_DROP,
   GLOBAL_VAULT_REGISTRY_MIGRATION,
   SOCIAL_CONNECTOR_PERSISTENCE_MIGRATION,
+  STAGING_EXACT_0004_SQL_SHA256,
+  STAGING_EXACT_APPROVAL_PREFIX,
+  STAGING_EXACT_DATABASE_SERVICE_ID,
+  STAGING_EXACT_WEB_SERVICE_ID,
   LEDGER_NAME,
   MIGRATION_FILE_PATTERN,
   PRODUCTION_APPROVAL,
   assertApplyTarget,
   assertExactDisposableTarget,
+  assertExactStagingTarget,
+  assertCanonicalStagingExactManifest,
   assertMigrationTarget,
   assertNonDestructiveSql,
   compareMigrationState,
   createMigrationRunner,
   exactMigrationState,
+  readStagingExactCatalogSnapshot,
   readManifest,
   readMigrationState,
   sha256,
+  stagingExactApprovalValue,
+  stagingExactCatalogDigest,
   targetFingerprint,
   verifyMigrationInfrastructure,
   verifyExistingLedgerContract,
@@ -2257,5 +2929,7 @@ module.exports = {
   verifySocialPhysicalProfile,
   verifyTargetMarker,
   validateExactMigrationRequest,
+  validateStagingExactMigrationRequest,
+  verifyStagingExactCatalogSnapshot,
   withRoleTransaction
 };

@@ -25,17 +25,25 @@ const {
   LEDGER_NAME,
   PRODUCTION_APPROVAL,
   SOCIAL_CONNECTOR_PERSISTENCE_MIGRATION,
+  STAGING_EXACT_0004_SQL_SHA256,
+  STAGING_EXACT_DATABASE_SERVICE_ID,
+  STAGING_EXACT_WEB_SERVICE_ID,
   assertApplyTarget,
   assertNonDestructiveSql,
   compareMigrationState,
   createMigrationRunner,
   readManifest,
   sha256,
+  stagingExactApprovalValue,
+  stagingExactCatalogDigest,
   targetFingerprint,
   verifyMigrationInfrastructure,
   verifyMigrationSession,
   verifyTargetMarker
 } = require("../src/persistence/postgres/migrations");
+const {
+  PAID_STAGING_PUBLIC_TARGET
+} = require("../src/persistence/postgres/staging-provisioner");
 const {
   main: migrationCliMain,
   parseMigrationCommand
@@ -66,6 +74,127 @@ const exactApplyRequest = Object.freeze({
 });
 const exactApprovalEnvironment = Object.freeze({
   SOCIAL_MIGRATION_TARGET_FINGERPRINT: targetFingerprint(baseTarget)
+});
+const stagingTarget = Object.freeze({
+  environment: "staging",
+  environmentId: PAID_STAGING_PUBLIC_TARGET.environmentId,
+  approval: APPLY_APPROVAL,
+  productionApproval: "",
+  host: PAID_STAGING_PUBLIC_TARGET.host,
+  port: PAID_STAGING_PUBLIC_TARGET.port,
+  database: PAID_STAGING_PUBLIC_TARGET.database,
+  username: PAID_STAGING_PUBLIC_TARGET.migrationLogin
+});
+
+function exactCatalogRows(profile, kind) {
+  const suffix = profile === EXACT_TO_PROFILE ? "0004" : "0003";
+  if (kind === "relations") {
+    return [{
+      schema_name: "ia4tube_social",
+      relation_name: `catalog_fixture_${suffix}`,
+      relation_kind: "r",
+      owner_name: "ia4tube_social_owner",
+      persistence: "p",
+      relrowsecurity: true,
+      relforcerowsecurity: true,
+      replica_identity: "d",
+      access_method: "heap",
+      tablespace_name: null,
+      reloptions: null
+    }];
+  }
+  if (kind === "columns") {
+    return [{
+      schema_name: "ia4tube_social",
+      relation_name: `catalog_fixture_${suffix}`,
+      ordinal_position: 1,
+      column_name: "company_id",
+      data_type: "uuid",
+      attnotnull: true,
+      identity_kind: "",
+      generated_kind: "",
+      default_definition: null,
+      collation_name: null
+    }];
+  }
+  if (kind === "constraints") {
+    return [{
+      schema_name: "ia4tube_social",
+      relation_name: `catalog_fixture_${suffix}`,
+      constraint_name: `catalog_fixture_${suffix}_pkey`,
+      constraint_type: "p",
+      convalidated: true,
+      condeferrable: false,
+      condeferred: false,
+      definition: "PRIMARY KEY (company_id)"
+    }];
+  }
+  if (kind === "indexes") {
+    return [{
+      schema_name: "ia4tube_social",
+      relation_name: `catalog_fixture_${suffix}`,
+      index_name: `catalog_fixture_${suffix}_pkey`,
+      owner_name: "ia4tube_social_owner",
+      indisunique: true,
+      indisprimary: true,
+      indisexclusion: false,
+      indisvalid: true,
+      indisready: true,
+      indislive: true,
+      definition: `CREATE UNIQUE INDEX catalog_fixture_${suffix}_pkey`,
+      predicate: null
+    }];
+  }
+  if (
+    ["views", "triggers", "rules", "sequences", "routines", "types"].includes(
+      kind
+    )
+  ) {
+    return [];
+  }
+  throw new Error(`unknown catalog fixture kind: ${kind}`);
+}
+
+function exactCatalogSnapshot(profile) {
+  return Object.freeze({
+    relations: exactCatalogRows(profile, "relations"),
+    columns: exactCatalogRows(profile, "columns"),
+    constraints: exactCatalogRows(profile, "constraints"),
+    indexes: exactCatalogRows(profile, "indexes"),
+    views: exactCatalogRows(profile, "views"),
+    triggers: exactCatalogRows(profile, "triggers"),
+    rules: exactCatalogRows(profile, "rules"),
+    sequences: exactCatalogRows(profile, "sequences"),
+    routines: exactCatalogRows(profile, "routines"),
+    types: exactCatalogRows(profile, "types")
+  });
+}
+
+const stagingExecutionPackageDigest = "1".repeat(64);
+const stagingRecoveryEvidenceDigest = "2".repeat(64);
+const stagingExactRequest = Object.freeze({
+  ...exactApplyRequest,
+  migrationSha256: STAGING_EXACT_0004_SQL_SHA256,
+  executionPackageDigest: stagingExecutionPackageDigest,
+  recoveryEvidenceDigest: stagingRecoveryEvidenceDigest,
+  beforeCatalogSha256: stagingExactCatalogDigest(
+    exactCatalogSnapshot(EXACT_FROM_PROFILE)
+  ),
+  afterCatalogSha256: stagingExactCatalogDigest(
+    exactCatalogSnapshot(EXACT_TO_PROFILE)
+  ),
+  recoveryStatus: "AVAILABLE",
+  recoveryConcurrentOperation: "NONE",
+  renderWebServiceId: STAGING_EXACT_WEB_SERVICE_ID,
+  renderDatabaseServiceId: STAGING_EXACT_DATABASE_SERVICE_ID,
+  databaseMarkerUuid: PAID_STAGING_PUBLIC_TARGET.environmentId,
+  stagingApproval: stagingExactApprovalValue(
+    stagingExecutionPackageDigest,
+    stagingRecoveryEvidenceDigest
+  )
+});
+const stagingApprovalEnvironment = Object.freeze({
+  SOCIAL_MIGRATION_TARGET_FINGERPRINT: targetFingerprint(stagingTarget)
 });
 
 function exactCliEnvironment() {
@@ -406,7 +535,11 @@ function migrationPool(options = {}) {
           return { rows: [] };
         }
         if (text === "ROLLBACK") {
-          if (options.rollbackFails) {
+          if (
+            options.rollbackFails ||
+            (options.rollbackFailsAfterMutation &&
+              state.exactMigrationExecutions > 0)
+          ) {
             const failure = new Error("synthetic rollback failure");
             failure.code = "synthetic_rollback_failure";
             throw failure;
@@ -589,6 +722,58 @@ function migrationPool(options = {}) {
           }
           return { rows };
         };
+        const catalogRows = (kind) => {
+          let rows = exactCatalogRows(activeProfile, kind).map((row) => ({
+            ...row
+          }));
+          if (typeof options.mutateExactCatalogRows === "function") {
+            rows = options.mutateExactCatalogRows({
+              kind,
+              profile: activeProfile,
+              rows,
+              state
+            }) || rows;
+          }
+          return { rows };
+        };
+        if (
+          text.includes("relation.relpersistence::text AS persistence")
+        ) {
+          return catalogRows("relations");
+        }
+        if (
+          text.includes("AS ordinal_position") &&
+          text.includes("AS collation_name")
+        ) {
+          return catalogRows("columns");
+        }
+        if (text.includes("pg_get_constraintdef")) {
+          return catalogRows("constraints");
+        }
+        if (text.includes("pg_get_indexdef")) {
+          return catalogRows("indexes");
+        }
+        if (text.includes("pg_get_viewdef")) {
+          return catalogRows("views");
+        }
+        if (text.includes("pg_get_triggerdef")) {
+          return catalogRows("triggers");
+        }
+        if (text.includes("pg_get_ruledef")) {
+          return catalogRows("rules");
+        }
+        if (text.includes("FROM pg_catalog.pg_sequence")) {
+          return catalogRows("sequences");
+        }
+        if (
+          text.includes("pg_get_function_identity_arguments") &&
+          text.includes("pg_get_functiondef")
+        ) {
+          return catalogRows("routines");
+        }
+        if (text.includes("FROM pg_catalog.pg_type type_info")) {
+          return catalogRows("types");
+        }
         if (
           text.includes("WHERE namespace.nspname = 'ia4tube_social'") &&
           text.includes("AS routine_count")
@@ -650,7 +835,10 @@ function migrationPool(options = {}) {
           return { rows: [{ pg_advisory_lock: null }] };
         }
         if (text.includes("pg_advisory_unlock")) {
-          if (options.unlockThrows) {
+          if (
+            options.unlockThrows ||
+            (options.unlockThrowsAfterCommit && state.commitAttempts > 0)
+          ) {
             throw new Error("synthetic unlock failure");
           }
           const unlocked =
@@ -707,12 +895,13 @@ function migrationPool(options = {}) {
   };
 }
 
-function runnerFor(harness, target = baseTarget) {
+function runnerFor(harness, target = baseTarget, manifestOptions = {}) {
   return createMigrationRunner({
     pool: harness.pool,
     ownerRole: "ia4tube_social_owner",
     migratorRole: "ia4tube_social_migrator",
-    target
+    target,
+    manifestOptions
   });
 }
 
@@ -730,6 +919,14 @@ function exactMigrationHarness(overrides = {}) {
     ledgerExists: true,
     applied: exactAppliedRows(),
     physicalProfile: EXACT_FROM_PROFILE,
+    ...overrides
+  });
+}
+
+function stagingExactMigrationHarness(overrides = {}) {
+  return exactMigrationHarness({
+    environmentId: PAID_STAGING_PUBLIC_TARGET.environmentId,
+    environmentName: "staging",
     ...overrides
   });
 }
@@ -755,6 +952,35 @@ function syntheticManifestWith0005() {
       version: migration.version,
       file: migration.file,
       sha256: migration.sha256 || sha256(Buffer.from(migration.sql, "utf8"))
+    });
+  }
+  const manifestPath = path.join(directory, "checksums.json");
+  fs.writeFileSync(
+    manifestPath,
+    `${JSON.stringify({ format: 1, migrations: entries }, null, 2)}\n`,
+    "utf8"
+  );
+  return {
+    directory,
+    options: { migrationsDirectory: directory, manifestPath }
+  };
+}
+
+function syntheticManifestWithCoordinated0004Change() {
+  const manifest = readManifest({ root });
+  const directory = fs.mkdtempSync(
+    path.join(os.tmpdir(), "ia4tube-social-exact-altered-0004-")
+  );
+  const entries = [];
+  for (const migration of manifest) {
+    const sql = migration.version === SOCIAL_CONNECTOR_PERSISTENCE_MIGRATION
+      ? `${migration.sql}SELECT 1;\n`
+      : migration.sql;
+    fs.writeFileSync(path.join(directory, migration.file), sql, "utf8");
+    entries.push({
+      version: migration.version,
+      file: migration.file,
+      sha256: sha256(Buffer.from(sql, "utf8"))
     });
   }
   const manifestPath = path.join(directory, "checksums.json");
@@ -2183,6 +2409,129 @@ test("exact modes refuse staging, non-loopback and non-disposable databases befo
   }
 });
 
+test("staging-exact accepts only the frozen staging identity before connecting", async () => {
+  const candidates = [
+    { environment: "test" },
+    { environmentId: environmentId },
+    { host: "other.render.com" },
+    { port: "5433" },
+    { database: "ia4tube_social_staging_copy" },
+    { username: "ia4tube_social_staging_runtime" },
+    { productionApproval: PRODUCTION_APPROVAL }
+  ];
+  for (const change of candidates) {
+    const target = { ...stagingTarget, ...change };
+    const harness = stagingExactMigrationHarness();
+    await assert.rejects(
+      runnerFor(harness, target).planStagingExact(stagingExactRequest, {
+        SOCIAL_MIGRATION_TARGET_FINGERPRINT: targetFingerprint(target)
+      }),
+      { code: "migration_staging_exact_target_mismatch" }
+    );
+    assert.equal(harness.state.connected, 0);
+  }
+});
+
+test("staging-exact validates recovery, service IDs, pins and bound approval before connecting", async () => {
+  const candidates = [
+    { migrationSha256: "0".repeat(64) },
+    { recoveryStatus: "UNKNOWN" },
+    { recoveryConcurrentOperation: "EXPORT_RUNNING" },
+    { renderWebServiceId: STAGING_EXACT_DATABASE_SERVICE_ID },
+    { renderDatabaseServiceId: STAGING_EXACT_WEB_SERVICE_ID },
+    { databaseMarkerUuid: environmentId },
+    { beforeCatalogSha256: "invalid" },
+    { recoveryEvidenceExternallyVerified: true },
+    { stagingApproval: "APPLY_SOCIAL_STAGING_EXACT_0004" }
+  ];
+  for (const change of candidates) {
+    const harness = stagingExactMigrationHarness();
+    await assert.rejects(
+      runnerFor(harness, stagingTarget).planStagingExact(
+        { ...stagingExactRequest, ...change },
+        stagingApprovalEnvironment
+      ),
+      {
+        code: change.stagingApproval
+          ? "migration_staging_exact_approval_invalid"
+          : "migration_staging_exact_request_invalid"
+      }
+    );
+    assert.equal(harness.state.connected, 0);
+  }
+});
+
+test("staging-exact refuses a coordinated 0004 SQL and checksum alteration by the independent pin", async () => {
+  const synthetic = syntheticManifestWithCoordinated0004Change();
+  const harness = stagingExactMigrationHarness();
+  try {
+    await assert.rejects(
+      runnerFor(
+        harness,
+        stagingTarget,
+        synthetic.options
+      ).planStagingExact(stagingExactRequest, stagingApprovalEnvironment),
+      { code: "migration_staging_exact_0004_pin_mismatch" }
+    );
+    assert.equal(harness.state.connected, 0);
+  } finally {
+    fs.rmSync(synthetic.directory, { recursive: true, force: true });
+  }
+});
+
+test("plan-staging-exact authenticates 0003 plus its frozen full catalog read-only", async () => {
+  const harness = stagingExactMigrationHarness();
+  const result = await runnerFor(
+    harness,
+    stagingTarget
+  ).planStagingExact(stagingExactRequest, stagingApprovalEnvironment);
+  assert.deepEqual(result, {
+    fromProfile: EXACT_FROM_PROFILE,
+    toProfile: EXACT_TO_PROFILE,
+    expectedPending: [SOCIAL_CONNECTOR_PERSISTENCE_MIGRATION],
+    observedPending: [SOCIAL_CONNECTOR_PERSISTENCE_MIGRATION],
+    beforeCatalogSha256: stagingExactRequest.beforeCatalogSha256,
+    migrationSha256: STAGING_EXACT_0004_SQL_SHA256,
+    executionPackageDigest: stagingExecutionPackageDigest,
+    recoveryEvidenceDigest: stagingRecoveryEvidenceDigest,
+    planApproved: true,
+    readOnly: true
+  });
+  assert.equal(harness.state.exactMigrationExecutions, 0);
+  assert.equal(harness.state.commitAttempts, 0);
+  assert.equal(
+    harness.state.queries.some((query) =>
+      query.text.includes("CREATE TABLE IF NOT EXISTS")
+    ),
+    false
+  );
+  assert.ok(harness.state.queries.some((query) =>
+    query.text === "BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY"
+  ));
+});
+
+test("plan-staging-exact refuses a partial 0004 catalog footprint before mutation", async () => {
+  for (const kind of ["columns", "constraints", "indexes", "relations"]) {
+    const harness = stagingExactMigrationHarness({
+      mutateExactCatalogRows({ kind: observedKind, rows }) {
+        return observedKind === kind
+          ? [{ ...rows[0], relation_name: "partial_0004_drift" }]
+          : rows;
+      }
+    });
+    await assert.rejects(
+      runnerFor(harness, stagingTarget).planStagingExact(
+        stagingExactRequest,
+        stagingApprovalEnvironment
+      ),
+      { code: "migration_staging_exact_catalog_mismatch" },
+      kind
+    );
+    assert.equal(harness.state.exactMigrationExecutions, 0, kind);
+    assert.equal(harness.state.commitAttempts, 0, kind);
+  }
+});
+
 test("exact runner validates the frozen request and synthetic recovery before connecting", async () => {
   const candidates = [
     {
@@ -2552,6 +2901,350 @@ test("apply-exact commits canonical 0004, ledger and physical validation as one 
   );
   assert.equal(texts.at(-1).includes("pg_advisory_unlock"), true);
   assert.equal(harness.state.released, true);
+});
+
+test("apply-staging-exact commits only canonical 0004 with ledger and catalog once", async () => {
+  const harness = stagingExactMigrationHarness();
+  const runner = runnerFor(harness, stagingTarget);
+  const result = await runner.applyStagingExact(
+    stagingExactRequest,
+    stagingApprovalEnvironment
+  );
+  assert.deepEqual(result, {
+    fromProfile: EXACT_FROM_PROFILE,
+    toProfile: EXACT_TO_PROFILE,
+    expectedPending: [SOCIAL_CONNECTOR_PERSISTENCE_MIGRATION],
+    observedPending: [SOCIAL_CONNECTOR_PERSISTENCE_MIGRATION],
+    appliedMigration: SOCIAL_CONNECTOR_PERSISTENCE_MIGRATION,
+    finalProfile: EXACT_TO_PROFILE,
+    finalCatalogSha256: stagingExactRequest.afterCatalogSha256,
+    postCommitValidated: true,
+    recoveryReferenceDigest: sha256(stagingExactRequest.recoveryReference),
+    recoveryCapturedAt: stagingExactRequest.recoveryCapturedAt,
+    recoveryEvidenceDigest: stagingRecoveryEvidenceDigest,
+    recoveryEvidenceExternallyVerified: false,
+    recoveryEvidencePackageBound: true,
+    executionPackageDigest: stagingExecutionPackageDigest,
+    preflightCatalogSha256: stagingExactRequest.beforeCatalogSha256,
+    retryAllowed: false
+  });
+  assert.equal(harness.state.exactMigrationExecutions, 1);
+  assert.equal(harness.state.commitAttempts, 1);
+  assert.equal(harness.state.physicalProfile, EXACT_TO_PROFILE);
+  assert.equal(
+    harness.state.applied.filter(
+      (row) => row.version === SOCIAL_CONNECTOR_PERSISTENCE_MIGRATION
+    ).length,
+    1
+  );
+  const texts = harness.state.queries.map((query) => query.text);
+  assert.equal(
+    texts.some((text) =>
+      text.includes("CREATE TABLE IF NOT EXISTS ia4tube_migrations.schema_migrations")
+    ),
+    false
+  );
+  const firstMutation = texts.find((text) =>
+    /^(CREATE|ALTER|DROP|GRANT|REVOKE|INSERT|UPDATE|DELETE|TRUNCATE)\b/i.test(
+      text.trimStart()
+    )
+  );
+  assert.match(
+    firstMutation,
+    /^ALTER TABLE ia4tube_social\.social_connections/
+  );
+
+  await assert.rejects(
+    runner.applyStagingExact(stagingExactRequest, stagingApprovalEnvironment),
+    { code: "exact_pending_set_mismatch" }
+  );
+  assert.equal(harness.state.exactMigrationExecutions, 1);
+  assert.equal(harness.state.commitAttempts, 1);
+  assert.equal(
+    harness.state.applied.filter(
+      (row) => row.version === SOCIAL_CONNECTOR_PERSISTENCE_MIGRATION
+    ).length,
+    1
+  );
+});
+
+test("apply-staging-exact rolls back catalog drift detected before COMMIT", async () => {
+  const harness = stagingExactMigrationHarness({
+    mutateExactCatalogRows({ profile, kind, rows }) {
+      if (profile === EXACT_TO_PROFILE && kind === "indexes") {
+        return [{ ...rows[0], index_name: "partial_index" }];
+      }
+      return rows;
+    }
+  });
+  await assert.rejects(
+    runnerFor(harness, stagingTarget).applyStagingExact(
+      stagingExactRequest,
+      stagingApprovalEnvironment
+    ),
+    { code: "migration_staging_exact_catalog_mismatch" }
+  );
+  assert.equal(harness.state.commitAttempts, 0);
+  assert.equal(harness.state.physicalProfile, EXACT_FROM_PROFILE);
+  assert.equal(harness.state.exactMigrationExecutions, 1);
+  assert.equal(
+    harness.state.applied.filter(
+      (row) => row.version === SOCIAL_CONNECTOR_PERSISTENCE_MIGRATION
+    ).length,
+    0
+  );
+  assert.ok(harness.state.queries.some((query) => query.text === "ROLLBACK"));
+});
+
+test("apply-staging-exact keeps ambiguous COMMIT non-retryable", async () => {
+  const harness = stagingExactMigrationHarness({
+    commitThrows: true,
+    commitOutcomeApplied: true
+  });
+  let failure;
+  try {
+    await runnerFor(harness, stagingTarget).applyStagingExact(
+      stagingExactRequest,
+      stagingApprovalEnvironment
+    );
+    assert.fail("ambiguous commit must fail closed");
+  } catch (error) {
+    failure = error;
+  }
+  assert.equal(failure.code, "migration_exact_commit_outcome_unknown");
+  assert.equal(failure.outcomeUnknown, true);
+  assert.equal(failure.retryAllowed, false);
+  assert.equal(failure.requiresReadOnlyInspection, true);
+  assert.equal(harness.state.commitAttempts, 1);
+  assert.equal(harness.state.exactMigrationExecutions, 1);
+});
+
+test("apply-staging-exact rolls back SQL, ledger and physical-gate failures", async () => {
+  const cases = [
+    {
+      name: "sql",
+      options: {
+        failOn: (text) =>
+          text.startsWith("ALTER TABLE ia4tube_social.social_connections")
+      },
+      expected: /synthetic migration failure/
+    },
+    {
+      name: "ledger insert",
+      options: {
+        failOn: (text, values) =>
+          text.includes("INSERT INTO ia4tube_migrations.schema_migrations") &&
+          values[0] === SOCIAL_CONNECTOR_PERSISTENCE_MIGRATION
+      },
+      expected: /synthetic migration failure/
+    },
+    {
+      name: "physical profile after sql",
+      options: {
+        mutateExactRows({ kind, profile, rows }) {
+          if (kind !== "constraints" || profile !== EXACT_TO_PROFILE) return rows;
+          return rows.map((row, index) =>
+            index === 0 ? { ...row, table_name: "wrong_table" } : row
+          );
+        }
+      },
+      expected: { code: "migration_exact_constraints_profile_mismatch" }
+    }
+  ];
+  for (const candidate of cases) {
+    const harness = stagingExactMigrationHarness(candidate.options);
+    await assert.rejects(
+      runnerFor(harness, stagingTarget).applyStagingExact(
+        stagingExactRequest,
+        stagingApprovalEnvironment
+      ),
+      candidate.expected,
+      candidate.name
+    );
+    assert.deepEqual(
+      harness.state.applied.map((row) => row.version),
+      EXACT_BASE_MIGRATIONS,
+      candidate.name
+    );
+    assert.equal(
+      harness.state.physicalProfile,
+      EXACT_FROM_PROFILE,
+      candidate.name
+    );
+    assert.equal(harness.state.commitAttempts, 0, candidate.name);
+    assert.ok(
+      harness.state.queries.some((query) => query.text === "ROLLBACK"),
+      candidate.name
+    );
+  }
+});
+
+test("staging-exact refuses ledger, owner, relkind and future migration before mutation", async () => {
+  const cases = [
+    {
+      name: "duplicate ledger",
+      options: {
+        applied: [...exactAppliedRows(), { ...exactAppliedRows()[0] }]
+      }
+    },
+    {
+      name: "owner",
+      options: {
+        mutateExactRows({ kind, profile, rows }) {
+          if (kind !== "relations" || profile !== EXACT_FROM_PROFILE) return rows;
+          return rows.map((row, index) =>
+            index === 0 ? { ...row, owner_name: "wrong_owner" } : row
+          );
+        }
+      }
+    },
+    {
+      name: "relkind",
+      options: {
+        mutateExactRows({ kind, profile, rows }) {
+          if (kind !== "relations" || profile !== EXACT_FROM_PROFILE) return rows;
+          let changed = false;
+          return rows.map((row) => {
+            if (!changed && row.object_kind === "r") {
+              changed = true;
+              return { ...row, object_kind: "v" };
+            }
+            return row;
+          });
+        }
+      }
+    }
+  ];
+  for (const candidate of cases) {
+    const harness = stagingExactMigrationHarness(candidate.options);
+    await assert.rejects(
+      runnerFor(harness, stagingTarget).applyStagingExact(
+        stagingExactRequest,
+        stagingApprovalEnvironment
+      ),
+      candidate.name
+    );
+    assert.equal(harness.state.exactMigrationExecutions, 0, candidate.name);
+    assert.equal(harness.state.commitAttempts, 0, candidate.name);
+  }
+
+  const synthetic = syntheticManifestWith0005();
+  try {
+    const harness = stagingExactMigrationHarness();
+    await assert.rejects(
+      runnerFor(harness, stagingTarget, synthetic.options).planStagingExact(
+        stagingExactRequest,
+        stagingApprovalEnvironment
+      ),
+      { code: "migration_staging_exact_manifest_mismatch" }
+    );
+    assert.equal(harness.state.connected, 0);
+    assert.equal(harness.state.exactMigrationExecutions, 0);
+  } finally {
+    fs.rmSync(synthetic.directory, { recursive: true, force: true });
+  }
+});
+
+test("apply-staging-exact fails closed when rollback cannot be confirmed", async () => {
+  const harness = stagingExactMigrationHarness({
+    failOn: (text, values) =>
+      text.includes("INSERT INTO ia4tube_migrations.schema_migrations") &&
+      values[0] === SOCIAL_CONNECTOR_PERSISTENCE_MIGRATION,
+    rollbackFailsAfterMutation: true
+  });
+  let failure;
+  try {
+    await runnerFor(harness, stagingTarget).applyStagingExact(
+      stagingExactRequest,
+      stagingApprovalEnvironment
+    );
+    assert.fail("rollback failure must fail closed");
+  } catch (error) {
+    failure = error;
+  }
+  assert.equal(failure.code, "migration_exact_rollback_failed");
+  assert.equal(failure.discardClient, true);
+  assert.equal(harness.state.commitAttempts, 0);
+  assert.equal(harness.state.applied.length, EXACT_BASE_MIGRATIONS.length);
+});
+
+test("apply-staging-exact classifies postcommit validation and unlock failures", async () => {
+  for (const candidate of [
+    {
+      name: "postcommit catalog",
+      options: {
+        mutateExactCatalogRows({ kind, profile, rows, state }) {
+          if (
+            state.commitAttempts > 0 &&
+            profile === EXACT_TO_PROFILE &&
+            kind === "indexes"
+          ) {
+            return [{ ...rows[0], index_name: "postcommit_drift" }];
+          }
+          return rows;
+        }
+      },
+      code: "migration_exact_postcommit_validation_failed"
+    },
+    {
+      name: "unlock",
+      options: { unlockThrowsAfterCommit: true },
+      code: "migration_advisory_unlock_failed"
+    }
+  ]) {
+    const harness = stagingExactMigrationHarness(candidate.options);
+    let failure;
+    try {
+      await runnerFor(harness, stagingTarget).applyStagingExact(
+        stagingExactRequest,
+        stagingApprovalEnvironment
+      );
+      assert.fail(`${candidate.name} must fail closed`);
+    } catch (error) {
+      failure = error;
+    }
+    assert.equal(failure.code, candidate.code, candidate.name);
+    assert.equal(failure.applied, true, candidate.name);
+    assert.equal(failure.retryAllowed, false, candidate.name);
+    assert.equal(failure.requiresReadOnlyInspection, true, candidate.name);
+    assert.equal(harness.state.commitAttempts, 1, candidate.name);
+    assert.equal(
+      harness.state.applied.filter(
+        (row) => row.version === SOCIAL_CONNECTOR_PERSISTENCE_MIGRATION
+      ).length,
+      1,
+      candidate.name
+    );
+  }
+});
+
+test("two staging-exact applies serialize to one ledger winner", async () => {
+  const harness = stagingExactMigrationHarness({ exactMigrationDelayMs: 10 });
+  const runner = runnerFor(harness, stagingTarget);
+  const settled = await Promise.allSettled([
+    runner.applyStagingExact(stagingExactRequest, stagingApprovalEnvironment),
+    runner.applyStagingExact(stagingExactRequest, stagingApprovalEnvironment)
+  ]);
+  assert.equal(
+    settled.filter((result) => result.status === "fulfilled").length,
+    1
+  );
+  assert.equal(
+    settled.filter(
+      (result) =>
+        result.status === "rejected" &&
+        result.reason?.code === "exact_pending_set_mismatch"
+    ).length,
+    1
+  );
+  assert.equal(harness.state.exactMigrationExecutions, 1);
+  assert.equal(harness.state.commitAttempts, 1);
+  assert.equal(
+    harness.state.applied.filter(
+      (row) => row.version === SOCIAL_CONNECTOR_PERSISTENCE_MIGRATION
+    ).length,
+    1
+  );
 });
 
 test("apply-exact rolls back every failure point before COMMIT", async () => {
