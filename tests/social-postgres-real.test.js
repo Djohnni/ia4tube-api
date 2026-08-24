@@ -1,5 +1,16 @@
 "use strict";
 
+{
+  const marker = process.env.SOCIAL_TEST_FILE_LOAD_MARKER;
+  if (typeof marker === "string" && /^[0-9a-f]{64}$/.test(marker)) {
+    process.stderr.write(
+      "IA4TUBE_SAFE_EVENT=" +
+      `{"event":"realTestFileLoaded","evidenceSchemaVersion":6,` +
+      `"marker":"${marker}","sequence":1}\n`
+    );
+  }
+}
+
 const assert = require("node:assert/strict");
 const { spawn, spawnSync } = require("node:child_process");
 const crypto = require("node:crypto");

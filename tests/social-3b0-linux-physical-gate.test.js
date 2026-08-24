@@ -1,6 +1,7 @@
 "use strict";
 
 const assert = require("node:assert/strict");
+const { execFileSync } = require("node:child_process");
 const crypto = require("node:crypto");
 const { EventEmitter } = require("node:events");
 const express = require("express");
@@ -72,6 +73,47 @@ function safeEventNames(lines) {
   return lines.map((line) => JSON.parse(
     line.slice(realPostgresRunner.SAFE_EVENT_PREFIX.length)
   ).event);
+}
+
+function safeEventObject(event, sequence, fields = {}) {
+  return {
+    event,
+    evidenceSchemaVersion: realPostgresRunner.EVIDENCE_SCHEMA_VERSION,
+    sequence,
+    ...fields
+  };
+}
+
+function realTestFileLoadedLine(fingerprint, sequence = 1) {
+  return realPostgresRunner.safeEventLine(safeEventObject(
+    realPostgresRunner.REAL_TEST_FILE_LOAD_EVENT,
+    sequence,
+    { marker: realPostgresRunner.realTestFileLoadMarker(fingerprint) }
+  ));
+}
+
+function shiftSafeEventSequences(lines, offset) {
+  return lines.map((line) => {
+    const event = JSON.parse(
+      line.slice(realPostgresRunner.SAFE_EVENT_PREFIX.length)
+    );
+    return realPostgresRunner.safeEventLine({
+      ...event,
+      sequence: event.sequence + offset
+    });
+  });
+}
+
+function authenticatedPhysicalLines(fingerprint, phaseLines = []) {
+  return [
+    realTestFileLoadedLine(fingerprint),
+    ...shiftSafeEventSequences(phaseLines, 1)
+  ];
+}
+
+function emitExitAndClose(child, code, signal) {
+  child.emit("exit", code, signal);
+  child.emit("close", code, signal);
 }
 
 function exact0004Evidence(
@@ -215,6 +257,7 @@ async function runSyntheticReporterFailure({
   stderrLines,
   phaseLines = []
 }) {
+  const fingerprint = "f".repeat(64);
   const emitted = [];
   let spawnArguments;
   const spawnImpl = (_executable, args) => {
@@ -224,15 +267,19 @@ async function runSyntheticReporterFailure({
     child.stderr = new PassThrough();
     queueMicrotask(() => {
       child.emit("spawn");
+      child.stderr.write(authenticatedPhysicalLines(
+        fingerprint,
+        phaseLines
+      ).join(""));
       child.stdout.end([...stdoutLines, ""].join("\n"));
-      child.stderr.end([...phaseLines, ...stderrLines, ""].join("\n"));
-      setImmediate(() => child.emit("close", 1, null));
+      child.stderr.end([...stderrLines, ""].join("\n"));
+      setImmediate(() => emitExitAndClose(child, 1, null));
     });
     return child;
   };
   const exitCode = await realPostgresRunner.main({}, {
     spawnImpl,
-    validateGateEnvironmentImpl: () => ({ fingerprint: "f".repeat(64) }),
+    validateGateEnvironmentImpl: () => ({ fingerprint }),
     writeLine: (line) => emitted.push(line)
   });
   assertExactTapRunnerArguments(spawnArguments);
@@ -244,6 +291,7 @@ async function runSyntheticReporterFailure({
 }
 
 test("real PostgreSQL runner emits one canonical safe lifecycle without raw TAP", async () => {
+  const fingerprint = "a".repeat(64);
   const emitted = [];
   const phaseLines = await physicalPhaseLines();
   let spawnArguments;
@@ -256,6 +304,10 @@ test("real PostgreSQL runner emits one canonical safe lifecycle without raw TAP"
     child.stderr = new PassThrough();
     queueMicrotask(() => {
       child.emit("spawn");
+      child.stderr.end(authenticatedPhysicalLines(
+        fingerprint,
+        phaseLines
+      ).join(""));
       child.stdout.end([
         "TAP version 13",
         `# Subtest: ${realPostgresRunner.TAP_TITLE}`,
@@ -268,31 +320,33 @@ test("real PostgreSQL runner emits one canonical safe lifecycle without raw TAP"
         "# cancelled 0",
         ""
       ].join("\n"));
-      child.stderr.end([...phaseLines, ""].join("\n"));
-      setImmediate(() => child.emit("close", 0, null));
+      setImmediate(() => emitExitAndClose(child, 0, null));
     });
     return child;
   };
   const exitCode = await realPostgresRunner.main({}, {
     spawnImpl,
-    validateGateEnvironmentImpl: () => ({ fingerprint: "a".repeat(64) }),
+    validateGateEnvironmentImpl: () => ({ fingerprint }),
     writeLine: (line) => emitted.push(line)
   });
   assert.equal(exitCode, 0);
   assertExactTapRunnerArguments(spawnArguments);
   assert.equal(spawnOptions.shell, false);
   assert.deepEqual(spawnOptions.stdio, ["ignore", "pipe", "pipe"]);
-  assert.equal(emitted.length, 9);
+  assert.equal(emitted.length, 12);
   assert.deepEqual(safeEventNames(emitted), [
     "runnerReached",
     "gateValidated",
     "nodeTestSpawnAttempted",
     "nodeTestProcessCreated",
+    "testFileLoaded",
     "tapStarted",
     "tapTitleObserved",
     "firstTestDiscovered",
-    "physicalPhaseSnapshot",
-    "nodeTestClosed"
+    "nodeTestTapSummary",
+    "nodeTestExit",
+    "nodeTestClose",
+    "physicalPhaseSnapshot"
   ]);
   assert.equal(emitted.every((line) =>
     line.startsWith(realPostgresRunner.SAFE_EVENT_PREFIX)), true);
@@ -301,19 +355,29 @@ test("real PostgreSQL runner emits one canonical safe lifecycle without raw TAP"
     line.includes(realPostgresRunner.TAP_TITLE)), false);
   const facts = collectSafeRunnerLines(emitted);
   assert.equal(facts.protocolValid, true);
-  assert.equal(facts.eventCount, 9);
+  assert.equal(facts.eventCount, 12);
   for (const name of [
     "runnerReached",
     "gateValidated",
     "nodeTestSpawnAttempted",
     "nodeTestProcessCreated",
+    "testFileLoaded",
     "tapStarted",
     "tapTitleObserved",
     "firstTestDiscovered"
   ]) assert.equal(facts[name], true, name);
+  assert.equal(facts.nodeTestExitObserved, true);
   assert.equal(facts.nodeTestExitCode, 0);
   assert.equal(facts.nodeTestSignal, null);
   assert.equal(facts.nodeTestTimedOut, false);
+  assert.equal(facts.nodeTestCloseObserved, true);
+  assert.equal(facts.nodeTestCloseCode, 0);
+  assert.equal(facts.nodeTestCloseSignal, null);
+  assert.deepEqual([
+    facts.testsDiscovered,
+    facts.testsPassed,
+    facts.testsFailed
+  ], [1, 1, 0]);
   assert.equal(facts.lastMainPhaseStarted, "reauthentication");
   assert.equal(facts.lastMainPhaseCompleted, "reauthentication");
   assert.equal(facts.lastExact0004SubphaseStarted, "final_snapshot");
@@ -431,6 +495,7 @@ test("real PostgreSQL runner preserves a sanitized gate refusal before spawn", a
 });
 
 test("real PostgreSQL runner classifies module failure without preserving its line", async () => {
+  const fingerprint = "b".repeat(64);
   const emitted = [];
   const phaseLines = await physicalPhaseLines({ complete: false });
   const spawnImpl = () => {
@@ -439,21 +504,22 @@ test("real PostgreSQL runner classifies module failure without preserving its li
     child.stderr = new PassThrough();
     queueMicrotask(() => {
       child.emit("spawn");
+      child.stderr.end(authenticatedPhysicalLines(
+        fingerprint,
+        phaseLines
+      ).join(""));
       child.stdout.end([
         "TAP version 13",
         "Error: Cannot find module 'pg' MODULE_NOT_FOUND",
         ""
       ].join("\n"));
-      child.stderr.end(
-        [...phaseLines, ""].join("\n")
-      );
-      setImmediate(() => child.emit("close", 1, null));
+      setImmediate(() => emitExitAndClose(child, 1, null));
     });
     return child;
   };
   const exitCode = await realPostgresRunner.main({}, {
     spawnImpl,
-    validateGateEnvironmentImpl: () => ({ fingerprint: "b".repeat(64) }),
+    validateGateEnvironmentImpl: () => ({ fingerprint }),
     writeLine: (line) => emitted.push(line)
   });
   assert.equal(exitCode, 1);
@@ -506,6 +572,7 @@ test("real PostgreSQL runner preserves an observable spawn refusal", async () =>
 });
 
 test("real PostgreSQL runner preserves a signal close without inventing timeout", async () => {
+  const fingerprint = "d".repeat(64);
   const emitted = [];
   const phaseLines = await physicalPhaseLines({ complete: false });
   const spawnImpl = () => {
@@ -514,6 +581,10 @@ test("real PostgreSQL runner preserves a signal close without inventing timeout"
     child.stderr = new PassThrough();
     queueMicrotask(() => {
       child.emit("spawn");
+      child.stderr.end(authenticatedPhysicalLines(
+        fingerprint,
+        phaseLines
+      ).join(""));
       child.stdout.end([
         "TAP version 13",
         `# Subtest: ${realPostgresRunner.TAP_TITLE}`,
@@ -524,16 +595,13 @@ test("real PostgreSQL runner preserves a signal close without inventing timeout"
         "# cancelled 0",
         ""
       ].join("\n"));
-      child.stderr.end(
-        [...phaseLines, ""].join("\n")
-      );
-      setImmediate(() => child.emit("close", null, "SIGTERM"));
+      setImmediate(() => emitExitAndClose(child, null, "SIGTERM"));
     });
     return child;
   };
   const exitCode = await realPostgresRunner.main({}, {
     spawnImpl,
-    validateGateEnvironmentImpl: () => ({ fingerprint: "d".repeat(64) }),
+    validateGateEnvironmentImpl: () => ({ fingerprint }),
     writeLine: (line) => emitted.push(line)
   });
   assert.equal(exitCode, 1);
@@ -542,7 +610,9 @@ test("real PostgreSQL runner preserves a signal close without inventing timeout"
   assert.equal(facts.nodeTestProcessCreated, true);
   assert.equal(facts.nodeTestExitCode, null);
   assert.equal(facts.nodeTestSignal, "SIGTERM");
-  assert.equal(facts.nodeTestTimedOut, null);
+  assert.equal(facts.nodeTestTimedOut, false);
+  assert.equal(facts.nodeTestCloseObserved, true);
+  assert.equal(facts.nodeTestCloseSignal, "SIGTERM");
   assert.equal(facts.firstFailureStage, "test_execution");
 });
 
@@ -1107,7 +1177,10 @@ test("protocol group 1: exact 0004 evidence is closed, ordered, immutable and sa
   assert.equal(missingSqlState.facts.safeErrorClass, "assertion_failure");
 
   const appendedAfterFailure = beforeMutation.emitted[0]
-    .replace('"sequence":1', '"sequence":11');
+    .replace(
+      '"sequence":1',
+      `"sequence":${beforeMutation.emitted.length + 1}`
+    );
   const preserved = collectSafeRunnerLines([
     ...beforeMutation.emitted,
     appendedAfterFailure
@@ -1650,29 +1723,42 @@ test("protocol group 1: impossible snapshots and incoherent failure boundaries f
       sequence: 4
     }),
     realPostgresRunner.safeEventLine({
+      event: "testFileLoaded",
+      evidenceSchemaVersion: version,
+      testFileLoaded: true,
+      sequence: 5
+    }),
+    realPostgresRunner.safeEventLine({
       event: "tapStarted",
       evidenceSchemaVersion: version,
       tapStarted: true,
-      sequence: 5
+      sequence: 6
     }),
     realPostgresRunner.safeEventLine({
       event: "firstTestDiscovered",
       evidenceSchemaVersion: version,
       firstTestDiscovered: true,
-      sequence: 6
-    }),
-    realPostgresRunner.safeEventLine(snapshot({
-      lastMainPhaseStarted: "physical_target_preflight",
       sequence: 7
-    })),
+    }),
     realPostgresRunner.safeEventLine({
-      event: "nodeTestClosed",
+      event: "nodeTestExit",
       evidenceSchemaVersion: version,
       nodeTestExitCode: 1,
       nodeTestSignal: null,
       nodeTestTimedOut: false,
       sequence: 8
-    })
+    }),
+    realPostgresRunner.safeEventLine({
+      event: "nodeTestClose",
+      evidenceSchemaVersion: version,
+      nodeTestCloseCode: 1,
+      nodeTestCloseSignal: null,
+      sequence: 9
+    }),
+    realPostgresRunner.safeEventLine(snapshot({
+      lastMainPhaseStarted: "physical_target_preflight",
+      sequence: 10
+    }))
   ];
   for (const firstFailureStage of [
     "safe_event_protocol",
@@ -1686,7 +1772,7 @@ test("protocol group 1: impossible snapshots and incoherent failure boundaries f
         safeErrorCode: firstFailureStage === "safe_event_protocol"
           ? "safe_event_protocol_invalid"
           : "ERR_TEST_FAILURE",
-        sequence: 9,
+        sequence: 11,
         stderrCategory: firstFailureStage === "safe_event_protocol"
           ? "unknown"
           : "tap_failure"
@@ -1717,7 +1803,7 @@ test("protocol group 1: outer failure preserves the first functional boundary an
     stderrLines: ["permission denied", "code: '42501'"]
   });
   assert.equal(functional.facts.protocolValid, true);
-  assert.equal(functional.facts.eventCount, 10);
+  assert.equal(functional.facts.eventCount, 12);
   assert.equal(functional.facts.failureDuringCleanup, false);
   assert.equal(functional.facts.failurePhase, "physical_target_preflight");
   assert.equal(functional.facts.lastMainPhaseCompleted, null);
@@ -1889,11 +1975,17 @@ test("classifier group 2: same-line permission conflicts propagate through colle
     { code: "EACCES", syscall: "open" }
   );
   const exitCode = await realPostgresRunner.main({}, {
-    runNodeTestImpl: async ({ onCreated }) => {
+    runNodeTestImpl: async ({ onCreated, onExit, onClose }) => {
       onCreated();
+      onExit(1, null, false);
+      onClose(1, null);
       return {
         created: true,
         error: conflictingError,
+        exitObserved: true,
+        closeObserved: true,
+        closeStatus: 1,
+        closeSignal: null,
         facts: {
           lastMainPhaseStarted: "role_provisioning",
           lastMainPhaseCompleted: "physical_target_preflight",
@@ -1911,7 +2003,7 @@ test("classifier group 2: same-line permission conflicts propagate through colle
   assert.equal(exitCode, 1);
   assert.equal(errorFacts.protocolValid, true);
   assert.equal(errorFacts.failure, true);
-  assert.equal(errorFacts.eventCount, 7);
+  assert.equal(errorFacts.eventCount, 8);
   assert.equal(errorFacts.firstFailureStage, "safe_event_protocol");
   assert.equal(errorFacts.failureDuringCleanup, false);
   assert.equal(errorFacts.failurePhase, "role_provisioning");
@@ -2068,7 +2160,7 @@ test("protocol group 1: safe event collector refuses duplicates, JSON, fields, e
         sequence: 4
       }),
       untrustedSafeEvent({
-        event: "nodeTestClosed",
+        event: "nodeTestExit",
         evidenceSchemaVersion: version,
         nodeTestExitCode: -1,
         nodeTestSignal: "SIGTERM",
@@ -5033,6 +5125,78 @@ const EXACT_0004_ARTIFACT_FILES = Object.freeze([
   "process-status.json.sha256"
 ]);
 
+const EXACT_0004_DIRTY_WORKTREE_PATH =
+  "tests/social-3b0-linux-physical-gate.test.js";
+const EXACT_0004_DIRTY_WORKTREE_STATUS =
+  ` M ${EXACT_0004_DIRTY_WORKTREE_PATH}\n`;
+
+function exact0004FixtureWorktreeEnvironment(context, worktreeStatus) {
+  assert.ok([
+    "",
+    EXACT_0004_DIRTY_WORKTREE_STATUS
+  ].includes(worktreeStatus));
+  const repositoryRoot = path.resolve(__dirname, "..");
+  const fixtureRoot = fs.mkdtempSync(
+    path.join(os.tmpdir(), "social-3b0-exact-0004-worktree-")
+  );
+  context.after(() => {
+    fs.rmSync(fixtureRoot, { recursive: true, force: true });
+  });
+  const runGit = (arguments_, environment = process.env) => execFileSync(
+    "git",
+    arguments_,
+    {
+      cwd: repositoryRoot,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+      env: environment
+    }
+  );
+  const gitDirectory = runGit([
+    "rev-parse",
+    "--absolute-git-dir"
+  ]).trim();
+  const sourceIndex = path.resolve(repositoryRoot, runGit([
+    "rev-parse",
+    "--git-path",
+    "index"
+  ]).trim());
+  const indexFile = path.join(fixtureRoot, "index");
+  const worktree = path.join(fixtureRoot, "checkout");
+  fs.mkdirSync(worktree, { mode: 0o700 });
+  fs.copyFileSync(sourceIndex, indexFile);
+  const fixtureEnvironment = Object.freeze({
+    GIT_DIR: gitDirectory,
+    GIT_INDEX_FILE: indexFile,
+    GIT_WORK_TREE: worktree
+  });
+  const gitEnvironment = {
+    ...process.env,
+    ...fixtureEnvironment,
+    GIT_OPTIONAL_LOCKS: "0",
+    GIT_TERMINAL_PROMPT: "0"
+  };
+  runGit([
+    "checkout-index",
+    "--all",
+    "--force",
+    "--index"
+  ], gitEnvironment);
+  if (worktreeStatus !== "") {
+    fs.appendFileSync(
+      path.join(worktree, ...EXACT_0004_DIRTY_WORKTREE_PATH.split("/")),
+      "\nexact0004 dirty worktree fixture\n"
+    );
+  }
+  const observedStatus = runGit([
+    "status",
+    "--porcelain=v1",
+    "--untracked-files=all"
+  ], gitEnvironment).replace(/\r\n/g, "\n");
+  assert.equal(observedStatus, worktreeStatus);
+  return fixtureEnvironment;
+}
+
 function exact0004ProtocolFixture(context, environmentOverrides = {}) {
   const runnerTemp = fs.mkdtempSync(
     path.join(os.tmpdir(), "social-3b0-exact-0004-entry-")
@@ -5049,8 +5213,9 @@ function exact0004ProtocolFixture(context, environmentOverrides = {}) {
     LEGACY_FINALIZE_OUTCOME: "success",
     FINALIZE_OUTCOME: "success",
     UPLOAD_OUTCOME: "success",
+    SOCIAL_EXACT_POSTGRES_IMAGE: gate.IMAGE,
     SOCIAL_EXACT_BRANCH:
-      "social/checkpoint-3b0-exact-0004-runner-linux-physical-step-entry-evidence-20260820",
+      "social/checkpoint-3b0-exact-0004-runner-linux-lifecycle-clean-worktree-fixture-20260821",
     GITHUB_SHA: "b".repeat(40),
     SOCIAL_EXACT_PARENT: "a".repeat(40),
     ...environmentOverrides
@@ -5074,7 +5239,7 @@ function exact0004LegacyArtifact(fixture, overrides = {}) {
     realPostgresRunner.EXACT_0004_ARTIFACT_ADDED_KEYS
   );
   const legacyKeys = realPostgresRunner.EXACT_0004_ARTIFACT_KEYS.filter(
-    (key) => !addedKeys.has(key)
+    (key) => !addedKeys.has(key) && key !== "lifecycleEvidence"
   );
   const artifact = Object.fromEntries(legacyKeys.map((key) => [key, null]));
   return Object.assign(artifact, {
@@ -5086,7 +5251,7 @@ function exact0004LegacyArtifact(fixture, overrides = {}) {
     inventory: [...realPostgresRunner.EXACT_0004_INVENTORY],
     runner: "ubuntu-24.04",
     nodeVersion: process.version,
-    postgresImageDigest: "sha256:" + "c".repeat(64),
+    postgresImageDigest: gate.IMAGE.slice(gate.IMAGE.lastIndexOf("@") + 1),
     postgresStarted: false,
     testProcessStarted: false,
     testFileLoaded: null,
@@ -5234,11 +5399,16 @@ function exact0004FinalizeFixture(fixture, {
   evidenceState = "valid",
   cleanupState = exact0004ZeroCleanup(),
   legacyOverrides = {},
+  mutateLegacy = (value) => value,
   processStatus = {}
 } = {}) {
+  const legacy = mutateLegacy(exact0004LegacyArtifact(
+    fixture,
+    legacyOverrides
+  ));
   exact0004WriteJson(
     path.join(fixture.files.artifactDirectory, "evidence.json"),
-    exact0004LegacyArtifact(fixture, legacyOverrides)
+    legacy
   );
   if (evidenceState === "valid") {
     exact0004WriteJson(fixture.files.evidenceState, {
@@ -5281,15 +5451,84 @@ function exact0004LoadPhysicalScript(fixture) {
   );
 }
 
+function exact0004RunnerEvent(name, sequence, fields = {}) {
+  return safeEventObject(name, sequence, fields);
+}
+
+function exact0004AppendRunnerEvents(observation, events) {
+  for (const event of events) {
+    assert.equal(
+      observation.safeEvent(event.event, null, event),
+      true,
+      event.event
+    );
+  }
+}
+
+function exact0004CreatedRunnerEvents() {
+  return [
+    exact0004RunnerEvent("runnerReached", 1, { runnerReached: true }),
+    exact0004RunnerEvent("gateValidated", 2, { gateValidated: true }),
+    exact0004RunnerEvent("nodeTestSpawnAttempted", 3, {
+      nodeTestSpawnAttempted: true
+    }),
+    exact0004RunnerEvent("nodeTestProcessCreated", 4, {
+      nodeTestProcessCreated: true
+    })
+  ];
+}
+
+function exact0004GreenRunnerEvents() {
+  const green = exact0004GreenLegacyOverrides();
+  const snapshotFields = Object.fromEntries([
+    "lastMainPhaseStarted",
+    "lastMainPhaseCompleted",
+    ...realPostgresRunner.EXACT_0004_EVIDENCE_FIELDS
+  ].map((key) => [key, green[key]]));
+  return [
+    ...exact0004CreatedRunnerEvents(),
+    exact0004RunnerEvent("testFileLoaded", 5, { testFileLoaded: true }),
+    exact0004RunnerEvent("tapStarted", 6, { tapStarted: true }),
+    exact0004RunnerEvent("tapTitleObserved", 7, {
+      tapTitleObserved: true
+    }),
+    exact0004RunnerEvent("firstTestDiscovered", 8, {
+      firstTestDiscovered: true
+    }),
+    exact0004RunnerEvent("nodeTestTapSummary", 9, {
+      cancelled: 0,
+      fail: 0,
+      pass: 1,
+      skipped: 0,
+      tests: 1
+    }),
+    exact0004RunnerEvent("nodeTestExit", 10, {
+      nodeTestExitCode: 0,
+      nodeTestSignal: null,
+      nodeTestTimedOut: false
+    }),
+    exact0004RunnerEvent("nodeTestClose", 11, {
+      nodeTestCloseCode: 0,
+      nodeTestCloseSignal: null
+    }),
+    exact0004RunnerEvent("physicalPhaseSnapshot", 12, {
+      cleanupCompleted: true,
+      cleanupStarted: true,
+      ...snapshotFields
+    })
+  ];
+}
+
 function exact0004CompleteGreenPhysicalRoute(fixture) {
   const observation = exact0004LoadPhysicalScript(fixture);
-  observation.launcherSpawnAttempted();
-  observation.launcherProcessCreated();
   observation.postgresStartAttempted();
   observation.postgresStarted();
-  observation.safeEvent("nodeTestSpawnAttempted");
-  observation.safeEvent("nodeTestProcessCreated");
-  observation.launcherClosed(0, null, false, 0);
+  observation.launcherSpawnAttempted();
+  observation.launcherProcessCreated();
+  exact0004AppendRunnerEvents(observation, exact0004GreenRunnerEvents());
+  observation.launcherClosed(0, null, false);
+  observation.auxiliaryResidualBeforeKill(0);
+  observation.auxiliaryResidualFinal(0);
   observation.cleanupStarted();
   observation.cleanupCompleted(true, 0);
   return observation;
@@ -5454,7 +5693,7 @@ test("Exact-0004 entry evidence 04 classifies E with the created launcher result
   const observation = exact0004LoadPhysicalScript(fixture);
   observation.launcherSpawnAttempted();
   observation.launcherProcessCreated();
-  observation.launcherClosed(0, null, false, 1);
+  observation.launcherClosed(0, null, false);
   const artifact = exact0004FinalizeFixture(fixture, {
     evidenceState: "missing",
     legacyOverrides: {
@@ -5515,7 +5754,7 @@ test("Exact-0004 entry evidence 07 classifies G when an owned resource has no cl
   const observation = exact0004LoadPhysicalScript(fixture);
   observation.launcherSpawnAttempted();
   observation.launcherProcessCreated();
-  observation.launcherClosed(1, null, false, 1);
+  observation.launcherClosed(1, null, false);
   const artifact = exact0004FinalizeFixture(fixture, {
     cleanupState: null
   });
@@ -5565,12 +5804,14 @@ test("Exact-0004 entry evidence 09 classifies H only for an owned launcher resid
 
 test("Exact-0004 entry evidence 10 keeps I external allowlisted identity outside route residuals", (context) => {
   const fixture = exact0004ProtocolFixture(context);
-  exact0004LoadPhysicalScript(fixture);
+  const observation = exact0004LoadPhysicalScript(fixture);
   realPostgresRunner.updateExact0004Checkpoint({
     auxiliaryProcessCount: 1,
     safeAuxiliaryProcessClass: "github_runner_tool",
     auxiliaryProcessOwnedByRoute: false
   }, fixture.environment);
+  observation.cleanupStarted();
+  observation.cleanupCompleted(true, 0);
   const artifact = exact0004FinalizeFixture(fixture);
   assert.equal(artifact.physicalLauncherSpawnAttempted, false);
   assert.equal(artifact.physicalLauncherProcessCreated, false);
@@ -5578,6 +5819,8 @@ test("Exact-0004 entry evidence 10 keeps I external allowlisted identity outside
   assert.equal(artifact.safeAuxiliaryProcessClass, "github_runner_tool");
   assert.equal(artifact.auxiliaryProcessOwnedByRoute, false);
   assert.equal(artifact.residuals.auxiliaryProcesses, 0);
+  assert.equal(artifact.cleanupStarted, true);
+  assert.equal(artifact.cleanupCompleted, true);
   assert.equal(
     artifact.firstFailure,
     "physical_step_auxiliary_process_not_owned_by_route"
@@ -5591,13 +5834,12 @@ test("Exact-0004 entry evidence 10 keeps I external allowlisted identity outside
 test("Exact-0004 entry evidence 11 preserves the first failure and separates later cleanup failure", (context) => {
   const fixture = exact0004ProtocolFixture(context);
   const observation = exact0004LoadPhysicalScript(fixture);
-  observation.launcherSpawnAttempted();
-  observation.launcherProcessCreated();
   observation.postgresStartAttempted();
   observation.postgresStarted();
-  observation.safeEvent("nodeTestSpawnAttempted");
-  observation.safeEvent("nodeTestProcessCreated");
-  observation.launcherClosed(1, null, false, 0);
+  observation.launcherSpawnAttempted();
+  observation.launcherProcessCreated();
+  exact0004AppendRunnerEvents(observation, exact0004CreatedRunnerEvents());
+  observation.launcherClosed(1, null, false);
   observation.failure("test_execution");
   observation.cleanupStarted();
   observation.cleanupCompleted(false, 0);
@@ -5712,6 +5954,7 @@ test("Exact-0004 entry evidence 14 final artifact has schema 2 and exactly four 
     fixture.files.cleanupState,
     fixture.files.assessment
   ]) {
+    assert.equal(fs.existsSync(stateFile), false, stateFile);
     const temporaryPrefix = path.basename(stateFile) + ".tmp-";
     assert.deepEqual(
       fs.readdirSync(path.dirname(stateFile)).filter(
@@ -5720,4 +5963,948 @@ test("Exact-0004 entry evidence 14 final artifact has schema 2 and exactly four 
       []
     );
   }
+});
+
+function exact0004NodeLifecycleHarness({
+  fingerprint = "9".repeat(64)
+} = {}) {
+  const callbacks = [];
+  let child;
+  let spawnExecutable;
+  let spawnArguments;
+  let spawnOptions;
+  const result = realPostgresRunner.runNodeTest({
+    configuration: { fingerprint },
+    env: {},
+    onCreated: () => callbacks.push({ event: "spawn" }),
+    onError: (afterSpawn, error) => callbacks.push({
+      afterSpawn,
+      event: "error",
+      safeCode: error?.code ?? null
+    }),
+    onExit: (code, signal, timedOut) => callbacks.push({
+      code,
+      event: "exit",
+      signal,
+      timedOut
+    }),
+    onClose: (code, signal) => callbacks.push({
+      code,
+      event: "close",
+      signal
+    }),
+    onMarker: (name, fields = {}) => callbacks.push({
+      event: name,
+      ...fields
+    }),
+    spawnImpl: (executable, args, options) => {
+      spawnExecutable = executable;
+      spawnArguments = args;
+      spawnOptions = options;
+      child = new EventEmitter();
+      child.stdout = new PassThrough();
+      child.stderr = new PassThrough();
+      return child;
+    }
+  });
+  return Object.freeze({
+    callbacks,
+    child,
+    fingerprint,
+    result,
+    spawnExecutable,
+    spawnArguments,
+    spawnOptions
+  });
+}
+
+function exact0004EmitAuthenticatedFileLoad(harness) {
+  harness.child.stderr.write(realTestFileLoadedLine(harness.fingerprint));
+}
+
+function exact0004EmitTap(harness, {
+  title = realPostgresRunner.TAP_TITLE,
+  tests = 1,
+  pass = 1,
+  fail = 0
+} = {}) {
+  harness.child.stdout.write([
+    "TAP version 13",
+    `# Subtest: ${title}`,
+    `ok 1 - ${title}`,
+    `1..${tests}`,
+    `# tests ${tests}`,
+    `# pass ${pass}`,
+    `# fail ${fail}`,
+    "# skipped 0",
+    "# cancelled 0",
+    ""
+  ].join("\n"));
+}
+
+function exact0004EndSyntheticPipes(harness) {
+  harness.child.stdout.end();
+  harness.child.stderr.end();
+}
+
+function exact0004RewriteEvidenceWithSidecar(fixture, value) {
+  const file = path.join(fixture.files.artifactDirectory, "evidence.json");
+  exact0004WriteJson(file, value);
+  const digest = crypto.createHash("sha256")
+    .update(fs.readFileSync(file))
+    .digest("hex");
+  fs.writeFileSync(
+    file + ".sha256",
+    digest + "  evidence.json\n",
+    { mode: 0o600 }
+  );
+}
+
+function exact0004GreenLifecycleArtifact(context, options = {}) {
+  const fixture = exact0004ProtocolFixture(context, {
+    PHYSICAL_OUTCOME: "success",
+    ...options.environmentOverrides
+  });
+  const observation = exact0004CompleteGreenPhysicalRoute(fixture);
+  const artifact = exact0004FinalizeFixture(fixture, {
+    legacyOverrides: exact0004GreenLegacyOverrides(),
+    ...options.finalizeOverrides
+  });
+  return Object.freeze({ artifact, fixture, observation });
+}
+
+test("Exact-0004 lifecycle evidence 01 preserves spawn to file load to TAP to exit to close", async () => {
+  const harness = exact0004NodeLifecycleHarness();
+  assert.deepEqual(harness.child.eventNames(), [
+    "spawn",
+    "error",
+    "exit",
+    "close"
+  ]);
+  assertExactTapRunnerArguments(harness.spawnArguments);
+  assert.equal(harness.spawnExecutable, process.execPath);
+  assert.equal(harness.spawnOptions.cwd, path.resolve(__dirname, ".."));
+  assert.equal(harness.spawnOptions.shell, false);
+  assert.equal(harness.spawnOptions.windowsHide, true);
+  assert.deepEqual(harness.spawnOptions.stdio, ["ignore", "pipe", "pipe"]);
+  assert.equal(
+    harness.spawnOptions.env.SOCIAL_REAL_POSTGRES_REQUIRED,
+    "true"
+  );
+  assert.equal(
+    harness.spawnOptions.env.SOCIAL_TEST_GATE_VALIDATED_FINGERPRINT,
+    harness.fingerprint
+  );
+  assert.equal(
+    harness.spawnOptions.env[realPostgresRunner.REAL_TEST_FILE_LOAD_MARKER_ENV],
+    realPostgresRunner.realTestFileLoadMarker(harness.fingerprint)
+  );
+  harness.child.emit("spawn");
+  exact0004EmitAuthenticatedFileLoad(harness);
+  exact0004EmitTap(harness);
+  harness.child.emit("exit", 0, null);
+  exact0004EndSyntheticPipes(harness);
+  harness.child.emit("close", 0, null);
+  const result = await harness.result;
+  const observed = harness.callbacks.map(({ event }) => event);
+  assert.deepEqual(observed, [
+    "spawn",
+    "testFileLoaded",
+    "tapStarted",
+    "tapTitleObserved",
+    "firstTestDiscovered",
+    "nodeTestTapSummary",
+    "exit",
+    "close"
+  ]);
+  assert.deepEqual({
+    absent: [],
+    certified: [
+      result.facts.testFileLoaded,
+      result.facts.tapStarted,
+      result.exitObserved,
+      result.closeObserved
+    ],
+    inference: [],
+    observed
+  }, {
+    absent: [],
+    certified: [true, true, true, true],
+    inference: [],
+    observed
+  });
+  assert.deepEqual([
+    result.status,
+    result.signal,
+    result.closeStatus,
+    result.closeSignal
+  ], [0, null, 0, null]);
+});
+
+test("Exact-0004 lifecycle evidence 02 keeps testFileLoaded independent from the TAP title", async () => {
+  const harness = exact0004NodeLifecycleHarness();
+  harness.child.emit("spawn");
+  exact0004EmitAuthenticatedFileLoad(harness);
+  exact0004EmitTap(harness, { title: "synthetic different TAP title" });
+  harness.child.emit("exit", 1, null);
+  exact0004EndSyntheticPipes(harness);
+  harness.child.emit("close", 1, null);
+  const result = await harness.result;
+  assert.equal(result.facts.testFileLoaded, true, "certified file entry");
+  assert.equal(result.facts.tapStarted, true, "observed TAP byte");
+  assert.equal(result.facts.tapTitleObserved, false, "expected title absent");
+  assert.equal(result.facts.firstTestDiscovered, true, "test observed");
+});
+
+test("Exact-0004 lifecycle evidence 03 preserves spawn then exit then close without inventing bootstrap facts", async () => {
+  const harness = exact0004NodeLifecycleHarness();
+  harness.child.emit("spawn");
+  harness.child.emit("exit", 0, null);
+  exact0004EndSyntheticPipes(harness);
+  harness.child.emit("close", 0, null);
+  const result = await harness.result;
+  assert.deepEqual(
+    harness.callbacks.map(({ event }) => event),
+    ["spawn", "exit", "close"]
+  );
+  assert.equal(result.facts.testFileLoaded, false, "authenticated fact absent");
+  assert.equal(result.facts.tapStarted, false, "TAP absent");
+  assert.equal(result.exitObserved, true);
+  assert.equal(result.closeObserved, true);
+});
+
+test("Exact-0004 lifecycle evidence 04 preserves exit while close is still pending", async () => {
+  const harness = exact0004NodeLifecycleHarness();
+  let settled = false;
+  harness.result.then(() => { settled = true; });
+  harness.child.emit("spawn");
+  harness.child.emit("exit", 0, null);
+  await Promise.resolve();
+  assert.equal(settled, false, "close remains absent, not inferred");
+  assert.deepEqual(
+    harness.callbacks.map(({ event }) => event),
+    ["spawn", "exit"]
+  );
+  exact0004EndSyntheticPipes(harness);
+  harness.child.emit("close", 0, null);
+  const result = await harness.result;
+  assert.equal(result.exitObserved, true);
+  assert.equal(result.closeObserved, true);
+});
+
+test("Exact-0004 lifecycle evidence 05 keeps an open pipe pending after exit", async () => {
+  const harness = exact0004NodeLifecycleHarness();
+  let settled = false;
+  harness.result.then(() => { settled = true; });
+  harness.child.emit("spawn");
+  exact0004EmitAuthenticatedFileLoad(harness);
+  harness.child.stderr.write("non-sensitive diagnostic still draining\n");
+  harness.child.emit("exit", 0, null);
+  await Promise.resolve();
+  assert.equal(settled, false);
+  assert.equal(harness.child.stderr.writableEnded, false);
+  exact0004EndSyntheticPipes(harness);
+  harness.child.emit("close", 0, null);
+  const result = await harness.result;
+  assert.equal(result.exitObserved, true);
+  assert.equal(result.closeObserved, true);
+  assert.equal(result.facts.testFileLoaded, true);
+});
+
+test("Exact-0004 lifecycle evidence 06 preserves error before spawn as an observed refusal", async () => {
+  const harness = exact0004NodeLifecycleHarness();
+  harness.child.emit(
+    "error",
+    Object.assign(new Error("synthetic refusal"), { code: "EACCES" })
+  );
+  exact0004EndSyntheticPipes(harness);
+  harness.child.emit("close", null, null);
+  const result = await harness.result;
+  assert.deepEqual(harness.callbacks, [{
+    afterSpawn: false,
+    event: "error",
+    safeCode: "EACCES"
+  }]);
+  assert.equal(result.created, false);
+  assert.equal(result.exitObserved, false);
+  assert.equal(result.closeObserved, true);
+});
+
+test("Exact-0004 lifecycle evidence 07 preserves error after spawn independently from exit and close", async () => {
+  const harness = exact0004NodeLifecycleHarness();
+  harness.child.emit("spawn");
+  harness.child.emit(
+    "error",
+    Object.assign(new Error("synthetic child error"), { code: "EPIPE" })
+  );
+  harness.child.emit("exit", 1, null);
+  exact0004EndSyntheticPipes(harness);
+  harness.child.emit("close", 1, null);
+  const result = await harness.result;
+  assert.deepEqual(
+    harness.callbacks.map(({ event }) => event),
+    ["spawn", "error", "exit", "close"]
+  );
+  assert.equal(harness.callbacks[1].afterSpawn, true);
+  assert.equal(result.error.code, "EPIPE");
+  assert.equal(result.exitObserved, true);
+  assert.equal(result.closeObserved, true);
+});
+
+test("Exact-0004 lifecycle evidence 08 preserves a nonzero exit code through close", async () => {
+  const harness = exact0004NodeLifecycleHarness();
+  harness.child.emit("spawn");
+  harness.child.emit("exit", 7, null);
+  exact0004EndSyntheticPipes(harness);
+  harness.child.emit("close", 7, null);
+  const result = await harness.result;
+  assert.deepEqual([
+    result.status,
+    result.signal,
+    result.closeStatus,
+    result.closeSignal
+  ], [7, null, 7, null]);
+});
+
+test("Exact-0004 lifecycle evidence 09 preserves a signal without inventing an exit code", async () => {
+  const harness = exact0004NodeLifecycleHarness();
+  harness.child.emit("spawn");
+  harness.child.emit("exit", null, "SIGTERM");
+  exact0004EndSyntheticPipes(harness);
+  harness.child.emit("close", null, "SIGTERM");
+  const result = await harness.result;
+  assert.deepEqual([
+    result.status,
+    result.signal,
+    result.closeStatus,
+    result.closeSignal
+  ], [null, "SIGTERM", null, "SIGTERM"]);
+  assert.equal(result.exitObserved, true);
+  assert.equal(result.closeObserved, true);
+});
+
+test("Exact-0004 lifecycle evidence 10 preserves timeout and the existing TERM KILL path", (context) => {
+  const workflowSource = fs.readFileSync(path.join(
+    __dirname,
+    "..",
+    ".github",
+    "workflows",
+    "social-3b0-exact-0004-runner-linux.yml"
+  ), "utf8");
+  assert.ok(workflowSource.includes("--signal=TERM"));
+  assert.ok(workflowSource.includes("--kill-after=5s"));
+  assert.ok(workflowSource.includes("'1200s'"));
+  const fixture = exact0004ProtocolFixture(context);
+  const observation = exact0004LoadPhysicalScript(fixture);
+  observation.launcherSpawnAttempted();
+  observation.launcherProcessCreated();
+  observation.launcherClosed(124, null, true);
+  observation.auxiliaryResidualBeforeKill(1);
+  observation.auxiliaryKillAttempted();
+  observation.auxiliaryKillResult(null, "SIGKILL", false);
+  observation.auxiliaryResidualFinal(0);
+  observation.cleanupStarted();
+  observation.cleanupCompleted(true, 0);
+  const checkpoint = exact0004ReadCheckpoint(fixture);
+  assert.equal(
+    checkpoint.checkpointSchemaVersion,
+    realPostgresRunner.EXACT_0004_CHECKPOINT_SCHEMA_VERSION
+  );
+  assert.equal(checkpoint.checkpointSchemaVersion, 2);
+  const byName = new Map(
+    checkpoint.lifecycleEvidence.map((entry) => [entry.event, entry])
+  );
+  assert.deepEqual(byName.get("physicalLauncherClosed").facts, {
+    exitCode: 124,
+    signal: null,
+    timedOut: true
+  });
+  assert.deepEqual(byName.get("auxiliaryKillAttempted").facts, {
+    signal: "SIGKILL"
+  });
+  assert.deepEqual(byName.get("auxiliaryKillResult").facts, {
+    exitCode: null,
+    signal: "SIGKILL",
+    timedOut: false
+  });
+});
+
+test("Exact-0004 lifecycle evidence 11 preserves residual before kill and residual final append only", (context) => {
+  const fixture = exact0004ProtocolFixture(context);
+  const observation = exact0004LoadPhysicalScript(fixture);
+  observation.launcherSpawnAttempted();
+  observation.launcherProcessCreated();
+  observation.launcherClosed(1, null, false);
+  observation.auxiliaryResidualBeforeKill(1);
+  const beforeKill = exact0004ReadCheckpoint(fixture).lifecycleEvidence;
+  observation.auxiliaryKillAttempted();
+  observation.auxiliaryKillResult(0, null, false);
+  observation.auxiliaryResidualFinal(0);
+  const afterKill = exact0004ReadCheckpoint(fixture).lifecycleEvidence;
+  assert.deepEqual(afterKill.slice(0, beforeKill.length), beforeKill);
+  assert.deepEqual(
+    afterKill.map(({ sequence }) => sequence),
+    Array.from({ length: afterKill.length }, (_, index) => index + 1)
+  );
+  assert.equal(
+    afterKill.find(({ event }) =>
+      event === "auxiliaryResidualBeforeKill").facts.count,
+    1
+  );
+  assert.equal(
+    afterKill.find(({ event }) =>
+      event === "auxiliaryResidualFinal").facts.count,
+    0
+  );
+});
+
+test("Exact-0004 lifecycle evidence 12 keeps authenticated facts when aggregate evidence is invalid", (context) => {
+  const fixture = exact0004ProtocolFixture(context);
+  exact0004CompleteGreenPhysicalRoute(fixture);
+  const artifact = exact0004FinalizeFixture(fixture, {
+    legacyOverrides: {
+      ...exact0004GreenLegacyOverrides(),
+      failureDuringCleanup: false,
+      failurePhase: null,
+      firstFailure: "physical_step_no_evidence",
+      firstFailureStage: "artifact",
+      safeErrorCode: null,
+      safeLineBucket: "unknown",
+      safeModuleName: null,
+      safePermissionOrigin: "unknown",
+      safeSourceBasename: null,
+      stderrCategory: "unknown"
+    }
+  });
+  assert.equal(artifact.physicalEvidenceState, "invalid");
+  assert.equal(artifact.testFileLoaded, true);
+  assert.equal(artifact.tapStarted, true);
+  assert.deepEqual([
+    artifact.testsDiscovered,
+    artifact.testsPassed,
+    artifact.testsFailed
+  ], [1, 1, 0]);
+  assert.deepEqual([
+    artifact.nodeTestExitCode,
+    artifact.nodeTestSignal,
+    artifact.nodeTestTimedOut
+  ], [0, null, false]);
+  assert.notEqual(artifact.firstFailure, null);
+
+  const invalidCheckpointFixture = exact0004ProtocolFixture(context);
+  exact0004CompleteGreenPhysicalRoute(invalidCheckpointFixture);
+  exact0004WriteJson(invalidCheckpointFixture.files.checkpoint, {
+    ...exact0004ReadCheckpoint(invalidCheckpointFixture),
+    unexpectedAggregateKey: true
+  });
+  const salvaged = exact0004FinalizeFixture(invalidCheckpointFixture, {
+    legacyOverrides: {
+      ...exact0004GreenLegacyOverrides(),
+      firstFailure: "physical_step_no_evidence",
+      firstFailureStage: "artifact",
+      stderrCategory: "unknown",
+      safePermissionOrigin: "unknown",
+      safeLineBucket: "unknown"
+    }
+  });
+  assert.equal(salvaged.physicalEntryCheckpointState, "invalid");
+  assert.equal(salvaged.testFileLoaded, true);
+  assert.equal(salvaged.nodeTestExitCode, 0);
+  assert.equal(salvaged.safeAuxiliaryProcessClass, "sudo");
+  assert.equal(salvaged.lifecycleEvidence.length > 0, true);
+
+  const countContradictionFixture = exact0004ProtocolFixture(context);
+  exact0004CompleteGreenPhysicalRoute(countContradictionFixture);
+  exact0004WriteJson(countContradictionFixture.files.checkpoint, {
+    ...exact0004ReadCheckpoint(countContradictionFixture),
+    auxiliaryProcessCount: 1
+  });
+  const countContradiction = exact0004FinalizeFixture(
+    countContradictionFixture,
+    {
+      legacyOverrides: {
+        ...exact0004GreenLegacyOverrides(),
+        firstFailure: "physical_step_no_evidence",
+        firstFailureStage: "artifact",
+        stderrCategory: "unknown",
+        safePermissionOrigin: "unknown",
+        safeLineBucket: "unknown"
+      }
+    }
+  );
+  assert.equal(countContradiction.physicalEntryCheckpointState, "invalid");
+  assert.equal(countContradiction.physicalEvidenceState, "invalid");
+  assert.equal(countContradiction.testFileLoaded, true);
+  assert.equal(countContradiction.nodeTestExitCode, 0);
+  assert.throws(
+    () => realPostgresRunner.enforceExact0004Artifact(
+      countContradictionFixture.environment
+    ),
+    /exact0004_(?:artifact|lifecycle)_/
+  );
+
+  const unmeasuredZeroFixture = exact0004ProtocolFixture(context);
+  const unmeasuredZeroObservation = exact0004LoadPhysicalScript(
+    unmeasuredZeroFixture
+  );
+  unmeasuredZeroObservation.launcherSpawnAttempted();
+  unmeasuredZeroObservation.launcherProcessCreated();
+  unmeasuredZeroObservation.cleanupStarted();
+  unmeasuredZeroObservation.cleanupCompleted(true, 0);
+  const unmeasuredZeroCheckpoint = exact0004ReadCheckpoint(
+    unmeasuredZeroFixture
+  );
+  assert.equal(unmeasuredZeroCheckpoint.auxiliaryProcessCount, 1);
+  assert.equal(unmeasuredZeroCheckpoint.cleanupStarted, true);
+  assert.equal(unmeasuredZeroCheckpoint.cleanupCompleted, false);
+  assert.equal(
+    unmeasuredZeroCheckpoint.lifecycleEvidence.some(({ event }) =>
+      event === "routeCleanupCompleted"),
+    false
+  );
+
+  const residualMismatchFixture = exact0004ProtocolFixture(context);
+  exact0004CompleteGreenPhysicalRoute(residualMismatchFixture);
+  const residualMismatchCheckpoint = exact0004ReadCheckpoint(
+    residualMismatchFixture
+  );
+  exact0004WriteJson(residualMismatchFixture.files.checkpoint, {
+    ...residualMismatchCheckpoint,
+    auxiliaryProcessCount: 1,
+    cleanupCompleted: false,
+    firstFailureStage: "cleanup",
+    lifecycleEvidence: residualMismatchCheckpoint.lifecycleEvidence.map(
+      (entry) => entry.event === "routeCleanupCompleted"
+        ? { ...entry, facts: { completed: true, count: 1 } }
+        : entry
+    )
+  });
+  const residualMismatch = exact0004FinalizeFixture(
+    residualMismatchFixture,
+    {
+      legacyOverrides: {
+        ...exact0004GreenLegacyOverrides(),
+        firstFailure: "physical_step_no_evidence",
+        firstFailureStage: "artifact",
+        stderrCategory: "unknown",
+        safePermissionOrigin: "unknown",
+        safeLineBucket: "unknown"
+      }
+    }
+  );
+  const residualMismatchByName = new Map(
+    residualMismatch.lifecycleEvidence.map((entry) => [entry.event, entry])
+  );
+  assert.equal(residualMismatch.physicalEntryCheckpointState, "invalid");
+  assert.equal(residualMismatch.physicalEvidenceState, "invalid");
+  assert.equal(residualMismatch.auxiliaryProcessCount, 1);
+  assert.equal(
+    residualMismatchByName.get("auxiliaryResidualFinal").facts.count,
+    0
+  );
+  assert.equal(
+    residualMismatchByName.get("routeCleanupCompleted").facts.count,
+    1
+  );
+  assert.equal(residualMismatch.testFileLoaded, true);
+  assert.equal(residualMismatch.nodeTestExitCode, 0);
+  assert.throws(
+    () => realPostgresRunner.enforceExact0004Artifact(
+      residualMismatchFixture.environment
+    ),
+    /exact0004_(?:artifact|lifecycle)_/
+  );
+
+  const classContradictionFixture = exact0004ProtocolFixture(context);
+  const classObservation = exact0004LoadPhysicalScript(
+    classContradictionFixture
+  );
+  classObservation.launcherSpawnAttempted();
+  exact0004WriteJson(classContradictionFixture.files.checkpoint, {
+    ...exact0004ReadCheckpoint(classContradictionFixture),
+    safeAuxiliaryProcessClass: "unknown"
+  });
+  const classContradiction = exact0004FinalizeFixture(
+    classContradictionFixture,
+    {
+      evidenceState: "missing",
+      legacyOverrides: {
+        firstFailure: "exact0004_orchestration_failed",
+        firstFailureStage: "composed_process"
+      }
+    }
+  );
+  assert.equal(classContradiction.physicalEntryCheckpointState, "invalid");
+  assert.equal(classContradiction.physicalEvidenceState, "invalid");
+  assert.equal(classContradiction.physicalLauncherSpawnAttempted, true);
+  assert.equal(classContradiction.physicalLauncherProcessCreated, false);
+  assert.equal(classContradiction.nodeTestExitCode, null);
+  assert.throws(
+    () => realPostgresRunner.enforceExact0004Artifact(
+      classContradictionFixture.environment
+    ),
+    /exact0004_(?:artifact|lifecycle)_/
+  );
+
+  const protocolFixture = exact0004ProtocolFixture(context);
+  exact0004CompleteGreenPhysicalRoute(protocolFixture);
+  const protocolInvalid = exact0004FinalizeFixture(protocolFixture, {
+    legacyOverrides: {
+      ...exact0004GreenLegacyOverrides(),
+      firstFailure: "safe_event_protocol_invalid",
+      firstFailureStage: "safe_event_protocol",
+      failureDuringCleanup: false,
+      failurePhase: null,
+      safeErrorCode: "safe_event_protocol_invalid",
+      safeLineBucket: "unknown",
+      safeModuleName: null,
+      safePermissionOrigin: "unknown",
+      safeSourceBasename: null,
+      stderrCategory: "unknown"
+    }
+  });
+  assert.equal(protocolInvalid.physicalEvidenceState, "invalid");
+  assert.equal(protocolInvalid.testFileLoaded, true);
+  assert.equal(protocolInvalid.tapStarted, true);
+  assert.deepEqual([
+    protocolInvalid.testsDiscovered,
+    protocolInvalid.testsPassed,
+    protocolInvalid.testsFailed,
+    protocolInvalid.nodeTestExitCode,
+    protocolInvalid.nodeTestSignal,
+    protocolInvalid.nodeTestTimedOut
+  ], [1, 1, 0, 0, null, false]);
+  assert.equal(
+    protocolInvalid.lifecycleEvidence.some(({ event }) =>
+      event === "nodeTestClose"),
+    true
+  );
+
+  const cleanupContradictions = [
+    {
+      cleanupStarted: false,
+      cleanupCompleted: true
+    },
+    {
+      cleanupStarted: false,
+      cleanupCompleted: false,
+      failureDuringCleanup: true,
+      failurePhase: "final_cleanup",
+      firstFailure: "final_cleanup_incomplete",
+      firstFailureStage: "cleanup",
+      stderrCategory: "unknown",
+      safePermissionOrigin: "unknown",
+      safeLineBucket: "unknown"
+    },
+    {
+      cleanupStarted: true,
+      cleanupCompleted: false,
+      failureDuringCleanup: false,
+      failurePhase: "final_cleanup",
+      firstFailure: "final_cleanup_incomplete",
+      firstFailureStage: "cleanup",
+      stderrCategory: "unknown",
+      safePermissionOrigin: "unknown",
+      safeLineBucket: "unknown"
+    },
+    {
+      gateValidated: null,
+      nodeTestSpawnAttempted: true
+    },
+    {
+      ...realPostgresRunner.emptyExact0004Evidence(),
+      cleanupStarted: true,
+      cleanupCompleted: false,
+      lastMainPhaseStarted: "physical_target_preflight",
+      lastMainPhaseCompleted: "physical_target_preflight"
+    }
+  ];
+  for (const contradiction of cleanupContradictions) {
+    const cleanupFixture = exact0004ProtocolFixture(context);
+    exact0004CompleteGreenPhysicalRoute(cleanupFixture);
+    const cleanupInvalid = exact0004FinalizeFixture(cleanupFixture, {
+      legacyOverrides: {
+        ...exact0004GreenLegacyOverrides(),
+        ...contradiction
+      }
+    });
+    assert.equal(cleanupInvalid.physicalEvidenceState, "invalid");
+    assert.equal(cleanupInvalid.testFileLoaded, true);
+    assert.deepEqual([
+      cleanupInvalid.testsDiscovered,
+      cleanupInvalid.testsPassed,
+      cleanupInvalid.testsFailed,
+      cleanupInvalid.nodeTestExitCode
+    ], [1, 1, 0, 0]);
+  }
+});
+
+test("Exact-0004 lifecycle evidence 13 preserves lifecycle across a post run test_execution failure", (context) => {
+  const fixture = exact0004ProtocolFixture(context);
+  const observation = exact0004CompleteGreenPhysicalRoute(fixture);
+  observation.failure("test_execution");
+  const artifact = exact0004FinalizeFixture(fixture, {
+    legacyOverrides: {
+      ...exact0004GreenLegacyOverrides(),
+      firstFailure: "post_run_contract_failed",
+      firstFailureStage: "test_execution",
+      failureDuringCleanup: false,
+      failurePhase: null,
+      safeErrorCode: "ERR_TEST_FAILURE",
+      safeLineBucket: "unknown",
+      safeModuleName: null,
+      safePermissionOrigin: "unknown",
+      safeSourceBasename: null,
+      stderrCategory: "tap_failure"
+    }
+  });
+  assert.equal(artifact.firstFailureStage, "test_execution");
+  assert.equal(artifact.firstFailure, "post_run_contract_failed");
+  assert.equal(
+    artifact.lifecycleEvidence.some(({ event }) => event === "nodeTestExit"),
+    true
+  );
+  assert.equal(
+    artifact.lifecycleEvidence.some(({ event }) => event === "nodeTestClose"),
+    true
+  );
+  assert.equal(artifact.nodeTestExitCode, 0);
+});
+
+test("Exact-0004 lifecycle evidence 14 finalizer preserves TAP counts exit and close", (context) => {
+  const fixture = exact0004ProtocolFixture(context);
+  exact0004CompleteGreenPhysicalRoute(fixture);
+  const artifact = exact0004FinalizeFixture(fixture, {
+    legacyOverrides: {
+      ...exact0004GreenLegacyOverrides(),
+      nodeTestExitCode: null,
+      nodeTestSignal: null,
+      nodeTestTimedOut: null,
+      testsDiscovered: 0,
+      testsPassed: 0,
+      testsFailed: 0
+    }
+  });
+  const byName = new Map(
+    artifact.lifecycleEvidence.map((entry) => [entry.event, entry])
+  );
+  assert.deepEqual([
+    artifact.testsDiscovered,
+    artifact.testsPassed,
+    artifact.testsFailed
+  ], [1, 1, 0]);
+  assert.deepEqual([
+    artifact.nodeTestExitCode,
+    artifact.nodeTestSignal,
+    artifact.nodeTestTimedOut
+  ], [0, null, false]);
+  assert.deepEqual(byName.get("nodeTestClose").facts, {
+    nodeTestCloseCode: 0,
+    nodeTestCloseSignal: null
+  });
+});
+
+test("Exact-0004 lifecycle evidence 15 enforcer rejects every lifecycle contradiction", (context) => {
+  const cleanWorktreeEnvironment = exact0004FixtureWorktreeEnvironment(
+    context,
+    ""
+  );
+  const { fixture } = exact0004GreenLifecycleArtifact(context, {
+    environmentOverrides: cleanWorktreeEnvironment
+  });
+  assert.doesNotThrow(() =>
+    realPostgresRunner.enforceExact0004Artifact(fixture.environment));
+  const contradictions = [
+    (artifact) => ({ ...artifact, nodeTestExitCode: 1 }),
+    (artifact) => ({ ...artifact, testFileLoaded: null }),
+    (artifact) => ({
+      ...artifact,
+      postgresImageDigest: "sha256:" + "d".repeat(64)
+    }),
+    (artifact) => ({ ...artifact, postgresImageDigest: null }),
+    (artifact) => ({
+      ...artifact,
+      auxiliaryProcessCount: 1,
+      residuals: { ...artifact.residuals, auxiliaryProcesses: 1 }
+    }),
+    (artifact) => ({
+      ...artifact,
+      lifecycleEvidence: artifact.lifecycleEvidence.map((entry) =>
+        entry.event === "nodeTestClose"
+          ? {
+              ...entry,
+              facts: { ...entry.facts, nodeTestCloseCode: 1 }
+            }
+          : entry)
+    }),
+    (artifact) => ({
+      ...artifact,
+      lifecycleEvidence: artifact.lifecycleEvidence.map((entry) =>
+        entry.event === "routeCleanupCompleted"
+          ? { ...entry, facts: { completed: false, count: 1 } }
+          : entry)
+    }),
+    (artifact) => ({
+      ...artifact,
+      lifecycleEvidence: artifact.lifecycleEvidence.map((entry) =>
+        entry.event === "physicalPhaseSnapshot"
+          ? {
+              ...entry,
+              facts: {
+                ...entry.facts,
+                cleanupStarted: false,
+                cleanupCompleted: false
+              }
+            }
+          : entry)
+    }),
+    (artifact) => ({
+      ...artifact,
+      lifecycleEvidence: artifact.lifecycleEvidence.map((entry) =>
+        entry.event === "physicalPhaseSnapshot"
+          ? {
+              ...entry,
+              facts: {
+                ...entry.facts,
+                ...realPostgresRunner.emptyExact0004Evidence(),
+                cleanupStarted: true,
+                cleanupCompleted: true,
+                lastMainPhaseStarted: "role_provisioning",
+                lastMainPhaseCompleted: "physical_target_preflight"
+              }
+            }
+          : entry)
+    }),
+    ...["skipped", "cancelled"].map((field) => (artifact) => ({
+      ...artifact,
+      lifecycleEvidence: artifact.lifecycleEvidence.map((entry) =>
+        entry.event === "nodeTestTapSummary"
+          ? { ...entry, facts: { ...entry.facts, [field]: 1 } }
+          : entry)
+    })),
+    (artifact) => ({
+      ...artifact,
+      lifecycleEvidence: artifact.lifecycleEvidence.map((entry) => {
+        if (entry.event === "tapTitleObserved") return {
+          ...entry,
+          event: "firstTestDiscovered",
+          facts: { firstTestDiscovered: true }
+        };
+        if (entry.event === "firstTestDiscovered") return {
+          ...entry,
+          event: "tapTitleObserved",
+          facts: { tapTitleObserved: true }
+        };
+        return entry;
+      })
+    }),
+    (artifact) => {
+      const launcher = artifact.lifecycleEvidence.filter((entry) => [
+        "physicalLauncherSpawnAttempted",
+        "physicalLauncherProcessCreated"
+      ].includes(entry.event));
+      const remainder = artifact.lifecycleEvidence.filter((entry) => ![
+        "physicalLauncherSpawnAttempted",
+        "physicalLauncherProcessCreated"
+      ].includes(entry.event));
+      return {
+        ...artifact,
+        lifecycleEvidence: [...launcher, ...remainder].map((entry, index) => ({
+          ...entry,
+          sequence: index + 1
+        }))
+      };
+    },
+    (artifact) => {
+      const snapshot = artifact.lifecycleEvidence.find((entry) =>
+        entry.event === "physicalPhaseSnapshot");
+      const remainder = artifact.lifecycleEvidence.filter((entry) =>
+        entry.event !== "physicalPhaseSnapshot");
+      return {
+        ...artifact,
+        lifecycleEvidence: [...remainder, snapshot].map((entry, index) => ({
+          ...entry,
+          sequence: index + 1
+        }))
+      };
+    }
+  ];
+  for (const mutate of contradictions) {
+    const current = exact0004GreenLifecycleArtifact(context, {
+      environmentOverrides: cleanWorktreeEnvironment
+    });
+    exact0004RewriteEvidenceWithSidecar(
+      current.fixture,
+      mutate(current.artifact)
+    );
+    assert.throws(
+      () => realPostgresRunner.enforceExact0004Artifact(
+        current.fixture.environment
+      ),
+      /exact0004_(?:artifact|lifecycle)_/
+    );
+  }
+  const dirtyWorktreeEnvironment = exact0004FixtureWorktreeEnvironment(
+    context,
+    EXACT_0004_DIRTY_WORKTREE_STATUS
+  );
+  const dirty = exact0004GreenLifecycleArtifact(context, {
+    environmentOverrides: dirtyWorktreeEnvironment
+  });
+  assert.equal(
+    dirty.artifact.postgresImageDigest,
+    gate.IMAGE.slice(gate.IMAGE.lastIndexOf("@") + 1)
+  );
+  assert.throws(
+    () => realPostgresRunner.enforceExact0004Artifact(
+      dirty.fixture.environment
+    ),
+    { message: "exact0004_worktree_not_clean" }
+  );
+});
+
+test("Exact-0004 lifecycle evidence 16 artifact contains no raw output or secret", (context) => {
+  const secretCanary = "lifecycle-secret-" + "8".repeat(48);
+  const fixture = exact0004ProtocolFixture(context);
+  exact0004CompleteGreenPhysicalRoute(fixture);
+  const artifact = exact0004FinalizeFixture(fixture, {
+    legacyOverrides: exact0004GreenLegacyOverrides(),
+    mutateLegacy: (legacy) => ({
+      ...legacy,
+      testProcessStarted: "raw stdout and stderr " + secretCanary
+    })
+  });
+  assert.equal(exact0004HasRawOutputKey(artifact), false);
+  assert.equal(JSON.stringify(artifact).includes(secretCanary), false);
+  assert.equal(JSON.stringify(artifact).includes("raw stdout"), false);
+  assert.equal(JSON.stringify(artifact).includes("raw stderr"), false);
+});
+
+test("Exact-0004 lifecycle evidence 17 artifact remains exactly four files with correct sidecars", (context) => {
+  const { fixture } = exact0004GreenLifecycleArtifact(context);
+  assert.deepEqual(
+    fs.readdirSync(fixture.files.artifactDirectory).sort(),
+    [...EXACT_0004_ARTIFACT_FILES].sort()
+  );
+  exact0004VerifySidecar(fixture.files.artifactDirectory, "evidence.json");
+  exact0004VerifySidecar(
+    fixture.files.artifactDirectory,
+    "process-status.json"
+  );
+});
+
+test("Exact-0004 lifecycle evidence 18 cleanup is true true with every final residual zero", (context) => {
+  const { artifact } = exact0004GreenLifecycleArtifact(context);
+  assert.equal(artifact.cleanupStarted, true);
+  assert.equal(artifact.cleanupCompleted, true);
+  assert.equal(artifact.cleanupFailure, null);
+  assert.deepEqual(Object.values(artifact.residuals), Array(8).fill(0));
+  const cleanupEvents = artifact.lifecycleEvidence.filter(({ event }) =>
+    event === "routeCleanupStarted" || event === "routeCleanupCompleted"
+  );
+  assert.deepEqual(cleanupEvents.map(({ event }) => event), [
+    "routeCleanupStarted",
+    "routeCleanupCompleted"
+  ]);
+  assert.deepEqual(cleanupEvents[1].facts, { completed: true, count: 0 });
 });

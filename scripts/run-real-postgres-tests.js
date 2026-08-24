@@ -46,7 +46,11 @@ const CONNECTION_NAMES = [
 ];
 const EVIDENCE_SCHEMA_VERSION = 6;
 const EXACT_0004_ARTIFACT_SCHEMA_VERSION = 2;
-const EXACT_0004_CHECKPOINT_SCHEMA_VERSION = 1;
+const EXACT_0004_CHECKPOINT_SCHEMA_VERSION = 2;
+const REAL_TEST_FILE_LOAD_EVENT = "realTestFileLoaded";
+const REAL_TEST_FILE_LOAD_MARKER_ENV = "SOCIAL_TEST_FILE_LOAD_MARKER";
+const REAL_TEST_FILE_LOAD_MARKER_DOMAIN =
+  "ia4tube-exact0004-real-test-file-loaded-v1";
 const EXACT_0004_CHECKPOINT_KEYS = Object.freeze([
   "checkpointSchemaVersion",
   "physicalStepAdmitted",
@@ -62,6 +66,7 @@ const EXACT_0004_CHECKPOINT_KEYS = Object.freeze([
   "postgresStarted",
   "nodeTestSpawnAttempted",
   "nodeTestProcessCreated",
+  "lifecycleEvidence",
   "cleanupStarted",
   "cleanupCompleted",
   "auxiliaryProcessCount",
@@ -438,6 +443,27 @@ const EXACT_0004_OPERATION_CLASS_SET = new Set(
 const EXACT_0004_ERROR_CLASS_SET = new Set(EXACT_0004_ERROR_CLASSES);
 const SAFE_SQL_STATE_SET = new Set(SAFE_SQL_STATES);
 const SAFE_SQL_STATE_VALUE_SET = new Set(SAFE_SQL_STATE_VALUES);
+const EXACT_0004_LIFECYCLE_LIMIT = 64;
+const EXACT_0004_LIFECYCLE_SOURCES = new Set([
+  "runner_safe_event",
+  "physical_launcher",
+  "route_cleanup"
+]);
+const EXACT_0004_PHYSICAL_LIFECYCLE_EVENTS = new Set([
+  "physicalLauncherSpawnAttempted",
+  "physicalLauncherProcessCreated",
+  "postgresStartAttempted",
+  "postgresStarted",
+  "physicalLauncherClosed",
+  "auxiliaryResidualBeforeKill",
+  "auxiliaryKillAttempted",
+  "auxiliaryKillResult",
+  "auxiliaryResidualFinal"
+]);
+const EXACT_0004_CLEANUP_LIFECYCLE_EVENTS = new Set([
+  "routeCleanupStarted",
+  "routeCleanupCompleted"
+]);
 const CONFLICTING_NEGATIVE_PROMISE_OUTCOME_SET = new Set(
   CONFLICTING_NEGATIVE_PROMISE_OUTCOMES
 );
@@ -499,6 +525,16 @@ function safeSourceFieldsValid(basename, bucket) {
   if (!SAFE_LINE_BUCKET_SET.has(bucket)) return false;
   if (basename === null) return bucket === "unknown";
   return SAFE_SOURCE_BASENAME_SET.has(basename);
+}
+
+function realTestFileLoadMarker(fingerprint) {
+  if (typeof fingerprint !== "string" || !SHA256.test(fingerprint)) {
+    throw new TypeError("real_test_file_load_fingerprint_invalid");
+  }
+  return crypto.createHash("sha256").update(
+    `${REAL_TEST_FILE_LOAD_MARKER_DOMAIN}\0${fingerprint}`,
+    "utf8"
+  ).digest("hex");
 }
 
 function emptyConflictingNegativeEvidence() {
@@ -872,6 +908,7 @@ function validateSafeEvent(event) {
     ["gateValidated", "gateValidated"],
     ["nodeTestSpawnAttempted", "nodeTestSpawnAttempted"],
     ["nodeTestProcessCreated", "nodeTestProcessCreated"],
+    ["testFileLoaded", "testFileLoaded"],
     ["tapStarted", "tapStarted"],
     ["tapTitleObserved", "tapTitleObserved"],
     ["firstTestDiscovered", "firstTestDiscovered"]
@@ -884,6 +921,72 @@ function validateSafeEvent(event) {
       "sequence",
       field
     ]) && event[field] === true;
+  }
+  if (event.event === REAL_TEST_FILE_LOAD_EVENT) {
+    return exactKeys(event, [
+      "event",
+      "evidenceSchemaVersion",
+      "marker",
+      "sequence"
+    ]) && SHA256.test(event.marker);
+  }
+  if (event.event === "nodeTestTapSummary") {
+    return exactKeys(event, [
+      "cancelled",
+      "event",
+      "evidenceSchemaVersion",
+      "fail",
+      "pass",
+      "sequence",
+      "skipped",
+      "tests"
+    ]) && [
+      event.tests,
+      event.pass,
+      event.fail,
+      event.skipped,
+      event.cancelled
+    ].every((value) => Number.isSafeInteger(value) && value >= 0 && value <= 999);
+  }
+  if (event.event === "nodeTestError") {
+    return exactKeys(event, [
+      "afterSpawn",
+      "event",
+      "evidenceSchemaVersion",
+      "safeErrorCode",
+      "sequence"
+    ]) && typeof event.afterSpawn === "boolean" &&
+      (event.safeErrorCode === null || SAFE_ERROR_CODE_SET.has(
+        event.safeErrorCode
+      ));
+  }
+  if (event.event === "nodeTestExit") {
+    const exited = Number.isSafeInteger(event.nodeTestExitCode) &&
+      event.nodeTestExitCode >= 0 && event.nodeTestSignal === null;
+    const signaled = event.nodeTestExitCode === null &&
+      SAFE_SIGNALS.has(event.nodeTestSignal);
+    return exactKeys(event, [
+      "event",
+      "evidenceSchemaVersion",
+      "nodeTestExitCode",
+      "nodeTestSignal",
+      "nodeTestTimedOut",
+      "sequence"
+    ]) && typeof event.nodeTestTimedOut === "boolean" &&
+      (exited || signaled);
+  }
+  if (event.event === "nodeTestClose") {
+    const exited = Number.isSafeInteger(event.nodeTestCloseCode) &&
+      event.nodeTestCloseCode >= 0 && event.nodeTestCloseSignal === null;
+    const signaled = event.nodeTestCloseCode === null &&
+      SAFE_SIGNALS.has(event.nodeTestCloseSignal);
+    return exactKeys(event, [
+      "event",
+      "evidenceSchemaVersion",
+      "nodeTestCloseCode",
+      "nodeTestCloseSignal",
+      "sequence"
+    ]) && (exited || signaled);
   }
   if (
     event.event === "mainPhaseStarted" ||
@@ -974,23 +1077,6 @@ function validateSafeEvent(event) {
   if (event.event === "physicalPhaseSnapshot") {
     return physicalSnapshotValid(event);
   }
-  if (event.event === "nodeTestClosed") {
-    const exitObserved = Number.isSafeInteger(event.nodeTestExitCode) &&
-      event.nodeTestExitCode >= 0 && event.nodeTestSignal === null &&
-      event.nodeTestTimedOut === false;
-    const signalObserved = event.nodeTestExitCode === null &&
-      typeof event.nodeTestSignal === "string" &&
-      SAFE_SIGNALS.has(event.nodeTestSignal) &&
-      event.nodeTestTimedOut === null;
-    return exactKeys(event, [
-      "event",
-      "evidenceSchemaVersion",
-      "nodeTestExitCode",
-      "nodeTestSignal",
-      "nodeTestTimedOut",
-      "sequence"
-    ]) && (exitObserved || signalObserved);
-  }
   if (event.event === "failure") {
     return exactKeys(event, [
       "event",
@@ -1023,6 +1109,211 @@ function validateSafeEvent(event) {
 function safeEventLine(event) {
   if (!validateSafeEvent(event)) throw new Error("safe_event_invalid");
   return SAFE_EVENT_PREFIX + canonicalJson(event) + "\n";
+}
+
+function validLifecycleProcessResult(code, signal, timedOut) {
+  const exited = Number.isSafeInteger(code) && code >= 0 && signal === null;
+  const signaled = code === null && SAFE_SIGNALS.has(signal);
+  return typeof timedOut === "boolean" && (exited || signaled);
+}
+
+function validExact0004WorkflowLifecycleEntry(entry) {
+  const facts = entry.facts;
+  if (EXACT_0004_PHYSICAL_LIFECYCLE_EVENTS.has(entry.event)) {
+    if (entry.source !== "physical_launcher") return false;
+    if ([
+      "physicalLauncherSpawnAttempted",
+      "physicalLauncherProcessCreated",
+      "postgresStartAttempted",
+      "postgresStarted"
+    ].includes(entry.event)) return exactKeys(facts, []);
+    if (entry.event === "physicalLauncherClosed") {
+      return exactKeys(facts, ["exitCode", "signal", "timedOut"]) &&
+        validLifecycleProcessResult(
+          facts.exitCode,
+          facts.signal,
+          facts.timedOut
+        );
+    }
+    if ([
+      "auxiliaryResidualBeforeKill",
+      "auxiliaryResidualFinal"
+    ].includes(entry.event)) {
+      return exactKeys(facts, ["count"]) &&
+        Number.isSafeInteger(facts.count) && facts.count >= 0 &&
+        facts.count <= 1;
+    }
+    if (entry.event === "auxiliaryKillAttempted") {
+      return exactKeys(facts, ["signal"]) && facts.signal === "SIGKILL";
+    }
+    return entry.event === "auxiliaryKillResult" &&
+      exactKeys(facts, ["exitCode", "signal", "timedOut"]) &&
+      validLifecycleProcessResult(
+        facts.exitCode,
+        facts.signal,
+        facts.timedOut
+      );
+  }
+  if (!EXACT_0004_CLEANUP_LIFECYCLE_EVENTS.has(entry.event) ||
+      entry.source !== "route_cleanup") return false;
+  if (entry.event === "routeCleanupStarted") return exactKeys(facts, []);
+  return exactKeys(facts, ["completed", "count"]) &&
+    typeof facts.completed === "boolean" &&
+    Number.isSafeInteger(facts.count) && facts.count >= 0 && facts.count <= 1;
+}
+
+function validExact0004LifecycleEvidence(value) {
+  if (!Array.isArray(value) || value.length > EXACT_0004_LIFECYCLE_LIMIT) {
+    return false;
+  }
+  let expectedRunnerSequence = 1;
+  const seen = new Set();
+  for (let index = 0; index < value.length; index += 1) {
+    const entry = value[index];
+    if (!exactKeys(entry, [
+      "sequence", "source", "sourceSequence", "event", "facts"
+    ]) || entry.sequence !== index + 1 ||
+        !EXACT_0004_LIFECYCLE_SOURCES.has(entry.source) ||
+        typeof entry.event !== "string" || seen.has(entry.event)) return false;
+    seen.add(entry.event);
+    if (entry.source === "runner_safe_event") {
+      if (entry.sourceSequence !== expectedRunnerSequence) return false;
+      const event = {
+        event: entry.event,
+        evidenceSchemaVersion: EVIDENCE_SCHEMA_VERSION,
+        sequence: entry.sourceSequence,
+        ...entry.facts
+      };
+      if (!validateSafeEvent(event)) return false;
+      expectedRunnerSequence += 1;
+    } else if (entry.sourceSequence !== null ||
+        !validExact0004WorkflowLifecycleEntry(entry)) return false;
+  }
+  const requireBefore = (event, predecessor) => !seen.has(event) ||
+    value.findIndex((entry) => entry.event === predecessor) >= 0 &&
+    value.findIndex((entry) => entry.event === predecessor) <
+      value.findIndex((entry) => entry.event === event);
+  const orderedWhenBoth = (before, after) => !seen.has(before) ||
+    !seen.has(after) || value.findIndex((entry) => entry.event === before) <
+      value.findIndex((entry) => entry.event === after);
+  if (!requireBefore(
+    "physicalLauncherProcessCreated",
+    "physicalLauncherSpawnAttempted"
+  ) || !requireBefore("postgresStarted", "postgresStartAttempted") ||
+      !requireBefore("physicalLauncherClosed", "physicalLauncherProcessCreated") ||
+      !requireBefore("auxiliaryResidualBeforeKill", "physicalLauncherClosed") ||
+      !requireBefore("auxiliaryKillAttempted", "auxiliaryResidualBeforeKill") ||
+      !requireBefore("auxiliaryKillResult", "auxiliaryKillAttempted") ||
+      !requireBefore("auxiliaryResidualFinal", "auxiliaryResidualBeforeKill") ||
+      !requireBefore("routeCleanupCompleted", "routeCleanupStarted")) return false;
+  if (seen.has("auxiliaryKillResult") &&
+      !requireBefore("auxiliaryResidualFinal", "auxiliaryKillResult")) return false;
+  if (!orderedWhenBoth("postgresStarted", "physicalLauncherSpawnAttempted") ||
+      !orderedWhenBoth(
+        "physicalLauncherClosed",
+        "routeCleanupStarted"
+      ) || !orderedWhenBoth(
+        "auxiliaryResidualFinal",
+        "routeCleanupStarted"
+      )) return false;
+  for (const event of EXACT_0004_PHYSICAL_LIFECYCLE_EVENTS) {
+    if (!orderedWhenBoth(event, "routeCleanupStarted")) return false;
+  }
+  for (const entry of value) {
+    if (entry.source !== "runner_safe_event") continue;
+    if (!orderedWhenBoth(
+      "physicalLauncherProcessCreated",
+      entry.event
+    ) || !orderedWhenBoth(entry.event, "physicalLauncherClosed") ||
+        !orderedWhenBoth(entry.event, "routeCleanupStarted")) return false;
+  }
+  if (seen.has("routeCleanupCompleted") &&
+      value[value.length - 1].event !== "routeCleanupCompleted") return false;
+  const residualBeforeKill = value.find((entry) =>
+    entry.event === "auxiliaryResidualBeforeKill");
+  const residualFinal = value.find((entry) =>
+    entry.event === "auxiliaryResidualFinal");
+  const killAttempted = seen.has("auxiliaryKillAttempted");
+  if (killAttempted && residualBeforeKill?.facts.count !== 1 ||
+      !killAttempted && seen.has("auxiliaryKillResult") ||
+      residualFinal && residualBeforeKill?.facts.count === 1 && !killAttempted) {
+    return false;
+  }
+  return true;
+}
+
+function exact0004AuxiliaryProcessProjection(
+  lifecycleEvidence,
+  auxiliaryProcessOwnedByRoute,
+  fallbackCount
+) {
+  const lifecycleByName = new Map(
+    lifecycleEvidence.map((entry) => [entry.event, entry])
+  );
+  const cleanupCompleted = lifecycleByName.get("routeCleanupCompleted");
+  const residualFinal = lifecycleByName.get("auxiliaryResidualFinal");
+  const residualBeforeKill = lifecycleByName.get(
+    "auxiliaryResidualBeforeKill"
+  );
+  const lastResidual = residualFinal || residualBeforeKill || null;
+  let valid = Number.isSafeInteger(fallbackCount) &&
+    fallbackCount >= 0 && fallbackCount <= 1;
+  if (!auxiliaryProcessOwnedByRoute) {
+    if (lifecycleByName.has("physicalLauncherProcessCreated") ||
+        lastResidual !== null ||
+        cleanupCompleted && cleanupCompleted.facts.count !== 0) valid = false;
+    return { count: fallbackCount, valid };
+  }
+  if (!lifecycleByName.has("physicalLauncherProcessCreated")) valid = false;
+  if (cleanupCompleted) {
+    if (lastResidual) {
+      if (cleanupCompleted.facts.count !== lastResidual.facts.count) {
+        valid = false;
+      }
+    } else if (cleanupCompleted.facts.count === 0) {
+      valid = false;
+    }
+  }
+  return {
+    count: cleanupCompleted
+      ? cleanupCompleted.facts.count
+      : lastResidual
+        ? lastResidual.facts.count
+        : 1,
+    valid
+  };
+}
+
+function exact0004LifecycleEntryFromSafeEvent(event, sequence) {
+  const {
+    event: eventName,
+    evidenceSchemaVersion,
+    sequence: sourceSequence,
+    ...facts
+  } = event;
+  if (evidenceSchemaVersion !== EVIDENCE_SCHEMA_VERSION ||
+      !validateSafeEvent(event)) throw new Error("safe_event_invalid");
+  return Object.freeze({
+    sequence,
+    source: "runner_safe_event",
+    sourceSequence,
+    event: eventName,
+    facts: Object.freeze(facts)
+  });
+}
+
+function exact0004RunnerFactsFromLifecycle(lifecycleEvidence) {
+  const collector = createSafeEventCollector();
+  for (const entry of lifecycleEvidence || []) {
+    if (entry.source !== "runner_safe_event") continue;
+    collector.push("stdout", Buffer.from(safeEventLine({
+      event: entry.event,
+      evidenceSchemaVersion: EVIDENCE_SCHEMA_VERSION,
+      sequence: entry.sourceSequence,
+      ...entry.facts
+    }), "utf8"));
+  }
+  return collector.finish();
 }
 
 function sanitizedModuleName(candidate) {
@@ -1346,8 +1637,14 @@ function createLineFramer(onLine) {
   return Object.freeze({ push, finish });
 }
 
-function createPhysicalPhaseProtocol() {
+function createPhysicalPhaseProtocol(options = {}) {
+  const expectedTestFileLoadMarker =
+    typeof options.testFileLoadMarker === "string" &&
+      SHA256.test(options.testFileLoadMarker)
+      ? options.testFileLoadMarker
+      : null;
   let expectedSequence = 1;
+  let testFileLoaded = false;
   let nextMainPhaseIndex = 0;
   let activeMainPhase = null;
   let lastMainPhaseStarted = null;
@@ -1386,7 +1683,21 @@ function createPhysicalPhaseProtocol() {
       invalidate();
       return false;
     }
-    if (event.event === "exact0004SubphaseStarted") {
+    if (event.event === REAL_TEST_FILE_LOAD_EVENT) {
+      if (
+        expectedSequence !== 1 ||
+        expectedTestFileLoadMarker === null ||
+        event.marker !== expectedTestFileLoadMarker ||
+        testFileLoaded
+      ) {
+        invalidate();
+        return false;
+      }
+      testFileLoaded = true;
+    } else if (expectedTestFileLoadMarker !== null && !testFileLoaded) {
+      invalidate();
+      return false;
+    } else if (event.event === "exact0004SubphaseStarted") {
       if (
         cleanupStarted ||
         activeMainPhase !== "exact_0004_plan_apply" ||
@@ -1600,7 +1911,8 @@ function createPhysicalPhaseProtocol() {
       conflictingNegativeAssertionMatched,
       conflictingNegativeRejectedBeforeAssertion,
       cleanupStarted,
-      cleanupCompleted
+      cleanupCompleted,
+      testFileLoaded
     });
   }
 
@@ -1613,8 +1925,24 @@ function createPhysicalPhaseEmitter(
   if (typeof writeLine !== "function") {
     throw new TypeError("physical_phase_writer_invalid");
   }
-  const protocol = createPhysicalPhaseProtocol();
+  const testFileLoadMarker = process.env[REAL_TEST_FILE_LOAD_MARKER_ENV];
+  const expectedTestFileLoadMarker =
+    typeof testFileLoadMarker === "string" && SHA256.test(testFileLoadMarker)
+      ? testFileLoadMarker
+      : null;
+  const protocol = createPhysicalPhaseProtocol({
+    testFileLoadMarker: expectedTestFileLoadMarker
+  });
   let sequence = 0;
+  if (expectedTestFileLoadMarker !== null) {
+    sequence = 1;
+    if (!protocol.accept({
+      event: REAL_TEST_FILE_LOAD_EVENT,
+      evidenceSchemaVersion: EVIDENCE_SCHEMA_VERSION,
+      marker: expectedTestFileLoadMarker,
+      sequence
+    })) throw new Error("physical_phase_protocol_invalid");
+  }
 
   function emit(event, fields) {
     sequence += 1;
@@ -1704,19 +2032,40 @@ function childSafeEventBody(line) {
   });
 }
 
-function createNodeTestObserver(onMarker = () => {}) {
+function createNodeTestObserver(onMarker = () => {}, options = {}) {
+  const expectedTestFileLoadMarker =
+    typeof options.testFileLoadMarker === "string" &&
+      SHA256.test(options.testFileLoadMarker)
+      ? options.testFileLoadMarker
+      : null;
   const totals = { tests: [], pass: [], fail: [], skipped: [], cancelled: [] };
   const markers = {
+    testFileLoaded: false,
     tapStarted: false,
     tapTitleObserved: false,
-    firstTestDiscovered: false
+    firstTestDiscovered: false,
+    nodeTestTapSummary: false
   };
   const diagnostic = createSafeDiagnosticAggregator();
-  const physicalPhases = createPhysicalPhaseProtocol();
-  function mark(name) {
+  const physicalPhases = createPhysicalPhaseProtocol({
+    testFileLoadMarker: expectedTestFileLoadMarker
+  });
+  function mark(name, fields = {}) {
     if (markers[name]) return;
     markers[name] = true;
-    onMarker(name);
+    onMarker(name, fields);
+  }
+  function markTapSummary() {
+    if (markers.nodeTestTapSummary || Object.values(totals).some(
+      (values) => values.length !== 1
+    )) return;
+    mark("nodeTestTapSummary", {
+      tests: totals.tests[0],
+      pass: totals.pass[0],
+      fail: totals.fail[0],
+      skipped: totals.skipped[0],
+      cancelled: totals.cancelled[0]
+    });
   }
   const framer = createLineFramer((channel, line) => {
     const safeChildEvent = childSafeEventBody(line);
@@ -1732,10 +2081,12 @@ function createNodeTestObserver(onMarker = () => {}) {
         physicalPhases.invalidate();
         return;
       }
-      if (
-        canonicalJson(event) !== safeChildEvent.body ||
-        !physicalPhases.accept(event)
-      ) physicalPhases.invalidate();
+      if (canonicalJson(event) !== safeChildEvent.body ||
+          !physicalPhases.accept(event)) {
+        physicalPhases.invalidate();
+      } else if (event.event === REAL_TEST_FILE_LOAD_EVENT) {
+        mark("testFileLoaded");
+      }
       return;
     }
     if (channel === "stdout") {
@@ -1743,7 +2094,10 @@ function createNodeTestObserver(onMarker = () => {}) {
       if (line === TAP_SUBTEST_TITLE) mark("tapTitleObserved");
       if (line.startsWith("# Subtest: ")) mark("firstTestDiscovered");
       const total = /^(?:#|\u2139)\s*(tests|pass|fail|skipped|cancelled)\s+([0-9]+)\s*$/.exec(line);
-      if (total) totals[total[1]].push(Number(total[2]));
+      if (total) {
+        totals[total[1]].push(Number(total[2]));
+        markTapSummary();
+      }
     }
     diagnostic.observe(line);
   });
@@ -1767,6 +2121,7 @@ function createNodeTestObserver(onMarker = () => {}) {
       : "not_observed";
     return Object.freeze({
       overflow: framed.overflow,
+      testFileLoaded: markers.testFileLoaded,
       tapStarted: markers.tapStarted,
       tapTitleObserved: markers.tapTitleObserved,
       firstTestDiscovered: markers.firstTestDiscovered,
@@ -1834,12 +2189,22 @@ function createSafeEventCollector(options = {}) {
     gateValidated: null,
     nodeTestSpawnAttempted: null,
     nodeTestProcessCreated: null,
+    testFileLoaded: null,
+    nodeTestErrorObserved: false,
+    nodeTestErrorAfterSpawn: null,
+    nodeTestExitObserved: false,
     nodeTestExitCode: null,
     nodeTestSignal: null,
     nodeTestTimedOut: null,
+    nodeTestCloseObserved: false,
+    nodeTestCloseCode: null,
+    nodeTestCloseSignal: null,
     tapStarted: null,
     tapTitleObserved: null,
     firstTestDiscovered: null,
+    testsDiscovered: null,
+    testsPassed: null,
+    testsFailed: null,
     lastMainPhaseStarted: null,
     lastMainPhaseCompleted: null,
     ...emptyExact0004Evidence(),
@@ -1857,34 +2222,43 @@ function createSafeEventCollector(options = {}) {
   };
   let expectedSequence = 1;
   let protocolInvalid = false;
+  let lifecycleContradiction = false;
   let closed = false;
   let failure = false;
   const rawDiagnostic = createSafeDiagnosticAggregator();
   function invalidate() {
     protocolInvalid = true;
   }
-  function notifyAcceptedEvent(name) {
+  function notifyAcceptedEvent(event) {
     try {
-      onAcceptedEvent(name, Object.freeze({ ...state }));
+      onAcceptedEvent(
+        event.event,
+        Object.freeze({ ...state }),
+        Object.freeze({ ...event })
+      );
     } catch {
       // The observer is deliberately non-authoritative. Its durable transport
       // is validated independently by the workflow finalizer.
     }
   }
   function markerAllowed(name) {
-    if (failure || closed || seen.has(name)) return false;
+    if (failure || seen.has(name)) return false;
+    if (name === "physicalPhaseSnapshot") {
+      return state.nodeTestProcessCreated === true && closed;
+    }
+    if (closed) return false;
     if (name === "runnerReached") return seen.size === 0;
     if (name === "gateValidated") return state.runnerReached === true;
     if (name === "nodeTestSpawnAttempted") return state.gateValidated === true;
     if (name === "nodeTestProcessCreated") {
       return state.nodeTestSpawnAttempted === true;
     }
+    if (name === "testFileLoaded") {
+      return state.nodeTestProcessCreated === true;
+    }
     if (name === "tapStarted") return state.nodeTestProcessCreated === true;
     if (name === "tapTitleObserved" || name === "firstTestDiscovered") {
       return state.tapStarted === true;
-    }
-    if (name === "physicalPhaseSnapshot") {
-      return state.nodeTestProcessCreated === true;
     }
     return false;
   }
@@ -1964,11 +2338,8 @@ function createSafeEventCollector(options = {}) {
     return false;
   }
   function applyEvent(event) {
-    if (
-      protocolInvalid ||
-      !validateSafeEvent(event) ||
-      event.sequence !== expectedSequence
-    ) {
+    if (protocolInvalid || !validateSafeEvent(event) ||
+        event.sequence !== expectedSequence) {
       invalidate();
       return;
     }
@@ -1978,6 +2349,7 @@ function createSafeEventCollector(options = {}) {
       "gateValidated",
       "nodeTestSpawnAttempted",
       "nodeTestProcessCreated",
+      "testFileLoaded",
       "tapStarted",
       "tapTitleObserved",
       "firstTestDiscovered"
@@ -1988,7 +2360,66 @@ function createSafeEventCollector(options = {}) {
       }
       seen.add(event.event);
       state[event.event] = true;
-      notifyAcceptedEvent(event.event);
+      notifyAcceptedEvent(event);
+      return;
+    }
+    if (event.event === "nodeTestTapSummary") {
+      if (failure || closed || seen.has(event.event) ||
+          state.tapStarted !== true) {
+        invalidate();
+        return;
+      }
+      seen.add(event.event);
+      state.testsDiscovered = event.tests;
+      state.testsPassed = event.pass;
+      state.testsFailed = event.fail;
+      notifyAcceptedEvent(event);
+      return;
+    }
+    if (event.event === "nodeTestError") {
+      if (failure || closed || seen.has(event.event) ||
+          state.nodeTestSpawnAttempted !== true ||
+          event.afterSpawn !== (state.nodeTestProcessCreated === true)) {
+        invalidate();
+        return;
+      }
+      seen.add(event.event);
+      state.nodeTestErrorObserved = true;
+      state.nodeTestErrorAfterSpawn = event.afterSpawn;
+      notifyAcceptedEvent(event);
+      return;
+    }
+    if (event.event === "nodeTestExit") {
+      if (failure || closed || seen.has(event.event) ||
+          state.nodeTestProcessCreated !== true) {
+        invalidate();
+        return;
+      }
+      seen.add(event.event);
+      state.nodeTestExitObserved = true;
+      state.nodeTestExitCode = event.nodeTestExitCode;
+      state.nodeTestSignal = event.nodeTestSignal;
+      state.nodeTestTimedOut = event.nodeTestTimedOut;
+      notifyAcceptedEvent(event);
+      return;
+    }
+    if (event.event === "nodeTestClose") {
+      if (failure || closed || seen.has(event.event) ||
+          state.nodeTestProcessCreated !== true) {
+        invalidate();
+        return;
+      }
+      if (state.nodeTestExitObserved !== true ||
+          event.nodeTestCloseCode !== state.nodeTestExitCode ||
+          event.nodeTestCloseSignal !== state.nodeTestSignal) {
+        lifecycleContradiction = true;
+      }
+      closed = true;
+      seen.add(event.event);
+      state.nodeTestCloseObserved = true;
+      state.nodeTestCloseCode = event.nodeTestCloseCode;
+      state.nodeTestCloseSignal = event.nodeTestCloseSignal;
+      notifyAcceptedEvent(event);
       return;
     }
     if (event.event === "physicalPhaseSnapshot") {
@@ -2004,26 +2435,7 @@ function createSafeEventCollector(options = {}) {
       }
       state.cleanupStarted = event.cleanupStarted;
       state.cleanupCompleted = event.cleanupCompleted;
-      notifyAcceptedEvent(event.event);
-      return;
-    }
-    if (event.event === "nodeTestClosed") {
-      if (
-        failure ||
-        closed ||
-        state.nodeTestProcessCreated !== true ||
-        !seen.has("physicalPhaseSnapshot") ||
-        seen.has("nodeTestClosed")
-      ) {
-        invalidate();
-        return;
-      }
-      closed = true;
-      seen.add(event.event);
-      state.nodeTestExitCode = event.nodeTestExitCode;
-      state.nodeTestSignal = event.nodeTestSignal;
-      state.nodeTestTimedOut = event.nodeTestTimedOut;
-      notifyAcceptedEvent(event.event);
+      notifyAcceptedEvent(event);
       return;
     }
     if (event.event === "failure") {
@@ -2047,7 +2459,7 @@ function createSafeEventCollector(options = {}) {
           state[field] = event[field];
         }
       }
-      notifyAcceptedEvent(event.event);
+      notifyAcceptedEvent(event);
       return;
     }
     invalidate();
@@ -2080,7 +2492,7 @@ function createSafeEventCollector(options = {}) {
     const rawClassification = rawDiagnostic.finish();
     if (framed.overflow) invalidate();
     if (!rawClassification.safeDiagnosticValid) invalidate();
-    if (protocolInvalid && !failure) {
+    if ((protocolInvalid || lifecycleContradiction) && !failure) {
       const boundary = seen.has("physicalPhaseSnapshot")
         ? snapshotFailureBoundary()
         : { failureDuringCleanup: false, failurePhase: null };
@@ -2104,7 +2516,7 @@ function createSafeEventCollector(options = {}) {
       state.safeLineBucket = rawClassification.safeLineBucket;
     }
     return Object.freeze({
-      protocolValid: !protocolInvalid,
+      protocolValid: !protocolInvalid && !lifecycleContradiction,
       closed,
       failure,
       eventCount: expectedSequence - 1,
@@ -2206,7 +2618,8 @@ function physicalPhaseContractValid(facts, result) {
 
 function nodeTestFailure(facts, result) {
   const exact0004Evidence = exact0004EvidenceFromFacts(facts);
-  const exactTap = facts.tapStarted &&
+  const exactTap = facts.testFileLoaded &&
+    facts.tapStarted &&
     facts.tapTitleObserved &&
     facts.firstTestDiscovered &&
     facts.tapTests === 1 &&
@@ -2216,7 +2629,8 @@ function nodeTestFailure(facts, result) {
     facts.tapCancelled === 0;
   const phaseContractValid = physicalPhaseContractValid(facts, result);
   const boundary = physicalFailureBoundary(facts);
-  if (result.status === 0 && result.signal === null &&
+  if (result.exitObserved === true && result.closeObserved === true &&
+      result.status === 0 && result.signal === null &&
       !facts.overflow && exactTap && phaseContractValid &&
       facts.safeDiagnosticValid) return null;
   if (!phaseContractValid || !facts.safeDiagnosticValid) {
@@ -2233,7 +2647,8 @@ function nodeTestFailure(facts, result) {
     });
   }
   let firstFailureStage = "node_test_bootstrap";
-  if (facts.firstTestDiscovered) firstFailureStage = "test_execution";
+  if (!facts.testFileLoaded) firstFailureStage = "node_test_bootstrap";
+  else if (facts.firstTestDiscovered) firstFailureStage = "test_execution";
   else if (facts.tapStarted) firstFailureStage = "test_discovery";
   else if (result.status === 0) firstFailureStage = "tap_start";
   let stderrCategory = facts.stderrCategory;
@@ -2297,11 +2712,19 @@ function runNodeTest({
   configuration,
   env,
   onCreated,
+  onError = () => {},
+  onExit = () => {},
+  onClose = () => {},
   onMarker,
   spawnImpl = spawn
 }) {
   return new Promise((resolve) => {
-    const observer = createNodeTestObserver(onMarker);
+    const testFileLoadMarker = realTestFileLoadMarker(
+      configuration.fingerprint
+    );
+    const observer = createNodeTestObserver(onMarker, {
+      testFileLoadMarker
+    });
     let child;
     try {
       child = spawnImpl(
@@ -2317,7 +2740,8 @@ function runNodeTest({
           env: {
             ...env,
             SOCIAL_REAL_POSTGRES_REQUIRED: "true",
-            SOCIAL_TEST_GATE_VALIDATED_FINGERPRINT: configuration.fingerprint
+            SOCIAL_TEST_GATE_VALIDATED_FINGERPRINT: configuration.fingerprint,
+            [REAL_TEST_FILE_LOAD_MARKER_ENV]: testFileLoadMarker
           },
           shell: false,
           stdio: ["ignore", "pipe", "pipe"],
@@ -2325,9 +2749,12 @@ function runNodeTest({
         }
       );
     } catch (error) {
+      onError(false, error);
       resolve(Object.freeze({
         created: false,
         error,
+        exitObserved: false,
+        closeObserved: false,
         status: null,
         signal: null,
         facts: null
@@ -2337,6 +2764,10 @@ function runNodeTest({
     let created = false;
     let settled = false;
     let streamError = false;
+    let childError = null;
+    let exitObserved = false;
+    let exitCode = null;
+    let exitSignal = null;
     if (child.stdout) {
       child.stdout.on("data", (chunk) => observer.push("stdout", chunk));
       child.stdout.once("error", () => { streamError = true; });
@@ -2351,26 +2782,36 @@ function runNodeTest({
     });
     child.once("error", (error) => {
       if (settled) return;
-      settled = true;
-      resolve(Object.freeze({
-        created,
-        error,
-        status: null,
-        signal: null,
-        facts: null
-      }));
+      childError = error;
+      onError(created, error);
+    });
+    child.once("exit", (status, signal) => {
+      if (settled) return;
+      exitObserved = true;
+      exitCode = Number.isSafeInteger(status) ? status : null;
+      exitSignal = typeof signal === "string" ? signal : null;
+      onExit(exitCode, exitSignal, false);
     });
     child.once("close", (status, signal) => {
       if (settled) return;
       settled = true;
       const facts = observer.finish();
+      const closeCode = Number.isSafeInteger(status) ? status : null;
+      const closeSignal = typeof signal === "string" ? signal : null;
+      if (created) onClose(closeCode, closeSignal, facts);
       resolve(Object.freeze({
         created,
-        error: streamError ? Object.assign(new Error("stream_error"), {
-          code: "test_process_failed"
-        }) : null,
-        status,
-        signal,
+        error: childError || (streamError
+          ? Object.assign(new Error("stream_error"), {
+              code: "test_process_failed"
+            })
+          : null),
+        exitObserved,
+        closeObserved: true,
+        closeStatus: closeCode,
+        closeSignal,
+        status: exitObserved ? exitCode : closeCode,
+        signal: exitObserved ? exitSignal : closeSignal,
         facts
       }));
     });
@@ -2789,7 +3230,23 @@ async function main(env = process.env, options = {}) {
       onCreated: () => emit("nodeTestProcessCreated", {
         nodeTestProcessCreated: true
       }),
-      onMarker: (name) => emit(name, { [name]: true })
+      onError: (afterSpawn, error) => emit("nodeTestError", {
+        afterSpawn,
+        safeErrorCode: safeFailureFromError(error).safeErrorCode
+      }),
+      onExit: (code, signal, timedOut) => emit("nodeTestExit", {
+        nodeTestExitCode: code,
+        nodeTestSignal: signal,
+        nodeTestTimedOut: timedOut
+      }),
+      onClose: (code, signal) => emit("nodeTestClose", {
+        nodeTestCloseCode: code,
+        nodeTestCloseSignal: signal
+      }),
+      onMarker: (name, fields = {}) => emit(
+        name,
+        name === "nodeTestTapSummary" ? fields : { [name]: true }
+      )
     });
   } catch (error) {
     emitFailure("node_test_spawn", safeFailureFromError(error));
@@ -2824,12 +3281,6 @@ async function main(env = process.env, options = {}) {
     cleanupStarted: result.facts.cleanupStarted,
     cleanupCompleted: result.facts.cleanupCompleted,
     ...resultExact0004Evidence
-  });
-  const nodeTestTimedOut = result.signal === null ? false : null;
-  emit("nodeTestClosed", {
-    nodeTestExitCode: result.status,
-    nodeTestSignal: result.signal,
-    nodeTestTimedOut
   });
   let failureFacts;
   if (result.error) {
@@ -2899,6 +3350,7 @@ function exact0004CheckpointDefaults() {
     postgresStarted: false,
     nodeTestSpawnAttempted: false,
     nodeTestProcessCreated: false,
+    lifecycleEvidence: [],
     cleanupStarted: false,
     cleanupCompleted: false,
     auxiliaryProcessCount: 0,
@@ -2910,7 +3362,8 @@ function exact0004CheckpointDefaults() {
 
 function validExact0004Checkpoint(value) {
   if (!exactKeys(value, EXACT_0004_CHECKPOINT_KEYS) ||
-      value.checkpointSchemaVersion !== EXACT_0004_CHECKPOINT_SCHEMA_VERSION) {
+      value.checkpointSchemaVersion !== EXACT_0004_CHECKPOINT_SCHEMA_VERSION ||
+      !validExact0004LifecycleEvidence(value.lifecycleEvidence)) {
     return false;
   }
   for (const key of [
@@ -2973,9 +3426,40 @@ function validExact0004Checkpoint(value) {
     return false;
   }
   if (value.physicalLauncherSpawnAttempted &&
-      value.auxiliaryProcessOwnedByRoute &&
       value.safeAuxiliaryProcessClass !== "sudo") return false;
   if (!value.physicalLauncherProcessCreated && !noLauncherResult) return false;
+  const lifecycleByName = new Map(
+    value.lifecycleEvidence.map((entry) => [entry.event, entry])
+  );
+  for (const [field, event] of [
+    ["physicalLauncherSpawnAttempted", "physicalLauncherSpawnAttempted"],
+    ["physicalLauncherProcessCreated", "physicalLauncherProcessCreated"],
+    ["postgresStartAttempted", "postgresStartAttempted"],
+    ["postgresStarted", "postgresStarted"],
+    ["nodeTestSpawnAttempted", "nodeTestSpawnAttempted"],
+    ["nodeTestProcessCreated", "nodeTestProcessCreated"],
+    ["cleanupStarted", "routeCleanupStarted"]
+  ]) if (value[field] !== lifecycleByName.has(event)) return false;
+  const cleanupCompletedEvent = lifecycleByName.get("routeCleanupCompleted");
+  const auxiliaryProjection = exact0004AuxiliaryProcessProjection(
+    value.lifecycleEvidence,
+    value.auxiliaryProcessOwnedByRoute,
+    value.auxiliaryProcessCount
+  );
+  if (!auxiliaryProjection.valid ||
+      value.auxiliaryProcessCount !== auxiliaryProjection.count) return false;
+  if (value.cleanupCompleted !== Boolean(
+    cleanupCompletedEvent && cleanupCompletedEvent.facts.completed === true &&
+      cleanupCompletedEvent.facts.count === 0
+  )) return false;
+  const launcherClosedEvent = lifecycleByName.get("physicalLauncherClosed");
+  if (launcherClosedEvent) {
+    if (value.physicalLauncherExitCode !==
+        launcherClosedEvent.facts.exitCode ||
+        value.physicalLauncherSignal !== launcherClosedEvent.facts.signal ||
+        value.physicalLauncherTimedOut !==
+          launcherClosedEvent.facts.timedOut) return false;
+  } else if (!noLauncherResult) return false;
   return true;
 }
 
@@ -3028,6 +3512,17 @@ function updateExact0004Checkpoint(patch, env = process.env) {
     });
   }
   const next = { ...current, ...patch };
+  if (!Array.isArray(next.lifecycleEvidence) ||
+      next.lifecycleEvidence.length < current.lifecycleEvidence.length ||
+      next.lifecycleEvidence.length > current.lifecycleEvidence.length + 1 ||
+      canonicalJson(next.lifecycleEvidence.slice(
+        0,
+        current.lifecycleEvidence.length
+      )) !== canonicalJson(current.lifecycleEvidence)) {
+    throw Object.assign(new Error("exact0004_checkpoint_transition_invalid"), {
+      code: "exact0004_checkpoint_transition_invalid"
+    });
+  }
   if (current.firstFailureStage !== null &&
       next.firstFailureStage !== current.firstFailureStage) {
     next.firstFailureStage = current.firstFailureStage;
@@ -3098,64 +3593,161 @@ function startExact0004PhysicalObservation(env = process.env) {
   }
   updateExact0004Checkpoint({ physicalScriptLoaded: true }, env);
   let launcherProcessCreated = false;
+  let lifecycleEvidence = [...initial.lifecycleEvidence];
   const observe = (patch) => observeExact0004Checkpoint(patch, env);
+  const append = (source, sourceSequence, event, facts, patch = {}) => {
+    const entry = {
+      sequence: lifecycleEvidence.length + 1,
+      source,
+      sourceSequence,
+      event,
+      facts
+    };
+    const next = [...lifecycleEvidence, entry];
+    if (!observe({ ...patch, lifecycleEvidence: next })) return false;
+    lifecycleEvidence = next;
+    return true;
+  };
+  const appendWorkflow = (source, event, facts, patch = {}) => append(
+    source,
+    null,
+    event,
+    facts,
+    patch
+  );
   const failure = (stage) => observe({
     firstFailureStage: EXACT_0004_CHECKPOINT_FAILURE_STAGES.includes(stage)
       ? stage
       : "unknown"
   });
-  const safeEvent = (name, snapshot) => {
+  const safeEvent = (name, snapshot, sourceEvent) => {
+    if (!sourceEvent || sourceEvent.event !== name) return false;
+    const entry = exact0004LifecycleEntryFromSafeEvent(
+      sourceEvent,
+      lifecycleEvidence.length + 1
+    );
+    const patch = {};
     if (name === "nodeTestSpawnAttempted") {
-      observe({ nodeTestSpawnAttempted: true });
+      patch.nodeTestSpawnAttempted = true;
     } else if (name === "nodeTestProcessCreated") {
-      observe({ nodeTestProcessCreated: true });
+      patch.nodeTestProcessCreated = true;
     } else if (name === "failure" && snapshot) {
-      failure(snapshot.firstFailureStage);
+      patch.firstFailureStage = EXACT_0004_CHECKPOINT_FAILURE_STAGES.includes(
+        snapshot.firstFailureStage
+      ) ? snapshot.firstFailureStage : "unknown";
     }
+    const next = [...lifecycleEvidence, entry];
+    if (!observe({ ...patch, lifecycleEvidence: next })) return false;
+    lifecycleEvidence = next;
+    return true;
   };
   return Object.freeze({
     cleanupCompleted(completed, auxiliaryResiduals) {
       const auxiliaryProcessCount = Number.isSafeInteger(auxiliaryResiduals) &&
         auxiliaryResiduals > 0 ? 1 : 0;
-      observe({
-        cleanupCompleted: completed === true && auxiliaryProcessCount === 0,
-        auxiliaryProcessCount,
-        ...(completed === true ? {} : { firstFailureStage: "cleanup" })
+      const cleanupSucceeded = completed === true &&
+        auxiliaryProcessCount === 0;
+      appendWorkflow("route_cleanup", "routeCleanupCompleted", {
+        completed: completed === true,
+        count: auxiliaryProcessCount
+      }, {
+        cleanupCompleted: cleanupSucceeded,
+        ...(launcherProcessCreated ? { auxiliaryProcessCount } : {}),
+        ...(cleanupSucceeded ? {} : { firstFailureStage: "cleanup" })
       });
     },
     cleanupStarted() {
-      observe({ cleanupStarted: true });
+      appendWorkflow("route_cleanup", "routeCleanupStarted", {}, {
+        cleanupStarted: true
+      });
     },
     failure,
-    launcherClosed(code, signal, timedOut, auxiliaryResiduals) {
+    launcherClosed(code, signal, timedOut) {
       if (!launcherProcessCreated) return;
-      observe({
-        physicalLauncherExitCode: Number.isSafeInteger(code) ? code : null,
-        physicalLauncherSignal: typeof signal === "string" ? signal : null,
-        physicalLauncherTimedOut: timedOut === true,
-        auxiliaryProcessCount: Number.isSafeInteger(auxiliaryResiduals) &&
-          auxiliaryResiduals > 0 ? 1 : 0
+      const exitCode = Number.isSafeInteger(code) ? code : null;
+      const safeSignal = typeof signal === "string" ? signal : null;
+      appendWorkflow("physical_launcher", "physicalLauncherClosed", {
+        exitCode,
+        signal: safeSignal,
+        timedOut: timedOut === true
+      }, {
+        physicalLauncherExitCode: exitCode,
+        physicalLauncherSignal: safeSignal,
+        physicalLauncherTimedOut: timedOut === true
       });
     },
     launcherProcessCreated() {
       launcherProcessCreated = true;
-      observe({
+      appendWorkflow(
+        "physical_launcher",
+        "physicalLauncherProcessCreated",
+        {},
+        {
         physicalLauncherProcessCreated: true,
         auxiliaryProcessCount: 1,
         auxiliaryProcessOwnedByRoute: true
-      });
+        }
+      );
     },
     launcherSpawnAttempted() {
-      observe({
+      appendWorkflow(
+        "physical_launcher",
+        "physicalLauncherSpawnAttempted",
+        {},
+        {
         physicalLauncherSpawnAttempted: true,
         safeAuxiliaryProcessClass: "sudo"
-      });
+        }
+      );
     },
     postgresStartAttempted() {
-      observe({ postgresStartAttempted: true });
+      appendWorkflow("physical_launcher", "postgresStartAttempted", {}, {
+        postgresStartAttempted: true
+      });
     },
     postgresStarted() {
-      observe({ postgresStarted: true });
+      appendWorkflow("physical_launcher", "postgresStarted", {}, {
+        postgresStarted: true
+      });
+    },
+    auxiliaryResidualBeforeKill(count) {
+      const safeCount = Number.isSafeInteger(count) && count > 0 ? 1 : 0;
+      return appendWorkflow(
+        "physical_launcher",
+        "auxiliaryResidualBeforeKill",
+        { count: safeCount },
+        { auxiliaryProcessCount: safeCount }
+      );
+    },
+    auxiliaryKillAttempted() {
+      return appendWorkflow(
+        "physical_launcher",
+        "auxiliaryKillAttempted",
+        { signal: "SIGKILL" }
+      );
+    },
+    auxiliaryKillResult(code, signal, timedOut) {
+      const exitCode = Number.isSafeInteger(code) ? code : null;
+      const safeSignal = typeof signal === "string" ? signal : null;
+      if (!validLifecycleProcessResult(
+        exitCode,
+        safeSignal,
+        timedOut === true
+      )) return false;
+      return appendWorkflow("physical_launcher", "auxiliaryKillResult", {
+        exitCode,
+        signal: safeSignal,
+        timedOut: timedOut === true
+      });
+    },
+    auxiliaryResidualFinal(count) {
+      const safeCount = Number.isSafeInteger(count) && count > 0 ? 1 : 0;
+      return appendWorkflow(
+        "physical_launcher",
+        "auxiliaryResidualFinal",
+        { count: safeCount },
+        { auxiliaryProcessCount: safeCount }
+      );
     },
     safeEvent
   });
@@ -3323,7 +3915,10 @@ const EXACT_0004_ARTIFACT_ADDED_KEYS = Object.freeze([
   "cleanupFailure"
 ]);
 const EXACT_0004_ARTIFACT_KEYS = Object.freeze([
-  ...EXACT_0004_LEGACY_ARTIFACT_KEYS,
+  ...EXACT_0004_LEGACY_ARTIFACT_KEYS.filter(
+    (key) => key !== "testProcessStarted"
+  ),
+  "lifecycleEvidence",
   ...EXACT_0004_ARTIFACT_ADDED_KEYS
 ]);
 const EXACT_0004_RESIDUAL_KEYS = Object.freeze([
@@ -3468,9 +4063,10 @@ function validExact0004Artifact(value) {
       JSON.stringify(value.inventory) !== JSON.stringify(EXACT_0004_INVENTORY) ||
       value.runner !== "ubuntu-24.04" ||
       !/^v[0-9]+\.[0-9]+\.[0-9]+$/.test(value.nodeVersion) ||
-      !/^sha256:[0-9a-f]{64}$/.test(value.postgresImageDigest)) return false;
+      !/^sha256:[0-9a-f]{64}$/.test(value.postgresImageDigest) ||
+      !validExact0004LifecycleEvidence(value.lifecycleEvidence)) return false;
   for (const key of [
-    "postgresStarted", "testProcessStarted", "planExactPassed",
+    "postgresStarted", "planExactPassed",
     "applyExactPassed", "concurrencyPassed", "rollbackPassed",
     "nodeTestSpawnAttempted", "nodeTestProcessCreated", "cleanupStarted",
     "cleanupCompleted", "failureDuringCleanup", "physicalStepAdmitted",
@@ -3484,7 +4080,7 @@ function validExact0004Artifact(value) {
     "tapTitleObserved", "firstTestDiscovered"
   ]) if (![null, true].includes(value[key])) return false;
   for (const key of ["testsDiscovered", "testsPassed", "testsFailed"]) {
-    if (!Number.isSafeInteger(value[key]) || value[key] < 0 || value[key] > 1) {
+    if (!Number.isSafeInteger(value[key]) || value[key] < 0 || value[key] > 999) {
       return false;
     }
   }
@@ -3494,14 +4090,14 @@ function validExact0004Artifact(value) {
   )) return false;
   if (!["not_observed", "0003"].includes(value.profileBefore) ||
       !["not_observed", "0004"].includes(value.profileAfter) ||
-      value.testFileLoaded !== value.tapTitleObserved ||
-      value.testsDiscovered !== (value.firstTestDiscovered === true ? 1 : 0) ||
-      value.testsPassed === 1 && value.testsDiscovered !== 1 ||
-      value.testsPassed === 1 && value.testsFailed === 1 ||
+      value.firstTestDiscovered === true && value.testsDiscovered < 1 ||
+      value.testsPassed > value.testsDiscovered ||
+      value.testsFailed > value.testsDiscovered ||
       value.gateValidated === true && value.runnerReached !== true ||
       value.nodeTestSpawnAttempted && value.physicalEvidenceState === "valid" &&
         value.gateValidated !== true ||
       value.nodeTestProcessCreated && !value.nodeTestSpawnAttempted ||
+      value.testFileLoaded === true && !value.nodeTestProcessCreated ||
       value.tapStarted === true && !value.nodeTestProcessCreated ||
       value.tapTitleObserved === true && value.tapStarted !== true ||
       value.firstTestDiscovered === true && value.tapStarted !== true) return false;
@@ -3511,14 +4107,69 @@ function validExact0004Artifact(value) {
     value.nodeTestExitCode >= 0 && value.nodeTestSignal === null &&
     value.nodeTestTimedOut === false;
   const nodeSignaled = value.nodeTestExitCode === null &&
-    SAFE_SIGNALS.has(value.nodeTestSignal) && value.nodeTestTimedOut === null;
+    SAFE_SIGNALS.has(value.nodeTestSignal) &&
+    typeof value.nodeTestTimedOut === "boolean";
   if (!noNodeResult && !nodeExited && !nodeSignaled ||
       !value.nodeTestProcessCreated && !noNodeResult) return false;
+  const runnerLifecycle = exact0004RunnerFactsFromLifecycle(
+    value.lifecycleEvidence
+  );
+  const lifecycleByName = new Map(
+    value.lifecycleEvidence.map((entry) => [entry.event, entry])
+  );
+  const auxiliaryProjection = exact0004AuxiliaryProcessProjection(
+    value.lifecycleEvidence,
+    value.auxiliaryProcessOwnedByRoute,
+    value.auxiliaryProcessCount
+  );
+  if (value.auxiliaryProcessCount !== auxiliaryProjection.count ||
+      !auxiliaryProjection.valid && value.physicalEvidenceState !== "invalid") {
+    return false;
+  }
+  for (const key of [
+    "runnerReached",
+    "gateValidated",
+    "nodeTestSpawnAttempted",
+    "nodeTestProcessCreated",
+    "testFileLoaded",
+    "tapStarted",
+    "tapTitleObserved",
+    "firstTestDiscovered"
+  ]) if (runnerLifecycle[key] === true && value[key] !== true) return false;
+  if (runnerLifecycle.testsDiscovered !== null && (
+    value.testsDiscovered !== runnerLifecycle.testsDiscovered ||
+    value.testsPassed !== runnerLifecycle.testsPassed ||
+    value.testsFailed !== runnerLifecycle.testsFailed
+  )) return false;
+  if (runnerLifecycle.nodeTestExitObserved && (
+    value.nodeTestExitCode !== runnerLifecycle.nodeTestExitCode ||
+    value.nodeTestSignal !== runnerLifecycle.nodeTestSignal ||
+    value.nodeTestTimedOut !== runnerLifecycle.nodeTestTimedOut
+  )) return false;
+  if (lifecycleByName.has("physicalPhaseSnapshot") && [
+    "lastMainPhaseStarted",
+    "lastMainPhaseCompleted",
+    ...EXACT_0004_EVIDENCE_FIELDS
+  ].some((key) => value[key] !== runnerLifecycle[key])) return false;
+  for (const [field, event] of [
+    ["physicalLauncherSpawnAttempted", "physicalLauncherSpawnAttempted"],
+    ["physicalLauncherProcessCreated", "physicalLauncherProcessCreated"],
+    ["postgresStartAttempted", "postgresStartAttempted"],
+    ["postgresStarted", "postgresStarted"]
+  ]) if (lifecycleByName.has(event) && value[field] !== true) return false;
+  const launcherClosedEvent = lifecycleByName.get("physicalLauncherClosed");
+  if (launcherClosedEvent && (
+    value.physicalLauncherExitCode !== launcherClosedEvent.facts.exitCode ||
+    value.physicalLauncherSignal !== launcherClosedEvent.facts.signal ||
+    value.physicalLauncherTimedOut !== launcherClosedEvent.facts.timedOut
+  )) return false;
   const failed = value.firstFailure !== null;
   if (!validExact0004ArtifactFailure(value) ||
       !validExact0004ArtifactBoundary(value, failed) ||
       !EXACT_0004_ARTIFACT_STATE_SET.has(value.physicalEntryCheckpointState) ||
       !EXACT_0004_ARTIFACT_STATE_SET.has(value.physicalEvidenceState) ||
+      value.physicalEntryCheckpointState === "invalid" &&
+        value.physicalEvidenceState !== "invalid" ||
       value.physicalStepEntered && !value.physicalStepAdmitted ||
       value.physicalScriptLoadAttempted && !value.physicalStepEntered ||
       value.physicalScriptLoaded && !value.physicalScriptLoadAttempted ||
@@ -3529,8 +4180,8 @@ function validExact0004Artifact(value) {
         !value.auxiliaryProcessOwnedByRoute ||
       value.postgresStartAttempted && !value.physicalScriptLoaded ||
       value.postgresStarted && !value.postgresStartAttempted ||
-      value.testProcessStarted && !value.physicalLauncherProcessCreated ||
-      value.nodeTestSpawnAttempted && !value.physicalLauncherProcessCreated ||
+      value.physicalEvidenceState === "valid" &&
+        value.nodeTestSpawnAttempted && !value.physicalLauncherProcessCreated ||
       value.nodeTestProcessCreated && !value.nodeTestSpawnAttempted ||
       value.cleanupCompleted && !value.cleanupStarted ||
       !value.cleanupStarted && value.failureDuringCleanup ||
@@ -3561,7 +4212,6 @@ function validExact0004Artifact(value) {
       !EXACT_0004_AUXILIARY_PROCESS_CLASSES.includes(
         value.safeAuxiliaryProcessClass) ||
       value.physicalLauncherSpawnAttempted &&
-        value.auxiliaryProcessOwnedByRoute &&
         value.safeAuxiliaryProcessClass !== "sudo" ||
       value.auxiliaryProcessOwnedByRoute &&
         !value.physicalLauncherProcessCreated ||
@@ -3640,6 +4290,202 @@ function validExact0004Assessment(value) {
       : value.cleanup === null);
 }
 
+function validExact0004LegacyArtifact(value) {
+  if (!exactKeys(value, EXACT_0004_LEGACY_ARTIFACT_KEYS) ||
+      value.schemaVersion !== 1 ||
+      value.evidenceSchemaVersion !== EVIDENCE_SCHEMA_VERSION ||
+      typeof value.branch !== "string" || value.branch.length < 1 ||
+      value.branch.length > 160 || /[\r\n]/.test(value.branch) ||
+      !/^[0-9a-f]{40}$/.test(value.commit) ||
+      !/^[0-9a-f]{40}$/.test(value.parent) ||
+      JSON.stringify(value.inventory) !== JSON.stringify(EXACT_0004_INVENTORY) ||
+      value.runner !== "ubuntu-24.04" ||
+      !/^v[0-9]+\.[0-9]+\.[0-9]+$/.test(value.nodeVersion) ||
+      !/^sha256:[0-9a-f]{64}$/.test(value.postgresImageDigest)) return false;
+  for (const key of [
+    "postgresStarted", "testProcessStarted", "planExactPassed",
+    "applyExactPassed", "concurrencyPassed", "rollbackPassed",
+    "cleanupStarted", "cleanupCompleted", "failureDuringCleanup"
+  ]) if (typeof value[key] !== "boolean") return false;
+  for (const key of [
+    "testFileLoaded", "runnerReached", "gateValidated",
+    "nodeTestSpawnAttempted", "nodeTestProcessCreated", "tapStarted",
+    "tapTitleObserved", "firstTestDiscovered"
+  ]) if (![null, true].includes(value[key])) return false;
+  for (const key of ["testsDiscovered", "testsPassed", "testsFailed"]) {
+    if (!Number.isSafeInteger(value[key]) || value[key] < 0 || value[key] > 999) {
+      return false;
+    }
+  }
+  if (!["not_observed", "0003"].includes(value.profileBefore) ||
+      !["not_observed", "0004"].includes(value.profileAfter) ||
+      value.testsDiscovered !== (value.firstTestDiscovered === true ? 1 : 0) ||
+      value.testsPassed > value.testsDiscovered ||
+      value.testsFailed > value.testsDiscovered ||
+      value.gateValidated === true && value.runnerReached !== true ||
+      value.nodeTestProcessCreated === true &&
+        value.nodeTestSpawnAttempted !== true ||
+      value.testFileLoaded === true && value.nodeTestProcessCreated !== true ||
+      value.tapStarted === true && value.nodeTestProcessCreated !== true ||
+      value.tapTitleObserved === true && value.tapStarted !== true ||
+      value.firstTestDiscovered === true && value.tapStarted !== true ||
+      value.nodeTestProcessCreated !== true && (
+        value.testsDiscovered !== 0 || value.testsPassed !== 0 ||
+        value.testsFailed !== 0
+      )) return false;
+  const noNodeResult = value.nodeTestExitCode === null &&
+    value.nodeTestSignal === null && value.nodeTestTimedOut === null;
+  const nodeExited = Number.isSafeInteger(value.nodeTestExitCode) &&
+    value.nodeTestExitCode >= 0 && value.nodeTestSignal === null &&
+    value.nodeTestTimedOut === false;
+  const nodeSignaled = value.nodeTestExitCode === null &&
+    SAFE_SIGNALS.has(value.nodeTestSignal) &&
+    typeof value.nodeTestTimedOut === "boolean";
+  const startedIndex = value.lastMainPhaseStarted === null ? -1 :
+    PHYSICAL_MAIN_PHASES.indexOf(value.lastMainPhaseStarted);
+  const completedIndex = value.lastMainPhaseCompleted === null ? -1 :
+    PHYSICAL_MAIN_PHASES.indexOf(value.lastMainPhaseCompleted);
+  const mainActive = startedIndex - completedIndex === 1;
+  const allMainCompleted = startedIndex === PHYSICAL_MAIN_PHASES.length - 1 &&
+    completedIndex === PHYSICAL_MAIN_PHASES.length - 1;
+  if (!noNodeResult && !nodeExited && !nodeSignaled ||
+      value.nodeTestProcessCreated !== true && !noNodeResult ||
+      value.nodeTestSpawnAttempted === true && value.gateValidated !== true ||
+      value.cleanupCompleted && !value.cleanupStarted ||
+      value.cleanupStarted && !mainActive && !allMainCompleted ||
+      value.failureDuringCleanup && (
+        !value.cleanupStarted || value.cleanupCompleted ||
+          value.failurePhase !== PHYSICAL_CLEANUP_PHASE
+      ) || !value.failureDuringCleanup &&
+        value.failurePhase === PHYSICAL_CLEANUP_PHASE ||
+      !validExact0004ArtifactFailure(value) ||
+      !validExact0004ArtifactBoundary(value, value.firstFailure !== null) ||
+      !exactKeys(value.residuals, EXACT_0004_RESIDUAL_KEYS) ||
+      EXACT_0004_RESIDUAL_KEYS.some((key) =>
+        !Number.isSafeInteger(value.residuals[key]) || value.residuals[key] < 0
+      )) return false;
+  return true;
+}
+
+function exact0004LegacyFallback(env, candidate) {
+  const source = candidate && typeof candidate === "object" &&
+    !Array.isArray(candidate) ? candidate : {};
+  const branch = typeof env.SOCIAL_EXACT_BRANCH === "string" &&
+    env.SOCIAL_EXACT_BRANCH.length > 0 && env.SOCIAL_EXACT_BRANCH.length <= 160 &&
+    !/[\r\n]/.test(env.SOCIAL_EXACT_BRANCH)
+    ? env.SOCIAL_EXACT_BRANCH
+    : typeof source.branch === "string" && source.branch.length > 0 &&
+        source.branch.length <= 160 && !/[\r\n]/.test(source.branch)
+      ? source.branch
+      : "unknown";
+  const commit = /^[0-9a-f]{40}$/.test(env.GITHUB_SHA || "")
+    ? env.GITHUB_SHA
+    : /^[0-9a-f]{40}$/.test(source.commit || "")
+      ? source.commit
+      : "0".repeat(40);
+  const parent = /^[0-9a-f]{40}$/.test(env.SOCIAL_EXACT_PARENT || "")
+    ? env.SOCIAL_EXACT_PARENT
+    : /^[0-9a-f]{40}$/.test(source.parent || "")
+      ? source.parent
+      : "0".repeat(40);
+  const imageReference = env.SOCIAL_EXACT_POSTGRES_IMAGE;
+  const separator = typeof imageReference === "string"
+    ? imageReference.lastIndexOf("@")
+    : -1;
+  const environmentDigest = separator > 0
+    ? imageReference.slice(separator + 1)
+    : null;
+  const postgresImageDigest = /^sha256:[0-9a-f]{64}$/.test(
+    environmentDigest || ""
+  ) ? environmentDigest
+    : /^sha256:[0-9a-f]{64}$/.test(source.postgresImageDigest || "")
+      ? source.postgresImageDigest
+      : "sha256:" + "0".repeat(64);
+  return {
+    schemaVersion: 1,
+    evidenceSchemaVersion: EVIDENCE_SCHEMA_VERSION,
+    branch,
+    commit,
+    parent,
+    inventory: [...EXACT_0004_INVENTORY],
+    runner: "ubuntu-24.04",
+    nodeVersion: /^v[0-9]+\.[0-9]+\.[0-9]+$/.test(source.nodeVersion || "")
+      ? source.nodeVersion
+      : process.version,
+    postgresImageDigest,
+    postgresStarted: false,
+    testProcessStarted: false,
+    testFileLoaded: null,
+    testsDiscovered: 0,
+    testsPassed: 0,
+    testsFailed: 0,
+    planExactPassed: false,
+    applyExactPassed: false,
+    concurrencyPassed: false,
+    rollbackPassed: false,
+    profileBefore: "not_observed",
+    profileAfter: "not_observed",
+    firstFailure: "physical_step_no_evidence",
+    runnerReached: null,
+    gateValidated: null,
+    nodeTestSpawnAttempted: null,
+    nodeTestProcessCreated: null,
+    nodeTestExitCode: null,
+    nodeTestSignal: null,
+    nodeTestTimedOut: null,
+    tapStarted: null,
+    tapTitleObserved: null,
+    firstTestDiscovered: null,
+    stderrCategory: "unknown",
+    safeErrorCode: null,
+    safeModuleName: null,
+    firstFailureStage: "artifact",
+    lastMainPhaseStarted: null,
+    lastMainPhaseCompleted: null,
+    ...emptyExact0004Evidence(),
+    cleanupStarted: false,
+    failureDuringCleanup: false,
+    failurePhase: null,
+    safePermissionOrigin: "unknown",
+    safeSourceBasename: null,
+    safeLineBucket: "unknown",
+    cleanupCompleted: false,
+    residuals: Object.fromEntries(
+      EXACT_0004_RESIDUAL_KEYS.map((key) => [key, 1])
+    )
+  };
+}
+
+function verifyExact0004MaterializedArtifact(files) {
+  const expected = [
+    "evidence.json",
+    "evidence.json.sha256",
+    "process-status.json",
+    "process-status.json.sha256"
+  ];
+  const actual = fs.readdirSync(files.artifactDirectory).sort();
+  if (canonicalJson(actual) !== canonicalJson([...expected].sort())) {
+    throw new Error("exact0004_artifact_inventory_invalid");
+  }
+  for (const name of expected) {
+    const file = path.join(files.artifactDirectory, name);
+    const stat = fs.lstatSync(file);
+    if (!stat.isFile() || stat.isSymbolicLink()) {
+      throw new Error("exact0004_artifact_file_invalid");
+    }
+  }
+  for (const name of ["evidence.json", "process-status.json"]) {
+    const file = path.join(files.artifactDirectory, name);
+    const digest = crypto.createHash("sha256").update(
+      fs.readFileSync(file)
+    ).digest("hex");
+    if (fs.readFileSync(file + ".sha256", "utf8") !==
+        `${digest}  ${name}\n`) {
+      throw new Error("exact0004_artifact_hash_invalid");
+    }
+  }
+}
+
 function finalizeExact0004Artifact(env = process.env) {
   const files = exact0004CheckpointPaths(env);
   const assessment = readExact0004Json(files.assessment);
@@ -3650,23 +4496,48 @@ function finalizeExact0004Artifact(env = process.env) {
   }
   const evidenceFile = path.join(files.artifactDirectory, "evidence.json");
   const evidenceSidecar = evidenceFile + ".sha256";
-  const legacy = readExact0004Json(evidenceFile);
-  if (!exactKeys(legacy, EXACT_0004_LEGACY_ARTIFACT_KEYS)) {
-    throw Object.assign(new Error("exact0004_legacy_artifact_invalid"), {
-      code: "exact0004_legacy_artifact_invalid"
-    });
-  }
+  const legacyCandidate = readExact0004Json(evidenceFile);
+  const legacyAggregateValid = validExact0004LegacyArtifact(legacyCandidate);
+  const legacy = legacyAggregateValid
+    ? legacyCandidate
+    : exact0004LegacyFallback(env, legacyCandidate);
   const entryCandidate = readExact0004Json(files.checkpoint);
   const entryCheckpointValid = validExact0004Checkpoint(entryCandidate);
   const checkpointDefaults = exact0004CheckpointDefaults();
   const entry = entryCheckpointValid
     ? entryCandidate
     : checkpointDefaults;
-  const checkpointPhysicalMarkersObserved = entryCheckpointValid &&
-    EXACT_0004_CHECKPOINT_KEYS.slice(1).some(
-      (key) => entry[key] !== checkpointDefaults[key]
+  const lifecycleEvidence = entryCandidate &&
+    validExact0004LifecycleEvidence(entryCandidate.lifecycleEvidence)
+    ? entryCandidate.lifecycleEvidence
+    : [];
+  const lifecycleByName = new Map(
+    lifecycleEvidence.map((item) => [item.event, item])
+  );
+  const runnerLifecycle = exact0004RunnerFactsFromLifecycle(
+    lifecycleEvidence
+  );
+  const candidateAuxiliaryProcessCount = entryCandidate &&
+    Number.isSafeInteger(entryCandidate.auxiliaryProcessCount) &&
+    entryCandidate.auxiliaryProcessCount >= 0 &&
+    entryCandidate.auxiliaryProcessCount <= 1
+    ? entryCandidate.auxiliaryProcessCount
+    : 0;
+  const lifecycleAuxiliaryProcessOwnedByRoute = lifecycleByName.has(
+    "physicalLauncherProcessCreated"
+  );
+  const lifecycleAuxiliaryProjection = exact0004AuxiliaryProcessProjection(
+    lifecycleEvidence,
+    lifecycleAuxiliaryProcessOwnedByRoute,
+    candidateAuxiliaryProcessCount
+  );
+  const checkpointPhysicalMarkersObserved = lifecycleEvidence.length > 0 ||
+    entryCheckpointValid && EXACT_0004_CHECKPOINT_KEYS.slice(1).some(
+      (key) => canonicalJson(entry[key]) !== canonicalJson(
+        checkpointDefaults[key]
+      )
     );
-  const legacyEvidenceFallback =
+  const legacyEvidenceFallback = !legacyAggregateValid ||
     legacy.firstFailure === "physical_step_no_evidence" &&
     legacy.firstFailureStage === "artifact";
   const legacyStatusFallback = legacy.firstFailure === "process_status_invalid" &&
@@ -3683,9 +4554,21 @@ function finalizeExact0004Artifact(env = process.env) {
   const statusTransportState = assessment.processStatusTransportState === "present"
     ? legacyStatusFallback ? "invalid" : "valid"
     : assessment.processStatusTransportState;
-  const physicalEvidenceState = evidenceTransportState !== "valid"
-    ? evidenceTransportState
-    : statusTransportState;
+  const legacyProtocolInvalid = legacyAggregateValid &&
+    legacy.firstFailureStage === "safe_event_protocol";
+  const runnerLifecycleObserved = lifecycleEvidence.some(
+    (entryItem) => entryItem.source === "runner_safe_event"
+  );
+  const checkpointAggregateInvalid =
+    assessment.entryCheckpointState === "invalid" ||
+    !lifecycleAuxiliaryProjection.valid;
+  const physicalEvidenceState = checkpointAggregateInvalid ||
+      legacyProtocolInvalid ||
+      (runnerLifecycleObserved && runnerLifecycle.protocolValid !== true)
+    ? "invalid"
+    : evidenceTransportState !== "valid"
+      ? evidenceTransportState
+      : statusTransportState;
   const cleanup = assessment.cleanupState === "valid"
     ? assessment.cleanup
     : null;
@@ -3695,20 +4578,23 @@ function finalizeExact0004Artifact(env = process.env) {
     env.PHYSICAL_OUTCOME
   ) || checkpointPhysicalMarkersObserved;
   const physicalStepEntered = physicalStepAdmitted &&
-    entry.physicalStepEntered === true;
+    (entry.physicalStepEntered === true || lifecycleEvidence.length > 0);
   const physicalScriptLoadAttempted = physicalStepEntered &&
-    entry.physicalScriptLoadAttempted === true;
+    (entry.physicalScriptLoadAttempted === true || lifecycleEvidence.length > 0);
   const physicalScriptLoaded = physicalScriptLoadAttempted &&
-    entry.physicalScriptLoaded === true;
+    (entry.physicalScriptLoaded === true || lifecycleEvidence.length > 0);
   const physicalLauncherSpawnAttempted = physicalScriptLoaded &&
-    entry.physicalLauncherSpawnAttempted === true;
+    (entry.physicalLauncherSpawnAttempted === true ||
+      lifecycleByName.has("physicalLauncherSpawnAttempted"));
   const physicalLauncherProcessCreated = physicalLauncherSpawnAttempted &&
-    entry.physicalLauncherProcessCreated === true;
+    (entry.physicalLauncherProcessCreated === true ||
+      lifecycleByName.has("physicalLauncherProcessCreated"));
   const auxiliaryProcessOwnedByRoute = physicalLauncherProcessCreated &&
-    entry.auxiliaryProcessOwnedByRoute === true;
-  const auxiliaryProcessCount = physicalStepAdmitted
-    ? entry.auxiliaryProcessCount
-    : 0;
+    (entry.auxiliaryProcessOwnedByRoute === true ||
+      lifecycleByName.has("physicalLauncherProcessCreated"));
+  const auxiliaryProcessCount = !physicalStepAdmitted
+    ? 0
+    : lifecycleAuxiliaryProjection.count;
   const residuals = {
     containers: cleanupCounter("containerResiduals"),
     volumes: cleanupCounter("volumeResiduals"),
@@ -3722,7 +4608,8 @@ function finalizeExact0004Artifact(env = process.env) {
     intermediateFiles: 0
   };
   const residualsZero = Object.values(residuals).every((value) => value === 0);
-  const cleanupStarted = entry.cleanupStarted === true || cleanup !== null;
+  const cleanupStarted = entry.cleanupStarted === true ||
+    lifecycleByName.has("routeCleanupStarted") || cleanup !== null;
   const cleanupCompleted = cleanupStarted && cleanup !== null &&
     cleanup.cleanupCompleted === true && residualsZero;
   const physicalCleanupFailureObserved = entryCheckpointValid &&
@@ -3914,20 +4801,66 @@ function finalizeExact0004Artifact(env = process.env) {
     recordFirstFailure(physicalFailure.code, physicalFailure.stage);
   }
   const physicalEvidenceValid = physicalEvidenceState === "valid";
-  const nodeTestSpawnAttempted = physicalLauncherProcessCreated &&
-    (entry.nodeTestSpawnAttempted === true ||
-      physicalEvidenceValid && legacy.nodeTestSpawnAttempted === true);
-  const nodeTestProcessCreated = physicalLauncherProcessCreated &&
-    (entry.nodeTestProcessCreated === true ||
-      physicalEvidenceValid && legacy.nodeTestProcessCreated === true);
+  const nodeTestSpawnAttempted = entry.nodeTestSpawnAttempted === true ||
+      runnerLifecycle.nodeTestSpawnAttempted === true ||
+      physicalEvidenceValid && legacy.nodeTestSpawnAttempted === true;
+  const nodeTestProcessCreated = entry.nodeTestProcessCreated === true ||
+      runnerLifecycle.nodeTestProcessCreated === true ||
+      physicalEvidenceValid && legacy.nodeTestProcessCreated === true;
+  const summaryObserved = runnerLifecycle.testsDiscovered !== null;
+  const exitObserved = runnerLifecycle.nodeTestExitObserved === true;
+  const runnerPhaseObserved = lifecycleByName.has("physicalPhaseSnapshot") ||
+    lifecycleByName.has("failure");
+  const runnerFailureObserved = lifecycleByName.has("failure");
+  const marker = (name) => runnerLifecycle[name] === true
+    ? true
+    : physicalEvidenceValid ? legacy[name] : null;
+  const phaseProjection = Object.fromEntries([
+    "lastMainPhaseStarted",
+    "lastMainPhaseCompleted",
+    ...EXACT_0004_EVIDENCE_FIELDS
+  ].map((key) => [
+    key,
+    runnerPhaseObserved ? runnerLifecycle[key] : legacy[key]
+  ]));
+  const launcherClosed = lifecycleByName.get("physicalLauncherClosed");
+  const {
+    testProcessStarted: legacyLauncherProcessStarted,
+    ...legacyArtifact
+  } = legacy;
+  void legacyLauncherProcessStarted;
   const artifact = {
-    ...legacy,
+    ...legacyArtifact,
     schemaVersion: EXACT_0004_ARTIFACT_SCHEMA_VERSION,
-    testsDiscovered: nodeTestProcessCreated ? legacy.testsDiscovered : 0,
-    testsPassed: nodeTestProcessCreated ? legacy.testsPassed : 0,
-    testsFailed: nodeTestProcessCreated ? legacy.testsFailed : 0,
+    lifecycleEvidence,
+    runnerReached: marker("runnerReached"),
+    gateValidated: marker("gateValidated"),
+    testFileLoaded: marker("testFileLoaded"),
+    tapStarted: marker("tapStarted"),
+    tapTitleObserved: marker("tapTitleObserved"),
+    firstTestDiscovered: marker("firstTestDiscovered"),
+    testsDiscovered: nodeTestProcessCreated
+      ? summaryObserved ? runnerLifecycle.testsDiscovered : legacy.testsDiscovered
+      : 0,
+    testsPassed: nodeTestProcessCreated
+      ? summaryObserved ? runnerLifecycle.testsPassed : legacy.testsPassed
+      : 0,
+    testsFailed: nodeTestProcessCreated
+      ? summaryObserved ? runnerLifecycle.testsFailed : legacy.testsFailed
+      : 0,
+    nodeTestExitCode: exitObserved
+      ? runnerLifecycle.nodeTestExitCode
+      : physicalEvidenceValid ? legacy.nodeTestExitCode : null,
+    nodeTestSignal: exitObserved
+      ? runnerLifecycle.nodeTestSignal
+      : physicalEvidenceValid ? legacy.nodeTestSignal : null,
+    nodeTestTimedOut: exitObserved
+      ? runnerLifecycle.nodeTestTimedOut
+      : physicalEvidenceValid ? legacy.nodeTestTimedOut : null,
+    ...phaseProjection,
     postgresStarted: physicalScriptLoaded &&
       (entry.postgresStarted === true ||
+        lifecycleByName.has("postgresStarted") ||
         physicalEvidenceValid && legacy.postgresStarted === true),
     nodeTestSpawnAttempted,
     nodeTestProcessCreated,
@@ -3937,6 +4870,7 @@ function finalizeExact0004Artifact(env = process.env) {
     firstFailureStage,
     failureDuringCleanup: (!legacyCleanupFallback &&
       legacy.failureDuringCleanup === true) ||
+      (runnerFailureObserved && runnerLifecycle.failureDuringCleanup === true) ||
       physicalCleanupFailureObserved ||
       (cleanupStarted && cleanupFailure !== null),
     failurePhase: firstFailureStage === "cleanup"
@@ -3944,22 +4878,34 @@ function finalizeExact0004Artifact(env = process.env) {
       : physicalFailureRefinedLegacy || legacy.failurePhase === "final_cleanup"
         ? null
         : legacy.failurePhase,
-    stderrCategory: physicalFailureRefinedLegacy
+    stderrCategory: runnerFailureObserved
+      ? runnerLifecycle.stderrCategory
+      : physicalFailureRefinedLegacy
       ? "unknown"
       : firstFailure !== null && legacy.stderrCategory === null
       ? "unknown"
       : legacy.stderrCategory,
-    safeErrorCode: physicalFailureRefinedLegacy ? null : legacy.safeErrorCode,
-    safeModuleName: physicalFailureRefinedLegacy ? null : legacy.safeModuleName,
-    safePermissionOrigin: physicalFailureRefinedLegacy
+    safeErrorCode: runnerFailureObserved
+      ? runnerLifecycle.safeErrorCode
+      : physicalFailureRefinedLegacy ? null : legacy.safeErrorCode,
+    safeModuleName: runnerFailureObserved
+      ? runnerLifecycle.safeModuleName
+      : physicalFailureRefinedLegacy ? null : legacy.safeModuleName,
+    safePermissionOrigin: runnerFailureObserved
+      ? runnerLifecycle.safePermissionOrigin
+      : physicalFailureRefinedLegacy
       ? "unknown"
       : firstFailure !== null && legacy.safePermissionOrigin === null
         ? "unknown"
         : legacy.safePermissionOrigin,
-    safeSourceBasename: physicalFailureRefinedLegacy
+    safeSourceBasename: runnerFailureObserved
+      ? runnerLifecycle.safeSourceBasename
+      : physicalFailureRefinedLegacy
       ? null
       : legacy.safeSourceBasename,
-    safeLineBucket: physicalFailureRefinedLegacy
+    safeLineBucket: runnerFailureObserved
+      ? runnerLifecycle.safeLineBucket
+      : physicalFailureRefinedLegacy
       ? "unknown"
       : firstFailure !== null && legacy.safeLineBucket === null
         ? "unknown"
@@ -3974,23 +4920,32 @@ function finalizeExact0004Artifact(env = process.env) {
     physicalLauncherSpawnAttempted,
     physicalLauncherProcessCreated,
     physicalLauncherExitCode: physicalLauncherProcessCreated
-      ? entry.physicalLauncherExitCode
+      ? launcherClosed
+        ? launcherClosed.facts.exitCode
+        : entry.physicalLauncherExitCode
       : null,
     physicalLauncherSignal: physicalLauncherProcessCreated
-      ? entry.physicalLauncherSignal
+      ? launcherClosed
+        ? launcherClosed.facts.signal
+        : entry.physicalLauncherSignal
       : null,
     physicalLauncherTimedOut: physicalLauncherProcessCreated
-      ? entry.physicalLauncherTimedOut
+      ? launcherClosed
+        ? launcherClosed.facts.timedOut
+        : entry.physicalLauncherTimedOut
       : null,
     postgresStartAttempted: physicalScriptLoaded &&
       (entry.postgresStartAttempted === true ||
+        lifecycleByName.has("postgresStartAttempted") ||
         physicalEvidenceValid && legacy.postgresStarted === true),
     auxiliaryProcessCount,
     safeAuxiliaryProcessClass: !physicalStepAdmitted
       ? "not_observed"
-      : entryCheckpointValid
-      ? entry.safeAuxiliaryProcessClass
-      : "unknown",
+      : physicalLauncherSpawnAttempted
+        ? "sudo"
+        : entryCheckpointValid
+          ? entry.safeAuxiliaryProcessClass
+          : "unknown",
     auxiliaryProcessOwnedByRoute,
     cleanupFailure
   };
@@ -4004,6 +4959,7 @@ function finalizeExact0004Artifact(env = process.env) {
   const sidecarBody = crypto.createHash("sha256").update(body).digest("hex") +
     "  evidence.json\n";
   writeExact0004FileAtomic(evidenceSidecar, sidecarBody);
+  verifyExact0004MaterializedArtifact(files);
   const consumedTransportFiles = [
     files.checkpoint,
     files.assessment,
@@ -4091,7 +5047,6 @@ function enforceExact0004Artifact(env = process.env) {
       "physicalLauncherProcessCreated",
       "postgresStartAttempted",
       "postgresStarted",
-      "testProcessStarted",
       "testFileLoaded",
       "planExactPassed",
       "applyExactPassed",
@@ -4110,6 +5065,70 @@ function enforceExact0004Artifact(env = process.env) {
       if (evidence[key] !== true) {
         throw new Error("exact0004_artifact_required_marker_invalid");
       }
+    }
+    const lifecycleEvents = new Map(
+      evidence.lifecycleEvidence.map((entry) => [entry.event, entry])
+    );
+    for (const event of [
+      "physicalLauncherSpawnAttempted",
+      "physicalLauncherProcessCreated",
+      "postgresStartAttempted",
+      "postgresStarted",
+      "runnerReached",
+      "gateValidated",
+      "nodeTestSpawnAttempted",
+      "nodeTestProcessCreated",
+      "testFileLoaded",
+      "tapStarted",
+      "tapTitleObserved",
+      "firstTestDiscovered",
+      "nodeTestTapSummary",
+      "nodeTestExit",
+      "nodeTestClose",
+      "physicalPhaseSnapshot",
+      "physicalLauncherClosed",
+      "auxiliaryResidualBeforeKill",
+      "auxiliaryResidualFinal",
+      "routeCleanupStarted",
+      "routeCleanupCompleted"
+    ]) if (!lifecycleEvents.has(event)) {
+      throw new Error("exact0004_lifecycle_required_event_missing");
+    }
+    const lifecycleFacts = exact0004RunnerFactsFromLifecycle(
+      evidence.lifecycleEvidence
+    );
+    const summaryEvent = lifecycleEvents.get("nodeTestTapSummary");
+    const closeEvent = lifecycleEvents.get("nodeTestClose");
+    const cleanupEvent = lifecycleEvents.get("routeCleanupCompleted");
+    const lifecycleIndex = (event) => evidence.lifecycleEvidence.findIndex(
+      (entry) => entry.event === event
+    );
+    if (!lifecycleFacts.protocolValid || lifecycleFacts.failure ||
+        lifecycleFacts.cleanupStarted !== true ||
+        lifecycleFacts.cleanupCompleted !== true ||
+        lifecycleFacts.nodeTestErrorObserved ||
+        lifecycleFacts.nodeTestExitObserved !== true ||
+        lifecycleFacts.nodeTestCloseObserved !== true ||
+        lifecycleFacts.closed !== true || lifecycleFacts.eventCount !== 12 ||
+        summaryEvent.facts.tests !== 1 || summaryEvent.facts.pass !== 1 ||
+        summaryEvent.facts.fail !== 0 || summaryEvent.facts.skipped !== 0 ||
+        summaryEvent.facts.cancelled !== 0 ||
+        lifecycleIndex("tapStarted") >= lifecycleIndex("tapTitleObserved") ||
+        lifecycleIndex("tapTitleObserved") >=
+          lifecycleIndex("firstTestDiscovered") ||
+        lifecycleIndex("firstTestDiscovered") >=
+          lifecycleIndex("nodeTestTapSummary") ||
+        lifecycleIndex("routeCleanupCompleted") !==
+          evidence.lifecycleEvidence.length - 1 ||
+        closeEvent.facts.nodeTestCloseCode !== 0 ||
+        closeEvent.facts.nodeTestCloseSignal !== null ||
+        lifecycleEvents.get("auxiliaryResidualBeforeKill").facts.count !== 0 ||
+        lifecycleEvents.get("auxiliaryResidualFinal").facts.count !== 0 ||
+        cleanupEvent.facts.completed !== true ||
+        cleanupEvent.facts.count !== 0 ||
+        lifecycleEvents.has("auxiliaryKillAttempted") ||
+        lifecycleEvents.has("auxiliaryKillResult")) {
+      throw new Error("exact0004_lifecycle_result_invalid");
     }
     const exactResult = {
       testsDiscovered: 1,
@@ -4163,8 +5182,9 @@ function enforceExact0004Artifact(env = process.env) {
         throw new Error("exact0004_artifact_result_invalid");
       }
     }
-    if (evidence.testFileLoaded !== evidence.tapTitleObserved ||
-        EXACT_0004_RESIDUAL_KEYS.some((key) => evidence.residuals[key] !== 0)) {
+    if (EXACT_0004_RESIDUAL_KEYS.some(
+      (key) => evidence.residuals[key] !== 0
+    )) {
       throw new Error("exact0004_artifact_result_invalid");
     }
     if (!validExact0004ProcessStatus(status) || status.exitCode !== 0 ||
@@ -4267,6 +5287,7 @@ module.exports = {
   EXACT_0004_EVIDENCE_FIELDS,
   EXACT_0004_EXECUTION_SUBPHASES,
   EXACT_0004_INVENTORY,
+  EXACT_0004_LIFECYCLE_LIMIT,
   EXACT_0004_OPERATION_CLASSES,
   EXACT_0004_SUBPHASES,
   EXACT_0004_RESIDUAL_KEYS,
@@ -4281,6 +5302,8 @@ module.exports = {
   REMOTE_DATABASE,
   RENDER_PAID_STAGING_DISPOSABLE_MODE,
   RENDER_REMOTE_MODE,
+  REAL_TEST_FILE_LOAD_EVENT,
+  REAL_TEST_FILE_LOAD_MARKER_ENV,
   SAFE_ERROR_CODES,
   SAFE_EVENT_PREFIX,
   SAFE_LINE_BUCKETS,
@@ -4304,6 +5327,7 @@ module.exports = {
   emptyConflictingNegativeEvidence,
   emptyExact0004Evidence,
   exact0004EvidenceValid,
+  exact0004RunnerFactsFromLifecycle,
   exact0004CheckpointDefaults,
   exact0004CheckpointPaths,
   exact0004OperationClass,
@@ -4314,6 +5338,7 @@ module.exports = {
   initializeExact0004PhysicalCheckpoint,
   main,
   observeExact0004Checkpoint,
+  realTestFileLoadMarker,
   runNodeTest,
   safeEventLine,
   safeLineBucket,
@@ -4326,6 +5351,7 @@ module.exports = {
   validExact0004Artifact,
   validExact0004Checkpoint,
   validExact0004CleanupState,
+  validExact0004LifecycleEvidence,
   validExact0004ProcessStatus,
   validateGateEnvironment,
   writeExact0004CleanupState
