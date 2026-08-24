@@ -39,7 +39,7 @@ const AUTHORIZED_FILES = Object.freeze([
 test("exact 0004 runner scope accepts exactly twenty paths", () => {
   assert.equal(
     AUTHORIZED_BRANCH,
-    "social/checkpoint-3b0-exact-0004-runner-linux-authenticated-profile-cleanup-evidence-20260823"
+    "social/checkpoint-3b0-exact-0004-runner-linux-final-profile-catalog-casts-20260824"
   );
   assert.equal(
     ROUTE_BASE_COMMIT,
@@ -47,7 +47,7 @@ test("exact 0004 runner scope accepts exactly twenty paths", () => {
   );
   assert.equal(
     ROUTE_PARENT_COMMIT,
-    "86fde733f9aef75b83d343209cb4811db440dbcc"
+    "70011da3f470f7f2f14352d2e087f32cea7873fa"
   );
   assert.equal(AUTHORIZED_FILES.length, 20);
   assert.deepEqual(ALLOWED_PREFIXES, []);

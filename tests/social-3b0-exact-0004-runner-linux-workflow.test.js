@@ -13,23 +13,24 @@ const ROOT = path.resolve(__dirname, "..");
 const RELATIVE = ".github/workflows/social-3b0-exact-0004-runner-linux.yml";
 const FILE = path.join(ROOT, ...RELATIVE.split("/"));
 const WORKFLOW_LF_SHA256 =
-  "dc21f2c5ee4e27e491abd560cb4d292f41cb21f2b09db9f1c7eb7e88aa3be85c";
-const WORKFLOW_FILTERED_OID = "ac9973e557e95c7ab41634d5abdfd36986f9e0af";
+  "3501d59acd14c3329f63f60f48ad7b81549bc41ca6fc2e4682ebbaa056e9311f";
+const WORKFLOW_FILTERED_OID = "567a7b6172c139820cc702bd43e9b31787058661";
 const PARENT_WORKFLOW_LF_SHA256 =
-  "36a54b43a543229b15f457c83b9c4fe2e10382bf076af78aeb6528750c95b260";
+  "dc21f2c5ee4e27e491abd560cb4d292f41cb21f2b09db9f1c7eb7e88aa3be85c";
 const PARENT_WORKFLOW_FILTERED_OID =
-  "6a4466a3edaa4d1795e6292b6bab26e80f6b53ab";
+  "ac9973e557e95c7ab41634d5abdfd36986f9e0af";
 const BRANCH =
-  "social/checkpoint-3b0-exact-0004-runner-linux-authenticated-profile-cleanup-evidence-20260823";
+  "social/checkpoint-3b0-exact-0004-runner-linux-final-profile-catalog-casts-20260824";
 const BASE = "13e38b875db2a220514fe06113663c517c975592";
-const PARENT = "86fde733f9aef75b83d343209cb4811db440dbcc";
+const PARENT = "70011da3f470f7f2f14352d2e087f32cea7873fa";
+const PRE_ROUTE_PARENT = "86fde733f9aef75b83d343209cb4811db440dbcc";
 const ROLLBACK_CATALOG_PARENT = "76e650c18beadc9768666285440445d2fc2e367e";
 const FIRST_ROLLBACK_PARENT = "5a109bc775ac9e35bdcdaabec16d329509d9125f";
 const FORCE_RLS_PARENT = "1de14105800db3ad024e15700d7e23fb2b41282c";
 const PLAN_SUBPHASE_PARENT = "73433e1b2d856e073db452ebe17815bec296bba0";
 const SOURCE_COMMIT = "8534817574a22dbd144a835c9f3585c44ee11c96";
 const MESSAGE =
-  "[run-social-3b0] authenticate exact 0004 profile and cleanup evidence";
+  "[run-social-3b0] disambiguate exact 0004 final profile catalog casts";
 const IMAGE =
   "docker.io/library/postgres:18.4-bookworm@sha256:7e6103cf85f88f7a0eddb3ec0b1ba8940eba098ed118ade25a729ca9daee5568";
 const ARTIFACT_SCHEMA_VERSION = 2;
@@ -234,18 +235,12 @@ const EXACT20 = Object.freeze([
   "tests/social-postgres-migrations.test.js",
   "tests/social-postgres-real.test.js"
 ]);
-const INCREMENTAL11 = Object.freeze([
+const INCREMENTAL5 = Object.freeze([
   ".github/workflows/social-3b0-exact-0004-runner-linux.yml",
-  "scripts/run-real-postgres-tests.js",
   "scripts/social-3a0p-local-scope.js",
-  MIGRATIONS_FILE,
-  NODE_TEST_FILE,
   "tests/social-3a0p-current-diff-scope.test.js",
   "tests/social-3a0p-local-scope.test.js",
-  "tests/social-3b0-exact-0004-runner-linux-workflow.test.js",
-  "tests/social-3b0-linux-physical-gate.test.js",
-  MIGRATION_TEST_FILE,
-  REAL_TEST_FILE
+  "tests/social-3b0-exact-0004-runner-linux-workflow.test.js"
 ]);
 const LEGACY_EVIDENCE_KEYS = Object.freeze([
   "schemaVersion",
@@ -976,9 +971,9 @@ test("Exact-0004 Linux workflow fixes branch, immediate parent, ancestral base, 
   assert.equal(new Set(EXACT20).size, 20);
   const guardInventory = bashExpectedInventory(guard);
   assert.deepEqual(guardInventory, EXACT20);
-  assert.equal(INCREMENTAL11.length, 11);
-  assert.equal(new Set(INCREMENTAL11).size, 11);
-  assert.deepEqual(bashIncrementalInventory(guard), INCREMENTAL11);
+  assert.equal(INCREMENTAL5.length, 5);
+  assert.equal(new Set(INCREMENTAL5).size, 5);
+  assert.deepEqual(bashIncrementalInventory(guard), INCREMENTAL5);
   assert.deepEqual(bashProtectedInventory(guard), PROTECTED_FILES);
   assert.equal(PROTECTED7.length, 7);
   assert.equal(new Set(PROTECTED7).size, 7);
@@ -1048,8 +1043,8 @@ test("Exact-0004 Linux workflow fixes branch, immediate parent, ancestral base, 
   assert.deepEqual(cleanupPins, CLEANUP_LF_SHA256);
   assert.equal(
     source.split(`'${RUNNER_FILE}'`).length - 1,
-    5,
-    "five semantic runner path positions"
+    4,
+    "four semantic runner path positions"
   );
   const imports = physicalRunnerImports(physical.run);
   assert.equal(imports.length, 1);
@@ -1177,7 +1172,7 @@ test("functional and instrumented pins come from canonical Git blobs", () => {
   const parentMigrations = git([
     "cat-file",
     "blob",
-    `${PARENT}:${MIGRATIONS_FILE}`
+    `${PRE_ROUTE_PARENT}:${MIGRATIONS_FILE}`
   ], null);
   assert.ok(Buffer.isBuffer(parentMigrations));
   assert.equal(
@@ -1216,7 +1211,7 @@ test("functional and instrumented pins come from canonical Git blobs", () => {
   const immediateParentBytes = git([
     "cat-file",
     "blob",
-    `${PARENT}:${REAL_TEST_FILE}`
+    `${PRE_ROUTE_PARENT}:${REAL_TEST_FILE}`
   ], null);
   assert.ok(Buffer.isBuffer(immediateParentBytes));
   assert.equal(
@@ -1305,7 +1300,7 @@ test("functional and instrumented pins come from canonical Git blobs", () => {
   const parentNodeTest = git([
     "cat-file",
     "blob",
-    `${PARENT}:${NODE_TEST_FILE}`
+    `${PRE_ROUTE_PARENT}:${NODE_TEST_FILE}`
   ], null);
   assert.ok(Buffer.isBuffer(parentNodeTest));
   assert.equal(
@@ -1320,7 +1315,7 @@ test("functional and instrumented pins come from canonical Git blobs", () => {
   const parentPhysicalTest = git([
     "cat-file",
     "blob",
-    `${PARENT}:${PHYSICAL_TEST_FILE}`
+    `${PRE_ROUTE_PARENT}:${PHYSICAL_TEST_FILE}`
   ], null);
   assert.ok(Buffer.isBuffer(parentPhysicalTest));
   assert.equal(
@@ -1385,7 +1380,7 @@ test("0004 conflict gates are physical, checksum-bound and reconstruct only the 
   const parentMigrationTest = git([
     "cat-file",
     "blob",
-    `${PARENT}:${MIGRATION_TEST_FILE}`
+    `${PRE_ROUTE_PARENT}:${MIGRATION_TEST_FILE}`
   ], null);
   assert.ok(Buffer.isBuffer(parentMigrationTest));
   assert.equal(
@@ -2345,7 +2340,7 @@ test("rollback catalog proofs reject mutants and reconstruct only their parent d
   const immediateParentBytes = git([
     "cat-file",
     "blob",
-    PARENT + ":" + REAL_TEST_FILE
+    PRE_ROUTE_PARENT + ":" + REAL_TEST_FILE
   ], null);
   assert.ok(Buffer.isBuffer(immediateParentBytes));
   assert.equal(
@@ -2825,7 +2820,7 @@ test("instrumented runner pin is the canonical filtered LF blob", () => {
   const immediateParent = git([
     "cat-file",
     "blob",
-    `${PARENT}:${RUNNER_FILE}`
+    `${PRE_ROUTE_PARENT}:${RUNNER_FILE}`
   ], null);
   assert.ok(Buffer.isBuffer(immediateParent));
   assert.equal(
@@ -3349,6 +3344,36 @@ test("one-shot proof reuses canonical Linux PostgreSQL with digest and no publis
     physical.run.indexOf("evidence.profileAfter='0004'") >
       physical.run.indexOf("if(await verifyFinalProfile(database))"),
     true
+  );
+  assert.equal(
+    (physical.run.match(
+      /array_agg\(version::text ORDER BY version::text\)/g
+    ) || []).length,
+    1
+  );
+  assert.equal(
+    physical.run.includes(
+      "relation.relname::text || ':' || relation.relkind::text " +
+      "ORDER BY relation.relname::text"
+    ),
+    true
+  );
+  assert.equal(
+    physical.run.includes(
+      "index_relation.relname::text || ':' || " +
+      "index_catalog.indisunique::text"
+    ),
+    true
+  );
+  assert.equal(
+    physical.run.includes(
+      "relation.relname || ':' || relation.relkind"
+    ),
+    false
+  );
+  assert.equal(
+    physical.run.includes("index_relation.relname || ':' ||"),
+    false
   );
   assert.equal((physical.run.match(/'run','test:postgres-real'/g) || []).length, 1);
   assert.equal((source.match(/npm run test:postgres-real/g) || []).length, 0);

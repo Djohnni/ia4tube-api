@@ -10,9 +10,9 @@ const {
 } = require("../scripts/social-3a0p-local-scope");
 
 const ROUTE_BRANCH =
-  "social/checkpoint-3b0-exact-0004-runner-linux-authenticated-profile-cleanup-evidence-20260823";
+  "social/checkpoint-3b0-exact-0004-runner-linux-final-profile-catalog-casts-20260824";
 const ROUTE_BASE_COMMIT = "13e38b875db2a220514fe06113663c517c975592";
-const ROUTE_PARENT_COMMIT = "86fde733f9aef75b83d343209cb4811db440dbcc";
+const ROUTE_PARENT_COMMIT = "70011da3f470f7f2f14352d2e087f32cea7873fa";
 const FUNCTIONAL_COMMIT = ROUTE_PARENT_COMMIT;
 const POST_COMMIT_PROOF_HEAD = "ffffffffffffffffffffffffffffffffffffffff";
 const GIT_TIMEOUT_MS = 20_000;
@@ -42,24 +42,16 @@ const AUTHORIZED_CHANGED_FILES = Object.freeze([
 const PARENT_COMMITTED_FILES = Object.freeze([...AUTHORIZED_CHANGED_FILES]);
 const INCREMENTAL_CHANGED_FILES = Object.freeze([
   ".github/workflows/social-3b0-exact-0004-runner-linux.yml",
-  "scripts/run-real-postgres-tests.js",
   "scripts/social-3a0p-local-scope.js",
-  "src/persistence/postgres/migrations.js",
-  "tests/node-test-runner-safety.test.js",
   "tests/social-3a0p-current-diff-scope.test.js",
   "tests/social-3a0p-local-scope.test.js",
-  "tests/social-3b0-exact-0004-runner-linux-workflow.test.js",
-  "tests/social-3b0-linux-physical-gate.test.js",
-  "tests/social-postgres-migrations.test.js",
-  "tests/social-postgres-real.test.js"
+  "tests/social-3b0-exact-0004-runner-linux-workflow.test.js"
 ]);
 const LOCAL_UNTRACKED_FILES = Object.freeze([]);
 const LOCAL_UNSTAGED_TRACKED_FILES = Object.freeze([
   ...INCREMENTAL_CHANGED_FILES
 ]);
-const AUTHORIZED_PRODUCT_FILES = Object.freeze([
-  "src/persistence/postgres/migrations.js"
-]);
+const AUTHORIZED_PRODUCT_FILES = Object.freeze([]);
 const PROTECTED_PRODUCT_DIRECTORIES = Object.freeze([
   "src",
   "db",
@@ -637,14 +629,14 @@ function runMandatoryContractProofs() {
     );
   });
 
-  // 5. Incomplete Incremental11 inventories and any twelfth path are refused.
+  // 5. Incomplete Incremental5 inventories and any sixth path are refused.
   proof(() => {
     for (const unstagedTrackedFiles of [
-      LOCAL_UNSTAGED_TRACKED_FILES.slice(0, 9),
-      LOCAL_UNSTAGED_TRACKED_FILES.slice(0, 10),
+      LOCAL_UNSTAGED_TRACKED_FILES.slice(0, 3),
+      LOCAL_UNSTAGED_TRACKED_FILES.slice(0, 4),
       [
         ...LOCAL_UNSTAGED_TRACKED_FILES,
-        "tests/twelfth-incremental-path.test.js"
+        "tests/sixth-incremental-path.test.js"
       ]
     ]) {
       assert.throws(
@@ -936,11 +928,11 @@ test("a barreira do runner exato 0004 contem exatamente os vinte caminhos autori
   const result = assertRouteInventory(sharedSnapshotCache.read());
   assert.equal(
     ROUTE_BRANCH,
-    "social/checkpoint-3b0-exact-0004-runner-linux-authenticated-profile-cleanup-evidence-20260823"
+    "social/checkpoint-3b0-exact-0004-runner-linux-final-profile-catalog-casts-20260824"
   );
   assert.equal(
     ROUTE_PARENT_COMMIT,
-    "86fde733f9aef75b83d343209cb4811db440dbcc"
+    "70011da3f470f7f2f14352d2e087f32cea7873fa"
   );
   assert.equal(
     ROUTE_BASE_COMMIT,
@@ -950,8 +942,8 @@ test("a barreira do runner exato 0004 contem exatamente os vinte caminhos autori
   assert.equal(new Set(AUTHORIZED_CHANGED_FILES).size, 20);
   assert.equal(PARENT_COMMITTED_FILES.length, 20);
   assert.equal(new Set(PARENT_COMMITTED_FILES).size, 20);
-  assert.equal(INCREMENTAL_CHANGED_FILES.length, 11);
-  assert.equal(new Set(INCREMENTAL_CHANGED_FILES).size, 11);
+  assert.equal(INCREMENTAL_CHANGED_FILES.length, 5);
+  assert.equal(new Set(INCREMENTAL_CHANGED_FILES).size, 5);
   assert.deepEqual(LOCAL_UNSTAGED_TRACKED_FILES, INCREMENTAL_CHANGED_FILES);
   assert.deepEqual(LOCAL_UNTRACKED_FILES, []);
   assert.deepEqual(result.files, [...AUTHORIZED_CHANGED_FILES].sort());
