@@ -12,6 +12,10 @@ const {
   INSTAGRAM_TOKEN_ENDPOINT,
   INSTAGRAM_USERNAME_PATTERN
 } = require("./instagram-config");
+const {
+  createInstagramScopeEvidence,
+  emitInstagramScopeEvidence
+} = require("./instagram-scope-evidence");
 
 const INSTAGRAM_EXCHANGE_TIMEOUT_MS = 5000;
 const INSTAGRAM_EXCHANGE_MAX_RESPONSE_BYTES = 32 * 1024;
@@ -427,9 +431,15 @@ function normalizeGrantedScopes(permissions) {
   );
 }
 
-function parseExchangeResponse(body) {
+function parseExchangeResponse(body, logger) {
   const decoded = parseJsonRecord(body);
   if (!Object.hasOwn(decoded, "data")) {
+    const scopeEvidence = createInstagramScopeEvidence({
+      responseFormat: "flat_object",
+      permissionsPresent: Object.hasOwn(decoded, "permissions"),
+      permissions: decoded.permissions
+    });
+    emitInstagramScopeEvidence(logger, scopeEvidence);
     const rawToken = decoded.access_token;
     decoded.access_token = null;
     const accessToken = tokenBuffer(rawToken);
@@ -445,6 +455,19 @@ function parseExchangeResponse(body) {
     }
   }
 
+  const candidate = Array.isArray(decoded.data) && decoded.data.length === 1 &&
+    decoded.data[0] && typeof decoded.data[0] === "object" &&
+    !Array.isArray(decoded.data[0])
+    ? decoded.data[0]
+    : null;
+  const scopeEvidence = createInstagramScopeEvidence({
+    responseFormat: "data_envelope",
+    permissionsPresent: candidate
+      ? Object.hasOwn(candidate, "permissions")
+      : false,
+    permissions: candidate?.permissions
+  });
+  emitInstagramScopeEvidence(logger, scopeEvidence);
   const envelope = strictRecord(decoded, ["data"]);
   if (!Array.isArray(envelope.data) || envelope.data.length !== 1) {
     providerFail();
@@ -556,6 +579,7 @@ function clearResultToken(result) {
 function createInstagramProvider(options = {}) {
   const config = requireConfig(options.config);
   const transport = requireTransport(options.transport);
+  const logger = options.logger;
   const setTimer = options.setTimeout || setTimeout;
   const clearTimer = options.clearTimeout || clearTimeout;
   const clock = options.clock || Date.now;
@@ -674,7 +698,7 @@ function createInstagramProvider(options = {}) {
           signal
         })
       ),
-      parseExchangeResponse
+      (body) => parseExchangeResponse(body, logger)
     );
   }
 

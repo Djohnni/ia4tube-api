@@ -122,9 +122,11 @@ test("server runtime exposes only the closed Instagram OAuth facade", async () =
   const randomUUID = () => "11111111-1111-4111-8111-111111111111";
   const setTimer = () => 1;
   const clearTimer = () => {};
+  const logger = { info() {}, error() {} };
   let received;
   const state = await initializeSocialServerRuntime({
     env: { SOCIAL_PERSISTENCE_ENABLED: "true" },
+    logger,
     instagramTransport: transport,
     clock,
     randomBytes,
@@ -142,6 +144,7 @@ test("server runtime exposes only the closed Instagram OAuth facade", async () =
   });
   assert.equal(state.instagramOAuth, facade);
   assert.equal(received.instagramTransport, transport);
+  assert.equal(received.logger, logger);
   assert.equal(received.clock, clock);
   assert.equal(received.randomBytes, randomBytes);
   assert.equal(received.randomUUID, randomUUID);

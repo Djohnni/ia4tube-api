@@ -518,9 +518,15 @@ test("provider builds the official URL without transport or secret exposure", ()
 test("provider exchanges one code through injected transport and sanitizes output", async () => {
   const config = loadInstagramOAuthConfig(enabledEnvironment());
   const calls = [];
+  const evidence = [];
   const timer = createManualTimer();
   const provider = createInstagramProvider({
     config,
+    logger: {
+      info(event) {
+        evidence.push(event);
+      }
+    },
     setTimeout: timer.setTimeout,
     clearTimeout: timer.clearTimeout,
     transport: async (url, options) => {
@@ -555,6 +561,13 @@ test("provider exchanges one code through injected transport and sanitizes outpu
   );
   assert.equal(result.userId, "synthetic-instagram-user-001");
   assert.deepEqual(Object.keys(result), ["accessToken", "userId"]);
+  assert.deepEqual(evidence, [{
+    component: "social_instagram_oauth",
+    event: "provider_scope_evidence",
+    responseFormat: "flat_object",
+    permissionsFormat: "absent",
+    grantedScopeNames: []
+  }]);
   assert.deepEqual(timer.snapshot(), {
     setCalls: 1,
     clearCalls: 1,

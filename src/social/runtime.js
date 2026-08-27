@@ -161,6 +161,7 @@ async function createSocialRuntime(options = {}) {
       const instagramProvider = createInstagramProvider({
         config: instagramConfig,
         transport,
+        logger: options.logger,
         clock: options.clock || Date.now,
         setTimeout: options.setTimeout,
         clearTimeout: options.clearTimeout

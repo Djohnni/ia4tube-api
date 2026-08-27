@@ -1,4 +1,7 @@
 const { installConsoleRedaction } = require("./src/security/log-redaction");
+const {
+  sanitizeInstagramScopeEvidence
+} = require("./src/social/oauth/instagram-scope-evidence");
 installConsoleRedaction();
 const {
   assertWebServiceDatabaseCredentialBoundary
@@ -7997,6 +8000,12 @@ async function startApiServer() {
     socialRuntimeState = await initializeSocialServerRuntime({
       env: process.env,
       logger: {
+        info(event) {
+          const safeEvidence = sanitizeInstagramScopeEvidence(event);
+          if (safeEvidence) {
+            console.info("[social][oauth-scope-evidence]", safeEvidence);
+          }
+        },
         error(event) {
           console.error("[social][postgres]", {
             component: "social_postgres",

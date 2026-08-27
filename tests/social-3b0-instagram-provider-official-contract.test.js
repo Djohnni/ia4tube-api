@@ -98,6 +98,7 @@ test("optional expected username is canonical without a hardcoded account", () =
 
 test("official code exchange unwraps data and returns canonical granted scopes", async () => {
   const calls = [];
+  const evidence = [];
   const provider = providerWithTransport(async (url, options) => {
     calls.push({ url, options });
     return jsonResponse({
@@ -111,6 +112,12 @@ test("official code exchange unwraps data and returns canonical granted scopes",
         ]
       }]
     });
+  }, {
+    logger: {
+      info(event) {
+        evidence.push(event);
+      }
+    }
   });
 
   const exchanged = await provider.exchangeCode({ code: "synthetic-code" });
@@ -126,20 +133,127 @@ test("official code exchange unwraps data and returns canonical granted scopes",
   assert.equal(exchanged.userId, USER_ID);
   assert.deepEqual(exchanged.grantedScopes, INSTAGRAM_OAUTH_SCOPES);
   assert.equal(Object.isFrozen(exchanged.grantedScopes), true);
+  assert.deepEqual(evidence, [{
+    component: "social_instagram_oauth",
+    event: "provider_scope_evidence",
+    responseFormat: "data_envelope",
+    permissionsFormat: "array",
+    grantedScopeNames: INSTAGRAM_OAUTH_SCOPES
+  }]);
   exchanged.accessToken.fill(0);
 });
 
 test("official comma-delimited permissions remain supported", async () => {
+  const evidence = [];
   const provider = providerWithTransport(async () => jsonResponse({
     data: [{
       access_token: SHORT_TOKEN,
       user_id: USER_ID,
       permissions: INSTAGRAM_OAUTH_SCOPES.join(",")
     }]
-  }));
+  }), {
+    logger: {
+      info(event) {
+        evidence.push(event);
+      }
+    }
+  });
   const exchanged = await provider.exchangeCode({ code: "synthetic-code" });
   assert.deepEqual(exchanged.grantedScopes, INSTAGRAM_OAUTH_SCOPES);
+  assert.equal(evidence.length, 1);
+  assert.equal(evidence[0].responseFormat, "data_envelope");
+  assert.equal(evidence[0].permissionsFormat, "csv_string");
+  assert.deepEqual(evidence[0].grantedScopeNames, INSTAGRAM_OAUTH_SCOPES);
   exchanged.accessToken.fill(0);
+});
+
+test("flat permissions are diagnostic only and do not widen the public contract", async () => {
+  const evidence = [];
+  const provider = providerWithTransport(async () => jsonResponse({
+    access_token: SHORT_TOKEN,
+    user_id: USER_ID,
+    permissions: INSTAGRAM_OAUTH_SCOPES.join(",")
+  }), {
+    logger: {
+      info(event) {
+        evidence.push(event);
+      }
+    }
+  });
+
+  const exchanged = await provider.exchangeCode({ code: "synthetic-code" });
+  assert.deepEqual(Object.keys(exchanged), ["accessToken", "userId"]);
+  assert.deepEqual(evidence, [{
+    component: "social_instagram_oauth",
+    event: "provider_scope_evidence",
+    responseFormat: "flat_object",
+    permissionsFormat: "csv_string",
+    grantedScopeNames: INSTAGRAM_OAUTH_SCOPES
+  }]);
+  exchanged.accessToken.fill(0);
+});
+
+test("partial envelope evidence preserves the provider contract", async () => {
+  const evidence = [];
+  const provider = providerWithTransport(async () => jsonResponse({
+    data: [{
+      access_token: SHORT_TOKEN,
+      user_id: USER_ID,
+      permissions: [INSTAGRAM_OAUTH_SCOPES[0]]
+    }]
+  }), {
+    logger: { info(event) { evidence.push(event); } }
+  });
+
+  const exchanged = await provider.exchangeCode({ code: "synthetic-code" });
+  assert.deepEqual(exchanged.grantedScopes, [INSTAGRAM_OAUTH_SCOPES[0]]);
+  assert.equal(evidence.length, 1);
+  assert.deepEqual(evidence[0].grantedScopeNames, [INSTAGRAM_OAUTH_SCOPES[0]]);
+  exchanged.accessToken.fill(0);
+});
+
+test("unsupported flat permissions are logged without widening the return", async () => {
+  const evidence = [];
+  const provider = providerWithTransport(async () => jsonResponse({
+    access_token: SHORT_TOKEN,
+    user_id: USER_ID,
+    permissions: null
+  }), {
+    logger: { info(event) { evidence.push(event); } }
+  });
+
+  const exchanged = await provider.exchangeCode({ code: "synthetic-code" });
+  assert.deepEqual(Object.keys(exchanged), ["accessToken", "userId"]);
+  assert.equal(evidence.length, 1);
+  assert.equal(evidence[0].responseFormat, "flat_object");
+  assert.equal(evidence[0].permissionsFormat, "unsupported");
+  assert.deepEqual(evidence[0].grantedScopeNames, []);
+  exchanged.accessToken.fill(0);
+});
+
+test("an anomalous envelope records only allowlisted scope evidence before rejection", async () => {
+  const evidence = [];
+  const provider = providerWithTransport(async () => jsonResponse({
+    data: [{
+      access_token: SHORT_TOKEN,
+      user_id: USER_ID,
+      permissions: [INSTAGRAM_OAUTH_SCOPES[0], "unknown_remote_scope"]
+    }]
+  }), {
+    logger: { info(event) { evidence.push(event); } }
+  });
+
+  await assert.rejects(
+    provider.exchangeCode({ code: "synthetic-code" }),
+    { code: "social_oauth_exchange_failed" }
+  );
+  assert.deepEqual(evidence, [{
+    component: "social_instagram_oauth",
+    event: "provider_scope_evidence",
+    responseFormat: "data_envelope",
+    permissionsFormat: "array",
+    grantedScopeNames: [INSTAGRAM_OAUTH_SCOPES[0]]
+  }]);
 });
 
 test("numeric 64-bit user_id remains exact through exchange and discovery", async () => {
