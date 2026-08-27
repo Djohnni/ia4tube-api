@@ -11,6 +11,7 @@ const {
 } = require("../src/social/reauth");
 const {
   INSTAGRAM_OAUTH_REDIRECT_URI,
+  INSTAGRAM_OAUTH_SCOPES,
   INSTAGRAM_PROVIDER
 } = require("../src/social/oauth/instagram-config");
 const {
@@ -42,10 +43,7 @@ const UUIDS = Object.freeze([
 ]);
 const TOKEN_TEXT = "synthetic-never-authenticable-instagram-token";
 const SHORT_TOKEN_TEXT = "synthetic-short-lived-instagram-token";
-const REQUIRED_SCOPES = Object.freeze([
-  "instagram_business_basic",
-  "instagram_business_content_publish"
-]);
+const REQUIRED_SCOPES = INSTAGRAM_OAUTH_SCOPES;
 
 function errorWithCode(code) {
   return Object.assign(new Error("closed"), { code });
@@ -260,7 +258,10 @@ function makeHarness(options = {}) {
       assert.equal(expectedRevision, createdConnectionRevision);
       assert.equal(record.id, createdConnectionId);
       assert.equal(record.state, "connected");
-      assert.deepEqual(activation.grantedScopes, REQUIRED_SCOPES);
+      assert.deepEqual(
+        activation.grantedScopes,
+        options.expectedActivationScopes ?? REQUIRED_SCOPES
+      );
       assert.equal(credentialEnvelope.id, createdInput.authorizationHandle);
       assert.equal(Buffer.isBuffer(credentialEnvelope.ciphertext), true);
       return Object.freeze({
@@ -734,26 +735,72 @@ test("professional account and controlled username gates fail closed before vaul
   );
 });
 
-test("insufficient scopes and discovery failure leave no credential or account", async () => {
-  const scopes = makeHarness({
-    grantedScopes: ["instagram_business_basic"]
-  });
-  const scopesState = (await authorize(scopes)).state;
-  await assert.rejects(
-    scopes.service.callback({
-      state: scopesState,
-      code: "synthetic-code",
-      error: null
-    }),
-    { code: "permission_missing" }
-  );
-  assert.equal(scopes.credentialCalls, 0);
-  assert.equal(scopes.storageInputs.length, 0);
-  assert.equal(
-    scopes.failureInputs[0].failureCode,
-    "provider_permissions_missing"
-  );
+test("required scope gate accepts normalized required subsets and extras", async (t) => {
+  const extraScope = "instagram_business_manage_comments";
+  const cases = [
+    ["exact", REQUIRED_SCOPES, REQUIRED_SCOPES],
+    ["reversed", [...REQUIRED_SCOPES].reverse(), REQUIRED_SCOPES],
+    [
+      "duplicated",
+      [REQUIRED_SCOPES[1], REQUIRED_SCOPES[0], REQUIRED_SCOPES[1]],
+      REQUIRED_SCOPES
+    ],
+    [
+      "additional",
+      [extraScope, ...REQUIRED_SCOPES],
+      Object.freeze([...REQUIRED_SCOPES, extraScope].sort())
+    ]
+  ];
 
+  for (const [name, grantedScopes, expectedActivationScopes] of cases) {
+    await t.test(name, async () => {
+      const harness = makeHarness({
+        grantedScopes,
+        expectedActivationScopes
+      });
+      const state = (await authorize(harness)).state;
+      const result = await harness.service.callback({
+        state,
+        code: "synthetic-code",
+        error: null
+      });
+      assert.equal(result.status, "authorization_completed");
+      assert.equal(harness.credentialCalls, 1);
+      assert.equal(harness.failureInputs.length, 0);
+    });
+  }
+});
+
+test("missing or legacy scopes fail without a credential or account", async (t) => {
+  const cases = [
+    ["missing basic", [REQUIRED_SCOPES[1]]],
+    ["missing publish", [REQUIRED_SCOPES[0]]],
+    ["legacy names", ["instagram_basic", "instagram_content_publish"]]
+  ];
+
+  for (const [name, grantedScopes] of cases) {
+    await t.test(name, async () => {
+      const harness = makeHarness({ grantedScopes });
+      const state = (await authorize(harness)).state;
+      await assert.rejects(
+        harness.service.callback({
+          state,
+          code: "synthetic-code",
+          error: null
+        }),
+        { code: "permission_missing" }
+      );
+      assert.equal(harness.credentialCalls, 0);
+      assert.equal(harness.storageInputs.length, 0);
+      assert.equal(
+        harness.failureInputs[0].failureCode,
+        "provider_permissions_missing"
+      );
+    });
+  }
+});
+
+test("discovery failure leaves no credential or account", async () => {
   const discovery = makeHarness({ discoveryFailure: true });
   const discoveryState = (await authorize(discovery)).state;
   await assert.rejects(

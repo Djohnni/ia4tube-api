@@ -30,6 +30,7 @@ const INSTAGRAM_DISCOVERY_FIELDS = Object.freeze([
 ]);
 const APP_ID_PATTERN = /^[0-9]{5,32}$/;
 const GRAPH_API_VERSION_PATTERN = /^v[1-9][0-9]?\.[0-9]+$/;
+const INSTAGRAM_SCOPE_NAME_PATTERN = /^[a-z][a-z0-9_]{1,99}$/;
 const VISIBLE_ASCII_PATTERN = /^[\x21-\x7e]+$/;
 const COMPACT_STATE_PATTERN =
   /^v1\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/;
@@ -401,8 +402,7 @@ function normalizeGrantedScopes(permissions) {
   if (typeof permissions === "string") {
     if (
       permissions.length < 1 ||
-      permissions.length > 2048 ||
-      permissions !== permissions.trim()
+      permissions.length > 2048
     ) {
       providerFail();
     }
@@ -416,30 +416,32 @@ function normalizeGrantedScopes(permissions) {
 
   const granted = new Set();
   for (const permission of values) {
+    if (typeof permission !== "string") providerFail();
+    const normalized = permission.trim();
     if (
-      typeof permission !== "string" ||
-      permission !== permission.trim() ||
-      !INSTAGRAM_OAUTH_SCOPES.includes(permission)
+      !INSTAGRAM_SCOPE_NAME_PATTERN.test(normalized)
     ) {
       providerFail();
     }
-    granted.add(permission);
+    granted.add(normalized);
   }
   if (granted.size < 1) providerFail();
-  return Object.freeze(
-    INSTAGRAM_OAUTH_SCOPES.filter((scope) => granted.has(scope))
-  );
+  return Object.freeze([...granted].sort());
 }
 
 function parseExchangeResponse(body, logger) {
   const decoded = parseJsonRecord(body);
   if (!Object.hasOwn(decoded, "data")) {
+    const permissionsPresent = Object.hasOwn(decoded, "permissions");
     const scopeEvidence = createInstagramScopeEvidence({
       responseFormat: "flat_object",
-      permissionsPresent: Object.hasOwn(decoded, "permissions"),
+      permissionsPresent,
       permissions: decoded.permissions
     });
     emitInstagramScopeEvidence(logger, scopeEvidence);
+    const grantedScopes = permissionsPresent
+      ? normalizeGrantedScopes(decoded.permissions)
+      : Object.freeze([]);
     const rawToken = decoded.access_token;
     decoded.access_token = null;
     const accessToken = tokenBuffer(rawToken);
@@ -447,7 +449,8 @@ function parseExchangeResponse(body, logger) {
       return Object.freeze({
         legacy: true,
         accessToken,
-        userId: normalizeExternalUserId(decoded.user_id)
+        userId: normalizeExternalUserId(decoded.user_id),
+        grantedScopes
       });
     } catch (error) {
       accessToken.fill(0);
@@ -712,12 +715,6 @@ function createInstagramProvider(options = {}) {
     if (!VISIBLE_ASCII_PATTERN.test(code)) providerFail();
     try {
       const exchanged = await requestAuthorizationCode(code);
-      if (exchanged.legacy) {
-        return Object.freeze({
-          accessToken: exchanged.accessToken,
-          userId: exchanged.userId
-        });
-      }
       return Object.freeze({
         accessToken: exchanged.accessToken,
         userId: exchanged.userId,

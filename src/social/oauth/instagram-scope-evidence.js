@@ -18,11 +18,10 @@ const PERMISSIONS_FORMATS = new Set([
 function canonicalScopeNames(value) {
   if (!Array.isArray(value)) return Object.freeze([]);
   const supplied = new Set(
-    value.filter((scope) =>
-      typeof scope === "string" &&
-      scope === scope.trim() &&
-      INSTAGRAM_OAUTH_SCOPES.includes(scope)
-    )
+    value
+      .filter((scope) => typeof scope === "string")
+      .map((scope) => scope.trim())
+      .filter((scope) => INSTAGRAM_OAUTH_SCOPES.includes(scope))
   );
   return Object.freeze(
     INSTAGRAM_OAUTH_SCOPES.filter((scope) => supplied.has(scope))

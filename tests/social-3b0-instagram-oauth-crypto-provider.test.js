@@ -560,7 +560,12 @@ test("provider exchanges one code through injected transport and sanitizes outpu
     Buffer.from("synthetic-token-not-authenticable")
   );
   assert.equal(result.userId, "synthetic-instagram-user-001");
-  assert.deepEqual(Object.keys(result), ["accessToken", "userId"]);
+  assert.deepEqual(Object.keys(result), [
+    "accessToken",
+    "userId",
+    "grantedScopes"
+  ]);
+  assert.deepEqual(result.grantedScopes, []);
   assert.deepEqual(evidence, [{
     component: "social_instagram_oauth",
     event: "provider_scope_evidence",
