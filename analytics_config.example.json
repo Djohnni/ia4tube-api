@@ -12,7 +12,7 @@
     "jogador_escudo": { "nome": "Jogador + escudo", "valor": 8.0 }
   },
   "online": {
-    "api_url": "https://api.omascote.com.br",
+    "api_url": "https://api.example.invalid",
     "token": ""
   }
 }

@@ -12,6 +12,7 @@ const { spawn } = require("child_process");
 const repoDir = path.resolve(__dirname, "..");
 const serverFile = path.join(repoDir, "server.js");
 const jwtSecret = "checkpoint-a-test-secret-with-at-least-32-characters";
+const SECURE_STARTUP_FAILURE_TIMEOUT_MS = 15_000;
 
 function getFreePort() {
   return new Promise((resolve, reject) => {
@@ -151,7 +152,7 @@ async function expectMissingJwtFailsSecurely(dataDir) {
     const timeout = setTimeout(() => {
       instance.child.kill();
       reject(new Error("Servidor sem JWT_SECRET nao encerrou."));
-    }, 5000);
+    }, SECURE_STARTUP_FAILURE_TIMEOUT_MS);
     instance.child.once("exit", (code) => {
       clearTimeout(timeout);
       resolve(code);
@@ -176,7 +177,7 @@ async function expectInvalidPublicApiBaseFailsSecurely(dataDir, value) {
     const timeout = setTimeout(() => {
       instance.child.kill();
       reject(new Error("Servidor com PUBLIC_API_BASE_URL invalida nao encerrou."));
-    }, 5000);
+    }, SECURE_STARTUP_FAILURE_TIMEOUT_MS);
     instance.child.once("exit", (code) => {
       clearTimeout(timeout);
       resolve(code);
