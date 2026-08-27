@@ -19,6 +19,11 @@ nichos/**/materiais_graficos/catalogo.json
 app_mobile/android/app/google-services.json
 bot_token.txt
 openai_key.txt
+credenciais.txt
+analytics_config.json
+debug_resultado.txt
+log.txt
+log_escalacao.txt
 *firebase-adminsdk*.json
 *service-account*.json
 firebase-admin*.json

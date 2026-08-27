@@ -1,0 +1,18 @@
+{
+  "produtos": {
+    "resultado": { "nome": "Resultado do jogo", "valor": 7.0 },
+    "escalacao": { "nome": "Escalação", "valor": 7.0 },
+    "contratacao": { "nome": "Contratação", "valor": 7.0 },
+    "proximo_jogo": { "nome": "Próximo jogo", "valor": 7.0 },
+    "patrocinador": { "nome": "Patrocinador / Apoio", "valor": 7.0 },
+    "escudo3d": { "nome": "Escudo 3D", "valor": 4.0 },
+    "desconhecido": { "nome": "Desconhecido", "valor": 0.0 },
+    "proximo_jogo_jogador": { "nome": "Próximo jogo jogador", "valor": 8.0 },
+    "resultado_jogo_jogador": { "nome": "Resultado jogador", "valor": 8.0 },
+    "jogador_escudo": { "nome": "Jogador + escudo", "valor": 8.0 }
+  },
+  "online": {
+    "api_url": "https://api.omascote.com.br",
+    "token": ""
+  }
+}
