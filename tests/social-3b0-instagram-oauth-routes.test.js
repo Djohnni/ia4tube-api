@@ -41,6 +41,11 @@ const UUIDS = Object.freeze([
   "10000000-0000-4000-8000-00000000000c"
 ]);
 const TOKEN_TEXT = "synthetic-never-authenticable-instagram-token";
+const SHORT_TOKEN_TEXT = "synthetic-short-lived-instagram-token";
+const REQUIRED_SCOPES = Object.freeze([
+  "instagram_business_basic",
+  "instagram_business_content_publish"
+]);
 
 function errorWithCode(code) {
   return Object.assign(new Error("closed"), { code });
@@ -163,6 +168,16 @@ function makeHarness(options = {}) {
       }
       assert.equal(input.expectedRevision, createdConnectionRevision);
       return Object.freeze({ status: "failed" });
+    },
+    async getAuthorizationStatus() {
+      return Object.freeze({
+        connectionId: createdConnectionId,
+        purpose: createdInput?.purpose || "connect",
+        status: consumed
+          ? "authorization_completed"
+          : "authorization_pending",
+        expiresAt: createdInput?.expiresAt || new Date(milliseconds + 60000)
+      });
     }
   };
   const oauthRepository = {
@@ -186,9 +201,95 @@ function makeHarness(options = {}) {
         throw errorWithCode("social_oauth_exchange_failed");
       }
       assert.equal(code, "synthetic-code");
-      const accessToken = Buffer.from(TOKEN_TEXT);
+      const accessToken = Buffer.from(SHORT_TOKEN_TEXT);
       tokenReferences.push(accessToken);
-      return Object.freeze({ accessToken, userId: "synthetic-user" });
+      return Object.freeze({
+        accessToken,
+        userId: "synthetic-user",
+        grantedScopes: options.grantedScopes ?? REQUIRED_SCOPES
+      });
+    },
+    async exchangeLongLivedToken({ accessToken }) {
+      events.push("exchange_long_lived_token");
+      assert.equal(accessToken.toString("utf8"), SHORT_TOKEN_TEXT);
+      const token = Buffer.from(TOKEN_TEXT);
+      tokenReferences.push(token);
+      return Object.freeze({
+        accessToken: token,
+        expiresIn: 5_184_000,
+        expiresAt: new Date(milliseconds + 5_184_000_000)
+      });
+    },
+    async discoverProfessionalAccount({ accessToken, userId }) {
+      events.push("discover_professional_account");
+      if (options.discoveryFailure) {
+        throw errorWithCode("provider_permanent_failure");
+      }
+      assert.equal(accessToken.toString("utf8"), TOKEN_TEXT);
+      assert.equal(userId, "synthetic-user");
+      return Object.freeze({
+        userId,
+        username: options.discoveredUsername || "ia4tube_empresas",
+        name: "IA4Tube Empresas",
+        accountType: options.accountType || "business"
+      });
+    }
+  };
+  const connectorScoped = {
+    async activateConnectionWithCredential(
+      record,
+      expectedRevision,
+      credentialEnvelope,
+      activation
+    ) {
+      events.push("activate_connection");
+      storageInputs.push({ record, expectedRevision, activation });
+      if (options.activationFailure) {
+        throw errorWithCode(options.activationFailure);
+      }
+      assert.equal(expectedRevision, createdConnectionRevision);
+      assert.equal(record.id, createdConnectionId);
+      assert.equal(record.state, "connected");
+      assert.deepEqual(activation.grantedScopes, REQUIRED_SCOPES);
+      assert.equal(credentialEnvelope.id, createdInput.authorizationHandle);
+      assert.equal(Buffer.isBuffer(credentialEnvelope.ciphertext), true);
+      return Object.freeze({
+        connection: Object.freeze({
+          companyId: record.companyId,
+          id: options.activationResultMismatch ? UUIDS[10] : record.id,
+          provider: record.provider,
+          state: record.state,
+          account: record.account,
+          revision: record.revision
+        }),
+        credential: Object.freeze({ id: credentialEnvelope.id }),
+        grantedScopes: activation.grantedScopes
+      });
+    },
+    async disconnectConnectionLocally() {
+      throw errorWithCode("resource_unavailable");
+    },
+    async getConnectionDetails() {
+      return options.connectionDetails || null;
+    },
+    async getCurrentConnectionDetails() {
+      return options.connectionDetails || null;
+    },
+    async runExclusive(operation) {
+      events.push("exclusive_begin");
+      try {
+        const result = await operation(connectorScoped);
+        events.push("exclusive_commit");
+        return result;
+      } catch (error) {
+        events.push("exclusive_rollback");
+        throw error;
+      }
+    }
+  };
+  const connectorStore = {
+    scope() {
+      return connectorScoped;
     }
   };
   const credentials = {
@@ -208,7 +309,7 @@ function makeHarness(options = {}) {
         authTag: Buffer.alloc(16, 0xa3),
         keyVersion: "vault-v1",
         aadVersion: 1,
-        expiresAt: null
+        expiresAt: input.expiresAt
       };
       try {
         if (options.vaultFailure) throw errorWithCode("vault_failed");
@@ -225,11 +326,14 @@ function makeHarness(options = {}) {
     config: Object.freeze({
       enabled: true,
       provider: INSTAGRAM_PROVIDER,
-      redirectUri: INSTAGRAM_OAUTH_REDIRECT_URI
+      redirectUri: INSTAGRAM_OAUTH_REDIRECT_URI,
+      expectedUsername: options.expectedUsername || null,
+      scopes: REQUIRED_SCOPES
     }),
     stateEnvelope: options.stateEnvelope || envelope,
     provider,
     oauthRepository,
+    connectorStore,
     credentials,
     authAdapter,
     clock: () => milliseconds,
@@ -274,6 +378,8 @@ test("authorize persists an encrypted-state transaction before exposing its URL"
     ok: true,
     provider: "instagram",
     status: "authorization_pending",
+    connectionId: result.connectionId,
+    expiresAt: result.expiresAt,
     authorizationUrl: result.authorizationUrl,
     returnPathId: "social_connections"
   });
@@ -328,15 +434,23 @@ test("callback authenticates state before tenant scope and stores one connection
     ok: true,
     provider: "instagram",
     status: "authorization_completed",
+    connectionId: result.connectionId,
+    connectionState: "connected",
+    username: "@ia4tube_empresas",
+    accountType: "business",
     returnPathId: "social_connections"
   });
   assert.equal(harness.exchangeCalls, 1);
   assert.equal(harness.credentialCalls, 1);
-  assert.deepEqual(harness.events.slice(-4), [
+  assert.deepEqual(harness.events.slice(-8), [
     "consume_authorization",
     "exchange_code",
+    "exchange_long_lived_token",
+    "discover_professional_account",
+    "exclusive_begin",
     "encrypt_credential",
-    "store_credential"
+    "activate_connection",
+    "exclusive_commit"
   ]);
   assert.equal(harness.contexts[1].companyId, harness.contexts[0].companyId);
   assert.equal(harness.contexts[1].userId, harness.contexts[0].userId);
@@ -497,6 +611,132 @@ test("exchange failure leaves state consumed and never retries the provider", as
   assert.equal(harness.failureInputs[0].expectedRevision, 1);
 });
 
+test("professional account and controlled username gates fail closed before vault storage", async () => {
+  const personal = makeHarness({ accountType: "personal" });
+  const personalState = (await authorize(personal)).state;
+  await assert.rejects(
+    personal.service.callback({
+      state: personalState,
+      code: "synthetic-code",
+      error: null
+    }),
+    { code: "invalid_account_type" }
+  );
+  assert.equal(personal.credentialCalls, 0);
+  assert.ok(personal.events.includes("fail_connection_consumed"));
+
+  const controlled = makeHarness({
+    expectedUsername: "ia4tube_empresas",
+    discoveredUsername: "another_professional_account"
+  });
+  const controlledState = (await authorize(controlled)).state;
+  await assert.rejects(
+    controlled.service.callback({
+      state: controlledState,
+      code: "synthetic-code",
+      error: null
+    }),
+    { code: "controlled_account_mismatch" }
+  );
+  assert.equal(controlled.credentialCalls, 0);
+});
+
+test("insufficient scopes and discovery failure leave no credential or account", async () => {
+  const scopes = makeHarness({
+    grantedScopes: ["instagram_business_basic"]
+  });
+  const scopesState = (await authorize(scopes)).state;
+  await assert.rejects(
+    scopes.service.callback({
+      state: scopesState,
+      code: "synthetic-code",
+      error: null
+    }),
+    { code: "permission_missing" }
+  );
+  assert.equal(scopes.credentialCalls, 0);
+  assert.equal(scopes.storageInputs.length, 0);
+
+  const discovery = makeHarness({ discoveryFailure: true });
+  const discoveryState = (await authorize(discovery)).state;
+  await assert.rejects(
+    discovery.service.callback({
+      state: discoveryState,
+      code: "synthetic-code",
+      error: null
+    }),
+    { code: "provider_permanent_failure" }
+  );
+  assert.equal(discovery.credentialCalls, 0);
+  assert.equal(discovery.storageInputs.length, 0);
+});
+
+test("activation failure cannot expose or retain an orphan token", async () => {
+  const harness = makeHarness({ activationFailure: "state_transition_invalid" });
+  const { state } = await authorize(harness);
+  await assert.rejects(
+    harness.service.callback({ state, code: "synthetic-code", error: null }),
+    { code: "social_oauth_exchange_failed" }
+  );
+  assert.equal(harness.credentialCalls, 1);
+  assert.equal(harness.storageInputs.length, 1);
+  assert.ok(harness.events.includes("fail_connection_consumed"));
+  assert.equal(
+    harness.tokenReferences.every((token) => token.every((byte) => byte === 0)),
+    true
+  );
+  assert.ok(harness.events.includes("exclusive_rollback"));
+  assert.equal(harness.events.includes("exclusive_commit"), false);
+});
+
+test("activation result is validated before the exclusive transaction commits", async () => {
+  const harness = makeHarness({ activationResultMismatch: true });
+  const { state } = await authorize(harness);
+  await assert.rejects(
+    harness.service.callback({ state, code: "synthetic-code", error: null }),
+    { code: "provider_result_unknown" }
+  );
+  const rollback = harness.events.indexOf("exclusive_rollback");
+  const terminal = harness.events.indexOf("fail_connection_consumed");
+  assert.ok(rollback > harness.events.indexOf("activate_connection"));
+  assert.ok(terminal > rollback);
+  assert.equal(harness.events.includes("exclusive_commit"), false);
+});
+
+test("service refuses incoherent connection state and health", async () => {
+  const harness = makeHarness({
+    connectionDetails: Object.freeze({
+      id: UUIDS[8],
+      provider: "instagram",
+      state: "disconnected",
+      account: null,
+      createdAt: new Date("2026-08-12T10:00:00.000Z"),
+      connectedAt: null,
+      updatedAt: new Date("2026-08-12T10:01:00.000Z"),
+      disconnectedAt: new Date("2026-08-12T10:01:00.000Z"),
+      health: "healthy"
+    })
+  });
+  await assert.rejects(
+    harness.service.getConnection({
+      verifiedClaims: claims(),
+      connectionId: UUIDS[8]
+    }),
+    { code: "resource_unavailable" }
+  );
+});
+
+test("an existing blocking connection rejects authorization before provider access", async () => {
+  const harness = makeHarness({ createFailure: "active_connection_exists" });
+  await assert.rejects(
+    harness.service.authorize({ verifiedClaims: claims(), purpose: "connect" }),
+    { code: "active_connection_exists" }
+  );
+  assert.equal(harness.exchangeCalls, 0);
+  assert.equal(harness.credentialCalls, 0);
+  assert.equal(harness.storageInputs.length, 0);
+});
+
 test("callback query is exact, duplicate-free and authority-free", () => {
   assert.deepEqual(
     parseCallbackQuery("/v1/social/oauth/callback?state=abc&code=xyz"),
@@ -548,7 +788,8 @@ test("callback route has no Bearer middleware and never returns remote descripti
   const routes = {};
   const router = {
     get(routePath, ...handlers) { routes[`GET ${routePath}`] = handlers; },
-    post(routePath, ...handlers) { routes[`POST ${routePath}`] = handlers; }
+    post(routePath, ...handlers) { routes[`POST ${routePath}`] = handlers; },
+    delete(routePath, ...handlers) { routes[`DELETE ${routePath}`] = handlers; }
   };
   let callbackInput;
   const service = {
@@ -564,6 +805,17 @@ test("callback route has no Bearer middleware and never returns remote descripti
     getService() { return service; }
   });
   assert.equal(routes["POST /connections/instagram/authorization"].length, 3);
+  assert.equal(routes["GET /connections/instagram"].length, 3);
+  assert.equal(routes["GET /connections/instagram/:connectionId"].length, 3);
+  assert.equal(
+    routes["GET /connections/instagram/:connectionId/authorization"].length,
+    3
+  );
+  assert.equal(
+    routes["GET /connections/instagram/:connectionId/health"].length,
+    3
+  );
+  assert.equal(routes["DELETE /connections/instagram/:connectionId"].length, 3);
   assert.equal(routes["GET /oauth/callback"].length, 2);
   const [cache, callbackHandler] = routes["GET /oauth/callback"];
   const req = {
@@ -613,4 +865,327 @@ test("server mounts the local OAuth contract without a callback Bearer guard", (
   );
   assert.doesNotMatch(routerSource, /console\.|logger\.|req\.query/);
   assert.doesNotMatch(routerSource, /json\([^)]*error_description/s);
+});
+
+function connectionRouteHarness(overrides = {}) {
+  const routes = {};
+  const calls = [];
+  const connectionId = UUIDS[8];
+  const connected = Object.freeze({
+    connectionId,
+    provider: "instagram",
+    username: "@ia4tube_empresas",
+    accountType: "business",
+    state: "connected",
+    createdAt: "2026-08-12T10:00:00.000Z",
+    connectedAt: "2026-08-12T10:01:00.000Z",
+    updatedAt: "2026-08-12T10:01:00.000Z",
+    disconnectedAt: null,
+    health: "healthy"
+  });
+  const disconnected = Object.freeze({
+    ...connected,
+    username: null,
+    accountType: null,
+    state: "disconnected",
+    updatedAt: "2026-08-12T10:02:00.000Z",
+    disconnectedAt: "2026-08-12T10:02:00.000Z",
+    health: "disconnected"
+  });
+  const service = {
+    async authorize() { return { ok: true }; },
+    async callback() { return { ok: true }; },
+    async getCurrentConnection(input) {
+      calls.push(["getCurrentConnection", input]);
+      return { ok: true, connection: connected };
+    },
+    async getConnection(input) {
+      calls.push(["getConnection", input]);
+      return { ok: true, connection: connected };
+    },
+    async getAuthorizationStatus(input) {
+      calls.push(["getAuthorizationStatus", input]);
+      return Object.freeze({
+        ok: true,
+        authorization: Object.freeze({
+          connectionId,
+          purpose: "connect",
+          status: "authorization_completed",
+          expiresAt: "2027-01-02T03:04:05.000Z"
+        })
+      });
+    },
+    async getConnectionHealth(input) {
+      calls.push(["getConnectionHealth", input]);
+      return Object.freeze({
+        ok: true,
+        connectionId,
+        provider: "instagram",
+        state: "connected",
+        health: "healthy",
+        checkedAt: "2026-08-12T10:03:00.000Z"
+      });
+    },
+    async disconnect(input) {
+      calls.push(["disconnect", input]);
+      return { ok: true, connection: disconnected };
+    },
+    ...overrides
+  };
+  const router = {
+    get(routePath, ...handlers) { routes[`GET ${routePath}`] = handlers; },
+    post(routePath, ...handlers) { routes[`POST ${routePath}`] = handlers; },
+    delete(routePath, ...handlers) { routes[`DELETE ${routePath}`] = handlers; }
+  };
+  createInstagramOAuthRouter({
+    router,
+    authenticate(_req, _res, next) { return next(); },
+    getService() { return service; }
+  });
+  return { calls, connected, connectionId, disconnected, routes, service };
+}
+
+function connectionRequest(input = {}) {
+  const headers = Object.fromEntries(
+    Object.entries(input.headers || {}).map(([key, value]) => [
+      key.toLowerCase(),
+      value
+    ])
+  );
+  return {
+    user: Object.hasOwn(input, "user") ? input.user : claims(),
+    auth: input.auth,
+    params: input.params || {},
+    query: input.query || {},
+    body: input.body,
+    headers,
+    get(name) { return headers[String(name).toLowerCase()]; }
+  };
+}
+
+async function invokeAuthenticatedRoute(handlers, req) {
+  const res = fakeResponse();
+  let middlewareCalls = 0;
+  handlers[0](req, res, () => { middlewareCalls += 1; });
+  handlers[1](req, res, () => { middlewareCalls += 1; });
+  assert.equal(middlewareCalls, 2);
+  await handlers[2](req, res);
+  assert.equal(res.headers["Cache-Control"], "no-store");
+  return res;
+}
+
+test("authenticated connection routes pass only middleware-verified claims as authority", async () => {
+  const harness = connectionRouteHarness();
+
+  const current = await invokeAuthenticatedRoute(
+    harness.routes["GET /connections/instagram"],
+    connectionRequest()
+  );
+  assert.equal(current.statusCode, 200);
+  assert.deepEqual(current.payload, {
+    ok: true,
+    connection: harness.connected
+  });
+
+  const detail = await invokeAuthenticatedRoute(
+    harness.routes["GET /connections/instagram/:connectionId"],
+    connectionRequest({ params: { connectionId: harness.connectionId } })
+  );
+  assert.equal(detail.statusCode, 200);
+  assert.equal(detail.payload.connection.username, "@ia4tube_empresas");
+
+  const authorization = await invokeAuthenticatedRoute(
+    harness.routes[
+      "GET /connections/instagram/:connectionId/authorization"
+    ],
+    connectionRequest({ params: { connectionId: harness.connectionId } })
+  );
+  assert.deepEqual(authorization.payload, {
+    ok: true,
+    authorization: {
+      connectionId: harness.connectionId,
+      provider: "instagram",
+      purpose: "connect",
+      status: "authorization_completed",
+      expiresAt: "2027-01-02T03:04:05.000Z"
+    }
+  });
+
+  const health = await invokeAuthenticatedRoute(
+    harness.routes["GET /connections/instagram/:connectionId/health"],
+    connectionRequest({ params: { connectionId: harness.connectionId } })
+  );
+  assert.deepEqual(health.payload, {
+    ok: true,
+    connectionId: harness.connectionId,
+    provider: "instagram",
+    state: "connected",
+    health: "healthy",
+    checkedAt: "2026-08-12T10:03:00.000Z"
+  });
+
+  const removed = await invokeAuthenticatedRoute(
+    harness.routes["DELETE /connections/instagram/:connectionId"],
+    connectionRequest({
+      params: { connectionId: harness.connectionId }
+    })
+  );
+  assert.deepEqual(removed.payload, {
+    ok: true,
+    connection: harness.disconnected
+  });
+  const removedAgain = await invokeAuthenticatedRoute(
+    harness.routes["DELETE /connections/instagram/:connectionId"],
+    connectionRequest({ params: { connectionId: harness.connectionId } })
+  );
+  assert.deepEqual(removedAgain.payload, removed.payload);
+
+  assert.deepEqual(harness.calls, [
+    ["getCurrentConnection", { verifiedClaims: claims() }],
+    ["getConnection", {
+      verifiedClaims: claims(),
+      connectionId: harness.connectionId
+    }],
+    ["getAuthorizationStatus", {
+      verifiedClaims: claims(),
+      connectionId: harness.connectionId
+    }],
+    ["getConnectionHealth", {
+      verifiedClaims: claims(),
+      connectionId: harness.connectionId
+    }],
+    ["disconnect", {
+      verifiedClaims: claims(),
+      connectionId: harness.connectionId
+    }],
+    ["disconnect", {
+      verifiedClaims: claims(),
+      connectionId: harness.connectionId
+    }]
+  ]);
+});
+
+test("connection routes reject forged authority and malformed ids before service access", async () => {
+  const harness = connectionRouteHarness();
+  const detailHandlers =
+    harness.routes["GET /connections/instagram/:connectionId"];
+  const deleteHandlers =
+    harness.routes["DELETE /connections/instagram/:connectionId"];
+
+  for (const req of [
+    connectionRequest({
+      params: { connectionId: harness.connectionId },
+      query: { company_id: "forged-company" }
+    }),
+    connectionRequest({
+      params: { connectionId: "not-a-uuid" }
+    }),
+    connectionRequest({
+      user: null,
+      params: { connectionId: harness.connectionId }
+    })
+  ]) {
+    const res = await invokeAuthenticatedRoute(detailHandlers, req);
+    assert.ok([400, 401].includes(res.statusCode));
+    assert.deepEqual(Object.keys(res.payload).sort(), ["code", "ok"]);
+  }
+
+  for (const req of [
+    connectionRequest({
+      params: { connectionId: harness.connectionId },
+      body: { userId: "forged-user" }
+    })
+  ]) {
+    const res = await invokeAuthenticatedRoute(deleteHandlers, req);
+    assert.equal(res.statusCode, 400);
+    assert.deepEqual(res.payload, {
+      ok: false,
+      code: "social_connection_request_invalid"
+    });
+  }
+  assert.deepEqual(harness.calls, []);
+});
+
+test("connection routes fail closed on cross-tenant absence and secret-shaped service output", async () => {
+  const unavailable = errorWithCode("resource_unavailable");
+  const missingHarness = connectionRouteHarness({
+    async getConnection() { throw unavailable; }
+  });
+  const missing = await invokeAuthenticatedRoute(
+    missingHarness.routes["GET /connections/instagram/:connectionId"],
+    connectionRequest({
+      params: { connectionId: missingHarness.connectionId }
+    })
+  );
+  assert.deepEqual(missing.payload, {
+    ok: false,
+    code: "resource_unavailable"
+  });
+  assert.equal(missing.statusCode, 404);
+
+  const secretHarness = connectionRouteHarness({
+    async getConnection() {
+      return {
+        ok: true,
+        connection: {
+          ...connectionRouteHarness().connected,
+          accessToken: "synthetic-secret-that-must-not-escape"
+        }
+      };
+    }
+  });
+  const refused = await invokeAuthenticatedRoute(
+    secretHarness.routes["GET /connections/instagram/:connectionId"],
+    connectionRequest({ params: { connectionId: secretHarness.connectionId } })
+  );
+  assert.equal(refused.statusCode, 503);
+  assert.deepEqual(refused.payload, {
+    ok: false,
+    code: "social_connection_response_invalid"
+  });
+  assert.equal(JSON.stringify(refused.payload).includes("synthetic-secret"), false);
+
+  const emptyHarness = connectionRouteHarness({
+    async getCurrentConnection(input) {
+      emptyHarness.calls.push(["getCurrentConnection", input]);
+      return { ok: true, connection: null };
+    }
+  });
+  const empty = await invokeAuthenticatedRoute(
+    emptyHarness.routes["GET /connections/instagram"],
+    connectionRequest()
+  );
+  assert.deepEqual(empty.payload, { ok: true, connection: null });
+
+  for (const [method, response] of [
+    ["getConnection", {
+      ok: true,
+      connection: { ...secretHarness.connected, health: "disconnected" }
+    }],
+    ["getConnectionHealth", {
+      ok: true,
+      connectionId: secretHarness.connectionId,
+      provider: "instagram",
+      state: "disconnected",
+      health: "healthy",
+      checkedAt: "2026-08-12T10:03:00.000Z"
+    }]
+  ]) {
+    const mismatchHarness = connectionRouteHarness({
+      async [method]() { return response; }
+    });
+    const route = method === "getConnection"
+      ? "GET /connections/instagram/:connectionId"
+      : "GET /connections/instagram/:connectionId/health";
+    const mismatch = await invokeAuthenticatedRoute(
+      mismatchHarness.routes[route],
+      connectionRequest({
+        params: { connectionId: mismatchHarness.connectionId }
+      })
+    );
+    assert.deepEqual(mismatch.payload, {
+      ok: false,
+      code: "social_connection_response_invalid"
+    });
+  }
 });

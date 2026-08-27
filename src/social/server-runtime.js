@@ -63,7 +63,12 @@ async function initializeSocialServerRuntime(options = {}) {
     runtime.instagramOAuth !== undefined &&
     (
       typeof runtime.instagramOAuth.authorize !== "function" ||
-      typeof runtime.instagramOAuth.callback !== "function"
+      typeof runtime.instagramOAuth.callback !== "function" ||
+      typeof runtime.instagramOAuth.disconnect !== "function" ||
+      typeof runtime.instagramOAuth.getAuthorizationStatus !== "function" ||
+      typeof runtime.instagramOAuth.getConnection !== "function" ||
+      typeof runtime.instagramOAuth.getConnectionHealth !== "function" ||
+      typeof runtime.instagramOAuth.getCurrentConnection !== "function"
     )
   ) {
     postgresFail(

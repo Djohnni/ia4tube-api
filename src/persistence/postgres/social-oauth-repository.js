@@ -503,6 +503,60 @@ function createPostgresOAuthRepository(options = {}) {
       }
     }
 
+    async function getAuthorizationStatus(connectionId) {
+      const cleanConnectionId = uuid(connectionId);
+      return run(async (client) => {
+        const result = await client.query(
+          [
+            "SELECT o.connection_id,o.purpose,o.expires_at,o.consumed_at,",
+            "  o.cancelled_at,o.failed_at,o.failure_code,",
+            "  o.expires_at <= CURRENT_TIMESTAMP AS authorization_expired,",
+            "  EXISTS (",
+            "    SELECT 1",
+            "    FROM ia4tube_social.social_encrypted_credentials credential",
+            "    WHERE credential.company_id=o.company_id",
+            "      AND credential.connection_id=o.connection_id",
+            "      AND credential.provider=o.provider",
+            "      AND credential.id=o.id",
+            "  ) AS authorization_succeeded,",
+            "  c.status AS connection_status",
+            "FROM ia4tube_social.social_oauth_transactions o",
+            "JOIN ia4tube_social.social_connections c",
+            "  ON c.company_id=o.company_id AND c.id=o.connection_id",
+            "  AND c.provider=o.provider",
+            "WHERE o.company_id=$1 AND o.connection_id=$2 AND o.provider=$3",
+            "ORDER BY o.created_at DESC,o.id DESC",
+            "LIMIT 1"
+          ].join("\n"),
+          [context.companyId, cleanConnectionId, context.provider]
+        );
+        const row = result.rows?.[0];
+        if (!row) connectorFail("resource_unavailable");
+        let status = "authorization_pending";
+        if (row.cancelled_at) {
+          status = "authorization_cancelled";
+        } else if (row.failed_at) {
+          status = row.failure_code === "authorization_expired"
+            ? "authorization_expired"
+            : "authorization_failed";
+        } else if (row.consumed_at) {
+          status = row.authorization_succeeded
+            ? "authorization_completed"
+            : row.connection_status === "authorization_pending"
+              ? "authorization_processing"
+              : "authorization_failed";
+        } else if (row.authorization_expired) {
+          status = "authorization_expired";
+        }
+        return Object.freeze({
+          connectionId: cleanConnectionId,
+          purpose: purpose(row.purpose),
+          status,
+          expiresAt: new Date(row.expires_at)
+        });
+      });
+    }
+
     async function createAuthorization(input = {}) {
       const clean = authorizationInput(input);
       return run(async (client) => {
@@ -585,10 +639,16 @@ function createPostgresOAuthRepository(options = {}) {
               "SELECT id,revision",
               "FROM ia4tube_social.social_connections",
               "WHERE company_id=$1 AND provider=$2",
-              "  AND status='reconnect_required'",
+              "  AND status=ANY($3::text[])",
+              "ORDER BY (status='reconnect_required') DESC,updated_at DESC,id",
+              "LIMIT 1",
               "FOR UPDATE"
             ].join("\n"),
-            [context.companyId, context.provider]
+            [
+              context.companyId,
+              context.provider,
+              ["reconnect_required", "disconnected"]
+            ]
           );
           if (reconnect.rows?.length !== 1) {
             connectorFail("active_connection_exists");
@@ -601,14 +661,15 @@ function createPostgresOAuthRepository(options = {}) {
               "  expires_at=NULL,revoked_at=NULL,disconnected_at=NULL,",
               "  updated_at=CURRENT_TIMESTAMP,revision=revision+1",
               "WHERE company_id=$1 AND id=$2 AND provider=$3",
-              "  AND status='reconnect_required' AND revision=$4",
+              "  AND status=ANY($5::text[]) AND revision=$4",
               "RETURNING id,revision"
             ].join("\n"),
             [
               context.companyId,
               current.id,
               context.provider,
-              positiveInteger(current.revision)
+              positiveInteger(current.revision),
+              ["reconnect_required", "disconnected"]
             ]
           );
           connectionRow = transitioned.rows?.[0];
@@ -1048,6 +1109,7 @@ function createPostgresOAuthRepository(options = {}) {
         return finish(input, "expired");
       },
       failAuthorizationConnection,
+      getAuthorizationStatus,
       storeConsumedAuthorizationCredential
     });
   }

@@ -1,6 +1,7 @@
 "use strict";
 
 const express = require("express");
+const { CONNECTION_STATES } = require("../connectors/states");
 
 const CALLBACK_MAX_URL_LENGTH = 8192;
 const CALLBACK_MAX_STATE_LENGTH = 2048;
@@ -8,6 +9,25 @@ const CALLBACK_MAX_CODE_LENGTH = 2048;
 const CALLBACK_MAX_ERROR_LENGTH = 64;
 const CALLBACK_MAX_ERROR_REASON_LENGTH = 64;
 const CALLBACK_MAX_DESCRIPTION_LENGTH = 512;
+const UUID_PATTERN =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const PROFESSIONAL_ACCOUNT_TYPES = new Set(["business", "creator"]);
+const CONNECTION_HEALTH = new Set([
+  "healthy",
+  "authorization_pending",
+  "reconnect_required",
+  "disconnecting",
+  "disconnected",
+  "failed"
+]);
+const AUTHORIZATION_STATUSES = new Set([
+  "authorization_pending",
+  "authorization_processing",
+  "authorization_completed",
+  "authorization_cancelled",
+  "authorization_expired",
+  "authorization_failed"
+]);
 const PUBLIC_ERROR_STATUS = Object.freeze({
   social_oauth_callback_invalid: 400,
   social_oauth_state_invalid: 400,
@@ -16,8 +36,22 @@ const PUBLIC_ERROR_STATUS = Object.freeze({
   social_oauth_state_already_consumed: 409,
   social_oauth_state_cancelled: 400,
   social_oauth_exchange_failed: 502,
+  controlled_account_mismatch: 409,
+  invalid_account_type: 422,
+  permission_missing: 403,
+  provider_permanent_failure: 502,
+  provider_result_unknown: 502,
+  provider_temporary_failure: 503,
   active_connection_exists: 409,
   idempotency_conflict: 409,
+  resource_unavailable: 404,
+  state_transition_invalid: 409,
+  disconnect_failed: 502,
+  social_context_invalid: 403,
+  social_authenticated_principal_invalid: 401,
+  social_connection_request_invalid: 400,
+  social_connection_response_invalid: 503,
+  social_connection_unavailable: 503,
   external_capability_disabled: 503,
   social_instagram_configuration_invalid: 503
 });
@@ -26,6 +60,226 @@ function callbackInvalid() {
   const error = new Error("Callback OAuth Instagram recusado.");
   error.code = "social_oauth_callback_invalid";
   throw error;
+}
+
+function connectionFail(code, message) {
+  const error = new Error(message || "Operacao de conexao Instagram recusada.");
+  error.code = code;
+  throw error;
+}
+
+function requestInvalid() {
+  connectionFail(
+    "social_connection_request_invalid",
+    "Requisicao de conexao Instagram recusada."
+  );
+}
+
+function responseInvalid() {
+  connectionFail(
+    "social_connection_response_invalid",
+    "Resposta de conexao Instagram recusada."
+  );
+}
+
+function isRecord(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const prototype = Object.getPrototypeOf(value);
+  return prototype === Object.prototype || prototype === null;
+}
+
+function exactRecord(value, expectedKeys, fail) {
+  if (!isRecord(value)) fail();
+  const keys = Object.keys(value);
+  if (
+    keys.length !== expectedKeys.length ||
+    expectedKeys.some((key) => !Object.hasOwn(value, key))
+  ) {
+    fail();
+  }
+  for (const key of keys) {
+    const descriptor = Object.getOwnPropertyDescriptor(value, key);
+    if (!descriptor || descriptor.get || descriptor.set) fail();
+  }
+  return value;
+}
+
+function boundedText(value, minimum, maximum, fail) {
+  if (
+    typeof value !== "string" ||
+    value !== value.trim() ||
+    value.length < minimum ||
+    value.length > maximum ||
+    /[\u0000-\u001f\u007f]/.test(value)
+  ) {
+    fail();
+  }
+  return value;
+}
+
+function requestUuid(value) {
+  const clean = boundedText(value, 36, 36, requestInvalid).toLowerCase();
+  if (
+    !UUID_PATTERN.test(clean) ||
+    clean === "00000000-0000-0000-0000-000000000000"
+  ) {
+    requestInvalid();
+  }
+  return clean;
+}
+
+function responseUuid(value) {
+  const clean = boundedText(value, 36, 36, responseInvalid).toLowerCase();
+  if (
+    !UUID_PATTERN.test(clean) ||
+    clean === "00000000-0000-0000-0000-000000000000"
+  ) {
+    responseInvalid();
+  }
+  return clean;
+}
+
+function assertEmptyInput(value) {
+  if (value === undefined || value === null) return;
+  if (!isRecord(value) || Object.keys(value).length !== 0) requestInvalid();
+}
+
+function assertRequestSurface(req, expectedParameterKeys) {
+  const params = req?.params === undefined
+    ? Object.create(null)
+    : req.params;
+  exactRecord(params, expectedParameterKeys, requestInvalid);
+  assertEmptyInput(req?.query);
+  assertEmptyInput(req?.body);
+  return params;
+}
+
+function verifiedClaims(req) {
+  if (!isRecord(req?.user)) {
+    connectionFail("social_authenticated_principal_invalid");
+  }
+  return req.user;
+}
+
+function coherentStateHealth(state, health) {
+  return state === "connected"
+    ? health === "healthy" || health === "reconnect_required"
+    : health === state;
+}
+
+function normalizeNullableDate(value) {
+  if (value === null) return null;
+  if (typeof value !== "string") responseInvalid();
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime()) || date.toISOString() !== value) {
+    responseInvalid();
+  }
+  return value;
+}
+
+function normalizeConnection(value, { optional = false } = {}) {
+  if (optional && value === null) return null;
+  const source = exactRecord(
+    value,
+    [
+      "connectionId",
+      "provider",
+      "username",
+      "accountType",
+      "state",
+      "createdAt",
+      "connectedAt",
+      "updatedAt",
+      "disconnectedAt",
+      "health"
+    ],
+    responseInvalid
+  );
+  const hasAccount = source.username !== null || source.accountType !== null;
+  if (
+    source.provider !== "instagram" ||
+    !CONNECTION_STATES.includes(source.state) ||
+    !CONNECTION_HEALTH.has(source.health) ||
+    !coherentStateHealth(source.state, source.health) ||
+    ((source.username === null) !== (source.accountType === null)) ||
+    (hasAccount &&
+      (typeof source.username !== "string" ||
+        !/^@[a-zA-Z0-9._]{1,30}$/.test(source.username) ||
+        !PROFESSIONAL_ACCOUNT_TYPES.has(source.accountType))) ||
+    (source.state === "connected" && !hasAccount)
+  ) {
+    responseInvalid();
+  }
+  return Object.freeze({
+    connectionId: responseUuid(source.connectionId),
+    provider: "instagram",
+    username: source.username,
+    accountType: source.accountType,
+    state: source.state,
+    createdAt: normalizeNullableDate(source.createdAt),
+    connectedAt: normalizeNullableDate(source.connectedAt),
+    updatedAt: normalizeNullableDate(source.updatedAt),
+    disconnectedAt: normalizeNullableDate(source.disconnectedAt),
+    health: source.health
+  });
+}
+
+function normalizeConnectionResult(value, options) {
+  const source = exactRecord(value, ["ok", "connection"], responseInvalid);
+  if (source.ok !== true) responseInvalid();
+  return Object.freeze({
+    ok: true,
+    connection: normalizeConnection(source.connection, options)
+  });
+}
+
+function normalizeAuthorizationResult(value) {
+  const result = exactRecord(value, ["ok", "authorization"], responseInvalid);
+  if (result.ok !== true) responseInvalid();
+  const source = exactRecord(
+    result.authorization,
+    ["connectionId", "purpose", "status", "expiresAt"],
+    responseInvalid
+  );
+  if (
+    !["connect", "reconnect"].includes(source.purpose) ||
+    !AUTHORIZATION_STATUSES.has(source.status)
+  ) {
+    responseInvalid();
+  }
+  const authorization = Object.freeze({
+    connectionId: responseUuid(source.connectionId),
+    provider: "instagram",
+    purpose: source.purpose,
+    status: source.status,
+    expiresAt: normalizeNullableDate(source.expiresAt)
+  });
+  return Object.freeze({ ok: true, authorization });
+}
+
+function normalizeHealthResult(value) {
+  const source = exactRecord(
+    value,
+    ["ok", "connectionId", "provider", "state", "health", "checkedAt"],
+    responseInvalid
+  );
+  if (
+    source.ok !== true ||
+    source.provider !== "instagram" ||
+    !CONNECTION_STATES.includes(source.state) ||
+    !CONNECTION_HEALTH.has(source.health) ||
+    !coherentStateHealth(source.state, source.health)
+  ) {
+    responseInvalid();
+  }
+  return Object.freeze({
+    ok: true,
+    connectionId: responseUuid(source.connectionId),
+    provider: "instagram",
+    state: source.state,
+    health: source.health,
+    checkedAt: normalizeNullableDate(source.checkedAt)
+  });
 }
 
 function safeQueryValue(value, minimum, maximum) {
@@ -119,19 +373,27 @@ function noStore(_req, res, next) {
   return next();
 }
 
-function publicCode(error) {
+function publicCode(error, fallback = "social_oauth_callback_invalid") {
   const code = String(error?.code || "");
   return Object.hasOwn(PUBLIC_ERROR_STATUS, code)
     ? code
-    : "social_oauth_callback_invalid";
+    : fallback;
 }
 
-function sendClosedError(res, error) {
-  const code = publicCode(error);
+function sendClosedError(
+  res,
+  error,
+  fallback = "social_oauth_callback_invalid"
+) {
+  const code = publicCode(error, fallback);
   return res.status(PUBLIC_ERROR_STATUS[code]).json(Object.freeze({
     ok: false,
     code
   }));
+}
+
+function sendConnectionError(res, error) {
+  return sendClosedError(res, error, "social_connection_unavailable");
 }
 
 function createInstagramOAuthRouter(options = {}) {
@@ -145,7 +407,8 @@ function createInstagramOAuthRouter(options = {}) {
   if (
     !router ||
     typeof router.post !== "function" ||
-    typeof router.get !== "function"
+    typeof router.get !== "function" ||
+    typeof router.delete !== "function"
   ) {
     callbackInvalid();
   }
@@ -162,6 +425,14 @@ function createInstagramOAuthRouter(options = {}) {
       throw error;
     }
     return value;
+  }
+
+  function serviceMethod(name) {
+    const value = service();
+    if (typeof value[name] !== "function") {
+      connectionFail("social_connection_unavailable");
+    }
+    return value[name].bind(value);
   }
 
   router.post(
@@ -188,6 +459,117 @@ function createInstagramOAuthRouter(options = {}) {
         return res.status(201).json(result);
       } catch (error) {
         return sendClosedError(res, error);
+      }
+    }
+  );
+
+  router.get(
+    "/connections/instagram",
+    noStore,
+    options.authenticate,
+    async (req, res) => {
+      try {
+        assertRequestSurface(req, []);
+        const result = normalizeConnectionResult(
+          await serviceMethod("getCurrentConnection")({
+            verifiedClaims: verifiedClaims(req)
+          }),
+          { optional: true }
+        );
+        return res.status(200).json(result);
+      } catch (error) {
+        return sendConnectionError(res, error);
+      }
+    }
+  );
+
+  router.get(
+    "/connections/instagram/:connectionId/authorization",
+    noStore,
+    options.authenticate,
+    async (req, res) => {
+      try {
+        const params = assertRequestSurface(req, ["connectionId"]);
+        const connectionId = requestUuid(params.connectionId);
+        const result = normalizeAuthorizationResult(
+          await serviceMethod("getAuthorizationStatus")({
+            verifiedClaims: verifiedClaims(req),
+            connectionId
+          })
+        );
+        return res.status(200).json(result);
+      } catch (error) {
+        return sendConnectionError(res, error);
+      }
+    }
+  );
+
+  router.get(
+    "/connections/instagram/:connectionId/health",
+    noStore,
+    options.authenticate,
+    async (req, res) => {
+      try {
+        const params = assertRequestSurface(req, ["connectionId"]);
+        const connectionId = requestUuid(params.connectionId);
+        const result = normalizeHealthResult(
+          await serviceMethod("getConnectionHealth")({
+            verifiedClaims: verifiedClaims(req),
+            connectionId
+          })
+        );
+        return res.status(200).json(result);
+      } catch (error) {
+        return sendConnectionError(res, error);
+      }
+    }
+  );
+
+  router.get(
+    "/connections/instagram/:connectionId",
+    noStore,
+    options.authenticate,
+    async (req, res) => {
+      try {
+        const params = assertRequestSurface(req, ["connectionId"]);
+        const connectionId = requestUuid(params.connectionId);
+        const result = normalizeConnectionResult(
+          await serviceMethod("getConnection")({
+            verifiedClaims: verifiedClaims(req),
+            connectionId
+          })
+        );
+        return res.status(200).json(result);
+      } catch (error) {
+        return sendConnectionError(res, error);
+      }
+    }
+  );
+
+  router.delete(
+    "/connections/instagram/:connectionId",
+    noStore,
+    options.authenticate,
+    async (req, res) => {
+      try {
+        const params = assertRequestSurface(req, ["connectionId"]);
+        const connectionId = requestUuid(params.connectionId);
+        const result = normalizeConnectionResult(
+          await serviceMethod("disconnect")({
+            verifiedClaims: verifiedClaims(req),
+            connectionId
+          })
+        );
+        if (
+          result.connection.state !== "disconnected" ||
+          result.connection.username !== null ||
+          result.connection.accountType !== null
+        ) {
+          responseInvalid();
+        }
+        return res.status(200).json(result);
+      } catch (error) {
+        return sendConnectionError(res, error);
       }
     }
   );

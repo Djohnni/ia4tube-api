@@ -135,16 +135,17 @@ async function createSocialRuntime(options = {}) {
       pool,
       runtimeRole: config.role
     });
+    const connectorStore = createPostgresConnectorStore({
+      pool,
+      runtimeRole: config.role
+    });
     const connectorPersistence = Object.freeze({
       audit: createPostgresConnectorAudit({
         pool,
         runtimeRole: config.role
       }),
       oauth: oauthRepository,
-      store: createPostgresConnectorStore({
-        pool,
-        runtimeRole: config.role
-      })
+      store: connectorStore
     });
     const authAdapter = createSocialAuthAdapter(identityConfig);
     let instagramOAuth = null;
@@ -160,6 +161,7 @@ async function createSocialRuntime(options = {}) {
       const instagramProvider = createInstagramProvider({
         config: instagramConfig,
         transport,
+        clock: options.clock || Date.now,
         setTimeout: options.setTimeout,
         clearTimeout: options.clearTimeout
       });
@@ -168,6 +170,7 @@ async function createSocialRuntime(options = {}) {
         stateEnvelope: instagramStateEnvelope,
         provider: instagramProvider,
         oauthRepository,
+        connectorStore,
         credentials,
         authAdapter,
         clock: options.clock || Date.now,

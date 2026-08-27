@@ -983,7 +983,7 @@ test("repeated disconnected persistence idempotently sanitizes legacy account ma
     )) {
       return { rows: [], rowCount: 1 };
     }
-    if (/DELETE FROM ia4tube_social\.social_connection_scopes/is.test(
+    if (/UPDATE ia4tube_social\.social_connection_scopes/is.test(
       call.text
     )) {
       return { rows: [], rowCount: 1 };
@@ -999,7 +999,7 @@ test("repeated disconnected persistence idempotently sanitizes legacy account ma
   for (const pattern of [
     /UPDATE ia4tube_social\.social_external_accounts/is,
     /UPDATE ia4tube_social\.social_encrypted_credentials/is,
-    /DELETE FROM ia4tube_social\.social_connection_scopes/is
+    /UPDATE ia4tube_social\.social_connection_scopes/is
   ]) {
     const call = calls.find((candidate) => pattern.test(candidate.text));
     assert.ok(call);
@@ -1634,7 +1634,7 @@ test("OAuth insert failure rolls back the pending connection and emits no audit"
   );
 });
 
-test("reconnect reuses the exact reconnect-required connection and advances its revision", async () => {
+test("reconnect reuses the exact reconnect-required or disconnected connection", async () => {
   const requestedConnectionId = "30000000-0000-4000-8000-000000000013";
   const expiresAt = oauthInput().expiresAt;
   const pool = createFakePool(async (call) => {
@@ -1690,12 +1690,13 @@ test("reconnect reuses the exact reconnect-required connection and advances its 
     /UPDATE ia4tube_social\.social_connections/is.test(call.text)
   );
   assert.match(transitioned.text, /status='authorization_pending'/i);
-  assert.match(transitioned.text, /status='reconnect_required'/i);
+  assert.match(transitioned.text, /status=ANY\(\$5::text\[\]\)/i);
   assert.deepEqual(transitioned.values, [
     CONTEXT_A.companyId,
     IDS.connection,
     "instagram",
-    5
+    5,
+    ["reconnect_required", "disconnected"]
   ]);
   const authorization = calls.find((call) =>
     /INSERT INTO ia4tube_social\.social_oauth_transactions/is.test(call.text)
@@ -3224,6 +3225,532 @@ test("local persistence adapters make zero external calls", async () => {
       detailsCode: null
     });
   });
+});
+
+test("connection detail reads are tenant-scoped, date-safe and secret-free", async () => {
+  const createdAt = new Date("2026-08-27T12:00:00.000Z");
+  const connectedAt = new Date("2026-08-27T12:01:00.000Z");
+  const updatedAt = new Date("2026-08-27T12:02:00.000Z");
+  const expiresAt = new Date("2026-08-27T14:00:00.000Z");
+  const observedAt = new Date("2026-08-27T12:03:00.000Z");
+  const row = connectionRow({
+    status: "connected",
+    revision: 4,
+    created_at: createdAt,
+    connected_at: connectedAt,
+    updated_at: updatedAt,
+    disconnected_at: null,
+    expires_at: expiresAt,
+    external_account_id: "synthetic-account-row-001",
+    external_id: professionalAccount().externalId,
+    username: professionalAccount().username,
+    display_name: professionalAccount().displayName,
+    account_type: professionalAccount().accountType,
+    external_account_status: "active",
+    active_credential_id: IDS.credential,
+    credential_expires_at: expiresAt,
+    granted_scopes: [
+      "instagram_business_manage_messages",
+      "instagram_business_basic"
+    ],
+    observed_at: observedAt
+  });
+  const currentPool = createFakePool(async () => ({ rows: [row] }));
+  const current = await createPostgresConnectorStore({
+    pool: currentPool,
+    runtimeRole: RUNTIME_ROLE
+  }).scope(CONTEXT_A).getCurrentConnectionDetails();
+
+  assert.deepEqual(Object.keys(current).sort(), [
+    "account",
+    "companyId",
+    "connectedAt",
+    "createdAt",
+    "disconnectedAt",
+    "expiresAt",
+    "grantedScopes",
+    "health",
+    "id",
+    "provider",
+    "revision",
+    "state",
+    "updatedAt"
+  ]);
+  assert.equal(current.companyId, CONTEXT_A.companyId);
+  assert.equal(current.state, "connected");
+  assert.equal(current.health, "healthy");
+  assert.deepEqual(current.account, professionalAccount());
+  assert.deepEqual(current.grantedScopes, [
+    "instagram_business_basic",
+    "instagram_business_manage_messages"
+  ]);
+  for (const [field, expected] of [
+    ["createdAt", createdAt],
+    ["connectedAt", connectedAt],
+    ["updatedAt", updatedAt],
+    ["expiresAt", expiresAt]
+  ]) {
+    assert.equal(current[field].getTime(), expected.getTime());
+    assert.notEqual(current[field], expected);
+  }
+  assert.equal(current.disconnectedAt, null);
+  assertScopedTransaction(currentPool, CONTEXT_A.companyId);
+  const currentRead = productCalls(currentPool)[0];
+  assert.deepEqual(currentRead.values.slice(0, 2), [
+    CONTEXT_A.companyId,
+    "instagram"
+  ]);
+  assert.match(currentRead.text, /status=ANY\(\$3::text\[\]\)/i);
+  assert.doesNotMatch(
+    currentRead.text,
+    /ciphertext|nonce|auth_tag|key_version/i
+  );
+
+  const byIdPool = createFakePool(async () => ({ rows: [row] }));
+  const byId = await createPostgresConnectorStore({
+    pool: byIdPool,
+    runtimeRole: RUNTIME_ROLE
+  }).scope(CONTEXT_A).getConnectionDetails(IDS.connection);
+  assert.deepEqual(byId, current);
+  assert.deepEqual(productCalls(byIdPool)[0].values, [
+    CONTEXT_A.companyId,
+    IDS.connection,
+    "instagram"
+  ]);
+  assert.equal(flattenedValues(byIdPool).includes(CONTEXT_B.companyId), false);
+
+  const emptyPool = createFakePool();
+  assert.equal(await createPostgresConnectorStore({
+    pool: emptyPool,
+    runtimeRole: RUNTIME_ROLE
+  }).scope(CONTEXT_A).getCurrentConnectionDetails(), null);
+});
+
+test("authorization status is tenant-scoped and exposes only normalized lifecycle data", async () => {
+  const expiresAt = new Date("2026-08-27T14:00:00.000Z");
+  const pool = createFakePool(async (call) => {
+    if (/FROM ia4tube_social\.social_oauth_transactions o/is.test(call.text)) {
+      return { rows: [{
+        connection_id: IDS.connection,
+        purpose: "connect",
+        expires_at: expiresAt,
+        consumed_at: new Date("2026-08-27T12:01:00.000Z"),
+        cancelled_at: null,
+        failed_at: null,
+        failure_code: null,
+        authorization_expired: false,
+        authorization_succeeded: true,
+        connection_status: "connected"
+      }] };
+    }
+    return { rows: [], rowCount: 0 };
+  });
+  const result = await createPostgresOAuthRepository({
+    pool,
+    runtimeRole: RUNTIME_ROLE
+  }).scope(CONTEXT_A).getAuthorizationStatus(IDS.connection);
+  assert.deepEqual(result, {
+    connectionId: IDS.connection,
+    purpose: "connect",
+    status: "authorization_completed",
+    expiresAt
+  });
+  assertScopedTransaction(pool, CONTEXT_A.companyId);
+  const read = productCalls(pool)[0];
+  assert.deepEqual(read.values, [
+    CONTEXT_A.companyId,
+    IDS.connection,
+    "instagram"
+  ]);
+  assert.doesNotMatch(
+    read.text,
+    /state_digest|session_jti_digest|redirect_uri_digest/i
+  );
+  assert.match(
+    read.text,
+    /o\.expires_at <= CURRENT_TIMESTAMP AS authorization_expired/i
+  );
+  assert.match(
+    read.text,
+    /credential\.id=o\.id[\s\S]*AS authorization_succeeded/i
+  );
+
+  const absent = createFakePool();
+  await assert.rejects(
+    createPostgresOAuthRepository({
+      pool: absent,
+      runtimeRole: RUNTIME_ROLE
+    }).scope(CONTEXT_A).getAuthorizationStatus(IDS.connection),
+    { code: "resource_unavailable" }
+  );
+});
+
+test("authorization status derives expiry, failure and historical success durably", async () => {
+  const expiresAt = new Date("2026-08-27T14:00:00.000Z");
+  const terminalAt = new Date("2026-08-27T12:01:00.000Z");
+  const baseRow = Object.freeze({
+    connection_id: IDS.connection,
+    purpose: "connect",
+    expires_at: expiresAt,
+    consumed_at: null,
+    cancelled_at: null,
+    failed_at: null,
+    failure_code: null,
+    authorization_expired: false,
+    authorization_succeeded: false,
+    connection_status: "authorization_pending"
+  });
+  const cases = [
+    {
+      name: "open transaction past database expiry",
+      row: { ...baseRow, authorization_expired: true },
+      expected: "authorization_expired"
+    },
+    {
+      name: "non-expiry terminal failure",
+      row: {
+        ...baseRow,
+        failed_at: terminalAt,
+        failure_code: "provider_permanent_failure"
+      },
+      expected: "authorization_failed"
+    },
+    {
+      name: "terminal expiry failure",
+      row: {
+        ...baseRow,
+        failed_at: terminalAt,
+        failure_code: "authorization_expired"
+      },
+      expected: "authorization_expired"
+    },
+    {
+      name: "successful authorization after connection state changed",
+      row: {
+        ...baseRow,
+        consumed_at: terminalAt,
+        authorization_expired: true,
+        authorization_succeeded: true,
+        connection_status: "reconnect_required"
+      },
+      expected: "authorization_completed"
+    }
+  ];
+
+  for (const item of cases) {
+    const pool = createFakePool(async (call) => {
+      if (/FROM ia4tube_social\.social_oauth_transactions o/is.test(call.text)) {
+        return { rows: [item.row] };
+      }
+      return { rows: [], rowCount: 0 };
+    });
+    const result = await createPostgresOAuthRepository({
+      pool,
+      runtimeRole: RUNTIME_ROLE
+    }).scope(CONTEXT_A).getAuthorizationStatus(IDS.connection);
+    assert.equal(result.status, item.expected, item.name);
+    assertScopedTransaction(pool, CONTEXT_A.companyId);
+  }
+});
+
+test("local disconnect is idempotent and atomically revokes only connector material", async () => {
+  let state = "connected";
+  let revision = 7;
+  let accountStatus = "active";
+  let credentialActive = true;
+  let scopes = 2;
+  let disconnectedAt = null;
+  const createdAt = new Date("2026-08-27T12:00:00.000Z");
+  const connectedAt = new Date("2026-08-27T12:01:00.000Z");
+  const updatedAt = new Date("2026-08-27T12:02:00.000Z");
+  const pool = createFakePool(async (call) => {
+    if (/FROM ia4tube_social\.social_connections connection/is.test(call.text)) {
+      return { rows: [connectionRow({
+        status: state,
+        revision,
+        created_at: createdAt,
+        connected_at: connectedAt,
+        updated_at: updatedAt,
+        disconnected_at: disconnectedAt,
+        expires_at: credentialActive
+          ? new Date("2026-08-27T14:00:00.000Z")
+          : null,
+        external_account_id: "synthetic-account-row-001",
+        external_id: professionalAccount().externalId,
+        username: professionalAccount().username,
+        display_name: professionalAccount().displayName,
+        account_type: professionalAccount().accountType,
+        external_account_status: accountStatus,
+        active_credential_id: credentialActive ? IDS.credential : null,
+        credential_expires_at: credentialActive
+          ? new Date("2026-08-27T14:00:00.000Z")
+          : null,
+        granted_scopes: scopes > 0 ? ["instagram_business_basic"] : [],
+        observed_at: new Date("2026-08-27T12:03:00.000Z")
+      })] };
+    }
+    if (/UPDATE ia4tube_social\.social_connections/is.test(call.text)) {
+      state = call.values[3];
+      revision = call.values[4];
+      if (state === "disconnected") {
+        disconnectedAt = new Date("2026-08-27T12:04:00.000Z");
+      }
+      return { rows: [{ id: IDS.connection }], rowCount: 1 };
+    }
+    if (/UPDATE ia4tube_social\.social_external_accounts/is.test(call.text)) {
+      const changed = accountStatus !== "revoked";
+      accountStatus = "revoked";
+      return { rows: [], rowCount: changed ? 1 : 0 };
+    }
+    if (/UPDATE ia4tube_social\.social_encrypted_credentials/is.test(
+      call.text
+    )) {
+      const changed = credentialActive;
+      credentialActive = false;
+      return { rows: [], rowCount: changed ? 1 : 0 };
+    }
+    if (/UPDATE ia4tube_social\.social_connection_scopes/is.test(
+      call.text
+    )) {
+      const removed = scopes;
+      scopes = 0;
+      return { rows: [], rowCount: removed };
+    }
+    if (/INSERT INTO ia4tube_social\.social_audit_events/is.test(call.text)) {
+      return { rows: [{}], rowCount: 1 };
+    }
+    return { rows: [], rowCount: 0 };
+  });
+  const scoped = createPostgresConnectorStore({
+    pool,
+    runtimeRole: RUNTIME_ROLE
+  }).scope(CONTEXT_A);
+  const first = await scoped.disconnectConnectionLocally(IDS.connection);
+  assert.equal(first.state, "disconnected");
+  assert.equal(first.health, "disconnected");
+  assert.equal(first.revision, 9);
+  assert.equal(first.account, null);
+  assert.deepEqual(first.grantedScopes, []);
+  assert.equal(first.expiresAt, null);
+  assertScopedTransaction(pool, CONTEXT_A.companyId);
+  const firstCalls = productCalls(pool);
+  assert.deepEqual(firstCalls.filter((call) =>
+    /UPDATE ia4tube_social\.social_connections/is.test(call.text)
+  ).map((call) => call.values[3]), ["disconnecting", "disconnected"]);
+  assert.ok(firstCalls.some((call) =>
+    /UPDATE ia4tube_social\.social_external_accounts/is.test(call.text) &&
+    /status = 'revoked'/i.test(call.text)
+  ));
+  assert.ok(firstCalls.some((call) =>
+    /UPDATE ia4tube_social\.social_encrypted_credentials/is.test(call.text) &&
+    /revoked_at = CURRENT_TIMESTAMP/i.test(call.text)
+  ));
+  assert.equal(firstCalls.some((call) => /^DELETE /i.test(call.text)), false);
+  assert.ok(firstCalls.some((call) =>
+    /UPDATE ia4tube_social\.social_connection_scopes/i.test(call.text) &&
+    /SET expires_at=GREATEST/i.test(call.text)
+  ));
+
+  const connectionUpdates = firstCalls.filter((call) =>
+    /UPDATE ia4tube_social\.social_connections/is.test(call.text)
+  ).length;
+  const auditWrites = firstCalls.filter((call) =>
+    /INSERT INTO ia4tube_social\.social_audit_events/is.test(call.text)
+  ).length;
+  const second = await scoped.disconnectConnectionLocally(IDS.connection);
+  assert.equal(second.state, "disconnected");
+  assert.equal(second.revision, first.revision);
+  assert.equal(productCalls(pool).filter((call) =>
+    /UPDATE ia4tube_social\.social_connections/is.test(call.text)
+  ).length, connectionUpdates);
+  assert.equal(productCalls(pool).filter((call) =>
+    /INSERT INTO ia4tube_social\.social_audit_events/is.test(call.text)
+  ).length, auditWrites);
+});
+
+test("credential activation restores the reusable account, token expiry and scopes atomically", async () => {
+  let activated = false;
+  const expiresAt = new Date(Date.now() + 2 * 60 * 60 * 1000);
+  const pool = createFakePool(async (call) => {
+    if (/FROM ia4tube_social\.social_connections connection/is.test(call.text)) {
+      return { rows: [connectionRow(activated
+        ? {
+          status: "connected",
+          revision: 2,
+          external_account_id: "synthetic-historical-account-row",
+          external_id: professionalAccount().externalId,
+          username: professionalAccount().username,
+          display_name: professionalAccount().displayName,
+          account_type: professionalAccount().accountType
+        }
+        : { status: "authorization_pending", revision: 1 })] };
+    }
+    if (/UPDATE ia4tube_social\.social_connections/is.test(call.text)) {
+      activated = true;
+      return { rows: [{ id: IDS.connection }], rowCount: 1 };
+    }
+    if (/INSERT INTO ia4tube_social\.social_external_accounts/is.test(
+      call.text
+    )) {
+      return {
+        rows: [{ id: "synthetic-historical-account-row" }],
+        rowCount: 1
+      };
+    }
+    if (/UPDATE ia4tube_social\.social_encrypted_credentials/is.test(
+      call.text
+    )) {
+      return { rows: [], rowCount: 0 };
+    }
+    if (/INSERT INTO ia4tube_social\.social_encrypted_credentials/is.test(
+      call.text
+    )) {
+      return { rows: [{
+        id: IDS.credential,
+        credential_type: "instagram_user_access_token",
+        key_version: "social-kek-v1",
+        aad_version: 1,
+        revision: 1,
+        expires_at: expiresAt
+      }], rowCount: 1 };
+    }
+    if (/INSERT INTO ia4tube_social\.social_audit_events/is.test(call.text)) {
+      return { rows: [{}], rowCount: 1 };
+    }
+    return { rows: [], rowCount: 0 };
+  });
+  const result = await createPostgresConnectorStore({
+    pool,
+    runtimeRole: RUNTIME_ROLE
+  }).scope(CONTEXT_A).activateConnectionWithCredential(
+    connectorRecord({
+      state: "connected",
+      account: professionalAccount(),
+      revision: 2
+    }),
+    1,
+    credentialEnvelope({
+      credentialType: "instagram_user_access_token",
+      expiresAt
+    }),
+    {
+      grantedScopes: [
+        "instagram_business_manage_messages",
+        "instagram_business_basic",
+        "instagram_business_basic"
+      ]
+    }
+  );
+  assert.equal(result.connection.state, "connected");
+  assert.equal(result.credential.expiresAt.getTime(), expiresAt.getTime());
+  assert.deepEqual(result.grantedScopes, [
+    "instagram_business_basic",
+    "instagram_business_manage_messages"
+  ]);
+  assertScopedTransaction(pool, CONTEXT_A.companyId);
+  const calls = productCalls(pool);
+  const connectionUpdate = calls.find((call) =>
+    /UPDATE ia4tube_social\.social_connections/is.test(call.text)
+  );
+  assert.match(connectionUpdate.text, /expires_at=\$6/i);
+  assert.equal(connectionUpdate.values[5].getTime(), expiresAt.getTime());
+  const accountUpsert = calls.find((call) =>
+    /INSERT INTO ia4tube_social\.social_external_accounts/is.test(call.text)
+  );
+  assert.match(accountUpsert.text, /status = 'active'/i);
+  assert.match(
+    accountUpsert.text,
+    /WHERE social_external_accounts\.connection_id = EXCLUDED\.connection_id/i
+  );
+  const scopeExpiration = calls.findIndex((call) =>
+    /UPDATE ia4tube_social\.social_connection_scopes/is.test(call.text)
+  );
+  const scopeInsert = calls.findIndex((call) =>
+    /INSERT INTO ia4tube_social\.social_connection_scopes/is.test(call.text)
+  );
+  const credentialInsert = calls.findIndex((call) =>
+    /INSERT INTO ia4tube_social\.social_encrypted_credentials/is.test(
+      call.text
+    )
+  );
+  assert.ok(scopeExpiration > credentialInsert);
+  assert.ok(scopeInsert > scopeExpiration);
+  assert.deepEqual(calls[scopeInsert].values.slice(0, 3), [
+    CONTEXT_A.companyId,
+    IDS.connection,
+    [
+      "instagram_business_basic",
+      "instagram_business_manage_messages"
+    ]
+  ]);
+  assert.equal(calls[scopeInsert].values[3].getTime(), expiresAt.getTime());
+  assert.equal(JSON.stringify(pool.calls).includes(SYNTHETIC_SECRET_MARKER), false);
+});
+
+test("scope persistence failure rolls back connection, account and credential activation", async () => {
+  const pool = createFakePool(async (call) => {
+    if (/FROM ia4tube_social\.social_connections connection/is.test(call.text)) {
+      return { rows: [connectionRow({
+        status: "authorization_pending",
+        revision: 1
+      })] };
+    }
+    if (/UPDATE ia4tube_social\.social_connections/is.test(call.text)) {
+      return { rows: [{ id: IDS.connection }], rowCount: 1 };
+    }
+    if (/INSERT INTO ia4tube_social\.social_external_accounts/is.test(
+      call.text
+    )) {
+      return { rows: [{ id: "synthetic-account-row-001" }], rowCount: 1 };
+    }
+    if (/UPDATE ia4tube_social\.social_encrypted_credentials/is.test(
+      call.text
+    )) {
+      return { rows: [], rowCount: 0 };
+    }
+    if (/INSERT INTO ia4tube_social\.social_encrypted_credentials/is.test(
+      call.text
+    )) {
+      return { rows: [{
+        id: IDS.credential,
+        credential_type: "access_token",
+        key_version: "social-kek-v1",
+        aad_version: 1,
+        revision: 1,
+        expires_at: credentialEnvelope().expiresAt
+      }], rowCount: 1 };
+    }
+    if (/INSERT INTO ia4tube_social\.social_connection_scopes/is.test(
+      call.text
+    )) {
+      throw Object.assign(new Error("synthetic_scope_failure"), {
+        code: "synthetic_scope_failure"
+      });
+    }
+    return { rows: [], rowCount: 0 };
+  });
+  await assert.rejects(
+    createPostgresConnectorStore({
+      pool,
+      runtimeRole: RUNTIME_ROLE
+    }).scope(CONTEXT_A).activateConnectionWithCredential(
+      connectorRecord({
+        state: "connected",
+        account: professionalAccount(),
+        revision: 2
+      }),
+      1,
+      credentialEnvelope(),
+      { grantedScopes: ["instagram_business_basic"] }
+    ),
+    { code: "synthetic_scope_failure" }
+  );
+  assert.equal(pool.calls.some((call) => call.text.trim() === "ROLLBACK"), true);
+  assert.equal(pool.calls.some((call) => call.text.trim() === "COMMIT"), false);
+  assert.equal(productCalls(pool).some((call) =>
+    call.values.includes("social.connection.state_transition") ||
+    call.values.includes("social.credential.stored")
+  ), false);
 });
 
 test("persistence source has no network/provider adapter or media-byte storage", () => {

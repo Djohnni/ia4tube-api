@@ -3,16 +3,27 @@
 const { postgresFail } = require("../../persistence/postgres/errors");
 const {
   INSTAGRAM_AUTHORIZATION_ENDPOINT,
+  INSTAGRAM_GRAPH_API_ORIGIN,
+  INSTAGRAM_LONG_LIVED_TOKEN_ENDPOINT,
   INSTAGRAM_OAUTH_REDIRECT_URI,
   INSTAGRAM_OAUTH_SCOPES,
+  INSTAGRAM_PROFESSIONAL_ACCOUNT_API_VERSION,
   INSTAGRAM_PROVIDER,
-  INSTAGRAM_TOKEN_ENDPOINT
+  INSTAGRAM_TOKEN_ENDPOINT,
+  INSTAGRAM_USERNAME_PATTERN
 } = require("./instagram-config");
 
 const INSTAGRAM_EXCHANGE_TIMEOUT_MS = 5000;
 const INSTAGRAM_EXCHANGE_MAX_RESPONSE_BYTES = 32 * 1024;
 const INSTAGRAM_EXCHANGE_MAX_TOKEN_BYTES = 8 * 1024;
 const INSTAGRAM_EXCHANGE_MAX_CODE_LENGTH = 2048;
+const INSTAGRAM_LONG_LIVED_MAX_EXPIRES_SECONDS = 60 * 24 * 60 * 60;
+const INSTAGRAM_DISCOVERY_FIELDS = Object.freeze([
+  "user_id",
+  "username",
+  "name",
+  "account_type"
+]);
 const APP_ID_PATTERN = /^[0-9]{5,32}$/;
 const GRAPH_API_VERSION_PATTERN = /^v[1-9][0-9]?\.[0-9]+$/;
 const VISIBLE_ASCII_PATTERN = /^[\x21-\x7e]+$/;
@@ -74,6 +85,14 @@ function requireConfig(config) {
     config.redirectUri !== INSTAGRAM_OAUTH_REDIRECT_URI ||
     config.authorizationEndpoint !== INSTAGRAM_AUTHORIZATION_ENDPOINT ||
     config.tokenEndpoint !== INSTAGRAM_TOKEN_ENDPOINT ||
+    !(
+      config.expectedUsername === null ||
+      (
+        typeof config.expectedUsername === "string" &&
+        INSTAGRAM_USERNAME_PATTERN.test(config.expectedUsername) &&
+        !config.expectedUsername.includes("..")
+      )
+    ) ||
     !Array.isArray(config.scopes) ||
     config.scopes.length !== INSTAGRAM_OAUTH_SCOPES.length ||
     config.scopes.some(
@@ -245,10 +264,87 @@ function normalizeExternalUserId(value) {
   return value;
 }
 
-function parseExchangeResponse(body) {
+function jsonStringEnd(source, start) {
+  for (let index = start + 1; index < source.length; index += 1) {
+    if (source[index] === "\\") {
+      index += 1;
+    } else if (source[index] === "\"") {
+      return index;
+    }
+  }
+  providerFail();
+}
+
+function isJsonWhitespace(value) {
+  return value === " " || value === "\t" || value === "\r" || value === "\n";
+}
+
+function isJsonValueDelimiter(value) {
+  return value === undefined ||
+    value === "," ||
+    value === "}" ||
+    value === "]" ||
+    isJsonWhitespace(value);
+}
+
+function preserveNumericUserIds(source) {
+  const pieces = [];
+  let cursor = 0;
+  let index = 0;
+  while (index < source.length) {
+    if (source[index] !== "\"") {
+      index += 1;
+      continue;
+    }
+    const end = jsonStringEnd(source, index);
+    let decoded;
+    try {
+      decoded = JSON.parse(source.slice(index, end + 1));
+    } catch {
+      providerFail();
+    }
+    if (decoded === "user_id") {
+      let colon = end + 1;
+      while (isJsonWhitespace(source[colon])) colon += 1;
+      if (source[colon] === ":") {
+        let valueStart = colon + 1;
+        while (isJsonWhitespace(source[valueStart])) valueStart += 1;
+        let valueEnd = valueStart;
+        if (source[valueEnd] === "0") {
+          valueEnd += 1;
+        } else if (source[valueEnd] >= "1" && source[valueEnd] <= "9") {
+          while (
+            source[valueEnd] >= "0" &&
+            source[valueEnd] <= "9"
+          ) {
+            valueEnd += 1;
+          }
+        }
+        if (
+          valueEnd > valueStart &&
+          isJsonValueDelimiter(source[valueEnd])
+        ) {
+          pieces.push(
+            source.slice(cursor, valueStart),
+            `"${source.slice(valueStart, valueEnd)}"`
+          );
+          cursor = valueEnd;
+          index = valueEnd;
+          continue;
+        }
+      }
+    }
+    index = end + 1;
+  }
+  if (pieces.length === 0) return source;
+  pieces.push(source.slice(cursor));
+  return pieces.join("");
+}
+
+function parseJsonRecord(body) {
   let decoded;
   try {
-    decoded = JSON.parse(body.toString("utf8"));
+    decoded = JSON.parse(preserveNumericUserIds(body.toString("utf8")));
   } catch {
     providerFail();
   }
@@ -260,24 +356,113 @@ function parseExchangeResponse(body) {
   ) {
     providerFail();
   }
-  const rawToken = decoded.access_token;
+  return decoded;
+}
+
+function tokenBuffer(value) {
   if (
-    typeof rawToken !== "string" ||
-    rawToken !== rawToken.trim() ||
-    rawToken.length < 1 ||
-    Buffer.byteLength(rawToken, "utf8") >
+    typeof value !== "string" ||
+    value !== value.trim() ||
+    value.length < 1 ||
+    Buffer.byteLength(value, "utf8") >
       INSTAGRAM_EXCHANGE_MAX_TOKEN_BYTES ||
-    /[\u0000-\u0020\u007f]/.test(rawToken) ||
-    !VISIBLE_ASCII_PATTERN.test(rawToken)
+    /[\u0000-\u0020\u007f]/.test(value) ||
+    !VISIBLE_ASCII_PATTERN.test(value)
   ) {
     providerFail();
   }
-  const accessToken = Buffer.from(rawToken, "utf8");
-  decoded.access_token = null;
+  return Buffer.from(value, "utf8");
+}
+
+function copyAccessToken(value) {
+  if (
+    !Buffer.isBuffer(value) ||
+    value.length < 1 ||
+    value.length > INSTAGRAM_EXCHANGE_MAX_TOKEN_BYTES
+  ) {
+    providerFail();
+  }
+  const copied = Buffer.from(value);
+  for (const byte of copied) {
+    if (byte < 0x21 || byte > 0x7e) {
+      copied.fill(0);
+      providerFail();
+    }
+  }
+  return copied;
+}
+
+function normalizeGrantedScopes(permissions) {
+  let values;
+  if (typeof permissions === "string") {
+    if (
+      permissions.length < 1 ||
+      permissions.length > 2048 ||
+      permissions !== permissions.trim()
+    ) {
+      providerFail();
+    }
+    values = permissions.split(",");
+  } else if (Array.isArray(permissions)) {
+    if (permissions.length < 1 || permissions.length > 32) providerFail();
+    values = permissions;
+  } else {
+    providerFail();
+  }
+
+  const granted = new Set();
+  for (const permission of values) {
+    if (
+      typeof permission !== "string" ||
+      permission !== permission.trim() ||
+      !INSTAGRAM_OAUTH_SCOPES.includes(permission)
+    ) {
+      providerFail();
+    }
+    granted.add(permission);
+  }
+  if (granted.size < 1) providerFail();
+  return Object.freeze(
+    INSTAGRAM_OAUTH_SCOPES.filter((scope) => granted.has(scope))
+  );
+}
+
+function parseExchangeResponse(body) {
+  const decoded = parseJsonRecord(body);
+  if (!Object.hasOwn(decoded, "data")) {
+    const rawToken = decoded.access_token;
+    decoded.access_token = null;
+    const accessToken = tokenBuffer(rawToken);
+    try {
+      return Object.freeze({
+        legacy: true,
+        accessToken,
+        userId: normalizeExternalUserId(decoded.user_id)
+      });
+    } catch (error) {
+      accessToken.fill(0);
+      throw error;
+    }
+  }
+
+  const envelope = strictRecord(decoded, ["data"]);
+  if (!Array.isArray(envelope.data) || envelope.data.length !== 1) {
+    providerFail();
+  }
+  const entry = strictRecord(envelope.data[0], [
+    "access_token",
+    "user_id",
+    "permissions"
+  ]);
+  const rawToken = entry.access_token;
+  entry.access_token = null;
+  const accessToken = tokenBuffer(rawToken);
   try {
     return Object.freeze({
+      legacy: false,
       accessToken,
-      userId: normalizeExternalUserId(decoded.user_id)
+      userId: normalizeExternalUserId(entry.user_id),
+      grantedScopes: normalizeGrantedScopes(entry.permissions)
     });
   } catch (error) {
     accessToken.fill(0);
@@ -285,17 +470,102 @@ function parseExchangeResponse(body) {
   }
 }
 
+function parseLongLivedTokenResponse(body) {
+  const decoded = strictRecord(parseJsonRecord(body), [
+    "access_token",
+    "token_type",
+    "expires_in"
+  ]);
+  const rawToken = decoded.access_token;
+  decoded.access_token = null;
+  const accessToken = tokenBuffer(rawToken);
+  try {
+    if (
+      decoded.token_type !== "bearer" ||
+      !Number.isSafeInteger(decoded.expires_in) ||
+      decoded.expires_in < 1 ||
+      decoded.expires_in > INSTAGRAM_LONG_LIVED_MAX_EXPIRES_SECONDS
+    ) {
+      providerFail();
+    }
+    return Object.freeze({
+      accessToken,
+      expiresIn: decoded.expires_in
+    });
+  } catch (error) {
+    accessToken.fill(0);
+    throw error;
+  }
+}
+
+function normalizeInstagramUsername(value) {
+  if (
+    typeof value !== "string" ||
+    value !== value.trim() ||
+    value.length < 1 ||
+    value.length > 30
+  ) {
+    providerFail();
+  }
+  const normalized = value.toLowerCase();
+  if (
+    !INSTAGRAM_USERNAME_PATTERN.test(normalized) ||
+    normalized.includes("..")
+  ) {
+    providerFail();
+  }
+  return normalized;
+}
+
+function normalizeDisplayName(value) {
+  if (value === undefined || value === null || value === "") return null;
+  if (
+    typeof value !== "string" ||
+    value !== value.trim() ||
+    value.length < 1 ||
+    value.length > 300 ||
+    /[\u0000-\u001f\u007f]/.test(value)
+  ) {
+    providerFail();
+  }
+  return value;
+}
+
+function normalizeProfessionalAccountType(value) {
+  if (value === "Business") return "business";
+  if (value === "Media_Creator") return "creator";
+  providerFail();
+}
+
+function parseProfessionalAccountResponse(body, expectedUserId) {
+  const decoded = parseJsonRecord(body);
+  const userId = normalizeExternalUserId(decoded.user_id);
+  if (userId !== expectedUserId) providerFail();
+  return Object.freeze({
+    userId,
+    username: normalizeInstagramUsername(decoded.username),
+    name: normalizeDisplayName(decoded.name),
+    accountType: normalizeProfessionalAccountType(decoded.account_type)
+  });
+}
+
+function clearResultToken(result) {
+  if (Buffer.isBuffer(result?.accessToken)) result.accessToken.fill(0);
+}
+
 function createInstagramProvider(options = {}) {
   const config = requireConfig(options.config);
   const transport = requireTransport(options.transport);
   const setTimer = options.setTimeout || setTimeout;
   const clearTimer = options.clearTimeout || clearTimeout;
+  const clock = options.clock || Date.now;
   const timeoutMs = options.timeoutMs === undefined
     ? INSTAGRAM_EXCHANGE_TIMEOUT_MS
     : options.timeoutMs;
   if (
     typeof setTimer !== "function" ||
     typeof clearTimer !== "function" ||
+    typeof clock !== "function" ||
     !Number.isSafeInteger(timeoutMs) ||
     timeoutMs < 1 ||
     timeoutMs > 30000
@@ -317,15 +587,8 @@ function createInstagramProvider(options = {}) {
     return url.toString();
   }
 
-  async function requestOnce(code) {
+  async function requestOnce(startRequest, parseResponse) {
     const controller = new AbortController();
-    const form = new URLSearchParams();
-    form.set("client_id", config.appId);
-    form.set("client_secret", config.appSecret);
-    form.set("grant_type", "authorization_code");
-    form.set("redirect_uri", INSTAGRAM_OAUTH_REDIRECT_URI);
-    form.set("code", code);
-
     const timedOut = Object.freeze({ timedOut: true });
     const completed = Object.freeze({ timedOut: false });
     let settleDeadline;
@@ -359,18 +622,7 @@ function createInstagramProvider(options = {}) {
         controller.abort();
       }, timeoutMs);
       timerStarted = true;
-      response = await withinBudget(() => transport(
-          INSTAGRAM_TOKEN_ENDPOINT,
-          Object.freeze({
-            method: "POST",
-            headers: Object.freeze({
-              accept: "application/json",
-              "content-type": "application/x-www-form-urlencoded"
-            }),
-            body: form.toString(),
-            signal: controller.signal
-          })
-        ));
+      response = await withinBudget(() => startRequest(controller.signal));
       if (
         !response ||
         !Number.isInteger(response.status) ||
@@ -384,9 +636,9 @@ function createInstagramProvider(options = {}) {
         withinBudget
       }));
       if (expired || controller.signal.aborted) throw timedOut;
-      const result = parseExchangeResponse(body);
+      const result = parseResponse(body);
       if (expired || controller.signal.aborted) {
-        result.accessToken.fill(0);
+        clearResultToken(result);
         throw timedOut;
       }
       return result;
@@ -402,6 +654,30 @@ function createInstagramProvider(options = {}) {
     }
   }
 
+  async function requestAuthorizationCode(code) {
+    const form = new URLSearchParams();
+    form.set("client_id", config.appId);
+    form.set("client_secret", config.appSecret);
+    form.set("grant_type", "authorization_code");
+    form.set("redirect_uri", INSTAGRAM_OAUTH_REDIRECT_URI);
+    form.set("code", code);
+    return requestOnce(
+      (signal) => transport(
+        INSTAGRAM_TOKEN_ENDPOINT,
+        Object.freeze({
+          method: "POST",
+          headers: Object.freeze({
+            accept: "application/json",
+            "content-type": "application/x-www-form-urlencoded"
+          }),
+          body: form.toString(),
+          signal
+        })
+      ),
+      parseExchangeResponse
+    );
+  }
+
   async function exchangeCode(input = {}) {
     const source = strictRecord(input, ["code"]);
     const code = boundedSecret(
@@ -411,16 +687,116 @@ function createInstagramProvider(options = {}) {
     );
     if (!VISIBLE_ASCII_PATTERN.test(code)) providerFail();
     try {
-      return await requestOnce(code);
+      const exchanged = await requestAuthorizationCode(code);
+      if (exchanged.legacy) {
+        return Object.freeze({
+          accessToken: exchanged.accessToken,
+          userId: exchanged.userId
+        });
+      }
+      return Object.freeze({
+        accessToken: exchanged.accessToken,
+        userId: exchanged.userId,
+        grantedScopes: exchanged.grantedScopes
+      });
     } catch {
       providerFail();
+    }
+  }
+
+  async function exchangeLongLivedToken(input = {}) {
+    const source = strictRecord(input, ["accessToken"]);
+    const shortLivedToken = copyAccessToken(source.accessToken);
+    let exchanged;
+    try {
+      exchanged = await requestOnce(
+        (signal) => {
+          const endpoint = new URL(INSTAGRAM_LONG_LIVED_TOKEN_ENDPOINT);
+          endpoint.searchParams.set("grant_type", "ig_exchange_token");
+          endpoint.searchParams.set("client_secret", config.appSecret);
+          endpoint.searchParams.set(
+            "access_token",
+            shortLivedToken.toString("utf8")
+          );
+          return transport(
+            endpoint.toString(),
+            Object.freeze({
+              method: "GET",
+              headers: Object.freeze({ accept: "application/json" }),
+              signal
+            })
+          );
+        },
+        parseLongLivedTokenResponse
+      );
+      const observedAt = clock();
+      const expiresAtMilliseconds =
+        observedAt + exchanged.expiresIn * 1000;
+      const expiresAt = new Date(expiresAtMilliseconds);
+      if (
+        !Number.isSafeInteger(observedAt) ||
+        observedAt < 0 ||
+        !Number.isSafeInteger(expiresAtMilliseconds) ||
+        expiresAtMilliseconds <= observedAt ||
+        Number.isNaN(expiresAt.getTime())
+      ) {
+        providerFail();
+      }
+      return Object.freeze({
+        accessToken: exchanged.accessToken,
+        expiresIn: exchanged.expiresIn,
+        expiresAt
+      });
+    } catch {
+      clearResultToken(exchanged);
+      providerFail();
+    } finally {
+      shortLivedToken.fill(0);
+    }
+  }
+
+  async function discoverProfessionalAccount(input = {}) {
+    const source = strictRecord(input, ["accessToken", "userId"]);
+    const accessToken = copyAccessToken(source.accessToken);
+    try {
+      const expectedUserId = normalizeExternalUserId(source.userId);
+      return await requestOnce(
+        (signal) => {
+          const endpoint = new URL(
+            `/${config.graphApiVersion}/me`,
+            INSTAGRAM_GRAPH_API_ORIGIN
+          );
+          endpoint.searchParams.set(
+            "fields",
+            INSTAGRAM_DISCOVERY_FIELDS.join(",")
+          );
+          return transport(
+            endpoint.toString(),
+            Object.freeze({
+              method: "GET",
+              headers: Object.freeze({
+                accept: "application/json",
+                authorization: `Bearer ${accessToken.toString("utf8")}`
+              }),
+              signal
+            })
+          );
+        },
+        (body) => parseProfessionalAccountResponse(body, expectedUserId)
+      );
+    } catch {
+      providerFail();
+    } finally {
+      accessToken.fill(0);
     }
   }
 
   return Object.freeze({
     provider: INSTAGRAM_PROVIDER,
     buildAuthorizationUrl,
-    exchangeCode
+    exchangeCode,
+    exchangeLongLivedToken,
+    discoverProfessionalAccount
   });
 }
 
@@ -430,8 +806,12 @@ module.exports = {
   INSTAGRAM_EXCHANGE_MAX_RESPONSE_BYTES,
   INSTAGRAM_EXCHANGE_MAX_TOKEN_BYTES,
   INSTAGRAM_EXCHANGE_TIMEOUT_MS,
+  INSTAGRAM_GRAPH_API_ORIGIN,
+  INSTAGRAM_LONG_LIVED_MAX_EXPIRES_SECONDS,
+  INSTAGRAM_LONG_LIVED_TOKEN_ENDPOINT,
   INSTAGRAM_OAUTH_REDIRECT_URI,
   INSTAGRAM_OAUTH_SCOPES,
+  INSTAGRAM_PROFESSIONAL_ACCOUNT_API_VERSION,
   INSTAGRAM_PROVIDER,
   INSTAGRAM_TOKEN_ENDPOINT,
   createInstagramProvider

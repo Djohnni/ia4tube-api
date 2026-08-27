@@ -38,6 +38,14 @@ const BLOCKING_CONNECTION_STATES = Object.freeze([
 ]);
 const PROFESSIONAL_ACCOUNT_TYPES = new Set(["business", "creator"]);
 const ERROR_CODES = new Set(Object.keys(ERROR_DEFINITIONS));
+const LOCAL_CONNECTION_HEALTH = new Set([
+  "authorization_pending",
+  "disconnected",
+  "disconnecting",
+  "failed",
+  "healthy",
+  "reconnect_required"
+]);
 const SHA256_PATTERN = /^[0-9a-f]{64}$/;
 const SAFE_CODE_PATTERN = /^[a-z][a-z0-9_]{0,99}$/;
 const KEY_VERSION_PATTERN = /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,49}$/;
@@ -153,6 +161,37 @@ function dateOrNull(value) {
   return new Date(value.getTime());
 }
 
+function databaseDate(value, optional = true) {
+  if (value === undefined || value === null) {
+    if (optional) return null;
+    connectorFail("resource_unavailable");
+  }
+  const parsed = value instanceof Date
+    ? new Date(value.getTime())
+    : new Date(value);
+  if (Number.isNaN(parsed.getTime())) connectorFail("resource_unavailable");
+  return parsed;
+}
+
+function scopeNames(value, optional = false) {
+  if (optional && value === undefined) return null;
+  if (!Array.isArray(value) || value.length > 100) {
+    connectorFail("connector_contract_invalid");
+  }
+  const scopes = value.map((item) => safeText(item, { max: 200 }));
+  return Object.freeze([...new Set(scopes)].sort());
+}
+
+function activationOptions(value) {
+  if (value === undefined) {
+    return Object.freeze({ grantedScopes: null });
+  }
+  const source = strictObject(value, ["grantedScopes"]);
+  return Object.freeze({
+    grantedScopes: scopeNames(source.grantedScopes, true)
+  });
+}
+
 function encryptedCredentialEnvelope(value) {
   const source = strictObject(value, [
     "id",
@@ -258,6 +297,64 @@ function connectionFromRow(row) {
   }
   if (result.account) result.account = accountRecord(result.account);
   return Object.freeze(result);
+}
+
+function localConnectionHealth(row, state, expiresAt) {
+  let health = state;
+  if (state === "connected") {
+    const observedAt = databaseDate(row.observed_at, false);
+    const tokenUsable = Boolean(
+      row.active_credential_id &&
+      (!expiresAt || expiresAt.getTime() > observedAt.getTime())
+    );
+    health = row.external_account_status === "active" && tokenUsable
+      ? "healthy"
+      : "reconnect_required";
+  }
+  if (!LOCAL_CONNECTION_HEALTH.has(health)) {
+    connectorFail("resource_unavailable");
+  }
+  return health;
+}
+
+function connectionDetailsFromRow(row) {
+  if (!row) return null;
+  const state = PERSISTED_CONNECTION_STATE[row.status];
+  if (!state || !CONNECTION_STATES.includes(state)) {
+    connectorFail("resource_unavailable");
+  }
+  const account = row.external_account_id &&
+    row.external_account_status === "active"
+    ? accountRecord({
+      externalId: row.external_id,
+      username: row.username,
+      displayName: row.display_name,
+      accountType: row.account_type
+    })
+    : null;
+  const connectionExpiry = databaseDate(row.expires_at);
+  const credentialExpiry = databaseDate(row.credential_expires_at);
+  const expiresAt = connectionExpiry && credentialExpiry
+    ? new Date(Math.min(
+      connectionExpiry.getTime(),
+      credentialExpiry.getTime()
+    ))
+    : credentialExpiry || connectionExpiry;
+  return Object.freeze({
+    companyId: row.company_id,
+    id: row.id,
+    provider: row.provider,
+    state,
+    account,
+    revision: rowRevision(row.revision),
+    createdAt: databaseDate(row.created_at, false),
+    connectedAt: databaseDate(row.connected_at),
+    updatedAt: databaseDate(row.updated_at, false),
+    disconnectedAt: databaseDate(row.disconnected_at),
+    expiresAt,
+    health: localConnectionHealth(row, state, expiresAt),
+    grantedScopes: scopeNames(row.granted_scopes || [])
+  });
 }
 
 function publicationFromRow(row) {
@@ -521,6 +618,47 @@ const CONNECTION_SELECT = [
   ") account ON TRUE"
 ].join("\n");
 
+const CONNECTION_DETAILS_SELECT = [
+  "SELECT connection.company_id, connection.id, connection.provider,",
+  "  connection.status, connection.revision, connection.created_at,",
+  "  connection.connected_at, connection.updated_at,",
+  "  connection.disconnected_at, connection.expires_at,",
+  "  account.id AS external_account_id, account.external_id,",
+  "  account.username, account.display_name, account.account_type,",
+  "  account.status AS external_account_status,",
+  "  credential.id AS active_credential_id,",
+  "  credential.expires_at AS credential_expires_at,",
+  "  ARRAY(",
+  "    SELECT granted.scope",
+  "    FROM ia4tube_social.social_connection_scopes granted",
+  "    WHERE granted.company_id=connection.company_id",
+  "      AND granted.connection_id=connection.id",
+  "      AND (granted.expires_at IS NULL OR",
+  "        granted.expires_at > CURRENT_TIMESTAMP)",
+  "    ORDER BY granted.scope",
+  "  ) AS granted_scopes,",
+  "  CURRENT_TIMESTAMP AS observed_at",
+  "FROM ia4tube_social.social_connections connection",
+  "LEFT JOIN LATERAL (",
+  "  SELECT id,external_id,username,display_name,account_type,status",
+  "  FROM ia4tube_social.social_external_accounts",
+  "  WHERE company_id=connection.company_id",
+  "    AND connection_id=connection.id AND provider=connection.provider",
+  "  ORDER BY (status='active') DESC,updated_at DESC,id",
+  "  LIMIT 1",
+  ") account ON TRUE",
+  "LEFT JOIN LATERAL (",
+  "  SELECT id,expires_at",
+  "  FROM ia4tube_social.social_encrypted_credentials",
+  "  WHERE company_id=connection.company_id",
+  "    AND connection_id=connection.id AND provider=connection.provider",
+  "    AND credential_type IN ('instagram_user_access_token','access_token')",
+  "    AND revoked_at IS NULL",
+  "  ORDER BY (expires_at IS NULL) DESC,expires_at DESC,updated_at DESC,id",
+  "  LIMIT 1",
+  ") credential ON TRUE"
+].join("\n");
+
 const PUBLICATION_SELECT = [
   "SELECT company_id, id, connection_id, provider, state,",
   "  confirmed_provider_reference, reconciliation_reference,",
@@ -535,6 +673,28 @@ async function loadConnection(client, context, id, lock = false) {
     [context.companyId, uuid(id), context.provider]
   );
   return connectionFromRow(result.rows?.[0]);
+}
+
+async function loadConnectionDetails(client, context, id, lock = false) {
+  const result = await client.query(
+    `${CONNECTION_DETAILS_SELECT}\n` +
+      "WHERE connection.company_id=$1 AND connection.id=$2" +
+      " AND connection.provider=$3" +
+      `${lock ? "\nFOR UPDATE OF connection" : ""}`,
+    [context.companyId, uuid(id), context.provider]
+  );
+  return connectionDetailsFromRow(result.rows?.[0]);
+}
+
+async function loadCurrentConnectionDetails(client, context) {
+  const result = await client.query(
+    `${CONNECTION_DETAILS_SELECT}\n` +
+      "WHERE connection.company_id=$1 AND connection.provider=$2\n" +
+      "ORDER BY (connection.status=ANY($3::text[])) DESC," +
+      " connection.updated_at DESC,connection.id\nLIMIT 1",
+    [context.companyId, context.provider, BLOCKING_CONNECTION_STATES]
+  );
+  return connectionDetailsFromRow(result.rows?.[0]);
 }
 
 async function loadPublication(client, context, id, lock = false) {
@@ -614,6 +774,39 @@ async function upsertProfessionalAccount(client, context, connectionId, account)
   if (!result.rows?.[0]) connectorFail("active_connection_exists");
 }
 
+async function replaceGrantedScopes(
+  client,
+  context,
+  connectionId,
+  grantedScopes,
+  expiresAt
+) {
+  if (grantedScopes === null) return;
+  await client.query(
+    [
+      "UPDATE ia4tube_social.social_connection_scopes",
+      "SET expires_at=GREATEST(",
+      "  CURRENT_TIMESTAMP,granted_at + INTERVAL '1 microsecond'",
+      ")",
+      "WHERE company_id=$1 AND connection_id=$2",
+      "  AND (expires_at IS NULL OR expires_at > CURRENT_TIMESTAMP)"
+    ].join("\n"),
+    [context.companyId, connectionId]
+  );
+  if (grantedScopes.length < 1) return;
+  await client.query(
+    [
+      "INSERT INTO ia4tube_social.social_connection_scopes (",
+      "  company_id,connection_id,scope,expires_at",
+      ") SELECT $1,$2,scope,$4",
+      "FROM unnest($3::text[]) AS granted(scope)",
+      "ON CONFLICT (company_id,connection_id,scope) DO UPDATE SET",
+      "  expires_at=EXCLUDED.expires_at"
+    ].join("\n"),
+    [context.companyId, connectionId, grantedScopes, expiresAt]
+  );
+}
+
 async function revokeConnectionMaterial(client, context, connectionId) {
   const accounts = await client.query(
     [
@@ -634,14 +827,21 @@ async function revokeConnectionMaterial(client, context, connectionId) {
     ].join("\n"),
     [context.companyId, connectionId, context.provider]
   );
-  await client.query(
-    "DELETE FROM ia4tube_social.social_connection_scopes " +
-      "WHERE company_id = $1 AND connection_id = $2",
+  const scopes = await client.query(
+    [
+      "UPDATE ia4tube_social.social_connection_scopes",
+      "SET expires_at=GREATEST(",
+      "  CURRENT_TIMESTAMP,granted_at + INTERVAL '1 microsecond'",
+      ")",
+      "WHERE company_id=$1 AND connection_id=$2",
+      "  AND (expires_at IS NULL OR expires_at > CURRENT_TIMESTAMP)"
+    ].join("\n"),
     [context.companyId, connectionId]
   );
   return Object.freeze({
     accountsRevoked: Number(accounts.rowCount || 0),
-    credentialsRevoked: Number(credentials.rowCount || 0)
+    credentialsRevoked: Number(credentials.rowCount || 0),
+    scopesRevoked: Number(scopes.rowCount || 0)
   });
 }
 
@@ -669,6 +869,102 @@ function createPostgresConnectorStore(options = {}) {
       }
 
       const methods = {
+        async getCurrentConnectionDetails() {
+          return execute((client) => loadCurrentConnectionDetails(
+            client,
+            context
+          ));
+        },
+
+        async getConnectionDetails(id) {
+          return execute((client) => loadConnectionDetails(
+            client,
+            context,
+            id
+          ));
+        },
+
+        async disconnectConnectionLocally(id) {
+          const connectionId = uuid(id);
+          return execute(async (client) => {
+            await client.query(
+              "SELECT pg_advisory_xact_lock(hashtextextended($1::text, 0))",
+              [`${context.companyId}:${context.provider}`]
+            );
+            let current = await loadConnectionDetails(
+              client,
+              context,
+              connectionId,
+              true
+            );
+            if (!current) connectorFail("resource_unavailable");
+            const route = ["connected", "reconnect_required", "failed"]
+              .includes(current.state)
+              ? ["disconnecting", "disconnected"]
+              : current.state === "disconnected"
+                ? []
+                : ["disconnected"];
+            for (const nextState of route) {
+              transitionConnectionState(current.state, nextState);
+              const updated = await client.query(
+                [
+                  "UPDATE ia4tube_social.social_connections",
+                  "SET status=$4,expires_at=CASE WHEN $4='disconnected'",
+                  "    THEN NULL ELSE expires_at END,",
+                  "  revoked_at=NULL,",
+                  "  disconnected_at=CASE WHEN $4='disconnected'",
+                  "    THEN COALESCE(disconnected_at,CURRENT_TIMESTAMP)",
+                  "    ELSE NULL END,",
+                  "  updated_at=CURRENT_TIMESTAMP,revision=$5",
+                  "WHERE company_id=$1 AND id=$2 AND provider=$3",
+                  "  AND revision=$6 RETURNING id"
+                ].join("\n"),
+                [
+                  context.companyId,
+                  connectionId,
+                  context.provider,
+                  nextState,
+                  current.revision + 1,
+                  current.revision
+                ]
+              );
+              if (!updated.rows?.[0]) connectorFail("state_transition_invalid");
+              await appendInternalAudit(client, context, {
+                action: "social.connection.state_transition",
+                connectionId,
+                detailsCode: `to_${nextState}`
+              });
+              current = Object.freeze({
+                ...current,
+                state: nextState,
+                revision: current.revision + 1
+              });
+            }
+            const revoked = await revokeConnectionMaterial(
+              client,
+              context,
+              connectionId
+            );
+            if (route.length > 0 || revoked.accountsRevoked > 0) {
+              await appendInternalAudit(client, context, {
+                action: "social.connection.disconnected",
+                connectionId,
+                detailsCode: revoked.accountsRevoked > 0
+                  ? "account_revoked"
+                  : "no_active_account"
+              });
+            }
+            if (revoked.credentialsRevoked > 0) {
+              await appendInternalAudit(client, context, {
+                action: "social.credential.removed",
+                connectionId,
+                detailsCode: "credential_revoked"
+              });
+            }
+            return loadConnectionDetails(client, context, connectionId);
+          });
+        },
+
         async getConnection(id) {
           return execute((client) => loadConnection(client, context, id));
         },
@@ -827,10 +1123,12 @@ function createPostgresConnectorStore(options = {}) {
         async activateConnectionWithCredential(
           record,
           expectedRevision,
-          credentialEnvelope
+          credentialEnvelope,
+          optionsValue
         ) {
           const clean = connectionInput(context, record, expectedRevision);
           const credential = encryptedCredentialEnvelope(credentialEnvelope);
+          const activation = activationOptions(optionsValue);
           if (clean.state !== "connected" || !clean.account) {
             connectorFail("state_transition_invalid");
           }
@@ -849,7 +1147,7 @@ function createPostgresConnectorStore(options = {}) {
                 "UPDATE ia4tube_social.social_connections",
                 "SET status='connected',",
                 " connected_at=COALESCE(connected_at,CURRENT_TIMESTAMP),",
-                " expires_at=NULL,revoked_at=NULL,disconnected_at=NULL,",
+                " expires_at=$6,revoked_at=NULL,disconnected_at=NULL,",
                 " updated_at=CURRENT_TIMESTAMP,revision=$4",
                 "WHERE company_id=$1 AND id=$2 AND provider=$3",
                 " AND revision=$5 RETURNING id"
@@ -859,7 +1157,8 @@ function createPostgresConnectorStore(options = {}) {
                 clean.id,
                 context.provider,
                 clean.revision,
-                expectedRevision
+                expectedRevision,
+                credential.expiresAt
               ]
             );
             if (!updated.rows?.[0]) connectorFail("state_transition_invalid");
@@ -917,6 +1216,13 @@ function createPostgresConnectorStore(options = {}) {
             );
             const credentialRow = storedCredential.rows?.[0];
             if (!credentialRow) connectorFail("idempotency_conflict");
+            await replaceGrantedScopes(
+              client,
+              context,
+              clean.id,
+              activation.grantedScopes,
+              credential.expiresAt
+            );
             await appendInternalAudit(client, context, {
               action: "social.connection.state_transition",
               connectionId: clean.id,
@@ -938,7 +1244,8 @@ function createPostgresConnectorStore(options = {}) {
                 expiresAt: credentialRow.expires_at
                   ? new Date(credentialRow.expires_at)
                   : null
-              })
+              }),
+              grantedScopes: activation.grantedScopes || Object.freeze([])
             });
           });
         },

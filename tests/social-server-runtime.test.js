@@ -109,7 +109,12 @@ test("enabled runtime must return a closeable initialized instance", async () =>
 test("server runtime exposes only the closed Instagram OAuth facade", async () => {
   const facade = Object.freeze({
     async authorize() {},
-    async callback() {}
+    async callback() {},
+    async disconnect() {},
+    async getAuthorizationStatus() {},
+    async getConnection() {},
+    async getConnectionHealth() {},
+    async getCurrentConnection() {}
   });
   const transport = async () => {};
   const clock = () => 123;
