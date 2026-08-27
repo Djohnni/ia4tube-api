@@ -198,26 +198,36 @@ function makeHarness(options = {}) {
       events.push("exchange_code");
       exchangeCalls += 1;
       if (options.exchangeFailure) {
-        throw errorWithCode("social_oauth_exchange_failed");
+        const failure = errorWithCode("social_oauth_exchange_failed");
+        if (options.exchangeFailureSecret) {
+          failure.message = options.exchangeFailureSecret;
+          failure.body = options.exchangeFailureSecret;
+        }
+        throw failure;
       }
       assert.equal(code, "synthetic-code");
       const accessToken = Buffer.from(SHORT_TOKEN_TEXT);
       tokenReferences.push(accessToken);
       return Object.freeze({
         accessToken,
-        userId: "synthetic-user",
+        userId: options.invalidExchangeUserId ? "" : "synthetic-user",
         grantedScopes: options.grantedScopes ?? REQUIRED_SCOPES
       });
     },
     async exchangeLongLivedToken({ accessToken }) {
       events.push("exchange_long_lived_token");
       assert.equal(accessToken.toString("utf8"), SHORT_TOKEN_TEXT);
+      if (options.longLivedFailure) {
+        throw errorWithCode("social_oauth_exchange_failed");
+      }
       const token = Buffer.from(TOKEN_TEXT);
       tokenReferences.push(token);
       return Object.freeze({
         accessToken: token,
         expiresIn: 5_184_000,
-        expiresAt: new Date(milliseconds + 5_184_000_000)
+        expiresAt: options.invalidLongLivedExpiry
+          ? new Date(milliseconds - 1)
+          : new Date(milliseconds + 5_184_000_000)
       });
     },
     async discoverProfessionalAccount({ accessToken, userId }) {
@@ -278,7 +288,14 @@ function makeHarness(options = {}) {
     async runExclusive(operation) {
       events.push("exclusive_begin");
       try {
+        if (options.exclusiveBeginFailure) {
+          throw errorWithCode("database_unavailable");
+        }
         const result = await operation(connectorScoped);
+        if (options.exclusiveCommitFailure) {
+          events.push("exclusive_commit_failure");
+          throw errorWithCode("database_unavailable");
+        }
         events.push("exclusive_commit");
         return result;
       } catch (error) {
@@ -595,7 +612,11 @@ test("connection terminalization failure is never swallowed", async () => {
 });
 
 test("exchange failure leaves state consumed and never retries the provider", async () => {
-  const harness = makeHarness({ exchangeFailure: true });
+  const secretMarker = "secret-provider-body-must-not-survive";
+  const harness = makeHarness({
+    exchangeFailure: true,
+    exchangeFailureSecret: secretMarker
+  });
   const { state } = await authorize(harness);
   await assert.rejects(
     harness.service.callback({ state, code: "synthetic-code", error: null }),
@@ -609,6 +630,70 @@ test("exchange failure leaves state consumed and never retries the provider", as
   assert.equal(harness.credentialCalls, 0);
   assert.ok(harness.events.includes("fail_connection_consumed"));
   assert.equal(harness.failureInputs[0].expectedRevision, 1);
+  assert.equal(
+    harness.failureInputs[0].failureCode,
+    "provider_code_exchange_failed"
+  );
+  assert.equal(JSON.stringify(harness.failureInputs).includes(secretMarker), false);
+});
+
+test("long-lived token failure is classified before discovery or storage", async () => {
+  const harness = makeHarness({ longLivedFailure: true });
+  const { state } = await authorize(harness);
+  await assert.rejects(
+    harness.service.callback({ state, code: "synthetic-code", error: null }),
+    { code: "social_oauth_exchange_failed" }
+  );
+  assert.equal(harness.credentialCalls, 0);
+  assert.equal(harness.storageInputs.length, 0);
+  assert.equal(
+    harness.failureInputs[0].failureCode,
+    "provider_token_extension_failed"
+  );
+});
+
+test("malformed token-bearing provider results zero every returned buffer", async () => {
+  const invalidExchange = makeHarness({ invalidExchangeUserId: true });
+  const invalidExchangeState = (await authorize(invalidExchange)).state;
+  await assert.rejects(
+    invalidExchange.service.callback({
+      state: invalidExchangeState,
+      code: "synthetic-code",
+      error: null
+    }),
+    { code: "social_oauth_exchange_failed" }
+  );
+  assert.equal(
+    invalidExchange.tokenReferences.every(
+      (token) => token.every((byte) => byte === 0)
+    ),
+    true
+  );
+  assert.equal(
+    invalidExchange.failureInputs[0].failureCode,
+    "provider_code_exchange_failed"
+  );
+
+  const invalidExtended = makeHarness({ invalidLongLivedExpiry: true });
+  const invalidExtendedState = (await authorize(invalidExtended)).state;
+  await assert.rejects(
+    invalidExtended.service.callback({
+      state: invalidExtendedState,
+      code: "synthetic-code",
+      error: null
+    }),
+    { code: "social_oauth_exchange_failed" }
+  );
+  assert.equal(
+    invalidExtended.tokenReferences.every(
+      (token) => token.every((byte) => byte === 0)
+    ),
+    true
+  );
+  assert.equal(
+    invalidExtended.failureInputs[0].failureCode,
+    "provider_token_extension_failed"
+  );
 });
 
 test("professional account and controlled username gates fail closed before vault storage", async () => {
@@ -624,6 +709,10 @@ test("professional account and controlled username gates fail closed before vaul
   );
   assert.equal(personal.credentialCalls, 0);
   assert.ok(personal.events.includes("fail_connection_consumed"));
+  assert.equal(
+    personal.failureInputs[0].failureCode,
+    "provider_account_ineligible"
+  );
 
   const controlled = makeHarness({
     expectedUsername: "ia4tube_empresas",
@@ -639,6 +728,10 @@ test("professional account and controlled username gates fail closed before vaul
     { code: "controlled_account_mismatch" }
   );
   assert.equal(controlled.credentialCalls, 0);
+  assert.equal(
+    controlled.failureInputs[0].failureCode,
+    "controlled_username_mismatch"
+  );
 });
 
 test("insufficient scopes and discovery failure leave no credential or account", async () => {
@@ -656,6 +749,10 @@ test("insufficient scopes and discovery failure leave no credential or account",
   );
   assert.equal(scopes.credentialCalls, 0);
   assert.equal(scopes.storageInputs.length, 0);
+  assert.equal(
+    scopes.failureInputs[0].failureCode,
+    "provider_permissions_missing"
+  );
 
   const discovery = makeHarness({ discoveryFailure: true });
   const discoveryState = (await authorize(discovery)).state;
@@ -669,6 +766,31 @@ test("insufficient scopes and discovery failure leave no credential or account",
   );
   assert.equal(discovery.credentialCalls, 0);
   assert.equal(discovery.storageInputs.length, 0);
+  assert.equal(
+    discovery.failureInputs[0].failureCode,
+    "provider_account_discovery_failed"
+  );
+});
+
+test("vault failure is classified and leaves no committed credential", async () => {
+  const harness = makeHarness({ vaultFailure: true });
+  const { state } = await authorize(harness);
+  await assert.rejects(
+    harness.service.callback({ state, code: "synthetic-code", error: null }),
+    { code: "social_oauth_exchange_failed" }
+  );
+  assert.equal(harness.credentialCalls, 1);
+  assert.equal(harness.storageInputs.length, 0);
+  assert.equal(harness.events.includes("exclusive_commit"), false);
+  assert.ok(harness.events.includes("exclusive_rollback"));
+  assert.equal(
+    harness.failureInputs[0].failureCode,
+    "token_vault_store_failed"
+  );
+  assert.equal(
+    harness.tokenReferences.every((token) => token.every((byte) => byte === 0)),
+    true
+  );
 });
 
 test("activation failure cannot expose or retain an orphan token", async () => {
@@ -687,6 +809,10 @@ test("activation failure cannot expose or retain an orphan token", async () => {
   );
   assert.ok(harness.events.includes("exclusive_rollback"));
   assert.equal(harness.events.includes("exclusive_commit"), false);
+  assert.equal(
+    harness.failureInputs[0].failureCode,
+    "connection_persistence_failed"
+  );
 });
 
 test("activation result is validated before the exclusive transaction commits", async () => {
@@ -701,6 +827,45 @@ test("activation result is validated before the exclusive transaction commits", 
   assert.ok(rollback > harness.events.indexOf("activate_connection"));
   assert.ok(terminal > rollback);
   assert.equal(harness.events.includes("exclusive_commit"), false);
+  assert.equal(
+    harness.failureInputs[0].failureCode,
+    "connection_finalization_failed"
+  );
+});
+
+test("exclusive transaction boundaries retain persistence and finalization stages", async () => {
+  const begin = makeHarness({ exclusiveBeginFailure: true });
+  const beginState = (await authorize(begin)).state;
+  await assert.rejects(
+    begin.service.callback({ state: beginState, code: "synthetic-code", error: null }),
+    { code: "social_oauth_exchange_failed" }
+  );
+  assert.equal(
+    begin.failureInputs[0].failureCode,
+    "connection_persistence_failed"
+  );
+  assert.equal(begin.events.includes("exclusive_commit"), false);
+
+  const commit = makeHarness({ exclusiveCommitFailure: true });
+  const commitState = (await authorize(commit)).state;
+  await assert.rejects(
+    commit.service.callback({
+      state: commitState,
+      code: "synthetic-code",
+      error: null
+    }),
+    { code: "social_oauth_exchange_failed" }
+  );
+  assert.equal(
+    commit.failureInputs[0].failureCode,
+    "connection_finalization_failed"
+  );
+  assert.ok(commit.events.includes("exclusive_rollback"));
+  assert.equal(commit.events.includes("exclusive_commit"), false);
+  assert.equal(
+    commit.tokenReferences.every((token) => token.every((byte) => byte === 0)),
+    true
+  );
 });
 
 test("service refuses incoherent connection state and health", async () => {

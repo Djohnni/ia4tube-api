@@ -11,6 +11,9 @@ const {
   ERROR_DEFINITIONS,
   connectorFail
 } = require("../../social/connectors/errors");
+const {
+  OAUTH_FAILURE_DETAIL_CODES
+} = require("../../social/oauth/instagram-oauth-failure");
 
 const ACTIONS = new Set([
   "social.authorization.begin",
@@ -21,6 +24,10 @@ const ACTIONS = new Set([
 ]);
 const OUTCOMES = new Set(["succeeded", "rejected", "failed"]);
 const DETAIL_CODES = new Set(Object.keys(ERROR_DEFINITIONS));
+const AUTHORIZATION_FAILURE_DETAIL_CODES = new Set([
+  ...DETAIL_CODES,
+  ...OAUTH_FAILURE_DETAIL_CODES
+]);
 const INTERNAL_ACTION_DETAILS = Object.freeze({
   "social.connection.state_transition": new Set([
     "to_authorization_pending",
@@ -60,7 +67,7 @@ const INTERNAL_ACTION_DETAILS = Object.freeze({
   ]),
   "social.authorization.consumed": new Set([null]),
   "social.authorization.cancelled": new Set([null]),
-  "social.authorization.failed": DETAIL_CODES
+  "social.authorization.failed": AUTHORIZATION_FAILURE_DETAIL_CODES
 });
 
 function strictObject(value, allowedKeys) {

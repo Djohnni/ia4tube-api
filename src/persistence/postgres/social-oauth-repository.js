@@ -13,9 +13,16 @@ const {
   ERROR_DEFINITIONS,
   connectorFail
 } = require("../../social/connectors/errors");
+const {
+  OAUTH_FAILURE_DETAIL_CODES
+} = require("../../social/oauth/instagram-oauth-failure");
 
 const PURPOSES = new Set(["connect", "reconnect"]);
 const FAILURE_CODES = new Set(Object.keys(ERROR_DEFINITIONS));
+const CONNECTION_FAILURE_CODES = new Set([
+  ...Object.keys(ERROR_DEFINITIONS),
+  ...OAUTH_FAILURE_DETAIL_CODES
+]);
 const DIGEST_HEX_PATTERN = /^[0-9a-f]{64}$/;
 const DIGEST_BYTES = 32;
 const CREDENTIAL_TYPE_PATTERN = /^[a-z][a-z0-9_]{0,49}$/;
@@ -220,7 +227,7 @@ function failedConnectionInput(input) {
     "terminalStatus"
   ]);
   if (
-    !FAILURE_CODES.has(source.failureCode) ||
+    !CONNECTION_FAILURE_CODES.has(source.failureCode) ||
     !TERMINAL_STATUSES.has(source.terminalStatus) ||
     (source.terminalStatus === "cancelled" &&
       source.failureCode !== "authorization_cancelled") ||

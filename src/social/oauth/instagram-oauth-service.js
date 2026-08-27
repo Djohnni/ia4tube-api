@@ -12,6 +12,10 @@ const {
   INSTAGRAM_OAUTH_REDIRECT_URI,
   INSTAGRAM_PROVIDER
 } = require("./instagram-config");
+const {
+  OAUTH_FAILURE_STAGES,
+  classifyOAuthFailure
+} = require("./instagram-oauth-failure");
 
 const INSTAGRAM_OAUTH_RETURN_PATH_ID = "social_connections";
 const INSTAGRAM_OAUTH_CREDENTIAL_TYPE = "instagram_user_access_token";
@@ -423,7 +427,8 @@ function createInstagramOAuthService(options = {}) {
     oauth,
     input,
     terminalStatus,
-    fallbackCode
+    fallbackCode,
+    consumedFailureCode = null
   ) {
     try {
       await oauth.failAuthorizationConnection({
@@ -436,7 +441,7 @@ function createInstagramOAuthService(options = {}) {
           ? "authorization_cancelled"
           : terminalStatus === "expired"
             ? "authorization_expired"
-            : "provider_result_unknown"
+            : consumedFailureCode
       });
     } catch {
       oauthFail(fallbackCode);
@@ -519,20 +524,24 @@ function createInstagramOAuthService(options = {}) {
     let shortLivedToken;
     let longLivedToken;
     let discoveredAccount;
+    let failureStage = OAUTH_FAILURE_STAGES.CODE_EXCHANGE;
     try {
       const exchanged = await options.provider.exchangeCode({
         code: source.code
       });
+      if (Buffer.isBuffer(exchanged?.accessToken)) {
+        shortLivedToken = exchanged.accessToken;
+      }
       if (
-        !Buffer.isBuffer(exchanged?.accessToken) ||
-        exchanged.accessToken.length < 1 ||
+        !Buffer.isBuffer(shortLivedToken) ||
+        shortLivedToken.length < 1 ||
         typeof exchanged.userId !== "string" ||
         exchanged.userId.length < 1 ||
         exchanged.userId.length > 500
       ) {
         oauthFail("social_oauth_exchange_failed");
       }
-      shortLivedToken = exchanged.accessToken;
+      failureStage = OAUTH_FAILURE_STAGES.TOKEN_EXTENSION_OR_VALIDATION;
       const grantedScopes = requireGrantedScopes(
         exchanged.grantedScopes,
         options.config.scopes
@@ -540,27 +549,34 @@ function createInstagramOAuthService(options = {}) {
       const extended = await options.provider.exchangeLongLivedToken({
         accessToken: shortLivedToken
       });
+      if (Buffer.isBuffer(extended?.accessToken)) {
+        longLivedToken = extended.accessToken;
+      }
       if (
-        !Buffer.isBuffer(extended?.accessToken) ||
-        extended.accessToken.length < 1 ||
+        !Buffer.isBuffer(longLivedToken) ||
+        longLivedToken.length < 1 ||
         !(extended.expiresAt instanceof Date) ||
         Number.isNaN(extended.expiresAt.getTime()) ||
         extended.expiresAt.getTime() <= callbackNow
       ) {
         oauthFail("social_oauth_exchange_failed");
       }
-      longLivedToken = extended.accessToken;
+      failureStage = OAUTH_FAILURE_STAGES.PROFESSIONAL_ACCOUNT_DISCOVERY;
+      const providerAccount = await options.provider.discoverProfessionalAccount({
+        accessToken: longLivedToken,
+        userId: exchanged.userId
+      });
+      failureStage = OAUTH_FAILURE_STAGES.CONTROLLED_ACCOUNT_VALIDATION;
       discoveredAccount = requireProfessionalAccount(
-        await options.provider.discoverProfessionalAccount({
-          accessToken: longLivedToken,
-          userId: exchanged.userId
-        }),
+        providerAccount,
         exchanged.userId,
         expectedUsername
       );
       const expectedRevision = requireRevision(consumed.connectionRevision);
+      failureStage = OAUTH_FAILURE_STAGES.CONNECTION_PERSISTENCE;
       await store.runExclusive(async (transactionalStore) => {
         requireConnectorStoreScope(transactionalStore);
+        failureStage = OAUTH_FAILURE_STAGES.VAULT_STORE;
         return options.credentials.withEncryptedConnectionCredential({
           companyId: context.companyId,
           connectionId: consumed.connectionId,
@@ -570,6 +586,7 @@ function createInstagramOAuthService(options = {}) {
           plaintext: longLivedToken,
           expiresAt: extended.expiresAt
         }, async (credentialEnvelope) => {
+          failureStage = OAUTH_FAILURE_STAGES.CONNECTION_PERSISTENCE;
           const activated = await transactionalStore
             .activateConnectionWithCredential({
               companyId: context.companyId,
@@ -581,6 +598,7 @@ function createInstagramOAuthService(options = {}) {
             }, expectedRevision, credentialEnvelope, {
               grantedScopes
             });
+          failureStage = OAUTH_FAILURE_STAGES.ATOMIC_FINALIZATION;
           const activatedConnection = activated?.connection;
           if (
             requireConnectionId(activatedConnection?.id) !==
@@ -599,7 +617,8 @@ function createInstagramOAuthService(options = {}) {
         ...payload,
         connectionId: consumed.connectionId,
         connectionRevision: requireRevision(consumed.connectionRevision)
-      }, "consumed", "social_oauth_exchange_failed");
+      }, "consumed", "social_oauth_exchange_failed",
+      classifyOAuthFailure(failureStage, error));
       if (CALLBACK_FAILURE_CODES.has(error?.code)) throw error;
       oauthFail("social_oauth_exchange_failed");
     } finally {

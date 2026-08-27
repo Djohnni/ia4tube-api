@@ -35,6 +35,9 @@ const {
   ERROR_DEFINITIONS
 } = require("../src/social/connectors/errors");
 const {
+  OAUTH_FAILURE_DETAIL_CODES
+} = require("../src/social/oauth/instagram-oauth-failure");
+const {
   SESSION_AUDIENCE,
   SESSION_ISSUER
 } = require("../src/social/reauth");
@@ -2839,6 +2842,13 @@ test("failAuthorizationConnection validates the exact terminal and only moves pe
   const cases = [
     {
       terminalStatus: "consumed",
+      failureCode: "provider_code_exchange_failed",
+      purpose: "connect",
+      status: "failed",
+      sql: /consumed_at IS NOT NULL/i
+    },
+    {
+      terminalStatus: "consumed",
       failureCode: "provider_temporary_failure",
       purpose: "connect",
       status: "failed",
@@ -3097,7 +3107,10 @@ test("the central internal-audit matrix accepts every declared writer event", ()
     ],
     "social.authorization.consumed": [null],
     "social.authorization.cancelled": [null],
-    "social.authorization.failed": Object.keys(ERROR_DEFINITIONS)
+    "social.authorization.failed": [
+      ...Object.keys(ERROR_DEFINITIONS),
+      ...OAUTH_FAILURE_DETAIL_CODES
+    ]
   });
   for (const [action, detailsCodes] of Object.entries(matrix)) {
     const outcome = action === "social.authorization.failed"
@@ -3185,9 +3198,23 @@ test("invalid store, OAuth and audit input fails before pool creation", async ()
   await assert.rejects(async () => oauth.createAuthorization(oauthInput({
     oauthCode: SYNTHETIC_SECRET_MARKER
   })));
+  await assert.rejects(async () => oauth.failAuthorization({
+    ...oauthConsumeInput(),
+    failureCode: "token_vault_store_failed"
+  }));
   await assert.rejects(async () => audit.append(CONTEXT_A, {
     companyId: CONTEXT_A.companyId,
     token: SYNTHETIC_SECRET_MARKER
+  }));
+  await assert.rejects(async () => audit.append(CONTEXT_A, {
+    companyId: CONTEXT_A.companyId,
+    actorUserId: CONTEXT_A.userId,
+    provider: CONTEXT_A.provider,
+    auditEventId: IDS.audit,
+    correlationId: IDS.correlation,
+    action: "social.authorization.begin",
+    outcome: "failed",
+    detailsCode: "provider_code_exchange_failed"
   }));
   assert.equal(pool.calls.length, 0);
 });
