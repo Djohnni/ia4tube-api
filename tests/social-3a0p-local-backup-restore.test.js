@@ -33,6 +33,9 @@ const profile0003 = SCHEMA_PROFILES.find(
 const profile0004 = SCHEMA_PROFILES.find(
   (profile) => profile.id === "social-schema-0004"
 );
+const profile0005 = SCHEMA_PROFILES.find(
+  (profile) => profile.id === "social-schema-0005"
+);
 const runMarker = "ia4tube-social-3a0p-run-00000001";
 const restoreDatabase = "ia4tube_social_disposable_restore";
 
@@ -355,6 +358,8 @@ test("pending evidence does not claim a physical approval", () => {
   assert.equal(evidence.windows.fileFsync, "required");
   assert.equal(evidence.windows.directoryFsync, "physicalPendingLinux");
   assert.equal(evidence.windows.noFollow, "physicalPendingLinux");
+  assert.ok(evidence.gates.includes("backup-profile-0005"));
+  assert.ok(evidence.gates.includes("restore-profile-0005"));
   assert.equal(Object.hasOwn(evidence, "ok"), false);
 });
 
@@ -376,6 +381,10 @@ test("the definitive migration ledger resolves profile 0004", () => {
   assert.equal(profileForRows(profile0004.migrationRows), profile0004);
 });
 
+test("the definitive migration ledger resolves current profile 0005", () => {
+  assert.equal(profileForRows(profile0005.migrationRows), profile0005);
+});
+
 test("an unknown migration ledger is refused", () => {
   assert.throws(
     () => profileForRows([]),
@@ -383,12 +392,17 @@ test("an unknown migration ledger is refused", () => {
   );
 });
 
-test("profile binding rejects both cross-profile directions with only the exact refusal code", () => {
+test("profile binding accepts each known profile and rejects every cross-profile direction", () => {
   assert.equal(assertProfileBinding(profile0003, profile0003), true);
   assert.equal(assertProfileBinding(profile0004, profile0004), true);
+  assert.equal(assertProfileBinding(profile0005, profile0005), true);
   for (const [expectedProfile, sourceProfile] of [
     [profile0003, profile0004],
-    [profile0004, profile0003]
+    [profile0003, profile0005],
+    [profile0004, profile0003],
+    [profile0004, profile0005],
+    [profile0005, profile0003],
+    [profile0005, profile0004]
   ]) {
     assert.throws(
       () => assertProfileBinding(expectedProfile, sourceProfile),
@@ -475,7 +489,7 @@ test("disposable lifecycle requires an exact loopback marked target", () => {
   );
 });
 
-for (const profile of [profile0003, profile0004]) {
+for (const profile of [profile0003, profile0004, profile0005]) {
   test(`backup ${profile.id} validates its catalog before transport and reports Windows durability honestly`, async () => {
     const events = [];
     const config = backupConfig();
@@ -868,7 +882,7 @@ test("restore binding refuses a run marker different from its owned lifecycle", 
   );
 });
 
-for (const profile of [profile0003, profile0004]) {
+for (const profile of [profile0003, profile0004, profile0005]) {
   test(`restore ${profile.id} creates, validates, and removes its disposable target`, async () => {
     const events = [];
     const result = await runProfileRestore(restoreRequest(profile, events));
@@ -885,7 +899,7 @@ for (const profile of [profile0003, profile0004]) {
   });
 }
 
-test("restore 0003 and 0004 keep verifier state, pools, authorities, buffers, and cleanup independent", async () => {
+test("restore 0003, 0004 and 0005 keep verifier state, pools, authorities, buffers, and cleanup independent", async () => {
   const specifications = [
     Object.freeze({
       profile: profile0003,
@@ -902,6 +916,15 @@ test("restore 0003 and 0004 keep verifier state, pools, authorities, buffers, an
       authority: Object.freeze({
         activationMarkerGeneration: 3,
         activeOperationalKeyGeneration: 1900000000,
+        randomCandidate: 1000000041
+      })
+    }),
+    Object.freeze({
+      profile: profile0005,
+      database: "ia4tube_social_disposable_restore_0005_independent",
+      authority: Object.freeze({
+        activationMarkerGeneration: 4,
+        activeOperationalKeyGeneration: 2000000000,
         randomCandidate: 1000000041
       })
     })
@@ -927,7 +950,7 @@ test("restore 0003 and 0004 keep verifier state, pools, authorities, buffers, an
       async verifyVault() {
         events.push("vault");
         assert.equal(registry.profileId, profile.id);
-        if (profile === profile0004) {
+        if (profile !== profile0003) {
           assert.ok(
             authority.activeOperationalKeyGeneration > authority.randomCandidate
           );
@@ -982,10 +1005,14 @@ test("restore 0003 and 0004 keep verifier state, pools, authorities, buffers, an
     runs.push({ authority, pool, registry, syntheticBuffer });
   }
 
-  assert.notEqual(runs[0].authority, runs[1].authority);
-  assert.notEqual(runs[0].pool, runs[1].pool);
-  assert.notEqual(runs[0].registry, runs[1].registry);
-  assert.notEqual(runs[0].syntheticBuffer, runs[1].syntheticBuffer);
+  for (let left = 0; left < runs.length; left += 1) {
+    for (let right = left + 1; right < runs.length; right += 1) {
+      assert.notEqual(runs[left].authority, runs[right].authority);
+      assert.notEqual(runs[left].pool, runs[right].pool);
+      assert.notEqual(runs[left].registry, runs[right].registry);
+      assert.notEqual(runs[left].syntheticBuffer, runs[right].syntheticBuffer);
+    }
+  }
 });
 
 test("restore removes its disposable target after a runner failure", async () => {

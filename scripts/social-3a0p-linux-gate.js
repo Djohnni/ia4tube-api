@@ -232,19 +232,23 @@ const BACKUP_RESTORE_OPERATIONS = new Set([
   "rollback_restore_0003",
   "gate5_backup_0003",
   "gate5_backup_0004",
+  "gate5_backup_0005",
   "gate5_restore_0003",
   "gate5_restore_0004",
+  "gate5_restore_0005",
   "unknown"
 ]);
 const BACKUP_PROVENANCE_OPERATIONS = new Set([
   "rollback_backup_0003",
   "gate5_backup_0003",
-  "gate5_backup_0004"
+  "gate5_backup_0004",
+  "gate5_backup_0005"
 ]);
 const RESTORE_PROVENANCE_OPERATIONS = new Set([
   "rollback_restore_0003",
   "gate5_restore_0003",
-  "gate5_restore_0004"
+  "gate5_restore_0004",
+  "gate5_restore_0005"
 ]);
 const BACKUP_RESTORE_BOUNDARIES = new Set([
   "external_process",
@@ -437,9 +441,9 @@ const RLS_ROLE_GATE_RESULT = Object.freeze({
   tenantSeedsCreatedByAdministrativeRole: true
 });
 const LINUX_RESTORE_DATABASE =
-  /^ia4tube_social_disposable_(?:rollback_0003|restore_0003|restore_0004|tamper|cross)_[0-9a-f]{12}$/;
+  /^ia4tube_social_disposable_(?:rollback_0003|restore_0003|restore_0004|restore_0005|tamper|cross)_[0-9a-f]{12}$/;
 const LINUX_VERIFIER_DATABASE =
-  /^ia4tube_social_disposable_(?:rollback_source|rollback_0003|source_0003|restore_0003|restore_0004|tamper|cross)_[0-9a-f]{12}$/;
+  /^ia4tube_social_disposable_(?:rollback_source|rollback_0003|source_0003|source_0004|source_0005|restore_0003|restore_0004|restore_0005|tamper|cross)_[0-9a-f]{12}$/;
 const LOGIN_VERIFIER_SESSION_OPTIONS =
   "-c statement_timeout=10000 -c lock_timeout=5000 -c idle_in_transaction_session_timeout=5000";
 const LOGIN_VERIFIER_AMBIENT_URL_NAMES = new Set([
@@ -457,9 +461,11 @@ const RESTORE_APPLICATION_SCHEMAS = Object.freeze([
 ]);
 const SCHEMA_PROFILE_0003 = "social-schema-0003";
 const SCHEMA_PROFILE_0004 = "social-schema-0004";
+const SCHEMA_PROFILE_0005 = "social-schema-0005";
 const SCHEMA_PROFILE_IDS = Object.freeze([
   SCHEMA_PROFILE_0003,
-  SCHEMA_PROFILE_0004
+  SCHEMA_PROFILE_0004,
+  SCHEMA_PROFILE_0005
 ]);
 const SCHEMA_PROFILE_DIAGNOSTIC_KEYS = Object.freeze([
   "expectedRelationCount",
@@ -480,6 +486,13 @@ class LinuxGateFailure extends Error {
 
 function fail(code) {
   throw new LinuxGateFailure(code);
+}
+
+function assertBundleDirectoryFsyncCount(count) {
+  if (count !== SCHEMA_PROFILE_IDS.length) {
+    fail("linux_gate_bundle_directory_fsync_count_invalid");
+  }
+  return true;
 }
 
 function failureCode(error) {
@@ -2760,7 +2773,7 @@ function createLinuxRestoreConfigFacade({ backupProduct, backupDirectory, fileSy
       if (fileSystem.existsSync(bundlePath)) {
         return loadRestoreConfig(environment, options);
       }
-      if (!/^profile-(?:0003|0004)-[0-9a-f]{12}\.ia4sb$/.test(path.basename(bundlePath))) {
+      if (!/^profile-(?:0003|0004|0005)-[0-9a-f]{12}\.ia4sb$/.test(path.basename(bundlePath))) {
         fail("linux_gate_restore_bundle_placeholder_refused");
       }
       let descriptor;
@@ -3900,12 +3913,23 @@ function createRestoreBehaviorFacade(legacy2ARoot, overrides = {}) {
   }
 
   let diagnostics = null;
+  const currentProfileVerifiers = new Map();
 
   function selectedVerifier(expectedProfileId) {
-    definitiveSchemaProfile(expectedProfileId);
-    return expectedProfileId === SCHEMA_PROFILE_0003
-      ? legacy.verifyRuntimeSchema
-      : runtimeValidation.verifyRuntimeSchema;
+    const profile = definitiveSchemaProfile(expectedProfileId);
+    if (expectedProfileId === SCHEMA_PROFILE_0003) {
+      return legacy.verifyRuntimeSchema;
+    }
+    if (!currentProfileVerifiers.has(expectedProfileId)) {
+      currentProfileVerifiers.set(
+        expectedProfileId,
+        (pool, role) =>
+          runtimeValidation.verifyRuntimeSchema(pool, role, {
+            expectedMigrationRows: profile.migrationRows
+          })
+      );
+    }
+    return currentProfileVerifiers.get(expectedProfileId);
   }
 
   function bindVerifier(expectedProfileId) {
@@ -4082,7 +4106,13 @@ async function migrationEvidence(state, dependencies = {}) {
   });
   const reapplied = await runner.apply({ SOCIAL_MIGRATION_TARGET_FINGERPRINT: migrations.targetFingerprint(target) });
   const revalidated = await runner.validate();
-  if (reapplied.length !== 0 || revalidated.valid !== true || revalidated.applied !== 4 || revalidated.pending !== 0) {
+  const manifest = migrations.readManifest({ root: state.repositoryRoot });
+  if (
+    reapplied.length !== 0 ||
+    revalidated.valid !== true ||
+    revalidated.applied !== manifest.length ||
+    revalidated.pending !== 0
+  ) {
     fail("linux_gate_migration_reapply_invalid");
   }
   const checksumTamperRefused = (dependencies.proveTamper || proveMigrationManifestTamper)(migrations, state);
@@ -4100,7 +4130,6 @@ async function migrationEvidence(state, dependencies = {}) {
       " (SELECT COUNT(*)::integer FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='ia4tube_social' AND c.relkind IN('r','p') AND (NOT c.relrowsecurity OR NOT c.relforcerowsecurity)) AS rls_missing"
     ].join("\n")), { role: OWNER_ROLE })
   ]).then(([ledger, catalog]) => {
-    const manifest = migrations.readManifest({ root: state.repositoryRoot });
     const expected = manifest.map((item) => ({ version: item.version, checksum: item.sha256 }));
     const actual = ledger.rows.map((item) => ({ version: item.version, checksum: item.checksum }));
     const row = catalog.rows?.[0];
@@ -4112,7 +4141,12 @@ async function migrationEvidence(state, dependencies = {}) {
     return Object.freeze({
       applied: actual.length,
       ledgerSha256: crypto.createHash("sha256").update(canonicalJson(actual)).digest("hex"),
-      migration0004Checksum: actual.at(-1).checksum,
+      migration0004Checksum: actual.find(
+        (entry) => entry.version === "0004_social_connector_persistence"
+      )?.checksum,
+      migration0005Checksum: actual.find(
+        (entry) => entry.version === "0005_fix_social_reference_checks"
+      )?.checksum,
       requiredTablesPresent: true,
       indexes: Number(row.indexes),
       constraints: Number(row.constraints),
@@ -4517,7 +4551,7 @@ async function runLinuxGate(options = {}) {
     await phase("backup_restore", async () => {
       await retirePrimaryPoolsBeforeBackup(state);
       const result = await gates.backupRestore({ state });
-      if (directoryFsyncBundles !== 2) fail("linux_gate_bundle_directory_fsync_count_invalid");
+      assertBundleDirectoryFsyncCount(directoryFsyncBundles);
       const backupTransport = publicBackupTransportEvidence(postgres);
       if (
         backupTransport.logicalIdentityTlsContractValidated !== true ||
@@ -4791,6 +4825,7 @@ module.exports = {
   MARKER,
   PRODUCT_COMMIT,
   SANITIZED_MARKER,
+  assertBundleDirectoryFsyncCount,
   canonicalJson,
   cleanupOnly,
   containsMarkerInTree,

@@ -51,6 +51,7 @@ const {
   GATE_PROCESS_STATUS_FILE,
   GATE_PROCESS_STATUS_HASH_FILE,
   LinuxGateFailure,
+  assertBundleDirectoryFsyncCount,
   canonicalJson,
   classifyGate4ConnectionCapacityDiagnostics,
   containsMarkerInTree,
@@ -109,6 +110,7 @@ const {
 const ROOT = path.resolve(__dirname, "..");
 const PROFILE_0003_ID = "social-schema-0003";
 const PROFILE_0004_ID = "social-schema-0004";
+const PROFILE_0005_ID = "social-schema-0005";
 const PROFILE_0004_ONLY_RELATIONS = Object.freeze([
   "social_idempotency_operations",
   "social_publications",
@@ -280,7 +282,7 @@ function profileCredentialCatalogHarness(
   defaultRow,
   options = {}
 ) {
-  if (![PROFILE_0003_ID, PROFILE_0004_ID].includes(profileId)) {
+  if (![PROFILE_0003_ID, PROFILE_0004_ID, PROFILE_0005_ID].includes(profileId)) {
     throw new TypeError("synthetic_profile_invalid");
   }
   const queries = [];
@@ -352,7 +354,7 @@ function profileCredentialCatalogHarness(
 }
 
 function profileVaultRegistryHarness(profileId) {
-  if (![PROFILE_0003_ID, PROFILE_0004_ID].includes(profileId)) {
+  if (![PROFILE_0003_ID, PROFILE_0004_ID, PROFILE_0005_ID].includes(profileId)) {
     throw new TypeError("synthetic_profile_invalid");
   }
   const queries = [];
@@ -407,9 +409,12 @@ function profileVaultRegistryHarness(profileId) {
   });
 }
 
-function runtimeSchemaContract(runtimeValidation, migrations) {
+function runtimeSchemaContract(runtimeValidation, migrations, migrationCount) {
+  const manifest = migrations.readManifest();
   return Object.freeze({
-    migrations: migrations.readManifest(),
+    migrations: Number.isInteger(migrationCount)
+      ? manifest.slice(0, migrationCount)
+      : manifest,
     runtimeValidation,
     tables: runtimeValidation.TENANT_TABLES,
     policies: runtimeValidation.TENANT_POLICIES,
@@ -867,7 +872,7 @@ test("profile-aware restore facade binds the primary repository before creation 
   );
 });
 
-test("fixed 0003 and current 0004 schema verifiers enforce their exact closed inventories", async (t) => {
+test("fixed 0003, historical 0004 and current 0005 schema verifiers enforce their exact closed inventories", async (t) => {
   const fixedLegacy = materializeFixedLegacy2AForTest();
   try {
     const currentRuntimeValidation = require(
@@ -881,16 +886,31 @@ test("fixed 0003 and current 0004 schema verifiers enforce their exact closed in
     ).SCHEMA_PROFILES;
     const profile0003 = profiles.find((profile) => profile.id === PROFILE_0003_ID);
     const profile0004 = profiles.find((profile) => profile.id === PROFILE_0004_ID);
+    const profile0005 = profiles.find((profile) => profile.id === PROFILE_0005_ID);
     const legacyContract = runtimeSchemaContract(
       fixedLegacy.runtimeValidation,
       fixedLegacy.migrations
     );
-    const currentContract = runtimeSchemaContract(
+    const historical0004Contract = runtimeSchemaContract(
+      currentRuntimeValidation,
+      currentMigrations,
+      4
+    );
+    const current0005Contract = runtimeSchemaContract(
       currentRuntimeValidation,
       currentMigrations
     );
     const inventory0003 = exactSchemaInventory(legacyContract);
-    const inventory0004 = exactSchemaInventory(currentContract);
+    const inventory0004 = exactSchemaInventory(historical0004Contract);
+    const inventory0005 = exactSchemaInventory(current0005Contract);
+    const verify0004 = (pool, role) =>
+      currentRuntimeValidation.verifyRuntimeSchema(pool, role, {
+        expectedMigrationRows: profile0004.migrationRows
+      });
+    const verify0005 = (pool, role) =>
+      currentRuntimeValidation.verifyRuntimeSchema(pool, role, {
+        expectedMigrationRows: profile0005.migrationRows
+      });
     const facade = createRestoreBehaviorFacade(fixedLegacy.legacyRoot);
     const request = (expectedProfileId, pool) => ({
       expectedProfileId,
@@ -916,7 +936,7 @@ test("fixed 0003 and current 0004 schema verifiers enforce their exact closed in
       });
     });
 
-    await t.test("exact 0003 deterministically fails current only for the three 0004 relations", async () => {
+    await t.test("exact 0003 deterministically fails 0004 only for the three new relations", async () => {
       const expectedCurrentRelations = [
         ...profile0004.rlsTables,
         "runtime_schema_contract"
@@ -962,7 +982,7 @@ test("fixed 0003 and current 0004 schema verifiers enforce their exact closed in
       const pool = runtimeSchemaCatalogPool(legacyContract, augmented);
       let observed;
       try {
-        await currentRuntimeValidation.verifyRuntimeSchema(
+        await verify0004(
           pool,
           "ia4tube_social_runtime"
         );
@@ -979,16 +999,30 @@ test("fixed 0003 and current 0004 schema verifiers enforce their exact closed in
       );
     });
 
-    await t.test("exact 0004 passes the complete current verifier", async () => {
+    await t.test("exact 0004 passes the authenticated historical verifier", async () => {
       const result = await facade.verifyRuntimeSchemaForProfile(
         request(
           PROFILE_0004_ID,
-          runtimeSchemaCatalogPool(currentContract, inventory0004)
+          runtimeSchemaCatalogPool(historical0004Contract, inventory0004)
         )
       );
       assert.deepEqual(result, {
         valid: true,
         migrationCount: 4,
+        tenantTableCount: 15
+      });
+    });
+
+    await t.test("exact 0005 passes the complete current verifier", async () => {
+      const result = await facade.verifyRuntimeSchemaForProfile(
+        request(
+          PROFILE_0005_ID,
+          runtimeSchemaCatalogPool(current0005Contract, inventory0005)
+        )
+      );
+      assert.deepEqual(result, {
+        valid: true,
+        migrationCount: 5,
         tenantTableCount: 15
       });
     });
@@ -1032,18 +1066,19 @@ test("fixed 0003 and current 0004 schema verifiers enforce their exact closed in
           (entries) => entries.filter((entry) => entry.name !== relation)
         );
         await rejectsRelationMismatch(
-          currentRuntimeValidation.verifyRuntimeSchema(
-            runtimeSchemaCatalogPool(currentContract, missing),
+          verify0004(
+            runtimeSchemaCatalogPool(historical0004Contract, missing),
             "ia4tube_social_runtime"
           )
         );
       }
     });
 
-    await t.test("both profiles refuse a wrong relation owner", async () => {
+    await t.test("all profiles refuse a wrong relation owner", async () => {
       for (const [contract, inventory, verifier] of [
         [legacyContract, inventory0003, fixedLegacy.dependencies.verifyRuntimeSchema],
-        [currentContract, inventory0004, currentRuntimeValidation.verifyRuntimeSchema]
+        [historical0004Contract, inventory0004, verify0004],
+        [current0005Contract, inventory0005, verify0005]
       ]) {
         const wrongOwner = replaceSchemaInventory(inventory, (entries) => {
           entries.find((entry) => entry.name === "companies").owner = "unexpected_owner";
@@ -1058,10 +1093,11 @@ test("fixed 0003 and current 0004 schema verifiers enforce their exact closed in
       }
     });
 
-    await t.test("both profiles refuse a wrong relkind", async () => {
+    await t.test("all profiles refuse a wrong relkind", async () => {
       for (const [contract, inventory, verifier] of [
         [legacyContract, inventory0003, fixedLegacy.dependencies.verifyRuntimeSchema],
-        [currentContract, inventory0004, currentRuntimeValidation.verifyRuntimeSchema]
+        [historical0004Contract, inventory0004, verify0004],
+        [current0005Contract, inventory0005, verify0005]
       ]) {
         const wrongKind = replaceSchemaInventory(inventory, (entries) => {
           entries.find((entry) => entry.name === "companies").kind = "v";
@@ -1076,10 +1112,11 @@ test("fixed 0003 and current 0004 schema verifiers enforce their exact closed in
       }
     });
 
-    await t.test("both profiles refuse a missing runtime contract view", async () => {
+    await t.test("all profiles refuse a missing runtime contract view", async () => {
       for (const [contract, inventory, verifier] of [
         [legacyContract, inventory0003, fixedLegacy.dependencies.verifyRuntimeSchema],
-        [currentContract, inventory0004, currentRuntimeValidation.verifyRuntimeSchema]
+        [historical0004Contract, inventory0004, verify0004],
+        [current0005Contract, inventory0005, verify0005]
       ]) {
         const missingView = replaceSchemaInventory(
           inventory,
@@ -1097,7 +1134,8 @@ test("fixed 0003 and current 0004 schema verifiers enforce their exact closed in
     });
 
     assert.deepEqual(profile0003.rlsTables, legacyContract.tables);
-    assert.deepEqual(profile0004.rlsTables, currentContract.tables);
+    assert.deepEqual(profile0004.rlsTables, historical0004Contract.tables);
+    assert.deepEqual(profile0005.rlsTables, current0005Contract.tables);
   } finally {
     fixedLegacy.cleanup();
   }
@@ -4708,6 +4746,8 @@ test("Linux restore targets are exact and source databases never match", () => {
   assert.equal(isLinuxRestoreDatabase("ia4tube_social_disposable_tamper_012345abcdef"), true);
   assert.equal(isLinuxRestoreDatabase("ia4tube_social_disposable_cross_012345abcdef"), true);
   assert.equal(isLinuxRestoreDatabase("ia4tube_social_disposable_source_0003_012345abcdef"), false);
+  assert.equal(isLinuxRestoreDatabase("ia4tube_social_disposable_source_0004_012345abcdef"), false);
+  assert.equal(isLinuxRestoreDatabase("ia4tube_social_disposable_source_0005_012345abcdef"), false);
   assert.equal(isLinuxRestoreDatabase("ia4tube_social_disposable_rollback_source_012345abcdef"), false);
   assert.equal(isLinuxRestoreDatabase("ia4tube_social_local"), false);
   assert.equal(isLinuxRestoreDatabase("ia4tube_social_disposable_restore_0003_012345abcdeg"), false);
@@ -5306,6 +5346,7 @@ function loginVerifierProvisionerPool(overrides = {}) {
 function createLoginVerifierFixture(options = {}) {
   const constructed = [];
   const ended = [];
+  const database = options.database || LOGIN_VERIFIER_FIXTURE.database;
   let physicalHost = options.physicalHost || LOGIN_VERIFIER_FIXTURE.privateHost;
   let physicalPort = options.omitPhysicalPort
     ? undefined
@@ -5329,7 +5370,7 @@ function createLoginVerifierFixture(options = {}) {
   };
   const bridge = createVerifiedLoginCredentialPoolBridge(postgres, {
     target: { host: "127.0.0.1", port: 5432 },
-    database: LOGIN_VERIFIER_FIXTURE.database,
+    database,
     provisionerLogin: LOGIN_VERIFIER_FIXTURE.provisionerLogin,
     migrationLogin: LOGIN_VERIFIER_FIXTURE.migrationLogin,
     runtimeLogin: LOGIN_VERIFIER_FIXTURE.runtimeLogin,
@@ -5337,10 +5378,17 @@ function createLoginVerifierFixture(options = {}) {
   }, { environment: options.environment || {} });
   const provisionerPool = options.authorize === false
     ? null
-    : bridge.authorizeProvisionerPool(options.provisionerPool || loginVerifierProvisionerPool());
+    : bridge.authorizeProvisionerPool(
+        options.provisionerPool ||
+          loginVerifierProvisionerPool({
+            database,
+            connectionString: loginVerifierUrl({ database })
+          })
+      );
   return {
     bridge,
     constructed,
+    database,
     ended,
     provisionerPool,
     setPhysicalHost(value) { physicalHost = value; },
@@ -5359,7 +5407,7 @@ function loginVerifierPoolConfiguration(fixture, overrides = {}) {
         protocol: overrides.protocol,
         host: overrides.uriHost,
         port: overrides.uriPort,
-        database: overrides.uriDatabase,
+        database: overrides.uriDatabase || fixture.database,
         login,
         password,
         omitPassword: overrides.omitPassword,
@@ -5416,6 +5464,21 @@ test("login verifier bridge accepts only exact postgres URI shapes and emits exp
     assert.equal(Object.isFrozen(original), true);
     await pool.end();
     assert.deepEqual(fixture.ended, [login]);
+  }
+});
+
+test("login verifier bridge admits the authenticated 0004 and 0005 source databases", async () => {
+  for (const database of [
+    "ia4tube_social_disposable_source_0004_012345abcdef",
+    "ia4tube_social_disposable_source_0005_012345abcdef"
+  ]) {
+    const fixture = createLoginVerifierFixture({ database });
+    const pool = new fixture.bridge.PoolClass(
+      loginVerifierPoolConfiguration(fixture)
+    );
+    assert.equal(pool.options.database, database);
+    assert.equal(fixture.constructed.length, 1);
+    await pool.end();
   }
 });
 
@@ -6222,11 +6285,12 @@ test("ledger migration-pool drain preserves the primary and propagates drain-onl
   await drainOnly.closeAll();
 });
 
-test("restore configs validate a future owned bundle without leaving a placeholder", () => {
+test("restore configs admit profile 0005 placeholders and refuse future or external paths", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "ia4tube-linux-lazy-restore-"));
   const backupDirectory = path.join(root, "backups");
   fs.mkdirSync(backupDirectory);
-  const bundlePath = path.join(backupDirectory, "profile-0003-012345abcdef.ia4sb");
+  const bundle0003Path = path.join(backupDirectory, "profile-0003-012345abcdef.ia4sb");
+  const bundle0005Path = path.join(backupDirectory, "profile-0005-fedcba543210.ia4sb");
   const events = [];
   const facade = createLinuxRestoreConfigFacade({
     backupDirectory,
@@ -6241,21 +6305,44 @@ test("restore configs validate a future owned bundle without leaving a placehold
   });
   try {
     assert.equal(facade.constant, true);
-    assert.equal(facade.loadRestoreConfig({ SOCIAL_RESTORE_BUNDLE: bundlePath }).bundlePath, bundlePath);
-    assert.deepEqual(events, [["load", true, 0]]);
-    assert.equal(fs.existsSync(bundlePath), false);
-    fs.writeFileSync(bundlePath, "real-bundle", { flag: "wx", mode: 0o600 });
-    facade.loadRestoreConfig({ SOCIAL_RESTORE_BUNDLE: bundlePath });
-    assert.equal(fs.readFileSync(bundlePath, "utf8"), "real-bundle");
+    assert.equal(
+      facade.loadRestoreConfig({ SOCIAL_RESTORE_BUNDLE: bundle0003Path }).bundlePath,
+      bundle0003Path
+    );
+    assert.equal(
+      facade.loadRestoreConfig({ SOCIAL_RESTORE_BUNDLE: bundle0005Path }).bundlePath,
+      bundle0005Path
+    );
+    assert.deepEqual(events, [["load", true, 0], ["load", true, 0]]);
+    assert.equal(fs.existsSync(bundle0003Path), false);
+    assert.equal(fs.existsSync(bundle0005Path), false);
+    fs.writeFileSync(bundle0003Path, "real-bundle", { flag: "wx", mode: 0o600 });
+    facade.loadRestoreConfig({ SOCIAL_RESTORE_BUNDLE: bundle0003Path });
+    assert.equal(fs.readFileSync(bundle0003Path, "utf8"), "real-bundle");
     assert.throws(() => facade.loadRestoreConfig({
       SOCIAL_RESTORE_BUNDLE: path.join(backupDirectory, "rollback-0003-012345abcdef.ia4sb")
     }), { code: "linux_gate_restore_bundle_placeholder_refused" });
     assert.throws(() => facade.loadRestoreConfig({
-      SOCIAL_RESTORE_BUNDLE: path.join(root, "outside.ia4sb")
+      SOCIAL_RESTORE_BUNDLE: path.join(backupDirectory, "profile-0006-012345abcdef.ia4sb")
+    }), { code: "linux_gate_restore_bundle_placeholder_refused" });
+    assert.throws(() => facade.loadRestoreConfig({
+      SOCIAL_RESTORE_BUNDLE: path.join(root, "profile-0005-012345abcdef.ia4sb")
     }), { code: "linux_gate_restore_bundle_path_invalid" });
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
+});
+
+test("bundle directory fsync count tracks the exact schema profile inventory", () => {
+  assert.equal(assertBundleDirectoryFsyncCount(3), true);
+  assert.throws(
+    () => assertBundleDirectoryFsyncCount(2),
+    { code: "linux_gate_bundle_directory_fsync_count_invalid" }
+  );
+  assert.throws(
+    () => assertBundleDirectoryFsyncCount(4),
+    { code: "linux_gate_bundle_directory_fsync_count_invalid" }
+  );
 });
 
 test("restore placeholder cleanup preserves the first failure and attempts every cleanup", async (t) => {
@@ -7022,18 +7109,19 @@ test("migration evidence binds the physical ledger to the checked-in manifest", 
   };
   try {
     const result = await migrationEvidence(state, {
-      migrationRunner: {
-        async apply() { return []; },
-        async validate() { return { valid: true, applied: 4, pending: 0 }; }
-      },
+       migrationRunner: {
+         async apply() { return []; },
+         async validate() { return { valid: true, applied: 5, pending: 0 }; }
+       },
       async withTransaction(pool, operation) { return operation(pool); }
     });
-    assert.equal(result.applied, 4);
+    assert.equal(result.applied, 5);
     assert.equal(result.requiredTablesPresent, true);
     assert.equal(result.checksumTamperRefused, true);
     assert.equal(result.idempotentReapply, true);
     assert.match(result.ledgerSha256, /^[0-9a-f]{64}$/);
     assert.match(result.migration0004Checksum, /^[0-9a-f]{64}$/);
+    assert.match(result.migration0005Checksum, /^[0-9a-f]{64}$/);
     assert.deepEqual(fs.readdirSync(workDirectory), []);
   } finally {
     fs.rmSync(workDirectory, { recursive: true, force: true });
@@ -7551,14 +7639,16 @@ test("WeakMap provenance router refuses unbound, crossed and reused requests", a
   });
 });
 
-test("all six normal operations are accepted while tamper/cross stay outside provenance", async () => {
+test("all eight normal operations are accepted while tamper/cross stay outside provenance", async () => {
   for (const [kind, operation, count] of [
     ["backup", "rollback_backup_0003", 3],
     ["backup", "gate5_backup_0003", 3],
     ["backup", "gate5_backup_0004", 3],
+    ["backup", "gate5_backup_0005", 3],
     ["restore", "rollback_restore_0003", 4],
     ["restore", "gate5_restore_0003", 4],
-    ["restore", "gate5_restore_0004", 4]
+    ["restore", "gate5_restore_0004", 4],
+    ["restore", "gate5_restore_0005", 4]
   ]) {
     const tracker = createBackupRestoreProvenanceTracker();
     const runTool = spawnedToolRunner(tracker, Array(count).fill(0));

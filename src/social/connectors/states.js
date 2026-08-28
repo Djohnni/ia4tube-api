@@ -84,7 +84,7 @@ function transitionPublicationState(current, next) {
 }
 
 const PROVIDER_REFERENCE_PATTERN =
-  /^[A-Za-z0-9][A-Za-z0-9._:-]{0,499}$/;
+  /^[A-Za-z0-9][A-Za-z0-9._:-]{0,498}$/;
 const SENSITIVE_REFERENCE_PATTERN =
   /(access[_-]?token|refresh[_-]?token|authorization|bearer|password|secret|oauth[_-]?code|api[_-]?key|ciphertext)/i;
 

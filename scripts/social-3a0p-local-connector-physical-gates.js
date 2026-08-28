@@ -181,7 +181,7 @@ async function migrationGate(state, dependencies, plans) {
   if (
     validation.valid !== true ||
     validation.pending !== 0 ||
-    validation.applied !== 4 ||
+    validation.applied !== 5 ||
     !Array.isArray(applied)
   ) {
     fail("connector_physical_migration_invalid");
@@ -213,6 +213,7 @@ async function migrationGate(state, dependencies, plans) {
     physicalExecution: true,
     syntheticOnly: true,
     profile0004: true,
+    profile0005: true,
     transactionalRollback: true,
     nonSocialUnchanged: true,
     migrationsApplied: validation.applied
@@ -564,6 +565,15 @@ async function backupRestoreGate(state, dependencies, plans) {
     if (restore0004?.disposableTargetRemoved !== true) {
       fail("connector_physical_backup_restore_invalid");
     }
+    const backup0005 = await dependencies.runProfileBackup(plan.backup0005);
+    const bundle0005 = requireBackupResult(
+      backup0005,
+      "social-schema-0005"
+    );
+    const restore0005 = await dependencies.runProfileRestore(plan.restore0005);
+    if (restore0005?.disposableTargetRemoved !== true) {
+      fail("connector_physical_backup_restore_invalid");
+    }
     // Tamper and cross-profile refusals are executed by the concrete plan so no
     // result is inferred from a unit-test-only JSON mutation.
     requireTrue(await plan.assertManifestTamperRefused(), "connector_physical_manifest_tamper_accepted");
@@ -573,6 +583,7 @@ async function backupRestoreGate(state, dependencies, plans) {
       syntheticOnly: true,
       profile0003: true,
       profile0004: true,
+      profile0005: true,
       restoreIsolated: true,
       manifestTamperRefused: true,
       crossProfileRefused: true,
@@ -586,7 +597,11 @@ async function backupRestoreGate(state, dependencies, plans) {
       bundle0004Size: bundle0004.size,
       bundle0004Sha256: bundle0004.sha256,
       bundle0004Tables: bundle0004.tables,
-      bundle0004RlsPolicies: bundle0004.rlsPolicies
+      bundle0004RlsPolicies: bundle0004.rlsPolicies,
+      bundle0005Size: bundle0005.size,
+      bundle0005Sha256: bundle0005.sha256,
+      bundle0005Tables: bundle0005.tables,
+      bundle0005RlsPolicies: bundle0005.rlsPolicies
     };
   } catch (error) {
     primaryFailed = true;
@@ -654,6 +669,8 @@ function createConnectorPhysicalGates(options = {}) {
         !backup.restore0003 ||
         !backup.backup0004 ||
         !backup.restore0004 ||
+        !backup.backup0005 ||
+        !backup.restore0005 ||
         typeof backup.assertManifestTamperRefused !== "function" ||
         typeof backup.assertCrossProfileRefused !== "function")
     ) {

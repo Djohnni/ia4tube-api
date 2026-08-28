@@ -771,7 +771,11 @@ test("contratos de roles, rollback forward-only e limitações Windows são expl
   assert.ok(rollback.operational.includes("restore-0001-0003-to-disposable-database"));
 
   const backup = windowsBackupRestoreContract();
-  assert.deepEqual(backup.profiles, ["social-schema-0003", "social-schema-0004"]);
+  assert.deepEqual(backup.profiles, [
+    "social-schema-0003",
+    "social-schema-0004",
+    "social-schema-0005"
+  ]);
   assert.equal(backup.directoryFsync, "pending-linux-durability-gate");
   assert.equal(backup.noFollow, "pending-linux-durability-gate");
 });

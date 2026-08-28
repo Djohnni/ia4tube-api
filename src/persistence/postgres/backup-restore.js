@@ -60,6 +60,19 @@ const EXPECTED_MIGRATION_ROWS = Object.freeze(
 const EXPECTED_MIGRATIONS = Object.freeze(
   EXPECTED_MIGRATION_ROWS.map((migration) => migration.version)
 );
+const PROFILE_0005_MIGRATION_ROWS = Object.freeze(
+  EXPECTED_MIGRATION_ROWS.slice(0, 5)
+);
+if (
+  PROFILE_0005_MIGRATION_ROWS.length !== 5 ||
+  PROFILE_0005_MIGRATION_ROWS[4]?.version !==
+    "0005_fix_social_reference_checks"
+) {
+  postgresFail(
+    "backup_schema_profile_0005_manifest_invalid",
+    "Perfil autenticado 0005 diverge do manifesto."
+  );
+}
 const PRE_0004_RLS_TABLES = Object.freeze([
   "companies",
   "users",
@@ -123,10 +136,49 @@ const SCHEMA_PROFILES = Object.freeze([
   }),
   Object.freeze({
     id: "social-schema-0004",
-    migrationRows: EXPECTED_MIGRATION_ROWS,
+    migrationRows: Object.freeze(EXPECTED_MIGRATION_ROWS.slice(0, 4)),
     backupTables: BACKUP_TABLES,
     evidenceTables: EVIDENCE_TABLES,
     rlsTables: RLS_TABLES
+  }),
+  Object.freeze({
+    id: "social-schema-0005",
+    migrationRows: PROFILE_0005_MIGRATION_ROWS,
+    backupTables: BACKUP_TABLES,
+    evidenceTables: EVIDENCE_TABLES,
+    rlsTables: RLS_TABLES
+  })
+]);
+const SOCIAL_CONNECTOR_UNVALIDATED_CONSTRAINTS = Object.freeze([
+  Object.freeze({
+    schema: "ia4tube_social",
+    table: "social_external_accounts",
+    name: "social_external_accounts_instagram_professional",
+    type: "c"
+  }),
+  Object.freeze({
+    schema: "ia4tube_social",
+    table: "social_oauth_transactions",
+    name: "social_oauth_transactions_connection_fk",
+    type: "f"
+  }),
+  Object.freeze({
+    schema: "ia4tube_social",
+    table: "social_audit_events",
+    name: "social_audit_events_reference_provider_present",
+    type: "c"
+  }),
+  Object.freeze({
+    schema: "ia4tube_social",
+    table: "social_audit_events",
+    name: "social_audit_events_connection_provider_fk",
+    type: "f"
+  }),
+  Object.freeze({
+    schema: "ia4tube_social",
+    table: "social_audit_events",
+    name: "social_audit_events_publication_provider_fk",
+    type: "f"
   })
 ]);
 const REQUIRED_VAULT_CONSTRAINT = Object.freeze({
@@ -137,38 +189,8 @@ const REQUIRED_VAULT_CONSTRAINT = Object.freeze({
 });
 const ALLOWED_UNVALIDATED_CONSTRAINTS_BY_PROFILE = Object.freeze({
   "social-schema-0003": Object.freeze([]),
-  "social-schema-0004": Object.freeze([
-    Object.freeze({
-      schema: "ia4tube_social",
-      table: "social_external_accounts",
-      name: "social_external_accounts_instagram_professional",
-      type: "c"
-    }),
-    Object.freeze({
-      schema: "ia4tube_social",
-      table: "social_oauth_transactions",
-      name: "social_oauth_transactions_connection_fk",
-      type: "f"
-    }),
-    Object.freeze({
-      schema: "ia4tube_social",
-      table: "social_audit_events",
-      name: "social_audit_events_reference_provider_present",
-      type: "c"
-    }),
-    Object.freeze({
-      schema: "ia4tube_social",
-      table: "social_audit_events",
-      name: "social_audit_events_connection_provider_fk",
-      type: "f"
-    }),
-    Object.freeze({
-      schema: "ia4tube_social",
-      table: "social_audit_events",
-      name: "social_audit_events_publication_provider_fk",
-      type: "f"
-    })
-  ])
+  "social-schema-0004": SOCIAL_CONNECTOR_UNVALIDATED_CONSTRAINTS,
+  "social-schema-0005": SOCIAL_CONNECTOR_UNVALIDATED_CONSTRAINTS
 });
 const CURRENT_SCHEMA_PROFILE = SCHEMA_PROFILES.at(-1);
 const TOOL_BASENAMES = Object.freeze({
@@ -2534,13 +2556,32 @@ async function runLogicalBackup({
 
 async function withExtractedVersionedBundle(options) {
   let profileMismatch;
+  const attemptedArchiveShapes = new Set();
   for (const profile of [...SCHEMA_PROFILES].reverse()) {
+    const expectedNames = bundleArchiveNames(profile);
+    const archiveShape = canonicalJson(expectedNames);
+    if (attemptedArchiveShapes.has(archiveShape)) continue;
+    attemptedArchiveShapes.add(archiveShape);
     try {
       return await withExtractedEncryptedBundle({
         ...options,
-        expectedNames: bundleArchiveNames(profile),
+        expectedNames,
         async operation(extracted) {
-          return options.operation(extracted, profile);
+          const manifestEntry = extracted?.files?.find(
+            (entry) => entry?.name === BUNDLE_ARCHIVE_MANIFEST
+          );
+          if (!manifestEntry?.path) fail("restore_encrypted_bundle_invalid");
+          const stored = readSmallJson(
+            manifestEntry.path,
+            options.fileSystem || fs
+          );
+          const storedProfile = requireManifestSchemaProfile(stored);
+          if (
+            canonicalJson(bundleArchiveNames(storedProfile)) !== archiveShape
+          ) {
+            fail("restore_encrypted_bundle_invalid");
+          }
+          return options.operation(extracted, storedProfile);
         }
       });
     } catch (error) {

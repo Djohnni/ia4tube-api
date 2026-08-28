@@ -14,6 +14,9 @@ const {
   runProfileBackup,
   runProfileRestore
 } = require("./social-3a0p-local-backup-restore");
+const {
+  materializeAuthenticatedMigrationProfile
+} = require("./social-migration-profile-manifest");
 
 const LOOPBACK_HOST = "127.0.0.1";
 const BACKUP_LOGICAL_HOST = "backup.local.ia4tube.invalid";
@@ -30,9 +33,11 @@ const OWNER_ROLE = "ia4tube_social_owner";
 const MIGRATOR_ROLE = "ia4tube_social_migrator";
 const SCHEMA_PROFILE_0003 = "social-schema-0003";
 const SCHEMA_PROFILE_0004 = "social-schema-0004";
+const SCHEMA_PROFILE_0005 = "social-schema-0005";
 const SCHEMA_PROFILE_IDS = Object.freeze([
   SCHEMA_PROFILE_0003,
-  SCHEMA_PROFILE_0004
+  SCHEMA_PROFILE_0004,
+  SCHEMA_PROFILE_0005
 ]);
 const CURRENT_SOCIAL_REPOSITORY_METHODS = Object.freeze([
   "consumeReauthGrant",
@@ -61,12 +66,14 @@ const LEGACY_SOCIAL_REPOSITORY_METHODS = Object.freeze([
 const BACKUP_PROVENANCE_OPERATIONS = new Set([
   "rollback_backup_0003",
   "gate5_backup_0003",
-  "gate5_backup_0004"
+  "gate5_backup_0004",
+  "gate5_backup_0005"
 ]);
 const RESTORE_PROVENANCE_OPERATIONS = new Set([
   "rollback_restore_0003",
   "gate5_restore_0003",
-  "gate5_restore_0004"
+  "gate5_restore_0004",
+  "gate5_restore_0005"
 ]);
 const SAFE_IDENTIFIER = /^[a-z][a-z0-9_]{2,62}$/;
 const SAFE_ENVIRONMENT_NAMES = new Set([
@@ -304,7 +311,7 @@ function createProfileAwareSocialRepositoryFactory({
   ) {
     fail("windows_physical_profile_repository_factory_invalid");
   }
-  if (expectedProfile.id === SCHEMA_PROFILE_0004) {
+  if (expectedProfile.id !== SCHEMA_PROFILE_0003) {
     return currentCreateSocialRepository;
   }
   return Object.freeze(function createProfile0003SocialRepository(options) {
@@ -398,13 +405,21 @@ function createDefaultRestoreBehaviorFacade({
   }
 
   function selectedSchemaVerifier(expectedProfileId) {
-    requireCanonicalSchemaProfile(schemaProfiles, expectedProfileId);
+    const expectedProfile = requireCanonicalSchemaProfile(
+      schemaProfiles,
+      expectedProfileId
+    );
     if (!SCHEMA_PROFILE_IDS.includes(expectedProfileId)) {
       fail("windows_physical_schema_profile_invalid");
     }
-    return expectedProfileId === SCHEMA_PROFILE_0003
-      ? loadLegacyDependencies().verifyRuntimeSchema
-      : runtimeValidation.verifyRuntimeSchema;
+    if (expectedProfileId === SCHEMA_PROFILE_0003) {
+      return loadLegacyDependencies().verifyRuntimeSchema;
+    }
+    return (pool, role) => runtimeValidation.verifyRuntimeSchema(
+      pool,
+      role,
+      { expectedMigrationRows: expectedProfile.migrationRows }
+    );
   }
 
   function boundSchemaVerifier(expectedProfileId) {
@@ -1131,29 +1146,25 @@ function createDefaultDatabaseManager({
     return (await inspect(expected)).status === "absent";
   }
 
-  function subsetManifestDirectory() {
-    const directory = path.join(paths.ownedRoot, "migration-profile-0003");
-    if (!fileSystem.existsSync(directory)) {
-      fileSystem.mkdirSync(directory, { recursive: false });
-      const manifest = JSON.parse(fileSystem.readFileSync(
-        path.join(repositoryRoot, "db", "migrations", "checksums.json"),
-        "utf8"
-      ));
-      const subset = manifest.migrations.filter((item) => item.version.startsWith("0001_") || item.version.startsWith("0002_") || item.version.startsWith("0003_"));
-      for (const item of subset) {
-        fileSystem.copyFileSync(
-          path.join(repositoryRoot, "db", "migrations", item.file),
-          path.join(directory, item.file),
-          fs.constants.COPYFILE_EXCL
-        );
-      }
-      fileSystem.writeFileSync(
-        path.join(directory, "checksums.json"),
-        `${JSON.stringify({ format: 1, migrations: subset }, null, 2)}\n`,
-        { encoding: "utf8", flag: "wx" }
+  const profileManifestOptions = new Map();
+
+  function authenticatedProfileManifestOptions(profileId) {
+    if (!SCHEMA_PROFILE_IDS.includes(profileId)) {
+      fail("windows_physical_database_profile_invalid");
+    }
+    if (!profileManifestOptions.has(profileId)) {
+      profileManifestOptions.set(
+        profileId,
+        materializeAuthenticatedMigrationProfile({
+          repositoryRoot,
+          ownedRoot: paths.ownedRoot,
+          profileId,
+          fileSystem,
+          migrationsModule: migrations
+        })
       );
     }
-    return directory;
+    return profileManifestOptions.get(profileId);
   }
 
   async function applyProfile(database, profileId) {
@@ -1167,12 +1178,7 @@ function createDefaultDatabaseManager({
       database,
       username: MIGRATION_LOGIN
     };
-    const manifestOptions = profileId === "social-schema-0003"
-      ? {
-          migrationsDirectory: subsetManifestDirectory(),
-          manifestPath: path.join(subsetManifestDirectory(), "checksums.json")
-        }
-      : { root: repositoryRoot };
+    const manifestOptions = authenticatedProfileManifestOptions(profileId);
     const runner = migrations.createMigrationRunner({
       pool: pool(database, MIGRATION_LOGIN, 2),
       ownerRole: OWNER_ROLE,
@@ -1184,7 +1190,16 @@ function createDefaultDatabaseManager({
       SOCIAL_MIGRATION_TARGET_FINGERPRINT: migrations.targetFingerprint(target)
     });
     const validation = await runner.validate();
-    const expected = profileId === "social-schema-0003" ? 3 : 4;
+    const expected = profileId === SCHEMA_PROFILE_0003
+      ? 3
+      : profileId === SCHEMA_PROFILE_0004
+        ? 4
+        : profileId === SCHEMA_PROFILE_0005
+          ? 5
+          : null;
+    if (expected === null) {
+      fail("windows_physical_database_profile_invalid");
+    }
     if (validation.valid !== true || validation.applied !== expected || validation.pending !== 0) {
       fail("windows_physical_database_profile_invalid");
     }
@@ -1362,8 +1377,11 @@ function createWindowsPhysicalPlans(options = {}) {
     rollbackSource: `ia4tube_social_disposable_rollback_source_${digest}`,
     rollbackRestore: `ia4tube_social_disposable_rollback_0003_${digest}`,
     backupSource0003: `ia4tube_social_disposable_source_0003_${digest}`,
+    backupSource0004: `ia4tube_social_disposable_source_0004_${digest}`,
+    backupSource0005: `ia4tube_social_disposable_source_0005_${digest}`,
     restore0003: `ia4tube_social_disposable_restore_0003_${digest}`,
     restore0004: `ia4tube_social_disposable_restore_0004_${digest}`,
+    restore0005: `ia4tube_social_disposable_restore_0005_${digest}`,
     tamper: `ia4tube_social_disposable_tamper_${digest}`,
     cross: `ia4tube_social_disposable_cross_${digest}`
   });
@@ -2043,6 +2061,10 @@ function createWindowsPhysicalPlans(options = {}) {
       backup.SCHEMA_PROFILES,
       "social-schema-0004"
     );
+    const profile0005 = requireCanonicalSchemaProfile(
+      backup.SCHEMA_PROFILES,
+      "social-schema-0005"
+    );
     const verifyProfile0003FixtureRestored = preparationHooks === undefined
       ? undefined
       : preparationHooks.installProfile0003RestoreVerification();
@@ -2052,21 +2074,73 @@ function createWindowsPhysicalPlans(options = {}) {
     ) {
       fail("windows_physical_restore_profile_verifier_wrapper_invalid");
     }
-    const sourceProof = await databaseManager.create(identity(names.backupSource0003, profile0003.id));
-    await databaseManager.applyProfile(names.backupSource0003, profile0003.id);
-    const plan0003 = backupRequest(
-      names.backupSource0003,
-      profile0003,
-      `profile-0003-${digest}`,
-      "gate5_backup_0003"
-    );
-    const plan0004 = backupRequest(
-      LOCAL_DATABASE,
-      profile0004,
-      `profile-0004-${digest}`,
-      "gate5_backup_0004"
-    );
-    const result = {
+    const sourceProofs = [];
+    async function cleanupSourceProofs() {
+      let cleanupFailure;
+      for (let index = sourceProofs.length - 1; index >= 0; index -= 1) {
+        const sourceProof = sourceProofs[index];
+        try {
+          if ((await databaseManager.assertCreated(sourceProof)) === true) {
+            await databaseManager.remove(sourceProof);
+          }
+          if ((await databaseManager.assertRemoved(sourceProof)) !== true) {
+            fail("windows_physical_source_cleanup_unconfirmed");
+          }
+          sourceProofs.splice(index, 1);
+        } catch (error) {
+          if (cleanupFailure === undefined) cleanupFailure = error;
+        }
+      }
+      if (cleanupFailure !== undefined) throw cleanupFailure;
+      return true;
+    }
+    async function createAndApplySource(database, profileId) {
+      const sourceIdentity = identity(database, profileId);
+      let proof;
+      try {
+        proof = await databaseManager.create(sourceIdentity);
+      } catch (primaryFailure) {
+        try {
+          const reconciled = await databaseManager.reconcile(sourceIdentity);
+          if (
+            reconciled?.status === "owned" &&
+            reconciled.createdByThisRun === true
+          ) {
+            sourceProofs.push(reconciled);
+          }
+        } catch {
+          // Preserve the create failure; the outer cleanup still handles known proofs.
+        }
+        throw primaryFailure;
+      }
+      sourceProofs.push(proof);
+      await databaseManager.applyProfile(database, profileId);
+      return proof;
+    }
+
+    try {
+      await createAndApplySource(names.backupSource0003, profile0003.id);
+      await createAndApplySource(names.backupSource0004, profile0004.id);
+      await createAndApplySource(names.backupSource0005, profile0005.id);
+      const plan0003 = backupRequest(
+        names.backupSource0003,
+        profile0003,
+        `profile-0003-${digest}`,
+        "gate5_backup_0003"
+      );
+      const plan0004 = backupRequest(
+        names.backupSource0004,
+        profile0004,
+        `profile-0004-${digest}`,
+        "gate5_backup_0004"
+      );
+      const plan0005 = backupRequest(
+        names.backupSource0005,
+        profile0005,
+        `profile-0005-${digest}`,
+        "gate5_backup_0005"
+      );
+      const result = {
       backup0003: plan0003.request,
       restore0003: restoreRequest(
         plan0003,
@@ -2081,6 +2155,13 @@ function createWindowsPhysicalPlans(options = {}) {
         names.restore0004,
         profile0004,
         "gate5_restore_0004"
+      ),
+      backup0005: plan0005.request,
+      restore0005: restoreRequest(
+        plan0005,
+        names.restore0005,
+        profile0005,
+        "gate5_restore_0005"
       ),
       async assertManifestTamperRefused() {
         const tampered = `${plan0003.config.files.bundle}.tampered`;
@@ -2195,16 +2276,19 @@ function createWindowsPhysicalPlans(options = {}) {
         return true;
       },
       async cleanup() {
-        if ((await databaseManager.assertCreated(sourceProof)) === true) {
-          await databaseManager.remove(sourceProof);
-          if ((await databaseManager.assertRemoved(sourceProof)) !== true) {
-            fail("windows_physical_source_cleanup_unconfirmed");
-          }
-        }
+        return cleanupSourceProofs();
       }
-    };
-    createdPlans.add(result);
-    return Object.freeze(result);
+      };
+      createdPlans.add(result);
+      return Object.freeze(result);
+    } catch (primaryFailure) {
+      try {
+        await cleanupSourceProofs();
+      } catch {
+        // Preserve the primary preparation failure after attempting every cleanup.
+      }
+      throw primaryFailure;
+    }
   }
 
   return Object.freeze({

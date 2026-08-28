@@ -41,7 +41,8 @@ const LOGICAL_TRANSPORT_BINDING_KEYS = Object.freeze([
 ].sort());
 const ALLOWED_PROFILE_IDS = Object.freeze([
   "social-schema-0003",
-  "social-schema-0004"
+  "social-schema-0004",
+  "social-schema-0005"
 ]);
 const WINDOWS_DURABILITY = Object.freeze({
   fileFsync: "required",
@@ -346,8 +347,10 @@ function physicalPendingEvidence() {
     gates: Object.freeze([
       "backup-profile-0003",
       "backup-profile-0004",
+      "backup-profile-0005",
       "restore-profile-0003",
       "restore-profile-0004",
+      "restore-profile-0005",
       "transactional-rollback-0004",
       "operational-rollback-0003",
       "reapply-0004"

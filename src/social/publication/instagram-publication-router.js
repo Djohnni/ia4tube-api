@@ -1,7 +1,10 @@
 "use strict";
 
 const express = require("express");
-const { PUBLICATION_STATES } = require("../connectors/states");
+const {
+  PUBLICATION_STATES,
+  isSafeProviderReference
+} = require("../connectors/states");
 const {
   CONTROLLED_GATE4_JPEG_SHA256
 } = require("./controlled-gate4-jpeg");
@@ -110,7 +113,7 @@ function normalizeAttempt(value) {
     !(source.errorCode === null ||
       /^[a-z][a-z0-9_]{0,99}$/.test(source.errorCode)) ||
     !(source.providerReference === null ||
-      /^[A-Za-z0-9][A-Za-z0-9._:-]{0,499}$/.test(source.providerReference)) ||
+      isSafeProviderReference(source.providerReference)) ||
     !(source.durationMs === null ||
       (Number.isSafeInteger(source.durationMs) && source.durationMs >= 0))
   ) {

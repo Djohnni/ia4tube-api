@@ -345,7 +345,28 @@ async function verifyVaultKeyRegistryBoundary(
 }
 
 async function verifyRuntimeSchema(pool, role, options = {}) {
-  const local = readManifest(options.manifestOptions);
+  const completeManifest = readManifest(options.manifestOptions);
+  let local = completeManifest;
+  if (options.expectedMigrationRows !== undefined) {
+    const expected = options.expectedMigrationRows;
+    if (
+      !Array.isArray(expected) ||
+      expected.length < 1 ||
+      expected.length > completeManifest.length ||
+      expected.some(
+        (row, index) =>
+          row?.version !== completeManifest[index]?.version ||
+          String(row?.checksum || row?.sha256 || "").toLowerCase() !==
+            completeManifest[index]?.sha256
+      )
+    ) {
+      postgresFail(
+        "postgres_runtime_migration_profile_invalid",
+        "Perfil historico de migrations divergente."
+      );
+    }
+    local = completeManifest.slice(0, expected.length);
+  }
   const runtimeRole = requireSafeLabel(role, "postgres_role");
   const ownerRole = requireSafeLabel(
     options.ownerRole || SOCIAL_OWNER_ROLE,

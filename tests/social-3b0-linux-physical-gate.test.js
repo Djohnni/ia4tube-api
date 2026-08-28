@@ -5240,7 +5240,8 @@ test("source keeps the physical O01-O22 proofs and closed cleanup interfaces", (
     "processKill(-child.pid, signal)",
     "child.processResiduals",
     "postgres.materials",
-    "rememberSensitive"
+    "rememberSensitive",
+    "ownedRoot: postgres.workDirectory"
   ]) assert.ok(source.includes(marker), marker);
 });
 

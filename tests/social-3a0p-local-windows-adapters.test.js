@@ -36,6 +36,7 @@ const HASH = "a".repeat(64);
 const GIB = 1024 ** 3;
 const BUNDLE_0003_HASH = "b".repeat(64);
 const BUNDLE_0004_HASH = "c".repeat(64);
+const BUNDLE_0005_HASH = "d".repeat(64);
 
 function directory() {
   return { isDirectory: () => true, isFile: () => false, isSymbolicLink: () => false };
@@ -125,7 +126,7 @@ function childOwnershipProof(pid, executablePath, isActive = () => true) {
 function gateResults() {
   return {
     assertConfigured() { return true; },
-    migration: async () => ({ physicalExecution: true, syntheticOnly: true, profile0004: true, transactionalRollback: true, nonSocialUnchanged: true, migrationsApplied: 4 }),
+    migration: async () => ({ physicalExecution: true, syntheticOnly: true, profile0004: true, profile0005: true, transactionalRollback: true, nonSocialUnchanged: true, migrationsApplied: 5 }),
     rls: async () => ({ physicalExecution: true, syntheticOnly: true, tenantIsolation: true, missingContextRefused: true, tamperedContextRefused: true, forceRls: true, syntheticCompanies: 2 }),
     concurrency: async () => ({ physicalExecution: true, syntheticOnly: true, concurrencySafe: true, oauthSynthetic: true, idempotencySafe: true, externalCallsAbsent: true }),
     vault: async () => ({ physicalExecution: true, syntheticOnly: true, aes256Gcm: true, aadBound: true, roundTrip: true, rotation: true, plaintextAbsent: true }),
@@ -134,6 +135,7 @@ function gateResults() {
       syntheticOnly: true,
       profile0003: true,
       profile0004: true,
+      profile0005: true,
       restoreIsolated: true,
       manifestTamperRefused: true,
       crossProfileRefused: true,
@@ -147,7 +149,11 @@ function gateResults() {
       bundle0004Size: 234,
       bundle0004Sha256: BUNDLE_0004_HASH,
       bundle0004Tables: 8,
-      bundle0004RlsPolicies: 10
+      bundle0004RlsPolicies: 10,
+      bundle0005Size: 345,
+      bundle0005Sha256: BUNDLE_0005_HASH,
+      bundle0005Tables: 8,
+      bundle0005RlsPolicies: 10
     }),
     async destroy() {}
   };
@@ -1401,9 +1407,10 @@ test("tracked Pool.connect preserves the callback contract used by pg-pool.query
       physicalExecution: true,
       syntheticOnly: true,
       profile0004: true,
+      profile0005: true,
       transactionalRollback: true,
       nonSocialUnchanged: true,
-      migrationsApplied: 4
+      migrationsApplied: 5
     };
   };
   const base = fixture({ dependencies: { physicalGates: gates } });

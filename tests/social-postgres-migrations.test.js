@@ -18,6 +18,9 @@ const {
   EXACT_FROM_PROFILE,
   EXACT_PENDING_MIGRATIONS,
   EXACT_TO_PROFILE,
+  REFERENCE_CHECK_FROM_PROFILE,
+  REFERENCE_CHECK_PENDING_MIGRATIONS,
+  REFERENCE_CHECK_TO_PROFILE,
   GLOBAL_VAULT_BACKFILL_POLICY,
   GLOBAL_VAULT_BACKFILL_POLICY_CREATE,
   GLOBAL_VAULT_BACKFILL_POLICY_DROP,
@@ -25,7 +28,10 @@ const {
   LEDGER_NAME,
   PRODUCTION_APPROVAL,
   SOCIAL_CONNECTOR_PERSISTENCE_MIGRATION,
+  SOCIAL_REFERENCE_CHECK_FIX_MIGRATION,
+  SOCIAL_REFERENCE_CHECK_REPLACEMENTS,
   STAGING_EXACT_0004_SQL_SHA256,
+  STAGING_REFERENCE_CHECK_0005_SQL_SHA256,
   STAGING_EXACT_DATABASE_SERVICE_ID,
   STAGING_EXACT_WEB_SERVICE_ID,
   assertApplyTarget,
@@ -49,6 +55,9 @@ const {
   main: migrationCliMain,
   parseMigrationCommand
 } = require("../scripts/social-db-migrate");
+const {
+  isSafeProviderReference
+} = require("../src/social/connectors/states");
 
 const root = path.resolve(__dirname, "..");
 const environmentId = "77777777-7777-4777-8777-777777777777";
@@ -61,6 +70,21 @@ const baseTarget = Object.freeze({
   port: "55432",
   database: "ia4tube_social_test_exact_runner",
   username: "synthetic_migrator"
+});
+const referenceCheckStagingTarget = Object.freeze({
+  environment: "staging",
+  environmentId: PAID_STAGING_PUBLIC_TARGET.environmentId,
+  approval: APPLY_APPROVAL,
+  productionApproval: "",
+  host: PAID_STAGING_PUBLIC_TARGET.host,
+  port: PAID_STAGING_PUBLIC_TARGET.port,
+  database: PAID_STAGING_PUBLIC_TARGET.database,
+  username: PAID_STAGING_PUBLIC_TARGET.migrationLogin
+});
+const referenceCheckApprovalEnvironment = Object.freeze({
+  SOCIAL_MIGRATION_TARGET_FINGERPRINT: targetFingerprint(
+    referenceCheckStagingTarget
+  )
 });
 
 const exactPlanRequest = Object.freeze({
@@ -414,6 +438,31 @@ function exactPhysicalRows(profile, kind) {
   throw new Error(`unknown exact fixture kind: ${kind}`);
 }
 
+function referenceCheckCatalogRows(fixed) {
+  return SOCIAL_REFERENCE_CHECK_REPLACEMENTS.map((entry) => ({
+    table_name: entry.table,
+    constraint_name: entry.constraint,
+    column_name: entry.column,
+    validated: true,
+    definition: fixed
+      ? [
+          `CHECK ((${entry.column} IS NULL) OR (`,
+          `(char_length(${entry.column}) >= 1) AND`,
+          `(char_length(${entry.column}) <= 499) AND`,
+          `(${entry.column} ~ '^[A-Za-z0-9]') AND`,
+          `(${entry.column} !~ '[^A-Za-z0-9._:-]') AND`,
+          `(${entry.column} !~* '(access[_-]?token|refresh[_-]?token|authorization|bearer|password|secret|oauth[_-]?code|api[_-]?key|ciphertext)')` +
+            "))"
+        ].join(" ")
+      : [
+          `CHECK ((${entry.column} IS NULL) OR (`,
+          `(${entry.column} ~ '^[A-Za-z0-9][A-Za-z0-9._:-]{0,499}$') AND`,
+          `(${entry.column} !~* '(access[_-]?token|refresh[_-]?token|authorization|bearer|password|secret|oauth[_-]?code|api[_-]?key|ciphertext)')` +
+            "))"
+        ].join(" ")
+  }));
+}
+
 function safePrincipalAccess(overrides = {}) {
   return {
     owns_database: false,
@@ -442,6 +491,12 @@ function migrationPool(options = {}) {
     activeLocks: 0,
     maxActiveLocks: 0,
     physicalProfile: options.physicalProfile || null,
+    referenceChecksFixed:
+      options.referenceChecksFixed === undefined
+        ? (options.applied || []).some(
+            (row) => row.version === SOCIAL_REFERENCE_CHECK_FIX_MIGRATION
+          )
+        : Boolean(options.referenceChecksFixed),
     exactMigrationExecutions: 0,
     commitAttempts: 0
   };
@@ -519,7 +574,8 @@ function migrationPool(options = {}) {
         if (text === "BEGIN" || text.startsWith("BEGIN TRANSACTION")) {
           transaction = {
             ledgerRows: [],
-            physicalProfile: state.physicalProfile
+            physicalProfile: state.physicalProfile,
+            referenceChecksFixed: state.referenceChecksFixed
           };
           return { rows: [] };
         }
@@ -528,6 +584,7 @@ function migrationPool(options = {}) {
           if (transaction && options.commitOutcomeApplied !== false) {
             state.applied.push(...transaction.ledgerRows);
             state.physicalProfile = transaction.physicalProfile;
+            state.referenceChecksFixed = transaction.referenceChecksFixed;
           }
           transaction = null;
           if (options.commitThrows) {
@@ -707,6 +764,21 @@ function migrationPool(options = {}) {
           }
           return { rows: [] };
         }
+        if (
+          text.includes(
+            "DROP CONSTRAINT social_publications_confirmed_reference_valid"
+          ) &&
+          text.includes(
+            "DROP CONSTRAINT social_publications_reconciliation_reference_valid"
+          ) &&
+          text.includes(
+            "DROP CONSTRAINT social_publication_attempts_reference_valid"
+          )
+        ) {
+          if (transaction) transaction.referenceChecksFixed = true;
+          else state.referenceChecksFixed = true;
+          return { rows: [] };
+        }
         const activeProfile =
           transaction?.physicalProfile || state.physicalProfile;
         const physicalRows = (kind) => {
@@ -747,6 +819,41 @@ function migrationPool(options = {}) {
           text.includes("AS collation_name")
         ) {
           return catalogRows("columns");
+        }
+        if (
+          text.includes("pg_get_constraintdef") &&
+          text.includes("'{0,499}'") &&
+          text.includes("constraint_info.conname = ANY")
+        ) {
+          let rows = referenceCheckCatalogRows(
+            transaction?.referenceChecksFixed ?? state.referenceChecksFixed
+          );
+          if (typeof options.mutateReferenceCheckRows === "function") {
+            rows = options.mutateReferenceCheckRows({
+              fixed:
+                transaction?.referenceChecksFixed ??
+                state.referenceChecksFixed,
+              rows: rows.map((row) => ({ ...row })),
+              state
+            }) || rows;
+          }
+          return {
+            rows
+          };
+        }
+        if (text.startsWith("SELECT ((") && text.includes("AS accepted")) {
+          const value = values[0];
+          const accepted =
+            value === null ||
+            (
+              typeof value === "string" &&
+              value.length >= 1 &&
+              value.length <= 499 &&
+              /^[A-Za-z0-9]/.test(value) &&
+              !/[^A-Za-z0-9._:-]/.test(value) &&
+              !/(access[_-]?token|refresh[_-]?token|authorization|bearer|password|secret|oauth[_-]?code|api[_-]?key|ciphertext)/i.test(value)
+            );
+          return { rows: [{ accepted }] };
         }
         if (text.includes("pg_get_constraintdef")) {
           return catalogRows("constraints");
@@ -932,14 +1039,14 @@ function stagingExactMigrationHarness(overrides = {}) {
   });
 }
 
-function syntheticManifestWith0005() {
+function syntheticManifestWithFutureMigration() {
   const manifest = readManifest({ root });
   const directory = fs.mkdtempSync(
     path.join(os.tmpdir(), "ia4tube-social-exact-0005-")
   );
   const synthetic = {
-    version: "0005_synthetic_future",
-    file: "0005_synthetic_future.up.sql",
+    version: "0006_synthetic_future",
+    file: "0006_synthetic_future.up.sql",
     sql: "SELECT 1;\n"
   };
   const entries = [];
@@ -1024,6 +1131,42 @@ test("exact CLI parser accepts only the frozen plan and apply argument sets", ()
     assert.deepEqual(parseMigrationCommand([command, "legacy-extra"]), {
       command,
       request: undefined
+    });
+  }
+});
+
+test("reference-check CLI parser pins the 0004 to 0005 request and SHA-256", () => {
+  const migrationSha256 = STAGING_REFERENCE_CHECK_0005_SQL_SHA256;
+  assert.equal(readManifest({ root }).at(-1).sha256, migrationSha256);
+  const request = {
+    fromProfile: REFERENCE_CHECK_FROM_PROFILE,
+    toProfile: REFERENCE_CHECK_TO_PROFILE,
+    expectedPending: REFERENCE_CHECK_PENDING_MIGRATIONS,
+    migrationSha256
+  };
+  for (const command of [
+    "plan-reference-check-fix",
+    "apply-reference-check-fix"
+  ]) {
+    assert.deepEqual(
+      parseMigrationCommand([
+        command,
+        `--migration-sha256=${migrationSha256}`
+      ]),
+      { command, request }
+    );
+  }
+  for (const argv of [
+    ["plan-reference-check-fix"],
+    ["plan-reference-check-fix", "--migration-sha256=invalid"],
+    [
+      "apply-reference-check-fix",
+      `--migration-sha256=${migrationSha256}`,
+      "--unexpected=value"
+    ]
+  ]) {
+    assert.throws(() => parseMigrationCommand(argv), {
+      code: "migration_reference_check_argument_invalid"
     });
   }
 });
@@ -1197,7 +1340,8 @@ test("manifest freezes ordered LF-only migration checksums", () => {
       "0001_social_multitenant_foundation",
       "0002_social_connections_and_vault",
       "0003_global_vault_key_registry",
-      "0004_social_connector_persistence"
+      "0004_social_connector_persistence",
+      "0005_fix_social_reference_checks"
     ]
   );
   for (const migration of migrations) {
@@ -1336,6 +1480,155 @@ test("migration scanner allows only the exact 0004 status-check replacement", ()
       () => assertNonDestructiveSql(candidate.sql, candidate.version),
       { code: "destructive_migration_refused" }
     );
+  }
+});
+
+test("migration 0005 replaces only the three reference checks with the 499-character contract", () => {
+  const migrationPath = path.join(
+    root,
+    "db",
+    "migrations",
+    "0005_fix_social_reference_checks.up.sql"
+  );
+  const sql = fs.readFileSync(migrationPath, "utf8");
+  assert.equal(
+    SOCIAL_REFERENCE_CHECK_FIX_MIGRATION,
+    "0005_fix_social_reference_checks"
+  );
+  assert.equal(SOCIAL_REFERENCE_CHECK_REPLACEMENTS.length, 3);
+  assert.doesNotThrow(() =>
+    assertNonDestructiveSql(sql, SOCIAL_REFERENCE_CHECK_FIX_MIGRATION)
+  );
+  assert.equal((sql.match(/\bDROP CONSTRAINT\b/g) || []).length, 3);
+  assert.equal((sql.match(/\bADD CONSTRAINT\b/g) || []).length, 3);
+  assert.equal((sql.match(/\bVALIDATE CONSTRAINT\b/g) || []).length, 3);
+  assert.equal((sql.match(/\bALTER TABLE\b/g) || []).length, 9);
+  assert.doesNotMatch(sql, /\{0,499\}/);
+  assert.doesNotMatch(
+    sql,
+    /\b(?:CREATE|INSERT|UPDATE|DELETE|TRUNCATE|GRANT|REVOKE|OWNER|POLICY|INDEX)\b/i
+  );
+
+  for (const entry of SOCIAL_REFERENCE_CHECK_REPLACEMENTS) {
+    const table = entry.table.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const column = entry.column.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const constraint = entry.constraint.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    assert.match(
+      sql,
+      new RegExp(
+        `ALTER TABLE ia4tube_social\\.${table}\\s+` +
+          `DROP CONSTRAINT ${constraint};`
+      )
+    );
+    const replacement = sql.match(
+      new RegExp(
+        `ALTER TABLE ia4tube_social\\.${table}\\s+` +
+          `ADD CONSTRAINT ${constraint}[\\s\\S]*?NOT VALID;`
+      )
+    )?.[0];
+    assert.ok(replacement);
+    assert.match(replacement, new RegExp(`char_length\\(${column}\\) BETWEEN 1 AND 499`));
+    assert.match(replacement, new RegExp(`${column} ~ '\\\^\\[A-Za-z0-9\\]'`));
+    assert.match(replacement, new RegExp(`${column} !~ '\\\[\\^A-Za-z0-9\\._:-\\]'`));
+    assert.match(replacement, /access\[_-\]\?token/);
+    assert.match(
+      sql,
+      new RegExp(
+        `ALTER TABLE ia4tube_social\\.${table}\\s+` +
+          `VALIDATE CONSTRAINT ${constraint};`
+      )
+    );
+  }
+
+  const safeReference = (value) =>
+    value === null ||
+    (
+      typeof value === "string" &&
+      value.length >= 1 &&
+      value.length <= 499 &&
+      /^[A-Za-z0-9]/.test(value) &&
+      !/[^A-Za-z0-9._:-]/.test(value) &&
+      !/(access[_-]?token|refresh[_-]?token|authorization|bearer|password|secret|oauth[_-]?code|api[_-]?key|ciphertext)/i.test(value)
+    );
+  const cases = [
+    [null, true],
+    ["", false],
+    ["A", true],
+    ["A".repeat(255), true],
+    ["A".repeat(256), true],
+    ["A".repeat(499), true],
+    ["A".repeat(500), false],
+    ["A0._:-z", true],
+    ["A/B", false],
+    ["A\nB", false],
+    ["access_token", false],
+    ["igo:a76b5455eb4d573c8d7aee425bd8928c", true]
+  ];
+  for (const entry of SOCIAL_REFERENCE_CHECK_REPLACEMENTS) {
+    for (const [value, expected] of cases) {
+      assert.equal(safeReference(value), expected, entry.constraint);
+    }
+  }
+  assert.equal(isSafeProviderReference("A".repeat(499)), true);
+  assert.equal(isSafeProviderReference("A".repeat(500)), false);
+  assert.equal(isSafeProviderReference("A\nB"), false);
+  assert.equal(
+    isSafeProviderReference("igo:a76b5455eb4d573c8d7aee425bd8928c"),
+    true
+  );
+
+  const refused = [
+    ["0006_synthetic", sql],
+    [
+      SOCIAL_REFERENCE_CHECK_FIX_MIGRATION,
+      sql.replace(
+        "DROP CONSTRAINT social_publications_confirmed_reference_valid;",
+        "DROP CONSTRAINT IF EXISTS social_publications_confirmed_reference_valid;"
+      )
+    ],
+    [
+      SOCIAL_REFERENCE_CHECK_FIX_MIGRATION,
+      sql.replace(
+        "social_publications_confirmed_reference_valid",
+        "unexpected_reference_constraint"
+      )
+    ],
+    [
+      SOCIAL_REFERENCE_CHECK_FIX_MIGRATION,
+      sql.replace(
+        "ALTER TABLE ia4tube_social.social_publication_attempts",
+        "ALTER TABLE ia4tube_social.social_connections"
+      )
+    ],
+    [
+      SOCIAL_REFERENCE_CHECK_FIX_MIGRATION,
+      `${sql}ALTER TABLE ia4tube_social.social_connections ` +
+        "DROP CONSTRAINT social_connections_status_allowed;\n"
+    ],
+    [
+      SOCIAL_REFERENCE_CHECK_FIX_MIGRATION,
+      `${sql}ALTER TABLE ia4tube_social.social_publications ` +
+        "ADD COLUMN unexpected_reference TEXT;\n"
+    ],
+    [
+      SOCIAL_REFERENCE_CHECK_FIX_MIGRATION,
+      `${sql}GRANT SELECT ON ia4tube_social.social_publications ` +
+        "TO ia4tube_social_runtime;\n"
+    ],
+    [
+      SOCIAL_REFERENCE_CHECK_FIX_MIGRATION,
+      `${sql}UPDATE ia4tube_social.social_publications ` +
+        "SET revision = revision;\n"
+    ],
+    [
+      SOCIAL_REFERENCE_CHECK_FIX_MIGRATION,
+      `${sql}SELECT 1;\n`
+    ]
+  ];
+  for (const [version, candidate] of refused) {
+    assert.throws(() => assertNonDestructiveSql(candidate, version), {
+      code: "destructive_migration_refused"
+    });
   }
 });
 
@@ -2080,7 +2373,7 @@ test("status and validate are read-only when the ledger is absent", async () => 
   const result = await runner.validate();
   assert.equal(result.valid, true);
   assert.equal(result.applied, 0);
-  assert.equal(result.pending, 4);
+  assert.equal(result.pending, 5);
   assert.equal(
     harness.state.queries.some((query) =>
       /^(CREATE|INSERT|UPDATE|DELETE|ALTER|DROP|TRUNCATE)\b/i.test(
@@ -2164,7 +2457,7 @@ test("plan-exact cannot publish requested 0003 when the physical gate is 0004", 
   assert.ok(harness.state.queries.some((query) => query.text === "ROLLBACK"));
 });
 
-test("plan-exact refuses every non-exact ledger state and a future 0005", async () => {
+test("plan-exact refuses non-exact ledger states and preserves its historical 0004 prefix", async () => {
   const manifest = readManifest({ root });
   const states = [
     { name: "empty", applied: [], code: "exact_pending_set_mismatch" },
@@ -2205,7 +2498,7 @@ test("plan-exact refuses every non-exact ledger state and a future 0005", async 
       code: "migration_ledger_invalid"
     }
   ];
-  assert.equal(manifest.length, 4);
+  assert.equal(manifest.length, 5);
   for (const candidate of states) {
     const harness = exactMigrationHarness({
       applied: candidate.applied,
@@ -2219,7 +2512,7 @@ test("plan-exact refuses every non-exact ledger state and a future 0005", async 
     assert.equal(harness.state.exactMigrationExecutions, 0, candidate.name);
   }
 
-  const synthetic = syntheticManifestWith0005();
+  const synthetic = syntheticManifestWithFutureMigration();
   try {
     const harness = exactMigrationHarness();
     const runner = createMigrationRunner({
@@ -2229,10 +2522,14 @@ test("plan-exact refuses every non-exact ledger state and a future 0005", async 
       target: baseTarget,
       manifestOptions: synthetic.options
     });
-    await assert.rejects(
-      runner.planExact(exactPlanRequest, exactApprovalEnvironment),
-      { code: "exact_pending_set_mismatch" }
+    const plan = await runner.planExact(
+      exactPlanRequest,
+      exactApprovalEnvironment
     );
+    assert.equal(plan.planApproved, true);
+    assert.deepEqual(plan.observedPending, [
+      SOCIAL_CONNECTOR_PERSISTENCE_MIGRATION
+    ]);
     assert.equal(harness.state.exactMigrationExecutions, 0);
   } finally {
     fs.rmSync(synthetic.directory, { recursive: true, force: true });
@@ -2602,6 +2899,380 @@ test("exact runner validates the frozen request and synthetic recovery before co
   }
 });
 
+test("the dedicated staging route applies 0005 once, validates all three checks and closes the ledger", async () => {
+  const manifest = readManifest({ root });
+  const migration = manifest.at(-1);
+  assert.equal(migration.sha256, STAGING_REFERENCE_CHECK_0005_SQL_SHA256);
+  const request = Object.freeze({
+    fromProfile: REFERENCE_CHECK_FROM_PROFILE,
+    toProfile: REFERENCE_CHECK_TO_PROFILE,
+    expectedPending: REFERENCE_CHECK_PENDING_MIGRATIONS,
+    migrationSha256: STAGING_REFERENCE_CHECK_0005_SQL_SHA256
+  });
+  const harness = stagingExactMigrationHarness({
+    applied: exactAppliedRows(4),
+    physicalProfile: EXACT_TO_PROFILE,
+    referenceChecksFixed: false
+  });
+  const runner = runnerFor(harness, referenceCheckStagingTarget);
+
+  const plan = await runner.planReferenceCheckFix(
+    request,
+    referenceCheckApprovalEnvironment
+  );
+  assert.equal(plan.fromProfile, REFERENCE_CHECK_FROM_PROFILE);
+  assert.deepEqual(plan.observedPending, [
+    SOCIAL_REFERENCE_CHECK_FIX_MIGRATION
+  ]);
+  assert.equal(plan.checksBefore.length, 3);
+  assert.ok(
+    plan.checksBefore.every((entry) => entry.definition.includes("{0,499}"))
+  );
+
+  const applied = await runner.applyReferenceCheckFix(
+    request,
+    referenceCheckApprovalEnvironment
+  );
+  assert.equal(applied.appliedMigration, SOCIAL_REFERENCE_CHECK_FIX_MIGRATION);
+  assert.equal(applied.finalProfile, REFERENCE_CHECK_TO_PROFILE);
+  assert.equal(applied.checksValidated, 3);
+  assert.equal(applied.semanticChecksPassed, true);
+  assert.equal(applied.postCommitValidated, true);
+  assert.equal(applied.retryAllowed, false);
+  assert.equal(harness.state.referenceChecksFixed, true);
+  assert.equal(
+    harness.state.applied.filter(
+      (row) => row.version === SOCIAL_REFERENCE_CHECK_FIX_MIGRATION
+    ).length,
+    1
+  );
+  assert.equal(
+    harness.state.queries.filter((query) => query.text === migration.sql).length,
+    1
+  );
+  assert.equal(
+    harness.state.queries.filter(
+      (query) =>
+        query.text.startsWith("SELECT ((") &&
+        query.text.includes("AS accepted")
+    ).length,
+    63
+  );
+  assert.equal(
+    harness.state.queries.some((query) =>
+      /\b(?:CREATE\s+TEMP|INSERT|UPDATE|DELETE)\b/i.test(query.text) &&
+      query.text.includes("ia4tube_reference_check_")
+    ),
+    false
+  );
+  const validation = await runner.validate();
+  assert.equal(validation.pending, 0);
+  assert.equal(validation.applied, 5);
+
+  await assert.rejects(
+    runner.applyReferenceCheckFix(request, referenceCheckApprovalEnvironment),
+    { code: "migration_reference_check_pending_set_mismatch" }
+  );
+  assert.equal(
+    harness.state.applied.filter(
+      (row) => row.version === SOCIAL_REFERENCE_CHECK_FIX_MIGRATION
+    ).length,
+    1
+  );
+});
+
+test("the dedicated 0005 route refuses any coordinated request SHA drift before connecting", async () => {
+  const harness = stagingExactMigrationHarness({
+    applied: exactAppliedRows(4),
+    physicalProfile: EXACT_TO_PROFILE,
+    referenceChecksFixed: false
+  });
+  await assert.rejects(
+    runnerFor(harness, referenceCheckStagingTarget).planReferenceCheckFix(
+      {
+        fromProfile: REFERENCE_CHECK_FROM_PROFILE,
+        toProfile: REFERENCE_CHECK_TO_PROFILE,
+        expectedPending: REFERENCE_CHECK_PENDING_MIGRATIONS,
+        migrationSha256: "0".repeat(64)
+      },
+      referenceCheckApprovalEnvironment
+    ),
+    { code: "migration_reference_check_request_invalid" }
+  );
+  assert.equal(harness.state.connected, 0);
+});
+
+test("the 0005 preflight refuses every material drift in the certified legacy checks", async () => {
+  const request = {
+    fromProfile: REFERENCE_CHECK_FROM_PROFILE,
+    toProfile: REFERENCE_CHECK_TO_PROFILE,
+    expectedPending: REFERENCE_CHECK_PENDING_MIGRATIONS,
+    migrationSha256: STAGING_REFERENCE_CHECK_0005_SQL_SHA256
+  };
+  const cases = [
+    {
+      name: "allowed characters",
+      mutate: (row) => ({
+        ...row,
+        definition: row.definition.replace("A-Za-z0-9._:-", "A-Za-z0-9._:")
+      })
+    },
+    {
+      name: "space inside allowed-character regex literal",
+      mutate: (row) => ({
+        ...row,
+        definition: row.definition.replace(
+          "[A-Za-z0-9._:-]",
+          "[ A-Za-z0-9._:-]"
+        )
+      })
+    },
+    {
+      name: "sensitive pattern",
+      mutate: (row) => ({
+        ...row,
+        definition: row.definition.replace("|ciphertext", "")
+      })
+    },
+    {
+      name: "maximum length",
+      mutate: (row) => ({
+        ...row,
+        definition: row.definition.replace("{0,499}", "{0,498}")
+      })
+    },
+    {
+      name: "validation state",
+      mutate: (row) => ({ ...row, validated: false })
+    }
+  ];
+
+  for (const candidate of cases) {
+    const harness = stagingExactMigrationHarness({
+      applied: exactAppliedRows(4),
+      physicalProfile: EXACT_TO_PROFILE,
+      referenceChecksFixed: false,
+      mutateReferenceCheckRows({ fixed, rows }) {
+        assert.equal(fixed, false);
+        return rows.map((row, index) =>
+          index === 0 ? candidate.mutate(row) : row
+        );
+      }
+    });
+    await assert.rejects(
+      runnerFor(harness, referenceCheckStagingTarget).planReferenceCheckFix(
+        request,
+        referenceCheckApprovalEnvironment
+      ),
+      { code: "migration_reference_check_before_mismatch" },
+      candidate.name
+    );
+    assert.equal(harness.state.exactMigrationExecutions, 0, candidate.name);
+    assert.equal(harness.state.referenceChecksFixed, false, candidate.name);
+  }
+});
+
+test("apply-reference-check-fix rolls back SQL, ledger and semantic-gate failures", async () => {
+  const request = {
+    fromProfile: REFERENCE_CHECK_FROM_PROFILE,
+    toProfile: REFERENCE_CHECK_TO_PROFILE,
+    expectedPending: REFERENCE_CHECK_PENDING_MIGRATIONS,
+    migrationSha256: STAGING_REFERENCE_CHECK_0005_SQL_SHA256
+  };
+  const cases = [
+    {
+      name: "migration SQL",
+      failOn: (text) =>
+        text.includes(
+          "DROP CONSTRAINT social_publications_confirmed_reference_valid"
+        )
+    },
+    {
+      name: "ledger insert",
+      failOn: (text, values) =>
+        text.includes("INSERT INTO ia4tube_migrations.schema_migrations") &&
+        values[0] === SOCIAL_REFERENCE_CHECK_FIX_MIGRATION
+    },
+    {
+      name: "semantic gate",
+      failOn: (text) =>
+        text.startsWith("SELECT ((") && text.includes("AS accepted")
+    }
+  ];
+
+  for (const candidate of cases) {
+    const harness = stagingExactMigrationHarness({
+      applied: exactAppliedRows(4),
+      physicalProfile: EXACT_TO_PROFILE,
+      referenceChecksFixed: false,
+      failOn: candidate.failOn
+    });
+    await assert.rejects(
+      runnerFor(harness, referenceCheckStagingTarget).applyReferenceCheckFix(
+        request,
+        referenceCheckApprovalEnvironment
+      ),
+      /synthetic migration failure/,
+      candidate.name
+    );
+    assert.equal(harness.state.commitAttempts, 0, candidate.name);
+    assert.equal(harness.state.referenceChecksFixed, false, candidate.name);
+    assert.equal(
+      harness.state.applied.filter(
+        (row) => row.version === SOCIAL_REFERENCE_CHECK_FIX_MIGRATION
+      ).length,
+      0,
+      candidate.name
+    );
+    assert.equal(
+      harness.state.queries.some((query) => query.text === "ROLLBACK"),
+      true,
+      candidate.name
+    );
+  }
+});
+
+test("apply-reference-check-fix keeps an ambiguous COMMIT non-retryable", async () => {
+  const harness = stagingExactMigrationHarness({
+    applied: exactAppliedRows(4),
+    physicalProfile: EXACT_TO_PROFILE,
+    referenceChecksFixed: false,
+    commitThrows: true,
+    commitOutcomeApplied: true
+  });
+  let failure;
+  try {
+    await runnerFor(
+      harness,
+      referenceCheckStagingTarget
+    ).applyReferenceCheckFix(
+      {
+        fromProfile: REFERENCE_CHECK_FROM_PROFILE,
+        toProfile: REFERENCE_CHECK_TO_PROFILE,
+        expectedPending: REFERENCE_CHECK_PENDING_MIGRATIONS,
+        migrationSha256: STAGING_REFERENCE_CHECK_0005_SQL_SHA256
+      },
+      referenceCheckApprovalEnvironment
+    );
+    assert.fail("ambiguous commit must fail closed");
+  } catch (error) {
+    failure = error;
+  }
+  assert.equal(
+    failure.code,
+    "migration_reference_check_commit_outcome_unknown"
+  );
+  assert.equal(failure.outcomeUnknown, true);
+  assert.equal(failure.retryAllowed, false);
+  assert.equal(failure.requiresReadOnlyInspection, true);
+  assert.equal(harness.state.commitAttempts, 1);
+  assert.equal(harness.state.referenceChecksFixed, true);
+  assert.equal(
+    harness.state.applied.filter(
+      (row) => row.version === SOCIAL_REFERENCE_CHECK_FIX_MIGRATION
+    ).length,
+    1
+  );
+  const commitIndex = harness.state.queries.findIndex(
+    (query) => query.text === "COMMIT"
+  );
+  assert.ok(commitIndex >= 0);
+  assert.equal(
+    harness.state.queries
+      .slice(commitIndex + 1)
+      .some((query) => query.text === "ROLLBACK"),
+    false
+  );
+});
+
+test("generic staging apply refuses 0005 and requires the dedicated route", async () => {
+  const harness = stagingExactMigrationHarness({
+    applied: exactAppliedRows(4),
+    physicalProfile: EXACT_TO_PROFILE,
+    referenceChecksFixed: false
+  });
+  await assert.rejects(
+    runnerFor(harness, referenceCheckStagingTarget).apply(
+      referenceCheckApprovalEnvironment
+    ),
+    { code: "migration_reference_check_exact_route_required" }
+  );
+  assert.equal(harness.state.exactMigrationExecutions, 0);
+  assert.equal(harness.state.referenceChecksFixed, false);
+  assert.equal(
+    harness.state.queries.some((query) =>
+      /^(?:CREATE|ALTER|DROP|GRANT|REVOKE|INSERT|UPDATE|DELETE|TRUNCATE)\b/i.test(
+        query.text.trimStart()
+      )
+    ),
+    false
+  );
+});
+
+test("generic staging apply remains an idempotent no-op after 0005 is already applied", async () => {
+  const harness = stagingExactMigrationHarness({
+    applied: exactAppliedRows(5),
+    physicalProfile: EXACT_TO_PROFILE,
+    referenceChecksFixed: true
+  });
+  const applied = await runnerFor(
+    harness,
+    referenceCheckStagingTarget
+  ).apply(referenceCheckApprovalEnvironment);
+  assert.deepEqual(applied, []);
+  assert.equal(harness.state.referenceChecksFixed, true);
+  assert.equal(
+    harness.state.queries.some((query) =>
+      query.text.includes(
+        "DROP CONSTRAINT social_publications_confirmed_reference_valid"
+      )
+    ),
+    false
+  );
+});
+
+test("the dedicated 0005 route freezes its prefix while generic apply sees a future 0006", async () => {
+  const synthetic = syntheticManifestWithFutureMigration();
+  try {
+    const request = {
+      fromProfile: REFERENCE_CHECK_FROM_PROFILE,
+      toProfile: REFERENCE_CHECK_TO_PROFILE,
+      expectedPending: REFERENCE_CHECK_PENDING_MIGRATIONS,
+      migrationSha256: STAGING_REFERENCE_CHECK_0005_SQL_SHA256
+    };
+    const planHarness = stagingExactMigrationHarness({
+      applied: exactAppliedRows(4),
+      physicalProfile: EXACT_TO_PROFILE,
+      referenceChecksFixed: false
+    });
+    const plan = await runnerFor(
+      planHarness,
+      referenceCheckStagingTarget,
+      synthetic.options
+    ).planReferenceCheckFix(request, referenceCheckApprovalEnvironment);
+    assert.deepEqual(plan.observedPending, [
+      SOCIAL_REFERENCE_CHECK_FIX_MIGRATION
+    ]);
+
+    const genericHarness = stagingExactMigrationHarness({
+      applied: exactAppliedRows(5),
+      physicalProfile: EXACT_TO_PROFILE,
+      referenceChecksFixed: true
+    });
+    const applied = await runnerFor(
+      genericHarness,
+      referenceCheckStagingTarget,
+      synthetic.options
+    ).apply(referenceCheckApprovalEnvironment);
+    assert.deepEqual(
+      applied.map((entry) => entry.version),
+      ["0006_synthetic_future"]
+    );
+  } finally {
+    fs.rmSync(synthetic.directory, { recursive: true, force: true });
+  }
+});
+
 test("apply takes an advisory lock and records SQL plus checksum atomically", async () => {
   const target = baseTarget;
   const harness = migrationPool();
@@ -2609,14 +3280,15 @@ test("apply takes an advisory lock and records SQL plus checksum atomically", as
   const applied = await runner.apply({
     SOCIAL_MIGRATION_TARGET_FINGERPRINT: targetFingerprint(target)
   });
-  assert.equal(applied.length, 4);
+  assert.equal(applied.length, 5);
   assert.deepEqual(
     harness.state.applied.map((row) => row.version),
     [
       "0001_social_multitenant_foundation",
       "0002_social_connections_and_vault",
       "0003_global_vault_key_registry",
-      "0004_social_connector_persistence"
+      "0004_social_connector_persistence",
+      "0005_fix_social_reference_checks"
     ]
   );
   const texts = harness.state.queries.map((query) => query.text);
@@ -3109,7 +3781,7 @@ test("apply-staging-exact rolls back SQL, ledger and physical-gate failures", as
   }
 });
 
-test("staging-exact refuses ledger, owner, relkind and future migration before mutation", async () => {
+test("staging-exact refuses ledger, owner and relkind while preserving its historical 0004 prefix", async () => {
   const cases = [
     {
       name: "duplicate ledger",
@@ -3158,18 +3830,23 @@ test("staging-exact refuses ledger, owner, relkind and future migration before m
     assert.equal(harness.state.commitAttempts, 0, candidate.name);
   }
 
-  const synthetic = syntheticManifestWith0005();
+  const synthetic = syntheticManifestWithFutureMigration();
   try {
     const harness = stagingExactMigrationHarness();
-    await assert.rejects(
-      runnerFor(harness, stagingTarget, synthetic.options).planStagingExact(
-        stagingExactRequest,
-        stagingApprovalEnvironment
-      ),
-      { code: "migration_staging_exact_manifest_mismatch" }
+    const plan = await runnerFor(
+      harness,
+      stagingTarget,
+      synthetic.options
+    ).planStagingExact(
+      stagingExactRequest,
+      stagingApprovalEnvironment
     );
-    assert.equal(harness.state.connected, 0);
+    assert.deepEqual(plan.observedPending, [
+      SOCIAL_CONNECTOR_PERSISTENCE_MIGRATION
+    ]);
+    assert.equal(plan.planApproved, true);
     assert.equal(harness.state.exactMigrationExecutions, 0);
+    assert.equal(harness.state.commitAttempts, 0);
   } finally {
     fs.rmSync(synthetic.directory, { recursive: true, force: true });
   }
@@ -3566,7 +4243,7 @@ test("two apply-exact runners produce one winner and one pending-set refusal", a
   );
 });
 
-test("reapplying all four migrations is idempotent at the ledger boundary", async () => {
+test("reapplying all five migrations is idempotent at the ledger boundary", async () => {
   const harness = migrationPool();
   const runner = runnerFor(harness);
   const approval = {
@@ -3574,7 +4251,7 @@ test("reapplying all four migrations is idempotent at the ledger boundary", asyn
   };
   const first = await runner.apply(approval);
   const second = await runner.apply(approval);
-  assert.equal(first.length, 4);
+  assert.equal(first.length, 5);
   assert.equal(second.length, 0);
   assert.deepEqual(
     harness.state.applied.map((row) => row.version),
@@ -3582,12 +4259,13 @@ test("reapplying all four migrations is idempotent at the ledger boundary", asyn
       "0001_social_multitenant_foundation",
       "0002_social_connections_and_vault",
       "0003_global_vault_key_registry",
-      "0004_social_connector_persistence"
+      "0004_social_connector_persistence",
+      "0005_fix_social_reference_checks"
     ]
   );
   assert.equal(
     new Set(harness.state.applied.map((row) => row.version)).size,
-    4
+    5
   );
 });
 
@@ -3679,15 +4357,15 @@ test("concurrent runners serialize and never apply a checksum twice", async () =
 
   assert.deepEqual(
     results.map((result) => result.length).sort((a, b) => a - b),
-    [0, 4]
+    [0, 5]
   );
   assert.equal(harness.state.lockWaits, 1);
   assert.equal(harness.state.maxActiveLocks, 1);
   assert.equal(harness.state.activeLocks, 0);
-  assert.equal(harness.state.applied.length, 4);
+  assert.equal(harness.state.applied.length, 5);
   assert.equal(
     new Set(harness.state.applied.map((row) => row.version)).size,
-    4
+    5
   );
 });
 

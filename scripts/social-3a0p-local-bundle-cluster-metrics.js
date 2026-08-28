@@ -7,7 +7,8 @@ const {
 
 const BUNDLE_PROFILES = Object.freeze([
   "social-schema-0003",
-  "social-schema-0004"
+  "social-schema-0004",
+  "social-schema-0005"
 ]);
 const SHA256 = /^[0-9a-f]{64}$/;
 
@@ -25,7 +26,11 @@ function requirePositiveInteger(value, code) {
 }
 
 function metricSuffix(profile) {
-  return profile === "social-schema-0003" ? "0003" : "0004";
+  const suffix = profile.match(/^social-schema-(\d{4})$/)?.[1];
+  if (!suffix || !BUNDLE_PROFILES.includes(profile)) {
+    fail("harness_bundle_profile_invalid");
+  }
+  return suffix;
 }
 
 function normalizeBundleDescriptor(bundle) {
@@ -187,11 +192,15 @@ function assertBundleMetricsSafe(result) {
       result.counts.bundle0003RlsPolicies,
       result.counts.bundle0004Bytes,
       result.counts.bundle0004Tables,
-      result.counts.bundle0004RlsPolicies
+      result.counts.bundle0004RlsPolicies,
+      result.counts.bundle0005Bytes,
+      result.counts.bundle0005Tables,
+      result.counts.bundle0005RlsPolicies
     ].some((value) => !Number.isSafeInteger(value) || value < 1) ||
     !isPlainObject(result.checks) ||
     result.checks.bundle0003RestoreApproved !== true ||
-    result.checks.bundle0004RestoreApproved !== true
+    result.checks.bundle0004RestoreApproved !== true ||
+    result.checks.bundle0005RestoreApproved !== true
   ) {
     fail("harness_bundle_restore_not_approved");
   }
@@ -200,7 +209,9 @@ function assertBundleMetricsSafe(result) {
     typeof result.hashes.bundle0003Sha256 !== "string" ||
     !SHA256.test(result.hashes.bundle0003Sha256) ||
     typeof result.hashes.bundle0004Sha256 !== "string" ||
-    !SHA256.test(result.hashes.bundle0004Sha256)
+    !SHA256.test(result.hashes.bundle0004Sha256) ||
+    typeof result.hashes.bundle0005Sha256 !== "string" ||
+    !SHA256.test(result.hashes.bundle0005Sha256)
   ) {
     fail("harness_bundle_individual_hashes_invalid");
   }

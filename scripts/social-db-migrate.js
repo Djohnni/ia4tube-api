@@ -11,11 +11,19 @@ const {
   EXACT_FROM_PROFILE,
   EXACT_PENDING_MIGRATIONS,
   EXACT_TO_PROFILE,
+  REFERENCE_CHECK_FROM_PROFILE,
+  REFERENCE_CHECK_PENDING_MIGRATIONS,
+  REFERENCE_CHECK_TO_PROFILE,
   createMigrationRunner
 } = require("../src/persistence/postgres/migrations");
 
 const LEGACY_COMMANDS = new Set(["status", "validate", "apply"]);
 const EXACT_COMMANDS = new Set(["plan-exact", "apply-exact"]);
+const REFERENCE_CHECK_COMMANDS = new Set([
+  "plan-reference-check-fix",
+  "apply-reference-check-fix"
+]);
+const SHA256_PATTERN = /^[0-9a-f]{64}$/;
 const RECOVERY_REFERENCE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/;
 const RECOVERY_TIMESTAMP =
   /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?Z$/;
@@ -51,6 +59,27 @@ function parseMigrationCommand(argv = process.argv.slice(2)) {
   if (LEGACY_COMMANDS.has(command)) {
     // Preserve the historical parser: legacy modes use only argv[0].
     return Object.freeze({ command, request: undefined });
+  }
+  if (REFERENCE_CHECK_COMMANDS.has(command)) {
+    const named = parseNamedArguments(argv.slice(1));
+    if (
+      named.size !== 1 ||
+      !named.has("migration-sha256") ||
+      !SHA256_PATTERN.test(named.get("migration-sha256"))
+    ) {
+      refuse("migration_reference_check_argument_invalid");
+    }
+    return Object.freeze({
+      command,
+      request: Object.freeze({
+        fromProfile: REFERENCE_CHECK_FROM_PROFILE,
+        toProfile: REFERENCE_CHECK_TO_PROFILE,
+        expectedPending: Object.freeze([
+          ...REFERENCE_CHECK_PENDING_MIGRATIONS
+        ]),
+        migrationSha256: named.get("migration-sha256")
+      })
+    });
   }
   if (!EXACT_COMMANDS.has(command)) refuse("migration_command_invalid");
 
@@ -156,6 +185,13 @@ async function main({
     if (parsed.command === "status") result = await runner.inspect();
     if (parsed.command === "validate") result = await runner.validate();
     if (parsed.command === "apply") result = await runner.apply(env);
+    if (parsed.command === "plan-reference-check-fix") {
+      result = await runner.planReferenceCheckFix(parsed.request, env);
+    }
+    if (parsed.command === "apply-reference-check-fix") {
+      await runner.planReferenceCheckFix(parsed.request, env);
+      result = await runner.applyReferenceCheckFix(parsed.request, env);
+    }
     if (parsed.command === "plan-exact") {
       result = await runner.planExact(parsed.request, env);
     }
@@ -204,6 +240,7 @@ if (require.main === module) {
 
 module.exports = {
   LEGACY_COMMANDS,
+  REFERENCE_CHECK_COMMANDS,
   MigrationCommandFailure,
   parseMigrationCommand,
   main

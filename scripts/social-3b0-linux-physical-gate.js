@@ -9,6 +9,9 @@ const net = require("node:net");
 const dns = require("node:dns");
 const tls = require("node:tls");
 const path = require("node:path");
+const {
+  materializeAuthenticatedMigrationProfile
+} = require("./social-migration-profile-manifest");
 
 const BRANCH =
   "social/checkpoint-3b0-o22-loopback-socket-close-barrier-20260813";
@@ -2127,7 +2130,12 @@ async function runPhysicalOAuthContract(options = {}) {
         ownerRole: OWNER_ROLE,
         migratorRole: MIGRATOR_ROLE,
         target,
-        manifestOptions: { root: repositoryRoot }
+        manifestOptions: materializeAuthenticatedMigrationProfile({
+          repositoryRoot,
+          ownedRoot: postgres.workDirectory,
+          profileId: migrations.EXACT_TO_PROFILE,
+          migrationsModule: migrations
+        })
       });
       const applied = await runner.apply({
         SOCIAL_MIGRATION_TARGET_FINGERPRINT: migrations.targetFingerprint(target)

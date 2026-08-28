@@ -33,6 +33,7 @@ const {
   CONNECTION_TRANSITIONS,
   PUBLICATION_TRANSITIONS,
   assertPublicationConfirmation,
+  isSafeProviderReference,
   isPublicationConfirmed,
   transitionConnectionState,
   transitionPublicationState
@@ -420,6 +421,25 @@ test("provider references are opaque identifiers and never URLs or secret-shaped
     state: "provider_confirming",
     reconciliationReference: "container:17890000000000000"
   }));
+});
+
+test("provider reference boundary matches the physical 0005 contract", () => {
+  for (const length of [1, 255, 256, 499]) {
+    assert.equal(isSafeProviderReference("A".repeat(length)), true, String(length));
+  }
+  assert.equal(
+    isSafeProviderReference("igo:a76b5455eb4d573c8d7aee425bd8928c"),
+    true
+  );
+  for (const reference of [
+    "",
+    "A".repeat(500),
+    "invalid/reference",
+    "line\nbreak",
+    "access_token:forbidden"
+  ]) {
+    assert.equal(isSafeProviderReference(reference), false, reference.length);
+  }
 });
 
 test("pending provider result is never treated as published", async () => {

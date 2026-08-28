@@ -20,6 +20,11 @@
       "version": "0004_social_connector_persistence",
       "file": "0004_social_connector_persistence.up.sql",
       "sha256": "91f6efc611903c40e16bd37828d5b9c1a03dfae222e1d13b5dc97f81ffde1b5d"
+    },
+    {
+      "version": "0005_fix_social_reference_checks",
+      "file": "0005_fix_social_reference_checks.up.sql",
+      "sha256": "ddac4a02cecfd5247432687289001aa3198cce4dccab4e45cedc4cff26e5da93"
     }
   ]
 }

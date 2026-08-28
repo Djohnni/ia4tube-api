@@ -156,6 +156,29 @@ test("router rejects a service response carrying any extra sensitive field", () 
   assert.equal(JSON.stringify(unsafe).includes("must-not-escape"), true);
 });
 
+test("router preserves a 499-character provider reference and rejects 500", () => {
+  const accepted = summary();
+  accepted.publication.attempts[0].providerReference = "A".repeat(499);
+  assert.equal(
+    normalizeSummary(accepted).publication.attempts[0].providerReference.length,
+    499
+  );
+
+  const refused = summary();
+  refused.publication.attempts[0].providerReference = "A".repeat(500);
+  assert.throws(() => normalizeSummary(refused));
+
+  const newline = summary();
+  newline.publication.attempts[0].providerReference = "valid\ninvalid";
+  assert.throws(() => normalizeSummary(newline));
+
+  for (const sensitive of ["access_token:forbidden", "Access-Token:forbidden"]) {
+    const unsafe = summary();
+    unsafe.publication.attempts[0].providerReference = sensitive;
+    assert.throws(() => normalizeSummary(unsafe));
+  }
+});
+
 test("unknown publication service is closed without project mutation", async () => {
   const h = harness(null);
   const routes = {};

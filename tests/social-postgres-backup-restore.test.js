@@ -1038,7 +1038,7 @@ test("operator uses only provisioner locks and catalog inspection", async (t) =>
   assert.equal(events.includes("BEGIN"), false);
   assert.equal(events.some((text) => /\bSET\s+(?:LOCAL\s+)?ROLE\b/i.test(text)), false);
   assert.equal(events.some((text) => text.includes("environment_identity")), false);
-  assert.equal(inspectedProfile.id, "social-schema-0004");
+  assert.equal(inspectedProfile.id, "social-schema-0005");
   assert.equal(
     events.filter((text) => text.includes("schema_migrations")).length,
     1
@@ -1056,6 +1056,7 @@ test("operator uses only provisioner locks and catalog inspection", async (t) =>
 test("catalog constraints are closed per authenticated schema profile", async (t) => {
   const profile0003 = SCHEMA_PROFILES[0];
   const profile0004 = SCHEMA_PROFILES[1];
+  const profile0005 = SCHEMA_PROFILES[2];
 
   async function accepted(context, profile, rows) {
     const catalog = await collectProfileCatalog(context, profile, rows);
@@ -1105,6 +1106,16 @@ test("catalog constraints are closed per authenticated schema profile", async (t
     await accepted(
       context,
       profile0004,
+      profile0004ConstraintRows((_constraint, index) => index % 2 === 0)
+    );
+  });
+
+  await t.test("0005 accepts the same connector validation states", async (context) => {
+    await accepted(context, profile0005, profile0004ConstraintRows(false));
+    await accepted(context, profile0005, profile0004ConstraintRows(true));
+    await accepted(
+      context,
+      profile0005,
       profile0004ConstraintRows((_constraint, index) => index % 2 === 0)
     );
   });
@@ -1593,8 +1604,20 @@ test("manifest verifies every logical file, counts and migration checksum", (t) 
 
 test("schema profile is selected only from an exact authenticated migration prefix", () => {
   const legacy = SCHEMA_PROFILES[0];
-  const current = SCHEMA_PROFILES[1];
+  const connector = SCHEMA_PROFILES[1];
+  const current = SCHEMA_PROFILES.at(-1);
+  assert.equal(current.id, "social-schema-0005");
+  assert.equal(current.migrationRows.length, 5);
+  assert.equal(
+    current.migrationRows.at(-1).version,
+    "0005_fix_social_reference_checks"
+  );
+  assert.deepEqual(
+    current.migrationRows,
+    EXPECTED_MIGRATION_ROWS.slice(0, 5)
+  );
   assert.equal(resolveSchemaProfile(legacy.migrationRows).id, legacy.id);
+  assert.equal(resolveSchemaProfile(connector.migrationRows).id, connector.id);
   assert.equal(resolveSchemaProfile(current.migrationRows).id, current.id);
   assert.throws(() => resolveSchemaProfile([]), {
     code: "backup_migration_state_invalid"
@@ -1748,7 +1771,7 @@ test("legacy format-2 0003 bundle restores with its exact authenticated table se
   assert.equal(psqlCalls, 2);
 });
 
-test("logical restore 0003 and 0004 independently dispatch runtime, vault, and 2A before workspace cleanup", async (t) => {
+test("logical restore 0003, 0004 and 0005 independently dispatch runtime, vault, and 2A before workspace cleanup", async (t) => {
   const specifications = [
     Object.freeze({
       profile: SCHEMA_PROFILES[0],
@@ -1763,6 +1786,14 @@ test("logical restore 0003 and 0004 independently dispatch runtime, vault, and 2
       authority: Object.freeze({
         activationMarkerGeneration: 3,
         activeOperationalKeyGeneration: 1900000000,
+        randomCandidate: 1000000041
+      })
+    }),
+    Object.freeze({
+      profile: SCHEMA_PROFILES[2],
+      authority: Object.freeze({
+        activationMarkerGeneration: 4,
+        activeOperationalKeyGeneration: 1900000001,
         randomCandidate: 1000000041
       })
     })
@@ -1805,7 +1836,7 @@ test("logical restore 0003 and 0004 independently dispatch runtime, vault, and 2
       },
       async verifyVault() {
         verifications.push("vault");
-        if (profile.id === "social-schema-0004") {
+        if (profile.id !== "social-schema-0003") {
           assert.ok(
             authority.activeOperationalKeyGeneration > authority.randomCandidate
           );
@@ -1842,10 +1873,15 @@ test("logical restore 0003 and 0004 independently dispatch runtime, vault, and 2
   assert.notEqual(runs[0].events, runs[1].events);
   assert.notEqual(runs[0].restoreWorkspace, runs[1].restoreWorkspace);
   assert.notEqual(runs[0].verifications, runs[1].verifications);
+  assert.notEqual(runs[1].authority, runs[2].authority);
+  assert.notEqual(runs[1].config, runs[2].config);
+  assert.notEqual(runs[1].events, runs[2].events);
+  assert.notEqual(runs[1].restoreWorkspace, runs[2].restoreWorkspace);
+  assert.notEqual(runs[1].verifications, runs[2].verifications);
 });
 
 test("legacy format-2 exception is limited to the exact 0003 contract", (t) => {
-  const current = createBundle(t, SCHEMA_PROFILES[1]);
+  const current = createBundle(t, SCHEMA_PROFILES.at(-1));
   const disguisedCurrent = JSON.parse(JSON.stringify(current.manifest));
   disguisedCurrent.format = 2;
   delete disguisedCurrent.schemaProfile;

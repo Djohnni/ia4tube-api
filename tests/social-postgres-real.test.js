@@ -38,9 +38,14 @@ const {
   EXACT_FROM_PROFILE,
   EXACT_PENDING_MIGRATIONS,
   EXACT_TO_PROFILE,
+  REFERENCE_CHECK_FROM_PROFILE,
+  REFERENCE_CHECK_PENDING_MIGRATIONS,
+  REFERENCE_CHECK_TO_PROFILE,
   GLOBAL_VAULT_BACKFILL_POLICY,
   GLOBAL_VAULT_REGISTRY_MIGRATION,
   SOCIAL_CONNECTOR_PERSISTENCE_MIGRATION,
+  SOCIAL_REFERENCE_CHECK_FIX_MIGRATION,
+  SOCIAL_REFERENCE_CHECK_REPLACEMENTS,
   compareMigrationState,
   createMigrationRunner,
   readManifest,
@@ -82,6 +87,8 @@ const FOUNDATION_MIGRATION_VERSION =
   "0001_social_multitenant_foundation";
 const EXACT_RECOVERY_REFERENCE = "synthetic-pg18-recovery-reference-0004";
 const EXACT_RECOVERY_CAPTURED_AT = "2026-08-13T12:00:00.000Z";
+const GATE4_PROVIDER_REFERENCE =
+  "igo:a76b5455eb4d573c8d7aee425bd8928c";
 const EXACT_PLAN_REQUEST = Object.freeze({
   fromProfile: EXACT_FROM_PROFILE,
   expectedPending: EXACT_PENDING_MIGRATIONS,
@@ -1368,6 +1375,328 @@ function temporaryMigrationManifest(migrations, suffix) {
   });
 }
 
+async function readReferenceCheckCatalog(client) {
+  const result = await client.query(
+    [
+      "SELECT relation.relname AS table_name,",
+      "  constraint_info.conname AS constraint_name,",
+      "  attribute.attname AS column_name,",
+      "  constraint_info.convalidated AS validated,",
+      "  pg_catalog.pg_get_constraintdef(constraint_info.oid, true)",
+      "    AS definition",
+      "FROM pg_catalog.pg_constraint constraint_info",
+      "JOIN pg_catalog.pg_class relation",
+      "  ON relation.oid = constraint_info.conrelid",
+      "JOIN pg_catalog.pg_namespace namespace",
+      "  ON namespace.oid = relation.relnamespace",
+      "LEFT JOIN pg_catalog.pg_attribute attribute",
+      "  ON attribute.attrelid = relation.oid",
+      "  AND array_length(constraint_info.conkey, 1) = 1",
+      "  AND attribute.attnum = constraint_info.conkey[1]",
+      "WHERE namespace.nspname = 'ia4tube_social'",
+      "  AND constraint_info.contype = 'c'",
+      "  AND (",
+      "    constraint_info.conname = ANY($1::text[]) OR",
+      "    strpos(",
+      "      pg_catalog.pg_get_constraintdef(constraint_info.oid, true),",
+      "      '{0,499}'",
+      "    ) > 0",
+      "  )",
+      "ORDER BY relation.relname, constraint_info.conname"
+    ].join("\n"),
+    [SOCIAL_REFERENCE_CHECK_REPLACEMENTS.map((entry) => entry.constraint)]
+  );
+  assert.equal(result.rowCount, SOCIAL_REFERENCE_CHECK_REPLACEMENTS.length);
+  const expected = new Set(
+    SOCIAL_REFERENCE_CHECK_REPLACEMENTS.map(
+      (entry) => `${entry.table}|${entry.constraint}|${entry.column}`
+    )
+  );
+  assert.deepEqual(
+    new Set(
+      result.rows.map(
+        (row) =>
+          `${row.table_name}|${row.constraint_name}|${row.column_name}`
+      )
+    ),
+    expected
+  );
+  assert.ok(result.rows.every((row) => row.validated === true));
+  return result.rows;
+}
+
+async function insertReferenceCheckFixture(client, row, sample, fixture) {
+  const operationId = randomUuid();
+  const publicationId = randomUuid();
+  const requestHash = digest(
+    `${row.constraint_name}:${sample.name}:${publicationId}`
+  );
+  await client.query(
+    [
+      "INSERT INTO ia4tube_social.social_idempotency_operations (",
+      "  company_id, operation_id, provider, capability, request_hash",
+      ") VALUES ($1, $2, 'instagram', 'publishImage', $3)"
+    ].join("\n"),
+    [fixture.companyId, operationId, requestHash]
+  );
+
+  const confirmed =
+    row.constraint_name ===
+    "social_publications_confirmed_reference_valid";
+  const reconciliation =
+    row.constraint_name ===
+    "social_publications_reconciliation_reference_valid";
+  const attempt =
+    row.constraint_name ===
+    "social_publication_attempts_reference_valid";
+  assert.equal(Number(confirmed) + Number(reconciliation) + Number(attempt), 1);
+
+  const confirmedReference = confirmed ? sample.value : null;
+  const reconciliationReference = reconciliation ? sample.value : null;
+  const publicationState =
+    confirmed && sample.value !== null
+      ? "published"
+      : (reconciliation && sample.value !== null) || attempt
+        ? "provider_confirming"
+        : "ready";
+  const publishedAt =
+    confirmed && sample.value !== null ? new Date() : null;
+  await client.query(
+    [
+      "INSERT INTO ia4tube_social.social_publications (",
+      "  company_id, id, connection_id, provider, media_reference,",
+      "  media_metadata_digest, state, idempotency_key, request_hash,",
+      "  confirmed_provider_reference, reconciliation_reference,",
+      "  published_at",
+      ") VALUES ($1, $2, $3, 'instagram', $4, $5, $6, $7, $8,",
+      "  $9, $10, $11)"
+    ].join("\n"),
+    [
+      fixture.companyId,
+      publicationId,
+      fixture.connectionId,
+      `reference-check-${sample.name}`,
+      digest(`reference-check-media:${publicationId}`),
+      publicationState,
+      operationId,
+      requestHash,
+      confirmedReference,
+      reconciliationReference,
+      publishedAt
+    ]
+  );
+
+  if (attempt) {
+    await client.query(
+      [
+        "INSERT INTO ia4tube_social.social_publication_attempts (",
+        "  company_id, publication_id, provider, attempt_number, state,",
+        "  provider_reference, finished_at, duration_ms",
+        ") VALUES ($1, $2, 'instagram', 1, $3, $4,",
+        "  CURRENT_TIMESTAMP, 0)"
+      ].join("\n"),
+      [
+        fixture.companyId,
+        publicationId,
+        sample.value === null ? "provider_confirming" : "published",
+        sample.value
+      ]
+    );
+  }
+}
+
+async function proveReferenceCheckMatrix(pool, fixture) {
+  const samples = Object.freeze([
+    Object.freeze({ name: "null", value: null, accepted: true }),
+    Object.freeze({ name: "empty", value: "", accepted: false }),
+    Object.freeze({ name: "length_1", value: "A", accepted: true }),
+    Object.freeze({
+      name: "length_255",
+      value: "A".repeat(255),
+      accepted: true
+    }),
+    Object.freeze({
+      name: "length_256",
+      value: "A".repeat(256),
+      accepted: true
+    }),
+    Object.freeze({
+      name: "length_499",
+      value: "A".repeat(499),
+      accepted: true
+    }),
+    Object.freeze({
+      name: "length_500",
+      value: "A".repeat(500),
+      accepted: false
+    }),
+    Object.freeze({
+      name: "valid_characters",
+      value: "Az09._:-valid",
+      accepted: true
+    }),
+    Object.freeze({
+      name: "invalid_character",
+      value: "A/B",
+      accepted: false
+    }),
+    Object.freeze({
+      name: "unexpected_newline",
+      value: "A\nB",
+      accepted: false
+    }),
+    Object.freeze({
+      name: "sensitive_reference",
+      value: "access_token",
+      accepted: false
+    }),
+    Object.freeze({
+      name: "gate4_reference",
+      value: GATE4_PROVIDER_REFERENCE,
+      accepted: true
+    })
+  ]);
+
+  return withTransaction(
+    pool,
+    async (client) => {
+      const catalog = await readReferenceCheckCatalog(client);
+      let checkIndex = 0;
+      for (const row of catalog) {
+        const definition = String(row.definition || "");
+        assert.match(definition, /^CHECK\s*\(/i);
+        assert.doesNotMatch(definition, /\{0,499\}/);
+        assert.match(definition, /char_length\(/);
+        assert.match(definition, />= 1/);
+        assert.match(definition, /<= 499/);
+
+        let sampleIndex = 0;
+        for (const sample of samples) {
+          const savepoint = `reference_real_${checkIndex}_${sampleIndex}`;
+          await client.query(`SAVEPOINT ${quoteIdentifier(savepoint)}`);
+          let failure = null;
+          try {
+            await insertReferenceCheckFixture(client, row, sample, fixture);
+          } catch (error) {
+            failure = error;
+          }
+          await client.query(
+            `ROLLBACK TO SAVEPOINT ${quoteIdentifier(savepoint)}`
+          );
+          await client.query(`RELEASE SAVEPOINT ${quoteIdentifier(savepoint)}`);
+
+          if (sample.accepted) {
+            assert.equal(
+              failure,
+              null,
+              `${row.constraint_name}:${sample.name}`
+            );
+          } else {
+            assert.ok(failure, `${row.constraint_name}:${sample.name}`);
+            assert.equal(
+              failure.code,
+              "23514",
+              `${row.constraint_name}:${sample.name}`
+            );
+            assert.equal(
+              failure.constraint,
+              row.constraint_name,
+              `${row.constraint_name}:${sample.name}`
+            );
+          }
+          sampleIndex += 1;
+        }
+        checkIndex += 1;
+      }
+      return Object.freeze({
+        checks: catalog.length,
+        samplesPerCheck: samples.length,
+        assertions: catalog.length * samples.length
+      });
+    },
+    { role: OWNER_ROLE, companyId: fixture.companyId }
+  );
+}
+
+async function proveReferenceCheckFix0005(pool, configuration, fixture) {
+  const migration = readManifest().find(
+    (entry) => entry.version === SOCIAL_REFERENCE_CHECK_FIX_MIGRATION
+  );
+  assert.ok(migration);
+  const request = Object.freeze({
+    fromProfile: REFERENCE_CHECK_FROM_PROFILE,
+    toProfile: REFERENCE_CHECK_TO_PROFILE,
+    expectedPending: REFERENCE_CHECK_PENDING_MIGRATIONS,
+    migrationSha256: migration.sha256
+  });
+  const runner = migrationRunner(pool, configuration);
+  const before = await runner.validate();
+  assert.equal(before.valid, true);
+  assert.equal(before.applied, 4);
+  assert.equal(before.pending, 1);
+  const plan = await runner.planReferenceCheckFix(
+    request,
+    configuration.approvalEnvironment
+  );
+  assert.equal(plan.fromProfile, REFERENCE_CHECK_FROM_PROFILE);
+  assert.equal(plan.toProfile, REFERENCE_CHECK_TO_PROFILE);
+  assert.equal(plan.readOnly, true);
+  assert.deepEqual(plan.observedPending, [
+    SOCIAL_REFERENCE_CHECK_FIX_MIGRATION
+  ]);
+  assert.equal(plan.checksBefore.length, 3);
+  assert.ok(
+    plan.checksBefore.every((entry) =>
+      entry.definition.includes("{0,499}")
+    )
+  );
+
+  const applied = await runner.applyReferenceCheckFix(
+    request,
+    configuration.approvalEnvironment
+  );
+  assert.equal(
+    applied.appliedMigration,
+    SOCIAL_REFERENCE_CHECK_FIX_MIGRATION
+  );
+  assert.equal(applied.finalProfile, REFERENCE_CHECK_TO_PROFILE);
+  assert.equal(applied.checksBefore.length, 3);
+  assert.equal(applied.checksAfter.length, 3);
+  assert.equal(applied.checksValidated, 3);
+  assert.equal(applied.semanticChecksPassed, true);
+  assert.equal(applied.postCommitValidated, true);
+  assert.equal(applied.retryAllowed, false);
+
+  const matrix = await proveReferenceCheckMatrix(pool, fixture);
+  assert.deepEqual(matrix, {
+    checks: 3,
+    samplesPerCheck: 12,
+    assertions: 36
+  });
+
+  const validation = await runner.validate();
+  assert.equal(validation.valid, true);
+  assert.equal(validation.applied, 5);
+  assert.equal(validation.pending, 0);
+  const ledger = await withTransaction(
+    pool,
+    (client) =>
+      client.query(
+        [
+          "SELECT COUNT(*)::integer AS ledger_rows,",
+          "  MIN(checksum_sha256)::text AS checksum_sha256",
+          "FROM ia4tube_migrations.schema_migrations",
+          "WHERE version = $1"
+        ].join("\n"),
+        [SOCIAL_REFERENCE_CHECK_FIX_MIGRATION]
+      ),
+    { role: MIGRATOR_ROLE }
+  );
+  assert.equal(ledger.rows[0].ledger_rows, 1);
+  assert.equal(ledger.rows[0].checksum_sha256, migration.sha256);
+  return Object.freeze({ applied, matrix, validation });
+}
+
 async function proveMigrationConcurrency(
   firstRunner,
   secondRunner,
@@ -2040,11 +2369,20 @@ async function proveExact0004Route(
   migrationPoolB,
   configuration,
   companyWithLegacyConnection,
-  physicalPhases
+  physicalPhases,
+  manifestOptions
 ) {
   assert.equal(configuration.mode, LOOPBACK_MODE);
-  const runnerA = migrationRunner(migrationPoolA, configuration);
-  const runnerB = migrationRunner(migrationPoolB, configuration);
+  const runnerA = migrationRunner(
+    migrationPoolA,
+    configuration,
+    manifestOptions
+  );
+  const runnerB = migrationRunner(
+    migrationPoolB,
+    configuration,
+    manifestOptions
+  );
   await proveMigratorExplicitRoleBoundary(migrationPoolA, physicalPhases);
   physicalPhases.startExact0004Subphase("snapshot_before_plan");
   const beforePlan = await readExactCatalogSnapshot(migrationPoolA);
@@ -2074,7 +2412,7 @@ async function proveExact0004Route(
   physicalPhases.completeExact0004Subphase("plan_snapshot_compare");
 
   physicalPhases.startExact0004Subphase("synthetic_0005_negative");
-  const manifest = readManifest();
+  const manifest = readManifest(manifestOptions);
   const futureSql = "SELECT 1;\n";
   const futureManifest = temporaryMigrationManifest(
     [
@@ -2094,12 +2432,13 @@ async function proveExact0004Route(
       configuration,
       futureManifest.options
     );
-    await assert.rejects(
-      futureRunner.planExact(
+    assert.deepEqual(
+      await futureRunner.planExact(
         EXACT_PLAN_REQUEST,
         configuration.approvalEnvironment
       ),
-      { code: "exact_pending_set_mismatch" }
+      plan,
+      "A rota historica 0004 deve autenticar somente o prefixo congelado."
     );
     assert.equal(await readExactCatalogSnapshot(migrationPoolA), beforePlan);
   } finally {
@@ -4512,28 +4851,77 @@ test(
       physicalPhases.startMain("exact_0004_plan_apply");
       let runnerA;
       let runnerB;
-      if (configuration.mode === LOOPBACK_MODE) {
-        ({ runnerA, runnerB } = await proveExact0004Route(
-          migrationPoolA,
-          migrationPoolB,
-          configuration,
-          companyC,
-          physicalPhases
-        ));
-      } else {
-        runnerA = migrationRunner(migrationPoolA, configuration);
-        runnerB = migrationRunner(migrationPoolB, configuration);
-        await proveMigrationConcurrency(
-          runnerA,
-          runnerB,
-          configuration,
-          manifest
-            .slice(registryMigrationIndex + 1)
-            .map((migration) => migration.version)
-        );
+      const connectorMigrationIndex = manifest.findIndex(
+        (migration) =>
+          migration.version === SOCIAL_CONNECTOR_PERSISTENCE_MIGRATION
+      );
+      assert.ok(connectorMigrationIndex > registryMigrationIndex);
+      const connectorManifest = temporaryMigrationManifest(
+        manifest.slice(0, connectorMigrationIndex + 1),
+        "0001-0004-prefix"
+      );
+      try {
+        if (configuration.mode === LOOPBACK_MODE) {
+          ({ runnerA, runnerB } = await proveExact0004Route(
+            migrationPoolA,
+            migrationPoolB,
+            configuration,
+            companyC,
+            physicalPhases,
+            connectorManifest.options
+          ));
+        } else {
+          runnerA = migrationRunner(
+            migrationPoolA,
+            configuration,
+            connectorManifest.options
+          );
+          runnerB = migrationRunner(
+            migrationPoolB,
+            configuration,
+            connectorManifest.options
+          );
+          await proveMigrationConcurrency(
+            runnerA,
+            runnerB,
+            configuration,
+            [SOCIAL_CONNECTOR_PERSISTENCE_MIGRATION]
+          );
+        }
+      } finally {
+        fs.rmSync(connectorManifest.directory, {
+          recursive: true,
+          force: true
+        });
       }
       physicalPhases.completeMain("exact_0004_plan_apply");
+
       physicalPhases.startMain("post_migration_validation");
+      if (configuration.mode === LOOPBACK_MODE) {
+        await proveReferenceCheckFix0005(
+          migrationPoolA,
+          configuration,
+          companyC
+        );
+      } else {
+        const fallbackRunner = migrationRunner(migrationPoolA, configuration);
+        const fallbackApplied = await fallbackRunner.apply(
+          configuration.approvalEnvironment
+        );
+        assert.deepEqual(
+          fallbackApplied.map((entry) => entry.version),
+          [SOCIAL_REFERENCE_CHECK_FIX_MIGRATION]
+        );
+        assert.deepEqual(
+          await proveReferenceCheckMatrix(migrationPoolA, companyC),
+          { checks: 3, samplesPerCheck: 12, assertions: 36 }
+        );
+        const fallbackValidation = await fallbackRunner.validate();
+        assert.equal(fallbackValidation.applied, 5);
+        assert.equal(fallbackValidation.pending, 0);
+      }
+      runnerA = migrationRunner(migrationPoolA, configuration);
+      runnerB = migrationRunner(migrationPoolB, configuration);
       await proveAdvisoryLock(
         migrationPoolA,
         runnerB,

@@ -79,8 +79,8 @@ function fakeDependencies() {
     },
     createMigrationRunner() {
       return {
-        async apply() { return [{ version: "0001" }, { version: "0002" }, { version: "0003" }, { version: "0004" }]; },
-        async validate() { return { valid: true, pending: 0, applied: 4 }; }
+        async apply() { return [{ version: "0001" }, { version: "0002" }, { version: "0003" }, { version: "0004" }, { version: "0005" }]; },
+        async validate() { return { valid: true, pending: 0, applied: 5 }; }
       };
     },
     targetFingerprint() { return "1".repeat(64); },
@@ -145,13 +145,19 @@ function fakeDependencies() {
       };
     },
     async runProfileBackup(plan) {
+      const suffix = plan.profileId.slice(-4);
+      const metrics = {
+        "0003": { size: 100, hash: "3", tables: 6, rls: 8 },
+        "0004": { size: 200, hash: "4", tables: 8, rls: 10 },
+        "0005": { size: 300, hash: "5", tables: 8, rls: 10 }
+      }[suffix];
       return {
         profileId: plan.profileId,
         evidence: {
-          bundleSize: plan.profileId.endsWith("0003") ? 100 : 200,
-          bundleSha256: plan.profileId.endsWith("0003") ? "3".repeat(64) : "4".repeat(64),
-          tableCount: plan.profileId.endsWith("0003") ? 6 : 8,
-          rlsTableCount: plan.profileId.endsWith("0003") ? 8 : 10
+          bundleSize: metrics.size,
+          bundleSha256: metrics.hash.repeat(64),
+          tableCount: metrics.tables,
+          rlsTableCount: metrics.rls
         }
       };
     },
@@ -639,6 +645,8 @@ test("concrete connector gates use the product contracts and physical plan runne
         restore0003: {},
         backup0004: { profileId: "social-schema-0004" },
         restore0004: {},
+        backup0005: { profileId: "social-schema-0005" },
+        restore0005: {},
         async assertManifestTamperRefused() { return true; },
         async assertCrossProfileRefused() { return true; }
       }
@@ -652,11 +660,13 @@ test("concrete connector gates use the product contracts and physical plan runne
   const backup = await gates.backupRestore({ state });
 
   assert.equal(migration.profile0004, true);
+  assert.equal(migration.profile0005, true);
   assert.equal(rls.tenantIsolation, true);
   assert.equal(concurrency.oauthSynthetic, true);
   assert.equal(vault.aes256Gcm, true);
   assert.equal(backup.profile0003, true);
   assert.equal(backup.profile0004, true);
+  assert.equal(backup.profile0005, true);
   assert.equal(backup.bundle0003Size, 100);
   assert.match(backup.bundle0003Sha256, /^3{64}$/);
   assert.equal(backup.bundle0003Tables, 6);
@@ -665,6 +675,10 @@ test("concrete connector gates use the product contracts and physical plan runne
   assert.match(backup.bundle0004Sha256, /^4{64}$/);
   assert.equal(backup.bundle0004Tables, 8);
   assert.equal(backup.bundle0004RlsPolicies, 10);
+  assert.equal(backup.bundle0005Size, 300);
+  assert.match(backup.bundle0005Sha256, /^5{64}$/);
+  assert.equal(backup.bundle0005Tables, 8);
+  assert.equal(backup.bundle0005RlsPolicies, 10);
   gates.destroy();
 });
 
@@ -675,11 +689,16 @@ test("Gate 5 sequences tracked normal operations before exact untracked refusal 
   const profile0004 = SCHEMA_PROFILES.find(
     (profile) => profile.id === "social-schema-0004"
   );
+  const profile0005 = SCHEMA_PROFILES.find(
+    (profile) => profile.id === "social-schema-0005"
+  );
   const normalOperations = Object.freeze([
     Object.freeze(["backup", "gate5_backup_0003", "social-schema-0003"]),
     Object.freeze(["restore", "gate5_restore_0003", "social-schema-0003"]),
     Object.freeze(["backup", "gate5_backup_0004", "social-schema-0004"]),
-    Object.freeze(["restore", "gate5_restore_0004", "social-schema-0004"])
+    Object.freeze(["restore", "gate5_restore_0004", "social-schema-0004"]),
+    Object.freeze(["backup", "gate5_backup_0005", "social-schema-0005"]),
+    Object.freeze(["restore", "gate5_restore_0005", "social-schema-0005"])
   ]);
   const normalOrder = normalOperations.map(([, operation]) => operation);
   const canonicalTamperCode = "backup_bundle_authentication_failed";
@@ -779,6 +798,8 @@ test("Gate 5 sequences tracked normal operations before exact untracked refusal 
       restore0003: requests.gate5_restore_0003,
       backup0004: requests.gate5_backup_0004,
       restore0004: requests.gate5_restore_0004,
+      backup0005: requests.gate5_backup_0005,
+      restore0005: requests.gate5_restore_0005,
       async assertManifestTamperRefused() {
         events.push("tamper");
         return exactRefusal(tamperError, canonicalTamperCode);
@@ -836,6 +857,7 @@ test("Gate 5 sequences tracked normal operations before exact untracked refusal 
       assert.equal(result.physicalExecution, true);
       assert.equal(result.profile0003, true);
       assert.equal(result.profile0004, true);
+      assert.equal(result.profile0005, true);
       assert.equal(result.manifestTamperRefused, true);
       assert.equal(result.crossProfileRefused, true);
       assert.equal(result.operationalRollback, true);
@@ -951,6 +973,8 @@ test("backup/restore cleanup always runs without overwriting the first failure",
       restore0003: {},
       backup0004: { profileId: "social-schema-0004" },
       restore0004: {},
+      backup0005: { profileId: "social-schema-0005" },
+      restore0005: {},
       async assertManifestTamperRefused() {
         return refusals.tamper !== false;
       },
@@ -1119,6 +1143,7 @@ test("backup/restore cleanup always runs without overwriting the first failure",
     const result = await gates.backupRestore({ state });
     assert.equal(result.profile0003, true);
     assert.equal(result.profile0004, true);
+    assert.equal(result.profile0005, true);
     assert.equal(cleanupCalls, 1);
     await gates.destroy();
   });

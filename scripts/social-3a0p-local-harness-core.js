@@ -1354,7 +1354,11 @@ function rollbackContract() {
 
 function windowsBackupRestoreContract() {
   return Object.freeze({
-    profiles: Object.freeze(["social-schema-0003", "social-schema-0004"]),
+    profiles: Object.freeze([
+      "social-schema-0003",
+      "social-schema-0004",
+      "social-schema-0005"
+    ]),
     fileFsync: "must-be-physically-confirmed",
     directoryFsync: "pending-linux-durability-gate",
     noFollow: "pending-linux-durability-gate",

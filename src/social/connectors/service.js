@@ -691,11 +691,11 @@ function createSocialConnectorService(options = {}) {
       outcome,
       confirmedProviderReference:
         outcome === "published"
-          ? safeText(result.confirmedProviderReference, { max: 500 })
+          ? safeText(result.confirmedProviderReference, { max: 499 })
           : null,
       reconciliationReference:
         outcome === "provider_confirming"
-          ? safeText(result.reconciliationReference, { max: 500 })
+          ? safeText(result.reconciliationReference, { max: 499 })
           : null
     });
   }
@@ -917,7 +917,7 @@ function createSocialConnectorService(options = {}) {
     const clean = Object.freeze({
       operationId: operationUuid(input.operationId),
       publicationId: operationUuid(input.publicationId),
-      providerReference: safeText(input.providerReference, { max: 500 })
+      providerReference: safeText(input.providerReference, { max: 499 })
     });
     try {
       const result = await runIdempotent(

@@ -81,6 +81,7 @@ const PHYSICAL_PROOFS = Object.freeze([
   "postgres-18-4-readiness",
   "role-bootstrap-idempotency",
   "migration-0001-0004",
+  "migration-0001-0005",
   "rls-company-a-b",
   "connector-concurrency",
   "oauth-synthetic-lifecycle",
@@ -88,6 +89,7 @@ const PHYSICAL_PROOFS = Object.freeze([
   "vault-round-trip-rotation",
   "backup-restore-profile-0003",
   "backup-restore-profile-0004",
+  "backup-restore-profile-0005",
   "forward-only-rollback"
 ]);
 
@@ -2235,12 +2237,12 @@ function createWindowsPhysicalAdapters(options = {}) {
 
   async function runMigrationGate(input) {
     bind(input);
-    const result = validateGateResult("migration", await physicalGates.migration({ state, input }), ["profile0004", "transactionalRollback", "nonSocialUnchanged"]);
+    const result = validateGateResult("migration", await physicalGates.migration({ state, input }), ["profile0004", "profile0005", "transactionalRollback", "nonSocialUnchanged"]);
     assertActive(input);
     return remember("run-migration-gate", {
       code: "windows_migration_gate_passed",
-      counts: { migrationsApplied: Number(result.migrationsApplied || 4) },
-      checks: { profile0004: true, transactionalRollback: true, nonSocialUnchanged: true }
+      counts: { migrationsApplied: Number(result.migrationsApplied || 5) },
+      checks: { profile0004: true, profile0005: true, transactionalRollback: true, nonSocialUnchanged: true }
     });
   }
 
@@ -2277,7 +2279,7 @@ function createWindowsPhysicalAdapters(options = {}) {
 
   async function runBackupRestoreGate(input) {
     bind(input);
-    const result = validateGateResult("backup_restore", await physicalGates.backupRestore({ state, input }), ["profile0003", "profile0004", "restoreIsolated", "manifestTamperRefused", "crossProfileRefused", "operationalRollback", "disposableRemoved", "fileFsync"]);
+    const result = validateGateResult("backup_restore", await physicalGates.backupRestore({ state, input }), ["profile0003", "profile0004", "profile0005", "restoreIsolated", "manifestTamperRefused", "crossProfileRefused", "operationalRollback", "disposableRemoved", "fileFsync"]);
     assertActive(input);
     const bundles = collectMeasuredBundleMetrics({
       bundles: [
@@ -2296,6 +2298,14 @@ function createWindowsPhysicalAdapters(options = {}) {
           tableCount: result.bundle0004Tables,
           rlsPolicyCount: result.bundle0004RlsPolicies,
           restoreApproved: result.profile0004 === true
+        },
+        {
+          profile: "social-schema-0005",
+          size: result.bundle0005Size,
+          sha256: result.bundle0005Sha256,
+          tableCount: result.bundle0005Tables,
+          rlsPolicyCount: result.bundle0005RlsPolicies,
+          restoreApproved: result.profile0005 === true
         }
       ]
     });
@@ -2304,13 +2314,14 @@ function createWindowsPhysicalAdapters(options = {}) {
     return remember("run-backup-restore-gate", {
       code: "windows_backup_restore_gate_passed",
       counts: {
-        schemaProfiles: 2,
+        schemaProfiles: 3,
         ...bundles.counts
       },
       hashes: { ...bundles.hashes },
       checks: {
         profile0003: true,
         profile0004: true,
+        profile0005: true,
         ...bundles.checks,
         restoreIsolated: true,
         manifestTamperRefused: true,

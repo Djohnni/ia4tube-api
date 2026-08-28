@@ -17,8 +17,10 @@ const {
 
 const BUNDLE_0003 = path.resolve("C:\\synthetic\\social-schema-0003.ia4sb");
 const BUNDLE_0004 = path.resolve("C:\\synthetic\\social-schema-0004.ia4sb");
+const BUNDLE_0005 = path.resolve("C:\\synthetic\\social-schema-0005.ia4sb");
 const HASH_0003 = "3".repeat(64);
 const HASH_0004 = "4".repeat(64);
+const HASH_0005 = "5".repeat(64);
 
 function expectCode(code) {
   return (error) => error instanceof HarnessFailure && error.code === code;
@@ -41,6 +43,14 @@ function descriptors(overrides = {}) {
       rlsPolicyCount: 10,
       restoreApproved: true,
       ...overrides.profile0004
+    },
+    {
+      profile: "social-schema-0005",
+      path: BUNDLE_0005,
+      tableCount: 7,
+      rlsPolicyCount: 10,
+      restoreApproved: true,
+      ...overrides.profile0005
     }
   ];
 }
@@ -48,11 +58,13 @@ function descriptors(overrides = {}) {
 function dependencies(overrides = {}) {
   const sizes = new Map([
     [BUNDLE_0003, 12_003],
-    [BUNDLE_0004, 14_004]
+    [BUNDLE_0004, 14_004],
+    [BUNDLE_0005, 15_005]
   ]);
   const hashes = new Map([
     [BUNDLE_0003, HASH_0003],
-    [BUNDLE_0004, HASH_0004]
+    [BUNDLE_0004, HASH_0004],
+    [BUNDLE_0005, HASH_0005]
   ]);
   return {
     statFile: async (file) => ({
@@ -65,7 +77,7 @@ function dependencies(overrides = {}) {
   };
 }
 
-test("two bundles retain individual sizes, hashes and restore evidence", async () => {
+test("three bundles retain individual sizes, hashes and restore evidence", async () => {
   const measured = [];
   const base = dependencies();
   const result = await collectBundleMetrics({
@@ -86,38 +98,47 @@ test("two bundles retain individual sizes, hashes and restore evidence", async (
     bundle0003RlsPolicies: 8,
     bundle0004Bytes: 14_004,
     bundle0004Tables: 7,
-    bundle0004RlsPolicies: 10
+    bundle0004RlsPolicies: 10,
+    bundle0005Bytes: 15_005,
+    bundle0005Tables: 7,
+    bundle0005RlsPolicies: 10
   });
   assert.deepEqual(result.hashes, {
     bundle0003Sha256: HASH_0003,
-    bundle0004Sha256: HASH_0004
+    bundle0004Sha256: HASH_0004,
+    bundle0005Sha256: HASH_0005
   });
   assert.deepEqual(result.checks, {
     bundle0003RestoreApproved: true,
-    bundle0004RestoreApproved: true
+    bundle0004RestoreApproved: true,
+    bundle0005RestoreApproved: true
   });
   assert.deepEqual(measured, [
     ["stat", BUNDLE_0003],
     ["hash", BUNDLE_0003],
     ["stat", BUNDLE_0004],
-    ["hash", BUNDLE_0004]
+    ["hash", BUNDLE_0004],
+    ["stat", BUNDLE_0005],
+    ["hash", BUNDLE_0005]
   ]);
   assert.equal(assertBundleMetricsSafe(result), true);
   assert.equal(validatePhaseResult(result).code, "bundle_metrics_collected");
 });
 
-test("bundle order does not collapse the two individual profiles", async () => {
+test("bundle order does not collapse the three individual profiles", async () => {
   const result = await collectBundleMetrics({
     bundles: descriptors().reverse(),
     ...dependencies()
   });
   assert.equal(result.counts.bundle0003Bytes, 12_003);
   assert.equal(result.counts.bundle0004Bytes, 14_004);
+  assert.equal(result.counts.bundle0005Bytes, 15_005);
   assert.equal(result.hashes.bundle0003Sha256, HASH_0003);
   assert.equal(result.hashes.bundle0004Sha256, HASH_0004);
+  assert.equal(result.hashes.bundle0005Sha256, HASH_0005);
 });
 
-test("physical measured output uses the same hardened two-profile contract", () => {
+test("physical measured output uses the same hardened three-profile contract", () => {
   const result = collectMeasuredBundleMetrics({
     bundles: [
       {
@@ -135,12 +156,21 @@ test("physical measured output uses the same hardened two-profile contract", () 
         tableCount: 6,
         rlsPolicyCount: 8,
         restoreApproved: true
+      },
+      {
+        profile: "social-schema-0005",
+        size: 15_005,
+        sha256: HASH_0005,
+        tableCount: 7,
+        rlsPolicyCount: 10,
+        restoreApproved: true
       }
     ]
   });
   assert.equal(assertBundleMetricsSafe(result), true);
   assert.equal(result.counts.bundle0003Bytes, 12_003);
   assert.equal(result.hashes.bundle0004Sha256, HASH_0004);
+  assert.equal(result.hashes.bundle0005Sha256, HASH_0005);
 });
 
 test("physical measured output refuses duplicate profiles and malformed evidence", () => {
@@ -148,7 +178,8 @@ test("physical measured output refuses duplicate profiles and malformed evidence
     () => collectMeasuredBundleMetrics({
       bundles: [
         { profile: "social-schema-0003", size: 1, sha256: HASH_0003, tableCount: 1, rlsPolicyCount: 1, restoreApproved: true },
-        { profile: "social-schema-0003", size: 2, sha256: HASH_0004, tableCount: 1, rlsPolicyCount: 1, restoreApproved: true }
+        { profile: "social-schema-0003", size: 2, sha256: HASH_0004, tableCount: 1, rlsPolicyCount: 1, restoreApproved: true },
+        { profile: "social-schema-0005", size: 3, sha256: HASH_0005, tableCount: 1, rlsPolicyCount: 1, restoreApproved: true }
       ]
     }),
     expectCode("harness_bundle_profile_duplicate")
@@ -157,7 +188,8 @@ test("physical measured output refuses duplicate profiles and malformed evidence
     () => collectMeasuredBundleMetrics({
       bundles: [
         { profile: "social-schema-0003", size: 1, sha256: HASH_0003, tableCount: 1, rlsPolicyCount: 1, restoreApproved: true },
-        { profile: "social-schema-0004", size: 2, sha256: "broken", tableCount: 1, rlsPolicyCount: 1, restoreApproved: true }
+        { profile: "social-schema-0004", size: 2, sha256: "broken", tableCount: 1, rlsPolicyCount: 1, restoreApproved: true },
+        { profile: "social-schema-0005", size: 3, sha256: HASH_0005, tableCount: 1, rlsPolicyCount: 1, restoreApproved: true }
       ]
     }),
     expectCode("harness_bundle_sha256_invalid")
@@ -168,7 +200,8 @@ test("final bundle assertion refuses missing counts or incomplete inventory", ()
   const valid = collectMeasuredBundleMetrics({
     bundles: [
       { profile: "social-schema-0003", size: 1, sha256: HASH_0003, tableCount: 1, rlsPolicyCount: 1, restoreApproved: true },
-      { profile: "social-schema-0004", size: 2, sha256: HASH_0004, tableCount: 1, rlsPolicyCount: 1, restoreApproved: true }
+      { profile: "social-schema-0004", size: 2, sha256: HASH_0004, tableCount: 1, rlsPolicyCount: 1, restoreApproved: true },
+      { profile: "social-schema-0005", size: 3, sha256: HASH_0005, tableCount: 1, rlsPolicyCount: 1, restoreApproved: true }
     ]
   });
   assert.throws(
@@ -220,10 +253,10 @@ test("reparse point and malformed SHA-256 are refused", async () => {
 
 test("restore result remains evidence and a failed restore blocks the gate", async () => {
   const result = await collectBundleMetrics({
-    bundles: descriptors({ profile0004: { restoreApproved: false } }),
+    bundles: descriptors({ profile0005: { restoreApproved: false } }),
     ...dependencies()
   });
-  assert.equal(result.checks.bundle0004RestoreApproved, false);
+  assert.equal(result.checks.bundle0005RestoreApproved, false);
   assert.throws(
     () => assertBundleMetricsSafe(result),
     expectCode("harness_bundle_restore_not_approved")

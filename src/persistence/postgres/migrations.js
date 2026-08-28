@@ -28,13 +28,22 @@ const GLOBAL_VAULT_REGISTRY_MIGRATION =
   "0003_global_vault_key_registry";
 const SOCIAL_CONNECTOR_PERSISTENCE_MIGRATION =
   "0004_social_connector_persistence";
+const SOCIAL_REFERENCE_CHECK_FIX_MIGRATION =
+  "0005_fix_social_reference_checks";
 const EXACT_FROM_PROFILE = "social-schema-0003";
 const EXACT_TO_PROFILE = "social-schema-0004";
 const EXACT_PENDING_MIGRATIONS = Object.freeze([
   SOCIAL_CONNECTOR_PERSISTENCE_MIGRATION
 ]);
+const REFERENCE_CHECK_FROM_PROFILE = "social-schema-0004";
+const REFERENCE_CHECK_TO_PROFILE = "social-schema-0005";
+const REFERENCE_CHECK_PENDING_MIGRATIONS = Object.freeze([
+  SOCIAL_REFERENCE_CHECK_FIX_MIGRATION
+]);
 const STAGING_EXACT_0004_SQL_SHA256 =
   "91f6efc611903c40e16bd37828d5b9c1a03dfae222e1d13b5dc97f81ffde1b5d";
+const STAGING_REFERENCE_CHECK_0005_SQL_SHA256 =
+  "ddac4a02cecfd5247432687289001aa3198cce4dccab4e45cedc4cff26e5da93";
 const STAGING_EXACT_APPROVAL_PREFIX =
   "APPLY_SOCIAL_STAGING_EXACT_0004";
 const STAGING_EXACT_WEB_SERVICE_ID = "srv-d9itiiurnols73fsbmmg";
@@ -47,6 +56,10 @@ const EXACT_BASE_MIGRATIONS = Object.freeze([
 const EXACT_TARGET_MIGRATIONS = Object.freeze([
   ...EXACT_BASE_MIGRATIONS,
   SOCIAL_CONNECTOR_PERSISTENCE_MIGRATION
+]);
+const REFERENCE_CHECK_TARGET_MIGRATIONS = Object.freeze([
+  ...EXACT_TARGET_MIGRATIONS,
+  SOCIAL_REFERENCE_CHECK_FIX_MIGRATION
 ]);
 const EXACT_BASE_TABLES = Object.freeze([
   "companies",
@@ -195,6 +208,25 @@ const SOCIAL_CONNECTION_STATUS_CONSTRAINT_REPLACEMENTS = Object.freeze([
   "social_connections_status_allowed",
   "social_connections_status_timestamp_consistent"
 ]);
+const SOCIAL_REFERENCE_CHECK_REPLACEMENTS = Object.freeze([
+  Object.freeze({
+    table: "social_publications",
+    column: "confirmed_provider_reference",
+    constraint: "social_publications_confirmed_reference_valid"
+  }),
+  Object.freeze({
+    table: "social_publications",
+    column: "reconciliation_reference",
+    constraint: "social_publications_reconciliation_reference_valid"
+  }),
+  Object.freeze({
+    table: "social_publication_attempts",
+    column: "provider_reference",
+    constraint: "social_publication_attempts_reference_valid"
+  })
+]);
+const SOCIAL_REFERENCE_SENSITIVE_PATTERN =
+  "(access[_-]?token|refresh[_-]?token|authorization|bearer|password|secret|oauth[_-]?code|api[_-]?key|ciphertext)";
 const GLOBAL_VAULT_BACKFILL_POLICY =
   "social_credentials_key_registry_backfill";
 const GLOBAL_VAULT_BACKFILL_POLICY_CREATE = [
@@ -906,7 +938,156 @@ function canonicalSql(filePath) {
   return content;
 }
 
+function escapedRegularExpression(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function stripApprovedReferenceCheckReplacement(sql, version) {
+  const dropMarkers = [...sql.matchAll(/\bDROP\s+CONSTRAINT\b/gi)];
+  if (
+    dropMarkers.length === 0 ||
+    version !== SOCIAL_REFERENCE_CHECK_FIX_MIGRATION
+  ) {
+    return sql;
+  }
+  if (
+    dropMarkers.length !== SOCIAL_REFERENCE_CHECK_REPLACEMENTS.length ||
+    /\bDROP\s+CONSTRAINT\s+IF\s+EXISTS\b/i.test(sql)
+  ) {
+    return sql;
+  }
+
+  let sanitized = sql;
+  for (const replacement of SOCIAL_REFERENCE_CHECK_REPLACEMENTS) {
+    const table = escapedRegularExpression(replacement.table);
+    const constraint = escapedRegularExpression(replacement.constraint);
+    const dropPattern = new RegExp(
+      `\\bALTER\\s+TABLE\\s+ia4tube_social\\.${table}\\s+` +
+        `DROP\\s+CONSTRAINT\\s+${constraint}\\s*;`,
+      "gi"
+    );
+    const addPattern = new RegExp(
+      `\\bALTER\\s+TABLE\\s+ia4tube_social\\.${table}\\s+` +
+        `ADD\\s+CONSTRAINT\\s+${constraint}\\s+CHECK\\s*\\(`,
+      "gi"
+    );
+    const validatePattern = new RegExp(
+      `\\bALTER\\s+TABLE\\s+ia4tube_social\\.${table}\\s+` +
+        `VALIDATE\\s+CONSTRAINT\\s+${constraint}\\s*;`,
+      "gi"
+    );
+    if (
+      [...sql.matchAll(dropPattern)].length !== 1 ||
+      [...sql.matchAll(addPattern)].length !== 1 ||
+      [...sql.matchAll(validatePattern)].length !== 1
+    ) {
+      return sql;
+    }
+    sanitized = sanitized.replace(dropPattern, "");
+  }
+  return sanitized;
+}
+
+function normalizeSqlLexically(value, options = {}) {
+  const source = String(value || "");
+  const removeParentheses = options.removeParentheses === true;
+  const removeTextCasts = options.removeTextCasts === true;
+  let normalized = "";
+  let inSingleQuotedLiteral = false;
+  for (let index = 0; index < source.length; index += 1) {
+    const character = source[index];
+    if (inSingleQuotedLiteral) {
+      normalized += character;
+      if (character === "'") {
+        if (source[index + 1] === "'") {
+          normalized += source[index + 1];
+          index += 1;
+        } else {
+          inSingleQuotedLiteral = false;
+        }
+      }
+      continue;
+    }
+    if (character === "'") {
+      inSingleQuotedLiteral = true;
+      normalized += character;
+      continue;
+    }
+    if (/\s/.test(character)) continue;
+    if (removeParentheses && (character === "(" || character === ")")) {
+      continue;
+    }
+    if (
+      removeTextCasts &&
+      source.slice(index).match(/^::text\b/i)
+    ) {
+      index += "::text".length - 1;
+      continue;
+    }
+    normalized += character;
+  }
+  return normalized;
+}
+
+function normalizedSqlStatement(value) {
+  return normalizeSqlLexically(value);
+}
+
+function canonicalReferenceCheckFixStatements() {
+  const replacements = SOCIAL_REFERENCE_CHECK_REPLACEMENTS.flatMap(
+    ({ table, column, constraint }) => [
+      normalizedSqlStatement(
+        `ALTER TABLE ia4tube_social.${table} ` +
+          `DROP CONSTRAINT ${constraint}`
+      ),
+      normalizedSqlStatement(
+        `ALTER TABLE ia4tube_social.${table} ` +
+          `ADD CONSTRAINT ${constraint} CHECK (` +
+          `${column} IS NULL OR (` +
+          `char_length(${column}) BETWEEN 1 AND 499 AND ` +
+          `${column} ~ '^[A-Za-z0-9]' AND ` +
+          `${column} !~ '[^A-Za-z0-9._:-]' AND ` +
+          `${column} !~* '${SOCIAL_REFERENCE_SENSITIVE_PATTERN}'` +
+          `)) NOT VALID`
+      )
+    ]
+  );
+  return Object.freeze([
+    ...replacements,
+    ...SOCIAL_REFERENCE_CHECK_REPLACEMENTS.map(
+      ({ table, constraint }) =>
+        normalizedSqlStatement(
+          `ALTER TABLE ia4tube_social.${table} ` +
+            `VALIDATE CONSTRAINT ${constraint}`
+        )
+    )
+  ]);
+}
+
+function assertCanonicalReferenceCheckFixSql(sql, version) {
+  if (version !== SOCIAL_REFERENCE_CHECK_FIX_MIGRATION) return;
+  const withoutComments = String(sql)
+    .replace(/\/\*[\s\S]*?\*\//g, " ")
+    .replace(/--[^\n]*/g, " ");
+  const statements = withoutComments
+    .split(";")
+    .map(normalizedSqlStatement)
+    .filter(Boolean);
+  if (!exactArrayMatches(statements, canonicalReferenceCheckFixStatements())) {
+    postgresFail(
+      "destructive_migration_refused",
+      "Migration corretiva contem SQL fora da allowlist fechada."
+    );
+  }
+}
+
 function stripApprovedConstraintReplacement(sql, version) {
+  const referenceCheckReplacement = stripApprovedReferenceCheckReplacement(
+    sql,
+    version
+  );
+  if (referenceCheckReplacement !== sql) return referenceCheckReplacement;
+
   const dropMarkers = [...sql.matchAll(/\bDROP\s+CONSTRAINT\b/gi)];
   if (
     dropMarkers.length === 0 ||
@@ -968,6 +1149,7 @@ function stripApprovedConstraintReplacement(sql, version) {
 }
 
 function assertNonDestructiveSql(sql, version) {
+  assertCanonicalReferenceCheckFixSql(sql, version);
   const withoutComments = sql
     .replace(/\/\*[\s\S]*?\*\//g, " ")
     .replace(/--[^\n]*/g, " ");
@@ -1415,6 +1597,288 @@ function exactMigrationState(local, applied, profile) {
     observedPending: Object.freeze([...observedPending]),
     status
   });
+}
+
+function validateReferenceCheckFixRequest(request, local) {
+  const migration = local.find(
+    (entry) => entry.version === SOCIAL_REFERENCE_CHECK_FIX_MIGRATION
+  );
+  if (
+    !request ||
+    request.fromProfile !== REFERENCE_CHECK_FROM_PROFILE ||
+    request.toProfile !== REFERENCE_CHECK_TO_PROFILE ||
+    !exactArrayMatches(
+      request.expectedPending,
+      REFERENCE_CHECK_PENDING_MIGRATIONS
+    ) ||
+    !migration ||
+    migration.sha256 !== STAGING_REFERENCE_CHECK_0005_SQL_SHA256 ||
+    request.migrationSha256 !== STAGING_REFERENCE_CHECK_0005_SQL_SHA256
+  ) {
+    postgresFail(
+      "migration_reference_check_request_invalid",
+      "Contrato da migration corretiva recusado."
+    );
+  }
+  return Object.freeze({
+    fromProfile: REFERENCE_CHECK_FROM_PROFILE,
+    toProfile: REFERENCE_CHECK_TO_PROFILE,
+    expectedPending: REFERENCE_CHECK_PENDING_MIGRATIONS,
+    migrationSha256: STAGING_REFERENCE_CHECK_0005_SQL_SHA256
+  });
+}
+
+function assertCanonicalReferenceCheckManifest(local) {
+  if (
+    !Array.isArray(local) ||
+    local.length !== REFERENCE_CHECK_TARGET_MIGRATIONS.length ||
+    local.some(
+      (migration, index) =>
+        migration.version !== REFERENCE_CHECK_TARGET_MIGRATIONS[index]
+    )
+  ) {
+    postgresFail(
+      "migration_reference_check_manifest_mismatch",
+      "Manifesto autenticado do perfil 0005 diverge."
+    );
+  }
+  const migration = local.at(-1);
+  if (migration.sha256 !== STAGING_REFERENCE_CHECK_0005_SQL_SHA256) {
+    postgresFail(
+      "migration_reference_check_0005_pin_mismatch",
+      "Pin independente da migration corretiva diverge."
+    );
+  }
+  return true;
+}
+
+function referenceCheckMigrationState(local, applied, profile) {
+  const status = compareMigrationState(local, applied);
+  const appliedVersions = status
+    .filter((item) => item.state === "applied")
+    .map((item) => item.version);
+  const observedPending = status
+    .filter((item) => item.state === "pending")
+    .map((item) => item.version);
+  const expectedApplied =
+    profile === REFERENCE_CHECK_FROM_PROFILE
+      ? EXACT_TARGET_MIGRATIONS
+      : profile === REFERENCE_CHECK_TO_PROFILE
+        ? REFERENCE_CHECK_TARGET_MIGRATIONS
+        : null;
+  const expectedPending =
+    profile === REFERENCE_CHECK_FROM_PROFILE
+      ? REFERENCE_CHECK_PENDING_MIGRATIONS
+      : [];
+  if (
+    !expectedApplied ||
+    !exactArrayMatches(appliedVersions, expectedApplied) ||
+    !exactArrayMatches(observedPending, expectedPending)
+  ) {
+    postgresFail(
+      "migration_reference_check_pending_set_mismatch",
+      "Conjunto pendente diverge da migration corretiva."
+    );
+  }
+  return Object.freeze({
+    appliedVersions: Object.freeze([...appliedVersions]),
+    observedPending: Object.freeze([...observedPending]),
+    status
+  });
+}
+
+function referenceCheckIdentity(row) {
+  return `${row.table_name}|${row.constraint_name}|${row.column_name}`;
+}
+
+function normalizedReferenceCheckDefinition(value) {
+  return normalizeSqlLexically(value, {
+    removeParentheses: true,
+    removeTextCasts: true
+  });
+}
+
+function expectedReferenceCheckDefinition(column) {
+  return normalizedReferenceCheckDefinition(
+    `CHECK ((${column} IS NULL) OR (` +
+      `(char_length(${column}) >= 1) AND ` +
+      `(char_length(${column}) <= 499) AND ` +
+      `(${column} ~ '^[A-Za-z0-9]') AND ` +
+      `(${column} !~ '[^A-Za-z0-9._:-]') AND ` +
+      `(${column} !~* '${SOCIAL_REFERENCE_SENSITIVE_PATTERN}')))`
+  );
+}
+
+function expectedLegacyReferenceCheckDefinition(column) {
+  return normalizedReferenceCheckDefinition(
+    `CHECK ((${column} IS NULL) OR (` +
+      `(${column} ~ '^[A-Za-z0-9][A-Za-z0-9._:-]{0,499}$') AND ` +
+      `(${column} !~* '${SOCIAL_REFERENCE_SENSITIVE_PATTERN}')))`
+  );
+}
+
+async function verifyReferenceCheckCatalog(client, phase) {
+  const expectedByIdentity = new Map(
+    SOCIAL_REFERENCE_CHECK_REPLACEMENTS.map((entry) => [
+      `${entry.table}|${entry.constraint}|${entry.column}`,
+      entry
+    ])
+  );
+  const result = await client.query(
+    [
+      "SELECT relation.relname AS table_name,",
+      "  constraint_info.conname AS constraint_name,",
+      "  attribute.attname AS column_name,",
+      "  constraint_info.convalidated AS validated,",
+      "  pg_catalog.pg_get_constraintdef(constraint_info.oid, true)",
+      "    AS definition",
+      "FROM pg_catalog.pg_constraint constraint_info",
+      "JOIN pg_catalog.pg_class relation",
+      "  ON relation.oid = constraint_info.conrelid",
+      "JOIN pg_catalog.pg_namespace namespace",
+      "  ON namespace.oid = relation.relnamespace",
+      "LEFT JOIN pg_catalog.pg_attribute attribute",
+      "  ON attribute.attrelid = relation.oid",
+      "  AND array_length(constraint_info.conkey, 1) = 1",
+      "  AND attribute.attnum = constraint_info.conkey[1]",
+      "WHERE namespace.nspname = 'ia4tube_social'",
+      "  AND constraint_info.contype = 'c'",
+      "  AND (",
+      "    constraint_info.conname = ANY($1::text[]) OR",
+      "    strpos(",
+      "      pg_catalog.pg_get_constraintdef(constraint_info.oid, true),",
+      "      '{0,499}'",
+      "    ) > 0",
+      "  )",
+      "ORDER BY relation.relname, constraint_info.conname"
+    ].join("\n"),
+    [SOCIAL_REFERENCE_CHECK_REPLACEMENTS.map((entry) => entry.constraint)]
+  );
+  if (
+    result.rows?.length !== SOCIAL_REFERENCE_CHECK_REPLACEMENTS.length ||
+    result.rows.some((row) => !expectedByIdentity.has(referenceCheckIdentity(row)))
+  ) {
+    postgresFail(
+      "migration_reference_check_catalog_mismatch",
+      "Catalogo dos CHECKs de referencia diverge."
+    );
+  }
+
+  for (const row of result.rows) {
+    const definition = String(row.definition || "");
+    if (phase === "before") {
+      if (
+        !row.validated ||
+        normalizedReferenceCheckDefinition(definition) !==
+          expectedLegacyReferenceCheckDefinition(row.column_name)
+      ) {
+        postgresFail(
+          "migration_reference_check_before_mismatch",
+          "CHECK anterior de referencia diverge."
+        );
+      }
+      continue;
+    }
+    if (
+      phase !== "after" ||
+      !row.validated ||
+      definition.includes("{0,499}") ||
+      normalizedReferenceCheckDefinition(definition) !==
+        expectedReferenceCheckDefinition(row.column_name)
+    ) {
+      postgresFail(
+        "migration_reference_check_after_mismatch",
+        "CHECK corrigido de referencia diverge."
+      );
+    }
+  }
+  return Object.freeze(
+    result.rows.map((row) =>
+      Object.freeze({
+        table: row.table_name,
+        constraint: row.constraint_name,
+        column: row.column_name,
+        validated: Boolean(row.validated),
+        definition: String(row.definition)
+      })
+    )
+  );
+}
+
+async function verifyReferenceCheckSemantics(client, catalog) {
+  const sensitiveSamples = Object.freeze([
+    "access_token",
+    "refresh-token",
+    "authorization",
+    "bearer",
+    "password",
+    "secret",
+    "oauth_code",
+    "api-key",
+    "ciphertext"
+  ]);
+  const samples = Object.freeze([
+    Object.freeze({ name: "null", value: null, accepted: true }),
+    Object.freeze({ name: "empty", value: "", accepted: false }),
+    Object.freeze({ name: "length_1", value: "A", accepted: true }),
+    Object.freeze({ name: "length_255", value: "A".repeat(255), accepted: true }),
+    Object.freeze({ name: "length_256", value: "A".repeat(256), accepted: true }),
+    Object.freeze({ name: "length_499", value: "A".repeat(499), accepted: true }),
+    Object.freeze({ name: "length_500", value: "A".repeat(500), accepted: false }),
+    Object.freeze({ name: "valid_characters", value: "A0._:-z", accepted: true }),
+    Object.freeze({ name: "invalid_character", value: "A/B", accepted: false }),
+    Object.freeze({ name: "unexpected_space", value: "A B", accepted: false }),
+    Object.freeze({ name: "unexpected_newline", value: "A\nB", accepted: false }),
+    ...sensitiveSamples.map((value) =>
+      Object.freeze({
+        name: `sensitive_reference_${value.replace(/[^a-z0-9]+/g, "_")}`,
+        value,
+        accepted: false
+      })
+    ),
+    Object.freeze({
+      name: "gate4_reference",
+      value: "igo:a76b5455eb4d573c8d7aee425bd8928c",
+      accepted: true
+    })
+  ]);
+  if (
+    !Array.isArray(catalog) ||
+    catalog.length !== SOCIAL_REFERENCE_CHECK_REPLACEMENTS.length
+  ) {
+    postgresFail(
+      "migration_reference_check_semantics_mismatch",
+      "Semantica dos CHECKs de referencia diverge."
+    );
+  }
+
+  for (const entry of catalog) {
+    const definition = String(entry.definition || "");
+    const expressionMatch = definition.match(/^CHECK\s*\(([\s\S]*)\)$/i);
+    if (!expressionMatch || definition.includes(";")) {
+      postgresFail(
+        "migration_reference_check_semantics_mismatch",
+        "Semantica dos CHECKs de referencia diverge."
+      );
+    }
+
+    for (const sample of samples) {
+      const result = await client.query(
+        [
+          `SELECT ((${expressionMatch[1]}) IS NOT FALSE) AS accepted`,
+          `FROM (VALUES ($1::text)) AS sample(${quoteIdentifier(entry.column)})`
+        ].join("\n"),
+        [sample.value]
+      );
+      if (result.rows?.length !== 1 || result.rows[0].accepted !== sample.accepted) {
+        postgresFail(
+          "migration_reference_check_semantics_mismatch",
+          "Semantica dos CHECKs de referencia diverge."
+        );
+      }
+    }
+  }
+  return true;
 }
 
 async function ensureLedger(client, ownerRole, migratorRole) {
@@ -2095,6 +2559,36 @@ function assertExactStagingTarget(target, request) {
   }
 }
 
+function assertReferenceCheckStagingTarget(target) {
+  const expected = PAID_STAGING_PUBLIC_TARGET;
+  if (
+    String(target?.environment || "").toLowerCase() !== "staging" ||
+    String(target?.environmentId || "").toLowerCase() !==
+      expected.environmentId ||
+    String(target?.host || "").toLowerCase() !== expected.host ||
+    String(target?.port || "5432") !== expected.port ||
+    String(target?.database || "") !== expected.database ||
+    String(target?.username || "").toLowerCase() !==
+      expected.migrationLogin ||
+    String(target?.productionApproval || "") !== ""
+  ) {
+    postgresFail(
+      "migration_reference_check_target_mismatch",
+      "Destino staging da migration corretiva diverge."
+    );
+  }
+  return true;
+}
+
+function assertReferenceCheckTarget(target) {
+  const environment = String(target?.environment || "").toLowerCase();
+  if (["local", "test"].includes(environment)) {
+    assertExactDisposableTarget(target);
+    return true;
+  }
+  return assertReferenceCheckStagingTarget(target);
+}
+
 function assertCanonicalStagingExactManifest(local) {
   if (
     !Array.isArray(local) ||
@@ -2325,6 +2819,119 @@ async function runExactReadOnlyTransaction(client, operation) {
     if (!rollbackAttempted) {
       await rollbackExactTransaction(client, error);
     }
+    throw error;
+  }
+}
+
+async function referenceCheckGateWithinTransaction(
+  client,
+  local,
+  profile,
+  migratorRole,
+  ownerRole,
+  target,
+  { exerciseSemantics = false } = {}
+) {
+  await verifyMigrationSession(client, migratorRole, ownerRole);
+  await verifyMigrationInfrastructure(client, migratorRole, ownerRole);
+  await client.query(`SET LOCAL ROLE ${quoteIdentifier(migratorRole)}`);
+  assertTargetMarker(await readTargetMarker(client), target);
+  await verifyExistingLedgerContract(client, ownerRole, migratorRole);
+  const migrationState = referenceCheckMigrationState(
+    local,
+    await readAppliedMigrations(client),
+    profile
+  );
+  const physical = await verifySocialPhysicalProfile(
+    client,
+    EXACT_TO_PROFILE,
+    ownerRole,
+    SOCIAL_RUNTIME_ROLE
+  );
+  const phase =
+    profile === REFERENCE_CHECK_FROM_PROFILE ? "before" : "after";
+  const referenceChecks = await verifyReferenceCheckCatalog(client, phase);
+  if (exerciseSemantics) {
+    await client.query(`SET LOCAL ROLE ${quoteIdentifier(ownerRole)}`);
+    await verifyReferenceCheckSemantics(client, referenceChecks);
+    await client.query(`SET LOCAL ROLE ${quoteIdentifier(migratorRole)}`);
+  }
+  return Object.freeze({ migrationState, physical, referenceChecks });
+}
+
+async function applyReferenceCheckWithinTransaction(
+  client,
+  local,
+  migratorRole,
+  ownerRole,
+  target
+) {
+  await client.query("BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ");
+  let commitAttempted = false;
+  try {
+    const before = await referenceCheckGateWithinTransaction(
+      client,
+      local,
+      REFERENCE_CHECK_FROM_PROFILE,
+      migratorRole,
+      ownerRole,
+      target
+    );
+    const migration = local.find(
+      (entry) => entry.version === SOCIAL_REFERENCE_CHECK_FIX_MIGRATION
+    );
+    if (
+      !migration ||
+      migration.sha256 !== STAGING_REFERENCE_CHECK_0005_SQL_SHA256
+    ) {
+      postgresFail(
+        "migration_reference_check_0005_pin_mismatch",
+        "Pin independente da migration corretiva diverge."
+      );
+    }
+
+    await client.query(`SET LOCAL ROLE ${quoteIdentifier(ownerRole)}`);
+    const started = process.hrtime.bigint();
+    await client.query(migration.sql);
+    const elapsed = Number((process.hrtime.bigint() - started) / 1000000n);
+    await client.query(
+      [
+        `INSERT INTO ${LEDGER_NAME} (`,
+        "  version, checksum_sha256, execution_ms",
+        ") VALUES ($1, $2, $3)"
+      ].join("\n"),
+      [migration.version, migration.sha256, elapsed]
+    );
+
+    await client.query(`SET LOCAL ROLE ${quoteIdentifier(migratorRole)}`);
+    const after = await referenceCheckGateWithinTransaction(
+      client,
+      local,
+      REFERENCE_CHECK_TO_PROFILE,
+      migratorRole,
+      ownerRole,
+      target,
+      { exerciseSemantics: true }
+    );
+
+    commitAttempted = true;
+    try {
+      await client.query("COMMIT");
+    } catch (error) {
+      const failure = new Error("migration_reference_check_commit_outcome_unknown");
+      failure.code = "migration_reference_check_commit_outcome_unknown";
+      failure.discardClient = true;
+      failure.skipAdvisoryUnlock = true;
+      failure.outcomeUnknown = true;
+      failure.retryAllowed = false;
+      failure.requiresReadOnlyInspection = true;
+      failure.cause = error;
+      throw failure;
+    }
+    return Object.freeze({ before, after, executionMs: elapsed });
+  } catch (error) {
+    if (commitAttempted) throw error;
+    await rollbackExactTransaction(client, error);
     throw error;
   }
 }
@@ -2592,6 +3199,9 @@ function createMigrationRunner(options = {}) {
   async function apply(env = process.env) {
     assertApplyTarget(target, env);
     const local = readManifest(manifestOptions);
+    const dedicatedReferenceCheckRouteRequired = !["local", "test"].includes(
+      String(target?.environment || "").toLowerCase()
+    );
     const client = await pool.connect();
     let releaseError;
     try {
@@ -2599,6 +3209,24 @@ function createMigrationRunner(options = {}) {
       await verifyMigrationInfrastructure(client, migratorRole, ownerRole);
       await verifyTargetMarker(client, migratorRole, target);
       return await withAdvisoryLock(client, async () => {
+        if (dedicatedReferenceCheckRouteRequired) {
+          const preflightState = compareMigrationState(
+            local,
+            await readMigrationState(client, migratorRole)
+          );
+          if (
+            preflightState.some(
+              (item) =>
+                item.version === SOCIAL_REFERENCE_CHECK_FIX_MIGRATION &&
+                item.state === "pending"
+            )
+          ) {
+            postgresFail(
+              "migration_reference_check_exact_route_required",
+              "Migration corretiva exige a rota transacional dedicada."
+            );
+          }
+        }
         await ensureLedger(client, ownerRole, migratorRole);
         const state = compareMigrationState(
           local,
@@ -2609,6 +3237,15 @@ function createMigrationRunner(options = {}) {
             .filter((item) => item.state === "pending")
             .map((item) => item.version)
         );
+        if (
+          pendingVersions.has(SOCIAL_REFERENCE_CHECK_FIX_MIGRATION) &&
+          dedicatedReferenceCheckRouteRequired
+        ) {
+          postgresFail(
+            "migration_reference_check_exact_route_required",
+            "Migration corretiva exige a rota transacional dedicada."
+          );
+        }
         const applied = [];
         for (const migration of local) {
           if (pendingVersions.has(migration.version)) {
@@ -2625,11 +3262,147 @@ function createMigrationRunner(options = {}) {
     }
   }
 
+  async function planReferenceCheckFix(request, env = process.env) {
+    const local = readManifest(manifestOptions).slice(
+      0,
+      REFERENCE_CHECK_TARGET_MIGRATIONS.length
+    );
+    assertCanonicalReferenceCheckManifest(local);
+    const exactRequest = validateReferenceCheckFixRequest(request, local);
+    assertMigrationTarget(target, env);
+    assertReferenceCheckTarget(target);
+    const client = await pool.connect();
+    let releaseError;
+    try {
+      await verifyMigrationSession(client, migratorRole, ownerRole);
+      await verifyMigrationInfrastructure(client, migratorRole, ownerRole);
+      const gate = await withAdvisoryLock(client, () =>
+        runExactReadOnlyTransaction(client, () =>
+          referenceCheckGateWithinTransaction(
+            client,
+            local,
+            REFERENCE_CHECK_FROM_PROFILE,
+            migratorRole,
+            ownerRole,
+            target
+          )
+        )
+      );
+      return Object.freeze({
+        fromProfile: REFERENCE_CHECK_FROM_PROFILE,
+        toProfile: exactRequest.toProfile,
+        expectedPending: Object.freeze([...exactRequest.expectedPending]),
+        observedPending: Object.freeze([
+          ...gate.migrationState.observedPending
+        ]),
+        migrationSha256: exactRequest.migrationSha256,
+        checksBefore: gate.referenceChecks,
+        planApproved: true,
+        readOnly: true
+      });
+    } catch (error) {
+      if (error?.discardClient) releaseError = error;
+      throw error;
+    } finally {
+      client.release(releaseError);
+    }
+  }
+
+  async function applyReferenceCheckFix(request, env = process.env) {
+    const local = readManifest(manifestOptions).slice(
+      0,
+      REFERENCE_CHECK_TARGET_MIGRATIONS.length
+    );
+    assertCanonicalReferenceCheckManifest(local);
+    const exactRequest = validateReferenceCheckFixRequest(request, local);
+    assertApplyTarget(target, env);
+    assertReferenceCheckTarget(target);
+    const client = await pool.connect();
+    let releaseError;
+    let commitCompleted = false;
+    try {
+      await verifyMigrationSession(client, migratorRole, ownerRole);
+      await verifyMigrationInfrastructure(client, migratorRole, ownerRole);
+      const applied = await withAdvisoryLock(client, async () => {
+        const transaction = await applyReferenceCheckWithinTransaction(
+          client,
+          local,
+          migratorRole,
+          ownerRole,
+          target
+        );
+        commitCompleted = true;
+        let finalGate;
+        try {
+          finalGate = await runExactReadOnlyTransaction(client, () =>
+            referenceCheckGateWithinTransaction(
+              client,
+              local,
+              REFERENCE_CHECK_TO_PROFILE,
+              migratorRole,
+              ownerRole,
+              target
+            )
+          );
+        } catch (error) {
+          const failure = new Error(
+            "migration_reference_check_postcommit_validation_failed"
+          );
+          failure.code =
+            "migration_reference_check_postcommit_validation_failed";
+          failure.applied = true;
+          failure.retryAllowed = false;
+          failure.requiresReadOnlyInspection = true;
+          failure.discardClient = Boolean(error?.discardClient);
+          failure.skipAdvisoryUnlock = Boolean(
+            error?.discardClient || error?.skipAdvisoryUnlock
+          );
+          failure.cause = error;
+          throw failure;
+        }
+        return Object.freeze({ transaction, finalGate });
+      });
+      return Object.freeze({
+        fromProfile: exactRequest.fromProfile,
+        toProfile: exactRequest.toProfile,
+        expectedPending: Object.freeze([...exactRequest.expectedPending]),
+        observedPending: Object.freeze([
+          ...applied.transaction.before.migrationState.observedPending
+        ]),
+        appliedMigration: SOCIAL_REFERENCE_CHECK_FIX_MIGRATION,
+        migrationSha256: exactRequest.migrationSha256,
+        finalProfile: REFERENCE_CHECK_TO_PROFILE,
+        checksBefore: applied.transaction.before.referenceChecks,
+        checksAfter: applied.finalGate.referenceChecks,
+        checksValidated: applied.transaction.after.referenceChecks.filter(
+          (entry) => entry.validated
+        ).length,
+        semanticChecksPassed: true,
+        executionMs: applied.transaction.executionMs,
+        postCommitValidated: true,
+        retryAllowed: false
+      });
+    } catch (error) {
+      if (commitCompleted) {
+        error.applied = true;
+        error.retryAllowed = false;
+        error.requiresReadOnlyInspection = true;
+      }
+      if (error?.discardClient) releaseError = error;
+      throw error;
+    } finally {
+      client.release(releaseError);
+    }
+  }
+
   async function planExact(request, env = process.env) {
     const exactRequest = validateExactMigrationRequest(request);
     assertMigrationTarget(target, env);
     assertExactDisposableTarget(target);
-    const local = readManifest(manifestOptions);
+    const local = readManifest(manifestOptions).slice(
+      0,
+      EXACT_TARGET_MIGRATIONS.length
+    );
     const client = await pool.connect();
     let releaseError;
     try {
@@ -2670,7 +3443,10 @@ function createMigrationRunner(options = {}) {
     });
     assertApplyTarget(target, env);
     assertExactDisposableTarget(target);
-    const local = readManifest(manifestOptions);
+    const local = readManifest(manifestOptions).slice(
+      0,
+      EXACT_TARGET_MIGRATIONS.length
+    );
     const client = await pool.connect();
     let releaseError;
     let commitCompleted = false;
@@ -2746,7 +3522,10 @@ function createMigrationRunner(options = {}) {
     const exactRequest = validateStagingExactMigrationRequest(request);
     assertMigrationTarget(target, env);
     assertExactStagingTarget(target, exactRequest);
-    const local = readManifest(manifestOptions);
+    const local = readManifest(manifestOptions).slice(
+      0,
+      EXACT_TARGET_MIGRATIONS.length
+    );
     assertCanonicalStagingExactManifest(local);
     const client = await pool.connect();
     let releaseError;
@@ -2793,7 +3572,10 @@ function createMigrationRunner(options = {}) {
     assertApplyTarget(target, env);
     assertExactStagingTarget(target, exactRequest);
     const preflight = await planStagingExact(exactRequest, env);
-    const local = readManifest(manifestOptions);
+    const local = readManifest(manifestOptions).slice(
+      0,
+      EXACT_TARGET_MIGRATIONS.length
+    );
     assertCanonicalStagingExactManifest(local);
     const client = await pool.connect();
     let releaseError;
@@ -2877,9 +3659,11 @@ function createMigrationRunner(options = {}) {
   return Object.freeze({
     apply,
     applyExact,
+    applyReferenceCheckFix,
     applyStagingExact,
     inspect,
     planExact,
+    planReferenceCheckFix,
     planStagingExact,
     validate
   });
@@ -2895,12 +3679,19 @@ module.exports = {
   EXACT_PENDING_MIGRATIONS,
   EXACT_TARGET_MIGRATIONS,
   EXACT_TO_PROFILE,
+  REFERENCE_CHECK_FROM_PROFILE,
+  REFERENCE_CHECK_PENDING_MIGRATIONS,
+  REFERENCE_CHECK_TARGET_MIGRATIONS,
+  REFERENCE_CHECK_TO_PROFILE,
   GLOBAL_VAULT_BACKFILL_POLICY,
   GLOBAL_VAULT_BACKFILL_POLICY_CREATE,
   GLOBAL_VAULT_BACKFILL_POLICY_DROP,
   GLOBAL_VAULT_REGISTRY_MIGRATION,
   SOCIAL_CONNECTOR_PERSISTENCE_MIGRATION,
+  SOCIAL_REFERENCE_CHECK_FIX_MIGRATION,
+  SOCIAL_REFERENCE_CHECK_REPLACEMENTS,
   STAGING_EXACT_0004_SQL_SHA256,
+  STAGING_REFERENCE_CHECK_0005_SQL_SHA256,
   STAGING_EXACT_APPROVAL_PREFIX,
   STAGING_EXACT_DATABASE_SERVICE_ID,
   STAGING_EXACT_WEB_SERVICE_ID,
@@ -2910,12 +3701,15 @@ module.exports = {
   assertApplyTarget,
   assertExactDisposableTarget,
   assertExactStagingTarget,
+  assertReferenceCheckTarget,
+  assertReferenceCheckStagingTarget,
   assertCanonicalStagingExactManifest,
   assertMigrationTarget,
   assertNonDestructiveSql,
   compareMigrationState,
   createMigrationRunner,
   exactMigrationState,
+  referenceCheckMigrationState,
   readStagingExactCatalogSnapshot,
   readManifest,
   readMigrationState,
@@ -2929,6 +3723,7 @@ module.exports = {
   verifySocialPhysicalProfile,
   verifyTargetMarker,
   validateExactMigrationRequest,
+  validateReferenceCheckFixRequest,
   validateStagingExactMigrationRequest,
   verifyStagingExactCatalogSnapshot,
   withRoleTransaction

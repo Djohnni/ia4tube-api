@@ -735,6 +735,10 @@ test("schema profile selection returns only the exact canonical frozen profile",
     requireCanonicalSchemaProfile(profiles, "social-schema-0004"),
     profiles[1]
   );
+  assert.equal(
+    requireCanonicalSchemaProfile(profiles, "social-schema-0005"),
+    profiles[2]
+  );
   for (const [candidate, profileId] of [
     [profiles, "social-schema-unknown"],
     [[...profiles], "social-schema-0003"],
@@ -900,7 +904,7 @@ function defaultRestoreBehaviorFacadeFixture(options = {}) {
   });
 }
 
-test("default Windows restore facade binds 0003 legacy and 0004 current into both schema slots", async () => {
+test("default Windows restore facade binds legacy 0003, historical 0004 and current 0005 into both schema slots", async () => {
   const fixture = defaultRestoreBehaviorFacadeFixture();
   const PoolClass = class SyntheticPool {};
   const profile0003 = fixture.facade.createRestoreBehaviorVerifiers({
@@ -913,15 +917,23 @@ test("default Windows restore facade binds 0003 legacy and 0004 current into bot
     env: { SOCIAL_SCHEMA_PROFILE: "social-schema-0003" },
     dependencies: { PoolClass }
   }).configuration;
+  const profile0005 = fixture.facade.createRestoreBehaviorVerifiers({
+    expectedProfileId: "social-schema-0005",
+    env: { SOCIAL_SCHEMA_PROFILE: "social-schema-0003" },
+    dependencies: { PoolClass }
+  }).configuration;
 
   assert.equal(fixture.calls.legacyLoad.length, 1);
   assert.equal(fixture.calls.legacyLoad[0], fixture.legacy2ARoot);
   assert.equal(Object.hasOwn(profile0003, "expectedProfileId"), false);
   assert.equal(Object.hasOwn(profile0004, "expectedProfileId"), false);
+  assert.equal(Object.hasOwn(profile0005, "expectedProfileId"), false);
   assert.equal(profile0003.legacy2ARoot, fixture.legacy2ARoot);
   assert.equal(profile0004.legacy2ARoot, fixture.legacy2ARoot);
+  assert.equal(profile0005.legacy2ARoot, fixture.legacy2ARoot);
   assert.equal(profile0003.dependencies.PoolClass, PoolClass);
   assert.equal(profile0004.dependencies.PoolClass, PoolClass);
+  assert.equal(profile0005.dependencies.PoolClass, PoolClass);
   assert.equal(
     profile0003.dependencies.verifyRuntimeSchema,
     profile0003.legacyDependencies.verifyRuntimeSchema
@@ -929,6 +941,10 @@ test("default Windows restore facade binds 0003 legacy and 0004 current into bot
   assert.equal(
     profile0004.dependencies.verifyRuntimeSchema,
     profile0004.legacyDependencies.verifyRuntimeSchema
+  );
+  assert.equal(
+    profile0005.dependencies.verifyRuntimeSchema,
+    profile0005.legacyDependencies.verifyRuntimeSchema
   );
   for (const operation of [
     "createCompanyScopedRepository",
@@ -939,6 +955,7 @@ test("default Windows restore facade binds 0003 legacy and 0004 current into bot
   ]) {
     assert.equal(profile0003.legacyDependencies[operation], fixture.legacy[operation]);
     assert.equal(profile0004.legacyDependencies[operation], fixture.legacy[operation]);
+    assert.equal(profile0005.legacyDependencies[operation], fixture.legacy[operation]);
   }
 
   const observed0004 = Object.freeze({ observedProfile: "0004" });
@@ -964,17 +981,35 @@ test("default Windows restore facade binds 0003 legacy and 0004 current into bot
   );
   assert.equal(fixture.calls.legacySchema.length, 2);
   assert.equal(fixture.calls.currentSchema.length, 2);
+  assert.equal(
+    fixture.calls.currentSchema[0][2].expectedMigrationRows,
+    require("../src/persistence/postgres/backup-restore").SCHEMA_PROFILES[1].migrationRows
+  );
+
+  await profile0005.dependencies.verifyRuntimeSchema(
+    observed0003,
+    "synthetic_runtime"
+  );
+  await profile0005.legacyDependencies.verifyRuntimeSchema(
+    observed0003,
+    "synthetic_runtime"
+  );
+  assert.equal(fixture.calls.currentSchema.length, 4);
+  assert.equal(
+    fixture.calls.currentSchema[2][2].expectedMigrationRows,
+    require("../src/persistence/postgres/backup-restore").SCHEMA_PROFILES[2].migrationRows
+  );
 
   await fixture.facade.verifyRuntimeSchemaForProfile({
     expectedProfileId: "social-schema-0004",
     pool: observed0003,
     role: "synthetic_runtime"
   });
-  assert.equal(fixture.calls.currentSchema.length, 3);
+  assert.equal(fixture.calls.currentSchema.length, 5);
   assert.equal(fixture.facade.schemaProfileDiagnostics(), null);
 });
 
-test("default Windows restore facade binds the 0003 repository bridge before creation and leaves 0004 current by identity", () => {
+test("default Windows restore facade binds the 0003 repository bridge and leaves 0004/0005 current by identity", () => {
   const fixture = defaultRestoreBehaviorFacadeFixture();
   const profile0003 = fixture.facade.createRestoreBehaviorVerifiers({
     expectedProfileId: "social-schema-0003",
@@ -984,9 +1019,17 @@ test("default Windows restore facade binds the 0003 repository bridge before cre
     expectedProfileId: "social-schema-0004",
     dependencies: { PoolClass: class SyntheticPool0004 {} }
   }).configuration;
+  const profile0005 = fixture.facade.createRestoreBehaviorVerifiers({
+    expectedProfileId: "social-schema-0005",
+    dependencies: { PoolClass: class SyntheticPool0005 {} }
+  }).configuration;
 
   assert.equal(
     profile0004.dependencies.createSocialRepository,
+    fixture.currentSocialRepository.createSocialRepository
+  );
+  assert.equal(
+    profile0005.dependencies.createSocialRepository,
     fixture.currentSocialRepository.createSocialRepository
   );
   assert.notEqual(
@@ -1032,14 +1075,22 @@ test("default Windows restore facade binds the 0003 repository bridge before cre
     profile0004.legacyDependencies.createSocialRepository,
     fixture.legacy.createSocialRepository
   );
+  assert.equal(
+    profile0005.legacyDependencies.createSocialRepository,
+    fixture.legacy.createSocialRepository
+  );
 
   const current0004 = profile0004.dependencies.createSocialRepository(
     repositoryOptions
   );
   assert.equal(current0004, fixture.currentRepository);
+  const current0005 = profile0005.dependencies.createSocialRepository(
+    repositoryOptions
+  );
+  assert.equal(current0005, fixture.currentRepository);
   assert.deepEqual(
     fixture.calls.currentRepositoryFactory,
-    [repositoryOptions, repositoryOptions]
+    [repositoryOptions, repositoryOptions, repositoryOptions]
   );
   assert.deepEqual(fixture.calls.legacyRepositoryFactory, [repositoryOptions]);
 });
@@ -1176,7 +1227,11 @@ test("default Windows restore facade treats a validated legacy loader failure as
     code: "restore_behavior_2a_source_hash_mismatch"
   });
   const fixture = defaultRestoreBehaviorFacadeFixture({ loaderFailure });
-  for (const profileId of ["social-schema-0003", "social-schema-0004"]) {
+  for (const profileId of [
+    "social-schema-0003",
+    "social-schema-0004",
+    "social-schema-0005"
+  ]) {
     assert.throws(
       () => fixture.facade.createRestoreBehaviorVerifiers({
         expectedProfileId: profileId,
@@ -1402,7 +1457,7 @@ test("restore request profile binding requires exact canonical identities in bot
   const profiles = require(
     "../src/persistence/postgres/backup-restore"
   ).SCHEMA_PROFILES;
-  const [profile0003, profile0004] = profiles;
+  const [profile0003, profile0004, profile0005] = profiles;
   const sourcePlan = (profile) => Object.freeze({ profile });
 
   for (const profile of profiles) {
@@ -1418,7 +1473,11 @@ test("restore request profile binding requires exact canonical identities in bot
 
   for (const [sourceProfile, expectedProfile] of [
     [profile0003, profile0004],
-    [profile0004, profile0003]
+    [profile0003, profile0005],
+    [profile0004, profile0003],
+    [profile0004, profile0005],
+    [profile0005, profile0003],
+    [profile0005, profile0004]
   ]) {
     assert.throws(
       () => assertRestoreRequestProfileBinding(
@@ -1510,10 +1569,10 @@ test("restore request binds profiles before transport, configuration, lifecycle 
   assert.ok(pools > verifiers);
 });
 
-test("runtime relation inventories remain exact for profiles 0003 and 0004", () => {
+test("runtime relation inventories remain exact for historical 0003/0004 and current 0005", () => {
   const backup = require("../src/persistence/postgres/backup-restore");
   const runtime = require("../src/persistence/postgres/runtime-validation");
-  const [profile0003, profile0004] = backup.SCHEMA_PROFILES;
+  const [profile0003, profile0004, profile0005] = backup.SCHEMA_PROFILES;
   const profile0003Relations = new Set([
     ...profile0003.rlsTables,
     "runtime_schema_contract"
@@ -1522,17 +1581,24 @@ test("runtime relation inventories remain exact for profiles 0003 and 0004", () 
     ...profile0004.rlsTables,
     "runtime_schema_contract"
   ]);
+  const profile0005Relations = new Set([
+    ...profile0005.rlsTables,
+    "runtime_schema_contract"
+  ]);
   const missingFrom0003 = [...profile0004Relations]
     .filter((relation) => !profile0003Relations.has(relation));
 
   assert.equal(profile0003Relations.size, 13);
   assert.equal(profile0004Relations.size, 16);
+  assert.equal(profile0005Relations.size, 16);
   assert.deepEqual(missingFrom0003, [
     "social_idempotency_operations",
     "social_publications",
     "social_publication_attempts"
   ]);
   assert.deepEqual(runtime.TENANT_TABLES, profile0004.rlsTables);
+  assert.deepEqual(runtime.TENANT_TABLES, profile0005.rlsTables);
+  assert.deepEqual([...profile0005Relations], [...profile0004Relations]);
 
   const source = fs.readFileSync(
     path.resolve(__dirname, "../src/persistence/postgres/runtime-validation.js"),
@@ -1839,7 +1905,7 @@ test("restore verifier construction stays absent across every earlier failure bo
   });
 });
 
-test("Gate 5 restore verifiers bind 0003 and 0004 across runtime, vault and 2A and close once", async () => {
+test("Gate 5 restore verifiers bind 0003, 0004 and 0005 across runtime, vault and 2A and close once", async () => {
   const behavior = profileAwareRestoreBehaviorFixture();
   const fixture = backupTransportFixture({
     precreateBackupDirectory: false,
@@ -1852,7 +1918,8 @@ test("Gate 5 restore verifiers bind 0003 and 0004 across runtime, vault and 2A a
     const prepared = await fixture.plans.prepareBackupRestore();
     for (const [request, profileId] of [
       [prepared.restore0003, "social-schema-0003"],
-      [prepared.restore0004, "social-schema-0004"]
+      [prepared.restore0004, "social-schema-0004"],
+      [prepared.restore0005, "social-schema-0005"]
     ]) {
       const identity = {
         database: request.lifecycle.database,
@@ -1880,7 +1947,8 @@ test("Gate 5 restore verifiers bind 0003 and 0004 across runtime, vault and 2A a
     }
     assert.deepEqual(behavior.created, [
       "social-schema-0003",
-      "social-schema-0004"
+      "social-schema-0004",
+      "social-schema-0005"
     ]);
     assert.deepEqual(behavior.operations, [
       ["social-schema-0003", "runtime"],
@@ -1888,18 +1956,22 @@ test("Gate 5 restore verifiers bind 0003 and 0004 across runtime, vault and 2A a
       ["social-schema-0003", "2a"],
       ["social-schema-0004", "runtime"],
       ["social-schema-0004", "vault"],
-      ["social-schema-0004", "2a"]
+      ["social-schema-0004", "2a"],
+      ["social-schema-0005", "runtime"],
+      ["social-schema-0005", "vault"],
+      ["social-schema-0005", "2a"]
     ]);
     assert.deepEqual(behavior.closed, [
       "social-schema-0003",
-      "social-schema-0004"
+      "social-schema-0004",
+      "social-schema-0005"
     ]);
   } finally {
     await destroyBackupTransportFixture(fixture);
   }
 });
 
-test("Gate 5 executes independent 0003 and high-authority 0004 restore verifier sequences through cleanup", async () => {
+test("Gate 5 executes independent 0003, 0004 and current 0005 restore verifier sequences through cleanup", async () => {
   const authorities = Object.freeze({
     "social-schema-0003": Object.freeze({
       activationMarkerGeneration: 0,
@@ -1909,6 +1981,11 @@ test("Gate 5 executes independent 0003 and high-authority 0004 restore verifier 
     "social-schema-0004": Object.freeze({
       activationMarkerGeneration: 3,
       activeOperationalKeyGeneration: 1900000000,
+      randomCandidate: 1000000041
+    }),
+    "social-schema-0005": Object.freeze({
+      activationMarkerGeneration: 4,
+      activeOperationalKeyGeneration: 2000000000,
       randomCandidate: 1000000041
     })
   });
@@ -1925,12 +2002,13 @@ test("Gate 5 executes independent 0003 and high-authority 0004 restore verifier 
     const prepared = await fixture.plans.prepareBackupRestore();
     const requests = [
       [prepared.restore0003, "social-schema-0003"],
-      [prepared.restore0004, "social-schema-0004"]
+      [prepared.restore0004, "social-schema-0004"],
+      [prepared.restore0005, "social-schema-0005"]
     ];
-    assert.notEqual(requests[0][0].pool, requests[1][0].pool);
-    assert.notEqual(
-      requests[0][0].lifecycle.database,
-      requests[1][0].lifecycle.database
+    assert.equal(new Set(requests.map(([request]) => request.pool)).size, 3);
+    assert.equal(
+      new Set(requests.map(([request]) => request.lifecycle.database)).size,
+      3
     );
 
     for (const [request, profileId] of requests) {
@@ -1958,11 +2036,14 @@ test("Gate 5 executes independent 0003 and high-authority 0004 restore verifier 
       ["social-schema-0003", "transport"],
       ["social-schema-0003", "cleanup"],
       ["social-schema-0004", "transport"],
-      ["social-schema-0004", "cleanup"]
+      ["social-schema-0004", "cleanup"],
+      ["social-schema-0005", "transport"],
+      ["social-schema-0005", "cleanup"]
     ]);
     assert.deepEqual(behavior.created, [
       "social-schema-0003",
-      "social-schema-0004"
+      "social-schema-0004",
+      "social-schema-0005"
     ]);
     assert.deepEqual(behavior.operations, [
       ["social-schema-0003", "runtime"],
@@ -1970,28 +2051,33 @@ test("Gate 5 executes independent 0003 and high-authority 0004 restore verifier 
       ["social-schema-0003", "2a"],
       ["social-schema-0004", "runtime"],
       ["social-schema-0004", "vault"],
-      ["social-schema-0004", "2a"]
+      ["social-schema-0004", "2a"],
+      ["social-schema-0005", "runtime"],
+      ["social-schema-0005", "vault"],
+      ["social-schema-0005", "2a"]
     ]);
     assert.deepEqual(behavior.closed, [
       "social-schema-0003",
-      "social-schema-0004"
+      "social-schema-0004",
+      "social-schema-0005"
     ]);
-    assert.equal(behavior.instances.length, 2);
-    assert.notEqual(
-      behavior.instances[0].authority,
-      behavior.instances[1].authority
-    );
-    assert.notEqual(
-      behavior.instances[0].registry,
-      behavior.instances[1].registry
-    );
-    assert.notEqual(behavior.instances[0].pool, behavior.instances[1].pool);
-    assert.notEqual(behavior.instances[0].buffer, behavior.instances[1].buffer);
-    assert.deepEqual([...behavior.instances[0].buffer], [0, 0, 0, 0]);
-    assert.deepEqual([...behavior.instances[1].buffer], [0, 0, 0, 0]);
+    assert.equal(behavior.instances.length, 3);
+    for (let left = 0; left < behavior.instances.length; left += 1) {
+      assert.deepEqual([...behavior.instances[left].buffer], [0, 0, 0, 0]);
+      for (let right = left + 1; right < behavior.instances.length; right += 1) {
+        assert.notEqual(behavior.instances[left].authority, behavior.instances[right].authority);
+        assert.notEqual(behavior.instances[left].registry, behavior.instances[right].registry);
+        assert.notEqual(behavior.instances[left].pool, behavior.instances[right].pool);
+        assert.notEqual(behavior.instances[left].buffer, behavior.instances[right].buffer);
+      }
+    }
     assert.deepEqual(
       behavior.instances[1].authority,
       authorities["social-schema-0004"]
+    );
+    assert.deepEqual(
+      behavior.instances[2].authority,
+      authorities["social-schema-0005"]
     );
     assert.equal(fixture.processStarts.length, 0);
     assert.equal(fixture.runToolCalls.length, 0);
@@ -2000,9 +2086,9 @@ test("Gate 5 executes independent 0003 and high-authority 0004 restore verifier 
   }
 });
 
-test("profile verifier creation failure never falls back from 0004 to 0003", async () => {
+test("profile verifier creation failure never falls back from current 0005", async () => {
   const behavior = profileAwareRestoreBehaviorFixture({
-    failCreateForProfileId: "social-schema-0004"
+    failCreateForProfileId: "social-schema-0005"
   });
   const fixture = backupTransportFixture({
     precreateBackupDirectory: false,
@@ -2013,7 +2099,7 @@ test("profile verifier creation failure never falls back from 0004 to 0003", asy
   });
   try {
     const prepared = await fixture.plans.prepareBackupRestore();
-    const request = prepared.restore0004;
+    const request = prepared.restore0005;
     const identity = {
       database: request.lifecycle.database,
       host: request.lifecycle.host,
@@ -2028,7 +2114,7 @@ test("profile verifier creation failure never falls back from 0004 to 0003", asy
       ),
       { code: "synthetic_profile_verifier_failure" }
     );
-    assert.deepEqual(behavior.created, ["social-schema-0004"]);
+    assert.deepEqual(behavior.created, ["social-schema-0005"]);
     assert.deepEqual(behavior.operations, []);
     assert.deepEqual(behavior.closed, []);
     await request.closeVerifiers();
@@ -2212,16 +2298,20 @@ test("backup plans require the fixed logical TLS identity and its bound internal
       ["backup0003", resolveSchemaProfile(prepared.backup0003.profileRows).id],
       ["restore0003", prepared.restore0003.expectedProfile.id],
       ["backup0004", resolveSchemaProfile(prepared.backup0004.profileRows).id],
-      ["restore0004", prepared.restore0004.expectedProfile.id]
+      ["restore0004", prepared.restore0004.expectedProfile.id],
+      ["backup0005", resolveSchemaProfile(prepared.backup0005.profileRows).id],
+      ["restore0005", prepared.restore0005.expectedProfile.id]
     ], [
       ["backup0003", "social-schema-0003"],
       ["restore0003", "social-schema-0003"],
       ["backup0004", "social-schema-0004"],
-      ["restore0004", "social-schema-0004"]
+      ["restore0004", "social-schema-0004"],
+      ["backup0005", "social-schema-0005"],
+      ["restore0005", "social-schema-0005"]
     ]);
-    assert.equal(bridgeCalls.length, 4);
-    assert.equal(fixture.configLoads.length, 2);
-    assert.equal(fixture.restoreConfigLoads.length, 2);
+    assert.equal(bridgeCalls.length, 6);
+    assert.equal(fixture.configLoads.length, 3);
+    assert.equal(fixture.restoreConfigLoads.length, 3);
     for (const load of fixture.configLoads) {
       assert.equal(load.sourceHost, logicalHost);
       assert.equal(load.sourcePort, "5432");
@@ -2248,7 +2338,9 @@ test("backup plans require the fixed logical TLS identity and its bound internal
       prepared.backup0003,
       prepared.restore0003,
       prepared.backup0004,
-      prepared.restore0004
+      prepared.restore0004,
+      prepared.backup0005,
+      prepared.restore0005
     ]) {
       assert.equal(request.localBinding.connectivityMode, connectivityMode);
       assert.equal(request.localBinding.logicalHost, logicalHost);
@@ -2304,7 +2396,9 @@ test("provenance binds and consumes only exact Gate 1 and Gate 5 outer operation
       [prepared.backup0003, "backup", successfulLogicalBackupResult()],
       [prepared.restore0003, "restore", successfulLogicalRestoreResult()],
       [prepared.backup0004, "backup", successfulLogicalBackupResult()],
-      [prepared.restore0004, "restore", successfulLogicalRestoreResult()]
+      [prepared.restore0004, "restore", successfulLogicalRestoreResult()],
+      [prepared.backup0005, "backup", successfulLogicalBackupResult()],
+      [prepared.restore0005, "restore", successfulLogicalRestoreResult()]
     ];
     for (const [request, kind, expected] of gate5Requests) {
       assert.equal(Object.isFrozen(request), true);
@@ -2327,7 +2421,9 @@ test("provenance binds and consumes only exact Gate 1 and Gate 5 outer operation
       "gate5_backup_0003",
       "gate5_restore_0003",
       "gate5_backup_0004",
-      "gate5_restore_0004"
+      "gate5_restore_0004",
+      "gate5_backup_0005",
+      "gate5_restore_0005"
     ]);
     for (const call of provenance.calls) {
       assert.equal(Object.isFrozen(call.request), true);
@@ -2340,14 +2436,16 @@ test("provenance binds and consumes only exact Gate 1 and Gate 5 outer operation
       "utf8"
     );
     const labels = new Set(
-      [...source.matchAll(/"((?:rollback|gate5)_(?:backup|restore)_000[34])"/gu)]
+      [...source.matchAll(/"((?:rollback|gate5)_(?:backup|restore)_000[345])"/gu)]
         .map((match) => match[1])
     );
     assert.deepEqual([...labels].sort(), [
       "gate5_backup_0003",
       "gate5_backup_0004",
+      "gate5_backup_0005",
       "gate5_restore_0003",
       "gate5_restore_0004",
+      "gate5_restore_0005",
       "rollback_backup_0003",
       "rollback_restore_0003"
     ]);
@@ -3289,6 +3387,154 @@ test("plan-directory rollback never overwrites the restore-work mkdir failure", 
       (error) => error === primary
     );
     assert.equal(rmdirCalls, 1);
+  } finally {
+    await destroyBackupTransportFixture(fixture);
+  }
+});
+
+test("backup preparation removes every source created before a profile apply failure", async () => {
+  for (const failedProfileId of ["social-schema-0004", "social-schema-0005"]) {
+    const failure = Object.assign(new Error("synthetic apply failure"), {
+      code: `synthetic_${failedProfileId}_apply_failure`
+    });
+    const active = new Set();
+    const created = [];
+    const removed = [];
+    const databaseManager = {
+      isAllowedDatabase() { return true; },
+      getPools() { return { provisioner: {} }; },
+      async create(identity) {
+        created.push(identity.profileId);
+        active.add(identity.database);
+        return Object.freeze({ ...identity, createdByThisRun: true });
+      },
+      async assertCreated(proof) { return active.has(proof.database); },
+      async remove(proof) {
+        removed.push(proof.profileId);
+        active.delete(proof.database);
+        return true;
+      },
+      async assertRemoved(proof) { return !active.has(proof.database); },
+      async applyProfile(_database, profileId) {
+        if (profileId === failedProfileId) throw failure;
+        return true;
+      },
+      async cleanupAll() {}
+    };
+    const fixture = backupTransportFixture({
+      precreateBackupDirectory: false,
+      dependencies: {
+        createBackupTransportBridge: createLogicalBackupTransportBridge,
+        databaseManager
+      }
+    });
+    try {
+      await assert.rejects(
+        fixture.plans.prepareBackupRestore(),
+        (error) => error === failure
+      );
+      const expectedCreated = failedProfileId === "social-schema-0004"
+        ? ["social-schema-0003", "social-schema-0004"]
+        : ["social-schema-0003", "social-schema-0004", "social-schema-0005"];
+      assert.deepEqual(created, expectedCreated);
+      assert.deepEqual(removed, [...expectedCreated].reverse());
+      assert.equal(active.size, 0);
+    } finally {
+      await destroyBackupTransportFixture(fixture);
+    }
+  }
+});
+
+test("backup source cleanup attempts older sources after the newest removal fails", async () => {
+  const removalFailure = Object.assign(new Error("synthetic remove failure"), {
+    code: "synthetic_0005_remove_failure"
+  });
+  const active = new Set();
+  const removeAttempts = [];
+  const databaseManager = {
+    isAllowedDatabase() { return true; },
+    getPools() { return { provisioner: {} }; },
+    async create(identity) {
+      active.add(identity.database);
+      return Object.freeze({ ...identity, createdByThisRun: true });
+    },
+    async assertCreated(proof) { return active.has(proof.database); },
+    async remove(proof) {
+      removeAttempts.push(proof.profileId);
+      if (proof.profileId === "social-schema-0005") throw removalFailure;
+      active.delete(proof.database);
+      return true;
+    },
+    async assertRemoved(proof) { return !active.has(proof.database); },
+    async applyProfile() { return true; },
+    async cleanupAll() {}
+  };
+  const fixture = backupTransportFixture({
+    precreateBackupDirectory: false,
+    dependencies: {
+      createBackupTransportBridge: createLogicalBackupTransportBridge,
+      databaseManager
+    }
+  });
+  try {
+    const prepared = await fixture.plans.prepareBackupRestore();
+    await assert.rejects(prepared.cleanup(), (error) => error === removalFailure);
+    assert.deepEqual(removeAttempts, [
+      "social-schema-0005",
+      "social-schema-0004",
+      "social-schema-0003"
+    ]);
+    assert.equal(active.size, 1);
+  } finally {
+    await destroyBackupTransportFixture(fixture);
+  }
+});
+
+test("backup preparation reconciles and removes a source after an ambiguous create failure", async () => {
+  const createFailure = Object.assign(new Error("synthetic create failure"), {
+    code: "synthetic_0004_create_failure"
+  });
+  const active = new Map();
+  const removed = [];
+  const databaseManager = {
+    isAllowedDatabase() { return true; },
+    getPools() { return { provisioner: {} }; },
+    async create(identity) {
+      active.set(identity.database, identity);
+      if (identity.profileId === "social-schema-0004") throw createFailure;
+      return Object.freeze({ ...identity, createdByThisRun: true });
+    },
+    async reconcile(identity) {
+      return Object.freeze({
+        ...identity,
+        createdByThisRun: active.has(identity.database),
+        status: active.has(identity.database) ? "owned" : "absent"
+      });
+    },
+    async assertCreated(proof) { return active.has(proof.database); },
+    async remove(proof) {
+      removed.push(proof.profileId);
+      active.delete(proof.database);
+      return true;
+    },
+    async assertRemoved(proof) { return !active.has(proof.database); },
+    async applyProfile() { return true; },
+    async cleanupAll() {}
+  };
+  const fixture = backupTransportFixture({
+    precreateBackupDirectory: false,
+    dependencies: {
+      createBackupTransportBridge: createLogicalBackupTransportBridge,
+      databaseManager
+    }
+  });
+  try {
+    await assert.rejects(
+      fixture.plans.prepareBackupRestore(),
+      (error) => error === createFailure
+    );
+    assert.deepEqual(removed, ["social-schema-0004", "social-schema-0003"]);
+    assert.equal(active.size, 0);
   } finally {
     await destroyBackupTransportFixture(fixture);
   }
