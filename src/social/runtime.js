@@ -1,5 +1,7 @@
 "use strict";
 
+const path = require("node:path");
+
 const {
   assertWebServiceDatabaseCredentialBoundary,
   loadRuntimePostgresConfig
@@ -56,6 +58,16 @@ const {
 const {
   createInstagramOAuthService
 } = require("./oauth/instagram-oauth-service");
+const {
+  CONTROLLED_GATE4_STAGING_ORIGIN,
+  createControlledGate4JpegMedia
+} = require("./publication/controlled-gate4-jpeg");
+const {
+  createInstagramPublicationConnector
+} = require("./publication/instagram-publication-connector");
+const {
+  createInstagramPublicationService
+} = require("./publication/instagram-publication-service");
 
 function createDisabledRuntime() {
   return Object.freeze({
@@ -139,16 +151,18 @@ async function createSocialRuntime(options = {}) {
       pool,
       runtimeRole: config.role
     });
+    const connectorAudit = createPostgresConnectorAudit({
+      pool,
+      runtimeRole: config.role
+    });
     const connectorPersistence = Object.freeze({
-      audit: createPostgresConnectorAudit({
-        pool,
-        runtimeRole: config.role
-      }),
+      audit: connectorAudit,
       oauth: oauthRepository,
       store: connectorStore
     });
     const authAdapter = createSocialAuthAdapter(identityConfig);
     let instagramOAuth = null;
+    let instagramPublication = null;
     if (instagramConfig.enabled) {
       instagramStateEnvelope = createInstagramOAuthStateEnvelope({
         derivationKey: identityConfig.key,
@@ -182,6 +196,46 @@ async function createSocialRuntime(options = {}) {
             ? "production"
             : "staging"
       });
+      if (
+        instagramConfig.publicOrigin === CONTROLLED_GATE4_STAGING_ORIGIN &&
+        instagramConfig.expectedUsername === "ia4tube_empresas"
+      ) {
+        const publicDirectory = options.publicDirectory || path.resolve(
+          __dirname,
+          "..",
+          "..",
+          "public"
+        );
+        const controlledMedia = createControlledGate4JpegMedia({
+          publicDirectory,
+          publicOrigin: instagramConfig.publicOrigin
+        });
+        const publicationTransport = options.instagramPublicationTransport ||
+          globalThis.fetch;
+        const publicationConnector = createInstagramPublicationConnector({
+          config: instagramConfig,
+          store: connectorStore,
+          credentials,
+          media: controlledMedia,
+          transport: publicationTransport,
+          clock: options.clock || Date.now,
+          setTimeout: options.setTimeout,
+          clearTimeout: options.clearTimeout,
+          sleep: options.publicationSleep
+        });
+        instagramPublication = createInstagramPublicationService({
+          config: instagramConfig,
+          authAdapter,
+          connectorStore,
+          connectorAudit,
+          credentials,
+          media: controlledMedia,
+          publicationConnector,
+          logger: options.logger,
+          clock: options.clock || Date.now,
+          randomUUID: options.randomUUID
+        });
+      }
     }
     let closed = false;
     function assertOpen() {
@@ -198,6 +252,7 @@ async function createSocialRuntime(options = {}) {
       connectorPersistence,
       credentials,
       instagramOAuth,
+      instagramPublication,
       reauth,
       auth: Object.freeze({
         fromVerifiedJwt(claims) {

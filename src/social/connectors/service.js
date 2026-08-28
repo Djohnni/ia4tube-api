@@ -718,7 +718,11 @@ function createSocialConnectorService(options = {}) {
           result.reconciliationReference !==
             publication.reconciliationReference
         ) {
-          connectorFail("provider_result_unknown");
+          return savePublication(scope, context, {
+            ...publication,
+            reconciliationReference: result.reconciliationReference,
+            revision: publication.revision + 1
+          }, publication.revision);
         }
         return publication;
       }

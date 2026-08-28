@@ -247,7 +247,7 @@ test("Instagram OAuth configuration defaults every external gate off", () => {
   assert.equal(Object.isFrozen(config), true);
 });
 
-test("Instagram OAuth flags are exact and publication cannot be enabled", () => {
+test("Instagram OAuth flags are exact and publication is staging-only", () => {
   for (const invalid of ["", "TRUE", " true", "false ", "1", true]) {
     assert.throws(
       () => loadInstagramOAuthConfig({
@@ -262,6 +262,46 @@ test("Instagram OAuth flags are exact and publication cannot be enabled", () => 
     }),
     { code: "social_instagram_publication_forbidden" }
   );
+  const readOnlyPublication = loadInstagramOAuthConfig(enabledEnvironment({
+    SOCIAL_EXTERNAL_PUBLICATION_ENABLED: "false",
+    SOCIAL_INSTAGRAM_EXPECTED_USERNAME: "@ia4tube_empresas",
+    PUBLIC_API_BASE_URL:
+      "https://ia4tube-api-staging-checkpoint-a.onrender.com"
+  }));
+  assert.equal(readOnlyPublication.enabled, true);
+  assert.equal(readOnlyPublication.externalConnectionEnabled, true);
+  assert.equal(readOnlyPublication.externalPublicationEnabled, false);
+  assert.equal(
+    readOnlyPublication.publicOrigin,
+    "https://ia4tube-api-staging-checkpoint-a.onrender.com"
+  );
+  const publication = loadInstagramOAuthConfig(enabledEnvironment({
+    SOCIAL_EXTERNAL_PUBLICATION_ENABLED: "true",
+    SOCIAL_INSTAGRAM_EXPECTED_USERNAME: "@ia4tube_empresas",
+    PUBLIC_API_BASE_URL:
+      "https://ia4tube-api-staging-checkpoint-a.onrender.com"
+  }));
+  assert.equal(publication.externalPublicationEnabled, true);
+  assert.equal(
+    publication.publicOrigin,
+    "https://ia4tube-api-staging-checkpoint-a.onrender.com"
+  );
+  for (const override of [
+    { SOCIAL_INSTAGRAM_EXPECTED_USERNAME: "@another_account" },
+    { PUBLIC_API_BASE_URL: "https://example.invalid" },
+    { SOCIAL_EXTERNAL_CONNECTION_ENABLED: "false" }
+  ]) {
+    assert.throws(
+      () => loadInstagramOAuthConfig(enabledEnvironment({
+        SOCIAL_EXTERNAL_PUBLICATION_ENABLED: "true",
+        SOCIAL_INSTAGRAM_EXPECTED_USERNAME: "@ia4tube_empresas",
+        PUBLIC_API_BASE_URL:
+          "https://ia4tube-api-staging-checkpoint-a.onrender.com",
+        ...override
+      })),
+      { code: "social_instagram_publication_forbidden" }
+    );
+  }
 });
 
 test("enabled Instagram OAuth configuration is closed to exact public values", () => {

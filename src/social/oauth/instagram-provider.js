@@ -423,7 +423,7 @@ function requireConfig(config) {
     config.enabled !== true ||
     config.instagramEnabled !== true ||
     config.externalConnectionEnabled !== true ||
-    config.externalPublicationEnabled !== false ||
+    typeof config.externalPublicationEnabled !== "boolean" ||
     config.provider !== INSTAGRAM_PROVIDER ||
     config.redirectUri !== INSTAGRAM_OAUTH_REDIRECT_URI ||
     config.authorizationEndpoint !== INSTAGRAM_AUTHORIZATION_ENDPOINT ||

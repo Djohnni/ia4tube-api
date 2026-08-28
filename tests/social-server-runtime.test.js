@@ -153,7 +153,8 @@ test("server runtime exposes only the closed Instagram OAuth facade", async () =
   assert.deepEqual(Object.keys(state).sort(), [
     "close",
     "enabled",
-    "instagramOAuth"
+    "instagramOAuth",
+    "instagramPublication"
   ]);
   await state.close();
 });
@@ -166,6 +167,66 @@ test("server runtime refuses an incomplete Instagram OAuth facade", async () => 
         return {
           enabled: true,
           instagramOAuth: { async authorize() {} },
+          async close() {}
+        };
+      }
+    }),
+    { code: "social_server_runtime_initialization_failed" }
+  );
+});
+
+test("server runtime preserves the Gate 4 facade with publication false and true", async () => {
+  for (const publicationFlag of ["false", "true"]) {
+    const facade = Object.freeze({
+      async arm() {},
+      async getSummary() {},
+      async publish() {},
+      async reconcile() {}
+    });
+    const publicationTransport = async () => {};
+    const publicationSleep = async () => {};
+    const publicDirectory = "C:\\synthetic\\ia4tube\\public";
+    let received;
+    const env = {
+      SOCIAL_PERSISTENCE_ENABLED: "true",
+      SOCIAL_EXTERNAL_PUBLICATION_ENABLED: publicationFlag
+    };
+    const state = await initializeSocialServerRuntime({
+      env,
+      instagramPublicationTransport: publicationTransport,
+      publicationSleep,
+      publicDirectory,
+      async createRuntime(options) {
+        received = options;
+        return {
+          enabled: true,
+          instagramPublication: facade,
+          async close() {}
+        };
+      }
+    });
+
+    assert.equal(received.env, env);
+    assert.equal(
+      received.env.SOCIAL_EXTERNAL_PUBLICATION_ENABLED,
+      publicationFlag
+    );
+    assert.equal(received.instagramPublicationTransport, publicationTransport);
+    assert.equal(received.publicationSleep, publicationSleep);
+    assert.equal(received.publicDirectory, publicDirectory);
+    assert.equal(state.instagramPublication, facade);
+    await state.close();
+  }
+});
+
+test("server runtime refuses an incomplete Gate 4 publication facade", async () => {
+  await assert.rejects(
+    initializeSocialServerRuntime({
+      env: { SOCIAL_PERSISTENCE_ENABLED: "true" },
+      async createRuntime() {
+        return {
+          enabled: true,
+          instagramPublication: { async publish() {} },
           async close() {}
         };
       }

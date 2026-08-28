@@ -46,6 +46,13 @@ const LOCAL_CONNECTION_HEALTH = new Set([
   "healthy",
   "reconnect_required"
 ]);
+const PUBLICATION_ATTEMPT_STATES = new Set([
+  "started",
+  "provider_confirming",
+  "published",
+  "failed_temporary",
+  "failed_permanent"
+]);
 const SHA256_PATTERN = /^[0-9a-f]{64}$/;
 const SAFE_CODE_PATTERN = /^[a-z][a-z0-9_]{0,99}$/;
 const KEY_VERSION_PATTERN = /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,49}$/;
@@ -95,6 +102,14 @@ function positiveInteger(value) {
   const parsed = Number(value);
   if (!Number.isSafeInteger(parsed) || parsed < 1) {
     connectorFail("connector_contract_invalid");
+  }
+  return parsed;
+}
+
+function nonNegativeInteger(value) {
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed) || parsed < 0) {
+    connectorFail("resource_unavailable");
   }
   return parsed;
 }
@@ -353,7 +368,10 @@ function connectionDetailsFromRow(row) {
     disconnectedAt: databaseDate(row.disconnected_at),
     expiresAt,
     health: localConnectionHealth(row, state, expiresAt),
-    grantedScopes: scopeNames(row.granted_scopes || [])
+    grantedScopes: scopeNames(row.granted_scopes || []),
+    activeCredentialId: row.active_credential_id
+      ? uuid(row.active_credential_id)
+      : null
   });
 }
 
@@ -375,6 +393,43 @@ function publicationFromRow(row) {
   }
   assertPublicationConfirmation(result);
   return Object.freeze(result);
+}
+
+function publicationAttemptFromRow(row) {
+  const state = safeText(row.state, { max: 50 });
+  if (!PUBLICATION_ATTEMPT_STATES.has(state)) {
+    connectorFail("resource_unavailable");
+  }
+  return Object.freeze({
+    attemptNumber: positiveInteger(row.attempt_number),
+    state,
+    errorCode: errorCode(row.error_code),
+    providerReference: row.provider_reference == null
+      ? null
+      : providerReference(row.provider_reference),
+    startedAt: databaseDate(row.started_at, false),
+    finishedAt: databaseDate(row.finished_at),
+    durationMs: row.duration_ms == null
+      ? null
+      : nonNegativeInteger(row.duration_ms)
+  });
+}
+
+function publicationDetailsFromRow(row, attemptRows = []) {
+  if (!row) return null;
+  const base = publicationFromRow(row);
+  return Object.freeze({
+    ...base,
+    mediaReference: mediaReference(row.media_reference),
+    mediaMetadataDigest: digest(row.media_metadata_digest),
+    caption: caption(row.caption),
+    idempotencyKey: uuid(row.idempotency_key),
+    requestHash: digest(row.request_hash),
+    publishedAt: databaseDate(row.published_at),
+    createdAt: databaseDate(row.created_at, false),
+    updatedAt: databaseDate(row.updated_at, false),
+    attempts: Object.freeze(attemptRows.map(publicationAttemptFromRow))
+  });
 }
 
 function canonicalMediaDigest(image) {
@@ -654,7 +709,8 @@ const CONNECTION_DETAILS_SELECT = [
   "    AND connection_id=connection.id AND provider=connection.provider",
   "    AND credential_type IN ('instagram_user_access_token','access_token')",
   "    AND revoked_at IS NULL",
-  "  ORDER BY (expires_at IS NULL) DESC,expires_at DESC,updated_at DESC,id",
+  "  ORDER BY (credential_type='instagram_user_access_token') DESC,",
+  "    (expires_at IS NULL) DESC,expires_at DESC,updated_at DESC,id",
   "  LIMIT 1",
   ") credential ON TRUE"
 ].join("\n");
@@ -663,6 +719,14 @@ const PUBLICATION_SELECT = [
   "SELECT company_id, id, connection_id, provider, state,",
   "  confirmed_provider_reference, reconciliation_reference,",
   "  error_code, revision",
+  "FROM ia4tube_social.social_publications"
+].join("\n");
+
+const PUBLICATION_DETAILS_SELECT = [
+  "SELECT company_id, id, connection_id, provider, media_reference,",
+  "  media_metadata_digest, caption, state, confirmed_provider_reference,",
+  "  reconciliation_reference, error_code, published_at, created_at,",
+  "  updated_at, revision, idempotency_key, request_hash",
   "FROM ia4tube_social.social_publications"
 ].join("\n");
 
@@ -704,6 +768,79 @@ async function loadPublication(client, context, id, lock = false) {
     [context.companyId, uuid(id), context.provider]
   );
   return publicationFromRow(result.rows?.[0]);
+}
+
+async function loadPublicationDetails(client, context, id) {
+  const publicationId = uuid(id);
+  const result = await client.query(
+    `${PUBLICATION_DETAILS_SELECT}\n` +
+      "WHERE company_id=$1 AND id=$2 AND provider=$3",
+    [context.companyId, publicationId, context.provider]
+  );
+  if (!result.rows?.[0]) return null;
+  const attempts = await client.query(
+    [
+      "SELECT attempt_number,state,error_code,provider_reference,",
+      "  started_at,finished_at,duration_ms",
+      "FROM ia4tube_social.social_publication_attempts",
+      "WHERE company_id=$1 AND publication_id=$2 AND provider=$3",
+      "ORDER BY attempt_number"
+    ].join("\n"),
+    [context.companyId, publicationId, context.provider]
+  );
+  return publicationDetailsFromRow(result.rows[0], attempts.rows || []);
+}
+
+async function loadPublicationSnapshot(
+  client,
+  context,
+  id,
+  connectionId
+) {
+  const publicationId = uuid(id);
+  const cleanConnectionId = uuid(connectionId);
+  const result = await client.query(
+    [
+      "SELECT publication.*,",
+      "  (SELECT COUNT(*)::bigint",
+      "   FROM ia4tube_social.social_publications counted",
+      "   WHERE counted.company_id=$1 AND counted.connection_id=$3",
+      "     AND counted.provider=$4 AND counted.state='published')",
+      "    AS publication_count,",
+      "  COALESCE((",
+      "    SELECT jsonb_agg(jsonb_build_object(",
+      "      'attempt_number',attempt.attempt_number,",
+      "      'state',attempt.state,'error_code',attempt.error_code,",
+      "      'provider_reference',attempt.provider_reference,",
+      "      'started_at',attempt.started_at,",
+      "      'finished_at',attempt.finished_at,",
+      "      'duration_ms',attempt.duration_ms",
+      "    ) ORDER BY attempt.attempt_number)",
+      "    FROM ia4tube_social.social_publication_attempts attempt",
+      "    WHERE attempt.company_id=$1 AND attempt.publication_id=$2",
+      "      AND attempt.provider=$4",
+      "  ), '[]'::jsonb) AS attempts",
+      "FROM (SELECT 1) anchor",
+      "LEFT JOIN LATERAL (",
+      `  ${PUBLICATION_DETAILS_SELECT}`,
+      "  WHERE company_id=$1 AND id=$2 AND provider=$4",
+      "  LIMIT 1",
+      ") publication ON TRUE"
+    ].join("\n"),
+    [context.companyId, publicationId, cleanConnectionId, context.provider]
+  );
+  const row = result.rows?.[0];
+  if (!row) connectorFail("resource_unavailable");
+  const attempts = row.attempts;
+  if (!Array.isArray(attempts) || attempts.length > 100) {
+    connectorFail("resource_unavailable");
+  }
+  return Object.freeze({
+    publication: row.id
+      ? publicationDetailsFromRow(row, attempts)
+      : null,
+    publicationCount: nonNegativeInteger(row.publication_count)
+  });
 }
 
 async function appendInternalAudit(client, context, input) {
@@ -1405,6 +1542,41 @@ function createPostgresConnectorStore(options = {}) {
           return execute((client) => loadPublication(client, context, id));
         },
 
+        async getPublicationDetails(id) {
+          return execute((client) => loadPublicationDetails(
+            client,
+            context,
+            id
+          ));
+        },
+
+        async getPublicationSnapshot(id, connectionId) {
+          return execute((client) => loadPublicationSnapshot(
+            client,
+            context,
+            id,
+            connectionId
+          ));
+        },
+
+        async countPublishedPublications(connectionId) {
+          const cleanConnectionId = uuid(connectionId);
+          return execute(async (client) => {
+            const result = await client.query(
+              [
+                "SELECT COUNT(*)::bigint AS publication_count",
+                "FROM ia4tube_social.social_publications",
+                "WHERE company_id=$1 AND connection_id=$2 AND provider=$3",
+                "  AND state='published'"
+              ].join("\n"),
+              [context.companyId, cleanConnectionId, context.provider]
+            );
+            return nonNegativeInteger(
+              result.rows?.[0]?.publication_count ?? 0
+            );
+          });
+        },
+
         async savePublication(record, expectedRevision) {
           const clean = publicationInput(context, record, expectedRevision);
           return execute(async (client) => {
@@ -1445,7 +1617,18 @@ function createPostgresConnectorStore(options = {}) {
               ) {
                 connectorFail("state_transition_invalid");
               }
-              transitionPublicationState(current.state, clean.state);
+              const confirmationReferenceProgress =
+                current.state === "provider_confirming" &&
+                clean.state === "provider_confirming" &&
+                typeof current.reconciliationReference === "string" &&
+                typeof clean.reconciliationReference === "string" &&
+                current.reconciliationReference !==
+                  clean.reconciliationReference &&
+                clean.confirmedProviderReference === null &&
+                clean.errorCode === null;
+              if (!confirmationReferenceProgress) {
+                transitionPublicationState(current.state, clean.state);
+              }
               const updated = await client.query(
                 [
                   "UPDATE ia4tube_social.social_publications",

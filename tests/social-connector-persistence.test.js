@@ -1102,6 +1102,51 @@ test("provider-confirming remains unconfirmed and its attempt can omit a referen
   assert.equal(untouchedPool.calls.length, 0);
 });
 
+test("provider-confirming reference can progress without opening another attempt", async () => {
+  let reference = "igc:created:12345";
+  let revision = 2;
+  const pool = createFakePool(async (call) => {
+    if (/FROM ia4tube_social\.social_publications/is.test(call.text)) {
+      return { rows: [publicationRow({
+        state: "provider_confirming",
+        revision,
+        reconciliation_reference: reference
+      })] };
+    }
+    if (/UPDATE ia4tube_social\.social_publications/is.test(call.text)) {
+      reference = "igc:armed:12345";
+      revision = 3;
+      return { rows: [{ id: IDS.publication }], rowCount: 1 };
+    }
+    if (/UPDATE ia4tube_social\.social_publication_attempts/is.test(
+      call.text
+    )) {
+      return { rows: [{ attempt_number: 1 }], rowCount: 1 };
+    }
+    return { rows: [{}], rowCount: 1 };
+  });
+  const saved = await createPostgresConnectorStore({
+    pool,
+    runtimeRole: RUNTIME_ROLE
+  }).scope(CONTEXT_A).savePublication(publicationRecord({
+    state: "provider_confirming",
+    revision: 3,
+    reconciliationReference: "igc:armed:12345"
+  }), 2);
+
+  assert.equal(saved.state, "provider_confirming");
+  assert.equal(saved.reconciliationReference, "igc:armed:12345");
+  const calls = productCalls(pool);
+  assert.equal(calls.some((call) =>
+    /INSERT INTO ia4tube_social\.social_publication_attempts/i.test(call.text)
+  ), false);
+  const attemptUpdate = calls.find((call) =>
+    /UPDATE ia4tube_social\.social_publication_attempts/is.test(call.text)
+  );
+  assert.ok(attemptUpdate);
+  assert.ok(attemptUpdate.values.includes("igc:armed:12345"));
+});
+
 test("publication attempt rows and audit events are written automatically in order", async () => {
   let persistedState = "ready";
   let revision = 1;
@@ -3290,6 +3335,7 @@ test("connection detail reads are tenant-scoped, date-safe and secret-free", asy
 
   assert.deepEqual(Object.keys(current).sort(), [
     "account",
+    "activeCredentialId",
     "companyId",
     "connectedAt",
     "createdAt",
@@ -3306,6 +3352,7 @@ test("connection detail reads are tenant-scoped, date-safe and secret-free", asy
   assert.equal(current.companyId, CONTEXT_A.companyId);
   assert.equal(current.state, "connected");
   assert.equal(current.health, "healthy");
+  assert.equal(current.activeCredentialId, IDS.credential);
   assert.deepEqual(current.account, professionalAccount());
   assert.deepEqual(current.grantedScopes, [
     "instagram_business_basic",
@@ -3328,6 +3375,10 @@ test("connection detail reads are tenant-scoped, date-safe and secret-free", asy
     "instagram"
   ]);
   assert.match(currentRead.text, /status=ANY\(\$3::text\[\]\)/i);
+  assert.match(
+    currentRead.text,
+    /ORDER BY \(credential_type='instagram_user_access_token'\) DESC/i
+  );
   assert.doesNotMatch(
     currentRead.text,
     /ciphertext|nonce|auth_tag|key_version/i
@@ -3351,6 +3402,156 @@ test("connection detail reads are tenant-scoped, date-safe and secret-free", asy
     pool: emptyPool,
     runtimeRole: RUNTIME_ROLE
   }).scope(CONTEXT_A).getCurrentConnectionDetails(), null);
+});
+
+test("publication details preserve the immutable ledger and ordered history", async () => {
+  const createdAt = new Date("2026-08-28T12:00:00.000Z");
+  const publishedAt = new Date("2026-08-28T12:01:00.000Z");
+  const updatedAt = new Date("2026-08-28T12:01:01.000Z");
+  const mediaDigest = "a".repeat(64);
+  const requestHash = "b".repeat(64);
+  const row = publicationRow({
+    media_reference: "gate4_snapshot_instagram_12345_business",
+    media_metadata_digest: mediaDigest,
+    caption: "Synthetic controlled caption",
+    state: "published",
+    confirmed_provider_reference: "igm:12345:abcdef:1787918460",
+    published_at: publishedAt,
+    created_at: createdAt,
+    updated_at: updatedAt,
+    idempotency_key: IDS.operation,
+    request_hash: requestHash,
+    revision: 4
+  });
+  const attempts = [{
+    attempt_number: 1,
+    state: "published",
+    error_code: null,
+    provider_reference: row.confirmed_provider_reference,
+    started_at: createdAt,
+    finished_at: publishedAt,
+    duration_ms: "60000"
+  }];
+  const pool = createFakePool(async (call) => {
+    if (/FROM ia4tube_social\.social_publication_attempts/is.test(call.text)) {
+      return { rows: attempts };
+    }
+    if (/FROM ia4tube_social\.social_publications/is.test(call.text)) {
+      return { rows: [row] };
+    }
+    return { rows: [] };
+  });
+  const details = await createPostgresConnectorStore({
+    pool,
+    runtimeRole: RUNTIME_ROLE
+  }).scope(CONTEXT_A).getPublicationDetails(IDS.publication);
+
+  assert.equal(details.companyId, CONTEXT_A.companyId);
+  assert.equal(details.mediaReference, row.media_reference);
+  assert.equal(details.mediaMetadataDigest, mediaDigest);
+  assert.equal(details.caption, row.caption);
+  assert.equal(details.idempotencyKey, IDS.operation);
+  assert.equal(details.requestHash, requestHash);
+  assert.equal(details.createdAt.getTime(), createdAt.getTime());
+  assert.equal(details.publishedAt.getTime(), publishedAt.getTime());
+  assert.equal(details.updatedAt.getTime(), updatedAt.getTime());
+  assert.deepEqual(details.attempts.map((attempt) => ({
+    attemptNumber: attempt.attemptNumber,
+    state: attempt.state,
+    durationMs: attempt.durationMs
+  })), [{ attemptNumber: 1, state: "published", durationMs: 60000 }]);
+  const calls = productCalls(pool);
+  assert.equal(calls.length, 2);
+  for (const call of calls) {
+    assert.deepEqual(call.values, [
+      CONTEXT_A.companyId,
+      IDS.publication,
+      "instagram"
+    ]);
+    assert.doesNotMatch(call.text, /ciphertext|nonce|auth_tag|key_version/i);
+  }
+  assertScopedTransaction(pool, CONTEXT_A.companyId);
+});
+
+test("publication snapshot is one tenant-scoped statement with count and history", async () => {
+  const createdAt = new Date("2026-08-28T13:00:00.000Z");
+  const updatedAt = new Date("2026-08-28T13:00:01.000Z");
+  const row = publicationRow({
+    media_reference: "gate4_snapshot_instagram_12345_business",
+    media_metadata_digest: "c".repeat(64),
+    caption: "Synthetic controlled caption",
+    idempotency_key: IDS.operation,
+    request_hash: "d".repeat(64),
+    created_at: createdAt,
+    updated_at: updatedAt,
+    publication_count: "7",
+    attempts: [{
+      attempt_number: 1,
+      state: "provider_confirming",
+      error_code: null,
+      provider_reference: "igc:created:12345",
+      started_at: createdAt,
+      finished_at: updatedAt,
+      duration_ms: 1000
+    }]
+  });
+  const pool = createFakePool(async (call) => {
+    assert.match(call.text, /^SELECT publication\.\*/i);
+    return { rows: [row] };
+  });
+  const snapshot = await createPostgresConnectorStore({
+    pool,
+    runtimeRole: RUNTIME_ROLE
+  }).scope(CONTEXT_A).getPublicationSnapshot(
+    IDS.publication,
+    IDS.connection
+  );
+
+  assert.equal(snapshot.publicationCount, 7);
+  assert.equal(snapshot.publication.id, IDS.publication);
+  assert.equal(snapshot.publication.idempotencyKey, IDS.operation);
+  assert.equal(snapshot.publication.attempts[0].state, "provider_confirming");
+  const calls = productCalls(pool);
+  assert.equal(calls.length, 1);
+  assert.deepEqual(calls[0].values, [
+    CONTEXT_A.companyId,
+    IDS.publication,
+    IDS.connection,
+    "instagram"
+  ]);
+  assert.match(calls[0].text, /counted\.company_id=\$1/i);
+  assert.match(calls[0].text, /attempt\.company_id=\$1/i);
+  assert.match(calls[0].text, /publication_id=\$2/i);
+  assert.match(calls[0].text, /connection_id=\$3/i);
+  assert.match(calls[0].text, /provider=\$4/i);
+  assert.doesNotMatch(
+    calls[0].text,
+    /ciphertext|nonce|auth_tag|key_version/i
+  );
+  assertScopedTransaction(pool, CONTEXT_A.companyId);
+});
+
+test("published publication count is tenant, connection and provider scoped", async () => {
+  const pool = createFakePool(async () => ({
+    rows: [{ publication_count: "9" }]
+  }));
+  const count = await createPostgresConnectorStore({
+    pool,
+    runtimeRole: RUNTIME_ROLE
+  }).scope(CONTEXT_A).countPublishedPublications(IDS.connection);
+
+  assert.equal(count, 9);
+  const call = productCalls(pool)[0];
+  assert.deepEqual(call.values, [
+    CONTEXT_A.companyId,
+    IDS.connection,
+    "instagram"
+  ]);
+  assert.match(call.text, /company_id=\$1/i);
+  assert.match(call.text, /connection_id=\$2/i);
+  assert.match(call.text, /provider=\$3/i);
+  assert.match(call.text, /state='published'/i);
+  assertScopedTransaction(pool, CONTEXT_A.companyId);
 });
 
 test("authorization status is tenant-scoped and exposes only normalized lifecycle data", async () => {

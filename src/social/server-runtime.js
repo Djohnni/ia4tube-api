@@ -18,6 +18,7 @@ function disabledServerRuntime() {
   return Object.freeze({
     enabled: false,
     instagramOAuth: null,
+    instagramPublication: null,
     async close() {}
   });
 }
@@ -42,6 +43,9 @@ async function initializeSocialServerRuntime(options = {}) {
     env,
     logger: options.logger,
     instagramTransport: options.instagramTransport,
+    instagramPublicationTransport: options.instagramPublicationTransport,
+    publicDirectory: options.publicDirectory,
+    publicationSleep: options.publicationSleep,
     clock: options.clock,
     randomBytes: options.randomBytes,
     randomUUID: options.randomUUID,
@@ -52,6 +56,21 @@ async function initializeSocialServerRuntime(options = {}) {
     !runtime ||
     runtime.enabled !== true ||
     typeof runtime.close !== "function"
+  ) {
+    postgresFail(
+      "social_server_runtime_initialization_failed",
+      "Runtime social nao inicializado."
+    );
+  }
+  if (
+    runtime.instagramPublication !== null &&
+    runtime.instagramPublication !== undefined &&
+    (
+      typeof runtime.instagramPublication.arm !== "function" ||
+      typeof runtime.instagramPublication.getSummary !== "function" ||
+      typeof runtime.instagramPublication.publish !== "function" ||
+      typeof runtime.instagramPublication.reconcile !== "function"
+    )
   ) {
     postgresFail(
       "social_server_runtime_initialization_failed",
@@ -81,6 +100,7 @@ async function initializeSocialServerRuntime(options = {}) {
   return Object.freeze({
     enabled: true,
     instagramOAuth: runtime.instagramOAuth || null,
+    instagramPublication: runtime.instagramPublication || null,
     async close() {
       if (closed) return;
       closed = true;

@@ -14,6 +14,8 @@ const INSTAGRAM_PROFESSIONAL_ACCOUNT_API_VERSION = "v25.0";
 const INSTAGRAM_OAUTH_REDIRECT_URI =
   "https://ia4tube-api-staging-checkpoint-a.onrender.com" +
   "/v1/social/oauth/callback";
+const INSTAGRAM_GATE4_STAGING_ORIGIN =
+  "https://ia4tube-api-staging-checkpoint-a.onrender.com";
 const INSTAGRAM_OAUTH_SCOPES = Object.freeze([
   "instagram_business_basic",
   "instagram_business_content_publish"
@@ -72,7 +74,28 @@ function normalizeExpectedUsername(value) {
   return normalized;
 }
 
-function disabledConfig(flags, expectedUsername) {
+function normalizePublicOrigin(value) {
+  if (value === undefined) return null;
+  let parsed;
+  try {
+    parsed = new URL(value);
+  } catch {
+    return null;
+  }
+  if (
+    parsed.protocol !== "https:" ||
+    parsed.username ||
+    parsed.password ||
+    parsed.search ||
+    parsed.hash ||
+    (parsed.pathname && parsed.pathname !== "/")
+  ) {
+    return null;
+  }
+  return parsed.origin;
+}
+
+function disabledConfig(flags, expectedUsername, publicOrigin) {
   return Object.freeze({
     enabled: false,
     provider: INSTAGRAM_PROVIDER,
@@ -82,6 +105,7 @@ function disabledConfig(flags, expectedUsername) {
     appId: null,
     appSecret: null,
     expectedUsername,
+    publicOrigin,
     redirectUri: INSTAGRAM_OAUTH_REDIRECT_URI,
     graphApiVersion: null,
     authorizationEndpoint: INSTAGRAM_AUTHORIZATION_ENDPOINT,
@@ -96,6 +120,7 @@ function loadInstagramOAuthConfig(env = process.env) {
   const expectedUsername = normalizeExpectedUsername(
     env.SOCIAL_INSTAGRAM_EXPECTED_USERNAME
   );
+  const publicOrigin = normalizePublicOrigin(env.PUBLIC_API_BASE_URL);
 
   const flags = Object.freeze({
     instagramEnabled: strictFlag(env, "SOCIAL_INSTAGRAM_ENABLED"),
@@ -108,11 +133,19 @@ function loadInstagramOAuthConfig(env = process.env) {
       "SOCIAL_EXTERNAL_PUBLICATION_ENABLED"
     )
   });
-  if (flags.externalPublicationEnabled) {
+  if (
+    flags.externalPublicationEnabled &&
+    (
+      !flags.instagramEnabled ||
+      !flags.externalConnectionEnabled ||
+      expectedUsername !== "ia4tube_empresas" ||
+      publicOrigin !== INSTAGRAM_GATE4_STAGING_ORIGIN
+    )
+  ) {
     configFail("social_instagram_publication_forbidden");
   }
   if (!flags.instagramEnabled) {
-    return disabledConfig(flags, expectedUsername);
+    return disabledConfig(flags, expectedUsername, publicOrigin);
   }
 
   const appId = boundedString(env.INSTAGRAM_APP_ID, {
@@ -141,10 +174,11 @@ function loadInstagramOAuthConfig(env = process.env) {
     provider: INSTAGRAM_PROVIDER,
     instagramEnabled: true,
     externalConnectionEnabled: flags.externalConnectionEnabled,
-    externalPublicationEnabled: false,
+    externalPublicationEnabled: flags.externalPublicationEnabled,
     appId,
     appSecret,
     expectedUsername,
+    publicOrigin,
     redirectUri: INSTAGRAM_OAUTH_REDIRECT_URI,
     graphApiVersion,
     authorizationEndpoint: INSTAGRAM_AUTHORIZATION_ENDPOINT,
@@ -157,6 +191,7 @@ module.exports = {
   GRAPH_API_VERSION_PATTERN,
   INSTAGRAM_AUTHORIZATION_ENDPOINT,
   INSTAGRAM_GRAPH_API_ORIGIN,
+  INSTAGRAM_GATE4_STAGING_ORIGIN,
   INSTAGRAM_LONG_LIVED_TOKEN_ENDPOINT,
   INSTAGRAM_OAUTH_REDIRECT_URI,
   INSTAGRAM_OAUTH_SCOPES,

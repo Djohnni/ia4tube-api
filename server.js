@@ -18,6 +18,16 @@ const {
 const {
   createInstagramOAuthRouter
 } = require("./src/social/oauth/instagram-oauth-router");
+const {
+  CONTROLLED_GATE4_PUBLIC_PATH,
+  createControlledGate4JpegPublicHandler,
+  isControlledGate4RequestPath,
+  isControlledGate4StagingOrigin,
+  normalizeControlledGate4RequestPath
+} = require("./src/social/publication/controlled-gate4-jpeg");
+const {
+  createInstagramPublicationRouter
+} = require("./src/social/publication/instagram-publication-router");
 
 const express = require("express");
 const cors = require("cors");
@@ -502,6 +512,24 @@ app.use("/videos", express.static(PUBLIC_VIDEOS_DIR, {
   }
 }));
 
+const controlledGate4JpegPublicHandler =
+  isControlledGate4StagingOrigin(process.env.PUBLIC_API_BASE_URL)
+    ? createControlledGate4JpegPublicHandler({ publicDirectory: PUBLIC_DIR })
+    : null;
+app.use((req, res, next) => {
+  if (!isControlledGate4RequestPath(req.originalUrl || req.url)) {
+    return next();
+  }
+  if (
+    !controlledGate4JpegPublicHandler ||
+    req.method !== "GET" ||
+    normalizeControlledGate4RequestPath(req.originalUrl || req.url) !==
+      CONTROLLED_GATE4_PUBLIC_PATH
+  ) {
+    return res.status(404).end();
+  }
+  return controlledGate4JpegPublicHandler(req, res, next);
+});
 app.use(express.static(PUBLIC_DIR));
 
 const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID || "";
@@ -1787,6 +1815,15 @@ app.use("/v1/social", createInstagramOAuthRouter({
   getService() {
     return socialRuntimeState?.enabled
       ? socialRuntimeState.instagramOAuth
+      : null;
+  }
+}));
+
+app.use("/v1/social", createInstagramPublicationRouter({
+  authenticate: auth,
+  getService() {
+    return socialRuntimeState?.enabled
+      ? socialRuntimeState.instagramPublication
       : null;
   }
 }));
@@ -8002,6 +8039,7 @@ async function startApiServer() {
   try {
     socialRuntimeState = await initializeSocialServerRuntime({
       env: process.env,
+      publicDirectory: PUBLIC_DIR,
       logger: {
         info(event) {
           const safeScopeEvidence = sanitizeInstagramScopeEvidence(event);
