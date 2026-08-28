@@ -26,6 +26,7 @@ const INSTAGRAM_EXCHANGE_MAX_TOKEN_BYTES = 8 * 1024;
 const INSTAGRAM_EXCHANGE_MAX_CODE_LENGTH = 2048;
 const INSTAGRAM_LONG_LIVED_MAX_EXPIRES_SECONDS = 60 * 24 * 60 * 60;
 const INSTAGRAM_DISCOVERY_FIELDS = Object.freeze([
+  "id",
   "user_id",
   "username",
   "name",
@@ -41,6 +42,23 @@ const CORRELATION_ID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const SAFE_METADATA_VALUE_PATTERN = /^[A-Za-z0-9_.:-]{1,128}$/;
 const SAFE_TOP_LEVEL_FIELD_PATTERN = /^[A-Za-z0-9_.-]{1,64}$/;
+const SENSITIVE_DISCOVERY_FIELD_NAMES = new Set([
+  "access_token",
+  "app_secret",
+  "authorization",
+  "client_secret",
+  "code",
+  "state",
+  "token"
+]);
+const ACCOUNT_TYPE_MAX_LENGTH = 64;
+const ACCOUNT_TYPE_CONTROL_PATTERN = /[\u0000-\u001f\u007f]/;
+const ACCOUNT_TYPE_RAW_PATTERN = /^[A-Za-z_ ]{1,64}$/;
+const PROFESSIONAL_ACCOUNT_TYPE_ALIASES = Object.freeze({
+  business: "business",
+  creator: "creator",
+  media_creator: "creator"
+});
 const APP_ID_PATTERN = /^[0-9]{5,32}$/;
 const GRAPH_API_VERSION_PATTERN = /^v[1-9][0-9]?\.[0-9]+$/;
 const INSTAGRAM_SCOPE_NAME_PATTERN = /^[a-z][a-z0-9_]{1,99}$/;
@@ -129,10 +147,16 @@ function safeTopLevelFields(value) {
   }
   return Object.freeze(
     Object.keys(value)
-      .filter((key) => SAFE_TOP_LEVEL_FIELD_PATTERN.test(key))
+      .filter(isSafeDiscoveryFieldName)
       .sort()
       .slice(0, 32)
   );
+}
+
+function isSafeDiscoveryFieldName(value) {
+  return typeof value === "string" &&
+    SAFE_TOP_LEVEL_FIELD_PATTERN.test(value) &&
+    !SENSITIVE_DISCOVERY_FIELD_NAMES.has(value.toLowerCase());
 }
 
 function discoveryResponseFormat(value) {
@@ -161,30 +185,32 @@ function safeDataItemCount(value) {
     : null;
 }
 
-function observedAccountTypeRaw(value) {
-  if (value === "Business" || value === "business") return value;
+function observeAccountType(value, forbiddenValues = []) {
+  const observed = value !== undefined && value !== null;
   if (
-    value === "Media_Creator" ||
-    value === "media_creator" ||
-    value === "creator"
+    typeof value !== "string" ||
+    value.length < 1 ||
+    value.length > ACCOUNT_TYPE_MAX_LENGTH ||
+    ACCOUNT_TYPE_CONTROL_PATTERN.test(value) ||
+    !ACCOUNT_TYPE_RAW_PATTERN.test(value) ||
+    containsKnownSecret(value, forbiddenValues)
   ) {
-    return value;
+    return Object.freeze({
+      raw: null,
+      normalized: null,
+      eligible: observed ? false : null
+    });
   }
-  if (value === "Personal" || value === "personal") return value;
-  return typeof value === "string" ? "unsupported" : null;
-}
-
-function observedAccountTypeNormalized(value) {
-  if (value === "Business" || value === "business") return "business";
-  if (
-    value === "Media_Creator" ||
-    value === "media_creator" ||
-    value === "creator"
-  ) {
-    return "creator";
-  }
-  if (value === "Personal" || value === "personal") return "personal";
-  return typeof value === "string" ? "unsupported" : null;
+  const raw = value;
+  const folded = raw.trim().toLowerCase();
+  const normalized = Object.hasOwn(PROFESSIONAL_ACCOUNT_TYPE_ALIASES, folded)
+    ? PROFESSIONAL_ACCOUNT_TYPE_ALIASES[folded]
+    : null;
+  return Object.freeze({
+    raw,
+    normalized,
+    eligible: normalized !== null
+  });
 }
 
 function providerErrorMetadata(decoded) {
@@ -236,6 +262,14 @@ function safeDuration(clock, startedAt) {
 }
 
 function createDiscoveryEvidence(input = {}, forbiddenValues = []) {
+  const accountType = observeAccountType(
+    input.accountTypeRaw,
+    forbiddenValues
+  );
+  const accountTypeEligible = accountType.raw === null &&
+    input.accountTypeEligible === false
+    ? false
+    : accountType.eligible;
   const failureCode = INSTAGRAM_DISCOVERY_FAILURE_CODES.has(input.failureCode)
     ? input.failureCode
     : null;
@@ -266,7 +300,7 @@ function createDiscoveryEvidence(input = {}, forbiddenValues = []) {
     topLevelFields: Object.freeze(
       Array.isArray(input.topLevelFields)
         ? input.topLevelFields
-          .filter((key) => SAFE_TOP_LEVEL_FIELD_PATTERN.test(key))
+          .filter(isSafeDiscoveryFieldName)
           .slice(0, 32)
         : []
     ),
@@ -288,10 +322,9 @@ function createDiscoveryEvidence(input = {}, forbiddenValues = []) {
       input.providerRequestId,
       forbiddenValues
     ),
-    accountTypeRaw: observedAccountTypeRaw(input.accountTypeRaw),
-    accountTypeNormalized: observedAccountTypeNormalized(
-      input.accountTypeRaw
-    ),
+    accountTypeRaw: accountType.raw,
+    accountTypeNormalized: accountType.normalized,
+    accountTypeEligible,
     retryable: input.retryable === true,
     correlationId: safeCorrelationId(input.correlationId),
     durationMs: Number.isSafeInteger(input.durationMs) &&
@@ -597,7 +630,7 @@ function isJsonValueDelimiter(value) {
     isJsonWhitespace(value);
 }
 
-function preserveNumericUserIds(source) {
+function preserveNumericIdentityIds(source) {
   const pieces = [];
   let cursor = 0;
   let index = 0;
@@ -613,7 +646,7 @@ function preserveNumericUserIds(source) {
     } catch {
       providerFail();
     }
-    if (decoded === "user_id") {
+    if (decoded === "user_id" || decoded === "id") {
       let colon = end + 1;
       while (isJsonWhitespace(source[colon])) colon += 1;
       if (source[colon] === ":") {
@@ -654,7 +687,7 @@ function preserveNumericUserIds(source) {
 function parseJsonRecord(body) {
   let decoded;
   try {
-    decoded = JSON.parse(preserveNumericUserIds(body.toString("utf8")));
+    decoded = JSON.parse(preserveNumericIdentityIds(body.toString("utf8")));
   } catch {
     providerFail();
   }
@@ -863,9 +896,19 @@ function normalizeDisplayName(value) {
 }
 
 function normalizeProfessionalAccountType(value) {
-  if (value === "Business") return "business";
-  if (value === "Media_Creator") return "creator";
-  providerFail();
+  if (
+    typeof value !== "string" ||
+    value.length < 1 ||
+    value.length > ACCOUNT_TYPE_MAX_LENGTH ||
+    ACCOUNT_TYPE_CONTROL_PATTERN.test(value)
+  ) {
+    providerFail();
+  }
+  const folded = value.trim().toLowerCase();
+  if (!Object.hasOwn(PROFESSIONAL_ACCOUNT_TYPE_ALIASES, folded)) {
+    providerFail();
+  }
+  return PROFESSIONAL_ACCOUNT_TYPE_ALIASES[folded];
 }
 
 function clearResultToken(result) {
@@ -1221,7 +1264,7 @@ function createInstagramProvider(options = {}) {
               withinBudget
             }));
             decoded = JSON.parse(
-              preserveNumericUserIds(body.toString("utf8"))
+              preserveNumericIdentityIds(body.toString("utf8"))
             );
           } catch {
             decoded = null;
@@ -1274,7 +1317,7 @@ function createInstagramProvider(options = {}) {
 
       let decoded;
       try {
-        decoded = JSON.parse(preserveNumericUserIds(body.toString("utf8")));
+        decoded = JSON.parse(preserveNumericIdentityIds(body.toString("utf8")));
       } catch {
         failDiscovery("provider_account_discovery_invalid_json", {
           ...responseMetadata(null, contentType),
@@ -1295,11 +1338,8 @@ function createInstagramProvider(options = {}) {
           retryable: false
         });
       }
-      if (
-        !Object.hasOwn(decoded, "user_id") ||
-        decoded.user_id === null ||
-        decoded.user_id === ""
-      ) {
+      if (!Object.hasOwn(decoded, "user_id") ||
+        decoded.user_id === null || decoded.user_id === "") {
         failDiscovery("provider_account_discovery_missing_id", {
           ...metadata,
           retryable: false
@@ -1314,7 +1354,23 @@ function createInstagramProvider(options = {}) {
           retryable: false
         });
       }
-      if (userId !== expectedUserId) {
+      if (Object.hasOwn(decoded, "id")) {
+        let appScopedUserId;
+        try {
+          appScopedUserId = normalizeExternalUserId(decoded.id);
+        } catch {
+          failDiscovery("provider_account_discovery_invalid_shape", {
+            ...metadata,
+            retryable: false
+          });
+        }
+        if (appScopedUserId !== expectedUserId) {
+          failDiscovery("provider_account_discovery_invalid_shape", {
+            ...metadata,
+            retryable: false
+          });
+        }
+      } else if (userId !== expectedUserId) {
         failDiscovery("provider_account_discovery_invalid_shape", {
           ...metadata,
           retryable: false
@@ -1340,12 +1396,6 @@ function createInstagramProvider(options = {}) {
         });
       }
       if (!Object.hasOwn(decoded, "account_type")) {
-        failDiscovery("provider_account_discovery_invalid_shape", {
-          ...metadata,
-          retryable: false
-        });
-      }
-      if (typeof decoded.account_type !== "string") {
         failDiscovery("provider_account_discovery_invalid_shape", {
           ...metadata,
           retryable: false

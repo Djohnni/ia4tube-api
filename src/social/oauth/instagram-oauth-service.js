@@ -206,7 +206,7 @@ function requireGrantedScopes(value, requiredScopes) {
   return Object.freeze([...granted].sort());
 }
 
-function requireProfessionalAccount(value, expectedUserId, expectedUsername) {
+function requireProfessionalAccount(value, expectedUsername) {
   const account = strictRecord(value, [
     "userId",
     "username",
@@ -217,7 +217,6 @@ function requireProfessionalAccount(value, expectedUserId, expectedUsername) {
     typeof account.userId !== "string" ||
     account.userId.length < 1 ||
     account.userId.length > 500 ||
-    account.userId !== expectedUserId ||
     typeof account.username !== "string" ||
     !INSTAGRAM_USERNAME_PATTERN.test(account.username) ||
     !PROFESSIONAL_ACCOUNT_TYPES.has(account.accountType) ||
@@ -570,7 +569,6 @@ function createInstagramOAuthService(options = {}) {
       failureStage = OAUTH_FAILURE_STAGES.CONTROLLED_ACCOUNT_VALIDATION;
       discoveredAccount = requireProfessionalAccount(
         providerAccount,
-        exchanged.userId,
         expectedUsername
       );
       const expectedRevision = requireRevision(consumed.connectionRevision);

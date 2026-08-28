@@ -240,7 +240,7 @@ function makeHarness(options = {}) {
       assert.equal(accessToken.toString("utf8"), TOKEN_TEXT);
       assert.equal(userId, "synthetic-user");
       return Object.freeze({
-        userId,
+        userId: options.discoveredUserId || userId,
         username: options.discoveredUsername || "ia4tube_empresas",
         name: "IA4Tube Empresas",
         accountType: options.accountType || "business"
@@ -641,6 +641,23 @@ test("exchange failure leaves state consumed and never retries the provider", as
     "provider_code_exchange_failed"
   );
   assert.equal(JSON.stringify(harness.failureInputs).includes(secretMarker), false);
+});
+
+test("callback persists the professional id separately from the app-scoped exchange id", async () => {
+  const professionalUserId = "synthetic-professional-user";
+  const harness = makeHarness({ discoveredUserId: professionalUserId });
+  const { state } = await authorize(harness);
+  const result = await harness.service.callback({
+    state,
+    code: "synthetic-code",
+    error: null
+  });
+  assert.equal(result.status, "authorization_completed");
+  assert.equal(result.connectionState, "connected");
+  const activation = harness.storageInputs.find((input) => input.record);
+  assert.equal(activation.record.account.externalId, professionalUserId);
+  assert.deepEqual(activation.activation.grantedScopes, REQUIRED_SCOPES);
+  assert.equal(harness.discoveryInputs.length, 1);
 });
 
 test("long-lived token failure is classified before discovery or storage", async () => {

@@ -20,6 +20,7 @@ const APP_SECRET = "synthetic-provider-contract-app-secret";
 const SHORT_TOKEN = "synthetic-short-lived-token";
 const LONG_TOKEN = "synthetic-long-lived-token";
 const USER_ID = "17841400000000001";
+const PROFESSIONAL_USER_ID = "17841400000000991";
 const LARGE_NUMERIC_USER_ID = "17841498765432109";
 const CORRELATION_ID = "10000000-0000-4000-8000-000000000099";
 const OBSERVED_AT = 1_800_000_000_000;
@@ -82,6 +83,26 @@ function discoveryHarness(transport, overrides = {}) {
     }
   }
   return { discover, evidence };
+}
+
+function accountDiscoveryHarness(accountType, overrides = {}) {
+  return discoveryHarness(async () => jsonResponse({
+    user_id: USER_ID,
+    username: "ia4tube_empresas",
+    name: "IA4Tube Empresas",
+    account_type: accountType,
+    ...overrides
+  }));
+}
+
+async function assertEligibleAccountType(remoteType, expectedType) {
+  const harness = accountDiscoveryHarness(remoteType);
+  const account = await harness.discover();
+  assert.equal(account.accountType, expectedType);
+  assert.equal(harness.evidence.length, 1);
+  assert.equal(harness.evidence[0].accountTypeRaw, remoteType);
+  assert.equal(harness.evidence[0].accountTypeNormalized, expectedType);
+  assert.equal(harness.evidence[0].accountTypeEligible, true);
 }
 
 test("optional expected username is canonical without a hardcoded account", () => {
@@ -411,7 +432,7 @@ test("professional discovery uses v25.0 fields, Bearer and exact type mapping", 
     );
     assert.equal(
       requested.searchParams.get("fields"),
-      "user_id,username,name,account_type"
+      "id,user_id,username,name,account_type"
     );
     assert.equal(requested.searchParams.has("access_token"), false);
     assert.equal(requested.searchParams.has("client_secret"), false);
@@ -551,6 +572,7 @@ test("discovery observability classifies HTTP rejection with safe provider metad
     providerRequestId: null,
     accountTypeRaw: null,
     accountTypeNormalized: null,
+    accountTypeEligible: null,
     retryable: false,
     correlationId: CORRELATION_ID,
     durationMs: 0
@@ -624,7 +646,8 @@ test("discovery observability classifies an ineligible account type", async () =
     code: "provider_account_discovery_account_ineligible"
   });
   assert.equal(harness.evidence[0].accountTypeRaw, "Personal");
-  assert.equal(harness.evidence[0].accountTypeNormalized, "personal");
+  assert.equal(harness.evidence[0].accountTypeNormalized, null);
+  assert.equal(harness.evidence[0].accountTypeEligible, false);
   assert.equal(harness.evidence[0].retryable, false);
 });
 
@@ -647,6 +670,7 @@ test("discovery observability preserves the current valid response contract", as
   assert.equal(harness.evidence[0].failureCode, null);
   assert.equal(harness.evidence[0].accountTypeRaw, "Business");
   assert.equal(harness.evidence[0].accountTypeNormalized, "business");
+  assert.equal(harness.evidence[0].accountTypeEligible, true);
   assert.equal(harness.evidence[0].requestStarted, true);
   assert.equal(harness.evidence[0].responseReceived, true);
 });
@@ -707,7 +731,8 @@ test("discovery observability never exposes response, token or authorization sec
     authorization: `Bearer ${secret}`
   });
   assert.equal(JSON.stringify(resanitized).includes(secret), false);
-  assert.deepEqual(Object.keys(resanitized), Object.keys(harness.evidence[0]));
+  assert.equal(resanitized.accountTypeRaw, null);
+  assert.equal(resanitized.accountTypeNormalized, null);
   assert.equal(sanitizeInstagramDiscoveryEvidence({
     ...harness.evidence[0],
     requestStarted: false,
@@ -715,8 +740,198 @@ test("discovery observability never exposes response, token or authorization sec
   }), null);
 });
 
-test("unsupported accounts, mismatched users and transport detail fail closed", async () => {
-  for (const remoteType of ["Creator", "BUSINESS", "Personal", "business"]) {
+test("account type focal 01 BUSINESS maps to business", async () => {
+  await assertEligibleAccountType("BUSINESS", "business");
+});
+
+test("account type focal 02 Business maps to business", async () => {
+  await assertEligibleAccountType("Business", "business");
+});
+
+test("account type focal 03 business maps to business", async () => {
+  await assertEligibleAccountType("business", "business");
+});
+
+test("account type focal 04 Creator aliases map to creator", async () => {
+  for (const remoteType of ["CREATOR", "Creator", "creator"]) {
+    await assertEligibleAccountType(remoteType, "creator");
+  }
+});
+
+test("account type focal 05 Media_Creator aliases map to creator", async () => {
+  for (const remoteType of [
+    "MEDIA_CREATOR",
+    "Media_Creator",
+    "media_creator"
+  ]) {
+    await assertEligibleAccountType(remoteType, "creator");
+  }
+});
+
+test("account type focal 06 surrounding spaces are trimmed canonically", async () => {
+  await assertEligibleAccountType("  BUSINESS  ", "business");
+});
+
+test("account type focal 07 PERSONAL remains ineligible", async () => {
+  const harness = accountDiscoveryHarness("PERSONAL");
+  await assert.rejects(harness.discover(), {
+    code: "provider_account_discovery_account_ineligible"
+  });
+  assert.equal(harness.evidence[0].accountTypeRaw, "PERSONAL");
+  assert.equal(harness.evidence[0].accountTypeNormalized, null);
+  assert.equal(harness.evidence[0].accountTypeEligible, false);
+});
+
+test("account type focal 08 closed allowlist rejects unsupported strings", async () => {
+  for (const remoteType of [
+    "CONSUMER",
+    "UNKNOWN",
+    "UNSUPPORTED",
+    "unsupported",
+    "PROFESSIONAL"
+  ]) {
+    const harness = accountDiscoveryHarness(remoteType);
+    await assert.rejects(harness.discover(), {
+      code: "provider_account_discovery_account_ineligible"
+    });
+    assert.equal(harness.evidence[0].accountTypeRaw, remoteType);
+    assert.equal(harness.evidence[0].accountTypeNormalized, null);
+    assert.equal(harness.evidence[0].accountTypeEligible, false);
+  }
+  const empty = accountDiscoveryHarness("");
+  await assert.rejects(empty.discover(), {
+    code: "provider_account_discovery_account_ineligible"
+  });
+});
+
+test("account type focal 09 missing account_type fails closed", async () => {
+  const harness = discoveryHarness(async () => jsonResponse({
+    user_id: USER_ID,
+    username: "ia4tube_empresas",
+    name: "IA4Tube Empresas"
+  }));
+  await assert.rejects(harness.discover(), {
+    code: "provider_account_discovery_invalid_shape"
+  });
+  assert.equal(harness.evidence[0].accountTypeRaw, null);
+  assert.equal(harness.evidence[0].accountTypeNormalized, null);
+  assert.equal(harness.evidence[0].accountTypeEligible, null);
+});
+
+test("account type focal 10 non-string account_type is ineligible", async () => {
+  for (const remoteType of [{ type: "BUSINESS" }, ["BUSINESS"], 1]) {
+    const harness = accountDiscoveryHarness(remoteType);
+    await assert.rejects(harness.discover(), {
+      code: "provider_account_discovery_account_ineligible"
+    });
+    assert.equal(harness.evidence[0].accountTypeRaw, null);
+    assert.equal(harness.evidence[0].accountTypeNormalized, null);
+    assert.equal(harness.evidence[0].accountTypeEligible, false);
+  }
+});
+
+test("account type focal 11 real direct object keeps distinct official IDs", async () => {
+  const harness = discoveryHarness(async () => jsonResponse({
+    account_type: "BUSINESS",
+    id: USER_ID,
+    name: "IA4Tube Empresas",
+    user_id: PROFESSIONAL_USER_ID,
+    username: "ia4tube_empresas"
+  }));
+  const account = await harness.discover();
+  assert.deepEqual(account, {
+    userId: PROFESSIONAL_USER_ID,
+    username: "ia4tube_empresas",
+    name: "IA4Tube Empresas",
+    accountType: "business"
+  });
+  assert.deepEqual(harness.evidence[0].topLevelFields, [
+    "account_type",
+    "id",
+    "name",
+    "user_id",
+    "username"
+  ]);
+  assert.equal(harness.evidence[0].accountTypeRaw, "BUSINESS");
+  assert.equal(harness.evidence[0].accountTypeNormalized, "business");
+  assert.equal(harness.evidence[0].accountTypeEligible, true);
+});
+
+test("account type focal 12 incompatible app-scoped id fails closed", async () => {
+  const harness = discoveryHarness(async () => jsonResponse({
+    account_type: "BUSINESS",
+    id: "17841400000000002",
+    name: "IA4Tube Empresas",
+    user_id: PROFESSIONAL_USER_ID,
+    username: "ia4tube_empresas"
+  }));
+  await assert.rejects(harness.discover(), {
+    code: "provider_account_discovery_invalid_shape"
+  });
+  assert.equal(harness.evidence[0].accountTypeRaw, "BUSINESS");
+
+  const missingBinding = discoveryHarness(async () => jsonResponse({
+    account_type: "BUSINESS",
+    name: "IA4Tube Empresas",
+    user_id: PROFESSIONAL_USER_ID,
+    username: "ia4tube_empresas"
+  }));
+  await assert.rejects(missingBinding.discover(), {
+    code: "provider_account_discovery_invalid_shape"
+  });
+});
+
+test("account type focal 13 raw value is exact and controls never survive", async () => {
+  const valid = accountDiscoveryHarness("Creator");
+  await valid.discover();
+  assert.equal(valid.evidence[0].accountTypeRaw, "Creator");
+  assert.equal(valid.evidence[0].accountTypeNormalized, "creator");
+  assert.equal(valid.evidence[0].accountTypeEligible, true);
+
+  const controlled = accountDiscoveryHarness("BUSI\u0000NESS");
+  await assert.rejects(controlled.discover(), {
+    code: "provider_account_discovery_account_ineligible"
+  });
+  assert.equal(controlled.evidence[0].accountTypeRaw, null);
+  assert.equal(JSON.stringify(controlled.evidence).includes("\u0000"), false);
+});
+
+test("account type focal 14 discovery evidence excludes OAuth secrets", async () => {
+  const oauthCode = "synthetic-oauth-code-private";
+  const oauthState = "synthetic-oauth-state-private";
+  const authorization = `Bearer ${LONG_TOKEN}`;
+  const harness = accountDiscoveryHarness("BUSINESS", {
+    access_token: LONG_TOKEN,
+    authorization,
+    code: oauthCode,
+    state: oauthState
+  });
+  await harness.discover();
+  const serialized = JSON.stringify(harness.evidence);
+  for (const forbidden of [LONG_TOKEN, oauthCode, oauthState, authorization]) {
+    assert.equal(serialized.includes(forbidden), false);
+  }
+  assert.deepEqual(harness.evidence[0].topLevelFields, [
+    "account_type",
+    "name",
+    "user_id",
+    "username"
+  ]);
+  const resanitized = sanitizeInstagramDiscoveryEvidence({
+    ...harness.evidence[0],
+    topLevelFields: [
+      ...harness.evidence[0].topLevelFields,
+      "access_token",
+      "authorization",
+      "code",
+      "state"
+    ]
+  });
+  assert.deepEqual(resanitized.topLevelFields, harness.evidence[0].topLevelFields);
+});
+
+test("unsupported accounts, mismatched identities and transport detail fail closed", async () => {
+  for (const remoteType of ["Personal", "CONSUMER", "UNKNOWN", "unsupported"]) {
     let calls = 0;
     const token = Buffer.from(LONG_TOKEN);
     const provider = providerWithTransport(async () => {
@@ -741,7 +956,8 @@ test("unsupported accounts, mismatched users and transport detail fail closed", 
 
   const mismatchToken = Buffer.from(LONG_TOKEN);
   const mismatch = providerWithTransport(async () => jsonResponse({
-    user_id: "17841400000000002",
+    id: "17841400000000002",
+    user_id: PROFESSIONAL_USER_ID,
     username: "ia4tube_empresas",
     name: "IA4Tube Empresas",
     account_type: "Business"
