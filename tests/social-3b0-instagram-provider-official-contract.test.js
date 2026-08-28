@@ -449,6 +449,28 @@ test("professional discovery normalizes an absent display name to null", async (
   }
 });
 
+test("discovery observability classifies a request that was not sent", async () => {
+  let transportCalls = 0;
+  const harness = discoveryHarness(async () => {
+    transportCalls += 1;
+    return jsonResponse({});
+  }, {
+    setTimeout(callback) {
+      callback();
+      return 1;
+    },
+    clearTimeout() {}
+  });
+  await assert.rejects(harness.discover(), {
+    code: "provider_account_discovery_request_not_sent"
+  });
+  assert.equal(transportCalls, 0);
+  assert.equal(harness.evidence.length, 1);
+  assert.equal(harness.evidence[0].requestStarted, false);
+  assert.equal(harness.evidence[0].responseReceived, false);
+  assert.equal(harness.evidence[0].retryable, false);
+});
+
 test("discovery observability classifies timeout", async () => {
   let transportCalls = 0;
   let timerCallback;
@@ -477,6 +499,8 @@ test("discovery observability classifies timeout", async () => {
     code: "provider_account_discovery_timeout"
   });
   assert.equal(harness.evidence.length, 1);
+  assert.equal(harness.evidence[0].requestStarted, true);
+  assert.equal(harness.evidence[0].responseReceived, false);
   assert.equal(harness.evidence[0].retryable, true);
   assert.equal(harness.evidence[0].correlationId, CORRELATION_ID);
 });
@@ -489,6 +513,8 @@ test("discovery observability classifies transport failure", async () => {
     code: "provider_account_discovery_transport_failed"
   });
   assert.equal(harness.evidence[0].retryable, true);
+  assert.equal(harness.evidence[0].requestStarted, true);
+  assert.equal(harness.evidence[0].responseReceived, false);
 });
 
 test("discovery observability classifies HTTP rejection with safe provider metadata", async () => {
@@ -511,6 +537,8 @@ test("discovery observability classifies HTTP rejection with safe provider metad
     stage: "provider_account_discovery",
     outcome: "failed",
     failureCode: "provider_account_discovery_http_rejected",
+    requestStarted: true,
+    responseReceived: true,
     httpStatus: 400,
     contentType: "application/json",
     responseFormat: "direct_object",
@@ -521,7 +549,8 @@ test("discovery observability classifies HTTP rejection with safe provider metad
     providerErrorSubcode: "33",
     providerTraceId: "TRACE_ABC_123",
     providerRequestId: null,
-    accountType: null,
+    accountTypeRaw: null,
+    accountTypeNormalized: null,
     retryable: false,
     correlationId: CORRELATION_ID,
     durationMs: 0
@@ -538,6 +567,7 @@ test("discovery observability classifies unexpected Content-Type", async () => {
     code: "provider_account_discovery_invalid_content_type"
   });
   assert.equal(harness.evidence[0].contentType, "text/html");
+  assert.equal(harness.evidence[0].responseReceived, true);
 });
 
 test("discovery observability classifies invalid JSON", async () => {
@@ -593,7 +623,8 @@ test("discovery observability classifies an ineligible account type", async () =
   await assert.rejects(harness.discover(), {
     code: "provider_account_discovery_account_ineligible"
   });
-  assert.equal(harness.evidence[0].accountType, "personal");
+  assert.equal(harness.evidence[0].accountTypeRaw, "Personal");
+  assert.equal(harness.evidence[0].accountTypeNormalized, "personal");
   assert.equal(harness.evidence[0].retryable, false);
 });
 
@@ -614,7 +645,10 @@ test("discovery observability preserves the current valid response contract", as
   });
   assert.equal(harness.evidence[0].outcome, "succeeded");
   assert.equal(harness.evidence[0].failureCode, null);
-  assert.equal(harness.evidence[0].accountType, "business");
+  assert.equal(harness.evidence[0].accountTypeRaw, "Business");
+  assert.equal(harness.evidence[0].accountTypeNormalized, "business");
+  assert.equal(harness.evidence[0].requestStarted, true);
+  assert.equal(harness.evidence[0].responseReceived, true);
 });
 
 test("discovery observability never exposes response, token or authorization secrets", async () => {
@@ -622,10 +656,10 @@ test("discovery observability never exposes response, token or authorization sec
   const harness = discoveryHarness(async () => jsonResponse({
     error: {
       message: secret,
-      type: "OAuthException",
+      type: APP_SECRET,
       code: 190,
       error_subcode: 463,
-      fbtrace_id: "TRACE_SAFE_456"
+      fbtrace_id: LONG_TOKEN
     },
     private_material: secret
   }, {
@@ -633,6 +667,7 @@ test("discovery observability never exposes response, token or authorization sec
     headers: {
       "content-type": "application/json",
       authorization: `Bearer ${secret}`,
+      "x-fb-request-id": LONG_TOKEN,
       "x-private-token": secret
     }
   }));
@@ -654,6 +689,7 @@ test("discovery observability never exposes response, token or authorization sec
   });
   assert.equal(serialized.includes(secret), false);
   assert.equal(serialized.includes(LONG_TOKEN), false);
+  assert.equal(serialized.includes(APP_SECRET), false);
   assert.equal(serialized.includes("https://"), false);
   assert.equal(serialized.toLowerCase().includes("authorization"), false);
   assert.equal(serialized.toLowerCase().includes("access_token"), false);
@@ -663,7 +699,8 @@ test("discovery observability never exposes response, token or authorization sec
   ]);
   const resanitized = sanitizeInstagramDiscoveryEvidence({
     ...harness.evidence[0],
-    accountType: secret,
+    accountTypeRaw: secret,
+    accountTypeNormalized: secret,
     providerErrorCode: secret,
     providerErrorSubcode: secret,
     rawBody: secret,
@@ -671,6 +708,11 @@ test("discovery observability never exposes response, token or authorization sec
   });
   assert.equal(JSON.stringify(resanitized).includes(secret), false);
   assert.deepEqual(Object.keys(resanitized), Object.keys(harness.evidence[0]));
+  assert.equal(sanitizeInstagramDiscoveryEvidence({
+    ...harness.evidence[0],
+    requestStarted: false,
+    responseReceived: true
+  }), null);
 });
 
 test("unsupported accounts, mismatched users and transport detail fail closed", async () => {

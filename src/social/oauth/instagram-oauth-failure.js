@@ -11,6 +11,7 @@ const OAUTH_FAILURE_STAGES = Object.freeze({
 });
 
 const PROFESSIONAL_ACCOUNT_DISCOVERY_FAILURE_CODES = Object.freeze([
+  "provider_account_discovery_request_not_sent",
   "provider_account_discovery_timeout",
   "provider_account_discovery_transport_failed",
   "provider_account_discovery_http_rejected",

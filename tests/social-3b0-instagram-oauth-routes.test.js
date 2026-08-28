@@ -805,8 +805,9 @@ test("missing or legacy scopes fail without a credential or account", async (t) 
   }
 });
 
-test("discovery observability maps every typed failure into the audit handoff", async (t) => {
+test("discovery observability maps every typed failure into the audit handoff", async () => {
   const codes = [
+    "provider_account_discovery_request_not_sent",
     "provider_account_discovery_timeout",
     "provider_account_discovery_transport_failed",
     "provider_account_discovery_http_rejected",
@@ -818,28 +819,26 @@ test("discovery observability maps every typed failure into the audit handoff", 
     "provider_account_discovery_account_ineligible"
   ];
   for (const code of codes) {
-    await t.test(code, async () => {
-      const discovery = makeHarness({
-        discoveryFailure: true,
-        discoveryFailureCode: code
-      });
-      const discoveryState = (await authorize(discovery)).state;
-      await assert.rejects(
-        discovery.service.callback({
-          state: discoveryState,
-          code: "synthetic-code",
-          error: null
-        }),
-        { code: "social_oauth_exchange_failed" }
-      );
-      assert.equal(discovery.credentialCalls, 0);
-      assert.equal(discovery.storageInputs.length, 0);
-      assert.equal(discovery.failureInputs[0].failureCode, code);
-      assert.equal(
-        discovery.discoveryInputs[0].correlationId,
-        discovery.contexts[1].correlationId
-      );
+    const discovery = makeHarness({
+      discoveryFailure: true,
+      discoveryFailureCode: code
     });
+    const discoveryState = (await authorize(discovery)).state;
+    await assert.rejects(
+      discovery.service.callback({
+        state: discoveryState,
+        code: "synthetic-code",
+        error: null
+      }),
+      { code: "social_oauth_exchange_failed" }
+    );
+    assert.equal(discovery.credentialCalls, 0);
+    assert.equal(discovery.storageInputs.length, 0);
+    assert.equal(discovery.failureInputs[0].failureCode, code);
+    assert.equal(
+      discovery.discoveryInputs[0].correlationId,
+      discovery.contexts[1].correlationId
+    );
   }
 });
 
