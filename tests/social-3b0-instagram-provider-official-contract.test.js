@@ -12,7 +12,8 @@ const {
   loadInstagramOAuthConfig
 } = require("../src/social/oauth/instagram-config");
 const {
-  createInstagramProvider
+  createInstagramProvider,
+  sanitizeInstagramDiscoveryEvidence
 } = require("../src/social/oauth/instagram-provider");
 
 const APP_SECRET = "synthetic-provider-contract-app-secret";
@@ -20,6 +21,7 @@ const SHORT_TOKEN = "synthetic-short-lived-token";
 const LONG_TOKEN = "synthetic-long-lived-token";
 const USER_ID = "17841400000000001";
 const LARGE_NUMERIC_USER_ID = "17841498765432109";
+const CORRELATION_ID = "10000000-0000-4000-8000-000000000099";
 const OBSERVED_AT = 1_800_000_000_000;
 const EXPIRES_IN = 5_184_000;
 
@@ -59,6 +61,27 @@ function providerWithTransport(transport, overrides = {}) {
     clock: () => OBSERVED_AT,
     ...overrides
   });
+}
+
+function discoveryHarness(transport, overrides = {}) {
+  const evidence = [];
+  const provider = providerWithTransport(transport, {
+    logger: { info(event) { evidence.push(event); } },
+    ...overrides
+  });
+  async function discover() {
+    const accessToken = Buffer.from(LONG_TOKEN);
+    try {
+      return await provider.discoverProfessionalAccount({
+        accessToken,
+        userId: USER_ID,
+        correlationId: CORRELATION_ID
+      });
+    } finally {
+      accessToken.fill(0);
+    }
+  }
+  return { discover, evidence };
 }
 
 test("optional expected username is canonical without a hardcoded account", () => {
@@ -426,6 +449,230 @@ test("professional discovery normalizes an absent display name to null", async (
   }
 });
 
+test("discovery observability classifies timeout", async () => {
+  let transportCalls = 0;
+  let timerCallback;
+  const harness = discoveryHarness(async (url, options) => {
+    transportCalls += 1;
+    return new Promise((resolve, reject) => {
+      options.signal.addEventListener("abort", () => {
+        reject(new Error("synthetic aborted transport"));
+      }, { once: true });
+    });
+  }, {
+    setTimeout(callback) {
+      timerCallback = callback;
+      return 1;
+    },
+    clearTimeout() {}
+  });
+  const pending = harness.discover();
+  void pending.catch(() => {});
+  for (let attempt = 0; attempt < 20 && transportCalls === 0; attempt += 1) {
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  assert.equal(transportCalls, 1);
+  timerCallback();
+  await assert.rejects(pending, {
+    code: "provider_account_discovery_timeout"
+  });
+  assert.equal(harness.evidence.length, 1);
+  assert.equal(harness.evidence[0].retryable, true);
+  assert.equal(harness.evidence[0].correlationId, CORRELATION_ID);
+});
+
+test("discovery observability classifies transport failure", async () => {
+  const harness = discoveryHarness(async () => {
+    throw new Error("synthetic private transport detail");
+  });
+  await assert.rejects(harness.discover(), {
+    code: "provider_account_discovery_transport_failed"
+  });
+  assert.equal(harness.evidence[0].retryable, true);
+});
+
+test("discovery observability classifies HTTP rejection with safe provider metadata", async () => {
+  const harness = discoveryHarness(async () => jsonResponse({
+    error: {
+      message: "private provider message",
+      type: "OAuthException",
+      code: 100,
+      error_subcode: 33,
+      fbtrace_id: "TRACE_ABC_123",
+      is_transient: false
+    }
+  }, { status: 400 }));
+  await assert.rejects(harness.discover(), {
+    code: "provider_account_discovery_http_rejected"
+  });
+  assert.deepEqual(harness.evidence[0], {
+    component: "social_instagram_oauth",
+    event: "provider_account_discovery_evidence",
+    stage: "provider_account_discovery",
+    outcome: "failed",
+    failureCode: "provider_account_discovery_http_rejected",
+    httpStatus: 400,
+    contentType: "application/json",
+    responseFormat: "direct_object",
+    topLevelFields: ["error"],
+    dataItemCount: null,
+    providerErrorType: "OAuthException",
+    providerErrorCode: "100",
+    providerErrorSubcode: "33",
+    providerTraceId: "TRACE_ABC_123",
+    providerRequestId: null,
+    accountType: null,
+    retryable: false,
+    correlationId: CORRELATION_ID,
+    durationMs: 0
+  });
+});
+
+test("discovery observability classifies unexpected Content-Type", async () => {
+  const harness = discoveryHarness(async () => ({
+    status: 200,
+    headers: { "content-type": "text/html; charset=utf-8" },
+    body: "not inspected"
+  }));
+  await assert.rejects(harness.discover(), {
+    code: "provider_account_discovery_invalid_content_type"
+  });
+  assert.equal(harness.evidence[0].contentType, "text/html");
+});
+
+test("discovery observability classifies invalid JSON", async () => {
+  const harness = discoveryHarness(async () => jsonTextResponse("{invalid"));
+  await assert.rejects(harness.discover(), {
+    code: "provider_account_discovery_invalid_json"
+  });
+  assert.equal(harness.evidence[0].responseFormat, "invalid_json");
+});
+
+test("discovery observability classifies incompatible response shape", async () => {
+  const harness = discoveryHarness(async () => jsonResponse({
+    data: [{
+      user_id: USER_ID,
+      username: "ia4tube_empresas",
+      account_type: "Business"
+    }]
+  }));
+  await assert.rejects(harness.discover(), {
+    code: "provider_account_discovery_invalid_shape"
+  });
+  assert.equal(harness.evidence[0].responseFormat, "data_envelope");
+  assert.deepEqual(harness.evidence[0].topLevelFields, ["data"]);
+  assert.equal(harness.evidence[0].dataItemCount, 1);
+});
+
+test("discovery observability classifies a missing user id", async () => {
+  const harness = discoveryHarness(async () => jsonResponse({
+    username: "ia4tube_empresas",
+    account_type: "Business"
+  }));
+  await assert.rejects(harness.discover(), {
+    code: "provider_account_discovery_missing_id"
+  });
+});
+
+test("discovery observability classifies a missing username", async () => {
+  const harness = discoveryHarness(async () => jsonResponse({
+    user_id: USER_ID,
+    account_type: "Business"
+  }));
+  await assert.rejects(harness.discover(), {
+    code: "provider_account_discovery_missing_username"
+  });
+});
+
+test("discovery observability classifies an ineligible account type", async () => {
+  const harness = discoveryHarness(async () => jsonResponse({
+    user_id: USER_ID,
+    username: "ia4tube_empresas",
+    account_type: "Personal"
+  }));
+  await assert.rejects(harness.discover(), {
+    code: "provider_account_discovery_account_ineligible"
+  });
+  assert.equal(harness.evidence[0].accountType, "personal");
+  assert.equal(harness.evidence[0].retryable, false);
+});
+
+test("discovery observability preserves the current valid response contract", async () => {
+  const harness = discoveryHarness(async () => jsonResponse({
+    user_id: USER_ID,
+    username: "Ia4Tube_Empresas",
+    name: "IA4Tube Empresas",
+    account_type: "Business",
+    data: []
+  }));
+  const result = await harness.discover();
+  assert.deepEqual(result, {
+    userId: USER_ID,
+    username: "ia4tube_empresas",
+    name: "IA4Tube Empresas",
+    accountType: "business"
+  });
+  assert.equal(harness.evidence[0].outcome, "succeeded");
+  assert.equal(harness.evidence[0].failureCode, null);
+  assert.equal(harness.evidence[0].accountType, "business");
+});
+
+test("discovery observability never exposes response, token or authorization secrets", async () => {
+  const secret = "secret-provider-material-must-not-survive";
+  const harness = discoveryHarness(async () => jsonResponse({
+    error: {
+      message: secret,
+      type: "OAuthException",
+      code: 190,
+      error_subcode: 463,
+      fbtrace_id: "TRACE_SAFE_456"
+    },
+    private_material: secret
+  }, {
+    status: 401,
+    headers: {
+      "content-type": "application/json",
+      authorization: `Bearer ${secret}`,
+      "x-private-token": secret
+    }
+  }));
+  let failure;
+  try {
+    await harness.discover();
+  } catch (error) {
+    failure = error;
+  }
+  assert.equal(failure?.code, "provider_account_discovery_http_rejected");
+  const serialized = JSON.stringify({
+    error: {
+      name: failure?.name,
+      code: failure?.code,
+      message: failure?.message,
+      evidence: failure?.evidence
+    },
+    evidence: harness.evidence
+  });
+  assert.equal(serialized.includes(secret), false);
+  assert.equal(serialized.includes(LONG_TOKEN), false);
+  assert.equal(serialized.includes("https://"), false);
+  assert.equal(serialized.toLowerCase().includes("authorization"), false);
+  assert.equal(serialized.toLowerCase().includes("access_token"), false);
+  assert.deepEqual(harness.evidence[0].topLevelFields, [
+    "error",
+    "private_material"
+  ]);
+  const resanitized = sanitizeInstagramDiscoveryEvidence({
+    ...harness.evidence[0],
+    accountType: secret,
+    providerErrorCode: secret,
+    providerErrorSubcode: secret,
+    rawBody: secret,
+    authorization: `Bearer ${secret}`
+  });
+  assert.equal(JSON.stringify(resanitized).includes(secret), false);
+  assert.deepEqual(Object.keys(resanitized), Object.keys(harness.evidence[0]));
+});
+
 test("unsupported accounts, mismatched users and transport detail fail closed", async () => {
   for (const remoteType of ["Creator", "BUSINESS", "Personal", "business"]) {
     let calls = 0;
@@ -444,7 +691,7 @@ test("unsupported accounts, mismatched users and transport detail fail closed", 
         accessToken: token,
         userId: USER_ID
       }),
-      { code: "social_oauth_exchange_failed" }
+      { code: "provider_account_discovery_account_ineligible" }
     );
     assert.equal(calls, 1);
     token.fill(0);
@@ -462,7 +709,7 @@ test("unsupported accounts, mismatched users and transport detail fail closed", 
       accessToken: mismatchToken,
       userId: USER_ID
     }),
-    { code: "social_oauth_exchange_failed" }
+    { code: "provider_account_discovery_invalid_shape" }
   );
   mismatchToken.fill(0);
 

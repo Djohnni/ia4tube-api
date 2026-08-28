@@ -2,6 +2,9 @@ const { installConsoleRedaction } = require("./src/security/log-redaction");
 const {
   sanitizeInstagramScopeEvidence
 } = require("./src/social/oauth/instagram-scope-evidence");
+const {
+  sanitizeInstagramDiscoveryEvidence
+} = require("./src/social/oauth/instagram-provider");
 installConsoleRedaction();
 const {
   assertWebServiceDatabaseCredentialBoundary
@@ -8001,9 +8004,18 @@ async function startApiServer() {
       env: process.env,
       logger: {
         info(event) {
-          const safeEvidence = sanitizeInstagramScopeEvidence(event);
-          if (safeEvidence) {
-            console.info("[social][oauth-scope-evidence]", safeEvidence);
+          const safeScopeEvidence = sanitizeInstagramScopeEvidence(event);
+          if (safeScopeEvidence) {
+            console.info("[social][oauth-scope-evidence]", safeScopeEvidence);
+            return;
+          }
+          const safeDiscoveryEvidence =
+            sanitizeInstagramDiscoveryEvidence(event);
+          if (safeDiscoveryEvidence) {
+            console.info(
+              "[social][oauth-account-discovery]",
+              safeDiscoveryEvidence
+            );
           }
         },
         error(event) {

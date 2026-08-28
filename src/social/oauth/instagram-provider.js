@@ -16,6 +16,9 @@ const {
   createInstagramScopeEvidence,
   emitInstagramScopeEvidence
 } = require("./instagram-scope-evidence");
+const {
+  PROFESSIONAL_ACCOUNT_DISCOVERY_FAILURE_CODES
+} = require("./instagram-oauth-failure");
 
 const INSTAGRAM_EXCHANGE_TIMEOUT_MS = 5000;
 const INSTAGRAM_EXCHANGE_MAX_RESPONSE_BYTES = 32 * 1024;
@@ -28,6 +31,16 @@ const INSTAGRAM_DISCOVERY_FIELDS = Object.freeze([
   "name",
   "account_type"
 ]);
+const INSTAGRAM_DISCOVERY_FAILURE_CODES = new Set(
+  PROFESSIONAL_ACCOUNT_DISCOVERY_FAILURE_CODES
+);
+const INSTAGRAM_DISCOVERY_COMPONENT = "social_instagram_oauth";
+const INSTAGRAM_DISCOVERY_EVENT = "provider_account_discovery_evidence";
+const INSTAGRAM_DISCOVERY_STAGE = "provider_account_discovery";
+const CORRELATION_ID_PATTERN =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const SAFE_METADATA_VALUE_PATTERN = /^[A-Za-z0-9_.:-]{1,128}$/;
+const SAFE_TOP_LEVEL_FIELD_PATTERN = /^[A-Za-z0-9_.-]{1,64}$/;
 const APP_ID_PATTERN = /^[0-9]{5,32}$/;
 const GRAPH_API_VERSION_PATTERN = /^v[1-9][0-9]?\.[0-9]+$/;
 const INSTAGRAM_SCOPE_NAME_PATTERN = /^[a-z][a-z0-9_]{1,99}$/;
@@ -40,6 +53,235 @@ function providerFail() {
     "social_oauth_exchange_failed",
     "Troca OAuth Instagram recusada."
   );
+}
+
+class InstagramDiscoveryError extends Error {
+  constructor(code, evidence) {
+    super("Descoberta de conta profissional Instagram recusada.");
+    this.name = "InstagramDiscoveryError";
+    this.code = code;
+    this.evidence = evidence;
+  }
+}
+
+function safeMetadataValue(value) {
+  if (Number.isSafeInteger(value)) return String(value);
+  if (
+    typeof value !== "string" ||
+    value !== value.trim() ||
+    !SAFE_METADATA_VALUE_PATTERN.test(value)
+  ) {
+    return null;
+  }
+  return value;
+}
+
+function safeProviderCode(value) {
+  if (Number.isSafeInteger(value) && value >= 0) return String(value);
+  return typeof value === "string" && /^[0-9]{1,20}$/.test(value)
+    ? value
+    : null;
+}
+
+function safeCorrelationId(value) {
+  return typeof value === "string" && CORRELATION_ID_PATTERN.test(value)
+    ? value.toLowerCase()
+    : null;
+}
+
+function normalizedContentType(response) {
+  const raw = responseHeader(response, "content-type");
+  if (typeof raw !== "string") return null;
+  const mime = raw.split(";", 1)[0].trim().toLowerCase();
+  return /^[a-z0-9!#$&^_.+-]+\/[a-z0-9!#$&^_.+-]+$/.test(mime)
+    ? mime
+    : null;
+}
+
+function safeTopLevelFields(value) {
+  if (
+    !value ||
+    typeof value !== "object" ||
+    Array.isArray(value) ||
+    Object.getPrototypeOf(value) !== Object.prototype
+  ) {
+    return Object.freeze([]);
+  }
+  return Object.freeze(
+    Object.keys(value)
+      .filter((key) => SAFE_TOP_LEVEL_FIELD_PATTERN.test(key))
+      .sort()
+      .slice(0, 32)
+  );
+}
+
+function discoveryResponseFormat(value) {
+  if (Array.isArray(value)) return "array";
+  if (
+    value &&
+    typeof value === "object" &&
+    Object.getPrototypeOf(value) === Object.prototype
+  ) {
+    const hasDirectAccountFields = [
+      "user_id",
+      "username",
+      "account_type"
+    ].some((key) => Object.hasOwn(value, key));
+    return Array.isArray(value.data) && !hasDirectAccountFields
+      ? "data_envelope"
+      : "direct_object";
+  }
+  if (value === null) return "null";
+  return typeof value;
+}
+
+function safeDataItemCount(value) {
+  return Array.isArray(value?.data) && value.data.length <= 10000
+    ? value.data.length
+    : null;
+}
+
+function observedAccountType(value) {
+  if (value === "Business" || value === "business") return "business";
+  if (
+    value === "Media_Creator" ||
+    value === "media_creator" ||
+    value === "creator"
+  ) {
+    return "creator";
+  }
+  if (value === "Personal" || value === "personal") return "personal";
+  return typeof value === "string" ? "unsupported" : null;
+}
+
+function providerErrorMetadata(decoded) {
+  const source = decoded?.error && typeof decoded.error === "object" &&
+    !Array.isArray(decoded.error)
+    ? decoded.error
+    : null;
+  if (!source) {
+    return Object.freeze({
+      providerErrorType: null,
+      providerErrorCode: null,
+      providerErrorSubcode: null,
+      providerTraceId: null,
+      providerTransient: null
+    });
+  }
+  return Object.freeze({
+    providerErrorType: safeMetadataValue(source.type),
+    providerErrorCode: safeProviderCode(source.code),
+    providerErrorSubcode: safeProviderCode(
+      source.error_subcode ?? source.subcode
+    ),
+    providerTraceId: safeMetadataValue(
+      source.fbtrace_id ?? source.trace_id
+    ),
+    providerTransient: typeof source.is_transient === "boolean"
+      ? source.is_transient
+      : null
+  });
+}
+
+function safeProviderRequestId(response) {
+  for (const name of ["x-fb-request-id", "x-request-id"]) {
+    const value = safeMetadataValue(responseHeader(response, name));
+    if (value !== null) return value;
+  }
+  return null;
+}
+
+function safeDuration(clock, startedAt) {
+  try {
+    const elapsed = clock() - startedAt;
+    return Number.isSafeInteger(elapsed) && elapsed >= 0 && elapsed <= 30000
+      ? elapsed
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function createDiscoveryEvidence(input = {}) {
+  const failureCode = INSTAGRAM_DISCOVERY_FAILURE_CODES.has(input.failureCode)
+    ? input.failureCode
+    : null;
+  const outcome = failureCode === null ? "succeeded" : "failed";
+  const status = Number.isInteger(input.httpStatus) &&
+    input.httpStatus >= 100 && input.httpStatus <= 599
+    ? input.httpStatus
+    : null;
+  const contentType = typeof input.contentType === "string" &&
+    input.contentType.length <= 128
+    ? input.contentType
+    : null;
+  const format = typeof input.responseFormat === "string" &&
+    /^[a-z_]{1,32}$/.test(input.responseFormat)
+    ? input.responseFormat
+    : "unavailable";
+  return Object.freeze({
+    component: INSTAGRAM_DISCOVERY_COMPONENT,
+    event: INSTAGRAM_DISCOVERY_EVENT,
+    stage: INSTAGRAM_DISCOVERY_STAGE,
+    outcome,
+    failureCode,
+    httpStatus: status,
+    contentType,
+    responseFormat: format,
+    topLevelFields: Object.freeze(
+      Array.isArray(input.topLevelFields)
+        ? input.topLevelFields
+          .filter((key) => SAFE_TOP_LEVEL_FIELD_PATTERN.test(key))
+          .slice(0, 32)
+        : []
+    ),
+    dataItemCount: Number.isSafeInteger(input.dataItemCount) &&
+      input.dataItemCount >= 0 && input.dataItemCount <= 10000
+      ? input.dataItemCount
+      : null,
+    providerErrorType: safeMetadataValue(input.providerErrorType),
+    providerErrorCode: safeProviderCode(input.providerErrorCode),
+    providerErrorSubcode: safeProviderCode(input.providerErrorSubcode),
+    providerTraceId: safeMetadataValue(input.providerTraceId),
+    providerRequestId: safeMetadataValue(input.providerRequestId),
+    accountType: observedAccountType(input.accountType),
+    retryable: input.retryable === true,
+    correlationId: safeCorrelationId(input.correlationId),
+    durationMs: Number.isSafeInteger(input.durationMs) &&
+      input.durationMs >= 0 && input.durationMs <= 30000
+      ? input.durationMs
+      : null
+  });
+}
+
+function sanitizeInstagramDiscoveryEvidence(value) {
+  if (
+    !value ||
+    typeof value !== "object" ||
+    Array.isArray(value) ||
+    value.component !== INSTAGRAM_DISCOVERY_COMPONENT ||
+    value.event !== INSTAGRAM_DISCOVERY_EVENT ||
+    value.stage !== INSTAGRAM_DISCOVERY_STAGE
+  ) {
+    return null;
+  }
+  const safe = createDiscoveryEvidence(value);
+  return safe.outcome === value.outcome ? safe : null;
+}
+
+function emitDiscoveryEvidence(logger, evidence) {
+  const safe = sanitizeInstagramDiscoveryEvidence(evidence);
+  if (!safe) return;
+  try {
+    const info = logger?.info;
+    if (typeof info !== "function") return;
+    const pending = info.call(logger, safe);
+    if (pending && typeof pending.then === "function") {
+      Promise.resolve(pending).catch(() => {});
+    }
+  } catch {
+    // Redacted diagnostic logging must never alter the OAuth result.
+  }
 }
 
 function strictRecord(value, expectedKeys) {
@@ -563,18 +805,6 @@ function normalizeProfessionalAccountType(value) {
   providerFail();
 }
 
-function parseProfessionalAccountResponse(body, expectedUserId) {
-  const decoded = parseJsonRecord(body);
-  const userId = normalizeExternalUserId(decoded.user_id);
-  if (userId !== expectedUserId) providerFail();
-  return Object.freeze({
-    userId,
-    username: normalizeInstagramUsername(decoded.username),
-    name: normalizeDisplayName(decoded.name),
-    accountType: normalizeProfessionalAccountType(decoded.account_type)
-  });
-}
-
 function clearResultToken(result) {
   if (Buffer.isBuffer(result?.accessToken)) result.accessToken.fill(0);
 }
@@ -777,12 +1007,83 @@ function createInstagramProvider(options = {}) {
   }
 
   async function discoverProfessionalAccount(input = {}) {
-    const source = strictRecord(input, ["accessToken", "userId"]);
+    const hasCorrelationId = input !== null && typeof input === "object" &&
+      Object.hasOwn(input, "correlationId");
+    const inputKeys = hasCorrelationId
+      ? ["accessToken", "userId", "correlationId"]
+      : ["accessToken", "userId"];
+    const source = strictRecord(input, inputKeys);
+    const correlationId = source.correlationId === undefined
+      ? null
+      : safeCorrelationId(source.correlationId);
+    if (source.correlationId !== undefined && correlationId === null) {
+      providerFail();
+    }
+    const expectedUserId = normalizeExternalUserId(source.userId);
     const accessToken = copyAccessToken(source.accessToken);
+    const controller = new AbortController();
+    const timedOut = Object.freeze({ timedOut: true });
+    const completed = Object.freeze({ timedOut: false });
+    let settleDeadline;
+    let expired = false;
+    let timer;
+    let timerStarted = false;
+    let response;
+    let body;
+    let startedAt;
     try {
-      const expectedUserId = normalizeExternalUserId(source.userId);
-      return await requestOnce(
-        (signal) => {
+      startedAt = clock();
+    } catch {
+      startedAt = null;
+    }
+    const deadline = new Promise((resolve) => {
+      settleDeadline = resolve;
+    });
+    async function withinBudget(operation) {
+      if (expired || controller.signal.aborted) throw timedOut;
+      const observed = Promise.resolve()
+        .then(operation)
+        .then(
+          (value) => Object.freeze({ fulfilled: true, value }),
+          (error) => Object.freeze({ fulfilled: false, error })
+        );
+      const outcome = await Promise.race([observed, deadline]);
+      if (outcome === timedOut || expired || controller.signal.aborted) {
+        throw timedOut;
+      }
+      if (!outcome.fulfilled) throw outcome.error;
+      return outcome.value;
+    }
+    function failDiscovery(code, metadata = {}) {
+      const evidence = createDiscoveryEvidence({
+        ...metadata,
+        failureCode: code,
+        correlationId,
+        durationMs: safeDuration(clock, startedAt)
+      });
+      emitDiscoveryEvidence(logger, evidence);
+      throw new InstagramDiscoveryError(code, evidence);
+    }
+    function responseMetadata(decoded, contentType) {
+      return {
+        httpStatus: response?.status,
+        contentType,
+        responseFormat: discoveryResponseFormat(decoded),
+        topLevelFields: safeTopLevelFields(decoded),
+        dataItemCount: safeDataItemCount(decoded),
+        providerRequestId: safeProviderRequestId(response)
+      };
+    }
+    try {
+      timer = setTimer(() => {
+        expired = true;
+        settleDeadline(timedOut);
+        controller.abort();
+      }, timeoutMs);
+      timerStarted = true;
+
+      try {
+        response = await withinBudget(() => {
           const endpoint = new URL(
             `/${config.graphApiVersion}/me`,
             INSTAGRAM_GRAPH_API_ORIGIN
@@ -799,16 +1100,208 @@ function createInstagramProvider(options = {}) {
                 accept: "application/json",
                 authorization: `Bearer ${accessToken.toString("utf8")}`
               }),
-              signal
+              signal: controller.signal
             })
           );
-        },
-        (body) => parseProfessionalAccountResponse(body, expectedUserId)
-      );
-    } catch {
-      providerFail();
+        });
+      } catch (error) {
+        if (error === timedOut || expired || controller.signal.aborted) {
+          failDiscovery("provider_account_discovery_timeout", {
+            responseFormat: "unavailable",
+            retryable: true
+          });
+        }
+        failDiscovery("provider_account_discovery_transport_failed", {
+          responseFormat: "unavailable",
+          retryable: true
+        });
+      }
+
+      if (!response || !Number.isInteger(response.status)) {
+        failDiscovery("provider_account_discovery_transport_failed", {
+          responseFormat: "unavailable",
+          retryable: true
+        });
+      }
+      const contentType = normalizedContentType(response);
+      if (response.status !== 200) {
+        let decoded = null;
+        if (contentType === "application/json") {
+          try {
+            body = await readResponseBody(response, Object.freeze({
+              signal: controller.signal,
+              withinBudget
+            }));
+            decoded = JSON.parse(
+              preserveNumericUserIds(body.toString("utf8"))
+            );
+          } catch {
+            decoded = null;
+          }
+        }
+        const providerError = providerErrorMetadata(decoded);
+        const retryable = providerError.providerTransient === null
+          ? response.status === 408 || response.status === 425 ||
+            response.status === 429 || response.status >= 500
+          : providerError.providerTransient;
+        failDiscovery("provider_account_discovery_http_rejected", {
+          ...responseMetadata(decoded, contentType),
+          ...providerError,
+          responseFormat: decoded === null
+            ? "unavailable"
+            : discoveryResponseFormat(decoded),
+          retryable
+        });
+      }
+      if (contentType !== "application/json") {
+        failDiscovery("provider_account_discovery_invalid_content_type", {
+          ...responseMetadata(null, contentType),
+          responseFormat: "unavailable",
+          retryable: false
+        });
+      }
+
+      try {
+        body = await readResponseBody(response, Object.freeze({
+          signal: controller.signal,
+          withinBudget
+        }));
+      } catch (error) {
+        if (error === timedOut || expired || controller.signal.aborted) {
+          failDiscovery("provider_account_discovery_timeout", {
+            ...responseMetadata(null, contentType),
+            responseFormat: "unavailable",
+            retryable: true
+          });
+        }
+        const code = error?.code === "social_oauth_exchange_failed"
+          ? "provider_account_discovery_invalid_shape"
+          : "provider_account_discovery_transport_failed";
+        failDiscovery(code, {
+          ...responseMetadata(null, contentType),
+          responseFormat: "unavailable",
+          retryable: code.endsWith("transport_failed")
+        });
+      }
+
+      let decoded;
+      try {
+        decoded = JSON.parse(preserveNumericUserIds(body.toString("utf8")));
+      } catch {
+        failDiscovery("provider_account_discovery_invalid_json", {
+          ...responseMetadata(null, contentType),
+          responseFormat: "invalid_json",
+          retryable: false
+        });
+      }
+      const metadata = responseMetadata(decoded, contentType);
+      if (
+        !decoded ||
+        typeof decoded !== "object" ||
+        Array.isArray(decoded) ||
+        Object.getPrototypeOf(decoded) !== Object.prototype ||
+        metadata.responseFormat !== "direct_object"
+      ) {
+        failDiscovery("provider_account_discovery_invalid_shape", {
+          ...metadata,
+          retryable: false
+        });
+      }
+      if (
+        !Object.hasOwn(decoded, "user_id") ||
+        decoded.user_id === null ||
+        decoded.user_id === ""
+      ) {
+        failDiscovery("provider_account_discovery_missing_id", {
+          ...metadata,
+          retryable: false
+        });
+      }
+      let userId;
+      try {
+        userId = normalizeExternalUserId(decoded.user_id);
+      } catch {
+        failDiscovery("provider_account_discovery_invalid_shape", {
+          ...metadata,
+          retryable: false
+        });
+      }
+      if (userId !== expectedUserId) {
+        failDiscovery("provider_account_discovery_invalid_shape", {
+          ...metadata,
+          retryable: false
+        });
+      }
+      if (
+        !Object.hasOwn(decoded, "username") ||
+        decoded.username === null ||
+        decoded.username === ""
+      ) {
+        failDiscovery("provider_account_discovery_missing_username", {
+          ...metadata,
+          retryable: false
+        });
+      }
+      let username;
+      try {
+        username = normalizeInstagramUsername(decoded.username);
+      } catch {
+        failDiscovery("provider_account_discovery_invalid_shape", {
+          ...metadata,
+          retryable: false
+        });
+      }
+      if (!Object.hasOwn(decoded, "account_type")) {
+        failDiscovery("provider_account_discovery_invalid_shape", {
+          ...metadata,
+          retryable: false
+        });
+      }
+      if (typeof decoded.account_type !== "string") {
+        failDiscovery("provider_account_discovery_invalid_shape", {
+          ...metadata,
+          retryable: false
+        });
+      }
+      let accountType;
+      try {
+        accountType = normalizeProfessionalAccountType(decoded.account_type);
+      } catch {
+        failDiscovery("provider_account_discovery_account_ineligible", {
+          ...metadata,
+          accountType: decoded.account_type,
+          retryable: false
+        });
+      }
+      let name;
+      try {
+        name = normalizeDisplayName(decoded.name);
+      } catch {
+        failDiscovery("provider_account_discovery_invalid_shape", {
+          ...metadata,
+          accountType: decoded.account_type,
+          retryable: false
+        });
+      }
+      const result = Object.freeze({ userId, username, name, accountType });
+      emitDiscoveryEvidence(logger, createDiscoveryEvidence({
+        ...metadata,
+        accountType: decoded.account_type,
+        retryable: false,
+        correlationId,
+        durationMs: safeDuration(clock, startedAt)
+      }));
+      return result;
     } finally {
-      accessToken.fill(0);
+      try {
+        if (timerStarted) clearTimer(timer);
+      } finally {
+        timerStarted = false;
+        settleDeadline(completed);
+        if (body) body.fill(0);
+        response = null;
+        accessToken.fill(0);
+      }
     }
   }
 
@@ -835,5 +1328,6 @@ module.exports = {
   INSTAGRAM_PROFESSIONAL_ACCOUNT_API_VERSION,
   INSTAGRAM_PROVIDER,
   INSTAGRAM_TOKEN_ENDPOINT,
-  createInstagramProvider
+  createInstagramProvider,
+  sanitizeInstagramDiscoveryEvidence
 };

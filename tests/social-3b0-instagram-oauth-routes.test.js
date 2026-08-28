@@ -77,6 +77,7 @@ function makeHarness(options = {}) {
   const settlementInputs = [];
   const storageInputs = [];
   const failureInputs = [];
+  const discoveryInputs = [];
   const envelope = createInstagramOAuthStateEnvelope({
     derivationKey: ROOT_KEY,
     keyVersion: "identity-v1",
@@ -228,10 +229,13 @@ function makeHarness(options = {}) {
           : new Date(milliseconds + 5_184_000_000)
       });
     },
-    async discoverProfessionalAccount({ accessToken, userId }) {
+    async discoverProfessionalAccount({ accessToken, userId, correlationId }) {
       events.push("discover_professional_account");
+      discoveryInputs.push({ correlationId });
       if (options.discoveryFailure) {
-        throw errorWithCode("provider_permanent_failure");
+        throw errorWithCode(
+          options.discoveryFailureCode || "provider_permanent_failure"
+        );
       }
       assert.equal(accessToken.toString("utf8"), TOKEN_TEXT);
       assert.equal(userId, "synthetic-user");
@@ -371,6 +375,7 @@ function makeHarness(options = {}) {
     settlementInputs,
     storageInputs,
     failureInputs,
+    discoveryInputs,
     get createdInput() { return createdInput; },
     get exchangeCalls() { return exchangeCalls; },
     get credentialCalls() { return credentialCalls; },
@@ -800,23 +805,42 @@ test("missing or legacy scopes fail without a credential or account", async (t) 
   }
 });
 
-test("discovery failure leaves no credential or account", async () => {
-  const discovery = makeHarness({ discoveryFailure: true });
-  const discoveryState = (await authorize(discovery)).state;
-  await assert.rejects(
-    discovery.service.callback({
-      state: discoveryState,
-      code: "synthetic-code",
-      error: null
-    }),
-    { code: "provider_permanent_failure" }
-  );
-  assert.equal(discovery.credentialCalls, 0);
-  assert.equal(discovery.storageInputs.length, 0);
-  assert.equal(
-    discovery.failureInputs[0].failureCode,
-    "provider_account_discovery_failed"
-  );
+test("discovery observability maps every typed failure into the audit handoff", async (t) => {
+  const codes = [
+    "provider_account_discovery_timeout",
+    "provider_account_discovery_transport_failed",
+    "provider_account_discovery_http_rejected",
+    "provider_account_discovery_invalid_content_type",
+    "provider_account_discovery_invalid_json",
+    "provider_account_discovery_invalid_shape",
+    "provider_account_discovery_missing_id",
+    "provider_account_discovery_missing_username",
+    "provider_account_discovery_account_ineligible"
+  ];
+  for (const code of codes) {
+    await t.test(code, async () => {
+      const discovery = makeHarness({
+        discoveryFailure: true,
+        discoveryFailureCode: code
+      });
+      const discoveryState = (await authorize(discovery)).state;
+      await assert.rejects(
+        discovery.service.callback({
+          state: discoveryState,
+          code: "synthetic-code",
+          error: null
+        }),
+        { code: "social_oauth_exchange_failed" }
+      );
+      assert.equal(discovery.credentialCalls, 0);
+      assert.equal(discovery.storageInputs.length, 0);
+      assert.equal(discovery.failureInputs[0].failureCode, code);
+      assert.equal(
+        discovery.discoveryInputs[0].correlationId,
+        discovery.contexts[1].correlationId
+      );
+    });
+  }
 });
 
 test("vault failure is classified and leaves no committed credential", async () => {
@@ -1064,6 +1088,8 @@ test("server mounts the local OAuth contract without a callback Bearer guard", (
   );
   assert.doesNotMatch(source, /GET \/v1\/social\/oauth\/callback.*auth/s);
   assert.match(source, /path: req\.path/);
+  assert.match(source, /sanitizeInstagramDiscoveryEvidence\(event\)/);
+  assert.match(source, /\[social\]\[oauth-account-discovery\]/);
   const routerSource = fs.readFileSync(
     path.join(
       __dirname,

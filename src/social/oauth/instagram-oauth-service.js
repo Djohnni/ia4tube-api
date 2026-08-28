@@ -564,7 +564,8 @@ function createInstagramOAuthService(options = {}) {
       failureStage = OAUTH_FAILURE_STAGES.PROFESSIONAL_ACCOUNT_DISCOVERY;
       const providerAccount = await options.provider.discoverProfessionalAccount({
         accessToken: longLivedToken,
-        userId: exchanged.userId
+        userId: exchanged.userId,
+        correlationId: context.correlationId
       });
       failureStage = OAUTH_FAILURE_STAGES.CONTROLLED_ACCOUNT_VALIDATION;
       discoveredAccount = requireProfessionalAccount(
