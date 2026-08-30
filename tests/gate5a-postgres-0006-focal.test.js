@@ -57,6 +57,115 @@ const MIGRATOR_ROLE = loginBootstrap.MIGRATOR_ROLE;
 const RUNTIME_ROLE = loginBootstrap.RUNTIME_ROLE;
 const AUTHORIZED =
   process.env.IA4TUBE_GATE5A_0006_PHYSICAL_APPROVED === ADMISSION;
+const POST_ROLLBACK_EXPECTED_VERSIONS = Object.freeze([
+  "0001_social_multitenant_foundation",
+  "0002_social_connections_and_vault",
+  "0003_global_vault_key_registry",
+  "0004_social_connector_persistence",
+  "0005_fix_social_reference_checks"
+]);
+const POST_ROLLBACK_RELATIONS = Object.freeze([
+  "social_meta_subject_mappings",
+  "social_meta_subject_mappings_pkey",
+  "social_meta_subject_mappings_subject_global_unique",
+  "social_meta_subject_mappings_active_connection_unique",
+  "social_compliance_requests",
+  "social_compliance_requests_pkey",
+  "social_compliance_requests_event_unique",
+  "social_compliance_requests_confirmation_unique",
+  "social_compliance_requests_confirmation_digest_unique",
+  "social_compliance_requests_company_connection_time_idx",
+  "social_compliance_requests_company_status_time_idx"
+]);
+const POST_ROLLBACK_ROUTINES = Object.freeze([
+  "resolve_meta_subject_mapping",
+  "resolve_compliance_status"
+]);
+const POST_ROLLBACK_POLICIES = Object.freeze([
+  "social_meta_subject_mappings_company_scope",
+  "social_meta_subject_mappings_owner_resolver",
+  "social_compliance_requests_company_scope",
+  "social_compliance_requests_owner_resolver"
+]);
+const POST_ROLLBACK_ROLE_TOPOLOGY_SQL = [
+  "SELECT session_user AS session_user_name,",
+  " current_user AS current_user_name,",
+  " NOT login.rolinherit AS login_noinherit,",
+  " (",
+  "  SELECT COUNT(*)::integer",
+  "  FROM pg_catalog.pg_auth_members membership",
+  "  JOIN pg_catalog.pg_roles granted_role",
+  "   ON granted_role.oid=membership.roleid",
+  "  WHERE membership.member=login.oid",
+  "   AND granted_role.rolname=$2",
+  "   AND NOT membership.admin_option",
+  "   AND NOT membership.inherit_option",
+  "   AND membership.set_option",
+  " ) AS migrator_set_memberships,",
+  " (",
+  "  SELECT COUNT(*)::integer",
+  "  FROM pg_catalog.pg_namespace namespace",
+  "  WHERE namespace.nspname=ANY($3::text[])",
+  " ) AS protected_schema_count,",
+  " NOT EXISTS (",
+  "  SELECT 1",
+  "  FROM pg_catalog.pg_namespace namespace",
+  "  CROSS JOIN LATERAL pg_catalog.aclexplode(",
+  "   COALESCE(",
+  "    namespace.nspacl,",
+  "    pg_catalog.acldefault('n',namespace.nspowner)",
+  "   )",
+  "  ) schema_acl",
+  "  WHERE namespace.nspname=ANY($3::text[])",
+  "   AND schema_acl.grantee=login.oid",
+  "   AND schema_acl.privilege_type='USAGE'",
+  " ) AS direct_schema_usage_absent",
+  "FROM pg_catalog.pg_roles login",
+  "WHERE login.rolname=$1"
+].join("\n");
+const POST_ROLLBACK_DIRECT_LEDGER_SQL = [
+  "SELECT COUNT(*)::integer AS total",
+  "FROM ia4tube_migrations.schema_migrations"
+].join("\n");
+const POST_ROLLBACK_IDENTITY_SQL = [
+  "SELECT session_user AS session_user_name,",
+  " current_user AS current_user_name"
+].join("\n");
+const POST_ROLLBACK_LEDGER_SQL = [
+  "SELECT array_agg(version ORDER BY version) AS versions,",
+  " COUNT(*)::integer AS total,",
+  " COUNT(*) FILTER (WHERE version=$1)::integer AS compliance_count",
+  "FROM ia4tube_migrations.schema_migrations"
+].join("\n");
+const POST_ROLLBACK_CATALOG_SQL = [
+  "SELECT",
+  " (",
+  "  SELECT COUNT(*)::integer",
+  "  FROM pg_catalog.pg_class relation",
+  "  JOIN pg_catalog.pg_namespace namespace",
+  "   ON namespace.oid=relation.relnamespace",
+  "  WHERE namespace.nspname=$1",
+  "   AND relation.relname=ANY($2::text[])",
+  " ) AS relation_count,",
+  " (",
+  "  SELECT COUNT(*)::integer",
+  "  FROM pg_catalog.pg_proc routine",
+  "  JOIN pg_catalog.pg_namespace namespace",
+  "   ON namespace.oid=routine.pronamespace",
+  "  WHERE namespace.nspname=$1",
+  "   AND routine.proname=ANY($3::text[])",
+  " ) AS routine_count,",
+  " (",
+  "  SELECT COUNT(*)::integer",
+  "  FROM pg_catalog.pg_policy policy",
+  "  JOIN pg_catalog.pg_class relation",
+  "   ON relation.oid=policy.polrelid",
+  "  JOIN pg_catalog.pg_namespace namespace",
+  "   ON namespace.oid=relation.relnamespace",
+  "  WHERE namespace.nspname=$1",
+  "   AND policy.polname=ANY($4::text[])",
+  " ) AS policy_count"
+].join("\n");
 
 function fail(code) {
   const error = new Error(code);
@@ -641,6 +750,101 @@ async function ledgerSnapshot(pool) {
   );
 }
 
+async function validatePostRollback(pool, options = {}) {
+  const expectedVersions = options.expectedVersions ||
+    POST_ROLLBACK_EXPECTED_VERSIONS;
+  const verifyProfile = options.verifyProfile || ((client) =>
+    migrations.verifySocialPhysicalProfile(
+      client,
+      migrations.COMPLIANCE_FROM_PROFILE,
+      OWNER_ROLE,
+      RUNTIME_ROLE
+    ));
+  const client = await pool.connect();
+  let transaction = false;
+  try {
+    const topology = await client.query(
+      POST_ROLLBACK_ROLE_TOPOLOGY_SQL,
+      [
+        MIGRATION_LOGIN,
+        MIGRATOR_ROLE,
+        ["ia4tube_migrations", "ia4tube_social"]
+      ]
+    );
+    assert.equal(topology.rows.length, 1);
+    assert.equal(topology.rows[0].session_user_name, MIGRATION_LOGIN);
+    assert.equal(topology.rows[0].current_user_name, MIGRATION_LOGIN);
+    assert.equal(topology.rows[0].login_noinherit, true);
+    assert.equal(topology.rows[0].migrator_set_memberships, 1);
+    assert.equal(topology.rows[0].protected_schema_count, 2);
+    assert.equal(topology.rows[0].direct_schema_usage_absent, true);
+
+    await client.query("BEGIN TRANSACTION READ ONLY");
+    transaction = true;
+    let directError;
+    try {
+      await client.query(POST_ROLLBACK_DIRECT_LEDGER_SQL);
+    } catch (error) {
+      directError = error;
+    }
+    await client.query("ROLLBACK");
+    transaction = false;
+    assert.ok(directError);
+    assert.equal(directError.code, "42501");
+
+    await client.query(
+      "BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY"
+    );
+    transaction = true;
+    await client.query(`SET LOCAL ROLE ${quoteIdentifier(MIGRATOR_ROLE)}`);
+    const identity = await client.query(POST_ROLLBACK_IDENTITY_SQL);
+    assert.equal(identity.rows.length, 1);
+    assert.equal(identity.rows[0].session_user_name, MIGRATION_LOGIN);
+    assert.equal(identity.rows[0].current_user_name, MIGRATOR_ROLE);
+
+    const ledger = await client.query(
+      POST_ROLLBACK_LEDGER_SQL,
+      [migrations.SOCIAL_COMPLIANCE_PERSISTENCE_MIGRATION]
+    );
+    assert.equal(ledger.rows.length, 1);
+    assert.deepEqual(ledger.rows[0].versions, expectedVersions);
+    assert.equal(ledger.rows[0].total, 5);
+    assert.equal(ledger.rows[0].compliance_count, 0);
+
+    const catalog = await client.query(
+      POST_ROLLBACK_CATALOG_SQL,
+      [
+        "ia4tube_social",
+        POST_ROLLBACK_RELATIONS,
+        POST_ROLLBACK_ROUTINES,
+        POST_ROLLBACK_POLICIES
+      ]
+    );
+    assert.equal(catalog.rows.length, 1);
+    assert.equal(catalog.rows[0].relation_count, 0);
+    assert.equal(catalog.rows[0].routine_count, 0);
+    assert.equal(catalog.rows[0].policy_count, 0);
+
+    const profile = await verifyProfile(client);
+    assert.equal(profile.profile, migrations.COMPLIANCE_FROM_PROFILE);
+    await client.query("ROLLBACK");
+    transaction = false;
+    return Object.freeze({
+      directLoginAccessDenied: true,
+      explicitMigratorRoleAccess: true,
+      migration0006Absent: true,
+      ledger0001Through0005: true,
+      profile: profile.profile,
+      transientObjectCount: 0
+    });
+  } catch (error) {
+    if (transaction) await client.query("ROLLBACK").catch(() => {});
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
 async function proveSyntheticRollback(pool, migration) {
   const client = await pool.connect();
   let transaction = false;
@@ -674,28 +878,13 @@ async function proveSyntheticRollback(pool, migration) {
     client.release();
   }
 
-  const after = await ledgerSnapshot(pool);
-  assert.equal(after.rows[0].total, 5);
-  assert.equal(after.rows[0].compliance_count, 0);
-  const absent = await withTransaction(
-    pool,
-    (client) => client.query(
-      [
-        "SELECT",
-        " to_regclass('ia4tube_social.social_meta_subject_mappings') IS NULL",
-        "  AS mappings_absent,",
-        " to_regclass('ia4tube_social.social_compliance_requests') IS NULL",
-        "  AS requests_absent"
-      ].join("\n")
-    ),
-    { role: MIGRATOR_ROLE }
-  );
-  assert.equal(absent.rows[0].mappings_absent, true);
-  assert.equal(absent.rows[0].requests_absent, true);
-  assert.equal(
-    (await physicalProfile(pool, migrations.COMPLIANCE_FROM_PROFILE)).profile,
-    migrations.COMPLIANCE_FROM_PROFILE
-  );
+  const validation = await validatePostRollback(pool);
+  assert.equal(validation.directLoginAccessDenied, true);
+  assert.equal(validation.explicitMigratorRoleAccess, true);
+  assert.equal(validation.migration0006Absent, true);
+  assert.equal(validation.ledger0001Through0005, true);
+  assert.equal(validation.profile, migrations.COMPLIANCE_FROM_PROFILE);
+  assert.equal(validation.transientObjectCount, 0);
 }
 
 function createFixture(
@@ -988,6 +1177,94 @@ async function authoritativeSnapshot(cluster, secrets, a, b) {
     await pool.end();
   }
 }
+
+test(
+  "Gate 5A: post-rollback validator preserves NOINHERIT denial and re-enters migrator role",
+  async () => {
+    const expectedVersions = [...POST_ROLLBACK_EXPECTED_VERSIONS];
+    const transcript = [];
+    let released = 0;
+    const client = {
+      async query(sql) {
+        const text = String(sql);
+        transcript.push(text);
+        if (text === POST_ROLLBACK_ROLE_TOPOLOGY_SQL) {
+          return {
+            rows: [{
+              session_user_name: MIGRATION_LOGIN,
+              current_user_name: MIGRATION_LOGIN,
+              login_noinherit: true,
+              migrator_set_memberships: 1,
+              protected_schema_count: 2,
+              direct_schema_usage_absent: true
+            }]
+          };
+        }
+        if (text === POST_ROLLBACK_DIRECT_LEDGER_SQL) {
+          const error = new Error("expected direct access denial");
+          error.code = "42501";
+          throw error;
+        }
+        if (text === POST_ROLLBACK_IDENTITY_SQL) {
+          return {
+            rows: [{
+              session_user_name: MIGRATION_LOGIN,
+              current_user_name: MIGRATOR_ROLE
+            }]
+          };
+        }
+        if (text === POST_ROLLBACK_LEDGER_SQL) {
+          return {
+            rows: [{
+              versions: expectedVersions,
+              total: 5,
+              compliance_count: 0
+            }]
+          };
+        }
+        if (text === POST_ROLLBACK_CATALOG_SQL) {
+          return {
+            rows: [{
+              relation_count: 0,
+              routine_count: 0,
+              policy_count: 0
+            }]
+          };
+        }
+        return { rows: [] };
+      },
+      release() {
+        released += 1;
+      }
+    };
+    const result = await validatePostRollback(
+      { connect: async () => client },
+      {
+        expectedVersions,
+        verifyProfile: async () => ({
+          profile: migrations.COMPLIANCE_FROM_PROFILE
+        })
+      }
+    );
+    const directIndex = transcript.indexOf(POST_ROLLBACK_DIRECT_LEDGER_SQL);
+    const roleIndex = transcript.indexOf(
+      `SET LOCAL ROLE ${quoteIdentifier(MIGRATOR_ROLE)}`
+    );
+    const ledgerIndex = transcript.indexOf(POST_ROLLBACK_LEDGER_SQL);
+    const catalogIndex = transcript.indexOf(POST_ROLLBACK_CATALOG_SQL);
+    assert.ok(directIndex >= 0 && directIndex < roleIndex);
+    assert.ok(roleIndex >= 0 && roleIndex < ledgerIndex);
+    assert.ok(ledgerIndex < catalogIndex);
+    assert.equal(transcript.filter((sql) => sql === "ROLLBACK").length, 2);
+    assert.equal(POST_ROLLBACK_CATALOG_SQL.includes("to_regclass"), false);
+    assert.equal(result.directLoginAccessDenied, true);
+    assert.equal(result.explicitMigratorRoleAccess, true);
+    assert.equal(result.migration0006Absent, true);
+    assert.equal(result.ledger0001Through0005, true);
+    assert.equal(result.transientObjectCount, 0);
+    assert.equal(released, 1);
+  }
+);
 
 test(
   "Gate 5A: PostgreSQL 18.6 disposable focal proves migration 0006 and compliance persistence",
