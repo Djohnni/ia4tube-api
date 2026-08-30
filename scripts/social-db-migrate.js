@@ -8,12 +8,17 @@ const {
   createPostgresPool
 } = require("../src/persistence/postgres/pool");
 const {
+  COMPLIANCE_FROM_PROFILE,
+  COMPLIANCE_PENDING_MIGRATIONS,
+  COMPLIANCE_TO_PROFILE,
   EXACT_FROM_PROFILE,
   EXACT_PENDING_MIGRATIONS,
   EXACT_TO_PROFILE,
   REFERENCE_CHECK_FROM_PROFILE,
   REFERENCE_CHECK_PENDING_MIGRATIONS,
   REFERENCE_CHECK_TO_PROFILE,
+  STAGING_EXACT_DATABASE_SERVICE_ID,
+  STAGING_EXACT_WEB_SERVICE_ID,
   createMigrationRunner
 } = require("../src/persistence/postgres/migrations");
 
@@ -23,7 +28,13 @@ const REFERENCE_CHECK_COMMANDS = new Set([
   "plan-reference-check-fix",
   "apply-reference-check-fix"
 ]);
+const COMPLIANCE_COMMANDS = new Set([
+  "plan-meta-compliance",
+  "apply-meta-compliance"
+]);
 const SHA256_PATTERN = /^[0-9a-f]{64}$/;
+const UUID_PATTERN =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const RECOVERY_REFERENCE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/;
 const RECOVERY_TIMESTAMP =
   /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?Z$/;
@@ -80,6 +91,69 @@ function parseMigrationCommand(argv = process.argv.slice(2)) {
         migrationSha256: named.get("migration-sha256")
       })
     });
+  }
+  if (COMPLIANCE_COMMANDS.has(command)) {
+    const named = parseNamedArguments(argv.slice(1));
+    const apply = command === "apply-meta-compliance";
+    const expectedNames = new Set([
+      "migration-sha256",
+      ...(apply
+        ? [
+            "recovery-reference",
+            "recovery-captured-at",
+            "execution-package-digest",
+            "staging-approval",
+            "database-marker-uuid"
+          ]
+        : [])
+    ]);
+    if (
+      named.size !== expectedNames.size ||
+      [...named.keys()].some((name) => !expectedNames.has(name)) ||
+      [...expectedNames].some((name) => !named.has(name)) ||
+      !SHA256_PATTERN.test(named.get("migration-sha256") || "")
+    ) {
+      refuse("migration_compliance_argument_invalid");
+    }
+    const request = {
+      fromProfile: COMPLIANCE_FROM_PROFILE,
+      toProfile: COMPLIANCE_TO_PROFILE,
+      expectedPending: Object.freeze([...COMPLIANCE_PENDING_MIGRATIONS]),
+      migrationSha256: named.get("migration-sha256")
+    };
+    if (apply) {
+      request.recoveryReference = named.get("recovery-reference");
+      request.recoveryCapturedAt = named.get("recovery-captured-at");
+      request.executionPackageDigest = named.get("execution-package-digest");
+      request.stagingApproval = named.get("staging-approval");
+      request.databaseMarkerUuid = String(
+        named.get("database-marker-uuid") || ""
+      ).toLowerCase();
+      request.recoveryStatus = "AVAILABLE";
+      request.recoveryConcurrentOperation = "NONE";
+      request.renderWebServiceId = STAGING_EXACT_WEB_SERVICE_ID;
+      request.renderDatabaseServiceId = STAGING_EXACT_DATABASE_SERVICE_ID;
+      if (
+        !RECOVERY_REFERENCE.test(request.recoveryReference || "") ||
+        !SHA256_PATTERN.test(request.executionPackageDigest || "") ||
+        !UUID_PATTERN.test(request.databaseMarkerUuid)
+      ) {
+        refuse("migration_compliance_argument_invalid");
+      }
+      const timestamp = Date.parse(request.recoveryCapturedAt);
+      const canonical = RECOVERY_TIMESTAMP.test(request.recoveryCapturedAt || "")
+        ? request.recoveryCapturedAt.includes(".")
+          ? request.recoveryCapturedAt
+          : request.recoveryCapturedAt.replace(/Z$/, ".000Z")
+        : "";
+      if (
+        !Number.isFinite(timestamp) ||
+        new Date(timestamp).toISOString() !== canonical
+      ) {
+        refuse("migration_compliance_argument_invalid");
+      }
+    }
+    return Object.freeze({ command, request: Object.freeze(request) });
   }
   if (!EXACT_COMMANDS.has(command)) refuse("migration_command_invalid");
 
@@ -192,6 +266,13 @@ async function main({
       await runner.planReferenceCheckFix(parsed.request, env);
       result = await runner.applyReferenceCheckFix(parsed.request, env);
     }
+    if (parsed.command === "plan-meta-compliance") {
+      result = await runner.planMetaCompliance(parsed.request, env);
+    }
+    if (parsed.command === "apply-meta-compliance") {
+      await runner.planMetaCompliance(parsed.request, env);
+      result = await runner.applyMetaCompliance(parsed.request, env);
+    }
     if (parsed.command === "plan-exact") {
       result = await runner.planExact(parsed.request, env);
     }
@@ -240,6 +321,7 @@ if (require.main === module) {
 
 module.exports = {
   LEGACY_COMMANDS,
+  COMPLIANCE_COMMANDS,
   REFERENCE_CHECK_COMMANDS,
   MigrationCommandFailure,
   parseMigrationCommand,

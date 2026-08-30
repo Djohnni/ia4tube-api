@@ -19,6 +19,17 @@ const {
   createInstagramOAuthRouter
 } = require("./src/social/oauth/instagram-oauth-router");
 const {
+  createInstagramOAuthVisualReturn
+} = require("./src/social/oauth/instagram-oauth-visual-return");
+const {
+  createMetaComplianceRouter
+} = require("./src/social/compliance");
+const {
+  createReviewerSandboxRouter,
+  createReviewerSandboxService
+} = require("./src/social/reviewer-sandbox/reviewer-sandbox");
+const {
+  CONTROLLED_GATE4_STAGING_ORIGIN,
   CONTROLLED_GATE4_PUBLIC_PATH,
   createControlledGate4JpegPublicHandler,
   isControlledGate4RequestPath,
@@ -235,6 +246,29 @@ const PUBLIC_API_BASE_URL = PUBLIC_URLS.publicApiBaseUrl;
 const PUBLIC_WEB_BASE_URL = PUBLIC_URLS.publicWebBaseUrl;
 const PAYMENT_RETURN_URL = PUBLIC_URLS.paymentReturnUrl;
 const PAYMENT_PAYER_EMAIL_DOMAIN = PUBLIC_URLS.paymentPayerEmailDomain;
+const GATE5A_STAGING_ENABLED =
+  PUBLIC_API_BASE_URL === CONTROLLED_GATE4_STAGING_ORIGIN;
+const CANONICAL_WEB_APP_FILE = path.join(__dirname, "app.html");
+const CANONICAL_REVIEWER_FLOW_FILE = path.join(
+  __dirname,
+  "gate5a-reviewer-flow.js"
+);
+const instagramOAuthVisualReturn = GATE5A_STAGING_ENABLED
+  ? createInstagramOAuthVisualReturn({
+      publicOrigin: PUBLIC_API_BASE_URL,
+      returnPath: "/app.html"
+    })
+  : null;
+const reviewerSandboxService = GATE5A_STAGING_ENABLED
+  ? createReviewerSandboxService({
+      publicOrigin: PUBLIC_API_BASE_URL,
+      controlledAssetPath: CONTROLLED_GATE4_PUBLIC_PATH
+    })
+  : null;
+
+process.once("exit", () => {
+  instagramOAuthVisualReturn?.destroy();
+});
 const ORDER_MEDIA_URL_TTL_SECONDS = Math.max(
   60,
   Math.min(Number(process.env.ORDER_MEDIA_URL_TTL_SECONDS || 5 * 60), 15 * 60)
@@ -422,6 +456,8 @@ function isSecuritySensitiveBodyRoute(req) {
   const routePath = String(req.path || "").toLowerCase();
   return routePath === "/bot/mobile-analytics/login" ||
     routePath === "/v1/social/connections/instagram/authorization" ||
+    routePath.startsWith("/v1/social/compliance/meta/") ||
+    routePath.startsWith("/v1/social/reviewer-sandbox/") ||
     routePath === "/oauth" ||
     routePath.startsWith("/oauth/") ||
     routePath === "/auth" ||
@@ -1810,14 +1846,39 @@ function auth(req, res, next) {
   }
 }
 
+if (GATE5A_STAGING_ENABLED) {
+  app.use(
+    "/v1/social/compliance",
+    createMetaComplianceRouter({
+      getService() {
+        return socialRuntimeState?.enabled
+          ? socialRuntimeState.metaCompliance
+          : null;
+      }
+    })
+  );
+}
+
 app.use("/v1/social", createInstagramOAuthRouter({
   authenticate: auth,
+  visualReturn: instagramOAuthVisualReturn,
   getService() {
     return socialRuntimeState?.enabled
       ? socialRuntimeState.instagramOAuth
       : null;
   }
 }));
+
+if (reviewerSandboxService) {
+  app.use(
+    "/v1/social/reviewer-sandbox",
+    createReviewerSandboxRouter({
+      authenticate: auth,
+      enabled: true,
+      service: reviewerSandboxService
+    })
+  );
+}
 
 app.use("/v1/social", createInstagramPublicationRouter({
   authenticate: auth,
@@ -2203,6 +2264,24 @@ app.use("/bot/free-art-campaigns", createFreeArtCampaignRoutes({
 // Health check
 app.get("/", (req, res) => {
   res.json({ ok: true, msg: "omascote-api online" });
+});
+
+app.get(["/app.html", "/reviewer"], (_req, res) => {
+  if (!GATE5A_STAGING_ENABLED) return res.status(404).end();
+  res.setHeader("Cache-Control", "no-store");
+  res.setHeader("Pragma", "no-cache");
+  res.setHeader("Referrer-Policy", "same-origin");
+  res.setHeader("X-Robots-Tag", "noindex, nofollow, noarchive");
+  return res.sendFile(CANONICAL_WEB_APP_FILE);
+});
+
+app.get("/gate5a-reviewer-flow.js", (_req, res) => {
+  if (!GATE5A_STAGING_ENABLED) return res.status(404).end();
+  res.setHeader("Cache-Control", "no-store");
+  res.setHeader("Pragma", "no-cache");
+  res.setHeader("X-Content-Type-Options", "nosniff");
+  res.setHeader("X-Robots-Tag", "noindex, nofollow, noarchive");
+  return res.type("application/javascript").sendFile(CANONICAL_REVIEWER_FLOW_FILE);
 });
 
 function envInt(name, fallback) {

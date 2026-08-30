@@ -404,6 +404,7 @@ function createInstagramOAuthRouter(options = {}) {
     callbackInvalid();
   }
   const router = options.router || express.Router();
+  const visualReturn = options.visualReturn || null;
   if (
     !router ||
     typeof router.post !== "function" ||
@@ -411,6 +412,32 @@ function createInstagramOAuthRouter(options = {}) {
     typeof router.delete !== "function"
   ) {
     callbackInvalid();
+  }
+  if (
+    visualReturn !== null &&
+    (
+      typeof visualReturn.recordSuccess !== "function" ||
+      typeof visualReturn.recordError !== "function" ||
+      typeof visualReturn.redirectUrl !== "function" ||
+      typeof visualReturn.get !== "function"
+    )
+  ) {
+    callbackInvalid();
+  }
+
+  function wantsVisualReturn(req) {
+    return Boolean(
+      visualReturn &&
+      /(?:^|,)\s*text\/html(?:\s*;|\s*,|\s*$)/i.test(
+        String(req.headers?.accept || "")
+      )
+    );
+  }
+
+  function redirectToVisualReturn(res, reference) {
+    res.setHeader("Referrer-Policy", "no-referrer");
+    res.setHeader("Location", visualReturn.redirectUrl(reference));
+    return res.status(303).end();
   }
 
   function service() {
@@ -574,13 +601,49 @@ function createInstagramOAuthRouter(options = {}) {
     }
   );
 
+  router.get("/oauth/return/:reference", noStore, (req, res) => {
+    if (!visualReturn) return res.status(404).end();
+    try {
+      const params = exactRecord(req.params, ["reference"], requestInvalid);
+      assertEmptyInput(req?.query);
+      assertEmptyInput(req?.body);
+      const result = visualReturn.get(params.reference);
+      if (!result) {
+        return res.status(404).json(Object.freeze({
+          ok: false,
+          code: "social_oauth_return_unavailable"
+        }));
+      }
+      return res.status(200).json(result);
+    } catch (error) {
+      return sendClosedError(res, error);
+    }
+  });
+
   router.get("/oauth/callback", noStore, async (req, res) => {
+    const visual = wantsVisualReturn(req);
     try {
       const result = await service().callback(
         parseCallbackQuery(req.originalUrl || req.url)
       );
+      if (visual) {
+        return redirectToVisualReturn(
+          res,
+          visualReturn.recordSuccess(result)
+        );
+      }
       return res.status(200).json(result);
     } catch (error) {
+      if (visual) {
+        try {
+          return redirectToVisualReturn(
+            res,
+            visualReturn.recordError(publicCode(error))
+          );
+        } catch (visualError) {
+          return sendClosedError(res, visualError);
+        }
+      }
       return sendClosedError(res, error);
     }
   });

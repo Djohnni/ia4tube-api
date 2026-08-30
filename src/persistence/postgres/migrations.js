@@ -30,6 +30,8 @@ const SOCIAL_CONNECTOR_PERSISTENCE_MIGRATION =
   "0004_social_connector_persistence";
 const SOCIAL_REFERENCE_CHECK_FIX_MIGRATION =
   "0005_fix_social_reference_checks";
+const SOCIAL_COMPLIANCE_PERSISTENCE_MIGRATION =
+  "0006_social_compliance_persistence";
 const EXACT_FROM_PROFILE = "social-schema-0003";
 const EXACT_TO_PROFILE = "social-schema-0004";
 const EXACT_PENDING_MIGRATIONS = Object.freeze([
@@ -40,10 +42,17 @@ const REFERENCE_CHECK_TO_PROFILE = "social-schema-0005";
 const REFERENCE_CHECK_PENDING_MIGRATIONS = Object.freeze([
   SOCIAL_REFERENCE_CHECK_FIX_MIGRATION
 ]);
+const COMPLIANCE_FROM_PROFILE = "social-schema-0005";
+const COMPLIANCE_TO_PROFILE = "social-schema-0006";
+const COMPLIANCE_PENDING_MIGRATIONS = Object.freeze([
+  SOCIAL_COMPLIANCE_PERSISTENCE_MIGRATION
+]);
 const STAGING_EXACT_0004_SQL_SHA256 =
   "91f6efc611903c40e16bd37828d5b9c1a03dfae222e1d13b5dc97f81ffde1b5d";
 const STAGING_REFERENCE_CHECK_0005_SQL_SHA256 =
   "ddac4a02cecfd5247432687289001aa3198cce4dccab4e45cedc4cff26e5da93";
+const STAGING_COMPLIANCE_0006_SQL_SHA256 =
+  "f07eb68d37e8fec372e4b712447a113cba5d6ae6395492bb5678cc13d74948e7";
 const STAGING_EXACT_APPROVAL_PREFIX =
   "APPLY_SOCIAL_STAGING_EXACT_0004";
 const STAGING_EXACT_WEB_SERVICE_ID = "srv-d9itiiurnols73fsbmmg";
@@ -60,6 +69,10 @@ const EXACT_TARGET_MIGRATIONS = Object.freeze([
 const REFERENCE_CHECK_TARGET_MIGRATIONS = Object.freeze([
   ...EXACT_TARGET_MIGRATIONS,
   SOCIAL_REFERENCE_CHECK_FIX_MIGRATION
+]);
+const COMPLIANCE_TARGET_MIGRATIONS = Object.freeze([
+  ...REFERENCE_CHECK_TARGET_MIGRATIONS,
+  SOCIAL_COMPLIANCE_PERSISTENCE_MIGRATION
 ]);
 const EXACT_BASE_TABLES = Object.freeze([
   "companies",
@@ -80,11 +93,24 @@ const EXACT_CONNECTOR_TABLES = Object.freeze([
   "social_publications",
   "social_publication_attempts"
 ]);
+const COMPLIANCE_TABLES = Object.freeze([
+  "social_meta_subject_mappings",
+  "social_compliance_requests"
+]);
 const EXACT_PROFILE_TABLES = Object.freeze({
   [EXACT_FROM_PROFILE]: EXACT_BASE_TABLES,
   [EXACT_TO_PROFILE]: Object.freeze([
     ...EXACT_BASE_TABLES,
     ...EXACT_CONNECTOR_TABLES
+  ]),
+  [COMPLIANCE_FROM_PROFILE]: Object.freeze([
+    ...EXACT_BASE_TABLES,
+    ...EXACT_CONNECTOR_TABLES
+  ]),
+  [COMPLIANCE_TO_PROFILE]: Object.freeze([
+    ...EXACT_BASE_TABLES,
+    ...EXACT_CONNECTOR_TABLES,
+    ...COMPLIANCE_TABLES
   ])
 });
 const EXACT_RUNTIME_TABLE_GRANTS = Object.freeze({
@@ -100,6 +126,12 @@ const EXACT_RUNTIME_TABLE_GRANTS = Object.freeze({
   social_publications: ["INSERT", "SELECT"],
   social_publication_attempts: ["INSERT", "SELECT"],
   social_audit_events: ["INSERT", "SELECT"]
+});
+const COMPLIANCE_RUNTIME_TABLE_GRANTS = Object.freeze({
+  ...EXACT_RUNTIME_TABLE_GRANTS,
+  social_encrypted_credentials: ["DELETE", "INSERT", "SELECT"],
+  social_meta_subject_mappings: ["INSERT", "SELECT"],
+  social_compliance_requests: ["INSERT", "SELECT"]
 });
 const EXACT_RUNTIME_COLUMN_GRANTS = Object.freeze({
   companies: {
@@ -193,6 +225,25 @@ const EXACT_RUNTIME_COLUMN_GRANTS = Object.freeze({
     finished_at: ["UPDATE"],
     duration_ms: ["UPDATE"],
     retry_after: ["UPDATE"],
+    updated_at: ["UPDATE"],
+    revision: ["UPDATE"]
+  }
+});
+const COMPLIANCE_RUNTIME_COLUMN_GRANTS = Object.freeze({
+  ...EXACT_RUNTIME_COLUMN_GRANTS,
+  social_meta_subject_mappings: {
+    user_id: ["UPDATE"],
+    connection_id: ["UPDATE"],
+    status: ["UPDATE"],
+    revoked_at: ["UPDATE"],
+    updated_at: ["UPDATE"],
+    revision: ["UPDATE"]
+  },
+  social_compliance_requests: {
+    status: ["UPDATE"],
+    details_code: ["UPDATE"],
+    token_materials_deleted: ["UPDATE"],
+    completed_at: ["UPDATE"],
     updated_at: ["UPDATE"],
     revision: ["UPDATE"]
   }
@@ -295,9 +346,12 @@ function expectedPolicyExpression(scopeColumn) {
 
 function expectedExactTableGrantSet(profile, runtimeRole, ownerRole) {
   const tables = new Set(exactProfileTables(profile));
+  const grantProfile = profile === COMPLIANCE_TO_PROFILE
+    ? COMPLIANCE_RUNTIME_TABLE_GRANTS
+    : EXACT_RUNTIME_TABLE_GRANTS;
   const expected = new Set();
   for (const [table, privileges] of Object.entries(
-    EXACT_RUNTIME_TABLE_GRANTS
+    grantProfile
   )) {
     if (table !== "runtime_schema_contract" && !tables.has(table)) continue;
     for (const privilege of privileges) {
@@ -311,9 +365,12 @@ function expectedExactTableGrantSet(profile, runtimeRole, ownerRole) {
 
 function expectedExactColumnGrantSet(profile, runtimeRole, ownerRole) {
   const tables = new Set(exactProfileTables(profile));
+  const grantProfile = profile === COMPLIANCE_TO_PROFILE
+    ? COMPLIANCE_RUNTIME_COLUMN_GRANTS
+    : EXACT_RUNTIME_COLUMN_GRANTS;
   const expected = new Set();
   for (const [table, columns] of Object.entries(
-    EXACT_RUNTIME_COLUMN_GRANTS
+    grantProfile
   )) {
     if (!tables.has(table)) continue;
     for (const [column, privileges] of Object.entries(columns)) {
@@ -364,6 +421,7 @@ async function verifySocialPhysicalProfile(
   runtimeRole = SOCIAL_RUNTIME_ROLE
 ) {
   const tables = exactProfileTables(profile);
+  const complianceProfile = profile === COMPLIANCE_TO_PROFILE;
   const expectedRelations = new Map([
     ...tables.map((table) => [table, "r"]),
     ["runtime_schema_contract", "v"]
@@ -386,7 +444,7 @@ async function verifySocialPhysicalProfile(
   if (
     schema.rows?.length !== 1 ||
     schema.rows[0].owner_name !== ownerRole ||
-    Number(schema.rows[0].routine_count) !== 0
+    Number(schema.rows[0].routine_count) !== (complianceProfile ? 2 : 0)
   ) {
     postgresFail(
       "migration_exact_schema_profile_mismatch",
@@ -426,15 +484,132 @@ async function verifySocialPhysicalProfile(
     );
   }
 
+  const routineCatalog = await client.query(
+    [
+      "SELECT routine.proname,",
+      " pg_get_function_identity_arguments(routine.oid)",
+      "   AS identity_arguments,",
+      " pg_get_function_result(routine.oid) AS function_result,",
+      " owner.rolname AS owner_name,routine.prosecdef,",
+      " routine.provolatile,routine.prokind,routine.proconfig,",
+      " routine.prosrc",
+      "FROM pg_catalog.pg_proc routine",
+      "JOIN pg_catalog.pg_namespace namespace",
+      " ON namespace.oid=routine.pronamespace",
+      "JOIN pg_catalog.pg_roles owner ON owner.oid=routine.proowner",
+      "WHERE namespace.nspname='ia4tube_social'",
+      "ORDER BY routine.proname,identity_arguments"
+    ].join("\n")
+  );
+  const expectedRoutines = new Map([
+    [
+      "resolve_compliance_status|requested_confirmation_digest text",
+      {
+        result: /^TABLE\(status text\)$/i,
+        relation: "ia4tube_social.social_compliance_requests"
+      }
+    ],
+    [
+      "resolve_meta_subject_mapping|requested_provider text, requested_subject_digest text",
+      {
+        result:
+          /^TABLE\(company_id uuid, user_id uuid, connection_id uuid\)$/i,
+        relation: "ia4tube_social.social_meta_subject_mappings"
+      }
+    ]
+  ]);
+  const routineRows = routineCatalog.rows || [];
+  if (
+    routineRows.length !== (complianceProfile ? 2 : 0) ||
+    routineRows.some((routine) => {
+      const key = `${routine.proname}|${routine.identity_arguments}`;
+      const expected = expectedRoutines.get(key);
+      const configEntries = Array.isArray(routine.proconfig)
+        ? routine.proconfig
+        : [];
+      const source = String(routine.prosrc || "").toLowerCase();
+      return (
+        !complianceProfile ||
+        !expected ||
+        !expected.result.test(String(routine.function_result || "")) ||
+        routine.owner_name !== ownerRole ||
+        routine.prosecdef !== true ||
+        routine.provolatile !== "s" ||
+        routine.prokind !== "f" ||
+        configEntries.length !== 1 ||
+        configEntries[0] !== "search_path=pg_catalog" ||
+        !source.includes(expected.relation) ||
+        /\b(execute|format|dblink|copy|lo_import|pg_read_file)\b/i.test(
+          source
+        )
+      );
+    })
+  ) {
+    postgresFail(
+      "migration_exact_routine_profile_mismatch",
+      "Rotinas sociais divergem do perfil exato."
+    );
+  }
+  const routineAcl = await client.query(
+    [
+      "SELECT routine.proname,",
+      " pg_get_function_identity_arguments(routine.oid)",
+      "   AS identity_arguments,",
+      " COALESCE(grantee.rolname,'PUBLIC') AS grantee,",
+      " expanded_acl.privilege_type,expanded_acl.is_grantable,",
+      " grantor.rolname AS grantor_name",
+      "FROM pg_catalog.pg_proc routine",
+      "JOIN pg_catalog.pg_namespace namespace",
+      " ON namespace.oid=routine.pronamespace",
+      "CROSS JOIN LATERAL pg_catalog.aclexplode(",
+      " COALESCE(routine.proacl,",
+      "   pg_catalog.acldefault('f',routine.proowner))",
+      ") expanded_acl",
+      "LEFT JOIN pg_catalog.pg_roles grantee",
+      " ON grantee.oid=expanded_acl.grantee",
+      "LEFT JOIN pg_catalog.pg_roles grantor",
+      " ON grantor.oid=expanded_acl.grantor",
+      "WHERE namespace.nspname='ia4tube_social'",
+      " AND expanded_acl.grantee<>routine.proowner",
+      "ORDER BY routine.proname,identity_arguments,grantee"
+    ].join("\n")
+  );
+  const actualRoutineAcl = new Set(
+    (routineAcl.rows || []).map((row) =>
+      `${String(row.grantee).toLowerCase()}|${row.proname}|` +
+      `${row.identity_arguments}|` +
+      `${String(row.privilege_type).toUpperCase()}|` +
+      `${Boolean(row.is_grantable)}|` +
+      String(row.grantor_name).toLowerCase()
+    )
+  );
+  const expectedRoutineAcl = complianceProfile
+    ? new Set([...expectedRoutines.keys()].map((key) => {
+        const separator = key.indexOf("|");
+        return `${runtimeRole}|${key.slice(0, separator)}|` +
+          `${key.slice(separator + 1)}|EXECUTE|false|${ownerRole}`;
+      }))
+    : new Set();
+  if (!exactSetMatches(actualRoutineAcl, expectedRoutineAcl)) {
+    postgresFail(
+      "migration_exact_routine_profile_mismatch",
+      "Rotinas sociais divergem do perfil exato."
+    );
+  }
+
   const policies = await client.query(
     [
-      "SELECT tablename, policyname, permissive, roles, cmd, qual, with_check",
+      "SELECT tablename, policyname, permissive, roles::text[] AS roles,",
+      "  cmd, qual, with_check",
       "FROM pg_catalog.pg_policies",
       "WHERE schemaname = 'ia4tube_social'",
       "ORDER BY tablename, policyname"
     ].join("\n")
   );
-  if (policies.rows?.length !== tables.length) {
+  if (
+    policies.rows?.length !== tables.length +
+      (complianceProfile ? COMPLIANCE_TABLES.length : 0)
+  ) {
     postgresFail(
       "migration_exact_rls_profile_mismatch",
       "Policies sociais divergem do perfil exato."
@@ -442,16 +617,15 @@ async function verifySocialPhysicalProfile(
   }
   const policyByTable = new Map();
   for (const policy of policies.rows || []) {
-    if (policyByTable.has(policy.tablename)) {
-      postgresFail(
-        "migration_exact_rls_profile_mismatch",
-        "Policies sociais divergem do perfil exato."
-      );
-    }
-    policyByTable.set(policy.tablename, policy);
+    const tablePolicies = policyByTable.get(policy.tablename) || [];
+    tablePolicies.push(policy);
+    policyByTable.set(policy.tablename, tablePolicies);
   }
   for (const table of tables) {
-    const policy = policyByTable.get(table);
+    const tablePolicies = policyByTable.get(table) || [];
+    const policy = tablePolicies.find(
+      (entry) => entry.policyname === `${table}_company_scope`
+    );
     const roles = Array.isArray(policy?.roles)
       ? policy.roles.map((item) => String(item).toLowerCase())
       : String(policy?.roles || "").toLowerCase() === "{public}"
@@ -469,6 +643,34 @@ async function verifySocialPhysicalProfile(
       canonicalPolicyExpression(policy.qual) !== expectedExpression ||
       canonicalPolicyExpression(policy.with_check) !== expectedExpression
     ) {
+      postgresFail(
+        "migration_exact_rls_profile_mismatch",
+        "Policies sociais divergem do perfil exato."
+      );
+    }
+    const resolver = tablePolicies.find(
+      (entry) => entry.policyname === `${table}_owner_resolver`
+    );
+    if (complianceProfile && COMPLIANCE_TABLES.includes(table)) {
+      const resolverRoles = Array.isArray(resolver?.roles)
+        ? resolver.roles.map((item) => String(item).toLowerCase())
+        : [];
+      if (
+        tablePolicies.length !== 2 ||
+        !resolver ||
+        resolver.permissive !== "PERMISSIVE" ||
+        resolverRoles.length !== 1 ||
+        resolverRoles[0] !== ownerRole ||
+        resolver.cmd !== "SELECT" ||
+        canonicalPolicyExpression(resolver.qual) !== "true" ||
+        resolver.with_check !== null
+      ) {
+        postgresFail(
+          "migration_exact_rls_profile_mismatch",
+          "Policies sociais divergem do perfil exato."
+        );
+      }
+    } else if (tablePolicies.length !== 1 || resolver) {
       postgresFail(
         "migration_exact_rls_profile_mismatch",
         "Policies sociais divergem do perfil exato."
@@ -597,7 +799,11 @@ async function verifySocialPhysicalProfile(
     ].join("\n")
   );
   const expectedNotValid =
-    profile === EXACT_TO_PROFILE
+    [
+      EXACT_TO_PROFILE,
+      COMPLIANCE_FROM_PROFILE,
+      COMPLIANCE_TO_PROFILE
+    ].includes(profile)
       ? new Set(EXACT_0004_NOT_VALID_CONSTRAINTS)
       : new Set();
   const actualNotValid = new Set(
@@ -1678,6 +1884,165 @@ function referenceCheckMigrationState(local, applied, profile) {
     postgresFail(
       "migration_reference_check_pending_set_mismatch",
       "Conjunto pendente diverge da migration corretiva."
+    );
+  }
+  return Object.freeze({
+    appliedVersions: Object.freeze([...appliedVersions]),
+    observedPending: Object.freeze([...observedPending]),
+    status
+  });
+}
+
+function assertCanonicalComplianceManifest(local) {
+  if (
+    !Array.isArray(local) ||
+    local.length !== COMPLIANCE_TARGET_MIGRATIONS.length ||
+    local.some(
+      (migration, index) =>
+        migration.version !== COMPLIANCE_TARGET_MIGRATIONS[index]
+    )
+  ) {
+    postgresFail(
+      "migration_compliance_manifest_mismatch",
+      "Manifesto autenticado do perfil 0006 diverge."
+    );
+  }
+  const migration = local.at(-1);
+  if (migration.sha256 !== STAGING_COMPLIANCE_0006_SQL_SHA256) {
+    postgresFail(
+      "migration_compliance_0006_pin_mismatch",
+      "Pin independente da migration 0006 diverge."
+    );
+  }
+  return true;
+}
+
+function complianceStagingApprovalValue(
+  recoveryReference,
+  executionPackageDigest
+) {
+  if (
+    typeof recoveryReference !== "string" ||
+    !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/.test(recoveryReference) ||
+    !/^[0-9a-f]{64}$/.test(String(executionPackageDigest || ""))
+  ) {
+    postgresFail(
+      "migration_compliance_staging_approval_invalid",
+      "Aprovacao da migration 0006 recusada."
+    );
+  }
+  return [
+    "APPLY_SOCIAL_STAGING_COMPLIANCE_0006",
+    PAID_STAGING_PUBLIC_TARGET.environmentId,
+    STAGING_COMPLIANCE_0006_SQL_SHA256,
+    sha256(recoveryReference),
+    executionPackageDigest
+  ].join(":");
+}
+
+function validateComplianceMigrationRequest(
+  request,
+  local,
+  { requireRecovery = false } = {}
+) {
+  const migration = local.find(
+    (entry) => entry.version === SOCIAL_COMPLIANCE_PERSISTENCE_MIGRATION
+  );
+  if (
+    !request ||
+    request.fromProfile !== COMPLIANCE_FROM_PROFILE ||
+    request.toProfile !== COMPLIANCE_TO_PROFILE ||
+    !exactArrayMatches(request.expectedPending, COMPLIANCE_PENDING_MIGRATIONS) ||
+    !migration ||
+    migration.sha256 !== STAGING_COMPLIANCE_0006_SQL_SHA256 ||
+    request.migrationSha256 !== STAGING_COMPLIANCE_0006_SQL_SHA256
+  ) {
+    postgresFail(
+      "migration_compliance_request_invalid",
+      "Contrato da migration 0006 recusado."
+    );
+  }
+  const base = {
+    fromProfile: COMPLIANCE_FROM_PROFILE,
+    toProfile: COMPLIANCE_TO_PROFILE,
+    expectedPending: COMPLIANCE_PENDING_MIGRATIONS,
+    migrationSha256: STAGING_COMPLIANCE_0006_SQL_SHA256
+  };
+  if (!requireRecovery) return Object.freeze(base);
+
+  const recoveryReference = String(request.recoveryReference || "");
+  const recoveryCapturedAt = request.recoveryCapturedAt;
+  const recoveryTimestamp = Date.parse(recoveryCapturedAt);
+  const canonicalRecoveryTimestamp =
+    typeof recoveryCapturedAt === "string" &&
+    /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/.test(recoveryCapturedAt)
+      ? recoveryCapturedAt.replace(/Z$/, ".000Z")
+      : recoveryCapturedAt;
+  if (
+    !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/.test(recoveryReference) ||
+    typeof recoveryCapturedAt !== "string" ||
+    !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?Z$/.test(
+      recoveryCapturedAt
+    ) ||
+    !Number.isFinite(recoveryTimestamp) ||
+    new Date(recoveryTimestamp).toISOString() !== canonicalRecoveryTimestamp ||
+    request.recoveryStatus !== "AVAILABLE" ||
+    request.recoveryConcurrentOperation !== "NONE" ||
+    request.renderWebServiceId !== STAGING_EXACT_WEB_SERVICE_ID ||
+    request.renderDatabaseServiceId !== STAGING_EXACT_DATABASE_SERVICE_ID ||
+    request.databaseMarkerUuid !== PAID_STAGING_PUBLIC_TARGET.environmentId ||
+    !/^[0-9a-f]{64}$/.test(String(request.executionPackageDigest || ""))
+  ) {
+    postgresFail(
+      "migration_compliance_recovery_invalid",
+      "Recovery da migration 0006 recusado."
+    );
+  }
+  const expectedApproval = complianceStagingApprovalValue(
+    recoveryReference,
+    request.executionPackageDigest
+  );
+  if (request.stagingApproval !== expectedApproval) {
+    postgresFail(
+      "migration_compliance_staging_approval_invalid",
+      "Aprovacao da migration 0006 recusada."
+    );
+  }
+  return Object.freeze({
+    ...base,
+    recoveryReference,
+    recoveryCapturedAt,
+    recoveryStatus: "AVAILABLE",
+    recoveryConcurrentOperation: "NONE",
+    executionPackageDigest: request.executionPackageDigest,
+    stagingApproval: request.stagingApproval
+  });
+}
+
+function complianceMigrationState(local, applied, profile) {
+  const status = compareMigrationState(local, applied);
+  const appliedVersions = status
+    .filter((item) => item.state === "applied")
+    .map((item) => item.version);
+  const observedPending = status
+    .filter((item) => item.state === "pending")
+    .map((item) => item.version);
+  const expectedApplied = profile === COMPLIANCE_FROM_PROFILE
+    ? REFERENCE_CHECK_TARGET_MIGRATIONS
+    : profile === COMPLIANCE_TO_PROFILE
+      ? COMPLIANCE_TARGET_MIGRATIONS
+      : null;
+  const expectedPending = profile === COMPLIANCE_FROM_PROFILE
+    ? COMPLIANCE_PENDING_MIGRATIONS
+    : [];
+  if (
+    !expectedApplied ||
+    !exactArrayMatches(appliedVersions, expectedApplied) ||
+    !exactArrayMatches(observedPending, expectedPending)
+  ) {
+    postgresFail(
+      "migration_compliance_pending_set_mismatch",
+      "Conjunto pendente diverge da migration 0006."
     );
   }
   return Object.freeze({
@@ -2936,6 +3301,110 @@ async function applyReferenceCheckWithinTransaction(
   }
 }
 
+async function complianceGateWithinTransaction(
+  client,
+  local,
+  profile,
+  migratorRole,
+  ownerRole,
+  target
+) {
+  await verifyMigrationSession(client, migratorRole, ownerRole);
+  await verifyMigrationInfrastructure(client, migratorRole, ownerRole);
+  await client.query(`SET LOCAL ROLE ${quoteIdentifier(migratorRole)}`);
+  assertTargetMarker(await readTargetMarker(client), target);
+  await verifyExistingLedgerContract(client, ownerRole, migratorRole);
+  const migrationState = complianceMigrationState(
+    local,
+    await readAppliedMigrations(client),
+    profile
+  );
+  const physical = await verifySocialPhysicalProfile(
+    client,
+    profile,
+    ownerRole,
+    SOCIAL_RUNTIME_ROLE
+  );
+  const referenceChecks = await verifyReferenceCheckCatalog(client, "after");
+  return Object.freeze({ migrationState, physical, referenceChecks });
+}
+
+async function applyComplianceWithinTransaction(
+  client,
+  local,
+  migratorRole,
+  ownerRole,
+  target
+) {
+  await client.query("BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ");
+  let commitAttempted = false;
+  try {
+    const before = await complianceGateWithinTransaction(
+      client,
+      local,
+      COMPLIANCE_FROM_PROFILE,
+      migratorRole,
+      ownerRole,
+      target
+    );
+    const migration = local.find(
+      (entry) => entry.version === SOCIAL_COMPLIANCE_PERSISTENCE_MIGRATION
+    );
+    if (
+      !migration ||
+      migration.sha256 !== STAGING_COMPLIANCE_0006_SQL_SHA256
+    ) {
+      postgresFail(
+        "migration_compliance_0006_pin_mismatch",
+        "Pin independente da migration 0006 diverge."
+      );
+    }
+
+    await client.query(`SET LOCAL ROLE ${quoteIdentifier(ownerRole)}`);
+    const started = process.hrtime.bigint();
+    await client.query(migration.sql);
+    const elapsed = Number((process.hrtime.bigint() - started) / 1000000n);
+    await client.query(
+      [
+        `INSERT INTO ${LEDGER_NAME} (`,
+        "  version, checksum_sha256, execution_ms",
+        ") VALUES ($1, $2, $3)"
+      ].join("\n"),
+      [migration.version, migration.sha256, elapsed]
+    );
+
+    await client.query(`SET LOCAL ROLE ${quoteIdentifier(migratorRole)}`);
+    const after = await complianceGateWithinTransaction(
+      client,
+      local,
+      COMPLIANCE_TO_PROFILE,
+      migratorRole,
+      ownerRole,
+      target
+    );
+
+    commitAttempted = true;
+    try {
+      await client.query("COMMIT");
+    } catch (error) {
+      const failure = new Error("migration_compliance_commit_outcome_unknown");
+      failure.code = "migration_compliance_commit_outcome_unknown";
+      failure.discardClient = true;
+      failure.skipAdvisoryUnlock = true;
+      failure.outcomeUnknown = true;
+      failure.retryAllowed = false;
+      failure.requiresReadOnlyInspection = true;
+      failure.cause = error;
+      throw failure;
+    }
+    return Object.freeze({ before, after, executionMs: elapsed });
+  } catch (error) {
+    if (commitAttempted) throw error;
+    await rollbackExactTransaction(client, error);
+    throw error;
+  }
+}
+
 async function exactGateWithinTransaction(
   client,
   local,
@@ -3227,6 +3696,22 @@ function createMigrationRunner(options = {}) {
             );
           }
         }
+        const compliancePreflightState = compareMigrationState(
+          local,
+          await readMigrationState(client, migratorRole)
+        );
+        if (
+          compliancePreflightState.some(
+            (item) =>
+              item.version === SOCIAL_COMPLIANCE_PERSISTENCE_MIGRATION &&
+              item.state === "pending"
+          )
+        ) {
+          postgresFail(
+            "migration_compliance_exact_route_required",
+            "Migration 0006 exige a rota transacional dedicada."
+          );
+        }
         await ensureLedger(client, ownerRole, migratorRole);
         const state = compareMigrationState(
           local,
@@ -3246,6 +3731,12 @@ function createMigrationRunner(options = {}) {
             "Migration corretiva exige a rota transacional dedicada."
           );
         }
+        if (pendingVersions.has(SOCIAL_COMPLIANCE_PERSISTENCE_MIGRATION)) {
+          postgresFail(
+            "migration_compliance_exact_route_required",
+            "Migration 0006 exige a rota transacional dedicada."
+          );
+        }
         const applied = [];
         for (const migration of local) {
           if (pendingVersions.has(migration.version)) {
@@ -3255,6 +3746,144 @@ function createMigrationRunner(options = {}) {
         return Object.freeze(applied);
       });
     } catch (error) {
+      if (error?.discardClient) releaseError = error;
+      throw error;
+    } finally {
+      client.release(releaseError);
+    }
+  }
+
+  async function planMetaCompliance(request, env = process.env) {
+    const local = readManifest(manifestOptions).slice(
+      0,
+      COMPLIANCE_TARGET_MIGRATIONS.length
+    );
+    assertCanonicalComplianceManifest(local);
+    const exactRequest = validateComplianceMigrationRequest(request, local);
+    assertMigrationTarget(target, env);
+    assertReferenceCheckTarget(target);
+    const client = await pool.connect();
+    let releaseError;
+    try {
+      await verifyMigrationSession(client, migratorRole, ownerRole);
+      await verifyMigrationInfrastructure(client, migratorRole, ownerRole);
+      const gate = await withAdvisoryLock(client, () =>
+        runExactReadOnlyTransaction(client, () =>
+          complianceGateWithinTransaction(
+            client,
+            local,
+            COMPLIANCE_FROM_PROFILE,
+            migratorRole,
+            ownerRole,
+            target
+          )
+        )
+      );
+      return Object.freeze({
+        fromProfile: gate.physical.profile,
+        toProfile: exactRequest.toProfile,
+        expectedPending: Object.freeze([...exactRequest.expectedPending]),
+        observedPending: Object.freeze([
+          ...gate.migrationState.observedPending
+        ]),
+        migrationSha256: exactRequest.migrationSha256,
+        planApproved: true,
+        readOnly: true
+      });
+    } catch (error) {
+      if (error?.discardClient) releaseError = error;
+      throw error;
+    } finally {
+      client.release(releaseError);
+    }
+  }
+
+  async function applyMetaCompliance(request, env = process.env) {
+    const local = readManifest(manifestOptions).slice(
+      0,
+      COMPLIANCE_TARGET_MIGRATIONS.length
+    );
+    assertCanonicalComplianceManifest(local);
+    const staging = String(target?.environment || "").toLowerCase() ===
+      "staging";
+    const exactRequest = validateComplianceMigrationRequest(request, local, {
+      requireRecovery: staging
+    });
+    assertApplyTarget(target, env);
+    assertReferenceCheckTarget(target);
+    const client = await pool.connect();
+    let releaseError;
+    let commitCompleted = false;
+    try {
+      await verifyMigrationSession(client, migratorRole, ownerRole);
+      await verifyMigrationInfrastructure(client, migratorRole, ownerRole);
+      const applied = await withAdvisoryLock(client, async () => {
+        const transaction = await applyComplianceWithinTransaction(
+          client,
+          local,
+          migratorRole,
+          ownerRole,
+          target
+        );
+        commitCompleted = true;
+        let finalGate;
+        try {
+          finalGate = await runExactReadOnlyTransaction(client, () =>
+            complianceGateWithinTransaction(
+              client,
+              local,
+              COMPLIANCE_TO_PROFILE,
+              migratorRole,
+              ownerRole,
+              target
+            )
+          );
+        } catch (error) {
+          const failure = new Error(
+            "migration_compliance_postcommit_validation_failed"
+          );
+          failure.code = "migration_compliance_postcommit_validation_failed";
+          failure.applied = true;
+          failure.retryAllowed = false;
+          failure.requiresReadOnlyInspection = true;
+          failure.discardClient = Boolean(error?.discardClient);
+          failure.skipAdvisoryUnlock = Boolean(
+            error?.discardClient || error?.skipAdvisoryUnlock
+          );
+          failure.cause = error;
+          throw failure;
+        }
+        return Object.freeze({ transaction, finalGate });
+      });
+      return Object.freeze({
+        fromProfile: exactRequest.fromProfile,
+        toProfile: exactRequest.toProfile,
+        expectedPending: Object.freeze([...exactRequest.expectedPending]),
+        observedPending: Object.freeze([
+          ...applied.transaction.before.migrationState.observedPending
+        ]),
+        appliedMigration: SOCIAL_COMPLIANCE_PERSISTENCE_MIGRATION,
+        migrationSha256: exactRequest.migrationSha256,
+        finalProfile: applied.finalGate.physical.profile,
+        executionMs: applied.transaction.executionMs,
+        postCommitValidated: true,
+        retryAllowed: false,
+        recoveryReferenceDigest: staging
+          ? sha256(exactRequest.recoveryReference)
+          : null,
+        recoveryCapturedAt: staging
+          ? exactRequest.recoveryCapturedAt
+          : null,
+        executionPackageDigest: staging
+          ? exactRequest.executionPackageDigest
+          : null
+      });
+    } catch (error) {
+      if (commitCompleted) {
+        error.applied = true;
+        error.retryAllowed = false;
+        error.requiresReadOnlyInspection = true;
+      }
       if (error?.discardClient) releaseError = error;
       throw error;
     } finally {
@@ -3659,10 +4288,12 @@ function createMigrationRunner(options = {}) {
   return Object.freeze({
     apply,
     applyExact,
+    applyMetaCompliance,
     applyReferenceCheckFix,
     applyStagingExact,
     inspect,
     planExact,
+    planMetaCompliance,
     planReferenceCheckFix,
     planStagingExact,
     validate
@@ -3672,6 +4303,11 @@ function createMigrationRunner(options = {}) {
 module.exports = {
   ADVISORY_LOCK_ID,
   APPLY_APPROVAL,
+  COMPLIANCE_FROM_PROFILE,
+  COMPLIANCE_PENDING_MIGRATIONS,
+  COMPLIANCE_TABLES,
+  COMPLIANCE_TARGET_MIGRATIONS,
+  COMPLIANCE_TO_PROFILE,
   EXACT_BASE_MIGRATIONS,
   EXACT_BASE_TABLES,
   EXACT_CONNECTOR_TABLES,
@@ -3688,10 +4324,12 @@ module.exports = {
   GLOBAL_VAULT_BACKFILL_POLICY_DROP,
   GLOBAL_VAULT_REGISTRY_MIGRATION,
   SOCIAL_CONNECTOR_PERSISTENCE_MIGRATION,
+  SOCIAL_COMPLIANCE_PERSISTENCE_MIGRATION,
   SOCIAL_REFERENCE_CHECK_FIX_MIGRATION,
   SOCIAL_REFERENCE_CHECK_REPLACEMENTS,
   STAGING_EXACT_0004_SQL_SHA256,
   STAGING_REFERENCE_CHECK_0005_SQL_SHA256,
+  STAGING_COMPLIANCE_0006_SQL_SHA256,
   STAGING_EXACT_APPROVAL_PREFIX,
   STAGING_EXACT_DATABASE_SERVICE_ID,
   STAGING_EXACT_WEB_SERVICE_ID,
@@ -3699,6 +4337,7 @@ module.exports = {
   MIGRATION_FILE_PATTERN,
   PRODUCTION_APPROVAL,
   assertApplyTarget,
+  assertCanonicalComplianceManifest,
   assertExactDisposableTarget,
   assertExactStagingTarget,
   assertReferenceCheckTarget,
@@ -3707,6 +4346,8 @@ module.exports = {
   assertMigrationTarget,
   assertNonDestructiveSql,
   compareMigrationState,
+  complianceStagingApprovalValue,
+  complianceMigrationState,
   createMigrationRunner,
   exactMigrationState,
   referenceCheckMigrationState,
@@ -3723,6 +4364,7 @@ module.exports = {
   verifySocialPhysicalProfile,
   verifyTargetMarker,
   validateExactMigrationRequest,
+  validateComplianceMigrationRequest,
   validateReferenceCheckFixRequest,
   validateStagingExactMigrationRequest,
   verifyStagingExactCatalogSnapshot,

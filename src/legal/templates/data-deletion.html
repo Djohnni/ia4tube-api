@@ -3,45 +3,105 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>RASCUNHO — Exclusão de Dados — IA4Tube</title>
+  <meta name="robots" content="index, follow">
+  <meta name="description" content="Rascunho técnico público das futuras instruções de Exclusão de Dados da IA4Tube.">
+  <title>Rascunho técnico público — Exclusão de Dados — IA4Tube</title>
   <style>
-    :root { color-scheme: light; font-family: Arial, sans-serif; }
-    body { margin: 0; background: #f4f6f8; color: #17202a; }
-    main { width: min(760px, calc(100% - 32px)); margin: 40px auto; }
-    article { background: #fff; border: 1px solid #d9dee3; border-radius: 12px; padding: 28px; }
-    .draft { border: 3px solid #a61b1b; background: #fff3f3; color: #7c1111; padding: 18px; margin-bottom: 28px; }
-    h1, h2 { line-height: 1.2; }
+    :root {
+      color-scheme: light;
+      font-family: Inter, Arial, sans-serif;
+      --ink: #172033;
+      --muted: #526078;
+      --surface: #ffffff;
+      --canvas: #f5f3ff;
+      --brand-dark: #38249a;
+      --warning-bg: #fff7e6;
+      --warning-border: #b85c00;
+      --line: #ded9f3;
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: var(--canvas); color: var(--ink); line-height: 1.62; }
+    main { width: min(880px, calc(100% - 32px)); margin: 32px auto; }
+    article { background: var(--surface); border: 1px solid var(--line); border-radius: 18px; padding: 36px; box-shadow: 0 12px 30px rgba(42, 32, 96, .08); }
+    .draft { border-left: 6px solid var(--warning-border); background: var(--warning-bg); padding: 20px; margin-bottom: 28px; }
+    .draft h1 { margin-top: 0; font-size: 1.35rem; }
+    h2 { margin-top: 32px; color: var(--brand-dark); line-height: 1.25; }
+    p, li { max-width: 76ch; }
     li { margin: 8px 0; }
-    footer { margin-top: 28px; padding-top: 18px; border-top: 1px solid #d9dee3; font-weight: 700; }
+    nav { display: flex; flex-wrap: wrap; gap: 10px 18px; margin-top: 30px; padding-top: 20px; border-top: 1px solid var(--line); }
+    nav a { color: var(--brand-dark); font-weight: 700; text-decoration-thickness: 2px; text-underline-offset: 3px; }
+    .meta { color: var(--muted); font-size: .95rem; }
+    .status { border: 1px solid var(--line); border-radius: 10px; padding: 16px; background: #faf9ff; }
+    footer { margin-top: 28px; padding-top: 18px; border-top: 1px solid var(--line); color: var(--muted); }
+    @media (max-width: 640px) {
+      main { width: min(100% - 20px, 880px); margin: 10px auto; }
+      article { padding: 22px 18px; border-radius: 12px; }
+      .draft { padding: 16px; }
+      h2 { font-size: 1.25rem; }
+    }
   </style>
 </head>
 <body>
   <main>
     <article>
-      <section class="draft" aria-label="Aviso de rascunho">
-        <h1>RASCUNHO — PENDENTE DE APROVAÇÃO</h1>
-        <p><strong>DRAFT — PENDING APPROVAL</strong></p>
-        <p>Esta página reserva o endereço das futuras instruções de Exclusão de Dados da IA4Tube. Nenhuma solicitação real é criada ou processada por este rascunho.</p>
-        <p>This page reserves the address for IA4Tube's future Data Deletion Instructions. This draft does not create or process a real request.</p>
+      <section class="draft" aria-label="Estado deste documento">
+        <h1>RASCUNHO TÉCNICO PÚBLICO — NÃO APROVADO JURIDICAMENTE</h1>
+        <p><strong>PUBLIC TECHNICAL DRAFT — NOT LEGALLY APPROVED</strong></p>
+        <p>Esta página explica a diferença técnica entre desconexão e exclusão e registra as decisões ainda necessárias. Ela não cria uma solicitação, não recebe dados pessoais e não promete prazo ou resultado.</p>
+        <p>O canal oficial, a verificação de identidade, o escopo de retenção e a redação final dependem de aprovação do proprietário e revisão jurídica.</p>
       </section>
 
-      <h2>Exclusão de Dados / Data Deletion</h2>
-      <p>O procedimento definitivo será publicado somente após revisão técnica, operacional e jurídica e aprovação expressa. Este rascunho não promete prazo, escopo, canal ou resultado de exclusão.</p>
+      <header>
+        <h2>Exclusão de Dados — preparação técnica</h2>
+        <p class="meta">Revisão técnica: 30 de agosto de 2026. Data de vigência jurídica: não definida.</p>
+      </header>
 
-      <h2>Itens pendentes de definição e aprovação</h2>
+      <section class="status" aria-label="Situação atual">
+        <h2>Situação atual</h2>
+        <p>Não há canal público final aprovado para iniciar uma exclusão. Esta página é informativa e não contém formulário. Não envie documentos, senhas, tokens ou dados pessoais a endereços não publicados oficialmente pela IA4Tube.</p>
+      </section>
+
+      <h2>1. Desconectar não é excluir</h2>
+      <p>A desconexão encerra o uso normal da autorização para novas operações. O núcleo atual registra o estado da conexão e torna a credencial revogada indisponível para uso; a comprovação de eliminação física e o tratamento dos demais registros pertencem ao fluxo específico de exclusão e aos seus testes.</p>
+      <p>Desconectar não deve apagar silenciosamente artes, legendas, pedidos, planejamento, publicações ou histórico comercial.</p>
+
+      <h2>2. Dados técnicos potencialmente abrangidos</h2>
+      <p>O desenho do fluxo de exclusão precisa avaliar, de forma isolada por empresa e conexão:</p>
       <ul>
-        <li>Canal oficial para iniciar a solicitação.</li>
-        <li>Informações mínimas e verificação segura de identidade.</li>
-        <li>Escopo da exclusão e possíveis escolhas do solicitante.</li>
-        <li>Etapas de confirmação, acompanhamento e conclusão.</li>
-        <li>Prazos, exceções e retenções aplicáveis.</li>
-        <li>Tratamento da desconexão de contas e autorizações externas.</li>
-        <li>Contato para dúvidas e data de vigência do procedimento.</li>
+        <li>credencial de acesso e seus envelopes criptográficos;</li>
+        <li>metadados da conexão, conta profissional e escopos concedidos;</li>
+        <li>transações OAuth e concessões temporárias relacionadas;</li>
+        <li>referências técnicas de publicação, tentativas e idempotência;</li>
+        <li>eventos de auditoria, backups e evidências cuja retenção ainda não foi decidida.</li>
       </ul>
+      <p>A lista final do que será eliminado, anonimizado ou preservado não está aprovada. Nenhuma obrigação de retenção ou exceção é afirmada sem decisão documentada.</p>
+
+      <h2>3. Fluxo que ainda precisa ser aprovado</h2>
+      <ol>
+        <li>Disponibilizar um canal oficial e acessível.</li>
+        <li>Verificar a identidade e a autoridade sobre a empresa e a conexão sem solicitar segredos do Instagram.</li>
+        <li>Registrar um pedido idempotente com referência opaca.</li>
+        <li>Apresentar o escopo aplicável e qualquer retenção legitimamente aprovada.</li>
+        <li>Executar a eliminação isolada por empresa e permitir acompanhamento seguro.</li>
+        <li>Informar a conclusão ou uma justificativa aprovada para dados preservados.</li>
+      </ol>
+      <p>Os prazos, o canal, as mensagens de confirmação e o processo de contestação ainda não foram definidos.</p>
+
+      <h2>4. Solicitações encaminhadas pela Meta</h2>
+      <p>O painel Meta pode ser configurado com uma URL pública de instruções ou com um callback técnico de exclusão. Este HTML é uma página de instruções em preparação; ele não é o callback e não processa <code>signed_request</code>.</p>
+      <p>Se o callback for adotado, sua URL e sua validação de assinatura precisam ser verificadas separadamente antes de qualquer configuração no painel. Nenhuma alteração no painel Meta é realizada por esta página.</p>
+
+      <h2>5. Contato pendente</h2>
+      <p>O proprietário ainda precisa aprovar a identidade responsável, o canal de contato e o procedimento de atendimento. Nenhum e-mail, endereço, encarregado ou prazo foi inventado.</p>
+
+      <nav aria-label="Documentos legais relacionados">
+        <a href="/politica-de-privacidade">Privacidade</a>
+        <a href="/termos-de-uso">Termos de Uso</a>
+        <a href="/exclusao-de-dados" aria-current="page">Exclusão de Dados</a>
+      </nav>
 
       <footer>
-        Não divulgar como canal ativo de exclusão nem usar em App Review antes da aprovação.
-        / Do not present this as an active deletion channel or use it for App Review before approval.
+        <strong>Status:</strong> texto técnico público, rastreável e responsivo; instrução jurídica final e canal ativo ainda não aprovados.
       </footer>
     </article>
   </main>

@@ -3,45 +3,102 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>RASCUNHO — Termos de Uso — IA4Tube</title>
+  <meta name="robots" content="index, follow">
+  <meta name="description" content="Rascunho técnico público dos futuros Termos de Uso da IA4Tube.">
+  <title>Rascunho técnico público — Termos de Uso — IA4Tube</title>
   <style>
-    :root { color-scheme: light; font-family: Arial, sans-serif; }
-    body { margin: 0; background: #f4f6f8; color: #17202a; }
-    main { width: min(760px, calc(100% - 32px)); margin: 40px auto; }
-    article { background: #fff; border: 1px solid #d9dee3; border-radius: 12px; padding: 28px; }
-    .draft { border: 3px solid #a61b1b; background: #fff3f3; color: #7c1111; padding: 18px; margin-bottom: 28px; }
-    h1, h2 { line-height: 1.2; }
+    :root {
+      color-scheme: light;
+      font-family: Inter, Arial, sans-serif;
+      --ink: #172033;
+      --muted: #526078;
+      --surface: #ffffff;
+      --canvas: #f5f3ff;
+      --brand-dark: #38249a;
+      --warning-bg: #fff7e6;
+      --warning-border: #b85c00;
+      --line: #ded9f3;
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: var(--canvas); color: var(--ink); line-height: 1.62; }
+    main { width: min(880px, calc(100% - 32px)); margin: 32px auto; }
+    article { background: var(--surface); border: 1px solid var(--line); border-radius: 18px; padding: 36px; box-shadow: 0 12px 30px rgba(42, 32, 96, .08); }
+    .draft { border-left: 6px solid var(--warning-border); background: var(--warning-bg); padding: 20px; margin-bottom: 28px; }
+    .draft h1 { margin-top: 0; font-size: 1.35rem; }
+    h2 { margin-top: 32px; color: var(--brand-dark); line-height: 1.25; }
+    p, li { max-width: 76ch; }
     li { margin: 8px 0; }
-    footer { margin-top: 28px; padding-top: 18px; border-top: 1px solid #d9dee3; font-weight: 700; }
+    nav { display: flex; flex-wrap: wrap; gap: 10px 18px; margin-top: 30px; padding-top: 20px; border-top: 1px solid var(--line); }
+    nav a { color: var(--brand-dark); font-weight: 700; text-decoration-thickness: 2px; text-underline-offset: 3px; }
+    .meta { color: var(--muted); font-size: .95rem; }
+    footer { margin-top: 28px; padding-top: 18px; border-top: 1px solid var(--line); color: var(--muted); }
+    @media (max-width: 640px) {
+      main { width: min(100% - 20px, 880px); margin: 10px auto; }
+      article { padding: 22px 18px; border-radius: 12px; }
+      .draft { padding: 16px; }
+      h2 { font-size: 1.25rem; }
+    }
   </style>
 </head>
 <body>
   <main>
     <article>
-      <section class="draft" aria-label="Aviso de rascunho">
-        <h1>RASCUNHO — PENDENTE DE APROVAÇÃO</h1>
-        <p><strong>DRAFT — PENDING APPROVAL</strong></p>
-        <p>Esta página reserva o endereço dos futuros Termos de Uso da IA4Tube. Ela ainda não contém termos jurídicos vigentes.</p>
-        <p>This page reserves the address for IA4Tube's future Terms of Use. It does not yet contain approved legal terms.</p>
+      <section class="draft" aria-label="Estado deste documento">
+        <h1>RASCUNHO TÉCNICO PÚBLICO — NÃO APROVADO JURIDICAMENTE</h1>
+        <p><strong>PUBLIC TECHNICAL DRAFT — NOT LEGALLY APPROVED</strong></p>
+        <p>Este documento organiza o escopo técnico que futuros Termos de Uso precisarão cobrir. Ele não cria contrato, garantia, licença, limitação de responsabilidade nem condição comercial vigente.</p>
+        <p>A identidade das partes e todas as decisões jurídicas continuam pendentes de aprovação do proprietário e revisão jurídica.</p>
       </section>
 
-      <h2>Termos de Uso / Terms of Use</h2>
-      <p>O conteúdo jurídico definitivo será inserido somente após revisão e aprovação expressas. Este rascunho não cria obrigações, garantias, licenças, limitações ou condições de uso.</p>
+      <header>
+        <h2>Termos de Uso — preparação técnica</h2>
+        <p class="meta">Revisão técnica: 30 de agosto de 2026. Data de vigência jurídica: não definida.</p>
+      </header>
 
-      <h2>Itens pendentes de definição e aprovação</h2>
+      <h2>1. Serviço abrangido por este rascunho</h2>
+      <p>A IA4Tube possui uma integração em staging para uma empresa autenticada conectar uma conta profissional Business ou Creator do Instagram, revisar uma imagem e legenda, solicitar uma publicação manual e consultar o resultado. A experiência para revisores e clientes externos ainda depende dos gates e aprovações indicados pelo projeto.</p>
+      <p>Este rascunho não declara como disponíveis publicação automática, calendário recorrente, vídeo, carrossel, Stories, múltiplas contas por empresa ou outras redes sociais.</p>
+
+      <h2>2. Conta, autorização e segurança</h2>
       <ul>
-        <li>Identificação das partes e aceitação dos termos.</li>
-        <li>Descrição do serviço e requisitos de uso.</li>
-        <li>Contas, segurança, responsabilidades e usos permitidos.</li>
-        <li>Conteúdo, propriedade intelectual e autorizações.</li>
-        <li>Planos, cobranças, cancelamentos e reembolsos, se aplicáveis.</li>
-        <li>Disponibilidade, suporte, suspensão e encerramento.</li>
-        <li>Limitações, legislação aplicável, alterações e vigência.</li>
+        <li>O acesso à integração é associado a uma empresa e a um usuário autenticado.</li>
+        <li>O usuário precisa controlar ou estar autorizado a administrar a conta profissional que pretende conectar.</li>
+        <li>A senha do Instagram é informada somente na superfície oficial do provedor e não deve ser fornecida à IA4Tube.</li>
+        <li>O usuário não deve compartilhar credenciais da IA4Tube nem tentar acessar dados de outra empresa.</li>
+        <li>A concessão de acesso pelo Instagram não ativa, por si só, publicação automática.</li>
       </ul>
 
+      <h2>3. Conteúdo e autorização de publicação</h2>
+      <p>O fluxo técnico exige uma ação de publicação vinculada a uma empresa, conta, mídia e legenda determinadas. O usuário deve ter autoridade sobre a conta e os direitos necessários sobre o material que escolher publicar.</p>
+      <p>As regras finais sobre titularidade, licenças de uso, conteúdo gerado, conteúdo proibido, denúncias e remoção ainda precisam ser aprovadas. Este rascunho não transfere propriedade intelectual.</p>
+
+      <h2>4. Estados e limites técnicos</h2>
+      <p>Uma arte pronta não é uma publicação. O sistema distingue preparação, envio, confirmação pelo provedor, publicação confirmada e falha. Uma indicação de sucesso depende de referência verificável retornada ou reconciliada com o provedor.</p>
+      <p>Meta/Instagram é um serviço de terceiro e pode recusar, limitar, atrasar ou remover conteúdo de acordo com suas próprias regras. Não há garantia de disponibilidade, prazo de publicação ou continuidade da API neste rascunho.</p>
+
+      <h2>5. Desconexão e dados</h2>
+      <p>Desconectar a conta deve impedir novas operações com aquela autorização. Desconexão não equivale automaticamente à exclusão de artes, legendas, publicações, auditoria ou outros dados. O escopo final de eliminação e de eventual preservação depende de uma política aprovada.</p>
+      <p>Consulte o <a href="/exclusao-de-dados">rascunho de Exclusão de Dados</a> e o <a href="/politica-de-privacidade">rascunho de Privacidade</a>.</p>
+
+      <h2>6. Decisões contratuais ainda abertas</h2>
+      <ul>
+        <li>Identidade jurídica, capacidade para contratar e forma de aceitação.</li>
+        <li>Elegibilidade por idade e territórios atendidos.</li>
+        <li>Planos, cobrança, cancelamento, reembolso e suporte.</li>
+        <li>Níveis de serviço, manutenção, suspensão e encerramento.</li>
+        <li>Responsabilidades, indenização, limitações, legislação e foro.</li>
+        <li>Procedimento de alteração dos termos e comunicação aos usuários.</li>
+      </ul>
+      <p>Nenhum desses itens deve ser preenchido por suposição técnica.</p>
+
+      <nav aria-label="Documentos legais relacionados">
+        <a href="/politica-de-privacidade">Privacidade</a>
+        <a href="/termos-de-uso" aria-current="page">Termos de Uso</a>
+        <a href="/exclusao-de-dados">Exclusão de Dados</a>
+      </nav>
+
       <footer>
-        Não publicar como termos vigentes nem usar em contratação ou App Review antes da aprovação.
-        / Do not use as effective terms, a contracting document, or an App Review document before approval.
+        <strong>Status:</strong> texto técnico público, rastreável e responsivo; conteúdo jurídico final ainda não aprovado.
       </footer>
     </article>
   </main>

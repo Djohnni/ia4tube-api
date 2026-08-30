@@ -30,6 +30,9 @@ const {
   createPostgresOAuthRepository
 } = require("../persistence/postgres/social-oauth-repository");
 const {
+  createPostgresMetaComplianceRepository
+} = require("../persistence/postgres/meta-compliance-repository");
+const {
   deriveSocialIdentity,
   parseIdentityConfig
 } = require("./identity");
@@ -68,6 +71,10 @@ const {
 const {
   createInstagramPublicationService
 } = require("./publication/instagram-publication-service");
+const {
+  createMetaComplianceService,
+  createMetaSignedRequestVerifier
+} = require("./compliance");
 
 function createDisabledRuntime() {
   return Object.freeze({
@@ -108,6 +115,8 @@ async function createSocialRuntime(options = {}) {
   let pool;
   let vault;
   let instagramStateEnvelope;
+  let metaComplianceRepository;
+  let metaSignedRequestVerifier;
   try {
     identityConfig = parseIdentityConfig(env);
     vaultKeyring = parseVaultKeyring(env);
@@ -163,7 +172,29 @@ async function createSocialRuntime(options = {}) {
     const authAdapter = createSocialAuthAdapter(identityConfig);
     let instagramOAuth = null;
     let instagramPublication = null;
+    let metaCompliance = null;
     if (instagramConfig.enabled) {
+      metaComplianceRepository = createPostgresMetaComplianceRepository({
+        pool,
+        runtimeRole: config.role,
+        appSecret: instagramConfig.appSecret,
+        randomUUID: options.randomUUID
+      });
+      if (typeof instagramConfig.publicOrigin === "string") {
+        metaSignedRequestVerifier = createMetaSignedRequestVerifier({
+          appSecret: instagramConfig.appSecret,
+          clock: options.clock || Date.now
+        });
+        metaCompliance = createMetaComplianceService({
+          signedRequestVerifier: metaSignedRequestVerifier,
+          repository: metaComplianceRepository,
+          publicStatusBaseUrl:
+            `${instagramConfig.publicOrigin}/v1/social/compliance/meta/` +
+            "data-deletion/status",
+          clock: options.clock || Date.now,
+          randomBytes: options.randomBytes
+        });
+      }
       instagramStateEnvelope = createInstagramOAuthStateEnvelope({
         derivationKey: identityConfig.key,
         keyVersion: identityConfig.derivationVersion,
@@ -188,6 +219,7 @@ async function createSocialRuntime(options = {}) {
         connectorStore,
         credentials,
         authAdapter,
+        metaComplianceRepository,
         clock: options.clock || Date.now,
         randomUUID: options.randomUUID,
         environment: env.NODE_ENV === "test"
@@ -253,6 +285,7 @@ async function createSocialRuntime(options = {}) {
       credentials,
       instagramOAuth,
       instagramPublication,
+      metaCompliance,
       reauth,
       auth: Object.freeze({
         fromVerifiedJwt(claims) {
@@ -274,6 +307,8 @@ async function createSocialRuntime(options = {}) {
         if (closed) return;
         closed = true;
         if (instagramStateEnvelope) instagramStateEnvelope.destroy();
+        if (metaSignedRequestVerifier) metaSignedRequestVerifier.destroy();
+        if (metaComplianceRepository) metaComplianceRepository.destroy();
         vault.destroy();
         identityConfig.key.fill(0);
         await closePostgresPool(pool);
@@ -281,6 +316,8 @@ async function createSocialRuntime(options = {}) {
     });
   } catch (error) {
     if (instagramStateEnvelope) instagramStateEnvelope.destroy();
+    if (metaSignedRequestVerifier) metaSignedRequestVerifier.destroy();
+    if (metaComplianceRepository) metaComplianceRepository.destroy();
     if (vault) vault.destroy();
     if (vaultKeyring) {
       for (const key of vaultKeyring.keys.values()) key.fill(0);

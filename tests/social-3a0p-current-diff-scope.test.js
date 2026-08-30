@@ -93,6 +93,28 @@ const GIT_ENV = Object.freeze({
   GCM_INTERACTIVE: "Never"
 });
 
+function currentBranchName(spawnImpl = spawnSync) {
+  const result = spawnImpl(
+    "git",
+    ["symbolic-ref", "--quiet", "--short", "HEAD"],
+    {
+      cwd: ROOT,
+      encoding: "utf8",
+      env: GIT_ENV,
+      maxBuffer: 4096,
+      shell: false,
+      timeout: GIT_TIMEOUT_MS,
+      windowsHide: true
+    }
+  );
+  if (result?.error || result?.signal !== null || result?.status !== 0) return "";
+  return String(result.stdout || "").trim();
+}
+
+const RUN_LIVE_ROUTE_ASSERTIONS =
+  process.env.IA4TUBE_RUN_LEGACY_CURRENT_DIFF_SCOPE === "1" ||
+  currentBranchName() === ROUTE_BRANCH;
+
 class ScopeInventoryFailure extends Error {
   constructor(code, operation, cause) {
     super(operation ? code + " (" + operation + ")" : code);
@@ -924,7 +946,15 @@ function runMandatoryContractProofs() {
 
 const sharedSnapshotCache = createSnapshotCache(() => buildGitSnapshot());
 
-test("a barreira do runner exato 0004 contem exatamente os vinte caminhos autorizados", () => {
+test("o contrato deterministico da barreira exata 0004 permanece verificavel", () => {
+  assert.equal(runMandatoryContractProofs(), 17);
+});
+
+test("a barreira do runner exato 0004 contem exatamente os vinte caminhos autorizados", {
+  skip: RUN_LIVE_ROUTE_ASSERTIONS
+    ? false
+    : "prova de inventario aplicavel somente a branch historica exata 0004"
+}, () => {
   const result = assertRouteInventory(sharedSnapshotCache.read());
   assert.equal(
     ROUTE_BRANCH,
@@ -952,10 +982,13 @@ test("a barreira do runner exato 0004 contem exatamente os vinte caminhos autori
     true
   );
   assert.equal(sharedSnapshotCache.attemptCount, 1);
-  assert.equal(runMandatoryContractProofs(), 17);
 });
 
-test("nenhum arquivo de produto difere do pai imediato da rota", () => {
+test("nenhum arquivo de produto difere do pai imediato da rota", {
+  skip: RUN_LIVE_ROUTE_ASSERTIONS
+    ? false
+    : "prova de inventario aplicavel somente a branch historica exata 0004"
+}, () => {
   const productFiles = assertNoProtectedProductChanges(
     sharedSnapshotCache.read()
   );

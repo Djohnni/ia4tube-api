@@ -19,6 +19,7 @@ function disabledServerRuntime() {
     enabled: false,
     instagramOAuth: null,
     instagramPublication: null,
+    metaCompliance: null,
     async close() {}
   });
 }
@@ -95,12 +96,27 @@ async function initializeSocialServerRuntime(options = {}) {
       "Runtime social nao inicializado."
     );
   }
+  if (
+    runtime.metaCompliance !== null &&
+    runtime.metaCompliance !== undefined &&
+    (
+      typeof runtime.metaCompliance.handleDeauthorization !== "function" ||
+      typeof runtime.metaCompliance.handleDataDeletion !== "function" ||
+      typeof runtime.metaCompliance.getStatus !== "function"
+    )
+  ) {
+    postgresFail(
+      "social_server_runtime_initialization_failed",
+      "Runtime social nao inicializado."
+    );
+  }
 
   let closed = false;
   return Object.freeze({
     enabled: true,
     instagramOAuth: runtime.instagramOAuth || null,
     instagramPublication: runtime.instagramPublication || null,
+    metaCompliance: runtime.metaCompliance || null,
     async close() {
       if (closed) return;
       closed = true;

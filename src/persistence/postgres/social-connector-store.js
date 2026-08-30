@@ -199,11 +199,48 @@ function scopeNames(value, optional = false) {
 
 function activationOptions(value) {
   if (value === undefined) {
-    return Object.freeze({ grantedScopes: null });
+    return Object.freeze({ grantedScopes: null, subjectMapping: null });
   }
-  const source = strictObject(value, ["grantedScopes"]);
+  const source = strictObject(value, ["grantedScopes", "subjectMapping"]);
+  let subjectMapping = null;
+  if (source.subjectMapping !== undefined) {
+    const mapping = strictObject(source.subjectMapping, [
+      "provider",
+      "subjectDigest",
+      "digestVersion"
+    ]);
+    if (
+      mapping.provider !== "instagram" ||
+      mapping.digestVersion !== "hmac-sha256-app-secret-v1"
+    ) {
+      connectorFail("connector_contract_invalid");
+    }
+    subjectMapping = Object.freeze({
+      provider: mapping.provider,
+      subjectDigest: digest(mapping.subjectDigest),
+      digestVersion: mapping.digestVersion
+    });
+  }
   return Object.freeze({
-    grantedScopes: scopeNames(source.grantedScopes, true)
+    grantedScopes: scopeNames(source.grantedScopes, true),
+    subjectMapping
+  });
+}
+
+function legacyComplianceMappingInput(value) {
+  const source = strictObject(value, [
+    "connectionId",
+    "externalUserId",
+    "subjectMapping"
+  ]);
+  const subjectMapping = activationOptions({
+    subjectMapping: source.subjectMapping
+  }).subjectMapping;
+  if (!subjectMapping) connectorFail("connector_contract_invalid");
+  return Object.freeze({
+    connectionId: uuid(source.connectionId),
+    externalUserId: safeText(source.externalUserId, { max: 500 }),
+    subjectMapping
   });
 }
 
@@ -1021,6 +1058,79 @@ function createPostgresConnectorStore(options = {}) {
           ));
         },
 
+        async ensureLegacyComplianceSubjectMapping(value) {
+          const clean = legacyComplianceMappingInput(value);
+          if (clean.subjectMapping.provider !== context.provider) {
+            connectorFail("connector_contract_invalid");
+          }
+          return execute(async (client) => {
+            await client.query(
+              "SELECT pg_advisory_xact_lock(hashtextextended($1::text, 0))",
+              [`${context.companyId}:${context.provider}`]
+            );
+            const candidate = await client.query(
+              [
+                "SELECT connection.created_by_user_id,account.external_id",
+                "FROM ia4tube_social.social_connections connection",
+                "JOIN ia4tube_social.social_external_accounts account",
+                "  ON account.company_id=connection.company_id",
+                " AND account.connection_id=connection.id",
+                " AND account.provider=connection.provider",
+                "WHERE connection.company_id=$1 AND connection.id=$2",
+                " AND connection.provider=$3",
+                " AND connection.status IN ('active','connected')",
+                " AND account.status='active'",
+                "ORDER BY account.updated_at DESC,account.id",
+                "LIMIT 1 FOR UPDATE OF connection,account"
+              ].join("\n"),
+              [context.companyId, clean.connectionId, context.provider]
+            );
+            const row = candidate.rows?.[0];
+            if (
+              candidate.rows?.length !== 1 ||
+              row.external_id !== clean.externalUserId
+            ) {
+              connectorFail("resource_unavailable");
+            }
+            const existing = await client.query(
+              [
+                "SELECT subject_digest",
+                "FROM ia4tube_social.social_meta_subject_mappings",
+                "WHERE company_id=$1 AND connection_id=$2 AND provider=$3",
+                " AND status='active'",
+                "FOR UPDATE"
+              ].join("\n"),
+              [context.companyId, clean.connectionId, context.provider]
+            );
+            if (existing.rows?.length === 1) {
+              return Object.freeze({ created: false });
+            }
+            if (existing.rows?.length) connectorFail("resource_unavailable");
+            const inserted = await client.query(
+              [
+                "INSERT INTO ia4tube_social.social_meta_subject_mappings (",
+                " company_id,provider,subject_digest,digest_version,",
+                " user_id,connection_id,status",
+                ") VALUES ($1,$2,$3,$4,$5,$6,'active')",
+                "ON CONFLICT DO NOTHING",
+                "RETURNING subject_digest"
+              ].join("\n"),
+              [
+                context.companyId,
+                context.provider,
+                clean.subjectMapping.subjectDigest,
+                clean.subjectMapping.digestVersion,
+                uuid(row.created_by_user_id),
+                clean.connectionId
+              ]
+            );
+            if (inserted.rowCount !== 1) {
+              connectorFail("idempotency_conflict");
+            }
+            return Object.freeze({ created: true });
+          });
+        },
+
         async disconnectConnectionLocally(id) {
           const connectionId = uuid(id);
           return execute(async (client) => {
@@ -1353,6 +1463,49 @@ function createPostgresConnectorStore(options = {}) {
             );
             const credentialRow = storedCredential.rows?.[0];
             if (!credentialRow) connectorFail("idempotency_conflict");
+            if (activation.subjectMapping) {
+              if (activation.subjectMapping.provider !== context.provider) {
+                connectorFail("connector_contract_invalid");
+              }
+              await client.query(
+                [
+                  "UPDATE ia4tube_social.social_meta_subject_mappings",
+                  "SET status='revoked',revoked_at=CURRENT_TIMESTAMP,",
+                  " updated_at=CURRENT_TIMESTAMP,revision=revision+1",
+                  "WHERE company_id=$1 AND connection_id=$2 AND provider=$3",
+                  " AND status='active' AND subject_digest<>$4"
+                ].join("\n"),
+                [
+                  context.companyId,
+                  clean.id,
+                  context.provider,
+                  activation.subjectMapping.subjectDigest
+                ]
+              );
+              const mapped = await client.query(
+                [
+                  "INSERT INTO ia4tube_social.social_meta_subject_mappings (",
+                  " company_id,provider,subject_digest,digest_version,",
+                  " user_id,connection_id,status",
+                  ") VALUES ($1,$2,$3,$4,$5,$6,'active')",
+                  "ON CONFLICT (company_id,provider,subject_digest)",
+                  "DO UPDATE SET user_id=EXCLUDED.user_id,",
+                  " connection_id=EXCLUDED.connection_id,status='active',",
+                  " revoked_at=NULL,updated_at=CURRENT_TIMESTAMP,",
+                  " revision=social_meta_subject_mappings.revision+1",
+                  "RETURNING subject_digest"
+                ].join("\n"),
+                [
+                  context.companyId,
+                  context.provider,
+                  activation.subjectMapping.subjectDigest,
+                  activation.subjectMapping.digestVersion,
+                  context.userId,
+                  clean.id
+                ]
+              );
+              if (mapped.rowCount !== 1) connectorFail("idempotency_conflict");
+            }
             await replaceGrantedScopes(
               client,
               context,

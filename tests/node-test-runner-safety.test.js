@@ -83,10 +83,16 @@ const LIFECYCLE_EVIDENCE_PARENT_FILTERED_OID =
 const ROLLBACK_CATALOG_PARENT_COMMIT =
   "5a109bc775ac9e35bdcdaabec16d329509d9125f";
 const REAL_POSTGRES_TEST = "tests/social-postgres-real.test.js";
-const REAL_POSTGRES_TEST_LF_SHA256 =
+const PRE_REFERENCE_CHECK_FIX_COMMIT =
+  "23b57fa846e3c2fea3cd0aed108c8f50f27f5c29";
+const PRE_REFERENCE_CHECK_FIX_LF_SHA256 =
   "10d8eb4081b858a51fd4d785a467a531a9c40024f943c80a6f89e87c3228bc1b";
-const REAL_POSTGRES_TEST_FILTERED_OID =
+const PRE_REFERENCE_CHECK_FIX_FILTERED_OID =
   "3fcf05a3ef9f612a1ba2dd897cf874f37807b631";
+const REAL_POSTGRES_TEST_LF_SHA256 =
+  "41a19914e3aa038467315885d2109f2dffe4f80af9940aad307f1afc7e671b98";
+const REAL_POSTGRES_TEST_FILTERED_OID =
+  "ec73a3d1e30521f7daeaa785a08a12f93210daff";
 const PHYSICAL_MAIN_PHASES = Object.freeze([
   "physical_target_preflight",
   "role_provisioning",
@@ -183,6 +189,41 @@ function replaceExactlyOnce(source, current, previous, label) {
   assert.notEqual(first, -1, label);
   assert.equal(source.indexOf(current, first + current.length), -1, label);
   return `${source.slice(0, first)}${previous}${source.slice(first + current.length)}`;
+}
+
+function contentFingerprint(content, label) {
+  const isBuffer = Buffer.isBuffer(content);
+  if (!isBuffer && typeof content !== "string") {
+    throw new TypeError(`${label}: content must be a string or Buffer`);
+  }
+  const hash = crypto.createHash("sha256");
+  if (isBuffer) hash.update(content);
+  else hash.update(content, "utf8");
+  return Object.freeze({
+    byteLength: isBuffer
+      ? content.byteLength
+      : Buffer.byteLength(content, "utf8"),
+    sha256: hash.digest("hex")
+  });
+}
+
+function assertBoundedContentEqual(actual, expected, label) {
+  const actualFingerprint = contentFingerprint(actual, `${label}: actual`);
+  const expectedFingerprint = contentFingerprint(expected, `${label}: expected`);
+  assert.equal(
+    actualFingerprint.byteLength,
+    expectedFingerprint.byteLength,
+    `${label}: byte length`
+  );
+  assert.equal(
+    actualFingerprint.sha256,
+    expectedFingerprint.sha256,
+    `${label}: sha256`
+  );
+}
+
+function readUtf8Lf(filePath, fsImpl = fs) {
+  return fsImpl.readFileSync(filePath, "utf8").replaceAll("\r\n", "\n");
 }
 
 function closedSourceSection(source, startMarker, endMarker) {
@@ -465,6 +506,59 @@ test("23. partitioning preserves the exact total automated-test count", () => {
   assert.equal(calls.flatMap(testFileArguments).length, discovered.length);
 });
 
+test("F1 allocation guard bounds diagnostics for the original mismatch shape", () => {
+  const candidate = Buffer.alloc(163_269, 0x61);
+  const historical = Buffer.alloc(150_850, 0x61);
+  historical[1_107] = 0x62;
+  assert.throws(
+    () => assertBoundedContentEqual(
+      candidate,
+      historical,
+      "synthetic original mismatch"
+    ),
+    (error) => {
+      assert.equal(error?.code, "ERR_ASSERTION");
+      assert.equal(typeof error?.actual, "number");
+      assert.equal(typeof error?.expected, "number");
+      assert.equal(String(error?.message).length < 512, true);
+      return true;
+    }
+  );
+});
+
+test("F1 allocation guard covers the final byte of equal-length input", () => {
+  const actual = Buffer.alloc(163_269, 0x61);
+  const expected = Buffer.from(actual);
+  expected[expected.length - 1] = 0x62;
+  assert.throws(
+    () => assertBoundedContentEqual(actual, expected, "synthetic late mismatch"),
+    (error) => {
+      assert.equal(error?.code, "ERR_ASSERTION");
+      assert.equal(typeof error?.actual, "string");
+      assert.equal(error.actual.length, 64);
+      assert.equal(typeof error?.expected, "string");
+      assert.equal(error.expected.length, 64);
+      assert.equal(String(error?.message).length < 512, true);
+      return true;
+    }
+  );
+});
+
+test("F1 source reader fails closed when the input read fails", () => {
+  const readError = Object.assign(new Error("synthetic_read_failure"), {
+    code: "EACCES"
+  });
+  const failingFs = {
+    readFileSync() {
+      throw readError;
+    }
+  };
+  assert.throws(
+    () => readUtf8Lf("synthetic-unreadable-source", failingFs),
+    (error) => error === readError
+  );
+});
+
 test("24. exact 0004 production ledger reads use the migrator role only", () => {
   const migrationsPath = path.join(
     REPOSITORY_ROOT,
@@ -484,12 +578,9 @@ test("24. exact 0004 production ledger reads use the migrator role only", () => 
     "migrations",
     "0004_social_connector_persistence.up.sql"
   );
-  const migrationsSource = fs.readFileSync(migrationsPath, "utf8")
-    .replaceAll("\r\n", "\n");
-  const rawRealTest = fs.readFileSync(realTestPath, "utf8");
-  const realTestSource = rawRealTest.replaceAll("\r\n", "\n");
-  const exactMigrationSource = fs.readFileSync(exactMigrationPath, "utf8")
-    .replaceAll("\r\n", "\n");
+  const migrationsSource = readUtf8Lf(migrationsPath);
+  const realTestSource = readUtf8Lf(realTestPath);
+  const exactMigrationSource = readUtf8Lf(exactMigrationPath);
   assert.equal(migrationsSource.includes("\r"), false);
   assert.equal(realTestSource.includes("\r"), false);
   assert.equal(exactMigrationSource.includes("\r"), false);
@@ -524,6 +615,16 @@ test("24. exact 0004 production ledger reads use the migrator role only", () => 
       filteredOid
     );
   };
+  const preReferenceCheckFix = readRealTestBlob(
+    PRE_REFERENCE_CHECK_FIX_COMMIT
+  );
+  assertRealTestBlob(
+    preReferenceCheckFix,
+    PRE_REFERENCE_CHECK_FIX_LF_SHA256,
+    PRE_REFERENCE_CHECK_FIX_FILTERED_OID
+  );
+  const preReferenceCheckFixSource = preReferenceCheckFix.toString("utf8");
+  assert.equal(preReferenceCheckFixSource.includes("\r"), false);
   const currentFileLoadMarkerBlock = [
     "{",
     "  const marker = process.env.SOCIAL_TEST_FILE_LOAD_MARKER;",
@@ -550,7 +651,7 @@ test("24. exact 0004 production ledger reads use the migrator role only", () => 
   const preRoutePlanCompletion =
     '  physicalPhases.completeExact0004Subphase("plan_exact");';
   let preRouteBaseCandidate = replaceExactlyOnce(
-    realTestSource,
+    preReferenceCheckFixSource,
     currentFileLoadMarkerBlock,
     preRouteFileLoadMarkerBlock,
     "current route evidence schema"
@@ -567,9 +668,10 @@ test("24. exact 0004 production ledger reads use the migrator role only", () => 
     PRE_ROUTE_BASE_LF_SHA256,
     PRE_ROUTE_BASE_FILTERED_OID
   );
-  assert.deepEqual(
-    Buffer.from(preRouteBaseCandidate, "utf8"),
-    preRouteBase
+  assertBoundedContentEqual(
+    preRouteBaseCandidate,
+    preRouteBase,
+    "pre-route base reconstruction"
   );
   const lifecycleEvidenceParentCandidate = replaceExactlyOnce(
     preRouteBaseCandidate,
@@ -585,9 +687,10 @@ test("24. exact 0004 production ledger reads use the migrator role only", () => 
     LIFECYCLE_EVIDENCE_PARENT_LF_SHA256,
     LIFECYCLE_EVIDENCE_PARENT_FILTERED_OID
   );
-  assert.deepEqual(
-    Buffer.from(lifecycleEvidenceParentCandidate, "utf8"),
-    lifecycleEvidenceParent
+  assertBoundedContentEqual(
+    lifecycleEvidenceParentCandidate,
+    lifecycleEvidenceParent,
+    "lifecycle evidence parent reconstruction"
   );
 
   const transactionRollbackHelper = closedSourceSection(
@@ -1141,9 +1244,10 @@ test("24. exact 0004 production ledger reads use the migrator role only", () => 
       .digest("hex"),
     EXTERNAL_ACCOUNT_ROLLBACK_CATALOG_PARENT_FILTERED_OID
   );
-  assert.deepEqual(
-    Buffer.from(externalAccountRollbackCatalogParentCandidate, "utf8"),
-    externalAccountRollbackCatalogParent
+  assertBoundedContentEqual(
+    externalAccountRollbackCatalogParentCandidate,
+    externalAccountRollbackCatalogParent,
+    "external-account rollback catalog parent reconstruction"
   );
   const rollbackCatalogParentCandidate = replaceExactlyOnce(
     externalAccountRollbackCatalogParentCandidate,
@@ -1172,16 +1276,23 @@ test("24. exact 0004 production ledger reads use the migrator role only", () => 
       }
     }
   );
-  assert.deepEqual(
-    Buffer.from(rollbackCatalogParentCandidate, "utf8"),
-    rollbackCatalogParent
+  assertBoundedContentEqual(
+    rollbackCatalogParentCandidate,
+    rollbackCatalogParent,
+    "rollback catalog parent reconstruction"
   );
-  const productionSnapshotSource = `${snapshotSource}${exactRouteSource}`;
+  const referenceCheckFixSource = closedSourceSection(
+    realTestSource,
+    "async function proveReferenceCheckFix0005(pool, configuration, fixture) {",
+    "async function proveMigrationConcurrency("
+  );
+  const productionSnapshotSource =
+    `${snapshotSource}${exactRouteSource}${referenceCheckFixSource}`;
   assert.equal(
     (productionSnapshotSource.match(
       /ia4tube_migrations\.schema_migrations/g
     ) || []).length,
-    4
+    5
   );
   assert.equal(
     snapshotSource.startsWith(
@@ -1212,6 +1323,25 @@ test("24. exact 0004 production ledger reads use the migrator role only", () => 
   assert.equal(
     (exactRouteSource.match(/\{ role: MIGRATOR_ROLE \}/g) || []).length,
     3
+  );
+  assert.equal(
+    (referenceCheckFixSource.match(
+      /ia4tube_migrations\.schema_migrations/g
+    ) || []).length,
+    1
+  );
+  assert.equal(
+    (referenceCheckFixSource.match(/\{ role: MIGRATOR_ROLE \}/g) || []).length,
+    1
+  );
+  assert.equal(
+    (referenceCheckFixSource.match(/\{ role: RUNTIME_ROLE/g) || []).length,
+    0
+  );
+  assert.equal(referenceCheckFixSource.includes("await pool.query("), false);
+  assert.equal(
+    referenceCheckFixSource.includes("const ledger = await withTransaction("),
+    true
   );
   assert.equal(
     (exactRouteSource.match(/\brunnerA\.planExact\(/g) || []).length,
@@ -1684,9 +1814,10 @@ test("24. exact 0004 production ledger reads use the migrator role only", () => 
       }
     }
   );
-  assert.deepEqual(
-    Buffer.from(permissionBoundaryHistoricalCandidate, "utf8"),
-    permissionBoundaryHistorical
+  assertBoundedContentEqual(
+    permissionBoundaryHistoricalCandidate,
+    permissionBoundaryHistorical,
+    "permission boundary historical reconstruction"
   );
 
   const exportBlock = /module\.exports\s*=\s*\{([^{}]*)\};/.exec(
@@ -1795,7 +1926,11 @@ test("24. exact 0004 production ledger reads use the migrator role only", () => 
       }
     }
   );
-  assert.deepEqual(Buffer.from(baselineCandidate, "utf8"), historical);
+  assertBoundedContentEqual(
+    baselineCandidate,
+    historical,
+    "safe evidence historical reconstruction"
+  );
   const canonical = Buffer.from(realTestSource, "utf8");
   assert.equal(
     crypto.createHash("sha256").update(canonical).digest("hex"),
@@ -2004,7 +2139,11 @@ test("26. exact 0004 ledger OID boundary rejects incomplete or textual contracts
       "direct negative removed",
       replace("        await pool.query(ledgerRead);", "        await Promise.resolve();")
     ],
-    ["positive role removed", replace("    { role: MIGRATOR_ROLE }", "    {}")]
+    ["positive role removed", replace("    { role: MIGRATOR_ROLE }", "    {}")],
+    [
+      "runtime role substituted",
+      replace("    { role: MIGRATOR_ROLE }", "    { role: RUNTIME_ROLE }")
+    ]
   ];
   for (const [label, mutated] of mutations) {
     assert.throws(

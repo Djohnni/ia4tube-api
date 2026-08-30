@@ -6,10 +6,17 @@ const path = require("path");
 
 const {
   LEGAL_PAGE_DEFINITIONS,
+  REQUIRED_DRAFT_MARKERS,
   createLegalPageHandlers,
   createLegalPagesRouter,
   loadLegalTemplates
 } = require("../src/legal/legal-pages.routes");
+
+const CANONICAL_LEGAL_ROUTES = Object.freeze([
+  "/politica-de-privacidade",
+  "/termos-de-uso",
+  "/exclusao-de-dados"
+]);
 
 function createFakeRouter() {
   const routes = new Map();
@@ -51,26 +58,41 @@ function invoke(handler) {
   return response;
 }
 
-function assertDraftPage(response) {
+function assertPublicTechnicalDraftPage(response) {
   assert.equal(response.statusCode, 200);
   assert.equal(response.contentType, "html");
-  assert.equal(response.headers.get("cache-control"), "no-store");
+  assert.equal(response.headers.get("cache-control"), "public, max-age=300");
   assert.equal(response.headers.get("content-language"), "pt-BR, en");
   assert.equal(response.headers.get("referrer-policy"), "no-referrer");
   assert.equal(response.headers.get("x-content-type-options"), "nosniff");
-  assert.equal(
-    response.headers.get("x-robots-tag"),
-    "noindex, nofollow, noarchive"
-  );
+  assert.equal(response.headers.get("x-robots-tag"), "index, follow");
+  assert.doesNotMatch(response.headers.get("x-robots-tag"), /noindex|nofollow/i);
   assert.match(response.headers.get("content-security-policy"), /default-src 'none'/);
+  assert.match(response.headers.get("content-security-policy"), /style-src 'unsafe-inline'/);
   assert.match(response.headers.get("content-security-policy"), /form-action 'none'/);
-  assert.match(response.body, /RASCUNHO/);
-  assert.match(response.body, /PENDENTE DE APROVAÇÃO/);
-  assert.match(response.body, /DRAFT/);
-  assert.match(response.body, /PENDING APPROVAL/);
+
+  for (const marker of REQUIRED_DRAFT_MARKERS) {
+    assert.equal(response.body.includes(marker), true, `Marcador ausente: ${marker}`);
+  }
+
+  assert.match(response.body, /<meta name="robots" content="index, follow">/i);
+  assert.match(response.body, /<meta name="viewport"/i);
+  assert.match(response.body, /@media\s*\(max-width:\s*640px\)/i);
+  assert.match(response.body, /ainda não aprovad[oa]s?/i);
   assert.doesNotMatch(response.body, /<script\b/i);
   assert.doesNotMatch(response.body, /<form\b/i);
   assert.doesNotMatch(response.body, /https?:\/\//i);
+  assert.doesNotMatch(response.body, /facebook\.com/i);
+  assert.doesNotMatch(response.body, /reserva o endereço/i);
+  assert.doesNotMatch(response.body, /DRAFT\s*—\s*PENDING APPROVAL/i);
+
+  for (const route of CANONICAL_LEGAL_ROUTES) {
+    assert.match(
+      response.body,
+      new RegExp(`href=["']${route}["']`, "i"),
+      `Link legal ausente: ${route}`
+    );
+  }
 }
 
 function main() {
@@ -116,7 +138,7 @@ function main() {
       allAliases.push(alias);
       assert.equal(fakeRouter.routes.has(alias), true);
       const response = invoke(fakeRouter.routes.get(alias));
-      assertDraftPage(response);
+      assertPublicTechnicalDraftPage(response);
       assert.equal(response.body, canonicalBody);
     }
   }
@@ -134,18 +156,18 @@ function main() {
 
   for (const templateFile of templateFiles) {
     const html = fs.readFileSync(path.join(templatesDir, templateFile), "utf8");
-    assertDraftPage({
+    assertPublicTechnicalDraftPage({
       statusCode: 200,
       contentType: "html",
       headers: new Map([
-        ["cache-control", "no-store"],
+        ["cache-control", "public, max-age=300"],
         ["content-language", "pt-BR, en"],
         ["referrer-policy", "no-referrer"],
         ["x-content-type-options", "nosniff"],
-        ["x-robots-tag", "noindex, nofollow, noarchive"],
+        ["x-robots-tag", "index, follow"],
         [
           "content-security-policy",
-          "default-src 'none'; form-action 'none'"
+          "default-src 'none'; style-src 'unsafe-inline'; form-action 'none'"
         ]
       ]),
       body: html
@@ -163,7 +185,9 @@ function main() {
     /Router legal invalido/
   );
 
-  process.stdout.write("legal pages unit tests: OK (12 aliases, 3 drafts)\n");
+  process.stdout.write(
+    "legal pages unit tests: OK (12 aliases, 3 public technical drafts)\n"
+  );
 }
 
 main();

@@ -154,8 +154,10 @@ test("server runtime exposes only the closed Instagram OAuth facade", async () =
     "close",
     "enabled",
     "instagramOAuth",
-    "instagramPublication"
+    "instagramPublication",
+    "metaCompliance"
   ]);
+  assert.equal(state.metaCompliance, null);
   await state.close();
 });
 

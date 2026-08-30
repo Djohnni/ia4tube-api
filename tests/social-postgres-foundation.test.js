@@ -50,6 +50,107 @@ const credentialKeyVersion = deriveVaultKeyVersion(
   1,
   Buffer.alloc(32, 9)
 );
+const COMPLIANCE_TABLES = new Set([
+  "social_meta_subject_mappings",
+  "social_compliance_requests"
+]);
+
+function runtimeRoutineRows(extra = false) {
+  const rows = [
+    {
+      proname: "resolve_compliance_status",
+      identity_arguments: "requested_confirmation_digest text",
+      function_result: "TABLE(status text)",
+      owner_name: "ia4tube_social_owner",
+      prosecdef: true,
+      provolatile: "s",
+      prokind: "f",
+      proconfig: ["search_path=pg_catalog"],
+      prosrc:
+        "SELECT request.status FROM ia4tube_social.social_compliance_requests request"
+    },
+    {
+      proname: "resolve_meta_subject_mapping",
+      identity_arguments:
+        "requested_provider text, requested_subject_digest text",
+      function_result:
+        "TABLE(company_id uuid, user_id uuid, connection_id uuid)",
+      owner_name: "ia4tube_social_owner",
+      prosecdef: true,
+      provolatile: "s",
+      prokind: "f",
+      proconfig: ["search_path=pg_catalog"],
+      prosrc:
+        "SELECT mapping.company_id FROM ia4tube_social.social_meta_subject_mappings mapping"
+    }
+  ];
+  if (extra) {
+    rows.push({
+      ...rows[0],
+      proname: "unexpected_runtime_routine",
+      identity_arguments: ""
+    });
+  }
+  return rows;
+}
+
+function runtimeRoutineAclRows() {
+  return runtimeRoutineRows().map((routine) => ({
+    proname: routine.proname,
+    identity_arguments: routine.identity_arguments,
+    grantee: "ia4tube_social_runtime",
+    privilege_type: "EXECUTE",
+    is_grantable: false,
+    grantor_name: "ia4tube_social_owner"
+  }));
+}
+
+function runtimeRlsTableRows() {
+  return TENANT_TABLES.map((relname) => ({
+    relname,
+    relrowsecurity: true,
+    relforcerowsecurity: true,
+    policy_count: COMPLIANCE_TABLES.has(relname) ? 2 : 1
+  }));
+}
+
+function runtimePolicyRows(options = {}) {
+  return TENANT_TABLES.flatMap((tablename) => {
+    const expression =
+      `(${TENANT_SCOPE_COLUMNS[tablename]} = ` +
+      "NULLIF(current_setting('ia4tube.company_id'::text, true), " +
+      "''::text)::uuid)";
+    const qualifier =
+      options.tamperedPolicy && tablename === "social_connections"
+        ? `(TRUE OR ${expression})`
+        : expression;
+    const companyPolicy = {
+      tablename,
+      policyname: TENANT_POLICIES[tablename],
+      permissive: "PERMISSIVE",
+      roles:
+        options.wrongRole && tablename === "social_connections"
+          ? ["ia4tube_social_runtime"]
+          : ["public"],
+      cmd: "ALL",
+      qual: qualifier,
+      with_check: qualifier
+    };
+    if (!COMPLIANCE_TABLES.has(tablename)) return [companyPolicy];
+    return [
+      companyPolicy,
+      {
+        tablename,
+        policyname: `${tablename}_owner_resolver`,
+        permissive: "PERMISSIVE",
+        roles: ["ia4tube_social_owner"],
+        cmd: "SELECT",
+        qual: "true",
+        with_check: null
+      }
+    ];
+  });
+}
 
 function runtimeTableAclRows() {
   return Object.entries(RUNTIME_TABLE_GRANTS).flatMap(
@@ -577,8 +678,17 @@ test("runtime schema validation requires checksums, FORCE RLS and least privileg
     if (text.includes("relation.relkind AS object_kind")) {
       return { rows: socialRelationRows() };
     }
-    if (text.includes("FROM pg_catalog.pg_proc routine")) {
-      return { rows: [{ routine_count: 0 }] };
+    if (
+      text.includes("FROM pg_catalog.pg_proc routine") &&
+      text.includes("pg_get_function_result")
+    ) {
+      return { rows: runtimeRoutineRows() };
+    }
+    if (
+      text.includes("FROM pg_catalog.pg_proc routine") &&
+      text.includes("expanded_acl")
+    ) {
+      return { rows: runtimeRoutineAclRows() };
     }
     if (text.includes("FROM ia4tube_social.runtime_schema_contract")) {
       return {
@@ -590,25 +700,12 @@ test("runtime schema validation requires checksums, FORCE RLS and least privileg
     }
     if (text.includes("FROM pg_catalog.pg_class c")) {
       return {
-        rows: TENANT_TABLES.map((relname) => ({
-          relname,
-          relrowsecurity: true,
-          relforcerowsecurity: true,
-          policy_count: 1
-        }))
+        rows: runtimeRlsTableRows()
       };
     }
     if (text.includes("FROM pg_catalog.pg_policies")) {
       return {
-        rows: TENANT_TABLES.map((tablename) => ({
-          tablename,
-          policyname: TENANT_POLICIES[tablename],
-          permissive: "PERMISSIVE",
-          roles: ["public"],
-          cmd: "ALL",
-          qual: `(${TENANT_SCOPE_COLUMNS[tablename]} = NULLIF(current_setting('ia4tube.company_id'::text, true), ''::text)::uuid)`,
-          with_check: `(${TENANT_SCOPE_COLUMNS[tablename]} = NULLIF(current_setting('ia4tube.company_id'::text, true), ''::text)::uuid)`
-        }))
+        rows: runtimePolicyRows()
       };
     }
     if (text.includes("namespace.nspacl")) {
@@ -627,6 +724,7 @@ test("runtime schema validation requires checksums, FORCE RLS and least privileg
             contract_select: true,
             audit_update: false,
             audit_delete: false,
+            credentials_delete: true,
             identity_write: false,
             legacy_access: false
           }
@@ -655,8 +753,17 @@ test("runtime schema validation requires checksums, FORCE RLS and least privileg
     if (text.includes("relation.relkind AS object_kind")) {
       return { rows: socialRelationRows() };
     }
-    if (text.includes("FROM pg_catalog.pg_proc routine")) {
-      return { rows: [{ routine_count: 0 }] };
+    if (
+      text.includes("FROM pg_catalog.pg_proc routine") &&
+      text.includes("pg_get_function_result")
+    ) {
+      return { rows: runtimeRoutineRows() };
+    }
+    if (
+      text.includes("FROM pg_catalog.pg_proc routine") &&
+      text.includes("expanded_acl")
+    ) {
+      return { rows: runtimeRoutineAclRows() };
     }
     if (text.includes("FROM ia4tube_social.runtime_schema_contract")) {
       return {
@@ -668,25 +775,12 @@ test("runtime schema validation requires checksums, FORCE RLS and least privileg
     }
     if (text.includes("FROM pg_catalog.pg_class c")) {
       return {
-        rows: TENANT_TABLES.map((relname) => ({
-          relname,
-          relrowsecurity: true,
-          relforcerowsecurity: true,
-          policy_count: 1
-        }))
+        rows: runtimeRlsTableRows()
       };
     }
     if (text.includes("FROM pg_catalog.pg_policies")) {
       return {
-        rows: TENANT_TABLES.map((tablename) => ({
-          tablename,
-          policyname: TENANT_POLICIES[tablename],
-          permissive: "PERMISSIVE",
-          roles: ["public"],
-          cmd: "ALL",
-          qual: `(${TENANT_SCOPE_COLUMNS[tablename]} = NULLIF(current_setting('ia4tube.company_id'::text, true), ''::text)::uuid)`,
-          with_check: `(${TENANT_SCOPE_COLUMNS[tablename]} = NULLIF(current_setting('ia4tube.company_id'::text, true), ''::text)::uuid)`
-        }))
+        rows: runtimePolicyRows()
       };
     }
     if (text.includes("namespace.nspacl")) {
@@ -704,6 +798,7 @@ test("runtime schema validation requires checksums, FORCE RLS and least privileg
           contract_select: true,
           audit_update: true,
           audit_delete: false,
+          credentials_delete: true,
           identity_write: false,
           legacy_access: false
         }]
@@ -760,12 +855,17 @@ test("runtime schema rejects policy, table and ACL drift", async () => {
         );
         return { rows };
       }
-      if (text.includes("FROM pg_catalog.pg_proc routine")) {
-        return {
-          rows: [
-            { routine_count: options.unexpectedRoutine ? 1 : 0 }
-          ]
-        };
+      if (
+        text.includes("FROM pg_catalog.pg_proc routine") &&
+        text.includes("pg_get_function_result")
+      ) {
+        return { rows: runtimeRoutineRows(options.unexpectedRoutine) };
+      }
+      if (
+        text.includes("FROM pg_catalog.pg_proc routine") &&
+        text.includes("expanded_acl")
+      ) {
+        return { rows: runtimeRoutineAclRows() };
       }
       if (text.includes("FROM ia4tube_social.runtime_schema_contract")) {
         return {
@@ -776,12 +876,7 @@ test("runtime schema rejects policy, table and ACL drift", async () => {
         };
       }
       if (text.includes("FROM pg_catalog.pg_class c")) {
-        const tables = TENANT_TABLES.map((relname) => ({
-          relname,
-          relrowsecurity: true,
-          relforcerowsecurity: true,
-          policy_count: 1
-        }));
+        const tables = runtimeRlsTableRows();
         if (options.extraTable) {
           tables.push({
             relname: "unexpected_tenant_data",
@@ -793,30 +888,7 @@ test("runtime schema rejects policy, table and ACL drift", async () => {
         return { rows: tables };
       }
       if (text.includes("FROM pg_catalog.pg_policies")) {
-        return {
-          rows: TENANT_TABLES.map((tablename) => {
-            const expression =
-              `(${TENANT_SCOPE_COLUMNS[tablename]} = ` +
-              "NULLIF(current_setting('ia4tube.company_id'::text, true), " +
-              "''::text)::uuid)";
-            const qualifier =
-              options.tamperedPolicy && tablename === "social_connections"
-                ? `(TRUE OR ${expression})`
-                : expression;
-            return {
-              tablename,
-              policyname: TENANT_POLICIES[tablename],
-              permissive: "PERMISSIVE",
-              roles:
-                options.wrongRole && tablename === "social_connections"
-                  ? ["ia4tube_social_runtime"]
-                  : ["public"],
-              cmd: "ALL",
-              qual: qualifier,
-              with_check: qualifier
-            };
-          })
-        };
+        return { rows: runtimePolicyRows(options) };
       }
       if (text.includes("namespace.nspacl")) {
         const rows = runtimeSchemaAclRows();
@@ -863,6 +935,7 @@ test("runtime schema rejects policy, table and ACL drift", async () => {
               contract_select: true,
               audit_update: false,
               audit_delete: false,
+              credentials_delete: true,
               identity_write: false,
               legacy_access: false
             }

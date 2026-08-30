@@ -10,7 +10,7 @@ const SOCIAL_ADMIN_SCHEMA = "ia4tube_social_admin";
 const SOCIAL_OWNER_ROLE = "ia4tube_social_owner";
 const RUNTIME_CONTRACT_VIEW = "runtime_schema_contract";
 const VAULT_KEY_REGISTRY = "vault_key_versions";
-const TENANT_TABLES = Object.freeze([
+const LEGACY_TENANT_TABLES = Object.freeze([
   "companies",
   "users",
   "company_memberships",
@@ -27,6 +27,14 @@ const TENANT_TABLES = Object.freeze([
   "social_publication_attempts",
   "social_audit_events"
 ]);
+const COMPLIANCE_TABLES = Object.freeze([
+  "social_meta_subject_mappings",
+  "social_compliance_requests"
+]);
+const TENANT_TABLES = Object.freeze([
+  ...LEGACY_TENANT_TABLES,
+  ...COMPLIANCE_TABLES
+]);
 const TENANT_POLICIES = Object.freeze(
   Object.fromEntries(
     TENANT_TABLES.map((table) => [table, `${table}_company_scope`])
@@ -40,7 +48,7 @@ const TENANT_SCOPE_COLUMNS = Object.freeze(
     ])
   )
 );
-const RUNTIME_TABLE_GRANTS = Object.freeze({
+const LEGACY_RUNTIME_TABLE_GRANTS = Object.freeze({
   runtime_schema_contract: ["SELECT"],
   social_connections: ["INSERT", "SELECT"],
   social_external_accounts: ["INSERT", "SELECT"],
@@ -54,7 +62,13 @@ const RUNTIME_TABLE_GRANTS = Object.freeze({
   social_publication_attempts: ["INSERT", "SELECT"],
   social_audit_events: ["INSERT", "SELECT"]
 });
-const RUNTIME_COLUMN_GRANTS = Object.freeze({
+const RUNTIME_TABLE_GRANTS = Object.freeze({
+  ...LEGACY_RUNTIME_TABLE_GRANTS,
+  social_encrypted_credentials: ["DELETE", "INSERT", "SELECT"],
+  social_meta_subject_mappings: ["INSERT", "SELECT"],
+  social_compliance_requests: ["INSERT", "SELECT"]
+});
+const LEGACY_RUNTIME_COLUMN_GRANTS = Object.freeze({
   companies: {
     id: ["SELECT"],
     name: ["SELECT"],
@@ -150,6 +164,25 @@ const RUNTIME_COLUMN_GRANTS = Object.freeze({
     revision: ["UPDATE"]
   }
 });
+const RUNTIME_COLUMN_GRANTS = Object.freeze({
+  ...LEGACY_RUNTIME_COLUMN_GRANTS,
+  social_meta_subject_mappings: {
+    user_id: ["UPDATE"],
+    connection_id: ["UPDATE"],
+    status: ["UPDATE"],
+    revoked_at: ["UPDATE"],
+    updated_at: ["UPDATE"],
+    revision: ["UPDATE"]
+  },
+  social_compliance_requests: {
+    status: ["UPDATE"],
+    details_code: ["UPDATE"],
+    token_materials_deleted: ["UPDATE"],
+    completed_at: ["UPDATE"],
+    updated_at: ["UPDATE"],
+    revision: ["UPDATE"]
+  }
+});
 
 function validateContractRows(rows, local) {
   if (!Array.isArray(rows) || rows.length !== local.length) {
@@ -193,11 +226,13 @@ function exactSetMatches(actual, expected) {
   return true;
 }
 
-function expectedTableGrantSet(role, ownerRole) {
+function expectedTableGrantSet(
+  role,
+  ownerRole,
+  grants = RUNTIME_TABLE_GRANTS
+) {
   const expected = new Set();
-  for (const [table, privileges] of Object.entries(
-    RUNTIME_TABLE_GRANTS
-  )) {
+  for (const [table, privileges] of Object.entries(grants)) {
     for (const privilege of privileges) {
       expected.add(
         `${role}|${table}|${privilege}|false|${ownerRole}`
@@ -207,11 +242,13 @@ function expectedTableGrantSet(role, ownerRole) {
   return expected;
 }
 
-function expectedColumnGrantSet(role, ownerRole) {
+function expectedColumnGrantSet(
+  role,
+  ownerRole,
+  grants = RUNTIME_COLUMN_GRANTS
+) {
   const expected = new Set();
-  for (const [table, columns] of Object.entries(
-    RUNTIME_COLUMN_GRANTS
-  )) {
+  for (const [table, columns] of Object.entries(grants)) {
     for (const [column, privileges] of Object.entries(columns)) {
       for (const privilege of privileges) {
         expected.add(
@@ -367,6 +404,19 @@ async function verifyRuntimeSchema(pool, role, options = {}) {
     }
     local = completeManifest.slice(0, expected.length);
   }
+  const complianceProfile = local.some(
+    (migration) =>
+      migration.version === "0006_social_compliance_persistence"
+  );
+  const tenantTables = complianceProfile
+    ? TENANT_TABLES
+    : LEGACY_TENANT_TABLES;
+  const tableGrants = complianceProfile
+    ? RUNTIME_TABLE_GRANTS
+    : LEGACY_RUNTIME_TABLE_GRANTS;
+  const columnGrants = complianceProfile
+    ? RUNTIME_COLUMN_GRANTS
+    : LEGACY_RUNTIME_COLUMN_GRANTS;
   const runtimeRole = requireSafeLabel(role, "postgres_role");
   const ownerRole = requireSafeLabel(
     options.ownerRole || SOCIAL_OWNER_ROLE,
@@ -416,7 +466,7 @@ async function verifyRuntimeSchema(pool, role, options = {}) {
         ].join("\n")
       );
       const expectedRelations = new Map([
-        ...TENANT_TABLES.map((table) => [table, "r"]),
+        ...tenantTables.map((table) => [table, "r"]),
         [RUNTIME_CONTRACT_VIEW, "v"]
       ]);
       if (
@@ -435,14 +485,111 @@ async function verifyRuntimeSchema(pool, role, options = {}) {
 
       const routines = await client.query(
         [
-          "SELECT COUNT(*)::integer AS routine_count",
+          "SELECT routine.proname,",
+          " pg_get_function_identity_arguments(routine.oid)",
+          "   AS identity_arguments,",
+          " pg_get_function_result(routine.oid) AS function_result,",
+          " owner.rolname AS owner_name,routine.prosecdef,",
+          " routine.provolatile,routine.prokind,routine.proconfig,",
+          " routine.prosrc",
           "FROM pg_catalog.pg_proc routine",
           "JOIN pg_catalog.pg_namespace namespace",
           "  ON namespace.oid = routine.pronamespace",
-          "WHERE namespace.nspname = 'ia4tube_social'"
+          "JOIN pg_catalog.pg_roles owner ON owner.oid=routine.proowner",
+          "WHERE namespace.nspname = 'ia4tube_social'",
+          "ORDER BY routine.proname,identity_arguments"
         ].join("\n")
       );
-      if (Number(routines.rows?.[0]?.routine_count) !== 0) {
+      const expectedRoutines = new Map([
+        [
+          "resolve_compliance_status|requested_confirmation_digest text",
+          {
+            result: /^TABLE\(status text\)$/i,
+            relation: "ia4tube_social.social_compliance_requests"
+          }
+        ],
+        [
+          "resolve_meta_subject_mapping|requested_provider text, requested_subject_digest text",
+          {
+            result:
+              /^TABLE\(company_id uuid, user_id uuid, connection_id uuid\)$/i,
+            relation: "ia4tube_social.social_meta_subject_mappings"
+          }
+        ]
+      ]);
+      const routineRows = routines.rows || [];
+      if (
+        routineRows.length !== (complianceProfile ? 2 : 0) ||
+        routineRows.some((routine) => {
+          const key = `${routine.proname}|${routine.identity_arguments}`;
+          const expected = expectedRoutines.get(key);
+          const configEntries = Array.isArray(routine.proconfig)
+            ? routine.proconfig
+            : [];
+          const source = String(routine.prosrc || "").toLowerCase();
+          return (
+            !complianceProfile ||
+            !expected ||
+            !expected.result.test(String(routine.function_result || "")) ||
+            routine.owner_name !== ownerRole ||
+            routine.prosecdef !== true ||
+            routine.provolatile !== "s" ||
+            routine.prokind !== "f" ||
+            configEntries.length !== 1 ||
+            configEntries[0] !== "search_path=pg_catalog" ||
+            !source.includes(expected.relation) ||
+            /\b(execute|format|dblink|copy|lo_import|pg_read_file)\b/i.test(
+              source
+            )
+          );
+        })
+      ) {
+        postgresFail(
+          "postgres_routine_contract_mismatch",
+          "Rotinas PostgreSQL sociais inesperadas."
+        );
+      }
+      const routineAclRows = await client.query(
+        [
+          "SELECT routine.proname,",
+          " pg_get_function_identity_arguments(routine.oid)",
+          "   AS identity_arguments,",
+          " COALESCE(grantee.rolname,'PUBLIC') AS grantee,",
+          " expanded_acl.privilege_type,expanded_acl.is_grantable,",
+          " grantor.rolname AS grantor_name",
+          "FROM pg_catalog.pg_proc routine",
+          "JOIN pg_catalog.pg_namespace namespace",
+          " ON namespace.oid=routine.pronamespace",
+          "CROSS JOIN LATERAL pg_catalog.aclexplode(",
+          " COALESCE(routine.proacl,",
+          "   pg_catalog.acldefault('f',routine.proowner))",
+          ") expanded_acl",
+          "LEFT JOIN pg_catalog.pg_roles grantee",
+          " ON grantee.oid=expanded_acl.grantee",
+          "LEFT JOIN pg_catalog.pg_roles grantor",
+          " ON grantor.oid=expanded_acl.grantor",
+          "WHERE namespace.nspname='ia4tube_social'",
+          " AND expanded_acl.grantee<>routine.proowner",
+          "ORDER BY routine.proname,identity_arguments,grantee"
+        ].join("\n")
+      );
+      const routineAclSet = new Set(
+        (routineAclRows.rows || []).map((entry) =>
+          `${String(entry.grantee).toLowerCase()}|${entry.proname}|` +
+          `${entry.identity_arguments}|` +
+          `${String(entry.privilege_type).toUpperCase()}|` +
+          `${Boolean(entry.is_grantable)}|` +
+          String(entry.grantor_name).toLowerCase()
+        )
+      );
+      const expectedRoutineAclSet = complianceProfile
+        ? new Set([...expectedRoutines.keys()].map((key) => {
+            const separator = key.indexOf("|");
+            return `${runtimeRole}|${key.slice(0, separator)}|` +
+              `${key.slice(separator + 1)}|EXECUTE|false|${ownerRole}`;
+          }))
+        : new Set();
+      if (!exactSetMatches(routineAclSet, expectedRoutineAclSet)) {
         postgresFail(
           "postgres_routine_contract_mismatch",
           "Rotinas PostgreSQL sociais inesperadas."
@@ -478,15 +625,18 @@ async function verifyRuntimeSchema(pool, role, options = {}) {
         .map((row) => row.relname)
         .sort();
       if (
-        tables.rows?.length !== TENANT_TABLES.length ||
+        tables.rows?.length !== tenantTables.length ||
         tableNames.some(
-          (table, index) => table !== [...TENANT_TABLES].sort()[index]
+          (table, index) => table !== [...tenantTables].sort()[index]
         ) ||
         tables.rows.some(
           (row) =>
             !row.relrowsecurity ||
             !row.relforcerowsecurity ||
-            Number(row.policy_count) < 1
+            Number(row.policy_count) !==
+              (complianceProfile && COMPLIANCE_TABLES.includes(row.relname)
+                ? 2
+                : 1)
         )
       ) {
         postgresFail(
@@ -497,27 +647,27 @@ async function verifyRuntimeSchema(pool, role, options = {}) {
 
       const policies = await client.query(
         [
-          "SELECT tablename, policyname, permissive, roles, cmd,",
+          "SELECT tablename, policyname, permissive, roles::text[] AS roles,",
+          "  cmd,",
           "  qual, with_check",
           "FROM pg_catalog.pg_policies",
           "WHERE schemaname = 'ia4tube_social'",
           "  AND tablename = ANY($1::text[])",
           "ORDER BY tablename, policyname"
         ].join("\n"),
-        [TENANT_TABLES]
+        [tenantTables]
       );
       const policyByTable = new Map();
       for (const policy of policies.rows || []) {
-        if (policyByTable.has(policy.tablename)) {
-          postgresFail(
-            "postgres_rls_contract_mismatch",
-            "Contrato RLS social divergente."
-          );
-        }
-        policyByTable.set(policy.tablename, policy);
+        const tablePolicies = policyByTable.get(policy.tablename) || [];
+        tablePolicies.push(policy);
+        policyByTable.set(policy.tablename, tablePolicies);
       }
-      for (const table of TENANT_TABLES) {
-        const policy = policyByTable.get(table);
+      for (const table of tenantTables) {
+        const tablePolicies = policyByTable.get(table) || [];
+        const policy = tablePolicies.find(
+          (entry) => entry.policyname === TENANT_POLICIES[table]
+        );
         const scopeColumn = TENANT_SCOPE_COLUMNS[table];
         const qualifier = canonicalPolicyExpression(policy?.qual);
         const check = canonicalPolicyExpression(policy?.with_check);
@@ -537,6 +687,34 @@ async function verifyRuntimeSchema(pool, role, options = {}) {
           qualifier !== expectedExpression ||
           check !== expectedExpression
         ) {
+          postgresFail(
+            "postgres_rls_contract_mismatch",
+            "Contrato RLS social divergente."
+          );
+        }
+        const resolverPolicy = tablePolicies.find(
+          (entry) => entry.policyname === `${table}_owner_resolver`
+        );
+        if (complianceProfile && COMPLIANCE_TABLES.includes(table)) {
+          const resolverRoles = Array.isArray(resolverPolicy?.roles)
+            ? resolverPolicy.roles.map((item) => String(item).toLowerCase())
+            : [];
+          if (
+            tablePolicies.length !== 2 ||
+            !resolverPolicy ||
+            resolverPolicy.permissive !== "PERMISSIVE" ||
+            resolverRoles.length !== 1 ||
+            resolverRoles[0] !== ownerRole ||
+            resolverPolicy.cmd !== "SELECT" ||
+            canonicalPolicyExpression(resolverPolicy.qual) !== "true" ||
+            resolverPolicy.with_check !== null
+          ) {
+            postgresFail(
+              "postgres_rls_contract_mismatch",
+              "Contrato RLS social divergente."
+            );
+          }
+        } else if (tablePolicies.length !== 1 || resolverPolicy) {
           postgresFail(
             "postgres_rls_contract_mismatch",
             "Contrato RLS social divergente."
@@ -624,7 +802,7 @@ async function verifyRuntimeSchema(pool, role, options = {}) {
       if (
         !exactSetMatches(
           actualTableGrants,
-          expectedTableGrantSet(runtimeRole, ownerRole)
+          expectedTableGrantSet(runtimeRole, ownerRole, tableGrants)
         )
       ) {
         postgresFail(
@@ -675,7 +853,7 @@ async function verifyRuntimeSchema(pool, role, options = {}) {
       if (
         !exactSetMatches(
           actualColumnGrants,
-          expectedColumnGrantSet(runtimeRole, ownerRole)
+          expectedColumnGrantSet(runtimeRole, ownerRole, columnGrants)
         )
       ) {
         postgresFail(
@@ -702,6 +880,11 @@ async function verifyRuntimeSchema(pool, role, options = {}) {
           "    'ia4tube_social.social_audit_events',",
           "    'DELETE'",
           "  ) AS audit_delete,",
+          "  has_table_privilege(",
+          "    current_user,",
+          "    'ia4tube_social.social_encrypted_credentials',",
+          "    'DELETE'",
+          "  ) AS credentials_delete,",
           "  has_table_privilege(",
           "    current_user,",
           "    'ia4tube_social.users',",
@@ -763,6 +946,7 @@ async function verifyRuntimeSchema(pool, role, options = {}) {
         !acl?.contract_select ||
         acl.audit_update ||
         acl.audit_delete ||
+        Boolean(acl.credentials_delete) !== complianceProfile ||
         acl.identity_write ||
         acl.legacy_access
       ) {
@@ -775,7 +959,7 @@ async function verifyRuntimeSchema(pool, role, options = {}) {
       return Object.freeze({
         valid: true,
         migrationCount: local.length,
-        tenantTableCount: TENANT_TABLES.length
+        tenantTableCount: tenantTables.length
       });
     },
     { role: runtimeRole }

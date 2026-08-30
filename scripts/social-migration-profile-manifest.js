@@ -8,7 +8,9 @@ const PROFILE_VERSIONS = Object.freeze({
   [migrations.EXACT_FROM_PROFILE]: migrations.EXACT_BASE_MIGRATIONS,
   [migrations.EXACT_TO_PROFILE]: migrations.EXACT_TARGET_MIGRATIONS,
   [migrations.REFERENCE_CHECK_TO_PROFILE]:
-    migrations.REFERENCE_CHECK_TARGET_MIGRATIONS
+    migrations.REFERENCE_CHECK_TARGET_MIGRATIONS,
+  [migrations.COMPLIANCE_TO_PROFILE]:
+    migrations.COMPLIANCE_TARGET_MIGRATIONS
 });
 
 function fail(code) {

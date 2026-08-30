@@ -73,6 +73,19 @@ if (
     "Perfil autenticado 0005 diverge do manifesto."
   );
 }
+const PROFILE_0006_MIGRATION_ROWS = Object.freeze(
+  EXPECTED_MIGRATION_ROWS.slice(0, 6)
+);
+if (
+  PROFILE_0006_MIGRATION_ROWS.length !== 6 ||
+  PROFILE_0006_MIGRATION_ROWS[5]?.version !==
+    "0006_social_compliance_persistence"
+) {
+  postgresFail(
+    "backup_schema_profile_0006_manifest_invalid",
+    "Perfil autenticado 0006 diverge do manifesto."
+  );
+}
 const PRE_0004_RLS_TABLES = Object.freeze([
   "companies",
   "users",
@@ -87,12 +100,17 @@ const PRE_0004_RLS_TABLES = Object.freeze([
   "social_reauth_grants",
   "social_audit_events"
 ]);
-const RLS_TABLES = Object.freeze([
+const CONNECTOR_RLS_TABLES = Object.freeze([
   ...PRE_0004_RLS_TABLES.slice(0, -1),
   "social_idempotency_operations",
   "social_publications",
   "social_publication_attempts",
   "social_audit_events"
+]);
+const RLS_TABLES = Object.freeze([
+  ...CONNECTOR_RLS_TABLES,
+  "social_meta_subject_mappings",
+  "social_compliance_requests"
 ]);
 const PRE_0004_BACKUP_TABLES = Object.freeze([
   "ia4tube_migrations.environment_identity",
@@ -111,11 +129,18 @@ const PRE_0004_BACKUP_TABLES = Object.freeze([
   "ia4tube_social.social_audit_events",
   "ia4tube_social.legacy_entity_mappings"
 ]);
-const BACKUP_TABLES = Object.freeze([
+const CONNECTOR_BACKUP_TABLES = Object.freeze([
   ...PRE_0004_BACKUP_TABLES.slice(0, -2),
   "ia4tube_social.social_idempotency_operations",
   "ia4tube_social.social_publications",
   "ia4tube_social.social_publication_attempts",
+  "ia4tube_social.social_audit_events",
+  "ia4tube_social.legacy_entity_mappings"
+]);
+const BACKUP_TABLES = Object.freeze([
+  ...CONNECTOR_BACKUP_TABLES.slice(0, -2),
+  "ia4tube_social.social_meta_subject_mappings",
+  "ia4tube_social.social_compliance_requests",
   "ia4tube_social.social_audit_events",
   "ia4tube_social.legacy_entity_mappings"
 ]);
@@ -137,13 +162,28 @@ const SCHEMA_PROFILES = Object.freeze([
   Object.freeze({
     id: "social-schema-0004",
     migrationRows: Object.freeze(EXPECTED_MIGRATION_ROWS.slice(0, 4)),
-    backupTables: BACKUP_TABLES,
-    evidenceTables: EVIDENCE_TABLES,
-    rlsTables: RLS_TABLES
+    backupTables: CONNECTOR_BACKUP_TABLES,
+    evidenceTables: Object.freeze(
+      [...CONNECTOR_BACKUP_TABLES].sort((left, right) =>
+        left.localeCompare(right)
+      )
+    ),
+    rlsTables: CONNECTOR_RLS_TABLES
   }),
   Object.freeze({
     id: "social-schema-0005",
     migrationRows: PROFILE_0005_MIGRATION_ROWS,
+    backupTables: CONNECTOR_BACKUP_TABLES,
+    evidenceTables: Object.freeze(
+      [...CONNECTOR_BACKUP_TABLES].sort((left, right) =>
+        left.localeCompare(right)
+      )
+    ),
+    rlsTables: CONNECTOR_RLS_TABLES
+  }),
+  Object.freeze({
+    id: "social-schema-0006",
+    migrationRows: PROFILE_0006_MIGRATION_ROWS,
     backupTables: BACKUP_TABLES,
     evidenceTables: EVIDENCE_TABLES,
     rlsTables: RLS_TABLES
@@ -190,7 +230,8 @@ const REQUIRED_VAULT_CONSTRAINT = Object.freeze({
 const ALLOWED_UNVALIDATED_CONSTRAINTS_BY_PROFILE = Object.freeze({
   "social-schema-0003": Object.freeze([]),
   "social-schema-0004": SOCIAL_CONNECTOR_UNVALIDATED_CONSTRAINTS,
-  "social-schema-0005": SOCIAL_CONNECTOR_UNVALIDATED_CONSTRAINTS
+  "social-schema-0005": SOCIAL_CONNECTOR_UNVALIDATED_CONSTRAINTS,
+  "social-schema-0006": SOCIAL_CONNECTOR_UNVALIDATED_CONSTRAINTS
 });
 const CURRENT_SCHEMA_PROFILE = SCHEMA_PROFILES.at(-1);
 const TOOL_BASENAMES = Object.freeze({

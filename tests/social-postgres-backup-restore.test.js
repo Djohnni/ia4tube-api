@@ -1038,7 +1038,7 @@ test("operator uses only provisioner locks and catalog inspection", async (t) =>
   assert.equal(events.includes("BEGIN"), false);
   assert.equal(events.some((text) => /\bSET\s+(?:LOCAL\s+)?ROLE\b/i.test(text)), false);
   assert.equal(events.some((text) => text.includes("environment_identity")), false);
-  assert.equal(inspectedProfile.id, "social-schema-0005");
+  assert.equal(inspectedProfile.id, "social-schema-0006");
   assert.equal(
     events.filter((text) => text.includes("schema_migrations")).length,
     1
@@ -1606,15 +1606,15 @@ test("schema profile is selected only from an exact authenticated migration pref
   const legacy = SCHEMA_PROFILES[0];
   const connector = SCHEMA_PROFILES[1];
   const current = SCHEMA_PROFILES.at(-1);
-  assert.equal(current.id, "social-schema-0005");
-  assert.equal(current.migrationRows.length, 5);
+  assert.equal(current.id, "social-schema-0006");
+  assert.equal(current.migrationRows.length, 6);
   assert.equal(
     current.migrationRows.at(-1).version,
-    "0005_fix_social_reference_checks"
+    "0006_social_compliance_persistence"
   );
   assert.deepEqual(
     current.migrationRows,
-    EXPECTED_MIGRATION_ROWS.slice(0, 5)
+    EXPECTED_MIGRATION_ROWS.slice(0, 6)
   );
   assert.equal(resolveSchemaProfile(legacy.migrationRows).id, legacy.id);
   assert.equal(resolveSchemaProfile(connector.migrationRows).id, connector.id);

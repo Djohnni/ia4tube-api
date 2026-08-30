@@ -78,6 +78,8 @@ function makeHarness(options = {}) {
   const storageInputs = [];
   const failureInputs = [];
   const discoveryInputs = [];
+  const legacyMappingInputs = [];
+  const mappingDigestInputs = [];
   const envelope = createInstagramOAuthStateEnvelope({
     derivationKey: ROOT_KEY,
     keyVersion: "identity-v1",
@@ -290,6 +292,13 @@ function makeHarness(options = {}) {
     async getCurrentConnectionDetails() {
       return options.connectionDetails || null;
     },
+    async ensureLegacyComplianceSubjectMapping(input) {
+      legacyMappingInputs.push(input);
+      if (options.legacyMappingFailure) {
+        throw errorWithCode(options.legacyMappingFailure);
+      }
+      return Object.freeze({ created: legacyMappingInputs.length === 1 });
+    },
     async runExclusive(operation) {
       events.push("exclusive_begin");
       try {
@@ -344,6 +353,18 @@ function makeHarness(options = {}) {
       }
     }
   };
+  const metaComplianceRepository = options.enableMetaCompliance
+    ? Object.freeze({
+        subjectMappingForExternalUser(input) {
+          mappingDigestInputs.push(input);
+          return Object.freeze({
+            provider: "instagram",
+            subjectDigest: "a".repeat(64),
+            digestVersion: "hmac-sha256-app-secret-v1"
+          });
+        }
+      })
+    : undefined;
   const service = createInstagramOAuthService({
     config: Object.freeze({
       enabled: true,
@@ -358,6 +379,7 @@ function makeHarness(options = {}) {
     connectorStore,
     credentials,
     authAdapter,
+    metaComplianceRepository,
     clock: () => milliseconds,
     randomUUID() {
       const value = UUIDS[uuidIndex % UUIDS.length];
@@ -376,6 +398,8 @@ function makeHarness(options = {}) {
     storageInputs,
     failureInputs,
     discoveryInputs,
+    legacyMappingInputs,
+    mappingDigestInputs,
     get createdInput() { return createdInput; },
     get exchangeCalls() { return exchangeCalls; },
     get credentialCalls() { return credentialCalls; },
@@ -976,6 +1000,80 @@ test("service refuses incoherent connection state and health", async () => {
     }),
     { code: "resource_unavailable" }
   );
+});
+
+test("existing connected account gets a fail-closed compliance mapping without another OAuth", async () => {
+  const connectionDetails = Object.freeze({
+    id: UUIDS[8],
+    provider: "instagram",
+    state: "connected",
+    account: Object.freeze({
+      externalId: "synthetic-professional-user",
+      username: "ia4tube_empresas",
+      displayName: "IA4Tube Empresas",
+      accountType: "business"
+    }),
+    createdAt: new Date("2026-08-12T10:00:00.000Z"),
+    connectedAt: new Date("2026-08-12T10:01:00.000Z"),
+    updatedAt: new Date("2026-08-12T10:02:00.000Z"),
+    disconnectedAt: null,
+    health: "healthy"
+  });
+  const harness = makeHarness({
+    connectionDetails,
+    enableMetaCompliance: true
+  });
+  const current = await harness.service.getCurrentConnection({
+    verifiedClaims: claims()
+  });
+  const exact = await harness.service.getConnection({
+    verifiedClaims: claims(),
+    connectionId: UUIDS[8]
+  });
+  assert.equal(current.connection.connectionId, UUIDS[8]);
+  assert.equal(exact.connection.connectionId, UUIDS[8]);
+  assert.equal(Object.hasOwn(current.connection, "externalId"), false);
+  assert.deepEqual(harness.mappingDigestInputs, [
+    { provider: "instagram", externalUserId: "synthetic-professional-user" },
+    { provider: "instagram", externalUserId: "synthetic-professional-user" }
+  ]);
+  assert.deepEqual(harness.legacyMappingInputs, [
+    {
+      connectionId: UUIDS[8],
+      externalUserId: "synthetic-professional-user",
+      subjectMapping: {
+        provider: "instagram",
+        subjectDigest: "a".repeat(64),
+        digestVersion: "hmac-sha256-app-secret-v1"
+      }
+    },
+    {
+      connectionId: UUIDS[8],
+      externalUserId: "synthetic-professional-user",
+      subjectMapping: {
+        provider: "instagram",
+        subjectDigest: "a".repeat(64),
+        digestVersion: "hmac-sha256-app-secret-v1"
+      }
+    }
+  ]);
+  assert.equal(harness.exchangeCalls, 0);
+  assert.equal(harness.credentialCalls, 0);
+
+  const disconnected = makeHarness({
+    enableMetaCompliance: true,
+    connectionDetails: Object.freeze({
+      ...connectionDetails,
+      state: "disconnected",
+      account: null,
+      connectedAt: null,
+      disconnectedAt: new Date("2026-08-12T10:03:00.000Z"),
+      health: "disconnected"
+    })
+  });
+  await disconnected.service.getCurrentConnection({ verifiedClaims: claims() });
+  assert.deepEqual(disconnected.legacyMappingInputs, []);
+  assert.deepEqual(disconnected.mappingDigestInputs, []);
 });
 
 test("an existing blocking connection rejects authorization before provider access", async () => {

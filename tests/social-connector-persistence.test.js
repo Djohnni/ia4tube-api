@@ -754,6 +754,122 @@ test("connection, professional account and encrypted credential activate atomica
   ]);
 });
 
+test("legacy compliance mapping uses the persisted connection creator and one tenant lock", async () => {
+  const persistedCreatorId = IDS.operationRetry;
+  assert.notEqual(persistedCreatorId, CONTEXT_A.userId);
+  const subjectDigest = "a".repeat(64);
+  const pool = createFakePool(async (call) => {
+    if (/SELECT connection\.created_by_user_id/is.test(call.text)) {
+      return {
+        rows: [{
+          created_by_user_id: persistedCreatorId,
+          external_id: professionalAccount().externalId
+        }]
+      };
+    }
+    if (/SELECT subject_digest[\s\S]*social_meta_subject_mappings/is.test(
+      call.text
+    )) {
+      return { rows: [] };
+    }
+    if (/INSERT INTO .*social_meta_subject_mappings/is.test(call.text)) {
+      return { rows: [{ subject_digest: subjectDigest }], rowCount: 1 };
+    }
+    return { rows: [] };
+  });
+  const result = await createPostgresConnectorStore({
+    pool,
+    runtimeRole: RUNTIME_ROLE
+  }).scope(CONTEXT_A).ensureLegacyComplianceSubjectMapping({
+    connectionId: IDS.connection,
+    externalUserId: professionalAccount().externalId,
+    subjectMapping: {
+      provider: "instagram",
+      subjectDigest,
+      digestVersion: "hmac-sha256-app-secret-v1"
+    }
+  });
+  assert.deepEqual(result, { created: true });
+  assertScopedTransaction(pool, CONTEXT_A.companyId);
+  assert.equal(
+    pool.calls.filter((call) => /pg_advisory_xact_lock/i.test(call.text)).length,
+    1
+  );
+  const insert = productCalls(pool).find((call) =>
+    /INSERT INTO .*social_meta_subject_mappings/is.test(call.text)
+  );
+  assert.ok(insert);
+  assert.ok(insert.values.includes(persistedCreatorId));
+  assert.equal(insert.values.includes(CONTEXT_A.userId), false);
+  assert.match(insert.text, /ON CONFLICT DO NOTHING/i);
+});
+
+test("legacy compliance mapping preserves an existing OAuth subject and fails closed on collisions", async () => {
+  const candidate = {
+    connectionId: IDS.connection,
+    externalUserId: professionalAccount().externalId,
+    subjectMapping: {
+      provider: "instagram",
+      subjectDigest: "b".repeat(64),
+      digestVersion: "hmac-sha256-app-secret-v1"
+    }
+  };
+  const existingPool = createFakePool(async (call) => {
+    if (/SELECT connection\.created_by_user_id/is.test(call.text)) {
+      return { rows: [{
+        created_by_user_id: CONTEXT_A.userId,
+        external_id: professionalAccount().externalId
+      }] };
+    }
+    if (/SELECT subject_digest[\s\S]*social_meta_subject_mappings/is.test(
+      call.text
+    )) {
+      return { rows: [{ subject_digest: "c".repeat(64) }] };
+    }
+    return { rows: [] };
+  });
+  const preserved = await createPostgresConnectorStore({
+    pool: existingPool,
+    runtimeRole: RUNTIME_ROLE
+  }).scope(CONTEXT_A).ensureLegacyComplianceSubjectMapping(candidate);
+  assert.deepEqual(preserved, { created: false });
+  assert.equal(
+    productCalls(existingPool).some((call) =>
+      /INSERT INTO .*social_meta_subject_mappings/is.test(call.text)
+    ),
+    false
+  );
+
+  const collisionPool = createFakePool(async (call) => {
+    if (/SELECT connection\.created_by_user_id/is.test(call.text)) {
+      return { rows: [{
+        created_by_user_id: CONTEXT_A.userId,
+        external_id: professionalAccount().externalId
+      }] };
+    }
+    if (/SELECT subject_digest[\s\S]*social_meta_subject_mappings/is.test(
+      call.text
+    )) {
+      return { rows: [] };
+    }
+    if (/INSERT INTO .*social_meta_subject_mappings/is.test(call.text)) {
+      return { rows: [], rowCount: 0 };
+    }
+    return { rows: [] };
+  });
+  await assert.rejects(
+    createPostgresConnectorStore({
+      pool: collisionPool,
+      runtimeRole: RUNTIME_ROLE
+    }).scope(CONTEXT_A).ensureLegacyComplianceSubjectMapping(candidate),
+    { code: "idempotency_conflict" }
+  );
+  assert.equal(
+    collisionPool.calls.some((call) => call.text.trim() === "ROLLBACK"),
+    true
+  );
+});
+
 test("credential activation failure rolls back every preceding write", async () => {
   const pool = createFakePool(async (call) => {
     if (/FROM ia4tube_social\.social_connections connection/is.test(call.text)) {

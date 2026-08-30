@@ -3,45 +3,107 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>RASCUNHO — Política de Privacidade — IA4Tube</title>
+  <meta name="robots" content="index, follow">
+  <meta name="description" content="Rascunho técnico público da futura Política de Privacidade da IA4Tube.">
+  <title>Rascunho técnico público — Privacidade — IA4Tube</title>
   <style>
-    :root { color-scheme: light; font-family: Arial, sans-serif; }
-    body { margin: 0; background: #f4f6f8; color: #17202a; }
-    main { width: min(760px, calc(100% - 32px)); margin: 40px auto; }
-    article { background: #fff; border: 1px solid #d9dee3; border-radius: 12px; padding: 28px; }
-    .draft { border: 3px solid #a61b1b; background: #fff3f3; color: #7c1111; padding: 18px; margin-bottom: 28px; }
-    h1, h2 { line-height: 1.2; }
+    :root {
+      color-scheme: light;
+      font-family: Inter, Arial, sans-serif;
+      --ink: #172033;
+      --muted: #526078;
+      --surface: #ffffff;
+      --canvas: #f5f3ff;
+      --brand-dark: #38249a;
+      --warning-bg: #fff7e6;
+      --warning-border: #b85c00;
+      --line: #ded9f3;
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: var(--canvas); color: var(--ink); line-height: 1.62; }
+    main { width: min(880px, calc(100% - 32px)); margin: 32px auto; }
+    article { background: var(--surface); border: 1px solid var(--line); border-radius: 18px; padding: 36px; box-shadow: 0 12px 30px rgba(42, 32, 96, .08); }
+    .draft { border-left: 6px solid var(--warning-border); background: var(--warning-bg); padding: 20px; margin-bottom: 28px; }
+    .draft h1 { margin-top: 0; font-size: 1.35rem; }
+    h2 { margin-top: 32px; color: var(--brand-dark); line-height: 1.25; }
+    p, li { max-width: 76ch; }
     li { margin: 8px 0; }
-    footer { margin-top: 28px; padding-top: 18px; border-top: 1px solid #d9dee3; font-weight: 700; }
+    code { overflow-wrap: anywhere; color: var(--brand-dark); }
+    nav { display: flex; flex-wrap: wrap; gap: 10px 18px; margin-top: 30px; padding-top: 20px; border-top: 1px solid var(--line); }
+    nav a { color: var(--brand-dark); font-weight: 700; text-decoration-thickness: 2px; text-underline-offset: 3px; }
+    .meta { color: var(--muted); font-size: .95rem; }
+    footer { margin-top: 28px; padding-top: 18px; border-top: 1px solid var(--line); color: var(--muted); }
+    @media (max-width: 640px) {
+      main { width: min(100% - 20px, 880px); margin: 10px auto; }
+      article { padding: 22px 18px; border-radius: 12px; }
+      .draft { padding: 16px; }
+      h2 { font-size: 1.25rem; }
+    }
   </style>
 </head>
 <body>
   <main>
     <article>
-      <section class="draft" aria-label="Aviso de rascunho">
-        <h1>RASCUNHO — PENDENTE DE APROVAÇÃO</h1>
-        <p><strong>DRAFT — PENDING APPROVAL</strong></p>
-        <p>Esta página reserva o endereço da futura Política de Privacidade da IA4Tube. Ela ainda não contém uma política jurídica vigente.</p>
-        <p>This page reserves the address for IA4Tube's future Privacy Policy. It does not yet contain an approved legal policy.</p>
+      <section class="draft" aria-label="Estado deste documento">
+        <h1>RASCUNHO TÉCNICO PÚBLICO — NÃO APROVADO JURIDICAMENTE</h1>
+        <p><strong>PUBLIC TECHNICAL DRAFT — NOT LEGALLY APPROVED</strong></p>
+        <p>Esta página descreve somente comportamentos técnicos comprovados ou limitações atuais da integração social da IA4Tube. A identidade jurídica responsável, o canal oficial, as bases legais, os fornecedores e os prazos ainda dependem de decisões do proprietário e revisão jurídica.</p>
+        <p>Não use este texto como política vigente, aviso de consentimento, contrato ou documento de App Review.</p>
       </section>
 
-      <h2>Política de Privacidade / Privacy Policy</h2>
-      <p>O conteúdo jurídico definitivo será inserido somente após revisão e aprovação expressas. Este rascunho não afirma quais dados são coletados, utilizados, compartilhados, armazenados ou excluídos.</p>
+      <header>
+        <h2>Política de Privacidade — preparação técnica</h2>
+        <p class="meta">Revisão técnica: 30 de agosto de 2026. Data de vigência jurídica: não definida.</p>
+      </header>
 
-      <h2>Itens pendentes de definição e aprovação</h2>
+      <h2>1. Escopo atualmente comprovado</h2>
+      <p>A integração em staging foi construída para conectar uma conta profissional do Instagram a uma empresa autenticada na IA4Tube e para publicar uma imagem quando houver uma ação expressamente autorizada. O código ativo solicita somente os escopos <code>instagram_business_basic</code> e <code>instagram_business_content_publish</code>.</p>
+      <p>A implantação para clientes externos, a publicação automática, o calendário recorrente e uma política final de exclusão não estão declarados como disponíveis por este rascunho.</p>
+
+      <h2>2. Categorias de dados tratadas pela integração</h2>
       <ul>
-        <li>Identificação do responsável e canais oficiais de contato.</li>
-        <li>Categorias de dados e respectivas fontes.</li>
-        <li>Finalidades, bases aplicáveis e escolhas do usuário.</li>
-        <li>Compartilhamentos, operadores e transferências.</li>
-        <li>Prazos e critérios de retenção e exclusão.</li>
-        <li>Direitos, solicitações e procedimento de atendimento.</li>
-        <li>Medidas de segurança, atualizações e data de vigência.</li>
+        <li>Identificadores internos da empresa, do usuário autenticado, da conexão e das operações.</li>
+        <li>Metadados da conta profissional fornecidos pelo Instagram, como identificador externo, nome de usuário, nome de exibição quando disponível, tipo e estado da conta.</li>
+        <li>Escopos concedidos e datas técnicas relacionadas à autorização, validade, revogação e desconexão.</li>
+        <li>Metadados de segurança do OAuth armazenados como resumos criptográficos, incluindo o estado, a URI de retorno e o identificador da sessão.</li>
+        <li>Credencial de acesso protegida por criptografia autenticada, acompanhada apenas dos metadados necessários para validade, rotação e revogação.</li>
+        <li>Referência interna da mídia, resumo criptográfico dos metadados, legenda, estado da publicação, identificador retornado pelo provedor e horários operacionais.</li>
+        <li>Registros de segurança e auditoria, como ação, resultado, código técnico, correlação e horário, sem a intenção de registrar tokens ou segredos.</li>
       </ul>
 
+      <h2>3. Finalidades técnicas atuais</h2>
+      <ul>
+        <li>Autenticar a autorização e associá-la à empresa e ao usuário corretos.</li>
+        <li>Descobrir e apresentar a conta profissional escolhida.</li>
+        <li>Executar uma publicação autorizada e consultar seu resultado.</li>
+        <li>Impedir publicações duplicadas e reconciliar respostas incompletas do provedor.</li>
+        <li>Proteger credenciais, isolar empresas, detectar abuso e produzir auditoria técnica.</li>
+        <li>Desconectar a integração e impedir o uso futuro de uma credencial revogada.</li>
+      </ul>
+
+      <h2>4. Origem e comunicação dos dados</h2>
+      <p>Os dados podem ser fornecidos pelo usuário autenticado, gerados pela operação da IA4Tube ou recebidos da API oficial do Instagram durante autorização, descoberta de conta e publicação. A comunicação com Meta/Instagram ocorre apenas para essas funções técnicas.</p>
+      <p>A lista de fornecedores de hospedagem, banco de dados, backup e suporte ainda não foi aprovada para publicação. Este rascunho não afirma que dados sejam vendidos e não cria uma autorização para uso publicitário.</p>
+
+      <h2>5. Segurança comprovada no código</h2>
+      <p>O núcleo social aplica separação por empresa no banco, controle de acesso, armazenamento criptografado da credencial, validação do retorno OAuth, idempotência e registros de auditoria redigidos. Essas medidas reduzem riscos, mas não constituem garantia absoluta nem substituem uma avaliação jurídica ou operacional.</p>
+
+      <h2>6. Retenção, backups e exclusão</h2>
+      <p>O sistema possui datas técnicas de validade e revogação, mas ainda não existe uma tabela de prazos jurídicos aprovada para metadados, publicações, auditoria e backups. Nenhum prazo de retenção ou conclusão de exclusão é prometido nesta página.</p>
+      <p>Desconectar uma conta e solicitar exclusão são operações diferentes. A desconexão impede a continuidade normal da integração; a eliminação dos dados técnicos elegíveis depende de um fluxo específico, de testes e das decisões de retenção ainda pendentes. Consulte o <a href="/exclusao-de-dados">rascunho de Exclusão de Dados</a>.</p>
+
+      <h2>7. Direitos e contato</h2>
+      <p>Os direitos aplicáveis, a forma de verificar a identidade do solicitante, o canal oficial e o responsável pelo atendimento ainda precisam ser definidos pelo proprietário. Nenhum endereço, e-mail, encarregado ou prazo foi inventado neste rascunho.</p>
+      <p>Até essa definição, esta página não constitui um canal ativo de solicitação e não deve ser apresentada como política final.</p>
+
+      <nav aria-label="Documentos legais relacionados">
+        <a href="/politica-de-privacidade" aria-current="page">Privacidade</a>
+        <a href="/termos-de-uso">Termos de Uso</a>
+        <a href="/exclusao-de-dados">Exclusão de Dados</a>
+      </nav>
+
       <footer>
-        Não publicar como política vigente nem usar em consentimento ou App Review antes da aprovação.
-        / Do not use as an effective policy, consent notice, or App Review document before approval.
+        <strong>Status:</strong> texto técnico público, rastreável e responsivo; conteúdo jurídico final ainda não aprovado.
       </footer>
     </article>
   </main>

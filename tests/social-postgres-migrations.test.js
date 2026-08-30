@@ -12,6 +12,9 @@ const {
 const {
   ADVISORY_LOCK_ID,
   APPLY_APPROVAL,
+  COMPLIANCE_FROM_PROFILE,
+  COMPLIANCE_PENDING_MIGRATIONS,
+  COMPLIANCE_TO_PROFILE,
   EXACT_BASE_MIGRATIONS,
   EXACT_BASE_TABLES,
   EXACT_CONNECTOR_TABLES,
@@ -31,11 +34,13 @@ const {
   SOCIAL_REFERENCE_CHECK_FIX_MIGRATION,
   SOCIAL_REFERENCE_CHECK_REPLACEMENTS,
   STAGING_EXACT_0004_SQL_SHA256,
+  STAGING_COMPLIANCE_0006_SQL_SHA256,
   STAGING_REFERENCE_CHECK_0005_SQL_SHA256,
   STAGING_EXACT_DATABASE_SERVICE_ID,
   STAGING_EXACT_WEB_SERVICE_ID,
   assertApplyTarget,
   assertNonDestructiveSql,
+  complianceStagingApprovalValue,
   compareMigrationState,
   createMigrationRunner,
   readStagingExactCatalogSnapshot,
@@ -1003,7 +1008,11 @@ function migrationPool(options = {}) {
   };
 }
 
-function runnerFor(harness, target = baseTarget, manifestOptions = {}) {
+function runnerFor(
+  harness,
+  target = baseTarget,
+  manifestOptions = genericMigrationPrefix.options
+) {
   return createMigrationRunner({
     pool: harness.pool,
     ownerRole: "ia4tube_social_owner",
@@ -1012,6 +1021,40 @@ function runnerFor(harness, target = baseTarget, manifestOptions = {}) {
     manifestOptions
   });
 }
+
+function materializeGenericMigrationPrefix() {
+  const migrations = readManifest({ root }).slice(0, 5);
+  const directory = fs.mkdtempSync(
+    path.join(os.tmpdir(), "ia4tube-social-generic-0005-")
+  );
+  const entries = migrations.map((migration) => {
+    fs.writeFileSync(
+      path.join(directory, migration.file),
+      migration.sql,
+      "utf8"
+    );
+    return {
+      version: migration.version,
+      file: migration.file,
+      sha256: migration.sha256
+    };
+  });
+  const manifestPath = path.join(directory, "checksums.json");
+  fs.writeFileSync(
+    manifestPath,
+    `${JSON.stringify({ format: 1, migrations: entries }, null, 2)}\n`,
+    "utf8"
+  );
+  return Object.freeze({
+    directory,
+    options: Object.freeze({ migrationsDirectory: directory, manifestPath })
+  });
+}
+
+const genericMigrationPrefix = materializeGenericMigrationPrefix();
+test.after(() => {
+  fs.rmSync(genericMigrationPrefix.directory, { recursive: true, force: true });
+});
 
 function exactAppliedRows(count = EXACT_BASE_MIGRATIONS.length) {
   return readManifest({ root }).slice(0, count).map((migration) => ({
@@ -1040,7 +1083,7 @@ function stagingExactMigrationHarness(overrides = {}) {
 }
 
 function syntheticManifestWithFutureMigration() {
-  const manifest = readManifest({ root });
+  const manifest = readManifest({ root }).slice(0, 5);
   const directory = fs.mkdtempSync(
     path.join(os.tmpdir(), "ia4tube-social-exact-0005-")
   );
@@ -1137,7 +1180,13 @@ test("exact CLI parser accepts only the frozen plan and apply argument sets", ()
 
 test("reference-check CLI parser pins the 0004 to 0005 request and SHA-256", () => {
   const migrationSha256 = STAGING_REFERENCE_CHECK_0005_SQL_SHA256;
-  assert.equal(readManifest({ root }).at(-1).sha256, migrationSha256);
+  assert.equal(
+    readManifest({ root }).find(
+      (migration) =>
+        migration.version === SOCIAL_REFERENCE_CHECK_FIX_MIGRATION
+    ).sha256,
+    migrationSha256
+  );
   const request = {
     fromProfile: REFERENCE_CHECK_FROM_PROFILE,
     toProfile: REFERENCE_CHECK_TO_PROFILE,
@@ -1167,6 +1216,70 @@ test("reference-check CLI parser pins the 0004 to 0005 request and SHA-256", () 
   ]) {
     assert.throws(() => parseMigrationCommand(argv), {
       code: "migration_reference_check_argument_invalid"
+    });
+  }
+});
+
+test("meta-compliance CLI parser pins the exact 0005 to 0006 contract", () => {
+  const recoveryReference = "synthetic-gate5a-recovery-0006";
+  const recoveryCapturedAt = "2026-08-30T12:00:00.000Z";
+  const executionPackageDigest = "a".repeat(64);
+  const stagingApproval = complianceStagingApprovalValue(
+    recoveryReference,
+    executionPackageDigest
+  );
+  const plan = parseMigrationCommand([
+    "plan-meta-compliance",
+    `--migration-sha256=${STAGING_COMPLIANCE_0006_SQL_SHA256}`
+  ]);
+  assert.deepEqual(plan, {
+    command: "plan-meta-compliance",
+    request: {
+      fromProfile: COMPLIANCE_FROM_PROFILE,
+      toProfile: COMPLIANCE_TO_PROFILE,
+      expectedPending: COMPLIANCE_PENDING_MIGRATIONS,
+      migrationSha256: STAGING_COMPLIANCE_0006_SQL_SHA256
+    }
+  });
+
+  const apply = parseMigrationCommand([
+    "apply-meta-compliance",
+    `--migration-sha256=${STAGING_COMPLIANCE_0006_SQL_SHA256}`,
+    `--recovery-reference=${recoveryReference}`,
+    `--recovery-captured-at=${recoveryCapturedAt}`,
+    `--execution-package-digest=${executionPackageDigest}`,
+    `--staging-approval=${stagingApproval}`,
+    `--database-marker-uuid=${PAID_STAGING_PUBLIC_TARGET.environmentId}`
+  ]);
+  assert.deepEqual(apply, {
+    command: "apply-meta-compliance",
+    request: {
+      fromProfile: COMPLIANCE_FROM_PROFILE,
+      toProfile: COMPLIANCE_TO_PROFILE,
+      expectedPending: COMPLIANCE_PENDING_MIGRATIONS,
+      migrationSha256: STAGING_COMPLIANCE_0006_SQL_SHA256,
+      recoveryReference,
+      recoveryCapturedAt,
+      executionPackageDigest,
+      stagingApproval,
+      databaseMarkerUuid: PAID_STAGING_PUBLIC_TARGET.environmentId,
+      recoveryStatus: "AVAILABLE",
+      recoveryConcurrentOperation: "NONE",
+      renderWebServiceId: STAGING_EXACT_WEB_SERVICE_ID,
+      renderDatabaseServiceId: STAGING_EXACT_DATABASE_SERVICE_ID
+    }
+  });
+
+  for (const argv of [
+    ["plan-meta-compliance"],
+    ["plan-meta-compliance", "--migration-sha256=invalid"],
+    [
+      "apply-meta-compliance",
+      `--migration-sha256=${STAGING_COMPLIANCE_0006_SQL_SHA256}`
+    ]
+  ]) {
+    assert.throws(() => parseMigrationCommand(argv), {
+      code: "migration_compliance_argument_invalid"
     });
   }
 });
@@ -1341,7 +1454,8 @@ test("manifest freezes ordered LF-only migration checksums", () => {
       "0002_social_connections_and_vault",
       "0003_global_vault_key_registry",
       "0004_social_connector_persistence",
-      "0005_fix_social_reference_checks"
+      "0005_fix_social_reference_checks",
+      "0006_social_compliance_persistence"
     ]
   );
   for (const migration of migrations) {
@@ -2498,7 +2612,7 @@ test("plan-exact refuses non-exact ledger states and preserves its historical 00
       code: "migration_ledger_invalid"
     }
   ];
-  assert.equal(manifest.length, 5);
+  assert.equal(manifest.length, 6);
   for (const candidate of states) {
     const harness = exactMigrationHarness({
       applied: candidate.applied,
@@ -2901,7 +3015,9 @@ test("exact runner validates the frozen request and synthetic recovery before co
 
 test("the dedicated staging route applies 0005 once, validates all three checks and closes the ledger", async () => {
   const manifest = readManifest({ root });
-  const migration = manifest.at(-1);
+  const migration = manifest.find(
+    (entry) => entry.version === SOCIAL_REFERENCE_CHECK_FIX_MIGRATION
+  );
   assert.equal(migration.sha256, STAGING_REFERENCE_CHECK_0005_SQL_SHA256);
   const request = Object.freeze({
     fromProfile: REFERENCE_CHECK_FROM_PROFILE,
@@ -3326,7 +3442,7 @@ test("apply takes an advisory lock and records SQL plus checksum atomically", as
   const manifest = readManifest({ root });
   assert.deepEqual(
     harness.state.applied.map((row) => row.checksum_sha256),
-    manifest.map((migration) => migration.sha256)
+    manifest.slice(0, 5).map((migration) => migration.sha256)
   );
   assert.equal(harness.state.released, true);
 });

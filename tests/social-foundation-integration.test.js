@@ -690,8 +690,9 @@ test("servidor isola empresas, protege midia e preserva sessao com o mesmo segre
 
   const legal = await request(port, "/privacidade");
   assert.equal(legal.status, 200);
-  assert.match(legal.body.toString("utf8"), /RASCUNHO/);
-  assert.match(legal.headers["x-robots-tag"], /noindex/);
+  assert.match(legal.body.toString("utf8"), /RASCUNHO TÉCNICO PÚBLICO/);
+  assert.equal(legal.headers["x-robots-tag"], "index, follow");
+  assert.doesNotMatch(legal.headers["x-robots-tag"], /noindex|nofollow/);
 
   let limited = null;
   for (let attempt = 0; attempt < 13; attempt += 1) {

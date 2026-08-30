@@ -280,6 +280,13 @@ function requireDependencies(options) {
   ) {
     oauthFail("social_instagram_configuration_invalid");
   }
+  if (
+    options.metaComplianceRepository !== undefined &&
+    typeof options.metaComplianceRepository
+      ?.subjectMappingForExternalUser !== "function"
+  ) {
+    oauthFail("social_instagram_configuration_invalid");
+  }
 }
 
 function requireOAuthScope(value) {
@@ -309,6 +316,30 @@ function requireConnectorStoreScope(value) {
     oauthFail("social_instagram_configuration_invalid");
   }
   return value;
+}
+
+async function ensureLegacyComplianceMapping(options, store, connection) {
+  if (
+    !options.metaComplianceRepository ||
+    !connection ||
+    connection.state !== "connected" ||
+    !connection.account
+  ) {
+    return;
+  }
+  if (typeof store.ensureLegacyComplianceSubjectMapping !== "function") {
+    oauthFail("social_instagram_configuration_invalid");
+  }
+  const subjectMapping = options.metaComplianceRepository
+    .subjectMappingForExternalUser({
+      provider: INSTAGRAM_PROVIDER,
+      externalUserId: connection.account.externalId
+    });
+  await store.ensureLegacyComplianceSubjectMapping({
+    connectionId: connection.id,
+    externalUserId: connection.account.externalId,
+    subjectMapping
+  });
 }
 
 function persistenceFailure(error, expired = false) {
@@ -571,6 +602,12 @@ function createInstagramOAuthService(options = {}) {
         providerAccount,
         expectedUsername
       );
+      const subjectMapping = options.metaComplianceRepository
+        ? options.metaComplianceRepository.subjectMappingForExternalUser({
+            provider: INSTAGRAM_PROVIDER,
+            externalUserId: exchanged.userId
+          })
+        : null;
       const expectedRevision = requireRevision(consumed.connectionRevision);
       failureStage = OAUTH_FAILURE_STAGES.CONNECTION_PERSISTENCE;
       await store.runExclusive(async (transactionalStore) => {
@@ -594,9 +631,9 @@ function createInstagramOAuthService(options = {}) {
               state: "connected",
               account: discoveredAccount,
               revision: expectedRevision + 1
-            }, expectedRevision, credentialEnvelope, {
-              grantedScopes
-            });
+            }, expectedRevision, credentialEnvelope, subjectMapping
+              ? { grantedScopes, subjectMapping }
+              : { grantedScopes });
           failureStage = OAUTH_FAILURE_STAGES.ATOMIC_FINALIZATION;
           const activatedConnection = activated?.connection;
           if (
@@ -650,6 +687,7 @@ function createInstagramOAuthService(options = {}) {
     const { context } = authenticatedContext(source.verifiedClaims);
     const store = requireConnectorStoreScope(options.connectorStore.scope(context));
     const current = await store.getCurrentConnectionDetails();
+    await ensureLegacyComplianceMapping(options, store, current);
     return Object.freeze({
       ok: true,
       connection: current ? publicConnection(current) : null
@@ -663,6 +701,7 @@ function createInstagramOAuthService(options = {}) {
     const store = requireConnectorStoreScope(options.connectorStore.scope(context));
     const connection = await store.getConnectionDetails(connectionId);
     if (!connection) oauthFail("resource_unavailable");
+    await ensureLegacyComplianceMapping(options, store, connection);
     return Object.freeze({
       ok: true,
       connection: publicConnection(connection)

@@ -17,7 +17,7 @@ function ownedFixture() {
   return fs.mkdtempSync(path.join(os.tmpdir(), "ia4tube-migration-profile-"));
 }
 
-test("authenticated profile manifests freeze the exact canonical 0003, 0004 and 0005 prefixes", () => {
+test("authenticated profile manifests freeze the canonical 0003 through 0006 prefixes", () => {
   const ownedRoot = ownedFixture();
   try {
     for (const [profileId, expectedVersions] of Object.entries(PROFILE_VERSIONS)) {
@@ -40,8 +40,8 @@ test("a selected historic profile ignores an authenticated future migration", ()
   const ownedRoot = ownedFixture();
   const canonical = migrations.readManifest({ root: repositoryRoot });
   const future = Object.freeze({
-    version: "0006_synthetic_future",
-    file: "0006_synthetic_future.up.sql",
+    version: "0007_synthetic_future",
+    file: "0007_synthetic_future.up.sql",
     sha256: "f".repeat(64),
     sql: "SELECT 1;"
   });

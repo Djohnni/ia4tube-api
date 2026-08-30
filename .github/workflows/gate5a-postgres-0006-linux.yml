@@ -1,0 +1,80 @@
+{
+  "name": "Gate 5A migration 0006 one-shot Linux physical proof",
+  "on": {
+    "push": {
+      "branches": [
+        "social/gate-5a-reviewer-readiness-staging-20260830"
+      ]
+    }
+  },
+  "permissions": {
+    "contents": "read"
+  },
+  "concurrency": {
+    "group": "gate5a-postgres-0006-linux-one-shot",
+    "cancel-in-progress": false
+  },
+  "env": {
+    "GATE5A_AUTHORIZED_PARENT": "08c6933168849c9fb5f5720af775fb746b74dbcd",
+    "GATE5A_AUTHORIZED_SUBJECT": "[gate5a] reviewer readiness and migration 0006",
+    "GATE5A_CANDIDATE_AGGREGATE_SHA256": "718da252f8cd3921079872718316a99f3a91067f5aa1f54a8c69bb3e42b99312",
+    "GATE5A_MIGRATION_SHA256": "f07eb68d37e8fec372e4b712447a113cba5d6ae6395492bb5678cc13d74948e7",
+    "GATE5A_POSTGRES_IMAGE": "postgres:18.6-bookworm@sha256:a10c981235b4f635e65df0cfb66a5598064628128505dbc6a3ed4ca303717521"
+  },
+  "jobs": {
+    "physical-proof": {
+      "if": "${{ github.event_name == 'push' && github.ref == 'refs/heads/social/gate-5a-reviewer-readiness-staging-20260830' && github.event.created == true && github.event.forced == false && github.event.before == '0000000000000000000000000000000000000000' && github.run_attempt == 1 && github.run_number == 1 }}",
+      "runs-on": "ubuntu-24.04",
+      "timeout-minutes": 30,
+      "steps": [
+        {
+          "name": "Checkout the single authorized candidate",
+          "uses": "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+          "with": {
+            "fetch-depth": 2,
+            "persist-credentials": false
+          }
+        },
+        {
+          "name": "Verify immutable one-shot boundary",
+          "shell": "bash",
+          "env": {
+            "GATE5A_EVENT_CREATED": "${{ github.event.created }}",
+            "GATE5A_EVENT_FORCED": "${{ github.event.forced }}",
+            "GATE5A_EVENT_BEFORE": "${{ github.event.before }}"
+          },
+          "run": "set -Eeuo pipefail\n[[ \"${GITHUB_EVENT_NAME}\" == \"push\" ]]\n[[ \"${GITHUB_REF}\" == \"refs/heads/social/gate-5a-reviewer-readiness-staging-20260830\" ]]\n[[ \"${GATE5A_EVENT_CREATED}\" == \"true\" ]]\n[[ \"${GATE5A_EVENT_FORCED}\" == \"false\" ]]\n[[ \"${GATE5A_EVENT_BEFORE}\" == \"0000000000000000000000000000000000000000\" ]]\n[[ \"${GITHUB_RUN_ATTEMPT}\" == \"1\" ]]\n[[ \"${GITHUB_RUN_NUMBER}\" == \"1\" ]]\n[[ \"${GITHUB_SHA}\" == \"$(git rev-parse HEAD)\" ]]\n[[ -z \"$(git status --porcelain --untracked-files=all)\" ]]\nmapfile -t parents < <(git show -s --format=%P HEAD)\n[[ \"${#parents[@]}\" -eq 1 ]]\n[[ \"${parents[0]}\" == \"${GATE5A_AUTHORIZED_PARENT}\" ]]\n[[ \"$(git show -s --format=%s HEAD)\" == \"${GATE5A_AUTHORIZED_SUBJECT}\" ]]\nworkflow_path=\".github/workflows/gate5a-postgres-0006-linux.yml\"\n[[ -f \"${workflow_path}\" && ! -L \"${workflow_path}\" ]]\nactual_workflow_sha256=\"$(sha256sum -- \"${workflow_path}\" | awk '{print $1}')\"\nmapfile -t workflow_trailers < <(git show -s --format='%(trailers:key=Gate5A-Workflow-SHA256,valueonly)' HEAD | sed '/^$/d')\nmapfile -t candidate_trailers < <(git show -s --format='%(trailers:key=Gate5A-Candidate-Aggregate-SHA256,valueonly)' HEAD | sed '/^$/d')\nmapfile -t count_trailers < <(git show -s --format='%(trailers:key=Gate5A-Candidate-Path-Count,valueonly)' HEAD | sed '/^$/d')\n[[ \"${#workflow_trailers[@]}\" -eq 1 ]]\n[[ \"${#candidate_trailers[@]}\" -eq 1 ]]\n[[ \"${#count_trailers[@]}\" -eq 1 ]]\n[[ \"${workflow_trailers[0]}\" == \"${actual_workflow_sha256}\" ]]\n[[ \"${candidate_trailers[0]}\" == \"${GATE5A_CANDIDATE_AGGREGATE_SHA256}\" ]]\n[[ \"${count_trailers[0]}\" == \"53\" ]]\ncandidate_paths=(\n  \".github/workflows/gate5a-postgres-0006-linux.yml\"\n  \"app.html\"\n  \"db/migrations/0006_social_compliance_persistence.up.sql\"\n  \"db/migrations/checksums.json\"\n  \"docs/gate5/DATA_DELETION_MIGRATION_REQUIRED.md\"\n  \"docs/gate5/LEGAL_OWNER_DECISIONS_REQUIRED.md\"\n  \"docs/gate5/META_BUSINESS_IDENTITY_DISCREPANCY.md\"\n  \"docs/gate5/META_DASHBOARD_CHANGES_PENDING.md\"\n  \"gate5a-reviewer-flow.js\"\n  \"scripts/social-db-migrate.js\"\n  \"scripts/social-migration-profile-manifest.js\"\n  \"server.js\"\n  \"src/legal/legal-pages.routes.js\"\n  \"src/legal/templates/data-deletion.html\"\n  \"src/legal/templates/privacy.html\"\n  \"src/legal/templates/terms.html\"\n  \"src/persistence/postgres/backup-restore.js\"\n  \"src/persistence/postgres/meta-compliance-repository.js\"\n  \"src/persistence/postgres/migrations.js\"\n  \"src/persistence/postgres/runtime-validation.js\"\n  \"src/persistence/postgres/social-connector-store.js\"\n  \"src/social/compliance/errors.js\"\n  \"src/social/compliance/index.js\"\n  \"src/social/compliance/meta-compliance-memory-repository.js\"\n  \"src/social/compliance/meta-compliance-router.js\"\n  \"src/social/compliance/meta-compliance-service.js\"\n  \"src/social/compliance/meta-signed-request.js\"\n  \"src/social/oauth/instagram-oauth-router.js\"\n  \"src/social/oauth/instagram-oauth-service.js\"\n  \"src/social/oauth/instagram-oauth-visual-return.js\"\n  \"src/social/reviewer-sandbox/reviewer-sandbox.js\"\n  \"src/social/runtime.js\"\n  \"src/social/server-runtime.js\"\n  \"tests/gate5-compliance-status-html.test.js\"\n  \"tests/gate5-legal-readiness.test.js\"\n  \"tests/gate5-meta-compliance.test.js\"\n  \"tests/gate5-oauth-visual-return.test.js\"\n  \"tests/gate5-reviewer-sandbox.test.js\"\n  \"tests/gate5-reviewer-server-e2e.test.js\"\n  \"tests/gate5a-postgres-0006-focal.test.js\"\n  \"tests/gate5a-postgres-0006-linux-workflow.test.js\"\n  \"tests/gate5a-reviewer-flow.test.js\"\n  \"tests/legal-pages.test.js\"\n  \"tests/node-test-runner-safety.test.js\"\n  \"tests/social-3a0p-current-diff-scope.test.js\"\n  \"tests/social-3b0-instagram-oauth-routes.test.js\"\n  \"tests/social-connector-persistence.test.js\"\n  \"tests/social-foundation-integration.test.js\"\n  \"tests/social-migration-profile-manifest.test.js\"\n  \"tests/social-postgres-backup-restore.test.js\"\n  \"tests/social-postgres-foundation.test.js\"\n  \"tests/social-postgres-migrations.test.js\"\n  \"tests/social-server-runtime.test.js\"\n)\n[[ \"${#candidate_paths[@]}\" -eq 53 ]]\nmapfile -t actual_paths < <(git diff --name-only HEAD^ HEAD --no-renames -- | LC_ALL=C sort)\n[[ \"${#actual_paths[@]}\" -eq \"${#candidate_paths[@]}\" ]]\nfor index in \"${!candidate_paths[@]}\"; do\n  [[ \"${actual_paths[${index}]}\" == \"${candidate_paths[${index}]}\" ]]\n  [[ -f \"${candidate_paths[${index}]}\" && ! -L \"${candidate_paths[${index}]}\" ]]\ndone\ndigest_paths=(\"${candidate_paths[@]:1}\")\n[[ \"${#digest_paths[@]}\" -eq 52 ]]\ndigest_file=\"${RUNNER_TEMP}/gate5a-candidate-digests-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.txt\"\n: > \"${digest_file}\"\nfor candidate_path in \"${digest_paths[@]}\"; do\n  candidate_sha256=\"$(sha256sum -- \"${candidate_path}\" | awk '{print $1}')\"\n  printf '%s  %s\\n' \"${candidate_sha256}\" \"${candidate_path}\" >> \"${digest_file}\"\ndone\nactual_candidate_sha256=\"$(sha256sum -- \"${digest_file}\" | awk '{print $1}')\"\nrm -f -- \"${digest_file}\"\n[[ \"${actual_candidate_sha256}\" == \"${GATE5A_CANDIDATE_AGGREGATE_SHA256}\" ]]\n[[ \"$(sha256sum -- db/migrations/0006_social_compliance_persistence.up.sql | awk '{print $1}')\" == \"${GATE5A_MIGRATION_SHA256}\" ]]\nprotected_paths=(\n  \"package.json\"\n  \"package-lock.json\"\n  \"db/migrations/0001_social_multitenant_foundation.up.sql\"\n  \"db/migrations/0002_social_connections_and_vault.up.sql\"\n  \"db/migrations/0003_global_vault_key_registry.up.sql\"\n  \"db/migrations/0004_social_connector_persistence.up.sql\"\n  \"db/migrations/0005_fix_social_reference_checks.up.sql\"\n  \".github/workflows/social-3a0p-linux-physical-gates.yml\"\n  \".github/workflows/social-3b0-exact-0004-runner-linux.yml\"\n  \".github/workflows/social-3b0-instagram-oauth-local-contract.yml\"\n  \".github/workflows/social-staging-exact-0004-disposable.yml\"\n  \"tests/social-3a0p-linux-workflow.test.js\"\n  \"tests/social-3b0-exact-0004-runner-linux-workflow.test.js\"\n  \"tests/social-vault-key-authority.test.js\"\n)\nfor protected_path in \"${protected_paths[@]}\"; do\n  git diff --quiet HEAD^ HEAD -- \"${protected_path}\"\ndone"
+        },
+        {
+          "name": "Set up Node 24",
+          "uses": "actions/setup-node@820762786026740c76f36085b0efc47a31fe5020",
+          "with": {
+            "node-version": "24",
+            "cache": "npm"
+          }
+        },
+        {
+          "name": "Install the frozen runtime dependencies",
+          "shell": "bash",
+          "run": "set -Eeuo pipefail\nnpm ci --ignore-scripts --no-audit --no-fund"
+        },
+        {
+          "name": "Pull and verify the pinned PostgreSQL image",
+          "shell": "bash",
+          "run": "set -Eeuo pipefail\ndocker pull \"${GATE5A_POSTGRES_IMAGE}\"\n[[ \"$(docker image inspect --format '{{.Architecture}}' \"${GATE5A_POSTGRES_IMAGE}\")\" == \"amd64\" ]]\n[[ \"$(docker image inspect --format '{{index .RepoDigests 0}}' \"${GATE5A_POSTGRES_IMAGE}\")\" == *@sha256:a10c981235b4f635e65df0cfb66a5598064628128505dbc6a3ed4ca303717521 ]]"
+        },
+        {
+          "name": "Run the single Gate 5A physical migration proof",
+          "shell": "bash",
+          "run": "set -Eeuo pipefail\ncontainer_name=\"gate5a-postgres-0006-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}\"\nlabel=\"io.ia4tube.gate5a-0006-run=${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}\"\nproof_root=\"${RUNNER_TEMP}/gate5a-postgres-0006-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}\"\n[[ \"${proof_root}\" == \"${RUNNER_TEMP}/gate5a-postgres-0006-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}\" ]]\n[[ ! -e \"${proof_root}\" && ! -L \"${proof_root}\" ]]\n[[ -z \"$(docker ps --all --no-trunc --quiet --filter \"label=${label}\")\" ]]\n[[ -z \"$(docker ps --all --no-trunc --quiet --filter \"name=^/${container_name}$\")\" ]]\nmkdir -- \"${proof_root}\"\nchmod 700 \"${proof_root}\"\nsudo chown 999:999 \"${proof_root}\"\nnode_root=\"$(dirname \"$(dirname \"$(readlink -f \"$(command -v node)\")\")\")\"\n[[ -x \"${node_root}/bin/node\" ]]\ntimeout --signal=TERM --kill-after=30s 720s docker run --rm \\\n  --name \"${container_name}\" \\\n  --label \"${label}\" \\\n  --platform linux/amd64 \\\n  --network none \\\n  --read-only \\\n  --cap-drop ALL \\\n  --security-opt no-new-privileges \\\n  --user 999:999 \\\n  --workdir /workspace \\\n  --tmpfs /run:rw,noexec,nosuid,nodev,size=16m \\\n  --tmpfs /dev/shm:rw,nosuid,nodev,size=64m \\\n  --mount \"type=bind,src=${GITHUB_WORKSPACE},dst=/workspace,readonly\" \\\n  --mount \"type=bind,src=${node_root},dst=/opt/node,readonly\" \\\n  --mount \"type=bind,src=${proof_root},dst=/proof\" \\\n  --env TMPDIR=/proof \\\n  --env NODE_ENV=test \\\n  --env IA4TUBE_GATE5A_0006_PHYSICAL_APPROVED=I_AUTHORIZE_ONE_DISPOSABLE_POSTGRES_18_6_GATE5A_0006_RUN \\\n  --entrypoint /opt/node/bin/node \\\n  \"${GATE5A_POSTGRES_IMAGE}\" \\\n  --test --test-reporter=spec /workspace/tests/gate5a-postgres-0006-focal.test.js"
+        },
+        {
+          "name": "Remove the exact disposable route and prove zero residue",
+          "if": "always()",
+          "shell": "bash",
+          "run": "set -u\ncontainer_name=\"gate5a-postgres-0006-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}\"\nlabel=\"io.ia4tube.gate5a-0006-run=${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}\"\nproof_root=\"${RUNNER_TEMP}/gate5a-postgres-0006-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}\"\n[[ \"${proof_root}\" == \"${RUNNER_TEMP}/gate5a-postgres-0006-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}\" ]]\ncleanup_ok=1\nbefore_label=\"$(docker ps --all --no-trunc --quiet --filter \"label=${label}\")\" || cleanup_ok=0\nbefore_name=\"$(docker ps --all --no-trunc --quiet --filter \"name=^/${container_name}$\")\" || cleanup_ok=0\nif [[ -n \"${before_name}\" ]]; then\n  docker rm --force \"${container_name}\" >/dev/null || cleanup_ok=0\nfi\nif [[ -e \"${proof_root}\" || -L \"${proof_root}\" ]]; then\n  if [[ -L \"${proof_root}\" ]]; then\n    cleanup_ok=0\n  else\n    sudo rm -rf --one-file-system -- \"${proof_root}\" || cleanup_ok=0\n  fi\nfi\nafter_label=\"$(docker ps --all --no-trunc --quiet --filter \"label=${label}\")\" || cleanup_ok=0\nafter_name=\"$(docker ps --all --no-trunc --quiet --filter \"name=^/${container_name}$\")\" || cleanup_ok=0\nif [[ \"${cleanup_ok}\" == \"1\" && -z \"${after_label}\" && -z \"${after_name}\" && ! -e \"${proof_root}\" && ! -L \"${proof_root}\" ]]; then\n  exit 0\nfi\nexit 1"
+        }
+      ]
+    }
+  }
+}
