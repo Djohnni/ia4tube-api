@@ -1,6 +1,7 @@
 "use strict";
 
 const assert = require("node:assert/strict");
+const crypto = require("node:crypto");
 const fs = require("node:fs");
 const http = require("node:http");
 const net = require("node:net");
@@ -14,9 +15,39 @@ const bcrypt = require("bcryptjs");
 const ROOT = path.resolve(__dirname, "..");
 const SERVER_FILE = path.join(ROOT, "server.js");
 const STAGING_ORIGIN = "https://ia4tube-api-staging-checkpoint-a.onrender.com";
+const PRODUCTION_TEST_ORIGIN = "https://synthetic-api.example.test";
+const PRODUCTION_TEST_HOST = new URL(PRODUCTION_TEST_ORIGIN).host;
 const LOGIN = "gate5a-reviewer-synthetic";
 const PASSWORD = "Gate5AReviewerSynthetic2026";
+const LOGIN_B = "gate5a-reviewer-empty-demo";
+const PASSWORD_B = "Gate5AReviewerEmptyDemo2026";
 const RUNNER_TOKEN = "gate5a-reviewer-synthetic-runner-token";
+const GATE4_SHA256 =
+  "4b9224fee69b707f304e11ad25ef7fe9d22f19904ba0b933172861f53b5bd773";
+
+function sha256(bytes) {
+  return crypto.createHash("sha256").update(bytes).digest("hex");
+}
+
+function syntheticJpegBytes() {
+  return Buffer.from(
+    "/9j/4AAQSkZJRgABAQEAYABgAAD/2wBDAAMCAgMCAgMDAwMEAwMEBQgFBQQEBQoH" +
+    "BwYIDAoMDAsKCwsNDhIQDQ4RDgsLEBYQERMUFRUVDA8XGBYUGBIUFRT/2wBDAQME" +
+    "BAUEBQkFBQkUDQsNFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQU" +
+    "FBQUFBQUFBQUFBQUFBT/wAARCAACAAIDASIAAhEBAxEB/8QAHwAAAQUBAQEBAQEA" +
+    "AAAAAAAAAAECAwQFBgcICQoL/8QAtRAAAgEDAwIEAwUFBAQAAAF9AQIDAAQRBRIh" +
+    "MUEGE1FhByJxFDKBkaEII0KxwRVS0fAkM2JyggkKFhcYGRolJicoKSo0NTY3ODk6" +
+    "Q0RFRkdISUpTVFVWV1hZWmNkZWZnaGlqc3R1dnd4eXqDhIWGh4iJipKTlJWWl5iZ" +
+    "mqKjpKWmp6ipqrKztLW2t7i5usLDxMXGx8jJytLT1NXW19jZ2uHi4+Tl5ufo6erx" +
+    "8vP09fb3+Pn6/8QAHwEAAwEBAQEBAQEBAQAAAAAAAAECAwQFBgcICQoL/8QAtREA" +
+    "AgECBAQDBAcFBAQAAQJ3AAECAxEEBSExBhJBUQdhcRMiMoEIFEKRobHBCSMzUvAV" +
+    "YnLRChYkNOEl8RcYGRomJygpKjU2Nzg5OkNERUZHSElKU1RVVldYWVpjZGVmZ2hp" +
+    "anN0dXZ3eHl6goOEhYaHiImKkpOUlZaXmJmaoqOkpaanqKmqsrO0tba3uLm6wsPE" +
+    "xcbHyMnK0tPU1dbX2Nna4uPk5ebn6Onq8vP09fb3+Pn6/9oADAMBAAIRAxEAPwD9" +
+    "U6KKKAP/2Q==",
+    "base64"
+  );
+}
 
 function freePort() {
   return new Promise((resolve, reject) => {
@@ -29,7 +60,7 @@ function freePort() {
   });
 }
 
-function spawnServer(port, dataDirectory) {
+function spawnServer(port, dataDirectory, overrides = {}) {
   const env = {
     ...process.env,
     PORT: String(port),
@@ -49,6 +80,12 @@ function spawnServer(port, dataDirectory) {
     FCM_MOCK: "1",
     FCM_DELIVERY_ENABLED: "false",
     FCM_AUTOMATIC_NOTIFICATIONS_ENABLED: "false",
+    FIREBASE_EXPECTED_PROJECT_ID: "",
+    FIREBASE_SERVICE_ACCOUNT_JSON: "",
+    GOOGLE_APPLICATION_CREDENTIALS: "",
+    FIREBASE_PROJECT_ID: "",
+    FIREBASE_CLIENT_EMAIL: "",
+    FIREBASE_PRIVATE_KEY: "",
     IA4TUBE_FREE_ART_ENABLED: "false",
     SOCIAL_PERSISTENCE_ENABLED: "false",
     SOCIAL_INSTAGRAM_ENABLED: "false",
@@ -57,7 +94,8 @@ function spawnServer(port, dataDirectory) {
     INSTAGRAM_APP_SECRET: "gate5a-meta-signed-request-test-secret",
     OAUTH_RATE_LIMIT_MAX: "100",
     AUTH_LOGIN_RATE_LIMIT_MAX: "20",
-    AUTH_LOGIN_ACCOUNT_RATE_LIMIT_MAX: "20"
+    AUTH_LOGIN_ACCOUNT_RATE_LIMIT_MAX: "20",
+    ...overrides
   };
   const child = spawn(process.execPath, [SERVER_FILE], {
     cwd: ROOT,
@@ -97,7 +135,7 @@ function request(port, requestPath, options = {}) {
       path: requestPath,
       method,
       headers: {
-        Host: "ia4tube-api-staging-checkpoint-a.onrender.com",
+        Host: options.host || "ia4tube-api-staging-checkpoint-a.onrender.com",
         "X-Forwarded-Proto": "https",
         ...(body ? {
           "Content-Type": options.contentType || "application/json",
@@ -168,9 +206,21 @@ test("canonical staging app completes the authenticated reviewer sandbox flow", 
   fs.mkdirSync(dataDirectory, { recursive: true });
   fs.writeFileSync(path.join(dataDirectory, "clientes.json"), JSON.stringify({
     [LOGIN]: {
-      nome_time: "Empresa Sintetica do Revisor",
+      nome_time: "Sabor da Vila Hamburgueria — DEMO",
       login_id: LOGIN,
       senha_hash: bcrypt.hashSync(PASSWORD, 4),
+      plano: 0,
+      saldo_mensal: 0,
+      saldo_extra: 100,
+      usados_no_ciclo: 0,
+      ciclo_mes: "2026-08",
+      conta_finalizada: true,
+      ativo: true
+    },
+    [LOGIN_B]: {
+      nome_time: "Empresa Vazia do Revisor — DEMO",
+      login_id: LOGIN_B,
+      senha_hash: bcrypt.hashSync(PASSWORD_B, 4),
       plano: 0,
       saldo_mensal: 0,
       saldo_extra: 100,
@@ -192,6 +242,28 @@ test("canonical staging app completes the authenticated reviewer sandbox flow", 
     fs.rmSync(temporaryRoot, { recursive: true, force: true });
   });
   await waitForServer(instance);
+
+  assert.equal(
+    (instance.output().match(/API rodando na porta/g) || []).length,
+    1
+  );
+  const health = await request(port, "/");
+  assert.equal(health.status, 200);
+  assert.deepEqual(health.json, { ok: true, msg: "omascote-api online" });
+
+  for (const legalPath of [
+    "/politica-de-privacidade",
+    "/termos-de-uso",
+    "/exclusao-de-dados"
+  ]) {
+    const legal = await request(port, legalPath);
+    assert.equal(legal.status, 200, legalPath);
+    assert.equal(legal.headers.location, undefined, legalPath);
+    const legalBody = legal.raw.toString("utf8");
+    assert.match(legalBody, /RASCUNHO TÉCNICO PÚBLICO/);
+    assert.match(legalBody, /NÃO APROVADO JURIDICAMENTE/);
+    assert.doesNotMatch(legalBody, /facebook\.com|example\.com|placeholder/i);
+  }
 
   const appPage = await request(
     port,
@@ -262,6 +334,38 @@ test("canonical staging app completes the authenticated reviewer sandbox flow", 
   assert.equal(typeof login.json.token, "string");
   const token = login.json.token;
 
+  const loginB = await request(port, "/auth/login", {
+    method: "POST",
+    body: { whatsapp: LOGIN_B, senha: PASSWORD_B }
+  });
+  assert.equal(loginB.status, 200);
+  assert.equal(loginB.json.ok, true);
+  const tokenB = loginB.json.token;
+
+  await request(port, "/v1/social/reviewer-sandbox/authorization", {
+    method: "POST",
+    token: tokenB,
+    body: { accountType: "BUSINESS", purpose: "app_review" }
+  });
+  const callbackB = await request(
+    port,
+    "/v1/social/reviewer-sandbox/authorization/callback",
+    { method: "POST", token: tokenB, body: {} }
+  );
+  assert.equal(callbackB.status, 200);
+  const emptyMediaB = await request(port, "/v1/social/reviewer-sandbox/media", {
+    method: "POST",
+    token: tokenB,
+    body: { asset: "controlled-review-jpeg" }
+  });
+  assert.equal(emptyMediaB.status, 404);
+  assert.equal(emptyMediaB.json.error.code, "reviewer_media_unavailable");
+  assert.deepEqual(emptyMediaB.json.state.media, {
+    selected: false,
+    item: null
+  });
+  assert.deepEqual(emptyMediaB.json.state.history, []);
+
   const supportMessages = await request(
     port,
     "/suporte/minhas-mensagens",
@@ -283,7 +387,7 @@ test("canonical staging app completes the authenticated reviewer sandbox flow", 
     token,
     body: {
       flyer_tipo: "pedido",
-      nome_time: "Empresa Sintetica do Revisor",
+      nome_time: "Sabor da Vila Hamburgueria — DEMO",
       rodada: "Gate 5A",
       data: "30/08/2026"
     }
@@ -292,7 +396,8 @@ test("canonical staging app completes the authenticated reviewer sandbox flow", 
   assert.equal(typeof productOrder.json.pedido_id, "string");
   const productOrderId = productOrder.json.pedido_id;
   const syntheticCaption =
-    "Arte sintética concluída com legenda persistida para a revisão Gate 5A.";
+    "Combo da Casa — DEMO\nDEMO SINTÉTICA\nNÃO PUBLICAR";
+  const syntheticPreview = syntheticJpegBytes();
   const generatedProduct = multipartBody([
     {
       name: "descricao_instagram",
@@ -308,7 +413,7 @@ test("canonical staging app completes the authenticated reviewer sandbox flow", 
       name: "preview",
       filename: "gate5a-generated-preview.jpg",
       contentType: "image/jpeg",
-      content: Buffer.from("gate5a-synthetic-generated-preview", "utf8")
+      content: syntheticPreview
     }
   ]);
   const completedProduct = await request(
@@ -331,6 +436,65 @@ test("canonical staging app completes the authenticated reviewer sandbox flow", 
   assert.equal(rereadProduct.json.imagem_pronta, true);
   assert.equal(rereadProduct.json.status, "pronto");
   assert.equal(rereadProduct.json.descricao_instagram, syntheticCaption);
+
+  const crossTenantProduct = await request(
+    port,
+    `/pedidos/${productOrderId}/info`,
+    { token: tokenB }
+  );
+  assert.equal(crossTenantProduct.status, 404);
+
+  const invalidJpegOrder = await request(port, "/pedidos", {
+    method: "POST",
+    token: tokenB,
+    body: {
+      flyer_tipo: "pedido",
+      nome_time: "Empresa Vazia do Revisor — DEMO",
+      rodada: "Gate 5A",
+      data: "30/08/2026"
+    }
+  });
+  assert.equal(invalidJpegOrder.status, 200);
+  const malformedProduct = multipartBody([
+    {
+      name: "descricao_instagram",
+      content: Buffer.from(syntheticCaption, "utf8")
+    },
+    {
+      name: "resultado",
+      filename: "gate5a-invalid-generated-art.png",
+      contentType: "image/png",
+      content: Buffer.from("gate5a-invalid-generated-art", "utf8")
+    },
+    {
+      name: "preview",
+      filename: "gate5a-invalid-preview.jpg",
+      contentType: "image/jpeg",
+      content: Buffer.from("not-a-jpeg", "utf8")
+    }
+  ]);
+  const completedMalformedProduct = await request(
+    port,
+    `/bot/pedidos/${invalidJpegOrder.json.pedido_id}/upload-resultado`,
+    {
+      method: "POST",
+      token: RUNNER_TOKEN,
+      rawBody: malformedProduct.body,
+      contentType: malformedProduct.contentType
+    }
+  );
+  assert.equal(completedMalformedProduct.status, 200);
+  const invalidMediaB = await request(port, "/v1/social/reviewer-sandbox/media", {
+    method: "POST",
+    token: tokenB,
+    body: { asset: "controlled-review-jpeg" }
+  });
+  assert.equal(invalidMediaB.status, 404);
+  assert.equal(invalidMediaB.json.error.code, "reviewer_media_unavailable");
+  assert.deepEqual(invalidMediaB.json.state.media, {
+    selected: false,
+    item: null
+  });
 
   const initial = await request(port, "/v1/social/reviewer-sandbox/state", { token });
   assert.equal(initial.status, 200);
@@ -359,13 +523,86 @@ test("canonical staging app completes the authenticated reviewer sandbox flow", 
   assert.equal(callback.json.state.connection.status, "connected");
   assert.equal(callback.json.state.connection.account.accountType, "BUSINESS");
 
+  for (const invalidBody of [
+    { asset: "controlled-review-jpeg", company_id: LOGIN_B },
+    { asset: "controlled-review-jpeg", orderId: productOrderId },
+    { asset: "https://example.invalid/arbitrary.jpg" }
+  ]) {
+    const rejected = await request(port, "/v1/social/reviewer-sandbox/media", {
+      method: "POST",
+      token,
+      body: invalidBody
+    });
+    assert.equal(rejected.status, 400);
+    assert.equal(rejected.json.error.code, "reviewer_request_invalid");
+    assert.deepEqual(rejected.json.state.media, {
+      selected: false,
+      item: null
+    });
+  }
+
   const media = await request(port, "/v1/social/reviewer-sandbox/media", {
     method: "POST",
     token,
     body: { asset: "controlled-review-jpeg" }
   });
   assert.equal(media.status, 200);
-  assert.equal(media.json.state.media.item.mimeType, "image/jpeg");
+  const mediaItem = media.json.state.media.item;
+  assert.equal(mediaItem.mimeType, "image/jpeg");
+  assert.equal(mediaItem.width, 2);
+  assert.equal(mediaItem.height, 2);
+  assert.equal(mediaItem.tenantOwned, true);
+  assert.equal(mediaItem.id, "tenant-controlled-review-jpeg");
+  assert.equal(mediaItem.assetPath.startsWith(
+    "/v1/social/reviewer-sandbox/media-capability/"
+  ), true);
+  assert.equal(mediaItem.assetPath.includes("?"), false);
+  assert.equal(mediaItem.assetPath.includes("#"), false);
+  assert.equal(mediaItem.assetPath.includes("\\"), false);
+  assert.equal(mediaItem.assetPath.length <= 300, true);
+  assert.equal(mediaItem.assetPath.includes(LOGIN), false);
+  assert.equal(mediaItem.assetPath.includes(GATE4_SHA256), false);
+  assert.equal(JSON.stringify(media.json).includes("storageKey"), false);
+  assert.equal(JSON.stringify(media.json).includes("ownerCompanyId"), false);
+  assert.equal(JSON.stringify(media.json).includes("sha256"), false);
+  assert.equal(JSON.stringify(media.json).includes("contentId"), false);
+
+  const protectedAssetPath = mediaItem.assetPath;
+  const protectedAsset = await request(port, protectedAssetPath);
+  assert.equal(protectedAsset.status, 200);
+  assert.match(protectedAsset.headers["content-type"], /^image\/jpeg/);
+  assert.equal(protectedAsset.headers["cache-control"], "private, no-store, no-transform");
+  assert.equal(protectedAsset.headers["x-content-type-options"], "nosniff");
+  assert.equal(protectedAsset.raw.equals(syntheticPreview), true);
+  assert.equal(sha256(protectedAsset.raw), sha256(syntheticPreview));
+  assert.notEqual(sha256(protectedAsset.raw), GATE4_SHA256);
+
+  const storedPreviewCandidates = fs.readdirSync(
+    path.join(dataDirectory, "pedidos", LOGIN)
+  ).map((month) => path.join(
+    dataDirectory,
+    "pedidos",
+    LOGIN,
+    month,
+    productOrderId,
+    "preview_ia4tube.jpg"
+  )).filter((candidate) => fs.existsSync(candidate));
+  assert.equal(storedPreviewCandidates.length, 1);
+  const storageKey = path.relative(dataDirectory, storedPreviewCandidates[0])
+    .split(path.sep)
+    .join("/");
+  assert.match(storageKey, new RegExp(`^pedidos/${LOGIN}/`));
+  assert.equal(storageKey.endsWith(`/${productOrderId}/preview_ia4tube.jpg`), true);
+  assert.equal(storageKey.includes("social/gate4"), false);
+  assert.equal(sha256(fs.readFileSync(storedPreviewCandidates[0])), sha256(syntheticPreview));
+
+  for (const tamperedPath of [
+    protectedAssetPath.replace(productOrderId, `${productOrderId}x`),
+    `${protectedAssetPath.slice(0, -1)}${protectedAssetPath.endsWith("A") ? "B" : "A"}`
+  ]) {
+    const tampered = await request(port, tamperedPath);
+    assert.equal(tampered.status, 404);
+  }
 
   const requestId = "gate5a-reviewer-manual-publish-v1";
   const publication = await request(port, "/v1/social/reviewer-sandbox/publications", {
@@ -408,6 +645,26 @@ test("canonical staging app completes the authenticated reviewer sandbox flow", 
   );
   assert.equal(history.json.publications.length, 1);
   assert.equal(details.json.publication.publicationId, publicationId);
+  const crossTenantDetails = await request(
+    port,
+    `/v1/social/reviewer-sandbox/publications/${publicationId}`,
+    { token: tokenB }
+  );
+  assert.equal(crossTenantDetails.status, 404);
+  assert.equal(
+    crossTenantDetails.json.error.code,
+    "reviewer_publication_not_found"
+  );
+  const stateBAfterPublication = await request(
+    port,
+    "/v1/social/reviewer-sandbox/state",
+    { token: tokenB }
+  );
+  assert.deepEqual(stateBAfterPublication.json.state.media, {
+    selected: false,
+    item: null
+  });
+  assert.deepEqual(stateBAfterPublication.json.state.history, []);
 
   const disconnected = await request(port, "/v1/social/reviewer-sandbox/connection", {
     method: "DELETE",
@@ -427,6 +684,8 @@ test("canonical staging app completes the authenticated reviewer sandbox flow", 
   assert.equal(disconnected.json.state.history.length, 1);
   assert.equal(disconnected.json.state.history[0].publicationId, publicationId);
   assert.equal(disconnected.json.state.history[0].state, "published");
+  const revokedAsset = await request(port, protectedAssetPath);
+  assert.equal(revokedAsset.status, 404);
 
   const delayed = await request(
     port,
@@ -457,11 +716,15 @@ test("canonical staging app completes the authenticated reviewer sandbox flow", 
     "reviewer_publication_not_found"
   );
 
-  await request(port, "/v1/social/reviewer-sandbox/media", {
+  const reselectedMedia = await request(port, "/v1/social/reviewer-sandbox/media", {
     method: "POST",
     token,
     body: { asset: "controlled-review-jpeg" }
   });
+  assert.equal(reselectedMedia.status, 200);
+  const reselectedAssetPath = reselectedMedia.json.state.media.item.assetPath;
+  const stillRevokedAsset = await request(port, protectedAssetPath);
+  assert.equal(stillRevokedAsset.status, 404);
   const newRequestId = "gate5a-reviewer-reconnected-publication";
   const newPublication = await request(
     port,
@@ -493,6 +756,102 @@ test("canonical staging app completes the authenticated reviewer sandbox flow", 
   assert.equal(deletion.json.state.deletion.technicalConnectionDataDeleted, true);
   assert.equal(deletion.json.externalCalls, 0);
   assert.equal(JSON.stringify(deletion.json).includes("access_token"), false);
+  const deletedAsset = await request(port, reselectedAssetPath);
+  assert.equal(deletedAsset.status, 404);
+  const serverOutput = instance.output();
+  assert.equal(
+    (serverOutput.match(/API rodando na porta/g) || []).length,
+    1
+  );
+  assert.equal(serverOutput.includes("[social][startup]"), false);
+  assert.doesNotMatch(serverOutput, /migration|migracao|migração/i);
+  assert.equal(serverOutput.includes(PASSWORD), false);
+  assert.equal(serverOutput.includes(PASSWORD_B), false);
+  assert.equal(serverOutput.includes(RUNNER_TOKEN), false);
+  assert.equal(serverOutput.includes(token), false);
+  assert.equal(serverOutput.includes(tokenB), false);
+});
+
+test("production origin keeps the reviewer sandbox and its media capability disabled", async (t) => {
+  const temporaryRoot = fs.mkdtempSync(
+    path.join(os.tmpdir(), "ia4tube-gate5a-production-gate-")
+  );
+  const dataDirectory = path.join(temporaryRoot, "data");
+  fs.mkdirSync(dataDirectory, { recursive: true });
+  fs.writeFileSync(path.join(dataDirectory, "clientes.json"), "{}", "utf8");
+
+  const port = await freePort();
+  const instance = spawnServer(port, dataDirectory, {
+    NODE_ENV: "production",
+    PUBLIC_API_BASE_URL: PRODUCTION_TEST_ORIGIN,
+    PUBLIC_WEB_BASE_URL: PRODUCTION_TEST_ORIGIN,
+    FCM_MOCK: ""
+  });
+  t.after(async () => {
+    if (instance.child.exitCode === null) {
+      const exited = new Promise((resolve) => instance.child.once("exit", resolve));
+      instance.child.kill();
+      await exited;
+    }
+    fs.rmSync(temporaryRoot, { recursive: true, force: true });
+  });
+  await waitForServer(instance);
+
+  assert.notEqual(PRODUCTION_TEST_ORIGIN, STAGING_ORIGIN);
+  assert.equal(new URL(PRODUCTION_TEST_ORIGIN).hostname.endsWith(".test"), true);
+
+  assert.equal(
+    (instance.output().match(/API rodando na porta/g) || []).length,
+    1
+  );
+  const health = await request(port, "/", {
+    host: PRODUCTION_TEST_HOST
+  });
+  assert.equal(health.status, 200);
+  assert.deepEqual(health.json, { ok: true, msg: "omascote-api online" });
+
+  for (const legalPath of [
+    "/politica-de-privacidade",
+    "/termos-de-uso",
+    "/exclusao-de-dados"
+  ]) {
+    const legal = await request(port, legalPath, {
+      host: PRODUCTION_TEST_HOST
+    });
+    assert.equal(legal.status, 200, legalPath);
+    assert.equal(legal.headers.location, undefined, legalPath);
+  }
+
+  for (const disabledPath of [
+    "/reviewer",
+    "/app.html",
+    "/gate5a-reviewer-flow.js",
+    "/v1/social/reviewer-sandbox/state",
+    "/v1/social/reviewer-sandbox/media-capability/order/1/nonce/owner/signature"
+  ]) {
+    const disabled = await request(port, disabledPath, {
+      host: PRODUCTION_TEST_HOST
+    });
+    assert.equal(disabled.status, 404, disabledPath);
+  }
+  const serverOutput = instance.output();
+  assert.equal(
+    (serverOutput.match(/API rodando na porta/g) || []).length,
+    1
+  );
+  assert.equal(serverOutput.includes("[social][startup]"), false);
+  assert.doesNotMatch(serverOutput, /migration|migracao|migração/i);
+  assert.equal(
+    (serverOutput.match(/\[fcm\]\[safety\]/g) || []).length,
+    1
+  );
+  assert.match(serverOutput, /delivery_enabled:\s*false/);
+  assert.match(serverOutput, /automatic_notifications_enabled:\s*false/);
+  assert.match(serverOutput, /credential_configured:\s*false/);
+  assert.doesNotMatch(
+    serverOutput,
+    /oauth2\.googleapis\.com|fcm\.googleapis\.com|ia4tube-api\.onrender\.com/i
+  );
 });
 
 test("reviewer sandbox rejects personal accounts and accepts Creator after reset", async (t) => {
@@ -503,7 +862,7 @@ test("reviewer sandbox rejects personal accounts and accepts Creator after reset
   fs.mkdirSync(dataDirectory, { recursive: true });
   fs.writeFileSync(path.join(dataDirectory, "clientes.json"), JSON.stringify({
     [LOGIN]: {
-      nome_time: "Empresa Sintetica do Revisor",
+      nome_time: "Sabor da Vila Hamburgueria — DEMO",
       login_id: LOGIN,
       senha_hash: bcrypt.hashSync(PASSWORD, 4),
       ativo: true

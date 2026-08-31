@@ -25,11 +25,11 @@ const {
   createMetaComplianceRouter
 } = require("./src/social/compliance");
 const {
+  ReviewerSandboxError,
   createReviewerSandboxRouter,
   createReviewerSandboxService
 } = require("./src/social/reviewer-sandbox/reviewer-sandbox");
 const {
-  CONTROLLED_GATE4_STAGING_ORIGIN,
   CONTROLLED_GATE4_PUBLIC_PATH,
   createControlledGate4JpegPublicHandler,
   isControlledGate4RequestPath,
@@ -246,8 +246,448 @@ const PUBLIC_API_BASE_URL = PUBLIC_URLS.publicApiBaseUrl;
 const PUBLIC_WEB_BASE_URL = PUBLIC_URLS.publicWebBaseUrl;
 const PAYMENT_RETURN_URL = PUBLIC_URLS.paymentReturnUrl;
 const PAYMENT_PAYER_EMAIL_DOMAIN = PUBLIC_URLS.paymentPayerEmailDomain;
-const GATE5A_STAGING_ENABLED =
-  PUBLIC_API_BASE_URL === CONTROLLED_GATE4_STAGING_ORIGIN;
+const GATE5A_STAGING_ORIGIN =
+  "https://ia4tube-api-staging-checkpoint-a.onrender.com";
+const GATE5A_STAGING_ENABLED = PUBLIC_API_BASE_URL === GATE5A_STAGING_ORIGIN;
+const REVIEWER_MEDIA_ASSET = "controlled-review-jpeg";
+const REVIEWER_MEDIA_SENTINEL_PATH =
+  "/v1/social/reviewer-sandbox/media/unavailable";
+const REVIEWER_MEDIA_CAPABILITY_PREFIX =
+  "/v1/social/reviewer-sandbox/media-capability";
+const REVIEWER_MEDIA_MAX_BYTES = 8 * 1024 * 1024;
+const REVIEWER_MEDIA_SOF_MARKERS = new Set([
+  0xc0, 0xc1, 0xc2, 0xc3,
+  0xc5, 0xc6, 0xc7,
+  0xc9, 0xca, 0xcb,
+  0xcd, 0xce, 0xcf
+]);
+
+function reviewerSandboxFail(
+  code,
+  status = 400,
+  message = "Operacao de demonstracao recusada."
+) {
+  throw new ReviewerSandboxError(code, status, message);
+}
+
+function reviewerTenantKey(context) {
+  const tenantId = String(context?.tenantId || "");
+  const principalId = String(context?.principalId || "");
+  if (
+    !orderStorage.isSafePathSegment(tenantId) ||
+    !orderStorage.isSafePathSegment(principalId) ||
+    tenantId !== principalId
+  ) {
+    reviewerSandboxFail(
+      "reviewer_tenant_invalid",
+      403,
+      "Empresa autenticada recusada."
+    );
+  }
+  return `${tenantId}\u0000${principalId}`;
+}
+
+function reviewerJpegDimensions(bytes) {
+  if (
+    !Buffer.isBuffer(bytes) ||
+    bytes.length < 16 ||
+    bytes[0] !== 0xff ||
+    bytes[1] !== 0xd8 ||
+    bytes.at(-2) !== 0xff ||
+    bytes.at(-1) !== 0xd9
+  ) {
+    return null;
+  }
+
+  let offset = 2;
+  let dimensions = null;
+  let hasQuantizationTable = false;
+  let hasHuffmanTable = false;
+  let hasScan = false;
+  while (offset + 3 < bytes.length) {
+    if (bytes[offset] !== 0xff) {
+      offset += 1;
+      continue;
+    }
+    while (offset < bytes.length && bytes[offset] === 0xff) offset += 1;
+    if (offset >= bytes.length) break;
+    const marker = bytes[offset];
+    offset += 1;
+    if (marker === 0xd9) break;
+    if (marker === 0xda) {
+      hasScan = true;
+      break;
+    }
+    if (marker === 0x01 || (marker >= 0xd0 && marker <= 0xd7)) continue;
+    if (offset + 1 >= bytes.length) return null;
+    const segmentLength = bytes.readUInt16BE(offset);
+    if (segmentLength < 2 || offset + segmentLength > bytes.length) return null;
+    if (marker === 0xdb) hasQuantizationTable = true;
+    if (marker === 0xc4) hasHuffmanTable = true;
+    if (REVIEWER_MEDIA_SOF_MARKERS.has(marker)) {
+      if (segmentLength < 7) return null;
+      const height = bytes.readUInt16BE(offset + 3);
+      const width = bytes.readUInt16BE(offset + 5);
+      if (width < 1 || height < 1) return null;
+      dimensions = { width, height };
+    }
+    offset += segmentLength;
+  }
+  return dimensions && hasQuantizationTable && hasHuffmanTable && hasScan
+    ? dimensions
+    : null;
+}
+
+function reviewerDemoText(value) {
+  return String(value || "")
+    .normalize("NFKD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toUpperCase();
+}
+
+function reviewerDemoCompany(client) {
+  const label = reviewerDemoText(client?.nome_time);
+  return Boolean(
+    client &&
+    client.ativo !== false &&
+    /(^|[^A-Z0-9])DEMO([^A-Z0-9]|$)/.test(label)
+  );
+}
+
+function reviewerDemoCaption(value) {
+  const caption = reviewerDemoText(value);
+  return /(^|[^A-Z0-9])DEMO([^A-Z0-9]|$)/.test(caption) &&
+    caption.includes("NAO PUBLICAR");
+}
+
+function readTenantOwnedReviewerMedia(owner, orderId, { includeBytes = false } = {}) {
+  if (
+    !orderStorage.isSafePathSegment(owner) ||
+    !orderStorage.isSafePathSegment(orderId)
+  ) {
+    return null;
+  }
+  const base = getPedidoBase(owner, orderId);
+  if (!base) return null;
+  const pedido = safeReadJson(path.join(base, "pedido.json")) || null;
+  if (
+    !pedido ||
+    String(pedido.whatsapp || "").trim() !== owner ||
+    isAdminFreeArtOrderHidden(pedido) ||
+    readOrderStatus(base, String(pedido.status || "")) !== "pronto"
+  ) {
+    return null;
+  }
+
+  const previewPath = path.join(base, "preview_ia4tube.jpg");
+  let stat;
+  let bytes;
+  try {
+    stat = fs.lstatSync(previewPath);
+    if (
+      !stat.isFile() ||
+      stat.isSymbolicLink() ||
+      stat.size < 16 ||
+      stat.size > REVIEWER_MEDIA_MAX_BYTES
+    ) {
+      return null;
+    }
+    bytes = fs.readFileSync(previewPath);
+    const dimensions = reviewerJpegDimensions(bytes);
+    if (!dimensions) {
+      bytes.fill(0);
+      return null;
+    }
+    const sha256 = crypto.createHash("sha256").update(bytes).digest("hex");
+    const relativeStorageKey = path.relative(DATA_DIR, previewPath);
+    if (
+      !relativeStorageKey ||
+      relativeStorageKey.startsWith("..") ||
+      path.isAbsolute(relativeStorageKey)
+    ) {
+      bytes.fill(0);
+      return null;
+    }
+    const caption = descricaoPostagemPedido(pedido);
+    if (!reviewerDemoCaption(caption)) {
+      bytes.fill(0);
+      return null;
+    }
+    const media = {
+      owner,
+      orderId,
+      previewPath,
+      storageKey: relativeStorageKey.split(path.sep).join("/"),
+      sha256,
+      width: dimensions.width,
+      height: dimensions.height,
+      caption
+    };
+    if (includeBytes) return { ...media, bytes };
+    bytes.fill(0);
+    return media;
+  } catch {
+    if (bytes) bytes.fill(0);
+    return null;
+  }
+}
+
+function latestTenantOwnedReviewerMedia(context) {
+  reviewerTenantKey(context);
+  const owner = String(context.tenantId);
+  if (!reviewerDemoCompany(readClientes()[owner])) return null;
+  for (const item of listPedidoBasesByWhatsapp(owner)) {
+    const media = readTenantOwnedReviewerMedia(owner, item.id);
+    if (media) return media;
+  }
+  return null;
+}
+
+function reviewerMediaCapabilityPath(media) {
+  if (!/^[A-Za-z0-9_-]{16,128}$/.test(media.selectionNonce || "")) {
+    reviewerSandboxFail("reviewer_media_selection_invalid", 503);
+  }
+  const expiresAt = Math.floor(Date.now() / 1000) + ORDER_MEDIA_URL_TTL_SECONDS;
+  const nonce = crypto.randomBytes(18).toString("base64url");
+  const ownerReference = orderMediaAccess.sign({
+    owner: media.owner,
+    orderId: "gate5a-reviewer-owner-ref",
+    variant: "thumbnail",
+    nonce: media.selectionNonce,
+    expiresAt: 0
+  });
+  const signature = orderMediaAccess.sign({
+    owner: media.owner,
+    orderId: `${media.orderId}:${media.sha256}:${media.selectionNonce}`,
+    variant: "thumbnail",
+    nonce,
+    expiresAt
+  });
+  const capabilityPath = [
+    REVIEWER_MEDIA_CAPABILITY_PREFIX,
+    encodeURIComponent(media.orderId),
+    String(expiresAt),
+    nonce,
+    ownerReference,
+    signature
+  ].join("/");
+  if (capabilityPath.length > 300) {
+    reviewerSandboxFail(
+      "reviewer_media_capability_invalid",
+      503,
+      "Midia de demonstracao temporariamente indisponivel."
+    );
+  }
+  return capabilityPath;
+}
+
+function reviewerMediaRequestIsExact(input) {
+  return Boolean(
+    input &&
+    typeof input === "object" &&
+    !Array.isArray(input) &&
+    Object.getPrototypeOf(input) === Object.prototype &&
+    Object.keys(input).length === 1 &&
+    input.asset === REVIEWER_MEDIA_ASSET
+  );
+}
+
+function createTenantOwnedReviewerSandboxService(baseService) {
+  const selectedMedia = new Map();
+
+  function currentSelectedMedia(context) {
+    const key = reviewerTenantKey(context);
+    const selected = selectedMedia.get(key);
+    if (!selected) return null;
+    if (!reviewerDemoCompany(readClientes()[selected.owner])) {
+      selectedMedia.delete(key);
+      return null;
+    }
+    const current = readTenantOwnedReviewerMedia(selected.owner, selected.orderId);
+    if (!current || current.sha256 !== selected.sha256) {
+      selectedMedia.delete(key);
+      return null;
+    }
+    const refreshed = {
+      ...current,
+      selectionNonce: selected.selectionNonce
+    };
+    selectedMedia.set(key, refreshed);
+    return refreshed;
+  }
+
+  function decorate(context, result) {
+    if (!result?.state || typeof result.state !== "object") return result;
+    reviewerTenantKey(context);
+    const client = readClientes()[context.tenantId] || {};
+    const companyLabel = String(client.nome_time || "").trim().slice(0, 120) ||
+      "Empresa autenticada";
+    const state = {
+      ...result.state,
+      company: {
+        label: companyLabel,
+        controlled: true
+      }
+    };
+    if (state.media?.selected === true) {
+      const media = currentSelectedMedia(context);
+      if (!media) {
+        state.media = { selected: false, item: null };
+      } else {
+        state.media = {
+          selected: true,
+          item: {
+            id: "tenant-controlled-review-jpeg",
+            fileName: "preview_ia4tube.jpg",
+            mimeType: "image/jpeg",
+            width: media.width,
+            height: media.height,
+            assetPath: reviewerMediaCapabilityPath(media),
+            caption: media.caption,
+            synthetic: true,
+            tenantOwned: true
+          }
+        };
+      }
+    }
+    return Object.freeze({ ...result, state });
+  }
+
+  function invoke(name, context, ...args) {
+    return decorate(context, baseService[name](context, ...args));
+  }
+
+  return Object.freeze({
+    read: (context) => invoke("read", context),
+    authorize: (context, input) => invoke("authorize", context, input),
+    callback: (context, input) => invoke("callback", context, input),
+    selectMedia(context, input) {
+      if (!reviewerMediaRequestIsExact(input)) {
+        reviewerSandboxFail("reviewer_request_invalid");
+      }
+      const media = latestTenantOwnedReviewerMedia(context);
+      if (!media) {
+        reviewerSandboxFail(
+          "reviewer_media_unavailable",
+          404,
+          "Nenhum JPEG elegivel foi encontrado para a empresa autenticada."
+        );
+      }
+      const selection = {
+        ...media,
+        selectionNonce: crypto.randomBytes(18).toString("base64url")
+      };
+      reviewerMediaCapabilityPath(selection);
+      const result = baseService.selectMedia(context, input);
+      selectedMedia.set(reviewerTenantKey(context), selection);
+      return decorate(context, result);
+    },
+    publish(context, input) {
+      if (!currentSelectedMedia(context)) {
+        reviewerSandboxFail("reviewer_media_required", 409);
+      }
+      return invoke("publish", context, input);
+    },
+    advance: (context, publicationId, input) => (
+      invoke("advance", context, publicationId, input)
+    ),
+    listPublications: (context) => invoke("listPublications", context),
+    getPublication: (context, publicationId) => (
+      invoke("getPublication", context, publicationId)
+    ),
+    disconnect(context) {
+      const result = baseService.disconnect(context);
+      selectedMedia.delete(reviewerTenantKey(context));
+      return decorate(context, result);
+    },
+    deleteConnectionData(context, input) {
+      const result = baseService.deleteConnectionData(context, input);
+      selectedMedia.delete(reviewerTenantKey(context));
+      return decorate(context, result);
+    },
+    reset(context, input) {
+      const result = baseService.reset(context, input);
+      selectedMedia.delete(reviewerTenantKey(context));
+      return decorate(context, result);
+    },
+    resolveMediaCapability(req) {
+      const ownerReference = String(req.params.ownerReference || "");
+      if (!/^[A-Za-z0-9_-]{43}$/.test(ownerReference)) return null;
+      let selected = null;
+      for (const candidate of [...selectedMedia.values()]) {
+        const expectedReference = orderMediaAccess.sign({
+          owner: candidate.owner,
+          orderId: "gate5a-reviewer-owner-ref",
+          variant: "thumbnail",
+          nonce: candidate.selectionNonce,
+          expiresAt: 0
+        });
+        const expectedBytes = Buffer.from(expectedReference, "utf8");
+        const receivedBytes = Buffer.from(ownerReference, "utf8");
+        if (
+          expectedBytes.length === receivedBytes.length &&
+          crypto.timingSafeEqual(expectedBytes, receivedBytes)
+        ) {
+          selected = currentSelectedMedia({
+            principalId: candidate.owner,
+            tenantId: candidate.owner
+          });
+          break;
+        }
+      }
+      return reviewerMediaFromCapability(req, selected);
+    }
+  });
+}
+
+function reviewerMediaFromCapability(req, selected) {
+  const orderId = String(req.params.orderId || "");
+  const expiresAt = Number(req.params.expiresAt);
+  const nonce = String(req.params.nonce || "");
+  const ownerReference = String(req.params.ownerReference || "");
+  const signature = String(req.params.signature || "");
+  if (
+    !orderStorage.isSafePathSegment(orderId) ||
+    !Number.isSafeInteger(expiresAt) ||
+    !/^[A-Za-z0-9_-]{16,128}$/.test(nonce) ||
+    !/^[A-Za-z0-9_-]{43}$/.test(ownerReference) ||
+    !/^[A-Za-z0-9_-]{43,128}$/.test(signature)
+  ) {
+    return null;
+  }
+  const owner = String(selected?.owner || "");
+  if (!owner) return null;
+  const client = readClientes()[owner];
+  if (
+    !reviewerDemoCompany(client) ||
+    !selected ||
+    selected.owner !== owner ||
+    selected.orderId !== orderId
+  ) {
+    return null;
+  }
+  const media = readTenantOwnedReviewerMedia(owner, orderId, {
+    includeBytes: true
+  });
+  if (!media) return null;
+  if (media.sha256 !== selected.sha256) {
+    media.bytes.fill(0);
+    return null;
+  }
+  const verified = orderMediaAccess.verify({
+    owner,
+    orderId: `${orderId}:${media.sha256}:${selected.selectionNonce}`,
+    variant: "thumbnail",
+    nonce,
+    expiresAt,
+    signature
+  });
+  if (!verified) {
+    media.bytes.fill(0);
+    return null;
+  }
+  return media;
+}
 const CANONICAL_WEB_APP_FILE = path.join(__dirname, "app.html");
 const CANONICAL_REVIEWER_FLOW_FILE = path.join(
   __dirname,
@@ -260,10 +700,12 @@ const instagramOAuthVisualReturn = GATE5A_STAGING_ENABLED
     })
   : null;
 const reviewerSandboxService = GATE5A_STAGING_ENABLED
-  ? createReviewerSandboxService({
-      publicOrigin: PUBLIC_API_BASE_URL,
-      controlledAssetPath: CONTROLLED_GATE4_PUBLIC_PATH
-    })
+  ? createTenantOwnedReviewerSandboxService(
+      createReviewerSandboxService({
+        publicOrigin: PUBLIC_API_BASE_URL,
+        controlledAssetPath: REVIEWER_MEDIA_SENTINEL_PATH
+      })
+    )
   : null;
 
 process.once("exit", () => {
@@ -1870,6 +2312,19 @@ app.use("/v1/social", createInstagramOAuthRouter({
 }));
 
 if (reviewerSandboxService) {
+  app.get(
+    `${REVIEWER_MEDIA_CAPABILITY_PREFIX}/:orderId/:expiresAt/:nonce/:ownerReference/:signature`,
+    (req, res) => {
+      const media = reviewerSandboxService.resolveMediaCapability(req);
+      if (!media) return res.status(404).end();
+      res.setHeader("Content-Type", "image/jpeg");
+      res.setHeader("Content-Length", String(media.bytes.length));
+      res.setHeader("Cache-Control", "private, no-store, no-transform");
+      res.setHeader("X-Content-Type-Options", "nosniff");
+      res.setHeader("X-Robots-Tag", "noindex, nofollow, noarchive");
+      return res.status(200).send(media.bytes);
+    }
+  );
   app.use(
     "/v1/social/reviewer-sandbox",
     createReviewerSandboxRouter({
