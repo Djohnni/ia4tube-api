@@ -268,6 +268,25 @@ function exactApplyArgv() {
   ];
 }
 
+function metaCompliancePlanArgv() {
+  return [
+    "plan-meta-compliance",
+    `--migration-sha256=${STAGING_COMPLIANCE_0006_SQL_SHA256}`
+  ];
+}
+
+function metaCompliancePlanResult() {
+  return {
+    fromProfile: COMPLIANCE_FROM_PROFILE,
+    toProfile: COMPLIANCE_TO_PROFILE,
+    expectedPending: [...COMPLIANCE_PENDING_MIGRATIONS],
+    observedPending: [...COMPLIANCE_PENDING_MIGRATIONS],
+    migrationSha256: STAGING_COMPLIANCE_0006_SQL_SHA256,
+    planApproved: true,
+    readOnly: true
+  };
+}
+
 const exactRuntimeTableGrants = Object.freeze({
   runtime_schema_contract: ["SELECT"],
   social_connections: ["INSERT", "SELECT"],
@@ -1372,8 +1391,368 @@ test("invalid exact CLI input is refused before configuration or pool creation",
   assert.equal(stdout, "");
   assert.deepEqual(JSON.parse(stderr), {
     ok: false,
-    code: "migration_exact_argument_set_invalid"
+    code: "migration_exact_argument_set_invalid",
+    failureStage: "argument_validation",
+    safeCauseCategory: "application_error",
+    errorName: "MigrationCommandFailure",
+    connectionAttempted: null,
+    connectionEstablished: null,
+    authenticationObserved: null,
+    queryAttempted: null,
+    databaseResponseObserved: null
   });
+});
+
+test("[gate5a instrumentation] code-less plan failure preserves stage and redacts secrets", async () => {
+  const sensitiveValues = [
+    ["synthetic", "password", "value"].join("-"),
+    ["postgresql", "://synthetic:credential@db.invalid/example"].join(""),
+    ["synthetic", "token", "value"].join("-"),
+    ["Bearer", "synthetic-authorization-value"].join(" "),
+    ["synthetic", "app", "secret", "value"].join("-")
+  ];
+  const syntheticFailure = new TypeError(sensitiveValues.join("|"));
+  syntheticFailure.stack = sensitiveValues.slice().reverse().join("|");
+  let stdout = "";
+  const stderrWrites = [];
+  let closed = false;
+  const status = await migrationCliMain({
+    argv: metaCompliancePlanArgv(),
+    env: exactCliEnvironment(),
+    createPoolImpl(_configuration, options) {
+      options.logger.error({ detail: sensitiveValues.join("|") });
+      return {
+        async connect() {
+          throw syntheticFailure;
+        }
+      };
+    },
+    createRunnerImpl: ({ pool }) => ({
+      async planMetaCompliance() {
+        await pool.connect();
+      }
+    }),
+    closePoolImpl: async () => { closed = true; },
+    stdout: { write: (value) => { stdout += value; } },
+    stderr: { write: (value) => { stderrWrites.push(value); } }
+  });
+  assert.equal(status, 1);
+  assert.equal(stdout, "");
+  assert.equal(closed, true);
+  assert.equal(stderrWrites.length, 1);
+  assert.equal(stderrWrites[0].trim().split(/\r?\n/).length, 1);
+  const failure = JSON.parse(stderrWrites[0]);
+  assert.deepEqual(failure, {
+    ok: false,
+    code: "migration_command_failed",
+    failureStage: "connection_attempt",
+    safeCauseCategory: "exception_without_string_code",
+    errorName: "TypeError",
+    connectionAttempted: true,
+    connectionEstablished: null,
+    authenticationObserved: null,
+    queryAttempted: null,
+    databaseResponseObserved: null
+  });
+  for (const sensitive of sensitiveValues) {
+    assert.equal(stderrWrites[0].includes(sensitive), false);
+  }
+  for (const forbiddenKey of ["message", "stack", "detail", "hint", "where"]) {
+    assert.equal(Object.hasOwn(failure, forbiddenKey), false);
+  }
+});
+
+test("[gate5a instrumentation] PostgreSQL SQLSTATE preserves ledger stage without raw diagnostics", async () => {
+  const sensitiveValues = [
+    ["synthetic", "password", "sqlstate"].join("-"),
+    ["postgresql", "://synthetic:credential@db.invalid/sqlstate"].join(""),
+    ["Bearer", "synthetic-sqlstate-value"].join(" ")
+  ];
+  const databaseFailure = new Error(sensitiveValues.join("|"));
+  databaseFailure.name = "DatabaseError";
+  databaseFailure.code = "42P01";
+  databaseFailure.stack = sensitiveValues.slice().reverse().join("|");
+  let stdout = "";
+  const stderrWrites = [];
+  let released = false;
+  const status = await migrationCliMain({
+    argv: metaCompliancePlanArgv(),
+    env: exactCliEnvironment(),
+    createPoolImpl: () => ({
+      async connect() {
+        return {
+          async query() {
+            throw databaseFailure;
+          },
+          release() {
+            released = true;
+            throw new TypeError(sensitiveValues[0]);
+          }
+        };
+      }
+    }),
+    createRunnerImpl: ({ pool }) => ({
+      async planMetaCompliance() {
+        const client = await pool.connect();
+        try {
+          await client.query(
+            "SELECT to_regclass($1) IS NOT NULL AS exists",
+            ["ia4tube_migrations.schema_migrations"]
+          );
+        } finally {
+          client.release();
+        }
+      }
+    }),
+    closePoolImpl: async () => undefined,
+    stdout: { write: (value) => { stdout += value; } },
+    stderr: { write: (value) => { stderrWrites.push(value); } }
+  });
+  assert.equal(status, 1);
+  assert.equal(stdout, "");
+  assert.equal(released, true);
+  assert.equal(stderrWrites.length, 1);
+  const failure = JSON.parse(stderrWrites[0]);
+  assert.deepEqual(failure, {
+    ok: false,
+    code: "migration_command_failed",
+    failureStage: "ledger_read",
+    safeCauseCategory: "postgresql_sqlstate",
+    errorName: "DatabaseError",
+    sqlstate: "42P01",
+    connectionAttempted: true,
+    connectionEstablished: true,
+    authenticationObserved: true,
+    queryAttempted: true,
+    databaseResponseObserved: true
+  });
+  for (const sensitive of sensitiveValues) {
+    assert.equal(stderrWrites[0].includes(sensitive), false);
+  }
+  assert.equal(Object.hasOwn(failure, "message"), false);
+  assert.equal(Object.hasOwn(failure, "stack"), false);
+});
+
+test("[gate5a instrumentation] role-assumption SQLSTATE maps to identity verification", async () => {
+  const sensitive = ["synthetic", "role", "diagnostic"].join("-");
+  const databaseFailure = new Error(sensitive);
+  databaseFailure.name = "DatabaseError";
+  databaseFailure.code = "42501";
+  let stdout = "";
+  const stderrWrites = [];
+  const status = await migrationCliMain({
+    argv: metaCompliancePlanArgv(),
+    env: exactCliEnvironment(),
+    createPoolImpl: () => ({
+      async connect() {
+        return {
+          async query() {
+            throw databaseFailure;
+          },
+          release() {}
+        };
+      }
+    }),
+    createRunnerImpl: ({ pool }) => ({
+      async planMetaCompliance() {
+        const client = await pool.connect();
+        try {
+          await client.query('SET LOCAL ROLE "ia4tube_social_migrator"');
+        } finally {
+          client.release();
+        }
+      }
+    }),
+    closePoolImpl: async () => undefined,
+    stdout: { write: (value) => { stdout += value; } },
+    stderr: { write: (value) => { stderrWrites.push(value); } }
+  });
+  assert.equal(status, 1);
+  assert.equal(stdout, "");
+  assert.equal(stderrWrites.length, 1);
+  assert.deepEqual(JSON.parse(stderrWrites[0]), {
+    ok: false,
+    code: "migration_command_failed",
+    failureStage: "identity_role_verification",
+    safeCauseCategory: "postgresql_sqlstate",
+    errorName: "DatabaseError",
+    sqlstate: "42501",
+    connectionAttempted: true,
+    connectionEstablished: true,
+    authenticationObserved: true,
+    queryAttempted: true,
+    databaseResponseObserved: true
+  });
+  assert.equal(stderrWrites[0].includes(sensitive), false);
+});
+
+test("[gate5a instrumentation] unknown observation states stay null before connection", async () => {
+  const syntheticFailure = new TypeError("synthetic pool creation failure");
+  let stdout = "";
+  const stderrWrites = [];
+  const status = await migrationCliMain({
+    argv: metaCompliancePlanArgv(),
+    env: exactCliEnvironment(),
+    createPoolImpl() {
+      throw syntheticFailure;
+    },
+    closePoolImpl: async () => assert.fail("pool must not be closed"),
+    stdout: { write: (value) => { stdout += value; } },
+    stderr: { write: (value) => { stderrWrites.push(value); } }
+  });
+  assert.equal(status, 1);
+  assert.equal(stdout, "");
+  assert.equal(stderrWrites.length, 1);
+  assert.deepEqual(JSON.parse(stderrWrites[0]), {
+    ok: false,
+    code: "migration_command_failed",
+    failureStage: "pool_creation",
+    safeCauseCategory: "exception_without_string_code",
+    errorName: "TypeError",
+    connectionAttempted: null,
+    connectionEstablished: null,
+    authenticationObserved: null,
+    queryAttempted: null,
+    databaseResponseObserved: null
+  });
+});
+
+test("[gate5a instrumentation] plan-meta-compliance success output stays byte-compatible", async () => {
+  const result = metaCompliancePlanResult();
+  let receivedRequest;
+  let receivedEnvironment;
+  let stdout = "";
+  const stderrWrites = [];
+  let closeCount = 0;
+  const status = await migrationCliMain({
+    argv: metaCompliancePlanArgv(),
+    env: exactCliEnvironment(),
+    createPoolImpl: () => ({ connect: async () => assert.fail("unused") }),
+    createRunnerImpl: () => ({
+      async planMetaCompliance(request, environment) {
+        receivedRequest = request;
+        receivedEnvironment = environment;
+        return result;
+      }
+    }),
+    closePoolImpl: async () => { closeCount += 1; },
+    stdout: { write: (value) => { stdout += value; } },
+    stderr: { write: (value) => { stderrWrites.push(value); } }
+  });
+  assert.equal(status, 0);
+  assert.equal(closeCount, 1);
+  assert.equal(stderrWrites.length, 0);
+  assert.equal(
+    stdout,
+    `${JSON.stringify({
+      ok: true,
+      command: "plan-meta-compliance",
+      result
+    })}\n`
+  );
+  assert.deepEqual(receivedRequest, {
+    fromProfile: COMPLIANCE_FROM_PROFILE,
+    toProfile: COMPLIANCE_TO_PROFILE,
+    expectedPending: COMPLIANCE_PENDING_MIGRATIONS,
+    migrationSha256: STAGING_COMPLIANCE_0006_SQL_SHA256
+  });
+  assert.equal(receivedEnvironment.SOCIAL_MIGRATION_ENVIRONMENT, "test");
+});
+
+test("[gate5a instrumentation] finalization failure emits one sanitized JSON and no success stdout", async () => {
+  const result = metaCompliancePlanResult();
+  const sensitive = ["synthetic", "finalization", "secret"].join("-");
+  const finalizationFailure = new TypeError(sensitive);
+  let stdout = "";
+  const stderrWrites = [];
+  const status = await migrationCliMain({
+    argv: metaCompliancePlanArgv(),
+    env: exactCliEnvironment(),
+    createPoolImpl: () => ({ connect: async () => assert.fail("unused") }),
+    createRunnerImpl: () => ({
+      async planMetaCompliance() {
+        return result;
+      }
+    }),
+    closePoolImpl: async () => { throw finalizationFailure; },
+    stdout: { write: (value) => { stdout += value; } },
+    stderr: { write: (value) => { stderrWrites.push(value); } }
+  });
+  assert.equal(status, 1);
+  assert.equal(stdout, "");
+  assert.equal(stderrWrites.length, 1);
+  assert.deepEqual(JSON.parse(stderrWrites[0]), {
+    ok: false,
+    code: "migration_command_failed",
+    failureStage: "finalization",
+    safeCauseCategory: "exception_without_string_code",
+    errorName: "TypeError",
+    connectionAttempted: null,
+    connectionEstablished: null,
+    authenticationObserved: null,
+    queryAttempted: null,
+    databaseResponseObserved: null
+  });
+  assert.equal(stderrWrites[0].includes(sensitive), false);
+});
+
+test("[gate5a instrumentation] release failure stops a two-step apply before mutation", async () => {
+  const sensitive = ["synthetic", "release", "secret"].join("-");
+  let applyCalls = 0;
+  let closeCount = 0;
+  let stdout = "";
+  const stderrWrites = [];
+  const status = await migrationCliMain({
+    argv: [
+      "apply-reference-check-fix",
+      `--migration-sha256=${STAGING_REFERENCE_CHECK_0005_SQL_SHA256}`
+    ],
+    env: exactCliEnvironment(),
+    createPoolImpl: () => ({
+      async connect() {
+        return {
+          async query() {
+            return { rows: [] };
+          },
+          release() {
+            throw new TypeError(sensitive);
+          }
+        };
+      }
+    }),
+    createRunnerImpl: ({ pool }) => ({
+      async planReferenceCheckFix() {
+        const client = await pool.connect();
+        client.release();
+        return { planApproved: true };
+      },
+      async applyReferenceCheckFix() {
+        applyCalls += 1;
+        return { applied: true };
+      }
+    }),
+    closePoolImpl: async () => { closeCount += 1; },
+    stdout: { write: (value) => { stdout += value; } },
+    stderr: { write: (value) => { stderrWrites.push(value); } }
+  });
+  assert.equal(status, 1);
+  assert.equal(applyCalls, 0);
+  assert.equal(closeCount, 1);
+  assert.equal(stdout, "");
+  assert.equal(stderrWrites.length, 1);
+  assert.deepEqual(JSON.parse(stderrWrites[0]), {
+    ok: false,
+    code: "migration_command_failed",
+    failureStage: "finalization",
+    safeCauseCategory: "exception_without_string_code",
+    errorName: "TypeError",
+    connectionAttempted: true,
+    connectionEstablished: true,
+    authenticationObserved: true,
+    queryAttempted: null,
+    databaseResponseObserved: true
+  });
+  assert.equal(stderrWrites[0].includes(sensitive), false);
 });
 
 test("exact CLI serializes commit ambiguity without leaking recovery evidence", async () => {
@@ -1394,13 +1773,20 @@ test("exact CLI serializes commit ambiguity without leaking recovery evidence", 
   });
   assert.equal(status, 1);
   assert.equal(stdout, "");
-  assert.deepEqual(JSON.parse(stderr), {
-    ok: false,
-    code: "migration_exact_commit_outcome_unknown",
-    outcomeUnknown: true,
-    retryAllowed: false,
-    requiresReadOnlyInspection: true
-  });
+  const failure = JSON.parse(stderr);
+  assert.equal(failure.ok, false);
+  assert.equal(failure.code, "migration_exact_commit_outcome_unknown");
+  assert.equal(failure.failureStage, "plan_construction");
+  assert.equal(failure.safeCauseCategory, "application_error");
+  assert.equal(failure.errorName, "Error");
+  assert.equal(failure.connectionAttempted, true);
+  assert.equal(failure.connectionEstablished, true);
+  assert.equal(failure.authenticationObserved, true);
+  assert.equal(failure.queryAttempted, true);
+  assert.equal(failure.databaseResponseObserved, true);
+  assert.equal(failure.outcomeUnknown, true);
+  assert.equal(failure.retryAllowed, false);
+  assert.equal(failure.requiresReadOnlyInspection, true);
   assert.equal(stderr.includes(exactApplyRequest.recoveryReference), false);
   assert.equal(closed, true);
   assert.equal(harness.state.commitAttempts, 1);
@@ -1433,13 +1819,20 @@ test("exact CLI marks postcommit validation failure as applied and non-retryable
   });
   assert.equal(status, 1);
   assert.equal(stdout, "");
-  assert.deepEqual(JSON.parse(stderr), {
-    ok: false,
-    code: "migration_exact_postcommit_validation_failed",
-    applied: true,
-    retryAllowed: false,
-    requiresReadOnlyInspection: true
-  });
+  const failure = JSON.parse(stderr);
+  assert.equal(failure.ok, false);
+  assert.equal(failure.code, "migration_exact_postcommit_validation_failed");
+  assert.equal(failure.failureStage, "plan_construction");
+  assert.equal(failure.safeCauseCategory, "application_error");
+  assert.equal(failure.errorName, "Error");
+  assert.equal(failure.connectionAttempted, true);
+  assert.equal(failure.connectionEstablished, true);
+  assert.equal(failure.authenticationObserved, true);
+  assert.equal(failure.queryAttempted, true);
+  assert.equal(failure.databaseResponseObserved, true);
+  assert.equal(failure.applied, true);
+  assert.equal(failure.retryAllowed, false);
+  assert.equal(failure.requiresReadOnlyInspection, true);
   assert.equal(stderr.includes(exactApplyRequest.recoveryReference), false);
   assert.equal(harness.state.commitAttempts, 1);
   assert.equal(harness.state.physicalProfile, EXACT_TO_PROFILE);

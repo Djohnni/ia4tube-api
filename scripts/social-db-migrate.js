@@ -38,6 +38,41 @@ const UUID_PATTERN =
 const RECOVERY_REFERENCE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/;
 const RECOVERY_TIMESTAMP =
   /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?Z$/;
+const CLIENT_RELEASE_FAILURE = Symbol("clientReleaseFailure");
+const POSTGRES_SQLSTATE = /^[0-9A-Z]{5}$/;
+const SAFE_DOMAIN_ERROR_CODE =
+  /^(?:migration|postgres|social|production|destructive)_[a-z0-9_]+$/;
+const SAFE_ERROR_NAMES = new Set([
+  "AggregateError",
+  "DatabaseError",
+  "Error",
+  "MigrationCommandFailure",
+  "PostgresError",
+  "RangeError",
+  "ReferenceError",
+  "SocialPostgresError",
+  "SyntaxError",
+  "TypeError",
+  "URIError"
+]);
+const TLS_ERROR_CODES = new Set([
+  "CERT_HAS_EXPIRED",
+  "DEPTH_ZERO_SELF_SIGNED_CERT",
+  "ERR_TLS_CERT_ALTNAME_INVALID",
+  "SELF_SIGNED_CERT_IN_CHAIN",
+  "UNABLE_TO_GET_ISSUER_CERT_LOCALLY",
+  "UNABLE_TO_VERIFY_LEAF_SIGNATURE"
+]);
+const NETWORK_ERROR_CODES = new Set([
+  "EAI_AGAIN",
+  "ECONNREFUSED",
+  "ECONNRESET",
+  "EHOSTUNREACH",
+  "ENETUNREACH",
+  "ENOTFOUND",
+  "EPIPE",
+  "ETIMEDOUT"
+]);
 
 class MigrationCommandFailure extends Error {
   constructor(code) {
@@ -212,6 +247,203 @@ function parseMigrationCommand(argv = process.argv.slice(2)) {
   return Object.freeze({ command, request: Object.freeze(request) });
 }
 
+function createFailureObservation() {
+  return {
+    failureStage: "argument_validation",
+    connectionAttempted: null,
+    connectionEstablished: null,
+    authenticationObserved: null,
+    queryAttempted: null,
+    databaseResponseObserved: null
+  };
+}
+
+function copyFailureObservation(observation) {
+  return Object.freeze({
+    failureStage: observation.failureStage,
+    connectionAttempted: observation.connectionAttempted,
+    connectionEstablished: observation.connectionEstablished,
+    authenticationObserved: observation.authenticationObserved,
+    queryAttempted: observation.queryAttempted,
+    databaseResponseObserved: observation.databaseResponseObserved
+  });
+}
+
+function errorCode(error) {
+  return typeof error?.code === "string" ? error.code : null;
+}
+
+function postgresSqlstate(error) {
+  const code = errorCode(error);
+  return code &&
+    !NETWORK_ERROR_CODES.has(code) &&
+    !TLS_ERROR_CODES.has(code) &&
+    !code.startsWith("ERR_TLS_") &&
+    POSTGRES_SQLSTATE.test(code)
+    ? code
+    : null;
+}
+
+function safeErrorName(error) {
+  const name = typeof error?.name === "string" ? error.name : "Error";
+  return SAFE_ERROR_NAMES.has(name) ? name : "Error";
+}
+
+function safeCauseCategory(error) {
+  const code = errorCode(error);
+  if (code === null) return "exception_without_string_code";
+  if (TLS_ERROR_CODES.has(code) || code.startsWith("ERR_TLS_")) {
+    return "tls_error";
+  }
+  if (NETWORK_ERROR_CODES.has(code)) return "network_error";
+  if (postgresSqlstate(error)) return "postgresql_sqlstate";
+  if (SAFE_DOMAIN_ERROR_CODE.test(code)) return "application_error";
+  return "exception_with_unrecognized_string_code";
+}
+
+function publicFailureCode(error) {
+  const code = errorCode(error);
+  return code && SAFE_DOMAIN_ERROR_CODE.test(code)
+    ? code
+    : "migration_command_failed";
+}
+
+function refineObservationForError(error, observation) {
+  const code = errorCode(error);
+  const sqlstate = postgresSqlstate(error);
+  if (sqlstate) {
+    observation.databaseResponseObserved = true;
+    if (sqlstate.startsWith("28")) {
+      observation.authenticationObserved = true;
+      if (observation.failureStage === "connection_attempt") {
+        observation.failureStage = "authentication";
+      }
+    }
+  }
+  if (
+    code &&
+    (TLS_ERROR_CODES.has(code) || code.startsWith("ERR_TLS_")) &&
+    observation.failureStage === "connection_attempt"
+  ) {
+    observation.failureStage = "tls_verification";
+  }
+}
+
+function failureEnvelope(error, observation) {
+  const snapshot = { ...observation };
+  refineObservationForError(error, snapshot);
+  const failure = {
+    ok: false,
+    code: publicFailureCode(error),
+    failureStage: snapshot.failureStage,
+    safeCauseCategory: safeCauseCategory(error),
+    errorName: safeErrorName(error)
+  };
+  const sqlstate = postgresSqlstate(error);
+  if (sqlstate) failure.sqlstate = sqlstate;
+  failure.connectionAttempted = snapshot.connectionAttempted;
+  failure.connectionEstablished = snapshot.connectionEstablished;
+  failure.authenticationObserved = snapshot.authenticationObserved;
+  failure.queryAttempted = snapshot.queryAttempted;
+  failure.databaseResponseObserved = snapshot.databaseResponseObserved;
+  if (error?.applied === true) failure.applied = true;
+  if (error?.outcomeUnknown === true) failure.outcomeUnknown = true;
+  if (error?.retryAllowed === false) failure.retryAllowed = false;
+  if (error?.requiresReadOnlyInspection === true) {
+    failure.requiresReadOnlyInspection = true;
+  }
+  return Object.freeze(failure);
+}
+
+function queryFailureStage(query) {
+  const text = typeof query === "string" ? query : String(query?.text || "");
+  if (/to_regclass|schema_migrations|checksum_sha256|execution_ms/i.test(text)) {
+    return "ledger_read";
+  }
+  if (
+    /server_version_num|session_user|current_user|set\s+local\s+role|pg_has_role|pg_auth_members|pg_roles/i.test(
+      text
+    )
+  ) {
+    return "identity_role_verification";
+  }
+  return "plan_construction";
+}
+
+function observeClient(client, observation) {
+  return Object.freeze({
+    async query(...args) {
+      observation.failureStage = queryFailureStage(args[0]);
+      observation.queryAttempted = true;
+      try {
+        const result = await client.query(...args);
+        observation.databaseResponseObserved = true;
+        return result;
+      } catch (error) {
+        refineObservationForError(error, observation);
+        throw error;
+      }
+    },
+    release(...args) {
+      const activeStage = observation.failureStage;
+      try {
+        const result = client.release(...args);
+        observation.failureStage = activeStage;
+        return result;
+      } catch (error) {
+        if (!observation[CLIENT_RELEASE_FAILURE]) {
+          observation[CLIENT_RELEASE_FAILURE] = error;
+        }
+        observation.failureStage = activeStage;
+        return undefined;
+      }
+    }
+  });
+}
+
+function observePool(pool, observation) {
+  return Object.freeze({
+    async connect(...args) {
+      observation.failureStage = "connection_attempt";
+      observation.connectionAttempted = true;
+      try {
+        const client = await pool.connect(...args);
+        observation.failureStage = "connection_established";
+        observation.connectionEstablished = true;
+        observation.authenticationObserved = true;
+        observation.databaseResponseObserved = true;
+        return observeClient(client, observation);
+      } catch (error) {
+        refineObservationForError(error, observation);
+        throw error;
+      }
+    }
+  });
+}
+
+function commandExecutionStage(command) {
+  return command.includes("plan") || command.includes("apply")
+    ? "plan_construction"
+    : "command_execution";
+}
+
+function capturedFailure(error, observation, status) {
+  return Object.freeze({
+    error,
+    observation: copyFailureObservation(observation),
+    status
+  });
+}
+
+async function completeRunnerOperation(operation, observation) {
+  const result = await operation;
+  if (observation[CLIENT_RELEASE_FAILURE]) {
+    observation.failureStage = "finalization";
+    throw observation[CLIENT_RELEASE_FAILURE];
+  }
+  return result;
+}
+
 async function main({
   argv = process.argv.slice(2),
   env = process.env,
@@ -219,87 +451,130 @@ async function main({
   createPoolImpl = (poolConfig, options) =>
     createPostgresPool(poolConfig, { ...options, PoolClass }),
   closePoolImpl = closePostgresPool,
+  createRunnerImpl = createMigrationRunner,
   stdout = process.stdout,
   stderr = process.stderr
 } = {}) {
+  const observation = createFailureObservation();
   let parsed;
   try {
     parsed = parseMigrationCommand(argv);
   } catch (error) {
-    const code =
-      error instanceof MigrationCommandFailure
-        ? error.code
-        : "migration_command_invalid";
-    if (code === "migration_command_invalid") {
-      stderr.write("Uso: npm run db:social -- status|validate|apply\n");
-    } else {
-      stderr.write(`${JSON.stringify({ ok: false, code })}\n`);
-    }
+    stderr.write(`${JSON.stringify(failureEnvelope(error, observation))}\n`);
     return 2;
   }
 
   let pool;
+  let failure;
+  let serializedSuccess;
   try {
+    observation.failureStage = "environment_validation";
     const configuration = loadMigrationPostgresConfig(env);
+    observation.failureStage = "pool_creation";
     pool = createPoolImpl(configuration.pool, {
       logger: {
-        error(event) {
-          stderr.write(`${JSON.stringify(event)}\n`);
+        error() {
+          // Keep stderr single-line and self-contained for the terminal result.
         }
       }
     });
-    const runner = createMigrationRunner({
-      pool,
+    observation.failureStage = "runner_creation";
+    const runner = createRunnerImpl({
+      pool: observePool(pool, observation),
       ownerRole: configuration.ownerRole,
       migratorRole: configuration.migratorRole,
       target: configuration.target
     });
 
+    observation.failureStage = commandExecutionStage(parsed.command);
     let result;
-    if (parsed.command === "status") result = await runner.inspect();
-    if (parsed.command === "validate") result = await runner.validate();
-    if (parsed.command === "apply") result = await runner.apply(env);
+    if (parsed.command === "status") {
+      result = await completeRunnerOperation(runner.inspect(), observation);
+    }
+    if (parsed.command === "validate") {
+      result = await completeRunnerOperation(runner.validate(), observation);
+    }
+    if (parsed.command === "apply") {
+      result = await completeRunnerOperation(runner.apply(env), observation);
+    }
     if (parsed.command === "plan-reference-check-fix") {
-      result = await runner.planReferenceCheckFix(parsed.request, env);
+      result = await completeRunnerOperation(
+        runner.planReferenceCheckFix(parsed.request, env),
+        observation
+      );
     }
     if (parsed.command === "apply-reference-check-fix") {
-      await runner.planReferenceCheckFix(parsed.request, env);
-      result = await runner.applyReferenceCheckFix(parsed.request, env);
+      await completeRunnerOperation(
+        runner.planReferenceCheckFix(parsed.request, env),
+        observation
+      );
+      result = await completeRunnerOperation(
+        runner.applyReferenceCheckFix(parsed.request, env),
+        observation
+      );
     }
     if (parsed.command === "plan-meta-compliance") {
-      result = await runner.planMetaCompliance(parsed.request, env);
+      result = await completeRunnerOperation(
+        runner.planMetaCompliance(parsed.request, env),
+        observation
+      );
     }
     if (parsed.command === "apply-meta-compliance") {
-      await runner.planMetaCompliance(parsed.request, env);
-      result = await runner.applyMetaCompliance(parsed.request, env);
+      await completeRunnerOperation(
+        runner.planMetaCompliance(parsed.request, env),
+        observation
+      );
+      result = await completeRunnerOperation(
+        runner.applyMetaCompliance(parsed.request, env),
+        observation
+      );
     }
     if (parsed.command === "plan-exact") {
-      result = await runner.planExact(parsed.request, env);
+      result = await completeRunnerOperation(
+        runner.planExact(parsed.request, env),
+        observation
+      );
     }
     if (parsed.command === "apply-exact") {
-      result = await runner.applyExact(parsed.request, env);
+      result = await completeRunnerOperation(
+        runner.applyExact(parsed.request, env),
+        observation
+      );
     }
+    observation.failureStage = "result_serialization";
     const output = { ok: true, command: parsed.command, result };
-    stdout.write(
-      `${JSON.stringify(output, null, LEGACY_COMMANDS.has(parsed.command) ? 2 : 0)}\n`
+    serializedSuccess =
+      `${JSON.stringify(output, null, LEGACY_COMMANDS.has(parsed.command) ? 2 : 0)}\n`;
+  } catch (error) {
+    failure = capturedFailure(error, observation, 1);
+  }
+
+  if (pool) {
+    observation.failureStage = "finalization";
+    try {
+      await closePoolImpl(pool);
+    } catch (error) {
+      if (!failure) failure = capturedFailure(error, observation, 1);
+    }
+  }
+
+  if (failure) {
+    stderr.write(
+      `${JSON.stringify(failureEnvelope(
+        failure.error,
+        failure.observation
+      ))}\n`
     );
+    return failure.status;
+  }
+
+  observation.failureStage = "result_output";
+  try {
+    stdout.write(serializedSuccess);
     return 0;
   } catch (error) {
-    const code =
-      typeof error?.code === "string"
-        ? error.code
-        : "migration_command_failed";
-    const failure = { ok: false, code };
-    if (error?.applied === true) failure.applied = true;
-    if (error?.outcomeUnknown === true) failure.outcomeUnknown = true;
-    if (error?.retryAllowed === false) failure.retryAllowed = false;
-    if (error?.requiresReadOnlyInspection === true) {
-      failure.requiresReadOnlyInspection = true;
-    }
-    stderr.write(`${JSON.stringify(failure)}\n`);
+    stderr.write(`${JSON.stringify(failureEnvelope(error, observation))}\n`);
     return 1;
-  } finally {
-    if (pool) await closePoolImpl(pool);
   }
 }
 
@@ -309,11 +584,10 @@ if (require.main === module) {
       process.exitCode = status;
     })
     .catch((error) => {
+      const observation = createFailureObservation();
+      observation.failureStage = "finalization";
       process.stderr.write(
-        `${JSON.stringify({
-          ok: false,
-          code: error?.code || "migration_command_failed"
-        })}\n`
+        `${JSON.stringify(failureEnvelope(error, observation))}\n`
       );
       process.exitCode = 1;
     });
