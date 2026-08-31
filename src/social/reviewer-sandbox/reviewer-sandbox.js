@@ -128,13 +128,23 @@ function createReviewerSandboxService(options = {}) {
   const randomUUID = options.randomUUID || crypto.randomUUID;
   const publicOrigin = String(options.publicOrigin || "").replace(/\/$/, "");
   const controlledAssetPath = String(options.controlledAssetPath || "");
+  const persistentConnection = options.persistentConnection || null;
   if (
     typeof clock !== "function" ||
     typeof randomUUID !== "function" ||
     !/^https?:\/\//.test(publicOrigin) ||
     !controlledAssetPath.startsWith("/") ||
     controlledAssetPath.includes("?") ||
-    controlledAssetPath.includes("#")
+    controlledAssetPath.includes("#") ||
+    (
+      persistentConnection !== null &&
+      (
+        typeof persistentConnection !== "object" ||
+        typeof persistentConnection.read !== "function" ||
+        typeof persistentConnection.disconnect !== "function" ||
+        typeof persistentConnection.deleteConnectionData !== "function"
+      )
+    )
   ) {
     fail("reviewer_configuration_invalid", 503);
   }
@@ -446,7 +456,7 @@ function createReviewerSandboxService(options = {}) {
     return response(getRecord(context));
   }
 
-  return Object.freeze({
+  const memoryService = Object.freeze({
     advance,
     authorize,
     callback,
@@ -458,6 +468,225 @@ function createReviewerSandboxService(options = {}) {
     read,
     reset,
     selectMedia
+  });
+  if (!persistentConnection) return memoryService;
+
+  function persistentState(value) {
+    if (
+      !value ||
+      typeof value !== "object" ||
+      Array.isArray(value) ||
+      !["connected", "disconnected", "deleted"].includes(value.status) ||
+      typeof value.tokenPhysicallyDeleted !== "boolean"
+    ) {
+      fail("reviewer_persistent_connection_invalid", 503);
+    }
+    if (value.status === "connected") {
+      const account = value.account;
+      if (
+        value.tokenPhysicallyDeleted !== false ||
+        !account ||
+        typeof account !== "object" ||
+        account.synthetic !== true ||
+        account.professional !== true ||
+        !PROFESSIONAL_ACCOUNT_TYPES.has(account.accountType) ||
+        typeof account.accountId !== "string" ||
+        !account.accountId.startsWith("synthetic-") ||
+        typeof account.username !== "string" ||
+        !/^@[a-z0-9_](?:[a-z0-9_.]{0,28}[a-z0-9_])?$/.test(
+          account.username
+        )
+      ) {
+        fail("reviewer_persistent_connection_invalid", 503);
+      }
+      return Object.freeze({
+        status: "connected",
+        account: Object.freeze({
+          accountId: account.accountId,
+          username: account.username,
+          accountType: account.accountType,
+          professional: true,
+          synthetic: true
+        }),
+        tokenPhysicallyDeleted: false
+      });
+    }
+    if (
+      value.account !== null ||
+      value.tokenPhysicallyDeleted !== (value.status === "deleted")
+    ) {
+      fail("reviewer_persistent_connection_invalid", 503);
+    }
+    return Object.freeze({
+      status: value.status,
+      account: null,
+      tokenPhysicallyDeleted: value.tokenPhysicallyDeleted
+    });
+  }
+
+  function applyPersistentState(record, value) {
+    if (record.syntheticToken !== null) {
+      fail("reviewer_memory_fallback_forbidden", 503);
+    }
+    const state = persistentState(value);
+    record.pendingAccountType = null;
+    record.state.connection = {
+      status: state.status,
+      account: state.account,
+      error: null,
+      tokenPhysicallyDeleted: state.tokenPhysicallyDeleted
+    };
+    if (state.status === "connected") {
+      record.state.deletion = {
+        status: "not_requested",
+        technicalConnectionDataDeleted: false,
+        commercialHistoryPolicy: "owner_decision_pending"
+      };
+      return record;
+    }
+    invalidateActivePublication(record);
+    record.state.authorization = {
+      status: "not_started",
+      callbackSanitized: true
+    };
+    record.state.delayedContentBlocked = true;
+    if (state.status === "deleted") {
+      record.state.stage = "data_deletion_completed";
+      record.state.deletion = {
+        status: "completed",
+        technicalConnectionDataDeleted: true,
+        commercialHistoryPolicy: "owner_decision_pending"
+      };
+    } else {
+      record.state.stage = "connection_disconnected";
+      record.state.deletion = {
+        status: "not_requested",
+        technicalConnectionDataDeleted: false,
+        commercialHistoryPolicy: "owner_decision_pending"
+      };
+    }
+    return record;
+  }
+
+  async function synchronize(context) {
+    const resolved = await persistentConnection.read(context);
+    return applyPersistentState(getRecord(context), resolved);
+  }
+
+  async function requireConnectedRecord(context) {
+    const record = await synchronize(context);
+    if (record.state.connection.status !== "connected") {
+      fail("reviewer_connection_required", 409);
+    }
+    return record;
+  }
+
+  async function requireReviewReadyRecord(context) {
+    const record = await requireConnectedRecord(context);
+    if (record.state.authorization.status !== "authorization_completed") {
+      fail("reviewer_authorization_not_completed", 409);
+    }
+    return record;
+  }
+
+  return Object.freeze({
+    async read(context) {
+      return response(await synchronize(context));
+    },
+    async authorize(context, input) {
+      const body = exactRecord(input, ["accountType", "purpose"]);
+      if (
+        !["BUSINESS", "CREATOR", "PERSONAL"].includes(body.accountType) ||
+        body.purpose !== REVIEWER_PURPOSE
+      ) {
+        fail("reviewer_authorization_invalid");
+      }
+      const record = await requireConnectedRecord(context);
+      if (body.accountType !== record.state.connection.account.accountType) {
+        fail("reviewer_authorization_invalid");
+      }
+      if (record.state.authorization.status === "authorization_pending") {
+        return response(record);
+      }
+      record.state.stage = "oauth_authorization";
+      record.state.authorization = {
+        status: "authorization_pending",
+        callbackSanitized: false
+      };
+      return response(record);
+    },
+    async callback(context, input) {
+      exactRecord(input, []);
+      const record = await requireConnectedRecord(context);
+      if (record.state.authorization.status !== "authorization_pending") {
+        fail("reviewer_authorization_not_pending", 409);
+      }
+      record.state.stage = "oauth_return";
+      record.state.authorization = {
+        status: "authorization_completed",
+        callbackSanitized: true
+      };
+      return response(record);
+    },
+    async selectMedia(context, input) {
+      await requireReviewReadyRecord(context);
+      return memoryService.selectMedia(context, input);
+    },
+    async publish(context, input) {
+      await requireReviewReadyRecord(context);
+      return memoryService.publish(context, input);
+    },
+    async advance(context, publicationId, input) {
+      await requireReviewReadyRecord(context);
+      return memoryService.advance(context, publicationId, input);
+    },
+    async listPublications(context) {
+      await synchronize(context);
+      return memoryService.listPublications(context);
+    },
+    async getPublication(context, publicationId) {
+      await synchronize(context);
+      return memoryService.getPublication(context, publicationId);
+    },
+    async disconnect(context) {
+      await requireConnectedRecord(context);
+      const resolved = await persistentConnection.disconnect(context);
+      const record = applyPersistentState(getRecord(context), resolved);
+      if (
+        record.state.connection.status !== "disconnected" ||
+        record.state.connection.tokenPhysicallyDeleted !== false
+      ) {
+        fail("reviewer_persistent_disconnect_unconfirmed", 503);
+      }
+      return response(record);
+    },
+    async deleteConnectionData(context, input) {
+      const body = exactRecord(input, ["confirm"]);
+      if (body.confirm !== true) {
+        fail("reviewer_deletion_confirmation_required");
+      }
+      await synchronize(context);
+      const resolved = await persistentConnection.deleteConnectionData(
+        context
+      );
+      const record = applyPersistentState(getRecord(context), resolved);
+      if (
+        record.state.connection.status !== "deleted" ||
+        record.state.connection.tokenPhysicallyDeleted !== true ||
+        record.state.deletion.technicalConnectionDataDeleted !== true
+      ) {
+        fail("reviewer_persistent_deletion_unconfirmed", 503);
+      }
+      return response(record);
+    },
+    async reset(context, input) {
+      const body = exactRecord(input, ["confirm"]);
+      if (body.confirm !== true) {
+        fail("reviewer_reset_confirmation_required");
+      }
+      await synchronize(context);
+      fail("reviewer_persistent_reset_forbidden", 409);
+    }
   });
 }
 
@@ -485,6 +714,10 @@ function createReviewerSandboxRouter(options = {}) {
   }
   const router = options.router || express.Router();
   const enabled = options.enabled === true;
+  const contextFromRequest = options.contextFromRequest || requireTenantContext;
+  if (typeof contextFromRequest !== "function") {
+    fail("reviewer_configuration_invalid", 503);
+  }
 
   router.use((req, res, next) => {
     res.setHeader("Cache-Control", "no-store");
@@ -496,7 +729,7 @@ function createReviewerSandboxRouter(options = {}) {
   router.use(options.authenticate);
 
   function context(req) {
-    return requireTenantContext(req);
+    return contextFromRequest(req);
   }
 
   function route(handler) {
@@ -507,7 +740,7 @@ function createReviewerSandboxRouter(options = {}) {
         return res.status(200).json(result);
       } catch (error) {
         try {
-          current = options.service.read(context(req)).state;
+          current = (await options.service.read(context(req))).state;
         } catch {
           current = null;
         }

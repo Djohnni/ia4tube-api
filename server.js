@@ -30,6 +30,12 @@ const {
   createReviewerSandboxService
 } = require("./src/social/reviewer-sandbox/reviewer-sandbox");
 const {
+  GATE5A_REVIEWER_COMPANY_NAME,
+  GATE5A_REVIEWER_LOGIN,
+  createGate5aSyntheticReviewerResolver,
+  gate5aReviewerSurfaceGateState
+} = require("./scripts/social-gate5a-synthetic-bridge");
+const {
   CONTROLLED_GATE4_PUBLIC_PATH,
   createControlledGate4JpegPublicHandler,
   isControlledGate4RequestPath,
@@ -87,7 +93,10 @@ const {
   timingSafeSecretMatch
 } = require("./src/security/runtime-security");
 const { createOrderMediaAccess } = require("./src/security/order-media-access");
-const { createTenantContextMiddleware } = require("./src/security/tenant-context");
+const {
+  createTenantContextMiddleware,
+  requireTenantContext
+} = require("./src/security/tenant-context");
 const { createLegalPagesRouter } = require("./src/legal/legal-pages.routes");
 const { createPublicUrlConfig } = require("./src/config/public-urls");
 const { streamDirectoryZip } = require("./src/zip/zip-stream");
@@ -248,7 +257,11 @@ const PAYMENT_RETURN_URL = PUBLIC_URLS.paymentReturnUrl;
 const PAYMENT_PAYER_EMAIL_DOMAIN = PUBLIC_URLS.paymentPayerEmailDomain;
 const GATE5A_STAGING_ORIGIN =
   "https://ia4tube-api-staging-checkpoint-a.onrender.com";
-const GATE5A_STAGING_ENABLED = PUBLIC_API_BASE_URL === GATE5A_STAGING_ORIGIN;
+const GATE5A_REVIEWER_SURFACE_GATE =
+  gate5aReviewerSurfaceGateState(process.env);
+const GATE5A_SYNTHETIC_BRIDGE_ENABLED =
+  GATE5A_REVIEWER_SURFACE_GATE.persistent;
+const GATE5A_STAGING_ENABLED = GATE5A_REVIEWER_SURFACE_GATE.enabled;
 const REVIEWER_MEDIA_ASSET = "controlled-review-jpeg";
 const REVIEWER_MEDIA_SENTINEL_PATH =
   "/v1/social/reviewer-sandbox/media/unavailable";
@@ -285,6 +298,35 @@ function reviewerTenantKey(context) {
     );
   }
   return `${tenantId}\u0000${principalId}`;
+}
+
+function gate5aReviewerContextFromRequest(req) {
+  const context = requireTenantContext(req);
+  const claims = req?.auth;
+  const client = readClientes()[context.tenantId];
+  if (
+    !claims ||
+    typeof claims !== "object" ||
+    Array.isArray(claims) ||
+    Object.getPrototypeOf(claims) !== Object.prototype ||
+    context.tenantId !== GATE5A_REVIEWER_LOGIN ||
+    context.principalId !== GATE5A_REVIEWER_LOGIN ||
+    context.role !== "owner" ||
+    !client ||
+    client.ativo === false ||
+    client.nome_time !== GATE5A_REVIEWER_COMPANY_NAME
+  ) {
+    reviewerSandboxFail(
+      "reviewer_authenticated_claims_required",
+      401,
+      "Autenticacao obrigatoria."
+    );
+  }
+  return Object.freeze({
+    ...context,
+    companyName: GATE5A_REVIEWER_COMPANY_NAME,
+    verifiedClaims: Object.freeze({ ...claims })
+  });
 }
 
 function reviewerJpegDimensions(bytes) {
@@ -553,15 +595,15 @@ function createTenantOwnedReviewerSandboxService(baseService) {
     return Object.freeze({ ...result, state });
   }
 
-  function invoke(name, context, ...args) {
-    return decorate(context, baseService[name](context, ...args));
+  async function invoke(name, context, ...args) {
+    return decorate(context, await baseService[name](context, ...args));
   }
 
   return Object.freeze({
     read: (context) => invoke("read", context),
     authorize: (context, input) => invoke("authorize", context, input),
     callback: (context, input) => invoke("callback", context, input),
-    selectMedia(context, input) {
+    async selectMedia(context, input) {
       if (!reviewerMediaRequestIsExact(input)) {
         reviewerSandboxFail("reviewer_request_invalid");
       }
@@ -578,11 +620,11 @@ function createTenantOwnedReviewerSandboxService(baseService) {
         selectionNonce: crypto.randomBytes(18).toString("base64url")
       };
       reviewerMediaCapabilityPath(selection);
-      const result = baseService.selectMedia(context, input);
+      const result = await baseService.selectMedia(context, input);
       selectedMedia.set(reviewerTenantKey(context), selection);
       return decorate(context, result);
     },
-    publish(context, input) {
+    async publish(context, input) {
       if (!currentSelectedMedia(context)) {
         reviewerSandboxFail("reviewer_media_required", 409);
       }
@@ -595,18 +637,18 @@ function createTenantOwnedReviewerSandboxService(baseService) {
     getPublication: (context, publicationId) => (
       invoke("getPublication", context, publicationId)
     ),
-    disconnect(context) {
-      const result = baseService.disconnect(context);
+    async disconnect(context) {
+      const result = await baseService.disconnect(context);
       selectedMedia.delete(reviewerTenantKey(context));
       return decorate(context, result);
     },
-    deleteConnectionData(context, input) {
-      const result = baseService.deleteConnectionData(context, input);
+    async deleteConnectionData(context, input) {
+      const result = await baseService.deleteConnectionData(context, input);
       selectedMedia.delete(reviewerTenantKey(context));
       return decorate(context, result);
     },
-    reset(context, input) {
-      const result = baseService.reset(context, input);
+    async reset(context, input) {
+      const result = await baseService.reset(context, input);
       selectedMedia.delete(reviewerTenantKey(context));
       return decorate(context, result);
     },
@@ -699,11 +741,20 @@ const instagramOAuthVisualReturn = GATE5A_STAGING_ENABLED
       returnPath: "/app.html"
     })
   : null;
+const reviewerPersistentConnection = GATE5A_SYNTHETIC_BRIDGE_ENABLED
+  ? createGate5aSyntheticReviewerResolver({
+      env: process.env,
+      getRuntime() {
+        return socialRuntimeState;
+      }
+    })
+  : null;
 const reviewerSandboxService = GATE5A_STAGING_ENABLED
   ? createTenantOwnedReviewerSandboxService(
       createReviewerSandboxService({
         publicOrigin: PUBLIC_API_BASE_URL,
-        controlledAssetPath: REVIEWER_MEDIA_SENTINEL_PATH
+        controlledAssetPath: REVIEWER_MEDIA_SENTINEL_PATH,
+        persistentConnection: reviewerPersistentConnection
       })
     )
   : null;
@@ -2329,6 +2380,9 @@ if (reviewerSandboxService) {
     "/v1/social/reviewer-sandbox",
     createReviewerSandboxRouter({
       authenticate: auth,
+      ...(GATE5A_SYNTHETIC_BRIDGE_ENABLED
+        ? { contextFromRequest: gate5aReviewerContextFromRequest }
+        : {}),
       enabled: true,
       service: reviewerSandboxService
     })

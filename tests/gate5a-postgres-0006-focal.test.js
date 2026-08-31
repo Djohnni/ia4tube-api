@@ -16,6 +16,9 @@ const {
   withTransaction
 } = require("../src/persistence/postgres/pool");
 const {
+  databaseTargetFingerprint
+} = require("../src/persistence/postgres/config");
+const {
   createPostgresConnectorStore
 } = require("../src/persistence/postgres/social-connector-store");
 const {
@@ -37,6 +40,39 @@ const {
   SESSION_AUDIENCE,
   SESSION_ISSUER
 } = require("../src/social/reauth");
+const {
+  createReviewerSandboxService
+} = require("../src/social/reviewer-sandbox/reviewer-sandbox");
+const { createSocialRuntime } = require("../src/social/runtime");
+const {
+  CONTROLLED_GATE4_COMPANY_ID,
+  CONTROLLED_GATE4_JPEG_SHA256,
+  CONTROLLED_GATE4_PUBLIC_PATH,
+  CONTROLLED_GATE4_USER_ID
+} = require("../src/social/publication/controlled-gate4-jpeg");
+const {
+  deriveVaultKeyVersion,
+  vaultKeyringFingerprint
+} = require("../src/social/vault-key-version");
+const {
+  GATE5A_ENVIRONMENT,
+  GATE5A_REVIEWER_COMPANY_NAME,
+  GATE5A_REVIEWER_LOGIN,
+  GATE5A_STAGING_ORIGIN,
+  GATE5A_STAGING_TARGET_FINGERPRINT,
+  GATE5A_SYNTHETIC_TOKEN_PREFIX,
+  GATE5A_SYNTHETIC_USERNAME,
+  createGate5aSyntheticReviewerResolver,
+  deriveGate5aSyntheticIdentity,
+  exactProvisionApproval,
+  gate5aReviewerSurfaceGateState,
+  gate5aSyntheticBridgeGateState,
+  provisionGate5aSyntheticBridge,
+  syntheticSignedRequest
+} = require("../scripts/social-gate5a-synthetic-bridge");
+const {
+  PAID_STAGING_PUBLIC_TARGET
+} = require("../src/persistence/postgres/staging-provisioner");
 
 const ROOT = path.resolve(__dirname, "..");
 const POSTGRES_BIN = process.platform === "linux"
@@ -223,6 +259,103 @@ function connectionUrl({ port, database, user, password }) {
   url.username = user;
   url.password = password;
   return url.toString();
+}
+
+function bridgeGateEnvironment(overrides = {}) {
+  return {
+    ENVIRONMENT: GATE5A_ENVIRONMENT,
+    PUBLIC_API_BASE_URL: GATE5A_STAGING_ORIGIN,
+    REVIEW_SANDBOX_ENABLED: "true",
+    SYNTHETIC_PROVIDER_ENABLED: "true",
+    ...overrides
+  };
+}
+
+function bridgeRuntimeEnvironment(cluster, secrets, vault) {
+  const databaseUrl = connectionUrl({
+    port: cluster.port,
+    database: DATABASE,
+    user: RUNTIME_LOGIN,
+    password: secrets.runtime
+  });
+  const env = bridgeGateEnvironment({
+    NODE_ENV: "test",
+    SOCIAL_PERSISTENCE_ENABLED: "true",
+    SOCIAL_DATABASE_ALLOW_INSECURE_LOCALHOST: "true",
+    SOCIAL_DATABASE_POOL_MAX: "3",
+    DATABASE_URL: databaseUrl,
+    SOCIAL_DATABASE_EXPECTED_TARGET_FINGERPRINT:
+      databaseTargetFingerprint(new URL(databaseUrl)),
+    SOCIAL_DATABASE_EXPECTED_RUNTIME_LOGIN: RUNTIME_LOGIN,
+    SOCIAL_DATABASE_RUNTIME_ROLE: RUNTIME_ROLE,
+    SOCIAL_IDENTITY_DERIVATION_KEY:
+      secrets.identityKey.toString("base64"),
+    SOCIAL_TENANT_NAMESPACE_UUID:
+      "41cb8c58-0bf4-4bd9-83b2-3f2f96dfe29f",
+    SOCIAL_IDENTITY_DERIVATION_VERSION: "social-id-v1",
+    SOCIAL_VAULT_ACTIVE_KEY_VERSION: vault.version,
+    SOCIAL_VAULT_EXPECTED_KEYRING_FINGERPRINT: vault.fingerprint,
+    SOCIAL_VAULT_KEYS_JSON: JSON.stringify({
+      [vault.version]: secrets.vaultKey.toString("base64")
+    }),
+    JWT_SECRET:
+      "gate5a-test-jwt-secret-separated-from-every-vault-key-0001",
+    ORDER_MEDIA_SIGNING_SECRET:
+      "gate5a-test-order-secret-separated-from-every-vault-key-0001",
+    SOCIAL_INSTAGRAM_ENABLED: "true",
+    SOCIAL_EXTERNAL_CONNECTION_ENABLED: "true",
+    SOCIAL_EXTERNAL_PUBLICATION_ENABLED: "true",
+    SOCIAL_INSTAGRAM_EXPECTED_USERNAME: "ia4tube_empresas",
+    INSTAGRAM_APP_ID: "123456789012345",
+    INSTAGRAM_APP_SECRET: secrets.appSecret.toString("hex"),
+    INSTAGRAM_OAUTH_REDIRECT_URI:
+      `${GATE5A_STAGING_ORIGIN}/v1/social/oauth/callback`,
+    INSTAGRAM_GRAPH_API_VERSION: "v25.0"
+  });
+  const identity = deriveGate5aSyntheticIdentity(env);
+  return Object.freeze({
+    ...env,
+    GATE5A_SYNTHETIC_BRIDGE_APPROVED: exactProvisionApproval(
+      PAID_STAGING_PUBLIC_TARGET.environmentId,
+      GATE5A_STAGING_TARGET_FINGERPRINT,
+      identity.companyId
+    )
+  });
+}
+
+function paidMigrationConfigurationForLocalFocal() {
+  const target = PAID_STAGING_PUBLIC_TARGET;
+  return Object.freeze({
+    enabled: true,
+    targetFingerprint: GATE5A_STAGING_TARGET_FINGERPRINT,
+    ownerRole: OWNER_ROLE,
+    migratorRole: MIGRATOR_ROLE,
+    pool: Object.freeze({
+      max: 1,
+      min: 0,
+      ssl: Object.freeze({ rejectUnauthorized: true })
+    }),
+    target: Object.freeze({
+      environment: GATE5A_ENVIRONMENT,
+      environmentId: target.environmentId,
+      host: target.host,
+      port: target.port,
+      database: target.database,
+      username: target.migrationLogin
+    })
+  });
+}
+
+function paidRuntimeConfigurationForLocalFocal() {
+  return Object.freeze({
+    enabled: true,
+    login: PAID_STAGING_PUBLIC_TARGET.runtimeLogin,
+    targetFingerprint: GATE5A_STAGING_TARGET_FINGERPRINT,
+    role: RUNTIME_ROLE,
+    pool: Object.freeze({
+      ssl: Object.freeze({ rejectUnauthorized: true })
+    })
+  });
 }
 
 function poolOptions({ port, database, user, password, max, name }) {
@@ -1017,6 +1150,71 @@ async function seedSyntheticState(pool, fixtures) {
   for (const fixture of fixtures) await seedTenant(pool, fixture);
 }
 
+async function registerVaultKeyVersion(pool, keyVersion) {
+  await withTransaction(
+    pool,
+    (client) => client.query(
+      [
+        "INSERT INTO ia4tube_social_admin.vault_key_versions(key_version)",
+        "VALUES($1) ON CONFLICT DO NOTHING"
+      ].join("\n"),
+      [keyVersion]
+    ),
+    { role: OWNER_ROLE }
+  );
+}
+
+async function bridgeAuthoritativeSnapshot(cluster, secrets, identity) {
+  const pool = new Pool(poolOptions({
+    port: cluster.port,
+    database: DATABASE,
+    user: ADMIN_LOGIN,
+    password: secrets.admin,
+    max: 1,
+    name: "ia4tube-gate5a-bridge-evidence"
+  }));
+  try {
+    const result = await pool.query(
+      [
+        "SELECT",
+        " (SELECT COUNT(*)::integer FROM ia4tube_social.companies WHERE id=$1) AS companies,",
+        " (SELECT COUNT(*)::integer FROM ia4tube_social.users WHERE company_id=$1 AND id=$2) AS users,",
+        " (SELECT COUNT(*)::integer FROM ia4tube_social.company_memberships WHERE company_id=$1 AND user_id=$2) AS memberships,",
+        " (SELECT COUNT(*)::integer FROM ia4tube_social.social_connections WHERE company_id=$1 AND id=$3) AS connections,",
+        " (SELECT COUNT(*)::integer FROM ia4tube_social.social_external_accounts WHERE company_id=$1 AND connection_id=$3) AS accounts,",
+        " (SELECT COUNT(*)::integer FROM ia4tube_social.social_meta_subject_mappings WHERE company_id=$1 AND connection_id=$3) AS mappings,",
+        " (SELECT COUNT(*)::integer FROM ia4tube_social.social_connection_scopes WHERE company_id=$1 AND connection_id=$3) AS scopes,",
+        " (SELECT COUNT(*)::integer FROM ia4tube_social.social_encrypted_credentials WHERE company_id=$1 AND id=$4) AS credentials,",
+        " (SELECT COUNT(*)::integer FROM ia4tube_social.social_compliance_requests WHERE company_id=$1 AND connection_id=$3) AS requests,",
+        " (SELECT status FROM ia4tube_social.social_connections WHERE company_id=$1 AND id=$3) AS connection_status,",
+        " (SELECT status FROM ia4tube_social.social_external_accounts WHERE company_id=$1 AND connection_id=$3) AS account_status,",
+        " (SELECT account_type FROM ia4tube_social.social_external_accounts WHERE company_id=$1 AND connection_id=$3) AS account_type,",
+        " (SELECT status FROM ia4tube_social.social_meta_subject_mappings WHERE company_id=$1 AND connection_id=$3) AS mapping_status,",
+        " (SELECT subject_digest FROM ia4tube_social.social_meta_subject_mappings WHERE company_id=$1 AND connection_id=$3) AS mapping_digest,",
+        " (SELECT COALESCE(array_agg(scope ORDER BY scope),'{}'::text[]) FROM ia4tube_social.social_connection_scopes WHERE company_id=$1 AND connection_id=$3) AS scope_names,",
+        " (SELECT COALESCE(array_agg(scope ORDER BY scope) FILTER (WHERE expires_at IS NULL OR expires_at>CURRENT_TIMESTAMP),'{}'::text[]) FROM ia4tube_social.social_connection_scopes WHERE company_id=$1 AND connection_id=$3) AS active_scope_names,",
+        " (SELECT status FROM ia4tube_social.social_compliance_requests WHERE company_id=$1 AND connection_id=$3 AND kind='data_deletion') AS deletion_status,",
+        " (SELECT token_materials_deleted FROM ia4tube_social.social_compliance_requests WHERE company_id=$1 AND connection_id=$3 AND kind='data_deletion') AS deletion_token_materials,",
+        " (SELECT revoked_at IS NOT NULL FROM ia4tube_social.social_encrypted_credentials WHERE company_id=$1 AND id=$4) AS credential_revoked,",
+        " (SELECT revision FROM ia4tube_social.social_encrypted_credentials WHERE company_id=$1 AND id=$4) AS credential_revision,",
+        " (SELECT encode(ciphertext,'hex') FROM ia4tube_social.social_encrypted_credentials WHERE company_id=$1 AND id=$4) AS ciphertext_hex,",
+        " (SELECT external_id FROM ia4tube_social.social_external_accounts WHERE company_id=$1 AND connection_id=$3 ORDER BY updated_at DESC LIMIT 1) AS external_id,",
+        " (SELECT username FROM ia4tube_social.social_external_accounts WHERE company_id=$1 AND connection_id=$3 ORDER BY updated_at DESC LIMIT 1) AS username,",
+        " (SELECT COALESCE(jsonb_agg(to_jsonb(audit)),'[]'::jsonb)::text FROM ia4tube_social.social_audit_events audit WHERE company_id=$1) AS audit_json"
+      ].join("\n"),
+      [
+        identity.companyId,
+        identity.userId,
+        identity.connectionId,
+        identity.credentialId
+      ]
+    );
+    return result.rows[0];
+  } finally {
+    await pool.end();
+  }
+}
+
 function signedRequest(externalId, issuedAt, secret) {
   const payload = Buffer.from(JSON.stringify({
     algorithm: "HMAC-SHA256",
@@ -1267,6 +1465,247 @@ test(
 );
 
 test(
+  "Gate 5A: synthetic bridge gates and persistent reviewer mode are fail-closed",
+  async () => {
+    assert.deepEqual(gate5aSyntheticBridgeGateState(bridgeGateEnvironment()), {
+      enabled: true,
+      environment: true,
+      origin: true,
+      reviewSandbox: true,
+      syntheticProvider: true
+    });
+    for (const override of [
+      { ENVIRONMENT: "production" },
+      { PUBLIC_API_BASE_URL: "https://api.ia4tube.com" },
+      { REVIEW_SANDBOX_ENABLED: "false" },
+      { SYNTHETIC_PROVIDER_ENABLED: "false" }
+    ]) {
+      assert.equal(
+        gate5aSyntheticBridgeGateState(
+          bridgeGateEnvironment(override)
+        ).enabled,
+        false
+      );
+    }
+    assert.deepEqual(
+      gate5aReviewerSurfaceGateState(bridgeGateEnvironment()),
+      { enabled: true, persistent: true, legacyTestOnly: false }
+    );
+    assert.deepEqual(
+      gate5aReviewerSurfaceGateState({
+        NODE_ENV: "test",
+        ENVIRONMENT: "production",
+        PUBLIC_API_BASE_URL: GATE5A_STAGING_ORIGIN,
+        SOCIAL_PERSISTENCE_ENABLED: "false"
+      }),
+      { enabled: false, persistent: false, legacyTestOnly: false }
+    );
+    assert.deepEqual(
+      gate5aReviewerSurfaceGateState({
+        NODE_ENV: "test",
+        ENVIRONMENT: "staging",
+        PUBLIC_API_BASE_URL: GATE5A_STAGING_ORIGIN,
+        SOCIAL_PERSISTENCE_ENABLED: "false"
+      }),
+      { enabled: false, persistent: false, legacyTestOnly: false }
+    );
+    assert.deepEqual(
+      gate5aReviewerSurfaceGateState({
+        NODE_ENV: "test",
+        PUBLIC_API_BASE_URL: GATE5A_STAGING_ORIGIN,
+        SOCIAL_PERSISTENCE_ENABLED: "false"
+      }),
+      { enabled: true, persistent: false, legacyTestOnly: true }
+    );
+
+    let authenticationAttempts = 0;
+    await assert.rejects(
+      provisionGate5aSyntheticBridge({
+        env: bridgeGateEnvironment({ ENVIRONMENT: "production" }),
+        authenticate: async () => {
+          authenticationAttempts += 1;
+          throw new Error("must_not_authenticate");
+        }
+      }),
+      { code: "gate5a_synthetic_bridge_gate_required" }
+    );
+    assert.equal(authenticationAttempts, 0);
+
+    await assert.rejects(
+      provisionGate5aSyntheticBridge({
+        env: bridgeGateEnvironment(),
+        loadRuntimeConfig: () => ({
+          ...paidRuntimeConfigurationForLocalFocal(),
+          targetFingerprint: "0".repeat(64)
+        }),
+        authenticate: async () => {
+          authenticationAttempts += 1;
+          throw new Error("must_not_authenticate");
+        }
+      }),
+      { code: "gate5a_synthetic_bridge_target_mismatch" }
+    );
+    assert.equal(authenticationAttempts, 0);
+
+    const context = Object.freeze({
+      tenantId: GATE5A_REVIEWER_LOGIN,
+      principalId: GATE5A_REVIEWER_LOGIN,
+      role: "owner",
+      companyName: "Sabor da Vila Hamburgueria — DEMO",
+      verifiedClaims: Object.freeze({ synthetic: "already-verified" })
+    });
+    let productionRuntimeReads = 0;
+    const productionResolver = createGate5aSyntheticReviewerResolver({
+      env: bridgeGateEnvironment({ ENVIRONMENT: "production" }),
+      getRuntime() {
+        productionRuntimeReads += 1;
+        return null;
+      }
+    });
+    await assert.rejects(
+      productionResolver.read(context),
+      { code: "gate5a_synthetic_bridge_gate_required" }
+    );
+    assert.equal(productionRuntimeReads, 0);
+    let persistentState = {
+      status: "connected",
+      account: {
+        accountId: "synthetic-gate5a-reviewer-account",
+        username: `@${GATE5A_SYNTHETIC_USERNAME}`,
+        accountType: "BUSINESS",
+        professional: true,
+        synthetic: true
+      },
+      tokenPhysicallyDeleted: false
+    };
+    const calls = { read: 0, disconnect: 0, deletion: 0 };
+    const service = createReviewerSandboxService({
+      publicOrigin: GATE5A_STAGING_ORIGIN,
+      controlledAssetPath: "/v1/social/reviewer-sandbox/media/unavailable",
+      randomUUID() {
+        throw new Error("memory_token_path_must_not_run");
+      },
+      persistentConnection: {
+        async read() {
+          calls.read += 1;
+          return persistentState;
+        },
+        async disconnect() {
+          calls.disconnect += 1;
+          persistentState = {
+            status: "disconnected",
+            account: null,
+            tokenPhysicallyDeleted: false
+          };
+          return persistentState;
+        },
+        async deleteConnectionData() {
+          calls.deletion += 1;
+          persistentState = {
+            status: "deleted",
+            account: null,
+            tokenPhysicallyDeleted: true
+          };
+          return persistentState;
+        }
+      }
+    });
+    const initial = await service.read(context);
+    assert.equal(initial.state.connection.status, "connected");
+    assert.equal(initial.state.connection.tokenPhysicallyDeleted, false);
+    const authorization = await service.authorize(context, {
+      accountType: "BUSINESS",
+      purpose: "app_review"
+    });
+    assert.equal(
+      authorization.state.authorization.status,
+      "authorization_pending"
+    );
+    const callback = await service.callback(context, {});
+    assert.equal(callback.state.connection.status, "connected");
+    assert.equal(JSON.stringify(callback).includes("synthetic-review-token"), false);
+    const disconnected = await service.disconnect(context);
+    assert.equal(disconnected.state.connection.status, "disconnected");
+    assert.equal(disconnected.state.connection.tokenPhysicallyDeleted, false);
+    const deleted = await service.deleteConnectionData(context, {
+      confirm: true
+    });
+    assert.equal(deleted.state.connection.status, "deleted");
+    assert.equal(deleted.state.connection.tokenPhysicallyDeleted, true);
+    assert.equal(deleted.state.deletion.technicalConnectionDataDeleted, true);
+    assert.deepEqual(calls, { read: 5, disconnect: 1, deletion: 1 });
+
+    const serverSource = fs.readFileSync(path.join(ROOT, "server.js"), "utf8");
+    const bridgeSource = fs.readFileSync(
+      path.join(ROOT, "scripts", "social-gate5a-synthetic-bridge.js"),
+      "utf8"
+    );
+    assert.equal(serverSource.includes("provisionGate5aSyntheticBridge("), false);
+    assert.equal(serverSource.includes("/admin/synthetic"), false);
+    assert.equal(
+      serverSource.includes(
+        "const GATE5A_STAGING_ENABLED = GATE5A_REVIEWER_SURFACE_GATE.enabled;"
+      ),
+      true
+    );
+    assert.equal(
+      serverSource.includes(
+        "const reviewerPersistentConnection = GATE5A_SYNTHETIC_BRIDGE_ENABLED"
+      ),
+      true
+    );
+    assert.equal(
+      serverSource.includes(
+        "persistentConnection: reviewerPersistentConnection"
+      ),
+      true
+    );
+    assert.equal(
+      serverSource.includes(
+        "const reviewerSandboxService = GATE5A_STAGING_ENABLED"
+      ),
+      true
+    );
+    assert.equal(bridgeSource.includes("ia4tube_empresas"), false);
+    assert.equal(bridgeSource.includes("0007_"), false);
+    assert.equal(bridgeSource.includes("api.instagram.com"), false);
+    assert.equal(bridgeSource.includes("graph.instagram.com"), false);
+    for (const gate4Reference of [
+      CONTROLLED_GATE4_COMPANY_ID,
+      CONTROLLED_GATE4_USER_ID,
+      CONTROLLED_GATE4_JPEG_SHA256,
+      CONTROLLED_GATE4_PUBLIC_PATH,
+      "ia4tube_empresas"
+    ]) {
+      assert.equal(bridgeSource.includes(gate4Reference), false);
+    }
+    for (const localOnlySourcePath of [
+      path.join(
+        ROOT,
+        "src",
+        "social",
+        "compliance",
+        "meta-compliance-service.js"
+      ),
+      path.join(
+        ROOT,
+        "src",
+        "persistence",
+        "postgres",
+        "meta-compliance-repository.js"
+      )
+    ]) {
+      const localOnlySource = fs.readFileSync(localOnlySourcePath, "utf8");
+      assert.equal(
+        /globalThis\.fetch|require\(["']node:https?["']\)|https?\.(?:get|request)\s*\(/
+          .test(localOnlySource),
+        false
+      );
+    }
+  }
+);
+
+test(
   "Gate 5A: PostgreSQL 18.6 disposable focal proves migration 0006 and compliance persistence",
   { skip: !AUTHORIZED, timeout: 600000 },
   async () => {
@@ -1277,11 +1716,14 @@ test(
       runtime: strongSecret(),
       environmentId: crypto.randomUUID(),
       appSecret: crypto.randomBytes(32),
-      identityKey: crypto.randomBytes(32)
+      identityKey: crypto.randomBytes(32),
+      vaultKey: crypto.randomBytes(32)
     };
     let cluster;
     let pools = {};
     let compliance;
+    let bridgeRuntime;
+    let bridgeEvidence;
     let evidence;
     let primaryFailure;
     let cleanupFailure;
@@ -1330,6 +1772,18 @@ test(
         33
       );
       await seedSyntheticState(pools.migration, [a, b]);
+      const bridgeVault = Object.freeze({
+        version: deriveVaultKeyVersion(1, secrets.vaultKey),
+        fingerprint: null
+      });
+      const vault = Object.freeze({
+        version: bridgeVault.version,
+        fingerprint: vaultKeyringFingerprint(
+          bridgeVault.version,
+          [bridgeVault.version]
+        )
+      });
+      await registerVaultKeyVersion(pools.migration, vault.version);
 
       const fullManifest = migrations.readManifest();
       const migration0006 = fullManifest.find(
@@ -1379,6 +1833,498 @@ test(
       const afterRefusalLedger = await ledgerSnapshot(pools.migration);
       assert.equal(afterRefusalLedger.rows[0].total, 6);
       assert.equal(afterRefusalLedger.rows[0].compliance_count, 1);
+
+      const existingTenantSnapshotBefore = await authoritativeSnapshot(
+        cluster,
+        secrets,
+        a,
+        b
+      );
+      const bridgeEnv = bridgeRuntimeEnvironment(cluster, secrets, vault);
+      const bridgeIdentity = deriveGate5aSyntheticIdentity(bridgeEnv);
+      assert.notEqual(bridgeIdentity.companyId, CONTROLLED_GATE4_COMPANY_ID);
+      assert.notEqual(bridgeIdentity.userId, CONTROLLED_GATE4_USER_ID);
+      assert.equal(
+        bridgeEnv.SOCIAL_INSTAGRAM_EXPECTED_USERNAME,
+        "ia4tube_empresas"
+      );
+      assert.equal(bridgeEnv.SOCIAL_EXTERNAL_PUBLICATION_ENABLED, "true");
+      const bridgeClaims = Object.freeze({
+        token_version: 2,
+        iss: SESSION_ISSUER,
+        aud: SESSION_AUDIENCE,
+        jti: "gate5a-synthetic-reviewer-jwt-000001",
+        sub: GATE5A_REVIEWER_LOGIN,
+        whatsapp: GATE5A_REVIEWER_LOGIN,
+        company_id: GATE5A_REVIEWER_LOGIN
+      });
+      const bridgeContext = Object.freeze({
+        tenantId: GATE5A_REVIEWER_LOGIN,
+        principalId: GATE5A_REVIEWER_LOGIN,
+        role: "owner",
+        companyName: GATE5A_REVIEWER_COMPANY_NAME,
+        verifiedClaims: bridgeClaims
+      });
+      const bridgeNow = Date.now();
+      const bridgeExternal = {
+        instagram: 0,
+        publication: 0
+      };
+      const bridgeLogs = [];
+      const bridgeLogger = Object.freeze({
+        error(value) { bridgeLogs.push(JSON.stringify(value)); },
+        info(value) { bridgeLogs.push(JSON.stringify(value)); },
+        warn(value) { bridgeLogs.push(JSON.stringify(value)); }
+      });
+      const forbiddenInstagramTransport = async () => {
+        bridgeExternal.instagram += 1;
+        throw new Error("gate5a_external_instagram_forbidden");
+      };
+      const forbiddenPublicationTransport = async () => {
+        bridgeExternal.publication += 1;
+        throw new Error("gate5a_external_publication_forbidden");
+      };
+      const gate4AssetSentinel = path.join(
+        cluster.root,
+        "gate4-asset-must-not-be-read"
+      );
+      const bridgeBootstrap = Object.freeze({
+        loadMigrationConfig: paidMigrationConfigurationForLocalFocal,
+        createPool: () => pools.migration,
+        createRunner: () => runner,
+        closePool: async () => {}
+      });
+      const bridgeRuntimeTarget = Object.freeze({
+        loadRuntimeConfig: paidRuntimeConfigurationForLocalFocal,
+        createRuntimePool: () => pools.runtime,
+        closeRuntimePool: async () => {}
+      });
+      const provisionInput = Object.freeze({
+        env: bridgeEnv,
+        verifiedClaims: bridgeClaims,
+        verifiedCompanyName: GATE5A_REVIEWER_COMPANY_NAME,
+        ...bridgeBootstrap,
+        ...bridgeRuntimeTarget,
+        publicDirectory: gate4AssetSentinel,
+        logger: bridgeLogger,
+        instagramTransport: forbiddenInstagramTransport,
+        instagramPublicationTransport: forbiddenPublicationTransport,
+        clock: () => bridgeNow
+      });
+      const firstProvision = await provisionGate5aSyntheticBridge(
+        provisionInput
+      );
+      assert.deepEqual(
+        {
+          ok: firstProvision.ok,
+          classification: firstProvision.classification,
+          identityInserted: firstProvision.identityInserted,
+          identityAlreadyExact: firstProvision.identityAlreadyExact,
+          connectionCreated: firstProvision.connectionCreated,
+          connectionAlreadyExact: firstProvision.connectionAlreadyExact,
+          persistedSyntheticConnection:
+            firstProvision.persistedSyntheticConnection,
+          persistedSyntheticCredential:
+            firstProvision.persistedSyntheticCredential,
+          canonicalVaultUsed: firstProvision.canonicalVaultUsed,
+          tokenExposed: firstProvision.tokenExposed
+        },
+        {
+          ok: true,
+          classification: "D",
+          identityInserted: 3,
+          identityAlreadyExact: 0,
+          connectionCreated: true,
+          connectionAlreadyExact: false,
+          persistedSyntheticConnection: true,
+          persistedSyntheticCredential: true,
+          canonicalVaultUsed: true,
+          tokenExposed: false
+        }
+      );
+      const bridgeAfterFirst = await bridgeAuthoritativeSnapshot(
+        cluster,
+        secrets,
+        bridgeIdentity
+      );
+      assert.deepEqual(
+        {
+          companies: bridgeAfterFirst.companies,
+          users: bridgeAfterFirst.users,
+          memberships: bridgeAfterFirst.memberships,
+          connections: bridgeAfterFirst.connections,
+          accounts: bridgeAfterFirst.accounts,
+          mappings: bridgeAfterFirst.mappings,
+          scopes: bridgeAfterFirst.scopes,
+          credentials: bridgeAfterFirst.credentials,
+          requests: bridgeAfterFirst.requests,
+          connectionStatus: bridgeAfterFirst.connection_status,
+          accountStatus: bridgeAfterFirst.account_status,
+          accountType: bridgeAfterFirst.account_type,
+          mappingStatus: bridgeAfterFirst.mapping_status,
+          externalId: bridgeAfterFirst.external_id,
+          username: bridgeAfterFirst.username,
+          scopeNames: bridgeAfterFirst.scope_names,
+          activeScopeNames: bridgeAfterFirst.active_scope_names,
+          credentialRevoked: bridgeAfterFirst.credential_revoked
+        },
+        {
+          companies: 1,
+          users: 1,
+          memberships: 1,
+          connections: 1,
+          accounts: 1,
+          mappings: 1,
+          scopes: 2,
+          credentials: 1,
+          requests: 0,
+          connectionStatus: "connected",
+          accountStatus: "active",
+          accountType: "business",
+          mappingStatus: "active",
+          externalId: bridgeIdentity.externalUserId,
+          username: GATE5A_SYNTHETIC_USERNAME,
+          scopeNames: [
+            "instagram_business_basic",
+            "instagram_business_content_publish"
+          ],
+          activeScopeNames: [
+            "instagram_business_basic",
+            "instagram_business_content_publish"
+          ],
+          credentialRevoked: false
+        }
+      );
+      const ciphertextAfterFirst = bridgeAfterFirst.ciphertext_hex;
+      const credentialRevisionAfterFirst =
+        bridgeAfterFirst.credential_revision;
+      assert.equal(typeof ciphertextAfterFirst, "string");
+      assert.notEqual(ciphertextAfterFirst.length, 0);
+      assert.equal(
+        ciphertextAfterFirst.includes(
+          Buffer.from(GATE5A_SYNTHETIC_TOKEN_PREFIX, "utf8").toString("hex")
+        ),
+        false
+      );
+
+      const secondProvision = await provisionGate5aSyntheticBridge(
+        provisionInput
+      );
+      assert.deepEqual(
+        {
+          identityInserted: secondProvision.identityInserted,
+          identityAlreadyExact: secondProvision.identityAlreadyExact,
+          connectionCreated: secondProvision.connectionCreated,
+          connectionAlreadyExact: secondProvision.connectionAlreadyExact
+        },
+        {
+          identityInserted: 0,
+          identityAlreadyExact: 3,
+          connectionCreated: false,
+          connectionAlreadyExact: true
+        }
+      );
+      const bridgeAfterSecond = await bridgeAuthoritativeSnapshot(
+        cluster,
+        secrets,
+        bridgeIdentity
+      );
+      assert.equal(bridgeAfterSecond.ciphertext_hex, ciphertextAfterFirst);
+      assert.equal(
+        bridgeAfterSecond.credential_revision,
+        credentialRevisionAfterFirst
+      );
+      const bridgeProvisionHiddenFromB = await withTransaction(
+        pools.runtime,
+        (client) => client.query(
+          [
+            "SELECT",
+            " (SELECT COUNT(*)::integer FROM ia4tube_social.social_connections WHERE company_id=$1) AS connections,",
+            " (SELECT COUNT(*)::integer FROM ia4tube_social.social_external_accounts WHERE company_id=$1) AS accounts,",
+            " (SELECT COUNT(*)::integer FROM ia4tube_social.social_meta_subject_mappings WHERE company_id=$1) AS mappings,",
+            " (SELECT COUNT(*)::integer FROM ia4tube_social.social_connection_scopes WHERE company_id=$1) AS scopes,",
+            " (SELECT COUNT(*)::integer FROM ia4tube_social.social_encrypted_credentials WHERE company_id=$1) AS credentials"
+          ].join("\n"),
+          [bridgeIdentity.companyId]
+        ),
+        { role: RUNTIME_ROLE, companyId: b.companyId }
+      );
+      assert.deepEqual(bridgeProvisionHiddenFromB.rows[0], {
+        connections: 0,
+        accounts: 0,
+        mappings: 0,
+        scopes: 0,
+        credentials: 0
+      });
+      for (const serialized of [
+        JSON.stringify(firstProvision),
+        JSON.stringify(secondProvision),
+        JSON.stringify(bridgeLogs),
+        bridgeAfterSecond.audit_json
+      ]) {
+        assert.equal(serialized.includes(GATE5A_SYNTHETIC_TOKEN_PREFIX), false);
+      }
+
+      const bridgeServerEnv = {
+        ...bridgeEnv,
+        SOCIAL_EXTERNAL_PUBLICATION_ENABLED: "false",
+        SOCIAL_INSTAGRAM_EXPECTED_USERNAME: GATE5A_SYNTHETIC_USERNAME
+      };
+      delete bridgeServerEnv.GATE5A_SYNTHETIC_BRIDGE_APPROVED;
+      bridgeRuntime = await createSocialRuntime({
+        env: bridgeServerEnv,
+        logger: bridgeLogger,
+        instagramTransport: forbiddenInstagramTransport,
+        instagramPublicationTransport: forbiddenPublicationTransport,
+        publicDirectory: gate4AssetSentinel,
+        clock: () => bridgeNow
+      });
+      const bridgeResolver = createGate5aSyntheticReviewerResolver({
+        env: bridgeEnv,
+        getRuntime: () => bridgeRuntime,
+        clock: () => bridgeNow,
+        ...bridgeRuntimeTarget
+      });
+      const bridgeService = createReviewerSandboxService({
+        publicOrigin: GATE5A_STAGING_ORIGIN,
+        controlledAssetPath:
+          "/v1/social/reviewer-sandbox/media/unavailable",
+        persistentConnection: bridgeResolver,
+        clock: () => bridgeNow
+      });
+      const bridgeInitial = await bridgeService.read(bridgeContext);
+      assert.equal(bridgeInitial.state.connection.status, "connected");
+      assert.equal(
+        bridgeInitial.state.authorization.status,
+        "not_started"
+      );
+      const bridgeAuthorization = await bridgeService.authorize(
+        bridgeContext,
+        { accountType: "BUSINESS", purpose: "app_review" }
+      );
+      assert.equal(
+        bridgeAuthorization.state.authorization.status,
+        "authorization_pending"
+      );
+      const bridgeCallback = await bridgeService.callback(bridgeContext, {});
+      assert.equal(
+        bridgeCallback.state.authorization.status,
+        "authorization_completed"
+      );
+      assert.equal(
+        bridgeCallback.state.connection.account.username,
+        `@${GATE5A_SYNTHETIC_USERNAME}`
+      );
+      await bridgeService.selectMedia(bridgeContext, {
+        asset: "controlled-review-jpeg"
+      });
+      const bridgeSending = await bridgeService.publish(bridgeContext, {
+        clientRequestId: "gate5a-synthetic-review-0001"
+      });
+      const bridgePublicationId =
+        bridgeSending.state.publication.details.publicationId;
+      assert.equal(bridgeSending.state.publication.state, "sending");
+      const bridgeConfirming = await bridgeService.advance(
+        bridgeContext,
+        bridgePublicationId,
+        {}
+      );
+      assert.equal(
+        bridgeConfirming.state.publication.state,
+        "provider_confirming"
+      );
+      const bridgePublished = await bridgeService.advance(
+        bridgeContext,
+        bridgePublicationId,
+        {}
+      );
+      assert.equal(bridgePublished.state.publication.state, "published");
+      assert.match(
+        bridgePublished.state.publication.details.mediaId,
+        /^synthetic-media-/
+      );
+      assert.match(
+        bridgePublished.state.publication.details.reference,
+        /^synthetic-review:/
+      );
+      assert.equal(
+        (await bridgeService.listPublications(bridgeContext)).publications
+          .length,
+        1
+      );
+
+      const bridgeSigned = syntheticSignedRequest(
+        bridgeEnv,
+        bridgeIdentity.externalUserId,
+        Math.floor(bridgeNow / 1000)
+      );
+      const separator = bridgeSigned.indexOf(".");
+      const firstSignatureCharacter = bridgeSigned[0];
+      const tamperedSignedRequest =
+        `${firstSignatureCharacter === "A" ? "B" : "A"}` +
+        bridgeSigned.slice(1, separator + 1) +
+        bridgeSigned.slice(separator + 1);
+      await assert.rejects(
+        bridgeRuntime.metaCompliance.handleDataDeletion({
+          signedRequest: tamperedSignedRequest
+        }),
+        (error) => error.code === "meta_signed_request_signature_invalid" &&
+          error.statusCode === 401
+      );
+      const bridgeAfterInvalid = await bridgeAuthoritativeSnapshot(
+        cluster,
+        secrets,
+        bridgeIdentity
+      );
+      assert.equal(bridgeAfterInvalid.credentials, 1);
+      assert.equal(bridgeAfterInvalid.requests, 0);
+      assert.equal(bridgeAfterInvalid.connection_status, "connected");
+
+      const bridgeDisconnected = await bridgeService.disconnect(
+        bridgeContext
+      );
+      assert.equal(
+        bridgeDisconnected.state.connection.status,
+        "disconnected"
+      );
+      assert.equal(
+        bridgeDisconnected.state.connection.tokenPhysicallyDeleted,
+        false
+      );
+      assert.equal(bridgeDisconnected.state.delayedContentBlocked, true);
+      await assert.rejects(
+        bridgeService.selectMedia(bridgeContext, {
+          asset: "controlled-review-jpeg"
+        }),
+        (error) => error.code === "reviewer_connection_required" &&
+          error.status === 409
+      );
+      const bridgeAfterDisconnect = await bridgeAuthoritativeSnapshot(
+        cluster,
+        secrets,
+        bridgeIdentity
+      );
+      assert.equal(bridgeAfterDisconnect.connection_status, "disconnected");
+      assert.equal(bridgeAfterDisconnect.account_status, "revoked");
+      assert.equal(bridgeAfterDisconnect.mapping_status, "active");
+      assert.equal(bridgeAfterDisconnect.credentials, 1);
+      assert.equal(bridgeAfterDisconnect.credential_revoked, true);
+      assert.deepEqual(bridgeAfterDisconnect.active_scope_names, []);
+      await assert.rejects(
+        bridgeRuntime.credentials.withDecryptedCredential({
+          companyId: bridgeIdentity.companyId,
+          credentialId: bridgeIdentity.credentialId
+        }, async () => true),
+        (error) => error.code === "credential_not_found"
+      );
+
+      const bridgeDeleted = await bridgeService.deleteConnectionData(
+        bridgeContext,
+        { confirm: true }
+      );
+      assert.equal(bridgeDeleted.state.connection.status, "deleted");
+      assert.equal(
+        bridgeDeleted.state.connection.tokenPhysicallyDeleted,
+        true
+      );
+      assert.equal(
+        bridgeDeleted.state.deletion.technicalConnectionDataDeleted,
+        true
+      );
+      const bridgeAfterDeletion = await bridgeAuthoritativeSnapshot(
+        cluster,
+        secrets,
+        bridgeIdentity
+      );
+      assert.equal(bridgeAfterDeletion.connection_status, "revoked");
+      assert.equal(bridgeAfterDeletion.mapping_status, "revoked");
+      assert.equal(bridgeAfterDeletion.credentials, 0);
+      assert.equal(bridgeAfterDeletion.requests, 1);
+      assert.equal(bridgeAfterDeletion.deletion_status, "completed");
+      assert.equal(bridgeAfterDeletion.deletion_token_materials, 1);
+      await assert.rejects(
+        bridgeRuntime.credentials.withDecryptedCredential({
+          companyId: bridgeIdentity.companyId,
+          credentialId: bridgeIdentity.credentialId
+        }, async () => true),
+        (error) => error.code === "credential_not_found"
+      );
+
+      const freshBridgeResolver = createGate5aSyntheticReviewerResolver({
+        env: bridgeEnv,
+        getRuntime: () => bridgeRuntime,
+        clock: () => bridgeNow,
+        ...bridgeRuntimeTarget
+      });
+      const freshBridgeService = createReviewerSandboxService({
+        publicOrigin: GATE5A_STAGING_ORIGIN,
+        controlledAssetPath:
+          "/v1/social/reviewer-sandbox/media/unavailable",
+        persistentConnection: freshBridgeResolver,
+        clock: () => bridgeNow
+      });
+      assert.equal(
+        (await freshBridgeService.read(bridgeContext)).state.connection.status,
+        "deleted"
+      );
+      const bridgeReplay = await bridgeRuntime.metaCompliance
+        .handleDataDeletion({ signedRequest: bridgeSigned });
+      assert.equal(bridgeReplay.replayed, true);
+      assert.equal(bridgeReplay.tokenMaterialsDeleted, 0);
+      assert.match(bridgeReplay.confirmationCode, /^[A-Za-z0-9_-]{32}$/);
+      assert.deepEqual(
+        await bridgeRuntime.metaCompliance.getStatus({
+          confirmationCode: bridgeReplay.confirmationCode
+        }),
+        { status: "completed" }
+      );
+      await assert.rejects(
+        bridgeRuntime.metaCompliance.getStatus({
+          confirmationCode: "Z".repeat(32)
+        }),
+        (error) => error.code === "meta_confirmation_unavailable" &&
+          error.statusCode === 404
+      );
+      const bridgeHiddenFromB = await withTransaction(
+        pools.runtime,
+        (client) => client.query(
+          [
+            "SELECT",
+            " (SELECT COUNT(*)::integer FROM ia4tube_social.social_connections WHERE company_id=$1) AS connections,",
+            " (SELECT COUNT(*)::integer FROM ia4tube_social.social_encrypted_credentials WHERE company_id=$1) AS credentials,",
+            " (SELECT COUNT(*)::integer FROM ia4tube_social.social_compliance_requests WHERE company_id=$1) AS requests"
+          ].join("\n"),
+          [bridgeIdentity.companyId]
+        ),
+        { role: RUNTIME_ROLE, companyId: b.companyId }
+      );
+      assert.deepEqual(bridgeHiddenFromB.rows[0], {
+        connections: 0,
+        credentials: 0,
+        requests: 0
+      });
+      assert.deepEqual(bridgeExternal, {
+        instagram: 0,
+        publication: 0
+      });
+      assert.equal(fs.existsSync(gate4AssetSentinel), false);
+      assert.deepEqual(
+        await authoritativeSnapshot(cluster, secrets, a, b),
+        existingTenantSnapshotBefore
+      );
+      bridgeEvidence = Object.freeze({
+        env: bridgeEnv,
+        serverEnv: bridgeServerEnv,
+        identity: bridgeIdentity,
+        context: bridgeContext,
+        signedRequest: bridgeSigned,
+        confirmationCode: bridgeReplay.confirmationCode,
+        clock: bridgeNow,
+        external: bridgeExternal,
+        gate4AssetSentinel
+      });
+      await bridgeRuntime.close();
+      bridgeRuntime = null;
 
       const now = Date.now();
       compliance = complianceRuntime(pools.runtime, now, secrets.appSecret);
@@ -1460,6 +2406,106 @@ test(
         secrets.appSecret
       );
       compliance = afterRestart;
+      bridgeRuntime = await createSocialRuntime({
+        env: bridgeEvidence.serverEnv,
+        logger: bridgeLogger,
+        instagramTransport: forbiddenInstagramTransport,
+        instagramPublicationTransport: forbiddenPublicationTransport,
+        publicDirectory: bridgeEvidence.gate4AssetSentinel,
+        clock: () => bridgeEvidence.clock
+      });
+      const bridgeAfterRestartResolver =
+        createGate5aSyntheticReviewerResolver({
+          env: bridgeEvidence.env,
+          getRuntime: () => bridgeRuntime,
+          clock: () => bridgeEvidence.clock,
+          ...bridgeRuntimeTarget
+        });
+      const bridgeAfterRestartService = createReviewerSandboxService({
+        publicOrigin: GATE5A_STAGING_ORIGIN,
+        controlledAssetPath:
+          "/v1/social/reviewer-sandbox/media/unavailable",
+        persistentConnection: bridgeAfterRestartResolver,
+        clock: () => bridgeEvidence.clock
+      });
+      const bridgeRestartRead = await bridgeAfterRestartService.read(
+        bridgeEvidence.context
+      );
+      assert.equal(
+        bridgeRestartRead.state.connection.status,
+        "deleted"
+      );
+      const bridgeRestartStatus = await bridgeRuntime.metaCompliance.getStatus({
+        confirmationCode: bridgeEvidence.confirmationCode
+      });
+      assert.deepEqual(
+        bridgeRestartStatus,
+        { status: "completed" }
+      );
+      const bridgeReplayAfterRestart = await bridgeRuntime.metaCompliance
+        .handleDataDeletion({ signedRequest: bridgeEvidence.signedRequest });
+      assert.equal(bridgeReplayAfterRestart.replayed, true);
+      assert.equal(bridgeReplayAfterRestart.tokenMaterialsDeleted, 0);
+      assert.equal(
+        bridgeReplayAfterRestart.confirmationCode,
+        bridgeEvidence.confirmationCode
+      );
+      await assert.rejects(
+        bridgeRuntime.credentials.withDecryptedCredential({
+          companyId: bridgeEvidence.identity.companyId,
+          credentialId: bridgeEvidence.identity.credentialId
+        }, async () => true),
+        (error) => error.code === "credential_not_found"
+      );
+      const bridgeAfterRestartSnapshot = await bridgeAuthoritativeSnapshot(
+        cluster,
+        secrets,
+        bridgeEvidence.identity
+      );
+      const bridgePublicArtifacts = JSON.stringify([
+        firstProvision,
+        secondProvision,
+        bridgeInitial,
+        bridgeAuthorization,
+        bridgeCallback,
+        bridgeSending,
+        bridgeConfirming,
+        bridgePublished,
+        bridgeDisconnected,
+        bridgeDeleted,
+        bridgeReplay,
+        bridgeRestartRead,
+        bridgeRestartStatus,
+        bridgeReplayAfterRestart
+      ]);
+      for (const forbidden of [
+        GATE5A_SYNTHETIC_TOKEN_PREFIX,
+        bridgeEvidence.signedRequest,
+        bridgeEvidence.signedRequest.split(".")[0]
+      ]) {
+        assert.equal(bridgePublicArtifacts.includes(forbidden), false);
+      }
+      const bridgeNonPublicArtifacts = [
+        JSON.stringify(bridgeLogs),
+        bridgeAfterDeletion.audit_json,
+        bridgeAfterRestartSnapshot.audit_json
+      ].join("\n");
+      for (const forbidden of [
+        GATE5A_SYNTHETIC_TOKEN_PREFIX,
+        bridgeEvidence.identity.externalUserId,
+        bridgeEvidence.signedRequest,
+        bridgeEvidence.signedRequest.split(".")[0],
+        bridgeEvidence.confirmationCode
+      ]) {
+        assert.equal(bridgeNonPublicArtifacts.includes(forbidden), false);
+      }
+      assert.deepEqual(bridgeEvidence.external, {
+        instagram: 0,
+        publication: 0
+      });
+      await bridgeRuntime.close();
+      bridgeRuntime = null;
+      bridgeEvidence = null;
       assert.deepEqual(
         await compliance.service.getStatus({
           confirmationCode: deletion.confirmationCode
@@ -1544,6 +2590,17 @@ test(
         crossTenantDeletion: false,
         publicationsCreated: 0,
         persistenceAfterRestart: true,
+        syntheticBridgeProvisioned: true,
+        syntheticBridgeIdempotent: true,
+        syntheticBridgePersistedAfterRestart: true,
+        syntheticBridgeTokenEncrypted: true,
+        syntheticBridgeTokenPhysicallyDeleted: true,
+        syntheticBridgeTokenUnusableAfterDeletion: true,
+        syntheticBridgeReplaySafe: true,
+        syntheticBridgeTenantIsolation: true,
+        syntheticBridgeProductionGate: true,
+        gate4ReferenceScan: true,
+        metaComplianceLocalRepositoryOnly: true,
         externalMetaCalls: 0,
         externalInstagramCalls: 0,
         externalPublicationCalls: 0,
@@ -1552,6 +2609,9 @@ test(
     } catch (error) {
       primaryFailure = error;
     } finally {
+      if (bridgeRuntime) {
+        try { await bridgeRuntime.close(); } catch {}
+      }
       if (compliance) {
         try { compliance.verifier.destroy(); } catch {}
         try { compliance.repository.destroy(); } catch {}
@@ -1570,6 +2630,7 @@ test(
       }
       secrets.appSecret.fill(0);
       secrets.identityKey.fill(0);
+      secrets.vaultKey.fill(0);
     }
 
     if (cleanupFailure) {
