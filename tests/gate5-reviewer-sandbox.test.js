@@ -289,3 +289,179 @@ test("sandbox rejects a client-supplied company identifier", () => {
     (error) => error.code === "reviewer_request_invalid"
   );
 });
+
+test("persistent reviewer history survives a fresh service and remains tenant-isolated", async () => {
+  const origin = "https://ia4tube-api-staging-checkpoint-a.onrender.com";
+  const trustedContent = {
+    caption: "CONTEUDO DEMO — NAO PUBLICAR",
+    mediaReference: `gate5a-content:${"a".repeat(64)}:${"b".repeat(32)}`
+  };
+  const confirmationCode = "A".repeat(32);
+  const histories = new Map();
+  const connectionStates = new Map([
+    [companyA.tenantId, "connected"],
+    [companyB.tenantId, "connected"]
+  ]);
+  const ids = new Map([
+    [companyA.tenantId, "11111111-1111-4111-8111-111111111111"],
+    [companyB.tenantId, "22222222-2222-4222-8222-222222222222"]
+  ]);
+
+  function envelope(context) {
+    const publication = histories.get(context.tenantId) || null;
+    return {
+      publication,
+      publications: publication?.state === "published" ? [publication] : []
+    };
+  }
+
+  const persistence = {
+    async read(context) {
+      const status = connectionStates.get(context.tenantId);
+      if (status === "connected") {
+        return {
+          status,
+          account: {
+            accountId: `synthetic-${context.tenantId}`,
+            username: "@empresa_sintetica",
+            accountType: "BUSINESS",
+            professional: true,
+            synthetic: true
+          },
+          tokenPhysicallyDeleted: false
+        };
+      }
+      if (status === "deleted") {
+        return {
+          status,
+          account: null,
+          tokenPhysicallyDeleted: true,
+          deletion: {
+            confirmationCode,
+            status: "completed",
+            statusUrl: `${origin}/v1/social/compliance/meta/` +
+              `data-deletion/status/${confirmationCode}`
+          }
+        };
+      }
+      return { status, account: null, tokenPhysicallyDeleted: false };
+    },
+    async disconnect(context) {
+      connectionStates.set(context.tenantId, "disconnected");
+      return this.read(context);
+    },
+    async deleteConnectionData(context) {
+      connectionStates.set(context.tenantId, "deleted");
+      return this.read(context);
+    },
+    async readPublicationHistory(context) {
+      return envelope(context);
+    },
+    async publishPublication(context, input, content) {
+      assert.equal(input.clientRequestId, "gate5a-reviewer-manual-publish-v1");
+      assert.deepEqual(content, trustedContent);
+      const suffix = ids.get(context.tenantId);
+      const existing = histories.get(context.tenantId);
+      if (!existing) {
+        histories.set(context.tenantId, {
+          publicationId: `synthetic-publication-${suffix}`,
+          state: "sending",
+          attempts: 1,
+          mediaId: null,
+          publishedAt: null,
+          reference: null,
+          permalink: null,
+          synthetic: true
+        });
+      }
+      return { ...envelope(context), idempotentReplay: Boolean(existing) };
+    },
+    async advancePublication(context, publicationId) {
+      const current = histories.get(context.tenantId);
+      if (!current || current.publicationId !== publicationId) {
+        throw new Error("publication_not_found");
+      }
+      if (current.state === "sending") {
+        histories.set(context.tenantId, {
+          ...current,
+          state: "provider_confirming"
+        });
+      } else if (current.state === "provider_confirming") {
+        const suffix = ids.get(context.tenantId);
+        histories.set(context.tenantId, {
+          ...current,
+          state: "published",
+          mediaId: `synthetic-media-${suffix}`,
+          publishedAt: "2026-09-01T12:00:00.000Z",
+          reference: `synthetic-review:${suffix}`,
+          permalink: `${origin}/app.html?review=instagram-publishing&` +
+            `publication=${encodeURIComponent(publicationId)}`
+        });
+      }
+      return envelope(context);
+    }
+  };
+
+  function persistentService() {
+    let counter = 1;
+    return createReviewerSandboxService({
+      publicOrigin: origin,
+      controlledAssetPath: "/v1/social/reviewer-sandbox/media/unavailable",
+      persistentConnection: persistence,
+      randomUUID() {
+        const suffix = (counter++).toString(16).padStart(12, "0");
+        return `00000000-0000-4000-8000-${suffix}`;
+      }
+    });
+  }
+
+  const first = persistentService();
+  await first.authorize(companyA, {
+    accountType: "BUSINESS",
+    purpose: "app_review"
+  });
+  await first.callback(companyA, {});
+  await first.selectMedia(companyA, { asset: "controlled-review-jpeg" });
+  const sending = await first.publish(companyA, {
+    clientRequestId: "gate5a-reviewer-manual-publish-v1"
+  }, trustedContent);
+  const publicationId = sending.state.publication.details.publicationId;
+  await first.advance(companyA, publicationId, {});
+  const published = await first.advance(companyA, publicationId, {});
+  assert.equal(published.state.history.length, 1);
+
+  const afterRestart = persistentService();
+  const reloaded = await afterRestart.read(companyA);
+  assert.equal(reloaded.state.history.length, 1);
+  assert.equal(reloaded.state.history[0].publicationId, publicationId);
+  assert.equal(reloaded.state.history[0].state, "published");
+  assert.equal((await afterRestart.read(companyB)).state.history.length, 0);
+  await assert.rejects(
+    afterRestart.getPublication(companyB, publicationId),
+    (error) => error.code === "reviewer_publication_not_found" &&
+      error.status === 404
+  );
+
+  await first.disconnect(companyA);
+  const deleted = await first.deleteConnectionData(companyA, { confirm: true });
+  assert.equal(deleted.state.deletion.confirmationCode, confirmationCode);
+  assert.equal(deleted.state.deletion.requestStatus, "completed");
+  assert.equal(
+    deleted.state.deletion.statusUrl,
+    `${origin}/v1/social/compliance/meta/data-deletion/status/${confirmationCode}`
+  );
+  assert.equal(deleted.state.history.length, 1);
+  const afterDeletionRestart = persistentService();
+  const restoredDeletion = await afterDeletionRestart.read(companyA);
+  assert.equal(restoredDeletion.state.history.length, 1);
+  assert.equal(
+    restoredDeletion.state.deletion.confirmationCode,
+    confirmationCode
+  );
+  assert.equal(restoredDeletion.state.deletion.requestStatus, "completed");
+  assert.equal(
+    restoredDeletion.state.deletion.statusUrl,
+    `${origin}/v1/social/compliance/meta/data-deletion/status/${confirmationCode}`
+  );
+  assert.equal((await afterRestart.read(companyB)).state.deletion.status, "not_requested");
+});

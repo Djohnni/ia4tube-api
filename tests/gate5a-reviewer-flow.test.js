@@ -969,6 +969,65 @@ test("normalizer requires an authenticated controlled company from the backend",
   }
 });
 
+test("deletion protocol accepts only the opaque code and canonical status route", () => {
+  const confirmationCode = opaqueReturnReference;
+  const statusUrl = `${gate5a.STAGING_API_ORIGIN}/v1/social/compliance/meta/` +
+    `data-deletion/status/${confirmationCode}`;
+  const candidate = {
+    ...gate5a.createInitialState(),
+    connection: {
+      status: "deleted",
+      account: null,
+      error: null,
+      tokenPhysicallyDeleted: true
+    },
+    deletion: {
+      status: "completed",
+      requestStatus: "completed",
+      confirmationCode,
+      statusUrl,
+      technicalConnectionDataDeleted: true,
+      commercialHistoryPolicy: "owner_decision_pending"
+    }
+  };
+  const normalized = gate5a.normalizeState(candidate);
+  assert.equal(normalized.deletion.confirmationCode, confirmationCode);
+  assert.equal(normalized.deletion.requestStatus, "completed");
+  assert.equal(normalized.deletion.statusUrl, statusUrl);
+
+  assert.throws(
+    () => gate5a.normalizeState({
+      ...candidate,
+      deletion: {
+        ...candidate.deletion,
+        statusUrl: `https://example.invalid/status/${confirmationCode}`
+      }
+    }),
+    (error) => error.code === "reviewer_deletion_status_url_invalid"
+  );
+  assert.throws(
+    () => gate5a.normalizeState({
+      ...candidate,
+      deletion: {
+        ...candidate.deletion,
+        statusUrl: `${statusUrl}?company_id=forbidden`
+      }
+    }),
+    (error) => error.code === "reviewer_deletion_status_url_invalid"
+  );
+  assert.throws(
+    () => gate5a.normalizeState({
+      ...candidate,
+      deletion: {
+        ...candidate.deletion,
+        statusUrl: `${gate5a.LOCAL_API_ORIGIN}/v1/social/compliance/meta/` +
+          `data-deletion/status/${confirmationCode}`
+      }
+    }, gate5a.STAGING_API_ORIGIN),
+    (error) => error.code === "reviewer_deletion_status_url_invalid"
+  );
+});
+
 test("app contract mounts canonical reviewer UI before ordinary application boot", () => {
   assert.match(appSource, /<script src="gate5a-reviewer-flow\.js"><\/script>/);
   assert.match(appSource, /id="gate5aReviewerRoot"/);
@@ -1024,7 +1083,10 @@ test("reviewer helper contains the complete non-admin journey and no real provid
     "Histórico de publicações",
     "Desconectar Instagram",
     "Excluir dados da conexão",
-    "política de retenção aguarda decisão"
+    "A credencial de acesso e os dados técnicos elegíveis da conexão foram excluídos. A conexão permaneceu revogada. Suas artes, imagens, legendas e histórico continuam salvos.",
+    "Acompanhar status do pedido",
+    "data-g5a-field=\"deletionConfirmationCode\"",
+    "rel=\"noopener noreferrer\""
   ]) {
     assert.ok(helperSource.includes(required), `Texto obrigatório ausente: ${required}`);
   }
@@ -1034,6 +1096,7 @@ test("reviewer helper contains the complete non-admin journey and no real provid
     "graph.instagram.com",
     "www.instagram.com/p/",
     "produtos/resultado.jpg",
+    "Conta, credencial e mídia foram removidas",
     "ia4tube_empresas",
     "Dcli_JWGv25",
     "17841476573931958",

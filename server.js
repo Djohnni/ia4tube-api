@@ -534,6 +534,28 @@ function reviewerMediaRequestIsExact(input) {
   );
 }
 
+function reviewerPersistentContent(media) {
+  if (
+    !media ||
+    !/^[0-9a-f]{64}$/.test(String(media.sha256 || "")) ||
+    !orderStorage.isSafePathSegment(media.owner) ||
+    !orderStorage.isSafePathSegment(media.orderId) ||
+    typeof media.storageKey !== "string" ||
+    !media.storageKey ||
+    !reviewerDemoCaption(media.caption)
+  ) {
+    reviewerSandboxFail("reviewer_media_persistence_invalid", 503);
+  }
+  const locatorDigest = crypto.createHash("sha256").update(
+    `${media.owner}\u0000${media.orderId}\u0000${media.storageKey}`,
+    "utf8"
+  ).digest("hex").slice(0, 32);
+  return Object.freeze({
+    caption: media.caption,
+    mediaReference: `gate5a-content:${media.sha256}:${locatorDigest}`
+  });
+}
+
 function createTenantOwnedReviewerSandboxService(baseService) {
   const selectedMedia = new Map();
 
@@ -625,10 +647,11 @@ function createTenantOwnedReviewerSandboxService(baseService) {
       return decorate(context, result);
     },
     async publish(context, input) {
-      if (!currentSelectedMedia(context)) {
+      const media = currentSelectedMedia(context);
+      if (!media) {
         reviewerSandboxFail("reviewer_media_required", 409);
       }
-      return invoke("publish", context, input);
+      return invoke("publish", context, input, reviewerPersistentContent(media));
     },
     advance: (context, publicationId, input) => (
       invoke("advance", context, publicationId, input)

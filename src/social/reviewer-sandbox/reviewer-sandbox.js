@@ -8,8 +8,13 @@ const { requireTenantContext } = require("../../security/tenant-context");
 const PROFESSIONAL_ACCOUNT_TYPES = new Set(["BUSINESS", "CREATOR"]);
 const REVIEWER_PURPOSE = "app_review";
 const REVIEWER_ASSET = "controlled-review-jpeg";
+const GATE5A_REVIEWER_CLIENT_REQUEST_ID =
+  "gate5a-reviewer-manual-publish-v1";
 const CLIENT_REQUEST_ID_PATTERN = /^[a-zA-Z0-9][a-zA-Z0-9._:-]{7,127}$/;
 const PUBLICATION_ID_PATTERN = /^synthetic-publication-[0-9a-f-]{36}$/;
+const CONFIRMATION_CODE_PATTERN = /^[A-Za-z0-9_-]{32,128}$/;
+const REVIEWER_CONTENT_REFERENCE_PATTERN =
+  /^gate5a-content:[0-9a-f]{64}:[0-9a-f]{32}$/;
 
 class ReviewerSandboxError extends Error {
   constructor(code, status, message) {
@@ -99,6 +104,9 @@ function initialState() {
     history: [],
     deletion: {
       status: "not_requested",
+      requestStatus: null,
+      confirmationCode: null,
+      statusUrl: null,
       technicalConnectionDataDeleted: false,
       commercialHistoryPolicy: "owner_decision_pending"
     },
@@ -129,6 +137,12 @@ function createReviewerSandboxService(options = {}) {
   const publicOrigin = String(options.publicOrigin || "").replace(/\/$/, "");
   const controlledAssetPath = String(options.controlledAssetPath || "");
   const persistentConnection = options.persistentConnection || null;
+  const persistentHistory = Boolean(
+    persistentConnection &&
+    typeof persistentConnection.readPublicationHistory === "function" &&
+    typeof persistentConnection.publishPublication === "function" &&
+    typeof persistentConnection.advancePublication === "function"
+  );
   if (
     typeof clock !== "function" ||
     typeof randomUUID !== "function" ||
@@ -142,7 +156,13 @@ function createReviewerSandboxService(options = {}) {
         typeof persistentConnection !== "object" ||
         typeof persistentConnection.read !== "function" ||
         typeof persistentConnection.disconnect !== "function" ||
-        typeof persistentConnection.deleteConnectionData !== "function"
+        typeof persistentConnection.deleteConnectionData !== "function" ||
+        ([
+          persistentConnection.readPublicationHistory,
+          persistentConnection.publishPublication,
+          persistentConnection.advancePublication
+        ].some((method) => typeof method === "function") &&
+          !persistentHistory)
       )
     )
   ) {
@@ -440,6 +460,9 @@ function createReviewerSandboxService(options = {}) {
     record.state.publication = { state: "idle", attempts: 0, details: null };
     record.state.deletion = {
       status: "completed",
+      requestStatus: null,
+      confirmationCode: null,
+      statusUrl: null,
       technicalConnectionDataDeleted: true,
       commercialHistoryPolicy: "owner_decision_pending"
     };
@@ -517,10 +540,43 @@ function createReviewerSandboxService(options = {}) {
     ) {
       fail("reviewer_persistent_connection_invalid", 503);
     }
+    let deletion = null;
+    if (value.status === "deleted" && value.deletion !== undefined) {
+      const source = value.deletion;
+      if (
+        !source ||
+        typeof source !== "object" ||
+        Array.isArray(source) ||
+        Object.getPrototypeOf(source) !== Object.prototype ||
+        Object.keys(source).sort().join(",") !==
+          "confirmationCode,status,statusUrl" ||
+        source.status !== "completed" ||
+        !CONFIRMATION_CODE_PATTERN.test(
+          String(source.confirmationCode || "")
+        )
+      ) {
+        fail("reviewer_persistent_connection_invalid", 503);
+      }
+      const canonicalStatusUrl = `${publicOrigin}/v1/social/compliance/meta/` +
+        `data-deletion/status/${encodeURIComponent(source.confirmationCode)}`;
+      if (source.statusUrl !== canonicalStatusUrl) {
+        fail("reviewer_persistent_connection_invalid", 503);
+      }
+      deletion = Object.freeze({
+        confirmationCode: source.confirmationCode,
+        status: "completed",
+        statusUrl: canonicalStatusUrl
+      });
+    } else if (value.status === "deleted" && persistentHistory) {
+      fail("reviewer_persistent_connection_invalid", 503);
+    } else if (value.deletion !== undefined) {
+      fail("reviewer_persistent_connection_invalid", 503);
+    }
     return Object.freeze({
       status: value.status,
       account: null,
-      tokenPhysicallyDeleted: value.tokenPhysicallyDeleted
+      tokenPhysicallyDeleted: value.tokenPhysicallyDeleted,
+      deletion
     });
   }
 
@@ -539,6 +595,9 @@ function createReviewerSandboxService(options = {}) {
     if (state.status === "connected") {
       record.state.deletion = {
         status: "not_requested",
+        requestStatus: null,
+        confirmationCode: null,
+        statusUrl: null,
         technicalConnectionDataDeleted: false,
         commercialHistoryPolicy: "owner_decision_pending"
       };
@@ -554,6 +613,9 @@ function createReviewerSandboxService(options = {}) {
       record.state.stage = "data_deletion_completed";
       record.state.deletion = {
         status: "completed",
+        requestStatus: state.deletion?.status || null,
+        confirmationCode: state.deletion?.confirmationCode || null,
+        statusUrl: state.deletion?.statusUrl || null,
         technicalConnectionDataDeleted: true,
         commercialHistoryPolicy: "owner_decision_pending"
       };
@@ -561,6 +623,9 @@ function createReviewerSandboxService(options = {}) {
       record.state.stage = "connection_disconnected";
       record.state.deletion = {
         status: "not_requested",
+        requestStatus: null,
+        confirmationCode: null,
+        statusUrl: null,
         technicalConnectionDataDeleted: false,
         commercialHistoryPolicy: "owner_decision_pending"
       };
@@ -568,9 +633,148 @@ function createReviewerSandboxService(options = {}) {
     return record;
   }
 
+  function persistentPublication(value) {
+    if (
+      !value ||
+      typeof value !== "object" ||
+      Array.isArray(value) ||
+      Object.getPrototypeOf(value) !== Object.prototype ||
+      Object.keys(value).sort().join(",") !== [
+        "attempts",
+        "mediaId",
+        "permalink",
+        "publicationId",
+        "publishedAt",
+        "reference",
+        "state",
+        "synthetic"
+      ].join(",") ||
+      value.synthetic !== true ||
+      !PUBLICATION_ID_PATTERN.test(String(value.publicationId || "")) ||
+      !["sending", "provider_confirming", "published"].includes(
+        value.state
+      ) ||
+      !Number.isInteger(value.attempts) ||
+      value.attempts < 0 ||
+      value.attempts > 1
+    ) {
+      fail("reviewer_persistent_history_invalid", 503);
+    }
+    if (value.state !== "published") {
+      if (
+        value.mediaId !== null ||
+        value.publishedAt !== null ||
+        value.reference !== null ||
+        value.permalink !== null
+      ) {
+        fail("reviewer_persistent_history_invalid", 503);
+      }
+      return Object.freeze({ ...value });
+    }
+    const publishedTime = typeof value.publishedAt === "string"
+      ? Date.parse(value.publishedAt)
+      : Number.NaN;
+    if (
+      value.attempts !== 1 ||
+      !/^synthetic-media-[0-9a-f-]{36}$/.test(String(value.mediaId || "")) ||
+      !/^synthetic-review:[0-9a-f-]{36}$/.test(
+        String(value.reference || "")
+      ) ||
+      !Number.isFinite(publishedTime) ||
+      new Date(value.publishedAt).toISOString() !== value.publishedAt
+    ) {
+      fail("reviewer_persistent_history_invalid", 503);
+    }
+    const canonicalPermalink = `${publicOrigin}/app.html?` +
+      "review=instagram-publishing&publication=" +
+      encodeURIComponent(value.publicationId);
+    if (value.permalink !== canonicalPermalink) {
+      fail("reviewer_persistent_history_invalid", 503);
+    }
+    return Object.freeze({ ...value });
+  }
+
+  function persistentPublicationContent(value) {
+    if (
+      !value ||
+      typeof value !== "object" ||
+      Array.isArray(value) ||
+      Object.getPrototypeOf(value) !== Object.prototype ||
+      Object.keys(value).sort().join(",") !== "caption,mediaReference" ||
+      !REVIEWER_CONTENT_REFERENCE_PATTERN.test(
+        String(value.mediaReference || "")
+      ) ||
+      typeof value.caption !== "string" ||
+      value.caption.length < 1 ||
+      value.caption.length > 2200 ||
+      /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(value.caption)
+    ) {
+      fail("reviewer_persistent_history_content_invalid", 503);
+    }
+    return Object.freeze({
+      caption: value.caption,
+      mediaReference: value.mediaReference
+    });
+  }
+
+  function applyPersistentHistory(record, value) {
+    if (
+      !value ||
+      typeof value !== "object" ||
+      Array.isArray(value) ||
+      !Object.hasOwn(value, "publication") ||
+      !Array.isArray(value.publications) ||
+      value.publications.length > 1
+    ) {
+      fail("reviewer_persistent_history_invalid", 503);
+    }
+    const active = value.publication === null
+      ? null
+      : persistentPublication(value.publication);
+    const publications = value.publications.map(persistentPublication);
+    if (
+      publications.some((item) => item.state !== "published") ||
+      (publications.length === 1 &&
+        active?.publicationId !== publications[0].publicationId)
+    ) {
+      fail("reviewer_persistent_history_invalid", 503);
+    }
+    record.state.history = publications.map((item) => ({ ...item }));
+    record.clientRequestId = active ? GATE5A_REVIEWER_CLIENT_REQUEST_ID : null;
+    if (record.state.connection.status === "connected" && active) {
+      record.state.publication = {
+        state: active.state,
+        attempts: active.attempts,
+        details: {
+          publicationId: active.publicationId,
+          mediaId: active.mediaId,
+          publishedAt: active.publishedAt,
+          reference: active.reference,
+          permalink: active.permalink,
+          synthetic: true
+        }
+      };
+      record.state.stage = active.state === "sending"
+        ? "publication_sending"
+        : active.state === "provider_confirming"
+          ? "publication_confirming"
+          : "publication_published";
+    } else {
+      record.state.publication = { state: "idle", attempts: 0, details: null };
+    }
+    return record;
+  }
+
   async function synchronize(context) {
     const resolved = await persistentConnection.read(context);
-    return applyPersistentState(getRecord(context), resolved);
+    const record = applyPersistentState(getRecord(context), resolved);
+    if (persistentHistory) {
+      applyPersistentHistory(
+        record,
+        await persistentConnection.readPublicationHistory(context)
+      );
+    }
+    return record;
   }
 
   async function requireConnectedRecord(context) {
@@ -632,21 +836,62 @@ function createReviewerSandboxService(options = {}) {
       await requireReviewReadyRecord(context);
       return memoryService.selectMedia(context, input);
     },
-    async publish(context, input) {
-      await requireReviewReadyRecord(context);
-      return memoryService.publish(context, input);
+    async publish(context, input, trustedContent) {
+      const record = await requireReviewReadyRecord(context);
+      const memoryResult = memoryService.publish(context, input);
+      if (!persistentHistory) return memoryResult;
+      const content = persistentPublicationContent(trustedContent);
+      const persisted = await persistentConnection.publishPublication(
+        context,
+        { clientRequestId: input.clientRequestId },
+        content
+      );
+      applyPersistentHistory(record, persisted);
+      if (typeof persisted.idempotentReplay !== "boolean") {
+        fail("reviewer_persistent_history_invalid", 503);
+      }
+      return response(record, {
+        idempotentReplay: persisted.idempotentReplay
+      });
     },
     async advance(context, publicationId, input) {
-      await requireReviewReadyRecord(context);
-      return memoryService.advance(context, publicationId, input);
+      exactRecord(input, []);
+      const record = await requireReviewReadyRecord(context);
+      if (!persistentHistory) {
+        return memoryService.advance(context, publicationId, input);
+      }
+      applyPersistentHistory(
+        record,
+        await persistentConnection.advancePublication(context, publicationId)
+      );
+      return response(record);
     },
     async listPublications(context) {
-      await synchronize(context);
-      return memoryService.listPublications(context);
+      const record = await synchronize(context);
+      if (!persistentHistory) return memoryService.listPublications(context);
+      return response(record, { publications: clone(record.state.history) });
     },
     async getPublication(context, publicationId) {
-      await synchronize(context);
-      return memoryService.getPublication(context, publicationId);
+      if (!PUBLICATION_ID_PATTERN.test(String(publicationId || ""))) {
+        fail("reviewer_publication_not_found", 404);
+      }
+      const record = await synchronize(context);
+      if (!persistentHistory) {
+        return memoryService.getPublication(context, publicationId);
+      }
+      const publication = record.state.history.find(
+        (item) => item.publicationId === publicationId
+      ) || (
+        record.state.publication.details?.publicationId === publicationId
+          ? {
+              ...record.state.publication.details,
+              state: record.state.publication.state,
+              attempts: record.state.publication.attempts
+            }
+          : null
+      );
+      if (!publication) fail("reviewer_publication_not_found", 404);
+      return response(record, { publication: clone(publication) });
     },
     async disconnect(context) {
       await requireConnectedRecord(context);

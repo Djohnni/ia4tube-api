@@ -27,6 +27,7 @@ const {
 const {
   createConnectorContext
 } = require("../src/social/connectors/contract");
+const { inputDigest } = require("../src/social/connectors/service");
 const {
   deriveSocialIdentity,
   parseIdentityConfig,
@@ -57,12 +58,17 @@ const GATE5A_SYNTHETIC_DISPLAY_NAME =
 const GATE5A_SYNTHETIC_ACCOUNT_TYPE = "business";
 const GATE5A_SYNTHETIC_TOKEN_PREFIX =
   "ia4tube-gate5a-synthetic-token-v1:";
+const GATE5A_REVIEWER_CLIENT_REQUEST_ID =
+  "gate5a-reviewer-manual-publish-v1";
 const GATE5A_BRIDGE_APPROVAL_PREFIX =
   "PROVISION_GATE5A_SYNTHETIC_BRIDGE:";
 const IDENTITY_STATUS = "active";
 const SAFE_ERROR_CODE = /^[a-z0-9_]{2,96}$/i;
 const UUID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+const CONFIRMATION_CODE_PATTERN = /^[A-Za-z0-9_-]{32,128}$/;
+const REVIEWER_CONTENT_REFERENCE_PATTERN =
+  /^gate5a-content:[0-9a-f]{64}:[0-9a-f]{32}$/;
 
 function fail(code) {
   postgresFail(code, "Ponte sintetica Gate 5A recusada.");
@@ -186,6 +192,85 @@ function deriveGate5aSyntheticIdentity(env, legacyId = GATE5A_REVIEWER_LOGIN) {
   } finally {
     identityConfig.key.fill(0);
   }
+}
+
+function gate5aReviewerPublicationIdentity(identity) {
+  if (!UUID_PATTERN.test(String(identity?.companyId || ""))) {
+    fail("gate5a_synthetic_identity_invalid");
+  }
+  return Object.freeze({
+    operationId: uuidV5(
+      identity.companyId,
+      `ia4tube:gate5a:reviewer-operation:v1:${GATE5A_REVIEWER_CLIENT_REQUEST_ID}`
+    ),
+    publicationId: uuidV5(
+      identity.companyId,
+      `ia4tube:gate5a:reviewer-publication:v1:${GATE5A_REVIEWER_CLIENT_REQUEST_ID}`
+    ),
+    mediaId: `synthetic-media-${uuidV5(
+      identity.companyId,
+      "ia4tube:gate5a:reviewer-media:v1"
+    )}`,
+    reference: `synthetic-review:${uuidV5(
+      identity.companyId,
+      "ia4tube:gate5a:reviewer-reference:v1"
+    )}`
+  });
+}
+
+function gate5aReviewerPublicationContent(value) {
+  if (
+    !value ||
+    typeof value !== "object" ||
+    Array.isArray(value) ||
+    Object.getPrototypeOf(value) !== Object.prototype ||
+    Object.keys(value).sort().join(",") !== "caption,mediaReference" ||
+    !REVIEWER_CONTENT_REFERENCE_PATTERN.test(
+      String(value.mediaReference || "")
+    ) ||
+    typeof value.caption !== "string" ||
+    value.caption.length < 1 ||
+    value.caption.length > 2200 ||
+    /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(value.caption)
+  ) {
+    fail("gate5a_synthetic_history_content_invalid");
+  }
+  return Object.freeze({
+    caption: value.caption,
+    mediaReference: value.mediaReference
+  });
+}
+
+function gate5aReviewerPublicationPayload(identity, content) {
+  const ids = gate5aReviewerPublicationIdentity(identity);
+  const trustedContent = gate5aReviewerPublicationContent(content);
+  const payload = Object.freeze({
+    operationId: ids.operationId,
+    publicationId: ids.publicationId,
+    connectionId: identity.connectionId,
+    image: Object.freeze({
+      mediaId: trustedContent.mediaReference,
+      mimeType: "image/jpeg"
+    }),
+    caption: trustedContent.caption
+  });
+  return Object.freeze({
+    ids,
+    payload,
+    requestHash: inputDigest(payload),
+    mediaMetadataDigest: crypto
+      .createHash("sha256")
+      .update(JSON.stringify(payload.image), "utf8")
+      .digest("hex")
+  });
+}
+
+function gate5aReviewerStatusUrl(confirmationCode) {
+  if (!CONFIRMATION_CODE_PATTERN.test(String(confirmationCode || ""))) {
+    fail("gate5a_synthetic_deletion_unconfirmed");
+  }
+  return `${GATE5A_STAGING_ORIGIN}/v1/social/compliance/meta/` +
+    `data-deletion/status/${encodeURIComponent(confirmationCode)}`;
 }
 
 function runtimeEnvironment(env) {
@@ -663,9 +748,26 @@ async function inspectGate5aSyntheticBridge(options = {}) {
           " (SELECT COUNT(*)::integer FROM ia4tube_social.social_compliance_requests WHERE company_id=$1) AS requests,",
           " (SELECT COUNT(*)::integer FROM ia4tube_social.social_compliance_requests WHERE company_id=$1 AND provider='instagram' AND kind='data_deletion' AND user_id=$2 AND connection_id=$3) AS deletion_requests,",
           " (SELECT status FROM ia4tube_social.social_compliance_requests WHERE company_id=$1 AND provider='instagram' AND kind='data_deletion' AND user_id=$2 AND connection_id=$3) AS deletion_status,",
+          " (SELECT confirmation_code FROM ia4tube_social.social_compliance_requests WHERE company_id=$1 AND provider='instagram' AND kind='data_deletion' AND user_id=$2 AND connection_id=$3) AS deletion_confirmation_code,",
           " (SELECT subject_digest FROM ia4tube_social.social_compliance_requests WHERE company_id=$1 AND provider='instagram' AND kind='data_deletion' AND user_id=$2 AND connection_id=$3) AS deletion_subject_digest,",
           " (SELECT token_materials_deleted FROM ia4tube_social.social_compliance_requests WHERE company_id=$1 AND provider='instagram' AND kind='data_deletion' AND user_id=$2 AND connection_id=$3) AS deletion_token_materials,",
-          " (SELECT COUNT(*)::integer FROM ia4tube_social.social_publications WHERE company_id=$1) AS publications"
+          " (SELECT COUNT(*)::integer FROM ia4tube_social.social_publications WHERE company_id=$1) AS publications,",
+          " (SELECT id FROM ia4tube_social.social_publications WHERE company_id=$1) AS publication_id,",
+          " (SELECT connection_id FROM ia4tube_social.social_publications WHERE company_id=$1) AS publication_connection_id,",
+          " (SELECT provider FROM ia4tube_social.social_publications WHERE company_id=$1) AS publication_provider,",
+          " (SELECT media_reference FROM ia4tube_social.social_publications WHERE company_id=$1) AS publication_media_reference,",
+          " (SELECT media_metadata_digest FROM ia4tube_social.social_publications WHERE company_id=$1) AS publication_media_metadata_digest,",
+          " (SELECT caption FROM ia4tube_social.social_publications WHERE company_id=$1) AS publication_caption,",
+          " (SELECT state FROM ia4tube_social.social_publications WHERE company_id=$1) AS publication_state,",
+          " (SELECT idempotency_key FROM ia4tube_social.social_publications WHERE company_id=$1) AS publication_idempotency_key,",
+          " (SELECT request_hash FROM ia4tube_social.social_publications WHERE company_id=$1) AS publication_request_hash,",
+          " (SELECT confirmed_provider_reference FROM ia4tube_social.social_publications WHERE company_id=$1) AS publication_confirmed_reference,",
+          " (SELECT reconciliation_reference FROM ia4tube_social.social_publications WHERE company_id=$1) AS publication_reconciliation_reference,",
+          " (SELECT published_at FROM ia4tube_social.social_publications WHERE company_id=$1) AS publication_published_at,",
+          " (SELECT revision FROM ia4tube_social.social_publications WHERE company_id=$1) AS publication_revision,",
+          " (SELECT COUNT(*)::integer FROM ia4tube_social.social_publication_attempts WHERE company_id=$1) AS publication_attempts,",
+          " (SELECT state FROM ia4tube_social.social_publication_attempts WHERE company_id=$1 ORDER BY attempt_number DESC LIMIT 1) AS publication_attempt_state,",
+          " (SELECT provider_reference FROM ia4tube_social.social_publication_attempts WHERE company_id=$1 ORDER BY attempt_number DESC LIMIT 1) AS publication_attempt_reference"
         ].join("\n"),
         [
           identity.companyId,
@@ -717,6 +819,73 @@ function exactStringArray(value, expected) {
     JSON.stringify([...value].sort()) === JSON.stringify([...expected].sort());
 }
 
+function exactGate5aReviewerHistory(snapshot, identity) {
+  const publicationCount = Number(snapshot.publications);
+  const attemptCount = Number(snapshot.publication_attempts);
+  if (publicationCount === 0) {
+    return attemptCount === 0 &&
+      snapshot.publication_id === null &&
+      snapshot.publication_attempt_state === null &&
+      snapshot.publication_attempt_reference === null;
+  }
+  if (publicationCount !== 1) return false;
+
+  const expected = gate5aReviewerPublicationPayload(identity, {
+    caption: snapshot.publication_caption,
+    mediaReference: snapshot.publication_media_reference
+  });
+  const state = snapshot.publication_state;
+  const expectedRevision = {
+    ready: 1,
+    publishing: 2,
+    provider_confirming: 3,
+    published: 4
+  }[state];
+  if (
+    expectedRevision === undefined ||
+    snapshot.publication_id !== expected.ids.publicationId ||
+    snapshot.publication_connection_id !== identity.connectionId ||
+    snapshot.publication_provider !== "instagram" ||
+    snapshot.publication_media_reference !== expected.payload.image.mediaId ||
+    snapshot.publication_media_metadata_digest !==
+      expected.mediaMetadataDigest ||
+    snapshot.publication_caption !== expected.payload.caption ||
+    snapshot.publication_idempotency_key !== expected.ids.operationId ||
+    snapshot.publication_request_hash !== expected.requestHash ||
+    Number(snapshot.publication_revision) !== expectedRevision
+  ) {
+    return false;
+  }
+
+  if (state === "ready") {
+    return attemptCount === 0 &&
+      snapshot.publication_confirmed_reference === null &&
+      snapshot.publication_reconciliation_reference === null &&
+      snapshot.publication_published_at === null;
+  }
+  if (attemptCount !== 1) return false;
+  if (state === "publishing") {
+    return snapshot.publication_attempt_state === "started" &&
+      snapshot.publication_attempt_reference === null &&
+      snapshot.publication_confirmed_reference === null &&
+      snapshot.publication_reconciliation_reference === null &&
+      snapshot.publication_published_at === null;
+  }
+  if (state === "provider_confirming") {
+    return snapshot.publication_attempt_state === "provider_confirming" &&
+      snapshot.publication_attempt_reference === null &&
+      snapshot.publication_confirmed_reference === null &&
+      snapshot.publication_reconciliation_reference === null &&
+      snapshot.publication_published_at === null;
+  }
+  return snapshot.publication_attempt_state === "published" &&
+    snapshot.publication_attempt_reference === expected.ids.mediaId &&
+    snapshot.publication_confirmed_reference === expected.ids.mediaId &&
+    snapshot.publication_reconciliation_reference === expected.ids.reference &&
+    snapshot.publication_published_at !== null &&
+    Number.isFinite(new Date(snapshot.publication_published_at).getTime());
+}
+
 function bridgeSnapshotState(snapshot, identity, mapping, env) {
   const scopes = [...INSTAGRAM_OAUTH_SCOPES].sort();
   const exactCore =
@@ -752,7 +921,7 @@ function bridgeSnapshotState(snapshot, identity, mapping, env) {
     Number(snapshot.scopes) === scopes.length &&
     exactStringArray(snapshot.scope_names, scopes) &&
     Number(snapshot.oauth_transactions) === 0 &&
-    Number(snapshot.publications) === 0;
+    exactGate5aReviewerHistory(snapshot, identity);
   if (!exactCore) fail("gate5a_synthetic_bridge_state_invalid");
 
   const credentialPresent =
@@ -778,7 +947,8 @@ function bridgeSnapshotState(snapshot, identity, mapping, env) {
       !credentialPresent ||
       !exactStringArray(snapshot.active_scope_names, scopes) ||
       Number(snapshot.requests) !== 0 ||
-      Number(snapshot.deletion_requests) !== 0
+      Number(snapshot.deletion_requests) !== 0 ||
+      snapshot.deletion_confirmation_code !== null
     ) {
       fail("gate5a_synthetic_bridge_state_invalid");
     }
@@ -792,7 +962,8 @@ function bridgeSnapshotState(snapshot, identity, mapping, env) {
       !credentialPresent ||
       !exactStringArray(snapshot.active_scope_names, []) ||
       Number(snapshot.requests) !== 0 ||
-      Number(snapshot.deletion_requests) !== 0
+      Number(snapshot.deletion_requests) !== 0 ||
+      snapshot.deletion_confirmation_code !== null
     ) {
       fail("gate5a_synthetic_bridge_state_invalid");
     }
@@ -810,6 +981,9 @@ function bridgeSnapshotState(snapshot, identity, mapping, env) {
       Number(snapshot.requests) !== 1 ||
       Number(snapshot.deletion_requests) !== 1 ||
       snapshot.deletion_status !== "completed" ||
+      !CONFIRMATION_CODE_PATTERN.test(
+        String(snapshot.deletion_confirmation_code || "")
+      ) ||
       snapshot.deletion_subject_digest !== mapping.subjectDigest ||
       Number(snapshot.deletion_token_materials) !== 1
     ) {
@@ -1175,7 +1349,9 @@ function createGate5aSyntheticReviewerResolver(options = {}) {
     if (
       !runtime?.enabled ||
       !runtime.instagramOAuth ||
-      !runtime.metaCompliance
+      !runtime.metaCompliance ||
+      typeof runtime.auth?.fromVerifiedJwt !== "function" ||
+      typeof runtime.connectorPersistence?.store?.scope !== "function"
     ) {
       fail("gate5a_synthetic_runtime_unavailable");
     }
@@ -1192,18 +1368,30 @@ function createGate5aSyntheticReviewerResolver(options = {}) {
       identity
     });
     try {
-      const state = bridgeSnapshotState(snapshot, identity, mapping, env);
-      if (state !== "deleted") {
+      const status = bridgeSnapshotState(snapshot, identity, mapping, env);
+      if (status !== "deleted") {
         verifySyntheticCredentialSnapshot(snapshot, identity, env);
       }
-      return state;
+      return Object.freeze({
+        status,
+        deletion: status === "deleted"
+          ? Object.freeze({
+              confirmationCode: snapshot.deletion_confirmation_code,
+              status: "completed",
+              statusUrl: gate5aReviewerStatusUrl(
+                snapshot.deletion_confirmation_code
+              )
+            })
+          : null
+      });
     } finally {
       destroyBridgeSnapshot(snapshot);
     }
   }
 
-  function publicState(state) {
-    if (state === "connected") {
+  function publicState(persisted) {
+    const status = persisted?.status;
+    if (status === "connected") {
       return Object.freeze({
         status: "connected",
         account: Object.freeze({
@@ -1217,16 +1405,279 @@ function createGate5aSyntheticReviewerResolver(options = {}) {
       });
     }
     return Object.freeze({
-      status: state,
+      status,
       account: null,
-      tokenPhysicallyDeleted: state === "deleted"
+      tokenPhysicallyDeleted: status === "deleted",
+      ...(status === "deleted"
+        ? { deletion: persisted.deletion }
+        : {})
+    });
+  }
+
+  function reviewerStore(resolved, context) {
+    const principal = resolved.runtime.auth.fromVerifiedJwt(
+      context.verifiedClaims
+    );
+    if (
+      principal?.companyId !== resolved.identity.companyId ||
+      principal?.userId !== resolved.identity.userId
+    ) {
+      fail("gate5a_synthetic_identity_drift_detected");
+    }
+    return resolved.runtime.connectorPersistence.store.scope(
+      createConnectorContext({
+        principal,
+        provider: "instagram",
+        environment: GATE5A_ENVIRONMENT,
+        correlationId: crypto.randomUUID(),
+        auditEventId: crypto.randomUUID()
+      })
+    );
+  }
+
+  function reviewerHistorySummary(details, identity) {
+    if (details === null || details === undefined) return null;
+    const expected = gate5aReviewerPublicationPayload(identity, {
+      caption: details.caption,
+      mediaReference: details.mediaReference
+    });
+    const expectedRevision = {
+      ready: 1,
+      publishing: 2,
+      provider_confirming: 3,
+      published: 4
+    }[details.state];
+    const attempts = Array.isArray(details.attempts)
+      ? details.attempts
+      : [];
+    const expectedAttemptState = {
+      publishing: "started",
+      provider_confirming: "provider_confirming",
+      published: "published"
+    }[details.state];
+    const exactAttempt = details.state === "ready"
+      ? attempts.length === 0
+      : attempts.length === 1 &&
+        attempts[0]?.attemptNumber === 1 &&
+        attempts[0]?.state === expectedAttemptState &&
+        attempts[0]?.errorCode === null &&
+        attempts[0]?.providerReference === (
+          details.state === "published" ? expected.ids.mediaId : null
+        );
+    const exactConfirmation = details.state === "published"
+      ? details.confirmedProviderReference === expected.ids.mediaId &&
+        details.reconciliationReference === expected.ids.reference &&
+        details.publishedAt instanceof Date &&
+        Number.isFinite(details.publishedAt.getTime())
+      : details.confirmedProviderReference === null &&
+        details.reconciliationReference === null &&
+        details.publishedAt === null;
+    if (
+      expectedRevision === undefined ||
+      details.companyId !== identity.companyId ||
+      details.id !== expected.ids.publicationId ||
+      details.connectionId !== identity.connectionId ||
+      details.provider !== "instagram" ||
+      details.mediaReference !== expected.payload.image.mediaId ||
+      details.mediaMetadataDigest !== expected.mediaMetadataDigest ||
+      details.caption !== expected.payload.caption ||
+      details.idempotencyKey !== expected.ids.operationId ||
+      details.requestHash !== expected.requestHash ||
+      details.revision !== expectedRevision ||
+      !exactAttempt ||
+      !exactConfirmation
+    ) {
+      fail("gate5a_synthetic_history_drift_detected");
+    }
+    const publicationId = `synthetic-publication-${details.id}`;
+    return Object.freeze({
+      publicationId,
+      state: details.state === "ready" || details.state === "publishing"
+        ? "sending"
+        : details.state,
+      attempts: attempts.length,
+      mediaId: details.state === "published" ? expected.ids.mediaId : null,
+      publishedAt: details.state === "published"
+        ? details.publishedAt.toISOString()
+        : null,
+      reference: details.state === "published" ? expected.ids.reference : null,
+      permalink: details.state === "published"
+        ? `${GATE5A_STAGING_ORIGIN}/app.html?review=instagram-publishing&` +
+          `publication=${encodeURIComponent(publicationId)}`
+        : null,
+      synthetic: true
+    });
+  }
+
+  function reviewerHistoryEnvelope(summary, extra = {}) {
+    return Object.freeze({
+      ...extra,
+      publication: summary,
+      publications: Object.freeze(
+        summary?.state === "published" ? [summary] : []
+      )
+    });
+  }
+
+  function reviewerPublicationRecord(details, patch = {}) {
+    return {
+      companyId: details.companyId,
+      id: details.id,
+      connectionId: details.connectionId,
+      provider: details.provider,
+      state: details.state,
+      confirmedProviderReference: details.confirmedProviderReference,
+      reconciliationReference: details.reconciliationReference,
+      errorCode: details.errorCode,
+      revision: details.revision,
+      mediaReference: details.mediaReference,
+      mediaMetadataDigest: details.mediaMetadataDigest,
+      caption: details.caption,
+      idempotencyKey: details.idempotencyKey,
+      requestHash: details.requestHash,
+      ...patch
+    };
+  }
+
+  async function readHistoryUnlocked(context) {
+    const resolved = dependencies(context);
+    const expected = gate5aReviewerPublicationIdentity(resolved.identity);
+    const details = await reviewerStore(resolved, context)
+      .getPublicationDetails(expected.publicationId);
+    return reviewerHistoryEnvelope(
+      reviewerHistorySummary(details, resolved.identity)
+    );
+  }
+
+  async function publishHistoryUnlocked(context, input, content) {
+    if (
+      !input ||
+      typeof input !== "object" ||
+      Array.isArray(input) ||
+      Object.getPrototypeOf(input) !== Object.prototype ||
+      Object.keys(input).length !== 1 ||
+      input.clientRequestId !== GATE5A_REVIEWER_CLIENT_REQUEST_ID
+    ) {
+      fail("gate5a_synthetic_history_request_invalid");
+    }
+    const resolved = dependencies(context);
+    const expected = gate5aReviewerPublicationPayload(
+      resolved.identity,
+      content
+    );
+    return reviewerStore(resolved, context).runExclusive(async (store) => {
+      const connection = await store.getConnectionDetails(
+        resolved.identity.connectionId
+      );
+      if (
+        !connection ||
+        connection.companyId !== resolved.identity.companyId ||
+        connection.id !== resolved.identity.connectionId ||
+        connection.provider !== "instagram" ||
+        connection.state !== "connected"
+      ) {
+        fail("gate5a_synthetic_connection_unavailable");
+      }
+      let details = await store.getPublicationDetails(
+        expected.ids.publicationId
+      );
+      const idempotentReplay = Boolean(details);
+      const reservation = await store.beginIdempotency({
+        capability: "publishImage",
+        operationId: expected.ids.operationId,
+        digest: expected.requestHash,
+        payload: expected.payload
+      });
+      if (!reservation || !["acquired", "pending", "completed"].includes(
+        reservation.status
+      )) {
+        fail("gate5a_synthetic_history_persistence_failed");
+      }
+      details = await store.getPublicationDetails(
+        expected.ids.publicationId
+      );
+      if (!details) fail("gate5a_synthetic_history_persistence_failed");
+      if (details.state === "ready") {
+        await store.savePublication(reviewerPublicationRecord(details, {
+          state: "publishing",
+          revision: details.revision + 1
+        }), details.revision);
+        details = await store.getPublicationDetails(
+          expected.ids.publicationId
+        );
+      }
+      const summary = reviewerHistorySummary(details, resolved.identity);
+      if (!idempotentReplay && summary.state !== "sending") {
+        fail("gate5a_synthetic_history_state_invalid");
+      }
+      return reviewerHistoryEnvelope(summary, { idempotentReplay });
+    });
+  }
+
+  async function advanceHistoryUnlocked(context, publicationId) {
+    const resolved = dependencies(context);
+    const ids = gate5aReviewerPublicationIdentity(resolved.identity);
+    if (publicationId !== `synthetic-publication-${ids.publicationId}`) {
+      fail("gate5a_synthetic_history_not_found");
+    }
+    return reviewerStore(resolved, context).runExclusive(async (store) => {
+      const connection = await store.getConnectionDetails(
+        resolved.identity.connectionId
+      );
+      if (!connection || connection.state !== "connected") {
+        fail("gate5a_synthetic_connection_unavailable");
+      }
+      let details = await store.getPublicationDetails(
+        ids.publicationId
+      );
+      if (!details) fail("gate5a_synthetic_history_not_found");
+      const expected = gate5aReviewerPublicationPayload(resolved.identity, {
+        caption: details.caption,
+        mediaReference: details.mediaReference
+      });
+      reviewerHistorySummary(details, resolved.identity);
+      if (details.state === "publishing") {
+        await store.savePublication(reviewerPublicationRecord(details, {
+          state: "provider_confirming",
+          revision: details.revision + 1
+        }), details.revision);
+      } else if (details.state === "provider_confirming") {
+        await store.savePublication(reviewerPublicationRecord(details, {
+          state: "published",
+          confirmedProviderReference: expected.ids.mediaId,
+          reconciliationReference: expected.ids.reference,
+          revision: details.revision + 1
+        }), details.revision);
+        details = await store.getPublicationDetails(
+          expected.ids.publicationId
+        );
+        await store.completeIdempotency({
+          capability: "publishImage",
+          operationId: expected.ids.operationId,
+          digest: expected.requestHash,
+          result: {
+            publicationId: details.id,
+            connectionId: details.connectionId,
+            provider: details.provider,
+            state: details.state,
+            confirmedProviderReference: details.confirmedProviderReference,
+            reconciliationReference: details.reconciliationReference,
+            revision: details.revision
+          },
+          errorCode: null
+        });
+      }
+      details = await store.getPublicationDetails(expected.ids.publicationId);
+      return reviewerHistoryEnvelope(
+        reviewerHistorySummary(details, resolved.identity)
+      );
     });
   }
 
   async function readUnlocked(context) {
     const resolved = dependencies(context);
     const state = await persistedState(resolved);
-    if (state === "connected") {
+    if (state.status === "connected") {
       const result = await resolved.runtime.instagramOAuth.getConnection({
         verifiedClaims: context.verifiedClaims,
         connectionId: resolved.identity.connectionId
@@ -1250,8 +1701,8 @@ function createGate5aSyntheticReviewerResolver(options = {}) {
   async function disconnectUnlocked(context) {
     const resolved = dependencies(context);
     const before = await persistedState(resolved);
-    if (before === "disconnected") return publicState(before);
-    if (before !== "connected") {
+    if (before.status === "disconnected") return publicState(before);
+    if (before.status !== "connected") {
       fail("gate5a_synthetic_connection_unavailable");
     }
     const result = await resolved.runtime.instagramOAuth.disconnect({
@@ -1265,16 +1716,17 @@ function createGate5aSyntheticReviewerResolver(options = {}) {
     ) {
       fail("gate5a_synthetic_disconnect_unconfirmed");
     }
-    if (await persistedState(resolved) !== "disconnected") {
+    const after = await persistedState(resolved);
+    if (after.status !== "disconnected") {
       fail("gate5a_synthetic_disconnect_unconfirmed");
     }
-    return publicState("disconnected");
+    return publicState(after);
   }
 
   async function deleteConnectionDataUnlocked(context, resolved) {
     const before = await persistedState(resolved);
-    if (before === "deleted") return publicState(before);
-    if (before !== "disconnected") {
+    if (before.status === "deleted") return publicState(before);
+    if (before.status !== "disconnected") {
       fail("gate5a_synthetic_connection_unavailable");
     }
     const now = Number(clock());
@@ -1293,7 +1745,10 @@ function createGate5aSyntheticReviewerResolver(options = {}) {
       result?.status !== "completed" ||
       result.replayed !== false ||
       result.tokenMaterialsDeleted !== 1 ||
-      typeof result.confirmationCode !== "string"
+      !CONFIRMATION_CODE_PATTERN.test(
+        String(result.confirmationCode || "")
+      ) ||
+      result.statusUrl !== gate5aReviewerStatusUrl(result.confirmationCode)
     ) {
       fail("gate5a_synthetic_deletion_unconfirmed");
     }
@@ -1303,13 +1758,21 @@ function createGate5aSyntheticReviewerResolver(options = {}) {
     if (status?.status !== "completed") {
       fail("gate5a_synthetic_deletion_unconfirmed");
     }
-    if (await persistedState(resolved) !== "deleted") {
+    const after = await persistedState(resolved);
+    if (
+      after.status !== "deleted" ||
+      after.deletion.confirmationCode !== result.confirmationCode ||
+      after.deletion.statusUrl !== result.statusUrl
+    ) {
       fail("gate5a_synthetic_deletion_unconfirmed");
     }
-    return publicState("deleted");
+    return publicState(after);
   }
 
   return Object.freeze({
+    advancePublication(context, publicationId) {
+      return serialize(() => advanceHistoryUnlocked(context, publicationId));
+    },
     deleteConnectionData(context) {
       return serialize(() => {
         const resolved = dependencies(context);
@@ -1323,8 +1786,14 @@ function createGate5aSyntheticReviewerResolver(options = {}) {
     disconnect(context) {
       return serialize(() => disconnectUnlocked(context));
     },
+    publishPublication(context, input, content) {
+      return serialize(() => publishHistoryUnlocked(context, input, content));
+    },
     read(context) {
       return serialize(() => readUnlocked(context));
+    },
+    readPublicationHistory(context) {
+      return serialize(() => readHistoryUnlocked(context));
     }
   });
 }

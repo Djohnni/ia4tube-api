@@ -507,6 +507,9 @@
       deletion: {
         status: "not_requested",
         completedAt: null,
+        requestStatus: null,
+        confirmationCode: null,
+        statusUrl: null,
         technicalConnectionDataDeleted: false,
         commercialHistoryPolicy: "owner_decision_pending"
       },
@@ -717,6 +720,9 @@
         deletion: {
           status: "completed",
           completedAt: at,
+          requestStatus: null,
+          confirmationCode: null,
+          statusUrl: null,
           technicalConnectionDataDeleted: true,
           commercialHistoryPolicy: "owner_decision_pending"
         }
@@ -806,7 +812,54 @@
     };
   }
 
-  function normalizeState(value) {
+  function normalizeDeletionRequest(value, deletionStatus, expectedApiOrigin) {
+    if (!isPlainObject(value)) return null;
+    const confirmationCode = safeString(value.confirmationCode, "", 128);
+    const statusUrl = safeString(value.statusUrl, "", 500);
+    const requestStatus = safeString(value.requestStatus, "", 40);
+    if (!confirmationCode && !statusUrl && !requestStatus) return null;
+    if (
+      deletionStatus !== "completed" ||
+      requestStatus !== "completed" ||
+      !/^[A-Za-z0-9_-]{32,128}$/.test(confirmationCode)
+    ) {
+      throw Object.assign(new Error("Protocolo de exclusão inválido."), {
+        code: "reviewer_deletion_protocol_invalid"
+      });
+    }
+    let parsed;
+    try {
+      parsed = new URL(statusUrl);
+    } catch (_error) {
+      throw Object.assign(new Error("URL de status inválida."), {
+        code: "reviewer_deletion_status_url_invalid"
+      });
+    }
+    const expectedPath = "/v1/social/compliance/meta/data-deletion/status/" +
+      encodeURIComponent(confirmationCode);
+    const acceptedOrigins = expectedApiOrigin
+      ? [expectedApiOrigin]
+      : [STAGING_API_ORIGIN, LOCAL_API_ORIGIN];
+    if (
+      !acceptedOrigins.includes(parsed.origin) ||
+      parsed.pathname !== expectedPath ||
+      parsed.search !== "" ||
+      parsed.hash !== "" ||
+      parsed.username !== "" ||
+      parsed.password !== ""
+    ) {
+      throw Object.assign(new Error("URL de status fora da rota canônica."), {
+        code: "reviewer_deletion_status_url_invalid"
+      });
+    }
+    return {
+      confirmationCode,
+      requestStatus: "completed",
+      statusUrl: parsed.toString()
+    };
+  }
+
+  function normalizeState(value, expectedApiOrigin) {
     if (!isPlainObject(value)) throw Object.assign(
       new Error("Estado inválido da sandbox de revisão."),
       { code: "reviewer_sandbox_state_invalid" }
@@ -917,6 +970,11 @@
     const deletionStatus = ["not_requested", "pending", "completed"].includes(
       deletionSource.status
     ) ? deletionSource.status : "not_requested";
+    const deletionRequest = normalizeDeletionRequest(
+      deletionSource,
+      deletionStatus,
+      expectedApiOrigin
+    );
 
     return {
       stage,
@@ -964,6 +1022,9 @@
       deletion: {
         status: deletionStatus,
         completedAt: safeIso(deletionSource.completedAt),
+        requestStatus: deletionRequest?.requestStatus || null,
+        confirmationCode: deletionRequest?.confirmationCode || null,
+        statusUrl: deletionRequest?.statusUrl || null,
         technicalConnectionDataDeleted:
           deletionSource.technicalConnectionDataDeleted === true,
         commercialHistoryPolicy: "owner_decision_pending"
@@ -1053,7 +1114,9 @@
         });
       }
       let normalizedState = null;
-      if (payload.state !== undefined) normalizedState = normalizeState(payload.state);
+      if (payload.state !== undefined) {
+        normalizedState = normalizeState(payload.state, apiBase);
+      }
       if (!response.ok || payload.ok !== true) {
         const error = Object.assign(new Error(
           safeString(payload.error?.message, "A operação demonstrativa foi recusada.", 300)
@@ -1334,9 +1397,9 @@
               </div>
               <div class="gate5aDataGrid">
                 <article><h3>Desconectar Instagram</h3><p>Encerra a conexão demonstrativa. O histórico sintético permanece visível até a exclusão.</p><button type="button" class="gate5aSecondary" data-g5a-action="disconnect">Desconectar conta sintética</button></article>
-                <article><h3>Excluir dados da conexão</h3><p>Descarta credencial sintética, conta e mídia técnicas. O histórico demonstrativo permanece separado enquanto a política de retenção aguarda decisão.</p><button type="button" class="gate5aDanger" data-g5a-action="delete-data">Confirmar exclusão demonstrativa</button></article>
+                <article><h3>Excluir dados da conexão</h3><p>Exclui a credencial de acesso e os dados técnicos elegíveis da conexão. A conexão permanece revogada; artes, imagens, legendas e histórico continuam salvos.</p><button type="button" class="gate5aDanger" data-g5a-action="delete-data">Confirmar exclusão demonstrativa</button></article>
               </div>
-              <div class="gate5aDeletionResult" data-g5a-deletion-result hidden><strong>Dados técnicos sintéticos descartados</strong><p>Conta, credencial e mídia foram removidas. O histórico demonstrativo permanece separado, sem habilitar novas operações, até uma decisão formal de retenção.</p></div>
+              <div class="gate5aDeletionResult" data-g5a-deletion-result hidden><strong>Dados técnicos elegíveis excluídos</strong><p>A credencial de acesso e os dados técnicos elegíveis da conexão foram excluídos. A conexão permaneceu revogada. Suas artes, imagens, legendas e histórico continuam salvos.</p><div class="gate5aProofGrid" data-g5a-deletion-protocol hidden><div><span>Protocolo</span><strong data-g5a-field="deletionConfirmationCode">—</strong></div><div><span>Estado atual do pedido</span><strong data-g5a-field="deletionRequestStatus">—</strong></div></div><a class="gate5aSecondary" data-g5a-deletion-status-link href="" target="_blank" rel="noopener noreferrer" hidden>Acompanhar status do pedido</a></div>
               <div class="gate5aActions"><button type="button" class="gate5aSecondary" data-g5a-action="reset">Reiniciar demonstração</button></div>
             </section>
           </div>
@@ -1527,6 +1590,16 @@
       setText("publishedAt", formatDateTime(state.publication.details?.publishedAt));
       setText("reference", state.publication.details?.reference || "—");
       setText("permalink", state.publication.details?.permalink || "—");
+      setText(
+        "deletionConfirmationCode",
+        state.deletion.confirmationCode || "—"
+      );
+      setText(
+        "deletionRequestStatus",
+        state.deletion.requestStatus === "completed"
+          ? "completed · concluído"
+          : "—"
+      );
 
       const mediaImage = root.querySelector("[data-g5a-field-src='mediaAsset']");
       if (mediaImage) {
@@ -1538,6 +1611,19 @@
       if (proof) proof.hidden = state.publication.state !== "published";
       const deletion = root.querySelector("[data-g5a-deletion-result]");
       if (deletion) deletion.hidden = state.deletion.status !== "completed";
+      const deletionProtocol = root.querySelector(
+        "[data-g5a-deletion-protocol]"
+      );
+      if (deletionProtocol) {
+        deletionProtocol.hidden = !state.deletion.confirmationCode;
+      }
+      const deletionStatusLink = root.querySelector(
+        "[data-g5a-deletion-status-link]"
+      );
+      if (deletionStatusLink) {
+        deletionStatusLink.hidden = !state.deletion.statusUrl;
+        deletionStatusLink.href = state.deletion.statusUrl || "";
+      }
       root.querySelectorAll("[data-g5a-company-confirmation]").forEach((element) => {
         element.hidden = !companyVerified || state.company.controlled !== true;
       });
