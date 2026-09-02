@@ -270,6 +270,7 @@ function requireDependencies(options) {
   ];
   if (
     options.config?.enabled !== true ||
+    typeof options.config?.externalConnectionEnabled !== "boolean" ||
     options.config?.provider !== INSTAGRAM_PROVIDER ||
     options.config?.redirectUri !== INSTAGRAM_OAUTH_REDIRECT_URI ||
     required.some(([owner, method]) =>
@@ -384,7 +385,14 @@ function createInstagramOAuthService(options = {}) {
     });
   }
 
+  function requireExternalConnection() {
+    if (options.config.externalConnectionEnabled !== true) {
+      oauthFail("external_capability_disabled");
+    }
+  }
+
   async function authorize(input = {}) {
+    requireExternalConnection();
     const source = strictRecord(input, ["verifiedClaims", "purpose"]);
     assertNoAuthorityFields({ purpose: source.purpose });
     const purpose = requirePurpose(source.purpose);
@@ -479,6 +487,7 @@ function createInstagramOAuthService(options = {}) {
   }
 
   async function callback(input = {}) {
+    requireExternalConnection();
     const source = strictRecord(input, ["state", "code", "error"]);
     if (
       Number(source.code !== null) + Number(source.error !== null) !== 1
@@ -687,7 +696,9 @@ function createInstagramOAuthService(options = {}) {
     const { context } = authenticatedContext(source.verifiedClaims);
     const store = requireConnectorStoreScope(options.connectorStore.scope(context));
     const current = await store.getCurrentConnectionDetails();
-    await ensureLegacyComplianceMapping(options, store, current);
+    if (options.config.externalConnectionEnabled === true) {
+      await ensureLegacyComplianceMapping(options, store, current);
+    }
     return Object.freeze({
       ok: true,
       connection: current ? publicConnection(current) : null
@@ -701,7 +712,9 @@ function createInstagramOAuthService(options = {}) {
     const store = requireConnectorStoreScope(options.connectorStore.scope(context));
     const connection = await store.getConnectionDetails(connectionId);
     if (!connection) oauthFail("resource_unavailable");
-    await ensureLegacyComplianceMapping(options, store, connection);
+    if (options.config.externalConnectionEnabled === true) {
+      await ensureLegacyComplianceMapping(options, store, connection);
+    }
     return Object.freeze({
       ok: true,
       connection: publicConnection(connection)
@@ -746,6 +759,7 @@ function createInstagramOAuthService(options = {}) {
   }
 
   async function disconnect(input = {}) {
+    requireExternalConnection();
     const source = strictRecord(input, [
       "verifiedClaims",
       "connectionId"

@@ -587,6 +587,133 @@ test("URL oficial e texto real expõem só as duas permissões aprovadas", () =>
   assert.equal(html.includes("provedor simulado"), false);
 });
 
+test("frontend real escolhe connect ou reconnect somente pelo estado do servidor", async () => {
+  const unknown = reviewerUi.realReviewerConnectionView(null, false);
+  assert.equal(unknown.purpose, null);
+  assert.equal(unknown.button, null);
+  assert.equal(unknown.status, "Verificando conexão");
+
+  const absent = reviewerUi.realReviewerConnectionView(null);
+  assert.equal(absent.purpose, "connect");
+  assert.equal(absent.button, "Conectar Instagram");
+
+  const active = reviewerUi.realReviewerConnectionView({
+    connectionId: IDS.connectionA,
+    state: "connected",
+    health: "healthy"
+  });
+  assert.equal(active.purpose, null);
+  assert.equal(active.connected, true);
+  assert.equal(active.status, "Instagram conectado");
+  assert.equal(active.button, null);
+
+  const unhealthyActive = reviewerUi.realReviewerConnectionView({
+    connectionId: IDS.connectionA,
+    state: "connected",
+    health: "reconnect_required"
+  });
+  assert.equal(unhealthyActive.purpose, null);
+  assert.equal(unhealthyActive.status, "Nova autorização necessária");
+  assert.match(unhealthyActive.message, /Desconecte/);
+
+  for (const state of ["disconnected", "reconnect_required"]) {
+    const revoked = reviewerUi.realReviewerConnectionView({
+      connectionId: IDS.connectionA,
+      state,
+      health: state
+    });
+    assert.equal(revoked.purpose, "reconnect");
+    assert.equal(revoked.button, "Conectar novamente");
+  }
+  assert.equal(reviewerUi.realReviewerAuthorizationResultAllowed(
+    "reconnect",
+    { connectionId: IDS.connectionA },
+    { connectionId: IDS.connectionA }
+  ), true);
+  assert.equal(reviewerUi.realReviewerAuthorizationResultAllowed(
+    "reconnect",
+    { connectionId: IDS.connectionA },
+    { connectionId: IDS.connectionB }
+  ), false);
+  assert.equal(
+    reviewerUi.realReviewerConnectionView({
+      connectionId: IDS.connectionA,
+      state: "authorization_pending",
+      health: "authorization_pending"
+    }).purpose,
+    null
+  );
+
+  const requests = [];
+  const client = reviewerUi.createHttpRealReviewerClient({
+    apiBase: reviewerUi.STAGING_API_ORIGIN,
+    tokenProvider: () => "reviewer-session",
+    fetchImpl: async (url, init) => {
+      requests.push({ url, init });
+      return {
+        ok: true,
+        status: 201,
+        async json() {
+          return { ok: true, authorizationUrl: "https://www.instagram.com/" };
+        }
+      };
+    }
+  });
+  await client.authorize(absent.purpose);
+  await client.authorize("reconnect");
+  assert.equal(requests.length, 2);
+  assert.deepEqual(requests.map(({ url, init }) => ({
+    url,
+    method: init.method
+  })), [
+    {
+      url: `${reviewerUi.STAGING_API_ORIGIN}` +
+        "/v1/social/connections/instagram/authorization",
+      method: "POST"
+    },
+    {
+      url: `${reviewerUi.STAGING_API_ORIGIN}` +
+        "/v1/social/connections/instagram/authorization",
+      method: "POST"
+    }
+  ]);
+  assert.deepEqual(requests.map(({ init }) => JSON.parse(init.body)), [
+    { purpose: "connect" },
+    { purpose: "reconnect" }
+  ]);
+  assert.equal(
+    requests.some(({ init }) => /company_id|connection_id|access_token/i.test(init.body)),
+    false
+  );
+  assert.throws(
+    () => client.authorize("arbitrary"),
+    { code: "real_reviewer_authorization_purpose_forbidden" }
+  );
+  assert.equal(requests.length, 2);
+  assert.equal(requests.some(({ url }) => /\/publications(?:\/|$)/.test(url)), false);
+  const malformedConnectionClient = reviewerUi.createHttpRealReviewerClient({
+    apiBase: reviewerUi.STAGING_API_ORIGIN,
+    tokenProvider: () => "reviewer-session",
+    fetchImpl: async () => ({
+      ok: true,
+      status: 200,
+      async json() { return { ok: true }; }
+    })
+  });
+  await assert.rejects(
+    malformedConnectionClient.connection(),
+    { code: "real_reviewer_connection_response_invalid" }
+  );
+  assert.throws(
+    () => reviewerUi.createHttpRealReviewerClient({
+      apiBase: reviewerUi.PRODUCTION_API_ORIGIN,
+      tokenProvider: () => "reviewer-session",
+      fetchImpl: async () => ({ ok: true })
+    }),
+    { code: "real_reviewer_origin_forbidden" }
+  );
+});
+
 test("identidade da mídia vincula JPEG e legenda a um marcador único", () => {
   const first = reviewerMediaIdentity({
     orderId: "pedido-controlado-1",

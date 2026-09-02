@@ -50,6 +50,14 @@
     "data"
   ]);
   const PROFESSIONAL_ACCOUNT_TYPES = Object.freeze(["BUSINESS", "CREATOR"]);
+  const REAL_REVIEWER_CONNECTION_STATES = Object.freeze([
+    "authorization_pending",
+    "connected",
+    "reconnect_required",
+    "disconnecting",
+    "disconnected",
+    "failed"
+  ]);
   const ACCOUNT_TYPES = Object.freeze([...PROFESSIONAL_ACCOUNT_TYPES, "PERSONAL"]);
   const PUBLICATION_STATES = Object.freeze([
     "idle",
@@ -1458,13 +1466,51 @@
       return payload;
     }
 
-    return Object.freeze({
-      connection: () => request("/v1/social/connections/instagram"),
-      authorize: (purpose) => request(
+    function requireConnectionPayload(payload, optional) {
+      const connection = payload?.connection;
+      const validState = isPlainObject(connection) &&
+        CONNECTION_ID_PATTERN.test(connection.connectionId) &&
+        connection.provider === "instagram" &&
+        REAL_REVIEWER_CONNECTION_STATES.includes(connection.state) &&
+        (
+          connection.state === "connected"
+            ? ["healthy", "reconnect_required"].includes(connection.health)
+            : connection.health === connection.state
+        );
+      if (
+        !Object.hasOwn(payload, "connection") ||
+        !(optional && connection === null) && !validState
+      ) {
+        throw Object.assign(new Error("Estado da conexão recusado."), {
+          code: "real_reviewer_connection_response_invalid"
+        });
+      }
+      return payload;
+    }
+
+    async function connection() {
+      return requireConnectionPayload(
+        await request("/v1/social/connections/instagram"),
+        true
+      );
+    }
+
+    function authorize(purpose) {
+      if (purpose !== "connect" && purpose !== "reconnect") {
+        throw Object.assign(new Error("Finalidade de autorização recusada."), {
+          code: "real_reviewer_authorization_purpose_forbidden"
+        });
+      }
+      return request(
         "/v1/social/connections/instagram/authorization",
         "POST",
         { purpose }
-      ),
+      );
+    }
+
+    return Object.freeze({
+      connection,
+      authorize,
       visualReturn: (reference) => request(
         `${OAUTH_RETURN_PREFIX}/${encodeURIComponent(reference)}`
       ),
@@ -1483,11 +1529,114 @@
         "POST",
         {}
       ),
-      disconnect: (connectionId) => request(
-        `/v1/social/connections/instagram/${encodeURIComponent(connectionId)}`,
-        "DELETE"
-      )
+      async disconnect(connectionId) {
+        const payload = requireConnectionPayload(await request(
+          `/v1/social/connections/instagram/${encodeURIComponent(connectionId)}`,
+          "DELETE"
+        ), false);
+        if (
+          String(payload.connection.connectionId).toLowerCase() !==
+          String(connectionId).toLowerCase()
+        ) {
+          throw Object.assign(new Error("Conexão desconectada recusada."), {
+            code: "real_reviewer_connection_response_invalid"
+          });
+        }
+        return payload;
+      }
     });
+  }
+
+  function realReviewerConnectionView(connection, loaded = true) {
+    if (!loaded) {
+      return Object.freeze({
+        purpose: null,
+        connected: false,
+        status: "Verificando conexão",
+        badge: "Verificando",
+        nav: "2. Verificando conexão",
+        title: "Verificando conexão",
+        message: "Aguarde a confirmação segura do estado da empresa.",
+        button: null
+      });
+    }
+    if (!connection) {
+      return Object.freeze({
+        purpose: "connect",
+        connected: false,
+        status: "Não conectada",
+        badge: "Aguardando",
+        nav: "2. Conectar Instagram",
+        title: "Conectar Instagram",
+        message: "A autorização começa somente após seu clique.",
+        button: "Conectar Instagram"
+      });
+    }
+    if (connection.state === "connected" && connection.health === "healthy") {
+      return Object.freeze({
+        purpose: null,
+        connected: true,
+        status: "Instagram conectado",
+        badge: "Conectada",
+        nav: "2. Instagram conectado",
+        title: "Instagram conectado",
+        message: "A conta profissional já está conectada a esta empresa.",
+        button: null
+      });
+    }
+    if (
+      connection.state === "connected" &&
+      connection.health === "reconnect_required"
+    ) {
+      return Object.freeze({
+        purpose: null,
+        connected: false,
+        status: "Nova autorização necessária",
+        badge: "Desconectar primeiro",
+        nav: "2. Nova autorização necessária",
+        title: "Nova autorização necessária",
+        message: "Desconecte a conta antes de iniciar a reconexão segura.",
+        button: null
+      });
+    }
+    if (
+      connection.state === "disconnected" ||
+      connection.state === "reconnect_required"
+    ) {
+      return Object.freeze({
+        purpose: "reconnect",
+        connected: false,
+        status: "Reconexão necessária",
+        badge: "Reconectar",
+        nav: "2. Conectar novamente",
+        title: "Conectar novamente",
+        message: "Uma nova autorização reutilizará a conexão desta empresa.",
+        button: "Conectar novamente"
+      });
+    }
+    return Object.freeze({
+      purpose: null,
+      connected: false,
+      status: connection.state === "authorization_pending"
+        ? "Autorização em andamento"
+        : "Conexão indisponível",
+      badge: "Aguardando",
+      nav: "2. Estado da conexão",
+      title: "Estado da conexão",
+      message: "Atualize a página antes de iniciar uma nova autorização.",
+      button: null
+    });
+  }
+
+  function realReviewerAuthorizationResultAllowed(
+    purpose,
+    connection,
+    result
+  ) {
+    if (purpose !== "reconnect") return purpose === "connect";
+    const expected = String(connection?.connectionId || "").toLowerCase();
+    const received = String(result?.connectionId || "").toLowerCase();
+    return CONNECTION_ID_PATTERN.test(expected) && received === expected;
   }
 
   function realReviewerTemplate() {
@@ -1503,7 +1652,7 @@
         <div class="gate5aReviewerLayout" data-real-layout>
           <aside class="gate5aReviewerNav" aria-label="Etapas da revisão real">
             <button type="button" data-real-nav="overview">1. Visão geral</button>
-            <button type="button" data-real-nav="authorization">2. Conectar Instagram</button>
+            <button type="button" data-real-nav="authorization" data-real-field="authorizationNav">2. Conectar Instagram</button>
             <button type="button" data-real-nav="oauth-return">3. Retorno seguro</button>
             <button type="button" data-real-nav="connection">4. Conta conectada</button>
             <button type="button" data-real-nav="media">5. Selecionar JPEG</button>
@@ -1514,7 +1663,7 @@
           </aside>
           <div class="gate5aReviewerContent" aria-live="polite">
             <section data-real-screen="overview"><div class="gate5aScreenHeading"><span class="gate5aStepNumber">01</span><div><h2>Fluxo real do revisor</h2><p>Conexão oficial, JPEG da empresa, publicação explícita e prova canônica.</p></div></div><div class="gate5aCompanyConfirmation"><span>✓ Empresa derivada da sessão</span><strong data-real-field="companyLabel">Empresa autenticada</strong><small>Nenhum company_id é aceito do navegador.</small></div><div class="gate5aFeatureGrid"><article><span>🔐</span><h3>OAuth oficial</h3><p>Somente as permissões básica e de publicação aprovadas.</p></article><article><span>🖼️</span><h3>JPEG próprio</h3><p>Conteúdo validado novamente no servidor antes do envio.</p></article><article><span>✅</span><h3>Prova real</h3><p>Publicado somente após Media ID, referência, horário e permalink.</p></article></div><div class="gate5aActions"><button type="button" class="gate5aPrimary" data-real-action="go-connect">Começar revisão</button></div></section>
-            <section data-real-screen="authorization" hidden><div class="gate5aScreenHeading"><span class="gate5aStepNumber">02</span><div><h2>Conectar Instagram</h2><p>A autorização começa somente após seu clique.</p></div></div><div class="gate5aSecurityCopy"><strong>Antes de continuar</strong><ul><li>A senha permanece no ambiente oficial do Instagram.</li><li>Serão solicitadas apenas instagram_business_basic e instagram_business_content_publish.</li><li>Nada é publicado durante a conexão.</li></ul></div><div class="gate5aActions"><button type="button" class="gate5aPrimary" data-real-action="authorize">Conectar Instagram</button></div></section>
+            <section data-real-screen="authorization" hidden><div class="gate5aScreenHeading"><span class="gate5aStepNumber">02</span><div><h2 data-real-field="authorizationTitle">Conectar Instagram</h2><p data-real-field="authorizationMessage">A autorização começa somente após seu clique.</p></div></div><div class="gate5aSecurityCopy"><strong>Antes de continuar</strong><ul><li>A senha permanece no ambiente oficial do Instagram.</li><li>Serão solicitadas apenas instagram_business_basic e instagram_business_content_publish.</li><li>Nada é publicado durante a conexão.</li></ul></div><div class="gate5aActions"><button type="button" class="gate5aPrimary" data-real-action="authorize" data-real-authorize>Conectar Instagram</button><strong data-real-connected-note hidden>Instagram conectado</strong></div></section>
             <section data-real-screen="oauth-return" hidden><div class="gate5aScreenHeading"><span class="gate5aStepNumber">03</span><div><h2>Confirmando sua conta</h2><p>O retorno visual usa apenas uma referência opaca e remove os parâmetros da URL.</p></div></div><ol class="gate5aProgressList"><li class="done"><span>1</span><div><strong>Retorno recebido</strong><small>Código e state não ficam nesta página.</small></div></li><li class="done"><span>2</span><div><strong>URL higienizada</strong><small>Nenhum token é devolvido ao navegador.</small></div></li><li><span>3</span><div><strong data-real-field="returnStatus">Confirmando sua conta</strong><small data-real-field="returnMessage">Aguarde a leitura do estado seguro.</small></div></li></ol><div class="gate5aActions"><button type="button" class="gate5aPrimary" data-real-action="refresh">Continuar</button></div></section>
             <section data-real-screen="connection" hidden><div class="gate5aScreenHeading"><span class="gate5aStepNumber">04</span><div><h2>Conta profissional</h2><p>Business ou Creator, vinculada à empresa autenticada.</p></div></div><div class="gate5aConnectionCard"><div class="gate5aAvatar">IG</div><div><span>Conta conectada</span><h3 data-real-field="username">—</h3><p data-real-field="accountType">—</p></div><strong class="gate5aStatusGood" data-real-field="connectionBadge">Aguardando</strong></div><div class="gate5aScopeGrid"><div><span>instagram_business_basic</span><strong>Necessária</strong></div><div><span>instagram_business_content_publish</span><strong>Necessária</strong></div></div><div class="gate5aActions"><button type="button" class="gate5aPrimary" data-real-action="go-media">Selecionar JPEG</button></div></section>
             <section data-real-screen="media" hidden><div class="gate5aScreenHeading"><span class="gate5aStepNumber">05</span><div><h2>Revisar imagem e legenda</h2><p>A lista contém somente JPEGs autorizados da empresa da sessão.</p></div></div><label class="gate5aCaption"><span>Conteúdo autorizado</span><select data-real-media-select><option value="">Selecione um JPEG</option></select></label><div class="gate5aMediaReview" data-real-media-review hidden><img data-real-field-src="mediaAsset" alt="Prévia do JPEG autorizado"><div><span class="gate5aSyntheticTag">Conteúdo real da empresa</span><h3 data-real-field="mediaFile">preview_ia4tube.jpg</h3><p><strong>Formato:</strong> image/jpeg · <span data-real-field="mediaDimensions">—</span></p><div class="gate5aCaption"><span>Legenda final com marcador único de confirmação</span><p data-real-field="caption">—</p></div><ul><li>Proprietário: empresa autenticada</li><li>Modo: publicação manual</li><li>Envio: somente após confirmação explícita</li></ul></div></div><p data-real-no-media hidden>Nenhum JPEG elegível está disponível para esta empresa.</p><div class="gate5aActions"><button type="button" class="gate5aPrimary" data-real-action="publish" disabled>Publicar no Instagram</button></div></section>
@@ -1551,6 +1700,7 @@
       stage: targetWindow.IA4_GATE5A_REVIEW_STAGE || "overview",
       companyLabel: "Empresa autenticada",
       connection: null,
+      connectionLoaded: false,
       media: [],
       selectedMediaId: null,
       publication: null,
@@ -1655,14 +1805,25 @@
       });
       textField("companyLabel", state.companyLabel);
       const connection = state.connection;
-      const connected = connection?.state === "connected" &&
-        connection?.health === "healthy";
-      textField("connectionStatus", connected ? "Conectada" : "Não conectada");
+      const connectionView = realReviewerConnectionView(
+        connection,
+        state.connectionLoaded
+      );
+      const connected = connectionView.connected;
+      textField("connectionStatus", connectionView.status);
+      textField("authorizationNav", connectionView.nav);
+      textField("authorizationTitle", connectionView.title);
+      textField("authorizationMessage", connectionView.message);
+      const authorizeButton = one("[data-real-authorize]");
+      authorizeButton.hidden = connectionView.button === null;
+      authorizeButton.disabled = connectionView.button === null || state.busy;
+      authorizeButton.textContent = connectionView.button || "Conectar Instagram";
+      one("[data-real-connected-note]").hidden = !connectionView.connected;
       textField("username", connection?.username || "—");
       textField("accountType", connection?.accountType
         ? connection.accountType.toUpperCase()
         : "—");
-      textField("connectionBadge", connected ? "Conectada" : "Aguardando");
+      textField("connectionBadge", connectionView.badge);
       textField("disconnectAccount", connected
         ? `${connection.username} (${connection.accountType})`
         : "Nenhuma conta conectada.");
@@ -1687,6 +1848,9 @@
         connected && media && !state.busy && (
           !state.publication || state.publication.state === "failed_temporary"
         )
+      );
+      one("[data-real-action=\"disconnect\"]").disabled = !(
+        connection?.state === "connected" && !state.busy
       );
       if (media) {
         one("[data-real-field-src=\"mediaAsset\"]").src = media.thumbnailUrl;
@@ -1751,14 +1915,18 @@
       }
     }
     async function refresh() {
+      update({ connectionLoaded: false });
+      const connection = await client.connection();
+      update({
+        connection: connection.connection,
+        connectionLoaded: true
+      });
       const results = await Promise.all([
-        client.connection(),
         client.media(),
         client.publications()
       ]);
-      const [connection, media, history] = results;
+      const [media, history] = results;
       update({
-        connection: connection.connection,
         media: Array.isArray(media.media) ? media.media : [],
         history: Array.isArray(history.publications) ? history.publications : [],
         publication: history.publications?.[0] || state.publication
@@ -1795,8 +1963,21 @@
       } else if (action === "go-connect") {
         update({ stage: "authorization", error: "" });
       } else if (action === "authorize") {
+        const purpose = realReviewerConnectionView(
+          state.connection,
+          state.connectionLoaded
+        ).purpose;
+        if (!purpose) return;
+        const expectedConnection = state.connection;
         run(async () => {
-          const result = await client.authorize("connect");
+          const result = await client.authorize(purpose);
+          if (!realReviewerAuthorizationResultAllowed(
+            purpose,
+            expectedConnection,
+            result
+          )) {
+            throw new Error("A conexão devolvida pela autorização foi recusada.");
+          }
           if (!isOfficialInstagramAuthorizationUrl(result.authorizationUrl)) {
             throw new Error("A URL oficial de autorização foi recusada.");
           }
@@ -1840,8 +2021,12 @@
       } else if (action === "disconnect" && state.connection?.connectionId) {
         if (!targetWindow.confirm("Deseja desconectar esta conta do Instagram?")) return;
         run(async () => {
-          await client.disconnect(state.connection.connectionId);
-          update({ connection: null });
+          const result = await client.disconnect(state.connection.connectionId);
+          update({
+            connection: result.connection,
+            connectionLoaded: true,
+            stage: "authorization"
+          });
         }, "data");
       }
     });
@@ -2485,6 +2670,7 @@
     MEDIA_PLACEHOLDER_DATA_URL,
     OAUTH_RETURN_PREFIX,
     PROFESSIONAL_ACCOUNT_TYPES,
+    REAL_REVIEWER_CONNECTION_STATES,
     PRODUCTION_API_ORIGIN,
     PUBLICATION_STATES,
     REAL_REVIEWER_PATH,
@@ -2521,6 +2707,8 @@
     readCanonicalLoginHandoff,
     realReviewerTemplate,
     realReviewerRequestAllowed,
+    realReviewerConnectionView,
+    realReviewerAuthorizationResultAllowed,
     recoverReviewerAuthenticationFrom401,
     reduceReviewerAuthenticationAfterError,
     resolveApiBase,

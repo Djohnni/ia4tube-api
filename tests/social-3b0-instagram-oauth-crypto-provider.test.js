@@ -275,6 +275,13 @@ test("Instagram OAuth flags are exact and publication is staging-only", () => {
     readOnlyPublication.publicOrigin,
     "https://ia4tube-api-staging-checkpoint-a.onrender.com"
   );
+  const connectionClosed = loadInstagramOAuthConfig(enabledEnvironment({
+    SOCIAL_EXTERNAL_CONNECTION_ENABLED: "false"
+  }));
+  assert.equal(connectionClosed.enabled, true);
+  assert.equal(connectionClosed.instagramEnabled, true);
+  assert.equal(connectionClosed.externalConnectionEnabled, false);
+  assert.equal(connectionClosed.externalPublicationEnabled, false);
   const publication = loadInstagramOAuthConfig(enabledEnvironment({
     SOCIAL_EXTERNAL_PUBLICATION_ENABLED: "true",
     SOCIAL_INSTAGRAM_EXPECTED_USERNAME: "@ia4tube_empresas",
@@ -302,6 +309,41 @@ test("Instagram OAuth flags are exact and publication is staging-only", () => {
       { code: "social_instagram_publication_forbidden" }
     );
   }
+});
+
+test("closed connection gate prevents provider work before transport", async () => {
+  let transportCalls = 0;
+  const provider = createInstagramProvider({
+    config: loadInstagramOAuthConfig(enabledEnvironment({
+      SOCIAL_EXTERNAL_CONNECTION_ENABLED: "false"
+    })),
+    async transport() {
+      transportCalls += 1;
+      throw new Error("transport must stay closed");
+    }
+  });
+  assert.throws(
+    () => provider.buildAuthorizationUrl({ state: "v1.a.b.c.d" }),
+    { code: "social_oauth_exchange_failed" }
+  );
+  await assert.rejects(
+    provider.exchangeCode({ code: "synthetic-code" }),
+    { code: "social_oauth_exchange_failed" }
+  );
+  await assert.rejects(
+    provider.exchangeLongLivedToken({
+      accessToken: Buffer.from("synthetic-token")
+    }),
+    { code: "social_oauth_exchange_failed" }
+  );
+  await assert.rejects(
+    provider.discoverProfessionalAccount({
+      accessToken: Buffer.from("synthetic-token"),
+      userId: "synthetic-user"
+    }),
+    { code: "social_oauth_exchange_failed" }
+  );
+  assert.equal(transportCalls, 0);
 });
 
 test("enabled Instagram OAuth configuration is closed to exact public values", () => {

@@ -368,6 +368,7 @@ function makeHarness(options = {}) {
   const service = createInstagramOAuthService({
     config: Object.freeze({
       enabled: true,
+      externalConnectionEnabled: options.externalConnectionEnabled !== false,
       provider: INSTAGRAM_PROVIDER,
       redirectUri: INSTAGRAM_OAUTH_REDIRECT_URI,
       expectedUsername: options.expectedUsername || null,
@@ -467,6 +468,50 @@ test("reconnect reuses the repository-selected blocking connection", async () =>
     harness.settlementInputs[0].input.observedAt.getTime(),
     1_800_000_000_000
   );
+});
+
+test("closed connection gate keeps connection reads and blocks every mutation", async () => {
+  const harness = makeHarness({
+    externalConnectionEnabled: false,
+    enableMetaCompliance: true,
+    connectionDetails: Object.freeze({
+      id: UUIDS[8],
+      provider: "instagram",
+      state: "connected",
+      health: "healthy",
+      account: Object.freeze({
+        externalId: "synthetic-professional-user",
+        username: "ia4tube_empresas",
+        displayName: "IA4Tube Empresas",
+        accountType: "business"
+      })
+    })
+  });
+  const current = await harness.service.getCurrentConnection({
+    verifiedClaims: claims()
+  });
+  assert.equal(current.connection.connectionId, UUIDS[8]);
+  assert.equal(current.connection.state, "connected");
+  assert.equal(current.connection.health, "healthy");
+  for (const operation of [
+    () => harness.service.authorize({
+      verifiedClaims: claims(),
+      purpose: "reconnect"
+    }),
+    () => harness.service.callback({ state: "x", code: "x", error: null }),
+    () => harness.service.disconnect({
+      verifiedClaims: claims(),
+      connectionId: UUIDS[8]
+    })
+  ]) {
+    await assert.rejects(operation, { code: "external_capability_disabled" });
+  }
+  assert.deepEqual(harness.events, []);
+  assert.equal(harness.exchangeCalls, 0);
+  assert.equal(harness.credentialCalls, 0);
+  assert.deepEqual(harness.storageInputs, []);
+  assert.deepEqual(harness.mappingDigestInputs, []);
+  assert.deepEqual(harness.legacyMappingInputs, []);
 });
 
 test("callback authenticates state before tenant scope and stores one connection-bound token", async () => {

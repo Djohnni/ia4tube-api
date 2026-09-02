@@ -170,7 +170,7 @@ function loadInstagramOAuthConfig(env = process.env) {
   );
 
   return Object.freeze({
-    enabled: flags.externalConnectionEnabled,
+    enabled: flags.instagramEnabled,
     provider: INSTAGRAM_PROVIDER,
     instagramEnabled: true,
     externalConnectionEnabled: flags.externalConnectionEnabled,

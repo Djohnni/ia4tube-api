@@ -155,6 +155,14 @@ function productCalls(pool) {
   return pool.calls.filter((call) => !isTransactionPlumbing(call.text));
 }
 
+function assertNoPublicationMutation(calls) {
+  const publicationWrite = calls.find((call) =>
+    /^(?:INSERT\s+INTO|UPDATE|DELETE\s+FROM)\s+ia4tube_social\.(?:social_publications|social_publication_attempts)\b/i
+      .test(call.text.trim())
+  );
+  assert.equal(publicationWrite, undefined);
+}
+
 function flattenedValues(pool) {
   return productCalls(pool)
     .flatMap((call) => call.values)
@@ -1872,6 +1880,43 @@ test("reconnect reuses the exact reconnect-required or disconnected connection",
     assert.ok(audit.values.includes(IDS.connection));
     assert.equal(audit.values.includes(requestedConnectionId), false);
   }
+  assertNoPublicationMutation(calls);
+});
+
+test("reconnect cannot select a connection owned by another tenant", async () => {
+  const pool = createFakePool(async (call) => {
+    if (/^UPDATE ia4tube_social\.social_oauth_transactions/is.test(call.text)) {
+      return { rows: [], rowCount: 0 };
+    }
+    if (/JOIN LATERAL/is.test(call.text)) return { rows: [], rowCount: 0 };
+    if (/FROM ia4tube_social\.social_connections/is.test(call.text)) {
+      assert.deepEqual(call.values, [
+        CONTEXT_B.companyId,
+        "instagram",
+        ["reconnect_required", "disconnected"]
+      ]);
+      return { rows: [], rowCount: 0 };
+    }
+    return { rows: [], rowCount: 0 };
+  });
+  await assert.rejects(
+    createPostgresOAuthRepository({
+      pool,
+      runtimeRole: RUNTIME_ROLE
+    }).scope(CONTEXT_B).createAuthorizationWithPendingConnection(oauthInput({
+      purpose: "reconnect"
+    })),
+    { code: "active_connection_exists" }
+  );
+  const calls = productCalls(pool);
+  assert.equal(calls.some((call) =>
+    /UPDATE ia4tube_social\.social_connections/is.test(call.text)
+  ), false);
+  assert.equal(calls.some((call) =>
+    /INSERT INTO ia4tube_social\.(?:social_oauth_transactions|social_audit_events)/is
+      .test(call.text)
+  ), false);
+  assertNoPublicationMutation(calls);
 });
 
 test("a terminal pending connection is recoverable only without its exact authorization credential", async () => {
@@ -3894,6 +3939,7 @@ test("local disconnect is idempotent and atomically revokes only connector mater
     /UPDATE ia4tube_social\.social_connection_scopes/i.test(call.text) &&
     /SET expires_at=GREATEST/i.test(call.text)
   ));
+  assertNoPublicationMutation(firstCalls);
 
   const connectionUpdates = firstCalls.filter((call) =>
     /UPDATE ia4tube_social\.social_connections/is.test(call.text)
@@ -4029,6 +4075,7 @@ test("credential activation restores the reusable account, token expiry and scop
   ]);
   assert.equal(calls[scopeInsert].values[3].getTime(), expiresAt.getTime());
   assert.equal(JSON.stringify(pool.calls).includes(SYNTHETIC_SECRET_MARKER), false);
+  assertNoPublicationMutation(calls);
 });
 
 test("scope persistence failure rolls back connection, account and credential activation", async () => {

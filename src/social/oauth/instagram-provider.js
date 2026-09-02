@@ -422,7 +422,7 @@ function requireConfig(config) {
     typeof config !== "object" ||
     config.enabled !== true ||
     config.instagramEnabled !== true ||
-    config.externalConnectionEnabled !== true ||
+    typeof config.externalConnectionEnabled !== "boolean" ||
     typeof config.externalPublicationEnabled !== "boolean" ||
     config.provider !== INSTAGRAM_PROVIDER ||
     config.redirectUri !== INSTAGRAM_OAUTH_REDIRECT_URI ||
@@ -936,7 +936,12 @@ function createInstagramProvider(options = {}) {
     providerFail();
   }
 
+  function requireExternalConnection() {
+    if (config.externalConnectionEnabled !== true) providerFail();
+  }
+
   function buildAuthorizationUrl(input = {}) {
+    requireExternalConnection();
     const source = strictRecord(input, ["state"]);
     const state = boundedSecret(source.state, 32, 2048);
     if (!COMPACT_STATE_PATTERN.test(state)) providerFail();
@@ -1042,6 +1047,7 @@ function createInstagramProvider(options = {}) {
   }
 
   async function exchangeCode(input = {}) {
+    requireExternalConnection();
     const source = strictRecord(input, ["code"]);
     const code = boundedSecret(
       source.code,
@@ -1062,6 +1068,7 @@ function createInstagramProvider(options = {}) {
   }
 
   async function exchangeLongLivedToken(input = {}) {
+    requireExternalConnection();
     const source = strictRecord(input, ["accessToken"]);
     const shortLivedToken = copyAccessToken(source.accessToken);
     let exchanged;
@@ -1113,6 +1120,7 @@ function createInstagramProvider(options = {}) {
   }
 
   async function discoverProfessionalAccount(input = {}) {
+    requireExternalConnection();
     const hasCorrelationId = input !== null && typeof input === "object" &&
       Object.hasOwn(input, "correlationId");
     const inputKeys = hasCorrelationId
