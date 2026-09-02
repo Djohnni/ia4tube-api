@@ -1,11 +1,11 @@
-<!doctype html>
+<!DOCTYPE html>
 <html lang="pt-BR">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="robots" content="index, follow">
-  <meta name="description" content="Rascunho técnico público da futura Política de Privacidade da IA4Tube.">
-  <title>Rascunho técnico público — Privacidade — IA4Tube</title>
+  <meta name="robots" content="index,follow">
+  <meta name="description" content="Política de Privacidade da IA4Tube.">
+  <title>Política de Privacidade — IA4Tube</title>
   <style>
     :root {
       color-scheme: light;
@@ -15,28 +15,30 @@
       --surface: #ffffff;
       --canvas: #f5f3ff;
       --brand-dark: #38249a;
-      --warning-bg: #fff7e6;
-      --warning-border: #b85c00;
       --line: #ded9f3;
+      --table-head: #eeebff;
     }
     * { box-sizing: border-box; }
-    body { margin: 0; background: var(--canvas); color: var(--ink); line-height: 1.62; }
-    main { width: min(880px, calc(100% - 32px)); margin: 32px auto; }
+    body { margin: 0; background: var(--canvas); color: var(--ink); line-height: 1.65; }
+    main { width: min(960px, calc(100% - 32px)); margin: 32px auto; }
     article { background: var(--surface); border: 1px solid var(--line); border-radius: 18px; padding: 36px; box-shadow: 0 12px 30px rgba(42, 32, 96, .08); }
-    .draft { border-left: 6px solid var(--warning-border); background: var(--warning-bg); padding: 20px; margin-bottom: 28px; }
-    .draft h1 { margin-top: 0; font-size: 1.35rem; }
-    h2 { margin-top: 32px; color: var(--brand-dark); line-height: 1.25; }
-    p, li { max-width: 76ch; }
+    header h1 { margin-top: 0; color: var(--brand-dark); line-height: 1.25; }
+    h2 { margin-top: 34px; color: var(--brand-dark); line-height: 1.25; }
+    h3 { margin-top: 24px; line-height: 1.3; }
+    p, li, address { max-width: 80ch; }
     li { margin: 8px 0; }
-    code { overflow-wrap: anywhere; color: var(--brand-dark); }
-    nav { display: flex; flex-wrap: wrap; gap: 10px 18px; margin-top: 30px; padding-top: 20px; border-top: 1px solid var(--line); }
-    nav a { color: var(--brand-dark); font-weight: 700; text-decoration-thickness: 2px; text-underline-offset: 3px; }
+    a { color: var(--brand-dark); font-weight: 700; text-underline-offset: 3px; }
+    address { font-style: normal; border: 1px solid var(--line); border-radius: 12px; background: #faf9ff; padding: 18px; }
+    .table-wrap { overflow-x: auto; margin: 18px 0; }
+    table { width: 100%; border-collapse: collapse; min-width: 680px; }
+    th, td { border: 1px solid var(--line); padding: 12px; text-align: left; vertical-align: top; }
+    th { background: var(--table-head); color: var(--brand-dark); }
+    nav { display: flex; flex-wrap: wrap; gap: 10px 18px; margin-top: 32px; padding-top: 20px; border-top: 1px solid var(--line); }
     .meta { color: var(--muted); font-size: .95rem; }
     footer { margin-top: 28px; padding-top: 18px; border-top: 1px solid var(--line); color: var(--muted); }
     @media (max-width: 640px) {
-      main { width: min(100% - 20px, 880px); margin: 10px auto; }
+      main { width: min(100% - 20px, 960px); margin: 10px auto; }
       article { padding: 22px 18px; border-radius: 12px; }
-      .draft { padding: 16px; }
       h2 { font-size: 1.25rem; }
     }
   </style>
@@ -44,66 +46,216 @@
 <body>
   <main>
     <article>
-      <section class="draft" aria-label="Estado deste documento">
-        <h1>RASCUNHO TÉCNICO PÚBLICO — NÃO APROVADO JURIDICAMENTE</h1>
-        <p><strong>PUBLIC TECHNICAL DRAFT — NOT LEGALLY APPROVED</strong></p>
-        <p>Esta página descreve somente comportamentos técnicos comprovados ou limitações atuais da integração social da IA4Tube. A identidade jurídica responsável, o canal oficial, as bases legais, os fornecedores e os prazos ainda dependem de decisões do proprietário e revisão jurídica.</p>
-        <p>Não use este texto como política vigente, aviso de consentimento, contrato ou documento de App Review.</p>
-      </section>
-
       <header>
-        <h2>Política de Privacidade — preparação técnica</h2>
-        <p class="meta">Revisão técnica: 30 de agosto de 2026. Data de vigência jurídica: não definida.</p>
+        <h1>Política de Privacidade da IA4Tube</h1>
+        <p class="meta"><strong>Vigente desde:</strong> 2 de setembro de 2026. <strong>Última atualização:</strong> 2 de setembro de 2026.</p>
       </header>
 
-      <h2>1. Escopo atualmente comprovado</h2>
-      <p>A integração em staging foi construída para conectar uma conta profissional do Instagram a uma empresa autenticada na IA4Tube e para publicar uma imagem quando houver uma ação expressamente autorizada. O código ativo solicita somente os escopos <code>instagram_business_basic</code> e <code>instagram_business_content_publish</code>.</p>
-      <p>A implantação para clientes externos, a publicação automática, o calendário recorrente e uma política final de exclusão não estão declarados como disponíveis por este rascunho.</p>
+      <h2>1. Responsável pelo tratamento e contato</h2>
+      <p>Para os tratamentos de dados pessoais descritos nesta Política realizados em nome próprio, a responsável é:</p>
+      <address>
+        <strong>26.108.034 DJOHNNI DALFOVO</strong><br>
+        Nome comercial: IA4Tube<br>
+        CNPJ: 26.108.034/0001-98<br>
+        Endereço comercial da operação: ALDO VALDIR PINTARELLI, 502, TAMANDUA, CEP 89138000, ASCURRA/SC<br>
+        E-mail de privacidade e suporte: <a href="mailto:detalhecamiseteria@gmail.com">detalhecamiseteria@gmail.com</a>
+      </address>
+      <p>Não há encarregado público nomeado nesta versão. O e-mail acima é o canal para dúvidas e para o exercício de direitos de privacidade. Esta informação não afirma dispensa legal de encarregado.</p>
 
-      <h2>2. Categorias de dados tratadas pela integração</h2>
+      <h2>2. Escopo</h2>
+      <p>Esta Política abrange todo o produto IA4Tube, incluindo cadastro, login, sessão, administração da empresa, pedidos, planejamento, artes, imagens, logos, textos, legendas, suporte, cobrança, histórico, segurança e os recursos opcionais de inteligência artificial, analytics, notificações e integração com Instagram, quando estiverem habilitados e forem utilizados pelo cliente.</p>
+      <p>O serviço é inicialmente destinado ao Brasil e a pessoas com pelo menos 18 anos. A IA4Tube não oferece a conta para uso direto por menores de 18 anos.</p>
+
+      <h2>3. Dados que podem ser tratados</h2>
+      <h3>3.1. Cadastro, empresa e sessão</h3>
       <ul>
-        <li>Identificadores internos da empresa, do usuário autenticado, da conexão e das operações.</li>
-        <li>Metadados da conta profissional fornecidos pelo Instagram, como identificador externo, nome de usuário, nome de exibição quando disponível, tipo e estado da conta.</li>
-        <li>Escopos concedidos e datas técnicas relacionadas à autorização, validade, revogação e desconexão.</li>
-        <li>Metadados de segurança do OAuth armazenados como resumos criptográficos, incluindo o estado, a URI de retorno e o identificador da sessão.</li>
-        <li>Credencial de acesso protegida por criptografia autenticada, acompanhada apenas dos metadados necessários para validade, rotação e revogação.</li>
-        <li>Referência interna da mídia, resumo criptográfico dos metadados, legenda, estado da publicação, identificador retornado pelo provedor e horários operacionais.</li>
-        <li>Registros de segurança e auditoria, como ação, resultado, código técnico, correlação e horário, sem a intenção de registrar tokens ou segredos.</li>
+        <li>dados de identificação e contato fornecidos no cadastro ou no suporte;</li>
+        <li>dados da empresa, de seus representantes e usuários autorizados;</li>
+        <li>credenciais protegidas, identificadores de sessão, estados de autenticação e preferências;</li>
+        <li>identificadores técnicos, datas, horários e eventos necessários para segurança e funcionamento.</li>
       </ul>
 
-      <h2>3. Finalidades técnicas atuais</h2>
+      <h3>3.2. Pedidos, planejamento e conteúdo</h3>
       <ul>
-        <li>Autenticar a autorização e associá-la à empresa e ao usuário corretos.</li>
-        <li>Descobrir e apresentar a conta profissional escolhida.</li>
-        <li>Executar uma publicação autorizada e consultar seu resultado.</li>
-        <li>Impedir publicações duplicadas e reconciliar respostas incompletas do provedor.</li>
-        <li>Proteger credenciais, isolar empresas, detectar abuso e produzir auditoria técnica.</li>
-        <li>Desconectar a integração e impedir o uso futuro de uma credencial revogada.</li>
+        <li>pedidos, briefings, planejamento e histórico comercial;</li>
+        <li>artes, fotografias, imagens, logos, marcas, textos, legendas, instruções e arquivos enviados;</li>
+        <li>versões, ajustes, aprovações, resultados e eventos associados ao trabalho;</li>
+        <li>instruções e materiais selecionados para geração ou adaptação por inteligência artificial, quando o recurso estiver habilitado e for utilizado.</li>
       </ul>
 
-      <h2>4. Origem e comunicação dos dados</h2>
-      <p>Os dados podem ser fornecidos pelo usuário autenticado, gerados pela operação da IA4Tube ou recebidos da API oficial do Instagram durante autorização, descoberta de conta e publicação. A comunicação com Meta/Instagram ocorre apenas para essas funções técnicas.</p>
-      <p>A lista de fornecedores de hospedagem, banco de dados, backup e suporte ainda não foi aprovada para publicação. Este rascunho não afirma que dados sejam vendidos e não cria uma autorização para uso publicitário.</p>
+      <h3>3.3. Pagamento e atendimento</h3>
+      <ul>
+        <li>valor, forma de cobrança, status, referência e informações necessárias para conciliação de Pix ou Mercado Pago, quando oferecido e utilizado;</li>
+        <li>mensagens, anexos e histórico de suporte;</li>
+        <li>dados necessários para cancelamento, reembolso, prevenção de fraude e solução de controvérsias.</li>
+      </ul>
 
-      <h2>5. Segurança comprovada no código</h2>
-      <p>O núcleo social aplica separação por empresa no banco, controle de acesso, armazenamento criptografado da credencial, validação do retorno OAuth, idempotência e registros de auditoria redigidos. Essas medidas reduzem riscos, mas não constituem garantia absoluta nem substituem uma avaliação jurídica ou operacional.</p>
+      <h3>3.4. Instagram, quando habilitado</h3>
+      <ul>
+        <li>identificadores e metadados da conta profissional Business ou Creator, como nome de usuário, nome de exibição, tipo e estado;</li>
+        <li>escopos concedidos, dados de autorização, conexão, conta externa e destino;</li>
+        <li>credencial social protegida e metadados de validade, rotação, revogação e desconexão;</li>
+        <li>mídia selecionada, legenda, estado, tentativas, referência do provedor, permalink e horários da publicação;</li>
+        <li>protocolos opacos e registros de pedidos de desautorização ou exclusão, quando o fluxo estiver operacionalmente habilitado.</li>
+      </ul>
+      <p>A senha do Instagram é digitada somente no ambiente oficial da Meta. A IA4Tube não recebe essa senha, e o token social protegido não é entregue ao navegador.</p>
 
-      <h2>6. Retenção, backups e exclusão</h2>
-      <p>O sistema possui datas técnicas de validade e revogação, mas ainda não existe uma tabela de prazos jurídicos aprovada para metadados, publicações, auditoria e backups. Nenhum prazo de retenção ou conclusão de exclusão é prometido nesta página.</p>
-      <p>Desconectar uma conta e solicitar exclusão são operações diferentes. A desconexão impede a continuidade normal da integração; a eliminação dos dados técnicos elegíveis depende de um fluxo específico, de testes e das decisões de retenção ainda pendentes. Consulte o <a href="/exclusao-de-dados">rascunho de Exclusão de Dados</a>.</p>
+      <h3>3.5. Analytics, notificações, segurança e auditoria</h3>
+      <ul>
+        <li>eventos de navegação e uso, apenas quando o componente de analytics estiver habilitado e executado;</li>
+        <li>identificadores de dispositivo e entrega, apenas quando notificações estiverem habilitadas e forem utilizadas;</li>
+        <li>ações, resultados, códigos técnicos, correlação e horários para prevenção de fraude, diagnóstico e auditoria;</li>
+        <li>pedido de privacidade, referência de atendimento, andamento e resultado.</li>
+      </ul>
 
-      <h2>7. Direitos e contato</h2>
-      <p>Os direitos aplicáveis, a forma de verificar a identidade do solicitante, o canal oficial e o responsável pelo atendimento ainda precisam ser definidos pelo proprietário. Nenhum endereço, e-mail, encarregado ou prazo foi inventado neste rascunho.</p>
-      <p>Até essa definição, esta página não constitui um canal ativo de solicitação e não deve ser apresentada como política final.</p>
+      <h2>4. Origem dos dados</h2>
+      <p>Os dados podem ser fornecidos pelo usuário ou pela empresa; gerados pelo uso da IA4Tube; recebidos do serviço de login, pagamento ou rede social escolhido; ou produzidos durante suporte, segurança, auditoria e execução da contratação.</p>
+      <p>O cliente deve possuir autorização para inserir dados pessoais, imagens e materiais de outras pessoas e deve limitar o envio ao que for necessário para a finalidade contratada.</p>
 
-      <nav aria-label="Documentos legais relacionados">
-        <a href="/politica-de-privacidade" aria-current="page">Privacidade</a>
+      <h2>5. Para que os dados são usados</h2>
+      <ul>
+        <li>criar, autenticar e administrar contas, sessões, empresas e permissões;</li>
+        <li>identificar a empresa e seus representantes;</li>
+        <li>prestar os serviços contratados e cumprir instruções do cliente;</li>
+        <li>organizar pedidos, planejamento, materiais, versões e histórico;</li>
+        <li>gerar e adaptar artes, imagens, textos e legendas quando o recurso de inteligência artificial for utilizado;</li>
+        <li>publicar conteúdo somente quando autorizado e confirmar o resultado com o provedor;</li>
+        <li>processar e conciliar pagamentos, cancelamentos e reembolsos;</li>
+        <li>prestar suporte e comunicar informações sobre a conta e o serviço;</li>
+        <li>proteger contas, prevenir fraude e abuso, investigar falhas e manter evidências;</li>
+        <li>cumprir obrigações aplicáveis e exercer ou defender direitos;</li>
+        <li>medir o uso e enviar notificações somente quando esses recursos estiverem habilitados e forem utilizados.</li>
+      </ul>
+
+      <h2>6. Fundamentos utilizados</h2>
+      <p>Conforme o contexto, o tratamento pode ser necessário para executar o contrato ou procedimentos solicitados antes da contratação, cumprir obrigação legal ou regulatória, exercer regularmente direitos, atender interesses legítimos avaliados no caso concreto ou obter consentimento quando ele for exigido. A IA4Tube não considera o consentimento como fundamento universal para todas as operações.</p>
+      <p>Quando o tratamento depender de consentimento, a pessoa poderá revogá-lo pelo canal indicado, sem invalidar operações realizadas legitimamente antes da revogação e sem afastar hipóteses de preservação permitidas.</p>
+
+      <h2>7. Fornecedores e compartilhamento</h2>
+      <p>A IA4Tube compartilha apenas os dados necessários à função correspondente, à segurança, ao atendimento de obrigação válida ou à defesa de direitos. Os fornecedores abaixo estão limitados ao uso comprovado ou à hipótese expressamente condicional descrita em cada linha; a presença na tabela não declara que todo recurso esteja ativo ao mesmo tempo:</p>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Serviço</th>
+              <th>Quando ocorre</th>
+              <th>Dados e finalidade</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>Render</td>
+              <td>Na hospedagem da aplicação em ambiente que utiliza esse fornecedor.</td>
+              <td>Dados e arquivos necessários para entregar a aplicação, processar requisições, armazenar a operação e manter segurança e registros técnicos.</td>
+            </tr>
+            <tr>
+              <td>Google Identity Services</td>
+              <td>Quando o login com Google for utilizado.</td>
+              <td>Token de identidade validado e dados básicos autorizados para autenticar e associar a conta.</td>
+            </tr>
+            <tr>
+              <td>Google Analytics</td>
+              <td>Quando o componente de analytics estiver habilitado e for executado.</td>
+              <td>Eventos de navegação e uso para medição e melhoria do serviço, conforme a configuração aplicada.</td>
+            </tr>
+            <tr>
+              <td>OpenAI</td>
+              <td>Quando um fluxo de inteligência artificial estiver habilitado e for utilizado pelo cliente.</td>
+              <td>Instruções e materiais selecionados para gerar ou adaptar conteúdo e devolver o resultado solicitado.</td>
+            </tr>
+            <tr>
+              <td>Meta/Instagram</td>
+              <td>Somente quando a integração social estiver habilitada e for utilizada.</td>
+              <td>Autorização, dados da conta profissional, mídia, legenda, referências e estado necessários para conectar, publicar e consultar o resultado.</td>
+            </tr>
+            <tr>
+              <td>Mercado Pago</td>
+              <td>Somente quando essa forma de cobrança for oferecida e escolhida.</td>
+              <td>Dados da transação necessários para iniciar, confirmar, conciliar, cancelar ou reembolsar o pagamento.</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <p>Serviços encontrados apenas em implementação ou planejamento, sem confirmação operacional suficiente, não são apresentados como fornecedores ativos. Se passarem a tratar dados no ambiente real, esta Política deverá ser atualizada antes de descrevê-los dessa forma.</p>
+      <p>A IA4Tube também poderá compartilhar dados com autoridades, juízos, consultores ou partes relacionadas quando houver obrigação, ordem válida, investigação de fraude, proteção de direitos ou necessidade de resposta a incidente.</p>
+
+      <h2>8. Tratamento fora do Brasil</h2>
+      <p>Alguns fornecedores podem processar ou armazenar dados em outros países, conforme a região, a configuração e a infraestrutura utilizada. Nesses casos, a IA4Tube deverá limitar o compartilhamento ao necessário e adotar o mecanismo exigido pela legislação aplicável para a transferência.</p>
+
+      <h2>9. Cookies, sessão e armazenamento no dispositivo</h2>
+      <p>O produto usa identificadores necessários para autenticação e funcionamento. O token de sessão comum possui validade criptográfica de até 7 dias; uma cópia pode permanecer no armazenamento local do dispositivo até logout, limpeza pelo aplicativo ou pelo usuário. A expiração impede seu uso válido, mas não apaga por si só a cópia local.</p>
+      <p>O acesso administrativo usa cookie protegido com vida máxima de 12 horas. O encerramento explícito limpa esse cookie no navegador; o token subjacente continua limitado à própria validade. Recursos de analytics podem usar identificadores adicionais quando estiverem habilitados.</p>
+
+      <h2>10. Integração social e controle de publicação</h2>
+      <p>Na primeira versão, cada empresa pode conectar uma conta profissional Instagram Business ou Creator. Conectar não publica nada, não ativa a Publicação automática e essa opção nunca começa selecionada. Geração automática e publicação são controles independentes.</p>
+      <p>Conteúdo atrasado nunca é publicado automaticamente depois de uma reconexão. Os estados “Enviando” e “Confirmando” não significam “Publicado”. Somente a confirmação com referência do provedor e permalink significa publicação concluída.</p>
+      <p>A desconexão bloqueia novas publicações. Desconectar e excluir dados são operações diferentes. A exclusão da conexão social elimina a credencial social elegível quando o fluxo estiver operacionalmente habilitado; a conexão e a conta técnica podem permanecer revogadas para auditoria. O usuário, a empresa, artes, imagens, legendas, pedidos e histórico não são apagados apenas por essa exclusão.</p>
+
+      <h2>11. Retenção</h2>
+      <p>A IA4Tube usa prazos somente quando eles são tecnicamente comprovados e, nas demais categorias, aplica critérios ligados à finalidade:</p>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Categoria</th>
+              <th>Critério comprovado ou aplicável</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>Sessão comum e cookie administrativo</td>
+              <td>Token de sessão válido por até 7 dias; cookie administrativo por até 12 horas, sempre limitado pela validade do token.</td>
+            </tr>
+            <tr>
+              <td>Autorizações sociais temporárias</td>
+              <td>O estado OAuth é válido por 10 minutos e a autorização sensível de reautenticação por 5 minutos. A expiração impede o uso dessas autorizações temporárias.</td>
+            </tr>
+            <tr>
+              <td>Arquivos temporários</td>
+              <td>Normalmente removidos após o processamento. Na pasta específica de uploads temporários, arquivos órfãos tornam-se elegíveis para limpeza após pelo menos 6 horas; isso não significa que serão eliminados exatamente nesse momento.</td>
+            </tr>
+            <tr>
+              <td>Cadastro, empresa, pedidos, artes, imagens, legendas e planejamento</td>
+              <td>Enquanto a conta estiver ativa e enquanto necessários à prestação do serviço. Posteriormente, podem ser mantidos enquanto necessários ao cumprimento de obrigação aplicável, à segurança, à auditoria ou ao exercício de direitos. Depois, serão eliminados ou anonimizados, conforme aplicável.</td>
+            </tr>
+            <tr>
+              <td>Pagamentos</td>
+              <td>Enquanto necessários para processar e conciliar pagamentos, prevenir fraude, prestar atendimento e cumprir obrigações aplicáveis.</td>
+            </tr>
+            <tr>
+              <td>Publicações, histórico, auditoria e protocolos</td>
+              <td>Enquanto necessários para prestar o serviço, oferecer suporte, proteger a segurança, manter auditoria e exercer direitos. Não há prazo automático fixo de expurgo comprovado para essas categorias.</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <h2>12. Backups e restauração</h2>
+      <p>Dados eliminados do ambiente ativo podem permanecer por período adicional em cópias técnicas de segurança, quando essas cópias existirem, conforme o ciclo aplicável. Essas cópias não são destinadas ao uso cotidiano do serviço. A IA4Tube não promete a eliminação instantânea de todas as cópias. Em caso de restauração, os pedidos de exclusão registrados serão verificados e reaplicados antes de os dados correspondentes voltarem a ficar disponíveis para uso normal.</p>
+
+      <h2>13. Segurança</h2>
+      <p>A IA4Tube utiliza controles como autenticação, separação de acesso por empresa, validações, proteção de credenciais, restrição de rotas, registros de segurança e, na integração social, criptografia autenticada do token. Nenhuma medida elimina todos os riscos, e esta Política não oferece garantia absoluta contra incidentes.</p>
+      <p>O usuário deve proteger suas credenciais, usar dispositivos confiáveis e informar suspeitas pelo canal oficial. Nunca envie senha do Instagram ou token social à IA4Tube.</p>
+
+      <h2>14. Direitos de privacidade</h2>
+      <p>O titular pode solicitar, quando aplicável, confirmação do tratamento, acesso, correção, anonimização, bloqueio ou eliminação, portabilidade conforme regulamentação, informação sobre compartilhamentos, revisão de consentimento, revogação do consentimento e oposição a tratamento realizado em desconformidade.</p>
+      <p>Envie o pedido para <a href="mailto:detalhecamiseteria@gmail.com">detalhecamiseteria@gmail.com</a>. A IA4Tube poderá verificar a identidade, o vínculo com a empresa e a autoridade do solicitante, usando apenas os dados proporcionais à proteção da conta e de terceiros. O resultado considerará o escopo pedido e as hipóteses de preservação aplicáveis.</p>
+      <p>Consulte as <a href="/exclusao-de-dados">Instruções de Exclusão de Dados</a> para distinguir desconexão, exclusão da conexão social e exclusão geral.</p>
+      <p>O atendimento das solicitações de privacidade será gratuito. O titular também poderá peticionar perante a Autoridade Nacional de Proteção de Dados — ANPD e recorrer aos órgãos de defesa do consumidor, quando aplicável.</p>
+
+      <h2>15. Alterações desta Política</h2>
+      <p>A IA4Tube pode atualizar esta Política para refletir mudanças no serviço, nos fornecedores, na segurança ou nas obrigações aplicáveis. Alterações relevantes serão comunicadas por e-mail e por aviso no aplicativo. Quando a legislação exigir consentimento, o tratamento correspondente dependerá do procedimento aplicável.</p>
+
+      <h2>16. Contato</h2>
+      <p>Dúvidas e solicitações podem ser encaminhadas para <a href="mailto:detalhecamiseteria@gmail.com">detalhecamiseteria@gmail.com</a>.</p>
+
+      <nav aria-label="Documentos jurídicos relacionados">
+        <a href="/politica-de-privacidade" aria-current="page">Política de Privacidade</a>
         <a href="/termos-de-uso">Termos de Uso</a>
         <a href="/exclusao-de-dados">Exclusão de Dados</a>
       </nav>
 
       <footer>
-        <strong>Status:</strong> texto técnico público, rastreável e responsivo; conteúdo jurídico final ainda não aprovado.
+        <strong>Vigente desde:</strong> 2 de setembro de 2026.
       </footer>
     </article>
   </main>

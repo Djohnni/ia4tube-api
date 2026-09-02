@@ -4,11 +4,9 @@ const fs = require("fs");
 const path = require("path");
 
 const DEFAULT_TEMPLATES_DIR = path.join(__dirname, "templates");
-const REQUIRED_DRAFT_MARKERS = Object.freeze([
-  "RASCUNHO TÉCNICO PÚBLICO",
-  "NÃO APROVADO JURIDICAMENTE",
-  "PUBLIC TECHNICAL DRAFT",
-  "NOT LEGALLY APPROVED"
+const REQUIRED_FINAL_MARKERS = Object.freeze([
+  "Vigente desde:",
+  "Última atualização:"
 ]);
 
 const LEGAL_PAGE_DEFINITIONS = Object.freeze([
@@ -57,8 +55,10 @@ function loadLegalTemplates(templatesDir = DEFAULT_TEMPLATES_DIR) {
     }
 
     const html = fs.readFileSync(templatePath, "utf8");
-    if (REQUIRED_DRAFT_MARKERS.some((marker) => !html.includes(marker))) {
-      throw new Error(`Template legal sem aviso de rascunho: ${definition.id}`);
+    if (REQUIRED_FINAL_MARKERS.some((marker) => !html.includes(marker))) {
+      throw new Error(
+        `Template legal sem marcadores de vigencia: ${definition.id}`
+      );
     }
     templates[definition.id] = html;
   }
@@ -67,11 +67,11 @@ function loadLegalTemplates(templatesDir = DEFAULT_TEMPLATES_DIR) {
 }
 
 function applyLegalPageHeaders(res) {
-  res.setHeader("Cache-Control", "public, max-age=300");
-  res.setHeader("Content-Language", "pt-BR, en");
+  res.setHeader("Cache-Control", "no-store");
+  res.setHeader("Content-Language", "pt-BR");
   res.setHeader("Referrer-Policy", "no-referrer");
   res.setHeader("X-Content-Type-Options", "nosniff");
-  res.setHeader("X-Robots-Tag", "index, follow");
+  res.setHeader("X-Robots-Tag", "index,follow");
   res.setHeader(
     "Content-Security-Policy",
     "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
@@ -113,7 +113,7 @@ function createLegalPagesRouter(options = {}) {
 module.exports = {
   DEFAULT_TEMPLATES_DIR,
   LEGAL_PAGE_DEFINITIONS,
-  REQUIRED_DRAFT_MARKERS,
+  REQUIRED_FINAL_MARKERS,
   applyLegalPageHeaders,
   createLegalPageHandlers,
   createLegalPagesRouter,
