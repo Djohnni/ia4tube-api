@@ -25,6 +25,7 @@ const INSTAGRAM_PUBLICATION_TIMEOUT_MS = 10000;
 const INSTAGRAM_PUBLICATION_MAX_RESPONSE_BYTES = 64 * 1024;
 const INSTAGRAM_PUBLICATION_POLL_ATTEMPTS = 8;
 const INSTAGRAM_PUBLICATION_POLL_INTERVAL_MS = 1500;
+const INSTAGRAM_PUBLICATION_RECONCILIATION_LOOKBACK_MS = 5 * 60 * 1000;
 const INSTAGRAM_MEDIA_ID_PATTERN = /^[0-9]{5,64}$/;
 const INSTAGRAM_GATE4_CAPTION = [
   "IA4Tube",
@@ -250,21 +251,24 @@ function parseJsonRecord(bytes) {
   return decoded;
 }
 
-function requireConnection(connection, context, expectedUsername) {
+function requireConnection(connection, context, authorizeConnection) {
   if (
     !connection ||
     connection.companyId !== context.companyId ||
     connection.provider !== INSTAGRAM_PROVIDER ||
     connection.state !== "connected" ||
     connection.health !== "healthy" ||
-    connection.account?.username !== expectedUsername ||
-    connection.account?.accountType !== "business" ||
+    typeof connection.account?.username !== "string" ||
+    connection.account.username.length < 1 ||
+    connection.account.username.length > 200 ||
+    !["business", "creator"].includes(connection.account?.accountType) ||
     !INSTAGRAM_MEDIA_ID_PATTERN.test(connection.account?.externalId || "") ||
     typeof connection.activeCredentialId !== "string" ||
     !Array.isArray(connection.grantedScopes) ||
     INSTAGRAM_OAUTH_SCOPES.some(
       (scope) => !connection.grantedScopes.includes(scope)
-    )
+    ) ||
+    authorizeConnection(connection, context) !== true
   ) {
     connectorFail("credential_unavailable");
   }
@@ -304,6 +308,35 @@ function createInstagramPublicationConnector(options = {}) {
     CONTROLLED_GATE4_COMPANY_ID;
   const expectedUserId = options.expectedUserId || CONTROLLED_GATE4_USER_ID;
   const expectedUsername = options.expectedUsername || "ia4tube_empresas";
+  const authorizeContext = options.authorizeContext || ((context) => (
+    context.companyId === expectedCompanyId && context.userId === expectedUserId
+  ));
+  const authorizeConnection = options.authorizeConnection || ((connection) => (
+    connection.account?.username === expectedUsername &&
+    connection.account?.accountType === "business"
+  ));
+  const authorizePublicationRequest = options.authorizePublicationRequest ||
+    ((input) => (
+      isControlledGate4MediaReference(input.image.mediaId) &&
+      input.caption === INSTAGRAM_GATE4_CAPTION
+    ));
+  const authorizePublication = options.authorizePublication || ((input) => (
+    isControlledGate4MediaReference(input.image.mediaId) &&
+    input.caption === INSTAGRAM_GATE4_CAPTION &&
+    input.image.mediaId === controlledGate4MediaReference(
+      input.connection.account
+    )
+  ));
+  const authorizePublishedCandidate = options.authorizePublishedCandidate ||
+    (() => true);
+  const allowOperationReferenceReconciliation =
+    options.allowOperationReferenceReconciliation === undefined
+      ? true
+      : options.allowOperationReferenceReconciliation;
+  const reconciliationLookbackMs =
+    options.reconciliationLookbackMs === undefined
+      ? INSTAGRAM_PUBLICATION_RECONCILIATION_LOOKBACK_MS
+      : options.reconciliationLookbackMs;
   if (
     !config ||
     config.provider !== INSTAGRAM_PROVIDER ||
@@ -317,6 +350,15 @@ function createInstagramPublicationConnector(options = {}) {
     typeof setTimer !== "function" ||
     typeof clearTimer !== "function" ||
     typeof sleep !== "function" ||
+    typeof authorizeContext !== "function" ||
+    typeof authorizeConnection !== "function" ||
+    typeof authorizePublicationRequest !== "function" ||
+    typeof authorizePublication !== "function" ||
+    typeof authorizePublishedCandidate !== "function" ||
+    typeof allowOperationReferenceReconciliation !== "boolean" ||
+    !Number.isSafeInteger(reconciliationLookbackMs) ||
+    reconciliationLookbackMs < 0 ||
+    reconciliationLookbackMs > INSTAGRAM_PUBLICATION_RECONCILIATION_LOOKBACK_MS ||
     !Number.isSafeInteger(timeoutMs) ||
     timeoutMs < 1 ||
     timeoutMs > 30000 ||
@@ -335,10 +377,7 @@ function createInstagramPublicationConnector(options = {}) {
       provider: INSTAGRAM_PROVIDER,
       environment: "staging"
     });
-    if (
-      context.companyId !== expectedCompanyId ||
-      context.userId !== expectedUserId
-    ) {
+    if (authorizeContext(context) !== true) {
       connectorFail("external_capability_disabled");
     }
     return context;
@@ -449,7 +488,7 @@ function createInstagramPublicationConnector(options = {}) {
     const connection = requireConnection(
       await store.scope(context).getConnectionDetails(connectionId),
       context,
-      expectedUsername
+      authorizeConnection
     );
     if (connection.id !== connectionId) connectorFail("resource_unavailable");
     return credentials.withDecryptedCredential({
@@ -513,7 +552,7 @@ function createInstagramPublicationConnector(options = {}) {
     if (!Array.isArray(result.data) || result.data.length > 25) return null;
     const observedAtMs = Number(clock());
     if (!Number.isFinite(observedAtMs)) return null;
-    const earliest = publication.createdAt.getTime() - 5 * 60 * 1000;
+    const earliest = publication.createdAt.getTime() - reconciliationLookbackMs;
     const latest = observedAtMs + 5 * 60 * 1000;
     const matches = [];
     for (const item of result.data) {
@@ -534,11 +573,23 @@ function createInstagramPublicationConnector(options = {}) {
         continue;
       }
       try {
-        matches.push(Object.freeze({
+        const candidate = Object.freeze({
+          caption: item.caption,
           mediaId: numericMediaId(item.id),
           permalink: canonicalPermalink(item.permalink),
           publishedAtMs: timestamp
-        }));
+        });
+        let authorized = false;
+        try {
+          authorized = authorizePublishedCandidate(Object.freeze({
+            connection,
+            publication,
+            candidate
+          })) === true;
+        } catch {
+          authorized = false;
+        }
+        if (authorized) matches.push(candidate);
       } catch {
         // A malformed candidate cannot confirm an external publication.
       }
@@ -560,9 +611,16 @@ function createInstagramPublicationConnector(options = {}) {
     const connectionId = requireUuid(source.connectionId);
     requireUuid(source.idempotencyKey);
     if (
-      !isControlledGate4MediaReference(image.mediaId) ||
       image.mimeType !== "image/jpeg" ||
-      source.caption !== INSTAGRAM_GATE4_CAPTION
+      !(source.caption === null || (
+        typeof source.caption === "string" &&
+        source.caption.length <= 2200 &&
+        !/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(source.caption)
+      )) ||
+      authorizePublicationRequest(Object.freeze({
+        image: Object.freeze({ ...image }),
+        caption: source.caption
+      })) !== true
     ) {
       connectorFail("connector_contract_invalid");
     }
@@ -572,6 +630,8 @@ function createInstagramPublicationConnector(options = {}) {
       async (connection, accessToken) => {
         const owned = await media.resolveOwnedJpeg(context, image.mediaId);
         if (
+          !owned ||
+          typeof owned !== "object" ||
           owned.companyId !== context.companyId ||
           owned.mediaId !== image.mediaId ||
           owned.mimeType !== "image/jpeg" ||
@@ -580,9 +640,13 @@ function createInstagramPublicationConnector(options = {}) {
         ) {
           connectorFail("resource_unavailable");
         }
-        if (
-          image.mediaId !== controlledGate4MediaReference(connection.account)
-        ) {
+        if (authorizePublication(Object.freeze({
+          context,
+          connection,
+          image: Object.freeze({ ...image }),
+          caption: source.caption,
+          owned
+        })) !== true) {
           connectorFail("resource_unavailable");
         }
         const body = new URLSearchParams();
@@ -728,6 +792,15 @@ function createInstagramPublicationConnector(options = {}) {
     ) {
       connectorFail("resource_unavailable");
     }
+    if (
+      /^igo:[0-9a-f]{32}$/.test(providerReference) &&
+      !allowOperationReferenceReconciliation
+    ) {
+      return Object.freeze({
+        outcome: "provider_confirming",
+        reconciliationReference: providerReference
+      });
+    }
     return withConnectionCredential(
       context,
       publication.connectionId,
@@ -815,7 +888,8 @@ function createInstagramPublicationConnector(options = {}) {
               });
             }
           } else if (container?.[1] === "submitted" ||
-                     /^igo:[0-9a-f]{32}$/.test(providerReference)) {
+                     (allowOperationReferenceReconciliation &&
+                      /^igo:[0-9a-f]{32}$/.test(providerReference))) {
             confirmed = await findPublishedByCaption(
               accessToken,
               connection,

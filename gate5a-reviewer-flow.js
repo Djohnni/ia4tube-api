@@ -13,6 +13,8 @@
   const PRODUCTION_API_ORIGIN = "https://ia4tube-api.onrender.com";
   const LOCAL_API_ORIGIN = "http://localhost:3000";
   const SANDBOX_PREFIX = "/v1/social/reviewer-sandbox";
+  const REAL_REVIEWER_PREFIX = "/v1/social/reviewer";
+  const REAL_REVIEWER_PATH = "/reviewer";
   const OAUTH_RETURN_PREFIX = "/v1/social/oauth/return";
   const CANONICAL_LOGIN_HANDOFF_KEY = "ia4tube_gate5a_login_handoff_v1";
   const CANONICAL_LOGIN_QUERY_KEY = "gate5a_review_login";
@@ -21,6 +23,7 @@
     `/app.html?${CANONICAL_LOGIN_QUERY_KEY}=${CANONICAL_LOGIN_QUERY_VALUE}`;
   const REVIEWER_RETURN_PATH =
     `/app.html?review=${REVIEW_QUERY_VALUE}&stage=overview`;
+  const REAL_REVIEWER_RETURN_PATH = REAL_REVIEWER_PATH;
   const CANONICAL_LOGIN_HANDOFF_TTL_MS = 15 * 60 * 1000;
   const RETURN_REFERENCE_PATTERN = /^[A-Za-z0-9_-]{32}$/;
   const CONNECTION_ID_PATTERN =
@@ -174,10 +177,19 @@
     return new URLSearchParams(source.startsWith("?") ? source.slice(1) : source);
   }
 
-  function isReviewerMode(search, hostname = STAGING_HOSTNAME) {
+  function isReviewerMode(
+    search,
+    hostname = STAGING_HOSTNAME,
+    pathname = "/app.html"
+  ) {
     if (!reviewerHostnameAllowed(hostname)) return false;
+    if (pathname !== "/app.html") return false;
     const params = parseSearch(search);
     return params.get(REVIEW_QUERY_KEY) === REVIEW_QUERY_VALUE;
+  }
+
+  function isRealReviewerMode(pathname, hostname = STAGING_HOSTNAME) {
+    return reviewerHostnameAllowed(hostname) && pathname === REAL_REVIEWER_PATH;
   }
 
   function removeCanonicalLoginHandoff(storage) {
@@ -243,10 +255,21 @@
   }
 
   function beginCanonicalLoginHandoff(target, now = Date.now()) {
+    const realReviewer = isRealReviewerMode(
+      target?.location?.pathname,
+      target?.location?.hostname
+    );
     if (
       !target?.location ||
       !reviewerHostnameAllowed(target.location.hostname) ||
-      !isReviewerMode(target.location.search, target.location.hostname) ||
+      !(
+        realReviewer ||
+        isReviewerMode(
+          target.location.search,
+          target.location.hostname,
+          target.location.pathname
+        )
+      ) ||
       typeof target.location.assign !== "function"
     ) {
       throw Object.assign(new Error("Entrada canônica indisponível nesta rota."), {
@@ -259,7 +282,12 @@
         code: "reviewer_canonical_login_clock_invalid"
       });
     }
-    const receipt = JSON.stringify({ version: 1, issuedAt });
+    const returnPath = realReviewer
+      ? REAL_REVIEWER_RETURN_PATH
+      : REVIEWER_RETURN_PATH;
+    const receipt = JSON.stringify(realReviewer
+      ? { version: 2, issuedAt, returnPath }
+      : { version: 1, issuedAt });
     try {
       target.sessionStorage.setItem(CANONICAL_LOGIN_HANDOFF_KEY, receipt);
     } catch (_error) {
@@ -271,7 +299,7 @@
     return Object.freeze({
       active: true,
       loginPath: CANONICAL_LOGIN_PATH,
-      returnPath: REVIEWER_RETURN_PATH
+      returnPath
     });
   }
 
@@ -298,8 +326,12 @@
     }
     const keys = isPlainObject(parsed) ? Object.keys(parsed).sort() : [];
     const current = Number(now);
-    const valid = keys.length === 2 && keys[0] === "issuedAt" &&
-      keys[1] === "version" && parsed.version === 1 &&
+    const legacyReceipt = keys.length === 2 && keys[0] === "issuedAt" &&
+      keys[1] === "version" && parsed.version === 1;
+    const realReceipt = keys.length === 3 && keys[0] === "issuedAt" &&
+      keys[1] === "returnPath" && keys[2] === "version" &&
+      parsed.version === 2 && parsed.returnPath === REAL_REVIEWER_RETURN_PATH;
+    const valid = (legacyReceipt || realReceipt) &&
       Number.isSafeInteger(parsed.issuedAt) &&
       Number.isSafeInteger(current) && current >= parsed.issuedAt &&
       current - parsed.issuedAt <= CANONICAL_LOGIN_HANDOFF_TTL_MS;
@@ -307,7 +339,10 @@
       removeCanonicalLoginHandoff(target.sessionStorage);
       return closed;
     }
-    return Object.freeze({ active: true, returnPath: REVIEWER_RETURN_PATH });
+    return Object.freeze({
+      active: true,
+      returnPath: realReceipt ? REAL_REVIEWER_RETURN_PATH : REVIEWER_RETURN_PATH
+    });
   }
 
   function sanitizeCanonicalLoginHandoffUrl(target) {
@@ -334,7 +369,7 @@
       return false;
     }
     removeCanonicalLoginHandoff(target.sessionStorage);
-    target.location.assign(REVIEWER_RETURN_PATH);
+    target.location.assign(handoff.returnPath);
     return true;
   }
 
@@ -388,21 +423,107 @@
     });
   }
 
+  function sanitizeRealReviewerUrl(value) {
+    let parsed;
+    try {
+      parsed = new URL(String(value || ""), "https://reviewer.invalid/reviewer");
+    } catch (_error) {
+      parsed = new URL("https://reviewer.invalid/reviewer");
+    }
+    const active = parsed.pathname === REAL_REVIEWER_PATH;
+    const referenceInput = parsed.searchParams.get("return_ref") || "";
+    const returnReference = RETURN_REFERENCE_PATTERN.test(referenceInput)
+      ? referenceInput
+      : null;
+    const callbackObserved = Boolean(returnReference) ||
+      CALLBACK_SENSITIVE_KEYS.some((key) => parsed.searchParams.has(key)) ||
+      /(?:^|[#?&])(code|state|error|access_token|id_token)=/i.test(parsed.hash);
+    return Object.freeze({
+      active,
+      callbackObserved,
+      changed: active && `${parsed.pathname}${parsed.search}${parsed.hash}` !==
+        REAL_REVIEWER_PATH,
+      returnReference,
+      stage: callbackObserved ? "oauth-return" : "overview",
+      path: active ? REAL_REVIEWER_PATH : `${parsed.pathname}${parsed.search}${parsed.hash}`
+    });
+  }
+
   function blockedNetworkError() {
-    const error = new Error("A revisão Gate 5A bloqueou uma chamada fora da sandbox.");
+    const error = new Error("A superfície de revisão bloqueou uma chamada não autorizada.");
     error.code = "gate5a_reviewer_network_blocked";
     return error;
+  }
+
+  function realReviewerRequestAllowed(requestUrl, method) {
+    if (requestUrl.search || requestUrl.hash) return false;
+    if (
+      method === "POST" &&
+      requestUrl.pathname === "/v1/social/connections/instagram/authorization"
+    ) return true;
+    if (
+      method === "GET" &&
+      requestUrl.pathname === "/v1/social/connections/instagram"
+    ) return true;
+    if (
+      ["GET", "DELETE"].includes(method) &&
+      /^\/v1\/social\/connections\/instagram\/[0-9a-f-]{36}(?:\/(?:authorization|health))?$/i
+        .test(requestUrl.pathname)
+    ) return true;
+    if (
+      method === "GET" &&
+      requestUrl.pathname === `${REAL_REVIEWER_PREFIX}/media`
+    ) return true;
+    if (
+      ["GET", "POST"].includes(method) &&
+      requestUrl.pathname === `${REAL_REVIEWER_PREFIX}/publications`
+    ) return true;
+    if (
+      method === "GET" &&
+      new RegExp(
+        `^${REAL_REVIEWER_PREFIX}/publications/[0-9a-f-]{36}$`,
+        "i"
+      ).test(requestUrl.pathname)
+    ) return true;
+    if (
+      method === "POST" &&
+      new RegExp(
+        `^${REAL_REVIEWER_PREFIX}/publications/[0-9a-f-]{36}/reconcile$`,
+        "i"
+      ).test(requestUrl.pathname)
+    ) return true;
+    const returnReference = requestUrl.pathname.startsWith(`${OAUTH_RETURN_PREFIX}/`)
+      ? requestUrl.pathname.slice(OAUTH_RETURN_PREFIX.length + 1)
+      : "";
+    return method === "GET" && RETURN_REFERENCE_PATTERN.test(returnReference);
   }
 
   function installEarlyGuard(target) {
     if (!target || !target.location) {
       return Object.freeze({ active: false, reason: "window_unavailable" });
     }
-    const active = isReviewerMode(target.location.search, target.location.hostname);
+    const realActive = isRealReviewerMode(
+      target.location.pathname,
+      target.location.hostname
+    );
+    const syntheticActive = isReviewerMode(
+      target.location.search,
+      target.location.hostname,
+      target.location.pathname
+    );
+    const active = realActive || syntheticActive;
     target.IA4_GATE5A_REVIEWER_ACTIVE = active;
+    target.IA4_REAL_REVIEWER_ACTIVE = realActive;
+    target.IA4_REVIEWER_MODE = realActive
+      ? "real"
+      : syntheticActive
+        ? "sandbox"
+        : null;
     if (!active) return Object.freeze({ active: false, reason: "route_inactive" });
 
-    const sanitized = sanitizeCallbackUrl(target.location.href);
+    const sanitized = realActive
+      ? sanitizeRealReviewerUrl(target.location.href)
+      : sanitizeCallbackUrl(target.location.href);
     if (sanitized.changed && target.history?.replaceState) {
       target.history.replaceState(
         Object.freeze({ gate5aReviewer: true }),
@@ -426,17 +547,22 @@
         return Promise.reject(blockedNetworkError());
       }
       const method = String(init?.method || input?.method || "GET").toUpperCase();
-      const sandboxAllowed = requestUrl.pathname === SANDBOX_PREFIX ||
-        requestUrl.pathname.startsWith(`${SANDBOX_PREFIX}/`);
+      const sandboxAllowed = !realActive && (
+        requestUrl.pathname === SANDBOX_PREFIX ||
+        requestUrl.pathname.startsWith(`${SANDBOX_PREFIX}/`)
+      );
+      const realAllowed = realActive && realReviewerRequestAllowed(
+        requestUrl,
+        method
+      );
       const returnReference = requestUrl.pathname.startsWith(`${OAUTH_RETURN_PREFIX}/`)
         ? requestUrl.pathname.slice(OAUTH_RETURN_PREFIX.length + 1)
         : "";
-      const visualReturnAllowed = method === "GET" &&
+      const visualReturnAllowed = !realActive && method === "GET" &&
         RETURN_REFERENCE_PATTERN.test(returnReference) &&
-        requestUrl.search === "" &&
-        requestUrl.hash === "";
+        requestUrl.search === "" && requestUrl.hash === "";
       const allowed = requestUrl.origin === allowedApiOrigin &&
-        (sandboxAllowed || visualReturnAllowed);
+        (sandboxAllowed || visualReturnAllowed || realAllowed);
       if (!allowed || !originalFetch) return Promise.reject(blockedNetworkError());
       return originalFetch(requestUrl.toString(), init);
     };
@@ -457,6 +583,7 @@
 
     return Object.freeze({
       active: true,
+      mode: realActive ? "real" : "sandbox",
       callbackObserved: sanitized.callbackObserved,
       returnReference: sanitized.returnReference,
       stage: sanitized.stage,
@@ -1238,6 +1365,503 @@
     return Object.freeze({ getStatus });
   }
 
+  function isOfficialInstagramAuthorizationUrl(value) {
+    let parsed;
+    try {
+      parsed = new URL(String(value || ""));
+    } catch (_error) {
+      return false;
+    }
+    const rawKeys = [...parsed.searchParams.keys()];
+    const keys = [...rawKeys].sort();
+    const scopes = String(parsed.searchParams.get("scope") || "")
+      .split(",")
+      .sort();
+    return parsed.protocol === "https:" &&
+      parsed.hostname === "www.instagram.com" &&
+      parsed.pathname === "/oauth/authorize" &&
+      !parsed.port && !parsed.username && !parsed.password && !parsed.hash &&
+      rawKeys.length === 6 &&
+      keys.join(",") ===
+        "client_id,enable_fb_login,redirect_uri,response_type,scope,state" &&
+      /^[0-9]{5,32}$/.test(parsed.searchParams.get("client_id") || "") &&
+      parsed.searchParams.get("enable_fb_login") === "0" &&
+      parsed.searchParams.get("redirect_uri") ===
+        `${STAGING_API_ORIGIN}/v1/social/oauth/callback` &&
+      parsed.searchParams.get("response_type") === "code" &&
+      scopes.join(",") ===
+        "instagram_business_basic,instagram_business_content_publish" &&
+      /^[A-Za-z0-9._~-]{32,2048}$/.test(
+        parsed.searchParams.get("state") || ""
+      );
+  }
+
+  function createHttpRealReviewerClient(options = {}) {
+    const apiBase = safeString(options.apiBase, "", 300);
+    const fetchImpl = options.fetchImpl;
+    const tokenProvider = typeof options.tokenProvider === "function"
+      ? options.tokenProvider
+      : () => "";
+    if (![LOCAL_API_ORIGIN, STAGING_API_ORIGIN].includes(apiBase)) {
+      throw Object.assign(new Error("Origem do revisor real recusada."), {
+        code: "real_reviewer_origin_forbidden"
+      });
+    }
+    if (typeof fetchImpl !== "function") {
+      throw Object.assign(new Error("Transporte do revisor real indisponível."), {
+        code: "real_reviewer_transport_unavailable"
+      });
+    }
+
+    async function request(route, method = "GET", body) {
+      const suffix = String(route || "");
+      if (
+        !suffix.startsWith("/") ||
+        suffix.includes("..") ||
+        /[?#\u0000-\u001f\u007f]/.test(suffix)
+      ) {
+        throw Object.assign(new Error("Rota do revisor real recusada."), {
+          code: "real_reviewer_route_forbidden"
+        });
+      }
+      const token = safeString(tokenProvider(), "", 8192);
+      if (!token) {
+        throw Object.assign(new Error("Entre pela IA4Tube para continuar."), {
+          code: "reviewer_authentication_required"
+        });
+      }
+      const headers = {
+        Accept: "application/json",
+        Authorization: `Bearer ${token}`
+      };
+      const init = { method, headers, cache: "no-store" };
+      if (body !== undefined) {
+        headers["Content-Type"] = "application/json";
+        init.body = JSON.stringify(body);
+      }
+      const response = await fetchImpl(`${apiBase}${suffix}`, init);
+      const payload = await response.json().catch(() => null);
+      if (response.status === 401) {
+        throw Object.assign(new Error("Sua sessão expirou. Entre novamente."), {
+          code: "reviewer_authentication_required"
+        });
+      }
+      if (!response.ok || !isPlainObject(payload) || payload.ok !== true) {
+        throw Object.assign(new Error(
+          response.status === 503
+            ? "Esta ação real permanece bloqueada pelo gate de segurança."
+            : "A operação real foi recusada com segurança."
+        ), {
+          code: safeString(payload?.code, "real_reviewer_request_failed", 100)
+        });
+      }
+      return payload;
+    }
+
+    return Object.freeze({
+      connection: () => request("/v1/social/connections/instagram"),
+      authorize: (purpose) => request(
+        "/v1/social/connections/instagram/authorization",
+        "POST",
+        { purpose }
+      ),
+      visualReturn: (reference) => request(
+        `${OAUTH_RETURN_PREFIX}/${encodeURIComponent(reference)}`
+      ),
+      media: () => request(`${REAL_REVIEWER_PREFIX}/media`),
+      publish: (mediaId, requestId) => request(
+        `${REAL_REVIEWER_PREFIX}/publications`,
+        "POST",
+        { mediaId, clientRequestId: requestId }
+      ),
+      publications: () => request(`${REAL_REVIEWER_PREFIX}/publications`),
+      publication: (publicationId) => request(
+        `${REAL_REVIEWER_PREFIX}/publications/${encodeURIComponent(publicationId)}`
+      ),
+      reconcile: (publicationId) => request(
+        `${REAL_REVIEWER_PREFIX}/publications/${encodeURIComponent(publicationId)}/reconcile`,
+        "POST",
+        {}
+      ),
+      disconnect: (connectionId) => request(
+        `/v1/social/connections/instagram/${encodeURIComponent(connectionId)}`,
+        "DELETE"
+      )
+    });
+  }
+
+  function realReviewerTemplate() {
+    return `
+      <div class="gate5aReviewerShell">
+        <header class="gate5aReviewerHeader">
+          <div><div class="gate5aEyebrow">Revisão oficial do Instagram</div><h1>Publicação manual com a IA4Tube</h1><p>Jornada real, autenticada e vinculada à empresa da sessão.</p></div>
+          <div class="gate5aEnvironmentBadge"><span></span> Staging · integração real</div>
+        </header>
+        <div class="gate5aSafetyNotice" role="note"><strong>Conexão segura:</strong> sua senha é digitada somente no ambiente oficial do Instagram. A IA4Tube nunca recebe sua senha, código OAuth ou token no navegador. Conectar não publica nada.</div>
+        <div class="gate5aError" data-real-error role="alert" hidden></div>
+        <div class="gate5aAuthGate" data-real-auth-gate hidden><span class="gate5aStepNumber">↗</span><div><h2>Entre para iniciar a revisão</h2><p>Use o login normal da IA4Tube. Depois do acesso, você voltará automaticamente a esta mesma superfície real.</p></div><button type="button" class="gate5aPrimary" data-real-action="login">Entrar pela IA4Tube</button></div>
+        <div class="gate5aReviewerLayout" data-real-layout>
+          <aside class="gate5aReviewerNav" aria-label="Etapas da revisão real">
+            <button type="button" data-real-nav="overview">1. Visão geral</button>
+            <button type="button" data-real-nav="authorization">2. Conectar Instagram</button>
+            <button type="button" data-real-nav="oauth-return">3. Retorno seguro</button>
+            <button type="button" data-real-nav="connection">4. Conta conectada</button>
+            <button type="button" data-real-nav="media">5. Selecionar JPEG</button>
+            <button type="button" data-real-nav="publication">6. Publicar e confirmar</button>
+            <button type="button" data-real-nav="history">7. Histórico e detalhes</button>
+            <button type="button" data-real-nav="data">8. Desconectar</button>
+            <div class="gate5aMiniStatus"><span>Estado da conexão</span><strong data-real-field="connectionStatus">Não conectada</strong><small>Modo manual · sem agendamento</small></div>
+          </aside>
+          <div class="gate5aReviewerContent" aria-live="polite">
+            <section data-real-screen="overview"><div class="gate5aScreenHeading"><span class="gate5aStepNumber">01</span><div><h2>Fluxo real do revisor</h2><p>Conexão oficial, JPEG da empresa, publicação explícita e prova canônica.</p></div></div><div class="gate5aCompanyConfirmation"><span>✓ Empresa derivada da sessão</span><strong data-real-field="companyLabel">Empresa autenticada</strong><small>Nenhum company_id é aceito do navegador.</small></div><div class="gate5aFeatureGrid"><article><span>🔐</span><h3>OAuth oficial</h3><p>Somente as permissões básica e de publicação aprovadas.</p></article><article><span>🖼️</span><h3>JPEG próprio</h3><p>Conteúdo validado novamente no servidor antes do envio.</p></article><article><span>✅</span><h3>Prova real</h3><p>Publicado somente após Media ID, referência, horário e permalink.</p></article></div><div class="gate5aActions"><button type="button" class="gate5aPrimary" data-real-action="go-connect">Começar revisão</button></div></section>
+            <section data-real-screen="authorization" hidden><div class="gate5aScreenHeading"><span class="gate5aStepNumber">02</span><div><h2>Conectar Instagram</h2><p>A autorização começa somente após seu clique.</p></div></div><div class="gate5aSecurityCopy"><strong>Antes de continuar</strong><ul><li>A senha permanece no ambiente oficial do Instagram.</li><li>Serão solicitadas apenas instagram_business_basic e instagram_business_content_publish.</li><li>Nada é publicado durante a conexão.</li></ul></div><div class="gate5aActions"><button type="button" class="gate5aPrimary" data-real-action="authorize">Conectar Instagram</button></div></section>
+            <section data-real-screen="oauth-return" hidden><div class="gate5aScreenHeading"><span class="gate5aStepNumber">03</span><div><h2>Confirmando sua conta</h2><p>O retorno visual usa apenas uma referência opaca e remove os parâmetros da URL.</p></div></div><ol class="gate5aProgressList"><li class="done"><span>1</span><div><strong>Retorno recebido</strong><small>Código e state não ficam nesta página.</small></div></li><li class="done"><span>2</span><div><strong>URL higienizada</strong><small>Nenhum token é devolvido ao navegador.</small></div></li><li><span>3</span><div><strong data-real-field="returnStatus">Confirmando sua conta</strong><small data-real-field="returnMessage">Aguarde a leitura do estado seguro.</small></div></li></ol><div class="gate5aActions"><button type="button" class="gate5aPrimary" data-real-action="refresh">Continuar</button></div></section>
+            <section data-real-screen="connection" hidden><div class="gate5aScreenHeading"><span class="gate5aStepNumber">04</span><div><h2>Conta profissional</h2><p>Business ou Creator, vinculada à empresa autenticada.</p></div></div><div class="gate5aConnectionCard"><div class="gate5aAvatar">IG</div><div><span>Conta conectada</span><h3 data-real-field="username">—</h3><p data-real-field="accountType">—</p></div><strong class="gate5aStatusGood" data-real-field="connectionBadge">Aguardando</strong></div><div class="gate5aScopeGrid"><div><span>instagram_business_basic</span><strong>Necessária</strong></div><div><span>instagram_business_content_publish</span><strong>Necessária</strong></div></div><div class="gate5aActions"><button type="button" class="gate5aPrimary" data-real-action="go-media">Selecionar JPEG</button></div></section>
+            <section data-real-screen="media" hidden><div class="gate5aScreenHeading"><span class="gate5aStepNumber">05</span><div><h2>Revisar imagem e legenda</h2><p>A lista contém somente JPEGs autorizados da empresa da sessão.</p></div></div><label class="gate5aCaption"><span>Conteúdo autorizado</span><select data-real-media-select><option value="">Selecione um JPEG</option></select></label><div class="gate5aMediaReview" data-real-media-review hidden><img data-real-field-src="mediaAsset" alt="Prévia do JPEG autorizado"><div><span class="gate5aSyntheticTag">Conteúdo real da empresa</span><h3 data-real-field="mediaFile">preview_ia4tube.jpg</h3><p><strong>Formato:</strong> image/jpeg · <span data-real-field="mediaDimensions">—</span></p><div class="gate5aCaption"><span>Legenda final com marcador único de confirmação</span><p data-real-field="caption">—</p></div><ul><li>Proprietário: empresa autenticada</li><li>Modo: publicação manual</li><li>Envio: somente após confirmação explícita</li></ul></div></div><p data-real-no-media hidden>Nenhum JPEG elegível está disponível para esta empresa.</p><div class="gate5aActions"><button type="button" class="gate5aPrimary" data-real-action="publish" disabled>Publicar no Instagram</button></div></section>
+            <section data-real-screen="publication" hidden><div class="gate5aScreenHeading"><span class="gate5aStepNumber">06</span><div><h2>Publicação manual</h2><p>Enviando e Confirmando ainda não significam Publicado.</p></div></div><div class="gate5aPublicationState"><span>Estado atual</span><strong data-real-field="publicationState">Aguardando envio</strong><small data-real-field="publicationHint">Um clique explícito inicia a operação.</small></div><ol class="gate5aPublishTimeline"><li data-real-publish-step="sending"><span></span><div><strong>Enviando</strong><small>Uma única submissão idempotente.</small></div></li><li data-real-publish-step="provider_confirming"><span></span><div><strong>Confirmando</strong><small>Ainda não tratado como publicado.</small></div></li><li data-real-publish-step="published"><span></span><div><strong>Publicado</strong><small>Somente com prova persistida do provider.</small></div></li></ol><div class="gate5aPublishedProof" data-real-proof hidden><h3>Publicado no Instagram</h3><div class="gate5aProofGrid"><div><span>Media ID</span><strong data-real-field="mediaId">—</strong></div><div><span>Horário</span><strong data-real-field="publishedAt">—</strong></div><div><span>Referência interna</span><strong data-real-field="reference">—</strong></div><div><span>Permalink</span><strong data-real-field="permalink">—</strong></div></div></div><div class="gate5aActions"><button type="button" class="gate5aPrimary" data-real-action="reconcile" hidden>Confirmar estado no Instagram</button><button type="button" class="gate5aSecondary" data-real-action="history">Ver histórico</button></div></section>
+            <section data-real-screen="history" hidden><div class="gate5aScreenHeading"><span class="gate5aStepNumber">07</span><div><h2>Histórico canônico</h2><p>O registro social persiste após recarregar a página ou reiniciar o serviço.</p></div></div><div class="gate5aHistoryList" data-real-history></div><div class="gate5aPublishedProof" data-real-detail hidden></div><div class="gate5aActions"><button type="button" class="gate5aPrimary" data-real-action="disconnect-screen">Revisar desconexão</button></div></section>
+            <section data-real-screen="data" hidden><div class="gate5aScreenHeading"><span class="gate5aStepNumber">08</span><div><h2>Desconectar Instagram</h2><p>A desconexão é separada da publicação e exige confirmação humana.</p></div></div><div class="gate5aDataGrid"><article><h3>Conta atual</h3><p data-real-field="disconnectAccount">Nenhuma conta conectada.</p><button type="button" class="gate5aDanger" data-real-action="disconnect">Desconectar conta</button></article><article><h3>O que permanece</h3><p>O histórico canônico da publicação continua disponível conforme a política aplicável.</p></article></div></section>
+          </div>
+        </div>
+        <div class="gate5aBusy" data-real-busy hidden><span></span><strong data-real-busy-label>Atualizando revisão real…</strong></div>
+      </div>`;
+  }
+
+  function mountRealReviewerApp(root, options = {}) {
+    const targetWindow = options.window || (typeof window === "object" ? window : null);
+    if (!root || !targetWindow || targetWindow.IA4_REAL_REVIEWER_ACTIVE !== true) {
+      return null;
+    }
+    targetWindow.document.body.classList.add("gate5a-reviewer-active");
+    root.hidden = false;
+    root.innerHTML = realReviewerTemplate();
+    let token = "";
+    try {
+      token = safeString(targetWindow.localStorage?.getItem("omascote_token"), "", 8192);
+    } catch (_error) {
+      token = "";
+    }
+    const apiBase = resolveApiBase(targetWindow.location.hostname);
+    const client = options.client || createHttpRealReviewerClient({
+      apiBase,
+      fetchImpl: targetWindow.fetch.bind(targetWindow),
+      tokenProvider: () => token
+    });
+    let state = {
+      stage: targetWindow.IA4_GATE5A_REVIEW_STAGE || "overview",
+      companyLabel: "Empresa autenticada",
+      connection: null,
+      media: [],
+      selectedMediaId: null,
+      publication: null,
+      history: [],
+      detail: null,
+      returnStatus: null,
+      busy: false,
+      error: ""
+    };
+    const returnReference = RETURN_REFERENCE_PATTERN.test(
+      String(targetWindow.IA4_GATE5A_RETURN_REFERENCE || "")
+    ) ? targetWindow.IA4_GATE5A_RETURN_REFERENCE : null;
+    targetWindow.IA4_GATE5A_RETURN_REFERENCE = null;
+
+    function one(selector) {
+      return root.querySelector(selector);
+    }
+    function all(selector) {
+      return [...root.querySelectorAll(selector)];
+    }
+    function textField(name, value) {
+      all(`[data-real-field="${name}"]`).forEach((node) => {
+        node.textContent = value == null || value === "" ? "—" : String(value);
+      });
+    }
+    function selectedMedia() {
+      return state.media.find((item) => item.id === state.selectedMediaId) || null;
+    }
+    function publicationLabel(value) {
+      return {
+        sending: "Enviando",
+        provider_confirming: "Confirmando",
+        published: "Publicado",
+        failed_temporary: "Falha temporária",
+        failed_permanent: "Falha permanente"
+      }[value] || "Aguardando envio";
+    }
+    function renderHistory() {
+      const container = one("[data-real-history]");
+      if (!container) return;
+      container.replaceChildren();
+      if (!state.history.length) {
+        const empty = targetWindow.document.createElement("p");
+        empty.textContent = "Nenhuma publicação real registrada para esta empresa.";
+        container.appendChild(empty);
+        return;
+      }
+      for (const item of state.history) {
+        const article = targetWindow.document.createElement("article");
+        article.className = "gate5aHistoryItem";
+        const heading = targetWindow.document.createElement("h3");
+        heading.textContent = `${publicationLabel(item.state)} · ${item.media?.fileName || "JPEG"}`;
+        const summary = targetWindow.document.createElement("p");
+        summary.textContent = `Conta: ${item.account?.username || "conta vinculada"} · ${formatDateTime(item.updatedAt)}`;
+        const button = targetWindow.document.createElement("button");
+        button.type = "button";
+        button.className = "gate5aSecondary";
+        button.dataset.realDetailId = item.publicationId;
+        button.textContent = "Abrir detalhes";
+        article.append(heading, summary, button);
+        container.appendChild(article);
+      }
+    }
+    function renderDetail() {
+      const container = one("[data-real-detail]");
+      if (!container) return;
+      container.hidden = !state.detail;
+      if (!state.detail) {
+        container.replaceChildren();
+        return;
+      }
+      const item = state.detail;
+      const heading = targetWindow.document.createElement("h3");
+      heading.textContent = "Detalhes da publicação";
+      const body = targetWindow.document.createElement("p");
+      body.textContent = [
+        `Estado: ${publicationLabel(item.state)}`,
+        `Conta: ${item.account?.username || "conta vinculada"}`,
+        `JPEG: ${item.media?.fileName || "preview_ia4tube.jpg"}`,
+        `Referência: ${item.internalReference}`,
+        `Horário: ${formatDateTime(item.publishedAt || item.updatedAt)}`,
+        `Media ID: ${item.providerMediaId || "aguardando confirmação"}`,
+        `Permalink: ${item.permalink || "aguardando confirmação"}`,
+        `Legenda: ${item.caption || "sem legenda"}`
+      ].join("\n");
+      body.style.whiteSpace = "pre-wrap";
+      container.replaceChildren(heading, body);
+    }
+    function render() {
+      const authenticated = Boolean(token);
+      one("[data-real-auth-gate]").hidden = authenticated;
+      one("[data-real-layout]").hidden = !authenticated;
+      one("[data-real-busy]").hidden = !state.busy;
+      const error = one("[data-real-error]");
+      error.hidden = !state.error;
+      error.textContent = state.error;
+      all("[data-real-screen]").forEach((section) => {
+        section.hidden = section.dataset.realScreen !== state.stage;
+      });
+      all("[data-real-nav]").forEach((button) => {
+        button.classList.toggle("active", button.dataset.realNav === state.stage);
+      });
+      textField("companyLabel", state.companyLabel);
+      const connection = state.connection;
+      const connected = connection?.state === "connected" &&
+        connection?.health === "healthy";
+      textField("connectionStatus", connected ? "Conectada" : "Não conectada");
+      textField("username", connection?.username || "—");
+      textField("accountType", connection?.accountType
+        ? connection.accountType.toUpperCase()
+        : "—");
+      textField("connectionBadge", connected ? "Conectada" : "Aguardando");
+      textField("disconnectAccount", connected
+        ? `${connection.username} (${connection.accountType})`
+        : "Nenhuma conta conectada.");
+      const selector = one("[data-real-media-select]");
+      const currentSelection = state.selectedMediaId || "";
+      selector.replaceChildren();
+      const placeholder = targetWindow.document.createElement("option");
+      placeholder.value = "";
+      placeholder.textContent = "Selecione um JPEG";
+      selector.appendChild(placeholder);
+      state.media.forEach((item, index) => {
+        const option = targetWindow.document.createElement("option");
+        option.value = item.id;
+        option.textContent = `${index + 1}. ${item.fileName} · ${item.width} × ${item.height}`;
+        selector.appendChild(option);
+      });
+      selector.value = currentSelection;
+      const media = selectedMedia();
+      one("[data-real-media-review]").hidden = !media;
+      one("[data-real-no-media]").hidden = state.media.length > 0;
+      one("[data-real-action=\"publish\"]").disabled = !(
+        connected && media && !state.busy && (
+          !state.publication || state.publication.state === "failed_temporary"
+        )
+      );
+      if (media) {
+        one("[data-real-field-src=\"mediaAsset\"]").src = media.thumbnailUrl;
+        textField("mediaFile", media.fileName);
+        textField("mediaDimensions", `${media.width} × ${media.height}`);
+        textField("caption", media.caption || "Sem legenda");
+      }
+      const publication = state.publication;
+      textField("publicationState", publicationLabel(publication?.state));
+      textField("publicationHint", publication?.state === "provider_confirming"
+        ? "A confirmação ainda precisa ser consultada; não reenvie."
+        : publication?.state === "published"
+          ? "Confirmação do provider persistida no histórico."
+          : "Um clique explícito inicia a operação.");
+      all("[data-real-publish-step]").forEach((node) => {
+        const order = ["sending", "provider_confirming", "published"];
+        const current = order.indexOf(publication?.state);
+        node.classList.toggle("done", current >= order.indexOf(node.dataset.realPublishStep));
+      });
+      const published = publication?.state === "published" &&
+        publication.providerMediaId && publication.permalink &&
+        publication.internalReference && publication.publishedAt;
+      one("[data-real-proof]").hidden = !published;
+      textField("mediaId", published ? publication.providerMediaId : "—");
+      textField("publishedAt", published ? formatDateTime(publication.publishedAt) : "—");
+      textField("reference", published ? publication.internalReference : "—");
+      textField("permalink", published ? publication.permalink : "—");
+      one("[data-real-action=\"reconcile\"]").hidden =
+        publication?.state !== "provider_confirming";
+      textField("returnStatus", state.returnStatus?.ok
+        ? "Conta confirmada"
+        : state.returnStatus
+          ? "Autorização não concluída"
+          : "Confirmando sua conta");
+      textField("returnMessage", state.returnStatus?.ok
+        ? "A conta profissional foi vinculada com segurança."
+        : state.returnStatus
+          ? "Confira o estado e tente a autorização novamente."
+          : "Aguarde a leitura do estado seguro.");
+      renderHistory();
+      renderDetail();
+    }
+    function update(values) {
+      state = { ...state, ...values };
+      render();
+    }
+    async function run(operation, stage = null) {
+      update({ busy: true, error: "", ...(stage ? { stage } : {}) });
+      try {
+        return await operation();
+      } catch (error) {
+        if (error?.code === "reviewer_authentication_required") {
+          try {
+            targetWindow.localStorage?.removeItem("omascote_token");
+          } catch (_error) {}
+          token = "";
+        }
+        update({ error: safeString(error?.message, "Operação recusada.", 300) });
+        return null;
+      } finally {
+        update({ busy: false });
+      }
+    }
+    async function refresh() {
+      const results = await Promise.all([
+        client.connection(),
+        client.media(),
+        client.publications()
+      ]);
+      const [connection, media, history] = results;
+      update({
+        connection: connection.connection,
+        media: Array.isArray(media.media) ? media.media : [],
+        history: Array.isArray(history.publications) ? history.publications : [],
+        publication: history.publications?.[0] || state.publication
+      });
+    }
+
+    root.addEventListener("change", (event) => {
+      if (event.target?.matches?.("[data-real-media-select]")) {
+        update({ selectedMediaId: event.target.value || null });
+      }
+    });
+    root.addEventListener("click", (event) => {
+      const detailButton = event.target?.closest?.("[data-real-detail-id]");
+      if (detailButton) {
+        run(async () => {
+          const result = await client.publication(detailButton.dataset.realDetailId);
+          update({ detail: result.publication });
+        }, "history");
+        return;
+      }
+      const nav = event.target?.closest?.("[data-real-nav]");
+      if (nav) {
+        update({ stage: nav.dataset.realNav, error: "" });
+        return;
+      }
+      const action = event.target?.closest?.("[data-real-action]")?.dataset.realAction;
+      if (!action || state.busy) return;
+      if (action === "login") {
+        try {
+          beginCanonicalLoginHandoff(targetWindow);
+        } catch (error) {
+          update({ error: safeString(error?.message, "Login indisponível.", 300) });
+        }
+      } else if (action === "go-connect") {
+        update({ stage: "authorization", error: "" });
+      } else if (action === "authorize") {
+        run(async () => {
+          const result = await client.authorize("connect");
+          if (!isOfficialInstagramAuthorizationUrl(result.authorizationUrl)) {
+            throw new Error("A URL oficial de autorização foi recusada.");
+          }
+          targetWindow.location.assign(result.authorizationUrl);
+        }, "authorization");
+      } else if (action === "refresh") {
+        run(refresh, "connection");
+      } else if (action === "go-media") {
+        update({ stage: "media", error: "" });
+      } else if (action === "publish") {
+        const media = selectedMedia();
+        if (!media || typeof targetWindow.crypto?.randomUUID !== "function") return;
+        const requestId = targetWindow.crypto.randomUUID();
+        update({
+          stage: "publication",
+          publication: { state: "sending" },
+          busy: true,
+          error: ""
+        });
+        client.publish(media.id, requestId).then((result) => {
+          update({ publication: result.publication, busy: false });
+        }).catch((error) => {
+          update({
+            publication: null,
+            busy: false,
+            error: safeString(error?.message, "Publicação recusada.", 300)
+          });
+        });
+      } else if (action === "reconcile" && state.publication?.publicationId) {
+        run(async () => {
+          const result = await client.reconcile(state.publication.publicationId);
+          update({ publication: result.publication });
+        }, "publication");
+      } else if (action === "history") {
+        run(async () => {
+          const result = await client.publications();
+          update({ history: result.publications });
+        }, "history");
+      } else if (action === "disconnect-screen") {
+        update({ stage: "data", error: "" });
+      } else if (action === "disconnect" && state.connection?.connectionId) {
+        if (!targetWindow.confirm("Deseja desconectar esta conta do Instagram?")) return;
+        run(async () => {
+          await client.disconnect(state.connection.connectionId);
+          update({ connection: null });
+        }, "data");
+      }
+    });
+
+    render();
+    if (token) {
+      run(async () => {
+        if (returnReference) {
+          state.returnStatus = await client.visualReturn(returnReference);
+        }
+        await refresh();
+      }, returnReference ? "oauth-return" : state.stage);
+    }
+    return Object.freeze({
+      client,
+      getState: () => ({ ...state }),
+      refresh
+    });
+  }
+
   function reviewerTemplate() {
     return `
       <div class="gate5aReviewerShell">
@@ -1439,6 +2063,9 @@
 
   function mountReviewerApp(root, options = {}) {
     const targetWindow = options.window || (typeof window === "object" ? window : null);
+    if (targetWindow?.IA4_REAL_REVIEWER_ACTIVE === true) {
+      return mountRealReviewerApp(root, options);
+    }
     if (!root || !targetWindow || targetWindow.IA4_GATE5A_REVIEWER_ACTIVE !== true) {
       return null;
     }
@@ -1860,6 +2487,9 @@
     PROFESSIONAL_ACCOUNT_TYPES,
     PRODUCTION_API_ORIGIN,
     PUBLICATION_STATES,
+    REAL_REVIEWER_PATH,
+    REAL_REVIEWER_PREFIX,
+    REAL_REVIEWER_RETURN_PATH,
     REVIEW_QUERY_KEY,
     REVIEW_QUERY_VALUE,
     REVIEWER_RETURN_PATH,
@@ -1874,23 +2504,30 @@
     accountFixture,
     beginCanonicalLoginHandoff,
     completeCanonicalLoginHandoff,
+    createHttpRealReviewerClient,
     createHttpSandboxClient,
     createInMemorySandbox,
     createInitialState,
     createOAuthReturnClient,
     installEarlyGuard,
+    isOfficialInstagramAuthorizationUrl,
+    isRealReviewerMode,
     isReviewerMode,
     isSafeSyntheticPermalink,
     localHostname,
     mountReviewerApp,
+    mountRealReviewerApp,
     normalizeState,
     readCanonicalLoginHandoff,
+    realReviewerTemplate,
+    realReviewerRequestAllowed,
     recoverReviewerAuthenticationFrom401,
     reduceReviewerAuthenticationAfterError,
     resolveApiBase,
     reviewerHostnameAllowed,
     sanitizeCanonicalLoginHandoffUrl,
     sanitizeCallbackUrl,
+    sanitizeRealReviewerUrl,
     transitionState
   });
 });

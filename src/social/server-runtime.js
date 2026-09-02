@@ -45,6 +45,8 @@ async function initializeSocialServerRuntime(options = {}) {
     logger: options.logger,
     instagramTransport: options.instagramTransport,
     instagramPublicationTransport: options.instagramPublicationTransport,
+    realReviewerEnabled: options.realReviewerEnabled,
+    realReviewerMedia: options.realReviewerMedia,
     publicDirectory: options.publicDirectory,
     publicationSleep: options.publicationSleep,
     clock: options.clock,
@@ -97,6 +99,22 @@ async function initializeSocialServerRuntime(options = {}) {
     );
   }
   if (
+    runtime.instagramReviewer !== null &&
+    runtime.instagramReviewer !== undefined &&
+    (
+      typeof runtime.instagramReviewer.getPublication !== "function" ||
+      typeof runtime.instagramReviewer.listMedia !== "function" ||
+      typeof runtime.instagramReviewer.listPublications !== "function" ||
+      typeof runtime.instagramReviewer.publish !== "function" ||
+      typeof runtime.instagramReviewer.reconcile !== "function"
+    )
+  ) {
+    postgresFail(
+      "social_server_runtime_initialization_failed",
+      "Runtime social nao inicializado."
+    );
+  }
+  if (
     runtime.metaCompliance !== null &&
     runtime.metaCompliance !== undefined &&
     (
@@ -116,6 +134,9 @@ async function initializeSocialServerRuntime(options = {}) {
     enabled: true,
     instagramOAuth: runtime.instagramOAuth || null,
     instagramPublication: runtime.instagramPublication || null,
+    ...(runtime.instagramReviewer
+      ? { instagramReviewer: runtime.instagramReviewer }
+      : {}),
     metaCompliance: runtime.metaCompliance || null,
     async close() {
       if (closed) return;

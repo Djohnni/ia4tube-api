@@ -72,6 +72,10 @@ const {
   createInstagramPublicationService
 } = require("./publication/instagram-publication-service");
 const {
+  createInstagramRealReviewerService,
+  reviewerPublishedCandidateAuthorized
+} = require("./reviewer-real/reviewer-real");
+const {
   createMetaComplianceService,
   createMetaSignedRequestVerifier
 } = require("./compliance");
@@ -172,6 +176,7 @@ async function createSocialRuntime(options = {}) {
     const authAdapter = createSocialAuthAdapter(identityConfig);
     let instagramOAuth = null;
     let instagramPublication = null;
+    let instagramReviewer = null;
     let metaCompliance = null;
     if (instagramConfig.enabled) {
       metaComplianceRepository = createPostgresMetaComplianceRepository({
@@ -269,6 +274,62 @@ async function createSocialRuntime(options = {}) {
         });
       }
     }
+    if (options.realReviewerEnabled === true) {
+      if (!instagramConfig.instagramEnabled) {
+        postgresFail(
+          "social_instagram_configuration_invalid",
+          "Configuracao do revisor real recusada."
+        );
+      }
+      const publicationTransport = options.instagramPublicationTransport ||
+        globalThis.fetch;
+      instagramReviewer = createInstagramRealReviewerService({
+        config: instagramConfig,
+        authAdapter,
+        connectorStore,
+        connectorAudit,
+        media: options.realReviewerMedia,
+        createPublicationConnector(expectedContext, media) {
+          return createInstagramPublicationConnector({
+            config: instagramConfig,
+            store: connectorStore,
+            credentials,
+            media,
+            transport: publicationTransport,
+            clock: options.clock || Date.now,
+            setTimeout: options.setTimeout,
+            clearTimeout: options.clearTimeout,
+            sleep: options.publicationSleep,
+            authorizeContext: (candidate) => candidate === expectedContext,
+            authorizeConnection(connection) {
+              return (
+                ["business", "creator"].includes(
+                  connection.account?.accountType
+                ) &&
+                (
+                  instagramConfig.expectedUsername === null ||
+                  connection.account?.username ===
+                    instagramConfig.expectedUsername
+                )
+              );
+            },
+            authorizePublicationRequest: () => true,
+            authorizePublication(input) {
+              return (
+                typeof input.caption === "string" &&
+                input.owned.caption === input.caption
+              );
+            },
+            allowOperationReferenceReconciliation: false,
+            reconciliationLookbackMs: 30 * 1000,
+            authorizePublishedCandidate: reviewerPublishedCandidateAuthorized
+          });
+        },
+        logger: options.logger,
+        clock: options.clock || Date.now,
+        randomUUID: options.randomUUID
+      });
+    }
     let closed = false;
     function assertOpen() {
       if (closed) {
@@ -285,6 +346,7 @@ async function createSocialRuntime(options = {}) {
       credentials,
       instagramOAuth,
       instagramPublication,
+      instagramReviewer,
       metaCompliance,
       reauth,
       auth: Object.freeze({

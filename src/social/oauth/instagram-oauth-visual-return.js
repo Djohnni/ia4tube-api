@@ -40,6 +40,7 @@ function createInstagramOAuthVisualReturn(options = {}) {
   const ttlMs = options.ttlMs || 10 * 60 * 1000;
   const maximumEntries = options.maximumEntries || 500;
   const returnPath = options.returnPath || "/app.html";
+  const surfaceMode = options.surfaceMode || "sandbox";
   if (
     typeof clock !== "function" ||
     typeof randomBytes !== "function" ||
@@ -53,7 +54,9 @@ function createInstagramOAuthVisualReturn(options = {}) {
     !returnPath.startsWith("/") ||
     returnPath.startsWith("//") ||
     returnPath.includes("?") ||
-    returnPath.includes("#")
+    returnPath.includes("#") ||
+    !["sandbox", "reviewer-real"].includes(surfaceMode) ||
+    (surfaceMode === "reviewer-real" && returnPath !== "/reviewer")
   ) {
     invalidConfiguration();
   }
@@ -175,8 +178,10 @@ function createInstagramOAuthVisualReturn(options = {}) {
       invalidConfiguration();
     }
     const url = new URL(returnPath, publicOrigin);
-    url.searchParams.set("review", "instagram-publishing");
-    url.searchParams.set("stage", "oauth-return");
+    if (surfaceMode === "sandbox") {
+      url.searchParams.set("review", "instagram-publishing");
+      url.searchParams.set("stage", "oauth-return");
+    }
     url.searchParams.set("return_ref", opaqueReference);
     return url.toString();
   }

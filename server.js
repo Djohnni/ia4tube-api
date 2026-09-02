@@ -45,6 +45,13 @@ const {
 const {
   createInstagramPublicationRouter
 } = require("./src/social/publication/instagram-publication-router");
+const {
+  REAL_REVIEWER_CONTENT_SECURITY_POLICY,
+  createInstagramRealReviewerRouter,
+  isRealReviewerLoginHandoffUrl,
+  reviewerMediaIdentity,
+  realReviewerUiGateState
+} = require("./src/social/reviewer-real/reviewer-real");
 
 const express = require("express");
 const cors = require("cors");
@@ -262,11 +269,15 @@ const GATE5A_REVIEWER_SURFACE_GATE =
 const GATE5A_SYNTHETIC_BRIDGE_ENABLED =
   GATE5A_REVIEWER_SURFACE_GATE.persistent;
 const GATE5A_STAGING_ENABLED = GATE5A_REVIEWER_SURFACE_GATE.enabled;
+const REAL_REVIEWER_UI_GATE = realReviewerUiGateState(process.env);
+const REAL_REVIEWER_UI_ENABLED = REAL_REVIEWER_UI_GATE.enabled;
 const REVIEWER_MEDIA_ASSET = "controlled-review-jpeg";
 const REVIEWER_MEDIA_SENTINEL_PATH =
   "/v1/social/reviewer-sandbox/media/unavailable";
 const REVIEWER_MEDIA_CAPABILITY_PREFIX =
   "/v1/social/reviewer-sandbox/media-capability";
+const REAL_REVIEWER_MEDIA_CAPABILITY_PREFIX =
+  "/v1/social/reviewer/media-capability";
 const REVIEWER_MEDIA_MAX_BYTES = 8 * 1024 * 1024;
 const REVIEWER_MEDIA_SOF_MARKERS = new Set([
   0xc0, 0xc1, 0xc2, 0xc3,
@@ -402,7 +413,11 @@ function reviewerDemoCaption(value) {
     caption.includes("NAO PUBLICAR");
 }
 
-function readTenantOwnedReviewerMedia(owner, orderId, { includeBytes = false } = {}) {
+function readTenantOwnedReviewerMedia(
+  owner,
+  orderId,
+  { includeBytes = false, demoOnly = true } = {}
+) {
   if (
     !orderStorage.isSafePathSegment(owner) ||
     !orderStorage.isSafePathSegment(orderId)
@@ -451,7 +466,7 @@ function readTenantOwnedReviewerMedia(owner, orderId, { includeBytes = false } =
       return null;
     }
     const caption = descricaoPostagemPedido(pedido);
-    if (!reviewerDemoCaption(caption)) {
+    if (demoOnly && !reviewerDemoCaption(caption)) {
       bytes.fill(0);
       return null;
     }
@@ -758,10 +773,13 @@ const CANONICAL_REVIEWER_FLOW_FILE = path.join(
   __dirname,
   "gate5a-reviewer-flow.js"
 );
-const instagramOAuthVisualReturn = GATE5A_STAGING_ENABLED
+const instagramOAuthVisualReturn = (
+  GATE5A_STAGING_ENABLED || REAL_REVIEWER_UI_ENABLED
+)
   ? createInstagramOAuthVisualReturn({
       publicOrigin: PUBLIC_API_BASE_URL,
-      returnPath: "/app.html"
+      returnPath: REAL_REVIEWER_UI_ENABLED ? "/reviewer" : "/app.html",
+      surfaceMode: REAL_REVIEWER_UI_ENABLED ? "reviewer-real" : "sandbox"
     })
   : null;
 const reviewerPersistentConnection = GATE5A_SYNTHETIC_BRIDGE_ENABLED
@@ -973,6 +991,7 @@ function isSecuritySensitiveBodyRoute(req) {
   return routePath === "/bot/mobile-analytics/login" ||
     routePath === "/v1/social/connections/instagram/authorization" ||
     routePath.startsWith("/v1/social/compliance/meta/") ||
+    routePath.startsWith("/v1/social/reviewer/") ||
     routePath.startsWith("/v1/social/reviewer-sandbox/") ||
     routePath === "/oauth" ||
     routePath.startsWith("/oauth/") ||
@@ -2385,6 +2404,35 @@ app.use("/v1/social", createInstagramOAuthRouter({
   }
 }));
 
+if (REAL_REVIEWER_UI_ENABLED) {
+  app.get(
+    `${REAL_REVIEWER_MEDIA_CAPABILITY_PREFIX}/:mediaId/:expiresAt/:nonce/:ownerContext/:signature`,
+    (req, res) => {
+      const media = resolveRealReviewerMediaCapability(req);
+      if (!media) return res.status(404).end();
+      res.setHeader("Content-Type", "image/jpeg");
+      res.setHeader("Content-Length", String(media.bytes.length));
+      res.setHeader("Cache-Control", "private, no-store, no-transform");
+      res.setHeader("X-Content-Type-Options", "nosniff");
+      res.setHeader("X-Robots-Tag", "noindex, nofollow, noarchive");
+      res.once("finish", () => media.bytes.fill(0));
+      res.once("close", () => media.bytes.fill(0));
+      return res.status(200).send(media.bytes);
+    }
+  );
+  app.use(
+    "/v1/social/reviewer",
+    createInstagramRealReviewerRouter({
+      authenticate: auth,
+      getService() {
+        return socialRuntimeState?.enabled
+          ? socialRuntimeState.instagramReviewer
+          : null;
+      }
+    })
+  );
+}
+
 if (reviewerSandboxService) {
   app.get(
     `${REVIEWER_MEDIA_CAPABILITY_PREFIX}/:orderId/:expiresAt/:nonce/:ownerReference/:signature`,
@@ -2798,17 +2846,36 @@ app.get("/", (req, res) => {
   res.json({ ok: true, msg: "omascote-api online" });
 });
 
-app.get(["/app.html", "/reviewer"], (_req, res) => {
-  if (!GATE5A_STAGING_ENABLED) return res.status(404).end();
+function sendReviewerApplication(req, res, { realReviewer = false } = {}) {
   res.setHeader("Cache-Control", "no-store");
   res.setHeader("Pragma", "no-cache");
   res.setHeader("Referrer-Policy", "same-origin");
   res.setHeader("X-Robots-Tag", "noindex, nofollow, noarchive");
+  if (realReviewer || isRealReviewerLoginHandoffUrl(req.originalUrl)) {
+    res.setHeader(
+      "Content-Security-Policy",
+      REAL_REVIEWER_CONTENT_SECURITY_POLICY
+    );
+  }
   return res.sendFile(CANONICAL_WEB_APP_FILE);
+}
+
+app.get("/app.html", (req, res) => {
+  if (!(GATE5A_STAGING_ENABLED || REAL_REVIEWER_UI_ENABLED)) {
+    return res.status(404).end();
+  }
+  return sendReviewerApplication(req, res);
+});
+
+app.get("/reviewer", (req, res) => {
+  if (!REAL_REVIEWER_UI_ENABLED) return res.status(404).end();
+  return sendReviewerApplication(req, res, { realReviewer: true });
 });
 
 app.get("/gate5a-reviewer-flow.js", (_req, res) => {
-  if (!GATE5A_STAGING_ENABLED) return res.status(404).end();
+  if (!(GATE5A_STAGING_ENABLED || REAL_REVIEWER_UI_ENABLED)) {
+    return res.status(404).end();
+  }
   res.setHeader("Cache-Control", "no-store");
   res.setHeader("Pragma", "no-cache");
   res.setHeader("X-Content-Type-Options", "nosniff");
@@ -3723,6 +3790,143 @@ function signedOrderMediaUrl({
     reuseUntil: now + reuseForMs
   });
   return url;
+}
+
+function realReviewerMediaDescriptor(source) {
+  return reviewerMediaIdentity({
+    orderId: source?.orderId,
+    jpegSha256: source?.sha256,
+    caption: source?.caption
+  });
+}
+
+function realReviewerMediaCapabilityUrl(owner, source, mediaId) {
+  const expiresAt = Math.floor(Date.now() / 1000) + ORDER_MEDIA_URL_TTL_SECONDS;
+  const nonce = crypto.randomBytes(18).toString("base64url");
+  const ownerContext = orderMediaAccess.sealOwnerContext(owner);
+  const signature = orderMediaAccess.sign({
+    owner,
+    orderId: `${mediaId}:${source.sha256}`,
+    variant: "thumbnail",
+    nonce,
+    expiresAt
+  });
+  return `${PUBLIC_API_BASE_URL}${REAL_REVIEWER_MEDIA_CAPABILITY_PREFIX}/` +
+    `${encodeURIComponent(mediaId)}/${expiresAt}/${encodeURIComponent(nonce)}/` +
+    `${encodeURIComponent(ownerContext)}/${encodeURIComponent(signature)}`;
+}
+
+function realReviewerMediaRecord(context, owner, source, descriptor) {
+  const selected = descriptor || realReviewerMediaDescriptor(source);
+  if (!selected) return null;
+  const url = realReviewerMediaCapabilityUrl(owner, source, selected.mediaId);
+  return Object.freeze({
+    companyId: context.companyId,
+    mediaId: selected.mediaId,
+    mimeType: "image/jpeg",
+    width: source.width,
+    height: source.height,
+    caption: selected.caption,
+    publicUrl: url,
+    thumbnailUrl: url
+  });
+}
+
+function listRealReviewerMedia({ context, owner }) {
+  if (
+    !context ||
+    typeof context.companyId !== "string" ||
+    !orderStorage.isSafePathSegment(owner)
+  ) {
+    return [];
+  }
+  const client = readClientes()[owner];
+  if (!client || client.ativo === false) return [];
+  const values = [];
+  for (const item of listPedidoBasesByWhatsapp(owner)) {
+    const source = readTenantOwnedReviewerMedia(owner, item.id, {
+      demoOnly: false
+    });
+    const record = source
+      ? realReviewerMediaRecord(context, owner, source)
+      : null;
+    if (!record) continue;
+    values.push(record);
+    if (values.length >= 20) break;
+  }
+  return Object.freeze(values);
+}
+
+const realReviewerMedia = Object.freeze({
+  async listOwnedJpegs(input) {
+    return listRealReviewerMedia(input);
+  },
+  async resolveOwnedJpeg({ context, owner, mediaId }) {
+    const expectedId = String(mediaId || "");
+    for (const item of listPedidoBasesByWhatsapp(owner).slice(0, 100)) {
+      const source = readTenantOwnedReviewerMedia(owner, item.id, {
+        demoOnly: false
+      });
+      const descriptor = source ? realReviewerMediaDescriptor(source) : null;
+      if (!descriptor || descriptor.mediaId !== expectedId) continue;
+      const record = realReviewerMediaRecord(
+        context,
+        owner,
+        source,
+        descriptor
+      );
+      if (record) {
+        return record;
+      }
+    }
+    return null;
+  }
+});
+
+function resolveRealReviewerMediaCapability(req) {
+  const mediaId = String(req.params.mediaId || "");
+  const expiresAt = Number(req.params.expiresAt);
+  const nonce = String(req.params.nonce || "");
+  const owner = orderMediaAccess.openOwnerContext(req.params.ownerContext);
+  const signature = String(req.params.signature || "");
+  const client = owner ? readClientes()[owner] : null;
+  if (
+    !/^reviewer-jpeg:[0-9a-f]{64}$/.test(mediaId) ||
+    !Number.isSafeInteger(expiresAt) ||
+    !/^[A-Za-z0-9_-]{16,128}$/.test(nonce) ||
+    !owner ||
+    !/^[A-Za-z0-9_-]{43}$/.test(signature) ||
+    !client ||
+    client.ativo === false
+  ) {
+    return null;
+  }
+  for (const item of listPedidoBasesByWhatsapp(owner).slice(0, 100)) {
+    const observed = readTenantOwnedReviewerMedia(owner, item.id, {
+      includeBytes: true,
+      demoOnly: false
+    });
+    if (
+      !observed ||
+      realReviewerMediaDescriptor(observed)?.mediaId !== mediaId
+    ) {
+      if (observed?.bytes) observed.bytes.fill(0);
+      continue;
+    }
+    if (!orderMediaAccess.verify({
+      owner,
+      orderId: `${mediaId}:${observed.sha256}`,
+      variant: "thumbnail",
+      nonce,
+      expiresAt,
+      signature
+    })) {
+      observed.bytes.fill(0);
+      return null;
+    }
+    return observed;
+  }
+  return null;
 }
 
 function protectOrderMediaPayload(
@@ -8651,6 +8855,8 @@ async function startApiServer() {
     socialRuntimeState = await initializeSocialServerRuntime({
       env: process.env,
       publicDirectory: PUBLIC_DIR,
+      realReviewerEnabled: REAL_REVIEWER_UI_ENABLED,
+      realReviewerMedia,
       logger: {
         info(event) {
           const safeScopeEvidence = sanitizeInstagramScopeEvidence(event);
