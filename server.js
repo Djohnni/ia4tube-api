@@ -229,6 +229,7 @@ const DATA_DIR = requireDeployedPath(
 
 const PEDIDOS_DIR = path.join(DATA_DIR, "pedidos");
 const TMP_UPLOADS_DIR = path.join(DATA_DIR, "tmp_uploads");
+const REAL_REVIEWER_MEDIA_DIR = path.join(DATA_DIR, "reviewer_media");
 const GRAPHIC_MATERIALS_DIR = path.join(DATA_DIR, "materiais_graficos");
 const CAROUSELS_DIR = path.join(DATA_DIR, "carrosseis");
 const MONTHLY_PLANNINGS_DIR = path.join(DATA_DIR, "planejamentos_mensais");
@@ -279,6 +280,13 @@ const REVIEWER_MEDIA_CAPABILITY_PREFIX =
 const REAL_REVIEWER_MEDIA_CAPABILITY_PREFIX =
   "/v1/social/reviewer/media-capability";
 const REVIEWER_MEDIA_MAX_BYTES = 8 * 1024 * 1024;
+const REAL_REVIEWER_MEDIA_SCHEMA_VERSION = 1;
+const REAL_REVIEWER_MEDIA_MAX_ITEMS = 20;
+const REAL_REVIEWER_MEDIA_ID_PATTERN = /^reviewer-jpeg:[0-9a-f]{64}$/;
+const REAL_REVIEWER_MEDIA_DIRECTORY_PATTERN = /^[0-9a-f]{64}$/;
+const REAL_REVIEWER_SOURCE_ID_PATTERN = /^upload-[0-9a-f]{32}$/;
+const REAL_REVIEWER_COMPANY_ID_PATTERN =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const REVIEWER_MEDIA_SOF_MARKERS = new Set([
   0xc0, 0xc1, 0xc2, 0xc3,
   0xc5, 0xc6, 0xc7,
@@ -389,6 +397,55 @@ function reviewerJpegDimensions(bytes) {
   return dimensions && hasQuantizationTable && hasHuffmanTable && hasScan
     ? dimensions
     : null;
+}
+
+function realReviewerUploadJpegDimensions(bytes) {
+  const dimensions = reviewerJpegDimensions(bytes);
+  if (!dimensions) return null;
+
+  let offset = 2;
+  let validFrame = false;
+  while (offset + 3 < bytes.length) {
+    if (bytes[offset] !== 0xff) {
+      offset += 1;
+      continue;
+    }
+    while (offset < bytes.length && bytes[offset] === 0xff) offset += 1;
+    if (offset >= bytes.length) return null;
+    const marker = bytes[offset];
+    offset += 1;
+    if (marker === 0xd9) return null;
+    if (marker === 0xda) {
+      if (!validFrame || offset + 2 >= bytes.length) return null;
+      const scanLength = bytes.readUInt16BE(offset);
+      const scanComponents = bytes[offset + 2];
+      return scanComponents >= 1 &&
+        scanComponents <= 4 &&
+        scanLength === 6 + (2 * scanComponents) &&
+        offset + scanLength < bytes.length - 2
+        ? dimensions
+        : null;
+    }
+    if (marker === 0x01 || (marker >= 0xd0 && marker <= 0xd7)) continue;
+    if (offset + 1 >= bytes.length) return null;
+    const segmentLength = bytes.readUInt16BE(offset);
+    if (segmentLength < 2 || offset + segmentLength > bytes.length) return null;
+    if (REVIEWER_MEDIA_SOF_MARKERS.has(marker)) {
+      if (segmentLength < 11) return null;
+      const frameComponents = bytes[offset + 7];
+      if (
+        bytes[offset + 2] !== 8 ||
+        frameComponents < 1 ||
+        frameComponents > 4 ||
+        segmentLength !== 8 + (3 * frameComponents)
+      ) {
+        return null;
+      }
+      validFrame = true;
+    }
+    offset += segmentLength;
+  }
+  return null;
 }
 
 function reviewerDemoText(value) {
@@ -1113,6 +1170,7 @@ function ensureDir(p) {
 ensureDir(DATA_DIR);
 ensureDir(PEDIDOS_DIR);
 ensureDir(TMP_UPLOADS_DIR);
+if (REAL_REVIEWER_UI_ENABLED) ensureDir(REAL_REVIEWER_MEDIA_DIR);
 ensureDir(GRAPHIC_MATERIALS_DIR);
 ensureDir(CAROUSELS_DIR);
 ensureDir(MONTHLY_PLANNINGS_DIR);
@@ -3792,6 +3850,412 @@ function signedOrderMediaUrl({
   return url;
 }
 
+function realReviewerMediaError(code) {
+  const error = new Error("Midia do revisor recusada.");
+  error.code = code;
+  return error;
+}
+
+function realReviewerDirectoryIsSafe(directoryPath) {
+  try {
+    const stat = fs.lstatSync(directoryPath);
+    return stat.isDirectory() && !stat.isSymbolicLink();
+  } catch {
+    return false;
+  }
+}
+
+function realReviewerDirectoryIsContained(root, directory, expectedRelative) {
+  try {
+    const realRoot = fs.realpathSync(root);
+    const realDirectory = fs.realpathSync(directory);
+    return path.relative(realRoot, realDirectory) === expectedRelative;
+  } catch {
+    return false;
+  }
+}
+
+function realReviewerOwnerBinding(owner) {
+  if (!orderStorage.isSafePathSegment(owner)) return null;
+  return crypto.createHash("sha256")
+    .update("ia4tube-real-reviewer-owner-v1\0", "utf8")
+    .update(owner, "utf8")
+    .digest("hex");
+}
+
+function realReviewerOwnerMediaDirectory(owner, { create = false } = {}) {
+  const binding = realReviewerOwnerBinding(owner);
+  const root = path.resolve(REAL_REVIEWER_MEDIA_DIR);
+  if (!binding || !realReviewerDirectoryIsSafe(root)) return null;
+  const directory = path.resolve(root, binding);
+  const relative = path.relative(root, directory);
+  if (
+    relative !== binding ||
+    relative.startsWith("..") ||
+    path.isAbsolute(relative)
+  ) {
+    return null;
+  }
+  if (create) {
+    try {
+      fs.mkdirSync(directory, { mode: 0o700 });
+    } catch (error) {
+      if (error?.code !== "EEXIST") return null;
+    }
+  }
+  return realReviewerDirectoryIsSafe(directory) &&
+    realReviewerDirectoryIsContained(root, directory, binding)
+    ? Object.freeze({ binding, directory })
+    : null;
+}
+
+function realReviewerMediaPath(ownerDirectory, mediaId) {
+  if (!REAL_REVIEWER_MEDIA_ID_PATTERN.test(String(mediaId || ""))) {
+    return null;
+  }
+  const directoryName = mediaId.slice("reviewer-jpeg:".length);
+  if (!REAL_REVIEWER_MEDIA_DIRECTORY_PATTERN.test(directoryName)) return null;
+  const mediaDirectory = path.resolve(ownerDirectory, directoryName);
+  const relative = path.relative(ownerDirectory, mediaDirectory);
+  if (
+    relative !== directoryName ||
+    relative.startsWith("..") ||
+    path.isAbsolute(relative)
+  ) {
+    return null;
+  }
+  return mediaDirectory;
+}
+
+function realReviewerMetadataIsValid(metadata, expected = {}) {
+  if (
+    !metadata ||
+    typeof metadata !== "object" ||
+    Array.isArray(metadata) ||
+    Object.getPrototypeOf(metadata) !== Object.prototype
+  ) {
+    return false;
+  }
+  const keys = [
+    "schemaVersion",
+    "status",
+    "mediaId",
+    "sourceId",
+    "companyId",
+    "ownerBinding",
+    "sha256",
+    "width",
+    "height",
+    "size",
+    "caption",
+    "createdAt"
+  ];
+  if (
+    Object.keys(metadata).length !== keys.length ||
+    keys.some((key) => !Object.hasOwn(metadata, key)) ||
+    metadata.schemaVersion !== REAL_REVIEWER_MEDIA_SCHEMA_VERSION ||
+    metadata.status !== "ready" ||
+    metadata.mediaId !== expected.mediaId ||
+    metadata.ownerBinding !== expected.ownerBinding ||
+    !REAL_REVIEWER_MEDIA_ID_PATTERN.test(metadata.mediaId) ||
+    !REAL_REVIEWER_SOURCE_ID_PATTERN.test(metadata.sourceId) ||
+    !REAL_REVIEWER_COMPANY_ID_PATTERN.test(metadata.companyId) ||
+    (expected.companyId && metadata.companyId !== expected.companyId) ||
+    !/^[0-9a-f]{64}$/.test(metadata.sha256) ||
+    metadata.width !== 1080 ||
+    metadata.height !== 1080 ||
+    !Number.isSafeInteger(metadata.size) ||
+    metadata.size < 16 ||
+    metadata.size > REVIEWER_MEDIA_MAX_BYTES ||
+    typeof metadata.caption !== "string" ||
+    metadata.caption !== metadata.caption.trim() ||
+    metadata.caption.length < 1 ||
+    /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(metadata.caption) ||
+    typeof metadata.createdAt !== "string" ||
+    !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(metadata.createdAt) ||
+    !Number.isFinite(Date.parse(metadata.createdAt))
+  ) {
+    return false;
+  }
+  const descriptor = reviewerMediaIdentity({
+    orderId: metadata.sourceId,
+    jpegSha256: metadata.sha256,
+    caption: metadata.caption
+  });
+  return descriptor?.mediaId === metadata.mediaId;
+}
+
+function readDirectRealReviewerMedia(
+  owner,
+  mediaId,
+  { companyId = null, includeBytes = false } = {}
+) {
+  if (
+    companyId !== null &&
+    !REAL_REVIEWER_COMPANY_ID_PATTERN.test(String(companyId || ""))
+  ) {
+    return null;
+  }
+  const ownerDirectory = realReviewerOwnerMediaDirectory(owner);
+  if (!ownerDirectory) return null;
+  const mediaDirectory = realReviewerMediaPath(
+    ownerDirectory.directory,
+    mediaId
+  );
+  if (
+    !mediaDirectory ||
+    !realReviewerDirectoryIsSafe(mediaDirectory) ||
+    !realReviewerDirectoryIsContained(
+      ownerDirectory.directory,
+      mediaDirectory,
+      mediaId.slice("reviewer-jpeg:".length)
+    )
+  ) {
+    return null;
+  }
+  const metadataPath = path.join(mediaDirectory, "metadata.json");
+  const jpegPath = path.join(mediaDirectory, "media.jpg");
+  let bytes = null;
+  try {
+    const metadataStat = fs.lstatSync(metadataPath);
+    const jpegStat = fs.lstatSync(jpegPath);
+    if (
+      !metadataStat.isFile() ||
+      metadataStat.isSymbolicLink() ||
+      metadataStat.size < 2 ||
+      metadataStat.size > 32 * 1024 ||
+      !jpegStat.isFile() ||
+      jpegStat.isSymbolicLink()
+    ) {
+      return null;
+    }
+    const metadata = JSON.parse(fs.readFileSync(metadataPath, "utf8"));
+    if (!realReviewerMetadataIsValid(metadata, {
+      mediaId,
+      ownerBinding: ownerDirectory.binding,
+      companyId
+    }) || jpegStat.size !== metadata.size) {
+      return null;
+    }
+    if (includeBytes) {
+      bytes = fs.readFileSync(jpegPath);
+      const dimensions = realReviewerUploadJpegDimensions(bytes);
+      const sha256 = crypto.createHash("sha256").update(bytes).digest("hex");
+      if (
+        bytes.length !== metadata.size ||
+        sha256 !== metadata.sha256 ||
+        dimensions?.width !== metadata.width ||
+        dimensions?.height !== metadata.height
+      ) {
+        bytes.fill(0);
+        return null;
+      }
+    }
+    const relativeStorageKey = path.relative(DATA_DIR, jpegPath);
+    if (
+      !relativeStorageKey ||
+      relativeStorageKey.startsWith("..") ||
+      path.isAbsolute(relativeStorageKey)
+    ) {
+      if (bytes) bytes.fill(0);
+      return null;
+    }
+    return {
+      owner,
+      orderId: metadata.sourceId,
+      previewPath: jpegPath,
+      storageKey: relativeStorageKey.split(path.sep).join("/"),
+      sha256: metadata.sha256,
+      width: metadata.width,
+      height: metadata.height,
+      caption: metadata.caption,
+      createdAt: metadata.createdAt,
+      ...(bytes ? { bytes } : {})
+    };
+  } catch {
+    if (bytes) bytes.fill(0);
+    return null;
+  }
+}
+
+function listDirectRealReviewerMedia({ context, owner }) {
+  if (
+    !context ||
+    !REAL_REVIEWER_COMPANY_ID_PATTERN.test(String(context.companyId || ""))
+  ) {
+    return [];
+  }
+  const ownerDirectory = realReviewerOwnerMediaDirectory(owner);
+  if (!ownerDirectory) return [];
+  let entries;
+  try {
+    entries = fs.readdirSync(ownerDirectory.directory, { withFileTypes: true });
+  } catch {
+    return [];
+  }
+  return entries
+    .filter((entry) => (
+      entry.isDirectory() &&
+      !entry.isSymbolicLink() &&
+      REAL_REVIEWER_MEDIA_DIRECTORY_PATTERN.test(entry.name)
+    ))
+    .map((entry) => readDirectRealReviewerMedia(
+      owner,
+      `reviewer-jpeg:${entry.name}`,
+      { companyId: context.companyId }
+    ))
+    .filter(Boolean)
+    .sort((left, right) => Date.parse(right.createdAt) - Date.parse(left.createdAt));
+}
+
+function writeExclusiveReviewerFile(filePath, contents) {
+  const descriptor = fs.openSync(filePath, "wx", 0o600);
+  try {
+    fs.writeFileSync(descriptor, contents);
+    fs.fsyncSync(descriptor);
+  } finally {
+    fs.closeSync(descriptor);
+  }
+}
+
+function realReviewerOwnedUploadCount(ownerDirectory) {
+  try {
+    return fs.readdirSync(ownerDirectory, { withFileTypes: true })
+      .filter((entry) => (
+        entry.isDirectory() &&
+        !entry.isSymbolicLink() &&
+        REAL_REVIEWER_MEDIA_DIRECTORY_PATTERN.test(entry.name)
+      ))
+      .length;
+  } catch {
+    return null;
+  }
+}
+
+function storeDirectRealReviewerMedia({ context, owner, bytes, caption }) {
+  if (
+    !context ||
+    !REAL_REVIEWER_COMPANY_ID_PATTERN.test(String(context.companyId || "")) ||
+    !orderStorage.isSafePathSegment(owner) ||
+    !Buffer.isBuffer(bytes) ||
+    bytes.length < 16
+  ) {
+    throw realReviewerMediaError("reviewer_media_invalid");
+  }
+  if (bytes.length > REVIEWER_MEDIA_MAX_BYTES) {
+    throw realReviewerMediaError("reviewer_media_too_large");
+  }
+  const client = readClientes()[owner];
+  const dimensions = realReviewerUploadJpegDimensions(bytes);
+  if (
+    !client ||
+    client.ativo === false ||
+    dimensions?.width !== 1080 ||
+    dimensions?.height !== 1080 ||
+    typeof caption !== "string" ||
+    caption !== caption.trim() ||
+    caption.length < 1
+  ) {
+    throw realReviewerMediaError("reviewer_media_invalid");
+  }
+  const sha256 = crypto.createHash("sha256").update(bytes).digest("hex");
+  const ownerDirectory = realReviewerOwnerMediaDirectory(owner, { create: true });
+  if (!ownerDirectory) {
+    throw realReviewerMediaError("reviewer_media_storage_unavailable");
+  }
+  const currentUploadCount = realReviewerOwnedUploadCount(
+    ownerDirectory.directory
+  );
+  if (currentUploadCount === null) {
+    throw realReviewerMediaError("reviewer_media_storage_unavailable");
+  }
+  if (currentUploadCount >= REAL_REVIEWER_MEDIA_MAX_ITEMS) {
+    throw realReviewerMediaError("reviewer_media_limit_reached");
+  }
+
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    const sourceId = `upload-${crypto.randomBytes(16).toString("hex")}`;
+    const selected = reviewerMediaIdentity({
+      orderId: sourceId,
+      jpegSha256: sha256,
+      caption
+    });
+    if (!selected) throw realReviewerMediaError("reviewer_media_invalid");
+    const finalDirectory = realReviewerMediaPath(
+      ownerDirectory.directory,
+      selected.mediaId
+    );
+    const pendingName = `.pending-${crypto.randomBytes(18).toString("hex")}`;
+    const pendingDirectory = path.resolve(ownerDirectory.directory, pendingName);
+    const pendingRelative = path.relative(
+      ownerDirectory.directory,
+      pendingDirectory
+    );
+    if (
+      !finalDirectory ||
+      pendingRelative !== pendingName ||
+      path.isAbsolute(pendingRelative)
+    ) {
+      throw realReviewerMediaError("reviewer_media_storage_unavailable");
+    }
+    if (fs.existsSync(finalDirectory)) continue;
+    let pendingCreated = false;
+    try {
+      fs.mkdirSync(pendingDirectory, { mode: 0o700 });
+      pendingCreated = true;
+      if (
+        !realReviewerDirectoryIsSafe(pendingDirectory) ||
+        !realReviewerDirectoryIsContained(
+          ownerDirectory.directory,
+          pendingDirectory,
+          pendingName
+        )
+      ) {
+        throw realReviewerMediaError("reviewer_media_storage_unavailable");
+      }
+      const metadata = Object.freeze({
+        schemaVersion: REAL_REVIEWER_MEDIA_SCHEMA_VERSION,
+        status: "ready",
+        mediaId: selected.mediaId,
+        sourceId,
+        companyId: context.companyId,
+        ownerBinding: ownerDirectory.binding,
+        sha256,
+        width: dimensions.width,
+        height: dimensions.height,
+        size: bytes.length,
+        caption,
+        createdAt: new Date().toISOString()
+      });
+      writeExclusiveReviewerFile(path.join(pendingDirectory, "media.jpg"), bytes);
+      writeExclusiveReviewerFile(
+        path.join(pendingDirectory, "metadata.json"),
+        `${JSON.stringify(metadata, null, 2)}\n`
+      );
+      fs.renameSync(pendingDirectory, finalDirectory);
+      pendingCreated = false;
+      const source = readDirectRealReviewerMedia(owner, selected.mediaId, {
+        companyId: context.companyId
+      });
+      if (!source) {
+        fs.rmSync(finalDirectory, { recursive: true, force: true });
+        throw realReviewerMediaError("reviewer_media_storage_unavailable");
+      }
+      return source;
+    } catch (error) {
+      if (pendingCreated) {
+        try {
+          fs.rmSync(pendingDirectory, { recursive: true, force: true });
+        } catch {}
+      }
+      if (error?.code === "EEXIST") continue;
+      if (/^reviewer_media_/.test(String(error?.code || ""))) throw error;
+      throw realReviewerMediaError("reviewer_media_storage_unavailable");
+    }
+  }
+  throw realReviewerMediaError("reviewer_media_storage_unavailable");
+}
+
 function realReviewerMediaDescriptor(source) {
   return reviewerMediaIdentity({
     orderId: source?.orderId,
@@ -3843,6 +4307,12 @@ function listRealReviewerMedia({ context, owner }) {
   const client = readClientes()[owner];
   if (!client || client.ativo === false) return [];
   const values = [];
+  for (const source of listDirectRealReviewerMedia({ context, owner })) {
+    const record = realReviewerMediaRecord(context, owner, source);
+    if (!record) continue;
+    values.push(record);
+    if (values.length >= 20) return Object.freeze(values);
+  }
   for (const item of listPedidoBasesByWhatsapp(owner)) {
     const source = readTenantOwnedReviewerMedia(owner, item.id, {
       demoOnly: false
@@ -3861,8 +4331,31 @@ const realReviewerMedia = Object.freeze({
   async listOwnedJpegs(input) {
     return listRealReviewerMedia(input);
   },
+  async storeOwnedJpeg({ context, owner, bytes, caption }) {
+    const source = storeDirectRealReviewerMedia({
+      context,
+      owner,
+      bytes,
+      caption
+    });
+    const record = realReviewerMediaRecord(context, owner, source);
+    if (!record) {
+      throw realReviewerMediaError("reviewer_media_storage_unavailable");
+    }
+    return record;
+  },
   async resolveOwnedJpeg({ context, owner, mediaId }) {
     const expectedId = String(mediaId || "");
+    const direct = readDirectRealReviewerMedia(owner, expectedId, {
+      companyId: context?.companyId || null
+    });
+    if (direct) {
+      const descriptor = realReviewerMediaDescriptor(direct);
+      const record = descriptor?.mediaId === expectedId
+        ? realReviewerMediaRecord(context, owner, direct, descriptor)
+        : null;
+      if (record) return record;
+    }
     for (const item of listPedidoBasesByWhatsapp(owner).slice(0, 100)) {
       const source = readTenantOwnedReviewerMedia(owner, item.id, {
         demoOnly: false
@@ -3899,6 +4392,23 @@ function resolveRealReviewerMediaCapability(req) {
     !client ||
     client.ativo === false
   ) {
+    return null;
+  }
+  const direct = readDirectRealReviewerMedia(owner, mediaId, {
+    includeBytes: true
+  });
+  if (direct) {
+    if (orderMediaAccess.verify({
+      owner,
+      orderId: `${mediaId}:${direct.sha256}`,
+      variant: "thumbnail",
+      nonce,
+      expiresAt,
+      signature
+    })) {
+      return direct;
+    }
+    direct.bytes.fill(0);
     return null;
   }
   for (const item of listPedidoBasesByWhatsapp(owner).slice(0, 100)) {

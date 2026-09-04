@@ -6540,6 +6540,324 @@ body.gate5a-reviewer-active main{
 
 @keyframes gate5aSpin{to{transform:rotate(360deg)}}
 
+/* /reviewer — identidade visual canônica do app IA4Tube (preto e dourado). */
+body.gate5a-reviewer-real{
+  color:#fff8e7;
+  background-color:#020202 !important;
+  background-image:
+    radial-gradient(circle at 12% 5%, rgba(255,194,51,.14), transparent 27%),
+    radial-gradient(circle at 92% 12%, rgba(255,215,106,.08), transparent 30%),
+    linear-gradient(180deg,#080603 0,#020202 62%) !important;
+}
+
+.gate5a-reviewer-real .gate5aReviewerBrand{
+  display:flex;
+  min-width:0;
+  align-items:center;
+  gap:17px;
+}
+
+.gate5a-reviewer-real .gate5aBrandMark{
+  position:relative;
+  display:grid;
+  flex:0 0 58px;
+  width:58px;
+  height:58px;
+  place-items:center;
+  border:1px solid rgba(255,230,163,.48);
+  border-radius:19px;
+  background:
+    radial-gradient(circle at 35% 28%,rgba(255,230,163,.22),transparent 42%),
+    linear-gradient(145deg,#241605,#090704);
+  box-shadow:0 0 0 5px rgba(255,194,51,.06),0 16px 36px rgba(0,0,0,.42);
+}
+
+.gate5a-reviewer-real .gate5aBrandMark svg{
+  width:48px;
+  height:48px;
+  overflow:visible;
+  fill:none;
+  stroke:#ffd76a;
+  stroke-width:3.4;
+  stroke-linecap:round;
+  stroke-linejoin:round;
+  filter:drop-shadow(0 0 6px rgba(255,194,51,.42));
+}
+.gate5a-reviewer-real .gate5aBrandMark .gate5aBrandDot{
+  fill:#ffd76a;
+  stroke:none;
+}
+
+.gate5a-reviewer-real .gate5aReviewerHeader{
+  color:#fff8e7;
+  border:1px solid rgba(255,215,106,.28);
+  background:
+    radial-gradient(circle at 12% 20%,rgba(255,194,51,.14),transparent 32%),
+    linear-gradient(135deg,#1a1004,#0b0905 54%,#020202);
+  box-shadow:0 24px 64px rgba(0,0,0,.52),inset 0 1px rgba(255,230,163,.08);
+}
+
+.gate5a-reviewer-real .gate5aReviewerHeader p{color:#d8c28a}
+.gate5a-reviewer-real .gate5aEyebrow{color:#ffd76a}
+.gate5a-reviewer-real .gate5aEnvironmentBadge{
+  color:#fff1b8;
+  border-color:rgba(255,215,106,.30);
+  background:rgba(255,215,106,.07);
+}
+.gate5a-reviewer-real .gate5aEnvironmentBadge span{
+  background:#ffd76a;
+  box-shadow:0 0 0 5px rgba(255,215,106,.11),0 0 14px rgba(255,194,51,.40);
+}
+
+.gate5a-reviewer-real .gate5aSafetyNotice{
+  color:#ead69e;
+  border-color:rgba(255,215,106,.22);
+  background:rgba(36,22,5,.72);
+}
+
+.gate5a-reviewer-real .gate5aAuthGate,
+.gate5a-reviewer-real .gate5aReviewerNav,
+.gate5a-reviewer-real .gate5aReviewerContent{
+  color:#fff8e7;
+  border-color:rgba(255,215,106,.20);
+  background:rgba(9,7,4,.96);
+  box-shadow:0 22px 56px rgba(0,0,0,.46),inset 0 1px rgba(255,230,163,.035);
+}
+
+.gate5a-reviewer-real .gate5aAuthGate h2,
+.gate5a-reviewer-real .gate5aScreenHeading h2{color:#fff8e7}
+.gate5a-reviewer-real .gate5aAuthGate p,
+.gate5a-reviewer-real .gate5aScreenHeading p{color:#bba878}
+.gate5a-reviewer-real .gate5aScreenHeading{border-bottom-color:rgba(255,215,106,.14)}
+
+.gate5a-reviewer-real .gate5aReviewerNav > button{color:#bba878}
+.gate5a-reviewer-real .gate5aReviewerNav > button:hover,
+.gate5a-reviewer-real .gate5aReviewerNav > button:focus-visible{
+  color:#fff1b8;
+  border-color:rgba(255,215,106,.24);
+  background:#15110a;
+}
+.gate5a-reviewer-real .gate5aReviewerNav > button.active{
+  color:#11100a;
+  background:linear-gradient(135deg,#ffe6a3,#ffc233 62%,#d69b22);
+  box-shadow:0 9px 22px rgba(255,194,51,.18);
+}
+
+.gate5a-reviewer-real .gate5aMiniStatus{
+  color:#d8c28a;
+  border:1px solid rgba(255,215,106,.15);
+  background:#15110a;
+}
+.gate5a-reviewer-real .gate5aMiniStatus strong{color:#ffd76a}
+.gate5a-reviewer-real .gate5aStepNumber{
+  color:#171005;
+  background:linear-gradient(145deg,#fff1b8,#ffc233);
+  box-shadow:0 8px 22px rgba(255,194,51,.14);
+}
+
+.gate5a-reviewer-real .gate5aCompanyConfirmation,
+.gate5a-reviewer-real .gate5aSecurityCopy,
+.gate5a-reviewer-real .gate5aConnectionCard,
+.gate5a-reviewer-real .gate5aPublishedProof,
+.gate5a-reviewer-real .gate5aDeletionResult{
+  color:#ead69e;
+  border-color:rgba(255,215,106,.23);
+  background:#15110a;
+}
+.gate5a-reviewer-real .gate5aCompanyConfirmation strong,
+.gate5a-reviewer-real .gate5aCompanyConfirmation small{color:#fff1b8}
+
+.gate5a-reviewer-real .gate5aFeatureGrid article,
+.gate5a-reviewer-real .gate5aDataGrid article,
+.gate5a-reviewer-real .gate5aScopeGrid > div,
+.gate5a-reviewer-real .gate5aProofGrid > div,
+.gate5a-reviewer-real .gate5aHistoryItem,
+.gate5a-reviewer-real .gate5aEmpty,
+.gate5a-reviewer-real .gate5aProgressList li,
+.gate5a-reviewer-real .gate5aPublishTimeline li{
+  color:#fff8e7;
+  border-color:rgba(255,215,106,.16);
+  background:#0d0b07;
+}
+.gate5a-reviewer-real .gate5aFeatureGrid h3,
+.gate5a-reviewer-real .gate5aDataGrid h3,
+.gate5a-reviewer-real .gate5aConnectionCard h3,
+.gate5a-reviewer-real .gate5aMediaReview h3,
+.gate5a-reviewer-real .gate5aHistoryItem h3,
+.gate5a-reviewer-real .gate5aProgressList strong,
+.gate5a-reviewer-real .gate5aPublishTimeline strong,
+.gate5a-reviewer-real .gate5aScopeGrid strong,
+.gate5a-reviewer-real .gate5aProofGrid strong{color:#fff8e7}
+.gate5a-reviewer-real .gate5aFeatureGrid p,
+.gate5a-reviewer-real .gate5aDataGrid p,
+.gate5a-reviewer-real .gate5aConnectionCard p,
+.gate5a-reviewer-real .gate5aMediaReview p,
+.gate5a-reviewer-real .gate5aMediaReview li,
+.gate5a-reviewer-real .gate5aHistoryItem p,
+.gate5a-reviewer-real .gate5aProgressList small,
+.gate5a-reviewer-real .gate5aPublishTimeline small,
+.gate5a-reviewer-real .gate5aScopeGrid span,
+.gate5a-reviewer-real .gate5aProofGrid span{color:#bba878}
+.gate5a-reviewer-real .gate5aStatusGood,
+.gate5a-reviewer-real .gate5aPublishedProof h3{color:#ffd76a}
+
+.gate5a-reviewer-real .gate5aPrimary{
+  color:#11100a;
+  border-color:#ffd76a;
+  background:linear-gradient(135deg,#fff1b8,#ffc233 62%,#d69b22);
+  box-shadow:0 11px 25px rgba(255,194,51,.18);
+}
+.gate5a-reviewer-real .gate5aSecondary{
+  color:#fff1b8;
+  border-color:rgba(255,215,106,.32);
+  background:#15110a;
+}
+.gate5a-reviewer-real .gate5aPrimary:focus-visible,
+.gate5a-reviewer-real .gate5aSecondary:focus-visible,
+.gate5a-reviewer-real .gate5aDanger:focus-visible{outline-color:rgba(255,215,106,.34)}
+
+.gate5a-reviewer-real .gate5aAvatar{
+  color:#11100a;
+  border:1px solid rgba(255,241,184,.44);
+  background:linear-gradient(145deg,#fff1b8,#ffc233 60%,#8a5d08);
+}
+.gate5a-reviewer-real .gate5aConnectionCard span{color:#bba878}
+.gate5a-reviewer-real .gate5aMediaReview > img{
+  border-color:rgba(255,215,106,.28);
+  box-shadow:0 18px 42px rgba(0,0,0,.52),0 0 0 4px rgba(255,194,51,.035);
+}
+.gate5a-reviewer-real .gate5aSyntheticTag{
+  color:#171005;
+  background:#ffd76a;
+}
+.gate5a-reviewer-real .gate5aCaption{
+  border-color:rgba(255,215,106,.16);
+  background:#0d0b07;
+}
+.gate5a-reviewer-real .gate5aCaption > span,
+.gate5a-reviewer-real .gate5aCaption p{color:#d8c28a}
+.gate5a-reviewer-real .gate5aPublicationState{
+  color:#fff8e7;
+  border:1px solid rgba(255,215,106,.24);
+  background:linear-gradient(135deg,#241605,#090704);
+}
+.gate5a-reviewer-real .gate5aPublishTimeline li.done{
+  border-color:rgba(255,215,106,.30);
+  background:#15110a;
+}
+.gate5a-reviewer-real .gate5aPublishTimeline li.done > span{
+  border-color:#ffd76a;
+  background:#ffd76a;
+}
+.gate5a-reviewer-real .gate5aBusy{background:rgba(2,2,2,.78)}
+.gate5a-reviewer-real .gate5aBusy > span{border-top-color:#ffd76a}
+
+.gate5aUploadPanel{
+  margin-top:20px;
+  padding:18px;
+  border:1px solid rgba(255,215,106,.20);
+  border-radius:20px;
+  background:linear-gradient(145deg,rgba(36,22,5,.72),rgba(9,7,4,.94));
+}
+.gate5aUploadIntro{
+  display:grid;
+  grid-template-columns:auto minmax(0,1fr) auto;
+  gap:13px 15px;
+  align-items:center;
+}
+.gate5aUploadIcon{
+  display:grid;
+  width:48px;
+  height:48px;
+  place-items:center;
+  color:#171005;
+  border-radius:15px;
+  background:linear-gradient(145deg,#fff1b8,#ffc233);
+  font-size:27px;
+  font-weight:500;
+}
+.gate5aUploadIntro h3{margin:0 0 4px;color:#fff8e7;font-size:16px}
+.gate5aUploadIntro p{margin:0;color:#bba878;font-size:12px;line-height:1.5}
+.gate5aUploadIntro > small{grid-column:2/-1;color:#8f805d;font-size:10px;font-weight:750}
+.gate5aFilePicker{display:inline-flex;align-items:center;justify-content:center;cursor:pointer}
+.gate5aUploadDraft{
+  display:grid;
+  grid-template-columns:minmax(180px,260px) minmax(0,1fr);
+  gap:18px;
+  margin-top:18px;
+  padding-top:18px;
+  border-top:1px solid rgba(255,215,106,.15);
+}
+.gate5aUploadDraft[hidden],
+.gate5aUploadSuccess[hidden]{display:none !important}
+.gate5aUploadDraft > img{
+  display:block;
+  width:100%;
+  aspect-ratio:1/1;
+  object-fit:cover;
+  border:1px solid rgba(255,215,106,.28);
+  border-radius:18px;
+  background:#020202;
+}
+.gate5aUploadFields{min-width:0}
+.gate5aUploadFileMeta{display:grid;gap:3px}
+.gate5aUploadFileMeta span,
+.gate5aTextField > span,
+.gate5aSelectField > span{
+  color:#bba878;
+  font-size:10px;
+  font-weight:900;
+  letter-spacing:.06em;
+  text-transform:uppercase;
+}
+.gate5aUploadFileMeta strong{overflow-wrap:anywhere;color:#fff8e7;font-size:14px}
+.gate5aUploadFileMeta small{color:#8f805d;font-size:10px;font-weight:750}
+.gate5aTextField,
+.gate5aSelectField{display:grid;gap:7px;margin-top:15px}
+.gate5aTextField textarea,
+.gate5aSelectField select{
+  width:100%;
+  color:#fff8e7;
+  border:1px solid rgba(255,215,106,.24);
+  border-radius:14px;
+  background:#090704;
+  font:inherit;
+  font-size:13px;
+  line-height:1.5;
+  outline:none;
+}
+.gate5aTextField textarea{min-height:118px;padding:12px 13px;resize:vertical}
+.gate5aSelectField select{min-height:48px;padding:10px 38px 10px 13px}
+.gate5aTextField textarea::placeholder{color:#776b50}
+.gate5aTextField textarea:focus,
+.gate5aSelectField select:focus{
+  border-color:#ffd76a;
+  box-shadow:0 0 0 3px rgba(255,194,51,.12);
+}
+.gate5aTextField > small{color:#8f805d;font-size:10px;text-align:right}
+.gate5aUploadSuccess{
+  margin-top:15px;
+  padding:12px 14px;
+  color:#fff1b8;
+  border:1px solid rgba(255,215,106,.26);
+  border-radius:13px;
+  background:rgba(255,194,51,.08);
+  font-size:12px;
+  font-weight:850;
+}
+.gate5aSectionDivider{
+  display:flex;
+  align-items:center;
+  gap:12px;
+  margin:24px 0 4px;
+  color:#8f805d;
+  font-size:10px;
+  font-weight:900;
+  letter-spacing:.07em;
+  text-transform:uppercase;
+}
+.gate5aSectionDivider::after{content:"";height:1px;flex:1;background:rgba(255,215,106,.14)}
+
 @media (max-width:860px){
   #gate5aReviewerRoot{padding:12px 10px 28px}
   .gate5aReviewerHeader{flex-direction:column;padding:20px;border-radius:22px}
@@ -6569,6 +6887,11 @@ body.gate5a-reviewer-active main{
   .gate5aActions > button{width:100%}
   .gate5aHistoryItem dl{grid-template-columns:1fr}
   .gate5aAuthGate{grid-template-columns:1fr}
+  .gate5a-reviewer-real .gate5aReviewerBrand{align-items:flex-start}
+  .gate5aUploadIntro{grid-template-columns:auto minmax(0,1fr)}
+  .gate5aUploadIntro .gate5aFilePicker{grid-column:1/-1;width:100%}
+  .gate5aUploadIntro > small{grid-column:1/-1;text-align:center}
+  .gate5aUploadDraft{grid-template-columns:1fr}
 }
 </style>
 </head>

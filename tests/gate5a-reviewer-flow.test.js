@@ -1109,3 +1109,123 @@ test("reviewer helper contains the complete non-admin journey and no real provid
     );
   }
 });
+
+test("real reviewer allowlist accepts only GET and POST on the exact media route", () => {
+  const exact = new URL(
+    `${gate5a.STAGING_API_ORIGIN}/v1/social/reviewer/media`
+  );
+  assert.equal(gate5a.realReviewerRequestAllowed(exact, "GET"), true);
+  assert.equal(gate5a.realReviewerRequestAllowed(exact, "POST"), true);
+  assert.equal(gate5a.realReviewerRequestAllowed(exact, "PUT"), false);
+  assert.equal(gate5a.realReviewerRequestAllowed(
+    new URL(`${exact}?unexpected=1`),
+    "POST"
+  ), false);
+  assert.equal(gate5a.realReviewerRequestAllowed(
+    new URL(`${exact}/unexpected`),
+    "POST"
+  ), false);
+});
+
+test("real reviewer template exposes the app-like JPEG preparation surface", () => {
+  const html = gate5a.realReviewerTemplate();
+  for (const expected of [
+    "IA4Tube · Revisão oficial do Instagram",
+    "gate5aBrandMark",
+    "data-real-upload-input",
+    'accept=".jpg,.jpeg,image/jpeg"',
+    "data-real-upload-preview",
+    "data-real-upload-caption",
+    'maxlength="2150"',
+    "Somente JPEG 1080 × 1080 · máximo de 8 MB",
+    'data-real-action="upload-media"',
+    "Adicionar à revisão"
+  ]) {
+    assert.ok(html.includes(expected), `Contrato visual ausente: ${expected}`);
+  }
+  assert.match(appSource, /body\.gate5a-reviewer-real\s*\{/);
+  assert.match(appSource, /background-color:#020202 !important/);
+  assert.match(appSource, /\.gate5a-reviewer-real \.gate5aReviewerHeader/);
+  assert.match(appSource, /#ffd76a/i);
+});
+
+test("real reviewer client uploads exactly jpeg and caption as multipart", async () => {
+  class FakeFormData {
+    constructor() {
+      this.parts = [];
+    }
+    append(name, value, fileName) {
+      this.parts.push({ name, value, fileName });
+    }
+  }
+  const requests = [];
+  const jpeg = Object.freeze({
+    name: "ia4tube-review.jpg",
+    type: "image/jpeg",
+    size: 1024
+  });
+  const caption = "Publicação controlada da IA4Tube.";
+  const uploaded = Object.freeze({
+    id: `reviewer-jpeg:${"a".repeat(64)}`,
+    fileName: "preview_ia4tube.jpg",
+    mimeType: "image/jpeg",
+    width: 1080,
+    height: 1080,
+    thumbnailUrl: `${gate5a.STAGING_API_ORIGIN}/v1/social/reviewer/media-capability/test`,
+    caption: `${caption}\n\n#IA4Tube #IA4TubeReview_TEST`,
+    owner: "Empresa autenticada"
+  });
+  const client = gate5a.createHttpRealReviewerClient({
+    apiBase: gate5a.STAGING_API_ORIGIN,
+    tokenProvider: () => "reviewer-session",
+    FormDataImpl: FakeFormData,
+    fetchImpl: async (url, init) => {
+      requests.push({ url, init });
+      return {
+        ok: true,
+        status: 201,
+        async json() {
+          return {
+            ok: true,
+            contentOwnerDerivedFromSession: true,
+            media: uploaded
+          };
+        }
+      };
+    }
+  });
+
+  const result = await client.uploadMedia(jpeg, caption);
+  assert.equal(result.media, uploaded);
+  assert.equal(requests.length, 1);
+  assert.equal(
+    requests[0].url,
+    `${gate5a.STAGING_API_ORIGIN}/v1/social/reviewer/media`
+  );
+  assert.equal(requests[0].init.method, "POST");
+  assert.equal(requests[0].init.headers.Authorization, "Bearer reviewer-session");
+  assert.equal(requests[0].init.headers["Content-Type"], undefined);
+  assert.ok(requests[0].init.body instanceof FakeFormData);
+  assert.deepEqual(
+    requests[0].init.body.parts.map(({ name, fileName }) => ({ name, fileName })),
+    [
+      { name: "jpeg", fileName: "ia4tube-review.jpg" },
+      { name: "caption", fileName: undefined }
+    ]
+  );
+  assert.equal(requests[0].init.body.parts[0].value, jpeg);
+  assert.equal(requests[0].init.body.parts[1].value, caption);
+});
+
+test("successful upload selects its JPEG without invoking OAuth or publication", () => {
+  const start = helperSource.indexOf('} else if (action === "upload-media")');
+  const end = helperSource.indexOf('} else if (action === "publish")', start);
+  assert.ok(start >= 0 && end > start, "ramo dedicado de upload deve existir");
+  const uploadBranch = helperSource.slice(start, end);
+  assert.match(uploadBranch, /client\.uploadMedia\(file, caption\)/);
+  assert.match(uploadBranch, /selectedMediaId:\s*uploaded\.id/);
+  assert.match(uploadBranch, /media:\s*nextMedia/);
+  assert.equal(uploadBranch.includes("client.publish"), false);
+  assert.equal(uploadBranch.includes("client.authorize"), false);
+  assert.equal(uploadBranch.includes("location.assign"), false);
+});

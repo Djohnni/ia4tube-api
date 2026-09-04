@@ -31,6 +31,8 @@
   const SAFE_RETURN_CODE_PATTERN = /^[a-z0-9_]{2,96}$/;
   const CLIENT_REQUEST_ID = "gate5a-reviewer-manual-publish-v1";
   const CONTROLLED_ASSET_ID = "controlled-review-jpeg";
+  const REAL_REVIEWER_JPEG_MAX_BYTES = 8 * 1024 * 1024;
+  const REAL_REVIEWER_SOURCE_CAPTION_MAX_LENGTH = 2150;
   const CALLBACK_SENSITIVE_KEYS = Object.freeze([
     "code",
     "state",
@@ -479,7 +481,7 @@
         .test(requestUrl.pathname)
     ) return true;
     if (
-      method === "GET" &&
+      ["GET", "POST"].includes(method) &&
       requestUrl.pathname === `${REAL_REVIEWER_PREFIX}/media`
     ) return true;
     if (
@@ -1421,7 +1423,7 @@
       });
     }
 
-    async function request(route, method = "GET", body) {
+    async function request(route, method = "GET", body, requestOptions = {}) {
       const suffix = String(route || "");
       if (
         !suffix.startsWith("/") ||
@@ -1444,8 +1446,12 @@
       };
       const init = { method, headers, cache: "no-store" };
       if (body !== undefined) {
-        headers["Content-Type"] = "application/json";
-        init.body = JSON.stringify(body);
+        if (requestOptions.multipart === true) {
+          init.body = body;
+        } else {
+          headers["Content-Type"] = "application/json";
+          init.body = JSON.stringify(body);
+        }
       }
       const response = await fetchImpl(`${apiBase}${suffix}`, init);
       const payload = await response.json().catch(() => null);
@@ -1515,6 +1521,24 @@
         `${OAUTH_RETURN_PREFIX}/${encodeURIComponent(reference)}`
       ),
       media: () => request(`${REAL_REVIEWER_PREFIX}/media`),
+      uploadMedia: (jpeg, caption) => {
+        const FormDataImpl = options.FormDataImpl ||
+          (typeof FormData === "function" ? FormData : null);
+        if (!FormDataImpl) {
+          throw Object.assign(new Error("Envio de JPEG indisponível neste navegador."), {
+            code: "real_reviewer_upload_unavailable"
+          });
+        }
+        const form = new FormDataImpl();
+        form.append("jpeg", jpeg, jpeg?.name || "ia4tube-reviewer.jpg");
+        form.append("caption", caption);
+        return request(
+          `${REAL_REVIEWER_PREFIX}/media`,
+          "POST",
+          form,
+          { multipart: true }
+        );
+      },
       publish: (mediaId, requestId) => request(
         `${REAL_REVIEWER_PREFIX}/publications`,
         "POST",
@@ -1643,7 +1667,7 @@
     return `
       <div class="gate5aReviewerShell">
         <header class="gate5aReviewerHeader">
-          <div><div class="gate5aEyebrow">Revisão oficial do Instagram</div><h1>Publicação manual com a IA4Tube</h1><p>Jornada real, autenticada e vinculada à empresa da sessão.</p></div>
+          <div class="gate5aReviewerBrand"><div class="gate5aBrandMark" aria-hidden="true"><svg viewBox="0 0 64 64" focusable="false"><circle cx="32" cy="32" r="28"></circle><path d="M15 40h36M34 18v35M15 40l19-22"></path><circle class="gate5aBrandDot" cx="34" cy="10" r="3.5"></circle></svg></div><div><div class="gate5aEyebrow">IA4Tube · Revisão oficial do Instagram</div><h1>Publique com segurança</h1><p>Escolha a imagem, confira a legenda e publique manualmente pela IA4Tube.</p></div></div>
           <div class="gate5aEnvironmentBadge"><span></span> Staging · integração real</div>
         </header>
         <div class="gate5aSafetyNotice" role="note"><strong>Conexão segura:</strong> sua senha é digitada somente no ambiente oficial do Instagram. A IA4Tube nunca recebe sua senha, código OAuth ou token no navegador. Conectar não publica nada.</div>
@@ -1666,7 +1690,32 @@
             <section data-real-screen="authorization" hidden><div class="gate5aScreenHeading"><span class="gate5aStepNumber">02</span><div><h2 data-real-field="authorizationTitle">Conectar Instagram</h2><p data-real-field="authorizationMessage">A autorização começa somente após seu clique.</p></div></div><div class="gate5aSecurityCopy"><strong>Antes de continuar</strong><ul><li>A senha permanece no ambiente oficial do Instagram.</li><li>Serão solicitadas apenas instagram_business_basic e instagram_business_content_publish.</li><li>Nada é publicado durante a conexão.</li></ul></div><div class="gate5aActions"><button type="button" class="gate5aPrimary" data-real-action="authorize" data-real-authorize>Conectar Instagram</button><strong data-real-connected-note hidden>Instagram conectado</strong></div></section>
             <section data-real-screen="oauth-return" hidden><div class="gate5aScreenHeading"><span class="gate5aStepNumber">03</span><div><h2>Confirmando sua conta</h2><p>O retorno visual usa apenas uma referência opaca e remove os parâmetros da URL.</p></div></div><ol class="gate5aProgressList"><li class="done"><span>1</span><div><strong>Retorno recebido</strong><small>Código e state não ficam nesta página.</small></div></li><li class="done"><span>2</span><div><strong>URL higienizada</strong><small>Nenhum token é devolvido ao navegador.</small></div></li><li><span>3</span><div><strong data-real-field="returnStatus">Confirmando sua conta</strong><small data-real-field="returnMessage">Aguarde a leitura do estado seguro.</small></div></li></ol><div class="gate5aActions"><button type="button" class="gate5aPrimary" data-real-action="refresh">Continuar</button></div></section>
             <section data-real-screen="connection" hidden><div class="gate5aScreenHeading"><span class="gate5aStepNumber">04</span><div><h2>Conta profissional</h2><p>Business ou Creator, vinculada à empresa autenticada.</p></div></div><div class="gate5aConnectionCard"><div class="gate5aAvatar">IG</div><div><span>Conta conectada</span><h3 data-real-field="username">—</h3><p data-real-field="accountType">—</p></div><strong class="gate5aStatusGood" data-real-field="connectionBadge">Aguardando</strong></div><div class="gate5aScopeGrid"><div><span>instagram_business_basic</span><strong>Necessária</strong></div><div><span>instagram_business_content_publish</span><strong>Necessária</strong></div></div><div class="gate5aActions"><button type="button" class="gate5aPrimary" data-real-action="go-media">Selecionar JPEG</button></div></section>
-            <section data-real-screen="media" hidden><div class="gate5aScreenHeading"><span class="gate5aStepNumber">05</span><div><h2>Revisar imagem e legenda</h2><p>A lista contém somente JPEGs autorizados da empresa da sessão.</p></div></div><label class="gate5aCaption"><span>Conteúdo autorizado</span><select data-real-media-select><option value="">Selecione um JPEG</option></select></label><div class="gate5aMediaReview" data-real-media-review hidden><img data-real-field-src="mediaAsset" alt="Prévia do JPEG autorizado"><div><span class="gate5aSyntheticTag">Conteúdo real da empresa</span><h3 data-real-field="mediaFile">preview_ia4tube.jpg</h3><p><strong>Formato:</strong> image/jpeg · <span data-real-field="mediaDimensions">—</span></p><div class="gate5aCaption"><span>Legenda final com marcador único de confirmação</span><p data-real-field="caption">—</p></div><ul><li>Proprietário: empresa autenticada</li><li>Modo: publicação manual</li><li>Envio: somente após confirmação explícita</li></ul></div></div><p data-real-no-media hidden>Nenhum JPEG elegível está disponível para esta empresa.</p><div class="gate5aActions"><button type="button" class="gate5aPrimary" data-real-action="publish" disabled>Publicar no Instagram</button></div></section>
+            <section data-real-screen="media" hidden>
+              <div class="gate5aScreenHeading"><span class="gate5aStepNumber">05</span><div><h2>Imagem e legenda</h2><p>Prepare o conteúdo aqui. Esta etapa não publica no Instagram.</p></div></div>
+              <div class="gate5aUploadPanel">
+                <div class="gate5aUploadIntro">
+                  <div class="gate5aUploadIcon" aria-hidden="true">＋</div>
+                  <div><h3>Adicionar uma imagem</h3><p>Escolha um JPEG do seu dispositivo para conferir antes da publicação.</p></div>
+                  <label class="gate5aSecondary gate5aFilePicker" for="gate5aRealJpegInput">Escolher JPEG</label>
+                  <input id="gate5aRealJpegInput" type="file" accept=".jpg,.jpeg,image/jpeg" aria-describedby="gate5aRealJpegHelp" data-real-upload-input hidden>
+                  <small id="gate5aRealJpegHelp">Somente JPEG 1080 × 1080 · máximo de 8 MB</small>
+                </div>
+                <div class="gate5aUploadDraft" data-real-upload-draft hidden>
+                  <img data-real-upload-preview alt="Prévia do JPEG selecionado">
+                  <div class="gate5aUploadFields">
+                    <div class="gate5aUploadFileMeta"><span>Imagem selecionada</span><strong data-real-upload-name>—</strong><small data-real-upload-size>—</small><small data-real-upload-dimensions>Dimensões ainda não verificadas</small></div>
+                    <label class="gate5aTextField"><span>Legenda</span><textarea rows="5" maxlength="${REAL_REVIEWER_SOURCE_CAPTION_MAX_LENGTH}" data-real-upload-caption placeholder="Escreva a legenda que acompanhará a publicação"></textarea><small><span data-real-caption-count>0</span> de ${REAL_REVIEWER_SOURCE_CAPTION_MAX_LENGTH} caracteres</small></label>
+                    <div class="gate5aActions"><button type="button" class="gate5aPrimary" data-real-action="upload-media" disabled>Adicionar à revisão</button><button type="button" class="gate5aSecondary" data-real-action="cancel-upload">Cancelar</button></div>
+                  </div>
+                </div>
+                <div class="gate5aUploadSuccess" data-real-upload-success role="status" hidden>JPEG adicionado. Confira abaixo antes de publicar.</div>
+              </div>
+              <div class="gate5aSectionDivider"><span>Conteúdo pronto para revisão</span></div>
+              <label class="gate5aSelectField"><span>JPEG autorizado</span><select data-real-media-select><option value="">Selecione um JPEG</option></select></label>
+              <div class="gate5aMediaReview" data-real-media-review hidden><img data-real-field-src="mediaAsset" alt="Prévia do JPEG autorizado"><div><span class="gate5aSyntheticTag">Conteúdo real da empresa</span><h3 data-real-field="mediaFile">preview_ia4tube.jpg</h3><p><strong>Formato:</strong> image/jpeg · <span data-real-field="mediaDimensions">—</span></p><div class="gate5aCaption"><span>Legenda final com marcador único de confirmação</span><p data-real-field="caption">—</p></div><ul><li>Proprietário: empresa autenticada</li><li>Modo: publicação manual</li><li>Envio: somente após confirmação explícita</li></ul></div></div>
+              <p class="gate5aEmpty" data-real-no-media hidden>Nenhum JPEG foi adicionado ainda.</p>
+              <div class="gate5aActions"><button type="button" class="gate5aPrimary" data-real-action="publish" disabled>Publicar no Instagram</button></div>
+            </section>
             <section data-real-screen="publication" hidden><div class="gate5aScreenHeading"><span class="gate5aStepNumber">06</span><div><h2>Publicação manual</h2><p>Enviando e Confirmando ainda não significam Publicado.</p></div></div><div class="gate5aPublicationState"><span>Estado atual</span><strong data-real-field="publicationState">Aguardando envio</strong><small data-real-field="publicationHint">Um clique explícito inicia a operação.</small></div><ol class="gate5aPublishTimeline"><li data-real-publish-step="sending"><span></span><div><strong>Enviando</strong><small>Uma única submissão idempotente.</small></div></li><li data-real-publish-step="provider_confirming"><span></span><div><strong>Confirmando</strong><small>Ainda não tratado como publicado.</small></div></li><li data-real-publish-step="published"><span></span><div><strong>Publicado</strong><small>Somente com prova persistida do provider.</small></div></li></ol><div class="gate5aPublishedProof" data-real-proof hidden><h3>Publicado no Instagram</h3><div class="gate5aProofGrid"><div><span>Media ID</span><strong data-real-field="mediaId">—</strong></div><div><span>Horário</span><strong data-real-field="publishedAt">—</strong></div><div><span>Referência interna</span><strong data-real-field="reference">—</strong></div><div><span>Permalink</span><strong data-real-field="permalink">—</strong></div></div></div><div class="gate5aActions"><button type="button" class="gate5aPrimary" data-real-action="reconcile" hidden>Confirmar estado no Instagram</button><button type="button" class="gate5aSecondary" data-real-action="history">Ver histórico</button></div></section>
             <section data-real-screen="history" hidden><div class="gate5aScreenHeading"><span class="gate5aStepNumber">07</span><div><h2>Histórico canônico</h2><p>O registro social persiste após recarregar a página ou reiniciar o serviço.</p></div></div><div class="gate5aHistoryList" data-real-history></div><div class="gate5aPublishedProof" data-real-detail hidden></div><div class="gate5aActions"><button type="button" class="gate5aPrimary" data-real-action="disconnect-screen">Revisar desconexão</button></div></section>
             <section data-real-screen="data" hidden><div class="gate5aScreenHeading"><span class="gate5aStepNumber">08</span><div><h2>Desconectar Instagram</h2><p>A desconexão é separada da publicação e exige confirmação humana.</p></div></div><div class="gate5aDataGrid"><article><h3>Conta atual</h3><p data-real-field="disconnectAccount">Nenhuma conta conectada.</p><button type="button" class="gate5aDanger" data-real-action="disconnect">Desconectar conta</button></article><article><h3>O que permanece</h3><p>O histórico canônico da publicação continua disponível conforme a política aplicável.</p></article></div></section>
@@ -1681,7 +1730,10 @@
     if (!root || !targetWindow || targetWindow.IA4_REAL_REVIEWER_ACTIVE !== true) {
       return null;
     }
-    targetWindow.document.body.classList.add("gate5a-reviewer-active");
+    targetWindow.document.body.classList.add(
+      "gate5a-reviewer-active",
+      "gate5a-reviewer-real"
+    );
     root.hidden = false;
     root.innerHTML = realReviewerTemplate();
     let token = "";
@@ -1694,7 +1746,8 @@
     const client = options.client || createHttpRealReviewerClient({
       apiBase,
       fetchImpl: targetWindow.fetch.bind(targetWindow),
-      tokenProvider: () => token
+      tokenProvider: () => token,
+      FormDataImpl: targetWindow.FormData
     });
     let state = {
       stage: targetWindow.IA4_GATE5A_REVIEW_STAGE || "overview",
@@ -1707,9 +1760,12 @@
       history: [],
       detail: null,
       returnStatus: null,
+      uploadSucceeded: false,
       busy: false,
       error: ""
     };
+    let pendingUpload = null;
+    let pendingCaption = "";
     const returnReference = RETURN_REFERENCE_PATTERN.test(
       String(targetWindow.IA4_GATE5A_RETURN_REFERENCE || "")
     ) ? targetWindow.IA4_GATE5A_RETURN_REFERENCE : null;
@@ -1728,6 +1784,55 @@
     }
     function selectedMedia() {
       return state.media.find((item) => item.id === state.selectedMediaId) || null;
+    }
+    function formatFileSize(value) {
+      const bytes = Number(value);
+      if (!Number.isFinite(bytes) || bytes < 0) return "—";
+      if (bytes < 1024) return `${bytes} bytes`;
+      if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+      return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
+    }
+    function clearPendingUpload() {
+      if (pendingUpload?.previewUrl && targetWindow.URL?.revokeObjectURL) {
+        targetWindow.URL.revokeObjectURL(pendingUpload.previewUrl);
+      }
+      pendingUpload = null;
+      pendingCaption = "";
+      const input = one("[data-real-upload-input]");
+      if (input) input.value = "";
+    }
+    function renderPendingUpload() {
+      const draft = one("[data-real-upload-draft]");
+      if (!draft) return;
+      draft.hidden = !pendingUpload;
+      const preview = one("[data-real-upload-preview]");
+      if (preview) {
+        if (pendingUpload?.previewUrl) preview.src = pendingUpload.previewUrl;
+        else preview.removeAttribute("src");
+      }
+      const name = one("[data-real-upload-name]");
+      if (name) name.textContent = pendingUpload?.file?.name || "—";
+      const size = one("[data-real-upload-size]");
+      if (size) size.textContent = pendingUpload
+        ? `${formatFileSize(pendingUpload.file.size)} · image/jpeg`
+        : "—";
+      const dimensions = one("[data-real-upload-dimensions]");
+      if (dimensions) dimensions.textContent = pendingUpload?.dimensionsValid
+        ? "1080 × 1080 confirmado"
+        : pendingUpload
+          ? "Verificando dimensões…"
+          : "Dimensões ainda não verificadas";
+      const caption = one("[data-real-upload-caption]");
+      if (caption && caption.value !== pendingCaption) caption.value = pendingCaption;
+      const count = one("[data-real-caption-count]");
+      if (count) count.textContent = String(pendingCaption.length);
+      const upload = one("[data-real-action=\"upload-media\"]");
+      if (upload) {
+        upload.disabled = !pendingUpload || pendingUpload.dimensionsValid !== true ||
+          !pendingCaption.trim() ||
+          pendingCaption.length > REAL_REVIEWER_SOURCE_CAPTION_MAX_LENGTH ||
+          state.busy;
+      }
     }
     function publicationLabel(value) {
       return {
@@ -1794,6 +1899,7 @@
       one("[data-real-auth-gate]").hidden = authenticated;
       one("[data-real-layout]").hidden = !authenticated;
       one("[data-real-busy]").hidden = !state.busy;
+      one("[data-real-upload-success]").hidden = !state.uploadSucceeded;
       const error = one("[data-real-error]");
       error.hidden = !state.error;
       error.textContent = state.error;
@@ -1889,7 +1995,8 @@
         ? "A conta profissional foi vinculada com segurança."
         : state.returnStatus
           ? "Confira o estado e tente a autorização novamente."
-          : "Aguarde a leitura do estado seguro.");
+           : "Aguarde a leitura do estado seguro.");
+      renderPendingUpload();
       renderHistory();
       renderDetail();
     }
@@ -1936,7 +2043,87 @@
     root.addEventListener("change", (event) => {
       if (event.target?.matches?.("[data-real-media-select]")) {
         update({ selectedMediaId: event.target.value || null });
+        return;
       }
+      if (event.target?.matches?.("[data-real-upload-input]")) {
+        const file = event.target.files?.[0] || null;
+        if (!file) return;
+        const validName = /\.jpe?g$/i.test(String(file.name || ""));
+        if (
+          file.type !== "image/jpeg" ||
+          !validName ||
+          file.size < 1 ||
+          file.size > REAL_REVIEWER_JPEG_MAX_BYTES
+        ) {
+          clearPendingUpload();
+          update({
+            uploadSucceeded: false,
+            error: file.size > REAL_REVIEWER_JPEG_MAX_BYTES
+              ? "O JPEG deve ter no máximo 8 MB."
+              : "Selecione um arquivo JPEG válido (.jpg ou .jpeg)."
+          });
+          return;
+        }
+        if (pendingUpload?.previewUrl && targetWindow.URL?.revokeObjectURL) {
+          targetWindow.URL.revokeObjectURL(pendingUpload.previewUrl);
+        }
+        let previewUrl = "";
+        try {
+          previewUrl = targetWindow.URL?.createObjectURL?.(file) || "";
+        } catch (_error) {
+          previewUrl = "";
+        }
+        if (!previewUrl) {
+          clearPendingUpload();
+          update({
+            uploadSucceeded: false,
+            error: "Não foi possível abrir a prévia deste JPEG."
+          });
+          return;
+        }
+        pendingUpload = { file, previewUrl, dimensionsValid: false };
+        update({ uploadSucceeded: false, error: "" });
+        const ImageImpl = targetWindow.Image;
+        if (typeof ImageImpl !== "function") {
+          clearPendingUpload();
+          update({
+            uploadSucceeded: false,
+            error: "Não foi possível verificar as dimensões deste JPEG."
+          });
+          return;
+        }
+        const probe = new ImageImpl();
+        probe.onload = () => {
+          if (pendingUpload?.previewUrl !== previewUrl) return;
+          if (probe.naturalWidth !== 1080 || probe.naturalHeight !== 1080) {
+            clearPendingUpload();
+            update({
+              uploadSucceeded: false,
+              error: "O JPEG deve ter exatamente 1080 × 1080 pixels."
+            });
+            return;
+          }
+          pendingUpload.dimensionsValid = true;
+          renderPendingUpload();
+        };
+        probe.onerror = () => {
+          if (pendingUpload?.previewUrl !== previewUrl) return;
+          clearPendingUpload();
+          update({
+            uploadSucceeded: false,
+            error: "Não foi possível verificar as dimensões deste JPEG."
+          });
+        };
+        probe.src = previewUrl;
+      }
+    });
+    root.addEventListener("input", (event) => {
+      if (!event.target?.matches?.("[data-real-upload-caption]")) return;
+      pendingCaption = String(event.target.value || "").slice(
+        0,
+        REAL_REVIEWER_SOURCE_CAPTION_MAX_LENGTH
+      );
+      renderPendingUpload();
     });
     root.addEventListener("click", (event) => {
       const detailButton = event.target?.closest?.("[data-real-detail-id]");
@@ -1987,6 +2174,36 @@
         run(refresh, "connection");
       } else if (action === "go-media") {
         update({ stage: "media", error: "" });
+      } else if (action === "cancel-upload") {
+        clearPendingUpload();
+        update({ uploadSucceeded: false, error: "" });
+      } else if (action === "upload-media") {
+        const file = pendingUpload?.file || null;
+        const caption = pendingCaption.trim();
+        if (!file || !caption) return;
+        run(async () => {
+          const result = await client.uploadMedia(file, caption);
+          const uploaded = result?.media;
+          if (
+            !isPlainObject(uploaded) ||
+            typeof uploaded.id !== "string" ||
+            uploaded.mimeType !== "image/jpeg" ||
+            typeof uploaded.thumbnailUrl !== "string"
+          ) {
+            throw new Error("A confirmação do JPEG enviado foi recusada.");
+          }
+          const nextMedia = [
+            uploaded,
+            ...state.media.filter((item) => item.id !== uploaded.id)
+          ].slice(0, 20);
+          clearPendingUpload();
+          update({
+            media: nextMedia,
+            selectedMediaId: uploaded.id,
+            uploadSucceeded: true,
+            error: ""
+          });
+        }, "media");
       } else if (action === "publish") {
         const media = selectedMedia();
         if (!media || typeof targetWindow.crypto?.randomUUID !== "function") return;

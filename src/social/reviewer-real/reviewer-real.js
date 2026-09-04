@@ -2,6 +2,7 @@
 
 const crypto = require("node:crypto");
 const express = require("express");
+const multer = require("multer");
 
 const {
   createConnectorContext,
@@ -11,6 +12,7 @@ const { connectorFail } = require("../connectors/errors");
 const { createConnectorRegistry } = require("../connectors/registry");
 const { createSocialConnectorService } = require("../connectors/service");
 const { PUBLICATION_STATES } = require("../connectors/states");
+const { createConcurrencyLimiter } = require("../../security/runtime-security");
 const {
   INSTAGRAM_OAUTH_SCOPES,
   INSTAGRAM_PROVIDER
@@ -40,6 +42,8 @@ const UUID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const SAFE_MEDIA_REFERENCE = /^[A-Za-z0-9:_-]{20,200}$/;
 const PROFESSIONAL_ACCOUNT_TYPES = new Set(["business", "creator"]);
+const REVIEWER_MEDIA_MAX_BYTES = 8 * 1024 * 1024;
+const REVIEWER_SOURCE_CAPTION_MAX_LENGTH = 2150;
 const ERROR_STATUS = Object.freeze({
   connector_contract_invalid: 503,
   credential_unavailable: 503,
@@ -49,11 +53,38 @@ const ERROR_STATUS = Object.freeze({
   provider_permanent_failure: 502,
   provider_result_unknown: 502,
   provider_temporary_failure: 503,
+  reviewer_media_invalid: 400,
+  reviewer_media_limit_reached: 409,
+  reviewer_media_storage_unavailable: 503,
+  reviewer_media_too_large: 413,
   resource_unavailable: 404,
   social_authenticated_principal_invalid: 401,
   social_context_invalid: 403,
   state_transition_invalid: 409
 });
+
+function reviewerMediaError(code) {
+  const error = new Error("Midia do revisor recusada.");
+  error.code = code;
+  return error;
+}
+
+function reviewerMediaFail(code) {
+  throw reviewerMediaError(code);
+}
+
+function reviewerSourceCaption(value) {
+  if (
+    typeof value !== "string" ||
+    value !== value.trim() ||
+    value.length < 1 ||
+    value.length > REVIEWER_SOURCE_CAPTION_MAX_LENGTH ||
+    /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(value)
+  ) {
+    reviewerMediaFail("reviewer_media_invalid");
+  }
+  return value;
+}
 
 function exactTrue(value) {
   return value === "true";
@@ -510,6 +541,35 @@ function createInstagramRealReviewerService(options = {}) {
     });
   }
 
+  async function uploadMedia(input = {}) {
+    const source = exactRecord(input, ["verifiedClaims", "bytes", "caption"]);
+    const current = session({ verifiedClaims: source.verifiedClaims });
+    const caption = reviewerSourceCaption(source.caption);
+    if (
+      !Buffer.isBuffer(source.bytes) ||
+      source.bytes.length < 16
+    ) {
+      reviewerMediaFail("reviewer_media_invalid");
+    }
+    if (source.bytes.length > REVIEWER_MEDIA_MAX_BYTES) {
+      reviewerMediaFail("reviewer_media_too_large");
+    }
+    if (typeof media.storeOwnedJpeg !== "function") {
+      reviewerMediaFail("reviewer_media_storage_unavailable");
+    }
+    const stored = await media.storeOwnedJpeg({
+      context: current.context,
+      owner: current.owner,
+      bytes: source.bytes,
+      caption
+    });
+    return Object.freeze({
+      ok: true,
+      contentOwnerDerivedFromSession: true,
+      media: publicMedia(stored, current.context.companyId)
+    });
+  }
+
   async function listPublications(input = {}) {
     const current = session(input);
     const scope = connectorStore.scope(current.context);
@@ -699,7 +759,8 @@ function createInstagramRealReviewerService(options = {}) {
     listMedia,
     listPublications,
     publish,
-    reconcile
+    reconcile,
+    uploadMedia
   });
 }
 
@@ -742,6 +803,61 @@ function sendError(res, error) {
   }));
 }
 
+const parseReviewerMediaMultipart = multer({
+  storage: multer.memoryStorage(),
+  limits: Object.freeze({
+    // Multer marks a stream truncated when it reaches its configured ceiling.
+    // One extra byte keeps the public 8 MiB limit inclusive; the service still
+    // rejects every payload whose actual size exceeds REVIEWER_MEDIA_MAX_BYTES.
+    fileSize: REVIEWER_MEDIA_MAX_BYTES + 1,
+    files: 1,
+    fields: 1,
+    // Busboy counts the terminating boundary when enforcing this limit.
+    // Three therefore admits exactly the one file + one text field contract.
+    parts: 3,
+    fieldNameSize: 32,
+    fieldSize: 16 * 1024
+  }),
+  fileFilter(_req, file, callback) {
+    if (
+      file?.fieldname !== "jpeg" ||
+      String(file?.mimetype || "").trim().toLowerCase() !== "image/jpeg"
+    ) {
+      return callback(reviewerMediaError("reviewer_media_invalid"));
+    }
+    return callback(null, true);
+  }
+}).single("jpeg");
+
+function reviewerMediaMultipart(req, res, next) {
+  return parseReviewerMediaMultipart(req, res, (error) => {
+    if (!error) return next();
+    if (Buffer.isBuffer(req.file?.buffer)) req.file.buffer.fill(0);
+    const code = error instanceof multer.MulterError &&
+      error.code === "LIMIT_FILE_SIZE"
+      ? "reviewer_media_too_large"
+      : "reviewer_media_invalid";
+    return sendError(res, reviewerMediaError(code));
+  });
+}
+
+function assertReviewerMediaUpload(req) {
+  if (
+    !emptyRecord(req?.query) ||
+    !emptyRecord(req?.params) ||
+    !isRecord(req?.body) ||
+    Object.keys(req.body).length !== 1 ||
+    !Object.hasOwn(req.body, "caption") ||
+    !req.file ||
+    req.file.fieldname !== "jpeg" ||
+    req.file.mimetype !== "image/jpeg" ||
+    !Buffer.isBuffer(req.file.buffer) ||
+    req.file.size !== req.file.buffer.length
+  ) {
+    reviewerMediaFail("reviewer_media_invalid");
+  }
+}
+
 function createInstagramRealReviewerRouter(options = {}) {
   if (
     typeof options.authenticate !== "function" ||
@@ -750,6 +866,13 @@ function createInstagramRealReviewerRouter(options = {}) {
     connectorFail("connector_contract_invalid");
   }
   const router = options.router || express.Router();
+  const mediaUploadConcurrencyLimit = createConcurrencyLimiter({
+    maxGlobal: 2,
+    maxPerKey: 1,
+    keyGenerator: (req) => req.user?.whatsapp || "unauthenticated",
+    code: "reviewer_media_upload_in_progress",
+    message: "Ja existe um JPEG sendo enviado para esta empresa."
+  });
 
   function service() {
     const value = options.getService();
@@ -782,6 +905,33 @@ function createInstagramRealReviewerRouter(options = {}) {
       verifiedClaims: requireUser(req)
     }));
   }));
+
+  router.post(
+    "/media",
+    noStore,
+    options.authenticate,
+    mediaUploadConcurrencyLimit,
+    reviewerMediaMultipart,
+    route(async (req, res) => {
+      const bytes = req.file?.buffer;
+      try {
+        assertReviewerMediaUpload(req);
+        const currentService = service();
+        if (typeof currentService.uploadMedia !== "function") {
+          reviewerMediaFail("reviewer_media_storage_unavailable");
+        }
+        const result = await currentService.uploadMedia({
+          verifiedClaims: requireUser(req),
+          bytes,
+          caption: req.body.caption
+        });
+        return res.status(201).json(result);
+      } finally {
+        if (Buffer.isBuffer(bytes)) bytes.fill(0);
+        if (req.file) delete req.file.buffer;
+      }
+    })
+  );
 
   router.post("/publications", noStore, options.authenticate, route(async (req, res) => {
     exactRecord(req.body, ["mediaId", "clientRequestId"]);

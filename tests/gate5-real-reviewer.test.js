@@ -1,6 +1,7 @@
 "use strict";
 
 const assert = require("node:assert/strict");
+const crypto = require("node:crypto");
 const http = require("node:http");
 const test = require("node:test");
 
@@ -85,6 +86,33 @@ function capabilityUrl(mediaId, marker) {
     `${marker.repeat(24)}/${marker.repeat(40)}/${marker.repeat(43)}`;
 }
 
+function reviewerUploadForm({
+  bytes = Buffer.alloc(32, 0x41),
+  caption = "Publicação controlada para análise técnica.",
+  fieldName = "jpeg",
+  mimeType = "image/jpeg",
+  fileName = "reviewer-upload.jpg",
+  extraFields = [],
+  secondFile = null
+} = {}) {
+  const form = new FormData();
+  form.append(
+    fieldName,
+    new Blob([bytes], { type: mimeType }),
+    fileName
+  );
+  if (caption !== null) form.append("caption", caption);
+  for (const [name, value] of extraFields) form.append(name, value);
+  if (secondFile) {
+    form.append(
+      "jpeg",
+      new Blob([secondFile], { type: "image/jpeg" }),
+      "second-reviewer-upload.jpg"
+    );
+  }
+  return form;
+}
+
 function createFixture() {
   const authAdapter = createSocialAuthAdapter(IDENTITY_CONFIG);
   const claimsA = claims("tenant-a");
@@ -132,6 +160,7 @@ function createFixture() {
     })]
   ]);
   const publications = new Map();
+  const uploads = [];
   const mediaByOwner = new Map([
     ["tenant-a", Object.freeze({
       companyId: principalA.companyId,
@@ -188,6 +217,28 @@ function createFixture() {
       return value?.companyId === context.companyId && value.mediaId === mediaId
         ? copy(value)
         : null;
+    },
+    async storeOwnedJpeg({ context, owner, bytes, caption }) {
+      const sourceId = `upload-${String(uploads.length + 1).padStart(32, "0")}`;
+      const identity = reviewerMediaIdentity({
+        orderId: sourceId,
+        jpegSha256: crypto.createHash("sha256").update(bytes).digest("hex"),
+        caption
+      });
+      assert.ok(identity);
+      const value = Object.freeze({
+        companyId: context.companyId,
+        mediaId: identity.mediaId,
+        mimeType: "image/jpeg",
+        width: 1080,
+        height: 1080,
+        caption: identity.caption,
+        publicUrl: capabilityUrl(identity.mediaId, "c"),
+        thumbnailUrl: capabilityUrl(identity.mediaId, "c")
+      });
+      uploads.push({ context, owner, bytes, caption, value });
+      mediaByOwner.set(owner, value);
+      return copy(value);
     }
   });
   let tick = 0;
@@ -288,6 +339,7 @@ function createFixture() {
     principalA,
     principalB,
     publications,
+    uploads,
     serviceOptions,
     createService: () => createInstagramRealReviewerService(serviceOptions)
   };
@@ -1000,6 +1052,280 @@ test("gate externo fechado recusa antes de persistência ou provedor", async () 
   assert.equal(fixture.calls.publish, 0);
   assert.equal(fixture.calls.reconcile, 0);
   assert.equal(fixture.publications.size, 0);
+});
+
+test("upload direto deriva empresa da sessão e independe dos gates externos", async () => {
+  const fixture = createFixture();
+  const service = createInstagramRealReviewerService({
+    ...fixture.serviceOptions,
+    config: Object.freeze({
+      ...fixture.serviceOptions.config,
+      externalConnectionEnabled: false,
+      externalPublicationEnabled: false
+    })
+  });
+  const bytes = Buffer.alloc(64, 0x5a);
+  const caption = "Publicação controlada para análise técnica da IA4Tube.";
+  const result = await service.uploadMedia({
+    verifiedClaims: fixture.claimsA,
+    bytes,
+    caption
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.contentOwnerDerivedFromSession, true);
+  assert.equal(fixture.uploads.length, 1);
+  assert.equal(fixture.uploads[0].context.companyId, fixture.principalA.companyId);
+  assert.equal(fixture.uploads[0].owner, "tenant-a");
+  assert.equal(fixture.uploads[0].bytes, bytes);
+  assert.equal(fixture.uploads[0].caption, caption);
+  assert.match(result.media.id, /^reviewer-jpeg:[0-9a-f]{64}$/);
+  assert.equal(result.media.mimeType, "image/jpeg");
+  assert.equal(result.media.width, 1080);
+  assert.equal(result.media.height, 1080);
+  assert.equal(result.media.caption.startsWith(`${caption}\n\n#IA4Tube `), true);
+  assert.equal(result.media.owner, "Empresa autenticada");
+  assert.match(
+    result.media.thumbnailUrl,
+    /^https:\/\/ia4tube-api-staging-checkpoint-a\.onrender\.com\/v1\/social\/reviewer\/media-capability\//
+  );
+
+  const serialized = JSON.stringify(result);
+  for (const forbidden of [
+    "tenant-a",
+    fixture.principalA.companyId,
+    "storageKey",
+    "previewPath",
+    "sourceId",
+    "sha256"
+  ]) {
+    assert.equal(serialized.includes(forbidden), false, forbidden);
+  }
+  const listedA = await service.listMedia({ verifiedClaims: fixture.claimsA });
+  const listedB = await service.listMedia({ verifiedClaims: fixture.claimsB });
+  assert.equal(listedA.media.some((item) => item.id === result.media.id), true);
+  assert.equal(listedB.media.some((item) => item.id === result.media.id), false);
+  assert.deepEqual(fixture.calls, {
+    publish: 0,
+    reconcile: 0,
+    externalMeta: 0,
+    externalInstagram: 0,
+    sandbox: 0
+  });
+});
+
+test("upload direto recusa bytes, legenda e autoridade fora do contrato", async () => {
+  const fixture = createFixture();
+  const service = fixture.createService();
+  const validBytes = Buffer.alloc(32, 0x31);
+  const invalidInputs = [
+    { bytes: Buffer.alloc(15), caption: "Legenda válida" },
+    { bytes: validBytes, caption: "" },
+    { bytes: validBytes, caption: " somente espaços externos " },
+    { bytes: validBytes, caption: `controle\u0000invalido` },
+    { bytes: validBytes, caption: "x".repeat(2151) }
+  ];
+
+  for (const input of invalidInputs) {
+    await assert.rejects(service.uploadMedia({
+      verifiedClaims: fixture.claimsA,
+      ...input
+    }), { code: "reviewer_media_invalid" });
+  }
+  await assert.rejects(service.uploadMedia({
+    verifiedClaims: fixture.claimsA,
+    bytes: Buffer.alloc((8 * 1024 * 1024) + 1),
+    caption: "Legenda válida"
+  }), { code: "reviewer_media_too_large" });
+  await assert.rejects(service.uploadMedia({
+    verifiedClaims: fixture.claimsA,
+    bytes: validBytes,
+    caption: "Legenda válida",
+    companyId: fixture.principalA.companyId
+  }), { code: "connector_contract_invalid" });
+  assert.equal(fixture.uploads.length, 0);
+
+  const boundary = await service.uploadMedia({
+    verifiedClaims: fixture.claimsA,
+    bytes: validBytes,
+    caption: "x".repeat(2150)
+  });
+  assert.equal(boundary.media.caption.length, 2200);
+  assert.equal(fixture.uploads.length, 1);
+});
+
+test("router autentica antes do multipart e aplica contrato e limites do upload", async (t) => {
+  const fixture = createFixture();
+  const service = fixture.createService();
+  let authenticationCalls = 0;
+  const app = express();
+  app.use("/v1/social/reviewer", createInstagramRealReviewerRouter({
+    authenticate(req, res, next) {
+      authenticationCalls += 1;
+      if (req.headers.authorization !== "Bearer reviewer-test") {
+        return res.status(401).json({ ok: false, code: "login_required" });
+      }
+      req.user = fixture.claimsA;
+      return next();
+    },
+    getService: () => service
+  }));
+  const server = http.createServer(app);
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  t.after(() => new Promise((resolve) => server.close(resolve)));
+  const address = server.address();
+  const endpoint = `http://127.0.0.1:${address.port}/v1/social/reviewer/media`;
+
+  const unauthorized = await fetch(endpoint, {
+    method: "POST",
+    body: reviewerUploadForm({
+      bytes: Buffer.alloc((8 * 1024 * 1024) + 1),
+      mimeType: "image/png"
+    })
+  });
+  assert.equal(unauthorized.status, 401);
+  assert.equal(fixture.uploads.length, 0);
+
+  const uploaded = await fetch(endpoint, {
+    method: "POST",
+    headers: { authorization: "Bearer reviewer-test" },
+    body: reviewerUploadForm()
+  });
+  const uploadedBody = await uploaded.json();
+  assert.equal(uploaded.status, 201, JSON.stringify(uploadedBody));
+  assert.equal(uploaded.headers.get("cache-control"), "no-store");
+  assert.equal(uploadedBody.ok, true);
+  assert.match(uploadedBody.media.id, /^reviewer-jpeg:[0-9a-f]{64}$/);
+  assert.equal(fixture.uploads.length, 1);
+  assert.equal(fixture.uploads[0].bytes.every((byte) => byte === 0), true);
+
+  const exactLimit = await fetch(endpoint, {
+    method: "POST",
+    headers: { authorization: "Bearer reviewer-test" },
+    body: reviewerUploadForm({ bytes: Buffer.alloc(8 * 1024 * 1024, 0x43) })
+  });
+  assert.equal(exactLimit.status, 201, JSON.stringify(await exactLimit.json()));
+  assert.equal(fixture.uploads.length, 2);
+  assert.equal(fixture.uploads[1].bytes.every((byte) => byte === 0), true);
+
+  const rejectedCases = [
+    {
+      expectedStatus: 400,
+      form: reviewerUploadForm({ fieldName: "image" })
+    },
+    {
+      expectedStatus: 400,
+      form: reviewerUploadForm({ mimeType: "image/png" })
+    },
+    {
+      expectedStatus: 400,
+      form: reviewerUploadForm({ caption: null })
+    },
+    {
+      expectedStatus: 400,
+      form: reviewerUploadForm({
+        extraFields: [["companyId", fixture.principalA.companyId]]
+      })
+    },
+    {
+      expectedStatus: 400,
+      form: reviewerUploadForm({ secondFile: Buffer.alloc(32, 0x42) })
+    },
+    {
+      expectedStatus: 400,
+      form: reviewerUploadForm({ caption: "x".repeat(2151) })
+    },
+    {
+      expectedStatus: 413,
+      form: reviewerUploadForm({
+        bytes: Buffer.alloc((8 * 1024 * 1024) + 1)
+      })
+    }
+  ];
+  for (const { expectedStatus, form } of rejectedCases) {
+    const response = await fetch(endpoint, {
+      method: "POST",
+      headers: { authorization: "Bearer reviewer-test" },
+      body: form
+    });
+    assert.equal(response.status, expectedStatus);
+    const body = await response.json();
+    assert.equal(
+      body.code,
+      expectedStatus === 413
+        ? "reviewer_media_too_large"
+        : "reviewer_media_invalid"
+    );
+  }
+  assert.equal(fixture.uploads.length, 2);
+
+  const queryRejected = await fetch(`${endpoint}?owner=tenant-b`, {
+    method: "POST",
+    headers: { authorization: "Bearer reviewer-test" },
+    body: reviewerUploadForm()
+  });
+  assert.equal(queryRejected.status, 400);
+  assert.deepEqual(await queryRejected.json(), {
+    ok: false,
+    code: "reviewer_media_invalid"
+  });
+  assert.equal(fixture.uploads.length, 2);
+  assert.equal(authenticationCalls, 11);
+});
+
+test("router limita upload simultâneo da mesma empresa antes de alocar outro JPEG", async (t) => {
+  const fixture = createFixture();
+  const baseService = fixture.createService();
+  let releaseFirst;
+  let signalStarted;
+  const firstStarted = new Promise((resolve) => { signalStarted = resolve; });
+  const holdFirst = new Promise((resolve) => { releaseFirst = resolve; });
+  let uploadCalls = 0;
+  const service = Object.freeze({
+    ...baseService,
+    async uploadMedia(input) {
+      uploadCalls += 1;
+      signalStarted();
+      await holdFirst;
+      return baseService.uploadMedia(input);
+    }
+  });
+  const app = express();
+  app.use("/v1/social/reviewer", createInstagramRealReviewerRouter({
+    authenticate(req, _res, next) {
+      req.user = fixture.claimsA;
+      return next();
+    },
+    getService: () => service
+  }));
+  const server = http.createServer(app);
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  t.after(() => {
+    releaseFirst();
+    return new Promise((resolve) => server.close(resolve));
+  });
+  const endpoint = `http://127.0.0.1:${server.address().port}/v1/social/reviewer/media`;
+
+  const first = fetch(endpoint, {
+    method: "POST",
+    body: reviewerUploadForm()
+  });
+  await firstStarted;
+  const concurrent = await fetch(endpoint, {
+    method: "POST",
+    body: reviewerUploadForm()
+  });
+  assert.equal(concurrent.status, 429);
+  assert.deepEqual(await concurrent.json(), {
+    ok: false,
+    code: "reviewer_media_upload_in_progress",
+    error: "Ja existe um JPEG sendo enviado para esta empresa."
+  });
+  assert.equal(uploadCalls, 1);
+
+  releaseFirst();
+  assert.equal((await first).status, 201);
+  assert.equal(fixture.uploads.length, 1);
 });
 
 test("router exige login e rejeita autoridade ou legenda enviada pelo cliente", async (t) => {
