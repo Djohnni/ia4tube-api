@@ -1,6 +1,7 @@
 "use strict";
 
 const path = require("node:path");
+const { isAppReviewCompany } = require("./app-review-policy");
 
 const {
   assertWebServiceDatabaseCredentialBoundary,
@@ -162,7 +163,8 @@ async function createSocialRuntime(options = {}) {
     });
     const connectorStore = createPostgresConnectorStore({
       pool,
-      runtimeRole: config.role
+      runtimeRole: config.role,
+      appReviewCompanyId: instagramConfig.appReview?.companyId || null
     });
     const connectorAudit = createPostgresConnectorAudit({
       pool,
@@ -227,11 +229,14 @@ async function createSocialRuntime(options = {}) {
         metaComplianceRepository,
         clock: options.clock || Date.now,
         randomUUID: options.randomUUID,
-        environment: env.NODE_ENV === "test"
-          ? "test"
-          : env.NODE_ENV === "production"
-            ? "production"
-            : "staging"
+        environment: instagramConfig.appReview?.companyId &&
+          instagramConfig.appReview.environment === "staging"
+          ? "staging"
+          : env.NODE_ENV === "test"
+            ? "test"
+            : env.NODE_ENV === "production"
+              ? "production"
+              : "staging"
       });
       if (
         instagramConfig.publicOrigin === CONTROLLED_GATE4_STAGING_ORIGIN &&
@@ -301,12 +306,13 @@ async function createSocialRuntime(options = {}) {
             clearTimeout: options.clearTimeout,
             sleep: options.publicationSleep,
             authorizeContext: (candidate) => candidate === expectedContext,
-            authorizeConnection(connection) {
+            authorizeConnection(connection, context) {
               return (
                 ["business", "creator"].includes(
                   connection.account?.accountType
                 ) &&
                 (
+                  isAppReviewCompany(instagramConfig, context.companyId) ||
                   instagramConfig.expectedUsername === null ||
                   connection.account?.username ===
                     instagramConfig.expectedUsername
@@ -320,7 +326,13 @@ async function createSocialRuntime(options = {}) {
                 input.owned.caption === input.caption
               );
             },
-            allowOperationReferenceReconciliation: false,
+            // A recovered App Review publication has only an opaque `igo:`
+            // reference. Its unique intent caption permits read-only lookup;
+            // ordinary tenants and Gate 4 retain their previous behavior.
+            allowOperationReferenceReconciliation: isAppReviewCompany(
+              instagramConfig,
+              expectedContext.companyId
+            ),
             reconciliationLookbackMs: 30 * 1000,
             authorizePublishedCandidate: reviewerPublishedCandidateAuthorized
           });

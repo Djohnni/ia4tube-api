@@ -1,6 +1,11 @@
 "use strict";
 
 const crypto = require("node:crypto");
+const {
+  canExternalConnection,
+  isAppReviewCompany,
+  isAppReviewAccessEnabled
+} = require("../app-review-policy");
 const { postgresFail } = require("../../persistence/postgres/errors");
 const {
   assertNoAuthorityFields,
@@ -185,7 +190,7 @@ function publicConnection(value) {
   });
 }
 
-function requireGrantedScopes(value, requiredScopes) {
+function requireGrantedScopes(value, requiredScopes, exact = false) {
   if (!Array.isArray(value) || value.length < 1 || value.length > 32) {
     oauthFail("permission_missing");
   }
@@ -200,7 +205,9 @@ function requireGrantedScopes(value, requiredScopes) {
     }
     granted.add(scope);
   }
-  if (requiredScopes.some((scope) => !granted.has(scope))) {
+  if (requiredScopes.some((scope) => !granted.has(scope)) ||
+    (exact && (value.length !== requiredScopes.length ||
+      granted.size !== requiredScopes.length))) {
     oauthFail("permission_missing");
   }
   return Object.freeze([...granted].sort());
@@ -385,14 +392,21 @@ function createInstagramOAuthService(options = {}) {
     });
   }
 
-  function requireExternalConnection() {
-    if (options.config.externalConnectionEnabled !== true) {
+  function requirePotentialExternalConnection() {
+    if (options.config.externalConnectionEnabled !== true &&
+      !isAppReviewAccessEnabled(options.config, options.config.appReview?.companyId)) {
+      oauthFail("external_capability_disabled");
+    }
+  }
+
+  function requireExternalConnection(context) {
+    if (!canExternalConnection(options.config, context)) {
       oauthFail("external_capability_disabled");
     }
   }
 
   async function authorize(input = {}) {
-    requireExternalConnection();
+    requirePotentialExternalConnection();
     const source = strictRecord(input, ["verifiedClaims", "purpose"]);
     assertNoAuthorityFields({ purpose: source.purpose });
     const purpose = requirePurpose(source.purpose);
@@ -400,6 +414,7 @@ function createInstagramOAuthService(options = {}) {
       source.verifiedClaims
     );
     const context = contextFor(principal);
+    requireExternalConnection(context);
     const authorizationHandle = randomUuid();
     const connectionId = randomUuid();
     const state = options.stateEnvelope.seal({
@@ -411,7 +426,7 @@ function createInstagramOAuthService(options = {}) {
       returnPathId: INSTAGRAM_OAUTH_RETURN_PATH_ID
     });
     const authenticatedState = options.stateEnvelope.open(state);
-    const authorizationUrl = options.provider.buildAuthorizationUrl({ state });
+    const authorizationUrl = options.provider.buildAuthorizationUrl({ state }, context);
     const oauth = requireOAuthScope(options.oauthRepository.scope(context));
     let created;
     try {
@@ -487,7 +502,7 @@ function createInstagramOAuthService(options = {}) {
   }
 
   async function callback(input = {}) {
-    requireExternalConnection();
+    requirePotentialExternalConnection();
     const source = strictRecord(input, ["state", "code", "error"]);
     if (
       Number(source.code !== null) + Number(source.error !== null) !== 1
@@ -502,6 +517,7 @@ function createInstagramOAuthService(options = {}) {
       provider: INSTAGRAM_PROVIDER,
       environment
     });
+    requireExternalConnection(context);
     const oauth = requireOAuthScope(options.oauthRepository.scope(context));
     const store = requireConnectorStoreScope(options.connectorStore.scope(context));
     const terminal = Object.freeze({
@@ -567,7 +583,7 @@ function createInstagramOAuthService(options = {}) {
     try {
       const exchanged = await options.provider.exchangeCode({
         code: source.code
-      });
+      }, context);
       if (Buffer.isBuffer(exchanged?.accessToken)) {
         shortLivedToken = exchanged.accessToken;
       }
@@ -583,11 +599,12 @@ function createInstagramOAuthService(options = {}) {
       failureStage = OAUTH_FAILURE_STAGES.TOKEN_EXTENSION_OR_VALIDATION;
       const grantedScopes = requireGrantedScopes(
         exchanged.grantedScopes,
-        options.config.scopes
+        options.config.scopes,
+        isAppReviewCompany(options.config, context.companyId)
       );
       const extended = await options.provider.exchangeLongLivedToken({
         accessToken: shortLivedToken
-      });
+      }, context);
       if (Buffer.isBuffer(extended?.accessToken)) {
         longLivedToken = extended.accessToken;
       }
@@ -605,11 +622,11 @@ function createInstagramOAuthService(options = {}) {
         accessToken: longLivedToken,
         userId: exchanged.userId,
         correlationId: context.correlationId
-      });
+      }, context);
       failureStage = OAUTH_FAILURE_STAGES.CONTROLLED_ACCOUNT_VALIDATION;
       discoveredAccount = requireProfessionalAccount(
         providerAccount,
-        expectedUsername
+        isAppReviewCompany(options.config, context.companyId) ? null : expectedUsername
       );
       const subjectMapping = options.metaComplianceRepository
         ? options.metaComplianceRepository.subjectMappingForExternalUser({
@@ -759,15 +776,23 @@ function createInstagramOAuthService(options = {}) {
   }
 
   async function disconnect(input = {}) {
-    requireExternalConnection();
+    requirePotentialExternalConnection();
     const source = strictRecord(input, [
       "verifiedClaims",
       "connectionId"
     ]);
     const connectionId = requireConnectionId(source.connectionId);
     const { context } = authenticatedContext(source.verifiedClaims);
+    requireExternalConnection(context);
     const store = requireConnectorStoreScope(options.connectorStore.scope(context));
-    const disconnected = await store.disconnectConnectionLocally(connectionId);
+    const appReview = isAppReviewCompany(options.config, context.companyId);
+    if (appReview &&
+        typeof store.disconnectAppReviewConnectionLocally !== "function") {
+      oauthFail("social_instagram_configuration_invalid");
+    }
+    const disconnected = await (appReview
+      ? store.disconnectAppReviewConnectionLocally(connectionId)
+      : store.disconnectConnectionLocally(connectionId));
     if (!disconnected) oauthFail("resource_unavailable");
     return Object.freeze({
       ok: true,

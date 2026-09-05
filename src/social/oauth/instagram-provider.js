@@ -1,5 +1,7 @@
 "use strict";
 
+const { canExternalConnection } = require("../app-review-policy");
+
 const { postgresFail } = require("../../persistence/postgres/errors");
 const {
   INSTAGRAM_AUTHORIZATION_ENDPOINT,
@@ -936,12 +938,20 @@ function createInstagramProvider(options = {}) {
     providerFail();
   }
 
-  function requireExternalConnection() {
-    if (config.externalConnectionEnabled !== true) providerFail();
+  function requireExternalConnection(context) {
+    if (context === undefined && !config.appReview?.companyId) {
+      if (config.externalConnectionEnabled !== true) providerFail();
+      return;
+    }
+    try {
+      if (!canExternalConnection(config, context)) providerFail();
+    } catch {
+      providerFail();
+    }
   }
 
-  function buildAuthorizationUrl(input = {}) {
-    requireExternalConnection();
+  function buildAuthorizationUrl(input = {}, context) {
+    requireExternalConnection(context);
     const source = strictRecord(input, ["state"]);
     const state = boundedSecret(source.state, 32, 2048);
     if (!COMPACT_STATE_PATTERN.test(state)) providerFail();
@@ -1046,8 +1056,8 @@ function createInstagramProvider(options = {}) {
     );
   }
 
-  async function exchangeCode(input = {}) {
-    requireExternalConnection();
+  async function exchangeCode(input = {}, context) {
+    requireExternalConnection(context);
     const source = strictRecord(input, ["code"]);
     const code = boundedSecret(
       source.code,
@@ -1067,8 +1077,8 @@ function createInstagramProvider(options = {}) {
     }
   }
 
-  async function exchangeLongLivedToken(input = {}) {
-    requireExternalConnection();
+  async function exchangeLongLivedToken(input = {}, context) {
+    requireExternalConnection(context);
     const source = strictRecord(input, ["accessToken"]);
     const shortLivedToken = copyAccessToken(source.accessToken);
     let exchanged;
@@ -1119,8 +1129,8 @@ function createInstagramProvider(options = {}) {
     }
   }
 
-  async function discoverProfessionalAccount(input = {}) {
-    requireExternalConnection();
+  async function discoverProfessionalAccount(input = {}, context) {
+    requireExternalConnection(context);
     const hasCorrelationId = input !== null && typeof input === "object" &&
       Object.hasOwn(input, "correlationId");
     const inputKeys = hasCorrelationId

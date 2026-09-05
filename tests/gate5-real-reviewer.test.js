@@ -32,6 +32,7 @@ const {
   deterministicUuid,
   isRealReviewerLoginHandoffUrl,
   reviewerCaptionMarker,
+  reviewerIntentCaption,
   reviewerMediaIdentity,
   reviewerPublishedCandidateAuthorized,
   realReviewerUiGateState
@@ -133,6 +134,7 @@ function createFixture() {
         accountType: "business"
       }),
       activeCredentialId: IDS.credentialA,
+      updatedAt: new Date("2026-09-02T11:59:00.000Z"),
       grantedScopes: Object.freeze([
         "instagram_business_basic",
         "instagram_business_content_publish"
@@ -152,6 +154,7 @@ function createFixture() {
         accountType: "creator"
       }),
       activeCredentialId: IDS.credentialB,
+      updatedAt: new Date("2026-09-02T11:59:00.000Z"),
       grantedScopes: Object.freeze([
         "instagram_business_basic",
         "instagram_business_content_publish"
@@ -160,6 +163,7 @@ function createFixture() {
     })]
   ]);
   const publications = new Map();
+  const publicationLocks = new Set();
   const uploads = [];
   const mediaByOwner = new Map([
     ["tenant-a", Object.freeze({
@@ -203,6 +207,22 @@ function createFixture() {
         async getPublicationDetails(id) {
           const value = publications.get(`${context.companyId}:${id}`);
           return copy(value || null);
+        },
+        async listPublicationDetails() {
+          return [...publications.values()].filter((item) => item.companyId === context.companyId)
+            .sort((a, b) => b.createdAt - a.createdAt).map(copy);
+        },
+        async listAppReviewPublicationDetails() {
+          return [...publications.values()].filter((item) => item.companyId === context.companyId)
+            .sort((a, b) => b.createdAt - a.createdAt).map(copy);
+        },
+        async withPublicationSubmissionLock(operation) {
+          if (publicationLocks.has(context.companyId)) {
+            throw Object.assign(new Error("busy"), { code: "state_transition_invalid" });
+          }
+          publicationLocks.add(context.companyId);
+          try { return await operation(); }
+          finally { publicationLocks.delete(context.companyId); }
         }
       });
     }
@@ -345,7 +365,12 @@ function createFixture() {
   };
 }
 
-function createReconciliationHarness({ publication, transport }) {
+function createReconciliationHarness({
+  publication,
+  transport,
+  allowOperationReferenceReconciliation = false,
+  appReview = false
+}) {
   const authAdapter = createSocialAuthAdapter(IDENTITY_CONFIG);
   const principal = authAdapter.fromVerifiedJwt(claims("tenant-a"));
   const context = createConnectorContext({
@@ -377,9 +402,17 @@ function createReconciliationHarness({ publication, transport }) {
   });
   const connector = createInstagramPublicationConnector({
     config: Object.freeze({
+      enabled: true,
+      instagramEnabled: true,
       provider: "instagram",
       graphApiVersion: "v25.0",
-      publicOrigin: REAL_REVIEWER_STAGING_ORIGIN
+      publicOrigin: REAL_REVIEWER_STAGING_ORIGIN,
+      appReview: appReview ? Object.freeze({
+        companyId: principal.companyId,
+        enabled: true,
+        environment: "staging",
+        realReviewerUiEnabled: true
+      }) : undefined
     }),
     store: Object.freeze({
       scope() {
@@ -418,7 +451,7 @@ function createReconciliationHarness({ publication, transport }) {
     authorizePublicationRequest: () => true,
     authorizePublication: () => true,
     authorizePublishedCandidate: reviewerPublishedCandidateAuthorized,
-    allowOperationReferenceReconciliation: false,
+    allowOperationReferenceReconciliation,
     reconciliationLookbackMs: 30 * 1000,
     timeoutMs: 100,
     pollAttempts: 1,
@@ -834,6 +867,46 @@ test("referência ambígua sem container nunca vira prova por legenda", async ()
   assert.deepEqual(h.counters, { credentials: 0, transport: 0 });
 });
 
+test("recovery igo do App Review reconcilia somente por leitura e legenda única", async () => {
+  const publicationId = "53000000-0000-4000-8000-000000000093";
+  const reference = `igo:${publicationId.replaceAll("-", "")}`;
+  const caption = reviewerIntentCaption(MEDIA_A, CAPTION_A, publicationId);
+  const publication = pendingPublication({
+    reference,
+    caption,
+    mediaReference: MEDIA_A
+  });
+  const requests = [];
+  const h = createReconciliationHarness({
+    publication,
+    appReview: true,
+    allowOperationReferenceReconciliation: true,
+    transport: async (url, options) => {
+      requests.push({ url, method: options.method, body: options.body });
+      return jsonResponse({ data: [{
+        id: "17999999999999997",
+        caption,
+        permalink: "https://www.instagram.com/p/IA4TubeRecovered/",
+        timestamp: "2026-09-02T12:00:05.000Z"
+      }] });
+    }
+  });
+  const result = await h.connector.getPublicationStatus(h.context, {
+    publicationId,
+    providerReference: reference,
+    idempotencyKey: "53000000-0000-4000-8000-000000000097"
+  });
+  assert.equal(result.outcome, "published");
+  assert.equal(
+    parseConfirmedReference(result.confirmedProviderReference).mediaId,
+    "17999999999999997"
+  );
+  assert.equal(requests.length, 1);
+  assert.equal(requests[0].method, "GET");
+  assert.equal(requests[0].body, undefined);
+  assert.match(requests[0].url, /\/media\?/);
+});
+
 test("candidate sem marcador não confirma um container submetido", async () => {
   const containerId = "17900000000000001";
   const reference = `igc:submitted:${containerId}`;
@@ -875,14 +948,18 @@ test("container submetido só confirma a legenda vinculada ao JPEG", async () =>
     caption: identity.caption,
     mediaReference: identity.mediaId
   });
+  const requests = [];
   const h = createReconciliationHarness({
     publication,
-    transport: async () => jsonResponse({ data: [{
+    transport: async (url, options) => {
+      requests.push({ url, method: options.method, body: options.body });
+      return jsonResponse({ data: [{
       id: "17999999999999999",
       caption: identity.caption,
       permalink: "https://www.instagram.com/p/IA4TubeReviewer/",
       timestamp: "2026-09-02T12:00:05.000Z"
-    }] })
+      }] });
+    }
   });
   const result = await h.connector.getPublicationStatus(h.context, {
     publicationId: publication.id,
@@ -894,6 +971,10 @@ test("container submetido só confirma a legenda vinculada ao JPEG", async () =>
     parseConfirmedReference(result.confirmedProviderReference).mediaId,
     "17999999999999999"
   );
+  assert.deepEqual(requests.map((item) => item.method), ["GET"]);
+  assert.equal(requests[0].body, undefined);
+  assert.match(requests[0].url, /\/media\?/);
+  assert.doesNotMatch(requests[0].url, /media_publish/);
 });
 
 test("mídia, publicação, confirmação e histórico são tenant-scoped e canônicos", async () => {
@@ -1017,6 +1098,31 @@ test("submissão duplicada não atribui a conta de uma conexão posterior", asyn
   });
   assert.equal(duplicate.duplicateSubmissionPrevented, true);
   assert.equal(duplicate.publication.account, null);
+});
+
+test("histórico terminal não é relabelled após reconexão no mesmo id", async () => {
+  const fixture = createFixture();
+  const service = fixture.createService();
+  const first = await service.publish({
+    verifiedClaims: fixture.claimsA,
+    mediaId: MEDIA_A,
+    clientRequestId: "53000000-0000-4000-8000-000000000085"
+  });
+  await service.reconcile({
+    verifiedClaims: fixture.claimsA,
+    publicationId: first.publication.publicationId
+  });
+  const previous = fixture.connections.get(fixture.principalA.companyId);
+  fixture.connections.set(fixture.principalA.companyId, Object.freeze({
+    ...previous,
+    updatedAt: new Date("2026-09-02T12:01:00.000Z"),
+    account: Object.freeze({ ...previous.account, username: "conta_reconectada" })
+  }));
+  const history = await service.listPublications({
+    verifiedClaims: fixture.claimsA
+  });
+  assert.equal(history.publications[0].state, "published");
+  assert.equal(history.publications[0].account, null);
 });
 
 test("gate externo fechado recusa antes de persistência ou provedor", async () => {
@@ -1417,4 +1523,102 @@ test("identificador único do histórico não depende de memória process-local"
     deterministicUuid(companyId, "instagram-real-reviewer-publication:v1"),
     deterministicUuid(companyId, "instagram-real-reviewer-publication:v1")
   );
+});
+
+function reviewService(fixture, enabled = true) {
+  return createInstagramRealReviewerService({
+    ...fixture.serviceOptions,
+    config: {
+      ...fixture.serviceOptions.config,
+      enabled: true,
+      instagramEnabled: true,
+      externalConnectionEnabled: false,
+      externalPublicationEnabled: false,
+      appReview: {
+        companyId: fixture.principalA.companyId,
+        enabled,
+        environment: "staging",
+        realReviewerUiEnabled: true
+      }
+    }
+  });
+}
+
+test("review isolado permite nova intenção após confirmação e preserva histórico", async () => {
+  const fixture = createFixture();
+  const service = reviewService(fixture);
+  const input = {
+    verifiedClaims: fixture.claimsA, mediaId: MEDIA_A,
+    clientRequestId: "57000000-0000-4000-8000-000000000001"
+  };
+  const first = await service.publish(input);
+  assert.equal(first.publication.state, "provider_confirming");
+  assert.equal(fixture.calls.publish, 1);
+  const duplicate = await service.publish(input);
+  assert.equal(duplicate.duplicateSubmissionPrevented, true);
+  assert.equal(duplicate.publication.publicationId, first.publication.publicationId);
+  await assert.rejects(service.publish({ ...input,
+    clientRequestId: "57000000-0000-4000-8000-000000000002"
+  }), { code: "state_transition_invalid" });
+  assert.equal(fixture.calls.publish, 1);
+  const confirmed = await service.reconcile({
+    verifiedClaims: fixture.claimsA, publicationId: first.publication.publicationId
+  });
+  assert.equal(confirmed.publication.state, "published");
+  assert.match(confirmed.publication.permalink, /^https:\/\/www.instagram.com\/p\//);
+  const history = await reviewService(fixture, false).listPublications({ verifiedClaims: fixture.claimsA });
+  assert.equal(history.independentReview, true);
+  assert.equal(history.freshPublicationAvailable, true);
+  assert.equal(history.publications.length, 1);
+  const replayAfterConfirmation = await reviewService(fixture).publish(input);
+  assert.equal(replayAfterConfirmation.publication.state, "published");
+  assert.equal(fixture.calls.publish, 1);
+  const second = await service.publish({ ...input,
+    clientRequestId: "57000000-0000-4000-8000-000000000002"
+  });
+  assert.notEqual(second.publication.publicationId, first.publication.publicationId);
+  assert.notEqual(second.publication.caption, first.publication.caption);
+  assert.equal(fixture.calls.publish, 2);
+  const all = await reviewService(fixture).listPublications({ verifiedClaims: fixture.claimsA });
+  assert.equal(all.publications.length, 2);
+  assert.equal(all.freshPublicationAvailable, false);
+  assert.equal(all.publications[1].providerMediaId, confirmed.publication.providerMediaId);
+  await assert.rejects(service.getPublication({ verifiedClaims: fixture.claimsB,
+    publicationId: first.publication.publicationId }), { code: "resource_unavailable" });
+  await assert.rejects(service.publish({ ...input, verifiedClaims: fixture.claimsB, mediaId: MEDIA_B }),
+    { code: "external_capability_disabled" });
+  await assert.rejects(reviewService(fixture, false).publish(input), { code: "external_capability_disabled" });
+  assert.equal(fixture.calls.externalMeta + fixture.calls.externalInstagram + fixture.calls.sandbox, 0);
+});
+
+test("review serializa cliques simultâneos com mesma ou diferentes intenções", async () => {
+  for (const distinct of [false, true]) {
+    const fixture = createFixture();
+    const service = reviewService(fixture);
+    const input = { verifiedClaims: fixture.claimsA, mediaId: MEDIA_A,
+      clientRequestId: "58000000-0000-4000-8000-000000000001" };
+    const results = await Promise.allSettled([
+      service.publish(input),
+      service.publish({ ...input, clientRequestId: distinct
+        ? "58000000-0000-4000-8000-000000000002" : input.clientRequestId })
+    ]);
+    assert.equal(results.filter((item) => item.status === "fulfilled").length, 1);
+    assert.equal(results.find((item) => item.status === "rejected").reason.code, "state_transition_invalid");
+    assert.equal(fixture.calls.publish, 1);
+    assert.equal(fixture.publications.size, 1);
+    assert.equal((await service.publish(input)).duplicateSubmissionPrevented, true);
+  }
+});
+
+test("review marcador de intenção não confirma a publicação anterior do mesmo JPEG", () => {
+  const { reviewerIntentCaption } = require("../src/social/reviewer-real/reviewer-real");
+  const firstId = "59000000-0000-4000-8000-000000000001";
+  const secondId = "59000000-0000-4000-8000-000000000002";
+  const caption = `Legenda de teste\n\n${reviewerCaptionMarker(MEDIA_A)}`;
+  const firstCaption = reviewerIntentCaption(MEDIA_A, caption, firstId);
+  const secondCaption = reviewerIntentCaption(MEDIA_A, caption, secondId);
+  const publication = { id: secondId, mediaReference: MEDIA_A, caption: secondCaption };
+  assert.equal(reviewerPublishedCandidateAuthorized({ publication, candidate: { caption: firstCaption } }), false);
+  assert.equal(reviewerPublishedCandidateAuthorized({ publication, candidate: { caption: secondCaption } }), true);
+  assert.ok(secondCaption.length <= 2200);
 });

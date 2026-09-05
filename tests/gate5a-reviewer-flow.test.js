@@ -1219,7 +1219,7 @@ test("real reviewer client uploads exactly jpeg and caption as multipart", async
 
 test("successful upload selects its JPEG without invoking OAuth or publication", () => {
   const start = helperSource.indexOf('} else if (action === "upload-media")');
-  const end = helperSource.indexOf('} else if (action === "publish")', start);
+  const end = helperSource.indexOf('} else if (action === "new-publication")', start);
   assert.ok(start >= 0 && end > start, "ramo dedicado de upload deve existir");
   const uploadBranch = helperSource.slice(start, end);
   assert.match(uploadBranch, /client\.uploadMedia\(file, caption\)/);

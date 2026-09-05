@@ -19,6 +19,9 @@ const {
   createInstagramOAuthRouter
 } = require("./src/social/oauth/instagram-oauth-router");
 const {
+  APP_REVIEW_LOGIN_PREFIX
+} = require("./src/social/app-review-policy");
+const {
   createInstagramOAuthVisualReturn
 } = require("./src/social/oauth/instagram-oauth-visual-return");
 const {
@@ -1351,6 +1354,7 @@ function loginIdIsValid(value) {
 function loginIdIsReserved(value) {
   const login = normalizarLoginId(value);
   return login === BOT_ADMIN_WHATSAPP ||
+    login.startsWith(APP_REVIEW_LOGIN_PREFIX) ||
     login.startsWith("google_") ||
     login.startsWith("auto_");
 }

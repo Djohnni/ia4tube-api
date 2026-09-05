@@ -9,6 +9,7 @@ const {
   requireUuid
 } = require("../connectors/contract");
 const { connectorFail } = require("../connectors/errors");
+const { isAppReviewCompany, canExternalConnection, canExternalPublication } = require("../app-review-policy");
 const { createConnectorRegistry } = require("../connectors/registry");
 const { createSocialConnectorService } = require("../connectors/service");
 const { PUBLICATION_STATES } = require("../connectors/states");
@@ -225,7 +226,10 @@ function reviewerMediaIdentity(input = {}) {
 function reviewerPublishedCandidateAuthorized(input) {
   const publication = input?.publication;
   const candidate = input?.candidate;
-  const marker = reviewerCaptionMarker(publication?.mediaReference);
+  const intentMarker = reviewerIntentMarker(publication?.mediaReference, publication?.id);
+  const marker = intentMarker && publication?.caption?.endsWith(`\n\n${intentMarker}`)
+    ? intentMarker
+    : reviewerCaptionMarker(publication?.mediaReference);
   return Boolean(
     marker &&
     typeof publication?.caption === "string" &&
@@ -233,6 +237,22 @@ function reviewerPublishedCandidateAuthorized(input) {
     candidate.caption === publication.caption &&
     candidate.caption.endsWith(`\n\n${marker}`)
   );
+}
+
+function reviewerIntentMarker(mediaId, publicationId) {
+  if (!reviewerCaptionMarker(mediaId) || !UUID_PATTERN.test(String(publicationId || ""))) return null;
+  const digest = crypto.createHash("sha256")
+    .update(`ia4tube-review-intent-v1\0${mediaId}\0${publicationId}`, "utf8")
+    .digest("hex").slice(0, 24).toUpperCase();
+  return `#IA4Tube #IA4TubeReview_${digest}`;
+}
+
+function reviewerIntentCaption(mediaId, caption, publicationId) {
+  const marker = reviewerIntentMarker(mediaId, publicationId);
+  if (!marker) connectorFail("connector_contract_invalid");
+  const oldSuffix = `\n\n${reviewerCaptionMarker(mediaId)}`;
+  const source = caption.endsWith(oldSuffix) ? caption.slice(0, -oldSuffix.length) : caption;
+  return safeCaption(`${source}\n\n${marker}`);
 }
 
 function deterministicUuid(namespace, label) {
@@ -362,7 +382,7 @@ function publicPublication(value, account = null) {
   }
   const publicationId = requireUuid(value.id);
   const connectionId = requireUuid(value.connectionId);
-  const state = value.state === "publishing" ? "sending" : value.state;
+  const state = ["ready", "publishing"].includes(value.state) ? "sending" : value.state;
   let providerMediaId = null;
   let permalink = null;
   let publishedAt = null;
@@ -449,12 +469,13 @@ function createInstagramRealReviewerService(options = {}) {
   const media = options.media;
   const createPublicationConnector = options.createPublicationConnector;
   const randomUUID = options.randomUUID || crypto.randomUUID;
+  const activeSubmissions = new Set();
   const createConnectorService = options.createConnectorService || ((input) => {
     const registry = createConnectorRegistry({
       environment: "staging",
       gates: {
-        externalConnectionEnabled: config.externalConnectionEnabled,
-        externalPublicationEnabled: config.externalPublicationEnabled,
+        externalConnectionEnabled: canExternalConnection(config, input.context),
+        externalPublicationEnabled: canExternalPublication(config, input.context),
         enabledProviders: [INSTAGRAM_PROVIDER],
         companyAllowlist: [input.context.companyId]
       }
@@ -463,7 +484,16 @@ function createInstagramRealReviewerService(options = {}) {
     registry.seal();
     return createSocialConnectorService({
       registry,
-      store: connectorStore,
+      store: isAppReviewCompany(config, input.context.companyId)
+        ? Object.freeze({ scope(context) {
+          if (context !== input.context) connectorFail("resource_unavailable");
+          const scoped = connectorStore.scope(context);
+          if (typeof scoped.beginAppReviewIdempotency !== "function") {
+            connectorFail("connector_contract_invalid");
+          }
+          return Object.freeze({ ...scoped, beginIdempotency: scoped.beginAppReviewIdempotency });
+        } })
+        : connectorStore,
       audit: connectorAudit,
       media: input.media,
       logger: options.logger
@@ -491,7 +521,7 @@ function createInstagramRealReviewerService(options = {}) {
     return verifiedSession(input, authAdapter, randomUUID);
   }
 
-  function scopedMedia(current) {
+  function scopedMedia(current, publicationId = null) {
     return Object.freeze({
       async resolveOwnedJpeg(context, id) {
         if (context !== current.context) {
@@ -510,7 +540,9 @@ function createInstagramRealReviewerService(options = {}) {
         ) {
           connectorFail("resource_unavailable");
         }
-        return owned;
+        return publicationId && isAppReviewCompany(config, context.companyId)
+          ? Object.freeze({ ...owned, caption: reviewerIntentCaption(id, owned.caption, publicationId) })
+          : owned;
       }
     });
   }
@@ -573,23 +605,29 @@ function createInstagramRealReviewerService(options = {}) {
   async function listPublications(input = {}) {
     const current = session(input);
     const scope = connectorStore.scope(current.context);
+    const reviewTenant = isAppReviewCompany(config, current.context.companyId);
     const publicationId = deterministicUuid(
       current.context.companyId,
       "instagram-real-reviewer-publication:v1"
     );
-    const details = await scope.getPublicationDetails(publicationId);
-    const connection = details
-      ? await scope.getConnectionDetails(details.connectionId)
-      : null;
+    if (reviewTenant &&
+        typeof scope.listAppReviewPublicationDetails !== "function") {
+      connectorFail("connector_contract_invalid");
+    }
+    const details = reviewTenant
+      ? await scope.listAppReviewPublicationDetails()
+      : [await scope.getPublicationDetails(publicationId)].filter(Boolean);
+    const publications = await Promise.all(details.map(async (value) => {
+      const connection = await scope.getConnectionDetails(value.connectionId);
+      return publicPublication(value, publicationAccount(value, connection));
+    }));
     return Object.freeze({
       ok: true,
       canonicalPersistence: true,
-      publications: Object.freeze(details
-        ? [publicPublication(
-          details,
-          connection?.id === details.connectionId ? connection.account : null
-        )]
-        : [])
+      independentReview: reviewTenant,
+      freshPublicationAvailable: reviewTenant && !details.some((item) =>
+        ["ready", "publishing", "provider_confirming"].includes(item.state)),
+      publications: Object.freeze(publications)
     });
   }
 
@@ -599,7 +637,7 @@ function createInstagramRealReviewerService(options = {}) {
     const details = await scope.getPublicationDetails(cleanId);
     if (!details) connectorFail("resource_unavailable");
     const connection = await scope.getConnectionDetails(details.connectionId);
-    return publicPublication(details, connection?.account || null);
+    return publicPublication(details, publicationAccount(details, connection));
   }
 
   async function getPublication(input = {}) {
@@ -609,13 +647,14 @@ function createInstagramRealReviewerService(options = {}) {
       current.context.companyId,
       "instagram-real-reviewer-publication:v1"
     );
-    if (requireUuid(source.publicationId) !== expectedId) {
+    if (!isAppReviewCompany(config, current.context.companyId) &&
+        requireUuid(source.publicationId) !== expectedId) {
       connectorFail("resource_unavailable");
     }
     return Object.freeze({
       ok: true,
       canonicalPersistence: true,
-      publication: await publicationById(current, expectedId)
+      publication: await publicationById(current, source.publicationId)
     });
   }
 
@@ -626,20 +665,37 @@ function createInstagramRealReviewerService(options = {}) {
       "clientRequestId"
     ]);
     const current = session({ verifiedClaims: source.verifiedClaims });
-    if (config.externalPublicationEnabled !== true) {
+    if (!canExternalPublication(config, current.context)) {
       connectorFail("external_capability_disabled");
     }
+    const scope = connectorStore.scope(current.context);
+    if (isAppReviewCompany(config, current.context.companyId)) {
+      if (typeof scope.listAppReviewPublicationDetails !== "function") {
+        connectorFail("connector_contract_invalid");
+      }
+      const key = current.context.companyId;
+      if (activeSubmissions.has(key)) connectorFail("state_transition_invalid");
+      activeSubmissions.add(key);
+      try { return await publishIntent(current, source, scope); }
+      finally { activeSubmissions.delete(key); }
+    }
+    return publishIntent(current, source, scope);
+  }
+
+  async function publishIntent(current, source, scope) {
+    const reviewTenant = isAppReviewCompany(config, current.context.companyId);
     const cleanMediaId = mediaReference(source.mediaId);
     const requestId = clientRequestId(source.clientRequestId);
     const connection = await connectedAccount(current);
     const publicationId = deterministicUuid(
       current.context.companyId,
-      "instagram-real-reviewer-publication:v1"
+      reviewTenant
+        ? `instagram-app-review-publication:v1:${connection.id}:${connection.account.externalId}:${cleanMediaId}:${requestId}`
+        : "instagram-real-reviewer-publication:v1"
     );
-    const scope = connectorStore.scope(current.context);
     const existing = await scope.getPublicationDetails(publicationId);
     if (existing) {
-      if (["publishing", "provider_confirming", "published"].includes(
+      if (["ready", "publishing", "provider_confirming", "published"].includes(
         existing.state
       )) {
         return Object.freeze({
@@ -652,7 +708,12 @@ function createInstagramRealReviewerService(options = {}) {
         connectorFail("state_transition_invalid");
       }
     }
-    const reviewerMedia = scopedMedia(current);
+    if (reviewTenant) {
+      const pending = (await scope.listAppReviewPublicationDetails()).find((item) =>
+        item.id !== publicationId && ["ready", "publishing", "provider_confirming"].includes(item.state));
+      if (pending) connectorFail("state_transition_invalid");
+    }
+    const reviewerMedia = scopedMedia(current, reviewTenant ? publicationId : null);
     const owned = await reviewerMedia.resolveOwnedJpeg(
       current.context,
       cleanMediaId
@@ -671,10 +732,10 @@ function createInstagramRealReviewerService(options = {}) {
     if (typeof connectorService?.publishImage !== "function") {
       connectorFail("connector_contract_invalid");
     }
-    const operationId = deterministicUuid(
-      publicationId,
-      `manual-submit:${requestId}`
-    );
+    const operationId = reviewTenant
+      ? deterministicUuid(current.context.companyId,
+        `instagram-review-submit:v1:${connection.id}:${connection.account.externalId}:${requestId}:${existing?.attempts?.length || 0}`)
+      : deterministicUuid(publicationId, `manual-submit:${requestId}`);
     try {
       await connectorService.publishImage(current.context, {
         operationId,
@@ -701,7 +762,7 @@ function createInstagramRealReviewerService(options = {}) {
   async function reconcile(input = {}) {
     const source = exactRecord(input, ["verifiedClaims", "publicationId"]);
     const current = session({ verifiedClaims: source.verifiedClaims });
-    if (config.externalPublicationEnabled !== true) {
+    if (!canExternalPublication(config, current.context)) {
       connectorFail("external_capability_disabled");
     }
     const publicationId = requireUuid(source.publicationId);
@@ -709,7 +770,9 @@ function createInstagramRealReviewerService(options = {}) {
       current.context.companyId,
       "instagram-real-reviewer-publication:v1"
     );
-    if (publicationId !== expectedId) connectorFail("resource_unavailable");
+    if (!isAppReviewCompany(config, current.context.companyId) && publicationId !== expectedId) {
+      connectorFail("resource_unavailable");
+    }
     const scope = connectorStore.scope(current.context);
     const details = await scope.getPublicationDetails(publicationId);
     if (!details || details.state !== "provider_confirming") {
@@ -719,7 +782,8 @@ function createInstagramRealReviewerService(options = {}) {
     if (details.connectionId !== connection.id) {
       connectorFail("resource_unavailable");
     }
-    const reviewerMedia = scopedMedia(current);
+    const reviewerMedia = scopedMedia(current, isAppReviewCompany(config, current.context.companyId)
+      ? publicationId : null);
     const connectorService = createConnectorService({
       context: current.context,
       media: reviewerMedia
@@ -762,6 +826,27 @@ function createInstagramRealReviewerService(options = {}) {
     reconcile,
     uploadMedia
   });
+}
+
+function publicationAccount(value, connection) {
+  if (!isRecord(connection?.account)) return null;
+  if (["ready", "publishing", "provider_confirming"].includes(value.state)) {
+    return connection.account;
+  }
+  const publicationUpdatedAt = value.updatedAt instanceof Date
+    ? value.updatedAt.getTime()
+    : NaN;
+  const connectionUpdatedAt = connection.updatedAt instanceof Date
+    ? connection.updatedAt.getTime()
+    : NaN;
+  // A reconnect can attach another account to the same connection record.
+  // If the connection changed after this terminal publication, omit the
+  // account instead of relabelling immutable history with current data.
+  return Number.isFinite(publicationUpdatedAt) &&
+    Number.isFinite(connectionUpdatedAt) &&
+    connectionUpdatedAt <= publicationUpdatedAt
+    ? connection.account
+    : null;
 }
 
 function emptyRecord(value) {
@@ -997,6 +1082,8 @@ module.exports = {
   isRealReviewerLoginHandoffUrl,
   publicPublication,
   reviewerCaptionMarker,
+  reviewerIntentCaption,
+  reviewerIntentMarker,
   reviewerMediaIdentity,
   reviewerPublishedCandidateAuthorized,
   realReviewerUiGateState

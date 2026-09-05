@@ -1,6 +1,11 @@
 "use strict";
 
 const {
+  canExternalPublication,
+  isAppReviewCompany
+} = require("../app-review-policy");
+
+const {
   requireConnectorContext,
   requireUuid
 } = require("../connectors/contract");
@@ -378,6 +383,12 @@ function createInstagramPublicationConnector(options = {}) {
       environment: "staging"
     });
     if (authorizeContext(context) !== true) {
+      connectorFail("external_capability_disabled");
+    }
+    // Legacy Gate 4 gating remains in its connector registry. The separate
+    // review window must additionally be checked at the provider boundary.
+    if (isAppReviewCompany(config, context.companyId) &&
+      !canExternalPublication(config, context)) {
       connectorFail("external_capability_disabled");
     }
     return context;

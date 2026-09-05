@@ -1714,7 +1714,7 @@
               <label class="gate5aSelectField"><span>JPEG autorizado</span><select data-real-media-select><option value="">Selecione um JPEG</option></select></label>
               <div class="gate5aMediaReview" data-real-media-review hidden><img data-real-field-src="mediaAsset" alt="Prévia do JPEG autorizado"><div><span class="gate5aSyntheticTag">Conteúdo real da empresa</span><h3 data-real-field="mediaFile">preview_ia4tube.jpg</h3><p><strong>Formato:</strong> image/jpeg · <span data-real-field="mediaDimensions">—</span></p><div class="gate5aCaption"><span>Legenda final com marcador único de confirmação</span><p data-real-field="caption">—</p></div><ul><li>Proprietário: empresa autenticada</li><li>Modo: publicação manual</li><li>Envio: somente após confirmação explícita</li></ul></div></div>
               <p class="gate5aEmpty" data-real-no-media hidden>Nenhum JPEG foi adicionado ainda.</p>
-              <div class="gate5aActions"><button type="button" class="gate5aPrimary" data-real-action="publish" disabled>Publicar no Instagram</button></div>
+              <div class="gate5aActions"><button type="button" class="gate5aPrimary" data-real-action="publish" disabled>Publicar no Instagram</button><button type="button" class="gate5aSecondary" data-real-action="new-publication" hidden>Preparar nova publicação</button><button type="button" class="gate5aSecondary" data-real-action="resume-publication" hidden>Retomar a mesma tentativa</button></div>
             </section>
             <section data-real-screen="publication" hidden><div class="gate5aScreenHeading"><span class="gate5aStepNumber">06</span><div><h2>Publicação manual</h2><p>Enviando e Confirmando ainda não significam Publicado.</p></div></div><div class="gate5aPublicationState"><span>Estado atual</span><strong data-real-field="publicationState">Aguardando envio</strong><small data-real-field="publicationHint">Um clique explícito inicia a operação.</small></div><ol class="gate5aPublishTimeline"><li data-real-publish-step="sending"><span></span><div><strong>Enviando</strong><small>Uma única submissão idempotente.</small></div></li><li data-real-publish-step="provider_confirming"><span></span><div><strong>Confirmando</strong><small>Ainda não tratado como publicado.</small></div></li><li data-real-publish-step="published"><span></span><div><strong>Publicado</strong><small>Somente com prova persistida do provider.</small></div></li></ol><div class="gate5aPublishedProof" data-real-proof hidden><h3>Publicado no Instagram</h3><div class="gate5aProofGrid"><div><span>Media ID</span><strong data-real-field="mediaId">—</strong></div><div><span>Horário</span><strong data-real-field="publishedAt">—</strong></div><div><span>Referência interna</span><strong data-real-field="reference">—</strong></div><div><span>Permalink</span><strong data-real-field="permalink">—</strong></div></div></div><div class="gate5aActions"><button type="button" class="gate5aPrimary" data-real-action="reconcile" hidden>Confirmar estado no Instagram</button><button type="button" class="gate5aSecondary" data-real-action="history">Ver histórico</button></div></section>
             <section data-real-screen="history" hidden><div class="gate5aScreenHeading"><span class="gate5aStepNumber">07</span><div><h2>Histórico canônico</h2><p>O registro social persiste após recarregar a página ou reiniciar o serviço.</p></div></div><div class="gate5aHistoryList" data-real-history></div><div class="gate5aPublishedProof" data-real-detail hidden></div><div class="gate5aActions"><button type="button" class="gate5aPrimary" data-real-action="disconnect-screen">Revisar desconexão</button></div></section>
@@ -1758,6 +1758,9 @@
       selectedMediaId: null,
       publication: null,
       history: [],
+      independentReview: false,
+      freshPublicationAvailable: false,
+      request: null,
       detail: null,
       returnStatus: null,
       uploadSucceeded: false,
@@ -1784,6 +1787,83 @@
     }
     function selectedMedia() {
       return state.media.find((item) => item.id === state.selectedMediaId) || null;
+    }
+    function requestStorageKey() {
+      return `ia4tube-review-intent-v1:${state.connection?.connectionId || "none"}`;
+    }
+    function persistRequest(value) {
+      try {
+        if (value) targetWindow.sessionStorage.setItem(requestStorageKey(), JSON.stringify(value));
+        else targetWindow.sessionStorage.removeItem(requestStorageKey());
+      } catch (_error) {
+        // Without durable browser intent storage, a reload still recovers the
+        // canonical pending publication; the server rejects competing intents.
+      }
+      state.request = value;
+    }
+    function restoreRequest() {
+      try {
+        const value = JSON.parse(targetWindow.sessionStorage.getItem(requestStorageKey()) || "null");
+        if (value && CONNECTION_ID_PATTERN.test(value.requestId) &&
+            /^reviewer-jpeg:[0-9a-f]{64}$/.test(value.mediaId) &&
+            (value.publicationId === null || value.publicationId === undefined ||
+              CONNECTION_ID_PATTERN.test(value.publicationId)) &&
+            (value.priorPublicationIds === undefined ||
+              (Array.isArray(value.priorPublicationIds) && value.priorPublicationIds.length <= 20 &&
+                value.priorPublicationIds.every((id) => CONNECTION_ID_PATTERN.test(id)))) &&
+            (value.startedAt === undefined ||
+              (Number.isFinite(value.startedAt) && value.startedAt > 0))) return value;
+      } catch (_error) {}
+      return null;
+    }
+    function publicationInFlight(value) {
+      return ["sending", "provider_confirming"].includes(value?.state);
+    }
+    function publicationTerminal(value) {
+      return ["published", "failed_permanent", "failed_temporary"].includes(value?.state);
+    }
+    function publicationTimestamp(value) {
+      const parsed = new Date(value?.updatedAt || value?.createdAt || "");
+      return Number.isFinite(parsed.getTime()) ? parsed.getTime() : 0;
+    }
+    function canonicalAttempt(publications, request) {
+      if (!request) return null;
+      if (request.publicationId) {
+        return publications.find((item) => item.publicationId === request.publicationId) || null;
+      }
+      const prior = new Set(request.priorPublicationIds || []);
+      const matching = publications.filter((item) =>
+        item?.media?.id === request.mediaId && !prior.has(item.publicationId));
+      const active = matching.find(publicationInFlight);
+      if (active) return active;
+      if (!Number.isFinite(request.startedAt)) return null;
+      return matching.find((item) => publicationTerminal(item) &&
+        publicationTimestamp(item) >= request.startedAt - 1000) || null;
+    }
+    function applyCanonicalHistory(history, request = state.request || restoreRequest()) {
+      const publications = Array.isArray(history?.publications) ? history.publications : [];
+      const pending = publications.find(publicationInFlight) || null;
+      const knownAttempt = canonicalAttempt(publications, request);
+      let nextRequest = request;
+      if (knownAttempt && request) {
+        nextRequest = {
+          ...request,
+          publicationId: knownAttempt.publicationId,
+          uncertain: !publicationTerminal(knownAttempt)
+        };
+        persistRequest(nextRequest);
+      } else if (request) {
+        state.request = request;
+      }
+      update({
+        history: publications,
+        independentReview: history?.independentReview === true,
+        freshPublicationAvailable: history?.freshPublicationAvailable === true,
+        publication: pending || knownAttempt || publications[0] || state.publication,
+        selectedMediaId: pending?.media?.id || knownAttempt?.media?.id ||
+          nextRequest?.mediaId || state.selectedMediaId
+      });
+      return knownAttempt;
     }
     function formatFileSize(value) {
       const bytes = Number(value);
@@ -1859,7 +1939,7 @@
         const heading = targetWindow.document.createElement("h3");
         heading.textContent = `${publicationLabel(item.state)} · ${item.media?.fileName || "JPEG"}`;
         const summary = targetWindow.document.createElement("p");
-        summary.textContent = `Conta: ${item.account?.username || "conta vinculada"} · ${formatDateTime(item.updatedAt)}`;
+        summary.textContent = `Conta: vínculo registrado nesta publicação · ${formatDateTime(item.updatedAt)}`;
         const button = targetWindow.document.createElement("button");
         button.type = "button";
         button.className = "gate5aSecondary";
@@ -1883,7 +1963,7 @@
       const body = targetWindow.document.createElement("p");
       body.textContent = [
         `Estado: ${publicationLabel(item.state)}`,
-        `Conta: ${item.account?.username || "conta vinculada"}`,
+        "Conta: vínculo registrado nesta publicação",
         `JPEG: ${item.media?.fileName || "preview_ia4tube.jpg"}`,
         `Referência: ${item.internalReference}`,
         `Horário: ${formatDateTime(item.publishedAt || item.updatedAt)}`,
@@ -1893,6 +1973,15 @@
       ].join("\n");
       body.style.whiteSpace = "pre-wrap";
       container.replaceChildren(heading, body);
+      if (item.state === "published" &&
+          /^https:\/\/www\.instagram\.com\/p\/[A-Za-z0-9_-]{3,100}\/$/.test(item.permalink || "")) {
+        const link = targetWindow.document.createElement("a");
+        link.href = item.permalink;
+        link.target = "_blank";
+        link.rel = "noopener noreferrer";
+        link.textContent = "Abrir publicação no Instagram";
+        container.appendChild(link);
+      }
     }
     function render() {
       const authenticated = Boolean(token);
@@ -1953,10 +2042,20 @@
       one("[data-real-action=\"publish\"]").disabled = !(
         connected && media && !state.busy && (
           !state.publication || state.publication.state === "failed_temporary"
-        )
+        ) && !state.request?.uncertain
       );
+      const inFlight = ["sending", "provider_confirming"].includes(state.publication?.state);
+      selector.disabled = state.busy || inFlight || Boolean(state.request?.uncertain);
+      const fresh = one("[data-real-action=\"new-publication\"]");
+      fresh.hidden = !(state.independentReview && state.freshPublicationAvailable &&
+        ["published", "failed_permanent"].includes(state.publication?.state));
+      fresh.disabled = state.busy || Boolean(state.request?.uncertain);
+      const resume = one("[data-real-action=\"resume-publication\"]");
+      resume.hidden = !state.request?.uncertain;
+      resume.disabled = state.busy || state.publication?.state === "provider_confirming";
       one("[data-real-action=\"disconnect\"]").disabled = !(
-        connection?.state === "connected" && !state.busy
+        connection?.state === "connected" && !state.busy && !inFlight &&
+        !state.request?.uncertain
       );
       if (media) {
         one("[data-real-field-src=\"mediaAsset\"]").src = media.thumbnailUrl;
@@ -2034,14 +2133,15 @@
       ]);
       const [media, history] = results;
       update({
-        media: Array.isArray(media.media) ? media.media : [],
-        history: Array.isArray(history.publications) ? history.publications : [],
-        publication: history.publications?.[0] || state.publication
+        media: Array.isArray(media.media) ? media.media : []
       });
+      applyCanonicalHistory(history);
     }
 
     root.addEventListener("change", (event) => {
       if (event.target?.matches?.("[data-real-media-select]")) {
+        if (state.busy || state.request?.uncertain ||
+            ["sending", "provider_confirming"].includes(state.publication?.state)) return;
         update({ selectedMediaId: event.target.value || null });
         return;
       }
@@ -2204,10 +2304,33 @@
             error: ""
           });
         }, "media");
-      } else if (action === "publish") {
-        const media = selectedMedia();
+      } else if (action === "new-publication") {
+        if (!state.independentReview || !state.freshPublicationAvailable || state.request?.uncertain ||
+            !["published", "failed_permanent"].includes(state.publication?.state)) return;
+        persistRequest(null);
+        update({ publication: null, selectedMediaId: null, stage: "media", error: "" });
+      } else if (action === "publish" || action === "resume-publication") {
+        const media = action === "resume-publication"
+          ? state.media.find((item) => item.id === state.request?.mediaId)
+          : selectedMedia();
         if (!media || typeof targetWindow.crypto?.randomUUID !== "function") return;
-        const requestId = targetWindow.crypto.randomUUID();
+        if (action === "publish" && (state.request?.uncertain ||
+            (state.publication && state.publication.state !== "failed_temporary"))) return;
+        if (action === "resume-publication" && (!state.request?.uncertain ||
+            state.publication?.state === "provider_confirming")) return;
+        const requestId = ((state.independentReview || action === "resume-publication")
+          ? state.request?.requestId : null) || targetWindow.crypto.randomUUID();
+        persistRequest({
+          requestId,
+          mediaId: media.id,
+          uncertain: true,
+          publicationId: state.request?.publicationId || null,
+          priorPublicationIds: state.request?.priorPublicationIds || state.history
+            .map((item) => item.publicationId)
+            .filter((id) => CONNECTION_ID_PATTERN.test(id))
+            .slice(0, 20),
+          startedAt: state.request?.startedAt || Date.now()
+        });
         update({
           stage: "publication",
           publication: { state: "sending" },
@@ -2215,27 +2338,54 @@
           error: ""
         });
         client.publish(media.id, requestId).then((result) => {
-          update({ publication: result.publication, busy: false });
-        }).catch((error) => {
-          update({
-            publication: null,
-            busy: false,
-            error: safeString(error?.message, "Publicação recusada.", 300)
+          persistRequest({
+            requestId,
+            mediaId: media.id,
+            uncertain: !publicationTerminal(result.publication),
+            publicationId: result.publication.publicationId,
+            priorPublicationIds: state.request?.priorPublicationIds,
+            startedAt: state.request?.startedAt
           });
+          update({ publication: result.publication, busy: false,
+            freshPublicationAvailable: state.independentReview &&
+              ["published", "failed_permanent", "failed_temporary"].includes(result.publication.state) });
+        }).catch(async (error) => {
+          let canonical = null;
+          try {
+            canonical = applyCanonicalHistory(await client.publications(), state.request);
+          } catch (_refreshError) {
+            // A second transport failure cannot prove the provider outcome.
+          }
+          const message = canonical?.state === "failed_temporary"
+            ? "A tentativa falhou temporariamente. Tente novamente; a mesma identificação será reutilizada."
+            : canonical?.state === "failed_permanent"
+              ? "A tentativa falhou e não foi publicada. Você pode preparar uma nova publicação."
+              : canonical?.state === "published"
+                ? ""
+                : canonical?.state === "provider_confirming"
+                  ? "O Instagram ainda está confirmando. Consulte o estado; não reenvie."
+                  : `${safeString(error?.message, "Resposta não confirmada.", 220)} Retome somente a mesma tentativa; não crie outra.`;
+          update({ busy: false, error: message });
         });
       } else if (action === "reconcile" && state.publication?.publicationId) {
         run(async () => {
           const result = await client.reconcile(state.publication.publicationId);
-          update({ publication: result.publication });
+          if (state.request) persistRequest({ ...state.request,
+            uncertain: !publicationTerminal(result.publication),
+            publicationId: result.publication.publicationId });
+          update({ publication: result.publication,
+            freshPublicationAvailable: state.independentReview &&
+              ["published", "failed_permanent", "failed_temporary"].includes(result.publication.state) });
         }, "publication");
       } else if (action === "history") {
         run(async () => {
           const result = await client.publications();
-          update({ history: result.publications });
+          applyCanonicalHistory(result);
         }, "history");
       } else if (action === "disconnect-screen") {
         update({ stage: "data", error: "" });
       } else if (action === "disconnect" && state.connection?.connectionId) {
+        if (publicationInFlight(state.publication) || state.request?.uncertain) return;
         if (!targetWindow.confirm("Deseja desconectar esta conta do Instagram?")) return;
         run(async () => {
           const result = await client.disconnect(state.connection.connectionId);

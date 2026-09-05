@@ -71,6 +71,8 @@ const PERSISTED_CONNECTION_STATE = Object.freeze({
   disconnecting: "disconnecting",
   failed: "failed"
 });
+const APP_REVIEW_PROVIDER = "instagram";
+const APP_REVIEW_STALE_MINUTES = 10;
 
 function strictObject(value, allowedKeys) {
   if (
@@ -96,6 +98,17 @@ function uuid(value) {
   } catch {
     connectorFail("connector_contract_invalid");
   }
+}
+
+function appReviewOperationReference(publicationId) {
+  return `igo:${uuid(publicationId).replaceAll("-", "").toLowerCase()}`;
+}
+
+function appReviewReconciliationDigest(publicationId, providerReference) {
+  return crypto.createHash("sha256").update(JSON.stringify({
+    providerReference,
+    publicationId: uuid(publicationId)
+  }), "utf8").digest("hex");
 }
 
 function positiveInteger(value) {
@@ -908,6 +921,470 @@ async function appendInternalAudit(client, context, input) {
   );
 }
 
+function recoveredPublicationResult(context, row, capability = "publishImage") {
+  if (row.state === "provider_confirming" || row.state === "published") {
+    return safeResultPayload({
+      publicationId: uuid(row.id),
+      connectionId: uuid(row.connection_id),
+      provider: context.provider,
+      state: row.state,
+      confirmedProviderReference: row.confirmed_provider_reference || null,
+      reconciliationReference: row.reconciliation_reference || null,
+      revision: rowRevision(row.revision)
+    }, capability, context.provider);
+  }
+  return null;
+}
+
+async function completeRecoveredPublicationIdempotency(
+  client,
+  context,
+  row,
+  staleOnly = false
+) {
+  const result = recoveredPublicationResult(context, row);
+  const failure = row.state === "failed_temporary" ||
+    row.state === "failed_permanent"
+    ? errorCode((ERROR_CODES.has(row.error_code) ? row.error_code : null) ||
+      (row.state === "failed_temporary"
+      ? "provider_temporary_failure"
+      : "provider_permanent_failure"), false)
+    : null;
+  if (result === null && failure === null) {
+    connectorFail("state_transition_invalid");
+  }
+  const updated = await client.query([
+    "UPDATE ia4tube_social.social_idempotency_operations",
+    "SET status='completed',result_payload=$4::jsonb,error_code=$5,",
+    " updated_at=CURRENT_TIMESTAMP,revision=revision+1",
+    "WHERE company_id=$1 AND provider=$2 AND capability='publishImage'",
+    " AND request_hash=$3 AND status='pending'",
+    staleOnly
+      ? ` AND updated_at <= CURRENT_TIMESTAMP - INTERVAL '${APP_REVIEW_STALE_MINUTES} minutes'`
+      : "",
+    "RETURNING operation_id"
+  ].filter(Boolean).join("\n"), [
+    context.companyId,
+    context.provider,
+    digest(row.request_hash),
+    result === null ? null : JSON.stringify(result),
+    failure
+  ]);
+  return Number(updated.rowCount || updated.rows?.length || 0);
+}
+
+async function completeRecoveredReconciliationIdempotency(
+  client,
+  context,
+  row,
+  requestHash
+) {
+  const result = recoveredPublicationResult(
+    context,
+    row,
+    "getPublicationStatus"
+  );
+  if (result === null) connectorFail("state_transition_invalid");
+  const updated = await client.query([
+    "UPDATE ia4tube_social.social_idempotency_operations",
+    "SET status='completed',result_payload=$4::jsonb,error_code=NULL,",
+    " updated_at=CURRENT_TIMESTAMP,revision=revision+1",
+    "WHERE company_id=$1 AND provider=$2",
+    " AND capability='getPublicationStatus' AND request_hash=$3",
+    " AND status='pending'",
+    ` AND updated_at <= CURRENT_TIMESTAMP - INTERVAL '${APP_REVIEW_STALE_MINUTES} minutes'`,
+    "RETURNING operation_id"
+  ].join("\n"), [
+    context.companyId,
+    context.provider,
+    digest(requestHash),
+    JSON.stringify(result)
+  ]);
+  return Number(updated.rowCount || updated.rows?.length || 0);
+}
+
+async function finishRecoveredAttempt(
+  client,
+  context,
+  row,
+  state,
+  reference,
+  failure
+) {
+  const updated = await client.query([
+    "UPDATE ia4tube_social.social_publication_attempts",
+    "SET state=$4,error_code=$5,provider_reference=$6,",
+    " finished_at=COALESCE(finished_at,CURRENT_TIMESTAMP),",
+    " duration_ms=COALESCE(duration_ms,GREATEST(0,FLOOR(EXTRACT(EPOCH FROM",
+    "   (CURRENT_TIMESTAMP-started_at))*1000)::bigint)),",
+    " updated_at=CURRENT_TIMESTAMP,revision=revision+1",
+    "WHERE company_id=$1 AND publication_id=$2 AND provider=$3",
+    " AND attempt_number=(SELECT MAX(candidate.attempt_number)",
+    "   FROM ia4tube_social.social_publication_attempts candidate",
+    "   WHERE candidate.company_id=$1 AND candidate.publication_id=$2",
+    "     AND candidate.provider=$3 AND candidate.state='started')",
+    " AND state='started' RETURNING attempt_number"
+  ].join("\n"), [
+    context.companyId,
+    uuid(row.id),
+    context.provider,
+    state,
+    failure,
+    reference
+  ]);
+  if (updated.rows?.length !== 1) connectorFail("state_transition_invalid");
+}
+
+async function failRecoveredUnsubmittedPublication(
+  client,
+  context,
+  row,
+  expectedState
+) {
+  if (
+    row.state !== expectedState ||
+    !["ready", "failed_temporary"].includes(expectedState)
+  ) {
+    connectorFail("state_transition_invalid");
+  }
+  const publishing = await client.query([
+    "UPDATE ia4tube_social.social_publications",
+    "SET state='publishing',error_code=NULL,reconciliation_reference=NULL,",
+    " updated_at=CURRENT_TIMESTAMP,revision=revision+1",
+    "WHERE company_id=$1 AND id=$2 AND provider=$3",
+    " AND state=$4 AND revision=$5 RETURNING revision"
+  ].join("\n"), [
+    context.companyId,
+    row.id,
+    context.provider,
+    expectedState,
+    row.revision
+  ]);
+  if (publishing.rows?.length !== 1) {
+    connectorFail("state_transition_invalid");
+  }
+  row.revision = rowRevision(publishing.rows[0].revision);
+  const nextAttempt = await client.query([
+    "SELECT COALESCE(MAX(attempt_number),0)::bigint+1 AS next_attempt",
+    "FROM ia4tube_social.social_publication_attempts",
+    "WHERE company_id=$1 AND publication_id=$2 AND provider=$3"
+  ].join("\n"), [context.companyId, row.id, context.provider]);
+  await client.query([
+    "INSERT INTO ia4tube_social.social_publication_attempts (",
+    " company_id,publication_id,provider,attempt_number,state",
+    ") VALUES ($1,$2,$3,$4,'started')"
+  ].join("\n"), [
+    context.companyId,
+    row.id,
+    context.provider,
+    positiveInteger(nextAttempt.rows?.[0]?.next_attempt)
+  ]);
+  await appendInternalAudit(client, context, {
+    action: "social.publication.attempt_recorded",
+    connectionId: row.connection_id,
+    publicationId: row.id,
+    detailsCode: "state_started"
+  });
+  await appendInternalAudit(client, context, {
+    action: "social.publication.state_transition",
+    connectionId: row.connection_id,
+    publicationId: row.id,
+    detailsCode: "to_publishing"
+  });
+
+  const failed = await client.query([
+    "UPDATE ia4tube_social.social_publications",
+    "SET state='failed_permanent',error_code='provider_permanent_failure',",
+    " reconciliation_reference=NULL,updated_at=CURRENT_TIMESTAMP,",
+    " revision=revision+1",
+    "WHERE company_id=$1 AND id=$2 AND provider=$3",
+    " AND state='publishing' AND revision=$4",
+    "RETURNING revision,request_hash"
+  ].join("\n"), [
+    context.companyId, row.id, context.provider, row.revision
+  ]);
+  if (failed.rows?.length !== 1) connectorFail("state_transition_invalid");
+  row.state = "failed_permanent";
+  row.error_code = "provider_permanent_failure";
+  row.revision = rowRevision(failed.rows[0].revision);
+  row.request_hash = digest(failed.rows[0].request_hash || row.request_hash);
+  await finishRecoveredAttempt(
+    client,
+    context,
+    row,
+    "failed_permanent",
+    null,
+    "provider_permanent_failure"
+  );
+  await appendInternalAudit(client, context, {
+    action: "social.publication.attempt_recorded",
+    connectionId: row.connection_id,
+    publicationId: row.id,
+    detailsCode: "state_failed_permanent"
+  });
+  await appendInternalAudit(client, context, {
+    action: "social.publication.state_transition",
+    connectionId: row.connection_id,
+    publicationId: row.id,
+    detailsCode: "to_failed_permanent"
+  });
+  return row;
+}
+
+async function recoverStaleArmedReconciliations(client, context) {
+  const armed = await client.query([
+    "SELECT id,connection_id,state,revision,reconciliation_reference,",
+    " confirmed_provider_reference,error_code,request_hash",
+    "FROM ia4tube_social.social_publications",
+    "WHERE company_id=$1 AND provider=$2 AND state='provider_confirming'",
+    " AND reconciliation_reference ~ '^igc:armed:[0-9]{5,64}$'",
+    "ORDER BY updated_at,id FOR UPDATE"
+  ].join("\n"), [context.companyId, context.provider]);
+  let armedSubmitted = 0;
+  let idempotencyCompleted = 0;
+  for (const candidate of armed.rows || []) {
+    const row = {
+      ...candidate,
+      id: uuid(candidate.id),
+      connection_id: uuid(candidate.connection_id),
+      revision: rowRevision(candidate.revision),
+      request_hash: digest(candidate.request_hash)
+    };
+    const armedReference = String(candidate.reconciliation_reference || "");
+    const requestHash = appReviewReconciliationDigest(row.id, armedReference);
+    const pending = await client.query([
+      "SELECT operation_id,request_hash",
+      "FROM ia4tube_social.social_idempotency_operations",
+      "WHERE company_id=$1 AND provider=$2",
+      " AND capability='getPublicationStatus' AND request_hash=$3",
+      " AND status='pending'",
+      ` AND updated_at <= CURRENT_TIMESTAMP - INTERVAL '${APP_REVIEW_STALE_MINUTES} minutes'`,
+      "ORDER BY updated_at,operation_id FOR UPDATE"
+    ].join("\n"), [context.companyId, context.provider, requestHash]);
+    if (!pending.rows?.length) continue;
+    for (const operation of pending.rows) digest(operation.request_hash);
+    const submittedReference = armedReference.replace(
+      /^igc:armed:/,
+      "igc:submitted:"
+    );
+    if (!/^igc:submitted:[0-9]{5,64}$/.test(submittedReference)) {
+      connectorFail("state_transition_invalid");
+    }
+    const progressed = await client.query([
+      "UPDATE ia4tube_social.social_publications",
+      "SET reconciliation_reference=$5,updated_at=CURRENT_TIMESTAMP,",
+      " revision=revision+1",
+      "WHERE company_id=$1 AND id=$2 AND provider=$3",
+      " AND state='provider_confirming' AND revision=$4",
+      " AND reconciliation_reference=$6",
+      "RETURNING revision"
+    ].join("\n"), [
+      context.companyId,
+      row.id,
+      context.provider,
+      row.revision,
+      submittedReference,
+      armedReference
+    ]);
+    if (progressed.rows?.length !== 1) {
+      connectorFail("state_transition_invalid");
+    }
+    row.revision = rowRevision(progressed.rows[0].revision);
+    row.reconciliation_reference = submittedReference;
+    const attempt = await client.query([
+      "UPDATE ia4tube_social.social_publication_attempts",
+      "SET provider_reference=$4,updated_at=CURRENT_TIMESTAMP,",
+      " revision=revision+1",
+      "WHERE company_id=$1 AND publication_id=$2 AND provider=$3",
+      " AND attempt_number=(SELECT MAX(candidate.attempt_number)",
+      "   FROM ia4tube_social.social_publication_attempts candidate",
+      "   WHERE candidate.company_id=$1 AND candidate.publication_id=$2",
+      "     AND candidate.provider=$3",
+      "     AND candidate.state='provider_confirming')",
+      " AND state='provider_confirming' AND provider_reference=$5",
+      "RETURNING attempt_number"
+    ].join("\n"), [
+      context.companyId,
+      row.id,
+      context.provider,
+      submittedReference,
+      armedReference
+    ]);
+    if (attempt.rows?.length !== 1) connectorFail("state_transition_invalid");
+    await appendInternalAudit(client, context, {
+      action: "social.publication.attempt_recorded",
+      connectionId: row.connection_id,
+      publicationId: row.id,
+      detailsCode: "state_provider_confirming"
+    });
+    await appendInternalAudit(client, context, {
+      action: "social.publication.state_transition",
+      connectionId: row.connection_id,
+      publicationId: row.id,
+      detailsCode: "to_provider_confirming"
+    });
+    idempotencyCompleted += await completeRecoveredReconciliationIdempotency(
+      client,
+      context,
+      row,
+      requestHash
+    );
+    armedSubmitted += 1;
+  }
+  return Object.freeze({ armedSubmitted, idempotencyCompleted });
+}
+
+async function recoverStaleAppReviewPublications(client, context) {
+  const candidates = await client.query([
+    "SELECT id,connection_id,state,revision,idempotency_key,request_hash,",
+    " confirmed_provider_reference,reconciliation_reference,error_code",
+    "FROM ia4tube_social.social_publications",
+    "WHERE company_id=$1 AND provider=$2",
+    " AND state IN ('ready','publishing')",
+    ` AND updated_at <= CURRENT_TIMESTAMP - INTERVAL '${APP_REVIEW_STALE_MINUTES} minutes'`,
+    "ORDER BY updated_at,id FOR UPDATE"
+  ].join("\n"), [context.companyId, context.provider]);
+  let readyFailedPermanent = 0;
+  let publishingProviderConfirming = 0;
+  let idempotencyCompleted = 0;
+
+  for (const candidate of candidates.rows || []) {
+    const row = {
+      ...candidate,
+      id: uuid(candidate.id),
+      connection_id: uuid(candidate.connection_id),
+      revision: rowRevision(candidate.revision),
+      request_hash: digest(candidate.request_hash)
+    };
+    if (row.state === "ready") {
+      await failRecoveredUnsubmittedPublication(
+        client,
+        context,
+        row,
+        "ready"
+      );
+      idempotencyCompleted += await completeRecoveredPublicationIdempotency(
+        client,
+        context,
+        row
+      );
+      readyFailedPermanent += 1;
+      continue;
+    }
+
+    if (row.state === "publishing") {
+      const reference = appReviewOperationReference(row.id);
+      const confirming = await client.query([
+        "UPDATE ia4tube_social.social_publications",
+        "SET state='provider_confirming',error_code=NULL,",
+        " reconciliation_reference=$5,updated_at=CURRENT_TIMESTAMP,",
+        " revision=revision+1",
+        "WHERE company_id=$1 AND id=$2 AND provider=$3",
+        " AND state='publishing' AND revision=$4",
+        "RETURNING revision,request_hash"
+      ].join("\n"), [
+        context.companyId, row.id, context.provider, row.revision, reference
+      ]);
+      if (confirming.rows?.length !== 1) {
+        connectorFail("state_transition_invalid");
+      }
+      row.state = "provider_confirming";
+      row.reconciliation_reference = reference;
+      row.revision = rowRevision(confirming.rows[0].revision);
+      row.request_hash = digest(
+        confirming.rows[0].request_hash || row.request_hash
+      );
+      await finishRecoveredAttempt(
+        client,
+        context,
+        row,
+        "provider_confirming",
+        reference,
+        null
+      );
+      await appendInternalAudit(client, context, {
+        action: "social.publication.attempt_recorded",
+        connectionId: row.connection_id,
+        publicationId: row.id,
+        detailsCode: "state_provider_confirming"
+      });
+      await appendInternalAudit(client, context, {
+        action: "social.publication.state_transition",
+        connectionId: row.connection_id,
+        publicationId: row.id,
+        detailsCode: "to_provider_confirming"
+      });
+      idempotencyCompleted += await completeRecoveredPublicationIdempotency(
+        client,
+        context,
+        row
+      );
+      publishingProviderConfirming += 1;
+    }
+  }
+
+  const staleCompleted = await client.query([
+    "SELECT publication.id,publication.connection_id,publication.state,",
+    " publication.confirmed_provider_reference,",
+    " publication.reconciliation_reference,publication.error_code,",
+    " publication.revision,publication.request_hash",
+    "FROM ia4tube_social.social_publications publication",
+    "WHERE publication.company_id=$1 AND publication.provider=$2",
+    " AND publication.state IN (",
+    "   'provider_confirming','published','failed_temporary','failed_permanent'",
+    " )",
+    " AND EXISTS (SELECT 1",
+    "   FROM ia4tube_social.social_idempotency_operations operation",
+    "   WHERE operation.company_id=publication.company_id",
+    "     AND operation.provider=publication.provider",
+    "     AND operation.capability='publishImage'",
+    "     AND operation.request_hash=publication.request_hash",
+    "     AND operation.status='pending'",
+    `     AND operation.updated_at <= CURRENT_TIMESTAMP - INTERVAL '${APP_REVIEW_STALE_MINUTES} minutes'`,
+    " )",
+    "ORDER BY publication.updated_at,publication.id FOR UPDATE"
+  ].join("\n"), [context.companyId, context.provider]);
+  for (const candidate of staleCompleted.rows || []) {
+    const row = {
+      ...candidate,
+      id: uuid(candidate.id),
+      connection_id: uuid(candidate.connection_id),
+      revision: rowRevision(candidate.revision),
+      request_hash: digest(candidate.request_hash)
+    };
+    if (row.state === "failed_temporary") {
+      // A worker can be paused after reserving idempotency but before reading
+      // the failed-temporary publication. The two CAS transitions fence that
+      // worker before a new intent is admitted, without any provider I/O.
+      await failRecoveredUnsubmittedPublication(
+        client,
+        context,
+        row,
+        "failed_temporary"
+      );
+    }
+    idempotencyCompleted += await completeRecoveredPublicationIdempotency(
+      client,
+      context,
+      row,
+      true
+    );
+  }
+
+  const reconciliation = await recoverStaleArmedReconciliations(
+    client,
+    context
+  );
+  idempotencyCompleted += reconciliation.idempotencyCompleted;
+
+  return Object.freeze({
+    readyFailedPermanent,
+    publishingProviderConfirming,
+    armedSubmitted: reconciliation.armedSubmitted,
+    idempotencyCompleted
+  });
+}
+
 async function upsertProfessionalAccount(client, context, connectionId, account) {
   const accountId = crypto.randomUUID();
   await client.query(
@@ -1021,6 +1498,9 @@ async function revokeConnectionMaterial(client, context, connectionId) {
 
 function createPostgresConnectorStore(options = {}) {
   const pool = options.pool;
+  const appReviewCompanyId = options.appReviewCompanyId == null
+    ? null
+    : uuid(options.appReviewCompanyId);
   const role = requireSafeLabel(
     options.runtimeRole || "ia4tube_social_runtime",
     "runtime_role"
@@ -1031,6 +1511,17 @@ function createPostgresConnectorStore(options = {}) {
 
   function scope(rawContext) {
     const context = requireConnectorContext(rawContext);
+
+    function requireAppReviewScope() {
+      if (
+        appReviewCompanyId === null ||
+        context.companyId !== appReviewCompanyId ||
+        context.provider !== APP_REVIEW_PROVIDER ||
+        context.environment !== "staging"
+      ) {
+        connectorFail("resource_unavailable");
+      }
+    }
 
     function createScope(boundClient = null, assertActive = () => true) {
       function execute(operation) {
@@ -1131,13 +1622,35 @@ function createPostgresConnectorStore(options = {}) {
           });
         },
 
-        async disconnectConnectionLocally(id) {
+        async disconnectAppReviewConnectionLocally(id) {
+          requireAppReviewScope();
+          return methods.disconnectConnectionLocally(id, true);
+        },
+
+        async disconnectConnectionLocally(id, appReview = false) {
+          if (appReview === true) requireAppReviewScope();
           const connectionId = uuid(id);
           return execute(async (client) => {
             await client.query(
               "SELECT pg_advisory_xact_lock(hashtextextended($1::text, 0))",
               [`${context.companyId}:${context.provider}`]
             );
+            if (appReview === true) {
+              await recoverStaleAppReviewPublications(client, context);
+              const activePublication = await client.query([
+                "SELECT id FROM ia4tube_social.social_publications",
+                "WHERE company_id=$1 AND connection_id=$2 AND provider=$3",
+                " AND state IN ('ready','publishing','provider_confirming')",
+                "LIMIT 1"
+              ].join("\n"), [
+                context.companyId,
+                connectionId,
+                context.provider
+              ]);
+              if (activePublication.rows?.length) {
+                connectorFail("state_transition_invalid");
+              }
+            }
             let current = await loadConnectionDetails(
               client,
               context,
@@ -1703,6 +2216,50 @@ function createPostgresConnectorStore(options = {}) {
           ));
         },
 
+        async listPublicationDetails() {
+          return execute(async (client) => {
+            const result = await client.query([
+              "SELECT id FROM ia4tube_social.social_publications",
+              "WHERE company_id=$1 AND provider=$2",
+              "ORDER BY (state IN ('ready','publishing','provider_confirming')) DESC,",
+              " created_at DESC, id DESC LIMIT 100"
+            ].join("\n"), [context.companyId, context.provider]);
+            const values = [];
+            for (const row of result.rows || []) {
+              const value = await loadPublicationDetails(client, context, row.id);
+              if (value) values.push(value);
+            }
+            return Object.freeze(values);
+          });
+        },
+
+        async listAppReviewPublicationDetails() {
+          requireAppReviewScope();
+          return execute(async (client) => {
+            await client.query(
+              "SELECT pg_advisory_xact_lock(hashtextextended($1::text, 0))",
+              [`${context.companyId}:${context.provider}`]
+            );
+            await recoverStaleAppReviewPublications(client, context);
+            const result = await client.query([
+              "SELECT id FROM ia4tube_social.social_publications",
+              "WHERE company_id=$1 AND provider=$2",
+              "ORDER BY (state IN ('ready','publishing','provider_confirming')) DESC,",
+              " created_at DESC,id DESC LIMIT 100"
+            ].join("\n"), [context.companyId, context.provider]);
+            const values = [];
+            for (const row of result.rows || []) {
+              const value = await loadPublicationDetails(
+                client,
+                context,
+                row.id
+              );
+              if (value) values.push(value);
+            }
+            return Object.freeze(values);
+          });
+        },
+
         async getPublicationSnapshot(id, connectionId) {
           return execute((client) => loadPublicationSnapshot(
             client,
@@ -1884,7 +2441,12 @@ function createPostgresConnectorStore(options = {}) {
           });
         },
 
-        async beginIdempotency(record) {
+        async beginAppReviewIdempotency(record) {
+          requireAppReviewScope();
+          return methods.beginIdempotency(record, true);
+        },
+
+        async beginIdempotency(record, appReviewPublication = false) {
           const source = strictObject(record, [
             "capability", "operationId", "digest", "payload"
           ]);
@@ -1900,11 +2462,36 @@ function createPostgresConnectorStore(options = {}) {
             connectorFail("connector_contract_invalid");
           }
           return execute(async (client) => {
-            if (publication) {
+            if (appReviewPublication === true) requireAppReviewScope();
+            if (publication || appReviewPublication === true) {
               await client.query(
                 "SELECT pg_advisory_xact_lock(hashtextextended($1::text, 0))",
                 [`${context.companyId}:${context.provider}`]
               );
+            }
+            if (appReviewPublication === true) {
+              await recoverStaleAppReviewPublications(client, context);
+              if (publication) {
+                // This check and ready reservation share the existing short
+                // transaction/tenant lock. No lock is held during provider I/O.
+                const pending = await client.query([
+                  "SELECT id FROM ia4tube_social.social_publications",
+                  "WHERE company_id=$1 AND provider=$2 AND id<>$3",
+                  " AND state IN ('ready','publishing','provider_confirming') LIMIT 1"
+                ].join("\n"), [context.companyId, context.provider, publication.id]);
+                if (pending.rows?.length) connectorFail("state_transition_invalid");
+                // A temporary-failure retry reserves its operation before the
+                // publication moves back to publishing. Guard that interval
+                // too, including independent workers/processes.
+                const reserved = await client.query([
+                  "SELECT operation_id FROM ia4tube_social.social_idempotency_operations",
+                  "WHERE company_id=$1 AND provider=$2 AND operation_id<>$3",
+                  " AND capability='publishImage' AND status='pending'",
+                  ` AND updated_at > CURRENT_TIMESTAMP - INTERVAL '${APP_REVIEW_STALE_MINUTES} minutes'`,
+                  "LIMIT 1"
+                ].join("\n"), [context.companyId, context.provider, operationId]);
+                if (reserved.rows?.length) connectorFail("state_transition_invalid");
+              }
             }
             const inserted = await client.query(
               [

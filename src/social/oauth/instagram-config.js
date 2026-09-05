@@ -1,6 +1,7 @@
 "use strict";
 
 const { postgresFail } = require("../../persistence/postgres/errors");
+const { loadAppReviewPolicy } = require("../app-review-policy");
 
 const INSTAGRAM_PROVIDER = "instagram";
 const INSTAGRAM_AUTHORIZATION_ENDPOINT =
@@ -95,7 +96,7 @@ function normalizePublicOrigin(value) {
   return parsed.origin;
 }
 
-function disabledConfig(flags, expectedUsername, publicOrigin) {
+function disabledConfig(flags, expectedUsername, publicOrigin, appReview) {
   return Object.freeze({
     enabled: false,
     provider: INSTAGRAM_PROVIDER,
@@ -106,6 +107,7 @@ function disabledConfig(flags, expectedUsername, publicOrigin) {
     appSecret: null,
     expectedUsername,
     publicOrigin,
+    appReview,
     redirectUri: INSTAGRAM_OAUTH_REDIRECT_URI,
     graphApiVersion: null,
     authorizationEndpoint: INSTAGRAM_AUTHORIZATION_ENDPOINT,
@@ -121,6 +123,7 @@ function loadInstagramOAuthConfig(env = process.env) {
     env.SOCIAL_INSTAGRAM_EXPECTED_USERNAME
   );
   const publicOrigin = normalizePublicOrigin(env.PUBLIC_API_BASE_URL);
+  const appReview = loadAppReviewPolicy(env);
 
   const flags = Object.freeze({
     instagramEnabled: strictFlag(env, "SOCIAL_INSTAGRAM_ENABLED"),
@@ -145,7 +148,7 @@ function loadInstagramOAuthConfig(env = process.env) {
     configFail("social_instagram_publication_forbidden");
   }
   if (!flags.instagramEnabled) {
-    return disabledConfig(flags, expectedUsername, publicOrigin);
+    return disabledConfig(flags, expectedUsername, publicOrigin, appReview);
   }
 
   const appId = boundedString(env.INSTAGRAM_APP_ID, {
@@ -179,6 +182,7 @@ function loadInstagramOAuthConfig(env = process.env) {
     appSecret,
     expectedUsername,
     publicOrigin,
+    appReview,
     redirectUri: INSTAGRAM_OAUTH_REDIRECT_URI,
     graphApiVersion,
     authorizationEndpoint: INSTAGRAM_AUTHORIZATION_ENDPOINT,
