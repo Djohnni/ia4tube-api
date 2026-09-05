@@ -132,6 +132,10 @@ async function initializeSocialServerRuntime(options = {}) {
   let closed = false;
   return Object.freeze({
     enabled: true,
+    // Read-only tenant eligibility dependencies; never expose credentials or
+    // operator repositories through the HTTP assembly wrapper.
+    ...(runtime.auth ? { auth: runtime.auth } : {}),
+    ...(runtime.companies ? { companies: runtime.companies } : {}),
     instagramOAuth: runtime.instagramOAuth || null,
     instagramPublication: runtime.instagramPublication || null,
     ...(runtime.instagramReviewer

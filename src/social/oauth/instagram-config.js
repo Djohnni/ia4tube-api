@@ -17,6 +17,8 @@ const INSTAGRAM_OAUTH_REDIRECT_URI =
   "/v1/social/oauth/callback";
 const INSTAGRAM_GATE4_STAGING_ORIGIN =
   "https://ia4tube-api-staging-checkpoint-a.onrender.com";
+const INSTAGRAM_PRODUCTION_ORIGIN = "https://ia4tube-api.onrender.com";
+const INSTAGRAM_PRODUCTION_SERVICE_ID = "srv-d8708kd7vvec73ap1p6g";
 const INSTAGRAM_OAUTH_SCOPES = Object.freeze([
   "instagram_business_basic",
   "instagram_business_content_publish"
@@ -124,6 +126,18 @@ function loadInstagramOAuthConfig(env = process.env) {
   );
   const publicOrigin = normalizePublicOrigin(env.PUBLIC_API_BASE_URL);
   const appReview = loadAppReviewPolicy(env);
+  const production = env.ENVIRONMENT === "production";
+  if (production && (
+    publicOrigin !== INSTAGRAM_PRODUCTION_ORIGIN ||
+    (env.RENDER_SERVICE_ID !== undefined &&
+      env.RENDER_SERVICE_ID !== INSTAGRAM_PRODUCTION_SERVICE_ID) ||
+    env.REVIEW_SANDBOX_ENABLED === "true" ||
+    env.SYNTHETIC_PROVIDER_ENABLED === "true" ||
+    env.META_APP_REVIEW_WINDOW_ENABLED === "true"
+  )) configFail("social_instagram_production_identity_invalid");
+  const redirectUri = production
+    ? `${INSTAGRAM_PRODUCTION_ORIGIN}/v1/social/oauth/callback`
+    : INSTAGRAM_OAUTH_REDIRECT_URI;
 
   const flags = Object.freeze({
     instagramEnabled: strictFlag(env, "SOCIAL_INSTAGRAM_ENABLED"),
@@ -141,14 +155,19 @@ function loadInstagramOAuthConfig(env = process.env) {
     (
       !flags.instagramEnabled ||
       !flags.externalConnectionEnabled ||
-      expectedUsername !== "ia4tube_empresas" ||
-      publicOrigin !== INSTAGRAM_GATE4_STAGING_ORIGIN
+      (!production && (expectedUsername !== "ia4tube_empresas" ||
+        publicOrigin !== INSTAGRAM_GATE4_STAGING_ORIGIN))
     )
   ) {
     configFail("social_instagram_publication_forbidden");
   }
   if (!flags.instagramEnabled) {
-    return disabledConfig(flags, expectedUsername, publicOrigin, appReview);
+    return Object.freeze({
+      ...disabledConfig(flags, expectedUsername, publicOrigin, appReview),
+      environment: production ? "production" : "staging",
+      publicationBindingRequired: production,
+      redirectUri
+    });
   }
 
   const appId = boundedString(env.INSTAGRAM_APP_ID, {
@@ -160,7 +179,7 @@ function loadInstagramOAuthConfig(env = process.env) {
     minimum: 16,
     maximum: 256
   });
-  if (env.INSTAGRAM_OAUTH_REDIRECT_URI !== INSTAGRAM_OAUTH_REDIRECT_URI) {
+  if (env.INSTAGRAM_OAUTH_REDIRECT_URI !== redirectUri) {
     configFail("social_instagram_redirect_uri_invalid");
   }
   const graphApiVersion = boundedString(
@@ -183,7 +202,9 @@ function loadInstagramOAuthConfig(env = process.env) {
     expectedUsername,
     publicOrigin,
     appReview,
-    redirectUri: INSTAGRAM_OAUTH_REDIRECT_URI,
+    environment: production ? "production" : "staging",
+    publicationBindingRequired: production,
+    redirectUri,
     graphApiVersion,
     authorizationEndpoint: INSTAGRAM_AUTHORIZATION_ENDPOINT,
     tokenEndpoint: INSTAGRAM_TOKEN_ENDPOINT,
@@ -196,6 +217,8 @@ module.exports = {
   INSTAGRAM_AUTHORIZATION_ENDPOINT,
   INSTAGRAM_GRAPH_API_ORIGIN,
   INSTAGRAM_GATE4_STAGING_ORIGIN,
+  INSTAGRAM_PRODUCTION_ORIGIN,
+  INSTAGRAM_PRODUCTION_SERVICE_ID,
   INSTAGRAM_LONG_LIVED_TOKEN_ENDPOINT,
   INSTAGRAM_OAUTH_REDIRECT_URI,
   INSTAGRAM_OAUTH_SCOPES,

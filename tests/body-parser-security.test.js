@@ -220,13 +220,13 @@ async function main() {
       4
     );
     assert.equal(
-      (serverSource.match(/jwt\.sign\(/g) || []).length,
+      (serverSource.match(/productionSession\.sign\(/g) || []).length,
       5
     );
-    assert.equal(
-      (serverSource.match(/algorithm:\s*"HS256"/g) || []).length,
-      5
-    );
+    const sessionSource = fs.readFileSync(path.join(repoDir, "src/social/production-session.js"), "utf8");
+    assert.equal((serverSource.match(/jwt\.sign\(/g) || []).length, 0);
+    assert.equal((sessionSource.match(/algorithm:\s*"HS256"/g) || []).length, 1);
+    assert.match(sessionSource, /algorithms:\s*\["HS256"\]/);
 
     await waitForServer(instance);
 

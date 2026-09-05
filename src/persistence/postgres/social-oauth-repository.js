@@ -1,4 +1,5 @@
 "use strict";
+const { assertNoPendingPublications } = require("./social-publication-guard");
 
 const crypto = require("node:crypto");
 const { withTransaction } = require("./pool");
@@ -633,6 +634,7 @@ function createPostgresOAuthRepository(options = {}) {
     async function createAuthorizationWithPendingConnection(input = {}) {
       const clean = authorizationInput(input);
       return run(async (client) => {
+        await assertNoPendingPublications(client, context.companyId, context.provider);
         await client.query(
           "SELECT pg_advisory_xact_lock(hashtextextended($1::text, 0))",
           [`${context.companyId}:${context.provider}`]
@@ -761,6 +763,7 @@ function createPostgresOAuthRepository(options = {}) {
           connectorFail("connector_contract_invalid");
         }
         return await run(async (client) => {
+          await assertNoPendingPublications(client, context.companyId, context.provider);
           await client.query(
             "SELECT pg_advisory_xact_lock(hashtextextended($1::text, 0))",
             [`${context.companyId}:${context.provider}`]
@@ -892,6 +895,7 @@ function createPostgresOAuthRepository(options = {}) {
       const clean = failedConnectionInput(input);
       const terminalPredicate = terminalStatusPredicate(clean.terminalStatus);
       return run(async (client) => {
+        await assertNoPendingPublications(client, context.companyId, context.provider);
         await client.query(
           "SELECT pg_advisory_xact_lock(hashtextextended($1::text, 0))",
           [`${context.companyId}:${context.provider}`]

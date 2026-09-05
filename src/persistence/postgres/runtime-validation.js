@@ -4,6 +4,7 @@ const { postgresFail } = require("./errors");
 const { readManifest } = require("./migrations");
 const { withTransaction } = require("./pool");
 const { requireSafeLabel } = require("./validation");
+const { BINDING_MIGRATION, bindingPoliciesMatch, verifyPublicationBindingSchema } = require("./publication-binding-schema");
 
 const SOCIAL_SCHEMA = "ia4tube_social";
 const SOCIAL_ADMIN_SCHEMA = "ia4tube_social_admin";
@@ -408,6 +409,7 @@ async function verifyRuntimeSchema(pool, role, options = {}) {
     (migration) =>
       migration.version === "0006_social_compliance_persistence"
   );
+  const bindingProfile = local.some((migration) => migration.version === BINDING_MIGRATION);
   const tenantTables = complianceProfile
     ? TENANT_TABLES
     : LEGACY_TENANT_TABLES;
@@ -634,7 +636,8 @@ async function verifyRuntimeSchema(pool, role, options = {}) {
             !row.relrowsecurity ||
             !row.relforcerowsecurity ||
             Number(row.policy_count) !==
-              (complianceProfile && COMPLIANCE_TABLES.includes(row.relname)
+              (bindingProfile && row.relname === "social_publications" ? 3 :
+                complianceProfile && COMPLIANCE_TABLES.includes(row.relname)
                 ? 2
                 : 1)
         )
@@ -713,6 +716,12 @@ async function verifyRuntimeSchema(pool, role, options = {}) {
               "postgres_rls_contract_mismatch",
               "Contrato RLS social divergente."
             );
+          }
+        } else if (bindingProfile && table === "social_publications") {
+          if (resolverPolicy || tablePolicies.length !== 3 || !bindingPoliciesMatch(
+            tablePolicies.filter((entry) => entry.policyname !== TENANT_POLICIES[table]), runtimeRole
+          )) {
+            postgresFail("postgres_rls_contract_mismatch", "Contrato RLS social divergente.");
           }
         } else if (tablePolicies.length !== 1 || resolverPolicy) {
           postgresFail(
@@ -956,6 +965,7 @@ async function verifyRuntimeSchema(pool, role, options = {}) {
         );
       }
 
+      if (bindingProfile) await verifyPublicationBindingSchema(client, { runtimeRole });
       return Object.freeze({
         valid: true,
         migrationCount: local.length,

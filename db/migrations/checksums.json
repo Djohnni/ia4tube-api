@@ -30,6 +30,11 @@
       "version": "0006_social_compliance_persistence",
       "file": "0006_social_compliance_persistence.up.sql",
       "sha256": "f07eb68d37e8fec372e4b712447a113cba5d6ae6395492bb5678cc13d74948e7"
+    },
+    {
+      "version": "0007_social_publication_connection_binding",
+      "file": "0007_social_publication_connection_binding.up.sql",
+      "sha256": "4747e001e3057b12facabb74f2529272d8c9cd4e933f55322ee9e3bc82483464"
     }
   ]
 }

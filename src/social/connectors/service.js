@@ -1,6 +1,7 @@
 "use strict";
 
 const crypto = require("node:crypto");
+const { createPublicationIntent, normalizeConnectionBinding } = require("../publication/connection-binding");
 const {
   assertNoAuthorityFields,
   requireConnectorContext,
@@ -374,7 +375,16 @@ function createSocialConnectorService(options = {}) {
     ) {
       delete digestPayload.operationId;
     }
-    const digest = inputDigest(digestPayload);
+    let digest = inputDigest(digestPayload);
+    if (capability === "publishImage" && payload.binding) {
+      const mediaMetadataDigest = payload.image.metadataDigest;
+      const intent = createPublicationIntent({ companyId: context.companyId,
+        clientRequestId: payload.clientRequestId, mediaId: payload.image.mediaId,
+        mediaMetadataDigest, caption: payload.caption, binding: payload.binding });
+      if (intent.publicationId !== payload.publicationId || intent.operationId !== operationId ||
+          intent.binding.connectionId !== payload.connectionId) connectorFail("publication_intent_conflict");
+      digest = intent.requestHash;
+    }
     const reservationInput = {
       capability,
       operationId,
@@ -648,9 +658,9 @@ function createSocialConnectorService(options = {}) {
       "publicationId",
       "connectionId",
       "image",
-      "caption"
+      "caption", "binding", "clientRequestId"
     ]);
-    const image = strictObject(input.image, ["mediaId", "mimeType"]);
+    const image = strictObject(input.image, ["mediaId", "mimeType", "metadataDigest"]);
     if (image.mimeType !== "image/jpeg") {
       connectorFail("connector_contract_invalid");
     }
@@ -660,9 +670,12 @@ function createSocialConnectorService(options = {}) {
       connectionId: operationUuid(input.connectionId),
       image: Object.freeze({
         mediaId: safeText(image.mediaId, { max: 200 }),
-        mimeType: "image/jpeg"
+        mimeType: "image/jpeg",
+        ...(image.metadataDigest !== undefined ? { metadataDigest: safeText(image.metadataDigest, { max: 64 }) } : {})
       }),
-      caption: safeCaption(input.caption)
+      caption: safeCaption(input.caption),
+      ...(input.binding ? { binding: normalizeConnectionBinding(input.binding),
+        clientRequestId: operationUuid(input.clientRequestId) } : {})
     });
   }
 
@@ -701,6 +714,15 @@ function createSocialConnectorService(options = {}) {
   }
 
   async function applyPublicationResult(scope, context, publication, result) {
+    if (publication.binding && result.outcome === "provider_confirming" &&
+        publication.state === "provider_confirming") {
+      const rank = (reference) => /^igm:known:/.test(reference || "") ? 4
+        : /^igc:submitted:/.test(reference || "") ? 3
+          : /^igc:armed:/.test(reference || "") ? 2
+            : /^igc:created:/.test(reference || "") ? 1 : 0;
+      // Delayed concurrent GET results cannot re-arm an already consumed POST.
+      if (rank(result.reconciliationReference) <= rank(publication.reconciliationReference)) return publication;
+    }
     if (publication.state === "published") {
       if (
         result.outcome === "published" &&
@@ -753,6 +775,9 @@ function createSocialConnectorService(options = {}) {
     const trusted = requireConnectorContext(context);
     assertNoAuthorityFields(input);
     const clean = publicationInput(input);
+    if ((trusted.environment === "production" || options.publicationBindingRequired === true) && !clean.binding) {
+      connectorFail("publication_binding_invalid");
+    }
     try {
       const ownedMedia = await media.resolveOwnedJpeg(
         trusted,
@@ -767,6 +792,8 @@ function createSocialConnectorService(options = {}) {
       ) {
         connectorFail("resource_unavailable");
       }
+      if (clean.binding && (!/^[0-9a-f]{64}$/.test(clean.image.metadataDigest || "") ||
+          ownedMedia.metadataDigest !== clean.image.metadataDigest)) connectorFail("publication_intent_conflict");
       const result = await runIdempotent(
         trusted,
         "publishImage",
@@ -829,7 +856,8 @@ function createSocialConnectorService(options = {}) {
                   mimeType: "image/jpeg"
                 }),
                 caption: clean.caption,
-                idempotencyKey: clean.operationId
+                idempotencyKey: clean.operationId,
+                ...(clean.binding ? { binding: clean.binding } : {})
               }
             );
             let providerResult;
@@ -841,12 +869,13 @@ function createSocialConnectorService(options = {}) {
             publication = await applyPublicationResult(
               scope,
               trusted,
-              publication,
+              clean.binding ? await scope.getPublication(clean.publicationId) : publication,
               providerResult
             );
             return publicationView(publication);
           } catch (error) {
             const normalized = normalizeConnectorError(error);
+            if (clean.binding) publication = await scope.getPublication(clean.publicationId);
             if (publication.state === "publishing") {
               const nextState = [
                 "provider_permanent_failure",
@@ -868,7 +897,7 @@ function createSocialConnectorService(options = {}) {
                 }
               );
             }
-            if ([
+            if (!clean.binding && [
               "authorization_expired",
               "credential_unavailable",
               "permission_missing"
@@ -912,13 +941,17 @@ function createSocialConnectorService(options = {}) {
     strictObject(input, [
       "operationId",
       "publicationId",
-      "providerReference"
+      "providerReference", "binding"
     ]);
     const clean = Object.freeze({
       operationId: operationUuid(input.operationId),
       publicationId: operationUuid(input.publicationId),
-      providerReference: safeText(input.providerReference, { max: 499 })
+      providerReference: safeText(input.providerReference, { max: 499 }),
+      ...(input.binding ? { binding: normalizeConnectionBinding(input.binding) } : {})
     });
+    if ((trusted.environment === "production" || options.publicationBindingRequired === true) && !clean.binding) {
+      connectorFail("publication_binding_invalid");
+    }
     try {
       const result = await runIdempotent(
         trusted,
@@ -947,7 +980,8 @@ function createSocialConnectorService(options = {}) {
               {
                 publicationId: clean.publicationId,
                 providerReference: clean.providerReference,
-                idempotencyKey: clean.operationId
+                idempotencyKey: clean.operationId,
+                ...(clean.binding ? { binding: clean.binding } : {})
               }
             );
             try {
@@ -962,7 +996,7 @@ function createSocialConnectorService(options = {}) {
           publication = await applyPublicationResult(
             scope,
             trusted,
-            publication,
+            clean.binding ? await scope.getPublication(clean.publicationId) : publication,
             providerResult
           );
           return publicationView(publication);

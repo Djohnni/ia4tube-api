@@ -14,6 +14,7 @@ const {
   connectorFail
 } = require("../connectors/errors");
 const { isSafeProviderReference } = require("../connectors/states");
+const { normalizeConnectionBinding } = require("./connection-binding");
 const {
   INSTAGRAM_GRAPH_API_ORIGIN,
   INSTAGRAM_OAUTH_SCOPES,
@@ -380,7 +381,7 @@ function createInstagramPublicationConnector(options = {}) {
   function trustedContext(value) {
     const context = requireConnectorContext(value, {
       provider: INSTAGRAM_PROVIDER,
-      environment: "staging"
+      environment: config.environment || "staging"
     });
     if (authorizeContext(context) !== true) {
       connectorFail("external_capability_disabled");
@@ -441,6 +442,7 @@ function createInstagramPublicationConnector(options = {}) {
           method: request.method,
           headers: Object.freeze(headers),
           body: request.body,
+          redirect: "error",
           signal: controller.signal
         })
       ));
@@ -495,9 +497,16 @@ function createInstagramPublicationConnector(options = {}) {
     }
   }
 
-  async function withConnectionCredential(context, connectionId, operation) {
+  async function withConnectionCredential(context, connectionId, operation, bound = null) {
+    const scoped = store.scope(context);
+    if ((context.environment === "production" || config.publicationBindingRequired === true) && !bound) {
+      connectorFail("publication_binding_invalid");
+    }
+    const snapshot = bound
+      ? await scoped.verifyPublicationExecutionBinding(bound.publicationId, bound.binding)
+      : null;
     const connection = requireConnection(
-      await store.scope(context).getConnectionDetails(connectionId),
+      snapshot ? snapshot.connection : await scoped.getConnectionDetails(connectionId),
       context,
       authorizeConnection
     );
@@ -505,7 +514,22 @@ function createInstagramPublicationConnector(options = {}) {
     return credentials.withDecryptedCredential({
       companyId: context.companyId,
       credentialId: connection.activeCredentialId
-    }, async (accessToken) => operation(connection, requireToken(accessToken)));
+    }, async (accessToken) => operation(connection, requireToken(accessToken), snapshot?.publication || null));
+  }
+
+  async function claimStage(context, source, connection, stage, containerId) {
+    if (!source.binding) return null;
+    const reservation = await store.scope(context).claimPublicationStage({
+      publicationId: source.publicationId, binding: source.binding, stage,
+      ...(containerId ? { containerId } : {})
+    });
+    if (!reservation?.acquired) connectorFail("provider_result_unknown");
+    // Never use a token captured for a different credential generation. Account
+    // writers share the claim lock; compliance can revoke future claims.
+    if (reservation.connection.activeCredentialId !== connection.activeCredentialId) {
+      connectorFail("publication_binding_conflict");
+    }
+    return reservation;
   }
 
   async function getContainerStatus(accessToken, containerId) {
@@ -615,11 +639,12 @@ function createInstagramPublicationConnector(options = {}) {
       "connectionId",
       "image",
       "caption",
-      "idempotencyKey"
+      "idempotencyKey", "binding"
     ]);
     const image = strictObject(source.image, ["mediaId", "mimeType"]);
     const publicationId = requireUuid(source.publicationId);
     const connectionId = requireUuid(source.connectionId);
+    const bound = source.binding ? { publicationId, binding: normalizeConnectionBinding(source.binding) } : null;
     requireUuid(source.idempotencyKey);
     if (
       image.mimeType !== "image/jpeg" ||
@@ -638,7 +663,7 @@ function createInstagramPublicationConnector(options = {}) {
     return withConnectionCredential(
       context,
       connectionId,
-      async (connection, accessToken) => {
+      async (connection, accessToken, publicationSnapshot) => {
         const owned = await media.resolveOwnedJpeg(context, image.mediaId);
         if (
           !owned ||
@@ -650,6 +675,12 @@ function createInstagramPublicationConnector(options = {}) {
           !owned.publicUrl.startsWith(`${config.publicOrigin}/`)
         ) {
           connectorFail("resource_unavailable");
+        }
+        if (bound && (publicationSnapshot.mediaReference !== image.mediaId ||
+            publicationSnapshot.caption !== source.caption ||
+            publicationSnapshot.idempotencyKey !== source.idempotencyKey ||
+            publicationSnapshot.mediaMetadataDigest !== owned.metadataDigest)) {
+          connectorFail("publication_intent_conflict");
         }
         if (authorizePublication(Object.freeze({
           context,
@@ -663,6 +694,7 @@ function createInstagramPublicationConnector(options = {}) {
         const body = new URLSearchParams();
         body.set("image_url", owned.publicUrl);
         body.set("caption", source.caption);
+        const createClaim = await claimStage(context, source, connection, "create_container");
         let containerId;
         try {
           const created = await requestJson(accessToken, {
@@ -681,6 +713,10 @@ function createInstagramPublicationConnector(options = {}) {
             });
           }
           throw error;
+        }
+        if (createClaim) {
+          await store.scope(context).recordPublicationStageReference({ publicationId,
+            expectedReference: createClaim.reference, containerId });
         }
         let ready = false;
         for (let attempt = 0; attempt < pollAttempts; attempt += 1) {
@@ -741,6 +777,7 @@ function createInstagramPublicationConnector(options = {}) {
         }
         const publishBody = new URLSearchParams();
         publishBody.set("creation_id", containerId);
+        await claimStage(context, source, connection, "publish_container", containerId);
         let mediaId;
         try {
           const published = await requestJson(accessToken, {
@@ -779,7 +816,7 @@ function createInstagramPublicationConnector(options = {}) {
             reconciliationReference: knownMediaReference(mediaId)
           });
         }
-      }
+      }, bound
     );
   }
 
@@ -788,9 +825,13 @@ function createInstagramPublicationConnector(options = {}) {
     const source = strictObject(input, [
       "publicationId",
       "providerReference",
-      "idempotencyKey"
+      "idempotencyKey", "binding"
     ]);
     const publicationId = requireUuid(source.publicationId);
+    const bound = source.binding ? { publicationId, binding: normalizeConnectionBinding(source.binding) } : null;
+    if ((context.environment === "production" || config.publicationBindingRequired === true) && !bound) {
+      connectorFail("publication_binding_invalid");
+    }
     requireUuid(source.idempotencyKey);
     const providerReference = safeReference(source.providerReference);
     const publication = await store.scope(context).getPublicationDetails(
@@ -866,6 +907,7 @@ function createInstagramPublicationConnector(options = {}) {
           } else if (container?.[1] === "armed") {
             const publishBody = new URLSearchParams();
             publishBody.set("creation_id", container[2]);
+            await claimStage(context, source, connection, "publish_container", container[2]);
             let mediaId;
             try {
               const published = await requestJson(accessToken, {
@@ -924,7 +966,7 @@ function createInstagramPublicationConnector(options = {}) {
             () => confirmed.publishedAtMs
           )
         });
-      }
+      }, bound
     );
   }
 

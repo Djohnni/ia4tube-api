@@ -20,6 +20,9 @@ const ERROR_DEFINITIONS = Object.freeze({
   state_transition_invalid: Object.freeze({ retryable: false }),
   active_connection_exists: Object.freeze({ retryable: false }),
   idempotency_conflict: Object.freeze({ retryable: false }),
+  publication_binding_invalid: Object.freeze({ retryable: false }),
+  publication_binding_conflict: Object.freeze({ retryable: false }),
+  publication_intent_conflict: Object.freeze({ retryable: false }),
   synthetic_connector_forbidden: Object.freeze({ retryable: false }),
   external_capability_disabled: Object.freeze({ retryable: false })
 });
@@ -60,7 +63,7 @@ function connectorFail(code) {
 
 function normalizeConnectorError(error, fallback = "provider_result_unknown") {
   if (
-    error instanceof SocialConnectorError &&
+    (error instanceof SocialConnectorError || error?.name === "PublicationBindingError") &&
     Object.hasOwn(ERROR_DEFINITIONS, error.code)
   ) {
     return new SocialConnectorError(error.code);

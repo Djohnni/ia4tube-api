@@ -8,6 +8,7 @@ const {
   INSTAGRAM_GRAPH_API_ORIGIN,
   INSTAGRAM_LONG_LIVED_TOKEN_ENDPOINT,
   INSTAGRAM_OAUTH_REDIRECT_URI,
+  INSTAGRAM_PRODUCTION_ORIGIN,
   INSTAGRAM_OAUTH_SCOPES,
   INSTAGRAM_PROFESSIONAL_ACCOUNT_API_VERSION,
   INSTAGRAM_PROVIDER,
@@ -419,6 +420,8 @@ function boundedSecret(value, minimum, maximum) {
 }
 
 function requireConfig(config) {
+  const expectedRedirect = config?.environment === "production"
+    ? `${INSTAGRAM_PRODUCTION_ORIGIN}/v1/social/oauth/callback` : INSTAGRAM_OAUTH_REDIRECT_URI;
   if (
     !config ||
     typeof config !== "object" ||
@@ -427,7 +430,8 @@ function requireConfig(config) {
     typeof config.externalConnectionEnabled !== "boolean" ||
     typeof config.externalPublicationEnabled !== "boolean" ||
     config.provider !== INSTAGRAM_PROVIDER ||
-    config.redirectUri !== INSTAGRAM_OAUTH_REDIRECT_URI ||
+    config.redirectUri !== expectedRedirect ||
+    (config.environment === "production" && config.publicOrigin !== INSTAGRAM_PRODUCTION_ORIGIN) ||
     config.authorizationEndpoint !== INSTAGRAM_AUTHORIZATION_ENDPOINT ||
     config.tokenEndpoint !== INSTAGRAM_TOKEN_ENDPOINT ||
     !(
@@ -958,7 +962,7 @@ function createInstagramProvider(options = {}) {
     const url = new URL(INSTAGRAM_AUTHORIZATION_ENDPOINT);
     url.searchParams.set("enable_fb_login", "0");
     url.searchParams.set("client_id", config.appId);
-    url.searchParams.set("redirect_uri", INSTAGRAM_OAUTH_REDIRECT_URI);
+    url.searchParams.set("redirect_uri", config.redirectUri);
     url.searchParams.set("response_type", "code");
     url.searchParams.set("scope", INSTAGRAM_OAUTH_SCOPES.join(","));
     url.searchParams.set("state", state);
@@ -1037,7 +1041,7 @@ function createInstagramProvider(options = {}) {
     form.set("client_id", config.appId);
     form.set("client_secret", config.appSecret);
     form.set("grant_type", "authorization_code");
-    form.set("redirect_uri", INSTAGRAM_OAUTH_REDIRECT_URI);
+    form.set("redirect_uri", config.redirectUri);
     form.set("code", code);
     return requestOnce(
       (signal) => transport(

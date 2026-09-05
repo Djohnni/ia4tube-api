@@ -2,6 +2,7 @@
 
 const { postgresFail } = require("./errors");
 const { withTransaction } = require("./pool");
+const { assertNoPendingPublications, lockSocialConnection } = require("./social-publication-guard");
 const {
   requireKeyVersion,
   requirePositiveInteger,
@@ -80,6 +81,7 @@ function createSocialRepository(options = {}) {
     const userId = requireUuid(input.createdByUserId, "user_id");
     const provider = requireProvider(input.provider);
     return scoped(companyId, async (client) => {
+      await assertNoPendingPublications(client, companyId, provider);
       const result = await client.query(
         [
           "INSERT INTO ia4tube_social.social_connections (",
@@ -146,6 +148,13 @@ function createSocialRepository(options = {}) {
         : requireDate(input.expiresAt, "expires_at");
 
     return scoped(companyId, async (client) => {
+      await assertNoPendingPublications(client, companyId, provider);
+      if (connectionId) {
+        await client.query([
+          "UPDATE ia4tube_social.social_connections SET revision=revision+1,updated_at=CURRENT_TIMESTAMP",
+          "WHERE company_id=$1 AND id=$2 AND provider=$3"
+        ].join("\n"), [companyId, connectionId, provider]);
+      }
       const result = await client.query(
         [
           "INSERT INTO ia4tube_social.social_encrypted_credentials (",
@@ -250,6 +259,7 @@ function createSocialRepository(options = {}) {
     const keyVersion = requireVaultKeyVersion(input.keyVersion);
 
     return scoped(companyId, async (client) => {
+      await lockCredentialWrapping(client, companyId, id);
       const result = await client.query(
         [
           "UPDATE ia4tube_social.social_encrypted_credentials",
@@ -295,6 +305,7 @@ function createSocialRepository(options = {}) {
     const keyVersion = requireVaultKeyVersion(input.keyVersion);
 
     return scoped(companyId, async (client) => {
+      await lockCredentialWrapping(client, companyId, id);
       const result = await client.query(
         [
           "UPDATE ia4tube_social.social_encrypted_credentials",
@@ -523,6 +534,17 @@ function createSocialRepository(options = {}) {
     rotateEncryptedCredentialForKeyRotation,
     storeEncryptedCredential
   });
+}
+
+async function lockCredentialWrapping(client, companyId, credentialId) {
+  const selected = await client.query([
+    "SELECT provider FROM ia4tube_social.social_encrypted_credentials",
+    "WHERE company_id=$1 AND id=$2"
+  ].join("\n"), [companyId, credentialId]);
+  if (!selected.rows?.[0]) postgresFail("credential_rotation_conflict", "Rotacao concorrente recusada.");
+  // Re-encryption preserves the plaintext/account and is not a new connection
+  // generation. It nevertheless shares ordering with compliance deletion.
+  await lockSocialConnection(client, companyId, requireProvider(selected.rows[0].provider));
 }
 
 module.exports = {

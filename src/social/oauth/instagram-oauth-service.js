@@ -15,6 +15,7 @@ const {
 } = require("../connectors/contract");
 const {
   INSTAGRAM_OAUTH_REDIRECT_URI,
+  INSTAGRAM_PRODUCTION_ORIGIN,
   INSTAGRAM_PROVIDER
 } = require("./instagram-config");
 const {
@@ -164,6 +165,7 @@ function publicConnection(value) {
   }
   let username = null;
   let accountType = null;
+  let externalId = null;
   if (value.account !== null && value.account !== undefined) {
     if (
       typeof value.account !== "object" ||
@@ -175,9 +177,15 @@ function publicConnection(value) {
     }
     username = `@${value.account.username}`;
     accountType = value.account.accountType;
+    if (typeof value.account.externalId !== "string" || !/^[0-9]{5,64}$/.test(value.account.externalId)) {
+      oauthFail("resource_unavailable");
+    }
+    externalId = value.account.externalId;
   }
   return Object.freeze({
     connectionId,
+    externalId,
+    connectionRevision: requireRevision(value.revision),
     provider: INSTAGRAM_PROVIDER,
     username,
     accountType,
@@ -260,6 +268,10 @@ function requireClock(clock) {
 }
 
 function requireDependencies(options) {
+  const production = options.config?.environment === "production" || options.environment === "production";
+  const expectedRedirectUri = production
+    ? `${INSTAGRAM_PRODUCTION_ORIGIN}/v1/social/oauth/callback`
+    : INSTAGRAM_OAUTH_REDIRECT_URI;
   const required = [
     [options.config, "enabled"],
     [options.stateEnvelope, "seal"],
@@ -279,7 +291,9 @@ function requireDependencies(options) {
     options.config?.enabled !== true ||
     typeof options.config?.externalConnectionEnabled !== "boolean" ||
     options.config?.provider !== INSTAGRAM_PROVIDER ||
-    options.config?.redirectUri !== INSTAGRAM_OAUTH_REDIRECT_URI ||
+    options.config?.redirectUri !== expectedRedirectUri ||
+    (production && options.config?.publicOrigin !== INSTAGRAM_PRODUCTION_ORIGIN) ||
+    (options.config?.environment && options.environment && options.config.environment !== options.environment) ||
     required.some(([owner, method]) =>
       method === "enabled"
         ? !owner
@@ -368,11 +382,8 @@ function createInstagramOAuthService(options = {}) {
   if (typeof randomUuid !== "function") {
     oauthFail("social_instagram_configuration_invalid");
   }
-  const environment = ["test", "staging", "production"].includes(
-    options.environment
-  )
-    ? options.environment
-    : "production";
+  const environment = options.environment || options.config.environment || "staging";
+  if (!["test", "staging", "production"].includes(environment)) oauthFail("social_instagram_configuration_invalid");
   const expectedUsername = options.config.expectedUsername ?? null;
   if (
     expectedUsername !== null &&
@@ -435,7 +446,7 @@ function createInstagramOAuthService(options = {}) {
         connectionId,
         purpose,
         state,
-        redirectUri: INSTAGRAM_OAUTH_REDIRECT_URI,
+        redirectUri: options.config.redirectUri,
         sessionJti: principal.jti,
         expiresAt: new Date(authenticatedState.expiresAt)
       });
@@ -523,7 +534,7 @@ function createInstagramOAuthService(options = {}) {
     const terminal = Object.freeze({
       authorizationHandle: payload.authorizationHandle,
       state: source.state,
-      redirectUri: INSTAGRAM_OAUTH_REDIRECT_URI,
+      redirectUri: options.config.redirectUri,
       sessionJti: payload.sessionJti,
       purpose: payload.purpose
     });

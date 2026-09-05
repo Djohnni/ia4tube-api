@@ -1,4 +1,5 @@
 "use strict";
+const { lockSocialConnection } = require("./social-publication-guard");
 
 const crypto = require("node:crypto");
 const { withTransaction } = require("./pool");
@@ -229,6 +230,9 @@ function createPostgresMetaComplianceRepository(options = {}) {
       return await withTransaction(
         pool,
         async (client) => {
+          // Revocation is never delayed by an uncertain publication. Serialize
+          // against stage claims, then revoke to prevent any subsequent claim.
+          await lockSocialConnection(client, input.companyId, input.provider);
           await client.query(
             "SELECT pg_advisory_xact_lock(hashtextextended($1::text,0))",
             [`${input.provider}:${input.eventKey}`]

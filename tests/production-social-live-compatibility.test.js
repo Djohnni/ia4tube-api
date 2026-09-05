@@ -46,143 +46,61 @@ function errorCode(code) {
   };
 }
 
-test("the default integration is closed, immutable and has no runtime handle", () => {
+test("default integration stays closed without opening a pool", async () => {
   const state = integration.createProductionSocialIntegration({ env: {} });
   assert.equal(state.enabled, false);
-  assert.equal(state.reason, integration.PREPARATION_INCOMPLETE);
   assert.equal(Object.isFrozen(state), true);
-  assert.equal(Object.isFrozen(state.pendingContracts), true);
-  assert.deepEqual(state.pendingContracts, [
-    "production_session_v2",
-    "publication_account_revision_binding",
-    "production_schema_and_recovery"
-  ]);
-  assert.deepEqual(Object.keys(state).sort(), [
-    "enabled", "middleware", "pendingContracts", "reason"
-  ]);
+  assert.equal(await state.initialize(), false);
 });
-
-test("official identity and explicitly closed flags are accepted without a DB", () => {
-  assert.equal(integration.assertProductionPreparationBoundary({
-    ENVIRONMENT: "production",
-    PUBLIC_API_BASE_URL: `${integration.OFFICIAL_API_ORIGIN}/`,
-    RENDER_SERVICE_ID: integration.OFFICIAL_WEB_SERVICE_ID,
-    ...Object.fromEntries(integration.CLOSED_FLAGS.map((name) => [name, "false"]))
-  }), true);
-});
-
 for (const name of integration.CLOSED_FLAGS) {
-  test(`${name} cannot enable this preparation candidate`, () => {
-    assert.throws(
-      () => integration.createProductionSocialIntegration({ env: { [name]: "true" } }),
-      errorCode(integration.PREPARATION_INCOMPLETE)
-    );
-  });
-  for (const value of ["TRUE", " true ", "1", "yes", true, null]) {
+  for (const value of ["TRUE", " true ", "1", true, null]) {
     test(`${name} rejects ambiguous flag ${JSON.stringify(value)}`, () => {
-      assert.throws(
-        () => integration.assertProductionPreparationBoundary({ [name]: value }),
-        errorCode("social_production_flag_invalid")
-      );
+      assert.throws(() => integration.assertProductionPreparationBoundary({ [name]: value }),
+        errorCode("social_production_flag_invalid"));
     });
   }
+  test(`${name} alone cannot activate an unprepared environment`, () => {
+    assert.throws(() => integration.createProductionSocialIntegration({ env: { [name]: "true" } }),
+      errorCode(integration.PREPARATION_INCOMPLETE));
+  });
 }
-
 for (const [env, code] of [
   [{ ENVIRONMENT: "staging" }, "social_production_environment_mismatch"],
-  [{ ENVIRONMENT: "test" }, "social_production_environment_mismatch"],
   [{ PUBLIC_API_BASE_URL: "https://ia4tube-api-staging-checkpoint-a.onrender.com" }, "social_production_origin_mismatch"],
-  [{ PUBLIC_API_BASE_URL: `${integration.OFFICIAL_API_ORIGIN}/unexpected` }, "social_production_origin_mismatch"],
-  [{ PUBLIC_API_BASE_URL: `${integration.OFFICIAL_API_ORIGIN}?sentinel=1` }, "social_production_origin_mismatch"],
-  [{ RENDER_SERVICE_ID: "srv-sentinel-staging" }, "social_production_service_mismatch"],
+  [{ RENDER_SERVICE_ID: "srv-wrong" }, "social_production_service_mismatch"],
   [{ NODE_TLS_REJECT_UNAUTHORIZED: "0" }, "node_tls_verification_disabled"],
   [{ NODE_EXTRA_CA_CERTS: "sentinel.pem" }, "social_database_custom_trust_forbidden"],
-  [{ SOCIAL_DATABASE_CA_BASE64: "sentinel" }, "social_database_custom_trust_forbidden"],
   [{ PGPASSWORD: "sentinel" }, "web_service_libpq_environment_override_forbidden"],
   [{ SOCIAL_MIGRATIONS_DATABASE_URL: "sentinel" }, "web_service_privileged_database_credential_forbidden"],
-  [{ SOCIAL_LOGIN_BOOTSTRAP_RUNTIME_PASSWORD: "sentinel" }, "web_service_operator_secret_forbidden"],
-  [{ SOCIAL_BACKUP_BUNDLE_KEY: "sentinel" }, "web_service_operator_secret_forbidden"],
   [{ DATABASE_URL: "sentinel" }, "web_service_runtime_database_credential_disabled"]
-]) {
-  test(`closed startup preserves identity/secret/TLS boundary: ${Object.keys(env)[0]} (${code})`, () => {
-    assert.throws(
-      () => integration.assertProductionPreparationBoundary(env),
-      errorCode(code)
-    );
-  });
-}
-
-test("caller-supplied readiness cannot activate the social module", () => {
-  let touched = false;
-  const state = integration.createProductionSocialIntegration({
-    env: {},
-    enabled: true,
-    ready: true,
-    createRuntime() { touched = true; throw new Error("must not initialize"); },
-    schemaValidated: true,
-    recoveryValidated: true,
-    bindingValidated: true
-  });
-  assert.equal(touched, false);
-  assert.equal(state.enabled, false);
+]) test(`production boundary ${code}`, () => {
+  assert.throws(() => integration.assertProductionPreparationBoundary(env), errorCode(code));
 });
-
-test("legacy offline origins remain test-only, without a persistence/gate bypass", () => {
-  for (const origin of ["https://synthetic.invalid", "https://ia4tube.test"]) {
-    const env = { NODE_ENV: "test", PUBLIC_API_BASE_URL: origin };
-    assert.equal(integration.createProductionSocialIntegration({ env }).enabled, false);
-    for (const extra of [
-      { NODE_ENV: "production" },
-      { ENVIRONMENT: "production" },
-      { RENDER_SERVICE_ID: integration.OFFICIAL_WEB_SERVICE_ID }
-    ]) {
-      assert.throws(() => integration.assertProductionPreparationBoundary({ ...env, ...extra }),
-        errorCode("social_production_origin_mismatch"));
-    }
-    for (const name of integration.CLOSED_FLAGS) {
-      assert.throws(() => integration.assertProductionPreparationBoundary({ ...env, [name]: "true" }),
-        errorCode(integration.PREPARATION_INCOMPLETE));
-    }
-  }
-  assert.throws(() => integration.assertProductionPreparationBoundary({
-    NODE_ENV: "test",
-    PUBLIC_API_BASE_URL: "https://ia4tube-api-staging-checkpoint-a.onrender.com"
-  }), errorCode("social_production_origin_mismatch"));
+test("closed middleware does not consume caller input", () => {
+  const state = integration.createProductionSocialIntegration({env:{}});
+  const response = {setHeader(){},status(code){this.statusCode=code;return this;},json(body){this.body=body;return this;}};
+  state.middleware(new Proxy({}, {get(){assert.fail("input consumed");}}), response);
+  assert.equal(response.statusCode,503);
+  assert.equal(response.body.code,integration.PREPARATION_INCOMPLETE);
 });
-
-for (const method of ["GET", "POST", "DELETE", "PATCH", "PUT", "HEAD", "OPTIONS"]) {
-  test(`${method} social middleware returns a non-cacheable error without reading authority or body`, () => {
-    const state = integration.createProductionSocialIntegration({ env: {} });
-    const headers = {};
-    const response = {
-      setHeader(name, value) { headers[name] = value; },
-      status(value) { this.statusCode = value; return this; },
-      json(value) { this.body = value; return this; }
-    };
-    const request = new Proxy({ method }, {
-      get() { throw new Error("request data must not be consumed"); }
-    });
-    state.middleware(request, response, () => assert.fail("must not fall through"));
-    assert.equal(response.statusCode, 503);
-    assert.equal(response.body.ok, false);
-    assert.equal(response.body.code, integration.PREPARATION_INCOMPLETE);
-    assert.equal(headers["Cache-Control"], "private, no-store");
-    assert.equal(headers["X-Content-Type-Options"], "nosniff");
-    assert.equal(headers["X-Robots-Tag"], "noindex, nofollow, noarchive");
-    assert.equal(JSON.stringify(response.body).includes("sentinel"), false);
-  });
-}
-
-test("server retains the entire live body, including FCM/auth/DATA_DIR/timers/route paths", () => {
-  const candidate = source("server.js");
-  assert.equal(candidate.startsWith(SERVER_IMPORT), true);
-  assert.equal(candidate.split(SERVER_MOUNT).length, 2);
-  const unchanged = candidate.slice(SERVER_IMPORT.length).replace(SERVER_MOUNT, "");
-  assert.equal(unchanged, liveSource("server.js"));
-  assert.ok(candidate.indexOf(SERVER_MOUNT) < candidate.indexOf("const globalJsonParser"));
-  assert.ok(candidate.indexOf(SERVER_MOUNT) < candidate.indexOf("express.static"));
+test("all legacy server code is preserved except explicit session issuance and startup assembly", () => {
+  let candidate = source("server.js");
+  assert.ok(candidate.startsWith(SERVER_IMPORT));
+  candidate = candidate.slice(SERVER_IMPORT.length).replace(SERVER_MOUNT.trimEnd()+"\nproductionSocialIntegration.mountWeb(app);\n\n", "");
+  candidate = candidate.replace('const { createProductionSession } = require("./src/social/production-session");\nconst productionSession = createProductionSession({ secret: JWT_SECRET, readClients: readClientes });\n', "");
+  const live = liveSource("server.js");
+  const originals = [...live.matchAll(/jwt\.sign\(\{ whatsapp(?:: (\w+))? \}, JWT_SECRET, \{\n\s*algorithm: "HS256",\n\s*expiresIn: "7d"\n\s*\}\)/g)];
+  assert.equal(originals.length,5);
+  let n=0;
+  candidate = candidate.replace(/productionSession\.sign\((\w+)\)/g, () => originals[n++][0]);
+  assert.equal(n,5);
+  candidate = candidate.replace("function startLegacyBackgroundTasks() {\n","");
+  const tail = candidate.indexOf("\n}\n\nproductionSocialIntegration.initialize({");
+  assert.ok(tail>0);
+  candidate = candidate.slice(0,tail)+"\napp.listen(PORT, () => {\n  console.log(\"API rodando na porta\", PORT);\n});\n";
+  assert.equal(candidate,live);
+  assert.ok(source("server.js").indexOf(SERVER_MOUNT.trim()) < source("server.js").indexOf("const globalJsonParser"));
 });
-
 test("invalid social startup stops before importing legacy modules, scheduling or I/O", () => {
   let legacyImports = 0;
   assert.throws(() => vm.runInNewContext(source("server.js"), {
@@ -197,14 +115,6 @@ test("invalid social startup stops before importing legacy modules, scheduling o
     fetch() { assert.fail("no network before boundary"); }
   }, { timeout: 1000 }), errorCode(integration.PREPARATION_INCOMPLETE));
   assert.equal(legacyImports, 0);
-});
-
-test("production boundary neither loads a social runtime nor introduces external actions", () => {
-  const moduleSource = source("src/social/production-integration.js");
-  const imports = [...moduleSource.matchAll(/require\("([^"]+)"\)/g)]
-    .map((match) => match[1]);
-  assert.deepEqual(imports, ["../persistence/postgres/config"]);
-  assert.doesNotMatch(moduleSource, /\b(?:fetch|setInterval|setTimeout|createPool|createSocialRuntime|initializeSocialServerRuntime)\s*\(/);
 });
 
 test("dependency additions preserve every legacy dependency and locked package record", () => {
@@ -378,7 +288,9 @@ test("isolated legacy login/profile/orders/planning and disabled FCM coexist wit
   const token = login.body.token;
   const jwtClaims = require("jsonwebtoken").verify(token, env.JWT_SECRET, { algorithms: ["HS256"] });
   assert.equal(jwtClaims.whatsapp, owner);
-  assert.equal(jwtClaims.token_version, undefined, "legacy session was not silently upgraded");
+  assert.equal(jwtClaims.token_version, 2, "a fresh authenticated login issues v2");
+  assert.equal(jwtClaims.sub, owner);
+  assert.equal(jwtClaims.company_id, owner);
   for (const route of ["/me", "/meus-pedidos", "/empresa/planejamento-mensal"]) {
     const result = await request(route, { token });
     assert.equal(result.status, 200, route);

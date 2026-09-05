@@ -1,9 +1,13 @@
-# Publication binding v2 — isolated module and proposed persistence extension
+# Publication binding v2 — checkpoint and candidate integration
 
-Status: implementation of pure validation/identity/hash only. No SQL migration
-has been created or applied. No runtime, provider, HTTP or Android integration
-is claimed by this module. The schema extension below needs presentation and
-specific authorization before application, under the 05/09/2026 mission.
+The original a619eb42 checkpoint implemented only the pure module. Under the
+subsequent 05/09/2026 authorization, the current uncommitted candidate connects
+it to the reviewer HTTP contract, connector service, PostgreSQL store and
+provider stage claims. The separately owned additive 0007 migration is now
+prepared; its application/recovery evidence is tracked in the database plan.
+Nothing in this document claims deployment, external publication or Android
+artifact approval. See `social-publication-atomic-integration.md` for the current
+protocol and the distinction between controlled tests and external readiness.
 
 ## Pure-module contract
 
@@ -46,8 +50,8 @@ the user and authorizes the company, connection and media. Caption and media
 digest must come from the server-validated owned snapshot, not from unverified
 client metadata. The helper checks neither JPEG bytes nor ownership.
 
-The proposed HTTP contract retains the same records for web and Android: expose
-the authenticated connection's `revision` and `account.externalId`; require
+The implemented HTTP contract retains the same records for web and Android:
+expose `connection.connectionRevision` and `connection.externalId`; require
 `expectedConnectionId`, `expectedExternalId`, `expectedConnectionRevision` on
 publish and reconcile; map those fields explicitly to the internal binding.
 Malformed/missing bindings and conflicts fail closed with fixed errors. The
@@ -75,7 +79,7 @@ confirmed references only exist after real confirmation (`0004`, 315–332).
 Caption, media reference, UUID and provider references are not alternate storage
 containers for the binding.
 
-## Exact additive extension proposed — not existing columns
+## Additive extension (prepared as 0007, not part of the original checkpoint)
 
 Two proposed nullable columns on `ia4tube_social.social_publications`:
 
@@ -105,8 +109,8 @@ Required constraints and permissions:
    lock and row locks. The FK supplies referential consistency, not proof that
    the captured revision was current. Application integration supplies that
    atomic precondition and must be tested.
-6. One separately reviewed additive migration/manifest change, with its own
-   name and checksum to be fixed only after authorization. Do not modify,
+6. One separately reviewed additive migration/manifest change, now identified as
+   `0007_social_publication_connection_binding`. Do not modify,
    duplicate or blindly reapply migrations 0001–0006. No backfill by username,
    current account, timestamp or caption. Backup/restore and catalog checks
    must recognize the new final profile before runtime activation.
@@ -115,7 +119,7 @@ This extension is proposed for recoverability, not a lease table or new engine.
 It adds no secret/token storage. Account usernames may change; reading a row's
 current username must not be labelled a historical username snapshot.
 
-## Integration still required before the correction is complete
+## Completion requirements (implementation and evidence remain distinct)
 
 - Under one short company/provider lock transaction: verify expected binding,
   state, credential and scopes; reserve immutable intent and initial operation.

@@ -222,20 +222,6 @@ class IA4TubeApiClient(
         }
     }
 
-    suspend fun saveFcmToken(token: String, fcmToken: String): ApiResult<Unit> = withContext(Dispatchers.IO) {
-        val bodyJson = JSONObject()
-            .put("token", fcmToken)
-            .put("platform", "android")
-
-        val request = Request.Builder()
-            .url("${AppConfig.apiBase}/me/fcm-token")
-            .header("Authorization", "Bearer $token")
-            .post(bodyJson.toString().toRequestBody(JSON))
-            .build()
-
-        executeJson(request) { Unit }
-    }
-
     suspend fun meusPedidos(token: String): ApiResult<List<OrderSummary>> = withContext(Dispatchers.IO) {
         val request = Request.Builder()
             .url("${AppConfig.apiBase}/meus-pedidos")

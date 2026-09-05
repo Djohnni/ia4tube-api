@@ -1,131 +1,123 @@
 package br.com.ia4tube.app.core.notifications
 
+import android.Manifest
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
-import android.graphics.Bitmap
-import android.graphics.BitmapFactory
+import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
+import androidx.core.content.ContextCompat
 import br.com.ia4tube.app.MainActivity
 import br.com.ia4tube.app.R
-import java.net.HttpURLConnection
-import java.net.URL
 
-object IA4TubeNotificationHelper {
+internal object IA4TubeNotificationHelper {
     const val CHANNEL_ID = "ia4tube_updates"
-    private const val CHANNEL_NAME = "Atualizacoes da iA4tube"
+    const val ACTION_OPEN_ART_READY = "com.ia4tube.app.action.OPEN_ART_READY"
+    const val EXTRA_EVENT_ID = "ia4tube_notification_event_id"
+    const val EXTRA_PEDIDO_ID = "ia4tube_notification_pedido_id"
+    const val EXTRA_TYPE = "ia4tube_notification_type"
+    private const val CHANNEL_NAME = "Atualizações da IA4Tube"
 
     fun ensureDefaultChannel(context: Context) {
         val manager = context.applicationContext.getSystemService(NotificationManager::class.java)
         ensureChannel(manager)
     }
 
+    fun canPost(context: Context): Boolean {
+        return Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU ||
+            ContextCompat.checkSelfPermission(
+                context,
+                Manifest.permission.POST_NOTIFICATIONS
+            ) == PackageManager.PERMISSION_GRANTED
+    }
+
+    fun cancelAll(context: Context) {
+        context.applicationContext
+            .getSystemService(NotificationManager::class.java)
+            .cancelAll()
+    }
+
+    fun cancel(context: Context, eventId: String): Boolean {
+        if (!ArtReadyNotificationPayload.isSafeEventId(eventId)) return false
+
+        return runCatching {
+            context.applicationContext
+                .getSystemService(NotificationManager::class.java)
+                .cancel(notificationIdForEvent(eventId))
+            true
+        }.getOrDefault(false)
+    }
+
     fun show(
         context: Context,
-        title: String,
-        body: String,
-        imageUrl: String? = null,
-        data: Map<String, String>
-    ) {
+        payload: ArtReadyNotificationPayload
+    ): Boolean {
+        if (!canPost(context)) return false
+
         val appContext = context.applicationContext
         val manager = appContext.getSystemService(NotificationManager::class.java)
         ensureChannel(manager)
-
-        val notificationId = (System.currentTimeMillis() % Int.MAX_VALUE).toInt()
+        val notificationId = notificationIdForEvent(payload.eventId)
         val contentIntent = PendingIntent.getActivity(
             appContext,
             notificationId,
-            buildOpenIntent(appContext, data),
+            buildOpenIntent(appContext, payload),
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
-
-        val safeTitle = title.ifBlank { "iA4tube" }
-        val safeBody = body.ifBlank { "Voce tem uma novidade no app." }
-        val imageBitmap = loadNotificationImage(imageUrl)
-
-        val builder = Notification.Builder(appContext, CHANNEL_ID)
+        val notification = Notification.Builder(appContext, CHANNEL_ID)
             .setSmallIcon(R.mipmap.ic_launcher)
-            .setContentTitle(safeTitle)
-            .setContentText(safeBody)
+            .setContentTitle(ArtReadyNotificationPayload.TITLE)
+            .setContentText(ArtReadyNotificationPayload.BODY)
+            .setStyle(
+                Notification.BigTextStyle()
+                    .bigText(ArtReadyNotificationPayload.BODY)
+            )
             .setContentIntent(contentIntent)
             .setAutoCancel(true)
+            .build()
 
-        if (imageBitmap != null) {
-            builder
-                .setLargeIcon(imageBitmap)
-                .setStyle(
-                    Notification.BigPictureStyle()
-                        .bigPicture(imageBitmap)
-                        .bigLargeIcon(null as Bitmap?)
-                        .setBigContentTitle(safeTitle)
-                        .setSummaryText(safeBody)
-                )
-        } else {
-            builder.setStyle(Notification.BigTextStyle().bigText(safeBody))
-        }
+        return runCatching {
+            manager.notify(notificationId, notification)
+            true
+        }.getOrDefault(false)
+    }
 
-        val notification = builder.build()
-
-        manager.notify(notificationId, notification)
+    internal fun notificationIdForEvent(eventId: String): Int {
+        return eventId.hashCode() and Int.MAX_VALUE
     }
 
     private fun ensureChannel(manager: NotificationManager) {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
-
-        val channel = NotificationChannel(
-            CHANNEL_ID,
-            CHANNEL_NAME,
-            NotificationManager.IMPORTANCE_DEFAULT
-        ).apply {
-            description = "Avisos de pedidos, planejamento e novidades da iA4tube"
-        }
-
-        manager.createNotificationChannel(channel)
+        manager.createNotificationChannel(
+            NotificationChannel(
+                CHANNEL_ID,
+                CHANNEL_NAME,
+                NotificationManager.IMPORTANCE_DEFAULT
+            ).apply {
+                description = "Avisos de artes prontas da IA4Tube"
+            }
+        )
     }
 
-    private fun buildOpenIntent(context: Context, data: Map<String, String>): Intent {
+    private fun buildOpenIntent(
+        context: Context,
+        payload: ArtReadyNotificationPayload
+    ): Intent {
         return Intent(context, MainActivity::class.java).apply {
+            action = ACTION_OPEN_ART_READY
             flags = Intent.FLAG_ACTIVITY_NEW_TASK or
                 Intent.FLAG_ACTIVITY_CLEAR_TOP or
                 Intent.FLAG_ACTIVITY_SINGLE_TOP
-            this.data = Uri.parse("ia4tube://notification/${System.currentTimeMillis()}")
-            data.forEach { (key, value) ->
-                putExtra(key, value)
-            }
-        }
-    }
-
-    private fun loadNotificationImage(imageUrl: String?): Bitmap? {
-        val normalizedUrl = imageUrl
-            ?.trim()
-            ?.takeIf { it.startsWith("https://") || it.startsWith("http://") }
-            ?: return null
-
-        return runCatching {
-            val connection = (URL(normalizedUrl).openConnection() as HttpURLConnection).apply {
-                connectTimeout = 5000
-                readTimeout = 5000
-                instanceFollowRedirects = true
-            }
-
-            connection.use {
-                if (responseCode !in 200..299) return@runCatching null
-                inputStream.use { stream ->
-                    BitmapFactory.decodeStream(stream)
-                }
-            }
-        }.getOrNull()
-    }
-
-    private inline fun <T> HttpURLConnection.use(block: HttpURLConnection.() -> T): T {
-        return try {
-            block()
-        } finally {
-            disconnect()
+            data = Uri.parse(
+                "ia4tube://notification/${Uri.encode(payload.eventId)}"
+            )
+            putExtra(EXTRA_EVENT_ID, payload.eventId)
+            putExtra(EXTRA_PEDIDO_ID, payload.pedidoId)
+            putExtra(EXTRA_TYPE, ArtReadyNotificationPayload.TYPE)
         }
     }
 }

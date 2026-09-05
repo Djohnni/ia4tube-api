@@ -1,5 +1,118 @@
 # Production preparation checkpoint — NOT a deployable integration
 
+## Current continuation, 2026-09-05 — supersedes historical checkpoint below
+
+Continuation base is local `a619eb422bdcb92c24b1498cc5cecc63df7a3169`.
+The original 285-test report and AAB31 are immutable historical evidence.
+They are not the approval evidence for this updated source.
+
+Implemented and tested locally:
+
+- Official server assembly: strict production origin/service/database pins,
+  runtime schema validation before listener/background jobs, new signed v2
+  sessions with legacy authentication preserved, independent authenticated
+  tenant readiness, and separate social parsers before the legacy 50MB parser.
+- Private `/reviewer`, scoped direct JPEG storage, same shared HTTP/persistence
+  contract as Android. Stable external-account ID and connection revision are
+  mandatory for a production publication and reconciliation. Local intent
+  storage is separated by product owner. History can reconcile its original
+  binding without a browser intent; no automatic provider POST on page load.
+- Real OAuth service/router/provider/state envelope now accept only their
+  exact environment callback. Production is not labelled staging. No OAuth
+  was performed: protocol tests use synthetic state, fixtures and loopback.
+- One shared advisory lock and durable stage claim coordinate account writers
+  and publication. Uncertain operations cannot be taken over by age. Neither
+  another account nor a newer revision can inherit an old intent. Legacy rows
+  remain unbound rather than being assigned today's account.
+- Migration0007 only adds the two specified binding fields and relevant
+  constraints/restrictive policies; original0001–0006 bytes are unchanged.
+  The complete SQL/profile/checksum is in the existing external promotion plan
+  and `social-publication-binding-migration-0007.md`.
+- New Node snapshot: **342 tests passed**, zero failed/skipped/cancelled, source
+  hashes unchanged; report `PRODUCTION_PREPARATION_TESTS_2026-09-05T19-10-11-095Z.json`
+  remains outside Git. Tests include actual local HTTP assembly/normalizers,
+  Web intent behavior, integration SQL doubles, session isolation and legacy
+  flows. A prior failed run is preserved and is not approval evidence; its
+  static assertion was updated for five calls to the shared HS256 signer.
+- Android inherits the already approved e11f4a6 snapshot, with only twelve
+  Instagram source/test files changed against that base. Final Android:
+  **149 tests passed** (not added to Node or historical counts), debug/release
+  compilation and lint passed with zero errors. Signed AAB31 version0.2.19:
+  `IA4Tube_0.2.19_31_production_binding_20027c862643.aab`, SHA256
+  `5529388D0BA7DEB4D11760299E399FC53A365834F41A506FCCFF87857466D821`.
+  Source digest `20027C862643619CE27AEFD7DA568C4D6C438F591B39C0BD5FA7C7EACECA4AEF`;
+  no Play upload or A55 installation. Original AAB hash47B36E24… unchanged.
+
+### Actual database and recovery state — no production writes
+
+The proprietor manually saved the exact resource-specific rule
+`177.125.241.117/32`, description `Preparacao temporaria - PC do proprietario`.
+Reload confirmed it. Same-PC HTTPS observations from ipify/AWS agreed. Existing
+workspace/environment rules were not changed. Remove the temporary rule only
+after preparation and the definitive operational access path are confirmed.
+
+At18:42:02UTC a fresh TLS/hostname-verified READ ONLY transaction succeeded
+after the rule change. PostgreSQL18.6, same zero application catalog; no roles,
+environment marker or migration ledger exist. **No production migration or
+bootstrap was performed.** Protected catalog report SHA256
+`EF36BD184D96EAB9B1CCA7859A17F8B7B0F3D40D84333C4BE39136AEDB2CAD48`.
+
+A: two consistent catalog observations are preserved, but are not a backup or
+protected restoration. B: portable PostgreSQL18.4 operated in a private local
+directory on127.0.0.1:64997, with SCRAM/checksums and synthetic records only.
+Physical0001–0007/catalog/ACL/RLS/FK/legacy tests, dump/restore profiles6/7 and
+two independent store sessions with one stage winner passed. This does not
+prove the canonical encrypted production recovery, Linux durability or a live
+provider. C: existing DATA_DIR was not changed; consistent cutover/recovery
+proof remains pending. Do not bootstrap production merely because B passed.
+
+Smallest identified free Linux route: owner-provided existing isolated Linux,
+or a manually installed WSL2 distribution on this PC (administrator/restart
+may be required). No installation or additional cost is authorized/executed.
+The Windows synthetic lab is stopped; retained artifacts are not real backups.
+
+### Concrete remaining decisions and guards
+
+1. Protected recovery A/C, Linux durability, independent key custody and the
+   reviewed operator package must precede real role/marker/schema preparation.
+   Dedicated production migration steps now exist but require exact resource,
+   catalog hashes, journal and independently verified recovery callback. No
+   `true` placeholder, generic runner bypass or operator secret in the service.
+2. Current schema grants runtime SELECT only on companies/users/memberships.
+   Login cannot create these rows. `tenant_not_provisioned` blocks the social
+   endpoints safely. Proposed minimum route: three operator INSERTs in one
+   transaction for each verified existing owner, plus an explicit strategy for
+   future registrations. No such DML was prepared/executed. Automatic bootstrap
+   via new grant/function is outside the two-column authorization; see
+   `production-social-tenant-readiness.md` before requesting that change.
+3. Physical production capacity/cutover and mobile runtime validation remain
+   separate requirements. No deployment, account recreation or provider replay
+   is justified by the local tests/AAB alone. An uncertain `igo:` crash can stay
+   blocked safely pending evidence; liveness is not faked as success.
+
+Current runtime variable is **DATABASE_URL**, not SOCIAL_DATABASE_URL; it must
+contain the dedicated runtime credential only. The observed public hostname
+with system trust/TLS is usable. The observed short internal hostname is pinned
+but still rejected by the strict TLS hostname policy; no insecure exception or
+guessed SNI was added. Production callbacks are prepared in code only, not saved
+in Meta. All live settings remain unchanged.
+
+Specific branch push was checked: no repository webhooks, only Render/Codex
+Apps, Pages disabled, no workflow or blueprint in the pushed tree; official
+Render tracks main with auto-deploy off, staging tracks its own branch, the
+other project webservice uses another repository. No PR/merge is created.
+Push is conditional on final scanner/diff/independent review, not a deployment.
+
+`PROXIMA_ETAPA=CONCLUIR_PREPARACAO_E_INTEGRACAO`
+
+`CANDIDATO_APTO_PARA_SOLICITAR_DEPLOY=NAO`
+
+Business verification remains VERIFIED; App Review not submitted. All existing
+forms, reviewer credentials, approved Web videos, post/history, external gates,
+public/legal pages, live/staging services and billing remain untouched.
+
+## Historical a619eb4 checkpoint below — not current status
+
 Date: 2026-09-05. Base: `1bd987f1ecbbd3a64f2ad0e905d30649704f4b3c`,
 reconfirmed as the live commit on service `srv-d8708kd7vvec73ap1p6g`.
 The configured branch is main, but the remote main reference observed during

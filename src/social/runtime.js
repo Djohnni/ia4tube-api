@@ -164,6 +164,7 @@ async function createSocialRuntime(options = {}) {
     const connectorStore = createPostgresConnectorStore({
       pool,
       runtimeRole: config.role,
+      publicationBindingRequired: instagramConfig.publicationBindingRequired,
       appReviewCompanyId: instagramConfig.appReview?.companyId || null
     });
     const connectorAudit = createPostgresConnectorAudit({
@@ -206,6 +207,7 @@ async function createSocialRuntime(options = {}) {
         derivationKey: identityConfig.key,
         keyVersion: identityConfig.derivationVersion,
         redirectUri: instagramConfig.redirectUri,
+        environment: instagramConfig.environment,
         clock: options.clock || Date.now,
         randomBytes: options.randomBytes
       });
@@ -229,14 +231,7 @@ async function createSocialRuntime(options = {}) {
         metaComplianceRepository,
         clock: options.clock || Date.now,
         randomUUID: options.randomUUID,
-        environment: instagramConfig.appReview?.companyId &&
-          instagramConfig.appReview.environment === "staging"
-          ? "staging"
-          : env.NODE_ENV === "test"
-            ? "test"
-            : env.NODE_ENV === "production"
-              ? "production"
-              : "staging"
+        environment: instagramConfig.environment
       });
       if (
         instagramConfig.publicOrigin === CONTROLLED_GATE4_STAGING_ORIGIN &&

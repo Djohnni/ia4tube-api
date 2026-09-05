@@ -148,7 +148,9 @@ class HomeViewModel(
     }
 
     fun logout() {
-        repository.logout()
+        viewModelScope.launch {
+            repository.logout()
+        }
     }
 
     private fun visitorState(): HomeUiState {

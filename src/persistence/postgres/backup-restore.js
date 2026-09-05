@@ -25,6 +25,7 @@ const {
 } = require("./encrypted-backup-bundle");
 const { requireSafeLabel, requireSha256, requireUuid } = require("./validation");
 const migrationManifest = require("../../../db/migrations/checksums.json");
+const { BINDING_MIGRATION, BINDING_PROFILE, BINDING_SQL_SHA256, verifyPublicationBindingSchema } = require("./publication-binding-schema");
 
 const BACKUP_APPROVAL = "BACKUP_SOCIAL_POSTGRES_2B0";
 const RESTORE_APPROVAL = "RESTORE_SOCIAL_POSTGRES_2B0_ISOLATED";
@@ -187,8 +188,19 @@ const SCHEMA_PROFILES = Object.freeze([
     backupTables: BACKUP_TABLES,
     evidenceTables: EVIDENCE_TABLES,
     rlsTables: RLS_TABLES
+  }),
+  Object.freeze({
+    id: BINDING_PROFILE,
+    migrationRows: Object.freeze(EXPECTED_MIGRATION_ROWS.slice(0, 7)),
+    backupTables: BACKUP_TABLES,
+    evidenceTables: EVIDENCE_TABLES,
+    rlsTables: RLS_TABLES
   })
 ]);
+if (EXPECTED_MIGRATION_ROWS.length !== 7 || EXPECTED_MIGRATION_ROWS[6].version !== BINDING_MIGRATION ||
+    EXPECTED_MIGRATION_ROWS[6].checksum !== BINDING_SQL_SHA256) {
+  postgresFail("backup_schema_profile_0007_manifest_invalid", "Perfil autenticado 0007 diverge do manifesto.");
+}
 const SOCIAL_CONNECTOR_UNVALIDATED_CONSTRAINTS = Object.freeze([
   Object.freeze({
     schema: "ia4tube_social",
@@ -231,7 +243,8 @@ const ALLOWED_UNVALIDATED_CONSTRAINTS_BY_PROFILE = Object.freeze({
   "social-schema-0003": Object.freeze([]),
   "social-schema-0004": SOCIAL_CONNECTOR_UNVALIDATED_CONSTRAINTS,
   "social-schema-0005": SOCIAL_CONNECTOR_UNVALIDATED_CONSTRAINTS,
-  "social-schema-0006": SOCIAL_CONNECTOR_UNVALIDATED_CONSTRAINTS
+  "social-schema-0006": SOCIAL_CONNECTOR_UNVALIDATED_CONSTRAINTS,
+  [BINDING_PROFILE]: SOCIAL_CONNECTOR_UNVALIDATED_CONSTRAINTS
 });
 const CURRENT_SCHEMA_PROFILE = SCHEMA_PROFILES.at(-1);
 const TOOL_BASENAMES = Object.freeze({
@@ -1608,7 +1621,8 @@ function normalizeCatalogEvidence(catalog, profile) {
     Number(catalog.canonicalRoleCount) !== 3 ||
     catalog.runtimeEscalationPossible !== false ||
     catalog.requiredConstraintsPresent !== true ||
-    catalog.compatibleWith2A !== true
+    catalog.compatibleWith2A !== true ||
+    (profile.id === BINDING_PROFILE && catalog.publicationBindingSchemaVerified !== true)
   ) {
     fail("backup_catalog_state_invalid");
   }
@@ -1620,6 +1634,7 @@ function normalizeCatalogEvidence(catalog, profile) {
     runtimeEscalationPossible: false,
     requiredConstraintsPresent: true,
     compatibleWith2A: true,
+    ...(profile.id === BINDING_PROFILE ? { publicationBindingSchemaVerified: true } : {}),
     policyDigest: requireSha256(
       String(catalog.policyDigest || "").toLowerCase(),
       "backup_policy_digest"
@@ -1999,7 +2014,9 @@ function createPostgresBackupOperator(pool) {
         "ORDER BY version"
       ].join("\n")
     );
-    return resolveSchemaProfile(result.rows || []);
+    const profile = resolveSchemaProfile(result.rows || []);
+    if (profile.id === BINDING_PROFILE) await verifyPublicationBindingSchema({ query: querySafe });
+    return profile;
   }
 
   async function inspectPrincipal(connection) {
@@ -2160,6 +2177,7 @@ function createPostgresBackupOperator(pool) {
       schemaProfile,
       "backup_catalog_state_invalid"
     );
+    if (profile.id === BINDING_PROFILE) await verifyPublicationBindingSchema({ query: querySafe });
     const permanentLogins = await inspectPermanentLogins(config);
     const state = await querySafe(
       [
@@ -2312,6 +2330,7 @@ function createPostgresBackupOperator(pool) {
         profile,
         constraintRows
       ),
+      ...(profile.id === BINDING_PROFILE ? { publicationBindingSchemaVerified: true } : {}),
       compatibleWith2A:
         compatibility.rows?.[0]?.compatible_with_2a === true,
       policyDigest: digestRows(policies.rows),

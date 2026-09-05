@@ -73,7 +73,37 @@ function createCompanyScopedRepository(options = {}) {
     });
   }
 
+  async function findActiveOwner({ companyId, userId } = {}) {
+    const scopedCompanyId = requireUuid(companyId, "company_id");
+    const scopedUserId = requireUuid(userId, "user_id");
+    return scoped(scopedCompanyId, async (client) => {
+      // One SELECT snapshot for all three records, using existing column-level
+      // SELECT grants only. This repository never provisions or repairs rows.
+      const result = await client.query([
+        "SELECT company.id AS company_id, app_user.id AS user_id,",
+        " company.identity_derivation_version, app_user.auth_version, membership.role",
+        "FROM ia4tube_social.companies company",
+        "JOIN ia4tube_social.users app_user ON app_user.company_id=company.id AND app_user.id=$2",
+        "JOIN ia4tube_social.company_memberships membership",
+        " ON membership.company_id=company.id AND membership.user_id=app_user.id",
+        "WHERE company.id=$1 AND company.identity_derivation_version=$3",
+        " AND company.status='active' AND app_user.status='active'",
+        " AND membership.status='active' AND membership.role='owner'"
+      ].join("\n"), [scopedCompanyId, scopedUserId, identityDerivationVersion]);
+      const row = result.rows?.[0];
+      if (!row) return null;
+      if (result.rows.length !== 1 || row.company_id !== scopedCompanyId || row.user_id !== scopedUserId ||
+          row.identity_derivation_version !== identityDerivationVersion || row.role !== "owner" ||
+          !Number.isSafeInteger(Number(row.auth_version)) || Number(row.auth_version) < 1) {
+        postgresFail("social_tenant_readiness_unavailable", "Vinculo da empresa indisponivel.");
+      }
+      return Object.freeze({ companyId: scopedCompanyId, userId: scopedUserId,
+        identityDerivationVersion, role: "owner", authVersion: Number(row.auth_version) });
+    });
+  }
+
   return Object.freeze({
+    findActiveOwner,
     findCompanyById,
     findMembership
   });

@@ -5,6 +5,7 @@ const { TextDecoder } = require("node:util");
 const { postgresFail } = require("../../persistence/postgres/errors");
 const {
   INSTAGRAM_OAUTH_REDIRECT_URI,
+  INSTAGRAM_PRODUCTION_ORIGIN,
   INSTAGRAM_PROVIDER
 } = require("./instagram-config");
 
@@ -314,8 +315,10 @@ function createInstagramOAuthStateEnvelope(options = {}) {
   }
   const keyVersion = requireKeyVersion(options.keyVersion);
   const keyVersionSegment = compactKeyVersion(keyVersion);
-  const redirectUri = options.redirectUri || INSTAGRAM_OAUTH_REDIRECT_URI;
-  if (redirectUri !== INSTAGRAM_OAUTH_REDIRECT_URI) stateFail();
+  const expectedRedirect = options.environment === "production"
+    ? `${INSTAGRAM_PRODUCTION_ORIGIN}/v1/social/oauth/callback` : INSTAGRAM_OAUTH_REDIRECT_URI;
+  const redirectUri = options.redirectUri || expectedRedirect;
+  if (redirectUri !== expectedRedirect) stateFail();
   const now = requireClock(options.clock || Date.now);
   const randomBytes = options.randomBytes || crypto.randomBytes;
   if (typeof randomBytes !== "function") stateFail();

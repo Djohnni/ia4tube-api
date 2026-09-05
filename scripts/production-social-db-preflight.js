@@ -26,7 +26,8 @@ const MIGRATIONS = Object.freeze([
   ["0003_global_vault_key_registry", "28e63269e5d31ebd05b49f24194be706d3e65eed3fa7f6b39f9051cfc9b96db7"],
   ["0004_social_connector_persistence", "91f6efc611903c40e16bd37828d5b9c1a03dfae222e1d13b5dc97f81ffde1b5d"],
   ["0005_fix_social_reference_checks", "ddac4a02cecfd5247432687289001aa3198cce4dccab4e45cedc4cff26e5da93"],
-  ["0006_social_compliance_persistence", "f07eb68d37e8fec372e4b712447a113cba5d6ae6395492bb5678cc13d74948e7"]
+  ["0006_social_compliance_persistence", "f07eb68d37e8fec372e4b712447a113cba5d6ae6395492bb5678cc13d74948e7"],
+  ["0007_social_publication_connection_binding", "4747e001e3057b12facabb74f2529272d8c9cd4e933f55322ee9e3bc82483464"]
 ].map(([version, sha256]) => Object.freeze({ version, file: `${version}.up.sql`, sha256 })));
 
 const SQL = Object.freeze({
@@ -92,7 +93,7 @@ const SQL = Object.freeze({
     r.rolinherit AS inherits, r.rolreplication AS replication,
     (SELECT count(*)::integer FROM pg_catalog.pg_auth_members m WHERE m.roleid = r.oid) AS member_count
     FROM pg_catalog.pg_roles r WHERE r.rolname = ANY($1::text[]) ORDER BY r.rolname`,
-  ledger: "SELECT version, checksum_sha256 FROM ia4tube_migrations.schema_migrations ORDER BY version LIMIT 7",
+  ledger: "SELECT version, checksum_sha256 FROM ia4tube_migrations.schema_migrations ORDER BY version LIMIT 8",
   marker: "SELECT environment_id::text, environment_name FROM ia4tube_migrations.environment_identity LIMIT 2"
 });
 
@@ -288,8 +289,9 @@ function summarizeSnapshot({ identity, catalogue, roles, ledger, marker }) {
     counts.other_extension_count === 0 && roles.length === 0 && !flags.ledger_exists && !flags.marker_exists;
   const blockers = [
     "recovery_not_proven_by_this_preflight",
-    "production_apply_route_not_implemented",
+    "production_apply_not_exposed_by_readonly_operator",
     "production_0005_0006_route_review_required",
+    "production_0007_isolated_recovery_and_review_required",
     "runtime_rls_and_cross_tenant_behavior_not_proven"
   ];
   if (counts.other_schema_count || counts.other_relation_count || counts.other_function_count ||
@@ -334,7 +336,7 @@ async function inspectConnectedClient(client, principal) {
     const catalogue = one(await client.query(SQL.catalogue));
     const roles = rows(await client.query(SQL.roles, [CANONICAL_ROLES]), 3);
     const ledger = catalogue.ledger_exists === true && catalogue.ledger_is_table === true && catalogue.ledger_readable === true
-      ? rows(await client.query(SQL.ledger), 7) : null;
+      ? rows(await client.query(SQL.ledger), 8) : null;
     const marker = catalogue.marker_exists === true && catalogue.marker_is_table === true && catalogue.marker_readable === true
       ? rows(await client.query(SQL.marker), 2) : null;
     const summary = summarizeSnapshot({ identity, catalogue, roles, ledger, marker });

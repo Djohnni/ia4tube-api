@@ -4,6 +4,7 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
 const test = require("node:test");
+const { bindingPolicies, bindingQueryFixture } = require("./helpers/publication-binding-schema-fixtures");
 const {
   databaseTargetFingerprint,
   loadMigrationPostgresConfig,
@@ -110,7 +111,7 @@ function runtimeRlsTableRows() {
     relname,
     relrowsecurity: true,
     relforcerowsecurity: true,
-    policy_count: COMPLIANCE_TABLES.has(relname) ? 2 : 1
+    policy_count: relname === "social_publications" ? 3 : COMPLIANCE_TABLES.has(relname) ? 2 : 1
   }));
 }
 
@@ -136,6 +137,7 @@ function runtimePolicyRows(options = {}) {
       qual: qualifier,
       with_check: qualifier
     };
+    if (tablename === "social_publications") return [companyPolicy, ...bindingPolicies()];
     if (!COMPLIANCE_TABLES.has(tablename)) return [companyPolicy];
     return [
       companyPolicy,
@@ -666,6 +668,8 @@ test("runtime schema validation requires checksums, FORCE RLS and least privileg
     read("db/migrations/checksums.json")
   ).migrations;
   const validHarness = fakePool((text) => {
+    const binding = bindingQueryFixture(text);
+    if (binding) return binding;
     if (text.includes("SELECT owner.rolname AS owner_name")) {
       return {
         rowCount: 1,
@@ -998,6 +1002,7 @@ test("company repository is read-only, typed and derivation-version bound", asyn
     identityDerivationVersion: identityVersion
   });
   assert.deepEqual(Object.keys(repository).sort(), [
+    "findActiveOwner",
     "findCompanyById",
     "findMembership"
   ]);

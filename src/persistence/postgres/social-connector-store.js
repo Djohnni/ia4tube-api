@@ -4,6 +4,11 @@ const crypto = require("node:crypto");
 const { withTransaction } = require("./pool");
 const { requireSafeLabel } = require("./validation");
 const { assertInternalConnectorAudit } = require("./social-connector-audit");
+const { lockSocialConnection, assertNoPendingPublications } = require("./social-publication-guard");
+const {
+  normalizeConnectionBinding, assertSameConnectionBinding,
+  createPublicationIntent, assertStoredPublicationRequestHash
+} = require("../../social/publication/connection-binding");
 const {
   requireConnectorContext,
   requireUuid
@@ -73,6 +78,12 @@ const PERSISTED_CONNECTION_STATE = Object.freeze({
 });
 const APP_REVIEW_PROVIDER = "instagram";
 const APP_REVIEW_STALE_MINUTES = 10;
+const PUBLICATION_SCOPES = Object.freeze(["instagram_business_basic", "instagram_business_content_publish"]);
+
+function requirePublicationScopes(connection) {
+  if (!Array.isArray(connection?.grantedScopes) || connection.grantedScopes.length !== PUBLICATION_SCOPES.length ||
+      PUBLICATION_SCOPES.some((scope) => !connection.grantedScopes.includes(scope))) connectorFail("permission_missing");
+}
 
 function strictObject(value, allowedKeys) {
   if (
@@ -411,6 +422,7 @@ function connectionDetailsFromRow(row) {
     provider: row.provider,
     state,
     account,
+    externalAccountRowId: row.external_account_id ? uuid(row.external_account_id) : null,
     revision: rowRevision(row.revision),
     createdAt: databaseDate(row.created_at, false),
     connectedAt: databaseDate(row.connected_at),
@@ -438,6 +450,13 @@ function publicationFromRow(row) {
     errorCode: row.error_code || null,
     revision: rowRevision(row.revision)
   };
+  if (row.bound_external_account_id != null || row.expected_connection_revision != null) {
+    result.binding = normalizeConnectionBinding({
+      connectionId: row.connection_id,
+      externalId: row.bound_external_id,
+      connectionRevision: rowRevision(row.expected_connection_revision)
+    });
+  }
   if (!PUBLICATION_STATES.includes(result.state)) {
     connectorFail("resource_unavailable");
   }
@@ -483,6 +502,7 @@ function publicationDetailsFromRow(row, attemptRows = []) {
 }
 
 function canonicalMediaDigest(image) {
+  if (image.metadataDigest !== undefined) return digest(image.metadataDigest);
   return crypto.createHash("sha256").update(JSON.stringify({
     mediaId: image.mediaId,
     mimeType: image.mimeType
@@ -495,12 +515,12 @@ function publishPayload(record, operationId, requestHash) {
     "publicationId",
     "connectionId",
     "image",
-    "caption"
+    "caption", "binding", "clientRequestId"
   ]);
   if (uuid(payload.operationId) !== operationId) {
     connectorFail("idempotency_conflict");
   }
-  const image = strictObject(payload.image, ["mediaId", "mimeType"]);
+  const image = strictObject(payload.image, ["mediaId", "mimeType", "metadataDigest"]);
   if (image.mimeType !== "image/jpeg") {
     connectorFail("connector_contract_invalid");
   }
@@ -511,11 +531,14 @@ function publishPayload(record, operationId, requestHash) {
     mediaReference: mediaId,
     mediaMetadataDigest: canonicalMediaDigest({
       mediaId,
-      mimeType: "image/jpeg"
+      mimeType: "image/jpeg",
+      ...(image.metadataDigest !== undefined ? { metadataDigest: image.metadataDigest } : {})
     }),
     caption: caption(payload.caption),
     idempotencyKey: operationId,
-    requestHash
+    requestHash,
+    ...(payload.binding ? { binding: normalizeConnectionBinding(payload.binding),
+      clientRequestId: uuid(payload.clientRequestId) } : {})
   });
 }
 
@@ -661,7 +684,7 @@ function publicationInput(context, record, expectedRevision) {
     "companyId", "id", "connectionId", "provider", "state",
     "confirmedProviderReference", "reconciliationReference", "errorCode",
     "revision", "mediaReference", "mediaMetadataDigest", "caption",
-    "idempotencyKey", "requestHash"
+    "idempotencyKey", "requestHash", "binding"
   ]);
   companyFor(context, source.companyId);
   providerFor(context, source.provider);
@@ -698,7 +721,8 @@ function publicationInput(context, record, expectedRevision) {
     idempotencyKey: source.idempotencyKey == null
       ? null
       : uuid(source.idempotencyKey),
-    requestHash: source.requestHash == null ? null : digest(source.requestHash)
+    requestHash: source.requestHash == null ? null : digest(source.requestHash),
+    ...(source.binding ? { binding: normalizeConnectionBinding(source.binding) } : {})
   };
   assertPublicationConfirmation(clean);
   return Object.freeze(clean);
@@ -765,10 +789,22 @@ const CONNECTION_DETAILS_SELECT = [
   ") credential ON TRUE"
 ].join("\n");
 
+// JSON extraction intentionally tolerates a legacy 0006 read-only schema.
+// Writes with binding require the explicitly verified 0007 profile.
+const PUBLICATION_BINDING_SELECT = [
+  "to_jsonb(social_publications)->>'bound_external_account_id' AS bound_external_account_id,",
+  "to_jsonb(social_publications)->>'expected_connection_revision' AS expected_connection_revision,",
+  "(SELECT bound_account.external_id FROM ia4tube_social.social_external_accounts bound_account",
+  " WHERE bound_account.company_id=social_publications.company_id",
+  " AND bound_account.connection_id=social_publications.connection_id",
+  " AND bound_account.id=NULLIF(to_jsonb(social_publications)->>'bound_external_account_id','')::uuid",
+  ") AS bound_external_id"
+].join("\n");
+
 const PUBLICATION_SELECT = [
   "SELECT company_id, id, connection_id, provider, state,",
   "  confirmed_provider_reference, reconciliation_reference,",
-  "  error_code, revision",
+  "  error_code, revision,", PUBLICATION_BINDING_SELECT,
   "FROM ia4tube_social.social_publications"
 ].join("\n");
 
@@ -776,7 +812,7 @@ const PUBLICATION_DETAILS_SELECT = [
   "SELECT company_id, id, connection_id, provider, media_reference,",
   "  media_metadata_digest, caption, state, confirmed_provider_reference,",
   "  reconciliation_reference, error_code, published_at, created_at,",
-  "  updated_at, revision, idempotency_key, request_hash",
+  "  updated_at, revision, idempotency_key, request_hash,", PUBLICATION_BINDING_SELECT,
   "FROM ia4tube_social.social_publications"
 ].join("\n");
 
@@ -820,11 +856,11 @@ async function loadPublication(client, context, id, lock = false) {
   return publicationFromRow(result.rows?.[0]);
 }
 
-async function loadPublicationDetails(client, context, id) {
+async function loadPublicationDetails(client, context, id, lock = false) {
   const publicationId = uuid(id);
   const result = await client.query(
     `${PUBLICATION_DETAILS_SELECT}\n` +
-      "WHERE company_id=$1 AND id=$2 AND provider=$3",
+      "WHERE company_id=$1 AND id=$2 AND provider=$3" + (lock ? " FOR UPDATE" : ""),
     [context.companyId, publicationId, context.provider]
   );
   if (!result.rows?.[0]) return null;
@@ -1511,6 +1547,7 @@ function createPostgresConnectorStore(options = {}) {
 
   function scope(rawContext) {
     const context = requireConnectorContext(rawContext);
+    const bindingRequired = options.publicationBindingRequired === true || context.environment === "production";
 
     function requireAppReviewScope() {
       if (
@@ -1533,7 +1570,101 @@ function createPostgresConnectorStore(options = {}) {
         });
       }
 
+      async function executionBinding(client, publicationId, expectedBinding) {
+        await lockSocialConnection(client, context.companyId, context.provider);
+        const publication = await loadPublicationDetails(client, context, uuid(publicationId), true);
+        if (!publication) connectorFail("resource_unavailable");
+        if (!publication.binding) connectorFail("publication_binding_invalid");
+        const binding = normalizeConnectionBinding(expectedBinding);
+        assertSameConnectionBinding(publication.binding, binding);
+        assertStoredPublicationRequestHash(publication.requestHash, {
+          companyId: context.companyId, publicationId: publication.id,
+          operationId: publication.idempotencyKey, mediaId: publication.mediaReference,
+          mediaMetadataDigest: publication.mediaMetadataDigest, caption: publication.caption,
+          binding: publication.binding
+        });
+        const connection = await loadConnectionDetails(client, context, publication.connectionId, true);
+        if (!connection?.account || connection.state !== "connected" ||
+            connection.health !== "healthy" || !connection.activeCredentialId) {
+          connectorFail("credential_unavailable");
+        }
+        requirePublicationScopes(connection);
+        assertSameConnectionBinding(binding, {
+          connectionId: connection.id, externalId: connection.account.externalId,
+          connectionRevision: connection.revision
+        });
+        return Object.freeze({ publication, connection });
+      }
+
+      async function advanceStage(client, publication, reference) {
+        const changed = await client.query([
+          "UPDATE ia4tube_social.social_publications",
+          "SET state='provider_confirming', reconciliation_reference=$4, error_code=NULL,",
+          " updated_at=CURRENT_TIMESTAMP, revision=revision+1",
+          "WHERE company_id=$1 AND id=$2 AND provider=$3 AND revision=$5 RETURNING id"
+        ].join("\n"), [context.companyId, publication.id, context.provider, reference, publication.revision]);
+        if (!changed.rows?.length) connectorFail("state_transition_invalid");
+        await client.query([
+          "UPDATE ia4tube_social.social_publication_attempts",
+          "SET state='provider_confirming',provider_reference=$4,error_code=NULL,",
+          " finished_at=COALESCE(finished_at,CURRENT_TIMESTAMP),",
+          " duration_ms=COALESCE(duration_ms,GREATEST(0,FLOOR(EXTRACT(EPOCH FROM (CURRENT_TIMESTAMP-started_at))*1000)::bigint)),",
+          " updated_at=CURRENT_TIMESTAMP,revision=revision+1",
+          "WHERE company_id=$1 AND publication_id=$2 AND provider=$3",
+          " AND state IN ('started','provider_confirming')"
+        ].join("\n"), [context.companyId, publication.id, context.provider, reference]);
+      }
+
       const methods = {
+        async verifyPublicationExecutionBinding(publicationId, binding) {
+          return execute((client) => executionBinding(client, publicationId, binding));
+        },
+
+        async claimPublicationStage(record) {
+          const input = strictObject(record, ["publicationId", "binding", "stage", "containerId"]);
+          if (!["create_container", "publish_container"].includes(input.stage)) {
+            connectorFail("connector_contract_invalid");
+          }
+          if (input.stage === "publish_container" && (typeof input.containerId !== "string" || !/^[0-9]{5,64}$/.test(input.containerId))) {
+            connectorFail("connector_contract_invalid");
+          }
+          return execute(async (client) => {
+            const snapshot = await executionBinding(client, input.publicationId, input.binding);
+            const { publication } = snapshot;
+            const allowed = input.stage === "create_container"
+              ? publication.state === "publishing" && !publication.reconciliationReference
+              : publication.state === "provider_confirming" &&
+                [`igc:created:${input.containerId}`, `igc:armed:${input.containerId}`]
+                  .includes(publication.reconciliationReference);
+            if (!allowed) return Object.freeze({ acquired: false, publication });
+            const reference = input.stage === "create_container"
+              ? `igo:${publication.id.replace(/-/g, "")}`
+              : `igc:submitted:${input.containerId}`;
+            // Durable one-winner reservation BEFORE network I/O. No lease or
+            // time-based takeover may turn this reference back into an action.
+            await advanceStage(client, publication, reference);
+            return Object.freeze({ ...snapshot, acquired: true, reference });
+          });
+        },
+
+        async recordPublicationStageReference(record) {
+          const input = strictObject(record, ["publicationId", "expectedReference", "containerId"]);
+          const id = uuid(input.publicationId);
+          if (input.expectedReference !== `igo:${id.replace(/-/g, "")}` ||
+              typeof input.containerId !== "string" || !/^[0-9]{5,64}$/.test(input.containerId)) connectorFail("connector_contract_invalid");
+          return execute(async (client) => {
+            await lockSocialConnection(client, context.companyId, context.provider);
+            const publication = await loadPublication(client, context, id, true);
+            if (!publication?.binding) connectorFail("publication_binding_invalid");
+            // Recording a response to an already claimed request is allowed
+            // after compliance revocation: it cannot initiate any new I/O.
+            if (publication.state === "provider_confirming" &&
+                publication.reconciliationReference === input.expectedReference) {
+              await advanceStage(client, publication, `igc:created:${input.containerId}`);
+            }
+            return loadPublication(client, context, id);
+          });
+        },
         async getCurrentConnectionDetails() {
           return execute((client) => loadCurrentConnectionDetails(
             client,
@@ -1635,8 +1766,8 @@ function createPostgresConnectorStore(options = {}) {
               "SELECT pg_advisory_xact_lock(hashtextextended($1::text, 0))",
               [`${context.companyId}:${context.provider}`]
             );
+            await assertNoPendingPublications(client, context.companyId, context.provider);
             if (appReview === true) {
-              await recoverStaleAppReviewPublications(client, context);
               const activePublication = await client.query([
                 "SELECT id FROM ia4tube_social.social_publications",
                 "WHERE company_id=$1 AND connection_id=$2 AND provider=$3",
@@ -1732,6 +1863,7 @@ function createPostgresConnectorStore(options = {}) {
         async ensureDisconnected(id) {
           const connectionId = uuid(id);
           return execute(async (client) => {
+            await assertNoPendingPublications(client, context.companyId, context.provider);
             const current = await loadConnection(
               client,
               context,
@@ -1795,6 +1927,7 @@ function createPostgresConnectorStore(options = {}) {
             connectorFail("credential_unavailable");
           }
           return execute(async (client) => {
+            await assertNoPendingPublications(client, context.companyId, context.provider);
             const current = await loadConnection(client, context, clean.id, true);
             if (expectedRevision === null) {
               if (current) connectorFail("state_transition_invalid");
@@ -1893,6 +2026,7 @@ function createPostgresConnectorStore(options = {}) {
             connectorFail("state_transition_invalid");
           }
           return execute(async (client) => {
+            await assertNoPendingPublications(client, context.companyId, context.provider);
             await client.query(
               "SELECT pg_advisory_xact_lock(hashtextextended($1::text, 0))",
               [`${context.companyId}:${context.provider}`]
@@ -2066,6 +2200,7 @@ function createPostgresConnectorStore(options = {}) {
             connectorFail("state_transition_invalid");
           }
           return execute(async (client) => {
+            await assertNoPendingPublications(client, context.companyId, context.provider);
             await client.query(
               "SELECT pg_advisory_xact_lock(hashtextextended($1::text, 0))",
               [`${context.companyId}:${context.provider}`]
@@ -2236,11 +2371,6 @@ function createPostgresConnectorStore(options = {}) {
         async listAppReviewPublicationDetails() {
           requireAppReviewScope();
           return execute(async (client) => {
-            await client.query(
-              "SELECT pg_advisory_xact_lock(hashtextextended($1::text, 0))",
-              [`${context.companyId}:${context.provider}`]
-            );
-            await recoverStaleAppReviewPublications(client, context);
             const result = await client.query([
               "SELECT id FROM ia4tube_social.social_publications",
               "WHERE company_id=$1 AND provider=$2",
@@ -2290,7 +2420,11 @@ function createPostgresConnectorStore(options = {}) {
         async savePublication(record, expectedRevision) {
           const clean = publicationInput(context, record, expectedRevision);
           return execute(async (client) => {
+            await lockSocialConnection(client, context.companyId, context.provider);
             const current = await loadPublication(client, context, clean.id, true);
+            if (bindingRequired && (!current?.binding || expectedRevision === null)) {
+              connectorFail("publication_binding_invalid");
+            }
             if (expectedRevision === null) {
               if (
                 current ||
@@ -2458,6 +2592,19 @@ function createPostgresConnectorStore(options = {}) {
           const publication = source.capability === "publishImage"
             ? publishPayload(source.payload, operationId, requestHash)
             : null;
+          if (publication && (bindingRequired || publication.binding)) {
+            if (!publication.binding) connectorFail("publication_binding_invalid");
+            digest(source.payload.image.metadataDigest);
+            const intent = createPublicationIntent({
+              companyId: context.companyId, clientRequestId: publication.clientRequestId,
+              mediaId: publication.mediaReference, mediaMetadataDigest: publication.mediaMetadataDigest,
+              caption: publication.caption, binding: publication.binding
+            });
+            if (intent.publicationId !== publication.id || intent.operationId !== operationId ||
+                intent.requestHash !== requestHash || publication.connectionId !== intent.binding.connectionId) {
+              connectorFail("publication_intent_conflict");
+            }
+          }
           if (source.capability !== "publishImage" && source.payload !== undefined) {
             connectorFail("connector_contract_invalid");
           }
@@ -2469,8 +2616,7 @@ function createPostgresConnectorStore(options = {}) {
                 [`${context.companyId}:${context.provider}`]
               );
             }
-            if (appReviewPublication === true) {
-              await recoverStaleAppReviewPublications(client, context);
+            if (appReviewPublication === true || (bindingRequired && publication)) {
               if (publication) {
                 // This check and ready reservation share the existing short
                 // transaction/tenant lock. No lock is held during provider I/O.
@@ -2483,14 +2629,14 @@ function createPostgresConnectorStore(options = {}) {
                 // A temporary-failure retry reserves its operation before the
                 // publication moves back to publishing. Guard that interval
                 // too, including independent workers/processes.
-                const reserved = await client.query([
+                const reserved = !bindingRequired ? await client.query([
                   "SELECT operation_id FROM ia4tube_social.social_idempotency_operations",
                   "WHERE company_id=$1 AND provider=$2 AND operation_id<>$3",
                   " AND capability='publishImage' AND status='pending'",
                   ` AND updated_at > CURRENT_TIMESTAMP - INTERVAL '${APP_REVIEW_STALE_MINUTES} minutes'`,
                   "LIMIT 1"
-                ].join("\n"), [context.companyId, context.provider, operationId]);
-                if (reserved.rows?.length) connectorFail("state_transition_invalid");
+                ].join("\n"), [context.companyId, context.provider, operationId]) : null;
+                if (reserved?.rows?.length) connectorFail("state_transition_invalid");
               }
             }
             const inserted = await client.query(
@@ -2536,13 +2682,26 @@ function createPostgresConnectorStore(options = {}) {
                     connectorFail("state_transition_invalid");
                   }
                 } else {
+                  let boundConnection = null;
+                  if (publication.binding) {
+                    boundConnection = await loadConnectionDetails(client, context, publication.connectionId, true);
+                    if (!boundConnection?.account || !boundConnection.externalAccountRowId ||
+                        boundConnection.state !== "connected" || boundConnection.health !== "healthy") {
+                      connectorFail("credential_unavailable");
+                    }
+                    requirePublicationScopes(boundConnection);
+                    assertSameConnectionBinding(publication.binding, {
+                      connectionId: boundConnection.id, externalId: boundConnection.account.externalId,
+                      connectionRevision: boundConnection.revision
+                    });
+                  }
                   const ready = await client.query(
                     [
                       "INSERT INTO ia4tube_social.social_publications (",
                       "  company_id, id, connection_id, provider, media_reference,",
                       "  media_metadata_digest, caption, state, idempotency_key,",
-                      "  request_hash, revision",
-                      ") SELECT $1,$2,$3,$4,$5,$6,$7,'ready',$8,$9,1",
+                      "  request_hash, revision" + (publication.binding ? ", bound_external_account_id, expected_connection_revision" : ""),
+                      ") SELECT $1,$2,$3,$4,$5,$6,$7,'ready',$8,$9,1" + (publication.binding ? ",$10,$11" : ""),
                       "FROM ia4tube_social.social_connections connection",
                       "WHERE connection.company_id = $1 AND connection.id = $3",
                       "  AND connection.provider = $4",
@@ -2558,7 +2717,8 @@ function createPostgresConnectorStore(options = {}) {
                       publication.mediaMetadataDigest,
                       publication.caption,
                       operationId,
-                      requestHash
+                      requestHash,
+                      ...(publication.binding ? [boundConnection.externalAccountRowId, publication.binding.connectionRevision] : [])
                     ]
                   );
                   if (!ready.rows?.[0]) connectorFail("credential_unavailable");

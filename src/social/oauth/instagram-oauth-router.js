@@ -183,6 +183,8 @@ function normalizeConnection(value, { optional = false } = {}) {
     value,
     [
       "connectionId",
+      "externalId",
+      "connectionRevision",
       "provider",
       "username",
       "accountType",
@@ -201,10 +203,13 @@ function normalizeConnection(value, { optional = false } = {}) {
     !CONNECTION_STATES.includes(source.state) ||
     !CONNECTION_HEALTH.has(source.health) ||
     !coherentStateHealth(source.state, source.health) ||
+    !Number.isSafeInteger(source.connectionRevision) || source.connectionRevision < 1 ||
     ((source.username === null) !== (source.accountType === null)) ||
+    ((source.externalId === null) !== !hasAccount) ||
     (hasAccount &&
       (typeof source.username !== "string" ||
         !/^@[a-zA-Z0-9._]{1,30}$/.test(source.username) ||
+        typeof source.externalId !== "string" || !/^[0-9]{5,64}$/.test(source.externalId) ||
         !PROFESSIONAL_ACCOUNT_TYPES.has(source.accountType))) ||
     (source.state === "connected" && !hasAccount)
   ) {
@@ -212,6 +217,8 @@ function normalizeConnection(value, { optional = false } = {}) {
   }
   return Object.freeze({
     connectionId: responseUuid(source.connectionId),
+    externalId: source.externalId,
+    connectionRevision: source.connectionRevision,
     provider: "instagram",
     username: source.username,
     accountType: source.accountType,
@@ -590,7 +597,7 @@ function createInstagramOAuthRouter(options = {}) {
         if (
           result.connection.state !== "disconnected" ||
           result.connection.username !== null ||
-          result.connection.accountType !== null
+          result.connection.accountType !== null || result.connection.externalId !== null
         ) {
           responseInvalid();
         }

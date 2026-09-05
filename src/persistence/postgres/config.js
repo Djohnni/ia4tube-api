@@ -16,6 +16,13 @@ const FINGERPRINT_PATTERN = /^[0-9a-f]{64}$/;
 const SOCIAL_OWNER_ROLE = "ia4tube_social_owner";
 const SOCIAL_MIGRATOR_ROLE = "ia4tube_social_migrator";
 const SOCIAL_RUNTIME_ROLE = "ia4tube_social_runtime";
+// Both hostnames were read from this resource's Render dashboard. An env
+// fingerprint alone cannot pin an environment: URL and fingerprint can both
+// be copied coherently from staging.
+const PRODUCTION_DATABASE_HOSTS = new Set([
+  "dpg-dae4tmf40ujc73dr2dog-a",
+  "dpg-dae4tmf40ujc73dr2dog-a.oregon-postgres.render.com"
+]);
 const OPERATOR_DATABASE_MARKER_PATTERN =
   /(?:^|_)(?:BACKUP|RESTORE|BOOTSTRAP|SIZING|TEST|MIGRATIONS?|PROVISIONER|ROTATIONS?|OPERATOR)(?:_|$)/;
 const OPERATOR_SECRET_TOKEN_PATTERN =
@@ -419,6 +426,13 @@ function loadRuntimePostgresConfig(env = process.env) {
   if (!enabled) return Object.freeze({ enabled: false });
 
   const parsed = parseDatabaseUrl(env.DATABASE_URL, "database_url");
+  if (env.ENVIRONMENT === "production" &&
+      (!PRODUCTION_DATABASE_HOSTS.has(parsed.hostname) ||
+       (parsed.port && parsed.port !== "5432") ||
+       parsed.pathname !== "/ia4tube_social_production")) {
+    postgresFail("social_production_database_target_mismatch",
+      "Destino PostgreSQL de producao recusado.");
+  }
   requireRemotePassword(parsed, "database_url");
   const targetFingerprint = requireExpectedTargetFingerprint(env, parsed);
   const login = normalizedDatabaseUsername(parsed);

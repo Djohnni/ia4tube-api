@@ -73,6 +73,8 @@ function requireJwtSecret(env = process.env) {
   return value;
 }
 const JWT_SECRET = requireJwtSecret();
+const { createProductionSession } = require("./src/social/production-session");
+const productionSession = createProductionSession({ secret: JWT_SECRET, readClients: readClientes });
 
 // ===== DATA STORAGE (RENDER DISK) =====
 const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, "dados");
@@ -137,6 +139,7 @@ app.use(cors({
 }));
 
 app.use("/v1/social", productionSocialIntegration.middleware);
+productionSocialIntegration.mountWeb(app);
 
 const globalJsonParser = express.json({ limit: "50mb" });
 const globalUrlencodedParser = express.urlencoded({ extended: false, limit: "1mb" });
@@ -1911,10 +1914,7 @@ app.post("/auth/google", async (req, res) => {
       writeClientes(clientes);
     }
 
-    const token = jwt.sign({ whatsapp: chaveCliente }, JWT_SECRET, {
-      algorithm: "HS256",
-      expiresIn: "7d"
-    });
+    const token = productionSession.sign(chaveCliente);
 
     return res.json({
       ok: true,
@@ -1982,10 +1982,7 @@ app.post("/auth/auto-register", (req, res) => {
     clientes[login] = novo;
     writeClientes(clientes);
 
-    const token = jwt.sign({ whatsapp: login }, JWT_SECRET, {
-      algorithm: "HS256",
-      expiresIn: "7d"
-    });
+    const token = productionSession.sign(login);
 
     return res.json({
       ok: true,
@@ -2063,10 +2060,7 @@ app.post("/auth/register", (req, res) => {
   clientesAtualizados[whatsapp] = novo;
   writeClientes(clientesAtualizados);
 
-  const token = jwt.sign({ whatsapp }, JWT_SECRET, {
-    algorithm: "HS256",
-    expiresIn: "7d"
-  });
+  const token = productionSession.sign(whatsapp);
 
   return res.json({
     ok: true,
@@ -2133,10 +2127,7 @@ app.post("/auth/finalizar-conta-auto", auth, (req, res) => {
 
     writeClientes(clientes);
 
-    const token = jwt.sign({ whatsapp: novoLogin }, JWT_SECRET, {
-      algorithm: "HS256",
-      expiresIn: "7d"
-    });
+    const token = productionSession.sign(novoLogin);
 
     return res.json({
       ok:true,
@@ -2192,10 +2183,7 @@ app.post("/auth/login", (req, res) => {
     writeClientes(clientes);
   }
 
-  const token = jwt.sign({ whatsapp }, JWT_SECRET, {
-    algorithm: "HS256",
-    expiresIn: "7d"
-  });
+  const token = productionSession.sign(whatsapp);
 
   return res.json({
     ok: true,
@@ -7316,6 +7304,7 @@ app.use((err, req, res, next) => {
 });
 
 cleanupOldTmpUploads();
+function startLegacyBackgroundTasks() {
 setInterval(cleanupOldTmpUploads, TMP_UPLOAD_CLEANUP_INTERVAL_MS);
 setInterval(finalizarConversasSuporteInativas, 60 * 1000);
 if (fcmService.scheduledNotificationsEnabled()) {
@@ -7334,6 +7323,26 @@ if (
   setInterval(runFreeArtCampaignNotifications, adminFreeArtsNotificationsIntervalMs());
 }
 
-app.listen(PORT, () => {
-  console.log("API rodando na porta", PORT);
+}
+
+productionSocialIntegration.initialize({
+  secret: JWT_SECRET,
+  readClients: readClientes,
+  dataDir: DATA_DIR,
+  logger: { info() {}, error() { console.error("[social] Operacao recusada."); } }
+}).then(() => {
+  startLegacyBackgroundTasks();
+  const httpServer = app.listen(PORT, () => {
+    console.log("API rodando na porta", PORT);
+  });
+  if (productionSocialIntegration.enabled) {
+    const { installSocialRuntimeShutdown } = require("./src/social/server-runtime");
+    installSocialRuntimeShutdown({
+      runtimeState: productionSocialIntegration,
+      server: httpServer
+    });
+  }
+}).catch(() => {
+  console.error("[social] Inicializacao recusada; nenhum servidor HTTP iniciado.");
+  process.exitCode = 1;
 });

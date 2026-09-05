@@ -10,6 +10,10 @@ const {
 } = require("./config");
 const { postgresFail } = require("./errors");
 const {
+  BINDING_MIGRATION, BINDING_PROFILE, BINDING_SQL_SHA256,
+  bindingPoliciesMatch, verifyPublicationBindingSchema
+} = require("./publication-binding-schema");
+const {
   inspectSessionPrincipalAccess,
   principalAccessIsUnsafe,
   quoteIdentifier
@@ -32,6 +36,21 @@ const SOCIAL_REFERENCE_CHECK_FIX_MIGRATION =
   "0005_fix_social_reference_checks";
 const SOCIAL_COMPLIANCE_PERSISTENCE_MIGRATION =
   "0006_social_compliance_persistence";
+const PREPARATION_PRODUCTION_TARGET = Object.freeze({
+  resourceId: "dpg-dae4tmf40ujc73dr2dog-a",
+  host: "dpg-dae4tmf40ujc73dr2dog-a.oregon-postgres.render.com",
+  port: 5432,
+  database: "ia4tube_social_production"
+});
+const PREPARATION_SQL_PINS = Object.freeze([
+  "ecab91eb1b915378b6d98edfa66c929c3558054349fbda8b25dbf274191a21bb",
+  "72b05e7de90cd2d7742b5622bc92f9e9d78168317b9b7d547a5adb1b918d722d",
+  "28e63269e5d31ebd05b49f24194be706d3e65eed3fa7f6b39f9051cfc9b96db7",
+  "91f6efc611903c40e16bd37828d5b9c1a03dfae222e1d13b5dc97f81ffde1b5d",
+  "ddac4a02cecfd5247432687289001aa3198cce4dccab4e45cedc4cff26e5da93",
+  "f07eb68d37e8fec372e4b712447a113cba5d6ae6395492bb5678cc13d74948e7",
+  BINDING_SQL_SHA256
+]);
 const EXACT_FROM_PROFILE = "social-schema-0003";
 const EXACT_TO_PROFILE = "social-schema-0004";
 const EXACT_PENDING_MIGRATIONS = Object.freeze([
@@ -108,6 +127,11 @@ const EXACT_PROFILE_TABLES = Object.freeze({
     ...EXACT_CONNECTOR_TABLES
   ]),
   [COMPLIANCE_TO_PROFILE]: Object.freeze([
+    ...EXACT_BASE_TABLES,
+    ...EXACT_CONNECTOR_TABLES,
+    ...COMPLIANCE_TABLES
+  ]),
+  [BINDING_PROFILE]: Object.freeze([
     ...EXACT_BASE_TABLES,
     ...EXACT_CONNECTOR_TABLES,
     ...COMPLIANCE_TABLES
@@ -346,7 +370,7 @@ function expectedPolicyExpression(scopeColumn) {
 
 function expectedExactTableGrantSet(profile, runtimeRole, ownerRole) {
   const tables = new Set(exactProfileTables(profile));
-  const grantProfile = profile === COMPLIANCE_TO_PROFILE
+  const grantProfile = [COMPLIANCE_TO_PROFILE, BINDING_PROFILE].includes(profile)
     ? COMPLIANCE_RUNTIME_TABLE_GRANTS
     : EXACT_RUNTIME_TABLE_GRANTS;
   const expected = new Set();
@@ -365,7 +389,7 @@ function expectedExactTableGrantSet(profile, runtimeRole, ownerRole) {
 
 function expectedExactColumnGrantSet(profile, runtimeRole, ownerRole) {
   const tables = new Set(exactProfileTables(profile));
-  const grantProfile = profile === COMPLIANCE_TO_PROFILE
+  const grantProfile = [COMPLIANCE_TO_PROFILE, BINDING_PROFILE].includes(profile)
     ? COMPLIANCE_RUNTIME_COLUMN_GRANTS
     : EXACT_RUNTIME_COLUMN_GRANTS;
   const expected = new Set();
@@ -421,7 +445,8 @@ async function verifySocialPhysicalProfile(
   runtimeRole = SOCIAL_RUNTIME_ROLE
 ) {
   const tables = exactProfileTables(profile);
-  const complianceProfile = profile === COMPLIANCE_TO_PROFILE;
+  const complianceProfile = [COMPLIANCE_TO_PROFILE, BINDING_PROFILE].includes(profile);
+  const bindingProfile = profile === BINDING_PROFILE;
   const expectedRelations = new Map([
     ...tables.map((table) => [table, "r"]),
     ["runtime_schema_contract", "v"]
@@ -608,7 +633,7 @@ async function verifySocialPhysicalProfile(
   );
   if (
     policies.rows?.length !== tables.length +
-      (complianceProfile ? COMPLIANCE_TABLES.length : 0)
+      (complianceProfile ? COMPLIANCE_TABLES.length : 0) + (bindingProfile ? 2 : 0)
   ) {
     postgresFail(
       "migration_exact_rls_profile_mismatch",
@@ -669,6 +694,12 @@ async function verifySocialPhysicalProfile(
           "migration_exact_rls_profile_mismatch",
           "Policies sociais divergem do perfil exato."
         );
+      }
+    } else if (bindingProfile && table === "social_publications") {
+      if (resolver || tablePolicies.length !== 3 || !bindingPoliciesMatch(
+        tablePolicies.filter((entry) => entry.policyname !== `${table}_company_scope`), runtimeRole
+      )) {
+        postgresFail("migration_exact_rls_profile_mismatch", "Policies sociais divergem do perfil exato.");
       }
     } else if (tablePolicies.length !== 1 || resolver) {
       postgresFail(
@@ -802,7 +833,8 @@ async function verifySocialPhysicalProfile(
     [
       EXACT_TO_PROFILE,
       COMPLIANCE_FROM_PROFILE,
-      COMPLIANCE_TO_PROFILE
+      COMPLIANCE_TO_PROFILE,
+      BINDING_PROFILE
     ].includes(profile)
       ? new Set(EXACT_0004_NOT_VALID_CONSTRAINTS)
       : new Set();
@@ -818,6 +850,7 @@ async function verifySocialPhysicalProfile(
     );
   }
 
+  if (bindingProfile) await verifyPublicationBindingSchema(client, { runtimeRole });
   return Object.freeze({
     profile,
     relationCount: expectedRelations.size,
@@ -3616,11 +3649,56 @@ async function applyStagingExactWithinTransaction(
   }
 }
 
+function validatePreparationStepRequest(request, local, { production = true } = {}) {
+  const versions = [...COMPLIANCE_TARGET_MIGRATIONS, BINDING_MIGRATION];
+  if (!Array.isArray(local) || local.length !== 7 || local.some((entry, index) =>
+    entry.version !== versions[index] || entry.sha256 !== PREPARATION_SQL_PINS[index]
+  )) postgresFail("migration_preparation_manifest_mismatch", "Manifesto da preparacao divergente.");
+  const index = Array.isArray(request?.expectedApplied) ? request.expectedApplied.length : -1;
+  if (index < 0 || index >= local.length || !exactArrayMatches(request.expectedApplied, versions.slice(0, index)) ||
+      request.migration !== versions[index] || request.migrationSha256 !== PREPARATION_SQL_PINS[index] ||
+      request.fromProfile !== `social-schema-${String(index).padStart(4, "0")}` ||
+      request.toProfile !== `social-schema-${String(index + 1).padStart(4, "0")}`) {
+    postgresFail("migration_preparation_step_invalid", "Passo de migration divergente.");
+  }
+  if (production && (request.resourceId !== PREPARATION_PRODUCTION_TARGET.resourceId ||
+      ![request.beforeCatalogSha256, request.afterCatalogSha256, request.recoveryEvidenceDigest,
+        request.executionPackageDigest].every((value) => typeof value === "string" && /^[0-9a-f]{64}$/.test(value)))) {
+    postgresFail("migration_preparation_evidence_required", "Evidencia de preparacao obrigatoria.");
+  }
+  return Object.freeze({
+    index, migration: versions[index], migrationSha256: PREPARATION_SQL_PINS[index],
+    expectedApplied: Object.freeze([...request.expectedApplied]),
+    fromProfile: request.fromProfile, toProfile: request.toProfile,
+    beforeCatalogSha256: request.beforeCatalogSha256, afterCatalogSha256: request.afterCatalogSha256,
+    recoveryEvidenceDigest: request.recoveryEvidenceDigest, executionPackageDigest: request.executionPackageDigest
+  });
+}
+
+function assertPreparationProductionTarget(target, env) {
+  assertMigrationTarget(target, env);
+  if (target.environment !== "production" || target.host !== PREPARATION_PRODUCTION_TARGET.host ||
+      String(target.port) !== String(PREPARATION_PRODUCTION_TARGET.port) ||
+      target.database !== PREPARATION_PRODUCTION_TARGET.database ||
+      !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(String(target.environmentId))) {
+    postgresFail("migration_preparation_target_mismatch", "Destino da preparacao divergente.");
+  }
+}
+
+function assertPreparationLedger(local, rows, appliedCount) {
+  const status = compareMigrationState(local, rows);
+  if (!exactArrayMatches(status.filter((entry) => entry.state === "applied").map((entry) => entry.version),
+    local.slice(0, appliedCount).map((entry) => entry.version))) {
+    postgresFail("migration_preparation_journal_mismatch", "Journal deve ser reinspecionado; repeticao recusada.");
+  }
+  return status;
+}
+
 function createMigrationRunner(options = {}) {
   const pool = options.pool;
   const ownerRole = options.ownerRole;
   const migratorRole = options.migratorRole;
-  const target = options.target;
+  const target = options.target ? Object.freeze({ ...options.target }) : options.target;
   const manifestOptions = options.manifestOptions || {};
   if (!pool || typeof pool.connect !== "function") {
     postgresFail("postgres_pool_required", "Pool PostgreSQL obrigatorio.");
@@ -3636,6 +3714,119 @@ function createMigrationRunner(options = {}) {
       "Roles PostgreSQL de migration divergentes."
     );
   }
+
+  async function preparationGate(client, local, request, count, production) {
+    const identity = await client.query(`SELECT current_database() = $1 AND session_user = $2 AS target_exact,
+      current_setting('server_version_num')::integer >= 180000 AND
+      current_setting('server_version_num')::integer < 190000 AS postgres_18,
+      COALESCE((SELECT ssl FROM pg_catalog.pg_stat_ssl WHERE pid = pg_catalog.pg_backend_pid()), false) AS tls_active`,
+    [target.database, target.username]);
+    if (identity.rows?.length !== 1 || identity.rows[0].target_exact !== true || identity.rows[0].postgres_18 !== true ||
+        (production && identity.rows[0].tls_active !== true)) {
+      postgresFail("migration_preparation_session_mismatch", "Sessao da preparacao divergente.");
+    }
+    await verifyMigrationSession(client, migratorRole, ownerRole);
+    await verifyMigrationInfrastructure(client, migratorRole, ownerRole);
+    await client.query(`SET LOCAL ROLE ${quoteIdentifier(migratorRole)}`);
+    assertTargetMarker(await readTargetMarker(client), target);
+    await verifyExistingLedgerContract(client, ownerRole, migratorRole);
+    const status = assertPreparationLedger(local, await readAppliedMigrations(client), count);
+    const catalogSha256 = stagingExactCatalogDigest(await readStagingExactCatalogSnapshot(client));
+    const expectedCatalog = count === request.index ? request.beforeCatalogSha256 : request.afterCatalogSha256;
+    if (production && catalogSha256 !== expectedCatalog) {
+      postgresFail("migration_preparation_catalog_mismatch", "Catalogo diverge do ensaio aprovado.");
+    }
+    if (count >= 3) {
+      await verifySocialPhysicalProfile(client, `social-schema-${String(count).padStart(4, "0")}`, ownerRole, SOCIAL_RUNTIME_ROLE);
+      await require("./runtime-validation").verifyVaultKeyRegistryBoundary(client, SOCIAL_RUNTIME_ROLE, ownerRole);
+    }
+    if (count >= 5) await verifyReferenceCheckCatalog(client, "after");
+    return Object.freeze({ status, catalogSha256, profile: `social-schema-${String(count).padStart(4, "0")}` });
+  }
+
+  async function runPreparationStep(rawRequest, env, { production, write }) {
+    const local = readManifest(manifestOptions);
+    const request = validatePreparationStepRequest(rawRequest, local, { production });
+    if (production) assertPreparationProductionTarget(target, env);
+    else {
+      assertMigrationTarget(target, env);
+      assertExactDisposableTarget(target);
+      if (request.index !== 6) postgresFail("migration_binding_step_only", "Rota descartavel restrita a 0007.");
+    }
+    if (write) assertApplyTarget(target, env);
+    if (production && write) {
+      // A digest/boolean from an HTTP caller is NOT recovery proof. Only the
+      // operator's independently reviewed verifier may authenticate its private evidence.
+      if (typeof options.verifyPreparationRecovery !== "function") {
+        postgresFail("migration_preparation_recovery_verifier_required", "Verificador de recuperacao obrigatorio.");
+      }
+      const evidence = await options.verifyPreparationRecovery(Object.freeze({
+        targetFingerprint: targetFingerprint(target), environmentId: target.environmentId,
+        resourceId: PREPARATION_PRODUCTION_TARGET.resourceId, ...request
+      }));
+      if (evidence?.verified !== true || evidence.targetFingerprint !== targetFingerprint(target) ||
+          evidence.fromProfile !== request.fromProfile || evidence.toProfile !== request.toProfile ||
+          evidence.recoveryEvidenceDigest !== request.recoveryEvidenceDigest ||
+          evidence.executionPackageDigest !== request.executionPackageDigest ||
+          evidence.beforeCatalogSha256 !== request.beforeCatalogSha256 || evidence.afterCatalogSha256 !== request.afterCatalogSha256 ||
+          evidence.isolatedRestoreVerified !== true || evidence.independentReviewApproved !== true) {
+        postgresFail("migration_preparation_recovery_invalid", "Prova de recuperacao divergente.");
+      }
+    }
+    const client = await pool.connect();
+    let releaseError;
+    let commitCompleted = false;
+    try {
+      return await withAdvisoryLock(client, async () => {
+        if (!write) return runExactReadOnlyTransaction(client, async () => {
+          const before = await preparationGate(client, local, request, request.index, production);
+          return Object.freeze({ readOnly: true, applyAuthorized: false, ...request, observedCatalogSha256: before.catalogSha256 });
+        });
+        await client.query("BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ");
+        let commitAttempted = false;
+        let before, after;
+        try {
+          before = await preparationGate(client, local, request, request.index, production);
+          await client.query(`SET LOCAL ROLE ${quoteIdentifier(ownerRole)}`);
+          const migration = local[request.index];
+          if (migration.version === GLOBAL_VAULT_REGISTRY_MIGRATION) await client.query(GLOBAL_VAULT_BACKFILL_POLICY_CREATE);
+          const started = process.hrtime.bigint();
+          await client.query(migration.sql);
+          if (migration.version === GLOBAL_VAULT_REGISTRY_MIGRATION) await client.query(GLOBAL_VAULT_BACKFILL_POLICY_DROP);
+          const elapsed = Number((process.hrtime.bigint() - started) / 1000000n);
+          await client.query(`INSERT INTO ${LEDGER_NAME} (version, checksum_sha256, execution_ms) VALUES ($1, $2, $3)`,
+            [migration.version, migration.sha256, elapsed]);
+          await client.query(`SET LOCAL ROLE ${quoteIdentifier(migratorRole)}`);
+          after = await preparationGate(client, local, request, request.index + 1, production);
+          commitAttempted = true;
+          try { await client.query("COMMIT"); commitCompleted = true; }
+          catch (cause) {
+            const failure = new Error("migration_preparation_commit_outcome_unknown");
+            Object.assign(failure, { code: failure.message, cause, outcomeUnknown: true, retryAllowed: false,
+              requiresReadOnlyInspection: true, discardClient: true, skipAdvisoryUnlock: true });
+            throw failure;
+          }
+        } catch (error) {
+          if (!commitAttempted) await rollbackExactTransaction(client, error);
+          throw error;
+        }
+        const finalGate = await runExactReadOnlyTransaction(client, () =>
+          preparationGate(client, local, request, request.index + 1, production));
+        return Object.freeze({ appliedMigration: request.migration, migrationSha256: request.migrationSha256,
+          fromProfile: before.profile, finalProfile: after.profile, finalCatalogSha256: finalGate.catalogSha256,
+          postCommitValidated: true, retryAllowed: false });
+      });
+    } catch (error) {
+      if (commitCompleted) Object.assign(error, { applied: true, retryAllowed: false, requiresReadOnlyInspection: true });
+      if (error?.discardClient) releaseError = error;
+      throw error;
+    } finally { client.release(releaseError); }
+  }
+
+  const planProductionStep = (request, env = process.env) => runPreparationStep(request, env, { production: true, write: false });
+  const applyProductionStep = (request, env = process.env) => runPreparationStep(request, env, { production: true, write: true });
+  const planPublicationBinding = (request, env = process.env) => runPreparationStep(request, env, { production: false, write: false });
+  const applyPublicationBinding = (request, env = process.env) => runPreparationStep(request, env, { production: false, write: true });
 
   async function inspect() {
     const local = readManifest(manifestOptions);
@@ -3700,6 +3891,9 @@ function createMigrationRunner(options = {}) {
           local,
           await readMigrationState(client, migratorRole)
         );
+        if (compliancePreflightState.some((item) => item.version === BINDING_MIGRATION && item.state === "pending")) {
+          postgresFail("migration_publication_binding_exact_route_required", "Migration 0007 exige rota transacional revisada.");
+        }
         if (
           compliancePreflightState.some(
             (item) =>
@@ -4287,6 +4481,10 @@ function createMigrationRunner(options = {}) {
 
   return Object.freeze({
     apply,
+    planProductionStep,
+    applyProductionStep,
+    planPublicationBinding,
+    applyPublicationBinding,
     applyExact,
     applyMetaCompliance,
     applyReferenceCheckFix,
@@ -4301,6 +4499,13 @@ function createMigrationRunner(options = {}) {
 }
 
 module.exports = {
+  BINDING_MIGRATION,
+  BINDING_PROFILE,
+  BINDING_SQL_SHA256,
+  PREPARATION_PRODUCTION_TARGET,
+  validatePreparationStepRequest,
+  assertPreparationProductionTarget,
+  assertPreparationLedger,
   ADVISORY_LOCK_ID,
   APPLY_APPROVAL,
   COMPLIANCE_FROM_PROFILE,
