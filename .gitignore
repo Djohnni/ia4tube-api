@@ -20,3 +20,6 @@ openai_key.txt
 *firebase-adminsdk*.json
 *service-account*.json
 firebase-admin*.json
+node_modules/
+*.dpapi
+*.pgpass

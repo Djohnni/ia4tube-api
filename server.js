@@ -1,3 +1,10 @@
+const {
+  createProductionSocialIntegration
+} = require("./src/social/production-integration");
+const productionSocialIntegration = createProductionSocialIntegration({
+  env: process.env
+});
+
 const express = require("express");
 const cors = require("cors");
 const fs = require("fs");
@@ -128,6 +135,8 @@ app.use(cors({
   origin: ["https://ia4tube.com", "https://www.ia4tube.com", "http://127.0.0.1:8080", "http://localhost:8080"],
   credentials: false
 }));
+
+app.use("/v1/social", productionSocialIntegration.middleware);
 
 const globalJsonParser = express.json({ limit: "50mb" });
 const globalUrlencodedParser = express.urlencoded({ extended: false, limit: "1mb" });

@@ -1,0 +1,2 @@
+# Migration checksums cover exact bytes. Preserve the canonical LF SQL files.
+db/** -text

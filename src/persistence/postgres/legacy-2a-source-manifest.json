@@ -1,0 +1,33 @@
+{
+  "format": 1,
+  "kind": "ia4tube-social-legacy-2a-source-manifest",
+  "commit": "9deb1e04249026a7046d44d6cbf4e2da87b9a0a4",
+  "scopes": [
+    "db/migrations",
+    "src/persistence/postgres",
+    "src/social"
+  ],
+  "files": {
+    "db/migrations/0001_social_multitenant_foundation.up.sql": "ecab91eb1b915378b6d98edfa66c929c3558054349fbda8b25dbf274191a21bb",
+    "db/migrations/0002_social_connections_and_vault.up.sql": "72b05e7de90cd2d7742b5622bc92f9e9d78168317b9b7d547a5adb1b918d722d",
+    "db/migrations/0003_global_vault_key_registry.up.sql": "28e63269e5d31ebd05b49f24194be706d3e65eed3fa7f6b39f9051cfc9b96db7",
+    "db/migrations/checksums.json": "fa7b4a377709e50b3a8b69ad192afe21966beaf7a52b4b22395527a9ed0cd40d",
+    "package-lock.json": "a73e0da8ea09cf6d9a286d473a2776e06a5b24ffaf9fd449c16a03f3663189cd",
+    "package.json": "8df422d39147f9d5805dccc31edeb0614046acc38d76e835699789c7bc9de273",
+    "src/persistence/postgres/company-scoped-repository.js": "e03ad5e37dfdf0dc583522dbbfcf0e7c8ea314f06515d681e78d65074086b64e",
+    "src/persistence/postgres/config.js": "04b5cb01e800e0f87e6c5941e53926960868451e38cd0fb42376dc274ef41542",
+    "src/persistence/postgres/errors.js": "83725c80e6dc48e1e996db19528074c6291f1ddbd671c2c546ba60e26fc28513",
+    "src/persistence/postgres/migrations.js": "b6cd478b367ab41f6d4677c7cda80aa2800f313e70ecb9f92b06bf1e60119be1",
+    "src/persistence/postgres/pool.js": "f48a4b21572af7bcb9533efbdd03a39ce7da843054fe1d32950ceac05a7d9a27",
+    "src/persistence/postgres/runtime-validation.js": "129e503e52050e978d1bba207500f35d4a388f61ca89cb9174cfd5f1f22b3f1f",
+    "src/persistence/postgres/social-repository.js": "75198b625dc6787842347650fe345a243fd24095eb5f80524cc2277bfeeba076",
+    "src/persistence/postgres/validation.js": "bd2533a154659ece45b860e50dca0e9bd735fdd4be669f6f2aee98f63c49f23f",
+    "src/persistence/postgres/vault-key-registry-admin.js": "f9548f5dfb451ec056e8bfc87e8a9b324b893b60bca72aa9938f1fc82080cdb0",
+    "src/social/auth-adapter.js": "a76760fbaa3872ab061c98730f498c67e3276612a507c96028a15683e196839d",
+    "src/social/credential-service.js": "d34bf8b73b05a6457e12640ebdcb59d927931ee389e1f7eded69f2f7314185d8",
+    "src/social/identity.js": "e45b3dd8d088cd3e9856f984fc0a090830138cbe36ca467bef30523b6a1c8465",
+    "src/social/reauth.js": "22a1a07a95f47992829becfcc08dd366f8d010fcdff83c3e7ca566fc7bfc1d28",
+    "src/social/runtime.js": "fa9dd7760b374881c9304d53602276cfa56a6cd6e32b4756d67418f75ce54370",
+    "src/social/vault.js": "d3689a5a8f343627ee102a081bb5cacfe36d5c5dbf82866c6d79c846262d8bde"
+  }
+}
