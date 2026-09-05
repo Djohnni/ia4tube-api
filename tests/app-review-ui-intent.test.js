@@ -12,9 +12,11 @@ function element() {
     appendChild(value) { this.children.push(value); } };
 }
 
-function harness({ client, storage = new Map() }) {
+function harness({ client, fetchImpl, returnReference = null, storage = new Map() }) {
   const nodes = new Map();
   const listeners = new Map();
+  const navigations = [];
+  const removedSessionKeys = [];
   const root = { ...element(),
     querySelector(selector) {
       if (!nodes.has(selector)) nodes.set(selector, element());
@@ -24,11 +26,15 @@ function harness({ client, storage = new Map() }) {
   };
   const window = {
     IA4_REAL_REVIEWER_ACTIVE: true,
+    IA4_GATE5A_RETURN_REFERENCE: returnReference,
     document: { body: element(), createElement: element },
-    localStorage: { getItem() { return "offline-product-session"; } },
+    localStorage: { getItem() { return "offline-product-session"; },
+      removeItem(key) { removedSessionKeys.push(key); } },
     sessionStorage: { getItem(key) { return storage.get(key); },
       setItem(key, value) { storage.set(key, value); }, removeItem(key) { storage.delete(key); } },
-    location: { hostname: reviewer.STAGING_HOSTNAME },
+    location: { hostname: reviewer.STAGING_HOSTNAME,
+      assign(url) { navigations.push(url); } },
+    fetch: fetchImpl,
     crypto: { randomUUID() { return `58000000-0000-4000-8000-${String(++ordinal).padStart(12, "0")}`; } }
   };
   const app = reviewer.mountRealReviewerApp(root, { window, client });
@@ -42,12 +48,186 @@ function harness({ client, storage = new Map() }) {
       return selector === "[data-real-media-select]";
     } } });
   }
-  return { app, click, select, storage, node: (selector) => root.querySelector(selector) };
+  return { app, click, select, storage, navigations, removedSessionKeys,
+    node: (selector) => root.querySelector(selector) };
 }
 
 const MEDIA = `reviewer-jpeg:${"b".repeat(64)}`;
 const CONNECTION = "58000000-0000-4000-8000-000000000010";
 const tick = () => new Promise((resolve) => setImmediate(resolve));
+
+const RETURN_REFERENCE = "R".repeat(32);
+function returnPayload(status, code = null) {
+  const completed = status === "authorization_completed";
+  return { ok: completed, provider: "instagram", status,
+    connectionId: completed ? CONNECTION : null, code, callbackSanitized: true };
+}
+
+function offlineResponse(payload, status = 200) {
+  return { ok: status >= 200 && status < 300, status,
+    async json() { return structuredClone(payload); } };
+}
+
+function oauthTransport({ result, returnStatus = 200, connectionStatus = 200 }) {
+  const calls = [];
+  const authorizationUrl = new URL("https://www.instagram.com/oauth/authorize");
+  authorizationUrl.search = new URLSearchParams({ enable_fb_login: "0",
+    client_id: "1234567890", response_type: "code", state: "S".repeat(64),
+    redirect_uri: `${reviewer.STAGING_API_ORIGIN}/v1/social/oauth/callback`,
+    scope: "instagram_business_basic,instagram_business_content_publish" }).toString();
+  async function fetchImpl(url, init) {
+    const route = new URL(url).pathname;
+    calls.push({ route, method: init.method, body: init.body, headers: init.headers });
+    if (route.startsWith("/v1/social/oauth/return/")) {
+      return offlineResponse(result, returnStatus);
+    }
+    if (route === "/v1/social/connections/instagram") {
+      const completed = result?.ok === true;
+      return offlineResponse(connectionStatus === 200 ? { ok: true, connection: {
+        connectionId: CONNECTION, provider: "instagram", state: completed ? "connected" : "failed",
+        health: completed ? "healthy" : "failed", username: completed ? "reviewer_own" : null,
+        accountType: completed ? "business" : null
+      } } : { ok: false, code: "resource_unavailable" }, connectionStatus);
+    }
+    if (route === "/v1/social/reviewer/media") return offlineResponse({ ok: true, media: [] });
+    if (route === "/v1/social/reviewer/publications") {
+      return offlineResponse({ ok: true, independentReview: true, publications: [] });
+    }
+    if (route === "/v1/social/connections/instagram/authorization") {
+      return offlineResponse({ ok: true, connectionId: CONNECTION,
+        authorizationUrl: authorizationUrl.href }, 201);
+    }
+    throw new Error(`Unexpected offline route: ${route}`);
+  }
+  return { calls, fetchImpl, authorizationUrl: authorizationUrl.href };
+}
+
+for (const [status, code] of [
+  ["authorization_cancelled", "social_oauth_state_cancelled"],
+  ["authorization_expired", "social_oauth_state_expired"],
+  ["authorization_failed", "social_oauth_exchange_failed"],
+  ["authorization_completed", null]
+]) {
+  test(`real UI loads canonical connection after ${status} and retries only on a click`, async () => {
+    const transport = oauthTransport({ result: returnPayload(status, code) });
+    const h = harness({ fetchImpl: transport.fetchImpl, returnReference: RETURN_REFERENCE });
+    await tick();
+    const state = h.app.getState();
+    assert.equal(state.connectionLoaded, true);
+    assert.equal(state.returnStatus.status, status);
+    assert.equal(state.error, "");
+    assert.deepEqual(state.history, []);
+    assert.deepEqual(h.navigations, []);
+    assert.equal(transport.calls.length, 4);
+    assert.ok(transport.calls.every((call) => call.method === "GET"));
+    assert.ok(transport.calls.every((call) => call.headers.Authorization === "Bearer offline-product-session"));
+    if (status === "authorization_completed") {
+      assert.equal(state.connection.state, "connected");
+      assert.equal(h.node("[data-real-authorize]").hidden, true);
+      h.click("authorize");
+      assert.equal(transport.calls.length, 4);
+      return;
+    }
+    assert.equal(state.connection.state, "failed");
+    assert.equal(reviewer.realReviewerConnectionView(state.connection).purpose, "connect");
+    assert.equal(h.node("[data-real-authorize]").hidden, false);
+    assert.equal(h.node("[data-real-authorize]").disabled, false);
+    assert.equal(h.node('[data-real-action="disconnect"]').disabled, true);
+    h.click("authorize");
+    h.click("authorize");
+    await tick();
+    const writes = transport.calls.filter((call) => call.method !== "GET");
+    assert.equal(writes.length, 1);
+    assert.equal(writes[0].route, "/v1/social/connections/instagram/authorization");
+    assert.deepEqual(JSON.parse(writes[0].body), { purpose: "connect" });
+    assert.deepEqual(h.navigations, [transport.authorizationUrl]);
+  });
+}
+
+test("an unavailable opaque return still reloads the authorized company without automatic retry", async () => {
+  const transport = oauthTransport({
+    result: { ok: false, code: "social_oauth_return_unavailable" }, returnStatus: 404
+  });
+  const h = harness({ fetchImpl: transport.fetchImpl, returnReference: RETURN_REFERENCE });
+  await tick();
+  assert.equal(h.app.getState().connectionLoaded, true);
+  assert.equal(h.app.getState().returnStatus, null);
+  assert.notEqual(h.app.getState().error, "");
+  assert.equal(transport.calls.length, 4);
+  assert.ok(transport.calls.every((call) => call.method === "GET"));
+  assert.deepEqual(h.navigations, []);
+});
+
+test("return authentication failure clears the session and stops bootstrap", async () => {
+  const transport = oauthTransport({
+    result: returnPayload("authorization_cancelled", "social_oauth_state_cancelled"), returnStatus: 401
+  });
+  const h = harness({ fetchImpl: transport.fetchImpl, returnReference: RETURN_REFERENCE });
+  await tick();
+  assert.equal(h.app.getState().connectionLoaded, false);
+  assert.equal(h.app.getState().returnStatus, null);
+  assert.deepEqual(h.removedSessionKeys, ["omascote_token"]);
+  assert.equal(h.node("[data-real-layout]").hidden, true);
+  assert.equal(transport.calls.length, 1);
+  h.click("authorize");
+  assert.equal(transport.calls.length, 1);
+});
+
+test("a terminal return cannot authorize a tenant rejected by the current-connection endpoint", async () => {
+  const transport = oauthTransport({
+    result: returnPayload("authorization_failed", "social_oauth_exchange_failed"), connectionStatus: 403
+  });
+  const h = harness({ fetchImpl: transport.fetchImpl, returnReference: RETURN_REFERENCE });
+  await tick();
+  assert.equal(h.app.getState().connectionLoaded, false);
+  assert.equal(h.app.getState().connection, null);
+  assert.notEqual(h.app.getState().error, "");
+  assert.equal(h.node("[data-real-authorize]").disabled, true);
+  h.click("authorize");
+  assert.equal(transport.calls.length, 2);
+  assert.deepEqual(h.navigations, []);
+});
+
+test("terminal ok:false is accepted only by the strict visual-return endpoint", async () => {
+  const result = returnPayload("authorization_cancelled", "social_oauth_state_cancelled");
+  const client = reviewer.createHttpRealReviewerClient({ apiBase: reviewer.STAGING_API_ORIGIN,
+    tokenProvider: () => "offline-product-session", fetchImpl: async () => offlineResponse(result) });
+  assert.deepEqual(await client.visualReturn(RETURN_REFERENCE), {
+    ok: false, status: "authorization_cancelled", callbackSanitized: true
+  });
+  for (const operation of [() => client.connection(), () => client.media(),
+    () => client.publications(), () => client.authorize("connect")]) {
+    await assert.rejects(operation, { code: "social_oauth_state_cancelled" });
+  }
+  assert.throws(() => client.visualReturn("../invalid"),
+    { code: "reviewer_oauth_return_reference_invalid" });
+});
+
+test("visual return rejects malformed bodies, HTTP failures and missing authentication", async () => {
+  const terminal = returnPayload("authorization_failed", "social_oauth_exchange_failed");
+  for (const payload of [null, { ok: false }, { ...terminal, status: "arbitrary_status" },
+    { ...terminal, provider: "other" }, { ...terminal, callbackSanitized: false },
+    { ...terminal, connectionId: CONNECTION }, { ...terminal, unexpectedField: true },
+    { ...terminal, status: "authorization_completed" }, { ...terminal, ok: true }]) {
+    const client = reviewer.createHttpRealReviewerClient({ apiBase: reviewer.STAGING_API_ORIGIN,
+      tokenProvider: () => "offline-product-session", fetchImpl: async () => offlineResponse(payload) });
+    await assert.rejects(() => client.visualReturn(RETURN_REFERENCE));
+  }
+  for (const status of [401, 403, 404, 503]) {
+    const client = reviewer.createHttpRealReviewerClient({ apiBase: reviewer.STAGING_API_ORIGIN,
+      tokenProvider: () => "offline-product-session",
+      fetchImpl: async () => offlineResponse(terminal, status) });
+    await assert.rejects(() => client.visualReturn(RETURN_REFERENCE), {
+      code: status === 401 ? "reviewer_authentication_required" : "social_oauth_exchange_failed"
+    });
+  }
+  let calls = 0;
+  const client = reviewer.createHttpRealReviewerClient({ apiBase: reviewer.STAGING_API_ORIGIN,
+    tokenProvider: () => "", fetchImpl: async () => { calls += 1; return offlineResponse(terminal); } });
+  await assert.rejects(() => client.visualReturn(RETURN_REFERENCE),
+    { code: "reviewer_authentication_required" });
+  assert.equal(calls, 0);
+});
 
 test("mounted real UI refreshes provider-confirming state without resubmitting the intent", async () => {
   const publications = [];

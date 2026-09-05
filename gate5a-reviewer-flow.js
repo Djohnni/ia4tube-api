@@ -1299,6 +1299,38 @@
     });
   }
 
+  function normalizeOAuthReturnPayload(payload) {
+    const keys = isPlainObject(payload) ? Object.keys(payload).sort() : [];
+    const exactKeys = [
+      "callbackSanitized", "code", "connectionId", "ok", "provider", "status"
+    ];
+    const exactShape = keys.length === exactKeys.length &&
+      keys.every((key, index) => key === exactKeys[index]);
+    const completed = payload?.status === "authorization_completed";
+    const completedShape = completed && payload?.ok === true &&
+      CONNECTION_ID_PATTERN.test(payload?.connectionId || "") &&
+      payload?.code === null;
+    const failureShape = !completed && payload?.ok === false &&
+      payload?.connectionId === null &&
+      SAFE_RETURN_CODE_PATTERN.test(payload?.code || "");
+    if (
+      !exactShape ||
+      payload.provider !== "instagram" ||
+      payload.callbackSanitized !== true ||
+      !VISUAL_RETURN_STATUSES.includes(payload.status) ||
+      (!completedShape && !failureShape)
+    ) {
+      throw Object.assign(new Error("Resposta inválida do retorno OAuth."), {
+        code: "reviewer_oauth_return_response_invalid"
+      });
+    }
+    return Object.freeze({
+      ok: payload.ok,
+      status: payload.status,
+      callbackSanitized: true
+    });
+  }
+
   function createOAuthReturnClient(options = {}) {
     const apiBase = safeString(options.apiBase, "", 300);
     const fetchImpl = options.fetchImpl;
@@ -1336,40 +1368,7 @@
           code: "reviewer_oauth_return_unavailable"
         });
       }
-      const keys = isPlainObject(payload) ? Object.keys(payload).sort() : [];
-      const exactKeys = [
-        "callbackSanitized",
-        "code",
-        "connectionId",
-        "ok",
-        "provider",
-        "status"
-      ];
-      const exactShape = keys.length === exactKeys.length &&
-        keys.every((key, index) => key === exactKeys[index]);
-      const completed = payload?.status === "authorization_completed";
-      const completedShape = completed && payload?.ok === true &&
-        CONNECTION_ID_PATTERN.test(payload?.connectionId || "") &&
-        payload?.code === null;
-      const failureShape = !completed && payload?.ok === false &&
-        payload?.connectionId === null &&
-        SAFE_RETURN_CODE_PATTERN.test(payload?.code || "");
-      if (
-        !exactShape ||
-        payload.provider !== "instagram" ||
-        payload.callbackSanitized !== true ||
-        !VISUAL_RETURN_STATUSES.includes(payload.status) ||
-        (!completedShape && !failureShape)
-      ) {
-        throw Object.assign(new Error("Resposta inválida do retorno OAuth."), {
-          code: "reviewer_oauth_return_response_invalid"
-        });
-      }
-      return Object.freeze({
-        ok: payload.ok,
-        status: payload.status,
-        callbackSanitized: true
-      });
+      return normalizeOAuthReturnPayload(payload);
     }
 
     return Object.freeze({ getStatus });
@@ -1460,7 +1459,12 @@
           code: "reviewer_authentication_required"
         });
       }
-      if (!response.ok || !isPlainObject(payload) || payload.ok !== true) {
+      const visualReturn = requestOptions.visualReturn === true &&
+        method === "GET" && body === undefined &&
+        suffix.startsWith(`${OAUTH_RETURN_PREFIX}/`) &&
+        RETURN_REFERENCE_PATTERN.test(suffix.slice(OAUTH_RETURN_PREFIX.length + 1));
+      if (!response.ok || !isPlainObject(payload) ||
+          (!visualReturn && payload.ok !== true)) {
         throw Object.assign(new Error(
           response.status === 503
             ? "Esta ação real permanece bloqueada pelo gate de segurança."
@@ -1469,7 +1473,7 @@
           code: safeString(payload?.code, "real_reviewer_request_failed", 100)
         });
       }
-      return payload;
+      return visualReturn ? normalizeOAuthReturnPayload(payload) : payload;
     }
 
     function requireConnectionPayload(payload, optional) {
@@ -1517,9 +1521,15 @@
     return Object.freeze({
       connection,
       authorize,
-      visualReturn: (reference) => request(
-        `${OAUTH_RETURN_PREFIX}/${encodeURIComponent(reference)}`
-      ),
+      visualReturn(reference) {
+        if (!RETURN_REFERENCE_PATTERN.test(String(reference || ""))) {
+          throw Object.assign(new Error("Referência do retorno OAuth inválida."), {
+            code: "reviewer_oauth_return_reference_invalid"
+          });
+        }
+        return request(`${OAUTH_RETURN_PREFIX}/${reference}`,
+          "GET", undefined, { visualReturn: true });
+      },
       media: () => request(`${REAL_REVIEWER_PREFIX}/media`),
       uploadMedia: (jpeg, caption) => {
         const FormDataImpl = options.FormDataImpl ||
@@ -1606,6 +1616,18 @@
         title: "Instagram conectado",
         message: "A conta profissional já está conectada a esta empresa.",
         button: null
+      });
+    }
+    if (connection.state === "failed") {
+      return Object.freeze({
+        purpose: "connect",
+        connected: false,
+        status: "Autorização não concluída",
+        badge: "Tentar novamente",
+        nav: "2. Conectar Instagram",
+        title: "Conectar Instagram",
+        message: "Você pode iniciar uma nova autorização pelo botão abaixo.",
+        button: "Tentar conectar novamente"
       });
     }
     if (
@@ -2401,10 +2423,17 @@
     render();
     if (token) {
       run(async () => {
+        let returnError = null;
         if (returnReference) {
-          state.returnStatus = await client.visualReturn(returnReference);
+          try {
+            state.returnStatus = await client.visualReturn(returnReference);
+          } catch (error) {
+            if (error?.code === "reviewer_authentication_required") throw error;
+            returnError = error;
+          }
         }
         await refresh();
+        if (returnError) throw returnError;
       }, returnReference ? "oauth-return" : state.stage);
     }
     return Object.freeze({
