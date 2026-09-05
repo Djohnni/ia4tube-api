@@ -23,6 +23,7 @@ firebase-admin*.json
 
 # Artefatos locais e configuracao Firebase do build Android.
 app_mobile/android/.gradle/
+app_mobile/android/.kotlin/
 app_mobile/android/build/
 app_mobile/android/app/build/
 app_mobile/android/app/google-services.json

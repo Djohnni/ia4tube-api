@@ -99,6 +99,10 @@ import br.com.ia4tube.app.feature.home.PremiumHomeTheme
 import br.com.ia4tube.app.feature.home.HomeViewModel
 import br.com.ia4tube.app.feature.home.HomeViewModelFactory
 import br.com.ia4tube.app.feature.home.premiumHomePalette
+import br.com.ia4tube.app.feature.instagram.AndroidInstagramPublicationIntentStore
+import br.com.ia4tube.app.feature.instagram.InstagramScreen
+import br.com.ia4tube.app.feature.instagram.InstagramViewModel
+import br.com.ia4tube.app.feature.instagram.InstagramViewModelFactory
 import br.com.ia4tube.app.feature.monthly_planning.MonthlyPlanningDetailScreen
 import br.com.ia4tube.app.feature.monthly_planning.MonthlyPlanningResultsScreen
 import br.com.ia4tube.app.feature.monthly_planning.MonthlyPlanningScreen
@@ -179,6 +183,9 @@ fun IA4TubeNavHost(
     }
     val monthlyPlanningCalendarCacheStore = remember {
         MonthlyPlanningCalendarCacheStore(context)
+    }
+    val instagramIntentStore = remember {
+        AndroidInstagramPublicationIntentStore(context)
     }
     val analyticsTracker = remember {
         MobileAnalyticsTracker(
@@ -448,6 +455,9 @@ fun IA4TubeNavHost(
                     MobileAnalytics.track("mobile_planejamento_mensal_abriu", tela = "home", produto = "planejamento_mensal")
                     navigateProtected(Routes.MonthlyPlanning)
                 },
+                onOpenInstagram = {
+                    navigateProtected(Routes.Instagram)
+                },
                 onOpenPlans = {
                     MobileAnalytics.track("mobile_planos_abriu", tela = "home")
                     navigateProtected(Routes.Plans)
@@ -477,6 +487,25 @@ fun IA4TubeNavHost(
                     requestAuthFor(PENDING_CAMERA_ACTION)
                 }
             )
+        }
+
+        composable(Routes.Instagram) {
+            if (!hasSavedToken()) {
+                LaunchedEffect(Unit) {
+                    requestAuthFor(Routes.Instagram)
+                }
+            } else {
+                val viewModel: InstagramViewModel = viewModel(
+                    factory = InstagramViewModelFactory(
+                        tokenProvider = repository::getSavedToken,
+                        intentStore = instagramIntentStore
+                    )
+                )
+                InstagramScreen(
+                    viewModel = viewModel,
+                    onBack = { navController.popBackStack() }
+                )
+            }
         }
 
         composable(Routes.Carousel) {

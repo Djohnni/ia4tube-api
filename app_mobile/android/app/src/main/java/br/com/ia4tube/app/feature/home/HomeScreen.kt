@@ -5,6 +5,7 @@ import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.border
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.clickable
@@ -31,6 +32,7 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -86,6 +88,7 @@ fun HomeScreen(
     onCreateArtFromPhoto: (String) -> Unit,
     onOpenCarousel: () -> Unit,
     onOpenMonthlyPlanning: () -> Unit,
+    onOpenInstagram: () -> Unit,
     onOpenPlans: () -> Unit,
     onCompanyProfile: () -> Unit,
     onSupport: () -> Unit,
@@ -151,6 +154,36 @@ fun HomeScreen(
                 .padding(top = 14.dp),
                 verticalArrangement = Arrangement.Top
             ) {
+                Button(
+                    onClick = onOpenInstagram,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 12.dp, vertical = 8.dp),
+                    shape = RoundedCornerShape(18.dp),
+                    border = BorderStroke(1.dp, homePalette.primaryBorder),
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = homePalette.cameraBackground,
+                        contentColor = homePalette.textPrimary
+                    )
+                ) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 8.dp),
+                        horizontalAlignment = Alignment.Start
+                    ) {
+                        Text(
+                            text = "Instagram",
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.Bold
+                        )
+                        Text(
+                            text = "Conectar conta profissional e publicar uma imagem",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = homePalette.textSecondary
+                        )
+                    }
+                }
                 FuturisticHomePanel(
                     state = state,
                     palette = homePalette,
