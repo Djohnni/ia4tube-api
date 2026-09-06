@@ -10,6 +10,10 @@ const {
 } = require("./config");
 const { postgresFail } = require("./errors");
 const {
+  INITIAL_PRODUCTION_APPROVAL, assertInitialProductionTarget,
+  validateInitialProductionRequest, initialRecoveryDecision
+} = require("./initial-production-recovery-exception");
+const {
   BINDING_MIGRATION, BINDING_PROFILE, BINDING_SQL_SHA256,
   bindingPoliciesMatch, verifyPublicationBindingSchema
 } = require("./publication-binding-schema");
@@ -2297,8 +2301,8 @@ async function verifyReferenceCheckSemantics(client, catalog) {
   return true;
 }
 
-async function ensureLedger(client, ownerRole, migratorRole) {
-  await client.query("BEGIN");
+async function ensureLedger(client, ownerRole, migratorRole, { withinTransaction = false } = {}) {
+  if (!withinTransaction) await client.query("BEGIN");
   try {
     await client.query(`SET LOCAL ROLE ${quoteIdentifier(ownerRole)}`);
     await client.query(
@@ -2473,8 +2477,9 @@ async function ensureLedger(client, ownerRole, migratorRole) {
         "ACL por coluna do ledger de migrations recusada."
       );
     }
-    await client.query("COMMIT");
+    if (!withinTransaction) await client.query("COMMIT");
   } catch (error) {
+    if (withinTransaction) throw error;
     try {
       await client.query("ROLLBACK");
     } catch (rollbackError) {
@@ -3667,11 +3672,16 @@ async function applyStagingExactWithinTransaction(
   }
 }
 
-function validatePreparationStepRequest(request, local, { production = true } = {}) {
+function assertPreparationManifest(local) {
   const versions = [...COMPLIANCE_TARGET_MIGRATIONS, BINDING_MIGRATION, OFFICIAL_OWNER_MIGRATION];
   if (!Array.isArray(local) || ![7, 8].includes(local.length) || local.some((entry, index) =>
     entry.version !== versions[index] || entry.sha256 !== PREPARATION_SQL_PINS[index]
   )) postgresFail("migration_preparation_manifest_mismatch", "Manifesto da preparacao divergente.");
+  return versions;
+}
+
+function validatePreparationStepRequest(request, local, { production = true, initialRecoveryException = false } = {}) {
+  const versions = assertPreparationManifest(local);
   const index = Array.isArray(request?.expectedApplied) ? request.expectedApplied.length : -1;
   if (index < 0 || index >= local.length || !exactArrayMatches(request.expectedApplied, versions.slice(0, index)) ||
       request.migration !== versions[index] || request.migrationSha256 !== PREPARATION_SQL_PINS[index] ||
@@ -3679,9 +3689,14 @@ function validatePreparationStepRequest(request, local, { production = true } = 
       request.toProfile !== `social-schema-${String(index + 1).padStart(4, "0")}`) {
     postgresFail("migration_preparation_step_invalid", "Passo de migration divergente.");
   }
+  if (initialRecoveryException) {
+    if (!production || local.length !== 8) postgresFail("migration_initial_manifest_invalid", "Manifesto inicial deve encerrar em 0008.");
+    validateInitialProductionRequest(request);
+  }
+  const evidenceDigests = [request.beforeCatalogSha256, request.afterCatalogSha256, request.executionPackageDigest];
+  if (!initialRecoveryException) evidenceDigests.push(request.recoveryEvidenceDigest);
   if (production && (request.resourceId !== PREPARATION_PRODUCTION_TARGET.resourceId ||
-      ![request.beforeCatalogSha256, request.afterCatalogSha256, request.recoveryEvidenceDigest,
-        request.executionPackageDigest].every((value) => typeof value === "string" && /^[0-9a-f]{64}$/.test(value)))) {
+      !evidenceDigests.every((value) => typeof value === "string" && /^[0-9a-f]{64}$/.test(value)))) {
     postgresFail("migration_preparation_evidence_required", "Evidencia de preparacao obrigatoria.");
   }
   return Object.freeze({
@@ -3689,7 +3704,11 @@ function validatePreparationStepRequest(request, local, { production = true } = 
     expectedApplied: Object.freeze([...request.expectedApplied]),
     fromProfile: request.fromProfile, toProfile: request.toProfile,
     beforeCatalogSha256: request.beforeCatalogSha256, afterCatalogSha256: request.afterCatalogSha256,
-    recoveryEvidenceDigest: request.recoveryEvidenceDigest, executionPackageDigest: request.executionPackageDigest
+    ...(initialRecoveryException ? {
+      initialAuthorizationId: request.initialAuthorizationId,
+      initialAuthorizationSha256: request.initialAuthorizationSha256
+    } : { recoveryEvidenceDigest: request.recoveryEvidenceDigest }),
+    executionPackageDigest: request.executionPackageDigest
   });
 }
 
@@ -3733,7 +3752,7 @@ function createMigrationRunner(options = {}) {
     );
   }
 
-  async function preparationGate(client, local, request, count, production) {
+  async function preparationSessionGate(client, production) {
     const identity = await client.query(`SELECT current_database() = $1 AND session_user = $2 AS target_exact,
       current_setting('server_version_num')::integer >= 180000 AND
       current_setting('server_version_num')::integer < 190000 AS postgres_18,
@@ -3747,6 +3766,10 @@ function createMigrationRunner(options = {}) {
     await verifyMigrationInfrastructure(client, migratorRole, ownerRole);
     await client.query(`SET LOCAL ROLE ${quoteIdentifier(migratorRole)}`);
     assertTargetMarker(await readTargetMarker(client), target);
+  }
+
+  async function preparationGate(client, local, request, count, production) {
+    await preparationSessionGate(client, production);
     await verifyExistingLedgerContract(client, ownerRole, migratorRole);
     const status = assertPreparationLedger(local, await readAppliedMigrations(client), count);
     const catalogSha256 = stagingExactCatalogDigest(await readStagingExactCatalogSnapshot(client));
@@ -3762,17 +3785,18 @@ function createMigrationRunner(options = {}) {
     return Object.freeze({ status, catalogSha256, profile: `social-schema-${String(count).padStart(4, "0")}` });
   }
 
-  async function runPreparationStep(rawRequest, env, { production, write, localIndex = 6 }) {
+  async function runPreparationStep(rawRequest, env, { production, write, localIndex = 6, initialRecoveryException = false }) {
     const local = readManifest(manifestOptions);
-    const request = validatePreparationStepRequest(rawRequest, local, { production });
-    if (production) assertPreparationProductionTarget(target, env);
+    const request = validatePreparationStepRequest(rawRequest, local, { production, initialRecoveryException });
+    if (initialRecoveryException) assertInitialProductionTarget(target, env, targetFingerprint(target || {}));
+    else if (production) assertPreparationProductionTarget(target, env);
     else {
       assertMigrationTarget(target, env);
       assertExactDisposableTarget(target);
       if (request.index !== localIndex) postgresFail("migration_binding_step_only", "Rota descartavel restrita ao passo nomeado.");
     }
-    if (write) assertApplyTarget(target, env);
-    if (production && write) {
+    if (write && !initialRecoveryException) assertApplyTarget(target, env);
+    if (production && write && !initialRecoveryException) {
       // A digest/boolean from an HTTP caller is NOT recovery proof. Only the
       // operator's independently reviewed verifier may authenticate its private evidence.
       if (typeof options.verifyPreparationRecovery !== "function") {
@@ -3798,7 +3822,8 @@ function createMigrationRunner(options = {}) {
       return await withAdvisoryLock(client, async () => {
         if (!write) return runExactReadOnlyTransaction(client, async () => {
           const before = await preparationGate(client, local, request, request.index, production);
-          return Object.freeze({ readOnly: true, applyAuthorized: false, ...request, observedCatalogSha256: before.catalogSha256 });
+          return Object.freeze({ readOnly: true, applyAuthorized: false, ...request, observedCatalogSha256: before.catalogSha256,
+            ...(initialRecoveryException ? { recoveryDecision: initialRecoveryDecision() } : {}) });
         });
         await client.query("BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ");
         let commitAttempted = false;
@@ -3832,7 +3857,8 @@ function createMigrationRunner(options = {}) {
           preparationGate(client, local, request, request.index + 1, production));
         return Object.freeze({ appliedMigration: request.migration, migrationSha256: request.migrationSha256,
           fromProfile: before.profile, finalProfile: after.profile, finalCatalogSha256: finalGate.catalogSha256,
-          postCommitValidated: true, retryAllowed: false });
+          postCommitValidated: true, retryAllowed: false,
+          ...(initialRecoveryException ? { recoveryDecision: initialRecoveryDecision() } : {}) });
       });
     } catch (error) {
       if (commitCompleted) Object.assign(error, { applied: true, retryAllowed: false, requiresReadOnlyInspection: true });
@@ -3843,10 +3869,84 @@ function createMigrationRunner(options = {}) {
 
   const planProductionStep = (request, env = process.env) => runPreparationStep(request, env, { production: true, write: false });
   const applyProductionStep = (request, env = process.env) => runPreparationStep(request, env, { production: true, write: true });
+  const planInitialProductionStep = (request, env = process.env) => runPreparationStep(request, env, { production: true, write: false, initialRecoveryException: true });
+  const applyInitialProductionStep = (request, env = process.env) => runPreparationStep(request, env, { production: true, write: true, initialRecoveryException: true });
   const planPublicationBinding = (request, env = process.env) => runPreparationStep(request, env, { production: false, write: false });
   const applyPublicationBinding = (request, env = process.env) => runPreparationStep(request, env, { production: false, write: true });
   const planOfficialOwnerProvisioning = (request, env = process.env) => runPreparationStep(request, env, { production: false, write: false, localIndex: 7 });
   const applyOfficialOwnerProvisioning = (request, env = process.env) => runPreparationStep(request, env, { production: false, write: true, localIndex: 7 });
+
+  async function initialLedgerGate(client, request) {
+    await preparationSessionGate(client, true);
+    const absent = await client.query(`SELECT
+      pg_catalog.to_regclass($1) IS NULL AS ledger_absent,
+      NOT EXISTS (SELECT 1 FROM pg_catalog.pg_namespace WHERE nspname = 'ia4tube_social') AS social_schema_absent,
+      NOT EXISTS (SELECT 1 FROM pg_catalog.pg_class c
+        JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+        WHERE n.nspname !~ '^pg_' AND n.nspname <> 'information_schema'
+          AND NOT (n.nspname = 'ia4tube_migrations' AND
+            (c.relname = 'environment_identity' OR c.relkind = 'i'))) AS other_relations_absent`, [LEDGER_NAME]);
+    if (absent.rows?.length !== 1 || absent.rows[0].ledger_absent !== true ||
+        absent.rows[0].social_schema_absent !== true || absent.rows[0].other_relations_absent !== true) {
+      postgresFail("migration_initial_ledger_not_absent", "Bootstrap inicial exige catalogo anterior ao ledger.");
+    }
+    const catalogSha256 = stagingExactCatalogDigest(await readStagingExactCatalogSnapshot(client));
+    if (catalogSha256 !== request.beforeCatalogSha256) {
+      postgresFail("migration_preparation_catalog_mismatch", "Catalogo inicial diverge do plano aprovado.");
+    }
+    return Object.freeze({ catalogSha256 });
+  }
+
+  async function runInitialProductionLedger(rawRequest, env, { write }) {
+    const request = validateInitialProductionRequest(rawRequest, { ledger: true });
+    assertInitialProductionTarget(target, env, targetFingerprint(target || {}));
+    const local = readManifest(manifestOptions);
+    assertPreparationManifest(local);
+    if (local.length !== 8) postgresFail("migration_initial_manifest_invalid", "Manifesto inicial deve encerrar em 0008.");
+    const client = await pool.connect();
+    let releaseError, commitCompleted = false;
+    try {
+      return await withAdvisoryLock(client, async () => {
+        if (!write) return runExactReadOnlyTransaction(client, async () => {
+          const before = await initialLedgerGate(client, request);
+          return Object.freeze({ readOnly: true, applyAuthorized: false, operation: "initial-ledger-plan",
+            ...request, observedCatalogSha256: before.catalogSha256, recoveryDecision: initialRecoveryDecision() });
+        });
+        await client.query("BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ");
+        let commitAttempted = false;
+        try {
+          await initialLedgerGate(client, request);
+          // Reuse the canonical DDL and exact ACL validator, under this single
+          // transaction; an existing ledger is refused before any CREATE/ACL.
+          await ensureLedger(client, ownerRole, migratorRole, { withinTransaction: true });
+          await preparationGate(client, local, { ...request, index: -1 }, 0, true);
+          commitAttempted = true;
+          try { await client.query("COMMIT"); commitCompleted = true; }
+          catch (cause) {
+            const failure = new Error("migration_preparation_commit_outcome_unknown");
+            Object.assign(failure, { code: failure.message, cause, outcomeUnknown: true, retryAllowed: false,
+              requiresReadOnlyInspection: true, discardClient: true, skipAdvisoryUnlock: true });
+            throw failure;
+          }
+        } catch (error) {
+          if (!commitAttempted) await rollbackExactTransaction(client, error);
+          throw error;
+        }
+        const finalGate = await runExactReadOnlyTransaction(client, () =>
+          preparationGate(client, local, { ...request, index: -1 }, 0, true));
+        return Object.freeze({ operation: "initial-ledger-initialized", finalProfile: finalGate.profile,
+          finalCatalogSha256: finalGate.catalogSha256, appliedMigrations: Object.freeze([]),
+          postCommitValidated: true, retryAllowed: false, recoveryDecision: initialRecoveryDecision() });
+      });
+    } catch (error) {
+      if (commitCompleted) Object.assign(error, { applied: true, retryAllowed: false, requiresReadOnlyInspection: true });
+      if (error?.discardClient) releaseError = error;
+      throw error;
+    } finally { client.release(releaseError); }
+  }
+
+  const planInitialProductionLedger = (request, env = process.env) => runInitialProductionLedger(request, env, { write: false });
+  const initializeInitialProductionLedger = (request, env = process.env) => runInitialProductionLedger(request, env, { write: true });
 
   async function inspect() {
     const local = readManifest(manifestOptions);
@@ -4506,6 +4606,10 @@ function createMigrationRunner(options = {}) {
     apply,
     planProductionStep,
     applyProductionStep,
+    planInitialProductionStep,
+    applyInitialProductionStep,
+    planInitialProductionLedger,
+    initializeInitialProductionLedger,
     planPublicationBinding,
     applyPublicationBinding,
     planOfficialOwnerProvisioning,
@@ -4524,6 +4628,7 @@ function createMigrationRunner(options = {}) {
 }
 
 module.exports = {
+  INITIAL_PRODUCTION_APPROVAL,
   BINDING_MIGRATION,
   BINDING_PROFILE,
   BINDING_SQL_SHA256,
