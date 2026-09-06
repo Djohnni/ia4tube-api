@@ -1,0 +1,138 @@
+{
+  "format": "ia4tube-synthetic-linux-v1",
+  "expectedParent": "b1d7ebcbab284a371c784a85bd7c545944e54d8e",
+  "realDataIncluded": false,
+  "original14Preserved": true,
+  "files": [
+    {
+      "path": ".dockerignore",
+      "sha256": "3eaa614096eb0d048a7095c83620882bb762b86a56af7505aabbf0987a9fef87",
+      "bytes": 98
+    },
+    {
+      "path": ".gitattributes",
+      "sha256": "3f412dc004713a1ec441726e5d8779e33af5288a14f6ec5ec3d42ad09fdda350",
+      "bytes": 82
+    },
+    {
+      "path": "Dockerfile",
+      "sha256": "8f9ac59f985e6b5a813a012cead6a850320d4e93e4e128c10e65502f62f9c811",
+      "bytes": 588
+    },
+    {
+      "path": "overlay/package-lock.json",
+      "sha256": "404faae1728262035305e6a6b7a8bdeacf91a884d8ba0ec0fcc9b16e419a1ae9",
+      "bytes": 59606
+    },
+    {
+      "path": "overlay/package.json",
+      "sha256": "4be35bcb865c9be8d9f546ff114da24b5a23fe24cee4ea75929566ceb261aca1",
+      "bytes": 357
+    },
+    {
+      "path": "overlay/server.js",
+      "sha256": "a087662bf2301391146df9fd0076d2d6cbe94284dfc1170f1276aa610ab3c30f",
+      "bytes": 232721
+    },
+    {
+      "path": "overlay/src/maintenance/capture-prompt.js",
+      "sha256": "48e2523d3d74a8aed65e049edbda28aa1426e118022316e07baf3a59fcb7172a",
+      "bytes": 5874
+    },
+    {
+      "path": "overlay/src/maintenance/capture-supervisor.js",
+      "sha256": "4ff4ac49bb0f1d8e7f9f42be6e308846efd3cad8b72427c5c0a6055ff0a9d5ba",
+      "bytes": 8697
+    },
+    {
+      "path": "overlay/src/maintenance/capture-worker.js",
+      "sha256": "5da2ebb3f546863804de0ce78a40db8dd3b76e969628cd55a56b703312dc8a52",
+      "bytes": 15564
+    },
+    {
+      "path": "overlay/src/maintenance/local-control.js",
+      "sha256": "993b5f521d3cc24f4700e11a77052fadbb6b530f4ee5d5631bdd59bcf634b078",
+      "bytes": 15089
+    },
+    {
+      "path": "overlay/src/maintenance/pause-cli.js",
+      "sha256": "445f4a7b2f03ba962c2ee11b0f1358bf3377c746dbe6589b5c134b537c82c197",
+      "bytes": 4201
+    },
+    {
+      "path": "overlay/src/maintenance/pause-controller.js",
+      "sha256": "0882981a53db3f45b7e4f7cc9fda3f69ce1cdf51451d139a90b29e8feb03aa8a",
+      "bytes": 9376
+    },
+    {
+      "path": "overlay/src/maintenance/pause-marker.js",
+      "sha256": "ec530d48af0a15c9240b37dfe515d41cdc669c423966569b80bd71ed219cc353",
+      "bytes": 5139
+    },
+    {
+      "path": "overlay/src/maintenance/pause-runtime.js",
+      "sha256": "053f3c40ace5f3f43b80f89cc29d950afa7a0b176eb8fd8c13c34c9b97e56dc0",
+      "bytes": 5896
+    },
+    {
+      "path": "overlay/src/maintenance/recovery/encrypted-backup-bundle.js",
+      "sha256": "3f6828d2aa08ba65f1dd526396af4564d78f6152628d719130d5a7e9f1f353d7",
+      "bytes": 50575
+    },
+    {
+      "path": "overlay/src/maintenance/recovery/errors.js",
+      "sha256": "37f2eb66b8ca816808fb59e799a794089668877addce43eadcbff994f120afe8",
+      "bytes": 456
+    },
+    {
+      "path": "overlay/src/maintenance/remote-work-fence.js",
+      "sha256": "724368a3a9d6fbcdc71872d6bb6ffab659ebe6b8120a3687344601ff05599d10",
+      "bytes": 10056
+    },
+    {
+      "path": "PAUSE_INSTALL_MANIFEST.json",
+      "sha256": "c57ef76fb2d6d5b429ec0eed707992bb49339f61a14c41e08f7c796ed2f1179e",
+      "bytes": 3794
+    },
+    {
+      "path": "PAUSE_INSTALL.patch",
+      "sha256": "966262edf9999bbba8b143ce312c8aa2d6eaa66fc78135c3e3d8ddc8e4272222",
+      "bytes": 141487
+    },
+    {
+      "path": "README.md",
+      "sha256": "1e1b5d91358c1545f7219c5f2cf7e98f24b0aec8665c31265560f623263cdb8a",
+      "bytes": 1872
+    },
+    {
+      "path": "tests/fixtures/control-host.js",
+      "sha256": "9d32ad48dc0aa95e69afa408f6bd826500d89d97e72b53caa9f9793a770d012d",
+      "bytes": 4041
+    },
+    {
+      "path": "tests/fixtures/posix-evidence.js",
+      "sha256": "5daf8276934372350bff8d7cb4b66ebcc2e5e5a03a742ff6508ab7348aaf4a05",
+      "bytes": 17319
+    },
+    {
+      "path": "tests/fixtures/process-evidence.js",
+      "sha256": "4ea46aea1d3ecbdbabbb3aa3511c18672446348d7e35da74b04bd19b2919f6ab",
+      "bytes": 13602
+    },
+    {
+      "path": "tests/linux-physical.test.js",
+      "sha256": "cd40c9e9bc94ace35ee1c3e5aba4fe9056361cb868d484387471843b2a3a18b3",
+      "bytes": 26762
+    },
+    {
+      "path": "tests/posix-evidence.test.js",
+      "sha256": "1450b531f99d06c71e253dd6d84eaa5e9a1ef5d684a4b2a05a6f3a8de987af95",
+      "bytes": 6150
+    },
+    {
+      "path": "verify-package.js",
+      "sha256": "6359bebd53004d66708456d48214674d962ebb38f82ce526150f60b7563bab4d",
+      "bytes": 3532
+    }
+  ]
+}

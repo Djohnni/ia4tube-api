@@ -1,0 +1,10 @@
+*
+!Dockerfile
+!overlay/
+!overlay/**
+!tests/
+!tests/**
+**/node_modules
+**/.env*
+**/*.dump
+**/*.mp4

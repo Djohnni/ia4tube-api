@@ -1,0 +1,75 @@
+name: Synthetic DATA_DIR pause - physical Linux
+
+on:
+  push:
+    branches: [validation/data-dir-pause-linux-20260906]
+
+permissions:
+  contents: read
+
+jobs:
+  physical-pause:
+    if: github.repository == 'Djohnni/ia4tube-api' && github.event_name == 'push' && github.event.forced == false && github.ref == 'refs/heads/validation/data-dir-pause-linux-20260906'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    env:
+      LAB_IMAGE: ia4tube-pause-synthetic:${{ github.run_id }}-${{ github.run_attempt }}
+      LAB_CONTAINER: ia4tube-pause-synthetic-${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - name: Checkout exact pushed candidate
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 2
+          persist-credentials: false
+
+      - name: Verify exact reviewed package and non-deploy scope
+        shell: bash
+        run: |
+          set -euo pipefail
+          node validation/data-dir-pause/verify-package.js
+          test "$(git status --porcelain)" = ""
+
+      - name: Build disposable dependency image
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker build --pull --no-cache --label ia4tube.synthetic-run="$GITHUB_RUN_ID" -t "$LAB_IMAGE" validation/data-dir-pause
+          docker image inspect "$LAB_IMAGE" --format 'SYNTHETIC_IMAGE_ID={{.Id}}'
+
+      - name: Record runtime and run physical synthetic tests without network
+        shell: bash
+        run: |
+          set -euo pipefail
+          timeout --signal=TERM --kill-after=30s 900s docker run --init --rm \
+            --name "$LAB_CONTAINER" --label ia4tube.synthetic-run="$GITHUB_RUN_ID" \
+            --network none --read-only --cap-drop ALL \
+            --cap-add CHOWN --cap-add FOWNER --cap-add SETUID --cap-add SETGID \
+            --security-opt no-new-privileges \
+            --memory 2g --cpus 2 --pids-limit 256 \
+            --tmpfs /var/data:rw,nosuid,nodev,noexec,size=2147483648,mode=0700 \
+            --tmpfs /tmp:rw,nosuid,nodev,noexec,size=536870912,mode=1777 \
+            "$LAB_IMAGE" sh -eu -c '
+              node --version
+              /usr/bin/tar --version
+              dpkg-query -W libc6 tar acl attr coreutils
+              sha256sum /usr/bin/tar
+              node --test --test-concurrency=1 tests/linux-physical.test.js
+            '
+
+      - name: Clean up only this job container and image
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          if docker container inspect "$LAB_CONTAINER" >/dev/null 2>&1; then
+            test "$(docker inspect --format '{{index .Config.Labels "ia4tube.synthetic-run"}}' "$LAB_CONTAINER")" = "$GITHUB_RUN_ID"
+            docker rm -f "$LAB_CONTAINER"
+          fi
+          if docker image inspect "$LAB_IMAGE" >/dev/null 2>&1; then
+            test "$(docker image inspect --format '{{index .Config.Labels "ia4tube.synthetic-run"}}' "$LAB_IMAGE")" = "$GITHUB_RUN_ID"
+            docker image rm "$LAB_IMAGE"
+          fi
+          ! docker container inspect "$LAB_CONTAINER" >/dev/null 2>&1
+          ! docker image inspect "$LAB_IMAGE" >/dev/null 2>&1
+          echo 'SYNTHETIC_RESOURCES_REMOVED=true; REAL_DATA_USED=false; ARTIFACTS_UPLOADED=false'

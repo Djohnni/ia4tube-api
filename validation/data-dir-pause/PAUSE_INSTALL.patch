@@ -1,0 +1,3464 @@
+diff --git a/package-lock.json b/package-lock.json
+index bd2b830..4c6345d 100644
+--- a/package-lock.json
++++ b/package-lock.json
+@@ -13,7 +13,8 @@
+         "cors": "^2.8.5",
+         "express": "^4.19.2",
+         "jsonwebtoken": "^9.0.2",
+-        "multer": "^1.4.5-lts.1"
++        "multer": "^1.4.5-lts.1",
++        "tar-stream": "3.2.0"
+       }
+     },
+     "node_modules/abort-controller": {
+diff --git a/package.json b/package.json
+index de523ce..6570d63 100644
+--- a/package.json
++++ b/package.json
+@@ -12,6 +12,7 @@
+     "cors": "^2.8.5",
+     "express": "^4.19.2",
+     "jsonwebtoken": "^9.0.2",
+-    "multer": "^1.4.5-lts.1"
++    "multer": "^1.4.5-lts.1",
++    "tar-stream": "3.2.0"
+   }
+ }
+diff --git a/server.js b/server.js
+index db30899..648360d 100644
+--- a/server.js
++++ b/server.js
+@@ -1,3 +1,6 @@
++require("./src/maintenance/pause-marker").assertNoUnfinishedPause({
++  dataDir: process.env.DATA_DIR || require("node:path").join(__dirname, "dados")
++});
+ const express = require("express");
+ const cors = require("cors");
+ const fs = require("fs");
+@@ -50,6 +53,13 @@ const seoNichePages = require("./src/seo/niche-page-renderer");
+ 
+ const app = express();
+ app.set("trust proxy", true);
++const { createPauseRuntime } = require("./src/maintenance/pause-runtime");
++const pauseFlag = process.env.DATA_DIR_PAUSE_ENABLED;
++if (pauseFlag !== undefined && pauseFlag !== "false" && pauseFlag !== "true") {
++  throw new Error("pause_configuration_invalid");
++}
++const dataDirPause = createPauseRuntime({ enabled: pauseFlag === "true" });
++app.use(dataDirPause.admission);
+ 
+ // ===== CONFIG BÁSICA =====
+ const PORT = process.env.PORT || 3000;
+@@ -2480,7 +2490,7 @@ function sendClientPushAsync(whatsapp, tipo, payload = {}) {
+ 
+     const sender = fcmSenderForType(tipo);
+     const invalidTokens = [];
+-    sender(cliente, payload, {
++    dataDirPause.detached("fcm-status", () => sender(cliente, payload, {
+       onInvalidToken: (token) => invalidTokens.push(token)
+     })
+       .then((result) => {
+@@ -2510,7 +2520,7 @@ function sendClientPushAsync(whatsapp, tipo, payload = {}) {
+           type: String(tipo || ""),
+           message: error?.message
+         });
+-      });
++      }));
+   } catch (error) {
+     console.warn("[fcm] falha ao preparar push", {
+       type: String(tipo || ""),
+@@ -6274,8 +6284,8 @@ app.post(
+             }
+           });
+           if (artReadyCompletion) {
+-            setImmediate(() => {
+-              artReadyNotificationService
++            dataDirPause.deferred("art-ready", () => {
++              return artReadyNotificationService
+                 .handleCompletion(artReadyCompletion)
+                 .then((result) => {
+                   console.log("[fcm][art-ready] processamento concluido", {
+@@ -7306,25 +7316,39 @@ app.use((err, req, res, next) => {
+   });
+ });
+ 
++function startLegacyRuntime() {
+ cleanupOldTmpUploads();
+-setInterval(cleanupOldTmpUploads, TMP_UPLOAD_CLEANUP_INTERVAL_MS);
+-setInterval(finalizarConversasSuporteInativas, 60 * 1000);
++setInterval(dataDirPause.background("cleanup-tmp", cleanupOldTmpUploads), TMP_UPLOAD_CLEANUP_INTERVAL_MS);
++setInterval(dataDirPause.background("support-cleanup", finalizarConversasSuporteInativas), 60 * 1000);
+ if (fcmService.scheduledNotificationsEnabled()) {
+-  setTimeout(runMonthlyPlanningNotifications, 15 * 1000);
+-  setInterval(runMonthlyPlanningNotifications, MONTHLY_PLANNING_NOTIFICATIONS_INTERVAL_MS);
++  setTimeout(dataDirPause.background("planning-notifications", runMonthlyPlanningNotifications), 15 * 1000);
++  setInterval(dataDirPause.background("planning-notifications", runMonthlyPlanningNotifications), MONTHLY_PLANNING_NOTIFICATIONS_INTERVAL_MS);
+ }
+ if (adminFreeArtsEnabled()) {
+-  setTimeout(runFreeArtCampaignRecovery, 60 * 1000);
+-  setInterval(runFreeArtCampaignRecovery, adminFreeArtsRecoveryIntervalMs());
++  setTimeout(dataDirPause.background("campaign-recovery", runFreeArtCampaignRecovery), 60 * 1000);
++  setInterval(dataDirPause.background("campaign-recovery", runFreeArtCampaignRecovery), adminFreeArtsRecoveryIntervalMs());
+ }
+ if (
+   adminFreeArtsNotificationsEnabled() &&
+   fcmService.scheduledNotificationsEnabled()
+ ) {
+-  setTimeout(runFreeArtCampaignNotifications, 20 * 1000);
+-  setInterval(runFreeArtCampaignNotifications, adminFreeArtsNotificationsIntervalMs());
++  setTimeout(dataDirPause.background("campaign-notifications", runFreeArtCampaignNotifications), 20 * 1000);
++  setInterval(dataDirPause.background("campaign-notifications", runFreeArtCampaignNotifications), adminFreeArtsNotificationsIntervalMs());
+ }
+ 
+ app.listen(PORT, () => {
+   console.log("API rodando na porta", PORT);
+ });
++}
++
++dataDirPause.finalizeRouting(app);
++if (dataDirPause.enabled) {
++  Promise.resolve().then(() => require("./src/maintenance/local-control")
++    .startLocalControl({ runtime: dataDirPause, dataDir: DATA_DIR }))
++    .then(startLegacyRuntime, () => {
++      console.error("pause_local_control_start_failed");
++      process.exit(1);
++    });
++} else {
++  startLegacyRuntime();
++}
+diff --git a/src/maintenance/capture-prompt.js b/src/maintenance/capture-prompt.js
+new file mode 100644
+index 0000000..f3fbf22
+--- /dev/null
++++ b/src/maintenance/capture-prompt.js
+@@ -0,0 +1,112 @@
++"use strict";
++
++const { Readable } = require("node:stream");
++const { runCli } = require("./pause-cli");
++const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/;
++const REFUSED = '{"ok":false,"code":"capture_prompt_refused"}\n';
++
++function refuse() { throw new Error("capture_prompt_refused"); }
++function parseCaptureArgs(args) {
++  const names = ["--pid", "--capture-id", "--epoch", "--ttl-ms"];
++  if (!Array.isArray(args) || args.length !== 8 || args.some(value => typeof value !== "string")) refuse();
++  const values = {};
++  for (let i = 0; i < args.length; i += 2) {
++    if (!names.includes(args[i]) || Object.hasOwn(values, args[i])) refuse();
++    values[args[i]] = args[i + 1];
++  }
++  if (!/^[1-9][0-9]{0,8}$/.test(values["--pid"]) || !UUID.test(values["--capture-id"]) ||
++      !UUID.test(values["--epoch"]) || !/^[1-9][0-9]{0,5}$/.test(values["--ttl-ms"]) ||
++      Number(values["--ttl-ms"]) > 900000) refuse();
++  return { pid: values["--pid"], captureId: values["--capture-id"], epoch: values["--epoch"], ttlMs: Number(values["--ttl-ms"]) };
++}
++
++// Buffers are erased on every path. V8 strings used by base64/JSON and copies in
++// the existing CLI cannot be guaranteed erased: this is not a secure-memory API.
++async function readHiddenKey(input, promptOutput, signals) {
++  const bytes = Buffer.alloc(44);
++  const previousRaw = input.isRaw === true;
++  let size = 0, answer = null, onData, onEnd, onError, onInterrupt, onClose;
++  try {
++    input.setRawMode(true);
++    answer = await new Promise((resolve, reject) => {
++      let settled = false;
++      function finish(failed) {
++        if (settled) return;
++        settled = true;
++        input.pause();
++        if (failed || size !== 44) return reject(new Error("capture_prompt_refused"));
++        const text = bytes.toString("ascii");
++        const decoded = Buffer.from(text, "base64");
++        try {
++          if (!/^[A-Za-z0-9+/]{43}=$/.test(text) || decoded.length !== 32 || decoded.toString("base64") !== text) return reject(new Error("capture_prompt_refused"));
++          resolve(Buffer.from(bytes));
++        } finally { decoded.fill(0); }
++      }
++      onData = part => {
++        if (!Buffer.isBuffer(part)) return finish(true);
++        try {
++          if (settled) return;
++          for (let i = 0; i < part.length; i++) {
++            const byte = part[i];
++            if (byte === 10 || byte === 13) {
++              // Only a final LF, CR, or CRLF; never a second input/command.
++              if (i !== part.length - 1 && !(byte === 13 && i === part.length - 2 && part[i + 1] === 10)) return finish(true);
++              return finish(false);
++            }
++            if (size >= 44 || byte < 43 || byte > 122 || !((byte >= 65 && byte <= 90) || (byte >= 97 && byte <= 122) || (byte >= 48 && byte <= 57) || byte === 43 || byte === 47 || byte === 61)) return finish(true);
++            bytes[size++] = byte;
++          }
++        } catch (_) { finish(true); }
++        finally { part.fill(0); }
++      };
++      onEnd = () => finish(false);
++      onError = onInterrupt = onClose = () => finish(true);
++      input.on("data", onData); input.once("end", onEnd); input.once("error", onError); input.once("close", onClose);
++      signals.once("SIGINT", onInterrupt); signals.once("SIGTERM", onInterrupt);
++      promptOutput.write("Capture key (base64, input hidden; Enter confirms, Ctrl-C cancels): ");
++      input.resume();
++    });
++    return answer;
++  } finally {
++    bytes.fill(0);
++    input.pause();
++    for (const [event, listener] of [["data", onData], ["end", onEnd], ["error", onError], ["close", onClose]]) if (listener) input.removeListener(event, listener);
++    if (onInterrupt) { signals.removeListener("SIGINT", onInterrupt); signals.removeListener("SIGTERM", onInterrupt); }
++    try { input.setRawMode(previousRaw); }
++    catch (_) { if (answer) answer.fill(0); refuse(); }
++  }
++}
++
++async function runCapturePrompt(options = {}) {
++  const { args = process.argv.slice(2), input = process.stdin, output = process.stdout, promptOutput = process.stderr } = options;
++  let key = null, wire = null, packet = null, packetInput = null;
++  try {
++    const metadata = parseCaptureArgs(args);
++    const fixture = options.testOnly === true;
++    if (fixture ? typeof options.runCli !== "function" : (process.platform !== "linux" || input !== process.stdin || options.runCli !== undefined || options.signals !== undefined)) refuse();
++    if (input.isTTY !== true || typeof input.setRawMode !== "function" || input.readableEncoding || input.destroyed || input.readableEnded) refuse();
++    key = await readHiddenKey(input, promptOutput, fixture ? options.signals || process : process);
++    packet = { command: "capture", captureId: metadata.captureId, epoch: metadata.epoch, ttlMs: metadata.ttlMs, bundleKeyBase64: key.toString("ascii") };
++    wire = Buffer.from(JSON.stringify(packet) + "\n");
++    packet.bundleKeyBase64 = undefined;
++    key.fill(0);
++    packetInput = Readable.from([wire], { objectMode: false });
++    // Erase the original transport buffer as soon as the existing CLI consumes
++    // its input; do not retain it for the potentially long capture completion.
++    packetInput.once("end", () => wire.fill(0));
++    packetInput.once("close", () => wire.fill(0));
++    const code = await (fixture ? options.runCli : runCli)({ args: ["--pid", metadata.pid], input: packetInput, output });
++    return code === 0 ? 0 : 2;
++  } catch (_) {
++    try { output.write(REFUSED); } catch (_) { /* Do not expose input or raw errors. */ }
++    return 2;
++  } finally {
++    if (key) key.fill(0);
++    if (wire) wire.fill(0);
++    if (packet) packet.bundleKeyBase64 = undefined;
++    if (packetInput) packetInput.destroy();
++  }
++}
++
++if (require.main === module) runCapturePrompt().then(code => { process.exitCode = code; }, () => { process.exitCode = 2; });
++module.exports = { parseCaptureArgs, runCapturePrompt };
+diff --git a/src/maintenance/capture-supervisor.js b/src/maintenance/capture-supervisor.js
+new file mode 100644
+index 0000000..e66e40d
+--- /dev/null
++++ b/src/maintenance/capture-supervisor.js
+@@ -0,0 +1,145 @@
++'use strict';
++
++const fs = require('node:fs');
++const path = require('node:path');
++const crypto = require('node:crypto');
++const { spawn } = require('node:child_process');
++const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/;
++const SHA = /^[a-f0-9]{64}$/;
++const MAX_OUTPUT = 16384;
++
++function refusal(code) { const error = new Error(code); error.code = code; return error; }
++function need(test, code) { if (!test) throw refusal(code); }
++function validResult(value, request) {
++  return Boolean(value && Object.keys(value).sort().join('|') === [
++    'kind','captureId','epoch','sourceFingerprint','verified','posixArchiveCompared',
++    'posixRestoreVerified','manifestSha256','bundleSha256','bundleBytes','files','directories','logicalBytes',
++  ].sort().join('|') && value.kind === 'ia4tube-data-dir-capture-result-v1' &&
++    value.captureId === request.captureId && value.epoch === request.epoch &&
++    value.sourceFingerprint === request.sourceFingerprint && value.verified === true &&
++    value.posixArchiveCompared === true && value.posixRestoreVerified === false &&
++    typeof value.manifestSha256 === 'string' && typeof value.bundleSha256 === 'string' && SHA.test(value.manifestSha256) && SHA.test(value.bundleSha256) &&
++    Number.isSafeInteger(value.bundleBytes) && value.bundleBytes > 0 &&
++    Number.isSafeInteger(value.logicalBytes) && value.logicalBytes >= 0 && value.logicalBytes <= 1073741824 &&
++    Number.isSafeInteger(value.files) && value.files >= 0 &&
++    Number.isSafeInteger(value.directories) && value.directories > 0);
++}
++
++// Trusted in-process configuration only. No paths/commands supplied by IPC users.
++function createCaptureSupervisor(options) {
++  const { controller } = options || {};
++  need(controller && ['status','startCapture','abortCapture','captureClosed'].every(name => typeof controller[name] === 'function'), 'capture_controller_invalid');
++  const fixture = options.testOnly === true;
++  need(!fixture || typeof options.spawnWorker === 'function', 'capture_fixture_spawn_required');
++  const workerPath = path.join(__dirname, 'capture-worker.js');
++  const schedule = options.setTimeout || setTimeout;
++  const unschedule = options.clearTimeout || clearTimeout;
++  const launch = options.spawnWorker || ((command, args, settings) => spawn(command, args, settings));
++  const groupAlive = options.groupAlive || (child => {
++    if (!child.pid) return false;
++    try { process.kill(-child.pid, 0); return true; }
++    catch (error) { if (error.code === 'ESRCH') return false; throw refusal('capture_group_state_unknown'); }
++  });
++  const terminate = options.terminate || (child => {
++    if (!child.pid) return;
++    try { process.kill(-child.pid, 'SIGTERM'); }
++    catch (error) { if (error.code !== 'ESRCH') throw refusal('capture_group_termination_failed'); }
++  });
++  let active = null;
++
++  function start(input) {
++    need(!active, 'capture_already_active');
++    need(input && typeof input.captureId === 'string' && typeof input.epoch === 'string' && typeof input.sourceFingerprint === 'string' && UUID.test(input.captureId) && UUID.test(input.epoch) && SHA.test(input.sourceFingerprint), 'capture_request_invalid');
++    need(Number.isSafeInteger(input.ttlMs) && input.ttlMs > 0 && input.ttlMs <= 1800000, 'capture_deadline_invalid');
++    need(Buffer.isBuffer(input.bundleKey) && input.bundleKey.length === 32, 'capture_key_invalid');
++    const initial = controller.status();
++    need(initial.state === 'frozen' && initial.inFlight === 0 && initial.epoch === input.epoch && !initial.capture, 'capture_not_frozen');
++    need(options.sourceRoot === undefined || path.resolve(options.sourceRoot) === path.resolve('/var/data'), 'capture_source_configuration_refused');
++    need(options.envelopePath === undefined || path.resolve(options.envelopePath) === path.join(__dirname, 'recovery', 'encrypted-backup-bundle.js'), 'capture_envelope_configuration_refused');
++    if (!fixture) {
++      need(process.platform === 'linux', 'capture_posix_required');
++      for (const pin of [options.workerSha256, options.envelopeSha256, options.tarSha256]) need(typeof pin === 'string' && SHA.test(pin), 'capture_tool_pin_required');
++      const stat = fs.lstatSync(workerPath);
++      need(stat.isFile() && !stat.isSymbolicLink() && stat.nlink === 1 && crypto.createHash('sha256').update(fs.readFileSync(workerPath)).digest('hex') === options.workerSha256, 'capture_worker_pin_mismatch');
++    }
++    const request = {
++      kind: 'ia4tube-data-dir-capture-request-v1', captureId: input.captureId, epoch: input.epoch,
++      sourceRoot: '/var/data', sourceFingerprint: input.sourceFingerprint,
++      envelopeSha256: options.envelopeSha256, tarSha256: options.tarSha256,
++      keyBase64: input.bundleKey.toString('base64'),
++    };
++    const env = { LANG: 'C', LC_ALL: 'C', TZ: 'UTC' };
++    for (const name of ['SystemRoot','WINDIR','TEMP','TMP']) if (process.env[name]) env[name] = process.env[name];
++    // Worker initially waits for stdin. Nothing can capture before startCapture.
++    const child = launch(process.execPath, [workerPath], { shell: false, windowsHide: true, detached: !fixture,
++      stdio: ['pipe','pipe','pipe'], env });
++    let resolveCompletion;
++    const completion = new Promise(resolve => { resolveCompletion = resolve; });
++    const run = { child, request, closed: false, invalid: false, registered: false, done: false,
++      timer: null, poll: null, output: [], bytes: 0, stderr: false, processError: false, result: null };
++    active = run;
++    function stopChild() { run.invalid = true; terminate(child); }
++    function invalidate() {
++      if (run.done) return false;
++      run.invalid = true;
++      if (run.registered) controller.abortCapture(request.captureId, { epoch: request.epoch });
++      else { try { terminate(child); } catch (_) { /* Closure remains mandatory. */ } }
++      return true;
++    }
++    function afterClose() {
++      if (!run.closed || run.done) return;
++      let alive;
++      try { alive = groupAlive(child); }
++      catch (_) { alive = true; invalidate(); }
++      if (alive) {
++        invalidate();
++        // Unknown or surviving descendants keep the barrier closed indefinitely.
++        // This is supervision, not a timeout interpreted as termination.
++        run.poll = schedule(afterClose, 100);
++        return;
++      }
++      const verified = !run.invalid && run.result !== null && run.registered;
++      let status = controller.status();
++      if (run.registered) status = controller.captureClosed(request.captureId, { epoch: request.epoch, success: verified, verified });
++      run.done = true;
++      active = null;
++      run.output.length = 0;
++      resolveCompletion(Object.freeze({ passed: verified, code: verified ? 'capture_verified' : 'capture_invalidated',
++        captureId: request.captureId, childClosed: true, processGroupEmpty: true,
++        result: verified ? run.result : null, status }));
++    }
++    child.on('error', () => { run.processError = true; invalidate(); });
++    child.stdin.on('error', () => { run.processError = true; invalidate(); });
++    child.stdout.on('data', chunk => {
++      run.bytes += chunk.length;
++      if (run.bytes > MAX_OUTPUT) { run.output.length = 0; invalidate(); }
++      else if (!run.invalid) run.output.push(Buffer.from(chunk));
++    });
++    child.stderr.on('data', () => { run.stderr = true; invalidate(); }); // Never expose raw child output.
++    // 'exit' is deliberately not a completion event: stdio/descendants may remain.
++    child.once('close', (code, signal) => {
++      run.closed = true;
++      if (run.timer !== null) unschedule(run.timer);
++      if (code !== 0 || signal || run.processError || run.stderr) invalidate();
++      if (!run.invalid) {
++        try {
++          const value = JSON.parse(Buffer.concat(run.output).toString('utf8'));
++          if (!validResult(value, request)) invalidate(); else run.result = value;
++        } catch (_) { invalidate(); }
++      }
++      afterClose();
++    });
++    try {
++      controller.startCapture(request.captureId, { epoch: request.epoch, abort: stopChild });
++      run.registered = true;
++      run.timer = schedule(invalidate, input.ttlMs);
++      const packet = Buffer.from(JSON.stringify(request) + '\n');
++      request.keyBase64 = undefined;
++      child.stdin.end(packet, () => packet.fill(0));
++    } catch (_) { request.keyBase64 = undefined; invalidate(); child.stdin.destroy(); }
++    return Object.freeze({ captureId: request.captureId, completion, abandon: invalidate });
++  }
++  return Object.freeze({ start, status: () => active ? Object.freeze({ captureId: active.request.captureId, closed: active.closed, invalid: active.invalid }) : null });
++}
++
++module.exports = { createCaptureSupervisor, validResult };
+diff --git a/src/maintenance/capture-worker.js b/src/maintenance/capture-worker.js
+new file mode 100644
+index 0000000..2913e69
+--- /dev/null
++++ b/src/maintenance/capture-worker.js
+@@ -0,0 +1,242 @@
++'use strict';
++
++const fs = require('node:fs');
++const fsp = require('node:fs/promises');
++const path = require('node:path');
++const os = require('node:os');
++const crypto = require('node:crypto');
++const { spawn } = require('node:child_process');
++const { TextDecoder } = require('node:util');
++const MAX_BYTES = 1073741824;
++const MAX_ENTRIES = 10000;
++const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/;
++const SHA = /^[a-f0-9]{64}$/;
++const NAMES = ['00-data-dir-manifest.json', '01-data-dir-posix.tar'];
++function fail(code) { const e = new Error(code); e.code = code; throw e; }
++function need(test, code) { if (!test) fail(code); }
++function abortCheck(signal) { if (signal?.aborted) fail('capture_aborted'); }
++function digest(value) { return crypto.createHash('sha256').update(value).digest('hex'); }
++function stable(stat) {
++  return { dev: String(stat.dev), ino: String(stat.ino), mode: String(stat.mode), uid: String(stat.uid),
++    gid: String(stat.gid), size: String(stat.size), mtimeNs: String(stat.mtimeNs), ctimeNs: String(stat.ctimeNs) };
++}
++function same(a, b) { return JSON.stringify(a) === JSON.stringify(b); }
++async function hashRegular(file, before, signal) {
++  const handle = await fsp.open(file, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW || 0));
++  const bytes = Buffer.alloc(65536);
++  try {
++    const opened = await handle.stat({ bigint: true });
++    need(opened.isFile() && opened.nlink === 1n && same(stable(before), stable(opened)), 'capture_file_changed');
++    const hash = crypto.createHash('sha256'); let position = 0;
++    while (true) {
++      abortCheck(signal);
++      const result = await handle.read(bytes, 0, bytes.length, position);
++      if (result.bytesRead === 0) break;
++      hash.update(bytes.subarray(0, result.bytesRead)); position += result.bytesRead;
++    }
++    need(BigInt(position) === before.size && same(stable(before), stable(await handle.stat({ bigint: true }))), 'capture_file_changed');
++    return hash.digest('hex');
++  } finally { bytes.fill(0); await handle.close(); }
++}
++async function inventoryTree(root, { exclude, signal, maxBytes = MAX_BYTES } = {}) {
++  need(path.isAbsolute(root) && Number.isSafeInteger(maxBytes) && maxBytes >= 0 && maxBytes <= MAX_BYTES, 'capture_inventory_contract');
++  root = path.resolve(root);
++  need(await fsp.realpath(root) === root, 'capture_root_redirected');
++  const excluded = exclude ? path.resolve(exclude) : null;
++  if (excluded) need(excluded.startsWith(root + path.sep), 'capture_exclusion_refused');
++  const rows = []; let logicalBytes = 0; let files = 0; let directories = 0;
++  const decoder = new TextDecoder('utf-8', { fatal: true });
++  async function visit(current, relative) {
++    abortCheck(signal);
++    if (current === excluded) return;
++    need(rows.length < MAX_ENTRIES, 'capture_entry_limit');
++    need(Buffer.byteLength(relative, 'utf8') <= 1024, 'capture_path_length_limit');
++    const before = await fsp.lstat(current, { bigint: true });
++    need(!before.isSymbolicLink() && (before.isDirectory() || before.isFile()), 'capture_special_file_refused');
++    const row = { path: relative, type: before.isDirectory() ? 'directory' : 'file', ...stable(before) };
++    if (before.isFile()) {
++      need(before.nlink === 1n, 'capture_hardlink_refused');
++      need(before.size <= BigInt(maxBytes - logicalBytes), 'capture_size_limit');
++      logicalBytes += Number(before.size); files++;
++      row.sha256 = await hashRegular(current, before, signal);
++      rows.push(row);
++    } else {
++      directories++; rows.push(row);
++      const names = (await fsp.readdir(current, { encoding: 'buffer' })).sort(Buffer.compare);
++      for (const name of names) {
++        let text;
++        try { text = decoder.decode(name); } catch (_) { fail('capture_filename_encoding_refused'); }
++        need(Buffer.from(text).equals(name) && text !== '.' && text !== '..', 'capture_filename_refused');
++        await visit(path.join(current, text), relative === '.' ? text : relative + '/' + text);
++      }
++      need(same(stable(before), stable(await fsp.lstat(current, { bigint: true }))), 'capture_directory_changed');
++    }
++  }
++  await visit(root, '.');
++  return { rows, files, directories, logicalBytes };
++}
++function compareInventories(before, after) { need(same(before, after), 'capture_inventory_changed'); return true; }
++function buildTarArgs({ mode, sourceRoot, archive, list }) {
++  need(mode === 'create' || mode === 'compare', 'capture_tar_mode_refused');
++  const args = [mode === 'create' ? '--create' : '--compare', '--format=pax', '--numeric-owner', '--acls', '--xattrs', '--xattrs-include=*', '--file', archive, '--directory', sourceRoot];
++  if (mode === 'create') args.push('--no-recursion', '--null', '--verbatim-files-from', '--files-from', list);
++  return args;
++}
++async function privateDirectory(target, { existing = false, fixture = false } = {}) {
++  if (!existing) await fsp.mkdir(target, { mode: 0o700 });
++  const stat = await fsp.lstat(target);
++  need(stat.isDirectory() && !stat.isSymbolicLink() && await fsp.realpath(target) === path.resolve(target), 'capture_workspace_refused');
++  if (!fixture) need(stat.uid === process.getuid() && (stat.mode & 0o777) === 0o700, 'capture_workspace_permissions');
++  // Also cover an empty, validated directory left by an earlier failed sync.
++  // Merely finding it again is not evidence that its parent entry is durable.
++  if (!fixture) await syncNewDirectory(target);
++}
++async function writeNew(target, value) {
++  const handle = await fsp.open(target, 'wx', 0o600);
++  try { await handle.writeFile(value); await handle.sync(); } finally { await handle.close(); }
++}
++async function syncDirectory(directory) {
++  const h = await fsp.open(directory, fs.constants.O_RDONLY);
++  try { await h.sync(); } finally { await h.close(); }
++}
++async function syncNewDirectory(directory, synchronize = syncDirectory) {
++  // Persist both the directory metadata and the new name in its parent. A
++  // failure is fatal; the caller must not publish a verified capture afterward.
++  await synchronize(directory);
++  await synchronize(path.dirname(directory));
++}
++function createTarRunner(signal) {
++  return async args => {
++    // Reserve the archive with O_EXCL. GNU tar writes the already opened inode,
++    // never an ordinary pathname it could truncate/replace after preflight.
++    let archiveHandle;
++    const commandArgs = [...args];
++    if (args[0] === '--create') {
++      const index = args.indexOf('--file') + 1;
++      archiveHandle = await fsp.open(args[index], 'wx', 0o600);
++      commandArgs[index] = '/proc/self/fd/3';
++    }
++    try { return await new Promise((resolve, reject) => {
++    let error = false; let stdout = ''; let exceeded = false;
++    const child = spawn('/usr/bin/tar', commandArgs, { shell: false, stdio: archiveHandle ? ['ignore', 'pipe', 'pipe', archiveHandle.fd] : ['ignore', 'pipe', 'pipe'], env: { LANG: 'C', LC_ALL: 'C', TZ: 'UTC' } });
++    const stop = () => { child.kill('SIGTERM'); };
++    signal?.addEventListener('abort', stop, { once: true });
++    if (signal?.aborted) stop();
++    child.on('error', () => { error = true; });
++    child.stdout.on('data', chunk => { if (stdout.length + chunk.length > 4096) { exceeded = true; child.kill('SIGTERM'); } else stdout += chunk.toString('utf8'); });
++    child.stderr.on('data', () => { error = true; }); // Paths/data never leave this process.
++    child.once('close', (code, terminationSignal) => {
++      signal?.removeEventListener('abort', stop);
++      if (error || exceeded || code !== 0 || terminationSignal || signal?.aborted) reject(Object.assign(new Error('capture_tar_refused'), { code: 'capture_tar_refused' }));
++      else resolve(stdout);
++    });
++    }); } finally {
++      if (archiveHandle) {
++        try { await archiveHandle.sync(); } finally { await archiveHandle.close(); }
++      }
++    }
++  };
++}
++async function capture(request, adapters) {
++  const { signal, bundle, runTar, fixture = false } = adapters;
++  need(typeof request.captureId === 'string' && typeof request.epoch === 'string' && typeof request.sourceFingerprint === 'string' && UUID.test(request.captureId) && UUID.test(request.epoch) && SHA.test(request.sourceFingerprint), 'capture_request_invalid');
++  need(Buffer.isBuffer(request.bundleKey) && request.bundleKey.length === 32, 'capture_key_invalid');
++  const root = path.resolve(request.sourceRoot);
++  if (fixture) need(root.startsWith(path.resolve(os.tmpdir()) + path.sep), 'capture_fixture_root_refused');
++  else need(process.platform === 'linux' && root === '/var/data', 'capture_posix_root_required');
++  need(await fsp.realpath(root) === root && (await fsp.lstat(root)).isDirectory(), 'capture_root_refused');
++  const parent = path.join(root, '.ia4tube-recovery-c');
++  try { await privateDirectory(parent, { fixture }); }
++  catch (error) { if (error.code !== 'EEXIST') throw error; await privateDirectory(parent, { existing: true, fixture }); }
++  need((await fsp.readdir(parent)).length === 0, 'capture_prior_workspace_present');
++  const operation = path.join(parent, request.captureId);
++  await privateDirectory(operation, { fixture });
++  const archive = path.join(operation, NAMES[1]);
++  const manifestFile = path.join(operation, NAMES[0]);
++  const list = path.join(operation, 'files.list');
++  const output = path.join(operation, 'data-dir.bundle');
++  const key = Buffer.from(request.bundleKey);
++  try {
++    abortCheck(signal);
++    const before = await inventoryTree(root, { exclude: operation, signal });
++    const capacity = await fsp.statfs(operation, { bigint: true });
++    need(capacity.bavail * capacity.bsize >= BigInt(before.logicalBytes) * 3n + 1073741824n, 'capture_space_refused');
++    await writeNew(list, Buffer.from(before.rows.map(row => row.path).join('\0') + '\0'));
++    await runTar(buildTarArgs({ mode: 'create', sourceRoot: root, archive, list }));
++    abortCheck(signal);
++    const archiveStat = await fsp.lstat(archive, { bigint: true });
++    need(archiveStat.isFile() && !archiveStat.isSymbolicLink() && archiveStat.nlink === 1n && archiveStat.size > 0n, 'capture_archive_invalid');
++    // The destination was a fresh private directory; tar receives a fixed output.
++    const archiveHash = await hashRegular(archive, archiveStat, signal);
++    await runTar(buildTarArgs({ mode: 'compare', sourceRoot: root, archive, list }));
++    const after = await inventoryTree(root, { exclude: operation, signal });
++    compareInventories(before, after);
++    const manifest = { format: 'ia4tube-data-dir-posix-capture-v1', captureId: request.captureId, epoch: request.epoch,
++      sourceFingerprint: request.sourceFingerprint, excludedOperation: '.ia4tube-recovery-c/' + request.captureId,
++      timestampPolicy: 'mtime-nanoseconds; ctime-observed-for-change-detection-not-restorable; atime-not-compared',
++      aclXattrPolicy: fixture ? 'fixture-adapter-not-POSIX-proof' : 'GNU-tar-pax-acls-xattrs; isolated-restore-validation-still-required',
++      archive: { name: NAMES[1], bytes: Number(archiveStat.size), sha256: archiveHash }, inventory: before,
++      posixRestoreVerified: false, fixtureOnly: fixture };
++    const manifestBytes = Buffer.from(JSON.stringify(manifest) + '\n');
++    await writeNew(manifestFile, manifestBytes);
++    abortCheck(signal);
++    const created = await bundle.createEncryptedBundle({ entries: [{ name: NAMES[0], path: manifestFile }, { name: NAMES[1], path: archive }],
++      expectedNames: NAMES, outputPath: output, label: 'data-dir-c-' + request.captureId,
++      sourceFingerprint: request.sourceFingerprint, bundleKey: key });
++    need(fixture || created.bundleDirectoryFsyncConfirmed === true, 'capture_directory_sync_unconfirmed');
++    abortCheck(signal);
++    await bundle.withExtractedEncryptedBundle({ containerPath: output, expectedNames: NAMES,
++      expectedLabel: 'data-dir-c-' + request.captureId, expectedSourceFingerprint: request.sourceFingerprint,
++      workDirectory: operation, workspacePurpose: 'data-dir-verify', bundleKey: key,
++      operation: async extracted => { bundle.compareEntryEvidence(created.entries, extracted.files); } });
++    abortCheck(signal);
++    compareInventories(before, await inventoryTree(root, { exclude: operation, signal }));
++    if (!fixture) await syncDirectory(operation);
++    return { kind: 'ia4tube-data-dir-capture-result-v1', captureId: request.captureId, epoch: request.epoch,
++      sourceFingerprint: request.sourceFingerprint, verified: true, posixArchiveCompared: !fixture,
++      posixRestoreVerified: false, manifestSha256: digest(manifestBytes), bundleSha256: created.sha256,
++      bundleBytes: created.size, files: before.files, directories: before.directories, logicalBytes: before.logicalBytes };
++  } finally { key.fill(0); } // Preserve this operation's artifacts/partials; no broad cleanup.
++}
++async function runProductionRequest(message, signal) {
++  need(process.platform === 'linux', 'capture_posix_required');
++  need(message && Object.keys(message).sort().join('|') === ['kind','captureId','epoch','sourceRoot','sourceFingerprint','envelopeSha256','tarSha256','keyBase64'].sort().join('|') && message.kind === 'ia4tube-data-dir-capture-request-v1' && message.sourceRoot === '/var/data', 'capture_request_invalid');
++  const modulePath = path.join(__dirname, 'recovery', 'encrypted-backup-bundle.js');
++  for (const [file, pin] of [[modulePath, message.envelopeSha256], ['/usr/bin/tar', message.tarSha256]]) {
++    need(typeof pin === 'string' && SHA.test(pin), 'capture_tool_pin_required');
++    const stat = fs.lstatSync(file);
++    need(stat.isFile() && !stat.isSymbolicLink() && stat.nlink === 1 && digest(fs.readFileSync(file)) === pin, 'capture_tool_pin_mismatch');
++  }
++  need(typeof message.keyBase64 === 'string' && /^[A-Za-z0-9+/]{43}=$/.test(message.keyBase64), 'capture_key_invalid');
++  const key = Buffer.from(message.keyBase64, 'base64');
++  if (key.length !== 32 || key.toString('base64') !== message.keyBase64) { key.fill(0); fail('capture_key_invalid'); }
++  message.keyBase64 = undefined;
++  const runTar = createTarRunner(signal);
++  try {
++    const version = await runTar(['--version']);
++    need(/^tar \(GNU tar\) [0-9]+\.[0-9]+/.test(version), 'capture_gnu_tar_required');
++    return await capture({ ...message, bundleKey: key }, { signal, runTar, bundle: require(modulePath) });
++  } finally { key.fill(0); }
++}
++async function runFixtureCapture(request, adapters) {
++  need(adapters && typeof adapters.runTar === 'function' && adapters.bundle, 'capture_fixture_adapters_required');
++  return capture(request, { ...adapters, fixture: true });
++}
++if (require.main === module) {
++  const abort = new AbortController();
++  process.on('SIGTERM', () => abort.abort());
++  let bytes = 0; const pieces = [];
++  process.stdin.on('data', part => { bytes += part.length; if (bytes > 16384) { abort.abort(); process.stdin.destroy(); } else pieces.push(Buffer.from(part)); });
++  process.stdin.once('end', async () => {
++    let packet;
++    try {
++      need(bytes > 0 && bytes <= 16384, 'capture_request_size');
++      packet = Buffer.concat(pieces); const message = JSON.parse(packet.toString('utf8')); packet.fill(0); for (const part of pieces) part.fill(0);
++      const result = await runProductionRequest(message, abort.signal);
++      abortCheck(abort.signal); process.stdout.write(JSON.stringify(result));
++    } catch (_) { process.exitCode = 2; process.stdout.write('{"kind":"capture-refused"}'); }
++    finally { if (packet) packet.fill(0); for (const part of pieces) part.fill(0); }
++  });
++}
++
++module.exports = { inventoryTree, compareInventories, buildTarArgs, syncNewDirectory, runFixtureCapture, runProductionRequest };
+diff --git a/src/maintenance/local-control.js b/src/maintenance/local-control.js
+new file mode 100644
+index 0000000..a1d27bd
+--- /dev/null
++++ b/src/maintenance/local-control.js
+@@ -0,0 +1,268 @@
++"use strict";
++
++const fs = require("node:fs/promises");
++const net = require("node:net");
++const path = require("node:path");
++const crypto = require("node:crypto");
++const { inspectRemoteWorkFence } = require("./remote-work-fence");
++const { createCaptureSupervisor } = require("./capture-supervisor");
++const { createPauseMarker } = require("./pause-marker");
++
++const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/;
++const SHA = /^[a-f0-9]{64}$/;
++const MAX_PACKET_BYTES = 4096;
++const WORKER_SHA256 = "5da2ebb3f546863804de0ce78a40db8dd3b76e969628cd55a56b703312dc8a52";
++const ENVELOPE_SHA256 = "3f6828d2aa08ba65f1dd526396af4564d78f6152628d719130d5a7e9f1f353d7";
++// Metadata binding only: this digest does not attest the deployed source/disk.
++const SOURCE_FINGERPRINT = crypto.createHash("sha256").update(
++  "ia4tube-data-dir-source-v1\nsrv-d8708kd7vvec73ap1p6g\n1bd987f1ecbbd3a64f2ad0e905d30649704f4b3c\n/var/data\n"
++).digest("hex");
++
++function refusal(code = "local_control_refused") { const error = new Error(code); error.code = code; return error; }
++function need(value, code) { if (!value) throw refusal(code); }
++function exact(value, keys) {
++  return value !== null && typeof value === "object" && !Array.isArray(value) &&
++    Object.keys(value).sort().join("|") === [...keys].sort().join("|");
++}
++function validId(value) { return typeof value === "string" && UUID.test(value); }
++function validDuration(value, maximum) { return Number.isSafeInteger(value) && value > 0 && value <= maximum; }
++function validatePacket(packet) {
++  need(packet && typeof packet.command === "string", "local_command_invalid");
++  const keys = {
++    status: ["command"], drain: ["command", "timeoutMs", "attestation"],
++    capture: ["command", "captureId", "epoch", "ttlMs", "bundleKeyBase64"],
++    abort: ["command", "captureId", "epoch"], resume: ["command"]
++  }[packet.command];
++  need(keys && exact(packet, keys), "local_command_invalid");
++  if (packet.command === "drain") {
++    need(validDuration(packet.timeoutMs, 300000), "local_deadline_invalid");
++    need(exact(packet.attestation, ["externalWritersAbsent", "operatorConfirmed", "limitationAcknowledged"]) &&
++      Object.values(packet.attestation).every(value => value === true), "local_attestation_required");
++  }
++  if (packet.command === "capture" || packet.command === "abort") {
++    need(validId(packet.captureId) && validId(packet.epoch), "local_capture_identity_invalid");
++  }
++  if (packet.command === "capture") {
++    need(validDuration(packet.ttlMs, 900000), "local_deadline_invalid");
++    need(typeof packet.bundleKeyBase64 === "string" && /^[A-Za-z0-9+/]{43}=$/.test(packet.bundleKeyBase64), "local_key_invalid");
++    const bytes = Buffer.from(packet.bundleKeyBase64, "base64");
++    try { need(bytes.length === 32 && bytes.toString("base64") === packet.bundleKeyBase64, "local_key_invalid"); }
++    finally { bytes.fill(0); }
++  }
++  return packet;
++}
++function decodePacket(bytes) {
++  need(Buffer.isBuffer(bytes) && bytes.length > 0 && bytes.length <= MAX_PACKET_BYTES, "local_packet_invalid");
++  const text = bytes.toString("utf8");
++  need(Buffer.from(text).equals(bytes), "local_packet_invalid");
++  try { return validatePacket(JSON.parse(text)); }
++  catch (error) { if (error.code?.startsWith("local_")) throw error; throw refusal("local_packet_invalid"); }
++}
++function publicStatus(runtime) {
++  const value = runtime.controller.status();
++  const state = ["normal", "draining", "frozen", "capturing", "aborting"].includes(value.state) ? value.state : "unknown";
++  need(validId(value.epoch) && Number.isSafeInteger(value.inFlight) && value.inFlight >= 0, "local_runtime_invalid");
++  const faults = runtime.faults();
++  need(Number.isSafeInteger(faults) && faults >= 0, "local_runtime_invalid");
++  return { state, epoch: value.epoch, inFlight: value.inFlight, faults,
++    capture: value.capture ? { captureId: value.capture.captureId, valid: value.capture.valid === true,
++      abortRequested: value.capture.abortRequested === true } : null,
++    lastCapture: value.lastCapture ? { captureId: value.lastCapture.captureId,
++      outcome: value.lastCapture.outcome === "completed" ? "completed" : "invalid", verified: value.lastCapture.verified === true } : null };
++}
++
++// Dependency injection is for local tests. No injection fields exist on the wire.
++function createControlActions({ runtime, dataDir, supervisor, inspectFence = inspectRemoteWorkFence, marker = createPauseMarker({ dataDir }) } = {}) {
++  need(runtime?.enabled === true && runtime.controller && typeof runtime.faults === "function" &&
++    supervisor && typeof supervisor.start === "function" && typeof inspectFence === "function" &&
++    marker && ["acquire", "release", "held"].every(name => typeof marker[name] === "function"), "local_runtime_invalid");
++  let busy = false;
++  let attestedEpoch = null;
++  let activeCapture = null;
++  function status() { return publicStatus(runtime); }
++  function checkedFence() {
++    need(runtime.faults() === 0, "local_accounting_fault");
++    const fence = inspectFence({ dataDir });
++    need(fence?.ok === true && fence.noActiveRecordedWork === true && fence.remoteWorkersStopped === false &&
++      fence.counts?.active === 0 && fence.counts?.unknown === 0, "local_remote_work_refused");
++    return { code: "remote_work_no_active_records", counts: { ...fence.counts }, remoteWorkersStopped: false };
++  }
++  function abandonActive() { if (activeCapture) activeCapture.abandon(); }
++  async function execute(packet, { signal } = {}) {
++    validatePacket(packet);
++    need(!signal?.aborted, "local_request_abandoned");
++    if (packet.command === "status") return { ok: true, code: "local_status", status: status() };
++    if (packet.command === "abort") {
++      const current = status();
++      need(activeCapture && current.epoch === packet.epoch && activeCapture.captureId === packet.captureId,
++        "local_capture_identity_invalid");
++      // The supervisor invalidates the controller BEFORE requesting termination.
++      activeCapture.abandon();
++      return { ok: true, code: "local_capture_abort_requested", status: status() };
++    }
++    need(!busy, "local_control_busy");
++    busy = true;
++    try {
++      if (packet.command === "drain") {
++        need(status().state === "normal", "local_state_conflict");
++        attestedEpoch = null;
++        checkedFence();
++        // Human declaration is mandatory but is not independently established.
++        attestedEpoch = status().epoch;
++        try {
++          // Close admission synchronously before filesystem I/O; attach a catch
++          // immediately in case the drain deadline expires during marker fsync.
++          const draining = runtime.controller.beginDrain({ timeoutMs: packet.timeoutMs });
++          draining.catch(() => {});
++          await marker.acquire(attestedEpoch);
++          await draining;
++          need(!signal?.aborted, "local_request_abandoned");
++          const fence = checkedFence();
++          need(status().state === "frozen" && status().inFlight === 0, "local_not_frozen");
++          return { ok: true, code: "local_drain_frozen", status: status(), fence,
++            externalWriterAttestation: "operator-declared-not-independently-verified" };
++        } catch (error) { attestedEpoch = null; throw error; }
++      }
++      if (packet.command === "resume") {
++        need(runtime.faults() === 0 && !activeCapture, "local_resume_refused");
++        const current = status();
++        // Cancel only a pre-capture drain. Existing business work remains in the
++        // ledger and continues normally; cancellation does not mean completion.
++        // The controller independently refuses cancelDrain after any capture.
++        need(current.state === "draining" || (current.state === "frozen" && current.inFlight === 0), "local_resume_refused");
++        // Removal AND directory fsync precede reopening admission. Failure leaves
++        // the same controller closed and requires explicit operator recovery.
++        await marker.release(current.epoch);
++        if (current.state === "draining") runtime.controller.cancelDrain();
++        else {
++          need(current.inFlight === 0 && current.state === "frozen", "local_resume_refused");
++          runtime.controller.resume();
++        }
++        attestedEpoch = null;
++        return { ok: true, code: "local_resumed", status: status() };
++      }
++      const before = status();
++      need(before.state === "frozen" && before.inFlight === 0 && before.epoch === packet.epoch &&
++        attestedEpoch === packet.epoch && marker.held() && !activeCapture, "local_not_frozen");
++      checkedFence();
++      need(!signal?.aborted, "local_request_abandoned");
++      const key = Buffer.from(packet.bundleKeyBase64, "base64");
++      packet.bundleKeyBase64 = undefined;
++      let capture;
++      const onAbandoned = () => { if (capture) capture.abandon(); };
++      signal?.addEventListener("abort", onAbandoned, { once: true });
++      try {
++        capture = supervisor.start({ captureId: packet.captureId, epoch: packet.epoch,
++          ttlMs: packet.ttlMs, bundleKey: key, sourceFingerprint: SOURCE_FINGERPRINT });
++        activeCapture = capture;
++        if (signal?.aborted) capture.abandon();
++      } catch (error) {
++        signal?.removeEventListener("abort", onAbandoned);
++        throw error;
++      } finally { key.fill(0); }
++      try {
++        const completion = await capture.completion;
++        need(completion.childClosed === true && completion.processGroupEmpty === true, "local_capture_closure_unconfirmed");
++        return { ok: completion.passed === true, code: completion.passed ? "local_capture_verified" : "local_capture_invalidated",
++          status: status(), result: completion.passed ? completion.result : null,
++          externalWriterAttestation: "operator-declared-not-independently-verified" };
++      } finally {
++        signal?.removeEventListener("abort", onAbandoned);
++        // A rejecting/invalid supervisor must not unlock a possibly-live child.
++        if (status().state === "frozen" && !status().capture) activeCapture = null;
++      }
++    } finally { busy = false; }
++  }
++  async function shutdown() {
++    if (activeCapture) { abandonActive(); await activeCapture.completion; }
++  }
++  return Object.freeze({ execute, status, shutdown });
++}
++
++function publicFailure() { return { ok: false, code: "local_control_refused" }; }
++function attachConnection(socket, actions) {
++  let pieces = [], total = 0, dispatched = false;
++  const abort = new AbortController();
++  const discard = () => { for (const piece of pieces) piece.fill(0); pieces = []; };
++  socket.on("error", () => abort.abort());
++  socket.once("close", () => { abort.abort(); discard(); });
++  socket.on("data", chunk => {
++    if (dispatched) { abort.abort(); socket.destroy(); return; }
++    total += chunk.length;
++    if (total > MAX_PACKET_BYTES) { dispatched = true; discard(); socket.end(JSON.stringify(publicFailure()) + "\n"); return; }
++    pieces.push(Buffer.from(chunk));
++    const buffer = Buffer.concat(pieces);
++    const newline = buffer.indexOf(10);
++    if (newline === -1) { buffer.fill(0); return; }
++    dispatched = true;
++    let packet;
++    try {
++      need(newline === buffer.length - 1, "local_packet_invalid");
++      packet = decodePacket(buffer.subarray(0, newline));
++    } catch (_) { discard(); buffer.fill(0); socket.end(JSON.stringify(publicFailure()) + "\n"); return; }
++    discard(); buffer.fill(0);
++    Promise.resolve(actions.execute(packet, { signal: abort.signal })).then(
++      result => { if (!socket.destroyed) socket.end(JSON.stringify(result) + "\n"); },
++      () => { if (!socket.destroyed) socket.end(JSON.stringify(publicFailure()) + "\n"); }
++    ).finally(() => { packet.bundleKeyBase64 = undefined; });
++  });
++}
++
++async function checkPrivate(target, uid, kind, mode, inode) {
++  const stat = await fs.lstat(target);
++  need(!stat.isSymbolicLink() && stat.uid === uid && (stat.mode & 0o777) === mode &&
++    (kind === "directory" ? stat.isDirectory() : stat.isSocket()) &&
++    (inode === undefined || stat.ino === inode), "local_socket_permissions_refused");
++  if (kind === "directory") need(await fs.realpath(target) === target, "local_socket_path_refused");
++  return stat;
++}
++async function startLocalControl({ runtime, dataDir } = {}) {
++  need(process.platform === "linux" && typeof process.getuid === "function", "local_linux_required");
++  need(runtime?.enabled === true && dataDir === "/var/data" && process.env.DATA_DIR_PAUSE_ENABLED === "true", "local_configuration_refused");
++  const tarSha256 = process.env.DATA_DIR_CAPTURE_TAR_SHA256;
++  need(typeof tarSha256 === "string" && SHA.test(tarSha256), "local_tar_pin_required");
++  const uid = process.getuid();
++  const directory = `/tmp/ia4tube-data-dir-pause-${process.pid}`;
++  const socketPath = path.join(directory, "control.sock");
++  const tmp = await fs.lstat("/tmp");
++  need(await fs.realpath("/tmp") === "/tmp" && tmp.isDirectory() && !tmp.isSymbolicLink() && tmp.uid === 0 &&
++    ((tmp.mode & 0o022) === 0 || (tmp.mode & 0o1000) !== 0), "local_tmp_refused");
++  // mkdir without recursive/existence recovery: any collision is a refusal.
++  await fs.mkdir(directory, { mode: 0o700 });
++  const directoryStat = await checkPrivate(directory, uid, "directory", 0o700);
++  const supervisor = createCaptureSupervisor({ controller: runtime.controller, sourceRoot: "/var/data",
++    workerSha256: WORKER_SHA256, envelopeSha256: ENVELOPE_SHA256, tarSha256 });
++  const actions = createControlActions({ runtime, dataDir, supervisor });
++  const sockets = new Set();
++  const server = net.createServer(socket => {
++    sockets.add(socket); socket.once("close", () => sockets.delete(socket)); attachConnection(socket, actions);
++  });
++  let listening = false;
++  await new Promise((resolve, reject) => {
++    server.on("error", () => {
++      if (!listening) reject(refusal("local_bind_refused"));
++      else {
++        for (const socket of sockets) socket.destroy();
++        void actions.shutdown().catch(() => {}); // Fail closed; never log raw errors.
++        server.close(() => {});
++      }
++    });
++    server.listen(socketPath, () => { listening = true; resolve(); });
++  });
++  await fs.chmod(socketPath, 0o600);
++  const socketStat = await checkPrivate(socketPath, uid, "socket", 0o600);
++  await checkPrivate(directory, uid, "directory", 0o700, directoryStat.ino);
++  return Object.freeze({ socketPath, actions, async close() {
++    await actions.shutdown();
++    for (const socket of sockets) socket.destroy();
++    await new Promise(resolve => server.close(resolve));
++    // Node may already unlink its socket. Never remove a replacement or recurse.
++    try { await checkPrivate(socketPath, uid, "socket", 0o600, socketStat.ino); await fs.unlink(socketPath); }
++    catch (error) { if (error.code !== "ENOENT") throw refusal("local_cleanup_refused"); }
++    await checkPrivate(directory, uid, "directory", 0o700, directoryStat.ino);
++    await fs.rmdir(directory);
++  } });
++}
++
++module.exports = { createControlActions, startLocalControl, validatePacket, decodePacket, attachConnection,
++  MAX_PACKET_BYTES, SOURCE_FINGERPRINT, WORKER_SHA256, ENVELOPE_SHA256 };
+diff --git a/src/maintenance/pause-cli.js b/src/maintenance/pause-cli.js
+new file mode 100644
+index 0000000..9901315
+--- /dev/null
++++ b/src/maintenance/pause-cli.js
+@@ -0,0 +1,84 @@
++"use strict";
++
++const fs = require("node:fs/promises");
++const net = require("node:net");
++const { decodePacket, MAX_PACKET_BYTES } = require("./local-control");
++
++function refuse() { throw new Error("pause_cli_refused"); }
++function parsePidArgs(args) {
++  if (!Array.isArray(args) || args.length !== 2 || args[0] !== "--pid" || !/^[1-9][0-9]{0,8}$/.test(args[1])) refuse();
++  return Number(args[1]);
++}
++async function readPacket(stream) {
++  if (stream.isTTY) refuse();
++  const parts = []; let bytes = 0;
++  try {
++    for await (const part of stream) {
++      bytes += part.length;
++      if (bytes > MAX_PACKET_BYTES) refuse();
++      parts.push(Buffer.from(part));
++    }
++    const packet = Buffer.concat(parts);
++    try { return decodePacket(packet); } finally { packet.fill(0); }
++  } finally { for (const part of parts) part.fill(0); }
++}
++async function verifySocket(pid) {
++  if (process.platform !== "linux" || typeof process.getuid !== "function") refuse();
++  const directory = `/tmp/ia4tube-data-dir-pause-${pid}`;
++  const socketPath = `${directory}/control.sock`;
++  const owner = process.getuid();
++  const tmp = await fs.lstat("/tmp");
++  if (!tmp.isDirectory() || tmp.isSymbolicLink() || tmp.uid !== 0 || await fs.realpath("/tmp") !== "/tmp" ||
++    ((tmp.mode & 0o022) !== 0 && (tmp.mode & 0o1000) === 0)) refuse();
++  const parent = await fs.lstat(directory), socket = await fs.lstat(socketPath);
++  if (!parent.isDirectory() || parent.isSymbolicLink() || parent.uid !== owner || (parent.mode & 0o777) !== 0o700 ||
++      await fs.realpath(directory) !== directory || !socket.isSocket() || socket.isSymbolicLink() ||
++      socket.uid !== owner || (socket.mode & 0o777) !== 0o600) refuse();
++  return socketPath;
++}
++// One stdin JSON request, one sanitized JSON result. Never supply the bundle key
++// in argv/environment, and never invoke this via a shell command containing it.
++async function runCli({ args = process.argv.slice(2), input = process.stdin, output = process.stdout } = {}) {
++  let packet;
++  try {
++    const pid = parsePidArgs(args);
++    const socketPath = await verifySocket(pid);
++    packet = await readPacket(input);
++    const wire = Buffer.from(JSON.stringify(packet) + "\n");
++    packet.bundleKeyBase64 = undefined;
++    const result = await new Promise((resolve, reject) => {
++      const socket = net.createConnection(socketPath);
++      const chunks = []; let size = 0; let settled = false;
++      // Capture deadline is server-supervised; timeout here abandons the socket,
++      // which invalidates capture. It is never reported as capture completion.
++      const timeout = setTimeout(() => { socket.destroy(); reject(new Error("pause_cli_timeout")); }, 1210000);
++      function finish(error, value) {
++        if (settled) return; settled = true; clearTimeout(timeout); wire.fill(0);
++        for (const chunk of chunks) chunk.fill(0);
++        if (error) reject(new Error("pause_cli_refused")); else resolve(value);
++      }
++      socket.once("connect", () => socket.write(wire, () => wire.fill(0)));
++      socket.on("error", () => finish(true));
++      socket.on("data", chunk => {
++        size += chunk.length;
++        if (size > 32768) { finish(true); socket.destroy(); return; }
++        chunks.push(Buffer.from(chunk));
++      });
++      socket.once("close", () => {
++        try {
++          const response = JSON.parse(Buffer.concat(chunks).toString("utf8"));
++          // The local server emits only its fixed public result vocabulary.
++          if (!response || typeof response.ok !== "boolean" || !/^local_[a-z_]+$/.test(response.code) ||
++            Object.keys(response).some(key => !["ok", "code", "status", "fence", "result", "externalWriterAttestation"].includes(key))) return finish(true);
++          finish(false, response);
++        } catch (_) { finish(true); }
++      });
++    });
++    output.write(JSON.stringify(result) + "\n");
++    return result.ok ? 0 : 2;
++  } catch (_) { output.write('{"ok":false,"code":"pause_cli_refused"}\n'); return 2; }
++  finally { if (packet) packet.bundleKeyBase64 = undefined; }
++}
++
++if (require.main === module) runCli().then(code => { process.exitCode = code; }, () => { process.exitCode = 2; });
++module.exports = { parsePidArgs, readPacket, runCli };
+diff --git a/src/maintenance/pause-controller.js b/src/maintenance/pause-controller.js
+new file mode 100644
+index 0000000..c04f70b
+--- /dev/null
++++ b/src/maintenance/pause-controller.js
+@@ -0,0 +1,215 @@
++'use strict';
++
++const { AsyncLocalStorage } = require('node:async_hooks');
++const { randomUUID } = require('node:crypto');
++const { performance } = require('node:perf_hooks');
++
++// Process-local admission/accounting only. Every writer, including detached work,
++// must register before it is scheduled. This module does not discover writers,
++// cancel business work, supervise OS processes or prove a capture artifact.
++function createPauseController(options = {}) {
++  const now = options.now || (() => performance.now());
++  const schedule = options.setTimeout || setTimeout;
++  const unschedule = options.clearTimeout || clearTimeout;
++  if ([now, schedule, unschedule].some(value => typeof value !== 'function')) {
++    throw failure('pause_configuration_invalid');
++  }
++  const epoch = randomUUID();
++  const context = new AsyncLocalStorage();
++  const leases = new WeakMap();
++  const operations = new Set();
++  const captureIds = new Set();
++  let state = 'normal';
++  let drain = null;
++  let cycleHadCapture = false;
++  let capture = null;
++  let lastCapture = null;
++
++  function failure(code) {
++    const error = new Error(code);
++    error.code = code;
++    return error;
++  }
++  function requireState(condition, code) {
++    if (!condition) throw failure(code);
++  }
++  function status() {
++    const kinds = Object.create(null);
++    for (const operation of operations) kinds[operation.kind] = (kinds[operation.kind] || 0) + 1;
++    return Object.freeze({
++      state, epoch, inFlight: operations.size, kinds: Object.freeze(kinds),
++      capture: capture ? Object.freeze({
++        captureId: capture.captureId, epoch, valid: capture.valid,
++        abortRequested: capture.abortRequested, abortHookFailed: capture.abortHookFailed,
++      }) : null,
++      lastCapture: lastCapture ? Object.freeze({ ...lastCapture }) : null,
++    });
++  }
++  function stopDrainWait(error) {
++    if (!drain) return;
++    const pending = drain;
++    drain = null;
++    if (pending.timer !== null) unschedule(pending.timer);
++    if (error) pending.reject(error);
++    else pending.resolve(status());
++  }
++  function checkDrained() {
++    if (state === 'draining' && operations.size === 0) {
++      state = 'frozen';
++      stopDrainWait();
++    }
++  }
++  function settle(operation) {
++    if (operation.removed || !operation.ownFinished || operation.children.size !== 0) return;
++    operation.removed = true;
++    operations.delete(operation);
++    if (operation.parent) {
++      operation.parent.children.delete(operation);
++      settle(operation.parent);
++    }
++    checkDrained();
++  }
++  function finish(operation) {
++    // HTTP finish/close cannot release a lease whose actual Promise is running.
++    if (operation.ownFinished || operation.running) return;
++    operation.ownFinished = true;
++    settle(operation);
++  }
++  function acquire(kind, acquireOptions = {}) {
++    requireState(typeof kind === 'string' && /^[a-z][a-z0-9_-]{0,47}$/.test(kind), 'pause_kind_invalid');
++    requireState(acquireOptions && typeof acquireOptions === 'object', 'pause_options_invalid');
++    let parent;
++    if (Object.hasOwn(acquireOptions, 'parent')) {
++      parent = leases.get(acquireOptions.parent);
++      requireState(Boolean(parent), 'pause_parent_invalid');
++    } else {
++      parent = context.getStore() || null;
++    }
++    if (parent) {
++      // A late callback inherited from a finished operation must not silently
++      // acquire a new root, even after normal operation has resumed.
++      requireState(!parent.ownFinished && !parent.removed, 'pause_parent_closed');
++      requireState(state === 'normal' || state === 'draining', 'pause_admission_closed');
++    } else {
++      requireState(state === 'normal', 'pause_admission_closed');
++    }
++    const operation = { kind, parent, children: new Set(), ownFinished: false, running: false, ran: false, removed: false };
++    operations.add(operation);
++    if (parent) parent.children.add(operation);
++    const lease = Object.freeze({
++      async run(fn) {
++        requireState(typeof fn === 'function', 'pause_operation_invalid');
++        requireState(!operation.ran && !operation.ownFinished && !operation.removed, 'pause_lease_closed');
++        operation.ran = true;
++        operation.running = true;
++        try { return await context.run(operation, fn); }
++        finally {
++          operation.running = false;
++          operation.ownFinished = true;
++          settle(operation);
++        }
++      },
++      finish() { finish(operation); },
++      bind(fn) {
++        requireState(typeof fn === 'function', 'pause_operation_invalid');
++        requireState(!operation.ownFinished && !operation.removed, 'pause_parent_closed');
++        // Binding restores the context for a callback, not its lifetime. The
++        // caller must keep this lease running until the callback actually ends.
++        return function(...args) {
++          requireState(!operation.ownFinished && !operation.removed, 'pause_parent_closed');
++          return context.run(operation, () => fn.apply(this, args));
++        };
++      },
++    });
++    leases.set(lease, operation);
++    return lease;
++  }
++  function run(kind, fn) {
++    requireState(typeof fn === 'function', 'pause_operation_invalid');
++    return acquire(kind).run(fn);
++  }
++  function beginDrain({ timeoutMs } = {}) {
++    requireState(Number.isSafeInteger(timeoutMs) && timeoutMs > 0 && timeoutMs <= 1800000, 'pause_timeout_invalid');
++    if (state === 'draining' && drain) return drain.promise;
++    requireState(state === 'normal', 'pause_state_conflict');
++    const deadline = now() + timeoutMs;
++    requireState(Number.isFinite(deadline), 'pause_clock_invalid');
++    state = 'draining'; // Synchronous fence, before returning the wait Promise.
++    cycleHadCapture = false;
++    let resolve, reject;
++    const promise = new Promise((onResolve, onReject) => { resolve = onResolve; reject = onReject; });
++    drain = { promise, resolve, reject, timer: null, deadline };
++    const pending = drain;
++    function deadlineReached() {
++      if (drain !== pending) return;
++      const remaining = pending.deadline - now();
++      if (Number.isFinite(remaining) && remaining > 0) {
++        pending.timer = schedule(deadlineReached, remaining);
++      } else {
++        // Timeout is not cancellation or completion. Admission stays closed and
++        // the same operations stay counted until their actual settlement.
++        stopDrainWait(failure('pause_drain_timeout'));
++      }
++    }
++    pending.timer = schedule(deadlineReached, timeoutMs);
++    checkDrained();
++    return promise;
++  }
++  function cancelDrain() {
++    requireState((state === 'draining' || state === 'frozen') && !cycleHadCapture && !capture, 'pause_state_conflict');
++    state = 'normal';
++    stopDrainWait(failure('pause_drain_cancelled'));
++    return status();
++  }
++  function checkEpoch(requestEpoch) {
++    requireState(requestEpoch === epoch, 'pause_epoch_stale');
++  }
++  function matchCapture(captureId, requestEpoch) {
++    checkEpoch(requestEpoch);
++    requireState(capture && capture.captureId === captureId && (state === 'capturing' || state === 'aborting'), 'pause_capture_stale');
++  }
++  function startCapture(captureId, { abort, epoch: requestEpoch } = {}) {
++    checkEpoch(requestEpoch);
++    requireState(typeof captureId === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(captureId), 'pause_capture_id_invalid');
++    requireState(typeof abort === 'function', 'pause_capture_abort_invalid');
++    requireState(state === 'frozen' && operations.size === 0 && !capture, 'pause_state_conflict');
++    requireState(!captureIds.has(captureId), 'pause_capture_stale');
++    captureIds.add(captureId);
++    cycleHadCapture = true;
++    capture = { captureId, abort, valid: true, abortRequested: false, abortHookFailed: false };
++    state = 'capturing';
++    return status();
++  }
++  function abortCapture(captureId, { epoch: requestEpoch } = {}) {
++    matchCapture(captureId, requestEpoch);
++    if (state === 'aborting') return status();
++    const current = capture;
++    current.valid = false;
++    current.abortRequested = true;
++    state = 'aborting'; // Invalidate before invoking the supervisor's abort hook.
++    try {
++      Promise.resolve(current.abort()).catch(() => { current.abortHookFailed = true; });
++    } catch (_) { current.abortHookFailed = true; }
++    return status();
++  }
++  function captureClosed(captureId, { success, verified, epoch: requestEpoch } = {}) {
++    // TRUST BOUNDARY: only the in-process supervisor calls this after child
++    // 'close' (not timeout/exit or a client's asserted boolean). This module
++    // cannot independently establish OS process closure or artifact integrity.
++    matchCapture(captureId, requestEpoch);
++    requireState(typeof success === 'boolean' && typeof verified === 'boolean', 'pause_capture_result_invalid');
++    const completed = state === 'capturing' && capture.valid && success && verified;
++    lastCapture = { captureId, epoch, outcome: completed ? 'completed' : 'invalid', verified: completed };
++    capture = null;
++    state = 'frozen';
++    return status();
++  }
++  function resume() {
++    requireState(state === 'frozen' && !capture && operations.size === 0, 'pause_state_conflict');
++    state = 'normal';
++    return status();
++  }
++  return Object.freeze({ acquire, run, fork: run, beginDrain, cancelDrain, status, startCapture, abortCapture, captureClosed, resume });
++}
++
++module.exports = { createPauseController };
+diff --git a/src/maintenance/pause-marker.js b/src/maintenance/pause-marker.js
+new file mode 100644
+index 0000000..7738817
+--- /dev/null
++++ b/src/maintenance/pause-marker.js
+@@ -0,0 +1,109 @@
++"use strict";
++
++const fs = require("node:fs");
++const fsp = require("node:fs/promises");
++const path = require("node:path");
++const os = require("node:os");
++const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/;
++const MARKER_NAME = ".ia4tube-pause.lock";
++function fail() { throw Object.assign(new Error("pause_marker_refused"), { code: "pause_marker_refused" }); }
++function need(value) { if (!value) fail(); }
++function markerPath(dataDir) {
++  need(typeof dataDir === "string" && path.isAbsolute(dataDir));
++  const root = path.resolve(dataDir);
++  need(root !== path.parse(root).root);
++  return path.join(root, MARKER_NAME);
++}
++
++// Called synchronously before ALL legacy imports/initializers, even flag=false.
++// Any entry (including a directory/dangling symlink/partial file) stops startup.
++// This function never reads marker contents and never repairs or deletes it.
++function assertNoUnfinishedPause({ dataDir } = {}) {
++  const target = markerPath(dataDir);
++  try { fs.lstatSync(target); }
++  catch (error) { if (error.code === "ENOENT") return; fail(); }
++  fail();
++}
++
++function createPauseMarker({ dataDir, testOnly = false, syncDirectory: fixtureSync } = {}) {
++  const target = markerPath(dataDir);
++  const root = path.dirname(target);
++  if (testOnly) {
++    need(root.startsWith(path.resolve(os.tmpdir()) + path.sep) && typeof fixtureSync === "function");
++  } else need(process.platform === "linux" && root === "/var/data" && fixtureSync === undefined);
++  const uid = typeof process.getuid === "function" ? process.getuid() : null;
++  let owned = null;
++  let directoryIdentity = null;
++  let removed = false;
++  const sameIdentity = (one, two) => one.dev === two.dev && one.ino === two.ino && one.uid === two.uid;
++  async function directory() {
++    const stat = await fsp.lstat(root);
++    need(stat.isDirectory() && !stat.isSymbolicLink() && await fsp.realpath(root) === root);
++    if (!testOnly) need(stat.uid === uid);
++    if (directoryIdentity) need(sameIdentity(directoryIdentity, stat));
++    else directoryIdentity = stat;
++  }
++  async function barrier() {
++    if (testOnly) return fixtureSync(root);
++    const handle = await fsp.open(root, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
++    try { need(sameIdentity(directoryIdentity, await handle.stat())); await handle.sync(); }
++    finally { await handle.close(); }
++  }
++  async function absent() {
++    try { await fsp.lstat(target); }
++    catch (error) { if (error.code === "ENOENT") return; fail(); }
++    fail();
++  }
++  async function acquire(epoch) {
++    try {
++      need(typeof epoch === "string" && UUID.test(epoch) && !owned);
++      await directory();
++      const handle = await fsp.open(target, "wx", 0o600);
++      const bytes = Buffer.from(JSON.stringify({ format: "ia4tube-pause-marker-v1", epoch, pid: process.pid }) + "\n");
++      try {
++        const identity = await handle.stat();
++        need(identity.isFile() && identity.nlink === 1);
++        if (!testOnly) need(identity.uid === uid && (identity.mode & 0o777) === 0o600);
++        owned = { epoch, bytes, identity };
++        removed = false;
++        await handle.writeFile(bytes);
++        await handle.sync();
++      } finally { await handle.close(); }
++      await barrier();
++    } catch (_) { fail(); } // Preserve partial/owned marker after any failure.
++  }
++  async function release(epoch) {
++    try {
++      need(typeof epoch === "string" && UUID.test(epoch));
++      await directory();
++      if (!owned) { await absent(); return; } // No acquisition occurred; never adopt an existing marker.
++      need(epoch === owned.epoch);
++      if (!removed) {
++        const observed = await fsp.lstat(target);
++        need(observed.isFile() && !observed.isSymbolicLink() && observed.nlink === 1 && sameIdentity(observed, owned.identity));
++        if (!testOnly) need(observed.uid === uid && (observed.mode & 0o777) === 0o600);
++        need(observed.size === owned.bytes.length);
++        const handle = await fsp.open(target, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW || 0));
++        const bytes = Buffer.alloc(owned.bytes.length + 1);
++        try {
++          need(sameIdentity(observed, await handle.stat()));
++          const result = await handle.read(bytes, 0, bytes.length, 0);
++          need(result.bytesRead === owned.bytes.length && bytes.subarray(0, result.bytesRead).equals(owned.bytes));
++          const latest = await fsp.lstat(target);
++          need(sameIdentity(latest, observed) && latest.size === observed.size && latest.mtimeMs === observed.mtimeMs && latest.ctimeMs === observed.ctimeMs);
++        } finally { bytes.fill(0); await handle.close(); }
++        await fsp.unlink(target);
++        removed = true;
++      } else await absent();
++      // If this barrier fails, keep bookkeeping and admission closed. The SAME
++      // owner can retry absence+barrier; another process cannot remove/adopt it.
++      await barrier();
++      owned.bytes.fill(0);
++      owned = null;
++      removed = false;
++    } catch (_) { fail(); }
++  }
++  return Object.freeze({ acquire, release, held: () => owned !== null });
++}
++
++module.exports = { assertNoUnfinishedPause, createPauseMarker, MARKER_NAME };
+diff --git a/src/maintenance/pause-runtime.js b/src/maintenance/pause-runtime.js
+new file mode 100644
+index 0000000..826093b
+--- /dev/null
++++ b/src/maintenance/pause-runtime.js
+@@ -0,0 +1,121 @@
++"use strict";
++const { createPauseController } = require("./pause-controller");
++const REQUEST = Symbol("ia4tube.pause.request");
++const CONTINUATION = Symbol("ia4tube.pause.continuation");
++
++function createPauseRuntime({ enabled = false, defer = setImmediate, controller = createPauseController() } = {}) {
++  let faults = 0;
++  const admission = (req, res, next) => {
++    if (!enabled) return next();
++    if (controller.status().state !== "normal") {
++      // Deliberately tiny read-only health response; no legacy GET is executed.
++      if (req.method === "GET" && req.url === "/") return res.json({ ok: true, maintenance: true });
++      res.setHeader("Retry-After", "30");
++      res.setHeader("Cache-Control", "no-store");
++      return res.status(503).json({ ok: false, code: "data_dir_paused", error: "Manutencao temporaria. Tente novamente depois." });
++    }
++    const lease = controller.acquire("http-request");
++    req[REQUEST] = lease;
++    const completion = lease.run(() => new Promise((resolve, reject) => {
++      // Children own their actual completion. A disconnected socket therefore
++      // cannot finish a running async handler or a still-open multer callback.
++      res.once("finish", resolve);
++      res.once("close", resolve);
++      try { next(); } catch (error) { reject(error); }
++    }));
++    Promise.resolve(completion).catch(next);
++  };
++
++  function wrapLayer(original) {
++    function invoke(receiver, args, nextIndex) {
++      const req = args[nextIndex - 2], res = args[nextIndex - 1], originalNext = args[nextIndex];
++      if (!req[REQUEST]) return original.apply(receiver, args);
++      // A response close finishes the request's own wait, not its live handler.
++      // next() must attach downstream work to that live handler rather than to
++      // the already-finished request root. The scoped marker is restored before
++      // yielding, so concurrent asynchronous branches do not share mutable state.
++      const lease = controller.acquire("http-handler", { parent: req[CONTINUATION] || req[REQUEST] });
++      const result = lease.run(() => new Promise((resolve, reject) => {
++        // A response that was already finished/destroyed before this callback
++        // began is not evidence that this newly admitted callback has finished.
++        let returned = false, nextCalled = false, responseFinished = false, pendingPromise = false;
++        const done = () => {
++          if (returned && !pendingPromise && (original.length < nextIndex + 1 || nextCalled || responseFinished)) {
++            res.removeListener("finish", finish); resolve();
++          }
++        };
++        const finish = () => { responseFinished = true; done(); };
++        res.once("finish", finish);
++        args[nextIndex] = lease.bind((...nextArgs) => {
++          nextCalled = true;
++          const previous = req[CONTINUATION];
++          req[CONTINUATION] = lease;
++          try { originalNext(...nextArgs); } catch (error) { reject(error); }
++          finally {
++            if (previous === undefined) delete req[CONTINUATION];
++            else req[CONTINUATION] = previous;
++          }
++          done();
++        });
++        const failed = error => {
++          pendingPromise = false;
++          returned = true;
++          res.removeListener("finish", finish);
++          // Forward while this lease is still live. A catch attached after
++          // lease.run settles would otherwise point error handlers at a closed
++          // parent, especially after an aborted response.
++          try { args[nextIndex](error); resolve(); } catch (forwardError) { reject(forwardError); }
++        };
++        try {
++          const value = original.apply(receiver, args);
++          pendingPromise = Boolean(value && typeof value.then === "function");
++          returned = true;
++          if (pendingPromise) Promise.resolve(value).then(() => {
++            pendingPromise = false; res.removeListener("finish", finish); resolve();
++          }, failed);
++          else done();
++        } catch (error) { failed(error); }
++      }));
++      Promise.resolve(result).catch(originalNext);
++      return result;
++    }
++    // Express 4 detects error middleware by arity. Keep it unchanged.
++    return original.length === 4
++      ? function(error, req, res, next) { return invoke(this, [error, req, res, next], 3); }
++      : function(req, res, next) { return invoke(this, [req, res, next], 2); };
++  }
++
++  function finalizeRouting(app) {
++    if (!enabled) return;
++    if (!app._router || !Array.isArray(app._router.stack)) throw new Error("pause_express_stack_refused");
++    const seen = new Set();
++    function walk(stack) {
++      for (const layer of stack) {
++        if (seen.has(layer)) continue;
++        seen.add(layer);
++        if (layer.route && Array.isArray(layer.route.stack)) walk(layer.route.stack);
++        else if (layer.handle && Array.isArray(layer.handle.stack)) walk(layer.handle.stack);
++        else if (typeof layer.handle === "function" && layer.handle !== admission) layer.handle = wrapLayer(layer.handle);
++        else if (layer.handle !== admission) throw new Error("pause_express_layer_refused");
++      }
++    }
++    walk(app._router.stack);
++  }
++  function background(kind, fn) {
++    if (!enabled) return fn;
++    return function(...args) {
++      if (controller.status().state !== "normal") return;
++      return controller.run(kind, () => fn.apply(this, args));
++    };
++  }
++  function detached(kind, fn) { return enabled ? controller.fork(kind, fn) : fn(); }
++  function deferred(kind, fn) {
++    if (!enabled) return defer(fn);
++    const lease = controller.acquire(kind);
++    try {
++      return defer(() => { Promise.resolve(lease.run(fn)).catch(() => { faults++; }); });
++    } catch (error) { faults++; lease.finish(); throw error; }
++  }
++  return Object.freeze({ enabled, controller, admission, finalizeRouting, background, detached, deferred, faults: () => faults });
++}
++module.exports = { createPauseRuntime };
+diff --git a/src/maintenance/recovery/encrypted-backup-bundle.js b/src/maintenance/recovery/encrypted-backup-bundle.js
+new file mode 100644
+index 0000000..6115c2a
+--- /dev/null
++++ b/src/maintenance/recovery/encrypted-backup-bundle.js
+@@ -0,0 +1,1759 @@
++"use strict";
++
++const crypto = require("node:crypto");
++const fs = require("node:fs");
++const path = require("node:path");
++const { Transform, Writable } = require("node:stream");
++const { pipeline } = require("node:stream/promises");
++const tar = require("tar-stream");
++const { SocialPostgresError } = require("./errors");
++
++const BUNDLE_FORMAT = "ia4tube-social-postgresql-encrypted-bundle";
++const BUNDLE_FORMAT_VERSION = 2;
++const BUNDLE_AAD_VERSION = 2;
++const BUNDLE_ALGORITHM = "aes-256-gcm";
++const BUNDLE_MAGIC = Buffer.from("IA4TUBE-SOCIAL-BUNDLE\u0000", "ascii");
++const HEADER_LENGTH_BYTES = 4;
++const MAX_HEADER_BYTES = 4096;
++const NONCE_BYTES = 12;
++const AUTH_TAG_BYTES = 16;
++const KEY_BYTES = 32;
++const MAX_ARCHIVE_ENTRY_BYTES = 16 * 1024 * 1024 * 1024;
++const MAX_BUNDLE_PLAINTEXT_BYTES = 32 * 1024 * 1024 * 1024;
++const MIN_EXTRACTION_MARGIN_BYTES = 64 * 1024 * 1024;
++const EXTRACTION_MARGIN_PERCENT = 10;
++const WORKSPACE_FORMAT = "ia4tube-social-owned-workspace";
++const WORKSPACE_FORMAT_VERSION = 1;
++const WORKSPACE_ID_BYTES = 16;
++const WORKSPACE_MARKER_NAME = ".ia4tube-workspace-owner.json";
++const WORKSPACE_PREFIX = ".ia4tube-social-workspace-";
++const DEFAULT_STALE_WORKSPACE_AGE_MS = 24 * 60 * 60 * 1000;
++const SAFE_ARCHIVE_NAME = /^[a-z0-9][a-z0-9._/-]{0,99}$/;
++const SAFE_LABEL = /^[a-z0-9][a-z0-9._-]{0,99}$/;
++const SAFE_PURPOSE = /^[a-z][a-z0-9-]{0,39}$/;
++const WORKSPACE_ID = /^[0-9a-f]{32}$/;
++const SHA256 = /^[0-9a-f]{64}$/;
++
++class EncryptedBackupBundleError extends SocialPostgresError {
++  constructor(code) {
++    super(code, "Bundle criptografado do backup social recusado.");
++    this.name = "EncryptedBackupBundleError";
++  }
++}
++
++function bundleFail(code) {
++  throw new EncryptedBackupBundleError(code);
++}
++
++function canonicalJson(value) {
++  if (Array.isArray(value)) {
++    return `[${value.map((item) => canonicalJson(item)).join(",")}]`;
++  }
++  if (value && typeof value === "object") {
++    return `{${Object.keys(value)
++      .sort()
++      .map((key) => `${JSON.stringify(key)}:${canonicalJson(value[key])}`)
++      .join(",")}}`;
++  }
++  return JSON.stringify(value);
++}
++
++function decodeBundleKey(encoded) {
++  if (
++    typeof encoded !== "string" ||
++    encoded.length !== 44 ||
++    !/^[A-Za-z0-9+/]{43}=$/.test(encoded)
++  ) {
++    bundleFail("backup_bundle_key_invalid");
++  }
++  const key = Buffer.from(encoded, "base64");
++  if (
++    key.length !== KEY_BYTES ||
++    key.toString("base64") !== encoded
++  ) {
++    key.fill(0);
++    bundleFail("backup_bundle_key_invalid");
++  }
++  return key;
++}
++
++function requireBundleKey(value) {
++  if (!Buffer.isBuffer(value) || value.length !== KEY_BYTES) {
++    bundleFail("backup_bundle_key_invalid");
++  }
++  return Buffer.from(value);
++}
++
++function requireLabel(value) {
++  if (typeof value !== "string" || !SAFE_LABEL.test(value)) {
++    bundleFail("backup_bundle_label_invalid");
++  }
++  return value;
++}
++
++function requireFingerprint(value) {
++  const fingerprint = String(value || "").toLowerCase();
++  if (!SHA256.test(fingerprint)) {
++    bundleFail("backup_bundle_source_fingerprint_invalid");
++  }
++  return fingerprint;
++}
++
++function requireArchiveName(value) {
++  if (
++    typeof value !== "string" ||
++    !SAFE_ARCHIVE_NAME.test(value) ||
++    value.startsWith("/") ||
++    value.includes("\\") ||
++    value.split("/").some((part) => !part || part === "." || part === "..")
++  ) {
++    bundleFail("backup_bundle_archive_name_invalid");
++  }
++  return value;
++}
++
++function requireExpectedNames(values) {
++  if (!Array.isArray(values) || values.length < 1 || values.length > 256) {
++    bundleFail("backup_bundle_allowlist_invalid");
++  }
++  const names = values.map(requireArchiveName);
++  if (new Set(names).size !== names.length) {
++    bundleFail("backup_bundle_allowlist_invalid");
++  }
++  return Object.freeze(names);
++}
++
++function requireRegularSourcePath(file, fileSystem = fs) {
++  const resolved = path.resolve(file);
++  let stat;
++  try {
++    stat = fileSystem.lstatSync(resolved);
++  } catch {
++    bundleFail("backup_bundle_source_missing");
++  }
++  if (
++    !stat.isFile() ||
++    stat.isSymbolicLink() ||
++    !Number.isSafeInteger(stat.size) ||
++    stat.size < 1 ||
++    stat.size > MAX_ARCHIVE_ENTRY_BYTES
++  ) {
++    bundleFail("backup_bundle_source_invalid");
++  }
++  return Object.freeze({ path: resolved, size: stat.size, stat });
++}
++
++function sameObjectIdentity(left, right) {
++  return Boolean(
++    left &&
++      right &&
++      left.dev === right.dev &&
++      left.ino === right.ino
++  );
++}
++
++function sameFileIdentity(left, right) {
++  return sameObjectIdentity(left, right) && left.size === right.size;
++}
++
++function sameStableFileIdentity(left, right) {
++  return Boolean(
++    sameFileIdentity(left, right) &&
++      left.mtimeMs === right.mtimeMs &&
++      left.ctimeMs === right.ctimeMs
++  );
++}
++
++function closeDescriptorSafely(descriptor, fileSystem = fs) {
++  if (descriptor === undefined) return true;
++  try {
++    fileSystem.closeSync(descriptor);
++    return true;
++  } catch (error) {
++    return error?.code === "EBADF";
++  }
++}
++
++function closeDescriptor(descriptor, fileSystem = fs) {
++  if (!closeDescriptorSafely(descriptor, fileSystem)) {
++    bundleFail("backup_bundle_descriptor_cleanup_failed");
++  }
++}
++
++function closeSourceEntries(normalized, fileSystem = fs) {
++  if (!normalized) return true;
++  let failed = false;
++  for (const entry of normalized.entries) {
++    failed =
++      !closeDescriptorSafely(entry.descriptor, fileSystem) || failed;
++  }
++  return !failed;
++}
++
++function openRegularSource(source, fileSystem = fs) {
++  let descriptor;
++  try {
++    descriptor = fileSystem.openSync(
++      source.path,
++      fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW || 0)
++    );
++    const opened = fileSystem.fstatSync(descriptor);
++    if (
++      !opened.isFile() ||
++      !sameStableFileIdentity(source.stat, opened) ||
++      opened.size < 1 ||
++      opened.size > MAX_ARCHIVE_ENTRY_BYTES
++    ) {
++      bundleFail("backup_bundle_source_changed");
++    }
++    return Object.freeze({
++      path: source.path,
++      size: opened.size,
++      descriptor,
++      identity: opened
++    });
++  } catch (error) {
++    if (descriptor !== undefined) {
++      try {
++        fileSystem.closeSync(descriptor);
++      } catch {
++        bundleFail("backup_bundle_descriptor_cleanup_failed");
++      }
++    }
++    if (error instanceof EncryptedBackupBundleError) throw error;
++    bundleFail("backup_bundle_source_invalid");
++  }
++}
++
++function normalizeEntries(entries, expectedNames, fileSystem = fs) {
++  const allowlist = requireExpectedNames(expectedNames);
++  if (!Array.isArray(entries) || entries.length !== allowlist.length) {
++    bundleFail("backup_bundle_entries_invalid");
++  }
++  const inspected = entries.map((entry, index) => {
++    const name = requireArchiveName(entry?.name);
++    if (name !== allowlist[index]) {
++      bundleFail("backup_bundle_entries_invalid");
++    }
++    return Object.freeze({
++      name,
++      ...requireRegularSourcePath(entry?.path, fileSystem)
++    });
++  });
++  const tarBytes = inspected.reduce(
++    (total, entry) =>
++      total + 512 + Math.ceil(entry.size / 512) * 512,
++    1024
++  );
++  if (
++    !Number.isSafeInteger(tarBytes) ||
++    tarBytes > MAX_BUNDLE_PLAINTEXT_BYTES
++  ) {
++    bundleFail("backup_bundle_size_limit_exceeded");
++  }
++  const opened = [];
++  try {
++    for (const entry of inspected) {
++      opened.push(
++        Object.freeze({
++          name: entry.name,
++          ...openRegularSource(entry, fileSystem)
++        })
++      );
++    }
++  } catch (error) {
++    let cleanupFailed = false;
++    for (const entry of opened) {
++      cleanupFailed =
++        !closeDescriptorSafely(entry.descriptor, fileSystem) ||
++        cleanupFailed;
++    }
++    if (cleanupFailed) {
++      bundleFail("backup_bundle_descriptor_cleanup_failed");
++    }
++    throw error;
++  }
++  return Object.freeze({
++    entries: Object.freeze(opened),
++    tarBytes
++  });
++}
++
++function createHeader({ label, sourceFingerprint, nonce, tarBytes }) {
++  if (!Buffer.isBuffer(nonce) || nonce.length !== NONCE_BYTES) {
++    bundleFail("backup_bundle_nonce_invalid");
++  }
++  if (
++    !Number.isSafeInteger(tarBytes) ||
++    tarBytes < 1024 ||
++    tarBytes > MAX_BUNDLE_PLAINTEXT_BYTES
++  ) {
++    bundleFail("backup_bundle_size_limit_exceeded");
++  }
++  return Object.freeze({
++    aadVersion: BUNDLE_AAD_VERSION,
++    algorithm: BUNDLE_ALGORITHM,
++    format: BUNDLE_FORMAT,
++    formatVersion: BUNDLE_FORMAT_VERSION,
++    label: requireLabel(label),
++    nonce: nonce.toString("base64"),
++    sourceFingerprint: requireFingerprint(sourceFingerprint),
++    tarBytes
++  });
++}
++
++function encodeHeader(header) {
++  const bytes = Buffer.from(canonicalJson(header), "utf8");
++  if (bytes.length < 2 || bytes.length > MAX_HEADER_BYTES) {
++    bundleFail("backup_bundle_header_invalid");
++  }
++  const length = Buffer.alloc(HEADER_LENGTH_BYTES);
++  length.writeUInt32BE(bytes.length);
++  const prefix = Buffer.concat([BUNDLE_MAGIC, length, bytes]);
++  length.fill(0);
++  return Object.freeze({ bytes, prefix });
++}
++
++function parseHeaderBytes(bytes) {
++  let parsed;
++  try {
++    parsed = JSON.parse(bytes.toString("utf8"));
++  } catch {
++    bundleFail("backup_bundle_header_invalid");
++  }
++  const expectedKeys = [
++    "aadVersion",
++    "algorithm",
++    "format",
++    "formatVersion",
++    "label",
++    "nonce",
++    "sourceFingerprint",
++    "tarBytes"
++  ];
++  if (
++    !parsed ||
++    Array.isArray(parsed) ||
++    typeof parsed !== "object" ||
++    Object.keys(parsed).sort().join("\u0000") !==
++      expectedKeys.sort().join("\u0000") ||
++    parsed.aadVersion !== BUNDLE_AAD_VERSION ||
++    parsed.algorithm !== BUNDLE_ALGORITHM ||
++    parsed.format !== BUNDLE_FORMAT ||
++    parsed.formatVersion !== BUNDLE_FORMAT_VERSION ||
++    !Number.isSafeInteger(parsed.tarBytes) ||
++    parsed.tarBytes < 1024 ||
++    parsed.tarBytes > MAX_BUNDLE_PLAINTEXT_BYTES ||
++    Buffer.from(canonicalJson(parsed), "utf8").compare(bytes) !== 0
++  ) {
++    bundleFail("backup_bundle_header_invalid");
++  }
++  const nonce = Buffer.from(String(parsed.nonce || ""), "base64");
++  if (
++    nonce.length !== NONCE_BYTES ||
++    nonce.toString("base64") !== parsed.nonce
++  ) {
++    nonce.fill(0);
++    bundleFail("backup_bundle_header_invalid");
++  }
++  return Object.freeze({
++    header: Object.freeze({
++      ...parsed,
++      label: requireLabel(parsed.label),
++      sourceFingerprint: requireFingerprint(parsed.sourceFingerprint)
++    }),
++    nonce
++  });
++}
++
++function exactStringEqual(left, right) {
++  const leftDigest = crypto.createHash("sha256").update(left).digest();
++  const rightDigest = crypto.createHash("sha256").update(right).digest();
++  try {
++    return crypto.timingSafeEqual(leftDigest, rightDigest);
++  } finally {
++    leftDigest.fill(0);
++    rightDigest.fill(0);
++  }
++}
++
++function hashPassThrough(hash, byteCounter) {
++  return new Transform({
++    transform(chunk, encoding, callback) {
++      hash.update(chunk);
++      if (byteCounter) byteCounter.size += chunk.length;
++      callback(null, chunk);
++    }
++  });
++}
++
++function framingTransform(prefix, cipher) {
++  let prefixWritten = false;
++  return new Transform({
++    transform(chunk, encoding, callback) {
++      if (!prefixWritten) {
++        prefixWritten = true;
++        this.push(prefix);
++      }
++      this.push(chunk);
++      callback();
++    },
++    flush(callback) {
++      try {
++        if (!prefixWritten) this.push(prefix);
++        this.push(cipher.getAuthTag());
++        callback();
++      } catch {
++        callback(new EncryptedBackupBundleError(
++          "backup_bundle_auth_tag_unavailable"
++        ));
++      }
++    }
++  });
++}
++
++async function appendFileToPack(pack, entry, fileSystem = fs) {
++  const target = pack.entry({
++    name: entry.name,
++    type: "file",
++    size: entry.size,
++    mode: 0o600,
++    uid: 0,
++    gid: 0,
++    uname: "",
++    gname: "",
++    mtime: new Date(0)
++  });
++  const hash = crypto.createHash("sha256");
++  const counter = { size: 0 };
++  await pipeline(
++    fileSystem.createReadStream(entry.path, {
++      fd: entry.descriptor,
++      autoClose: false,
++      start: 0,
++      end: entry.size - 1
++    }),
++    hashPassThrough(hash, counter),
++    target
++  );
++  const after = fileSystem.fstatSync(entry.descriptor);
++  if (
++    counter.size !== entry.size ||
++    !sameStableFileIdentity(entry.identity, after)
++  ) {
++    bundleFail("backup_bundle_source_changed");
++  }
++  return Object.freeze({
++    name: entry.name,
++    size: counter.size,
++    sha256: hash.digest("hex")
++  });
++}
++
++function requireFreshAtomicTarget(outputPath, fileSystem = fs) {
++  if (!path.isAbsolute(outputPath)) {
++    bundleFail("backup_bundle_output_invalid");
++  }
++  const finalPath = path.resolve(outputPath);
++  const partialPath = `${finalPath}.partial`;
++  const directory = path.dirname(finalPath);
++  let directoryStat;
++  try {
++    directoryStat = fileSystem.lstatSync(directory);
++  } catch {
++    bundleFail("backup_bundle_output_invalid");
++  }
++  if (
++    !directoryStat.isDirectory() ||
++    directoryStat.isSymbolicLink() ||
++    fileSystem.existsSync(finalPath) ||
++    fileSystem.existsSync(partialPath)
++  ) {
++    bundleFail("backup_bundle_output_not_fresh");
++  }
++  return Object.freeze({ finalPath, partialPath, directory });
++}
++
++function cleanupOwnedPath(file, ownership, fileSystem = fs) {
++  if (!ownership.owned) return true;
++  try {
++    const current = fileSystem.lstatSync(file);
++    if (
++      current.isSymbolicLink() ||
++      !current.isFile() ||
++      !sameObjectIdentity(ownership.identity, current)
++    ) {
++      return false;
++    }
++    fileSystem.unlinkSync(file);
++    ownership.owned = false;
++    return !fileSystem.existsSync(file);
++  } catch (error) {
++    if (error?.code === "ENOENT") {
++      ownership.owned = false;
++      return true;
++    }
++    return false;
++  }
++}
++
++function cleanupAtomicTarget(target, ownership, fileSystem = fs) {
++  let failed = false;
++  failed =
++    !cleanupOwnedPath(
++      target.partialPath,
++      ownership.partial,
++      fileSystem
++    ) || failed;
++  failed =
++    !cleanupOwnedPath(target.finalPath, ownership.final, fileSystem) ||
++    failed;
++  if (failed) {
++    bundleFail("backup_bundle_cleanup_failed");
++  }
++}
++
++function fsyncDirectoryWhenSupported(directory, fileSystem = fs) {
++  let descriptor;
++  try {
++    descriptor = fileSystem.openSync(directory, fs.constants.O_RDONLY);
++    fileSystem.fsyncSync(descriptor);
++    return true;
++  } catch (error) {
++    if (
++      ["EINVAL", "EISDIR", "ENOTSUP", "EPERM"].includes(error?.code)
++    ) {
++      return false;
++    }
++    bundleFail("backup_bundle_directory_sync_failed");
++  } finally {
++    if (descriptor !== undefined) {
++      try {
++        fileSystem.closeSync(descriptor);
++      } catch {
++        bundleFail("backup_bundle_descriptor_cleanup_failed");
++      }
++    }
++  }
++}
++
++function freezeCreatedBundle(properties, identity) {
++  const result = { ...properties };
++  Object.defineProperty(result, "identity", {
++    value: identity,
++    enumerable: false,
++    writable: false,
++    configurable: false
++  });
++  return Object.freeze(result);
++}
++
++function cleanupCreatedBundle(bundle, fileSystem = fs) {
++  if (
++    !bundle ||
++    typeof bundle.path !== "string" ||
++    !path.isAbsolute(bundle.path) ||
++    !bundle.identity
++  ) {
++    bundleFail("backup_bundle_cleanup_ownership_invalid");
++  }
++  const ownership = {
++    owned: true,
++    identity: bundle.identity
++  };
++  if (!cleanupOwnedPath(bundle.path, ownership, fileSystem)) {
++    bundleFail("backup_bundle_cleanup_failed");
++  }
++  fsyncDirectoryWhenSupported(path.dirname(bundle.path), fileSystem);
++  return true;
++}
++
++async function createEncryptedBundle({
++  entries,
++  expectedNames,
++  outputPath,
++  label,
++  sourceFingerprint,
++  bundleKey,
++  randomBytes = crypto.randomBytes,
++  fileSystem = fs
++}) {
++  const target = requireFreshAtomicTarget(outputPath, fileSystem);
++  const key = requireBundleKey(bundleKey);
++  const ownership = {
++    partial: { owned: false, identity: null },
++    final: { owned: false, identity: null }
++  };
++  let normalized;
++  let sourcesClosed = false;
++  let nonce;
++  let outputDescriptor;
++  let output;
++  try {
++    normalized = normalizeEntries(entries, expectedNames, fileSystem);
++    nonce = randomBytes(NONCE_BYTES);
++    if (!Buffer.isBuffer(nonce) || nonce.length !== NONCE_BYTES) {
++      bundleFail("backup_bundle_nonce_invalid");
++    }
++    nonce = Buffer.from(nonce);
++    const encoded = encodeHeader(
++      createHeader({
++        label,
++        sourceFingerprint,
++        nonce,
++        tarBytes: normalized.tarBytes
++      })
++    );
++    const cipher = crypto.createCipheriv(BUNDLE_ALGORITHM, key, nonce, {
++      authTagLength: AUTH_TAG_BYTES
++    });
++    cipher.setAAD(encoded.prefix);
++    const tarHash = crypto.createHash("sha256");
++    const tarCounter = { size: 0 };
++    const containerHash = crypto.createHash("sha256");
++    const containerCounter = { size: 0 };
++    const pack = tar.pack();
++    outputDescriptor = fileSystem.openSync(
++      target.partialPath,
++      fs.constants.O_WRONLY |
++        fs.constants.O_CREAT |
++        fs.constants.O_EXCL,
++      0o600
++    );
++    ownership.partial.identity =
++      fileSystem.fstatSync(outputDescriptor);
++    ownership.partial.owned = true;
++    output = fileSystem.createWriteStream(target.partialPath, {
++      fd: outputDescriptor,
++      autoClose: false
++    });
++    const stream = pipeline(
++      pack,
++      hashPassThrough(tarHash, tarCounter),
++      cipher,
++      framingTransform(encoded.prefix, cipher),
++      hashPassThrough(containerHash, containerCounter),
++      output
++    );
++    const entryEvidence = [];
++    try {
++      for (const entry of normalized.entries) {
++        entryEvidence.push(
++          await appendFileToPack(pack, entry, fileSystem)
++        );
++      }
++      pack.finalize();
++      await stream;
++    } catch (error) {
++      pack.destroy(error);
++      try {
++        await stream;
++      } catch {
++        // The stable bundle error below is authoritative.
++      }
++      throw error;
++    }
++    if (tarCounter.size !== normalized.tarBytes) {
++      bundleFail("backup_bundle_tar_size_mismatch");
++    }
++    if (!closeSourceEntries(normalized, fileSystem)) {
++      bundleFail("backup_bundle_descriptor_cleanup_failed");
++    }
++    sourcesClosed = true;
++    fileSystem.fchmodSync(outputDescriptor, 0o600);
++    fileSystem.fsyncSync(outputDescriptor);
++    const completedIdentity = fileSystem.fstatSync(outputDescriptor);
++    if (
++      !sameObjectIdentity(
++        ownership.partial.identity,
++        completedIdentity
++      ) ||
++      completedIdentity.size !== containerCounter.size
++    ) {
++      bundleFail("backup_bundle_output_identity_changed");
++    }
++    ownership.partial.identity = completedIdentity;
++    fileSystem.closeSync(outputDescriptor);
++    outputDescriptor = undefined;
++    fileSystem.linkSync(target.partialPath, target.finalPath);
++    ownership.final.identity = completedIdentity;
++    ownership.final.owned = true;
++    if (
++      !cleanupOwnedPath(
++        target.partialPath,
++        ownership.partial,
++        fileSystem
++      )
++    ) {
++      bundleFail("backup_bundle_cleanup_failed");
++    }
++    const bundleDirectoryFsyncConfirmed =
++      fsyncDirectoryWhenSupported(target.directory, fileSystem);
++    return freezeCreatedBundle({
++      path: target.finalPath,
++      size: containerCounter.size,
++      sha256: containerHash.digest("hex"),
++      tarSha256: tarHash.digest("hex"),
++      bundleDirectoryFsyncConfirmed,
++      entries: Object.freeze(entryEvidence)
++    }, completedIdentity);
++  } catch (error) {
++    let descriptorCleanupFailed = false;
++    let outputDescriptorCleanupFailed = false;
++    if (normalized && !sourcesClosed) {
++      sourcesClosed = true;
++      descriptorCleanupFailed =
++        !closeSourceEntries(normalized, fileSystem);
++    }
++    if (outputDescriptor !== undefined) {
++      if (
++        closeDescriptorSafely(outputDescriptor, fileSystem)
++      ) {
++        outputDescriptor = undefined;
++      } else {
++        outputDescriptorCleanupFailed = true;
++      }
++    }
++    try {
++      cleanupAtomicTarget(target, ownership, fileSystem);
++    } catch {
++      throw new EncryptedBackupBundleError(
++        "backup_bundle_cleanup_failed"
++      );
++    }
++    if (descriptorCleanupFailed || outputDescriptorCleanupFailed) {
++      throw new EncryptedBackupBundleError(
++        "backup_bundle_descriptor_cleanup_failed"
++      );
++    }
++    if (error instanceof EncryptedBackupBundleError) throw error;
++    bundleFail("backup_bundle_creation_failed");
++  } finally {
++    if (outputDescriptor !== undefined) {
++      closeDescriptorSafely(outputDescriptor, fileSystem);
++    }
++    if (normalized && !sourcesClosed) {
++      closeSourceEntries(normalized, fileSystem);
++    }
++    key.fill(0);
++    if (nonce) nonce.fill(0);
++  }
++}
++
++function readExactly(fileSystem, descriptor, buffer, position) {
++  let offset = 0;
++  while (offset < buffer.length) {
++    const read = fileSystem.readSync(
++      descriptor,
++      buffer,
++      offset,
++      buffer.length - offset,
++      position + offset
++    );
++    if (read === 0) bundleFail("backup_bundle_truncated");
++    offset += read;
++  }
++}
++
++function openInspectedContainer(
++  containerPath,
++  { expectedLabel, expectedSourceFingerprint } = {},
++  fileSystem = fs
++) {
++  const resolved = path.resolve(containerPath);
++  let descriptor;
++  let nonce;
++  try {
++    const before = fileSystem.lstatSync(resolved);
++    if (
++      !before.isFile() ||
++      before.isSymbolicLink() ||
++      !Number.isSafeInteger(before.size) ||
++      before.size <=
++        BUNDLE_MAGIC.length + HEADER_LENGTH_BYTES + AUTH_TAG_BYTES
++    ) {
++      bundleFail("backup_bundle_container_invalid");
++    }
++    descriptor = fileSystem.openSync(
++      resolved,
++      fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW || 0)
++    );
++    const stat = fileSystem.fstatSync(descriptor);
++    if (!stat.isFile() || !sameStableFileIdentity(before, stat)) {
++      bundleFail("backup_bundle_container_changed");
++    }
++    const leading = Buffer.alloc(
++      BUNDLE_MAGIC.length + HEADER_LENGTH_BYTES
++    );
++    readExactly(fileSystem, descriptor, leading, 0);
++    if (
++      leading.subarray(0, BUNDLE_MAGIC.length).compare(BUNDLE_MAGIC) !== 0
++    ) {
++      bundleFail("backup_bundle_magic_invalid");
++    }
++    const headerLength = leading.readUInt32BE(BUNDLE_MAGIC.length);
++    if (headerLength < 2 || headerLength > MAX_HEADER_BYTES) {
++      bundleFail("backup_bundle_header_invalid");
++    }
++    const headerBytes = Buffer.alloc(headerLength);
++    readExactly(
++      fileSystem,
++      descriptor,
++      headerBytes,
++      BUNDLE_MAGIC.length + HEADER_LENGTH_BYTES
++    );
++    const parsed = parseHeaderBytes(headerBytes);
++    nonce = parsed.nonce;
++    const prefix = Buffer.concat([leading, headerBytes]);
++    const ciphertextStart = prefix.length;
++    const ciphertextBytes =
++      stat.size - ciphertextStart - AUTH_TAG_BYTES;
++    if (
++      ciphertextBytes < 1 ||
++      ciphertextBytes > MAX_BUNDLE_PLAINTEXT_BYTES ||
++      ciphertextBytes !== parsed.header.tarBytes
++    ) {
++      bundleFail("backup_bundle_tar_size_mismatch");
++    }
++    const authTag = Buffer.alloc(AUTH_TAG_BYTES);
++    readExactly(
++      fileSystem,
++      descriptor,
++      authTag,
++      stat.size - AUTH_TAG_BYTES
++    );
++    if (
++      expectedLabel !== undefined &&
++      !exactStringEqual(parsed.header.label, requireLabel(expectedLabel))
++    ) {
++      bundleFail("backup_bundle_label_mismatch");
++    }
++    if (
++      expectedSourceFingerprint !== undefined &&
++      !exactStringEqual(
++        parsed.header.sourceFingerprint,
++        requireFingerprint(expectedSourceFingerprint)
++      )
++    ) {
++      bundleFail("backup_bundle_source_fingerprint_mismatch");
++    }
++    const result = Object.freeze({
++      path: resolved,
++      size: stat.size,
++      header: parsed.header,
++      prefix,
++      nonce: Buffer.from(nonce),
++      authTag,
++      descriptor,
++      identity: stat,
++      ciphertextStart,
++      ciphertextEnd: stat.size - AUTH_TAG_BYTES - 1
++    });
++    nonce.fill(0);
++    descriptor = undefined;
++    return result;
++  } catch (error) {
++    if (error instanceof EncryptedBackupBundleError) throw error;
++    bundleFail("backup_bundle_container_invalid");
++  } finally {
++    if (descriptor !== undefined) {
++      try {
++        fileSystem.closeSync(descriptor);
++      } catch {
++        bundleFail("backup_bundle_descriptor_cleanup_failed");
++      }
++    }
++    if (nonce) nonce.fill(0);
++  }
++}
++
++function inspectContainer(
++  containerPath,
++  expectations = {},
++  fileSystem = fs
++) {
++  const container = openInspectedContainer(
++    containerPath,
++    expectations,
++    fileSystem
++  );
++  try {
++    return Object.freeze({
++      path: container.path,
++      size: container.size,
++      header: container.header,
++      prefix: Buffer.from(container.prefix),
++      nonce: Buffer.from(container.nonce),
++      authTag: Buffer.from(container.authTag),
++      ciphertextStart: container.ciphertextStart,
++      ciphertextEnd: container.ciphertextEnd
++    });
++  } finally {
++    container.prefix.fill(0);
++    container.nonce.fill(0);
++    container.authTag.fill(0);
++    closeDescriptor(container.descriptor, fileSystem);
++  }
++}
++
++function requireWorkspacePurpose(value) {
++  if (typeof value !== "string" || !SAFE_PURPOSE.test(value)) {
++    bundleFail("backup_bundle_workspace_purpose_invalid");
++  }
++  return value;
++}
++
++function requireWorkspaceRoot(root, fileSystem = fs) {
++  const resolved = path.resolve(root);
++  let stat;
++  let real;
++  try {
++    stat = fileSystem.lstatSync(resolved);
++    real = fileSystem.realpathSync(resolved);
++  } catch {
++    bundleFail("backup_bundle_work_directory_invalid");
++  }
++  const normalizedResolved =
++    process.platform === "win32" ? resolved.toLowerCase() : resolved;
++  const normalizedReal =
++    process.platform === "win32"
++      ? path.resolve(real).toLowerCase()
++      : path.resolve(real);
++  if (
++    !stat.isDirectory() ||
++    stat.isSymbolicLink() ||
++    normalizedResolved !== normalizedReal
++  ) {
++    bundleFail("backup_bundle_work_directory_invalid");
++  }
++  return Object.freeze({ path: resolved, identity: stat });
++}
++
++function workspaceMarker({ id, purpose, ownerPid, ownerUid, createdAt }) {
++  if (!WORKSPACE_ID.test(id)) {
++    bundleFail("backup_bundle_workspace_id_invalid");
++  }
++  if (!Number.isSafeInteger(ownerPid) || ownerPid < 1) {
++    bundleFail("backup_bundle_workspace_marker_invalid");
++  }
++  if (
++    ownerUid !== null &&
++    (!Number.isSafeInteger(ownerUid) || ownerUid < 0)
++  ) {
++    bundleFail("backup_bundle_workspace_marker_invalid");
++  }
++  if (
++    typeof createdAt !== "string" ||
++    !Number.isFinite(Date.parse(createdAt)) ||
++    new Date(createdAt).toISOString() !== createdAt
++  ) {
++    bundleFail("backup_bundle_workspace_marker_invalid");
++  }
++  return Object.freeze({
++    createdAt,
++    format: WORKSPACE_FORMAT,
++    formatVersion: WORKSPACE_FORMAT_VERSION,
++    id,
++    ownerPid,
++    ownerUid,
++    purpose: requireWorkspacePurpose(purpose)
++  });
++}
++
++function markerText(marker) {
++  return `${canonicalJson(marker)}\n`;
++}
++
++function workspacePrefix(purpose) {
++  return `${WORKSPACE_PREFIX}${requireWorkspacePurpose(purpose)}-`;
++}
++
++function validateWorkspaceTree(directory, fileSystem = fs) {
++  let entries;
++  try {
++    entries = fileSystem.readdirSync(directory, {
++      withFileTypes: true
++    });
++  } catch {
++    bundleFail("backup_bundle_workspace_tree_invalid");
++  }
++  for (const entry of entries) {
++    const target = path.join(directory, entry.name);
++    const relative = path.relative(directory, target);
++    if (
++      !relative ||
++      relative.startsWith("..") ||
++      path.isAbsolute(relative)
++    ) {
++      bundleFail("backup_bundle_workspace_tree_invalid");
++    }
++    let stat;
++    try {
++      stat = fileSystem.lstatSync(target);
++    } catch {
++      bundleFail("backup_bundle_workspace_tree_invalid");
++    }
++    if (stat.isSymbolicLink()) {
++      bundleFail("backup_bundle_workspace_tree_invalid");
++    }
++    if (stat.isDirectory()) {
++      validateWorkspaceTree(target, fileSystem);
++    } else if (!stat.isFile()) {
++      bundleFail("backup_bundle_workspace_tree_invalid");
++    }
++  }
++  return true;
++}
++
++function inspectOwnedWorkspace(
++  directory,
++  { root, purpose, expectedIdentity } = {},
++  fileSystem = fs
++) {
++  const workspaceRoot = requireWorkspaceRoot(root, fileSystem);
++  const checkedPurpose = requireWorkspacePurpose(purpose);
++  const resolved = path.resolve(directory);
++  const relative = path.relative(workspaceRoot.path, resolved);
++  const prefix = workspacePrefix(checkedPurpose);
++  const name = path.basename(resolved);
++  const id = name.startsWith(prefix) ? name.slice(prefix.length) : "";
++  if (
++    !relative ||
++    relative.includes(path.sep) ||
++    path.isAbsolute(relative) ||
++    !WORKSPACE_ID.test(id)
++  ) {
++    bundleFail("backup_bundle_workspace_invalid");
++  }
++  let stat;
++  try {
++    stat = fileSystem.lstatSync(resolved);
++  } catch {
++    bundleFail("backup_bundle_workspace_invalid");
++  }
++  if (
++    !stat.isDirectory() ||
++    stat.isSymbolicLink() ||
++    (expectedIdentity &&
++      !sameObjectIdentity(expectedIdentity, stat))
++  ) {
++    bundleFail("backup_bundle_workspace_invalid");
++  }
++  const markerPath = path.join(resolved, WORKSPACE_MARKER_NAME);
++  let markerStat;
++  let markerDescriptor;
++  let text;
++  try {
++    markerStat = fileSystem.lstatSync(markerPath);
++    if (
++      !markerStat.isFile() ||
++      markerStat.isSymbolicLink() ||
++      markerStat.size < 2 ||
++      markerStat.size > 512
++    ) {
++      bundleFail("backup_bundle_workspace_marker_invalid");
++    }
++    markerDescriptor = fileSystem.openSync(
++      markerPath,
++      fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW || 0)
++    );
++    const openedMarker = fileSystem.fstatSync(markerDescriptor);
++    if (!sameStableFileIdentity(markerStat, openedMarker)) {
++      bundleFail("backup_bundle_workspace_marker_invalid");
++    }
++    const markerBytes = Buffer.alloc(openedMarker.size);
++    readExactly(fileSystem, markerDescriptor, markerBytes, 0);
++    const afterRead = fileSystem.fstatSync(markerDescriptor);
++    if (!sameStableFileIdentity(openedMarker, afterRead)) {
++      markerBytes.fill(0);
++      bundleFail("backup_bundle_workspace_marker_invalid");
++    }
++    text = markerBytes.toString("utf8");
++    markerBytes.fill(0);
++  } catch (error) {
++    if (error instanceof EncryptedBackupBundleError) throw error;
++    bundleFail("backup_bundle_workspace_marker_invalid");
++  } finally {
++    if (markerDescriptor !== undefined) {
++      if (!closeDescriptorSafely(markerDescriptor, fileSystem)) {
++        bundleFail("backup_bundle_descriptor_cleanup_failed");
++      }
++    }
++  }
++  let marker;
++  try {
++    marker = JSON.parse(text);
++  } catch {
++    bundleFail("backup_bundle_workspace_marker_invalid");
++  }
++  const expectedKeys = [
++    "createdAt",
++    "format",
++    "formatVersion",
++    "id",
++    "ownerPid",
++    "ownerUid",
++    "purpose"
++  ];
++  if (
++    !marker ||
++    Array.isArray(marker) ||
++    typeof marker !== "object" ||
++    Object.keys(marker).sort().join("\u0000") !==
++      expectedKeys.sort().join("\u0000")
++  ) {
++    bundleFail("backup_bundle_workspace_marker_invalid");
++  }
++  const expected = workspaceMarker({
++    id,
++    purpose: checkedPurpose,
++    ownerPid: marker.ownerPid,
++    ownerUid: marker.ownerUid,
++    createdAt: marker.createdAt
++  });
++  if (
++    markerText(expected) !== text ||
++    canonicalJson(marker) !== canonicalJson(expected)
++  ) {
++    bundleFail("backup_bundle_workspace_marker_invalid");
++  }
++  const currentUid =
++    typeof process.getuid === "function" ? process.getuid() : null;
++  if (
++    expected.ownerUid !== currentUid ||
++    (process.platform !== "win32" &&
++      ((stat.mode & 0o077) !== 0 ||
++        (markerStat.mode & 0o077) !== 0))
++  ) {
++    bundleFail("backup_bundle_workspace_permissions_invalid");
++  }
++  validateWorkspaceTree(resolved, fileSystem);
++  return Object.freeze({
++    path: resolved,
++    root: workspaceRoot.path,
++    purpose: checkedPurpose,
++    id,
++    markerPath,
++    identity: stat,
++    createdAt: expected.createdAt,
++    ownerPid: expected.ownerPid,
++    ownerUid: expected.ownerUid
++  });
++}
++
++function createOwnedWorkspace({
++  root,
++  purpose,
++  id: requestedId,
++  randomBytes = crypto.randomBytes,
++  now = () => new Date(),
++  fileSystem = fs
++}) {
++  const workspaceRoot = requireWorkspaceRoot(root, fileSystem);
++  const checkedPurpose = requireWorkspacePurpose(purpose);
++  let workspace;
++  let createdPath;
++  let createdIdentity;
++  let markerDescriptor;
++  try {
++    let id = requestedId;
++    if (id === undefined) {
++      const generated = randomBytes(WORKSPACE_ID_BYTES);
++      if (
++        !Buffer.isBuffer(generated) ||
++        generated.length !== WORKSPACE_ID_BYTES
++      ) {
++        bundleFail("backup_bundle_workspace_id_invalid");
++      }
++      const idBytes = Buffer.from(generated);
++      id = idBytes.toString("hex");
++      idBytes.fill(0);
++    }
++    if (!WORKSPACE_ID.test(id)) {
++      bundleFail("backup_bundle_workspace_id_invalid");
++    }
++    const timestamp = now();
++    if (!(timestamp instanceof Date) || !Number.isFinite(timestamp.getTime())) {
++      bundleFail("backup_bundle_workspace_marker_invalid");
++    }
++    const directory = path.join(
++      workspaceRoot.path,
++      `${workspacePrefix(checkedPurpose)}${id}`
++    );
++    fileSystem.mkdirSync(directory, {
++      recursive: false,
++      mode: 0o700
++    });
++    createdPath = directory;
++    const identity = fileSystem.lstatSync(directory);
++    if (!identity.isDirectory() || identity.isSymbolicLink()) {
++      bundleFail("backup_bundle_workspace_invalid");
++    }
++    createdIdentity = identity;
++    const markerPath = path.join(directory, WORKSPACE_MARKER_NAME);
++    markerDescriptor = fileSystem.openSync(
++      markerPath,
++      fs.constants.O_WRONLY |
++        fs.constants.O_CREAT |
++        fs.constants.O_EXCL,
++      0o600
++    );
++    fileSystem.writeFileSync(
++      markerDescriptor,
++      markerText(workspaceMarker({
++        id,
++        purpose: checkedPurpose,
++        ownerPid: process.pid,
++        ownerUid:
++          typeof process.getuid === "function" ? process.getuid() : null,
++        createdAt: timestamp.toISOString()
++      })),
++      "utf8"
++    );
++    fileSystem.fchmodSync(markerDescriptor, 0o600);
++    fileSystem.fsyncSync(markerDescriptor);
++    fileSystem.closeSync(markerDescriptor);
++    markerDescriptor = undefined;
++    fileSystem.chmodSync(directory, 0o700);
++    fsyncDirectoryWhenSupported(directory, fileSystem);
++    fsyncDirectoryWhenSupported(workspaceRoot.path, fileSystem);
++    workspace = inspectOwnedWorkspace(
++      directory,
++      {
++        root: workspaceRoot.path,
++        purpose: checkedPurpose,
++        expectedIdentity: identity
++      },
++      fileSystem
++    );
++    return workspace;
++  } catch (error) {
++    let descriptorCleanupFailed = false;
++    let workspaceCleanupFailed = false;
++    if (markerDescriptor !== undefined) {
++      if (!closeDescriptorSafely(markerDescriptor, fileSystem)) {
++        descriptorCleanupFailed = true;
++      }
++    }
++    if (createdPath && createdIdentity) {
++      try {
++        const current = fileSystem.lstatSync(createdPath);
++        if (
++          !current.isSymbolicLink() &&
++          current.isDirectory() &&
++          sameObjectIdentity(createdIdentity, current)
++        ) {
++          validateWorkspaceTree(createdPath, fileSystem);
++          fileSystem.rmSync(createdPath, {
++            recursive: true,
++            force: false
++          });
++        }
++      } catch {
++        workspaceCleanupFailed = true;
++      }
++    }
++    if (workspaceCleanupFailed) {
++      bundleFail("backup_bundle_cleanup_failed");
++    }
++    if (descriptorCleanupFailed) {
++      bundleFail("backup_bundle_descriptor_cleanup_failed");
++    }
++    if (error instanceof EncryptedBackupBundleError) throw error;
++    bundleFail("backup_bundle_workspace_creation_failed");
++  }
++}
++
++function cleanupOwnedWorkspace(workspace, fileSystem = fs) {
++  const inspected = inspectOwnedWorkspace(
++    workspace?.path,
++    {
++      root: workspace?.root,
++      purpose: workspace?.purpose,
++      expectedIdentity: workspace?.identity
++    },
++    fileSystem
++  );
++  try {
++    fileSystem.rmSync(inspected.path, {
++      recursive: true,
++      force: false
++    });
++    if (fileSystem.existsSync(inspected.path)) {
++      bundleFail("backup_bundle_cleanup_failed");
++    }
++    fsyncDirectoryWhenSupported(inspected.root, fileSystem);
++    return true;
++  } catch (error) {
++    if (error instanceof EncryptedBackupBundleError) throw error;
++    bundleFail("backup_bundle_cleanup_failed");
++  }
++}
++
++function recoverOwnedWorkspaces({
++  root,
++  purpose,
++  minimumAgeMs = DEFAULT_STALE_WORKSPACE_AGE_MS,
++  now = () => Date.now(),
++  isProcessAlive = (pid) => {
++    try {
++      process.kill(pid, 0);
++      return true;
++    } catch (error) {
++      if (error?.code === "ESRCH") return false;
++      return true;
++    }
++  },
++  fileSystem = fs
++}) {
++  const workspaceRoot = requireWorkspaceRoot(root, fileSystem);
++  const checkedPurpose = requireWorkspacePurpose(purpose);
++  const prefix = workspacePrefix(checkedPurpose);
++  if (
++    !Number.isSafeInteger(minimumAgeMs) ||
++    minimumAgeMs < 0 ||
++    typeof now !== "function" ||
++    typeof isProcessAlive !== "function"
++  ) {
++    bundleFail("backup_bundle_workspace_recovery_invalid");
++  }
++  const currentTime = now();
++  if (!Number.isSafeInteger(currentTime) || currentTime < 0) {
++    bundleFail("backup_bundle_workspace_recovery_invalid");
++  }
++  let names;
++  try {
++    names = fileSystem
++      .readdirSync(workspaceRoot.path)
++      .filter((name) => name.startsWith(prefix))
++      .sort();
++  } catch {
++    bundleFail("backup_bundle_workspace_recovery_failed");
++  }
++  for (const name of names) {
++    const id = name.slice(prefix.length);
++    if (!WORKSPACE_ID.test(id)) {
++      bundleFail("backup_bundle_workspace_recovery_blocked");
++    }
++    const inspected = inspectOwnedWorkspace(
++      path.join(workspaceRoot.path, name),
++      { root: workspaceRoot.path, purpose: checkedPurpose },
++      fileSystem
++    );
++    const createdAt = Date.parse(inspected.createdAt);
++    if (
++      !Number.isFinite(createdAt) ||
++      currentTime - createdAt < minimumAgeMs ||
++      isProcessAlive(inspected.ownerPid)
++    ) {
++      bundleFail("backup_bundle_workspace_recovery_deferred");
++    }
++    cleanupOwnedWorkspace(inspected, fileSystem);
++  }
++  return Object.freeze({ recovered: names.length });
++}
++
++function validateTarHeader(header, allowlist, seen) {
++  const name = requireArchiveName(header?.name);
++  if (
++    !allowlist.has(name) ||
++    seen.has(name) ||
++    header.type !== "file" ||
++    Boolean(header.linkname) ||
++    !Number.isSafeInteger(header.size) ||
++    header.size < 1 ||
++    header.size > MAX_ARCHIVE_ENTRY_BYTES
++  ) {
++    bundleFail("backup_bundle_tar_entry_invalid");
++  }
++  return name;
++}
++
++function assertContainerIdentity(container, fileSystem = fs) {
++  let current;
++  try {
++    current = fileSystem.fstatSync(container.descriptor);
++  } catch {
++    bundleFail("backup_bundle_container_changed");
++  }
++  if (
++    !current.isFile() ||
++    !sameStableFileIdentity(container.identity, current)
++  ) {
++    bundleFail("backup_bundle_container_changed");
++  }
++  return true;
++}
++
++function createContainerReadStream(container, fileSystem = fs) {
++  return fileSystem.createReadStream(container.path, {
++    fd: container.descriptor,
++    autoClose: false,
++    start: container.ciphertextStart,
++    end: container.ciphertextEnd
++  });
++}
++
++function createBundleDecipher(container, key) {
++  const decipher = crypto.createDecipheriv(
++    BUNDLE_ALGORITHM,
++    key,
++    container.nonce,
++    { authTagLength: AUTH_TAG_BYTES }
++  );
++  decipher.setAAD(container.prefix);
++  decipher.setAuthTag(container.authTag);
++  return decipher;
++}
++
++async function authenticateContainer(container, key, fileSystem = fs) {
++  const hash = crypto.createHash("sha256");
++  const counter = { size: 0 };
++  const discard = new Writable({
++    write(chunk, encoding, callback) {
++      callback();
++    }
++  });
++  try {
++    await pipeline(
++      createContainerReadStream(container, fileSystem),
++      createBundleDecipher(container, key),
++      hashPassThrough(hash, counter),
++      discard
++    );
++  } catch {
++    bundleFail("backup_bundle_authentication_failed");
++  }
++  if (counter.size !== container.header.tarBytes) {
++    bundleFail("backup_bundle_tar_size_mismatch");
++  }
++  assertContainerIdentity(container, fileSystem);
++  return Object.freeze({
++    size: counter.size,
++    sha256: hash.digest("hex")
++  });
++}
++
++function requireExtractionCapacity(
++  directory,
++  tarBytes,
++  fileSystem = fs
++) {
++  if (
++    !Number.isSafeInteger(tarBytes) ||
++    tarBytes < 1024 ||
++    tarBytes > MAX_BUNDLE_PLAINTEXT_BYTES ||
++    typeof fileSystem.statfsSync !== "function"
++  ) {
++    bundleFail("backup_bundle_capacity_check_failed");
++  }
++  let stat;
++  try {
++    stat = fileSystem.statfsSync(directory);
++  } catch {
++    bundleFail("backup_bundle_capacity_check_failed");
++  }
++  let available;
++  try {
++    const blocks = BigInt(stat.bavail);
++    const blockSize = BigInt(stat.bsize);
++    if (blocks < 0n || blockSize < 1n) {
++      bundleFail("backup_bundle_capacity_check_failed");
++    }
++    available = blocks * blockSize;
++  } catch (error) {
++    if (error instanceof EncryptedBackupBundleError) throw error;
++    bundleFail("backup_bundle_capacity_check_failed");
++  }
++  const required = BigInt(tarBytes);
++  const percentage =
++    (required * BigInt(EXTRACTION_MARGIN_PERCENT) + 99n) / 100n;
++  const margin =
++    percentage > BigInt(MIN_EXTRACTION_MARGIN_BYTES)
++      ? percentage
++      : BigInt(MIN_EXTRACTION_MARGIN_BYTES);
++  if (available < required + margin) {
++    bundleFail("backup_bundle_space_insufficient");
++  }
++  return true;
++}
++
++async function extractTarStream({
++  readable,
++  transforms = [],
++  expectedNames,
++  destinationDirectory,
++  fileSystem = fs
++}) {
++  if (!Array.isArray(transforms)) {
++    bundleFail("backup_bundle_extraction_transform_invalid");
++  }
++  const names = requireExpectedNames(expectedNames);
++  const allowlist = new Set(names);
++  const seen = new Set();
++  const files = new Map();
++  const extract = tar.extract();
++  const ingestion = pipeline(readable, ...transforms, extract);
++  let entryFailure;
++  let declaredTarBytes = 1024;
++  try {
++    for await (const stream of extract) {
++      const header = stream.header;
++      const name = validateTarHeader(header, allowlist, seen);
++      declaredTarBytes +=
++        512 + Math.ceil(header.size / 512) * 512;
++      if (
++        !Number.isSafeInteger(declaredTarBytes) ||
++        declaredTarBytes > MAX_BUNDLE_PLAINTEXT_BYTES
++      ) {
++        bundleFail("backup_bundle_size_limit_exceeded");
++      }
++      const destination = path.join(
++        destinationDirectory,
++        ...name.split("/")
++      );
++      const relative = path.relative(destinationDirectory, destination);
++      if (
++        !relative ||
++        relative.startsWith("..") ||
++        path.isAbsolute(relative)
++      ) {
++        bundleFail("backup_bundle_tar_entry_invalid");
++      }
++      fileSystem.mkdirSync(path.dirname(destination), {
++        recursive: true,
++        mode: 0o700
++      });
++      const hash = crypto.createHash("sha256");
++      const byteCounter = { size: 0 };
++      try {
++        await pipeline(
++          stream,
++          hashPassThrough(hash, byteCounter),
++          fileSystem.createWriteStream(destination, {
++            flags: "wx",
++            mode: 0o600
++          })
++        );
++      } catch {
++        bundleFail("backup_bundle_extraction_failed");
++      }
++      if (byteCounter.size !== header.size) {
++        bundleFail("backup_bundle_tar_entry_invalid");
++      }
++      fileSystem.chmodSync(destination, 0o600);
++      seen.add(name);
++      files.set(
++        name,
++        Object.freeze({
++          name,
++          path: destination,
++          size: byteCounter.size,
++          sha256: hash.digest("hex")
++        })
++      );
++    }
++    await ingestion;
++  } catch (error) {
++    entryFailure =
++      error instanceof EncryptedBackupBundleError
++        ? error
++        : new EncryptedBackupBundleError(
++            transforms.length > 0
++              ? "backup_bundle_authentication_failed"
++              : "backup_bundle_extraction_failed"
++          );
++    extract.destroy();
++    try {
++      await ingestion;
++    } catch {
++      // The stable entry/authentication error below is authoritative.
++    }
++    throw entryFailure;
++  }
++  if (
++    seen.size !== names.length ||
++    names.some((name) => !seen.has(name))
++  ) {
++    bundleFail("backup_bundle_allowlist_incomplete");
++  }
++  return Object.freeze({
++    files: Object.freeze(names.map((name) => files.get(name))),
++    tarBytes: declaredTarBytes
++  });
++}
++
++async function withExtractedEncryptedBundle({
++  containerPath,
++  expectedNames,
++  expectedLabel,
++  expectedSourceFingerprint,
++  workDirectory,
++  bundleKey,
++  operation,
++  workspacePurpose = "restore",
++  fileSystem = fs
++}) {
++  if (typeof operation !== "function") {
++    bundleFail("backup_bundle_operation_required");
++  }
++  const names = requireExpectedNames(expectedNames);
++  const root = requireWorkspaceRoot(workDirectory, fileSystem).path;
++  const purpose = requireWorkspacePurpose(workspacePurpose);
++  const key = requireBundleKey(bundleKey);
++  let workspace;
++  let container;
++  try {
++    recoverOwnedWorkspaces({
++      root,
++      purpose,
++      fileSystem
++    });
++    let extracted;
++    try {
++      container = openInspectedContainer(
++        containerPath,
++        { expectedLabel, expectedSourceFingerprint },
++        fileSystem
++      );
++      const authenticated = await authenticateContainer(
++        container,
++        key,
++        fileSystem
++      );
++      requireExtractionCapacity(
++        root,
++        container.header.tarBytes,
++        fileSystem
++      );
++      workspace = createOwnedWorkspace({
++        root,
++        purpose,
++        fileSystem
++      });
++      const decipher = crypto.createDecipheriv(
++        BUNDLE_ALGORITHM,
++        key,
++        container.nonce,
++        { authTagLength: AUTH_TAG_BYTES }
++      );
++      decipher.setAAD(container.prefix);
++      decipher.setAuthTag(container.authTag);
++      const secondHash = crypto.createHash("sha256");
++      const secondCounter = { size: 0 };
++      extracted = await extractTarStream({
++        readable: createContainerReadStream(container, fileSystem),
++        transforms: [
++          decipher,
++          hashPassThrough(secondHash, secondCounter)
++        ],
++        expectedNames: names,
++        destinationDirectory: workspace.path,
++        fileSystem
++      });
++      const secondSha256 = secondHash.digest("hex");
++      if (
++        secondCounter.size !== authenticated.size ||
++        secondCounter.size !== container.header.tarBytes ||
++        extracted.tarBytes !== container.header.tarBytes ||
++        !exactStringEqual(secondSha256, authenticated.sha256)
++      ) {
++        bundleFail("backup_bundle_second_pass_mismatch");
++      }
++      assertContainerIdentity(container, fileSystem);
++    } catch (error) {
++      if (error instanceof EncryptedBackupBundleError) throw error;
++      bundleFail("backup_bundle_authentication_failed");
++    }
++    return await operation(
++      Object.freeze({
++        directory: workspace.path,
++        header: container.header,
++        files: extracted.files
++      })
++    );
++  } finally {
++    key.fill(0);
++    let descriptorCleanupFailed = false;
++    let workspaceCleanupError;
++    if (container) {
++      container.nonce.fill(0);
++      container.authTag.fill(0);
++      container.prefix.fill(0);
++      if (
++        !closeDescriptorSafely(container.descriptor, fileSystem)
++      ) {
++        descriptorCleanupFailed = true;
++      }
++    }
++    if (workspace) {
++      try {
++        cleanupOwnedWorkspace(workspace, fileSystem);
++      } catch (error) {
++        workspaceCleanupError = error;
++      }
++    }
++    if (workspaceCleanupError) {
++      throw workspaceCleanupError;
++    }
++    if (descriptorCleanupFailed) {
++      bundleFail("backup_bundle_descriptor_cleanup_failed");
++    }
++  }
++}
++
++function compareEntryEvidence(expected, actual) {
++  if (
++    !Array.isArray(expected) ||
++    !Array.isArray(actual) ||
++    expected.length !== actual.length
++  ) {
++    bundleFail("backup_bundle_verification_failed");
++  }
++  for (let index = 0; index < expected.length; index += 1) {
++    const left = expected[index];
++    const right = actual[index];
++    if (
++      left?.name !== right?.name ||
++      left?.size !== right?.size ||
++      !SHA256.test(String(left?.sha256 || "")) ||
++      !SHA256.test(String(right?.sha256 || "")) ||
++      !crypto.timingSafeEqual(
++        Buffer.from(left.sha256, "hex"),
++        Buffer.from(right.sha256, "hex")
++      )
++    ) {
++      bundleFail("backup_bundle_verification_failed");
++    }
++  }
++  return true;
++}
++
++module.exports = {
++  AUTH_TAG_BYTES,
++  BUNDLE_AAD_VERSION,
++  BUNDLE_ALGORITHM,
++  BUNDLE_FORMAT,
++  BUNDLE_FORMAT_VERSION,
++  BUNDLE_MAGIC,
++  EncryptedBackupBundleError,
++  HEADER_LENGTH_BYTES,
++  KEY_BYTES,
++  MAX_ARCHIVE_ENTRY_BYTES,
++  MAX_BUNDLE_PLAINTEXT_BYTES,
++  MIN_EXTRACTION_MARGIN_BYTES,
++  NONCE_BYTES,
++  canonicalJson,
++  cleanupCreatedBundle,
++  cleanupOwnedWorkspace,
++  compareEntryEvidence,
++  createEncryptedBundle,
++  createOwnedWorkspace,
++  decodeBundleKey,
++  extractTarStream,
++  inspectContainer,
++  recoverOwnedWorkspaces,
++  requireArchiveName,
++  requireExtractionCapacity,
++  withExtractedEncryptedBundle
++};
+diff --git a/src/maintenance/recovery/errors.js b/src/maintenance/recovery/errors.js
+new file mode 100644
+index 0000000..814434d
+--- /dev/null
++++ b/src/maintenance/recovery/errors.js
+@@ -0,0 +1,19 @@
++"use strict";
++
++class SocialPostgresError extends Error {
++  constructor(code, message = "Operacao PostgreSQL social recusada.", cause) {
++    super(message);
++    this.name = "SocialPostgresError";
++    this.code = code;
++    if (cause !== undefined) this.cause = cause;
++  }
++}
++
++function postgresFail(code, message, cause) {
++  throw new SocialPostgresError(code, message, cause);
++}
++
++module.exports = {
++  SocialPostgresError,
++  postgresFail
++};
+diff --git a/src/maintenance/remote-work-fence.js b/src/maintenance/remote-work-fence.js
+new file mode 100644
+index 0000000..952741d
+--- /dev/null
++++ b/src/maintenance/remote-work-fence.js
+@@ -0,0 +1,195 @@
++"use strict";
++
++const fs = require("node:fs");
++const path = require("node:path");
++
++// Read-only refusal fence for live source 1bd987f1ecbbd3a64f2ad0e905d30649704f4b3c.
++// Never use the business readers here: listBotPending recovers/claims work.
++// Only recorded terminal work is accepted. Queued work is refused too, because
++// the legacy poll/download contract does not prove that a remote worker is idle.
++const DEFINITIONS = Object.freeze([
++  { directory: "pedidos", count: "orders", file: "pedido.json",
++    terminal: ["pronto", "erro"], active: ["novo", "em_producao", "ajuste_pendente", "em_analise"] },
++  { directory: "planejamentos_mensais", count: "plannings", file: "solicitacao.json", type: "planejamento_mensal",
++    terminal: ["pronto", "erro", "cancelado"], active: ["em_analise", "processando"] },
++  { directory: "materiais_graficos", count: "materials", file: "solicitacao.json", type: "material_grafico_empresa",
++    terminal: ["pronto", "erro", "created"], active: ["novo", "em_producao", "processando"] },
++  { directory: "carrosseis", count: "carousels", file: "solicitacao.json", type: "carrossel_ia4tube",
++    terminal: ["pronto", "erro"], active: ["pendente", "baixado", "processando"] }
++]);
++const MAX_JSON_BYTES = 4 * 1024 * 1024;
++const hasOwn = (value, key) => Object.prototype.hasOwnProperty.call(value, key);
++const isObject = (value) => value !== null && typeof value === "object" && !Array.isArray(value);
++const safeSegment = (value) => typeof value === "string" && value.length > 0 &&
++  value !== "." && value !== ".." && !/[\\/\x00-\x1f:]/.test(value);
++
++function inspectRemoteWorkFence({ dataDir, fileSystem = fs, nowMs = Date.now(), maxEntries = 100000 } = {}) {
++  const counts = { orders: 0, plannings: 0, materials: 0, carousels: 0, campaigns: 0, arts: 0, active: 0, unknown: 0 };
++  let visited = 0;
++  const directoryWitnesses = [];
++  const fileWitnesses = [];
++  function refuse() { throw new Error("remote_work_unverifiable"); }
++  function budget() { if (++visited > maxEntries) refuse(); }
++  function sameStat(first, second) {
++    return ["dev", "ino", "size", "mtimeMs", "ctimeMs", "nlink"].every((key) => first[key] === second[key]);
++  }
++  function stat(target, kind) {
++    const value = fileSystem.lstatSync(target);
++    if (value.isSymbolicLink() || (kind === "directory" ? !value.isDirectory() : !value.isFile())) refuse();
++    if (kind === "file" && value.nlink !== 1) refuse();
++    return value;
++  }
++  function entries(target) {
++    const before = stat(target, "directory");
++    const names = fileSystem.readdirSync(target);
++    if (!Array.isArray(names) || names.some((name) => !safeSegment(name)) || new Set(names).size !== names.length) refuse();
++    names.sort();
++    for (const unused of names) { void unused; budget(); }
++    if (!sameStat(before, stat(target, "directory"))) refuse();
++    directoryWitnesses.push({ target, before, names });
++    return names;
++  }
++  function readText(target, maxBytes = MAX_JSON_BYTES) {
++    const before = stat(target, "file");
++    if (!Number.isSafeInteger(before.size) || before.size < 1 || before.size > maxBytes) refuse();
++    const bytes = fileSystem.readFileSync(target);
++    if (!Buffer.isBuffer(bytes) || bytes.length !== before.size || !sameStat(before, stat(target, "file"))) refuse();
++    fileWitnesses.push({ target, before });
++    const text = bytes.toString("utf8");
++    if (!Buffer.from(text, "utf8").equals(bytes)) refuse();
++    return text;
++  }
++  function readJson(target) {
++    const value = JSON.parse(readText(target));
++    if (!isObject(value)) refuse();
++    return value;
++  }
++  function classify(status, terminal, active) {
++    if (typeof status !== "string") { counts.unknown++; return; }
++    if (active.includes(status)) counts.active++;
++    else if (!terminal.includes(status)) counts.unknown++;
++  }
++  function checkClaim(record) {
++    const claimFields = ["runner_claim_id", "runner_claimed_em", "runner_claim_expires_em", "runner_claim_consumed_em"];
++    for (const key of claimFields) {
++      if (hasOwn(record, key) && typeof record[key] !== "string") { counts.unknown++; return; }
++    }
++    for (const key of claimFields.slice(1)) {
++      if (record[key] && !Number.isFinite(Date.parse(record[key]))) { counts.unknown++; return; }
++    }
++    if (record.runner_claim_expires_em) {
++      // An expired lease is not proof of termination. Even a terminal record
++      // with an unconsumed claim is ambiguous; do not repair it in this fence.
++      if (Date.parse(record.runner_claim_expires_em) > nowMs) counts.active++;
++      else if (!record.runner_claim_consumed_em) counts.unknown++;
++    } else if ((record.runner_claim_id || record.runner_claimed_em) && !record.runner_claim_consumed_em) {
++      counts.unknown++;
++    }
++  }
++  function checkLeafFiles(target, names, depth = 0) {
++    if (depth > 8) refuse();
++    for (const name of names) {
++      const fullPath = path.join(target, name);
++      const value = fileSystem.lstatSync(fullPath);
++      if (value.isSymbolicLink()) refuse();
++      if (value.isDirectory()) checkLeafFiles(fullPath, entries(fullPath), depth + 1);
++      else if (!value.isFile() || value.nlink !== 1) refuse();
++      // Partial metadata cannot be silently accepted as a settled job.
++      if (/\.tmp(?:\.|$)/i.test(name)) refuse();
++    }
++  }
++  function checkRecord(target, names, definition, owner, id) {
++    counts[definition.count]++;
++    if (!names.includes(definition.file) || !names.includes("status.txt")) refuse();
++    const record = readJson(path.join(target, definition.file));
++    if (record.id !== id || record.whatsapp !== owner || (definition.type && record.tipo !== definition.type)) refuse();
++    const status = readText(path.join(target, "status.txt"), 256).trim();
++    if (status !== record.status) counts.unknown++;
++    classify(record.status, definition.terminal, definition.active);
++    checkClaim(record);
++    if (names.includes("ajuste_pendente.txt")) counts.active++;
++    checkLeafFiles(target, names);
++  }
++  function checkHiddenCalendar(target) {
++    const parsed = JSON.parse(readText(target));
++    if (!Array.isArray(parsed) && !(isObject(parsed) &&
++      ["hidden_items", "itens_ocultos", "hidden_keys"].some((key) => Array.isArray(parsed[key])))) refuse();
++  }
++  function scanFamily(root, definition) {
++    const familyPath = path.join(root, definition.directory);
++    for (const owner of entries(familyPath)) {
++      const ownerPath = path.join(familyPath, owner);
++      for (const cycle of entries(ownerPath)) {
++        const cyclePath = path.join(ownerPath, cycle);
++        if (definition.count === "plannings" && cycle === "calendario_oculto.json") {
++          checkHiddenCalendar(cyclePath);
++          continue;
++        }
++        for (const id of entries(cyclePath)) {
++          const target = path.join(cyclePath, id);
++          checkRecord(target, entries(target), definition, owner, id);
++        }
++      }
++    }
++  }
++  function scanCampaigns(root, rootNames) {
++    // Unlike the other four roots, the legacy server creates this one lazily.
++    if (!rootNames.includes("campanhas_artes_gratis")) return;
++    const familyPath = path.join(root, "campanhas_artes_gratis");
++    for (const id of entries(familyPath)) {
++      const target = path.join(familyPath, id);
++      const names = entries(target);
++      counts.campaigns++;
++      const campaign = readJson(path.join(target, "campanha.json"));
++      if (campaign.id !== id || campaign.tipo !== "arte_gratis_semanal" ||
++        !Number.isInteger(campaign.quantidade_artes) || campaign.quantidade_artes < 1 || campaign.quantidade_artes > 20) refuse();
++      classify(campaign.status, ["revisao", "distribuida"], ["gerando"]);
++      const distribution = readJson(path.join(target, "distribuicao.json"));
++      if (!Array.isArray(distribution.assignments) || distribution.assignments.some((value) => !isObject(value) || value.status !== "distribuida")) refuse();
++      const artsPath = path.join(target, "artes");
++      const artNames = entries(artsPath);
++      if (artNames.length !== campaign.quantidade_artes) refuse();
++      for (const artId of artNames) {
++        const artPath = path.join(artsPath, artId);
++        const artFiles = entries(artPath);
++        counts.arts++;
++        const art = readJson(path.join(artPath, "arte.json"));
++        if (art.id !== artId || art.campaign_id !== id) refuse();
++        classify(art.status, ["pronta", "aprovada", "excluida", "erro"], ["pendente", "gerando"]);
++        checkClaim(art);
++        checkLeafFiles(artPath, artFiles);
++      }
++      // Includes links and unexpected partial files in the campaign root.
++      checkLeafFiles(target, names);
++    }
++  }
++  try {
++    if (typeof dataDir !== "string" || !path.isAbsolute(dataDir) || !Number.isFinite(nowMs) ||
++      !Number.isSafeInteger(maxEntries) || maxEntries < 1 || maxEntries > 1000000) refuse();
++    const root = path.resolve(dataDir);
++    if (root === path.parse(root).root || fileSystem.realpathSync(root) !== root) refuse();
++    const rootNames = entries(root);
++    for (const definition of DEFINITIONS) scanFamily(root, definition);
++    scanCampaigns(root, rootNames);
++    // This detects observed replacement/mutation during the read, but is not a
++    // filesystem lock. The caller must already hold the local drained fence.
++    for (const witness of directoryWitnesses) {
++      if (!sameStat(witness.before, stat(witness.target, "directory"))) refuse();
++      const names = fileSystem.readdirSync(witness.target).sort();
++      if (JSON.stringify(names) !== JSON.stringify(witness.names)) refuse();
++    }
++    for (const witness of fileWitnesses) if (!sameStat(witness.before, stat(witness.target, "file"))) refuse();
++  } catch {
++    counts.unknown++;
++  }
++  const ok = counts.active === 0 && counts.unknown === 0;
++  return Object.freeze({
++    ok,
++    code: counts.unknown ? "remote_work_unverifiable" : counts.active ? "remote_work_recorded_pending" : "remote_work_no_active_records",
++    counts: Object.freeze(counts),
++    noActiveRecordedWork: ok,
++    remoteWorkersStopped: false
++  });
++}
++
++module.exports = { inspectRemoteWorkFence };

@@ -1,0 +1,2 @@
+# Preserve exact reviewed snapshot bytes, including fixture line endings.
+* -text
