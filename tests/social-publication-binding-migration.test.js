@@ -26,7 +26,8 @@ const historicalPins = [
   "f07eb68d37e8fec372e4b712447a113cba5d6ae6395492bb5678cc13d74948e7"
 ];
 const digest = "1".repeat(64);
-const local = readManifest();
+// This historical suite remains explicitly scoped to the immutable 0007 prefix.
+const local = readManifest().slice(0, 7);
 function request(index = 6) {
   return {
     resourceId: PREPARATION_PRODUCTION_TARGET.resourceId,
@@ -142,7 +143,7 @@ test("backup recognizes distinct 0006 and 0007 profiles with identical data-tabl
   assert.equal(after.id, BINDING_PROFILE);
   assert.deepEqual(after.backupTables, before.backupTables);
   assert.deepEqual(after.rlsTables, before.rlsTables);
-  assert.equal(SCHEMA_PROFILES.at(-1).id, BINDING_PROFILE);
+  assert.equal(SCHEMA_PROFILES.find((entry) => entry.id === BINDING_PROFILE).migrationRows.length, 7);
   const drift = asRows(7); drift[6].checksum = digest;
   assert.throws(() => resolveSchemaProfile(drift), { code: "backup_migration_state_invalid" });
 });

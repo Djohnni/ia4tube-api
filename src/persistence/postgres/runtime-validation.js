@@ -5,6 +5,8 @@ const { readManifest } = require("./migrations");
 const { withTransaction } = require("./pool");
 const { requireSafeLabel } = require("./validation");
 const { BINDING_MIGRATION, bindingPoliciesMatch, verifyPublicationBindingSchema } = require("./publication-binding-schema");
+const { OFFICIAL_OWNER_MIGRATION, OFFICIAL_OWNER_ROUTINE_KEY, OFFICIAL_OWNER_RESULT,
+  officialOwnerBodyMatches, verifyOfficialOwnerSchema } = require("./official-owner-schema");
 
 const SOCIAL_SCHEMA = "ia4tube_social";
 const SOCIAL_ADMIN_SCHEMA = "ia4tube_social_admin";
@@ -410,6 +412,7 @@ async function verifyRuntimeSchema(pool, role, options = {}) {
       migration.version === "0006_social_compliance_persistence"
   );
   const bindingProfile = local.some((migration) => migration.version === BINDING_MIGRATION);
+  const officialOwnerProfile = local.some((migration) => migration.version === OFFICIAL_OWNER_MIGRATION);
   const tenantTables = complianceProfile
     ? TENANT_TABLES
     : LEGACY_TENANT_TABLES;
@@ -520,8 +523,12 @@ async function verifyRuntimeSchema(pool, role, options = {}) {
         ]
       ]);
       const routineRows = routines.rows || [];
+      if (officialOwnerProfile) expectedRoutines.set(OFFICIAL_OWNER_ROUTINE_KEY, {
+        result: { test: (value) => value === OFFICIAL_OWNER_RESULT },
+        relation: "ia4tube_social.companies", volatility: "v", officialOwner: true
+      });
       if (
-        routineRows.length !== (complianceProfile ? 2 : 0) ||
+        routineRows.length !== (complianceProfile ? 2 : 0) + (officialOwnerProfile ? 1 : 0) ||
         routineRows.some((routine) => {
           const key = `${routine.proname}|${routine.identity_arguments}`;
           const expected = expectedRoutines.get(key);
@@ -535,11 +542,12 @@ async function verifyRuntimeSchema(pool, role, options = {}) {
             !expected.result.test(String(routine.function_result || "")) ||
             routine.owner_name !== ownerRole ||
             routine.prosecdef !== true ||
-            routine.provolatile !== "s" ||
+            routine.provolatile !== (expected.volatility || "s") ||
             routine.prokind !== "f" ||
             configEntries.length !== 1 ||
             configEntries[0] !== "search_path=pg_catalog" ||
             !source.includes(expected.relation) ||
+            (expected.officialOwner && !officialOwnerBodyMatches(routine.prosrc)) ||
             /\b(execute|format|dblink|copy|lo_import|pg_read_file)\b/i.test(
               source
             )
@@ -966,10 +974,12 @@ async function verifyRuntimeSchema(pool, role, options = {}) {
       }
 
       if (bindingProfile) await verifyPublicationBindingSchema(client, { runtimeRole });
+      if (officialOwnerProfile) await verifyOfficialOwnerSchema(client, { runtimeRole, ownerRole });
       return Object.freeze({
         valid: true,
         migrationCount: local.length,
-        tenantTableCount: tenantTables.length
+        tenantTableCount: tenantTables.length,
+        ...(officialOwnerProfile ? { officialOwnerProvisioning: true } : {})
       });
     },
     { role: runtimeRole }

@@ -44,6 +44,24 @@ test("removed or inactive product owner cannot enter social", () => {
   clients[owner].ativo = true;
   assert.equal(check(session.sign("unknown-owner")).next,false);
 });
+for (const active of [undefined, null, 0, false, "true"]) test(`social session requires explicitly active owner (${String(active)})`, () => {
+  const local = { [owner]: { ativo: active } };
+  const verifier = createProductionSession({ secret, readClients: () => local });
+  let next = false;
+  const res = { status(value) { this.code = value; return this; }, json() {} };
+  verifier.authenticate({ headers: { authorization: `Bearer ${verifier.sign(owner)}` } }, res, () => { next = true; });
+  assert.equal(next, false); assert.equal(res.code, 401);
+});
+test("temporary auto account cannot enter social until legitimately finalized", () => {
+  const local = { [owner]: { ativo: true, cadastro_automatico: true } };
+  const verifier = createProductionSession({ secret, readClients: () => local });
+  const req = { headers: { authorization: `Bearer ${verifier.sign(owner)}` } };
+  let next = false;
+  const res = { status() { return this; }, json() {} };
+  verifier.authenticate(req, res, () => { next = true; }); assert.equal(next, false);
+  local[owner].conta_finalizada = true;
+  verifier.authenticate(req, res, () => { next = true; }); assert.equal(next, true);
+});
 const env = { ENVIRONMENT:"production", PUBLIC_API_BASE_URL:"https://ia4tube-api.onrender.com",
   SOCIAL_INSTAGRAM_ENABLED:"true", SOCIAL_EXTERNAL_CONNECTION_ENABLED:"false", SOCIAL_EXTERNAL_PUBLICATION_ENABLED:"false",
   INSTAGRAM_APP_ID:"12345678901234", INSTAGRAM_APP_SECRET:crypto.randomBytes(32).toString("hex"),

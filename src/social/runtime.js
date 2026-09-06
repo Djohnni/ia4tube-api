@@ -18,6 +18,7 @@ const {
 const {
   createCompanyScopedRepository
 } = require("../persistence/postgres/company-scoped-repository");
+const { createProductionTenantRepository } = require("../persistence/postgres/production-tenant-repository");
 const {
   createSocialRepository
 } = require("../persistence/postgres/social-repository");
@@ -135,12 +136,15 @@ async function createSocialRuntime(options = {}) {
       PoolClass: options.PoolClass
     });
     await verifyRuntimeRole(pool, config.role);
-    await verifyRuntimeSchema(pool, config.role);
+    const schemaProfile = await verifyRuntimeSchema(pool, config.role);
     const companies = createCompanyScopedRepository({
       pool,
       runtimeRole: config.role,
       identityDerivationVersion: identityConfig.derivationVersion
     });
+    const tenantProvisioning = env.ENVIRONMENT === "production" && schemaProfile.officialOwnerProvisioning === true
+      ? createProductionTenantRepository({ pool, runtimeRole: config.role,
+        identityDerivationVersion: identityConfig.derivationVersion }) : null;
     const social = createSocialRepository({
       pool,
       runtimeRole: config.role,
@@ -349,6 +353,7 @@ async function createSocialRuntime(options = {}) {
     return Object.freeze({
       enabled: true,
       companies,
+      ...(tenantProvisioning ? { tenantProvisioning } : {}),
       connectorPersistence,
       credentials,
       instagramOAuth,

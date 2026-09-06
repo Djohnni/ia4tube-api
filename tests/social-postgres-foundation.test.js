@@ -5,6 +5,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 const test = require("node:test");
 const { bindingPolicies, bindingQueryFixture } = require("./helpers/publication-binding-schema-fixtures");
+const { officialOwnerRoutine, officialOwnerQueryFixture } = require("./helpers/official-owner-schema-fixtures");
 const {
   databaseTargetFingerprint,
   loadMigrationPostgresConfig,
@@ -85,6 +86,7 @@ function runtimeRoutineRows(extra = false) {
         "SELECT mapping.company_id FROM ia4tube_social.social_meta_subject_mappings mapping"
     }
   ];
+  rows.push(officialOwnerRoutine());
   if (extra) {
     rows.push({
       ...rows[0],
@@ -669,6 +671,8 @@ test("runtime schema validation requires checksums, FORCE RLS and least privileg
   ).migrations;
   const validHarness = fakePool((text) => {
     const binding = bindingQueryFixture(text);
+    const officialOwner = officialOwnerQueryFixture(text);
+    if (officialOwner) return officialOwner;
     if (binding) return binding;
     if (text.includes("SELECT owner.rolname AS owner_name")) {
       return {

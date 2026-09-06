@@ -26,6 +26,8 @@ const {
 const { requireSafeLabel, requireSha256, requireUuid } = require("./validation");
 const migrationManifest = require("../../../db/migrations/checksums.json");
 const { BINDING_MIGRATION, BINDING_PROFILE, BINDING_SQL_SHA256, verifyPublicationBindingSchema } = require("./publication-binding-schema");
+const { OFFICIAL_OWNER_MIGRATION, OFFICIAL_OWNER_PROFILE, OFFICIAL_OWNER_SQL_SHA256,
+  OFFICIAL_OWNER_BODY_SHA256, verifyOfficialOwnerSchema } = require("./official-owner-schema");
 
 const BACKUP_APPROVAL = "BACKUP_SOCIAL_POSTGRES_2B0";
 const RESTORE_APPROVAL = "RESTORE_SOCIAL_POSTGRES_2B0_ISOLATED";
@@ -195,11 +197,22 @@ const SCHEMA_PROFILES = Object.freeze([
     backupTables: BACKUP_TABLES,
     evidenceTables: EVIDENCE_TABLES,
     rlsTables: RLS_TABLES
+  }),
+  Object.freeze({
+    id: OFFICIAL_OWNER_PROFILE,
+    migrationRows: Object.freeze(EXPECTED_MIGRATION_ROWS.slice(0, 8)),
+    backupTables: BACKUP_TABLES,
+    evidenceTables: EVIDENCE_TABLES,
+    rlsTables: RLS_TABLES
   })
 ]);
-if (EXPECTED_MIGRATION_ROWS.length !== 7 || EXPECTED_MIGRATION_ROWS[6].version !== BINDING_MIGRATION ||
+if (EXPECTED_MIGRATION_ROWS.length !== 8 || EXPECTED_MIGRATION_ROWS[6].version !== BINDING_MIGRATION ||
     EXPECTED_MIGRATION_ROWS[6].checksum !== BINDING_SQL_SHA256) {
   postgresFail("backup_schema_profile_0007_manifest_invalid", "Perfil autenticado 0007 diverge do manifesto.");
+}
+if (EXPECTED_MIGRATION_ROWS[7].version !== OFFICIAL_OWNER_MIGRATION ||
+    EXPECTED_MIGRATION_ROWS[7].checksum !== OFFICIAL_OWNER_SQL_SHA256) {
+  postgresFail("backup_schema_profile_0008_manifest_invalid", "Perfil autenticado 0008 diverge do manifesto.");
 }
 const SOCIAL_CONNECTOR_UNVALIDATED_CONSTRAINTS = Object.freeze([
   Object.freeze({
@@ -244,9 +257,13 @@ const ALLOWED_UNVALIDATED_CONSTRAINTS_BY_PROFILE = Object.freeze({
   "social-schema-0004": SOCIAL_CONNECTOR_UNVALIDATED_CONSTRAINTS,
   "social-schema-0005": SOCIAL_CONNECTOR_UNVALIDATED_CONSTRAINTS,
   "social-schema-0006": SOCIAL_CONNECTOR_UNVALIDATED_CONSTRAINTS,
-  [BINDING_PROFILE]: SOCIAL_CONNECTOR_UNVALIDATED_CONSTRAINTS
+  [BINDING_PROFILE]: SOCIAL_CONNECTOR_UNVALIDATED_CONSTRAINTS,
+  [OFFICIAL_OWNER_PROFILE]: SOCIAL_CONNECTOR_UNVALIDATED_CONSTRAINTS
 });
 const CURRENT_SCHEMA_PROFILE = SCHEMA_PROFILES.at(-1);
+function hasPublicationBinding(profile) {
+  return [BINDING_PROFILE, OFFICIAL_OWNER_PROFILE].includes(profile.id);
+}
 const TOOL_BASENAMES = Object.freeze({
   dump: new Set(["pg_dump", "pg_dump.exe"]),
   restore: new Set(["pg_restore", "pg_restore.exe"]),
@@ -1622,7 +1639,9 @@ function normalizeCatalogEvidence(catalog, profile) {
     catalog.runtimeEscalationPossible !== false ||
     catalog.requiredConstraintsPresent !== true ||
     catalog.compatibleWith2A !== true ||
-    (profile.id === BINDING_PROFILE && catalog.publicationBindingSchemaVerified !== true)
+    (hasPublicationBinding(profile) && catalog.publicationBindingSchemaVerified !== true) ||
+    (profile.id === OFFICIAL_OWNER_PROFILE && (catalog.officialOwnerSchemaVerified !== true ||
+      catalog.officialOwnerRoutineSha256 !== OFFICIAL_OWNER_BODY_SHA256))
   ) {
     fail("backup_catalog_state_invalid");
   }
@@ -1634,7 +1653,9 @@ function normalizeCatalogEvidence(catalog, profile) {
     runtimeEscalationPossible: false,
     requiredConstraintsPresent: true,
     compatibleWith2A: true,
-    ...(profile.id === BINDING_PROFILE ? { publicationBindingSchemaVerified: true } : {}),
+    ...(hasPublicationBinding(profile) ? { publicationBindingSchemaVerified: true } : {}),
+    ...(profile.id === OFFICIAL_OWNER_PROFILE ? { officialOwnerSchemaVerified: true,
+      officialOwnerRoutineSha256: OFFICIAL_OWNER_BODY_SHA256 } : {}),
     policyDigest: requireSha256(
       String(catalog.policyDigest || "").toLowerCase(),
       "backup_policy_digest"
@@ -2015,7 +2036,8 @@ function createPostgresBackupOperator(pool) {
       ].join("\n")
     );
     const profile = resolveSchemaProfile(result.rows || []);
-    if (profile.id === BINDING_PROFILE) await verifyPublicationBindingSchema({ query: querySafe });
+    if (hasPublicationBinding(profile)) await verifyPublicationBindingSchema({ query: querySafe });
+    if (profile.id === OFFICIAL_OWNER_PROFILE) await verifyOfficialOwnerSchema({ query: querySafe });
     return profile;
   }
 
@@ -2177,7 +2199,8 @@ function createPostgresBackupOperator(pool) {
       schemaProfile,
       "backup_catalog_state_invalid"
     );
-    if (profile.id === BINDING_PROFILE) await verifyPublicationBindingSchema({ query: querySafe });
+    if (hasPublicationBinding(profile)) await verifyPublicationBindingSchema({ query: querySafe });
+    if (profile.id === OFFICIAL_OWNER_PROFILE) await verifyOfficialOwnerSchema({ query: querySafe });
     const permanentLogins = await inspectPermanentLogins(config);
     const state = await querySafe(
       [
@@ -2330,7 +2353,9 @@ function createPostgresBackupOperator(pool) {
         profile,
         constraintRows
       ),
-      ...(profile.id === BINDING_PROFILE ? { publicationBindingSchemaVerified: true } : {}),
+      ...(hasPublicationBinding(profile) ? { publicationBindingSchemaVerified: true } : {}),
+      ...(profile.id === OFFICIAL_OWNER_PROFILE ? { officialOwnerSchemaVerified: true,
+        officialOwnerRoutineSha256: OFFICIAL_OWNER_BODY_SHA256 } : {}),
       compatibleWith2A:
         compatibility.rows?.[0]?.compatible_with_2a === true,
       policyDigest: digestRows(policies.rows),

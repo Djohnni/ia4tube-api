@@ -1,5 +1,83 @@
 # Production preparation checkpoint — NOT a deployable integration
 
+## Current WSL2/official-owner continuation — 2026-09-05
+
+Continuation starts from **f0563de8784facfb85edd15cfe6529c8bffecb0c already
+committed and pushed** on `feat/production-social-preparation-20260905`.
+The sections below remain historical where superseded here. The push condition
+was already resolved and was not re-investigated. No deploy is authorized.
+
+Final Node proof for this continuation: **399/399 PASS**,29 files,169 source
+hashes unchanged, zero failure/skip/cancellation. External report
+`PRODUCTION_PREPARATION_TESTS_2026-09-06T01-02-21-118Z.json`, SHA256
+`BC41BE2D101790C026BE62D837181E10B1353225F931741087C789D302FEA5D1`;
+TAP SHA256 `E36CA1010A8A7129F099EDC86B171F6513A4CC884421FBDAE15EB79687E60FB4`.
+This includes the actual five login HTTP handlers and SQL protocol doubles,
+legacy errors/login, malicious company input, unavailable social persistence,
+strict active/finalized access, deadline/accounting and0008 profile refusals.
+Physical PostgreSQL proof is separate below;399 does not include the149 Android
+tests or add the historical342/285 results. Independent review found no
+remaining P1/P2 in this local, blocked checkpoint; it does not approve live DDL.
+
+The existing five authenticated/authorized session issuances now invoke the
+minimal official-owner binding before returning the unchanged JWT. There is no
+second login, password import, client-selected company, new HTTP endpoint,
+Android edit, GET-side creation, tenant repair or cross-environment copy.
+Temporary automatic accounts cannot provision until finalization. Social
+authentication requires an explicitly active, finalized product owner. Legacy
+authentication and Express4 error handling are preserved. The bounded hook
+retains/deduplicates at most three in-flight writers until settlement; timeout
+is not claimed to cancel a transaction. See `production-social-tenant-readiness.md`.
+
+Additional structure beyond0007 was explicitly presented: **one new0008 SQL
+function and its runtime EXECUTE grant**, no table/column/role or direct DML
+grant. It remains **unapplied on production/staging**. Exact contract/pins and
+credential-compromise boundary are in `social-official-owner-migration-0008.md`.
+Runtime profile8 pins function body/signature/ACL/owner/search path and forced
+RLS; historical profile7 remains distinct. Original0001–0007 bytes are intact.
+
+Separate physical synthetic proof: `PG18_OFFICIAL_OWNER_2026-09-06T01-01-17-347Z.json`,
+SHA256 `64bb7c56ac941ac9ad3e9588d3d5f28fc4f7092f16cf175a0e5b190c295b447b`.
+PostgreSQL18.4, 15 phases PASS,48 executed-source/tool/database hashes unchanged.
+Two real repository sessions produced one creation; two tenants remained
+isolated,13 conflicting/partial states were not repaired, runtime direct DML
+and PUBLIC EXECUTE were denied, GUCs cleared, failed inserts rolled back, and
+four catalog drifts were refused. Profile8 dump/restore matched the exact
+catalog and counts/digests of all20 evidence tables; subsequent owner replay
+changed no data. Existing binding-store claim/isolation regression also passed.
+The loopback-only cluster was stopped; no remaining PostgreSQL/listener.
+Original B report/tools were preserved. This is **not Linux durability, encrypted
+production recovery A/C, provider execution, capacity or a deployment proof**.
+
+Windows preflight: Windows11 Pro26200/CPU support WSL2, but firmware virtualization
+is OFF, independently confirmed via CIM and systeminfo. WSL/distributions are
+absent. C: has approximately118GiB free; initial20GiB budget is an estimate and
+must be rechecked against real recovery sizes. No downloads/installations or
+restart were performed. No rescue storage is used. BitLocker status requires
+human/admin verification; no encryption/BIOS/security settings changed. The
+secret-free external `WSL2_RETOMADA_PROTEGIDA_2026-09-05.md` contains the resume
+checkpoint before any human-approved reboot.
+
+**Actual production database remains untouched by this continuation.** A is
+still a profile-zero catalog baseline, not backup/restore; C still lacks a
+consistent captured DATA_DIR/manifest and independent recovery/custody. The
+historical Linux operator targets staging and cannot be relabelled production.
+No migration/tenant is materialized here. No webservice is configured to use
+the new database. Real preparation is conditional on these remaining proofs.
+
+Android remains the same176-file tree `877d267acdc72433ca4cf5b8039a560318353394`
+as f0563de8. Existing signed AAB **com.ia4tube.app,0.2.19/31,12,976,777 bytes**,
+`IA4Tube_0.2.19_31_production_binding_20027c862643.aab`, SHA256
+`5529388D0BA7DEB4D11760299E399FC53A365834F41A506FCCFF87857466D821`,
+certificate `AC1B12E013EC3B6C91A925189295C007459CB02B6D491960CEB0E6E1D1B4366D`,
+was independently checked from the existing artifact, without rebuilding.
+149 Android tests and the previous AAB47B36E24… are preserved separately.
+Report: `AAB_EXISTENTE_F0563DE8_VERIFICACAO_20260906T004553Z.json`/`.md` outside Git.
+
+**Candidate NOT deployable.** No deploy/merge/main/Play/A55/Meta/gate/OAuth/post,
+disconnection or deletion of real data. Business Verification and all existing
+review evidence remain preserved. Canonical progress remains19/30—63.3%.
+
 ## Current continuation, 2026-09-05 — supersedes historical checkpoint below
 
 Continuation base is local `a619eb422bdcb92c24b1498cc5cecc63df7a3169`.

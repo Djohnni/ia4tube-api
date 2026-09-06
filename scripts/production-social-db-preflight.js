@@ -27,7 +27,8 @@ const MIGRATIONS = Object.freeze([
   ["0004_social_connector_persistence", "91f6efc611903c40e16bd37828d5b9c1a03dfae222e1d13b5dc97f81ffde1b5d"],
   ["0005_fix_social_reference_checks", "ddac4a02cecfd5247432687289001aa3198cce4dccab4e45cedc4cff26e5da93"],
   ["0006_social_compliance_persistence", "f07eb68d37e8fec372e4b712447a113cba5d6ae6395492bb5678cc13d74948e7"],
-  ["0007_social_publication_connection_binding", "4747e001e3057b12facabb74f2529272d8c9cd4e933f55322ee9e3bc82483464"]
+  ["0007_social_publication_connection_binding", "4747e001e3057b12facabb74f2529272d8c9cd4e933f55322ee9e3bc82483464"],
+  ["0008_social_official_owner_provisioning", "65a24b7e2171320623dba1d2d5d5e63b5679545ae1d0ca3a706765608a5b5dc6"]
 ].map(([version, sha256]) => Object.freeze({ version, file: `${version}.up.sql`, sha256 })));
 
 const SQL = Object.freeze({
@@ -93,7 +94,7 @@ const SQL = Object.freeze({
     r.rolinherit AS inherits, r.rolreplication AS replication,
     (SELECT count(*)::integer FROM pg_catalog.pg_auth_members m WHERE m.roleid = r.oid) AS member_count
     FROM pg_catalog.pg_roles r WHERE r.rolname = ANY($1::text[]) ORDER BY r.rolname`,
-  ledger: "SELECT version, checksum_sha256 FROM ia4tube_migrations.schema_migrations ORDER BY version LIMIT 8",
+  ledger: "SELECT version, checksum_sha256 FROM ia4tube_migrations.schema_migrations ORDER BY version LIMIT 9",
   marker: "SELECT environment_id::text, environment_name FROM ia4tube_migrations.environment_identity LIMIT 2"
 });
 

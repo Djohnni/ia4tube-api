@@ -35,7 +35,8 @@ function createProductionSession({ secret, readClients }) {
           claims.jti.length < 16 || claims.jti.length > 200) throw new Error();
       const clients = readClients();
       const client = Object.hasOwn(clients, claims.whatsapp) ? clients[claims.whatsapp] : null;
-      if (!client || client.ativo === false) throw new Error();
+      if (!client || client.ativo !== true ||
+          (client.cadastro_automatico === true && client.conta_finalizada !== true)) throw new Error();
       req.user = Object.freeze(claims);
       return next();
     } catch {

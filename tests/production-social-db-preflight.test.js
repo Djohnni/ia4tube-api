@@ -135,8 +135,8 @@ test("libpq, Node and OpenSSL ambient overrides are refused without disclosing t
   assert.throws(() => loadConnectionOptions({ ...environment(), SOCIAL_DATABASE_CA_FILE: "fixture-private-path" }), matchesCode("production_preflight_tls_required"));
 });
 
-test("six historical and one additive local SQL files match their immutable pins", () => {
-  assert.equal(MIGRATIONS.length, 7);
+test("seven historical and the additive owner function SQL match their immutable pins", () => {
+  assert.equal(MIGRATIONS.length, 8);
   for (const entry of MIGRATIONS) assert.match(entry.sha256, /^[a-f0-9]{64}$/);
   assert.equal(verifyLocalManifest(), true);
 });
@@ -167,7 +167,7 @@ test("an empty catalogue is only a baseline candidate and never apply or recover
   assert.equal(report.readOnly, true);
   assert.equal(report.applyAvailable, false);
   assert.equal(report.environmentIdentityComparedWithApprovedUuid, false);
-  assert.equal(report.pendingMigrations.length, 7);
+  assert.equal(report.pendingMigrations.length, 8);
   assert.ok(report.blockers.includes("recovery_not_proven_by_this_preflight"));
   assert.ok(report.blockers.includes("production_apply_not_exposed_by_readonly_operator"));
   assert.ok(report.blockers.includes("production_0007_isolated_recovery_and_review_required"));
@@ -193,7 +193,7 @@ test("an existing exact ledger and production marker are inspected without expos
   const report = summarizeSnapshot(populatedSnapshot());
   assert.equal(report.ledgerChecksumsVerified, true);
   assert.deepEqual(report.pendingMigrations, []);
-  assert.equal(report.appliedMigrations.length, 7);
+  assert.equal(report.appliedMigrations.length, 8);
   assert.equal(report.environmentMarkerProductionAndUuidValid, true);
   assert.equal(report.environmentIdentityComparedWithApprovedUuid, false);
   assert.equal(report.baselineCandidate, false);

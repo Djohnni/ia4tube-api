@@ -20,7 +20,7 @@ O fingerprint usa `databaseTargetFingerprint()` existente e não inclui senha ou
 
 ## Fronteira operacional
 
-Antes de carregar `pg` ou conectar, o operador exige comando exato, aprovação de inspeção, URL exata, TLS estrito e os sete checksums locais: os seis históricos preservados e a adição 0007 autorizada na missão de continuidade. URL exige usuário/senha, porta explícita e somente `sslmode=verify-full`; rejeita outro banco, host, parâmetro ou fragmento. Não há override de destino na CLI.
+Antes de carregar `pg` ou conectar, o operador exige comando exato, aprovação de inspeção, URL exata, TLS estrito e os oito checksums locais: 0001–0007 com bytes preservados e a função restrita 0008 preparada nesta continuidade. Conferir o manifesto completo não aplica migrations nem autoriza sua aplicação. A diferença estrutural 0008 foi apresentada separadamente; permanece condicionada à recuperação protegida e revisão antes da aplicação real. URL exige usuário/senha, porta explícita e somente `sslmode=verify-full`; rejeita outro banco, host, parâmetro ou fragmento. Não há override de destino na CLI.
 
 São reutilizados `loadSystemPostgresTls()` e os certificados de confiança padrão, validação de cadeia, SAN/hostname exato, `rejectUnauthorized: true` e TLS mínimo 1.2. Não há CA customizada nem bypass de verificação. Overrides ambientais libpq, Node/OpenSSL e custom trust são recusados; o processo chamador deve recusá-los **antes de iniciar Node**, pois um preload pode executar antes do script. Não alterar ambiente global nem ambiente do webservice para executar esta inspeção.
 

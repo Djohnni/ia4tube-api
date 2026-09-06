@@ -47,6 +47,14 @@ function createProductionSocialIntegration(options = {}) {
   assertProductionPreparationBoundary(env);
   const enabled = env.SOCIAL_PERSISTENCE_ENABLED === "true";
   let mounted = null, runtime = null, initialization = null, visualReturn = null;
+  let tenantProvisioning = null;
+  async function afterAuthentication(owner) {
+    // The disabled path must not read product records, initialize dependencies,
+    // derive an identity or open a pool. Session issuance remains unchanged.
+    if (!enabled) return Object.freeze({ available: false, code: "social_persistence_disabled" });
+    if (!tenantProvisioning) return Object.freeze({ available: false, code: "social_tenant_provisioning_unavailable" });
+    return tenantProvisioning.afterAuthentication(owner);
+  }
   function middleware(req, res, next) {
     noStore(res);
     if (!mounted) return res.status(503).json({ ok: false, code: PREPARATION_INCOMPLETE,
@@ -74,6 +82,10 @@ function createProductionSocialIntegration(options = {}) {
         realReviewerEnabled: env.SOCIAL_INSTAGRAM_ENABLED === "true",
         realReviewerMedia: mediaSurface.media, logger: dependencies.logger });
       const { createProductionTenantReadiness } = require("./production-tenant-readiness");
+      const { createProductionTenantProvisioning } = require("./production-tenant-provisioning");
+      tenantProvisioning = createProductionTenantProvisioning({ enabled: true,
+        readClients: dependencies.readClients, logger: dependencies.logger,
+        getDependencies: () => ({ authAdapter: runtime?.auth, tenants: runtime?.tenantProvisioning }) });
       const readiness = createProductionTenantReadiness({ authAdapter: runtime.auth, companies: runtime.companies });
       const authenticateSocial = (req, res, next) => session.authenticate(req, res,
         () => readiness.middleware(req, res, next));
@@ -120,11 +132,14 @@ function createProductionSocialIntegration(options = {}) {
   }
   async function close() {
     mounted = null;
+    const provisioning = tenantProvisioning;
+    tenantProvisioning = null;
+    if (provisioning) await provisioning.close();
     visualReturn?.destroy();
     if (runtime) { const state = runtime; runtime = null; await state.close(); }
   }
   return Object.freeze({ enabled, reason: enabled ? null : PREPARATION_INCOMPLETE,
-    pendingContracts: PENDING_CONTRACTS, middleware, initialize, mountWeb, close });
+    pendingContracts: PENDING_CONTRACTS, afterAuthentication, middleware, initialize, mountWeb, close });
 }
 module.exports = { CLOSED_FLAGS, OFFICIAL_API_ORIGIN, OFFICIAL_WEB_SERVICE_ID,
   PENDING_CONTRACTS, PREPARATION_INCOMPLETE, assertProductionPreparationBoundary, createProductionSocialIntegration };

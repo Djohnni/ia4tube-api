@@ -14,6 +14,10 @@ const {
   bindingPoliciesMatch, verifyPublicationBindingSchema
 } = require("./publication-binding-schema");
 const {
+  OFFICIAL_OWNER_MIGRATION, OFFICIAL_OWNER_PROFILE, OFFICIAL_OWNER_SQL_SHA256,
+  OFFICIAL_OWNER_ROUTINE_KEY, OFFICIAL_OWNER_RESULT, officialOwnerBodyMatches, verifyOfficialOwnerSchema
+} = require("./official-owner-schema");
+const {
   inspectSessionPrincipalAccess,
   principalAccessIsUnsafe,
   quoteIdentifier
@@ -49,7 +53,8 @@ const PREPARATION_SQL_PINS = Object.freeze([
   "91f6efc611903c40e16bd37828d5b9c1a03dfae222e1d13b5dc97f81ffde1b5d",
   "ddac4a02cecfd5247432687289001aa3198cce4dccab4e45cedc4cff26e5da93",
   "f07eb68d37e8fec372e4b712447a113cba5d6ae6395492bb5678cc13d74948e7",
-  BINDING_SQL_SHA256
+  BINDING_SQL_SHA256,
+  OFFICIAL_OWNER_SQL_SHA256
 ]);
 const EXACT_FROM_PROFILE = "social-schema-0003";
 const EXACT_TO_PROFILE = "social-schema-0004";
@@ -132,6 +137,11 @@ const EXACT_PROFILE_TABLES = Object.freeze({
     ...COMPLIANCE_TABLES
   ]),
   [BINDING_PROFILE]: Object.freeze([
+    ...EXACT_BASE_TABLES,
+    ...EXACT_CONNECTOR_TABLES,
+    ...COMPLIANCE_TABLES
+  ]),
+  [OFFICIAL_OWNER_PROFILE]: Object.freeze([
     ...EXACT_BASE_TABLES,
     ...EXACT_CONNECTOR_TABLES,
     ...COMPLIANCE_TABLES
@@ -370,7 +380,7 @@ function expectedPolicyExpression(scopeColumn) {
 
 function expectedExactTableGrantSet(profile, runtimeRole, ownerRole) {
   const tables = new Set(exactProfileTables(profile));
-  const grantProfile = [COMPLIANCE_TO_PROFILE, BINDING_PROFILE].includes(profile)
+  const grantProfile = [COMPLIANCE_TO_PROFILE, BINDING_PROFILE, OFFICIAL_OWNER_PROFILE].includes(profile)
     ? COMPLIANCE_RUNTIME_TABLE_GRANTS
     : EXACT_RUNTIME_TABLE_GRANTS;
   const expected = new Set();
@@ -389,7 +399,7 @@ function expectedExactTableGrantSet(profile, runtimeRole, ownerRole) {
 
 function expectedExactColumnGrantSet(profile, runtimeRole, ownerRole) {
   const tables = new Set(exactProfileTables(profile));
-  const grantProfile = [COMPLIANCE_TO_PROFILE, BINDING_PROFILE].includes(profile)
+  const grantProfile = [COMPLIANCE_TO_PROFILE, BINDING_PROFILE, OFFICIAL_OWNER_PROFILE].includes(profile)
     ? COMPLIANCE_RUNTIME_COLUMN_GRANTS
     : EXACT_RUNTIME_COLUMN_GRANTS;
   const expected = new Set();
@@ -445,8 +455,9 @@ async function verifySocialPhysicalProfile(
   runtimeRole = SOCIAL_RUNTIME_ROLE
 ) {
   const tables = exactProfileTables(profile);
-  const complianceProfile = [COMPLIANCE_TO_PROFILE, BINDING_PROFILE].includes(profile);
-  const bindingProfile = profile === BINDING_PROFILE;
+  const officialOwnerProfile = profile === OFFICIAL_OWNER_PROFILE;
+  const complianceProfile = [COMPLIANCE_TO_PROFILE, BINDING_PROFILE, OFFICIAL_OWNER_PROFILE].includes(profile);
+  const bindingProfile = [BINDING_PROFILE, OFFICIAL_OWNER_PROFILE].includes(profile);
   const expectedRelations = new Map([
     ...tables.map((table) => [table, "r"]),
     ["runtime_schema_contract", "v"]
@@ -469,7 +480,7 @@ async function verifySocialPhysicalProfile(
   if (
     schema.rows?.length !== 1 ||
     schema.rows[0].owner_name !== ownerRole ||
-    Number(schema.rows[0].routine_count) !== (complianceProfile ? 2 : 0)
+    Number(schema.rows[0].routine_count) !== (complianceProfile ? 2 : 0) + (officialOwnerProfile ? 1 : 0)
   ) {
     postgresFail(
       "migration_exact_schema_profile_mismatch",
@@ -544,8 +555,12 @@ async function verifySocialPhysicalProfile(
     ]
   ]);
   const routineRows = routineCatalog.rows || [];
+  if (officialOwnerProfile) expectedRoutines.set(OFFICIAL_OWNER_ROUTINE_KEY, {
+    result: { test: (value) => value === OFFICIAL_OWNER_RESULT },
+    relation: "ia4tube_social.companies", volatility: "v", officialOwner: true
+  });
   if (
-    routineRows.length !== (complianceProfile ? 2 : 0) ||
+    routineRows.length !== (complianceProfile ? 2 : 0) + (officialOwnerProfile ? 1 : 0) ||
     routineRows.some((routine) => {
       const key = `${routine.proname}|${routine.identity_arguments}`;
       const expected = expectedRoutines.get(key);
@@ -559,11 +574,12 @@ async function verifySocialPhysicalProfile(
         !expected.result.test(String(routine.function_result || "")) ||
         routine.owner_name !== ownerRole ||
         routine.prosecdef !== true ||
-        routine.provolatile !== "s" ||
+        routine.provolatile !== (expected.volatility || "s") ||
         routine.prokind !== "f" ||
         configEntries.length !== 1 ||
         configEntries[0] !== "search_path=pg_catalog" ||
         !source.includes(expected.relation) ||
+        (expected.officialOwner && !officialOwnerBodyMatches(routine.prosrc)) ||
         /\b(execute|format|dblink|copy|lo_import|pg_read_file)\b/i.test(
           source
         )
@@ -834,7 +850,8 @@ async function verifySocialPhysicalProfile(
       EXACT_TO_PROFILE,
       COMPLIANCE_FROM_PROFILE,
       COMPLIANCE_TO_PROFILE,
-      BINDING_PROFILE
+      BINDING_PROFILE,
+      OFFICIAL_OWNER_PROFILE
     ].includes(profile)
       ? new Set(EXACT_0004_NOT_VALID_CONSTRAINTS)
       : new Set();
@@ -851,6 +868,7 @@ async function verifySocialPhysicalProfile(
   }
 
   if (bindingProfile) await verifyPublicationBindingSchema(client, { runtimeRole });
+  if (officialOwnerProfile) await verifyOfficialOwnerSchema(client, { runtimeRole, ownerRole });
   return Object.freeze({
     profile,
     relationCount: expectedRelations.size,
@@ -3650,8 +3668,8 @@ async function applyStagingExactWithinTransaction(
 }
 
 function validatePreparationStepRequest(request, local, { production = true } = {}) {
-  const versions = [...COMPLIANCE_TARGET_MIGRATIONS, BINDING_MIGRATION];
-  if (!Array.isArray(local) || local.length !== 7 || local.some((entry, index) =>
+  const versions = [...COMPLIANCE_TARGET_MIGRATIONS, BINDING_MIGRATION, OFFICIAL_OWNER_MIGRATION];
+  if (!Array.isArray(local) || ![7, 8].includes(local.length) || local.some((entry, index) =>
     entry.version !== versions[index] || entry.sha256 !== PREPARATION_SQL_PINS[index]
   )) postgresFail("migration_preparation_manifest_mismatch", "Manifesto da preparacao divergente.");
   const index = Array.isArray(request?.expectedApplied) ? request.expectedApplied.length : -1;
@@ -3744,14 +3762,14 @@ function createMigrationRunner(options = {}) {
     return Object.freeze({ status, catalogSha256, profile: `social-schema-${String(count).padStart(4, "0")}` });
   }
 
-  async function runPreparationStep(rawRequest, env, { production, write }) {
+  async function runPreparationStep(rawRequest, env, { production, write, localIndex = 6 }) {
     const local = readManifest(manifestOptions);
     const request = validatePreparationStepRequest(rawRequest, local, { production });
     if (production) assertPreparationProductionTarget(target, env);
     else {
       assertMigrationTarget(target, env);
       assertExactDisposableTarget(target);
-      if (request.index !== 6) postgresFail("migration_binding_step_only", "Rota descartavel restrita a 0007.");
+      if (request.index !== localIndex) postgresFail("migration_binding_step_only", "Rota descartavel restrita ao passo nomeado.");
     }
     if (write) assertApplyTarget(target, env);
     if (production && write) {
@@ -3827,6 +3845,8 @@ function createMigrationRunner(options = {}) {
   const applyProductionStep = (request, env = process.env) => runPreparationStep(request, env, { production: true, write: true });
   const planPublicationBinding = (request, env = process.env) => runPreparationStep(request, env, { production: false, write: false });
   const applyPublicationBinding = (request, env = process.env) => runPreparationStep(request, env, { production: false, write: true });
+  const planOfficialOwnerProvisioning = (request, env = process.env) => runPreparationStep(request, env, { production: false, write: false, localIndex: 7 });
+  const applyOfficialOwnerProvisioning = (request, env = process.env) => runPreparationStep(request, env, { production: false, write: true, localIndex: 7 });
 
   async function inspect() {
     const local = readManifest(manifestOptions);
@@ -3891,6 +3911,9 @@ function createMigrationRunner(options = {}) {
           local,
           await readMigrationState(client, migratorRole)
         );
+        if (compliancePreflightState.some((item) => item.version === OFFICIAL_OWNER_MIGRATION && item.state === "pending")) {
+          postgresFail("migration_official_owner_exact_route_required", "Migration 0008 exige rota transacional revisada.");
+        }
         if (compliancePreflightState.some((item) => item.version === BINDING_MIGRATION && item.state === "pending")) {
           postgresFail("migration_publication_binding_exact_route_required", "Migration 0007 exige rota transacional revisada.");
         }
@@ -4485,6 +4508,8 @@ function createMigrationRunner(options = {}) {
     applyProductionStep,
     planPublicationBinding,
     applyPublicationBinding,
+    planOfficialOwnerProvisioning,
+    applyOfficialOwnerProvisioning,
     applyExact,
     applyMetaCompliance,
     applyReferenceCheckFix,

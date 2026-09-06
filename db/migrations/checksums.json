@@ -35,6 +35,11 @@
       "version": "0007_social_publication_connection_binding",
       "file": "0007_social_publication_connection_binding.up.sql",
       "sha256": "4747e001e3057b12facabb74f2529272d8c9cd4e933f55322ee9e3bc82483464"
+    },
+    {
+      "version": "0008_social_official_owner_provisioning",
+      "file": "0008_social_official_owner_provisioning.up.sql",
+      "sha256": "65a24b7e2171320623dba1d2d5d5e63b5679545ae1d0ca3a706765608a5b5dc6"
     }
   ]
 }

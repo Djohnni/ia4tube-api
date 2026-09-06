@@ -1914,6 +1914,7 @@ app.post("/auth/google", async (req, res) => {
       writeClientes(clientes);
     }
 
+    await productionSocialIntegration.afterAuthentication(chaveCliente);
     const token = productionSession.sign(chaveCliente);
 
     return res.json({
@@ -1937,7 +1938,7 @@ app.post("/auth/google", async (req, res) => {
 });
 
 // Login automático invisível
-app.post("/auth/auto-register", (req, res) => {
+app.post("/auth/auto-register", async (req, res) => {
   try {
     const body = req.body || {};
     const clientes = readClientes();
@@ -1982,6 +1983,7 @@ app.post("/auth/auto-register", (req, res) => {
     clientes[login] = novo;
     writeClientes(clientes);
 
+    await productionSocialIntegration.afterAuthentication(login);
     const token = productionSession.sign(login);
 
     return res.json({
@@ -2006,7 +2008,8 @@ app.post("/auth/auto-register", (req, res) => {
 });
 
 // Login
-app.post("/auth/register", (req, res) => {
+app.post("/auth/register", async (req, res, next) => {
+  try {
   const body = req.body || {};
   const whatsapp = normalizarLoginId(body.whatsapp);
   const senha = body.senha || "";
@@ -2060,6 +2063,7 @@ app.post("/auth/register", (req, res) => {
   clientesAtualizados[whatsapp] = novo;
   writeClientes(clientesAtualizados);
 
+  await productionSocialIntegration.afterAuthentication(whatsapp);
   const token = productionSession.sign(whatsapp);
 
   return res.json({
@@ -2070,9 +2074,10 @@ app.post("/auth/register", (req, res) => {
     ...billingService.getStandaloneArtStatus(novo),
     usados_no_ciclo: novo.usados_no_ciclo
   });
+  } catch (error) { return next(error); }
 });
 
-app.post("/auth/finalizar-conta-auto", auth, (req, res) => {
+app.post("/auth/finalizar-conta-auto", auth, async (req, res) => {
   try {
     const loginAtual = req.user.whatsapp;
     const novoLogin = normalizarLoginId(req.body?.login);
@@ -2127,6 +2132,7 @@ app.post("/auth/finalizar-conta-auto", auth, (req, res) => {
 
     writeClientes(clientes);
 
+    await productionSocialIntegration.afterAuthentication(novoLogin);
     const token = productionSession.sign(novoLogin);
 
     return res.json({
@@ -2150,7 +2156,8 @@ app.post("/auth/finalizar-conta-auto", auth, (req, res) => {
   }
 });
 
-app.post("/auth/login", (req, res) => {
+app.post("/auth/login", async (req, res, next) => {
+  try {
   const body = req.body || {};
   const whatsapp = normalizarLoginId(body.whatsapp);
   const senha = body.senha || "";
@@ -2183,6 +2190,7 @@ app.post("/auth/login", (req, res) => {
     writeClientes(clientes);
   }
 
+  await productionSocialIntegration.afterAuthentication(whatsapp);
   const token = productionSession.sign(whatsapp);
 
   return res.json({
@@ -2196,6 +2204,7 @@ app.post("/auth/login", (req, res) => {
     saldo: Number(c.saldo_mensal || 0) + Number(c.saldo_extra || 0),
     usados_no_ciclo: c.usados_no_ciclo
   });
+  } catch (error) { return next(error); }
 });
 
 // Perfil
@@ -7329,7 +7338,8 @@ productionSocialIntegration.initialize({
   secret: JWT_SECRET,
   readClients: readClientes,
   dataDir: DATA_DIR,
-  logger: { info() {}, error() { console.error("[social] Operacao recusada."); } }
+  logger: { info() {}, warn() { console.warn("[social] Vinculo da empresa indisponivel."); },
+    error() { console.error("[social] Operacao recusada."); } }
 }).then(() => {
   startLegacyBackgroundTasks();
   const httpServer = app.listen(PORT, () => {

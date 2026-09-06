@@ -89,6 +89,21 @@ test("all legacy server code is preserved except explicit session issuance and s
   candidate = candidate.slice(SERVER_IMPORT.length).replace(SERVER_MOUNT.trimEnd()+"\nproductionSocialIntegration.mountWeb(app);\n\n", "");
   candidate = candidate.replace('const { createProductionSession } = require("./src/social/production-session");\nconst productionSession = createProductionSession({ secret: JWT_SECRET, readClients: readClientes });\n', "");
   const live = liveSource("server.js");
+  const hooks = [...candidate.matchAll(/^ *await productionSocialIntegration\.afterAuthentication\((\w+)\);\r?\n/gm)];
+  assert.equal(hooks.length, 5);
+  candidate = candidate.replace(/^ *await productionSocialIntegration\.afterAuthentication\(\w+\);\r?\n/gm, "");
+  for (const route of ["auto-register"]) {
+    candidate = candidate.replace(`app.post("/auth/${route}", async (req, res) => {`,
+      `app.post("/auth/${route}", (req, res) => {`);
+  }
+  for (const route of ["register", "login"]) {
+    candidate = candidate.replace(`app.post("/auth/${route}", async (req, res, next) => {\n  try {`,
+      `app.post("/auth/${route}", (req, res) => {`);
+  }
+  assert.equal(candidate.split("  } catch (error) { return next(error); }\n").length - 1, 2);
+  candidate = candidate.replaceAll("  } catch (error) { return next(error); }\n", "");
+  candidate = candidate.replace('app.post("/auth/finalizar-conta-auto", auth, async (req, res) => {',
+    'app.post("/auth/finalizar-conta-auto", auth, (req, res) => {');
   const originals = [...live.matchAll(/jwt\.sign\(\{ whatsapp(?:: (\w+))? \}, JWT_SECRET, \{\n\s*algorithm: "HS256",\n\s*expiresIn: "7d"\n\s*\}\)/g)];
   assert.equal(originals.length,5);
   let n=0;
