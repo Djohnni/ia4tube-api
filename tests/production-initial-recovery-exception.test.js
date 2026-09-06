@@ -137,20 +137,26 @@ test("repeated, gapped or drifted journal cannot be repaired by the exception", 
 // recovery or DDL semantics. No Client/Pool, process or network is instantiated.
 async function sqlDouble({ ledger = false, change = () => undefined, failCommit = false } = {}) {
   const queries = [], rows = [];
-  let released, commits = 0;
+  let released, commits = 0, currentRole = target().username;
   const catalog = await readStagingExactCatalogSnapshot({ async query() { return { rows: [] }; } });
   const digest = stagingExactCatalogDigest(catalog);
   const one = value => ({ rows: [value] });
   const acl = privileges => ({ rows: privileges.map(privilege_type => ({ grantee: migratorRole, privilege_type, is_grantable: false, grantor_name: ownerRole })) });
   const client = { release(error) { released = { error }; }, async query(sql, args) {
     queries.push(sql);
+    if (sql.startsWith("SET LOCAL ROLE ")) currentRole = sql.slice("SET LOCAL ROLE ".length).replaceAll('"', "");
     const altered = change(sql, args, { ledger, rows });
     if (altered !== undefined) return altered;
     if (sql.includes("AS target_exact")) return one({ target_exact: true, postgres_18: true, tls_active: true });
     if (sql.includes("AS owner_members_exact")) return one({ postgres_version_supported: true, database_owner_safe: true,
       login_is_separate: true, direct_connect_exact: true, public_database_acl_absent: true, database_temp_absent: true,
       can_migrate: true, migrator_members_exact: true, owner_members_exact: true });
-    if (sql.includes("AS owns_database")) return one({});
+    // Match the real inspector's current_user OR session_user semantics. The
+    // owner remains active until explicitly reset or the transaction closes.
+    if (sql.includes("AS owns_database")) return one({
+      database_create: currentRole === ownerRole, owns_schema: currentRole === ownerRole,
+      schema_create: currentRole === ownerRole, owns_relation: currentRole === ownerRole
+    });
     if (sql.includes("AS schema_owner_name")) return one({ schema_owner_name: ownerRole, routine_count: 0 });
     if (sql.includes("AS marker_kind")) return one({ marker_kind: "r", marker_owner_name: ownerRole });
     if (sql.startsWith("SELECT environment_id::text")) return one({ environment_id: target().environmentId, environment_name: "production" });
@@ -167,6 +173,7 @@ async function sqlDouble({ ledger = false, change = () => undefined, failCommit 
     if (sql.startsWith("INSERT INTO ia4tube_migrations.schema_migrations")) rows.push({ version: args[0], checksum_sha256: args[1] });
     if (sql.includes("AS unlocked")) return one({ unlocked: true });
     if (sql === "COMMIT") { commits++; if (failCommit) throw new Error("synthetic_commit_transport_loss"); }
+    if (sql === "COMMIT" || sql === "ROLLBACK") currentRole = target().username;
     return { rows: [] };
   } };
   const value = target();
@@ -193,6 +200,9 @@ test("ledger bootstrap reuses canonical DDL once, validates empty journal and pe
   assert.equal(result.postCommitValidated, true); assert.deepEqual(result.appliedMigrations, []);
   assert.equal(result.recoveryDecision.isolatedRestoreVerified, false);
   assert.equal(h.queries.filter(x => x.startsWith("CREATE TABLE IF NOT EXISTS")).length, 1);
+  const creationIndex = h.queries.findIndex(x => x.startsWith("CREATE TABLE IF NOT EXISTS"));
+  const firstSessionGateAfterCreation = h.queries.findIndex((x, i) => i > creationIndex && x.includes("AS owner_members_exact"));
+  assert.ok(h.queries.slice(creationIndex, firstSessionGateAfterCreation).includes(`SET LOCAL ROLE "${migratorRole}"`));
   assert.equal(h.queries.filter(x => x.startsWith("BEGIN")).length, 2);
   assert.equal(h.commits(), 1); assert.equal(h.queries.some(x => x.startsWith("INSERT")), false);
   assert.equal(h.queries.at(-1).includes("advisory_unlock"), true); assert.ok(h.released());

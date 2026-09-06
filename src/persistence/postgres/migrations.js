@@ -3919,6 +3919,7 @@ function createMigrationRunner(options = {}) {
           // Reuse the canonical DDL and exact ACL validator, under this single
           // transaction; an existing ledger is refused before any CREATE/ACL.
           await ensureLedger(client, ownerRole, migratorRole, { withinTransaction: true });
+          await client.query(`SET LOCAL ROLE ${quoteIdentifier(migratorRole)}`);
           await preparationGate(client, local, { ...request, index: -1 }, 0, true);
           commitAttempted = true;
           try { await client.query("COMMIT"); commitCompleted = true; }
