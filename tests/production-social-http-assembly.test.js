@@ -7,7 +7,7 @@ const {createInstagramOAuthStateEnvelope}=require("../src/social/oauth/instagram
 const {createProductionSession}=require("../src/social/production-session");
 const {createSocialAuthAdapter}=require("../src/social/auth-adapter");
 const {databaseTargetFingerprint}=require("../src/persistence/postgres/config");
-const {initializeSocialServerRuntime}=require("../src/social/server-runtime");
+const {initializeSocialServerRuntime,safeErrorCode}=require("../src/social/server-runtime");
 function environment(){
  const url=new URL(`postgresql://ia4tube_social_runtime:${crypto.randomBytes(24).toString("hex")}@dpg-dae4tmf40ujc73dr2dog-a.oregon-postgres.render.com:5432/ia4tube_social_production`);
  return {ENVIRONMENT:"production",PUBLIC_API_BASE_URL:"https://ia4tube-api.onrender.com",SOCIAL_PERSISTENCE_ENABLED:"true",SOCIAL_INSTAGRAM_ENABLED:"true",REAL_REVIEWER_UI_ENABLED:"true",
@@ -17,6 +17,12 @@ function environment(){
  INSTAGRAM_APP_ID:"12345678901234",INSTAGRAM_APP_SECRET:crypto.randomBytes(32).toString("hex"),INSTAGRAM_GRAPH_API_VERSION:"v25.0",
  INSTAGRAM_OAUTH_REDIRECT_URI:"https://ia4tube-api.onrender.com/v1/social/oauth/callback"};
 }
+test("startup diagnostics expose only a bounded error code",()=>{
+ const error=Object.assign(new Error("sentinel-secret-message"),{code:"reviewer_media_storage_unavailable"});
+ assert.equal(safeErrorCode(error),"reviewer_media_storage_unavailable");
+ assert.equal(safeErrorCode(Object.assign(new Error("sentinel-secret-message"),{code:"bad code: sentinel"})),"social_runtime_failed");
+ assert.equal(safeErrorCode(new Error("sentinel-secret-message")),"social_runtime_failed");
+});
 test("production provider and authenticated state use official callback, never staging, with no network",()=>{
  const env=environment(),config=loadInstagramOAuthConfig(env),key=crypto.randomBytes(32);
  const state=createInstagramOAuthStateEnvelope({environment:"production",redirectUri:config.redirectUri,keyVersion:"synthetic_v1",derivationKey:key});

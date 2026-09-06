@@ -7352,7 +7352,11 @@ productionSocialIntegration.initialize({
       server: httpServer
     });
   }
-}).catch(() => {
-  console.error("[social] Inicializacao recusada; nenhum servidor HTTP iniciado.");
+}).catch((error) => {
+  const { safeErrorCode } = require("./src/social/server-runtime");
+  console.error(
+    "[social] Inicializacao recusada; nenhum servidor HTTP iniciado. Codigo:",
+    safeErrorCode(error)
+  );
   process.exitCode = 1;
 });
