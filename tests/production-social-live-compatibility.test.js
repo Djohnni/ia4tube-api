@@ -46,6 +46,18 @@ function errorCode(code) {
   };
 }
 
+test("uncoded startup failures become a safe stage code without preserving the message", () => {
+  const source = new Error("sentinel-secret-message");
+  const safe = integration.safeStartupError(source, "social_startup_server_runtime_failed");
+  assert.equal(safe.code, "social_startup_server_runtime_failed");
+  assert.equal(safe.message.includes("sentinel"), false);
+  assert.equal(Object.hasOwn(safe, "cause"), false);
+  const coded = Object.assign(new Error("safe message not logged"), {
+    code: "postgres_runtime_role_unsafe"
+  });
+  assert.equal(integration.safeStartupError(coded, "social_startup_server_runtime_failed"), coded);
+});
+
 test("default integration stays closed without opening a pool", async () => {
   const state = integration.createProductionSocialIntegration({ env: {} });
   assert.equal(state.enabled, false);

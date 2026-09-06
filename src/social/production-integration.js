@@ -3,6 +3,7 @@ const { assertWebServiceDatabaseCredentialBoundary } = require("../persistence/p
 const OFFICIAL_API_ORIGIN = "https://ia4tube-api.onrender.com";
 const OFFICIAL_WEB_SERVICE_ID = "srv-d8708kd7vvec73ap1p6g";
 const PREPARATION_INCOMPLETE = "social_production_preparation_incomplete";
+const SAFE_STARTUP_ERROR_CODE = /^[a-z0-9_]{2,96}$/i;
 const CLOSED_FLAGS = Object.freeze([
   "SOCIAL_PERSISTENCE_ENABLED", "SOCIAL_INSTAGRAM_ENABLED",
   "SOCIAL_EXTERNAL_CONNECTION_ENABLED", "SOCIAL_EXTERNAL_PUBLICATION_ENABLED",
@@ -14,6 +15,12 @@ function refuse(code) {
   const error = new Error("Integracao social de producao indisponivel.");
   error.code = code;
   throw error;
+}
+function safeStartupError(error, fallback) {
+  if (SAFE_STARTUP_ERROR_CODE.test(String(error?.code || ""))) return error;
+  const failure = new Error("Inicializacao social recusada.");
+  failure.code = fallback;
+  return failure;
 }
 function configured(value) { return value !== undefined && value !== ""; }
 function assertProductionPreparationBoundary(env = process.env) {
@@ -64,6 +71,7 @@ function createProductionSocialIntegration(options = {}) {
   async function initialize(dependencies = {}) {
     if (!enabled) return false;
     if (initialization) return initialization;
+    let startupStage = "social_startup_session_failed";
     initialization = (async () => {
       const express = require("express");
       const { createProductionSession } = require("./production-session");
@@ -74,13 +82,17 @@ function createProductionSocialIntegration(options = {}) {
       const { createInstagramRealReviewerRouter } = require("./reviewer-real/reviewer-real");
       const { createMetaComplianceRouter } = require("./compliance");
       const { createRateLimiter } = require("../security/runtime-security");
+      startupStage = "social_startup_session_failed";
       const session = createProductionSession({ secret: dependencies.secret, readClients: dependencies.readClients });
+      startupStage = "social_startup_media_failed";
       const mediaSurface = createProductionMedia({ env, dataDir: dependencies.dataDir, readClients: dependencies.readClients });
       // Physical runtime role/schema validation happens before the HTTP listener.
       // No operator credential or migration is permitted in this webservice.
+      startupStage = "social_startup_server_runtime_failed";
       runtime = await initializeSocialServerRuntime({ env,
         realReviewerEnabled: env.SOCIAL_INSTAGRAM_ENABLED === "true",
         realReviewerMedia: mediaSurface.media, logger: dependencies.logger });
+      startupStage = "social_startup_tenant_binding_failed";
       const { createProductionTenantReadiness } = require("./production-tenant-readiness");
       const { createProductionTenantProvisioning } = require("./production-tenant-provisioning");
       tenantProvisioning = createProductionTenantProvisioning({ enabled: true,
@@ -89,6 +101,7 @@ function createProductionSocialIntegration(options = {}) {
       const readiness = createProductionTenantReadiness({ authAdapter: runtime.auth, companies: runtime.companies });
       const authenticateSocial = (req, res, next) => session.authenticate(req, res,
         () => readiness.middleware(req, res, next));
+      startupStage = "social_startup_http_assembly_failed";
       visualReturn = createInstagramOAuthVisualReturn({ publicOrigin: OFFICIAL_API_ORIGIN,
         returnPath: "/reviewer", surfaceMode: "reviewer-real" });
       const router = express.Router();
@@ -112,10 +125,18 @@ function createProductionSocialIntegration(options = {}) {
       router.use((_req, res) => res.status(404).json({ ok: false, code: "social_route_not_found" }));
       router.use((_error, _req, res, _next) => res.status(400).json({ ok: false, code: "social_request_invalid" }));
       mounted = router;
+      startupStage = "social_startup_complete";
       return true;
     })();
     try { return await initialization; }
-    catch (error) { await close(); throw error; }
+    catch (error) {
+      const failure = safeStartupError(error, startupStage);
+      try { await close(); }
+      catch (cleanupError) {
+        throw safeStartupError(cleanupError, "social_startup_cleanup_failed");
+      }
+      throw failure;
+    }
   }
   function mountWeb(app) {
     if (env.REAL_REVIEWER_UI_ENABLED !== "true") return;
@@ -142,4 +163,5 @@ function createProductionSocialIntegration(options = {}) {
     pendingContracts: PENDING_CONTRACTS, afterAuthentication, middleware, initialize, mountWeb, close });
 }
 module.exports = { CLOSED_FLAGS, OFFICIAL_API_ORIGIN, OFFICIAL_WEB_SERVICE_ID,
-  PENDING_CONTRACTS, PREPARATION_INCOMPLETE, assertProductionPreparationBoundary, createProductionSocialIntegration };
+  PENDING_CONTRACTS, PREPARATION_INCOMPLETE, assertProductionPreparationBoundary,
+  createProductionSocialIntegration, safeStartupError };
