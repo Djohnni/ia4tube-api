@@ -82,6 +82,15 @@ const {
   createMetaSignedRequestVerifier
 } = require("./compliance");
 
+const SAFE_RUNTIME_ERROR_CODE = /^[a-z0-9_]{2,96}$/i;
+
+function safeRuntimeError(error, fallback) {
+  if (SAFE_RUNTIME_ERROR_CODE.test(String(error?.code || ""))) return error;
+  const failure = new Error("Runtime social recusado.");
+  failure.code = fallback;
+  return failure;
+}
+
 function createDisabledRuntime() {
   return Object.freeze({
     enabled: false,
@@ -123,20 +132,27 @@ async function createSocialRuntime(options = {}) {
   let instagramStateEnvelope;
   let metaComplianceRepository;
   let metaSignedRequestVerifier;
+  let runtimeStage = "social_runtime_identity_configuration_failed";
   try {
     identityConfig = parseIdentityConfig(env);
+    runtimeStage = "social_runtime_vault_configuration_failed";
     vaultKeyring = parseVaultKeyring(env);
+    runtimeStage = "social_runtime_secret_separation_failed";
     assertSocialSecretSeparation({
       vaultKeyring,
       identityKey: identityConfig.key,
       env
     });
+    runtimeStage = "social_runtime_pool_creation_failed";
     pool = createPostgresPool(config.pool, {
       logger: options.logger,
       PoolClass: options.PoolClass
     });
+    runtimeStage = "social_runtime_role_verification_failed";
     await verifyRuntimeRole(pool, config.role);
+    runtimeStage = "social_runtime_schema_verification_failed";
     const schemaProfile = await verifyRuntimeSchema(pool, config.role);
+    runtimeStage = "social_runtime_repository_assembly_failed";
     const companies = createCompanyScopedRepository({
       pool,
       runtimeRole: config.role,
@@ -185,6 +201,7 @@ async function createSocialRuntime(options = {}) {
     let instagramPublication = null;
     let instagramReviewer = null;
     let metaCompliance = null;
+    runtimeStage = "social_runtime_instagram_service_assembly_failed";
     if (instagramConfig.enabled) {
       metaComplianceRepository = createPostgresMetaComplianceRepository({
         pool,
@@ -278,6 +295,7 @@ async function createSocialRuntime(options = {}) {
         });
       }
     }
+    runtimeStage = "social_runtime_reviewer_service_assembly_failed";
     if (options.realReviewerEnabled === true) {
       if (!instagramConfig.instagramEnabled) {
         postgresFail(
@@ -341,6 +359,7 @@ async function createSocialRuntime(options = {}) {
         randomUUID: options.randomUUID
       });
     }
+    runtimeStage = "social_runtime_complete";
     let closed = false;
     function assertOpen() {
       if (closed) {
@@ -389,6 +408,7 @@ async function createSocialRuntime(options = {}) {
       }
     });
   } catch (error) {
+    const failure = safeRuntimeError(error, runtimeStage);
     if (instagramStateEnvelope) instagramStateEnvelope.destroy();
     if (metaSignedRequestVerifier) metaSignedRequestVerifier.destroy();
     if (metaComplianceRepository) metaComplianceRepository.destroy();
@@ -402,14 +422,17 @@ async function createSocialRuntime(options = {}) {
       try {
         await closePostgresPool(pool);
       } catch (cleanupError) {
-        cleanupError.cause = error;
-        throw cleanupError;
+        throw safeRuntimeError(
+          cleanupError,
+          "social_runtime_cleanup_failed"
+        );
       }
     }
-    throw error;
+    throw failure;
   }
 }
 
 module.exports = {
-  createSocialRuntime
+  createSocialRuntime,
+  safeRuntimeError
 };

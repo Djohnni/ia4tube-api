@@ -8,6 +8,7 @@ const {createProductionSession}=require("../src/social/production-session");
 const {createSocialAuthAdapter}=require("../src/social/auth-adapter");
 const {databaseTargetFingerprint}=require("../src/persistence/postgres/config");
 const {initializeSocialServerRuntime,safeErrorCode}=require("../src/social/server-runtime");
+const {safeRuntimeError}=require("../src/social/runtime");
 function environment(){
  const url=new URL(`postgresql://ia4tube_social_runtime:${crypto.randomBytes(24).toString("hex")}@dpg-dae4tmf40ujc73dr2dog-a.oregon-postgres.render.com:5432/ia4tube_social_production`);
  return {ENVIRONMENT:"production",PUBLIC_API_BASE_URL:"https://ia4tube-api.onrender.com",SOCIAL_PERSISTENCE_ENABLED:"true",SOCIAL_INSTAGRAM_ENABLED:"true",REAL_REVIEWER_UI_ENABLED:"true",
@@ -22,6 +23,15 @@ test("startup diagnostics expose only a bounded error code",()=>{
  assert.equal(safeErrorCode(error),"reviewer_media_storage_unavailable");
  assert.equal(safeErrorCode(Object.assign(new Error("sentinel-secret-message"),{code:"bad code: sentinel"})),"social_runtime_failed");
  assert.equal(safeErrorCode(new Error("sentinel-secret-message")),"social_runtime_failed");
+});
+test("runtime diagnostics expose only a bounded stage code",()=>{
+ const source=new Error("sentinel-secret-message");
+ const safe=safeRuntimeError(source,"social_runtime_role_verification_failed");
+ assert.equal(safe.code,"social_runtime_role_verification_failed");
+ assert.equal(safe.message.includes("sentinel"),false);
+ assert.equal(Object.hasOwn(safe,"cause"),false);
+ const coded=Object.assign(new Error("not logged"),{code:"postgres_schema_owner_mismatch"});
+ assert.equal(safeRuntimeError(coded,"social_runtime_schema_verification_failed"),coded);
 });
 test("production provider and authenticated state use official callback, never staging, with no network",()=>{
  const env=environment(),config=loadInstagramOAuthConfig(env),key=crypto.randomBytes(32);
