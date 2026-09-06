@@ -137,17 +137,23 @@ test("repeated, gapped or drifted journal cannot be repaired by the exception", 
 // recovery or DDL semantics. No Client/Pool, process or network is instantiated.
 async function sqlDouble({ ledger = false, change = () => undefined, failCommit = false } = {}) {
   const queries = [], rows = [];
-  let released, commits = 0, currentRole = target().username;
+  let released, commits = 0, currentRole = target().username, transactionSnapshot;
   const catalog = await readStagingExactCatalogSnapshot({ async query() { return { rows: [] }; } });
   const digest = stagingExactCatalogDigest(catalog);
   const one = value => ({ rows: [value] });
   const acl = privileges => ({ rows: privileges.map(privilege_type => ({ grantee: migratorRole, privilege_type, is_grantable: false, grantor_name: ownerRole })) });
   const client = { release(error) { released = { error }; }, async query(sql, args) {
     queries.push(sql);
-    if (sql.startsWith("SET LOCAL ROLE ")) currentRole = sql.slice("SET LOCAL ROLE ".length).replaceAll('"', "");
+    if (sql.startsWith("BEGIN")) transactionSnapshot = { ledger, rows: rows.map(x => ({ ...x })) };
+    if (sql.startsWith("SET LOCAL ROLE ")) {
+      currentRole = sql === "SET LOCAL ROLE NONE" ? target().username : sql.slice("SET LOCAL ROLE ".length).replaceAll('"', "");
+    }
     const altered = change(sql, args, { ledger, rows });
     if (altered !== undefined) return altered;
-    if (sql.includes("AS target_exact")) return one({ target_exact: true, postgres_18: true, tls_active: true });
+    // PG18 statistics permissions use current_user. Under the NOLOGIN role,
+    // the session's ssl value is hidden; the production query COALESCEs it false.
+    if (sql.includes("AS target_exact")) return one({ target_exact: true, postgres_18: true,
+      tls_active: currentRole === target().username });
     if (sql.includes("AS owner_members_exact")) return one({ postgres_version_supported: true, database_owner_safe: true,
       login_is_separate: true, direct_connect_exact: true, public_database_acl_absent: true, database_temp_absent: true,
       can_migrate: true, migrator_members_exact: true, owner_members_exact: true });
@@ -173,7 +179,10 @@ async function sqlDouble({ ledger = false, change = () => undefined, failCommit 
     if (sql.startsWith("INSERT INTO ia4tube_migrations.schema_migrations")) rows.push({ version: args[0], checksum_sha256: args[1] });
     if (sql.includes("AS unlocked")) return one({ unlocked: true });
     if (sql === "COMMIT") { commits++; if (failCommit) throw new Error("synthetic_commit_transport_loss"); }
-    if (sql === "COMMIT" || sql === "ROLLBACK") currentRole = target().username;
+    if (sql === "ROLLBACK" && transactionSnapshot) {
+      ledger = transactionSnapshot.ledger; rows.splice(0, rows.length, ...transactionSnapshot.rows);
+    }
+    if (sql === "COMMIT" || sql === "ROLLBACK") { currentRole = target().username; transactionSnapshot = undefined; }
     return { rows: [] };
   } };
   const value = target();
@@ -215,6 +224,63 @@ test("ledger bootstrap refuses an existing ledger before any DDL or ACL repair",
   assert.ok(h.queries.every(x => !/^(?:CREATE|GRANT|REVOKE)\b/.test(x))); assert.ok(h.released());
 });
 
+test("canonical ledger preview validates exact DDL then rolls back, rechecks absence, and never commits", async () => {
+  const h = await sqlDouble();
+  const result = await h.runner.previewInitialProductionLedger(h.request, h.env);
+  assert.equal(result.operation, "initial-ledger-preview");
+  assert.equal(result.previewValidated, true); assert.equal(result.postCommitValidated, false);
+  assert.equal(result.rollbackConfirmed, true); assert.equal(result.postRollbackCatalogueVerified, true);
+  assert.equal(result.readOnly, false); assert.equal(result.rollbackOnly, true);
+  assert.equal(result.finalCatalogSha256, h.request.beforeCatalogSha256);
+  assert.equal(result.recoveryDecision.recoveryProven, false);
+  assert.equal(h.queries.filter(x => x.startsWith("CREATE TABLE IF NOT EXISTS")).length, 1);
+  assert.equal(h.commits(), 0); assert.equal(h.queries.filter(x => x === "ROLLBACK").length, 2);
+  assert.equal(h.queries.filter(x => x.includes("AS ledger_absent")).length, 2);
+  for (let i = 0; i < h.queries.length; i++) if (h.queries[i].includes("AS target_exact")) {
+    assert.equal(h.queries[i - 1], "SET LOCAL ROLE NONE");
+  }
+  assert.equal(h.queries.some(x => x.startsWith("INSERT")), false); assert.ok(h.released());
+});
+
+test("preview keeps authorization, target and catalogue gates before and after DDL", async () => {
+  const refused = refusalHarness();
+  await assert.rejects(refused.runner.previewInitialProductionLedger({ ...ledgerRequest(), initialAuthorizationId: "other" }, refused.env),
+    { code: "migration_initial_authorization_mismatch" });
+  assert.equal(refused.connections(), 0);
+  for (const field of ["beforeCatalogSha256", "afterCatalogSha256"]) {
+    const h = await sqlDouble();
+    await assert.rejects(h.runner.previewInitialProductionLedger({ ...h.request, [field]: "f".repeat(64) }, h.env), error => {
+      assert.equal(error.code, "migration_preparation_catalog_mismatch");
+      assert.equal(error.initialPreparationPhase, field === "beforeCatalogSha256" ? "initial-ledger-before-gate" : "initial-ledger-after-gate");
+      return true;
+    });
+    assert.equal(h.commits(), 0); assert.equal(h.queries.filter(x => x === "ROLLBACK").length, 1);
+  }
+});
+
+test("preview retains the actual query error and a fixed phase while rolling back failed DDL", async () => {
+  const h = await sqlDouble({ change(sql) {
+    if (sql.startsWith("CREATE TABLE IF NOT EXISTS")) throw Object.assign(new Error("synthetic private error"), { code: "42501" });
+  } });
+  await assert.rejects(h.runner.previewInitialProductionLedger(h.request, h.env), error => {
+    assert.equal(error.code, "42501"); assert.equal(error.initialPreparationPhase, "initial-ledger-ddl-and-acl"); return true;
+  });
+  assert.equal(h.commits(), 0); assert.equal(h.queries.filter(x => x === "ROLLBACK").length, 1);
+  assert.ok(h.released());
+});
+
+test("unconfirmed preview rollback discards the session and never retries rollback or claims success", async () => {
+  const h = await sqlDouble({ change(sql) { if (sql === "ROLLBACK") throw Object.assign(new Error("synthetic transport loss"), { code: "08006" }); } });
+  await assert.rejects(h.runner.previewInitialProductionLedger(h.request, h.env), error => {
+    assert.equal(error.code, "migration_initial_preview_rollback_failed");
+    assert.equal(error.initialPreparationPhase, "initial-ledger-preview-rollback");
+    assert.equal(error.requiresReadOnlyInspection, true); assert.equal(error.retryAllowed, false); return true;
+  });
+  assert.equal(h.commits(), 0); assert.equal(h.queries.filter(x => x === "ROLLBACK").length, 1);
+  assert.equal(h.queries.some(x => x.includes("advisory_unlock")), false);
+  assert.equal(h.released().error.discardClient, true);
+});
+
 test("one exact initial migration uses unchanged SQL, writes one journal entry and validates after commit", async () => {
   const h = await sqlDouble({ ledger: true });
   const result = await h.runner.applyInitialProductionStep(h.step, h.env);
@@ -231,10 +297,11 @@ for (const [label, change, code] of [
   ["PG18", sql => sql.includes("AS target_exact") ? { rows: [{ target_exact: true, postgres_18: false, tls_active: true }] } : undefined, "migration_preparation_session_mismatch"],
   ["privileged migration login", sql => sql.includes("AS owner_members_exact") ? { rows: [{ rolsuper: true }] } : undefined, "migration_session_role_unsafe"],
   ["marker", sql => sql.startsWith("SELECT environment_id::text") ? { rows: [{ environment_id: target().environmentId, environment_name: "staging" }] } : undefined, "migration_environment_marker_mismatch"]
-]) test(`both initial writes still refuse ${label} and roll back without DDL`, async () => {
-  for (const ledger of [false, true]) {
+]) test(`initial operations still refuse ${label} and roll back without DDL`, async () => {
+  for (const operation of ["initializeInitialProductionLedger", "applyInitialProductionStep", "previewInitialProductionLedger"]) {
+    const ledger = operation === "applyInitialProductionStep";
     const h = await sqlDouble({ ledger, change });
-    await assert.rejects(ledger ? h.runner.applyInitialProductionStep(h.step, h.env) : h.runner.initializeInitialProductionLedger(h.request, h.env), { code });
+    await assert.rejects(h.runner[operation](ledger ? h.step : h.request, h.env), { code });
     assert.ok(h.queries.includes("ROLLBACK")); assert.equal(h.commits(), 0);
     assert.ok(h.queries.every(x => !/^(?:CREATE|INSERT|GRANT|REVOKE)\b/.test(x))); assert.ok(h.released());
   }

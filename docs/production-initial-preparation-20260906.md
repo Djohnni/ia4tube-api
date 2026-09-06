@@ -26,6 +26,12 @@ A exceção vale exclusivamente para a preparação inicial do banco abaixo e pa
 4. Verificar runtime, schema, RLS forçada, grants e isolamento. Identidade/cofre de produção são próprios; não copiar material do staging.
 5. Preservar mídia no disco persistente e os fluxos legados. Chaves, assinatura Android, AAB, backups existentes, staging, revisão e provas da Meta não são dispensáveis.
 
+### Diagnóstico transacional do ledger
+
+`previewInitialProductionLedger` usa a mesma autorização inicial, alvo, manifesto, DDL canônico e verificadores da inicialização. Nunca executa COMMIT: desfaz a transação e confere, em nova transação somente leitura, que o ledger continua ausente e o catálogo anterior foi preservado. O resultado é explicitamente `readOnly:false`, `rollbackOnly:true` e `postCommitValidated:false`. Uma recusa não equivale a prévia aprovada; reinspecionar separadamente antes de qualquer tentativa persistente.
+
+A conferência de identidade/TLS deve ser feita com o LOGIN autenticado, antes de assumir novamente o papel restrito de migration. As estatísticas de sessão do PostgreSQL são limitadas pelo papel corrente; trocar para um grupo NOLOGIN pode ocultar a informação TLS da própria conexão. Não contornar isso concedendo leitura global de estatísticas ou aceitando TLS ausente. [Documentação PostgreSQL 18](https://www.postgresql.org/docs/18/monitoring-stats.html#MONITORING-STATS-VIEWS).
+
 ## Promoção e retorno
 
 Registrar o SHA e a configuração funcionais **realmente observados** antes da implantação. A referência histórica `1bd987f1ecbbd3a64f2ad0e905d30649704f4b3c` não é ordem de rollback. Preservar JWT, FCM, DATA_DIR, disco e demais configurações existentes.

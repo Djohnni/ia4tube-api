@@ -3753,6 +3753,9 @@ function createMigrationRunner(options = {}) {
   }
 
   async function preparationSessionGate(client, production) {
+    // Inspect the authenticated LOGIN: PG18 hides session TLS statistics from
+    // the active NOLOGIN role. All checks remain, then we assume the migrator.
+    await client.query("SET LOCAL ROLE NONE");
     const identity = await client.query(`SELECT current_database() = $1 AND session_user = $2 AS target_exact,
       current_setting('server_version_num')::integer >= 180000 AND
       current_setting('server_version_num')::integer < 190000 AS postgres_18,
@@ -3897,7 +3900,7 @@ function createMigrationRunner(options = {}) {
     return Object.freeze({ catalogSha256 });
   }
 
-  async function runInitialProductionLedger(rawRequest, env, { write }) {
+  async function runInitialProductionLedger(rawRequest, env, { write, preview = false }) {
     const request = validateInitialProductionRequest(rawRequest, { ledger: true });
     assertInitialProductionTarget(target, env, targetFingerprint(target || {}));
     const local = readManifest(manifestOptions);
@@ -3905,22 +3908,45 @@ function createMigrationRunner(options = {}) {
     if (local.length !== 8) postgresFail("migration_initial_manifest_invalid", "Manifesto inicial deve encerrar em 0008.");
     const client = await pool.connect();
     let releaseError, commitCompleted = false;
+    let initialPreparationPhase = "initial-ledger-lock";
     try {
       return await withAdvisoryLock(client, async () => {
-        if (!write) return runExactReadOnlyTransaction(client, async () => {
+        if (!write && !preview) return runExactReadOnlyTransaction(client, async () => {
+          initialPreparationPhase = "initial-ledger-before-gate";
           const before = await initialLedgerGate(client, request);
           return Object.freeze({ readOnly: true, applyAuthorized: false, operation: "initial-ledger-plan",
             ...request, observedCatalogSha256: before.catalogSha256, recoveryDecision: initialRecoveryDecision() });
         });
+        initialPreparationPhase = "initial-ledger-begin";
         await client.query("BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ");
-        let commitAttempted = false;
+        let commitAttempted = false, previewRollbackAttempted = false;
         try {
+          initialPreparationPhase = "initial-ledger-before-gate";
           await initialLedgerGate(client, request);
           // Reuse the canonical DDL and exact ACL validator, under this single
           // transaction; an existing ledger is refused before any CREATE/ACL.
+          initialPreparationPhase = "initial-ledger-ddl-and-acl";
           await ensureLedger(client, ownerRole, migratorRole, { withinTransaction: true });
+          initialPreparationPhase = "initial-ledger-after-gate";
           await client.query(`SET LOCAL ROLE ${quoteIdentifier(migratorRole)}`);
           await preparationGate(client, local, { ...request, index: -1 }, 0, true);
+          if (preview) {
+            initialPreparationPhase = "initial-ledger-preview-rollback";
+            previewRollbackAttempted = true;
+            try { await client.query("ROLLBACK"); }
+            catch (error) {
+              Object.assign(error, { code: "migration_initial_preview_rollback_failed", discardClient: true,
+                skipAdvisoryUnlock: true, retryAllowed: false, requiresReadOnlyInspection: true });
+              throw error;
+            }
+            initialPreparationPhase = "initial-ledger-postrollback-gate";
+            const restored = await runExactReadOnlyTransaction(client, () => initialLedgerGate(client, request));
+            return Object.freeze({ operation: "initial-ledger-preview", previewValidated: true,
+              postCommitValidated: false, rollbackConfirmed: true, postRollbackCatalogueVerified: true,
+              readOnly: false, rollbackOnly: true, finalCatalogSha256: restored.catalogSha256,
+              appliedMigrations: Object.freeze([]), retryAllowed: false, recoveryDecision: initialRecoveryDecision() });
+          }
+          initialPreparationPhase = "initial-ledger-commit";
           commitAttempted = true;
           try { await client.query("COMMIT"); commitCompleted = true; }
           catch (cause) {
@@ -3930,9 +3956,10 @@ function createMigrationRunner(options = {}) {
             throw failure;
           }
         } catch (error) {
-          if (!commitAttempted) await rollbackExactTransaction(client, error);
+          if (!commitAttempted && !previewRollbackAttempted) await rollbackExactTransaction(client, error);
           throw error;
         }
+        initialPreparationPhase = "initial-ledger-postcommit-gate";
         const finalGate = await runExactReadOnlyTransaction(client, () =>
           preparationGate(client, local, { ...request, index: -1 }, 0, true));
         return Object.freeze({ operation: "initial-ledger-initialized", finalProfile: finalGate.profile,
@@ -3940,6 +3967,7 @@ function createMigrationRunner(options = {}) {
           postCommitValidated: true, retryAllowed: false, recoveryDecision: initialRecoveryDecision() });
       });
     } catch (error) {
+      error.initialPreparationPhase = initialPreparationPhase;
       if (commitCompleted) Object.assign(error, { applied: true, retryAllowed: false, requiresReadOnlyInspection: true });
       if (error?.discardClient) releaseError = error;
       throw error;
@@ -3948,6 +3976,7 @@ function createMigrationRunner(options = {}) {
 
   const planInitialProductionLedger = (request, env = process.env) => runInitialProductionLedger(request, env, { write: false });
   const initializeInitialProductionLedger = (request, env = process.env) => runInitialProductionLedger(request, env, { write: true });
+  const previewInitialProductionLedger = (request, env = process.env) => runInitialProductionLedger(request, env, { write: false, preview: true });
 
   async function inspect() {
     const local = readManifest(manifestOptions);
@@ -4611,6 +4640,7 @@ function createMigrationRunner(options = {}) {
     applyInitialProductionStep,
     planInitialProductionLedger,
     initializeInitialProductionLedger,
+    previewInitialProductionLedger,
     planPublicationBinding,
     applyPublicationBinding,
     planOfficialOwnerProvisioning,
