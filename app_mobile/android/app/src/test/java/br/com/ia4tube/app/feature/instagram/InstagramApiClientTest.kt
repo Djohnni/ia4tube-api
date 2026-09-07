@@ -42,6 +42,36 @@ class InstagramApiClientTest {
         assertEquals(0, server.requestCount)
     }
 
+    @Test fun connectionRequiresExplicitStableIdentityAndStrictSafeIntegerRevision() = runBlocking {
+        val malformed = listOf(
+            connection().also { it.remove("externalId") },
+            connection().put("externalId", JSONObject.NULL),
+            connection().put("externalId", "@fixture_account"),
+            connection().also { it.remove("connectionRevision") },
+            connection().put("connectionRevision", "4"),
+            connection().put("connectionRevision", 4.5),
+            connection().put("connectionRevision", 0),
+            connection().put("connectionRevision", 9007199254740992L)
+        )
+        for (fixture in malformed) {
+            enqueue(JSONObject().put("ok", true).put("connection", fixture))
+            assertEquals(InstagramResult.Failure(InstagramError.INVALID_RESPONSE), client.currentConnection())
+        }
+        enqueue(JSONObject().put("ok", true).put("connection", connection()
+            .put("state", "disconnected").put("health", "disconnected")
+            .put("username", JSONObject.NULL).put("accountType", JSONObject.NULL).put("externalId", JSONObject.NULL)))
+        assertFalse((client.currentConnection() as InstagramResult.Success).value!!.canPublish)
+    }
+
+    @Test fun invalidCallerBindingFailsBeforeAnyPost() = runBlocking {
+        for (binding in listOf(BINDING.copy(externalId = "@name"), BINDING.copy(connectionRevision = 0),
+            BINDING.copy(connectionRevision = 9007199254740992L), BINDING.copy(connectionId = "bad"))) {
+            assertEquals(InstagramResult.Failure(InstagramError.INVALID_INPUT), client.publish(MEDIA, REQUEST, binding))
+            assertEquals(InstagramResult.Failure(InstagramError.INVALID_INPUT), client.reconcile(PUBLICATION, binding))
+        }
+        assertEquals(0, server.requestCount)
+    }
+
     @Test fun publicConstructorCannotUseLocalOrStagingOrigins() = runBlocking {
         val badOrigins = listOf("http://127.0.0.1:${server.port}", "https://ia4tube-api-staging-checkpoint-a.onrender.com")
         for (origin in badOrigins) {
@@ -115,34 +145,37 @@ class InstagramApiClientTest {
 
     @Test fun publishPreservesCallerIntentAndSendingIsNotPublished() = runBlocking {
         enqueue(JSONObject().put("ok", true).put("publication", publication("sending")), 202)
-        val result = client.publish(MEDIA, REQUEST) as InstagramResult.Success
+        val result = client.publish(MEDIA, REQUEST, BINDING) as InstagramResult.Success
         assertFalse(result.value.confirmed)
         assertTrue(result.value.pending)
         val body = JSONObject(server.takeRequest().body.readUtf8())
-        assertEquals(setOf("mediaId", "clientRequestId"), body.keys().asSequence().toSet())
+        assertEquals(setOf("mediaId", "clientRequestId", "expectedConnectionId", "expectedExternalId", "expectedConnectionRevision"), body.keys().asSequence().toSet())
+        assertEquals(BINDING.externalId, body.getString("expectedExternalId"))
+        assertEquals(BINDING.connectionRevision, body.getLong("expectedConnectionRevision"))
+        assertEquals(CONNECTION, body.getString("expectedConnectionId"))
         assertEquals(REQUEST, body.getString("clientRequestId"))
         assertEquals(MEDIA, body.getString("mediaId"))
     }
 
     @Test fun falsePublishedAndUntrustedPermalinkNeverBecomeSuccess() = runBlocking {
         enqueue(JSONObject().put("ok", true).put("publication", publication("published")), 201)
-        assertEquals(InstagramResult.Failure(InstagramError.RESULT_UNKNOWN), client.publish(MEDIA, REQUEST))
+        assertEquals(InstagramResult.Failure(InstagramError.RESULT_UNKNOWN), client.publish(MEDIA, REQUEST, BINDING))
         val unsafe = publication("published").put("providerMediaId", "1234567890")
             .put("publishedAt", DATE).put("permalink", "https://evil.example/p/AbCdE_123/")
         enqueue(JSONObject().put("ok", true).put("publication", unsafe), 201)
-        assertEquals(InstagramResult.Failure(InstagramError.RESULT_UNKNOWN), client.publish(MEDIA, REQUEST))
+        assertEquals(InstagramResult.Failure(InstagramError.RESULT_UNKNOWN), client.publish(MEDIA, REQUEST, BINDING))
     }
 
     @Test fun ambiguousPublicationTransportFailureIsNotAutomaticallyRetried() = runBlocking {
         server.enqueue(MockResponse().setSocketPolicy(SocketPolicy.DISCONNECT_AFTER_REQUEST))
-        assertEquals(InstagramResult.Failure(InstagramError.RESULT_UNKNOWN), client.publish(MEDIA, REQUEST))
+        assertEquals(InstagramResult.Failure(InstagramError.RESULT_UNKNOWN), client.publish(MEDIA, REQUEST, BINDING))
         assertEquals(1, server.requestCount)
     }
 
     @Test fun gateRejectionHasSafeUnavailableMessageEvenOnPublish() = runBlocking {
         enqueue(JSONObject().put("ok", false).put("code", "external_capability_disabled")
             .put("error", "private configuration"), 503)
-        assertEquals(InstagramResult.Failure(InstagramError.UNAVAILABLE), client.publish(MEDIA, REQUEST))
+        assertEquals(InstagramResult.Failure(InstagramError.UNAVAILABLE), client.publish(MEDIA, REQUEST, BINDING))
     }
 
     @Test fun confirmedPublicationRequiresAllServerEvidenceAndRequestedId() = runBlocking {
@@ -157,12 +190,57 @@ class InstagramApiClientTest {
 
     @Test fun reconciliationUsesExistingPublicationAndNeverCreatesNewIntent() = runBlocking {
         enqueue(JSONObject().put("ok", true).put("publication", publication("provider_confirming")), 202)
-        val result = client.reconcile(PUBLICATION) as InstagramResult.Success
+        val result = client.reconcile(PUBLICATION, BINDING) as InstagramResult.Success
         assertTrue(result.value.pending)
         val request = server.takeRequest()
         assertEquals("/v1/social/reviewer/publications/$PUBLICATION/reconcile", request.path)
         assertEquals("POST", request.method)
-        assertEquals(0, JSONObject(request.body.readUtf8()).length())
+        val body = JSONObject(request.body.readUtf8())
+        assertEquals(setOf("expectedConnectionId", "expectedExternalId", "expectedConnectionRevision"), body.keys().asSequence().toSet())
+        assertEquals(CONNECTION, body.getString("expectedConnectionId"))
+        assertEquals(BINDING.externalId, body.getString("expectedExternalId"))
+        assertEquals(BINDING.connectionRevision, body.getLong("expectedConnectionRevision"))
+    }
+
+    @Test fun mutationResponsesMustCarryExactlyTheOriginalBinding() = runBlocking {
+        for (changed in listOf(JSONObject.NULL, JSONObject().put("connectionId", CONNECTION)
+            .put("externalId", BINDING.externalId).put("connectionRevision", 5L))) {
+            enqueue(JSONObject().put("ok", true).put("publication", publication("provider_confirming").put("binding", changed)), 202)
+            assertEquals(InstagramResult.Failure(InstagramError.RESULT_UNKNOWN), client.publish(MEDIA, REQUEST, BINDING))
+            enqueue(JSONObject().put("ok", true).put("publication", publication("provider_confirming").put("binding", changed)), 202)
+            assertEquals(InstagramResult.Failure(InstagramError.RESULT_UNKNOWN), client.reconcile(PUBLICATION, BINDING))
+        }
+    }
+
+    @Test fun bindingConflictIsSanitizedAndNeverAutomaticallyRetried() = runBlocking {
+        enqueue(JSONObject().put("ok", false).put("code", "publication_binding_conflict")
+            .put("error", "private provider credential"), 409)
+        val result = client.reconcile(PUBLICATION, BINDING)
+        assertEquals(InstagramResult.Failure(InstagramError.BINDING_CONFLICT), result)
+        assertFalse(result.toString().contains("private"))
+        assertEquals(1, server.requestCount)
+    }
+
+    @Test fun lookupUsesOnlyOriginalIntentUuidAndAcceptsAuthoritativeNullWithoutMutation() = runBlocking {
+        enqueue(JSONObject().put("ok", true).put("canonicalPersistence", true).put("publication", JSONObject.NULL))
+        assertEquals(InstagramResult.Success<InstagramPublication?>(null), client.publicationIntent(REQUEST))
+        val request = server.takeRequest()
+        assertEquals("GET", request.method)
+        assertEquals("/v1/social/reviewer/publication-intents/$REQUEST", request.path)
+        assertEquals(0L, request.bodySize)
+        enqueue(JSONObject().put("ok", true).put("canonicalPersistence", true)
+            .put("publication", publication("provider_confirming")))
+        assertEquals(BINDING, (client.publicationIntent(REQUEST) as InstagramResult.Success).value!!.binding)
+        assertEquals(InstagramResult.Failure(InstagramError.INVALID_INPUT), client.publicationIntent("bad/intent"))
+        assertEquals(2, server.requestCount)
+    }
+
+    @Test fun lookupRejectsAbsentCanonicalProofOrAbsentPublicationField() = runBlocking {
+        for (fixture in listOf(JSONObject().put("ok", true).put("publication", JSONObject.NULL),
+            JSONObject().put("ok", true).put("canonicalPersistence", true))) {
+            enqueue(fixture)
+            assertEquals(InstagramResult.Failure(InstagramError.INVALID_RESPONSE), client.publicationIntent(REQUEST))
+        }
     }
 
     @Test fun historyCannotOfferFreshPublicationWhileAnotherIsPending() = runBlocking {
@@ -185,6 +263,7 @@ class InstagramApiClientTest {
 
     private fun connection() = JSONObject().put("connectionId", CONNECTION).put("provider", "instagram")
         .put("state", "connected").put("health", "healthy").put("username", "@fixture_account").put("accountType", "business")
+        .put("externalId", BINDING.externalId).put("connectionRevision", BINDING.connectionRevision)
 
     private fun media() = JSONObject().put("id", MEDIA).put("mimeType", "image/jpeg")
         .put("caption", "caption\n\n#IA4TubeReview_fixture").put("width", 1080).put("height", 1080)
@@ -194,9 +273,12 @@ class InstagramApiClientTest {
         .put("state", state).put("media", JSONObject().put("id", MEDIA).put("mimeType", "image/jpeg"))
         .put("caption", "caption").put("account", JSONObject.NULL).put("providerMediaId", JSONObject.NULL)
         .put("permalink", JSONObject.NULL).put("publishedAt", JSONObject.NULL).put("createdAt", DATE).put("updatedAt", DATE)
+        .put("binding", JSONObject().put("connectionId", CONNECTION).put("externalId", BINDING.externalId)
+            .put("connectionRevision", BINDING.connectionRevision))
 
     companion object {
         private const val CONNECTION = "11111111-1111-4111-8111-111111111111"
+        private val BINDING = InstagramConnectionBinding(CONNECTION, "123456789012345", 4L)
         private const val OTHER_CONNECTION = "22222222-2222-4222-8222-222222222222"
         private const val PUBLICATION = "33333333-3333-4333-8333-333333333333"
         private const val REQUEST = "44444444-4444-4444-8444-444444444444"

@@ -37,6 +37,7 @@ class InstagramViewModelTest {
             assertNotNull("The durable intent must already exist when POST starts", durable)
             assertEquals(mediaId, durable!!.mediaId)
             assertEquals(requestId, durable.clientRequestId)
+            assertEquals(CONNECTION.binding, durable.binding)
             assertNull(durable.publicationId)
             InstagramResult.Success(publicationFixture())
         }
@@ -49,6 +50,7 @@ class InstagramViewModelTest {
         model.awaitIdle()
 
         assertEquals(1, gateway.publishCalls.size)
+        assertEquals(listOf(CONNECTION.binding), gateway.publishBindings)
         assertEquals(1, store.createCalls)
         assertTrue(events.indexOf("create-complete") < events.indexOf("publish"))
         assertEquals(store.read(contextKey())!!.clientRequestId, gateway.publishCalls.single().second)
@@ -89,6 +91,51 @@ class InstagramViewModelTest {
         assertEquals(original, store.read(contextKey()))
         assertNull(model.uiState.value.intent!!.publicationId)
         assertTrue(model.uiState.value.hasUnresolvedIntent)
+        assertFalse(model.uiState.value.canPublish)
+        assertEquals(listOf(original.clientRequestId, original.clientRequestId), gateway.intentLookups)
+    }
+
+    @Test fun lostResponseIsRecoveredOnlyByOriginalIntentLookupWithoutPostingAgain() = runTest(dispatcher) {
+        val store = MemoryIntentStore()
+        val gateway = SyntheticGateway().apply {
+            onPublish = { _, _ -> InstagramResult.Failure(InstagramError.RESULT_UNKNOWN) }
+        }
+        val model = model(gateway, store)
+        prepareImageForPublication(model)
+        model.requestPublicationConfirmation()
+        model.confirmPublish()
+        model.awaitIdle()
+        val original = store.read(contextKey())!!
+        gateway.intentResult = InstagramResult.Success(publicationFixture(confirmed = false))
+
+        model.onResume()
+        model.awaitIdle()
+
+        val identified = store.read(contextKey())!!
+        assertEquals(original.clientRequestId, identified.clientRequestId)
+        assertEquals(original.binding, identified.binding)
+        assertEquals(PUBLICATION_ID, identified.publicationId)
+        assertFalse(identified.confirmed)
+        assertEquals(listOf(original.clientRequestId), gateway.intentLookups)
+        assertEquals(1, gateway.publishCalls.size)
+        assertTrue(gateway.reconcileCalls.isEmpty())
+        assertTrue(model.uiState.value.canContinueConfirmation)
+    }
+
+    @Test fun lookupWithDifferentBindingCannotAdoptPublicationOrReleaseWitness() = runTest(dispatcher) {
+        val original = InstagramIntentPolicy.create(MEDIA.id, CONNECTION)
+        val store = MemoryIntentStore().apply { seed(contextKey(), original) }
+        val gateway = SyntheticGateway().apply {
+            intentResult = InstagramResult.Success(publicationFixture().copy(
+                binding = CONNECTION.binding!!.copy(connectionRevision = 5L)))
+        }
+        val model = model(gateway, store)
+        model.onResume()
+        model.awaitIdle()
+        assertEquals(original, store.read(contextKey()))
+        assertNull(model.uiState.value.intent!!.publicationId)
+        assertTrue(gateway.publishCalls.isEmpty())
+        assertTrue(gateway.reconcileCalls.isEmpty())
         assertFalse(model.uiState.value.canPublish)
     }
 
@@ -170,6 +217,7 @@ class InstagramViewModelTest {
         model.awaitIdle()
 
         assertEquals(listOf(PUBLICATION_ID), gateway.reconcileCalls)
+        assertEquals(listOf(intent.binding), gateway.reconcileBindings)
         assertTrue(gateway.publishCalls.isEmpty())
         assertEquals(0, store.createCalls)
         assertEquals(intent.clientRequestId, store.read(contextKey())!!.clientRequestId)
@@ -207,7 +255,7 @@ class InstagramViewModelTest {
         assertTrue(model.uiState.value.canContinueConfirmation)
 
         // The visible state is still the original account when the user opens the dialog.
-        gateway.connection = CONNECTION.copy(username = "@conta_reconectada")
+        gateway.connection = CONNECTION.copy(username = "@conta_reconectada", externalId = "987654321000000", connectionRevision = 5L)
         model.requestContinuationConfirmation()
         model.continuePublicationConfirmation()
         model.awaitIdle()
@@ -238,6 +286,56 @@ class InstagramViewModelTest {
             assertFalse(model.uiState.value.canPublish)
             assertNotNull(model.uiState.value.error)
         }
+    }
+
+    @Test fun serverConflictAfterAdvisoryRefreshKeepsOriginalBindingAndNeverRetries() = runTest(dispatcher) {
+        val pending = publicationFixture(confirmed = false)
+        val original = InstagramIntentPolicy.create(MEDIA.id, CONNECTION).copy(publicationId = PUBLICATION_ID)
+        val store = MemoryIntentStore().apply { seed(contextKey(), original) }
+        val gateway = SyntheticGateway().apply {
+            history = InstagramHistory(listOf(pending), false, true)
+            publicationResult = InstagramResult.Success(pending)
+            onReconcile = {
+                // Simulate another session reconnecting after the advisory GET returned.
+                connection = CONNECTION.copy(externalId = "987654321000000", connectionRevision = 5L)
+                InstagramResult.Failure(InstagramError.BINDING_CONFLICT)
+            }
+        }
+        val model = model(gateway, store)
+        model.onResume()
+        model.awaitIdle()
+        model.requestContinuationConfirmation()
+        model.continuePublicationConfirmation()
+        model.awaitIdle()
+        assertEquals(listOf(original.binding), gateway.reconcileBindings)
+        assertEquals(original, store.read(contextKey()))
+        assertEquals(InstagramAvailability.UNAVAILABLE, model.uiState.value.availability)
+        model.onResume()
+        model.awaitIdle()
+        model.requestContinuationConfirmation()
+        model.continuePublicationConfirmation()
+        assertEquals(1, gateway.reconcileCalls.size)
+        assertTrue(gateway.publishCalls.isEmpty())
+        assertFalse(model.uiState.value.canContinueConfirmation)
+    }
+
+    @Test fun legacyUsernameOnlyWitnessIsNotUpgradedFromCurrentAccount() = runTest(dispatcher) {
+        val legacy = InstagramIntentPolicy.create(MEDIA.id, CONNECTION).copy(
+            boundExternalId = null, expectedConnectionRevision = null, publicationId = PUBLICATION_ID)
+        val store = MemoryIntentStore().apply { seed(contextKey(), legacy) }
+        val gateway = SyntheticGateway().apply {
+            publicationResult = InstagramResult.Success(publicationFixture(false).copy(binding = null))
+        }
+        val model = model(gateway, store)
+        model.onResume()
+        model.awaitIdle()
+        model.requestContinuationConfirmation()
+        model.continuePublicationConfirmation()
+        assertEquals(legacy, store.read(contextKey()))
+        assertFalse(model.uiState.value.canContinueConfirmation)
+        assertTrue(gateway.intentLookups.isEmpty())
+        assertTrue(gateway.reconcileCalls.isEmpty())
+        assertTrue(gateway.publishCalls.isEmpty())
     }
 
     @Test fun unreadableLedgerFailsClosedWithoutAnyMutation() = runTest(dispatcher) {
@@ -342,7 +440,7 @@ class InstagramViewModelTest {
         }
         @Synchronized override fun update(contextKey: String, intent: InstagramPublicationIntent): Boolean {
             val saved = records[contextKey] ?: return false
-            if (saved.clientRequestId != intent.clientRequestId) return false
+            if (!InstagramIntentPolicy.canUpdate(saved, intent)) return false
             records[contextKey] = intent
             return true
         }
@@ -361,10 +459,14 @@ class InstagramViewModelTest {
         var mediaItems = listOf(MEDIA)
         var history = InstagramHistory(emptyList(), true, true)
         var publicationResult: InstagramResult<InstagramPublication> = InstagramResult.Success(publicationFixture())
+        var intentResult: InstagramResult<InstagramPublication?> = InstagramResult.Success(null)
+        val intentLookups = mutableListOf<String>()
         var onPublish: suspend (String, String) -> InstagramResult<InstagramPublication> = { _, _ -> InstagramResult.Success(publicationFixture()) }
         var onReconcile: suspend (String) -> InstagramResult<InstagramPublication> = { InstagramResult.Success(publicationFixture()) }
         val publishCalls = mutableListOf<Pair<String, String>>()
         val reconcileCalls = mutableListOf<String>()
+        val publishBindings = mutableListOf<InstagramConnectionBinding>()
+        val reconcileBindings = mutableListOf<InstagramConnectionBinding>()
         var authorizeCalls = 0
             private set
 
@@ -380,11 +482,17 @@ class InstagramViewModelTest {
         override suspend fun uploadMedia(jpeg: ByteArray, caption: String): InstagramResult<InstagramMedia> = InstagramResult.Success(MEDIA)
         override suspend fun publications(): InstagramResult<InstagramHistory> = InstagramResult.Success(history)
         override suspend fun publication(publicationId: String): InstagramResult<InstagramPublication> = publicationResult
-        override suspend fun publish(mediaId: String, clientRequestId: String): InstagramResult<InstagramPublication> {
+        override suspend fun publicationIntent(clientRequestId: String): InstagramResult<InstagramPublication?> {
+            intentLookups.add(clientRequestId)
+            return intentResult
+        }
+        override suspend fun publish(mediaId: String, clientRequestId: String, binding: InstagramConnectionBinding): InstagramResult<InstagramPublication> {
+            publishBindings.add(binding)
             publishCalls.add(mediaId to clientRequestId)
             return onPublish(mediaId, clientRequestId)
         }
-        override suspend fun reconcile(publicationId: String): InstagramResult<InstagramPublication> {
+        override suspend fun reconcile(publicationId: String, binding: InstagramConnectionBinding): InstagramResult<InstagramPublication> {
+            reconcileBindings.add(binding)
             reconcileCalls.add(publicationId)
             return onReconcile(publicationId)
         }
@@ -395,7 +503,7 @@ class InstagramViewModelTest {
         private const val CONNECTION_ID = "11111111-1111-4111-8111-111111111111"
         private const val OTHER_CONNECTION_ID = "33333333-3333-4333-8333-333333333333"
         private const val PUBLICATION_ID = "22222222-2222-4222-8222-222222222222"
-        private val CONNECTION = InstagramConnection(CONNECTION_ID, "connected", "healthy", "@empresa", "business")
+        private val CONNECTION = InstagramConnection(CONNECTION_ID, "connected", "healthy", "@empresa", "business", "123456789012345", 4L)
         private val MEDIA = InstagramMedia("reviewer-jpeg:" + "a".repeat(64), "Prévia sintética", 1080, 1080)
         private fun contextKey() = InstagramIntentPolicy.contextKey(ORIGIN, CONNECTION_ID)
         private fun publicationFixture(confirmed: Boolean = true) = InstagramPublication(
@@ -404,7 +512,7 @@ class InstagramViewModelTest {
             if (confirmed) "123456789" else null,
             if (confirmed) "https://www.instagram.com/p/ABCDE12345/" else null,
             if (confirmed) "2026-09-05T12:00:00Z" else null,
-            "2026-09-05T11:59:00Z", "2026-09-05T12:00:00Z"
+            "2026-09-05T11:59:00Z", "2026-09-05T12:00:00Z", CONNECTION.binding
         )
     }
 }

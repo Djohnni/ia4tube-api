@@ -11,6 +11,7 @@ enum class InstagramError(val message: String) {
     INVALID_RESPONSE("Não foi possível confirmar os dados do Instagram. Tente consultar novamente."),
     INVALID_INPUT("Confira a imagem, a legenda e os dados selecionados."),
     CONFLICT("Já existe uma operação em andamento. Consulte o resultado antes de continuar."),
+    BINDING_CONFLICT("A conta ou a revisão da conexão mudou. Atualize a consulta; o envio original não será redirecionado para outra conta."),
     NETWORK("Não foi possível consultar o serviço. Confira sua conexão."),
     RESULT_UNKNOWN("O resultado ainda não foi confirmado. Consulte o histórico antes de tentar publicar novamente."),
     REJECTED("A operação foi recusada. Consulte o estado da conexão antes de continuar.")
@@ -21,10 +22,19 @@ data class InstagramConnection(
     val state: String,
     val health: String,
     val username: String?,
-    val accountType: String?
+    val accountType: String?,
+    val externalId: String? = null,
+    val connectionRevision: Long? = null
 ) {
+    val binding: InstagramConnectionBinding? get() = if (externalId != null && connectionRevision != null)
+        InstagramConnectionBinding(connectionId, externalId, connectionRevision).takeIf { it.valid } else null
     val canPublish: Boolean get() = state == "connected" && health == "healthy" &&
-        accountType in setOf("business", "creator") && !username.isNullOrBlank()
+        accountType in setOf("business", "creator") && !username.isNullOrBlank() && binding != null
+}
+
+data class InstagramConnectionBinding(val connectionId: String, val externalId: String, val connectionRevision: Long) {
+    val valid: Boolean get() = InstagramPolicies.validUuid(connectionId) &&
+        InstagramPolicies.validExternalId(externalId) && InstagramPolicies.validConnectionRevision(connectionRevision)
 }
 
 data class InstagramAuthorization(
@@ -61,7 +71,8 @@ data class InstagramPublication(
     val permalink: String?,
     val publishedAt: String?,
     val createdAt: String,
-    val updatedAt: String
+    val updatedAt: String,
+    val binding: InstagramConnectionBinding? = null
 ) {
     val confirmed: Boolean get() = state == "published" && providerMediaId != null &&
         permalink != null && publishedAt != null
@@ -82,6 +93,7 @@ interface InstagramGateway {
     suspend fun uploadMedia(jpeg: ByteArray, caption: String): InstagramResult<InstagramMedia>
     suspend fun publications(): InstagramResult<InstagramHistory>
     suspend fun publication(publicationId: String): InstagramResult<InstagramPublication>
-    suspend fun publish(mediaId: String, clientRequestId: String): InstagramResult<InstagramPublication>
-    suspend fun reconcile(publicationId: String): InstagramResult<InstagramPublication>
+    suspend fun publicationIntent(clientRequestId: String): InstagramResult<InstagramPublication?>
+    suspend fun publish(mediaId: String, clientRequestId: String, binding: InstagramConnectionBinding): InstagramResult<InstagramPublication>
+    suspend fun reconcile(publicationId: String, binding: InstagramConnectionBinding): InstagramResult<InstagramPublication>
 }

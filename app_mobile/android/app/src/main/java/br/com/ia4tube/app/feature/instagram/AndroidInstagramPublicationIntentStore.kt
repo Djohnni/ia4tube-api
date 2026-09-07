@@ -19,11 +19,7 @@ class AndroidInstagramPublicationIntentStore(context: android.content.Context) :
 
     override fun update(contextKey: String, intent: InstagramPublicationIntent): Boolean = synchronized(lock) {
         val previous = read(contextKey) ?: return@synchronized false
-        if (previous.clientRequestId != intent.clientRequestId || previous.mediaId != intent.mediaId ||
-            previous.connectionId != intent.connectionId || previous.accountUsername != intent.accountUsername ||
-            previous.accountType != intent.accountType ||
-            (previous.publicationId != null && previous.publicationId != intent.publicationId)
-        ) return@synchronized false
+        if (!InstagramIntentPolicy.canUpdate(previous, intent)) return@synchronized false
         preferences.edit().putString(key(contextKey), InstagramIntentCodec.encode(intent)).commit()
     }
 

@@ -105,7 +105,8 @@ class InstagramViewModel(
                     is InstagramResult.Failure -> { failAvailability(result.error); return@launch }
                     is InstagramResult.Success -> {
                         if (!isCurrent(epoch)) return@launch
-                        val changed = _uiState.value.connection?.connectionId != result.value?.connectionId
+                        val changed = _uiState.value.connection?.connectionId != result.value?.connectionId ||
+                            _uiState.value.connection?.binding != result.value?.binding
                         if (changed) _uiState.value.draftJpeg?.fill(0)
                         _uiState.update {
                             it.copy(connection = result.value, availability = InstagramAvailability.AVAILABLE,
@@ -159,6 +160,16 @@ class InstagramViewModel(
                         when (val result = api.publication(saved.publicationId)) {
                             is InstagramResult.Success -> if (isCurrent(epoch)) observePublication(contextKey, saved, result.value)
                             is InstagramResult.Failure -> if (isCurrent(epoch)) _uiState.update { it.copy(message = "O resultado continua pendente de confirmação. Nenhum novo envio será feito.") }
+                        }
+                    } else if (saved?.binding != null) {
+                        when (val result = api.publicationIntent(saved.clientRequestId)) {
+                            is InstagramResult.Success -> if (isCurrent(epoch)) {
+                                val publication = result.value
+                                val identified = publication?.let { InstagramIntentPolicy.identify(saved, it) }
+                                if (identified != null) observePublication(contextKey, identified, publication)
+                                else _uiState.update { it.copy(message = UNKNOWN_RESULT) }
+                            }
+                            is InstagramResult.Failure -> if (isCurrent(epoch)) _uiState.update { it.copy(message = UNKNOWN_RESULT) }
                         }
                     }
                 }
@@ -279,6 +290,7 @@ class InstagramViewModel(
         val selectedMedia = _uiState.value.selectedMedia ?: return
         val contextKey = InstagramIntentPolicy.contextKey(apiOrigin, connection.connectionId)
         val intent = InstagramIntentPolicy.create(selectedMedia.id, connection)
+        val binding = intent.binding ?: return
         _uiState.update { it.copy(busy = true, confirmationOpen = false, message = null, error = null) }
         operation = viewModelScope.launch {
             try {
@@ -292,12 +304,13 @@ class InstagramViewModel(
                     return@launch
                 }
                 _uiState.update { it.copy(intent = intent) }
-                val result = api.publish(intent.mediaId, intent.clientRequestId)
+                val result = api.publish(intent.mediaId, intent.clientRequestId, binding)
                 if (!isCurrent(epoch)) return@launch
                 when (result) {
                     is InstagramResult.Success -> {
                         val publication = result.value
-                        if (publication.connectionId != intent.connectionId || publication.mediaId != intent.mediaId) {
+                        if (publication.connectionId != intent.connectionId || publication.mediaId != intent.mediaId ||
+                            publication.binding != binding) {
                             _uiState.update { it.copy(error = UNKNOWN_RESULT) }
                             return@launch
                         }
@@ -360,14 +373,15 @@ class InstagramViewModel(
         ) return
         val intent = _uiState.value.intent ?: return
         val publicationId = intent.publicationId ?: return
+        val binding = intent.binding ?: return
         val epoch = sessionEpoch
         val api = gateway ?: return
         val contextKey = InstagramIntentPolicy.contextKey(apiOrigin, intent.connectionId)
         _uiState.update { it.copy(busy = true, reconciliationConfirmationOpen = false, error = null, message = null) }
         operation = viewModelScope.launch {
             try {
-                // A reconnect can reuse a connection ID for a different Instagram account.
-                // Do not use the account currently attached to a history row as the original binding.
+                // Advisory refresh for honest UI only. The POST still carries the original
+                // stable binding, which the server must check atomically to close this race.
                 val currentConnection = api.currentConnection()
                 if (!isCurrent(epoch)) return@launch
                 when (currentConnection) {
@@ -384,13 +398,16 @@ class InstagramViewModel(
                         }
                     }
                 }
-                when (val result = api.reconcile(publicationId)) {
+                when (val result = api.reconcile(publicationId, binding)) {
                     is InstagramResult.Success -> if (isCurrent(epoch)) {
                         if (InstagramIntentPolicy.observe(intent, result.value) == null) {
                             _uiState.update { it.copy(error = UNKNOWN_RESULT) }
                         } else observePublication(contextKey, intent, result.value)
                     }
-                    is InstagramResult.Failure -> if (isCurrent(epoch)) _uiState.update { it.copy(error = UNKNOWN_RESULT) }
+                    is InstagramResult.Failure -> if (isCurrent(epoch)) {
+                        if (result.error == InstagramError.BINDING_CONFLICT) failAvailability(result.error)
+                        else _uiState.update { it.copy(error = UNKNOWN_RESULT) }
+                    }
                 }
             } catch (cancelled: CancellationException) {
                 throw cancelled

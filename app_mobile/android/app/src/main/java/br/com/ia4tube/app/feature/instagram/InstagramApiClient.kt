@@ -91,20 +91,28 @@ class InstagramApiClient private constructor(
         }
     }
 
-    override suspend fun publish(mediaId: String, clientRequestId: String): InstagramResult<InstagramPublication> {
-        if (!InstagramPolicies.validMediaId(mediaId) || !InstagramPolicies.validUuid(clientRequestId)) return invalidInput()
+    override suspend fun publish(mediaId: String, clientRequestId: String, binding: InstagramConnectionBinding): InstagramResult<InstagramPublication> {
+        if (!InstagramPolicies.validMediaId(mediaId) || !InstagramPolicies.validUuid(clientRequestId) || !binding.valid) return invalidInput()
         return request("/v1/social/reviewer/publications", "POST", jsonBody(JSONObject()
-            .put("mediaId", mediaId).put("clientRequestId", clientRequestId)), publicationMutation = true) { root ->
-            parsePublication(root.getJSONObject("publication")).also { require(it.mediaId == mediaId) }
+            .put("mediaId", mediaId).put("clientRequestId", clientRequestId).withBinding(binding)), publicationMutation = true) { root ->
+            parsePublication(root.getJSONObject("publication")).also { require(it.mediaId == mediaId && it.binding == binding) }
         }
     }
 
-    override suspend fun reconcile(publicationId: String): InstagramResult<InstagramPublication> {
-        if (!InstagramPolicies.validUuid(publicationId)) return invalidInput()
+    override suspend fun publicationIntent(clientRequestId: String): InstagramResult<InstagramPublication?> {
+        if (!InstagramPolicies.validUuid(clientRequestId)) return invalidInput()
+        return request("/v1/social/reviewer/publication-intents/$clientRequestId") { root ->
+            require(root.getBoolean("canonicalPersistence") && root.has("publication"))
+            if (root.isNull("publication")) null else parsePublication(root.getJSONObject("publication"))
+        }
+    }
+
+    override suspend fun reconcile(publicationId: String, binding: InstagramConnectionBinding): InstagramResult<InstagramPublication> {
+        if (!InstagramPolicies.validUuid(publicationId) || !binding.valid) return invalidInput()
         return request("/v1/social/reviewer/publications/$publicationId/reconcile", "POST",
-            jsonBody(JSONObject()), publicationMutation = true) { root ->
+            jsonBody(JSONObject().withBinding(binding)), publicationMutation = true) { root ->
             parsePublication(root.getJSONObject("publication")).also {
-                require(it.publicationId.equals(publicationId, true))
+                require(it.publicationId.equals(publicationId, true) && it.binding == binding)
             }
         }
     }
@@ -163,7 +171,11 @@ class InstagramApiClient private constructor(
         val type = value.nullableText("accountType", 12)
         validateAccount(username, type)
         require(state != "connected" || username != null)
-        return InstagramConnection(value.requiredUuid("connectionId"), state, health, username, type)
+        val externalId = value.nullableText("externalId", 64)
+        require(externalId == null || InstagramPolicies.validExternalId(externalId))
+        val revision = value.requiredRevision("connectionRevision")
+        require(state != "connected" || externalId != null)
+        return InstagramConnection(value.requiredUuid("connectionId"), state, health, username, type, externalId, revision)
     }
 
     private fun parseMedia(value: JSONObject): InstagramMedia {
@@ -196,9 +208,15 @@ class InstagramApiClient private constructor(
             require(providerId != null && Regex("^[0-9]{5,64}$").matches(providerId))
             require(permalink != null && InstagramPolicies.isOfficialPermalink(permalink) && publishedAt != null)
         } else require(providerId == null && permalink == null && publishedAt == null)
-        return InstagramPublication(value.requiredUuid("publicationId"), value.requiredUuid("connectionId"),
+        val connectionId = value.requiredUuid("connectionId")
+        require(value.has("binding"))
+        val binding = if (value.isNull("binding")) null else value.getJSONObject("binding").let {
+            InstagramConnectionBinding(it.requiredUuid("connectionId"), it.requiredText("externalId", 64),
+                it.requiredRevision("connectionRevision")).also { bound -> require(bound.valid && bound.connectionId == connectionId) }
+        }
+        return InstagramPublication(value.requiredUuid("publicationId"), connectionId,
             state, mediaId, caption, username, type, providerId, permalink, publishedAt,
-            value.requiredDate("createdAt"), value.requiredDate("updatedAt"))
+            value.requiredDate("createdAt"), value.requiredDate("updatedAt"), binding)
     }
 
     private fun validateAccount(username: String?, type: String?) {
@@ -217,7 +235,15 @@ class InstagramApiClient private constructor(
         require(has(key))
         return if (isNull(key)) null else requiredText(key, maximum)
     }
-    private fun JSONObject.requiredUuid(key: String) = requiredText(key, 36).also { require(InstagramPolicies.validUuid(it)) }
+    private fun JSONObject.requiredUuid(key: String) = requiredText(key, 36).also { require(InstagramPolicies.validUuid(it)) }.lowercase()
+    private fun JSONObject.requiredRevision(key: String): Long {
+        val value = get(key)
+        require(value is Int || value is Long)
+        return (value as Number).toLong().also { require(InstagramPolicies.validConnectionRevision(it)) }
+    }
+    private fun JSONObject.withBinding(binding: InstagramConnectionBinding): JSONObject =
+        put("expectedConnectionId", binding.connectionId).put("expectedExternalId", binding.externalId)
+            .put("expectedConnectionRevision", binding.connectionRevision)
     private fun JSONObject.requiredDate(key: String) = requiredText(key, 40).also { Instant.parse(it) }
     private fun JSONObject.nullableDate(key: String): String? {
         require(has(key))
@@ -229,6 +255,7 @@ class InstagramApiClient private constructor(
     }
 
     private fun mapError(status: Int, code: String, publicationMutation: Boolean): InstagramError = when {
+        code in setOf("publication_binding_conflict", "connection_binding_conflict", "publication_connection_binding_conflict") -> InstagramError.BINDING_CONFLICT
         code in setOf("external_capability_disabled", "social_instagram_configuration_invalid", "social_instagram_publication_forbidden") -> InstagramError.UNAVAILABLE
         status == 409 -> InstagramError.CONFLICT
         status in setOf(400, 413, 422) -> InstagramError.INVALID_INPUT

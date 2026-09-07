@@ -157,7 +157,10 @@ fun InstagramScreen(viewModel: InstagramViewModel, onBack: () -> Unit) {
                 InstagramSection("Publicação aguardando confirmação") {
                     Text("Existe um envio registrado para esta conexão. Consulte o resultado e o histórico. O aplicativo não repetirá a publicação nem iniciará outra enquanto o resultado estiver pendente.")
                     if (state.intent?.publicationId == null) {
-                        Text("O serviço não forneceu uma referência confirmada para este envio. A recuperação precisa ser verificada pelo suporte. Não é possível associar uma publicação do histórico a esta tentativa apenas pela imagem ou pela legenda.", style = MaterialTheme.typography.bodySmall)
+                        Text(if (state.intent?.binding != null)
+                            "A referência ainda não foi confirmada. Atualize a consulta para buscar pelo identificador original; uma resposta vazia não cancela nem repete o envio."
+                            else "Este registro antigo não tem vínculo estável verificável. A recuperação precisa ser verificada pelo suporte; nenhuma conta atual será atribuída à tentativa antiga.",
+                            style = MaterialTheme.typography.bodySmall)
                     }
                     if (state.pendingPublication?.state == "provider_confirming") {
                         Text("Você pode continuar a confirmação do envio que já aprovou. Essa ação pode concluir a mesma publicação no Instagram.")

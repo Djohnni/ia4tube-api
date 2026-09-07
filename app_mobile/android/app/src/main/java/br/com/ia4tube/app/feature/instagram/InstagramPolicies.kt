@@ -18,6 +18,8 @@ object InstagramPolicies {
 
     fun validUuid(value: String): Boolean = uuid.matches(value)
     fun validMediaId(value: String): Boolean = media.matches(value)
+    fun validExternalId(value: String): Boolean = Regex("^[0-9]{5,64}$").matches(value)
+    fun validConnectionRevision(value: Long): Boolean = value in 1L..9007199254740991L
     fun validCaption(value: String): Boolean = value == value.trim() &&
         value.length in 1..MAX_SOURCE_CAPTION_LENGTH && !forbiddenText.containsMatchIn(value)
     internal fun validPublishedCaption(value: String): Boolean = value.length in 1..2200 &&

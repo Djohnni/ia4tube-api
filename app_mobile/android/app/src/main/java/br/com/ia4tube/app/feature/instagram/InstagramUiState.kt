@@ -39,7 +39,8 @@ data class InstagramUiState(
         freshPublicationAvailable && authorizationUrlToOpen == null
     val pendingPublication: InstagramPublication? get() = intent?.let { saved ->
         history.firstOrNull { it.publicationId == saved.publicationId &&
-            it.connectionId == saved.connectionId && it.mediaId == saved.mediaId }
+            it.connectionId == saved.connectionId && it.mediaId == saved.mediaId &&
+            (!InstagramIntentPolicy.hasAccountBinding(saved) || it.binding == saved.binding) }
     }
     val canContinueConfirmation: Boolean get() = !busy && storageAvailable &&
         availability == InstagramAvailability.AVAILABLE && connection?.canPublish == true && hasUnresolvedIntent &&
