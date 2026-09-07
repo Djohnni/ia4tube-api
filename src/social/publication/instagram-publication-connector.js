@@ -386,10 +386,11 @@ function createInstagramPublicationConnector(options = {}) {
     if (authorizeContext(context) !== true) {
       connectorFail("external_capability_disabled");
     }
-    // Legacy Gate 4 gating remains in its connector registry. The separate
-    // review window must additionally be checked at the provider boundary.
-    if (isAppReviewCompany(config, context.companyId) &&
-      !canExternalPublication(config, context)) {
+    // Production's exact subject scope and the staging review window are
+    // checked again at the provider boundary, beyond the service registry.
+    if ((config.environment === "production" || context.environment === "production" ||
+        isAppReviewCompany(config, context.companyId)) &&
+        !canExternalPublication(config, context)) {
       connectorFail("external_capability_disabled");
     }
     return context;

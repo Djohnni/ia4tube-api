@@ -9,6 +9,8 @@ const {createSocialAuthAdapter}=require("../src/social/auth-adapter");
 const {databaseTargetFingerprint}=require("../src/persistence/postgres/config");
 const {initializeSocialServerRuntime,safeErrorCode}=require("../src/social/server-runtime");
 const {safeRuntimeError}=require("../src/social/runtime");
+const {fixtureContext}=require("./helpers/publication-atomic-memory-pool");
+const {loadProductionOperationPolicy}=require("../src/social/production-operation-policy");
 function environment(){
  const url=new URL(`postgresql://ia4tube_social_runtime:${crypto.randomBytes(24).toString("hex")}@dpg-dae4tmf40ujc73dr2dog-a.oregon-postgres.render.com:5432/ia4tube_social_production`);
  return {ENVIRONMENT:"production",PUBLIC_API_BASE_URL:"https://ia4tube-api.onrender.com",SOCIAL_PERSISTENCE_ENABLED:"true",SOCIAL_INSTAGRAM_ENABLED:"true",REAL_REVIEWER_UI_ENABLED:"true",
@@ -40,8 +42,12 @@ test("production provider and authenticated state use official callback, never s
  try{
  const sealed=state.seal({purpose:"connect",companyId:crypto.randomUUID(),userId:crypto.randomUUID(),sessionJti:crypto.randomUUID(),authorizationHandle:crypto.randomUUID(),returnPathId:"social_connections"});
  assert.equal(state.open(sealed).purpose,"connect");assert.throws(()=>stage.open(sealed));
- const provider=createInstagramProvider({config:{...config,externalConnectionEnabled:true},transport:()=>{throw new Error("Network forbidden");}});
- const url=new URL(provider.buildAuthorizationUrl({state:sealed}));assert.equal(url.searchParams.get("redirect_uri"),config.redirectUri);
+ const context=fixtureContext().context;
+ const productionOperations=loadProductionOperationPolicy({ENVIRONMENT:"production",
+   SOCIAL_PRODUCTION_OPERATION_ALLOWLIST_JSON:JSON.stringify([{companyId:context.companyId,userId:context.userId}])});
+ const provider=createInstagramProvider({config:{...config,productionOperations,externalConnectionEnabled:true},transport:()=>{throw new Error("Network forbidden");}});
+ assert.throws(()=>provider.buildAuthorizationUrl({state:sealed}),"production provider requires its trusted context");
+ const url=new URL(provider.buildAuthorizationUrl({state:sealed},context));assert.equal(url.searchParams.get("redirect_uri"),config.redirectUri);
  assert.equal(url.origin,"https://www.instagram.com");assert.deepEqual(url.searchParams.get("scope").split(","),["instagram_business_basic","instagram_business_content_publish"]);
  assert.throws(()=>createInstagramProvider({config:{...config,redirectUri:INSTAGRAM_OAUTH_REDIRECT_URI}}));
  }finally{state.destroy();stage.destroy();key.fill(0);}

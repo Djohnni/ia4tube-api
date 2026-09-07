@@ -2,6 +2,7 @@
 
 const { postgresFail } = require("../../persistence/postgres/errors");
 const { loadAppReviewPolicy } = require("../app-review-policy");
+const { loadProductionOperationPolicy } = require("../production-operation-policy");
 
 const INSTAGRAM_PROVIDER = "instagram";
 const INSTAGRAM_AUTHORIZATION_ENDPOINT =
@@ -126,6 +127,7 @@ function loadInstagramOAuthConfig(env = process.env) {
   );
   const publicOrigin = normalizePublicOrigin(env.PUBLIC_API_BASE_URL);
   const appReview = loadAppReviewPolicy(env);
+  const productionOperations = loadProductionOperationPolicy(env);
   const production = env.ENVIRONMENT === "production";
   if (production && (
     publicOrigin !== INSTAGRAM_PRODUCTION_ORIGIN ||
@@ -166,6 +168,7 @@ function loadInstagramOAuthConfig(env = process.env) {
       ...disabledConfig(flags, expectedUsername, publicOrigin, appReview),
       environment: production ? "production" : "staging",
       publicationBindingRequired: production,
+      productionOperations,
       redirectUri
     });
   }
@@ -204,6 +207,7 @@ function loadInstagramOAuthConfig(env = process.env) {
     appReview,
     environment: production ? "production" : "staging",
     publicationBindingRequired: production,
+    productionOperations,
     redirectUri,
     graphApiVersion,
     authorizationEndpoint: INSTAGRAM_AUTHORIZATION_ENDPOINT,

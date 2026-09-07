@@ -4,6 +4,7 @@ const { UUID_PATTERN } = require("../persistence/postgres/validation");
 const { postgresFail } = require("../persistence/postgres/errors");
 const { deriveSocialIdentity, parseIdentityConfig } = require("./identity");
 const { CONTROLLED_GATE4_COMPANY_ID } = require("./publication/controlled-gate4-jpeg");
+const { canProductionOperation } = require("./production-operation-policy");
 
 const APP_REVIEW_STAGING_ORIGIN =
   "https://ia4tube-api-staging-checkpoint-a.onrender.com";
@@ -109,6 +110,9 @@ function canExternalOperation(config, context, gate) {
   // Lazy loading avoids the config/state-envelope/auth-adapter import cycle.
   const { requireConnectorContext } = require("./connectors/contract");
   const trusted = requireConnectorContext(context, { provider: "instagram" });
+  if (config?.environment === "production" || trusted.environment === "production") {
+    return canProductionOperation(config, trusted, gate);
+  }
   if (isAppReviewCompany(config, trusted.companyId)) {
     return trusted.environment === "staging" &&
       isAppReviewAccessEnabled(config, trusted.companyId);

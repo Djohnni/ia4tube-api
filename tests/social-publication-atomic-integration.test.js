@@ -11,6 +11,8 @@ const { createPublicationIntent } = require("../src/social/publication/connectio
 const { createInstagramRealReviewerService, createInstagramRealReviewerRouter } = require("../src/social/reviewer-real/reviewer-real");
 const { withTransaction } = require("../src/persistence/postgres/pool");
 const { lockSocialConnection } = require("../src/persistence/postgres/social-publication-guard");
+const { loadInstagramOAuthConfig } = require("../src/social/oauth/instagram-config");
+const { APP_REVIEW_LOGIN } = require("../src/social/app-review-policy");
 
 const MEDIA = `reviewer-jpeg:${"a".repeat(64)}`;
 const CONTAINER = "17900000000000001";
@@ -19,11 +21,18 @@ const PUBLIC_ORIGIN = "https://ia4tube-api.onrender.com";
 function json(value) { return {status:200, headers:{get:()=>"application/json"}, arrayBuffer:async()=>Buffer.from(JSON.stringify(value))}; }
 function deferred() { let resolve; const promise = new Promise(r => { resolve=r; }); return {promise,resolve}; }
 
-function fixture(customTransport) {
-  const authenticated = fixtureContext();
+function fixture(customTransport, { owner, configOverrides = {}, allowOperationReferenceReconciliation = true } = {}) {
+  const authenticated = fixtureContext(owner);
   const { context } = authenticated;
+  const config = loadInstagramOAuthConfig({ENVIRONMENT:"production",PUBLIC_API_BASE_URL:PUBLIC_ORIGIN,
+    SOCIAL_INSTAGRAM_ENABLED:"true",SOCIAL_EXTERNAL_CONNECTION_ENABLED:"true",SOCIAL_EXTERNAL_PUBLICATION_ENABLED:"true",
+    META_APP_REVIEW_WINDOW_ENABLED:"false",SOCIAL_TENANT_NAMESPACE_UUID:"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+    SOCIAL_IDENTITY_DERIVATION_VERSION:"v1",SOCIAL_IDENTITY_DERIVATION_KEY:Buffer.alloc(32,17).toString("base64"),
+    SOCIAL_PRODUCTION_OPERATION_ALLOWLIST_JSON:JSON.stringify([{companyId:context.companyId,userId:context.userId}]),
+    INSTAGRAM_APP_ID:"12345678901234",INSTAGRAM_APP_SECRET:crypto.randomBytes(32).toString("hex"),
+    INSTAGRAM_GRAPH_API_VERSION:"v25.0",INSTAGRAM_OAUTH_REDIRECT_URI:`${PUBLIC_ORIGIN}/v1/social/oauth/callback`,...configOverrides});
   const pool = createMemoryPool(context);
-  const store = createPostgresConnectorStore({pool, publicationBindingRequired:true});
+  const store = createPostgresConnectorStore({pool, publicationBindingRequired:true,appReviewCompanyId:config.appReview.companyId});
   const scope = store.scope(context);
   const binding = {connectionId:pool.state.connection.id, externalId:pool.state.connection.external_id,connectionRevision:7};
   const posts = [];
@@ -34,8 +43,6 @@ function fixture(customTransport) {
     if (ctx.companyId !== context.companyId || id !== MEDIA) return null;
     return {...owned};
   }};
-  const config = {provider:"instagram",environment:"production",publicationBindingRequired:true,
-    publicOrigin:PUBLIC_ORIGIN,graphApiVersion:"v25.0",externalConnectionEnabled:true,externalPublicationEnabled:true};
   const transport = async (url, request) => {
     assert.equal(pool.transactions,0,"provider I/O must not hold a database transaction");
     assert.equal(request.redirect,"error");
@@ -53,6 +60,7 @@ function fixture(customTransport) {
     return json({data:[]});
   };
   const connector = createInstagramPublicationConnector({config,store,media,transport,pollIntervalMs:0,pollAttempts:1,
+    allowOperationReferenceReconciliation,
     credentials:{async withDecryptedCredential({companyId,credentialId}, operation) {
       assert.equal(companyId,context.companyId); assert.equal(credentialId,pool.state.connection.active_credential_id);
       const ephemeral = Buffer.from("SYNTHETIC_NOT_A_REAL_ACCESS_TOKEN");
@@ -258,4 +266,67 @@ test("router forwards only the exact three binding fields and exposes read-only 
   assert.equal((await invoke("POST /publications",{mediaId:MEDIA,clientRequestId:requestId,expectedConnectionId:binding.expectedConnectionId})).code,400);
   assert.equal((await invoke("POST /publications",{mediaId:MEDIA,clientRequestId:requestId,...binding,company_id:"another"})).code,400);
   assert.equal(records.length,before);
+});
+
+function scopedReviewer(f, config=f.config) {
+  return createInstagramRealReviewerService({config,authAdapter:f.adapter,connectorStore:f.store,
+    connectorAudit:{async append(){}},createPublicationConnector:()=>f.connector,
+    media:{async listOwnedJpegs(){return[];},async resolveOwnedJpeg(){return {...f.owned};}}});
+}
+function reviewerRequest(f, claims=f.claims) {
+  return {verifiedClaims:claims,mediaId:MEDIA,clientRequestId:crypto.randomUUID(),
+    expectedConnectionId:f.binding.connectionId,expectedExternalId:f.binding.externalId,expectedConnectionRevision:7};
+}
+
+test("production publication and reconciliation require the same explicit pair and current global gates",async()=>{
+  const f=fixture();
+  for(const deniedConfig of [
+    {...f.config,productionOperations:undefined},
+    {...f.config,productionOperations:{subjects:[]}},
+    {...f.config,productionOperations:{subjects:[{companyId:f.context.companyId,userId:fixtureContext("other-synthetic").context.userId}]}},
+    {...f.config,externalConnectionEnabled:false},
+    {...f.config,externalPublicationEnabled:false}
+  ]) {
+    const reviewer=scopedReviewer(f,deniedConfig),before=f.pool.statements.length;
+    await assert.rejects(reviewer.publish(reviewerRequest(f)),e=>e.code==="external_capability_disabled");
+    await assert.rejects(reviewer.reconcile({verifiedClaims:f.claims,publicationId:crypto.randomUUID(),
+      expectedConnectionId:f.binding.connectionId,expectedExternalId:f.binding.externalId,expectedConnectionRevision:7}),
+    e=>e.code==="external_capability_disabled");
+    assert.equal(f.pool.statements.length,before,"scope denial precedes persistence and provider access");
+  }
+  assert.equal(f.posts.length,0);assert.equal(f.reads.length,0);
+});
+
+test("another authenticated tenant cannot execute or recover the allowed tenant's intent",async()=>{
+  const f=fixture(async({request})=>{if(request.method==="POST")throw new Error("synthetic lost response");return json({data:[]});});
+  const reviewer=scopedReviewer(f),request=reviewerRequest(f),published=await reviewer.publish(request);
+  const other=fixtureContext("different-synthetic-owner"),before=f.posts.length;
+  await assert.rejects(reviewer.publish({...request,verifiedClaims:other.claims}),e=>e.code==="external_capability_disabled");
+  await assert.rejects(reviewer.reconcile({verifiedClaims:other.claims,publicationId:published.publication.publicationId,
+    expectedConnectionId:f.binding.connectionId,expectedExternalId:f.binding.externalId,expectedConnectionRevision:7}),
+  e=>e.code==="external_capability_disabled");
+  assert.equal((await reviewer.getPublicationIntent({verifiedClaims:other.claims,clientRequestId:request.clientRequestId})).publication,null);
+  assert.equal(f.posts.length,before);
+});
+
+test("the fixed production reviewer can publish only when explicitly scoped, preserving bound deduplication",async()=>{
+  const f=fixture(async({request})=>{if(request.method==="POST")throw new Error("synthetic lost response");return json({data:[]});},
+    {owner:APP_REVIEW_LOGIN,allowOperationReferenceReconciliation:false});
+  assert.equal(f.config.appReview.enabled,false);assert.equal(f.config.appReview.companyId,f.context.companyId);
+  const reviewer=scopedReviewer(f),request=reviewerRequest(f);
+  const first=await reviewer.publish(request);assert.equal(first.publication.state,"provider_confirming");
+  assert.deepEqual(first.publication.binding,f.binding);
+  const repeated=await reviewer.publish(request);assert.equal(repeated.duplicateSubmissionPrevented,true);
+  assert.equal(f.posts.length,1);assert.equal(f.pool.state.publications.size,1);
+  const pending=await reviewer.reconcile({verifiedClaims:f.claims,publicationId:first.publication.publicationId,
+    expectedConnectionId:f.binding.connectionId,expectedExternalId:f.binding.externalId,expectedConnectionRevision:7});
+  assert.equal(pending.publication.state,"provider_confirming");assert.equal(f.posts.length,1);assert.equal(f.reads.length,0);
+  const ownerClaims=fixtureContext().claims;
+  await assert.rejects(reviewer.publish({...request,verifiedClaims:ownerClaims}),e=>e.code==="external_capability_disabled");
+});
+
+test("the production publication provider independently refuses an empty scope",async()=>{
+  const f=fixture(undefined,{configOverrides:{SOCIAL_PRODUCTION_OPERATION_ALLOWLIST_JSON:"[]"}});
+  await assert.rejects(f.service.publishImage(f.context,f.input()),e=>e.code==="external_capability_disabled");
+  assert.equal(f.posts.length,0);assert.equal(f.reads.length,0);
 });

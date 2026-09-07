@@ -23,7 +23,9 @@ function fixture({ owner, environment = "production", env = {} } = {}) {
   const config = loadInstagramOAuthConfig({ ENVIRONMENT:environment, PUBLIC_API_BASE_URL:"https://ia4tube-api.onrender.com",
     SOCIAL_INSTAGRAM_ENABLED:"true", SOCIAL_EXTERNAL_CONNECTION_ENABLED:"true", SOCIAL_EXTERNAL_PUBLICATION_ENABLED:"false",
     INSTAGRAM_APP_ID:"12345678901234",INSTAGRAM_APP_SECRET:crypto.randomBytes(32).toString("hex"),
-    INSTAGRAM_GRAPH_API_VERSION:"v25.0",INSTAGRAM_OAUTH_REDIRECT_URI:"https://ia4tube-api.onrender.com/v1/social/oauth/callback", ...env });
+    INSTAGRAM_GRAPH_API_VERSION:"v25.0",INSTAGRAM_OAUTH_REDIRECT_URI:"https://ia4tube-api.onrender.com/v1/social/oauth/callback",
+    ...(environment === "production" ? {SOCIAL_PRODUCTION_OPERATION_ALLOWLIST_JSON:JSON.stringify([
+      {companyId:identity.context.companyId,userId:identity.context.userId}])} : {}), ...env });
   const options = {config,environment,authAdapter:identity.adapter,
     stateEnvelope:{seal:refused,open:refused,openForCallback:refused},
     provider:{buildAuthorizationUrl:refused,exchangeCode:refused,exchangeLongLivedToken:refused,discoverProfessionalAccount:refused},
@@ -86,6 +88,15 @@ test("real GET by ID and disconnect normalizer retain revision, null all account
   assert.equal(disconnected.body.connection.connectionRevision,8);
   for(const key of ["username","accountType","externalId"])assert.equal(disconnected.body.connection[key],null);
   assert.equal((await request("GET",path)).status,200);
+});
+
+test("explicitly scoped production reviewer uses ordinary connection storage, not staging-only disconnect",async t=>{
+  const f=fixture({owner:APP_REVIEW_LOGIN,env:{META_APP_REVIEW_WINDOW_ENABLED:"false",
+    SOCIAL_IDENTITY_DERIVATION_KEY:Buffer.alloc(32,17).toString("base64"),
+    SOCIAL_TENANT_NAMESPACE_UUID:"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",SOCIAL_IDENTITY_DERIVATION_VERSION:"v1"}});
+  const request=await serve(t,f),result=await request("DELETE",`/connections/instagram/${f.pool.state.connection.id}`);
+  assert.equal(result.status,200);assert.equal(result.body.connection.state,"disconnected");
+  assert.equal(result.body.connection.connectionRevision,8);
 });
 
 test("optional GET current still returns null for no connection",async t=>{

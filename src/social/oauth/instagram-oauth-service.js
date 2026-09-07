@@ -745,7 +745,9 @@ function createInstagramOAuthService(options = {}) {
     const store = requireConnectorStoreScope(options.connectorStore.scope(context));
     const connection = await store.getConnectionDetails(connectionId);
     if (!connection) oauthFail("resource_unavailable");
-    if (options.config.externalConnectionEnabled === true) {
+    if (options.config.environment === "production"
+      ? canExternalConnection(options.config, context)
+      : options.config.externalConnectionEnabled === true) {
       await ensureLegacyComplianceMapping(options, store, connection);
     }
     return Object.freeze({
@@ -801,7 +803,7 @@ function createInstagramOAuthService(options = {}) {
     const { context } = authenticatedContext(source.verifiedClaims);
     requireExternalConnection(context);
     const store = requireConnectorStoreScope(options.connectorStore.scope(context));
-    const appReview = isAppReviewCompany(options.config, context.companyId);
+    const appReview = context.environment === "staging" && isAppReviewCompany(options.config, context.companyId);
     if (appReview &&
         typeof store.disconnectAppReviewConnectionLocally !== "function") {
       oauthFail("social_instagram_configuration_invalid");

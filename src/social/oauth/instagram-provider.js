@@ -943,7 +943,7 @@ function createInstagramProvider(options = {}) {
   }
 
   function requireExternalConnection(context) {
-    if (context === undefined && !config.appReview?.companyId) {
+    if (context === undefined && config.environment !== "production" && !config.appReview?.companyId) {
       if (config.externalConnectionEnabled !== true) providerFail();
       return;
     }

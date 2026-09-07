@@ -491,7 +491,7 @@ function createInstagramRealReviewerService(options = {}) {
     registry.seal();
     return createSocialConnectorService({
       registry,
-      store: isAppReviewCompany(config, input.context.companyId)
+      store: input.context.environment === "staging" && isAppReviewCompany(config, input.context.companyId)
         ? Object.freeze({ scope(context) {
           if (context !== input.context) connectorFail("resource_unavailable");
           const scoped = connectorStore.scope(context);

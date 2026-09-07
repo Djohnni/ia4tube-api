@@ -346,7 +346,7 @@ async function createSocialRuntime(options = {}) {
             // A recovered App Review publication has only an opaque `igo:`
             // reference. Its unique intent caption permits read-only lookup;
             // ordinary tenants and Gate 4 retain their previous behavior.
-            allowOperationReferenceReconciliation: isAppReviewCompany(
+            allowOperationReferenceReconciliation: expectedContext.environment === "staging" && isAppReviewCompany(
               instagramConfig,
               expectedContext.companyId
             ),

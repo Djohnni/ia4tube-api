@@ -26,6 +26,7 @@ const files = Object.freeze([
   "production-social-web.test.js",
   "production-social-http-assembly.test.js",
   "production-social-oauth-connection-http.test.js",
+  "production-social-operation-scope.test.js",
   "production-social-tenant-readiness.test.js",
   "production-social-tenant-provisioning.test.js",
   "production-social-tenant-login-http.test.js",
