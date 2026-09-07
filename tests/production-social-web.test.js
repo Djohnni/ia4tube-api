@@ -15,7 +15,7 @@ function element(tag="div") {
     replaceChildren(...nodes){this.children=nodes;if(tag==="select")this.value=nodes[0]?.value||"";},
     removeAttribute(name){delete this[name];}};
 }
-function harness({owner="owner-a",stored={},history=[]}={}) {
+function harness({owner="owner-a",stored={},history=[],availability={connectionAllowed:false,publicationAllowed:false}}={}) {
   const elements = new Map();
   const get = id => {if(!elements.has(id))elements.set(id,element(id==="media"?"select":"div"));return elements.get(id);};
   const token = `header.${Buffer.from(JSON.stringify({sub:owner,company_id:owner})).toString("base64url")}.signature`;
@@ -30,7 +30,10 @@ function harness({owner="owner-a",stored={},history=[]}={}) {
     fetch:async (url,options={})=>{
       calls.push({url,method:options.method||"GET",body:options.body?JSON.parse(options.body):null});
       let result={ok:true};
-      if(url.endsWith("connections/instagram"))result.connection=connection;
+      if(url.endsWith("connections/instagram")) {
+        result.connection=connection;
+        if(availability!==null)result.operationalAvailability=availability;
+      }
       else if(url.endsWith("/media"))result.media=[{id:"media-1",caption:"Technical fixture",thumbnailUrl:"/fixture"}];
       else if(url.includes("/publication-intents/"))result.publication=outcome;
       else if(url.endsWith("/reconcile"))result.publication={...outcome,state:"published"};
@@ -44,6 +47,17 @@ function harness({owner="owner-a",stored={},history=[]}={}) {
 test("web resumes with GET only and never initiates OAuth or publication",async()=>{
   const h=harness();await drain();assert.equal(h.calls.length,3);assert.ok(h.calls.every(x=>x.method==="GET"));
   assert.equal(h.get("product").hidden,false);
+});
+test("existing web consumer retains connection rendering with additive or prior response",async()=>{
+  for(const availability of [null,{connectionAllowed:false,publicationAllowed:false},
+    {connectionAllowed:true,publicationAllowed:true}]) {
+    const h=harness({availability});await drain();
+    assert.equal(h.get("product").hidden,false);
+    assert.ok(h.calls.every(x=>x.method==="GET"));
+    h.get("refresh").onclick();await drain();
+    assert.equal(h.get("product").hidden,false);
+    assert.ok(h.calls.every(x=>x.method==="GET"),"availability hints never trigger actions in legacy web");
+  }
 });
 test("web intent freezes original account and revision even when connection changes",async()=>{
   const h=harness();await drain();h.get("review").onclick();await drain();

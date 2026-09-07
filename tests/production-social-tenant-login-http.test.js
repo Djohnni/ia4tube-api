@@ -61,7 +61,8 @@ test("actual five official session issuances use scoped provisioning without cha
     const auth = createSocialAuthAdapter({ namespaceUuid: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", derivationVersion: "v1", key: Buffer.alloc(32, 17) });
     const unavailable = async () => { throw Object.assign(new Error(), { code: "external_capability_disabled" }); };
     const oauth = { authorize: unavailable, callback: unavailable, disconnect: unavailable, getAuthorizationStatus: unavailable,
-      getConnection: unavailable, getConnectionHealth: unavailable, getCurrentConnection: async () => ({ ok: true, connection: null }) };
+      getConnection: unavailable, getConnectionHealth: unavailable, getCurrentConnection: async () => ({ ok: true, connection: null,
+        operationalAvailability: { connectionAllowed: false, publicationAllowed: false } }) };
     const reviewer = { getPublication: unavailable, listMedia: async () => ({ ok: true, media: [] }),
       listPublications: async () => ({ ok: true, publications: [] }), publish: unavailable, reconcile: unavailable };
     const runtime = { enabled: true, auth, companies: createCompanyScopedRepository({ pool, identityDerivationVersion: "v1" }),

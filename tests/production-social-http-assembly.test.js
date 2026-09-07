@@ -54,7 +54,7 @@ test("actual production HTTP assembly preserves authenticated read-only prerequi
  const companies={async findActiveOwner({companyId,userId}){return provisioned?{companyId,userId,role:"owner",identityDerivationVersion:env.SOCIAL_IDENTITY_DERIVATION_VERSION}:null;}};
  const unavailable=async()=>{throw Object.assign(new Error(),{code:"external_capability_disabled"});};
  const service={authorize:unavailable,callback:unavailable,disconnect:unavailable,getAuthorizationStatus:unavailable,getConnection:unavailable,getConnectionHealth:unavailable,
- async getCurrentConnection(){return {ok:true,connection:null};}};
+ async getCurrentConnection(){return {ok:true,connection:null,operationalAvailability:{connectionAllowed:false,publicationAllowed:false}};}};
  const reviewer={getPublication:unavailable,listMedia:async()=>({ok:true,media:[]}),listPublications:async()=>({ok:true,publications:[]}),publish:unavailable,reconcile:unavailable};
  const fakeRuntime={enabled:true,auth,companies,instagramOAuth:service,instagramReviewer:reviewer,instagramPublication:null,metaCompliance:null,close:async()=>{closed++;}};
  const modulePath=require.resolve("../src/social/server-runtime");
@@ -71,7 +71,7 @@ test("actual production HTTP assembly preserves authenticated read-only prerequi
  const base=`http://127.0.0.1:${server.address().port}`;
  const headers={Authorization:`Bearer ${createProductionSession({secret,readClients:()=>({[owner]:{ativo:true}})}).sign(owner)}`};
  assert.equal((await fetch(`${base}/v1/social/connections/instagram`)).status,401);
- const read=await fetch(`${base}/v1/social/connections/instagram`,{headers});assert.equal(read.status,200);assert.deepEqual(await read.json(),{ok:true,connection:null});
+ const read=await fetch(`${base}/v1/social/connections/instagram`,{headers});assert.equal(read.status,200);assert.deepEqual(await read.json(),{ok:true,connection:null,operationalAvailability:{connectionAllowed:false,publicationAllowed:false}});
  provisioned=false;const blocked=await fetch(`${base}/v1/social/connections/instagram`,{headers});assert.equal(blocked.status,503);assert.equal((await blocked.json()).code,"tenant_not_provisioned");provisioned=true;
  const page=await fetch(`${base}/reviewer`);assert.equal(page.status,200);assert.match(page.headers.get("content-security-policy"),/default-src 'self'/);assert.match(await page.text(),/Conectar Instagram/);
  const wrongOrigin=await fetch(`${base}/v1/social/reviewer/media`,{headers:{...headers,Origin:"https://foreign.invalid"}});assert.equal(wrongOrigin.status,403);

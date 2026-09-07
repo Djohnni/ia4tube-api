@@ -240,6 +240,32 @@ function normalizeConnectionResult(value, options) {
   });
 }
 
+function normalizeCurrentConnectionResult(value) {
+  const source = exactRecord(
+    value,
+    ["ok", "connection", "operationalAvailability"],
+    responseInvalid
+  );
+  if (source.ok !== true) responseInvalid();
+  const availability = exactRecord(
+    source.operationalAvailability,
+    ["connectionAllowed", "publicationAllowed"],
+    responseInvalid
+  );
+  if (typeof availability.connectionAllowed !== "boolean" ||
+      typeof availability.publicationAllowed !== "boolean") {
+    responseInvalid();
+  }
+  return Object.freeze({
+    ok: true,
+    connection: normalizeConnection(source.connection, { optional: true }),
+    operationalAvailability: Object.freeze({
+      connectionAllowed: availability.connectionAllowed,
+      publicationAllowed: availability.publicationAllowed
+    })
+  });
+}
+
 function normalizeAuthorizationResult(value) {
   const result = exactRecord(value, ["ok", "authorization"], responseInvalid);
   if (result.ok !== true) responseInvalid();
@@ -504,11 +530,10 @@ function createInstagramOAuthRouter(options = {}) {
     async (req, res) => {
       try {
         assertRequestSurface(req, []);
-        const result = normalizeConnectionResult(
+        const result = normalizeCurrentConnectionResult(
           await serviceMethod("getCurrentConnection")({
             verifiedClaims: verifiedClaims(req)
-          }),
-          { optional: true }
+          })
         );
         return res.status(200).json(result);
       } catch (error) {

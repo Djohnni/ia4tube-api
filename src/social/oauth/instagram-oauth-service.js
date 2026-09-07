@@ -3,6 +3,7 @@
 const crypto = require("node:crypto");
 const {
   canExternalConnection,
+  canExternalPublication,
   isAppReviewCompany,
   isAppReviewAccessEnabled
 } = require("../app-review-policy");
@@ -724,12 +725,16 @@ function createInstagramOAuthService(options = {}) {
     const { context } = authenticatedContext(source.verifiedClaims);
     const store = requireConnectorStoreScope(options.connectorStore.scope(context));
     const current = await store.getCurrentConnectionDetails();
-    if (options.config.externalConnectionEnabled === true) {
-      await ensureLegacyComplianceMapping(options, store, current);
-    }
+    // This session-scoped GET is observational, including when gates are open.
+    // Do not lazily repair compliance mappings or mint authorization state here.
+    // These hints reuse the action policy, which is checked again at execution.
     return Object.freeze({
       ok: true,
-      connection: current ? publicConnection(current) : null
+      connection: current ? publicConnection(current) : null,
+      operationalAvailability: Object.freeze({
+        connectionAllowed: canExternalConnection(options.config, context),
+        publicationAllowed: canExternalPublication(options.config, context)
+      })
     });
   }
 
