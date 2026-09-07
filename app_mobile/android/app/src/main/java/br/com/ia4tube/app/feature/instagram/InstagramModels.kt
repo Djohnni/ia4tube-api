@@ -85,8 +85,17 @@ data class InstagramHistory(
     val independentReview: Boolean
 )
 
+/** Advisory only: every mutation remains authorized by the server at execution time. */
+data class InstagramOperationalAvailability(val connectionAllowed: Boolean, val publicationAllowed: Boolean)
+
+data class InstagramConnectionSnapshot(
+    val connection: InstagramConnection?,
+    val operationalAvailability: InstagramOperationalAvailability?
+)
+
 interface InstagramGateway {
     suspend fun currentConnection(): InstagramResult<InstagramConnection?>
+    suspend fun currentSnapshot(): InstagramResult<InstagramConnectionSnapshot>
     suspend fun authorize(purpose: String): InstagramResult<InstagramAuthorization>
     suspend fun authorizationStatus(connectionId: String): InstagramResult<InstagramAuthorizationStatus>
     suspend fun media(): InstagramResult<List<InstagramMedia>>

@@ -42,6 +42,59 @@ class InstagramApiClientTest {
         assertEquals(0, server.requestCount)
     }
 
+    @Test fun additiveSnapshotUsesSameReadOnlyRouteAndPreviousReaderStillWorks() = runBlocking {
+        for (allowed in listOf(false, true)) {
+            val body = JSONObject().put("ok", true).put("connection", connection())
+                .put("operationalAvailability", JSONObject().put("connectionAllowed", allowed)
+                    .put("publicationAllowed", !allowed))
+            enqueue(body)
+            val snapshot = (client.currentSnapshot() as InstagramResult.Success).value
+            assertTrue(snapshot.connection!!.canPublish)
+            assertEquals(InstagramOperationalAvailability(allowed, !allowed), snapshot.operationalAvailability)
+            val request = server.takeRequest()
+            assertEquals("GET", request.method)
+            assertEquals("/v1/social/connections/instagram", request.path)
+            assertEquals(0L, request.bodySize)
+            assertEquals("no-store", request.getHeader("Cache-Control"))
+            enqueue(body)
+            assertTrue((client.currentConnection() as InstagramResult.Success).value!!.canPublish)
+            server.takeRequest()
+        }
+    }
+
+    @Test fun absentOrMalformedAvailabilityIsUnknownNotPermission() = runBlocking {
+        val values = listOf(null, JSONObject.NULL, "true", JSONObject(),
+            JSONObject().put("connectionAllowed", "true").put("publicationAllowed", true),
+            JSONObject().put("connectionAllowed", true).put("publicationAllowed", 1),
+            JSONObject().put("connectionAllowed", true))
+        for (value in values) {
+            val body = JSONObject().put("ok", true).put("connection", JSONObject.NULL)
+            if (value != null) body.put("operationalAvailability", value)
+            enqueue(body)
+            val snapshot = (client.currentSnapshot() as InstagramResult.Success).value
+            assertNull(snapshot.connection)
+            assertNull(snapshot.operationalAvailability)
+            assertEquals("GET", server.takeRequest().method)
+        }
+    }
+
+    @Test fun snapshotRejectsExpiredSessionAndCommunicationFailureWithoutGuessingPermission() = runBlocking {
+        token = ""
+        assertEquals(InstagramResult.Failure(InstagramError.SESSION_REQUIRED), client.currentSnapshot())
+        assertEquals(0, server.requestCount)
+        token = "synthetic-local-session"
+        server.enqueue(MockResponse().setResponseCode(401))
+        assertEquals(InstagramResult.Failure(InstagramError.SESSION_REQUIRED), client.currentSnapshot())
+        server.enqueue(MockResponse().setBody("unrecognized"))
+        assertEquals(InstagramResult.Failure(InstagramError.INVALID_RESPONSE), client.currentSnapshot())
+        var reads = 0
+        val changing = InstagramApiClient.forLocalTests({ if (reads++ == 0) "old" else "new" },
+            "http://127.0.0.1:${server.port}/")
+        enqueue(JSONObject().put("ok", true).put("connection", JSONObject.NULL)
+            .put("operationalAvailability", JSONObject().put("connectionAllowed", true).put("publicationAllowed", true)))
+        assertEquals(InstagramResult.Failure(InstagramError.SESSION_REQUIRED), changing.currentSnapshot())
+    }
+
     @Test fun connectionRequiresExplicitStableIdentityAndStrictSafeIntegerRevision() = runBlocking {
         val malformed = listOf(
             connection().also { it.remove("externalId") },

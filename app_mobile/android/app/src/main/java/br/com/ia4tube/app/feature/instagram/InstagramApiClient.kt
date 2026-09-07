@@ -99,6 +99,19 @@ class InstagramApiClient private constructor(
         }
     }
 
+    override suspend fun currentSnapshot(): InstagramResult<InstagramConnectionSnapshot> =
+        request("/v1/social/connections/instagram") { root ->
+            require(root.has("connection"))
+            val connection = if (root.isNull("connection")) null else parseConnection(root.getJSONObject("connection"))
+            val operational = root.optJSONObject("operationalAvailability")
+            // Missing/older or malformed responses are unknown, never implicitly allowed.
+            val connectionAllowed = operational?.opt("connectionAllowed") as? Boolean
+            val publicationAllowed = operational?.opt("publicationAllowed") as? Boolean
+            val availability = if (connectionAllowed != null && publicationAllowed != null)
+                InstagramOperationalAvailability(connectionAllowed, publicationAllowed) else null
+            InstagramConnectionSnapshot(connection, availability)
+        }
+
     override suspend fun publicationIntent(clientRequestId: String): InstagramResult<InstagramPublication?> {
         if (!InstagramPolicies.validUuid(clientRequestId)) return invalidInput()
         return request("/v1/social/reviewer/publication-intents/$clientRequestId") { root ->

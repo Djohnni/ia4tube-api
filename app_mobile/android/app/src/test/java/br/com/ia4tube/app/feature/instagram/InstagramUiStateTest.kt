@@ -10,6 +10,7 @@ class InstagramUiStateTest {
     private val media = InstagramMedia(MEDIA_ID, "Legenda confirmada no upload", 1080, 1080)
     private fun ready() = InstagramUiState(
         availability = InstagramAvailability.AVAILABLE,
+        operationalAvailability = InstagramOperationalAvailability(true, true),
         connection = connection,
         media = listOf(media),
         selectedMediaId = media.id,
@@ -66,7 +67,8 @@ class InstagramUiStateTest {
     }
 
     @Test fun pendingAuthorizationCannotBeReopenedAsANewRequest() {
-        val state = InstagramUiState(availability = InstagramAvailability.AVAILABLE)
+        val state = InstagramUiState(availability = InstagramAvailability.AVAILABLE,
+            operationalAvailability = InstagramOperationalAvailability(true, true))
         assertTrue(state.canAuthorize)
         assertFalse(state.copy(authorizationStatus = "authorization_pending").canAuthorize)
         assertFalse(state.copy(authorizationStatus = "authorization_processing").canAuthorize)
@@ -74,7 +76,8 @@ class InstagramUiStateTest {
     }
 
     @Test fun serverPendingOrDisconnectingBlocksAuthorizationWithoutLocalStatus() {
-        val state = InstagramUiState(availability = InstagramAvailability.AVAILABLE)
+        val state = InstagramUiState(availability = InstagramAvailability.AVAILABLE,
+            operationalAvailability = InstagramOperationalAvailability(true, true))
         assertFalse(state.copy(connection = connection.copy(state = "authorization_pending")).canAuthorize)
         assertFalse(state.copy(connection = connection.copy(state = "disconnecting")).canAuthorize)
         assertFalse(state.copy(connection = connection).canAuthorize)
@@ -88,6 +91,20 @@ class InstagramUiStateTest {
         assertEquals("@empresa", instagramUsernameLabel("@empresa"))
         assertEquals("@empresa", instagramUsernameLabel("empresa"))
         assertEquals("Conta não confirmada", instagramUsernameLabel(""))
+    }
+
+    @Test fun operationalPermissionMustBeExplicitAndIndependentForEachAction() {
+        val editable = ready().copy(draftJpeg = byteArrayOf(1), draftCaption = "Legenda")
+        for (permission in listOf(null, InstagramOperationalAvailability(false, false))) {
+            val unknownOrBlocked = editable.copy(operationalAvailability = permission)
+            assertFalse(unknownOrBlocked.canPublish)
+            assertFalse(unknownOrBlocked.canUpload)
+            assertFalse(unknownOrBlocked.copy(connection = null).canAuthorize)
+        }
+        assertTrue(editable.copy(operationalAvailability = InstagramOperationalAvailability(false, true)).canPublish)
+        assertTrue(editable.copy(connection = null,
+            operationalAvailability = InstagramOperationalAvailability(true, false)).canAuthorize)
+        assertFalse(editable.copy(operationalAvailability = InstagramOperationalAvailability(true, false)).canPublish)
     }
 
     @Test fun continuationRequiresIdentifiedMatchingProviderConfirmation() {

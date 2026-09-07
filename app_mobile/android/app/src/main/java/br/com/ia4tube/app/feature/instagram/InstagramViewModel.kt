@@ -28,12 +28,15 @@ class InstagramViewModel(
     private var operation: Job? = null
     private var gateway: InstagramGateway? = null
     private var pendingAuthorizationConnectionId: String? = null
+    private var availabilityEpoch = 0L
+    private var foreground = false
 
     private fun synchronizeSession(): Boolean {
         val currentToken = tokenProvider()
         if (currentToken != sessionToken) {
             operation?.cancel()
             sessionEpoch += 1
+            availabilityEpoch += 1
             sessionToken = currentToken
             pendingAuthorizationConnectionId = null
             _uiState.value.draftJpeg?.fill(0)
@@ -57,7 +60,22 @@ class InstagramViewModel(
 
     fun onResume() {
         if (!synchronizeSession()) return
+        if (!foreground) {
+            foreground = true
+            invalidateOperationalAvailability()
+        }
         if (!_uiState.value.busy) refresh()
+    }
+
+    fun onPause() {
+        foreground = false
+        invalidateOperationalAvailability()
+    }
+
+    private fun invalidateOperationalAvailability() {
+        availabilityEpoch += 1
+        _uiState.update { it.copy(operationalAvailability = null,
+            confirmationOpen = false, reconciliationConfirmationOpen = false) }
     }
 
     fun pickerSessionKey(): String? {
@@ -96,21 +114,27 @@ class InstagramViewModel(
         if (!synchronizeSession() || _uiState.value.busy) return
         val epoch = sessionEpoch
         val api = gateway ?: return
-        _uiState.update { it.copy(busy = true, error = null, confirmationOpen = false, reconciliationConfirmationOpen = false) }
+        invalidateOperationalAvailability()
+        val expectedAvailabilityEpoch = availabilityEpoch
+        _uiState.update { it.copy(busy = true, availability = InstagramAvailability.CHECKING,
+            error = null, confirmationOpen = false, reconciliationConfirmationOpen = false) }
         operation = viewModelScope.launch {
             try {
-                val connectionResult = api.currentConnection()
+                val connectionResult = api.currentSnapshot()
                 if (!isCurrent(epoch)) return@launch
                 when (val result = connectionResult) {
                     is InstagramResult.Failure -> { failAvailability(result.error); return@launch }
                     is InstagramResult.Success -> {
                         if (!isCurrent(epoch)) return@launch
-                        val changed = _uiState.value.connection?.connectionId != result.value?.connectionId ||
-                            _uiState.value.connection?.binding != result.value?.binding
+                        val current = result.value.connection
+                        val changed = _uiState.value.connection?.connectionId != current?.connectionId ||
+                            _uiState.value.connection?.binding != current?.binding
                         if (changed) _uiState.value.draftJpeg?.fill(0)
                         _uiState.update {
-                            it.copy(connection = result.value, availability = InstagramAvailability.AVAILABLE,
-                                authorizationStatus = if (result.value == null && pendingAuthorizationConnectionId == null)
+                            it.copy(connection = current, availability = InstagramAvailability.AVAILABLE,
+                                operationalAvailability = result.value.operationalAvailability.takeIf {
+                                    expectedAvailabilityEpoch == availabilityEpoch && foreground },
+                                authorizationStatus = if (current == null && pendingAuthorizationConnectionId == null)
                                     null else it.authorizationStatus,
                                 selectedMediaId = if (changed) null else it.selectedMediaId,
                                 draftJpeg = if (changed) null else it.draftJpeg,
@@ -188,6 +212,7 @@ class InstagramViewModel(
     private fun failAvailability(error: InstagramError) {
         _uiState.update { it.copy(
             availability = if (error == InstagramError.SESSION_REQUIRED) InstagramAvailability.SESSION_REQUIRED else InstagramAvailability.UNAVAILABLE,
+            operationalAvailability = null,
             historyLoaded = false, freshPublicationAvailable = false, confirmationOpen = false, error = error.message
         ) }
     }
@@ -375,6 +400,8 @@ class InstagramViewModel(
         val publicationId = intent.publicationId ?: return
         val binding = intent.binding ?: return
         val epoch = sessionEpoch
+        invalidateOperationalAvailability()
+        val expectedAvailabilityEpoch = availabilityEpoch
         val api = gateway ?: return
         val contextKey = InstagramIntentPolicy.contextKey(apiOrigin, intent.connectionId)
         _uiState.update { it.copy(busy = true, reconciliationConfirmationOpen = false, error = null, message = null) }
@@ -382,16 +409,21 @@ class InstagramViewModel(
             try {
                 // Advisory refresh for honest UI only. The POST still carries the original
                 // stable binding, which the server must check atomically to close this race.
-                val currentConnection = api.currentConnection()
-                if (!isCurrent(epoch)) return@launch
+                val currentConnection = api.currentSnapshot()
+                if (!isCurrent(epoch) || expectedAvailabilityEpoch != availabilityEpoch || !foreground) return@launch
                 when (currentConnection) {
                     is InstagramResult.Failure -> {
-                        _uiState.update { it.copy(error = currentConnection.error.message) }
+                        failAvailability(currentConnection.error)
                         return@launch
                     }
                     is InstagramResult.Success -> {
-                        val current = currentConnection.value
-                        _uiState.update { it.copy(connection = current) }
+                        val current = currentConnection.value.connection
+                        val operational = currentConnection.value.operationalAvailability
+                        _uiState.update { it.copy(connection = current, operationalAvailability = operational) }
+                        if (operational?.publicationAllowed != true) {
+                            _uiState.update { it.copy(error = "A disponibilidade para continuar o envio não foi confirmada. Atualize a consulta.") }
+                            return@launch
+                        }
                         if (current?.canPublish != true || !InstagramIntentPolicy.matchesAccount(intent, current)) {
                             _uiState.update { it.copy(error = "A conta conectada mudou ou não está pronta. A continuação desta publicação permanece bloqueada.") }
                             return@launch

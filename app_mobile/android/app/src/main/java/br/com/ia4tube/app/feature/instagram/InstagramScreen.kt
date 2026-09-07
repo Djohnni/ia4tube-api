@@ -6,8 +6,10 @@ import android.graphics.BitmapFactory
 import android.net.Uri
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -20,11 +22,15 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.OutlinedTextFieldDefaults
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -41,6 +47,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.Lifecycle
@@ -59,6 +66,21 @@ fun InstagramScreen(viewModel: InstagramViewModel, onBack: () -> Unit) {
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
     val scope = rememberCoroutineScope()
+    val colors = MaterialTheme.colorScheme
+    val surfaceText = instagramReadableForeground(colors.onSurface, colors.surface)
+    val secondaryText = instagramReadableForeground(colors.onSurfaceVariant, colors.surface)
+    val disabledText = instagramReadableForeground(colors.onSurfaceVariant, colors.surfaceVariant)
+    val filledButtonColors = ButtonDefaults.buttonColors(
+        contentColor = instagramReadableForeground(colors.onPrimary, colors.primary),
+        disabledContainerColor = colors.surfaceVariant,
+        disabledContentColor = disabledText
+    )
+    val outlinedButtonColors = ButtonDefaults.outlinedButtonColors(
+        contentColor = surfaceText,
+        disabledContentColor = secondaryText
+    )
+    val textButtonColors = ButtonDefaults.textButtonColors(contentColor = surfaceText)
+    val actionBorder = BorderStroke(1.dp, secondaryText)
     var pendingPickerSession by remember { mutableStateOf<String?>(null) }
     var readingImage by remember { mutableStateOf(false) }
     val picker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
@@ -86,6 +108,7 @@ fun InstagramScreen(viewModel: InstagramViewModel, onBack: () -> Unit) {
     DisposableEffect(lifecycleOwner, viewModel) {
         val observer = LifecycleEventObserver { _, event ->
             if (event == Lifecycle.Event.ON_RESUME) viewModel.onResume()
+            if (event == Lifecycle.Event.ON_PAUSE) viewModel.onPause()
         }
         lifecycleOwner.lifecycle.addObserver(observer)
         onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
@@ -110,19 +133,32 @@ fun InstagramScreen(viewModel: InstagramViewModel, onBack: () -> Unit) {
             modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState()),
             verticalArrangement = Arrangement.spacedBy(16.dp)
         ) {
-            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically) {
-                Text("Instagram", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
-                TextButton(onClick = onBack) { Text("Voltar") }
+            BoxWithConstraints(modifier = Modifier.fillMaxWidth()) {
+                if (instagramUsesStackedHeader(maxWidth.value, LocalDensity.current.fontScale)) {
+                    Column(modifier = Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Text("Instagram", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
+                        TextButton(onClick = onBack, colors = textButtonColors,
+                            modifier = Modifier.align(Alignment.End)) { Text("Voltar") }
+                    }
+                } else {
+                    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp),
+                        verticalAlignment = Alignment.CenterVertically) {
+                        Text("Instagram", modifier = Modifier.weight(1f),
+                            style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
+                        TextButton(onClick = onBack, colors = textButtonColors) { Text("Voltar") }
+                    }
+                }
             }
             Text("Conecte sua conta profissional e publique uma imagem após revisar e confirmar.")
-            OutlinedButton(onClick = viewModel::refresh, enabled = !state.busy && !readingImage) {
+            OutlinedButton(onClick = viewModel::refresh, enabled = !state.busy && !readingImage,
+                colors = outlinedButtonColors, border = actionBorder) {
                 Text(if (state.hasUnresolvedIntent) "Consultar resultado e histórico" else "Atualizar")
             }
             if (state.busy || readingImage) {
                 Row(horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.CenterVertically) {
-                    CircularProgressIndicator(modifier = Modifier.size(22.dp), strokeWidth = 2.dp)
-                    Text(if (readingImage) "Conferindo a imagem…" else "Aguarde a confirmação do serviço…")
+                    CircularProgressIndicator(modifier = Modifier.size(22.dp), strokeWidth = 2.dp, color = secondaryText)
+                    Text(if (readingImage) "Conferindo a imagem…" else "Aguarde a confirmação do serviço…",
+                        modifier = Modifier.weight(1f))
                 }
             }
             if (state.availability == InstagramAvailability.SESSION_REQUIRED) {
@@ -131,13 +167,27 @@ fun InstagramScreen(viewModel: InstagramViewModel, onBack: () -> Unit) {
                 }
             } else if (state.availability == InstagramAvailability.UNAVAILABLE) {
                 InstagramSection("Recurso indisponível") {
-                    Text("Não foi possível disponibilizar o Instagram para esta conta no aplicativo oficial. Você pode consultar novamente mais tarde.")
+                    Text("Não foi possível verificar a disponibilidade do Instagram. Use Atualizar para tentar novamente.")
                 }
             }
-            state.error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
+            state.error?.let {
+                Surface(modifier = Modifier.fillMaxWidth(), shape = MaterialTheme.shapes.medium,
+                    color = colors.errorContainer,
+                    contentColor = instagramReadableForeground(colors.onErrorContainer, colors.errorContainer)) {
+                    Text(it, modifier = Modifier.padding(16.dp))
+                }
+            }
             state.message?.let { Text(it, style = MaterialTheme.typography.bodyMedium) }
 
             InstagramSection("1. Conta profissional") {
+                Text(when {
+                    state.availability == InstagramAvailability.CHECKING -> "Verificando a disponibilidade de conexão…"
+                    state.availability == InstagramAvailability.SESSION_REQUIRED -> "Entre na IA4Tube para verificar a disponibilidade."
+                    state.availability == InstagramAvailability.UNAVAILABLE -> "A consulta de disponibilidade não foi concluída. Use Atualizar para tentar novamente."
+                    state.operationalAvailability == null -> "Disponibilidade de conexão não confirmada. Use Atualizar; nenhuma autorização será iniciada por tentativa."
+                    state.operationalAvailability?.connectionAllowed == false -> "A conexão com o Instagram está temporariamente indisponível para esta sessão. Você pode consultar novamente em Atualizar."
+                    else -> "Conexão disponível para esta sessão. A autorização será feita no domínio oficial do Instagram."
+                }, style = MaterialTheme.typography.bodyMedium)
                 Text(connectionLabel(state.connection, state.availability), fontWeight = FontWeight.SemiBold)
                 state.connection?.username?.let { Text(instagramUsernameLabel(it), style = MaterialTheme.typography.titleLarge) }
                 state.connection?.accountType?.let { Text("Tipo de conta: ${accountTypeLabel(it)}") }
@@ -147,7 +197,8 @@ fun InstagramScreen(viewModel: InstagramViewModel, onBack: () -> Unit) {
                 Text("A senha do Instagram é informada somente na autorização oficial.", style = MaterialTheme.typography.bodySmall)
                 state.authorizationStatus?.let { Text(authorizationLabel(it), style = MaterialTheme.typography.bodyMedium) }
                 if (state.connection?.canPublish != true) {
-                    Button(onClick = viewModel::connect, enabled = state.canAuthorize && !readingImage) {
+                    Button(onClick = viewModel::connect, enabled = state.canAuthorize && !readingImage,
+                        colors = filledButtonColors) {
                         Text(if (state.connection == null) "Conectar Instagram" else "Reconectar Instagram")
                     }
                 }
@@ -165,7 +216,7 @@ fun InstagramScreen(viewModel: InstagramViewModel, onBack: () -> Unit) {
                     if (state.pendingPublication?.state == "provider_confirming") {
                         Text("Você pode continuar a confirmação do envio que já aprovou. Essa ação pode concluir a mesma publicação no Instagram.")
                         Button(onClick = viewModel::requestContinuationConfirmation,
-                            enabled = state.canContinueConfirmation && !readingImage) {
+                            enabled = state.canContinueConfirmation && !readingImage, colors = filledButtonColors) {
                             Text("Continuar confirmação desta publicação")
                         }
                     }
@@ -173,8 +224,13 @@ fun InstagramScreen(viewModel: InstagramViewModel, onBack: () -> Unit) {
             }
 
             InstagramSection("2. Imagem e legenda") {
+                if (state.operationalAvailability?.publicationAllowed == false) {
+                    Text("A publicação no Instagram está temporariamente indisponível para esta sessão.",
+                        style = MaterialTheme.typography.bodyMedium)
+                }
                 Text("JPEG · 1080 × 1080 pixels · até 8 MB", style = MaterialTheme.typography.bodySmall)
-                OutlinedButton(enabled = state.canEditDraft && !readingImage, onClick = {
+                OutlinedButton(enabled = state.canEditDraft && !readingImage,
+                    colors = outlinedButtonColors, border = actionBorder, onClick = {
                     viewModel.pickerSessionKey()?.let {
                         pendingPickerSession = it
                         picker.launch("image/jpeg")
@@ -186,11 +242,22 @@ fun InstagramScreen(viewModel: InstagramViewModel, onBack: () -> Unit) {
                     onValueChange = viewModel::updateCaption,
                     modifier = Modifier.fillMaxWidth(),
                     enabled = state.canEditDraft && !readingImage,
+                    colors = OutlinedTextFieldDefaults.colors(
+                        focusedTextColor = surfaceText, unfocusedTextColor = surfaceText,
+                        disabledTextColor = secondaryText, cursorColor = surfaceText,
+                        focusedBorderColor = surfaceText, unfocusedBorderColor = secondaryText,
+                        disabledBorderColor = secondaryText,
+                        focusedLabelColor = surfaceText, unfocusedLabelColor = secondaryText,
+                        disabledLabelColor = secondaryText,
+                        focusedSupportingTextColor = secondaryText, unfocusedSupportingTextColor = secondaryText,
+                        disabledSupportingTextColor = secondaryText
+                    ),
                     minLines = 3,
                     label = { Text("Legenda") },
                     supportingText = { Text("A prévia da legenda será exibida antes da publicação.") }
                 )
-                Button(onClick = viewModel::upload, enabled = state.canUpload && !readingImage) { Text("Enviar imagem para revisão") }
+                Button(onClick = viewModel::upload, enabled = state.canUpload && !readingImage,
+                    colors = filledButtonColors) { Text("Enviar imagem para revisão") }
             }
 
             state.selectedMedia?.let { selected ->
@@ -202,7 +269,8 @@ fun InstagramScreen(viewModel: InstagramViewModel, onBack: () -> Unit) {
                     Text("O serviço pode acrescentar ou atualizar uma identificação ao final da legenda. A legenda definitiva será exibida no histórico.", style = MaterialTheme.typography.bodySmall)
                     Text("A publicação só será solicitada após sua confirmação.", style = MaterialTheme.typography.bodySmall)
                     Button(onClick = viewModel::requestPublicationConfirmation,
-                        enabled = state.canPublish && !readingImage) { Text("Revisar e publicar no Instagram") }
+                        enabled = state.canPublish && !readingImage,
+                        colors = filledButtonColors) { Text("Revisar e publicar no Instagram") }
                     if (state.historyLoaded && !state.freshPublicationAvailable && state.intent == null) {
                         Text("O serviço não liberou uma nova publicação para esta conta.", style = MaterialTheme.typography.bodySmall)
                     }
@@ -223,7 +291,7 @@ fun InstagramScreen(viewModel: InstagramViewModel, onBack: () -> Unit) {
                         publication.publishedAt?.let { Text("Publicado em: $it", style = MaterialTheme.typography.bodySmall) }
                         val permalink = publication.permalink
                         if (publication.confirmed && permalink != null && InstagramPolicies.isOfficialPermalink(permalink)) {
-                            OutlinedButton(onClick = {
+                            OutlinedButton(colors = outlinedButtonColors, border = actionBorder, onClick = {
                                 if (InstagramPolicies.isOfficialPermalink(permalink)) {
                                     try {
                                         context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(permalink)).apply {
@@ -237,7 +305,8 @@ fun InstagramScreen(viewModel: InstagramViewModel, onBack: () -> Unit) {
                 }
                 if (state.intent?.confirmed == true) {
                     OutlinedButton(onClick = viewModel::startNewDraft,
-                        enabled = !state.busy && !readingImage && state.storageAvailable && state.freshPublicationAvailable) {
+                        enabled = !state.busy && !readingImage && state.storageAvailable && state.freshPublicationAvailable,
+                        colors = outlinedButtonColors, border = actionBorder) {
                         Text("Preparar outra publicação")
                     }
                     if (!state.freshPublicationAvailable) Text("Consulte o serviço para saber se uma nova publicação está disponível.", style = MaterialTheme.typography.bodySmall)
@@ -250,6 +319,8 @@ fun InstagramScreen(viewModel: InstagramViewModel, onBack: () -> Unit) {
     if (state.confirmationOpen && state.selectedMedia != null) {
         AlertDialog(
             onDismissRequest = viewModel::dismissPublicationConfirmation,
+            containerColor = colors.surface, titleContentColor = surfaceText,
+            textContentColor = surfaceText, tonalElevation = 0.dp,
             title = { Text("Publicar agora no Instagram?") },
             text = {
                 Column(modifier = Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -261,31 +332,41 @@ fun InstagramScreen(viewModel: InstagramViewModel, onBack: () -> Unit) {
                 }
             },
             confirmButton = {
-                Button(enabled = state.canPublish, onClick = viewModel::confirmPublish) { Text("Confirmar publicação") }
+                Button(enabled = state.canPublish, onClick = viewModel::confirmPublish,
+                    colors = filledButtonColors) { Text("Confirmar publicação") }
             },
             dismissButton = {
-                TextButton(onClick = viewModel::dismissPublicationConfirmation) { Text("Voltar à revisão") }
+                TextButton(onClick = viewModel::dismissPublicationConfirmation,
+                    colors = textButtonColors) { Text("Voltar à revisão") }
             }
         )
     }
     if (state.reconciliationConfirmationOpen) {
         AlertDialog(
             onDismissRequest = viewModel::dismissContinuationConfirmation,
+            containerColor = colors.surface, titleContentColor = surfaceText,
+            textContentColor = surfaceText, tonalElevation = 0.dp,
             title = { Text("Continuar a publicação já aprovada?") },
-            text = { Text("O serviço continuará a confirmação deste mesmo envio e poderá concluir a publicação no Instagram. A referência e a intenção do envio serão preservadas.") },
+            text = { Text("O serviço continuará a confirmação deste mesmo envio e poderá concluir a publicação no Instagram. A referência e a intenção do envio serão preservadas.",
+                modifier = Modifier.verticalScroll(rememberScrollState())) },
             confirmButton = {
-                Button(enabled = state.canContinueConfirmation, onClick = viewModel::continuePublicationConfirmation) {
+                Button(enabled = state.canContinueConfirmation, onClick = viewModel::continuePublicationConfirmation,
+                    colors = filledButtonColors) {
                     Text("Confirmar continuação")
                 }
             },
-            dismissButton = { TextButton(onClick = viewModel::dismissContinuationConfirmation) { Text("Voltar") } }
+            dismissButton = { TextButton(onClick = viewModel::dismissContinuationConfirmation,
+                colors = textButtonColors) { Text("Voltar") } }
         )
     }
 }
 
 @Composable
 private fun InstagramSection(title: String, content: @Composable () -> Unit) {
-    Card(modifier = Modifier.fillMaxWidth()) {
+    Card(modifier = Modifier.fillMaxWidth(), colors = CardDefaults.cardColors(
+        containerColor = MaterialTheme.colorScheme.surface,
+        contentColor = instagramReadableForeground(MaterialTheme.colorScheme.onSurface, MaterialTheme.colorScheme.surface)
+    )) {
         Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
             Text(title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
             content()

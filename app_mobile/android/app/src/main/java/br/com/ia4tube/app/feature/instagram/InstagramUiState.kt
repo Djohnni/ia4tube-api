@@ -9,6 +9,7 @@ data class InstagramUiState(
     val availability: InstagramAvailability = InstagramAvailability.CHECKING,
     val busy: Boolean = false,
     val connection: InstagramConnection? = null,
+    val operationalAvailability: InstagramOperationalAvailability? = null,
     val authorizationStatus: String? = null,
     val authorizationUrlToOpen: String? = null,
     val media: List<InstagramMedia> = emptyList(),
@@ -28,14 +29,17 @@ data class InstagramUiState(
     val selectedMedia: InstagramMedia? get() = media.firstOrNull { it.id == selectedMediaId }
     val hasUnresolvedIntent: Boolean get() = intent != null && !intent.confirmed
     val canAuthorize: Boolean get() = !busy && availability == InstagramAvailability.AVAILABLE &&
+        operationalAvailability?.connectionAllowed == true &&
         authorizationStatus !in setOf("authorization_pending", "authorization_processing") &&
         (connection == null || connection.state in setOf("disconnected", "reconnect_required", "failed") ||
             (connection.state == "connected" && connection.health == "reconnect_required"))
     val canEditDraft: Boolean get() = !busy && availability == InstagramAvailability.AVAILABLE &&
         connection?.canPublish == true && intent == null && storageAvailable
     val canUpload: Boolean get() = canEditDraft && draftJpeg != null &&
+        operationalAvailability?.publicationAllowed == true &&
         InstagramPolicies.validCaption(draftCaption.trim())
     val canPublish: Boolean get() = canEditDraft && selectedMedia != null && historyLoaded &&
+        operationalAvailability?.publicationAllowed == true &&
         freshPublicationAvailable && authorizationUrlToOpen == null
     val pendingPublication: InstagramPublication? get() = intent?.let { saved ->
         history.firstOrNull { it.publicationId == saved.publicationId &&
@@ -43,6 +47,7 @@ data class InstagramUiState(
             (!InstagramIntentPolicy.hasAccountBinding(saved) || it.binding == saved.binding) }
     }
     val canContinueConfirmation: Boolean get() = !busy && storageAvailable &&
+        operationalAvailability?.publicationAllowed == true &&
         availability == InstagramAvailability.AVAILABLE && connection?.canPublish == true && hasUnresolvedIntent &&
         intent?.let { InstagramIntentPolicy.matchesAccount(it, connection) } == true &&
         pendingPublication?.state == "provider_confirming"
