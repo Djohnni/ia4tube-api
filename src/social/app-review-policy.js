@@ -9,6 +9,19 @@ const APP_REVIEW_STAGING_ORIGIN =
   "https://ia4tube-api-staging-checkpoint-a.onrender.com";
 const APP_REVIEW_LOGIN_PREFIX = "ia4tube_meta_app_review_";
 const APP_REVIEW_LOGIN = `${APP_REVIEW_LOGIN_PREFIX}20260904`;
+const APP_REVIEW_COMPANY_LABEL = "IA4Tube \u2014 Meta App Review";
+const APP_REVIEW_MOJIBAKE_COMPANY_LABEL =
+  "IA4Tube \u00e2\u20ac\u201d Meta App Review";
+
+function repairAppReviewCompanyLabel(login, companyLabel) {
+  if (
+    login === APP_REVIEW_LOGIN &&
+    companyLabel === APP_REVIEW_MOJIBAKE_COMPANY_LABEL
+  ) {
+    return APP_REVIEW_COMPANY_LABEL;
+  }
+  return companyLabel;
+}
 
 function expectedAppReviewCompanyId(env) {
   let identityConfig;
@@ -112,6 +125,7 @@ function canExternalPublication(config, context) {
 }
 
 module.exports = {
+  APP_REVIEW_COMPANY_LABEL,
   APP_REVIEW_LOGIN,
   APP_REVIEW_LOGIN_PREFIX,
   APP_REVIEW_STAGING_ORIGIN,
@@ -119,5 +133,6 @@ module.exports = {
   canExternalPublication,
   isAppReviewAccessEnabled,
   isAppReviewCompany,
-  loadAppReviewPolicy
+  loadAppReviewPolicy,
+  repairAppReviewCompanyLabel
 };

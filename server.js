@@ -5,6 +5,10 @@ const productionSocialIntegration = createProductionSocialIntegration({
   env: process.env
 });
 
+const {
+  repairAppReviewCompanyLabel
+} = require("./src/social/app-review-policy");
+
 const express = require("express");
 const cors = require("cors");
 const fs = require("fs");
@@ -2182,10 +2186,17 @@ app.post("/auth/login", async (req, res, next) => {
     return res.status(401).json({ ok: false, error: "Senha incorreta" });
   }
 
+  const repairedCompanyLabel = repairAppReviewCompanyLabel(
+    whatsapp,
+    c.nome_time
+  );
   const mesAtual = nowYYYYMM();
-  if (c.ciclo_mes !== mesAtual) {
-    c.ciclo_mes = mesAtual;
-    c.usados_no_ciclo = 0;
+  if (c.ciclo_mes !== mesAtual || repairedCompanyLabel !== c.nome_time) {
+    c.nome_time = repairedCompanyLabel;
+    if (c.ciclo_mes !== mesAtual) {
+      c.ciclo_mes = mesAtual;
+      c.usados_no_ciclo = 0;
+    }
     clientes[whatsapp] = c;
     writeClientes(clientes);
   }

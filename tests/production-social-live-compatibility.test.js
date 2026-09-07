@@ -24,6 +24,38 @@ const SERVER_IMPORT = [
 ].join("\n");
 const SERVER_MOUNT =
   'app.use("/v1/social", productionSocialIntegration.middleware);\n\n';
+const REVIEW_LABEL_IMPORT = [
+  "const {",
+  "  repairAppReviewCompanyLabel",
+  '} = require("./src/social/app-review-policy");',
+  "",
+  ""
+].join("\n");
+const REVIEW_LABEL_LOGIN_REPAIR = [
+  "  const repairedCompanyLabel = repairAppReviewCompanyLabel(",
+  "    whatsapp,",
+  "    c.nome_time",
+  "  );",
+  "  const mesAtual = nowYYYYMM();",
+  "  if (c.ciclo_mes !== mesAtual || repairedCompanyLabel !== c.nome_time) {",
+  "    c.nome_time = repairedCompanyLabel;",
+  "    if (c.ciclo_mes !== mesAtual) {",
+  "      c.ciclo_mes = mesAtual;",
+  "      c.usados_no_ciclo = 0;",
+  "    }",
+  "    clientes[whatsapp] = c;",
+  "    writeClientes(clientes);",
+  "  }"
+].join("\n");
+const LEGACY_MONTH_CYCLE = [
+  "  const mesAtual = nowYYYYMM();",
+  "  if (c.ciclo_mes !== mesAtual) {",
+  "    c.ciclo_mes = mesAtual;",
+  "    c.usados_no_ciclo = 0;",
+  "    clientes[whatsapp] = c;",
+  "    writeClientes(clientes);",
+  "  }"
+].join("\n");
 
 function source(file) {
   return fs.readFileSync(path.join(root, file), "utf8").replace(/\r\n/g, "\n");
@@ -99,11 +131,15 @@ test("all legacy server code is preserved except explicit session issuance and s
   let candidate = source("server.js");
   assert.ok(candidate.startsWith(SERVER_IMPORT));
   candidate = candidate.slice(SERVER_IMPORT.length).replace(SERVER_MOUNT.trimEnd()+"\nproductionSocialIntegration.mountWeb(app);\n\n", "");
+  assert.ok(candidate.startsWith(REVIEW_LABEL_IMPORT));
+  candidate = candidate.slice(REVIEW_LABEL_IMPORT.length);
   candidate = candidate.replace('const { createProductionSession } = require("./src/social/production-session");\nconst productionSession = createProductionSession({ secret: JWT_SECRET, readClients: readClientes });\n', "");
   const live = liveSource("server.js");
   const hooks = [...candidate.matchAll(/^ *await productionSocialIntegration\.afterAuthentication\((\w+)\);\r?\n/gm)];
   assert.equal(hooks.length, 5);
   candidate = candidate.replace(/^ *await productionSocialIntegration\.afterAuthentication\(\w+\);\r?\n/gm, "");
+  assert.equal(candidate.split(REVIEW_LABEL_LOGIN_REPAIR).length - 1, 1);
+  candidate = candidate.replace(REVIEW_LABEL_LOGIN_REPAIR, LEGACY_MONTH_CYCLE);
   for (const route of ["auto-register"]) {
     candidate = candidate.replace(`app.post("/auth/${route}", async (req, res) => {`,
       `app.post("/auth/${route}", (req, res) => {`);

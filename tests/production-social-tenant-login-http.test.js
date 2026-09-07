@@ -5,7 +5,13 @@ const fs = require("node:fs"), os = require("node:os"), path = require("node:pat
 const { spawn } = require("node:child_process");
 const jwt = require("jsonwebtoken");
 const { databaseTargetFingerprint } = require("../src/persistence/postgres/config");
+const {
+  APP_REVIEW_COMPANY_LABEL,
+  APP_REVIEW_LOGIN
+} = require("../src/social/app-review-policy");
 const root = path.resolve(__dirname, "..");
+const APP_REVIEW_MOJIBAKE_COMPANY_LABEL =
+  "IA4Tube \u00e2\u20ac\u201d Meta App Review";
 
 test("actual five official session issuances use scoped provisioning without changing legacy authentication", async t => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "ia4tube-tenant-login-http-"));
@@ -14,13 +20,21 @@ test("actual five official session issuances use scoped provisioning without cha
   const hash = require("bcryptjs").hashSync(password, 4);
   const client = active => ({ ativo: active, senha_hash: hash, nome_time: "Synthetic", plano: "free", saldo_mensal: 0, saldo_extra: 0 });
   fs.writeFileSync(path.join(directory, "clientes.json"), JSON.stringify({
-    [ownerA]: client(true), [ownerB]: client(true), "synthetic-inactive-owner": client(false)
+    [ownerA]: client(true), [ownerB]: client(true), "synthetic-inactive-owner": client(false),
+    [APP_REVIEW_LOGIN]: { ...client(true), nome_time: APP_REVIEW_MOJIBAKE_COMPANY_LABEL }
   }));
   // All application network/command entry points are blocked BEFORE server.js.
   // Google verification is an in-memory synthetic response, never an HTTP call.
   // SQL uses the strict scoped protocol double, not a real database.
   const bootstrap = String.raw`
     "use strict";
+    const fs = require("node:fs"), path = require("node:path");
+    const originalWriteFileSync = fs.writeFileSync;
+    let legacyClientWrites = 0;
+    fs.writeFileSync = function(file, ...args) {
+      if (path.resolve(String(file)) === path.resolve(process.env.DATA_DIR, "clientes.json")) legacyClientWrites += 1;
+      return Reflect.apply(originalWriteFileSync, this, [file, ...args]);
+    };
     const blocked = () => { process.stderr.write("TENANT_FORBIDDEN_EFFECT\n"); throw new Error("synthetic_external_forbidden"); };
     global.fetch = async url => {
       if (url === "https://oauth2.googleapis.com/tokeninfo?id_token=synthetic-google-id-token")
@@ -61,7 +75,8 @@ test("actual five official session issuances use scoped provisioning without cha
       const app = express(...args), listen = app.listen;
       // These controls exist only in the isolated test process, never production.
       app.get("/__synthetic_tenant_state", (_req, res) => res.json({
-        tenants: [...pool.tenants.values()], writes: pool.statements.filter(entry => entry.sql === ENSURE_OFFICIAL_OWNER_SQL).length
+        tenants: [...pool.tenants.values()], writes: pool.statements.filter(entry => entry.sql === ENSURE_OFFICIAL_OWNER_SQL).length,
+        legacyClientWrites
       }));
       app.post("/__synthetic_tenant_failure", express.json(), (req, res) => {
         legacyError = ["compare", "hash"].includes(req.body.legacyError) ? req.body.legacyError : null;
@@ -121,8 +136,11 @@ test("actual five official session issuances use scoped provisioning without cha
   let tokenA;
   await t.test("wrong credential and inactive owner never invoke provisioning", async () => {
     assert.equal((await request("/auth/login", { method: "POST", body: { whatsapp: ownerA, senha: "wrong" } })).status, 401);
+    assert.equal((await request("/auth/login", { method: "POST", body: { whatsapp: APP_REVIEW_LOGIN, senha: "wrong" } })).status, 401);
     assert.equal((await request("/auth/login", { method: "POST", body: { whatsapp: "synthetic-inactive-owner", senha: password } })).status, 403);
     assert.equal((await state()).writes, 0);
+    assert.equal(JSON.parse(fs.readFileSync(path.join(directory, "clientes.json"), "utf8"))[APP_REVIEW_LOGIN].nome_time,
+      APP_REVIEW_MOJIBAKE_COMPANY_LABEL);
   });
   await t.test("unexpected legacy errors still reach the Express4 error handler, never become floating rejections", async () => {
     for (const [route, legacyError] of [["login", "compare"], ["register", "hash"]]) {
@@ -184,6 +202,28 @@ test("actual five official session issuances use scoped provisioning without cha
     assert.equal(social.status, 503); assert.equal(social.body.code, "social_tenant_readiness_unavailable");
     assert.ok(!JSON.stringify(result).includes("SYNTHETIC_PRIVATE_DB_DETAIL"));
     await request("/__synthetic_tenant_failure", { method: "POST", body: { enabled: false } });
+  });
+  await t.test("a valid app-review login repairs and persists its exact label once", async () => {
+    const writesBefore = (await state()).legacyClientWrites;
+    const first = await request("/auth/login", {
+      method: "POST",
+      body: { whatsapp: APP_REVIEW_LOGIN, senha: password }
+    });
+    assert.equal(first.status, 200);
+    assert.equal(first.body.nome_time, APP_REVIEW_COMPANY_LABEL);
+    assert.equal((await state()).legacyClientWrites, writesBefore + 1,
+      "cycle refresh and exact label repair share one legacy write");
+    assert.equal(JSON.parse(fs.readFileSync(path.join(directory, "clientes.json"), "utf8"))[APP_REVIEW_LOGIN].nome_time,
+      APP_REVIEW_COMPANY_LABEL);
+
+    const repeated = await request("/auth/login", {
+      method: "POST",
+      body: { whatsapp: APP_REVIEW_LOGIN, senha: password }
+    });
+    assert.equal(repeated.status, 200);
+    assert.equal(repeated.body.nome_time, APP_REVIEW_COMPANY_LABEL);
+    assert.equal((await state()).legacyClientWrites, writesBefore + 1,
+      "an already repaired label is not rewritten");
   });
   assert.ok(!output.includes("TENANT_FORBIDDEN_EFFECT")); assert.ok(!output.includes("SYNTHETIC_PRIVATE_DB_DETAIL"));
 });
