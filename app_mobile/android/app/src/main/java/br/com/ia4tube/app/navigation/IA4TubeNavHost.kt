@@ -516,6 +516,7 @@ fun IA4TubeNavHost(
                 BackHandler(onBack = leaveInstagram)
                 InstagramScreen(
                     viewModel = viewModel,
+                    tokenProvider = repository::getSavedToken,
                     onBack = leaveInstagram
                 )
             }
@@ -571,6 +572,7 @@ fun IA4TubeNavHost(
                 )
                 MonthlyPlanningScreen(
                     viewModel = viewModel,
+                    tokenProvider = repository::getSavedToken,
                     onBack = { navController.popBackStack() },
                     onOpenDetail = { planningId ->
                         navController.navigate(Routes.monthlyPlanningDetail(planningId))

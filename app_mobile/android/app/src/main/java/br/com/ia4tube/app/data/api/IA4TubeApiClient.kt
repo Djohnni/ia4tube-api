@@ -357,9 +357,10 @@ class IA4TubeApiClient(
         }
     }
 
-    suspend fun ocultarItemCalendarioPlanejamento(token: String, itemKey: String): ApiResult<Unit> = withContext(Dispatchers.IO) {
+    suspend fun ocultarItemCalendarioPlanejamento(token: String, itemKey: String, calendarRevision: Long? = null): ApiResult<Unit> = withContext(Dispatchers.IO) {
         val bodyJson = JSONObject()
             .put("item_key", itemKey)
+            .put("calendar_revision", calendarRevision)
         val request = Request.Builder()
             .url("${AppConfig.apiBase}/empresa/calendario-planejamento-mensal/ocultar")
             .header("Authorization", "Bearer $token")
@@ -380,6 +381,7 @@ class IA4TubeApiClient(
             .put("pedido_id", requestData.pedidoId)
             .put("data", requestData.date)
             .put("horario", requestData.time)
+            .put("calendar_revision", requestData.calendarRevision)
         val request = Request.Builder()
             .url("${AppConfig.apiBase}/empresa/calendario-planejamento-mensal/reagendar")
             .header("Authorization", "Bearer $token")
@@ -406,6 +408,8 @@ class IA4TubeApiClient(
             .addFormDataPart("caracteristicas_empresa", JSONArray(requestData.caracteristicasEmpresa).toString())
             .addFormDataPart("informacoes_empresa", requestData.informacoesEmpresa)
             .addFormDataPart("orientacoes_fotos", monthlyPlanningPhotoOrientationsJson(requestData))
+            .addFormDataPart("calendar_automatic", requestData.calendarAutomatic.toString())
+            .addFormDataPart("calendar_preference_revision", requestData.calendarPreferenceRevision.toString())
 
         requestData.fotos.forEach { photo ->
             val foto = photo.file ?: return@forEach
@@ -1508,7 +1512,9 @@ class IA4TubeApiClient(
                 freeArtWeekly = origem.equals("arte_gratis_semanal", ignoreCase = true) ||
                     campaignId.startsWith("free_", ignoreCase = true),
                 campaignId = campaignId,
-                assignmentId = item.optString("assignment_id")
+                assignmentId = item.optString("assignment_id"),
+                calendarRevision = item.optLong("calendar_revision").takeIf { it > 0 },
+                calendarStatusLabel = item.optString("calendar_status_label")
             )
         }
 

@@ -9,7 +9,9 @@ data class MonthlyPlanningRequest(
     val caracteristicasEmpresa: List<String> = emptyList(),
     val informacoesEmpresa: String = "",
     val logo: UploadFile? = null,
-    val fotos: List<MonthlyPlanningPhotoInput> = emptyList()
+    val fotos: List<MonthlyPlanningPhotoInput> = emptyList(),
+    val calendarAutomatic: Boolean = false,
+    val calendarPreferenceRevision: Long = 0
 )
 
 data class MonthlyPlanningPhotoInput(
@@ -95,7 +97,9 @@ data class MonthlyPlanningPostDto(
     val tipo: String = "",
     val freeArtWeekly: Boolean = false,
     val campaignId: String = "",
-    val assignmentId: String = ""
+    val assignmentId: String = "",
+    val calendarRevision: Long? = null,
+    val calendarStatusLabel: String = ""
 )
 
 data class MonthlyPlanningRescheduleRequest(
@@ -104,7 +108,8 @@ data class MonthlyPlanningRescheduleRequest(
     val planejamentoItemId: String = "",
     val pedidoId: String = "",
     val date: String,
-    val time: String = ""
+    val time: String = "",
+    val calendarRevision: Long? = null
 )
 
 data class MonthlyPlanningDetailDto(

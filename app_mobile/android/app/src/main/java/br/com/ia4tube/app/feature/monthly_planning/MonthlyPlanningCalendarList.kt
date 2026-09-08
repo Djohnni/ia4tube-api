@@ -72,7 +72,9 @@ data class MonthlyPlanningCalendarListItem(
     val tipo: String = "",
     val freeArtWeekly: Boolean = false,
     val campaignId: String = "",
-    val assignmentId: String = ""
+    val assignmentId: String = "",
+    val calendarRevision: Long? = null,
+    val calendarStatusLabel: String = ""
 )
 
 @Composable
@@ -291,7 +293,7 @@ private fun MonthlyPlanningCalendarDayPost(
                 color = MaterialTheme.colorScheme.primary
             )
             Text(
-                text = if (item.isWeeklyFreeArt()) "Arte Gratis da Semana" else "Pronta",
+                text = item.calendarStatusLabel.ifBlank { if (item.isWeeklyFreeArt()) "Arte Gratis da Semana" else if (item.imageReady) "Arte pronta" else item.status },
                 style = MaterialTheme.typography.bodySmall,
                 fontWeight = FontWeight.SemiBold,
                 color = if (item.isWeeklyFreeArt()) {
@@ -488,7 +490,9 @@ internal fun MonthlyPlanningPost.toCalendarListItem(planningId: String = ""): Mo
         tipo = tipo,
         freeArtWeekly = freeArtWeekly,
         campaignId = campaignId,
-        assignmentId = assignmentId
+        assignmentId = assignmentId,
+        calendarRevision = calendarRevision,
+        calendarStatusLabel = calendarStatusLabel
     )
 }
 

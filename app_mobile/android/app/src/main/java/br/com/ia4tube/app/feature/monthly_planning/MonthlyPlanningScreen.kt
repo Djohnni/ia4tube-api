@@ -113,6 +113,7 @@ import java.util.Locale
 import java.util.TimeZone
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import br.com.ia4tube.app.feature.calendar.*
 
 @Composable
 fun MonthlyPlanningScreen(
@@ -121,8 +122,12 @@ fun MonthlyPlanningScreen(
     onOpenDetail: (String) -> Unit,
     onOpenOrder: (String) -> Unit,
     onOpenPlanningResults: (String) -> Unit,
-    onOpenPlans: () -> Unit
+    onOpenPlans: () -> Unit,
+    tokenProvider: () -> String = { "" }
 ) {
+    val calendarModel = rememberCalendarModel(tokenProvider)
+    val calendar by calendarModel.uiState.collectAsState()
+    var showGallery by remember { mutableStateOf(false) }
     val state by viewModel.uiState.collectAsState()
     val context = LocalContext.current
     val fileReader = remember(context) { AndroidFileReader(context) }
@@ -140,6 +145,9 @@ fun MonthlyPlanningScreen(
     var pendingDiscoveryCameraUri by remember { mutableStateOf<Uri?>(null) }
     var pendingPhotoRemoval by remember { mutableStateOf<MonthlyPlanningPhotoDraft?>(null) }
     var showGeneralCalendar by remember { mutableStateOf(false) }
+    LaunchedEffect(showGeneralCalendar, calendar.data.items) {
+        if (showGeneralCalendar && calendar.fresh) viewModel.refreshGeneralCalendar()
+    }
 
     val photosPicker = rememberLauncherForActivityResult(ActivityResultContracts.GetMultipleContents()) { uris ->
         val slotId = pendingPhotoSlotId ?: state.photos.firstOrNull()?.id
@@ -455,9 +463,12 @@ fun MonthlyPlanningScreen(
     }
 
     ScreenScaffold {
-        if (showGeneralCalendar) {
+        if (showGallery) {
+            CalendarGallery(calendarModel, tokenProvider()) { showGallery = false; viewModel.refreshGeneralCalendar() }
+        } else if (showGeneralCalendar) {
             MonthlyPlanningGeneralCalendarContent(
                 state = state,
+                onGallery = { showGallery = true },
                 onBack = { showGeneralCalendar = false },
                 onRefresh = viewModel::refreshGeneralCalendar,
                 onOpenOrder = onOpenOrder,
@@ -536,7 +547,12 @@ fun MonthlyPlanningScreen(
                         onContinue = viewModel::goToConfirmation
                     )
 
-                    MonthlyPlanningStep.Confirmation -> MonthlyPlanningConfirmationStep(
+                    MonthlyPlanningStep.Confirmation -> {
+                    if (calendar.data.enabled) Text(if (calendar.data.automatic)
+                        "Publicação automática ativa: depois de prontas, estas artes serão enviadas nas datas e horários do calendário. Você pode editar a legenda ou mudar os agendamentos antes do envio."
+                        else "Publicação automática pausada. Este pedido não será enviado ao Instagram sozinho.")
+                    calendar.error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
+                    MonthlyPlanningConfirmationStep(
                         state = state,
                         onBack = viewModel::backToUpload,
                         onCompanyNameChange = viewModel::updateCompanyName,
@@ -550,8 +566,14 @@ fun MonthlyPlanningScreen(
                         onCompanyImportantInfoChange = viewModel::updateCompanyImportantInfo,
                         onSelectLogo = { logoPicker.launch(arrayOf("image/*")) },
                         onRemoveLogo = viewModel::removeCompanyLogo,
-                        onConfirm = viewModel::confirmPlanning
+                        onConfirm = {
+                            if (calendar.fresh || tokenProvider().isBlank()) {
+                                viewModel.setCalendarPreference(calendar.data.automatic, calendar.data.preferenceRevision)
+                                viewModel.confirmPlanning()
+                            } else { calendarModel.refresh(); viewModel.calendarUnavailable() }
+                        }
                     )
+                    }
 
                     MonthlyPlanningStep.Processing -> MonthlyPlanningProcessingStep(
                         planning = state.planning,
@@ -866,6 +888,7 @@ private fun MonthlyPlanningCalendarShortcut(onClick: () -> Unit) {
 @Composable
 private fun MonthlyPlanningGeneralCalendarContent(
     state: MonthlyPlanningUiState,
+    onGallery: () -> Unit,
     onBack: () -> Unit,
     onRefresh: () -> Unit,
     onOpenOrder: (String) -> Unit,
@@ -893,6 +916,7 @@ private fun MonthlyPlanningGeneralCalendarContent(
                 Text("Voltar")
             }
         }
+        OutlinedButton(onClick = onGallery, modifier = Modifier.fillMaxWidth()) { Text("Ver minhas artes programadas") }
         Text(
             text = "Todas as artes planejadas dos seus planejamentos mensais.",
             style = MaterialTheme.typography.bodyMedium,

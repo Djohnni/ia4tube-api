@@ -64,6 +64,8 @@ class MonthlyPlanningCalendarCacheStore(context: Context) {
             .put("objective", objective)
             .put("status", status)
             .put("status_label", statusLabel)
+            .put("calendar_revision", calendarRevision)
+            .put("calendar_status_label", calendarStatusLabel)
             .put("caption", caption)
             .put("pedido_id", pedidoId)
             .put("image_ready", imageReady)
@@ -83,6 +85,8 @@ class MonthlyPlanningCalendarCacheStore(context: Context) {
             objective = optString("objective"),
             status = optString("status"),
             statusLabel = optString("status_label"),
+            calendarRevision = optLong("calendar_revision").takeIf { it > 0 },
+            calendarStatusLabel = optString("calendar_status_label"),
             caption = optString("caption"),
             pedidoId = optString("pedido_id"),
             imageReady = optBoolean("image_ready", false),

@@ -135,10 +135,10 @@ class AuthRepository(
         return apiClient.calendarioPlanejamentoMensal(token)
     }
 
-    suspend fun ocultarItemCalendarioPlanejamento(itemKey: String): ApiResult<Unit> {
+    suspend fun ocultarItemCalendarioPlanejamento(itemKey: String, calendarRevision: Long? = null): ApiResult<Unit> {
         val token = sessionStore.getToken()
         if (token.isBlank()) return ApiResult.Failure(SESSION_EXPIRED_MESSAGE)
-        return apiClient.ocultarItemCalendarioPlanejamento(token, itemKey)
+        return apiClient.ocultarItemCalendarioPlanejamento(token, itemKey, calendarRevision)
     }
 
     suspend fun reagendarItemCalendarioPlanejamento(request: MonthlyPlanningRescheduleRequest): ApiResult<MonthlyPlanningPostDto> {

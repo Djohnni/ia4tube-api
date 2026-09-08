@@ -60,9 +60,14 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import br.com.ia4tube.app.feature.calendar.*
 
 @Composable
-fun InstagramScreen(viewModel: InstagramViewModel, onBack: () -> Unit) {
+fun InstagramScreen(viewModel: InstagramViewModel, onBack: () -> Unit, tokenProvider: () -> String = { "" }) {
+    val calendarModel = rememberCalendarModel(tokenProvider)
+    val calendar by calendarModel.uiState.collectAsState()
+    var showCalendarGallery by remember { mutableStateOf(false) }
+    var showManual by remember { mutableStateOf(false) }
     val state by viewModel.uiState.collectAsState()
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
@@ -133,7 +138,9 @@ fun InstagramScreen(viewModel: InstagramViewModel, onBack: () -> Unit) {
     }
 
     ScreenScaffold {
-        Column(
+        if (showCalendarGallery) {
+            CalendarGallery(calendarModel, tokenProvider()) { showCalendarGallery = false; viewModel.refresh() }
+        } else Column(
             modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState()),
             verticalArrangement = Arrangement.spacedBy(16.dp)
         ) {
@@ -229,6 +236,11 @@ fun InstagramScreen(viewModel: InstagramViewModel, onBack: () -> Unit) {
             }
 
             InstagramSection("2. Imagem e legenda") {
+                if (calendar.data.next != null && !showManual) {
+                    ScheduledNextContent(calendarModel, tokenProvider()) { showCalendarGallery = true }
+                    TextButton(onClick = { showManual = true }) { Text("Preparar outra imagem manualmente") }
+                } else {
+                if (calendar.data.next != null) TextButton(onClick = { showManual = false }) { Text("Ver próxima arte do calendário") }
                 if (state.operationalAvailability?.publicationAllowed == false) {
                     Text("A publicação no Instagram está temporariamente indisponível para esta sessão.",
                         style = MaterialTheme.typography.bodyMedium)
@@ -298,6 +310,10 @@ fun InstagramScreen(viewModel: InstagramViewModel, onBack: () -> Unit) {
                     }
                 }
             }
+
+            }
+            CalendarAutomationSettings(calendarModel)
+            if (calendar.data.enabled) OutlinedButton(onClick = { showCalendarGallery = true }) { Text("Ver minhas artes programadas") }
 
             state.selectedMedia?.let { selected ->
                 InstagramSection("3. Revisar publicação") {

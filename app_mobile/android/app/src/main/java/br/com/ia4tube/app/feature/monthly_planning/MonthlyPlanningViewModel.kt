@@ -106,6 +106,8 @@ data class MonthlyPlanningUiState(
     val plannings: List<MonthlyPlanningSummary> = emptyList(),
     val detailPlanning: MonthlyPlanningSummary? = null,
     val calendarLoading: Boolean = false,
+    val calendarAutomatic: Boolean = false,
+    val calendarPreferenceRevision: Long = 0,
     val calendarError: String? = null,
     val calendarSuccessMessage: String? = null,
     val reschedulingCalendarItemKeys: Set<String> = emptySet(),
@@ -490,7 +492,9 @@ data class MonthlyPlanningPost(
     val tipo: String = "",
     val freeArtWeekly: Boolean = false,
     val campaignId: String = "",
-    val assignmentId: String = ""
+    val assignmentId: String = "",
+    val calendarRevision: Long? = null,
+    val calendarStatusLabel: String = ""
 )
 
 sealed class MonthlyPlanningResultDestination {
@@ -770,7 +774,8 @@ class MonthlyPlanningViewModel(
 
     fun removeFromGeneralCalendar(itemKey: String) {
         viewModelScope.launch {
-            when (val result = repository.ocultarItemCalendarioPlanejamento(itemKey)) {
+            val revision = _uiState.value.generalCalendarPosts.find { it.key == itemKey }?.calendarRevision
+            when (val result = repository.ocultarItemCalendarioPlanejamento(itemKey, revision)) {
                 is ApiResult.Success -> {
                     calendarCacheStore.remove(repository.getSavedToken(), itemKey)
                     _uiState.update {
@@ -811,7 +816,8 @@ class MonthlyPlanningViewModel(
                     planejamentoItemId = item.planejamentoItemId,
                     pedidoId = item.pedidoId,
                     date = newDate,
-                    time = item.time
+                    time = item.time,
+                    calendarRevision = item.calendarRevision
                 )
 
                 when (val result = repository.reagendarItemCalendarioPlanejamento(request)) {
@@ -1000,6 +1006,10 @@ class MonthlyPlanningViewModel(
         }
     }
 
+    fun setCalendarPreference(enabled: Boolean, revision: Long) {
+        _uiState.update { it.copy(calendarAutomatic = enabled, calendarPreferenceRevision = revision) }
+    }
+    fun calendarUnavailable() { _uiState.update { it.copy(uploadError = "Aguarde a conferência da programação automática e tente novamente.") } }
     fun confirmPlanning() {
         confirmPlanningInternal()
     }
@@ -1133,7 +1143,9 @@ class MonthlyPlanningViewModel(
                 caracteristicasEmpresa = uiProfile.caracteristicasEmpresa,
                 informacoesEmpresa = uiProfile.informacoesEmpresa.trim(),
                 logo = uiProfile.logoFile,
-                fotos = activePhotos.map { it.toRequestInput() }
+                fotos = activePhotos.map { it.toRequestInput() },
+                calendarAutomatic = current.calendarAutomatic,
+                calendarPreferenceRevision = current.calendarPreferenceRevision
             )
 
             when (val result = repository.solicitarPlanejamentoMensal(request)) {
@@ -2155,7 +2167,9 @@ private fun MonthlyPlanningPostDto.toUiPost(): MonthlyPlanningPost {
         tipo = tipo,
         freeArtWeekly = freeArtWeekly,
         campaignId = campaignId,
-        assignmentId = assignmentId
+        assignmentId = assignmentId,
+        calendarRevision = calendarRevision,
+        calendarStatusLabel = calendarStatusLabel
     )
 }
 
