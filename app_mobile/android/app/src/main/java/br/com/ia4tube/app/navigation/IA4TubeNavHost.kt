@@ -6,6 +6,7 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.padding
@@ -491,13 +492,17 @@ fun IA4TubeNavHost(
             )
         }
 
-        composable(Routes.Instagram) {
+        composable(Routes.Instagram) { instagramEntry ->
             if (!hasSavedToken()) {
                 LaunchedEffect(Unit) {
                     requestAuthFor(Routes.Instagram)
                 }
             } else {
+                val instagramOwner = remember(instagramEntry) {
+                    navController.instagramViewModelOwner()
+                }
                 val viewModel: InstagramViewModel = viewModel(
+                    viewModelStoreOwner = instagramOwner,
                     factory = InstagramViewModelFactory(
                         tokenProvider = repository::getSavedToken,
                         intentStore = instagramIntentStore,
@@ -505,9 +510,13 @@ fun IA4TubeNavHost(
                         uploadStore = remember { AndroidInstagramUploadWitnessStore(context) }
                     )
                 )
+                val leaveInstagram: () -> Unit = {
+                    navController.leaveInstagram(instagramEntry, viewModel)
+                }
+                BackHandler(onBack = leaveInstagram)
                 InstagramScreen(
                     viewModel = viewModel,
-                    onBack = { navController.popBackStack() }
+                    onBack = leaveInstagram
                 )
             }
         }

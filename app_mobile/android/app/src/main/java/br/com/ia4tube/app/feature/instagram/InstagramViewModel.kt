@@ -28,6 +28,7 @@ class InstagramViewModel(
     private val _uiState = MutableStateFlow(InstagramUiState())
     val uiState: StateFlow<InstagramUiState> = _uiState.asStateFlow()
     private var sessionToken = ""
+    // Also revoked on route exit: a retained VM must not accept work from an old screen entry.
     private var sessionEpoch = 0L
     private var operation: Job? = null
     private var gateway: InstagramGateway? = null
@@ -84,6 +85,22 @@ class InstagramViewModel(
     fun onPause() {
         foreground = false
         invalidateOperationalAvailability()
+    }
+
+    /** Leaving the route is not the temporary pause caused by the picker/browser. */
+    fun onRouteExit() {
+        onPause()
+        discardJpegSelection()
+        // Revoke callbacks before cancellation: a gateway/commit may finish non-cancellably.
+        // Durable upload completion still belongs to its original ID, never the new entry's UI.
+        sessionEpoch += 1
+        completedRefreshEpoch = -1L
+        val previousOperation = operation
+        operation = null
+        previousOperation?.cancel()
+        _uiState.update { it.copy(busy = false, authorizationUrlToOpen = null,
+            availability = if (it.availability == InstagramAvailability.SESSION_REQUIRED)
+                InstagramAvailability.SESSION_REQUIRED else InstagramAvailability.CHECKING) }
     }
 
     private fun invalidateOperationalAvailability() {
