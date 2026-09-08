@@ -101,6 +101,7 @@ import br.com.ia4tube.app.feature.home.HomeViewModelFactory
 import br.com.ia4tube.app.feature.home.premiumHomePalette
 import br.com.ia4tube.app.feature.instagram.AndroidInstagramPublicationIntentStore
 import br.com.ia4tube.app.feature.instagram.AndroidInstagramAuthorizationWitnessStore
+import br.com.ia4tube.app.feature.instagram.AndroidInstagramUploadWitnessStore
 import br.com.ia4tube.app.feature.instagram.InstagramScreen
 import br.com.ia4tube.app.feature.instagram.InstagramViewModel
 import br.com.ia4tube.app.feature.instagram.InstagramViewModelFactory
@@ -500,7 +501,8 @@ fun IA4TubeNavHost(
                     factory = InstagramViewModelFactory(
                         tokenProvider = repository::getSavedToken,
                         intentStore = instagramIntentStore,
-                        authorizationStore = remember { AndroidInstagramAuthorizationWitnessStore(context) }
+                        authorizationStore = remember { AndroidInstagramAuthorizationWitnessStore(context) },
+                        uploadStore = remember { AndroidInstagramUploadWitnessStore(context) }
                     )
                 )
                 InstagramScreen(

@@ -224,7 +224,7 @@ class InstagramViewModelTest {
     @Test fun changedSessionDiscardsPendingJpegAndOldCallbackEvenIfTokenReturns() = runTest(dispatcher) {
         val gateway = SyntheticGateway()
         var token = "synthetic-old-company"
-        val model = InstagramViewModel({ token }, MemoryIntentStore(), ORIGIN, { gateway }, MemoryAuthorizationStore())
+        val model = InstagramViewModel({ token }, MemoryIntentStore(), ORIGIN, { gateway }, MemoryAuthorizationStore(), inMemoryUploadWitnessStore())
         model.onResume(); model.awaitIdle()
         val key = model.pickerSessionKey()!!
         val jpeg = InstagramPoliciesTest.jpegEnvelope()
@@ -450,7 +450,7 @@ class InstagramViewModelTest {
         val capturedProviders = mutableListOf<() -> String>()
         val model = InstagramViewModel(
             tokenProvider = { currentToken }, intentStore = store, apiOrigin = ORIGIN,
-            authorizationStore = MemoryAuthorizationStore(), gatewayFactory = { captured ->
+            authorizationStore = MemoryAuthorizationStore(), uploadStore = inMemoryUploadWitnessStore(), gatewayFactory = { captured ->
                 capturedProviders.add(captured)
                 if (captured() == "synthetic-session-one") oldGateway else newGateway
             }
@@ -693,7 +693,7 @@ class InstagramViewModelTest {
     private fun model(gateway: SyntheticGateway, store: MemoryIntentStore,
         authorizationStore: InstagramAuthorizationWitnessStore = MemoryAuthorizationStore()) = InstagramViewModel(
         tokenProvider = { "synthetic-session-one" }, intentStore = store, apiOrigin = ORIGIN,
-        gatewayFactory = { gateway }, authorizationStore = authorizationStore
+        gatewayFactory = { gateway }, authorizationStore = authorizationStore, uploadStore = inMemoryUploadWitnessStore()
     )
 
     @Test fun blockedUnknownAndFailureCanRefreshToAllowedWithoutOAuthProbe() = runTest(dispatcher) {
@@ -769,7 +769,7 @@ class InstagramViewModelTest {
         val second = SyntheticGateway().apply { connection = null; operational = InstagramOperationalAvailability(false, false) }
         var token = "synthetic-first"
         val model = InstagramViewModel({ token }, MemoryIntentStore(), ORIGIN,
-            { captured -> if (captured() == "synthetic-first") first else second }, MemoryAuthorizationStore())
+            { captured -> if (captured() == "synthetic-first") first else second }, MemoryAuthorizationStore(), inMemoryUploadWitnessStore())
         model.onResume(); model.awaitIdle()
         assertTrue(model.uiState.value.canAuthorize)
         token = "synthetic-second"
@@ -927,7 +927,8 @@ class InstagramViewModelTest {
         override suspend fun media(): InstagramResult<List<InstagramMedia>> = InstagramResult.Success(mediaItems)
         override suspend fun uploadMedia(jpeg: ByteArray, caption: String): InstagramResult<InstagramMedia> {
             uploadCalls += 1
-            return InstagramResult.Success(MEDIA)
+            return InstagramResult.Success(MEDIA, InstagramRequestDiagnostic(true, true, 201,
+                "http_success", InstagramRequestStage.HTTP_RESPONSE, 1, 1, false))
         }
         override suspend fun publications(): InstagramResult<InstagramHistory> {
             beforePublications()
@@ -1150,7 +1151,7 @@ class InstagramViewModelTest {
         }
         var token = "synthetic-old-company"
         val model = InstagramViewModel({ token }, MemoryIntentStore(), ORIGIN,
-            { captured -> if (captured() == "synthetic-old-company") oldGateway else newGateway }, MemoryAuthorizationStore())
+            { captured -> if (captured() == "synthetic-old-company") oldGateway else newGateway }, MemoryAuthorizationStore(), inMemoryUploadWitnessStore())
         model.onResume(); model.awaitIdle(); model.connect(); started.await()
         token = "synthetic-new-company"
         model.onResume(); model.awaitIdle()

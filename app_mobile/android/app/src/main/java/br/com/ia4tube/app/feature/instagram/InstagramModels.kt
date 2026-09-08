@@ -1,8 +1,8 @@
 package br.com.ia4tube.app.feature.instagram
 
 sealed interface InstagramResult<out T> {
-    data class Success<T>(val value: T) : InstagramResult<T>
-    data class Failure(val error: InstagramError) : InstagramResult<Nothing>
+    data class Success<T>(val value: T, val diagnostic: InstagramRequestDiagnostic? = null) : InstagramResult<T>
+    data class Failure(val error: InstagramError, val diagnostic: InstagramRequestDiagnostic? = null) : InstagramResult<Nothing>
 }
 
 enum class InstagramError(val message: String) {

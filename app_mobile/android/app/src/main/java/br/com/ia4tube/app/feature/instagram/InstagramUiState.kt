@@ -23,6 +23,11 @@ data class InstagramUiState(
     val jpegSelectionPending: Boolean = false,
     val draftCaption: String = "",
     val selectedMediaId: String? = null,
+    val uploadWitness: InstagramUploadWitness? = null,
+    val uploadStorageAvailable: Boolean = true,
+    val uploadDraftMatches: Boolean = false,
+    val uploadFeedback: String? = null,
+    val uploadLocalDiagnostic: InstagramRequestDiagnostic? = null,
     val intent: InstagramPublicationIntent? = null,
     val storageAvailable: Boolean = true,
     val confirmationOpen: Boolean = false,
@@ -54,10 +59,29 @@ data class InstagramUiState(
         operationalAvailability?.connectionAllowed == true && authorizationPurpose != null
     val canEditDraft: Boolean get() = !busy && availability == InstagramAvailability.AVAILABLE &&
         connection?.canPublish == true && intent == null && storageAvailable
-    val canUpload: Boolean get() = canEditDraft && !jpegSelectionPending && draftJpeg != null &&
-        operationalAvailability?.publicationAllowed == true &&
-        InstagramPolicies.validCaption(draftCaption.trim())
+    val hasUnresolvedUpload: Boolean get() = uploadWitness?.let { !InstagramUploadWitnessPolicy.isResolved(it) } == true
+    val uploadBlockReason: String? get() = when {
+        busy -> uploadWitness?.takeIf { it.phase == InstagramUploadPhase.IN_FLIGHT }
+            ?.let(::instagramUploadPhaseLabel) ?: "Há uma consulta ou operação em andamento. Aguarde."
+        availability == InstagramAvailability.SESSION_REQUIRED -> InstagramError.SESSION_REQUIRED.message
+        availability != InstagramAvailability.AVAILABLE -> "A disponibilidade ainda não foi confirmada. Use Atualizar."
+        connection?.canPublish != true -> "A conta profissional não está pronta para este envio. Confira a conexão e use Atualizar."
+        !storageAvailable || !uploadStorageAvailable -> "Não foi possível confirmar o registro local. Não reenvie; use Atualizar."
+        intent != null -> "Há uma publicação registrada. Consulte seu resultado antes de preparar outro envio."
+        hasUnresolvedUpload -> "O resultado do envio anterior ainda é desconhecido. Não reenvie; use Atualizar para consultar o estado."
+        uploadWitness != null && uploadWitness.binding != connection?.binding -> "A conta vinculada ao envio mudou. O registro anterior foi preservado; não reenvie."
+        operationalAvailability?.publicationAllowed != true -> InstagramError.UNAVAILABLE.message
+        jpegSelectionPending -> "A seleção da imagem ainda está sendo conferida. Aguarde ou use Atualizar."
+        draftJpeg == null -> "Escolha uma imagem JPEG antes de enviar."
+        !InstagramPolicies.validCaption(draftCaption) -> "Revise a legenda: use de 1 a 2150 caracteres, sem espaços no início ou no fim."
+        uploadWitness?.phase == InstagramUploadPhase.CONFIRMED && uploadDraftMatches -> "Esta imagem e legenda já foram enviadas. Revise a prévia antes de publicar."
+        else -> null
+    }
+    val canUpload: Boolean get() = uploadBlockReason == null
+    val uploadMessages: List<String> get() = listOfNotNull(uploadBlockReason, uploadFeedback).distinct()
     val canPublish: Boolean get() = canEditDraft && !jpegSelectionPending && selectedMedia != null && historyLoaded &&
+        uploadStorageAvailable && uploadDraftMatches && uploadWitness?.phase == InstagramUploadPhase.CONFIRMED &&
+        uploadWitness.binding == connection?.binding && uploadWitness.mediaId == selectedMediaId &&
         operationalAvailability?.publicationAllowed == true &&
         freshPublicationAvailable && authorizationUrlToOpen == null
     val pendingPublication: InstagramPublication? get() = intent?.let { saved ->

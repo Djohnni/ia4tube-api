@@ -7,6 +7,7 @@ import br.com.ia4tube.app.core.config.AppConfig
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -21,7 +22,8 @@ class InstagramViewModel(
     private val intentStore: InstagramPublicationIntentStore,
     private val apiOrigin: String = AppConfig.apiBase,
     private val gatewayFactory: (() -> String) -> InstagramGateway = { InstagramApiClient(it, AppConfig.apiBase) },
-    private val authorizationStore: InstagramAuthorizationWitnessStore
+    private val authorizationStore: InstagramAuthorizationWitnessStore,
+    private val uploadStore: InstagramUploadWitnessStore
 ) : ViewModel() {
     private val _uiState = MutableStateFlow(InstagramUiState())
     val uiState: StateFlow<InstagramUiState> = _uiState.asStateFlow()
@@ -142,7 +144,7 @@ class InstagramViewModel(
         jpegSelection = null
         _uiState.value.draftJpeg?.fill(0)
         _uiState.update { it.copy(draftJpeg = bytes, jpegSelectionPending = false,
-            selectedMediaId = null, error = null, message = null) }
+            selectedMediaId = null).withUploadDraftBinding() }
     }
 
     private fun discardJpegSelection() {
@@ -172,9 +174,50 @@ class InstagramViewModel(
     }
 
     fun updateCaption(caption: String) {
-        if (!synchronizeSession() || !_uiState.value.canEditDraft) return
-        if (caption.length > 9000) return
-        _uiState.update { it.copy(draftCaption = caption, selectedMediaId = null, error = null, message = null) }
+        if (!synchronizeSession() || caption == _uiState.value.draftCaption) return
+        if (!_uiState.value.canEditDraft) return
+        if (caption.length > 9000) {
+            _uiState.update { it.copy(uploadFeedback = "A legenda excede o limite do campo. Revise o texto antes de enviar.") }
+            return
+        }
+        // Editing a draft is not a result event. Keep all evidence of the previous operation.
+        _uiState.update { it.copy(draftCaption = caption, selectedMediaId = null).withUploadDraftBinding() }
+    }
+
+    private fun InstagramUiState.withUploadDraftBinding(): InstagramUiState {
+        val saved = uploadWitness
+        val matches = saved != null && saved.binding == connection?.binding && draftJpeg?.let {
+            instagramUploadFingerprint(it, draftCaption) == saved.contentFingerprint
+        } == true
+        return copy(uploadDraftMatches = matches, selectedMediaId = saved?.mediaId?.takeIf { id ->
+            matches && saved.phase == InstagramUploadPhase.CONFIRMED && media.any { it.id == id }
+        })
+    }
+
+    private suspend fun restoreUpload(epoch: Long, connection: InstagramConnection?) {
+        if (connection == null) return
+        val key = InstagramIntentPolicy.contextKey(apiOrigin, connection.connectionId)
+        try {
+            var saved = withContext(Dispatchers.IO) { uploadStore.read(key) }
+            // A restart/refresh cannot prove whether a previously dispatched request was processed.
+            if (saved?.phase in setOf(InstagramUploadPhase.PREPARED, InstagramUploadPhase.IN_FLIGHT)) {
+                saved = saved!!.copy(phase = InstagramUploadPhase.UNKNOWN)
+                check(withContext(Dispatchers.IO) { uploadStore.update(key, saved) })
+            }
+            if (!isCurrent(epoch)) return
+            _uiState.update { it.copy(uploadWitness = saved, uploadStorageAvailable = true,
+                uploadFeedback = when {
+                    saved == null -> it.uploadFeedback
+                    saved.binding != connection.binding -> "O registro abaixo pertence ao vínculo anterior da conta. Ele foi preservado e não autoriza um novo envio."
+                    else -> instagramUploadPhaseLabel(saved)
+                }
+            ).withUploadDraftBinding() }
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (_: Exception) {
+            if (isCurrent(epoch)) _uiState.update { it.copy(uploadStorageAvailable = false,
+                uploadFeedback = "O registro do envio não pôde ser confirmado. Não reenvie; use Atualizar.") }
+        }
     }
 
     fun refresh() {
@@ -185,7 +228,9 @@ class InstagramViewModel(
         invalidateOperationalAvailability()
         val expectedAvailabilityEpoch = availabilityEpoch
         _uiState.update { it.copy(busy = true, availability = InstagramAvailability.CHECKING,
-            authorizationUrlToOpen = null, error = null, message = null,
+            authorizationUrlToOpen = null,
+            error = if (it.uploadWitness != null || it.uploadLocalDiagnostic != null) it.error else null,
+            message = if (it.uploadWitness != null) it.message else null,
             confirmationOpen = false, reconciliationConfirmationOpen = false) }
         operation = viewModelScope.launch {
             try {
@@ -213,11 +258,19 @@ class InstagramViewModel(
                                 selectedMediaId = if (changed) null else it.selectedMediaId,
                                 draftJpeg = if (changed) null else it.draftJpeg,
                                 draftCaption = if (changed) "" else it.draftCaption,
-                                intent = if (changed) null else it.intent)
+                                intent = if (changed) null else it.intent,
+                                uploadWitness = if (changed) null else it.uploadWitness,
+                                uploadDraftMatches = if (changed) false else it.uploadDraftMatches,
+                                uploadFeedback = if (changed) null else it.uploadFeedback,
+                                uploadLocalDiagnostic = if (changed) null else it.uploadLocalDiagnostic,
+                                error = if (changed) null else it.error,
+                                message = if (changed) null else it.message)
                         }
                     }
                 }
                 val connection = _uiState.value.connection
+                restoreUpload(epoch, connection)
+                if (!isCurrent(epoch)) return@launch
                 val authorizationConnectionId = connection?.connectionId ?: witness?.connectionId ?: witness?.previousConnectionId
                 if (authorizationConnectionId != null) {
                     when (val result = api.authorizationStatus(authorizationConnectionId)) {
@@ -261,7 +314,7 @@ class InstagramViewModel(
                 if (!isCurrent(epoch)) return@launch
                 when (val result = api.media()) {
                     is InstagramResult.Success -> if (isCurrent(epoch)) _uiState.update {
-                        it.copy(media = result.value, selectedMediaId = it.selectedMediaId?.takeIf { id -> result.value.any { media -> media.id == id } })
+                        it.copy(media = result.value).withUploadDraftBinding()
                     }
                     is InstagramResult.Failure -> { if (isCurrent(epoch)) failAvailability(result.error); return@launch }
                 }
@@ -390,31 +443,178 @@ class InstagramViewModel(
     }
 
     fun upload() {
-        if (!synchronizeSession() || !_uiState.value.canUpload) return
+        if (!synchronizeSession()) {
+            showUploadBlock(InstagramError.SESSION_REQUIRED.message, "local_session_required")
+            return
+        }
+        // Keep the original operation/progress visible on a duplicate callback.
+        if (_uiState.value.busy) return
+        _uiState.value.uploadBlockReason?.let { showUploadBlock(it); return }
         val epoch = sessionEpoch
-        val api = gateway ?: return
-        val jpeg = _uiState.value.draftJpeg?.copyOf() ?: return
-        val caption = _uiState.value.draftCaption.trim()
-        _uiState.update { it.copy(busy = true, error = null, message = null) }
+        val expectedAvailabilityEpoch = availabilityEpoch
+        val api = gateway ?: run { showUploadBlock(InstagramError.UNAVAILABLE.message); return }
+        val current = _uiState.value
+        val binding = current.connection?.binding ?: run {
+            showUploadBlock("A identidade da conta não foi confirmada. Use Atualizar."); return
+        }
+        val jpeg = current.draftJpeg?.copyOf() ?: run {
+            showUploadBlock("Escolha uma imagem JPEG antes de enviar."); return
+        }
+        if (!InstagramPolicies.validateJpeg(jpeg)) {
+            jpeg.fill(0)
+            showUploadBlock("Escolha uma imagem JPEG de 1080 × 1080 pixels, com até 8 MB.", "local_invalid_input")
+            return
+        }
+        val caption = current.draftCaption // Never silently change the approved draft.
+        val contextKey = InstagramIntentPolicy.contextKey(apiOrigin, binding.connectionId)
+        var record = InstagramUploadWitness(UUID.randomUUID().toString(),
+            instagramUploadFingerprint(jpeg, caption), binding, System.currentTimeMillis())
+        _uiState.update { it.copy(busy = true, error = null, message = null,
+            uploadFeedback = instagramUploadPhaseLabel(record), uploadLocalDiagnostic = null) }
         operation = viewModelScope.launch {
             try {
-                val result = api.uploadMedia(jpeg, caption)
+                val stored = withContext(Dispatchers.IO) {
+                    val previous = uploadStore.read(contextKey)
+                    if (previous != null && (!InstagramUploadWitnessPolicy.isResolved(previous) ||
+                            previous.binding != binding || (previous.phase == InstagramUploadPhase.CONFIRMED &&
+                            previous.contentFingerprint == record.contentFingerprint))) false
+                    else if (previous != null && !uploadStore.clearResolved(contextKey, previous.id)) false
+                    else uploadStore.create(contextKey, record)
+                }
                 if (!isCurrent(epoch)) return@launch
-                when (result) {
-                    is InstagramResult.Success -> _uiState.update {
-                        it.copy(media = listOf(result.value) + it.media.filterNot { media -> media.id == result.value.id },
-                            selectedMediaId = result.value.id,
-                            message = "Imagem enviada. Revise abaixo a prévia da legenda antes de publicar.")
+                check(stored)
+                _uiState.update { it.copy(uploadWitness = record).withUploadDraftBinding() }
+                if (!foreground || expectedAvailabilityEpoch != availabilityEpoch ||
+                    _uiState.value.connection?.binding != binding ||
+                    _uiState.value.operationalAvailability?.publicationAllowed != true) {
+                    val blocked = record.copy(phase = InstagramUploadPhase.REJECTED,
+                        diagnostic = localUploadDiagnostic("local_unavailable"))
+                    persistUploadResult(contextKey, blocked, epoch)
+                    showUploadBlock("A disponibilidade mudou antes da requisição. Use Atualizar.")
+                    return@launch
+                }
+                record = record.copy(phase = InstagramUploadPhase.IN_FLIGHT,
+                    diagnostic = InstagramRequestDiagnostic(true, false, null, "request_started",
+                        InstagramRequestStage.REQUEST_INITIATED, record.startedAtEpochMillis, 0, true))
+                check(withContext(Dispatchers.IO) { uploadStore.update(contextKey, record) })
+                if (!isCurrent(epoch)) return@launch
+                _uiState.update { it.copy(uploadWitness = record,
+                    uploadFeedback = instagramUploadPhaseLabel(record)).withUploadDraftBinding() }
+                // A foreground/account change while committing still must not dispatch a request.
+                if (!foreground || expectedAvailabilityEpoch != availabilityEpoch ||
+                    _uiState.value.connection?.binding != binding) {
+                    record = record.copy(phase = InstagramUploadPhase.REJECTED,
+                        diagnostic = localUploadDiagnostic("local_unavailable"))
+                    persistUploadResult(contextKey, record, epoch)
+                    showUploadBlock("A disponibilidade mudou antes da requisição. Use Atualizar.")
+                    return@launch
+                }
+                val result = api.uploadMedia(jpeg, caption)
+                var outcome = when (result) {
+                    is InstagramResult.Success -> record.copy(phase = InstagramUploadPhase.CONFIRMED,
+                        mediaId = result.value.id, diagnostic = result.diagnostic)
+                    is InstagramResult.Failure -> record.copy(phase =
+                        if (result.diagnostic?.outcomeUnknown == false) InstagramUploadPhase.REJECTED
+                        else InstagramUploadPhase.UNKNOWN, diagnostic = result.diagnostic ?: record.diagnostic)
+                }
+                // The gateway contract accepts generic media IDs elsewhere. This local ledger
+                // only accepts the upload endpoint's known resource format, never arbitrary text.
+                if (!InstagramUploadWitnessPolicy.valid(outcome)) {
+                    val diagnostic = result.let {
+                        when (it) {
+                            is InstagramResult.Success -> it.diagnostic
+                            is InstagramResult.Failure -> it.diagnostic
+                        }
                     }
-                    is InstagramResult.Failure -> _uiState.update { it.copy(error = result.error.message) }
+                    outcome = record.copy(phase = InstagramUploadPhase.UNKNOWN,
+                        diagnostic = diagnostic?.takeIf { it.requestStarted }?.copy(
+                            code = "response_invalid", stage = InstagramRequestStage.INVALID_RESPONSE, outcomeUnknown = true)
+                            ?: record.diagnostic)
+                }
+                val persisted = persistUploadResult(contextKey, outcome, epoch)
+                record = outcome
+                if (!isCurrent(epoch) || _uiState.value.uploadWitness?.id != record.id ||
+                    _uiState.value.connection?.binding != binding) return@launch
+                if (!persisted) return@launch
+                when (result) {
+                    is InstagramResult.Success -> {
+                        if (persisted && outcome.phase == InstagramUploadPhase.CONFIRMED) {
+                            _uiState.update {
+                                it.copy(media = listOf(result.value) + it.media.filterNot { media -> media.id == result.value.id },
+                                    message = "Imagem enviada. Revise abaixo a prévia da legenda antes de publicar."
+                                ).withUploadDraftBinding()
+                            }
+                        } else if (outcome.phase == InstagramUploadPhase.UNKNOWN) {
+                            _uiState.update { it.copy(error = InstagramError.INVALID_RESPONSE.message) }
+                        }
+                    }
+                    is InstagramResult.Failure -> _uiState.update { it.copy(error = result.error.message,
+                        uploadFeedback = if (outcome.phase == InstagramUploadPhase.UNKNOWN)
+                            "${result.error.message} ${instagramUploadPhaseLabel(outcome)}" else result.error.message) }
                 }
             } catch (cancelled: CancellationException) {
+                preserveUnfinishedUpload(contextKey, record, epoch)
                 throw cancelled
             } catch (_: Exception) {
-                if (isCurrent(epoch)) _uiState.update { it.copy(error = "Não foi possível confirmar o envio da imagem.") }
+                preserveUnfinishedUpload(contextKey, record, epoch)
+                if (isCurrent(epoch)) _uiState.update { it.copy(uploadStorageAvailable = false,
+                    error = "Não foi possível confirmar o envio ou seu registro. Não reenvie; use Atualizar.",
+                    uploadFeedback = "Não foi possível confirmar o envio ou seu registro. Não reenvie; use Atualizar.") }
             } finally {
                 jpeg.fill(0)
                 if (isCurrent(epoch)) _uiState.update { it.copy(busy = false) }
+            }
+        }
+    }
+
+    private fun localUploadDiagnostic(code: String) = InstagramRequestDiagnostic(false, false, null,
+        code, InstagramRequestStage.LOCAL_VALIDATION, System.currentTimeMillis(), 0, false)
+
+    private fun showUploadBlock(reason: String, code: String = "local_unavailable") {
+        _uiState.update { it.copy(error = reason, uploadFeedback = reason,
+            uploadLocalDiagnostic = localUploadDiagnostic(code)) }
+    }
+
+    private suspend fun persistUploadResult(key: String, result: InstagramUploadWitness, epoch: Long): Boolean {
+        val saved = withContext(NonCancellable + Dispatchers.IO) { uploadStore.update(key, result) }
+        // A refused CAS is not permission to overwrite a canonical/terminal result in the UI.
+        val canonical = if (saved) result else withContext(NonCancellable + Dispatchers.IO) {
+            runCatching { uploadStore.read(key) }.getOrNull()
+        }
+        if (isCurrent(epoch) && _uiState.value.uploadWitness?.id == result.id) {
+            _uiState.update {
+                val known = canonical ?: it.uploadWitness
+                val visible = if (!saved && known != null && !InstagramUploadWitnessPolicy.isResolved(known))
+                    known.copy(phase = InstagramUploadPhase.UNKNOWN) else known
+                it.copy(uploadWitness = visible, uploadStorageAvailable = saved,
+                uploadFeedback = if (saved) instagramUploadPhaseLabel(result)
+                    else "O resultado não pôde ser salvo. O registro foi preservado; não reenvie.",
+                error = if (saved) it.error else "O resultado não pôde ser salvo. Não reenvie."
+            ).withUploadDraftBinding() }
+        }
+        return saved
+    }
+
+    private suspend fun preserveUnfinishedUpload(key: String, record: InstagramUploadWitness, epoch: Long) {
+        try {
+            val preserved = withContext(NonCancellable + Dispatchers.IO) {
+                val existing = uploadStore.read(key)?.takeIf { it.id == record.id } ?: return@withContext null
+                if (InstagramUploadWitnessPolicy.isResolved(existing)) existing else {
+                    val unknown = existing.copy(phase = InstagramUploadPhase.UNKNOWN)
+                    check(uploadStore.update(key, unknown))
+                    unknown
+                }
+            }
+            if (preserved != null && isCurrent(epoch) && _uiState.value.uploadWitness?.id == record.id) {
+                _uiState.update { it.copy(uploadWitness = preserved,
+                    uploadFeedback = instagramUploadPhaseLabel(preserved)).withUploadDraftBinding() }
+            }
+        } catch (_: Exception) {
+            if (isCurrent(epoch)) _uiState.update {
+                val known = it.uploadWitness
+                it.copy(uploadStorageAvailable = false, uploadWitness =
+                    if (known != null && !InstagramUploadWitnessPolicy.isResolved(known))
+                        known.copy(phase = InstagramUploadPhase.UNKNOWN) else known)
             }
         }
     }
@@ -587,7 +787,7 @@ class InstagramViewModel(
                 if (removed) {
                     _uiState.value.draftJpeg?.fill(0)
                     _uiState.update { it.copy(intent = null, draftJpeg = null, draftCaption = "",
-                        selectedMediaId = null, message = null, error = null) }
+                        selectedMediaId = null, uploadDraftMatches = false, message = null, error = null) }
                 } else _uiState.update { it.copy(storageAvailable = false, error = "O registro anterior não pôde ser confirmado.") }
             } catch (cancelled: CancellationException) {
                 throw cancelled
@@ -615,11 +815,13 @@ class InstagramViewModel(
 class InstagramViewModelFactory(
     private val tokenProvider: () -> String,
     private val intentStore: InstagramPublicationIntentStore,
-    private val authorizationStore: InstagramAuthorizationWitnessStore
+    private val authorizationStore: InstagramAuthorizationWitnessStore,
+    private val uploadStore: InstagramUploadWitnessStore
 ) : ViewModelProvider.Factory {
     override fun <T : ViewModel> create(modelClass: Class<T>): T {
         require(modelClass.isAssignableFrom(InstagramViewModel::class.java))
         @Suppress("UNCHECKED_CAST")
-        return InstagramViewModel(tokenProvider, intentStore, authorizationStore = authorizationStore) as T
+        return InstagramViewModel(tokenProvider, intentStore, authorizationStore = authorizationStore,
+            uploadStore = uploadStore) as T
     }
 }

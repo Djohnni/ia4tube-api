@@ -276,6 +276,27 @@ fun InstagramScreen(viewModel: InstagramViewModel, onBack: () -> Unit) {
                 )
                 Button(onClick = viewModel::upload, enabled = state.canUpload && !readingImage,
                     colors = filledButtonColors) { Text("Enviar imagem para revisão") }
+                // Keep feedback beside the initiating control, even when it is disabled.
+                state.uploadMessages.forEach {
+                    Text(it, style = MaterialTheme.typography.bodySmall)
+                }
+                state.uploadWitness?.let { upload ->
+                    Text(if (upload.binding == state.connection?.binding) "Último envio de imagem"
+                        else "Envio preservado do vínculo anterior", fontWeight = FontWeight.SemiBold)
+                    Text(instagramUploadPhaseLabel(upload), style = MaterialTheme.typography.bodySmall)
+                    Text("Horário: ${java.text.DateFormat.getDateTimeInstance().format(java.util.Date(upload.startedAtEpochMillis))}",
+                        style = MaterialTheme.typography.bodySmall)
+                    upload.mediaId?.let { Text("Referência: $it", style = MaterialTheme.typography.bodySmall) }
+                    upload.diagnostic?.let { diagnostic ->
+                        Text("Etapa: ${diagnostic.stage.name} · ${diagnostic.durationMillis} ms", style = MaterialTheme.typography.bodySmall)
+                        Text("HTTP: ${diagnostic.httpStatus?.toString() ?: "sem resposta confirmada"} · ${diagnostic.code}",
+                            style = MaterialTheme.typography.bodySmall)
+                    }
+                    if (!state.uploadDraftMatches) {
+                        Text("O rascunho atual não corresponde a este envio. A referência anterior foi preservada e não autoriza publicar o novo conteúdo.",
+                            style = MaterialTheme.typography.bodySmall)
+                    }
+                }
             }
 
             state.selectedMedia?.let { selected ->

@@ -16,6 +16,9 @@ class InstagramUiStateTest {
         connection = connection,
         media = listOf(media),
         selectedMediaId = media.id,
+        uploadDraftMatches = true,
+        uploadWitness = InstagramUploadWitness("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", "a".repeat(64),
+            connection.binding!!, 1, InstagramUploadPhase.CONFIRMED, media.id),
         historyLoaded = true,
         freshPublicationAvailable = true
     )

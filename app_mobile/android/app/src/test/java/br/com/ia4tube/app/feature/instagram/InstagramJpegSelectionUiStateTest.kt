@@ -19,21 +19,29 @@ class InstagramJpegSelectionUiStateTest {
         connection = connection,
         media = listOf(media),
         selectedMediaId = media.id,
+        uploadDraftMatches = true,
+        uploadWitness = InstagramUploadWitness("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", "b".repeat(64),
+            connection.binding!!, 1, InstagramUploadPhase.CONFIRMED, media.id),
         historyLoaded = true,
         freshPublicationAvailable = true,
         draftJpeg = InstagramPoliciesTest.jpegEnvelope(),
         draftCaption = "Legenda sintética local"
     )
 
+    private fun unuploaded(state: InstagramUiState) = state.copy(
+        uploadWitness = null, uploadDraftMatches = false, selectedMediaId = null)
+
     @Test fun pendingSelectionBlocksOldDraftAndServerMediaWithoutBlockingLocalEditing() {
         val original = ready()
         assertTrue(original.canEditDraft)
-        assertTrue(original.canUpload)
+        assertFalse("Confirmed content must not be uploaded twice", original.canUpload)
+        assertTrue(unuploaded(original).canUpload)
         assertTrue(original.canPublish)
 
         val pending = original.copy(jpegSelectionPending = true, confirmationOpen = true)
         assertTrue("A pending selection must still allow local replacement or cancellation", pending.canEditDraft)
         assertFalse("The previous valid JPEG must not be uploaded during selection", pending.canUpload)
+        assertFalse("Even an unuploaded draft must wait for selection", unuploaded(pending).canUpload)
         assertFalse("The previous reviewed media must not be published during selection", pending.canPublish)
         assertSame(original.draftJpeg, pending.draftJpeg)
         assertEquals(original.draftCaption, pending.draftCaption)
@@ -47,7 +55,8 @@ class InstagramJpegSelectionUiStateTest {
 
         val completed = pending.copy(jpegSelectionPending = false)
         assertTrue(completed.canEditDraft)
-        assertTrue(completed.canUpload)
+        assertTrue(unuploaded(completed).canUpload)
+        assertFalse(completed.canUpload)
         assertTrue(completed.canPublish)
     }
 
@@ -64,6 +73,7 @@ class InstagramJpegSelectionUiStateTest {
                 )
                 assertTrue(state.canEditDraft)
                 assertFalse(state.canUpload)
+                assertFalse(unuploaded(state).canUpload)
                 assertFalse(state.canPublish)
             }
         }
@@ -81,6 +91,7 @@ class InstagramJpegSelectionUiStateTest {
             for (candidate in blocked) {
                 assertFalse(candidate.canEditDraft)
                 assertFalse(candidate.canUpload)
+                assertFalse(unuploaded(candidate).canUpload)
                 assertFalse(candidate.canPublish)
             }
         }
@@ -102,6 +113,7 @@ class InstagramJpegSelectionUiStateTest {
             for (candidate in blocked) {
                 assertFalse(candidate.canEditDraft)
                 assertFalse(candidate.canUpload)
+                assertFalse(unuploaded(candidate).canUpload)
                 assertFalse(candidate.canPublish)
             }
         }
@@ -109,11 +121,12 @@ class InstagramJpegSelectionUiStateTest {
 
     @Test fun endingSelectionDoesNotReplaceCaptionMediaHistoryOrAuthorizationGuards() {
         val completed = ready().copy(jpegSelectionPending = true).copy(jpegSelectionPending = false)
-        assertTrue(completed.canUpload)
+        assertTrue(unuploaded(completed).canUpload)
+        assertFalse(completed.canUpload)
         assertTrue(completed.canPublish)
 
-        assertFalse(completed.copy(draftJpeg = null).canUpload)
-        assertFalse(completed.copy(draftCaption = "   ").canUpload)
+        assertFalse(unuploaded(completed).copy(draftJpeg = null).canUpload)
+        assertFalse(unuploaded(completed).copy(draftCaption = "   ").canUpload)
         assertFalse(completed.copy(selectedMediaId = null).canPublish)
         assertFalse(completed.copy(selectedMediaId = "not-owned").canPublish)
         assertFalse(completed.copy(historyLoaded = false).canPublish)

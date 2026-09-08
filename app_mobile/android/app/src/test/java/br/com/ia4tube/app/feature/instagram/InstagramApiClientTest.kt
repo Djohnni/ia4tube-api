@@ -181,7 +181,9 @@ class InstagramApiClientTest {
     }
 
     @Test fun uploadValidatesLocallyAndUsesExactlyJpegAndCaption() = runBlocking {
-        assertEquals(InstagramResult.Failure(InstagramError.INVALID_INPUT), client.uploadMedia(byteArrayOf(1), "caption"))
+        val invalid = client.uploadMedia(byteArrayOf(1), "caption") as InstagramResult.Failure
+        assertEquals(InstagramError.INVALID_INPUT, invalid.error)
+        assertEquals("local_invalid_input", invalid.diagnostic?.code)
         assertEquals(0, server.requestCount)
         enqueue(JSONObject().put("ok", true).put("contentOwnerDerivedFromSession", true).put("media", media()))
         val result = client.uploadMedia(InstagramPoliciesTest.jpegEnvelope(), "caption") as InstagramResult.Success
@@ -307,7 +309,10 @@ class InstagramApiClientTest {
     @Test fun stagedMediaCapabilityIsRejectedByOfficialClient() = runBlocking {
         val staged = media().put("thumbnailUrl", "https://ia4tube-api-staging-checkpoint-a.onrender.com/v1/social/reviewer/media-capability/fixture")
         enqueue(JSONObject().put("ok", true).put("contentOwnerDerivedFromSession", true).put("media", staged))
-        assertEquals(InstagramResult.Failure(InstagramError.INVALID_RESPONSE), client.uploadMedia(InstagramPoliciesTest.jpegEnvelope(), "caption"))
+        val result = client.uploadMedia(InstagramPoliciesTest.jpegEnvelope(), "caption") as InstagramResult.Failure
+        assertEquals(InstagramError.INVALID_RESPONSE, result.error)
+        assertEquals("response_invalid", result.diagnostic?.code)
+        assertTrue(result.diagnostic!!.outcomeUnknown)
     }
 
     private fun enqueue(value: JSONObject, status: Int = 200) {

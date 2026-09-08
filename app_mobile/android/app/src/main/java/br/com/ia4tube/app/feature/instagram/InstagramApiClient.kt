@@ -13,6 +13,7 @@ import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.IOException
+import java.io.InterruptedIOException
 import java.time.Instant
 import java.util.concurrent.TimeUnit
 
@@ -63,15 +64,88 @@ class InstagramApiClient private constructor(
         }
 
     override suspend fun uploadMedia(jpeg: ByteArray, caption: String): InstagramResult<InstagramMedia> {
-        if (!InstagramPolicies.validCaption(caption) || !InstagramPolicies.validateJpeg(jpeg)) return invalidInput()
-        val body = MultipartBody.Builder().setType(MultipartBody.FORM)
-            .addFormDataPart("jpeg", "preview_ia4tube.jpg", jpeg.toRequestBody("image/jpeg".toMediaType()))
-            .addFormDataPart("caption", caption).build()
-        return request("/v1/social/reviewer/media", "POST", body) { root ->
-            require(root.getBoolean("contentOwnerDerivedFromSession"))
-            parseMedia(root.getJSONObject("media"))
+        val trace = InstagramUploadRequestTrace()
+        if (!InstagramPolicies.validCaption(caption) || !InstagramPolicies.validateJpeg(jpeg)) {
+            return uploadFailure(InstagramError.INVALID_INPUT, trace, InstagramRequestStage.LOCAL_VALIDATION,
+                "local_invalid_input", false)
         }
+        val body = try {
+            MultipartBody.Builder().setType(MultipartBody.FORM)
+                .addFormDataPart("jpeg", "preview_ia4tube.jpg", jpeg.toRequestBody("image/jpeg".toMediaType()))
+                .addFormDataPart("caption", caption).build()
+        } catch (_: Exception) {
+            return uploadFailure(InstagramError.INVALID_INPUT, trace, InstagramRequestStage.LOCAL_VALIDATION,
+                "local_request_failed", false)
+        }
+        return requestUpload(body, trace)
     }
+
+    /** Only the upload receives diagnostics; all other endpoint/result contracts remain unchanged. */
+    private suspend fun requestUpload(body: RequestBody, trace: InstagramUploadRequestTrace): InstagramResult<InstagramMedia> =
+        withContext(Dispatchers.IO) {
+            if (!InstagramPolicies.isOfficialApiBase(apiBase)) return@withContext uploadFailure(
+                InstagramError.UNAVAILABLE, trace, InstagramRequestStage.LOCAL_VALIDATION, "local_unavailable", false)
+            val token = try { tokenProvider() } catch (_: Exception) { "" }
+            if (token.isBlank() || token.length > 8192 || token.any { it <= ' ' || it == '\u007f' }) {
+                return@withContext uploadFailure(InstagramError.SESSION_REQUIRED, trace,
+                    InstagramRequestStage.LOCAL_VALIDATION, "local_session_required", false)
+            }
+            try {
+                val request = Request.Builder().url(transportBase + "/v1/social/reviewer/media")
+                    .header("Authorization", "Bearer $token").header("Accept", "application/json")
+                    .header("Cache-Control", "no-store").post(body).build()
+                val call = client.newCall(request)
+                trace.startRequest()
+                call.execute().use { response ->
+                    trace.receiveResponse(response.code)
+                    if (response.code !in 100..599) return@withContext uploadInvalidResponse(trace)
+                    if (tokenProvider() != token) return@withContext uploadFailure(InstagramError.SESSION_REQUIRED,
+                        trace, InstagramRequestStage.HTTP_RESPONSE, "session_changed", true)
+                    // A redirect is not an acknowledgement of this endpoint's storage contract.
+                    if (response.code in 300..399) return@withContext uploadFailure(InstagramError.UNAVAILABLE,
+                        trace, InstagramRequestStage.HTTP_RESPONSE, "http_redirect_refused", true)
+                    val responseBody = response.body ?: return@withContext uploadInvalidResponse(trace)
+                    if (responseBody.contentLength() > MAX_RESPONSE_BYTES) return@withContext uploadInvalidResponse(trace)
+                    val source = responseBody.source()
+                    source.request(MAX_RESPONSE_BYTES + 1)
+                    if (source.buffer.size > MAX_RESPONSE_BYTES) return@withContext uploadInvalidResponse(trace)
+                    val json = try { JSONObject(source.buffer.readUtf8()) }
+                        catch (_: Exception) { return@withContext uploadInvalidResponse(trace) }
+                    if (response.code in 500..599 || (response.code in 400..499 && json.opt("ok") == false)) {
+                        val code = InstagramRequestDiagnostic.normalizedServerCode(json.opt("code"), response.code)
+                        val error = when (response.code) {
+                            401 -> InstagramError.SESSION_REQUIRED
+                            403, 404, 405, 501 -> InstagramError.UNAVAILABLE
+                            else -> mapError(response.code, code, false)
+                        }
+                        return@withContext uploadFailure(error, trace, InstagramRequestStage.HTTP_RESPONSE,
+                            code, response.code >= 500)
+                    }
+                    if (!response.isSuccessful || json.opt("ok") != true) return@withContext uploadInvalidResponse(trace)
+                    require(json.opt("contentOwnerDerivedFromSession") == true)
+                    InstagramResult.Success(parseMedia(json.getJSONObject("media")),
+                        trace.diagnostic(InstagramRequestStage.HTTP_RESPONSE, "http_success", false))
+                }
+            } catch (cancelled: CancellationException) {
+                // The caller's pre-request durable witness remains uncertain; never swallow cancellation.
+                throw cancelled
+            } catch (_: InterruptedIOException) {
+                uploadFailure(InstagramError.NETWORK, trace, InstagramRequestStage.TRANSPORT, "transport_timeout", true)
+            } catch (_: IOException) {
+                uploadFailure(InstagramError.NETWORK, trace, InstagramRequestStage.TRANSPORT, "transport_failure", true)
+            } catch (_: Exception) {
+                if (trace.requestStarted) uploadInvalidResponse(trace)
+                else uploadFailure(InstagramError.UNAVAILABLE, trace, InstagramRequestStage.LOCAL_VALIDATION,
+                    "local_request_failed", false)
+            }
+        }
+
+    private fun uploadFailure(error: InstagramError, trace: InstagramUploadRequestTrace,
+        stage: InstagramRequestStage, code: String, unknown: Boolean) =
+        InstagramResult.Failure(error, trace.diagnostic(stage, code, unknown))
+
+    private fun uploadInvalidResponse(trace: InstagramUploadRequestTrace) = uploadFailure(
+        InstagramError.INVALID_RESPONSE, trace, InstagramRequestStage.INVALID_RESPONSE, "response_invalid", true)
 
     override suspend fun publications(): InstagramResult<InstagramHistory> =
         request("/v1/social/reviewer/publications") { root ->
@@ -295,12 +369,13 @@ class InstagramApiClient private constructor(
             .writeTimeout(45, TimeUnit.SECONDS).callTimeout(60, TimeUnit.SECONDS).build()
 
         /** Explicit JVM fixture boundary. The public constructor can only reach the production origin. */
-        internal fun forLocalTests(tokenProvider: () -> String, loopbackBase: String): InstagramApiClient {
+        internal fun forLocalTests(tokenProvider: () -> String, loopbackBase: String, timeoutMillis: Long = 60_000L): InstagramApiClient {
             val url = loopbackBase.toHttpUrl()
             require(url.scheme == "http" && url.host == "127.0.0.1" && url.username.isEmpty() &&
                 url.password.isEmpty() && url.encodedPath == "/" && url.query == null && url.fragment == null)
+            require(timeoutMillis in 1L..60_000L)
             return InstagramApiClient(tokenProvider, InstagramPolicies.OFFICIAL_API_ORIGIN,
-                url.toString().trimEnd('/'), defaultClient())
+                url.toString().trimEnd('/'), defaultClient().newBuilder().callTimeout(timeoutMillis, TimeUnit.MILLISECONDS).build())
         }
     }
 }
