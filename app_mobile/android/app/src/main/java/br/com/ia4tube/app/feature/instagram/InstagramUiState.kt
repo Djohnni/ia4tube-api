@@ -20,6 +20,7 @@ data class InstagramUiState(
     val historyLoaded: Boolean = false,
     val freshPublicationAvailable: Boolean = false,
     val draftJpeg: ByteArray? = null,
+    val jpegSelectionPending: Boolean = false,
     val draftCaption: String = "",
     val selectedMediaId: String? = null,
     val intent: InstagramPublicationIntent? = null,
@@ -53,10 +54,10 @@ data class InstagramUiState(
         operationalAvailability?.connectionAllowed == true && authorizationPurpose != null
     val canEditDraft: Boolean get() = !busy && availability == InstagramAvailability.AVAILABLE &&
         connection?.canPublish == true && intent == null && storageAvailable
-    val canUpload: Boolean get() = canEditDraft && draftJpeg != null &&
+    val canUpload: Boolean get() = canEditDraft && !jpegSelectionPending && draftJpeg != null &&
         operationalAvailability?.publicationAllowed == true &&
         InstagramPolicies.validCaption(draftCaption.trim())
-    val canPublish: Boolean get() = canEditDraft && selectedMedia != null && historyLoaded &&
+    val canPublish: Boolean get() = canEditDraft && !jpegSelectionPending && selectedMedia != null && historyLoaded &&
         operationalAvailability?.publicationAllowed == true &&
         freshPublicationAvailable && authorizationUrlToOpen == null
     val pendingPublication: InstagramPublication? get() = intent?.let { saved ->

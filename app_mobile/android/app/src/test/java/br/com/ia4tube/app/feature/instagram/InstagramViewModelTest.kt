@@ -27,6 +27,37 @@ class InstagramViewModelTest {
     @Before fun setUp() { Dispatchers.setMain(dispatcher) }
     @After fun tearDown() { Dispatchers.resetMain() }
 
+    @Test fun jpegReturnedDuringResumeRefreshSurvivesWithoutOpeningPublicationGate() = runTest(dispatcher) {
+        val gateway = SyntheticGateway().apply { operational = InstagramOperationalAvailability(false, false) }
+        val model = model(gateway, MemoryIntentStore())
+        model.onResume(); model.awaitIdle()
+        val pickerKey = model.pickerSessionKey()!!
+        val started = CompletableDeferred<Unit>()
+        val finish = CompletableDeferred<Unit>()
+        gateway.beforeSnapshot = { started.complete(Unit); finish.await() }
+        model.onPause()
+        model.onResume()
+        started.await()
+        val jpeg = InstagramPoliciesTest.jpegEnvelope()
+        model.acceptJpeg(jpeg, pickerKey)
+        assertFalse(model.uiState.value.canUpload)
+        assertFalse(model.uiState.value.canPublish)
+        finish.complete(Unit); model.awaitIdle()
+
+        assertNotNull("Version 34 silently discards the JPEG while resume refresh is busy", model.uiState.value.draftJpeg)
+        assertTrue(jpeg.contentEquals(model.uiState.value.draftJpeg))
+        model.updateCaption("Legenda sintética da seleção local")
+        model.upload()
+        model.connect()
+        model.requestPublicationConfirmation(); model.confirmPublish()
+        assertFalse(model.uiState.value.canUpload)
+        assertFalse(model.uiState.value.canPublish)
+        assertEquals(0, gateway.uploadCalls)
+        assertEquals(0, gateway.authorizeCalls)
+        assertTrue(gateway.publishCalls.isEmpty())
+        assertTrue(gateway.reconcileCalls.isEmpty())
+    }
+
     @Test fun expiredInitialAuthorizationAllowsOneExplicitConnectWithoutDeletingConnection() = runTest(dispatcher) {
         val expiredConnection = InstagramConnection(CONNECTION_ID, "authorization_pending", "authorization_pending", null, null)
         val gateway = SyntheticGateway().apply {
@@ -116,6 +147,248 @@ class InstagramViewModelTest {
         assertTrue(model.uiState.value.hasUnresolvedIntent)
         assertFalse(model.uiState.value.canPublish)
         assertEquals(listOf(original.clientRequestId, original.clientRequestId), gateway.intentLookups)
+    }
+
+    @Test fun jpegCallbackBeforeResumeWaitsForFreshContextAndCallbackAfterRefreshWorks() = runTest(dispatcher) {
+        for (beforeResume in listOf(true, false)) {
+            val gateway = SyntheticGateway()
+            val model = model(gateway, MemoryIntentStore())
+            model.onResume(); model.awaitIdle()
+            val key = model.pickerSessionKey()!!
+            val jpeg = InstagramPoliciesTest.jpegEnvelope()
+            model.onPause()
+            if (beforeResume) {
+                model.acceptJpeg(jpeg, key)
+                assertNull(model.uiState.value.draftJpeg)
+                assertTrue(model.uiState.value.jpegSelectionPending)
+            }
+            model.onResume(); model.awaitIdle()
+            if (!beforeResume) model.acceptJpeg(jpeg, key)
+            assertTrue(jpeg.contentEquals(model.uiState.value.draftJpeg))
+            assertFalse(model.uiState.value.jpegSelectionPending)
+            assertNoExternalWrites(gateway)
+        }
+    }
+
+    @Test fun jpegPendingSurvivesNetworkFailureButCannotUploadBeforeSuccessfulRefresh() = runTest(dispatcher) {
+        val gateway = SyntheticGateway()
+        val model = model(gateway, MemoryIntentStore())
+        model.onResume(); model.awaitIdle()
+        model.updateCaption("Legenda sintética válida")
+        val key = model.pickerSessionKey()!!
+        val jpeg = InstagramPoliciesTest.jpegEnvelope()
+        model.onPause(); model.acceptJpeg(jpeg, key)
+        gateway.connectionFailure = InstagramError.NETWORK
+        model.onResume(); model.awaitIdle()
+        assertTrue(model.uiState.value.jpegSelectionPending)
+        assertNull(model.uiState.value.draftJpeg)
+        assertTrue(jpeg.any { it != 0.toByte() })
+        model.upload(); model.confirmPublish()
+        assertNoExternalWrites(gateway)
+
+        gateway.connectionFailure = null
+        model.refresh(); model.awaitIdle()
+        assertTrue(jpeg.contentEquals(model.uiState.value.draftJpeg))
+        assertFalse(model.uiState.value.jpegSelectionPending)
+        assertTrue(model.uiState.value.canUpload)
+        assertNoExternalWrites(gateway)
+    }
+
+    @Test fun jpegPendingCannotAdoptAnyChangedAccountBindingOrDisconnectedAccount() = runTest(dispatcher) {
+        val changedConnections = listOf(
+            CONNECTION.copy(connectionId = OTHER_CONNECTION_ID),
+            CONNECTION.copy(externalId = "987654321000000"),
+            CONNECTION.copy(connectionRevision = 5L),
+            CONNECTION.copy(state = "disconnected"), null
+        )
+        for (changed in changedConnections) {
+            val gateway = SyntheticGateway()
+            val model = model(gateway, MemoryIntentStore())
+            model.onResume(); model.awaitIdle()
+            val key = model.pickerSessionKey()!!
+            val jpeg = InstagramPoliciesTest.jpegEnvelope()
+            model.onPause(); model.acceptJpeg(jpeg, key)
+            gateway.connection = changed
+            model.onResume(); model.awaitIdle()
+            assertNull(model.uiState.value.draftJpeg)
+            assertFalse(model.uiState.value.jpegSelectionPending)
+            assertTrue(jpeg.all { it == 0.toByte() })
+            val late = InstagramPoliciesTest.jpegEnvelope()
+            model.acceptJpeg(late, key)
+            assertTrue(late.all { it == 0.toByte() })
+            assertNull(model.uiState.value.draftJpeg)
+            assertNoExternalWrites(gateway)
+        }
+    }
+
+    @Test fun changedSessionDiscardsPendingJpegAndOldCallbackEvenIfTokenReturns() = runTest(dispatcher) {
+        val gateway = SyntheticGateway()
+        var token = "synthetic-old-company"
+        val model = InstagramViewModel({ token }, MemoryIntentStore(), ORIGIN, { gateway }, MemoryAuthorizationStore())
+        model.onResume(); model.awaitIdle()
+        val key = model.pickerSessionKey()!!
+        val jpeg = InstagramPoliciesTest.jpegEnvelope()
+        model.onPause(); model.acceptJpeg(jpeg, key)
+        token = "synthetic-new-company"
+        model.onResume(); model.awaitIdle()
+        assertTrue(jpeg.all { it == 0.toByte() })
+        assertNull(model.uiState.value.draftJpeg)
+        token = "synthetic-old-company"
+        model.onPause(); model.onResume(); model.awaitIdle()
+        val late = InstagramPoliciesTest.jpegEnvelope()
+        model.acceptJpeg(late, key)
+        model.showSelectionError(key, "Erro antigo")
+        assertTrue(late.all { it == 0.toByte() })
+        assertNull(model.uiState.value.draftJpeg)
+        assertNull(model.uiState.value.error)
+        assertNoExternalWrites(gateway)
+    }
+
+    @Test fun pendingJpegWaitsForLedgerAndIsDiscardedIfIntentWasDiscovered() = runTest(dispatcher) {
+        for (unreadable in listOf(false, true)) {
+            val gateway = SyntheticGateway()
+            val store = MemoryIntentStore()
+            val model = model(gateway, store)
+            model.onResume(); model.awaitIdle()
+            val key = model.pickerSessionKey()!!
+            val jpeg = InstagramPoliciesTest.jpegEnvelope()
+            val started = CompletableDeferred<Unit>()
+            val finish = CompletableDeferred<Unit>()
+            gateway.beforePublications = { started.complete(Unit); finish.await() }
+            if (unreadable) store.throwOnRead = true
+            else store.seed(contextKey(), InstagramIntentPolicy.create(MEDIA.id, CONNECTION))
+            model.onPause(); model.onResume(); started.await()
+            model.acceptJpeg(jpeg, key)
+            assertNull(model.uiState.value.draftJpeg)
+            model.upload(); model.confirmPublish()
+            finish.complete(Unit); model.awaitIdle()
+            assertNull(model.uiState.value.draftJpeg)
+            assertFalse(model.uiState.value.canUpload)
+            assertFalse(model.uiState.value.canPublish)
+            if (!unreadable) {
+                assertFalse(model.uiState.value.jpegSelectionPending)
+                assertTrue(jpeg.all { it == 0.toByte() })
+                assertNotNull(model.uiState.value.intent)
+            }
+            assertNoExternalWrites(gateway)
+        }
+    }
+
+    @Test fun staleRefreshCannotAcceptPendingJpegAfterAnotherPause() = runTest(dispatcher) {
+        val gateway = SyntheticGateway()
+        val model = model(gateway, MemoryIntentStore())
+        model.onResume(); model.awaitIdle()
+        val key = model.pickerSessionKey()!!
+        val jpeg = InstagramPoliciesTest.jpegEnvelope()
+        val started = CompletableDeferred<Unit>()
+        val finish = CompletableDeferred<Unit>()
+        gateway.beforeSnapshot = { started.complete(Unit); finish.await() }
+        model.onPause(); model.onResume(); started.await()
+        model.acceptJpeg(jpeg, key)
+        model.onPause(); model.onResume()
+        finish.complete(Unit); model.awaitIdle()
+        assertNull(model.uiState.value.draftJpeg)
+        assertTrue(model.uiState.value.jpegSelectionPending)
+        assertFalse(model.uiState.value.canUpload)
+        gateway.beforeSnapshot = {}
+        model.refresh(); model.awaitIdle()
+        assertTrue(jpeg.contentEquals(model.uiState.value.draftJpeg))
+        assertNoExternalWrites(gateway)
+    }
+
+    @Test fun cancelledOrFailedPickerPreservesPreviousDraftAndCannotConsumeNewTicket() = runTest(dispatcher) {
+        val gateway = SyntheticGateway()
+        val model = model(gateway, MemoryIntentStore())
+        model.onResume(); model.awaitIdle()
+        val previous = InstagramPoliciesTest.jpegEnvelope()
+        model.acceptJpeg(previous, model.pickerSessionKey()!!)
+        model.updateCaption("Legenda anterior")
+        val cancelled = model.pickerSessionKey()!!
+        model.cancelJpegSelection(cancelled)
+        assertTrue(previous.contentEquals(model.uiState.value.draftJpeg))
+        assertEquals("Legenda anterior", model.uiState.value.draftCaption)
+        assertFalse(model.uiState.value.jpegSelectionPending)
+        val next = model.pickerSessionKey()!!
+        assertTrue(cancelled != next)
+        model.cancelJpegSelection(cancelled)
+        model.showSelectionError(cancelled, "Erro atrasado")
+        val late = InstagramPoliciesTest.jpegEnvelope()
+        model.acceptJpeg(late, cancelled)
+        assertTrue(late.all { it == 0.toByte() })
+        assertTrue(model.uiState.value.jpegSelectionPending)
+        assertNull(model.uiState.value.error)
+        model.showSelectionError(next)
+        assertFalse(model.uiState.value.jpegSelectionPending)
+        assertNotNull(model.uiState.value.error)
+        assertTrue(previous.contentEquals(model.uiState.value.draftJpeg))
+        assertNoExternalWrites(gateway)
+    }
+
+    @Test fun replacementAndDuplicatePickerResultsNeverOverwriteNewSelection() = runTest(dispatcher) {
+        val gateway = SyntheticGateway()
+        val model = model(gateway, MemoryIntentStore())
+        model.onResume(); model.awaitIdle()
+        val oldKey = model.pickerSessionKey()!!
+        val oldJpeg = InstagramPoliciesTest.jpegEnvelope()
+        model.onPause(); model.acceptJpeg(oldJpeg, oldKey)
+        model.onResume(); model.awaitIdle()
+        val newKey = model.pickerSessionKey()!!
+        val newJpeg = InstagramPoliciesTest.jpegEnvelope()
+        model.acceptJpeg(newJpeg, newKey)
+        assertTrue(oldJpeg.all { it == 0.toByte() })
+        val late = InstagramPoliciesTest.jpegEnvelope()
+        model.acceptJpeg(late, oldKey)
+        val duplicate = InstagramPoliciesTest.jpegEnvelope()
+        model.acceptJpeg(duplicate, newKey)
+        assertTrue(late.all { it == 0.toByte() })
+        assertTrue(duplicate.all { it == 0.toByte() })
+        assertTrue(newJpeg.contentEquals(model.uiState.value.draftJpeg))
+        assertNoExternalWrites(gateway)
+    }
+
+    @Test fun doublePickerLaunchIsRefusedAndExplicitCancelReleasesPendingBytes() = runTest(dispatcher) {
+        val gateway = SyntheticGateway()
+        val model = model(gateway, MemoryIntentStore())
+        model.onResume(); model.awaitIdle()
+        val first = model.pickerSessionKey()!!
+        assertNull(model.pickerSessionKey())
+        val bytes = InstagramPoliciesTest.jpegEnvelope()
+        model.onPause(); model.acceptJpeg(bytes, first)
+        model.cancelPendingJpegSelection()
+        assertTrue(bytes.all { it == 0.toByte() })
+        assertFalse(model.uiState.value.jpegSelectionPending)
+        model.onResume(); model.awaitIdle()
+        val second = model.pickerSessionKey()!!
+        assertTrue(first != second)
+        assertNull(model.pickerSessionKey())
+        model.cancelJpegSelection(first)
+        assertTrue(model.uiState.value.jpegSelectionPending)
+        model.cancelJpegSelection(second)
+        assertFalse(model.uiState.value.jpegSelectionPending)
+        assertNoExternalWrites(gateway)
+    }
+
+    @Test fun invalidPickerJpegsRemainRejectedAndZeroed() = runTest(dispatcher) {
+        val gateway = SyntheticGateway()
+        val model = model(gateway, MemoryIntentStore())
+        model.onResume(); model.awaitIdle()
+        for (invalid in listOf(InstagramPoliciesTest.jpegEnvelope(width = 1079),
+            InstagramPoliciesTest.jpegEnvelope(height = 1079), byteArrayOf(1, 2, 3),
+            ByteArray(InstagramPolicies.MAX_JPEG_BYTES + 1) { 1 })) {
+            model.acceptJpeg(invalid, model.pickerSessionKey()!!)
+            assertTrue(invalid.all { it == 0.toByte() })
+            assertNull(model.uiState.value.draftJpeg)
+            assertFalse(model.uiState.value.jpegSelectionPending)
+            assertNotNull(model.uiState.value.error)
+        }
+        assertNoExternalWrites(gateway)
+    }
+
+    private fun assertNoExternalWrites(gateway: SyntheticGateway) {
+        assertEquals(0, gateway.uploadCalls)
+        assertEquals(0, gateway.authorizeCalls)
+        assertTrue(gateway.publishCalls.isEmpty())
+        assertTrue(gateway.reconcileCalls.isEmpty())
     }
 
     @Test fun lostResponseIsRecoveredOnlyByOriginalIntentLookupWithoutPostingAgain() = runTest(dispatcher) {
@@ -607,10 +880,12 @@ class InstagramViewModelTest {
     }
 
     private class SyntheticGateway : InstagramGateway {
+        var uploadCalls = 0
         var connection: InstagramConnection? = CONNECTION
         var connectionFailure: InstagramError? = null
         var operational: InstagramOperationalAvailability? = InstagramOperationalAvailability(true, true)
         var beforeSnapshot: suspend () -> Unit = {}
+        var beforePublications: suspend () -> Unit = {}
         var snapshotCalls = 0
         var mediaItems = listOf(MEDIA)
         var history = InstagramHistory(emptyList(), true, true)
@@ -650,8 +925,14 @@ class InstagramViewModelTest {
             return authorizationResult ?: InstagramResult.Success(InstagramAuthorizationStatus(connectionId, "connect", "authorization_completed", null))
         }
         override suspend fun media(): InstagramResult<List<InstagramMedia>> = InstagramResult.Success(mediaItems)
-        override suspend fun uploadMedia(jpeg: ByteArray, caption: String): InstagramResult<InstagramMedia> = InstagramResult.Success(MEDIA)
-        override suspend fun publications(): InstagramResult<InstagramHistory> = InstagramResult.Success(history)
+        override suspend fun uploadMedia(jpeg: ByteArray, caption: String): InstagramResult<InstagramMedia> {
+            uploadCalls += 1
+            return InstagramResult.Success(MEDIA)
+        }
+        override suspend fun publications(): InstagramResult<InstagramHistory> {
+            beforePublications()
+            return InstagramResult.Success(history)
+        }
         override suspend fun publication(publicationId: String): InstagramResult<InstagramPublication> = publicationResult
         override suspend fun publicationIntent(clientRequestId: String): InstagramResult<InstagramPublication?> {
             intentLookups.add(clientRequestId)

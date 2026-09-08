@@ -32,11 +32,21 @@ class InstagramViewModel(
     private var authorizationWitness: InstagramAuthorizationWitness? = null
     private var availabilityEpoch = 0L
     private var foreground = false
+    private var completedRefreshEpoch = -1L
+    private var jpegSelection: JpegSelection? = null
+
+    private data class JpegSelection(
+        val ticket: String,
+        val sessionEpoch: Long,
+        val binding: InstagramConnectionBinding,
+        var bytes: ByteArray? = null
+    )
 
     private fun synchronizeSession(): Boolean {
         val currentToken = tokenProvider()
         if (currentToken != sessionToken) {
             operation?.cancel()
+            discardJpegSelection()
             sessionEpoch += 1
             availabilityEpoch += 1
             sessionToken = currentToken
@@ -84,29 +94,81 @@ class InstagramViewModel(
     private fun authorizationContextKey(): String = InstagramPolicies.sessionKey("$apiOrigin|$sessionToken")
 
     fun pickerSessionKey(): String? {
-        if (!synchronizeSession() || !_uiState.value.canEditDraft) return null
-        return InstagramPolicies.sessionKey(sessionToken)
+        if (!synchronizeSession() || !_uiState.value.canEditDraft || jpegSelection != null) return null
+        val binding = _uiState.value.connection?.binding ?: return null
+        discardJpegSelection()
+        val ticket = UUID.randomUUID().toString()
+        jpegSelection = JpegSelection(ticket, sessionEpoch, binding)
+        _uiState.update { it.copy(jpegSelectionPending = true) }
+        return ticket
     }
 
     fun acceptJpeg(bytes: ByteArray, pickerSessionKey: String) {
-        if (!synchronizeSession() || pickerSessionKey != InstagramPolicies.sessionKey(sessionToken) ||
-            !_uiState.value.canEditDraft
-        ) {
+        val selection = currentJpegSelection(pickerSessionKey)
+        if (selection == null || selection.bytes != null) {
             bytes.fill(0)
             return
         }
         if (!InstagramPolicies.validateJpeg(bytes)) {
             bytes.fill(0)
-            showSelectionError("Escolha uma imagem JPEG de 1080 × 1080 pixels, com até 8 MB.")
+            showSelectionError(pickerSessionKey, "Escolha uma imagem JPEG de 1080 × 1080 pixels, com até 8 MB.")
             return
         }
-        _uiState.value.draftJpeg?.fill(0)
-        _uiState.update { it.copy(draftJpeg = bytes, selectedMediaId = null, error = null, message = null) }
+        // Receiving local bytes is not authorization to upload. The return from GetContent
+        // races ON_RESUME, whose refresh must finish checking the account and durable intent.
+        selection.bytes = bytes
+        settleJpegSelection()
     }
 
-    fun showSelectionError(message: String = "Não foi possível abrir a imagem selecionada.") {
-        if (!synchronizeSession()) return
+    private fun currentJpegSelection(ticket: String): JpegSelection? {
+        if (!synchronizeSession()) return null
+        val selection = jpegSelection?.takeIf { it.ticket == ticket } ?: return null
+        if (selection.sessionEpoch != sessionEpoch || selection.binding != _uiState.value.connection?.binding) {
+            discardJpegSelection()
+            return null
+        }
+        return selection
+    }
+
+    private fun settleJpegSelection() {
+        val selection = jpegSelection?.let { currentJpegSelection(it.ticket) } ?: return
+        val bytes = selection.bytes ?: return
+        if (!foreground || _uiState.value.busy || completedRefreshEpoch != availabilityEpoch ||
+            _uiState.value.availability != InstagramAvailability.AVAILABLE) return
+        if (!_uiState.value.canEditDraft) {
+            discardJpegSelection()
+            return
+        }
+        jpegSelection = null
+        _uiState.value.draftJpeg?.fill(0)
+        _uiState.update { it.copy(draftJpeg = bytes, jpegSelectionPending = false,
+            selectedMediaId = null, error = null, message = null) }
+    }
+
+    private fun discardJpegSelection() {
+        jpegSelection?.bytes?.fill(0)
+        jpegSelection = null
+        _uiState.update { it.copy(jpegSelectionPending = false) }
+    }
+
+    fun cancelJpegSelection(ticket: String) {
+        if (currentJpegSelection(ticket) != null) discardJpegSelection()
+    }
+
+    fun cancelPendingJpegSelection() {
+        jpegSelection?.let { cancelJpegSelection(it.ticket) }
+    }
+
+    fun showSelectionError(ticket: String, message: String = "Não foi possível abrir a imagem selecionada.") {
+        if (currentJpegSelection(ticket) == null) return
+        discardJpegSelection()
         _uiState.update { it.copy(error = message) }
+    }
+
+    fun publicationBrowserUnavailable() {
+        if (synchronizeSession()) _uiState.update {
+            it.copy(error = "Não foi possível abrir a publicação no navegador.")
+        }
     }
 
     fun updateCaption(caption: String) {
@@ -140,6 +202,7 @@ class InstagramViewModel(
                         val current = result.value.connection
                         val changed = _uiState.value.connection?.connectionId != current?.connectionId ||
                             _uiState.value.connection?.binding != current?.binding
+                        if (changed) discardJpegSelection()
                         if (changed) _uiState.value.draftJpeg?.fill(0)
                         _uiState.update {
                             it.copy(connection = current, availability = InstagramAvailability.AVAILABLE,
@@ -233,6 +296,9 @@ class InstagramViewModel(
                         }
                     }
                 }
+                if (isCurrent(epoch) && expectedAvailabilityEpoch == availabilityEpoch && foreground) {
+                    completedRefreshEpoch = expectedAvailabilityEpoch
+                }
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (_: Exception) {
@@ -241,7 +307,10 @@ class InstagramViewModel(
                         error = "Não foi possível confirmar os registros locais. As novas ações permanecem bloqueadas; use Atualizar.")
                 }
             } finally {
-                if (isCurrent(epoch)) _uiState.update { it.copy(busy = false) }
+                if (isCurrent(epoch)) {
+                    _uiState.update { it.copy(busy = false) }
+                    settleJpegSelection()
+                }
             }
         }
     }
@@ -532,6 +601,7 @@ class InstagramViewModel(
     }
 
     override fun onCleared() {
+        discardJpegSelection()
         _uiState.value.draftJpeg?.fill(0)
         super.onCleared()
     }

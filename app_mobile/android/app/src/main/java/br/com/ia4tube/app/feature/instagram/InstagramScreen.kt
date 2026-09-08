@@ -41,6 +41,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -81,23 +82,26 @@ fun InstagramScreen(viewModel: InstagramViewModel, onBack: () -> Unit) {
     )
     val textButtonColors = ButtonDefaults.textButtonColors(contentColor = surfaceText)
     val actionBorder = BorderStroke(1.dp, secondaryText)
-    var pendingPickerSession by remember { mutableStateOf<String?>(null) }
+    // Only an opaque, VM-bound ticket survives rotation; never persist image bytes or a URI.
+    var pendingPickerSession by rememberSaveable { mutableStateOf<String?>(null) }
     var readingImage by remember { mutableStateOf(false) }
     val picker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
         val pickerSession = pendingPickerSession
         pendingPickerSession = null
+        if (pickerSession != null && uri == null) viewModel.cancelJpegSelection(pickerSession)
         if (uri != null && pickerSession != null) {
             readingImage = true
             scope.launch {
                 try {
                     val bytes = withContext(Dispatchers.IO) { readInstagramJpeg(context.contentResolver, uri) }
                     if (bytes == null) viewModel.showSelectionError(
-                        "Escolha uma imagem JPEG válida de 1080 × 1080 pixels, com até 8 MB."
+                        pickerSession, "Escolha uma imagem JPEG válida de 1080 × 1080 pixels, com até 8 MB."
                     ) else viewModel.acceptJpeg(bytes, pickerSession)
                 } catch (cancelled: CancellationException) {
+                    viewModel.cancelJpegSelection(pickerSession)
                     throw cancelled
                 } catch (_: Exception) {
-                    viewModel.showSelectionError()
+                    viewModel.showSelectionError(pickerSession)
                 } finally {
                     readingImage = false
                 }
@@ -230,13 +234,26 @@ fun InstagramScreen(viewModel: InstagramViewModel, onBack: () -> Unit) {
                         style = MaterialTheme.typography.bodyMedium)
                 }
                 Text("JPEG · 1080 × 1080 pixels · até 8 MB", style = MaterialTheme.typography.bodySmall)
-                OutlinedButton(enabled = state.canEditDraft && !readingImage,
+                OutlinedButton(enabled = state.canEditDraft && !state.jpegSelectionPending &&
+                    pendingPickerSession == null && !readingImage,
                     colors = outlinedButtonColors, border = actionBorder, onClick = {
                     viewModel.pickerSessionKey()?.let {
                         pendingPickerSession = it
-                        picker.launch("image/jpeg")
+                        try {
+                            picker.launch("image/jpeg")
+                        } catch (_: Exception) {
+                            pendingPickerSession = null
+                            viewModel.showSelectionError(it)
+                        }
                     }
                 }) { Text("Escolher imagem JPEG") }
+                if (state.jpegSelectionPending) {
+                    Text("Seleção de imagem pendente de confirmação. Aguarde a consulta ou use Atualizar.",
+                        style = MaterialTheme.typography.bodySmall)
+                    TextButton(onClick = viewModel::cancelPendingJpegSelection,
+                        enabled = pendingPickerSession == null && !readingImage,
+                        colors = textButtonColors) { Text("Cancelar seleção") }
+                }
                 state.draftJpeg?.let { InstagramLocalPreview(it) }
                 OutlinedTextField(
                     value = state.draftCaption,
@@ -298,7 +315,7 @@ fun InstagramScreen(viewModel: InstagramViewModel, onBack: () -> Unit) {
                                         context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(permalink)).apply {
                                             addCategory(Intent.CATEGORY_BROWSABLE)
                                         })
-                                    } catch (_: Exception) { viewModel.showSelectionError("Não foi possível abrir a publicação no navegador.") }
+                                    } catch (_: Exception) { viewModel.publicationBrowserUnavailable() }
                                 }
                             }) { Text("Ver publicação no Instagram") }
                         }
