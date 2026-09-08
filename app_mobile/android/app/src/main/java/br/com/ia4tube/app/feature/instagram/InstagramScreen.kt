@@ -199,7 +199,8 @@ fun InstagramScreen(viewModel: InstagramViewModel, onBack: () -> Unit) {
                 if (state.connection?.canPublish != true) {
                     Button(onClick = viewModel::connect, enabled = state.canAuthorize && !readingImage,
                         colors = filledButtonColors) {
-                        Text(if (state.connection == null) "Conectar Instagram" else "Reconectar Instagram")
+                        Text(if (state.authorizationPurpose == "connect" || state.connection == null)
+                            "Conectar Instagram" else "Reconectar Instagram")
                     }
                 }
             }

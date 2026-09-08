@@ -27,6 +27,29 @@ class InstagramViewModelTest {
     @Before fun setUp() { Dispatchers.setMain(dispatcher) }
     @After fun tearDown() { Dispatchers.resetMain() }
 
+    @Test fun expiredInitialAuthorizationAllowsOneExplicitConnectWithoutDeletingConnection() = runTest(dispatcher) {
+        val expiredConnection = InstagramConnection(CONNECTION_ID, "authorization_pending", "authorization_pending", null, null)
+        val gateway = SyntheticGateway().apply {
+            connection = expiredConnection
+            authorizationResult = InstagramResult.Success(InstagramAuthorizationStatus(
+                CONNECTION_ID, "connect", "authorization_pending", "2026-09-07T12:10:00Z"))
+        }
+        val model = model(gateway, MemoryIntentStore())
+        model.onResume(); model.awaitIdle()
+        assertFalse(model.uiState.value.canAuthorize)
+        model.connect()
+        assertEquals(0, gateway.authorizeCalls)
+
+        gateway.authorizationResult = InstagramResult.Success(InstagramAuthorizationStatus(
+            CONNECTION_ID, "connect", "authorization_expired", "2026-09-07T12:10:00Z"))
+        model.refresh(); model.awaitIdle()
+        assertEquals(expiredConnection, model.uiState.value.connection)
+        assertTrue("Version 33 incorrectly leaves the expired initial connection disabled", model.uiState.value.canAuthorize)
+        assertEquals(0, gateway.authorizeCalls)
+        model.connect(); model.connect(); model.awaitIdle()
+        assertEquals(listOf("connect"), gateway.authorizePurposes)
+    }
+
     @Test fun doubleConfirmationCreatesOneDurableIntentBeforeTheOnlyPost() = runTest(dispatcher) {
         val events = Collections.synchronizedList(mutableListOf<String>())
         val store = MemoryIntentStore(events)
@@ -154,7 +177,7 @@ class InstagramViewModelTest {
         val capturedProviders = mutableListOf<() -> String>()
         val model = InstagramViewModel(
             tokenProvider = { currentToken }, intentStore = store, apiOrigin = ORIGIN,
-            gatewayFactory = { captured ->
+            authorizationStore = MemoryAuthorizationStore(), gatewayFactory = { captured ->
                 capturedProviders.add(captured)
                 if (captured() == "synthetic-session-one") oldGateway else newGateway
             }
@@ -375,7 +398,7 @@ class InstagramViewModelTest {
         assertTrue(gateway.publishCalls.isEmpty())
     }
 
-    @Test fun authoritativeAbsentConnectionClearsUnidentifiedPendingAuthorizationWithoutInventingCancellation() = runTest(dispatcher) {
+    @Test fun absentConnectionCannotClearAnUnidentifiedPostOrInventCancellation() = runTest(dispatcher) {
         val gateway = SyntheticGateway().apply { connection = null }
         val model = model(gateway, MemoryIntentStore())
         model.onResume()
@@ -387,15 +410,17 @@ class InstagramViewModelTest {
 
         model.refresh()
         model.awaitIdle()
-        assertNull(model.uiState.value.authorizationStatus)
-        assertTrue(model.uiState.value.canAuthorize)
+        assertEquals("authorization_pending", model.uiState.value.authorizationStatus)
+        assertFalse(model.uiState.value.canAuthorize)
+        model.connect()
         assertEquals(1, gateway.authorizeCalls)
         assertTrue(gateway.publishCalls.isEmpty())
     }
 
-    private fun model(gateway: SyntheticGateway, store: MemoryIntentStore) = InstagramViewModel(
+    private fun model(gateway: SyntheticGateway, store: MemoryIntentStore,
+        authorizationStore: InstagramAuthorizationWitnessStore = MemoryAuthorizationStore()) = InstagramViewModel(
         tokenProvider = { "synthetic-session-one" }, intentStore = store, apiOrigin = ORIGIN,
-        gatewayFactory = { gateway }
+        gatewayFactory = { gateway }, authorizationStore = authorizationStore
     )
 
     @Test fun blockedUnknownAndFailureCanRefreshToAllowedWithoutOAuthProbe() = runTest(dispatcher) {
@@ -471,7 +496,7 @@ class InstagramViewModelTest {
         val second = SyntheticGateway().apply { connection = null; operational = InstagramOperationalAvailability(false, false) }
         var token = "synthetic-first"
         val model = InstagramViewModel({ token }, MemoryIntentStore(), ORIGIN,
-            { captured -> if (captured() == "synthetic-first") first else second })
+            { captured -> if (captured() == "synthetic-first") first else second }, MemoryAuthorizationStore())
         model.onResume(); model.awaitIdle()
         assertTrue(model.uiState.value.canAuthorize)
         token = "synthetic-second"
@@ -600,6 +625,11 @@ class InstagramViewModelTest {
         val reconcileBindings = mutableListOf<InstagramConnectionBinding>()
         var authorizeCalls = 0
             private set
+        val authorizePurposes = mutableListOf<String>()
+        var authorizationResult: InstagramResult<InstagramAuthorizationStatus>? = null
+        var onAuthorize: suspend (String) -> InstagramResult<InstagramAuthorization> = { InstagramResult.Failure(InstagramError.NETWORK) }
+        var beforeAuthorizationStatus: suspend () -> Unit = {}
+        val authorizationLookups = mutableListOf<String>()
 
         override suspend fun currentConnection(): InstagramResult<InstagramConnection?> =
             connectionFailure?.let { InstagramResult.Failure(it) } ?: InstagramResult.Success(connection)
@@ -611,10 +641,14 @@ class InstagramViewModelTest {
         }
         override suspend fun authorize(purpose: String): InstagramResult<InstagramAuthorization> {
             authorizeCalls += 1
-            return InstagramResult.Failure(InstagramError.NETWORK)
+            authorizePurposes.add(purpose)
+            return onAuthorize(purpose)
         }
-        override suspend fun authorizationStatus(connectionId: String): InstagramResult<InstagramAuthorizationStatus> =
-            InstagramResult.Success(InstagramAuthorizationStatus(connectionId, "connect", "authorization_completed", null))
+        override suspend fun authorizationStatus(connectionId: String): InstagramResult<InstagramAuthorizationStatus> {
+            authorizationLookups.add(connectionId)
+            beforeAuthorizationStatus()
+            return authorizationResult ?: InstagramResult.Success(InstagramAuthorizationStatus(connectionId, "connect", "authorization_completed", null))
+        }
         override suspend fun media(): InstagramResult<List<InstagramMedia>> = InstagramResult.Success(mediaItems)
         override suspend fun uploadMedia(jpeg: ByteArray, caption: String): InstagramResult<InstagramMedia> = InstagramResult.Success(MEDIA)
         override suspend fun publications(): InstagramResult<InstagramHistory> = InstagramResult.Success(history)
@@ -633,6 +667,235 @@ class InstagramViewModelTest {
             reconcileCalls.add(publicationId)
             return onReconcile(publicationId)
         }
+    }
+
+    private class MemoryAuthorizationStore : InstagramAuthorizationWitnessStore {
+        private val records = mutableMapOf<String, InstagramAuthorizationWitness>()
+        var createSucceeds = true
+        override fun read(contextKey: String) = records[contextKey]
+        override fun create(contextKey: String, witness: InstagramAuthorizationWitness): Boolean {
+            if (!createSucceeds || records.containsKey(contextKey)) return false
+            records[contextKey] = witness
+            return true
+        }
+        override fun update(contextKey: String, witness: InstagramAuthorizationWitness): Boolean {
+            if (records[contextKey]?.id != witness.id) return false
+            records[contextKey] = witness
+            return true
+        }
+        override fun clear(contextKey: String, id: String): Boolean {
+            if (records[contextKey]?.id != id) return false
+            records.remove(contextKey)
+            return true
+        }
+    }
+
+    private fun expiredGateway(purpose: String = "connect") = SyntheticGateway().apply {
+        connection = if (purpose == "connect")
+            InstagramConnection(CONNECTION_ID, "authorization_pending", "authorization_pending", null, null)
+        else CONNECTION.copy(state = "authorization_pending", health = "authorization_pending")
+        authorizationResult = InstagramResult.Success(InstagramAuthorizationStatus(
+            CONNECTION_ID, purpose, "authorization_expired", "2026-09-07T12:10:00Z"))
+    }
+
+    @Test fun expiredStateSurvivesNavigationAndProcessRecreationWithoutChangingServerRecord() = runTest(dispatcher) {
+        val gateway = expiredGateway()
+        val witnessStore = MemoryAuthorizationStore()
+        val first = model(gateway, MemoryIntentStore(), witnessStore)
+        first.onResume(); first.awaitIdle()
+        assertTrue(first.uiState.value.canAuthorize)
+        first.onPause()
+        assertFalse(first.uiState.value.canAuthorize)
+        first.onResume(); first.awaitIdle()
+        assertTrue(first.uiState.value.canAuthorize)
+        val restarted = model(gateway, MemoryIntentStore(), witnessStore)
+        assertFalse(restarted.uiState.value.canAuthorize)
+        restarted.onResume(); restarted.awaitIdle()
+        assertTrue(restarted.uiState.value.canAuthorize)
+        assertEquals(first.uiState.value.connection, restarted.uiState.value.connection)
+        assertEquals(0, gateway.authorizeCalls)
+    }
+
+    @Test fun expiredStateStillRequiresFreshPositiveOperationalPermission() = runTest(dispatcher) {
+        val gateway = expiredGateway().apply { operational = InstagramOperationalAvailability(false, false) }
+        val model = model(gateway, MemoryIntentStore())
+        model.onResume(); model.awaitIdle()
+        assertFalse(model.uiState.value.canAuthorize)
+        model.connect(); assertEquals(0, gateway.authorizeCalls)
+        gateway.operational = InstagramOperationalAvailability(true, false)
+        model.refresh(); model.awaitIdle()
+        assertTrue(model.uiState.value.canAuthorize)
+        assertFalse(model.uiState.value.canPublish)
+        model.connect(); model.awaitIdle()
+        assertEquals(listOf("connect"), gateway.authorizePurposes)
+    }
+
+    @Test fun failedStatusRefreshCannotReuseEarlierExpiryOrEnableOnNetworkError() = runTest(dispatcher) {
+        val gateway = expiredGateway()
+        val model = model(gateway, MemoryIntentStore())
+        model.onResume(); model.awaitIdle()
+        assertTrue(model.uiState.value.canAuthorize)
+        for (error in listOf(InstagramError.NETWORK, InstagramError.REJECTED, InstagramError.INVALID_RESPONSE)) {
+            gateway.authorizationResult = InstagramResult.Failure(error)
+            model.refresh(); model.awaitIdle()
+            assertFalse(model.uiState.value.canAuthorize)
+            model.connect()
+        }
+        assertEquals(0, gateway.authorizeCalls)
+        gateway.authorizationResult = InstagramResult.Success(InstagramAuthorizationStatus(
+            CONNECTION_ID, "connect", "authorization_expired", "2026-09-07T12:10:00Z"))
+        model.refresh(); model.awaitIdle()
+        assertTrue(model.uiState.value.canAuthorize)
+    }
+
+    @Test fun confirmedCancellationAndFailureRequireExplicitActionAndPreservePurpose() = runTest(dispatcher) {
+        for (purpose in listOf("connect", "reconnect")) {
+            for (status in listOf("authorization_cancelled", "authorization_failed", "authorization_expired")) {
+                val gateway = expiredGateway(purpose).apply {
+                    authorizationResult = InstagramResult.Success(InstagramAuthorizationStatus(
+                        CONNECTION_ID, purpose, status, "2026-09-07T12:10:00Z"))
+                }
+                val model = model(gateway, MemoryIntentStore())
+                model.onResume(); model.awaitIdle()
+                assertTrue(model.uiState.value.canAuthorize)
+                assertEquals(0, gateway.authorizeCalls)
+                model.connect(); model.connect(); model.awaitIdle()
+                assertEquals(listOf(purpose), gateway.authorizePurposes)
+            }
+        }
+    }
+
+    @Test fun lostNewPostCannotBeReleasedByOldExpiredSnapshotEvenAfterRestart() = runTest(dispatcher) {
+        val gateway = expiredGateway()
+        val witnessStore = MemoryAuthorizationStore()
+        val first = model(gateway, MemoryIntentStore(), witnessStore)
+        first.onResume(); first.awaitIdle(); first.connect(); first.awaitIdle()
+        assertFalse(first.uiState.value.canAuthorize)
+        first.refresh(); first.awaitIdle()
+        assertFalse(first.uiState.value.canAuthorize)
+        val restarted = model(gateway, MemoryIntentStore(), witnessStore)
+        restarted.onResume(); restarted.awaitIdle()
+        restarted.connect()
+        assertFalse(restarted.uiState.value.canAuthorize)
+        assertEquals(1, gateway.authorizeCalls)
+
+        // Observing the NEW same-connection attempt, not the prior expired one, identifies it.
+        gateway.authorizationResult = InstagramResult.Success(InstagramAuthorizationStatus(
+            CONNECTION_ID, "connect", "authorization_pending", "2026-09-07T12:30:00Z"))
+        restarted.refresh(); restarted.awaitIdle()
+        assertFalse(restarted.uiState.value.canAuthorize)
+        gateway.authorizationResult = InstagramResult.Success(InstagramAuthorizationStatus(
+            CONNECTION_ID, "connect", "authorization_expired", "2026-09-07T12:30:00Z"))
+        restarted.refresh(); restarted.awaitIdle()
+        assertTrue(restarted.uiState.value.canAuthorize)
+        assertEquals(1, gateway.authorizeCalls)
+        restarted.connect(); restarted.awaitIdle()
+        assertEquals(listOf("connect", "connect"), gateway.authorizePurposes)
+    }
+
+    @Test fun unidentifiedInitialPostRemainsUnknownAcrossRecreationAndNullSnapshot() = runTest(dispatcher) {
+        val gateway = SyntheticGateway().apply { connection = null }
+        val witnessStore = MemoryAuthorizationStore()
+        val first = model(gateway, MemoryIntentStore(), witnessStore)
+        first.onResume(); first.awaitIdle(); first.connect(); first.awaitIdle()
+        val restarted = model(gateway, MemoryIntentStore(), witnessStore)
+        restarted.onResume(); restarted.awaitIdle()
+        restarted.connect()
+        assertTrue(restarted.uiState.value.authorizationOutcomeUnknown)
+        assertFalse(restarted.uiState.value.canAuthorize)
+        assertEquals(listOf("connect"), gateway.authorizePurposes)
+    }
+
+    @Test fun explicitNewAttemptUsesFreshNavigationEventOnceAndRejectsOldTerminalResponse() = runTest(dispatcher) {
+        val gateway = expiredGateway().apply {
+            onAuthorize = { InstagramResult.Success(InstagramAuthorization(CONNECTION_ID,
+                InstagramPoliciesTest.authorizationUrl(), "2026-09-07T12:30:00Z")) }
+        }
+        val model = model(gateway, MemoryIntentStore())
+        model.onResume(); model.awaitIdle(); model.connect(); model.connect(); model.awaitIdle()
+        assertEquals(listOf("connect"), gateway.authorizePurposes)
+        assertNotNull(model.takeAuthorizationUrl())
+        assertNull(model.takeAuthorizationUrl())
+        model.refresh(); model.awaitIdle()
+        assertFalse(model.uiState.value.canAuthorize)
+        assertTrue(model.uiState.value.authorizationOutcomeUnknown)
+        gateway.authorizationResult = InstagramResult.Success(InstagramAuthorizationStatus(
+            CONNECTION_ID, "connect", "authorization_completed", "2026-09-07T12:30:00Z"))
+        gateway.connection = CONNECTION
+        model.onPause(); model.onResume(); model.awaitIdle()
+        assertFalse(model.uiState.value.canAuthorize)
+        assertFalse(model.uiState.value.authorizationOutcomeUnknown)
+        assertTrue(model.uiState.value.connection!!.canPublish)
+        assertEquals(1, gateway.authorizeCalls)
+    }
+
+    @Test fun cancellationWhilePostIsUncertainPreservesWitnessAndCannotAutoRetry() = runTest(dispatcher) {
+        val gateway = expiredGateway().apply {
+            onAuthorize = { throw kotlinx.coroutines.CancellationException("Synthetic cancellation") }
+        }
+        val witnessStore = MemoryAuthorizationStore()
+        val model = model(gateway, MemoryIntentStore(), witnessStore)
+        model.onResume(); model.awaitIdle(); model.connect(); model.awaitIdle()
+        model.refresh(); model.awaitIdle(); model.connect()
+        assertFalse(model.uiState.value.canAuthorize)
+        assertEquals(1, gateway.authorizeCalls)
+        val restarted = model(gateway, MemoryIntentStore(), witnessStore)
+        restarted.onResume(); restarted.awaitIdle()
+        assertFalse(restarted.uiState.value.canAuthorize)
+    }
+
+    @Test fun failedDurableWitnessCreationPreventsThePost() = runTest(dispatcher) {
+        val gateway = expiredGateway()
+        val witnessStore = MemoryAuthorizationStore().apply { createSucceeds = false }
+        val model = model(gateway, MemoryIntentStore(), witnessStore)
+        model.onResume(); model.awaitIdle(); model.connect(); model.awaitIdle()
+        assertEquals(0, gateway.authorizeCalls)
+        assertFalse(model.uiState.value.canAuthorize)
+    }
+
+    @Test fun delayedAuthorizationResponseFromOldUserCannotOverwriteNewSession() = runTest(dispatcher) {
+        val started = CompletableDeferred<Unit>()
+        val finish = CompletableDeferred<Unit>()
+        val oldGateway = expiredGateway().apply {
+            onAuthorize = {
+                started.complete(Unit)
+                kotlinx.coroutines.withContext(kotlinx.coroutines.NonCancellable) { finish.await() }
+                InstagramResult.Success(InstagramAuthorization(CONNECTION_ID,
+                    InstagramPoliciesTest.authorizationUrl(), "2026-09-07T12:30:00Z"))
+            }
+        }
+        val newGateway = SyntheticGateway().apply {
+            connection = CONNECTION.copy(connectionId = OTHER_CONNECTION_ID)
+        }
+        var token = "synthetic-old-company"
+        val model = InstagramViewModel({ token }, MemoryIntentStore(), ORIGIN,
+            { captured -> if (captured() == "synthetic-old-company") oldGateway else newGateway }, MemoryAuthorizationStore())
+        model.onResume(); model.awaitIdle(); model.connect(); started.await()
+        token = "synthetic-new-company"
+        model.onResume(); model.awaitIdle()
+        finish.complete(Unit)
+        testScheduler.runCurrent()
+        assertEquals(OTHER_CONNECTION_ID, model.uiState.value.connection?.connectionId)
+        assertNull(model.takeAuthorizationUrl())
+        assertFalse(model.uiState.value.canAuthorize)
+        assertEquals(1, oldGateway.authorizeCalls)
+        assertEquals(0, newGateway.authorizeCalls)
+    }
+
+    @Test fun delayedStatusFromBeforePauseDoesNotReenableNewAction() = runTest(dispatcher) {
+        val gateway = expiredGateway()
+        val started = CompletableDeferred<Unit>()
+        val finish = CompletableDeferred<Unit>()
+        gateway.beforeAuthorizationStatus = { started.complete(Unit); finish.await() }
+        val model = model(gateway, MemoryIntentStore())
+        model.onResume(); started.await(); model.onPause(); model.onResume()
+        finish.complete(Unit); model.awaitIdle()
+        assertFalse(model.uiState.value.canAuthorize)
+        assertFalse(model.uiState.value.authorizationChecked)
+        assertEquals(0, gateway.authorizeCalls)
+        gateway.beforeAuthorizationStatus = {}
+        model.refresh(); model.awaitIdle()
+        assertTrue(model.uiState.value.canAuthorize)
     }
 
     companion object {

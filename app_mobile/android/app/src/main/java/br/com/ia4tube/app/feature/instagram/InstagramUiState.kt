@@ -11,6 +11,9 @@ data class InstagramUiState(
     val connection: InstagramConnection? = null,
     val operationalAvailability: InstagramOperationalAvailability? = null,
     val authorizationStatus: String? = null,
+    val authorization: InstagramAuthorizationStatus? = null,
+    val authorizationChecked: Boolean = false,
+    val authorizationOutcomeUnknown: Boolean = false,
     val authorizationUrlToOpen: String? = null,
     val media: List<InstagramMedia> = emptyList(),
     val history: List<InstagramPublication> = emptyList(),
@@ -28,11 +31,26 @@ data class InstagramUiState(
 ) {
     val selectedMedia: InstagramMedia? get() = media.firstOrNull { it.id == selectedMediaId }
     val hasUnresolvedIntent: Boolean get() = intent != null && !intent.confirmed
+    // Authorization lifecycle, connection lifecycle and operational permission are independent.
+    // Only an authoritative terminal snapshot may release an unfinished connection record.
+    val authorizationPurpose: String? get() {
+        if (!authorizationChecked || authorizationOutcomeUnknown || authorizationUrlToOpen != null ||
+            authorizationStatus in setOf("authorization_pending", "authorization_processing")) return null
+        val current = connection ?: return "connect"
+        val observed = authorization?.takeIf { it.connectionId == current.connectionId && it.status == authorizationStatus }
+        val terminal = observed?.status in setOf("authorization_expired", "authorization_cancelled", "authorization_failed")
+        return when {
+            current.state == "authorization_pending" && terminal ->
+                observed?.purpose?.takeIf { it == "reconnect" || (it == "connect" && current.externalId == null && current.username == null) }
+            current.state == "failed" && terminal && observed?.purpose == "connect" &&
+                current.externalId == null && current.username == null -> "connect"
+            current.state in setOf("disconnected", "reconnect_required") ||
+                (current.state == "connected" && current.health == "reconnect_required") -> "reconnect"
+            else -> null
+        }
+    }
     val canAuthorize: Boolean get() = !busy && availability == InstagramAvailability.AVAILABLE &&
-        operationalAvailability?.connectionAllowed == true &&
-        authorizationStatus !in setOf("authorization_pending", "authorization_processing") &&
-        (connection == null || connection.state in setOf("disconnected", "reconnect_required", "failed") ||
-            (connection.state == "connected" && connection.health == "reconnect_required"))
+        operationalAvailability?.connectionAllowed == true && authorizationPurpose != null
     val canEditDraft: Boolean get() = !busy && availability == InstagramAvailability.AVAILABLE &&
         connection?.canPublish == true && intent == null && storageAvailable
     val canUpload: Boolean get() = canEditDraft && draftJpeg != null &&

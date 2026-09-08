@@ -13,13 +13,15 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.util.UUID
 
 /** Each request uses the captured official IA4Tube session; changing it detaches all outstanding work. */
 class InstagramViewModel(
     private val tokenProvider: () -> String,
     private val intentStore: InstagramPublicationIntentStore,
     private val apiOrigin: String = AppConfig.apiBase,
-    private val gatewayFactory: (() -> String) -> InstagramGateway = { InstagramApiClient(it, AppConfig.apiBase) }
+    private val gatewayFactory: (() -> String) -> InstagramGateway = { InstagramApiClient(it, AppConfig.apiBase) },
+    private val authorizationStore: InstagramAuthorizationWitnessStore
 ) : ViewModel() {
     private val _uiState = MutableStateFlow(InstagramUiState())
     val uiState: StateFlow<InstagramUiState> = _uiState.asStateFlow()
@@ -27,7 +29,7 @@ class InstagramViewModel(
     private var sessionEpoch = 0L
     private var operation: Job? = null
     private var gateway: InstagramGateway? = null
-    private var pendingAuthorizationConnectionId: String? = null
+    private var authorizationWitness: InstagramAuthorizationWitness? = null
     private var availabilityEpoch = 0L
     private var foreground = false
 
@@ -38,7 +40,7 @@ class InstagramViewModel(
             sessionEpoch += 1
             availabilityEpoch += 1
             sessionToken = currentToken
-            pendingAuthorizationConnectionId = null
+            authorizationWitness = null
             _uiState.value.draftJpeg?.fill(0)
             _uiState.value = InstagramUiState(
                 availability = if (currentToken.isBlank()) InstagramAvailability.SESSION_REQUIRED else InstagramAvailability.CHECKING
@@ -75,8 +77,11 @@ class InstagramViewModel(
     private fun invalidateOperationalAvailability() {
         availabilityEpoch += 1
         _uiState.update { it.copy(operationalAvailability = null,
+            authorization = null, authorizationChecked = false,
             confirmationOpen = false, reconciliationConfirmationOpen = false) }
     }
+
+    private fun authorizationContextKey(): String = InstagramPolicies.sessionKey("$apiOrigin|$sessionToken")
 
     fun pickerSessionKey(): String? {
         if (!synchronizeSession() || !_uiState.value.canEditDraft) return null
@@ -114,12 +119,18 @@ class InstagramViewModel(
         if (!synchronizeSession() || _uiState.value.busy) return
         val epoch = sessionEpoch
         val api = gateway ?: return
+        val authorizationKey = authorizationContextKey()
         invalidateOperationalAvailability()
         val expectedAvailabilityEpoch = availabilityEpoch
         _uiState.update { it.copy(busy = true, availability = InstagramAvailability.CHECKING,
-            error = null, confirmationOpen = false, reconciliationConfirmationOpen = false) }
+            authorizationUrlToOpen = null, error = null, message = null,
+            confirmationOpen = false, reconciliationConfirmationOpen = false) }
         operation = viewModelScope.launch {
             try {
+                val witness = withContext(Dispatchers.IO) { authorizationStore.read(authorizationKey) }
+                if (!isCurrent(epoch)) return@launch
+                authorizationWitness = witness
+                _uiState.update { it.copy(authorizationOutcomeUnknown = witness != null) }
                 val connectionResult = api.currentSnapshot()
                 if (!isCurrent(epoch)) return@launch
                 when (val result = connectionResult) {
@@ -134,7 +145,7 @@ class InstagramViewModel(
                             it.copy(connection = current, availability = InstagramAvailability.AVAILABLE,
                                 operationalAvailability = result.value.operationalAvailability.takeIf {
                                     expectedAvailabilityEpoch == availabilityEpoch && foreground },
-                                authorizationStatus = if (current == null && pendingAuthorizationConnectionId == null)
+                                authorizationStatus = if (current == null && witness == null)
                                     null else it.authorizationStatus,
                                 selectedMediaId = if (changed) null else it.selectedMediaId,
                                 draftJpeg = if (changed) null else it.draftJpeg,
@@ -144,20 +155,45 @@ class InstagramViewModel(
                     }
                 }
                 val connection = _uiState.value.connection
-                val authorizationConnectionId = pendingAuthorizationConnectionId ?: connection?.connectionId
+                val authorizationConnectionId = connection?.connectionId ?: witness?.connectionId ?: witness?.previousConnectionId
                 if (authorizationConnectionId != null) {
                     when (val result = api.authorizationStatus(authorizationConnectionId)) {
                         is InstagramResult.Success -> if (isCurrent(epoch)) {
-                            _uiState.update { it.copy(authorizationStatus = result.value.status) }
-                            if (result.value.status !in setOf("authorization_pending", "authorization_processing")) {
-                                pendingAuthorizationConnectionId = null
+                            val observed = result.value
+                            if (observed.connectionId != authorizationConnectionId ||
+                                (connection != null && observed.connectionId != connection.connectionId) ||
+                                (witness != null && !witness.matches(observed))) {
+                                _uiState.update { it.copy(authorizationChecked = false,
+                                    message = AUTHORIZATION_UNKNOWN) }
+                            } else {
+                                if (witness != null) {
+                                    val terminal = observed.status in setOf("authorization_completed", "authorization_expired",
+                                        "authorization_cancelled", "authorization_failed")
+                                    val identified = witness.copy(connectionId = observed.connectionId, expiresAt = observed.expiresAt)
+                                    val stored = withContext(Dispatchers.IO) {
+                                        if (terminal) authorizationStore.clear(authorizationKey, witness.id)
+                                        else authorizationStore.update(authorizationKey, identified)
+                                    }
+                                    if (!isCurrent(epoch)) return@launch
+                                    check(stored) { "Authorization witness not confirmed" }
+                                    authorizationWitness = if (terminal) null else identified
+                                }
+                                _uiState.update { it.copy(authorization = observed, authorizationStatus = observed.status,
+                                    authorizationChecked = expectedAvailabilityEpoch == availabilityEpoch && foreground,
+                                    authorizationOutcomeUnknown = authorizationWitness != null) }
                             }
                         }
-                        // An already connected account may have no current authorization record.
-                        is InstagramResult.Failure -> if (pendingAuthorizationConnectionId != null && isCurrent(epoch)) {
-                            _uiState.update { it.copy(message = "A autorização ainda não foi confirmada. Você pode consultar novamente.") }
+                        // Failure/404 is not proof that an earlier POST has expired or was cancelled.
+                        is InstagramResult.Failure -> if (isCurrent(epoch)) {
+                            _uiState.update { it.copy(authorizationChecked = false, message = AUTHORIZATION_UNKNOWN) }
                         }
                     }
+                } else if (witness == null) {
+                    _uiState.update { it.copy(authorization = null, authorizationStatus = null,
+                        authorizationChecked = expectedAvailabilityEpoch == availabilityEpoch && foreground,
+                        authorizationOutcomeUnknown = false) }
+                } else {
+                    _uiState.update { it.copy(authorizationStatus = "authorization_pending", message = AUTHORIZATION_UNKNOWN) }
                 }
                 if (!isCurrent(epoch)) return@launch
                 when (val result = api.media()) {
@@ -201,7 +237,8 @@ class InstagramViewModel(
                 throw cancelled
             } catch (_: Exception) {
                 if (isCurrent(epoch)) _uiState.update {
-                    it.copy(storageAvailable = false, error = "Não foi possível confirmar o registro da publicação. O envio permanece bloqueado.")
+                    it.copy(storageAvailable = false, authorizationChecked = false,
+                        error = "Não foi possível confirmar os registros locais. As novas ações permanecem bloqueadas; use Atualizar.")
                 }
             } finally {
                 if (isCurrent(epoch)) _uiState.update { it.copy(busy = false) }
@@ -212,7 +249,7 @@ class InstagramViewModel(
     private fun failAvailability(error: InstagramError) {
         _uiState.update { it.copy(
             availability = if (error == InstagramError.SESSION_REQUIRED) InstagramAvailability.SESSION_REQUIRED else InstagramAvailability.UNAVAILABLE,
-            operationalAvailability = null,
+            operationalAvailability = null, authorization = null, authorizationChecked = false,
             historyLoaded = false, freshPublicationAvailable = false, confirmationOpen = false, error = error.message
         ) }
     }
@@ -221,10 +258,22 @@ class InstagramViewModel(
         if (!synchronizeSession() || !_uiState.value.canAuthorize) return
         val epoch = sessionEpoch
         val api = gateway ?: return
-        val purpose = if (_uiState.value.connection == null) "connect" else "reconnect"
-        _uiState.update { it.copy(busy = true, error = null, message = null) }
+        val current = _uiState.value
+        val purpose = current.authorizationPurpose ?: return
+        val authorizationKey = authorizationContextKey()
+        val witness = InstagramAuthorizationWitness(UUID.randomUUID().toString(), purpose,
+            current.connection?.connectionId, current.authorization?.expiresAt)
+        _uiState.update { it.copy(busy = true, authorization = null, authorizationChecked = false,
+            authorizationOutcomeUnknown = true, authorizationUrlToOpen = null,
+            authorizationStatus = "authorization_pending", error = null, message = null) }
         operation = viewModelScope.launch {
             try {
+                // Persist only non-secret metadata before the sole POST. A lost response or
+                // process death must not erase uncertainty and enable a duplicate request.
+                val stored = withContext(Dispatchers.IO) { authorizationStore.create(authorizationKey, witness) }
+                if (!isCurrent(epoch)) return@launch
+                check(stored) { "Authorization witness not persisted" }
+                authorizationWitness = witness
                 val result = api.authorize(purpose)
                 if (!isCurrent(epoch)) return@launch
                 when (result) {
@@ -233,7 +282,11 @@ class InstagramViewModel(
                             _uiState.update { it.copy(error = "O endereço de autorização não pôde ser confirmado.") }
                             return@launch
                         }
-                        pendingAuthorizationConnectionId = result.value.connectionId
+                        val identified = witness.copy(connectionId = result.value.connectionId, expiresAt = result.value.expiresAt)
+                        val identifiedStored = withContext(Dispatchers.IO) { authorizationStore.update(authorizationKey, identified) }
+                        if (!isCurrent(epoch)) return@launch
+                        check(identifiedStored) { "Authorization response not persisted" }
+                        authorizationWitness = identified
                         _uiState.update { it.copy(authorizationStatus = "authorization_pending",
                             authorizationUrlToOpen = result.value.authorizationUrl,
                             message = "Conclua a autorização no Instagram e volte ao aplicativo para consultar o resultado.") }
@@ -241,16 +294,14 @@ class InstagramViewModel(
                     is InstagramResult.Failure -> {
                         if (result.error == InstagramError.UNAVAILABLE || result.error == InstagramError.SESSION_REQUIRED) {
                             failAvailability(result.error)
-                        } else _uiState.update { it.copy(error = result.error.message,
-                            authorizationStatus = if (result.error in setOf(InstagramError.NETWORK, InstagramError.RESULT_UNKNOWN, InstagramError.INVALID_RESPONSE))
-                                "authorization_pending" else it.authorizationStatus) }
+                        } else _uiState.update { it.copy(error = result.error.message, message = AUTHORIZATION_UNKNOWN) }
                     }
                 }
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (_: Exception) {
                 if (isCurrent(epoch)) _uiState.update { it.copy(authorizationStatus = "authorization_pending",
-                    error = "A autorização ainda não foi confirmada. Consulte o estado antes de continuar.") }
+                    authorizationChecked = false, error = AUTHORIZATION_UNKNOWN) }
             } finally {
                 if (isCurrent(epoch)) _uiState.update { it.copy(busy = false) }
             }
@@ -486,17 +537,19 @@ class InstagramViewModel(
     }
 
     private companion object {
+        const val AUTHORIZATION_UNKNOWN = "A autorização ainda não foi confirmada. Use Atualizar para consultar a mesma tentativa; nenhuma nova autorização será iniciada automaticamente."
         const val UNKNOWN_RESULT = "O resultado ainda não foi confirmado. Consulte o histórico; nenhum novo envio será feito enquanto esta publicação estiver pendente."
     }
 }
 
 class InstagramViewModelFactory(
     private val tokenProvider: () -> String,
-    private val intentStore: InstagramPublicationIntentStore
+    private val intentStore: InstagramPublicationIntentStore,
+    private val authorizationStore: InstagramAuthorizationWitnessStore
 ) : ViewModelProvider.Factory {
     override fun <T : ViewModel> create(modelClass: Class<T>): T {
         require(modelClass.isAssignableFrom(InstagramViewModel::class.java))
         @Suppress("UNCHECKED_CAST")
-        return InstagramViewModel(tokenProvider, intentStore) as T
+        return InstagramViewModel(tokenProvider, intentStore, authorizationStore = authorizationStore) as T
     }
 }

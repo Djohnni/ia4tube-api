@@ -13,7 +13,8 @@ sourceSets {
             "br/com/ia4tube/app/feature/instagram/InstagramPolicies.kt",
             "br/com/ia4tube/app/feature/instagram/InstagramApiClient.kt",
             "br/com/ia4tube/app/feature/instagram/InstagramPublicationIntentStore.kt",
-            "br/com/ia4tube/app/feature/instagram/InstagramUiState.kt"
+            "br/com/ia4tube/app/feature/instagram/InstagramUiState.kt",
+            "br/com/ia4tube/app/feature/instagram/InstagramAuthorizationWitnessStore.kt"
         )
     }
     test {

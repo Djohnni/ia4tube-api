@@ -100,6 +100,7 @@ import br.com.ia4tube.app.feature.home.HomeViewModel
 import br.com.ia4tube.app.feature.home.HomeViewModelFactory
 import br.com.ia4tube.app.feature.home.premiumHomePalette
 import br.com.ia4tube.app.feature.instagram.AndroidInstagramPublicationIntentStore
+import br.com.ia4tube.app.feature.instagram.AndroidInstagramAuthorizationWitnessStore
 import br.com.ia4tube.app.feature.instagram.InstagramScreen
 import br.com.ia4tube.app.feature.instagram.InstagramViewModel
 import br.com.ia4tube.app.feature.instagram.InstagramViewModelFactory
@@ -498,7 +499,8 @@ fun IA4TubeNavHost(
                 val viewModel: InstagramViewModel = viewModel(
                     factory = InstagramViewModelFactory(
                         tokenProvider = repository::getSavedToken,
-                        intentStore = instagramIntentStore
+                        intentStore = instagramIntentStore,
+                        authorizationStore = remember { AndroidInstagramAuthorizationWitnessStore(context) }
                     )
                 )
                 InstagramScreen(
