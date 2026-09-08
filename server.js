@@ -4046,7 +4046,7 @@ app.post(
   "/empresa/planejamento-mensal/solicitar",
   auth,
   upload.fields(MONTHLY_PLANNING_UPLOAD_FIELDS),
-  (req, res) => {
+  async (req, res) => {
     const whatsapp = req.user.whatsapp;
     const clientes = readClientes();
     const cliente = clientes[whatsapp];
@@ -4060,6 +4060,7 @@ app.post(
     let freeArtIpLock = { blocked: false, ipHash: "", ipMasked: "", lock: null };
 
     try {
+      const calendarAuthorizationFactory = await productionSocialIntegration.prepareCalendarRequest(req.user, req.body);
       freeArtIpLock = getFreeArtIpLockStatus(req);
       let freeArtBlockedByClaimLock = false;
 
@@ -4092,6 +4093,7 @@ app.post(
         whatsapp,
         body: req.body || {},
         files: req.files || {},
+        calendarAuthorizationFactory,
         freeArtBlocked: freeArtIpLock.blocked || freeArtBlockedByClaimLock
       });
 
@@ -4191,7 +4193,7 @@ app.get("/empresa/planejamento-mensal", auth, (req, res) => {
   }
 });
 
-function handleMonthlyPlanningCalendarList(req, res) {
+async function handleMonthlyPlanningCalendarList(req, res) {
   console.log("[planejamento-mensal][calendario] rota calendario geral", {
     method: req.method,
     path: req.originalUrl || req.path
@@ -4206,11 +4208,11 @@ function handleMonthlyPlanningCalendarList(req, res) {
   }
 
   try {
-    const monthlyCalendar = monthlyPlanningService.listClientPlanningCalendar({
+    const monthlyCalendar = await productionSocialIntegration.calendarOverlay(req.user, monthlyPlanningService.listClientPlanningCalendar({
       baseDir: MONTHLY_PLANNINGS_DIR,
       whatsapp,
       pedidosDir: PEDIDOS_DIR
-    });
+    }));
 
     if (!adminFreeArtsEnabled()) {
       return res.json(monthlyCalendar);
@@ -4246,7 +4248,7 @@ function handleMonthlyPlanningCalendarList(req, res) {
   }
 }
 
-function handleMonthlyPlanningCalendarHide(req, res) {
+async function handleMonthlyPlanningCalendarHide(req, res) {
   console.log("[planejamento-mensal][calendario] rota ocultar calendario", {
     method: req.method,
     path: req.originalUrl || req.path
@@ -4270,6 +4272,10 @@ function handleMonthlyPlanningCalendarHide(req, res) {
       if (freeResult) return res.json(freeResult);
     }
 
+    const calendarResult = await productionSocialIntegration.calendarEdit(req.user,
+      req.body?.item_key || req.body?.calendar_key || req.body?.key || "",
+      { action: "cancel", revision: req.body?.calendar_revision, reference: req.body });
+    if (calendarResult) return res.json(calendarResult);
     return res.json(monthlyPlanningService.hideClientPlanningCalendarItem({
       baseDir: MONTHLY_PLANNINGS_DIR,
       whatsapp,
@@ -4292,7 +4298,7 @@ function handleMonthlyPlanningCalendarHide(req, res) {
   }
 }
 
-function handleMonthlyPlanningCalendarReschedule(req, res) {
+async function handleMonthlyPlanningCalendarReschedule(req, res) {
   console.log("[planejamento-mensal][calendario] rota reagendar calendario", {
     method: req.method,
     path: req.originalUrl || req.path
@@ -4316,6 +4322,10 @@ function handleMonthlyPlanningCalendarReschedule(req, res) {
       });
     }
 
+    const calendarResult = await productionSocialIntegration.calendarEdit(req.user, itemKey, { action: "schedule",
+      revision: req.body?.calendar_revision, reference: req.body, date: req.body?.data || req.body?.date || req.body?.data_sugerida || "",
+      time: req.body?.horario || req.body?.time || req.body?.horario_sugerido || "" });
+    if (calendarResult) return res.json(calendarResult);
     return res.json(monthlyPlanningService.rescheduleClientPlanningCalendarItem({
       baseDir: MONTHLY_PLANNINGS_DIR,
       whatsapp,
@@ -7349,6 +7359,8 @@ productionSocialIntegration.initialize({
   secret: JWT_SECRET,
   readClients: readClientes,
   dataDir: DATA_DIR,
+  planningDir: MONTHLY_PLANNINGS_DIR,
+  ordersDir: PEDIDOS_DIR,
   logger: { info() {}, warn() { console.warn("[social] Vinculo da empresa indisponivel."); },
     error() { console.error("[social] Operacao recusada."); } }
 }).then(() => {

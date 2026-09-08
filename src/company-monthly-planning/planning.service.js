@@ -1400,7 +1400,7 @@ function listAllPlanningDirs(baseDir) {
   return dirs;
 }
 
-function createRequest({ baseDir, cliente, whatsapp, body = {}, files = {}, freeArtBlocked = false }) {
+function createRequest({ baseDir, cliente, whatsapp, body = {}, files = {}, freeArtBlocked = false, calendarAuthorizationFactory = null }) {
   const parsedPhotoItems = parsePlanningPhotoItems(body);
   const hasStructuredPhotoItems = planningPhotoItemsAreStructured(parsedPhotoItems);
   const quantidadeReservada = hasStructuredPhotoItems ? parsedPhotoItems.length : normalizeQuantity(body);
@@ -1419,6 +1419,13 @@ function createRequest({ baseDir, cliente, whatsapp, body = {}, files = {}, free
   const { billing, charge } = validatePlanAndFreeArts(cliente, quantidadeReservada, { freeArtBlocked });
   const ciclo = planCycle(cliente);
   const planningId = newPlanningId();
+  // Internal capability, never accepted from an HTTP body or included in product responses/runner packages.
+  const calendarEnvelope = calendarAuthorizationFactory?.({ planningId, quantity: quantidadeReservada }) || null;
+  if (calendarEnvelope) {
+    const receiptPath = require("../social/calendar/model").consentPath(baseDir, whatsapp, planningId);
+    fs.mkdirSync(path.dirname(receiptPath), { recursive: true, mode: 0o700 });
+    fs.writeFileSync(receiptPath, JSON.stringify({ envelope: calendarEnvelope }), { flag: "wx", mode: 0o600 });
+  }
   const dirPath = requestDir(baseDir, whatsapp, ciclo, planningId);
   ensureDir(dirPath);
 
@@ -4310,6 +4317,15 @@ async function processDueNotifications({
 
     const planning = parsePlanning(dirPath);
     if (!planning) continue;
+
+    // Automatically authorized orders use the canonical bridge schedule. Do not
+    // send the legacy "post manually now" reminder using the original plan date.
+    // Only test existence; never read or include this private receipt in a notification.
+    if (typeof planning.whatsapp === "string" && typeof planning.id === "string" &&
+        fs.existsSync(require("../social/calendar/model").consentPath(baseDir, planning.whatsapp, planning.id))) {
+      result.skipped += 1;
+      continue;
+    }
 
     if (planning.status === "cancelado") {
       const cancelled = cancelPendingNotificationsForPlanning(planning);

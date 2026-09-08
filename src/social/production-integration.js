@@ -5,7 +5,7 @@ const OFFICIAL_WEB_SERVICE_ID = "srv-d8708kd7vvec73ap1p6g";
 const PREPARATION_INCOMPLETE = "social_production_preparation_incomplete";
 const SAFE_STARTUP_ERROR_CODE = /^[a-z0-9_]{2,96}$/i;
 const CLOSED_FLAGS = Object.freeze([
-  "SOCIAL_PERSISTENCE_ENABLED", "SOCIAL_INSTAGRAM_ENABLED",
+  "SOCIAL_PERSISTENCE_ENABLED", "SOCIAL_INSTAGRAM_ENABLED", "SOCIAL_CALENDAR_ENABLED",
   "SOCIAL_EXTERNAL_CONNECTION_ENABLED", "SOCIAL_EXTERNAL_PUBLICATION_ENABLED",
   "REAL_REVIEWER_UI_ENABLED", "META_APP_REVIEW_WINDOW_ENABLED",
   "REVIEW_SANDBOX_ENABLED", "SYNTHETIC_PROVIDER_ENABLED"
@@ -40,6 +40,7 @@ function assertProductionPreparationBoundary(env = process.env) {
   if (enabled && (env.ENVIRONMENT !== "production" || env.PUBLIC_API_BASE_URL !== OFFICIAL_API_ORIGIN ||
       (env.RENDER === "true" && env.RENDER_SERVICE_ID !== OFFICIAL_WEB_SERVICE_ID))) refuse(PREPARATION_INCOMPLETE);
   if (!enabled && CLOSED_FLAGS.some(name => name !== "SOCIAL_PERSISTENCE_ENABLED" && env[name] === "true")) refuse(PREPARATION_INCOMPLETE);
+  if (env.SOCIAL_CALENDAR_ENABLED === "true" && env.SOCIAL_INSTAGRAM_ENABLED !== "true") refuse(PREPARATION_INCOMPLETE);
   assertWebServiceDatabaseCredentialBoundary(env);
   return true;
 }
@@ -91,6 +92,8 @@ function createProductionSocialIntegration(options = {}) {
       startupStage = "social_startup_server_runtime_failed";
       runtime = await initializeSocialServerRuntime({ env,
         realReviewerEnabled: env.SOCIAL_INSTAGRAM_ENABLED === "true",
+        createCalendar: env.SOCIAL_CALENDAR_ENABLED === "true" ? ports =>
+          require("./calendar").createProductionCalendar(dependencies, ports) : undefined,
         realReviewerMedia: mediaSurface.media, logger: dependencies.logger });
       startupStage = "social_startup_tenant_binding_failed";
       const { createProductionTenantReadiness } = require("./production-tenant-readiness");
@@ -118,6 +121,8 @@ function createProductionSocialIntegration(options = {}) {
       router.use("/compliance", express.urlencoded({ extended: false, limit: "32kb", parameterLimit: 1 }),
         createMetaComplianceRouter({ getService: () => runtime.metaCompliance }));
       router.use(express.json({ limit: "16kb", strict: true }));
+      router.use("/calendar", require("./calendar/router").createCalendarRouter({
+        authenticate: authenticateSocial, getService: () => runtime?.calendar }));
       router.use(createInstagramOAuthRouter({ authenticate: authenticateSocial, visualReturn,
         getService: () => runtime.instagramOAuth }));
       router.use("/reviewer", createInstagramRealReviewerRouter({ authenticate: authenticateSocial,
@@ -125,6 +130,7 @@ function createProductionSocialIntegration(options = {}) {
       router.use((_req, res) => res.status(404).json({ ok: false, code: "social_route_not_found" }));
       router.use((_error, _req, res, _next) => res.status(400).json({ ok: false, code: "social_request_invalid" }));
       mounted = router;
+      runtime.calendar?.start();
       startupStage = "social_startup_complete";
       return true;
     })();
@@ -160,6 +166,13 @@ function createProductionSocialIntegration(options = {}) {
     if (runtime) { const state = runtime; runtime = null; await state.close(); }
   }
   return Object.freeze({ enabled, reason: enabled ? null : PREPARATION_INCOMPLETE,
+    async prepareCalendarRequest(claims, body) {
+      if (body?.calendar_automatic !== true && body?.calendar_automatic !== "true") return null;
+      if (!runtime?.calendar) require("./calendar/model").fail("calendar_disabled", 503);
+      return runtime.calendar.prepareRequest(claims, body.calendar_automatic, body.calendar_preference_revision);
+    },
+    async calendarOverlay(claims, payload) { return runtime?.calendar ? runtime.calendar.overlay(claims, payload) : payload; },
+    async calendarEdit(claims, key, input) { return runtime?.calendar ? runtime.calendar.legacyEdit(claims, key, input) : false; },
     pendingContracts: PENDING_CONTRACTS, afterAuthentication, middleware, initialize, mountWeb, close });
 }
 module.exports = { CLOSED_FLAGS, OFFICIAL_API_ORIGIN, OFFICIAL_WEB_SERVICE_ID,

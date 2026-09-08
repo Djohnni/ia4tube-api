@@ -27,6 +27,17 @@ function isAuthenticatedSocialPrincipal(value) {
 }
 
 function createSocialAuthAdapter(identityConfig = {}) {
+  // Only signed, owner-bound order grants verified by the calendar service can enter this path.
+  // No HTTP body, saved password or fabricated JWT is an execution identity.
+  function fromVerifiedCalendarGrant(grant) {
+    if (!require("./calendar/grants").isVerifiedCalendarGrant(grant)) {
+      postgresFail("social_authenticated_principal_invalid", "Principal delegado recusado.");
+    }
+    const principal = Object.freeze({ companyId: grant.companyId, userId: grant.userId,
+      tokenVersion: null, issuer: "ia4tube-calendar", audience: "calendar_publish", subject: grant.nonce });
+    AUTHENTICATED_SOCIAL_PRINCIPALS.add(principal);
+    return principal;
+  }
   function fromVerifiedJwt(claims = {}) {
     if (
       claims.token_version !== 2 ||
@@ -89,6 +100,7 @@ function createSocialAuthAdapter(identityConfig = {}) {
   }
 
   return Object.freeze({
+    fromVerifiedCalendarGrant,
     fromAuthenticatedOAuthState,
     fromVerifiedJwt
   });

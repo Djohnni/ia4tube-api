@@ -127,8 +127,23 @@ test("closed middleware does not consume caller input", () => {
   assert.equal(response.statusCode,503);
   assert.equal(response.body.code,integration.PREPARATION_INCOMPLETE);
 });
-test("all legacy server code is preserved except explicit session issuance and startup assembly", () => {
+test("legacy server code is preserved outside explicit session, startup and calendar adapter hooks", () => {
   let candidate = source("server.js");
+  assert.equal(candidate.split("reference: req.body").length - 1, 2);
+  candidate = candidate.replace(", reference: req.body });", " });").replace("reference: req.body, date:", "date:");
+  // Enumerated calendar adapter calls only; the rest of the historical server still compares byte-for-byte.
+  const undoCalendar = [
+    ['  upload.fields(MONTHLY_PLANNING_UPLOAD_FIELDS),\n  async (req, res) => {', '  upload.fields(MONTHLY_PLANNING_UPLOAD_FIELDS),\n  (req, res) => {'],
+    ['      const calendarAuthorizationFactory = await productionSocialIntegration.prepareCalendarRequest(req.user, req.body);\n', ''],
+    ['        calendarAuthorizationFactory,\n', ''],
+    ['    const monthlyCalendar = await productionSocialIntegration.calendarOverlay(req.user, monthlyPlanningService.listClientPlanningCalendar({\n      baseDir: MONTHLY_PLANNINGS_DIR,\n      whatsapp,\n      pedidosDir: PEDIDOS_DIR\n    }));',
+     '    const monthlyCalendar = monthlyPlanningService.listClientPlanningCalendar({\n      baseDir: MONTHLY_PLANNINGS_DIR,\n      whatsapp,\n      pedidosDir: PEDIDOS_DIR\n    });'],
+    ['    const calendarResult = await productionSocialIntegration.calendarEdit(req.user,\n      req.body?.item_key || req.body?.calendar_key || req.body?.key || "",\n      { action: "cancel", revision: req.body?.calendar_revision });\n    if (calendarResult) return res.json(calendarResult);\n', ''],
+    ['    const calendarResult = await productionSocialIntegration.calendarEdit(req.user, itemKey, { action: "schedule",\n      revision: req.body?.calendar_revision, date: req.body?.data || req.body?.date || req.body?.data_sugerida || "",\n      time: req.body?.horario || req.body?.time || req.body?.horario_sugerido || "" });\n    if (calendarResult) return res.json(calendarResult);\n', '']
+  ];
+  for (const name of ['List', 'Hide', 'Reschedule']) undoCalendar.push([
+    `async function handleMonthlyPlanningCalendar${name}(req, res) {`, `function handleMonthlyPlanningCalendar${name}(req, res) {`]);
+  for (const [from, to] of undoCalendar) { assert.equal(candidate.split(from).length - 1, 1); candidate = candidate.replace(from, to); }
   assert.ok(candidate.startsWith(SERVER_IMPORT));
   candidate = candidate.slice(SERVER_IMPORT.length).replace(SERVER_MOUNT.trimEnd()+"\nproductionSocialIntegration.mountWeb(app);\n\n", "");
   assert.ok(candidate.startsWith(REVIEW_LABEL_IMPORT));
@@ -188,7 +203,7 @@ test("dependency additions preserve every legacy dependency and locked package r
   }
   assert.deepEqual(Object.keys(currentPackage.dependencies)
     .filter((name) => !Object.hasOwn(previousPackage.dependencies, name)).sort(),
-  ["pg", "tar-stream"]);
+  ["pg", "sharp", "tar-stream"]);
   for (const [name, value] of Object.entries(previousPackage)) {
     if (!["dependencies", "scripts"].includes(name)) {
       assert.deepEqual(currentPackage[name], value, name);
@@ -203,7 +218,8 @@ test("dependency additions preserve every legacy dependency and locked package r
   assert.deepEqual(currentLock.packages[""].dependencies, currentPackage.dependencies);
   const added = Object.keys(currentLock.packages)
     .filter((name) => !Object.hasOwn(previousLock.packages, name));
-  assert.equal(added.length, 13);
+  assert.equal(added.length, 45); // 13 historical additions + sharp's 32 pinned cross-platform records.
+  assert.equal(currentLock.packages["node_modules/sharp"].version, "0.35.4");
   assert.equal(currentLock.packages["node_modules/pg"].version, "8.22.0");
   assert.equal(currentLock.packages["node_modules/tar-stream"].version, "3.2.0");
 });

@@ -132,6 +132,7 @@ async function createSocialRuntime(options = {}) {
   let instagramStateEnvelope;
   let metaComplianceRepository;
   let metaSignedRequestVerifier;
+  let calendar = null;
   let runtimeStage = "social_runtime_identity_configuration_failed";
   try {
     identityConfig = parseIdentityConfig(env);
@@ -359,6 +360,15 @@ async function createSocialRuntime(options = {}) {
         randomUUID: options.randomUUID
       });
     }
+    if (typeof options.createCalendar === "function") {
+      runtimeStage = "social_runtime_calendar_assembly_failed";
+      calendar = await options.createCalendar({ pool, role: config.role, config: instagramConfig,
+        auth: authAdapter, connectorStore, connectorAudit, credentials,
+        transport: options.instagramPublicationTransport || globalThis.fetch,
+        identity: (legacyCompanyId, legacyUserId) => deriveSocialIdentity({
+          namespaceUuid: identityConfig.namespaceUuid, derivationKey: identityConfig.key,
+          derivationVersion: identityConfig.derivationVersion, legacyCompanyId, legacyUserId }) });
+    }
     runtimeStage = "social_runtime_complete";
     let closed = false;
     function assertOpen() {
@@ -378,6 +388,7 @@ async function createSocialRuntime(options = {}) {
       instagramOAuth,
       instagramPublication,
       instagramReviewer,
+      calendar,
       metaCompliance,
       reauth,
       auth: Object.freeze({
@@ -399,6 +410,7 @@ async function createSocialRuntime(options = {}) {
       async close() {
         if (closed) return;
         closed = true;
+        if (calendar) await calendar.close();
         if (instagramStateEnvelope) instagramStateEnvelope.destroy();
         if (metaSignedRequestVerifier) metaSignedRequestVerifier.destroy();
         if (metaComplianceRepository) metaComplianceRepository.destroy();
@@ -409,6 +421,7 @@ async function createSocialRuntime(options = {}) {
     });
   } catch (error) {
     const failure = safeRuntimeError(error, runtimeStage);
+    if (calendar) await calendar.close();
     if (instagramStateEnvelope) instagramStateEnvelope.destroy();
     if (metaSignedRequestVerifier) metaSignedRequestVerifier.destroy();
     if (metaComplianceRepository) metaComplianceRepository.destroy();

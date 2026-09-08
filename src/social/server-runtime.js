@@ -47,6 +47,7 @@ async function initializeSocialServerRuntime(options = {}) {
     instagramPublicationTransport: options.instagramPublicationTransport,
     realReviewerEnabled: options.realReviewerEnabled,
     realReviewerMedia: options.realReviewerMedia,
+    createCalendar: options.createCalendar,
     publicDirectory: options.publicDirectory,
     publicationSleep: options.publicationSleep,
     clock: options.clock,
@@ -138,6 +139,7 @@ async function initializeSocialServerRuntime(options = {}) {
     ...(runtime.companies ? { companies: runtime.companies } : {}),
     ...(runtime.tenantProvisioning ? { tenantProvisioning: runtime.tenantProvisioning } : {}),
     instagramOAuth: runtime.instagramOAuth || null,
+    calendar: runtime.calendar || null,
     instagramPublication: runtime.instagramPublication || null,
     ...(runtime.instagramReviewer
       ? { instagramReviewer: runtime.instagramReviewer }
