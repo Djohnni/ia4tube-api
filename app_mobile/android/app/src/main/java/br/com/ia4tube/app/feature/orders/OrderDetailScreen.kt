@@ -59,6 +59,7 @@ import coil.compose.rememberAsyncImagePainter
 import coil.request.ImageRequest
 import br.com.ia4tube.app.R
 import br.com.ia4tube.app.core.analytics.MobileAnalytics
+import br.com.ia4tube.app.core.art_cache.PrivateArtImage
 import br.com.ia4tube.app.core.share.ShareImageStore
 import br.com.ia4tube.app.data.api.PreviewUrlBuilder
 import br.com.ia4tube.app.data.models.MarketingVideo
@@ -132,6 +133,7 @@ fun OrderDetailScreen(
                         marketingVideoFinished = state.marketingVideoFinished,
                         marketingVideoDismissed = state.marketingVideoDismissed,
                         previewToken = viewModel.previewToken,
+                        previewRefresh = state.previewRefresh,
                         errorMessage = state.error,
                         actionMessage = state.actionMessage,
                         onRefreshNow = viewModel::refreshNow,
@@ -209,6 +211,7 @@ private fun OrderInfoCard(
     marketingVideoFinished: Boolean,
     marketingVideoDismissed: Boolean,
     previewToken: String,
+    previewRefresh: Long,
     errorMessage: UiText?,
     actionMessage: UiText?,
     onRefreshNow: () -> Unit,
@@ -292,6 +295,7 @@ private fun OrderInfoCard(
         DeliverySection(
             info = info,
             previewToken = previewToken,
+            previewRefresh = previewRefresh,
             description = postDescription,
             canDownload = canDownloadResult,
             downloading = downloading,
@@ -585,6 +589,7 @@ private fun MarketingVideoPausedPreview(
 private fun DeliverySection(
     info: OrderInfo,
     previewToken: String,
+    previewRefresh: Long,
     description: String,
     canDownload: Boolean,
     downloading: Boolean,
@@ -632,6 +637,7 @@ private fun DeliverySection(
             OrderPreviewImage(
                 info = info,
                 previewToken = previewToken,
+                previewRefresh = previewRefresh,
                 modifier = Modifier
                     .fillMaxWidth(0.92f)
                     .aspectRatio(9f / 16f)
@@ -1105,7 +1111,7 @@ private fun PixQrCode(qrCodeBase64: String) {
 }
 
 @Composable
-private fun PreviewCard(info: OrderInfo, previewToken: String, polling: Boolean) {
+private fun PreviewCard(info: OrderInfo, previewToken: String, previewRefresh: Long, polling: Boolean) {
     if (!info.imagemPronta) {
         CreatingPreviewProgressCard(info = info, polling = polling)
         return
@@ -1134,6 +1140,7 @@ private fun PreviewCard(info: OrderInfo, previewToken: String, polling: Boolean)
                 OrderPreviewImage(
                     info = info,
                     previewToken = previewToken,
+                    previewRefresh = previewRefresh,
                     modifier = Modifier.fillMaxSize()
                 )
             }
@@ -1145,54 +1152,29 @@ private fun PreviewCard(info: OrderInfo, previewToken: String, polling: Boolean)
 private fun OrderPreviewImage(
     info: OrderInfo,
     previewToken: String,
+    previewRefresh: Long,
     modifier: Modifier = Modifier
 ) {
     val isCompanyArt = info.isCompanyArt()
     val previewUrl = PreviewUrlBuilder.build(info.id, info.previewUrl)
-    val context = LocalContext.current
-    val imageRequest = remember(previewUrl, previewToken) {
-        ImageRequest.Builder(context)
-            .data(previewUrl)
-            .crossfade(true)
-            .apply {
-                if (previewToken.isNotBlank() && PreviewUrlBuilder.shouldSendAuthorization(previewUrl)) {
-                    addHeader("Authorization", "Bearer $previewToken")
-                }
-            }
-            .build()
-    }
-    val painter = rememberAsyncImagePainter(model = imageRequest)
-    val state = painter.state
-
-    Box(
+    PrivateArtImage(
+        url = previewUrl,
+        token = previewToken,
+        revalidationKey = previewRefresh,
+        contentDescription = stringResource(
+            if (isCompanyArt) {
+                R.string.order_visualization_content_description
+            } else {
+                R.string.order_preview_content_description
+            },
+            info.id
+        ),
         modifier = modifier,
-        contentAlignment = Alignment.Center
-    ) {
-        Image(
-            painter = painter,
-            contentDescription = stringResource(
-                if (isCompanyArt) {
-                    R.string.order_visualization_content_description
-                } else {
-                    R.string.order_preview_content_description
-                },
-                info.id
-            ),
-            modifier = Modifier.fillMaxSize(),
-            contentScale = ContentScale.Fit
+        contentScale = ContentScale.Fit,
+        errorText = stringResource(
+            if (isCompanyArt) R.string.order_visualization_error else R.string.order_preview_error
         )
-
-        when (state) {
-            is AsyncImagePainter.State.Loading -> CircularProgressIndicator()
-            is AsyncImagePainter.State.Error -> Text(
-                text = stringResource(
-                    if (isCompanyArt) R.string.order_visualization_error else R.string.order_preview_error
-                ),
-                color = MaterialTheme.colorScheme.error
-            )
-            else -> Unit
-        }
-    }
+    )
 }
 
 @Composable

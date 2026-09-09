@@ -40,6 +40,7 @@ data class OrderDetailUiState(
     val polling: Boolean = false,
     val manualRefreshing: Boolean = false,
     val info: OrderInfo? = null,
+    val previewRefresh: Long = 0,
     val paymentInfo: PaymentInfo? = null,
     val marketingVideo: MarketingVideo? = null,
     val marketingVideoLoading: Boolean = false,
@@ -419,6 +420,7 @@ class OrderDetailViewModel(
                     it.copy(
                         loading = false,
                         info = result.value,
+                        previewRefresh = it.previewRefresh + 1,
                         error = friendlyError,
                         paymentInfo = if (result.value.pagamentoPendente) {
                             it.paymentInfo ?: result.value.toPaymentInfo()

@@ -1,6 +1,5 @@
 package br.com.ia4tube.app.feature.monthly_planning
 
-import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -38,15 +37,12 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
+import br.com.ia4tube.app.core.art_cache.PrivateArtImage
 import br.com.ia4tube.app.data.api.PreviewUrlBuilder
 import br.com.ia4tube.app.ui.components.ScreenScaffold
-import coil.compose.AsyncImagePainter
-import coil.compose.rememberAsyncImagePainter
-import coil.request.ImageRequest
 
 @Composable
 fun MonthlyPlanningResultsScreen(
@@ -56,6 +52,7 @@ fun MonthlyPlanningResultsScreen(
     onBack: () -> Unit,
     onOpenOrder: (String) -> Unit
 ) {
+    val ownerPreviewToken = remember { previewToken }
     val state by viewModel.uiState.collectAsState()
     val planning = state.detailPlanning?.takeIf { it.id == planningId }
         ?: state.planning.takeIf { it.id == planningId }
@@ -119,7 +116,7 @@ fun MonthlyPlanningResultsScreen(
                 planning.posts.sortedBy { it.number }.forEach { post ->
                     MonthlyPlanningResultPostCard(
                         post = post,
-                        previewToken = previewToken,
+                        previewToken = ownerPreviewToken,
                         onOpenOrder = onOpenOrder,
                         onExpand = { expandedPost = post }
                     )
@@ -133,7 +130,7 @@ fun MonthlyPlanningResultsScreen(
     expandedPost?.let { post ->
         MonthlyPlanningResultImageDialog(
             post = post,
-            previewToken = previewToken,
+            previewToken = ownerPreviewToken,
             onDismiss = { expandedPost = null },
             onOpenOrder = onOpenOrder
         )
@@ -318,44 +315,18 @@ private fun MonthlyPlanningResultImage(
     modifier: Modifier = Modifier
 ) {
     val previewUrl = post.resultImageUrl()
-    val context = LocalContext.current
-    val imageRequest = remember(previewUrl, previewToken) {
-        ImageRequest.Builder(context)
-            .data(previewUrl)
-            .crossfade(true)
-            .apply {
-                if (previewToken.isNotBlank() && PreviewUrlBuilder.shouldSendAuthorization(previewUrl)) {
-                    addHeader("Authorization", "Bearer $previewToken")
-                }
-            }
-            .build()
-    }
-    val painter = rememberAsyncImagePainter(model = imageRequest)
-    val painterState = painter.state
-
-    Box(
+    PrivateArtImage(
+        url = previewUrl,
+        token = previewToken,
+        revalidationKey = listOf(post.status, post.imageReady, post.thumbnailUrl),
+        contentDescription = "Arte ${post.number}",
         modifier = modifier.background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f)),
-        contentAlignment = Alignment.Center
-    ) {
-        if (previewUrl.isNotBlank() && painterState !is AsyncImagePainter.State.Error) {
-            Image(
-                painter = painter,
-                contentDescription = "Arte ${post.number}",
-                modifier = Modifier.fillMaxSize(),
-                contentScale = ContentScale.Crop
-            )
-        } else {
-            Text(
-                text = "Imagem pronta",
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                style = MaterialTheme.typography.bodyMedium
-            )
-        }
-    }
+        contentScale = ContentScale.Crop,
+        errorText = "Imagem pronta"
+    )
 }
 
 private fun MonthlyPlanningPost.resultImageUrl(): String {
-    return thumbnailUrl.ifBlank {
-        if (pedidoId.isNotBlank()) PreviewUrlBuilder.build(pedidoId) else ""
-    }
+    return if (thumbnailUrl.isNotBlank()) PreviewUrlBuilder.build(pedidoId, thumbnailUrl)
+        else if (pedidoId.isNotBlank()) PreviewUrlBuilder.build(pedidoId) else ""
 }

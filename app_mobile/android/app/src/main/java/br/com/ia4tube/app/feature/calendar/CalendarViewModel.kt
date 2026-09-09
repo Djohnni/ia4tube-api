@@ -10,7 +10,7 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 
 data class CalendarUiState(val data: CalendarSnapshot = CalendarSnapshot(), val busy: Boolean = false,
-    val fresh: Boolean = false, val error: String? = null)
+    val fresh: Boolean = false, val error: String? = null, val imageRefresh: Long = 0)
 
 class CalendarViewModel(private val tokenProvider: () -> String, private val token: String,
     private val gateway: CalendarGateway = CalendarApi(token)) : ViewModel() {
@@ -26,7 +26,7 @@ class CalendarViewModel(private val tokenProvider: () -> String, private val tok
         viewModelScope.launch {
             try {
                 val result = operation()
-                if (valid() && sequence == ticket) state.value = CalendarUiState(result, fresh = true)
+                if (valid() && sequence == ticket) state.value = CalendarUiState(result, fresh = true, imageRefresh = ticket)
                 else if (!valid()) invalidateSession()
             } catch (cancelled: CancellationException) { throw cancelled }
             catch (error: Exception) {

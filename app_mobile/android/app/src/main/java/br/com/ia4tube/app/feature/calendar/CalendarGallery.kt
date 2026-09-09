@@ -26,12 +26,7 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
-import coil.ImageLoader
-import coil.compose.AsyncImage
-import coil.request.CachePolicy
-import coil.request.ImageRequest
-import kotlinx.coroutines.delay
-import okhttp3.OkHttpClient
+import br.com.ia4tube.app.core.art_cache.PrivateArtImage
 import java.time.LocalDate
 import java.time.LocalTime
 import java.time.ZoneId
@@ -44,39 +39,37 @@ internal val LocalScheduledArtRenderer = staticCompositionLocalOf<(@Composable (
 fun rememberCalendarModel(tokenProvider: () -> String): CalendarViewModel {
     val token = tokenProvider()
     val model = remember(token) { CalendarViewModel(tokenProvider, token) }
-    val lifecycle = LocalLifecycleOwner.current.lifecycle
-    var resumed by remember { mutableStateOf(lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED)) }
-    DisposableEffect(model, lifecycle) {
-        val observer = LifecycleEventObserver { _, event ->
-            if (event == Lifecycle.Event.ON_RESUME) { resumed = true; model.refresh() }
-            if (event == Lifecycle.Event.ON_PAUSE) { resumed = false; model.onPause() }
-        }
-        lifecycle.addObserver(observer)
-        onDispose { lifecycle.removeObserver(observer); model.dispose() }
-    }
-    LaunchedEffect(model, resumed) { if (resumed) while (true) { model.refresh(); delay(15000) } }
+    DisposableEffect(model) { onDispose { model.dispose() } }
+    CalendarRefreshLifecycle(model)
     return model
 }
 
 @Composable
-fun ScheduledArtImage(item: ScheduledArt, token: String, modifier: Modifier = Modifier) {
+internal fun CalendarRefreshLifecycle(model: CalendarViewModel) {
+    val lifecycle = LocalLifecycleOwner.current.lifecycle
+    DisposableEffect(model, lifecycle) {
+        // Adding the observer delivers ON_RESUME for an already resumed owner as well.
+        // Handle events directly so a quick pause/resume cannot be lost to recomposition.
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) model.refresh()
+            if (event == Lifecycle.Event.ON_PAUSE) model.onPause()
+        }
+        lifecycle.addObserver(observer)
+        onDispose { lifecycle.removeObserver(observer) }
+    }
+}
+
+@Composable
+fun ScheduledArtImage(item: ScheduledArt, token: String, modifier: Modifier = Modifier, refreshKey: Any? = item.revision) {
     LocalScheduledArtRenderer.current?.let { render -> render(item, modifier); return }
-    val context = LocalContext.current
-    val loader = remember(token) { ImageLoader.Builder(context).okHttpClient(
-        OkHttpClient.Builder().followRedirects(false).followSslRedirects(false).retryOnConnectionFailure(false).build())
-        .memoryCachePolicy(CachePolicy.DISABLED).diskCachePolicy(CachePolicy.DISABLED).build() }
-    DisposableEffect(loader) { onDispose { loader.shutdown() } }
     val url = item.imageUrl
     if (url != null && token.isNotBlank()) {
-        var imageFailed by remember(item.id, item.revision) { mutableStateOf(false) }
-        Box(modifier, contentAlignment = Alignment.Center) {
-        AsyncImage(model = ImageRequest.Builder(context).data(CALENDAR_ORIGIN + url)
-            .addHeader("Authorization", "Bearer $token").addHeader("Cache-Control", "no-store")
-            .memoryCachePolicy(CachePolicy.DISABLED).diskCachePolicy(CachePolicy.DISABLED).build(),
-            imageLoader = loader, contentDescription = "Arte preparada para o Instagram, sem corte",
-            contentScale = ContentScale.Fit, modifier = Modifier.fillMaxSize(),
-            onError = { imageFailed = true }, onSuccess = { imageFailed = false })
-        if (imageFailed) Text("Não foi possível carregar a prévia. Atualize para conferir a imagem.", color = Color(0xFFFFB4AB), modifier = Modifier.background(Color(0xFF171B25)).padding(12.dp))
+        CompositionLocalProvider(LocalContentColor provides Color.White) {
+            PrivateArtImage(url = CALENDAR_ORIGIN + url, token = token,
+                contentDescription = "Arte preparada para o Instagram, sem corte",
+                contentScale = ContentScale.Fit, modifier = modifier,
+                revalidationKey = refreshKey,
+                errorText = "Não foi possível carregar a prévia. Feche e reabra para tentar novamente.")
         }
     } else Box(modifier, contentAlignment = Alignment.Center) { Text("Preparando a imagem…", color = Color(0xFFACB5C8)) }
 }
@@ -109,7 +102,7 @@ fun ScheduledNextContent(model: CalendarViewModel, token: String, onGallery: () 
     val next = state.data.next ?: return
     Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
         Text("Próxima arte do calendário", fontWeight = FontWeight.Bold)
-        ScheduledArtImage(next, token, Modifier.fillMaxWidth().aspectRatio(1f).heightIn(max = 380.dp))
+        ScheduledArtImage(next, token, Modifier.fillMaxWidth().aspectRatio(1f).heightIn(max = 380.dp), state.imageRefresh)
         Text(next.caption)
         Text("${next.date} às ${next.time} · Brasília")
         Text(if (state.fresh) next.statusLabel else "Estado não confirmado — atualize")
@@ -120,6 +113,8 @@ fun ScheduledNextContent(model: CalendarViewModel, token: String, onGallery: () 
 
 @Composable
 fun CalendarGallery(model: CalendarViewModel, token: String, onBack: () -> Unit) {
+    // The parent retains this model when closing the gallery, so each reopening reads again.
+    LaunchedEffect(model) { model.refresh() }
     val state by model.uiState.collectAsState()
     val today = LocalDate.now(ZoneId.of("America/Sao_Paulo"))
     val items = galleryItems(state.data.items, today)
@@ -135,7 +130,10 @@ fun CalendarGallery(model: CalendarViewModel, token: String, onBack: () -> Unit)
         }
         if (state.busy) LinearProgressIndicator(Modifier.fillMaxWidth())
         state.error?.let { Text(it, color = Color(0xFFFFB4AB), modifier = Modifier.padding(8.dp)) }
-        if (!state.data.enabled) Text("A galeria programada ainda não está disponível neste servidor.", color = Color.White)
+        if (!state.data.enabled) {
+            if (state.busy) Text("Carregando suas artes… Isso pode levar até 1 minuto.", color = Color.White)
+            else if (state.error == null) Text("A galeria programada ainda não está disponível neste servidor.", color = Color.White)
+        }
         else if (items.isEmpty()) Text("Nenhuma arte programada. As artes criadas aparecerão aqui.", color = Color.White, modifier = Modifier.padding(16.dp))
         else {
             val pager = rememberPagerState(initialPage = items.indexOfFirst { it.date >= today.toString() }.coerceAtLeast(0), pageCount = { items.size })
@@ -144,7 +142,7 @@ fun CalendarGallery(model: CalendarViewModel, token: String, onBack: () -> Unit)
                 Column(Modifier.fillMaxSize().padding(vertical = 12.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
                     Text("${art.username?.let { "@$it · " } ?: ""}${LocalDate.parse(art.date).format(DateTimeFormatter.ofPattern("dd/MM/yyyy"))} · ${art.time}", color = Color.White)
                     Row(Modifier.weight(1f), verticalAlignment = Alignment.CenterVertically) {
-                        ScheduledArtImage(art, token, Modifier.weight(1f).fillMaxHeight())
+                        ScheduledArtImage(art, token, Modifier.weight(1f).fillMaxHeight(), state.imageRefresh)
                         Column(Modifier.width(actionWidth), verticalArrangement = Arrangement.spacedBy(14.dp), horizontalAlignment = Alignment.CenterHorizontally) {
                             GalleryAction(Icons.Default.Edit, "Legenda", art.editable && state.fresh && !state.busy) { editing = art to "caption" }
                             GalleryAction(Icons.Default.DateRange, "Data/hora", art.editable && state.fresh && !state.busy) { editing = art to "schedule" }

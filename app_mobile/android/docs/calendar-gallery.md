@@ -17,7 +17,21 @@ Local work of2026-09-08, branch `feat/android-calendar-gallery-20260908`, based 
 
 `feature/calendar/CalendarApi.kt`, `CalendarViewModel.kt` and `CalendarGallery.kt` use the official production API, the existing legitimate IA4Tube session, authenticated owned JPEGs and no image-cache reuse across sessions. No bearer forwarding to arbitrary URLs or redirects. No passwords or provider tokens are stored by this feature.
 
+Follow-up: [private-art-cache.md](private-art-cache.md) documents the new encrypted, session-bound local copy shared by result/calendar/gallery views. It replaces direct image loading without adding polling. Revalidation still checks the server; it reuses unchanged image bytes, never a previous account's copy. The validation counts below are the historical checkpoints of the preceding changes, not the final cache test run.
+
 New data loads only while resumed; leaving/session replacement invalidates fresh state. An offline or stale view cannot show a reliable green scheduled status or issue edits. Conflicts require refresh; writes are not automatically retried. Editing/cancellation is disabled once the server begins dispatch. The server is authoritative about scheduling and publication.
+
+### Stable gallery snapshot and one-minute wait (follow-up correction)
+
+- Calendar JSON and authenticated JPEG reads use an explicit 60-second read timeout and a 60-second total call timeout. Connection/write limits remain 10 seconds; redirects and automatic connection retries remain disabled. TLS verification and session isolation are unchanged. The later private-copy implementation adds conditional revalidation without enabling a shared HTTP/Coil image cache.
+- Removed the 15-second polling loop. The calendar model loads once on screen entry/app resume. The gallery also requests a fresh snapshot on each opening because both parent screens retain the same model when the gallery is closed.
+- While the gallery stays open, elapsed time and unrelated recomposition do not reload its list. Opening it again or using **Atualizar** requests current data. User-confirmed caption/date/cancellation changes still use the server's returned snapshot; they are not delayed until reopening.
+- Backgrounding the app still invalidates fresh state and returning reads once. Pending requests are coalesced by the existing busy guard. Revision, owner/session, conflict and uncertain-result safeguards are preserved.
+- A longer timeout does not hide a real HTTP 503 or prove every production failure resolved. This addresses premature client read timeouts and continuous refresh; production/device confirmation remains separate from local checks.
+
+Focused regression coverage includes an actual loopback HTTP response delayed 12 seconds (past the previous default 10-second read limit), timeout/security configuration, a slow in-flight read without duplicate actions, visible non-retried 503, and real Compose lifecycle entry/reopening/manual refresh/background behavior with synthetic data. No diagnostics-only release is needed.
+
+Validation of this correction: 134 focused debug unit/render tests passed, zero failures/errors/skips (19 calendar tests plus 115 existing monthly-planning/Instagram/navigation tests). The initial empty view now describes the one-minute loading window instead of saying the feature is unavailable during a pending read. The lifecycle tests explicitly flush Compose snapshots/layout and teardown, including pause/resume without an intermediate frame. Kotlin compilation and `git diff --check` passed; no new AAB, Play upload or phone installation was performed for this correction. The already distributed AAB38 remains unchanged.
 
 Existing monthly-calendar DTO/cache and edit calls carry canonical revision/status. The old backend's missing calendar route is treated as unavailable, preserving the old manual path. A fresh preference check precedes generation submission so an unknown automatic setting cannot silently authorize an order.
 

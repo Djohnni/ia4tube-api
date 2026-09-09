@@ -8,10 +8,14 @@ import okhttp3.RequestBody.Companion.toRequestBody
 import okhttp3.MediaType.Companion.toMediaType
 import org.json.JSONObject
 import java.time.LocalDate
-import java.time.ZoneId
 import java.util.concurrent.TimeUnit
 
 internal const val CALENDAR_ORIGIN = "https://ia4tube-api.onrender.com"
+
+// Calendar reads may wait for the server; retain a bounded total and never retry writes.
+internal fun calendarHttpClient(): OkHttpClient = OkHttpClient.Builder()
+    .followRedirects(false).followSslRedirects(false).retryOnConnectionFailure(false)
+    .readTimeout(60, TimeUnit.SECONDS).callTimeout(60, TimeUnit.SECONDS).build()
 data class ScheduledArt(
     val id: String, val key: String, val date: String, val time: String, val caption: String,
     val revision: Long, val status: String, val statusLabel: String, val editable: Boolean,
@@ -57,8 +61,7 @@ internal fun parseCalendar(root: JSONObject): CalendarSnapshot {
 }
 
 class CalendarApi(private val token: String) : CalendarGateway {
-    private val client = OkHttpClient.Builder().followRedirects(false).followSslRedirects(false)
-        .retryOnConnectionFailure(false).callTimeout(30, TimeUnit.SECONDS).build()
+    private val client = calendarHttpClient()
     private suspend fun request(path: String = "", body: JSONObject? = null): CalendarSnapshot = withContext(Dispatchers.IO) {
         require(token.isNotBlank())
         val request = Request.Builder().url("$CALENDAR_ORIGIN/v1/social/calendar$path")

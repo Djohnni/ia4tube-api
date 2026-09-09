@@ -1,7 +1,6 @@
 package br.com.ia4tube.app.feature.monthly_planning
 
 import androidx.compose.foundation.Canvas
-import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -37,14 +36,11 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.layout.ContentScale
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import br.com.ia4tube.app.core.art_cache.PrivateArtImage
 import br.com.ia4tube.app.data.api.PreviewUrlBuilder
-import coil.compose.AsyncImagePainter
-import coil.compose.rememberAsyncImagePainter
-import coil.request.ImageRequest
 import java.time.LocalDate
 import java.time.format.DateTimeFormatter
 import java.time.format.DateTimeParseException
@@ -81,6 +77,7 @@ data class MonthlyPlanningCalendarListItem(
 internal fun MonthlyPlanningCalendarList(
     title: String,
     items: List<MonthlyPlanningCalendarListItem>,
+    previewToken: String,
     loading: Boolean,
     emptyText: String,
     onOpenOrder: (String) -> Unit,
@@ -113,6 +110,7 @@ internal fun MonthlyPlanningCalendarList(
             buildNextThirtyCalendarDays(items).forEach { day ->
                 MonthlyPlanningCalendarDayCard(
                     day = day,
+                    previewToken = previewToken,
                     onOpenOrder = onOpenOrder,
                     onRemove = onRemove,
                     reschedulingItemKeys = reschedulingItemKeys,
@@ -133,6 +131,7 @@ internal fun MonthlyPlanningCalendarList(
             items.forEach { item ->
                 MonthlyPlanningCalendarListCard(
                     item = item,
+                    previewToken = previewToken,
                     onOpenOrder = onOpenOrder,
                     onRemove = onRemove,
                     isSharing = sharingItemKeys.contains(item.key),
@@ -163,6 +162,7 @@ private data class MonthlyPlanningCalendarDay(
 @Composable
 private fun MonthlyPlanningCalendarDayCard(
     day: MonthlyPlanningCalendarDay,
+    previewToken: String,
     onOpenOrder: (String) -> Unit,
     onRemove: ((MonthlyPlanningCalendarListItem) -> Unit)?,
     reschedulingItemKeys: Set<String>,
@@ -246,6 +246,7 @@ private fun MonthlyPlanningCalendarDayCard(
                     }
                     MonthlyPlanningCalendarDayPost(
                         item = item,
+                        previewToken = previewToken,
                         onOpenOrder = onOpenOrder,
                         onRemove = onRemove,
                         isRescheduling = reschedulingItemKeys.contains(item.key),
@@ -262,6 +263,7 @@ private fun MonthlyPlanningCalendarDayCard(
 @Composable
 private fun MonthlyPlanningCalendarDayPost(
     item: MonthlyPlanningCalendarListItem,
+    previewToken: String,
     onOpenOrder: (String) -> Unit,
     onRemove: ((MonthlyPlanningCalendarListItem) -> Unit)?,
     isRescheduling: Boolean,
@@ -310,7 +312,7 @@ private fun MonthlyPlanningCalendarDayPost(
             horizontalArrangement = Arrangement.spacedBy(10.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            MonthlyPlanningCalendarThumbnail(item = item)
+            MonthlyPlanningCalendarThumbnail(item = item, previewToken = previewToken)
             Text(
                 modifier = Modifier.weight(1f),
                 text = item.title,
@@ -373,6 +375,7 @@ private fun MonthlyPlanningCalendarDayPost(
 @Composable
 private fun MonthlyPlanningCalendarListCard(
     item: MonthlyPlanningCalendarListItem,
+    previewToken: String,
     onOpenOrder: (String) -> Unit,
     onRemove: ((MonthlyPlanningCalendarListItem) -> Unit)?,
     isSharing: Boolean,
@@ -431,7 +434,7 @@ private fun MonthlyPlanningCalendarListCard(
                 horizontalArrangement = Arrangement.spacedBy(10.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                MonthlyPlanningCalendarThumbnail(item = item)
+                MonthlyPlanningCalendarThumbnail(item = item, previewToken = previewToken)
                 Text(
                     modifier = Modifier.weight(1f),
                     text = item.title,
@@ -502,7 +505,7 @@ private fun MonthlyPlanningCalendarListItem.isWeeklyFreeArt(): Boolean {
 }
 
 @Composable
-private fun MonthlyPlanningCalendarThumbnail(item: MonthlyPlanningCalendarListItem) {
+private fun MonthlyPlanningCalendarThumbnail(item: MonthlyPlanningCalendarListItem, previewToken: String) {
     val shape = RoundedCornerShape(10.dp)
     val backgroundColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.9f)
     val borderColor = MaterialTheme.colorScheme.outline.copy(alpha = 0.22f)
@@ -527,34 +530,14 @@ private fun MonthlyPlanningCalendarThumbnail(item: MonthlyPlanningCalendarListIt
             return@Box
         }
 
-        val context = LocalContext.current
-        val imageRequest = remember(resolvedUrl, context) {
-            ImageRequest.Builder(context)
-                .data(resolvedUrl)
-                .crossfade(true)
-                .build()
-        }
-        val painter = rememberAsyncImagePainter(model = imageRequest)
-
-        Image(
-            painter = painter,
+        PrivateArtImage(
+            url = resolvedUrl,
+            token = previewToken,
             contentDescription = "Miniatura da arte",
             modifier = Modifier.matchParentSize(),
-            contentScale = ContentScale.Fit
+            contentScale = ContentScale.Fit,
+            errorText = "Imagem indisponível"
         )
-
-        when (painter.state) {
-            is AsyncImagePainter.State.Loading -> {
-                CalendarImagePlaceholder()
-                CircularProgressIndicator(
-                    modifier = Modifier.size(18.dp),
-                    strokeWidth = 2.dp,
-                    color = MaterialTheme.colorScheme.primary
-                )
-            }
-            is AsyncImagePainter.State.Error -> CalendarImagePlaceholder()
-            else -> Unit
-        }
     }
 }
 

@@ -4,6 +4,7 @@ import android.content.Context
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
 import android.util.Base64
+import br.com.ia4tube.app.core.art_cache.AndroidPrivateArts
 import java.security.KeyStore
 import javax.crypto.Cipher
 import javax.crypto.KeyGenerator
@@ -11,6 +12,7 @@ import javax.crypto.SecretKey
 import javax.crypto.spec.GCMParameterSpec
 
 class SessionStore(context: Context) {
+    private val applicationContext = context.applicationContext
     private val preferences = context.getSharedPreferences("ia4tube_session", Context.MODE_PRIVATE)
 
     fun getToken(): String {
@@ -35,10 +37,12 @@ class SessionStore(context: Context) {
             .putString(KEY_TOKEN_IV, encrypted.iv)
             .remove(KEY_TOKEN)
             .apply()
+        AndroidPrivateArts.invalidateSession(applicationContext)
     }
 
     fun clear() {
         preferences.edit().clear().apply()
+        AndroidPrivateArts.invalidateSession(applicationContext)
     }
 
     private fun encrypt(value: String): EncryptedValue {

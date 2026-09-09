@@ -125,6 +125,7 @@ fun MonthlyPlanningScreen(
     onOpenPlans: () -> Unit,
     tokenProvider: () -> String = { "" }
 ) {
+    val previewToken = remember { tokenProvider() }
     val calendarModel = rememberCalendarModel(tokenProvider)
     val calendar by calendarModel.uiState.collectAsState()
     var showGallery by remember { mutableStateOf(false) }
@@ -464,10 +465,11 @@ fun MonthlyPlanningScreen(
 
     ScreenScaffold {
         if (showGallery) {
-            CalendarGallery(calendarModel, tokenProvider()) { showGallery = false; viewModel.refreshGeneralCalendar() }
+            CalendarGallery(calendarModel, previewToken) { showGallery = false; viewModel.refreshGeneralCalendar() }
         } else if (showGeneralCalendar) {
             MonthlyPlanningGeneralCalendarContent(
                 state = state,
+                previewToken = previewToken,
                 onGallery = { showGallery = true },
                 onBack = { showGeneralCalendar = false },
                 onRefresh = viewModel::refreshGeneralCalendar,
@@ -888,6 +890,7 @@ private fun MonthlyPlanningCalendarShortcut(onClick: () -> Unit) {
 @Composable
 private fun MonthlyPlanningGeneralCalendarContent(
     state: MonthlyPlanningUiState,
+    previewToken: String,
     onGallery: () -> Unit,
     onBack: () -> Unit,
     onRefresh: () -> Unit,
@@ -947,6 +950,7 @@ private fun MonthlyPlanningGeneralCalendarContent(
         MonthlyPlanningCalendarList(
             title = "Postagens planejadas",
             items = state.visibleGeneralCalendarPosts,
+            previewToken = previewToken,
             loading = state.calendarLoading,
             emptyText = "Nenhuma arte encontrada no calendário.",
             onOpenOrder = onOpenOrder,

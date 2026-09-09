@@ -6,6 +6,7 @@ import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.test.advanceUntilIdle
+import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.setMain
 import kotlinx.coroutines.test.resetMain
@@ -27,8 +28,8 @@ class CalendarTest {
         null, "synthetic", java.time.LocalDate.parse(date).toEpochDay() * 86400000)
     private fun snapshot() = CalendarSnapshot(true, true, 2, true, "synthetic", false, listOf(art()), art())
     private class Fake(var snapshot: CalendarSnapshot) : CalendarGateway {
-        var edits = 0; var changes = 0; var failure: Exception? = null; var pending: CompletableDeferred<Unit>? = null
-        override suspend fun list(): CalendarSnapshot { pending?.await(); failure?.let { throw it }; return snapshot }
+        var reads = 0; var edits = 0; var changes = 0; var failure: Exception? = null; var pending: CompletableDeferred<Unit>? = null
+        override suspend fun list(): CalendarSnapshot { reads++; pending?.await(); failure?.let { throw it }; return snapshot }
         override suspend fun preferences(enabled: Boolean, revision: Long): CalendarSnapshot { changes++; return snapshot.copy(automatic = enabled) }
         override suspend fun edit(item: ScheduledArt, action: String, caption: String, date: String, time: String): CalendarSnapshot {
             edits++; return snapshot.copy(items = if (action == "cancel") emptyList() else snapshot.items.map { it.copy(caption = caption, revision = it.revision + 1) })
@@ -45,6 +46,28 @@ class CalendarTest {
         model.edit(art(), "cancel"); advanceUntilIdle(); assertEquals(0, fake.edits)
         model.refresh(); advanceUntilIdle(); assertTrue(model.uiState.value.fresh)
         model.onPause(); model.edit(art(), "cancel"); advanceUntilIdle(); assertEquals(0, fake.edits); model.dispose()
+    }
+    @Test fun slowReadRemainsBusyWithoutDuplicateReadsOrMutations() = runTest(dispatcher) {
+        val fake = Fake(snapshot()); fake.pending = CompletableDeferred()
+        val model = CalendarViewModel({ "synthetic" }, "synthetic", fake)
+        model.refresh(); runCurrent()
+        advanceTimeBy(45_000); runCurrent()
+        assertTrue(model.uiState.value.busy); assertNull(model.uiState.value.error)
+        model.refresh(); model.edit(art(), "cancel"); runCurrent()
+        assertEquals(1, fake.reads); assertEquals(0, fake.edits)
+        fake.pending!!.complete(Unit); advanceUntilIdle()
+        assertTrue(model.uiState.value.fresh); assertFalse(model.uiState.value.busy)
+        advanceTimeBy(180_000); runCurrent(); assertEquals(1, fake.reads)
+        model.dispose()
+    }
+    @Test fun realServiceFailureIsNotHiddenOrRetriedByLongerWait() = runTest(dispatcher) {
+        val fake = Fake(snapshot()); fake.failure = CalendarFailure(503)
+        val model = CalendarViewModel({ "synthetic" }, "synthetic", fake)
+        model.refresh(); advanceUntilIdle()
+        assertEquals(1, fake.reads); assertFalse(model.uiState.value.fresh)
+        assertFalse(model.uiState.value.busy); assertNotNull(model.uiState.value.error)
+        advanceTimeBy(180_000); runCurrent(); assertEquals(1, fake.reads)
+        model.dispose()
     }
     @Test fun captionsUseSameRevisionAndCancellationRemovesScheduleOnly() = runTest(dispatcher) {
         val fake = Fake(snapshot()); val model = CalendarViewModel({ "synthetic" }, "synthetic", fake)

@@ -37,6 +37,7 @@ import br.com.ia4tube.app.ui.components.ScreenScaffold
 fun MonthlyPlanningDetailScreen(
     planningId: String,
     viewModel: MonthlyPlanningViewModel,
+    previewToken: String,
     onBack: () -> Unit,
     onOpenOrder: (String) -> Unit
 ) {
@@ -101,6 +102,7 @@ fun MonthlyPlanningDetailScreen(
                 )
                 MonthlyPlanningDetailTab.Calendar -> MonthlyPlanningCalendar(
                     posts = planning.posts,
+                    previewToken = previewToken,
                     onOpenOrder = onOpenOrder
                 )
             }
@@ -184,11 +186,13 @@ private fun MonthlyPlanningCalendar(posts: List<MonthlyPlanningPost>) {
 @Composable
 private fun MonthlyPlanningCalendar(
     posts: List<MonthlyPlanningPost>,
+    previewToken: String,
     onOpenOrder: (String) -> Unit
 ) {
     MonthlyPlanningCalendarList(
         title = "Calendário mensal",
         items = posts.map { it.toCalendarListItem() },
+        previewToken = previewToken,
         loading = false,
         emptyText = "Nenhuma postagem planejada.",
         onOpenOrder = onOpenOrder

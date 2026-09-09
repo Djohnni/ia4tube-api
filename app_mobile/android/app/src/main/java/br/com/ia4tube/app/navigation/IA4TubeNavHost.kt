@@ -647,6 +647,7 @@ fun IA4TubeNavHost(
                 MonthlyPlanningDetailScreen(
                     planningId = planningId,
                     viewModel = viewModel,
+                    previewToken = remember(backStackEntry) { repository.getSavedToken() },
                     onBack = { navController.popBackStack() },
                     onOpenOrder = { pedidoId ->
                         navigateProtected(Routes.orderDetail(pedidoId))
