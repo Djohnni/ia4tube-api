@@ -8,6 +8,13 @@ function validate(state) {
 }
 function createCalendarStore({ pool, role }) {
   return Object.freeze({
+    async exists(companyId) {
+      if (!UUID.test(companyId)) fail("calendar_owner_invalid", 403);
+      return withTransaction(pool, async client => {
+        const rows = await client.query("SELECT 1 FROM ia4tube_calendar.owner_state WHERE company_id=$1", [companyId]);
+        return rows.rowCount === 1;
+      }, { companyId, role });
+    },
     async verify() {
       const result = await pool.query(`SELECT c.relrowsecurity AS rls,c.relforcerowsecurity AS forced,
         pg_get_userbyid(c.relowner) AS owner,

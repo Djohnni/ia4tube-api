@@ -1,7 +1,8 @@
 "use strict";
 const express = require("express");
 const { fail } = require("./model");
-function createCalendarRouter({ authenticate, getService }) {
+const { readCalendarWithRecovery } = require("./read-recovery");
+function createCalendarRouter({ authenticate, getService, logger }) {
   const router = express.Router();
   const call = action => async (req, res) => {
     try {
@@ -21,7 +22,7 @@ function createCalendarRouter({ authenticate, getService }) {
     const p = req.params; res.type("jpeg").send(service.publicBytes(p.company, p.sha, p.expires, p.signature));
   }));
   router.use(authenticate);
-  router.get("/", call(async (service, req, res) => res.json(await service.list(req.user))));
+  router.get("/", call(async (service, req, res) => res.json(await readCalendarWithRecovery(() => service.list(req.user), logger))));
   router.post("/preferences", call(async (service, req, res) => res.json(await service.preferences(req.user, req.body || {}))));
   router.get("/items/:id/image", call(async (service, req, res) => res.type("jpeg").send(await service.image(req.user, req.params.id))));
   router.post("/items/:id", call(async (service, req, res) => res.json(await service.edit(req.user, req.params.id, req.body || {}))));

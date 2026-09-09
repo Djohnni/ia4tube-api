@@ -154,6 +154,9 @@ function createCalendarService({ store, source, media, grants, auth, identity, r
   }
   async function tickOwner(owner) {
     active(owner); const ids = identity(owner, owner);
+    // Calendar UI/explicit consent initializes this row after normal tenant readiness.
+    // The worker must not create social data for every historical product account.
+    if (!await store.exists(ids.companyId)) return;
     await sync(owner, ids.companyId, ids.userId);
     const jobs = await store.update(ids.companyId, state => Object.values(state.jobs).filter(job => job.authorization && !["cancelled", "published", "failed"].includes(job.phase)));
     for (const snapshot of jobs) {

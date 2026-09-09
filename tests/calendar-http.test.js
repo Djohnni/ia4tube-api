@@ -56,3 +56,21 @@ test("disabled calendar remains authenticated and read-only; activation requires
     PUBLIC_API_BASE_URL: "https://ia4tube-api.onrender.com", SOCIAL_PERSISTENCE_ENABLED: "true",
     SOCIAL_CALENDAR_ENABLED: "true", SOCIAL_INSTAGRAM_ENABLED: "false" }), { code: "social_production_preparation_incomplete" });
 });
+test("HTTP recovery applies only to the gallery GET, never to preferences or edits", async t => {
+  let reads = 0, preferences = 0, edits = 0;
+  const closed = () => Object.assign(new Error("sentinel-private-connection"), { code: "25P03" });
+  const f = await surface(t, () => ({
+    async list() { if (++reads === 1) throw closed(); return { ok: true, items: [{ id: "same-owned-item" }] }; },
+    async preferences() { preferences++; throw closed(); },
+    async edit() { edits++; throw closed(); }
+  }));
+  const headers = f.headers("synthetic-a");
+  const gallery = await fetch(f.base, { headers });
+  assert.equal(gallery.status, 200); assert.equal(reads, 2);
+  assert.deepEqual((await gallery.json()).items, [{ id: "same-owned-item" }]);
+  for (const route of ["preferences", "items/synthetic"]) {
+    const response = await fetch(`${f.base}/${route}`, { headers, method: "POST", body: "{}" });
+    assert.equal(response.status, 503); assert.doesNotMatch(await response.text(), /sentinel|25P03/);
+  }
+  assert.equal(preferences, 1); assert.equal(edits, 1);
+});

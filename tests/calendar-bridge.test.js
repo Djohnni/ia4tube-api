@@ -10,7 +10,7 @@ const { deriveSocialIdentity } = require("../src/social/identity");
 const { SESSION_ISSUER, SESSION_AUDIENCE } = require("../src/social/reauth");
 function memoryStore() {
   const rows = new Map(); let tail = Promise.resolve();
-  return { rows, update(id, action) {
+  return { rows, async exists(id) { return rows.has(id); }, update(id, action) {
     const pending = tail.then(async () => { const state = structuredClone(rows.get(id) || model.freshState());
       const result = await action(state); rows.set(id, state); return structuredClone(result); });
     tail = pending.catch(() => {}); return pending;
@@ -35,10 +35,11 @@ function fixture() {
   const publisher = { allowed: () => open, connection: async () => currentBinding ? { binding: currentBinding, username: "synthetic" } : null,
     intent: (_ctx, _job, requestId) => ({ publicationId: requestId }),
     send: async () => { sends++; return response; }, status: async () => response };
-  const service = createCalendarService({ store, source: { list: () => sources }, media, grants, auth, identity,
+  let sourceReads = 0;
+  const service = createCalendarService({ store, source: { list: () => { sourceReads++; return sources; } }, media, grants, auth, identity,
     readClients: () => clients, publisher, clock: () => now });
   return { service, store, ids, claims, binding, grants, envelope, media, publisher,
-    sends: () => sends, setOpen: value => open = value, setSources: value => sources = value,
+    sends: () => sends, sourceReads: () => sourceReads, setOpen: value => open = value, setSources: value => sources = value,
     setTime: value => now = value, setBinding: value => currentBinding = value, setResponse: value => response = value,
     disableOwner: () => clients = {},
     async enable() { await service.preferences(claims, { enabled: true, revision: 1, confirmed: true }); },
@@ -59,6 +60,14 @@ test("closed gates and paused preference never dispatch", async () => {
   const f = fixture(); await f.service.tick(); assert.equal(f.sends(), 0);
   await f.enable(); f.setOpen(false); await f.service.tick();
   assert.equal(f.sends(), 0); assert.equal((await f.first()).status, "operations_closed");
+});
+test("worker leaves historical accounts without an initialized calendar untouched", async () => {
+  const f = fixture();
+  await f.service.tick(); await f.service.tick();
+  assert.equal(f.sourceReads(), 0); assert.equal(f.store.rows.size, 0); assert.equal(f.sends(), 0);
+  // A normal authenticated gallery read initializes the same owner's calendar.
+  await f.first(); const before = f.sourceReads(); await f.service.tick();
+  assert.ok(f.sourceReads() > before); assert.equal(f.store.rows.size, 1); assert.equal(f.sends(), 0);
 });
 test("one due job uses existing publisher once, preserves result across repeated ticks", async () => {
   const f = fixture(); await f.enable(); await Promise.all([f.service.tick(), f.service.tick()]); await f.service.tick();

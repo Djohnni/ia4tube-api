@@ -122,7 +122,7 @@ function createProductionSocialIntegration(options = {}) {
         createMetaComplianceRouter({ getService: () => runtime.metaCompliance }));
       router.use(express.json({ limit: "16kb", strict: true }));
       router.use("/calendar", require("./calendar/router").createCalendarRouter({
-        authenticate: authenticateSocial, getService: () => runtime?.calendar }));
+        authenticate: authenticateSocial, getService: () => runtime?.calendar, logger: dependencies.logger }));
       router.use(createInstagramOAuthRouter({ authenticate: authenticateSocial, visualReturn,
         getService: () => runtime.instagramOAuth }));
       router.use("/reviewer", createInstagramRealReviewerRouter({ authenticate: authenticateSocial,

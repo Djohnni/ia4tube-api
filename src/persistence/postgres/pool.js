@@ -1,7 +1,7 @@
 "use strict";
 
 const pg = require("pg");
-const { postgresFail, SocialPostgresError } = require("./errors");
+const { postgresFail, SocialPostgresError, isPostgresConnectionFailure } = require("./errors");
 const { requireSafeLabel, requireUuid } = require("./validation");
 
 const SET_COMPANY_SCOPE_SQL =
@@ -167,6 +167,13 @@ async function withTransaction(pool, operation, options = {}) {
   const client = requireClient(await pool.connect());
   let started = false;
   let discarded = false;
+  let brokenConnection = null;
+  let connectionEventError = null;
+  // pg can emit an error event as well as rejecting the active query when a
+  // checked-out connection is terminated. The pool's idle listener is absent
+  // here; retain the failure for rollback/discard instead of an uncaught event.
+  const onConnectionError = error => { connectionEventError = error; };
+  if (typeof client.on === "function") client.on("error", onConnectionError);
   try {
     await client.query("BEGIN");
     started = true;
@@ -179,10 +186,14 @@ async function withTransaction(pool, operation, options = {}) {
       ]);
     }
     const result = await operation(client);
+    if (connectionEventError) throw connectionEventError;
     await client.query("COMMIT");
     started = false;
     return result;
   } catch (error) {
+    // A fatal connection error can race with the socket's final close event.
+    // Even a resolved ROLLBACK must not return that client to another request.
+    if (connectionEventError || isPostgresConnectionFailure(error)) brokenConnection = connectionEventError || error;
     if (started) {
       try {
         await client.query("ROLLBACK");
@@ -198,7 +209,12 @@ async function withTransaction(pool, operation, options = {}) {
     }
     throw error;
   } finally {
-    if (!discarded) client.release();
+    try {
+      if (!discarded) {
+        if (brokenConnection) client.release(brokenConnection);
+        else client.release();
+      }
+    } finally { if (typeof client.removeListener === "function") client.removeListener("error", onConnectionError); }
   }
 }
 
