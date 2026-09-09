@@ -83,6 +83,103 @@ test("caption changes reuse item and calendar overlay, stale writes conflict", a
   assert.equal(overlay.postagens[0].legenda, "Nova legenda");
 });
 
+test("caption confirmation does not depend on a second connection read after the write", async () => {
+  const f = fixture(); f.setOpen(false); const item = await f.first();
+  const originalConnection = f.publisher.connection; let reads = 0;
+  f.publisher.connection = async context => {
+    reads++;
+    if (f.store.rows.get(f.ids.companyId).jobs[item.id].caption === "Legenda confirmada") {
+      throw Object.assign(new Error("synthetic post-commit read failure"), { code: "25P03" });
+    }
+    return originalConnection(context);
+  };
+  const response = await f.service.edit(f.claims, item.id,
+    { action: "caption", caption: "Legenda confirmada", revision: item.revision });
+  assert.equal(response.items[0].caption, "Legenda confirmada");
+  assert.equal(response.items[0].revision, item.revision + 1);
+  assert.equal(reads, 1); assert.equal(f.sends(), 0);
+});
+
+test("caption response is the committed owner snapshot without post-write resynchronization", async () => {
+  const f = fixture(); f.setOpen(false); const item = await f.first();
+  const foreignCompany = crypto.randomUUID();
+  f.store.rows.set(foreignCompany, { ...model.freshState(), jobs: { foreign: { caption: "Foreign private caption" } } });
+  const beforeSourceReads = f.sourceReads();
+  const response = await f.service.edit(f.claims, item.id,
+    { action: "caption", caption: " Nova legenda única ", revision: item.revision });
+  assert.equal(f.sourceReads() - beforeSourceReads, 1);
+  assert.equal(response.ok, true); assert.equal(response.enabled, true);
+  assert.equal(response.operationsAllowed, false); assert.equal(response.preferences.enabled, false);
+  assert.equal(response.timeZone, "America/Sao_Paulo"); assert.equal(Number.isFinite(response.serverTime), true);
+  assert.equal(response.connection.username, "synthetic");
+  assert.equal(response.items.length, 1); assert.equal(response.items[0].id, item.id);
+  assert.equal(response.items[0].caption, "Nova legenda única");
+  assert.equal(response.items[0].revision, item.revision + 1);
+  assert.equal(response.items[0].imageUrl, item.imageUrl);
+  assert.equal(f.store.rows.get(f.ids.companyId).jobs[item.id].caption, response.items[0].caption);
+  assert.equal(JSON.stringify(response).includes("Foreign private caption"), false);
+  assert.equal(f.sends(), 0);
+});
+
+test("failed connection preflight leaves the requested caption unmodified", async () => {
+  const f = fixture(); const item = await f.first();
+  f.publisher.connection = async () => { throw Object.assign(new Error("synthetic unavailable read"), { code: "25P03" }); };
+  await assert.rejects(f.service.edit(f.claims, item.id,
+    { action: "caption", caption: "Not saved", revision: item.revision }), { code: "25P03" });
+  const stored = f.store.rows.get(f.ids.companyId).jobs[item.id];
+  assert.equal(stored.caption, item.caption); assert.equal(stored.revision, item.revision);
+  assert.equal(f.sends(), 0);
+});
+
+test("calendar HTTP returns the full updated caption snapshot in the single POST", async t => {
+  const express = require("express");
+  const { createCalendarRouter } = require("../src/social/calendar/router");
+  const f = fixture(); f.setOpen(false); const item = await f.first();
+  const originalConnection = f.publisher.connection;
+  f.publisher.connection = async context => {
+    if (f.store.rows.get(f.ids.companyId).jobs[item.id].caption === "Confirmada via HTTP") {
+      throw new Error("synthetic post-commit read failure");
+    }
+    return originalConnection(context);
+  };
+  const app = express(); app.use(express.json());
+  app.use("/v1/social/calendar", createCalendarRouter({ getService: () => f.service,
+    authenticate: (req, _res, next) => { req.user = f.claims; next(); } }));
+  const server = app.listen(0, "127.0.0.1"); await new Promise(resolve => server.once("listening", resolve));
+  t.after(() => new Promise(resolve => server.close(resolve)));
+  const response = await fetch(`http://127.0.0.1:${server.address().port}/v1/social/calendar/items/${item.id}`, {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ action: "caption", caption: "Confirmada via HTTP", revision: item.revision })
+  });
+  assert.equal(response.status, 200);
+  const body = await response.json();
+  assert.equal(body.ok, true); assert.equal(body.enabled, true);
+  assert.equal(body.preferences.enabled, false); assert.equal(body.operationsAllowed, false);
+  assert.equal(body.timeZone, "America/Sao_Paulo"); assert.equal(typeof body.serverTime, "number");
+  assert.equal(body.items[0].id, item.id); assert.equal(body.items[0].caption, "Confirmada via HTTP");
+  assert.equal(body.items[0].revision, item.revision + 1); assert.equal(body.items[0].imageUrl, item.imageUrl);
+  assert.equal(f.store.rows.get(f.ids.companyId).jobs[item.id].revision, item.revision + 1);
+  assert.equal(f.sends(), 0);
+});
+
+test("uncertain edit commit is surfaced once without replaying the mutation", async () => {
+  const f = fixture(); const item = await f.first();
+  const update = f.store.update.bind(f.store); let mutations = 0;
+  f.store.update = async (companyId, operation) => {
+    const before = f.store.rows.get(companyId)?.jobs[item.id]?.revision;
+    const result = await update(companyId, operation);
+    if (f.store.rows.get(companyId)?.jobs[item.id]?.revision !== before) {
+      mutations++;
+      throw Object.assign(new Error("synthetic lost commit acknowledgement"), { code: "08006" });
+    }
+    return result;
+  };
+  await assert.rejects(f.service.edit(f.claims, item.id,
+    { action: "caption", caption: "Possibly saved", revision: item.revision }), { code: "08006" });
+  assert.equal(mutations, 1); assert.equal(f.sends(), 0);
+  assert.equal(f.store.rows.get(f.ids.companyId).jobs[item.id].revision, item.revision + 1);
+});
+
 test("oversized generated caption is attention for that art, not a blocked company or a silently truncated post", async () => {
   const f = fixture(); f.setSources([{ key: "plan:1", planningId: "plan-synthetic", orderId: "order1",
     date: "2026-09-10", time: "12:00", caption: "x".repeat(2201), imageReady: true, version: "1", authorizationEnvelope: f.envelope }]);

@@ -64,20 +64,21 @@ function createCalendarService({ store, source, media, grants, auth, identity, r
       editable: !job.intent && !LOCKED.has(job.phase) && job.phase !== "cancelled", automatic: Boolean(job.authorization),
       username: connection?.username || null, error: job.error || null, publication: job.publication || null };
   }
+  function snapshot(state, connection, allowed) {
+    const items = Object.values(state.jobs).filter(job => job.phase !== "cancelled")
+        .sort((a, b) => a.scheduledAt - b.scheduledAt || a.id.localeCompare(b.id))
+        .map(job => view(job, state.preferences, connection, allowed));
+    const next = items.find(item => ["dispatching", "confirming"].includes(item.status)) ||
+        items.find(item => item.automatic && item.status !== "published" && item.scheduledAt + LATE_MS >= clock()) || null;
+    return { ok: true, enabled: true, preferences: state.preferences, connection, operationsAllowed: allowed,
+        timeZone: TIME_ZONE, serverTime: clock(), items, next };
+  }
   async function list(claims) {
     const current = session(claims); const { companyId, userId } = current.context;
     await sync(current.owner, companyId, userId);
     const connection = await publisher.connection(current.context);
     const allowed = publisher.allowed(current.context);
-    return store.update(companyId, state => {
-      const items = Object.values(state.jobs).filter(job => job.phase !== "cancelled")
-        .sort((a, b) => a.scheduledAt - b.scheduledAt || a.id.localeCompare(b.id))
-        .map(job => view(job, state.preferences, connection, allowed));
-      const next = items.find(item => ["dispatching", "confirming"].includes(item.status)) ||
-        items.find(item => item.automatic && item.status !== "published" && item.scheduledAt + LATE_MS >= clock()) || null;
-      return { ok: true, enabled: true, preferences: state.preferences, connection, operationsAllowed: allowed,
-        timeZone: TIME_ZONE, serverTime: clock(), items, next };
-    });
+    return store.update(companyId, state => snapshot(state, connection, allowed));
   }
   async function preferences(claims, input) {
     const current = session(claims); const connection = await publisher.connection(current.context);
@@ -104,8 +105,16 @@ function createCalendarService({ store, source, media, grants, auth, identity, r
   async function edit(claims, id, input) {
     const current = session(claims);
     await sync(current.owner, current.context.companyId, current.context.userId);
-    await store.update(current.context.companyId, state => { changeJob(state, id, input, clock()); return null; });
-    return list(claims);
+    // Resolve fallible reads before the edit. A second list/sync after COMMIT
+    // could report failure even though the new caption was already persisted.
+    const connection = await publisher.connection(current.context);
+    const allowed = publisher.allowed(current.context);
+    return store.update(current.context.companyId, state => {
+      changeJob(state, id, input, clock());
+      // The same owner transaction returns the updated snapshot only after
+      // commit succeeds. Never retry the write if its outcome is uncertain.
+      return snapshot(state, connection, allowed);
+    });
   }
   async function image(claims, id) {
     const current = session(claims);

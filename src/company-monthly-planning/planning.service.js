@@ -710,11 +710,28 @@ function companyImportantInfoFromPlanning(planning = {}, profile = {}) {
   );
 }
 
+function normalizeWhatsappContact(value) {
+  if (typeof value !== "string") return "";
+  const contact = value.trim();
+  // Check the supplied text before stripping phone separators: logins may contain digits.
+  if (!/^\+?[0-9 ()-]+$/.test(contact)) return "";
+  const digits = contact.replace(/[^0-9]/g, "");
+  return /^[1-9][0-9]{9,14}$/.test(digits) ? contact : "";
+}
+
 function normalizeProfile(body = {}, cliente = {}) {
+  const whatsapp = normalizeWhatsappContact(body.whatsapp);
+  if (body.whatsapp != null &&
+      (typeof body.whatsapp !== "string" || body.whatsapp.trim() !== "") && !whatsapp) {
+    const error = new Error("Informe um WhatsApp de contato com DDD, de 10 a 15 digitos, ou deixe o campo vazio.");
+    error.statusCode = 400;
+    error.code = "monthly_planning_invalid_whatsapp_contact";
+    throw error;
+  }
   return {
     nome_empresa: String(body.nome_empresa || body.nomeEmpresa || cliente.nome_empresa || cliente.nome_time || "").trim(),
     ramo: String(body.ramo || cliente.ramo || cliente.nicho || "").trim(),
-    whatsapp: String(body.whatsapp || cliente.whatsapp || "").trim(),
+    whatsapp,
     instagram: String(body.instagram || cliente.instagram || "").trim(),
     caracteristicas_empresa: companyCharacteristicsFromBody(body),
     informacoes_empresa: companyImportantInfoFromBody(body),
@@ -1416,6 +1433,7 @@ function createRequest({ baseDir, cliente, whatsapp, body = {}, files = {}, free
     error.code = "monthly_planning_items_limit";
     throw error;
   }
+  const profile = normalizeProfile(body, cliente);
   const { billing, charge } = validatePlanAndFreeArts(cliente, quantidadeReservada, { freeArtBlocked });
   const ciclo = planCycle(cliente);
   const planningId = newPlanningId();
@@ -1454,7 +1472,6 @@ function createRequest({ baseDir, cliente, whatsapp, body = {}, files = {}, free
   }));
   const now = new Date().toISOString();
   const reservation = reservePlanningArts(cliente, planningId, quantidadeReservada, now, billing, charge);
-  const profile = normalizeProfile(body, cliente);
   const solicitacao = {
     id: planningId,
     planejamento_id: planningId,
@@ -3476,7 +3493,7 @@ function buildChildOrder({ planning, item, itemId, pedidoId, mesAtual, copiedAss
   const horarioSugerido = cleanText(item.horario_sugerido);
   const nomeEmpresa = cleanText(profile.nome_empresa, "Empresa");
   const ramo = cleanText(profile.ramo, "empresa local");
-  const whatsappContato = cleanText(profile.whatsapp, planning.whatsapp || "");
+  const whatsappContato = normalizeWhatsappContact(profile.whatsapp);
   const instagram = cleanText(profile.instagram);
   const caracteristicasEmpresa = companyCharacteristicsFromPlanning(planning, profile);
   const informacoesEmpresa = companyImportantInfoFromPlanning(planning, profile);
