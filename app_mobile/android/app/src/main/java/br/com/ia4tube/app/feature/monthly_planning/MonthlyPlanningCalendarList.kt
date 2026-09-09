@@ -1,5 +1,7 @@
 package br.com.ia4tube.app.feature.monthly_planning
 
+import android.app.DatePickerDialog
+import android.app.TimePickerDialog
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -7,6 +9,8 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -21,6 +25,7 @@ import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -36,12 +41,15 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import br.com.ia4tube.app.core.art_cache.PrivateArtImage
 import br.com.ia4tube.app.data.api.PreviewUrlBuilder
 import java.time.LocalDate
+import java.time.LocalTime
+import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 import java.time.format.DateTimeParseException
 import java.time.format.TextStyle
@@ -82,7 +90,7 @@ internal fun MonthlyPlanningCalendarList(
     emptyText: String,
     onOpenOrder: (String) -> Unit,
     onRemove: ((MonthlyPlanningCalendarListItem) -> Unit)? = null,
-    onReschedule: ((MonthlyPlanningCalendarListItem, String) -> Unit)? = null,
+    onReschedule: ((MonthlyPlanningCalendarListItem, String, String) -> Unit)? = null,
     reschedulingItemKeys: Set<String> = emptySet(),
     sharingItemKeys: Set<String> = emptySet(),
     onShare: ((MonthlyPlanningCalendarListItem) -> Unit)? = null,
@@ -145,9 +153,9 @@ internal fun MonthlyPlanningCalendarList(
         MonthlyPlanningRescheduleDialog(
             item = item,
             onDismiss = { pendingRescheduleItem = null },
-            onDateSelected = { newDate ->
+            onScheduleSelected = { newDate, newTime ->
                 pendingRescheduleItem = null
-                onReschedule?.invoke(item, newDate)
+                onReschedule?.invoke(item, newDate, newTime)
             }
         )
     }
@@ -260,6 +268,7 @@ private fun MonthlyPlanningCalendarDayCard(
     }
 }
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun MonthlyPlanningCalendarDayPost(
     item: MonthlyPlanningCalendarListItem,
@@ -334,7 +343,7 @@ private fun MonthlyPlanningCalendarDayPost(
                     color = MaterialTheme.colorScheme.primary
                 )
                 Text(
-                    text = "Alterando data...",
+                    text = "Alterando data e horário...",
                     style = MaterialTheme.typography.bodySmall,
                     fontWeight = FontWeight.SemiBold,
                     color = MaterialTheme.colorScheme.primary
@@ -342,9 +351,9 @@ private fun MonthlyPlanningCalendarDayPost(
             }
         }
         if (onShare != null || effectiveOnReschedule != null || onRemove != null) {
-            Row(
-                modifier = Modifier.align(Alignment.End),
-                horizontalArrangement = Arrangement.spacedBy(4.dp)
+            FlowRow(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(4.dp, Alignment.End)
             ) {
                 if (onShare != null && canOpenOrder) {
                     TextButton(
@@ -359,7 +368,7 @@ private fun MonthlyPlanningCalendarDayPost(
                         enabled = !isRescheduling,
                         onClick = { reschedule(item) }
                     ) {
-                        Text("Alterar data")
+                        Text("Data e horário")
                     }
                 }
                 onRemove?.let { remove ->
@@ -580,17 +589,20 @@ private fun CalendarImagePlaceholder() {
 }
 
 @Composable
-private fun MonthlyPlanningRescheduleDialog(
+internal fun MonthlyPlanningRescheduleDialog(
     item: MonthlyPlanningCalendarListItem,
     onDismiss: () -> Unit,
-    onDateSelected: (String) -> Unit
+    onScheduleSelected: (String, String) -> Unit
 ) {
-    val days = remember { buildNextThirtyCalendarDateOptions() }
+    val context = LocalContext.current
+    var date by remember(item.key) { mutableStateOf(runCatching { LocalDate.parse(item.date) }.getOrNull()) }
+    var time by remember(item.key) { mutableStateOf(runCatching { LocalTime.parse(item.time) }.getOrNull()) }
+    var error by remember(item.key) { mutableStateOf<String?>(null) }
     AlertDialog(
         onDismissRequest = onDismiss,
         title = {
             Text(
-                text = "Alterar data",
+                text = "Alterar data e horário",
                 style = MaterialTheme.typography.titleLarge,
                 fontWeight = FontWeight.ExtraBold
             )
@@ -611,31 +623,42 @@ private fun MonthlyPlanningRescheduleDialog(
                     overflow = TextOverflow.Ellipsis,
                     color = MaterialTheme.colorScheme.onSurface
                 )
-                days.forEach { date ->
-                    val selected = date.toString() == item.date
-                    TextButton(
-                        modifier = Modifier.fillMaxWidth(),
-                        onClick = { onDateSelected(date.toString()) }
-                    ) {
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Text(
-                                text = date.format(CalendarDateFormatter),
-                                fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium
-                            )
-                            Text(
-                                text = date.dayOfWeek.getDisplayName(TextStyle.FULL, CalendarLocale),
-                                style = MaterialTheme.typography.bodySmall
-                            )
-                        }
-                    }
+                OutlinedButton(modifier = Modifier.fillMaxWidth(), onClick = {
+                    val firstDay = LocalDate.now(CalendarScheduleZone)
+                    val lastDay = firstDay.plusDays(GENERAL_CALENDAR_DAYS - 1L)
+                    val initial = (date ?: firstDay).coerceIn(firstDay, lastDay)
+                    DatePickerDialog(context, { _, y, m, d ->
+                        date = LocalDate.of(y, m + 1, d)
+                        error = null
+                    }, initial.year, initial.monthValue - 1, initial.dayOfMonth).apply {
+                        // Native picker bounds represent calendar dates in the phone's zone.
+                        datePicker.minDate = firstDay.atStartOfDay(ZoneId.systemDefault()).toInstant().toEpochMilli()
+                        datePicker.maxDate = lastDay.atStartOfDay(ZoneId.systemDefault()).toInstant().toEpochMilli()
+                    }.show()
+                }) {
+                    Text("Data: ${date?.format(CalendarDateFormatter) ?: "Selecionar"}")
                 }
+                OutlinedButton(modifier = Modifier.fillMaxWidth(), onClick = {
+                    val initial = time ?: LocalTime.of(9, 0)
+                    TimePickerDialog(context, { _, h, m ->
+                        time = LocalTime.of(h, m)
+                        error = null
+                    }, initial.hour, initial.minute, true).show()
+                }) {
+                    Text("Horário: ${time?.format(DateTimeFormatter.ofPattern("HH:mm")) ?: "Selecionar"}")
+                }
+                Text("Horário de Brasília. A alteração só será enviada ao tocar em Salvar.")
+                error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
             }
         },
-        confirmButton = {},
+        confirmButton = {
+            TextButton(onClick = {
+                val selectedDate = date?.toString().orEmpty()
+                val selectedTime = time?.format(DateTimeFormatter.ofPattern("HH:mm")).orEmpty()
+                error = calendarScheduleError(selectedDate, selectedTime)
+                if (error == null) onScheduleSelected(selectedDate, selectedTime)
+            }) { Text("Salvar") }
+        },
         dismissButton = {
             TextButton(onClick = onDismiss) {
                 Text("Cancelar")
@@ -674,7 +697,7 @@ private fun firstWords(value: String, maxWords: Int): String {
 private fun buildNextThirtyCalendarDays(
     items: List<MonthlyPlanningCalendarListItem>
 ): List<MonthlyPlanningCalendarDay> {
-    val today = LocalDate.now()
+    val today = LocalDate.now(CalendarScheduleZone)
     val days = buildNextThirtyCalendarDateOptions(today)
     val itemsByDate = items
         .mapNotNull { item -> item.toDatedCalendarItem() }
@@ -695,7 +718,7 @@ private fun buildNextThirtyCalendarDays(
     }
 }
 
-private fun buildNextThirtyCalendarDateOptions(today: LocalDate = LocalDate.now()): List<LocalDate> {
+private fun buildNextThirtyCalendarDateOptions(today: LocalDate = LocalDate.now(CalendarScheduleZone)): List<LocalDate> {
     return (0 until GENERAL_CALENDAR_DAYS).map { today.plusDays(it.toLong()) }
 }
 

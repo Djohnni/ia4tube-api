@@ -19,7 +19,6 @@ import br.com.ia4tube.app.data.models.MonthlyPlanningPhotoInput
 import br.com.ia4tube.app.data.models.MonthlyPlanningPostDto
 import br.com.ia4tube.app.data.models.MonthlyPlanningRequest
 import br.com.ia4tube.app.data.models.MonthlyPlanningRequestResponse
-import br.com.ia4tube.app.data.models.MonthlyPlanningRescheduleRequest
 import br.com.ia4tube.app.data.models.MonthlyPlanningSummaryDto
 import br.com.ia4tube.app.data.models.UploadFile
 import br.com.ia4tube.app.data.repository.AuthRepository
@@ -792,7 +791,11 @@ class MonthlyPlanningViewModel(
         }
     }
 
-    fun rescheduleGeneralCalendarItem(item: MonthlyPlanningCalendarListItem, newDate: String) {
+    fun rescheduleGeneralCalendarItem(item: MonthlyPlanningCalendarListItem, newDate: String, newTime: String) {
+        calendarScheduleError(newDate, newTime)?.let { message ->
+            _uiState.update { it.copy(calendarError = message, calendarSuccessMessage = null) }
+            return
+        }
         var shouldStart = false
         _uiState.update { state ->
             if (state.reschedulingCalendarItemKeys.contains(item.key)) {
@@ -810,15 +813,7 @@ class MonthlyPlanningViewModel(
 
         viewModelScope.launch {
             try {
-                val request = MonthlyPlanningRescheduleRequest(
-                    itemKey = item.key,
-                    planningId = item.planningId,
-                    planejamentoItemId = item.planejamentoItemId,
-                    pedidoId = item.pedidoId,
-                    date = newDate,
-                    time = item.time,
-                    calendarRevision = item.calendarRevision
-                )
+                val request = item.rescheduleRequest(newDate, newTime)
 
                 when (val result = repository.reagendarItemCalendarioPlanejamento(request)) {
                     is ApiResult.Success -> {
@@ -839,7 +834,7 @@ class MonthlyPlanningViewModel(
                         _uiState.update { state ->
                             state.copy(
                                 calendarError = null,
-                                calendarSuccessMessage = "Data alterada com sucesso.",
+                                calendarSuccessMessage = "Data e horário alterados com sucesso.",
                                 reschedulingCalendarItemKeys = state.reschedulingCalendarItemKeys - item.key,
                                 generalCalendarPosts = state.generalCalendarPosts
                                     .filterNot { existing ->
@@ -863,7 +858,7 @@ class MonthlyPlanningViewModel(
     private fun showCalendarRescheduleError(itemKey: String) {
         _uiState.update {
             it.copy(
-                calendarError = "Não foi possível alterar a data. Tente novamente.",
+                calendarError = "Não foi possível confirmar a alteração de data e horário. Confira o calendário antes de tentar novamente.",
                 calendarSuccessMessage = null,
                 reschedulingCalendarItemKeys = it.reschedulingCalendarItemKeys - itemKey
             )

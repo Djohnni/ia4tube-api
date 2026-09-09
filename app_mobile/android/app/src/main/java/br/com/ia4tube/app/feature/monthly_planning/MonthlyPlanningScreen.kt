@@ -896,7 +896,7 @@ private fun MonthlyPlanningGeneralCalendarContent(
     onRefresh: () -> Unit,
     onOpenOrder: (String) -> Unit,
     onRemove: (MonthlyPlanningCalendarListItem) -> Unit,
-    onReschedule: (MonthlyPlanningCalendarListItem, String) -> Unit,
+    onReschedule: (MonthlyPlanningCalendarListItem, String, String) -> Unit,
     onShare: (MonthlyPlanningCalendarListItem) -> Unit,
     modifier: Modifier = Modifier
 ) {
