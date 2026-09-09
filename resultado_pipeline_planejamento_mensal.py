@@ -8,6 +8,7 @@ from pathlib import Path
 from datetime import datetime
 
 from openai import OpenAI
+from editorial_niche import editorial_context, editorial_fallback, editorial_caption
 
 from resultado_pipeline_ia4tube import (
     BASE_DIR,
@@ -691,6 +692,8 @@ Nao escreva, sugira ou invente nenhum termo proibido na imagem.
 BRIEFING CRIATIVO DO PEDIDO:
 {text_value(pedido, "briefing_arte", "observacoes") or "sem briefing adicional"}
 
+{editorial_context(pedido, "art")}
+
 REGRAS FINAIS:
 - A arte deve parecer feita para a empresa real do pedido.
 - Usar cores, contraste e hierarquia profissionais.
@@ -716,6 +719,7 @@ def remove_forbidden_lines(text, forbidden):
 def gerar_descricao_planejamento(pedido):
     instructions = planning_instructions(pedido)
     forbidden = instructions["texto_proibido"]
+    niche_context = editorial_context(pedido, "caption")
 
     try:
         client = OpenAI(api_key=load_api_key())
@@ -736,6 +740,8 @@ DADOS:
 - Instagram: {text_value(pedido, "instagram")}
 - Informacoes importantes da empresa: {company_important_info(pedido) or "nenhuma"}
 
+{niche_context}
+
 REGRAS:
 - Se houver orientacao especifica para legenda, obedeca.
 - Use texto obrigatorio e orientacao visual apenas como contexto.
@@ -750,8 +756,11 @@ REGRAS:
 - Incluir #ia4tube na ultima linha.
 """.strip()
         response = client.responses.create(model="gpt-5-mini", input=prompt)
-        return limpar_descricao_instagram(response.output_text, pedido)
+        result = editorial_caption(pedido, limpar_descricao_instagram(response.output_text, pedido))
+        return remove_forbidden_lines(result, forbidden) if niche_context else result
     except Exception:
+        if niche_context:
+            return remove_forbidden_lines(editorial_fallback(pedido), forbidden)
         base = instructions["texto_obrigatorio_imagem"] or instructions["orientacao_visual"]
         if not base:
             base = text_value(pedido, "objetivo_postagem", "objetivo") or "Arte pronta para divulgar sua empresa."
@@ -860,7 +869,11 @@ def main():
     for idx, ref in enumerate(referencias, start=1):
         log(f"   {idx:02d}. {ref.name}")
 
+    from instagram_layout import layout_for, composition_instructions, MASTER_SIZE
     prompt = build_prompt(pedido, referencias)
+    responsive = layout_for(pedido)
+    if responsive:
+        prompt += "\n\n" + composition_instructions(pedido)
 
     out_final_pedido = pedido_dir / "resultado_final.png"
     out_preview_pedido = pedido_dir / "preview_ia4tube.jpg"
@@ -871,6 +884,7 @@ def main():
         prompt,
         referencias,
         allow_prompt_only=True,
+        size_override=MASTER_SIZE if responsive else None,
     )
 
     try:
@@ -887,7 +901,7 @@ def main():
         "pedido_id": pedido_id,
         "pipeline": "resultado_pipeline_planejamento_mensal.py",
         "modelo": MODEL,
-        "size": SIZE,
+        "size": MASTER_SIZE if responsive else SIZE,
         "quality": QUALITY,
         "output_format_api": OUTPUT_FORMAT,
         "estilo_visual_cliente": planning_style(pedido),

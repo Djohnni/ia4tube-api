@@ -48,6 +48,19 @@ test("web resumes with GET only and never initiates OAuth or publication",async(
   const h=harness();await drain();assert.equal(h.calls.length,3);assert.ok(h.calls.every(x=>x.method==="GET"));
   assert.equal(h.get("product").hidden,false);
 });
+
+test("Story history labels the placement and only offers an official provider link when present", async () => {
+  for (const permalink of [null, "https://www.instagram.com/stories/synthetic/123456/", "https://www.instagram.com/stories/synthetic/123456/?redirect=other"]) {
+    const h = harness({ history: [{ publicationId: "synthetic-story", state: "published", destination: "story",
+      caption: "Feed-only fixture caption", providerMediaId: "123456", publishedAt: "2026-09-09T18:00:00Z", permalink }] });
+    await drain();
+    const article = h.get("history").children[0], display = article.children[0].textContent;
+    assert.match(display, /Story/); assert.match(display, /123456/); assert.doesNotMatch(display, /Feed-only fixture caption/);
+    const links = article.children.filter(item => item.tag === "a");
+    assert.equal(links.length, permalink && !permalink.includes("?") ? 1 : 0);
+    assert.ok(h.calls.every(call => call.method === "GET"));
+  }
+});
 test("existing web consumer retains connection rendering with additive or prior response",async()=>{
   for(const availability of [null,{connectionAllowed:false,publicationAllowed:false},
     {connectionAllowed:true,publicationAllowed:true}]) {

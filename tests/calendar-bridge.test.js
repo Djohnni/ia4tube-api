@@ -67,7 +67,8 @@ test("worker leaves historical accounts without an initialized calendar untouche
   assert.equal(f.sourceReads(), 0); assert.equal(f.store.rows.size, 0); assert.equal(f.sends(), 0);
   // A normal authenticated gallery read initializes the same owner's calendar.
   await f.first(); const before = f.sourceReads(); await f.service.tick();
-  assert.ok(f.sourceReads() > before); assert.equal(f.store.rows.size, 1); assert.equal(f.sends(), 0);
+  assert.ok(f.sourceReads() > before); assert.equal(f.store.rows.size, 1);
+  assert.equal(f.sends(), 1, "new owner's default is active, but this synthetic item still requires its signed order grant");
 });
 test("one due job uses existing publisher once, preserves result across repeated ticks", async () => {
   const f = fixture(); await f.enable(); await Promise.all([f.service.tick(), f.service.tick()]); await f.service.tick();
@@ -109,7 +110,7 @@ test("caption response is the committed owner snapshot without post-write resync
     { action: "caption", caption: " Nova legenda única ", revision: item.revision });
   assert.equal(f.sourceReads() - beforeSourceReads, 1);
   assert.equal(response.ok, true); assert.equal(response.enabled, true);
-  assert.equal(response.operationsAllowed, false); assert.equal(response.preferences.enabled, false);
+  assert.equal(response.operationsAllowed, false); assert.equal(response.preferences.enabled, true);
   assert.equal(response.timeZone, "America/Sao_Paulo"); assert.equal(Number.isFinite(response.serverTime), true);
   assert.equal(response.connection.username, "synthetic");
   assert.equal(response.items.length, 1); assert.equal(response.items[0].id, item.id);
@@ -154,7 +155,7 @@ test("calendar HTTP returns the full updated caption snapshot in the single POST
   assert.equal(response.status, 200);
   const body = await response.json();
   assert.equal(body.ok, true); assert.equal(body.enabled, true);
-  assert.equal(body.preferences.enabled, false); assert.equal(body.operationsAllowed, false);
+  assert.equal(body.preferences.enabled, true); assert.equal(body.operationsAllowed, false);
   assert.equal(body.timeZone, "America/Sao_Paulo"); assert.equal(typeof body.serverTime, "number");
   assert.equal(body.items[0].id, item.id); assert.equal(body.items[0].caption, "Confirmada via HTTP");
   assert.equal(body.items[0].revision, item.revision + 1); assert.equal(body.items[0].imageUrl, item.imageUrl);
@@ -246,10 +247,134 @@ test("JPEG conversion preserves composition, private owner path and signed expir
   const media = createCalendarMedia({ dataDir: root, secret: "synthetic-secret-".repeat(4), publicOrigin: "https://synthetic.invalid",
     clock: () => now, loadSource: async () => original }); t.after(() => media.close());
   const asset = await media.prepare("synthetic", company, {}), job = { asset, caption: "Exata" };
+  assert.equal(media.descriptor(company, job).metadataDigest,
+    model.digest(JSON.stringify([company, asset.sha, "Exata"])), "pending legacy intents keep their original digest");
   const jpeg = media.bytesFor(company, asset), meta = await sharp(jpeg).metadata();
   assert.equal(meta.format, "jpeg"); assert.equal(meta.width, 1080); assert.equal(meta.height, 1080);
   assert.equal(model.digest(original), asset.sourceHash); assert.throws(() => media.bytesFor(crypto.randomUUID(), asset));
   const url = new URL(media.descriptor(company, job).publicUrl), fields = url.pathname.split("/").slice(-4);
   assert.deepEqual(media.publicBytes(...fields), jpeg); fields[3] = "0".repeat(64); assert.throws(() => media.publicBytes(...fields));
   now += 901000; assert.throws(() => media.publicBytes(...new URL(media.descriptor(company, job).publicUrl).pathname.split("/").slice(-4).map((v,i) => i === 2 ? String(Number(v) - 901) : v)));
+});
+
+function formattedFixture(target = "both", authorized = true) {
+  const f = fixture();
+  f.setSources([{ key: "plan:1", planningId: "plan-synthetic", orderId: "order1", date: "2026-09-10", time: "12:05",
+    caption: "Legenda original", imageReady: true, version: "1", layout: "safe_master_v1", destination: target,
+    authorizationEnvelope: authorized ? f.envelope : null }]);
+  const feed = { sha: "a".repeat(64), sourceHash: "b".repeat(64), width: 1080, height: 1350 };
+  const story = { ...feed, sha: "c".repeat(64), height: 1920 };
+  f.media.prepare = async () => ({ ...(target === "story" ? story : feed), variants: { feed, story } });
+  const oldConnection = f.publisher.connection;
+  f.publisher.connection = async ctx => { const found = await oldConnection(ctx); return found ? { ...found, accountType: "business" } : null; };
+  const sent = []; let outcome = target => ({ published: true, mediaId: target === "feed" ? "12345" : "23456", permalink: null });
+  f.publisher.send = async (_ctx, item) => { sent.push(item.target); return outcome(item.target); };
+  return { ...f, sent, setOutcome: fn => outcome = fn, due: () => f.setTime(model.dateTime("2026-09-10", "12:05")) };
+}
+test("two placements share one calendar item and use one durable send per placement", async () => {
+  const f = formattedFixture(); const item = await f.first(); assert.equal(item.destination, "both"); assert.equal(item.formatsReady, true);
+  f.due(); await Promise.all([f.service.tick(), f.service.tick()]);
+  assert.deepEqual(f.sent, ["feed"]); assert.equal((await f.first()).status, "confirming");
+  await f.service.tick(); await f.service.tick();
+  const done = await f.first(); assert.deepEqual(f.sent, ["feed", "story"]); assert.equal(done.status, "published");
+  assert.equal(Object.keys(f.store.rows.get(f.ids.companyId).jobs).length, 1);
+  assert.equal(done.publications.feed.result.mediaId, "12345"); assert.equal(done.publications.story.result.mediaId, "23456");
+  await assert.rejects(f.service.edit(f.claims, done.id, { action: "destination", destination: "feed", confirmed: true, revision: done.revision }), { code: "calendar_dispatch_started" });
+});
+test("a failed second destination remains partial and never repeats the successful first one", async () => {
+  const f = formattedFixture(); await f.first(); f.due();
+  f.setOutcome(target => target === "feed" ? { published: true, mediaId: "12345" } : { published: false, state: "failed_permanent" });
+  await f.service.tick(); await f.service.tick(); await f.service.tick();
+  assert.deepEqual(f.sent, ["feed", "story"]); const item = await f.first();
+  assert.equal(item.status, "partial"); assert.equal(item.publications.feed.status, "published"); assert.equal(item.publications.story.status, "failed");
+});
+test("uncertain first destination is observed, never re-sent or bypassed with a second delivery", async () => {
+  const f = formattedFixture(); f.setOutcome(() => null); f.setResponse(null); await f.first(); f.due();
+  await f.service.tick(); await f.service.tick(); await f.service.tick();
+  assert.deepEqual(f.sent, ["feed"]); assert.equal((await f.first()).status, "confirming");
+});
+test("per-art off is durable across sync and prevents every placement without deleting media", async () => {
+  const f = formattedFixture(); const item = await f.first();
+  const paused = await f.service.edit(f.claims, item.id, { action: "automatic", enabled: false, revision: item.revision });
+  assert.equal(paused.items[0].automatic, false); assert.equal(paused.items[0].status, "item_paused");
+  f.due(); await f.service.tick(); assert.deepEqual(f.sent, []); assert.equal((await f.first()).formatsReady, true);
+});
+
+test("a source no longer ready cannot dispatch previously prepared variants", async () => {
+  const f = formattedFixture(); await f.first();
+  f.setSources([{ key: "plan:1", planningId: "plan-synthetic", orderId: "order1", date: "2026-09-10", time: "12:05",
+    caption: "Legenda original", imageReady: false, version: "1", layout: "safe_master_v1", destination: "both",
+    authorizationEnvelope: f.envelope }]);
+  f.due(); await f.service.tick(); assert.deepEqual(f.sent, []);
+  const stored = Object.values(f.store.rows.get(f.ids.companyId).jobs)[0];
+  assert.equal(stored.asset, null); assert.equal(stored.assets, null);
+});
+test("per-art enabling binds a new grant to exactly that owner, item and connection", async () => {
+  const f = formattedFixture("feed", false); const item = await f.first();
+  assert.equal(item.automatic, false);
+  const enabled = await f.service.edit(f.claims, item.id, { action: "automatic", enabled: true, confirmed: true, revision: item.revision });
+  const stored = f.store.rows.get(f.ids.companyId).jobs[item.id];
+  assert.equal(stored.authorization.jobId, item.id); assert.equal(stored.authorization.companyId, f.ids.companyId);
+  assert.equal(enabled.items[0].automatic, true); f.due(); await f.service.tick(); assert.deepEqual(f.sent, ["feed"]);
+});
+test("destination edit is revision-bound, preview-confirmed and does not create another calendar job", async () => {
+  const f = formattedFixture("feed"); const item = await f.first();
+  await assert.rejects(f.service.edit(f.claims, item.id, { action: "destination", destination: "both", revision: item.revision }), { code: "calendar_preview_required" });
+  const changed = await f.service.edit(f.claims, item.id, { action: "destination", destination: "story", confirmed: true, revision: item.revision });
+  assert.equal(changed.items[0].destination, "story"); assert.equal(changed.items.length, 1);
+  await assert.rejects(f.service.edit(f.claims, item.id, { action: "destination", destination: "feed", confirmed: true, revision: item.revision }), { code: "calendar_revision_conflict" });
+  f.due(); await f.service.tick(); assert.deepEqual(f.sent, ["story"]);
+});
+
+test("renewing one art does not release its original order allocation for another source", async () => {
+  const f = formattedFixture("feed"); const item = await f.first();
+  const originalNonce = f.store.rows.get(f.ids.companyId).jobs[item.id].grantNonce;
+  await f.service.edit(f.claims, item.id, { action: "automatic", enabled: true, confirmed: true, revision: item.revision });
+  assert.equal(f.store.rows.get(f.ids.companyId).jobs[item.id].grantNonce, originalNonce);
+  const renewed = await f.first();
+  await f.service.edit(f.claims, item.id, { action: "cancel", revision: renewed.revision });
+  f.setSources([{ key: "plan:replacement", planningId: "plan-synthetic", orderId: "replacement", date: "2026-09-10", time: "12:05",
+    caption: "Extra", imageReady: true, version: "1", authorizationEnvelope: f.envelope }]);
+  assert.equal((await f.first()).automatic, false);
+  f.due(); await f.service.tick(); assert.deepEqual(f.sent, []);
+});
+test("gates, foreign binding, missing connection and overdue time block both destinations", async () => {
+  for (const reason of ["gates", "binding", "connection", "overdue", "creator"]) {
+    const f = formattedFixture(); await f.first(); f.due();
+    if (reason === "gates") f.setOpen(false);
+    if (reason === "binding") f.setBinding({ ...f.binding, externalId: "999999999999" });
+    if (reason === "connection") f.setBinding(null);
+    if (reason === "overdue") f.setTime(model.dateTime("2026-09-10", "12:16"));
+    if (reason === "creator") f.publisher.connection = async () => ({ binding: f.binding, accountType: "creator" });
+    await f.service.tick(); assert.deepEqual(f.sent, [], reason);
+  }
+});
+test("responsive JPEG variants retain opposite artwork corners without white bars or distortion", async t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ia4tube-format-synthetic-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const sharp = require("sharp");
+  const marker = color => sharp({ create: { width: 160, height: 160, channels: 3, background: color } }).png().toBuffer();
+  let original = await sharp({ create: { width: 1152, height: 1440, channels: 3, background: "#cc2244" } })
+    .composite([{ input: await marker("#00cc00"), left: 0, top: 0 }, { input: await marker("#0000cc"), left: 992, top: 1280 }]).png().toBuffer();
+  const company = crypto.randomUUID(); const media = createCalendarMedia({ dataDir: root, secret: "synthetic-only-".repeat(4),
+    publicOrigin: "https://synthetic.invalid", loadSource: async () => original }); t.after(() => media.close());
+  const asset = await media.prepare("synthetic", company, { layout: "safe_master_v1", destination: "both" });
+  for (const [target, height] of [["feed", 1350], ["story", 1920]]) {
+    const bytes = media.bytesFor(company, asset.variants[target]); const metadata = await sharp(bytes).metadata();
+    assert.equal(metadata.width, 1080); assert.equal(metadata.height, height);
+    const offset = target === "story" ? 285 : 0;
+    const topCorner = await sharp(bytes).extract({ left: 40, top: offset + 40, width: 1, height: 1 }).raw().toBuffer();
+    const bottomCorner = await sharp(bytes).extract({ left: 1040, top: offset + 1310, width: 1, height: 1 }).raw().toBuffer();
+    assert.ok(topCorner[1] > 180 && topCorner[0] < 30, "top-left content stays intact");
+    assert.ok(bottomCorner[2] > 180 && bottomCorner[0] < 30, "bottom-right content stays intact");
+    if (target === "story") {
+      const background = await sharp(bytes).extract({ left: 0, top: 0, width: 1, height: 1 }).raw().toBuffer();
+      assert.ok(background[1] < 100, "extension is derived artwork background, not a white band");
+    }
+  }
+  const a = media.descriptor(company, { target: "feed", asset: asset.variants.feed, caption: "Texto" });
+  const b = media.descriptor(company, { target: "story", asset: asset.variants.story, caption: "Texto" });
+  assert.notEqual(a.metadataDigest, b.metadataDigest);
+  original = await sharp({ create: { width: 1024, height: 1536, channels: 3, background: "red" } }).png().toBuffer();
+  await assert.rejects(media.prepare("synthetic", company, { layout: "safe_master_v1" }), { code: "calendar_format_source_invalid" });
 });

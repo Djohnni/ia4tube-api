@@ -131,6 +131,7 @@ function canonicalPermalink(value) {
     connectorFail("provider_result_unknown");
   }
   const match = parsed.pathname.match(/^\/p\/([A-Za-z0-9_-]{3,100})\/?$/);
+  const story = parsed.pathname.match(/^\/stories\/([A-Za-z0-9_.]{1,30})\/([0-9]{5,64})\/?$/);
   if (
     parsed.protocol !== "https:" ||
     parsed.hostname !== "www.instagram.com" ||
@@ -139,11 +140,11 @@ function canonicalPermalink(value) {
     parsed.password ||
     parsed.search ||
     parsed.hash ||
-    !match
+    (!match && !story)
   ) {
     connectorFail("provider_result_unknown");
   }
-  return `https://www.instagram.com/p/${match[1]}/`;
+  return match ? `https://www.instagram.com/p/${match[1]}/` : `https://www.instagram.com/stories/${story[1]}/${story[2]}/`;
 }
 
 function confirmedReference(mediaId, permalink, clock = Date.now) {
@@ -159,6 +160,13 @@ function confirmedReference(mediaId, permalink, clock = Date.now) {
 
 function parseConfirmedReference(value) {
   const clean = safeReference(value);
+  const story = clean.match(/^igs:([0-9]{5,64}):([0-9a-f]*):([0-9]{1,16})$/);
+  if (story) {
+    if (story[2].length % 2 !== 0 || Number(story[3]) < 1 || !Number.isSafeInteger(Number(story[3])) || String(Number(story[3])) !== story[3]) connectorFail("resource_unavailable");
+    const permalink = story[2] ? canonicalPermalink(Buffer.from(story[2], "hex").toString("utf8")) : null;
+    if (permalink && Buffer.from(permalink).toString("hex") !== story[2]) connectorFail("resource_unavailable");
+    return Object.freeze({ mediaId: story[1], permalink, publishedEpochSeconds: Number(story[3]), destination: "story" });
+  }
   const match = clean.match(/^igm:([0-9]{5,64}):([0-9a-f]+):([0-9]{1,16})$/);
   if (!match || match[2].length % 2 !== 0) {
     connectorFail("resource_unavailable");
@@ -294,6 +302,8 @@ function requireToken(value) {
 }
 
 function createInstagramPublicationConnector(options = {}) {
+  const destination = options.destination || "feed";
+  if (!["feed", "story"].includes(destination)) connectorFail("connector_contract_invalid");
   const config = options.config;
   const store = options.store;
   const credentials = options.credentials;
@@ -551,7 +561,7 @@ function createInstagramPublicationConnector(options = {}) {
     const result = await requestJson(accessToken, {
       method: "GET",
       mutation: false,
-      url: graphUrl(`/${id}`, { fields: "id,permalink,timestamp" })
+      url: graphUrl(`/${id}`, { fields: destination === "story" ? "id,permalink,timestamp,media_product_type" : "id,permalink,timestamp" })
     });
     const publishedAtMs = new Date(result.timestamp).getTime();
     if (!Number.isFinite(publishedAtMs)) {
@@ -559,11 +569,20 @@ function createInstagramPublicationConnector(options = {}) {
     }
     const returnedId = numericMediaId(result.id);
     if (returnedId !== id) connectorFail("provider_result_unknown");
+    if (destination === "story" && result.media_product_type !== "STORY") connectorFail("provider_result_unknown");
+    if (destination === "feed" && String(result.permalink || "").includes("/stories/")) connectorFail("provider_result_unknown");
     return Object.freeze({
       mediaId: returnedId,
-      permalink: canonicalPermalink(result.permalink),
+      permalink: destination === "story" && !result.permalink ? null : canonicalPermalink(result.permalink),
       publishedAtMs
     });
+  }
+  function confirmation(record) {
+    if (destination !== "story") return confirmedReference(record.mediaId, record.permalink, () => record.publishedAtMs);
+    const seconds = Math.floor(record.publishedAtMs / 1000);
+    if (!Number.isSafeInteger(seconds) || seconds < 1) connectorFail("provider_result_unknown");
+    const encoded = record.permalink ? Buffer.from(canonicalPermalink(record.permalink)).toString("hex") : "";
+    return safeReference(`igs:${numericMediaId(record.mediaId)}:${encoded}:${seconds}`);
   }
 
   async function findPublishedByCaption(
@@ -571,6 +590,7 @@ function createInstagramPublicationConnector(options = {}) {
     connection,
     publication
   ) {
+    if (destination === "story") return null; // Never infer a Story identity from a caption or a feed list.
     let result;
     try {
       result = await requestJson(accessToken, {
@@ -677,6 +697,10 @@ function createInstagramPublicationConnector(options = {}) {
         ) {
           connectorFail("resource_unavailable");
         }
+        if ((owned.destination || "feed") !== destination ||
+            (destination === "story" && (connection.account.accountType !== "business" || owned.width !== 1080 || owned.height !== 1920))) {
+          connectorFail("resource_unavailable");
+        }
         if (bound && (publicationSnapshot.mediaReference !== image.mediaId ||
             publicationSnapshot.caption !== source.caption ||
             publicationSnapshot.idempotencyKey !== source.idempotencyKey ||
@@ -694,7 +718,8 @@ function createInstagramPublicationConnector(options = {}) {
         }
         const body = new URLSearchParams();
         body.set("image_url", owned.publicUrl);
-        body.set("caption", source.caption);
+        if (destination === "story") body.set("media_type", "STORIES");
+        else body.set("caption", source.caption);
         const createClaim = await claimStage(context, source, connection, "create_container");
         let containerId;
         try {
@@ -805,11 +830,7 @@ function createInstagramPublicationConnector(options = {}) {
           const mediaRecord = await getMedia(accessToken, mediaId);
           return Object.freeze({
             outcome: "published",
-            confirmedProviderReference: confirmedReference(
-              mediaRecord.mediaId,
-              mediaRecord.permalink,
-              () => mediaRecord.publishedAtMs
-            )
+            confirmedProviderReference: confirmation(mediaRecord)
           });
         } catch {
           return Object.freeze({
@@ -961,11 +982,7 @@ function createInstagramPublicationConnector(options = {}) {
         }
         return Object.freeze({
           outcome: "published",
-          confirmedProviderReference: confirmedReference(
-            confirmed.mediaId,
-            confirmed.permalink,
-            () => confirmed.publishedAtMs
-          )
+          confirmedProviderReference: confirmation(confirmed)
         });
       }, bound
     );

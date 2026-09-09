@@ -11,6 +11,7 @@ import requests
 from openai import OpenAI
 from PIL import Image, ImageDraw, ImageFont
 from nicho_knowledge_local import build_local_niche_knowledge_for_order, resolve_local_nicho_id
+from editorial_niche import editorial_context, editorial_caption, editorial_fallback
 
 API_BASE = os.environ.get("IA4TUBE_API_BASE", "https://api.ia4tube.com.br").rstrip("/")
 DESCRIPTION_TIMEOUT_SECONDS = float(os.environ.get("IA4TUBE_DESCRIPTION_TIMEOUT_SECONDS", "30"))
@@ -2719,7 +2720,10 @@ def prepare_reference_image_file(caminho: Path, temp_files: list[Path]):
         return None
 
 
-def render_via_chatgpt_api(output_path: Path, prompt: str, arquivos_referencia: list[Path], allow_prompt_only: bool = False):
+def render_via_chatgpt_api(output_path: Path, prompt: str, arquivos_referencia: list[Path], allow_prompt_only: bool = False, size_override: str | None = None):
+    if size_override not in (None, "1152x1440"):
+        raise ValueError("Formato de arte nao autorizado.")
+    render_size = size_override or SIZE
     api_key = load_api_key()
     client = OpenAI(api_key=api_key)
 
@@ -2736,7 +2740,7 @@ def render_via_chatgpt_api(output_path: Path, prompt: str, arquivos_referencia: 
                 raise ValueError("Nenhuma imagem de referencia valida encontrada para enviar ao ChatGPT API.")
             log("Nenhuma referencia visual valida encontrada. Gerando somente com prompt.")
 
-        log(f"Modelo: {MODEL} | Size: {SIZE} | Quality: {QUALITY} | Formato API: {OUTPUT_FORMAT}")
+        log(f"Modelo: {MODEL} | Size: {render_size} | Quality: {QUALITY} | Formato API: {OUTPUT_FORMAT}")
 
         if image_files:
             log(f"Enviando {len(image_files)} imagens para ChatGPT API...")
@@ -2744,7 +2748,7 @@ def render_via_chatgpt_api(output_path: Path, prompt: str, arquivos_referencia: 
                 model=MODEL,
                 image=image_files,
                 prompt=prompt,
-                size=SIZE,
+                size=render_size,
                 quality=QUALITY,
                 output_format=OUTPUT_FORMAT,
                 n=N,
@@ -2753,7 +2757,7 @@ def render_via_chatgpt_api(output_path: Path, prompt: str, arquivos_referencia: 
             result = client.images.generate(
                 model=MODEL,
                 prompt=prompt,
-                size=SIZE,
+                size=render_size,
                 quality=QUALITY,
                 output_format=OUTPUT_FORMAT,
                 n=N,
@@ -3162,6 +3166,7 @@ def limpar_descricao_instagram(texto, pedido=None):
 
 
 def gerar_descricao_instagram(pedido, linhas_texto):
+    niche_context = editorial_context(pedido, "caption")
     try:
         client = OpenAI(api_key=load_api_key())
         categoria = get_categoria(pedido)
@@ -3269,18 +3274,22 @@ REGRAS SOBRE CARACTERISTICAS DA EMPRESA:
 - Nunca invente caracteristicas permanentes nao informadas, como delivery, estacionamento, Pix, cartao, parcelamento, drive-thru, horario especial ou atendimento 24 horas.
 - So mencione delivery, entrega, receber em casa, app ou termos equivalentes se houver caracteristica marcada ligada a delivery/entrega ou se isso estiver escrito nas informacoes importantes.
 """
+        if niche_context:
+            prompt += "\n\n" + niche_context
 
         response = client.responses.create(
             model="gpt-5-mini",
             input=prompt
         )
 
-        return limpar_descricao_instagram(response.output_text, pedido)
+        return editorial_caption(pedido, limpar_descricao_instagram(response.output_text, pedido))
 
     except Exception:
-        return ""
+        return editorial_fallback(pedido) if niche_context else ""
 
 def gerar_descricao_instagram_fallback(pedido, linhas_texto):
+    if editorial_fallback(pedido):
+        return editorial_fallback(pedido)
     nome = normalize_text(pedido.get("nome_empresa") or pedido.get("data") or "").strip()
     ramo = normalize_text(pedido.get("ramo") or "").strip()
     whatsapp = normalize_text(pedido.get("whatsapp_contato") or "").strip()

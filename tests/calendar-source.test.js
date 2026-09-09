@@ -27,6 +27,10 @@ test("real existing creation, plan, child artwork and calendar feed the bridge w
     postagens: [{ ordem: 1, tema: "Arte sintética", objetivo: "Divulgar", data_sugerida: "2099-01-02", horario_sugerido: "12:00" }] } });
   const source = createCalendarSource({ dataDir: root, planningDir: baseDir, ordersDir: pedidosDir });
   const pending = source.list(owner); assert.equal(pending.length, 1); assert.equal(pending[0].imageReady, false);
+  assert.equal(pending[0].destination, "feed"); assert.equal(pending[0].layout, "safe_master_v1");
+  const allOrders = require("../src/orders/order.storage").listPedidoBasesByWhatsapp(pedidosDir, owner);
+  const child = allOrders.find(entry => entry.id === pending[0].orderId).pedido;
+  assert.equal(child.planejamento_mensal.instagram_layout, "safe_master_v1");
   assert.ok(grants.verify(pending[0].authorizationEnvelope, companyId, userId));
   const image = await require("sharp")({ create: { width: 200, height: 200, channels: 3, background: "white" } }).png().toBuffer();
   const resultPath = path.join(root, "result.png"); fs.writeFileSync(resultPath, image);

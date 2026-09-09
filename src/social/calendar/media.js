@@ -22,9 +22,30 @@ function createCalendarMedia({ dataDir, secret, publicOrigin, loadSource, clock 
     const input = sharp(bytes, { limitInputPixels: 25 * 1000 * 1000, failOn: "error" });
     const meta = await input.metadata();
     if (!["png", "jpeg", "webp"].includes(meta.format) || (meta.pages || 1) !== 1) fail("calendar_media_invalid");
+    if (job.layout === "safe_master_v1") {
+      // Preserve the entire Feed artwork in both placements; a prompt is not a crop-safety proof.
+      const rotated = await input.rotate().flatten({ background: "#ffffff" }).png().toBuffer();
+      const geometry = await sharp(rotated).metadata();
+      if (geometry.width !== 1152 || geometry.height !== 1440) fail("calendar_format_source_invalid");
+      const feed = await sharp(rotated).resize(1080, 1350).png().toBuffer();
+      const variants = {};
+      for (const target of ["feed", "story"]) {
+        // Only the decorative background is cropped/blurred. The foreground is never cropped.
+        const frame = target === "feed" ? sharp(feed) : sharp(rotated)
+          .resize(1080, 1920, { fit: "cover" }).blur(50).composite([{ input: feed, left: 0, top: 285 }]);
+        const height = target === "feed" ? 1350 : 1920;
+        const jpeg = await frame.toColourspace("srgb")
+          .jpeg({ quality: 92, chromaSubsampling: "4:4:4" }).toBuffer();
+        variants[target] = persist(companyId, jpeg, sourceHash, 1080, height);
+      }
+      return { ...variants[job.destination === "story" ? "story" : "feed"], variants };
+    }
     const jpeg = await input.rotate().flatten({ background: "#ffffff" })
       .resize(1080, 1080, { fit: "contain", background: "#ffffff" })
       .toColourspace("srgb").jpeg({ quality: 92, chromaSubsampling: "4:4:4" }).toBuffer();
+    return persist(companyId, jpeg, sourceHash, 1080, 1080);
+  }
+  function persist(companyId, jpeg, sourceHash, width, height) {
     if (jpeg.length > MAX_BYTES) fail("calendar_media_too_large");
     const sha = digest(jpeg); const file = filename(companyId, sha);
     fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
@@ -35,7 +56,7 @@ function createCalendarMedia({ dataDir, secret, publicOrigin, loadSource, clock 
       try { fs.writeFileSync(fd, jpeg); fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
       fs.renameSync(temp, file);
     }
-    return { sha, sourceHash, width: 1080, height: 1080, size: jpeg.length };
+    return { sha, sourceHash, width, height, size: jpeg.length };
   }
   function bytesFor(companyId, asset) {
     const file = filename(companyId, asset.sha);
@@ -51,9 +72,13 @@ function createCalendarMedia({ dataDir, secret, publicOrigin, loadSource, clock 
     const expires = Math.floor(clock() / 1000) + 900;
     const signature = sign(`${companyId}:${job.asset.sha}:${expires}`);
     const publicUrl = `${publicOrigin}/v1/social/calendar/media/${companyId}/${job.asset.sha}/${expires}/${signature}`;
-    return Object.freeze({ companyId, mediaId: `calendar-jpeg:${job.asset.sha}`, mimeType: "image/jpeg",
-      width: 1080, height: 1080, caption: job.caption, publicUrl, thumbnailUrl: publicUrl,
-      metadataDigest: digest(JSON.stringify([companyId, job.asset.sha, job.caption])) });
+    const metadata = [companyId, job.asset.sha, job.caption];
+    // Pending legacy Feed intents retain the digest they were created with.
+    if (job.layout === "safe_master_v1" || job.target) metadata.push(job.target || "feed");
+    return Object.freeze({ companyId, mediaId: `${job.target === "story" ? "calendar-story-jpeg" : "calendar-jpeg"}:${job.asset.sha}`, mimeType: "image/jpeg",
+      width: job.asset.width, height: job.asset.height, caption: job.caption, publicUrl, thumbnailUrl: publicUrl,
+      destination: job.target || "feed",
+      metadataDigest: digest(JSON.stringify(metadata)) });
   }
   async function unchanged(owner, job) { return digest(await loadSource(owner, job)) === job.asset.sourceHash; }
   function publicBytes(companyId, sha, expires, signature) {

@@ -40,7 +40,8 @@ function createCalendarSource({ dataDir, planningDir, ordersDir }) {
       catch { ready = false; }
       return { key: item.calendar_key, planningId: item.planning_id, orderId: item.pedido_id,
         title: item.titulo, date: item.data, time: item.horario, caption: item.legenda || "",
-        imageReady: ready, version, authorizationEnvelope, calendarPayload: item };
+        imageReady: ready, version, authorizationEnvelope, calendarPayload: item,
+        destination: plan.instagram_destination || "feed", layout: plan.instagram_layout || null };
     }).filter(item => item && item.planningId && item.orderId);
   }
   return Object.freeze({ list, async load(owner, job) { return fs.readFileSync(result(owner, job).file); } });

@@ -1418,6 +1418,7 @@ function listAllPlanningDirs(baseDir) {
 }
 
 function createRequest({ baseDir, cliente, whatsapp, body = {}, files = {}, freeArtBlocked = false, calendarAuthorizationFactory = null }) {
+  const instagramDestination = require("../social/calendar/destinations").destination(body.instagram_destination || "feed");
   const parsedPhotoItems = parsePlanningPhotoItems(body);
   const hasStructuredPhotoItems = planningPhotoItemsAreStructured(parsedPhotoItems);
   const quantidadeReservada = hasStructuredPhotoItems ? parsedPhotoItems.length : normalizeQuantity(body);
@@ -1474,6 +1475,8 @@ function createRequest({ baseDir, cliente, whatsapp, body = {}, files = {}, free
   const reservation = reservePlanningArts(cliente, planningId, quantidadeReservada, now, billing, charge);
   const solicitacao = {
     id: planningId,
+    instagram_destination: instagramDestination,
+    instagram_layout: "safe_master_v1",
     planejamento_id: planningId,
     tipo: "planejamento_mensal",
     status: "em_analise",
@@ -3559,6 +3562,8 @@ function buildChildOrder({ planning, item, itemId, pedidoId, mesAtual, copiedAss
   const chargeFields = planningChargeFieldsForItem(planning, item);
   const planningMeta = {
     origem: "planejamento_mensal",
+    instagram_destination: planning.instagram_destination || "feed",
+    instagram_layout: planning.instagram_layout || null,
     planejamento_id: planning.planejamento_id || planning.id,
     planejamento_item_id: itemId,
     ordem: Number(item.ordem || 0),

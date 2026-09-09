@@ -24,7 +24,7 @@ function createCalendarRouter({ authenticate, getService, logger }) {
   router.use(authenticate);
   router.get("/", call(async (service, req, res) => res.json(await readCalendarWithRecovery(() => service.list(req.user), logger))));
   router.post("/preferences", call(async (service, req, res) => res.json(await service.preferences(req.user, req.body || {}))));
-  router.get("/items/:id/image", call(async (service, req, res) => res.type("jpeg").send(await service.image(req.user, req.params.id))));
+  router.get("/items/:id/image", call(async (service, req, res) => res.type("jpeg").send(await service.image(req.user, req.params.id, req.query.destination ?? null))));
   router.post("/items/:id", call(async (service, req, res) => res.json(await service.edit(req.user, req.params.id, req.body || {}))));
   return router;
 }

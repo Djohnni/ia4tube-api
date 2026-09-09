@@ -73,7 +73,9 @@
     const article = document.createElement("article");
     const text = document.createElement("pre");
     const labels = { published: "Publicado — confirmação recebida", sending: "Enviando", provider_confirming: "Confirmando — resultado ainda incerto" };
-    text.textContent = `${labels[value.state] || value.state}\n${value.caption}\nReferência: ${value.publicationId}\nMedia ID: ${value.providerMediaId || "Aguardando confirmação"}\nHorário: ${value.publishedAt || "—"}`;
+    const placement = value.destination === "story" ? "Story" : "Feed";
+    const description = placement === "Story" ? "Imagem no Story — sem legenda do Feed" : value.caption;
+    text.textContent = `${labels[value.state] || value.state}\n${placement}\n${description}\nReferência: ${value.publicationId}\nMedia ID: ${value.providerMediaId || "Aguardando confirmação"}\nHorário: ${value.publishedAt || "—"}`;
     article.append(text);
     if (value.state === "provider_confirming" && value.binding) {
       const bound = document.createElement("pre");
@@ -85,7 +87,8 @@
     }
     if (value.state === "published" && value.permalink) {
       const url = new URL(value.permalink);
-      if (url.origin === "https://www.instagram.com" && /^\/p\/[A-Za-z0-9_-]+\/?$/.test(url.pathname)) {
+      if (url.origin === "https://www.instagram.com" && !url.username && !url.password && !url.search && !url.hash &&
+          (/^\/p\/[A-Za-z0-9_-]+\/?$/.test(url.pathname) || /^\/stories\/[A-Za-z0-9_.]+\/[0-9]+\/?$/.test(url.pathname))) {
         const link = document.createElement("a"); link.href = url.href; link.target = "_blank"; link.rel = "noopener noreferrer"; link.textContent = "Abrir publicação no Instagram"; article.append(link);
       }
     }

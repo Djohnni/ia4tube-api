@@ -4,7 +4,7 @@ const crypto = require("node:crypto");
 const TIME_ZONE = "America/Sao_Paulo";
 const MAX_ITEMS = 1000;
 const LATE_MS = 10 * 60 * 1000;
-const LOCKED = new Set(["dispatching", "confirming", "published", "failed"]);
+const LOCKED = new Set(["dispatching", "confirming", "published", "failed", "partial"]);
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 function fail(code, status = 409) {
   const error = new Error("Não foi possível atualizar esta programação. Atualize e confira o estado atual.");
@@ -37,7 +37,7 @@ function dateTime(date, time) {
   if (`${p.year}-${p.month}-${p.day}` !== date || `${p.hour}:${p.minute}` !== time || !Number.isFinite(result)) fail("calendar_time_invalid", 400);
   return result;
 }
-function freshState() { return { schema: 1, preferences: { enabled: false, revision: 1, binding: null }, jobs: {} }; }
+function freshState() { return { schema: 1, preferences: { enabled: true, revision: 1, binding: null }, jobs: {} }; }
 function validBinding(binding) {
   return binding && UUID.test(binding.connectionId) && /^[0-9]{5,64}$/.test(binding.externalId || "") &&
     Number.isSafeInteger(binding.connectionRevision) && binding.connectionRevision > 0;
@@ -46,7 +46,7 @@ function sameBinding(a, b) { return Boolean(validBinding(a) && validBinding(b) &
   a.connectionId === b.connectionId && a.externalId === b.externalId && a.connectionRevision === b.connectionRevision); }
 function editable(job, revision) {
   if (!job || !Number.isSafeInteger(revision) || job.revision !== revision) fail("calendar_revision_conflict");
-  if (LOCKED.has(job.phase) || job.intent) fail("calendar_dispatch_started");
+  if (LOCKED.has(job.phase) || require("./destinations").started(job)) fail("calendar_dispatch_started");
   if (job.phase === "cancelled") fail("calendar_cancelled");
 }
 function changeJob(state, id, input, now) {
@@ -54,6 +54,17 @@ function changeJob(state, id, input, now) {
   if (!job) fail("calendar_not_found", 404);
   editable(job, input.revision);
   if (input.action === "cancel") { job.phase = "cancelled"; job.cancelledAt = now; }
+  else if (input.action === "automatic") {
+    if (typeof input.enabled !== "boolean") fail("calendar_automatic_invalid", 400);
+    job.automaticEnabled = input.enabled;
+  }
+  else if (input.action === "destination") {
+    const target = require("./destinations").destination(input.destination);
+    if (input.confirmed !== true) fail("calendar_preview_required", 400);
+    if (job.layout !== "safe_master_v1" || !job.assets?.feed || !job.assets?.story) fail("calendar_formats_not_ready");
+    job.destination = target;
+    job.asset = job.assets[target === "story" ? "story" : "feed"];
+  }
   else if (input.action === "caption") {
     job.caption = caption(input.caption); job.captionEdited = true;
     if (job.caption && job.error === "calendar_caption_invalid") { job.error = null; job.phase = job.asset ? "ready" : "waiting_media"; }
@@ -86,20 +97,21 @@ function syncSources(state, sources, companyId, now) {
       job = state.jobs[id] = { id, sourceKey: source.key, planningId: source.planningId, orderId: source.orderId,
         title: source.title || "Arte programada", date: source.date, time: source.time, scheduledAt,
         caption: initialCaption, error: initialError, revision: 1, phase: "waiting_media", asset: null,
-        authorization, grantNonce: authorization?.nonce || null, sourceVersion: source.version, createdAt: now, updatedAt: now };
+        authorization, automaticEnabled: Boolean(authorization), destination: source.destination || "feed", layout: source.layout || null,
+        grantNonce: authorization?.nonce || null, sourceVersion: source.version, createdAt: now, updatedAt: now };
     }
     if (LOCKED.has(job.phase) || job.phase === "cancelled") continue;
     if (job.sourceVersion !== source.version) {
       // A replacement of an already prepared image must never publish under the old visual approval.
       if (job.asset) { job.phase = "attention"; job.error = "calendar_art_changed"; job.authorization = null; }
-      job.asset = null; job.sourceVersion = source.version; job.revision++;
+      job.asset = null; job.assets = null; job.sourceVersion = source.version; job.revision++;
       if (job.error === "calendar_image_preparation_failed") job.error = null;
       if (!job.captionEdited) {
         try { job.caption = caption(source.caption || ""); if (job.error === "calendar_caption_invalid") job.error = null; }
         catch { job.caption = ""; job.error = job.error || "calendar_caption_invalid"; }
       }
     }
-    if (!source.imageReady) { job.asset = null; job.phase = job.error ? "attention" : "waiting_media"; }
+    if (!source.imageReady) { job.asset = null; job.assets = null; job.phase = job.error ? "attention" : "waiting_media"; }
   }
   // Legacy hide/cancel operations cannot leave an invisible future dispatch behind.
   for (const job of Object.values(state.jobs)) if (!seen.has(job.id) && !LOCKED.has(job.phase) && job.phase !== "cancelled") {
@@ -110,8 +122,10 @@ function availability(job, preferences, binding, gatesOpen, now) {
   if (job.phase === "cancelled") return "cancelled";
   if (job.phase === "published") return "published";
   if (job.phase === "failed") return "attention";
+  if (job.phase === "partial") return "partial";
   if (["dispatching", "confirming"].includes(job.phase)) return job.phase;
   if (!job.authorization) return job.error ? "attention" : "manual";
+  if (job.automaticEnabled === false) return "item_paused";
   if (job.authorization.validUntil <= now || job.scheduledAt + LATE_MS >= job.authorization.validUntil) return "attention";
   if (job.scheduledAt + LATE_MS < now) return "overdue";
   if (!preferences.enabled) return "paused";

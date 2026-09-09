@@ -391,13 +391,15 @@ function publicPublication(value, account = null) {
   let providerMediaId = null;
   let permalink = null;
   let publishedAt = null;
+  let destination = String(value.mediaReference || "").startsWith("calendar-story-jpeg:") ? "story" : "feed";
   if (value.state === "published") {
     if (value.publishedAt === null) connectorFail("resource_unavailable");
     const confirmed = parseConfirmedReference(
       value.confirmedProviderReference
     );
     providerMediaId = confirmed.mediaId;
-    permalink = canonicalPermalink(confirmed.permalink);
+    destination = confirmed.destination || "feed";
+    permalink = destination === "story" && confirmed.permalink === null ? null : canonicalPermalink(confirmed.permalink);
     publishedAt = new Date(
       confirmed.publishedEpochSeconds * 1000
     ).toISOString();
@@ -417,6 +419,7 @@ function publicPublication(value, account = null) {
       mimeType: "image/jpeg"
     }),
     caption: safeCaption(value.caption),
+    destination,
     providerMediaId,
     permalink,
     publishedAt,

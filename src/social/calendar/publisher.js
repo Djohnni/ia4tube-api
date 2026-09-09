@@ -18,10 +18,10 @@ function createCalendarPublisher({ config, connectorStore, connectorAudit, crede
     const registry = createConnectorRegistry({ environment: config.environment, gates: {
       externalConnectionEnabled: true, externalPublicationEnabled: true,
       enabledProviders: ["instagram"], companyAllowlist: [context.companyId] } });
-    registry.register(createInstagramPublicationConnector({ config, store: connectorStore, credentials,
+    registry.register(createInstagramPublicationConnector({ config, store: connectorStore, credentials, destination: job.target || "feed",
       media: scopedMedia, transport, authorizeContext: candidate => candidate === context && allowed(candidate),
       authorizeConnection: connection => connection.account?.externalId === job.authorization.binding.externalId &&
-        ["business", "creator"].includes(connection.account?.accountType),
+        (job.target === "story" ? connection.account?.accountType === "business" : ["business", "creator"].includes(connection.account?.accountType)),
       authorizePublicationRequest: input => input.image.mediaId === descriptor.mediaId && input.caption === job.caption,
       authorizePublication: input => input.owned.metadataDigest === descriptor.metadataDigest && input.caption === job.caption,
       // Commercial captions are exact. Identical text is NOT evidence of identity.
@@ -52,7 +52,7 @@ function createCalendarPublisher({ config, connectorStore, connectorAudit, crede
           !connection.activeCredentialId || !["business", "creator"].includes(connection.account?.accountType) ||
           !["instagram_business_basic", "instagram_business_content_publish"].every(scope => (connection.grantedScopes || []).includes(scope))) return null;
       return { binding: { connectionId: connection.id, externalId: connection.account.externalId,
-        connectionRevision: connection.revision }, username: connection.account.username };
+        connectionRevision: connection.revision }, username: connection.account.username, accountType: connection.account.accountType };
     },
     async observe(context, job) {
       const current = await status(context, job.intent.publicationId);
