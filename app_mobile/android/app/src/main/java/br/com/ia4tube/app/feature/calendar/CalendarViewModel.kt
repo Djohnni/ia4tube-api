@@ -45,6 +45,14 @@ class CalendarViewModel(private val tokenProvider: () -> String, private val tok
         }
     }
     fun refresh() = run { gateway.list() }
+    fun destination(item: ScheduledArt, destination: String, onSuccess: () -> Unit) {
+        if (!item.editable || state.value.data.items.none { it.id == item.id && it.revision == item.revision }) return
+        run(true, onSuccess) { gateway.destination(item, destination) }
+    }
+    fun automatic(item: ScheduledArt, enabled: Boolean, onSuccess: () -> Unit) {
+        if (!item.editable || state.value.data.items.none { it.id == item.id && it.revision == item.revision }) return
+        run(true, onSuccess) { gateway.automatic(item, enabled) }
+    }
     fun preferences(enabled: Boolean) { val revision = state.value.data.preferenceRevision
         run(true) { gateway.preferences(enabled, revision) } }
     fun edit(item: ScheduledArt, action: String, caption: String = "", date: String = "", time: String = "", onSuccess: () -> Unit = {}) {

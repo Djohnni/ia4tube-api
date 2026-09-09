@@ -291,9 +291,11 @@ class InstagramApiClient private constructor(
         val providerId = value.nullableText("providerMediaId", 64)
         val permalink = value.nullableText("permalink", 200)
         val publishedAt = value.nullableDate("publishedAt")
+        val destination = value.optString("destination", "feed")
+        require(destination in setOf("feed", "story"))
         if (state == "published") {
             require(providerId != null && Regex("^[0-9]{5,64}$").matches(providerId))
-            require(permalink != null && InstagramPolicies.isOfficialPermalink(permalink) && publishedAt != null)
+            require(publishedAt != null && if (permalink == null) destination == "story" else InstagramPolicies.isOfficialPermalink(permalink))
         } else require(providerId == null && permalink == null && publishedAt == null)
         val connectionId = value.requiredUuid("connectionId")
         require(value.has("binding"))
@@ -303,7 +305,7 @@ class InstagramApiClient private constructor(
         }
         return InstagramPublication(value.requiredUuid("publicationId"), connectionId,
             state, mediaId, caption, username, type, providerId, permalink, publishedAt,
-            value.requiredDate("createdAt"), value.requiredDate("updatedAt"), binding)
+            value.requiredDate("createdAt"), value.requiredDate("updatedAt"), binding, destination)
     }
 
     private fun validateAccount(username: String?, type: String?) {

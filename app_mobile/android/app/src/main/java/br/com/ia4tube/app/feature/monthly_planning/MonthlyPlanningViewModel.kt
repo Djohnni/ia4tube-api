@@ -107,6 +107,7 @@ data class MonthlyPlanningUiState(
     val calendarLoading: Boolean = false,
     val calendarAutomatic: Boolean = false,
     val calendarPreferenceRevision: Long = 0,
+    val instagramDestination: String = "feed",
     val calendarError: String? = null,
     val calendarSuccessMessage: String? = null,
     val reschedulingCalendarItemKeys: Set<String> = emptySet(),
@@ -1001,6 +1002,10 @@ class MonthlyPlanningViewModel(
         }
     }
 
+    fun setInstagramDestination(destination: String) {
+        if (destination !in setOf("feed", "story", "both")) return
+        _uiState.update { it.copy(instagramDestination = destination) }
+    }
     fun setCalendarPreference(enabled: Boolean, revision: Long) {
         _uiState.update { it.copy(calendarAutomatic = enabled, calendarPreferenceRevision = revision) }
     }
@@ -1140,7 +1145,8 @@ class MonthlyPlanningViewModel(
                 logo = uiProfile.logoFile,
                 fotos = activePhotos.map { it.toRequestInput() },
                 calendarAutomatic = current.calendarAutomatic,
-                calendarPreferenceRevision = current.calendarPreferenceRevision
+                calendarPreferenceRevision = current.calendarPreferenceRevision,
+                instagramDestination = current.instagramDestination
             )
 
             when (val result = repository.solicitarPlanejamentoMensal(request)) {

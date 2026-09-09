@@ -409,6 +409,7 @@ class IA4TubeApiClient(
             .addFormDataPart("informacoes_empresa", requestData.informacoesEmpresa)
             .addFormDataPart("orientacoes_fotos", monthlyPlanningPhotoOrientationsJson(requestData))
             .addFormDataPart("calendar_automatic", requestData.calendarAutomatic.toString())
+            .addFormDataPart("instagram_destination", requestData.instagramDestination)
             .addFormDataPart("calendar_preference_revision", requestData.calendarPreferenceRevision.toString())
 
         requestData.fotos.forEach { photo ->

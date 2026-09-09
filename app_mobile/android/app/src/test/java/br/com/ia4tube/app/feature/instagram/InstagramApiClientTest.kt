@@ -257,6 +257,27 @@ class InstagramApiClientTest {
         assertEquals(BINDING.connectionRevision, body.getLong("expectedConnectionRevision"))
     }
 
+    @Test fun confirmedStoryWithoutPermalinkStillRequiresProviderIdAndTime() = runBlocking {
+        val story = publication("published").put("destination", "story").put("providerMediaId", "1234567890")
+            .put("publishedAt", DATE).put("permalink", JSONObject.NULL)
+        enqueue(JSONObject().put("ok", true).put("publication", story))
+        val result = client.publication(PUBLICATION) as InstagramResult.Success
+        assertTrue(result.value.confirmed); assertEquals("story", result.value.destination); assertNull(result.value.permalink)
+        enqueue(JSONObject().put("ok", true).put("publication", story.put("publishedAt", JSONObject.NULL)))
+        assertEquals(InstagramResult.Failure(InstagramError.INVALID_RESPONSE), client.publication(PUBLICATION))
+    }
+
+    @Test fun storyLinkMustRemainOfficialAndCannotContainRedirectParameters() = runBlocking {
+        val link = "https://www.instagram.com/stories/fixture_account/1234567890/"
+        assertTrue(InstagramPolicies.isOfficialPermalink(link))
+        assertFalse(InstagramPolicies.isOfficialPermalink(link + "?next=https://evil.invalid"))
+        assertFalse(InstagramPolicies.isOfficialPermalink(link.replace("www.instagram.com", "evil.invalid")))
+        val story = publication("published").put("destination", "story").put("providerMediaId", "1234567890")
+            .put("publishedAt", DATE).put("permalink", link)
+        enqueue(JSONObject().put("ok", true).put("publication", story))
+        assertTrue((client.publication(PUBLICATION) as InstagramResult.Success).value.confirmed)
+    }
+
     @Test fun mutationResponsesMustCarryExactlyTheOriginalBinding() = runBlocking {
         for (changed in listOf(JSONObject.NULL, JSONObject().put("connectionId", CONNECTION)
             .put("externalId", BINDING.externalId).put("connectionRevision", 5L))) {

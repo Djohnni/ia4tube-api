@@ -72,10 +72,11 @@ data class InstagramPublication(
     val publishedAt: String?,
     val createdAt: String,
     val updatedAt: String,
-    val binding: InstagramConnectionBinding? = null
+    val binding: InstagramConnectionBinding? = null,
+    val destination: String = "feed"
 ) {
     val confirmed: Boolean get() = state == "published" && providerMediaId != null &&
-        permalink != null && publishedAt != null
+        (permalink != null || destination == "story") && publishedAt != null
     val pending: Boolean get() = state in setOf("ready", "publishing", "sending", "provider_confirming")
 }
 

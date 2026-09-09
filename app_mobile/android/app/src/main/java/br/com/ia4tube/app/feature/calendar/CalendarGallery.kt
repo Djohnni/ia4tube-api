@@ -4,6 +4,8 @@ import android.app.DatePickerDialog
 import android.app.TimePickerDialog
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.pager.VerticalPager
 import androidx.compose.foundation.pager.rememberPagerState
@@ -15,7 +17,9 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.graphics.vector.path
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
@@ -34,6 +38,16 @@ import java.time.format.DateTimeFormatter
 
 // Preview/test injection only; production always renders the owned, immutable server JPEG.
 internal val LocalScheduledArtRenderer = staticCompositionLocalOf<(@Composable (ScheduledArt, Modifier) -> Unit)?> { null }
+
+// A photo frame denotes formatting; never reuse the paper-plane/send symbol here.
+private val CalendarFormatIcon = ImageVector.Builder("CalendarFormat", 24.dp, 24.dp, 24f, 24f).apply {
+    path(fill = SolidColor(Color.White)) {
+        moveTo(3f, 3f); lineTo(21f, 3f); lineTo(21f, 21f); lineTo(3f, 21f); close()
+        moveTo(5f, 5f); lineTo(5f, 19f); lineTo(19f, 19f); lineTo(19f, 5f); close()
+        moveTo(6f, 17f); lineTo(10f, 12f); lineTo(13f, 15f); lineTo(15f, 12f); lineTo(18f, 17f); close()
+        moveTo(15f, 8f); lineTo(17f, 8f); lineTo(17f, 10f); lineTo(15f, 10f); close()
+    }
+}.build()
 
 @Composable
 fun rememberCalendarModel(tokenProvider: () -> String): CalendarViewModel {
@@ -66,7 +80,7 @@ fun ScheduledArtImage(item: ScheduledArt, token: String, modifier: Modifier = Mo
     if (url != null && token.isNotBlank()) {
         CompositionLocalProvider(LocalContentColor provides Color.White) {
             PrivateArtImage(url = CALENDAR_ORIGIN + url, token = token,
-                contentDescription = "Arte preparada para o Instagram, sem corte",
+                contentDescription = "Prévia do arquivo preparado para ${destinationLabel(item.destination)}",
                 contentScale = ContentScale.Fit, modifier = modifier,
                 revalidationKey = refreshKey,
                 errorText = "Não foi possível carregar a prévia. Feche e reabra para tentar novamente.")
@@ -81,7 +95,7 @@ fun CalendarAutomationSettings(model: CalendarViewModel) {
     if (!state.data.enabled) return
     Card { Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Text("Publicação pelo calendário", fontWeight = FontWeight.Bold)
-        Text(if (state.data.automatic) "Novos pedidos serão programados para o Instagram. Você pode mudar a legenda, a data ou excluir o agendamento no calendário."
+        Text(if (state.data.automatic) "A programação começa ativada para novos pedidos com Instagram conectado. Você pode desligar somente uma arte, mudar o destino, a legenda, a data e o horário no calendário."
             else "Ative uma vez para programar automaticamente as artes dos próximos pedidos.")
         Text("Conta: ${state.data.username?.let { "@$it" } ?: "conecte seu Instagram profissional"}")
         OutlinedButton(onClick = { if (state.data.automatic) model.preferences(false) else confirm = true },
@@ -107,7 +121,7 @@ fun ScheduledNextContent(model: CalendarViewModel, token: String, onGallery: () 
         Text("${next.date} às ${next.time} · Brasília")
         Text(if (state.fresh) next.statusLabel else "Estado não confirmado — atualize")
         OutlinedButton(onClick = onGallery) { Text("Editar na galeria") }
-        Text("Esta arte já está na programação. Não é necessário enviá-la manualmente.", style = MaterialTheme.typography.bodySmall)
+        Text("Destino: ${destinationLabel(next.destination)}. Não envie esta arte novamente pelo formulário manual.", style = MaterialTheme.typography.bodySmall)
     }
 }
 
@@ -135,27 +149,40 @@ fun CalendarGallery(model: CalendarViewModel, token: String, backLabel: String =
         if (state.busy) LinearProgressIndicator(Modifier.fillMaxWidth())
         state.error?.let { Text(it, color = Color(0xFFFFB4AB), modifier = Modifier.padding(8.dp)) }
         if (!state.data.enabled) {
-            if (state.busy) Text("Carregando suas artes… Isso pode levar até 1 minuto.", color = Color.White)
-            else if (state.error == null) Text("A galeria programada ainda não está disponível neste servidor.", color = Color.White)
+            if (!state.busy && state.error == null) Text("A galeria programada ainda não está disponível neste servidor.", color = Color.White)
         }
         else if (items.isEmpty()) Text("Nenhuma arte programada. As artes criadas aparecerão aqui.", color = Color.White, modifier = Modifier.padding(16.dp))
         else {
             val pager = rememberPagerState(initialPage = items.indexOfFirst { it.date >= today.toString() }.coerceAtLeast(0), pageCount = { items.size })
             VerticalPager(state = pager, key = { items[it].id }, modifier = Modifier.weight(1f)) { index ->
                 val art = items[index]
+                var preview by remember(art.id, art.destination) { mutableStateOf(if (art.destination == "story") "story" else "feed") }
                 Column(Modifier.fillMaxSize().padding(vertical = 12.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
                     Text("${art.username?.let { "@$it · " } ?: ""}${LocalDate.parse(art.date).format(DateTimeFormatter.ofPattern("dd/MM/yyyy"))} · ${art.time}", color = Color.White)
+                    if (art.destination == "both") Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        for (target in listOf("feed", "story")) FilterChip(selected = preview == target, onClick = { preview = target },
+                            colors = FilterChipDefaults.filterChipColors(labelColor = Color.White,
+                                selectedLabelColor = Color(0xFF211A31), selectedContainerColor = Color(0xFFEADDFF)),
+                            label = { Text(destinationLabel(target)) })
+                        Text("2 publicações", color = Color.White, modifier = Modifier.align(Alignment.CenterVertically))
+                    }
                     Row(Modifier.weight(1f), verticalAlignment = Alignment.CenterVertically) {
-                        ScheduledArtImage(art, token, Modifier.weight(1f).fillMaxHeight(), state.imageRefresh)
-                        Column(Modifier.width(actionWidth), verticalArrangement = Arrangement.spacedBy(14.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+                        ScheduledArtImage(art.copy(imageUrl = art.previews[preview] ?: art.imageUrl, destination = preview), token, Modifier.weight(1f).fillMaxHeight(), state.imageRefresh)
+                        Column(Modifier.width(actionWidth).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(4.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+                            GalleryAction(CalendarFormatIcon, "Formato", art.editable && art.formatsReady && state.fresh && !state.busy) { editing = art to "destination" }
                             GalleryAction(Icons.Default.Edit, "Legenda", art.editable && state.fresh && !state.busy) { editing = art to "caption" }
                             GalleryAction(Icons.Default.DateRange, "Data/hora", art.editable && state.fresh && !state.busy) { editing = art to "schedule" }
+                            GalleryAction(if (art.automatic) Icons.Default.CheckCircle else Icons.Default.Close,
+                                if (art.automatic) "Ativada" else "Desativada", art.editable && state.fresh && !state.busy,
+                                if (art.automatic) Color(0xFF64E6A5) else Color(0xFFFFD28A)) { editing = art to "automatic" }
                             GalleryAction(Icons.Default.Check, "Situação", true,
                                 if (state.fresh && art.status == "scheduled") Color(0xFF64E6A5) else Color(0xFFFFD28A)) { showStatus = art }
                             GalleryAction(Icons.Default.Delete, "Excluir", art.editable && state.fresh && !state.busy) { editing = art to "cancel" }
                         }
                     }
-                    Text(art.caption, color = Color.White, maxLines = 5, overflow = TextOverflow.Ellipsis)
+                    if (preview == "story") Text("Story · o Instagram não exibe a legenda do Feed aqui.", color = Color.White, style = MaterialTheme.typography.bodySmall)
+                    else Text(art.caption, color = Color.White, maxLines = 5, overflow = TextOverflow.Ellipsis)
+                    art.publications.forEach { (target, result) -> Text("${destinationLabel(target)}: ${if (result == "published") "publicação confirmada" else if (result == "failed") "falhou — confira" else "aguardando confirmação"}", color = Color.White, style = MaterialTheme.typography.bodySmall) }
                     Text(if (state.fresh) art.statusLabel else "Estado não confirmado — atualize", color = Color(0xFFD3D6DF))
                     Text("${index + 1} de ${items.size} · Arraste para ver a próxima · Horário de Brasília", color = Color(0xFFB8BDC9), style = MaterialTheme.typography.labelSmall)
                 }
@@ -164,7 +191,13 @@ fun CalendarGallery(model: CalendarViewModel, token: String, backLabel: String =
     }
     editing?.takeIf { edit -> state.data.items.any { it.id == edit.first.id } }?.let { (art, action) ->
         val current = state.data.items.any { it.id == art.id && it.revision == art.revision }
-        CalendarEditDialog(art, action, busy = state.busy, canSave = state.fresh && current,
+        if (action in setOf("destination", "automatic")) CalendarDeliveryDialog(art, action, token,
+            busy = state.busy, canSave = state.fresh && current, storyEligible = state.data.storyEligible,
+            canEnable = state.data.connected && state.data.automatic, error = state.error,
+            onDismiss = { if (!state.busy) editing = null },
+            onDestination = { model.destination(art, it) { editing = null } },
+            onAutomatic = { model.automatic(art, it) { editing = null } })
+        else CalendarEditDialog(art, action, busy = state.busy, canSave = state.fresh && current,
             error = state.error ?: if (!state.busy && (!state.fresh || !current))
                 "A programação precisa ser conferida. Volte à galeria e toque em Atualizar antes de salvar."
                 else null,
@@ -179,6 +212,40 @@ fun CalendarGallery(model: CalendarViewModel, token: String, backLabel: String =
             else if (art.status in setOf("confirming", "dispatching")) "O envio já começou. Aguarde a confirmação. A IA4Tube não repetirá a publicação automaticamente se o resultado estiver incerto."
             else "${art.statusLabel}. Confira a conexão e a programação. Horários vencidos precisam ser reagendados; não são publicados em lote ao voltar.") },
         confirmButton = { TextButton(onClick = { showStatus = null }) { Text("Entendi") } }) }
+}
+
+internal fun destinationLabel(value: String): String = when (value) { "story" -> "Story"; "both" -> "Feed e Story"; else -> "Feed" }
+
+@Composable
+private fun CalendarDeliveryDialog(art: ScheduledArt, action: String, token: String, busy: Boolean,
+    canSave: Boolean, storyEligible: Boolean, canEnable: Boolean, error: String?, onDismiss: () -> Unit,
+    onDestination: (String) -> Unit, onAutomatic: (Boolean) -> Unit) {
+    var selected by remember(art.id, art.revision) { mutableStateOf(art.destination) }
+    var preview by remember { mutableStateOf(if (art.destination == "story") "story" else "feed") }
+    AlertDialog(onDismissRequest = onDismiss,
+        title = { Text(if (action == "destination") "Formato da publicação" else if (art.automatic) "Desligar esta publicação?" else "Ativar esta publicação?") },
+        text = { Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            if (action == "destination") {
+                for (target in listOf("feed", "story", "both")) Row(verticalAlignment = Alignment.CenterVertically) {
+                    RadioButton(selected = selected == target, onClick = { selected = target; preview = if (target == "story") "story" else "feed" },
+                        enabled = !busy && (target == "feed" || storyEligible))
+                    Text(destinationLabel(target) + if (target == "both") " — 2 envios" else "")
+                }
+                if (!storyEligible) Text("A publicação de Story requer uma conta Business elegível.")
+                if (selected == "both") Row { for (target in listOf("feed", "story")) TextButton(onClick = { preview = target }) { Text("Ver ${destinationLabel(target)}") } }
+                ScheduledArtImage(art.copy(imageUrl = art.previews[preview], destination = preview), token,
+                    Modifier.fillMaxWidth().height(260.dp))
+                Text("Confira a prévia. Feed: 4:5. Story: 9:16, com a arte inteira e preenchimento de fundo. A legenda editável acompanha somente o Feed; ela não vira texto da imagem.")
+                Text("Salvar o formato não publica agora. A data e o horário programados são mantidos.")
+            } else Text(if (art.automatic) "Esta arte fica no calendário, mas não será publicada automaticamente. As outras continuam como estão."
+                else "Esta arte será enviada a ${destinationLabel(art.destination)} em ${art.date}, às ${art.time} (Brasília), mesmo com o app fechado. Conexão e disponibilidade serão conferidas na hora.")
+            if (action == "automatic" && !art.automatic && !canEnable) Text("Conecte o Instagram e confira se a programação geral está ativada antes de ligar esta arte.")
+            if (!canSave && !busy) Text("Volte e atualize a galeria antes de confirmar.")
+            error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
+        } },
+        confirmButton = { TextButton(enabled = !busy && canSave && (action == "destination" || art.automatic || canEnable),
+            onClick = { if (action == "destination") onDestination(selected) else onAutomatic(!art.automatic) }) { Text(if (busy) "Salvando…" else if (action == "destination") "Salvar formato" else "Confirmar") } },
+        dismissButton = { TextButton(onClick = onDismiss, enabled = !busy) { Text("Voltar") } })
 }
 
 @Composable

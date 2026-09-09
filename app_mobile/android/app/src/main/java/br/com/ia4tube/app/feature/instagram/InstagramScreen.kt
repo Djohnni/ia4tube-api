@@ -338,6 +338,7 @@ fun InstagramScreen(viewModel: InstagramViewModel, onBack: () -> Unit, tokenProv
                 state.history.forEach { publication ->
                     Column(verticalArrangement = Arrangement.spacedBy(6.dp), modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp)) {
                         Text(publicationLabel(publication), fontWeight = FontWeight.Bold)
+                        Text(if (publication.destination == "story") "Story · a legenda do Feed não é exibida nesta publicação" else "Feed", style = MaterialTheme.typography.bodySmall)
                         publication.username?.let { Text(instagramUsernameLabel(it)) }
                         Text(publication.caption, style = MaterialTheme.typography.bodyMedium)
                         Text("Imagem: ${publication.mediaId}", style = MaterialTheme.typography.bodySmall)

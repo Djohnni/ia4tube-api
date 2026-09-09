@@ -32,7 +32,9 @@ internal fun isPrivateArtUrl(url: HttpUrl, origin: HttpUrl): Boolean {
             url.queryParameterNames.all { it == "v" }
     }
     return parts.size == 6 && parts.take(4) == listOf("v1", "social", "calendar", "items") &&
-        parts[4].matches(Regex("[a-f0-9]{40}")) && parts[5] == "image" && url.query == null
+        parts[4].matches(Regex("[a-f0-9]{40}")) && parts[5] == "image" &&
+        (url.query == null || (url.queryParameterNames == setOf("destination") &&
+            url.queryParameterValues("destination").size == 1 && url.queryParameter("destination") in setOf("feed", "story")))
 }
 
 internal fun privateArtKey(token: String, url: HttpUrl): String = MessageDigest.getInstance("SHA-256")

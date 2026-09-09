@@ -48,7 +48,8 @@ object InstagramPolicies {
     fun isOfficialPermalink(value: String): Boolean {
         val uri = secureUri(value) ?: return false
         return uri.scheme == "https" && uri.host == "www.instagram.com" && uri.port == -1 &&
-            uri.rawQuery == null && Regex("^/p/[A-Za-z0-9_-]{3,100}/$").matches(uri.rawPath.orEmpty())
+            uri.rawQuery == null && (Regex("^/p/[A-Za-z0-9_-]{3,100}/$").matches(uri.rawPath.orEmpty()) ||
+                Regex("^/stories/[A-Za-z0-9_.]{1,30}/[0-9]{5,64}/$").matches(uri.rawPath.orEmpty()))
     }
 
     internal fun isOfficialThumbnail(value: String): Boolean {

@@ -38,7 +38,8 @@ class CalendarGalleryRenderTest {
     private fun render(fontScale: Float, filename: String) {
         val today = LocalDate.now(ZoneId.of("America/Sao_Paulo")).toString()
         val item = ScheduledArt("a".repeat(40), "synthetic:1", today, "18:30", "Uma arte pronta para o próximo dia. Você pode editar esta legenda antes da publicação.",
-            2, "scheduled", "Programada", true, true, null, "empresa_exemplo", System.currentTimeMillis())
+            2, "scheduled", "Programada", true, true, null, "empresa_exemplo", System.currentTimeMillis(),
+            destination = "both", formatsReady = true)
         val snapshot = CalendarSnapshot(true, true, 2, true, "empresa_exemplo", true, listOf(item), item)
         val gateway = object : CalendarGateway {
             override suspend fun list() = snapshot
@@ -53,7 +54,7 @@ class CalendarGalleryRenderTest {
         val config = android.content.res.Configuration(activity.resources.configuration).apply { this.fontScale = fontScale }
         @Suppress("DEPRECATION")
         activity.resources.updateConfiguration(config, activity.resources.displayMetrics)
-        val sample = Bitmap.createBitmap(1080, 1080, Bitmap.Config.ARGB_8888)
+        val sample = Bitmap.createBitmap(1080, 1350, Bitmap.Config.ARGB_8888)
         val canvas = Canvas(sample); canvas.drawColor(android.graphics.Color.rgb(28, 69, 104))
         val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = android.graphics.Color.rgb(244, 216, 154); textSize = 120f; isFakeBoldText = true }
         canvas.drawText("SUA MARCA", 95f, 420f, paint); paint.textSize = 58f; paint.isFakeBoldText = false

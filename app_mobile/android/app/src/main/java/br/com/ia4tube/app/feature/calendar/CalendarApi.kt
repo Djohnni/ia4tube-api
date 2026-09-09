@@ -19,17 +19,22 @@ internal fun calendarHttpClient(): OkHttpClient = OkHttpClient.Builder()
 data class ScheduledArt(
     val id: String, val key: String, val date: String, val time: String, val caption: String,
     val revision: Long, val status: String, val statusLabel: String, val editable: Boolean,
-    val automatic: Boolean, val imageUrl: String?, val username: String?, val scheduledAt: Long
+    val automatic: Boolean, val imageUrl: String?, val username: String?, val scheduledAt: Long,
+    val destination: String = "feed", val previews: Map<String, String> = emptyMap(),
+    val formatsReady: Boolean = false, val publications: Map<String, String> = emptyMap()
 )
 data class CalendarSnapshot(
     val enabled: Boolean = false, val automatic: Boolean = false, val preferenceRevision: Long = 0,
     val connected: Boolean = false, val username: String? = null, val operationsAllowed: Boolean = false,
-    val items: List<ScheduledArt> = emptyList(), val next: ScheduledArt? = null
+    val items: List<ScheduledArt> = emptyList(), val next: ScheduledArt? = null,
+    val storyEligible: Boolean = false
 )
 interface CalendarGateway {
     suspend fun list(): CalendarSnapshot
     suspend fun preferences(enabled: Boolean, revision: Long): CalendarSnapshot
     suspend fun edit(item: ScheduledArt, action: String, caption: String = "", date: String = "", time: String = ""): CalendarSnapshot
+    suspend fun destination(item: ScheduledArt, destination: String): CalendarSnapshot = throw CalendarFailure(400)
+    suspend fun automatic(item: ScheduledArt, enabled: Boolean): CalendarSnapshot = throw CalendarFailure(400)
 }
 internal fun galleryItems(items: List<ScheduledArt>, today: LocalDate): List<ScheduledArt> = items
     .filter { it.date >= today.toString() || (it.automatic && it.status != "published") }
@@ -49,15 +54,27 @@ internal fun parseCalendar(root: JSONObject): CalendarSnapshot {
         val date = item.getString("date"); LocalDate.parse(date)
         val time = item.getString("time"); require(time.matches(Regex("([01]\\d|2[0-3]):[0-5]\\d")))
         val revision = item.getLong("revision"); require(revision > 0)
+        val destination = item.optString("destination", "feed"); require(destination in setOf("feed", "story", "both"))
+        val previews = mutableMapOf<String, String>()
+        val rawPreviews = item.optJSONObject("previews")
+        for (target in listOf("feed", "story")) rawPreviews?.optString(target)?.takeIf { it.isNotBlank() }?.let { url ->
+            require(url == "/v1/social/calendar/items/$id/image?destination=$target"); previews[target] = url
+        }
+        val publications = mutableMapOf<String, String>()
+        for (target in listOf("feed", "story")) item.optJSONObject("publications")?.optJSONObject(target)?.let {
+            publications[target] = it.optString("status", "confirming")
+        }
         ScheduledArt(id, item.getString("key"), date, time, caption, revision,
             item.getString("status"), item.getString("statusLabel"), item.getBoolean("editable"),
-            item.getBoolean("automatic"), image, item.optString("username").takeUnless { item.isNull("username") }, item.getLong("scheduledAt"))
+            item.getBoolean("automatic"), image, item.optString("username").takeUnless { item.isNull("username") }, item.getLong("scheduledAt"),
+            destination, previews, item.optBoolean("formatsReady", false), publications)
     }
     require(items.map { it.id }.distinct().size == items.size)
     val connection = root.optJSONObject("connection")
     val nextId = root.optJSONObject("next")?.getString("id")
     return CalendarSnapshot(true, preferences.getBoolean("enabled"), preferences.getLong("revision"),
-        connection != null, connection?.optString("username"), root.getBoolean("operationsAllowed"), items, items.find { it.id == nextId })
+        connection != null, connection?.optString("username"), root.getBoolean("operationsAllowed"), items, items.find { it.id == nextId },
+        connection?.optString("accountType") == "business")
 }
 
 class CalendarApi internal constructor(private val token: String, private val origin: String,
@@ -83,6 +100,16 @@ class CalendarApi internal constructor(private val token: String, private val or
     override suspend fun list() = request()
     override suspend fun preferences(enabled: Boolean, revision: Long) = request("/preferences",
         JSONObject().put("enabled", enabled).put("revision", revision).put("confirmed", true))
+    override suspend fun destination(item: ScheduledArt, destination: String): CalendarSnapshot {
+        require(destination in setOf("feed", "story", "both") && item.id.matches(Regex("[a-f0-9]{40}")))
+        return request("/items/${item.id}", JSONObject().put("action", "destination").put("revision", item.revision)
+            .put("destination", destination).put("confirmed", true))
+    }
+    override suspend fun automatic(item: ScheduledArt, enabled: Boolean): CalendarSnapshot {
+        require(item.id.matches(Regex("[a-f0-9]{40}")))
+        return request("/items/${item.id}", JSONObject().put("action", "automatic").put("revision", item.revision)
+            .put("enabled", enabled).put("confirmed", true))
+    }
     override suspend fun edit(item: ScheduledArt, action: String, caption: String, date: String, time: String): CalendarSnapshot {
         require(item.id.matches(Regex("[a-f0-9]{40}")) && action in setOf("caption", "schedule", "cancel"))
         return request("/items/${item.id}", JSONObject().put("action", action).put("revision", item.revision)

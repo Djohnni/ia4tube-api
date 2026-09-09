@@ -11,7 +11,8 @@ data class MonthlyPlanningRequest(
     val logo: UploadFile? = null,
     val fotos: List<MonthlyPlanningPhotoInput> = emptyList(),
     val calendarAutomatic: Boolean = false,
-    val calendarPreferenceRevision: Long = 0
+    val calendarPreferenceRevision: Long = 0,
+    val instagramDestination: String = "feed"
 )
 
 data class MonthlyPlanningPhotoInput(

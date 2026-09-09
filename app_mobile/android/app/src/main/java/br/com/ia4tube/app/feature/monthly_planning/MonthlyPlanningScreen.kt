@@ -31,6 +31,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material3.FilterChip
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowLeft
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.AddCircle
@@ -497,6 +498,18 @@ fun MonthlyPlanningScreen(
                     MonthlyPlanningCalendarShortcut(
                         onClick = { showGeneralCalendar = true }
                     )
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        for ((target, label) in listOf("feed" to "Feed", "story" to "Story", "both" to "Ambos")) {
+                            FilterChip(selected = state.instagramDestination == target,
+                                onClick = { viewModel.setInstagramDestination(target) },
+                                label = { Text(label) }, enabled = target == "feed" || calendar.data.storyEligible)
+                        }
+                    }
+                    Text(when (state.instagramDestination) {
+                        "both" -> "Feed e Story: duas versões e dois envios por arte, na data e hora do calendário."
+                        "story" -> "Story: imagem vertical 9:16. A legenda do Feed não aparece no Story."
+                        else -> "Feed: imagem vertical 4:5 com legenda. Você também pode mudar o destino na galeria."
+                    }, style = MaterialTheme.typography.bodySmall)
                 }
 
                 when (state.step) {
@@ -550,8 +563,10 @@ fun MonthlyPlanningScreen(
                     )
 
                     MonthlyPlanningStep.Confirmation -> {
-                    if (calendar.data.enabled) Text(if (calendar.data.automatic)
+                    Text("Destino: ${br.com.ia4tube.app.feature.calendar.destinationLabel(state.instagramDestination)}" + if (state.instagramDestination == "both") " — dois envios por arte." else "")
+                    if (calendar.data.enabled) Text(if (calendar.data.automatic && calendar.data.connected)
                         "Publicação automática ativa: depois de prontas, estas artes serão enviadas nas datas e horários do calendário. Você pode editar a legenda ou mudar os agendamentos antes do envio."
+                        else if (!calendar.data.connected) "Instagram não conectado: as artes serão criadas, mas será necessário conectar e ativá-las antes de publicar."
                         else "Publicação automática pausada. Este pedido não será enviado ao Instagram sozinho.")
                     calendar.error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
                     MonthlyPlanningConfirmationStep(
@@ -570,7 +585,7 @@ fun MonthlyPlanningScreen(
                         onRemoveLogo = viewModel::removeCompanyLogo,
                         onConfirm = {
                             if (calendar.fresh || tokenProvider().isBlank()) {
-                                viewModel.setCalendarPreference(calendar.data.automatic, calendar.data.preferenceRevision)
+                                viewModel.setCalendarPreference(calendar.data.automatic && calendar.data.connected, calendar.data.preferenceRevision)
                                 viewModel.confirmPlanning()
                             } else { calendarModel.refresh(); viewModel.calendarUnavailable() }
                         }
