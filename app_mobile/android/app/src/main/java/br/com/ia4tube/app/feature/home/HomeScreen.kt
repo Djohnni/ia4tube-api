@@ -89,6 +89,7 @@ fun HomeScreen(
     onOpenCarousel: () -> Unit,
     onOpenMonthlyPlanning: () -> Unit,
     onOpenInstagram: () -> Unit,
+    onOpenPlannedArts: () -> Unit,
     onOpenPlans: () -> Unit,
     onCompanyProfile: () -> Unit,
     onSupport: () -> Unit,
@@ -154,36 +155,7 @@ fun HomeScreen(
                 .padding(top = 14.dp),
                 verticalArrangement = Arrangement.Top
             ) {
-                Button(
-                    onClick = onOpenInstagram,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 12.dp, vertical = 8.dp),
-                    shape = RoundedCornerShape(18.dp),
-                    border = BorderStroke(1.dp, homePalette.primaryBorder),
-                    colors = ButtonDefaults.buttonColors(
-                        containerColor = homePalette.cameraBackground,
-                        contentColor = homePalette.textPrimary
-                    )
-                ) {
-                    Column(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(vertical = 8.dp),
-                        horizontalAlignment = Alignment.Start
-                    ) {
-                        Text(
-                            text = "Instagram",
-                            style = MaterialTheme.typography.titleMedium,
-                            fontWeight = FontWeight.Bold
-                        )
-                        Text(
-                            text = "Conectar conta profissional e publicar uma imagem",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = homePalette.textSecondary
-                        )
-                    }
-                }
+                HomeArtShortcuts(homePalette, onOpenInstagram, onOpenPlannedArts)
                 FuturisticHomePanel(
                     state = state,
                     palette = homePalette,
@@ -265,6 +237,30 @@ fun HomeScreen(
         QuickIconHelpDialog(
             onDismiss = { showIconHelpDialog = false }
         )
+    }
+}
+
+@Composable
+internal fun HomeArtShortcuts(palette: PremiumHomePalette, onOpenInstagram: () -> Unit, onOpenPlannedArts: () -> Unit) {
+    Column {
+        HomeArtShortcut("Instagram", "Conectar conta profissional e publicar uma imagem", palette, onOpenInstagram)
+        HomeArtShortcut("Minhas artes planejadas", "Ver imagens, legendas e datas do calendário", palette, onOpenPlannedArts)
+    }
+}
+
+@Composable
+private fun HomeArtShortcut(title: String, description: String, palette: PremiumHomePalette, onClick: () -> Unit) {
+    Button(
+        onClick = onClick,
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp),
+        shape = RoundedCornerShape(18.dp),
+        border = BorderStroke(1.dp, palette.primaryBorder),
+        colors = ButtonDefaults.buttonColors(containerColor = palette.cameraBackground, contentColor = palette.textPrimary)
+    ) {
+        Column(Modifier.fillMaxWidth().padding(vertical = 8.dp), horizontalAlignment = Alignment.Start) {
+            Text(title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+            Text(description, style = MaterialTheme.typography.bodySmall, color = palette.textSecondary)
+        }
     }
 }
 

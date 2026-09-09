@@ -60,11 +60,12 @@ internal fun parseCalendar(root: JSONObject): CalendarSnapshot {
         connection != null, connection?.optString("username"), root.getBoolean("operationsAllowed"), items, items.find { it.id == nextId })
 }
 
-class CalendarApi(private val token: String) : CalendarGateway {
-    private val client = calendarHttpClient()
+class CalendarApi internal constructor(private val token: String, private val origin: String,
+    private val client: OkHttpClient) : CalendarGateway {
+    constructor(token: String) : this(token, CALENDAR_ORIGIN, calendarHttpClient())
     private suspend fun request(path: String = "", body: JSONObject? = null): CalendarSnapshot = withContext(Dispatchers.IO) {
         require(token.isNotBlank())
-        val request = Request.Builder().url("$CALENDAR_ORIGIN/v1/social/calendar$path")
+        val request = Request.Builder().url("$origin/v1/social/calendar$path")
             .header("Authorization", "Bearer $token").header("Cache-Control", "no-store")
         if (body != null) request.post(body.toString().toRequestBody("application/json".toMediaType()))
         client.newCall(request.build()).execute().use { response ->

@@ -112,19 +112,23 @@ fun ScheduledNextContent(model: CalendarViewModel, token: String, onGallery: () 
 }
 
 @Composable
-fun CalendarGallery(model: CalendarViewModel, token: String, onBack: () -> Unit) {
+fun CalendarGallery(model: CalendarViewModel, token: String, backLabel: String = "Voltar ao calendário", onBack: () -> Unit) {
     // The parent retains this model when closing the gallery, so each reopening reads again.
     LaunchedEffect(model) { model.refresh() }
     val state by model.uiState.collectAsState()
     val today = LocalDate.now(ZoneId.of("America/Sao_Paulo"))
     val items = galleryItems(state.data.items, today)
     val actionWidth = (68f * LocalDensity.current.fontScale).coerceIn(68f, 112f).dp
-    var editing by remember { mutableStateOf<Pair<ScheduledArt, String>?>(null) }
-    var showStatus by remember { mutableStateOf<ScheduledArt?>(null) }
+    var editing by remember(model, token) { mutableStateOf<Pair<ScheduledArt, String>?>(null) }
+    var showStatus by remember(model, token) { mutableStateOf<ScheduledArt?>(null) }
+    LaunchedEffect(model, token, state.data.items) {
+        if (state.data.items.none { it.id == editing?.first?.id }) editing = null
+        if (state.data.items.none { it.id == showStatus?.id }) showStatus = null
+    }
     BackHandler(onBack = onBack)
     Column(Modifier.fillMaxSize().background(Color(0xFF101218)).padding(horizontal = 12.dp, vertical = 8.dp)) {
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-            IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Voltar ao calendário", tint = Color.White) }
+            IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, backLabel, tint = Color.White) }
             Text("Ver minhas artes programadas", color = Color.White, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
             IconButton(onClick = model::refresh, enabled = !state.busy) { Icon(Icons.Default.Refresh, "Atualizar", tint = Color.White) }
         }
@@ -158,9 +162,18 @@ fun CalendarGallery(model: CalendarViewModel, token: String, onBack: () -> Unit)
             }
         }
     }
-    editing?.let { (art, action) -> CalendarEditDialog(art, action, onDismiss = { editing = null },
-        onSave = { caption, date, time -> model.edit(art, action, caption, date, time); editing = null }) }
-    showStatus?.let { art -> AlertDialog(onDismissRequest = { showStatus = null }, title = { Text(if (state.fresh) art.statusLabel else "Atualização necessária") },
+    editing?.takeIf { edit -> state.data.items.any { it.id == edit.first.id } }?.let { (art, action) ->
+        val current = state.data.items.any { it.id == art.id && it.revision == art.revision }
+        CalendarEditDialog(art, action, busy = state.busy, canSave = state.fresh && current,
+            error = state.error ?: if (!state.busy && (!state.fresh || !current))
+                "A programação precisa ser conferida. Volte à galeria e toque em Atualizar antes de salvar."
+                else null,
+            onDismiss = { if (!state.busy) editing = null },
+            onSave = { caption, date, time ->
+                model.edit(art, action, caption, date, time, onSuccess = { editing = null })
+            })
+    }
+    showStatus?.takeIf { shown -> state.data.items.any { it.id == shown.id } }?.let { art -> AlertDialog(onDismissRequest = { showStatus = null }, title = { Text(if (state.fresh) art.statusLabel else "Atualização necessária") },
         text = { Text(if (art.status == "scheduled" && state.fresh) "O envio está programado para ${art.date}, às ${art.time} (Brasília). A conexão será conferida novamente na hora. Não é preciso manter o app aberto."
             else if (art.status == "published") "O Instagram confirmou esta publicação. Excluir um agendamento não apaga uma publicação já feita."
             else if (art.status in setOf("confirming", "dispatching")) "O envio já começou. Aguarde a confirmação. A IA4Tube não repetirá a publicação automaticamente se o resultado estiver incerto."
@@ -179,7 +192,8 @@ private fun GalleryAction(icon: ImageVector, label: String, enabled: Boolean, co
 }
 
 @Composable
-private fun CalendarEditDialog(art: ScheduledArt, action: String, onDismiss: () -> Unit, onSave: (String, String, String) -> Unit) {
+private fun CalendarEditDialog(art: ScheduledArt, action: String, busy: Boolean, canSave: Boolean,
+    error: String?, onDismiss: () -> Unit, onSave: (String, String, String) -> Unit) {
     val context = LocalContext.current
     var caption by remember(art.id, art.revision) { mutableStateOf(art.caption) }
     var date by remember { mutableStateOf(LocalDate.parse(art.date)) }
@@ -188,16 +202,21 @@ private fun CalendarEditDialog(art: ScheduledArt, action: String, onDismiss: () 
         text = { Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
             when (action) {
                 "caption" -> { OutlinedTextField(value = caption, onValueChange = { if (it.length <= 2200) caption = it },
-                    label = { Text("Legenda do Instagram") }, minLines = 4, maxLines = 9)
+                    label = { Text("Legenda do Instagram") }, minLines = 4, maxLines = 9, enabled = !busy)
                     Text("${caption.length}/2200 · Não altera o texto desenhado na imagem.") }
                 "schedule" -> {
-                    OutlinedButton(onClick = { DatePickerDialog(context, { _, y, m, d -> date = LocalDate.of(y, m + 1, d) }, date.year, date.monthValue - 1, date.dayOfMonth).show() }) { Text(date.format(DateTimeFormatter.ofPattern("dd/MM/yyyy"))) }
-                    OutlinedButton(onClick = { TimePickerDialog(context, { _, h, m -> time = LocalTime.of(h, m) }, time.hour, time.minute, true).show() }) { Text(time.toString()) }
+                    OutlinedButton(enabled = !busy, onClick = { DatePickerDialog(context, { _, y, m, d -> date = LocalDate.of(y, m + 1, d) }, date.year, date.monthValue - 1, date.dayOfMonth).show() }) { Text(date.format(DateTimeFormatter.ofPattern("dd/MM/yyyy"))) }
+                    OutlinedButton(enabled = !busy, onClick = { TimePickerDialog(context, { _, h, m -> time = LocalTime.of(h, m) }, time.hour, time.minute, true).show() }) { Text(time.toString()) }
                     Text("Horário de Brasília. A arte será movida, sem criar outra publicação.")
                 }
                 else -> Text("A arte será retirada do calendário e não será enviada. A imagem original e o pedido continuam disponíveis. Outras artes e publicações já feitas não serão apagadas.")
             }
+            if (busy) Text("Salvando… Aguarde a confirmação.")
+            error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
         } },
-        confirmButton = { TextButton(onClick = { onSave(caption, date.toString(), time.toString()) }, enabled = action != "caption" || caption.isNotBlank()) { Text(if (action == "cancel") "Excluir agendamento" else "Salvar") } },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("Voltar") } })
+        confirmButton = { TextButton(onClick = { onSave(caption, date.toString(), time.toString()) },
+            enabled = !busy && canSave && (action != "caption" || caption.isNotBlank())) {
+                Text(if (busy) "Salvando…" else if (action == "cancel") "Excluir agendamento" else "Salvar")
+            } },
+        dismissButton = { TextButton(onClick = onDismiss, enabled = !busy) { Text("Voltar") } })
 }

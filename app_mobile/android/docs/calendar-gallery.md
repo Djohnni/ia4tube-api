@@ -15,6 +15,12 @@ Local work of2026-09-08, branch `feat/android-calendar-gallery-20260908`, based 
 
 ## Implementation
 
+### Home shortcut (Android40 / 0.2.27)
+
+The Home screen now places **Minhas artes planejadas** immediately below Instagram. This protected `planned-arts` route uses the same `CalendarGallery`, authenticated calendar model, canonical schedule items and private-image cache as the existing calendar entry. It does not create a second list, authorize automatic publication or alter the Instagram connection. Back returns to the originating Home; repeated or stale callbacks cannot pop another screen. Existing calendar and Instagram entries retain their previous return labels and behavior.
+
+Focused verification: 40 tests passed across nine suites, with zero failures, errors or skips: the26 calendar tests, two Home shortcut/render checks (including enlarged font), five planned-art navigation checks and seven existing Instagram-retention checks. Kotlin production/test compilation and whitespace validation passed. These are local checks; internal distribution and physical-device confirmation are recorded separately.
+
 `feature/calendar/CalendarApi.kt`, `CalendarViewModel.kt` and `CalendarGallery.kt` use the official production API, the existing legitimate IA4Tube session, authenticated owned JPEGs and no image-cache reuse across sessions. No bearer forwarding to arbitrary URLs or redirects. No passwords or provider tokens are stored by this feature.
 
 Follow-up: [private-art-cache.md](private-art-cache.md) documents the new encrypted, session-bound local copy shared by result/calendar/gallery views. It replaces direct image loading without adding polling. Revalidation still checks the server; it reuses unchanged image bytes, never a previous account's copy. The validation counts below are the historical checkpoints of the preceding changes, not the final cache test run.
@@ -31,7 +37,17 @@ New data loads only while resumed; leaving/session replacement invalidates fresh
 
 Focused regression coverage includes an actual loopback HTTP response delayed 12 seconds (past the previous default 10-second read limit), timeout/security configuration, a slow in-flight read without duplicate actions, visible non-retried 503, and real Compose lifecycle entry/reopening/manual refresh/background behavior with synthetic data. No diagnostics-only release is needed.
 
-Validation of this correction: 134 focused debug unit/render tests passed, zero failures/errors/skips (19 calendar tests plus 115 existing monthly-planning/Instagram/navigation tests). The initial empty view now describes the one-minute loading window instead of saying the feature is unavailable during a pending read. The lifecycle tests explicitly flush Compose snapshots/layout and teardown, including pause/resume without an intermediate frame. Kotlin compilation and `git diff --check` passed; no new AAB, Play upload or phone installation was performed for this correction. The already distributed AAB38 remains unchanged.
+### Caption save confirmation (2026-09-09, local correction)
+
+The editor now remains open while its single write is pending and closes only after the returned server snapshot has been installed in the calendar state. Pending actions show `Salvando…` and block another save. An unconfirmed response preserves the draft for the same session, explains that the change may already have been saved, and requires an explicit calendar refresh before another edit. There is no automatic write retry or extra GET after a successful POST, and no polling was added. Access denial or session invalidation removes the old editor and caption.
+
+The Android39 source already consumed a complete POST snapshot; it did not intentionally postpone locally saved captions until reopening. The observed production edits have no captured POST response/status, so the historical runtime cause remains unproven. Synthetic tests cover complete HTTP POST JSON through the real parser and model, uncertain responses without repeated writes, and the updated caption rendered by the same Compose gallery instance. They also cover 401/403 and late results after invalidation. Direct AlertDialog interaction and rendering a pending animation under Robolectric encountered a frame-clock loop; those abandoned harness paths are not included or counted as a functional reproduction. Pending and late-response behavior is instead checked with the deterministic coroutine test dispatcher. No A55/device interaction is claimed by these local checks.
+
+Validation of this local correction: all 26 calendar tests passed in six suites, with zero failures, errors or skips (`:app:testDebugUnitTest --offline --console=plain -Pkotlin.incremental=false --tests '*Calendar*Test'`). This includes seven added checks across HTTP/model and Compose rendering. Debug Kotlin compilation and `git diff --check` passed; version39/0.2.26 is unchanged. No release/AAB, commit, deployment or device operation was performed.
+
+### Historical loading/lifecycle validation (before the caption correction)
+
+Validation of the earlier correction: 134 focused debug unit/render tests passed, zero failures/errors/skips (19 calendar tests plus 115 existing monthly-planning/Instagram/navigation tests). The initial empty view now describes the one-minute loading window instead of saying the feature is unavailable during a pending read. The lifecycle tests explicitly flush Compose snapshots/layout and teardown, including pause/resume without an intermediate frame. Kotlin compilation and `git diff --check` passed; no new AAB, Play upload or phone installation was performed for that earlier correction. The already distributed AAB38 remained unchanged at that checkpoint.
 
 Existing monthly-calendar DTO/cache and edit calls carry canonical revision/status. The old backend's missing calendar route is treated as unavailable, preserving the old manual path. A fresh preference check precedes generation submission so an unknown automatic setting cannot silently authorize an order.
 

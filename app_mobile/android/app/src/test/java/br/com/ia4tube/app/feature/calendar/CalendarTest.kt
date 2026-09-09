@@ -29,10 +29,12 @@ class CalendarTest {
     private fun snapshot() = CalendarSnapshot(true, true, 2, true, "synthetic", false, listOf(art()), art())
     private class Fake(var snapshot: CalendarSnapshot) : CalendarGateway {
         var reads = 0; var edits = 0; var changes = 0; var failure: Exception? = null; var pending: CompletableDeferred<Unit>? = null
+        var pendingEdit: CompletableDeferred<Unit>? = null
         override suspend fun list(): CalendarSnapshot { reads++; pending?.await(); failure?.let { throw it }; return snapshot }
         override suspend fun preferences(enabled: Boolean, revision: Long): CalendarSnapshot { changes++; return snapshot.copy(automatic = enabled) }
         override suspend fun edit(item: ScheduledArt, action: String, caption: String, date: String, time: String): CalendarSnapshot {
-            edits++; return snapshot.copy(items = if (action == "cancel") emptyList() else snapshot.items.map { it.copy(caption = caption, revision = it.revision + 1) })
+            edits++; pendingEdit?.await()
+            return snapshot.copy(items = if (action == "cancel") emptyList() else snapshot.items.map { it.copy(caption = caption, revision = it.revision + 1) })
         }
     }
     @Test fun displayKeepsTodayAndFutureAndDoesNotHideOverdueFailures() {
@@ -76,6 +78,33 @@ class CalendarTest {
         model.edit(art(), "cancel"); advanceUntilIdle(); assertEquals(1, fake.edits) // stale dialog rejected locally
         model.edit(model.uiState.value.data.items.single(), "cancel"); advanceUntilIdle()
         assertTrue(model.uiState.value.data.items.isEmpty()); assertEquals(2, fake.edits); model.dispose()
+    }
+    @Test fun pendingCaptionIsConfirmedOnlyAfterUpdatedSnapshotAndNeverWrittenTwice() = runTest(dispatcher) {
+        val fake = Fake(snapshot()); fake.pendingEdit = CompletableDeferred()
+        val model = CalendarViewModel({ "synthetic" }, "synthetic", fake)
+        model.refresh(); advanceUntilIdle()
+        var confirmed: CalendarUiState? = null
+        model.edit(art(), "caption", "Nova legenda", onSuccess = { confirmed = model.uiState.value })
+        runCurrent(); advanceTimeBy(16_000); runCurrent()
+        assertNull(confirmed); assertTrue(model.uiState.value.busy)
+        assertEquals("Legenda exata", model.uiState.value.data.items.single().caption)
+        model.edit(art(), "caption", "Nova legenda"); runCurrent()
+        assertEquals(1, fake.edits); assertEquals(1, fake.reads)
+        fake.pendingEdit!!.complete(Unit); advanceUntilIdle()
+        assertEquals("Nova legenda", confirmed!!.data.items.single().caption)
+        assertFalse(confirmed!!.busy); assertTrue(confirmed!!.fresh)
+        advanceTimeBy(180_000); runCurrent()
+        assertEquals(1, fake.edits); assertEquals(1, fake.reads); model.dispose()
+    }
+    @Test fun invalidatedSessionNeverReceivesLateCaptionOrConfirmation() = runTest(dispatcher) {
+        val fake = Fake(snapshot()); fake.pendingEdit = CompletableDeferred()
+        val model = CalendarViewModel({ "synthetic" }, "synthetic", fake)
+        model.refresh(); advanceUntilIdle()
+        var confirmations = 0
+        model.edit(art(), "caption", "Nova legenda", onSuccess = { confirmations++ }); runCurrent()
+        model.invalidateSession(); fake.pendingEdit!!.complete(Unit); advanceUntilIdle()
+        assertEquals(0, confirmations); assertTrue(model.uiState.value.data.items.isEmpty())
+        assertFalse(model.uiState.value.fresh); assertEquals(1, fake.edits); model.dispose()
     }
     @Test fun offlineDataIsNeverPresentedAsFreshOrEditable() = runTest(dispatcher) {
         val fake = Fake(snapshot()); val model = CalendarViewModel({ "synthetic" }, "synthetic", fake)

@@ -77,6 +77,8 @@ import br.com.ia4tube.app.domain.usecase.RequestOrderAdjustmentUseCase
 import br.com.ia4tube.app.domain.usecase.RegisterUseCase
 import br.com.ia4tube.app.domain.usecase.SendSupportMessageUseCase
 import br.com.ia4tube.app.feature.carousel.CarouselScreen
+import br.com.ia4tube.app.feature.calendar.CalendarGallery
+import br.com.ia4tube.app.feature.calendar.rememberCalendarModel
 import br.com.ia4tube.app.feature.carousel.CarouselViewModel
 import br.com.ia4tube.app.feature.carousel.CarouselViewModelFactory
 import br.com.ia4tube.app.feature.create_art.CreateArtEmpresaScreen
@@ -422,7 +424,7 @@ fun IA4TubeNavHost(
             )
         }
 
-        composable(Routes.Home) {
+        composable(Routes.Home) { homeEntry ->
             LaunchedEffect(Unit) {
                 MobileAnalytics.track("mobile_home_abriu", tela = "home")
             }
@@ -460,6 +462,11 @@ fun IA4TubeNavHost(
                 },
                 onOpenInstagram = {
                     navigateProtected(Routes.Instagram)
+                },
+                onOpenPlannedArts = {
+                    navController.openPlannedArts(homeEntry, hasSavedToken()) {
+                        requestAuthFor(Routes.PlannedArts)
+                    }
                 },
                 onOpenPlans = {
                     MobileAnalytics.track("mobile_planos_abriu", tela = "home")
@@ -519,6 +526,17 @@ fun IA4TubeNavHost(
                     tokenProvider = repository::getSavedToken,
                     onBack = leaveInstagram
                 )
+            }
+        }
+
+        composable(Routes.PlannedArts) { galleryEntry ->
+            if (!hasSavedToken()) {
+                LaunchedEffect(Unit) { requestAuthFor(Routes.PlannedArts) }
+            } else {
+                val calendarModel = rememberCalendarModel(repository::getSavedToken)
+                CalendarGallery(calendarModel, repository.getSavedToken(), backLabel = "Voltar à página inicial") {
+                    navController.leavePlannedArts(galleryEntry)
+                }
             }
         }
 
