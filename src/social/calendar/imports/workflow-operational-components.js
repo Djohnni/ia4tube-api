@@ -13,14 +13,15 @@ const { createDurableInspectionDispatcher } = require("./inspection-dispatcher")
 const { createRenderDiskPrivateUploadProvider } = require("./render-disk-provider");
 const { createCalendarImportUploadService } = require("./upload-service");
 const { createPreparationQueue } = require("./preparation-queue");
+const { createWorkflowCoordinatorTick } = require("./workflow-coordinator-tick");
 async function createWorkflowOperationalComponents({ enabled = false, store, owner, capacity, sourceAdmission, preparedAdmission, accessPolicy, diskSpaceGuard,
   privateRoot, preparationRoot, publicApiOrigin, musicRoot, resolveMusicTrack, catalog, bridgeKey, adapter,
-  validationOnly = false, allowControlledForTests = false, clock = Date.now } = {}) {
-  if (!enabled) return Object.freeze({ available: false, reason: "workflow_disabled" });
+  validationOnly = false, allowControlledForTests = false, clock = Date.now, diagnostic = () => {}, transferTimeoutMs = 60000 } = {}) {
+  if (enabled !== true) return Object.freeze({ available: false, reason: "workflow_disabled" });
   if (await store?.verify?.() !== true || capacity?.capabilities?.persistence !== "durable") fail("schema_not_ready");
   let resultStore, provider, preparationRunner, inspectionRunner;
   const journal = createWorkflowPrivateJournal({ store, owner, clock });
-  const bridge = createWorkflowPrivateBridge({ journal, key: bridgeKey, privateRoot, preparationRoot, musicRoot, resolveMusicTrack, clock,
+  const bridge = createWorkflowPrivateBridge({ journal, key: bridgeKey, privateRoot, preparationRoot, musicRoot, resolveMusicTrack, clock, diagnostic, transferTimeoutMs,
     allowSyntheticForTests: allowControlledForTests, provider: { streamSealedObject: args => provider.streamSealedObject(args) }, getResultStore: () => resultStore,
     assertHeld: (task, kind, resultRef) => kind === "inspect" ? inspectionRunner.assertExecutionHeld({ task, snapshotBytes: task.sizeBytes, maxRuntimeMs: task.maxRuntimeMs }) :
       preparedAdmission.assertHeld({ task, resultRef, requiredBytes: 65536, intent: "write" }) });
@@ -35,7 +36,8 @@ async function createWorkflowOperationalComponents({ enabled = false, store, own
   const upload = createCalendarImportUploadService({ store, provider, enabled: true, clock });
   const preparation = createPreparationQueue({ store, dispatcher: preparationRunner, resultStore, accessPolicy, enabled: true, catalog,
     allowSyntheticForTests: allowControlledForTests, clock });
+  const tick = createWorkflowCoordinatorTick({ store, owner, journal, inspectionRunner, preparationRunner, upload, preparation, accessPolicy });
   return Object.freeze({ available: true, bridge, journal, worker, preparationRunner, inspectionRunner, inspector, provider, upload, preparation, resultStore,
-    handlePrivateRequest: (req, res) => bridge.handle(req, res) });
+    tick, handlePrivateRequest: (req, res) => bridge.handle(req, res) });
 }
 module.exports = { createWorkflowOperationalComponents };

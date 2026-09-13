@@ -56,15 +56,24 @@ async function receiveFile(stream, filename, expected, sha, check = () => {}) {
       let offset = 0; while (offset < chunk.length) { const w = await handle.write(chunk, offset, Math.min(MAX_CHUNK, chunk.length - offset)); if (!w.bytesWritten) fail("write_failed"); offset += w.bytesWritten; }
     }
     check(); if (size !== expected || h.digest("hex") !== sha) fail("checksum_invalid");
-    await handle.sync(); await handle.close(); closed = true;
+    await handle.sync(); check(); await handle.close(); closed = true;
     try { await fs.link(temp, filename); } catch (error) { if (error.code !== "EEXIST") throw error; const prior = await fileHash(filename); if (prior.size !== expected || prior.sha256 !== sha) fail("file_conflict"); }
     await fs.chmod(filename, 0o400);
+    if (process.platform !== "win32") {
+      const directory = await fs.open(path.dirname(filename), sync.constants.O_RDONLY | (sync.constants.O_DIRECTORY || 0));
+      try { await directory.sync(); check(); } finally { await directory.close(); }
+    }
   } finally {
     if (!closed) await handle.close();
     // This request alone created this named staging file; its handle is closed.
     // No original, committed derivative or unknown execution is deleted.
     await fs.unlink(temp).catch(error => { if (error.code !== "ENOENT") throw error; });
+    if (process.platform !== "win32") {
+      const directory = await fs.open(path.dirname(filename), sync.constants.O_RDONLY | (sync.constants.O_DIRECTORY || 0));
+      try { await directory.sync(); } finally { await directory.close(); }
+    }
   }
+  check();
 }
 function allParts(prepared) { const items = [...Object.values(prepared?.variants || {}), ...(prepared?.thumbnail ? [prepared.thumbnail] : [])];
   if (items.length < 1 || items.length > 4) fail("manifest_invalid");

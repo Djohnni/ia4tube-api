@@ -3,6 +3,12 @@ const test = require("node:test"), assert = require("node:assert/strict"), crypt
 const { createRenderWorkflowAdapter, createControlledRenderWorkflowAdapter, isRenderWorkflowAdapter } = require("../src/social/calendar/imports/render-workflow-adapter");
 const { createWorkflowPrivateClient } = require("../src/social/calendar/imports/workflow-private-transfer");
 const { registerWorkflowTask } = require("../src/social/calendar/imports/workflow-task-agent");
+const { createWorkflowOperationalComponents } = require("../src/social/calendar/imports/workflow-operational-components");
+test("Workflow composition accepts only literal true activation and never probes a disabled store", async () => {
+  let touched = 0; const store = { verify() { touched++; throw Error("must_not_call"); } };
+  for (const enabled of [undefined, false, "false", "true", 1, {}]) assert.deepEqual(await createWorkflowOperationalComponents({ enabled, store }), { available: false, reason: "workflow_disabled" });
+  assert.equal(touched, 0);
+});
 function fixture(overrides = {}) { const calls = [], executionId = crypto.randomUUID(), runId = "trn-synthetic123", row = { id: runId, input: [{ executionId }], status: "completed", retries: 0 };
   const sdkClient = { workflows: {
     async startTask(...args) { calls.push(args); return { taskRunId: runId }; }, async getTaskRun() { return structuredClone(row); },

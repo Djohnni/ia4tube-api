@@ -2,6 +2,7 @@
 const fs = require("node:fs/promises"), path = require("node:path"), crypto = require("node:crypto"), { spawn } = require("node:child_process");
 const instances = new WeakSet(), UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/;
 const { AsyncLocalStorage } = require("node:async_hooks");
+const { closedSpawnErrorCode } = require("./media-process-diagnostics");
 const MAX_JSON = 262144, HARD_MS = 180000;
 function fail(code) { throw Object.assign(new Error("media_process_" + code), { code: "media_process_" + code }); }
 function stable(value) {
@@ -129,6 +130,7 @@ function createMediaProcessExecutor({ workingRoot, ffmpegPath, allowedRoots = []
             launcher.state !== "not_started_proved" || !["compile", "spawn", "busy", "deadline"].includes(launcher.stage) || launcher.workerStarted !== false ||
             !Number.isSafeInteger(launcher.elapsedMs) || launcher.elapsedMs < 0) return { state: "unknown", executionId, reason: "launch_receipt_invalid" };
         return { state: "failed", executionId, reason: `not_started_${launcher.stage}`, elapsedMs: launcher.elapsedMs,
+          ...(launcher.stage === "spawn" ? { spawnErrorCode: closedSpawnErrorCode({ code: launcher.spawnErrorCode }) } : {}),
           termination: { proved: true, descendants: 0, proofId: digest({ request, launcher }) } };
       }
       const terminal = await readJson(path.join(nativeReceipts, "terminal.json"));
@@ -199,9 +201,10 @@ function createMediaProcessExecutor({ workingRoot, ffmpegPath, allowedRoots = []
         return observe(executionId);
       }
       await immutableJson(path.join(attempt, "request.json"), request);
-      async function notStarted(stage) {
+      async function notStarted(stage, spawnErrorCode) {
         await immutableJson(path.join(attempt, "launcher-terminal.json"), { schema: 1, executionId, requestDigest: digest(request), state: "not_started_proved",
-          stage, workerStarted: false, elapsedMs: Math.ceil(performance.now() - launchStarted) });
+          stage, workerStarted: false, elapsedMs: Math.ceil(performance.now() - launchStarted),
+          ...(stage === "spawn" ? { spawnErrorCode: closedSpawnErrorCode({ code: spawnErrorCode }) } : {}) });
         return observe(executionId);
       }
       if (active) return notStarted("busy");
@@ -213,18 +216,18 @@ function createMediaProcessExecutor({ workingRoot, ffmpegPath, allowedRoots = []
         const spawnTimeout = Math.floor(timeoutMs - (performance.now() - launchStarted));
         if (spawnTimeout < 1) return notStarted("deadline");
         const outcome = await new Promise(resolve => {
-          let child, spawned = false, spawnFailed = false;
+          let child, spawned = false, spawnFailed = false, spawnErrorCode = "UNKNOWN";
           const nativeArgs = [attempt, process.execPath, path.join(__dirname, "media-process-child.js"), String(spawnTimeout), String(process.pid), String(memoryBytes),
             ...(process.platform === "linux" ? [linux.cgroupRoot, operation === "prepare" ? path.join(projected.outputRoot, projected.companyId, projected.assetId) : attempt] : [])];
           const launch = process.platform === "linux" ? require("./linux-media-runtime").launch(supervisor, nativeArgs, linux) : { command: supervisor, args: nativeArgs };
           try { child = spawn(launch.command, launch.args,
             { cwd: attempt, shell: false, windowsHide: true, detached: true, stdio: "ignore", env: cleanEnvironment(attempt) }); }
-          catch { resolve("not_started"); return; }
+          catch (error) { resolve({ state: "not_started", spawnErrorCode: closedSpawnErrorCode(error) }); return; }
           child.once("spawn", () => { spawned = true; });
-          child.once("error", () => { spawnFailed = true; });
-          child.once("close", () => resolve(spawnFailed && !spawned && !child.pid ? "not_started" : "launched"));
+          child.once("error", error => { spawnFailed = true; spawnErrorCode = closedSpawnErrorCode(error); });
+          child.once("close", () => resolve({ state: spawnFailed && !spawned && !child.pid ? "not_started" : "launched", spawnErrorCode }));
         });
-        if (outcome === "not_started") return notStarted("spawn");
+        if (outcome.state === "not_started") return notStarted("spawn", outcome.spawnErrorCode);
         return observe(executionId);
       } finally { active--; }
     },

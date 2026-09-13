@@ -37,7 +37,7 @@ function createWorkflowPrivateJournal({ store, owner, clock = Date.now }) {
     async register(task, ids, kind) { return update((value, state) => {
       const old = state[kind === "inspect" ? "inspectionExecutions" : "preparationExecutions"]?.records?.[task.dispatchKey];
       if (!old || !old.launchClaimed || old.completion || old.executionId !== ids.executionId || !isDeepStrictEqual(old.task, task) ||
-          task.userId !== owner.userId || task.companyId !== owner.companyId || task.deadlineAt <= clock()) fail("unclaimed");
+          task.userId !== owner.userId || task.companyId !== owner.companyId || kind === "prepare" && ids.resultRef !== old.resultRef || task.deadlineAt <= clock()) fail("unclaimed");
       let r = value.records[ids.executionId];
       if (r) return { registered: false, record: r };
       r = { executionId: ids.executionId, kind, dispatchKey: task.dispatchKey, executionDigest: task.executionDigest,

@@ -95,7 +95,10 @@ static int group_create(const char *root, char *group, size_t size, long long me
   if (cg_write(group, "memory.max", value) || cg_write(group, "memory.swap.max", "0") || cg_write(group, "memory.oom.group", "1") ||
       cg_write(group, "pids.max", "64") || cg_write(group, "cpu.max", "100000 100000")) return -1;
   char kill_file[PATH_MAX]; if (child_path(kill_file, sizeof kill_file, group, "cgroup.kill") || access(kill_file, W_OK)) return -1;
-  return cg_value(group, "memory.max", NULL) == memory && cg_value(group, "pids.max", NULL) == TASK_MAX && cg_value(group, "memory.swap.max", NULL) == 0 ? 0 : -1;
+  char cpu_file[PATH_MAX], cpu_limit[128];
+  if (child_path(cpu_file, sizeof cpu_file, group, "cpu.max") || read_text(cpu_file, cpu_limit, sizeof cpu_limit) || strcmp(cpu_limit, "100000 100000\n")) return -1;
+  return cg_value(group, "memory.max", NULL) == memory && cg_value(group, "pids.max", NULL) == TASK_MAX &&
+    cg_value(group, "memory.swap.max", NULL) == 0 && cg_value(group, "memory.oom.group", NULL) == 1 && cg_value(group, "memory.peak", NULL) >= 0 ? 0 : -1;
 }
 static int write_receipt(const char *root, const char *name, const char *text, uid_t uid, gid_t gid) {
   char temporary[PATH_MAX], destination[PATH_MAX];

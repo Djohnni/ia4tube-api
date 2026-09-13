@@ -74,3 +74,44 @@ test("private Workflow: musical photo and original video derivatives returned pr
     assert.equal(r.manifest.inspections[p.sha256].sha256, p.sha256);
   }
 });
+
+test("private Workflow: asynchronous start progresses only through finite owner tick; overlap and unconfirmed run never duplicate or free capacity", async t => {
+  const f = await createOperationalCalendarPipelineFixture(t, { ...options, asynchronousSdk: true });
+  const bytes = await require("sharp")({ create: { width: 96, height: 160, channels: 3, background: "#24678a" } }).png().toBuffer();
+  const sha256 = crypto.createHash("sha256").update(bytes).digest("hex");
+  const started = await f.upload.start(f.context, { idempotencyKey: crypto.randomUUID(), kind: "image", mimeType: "image/png", sizeBytes: bytes.length, sha256 });
+  const grant = await f.upload.authorizePart(f.context, { uploadId: started.uploadId, partNumber: 1, sha256, md5Base64: crypto.createHash("md5").update(bytes).digest("base64") });
+  const uploadRecord = (await f.snapshot()).uploads[started.uploadId];
+  await f.provider.acceptPart({ context: f.context, objectKey: uploadRecord.objectKey, uploadId: uploadRecord.disk.uploadId, partNumber: 1,
+    authorizationId: grant.authorizationId, contentLength: bytes.length, stream: require("node:stream").Readable.from([bytes]) });
+  await assert.rejects(() => f.upload.complete(f.context, { uploadId: started.uploadId }), error => error.code === "import_verification_pending");
+  assert.equal(f.workflow.calls.length, 1); assert.equal([...f.workflow.sdkRuns.values()][0].status, "running");
+  await f.workflow.awaitTasks(); await f.workflow.tick();
+  assert.equal((await f.upload.status(f.context, { uploadId: started.uploadId })).state, "uploaded");
+  const requested = await f.preparation.request(f.context, { uploadId: started.uploadId, assetId: started.assetId, expectedMediaRevision: 0,
+    idempotencyKey: crypto.randomUUID(), selection: { kind: "image", targets: ["feed"], audioMode: "none" } });
+  const first = f.workflow.tick(), overlapping = f.workflow.tick(); assert.equal(first, overlapping, "Concurrent calls join one finite tick");
+  await first; assert.equal(f.workflow.calls.length, 2); assert.equal((await f.preparation.status(f.context, { assetId: started.assetId })).ready, false);
+  await f.workflow.awaitTasks();
+  // Controlled crash-gap state: a claimed predecessor must itself block new
+  // dispatch even if its Workflow registration is not visible. Restore only
+  // this exact synthetic row; this is not an actual API restart proof.
+  const registration = (await f.workflow.journal.records()).find(r => r.kind === "prepare");
+  const storedRegistration = await f.store.update(f.context.companyId, state => {
+    const row = state.workflowExecutions.records[registration.executionId]; delete state.workflowExecutions.records[registration.executionId]; return row;
+  });
+  try { assert.equal((await f.workflow.tick()).unresolved, true); assert.equal(f.workflow.calls.length, 2); }
+  finally { await f.store.update(f.context.companyId, state => { state.workflowExecutions.records[registration.executionId] = storedRegistration; }); }
+  const remotePrepare = [...f.workflow.sdkRuns.values()][1]; remotePrepare.status = "running";
+  const observed = await f.workflow.tick(); assert.equal(observed.unresolved, true, "Bytes are durably returned; provider status remains independently pending");
+  assert.equal((await f.preparation.status(f.context, { assetId: started.assetId })).ready, false);
+  const record = (await f.workflow.journal.records()).find(r => r.kind === "prepare");
+  const capacity = await f.capacity.inspect({ context: { authenticated: true, role: "calendar_media_capacity_coordinator" }, jobId: record.task.jobId });
+  assert.equal(capacity.state, "running", "A durable result alone must not release capacity before confirmed run termination");
+  assert.equal(f.workflow.calls.length, 2);
+  remotePrepare.status = "completed"; await f.workflow.tick();
+  const ready = await f.preparation.status(f.context, { assetId: started.assetId }); assert.equal(ready.ready, true); assert.equal(ready.mediaRevision, requested.mediaRevision);
+  await Promise.all([f.workflow.tick(), f.workflow.tick()]); assert.equal(f.workflow.calls.length, 2);
+  f.revoke(); await assert.rejects(() => f.workflow.tick(), /not_allowed/); assert.equal(f.workflow.calls.length, 2);
+  t.diagnostic("ASYNC_START=PROVED; STATUS_READONLY=YES; TICK_OVERLAP_JOINED=YES; UNKNOWN_RESERVATION_HELD=YES; DUPLICATE_STARTS=ZERO");
+});

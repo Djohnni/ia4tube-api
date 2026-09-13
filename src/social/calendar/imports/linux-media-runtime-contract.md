@@ -48,7 +48,7 @@ Métricas Linux são `memory.peak` do cgroup (memória contabilizada, inclusive 
 
 `calendar-import-media-process-linux-physical.test.js`: sem skips; prova real de namespaces, uid, recusa de alteração de request/receipts/código/cgroup, ambiente limpo, resposta perdida, deadline/descendente, morte do coordenador, segunda execução recusada, excesso de saída, memória, tarefas e capacidade ausente.
 
-`calendar-import-media-linux-candidate-limit-physical.test.js`: vídeo sintético real de 60 segundos, 1080×1920 e 92–100 MiB, com upload, inspeção, preparação e inspeção final. Mantém 180 segundos/512 MiB/1 CPU; uma falha deve ser registrada, não corrigida relaxando o teste.
+`calendar-import-media-linux-candidate-limit-physical.test.js`: vídeo sintético real de 60 segundos, 1080×1920 e pelo menos 92 MiB codificados, acrescido de um box ISO-BMFF `free` até **100 MiB exatos (104.857.600 bytes)**. O preenchimento testa o teto de transporte/reserva, não representa trabalho adicional de codec; o diagnóstico separa os dois tamanhos. Upload, inspeção integral, preparação e inspeção final permanecem físicos. Mantém 180 segundos/512 MiB/1 CPU; uma falha deve ser registrada, não corrigida relaxando o teste.
 
 As provas PG, calendário, resultado perdido, espaço/reservas e publicador simulado existentes são reutilizadas somente nas partes pertinentes à mudança de sistema operacional. Nenhuma chamada Instagram real e nenhum gasto Render fazem parte dessa suíte.
 

@@ -21,7 +21,7 @@ function build(client, taskSlug, testing, requestTimeoutMs = 15000) {
       if (!UUID.test(executionId || "") || runId != null && !RUN.test(runId)) fail("request_invalid");
       const deadline = performance.now() + requestTimeoutMs;
       try {
-        if (runId) { const r = await bounded(client.workflows.getTaskRun(runId), deadline); if (!matched(r, executionId)) fail("run_binding_invalid");
+        if (runId) { const r = await bounded(client.workflows.getTaskRun(runId), deadline); if (!matched(r, executionId) || r.id !== runId) fail("run_binding_invalid");
           return { runId, status: r.status, terminal: ["completed", "failed", "canceled"].includes(r.status) }; }
         // Bounded read-only search recovers a lost start acknowledgement. An
         // inconclusive page is NEVER permission to dispatch another run.
