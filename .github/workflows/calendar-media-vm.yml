@@ -84,6 +84,13 @@ jobs:
           printf '%s  %s\n' 472655581fb851559730c48763e0c9d3bc25975c59d518003fc0849d3e4ba0f6 "$RUNNER_TEMP/vm-node.tar.xz" | sha256sum -c - >/dev/null
           [[ ! -e /opt/node-v24.15.0-linux-x64 ]]
           sudo tar --no-same-owner -xJf "$RUNNER_TEMP/vm-node.tar.xz" -C /opt
+          # CI4 proved this disposable runner image has /opt mode 0777.
+          # Tighten ONLY this fixed parent on the ephemeral test machine.
+          # The candidate installer never silently changes shared host parents.
+          [[ "$GITHUB_ACTIONS" == true && "$RUNNER_ENVIRONMENT" == github-hosted ]]
+          [[ -d /opt && ! -L /opt && "$(stat -c '%u' /opt)" == 0 ]]
+          sudo chmod 0755 -- /opt
+          [[ "$(stat -c '%a' /opt)" == 755 ]]
           sudo env PATH=/opt/node-v24.15.0-linux-x64/bin:/usr/sbin:/usr/bin:/sbin:/bin bash "$RUNNER_TEMP/vm-proof-bundle/scripts/media-vm/preflight-ubuntu24.sh"
           sudo env PATH=/opt/node-v24.15.0-linux-x64/bin:/usr/sbin:/usr/bin:/sbin:/bin bash "$RUNNER_TEMP/vm-proof-bundle/scripts/media-vm/install-ubuntu24.sh" --synthetic-proof
           # Fixed public installation paths only: no environment or data files.

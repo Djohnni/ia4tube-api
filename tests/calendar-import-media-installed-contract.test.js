@@ -52,3 +52,13 @@ test("installation never starts a worker, carries production credentials or over
   assert.doesNotMatch(installer + pack, /systemctl\s+(enable|start)|NOPASSWD:\s*ALL|fs\.readFileSync\([^\n]*bridge\.key/);
   assert.match(pack, /enabled: false/); assert.match(pack, /"src", "node_modules", "workflows"/);
 });
+
+test("host preflight rejects unsafe privileged ancestors without changing a shared directory", () => {
+  const preflight = fs.readFileSync(path.resolve(__dirname, "../scripts/media-vm/preflight-ubuntu24.sh"), "utf8");
+  assert.match(preflight, /for ancestor in \/opt \/var \/var\/lib \/etc/);
+  assert.match(preflight, /! -L "\$ancestor"/);
+  assert.match(preflight, /stat -c '%u' -- "\$ancestor"\) == 0/);
+  assert.match(preflight, /8#\$ancestor_mode & 8#022/);
+  assert.match(preflight, /PRIVILEGED_ANCESTOR_UNSAFE/);
+  assert.doesNotMatch(preflight, /\b(?:chmod|chown|install|mkdir|truncate|mkfs)\s/);
+});
