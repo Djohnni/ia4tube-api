@@ -4,6 +4,15 @@
 const fs = require("node:fs/promises"), path = require("node:path"), crypto = require("node:crypto");
 const { spawn } = require("node:child_process");
 const OUTPUT_MAX = 262144;
+const PROBE_STAGES = new Set(["host_identity", "installed_accounts", "installed_caller", "installed_ancestry", "installed_paths", "volume_mount", "volume_backing",
+  "pidfd", "jail_prepare", "cgroup", "clone", "assignment", "release", "child_namespace", "child_privileges", "child_probe", "child_stdio", "child_exec", "child_failed", "cleanup", "completed"]);
+function closedProbeDiagnostic(text) {
+  if (typeof text !== "string" || Buffer.byteLength(text) > OUTPUT_MAX) return null;
+  const lines = text.split(/\r?\n/).filter(line => line.startsWith("MEDIA_LINUX_PROBE="));
+  if (lines.length !== 1) return null;
+  const match = /^MEDIA_LINUX_PROBE=([a-z_]+):([01])$/.exec(lines[0]);
+  return match && PROBE_STAGES.has(match[1]) ? Object.freeze({ stage: match[1], terminationProved: match[2] === "1" }) : null;
+}
 const INSTALLED = Object.freeze({ root: "/opt/ia4tube-media", native: "/opt/ia4tube-media/bin/supervisor",
   node: "/opt/ia4tube-media/runtime/usr/bin/node", entry: "/opt/ia4tube-media/runtime/app/src/social/calendar/imports/media-process-child.js",
   ffmpeg: "/opt/ia4tube-media/runtime/usr/bin/ffmpeg", cgroupRoot: "/sys/fs/cgroup/ia4tube-media-vm",
@@ -42,13 +51,14 @@ async function installedSupervisor() {
 }
 async function bounded(command, args, { env, cwd, timeoutMs = 30000 } = {}) {
   return new Promise((resolve, reject) => {
-    let child, output = 0, bad = false;
+    let child, output = 0, bad = false; const stdout = [];
     try { child = spawn(command, args, { cwd, shell: false, stdio: ["ignore", "pipe", "pipe"], env }); }
     catch { reject(Object.assign(new Error("media_process_linux_launch_failed"), { code: "media_process_linux_launch_failed" })); return; }
     const timer = setTimeout(() => { bad = true; child.kill("SIGKILL"); }, timeoutMs);
     child.once("error", () => { bad = true; });
-    for (const stream of [child.stdout, child.stderr]) stream?.on("data", chunk => { output += chunk.length; if (output > OUTPUT_MAX) { bad = true; child.kill("SIGKILL"); } });
-    child.once("close", code => { clearTimeout(timer); resolve({ code, valid: !bad && code === 0 }); });
+    for (const stream of [child.stdout, child.stderr]) stream?.on("data", chunk => { output += chunk.length; if (output > OUTPUT_MAX) { bad = true; child.kill("SIGKILL"); }
+      else if (stream === child.stdout) stdout.push(chunk); });
+    child.once("close", code => { clearTimeout(timer); resolve({ code, valid: !bad && code === 0, probe: bad ? null : closedProbeDiagnostic(Buffer.concat(stdout).toString("utf8")) }); });
   });
 }
 async function compileLinuxSupervisor(root, { safePath, cleanEnvironment, linuxRuntime } = {}) {
@@ -90,11 +100,14 @@ async function compileLinuxSupervisor(root, { safePath, cleanEnvironment, linuxR
 async function probeLinuxRuntime(native, config, cleanEnvironment, root) {
   const request = launch(native, ["--probe", config.cgroupRoot, String(process.pid)], config);
   const result = await bounded(request.command, request.args, { cwd: root, env: cleanEnvironment(root), timeoutMs: 15000 });
-  if (!result.valid) fail("capabilities_unavailable");
+  if (!result.valid || result.probe?.stage !== "completed" || result.probe.terminationProved !== true) {
+    if (result.probe && result.probe.stage !== "completed") fail("probe_" + result.probe.stage);
+    fail("capabilities_unavailable");
+  }
   return Object.freeze({ platform: "linux", validationOnly: true, cgroupV2: true, pidfd: true, privatePidMountNetworkNamespaces: true,
     unprivilegedCodec: true, readOnlyHostFilesystem: config.launchMode !== "installed", writableTaskRootsOnly: true,
     ...(config.launchMode === "installed" ? { readIsolatedRoot: true, distinctCodecUid: true,
       aggregateScratchQuotaBytes: INSTALLED.quotaBytes, installedLauncher: true } : {}),
     maxTasks: 64, cpuQuotaUs: 100000, cpuPeriodUs: 100000, memorySwapBytes: 0 });
 }
-module.exports = { normalizeLinuxRuntime, compileLinuxSupervisor, probeLinuxRuntime, launch, INSTALLED };
+module.exports = { normalizeLinuxRuntime, compileLinuxSupervisor, probeLinuxRuntime, launch, INSTALLED, closedProbeDiagnostic };

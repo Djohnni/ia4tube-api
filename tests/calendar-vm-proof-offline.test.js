@@ -2,7 +2,7 @@
 const test = require("node:test"), assert = require("node:assert/strict"), fs = require("node:fs/promises"), path = require("node:path"), os = require("node:os");
 const { spawnSync } = require("node:child_process");
 const { createLocalStore, protectedPath, protectCreatedFile } = require("../scripts/validation/vm-proof-local-state");
-const { parseEvidence } = require("../scripts/validation/vm-proof-guest");
+const { parseEvidence, closedFailure, validateFailure } = require("../scripts/validation/vm-proof-guest");
 const { MANIFEST, sha256 } = require("../scripts/validation/vm-proof-manifest");
 const { buildPackage } = require("../scripts/validation/vm-proof-package");
 const { main } = require("../scripts/validation/vm-proof-cli");
@@ -80,7 +80,7 @@ test("unsafe output directory and inherited broad credential file fail closed", 
 function evidenceLines() {
   return ["# " + JSON.stringify({ case: "installed-pipeline", source: { size: 104857600 }, decoded: { seconds: 60 }, prepared: {
     elapsedMs: 45000, metrics: { cpuMs: 42000, peakTreeMemoryBytes: 300000000, peakTasks: 20 } } }),
-    ...MANIFEST.cases.map(c => "# VM_INSTALLED_CASE=" + JSON.stringify({ id: c.id, passed: true, terminationProved: true, nativeLaunches: c.attempts.length })),
+    ...MANIFEST.cases.map(c => "# VM_INSTALLED_CASE=" + JSON.stringify({ id: c.id, passed: true, terminationProved: true, nativeLaunches: c.attempts.length, failure: null })),
     "# VM_INSTALLED_TOTAL=" + JSON.stringify({ launches: 8, allTerminated: true, attemptIds: MANIFEST.cases.flatMap(c => c.attempts) })].join("\n");
 }
 test("guest evidence binds the eight supervised attempt IDs, not just five test cases", () => {
@@ -92,6 +92,22 @@ test("guest evidence binds the eight supervised attempt IDs, not just five test 
   assert.throws(() => parseEvidence(evidenceLines().replace('"cpuMs":42000', '"cpuMs":"secret"'), 0, 100000), /metrics_invalid/);
   assert.equal(parseEvidence(evidenceLines(), 1, 100000).allPassed, false);
   assert.throws(() => parseEvidence("no physical receipts", 0), /receipt/);
+});
+test("installed failure diagnosis carries only allowlisted stage/code, never raw exception content", () => {
+  const secret = "synthetic-private-path-and-token-never-export", safe = closedFailure({ code: "ERR_ASSERTION", message: secret }, "launcher-identity");
+  assert.deepEqual(safe, { stage: "launcher-identity", code: "assertion_failed" }); assert.equal(JSON.stringify(safe).includes(secret), false);
+  assert.deepEqual(closedFailure({ code: secret, message: secret }, secret), { stage: "case-body", code: "unexpected_error" });
+  for (const stage of ["host_identity", "installed_accounts", "installed_caller", "installed_ancestry", "installed_paths", "volume_mount", "volume_backing",
+    "pidfd", "jail_prepare", "cgroup", "clone", "assignment", "release", "child_namespace", "child_privileges", "child_probe", "child_stdio", "child_exec", "child_failed", "cleanup"]) {
+    const code = "media_process_linux_probe_" + stage;
+    assert.deepEqual(closedFailure({ code, message: secret }, "runtime-probe"), { stage: "runtime-probe", code });
+  }
+  assert.equal(closedFailure({ code: "media_process_linux_probe_" + secret }, "runtime-probe").code, "unexpected_error");
+  assert.equal(validateFailure({ ...safe, message: secret }), false);
+  const failed = "# VM_INSTALLED_CASE=" + JSON.stringify({ id: MANIFEST.cases[0].id, passed: false, terminationProved: false, nativeLaunches: 0, failure: safe }) +
+    "\n# VM_INSTALLED_TOTAL=" + JSON.stringify({ launches: 0, allTerminated: false, attemptIds: [] });
+  const r = parseEvidence(failed, 1, 100); assert.deepEqual(r.failure, safe); assert.equal(r.allPassed, false); assert.equal(r.launches, 0);
+  assert.throws(() => parseEvidence(failed.replace('"assertion_failed"', JSON.stringify(secret)), 1, 100), /case_receipt_invalid/);
 });
 test("real source package builds twice identically, includes installed dependencies and excludes administrative controller", async () => {
   const a = await buildPackage(root), b = await buildPackage(root);

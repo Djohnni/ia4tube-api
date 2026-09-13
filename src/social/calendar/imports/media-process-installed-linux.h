@@ -43,11 +43,13 @@ static int vm_uuid(const char *value) {
 static int vm_volume(void) {
   struct stat st, parent, image; struct statfs type; struct statvfs space;
   char backing[PATH_MAX], filename[PATH_MAX], text[PATH_MAX];
+  probe_stage="volume_mount";
   if (lstat(VM_WORK,&st) || !S_ISDIR(st.st_mode) || S_ISLNK(st.st_mode) || st.st_uid!=0 || (st.st_mode&0022) ||
       lstat(VM_BASE,&parent) || st.st_dev==parent.st_dev || statfs(VM_WORK,&type) || type.f_type!=EXT4_SUPER_MAGIC ||
       statvfs(VM_WORK,&space) || !(space.f_flag&ST_NOSUID) || !(space.f_flag&ST_NODEV) ||
       (unsigned long long)space.f_blocks*space.f_frsize > VM_QUOTA ||
       (unsigned long long)space.f_blocks*space.f_frsize < VM_QUOTA*9/10) return -1;
+  probe_stage="volume_backing";
   if (snprintf(filename,sizeof filename,"/sys/dev/block/%u:%u/loop/backing_file",major(st.st_dev),minor(st.st_dev)) >= (int)sizeof filename ||
       read_text(filename,text,sizeof text)) return -1;
   text[strcspn(text,"\r\n")]=0;
@@ -57,22 +59,25 @@ static int vm_volume(void) {
   return 0;
 }
 static int vm_authorize(pid_t parent, const char *root, const char *node, const char *entry, const char *cgroot, const char *write_root, int probe) {
+  probe_stage="installed_accounts";
   struct passwd *pw = getpwnam("ia4tube-coordinator"); if(!pw || pw->pw_uid==0 || pw->pw_gid==0) return -1;
   uid_t uid=pw->pw_uid, observed; gid_t gid=pw->pw_gid, observed_gid;
   pw=getpwnam("ia4tube-codec"); if(!pw || pw->pw_uid==0 || pw->pw_uid==uid || pw->pw_gid==0 || pw->pw_gid==gid) return -1;
   vm_codec_uid=pw->pw_uid; vm_codec_gid=pw->pw_gid;
   const char *sudo_uid=getenv("SUDO_UID"); char *end=NULL;
+  probe_stage="installed_caller";
   if (!sudo_uid || strtoul(sudo_uid,&end,10)!=uid || !end || *end || parent_identity(parent,&observed,&observed_gid) || observed!=uid || observed_gid!=gid) return -1;
   /* sudo may insert a monitor process, but the supplied coordinator must be
    * an actual ancestor. Naming an unrelated same-UID process is not enough. */
-  pid_t ancestor=getppid(); int found=0;
+  probe_stage="installed_ancestry"; pid_t ancestor=getppid(); int found=0;
   for(int depth=0;depth<8 && ancestor>1;depth++) {
     if(ancestor==parent) { found=1; break; }
     char file[128], status[8192]; snprintf(file,sizeof file,"/proc/%d/status",ancestor);
     if(read_text(file,status,sizeof status)) return -1;
     char *p=strstr(status,"\nPPid:\t"); if(!p) return -1; ancestor=(pid_t)strtol(p+7,NULL,10);
   }
-  char own[PATH_MAX]; ssize_t count=readlink("/proc/self/exe",own,sizeof own-1);
+  if(!found)return -1;
+  probe_stage="installed_paths"; char own[PATH_MAX]; ssize_t count=readlink("/proc/self/exe",own,sizeof own-1);
   if(count<1) return -1; own[count]=0;
   if(!found || strcmp(own,VM_NATIVE) || vm_path(VM_NATIVE,0,1) || vm_path(VM_RUNTIME,1,1) ||
       vm_path(VM_NODE,0,1) || vm_path(VM_ENTRY,0,1) || strcmp(cgroot,VM_CGROUP) || vm_volume()) return -1;

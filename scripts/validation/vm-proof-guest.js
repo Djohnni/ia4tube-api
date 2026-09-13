@@ -5,6 +5,24 @@ const { MANIFEST, sha256, canonical } = require("./vm-proof-manifest");
 const STATE = "/var/lib/ia4tube-media/state/proof-run";
 const ROOT = "/opt/ia4tube-media/proof";
 function fail(code) { throw new Error("vm_proof_guest_" + code); }
+const FAILURE_STAGES = new Set(["platform", "installation-record", "coordinator-identity", "launcher-identity", "executor-configuration",
+  "runtime-probe", "capabilities", "scratch-quota", "case-body", "guest-parser", "guest-launch"]);
+const FAILURE_CODES = new Set(["assertion_failed", "missing_path", "permission_denied", "already_exists", "unexpected_error", "subprocess_failed",
+  "media_process_linux_installed_path_invalid", "media_process_linux_installed_record_invalid", "media_process_linux_installed_launcher_invalid",
+  "media_process_linux_capabilities_unavailable", "media_process_installed_configuration_invalid", "media_process_linux_configuration_invalid",
+  "media_process_path_invalid", "vm_proof_guest_case_receipt_invalid", "vm_proof_guest_total_receipt_invalid",
+  "vm_proof_guest_total_receipt_missing", "vm_proof_guest_duplicate_metrics", "vm_proof_guest_metrics_invalid"]);
+for (const stage of ["host_identity", "installed_accounts", "installed_caller", "installed_ancestry", "installed_paths", "volume_mount", "volume_backing",
+  "pidfd", "jail_prepare", "cgroup", "clone", "assignment", "release", "child_namespace", "child_privileges", "child_probe", "child_stdio", "child_exec", "child_failed", "cleanup"])
+  FAILURE_CODES.add("media_process_linux_probe_" + stage);
+function validateFailure(value) {
+  return value === null || value && Object.keys(value).sort().join(",") === "code,stage" && FAILURE_STAGES.has(value.stage) && FAILURE_CODES.has(value.code);
+}
+function closedFailure(error, stage = "case-body") {
+  const mapping = { ERR_ASSERTION: "assertion_failed", ENOENT: "missing_path", EACCES: "permission_denied", EPERM: "permission_denied", EEXIST: "already_exists" };
+  const value = mapping[error?.code] || (FAILURE_CODES.has(error?.code) ? error.code : FAILURE_CODES.has(error?.message) ? error.message : "unexpected_error");
+  return { stage: FAILURE_STAGES.has(stage) ? stage : "case-body", code: value };
+}
 function validateMetrics(metrics) {
   return metrics === null || metrics && Object.keys(metrics).sort().join(",") === "decodedSeconds,peakTasks,peakTreeMemoryBytes,preparationCpuMs,preparationElapsedMs,sequenceElapsedMs,sourceBytes" &&
     Object.values(metrics).every(n => Number.isFinite(n) && n >= 0 && n <= 10 ** 13);
@@ -30,8 +48,9 @@ function parseEvidence(output, code, sequenceElapsedMs = null) {
     const row = JSON.parse(match[2]);
     if (match[1] === "CASE") {
       const expected = MANIFEST.cases[cases.length];
-      if (!expected || Object.keys(row).sort().join(",") !== "id,nativeLaunches,passed,terminationProved" || row.id !== expected.id ||
+      if (!expected || Object.keys(row).sort().join(",") !== "failure,id,nativeLaunches,passed,terminationProved" || row.id !== expected.id ||
         typeof row.passed !== "boolean" || typeof row.terminationProved !== "boolean" ||
+        !validateFailure(row.failure) || (row.passed ? row.failure !== null : row.failure === null) ||
         !Number.isSafeInteger(row.nativeLaunches) || row.nativeLaunches < 0 || row.nativeLaunches > expected.attempts.length) fail("case_receipt_invalid");
       cases.push(row);
     } else {
@@ -45,7 +64,7 @@ function parseEvidence(output, code, sequenceElapsedMs = null) {
   if (totals.length !== 1 || totals[0].launches !== cases.reduce((n, c) => n + c.nativeLaunches, 0)) fail("total_receipt_missing");
   const allPassed = code === 0 && metrics !== null && cases.length === MANIFEST.cases.length && cases.every((c, i) => c.passed && c.terminationProved && c.nativeLaunches === MANIFEST.cases[i].attempts.length);
   return { schema: 1, cases, launches: totals[0].launches, attemptIds: totals[0].attemptIds, allTerminated: totals[0].allTerminated,
-    syntheticOnly: true, metrics, allPassed };
+    syntheticOnly: true, metrics, failure: cases.find(c => !c.passed)?.failure || null, allPassed };
 }
 async function writeExclusive(file, value) {
   const out = await fs.open(file, "wx", 0o600);
@@ -74,7 +93,8 @@ async function run() {
     startedAt: Date.now(), caseIds: MANIFEST.cases.map(c => c.id), attemptIds: MANIFEST.cases.flatMap(c => c.attempts), retries: 0 });
   let evidence;
   try { const result = await launchSequence(); evidence = parseEvidence(result.output, result.code, result.elapsedMs); }
-  catch { evidence = { schema: 1, cases: [], launches: null, attemptIds: [], allTerminated: false, syntheticOnly: true, metrics: null, allPassed: false }; }
+  catch (error) { evidence = { schema: 1, cases: [], launches: null, attemptIds: [], allTerminated: false, syntheticOnly: true,
+    metrics: null, failure: closedFailure(error, "guest-parser"), allPassed: false }; }
   await writeExclusive(path.join(STATE, "evidence.json"), evidence);
   return evidence;
 }
@@ -91,4 +111,4 @@ if (require.main === module) {
     if (action[0] === "--run" && (!e.allPassed || !e.allTerminated)) process.exitCode = 1;
   }).catch(() => { process.stderr.write("VM_PROOF_GUEST=CLOSED_FAILURE_NO_REPEAT\n"); process.exitCode = 1; });
 }
-module.exports = { parseEvidence, launchSequence, validateMetrics };
+module.exports = { parseEvidence, launchSequence, validateMetrics, closedFailure, validateFailure };

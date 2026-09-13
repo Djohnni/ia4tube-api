@@ -5,7 +5,7 @@ const fs = require("node:fs/promises"), path = require("node:path"), net = requi
 const { spawn } = require("node:child_process");
 const { atomicWrite, protectedPath } = require("./vm-proof-local-state");
 const { sha256, MANIFEST } = require("./vm-proof-manifest");
-const { validateMetrics } = require("./vm-proof-guest");
+const { validateMetrics, validateFailure } = require("./vm-proof-guest");
 function fail(code) { throw Object.assign(new Error("vm_proof_ssh_" + code), { code: "vm_proof_ssh_" + code }); }
 function processRun(command, args, { signal, timeoutMs = 20000, maxBytes = 65536, stdin = null } = {}) {
   return new Promise((resolve, reject) => {
@@ -133,13 +133,15 @@ async function createSshGuest({ stateRoot, packagePath, plan, run = processRun }
       const evidence = JSON.parse(marker.slice("VM_PROOF_EVIDENCE=".length));
       // Closed schema: never export raw stdout/stderr, environment, paths, media
       // or provider payloads. All artifact content is synthetic status evidence.
-      if (Object.keys(evidence).some(k => !["schema", "cases", "launches", "attemptIds", "allTerminated", "syntheticOnly", "metrics"].includes(k)) ||
+      if (Object.keys(evidence).some(k => !["schema", "cases", "launches", "attemptIds", "allTerminated", "syntheticOnly", "metrics", "failure"].includes(k)) ||
         evidence.schema !== 1 || evidence.syntheticOnly !== true || !Array.isArray(evidence.cases) || evidence.cases.length > 10 ||
-        !validateMetrics(evidence.metrics) || typeof evidence.allTerminated !== "boolean" ||
+        !validateMetrics(evidence.metrics) || !validateFailure(evidence.failure) || typeof evidence.allTerminated !== "boolean" ||
         !Array.isArray(evidence.attemptIds) || (evidence.launches === null ? evidence.attemptIds.length !== 0 || evidence.allTerminated !== false || evidence.cases.length !== 0 :
           !Number.isSafeInteger(evidence.launches) || evidence.launches < 0 || evidence.launches > MANIFEST.maxLaunches || evidence.attemptIds.length !== evidence.launches) ||
         evidence.attemptIds.some((id, i) => id !== MANIFEST.cases.flatMap(c => c.attempts)[i]) ||
-        evidence.cases.some(r => Object.keys(r).some(k => !["id", "passed", "terminationProved", "nativeLaunches"].includes(k)) || !MANIFEST.cases.some(c => c.id === r.id))) fail("evidence_schema_invalid");
+        evidence.cases.some((r, i) => Object.keys(r).sort().join(",") !== "failure,id,nativeLaunches,passed,terminationProved" || r.id !== MANIFEST.cases[i]?.id ||
+          !validateFailure(r.failure) || (r.passed ? r.failure !== null : r.failure === null) ||
+          typeof r.passed !== "boolean" || typeof r.terminationProved !== "boolean" || !Number.isSafeInteger(r.nativeLaunches) || r.nativeLaunches < 0 || r.nativeLaunches > MANIFEST.cases[i].attempts.length)) fail("evidence_schema_invalid");
       const safe = { ...evidence, missionId, planSha256: plan.approvalSha256 };
       await atomicWrite(path.join(stateRoot, "synthetic-evidence.json"), safe);
       return { sanitized: true, sha256: sha256(JSON.stringify(safe)) };

@@ -4,18 +4,19 @@
 const test = require("node:test"), assert = require("node:assert/strict"), fs = require("node:fs/promises"), path = require("node:path"), crypto = require("node:crypto");
 const { createMediaProcessExecutor } = require("../src/social/calendar/imports/media-process-executor");
 const { INSTALLED } = require("../src/social/calendar/imports/linux-media-runtime");
+const { closedFailure } = require("../scripts/validation/vm-proof-guest");
 const linuxRuntime = { cgroupRoot: INSTALLED.cgroupRoot, launchMode: "installed", validationOnly: true };
 const options = { workingRoot: INSTALLED.executionRoot, ffmpegPath: INSTALLED.ffmpeg, allowedRoots: [INSTALLED.workRoot + "/data"], syntheticTests: true, linuxRuntime };
-let executor, failed = false, attempts = 0; const launched = [], prefix = crypto.randomUUID();
+let executor, failed = false, attempts = 0, stage = "case-body"; const launched = [], prefix = crypto.randomUUID();
 const caseIds = { "installed preflight identity and immutable launcher": "installed-preflight", "installed codec cannot read coordinator or another tenant": "identity-read-isolation",
   "installed aggregate scratch quota fails closed": "aggregate-space", "installed aggregate deadline terminates descendants": "deadline-descendants", "installed preparation and independent validation": "source-limit" };
 function checked(name, action, timeout = 30000) { test(name, { timeout }, async t => {
   assert.equal(failed, false, "Prior proof failure: no later launch is permitted");
-  const before = attempts;
-  try { await action(t); t.diagnostic("VM_INSTALLED_CASE=" + JSON.stringify({ id: caseIds[name], passed: true, terminationProved: true, nativeLaunches: attempts - before }));
+  const before = attempts; stage = "case-body";
+  try { await action(t); t.diagnostic("VM_INSTALLED_CASE=" + JSON.stringify({ id: caseIds[name], passed: true, terminationProved: true, nativeLaunches: attempts - before, failure: null }));
     if (caseIds[name] === "source-limit") t.diagnostic("VM_INSTALLED_TOTAL=" + JSON.stringify({ launches: attempts, allTerminated: true, attemptIds: launched.map(row => row.name) }));
   } catch (error) { failed = true;
-    t.diagnostic("VM_INSTALLED_CASE=" + JSON.stringify({ id: caseIds[name], passed: false, terminationProved: false, nativeLaunches: attempts - before }));
+    t.diagnostic("VM_INSTALLED_CASE=" + JSON.stringify({ id: caseIds[name], passed: false, terminationProved: false, nativeLaunches: attempts - before, failure: closedFailure(error, stage) }));
     t.diagnostic("VM_INSTALLED_TOTAL=" + JSON.stringify({ launches: attempts, allTerminated: false, attemptIds: launched.map(row => row.name) })); throw error;
   }
 }); }
@@ -27,13 +28,20 @@ async function run(name, operation, input, timeoutMs = 180000) {
 }
 function success(result) { assert.equal(result.state, "succeeded", JSON.stringify(result)); assert.equal(result.termination?.proved, true); assert.equal(result.termination.descendants, 0); }
 checked("installed preflight identity and immutable launcher", async t => {
+  stage = "platform";
   assert.equal(process.platform, "linux"); assert.ok(process.getuid() > 0);
+  stage = "installation-record";
   const record = JSON.parse(await fs.readFile("/opt/ia4tube-media/installation.json", "utf8"));
+  stage = "coordinator-identity";
   assert.equal(process.getuid(), record.coordinatorUid); assert.notEqual(record.codecUid, record.coordinatorUid);
+  stage = "launcher-identity";
   const native = await fs.stat(INSTALLED.native); assert.equal(native.uid, 0); assert.equal(native.mode & 0o222, 0);
+  stage = "executor-configuration";
   executor = createMediaProcessExecutor(options); assert.equal(executor.capabilities.hardTermination, false);
   attempts++; launched.push({ name: "native-preflight", executionId: "probe" });
+  stage = "runtime-probe";
   const prepared = await executor.prepareRuntime();
+  stage = "capabilities";
   for (const key of ["readIsolatedRoot", "distinctCodecUid", "installedLauncher", "cgroupV2", "pidfd"]) assert.equal(prepared.capabilities[key], true, key);
   assert.equal(prepared.capabilities.aggregateScratchQuotaBytes, 3221225472);
   t.diagnostic(JSON.stringify({ case: "installed-preflight", nativeAttempts: 1, hostProductionApproved: false, capabilities: prepared.capabilities }));

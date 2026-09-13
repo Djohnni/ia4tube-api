@@ -33,6 +33,23 @@
 #define TASK_MAX 64
 #define STACK_BYTES (1024 * 1024)
 static volatile sig_atomic_t interrupted;
+/* Closed probe diagnostics contain no arguments, paths, IDs or environment. */
+static const char *probe_stage = "host_identity";
+static int probe_result(int okay, int exit_code, int proved) {
+  const char *stage = okay ? "completed" : probe_stage;
+  if (!okay && !strcmp(stage,"child")) {
+    switch(exit_code) {
+      case 122: stage="child_namespace"; break;
+      case 123: stage="child_privileges"; break;
+      case 124: stage="child_probe"; break;
+      case 125: stage="child_stdio"; break;
+      case 126: stage="child_exec"; break;
+      default: stage="child_failed";
+    }
+  }
+  fprintf(stdout,"MEDIA_LINUX_PROBE=%s:%d\n",stage,proved?1:0);
+  return okay?0:77;
+}
 static void on_signal(int signal_number) { (void)signal_number; interrupted = 1; }
 static long long millis(void) { struct timespec t; if (clock_gettime(CLOCK_MONOTONIC, &t)) return -1; return (long long)t.tv_sec * 1000 + t.tv_nsec / 1000000; }
 static int read_text(const char *name, char *text, size_t capacity) {
@@ -183,9 +200,9 @@ static int supervise(const char *root, const char *node, const char *entry, int 
   unsigned long long self_ticks = start_ticks(getpid()), parent_ticks = start_ticks(parent), output_bytes = 0;
   pid_t child = -1; int parent_fd = -1, self_fd = -1, release[2] = {-1,-1}, output[2] = {-1,-1}, status = 0, reaped = 0, assigned = 0, proved = 0;
   const char *state = "failed"; int exit_code = 1; void *stack = NULL; long long peak = 0, peak_tasks = 0, cpu_us = 0, pids_denied = 0, oom_kills = 0;
-  if (geteuid() != 0 || !self_ticks || !parent_ticks || parent_ticks > self_ticks || boot_id(boot, sizeof boot) || parent_identity(parent, &uid, &gid)) return 77;
+  if (geteuid() != 0 || !self_ticks || !parent_ticks || parent_ticks > self_ticks || boot_id(boot, sizeof boot) || parent_identity(parent, &uid, &gid)) return probe?probe_result(0,1,0):77;
 #ifdef IA4TUBE_INSTALLED
-  if (memory != 536870912 || vm_authorize(parent,root,node,entry,cgroot,write_root,probe)) return 77;
+  if (memory != 536870912 || vm_authorize(parent,root,node,entry,cgroot,write_root,probe)) return probe?probe_result(0,1,0):77;
 #endif
   if (!probe) {
     if (snprintf(control, sizeof control, "%s.supervision", root) >= (int)sizeof control || mkdir(control, 0700) || chown(control, uid, gid)) return 70;
@@ -197,11 +214,13 @@ static int supervise(const char *root, const char *node, const char *entry, int 
         (!strncmp(node, write_root, write_length) && (node[write_length] == '/' || !node[write_length]))) return 70;
   }
   prctl(PR_SET_DUMPABLE, 0); signal(SIGTERM, on_signal); signal(SIGINT, on_signal); signal(SIGHUP, on_signal); signal(SIGPIPE, SIG_IGN);
+  probe_stage="pidfd";
   parent_fd = (int)syscall(SYS_pidfd_open, parent, 0); if (parent_fd < 0 || start_ticks(parent) != parent_ticks) goto finish;
   self_fd = (int)syscall(SYS_pidfd_open, getpid(), 0); if (self_fd < 0) goto finish;
 #ifdef IA4TUBE_INSTALLED
-  if (vm_prepare(root,write_root,probe,began+timeout)) goto finish;
+  probe_stage="jail_prepare"; if (vm_prepare(root,write_root,probe,began+timeout)) goto finish;
 #endif
+  probe_stage="cgroup";
   if (group_create(cgroot, group, sizeof group, memory) || pipe2(release, O_CLOEXEC) || pipe2(output, O_CLOEXEC | O_NONBLOCK)) goto finish;
   if (fcntl(output[1], F_SETFL, fcntl(output[1], F_GETFL) & ~O_NONBLOCK)) goto finish;
   stack = malloc(STACK_BYTES); if (!stack) goto finish;
@@ -209,16 +228,17 @@ static int supervise(const char *root, const char *node, const char *entry, int 
 #ifdef IA4TUBE_INSTALLED
   spec.uid=vm_codec_uid; spec.gid=vm_codec_gid;
 #endif
-  child = clone(contained_child, (char *)stack + STACK_BYTES, CLONE_NEWNS | CLONE_NEWPID | CLONE_NEWNET | SIGCHLD, &spec);
+  probe_stage="clone"; child = clone(contained_child, (char *)stack + STACK_BYTES, CLONE_NEWNS | CLONE_NEWPID | CLONE_NEWNET | SIGCHLD, &spec);
   if (child < 0) goto finish;
   close(release[0]); release[0] = -1; close(output[1]); output[1] = -1;
-  snprintf(text, sizeof text, "%d", child); if (cg_write(group, "cgroup.procs", text)) goto finish; assigned = 1;
+  probe_stage="assignment"; snprintf(text, sizeof text, "%d", child); if (cg_write(group, "cgroup.procs", text)) goto finish; assigned = 1;
   if (!probe) {
     snprintf(text, sizeof text, "{\"schema\":1,\"platform\":\"linux\",\"assignedBeforeResume\":true,\"supervisor\":{\"pid\":%d,\"creationTicks\":\"%llu\",\"bootId\":\"%s\"},\"cgroup\":\"execution-%d\"}", getpid(), self_ticks, boot, getpid());
     if (write_receipt(control, "started.json", text, uid, gid)) goto finish;
   }
-  if (write(release[1], "1", 1) != 1) goto finish;
+  probe_stage="release"; if (write(release[1], "1", 1) != 1) goto finish;
   close(release[1]); release[1] = -1;
+  probe_stage="child";
   while (1) {
     char buffer[4096]; ssize_t n; while ((n = read(output[0], buffer, sizeof buffer)) > 0) { output_bytes += (unsigned long long)n; if (output_bytes > OUTPUT_MAX) break; }
     long long tasks = cg_value(group, "pids.current", NULL); if (tasks > peak_tasks) peak_tasks = tasks;
@@ -253,12 +273,12 @@ finish:
   /* Only after kernel termination proof may ownership return to the trusted
    * coordinator. Never follow links or touch another execution's directory. */
   if (!probe && (vm_restore(root,uid,gid) || (strcmp(root,write_root) && vm_restore(write_root,uid,gid)))) proved=0;
-  if (proved && vm_cleanup(probe)) proved=0;
+  if (proved && vm_cleanup(probe)) { proved=0; probe_stage="cleanup"; }
 #endif
 unknown:
   for (int i = 0; i < 2; i++) { if (release[i] >= 0) close(release[i]); if (output[i] >= 0) close(output[i]); }
   if (parent_fd >= 0) close(parent_fd); if (self_fd >= 0) close(self_fd); free(stack);
-  if (probe) return proved && !strcmp(state, "succeeded") && exit_code == 0 ? 0 : 77;
+  if (probe) return probe_result(proved && !strcmp(state,"succeeded") && exit_code==0,exit_code,proved);
   snprintf(text, sizeof text, "{\"schema\":1,\"platform\":\"linux\",\"state\":\"%s\",\"exitCode\":%d,\"elapsedMs\":%lld,\"supervisor\":{\"pid\":%d,\"creationTicks\":\"%llu\",\"bootId\":\"%s\"},\"termination\":{\"proved\":%s,\"descendants\":%d},\"limits\":{\"memoryBytes\":%lld,\"maxTasks\":64,\"cpuQuotaUs\":100000,\"cpuPeriodUs\":100000,\"swapBytes\":0},\"metrics\":{\"cpuMs\":%lld,\"peakTreeMemoryBytes\":%lld,\"peakTasks\":%lld,\"pidsMaxEvents\":%lld,\"oomKillEvents\":%lld,\"outputBytes\":%llu}}", state, exit_code, millis()-began, getpid(), self_ticks, boot, proved ? "true" : "false", proved ? 0 : -1, memory, cpu_us < 0 ? 0 : cpu_us / 1000, peak < 0 ? 0 : peak, peak_tasks, pids_denied, oom_kills, output_bytes);
   if (write_receipt(control, "terminal.json", text, uid, gid)) return 70;
   return proved ? 0 : 70;

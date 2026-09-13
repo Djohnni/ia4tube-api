@@ -2,6 +2,14 @@
 const test = require("node:test"), assert = require("node:assert/strict"), fs = require("node:fs"), path = require("node:path");
 const { normalizeLinuxRuntime, launch, INSTALLED } = require("../src/social/calendar/imports/linux-media-runtime");
 const config = { cgroupRoot: INSTALLED.cgroupRoot, launchMode: "installed", validationOnly: true };
+
+test("native probe diagnosis is a closed stage and boolean, never output text", () => {
+  const { closedProbeDiagnostic } = require("../src/social/calendar/imports/linux-media-runtime");
+  assert.deepEqual(closedProbeDiagnostic("MEDIA_LINUX_PROBE=installed_paths:0\n"), { stage: "installed_paths", terminationProved: false });
+  assert.deepEqual(closedProbeDiagnostic("MEDIA_LINUX_PROBE=completed:1\n"), { stage: "completed", terminationProved: true });
+  for (const value of [null, "secret", "MEDIA_LINUX_PROBE=/etc/secret:0", "MEDIA_LINUX_PROBE=installed_paths:0:secret", "MEDIA_LINUX_PROBE=unreviewed:1", "MEDIA_LINUX_PROBE=child_namespace:0\nMEDIA_LINUX_PROBE=completed:1", "x".repeat(262145)])
+    assert.equal(closedProbeDiagnostic(value), null);
+});
 test("installed contract accepts only fixed root and privileged installed binary", () => {
   assert.deepEqual(normalizeLinuxRuntime(config), config);
   assert.deepEqual(launch(INSTALLED.native, ["--probe"], config), { command: "/usr/bin/sudo", args: ["-n", "--", INSTALLED.native, "--probe"] });

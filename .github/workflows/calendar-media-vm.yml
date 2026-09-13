@@ -86,12 +86,14 @@ jobs:
           sudo tar --no-same-owner -xJf "$RUNNER_TEMP/vm-node.tar.xz" -C /opt
           sudo env PATH=/opt/node-v24.15.0-linux-x64/bin:/usr/sbin:/usr/bin:/sbin:/bin bash "$RUNNER_TEMP/vm-proof-bundle/scripts/media-vm/preflight-ubuntu24.sh"
           sudo env PATH=/opt/node-v24.15.0-linux-x64/bin:/usr/sbin:/usr/bin:/sbin:/bin bash "$RUNNER_TEMP/vm-proof-bundle/scripts/media-vm/install-ubuntu24.sh" --synthetic-proof
+          proof_status=0
           sudo -u ia4tube-coordinator env -i PATH=/usr/bin:/bin LANG=C.UTF-8 \
             /opt/ia4tube-media/runtime/usr/bin/node \
-            /opt/ia4tube-media/proof/scripts/validation/vm-proof-guest.js --run
+            /opt/ia4tube-media/proof/scripts/validation/vm-proof-guest.js --run || proof_status=$?
           sudo -u ia4tube-coordinator env -i PATH=/usr/bin:/bin LANG=C.UTF-8 \
             /opt/ia4tube-media/runtime/usr/bin/node \
             /opt/ia4tube-media/proof/scripts/validation/vm-proof-guest.js --collect
+          [[ "$proof_status" == 0 ]]
       - name: VM pull integration under the installed coordinator identity
         if: ${{ !cancelled() && steps.installed.outcome == 'success' }}
         shell: bash
