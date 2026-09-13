@@ -130,7 +130,7 @@ function canonicalPermalink(value) {
   } catch {
     connectorFail("provider_result_unknown");
   }
-  const match = parsed.pathname.match(/^\/p\/([A-Za-z0-9_-]{3,100})\/?$/);
+  const match = parsed.pathname.match(/^\/(p|reel)\/([A-Za-z0-9_-]{3,100})\/?$/);
   const story = parsed.pathname.match(/^\/stories\/([A-Za-z0-9_.]{1,30})\/([0-9]{5,64})\/?$/);
   if (
     parsed.protocol !== "https:" ||
@@ -144,7 +144,7 @@ function canonicalPermalink(value) {
   ) {
     connectorFail("provider_result_unknown");
   }
-  return match ? `https://www.instagram.com/p/${match[1]}/` : `https://www.instagram.com/stories/${story[1]}/${story[2]}/`;
+  return match ? `https://www.instagram.com/${match[1]}/${match[2]}/` : `https://www.instagram.com/stories/${story[1]}/${story[2]}/`;
 }
 
 function confirmedReference(mediaId, permalink, clock = Date.now) {
@@ -213,6 +213,24 @@ function responseHeader(response, name) {
 }
 
 async function responseBytes(response) {
+  if (typeof response?.body?.getReader === "function") {
+    const reader = response.body.getReader(), chunks = [];
+    let count = 0;
+    try {
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        count += value.byteLength;
+        if (count > INSTAGRAM_PUBLICATION_MAX_RESPONSE_BYTES) connectorFail("provider_result_unknown");
+        chunks.push(Buffer.from(value));
+      }
+      return Buffer.concat(chunks, count);
+    } finally {
+      try { await reader.cancel(); } catch { /* No provider data in diagnostics. */ }
+      reader.releaseLock();
+      for (const chunk of chunks) chunk.fill(0);
+    }
+  }
   if (typeof response?.arrayBuffer === "function") {
     return Buffer.from(await response.arrayBuffer());
   }
@@ -303,7 +321,7 @@ function requireToken(value) {
 
 function createInstagramPublicationConnector(options = {}) {
   const destination = options.destination || "feed";
-  if (!["feed", "story"].includes(destination)) connectorFail("connector_contract_invalid");
+  if (!["feed", "story", "reel"].includes(destination)) connectorFail("connector_contract_invalid");
   const config = options.config;
   const store = options.store;
   const credentials = options.credentials;
@@ -476,7 +494,12 @@ function createInstagramPublicationConnector(options = {}) {
         }
         connectorFail("provider_result_unknown");
       }
-      bytes = await responseBytes(response);
+      bytes = await Promise.race([responseBytes(response), deadline]);
+      if (bytes === timedOut) {
+        bytes = null;
+        if (request.mutation) throw new AmbiguousProviderMutation();
+        connectorFail("provider_temporary_failure");
+      }
       const decoded = parseJsonRecord(bytes);
       if (response.status !== 200) {
         if (
@@ -561,7 +584,7 @@ function createInstagramPublicationConnector(options = {}) {
     const result = await requestJson(accessToken, {
       method: "GET",
       mutation: false,
-      url: graphUrl(`/${id}`, { fields: destination === "story" ? "id,permalink,timestamp,media_product_type" : "id,permalink,timestamp" })
+      url: graphUrl(`/${id}`, { fields: destination !== "feed" ? "id,permalink,timestamp,media_product_type" : "id,permalink,timestamp" })
     });
     const publishedAtMs = new Date(result.timestamp).getTime();
     if (!Number.isFinite(publishedAtMs)) {
@@ -570,7 +593,9 @@ function createInstagramPublicationConnector(options = {}) {
     const returnedId = numericMediaId(result.id);
     if (returnedId !== id) connectorFail("provider_result_unknown");
     if (destination === "story" && result.media_product_type !== "STORY") connectorFail("provider_result_unknown");
-    if (destination === "feed" && String(result.permalink || "").includes("/stories/")) connectorFail("provider_result_unknown");
+    if (destination === "reel" && result.media_product_type !== "REELS") connectorFail("provider_result_unknown");
+    if (destination === "reel" && !/^https:\/\/www\.instagram\.com\/(reel|p)\//.test(result.permalink || "")) connectorFail("provider_result_unknown");
+    if (destination === "feed" && /\/(stories|reel)\//.test(String(result.permalink || ""))) connectorFail("provider_result_unknown");
     return Object.freeze({
       mediaId: returnedId,
       permalink: destination === "story" && !result.permalink ? null : canonicalPermalink(result.permalink),
@@ -590,7 +615,7 @@ function createInstagramPublicationConnector(options = {}) {
     connection,
     publication
   ) {
-    if (destination === "story") return null; // Never infer a Story identity from a caption or a feed list.
+    if (destination !== "feed") return null; // Never infer Story/Reel identity from captions or a feed list.
     let result;
     try {
       result = await requestJson(accessToken, {
@@ -653,7 +678,7 @@ function createInstagramPublicationConnector(options = {}) {
     return matches.length === 1 ? matches[0] : null;
   }
 
-  async function publishImage(rawContext, input = {}) {
+  async function publish(rawContext, input = {}, prepared = false) {
     const context = trustedContext(rawContext);
     const source = strictObject(input, [
       "publicationId",
@@ -668,7 +693,8 @@ function createInstagramPublicationConnector(options = {}) {
     const bound = source.binding ? { publicationId, binding: normalizeConnectionBinding(source.binding) } : null;
     requireUuid(source.idempotencyKey);
     if (
-      image.mimeType !== "image/jpeg" ||
+      (prepared ? !["image/jpeg", "video/mp4"].includes(image.mimeType) || !bound ||
+        !/^calendar-prepared-v1:[a-f0-9]{64}$/.test(image.mediaId || "") : image.mimeType !== "image/jpeg") ||
       !(source.caption === null || (
         typeof source.caption === "string" &&
         source.caption.length <= 2200 &&
@@ -685,17 +711,35 @@ function createInstagramPublicationConnector(options = {}) {
       context,
       connectionId,
       async (connection, accessToken, publicationSnapshot) => {
-        const owned = await media.resolveOwnedJpeg(context, image.mediaId);
+        const resolver = prepared ? media.resolveOwnedPreparedMedia : media.resolveOwnedJpeg;
+        if (typeof resolver !== "function") connectorFail("resource_unavailable");
+        const owned = await resolver.call(media, context, image.mediaId);
         if (
           !owned ||
           typeof owned !== "object" ||
-          owned.companyId !== context.companyId ||
+              owned.companyId !== context.companyId ||
           owned.mediaId !== image.mediaId ||
-          owned.mimeType !== "image/jpeg" ||
+          owned.mimeType !== image.mimeType ||
           typeof owned.publicUrl !== "string" ||
           !owned.publicUrl.startsWith(`${config.publicOrigin}/`)
         ) {
           connectorFail("resource_unavailable");
+        }
+        if (prepared) {
+          const video = owned.mimeType === "video/mp4";
+          if (owned.userId !== context.userId || owned.target !== destination || owned.destination !== destination ||
+              !/^[a-f0-9]{64}$/.test(owned.sha256 || "") ||
+              !Number.isSafeInteger(owned.sizeBytes) || owned.sizeBytes < 1 ||
+              owned.sizeBytes > (video ? 100000000 : 8000000) ||
+              (destination === "reel" && !video) || (destination === "feed" && video) ||
+              typeof owned.shareToFeed !== "boolean" || (destination !== "reel" && owned.shareToFeed) ||
+              !video && (owned.width !== 1080 || owned.height !== (destination === "feed" ? 1350 : 1920) || owned.hasAudio !== false || owned.audioMode !== "none" || owned.durationSeconds != null) ||
+              video && (owned.width !== 1080 || owned.height !== 1920 ||
+                !Number.isFinite(owned.durationSeconds) || owned.durationSeconds < 3 || owned.durationSeconds > 60 ||
+                typeof owned.hasAudio !== "boolean" || !["original", "muted", "music"].includes(owned.audioMode) ||
+                owned.audioMode === "muted" && owned.hasAudio || owned.audioMode === "music" && !owned.hasAudio)) {
+            connectorFail("resource_unavailable");
+          }
         }
         if ((owned.destination || "feed") !== destination ||
             (destination === "story" && (connection.account.accountType !== "business" || owned.width !== 1080 || owned.height !== 1920))) {
@@ -717,9 +761,15 @@ function createInstagramPublicationConnector(options = {}) {
           connectorFail("resource_unavailable");
         }
         const body = new URLSearchParams();
-        body.set("image_url", owned.publicUrl);
+        body.set(owned.mimeType === "video/mp4" ? "video_url" : "image_url", owned.publicUrl);
         if (destination === "story") body.set("media_type", "STORIES");
-        else body.set("caption", source.caption);
+        else {
+          if (source.caption !== null) body.set("caption", source.caption);
+          if (destination === "reel") {
+            body.set("media_type", "REELS");
+            body.set("share_to_feed", String(owned.shareToFeed));
+          }
+        }
         const createClaim = await claimStage(context, source, connection, "create_container");
         let containerId;
         try {
@@ -737,6 +787,9 @@ function createInstagramPublicationConnector(options = {}) {
               outcome: "provider_confirming",
               reconciliationReference: operationReference(publicationId)
             });
+          }
+          if (error instanceof SocialConnectorError && ["provider_permanent_failure", "permission_missing", "credential_unavailable"].includes(error.code)) {
+            return Object.freeze({ outcome: "failed_permanent" });
           }
           throw error;
         }
@@ -823,6 +876,9 @@ function createInstagramPublicationConnector(options = {}) {
                 containerId
               )
             });
+          }
+          if (error instanceof SocialConnectorError && ["provider_permanent_failure", "permission_missing", "credential_unavailable"].includes(error.code)) {
+            return Object.freeze({ outcome: "failed_permanent" });
           }
           throw error;
         }
@@ -952,6 +1008,9 @@ function createInstagramPublicationConnector(options = {}) {
                   )
                 });
               }
+              if (error instanceof SocialConnectorError && ["provider_permanent_failure", "permission_missing", "credential_unavailable"].includes(error.code)) {
+                return Object.freeze({ outcome: "failed_permanent" });
+              }
               throw error;
             }
             try {
@@ -992,13 +1051,15 @@ function createInstagramPublicationConnector(options = {}) {
     provider: INSTAGRAM_PROVIDER,
     capabilities: Object.freeze([
       "publishImage",
+      "publishPreparedMedia",
       "getPublicationStatus"
     ]),
     external: true,
     synthetic: false,
     testOnly: false,
     getPublicationStatus,
-    publishImage
+    publishImage: (context, input) => publish(context, input, false),
+    publishPreparedMedia: (context, input) => publish(context, input, true)
   });
 }
 

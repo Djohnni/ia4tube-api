@@ -114,7 +114,7 @@ function syncSources(state, sources, companyId, now) {
     if (!source.imageReady) { job.asset = null; job.assets = null; job.phase = job.error ? "attention" : "waiting_media"; }
   }
   // Legacy hide/cancel operations cannot leave an invisible future dispatch behind.
-  for (const job of Object.values(state.jobs)) if (!seen.has(job.id) && !LOCKED.has(job.phase) && job.phase !== "cancelled") {
+  for (const job of Object.values(state.jobs)) if (job.sourceKind !== "upload" && !seen.has(job.id) && !LOCKED.has(job.phase) && job.phase !== "cancelled") {
     job.phase = "cancelled"; job.cancelledAt = now; job.revision++;
   }
 }
@@ -124,6 +124,9 @@ function availability(job, preferences, binding, gatesOpen, now) {
   if (job.phase === "failed") return "attention";
   if (job.phase === "partial") return "partial";
   if (["dispatching", "confirming"].includes(job.phase)) return job.phase;
+  // The typed publisher is not connected yet. Never promise automatic delivery
+  // just because an upload has a schedule and a signed consent record.
+  if (job.sourceKind === "upload") return "import_not_operational";
   if (!job.authorization) return job.error ? "attention" : "manual";
   if (job.automaticEnabled === false) return "item_paused";
   if (job.authorization.validUntil <= now || job.scheduledAt + LATE_MS >= job.authorization.validUntil) return "attention";
@@ -132,7 +135,7 @@ function availability(job, preferences, binding, gatesOpen, now) {
   if (!sameBinding(job.authorization.binding, binding)) return "connection_required";
   if (!gatesOpen) return "operations_closed";
   if (!job.asset) return "waiting_media";
-  if (!job.caption) return "attention";
+  if (!job.caption && !(job.sourceKind === "upload" && require("./destinations").targets(job).every(target => target === "story"))) return "attention";
   if (job.error) return "attention";
   return "scheduled";
 }

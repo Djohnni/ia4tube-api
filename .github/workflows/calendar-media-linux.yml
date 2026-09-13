@@ -1,0 +1,80 @@
+name: Synthetic calendar media Linux proof
+
+on:
+  push:
+    branches: [validation/linux-media-pilot-20260913]
+    paths:
+      - '.github/workflows/calendar-media-linux.yml'
+      - 'scripts/validation/calendar-media-linux-*'
+      - 'src/social/**'
+      - 'src/persistence/postgres/**'
+      - 'db/calendar-migrations/**'
+      - 'tests/calendar-*'
+      - 'tests/helpers/operational-*'
+      - 'tests/helpers/workflow-*'
+      - 'tests/fixtures/**'
+      - 'package.json'
+      - 'package-lock.json'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: synthetic-calendar-media-linux
+  cancel-in-progress: false
+
+jobs:
+  synthetic-linux:
+    if: github.repository == 'Djohnni/ia4tube-api' && github.ref == 'refs/heads/validation/linux-media-pilot-20260913'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - name: Checkout reviewed branch without persistent credentials
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+      - name: Node runtime, no dependency cache
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '24.15.0'
+          check-latest: false
+      - name: Public test tools on disposable runner only
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends gcc ffmpeg postgresql-16
+          npm ci --ignore-scripts --no-audit --no-fund
+          cc -std=c11 -fsyntax-only -Wall -Wextra -Werror -Wno-misleading-indentation src/social/calendar/imports/media-process-supervisor-linux.c
+      - name: Synthetic media, private loopback transfer and real PostgreSQL
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$GITHUB_RUN_ID" =~ ^[0-9]+$ && "$GITHUB_RUN_ATTEMPT" =~ ^[0-9]+$ ]]
+          cgroup_root=/sys/fs/cgroup/ia4tube-media-synthetic-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}
+          # This is a new subtree on the disposable runner, not a host-wide
+          # controller change. Missing delegation is a failed capability proof.
+          sudo mkdir -- "$cgroup_root"
+          sudo chmod 0755 -- "$cgroup_root"
+          sudo sh -c 'printf "+cpu +memory +pids" > "$1/cgroup.subtree_control"' sh "$cgroup_root"
+          env -i PATH="$PATH" LANG=C.UTF-8 \
+            CALENDAR_OPERATIONAL_MEDIA_TEST_PG_BIN=/usr/lib/postgresql/16/bin \
+            FFMPEG_TEST_BINARY=/usr/bin/ffmpeg \
+            CALENDAR_MEDIA_LINUX_CGROUP_ROOT=/sys/fs/cgroup/ia4tube-media-synthetic-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT} \
+            CALENDAR_MEDIA_LINUX_LAUNCH_MODE=sudo \
+            CALENDAR_MEDIA_LINUX_PHYSICAL=1 \
+            node scripts/validation/calendar-media-linux-proof.js
+      - name: Check test cgroup is empty before removing only its root
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$GITHUB_RUN_ID" =~ ^[0-9]+$ && "$GITHUB_RUN_ATTEMPT" =~ ^[0-9]+$ ]]
+          cgroup_root=/sys/fs/cgroup/ia4tube-media-synthetic-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}
+          if [[ -d "$cgroup_root" ]]; then
+            [[ "$(awk '/^populated / {print $2}' "$cgroup_root/cgroup.events")" = 0 ]]
+            sudo rmdir -- "$cgroup_root"
+          fi
+      # No artifacts, media, cache, secrets or environment are uploaded.
+      # The entire VM and synthetic storage disappear at the end of this job.

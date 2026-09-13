@@ -652,7 +652,7 @@ function createSocialConnectorService(options = {}) {
     }
   }
 
-  function publicationInput(input) {
+  function publicationInput(input, prepared = false) {
     strictObject(input, [
       "operationId",
       "publicationId",
@@ -661,7 +661,9 @@ function createSocialConnectorService(options = {}) {
       "caption", "binding", "clientRequestId"
     ]);
     const image = strictObject(input.image, ["mediaId", "mimeType", "metadataDigest"]);
-    if (image.mimeType !== "image/jpeg") {
+    if (prepared ? !["image/jpeg", "video/mp4"].includes(image.mimeType) ||
+        !/^calendar-prepared-v1:[a-f0-9]{64}$/.test(image.mediaId || "") || !input.binding
+        : image.mimeType !== "image/jpeg") {
       connectorFail("connector_contract_invalid");
     }
     return Object.freeze({
@@ -670,10 +672,10 @@ function createSocialConnectorService(options = {}) {
       connectionId: operationUuid(input.connectionId),
       image: Object.freeze({
         mediaId: safeText(image.mediaId, { max: 200 }),
-        mimeType: "image/jpeg",
+        mimeType: image.mimeType,
         ...(image.metadataDigest !== undefined ? { metadataDigest: safeText(image.metadataDigest, { max: 64 }) } : {})
       }),
-      caption: safeCaption(input.caption),
+      caption: input.binding && input.caption === "" ? "" : safeCaption(input.caption),
       ...(input.binding ? { binding: normalizeConnectionBinding(input.binding),
         clientRequestId: operationUuid(input.clientRequestId) } : {})
     });
@@ -771,15 +773,17 @@ function createSocialConnectorService(options = {}) {
     });
   }
 
-  async function publishImage(context, input = {}) {
+  async function publish(context, input = {}, prepared = false) {
     const trusted = requireConnectorContext(context);
     assertNoAuthorityFields(input);
-    const clean = publicationInput(input);
+    const clean = publicationInput(input, prepared);
     if ((trusted.environment === "production" || options.publicationBindingRequired === true) && !clean.binding) {
       connectorFail("publication_binding_invalid");
     }
     try {
-      const ownedMedia = await media.resolveOwnedJpeg(
+      const resolver = prepared ? media.resolveOwnedPreparedMedia : media.resolveOwnedJpeg;
+      if (typeof resolver !== "function") connectorFail("resource_unavailable");
+      const ownedMedia = await resolver.call(media,
         trusted,
         clean.image.mediaId
       );
@@ -788,7 +792,7 @@ function createSocialConnectorService(options = {}) {
         typeof ownedMedia !== "object" ||
         ownedMedia.companyId !== trusted.companyId ||
         ownedMedia.mediaId !== clean.image.mediaId ||
-        ownedMedia.mimeType !== "image/jpeg"
+        ownedMedia.mimeType !== clean.image.mimeType
       ) {
         connectorFail("resource_unavailable");
       }
@@ -847,13 +851,13 @@ function createSocialConnectorService(options = {}) {
           try {
             const rawProviderResult = await registry.invoke(
               trusted,
-              "publishImage",
+              prepared ? "publishPreparedMedia" : "publishImage",
               {
                 publicationId: clean.publicationId,
                 connectionId: clean.connectionId,
                 image: Object.freeze({
                   mediaId: ownedMedia.mediaId,
-                  mimeType: "image/jpeg"
+                  mimeType: clean.image.mimeType
                 }),
                 caption: clean.caption,
                 idempotencyKey: clean.operationId,
@@ -1118,7 +1122,8 @@ function createSocialConnectorService(options = {}) {
     discoverAccount,
     disconnect,
     getPublicationStatus,
-    publishImage
+    publishImage: (context, input) => publish(context, input, false),
+    publishPreparedMedia: (context, input) => publish(context, input, true)
   });
 }
 

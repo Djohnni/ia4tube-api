@@ -163,7 +163,8 @@ function safeText(value, { max = 500, optional = false } = {}) {
   return value;
 }
 
-function caption(value) {
+function caption(value, preserveEmpty = false) {
+  if (preserveEmpty && value === "") return "";
   if (value === undefined || value === null || value === "") return null;
   if (
     typeof value !== "string" ||
@@ -491,7 +492,7 @@ function publicationDetailsFromRow(row, attemptRows = []) {
     ...base,
     mediaReference: mediaReference(row.media_reference),
     mediaMetadataDigest: digest(row.media_metadata_digest),
-    caption: caption(row.caption),
+    caption: caption(row.caption, /^calendar-prepared-v1:/.test(row.media_reference || "")),
     idempotencyKey: uuid(row.idempotency_key),
     requestHash: digest(row.request_hash),
     publishedAt: databaseDate(row.published_at),
@@ -521,7 +522,12 @@ function publishPayload(record, operationId, requestHash) {
     connectorFail("idempotency_conflict");
   }
   const image = strictObject(payload.image, ["mediaId", "mimeType", "metadataDigest"]);
-  if (image.mimeType !== "image/jpeg") {
+  // Preserve the durable operation identifier and v2 intent schema. Prepared
+  // video is typed by MIME and a bound, digested immutable media reference; it
+  // is never coerced to JPEG or admitted through an unbound legacy request.
+  if (image.mimeType !== "image/jpeg" && !(image.mimeType === "video/mp4" &&
+      payload.binding && /^calendar-prepared-v1:[a-f0-9]{64}$/.test(image.mediaId || "") &&
+      /^[a-f0-9]{64}$/.test(image.metadataDigest || ""))) {
     connectorFail("connector_contract_invalid");
   }
   const mediaId = mediaReference(image.mediaId);
@@ -531,10 +537,10 @@ function publishPayload(record, operationId, requestHash) {
     mediaReference: mediaId,
     mediaMetadataDigest: canonicalMediaDigest({
       mediaId,
-      mimeType: "image/jpeg",
+      mimeType: image.mimeType,
       ...(image.metadataDigest !== undefined ? { metadataDigest: image.metadataDigest } : {})
     }),
-    caption: caption(payload.caption),
+    caption: caption(payload.caption, /^calendar-prepared-v1:/.test(mediaId)),
     idempotencyKey: operationId,
     requestHash,
     ...(payload.binding ? { binding: normalizeConnectionBinding(payload.binding),
@@ -717,7 +723,7 @@ function publicationInput(context, record, expectedRevision) {
     mediaMetadataDigest: source.mediaMetadataDigest == null
       ? null
       : digest(source.mediaMetadataDigest),
-    caption: caption(source.caption),
+    caption: caption(source.caption, /^calendar-prepared-v1:/.test(source.mediaReference || "")),
     idempotencyKey: source.idempotencyKey == null
       ? null
       : uuid(source.idempotencyKey),

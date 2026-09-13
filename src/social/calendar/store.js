@@ -1,13 +1,15 @@
 "use strict";
 const { withTransaction } = require("../../persistence/postgres/pool");
 const { freshState, UUID, fail, MAX_ITEMS } = require("./model");
+const stores = new WeakSet();
 function validate(state) {
   if (!state || state.schema !== 1 || !state.preferences || typeof state.preferences.enabled !== "boolean" ||
       !state.jobs || Array.isArray(state.jobs) || Object.keys(state.jobs).length > MAX_ITEMS || Buffer.byteLength(JSON.stringify(state), "utf8") > 8 * 1024 * 1024) fail("calendar_state_invalid", 503);
   return state;
 }
 function createCalendarStore({ pool, role }) {
-  return Object.freeze({
+  const store = Object.freeze({
+    capabilities: Object.freeze({ persistence: "postgres", durable: true }),
     async exists(companyId) {
       if (!UUID.test(companyId)) fail("calendar_owner_invalid", 403);
       return withTransaction(pool, async client => {
@@ -49,6 +51,14 @@ function createCalendarStore({ pool, role }) {
         const before = rows.rows[0] ? JSON.stringify(state) : null;
         const result = await operation(state);
         validate(state);
+        // Only imported references need the optional 0002 schema. The collector
+        // takes these same locks in calendar -> imports order before retiring
+        // an asset, closing the snapshot-to-confirm race without changing 0001.
+        if (require("./imports/retention-policy").calendarAssetIds(state).length) {
+          await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1,0))", [`calendar-import:${companyId}`]);
+          const imports = await client.query("SELECT document FROM ia4tube_calendar.import_upload_state WHERE company_id=$1 FOR UPDATE", [companyId]);
+          require("./imports/retention-policy").assertCalendarRetention(state, imports.rows[0]?.document);
+        }
         if (JSON.stringify(state) !== before) await client.query(`INSERT INTO ia4tube_calendar.owner_state(company_id,document) VALUES($1,$2::jsonb)
           ON CONFLICT(company_id) DO UPDATE SET document=EXCLUDED.document,
           revision=owner_state.revision+1,updated_at=CURRENT_TIMESTAMP`, [companyId, JSON.stringify(state)]);
@@ -56,5 +66,7 @@ function createCalendarStore({ pool, role }) {
       }, { companyId, role });
     }
   });
+  stores.add(store); return store;
 }
-module.exports = { createCalendarStore, validate };
+function isCalendarStore(value) { return stores.has(value); }
+module.exports = { createCalendarStore, isCalendarStore, validate };

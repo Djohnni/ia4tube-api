@@ -3,12 +3,17 @@ const crypto = require("node:crypto");
 const { targets, started, delivery, record } = require("./destinations");
 const { createConnectorContext } = require("../connectors/contract");
 const { fail, idFor, syncSources, changeJob, sameBinding, availability, TIME_ZONE, LOCKED, LATE_MS } = require("./model");
+const { isCalendarImportService, isOperationalCalendarImportService } = require("./imports/local-calendar-service");
 const LABELS = { scheduled: "Programada", paused: "Automação geral pausada", manual: "Ative esta arte após conectar o Instagram",
   item_paused: "Publicação desta arte desativada", partial: "Publicada parcialmente — precisa de atenção",
   waiting_media: "Preparando imagem", operations_closed: "Publicação temporariamente indisponível",
+  import_not_operational: "Importação ainda não disponível para publicação",
   connection_required: "Confira a conexão Instagram", overdue: "Horário vencido — reagende", attention: "Precisa de atenção",
   dispatching: "Publicando", confirming: "Confirmando publicação", published: "Publicada", cancelled: "Cancelada" };
-function createCalendarService({ store, source, media, grants, auth, identity, readClients, publisher, clock = Date.now }) {
+function createCalendarService({ store, source, media, grants, auth, identity, readClients, publisher, importScheduling = null, clock = Date.now }) {
+  const importsAvailable = isCalendarImportService(importScheduling) && importScheduling.store === store;
+  const operationalImports = importsAvailable && isOperationalCalendarImportService(importScheduling) && publisher.preparedAvailable === true;
+  const importContext = value => ({ authenticated: true, companyId: value.companyId, userId: value.userId });
   let stopped = false, running = false, timer = null;
   function active(owner) {
     const clients = readClients(); const client = Object.hasOwn(clients, owner) ? clients[owner] : null;
@@ -59,29 +64,35 @@ function createCalendarService({ store, source, media, grants, auth, identity, r
       }
     }
   }
-  function view(job, prefs, connection, allowed) {
+  function view(job, prefs, connection, allowed, context = null) {
     let status = availability(job, prefs, connection?.binding, allowed, clock());
+    const imported = importsAvailable && job.sourceKind === "upload" && context;
+    if (imported) status = importScheduling.status(job, prefs, connection) || status;
     if (status === "scheduled" && targets(job).includes("story") && connection?.accountType !== "business") status = "attention";
     return { id: job.id, key: job.sourceKey, planningId: job.planningId, orderId: job.orderId,
       title: job.title, date: job.date, time: job.time, timeZone: TIME_ZONE, scheduledAt: job.scheduledAt,
       caption: job.caption, revision: job.revision, status, statusLabel: LABELS[status],
-      imageUrl: job.asset ? `/v1/social/calendar/items/${job.id}/image` : null,
+      imageUrl: job.asset && job.sourceKind !== "upload" ? `/v1/social/calendar/items/${job.id}/image` : null,
       editable: !started(job) && !LOCKED.has(job.phase) && job.phase !== "cancelled",
       automatic: job.automaticEnabled ?? Boolean(job.authorization), destination: job.destination || "feed",
-      formatsReady: Boolean(job.assets?.feed && job.assets?.story),
-      previews: job.assets ? Object.fromEntries(Object.keys(job.assets).map(target => [target, `/v1/social/calendar/items/${job.id}/image?destination=${target}`])) : {},
+      formatsReady: job.sourceKind !== "upload" && Boolean(job.assets?.feed && job.assets?.story),
+      previews: job.assets && job.sourceKind !== "upload" ? Object.fromEntries(Object.keys(job.assets).map(target => [target, `/v1/social/calendar/items/${job.id}/image?destination=${target}`])) : {},
       publications: Object.fromEntries(Object.entries(job.deliveries || {}).map(([target, value]) => [target,
         { status: value.phase, result: value.publication || null }])),
-      username: connection?.username || null, error: job.error || null, publication: job.publication || null };
+      username: connection?.username || null, error: job.error || null, publication: job.publication || null,
+      ...(imported ? { sourceKind: "upload", selectedTargets: targets(job), localSimulation: job.import.localSimulation === true,
+        media: importScheduling.describe(job, importContext(context)) } : {}) };
   }
-  function snapshot(state, connection, allowed) {
-    const items = Object.values(state.jobs).filter(job => job.phase !== "cancelled")
+  function snapshot(state, connection, allowed, context = null) {
+    const items = Object.values(state.jobs).filter(job => job.phase !== "cancelled" &&
+      (!importsAvailable || job.sourceKind !== "upload" || job.import?.userId === context?.userId))
         .sort((a, b) => a.scheduledAt - b.scheduledAt || a.id.localeCompare(b.id))
-        .map(job => view(job, state.preferences, connection, allowed));
+        .map(job => view(job, state.preferences, connection, allowed, context));
     const next = items.find(item => ["dispatching", "confirming"].includes(item.status)) ||
         items.find(item => item.automatic && item.status !== "published" && item.scheduledAt + LATE_MS >= clock()) || null;
     return { ok: true, enabled: true, preferences: state.preferences, connection, operationsAllowed: allowed,
-        timeZone: TIME_ZONE, serverTime: clock(), items, next };
+        timeZone: TIME_ZONE, serverTime: clock(), items, next,
+        ...(importsAvailable && context ? { identity: { companyId: context.companyId, userId: context.userId } } : {}) };
   }
   async function list(claims) {
     const current = session(claims); const { companyId, userId } = current.context;
@@ -93,7 +104,7 @@ function createCalendarService({ store, source, media, grants, auth, identity, r
       if (state.preferences.enabled && !state.preferences.binding && connection?.binding) {
         state.preferences.binding = connection.binding; state.preferences.revision++;
       }
-      return snapshot(state, connection, allowed);
+      return snapshot(state, connection, allowed, current.context);
     });
   }
   async function preferences(claims, input) {
@@ -126,9 +137,14 @@ function createCalendarService({ store, source, media, grants, auth, identity, r
     const connection = await publisher.connection(current.context);
     const allowed = publisher.allowed(current.context);
     return store.update(current.context.companyId, state => {
+      if (importsAvailable && state.jobs[id]?.sourceKind === "upload") {
+        importScheduling.editState(state, importContext(current.context), id, input, connection);
+        return snapshot(state, connection, allowed, current.context);
+      }
       if (input.action === "automatic" && input.enabled === true) {
         const job = state.jobs[id];
         require("./model").editable(job, input.revision);
+        if (job.sourceKind === "upload") fail("calendar_import_not_operational", 503);
         if (!connection || !state.preferences.enabled || input.confirmed !== true) fail("calendar_connection_required");
         if (job.scheduledAt <= clock()) fail("calendar_time_outside_window", 400);
         if (targets(job).includes("story") && connection.accountType !== "business") fail("calendar_story_business_required");
@@ -143,13 +159,14 @@ function createCalendarService({ store, source, media, grants, auth, identity, r
       changeJob(state, id, input, clock());
       // The same owner transaction returns the updated snapshot only after
       // commit succeeds. Never retry the write if its outcome is uncertain.
-      return snapshot(state, connection, allowed);
+      return snapshot(state, connection, allowed, current.context);
     });
   }
   async function image(claims, id, target = null) {
     const current = session(claims);
     const job = await store.update(current.context.companyId, state => state.jobs[id] || null);
     if (!job?.asset || job.phase === "cancelled") fail("calendar_not_found", 404);
+    if (job.sourceKind === "upload") fail("calendar_import_not_operational", 503);
     if (target !== null && !["feed", "story"].includes(target)) fail("calendar_destination_invalid", 400);
     const asset = target ? job.assets?.[target] : job.asset;
     if (!asset) fail("calendar_not_found", 404);
@@ -162,14 +179,27 @@ function createCalendarService({ store, source, media, grants, auth, identity, r
     const raw = payload.postagens || payload.itens || [];
     const postagens = raw.flatMap(item => {
       const job = state.jobs[idFor(current.context.companyId, item.calendar_key)];
+      if (importsAvailable && job?.sourceKind === "upload") return [];
       if (!job) return [item]; if (job.phase === "cancelled") return [];
       return [{ ...item, data: job.date, data_sugerida: job.date, horario: job.time, horario_sugerido: job.time,
         legenda: job.caption, descricao_instagram: job.caption, calendar_schedule_id: job.id,
         calendar_revision: job.revision, calendar_phase: job.phase,
         calendar_status_label: view(job, state.preferences, connection, publisher.allowed(current.context)).statusLabel,
         sort_key: `${job.date}|${job.time}|${String(item.ordem || 0).padStart(4, "0")}` }];
-    }).sort((a, b) => `${a.data}|${a.horario}`.localeCompare(`${b.data}|${b.horario}`));
-    return { ...payload, postagens, itens: postagens, total: postagens.length };
+    });
+    if (importsAvailable) for (const job of Object.values(state.jobs)) {
+      if (job.sourceKind !== "upload" || job.phase === "cancelled" || job.import?.userId !== current.context.userId) continue;
+      const item = view(job, state.preferences, connection, publisher.allowed(current.context), current.context);
+      postagens.push({ calendar_key: job.sourceKey, calendar_schedule_id: job.id, calendar_revision: job.revision,
+        calendar_phase: job.phase, calendar_status_label: item.statusLabel, calendar_media: item.media, media: item.media,
+        calendar_selected_targets: item.selectedTargets, calendar_destination: item.destination, source_kind: "upload",
+        planning_id: null, pedido_id: null, item_id: job.id, tema: job.title, data: job.date, data_sugerida: job.date,
+        horario: job.time, horario_sugerido: job.time, legenda: job.caption, descricao_instagram: job.caption,
+        imagem_pronta: true, imagem_url: null, sort_key: `${job.date}|${job.time}|0000` });
+    }
+    postagens.sort((a, b) => `${a.data}|${a.horario}`.localeCompare(`${b.data}|${b.horario}`));
+    return { ...payload, postagens, itens: postagens, total: postagens.length,
+      ...(importsAvailable ? { identity: { companyId: current.context.companyId, userId: current.context.userId } } : {}) };
   }
   async function legacyEdit(claims, key, input) {
     const current = session(claims); await sync(current.owner, current.context.companyId, current.context.userId);
@@ -182,6 +212,9 @@ function createCalendarService({ store, source, media, grants, auth, identity, r
           job.sourceKey === `${job.planningId}:${reference.planejamento_item_id}`));
       if (matches.length > 1) fail("calendar_reference_ambiguous", 400);
       const job = matches[0]; if (!job) return false;
+      // Imported records require the owner/revision checks of the typed item
+      // endpoint; a legacy generation reference is not authority to edit them.
+      if (importsAvailable && job.sourceKind === "upload") fail("calendar_refresh_required");
       const id = job.id;
       const original = sources.find(item => item.key === job.sourceKey)?.calendarPayload || {};
       // New UI carries the displayed revision; older clients cannot silently overwrite automatic schedules.
@@ -200,14 +233,20 @@ function createCalendarService({ store, source, media, grants, auth, identity, r
     // The worker must not create social data for every historical product account.
     if (!await store.exists(ids.companyId)) return;
     await sync(owner, ids.companyId, ids.userId);
-    const jobs = await store.update(ids.companyId, state => Object.values(state.jobs).filter(job => job.authorization && !["cancelled", "published", "failed"].includes(job.phase)));
+    const jobs = await store.update(ids.companyId, state => Object.values(state.jobs).filter(job => job.authorization && !["cancelled", "published"].includes(job.phase) &&
+      (job.phase !== "failed" || job.assets && targets(job).some(target => !["published", "failed"].includes(job.deliveries?.[target]?.phase)))));
     for (const snapshot of jobs) {
       if (stopped) return;
+      // Admission of typed uploads is separate from the JPEG-only publisher.
+      // Never coerce an MP4 into the legacy image path before the typed adapter is wired.
+      if (snapshot.sourceKind === "upload" && !operationalImports) continue;
       let grant, ctx;
       try { ({ grant, context: ctx } = delegated(owner, snapshot.authorization.envelope)); }
       catch { continue; }
       if (grant.planningId !== snapshot.planningId || (grant.jobId && grant.jobId !== snapshot.id)) continue;
-      if (snapshot.assets && snapshot.layout === "safe_master_v1") {
+      if (snapshot.sourceKind === "upload" && (grant.sourceKind !== "upload" || grant.assetId !== snapshot.import?.assetId ||
+          grant.assetRevision !== snapshot.import?.mediaRevision || grant.previewDigest !== snapshot.import?.previewDigest || grant.userId !== snapshot.import?.userId)) continue;
+      if (snapshot.assets && (snapshot.layout === "safe_master_v1" || snapshot.layout === "import_prepared_v1")) {
         if (await tickFormatted(owner, ids, ctx, grant, snapshot)) break;
         continue;
       }
@@ -259,8 +298,21 @@ function createCalendarService({ store, source, media, grants, auth, identity, r
     for (const target of targets(snapshot)) {
       const part = delivery(snapshot, target);
       if (part.phase === "published") continue;
-      if (part.phase === "failed") return false;
+      if (part.phase === "failed") continue; // Another destination still owns its independent intent/result.
       if (part.intent) {
+        if (part.sourceKind === "upload") {
+          // One immediate status check in send, then at most four automatic
+          // checks one minute apart. This claim survives concurrent instances
+          // and restart. Exhaustion keeps the uncertain intent; never re-send.
+          const claimed = await store.update(ids.companyId, state => {
+            const item = state.jobs[snapshot.id]?.deliveries?.[target];
+            if (!item || item.intent?.publicationId !== part.intent.publicationId || ["published", "failed"].includes(item.phase) ||
+                (item.providerObservationCount || 0) >= 4 || clock() < (item.providerObservedAt || item.dispatchAt) + 60000) return false;
+            item.providerObservedAt = clock(); item.providerObservationCount = (item.providerObservationCount || 0) + 1;
+            return true;
+          });
+          if (!claimed) continue;
+        }
         const result = publisher.observe ? await publisher.observe(ctx, part) : await publisher.status(ctx, part.intent.publicationId);
         await store.update(ids.companyId, state => {
           const job = state.jobs[snapshot.id];
@@ -276,7 +328,10 @@ function createCalendarService({ store, source, media, grants, auth, identity, r
       if (!publisher.allowed(ctx) || !sameBinding(grant.binding, connection?.binding) || !part.asset || part.scheduledAt > clock() ||
           (targets(snapshot).includes("story") && connection.accountType !== "business")) return false;
       let intact = false;
-      try { intact = await media.unchanged(owner, part); if (intact) media.bytesFor(ids.companyId, part.asset); } catch { /* Fail closed. */ }
+      try {
+        if (part.sourceKind === "upload") intact = await publisher.verifyPrepared(ctx, part) === true;
+        else { intact = await media.unchanged(owner, part); if (intact) media.bytesFor(ids.companyId, part.asset); }
+      } catch { /* Fail closed. No conversion or provider call in this check. */ }
       if (!intact) {
         await store.update(ids.companyId, state => { const job = state.jobs[snapshot.id];
           if (job?.revision === snapshot.revision) { job.error = "calendar_art_changed"; job.phase = started(job) ? "partial" : "attention"; job.automaticEnabled = false; job.revision++; }
@@ -288,7 +343,10 @@ function createCalendarService({ store, source, media, grants, auth, identity, r
         const job = state.jobs[snapshot.id];
         if (!job || job.revision !== snapshot.revision) return null;
         const candidate = delivery(job, target);
-        if (candidate.intent || availability(candidate, state.preferences, connection.binding, publisher.allowed(ctx), clock()) !== "scheduled") return null;
+        const stateOfCandidate = candidate.sourceKind === "upload"
+          ? importScheduling.status(candidate, state.preferences, connection)
+          : availability(candidate, state.preferences, connection.binding, publisher.allowed(ctx), clock());
+        if (candidate.intent || stateOfCandidate !== "scheduled") return null;
         const intent = publisher.intent(ctx, candidate, crypto.randomUUID());
         record(job, target, { phase: "dispatching", intent, dispatchAt: clock() });
         return delivery(job, target);
@@ -320,6 +378,7 @@ function createCalendarService({ store, source, media, grants, auth, identity, r
   }
   return Object.freeze({ list, preferences, prepareRequest, edit, image, overlay, legacyEdit, tick,
     publicBytes: media.publicBytes,
+    publicMedia: publisher.publicMedia,
     start() { if (!timer && !stopped) { timer = setInterval(() => { void tick(); }, 15000); timer.unref?.(); } },
     async close() { stopped = true; clearInterval(timer); while (running) await new Promise(resolve => setTimeout(resolve, 25)); media.close(); grants.close(); }
   });

@@ -1,0 +1,282 @@
+{
+  "ok": true,
+  "enabled": true,
+  "preferences": {
+    "enabled": true,
+    "revision": 2,
+    "binding": {
+      "connectionId": "cc6482af-cf4a-4b17-8bcf-c1e803afb48e",
+      "externalId": "123456789012345",
+      "connectionRevision": 1
+    }
+  },
+  "connection": {
+    "binding": {
+      "connectionId": "cc6482af-cf4a-4b17-8bcf-c1e803afb48e",
+      "externalId": "123456789012345",
+      "connectionRevision": 1
+    },
+    "username": "synthetic_local_account",
+    "accountType": "business"
+  },
+  "operationsAllowed": false,
+  "timeZone": "America/Sao_Paulo",
+  "serverTime": 1789274332796,
+  "items": [
+    {
+      "id": "4faf70f6e611c20f5615df09481fe49c6c636389",
+      "key": "upload:0f149cd2-64cb-447e-bc4c-c3fc7fe8946b:7f5998fcc6c9b1bd2fb382e566d387938e3d7736fe97fddacdac556547131ab6",
+      "planningId": null,
+      "orderId": null,
+      "title": "Foto da galeria",
+      "date": "2026-09-14",
+      "time": "01:38",
+      "timeZone": "America/Sao_Paulo",
+      "scheduledAt": 1789360680000,
+      "caption": "Material sintético local",
+      "revision": 1,
+      "status": "scheduled",
+      "statusLabel": "Programada",
+      "imageUrl": null,
+      "editable": true,
+      "automatic": true,
+      "destination": "multiple",
+      "formatsReady": false,
+      "previews": {},
+      "publications": {},
+      "username": "synthetic_local_account",
+      "error": null,
+      "publication": null,
+      "sourceKind": "upload",
+      "selectedTargets": [
+        "feed",
+        "story"
+      ],
+      "localSimulation": true,
+      "media": {
+        "assetId": "0f149cd2-64cb-447e-bc4c-c3fc7fe8946b",
+        "mediaRevision": 1,
+        "currentRevision": 1,
+        "previewDigest": "fc12b84cfb081f06c932da2f77a4aaf7dedb5bcfcbb04480c24f59b3211996f8",
+        "testOnly": false,
+        "variants": [
+          {
+            "target": "feed",
+            "kind": "image",
+            "mimeType": "image/jpeg",
+            "sha256": "02dc632da96d1f1676063bb7d1e0cc39aca0ee0d5a6de99f121415981ad502b4",
+            "sourceSha256": "f59c460aa4cabc7aa5770fa49039236a5727b0ff0581107887ce7e7a7d1101bd",
+            "width": 1080,
+            "height": 1350,
+            "sizeBytes": 17380,
+            "durationMs": null,
+            "audioMode": "none",
+            "hasAudio": false,
+            "url": "https://ia4tube-api.onrender.com/v1/social/calendar/imports/schedules/4faf70f6e611c20f5615df09481fe49c6c636389/preview/feed"
+          },
+          {
+            "target": "story",
+            "kind": "image",
+            "mimeType": "image/jpeg",
+            "sha256": "08294045526705fa8384d4c473ebd6c03319dfc93bf3236daca758ec67f1b62f",
+            "sourceSha256": "f59c460aa4cabc7aa5770fa49039236a5727b0ff0581107887ce7e7a7d1101bd",
+            "width": 1080,
+            "height": 1920,
+            "sizeBytes": 24568,
+            "durationMs": null,
+            "audioMode": "none",
+            "hasAudio": false,
+            "url": "https://ia4tube-api.onrender.com/v1/social/calendar/imports/schedules/4faf70f6e611c20f5615df09481fe49c6c636389/preview/story"
+          }
+        ],
+        "thumbnail": null,
+        "sourceKind": "upload",
+        "shareToFeed": false
+      }
+    },
+    {
+      "id": "c535f9bb74f167403be39661dacc96b38fba9e2b",
+      "key": "upload:9173926f-e723-4494-8988-ea258fa1a1ed:032e6e1fc9227d838c0d5d29365c81fba3a46aab0866a07132bec225ac31ac78",
+      "planningId": null,
+      "orderId": null,
+      "title": "Vídeo da galeria",
+      "date": "2026-09-14",
+      "time": "02:08",
+      "timeZone": "America/Sao_Paulo",
+      "scheduledAt": 1789362480000,
+      "caption": "Material sintético local",
+      "revision": 1,
+      "status": "scheduled",
+      "statusLabel": "Programada",
+      "imageUrl": null,
+      "editable": true,
+      "automatic": true,
+      "destination": "multiple",
+      "formatsReady": false,
+      "previews": {},
+      "publications": {},
+      "username": "synthetic_local_account",
+      "error": null,
+      "publication": null,
+      "sourceKind": "upload",
+      "selectedTargets": [
+        "story",
+        "reel"
+      ],
+      "localSimulation": true,
+      "media": {
+        "assetId": "9173926f-e723-4494-8988-ea258fa1a1ed",
+        "mediaRevision": 1,
+        "currentRevision": 1,
+        "previewDigest": "2c69de4ae745bf19e611aaccfb8664a65e04c5a55ac1a77b32ad16ada41f02ca",
+        "testOnly": false,
+        "variants": [
+          {
+            "target": "story",
+            "kind": "video",
+            "mimeType": "video/mp4",
+            "sha256": "8f276024b72f90e894e9dfa7e208dc1a33e6f76f245a8f868696938dcbbfd60f",
+            "sourceSha256": "3c38628f374971323d000bec1d039d0b41f931e104635678fe682aef35281997",
+            "width": 1080,
+            "height": 1920,
+            "sizeBytes": 82016,
+            "durationMs": 510,
+            "audioMode": "original",
+            "hasAudio": true,
+            "url": "https://ia4tube-api.onrender.com/v1/social/calendar/imports/schedules/c535f9bb74f167403be39661dacc96b38fba9e2b/preview/story"
+          },
+          {
+            "target": "reel",
+            "kind": "video",
+            "mimeType": "video/mp4",
+            "sha256": "8f276024b72f90e894e9dfa7e208dc1a33e6f76f245a8f868696938dcbbfd60f",
+            "sourceSha256": "3c38628f374971323d000bec1d039d0b41f931e104635678fe682aef35281997",
+            "width": 1080,
+            "height": 1920,
+            "sizeBytes": 82016,
+            "durationMs": 510,
+            "audioMode": "original",
+            "hasAudio": true,
+            "url": "https://ia4tube-api.onrender.com/v1/social/calendar/imports/schedules/c535f9bb74f167403be39661dacc96b38fba9e2b/preview/reel"
+          }
+        ],
+        "thumbnail": {
+          "target": "thumbnail",
+          "kind": "image",
+          "mimeType": "image/jpeg",
+          "sha256": "8b7e21faf102d1feae7476a43186d01a984521169512cf8ce0d35130ca25e882",
+          "sourceSha256": "3c38628f374971323d000bec1d039d0b41f931e104635678fe682aef35281997",
+          "width": 1080,
+          "height": 1920,
+          "sizeBytes": 80679,
+          "durationMs": null,
+          "audioMode": "none",
+          "hasAudio": false,
+          "url": "https://ia4tube-api.onrender.com/v1/social/calendar/imports/schedules/c535f9bb74f167403be39661dacc96b38fba9e2b/preview/thumbnail"
+        },
+        "sourceKind": "upload",
+        "shareToFeed": true
+      }
+    },
+    {
+      "id": "746351c14e9eef64537e1e824e07e24ea8de6644",
+      "key": "synthetic-plan:original",
+      "planningId": "synthetic-plan",
+      "orderId": "synthetic-original-order",
+      "title": "Arte programada",
+      "date": "2026-09-15",
+      "time": "01:38",
+      "timeZone": "America/Sao_Paulo",
+      "scheduledAt": 1789447080000,
+      "caption": "Arte original preservada",
+      "revision": 2,
+      "status": "manual",
+      "statusLabel": "Ative esta arte após conectar o Instagram",
+      "imageUrl": "/v1/social/calendar/items/746351c14e9eef64537e1e824e07e24ea8de6644/image",
+      "editable": true,
+      "automatic": false,
+      "destination": "feed",
+      "formatsReady": false,
+      "previews": {},
+      "publications": {},
+      "username": "synthetic_local_account",
+      "error": null,
+      "publication": null
+    }
+  ],
+  "next": {
+    "id": "4faf70f6e611c20f5615df09481fe49c6c636389",
+    "key": "upload:0f149cd2-64cb-447e-bc4c-c3fc7fe8946b:7f5998fcc6c9b1bd2fb382e566d387938e3d7736fe97fddacdac556547131ab6",
+    "planningId": null,
+    "orderId": null,
+    "title": "Foto da galeria",
+    "date": "2026-09-14",
+    "time": "01:38",
+    "timeZone": "America/Sao_Paulo",
+    "scheduledAt": 1789360680000,
+    "caption": "Material sintético local",
+    "revision": 1,
+    "status": "scheduled",
+    "statusLabel": "Programada",
+    "imageUrl": null,
+    "editable": true,
+    "automatic": true,
+    "destination": "multiple",
+    "formatsReady": false,
+    "previews": {},
+    "publications": {},
+    "username": "synthetic_local_account",
+    "error": null,
+    "publication": null,
+    "sourceKind": "upload",
+    "selectedTargets": [
+      "feed",
+      "story"
+    ],
+    "localSimulation": true,
+    "media": {
+      "assetId": "0f149cd2-64cb-447e-bc4c-c3fc7fe8946b",
+      "mediaRevision": 1,
+      "currentRevision": 1,
+      "previewDigest": "fc12b84cfb081f06c932da2f77a4aaf7dedb5bcfcbb04480c24f59b3211996f8",
+      "testOnly": false,
+      "variants": [
+        {
+          "target": "feed",
+          "kind": "image",
+          "mimeType": "image/jpeg",
+          "sha256": "02dc632da96d1f1676063bb7d1e0cc39aca0ee0d5a6de99f121415981ad502b4",
+          "sourceSha256": "f59c460aa4cabc7aa5770fa49039236a5727b0ff0581107887ce7e7a7d1101bd",
+          "width": 1080,
+          "height": 1350,
+          "sizeBytes": 17380,
+          "durationMs": null,
+          "audioMode": "none",
+          "hasAudio": false,
+          "url": "https://ia4tube-api.onrender.com/v1/social/calendar/imports/schedules/4faf70f6e611c20f5615df09481fe49c6c636389/preview/feed"
+        },
+        {
+          "target": "story",
+          "kind": "image",
+          "mimeType": "image/jpeg",
+          "sha256": "08294045526705fa8384d4c473ebd6c03319dfc93bf3236daca758ec67f1b62f",
+          "sourceSha256": "f59c460aa4cabc7aa5770fa49039236a5727b0ff0581107887ce7e7a7d1101bd",
+          "width": 1080,
+          "height": 1920,
+          "sizeBytes": 24568,
+          "durationMs": null,
+          "audioMode": "none",
+          "hasAudio": false,
+          "url": "https://ia4tube-api.onrender.com/v1/social/calendar/imports/schedules/4faf70f6e611c20f5615df09481fe49c6c636389/preview/story"
+        }
+      ],
+      "thumbnail": null,
+      "sourceKind": "upload",
+      "shareToFeed": false
+    }
+  },
+  "identity": {
+    "companyId": "28bd0bb2-8824-5f8a-a2c0-b85848c2ab5d",
+    "userId": "38fd3a14-5b3a-5251-a121-f118c557e4fa"
+  }
+}

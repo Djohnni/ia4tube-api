@@ -13,6 +13,7 @@ const CONNECTOR_CAPABILITIES = Object.freeze([
   "beginAuthorization",
   "discoverAccount",
   "publishImage",
+  "publishPreparedMedia",
   "getPublicationStatus",
   "disconnect"
 ]);

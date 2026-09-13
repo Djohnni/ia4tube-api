@@ -23,12 +23,33 @@ function createCalendarGrants(secret, clock = Date.now) {
     let grant;
     try { grant = JSON.parse(Buffer.from(body, "base64url").toString()); } catch { return null; }
     if (grant.purpose !== "calendar_publish" || grant.companyId !== companyId || grant.userId !== userId ||
-        !validBinding(grant.binding) || typeof grant.planningId !== "string" || !Number.isSafeInteger(grant.quantity) ||
-        grant.quantity < 1 || grant.quantity > 40 || !Number.isSafeInteger(grant.issuedAt) || grant.issuedAt > clock() ||
+        !validBinding(grant.binding) || !Number.isSafeInteger(grant.issuedAt) || grant.issuedAt > clock() ||
         !Number.isSafeInteger(grant.validUntil) || grant.validUntil <= clock()) return null;
+    if (grant.sourceKind === "upload") {
+      if (grant.planningId !== null || grant.quantity !== 1 || !UUID.test(grant.assetId || "") ||
+          !Number.isSafeInteger(grant.assetRevision) || grant.assetRevision < 1 ||
+          !/^[a-f0-9]{64}$/.test(grant.previewDigest || "") || !/^[a-f0-9]{40}$/.test(grant.jobId || "") ||
+          !Number.isSafeInteger(grant.preferenceRevision) || grant.preferenceRevision < 1 ||
+          grant.validUntil > grant.issuedAt + 180 * 86400000) return null;
+    } else if ((grant.sourceKind !== undefined && grant.sourceKind !== "order") ||
+        typeof grant.planningId !== "string" || !Number.isSafeInteger(grant.quantity) ||
+        grant.quantity < 1 || grant.quantity > 40) return null;
     if (grant.jobId != null && !/^[a-f0-9]{40}$/.test(grant.jobId)) return null;
     Object.freeze(grant.binding); Object.freeze(grant); verified.add(grant); return grant;
   }
-  return Object.freeze({ issue, verify, close() { key.fill(0); } });
+  function issueImport({ companyId, userId, binding, revision, assetId, assetRevision, previewDigest, jobId }) {
+    if (!UUID.test(companyId || "") || !UUID.test(userId || "") || !validBinding(binding) ||
+        !Number.isSafeInteger(revision) || revision < 1 || !UUID.test(assetId || "") ||
+        !Number.isSafeInteger(assetRevision) || assetRevision < 1 || !/^[a-f0-9]{64}$/.test(previewDigest || "") ||
+        !/^[a-f0-9]{40}$/.test(jobId || "")) fail("calendar_consent_invalid", 400);
+    const now = clock();
+    if (!Number.isSafeInteger(now) || now < 0) fail("calendar_consent_invalid", 400);
+    const value = { purpose: "calendar_publish", sourceKind: "upload", companyId, userId, binding,
+      preferenceRevision: revision, planningId: null, quantity: 1, jobId, assetId, assetRevision,
+      previewDigest, issuedAt: now, validUntil: now + 180 * 86400000, nonce: crypto.randomUUID() };
+    const body = Buffer.from(JSON.stringify(value)).toString("base64url");
+    return `${body}.${sign(body)}`;
+  }
+  return Object.freeze({ issue, issueImport, verify, close() { key.fill(0); } });
 }
 module.exports = { createCalendarGrants, isVerifiedCalendarGrant };

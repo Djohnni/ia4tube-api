@@ -203,7 +203,7 @@ test("dependency additions preserve every legacy dependency and locked package r
   }
   assert.deepEqual(Object.keys(currentPackage.dependencies)
     .filter((name) => !Object.hasOwn(previousPackage.dependencies, name)).sort(),
-  ["pg", "sharp", "tar-stream"]);
+  ["@aws-sdk/client-s3", "@aws-sdk/s3-request-presigner", "pg", "sharp", "tar-stream"]);
   for (const [name, value] of Object.entries(previousPackage)) {
     if (!["dependencies", "scripts"].includes(name)) {
       assert.deepEqual(currentPackage[name], value, name);
@@ -218,7 +218,13 @@ test("dependency additions preserve every legacy dependency and locked package r
   assert.deepEqual(currentLock.packages[""].dependencies, currentPackage.dependencies);
   const added = Object.keys(currentLock.packages)
     .filter((name) => !Object.hasOwn(previousLock.packages, name));
-  assert.equal(added.length, 45); // 13 historical additions + sharp's 32 pinned cross-platform records.
+  // Preserve the already-prepared optional object-storage adapter as well as
+  // the 45 prior additions. This does not activate it or relax legacy pins.
+  assert.equal(added.length, 71); // 45 prior records + 26 pinned SDK/transitive records.
+  for (const name of ["@aws-sdk/client-s3", "@aws-sdk/s3-request-presigner"]) {
+    assert.equal(currentPackage.dependencies[name], "3.1131.0");
+    assert.equal(currentLock.packages[`node_modules/${name}`].version, "3.1131.0");
+  }
   assert.equal(currentLock.packages["node_modules/sharp"].version, "0.35.4");
   assert.equal(currentLock.packages["node_modules/pg"].version, "8.22.0");
   assert.equal(currentLock.packages["node_modules/tar-stream"].version, "3.2.0");

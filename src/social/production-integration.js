@@ -120,7 +120,17 @@ function createProductionSocialIntegration(options = {}) {
       router.get("/reviewer/media-capability/:mediaId/:expiresAt/:nonce/:ownerContext/:signature", mediaSurface.capability);
       router.use("/compliance", express.urlencoded({ extended: false, limit: "32kb", parameterLimit: 1 }),
         createMetaComplianceRouter({ getService: () => runtime.metaCompliance }));
+      // Grant-scoped bytes precede body parsers; disabled runtime still refuses
+      // every transfer. No processing or worker startup occurs in these routes.
+      router.use("/calendar/imports/bytes", require("./calendar/imports/transfer-router").createCalendarImportByteRouter({
+        getService: () => runtime?.calendar?.imports?.transfer }));
       router.use(express.json({ limit: "16kb", strict: true }));
+      router.use("/calendar/imports", require("./calendar/imports/preview-router").createPrivateImportPreviewRouter({
+        authenticate: authenticateSocial, resolvePrincipal: claims => runtime.auth.fromVerifiedJwt(claims),
+        getService: () => runtime?.calendar?.imports?.preview, getScheduledService: () => runtime?.calendar?.imports?.scheduling }));
+      router.use("/calendar/imports", require("./calendar/imports/router").createCalendarImportRouter({
+        authenticate: authenticateSocial, resolvePrincipal: claims => runtime.auth.fromVerifiedJwt(claims),
+        getService: () => runtime?.calendar?.imports }));
       router.use("/calendar", require("./calendar/router").createCalendarRouter({
         authenticate: authenticateSocial, getService: () => runtime?.calendar, logger: dependencies.logger }));
       router.use(createInstagramOAuthRouter({ authenticate: authenticateSocial, visualReturn,

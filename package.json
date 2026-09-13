@@ -8,6 +8,9 @@
     "test:social-production-compatibility": "node --test tests/production-social-live-compatibility.test.js"
   },
   "dependencies": {
+    "@aws-sdk/client-s3": "3.1131.0",
+    "@aws-sdk/s3-request-presigner": "3.1131.0",
+    "@renderinc/sdk": "1.1.0",
     "archiver": "^8.0.0",
     "bcryptjs": "^2.4.3",
     "cors": "^2.8.5",

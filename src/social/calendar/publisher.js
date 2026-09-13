@@ -6,19 +6,35 @@ const { createInstagramPublicationConnector, parseConfirmedReference } = require
 const { createPublicationIntent } = require("../publication/connection-binding");
 const { canProductionOperation } = require("../production-operation-policy");
 const { fail } = require("./model");
-function createCalendarPublisher({ config, connectorStore, connectorAudit, credentials, transport, media }) {
+const { isPreparedCalendarMedia } = require("./imports/prepared-publication-media");
+const { requireConnectorContext } = require("../connectors/contract");
+function createCalendarPublisher({ config, connectorStore, connectorAudit, credentials, transport, media, preparedMedia = null }) {
   const allowed = context => canProductionOperation(config, context, "externalPublicationEnabled");
+  const importContext = context => {
+    const trusted = requireConnectorContext(context);
+    return Object.freeze({ authenticated: true, companyId: trusted.companyId, userId: trusted.userId });
+  };
+  const descriptorFor = (context, job) => job.sourceKind === "upload"
+    ? preparedMedia?.descriptor(context.companyId, job) || fail("calendar_import_not_operational", 503)
+    : media.descriptor(context.companyId, job);
   function assemble(context, job) {
     if (!allowed(context)) fail("calendar_operations_closed");
-    const descriptor = media.descriptor(context.companyId, job);
+    if (job.sourceKind === "upload" && (!isPreparedCalendarMedia(preparedMedia) ||
+        preparedMedia.localTransport && transport !== preparedMedia.localTransport)) fail("calendar_import_not_operational", 503);
+    const descriptor = descriptorFor(context, job);
     const scopedMedia = Object.freeze({ async resolveOwnedJpeg(candidate, id) {
       if (candidate !== context || id !== descriptor.mediaId) fail("calendar_media_owner_invalid", 403);
+      if (job.sourceKind === "upload") fail("calendar_media_owner_invalid", 403);
       return descriptor;
+    }, async resolveOwnedPreparedMedia(candidate, id) {
+      if (candidate !== context || job.sourceKind !== "upload" || id !== descriptor.mediaId) fail("calendar_media_owner_invalid", 403);
+      return preparedMedia.resolveOwnedPreparedMedia(importContext(context), id, job);
     } });
     const registry = createConnectorRegistry({ environment: config.environment, gates: {
       externalConnectionEnabled: true, externalPublicationEnabled: true,
       enabledProviders: ["instagram"], companyAllowlist: [context.companyId] } });
     registry.register(createInstagramPublicationConnector({ config, store: connectorStore, credentials, destination: job.target || "feed",
+      ...(job.sourceKind === "upload" ? { pollAttempts: 1 } : {}),
       media: scopedMedia, transport, authorizeContext: candidate => candidate === context && allowed(candidate),
       authorizeConnection: connection => connection.account?.externalId === job.authorization.binding.externalId &&
         (job.target === "story" ? connection.account?.accountType === "business" : ["business", "creator"].includes(connection.account?.accountType)),
@@ -31,7 +47,7 @@ function createCalendarPublisher({ config, connectorStore, connectorAudit, crede
       audit: connectorAudit, media: scopedMedia, publicationBindingRequired: true }) };
   }
   function intent(context, job, requestId) {
-    const descriptor = media.descriptor(context.companyId, job);
+    const descriptor = descriptorFor(context, job);
     return createPublicationIntent({ companyId: context.companyId, clientRequestId: requestId,
       binding: job.authorization.binding, mediaId: descriptor.mediaId,
       mediaMetadataDigest: descriptor.metadataDigest, caption: job.caption });
@@ -46,6 +62,12 @@ function createCalendarPublisher({ config, connectorStore, connectorAudit, crede
       publishedAt: confirmed ? confirmed.publishedEpochSeconds * 1000 : null };
   }
   return Object.freeze({ allowed, intent, status,
+    preparedAvailable: isPreparedCalendarMedia(preparedMedia),
+    publicMedia: preparedMedia?.publicMedia,
+    async verifyPrepared(context, job) {
+      if (!isPreparedCalendarMedia(preparedMedia) || preparedMedia.localTransport && transport !== preparedMedia.localTransport) fail("calendar_import_not_operational", 503);
+      return preparedMedia.verify(importContext(context), job);
+    },
     async connection(context) {
       const connection = await connectorStore.scope(context).getCurrentConnectionDetails();
       if (!connection || connection.state !== "connected" || connection.health !== "healthy" ||
@@ -74,9 +96,10 @@ function createCalendarPublisher({ config, connectorStore, connectorAudit, crede
       const planned = job.intent;
       // Stored intent reused on every observation, never generated again after a timeout.
       if (await status(context, planned.publicationId)) return status(context, planned.publicationId);
-      await service.publishImage(context, { operationId: planned.operationId, publicationId: planned.publicationId,
+      const publish = job.sourceKind === "upload" ? service.publishPreparedMedia : service.publishImage;
+      await publish(context, { operationId: planned.operationId, publicationId: planned.publicationId,
         connectionId: job.authorization.binding.connectionId, clientRequestId: planned.clientRequestId,
-        binding: job.authorization.binding, image: { mediaId: descriptor.mediaId, mimeType: "image/jpeg",
+        binding: job.authorization.binding, image: { mediaId: descriptor.mediaId, mimeType: descriptor.mimeType,
           metadataDigest: descriptor.metadataDigest }, caption: job.caption });
       return status(context, planned.publicationId);
     }

@@ -137,7 +137,8 @@ function publicationSnapshot(value) {
     typeof source.mediaId !== "string" ||
     !MEDIA_ID_PATTERN.test(source.mediaId) ||
     typeof source.caption !== "string" ||
-    source.caption.length < 1 || source.caption.length > 2200 ||
+    source.caption.length === 0 && !/^calendar-prepared-v1:[a-f0-9]{64}$/.test(source.mediaId) ||
+    source.caption.length > 2200 ||
     CAPTION_CONTROLS.test(source.caption)
   ) fail();
   const mediaMetadataDigest = digest(source.mediaMetadataDigest);

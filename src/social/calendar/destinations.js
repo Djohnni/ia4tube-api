@@ -5,7 +5,15 @@ function destination(value = "feed") {
   if (!Object.hasOwn(TARGETS, value)) fail("calendar_destination_invalid", 400);
   return value;
 }
-function targets(job) { return TARGETS[destination(job.destination || "feed")]; }
+function targets(job) {
+  if (job.sourceKind === "upload") {
+    const list = job.selectedTargets;
+    if (!Array.isArray(list) || !list.length || list.length > 3 || new Set(list).size !== list.length ||
+        list.some(target => !["feed", "story", "reel"].includes(target))) fail("calendar_destination_invalid", 400);
+    return list.slice();
+  }
+  return TARGETS[destination(job.destination || "feed")];
+}
 function started(job) { return Boolean(job.intent || Object.values(job.deliveries || {}).some(item => item.intent)); }
 function delivery(job, target) {
   const saved = job.deliveries?.[target];

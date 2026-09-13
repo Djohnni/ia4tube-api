@@ -45,6 +45,22 @@ function fixture() {
     async enable() { await service.preferences(claims, { enabled: true, revision: 1, confirmed: true }); },
     async first() { return (await service.list(claims)).items[0]; } };
 }
+test("typed imports never advertise legacy image URLs or claim an operational publisher", async () => {
+  const f = fixture(); await f.first();
+  const state = f.store.rows.get(f.ids.companyId), original = Object.values(state.jobs)[0];
+  const imported = { ...structuredClone(original), id: "c".repeat(40), sourceKey: "upload:synthetic",
+    sourceKind: "upload", planningId: null, orderId: null, layout: "import_prepared_v1",
+    selectedTargets: ["reel"], destination: "reel", asset: { mimeType: "video/mp4", sha256: "b".repeat(64) },
+    assets: { reel: { mimeType: "video/mp4", sha256: "b".repeat(64) } }, phase: "ready" };
+  state.jobs[imported.id] = imported; f.setSources([]);
+  const item = (await f.service.list(f.claims)).items.find(value => value.id === imported.id);
+  assert.equal(item.status, "import_not_operational"); assert.equal(item.imageUrl, null);
+  assert.equal(item.formatsReady, false); assert.deepEqual(item.previews, {});
+  await assert.rejects(f.service.image(f.claims, item.id), { code: "calendar_import_not_operational" });
+  await assert.rejects(f.service.edit(f.claims, item.id, { action: "automatic", revision: item.revision, enabled: true, confirmed: true }), { code: "calendar_import_not_operational" });
+  await f.service.tick(); assert.equal(f.sends(), 0);
+});
+
 test("São Paulo schedule uses explicit zone and rejects impossible dates", () => {
   assert.equal(new Date(model.dateTime("2026-09-10", "12:00")).toISOString(), "2026-09-10T15:00:00.000Z");
   assert.throws(() => model.dateTime("2026-02-30", "12:00"));
