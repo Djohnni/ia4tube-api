@@ -58,7 +58,17 @@ async function createOperationalMediaPostgresFixture(t, { binDirectory = process
     assert.equal(listening, false, "Synthetic listener must be closed before cleanup or restart");
   }
   async function start() {
-    await command("pg_ctl", ["start", "-D", data, "-l", path.join(root, "synthetic.log"), "-o", `-h 127.0.0.1 -p ${port}`, "-w"]);
+    // Ubuntu's packaged default socket directory belongs to the postgres OS
+    // account. This independently owned fixture must use only its private root;
+    // TCP remains loopback and both authentication modes remain SCRAM.
+    const options = `-h 127.0.0.1 -p ${port}` + (process.platform === "linux" ? ` -k "${root}"` : "");
+    try { await command("pg_ctl", ["start", "-D", data, "-l", path.join(root, "synthetic.log"), "-o", options, "-w"]); }
+    catch (error) {
+      const log = fs.existsSync(path.join(root, "synthetic.log")) ? fs.readFileSync(path.join(root, "synthetic.log"), "utf8").slice(-16384) : "";
+      t.diagnostic("SYNTHETIC_PG_START_FAILURE=" + JSON.stringify({ socketPermission: /could not create lock file.*Permission denied/.test(log),
+        portBusy: /Address already in use/.test(log), badConfiguration: /invalid value|unrecognized configuration/.test(log) }));
+      throw error;
+    }
     started = true;
   }
   t.after(async () => {

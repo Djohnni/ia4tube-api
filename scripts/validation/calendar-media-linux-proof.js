@@ -40,6 +40,8 @@ const tests = [
   "tests/calendar-import-operational-runner-fencing-physical.test.js",
   "tests/calendar-import-operational-prelaunch-physical.test.js",
   "tests/calendar-operational-media-e2e.test.js",
+  "tests/calendar-render-workflow-adapter.test.js",
+  "tests/calendar-workflow-private-physical.test.js",
   "tests/calendar-import-retention-policy.test.js",
   "tests/calendar-import-retention-postgres-physical.test.js"
 ];

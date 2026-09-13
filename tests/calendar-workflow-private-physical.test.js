@@ -3,6 +3,7 @@ const test = require("node:test"), assert = require("node:assert/strict"), crypt
 const { createOperationalCalendarPipelineFixture, PREFIX } = require("./helpers/operational-calendar-pipeline-fixture");
 const { configureWorkflowPrivatePipeline } = require("./helpers/workflow-private-pipeline-fixture");
 const { dateTime } = require("../src/social/calendar/model");
+const http = require("node:http");
 const options = { configurePrivatePipeline: configureWorkflowPrivatePipeline };
 test("private Workflow: real PG and separated disk HTTP transfers → inspected photo → same calendar → controlled provider", async t => {
   const f = await createOperationalCalendarPipelineFixture(t, options), ready = await f.preparePhoto();
@@ -24,7 +25,9 @@ test("private Workflow: real PG and separated disk HTTP transfers → inspected 
 });
 test("private Workflow: lost start response observes same execution; exclusive claimant and persisted derivative survive lookup", async t => {
   const f = await createOperationalCalendarPipelineFixture(t, options); f.workflow.loseNextStart();
-  const ready = await f.preparePhoto(); assert.equal(ready.status.ready, true, JSON.stringify(ready.status));
+  const ready = await f.preparePhoto(); assert.equal(ready.status.ready, false, "A lost start acknowledgement is not fabricated as immediate success");
+  const reconciled = await f.preparation.reconcile(f.context, { assetId: ready.assetId, mediaRevision: ready.mediaRevision });
+  assert.equal(reconciled.ready, true, JSON.stringify(reconciled));
   assert.equal(f.workflow.calls.length, 2);
   const records = await f.workflow.journal.records(); const r = records.find(v => v.kind === "prepare");
   const duplicate = f.workflow.clientFor(r.executionId); await assert.rejects(() => duplicate.claim(), /workflow_private_transfer_failed/);
@@ -33,6 +36,30 @@ test("private Workflow: lost start response observes same execution; exclusive c
   assert.equal(before.prepared.sourceSha256, r.task.source.sha256);
   await f.workflow.bridge.recover(r.executionId); assert.equal(f.workflow.calls.length, 2);
   const wrong = crypto.randomUUID(); await assert.rejects(() => f.workflow.journal.deliver(r.executionId, wrong, r.delivered), /claim_conflict/);
+});
+test("private Workflow: authenticated slow body has total deadline and disconnected requests release transfer slots", async t => {
+  const f = await createOperationalCalendarPipelineFixture(t, { ...options, bridgeTimeoutMs: 2000 });
+  const ready = await f.preparePhoto(); assert.equal(ready.status.ready, true);
+  const r = (await f.workflow.journal.records())[0], started = performance.now();
+  async function partial(disconnect) {
+    return new Promise(resolve => {
+      const agentId = crypto.randomUUID(), length = 4096, sha256 = crypto.createHash("sha256").update(Buffer.alloc(length, 32)).digest("hex");
+      const headers = f.workflow.headersForSyntheticTest({ executionId: r.executionId, agentId, method: "POST", resource: "claim", length, sha256 });
+      const req = http.request(f.workflow.origin + "/internal/calendar-media/workflow/" + r.executionId + "/claim", { method: "POST", headers });
+      let timer; const done = () => { clearInterval(timer); resolve(); };
+      req.on("error", done); req.on("close", done); req.on("response", res => { res.resume(); res.on("end", done); });
+      req.write(" "); timer = setInterval(() => req.write(" "), 25);
+      if (disconnect) setTimeout(() => req.destroy(), 100);
+    });
+  }
+  await partial(false); const elapsed = performance.now() - started;
+  assert.ok(elapsed >= 1500 && elapsed < 5000, `Bounded continuous sender stopped at ${Math.round(elapsed)}ms`);
+  await Promise.all([partial(true), partial(true)]);
+  assert.deepEqual(await f.workflow.clientFor(r.executionId, r.agentId).status(), { delivered: true });
+  const unchanged = await f.workflow.journal.get(r.executionId); assert.deepEqual(unchanged.delivered, r.delivered);
+  await assert.rejects(() => f.workflow.clientFor(r.executionId, r.agentId).manifest({ ...r.manifest, executionId: crypto.randomUUID() }), /transfer_failed/);
+  assert.deepEqual((await f.workflow.journal.get(r.executionId)).manifest, r.manifest);
+  t.diagnostic("PRIVATE_TRANSFER_TOTAL_DEADLINE=PROVED; CONTINUOUS_IDLE_RESET=INEFFECTIVE; CLOSED_CLIENT_SLOTS=REUSABLE; ORIGINAL_RECEIPT=UNCHANGED");
 });
 test("private Workflow: musical photo and original video derivatives returned privately with native decode receipts", async t => {
   const f = await createOperationalCalendarPipelineFixture(t, { ...options, syntheticMusic: true });

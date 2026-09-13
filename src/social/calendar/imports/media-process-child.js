@@ -39,6 +39,7 @@ async function main() {
         requestWriteRefused: await refused(requestPath),
         nativeReceiptWriteRefused: await refused(root + ".supervision/terminal.json"),
         sourceWriteRefused: await refused(__filename),
+        otherAssetWriteRefused: await refused(path.join(path.dirname(root), "other-company-art.txt")),
         cgroupEscapeRefused: await refused("/sys/fs/cgroup/cgroup.procs"),
         interfaces: (await fs.readFile("/proc/net/dev", "utf8")).split("\n").filter(line => line.includes(":" )).map(line => line.split(":")[0].trim()) };
     }

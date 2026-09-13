@@ -47,7 +47,10 @@ async function compileLinuxSupervisor(root, { safePath, cleanEnvironment }) {
   const compiler = await fs.realpath("/usr/bin/cc"), stat = await fs.stat(compiler);
   if (!stat.isFile() || !compiler.startsWith("/usr/bin/") || stat.uid !== 0 || (stat.mode & 0o022)) fail("compiler_invalid");
   const temporary = path.join(root, `compile-${crypto.randomUUID()}.linux`);
-  const result = await bounded(compiler, ["-std=c11", "-O2", "-Wall", "-Wextra", "-Werror", "-Wno-misleading-indentation", "-D_FORTIFY_SOURCE=2", "-fstack-protector-strong", "-o", temporary, source], { cwd: root, env: cleanEnvironment(root) });
+  // GCC's assembler/linker are subprocesses resolved via PATH. This fixed
+  // system-only compiler PATH is deliberately NOT passed to any media child.
+  const result = await bounded(compiler, ["-std=c11", "-O2", "-Wall", "-Wextra", "-Werror", "-Wno-misleading-indentation", "-D_FORTIFY_SOURCE=2", "-fstack-protector-strong", "-o", temporary, source],
+    { cwd: root, env: { ...cleanEnvironment(root), PATH: "/usr/bin:/bin" } });
   if (!result.valid) fail("compiler_failed");
   await safePath(temporary, { file: true }); await fs.chmod(temporary, 0o500);
   try { await fs.link(temporary, destination); } catch (error) { if (error.code !== "EEXIST") throw error; await safePath(destination, { file: true }); }

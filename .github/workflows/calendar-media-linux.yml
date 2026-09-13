@@ -13,6 +13,7 @@ on:
       - 'tests/helpers/operational-*'
       - 'tests/helpers/workflow-*'
       - 'tests/fixtures/**'
+      - 'workflows/calendar-media.mjs'
       - 'package.json'
       - 'package-lock.json'
 
@@ -46,7 +47,7 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends gcc ffmpeg postgresql-16
           npm ci --ignore-scripts --no-audit --no-fund
-          cc -std=c11 -fsyntax-only -Wall -Wextra -Werror -Wno-misleading-indentation src/social/calendar/imports/media-process-supervisor-linux.c
+          cc -std=c11 -O2 -Wall -Wextra -Werror -Wno-misleading-indentation -D_FORTIFY_SOURCE=2 -fstack-protector-strong -o "$RUNNER_TEMP/calendar-media-supervisor-check" src/social/calendar/imports/media-process-supervisor-linux.c
       - name: Synthetic media, private loopback transfer and real PostgreSQL
         shell: bash
         run: |

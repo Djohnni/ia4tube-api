@@ -26,7 +26,8 @@ async function configureWorkflowPrivatePipeline(t, f, options = {}) {
   const journal = createWorkflowPrivateJournal({ store: f.store, owner: f.context, clock: f.clock });
   const key = crypto.randomBytes(32), originalProvider = f.provider; let preparedStore, preparationRunner, inspectionRunner;
   const bridge = createWorkflowPrivateBridge({ journal, key, provider: originalProvider, privateRoot: f.privateRoot, preparationRoot: f.preparationRoot, getResultStore: () => preparedStore,
-    clock: f.clock, musicRoot: f.musicRoot, allowSyntheticForTests: options.syntheticMusic === true, diagnostic: code => t.diagnostic("WORKFLOW_TRANSFER_CODE=" + code),
+    clock: f.clock, musicRoot: f.musicRoot, transferTimeoutMs: options.bridgeTimeoutMs || 60000,
+    allowSyntheticForTests: options.syntheticMusic === true, diagnostic: code => t.diagnostic("WORKFLOW_TRANSFER_CODE=" + code),
     resolveMusicTrack: async id => f.catalog.has(id) ? { filePath: path.join(f.musicRoot, "local-tone.wav"), sha256: f.catalog.get(id).sha256, synthetic: true } : null,
     assertHeld: async (task, kind, resultRef) => kind === "inspect" ? inspectionRunner.assertExecutionHeld({ task, snapshotBytes: task.sizeBytes, maxRuntimeMs: task.maxRuntimeMs }) :
       f.preparedAdmission.assertHeld({ task, resultRef, requiredBytes: 65536, intent: "write" }) });
@@ -61,7 +62,13 @@ async function configureWorkflowPrivatePipeline(t, f, options = {}) {
   const preparation = createPreparationQueue({ store: f.store, dispatcher: preparationRunner, resultStore: preparedStore, accessPolicy: f.accessPolicy,
     enabled: true, catalog: f.catalog, allowSyntheticForTests: options.syntheticMusic === true, clock: f.clock });
   Object.assign(f, { preparedStore, preparationRunner, inspectionRunner, inspector, provider, upload, preparation,
-    workflow: { bridge, journal, native, agent, origin, calls, sdkRuns, clientFor, remoteRoot, metrics, loseNextStart() { lostStart = true; } } });
+    workflow: { bridge, journal, native, agent, origin, calls, sdkRuns, clientFor, remoteRoot, metrics, loseNextStart() { lostStart = true; },
+      headersForSyntheticTest({ executionId, agentId, method, resource, length = 0, sha256 = crypto.createHash("sha256").update("").digest("hex") }) {
+        const stamp = String(f.clock()), scoped = crypto.createHmac("sha256", key).update("calendar-workflow-v1:" + executionId).digest();
+        const signature = crypto.createHmac("sha256", scoped).update([method, resource, agentId, stamp, length, sha256].join("\n")).digest("hex"); scoped.fill(0);
+        return { "content-length": length, "x-media-agent": agentId, "x-media-time": stamp, "x-media-sha256": sha256, "x-media-auth": signature };
+      }
+    } });
   t.after(async () => { server.closeAllConnections(); await new Promise(resolve => server.close(resolve)); key.fill(0); });
 }
 module.exports = { configureWorkflowPrivatePipeline };

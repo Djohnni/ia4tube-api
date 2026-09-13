@@ -3,9 +3,9 @@ const { isWorkflowPrivateBridge } = require("./workflow-private-transfer");
 const { isRenderWorkflowAdapter } = require("./render-workflow-adapter");
 const { fail } = require("./workflow-private-journal");
 const workers = new WeakSet();
-function createWorkflowProcessWorker({ bridge, adapter, allowControlledForTests = false, remoteRuntimeVerified = false } = {}) {
+function createWorkflowProcessWorker({ bridge, adapter, allowControlledForTests = false, validationOnly = false } = {}) {
   if (!isWorkflowPrivateBridge(bridge) || !isRenderWorkflowAdapter(adapter, { allowControlledForTests }) ||
-      !allowControlledForTests && remoteRuntimeVerified !== true || allowControlledForTests && !adapter.capabilities.controlled) fail("configuration_invalid");
+      !allowControlledForTests && validationOnly !== true || allowControlledForTests && !adapter.capabilities.controlled) fail("configuration_invalid");
   async function observe(task, { executionId } = {}) {
     const r = await bridge.journal.get(executionId);
     if (r.dispatchKey !== task.dispatchKey || r.executionDigest !== task.executionDigest) fail("binding_conflict");
@@ -25,7 +25,10 @@ function createWorkflowProcessWorker({ bridge, adapter, allowControlledForTests 
     return observe(task, ids);
   }
   const worker = Object.freeze({ capabilities: Object.freeze({ actualPreparation: true, actualByteDecoding: true, hardTermination: true,
-    remoteWorkflowVerified: remoteRuntimeVerified, controlled: allowControlledForTests, readyForProduction: remoteRuntimeVerified && !allowControlledForTests }),
+    // hardTermination is the mandatory receipt contract, not a Render-host
+    // attestation. No caller boolean may mark this candidate production ready.
+    remoteWorkflowVerified: false, terminationProofRequired: true, validationOnly: true,
+    controlled: allowControlledForTests, readyForProduction: false }),
     execute: (task, ids) => run("prepare", task, ids), inspect: (task, ids) => run("inspect", task, ids), observe });
   workers.add(worker); return worker;
 }
