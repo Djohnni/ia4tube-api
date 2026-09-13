@@ -18,19 +18,26 @@ async function configureWorkflowPrivatePipeline(t, f, options = {}) {
   // Register before initialization: an early capability/config failure must also
   // close the new host and HTTP listener. Never call cleanup on another fixture.
   const hostExited = new Promise(resolve => host.once("exit", resolve));
-  t.after(async () => {
+  let shutdownProof, closePromise;
+  const close = () => closePromise ||= (async () => {
     if (host.connected) host.send({ type: "shutdown" });
     let timer;
     try { await Promise.race([hostExited, new Promise((_, reject) => { timer = setTimeout(() => reject(Error("synthetic_workflow_host_shutdown_unproved")), 190000); })]); }
-    finally { clearTimeout(timer); server.closeAllConnections(); await new Promise(resolve => server.close(resolve)); key.fill(0); }
-    t.diagnostic("WORKFLOW_COORDINATOR_SEPARATE_OS_PROCESS=YES; NO_DATABASE_OR_INSTAGRAM_ENVIRONMENT=YES; COORDINATOR_EXITED=YES");
-  });
+    finally { clearTimeout(timer); }
+    assert.equal(shutdownProof?.proved, true, "Native descendants must be proved stopped before deleting synthetic files");
+    assert.equal((await f.pg.tenantPool.query("SELECT 1 AS present")).rows[0].present, 1, "Database must remain available until host stop");
+    assert.equal((await fs.stat(f.pg.root)).isDirectory(), true);
+    server.closeAllConnections(); await new Promise(resolve => server.close(resolve)); key.fill(0);
+    t.diagnostic("WORKFLOW_COORDINATOR_SEPARATE_OS_PROCESS=YES; NO_DATABASE_OR_INSTAGRAM_ENVIRONMENT=YES; COORDINATOR_EXITED=YES; NATIVE_DESCENDANTS_STOPPED=YES; HOST_BEFORE_PG_CLEANUP=YES");
+  })();
+  f.pg.registerBeforeCleanup(close);
   const pending = new Map(); let readyResolve, readyReject;
   const ready = new Promise((resolve, reject) => { readyResolve = resolve; readyReject = reject; });
   host.on("message", message => {
     if (message.type === "ready") readyResolve(message);
     else if (message.type === "initialization_failed") readyReject(Error("synthetic_workflow_host_initialization_failed"));
     else if (message.type === "diagnostic") t.diagnostic("WORKFLOW_AGENT_CODE=" + message.code);
+    else if (message.type === "shutdown_proof") shutdownProof = message;
     else if (message.type === "result") { pending.get(message.executionId)?.resolve(message.result); pending.delete(message.executionId); }
   });
   host.on("error", () => readyReject(Error("synthetic_workflow_host_start_failed")));
@@ -48,7 +55,6 @@ async function configureWorkflowPrivatePipeline(t, f, options = {}) {
       const r = { id, input: args, status: "running", retries: 0, results: [] }; sdkRuns.set(id, r);
       const taskPromise = runOnHost(args[0].executionId).then(value => { r.results = [value]; r.status = "completed"; }, () => { r.status = "failed"; });
       taskPromises.push(taskPromise);
-      if (options.asynchronousSdk !== true) await taskPromise;
       if (lostStart && (await journal.get(args[0].executionId)).kind === "prepare") { lostStart = false; throw Error("synthetic_start_response_lost"); } return { taskRunId: id };
     },
     async getTaskRun(id) { return structuredClone(sdkRuns.get(id)); },
@@ -65,8 +71,32 @@ async function configureWorkflowPrivatePipeline(t, f, options = {}) {
     diagnostic: code => t.diagnostic("WORKFLOW_TRANSFER_CODE=" + code), transferTimeoutMs: options.bridgeTimeoutMs || 60000 });
   ({ journal, bridge } = components);
   const { resultStore: preparedStore, preparationRunner, inspectionRunner, inspector, provider, upload, preparation, tick } = components;
+  async function progressUntil(deadlineAt, read, done) {
+    // Follow the existing task deadline; never enlarge SDK or native limits and
+    // never replace a start. Status reads remain read-only; tick is explicit.
+    while (f.clock() < deadlineAt) {
+      await tick(); const value = await read(); if (done(value)) return value;
+      if (["attention", "rejected"].includes(value.state)) throw Error("synthetic_workflow_terminal_not_ready");
+      await new Promise(resolve => setTimeout(resolve, Math.min(250, Math.max(1, deadlineAt - f.clock()))));
+    }
+    throw Error("synthetic_workflow_existing_deadline_exhausted");
+  }
+  f.resolvePendingUpload = async started => {
+    const r = (await journal.records()).find(r => r.kind === "inspect" && r.task.uploadId === started.uploadId);
+    assert.ok(r, "Pending upload must have its original inspection identity");
+    return progressUntil(r.task.deadlineAt, () => upload.status(f.context, { uploadId: started.uploadId }), value => value.state === "uploaded");
+  };
+  const finishPrepared = async value => {
+    if (!value.status.ready) {
+      const r = (await journal.records()).find(r => r.kind === "prepare" && r.task.assetId === value.assetId && r.task.mediaRevision === value.mediaRevision);
+      assert.ok(r, "Pending preparation must have its original execution identity");
+      value.status = await progressUntil(r.task.deadlineAt, () => preparation.status(f.context, { assetId: value.assetId }), status => status.ready === true);
+    }
+    value.prepared = (await preparation.snapshot(f.context, { assetId: value.assetId, mediaRevision: value.mediaRevision })).result;
+    return value;
+  };
   Object.assign(f, { preparedStore, preparationRunner, inspectionRunner, inspector, provider, upload, preparation,
-    workflow: { bridge, journal, origin, calls, sdkRuns, clientFor, remoteRoot, metrics, hostProof, tick,
+    workflow: { bridge, journal, origin, calls, sdkRuns, clientFor, remoteRoot, metrics, hostProof, tick, finishPrepared, close,
       awaitTasks: () => Promise.all(taskPromises), loseNextStart() { lostStart = true; },
       headersForSyntheticTest({ executionId, agentId, method, resource, length = 0, sha256 = crypto.createHash("sha256").update("").digest("hex") }) {
         const stamp = String(f.clock()), scoped = crypto.createHmac("sha256", key).update("calendar-workflow-v1:" + executionId).digest();

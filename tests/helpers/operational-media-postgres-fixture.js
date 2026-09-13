@@ -35,6 +35,7 @@ async function createOperationalMediaPostgresFixture(t, { binDirectory = process
     });
   }
   let started = false, closed = false, adminPool, tenantPool, capacityPool, transferPool;
+  const beforeCleanup = [];
   const common = { host: "127.0.0.1", port, password, database: "postgres", max: 8, connectionTimeoutMillis: 3000,
     statement_timeout: 10000, query_timeout: 12000, application_name: "synthetic_operational_media_test" };
   const pool = user => { const value = new Pool({ ...common, user }); value.on("error", () => {}); return value; };
@@ -73,6 +74,11 @@ async function createOperationalMediaPostgresFixture(t, { binDirectory = process
   }
   t.after(async () => {
     if (closed) return; closed = true;
+    // Node after hooks are FIFO. Dependent processes must stop while this
+    // database and its files are still available. A missing shutdown proof
+    // deliberately preserves this synthetic root instead of deleting live data.
+    try { for (const dispose of beforeCleanup.slice().reverse()) await dispose(); }
+    catch (error) { t.diagnostic("SYNTHETIC_DEPENDENT_SHUTDOWN_UNPROVED=YES; ROOT_AND_DATABASE_PRESERVED=YES"); throw error; }
     await closePools(); await stop();
     const target = path.resolve(root);
     assert.equal(path.dirname(target), path.resolve(os.tmpdir()));
@@ -105,6 +111,7 @@ async function createOperationalMediaPostgresFixture(t, { binDirectory = process
   assert.equal(identity.rows[0].address, "127.0.0.1");
   return Object.freeze({
     root, platform: process.platform, databaseVersion: identity.rows[0].version,
+    registerBeforeCleanup(dispose) { assert.equal(typeof dispose, "function"); assert.equal(closed, false); beforeCleanup.push(dispose); },
     get adminPool() { return adminPool; }, get tenantPool() { return tenantPool; },
     get capacityPool() { return capacityPool; }, get transferPool() { return transferPool; },
     async addCompany(id = crypto.randomUUID()) {

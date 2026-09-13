@@ -147,15 +147,19 @@ async function createOperationalPrivatePipelineFixture(t, options = {}) {
     let result;
     try { result = await f.upload.complete(context, { uploadId: started.uploadId }); }
     catch (error) {
-      const state = await f.snapshot();
-      const execution = Object.values(state.inspectionExecutions?.records || {}).find(record => record.task.uploadId === started.uploadId);
-      if (execution) {
-        const observed = await f.executor.observe(execution.executionId);
-        let terminal; try { terminal = JSON.parse(await fs.readFile(path.join(inspectionWorkingRoot, execution.executionId, "worker-terminal.json"), "utf8")); } catch (_) {}
-        t.diagnostic(`PHYSICAL_SOURCE_INSPECTION=${JSON.stringify({ journal: execution.phase, state: observed.state,
-          reason: observed.reason, failureCode: observed.failureCode, workerReason: terminal?.reason })}`);
+      if (error.code === "import_verification_pending" && typeof f.resolvePendingUpload === "function") result = await f.resolvePendingUpload(started);
+      else {
+        const state = await f.snapshot();
+        const execution = Object.values(state.inspectionExecutions?.records || {}).find(record => record.task.uploadId === started.uploadId);
+        if (execution && f.workflow) t.diagnostic(`WORKFLOW_SOURCE_INSPECTION=${JSON.stringify({ journal: execution.phase, localExecutorApplicable: false })}`);
+        else if (execution) {
+          const observed = await f.executor.observe(execution.executionId);
+          let terminal; try { terminal = JSON.parse(await fs.readFile(path.join(inspectionWorkingRoot, execution.executionId, "worker-terminal.json"), "utf8")); } catch (_) {}
+          t.diagnostic(`PHYSICAL_SOURCE_INSPECTION=${JSON.stringify({ journal: execution.phase, state: observed.state,
+            reason: observed.reason, failureCode: observed.failureCode, workerReason: terminal?.reason })}`);
+        }
+        throw error;
       }
-      throw error;
     }
     assert.equal(result.state, "uploaded", `Physical inspection did not finish: ${result.state}`); return result;
   };

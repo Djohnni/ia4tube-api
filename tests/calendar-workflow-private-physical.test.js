@@ -6,7 +6,7 @@ const { dateTime } = require("../src/social/calendar/model");
 const http = require("node:http");
 const options = { configurePrivatePipeline: configureWorkflowPrivatePipeline };
 test("private Workflow: real PG and separated disk HTTP transfers → inspected photo → same calendar → controlled provider", async t => {
-  const f = await createOperationalCalendarPipelineFixture(t, options), ready = await f.preparePhoto();
+  const f = await createOperationalCalendarPipelineFixture(t, options), ready = await f.workflow.finishPrepared(await f.preparePhoto());
   assert.equal(ready.status.ready, true, JSON.stringify(ready.status));
   assert.equal(f.workflow.calls.length, 2, "one source inspection and one preparation");
   const records = await f.workflow.journal.records(); assert.equal(records.length, 2);
@@ -26,7 +26,7 @@ test("private Workflow: real PG and separated disk HTTP transfers → inspected 
 test("private Workflow: lost start response observes same execution; exclusive claimant and persisted derivative survive lookup", async t => {
   const f = await createOperationalCalendarPipelineFixture(t, options); f.workflow.loseNextStart();
   const ready = await f.preparePhoto(); assert.equal(ready.status.ready, false, "A lost start acknowledgement is not fabricated as immediate success");
-  const reconciled = await f.preparation.reconcile(f.context, { assetId: ready.assetId, mediaRevision: ready.mediaRevision });
+  const reconciled = (await f.workflow.finishPrepared(ready)).status;
   assert.equal(reconciled.ready, true, JSON.stringify(reconciled));
   assert.equal(f.workflow.calls.length, 2);
   const records = await f.workflow.journal.records(); const r = records.find(v => v.kind === "prepare");
@@ -39,7 +39,7 @@ test("private Workflow: lost start response observes same execution; exclusive c
 });
 test("private Workflow: authenticated slow body has total deadline and disconnected requests release transfer slots", async t => {
   const f = await createOperationalCalendarPipelineFixture(t, { ...options, bridgeTimeoutMs: 2000 });
-  const ready = await f.preparePhoto(); assert.equal(ready.status.ready, true);
+  const ready = await f.workflow.finishPrepared(await f.preparePhoto()); assert.equal(ready.status.ready, true);
   const r = (await f.workflow.journal.records())[0], started = performance.now();
   async function partial(disconnect) {
     return new Promise(resolve => {
@@ -63,9 +63,9 @@ test("private Workflow: authenticated slow body has total deadline and disconnec
 });
 test("private Workflow: musical photo and original video derivatives returned privately with native decode receipts", async t => {
   const f = await createOperationalCalendarPipelineFixture(t, { ...options, syntheticMusic: true });
-  const photo = await f.preparePhoto({ selection: { kind: "image", targets: ["feed", "story"], audioMode: "music", musicTrackId: "synthetic-local-tone", musicalTargets: ["story"] } });
+  const photo = await f.workflow.finishPrepared(await f.preparePhoto({ selection: { kind: "image", targets: ["feed", "story"], audioMode: "music", musicTrackId: "synthetic-local-tone", musicalTargets: ["story"] } }));
   assert.equal(photo.status.ready, true, JSON.stringify(photo.status));
-  const video = await f.prepareVideo({ selection: { kind: "video", targets: ["story", "reel"], audioMode: "original" } });
+  const video = await f.workflow.finishPrepared(await f.prepareVideo({ selection: { kind: "video", targets: ["story", "reel"], audioMode: "original" } }));
   assert.equal(video.status.ready, true, JSON.stringify(video.status));
   const records = (await f.workflow.journal.records()).filter(r => r.kind === "prepare");
   assert.equal(records.length, 2);
@@ -114,4 +114,21 @@ test("private Workflow: asynchronous start progresses only through finite owner 
   await Promise.all([f.workflow.tick(), f.workflow.tick()]); assert.equal(f.workflow.calls.length, 2);
   f.revoke(); await assert.rejects(() => f.workflow.tick(), /not_allowed/); assert.equal(f.workflow.calls.length, 2);
   t.diagnostic("ASYNC_START=PROVED; STATUS_READONLY=YES; TICK_OVERLAP_JOINED=YES; UNKNOWN_RESERVATION_HELD=YES; DUPLICATE_STARTS=ZERO");
+});
+
+test("private Workflow: assertion-error cleanup drains active host and proves native termination before PostgreSQL or media removal", async t => {
+  const f = await createOperationalCalendarPipelineFixture(t, options);
+  const value = await f.preparePhoto({ selection: { kind: "image", targets: ["feed"], audioMode: "none" } });
+  assert.equal(value.status.ready, false); assert.equal([...f.workflow.sdkRuns.values()].at(-1).status, "running");
+  let caught;
+  try { throw Error("synthetic_assertion_failure_after_start"); }
+  catch (error) { caught = error.message; }
+  finally { await f.workflow.close(); }
+  assert.equal(caught, "synthetic_assertion_failure_after_start");
+  assert.equal((await fs.stat(f.pg.root)).isDirectory(), true);
+  assert.equal((await f.pg.tenantPool.query("SELECT 1 AS intact")).rows[0].intact, 1);
+  const r = (await f.workflow.journal.records()).find(r => r.kind === "prepare");
+  assert.equal(r.delivered.termination.proved, true); assert.equal(r.delivered.termination.descendants, 0);
+  assert.equal(f.workflow.calls.length, 2);
+  t.diagnostic("ASSERTION_ERROR_PATH=CONTROLLED; ACTIVE_HOST_DRAINED=YES; NATIVE_TERMINATION_PROVED=YES; DATABASE_AND_FILES_PRESENT_UNTIL_STOP=YES");
 });

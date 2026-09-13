@@ -5,6 +5,7 @@ const fs = require("node:fs/promises"), path = require("node:path"), crypto = re
 const { isMediaProcessExecutor, safePath, digest, immutableJson, readJson } = require("./media-process-executor");
 const { isWorkflowPrivateClient, fileHash, allParts } = require("./workflow-private-transfer");
 const { UUID, fail } = require("./workflow-private-journal");
+const { closedSpawnErrorCode } = require("./media-process-diagnostics");
 function createWorkflowTaskAgent({ workingRoot, executor, allowSyntheticForTests = false, clock = Date.now, diagnostic = () => {} } = {}) {
   if (!path.isAbsolute(workingRoot || "") || !isMediaProcessExecutor(executor) ||
       !(executor.capabilities.supported || executor.capabilities.validationOnly && executor.capabilities.linuxCapabilitiesProved) || !executor.capabilities.hardTermination) fail("runtime_unvalidated");
@@ -40,6 +41,7 @@ function createWorkflowTaskAgent({ workingRoot, executor, allowSyntheticForTests
             ...(music ? { music } : {}), logicalNow: clock(), deadlineAt: task.deadlineAt };
           const converted = await executor.run({ executionId, operation: input.kind, timeoutMs: remaining(), input: nativeInput });
           if (converted.state !== "succeeded") diagnostic(/^[a-z_]{1,100}$/.test(converted.failureCode || converted.reason || "") ? converted.failureCode || converted.reason : "workflow_conversion_incomplete");
+          if (converted.reason === "not_started_spawn") diagnostic("workflow_spawn_" + closedSpawnErrorCode({ code: converted.spawnErrorCode }).toLowerCase());
           if (!converted.termination?.proved) fail("termination_unproved");
           const inspections = {};
           if (input.kind === "prepare" && converted.state === "succeeded") {

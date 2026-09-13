@@ -137,7 +137,7 @@ async function createOperationalCalendarPipelineFixture(t, options = {}) {
   app.use("/v1/social/calendar", createCalendarRouter({ authenticate: session.authenticate, getService: () => current.calendar }));
   const server = app.listen(0, "127.0.0.1"); await new Promise(resolve => server.once("listening", resolve));
   base = `http://127.0.0.1:${server.address().port}`;
-  t.after(async () => { server.closeAllConnections(); await new Promise(resolve => server.close(resolve)); current.imports.close(); await current.calendar.close(); });
+  db.registerBeforeCleanup(async () => { server.closeAllConnections(); await new Promise(resolve => server.close(resolve)); current.imports.close(); await current.calendar.close(); });
   const pipelineReopen = f.reopen;
   f.reopen = async settings => { current.imports.close(); await current.calendar.close(); await pipelineReopen(settings); await mount(); };
   const request = (route, options = {}) => fetch(base + route, { ...options, headers: { Authorization: `Bearer ${token}`, ...options.headers } });
