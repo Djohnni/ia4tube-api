@@ -11,6 +11,7 @@ assert.match(process.env.CALENDAR_MEDIA_LINUX_CGROUP_ROOT || "", /^\/sys\/fs\/cg
 const tests = [
   "tests/calendar-vm-transport.test.js",
   "tests/calendar-vm-proof-controller.test.js",
+  "tests/calendar-vm-proof-offline.test.js",
   "tests/calendar-vm-private-physical.test.js",
   "tests/calendar-import-media-linux-contract.test.js",
   "tests/calendar-import-media-installed-contract.test.js",

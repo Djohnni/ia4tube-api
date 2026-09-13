@@ -42,6 +42,7 @@ jobs:
           node-version: '24.15.0'
           check-latest: false
       - name: Public tools and static compiler checks
+        id: tools
         shell: bash
         run: |
           set -euo pipefail
@@ -50,6 +51,7 @@ jobs:
           npm ci --ignore-scripts --no-audit --no-fund
           cc -std=c11 -O2 -Wall -Wextra -Werror -Wno-misleading-indentation -D_FORTIFY_SOURCE=2 -fstack-protector-strong -o "$RUNNER_TEMP/calendar-media-supervisor-check" src/social/calendar/imports/media-process-supervisor-linux.c
       - name: VM protocol and affected legacy regressions
+        id: protocol
         shell: bash
         run: |
           set -euo pipefail
@@ -65,6 +67,8 @@ jobs:
             CALENDAR_MEDIA_LINUX_LAUNCH_MODE=sudo CALENDAR_MEDIA_LINUX_PHYSICAL=1 \
             node scripts/validation/calendar-media-vm-linux-proof.js
       - name: Installed supervisor, separate codec identity and physical scratch limit
+        id: installed
+        if: ${{ !cancelled() && steps.tools.outcome == 'success' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -83,9 +87,13 @@ jobs:
           sudo env PATH=/opt/node-v24.15.0-linux-x64/bin:/usr/sbin:/usr/bin:/sbin:/bin bash "$RUNNER_TEMP/vm-proof-bundle/scripts/media-vm/preflight-ubuntu24.sh"
           sudo env PATH=/opt/node-v24.15.0-linux-x64/bin:/usr/sbin:/usr/bin:/sbin:/bin bash "$RUNNER_TEMP/vm-proof-bundle/scripts/media-vm/install-ubuntu24.sh" --synthetic-proof
           sudo -u ia4tube-coordinator env -i PATH=/usr/bin:/bin LANG=C.UTF-8 \
-            /opt/ia4tube-media/runtime/usr/bin/node --test --test-concurrency=1 \
-            /opt/ia4tube-media/proof/tests/calendar-import-media-process-installed-linux.test.js
+            /opt/ia4tube-media/runtime/usr/bin/node \
+            /opt/ia4tube-media/proof/scripts/validation/vm-proof-guest.js --run
+          sudo -u ia4tube-coordinator env -i PATH=/usr/bin:/bin LANG=C.UTF-8 \
+            /opt/ia4tube-media/runtime/usr/bin/node \
+            /opt/ia4tube-media/proof/scripts/validation/vm-proof-guest.js --collect
       - name: VM pull integration under the installed coordinator identity
+        if: ${{ !cancelled() && steps.installed.outcome == 'success' }}
         shell: bash
         run: |
           set -euo pipefail

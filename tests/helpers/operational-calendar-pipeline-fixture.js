@@ -102,7 +102,10 @@ async function createOperationalCalendarPipelineFixture(t, options = {}) {
       catalog: f.catalog, localTransport: transport, allowLocalTransportForTests: true, clock: f.clock,
       async verifyReadiness() {
         assert.equal(await registry.verify(), true); assert.equal(await f.ledger.verify(), true);
-        assert.equal(f.executor.capabilities.hardTermination, true);
+        if (options.externalPrivateExecutor === true) {
+          assert.equal(typeof f.assertPrivateExecutorReadiness, "function");
+          assert.equal(await f.assertPrivateExecutorReadiness(), true);
+        } else assert.equal(f.executor.capabilities.hardTermination, true);
         assert.equal(f.preparedStore.capabilities.testOnly, false); return true;
       } });
     assert.equal(isOperationalCalendarImportsRuntimeFactory(runtimeFactory), false, "The production factory rejects a simulated transport");

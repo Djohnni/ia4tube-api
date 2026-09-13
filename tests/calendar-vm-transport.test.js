@@ -41,3 +41,14 @@ test("VM entry: installed immutable runtime revision must match configuration be
     [{ runtimeRevision: revision }, { schema: 2, runtimeRevision: revision }]
   ]) assert.throws(() => validateRuntimeRevision(config, manifest), /runtime_revision_conflict/);
 });
+test("VM fixture: readiness receipt binds the separate host PID and requires actual termination/installed proof fields", () => {
+  const { assertVmHostReceipt } = require("./helpers/vm-private-pipeline-fixture");
+  // Pure receipt-schema contract; the physical suite supplies the actual
+  // message from the forked process after native prepareRuntime succeeds.
+  const pid = process.pid + 10000, receipt = { type: "ready", pid, isolatedEnvironment: true, hardTermination: true, installedHost: true };
+  assert.doesNotThrow(() => assertVmHostReceipt(receipt, pid, true));
+  for (const changed of [{ pid: pid + 1 }, { type: "pending" }, { hardTermination: false }, { isolatedEnvironment: false }, { installedHost: false }])
+    assert.throws(() => assertVmHostReceipt({ ...receipt, ...changed }, pid, true));
+  assert.throws(() => assertVmHostReceipt(receipt, process.pid, true));
+  assert.throws(() => assertVmHostReceipt(undefined, pid, false));
+});

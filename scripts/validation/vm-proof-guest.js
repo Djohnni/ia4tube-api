@@ -5,10 +5,27 @@ const { MANIFEST, sha256, canonical } = require("./vm-proof-manifest");
 const STATE = "/var/lib/ia4tube-media/state/proof-run";
 const ROOT = "/opt/ia4tube-media/proof";
 function fail(code) { throw new Error("vm_proof_guest_" + code); }
-function parseEvidence(output, code) {
-  const cases = [], totals = [];
+function validateMetrics(metrics) {
+  return metrics === null || metrics && Object.keys(metrics).sort().join(",") === "decodedSeconds,peakTasks,peakTreeMemoryBytes,preparationCpuMs,preparationElapsedMs,sequenceElapsedMs,sourceBytes" &&
+    Object.values(metrics).every(n => Number.isFinite(n) && n >= 0 && n <= 10 ** 13);
+}
+function parseEvidence(output, code, sequenceElapsedMs = null) {
+  const cases = [], totals = []; let metrics = null;
   for (const line of output.split(/\r?\n/)) {
-    const match = line.match(/^(?:# )?VM_INSTALLED_(CASE|TOTAL)=(\{.*\})$/);
+    // Read only the synthetic pipeline's closed numeric measurements. Never
+    // retain raw diagnostics, execution paths/IDs, source bytes or environment.
+    const diagnostic = line.match(/^\s*# (\{.*\})$/);
+    if (diagnostic) {
+      let row; try { row = JSON.parse(diagnostic[1]); } catch { continue; }
+      if (row.case === "installed-pipeline") {
+        if (metrics !== null) fail("duplicate_metrics");
+        metrics = { sequenceElapsedMs, sourceBytes: row.source?.size, decodedSeconds: row.decoded?.seconds,
+          preparationElapsedMs: row.prepared?.elapsedMs, preparationCpuMs: row.prepared?.metrics?.cpuMs,
+          peakTreeMemoryBytes: row.prepared?.metrics?.peakTreeMemoryBytes, peakTasks: row.prepared?.metrics?.peakTasks };
+        if (!validateMetrics(metrics)) fail("metrics_invalid");
+      }
+    }
+    const match = line.match(/^\s*(?:# )?VM_INSTALLED_(CASE|TOTAL)=(\{.*\})$/);
     if (!match) continue;
     const row = JSON.parse(match[2]);
     if (match[1] === "CASE") {
@@ -26,9 +43,9 @@ function parseEvidence(output, code) {
     }
   }
   if (totals.length !== 1 || totals[0].launches !== cases.reduce((n, c) => n + c.nativeLaunches, 0)) fail("total_receipt_missing");
-  const allPassed = code === 0 && cases.length === MANIFEST.cases.length && cases.every((c, i) => c.passed && c.terminationProved && c.nativeLaunches === MANIFEST.cases[i].attempts.length);
+  const allPassed = code === 0 && metrics !== null && cases.length === MANIFEST.cases.length && cases.every((c, i) => c.passed && c.terminationProved && c.nativeLaunches === MANIFEST.cases[i].attempts.length);
   return { schema: 1, cases, launches: totals[0].launches, attemptIds: totals[0].attemptIds, allTerminated: totals[0].allTerminated,
-    syntheticOnly: true, allPassed };
+    syntheticOnly: true, metrics, allPassed };
 }
 async function writeExclusive(file, value) {
   const out = await fs.open(file, "wx", 0o600);
@@ -36,6 +53,7 @@ async function writeExclusive(file, value) {
   const dir = await fs.open(path.dirname(file), "r"); try { await dir.sync(); } finally { await dir.close(); }
 }
 async function launchSequence({ timeoutMs = MANIFEST.sequenceSeconds * 1000 } = {}) {
+  const began = performance.now();
   return new Promise(resolve => {
     const child = spawn(process.execPath, ["--test", "--test-concurrency=1", "--test-reporter=tap", MANIFEST.testFile], {
       cwd: ROOT, shell: false, stdio: ["ignore", "pipe", "pipe"], env: { PATH: "/opt/ia4tube-media/runtime/usr/bin:/usr/bin:/bin", LANG: "C.UTF-8",
@@ -45,7 +63,7 @@ async function launchSequence({ timeoutMs = MANIFEST.sequenceSeconds * 1000 } = 
     const timer = setTimeout(() => { failed = true; child.kill("SIGKILL"); }, timeoutMs);
     const append = b => { bytes += b.length; if (bytes > 512 * 1024) { failed = true; child.kill("SIGKILL"); } else output += b.toString("utf8"); };
     child.stdout.on("data", append); child.stderr.on("data", append); child.on("error", () => { failed = true; });
-    child.once("close", code => { clearTimeout(timer); resolve({ code: failed ? 1 : code, output }); });
+    child.once("close", code => { clearTimeout(timer); resolve({ code: failed ? 1 : code, output, elapsedMs: Math.round(performance.now() - began) }); });
   });
 }
 async function run() {
@@ -55,8 +73,8 @@ async function run() {
   await writeExclusive(path.join(STATE, "intent.json"), { schema: 1, manifestSha256: sha256(canonical(MANIFEST)),
     startedAt: Date.now(), caseIds: MANIFEST.cases.map(c => c.id), attemptIds: MANIFEST.cases.flatMap(c => c.attempts), retries: 0 });
   let evidence;
-  try { const result = await launchSequence(); evidence = parseEvidence(result.output, result.code); }
-  catch { evidence = { schema: 1, cases: [], launches: 0, attemptIds: [], allTerminated: false, syntheticOnly: true, allPassed: false }; }
+  try { const result = await launchSequence(); evidence = parseEvidence(result.output, result.code, result.elapsedMs); }
+  catch { evidence = { schema: 1, cases: [], launches: null, attemptIds: [], allTerminated: false, syntheticOnly: true, metrics: null, allPassed: false }; }
   await writeExclusive(path.join(STATE, "evidence.json"), evidence);
   return evidence;
 }
@@ -73,4 +91,4 @@ if (require.main === module) {
     if (action[0] === "--run" && (!e.allPassed || !e.allTerminated)) process.exitCode = 1;
   }).catch(() => { process.stderr.write("VM_PROOF_GUEST=CLOSED_FAILURE_NO_REPEAT\n"); process.exitCode = 1; });
 }
-module.exports = { parseEvidence, launchSequence };
+module.exports = { parseEvidence, launchSequence, validateMetrics };

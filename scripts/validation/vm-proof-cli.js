@@ -4,7 +4,7 @@ const { createPlan, validatePlan, canonical, sha256 } = require("./vm-proof-mani
 function argumentsOf(argv) {
   const values = {};
   for (let i = 0; i < argv.length; i += 2) {
-    if (!/^--[a-z-]+$/.test(argv[i] || "") || typeof argv[i + 1] !== "string" || argv[i + 1].startsWith("--") || values[argv[i]]) throw new Error("vm_proof_arguments_invalid");
+    if (!/^--[a-z][a-z0-9-]*$/.test(argv[i] || "") || typeof argv[i + 1] !== "string" || argv[i + 1].startsWith("--") || values[argv[i]]) throw new Error("vm_proof_arguments_invalid");
     values[argv[i]] = argv[i + 1];
   }
   return values;

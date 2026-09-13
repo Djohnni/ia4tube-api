@@ -73,6 +73,33 @@ test("lost Create response reconciles unique intent without a second POST", asyn
   const result = await f.run(); assert.equal(result.destructionConfirmed, true); assert.equal(f.state().creationRecovered, true);
   assert.equal(f.calls.filter(v => v === "create").length, 1); assert.equal(result.failure, null);
 });
+test("Create visibility lag is observed within original deadline without repeating POST", async () => {
+  const f = fixture(), original = f.provider.create; let reads = 0;
+  f.provider.create = async a => { await original(a); throw new Error("lost"); };
+  f.provider.findByTag = async () => { reads++; if (reads < 3) return []; return [f.vm()]; };
+  const r = await f.run(); assert.equal(reads, 3); assert.equal(r.destructionConfirmed, true);
+  assert.equal(f.calls.filter(v => v === "create").length, 1); assert.equal(r.deadlineAt - r.createdAt, 7200000);
+});
+test("late observation after original work budget destroys without running install or cases", async () => {
+  const f = fixture(), original = f.provider.create; let reads = 0;
+  f.provider.create = async a => { await original(a); throw new Error("lost"); };
+  f.provider.findByTag = async () => { reads++; if (reads === 1) { f.advance(109 * 60000); return []; } return [f.vm()]; };
+  const r = await f.run(); assert.equal(r.destructionConfirmed, true); assert.equal(f.calls.includes("install"), false);
+  assert.equal(f.calls.filter(v => v === "create").length, 1);
+});
+test("journal write failure after created ID does not prevent provider-side cleanup", async () => {
+  const f = fixture(), save = f.store.write;
+  f.store.write = async s => { if (s.phase === "host_preflight_intent" || s.phase === "collecting" || s.phase === "destroyed") throw new Error("disk full"); await save(s); };
+  const r = await f.run(); assert.equal(r.destructionConfirmed, true); assert.equal(r.journalPersistenceFailed, true);
+  assert.equal(f.calls.includes("preflight"), false); assert.equal(f.calls.filter(v => v === "destroy").length, 1);
+});
+test("unbound or unverified existing account SSH key blocks creation", async () => {
+  const f = fixture(), plan = createPlan("a".repeat(64));
+  await assert.rejects(f.run({ plan, approvalSha256: plan.approvalSha256 }), /existing_account_ssh_key/);
+  assert.equal(f.calls.length, 0);
+  f.provider.verifySshKey = async () => { throw new Error("mismatch"); };
+  const r = await f.run(); assert.equal(r.billingMayContinue, false); assert.equal(f.calls.includes("create"), false);
+});
 test("unknown Create with zero matches remains visible; resume only reads and never creates again", async () => {
   const f = fixture(); f.provider.create = async () => { f.calls.push("create"); throw new Error("network"); };
   const first = await f.run(); assert.equal(first.billingMayContinue, true); assert.equal(first.resourceId, null);

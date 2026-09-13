@@ -8,13 +8,25 @@ async function protectedPath(file, { directory = false } = {}) {
   if (process.platform === "win32") {
     // No content is read by PowerShell and no path or ACL is printed. ACLs are
     // checked, never weakened. Caller must prepare a protected external folder.
-    const script = '$ErrorActionPreference="Stop"; try { $a=Get-Acl -LiteralPath $env:IA4TUBE_VM_PROTECTED_PATH; $me=[System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value; if (-not $a.AreAccessRulesProtected) { exit 2 }; foreach($r in $a.Access) { if($r.AccessControlType -eq "Allow") { $sid=$r.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value; if($sid -notin @($me,"S-1-5-18","S-1-5-32-544")) { exit 3 } } }; exit 0 } catch { exit 4 }';
+    const script = '$ErrorActionPreference="Stop"; try { $a=Get-Acl -LiteralPath $env:IA4TUBE_VM_PROTECTED_PATH; $me=[System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value; if (-not $a.AreAccessRulesProtected) { exit 2 }; if ($a.GetOwner([System.Security.Principal.SecurityIdentifier]).Value -notin @($me,"S-1-5-18","S-1-5-32-544")) { exit 5 }; foreach($r in $a.Access) { if($r.AccessControlType -eq "Allow") { $sid=$r.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value; if($sid -notin @($me,"S-1-5-18","S-1-5-32-544")) { exit 3 } } }; exit 0 } catch { exit 4 }';
     const r = spawnSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script],
       { shell: false, windowsHide: true, stdio: "ignore", timeout: 10000, env: { SystemRoot: process.env.SystemRoot,
         PATH: process.env.PATH, IA4TUBE_VM_PROTECTED_PATH: path.resolve(file) } });
     if (r.status !== 0) fail("protected_acl_required");
   } else if (st.uid !== process.getuid() || (st.mode & 0o077)) fail("protected_mode_required");
   return st;
+}
+async function protectCreatedFile(file) {
+  // Only call for a file this operation has just created inside the already
+  // protected external directory. Never change an existing provider credential.
+  if (process.platform !== "win32") await fs.chmod(file, 0o600);
+  else {
+    const script = '$ErrorActionPreference="Stop"; try { $sid=[System.Security.Principal.WindowsIdentity]::GetCurrent().User; $a=New-Object System.Security.AccessControl.FileSecurity; $a.SetOwner($sid); $a.SetAccessRuleProtection($true,$false); foreach($s in @($sid.Value,"S-1-5-18")) { $r=New-Object System.Security.AccessControl.FileSystemAccessRule((New-Object System.Security.Principal.SecurityIdentifier($s)),"FullControl","Allow"); $a.AddAccessRule($r) }; Set-Acl -LiteralPath $env:IA4TUBE_VM_PROTECTED_PATH -AclObject $a; exit 0 } catch { exit 4 }';
+    const r = spawnSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script], { shell: false, windowsHide: true,
+      stdio: "ignore", timeout: 10000, env: { SystemRoot: process.env.SystemRoot, PATH: process.env.PATH, IA4TUBE_VM_PROTECTED_PATH: path.resolve(file) } });
+    if (r.status !== 0) fail("new_file_protection_failed");
+  }
+  await protectedPath(file);
 }
 async function externalRoot(directory) {
   const absolute = path.resolve(directory), actual = await fs.realpath(absolute);
@@ -35,6 +47,7 @@ async function atomicWrite(file, value) {
   const temporary = file + ".new-" + crypto.randomUUID();
   const handle = await fs.open(temporary, "wx", 0o600);
   try { await handle.writeFile(JSON.stringify(value)); await handle.sync(); } finally { await handle.close(); }
+  await protectCreatedFile(temporary);
   await fs.rename(temporary, file); await syncDirectory(path.dirname(file));
 }
 async function createLocalStore(directory) {
@@ -44,6 +57,7 @@ async function createLocalStore(directory) {
   async function readFrames() {
     try {
       const st = await fs.lstat(file); if (!st.isFile() || st.isSymbolicLink() || st.size > 8 * 1024 * 1024) fail("journal_file_invalid");
+      await protectedPath(file);
       const bytes = await fs.readFile(file, "utf8");
       // Never fall back to an older 'prepared' snapshot after a damaged intent.
       // Incomplete/modified tails block creation and require explicit recovery.
@@ -55,7 +69,9 @@ async function createLocalStore(directory) {
         revision = r.revision; previous = r.hash; last = r.state;
       }
       let marker;
-      try { marker = JSON.parse(await fs.readFile(path.join(root, "session-marker.json"), "utf8")); }
+      try { const markerFile = path.join(root, "session-marker.json"), markerStat = await protectedPath(markerFile);
+        if (markerStat.size > 4096) fail("session_marker_invalid");
+        marker = JSON.parse(await fs.readFile(markerFile, "utf8")); }
       catch { fail("session_marker_missing_or_invalid"); }
       if (marker.missionId !== last.missionId || marker.planSha256 !== last.planSha256) fail("session_marker_mismatch");
       return last;
@@ -86,12 +102,14 @@ async function createLocalStore(directory) {
         const marker = await fs.open(path.join(root, "session-marker.json"), "wx", 0o600);
         try { await marker.writeFile(JSON.stringify({ schema: 1, missionId: value.missionId, planSha256: value.planSha256 })); await marker.sync(); }
         finally { await marker.close(); }
+        await protectCreatedFile(path.join(root, "session-marker.json"));
         await syncDirectory(root);
       }
       const payload = { revision: revision + 1, previous, state: value };
       const hash = crypto.createHash("sha256").update(JSON.stringify(payload)).digest("hex");
       const handle = await fs.open(file, revision === 0 ? "wx" : "a", 0o600);
       try { await handle.writeFile(JSON.stringify({ ...payload, hash }) + "\n"); await handle.sync(); } finally { await handle.close(); }
+      if (revision === 0) await protectCreatedFile(file);
       await syncDirectory(root); previous = hash; revision++;
     },
     async exclusive(fn) {
@@ -113,4 +131,4 @@ async function readProviderCredential(file, stateRoot) {
   if (!/^[A-Za-z0-9_-]{32,512}$/.test(token)) fail("credential_file_invalid");
   return token;
 }
-module.exports = { protectedPath, externalRoot, atomicWrite, createLocalStore, readProviderCredential };
+module.exports = { protectedPath, protectCreatedFile, externalRoot, atomicWrite, createLocalStore, readProviderCredential };

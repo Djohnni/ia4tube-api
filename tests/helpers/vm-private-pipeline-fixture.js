@@ -5,6 +5,12 @@ const { createWorkflowOperationalComponents } = require(imports + "workflow-oper
 const { createVmPullClient } = require(imports + "vm-pull-transport");
 const { createWorkflowPrivateClient } = require(imports + "workflow-private-transfer");
 const { FFMPEG } = require("./operational-private-pipeline-fixture");
+function assertVmHostReceipt(proof, expectedPid, installed) {
+  assert.ok(Number.isSafeInteger(expectedPid) && expectedPid > 0 && expectedPid !== process.pid);
+  assert.equal(proof?.type, "ready"); assert.equal(proof?.pid, expectedPid);
+  assert.equal(proof?.isolatedEnvironment, true); assert.equal(proof?.hardTermination, true);
+  if (installed) assert.equal(proof?.installedHost, true);
+}
 async function configureVmPrivatePipeline(t, f, options = {}) {
   const suffix = crypto.randomBytes(5).toString("hex"), remoteRoot = path.join(f.pg.root, "vm-" + suffix);
   const installed = process.env.CALENDAR_VM_INSTALLED_TEST === "1";
@@ -13,7 +19,7 @@ async function configureVmPrivatePipeline(t, f, options = {}) {
   const stateRoot = installed ? "/var/lib/ia4tube-media/state/test-" + suffix : path.join(remoteRoot, "s");
   for (const p of [remoteRoot, work, exec, stateRoot]) await fs.mkdir(p, { recursive: true, mode: 0o700 });
   const key = crypto.randomBytes(32), workerId = crypto.randomUUID(), runtimeRevision = crypto.createHash("sha256").update("synthetic-runtime-vm-1").digest("hex");
-  let components, host, shutdownProof, hostExited, closeHostPromise, closed = false, loseOffer = false, loseDone = false, corruptPart = false;
+  let components, host, readyProof, shutdownProof, hostExited, closeHostPromise, closed = false, loseOffer = false, loseDone = false, corruptPart = false;
   let bootId = crypto.randomUUID(); const events = [], hosts = [];
   const server = http.createServer(async (req, res) => {
     // A real committed response is lost at the socket, after the actual router
@@ -49,7 +55,7 @@ async function configureVmPrivatePipeline(t, f, options = {}) {
   }
   const pending = new Map();
   async function launchHost() {
-    shutdownProof = undefined; closeHostPromise = undefined;
+    shutdownProof = undefined; readyProof = undefined; closeHostPromise = undefined;
     host = fork(path.join(__dirname, "vm-private-task-host.js"), [], { execArgv: [], windowsHide: true, stdio: ["ignore", "ignore", "ignore", "ipc"],
       env: process.platform === "win32" ? { SystemRoot: process.env.SystemRoot, TEMP: remoteRoot, TMP: remoteRoot } : { LANG: "C", LC_ALL: "C", TMPDIR: remoteRoot } });
     hosts.push(host.pid); hostExited = new Promise(resolve => host.once("exit", resolve));
@@ -66,8 +72,7 @@ async function configureVmPrivatePipeline(t, f, options = {}) {
       ffmpegPath: installed ? "/opt/ia4tube-media/runtime/usr/bin/ffmpeg" : FFMPEG, requireInstalledProof: installed,
       ...(process.platform === "linux" ? { linuxRuntime: { cgroupRoot: installed ? "/sys/fs/cgroup/ia4tube-media-vm" : process.env.CALENDAR_MEDIA_LINUX_CGROUP_ROOT,
         launchMode: installed ? "installed" : process.env.CALENDAR_MEDIA_LINUX_LAUNCH_MODE || "sudo", validationOnly: true } } : {}) } });
-    const proof = await ready; assert.notEqual(proof.pid, process.pid); assert.equal(proof.isolatedEnvironment, true); assert.equal(proof.hardTermination, true);
-    if (installed) assert.equal(proof.installedHost, true);
+    const proof = await ready; assertVmHostReceipt(proof, host.pid, installed); readyProof = Object.freeze(proof);
   }
   function hostTick() { const callId = crypto.randomUUID(); return new Promise((resolve, reject) => { pending.set(callId, { resolve, reject }); host.send({ type: "tick", callId }); }); }
   async function closeHost() {
@@ -103,6 +108,15 @@ async function configureVmPrivatePipeline(t, f, options = {}) {
   // `workflow` also prevents an unrelated local-executor receipt being logged
   // as the remote host's receipt by the shared diagnostic helper.
   f.workflow = { get journal() { return components.journal; } };
+  f.assertPrivateExecutorReadiness = async () => {
+    // This receipt comes only from the forked host AFTER its real branded
+    // executor prepareRuntime completed; no local-executor stand-in is built.
+    assert.equal(host.connected, true); assert.equal(host.exitCode, null);
+    assertVmHostReceipt(readyProof, host.pid, installed);
+    assert.equal(components.worker.capabilities.terminationProofRequired, true);
+    assert.equal(components.worker.capabilities.readyForProduction, false);
+    return true;
+  };
   f.vm = { get journal() { return components.journal; }, get worker() { return components.worker; }, get bridge() { return components.bridge; },
     tick: () => components.tick(), hostTick, finishPrepared, control, events, hosts, stateRoot, work, exec, origin, workerId, runtimeRevision,
     clientFor: (executionId, agentId) => createWorkflowPrivateClient({ origin, key, executionId, agentId, allowLoopbackForTests: true }),
@@ -111,4 +125,4 @@ async function configureVmPrivatePipeline(t, f, options = {}) {
     async requests() { return Promise.all((await fs.readdir(path.join(stateRoot, "requests"))).map(async name => JSON.parse(await fs.readFile(path.join(stateRoot, "requests", name), "utf8")))); }
   };
 }
-module.exports = { configureVmPrivatePipeline };
+module.exports = { configureVmPrivatePipeline, assertVmHostReceipt };

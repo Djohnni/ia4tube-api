@@ -5,6 +5,7 @@ const fs = require("node:fs/promises"), path = require("node:path"), net = requi
 const { spawn } = require("node:child_process");
 const { atomicWrite, protectedPath } = require("./vm-proof-local-state");
 const { sha256, MANIFEST } = require("./vm-proof-manifest");
+const { validateMetrics } = require("./vm-proof-guest");
 function fail(code) { throw Object.assign(new Error("vm_proof_ssh_" + code), { code: "vm_proof_ssh_" + code }); }
 function processRun(command, args, { signal, timeoutMs = 20000, maxBytes = 65536, stdin = null } = {}) {
   return new Promise((resolve, reject) => {
@@ -47,7 +48,8 @@ async function createSshGuest({ stateRoot, packagePath, plan, run = processRun }
     known: path.join(stateRoot, "proof-known-hosts"), identity: path.join(stateRoot, "proof-identity.json") };
   let identity = null, address = null;
   const executable = process.platform === "win32" ? { ssh: "ssh.exe", scp: "scp.exe", keygen: "ssh-keygen.exe" } : { ssh: "/usr/bin/ssh", scp: "/usr/bin/scp", keygen: "/usr/bin/ssh-keygen" };
-  const options = () => ["-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes", "-o", "UserKnownHostsFile=" + files.known,
+  const options = () => ["-F", process.platform === "win32" ? "NUL" : "/dev/null", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes", "-o", "UserKnownHostsFile=" + files.known,
+    "-o", "ForwardAgent=no", "-o", "ClearAllForwardings=yes", "-o", "PermitLocalCommand=no", "-o", "ProxyCommand=none",
     "-o", "GlobalKnownHostsFile=" + (process.platform === "win32" ? "NUL" : "/dev/null"),
     "-o", "IdentitiesOnly=yes", "-o", "ConnectTimeout=10", "-o", "ServerAliveInterval=5", "-o", "ServerAliveCountMax=2",
     "-o", "LogLevel=ERROR", "-i", files.admin];
@@ -89,6 +91,15 @@ async function createSshGuest({ stateRoot, packagePath, plan, run = processRun }
       await protectNewFile(files.known);
     },
     async preflight({ signal, timeoutMs }) {
+      // Provider 'active' can precede sshd. Only retry this inert admission
+      // check, retaining the pinned key; no installer/converter is retried.
+      const deadline = Date.now() + timeoutMs;
+      while (true) {
+        if (signal?.aborted || Date.now() >= deadline) fail("host_not_ready");
+        try { await remote("true", { signal, timeoutMs: Math.min(10000, deadline - Date.now()) }); break; }
+        catch { if (signal?.aborted || Date.now() >= deadline) fail("host_not_ready"); }
+        await new Promise(resolve => setTimeout(resolve, Math.min(1000, deadline - Date.now())));
+      }
       // Wait for cloud-init completion without skipping pinned host verification.
       await remote("sudo -n cloud-init status --wait", { signal, timeoutMs });
       const bytes = await fs.readFile(packagePath); if (sha256(bytes) !== plan.packageSha256) fail("package_changed");
@@ -122,9 +133,11 @@ async function createSshGuest({ stateRoot, packagePath, plan, run = processRun }
       const evidence = JSON.parse(marker.slice("VM_PROOF_EVIDENCE=".length));
       // Closed schema: never export raw stdout/stderr, environment, paths, media
       // or provider payloads. All artifact content is synthetic status evidence.
-      if (Object.keys(evidence).some(k => !["schema", "cases", "launches", "attemptIds", "allTerminated", "syntheticOnly"].includes(k)) ||
+      if (Object.keys(evidence).some(k => !["schema", "cases", "launches", "attemptIds", "allTerminated", "syntheticOnly", "metrics"].includes(k)) ||
         evidence.schema !== 1 || evidence.syntheticOnly !== true || !Array.isArray(evidence.cases) || evidence.cases.length > 10 ||
-        !Array.isArray(evidence.attemptIds) || evidence.attemptIds.length !== evidence.launches ||
+        !validateMetrics(evidence.metrics) || typeof evidence.allTerminated !== "boolean" ||
+        !Array.isArray(evidence.attemptIds) || (evidence.launches === null ? evidence.attemptIds.length !== 0 || evidence.allTerminated !== false || evidence.cases.length !== 0 :
+          !Number.isSafeInteger(evidence.launches) || evidence.launches < 0 || evidence.launches > MANIFEST.maxLaunches || evidence.attemptIds.length !== evidence.launches) ||
         evidence.attemptIds.some((id, i) => id !== MANIFEST.cases.flatMap(c => c.attempts)[i]) ||
         evidence.cases.some(r => Object.keys(r).some(k => !["id", "passed", "terminationProved", "nativeLaunches"].includes(k)) || !MANIFEST.cases.some(c => c.id === r.id))) fail("evidence_schema_invalid");
       const safe = { ...evidence, missionId, planSha256: plan.approvalSha256 };
