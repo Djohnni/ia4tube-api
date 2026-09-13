@@ -9,6 +9,8 @@ const FAILURE_STAGES = new Set(["platform", "installation-record", "coordinator-
   "runtime-probe", "capabilities", "scratch-quota", "case-body", "guest-parser", "guest-launch"]);
 const FAILURE_CODES = new Set(["assertion_failed", "missing_path", "permission_denied", "already_exists", "unexpected_error", "subprocess_failed",
   "media_process_linux_installed_path_invalid", "media_process_linux_installed_record_invalid", "media_process_linux_installed_launcher_invalid",
+  "media_process_linux_installed_path_symlink", "media_process_linux_installed_path_owner", "media_process_linux_installed_path_writable",
+  "media_process_linux_installed_path_type", "media_process_linux_installed_path_hardlink", "media_process_linux_installed_file_writable",
   "media_process_linux_capabilities_unavailable", "media_process_installed_configuration_invalid", "media_process_linux_configuration_invalid",
   "media_process_path_invalid", "vm_proof_guest_case_receipt_invalid", "vm_proof_guest_total_receipt_invalid",
   "vm_proof_guest_total_receipt_missing", "vm_proof_guest_duplicate_metrics", "vm_proof_guest_metrics_invalid"]);

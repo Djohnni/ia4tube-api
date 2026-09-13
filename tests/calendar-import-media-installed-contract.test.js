@@ -10,6 +10,20 @@ test("native probe diagnosis is a closed stage and boolean, never output text", 
   for (const value of [null, "secret", "MEDIA_LINUX_PROBE=/etc/secret:0", "MEDIA_LINUX_PROBE=installed_paths:0:secret", "MEDIA_LINUX_PROBE=unreviewed:1", "MEDIA_LINUX_PROBE=child_namespace:0\nMEDIA_LINUX_PROBE=completed:1", "x".repeat(262145)])
     assert.equal(closedProbeDiagnostic(value), null);
 });
+
+test("immutable metadata diagnostics retain root ownership and write protections", () => {
+  const { immutableMetadataCode } = require("../src/social/calendar/imports/linux-media-runtime");
+  const st = { uid: 0, mode: 0o555, nlink: 1, isSymbolicLink: () => false, isDirectory: () => false, isFile: () => true };
+  const file = { target: true };
+  assert.equal(immutableMetadataCode(st, file), null);
+  assert.equal(immutableMetadataCode({ ...st, uid: 1001 }, file), "installed_path_owner");
+  assert.equal(immutableMetadataCode({ ...st, mode: 0o775 }, file), "installed_path_writable");
+  assert.equal(immutableMetadataCode({ ...st, isSymbolicLink: () => true }, file), "installed_path_symlink");
+  assert.equal(immutableMetadataCode({ ...st, isFile: () => false }, file), "installed_path_type");
+  assert.equal(immutableMetadataCode({ ...st, nlink: 2 }, file), "installed_path_hardlink");
+  assert.equal(immutableMetadataCode({ ...st, mode: 0o755 }, file), "installed_file_writable");
+  assert.equal(immutableMetadataCode({ ...st, mode: 0o755, isDirectory: () => true }, { target: true, directory: true }), null);
+});
 test("installed contract accepts only fixed root and privileged installed binary", () => {
   assert.deepEqual(normalizeLinuxRuntime(config), config);
   assert.deepEqual(launch(INSTALLED.native, ["--probe"], config), { command: "/usr/bin/sudo", args: ["-n", "--", INSTALLED.native, "--probe"] });

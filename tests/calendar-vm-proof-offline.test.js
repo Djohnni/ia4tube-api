@@ -103,6 +103,10 @@ test("installed failure diagnosis carries only allowlisted stage/code, never raw
     assert.deepEqual(closedFailure({ code, message: secret }, "runtime-probe"), { stage: "runtime-probe", code });
   }
   assert.equal(closedFailure({ code: "media_process_linux_probe_" + secret }, "runtime-probe").code, "unexpected_error");
+  for (const suffix of ["installed_path_symlink", "installed_path_owner", "installed_path_writable", "installed_path_type", "installed_path_hardlink", "installed_file_writable"]) {
+    const code = "media_process_linux_" + suffix;
+    assert.deepEqual(closedFailure({ code, message: secret }, "runtime-probe"), { stage: "runtime-probe", code });
+  }
   assert.equal(validateFailure({ ...safe, message: secret }), false);
   const failed = "# VM_INSTALLED_CASE=" + JSON.stringify({ id: MANIFEST.cases[0].id, passed: false, terminationProved: false, nativeLaunches: 0, failure: safe }) +
     "\n# VM_INSTALLED_TOTAL=" + JSON.stringify({ launches: 0, allTerminated: false, attemptIds: [] });

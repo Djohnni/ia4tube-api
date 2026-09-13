@@ -13,6 +13,16 @@ function closedProbeDiagnostic(text) {
   const match = /^MEDIA_LINUX_PROBE=([a-z_]+):([01])$/.exec(lines[0]);
   return match && PROBE_STAGES.has(match[1]) ? Object.freeze({ stage: match[1], terminationProved: match[2] === "1" }) : null;
 }
+function immutableMetadataCode(st, { target = false, directory = false } = {}) {
+  if (st.isSymbolicLink()) return "installed_path_symlink";
+  if (st.uid !== 0) return "installed_path_owner";
+  if (st.mode & 0o022) return "installed_path_writable";
+  if (!target) return null;
+  if (directory ? !st.isDirectory() : !st.isFile()) return "installed_path_type";
+  if (!directory && st.nlink !== 1) return "installed_path_hardlink";
+  if (!directory && st.mode & 0o222) return "installed_file_writable";
+  return null;
+}
 const INSTALLED = Object.freeze({ root: "/opt/ia4tube-media", native: "/opt/ia4tube-media/bin/supervisor",
   node: "/opt/ia4tube-media/runtime/usr/bin/node", entry: "/opt/ia4tube-media/runtime/app/src/social/calendar/imports/media-process-child.js",
   ffmpeg: "/opt/ia4tube-media/runtime/usr/bin/ffmpeg", cgroupRoot: "/sys/fs/cgroup/ia4tube-media-vm",
@@ -33,9 +43,9 @@ async function installedSupervisor() {
   async function immutable(name, directory = false) {
     const parts = name.split("/").filter(Boolean); let current = "";
     for (const part of parts) { current += "/" + part; const st = await fs.lstat(current);
-      if (st.isSymbolicLink() || st.uid !== 0 || (st.mode & 0o022)) fail("installed_path_invalid"); }
+      const code = immutableMetadataCode(st); if (code) fail(code); }
     const st = await fs.stat(name);
-    if (directory ? !st.isDirectory() : !st.isFile() || st.nlink !== 1 || (st.mode & 0o222)) fail("installed_path_invalid");
+    const code = immutableMetadataCode(st, { target: true, directory }); if (code) fail(code);
   }
   await immutable(INSTALLED.root, true); await immutable(INSTALLED.native); await immutable(INSTALLED.node); await immutable(INSTALLED.entry);
   const recordPath = INSTALLED.root + "/installation.json"; await immutable(recordPath);
@@ -101,7 +111,8 @@ async function probeLinuxRuntime(native, config, cleanEnvironment, root) {
   const request = launch(native, ["--probe", config.cgroupRoot, String(process.pid)], config);
   const result = await bounded(request.command, request.args, { cwd: root, env: cleanEnvironment(root), timeoutMs: 15000 });
   if (!result.valid || result.probe?.stage !== "completed" || result.probe.terminationProved !== true) {
-    if (result.probe && result.probe.stage !== "completed") fail("probe_" + result.probe.stage);
+    // Historical validation callers retain their public error contract.
+    if (config.launchMode === "installed" && result.probe && result.probe.stage !== "completed") fail("probe_" + result.probe.stage);
     fail("capabilities_unavailable");
   }
   return Object.freeze({ platform: "linux", validationOnly: true, cgroupV2: true, pidfd: true, privatePidMountNetworkNamespaces: true,
@@ -110,4 +121,4 @@ async function probeLinuxRuntime(native, config, cleanEnvironment, root) {
       aggregateScratchQuotaBytes: INSTALLED.quotaBytes, installedLauncher: true } : {}),
     maxTasks: 64, cpuQuotaUs: 100000, cpuPeriodUs: 100000, memorySwapBytes: 0 });
 }
-module.exports = { normalizeLinuxRuntime, compileLinuxSupervisor, probeLinuxRuntime, launch, INSTALLED, closedProbeDiagnostic };
+module.exports = { normalizeLinuxRuntime, compileLinuxSupervisor, probeLinuxRuntime, launch, INSTALLED, closedProbeDiagnostic, immutableMetadataCode };
