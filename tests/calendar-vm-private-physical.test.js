@@ -1,0 +1,77 @@
+"use strict";
+const test = require("node:test"), assert = require("node:assert/strict"), crypto = require("node:crypto"), fs = require("node:fs/promises"), path = require("node:path");
+const { createOperationalCalendarPipelineFixture, PREFIX } = require("./helpers/operational-calendar-pipeline-fixture");
+const { configureVmPrivatePipeline } = require("./helpers/vm-private-pipeline-fixture");
+const { dateTime } = require("../src/social/calendar/model");
+const options = { configurePrivatePipeline: configureVmPrivatePipeline, externalPrivateExecutor: true };
+test("VM private: real PostgreSQL + independent pull process + bytes/hash + native derivative → existing calendar and controlled publisher", async t => {
+  const f = await createOperationalCalendarPipelineFixture(t, options);
+  f.vm.loseNextOffer(); const value = await f.preparePhoto({ selection: { kind: "image", targets: ["feed", "story"], audioMode: "none" } });
+  const ready = await f.vm.finishPrepared(value); assert.equal(ready.status.ready, true);
+  assert.ok(f.vm.events.some(e => e.kind === "lost_response" && e.action === "poll"));
+  const records = await f.vm.journal.records(); assert.equal(records.length, 2);
+  for (const r of records) { assert.equal(r.transport.kind, "vm"); assert.equal(r.runId, null); assert.equal(r.delivered.state, "succeeded");
+    assert.equal(r.vmTerminal.proofId, r.delivered.termination.proofId); assert.equal(r.delivered.termination.descendants, 0);
+    assert.ok((await f.vm.requests()).some(q => q.requestId === r.vmOffer.requestId && q.agentId === r.agentId));
+    await assert.rejects(() => f.vm.journal.setRun(r.executionId, "trn-fake"), /run_conflict/);
+  }
+  const prepare = records.find(r => r.kind === "prepare"); assert.equal(prepare.manifest.prepared.sourceSha256, prepare.task.source.sha256);
+  const denied = await fetch(f.vm.origin + "/internal/calendar-media/vm/poll", { method: "POST", body: "{}" }); assert.equal(denied.status, 409);
+  await assert.rejects(() => f.vm.control.poll({ requestId: prepare.vmOffer.requestId, agentId: crypto.randomUUID(), bootId: crypto.randomUUID() }), /unconfirmed/);
+  await assert.rejects(() => f.vm.clientFor(prepare.executionId, crypto.randomUUID()).claim(), /transfer_failed/);
+  const input = f.inputFor(ready), { assetId, ...body } = input, response = await f.post(`${PREFIX}/assets/${assetId}/schedule`, body), scheduled = await response.json();
+  assert.equal(response.status, 200, JSON.stringify(scheduled));
+  f.advance(Math.max(0, dateTime(scheduled.schedule.date, scheduled.schedule.time) - f.clock()));
+  await f.current().calendar.tick(); f.advance(60001); await f.current().calendar.tick();
+  const row = await f.current().calendarStore.update(f.context.companyId, state => state.jobs[scheduled.schedule.id]);
+  assert.equal(row.phase, "published"); assert.equal(f.providerCalls.filter(c => c.operation === "publish").length, 2);
+  for (const c of f.providerCalls.filter(c => c.operation === "create")) assert.equal(c.hash, ready.prepared.variants[c.target].sha256);
+  t.diagnostic("VM_CONTROL=ACTUAL_PULL_HTTP; OFFER_RESPONSE_LOST=REPLAYED_SAME_ID; ORIGINAL_AND_DERIVATIVE_BYTES=HASH_VERIFIED; INSTAGRAM=CONTROLLED");
+});
+test("VM private: lost done response survives actual PostgreSQL restart and coordinator process restart/new boot identity without new conversion", async t => {
+  const f = await createOperationalCalendarPipelineFixture(t, options);
+  const value = await f.preparePhoto({ selection: { kind: "image", targets: ["feed"], audioMode: "none" } });
+  f.vm.loseNextDone(); const done = await f.vm.hostTick(); assert.equal(done.state, "unconfirmed");
+  const record = (await f.vm.journal.records()).find(r => r.kind === "prepare"); assert.ok(record.vmTerminal);
+  await f.store.update(f.context.companyId, state => { state.workflowExecutions.records[record.executionId].vmTerminal = null; });
+  assert.equal((await f.vm.tick()).unresolved, true);
+  const held = await f.capacity.inspect({ context: { authenticated: true, role: "calendar_media_capacity_coordinator" }, jobId: record.task.jobId });
+  assert.equal(held.state, "running", "A delivered derivative without VM terminal proof must keep its original capacity reservation");
+  await f.store.update(f.context.companyId, state => { state.workflowExecutions.records[record.executionId].vmTerminal = record.vmTerminal; });
+  const beforeNative = (await fs.readdir(f.vm.exec)).filter(n => /^[a-f0-9-]{36}$/.test(n)).sort();
+  await f.reopen({ restartDatabase: true }); await f.vm.restartHost({ newBoot: true });
+  const resumed = await f.vm.hostTick(); assert.equal(resumed.state, "delivered"); assert.equal(resumed.executionId, record.executionId);
+  assert.deepEqual((await fs.readdir(f.vm.exec)).filter(n => /^[a-f0-9-]{36}$/.test(n)).sort(), beforeNative);
+  await f.vm.tick(); const ready = await f.vm.finishPrepared(value); assert.equal(ready.status.ready, true);
+  const after = await f.vm.journal.get(record.executionId); assert.deepEqual(after.vmOffer, record.vmOffer); assert.deepEqual(after.vmTerminal, record.vmTerminal);
+  assert.notEqual(f.vm.hosts[0], f.vm.hosts[1]); assert.equal((await f.vm.journal.records()).length, 2);
+  // The caller's terminal assertion alone cannot release an uncertain task.
+  await f.store.update(f.context.companyId, state => { state.workflowExecutions.records[record.executionId].vmTerminal = null; });
+  const pending = await f.vm.worker.observe(record.task, { executionId: record.executionId }); assert.equal(pending.state, "unknown");
+  await f.store.update(f.context.companyId, state => { state.workflowExecutions.records[record.executionId].vmTerminal = record.vmTerminal; });
+  const manifestBefore = JSON.stringify(after.manifest);
+  await assert.rejects(() => f.vm.clientFor(record.executionId, record.agentId).manifest({ ...record.manifest, executionId: crypto.randomUUID() }), /transfer_failed/);
+  assert.equal(JSON.stringify((await f.vm.journal.get(record.executionId)).manifest), manifestBefore);
+  t.diagnostic("PG_RESTART=ACTUAL; VM_PROCESS_RESTART=ACTUAL; NEW_BOOT_ID=CONTROLLED_SIMULATION_NOT_VM_REBOOT; RETURN_RECEIPT=REPLAYED; DUPLICATE_NATIVE_IDS=ZERO");
+});
+test("VM private: corrupted returned bytes keep reservation; retry transfers the same receipt; a later revision is never overwritten", async t => {
+  const f = await createOperationalCalendarPipelineFixture(t, options);
+  const value = await f.preparePhoto({ selection: { kind: "image", targets: ["feed"], audioMode: "none" } });
+  const record = (await f.vm.journal.records()).find(r => r.kind === "prepare");
+  const later = await f.preparation.request(f.context, { assetId: value.assetId, uploadId: record.task.uploadId,
+    expectedMediaRevision: 1, idempotencyKey: crypto.randomUUID(), selection: { kind: "image", targets: ["story"], audioMode: "none" } });
+  assert.equal(later.mediaRevision, 2);
+  f.vm.corruptNextPart(); assert.equal((await f.vm.hostTick()).state, "reconciliation_required");
+  const damaged = await f.vm.journal.get(record.executionId); assert.equal(damaged.delivered, null); assert.equal(damaged.vmTerminal, null);
+  assert.equal((await f.vm.tick()).unresolved, true);
+  assert.equal((await f.capacity.inspect({ context: { authenticated: true, role: "calendar_media_capacity_coordinator" }, jobId: record.task.jobId })).state, "running");
+  const nativeIds = (await fs.readdir(f.vm.exec)).filter(n => /^[a-f0-9-]{36}$/.test(n)).sort();
+  const ticks = await Promise.all([f.vm.hostTick(), f.vm.hostTick()]); assert.ok(ticks.every(r => r.state === "delivered" && r.executionId === record.executionId));
+  assert.deepEqual((await fs.readdir(f.vm.exec)).filter(n => /^[a-f0-9-]{36}$/.test(n)).sort(), nativeIds, "Only the existing derivative is retransferred, no second converter");
+  await f.preparation.reconcile(f.context, { assetId: value.assetId, mediaRevision: 1 });
+  const latest = await f.preparation.status(f.context, { assetId: value.assetId }); assert.equal(latest.mediaRevision, 2); assert.equal(latest.ready, false); assert.equal(latest.state, "queued");
+  const old = await f.preparation.snapshot(f.context, { assetId: value.assetId, mediaRevision: 1 }); assert.equal(old.currentRevision, 2); assert.ok(old.result);
+  const settled = await f.vm.journal.get(record.executionId); assert.equal(settled.delivered.state, "succeeded");
+  assert.equal((await f.vm.journal.records()).filter(r => r.kind === "prepare").length, 1, "New revision was not launched by an old callback");
+  t.diagnostic("RETURN_HASH_MISMATCH=REJECTED; UNKNOWN_RESERVATION=HELD; REPLAY=BYTES_ONLY_SAME_NATIVE_RECEIPT; OLD_RESULT_DOES_NOT_OVERWRITE_NEW_REVISION=YES");
+});

@@ -1,0 +1,76 @@
+"use strict";
+// Fixed synthetic sequence only. This file contains no provider API/credential.
+const fs = require("node:fs/promises"), path = require("node:path"), { spawn } = require("node:child_process");
+const { MANIFEST, sha256, canonical } = require("./vm-proof-manifest");
+const STATE = "/var/lib/ia4tube-media/state/proof-run";
+const ROOT = "/opt/ia4tube-media/proof";
+function fail(code) { throw new Error("vm_proof_guest_" + code); }
+function parseEvidence(output, code) {
+  const cases = [], totals = [];
+  for (const line of output.split(/\r?\n/)) {
+    const match = line.match(/^(?:# )?VM_INSTALLED_(CASE|TOTAL)=(\{.*\})$/);
+    if (!match) continue;
+    const row = JSON.parse(match[2]);
+    if (match[1] === "CASE") {
+      const expected = MANIFEST.cases[cases.length];
+      if (!expected || Object.keys(row).sort().join(",") !== "id,nativeLaunches,passed,terminationProved" || row.id !== expected.id ||
+        typeof row.passed !== "boolean" || typeof row.terminationProved !== "boolean" ||
+        !Number.isSafeInteger(row.nativeLaunches) || row.nativeLaunches < 0 || row.nativeLaunches > expected.attempts.length) fail("case_receipt_invalid");
+      cases.push(row);
+    } else {
+      if (Object.keys(row).sort().join(",") !== "allTerminated,attemptIds,launches" || typeof row.allTerminated !== "boolean" ||
+        !Number.isSafeInteger(row.launches) || row.launches < 0 || row.launches > MANIFEST.maxLaunches ||
+        !Array.isArray(row.attemptIds) || row.attemptIds.length !== row.launches ||
+        row.attemptIds.some((id, i) => id !== MANIFEST.cases.flatMap(c => c.attempts)[i])) fail("total_receipt_invalid");
+      totals.push(row);
+    }
+  }
+  if (totals.length !== 1 || totals[0].launches !== cases.reduce((n, c) => n + c.nativeLaunches, 0)) fail("total_receipt_missing");
+  const allPassed = code === 0 && cases.length === MANIFEST.cases.length && cases.every((c, i) => c.passed && c.terminationProved && c.nativeLaunches === MANIFEST.cases[i].attempts.length);
+  return { schema: 1, cases, launches: totals[0].launches, attemptIds: totals[0].attemptIds, allTerminated: totals[0].allTerminated,
+    syntheticOnly: true, allPassed };
+}
+async function writeExclusive(file, value) {
+  const out = await fs.open(file, "wx", 0o600);
+  try { await out.writeFile(canonical(value)); await out.sync(); } finally { await out.close(); }
+  const dir = await fs.open(path.dirname(file), "r"); try { await dir.sync(); } finally { await dir.close(); }
+}
+async function launchSequence({ timeoutMs = MANIFEST.sequenceSeconds * 1000 } = {}) {
+  return new Promise(resolve => {
+    const child = spawn(process.execPath, ["--test", "--test-concurrency=1", "--test-reporter=tap", MANIFEST.testFile], {
+      cwd: ROOT, shell: false, stdio: ["ignore", "pipe", "pipe"], env: { PATH: "/opt/ia4tube-media/runtime/usr/bin:/usr/bin:/bin", LANG: "C.UTF-8",
+        CALENDAR_VM_INSTALLED_TEST: "1", CALENDAR_MEDIA_LINUX_PHYSICAL: "1", CALENDAR_MEDIA_LINUX_CGROUP_ROOT: "/sys/fs/cgroup/ia4tube-media-vm",
+        CALENDAR_MEDIA_LINUX_LAUNCH_MODE: "installed", FFMPEG_TEST_BINARY: "/usr/bin/ffmpeg" } });
+    let bytes = 0, output = "", failed = false;
+    const timer = setTimeout(() => { failed = true; child.kill("SIGKILL"); }, timeoutMs);
+    const append = b => { bytes += b.length; if (bytes > 512 * 1024) { failed = true; child.kill("SIGKILL"); } else output += b.toString("utf8"); };
+    child.stdout.on("data", append); child.stderr.on("data", append); child.on("error", () => { failed = true; });
+    child.once("close", code => { clearTimeout(timer); resolve({ code: failed ? 1 : code, output }); });
+  });
+}
+async function run() {
+  if (process.platform !== "linux" || typeof process.getuid !== "function" || process.getuid() === 0) fail("nonroot_linux_required");
+  const real = await fs.realpath(__dirname); if (real !== ROOT + "/scripts/validation") fail("installed_proof_required");
+  const dir = await fs.lstat(STATE); if (!dir.isDirectory() || dir.isSymbolicLink() || dir.uid !== process.getuid() || (dir.mode & 0o077)) fail("private_state_required");
+  await writeExclusive(path.join(STATE, "intent.json"), { schema: 1, manifestSha256: sha256(canonical(MANIFEST)),
+    startedAt: Date.now(), caseIds: MANIFEST.cases.map(c => c.id), attemptIds: MANIFEST.cases.flatMap(c => c.attempts), retries: 0 });
+  let evidence;
+  try { const result = await launchSequence(); evidence = parseEvidence(result.output, result.code); }
+  catch { evidence = { schema: 1, cases: [], launches: 0, attemptIds: [], allTerminated: false, syntheticOnly: true, allPassed: false }; }
+  await writeExclusive(path.join(STATE, "evidence.json"), evidence);
+  return evidence;
+}
+async function collect() {
+  const st = await fs.lstat(path.join(STATE, "evidence.json")); if (!st.isFile() || st.isSymbolicLink() || st.size > 32768) fail("evidence_file_invalid");
+  const { allPassed, ...evidence } = JSON.parse(await fs.readFile(path.join(STATE, "evidence.json"), "utf8"));
+  return evidence;
+}
+if (require.main === module) {
+  const action = process.argv.slice(2);
+  if (action.length !== 1 || !["--run", "--collect"].includes(action[0])) { process.stderr.write("VM_PROOF_GUEST=INVALID_ACTION\n"); process.exitCode = 1; }
+  else (action[0] === "--run" ? run() : collect()).then(e => {
+    process.stdout.write((action[0] === "--run" ? "VM_PROOF_SEQUENCE=" : "VM_PROOF_EVIDENCE=") + JSON.stringify(e) + "\n");
+    if (action[0] === "--run" && (!e.allPassed || !e.allTerminated)) process.exitCode = 1;
+  }).catch(() => { process.stderr.write("VM_PROOF_GUEST=CLOSED_FAILURE_NO_REPEAT\n"); process.exitCode = 1; });
+}
+module.exports = { parseEvidence, launchSequence };

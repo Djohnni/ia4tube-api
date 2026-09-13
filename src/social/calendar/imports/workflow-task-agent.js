@@ -11,20 +11,32 @@ function createWorkflowTaskAgent({ workingRoot, executor, allowSyntheticForTests
       !(executor.capabilities.supported || executor.capabilities.validationOnly && executor.capabilities.linuxCapabilitiesProved) || !executor.capabilities.hardTermination) fail("runtime_unvalidated");
   const root = path.resolve(workingRoot);
   return Object.freeze({
-    async run(client) {
+    async run(client, { recoveryOnly = false } = {}) {
       if (!isWorkflowPrivateClient(client)) fail("client_invalid");
-      const executionId = client.executionId; let task, attempt, manifest;
+      const executionId = client.executionId; let task, attempt, manifest, existingIntent = false;
       try {
+        // A new Render task has not claimed its agent yet, so its initial
+        // status may be denied. A VM replay already has the durable claimant.
+        const delivery = await client.status().catch(() => null);
+        if (delivery?.delivered === true) return { executionId, state: "delivered" };
         await safePath(root); attempt = path.join(root, executionId);
         await fs.mkdir(attempt, { mode: 0o700 }).catch(error => { if (error.code !== "EEXIST") throw error; }); await safePath(attempt);
         const input = await client.claim(); task = input.task;
         if (!task || !UUID.test(task.companyId || "") || !UUID.test(task.assetId || "") || task.deadlineAt <= clock()) fail("task_invalid");
         const intent = { kind: input.kind, task, resultRef: input.resultRef, executionId };
         try { await immutableJson(path.join(attempt, "intent.json"), intent); }
-        catch (error) { if (error.code !== "EEXIST" || digest(await readJson(path.join(attempt, "intent.json"))) !== digest(intent)) throw error; }
+        catch (error) { if (error.code !== "EEXIST" || digest(await readJson(path.join(attempt, "intent.json"))) !== digest(intent)) throw error; existingIntent = true; }
         try { manifest = await readJson(path.join(attempt, "return.json")); }
         catch (error) { if (error.code !== "ENOENT") throw error; }
         if (!manifest) {
+          if (recoveryOnly || existingIntent) {
+            // A durable intention without a returned receipt is ambiguous. A
+            // process restart must observe the native identity, never re-enter
+            // run() with a freshly reconstructed logical time or source.
+            const observed = await executor.observe(executionId);
+            diagnostic(observed.termination?.proved ? "workflow_recovery_native_terminated_result_missing" : "workflow_recovery_native_unknown");
+            fail("recovery_requires_receipt");
+          }
           const started = performance.now(), remaining = () => { const left = Math.floor(Math.min(task.deadlineAt - clock(), task.maxRuntimeMs - performance.now() + started)); if (left < 1) fail("deadline_exceeded"); return left; };
           const source = input.kind === "inspect" ? task : task.source;
           const inputRoot = path.join(attempt, "input"), outputRoot = path.join(attempt, "output"), musicRoot = path.join(attempt, "music");

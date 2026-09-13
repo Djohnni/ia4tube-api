@@ -76,6 +76,12 @@ async function createOperationalPrivatePipelineFixture(t, options = {}) {
     const capacity = createGlobalMediaCapacity({ store: ledger, enabled: true, requireDiskSpaceEvidence: true, diskSpaceGuard: guard, clock });
     const sourceAdmission = createRenderDiskAdmission({ capacity, store, rootDirectory: privateRoot, diskSpaceGuard: guard,
       requireDiskSpaceEvidence: true, coordinatorContext: coordinator, enabled: true });
+    const preparedAdmission = createPreparedDiskAdmission({ capacity, tenantStore: store, accessPolicy, rootDirectory: privateRoot,
+      diskSpaceGuard: guard, enabled: true, clock });
+    if (options.externalPrivateExecutor === true) {
+      assert.equal(typeof options.configurePrivatePipeline, "function", "External runtime must be supplied by a complete explicit fixture factory");
+      Object.assign(f, { store, ledger, guard, capacity, sourceAdmission, preparedAdmission }); return;
+    }
     const executor = createMediaProcessExecutor({ workingRoot: executorRoot, ffmpegPath: FFMPEG,
       allowedRoots: [privateRoot, preparationRoot, musicRoot, inspectionWorkingRoot, preparationWorkingRoot], memoryBytes: 512 * 1024 ** 2,
       ...(process.platform === "linux" ? { linuxRuntime: { cgroupRoot: process.env.CALENDAR_MEDIA_LINUX_CGROUP_ROOT,
@@ -102,8 +108,6 @@ async function createOperationalPrivatePipelineFixture(t, options = {}) {
         catch (error) { t.diagnostic(`PHYSICAL_INSPECTION_ERROR=${error.code || error.name}`); throw error; } }
     });
     const upload = createCalendarImportUploadService({ store, provider: uploadProvider, enabled: true, clock });
-    const preparedAdmission = createPreparedDiskAdmission({ capacity, tenantStore: store, accessPolicy, rootDirectory: privateRoot,
-      diskSpaceGuard: guard, enabled: true, clock });
     const preparedStore = createPreparedDiskResultStore({ rootDirectory: privateRoot, preparationRoot, tenantStore: store, admission: preparedAdmission,
       accessPolicy, outputInspector: createPreparedDiskOutputInspector({ ffmpegPath: FFMPEG, processExecutor: executor }), enabled: true, clock });
     const preparationRunner = createOperationalPreparationRunner({ store, owner: context, capacity, admission: preparedAdmission, accessPolicy,

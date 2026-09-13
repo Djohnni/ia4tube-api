@@ -14,13 +14,14 @@ const { createRenderDiskPrivateUploadProvider } = require("./render-disk-provide
 const { createCalendarImportUploadService } = require("./upload-service");
 const { createPreparationQueue } = require("./preparation-queue");
 const { createWorkflowCoordinatorTick } = require("./workflow-coordinator-tick");
+const { createVmPullRouter } = require("./vm-pull-transport");
 async function createWorkflowOperationalComponents({ enabled = false, store, owner, capacity, sourceAdmission, preparedAdmission, accessPolicy, diskSpaceGuard,
   privateRoot, preparationRoot, publicApiOrigin, musicRoot, resolveMusicTrack, catalog, bridgeKey, adapter,
-  validationOnly = false, allowControlledForTests = false, clock = Date.now, diagnostic = () => {}, transferTimeoutMs = 60000 } = {}) {
+  validationOnly = false, allowControlledForTests = false, clock = Date.now, diagnostic = () => {}, transferTimeoutMs = 60000, executionTransport } = {}) {
   if (enabled !== true) return Object.freeze({ available: false, reason: "workflow_disabled" });
   if (await store?.verify?.() !== true || capacity?.capabilities?.persistence !== "durable") fail("schema_not_ready");
   let resultStore, provider, preparationRunner, inspectionRunner;
-  const journal = createWorkflowPrivateJournal({ store, owner, clock });
+  const journal = createWorkflowPrivateJournal({ store, owner, clock, transport: executionTransport });
   const bridge = createWorkflowPrivateBridge({ journal, key: bridgeKey, privateRoot, preparationRoot, musicRoot, resolveMusicTrack, clock, diagnostic, transferTimeoutMs,
     allowSyntheticForTests: allowControlledForTests, provider: { streamSealedObject: args => provider.streamSealedObject(args) }, getResultStore: () => resultStore,
     assertHeld: (task, kind, resultRef) => kind === "inspect" ? inspectionRunner.assertExecutionHeld({ task, snapshotBytes: task.sizeBytes, maxRuntimeMs: task.maxRuntimeMs }) :
@@ -37,7 +38,8 @@ async function createWorkflowOperationalComponents({ enabled = false, store, own
   const preparation = createPreparationQueue({ store, dispatcher: preparationRunner, resultStore, accessPolicy, enabled: true, catalog,
     allowSyntheticForTests: allowControlledForTests, clock });
   const tick = createWorkflowCoordinatorTick({ store, owner, journal, inspectionRunner, preparationRunner, upload, preparation, accessPolicy });
+  const vmPull = journal.transport.kind === "vm" ? createVmPullRouter({ journal, key: bridgeKey, accessPolicy, clock }) : null;
   return Object.freeze({ available: true, bridge, journal, worker, preparationRunner, inspectionRunner, inspector, provider, upload, preparation, resultStore,
-    tick, handlePrivateRequest: (req, res) => bridge.handle(req, res) });
+    tick, handlePrivateRequest: async (req, res) => vmPull && await vmPull.handle(req, res) || bridge.handle(req, res) });
 }
 module.exports = { createWorkflowOperationalComponents };

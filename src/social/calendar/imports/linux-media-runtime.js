@@ -4,15 +4,41 @@
 const fs = require("node:fs/promises"), path = require("node:path"), crypto = require("node:crypto");
 const { spawn } = require("node:child_process");
 const OUTPUT_MAX = 262144;
+const INSTALLED = Object.freeze({ root: "/opt/ia4tube-media", native: "/opt/ia4tube-media/bin/supervisor",
+  node: "/opt/ia4tube-media/runtime/usr/bin/node", entry: "/opt/ia4tube-media/runtime/app/src/social/calendar/imports/media-process-child.js",
+  ffmpeg: "/opt/ia4tube-media/runtime/usr/bin/ffmpeg", cgroupRoot: "/sys/fs/cgroup/ia4tube-media-vm",
+  workRoot: "/var/lib/ia4tube-media/work", executionRoot: "/var/lib/ia4tube-media/work/executions", quotaBytes: 3 * 1024 ** 3 });
 function fail(code) { throw Object.assign(new Error("media_process_linux_" + code), { code: "media_process_linux_" + code }); }
 function normalizeLinuxRuntime(value) {
   if (!value || typeof value !== "object" || Array.isArray(value) || Object.keys(value).some(key => !["cgroupRoot", "launchMode", "validationOnly"].includes(key)) ||
       !/^\/sys\/fs\/cgroup\/ia4tube-media-[a-zA-Z0-9_-]{1,100}$/.test(value.cgroupRoot || "") ||
-      !["direct", "sudo"].includes(value.launchMode) || value.validationOnly !== true) fail("configuration_invalid");
+      !["direct", "sudo", "installed"].includes(value.launchMode) || value.validationOnly !== true ||
+      value.launchMode === "installed" && value.cgroupRoot !== INSTALLED.cgroupRoot) fail("configuration_invalid");
   return Object.freeze({ cgroupRoot: value.cgroupRoot, launchMode: value.launchMode, validationOnly: true });
 }
 function launch(native, args, config) {
-  return config.launchMode === "sudo" ? { command: "/usr/bin/sudo", args: ["-n", "--", native, ...args] } : { command: native, args };
+  if (config.launchMode === "installed" && native !== INSTALLED.native) fail("installed_launcher_invalid");
+  return ["sudo", "installed"].includes(config.launchMode) ? { command: "/usr/bin/sudo", args: ["-n", "--", native, ...args] } : { command: native, args };
+}
+async function installedSupervisor() {
+  async function immutable(name, directory = false) {
+    const parts = name.split("/").filter(Boolean); let current = "";
+    for (const part of parts) { current += "/" + part; const st = await fs.lstat(current);
+      if (st.isSymbolicLink() || st.uid !== 0 || (st.mode & 0o022)) fail("installed_path_invalid"); }
+    const st = await fs.stat(name);
+    if (directory ? !st.isDirectory() : !st.isFile() || st.nlink !== 1 || (st.mode & 0o222)) fail("installed_path_invalid");
+  }
+  await immutable(INSTALLED.root, true); await immutable(INSTALLED.native); await immutable(INSTALLED.node); await immutable(INSTALLED.entry);
+  const recordPath = INSTALLED.root + "/installation.json"; await immutable(recordPath);
+  if ((await fs.stat(recordPath)).size > 4096) fail("installed_record_invalid");
+  const record = JSON.parse(await fs.readFile(recordPath, "utf8"));
+  const sha = async file => crypto.createHash("sha256").update(await fs.readFile(file)).digest("hex");
+  const sources = await Promise.all(["media-process-supervisor-linux.c", "media-process-installed-linux.h"].map(name => fs.readFile(path.join(__dirname, name))));
+  if (record.schema !== 1 || record.sourceSha256 !== crypto.createHash("sha256").update(Buffer.concat(sources)).digest("hex") ||
+      record.binarySha256 !== await sha(INSTALLED.native) || record.entrySha256 !== await sha(INSTALLED.entry) ||
+      record.entrySha256 !== await sha(path.join(__dirname, "media-process-child.js")) || record.aggregateScratchQuotaBytes !== INSTALLED.quotaBytes ||
+      record.coordinatorUid < 1 || record.codecUid < 1 || record.coordinatorUid === record.codecUid || record.coordinatorUid !== process.getuid()) fail("installed_record_invalid");
+  return INSTALLED.native;
 }
 async function bounded(command, args, { env, cwd, timeoutMs = 30000 } = {}) {
   return new Promise((resolve, reject) => {
@@ -25,7 +51,8 @@ async function bounded(command, args, { env, cwd, timeoutMs = 30000 } = {}) {
     child.once("close", code => { clearTimeout(timer); resolve({ code, valid: !bad && code === 0 }); });
   });
 }
-async function compileLinuxSupervisor(root, { safePath, cleanEnvironment }) {
+async function compileLinuxSupervisor(root, { safePath, cleanEnvironment, linuxRuntime } = {}) {
+  if (linuxRuntime?.launchMode === "installed") return installedSupervisor();
   const source = path.join(__dirname, "media-process-supervisor-linux.c");
   const hash = crypto.createHash("sha256").update(await fs.readFile(source)).digest("hex");
   const destination = path.join(root, `supervisor-${hash}.linux`);
@@ -65,6 +92,9 @@ async function probeLinuxRuntime(native, config, cleanEnvironment, root) {
   const result = await bounded(request.command, request.args, { cwd: root, env: cleanEnvironment(root), timeoutMs: 15000 });
   if (!result.valid) fail("capabilities_unavailable");
   return Object.freeze({ platform: "linux", validationOnly: true, cgroupV2: true, pidfd: true, privatePidMountNetworkNamespaces: true,
-    unprivilegedCodec: true, readOnlyHostFilesystem: true, writableTaskRootsOnly: true, maxTasks: 64, cpuQuotaUs: 100000, cpuPeriodUs: 100000, memorySwapBytes: 0 });
+    unprivilegedCodec: true, readOnlyHostFilesystem: config.launchMode !== "installed", writableTaskRootsOnly: true,
+    ...(config.launchMode === "installed" ? { readIsolatedRoot: true, distinctCodecUid: true,
+      aggregateScratchQuotaBytes: INSTALLED.quotaBytes, installedLauncher: true } : {}),
+    maxTasks: 64, cpuQuotaUs: 100000, cpuPeriodUs: 100000, memorySwapBytes: 0 });
 }
-module.exports = { normalizeLinuxRuntime, compileLinuxSupervisor, probeLinuxRuntime, launch };
+module.exports = { normalizeLinuxRuntime, compileLinuxSupervisor, probeLinuxRuntime, launch, INSTALLED };

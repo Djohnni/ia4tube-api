@@ -22,8 +22,8 @@ async function safePath(value, { file = false, beneath } = {}) {
 async function readJson(file) { await safePath(file, { file: true }); const stat = await fs.stat(file); if (stat.size < 2 || stat.size > MAX_JSON) fail("receipt_invalid"); return JSON.parse(await fs.readFile(file, "utf8")); }
 async function immutableJson(file, value) { const text = JSON.stringify(value); if (Buffer.byteLength(text) > MAX_JSON) fail("request_invalid"); const handle = await fs.open(file, "wx", 0o600); try { await handle.writeFile(text); await handle.sync(); } finally { await handle.close(); } }
 function cleanEnvironment(root) { return process.platform === "win32" ? { SystemRoot: process.env.SystemRoot, TEMP: root, TMP: root, UV_THREADPOOL_SIZE: "2" } : { LANG: "C", LC_ALL: "C", TMPDIR: root, UV_THREADPOOL_SIZE: "2" }; }
-async function compileSupervisor(root) {
-  if (process.platform === "linux") return require("./linux-media-runtime").compileLinuxSupervisor(root, { safePath, cleanEnvironment });
+async function compileSupervisor(root, linuxRuntime) {
+  if (process.platform === "linux") return require("./linux-media-runtime").compileLinuxSupervisor(root, { safePath, cleanEnvironment, linuxRuntime });
   const source = path.join(__dirname, "media-process-supervisor.cs"), bytes = await fs.readFile(source), key = digest(bytes);
   const destination = path.join(root, `supervisor-${key}.exe`);
   try { await safePath(destination, { file: true }); return destination; } catch (error) { if (error.code !== "ENOENT") throw error; }
@@ -60,10 +60,13 @@ function createMediaProcessExecutor({ workingRoot, ffmpegPath, allowedRoots = []
       !Number.isSafeInteger(memoryBytes) || memoryBytes < 64 * 1024 ** 2 || memoryBytes > 512 * 1024 ** 2) fail("configuration_invalid");
   const root = path.resolve(workingRoot), roots = [root, ...allowedRoots.map(value => path.resolve(value))];
   const linux = linuxRuntime === undefined ? undefined : require("./linux-media-runtime").normalizeLinuxRuntime(linuxRuntime);
+  const installed = linux?.launchMode === "installed" ? require("./linux-media-runtime").INSTALLED : undefined;
+  if (installed && (root !== installed.executionRoot || path.resolve(ffmpegPath) !== installed.ffmpeg || memoryBytes !== 512 * 1024 ** 2 ||
+      roots.some(value => value !== root && !value.startsWith(installed.workRoot + "/data/" ) && value !== installed.workRoot + "/data"))) fail("installed_configuration_invalid");
   let active = 0, supervisorPromise, linuxProof; const scope = new AsyncLocalStorage();
   async function readyRuntime() {
     if (process.platform !== "win32" && !(process.platform === "linux" && linux)) fail("platform_unvalidated");
-    supervisorPromise ||= compileSupervisor(root); const native = await supervisorPromise;
+    supervisorPromise ||= compileSupervisor(root, linux); const native = await supervisorPromise;
     if (process.platform === "linux" && !linuxProof) linuxProof = await require("./linux-media-runtime").probeLinuxRuntime(native, linux, cleanEnvironment, root);
     return native;
   }
@@ -109,7 +112,7 @@ function createMediaProcessExecutor({ workingRoot, ffmpegPath, allowedRoots = []
       if (!descriptor || !["image/jpeg", "video/mp4"].includes(descriptor.mimeType) || !Number.isSafeInteger(descriptor.size) || descriptor.size < 1 || descriptor.size > (descriptor.mimeType === "image/jpeg" ? 8 : 100) * 1024 ** 2 || !/^[a-f0-9]{64}$/.test(descriptor.sha256 || "")) fail("request_invalid");
       return { filePath: await permitted(input.filePath, true), descriptor: { mimeType: descriptor.mimeType, size: descriptor.size, sha256: descriptor.sha256 } };
     }
-    if (operation === "test_tree" && syntheticTests === true && ["stall", "child_exit", "output", "finite_output", "environment", "linux_containment", "linux_task_pressure", "linux_memory_pressure"].includes(input.mode) && Object.keys(input).length === 1) return { mode: input.mode };
+    if (operation === "test_tree" && syntheticTests === true && ["stall", "child_exit", "output", "finite_output", "environment", "linux_containment", "linux_task_pressure", "linux_memory_pressure", "linux_read_isolation", "linux_aggregate_quota", "linux_generate_source"].includes(input.mode) && Object.keys(input).length === 1) return { mode: input.mode };
     fail("operation_forbidden");
   }
   async function observe(executionId) {
@@ -136,7 +139,7 @@ function createMediaProcessExecutor({ workingRoot, ffmpegPath, allowedRoots = []
       const terminal = await readJson(path.join(nativeReceipts, "terminal.json"));
       if (terminal.schema !== 1 || !["succeeded", "failed", "timed_out", "parent_lost", "output_limit"].includes(terminal.state) || terminal.termination?.proved !== true || terminal.termination.descendants !== 0 || !Number.isSafeInteger(terminal.elapsedMs) || terminal.elapsedMs < 0) return { state: "unknown", executionId };
       if (!Number.isSafeInteger(terminal.supervisor?.pid) || terminal.supervisor.pid < 1 || !/^[0-9]{1,20}$/.test(terminal.supervisor.creationTicks || "")) return { state: "unknown", executionId };
-      supervisorPromise ||= compileSupervisor(root);
+      supervisorPromise ||= compileSupervisor(root, linux);
       const native = await supervisorPromise;
       if (process.platform === "linux" && (terminal.platform !== "linux" || !/^[a-f0-9-]{36}$/.test(terminal.supervisor.bootId || ""))) return { state: "unknown", executionId, reason: "supervisor_identity_invalid" };
       const supervisorExit = await new Promise(resolve => { const probe = spawn(native, ["--observe", String(terminal.supervisor.pid), terminal.supervisor.creationTicks,
@@ -217,8 +220,11 @@ function createMediaProcessExecutor({ workingRoot, ffmpegPath, allowedRoots = []
         if (spawnTimeout < 1) return notStarted("deadline");
         const outcome = await new Promise(resolve => {
           let child, spawned = false, spawnFailed = false, spawnErrorCode = "UNKNOWN";
-          const nativeArgs = [attempt, process.execPath, path.join(__dirname, "media-process-child.js"), String(spawnTimeout), String(process.pid), String(memoryBytes),
-            ...(process.platform === "linux" ? [linux.cgroupRoot, operation === "prepare" ? path.join(projected.outputRoot, projected.companyId, projected.assetId) : attempt] : [])];
+          const nativeArgs = [attempt, installed?.node || process.execPath, installed?.entry || path.join(__dirname, "media-process-child.js"), String(spawnTimeout), String(process.pid), String(memoryBytes),
+            ...(process.platform === "linux" ? [linux.cgroupRoot, operation === "prepare" ? path.join(projected.outputRoot, projected.companyId, projected.assetId) : attempt] : []),
+            ...(installed ? [operation === "prepare" ? path.join(projected.inputRoot, projected.companyId, projected.sourceName) :
+              operation === "inspect" ? projected.sourcePath : operation === "inspect_output" ? projected.filePath : "-",
+              projected.music ? path.join(projected.music.root, projected.music.name) : "-"] : [])];
           const launch = process.platform === "linux" ? require("./linux-media-runtime").launch(supervisor, nativeArgs, linux) : { command: supervisor, args: nativeArgs };
           try { child = spawn(launch.command, launch.args,
             { cwd: attempt, shell: false, windowsHide: true, detached: true, stdio: "ignore", env: cleanEnvironment(attempt) }); }

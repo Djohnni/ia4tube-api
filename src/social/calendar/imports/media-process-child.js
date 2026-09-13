@@ -43,6 +43,51 @@ async function main() {
         cgroupEscapeRefused: await refused("/sys/fs/cgroup/cgroup.procs"),
         interfaces: (await fs.readFile("/proc/net/dev", "utf8")).split("\n").filter(line => line.includes(":" )).map(line => line.split(":")[0].trim()) };
     }
+    else if (input.mode === "linux_read_isolation" && process.platform === "linux") {
+      const absent = async name => { try { await fs.readFile(name); return false; } catch (error) { return ["ENOENT", "EACCES", "EPERM"].includes(error.code); } };
+      const deniedWrite = async name => { try { await fs.writeFile(name, "synthetic"); return false; } catch (error) { return ["ENOENT", "EACCES", "EPERM", "EROFS"].includes(error.code); } };
+      value = { uid: process.getuid(), gid: process.getgid(), pid: process.pid,
+        coordinatorSecretAbsent: await absent("/etc/ia4tube-media/synthetic-coordinator-secret"),
+        worldReadableHostFileAbsent: await absent("/var/tmp/ia4tube-synthetic-outside-readable.txt"),
+        otherTenantAbsent: await absent("/var/lib/ia4tube-media/work/data/synthetic-other-company/art.txt"),
+        nativeReceiptAbsent: await absent(root + ".supervision/started.json"),
+        journalAbsent: await absent("/var/lib/ia4tube-media/state/synthetic-journal.json"),
+        requestImmutable: await deniedWrite(requestPath), runtimeImmutable: await deniedWrite(__filename),
+        tmpOutsideQuotaRefused: await deniedWrite("/tmp/outside-quota"), shmOutsideQuotaRefused: await deniedWrite("/dev/shm/outside-quota"),
+        homeOutsideQuotaRefused: await deniedWrite("/home/outside-quota"),
+        inheritedHighDescriptorAbsent: await absent("/proc/self/fd/200"),
+        environmentKeys: Object.keys(process.env).sort(),
+        interfaces: (await fs.readFile("/proc/net/dev", "utf8")).split("\n").filter(line => line.includes(":" )).map(line => line.split(":")[0].trim()) };
+    }
+    else if (input.mode === "linux_aggregate_quota" && process.platform === "linux") {
+      const files = [], chunk = Buffer.alloc(8 * 1024 ** 2, 0xa5); let bytesWritten = 0, quotaRefused = false;
+      try {
+        for (let index = 0; index < 64; index++) {
+          const filename = path.join(root, `quota-${index}.bin`), handle = await fs.open(filename, "wx", 0o600); files.push(filename);
+          try { for (let part = 0; part < 8; part++) { const written = await handle.write(chunk); bytesWritten += written.bytesWritten; } await handle.sync(); }
+          finally { await handle.close(); }
+        }
+      } catch (error) { if (error.code === "ENOSPC" || error.code === "EDQUOT") quotaRefused = true; else throw error; }
+      finally { for (const filename of files) await fs.unlink(filename); }
+      const stats = await fs.statfs(root);
+      value = { quotaRefused, bytesWritten, filesAttempted: files.length, largestFileBudgetBytes: 64 * 1024 ** 2,
+        aggregateVolumeBytes: stats.blocks * stats.bsize, freeBytesAfterOwnCleanup: stats.bavail * stats.bsize };
+    }
+    else if (input.mode === "linux_generate_source" && process.platform === "linux") {
+      const source = path.join(root, "synthetic-60s.mp4");
+      const generated = await require("./preparation").runBoundedProcess(request.ffmpegPath,
+        ["-hide_banner", "-nostdin", "-v", "error", "-f", "lavfi", "-i", "testsrc2=size=1080x1920:rate=30",
+          "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000", "-t", "60", "-threads", "2", "-filter_threads", "1",
+          "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p", "-b:v", "13M", "-minrate", "13M", "-maxrate", "13M",
+          "-bufsize", "26M", "-x264-params", "nal-hrd=cbr:force-cfr=1", "-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart", "-n", source],
+        { cwd: root, timeoutMs: request.timeoutMs });
+      if (generated.code !== 0) throw Error("synthetic_generation_failed");
+      const stat = await fs.stat(source), total = 100 * 1024 ** 2;
+      if (stat.size < 92 * 1024 ** 2 || stat.size > total - 8) throw Error("synthetic_size_invalid");
+      const padding = Buffer.alloc(total - stat.size); padding.writeUInt32BE(padding.length); padding.write("free", 4, "ascii");
+      await fs.appendFile(source, padding);
+      value = { ...(await hashFile(source)), encodedSourceBytes: stat.size, width: 1080, height: 1920, seconds: 60 };
+    }
     else if (input.mode === "linux_memory_pressure" && process.platform === "linux") {
       const allocations = []; setInterval(() => { allocations.push(Buffer.alloc(32 * 1024 ** 2, 0xa5)); }, 1); return;
     }

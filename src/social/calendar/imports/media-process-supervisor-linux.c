@@ -112,6 +112,10 @@ static int write_receipt(const char *root, const char *name, const char *text, u
   int synced = fsync(fd); close(fd); return synced;
 }
 struct child_spec { int release, output, probe, supervisor_fd; uid_t uid; gid_t gid; const char *root, *node, *entry, *write_root; };
+#ifdef IA4TUBE_INSTALLED
+#include "media-process-installed-linux.h"
+#endif
+#ifndef IA4TUBE_INSTALLED
 static int readonly_filesystem(const char *attempt, const char *write_root, int probe) {
   char request[PATH_MAX];
   if (mount("/", "/", NULL, MS_BIND | MS_REC, NULL)) return -1;
@@ -126,17 +130,23 @@ static int readonly_filesystem(const char *attempt, const char *write_root, int 
   }
   return 0;
 }
+#endif
 static int contained_child(void *opaque) {
   struct child_spec *spec = opaque; char release;
   if (prctl(PR_SET_PDEATHSIG, SIGKILL) || read(spec->release, &release, 1) != 1 || release != '1') _exit(121);
   close(spec->release);
   /* Namespace creation precedes child creation; no codec ever runs before
    * cgroup assignment, private proc/cgroup mounts and privilege revocation. */
-  if (mount(NULL, "/", NULL, MS_REC | MS_PRIVATE, NULL) ||
+  if (mount(NULL, "/", NULL, MS_REC | MS_PRIVATE, NULL)) _exit(122);
+#ifdef IA4TUBE_INSTALLED
+  if (vm_jail_child(spec)) _exit(122);
+#else
+  if (
       mount("proc", "/proc", "proc", MS_NOSUID | MS_NODEV | MS_NOEXEC, NULL) ||
       mount("/sys/fs/cgroup", "/sys/fs/cgroup", NULL, MS_BIND | MS_REC, NULL) ||
       mount(NULL, "/sys/fs/cgroup", NULL, MS_BIND | MS_REMOUNT | MS_RDONLY | MS_NOSUID | MS_NODEV | MS_NOEXEC, NULL) ||
       readonly_filesystem(spec->root, spec->write_root, spec->probe)) _exit(122);
+#endif
   struct rlimit no_core = {0, 0}, files = {128, 128}, file_size = {128ULL * 1024 * 1024, 128ULL * 1024 * 1024};
   if (setrlimit(RLIMIT_CORE, &no_core) || setrlimit(RLIMIT_NOFILE, &files) || setrlimit(RLIMIT_FSIZE, &file_size) || setgroups(0, NULL)) _exit(123);
   for (int cap = 0; cap <= CAP_LAST_CAP; cap++) if (prctl(PR_CAPBSET_DROP, cap, 0, 0, 0)) _exit(123);
@@ -159,7 +169,8 @@ static int contained_child(void *opaque) {
   }
   if (dup2(spec->output, STDOUT_FILENO) < 0 || dup2(spec->output, STDERR_FILENO) < 0) _exit(125);
   int null_fd = open("/dev/null", O_RDONLY | O_CLOEXEC); if (null_fd < 0 || dup2(null_fd, STDIN_FILENO) < 0) _exit(125);
-  for (int fd = 3; fd < 128; fd++) close(fd);
+  /* RLIMIT_NOFILE does not close already inherited descriptors above it. */
+  if (syscall(SYS_close_range, 3U, ~0U, 0)) _exit(125);
   if (chdir(spec->root)) _exit(125);
   char request[PATH_MAX], temp[PATH_MAX + 16];
   if (child_path(request, sizeof request, spec->root, "request.json") || snprintf(temp, sizeof temp, "TMPDIR=%s", spec->root) >= (int)sizeof temp) _exit(125);
@@ -173,6 +184,9 @@ static int supervise(const char *root, const char *node, const char *entry, int 
   pid_t child = -1; int parent_fd = -1, self_fd = -1, release[2] = {-1,-1}, output[2] = {-1,-1}, status = 0, reaped = 0, assigned = 0, proved = 0;
   const char *state = "failed"; int exit_code = 1; void *stack = NULL; long long peak = 0, peak_tasks = 0, cpu_us = 0, pids_denied = 0, oom_kills = 0;
   if (geteuid() != 0 || !self_ticks || !parent_ticks || parent_ticks > self_ticks || boot_id(boot, sizeof boot) || parent_identity(parent, &uid, &gid)) return 77;
+#ifdef IA4TUBE_INSTALLED
+  if (memory != 536870912 || vm_authorize(parent,root,node,entry,cgroot,write_root,probe)) return 77;
+#endif
   if (!probe) {
     if (snprintf(control, sizeof control, "%s.supervision", root) >= (int)sizeof control || mkdir(control, 0700) || chown(control, uid, gid)) return 70;
     /* Sibling receipts are outside both writable mounts. Refuse a caller that
@@ -185,10 +199,16 @@ static int supervise(const char *root, const char *node, const char *entry, int 
   prctl(PR_SET_DUMPABLE, 0); signal(SIGTERM, on_signal); signal(SIGINT, on_signal); signal(SIGHUP, on_signal); signal(SIGPIPE, SIG_IGN);
   parent_fd = (int)syscall(SYS_pidfd_open, parent, 0); if (parent_fd < 0 || start_ticks(parent) != parent_ticks) goto finish;
   self_fd = (int)syscall(SYS_pidfd_open, getpid(), 0); if (self_fd < 0) goto finish;
+#ifdef IA4TUBE_INSTALLED
+  if (vm_prepare(root,write_root,probe,began+timeout)) goto finish;
+#endif
   if (group_create(cgroot, group, sizeof group, memory) || pipe2(release, O_CLOEXEC) || pipe2(output, O_CLOEXEC | O_NONBLOCK)) goto finish;
   if (fcntl(output[1], F_SETFL, fcntl(output[1], F_GETFL) & ~O_NONBLOCK)) goto finish;
   stack = malloc(STACK_BYTES); if (!stack) goto finish;
   struct child_spec spec = {release[0], output[1], probe, self_fd, uid, gid, root, node, entry, write_root};
+#ifdef IA4TUBE_INSTALLED
+  spec.uid=vm_codec_uid; spec.gid=vm_codec_gid;
+#endif
   child = clone(contained_child, (char *)stack + STACK_BYTES, CLONE_NEWNS | CLONE_NEWPID | CLONE_NEWNET | SIGCHLD, &spec);
   if (child < 0) goto finish;
   close(release[0]); release[0] = -1; close(output[1]); output[1] = -1;
@@ -229,6 +249,12 @@ finish:
   }
   if (output[0] >= 0) { char buffer[4096]; ssize_t n; while ((n = read(output[0], buffer, sizeof buffer)) > 0) output_bytes += (unsigned long long)n; }
   if (output_bytes > OUTPUT_MAX && !strcmp(state, "succeeded")) state = "output_limit";
+#ifdef IA4TUBE_INSTALLED
+  /* Only after kernel termination proof may ownership return to the trusted
+   * coordinator. Never follow links or touch another execution's directory. */
+  if (!probe && (vm_restore(root,uid,gid) || (strcmp(root,write_root) && vm_restore(write_root,uid,gid)))) proved=0;
+  if (proved && vm_cleanup(probe)) proved=0;
+#endif
 unknown:
   for (int i = 0; i < 2; i++) { if (release[i] >= 0) close(release[i]); if (output[i] >= 0) close(output[i]); }
   if (parent_fd >= 0) close(parent_fd); if (self_fd >= 0) close(self_fd); free(stack);
@@ -249,7 +275,12 @@ int main(int argc, char **argv) {
     return actual != expected || ready > 0 ? 0 : ready == 0 ? 75 : 70;
   }
   if (argc == 4 && !strcmp(argv[1], "--probe")) return supervise("/tmp", "/usr/bin/true", "/dev/null", 10000, (pid_t)atoi(argv[3]), 536870912, argv[2], "/tmp", 1);
+#ifdef IA4TUBE_INSTALLED
+  if (argc != 11) return 64;
+  vm_input=argv[9];vm_music=argv[10];
+#else
   if (argc != 9) return 64;
+#endif
   char root[PATH_MAX], node[PATH_MAX], entry[PATH_MAX], write_root[PATH_MAX];
   if (!realpath(argv[1], root) || strcmp(root, argv[1]) || !realpath(argv[2], node) || !realpath(argv[3], entry) ||
       !realpath(argv[8], write_root) || strcmp(write_root, argv[8]) || !strcmp(write_root, "/")) return 64;
