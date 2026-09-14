@@ -4,17 +4,20 @@
 const test = require("node:test"), assert = require("node:assert/strict"), fs = require("node:fs/promises"), path = require("node:path"), crypto = require("node:crypto");
 const { createMediaProcessExecutor } = require("../src/social/calendar/imports/media-process-executor");
 const { INSTALLED } = require("../src/social/calendar/imports/linux-media-runtime");
-const { closedFailure } = require("../scripts/validation/vm-proof-guest");
+const { closedFailure, selectedCases } = require("../scripts/validation/vm-proof-guest");
 const linuxRuntime = { cgroupRoot: INSTALLED.cgroupRoot, launchMode: "installed", validationOnly: true };
 const options = { workingRoot: INSTALLED.executionRoot, ffmpegPath: INSTALLED.ffmpeg, allowedRoots: [INSTALLED.workRoot + "/data"], syntheticTests: true, linuxRuntime };
 let executor, failed = false, attempts = 0, stage = "case-body"; const launched = [], prefix = crypto.randomUUID();
+const isRevalidation=process.env.CALENDAR_VM_REVALIDATION_CASE_IDS!==undefined;
+const activeCases=selectedCases(isRevalidation?JSON.parse(process.env.CALENDAR_VM_REVALIDATION_CASE_IDS):undefined);
+const activeCaseIds=activeCases.map(c=>c.id), expectedRevalidationAttempts=activeCases.reduce((n,c)=>n+c.attempts.length,0);
 const caseIds = { "installed preflight identity and immutable launcher": "installed-preflight", "installed codec cannot read coordinator or another tenant": "identity-read-isolation",
   "installed aggregate scratch quota fails closed": "aggregate-space", "installed aggregate deadline terminates descendants": "deadline-descendants", "installed preparation and independent validation": "source-limit" };
-function checked(name, action, timeout = 30000) { test(name, { timeout }, async t => {
+function checked(name, action, timeout = 30000) { test(name, { timeout,skip:!activeCaseIds.includes(caseIds[name]) }, async t => {
   assert.equal(failed, false, "Prior proof failure: no later launch is permitted");
   const before = attempts; stage = "case-body";
   try { await action(t); t.diagnostic("VM_INSTALLED_CASE=" + JSON.stringify({ id: caseIds[name], passed: true, terminationProved: true, nativeLaunches: attempts - before, failure: null }));
-    if (caseIds[name] === "source-limit") t.diagnostic("VM_INSTALLED_TOTAL=" + JSON.stringify({ launches: attempts, allTerminated: true, attemptIds: launched.map(row => row.name) }));
+    if (caseIds[name] === activeCaseIds[activeCaseIds.length-1]) t.diagnostic("VM_INSTALLED_TOTAL=" + JSON.stringify({ launches: attempts, allTerminated: true, attemptIds: launched.map(row => row.name) }));
   } catch (error) { failed = true;
     t.diagnostic("VM_INSTALLED_CASE=" + JSON.stringify({ id: caseIds[name], passed: false, terminationProved: false, nativeLaunches: attempts - before, failure: closedFailure(error, stage) }));
     t.diagnostic("VM_INSTALLED_TOTAL=" + JSON.stringify({ launches: attempts, allTerminated: false, attemptIds: launched.map(row => row.name) })); throw error;
@@ -22,6 +25,7 @@ function checked(name, action, timeout = 30000) { test(name, { timeout }, async 
 }); }
 async function run(name, operation, input, timeoutMs = 180000) {
   assert.ok(++attempts <= 8, "Reviewed proof has exactly eight maximum attempts");
+  if(isRevalidation)assert.ok(attempts<=expectedRevalidationAttempts,"No launch outside the explicitly selected fixed cases");
   const executionId = crypto.randomUUID(); launched.push({ name, executionId });
   const result = await executor.run({ executionId, operation, input, timeoutMs });
   return { ...result, request: { executionId, operation, input, timeoutMs } };
@@ -97,7 +101,7 @@ checked("installed preparation and independent validation", async t => {
   const filePath = path.join(outputRoot, companyId, assetId, descriptor.fileName);
   const decoded = await run("inspect-derivative", "inspect_output", { filePath, descriptor }, 30000); success(decoded);
   assert.equal(decoded.result.decoded, true); assert.ok(Math.abs(decoded.result.durationSeconds - 60) < 0.15);
-  assert.equal(attempts, 8);
+  if(isRevalidation)assert.equal(attempts,expectedRevalidationAttempts);else assert.equal(attempts, 8);
   t.diagnostic(JSON.stringify({ case: "installed-pipeline", nativeAttempts: 4, source: generated.result, prepared: { elapsedMs: prepared.elapsedMs, metrics: prepared.metrics },
     decoded: { complete: decoded.result.decoded, seconds: decoded.result.durationSeconds }, totalAttempts: attempts, launched }));
 }, 560000);

@@ -3,10 +3,14 @@
 // package. No credentials, git metadata, user media or output evidence copied.
 const fs = require("node:fs"), path = require("node:path"), crypto = require("node:crypto"), { execFileSync } = require("node:child_process");
 const target = "/opt/ia4tube-media", source = path.resolve(__dirname, "../.."), runtime = target + "/runtime";
+const diagnostic = require("./install-diagnostics.cjs").productionSession();
+const { createFixedFile } = require("./install-file.cjs");
+const operation = (id, fn) => diagnostic.span(id, "scripts/media-vm/package-install.cjs#" + id, fn);
 function fail() { throw Error("vm_installation_refused"); }
+function main() {
 if (process.platform !== "linux" || process.getuid() !== 0 || process.version !== "v24.15.0" ||
     process.argv.length > 3 || process.argv[2] && process.argv[2] !== "--seal") fail();
-function newFile(name, value, mode = 0o444) { fs.writeFileSync(name, value, { flag: "wx", mode }); }
+function newFile(name, value, mode = 0o444) { return operation("create_" + path.basename(name).replace(/[^a-z0-9_-]/g,"_").slice(0,50), () => createFixedFile(name,value,mode)); }
 function mkdir(name) { fs.mkdirSync(name, { recursive: true, mode: 0o755 }); }
 function copyFile(from, to) { mkdir(path.dirname(to)); fs.copyFileSync(from, to, fs.constants.COPYFILE_EXCL); fs.chownSync(to, 0, 0); fs.chmodSync(to, 0o555); }
 function readonlyTree(name) {
@@ -15,9 +19,9 @@ function readonlyTree(name) {
   else if (st.isFile()) fs.chmodSync(name, st.mode & 0o111 ? 0o555 : 0o444); else fail();
   fs.chownSync(name, 0, 0);
 }
-const coordinatorUid = Number(execFileSync("/usr/bin/id", ["-u", "ia4tube-coordinator"], { encoding: "utf8" }).trim());
-const coordinatorGid = Number(execFileSync("/usr/bin/id", ["-g", "ia4tube-coordinator"], { encoding: "utf8" }).trim());
-const codecUid = Number(execFileSync("/usr/bin/id", ["-u", "ia4tube-codec"], { encoding: "utf8" }).trim());
+const coordinatorUid = operation("coordinator_uid", () => Number(execFileSync("/usr/bin/id", ["-u", "ia4tube-coordinator"], { encoding: "utf8" }).trim()));
+const coordinatorGid = operation("coordinator_gid", () => Number(execFileSync("/usr/bin/id", ["-g", "ia4tube-coordinator"], { encoding: "utf8" }).trim()));
+const codecUid = operation("codec_uid", () => Number(execFileSync("/usr/bin/id", ["-u", "ia4tube-codec"], { encoding: "utf8" }).trim()));
 if (!coordinatorUid || !codecUid || coordinatorUid === codecUid) fail();
 const sha = filename => crypto.createHash("sha256").update(fs.readFileSync(filename)).digest("hex");
 if (process.argv[2] === "--seal") {
@@ -32,7 +36,7 @@ if (process.argv[2] === "--seal") {
     runtimeRevision, coordinatorUid, codecUid, aggregateScratchQuotaBytes: 3221225472, validationOnly: true }));
   const configFile = "/etc/ia4tube-media/worker.json", config = JSON.parse(fs.readFileSync(configFile, "utf8"));
   config.runtimeRevision = runtimeRevision; fs.writeFileSync(configFile, JSON.stringify(config));
-  process.exit(0);
+  return;
 }
 for (const area of ["runtime", "coordinator", "proof"]) { if (fs.existsSync(target + "/" + area)) fail(); mkdir(target + "/" + area); }
 const binaries = [[process.execPath, "/usr/bin/node"], ["/usr/bin/ffmpeg", "/usr/bin/ffmpeg"], ["/usr/bin/ffprobe", "/usr/bin/ffprobe"]];
@@ -40,22 +44,20 @@ const libraries = new Set();
 for (const [binary, destination] of binaries) {
   const resolved = fs.realpathSync(binary), st = fs.statSync(resolved); if (!st.isFile() || st.uid !== 0 || st.mode & 0o022) fail();
   copyFile(resolved, runtime + destination);
-  const listing = execFileSync("/usr/bin/ldd", [resolved], { encoding: "utf8", timeout: 10000, maxBuffer: 65536,
-    env: { PATH: "/usr/bin:/bin", LANG: "C", LC_ALL: "C" } });
+  const listing = operation("dependencies_" + path.basename(destination), () => execFileSync("/usr/bin/ldd", [resolved], { encoding: "utf8", timeout: 10000, maxBuffer: 65536,
+    env: { PATH: "/usr/bin:/bin", LANG: "C", LC_ALL: "C" } }));
   for (const match of listing.matchAll(/(?:=>\s*)?(\/(?:usr\/)?lib[^\s]*)\s+\(/g)) libraries.add(match[1]);
 }
-for (const library of libraries) if (!fs.existsSync(runtime + library)) copyFile(fs.realpathSync(library), runtime + library);
+operation("copy_libraries", () => { for (const library of libraries) if (!fs.existsSync(runtime + library)) copyFile(fs.realpathSync(library), runtime + library); });
 for (const appRoot of [runtime + "/app", target + "/coordinator", target + "/proof"]) {
   mkdir(appRoot);
-  for (const name of ["src", "node_modules", "workflows"]) fs.cpSync(path.join(source, name), path.join(appRoot, name), {
+  for (const name of ["src", "node_modules", "workflows"]) operation("copy_" + path.basename(appRoot) + "_" + name, () => fs.cpSync(path.join(source, name), path.join(appRoot, name), {
     recursive: true, errorOnExist: true, force: false, dereference: true,
-    filter: from => !from.split(path.sep).includes(".bin") });
+    filter: from => !from.split(path.sep).includes(".bin") }));
   for (const name of ["package.json", "package-lock.json"]) copyFile(path.join(source, name), path.join(appRoot, name));
 }
-fs.cpSync(path.join(source, "tests"), target + "/proof/tests", { recursive: true, errorOnExist: true, force: false, dereference: true });
-fs.cpSync(path.join(source, "scripts"), target + "/proof/scripts", { recursive: true, errorOnExist: true, force: false, dereference: true });
-fs.cpSync(path.join(source, "db"), target + "/proof/db", { recursive: true, errorOnExist: true, force: false, dereference: true });
-for (const name of [runtime, target + "/coordinator", target + "/proof"]) readonlyTree(name);
+for (const area of ["tests", "scripts", "db"]) operation("copy_proof_"+area, () => fs.cpSync(path.join(source, area), target + "/proof/"+area, { recursive: true, errorOnExist: true, force: false, dereference: true }));
+for (const name of [runtime, target + "/coordinator", target + "/proof"]) operation("seal_tree_"+path.basename(name), () => readonlyTree(name));
 copyFile(path.join(source, "scripts/media-vm/prepare-cgroup.sh"), target + "/bin/prepare-cgroup");
 newFile("/etc/sudoers.d/ia4tube-media", "# One installed launcher; its native parser enforces fixed targets and caller identity.\n" +
   "Defaults:ia4tube-coordinator !requiretty\n" +
@@ -77,3 +79,6 @@ newFile("/etc/systemd/system/ia4tube-media-containment.service", "[Unit]\nDescri
 mkdir("/etc/systemd/system/local-fs.target.wants"); mkdir("/etc/systemd/system/multi-user.target.wants");
 fs.symlinkSync("../" + mountUnit, "/etc/systemd/system/local-fs.target.wants/" + mountUnit);
 fs.symlinkSync("../ia4tube-media-containment.service", "/etc/systemd/system/multi-user.target.wants/ia4tube-media-containment.service");
+}
+try { operation(process.argv[2] === "--seal" ? "seal_package" : "copy_package", main); }
+catch (error) { process.stderr.write("VM_INSTALL_INTERNAL=FAILED\n"); process.exitCode = Number.isInteger(error.status) && error.status > 0 && error.status <= 255 ? error.status : 1; }

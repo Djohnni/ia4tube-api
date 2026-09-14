@@ -12,10 +12,12 @@ const clone=v=>structuredClone(v),imageId="6257327608773510097";
 const plan=P.createGooglePlan({imageId,operatorIpv4:"93.184.216.34"});
 const privateFixture="-----BEGIN OPENSSH PRIVATE KEY-----\nYQ==\n-----END OPENSSH PRIVATE KEY-----\n";
 const startup=makeGoogleBootstrap(privateFixture,"ssh-ed25519 YQ== synthetic","ssh-ed25519 Yg== synthetic");
-function fixture(flags={}){
+function fixture(flags={},fixturePlan=plan){
+  const plan=fixturePlan;
   let time=Date.parse("2026-09-14T00:00:00Z"),nextId=9007199254740993n,state=null,locked=false,sequenceCount=0,installationCount=0;
   const resources=new Map(),ops=new Map(),calls=[],missed=new Set(),hidden=new Map(),guestCalls=[];
   let installObservation;
+  let physicalTicket=null,revalidationCount=0;
   const url=p=>"https://www.googleapis.com/compute/v1/"+p;
   const transport=async request=>{
     const {method,pathname,body}=request;calls.push({method,pathname,body:clone(body)});
@@ -82,28 +84,49 @@ function fixture(flags={}){
   const guest={prepareLocalIdentity:async()=>{},createIdentityPayload:()=>({startupScript:startup}),bindHost:async()=>{},
     preflight:async()=>({passed:!flags.hostFailure,convertersStarted:0}),install:async()=>{
       installationCount++;guestCalls.push("install");installObservation=clone(await getCompleteDiagnostic());
-      if(flags.installFailure){
-        installObservation.markers=installObservation.markers.slice(0,4);installObservation.markers[3].event="failed";installObservation.markers[3].exitCode=42;
-        installObservation.lastCompletedStage="initialization";installObservation.finalMarkerReceived=false;installObservation.exitCode=42;
-        installObservation.failedStage="dependencies_runtime";installObservation.failedStageExitCode=42;
+      if((flags.installFailure||flags.packageInstallFailure)&&installationCount<=(flags.failInstallCount||Infinity)){
+        const last=flags.packageInstallFailure?7:3;
+        installObservation.markers=installObservation.markers.slice(0,last+1);installObservation.markers[last].event="failed";installObservation.markers[last].exitCode=42;
+        installObservation.lastCompletedStage=flags.packageInstallFailure?'version_checks':"initialization";installObservation.finalMarkerReceived=false;installObservation.exitCode=42;
+        installObservation.failedStage=flags.packageInstallFailure?'package_install':"dependencies_runtime";installObservation.failedStageExitCode=42;
         installObservation.classification=classifyInstallDiagnostic(installObservation);installObservation.installationPassed=false;
         throw Object.assign(new Error("synthetic secret must stay private"),{code:"vm_proof_ssh_installation_substep_failed",diagnostic:installObservation});
       }
       if(flags.installUncertain){installObservation.exitCode=255;installObservation.classification=classifyInstallDiagnostic(installObservation);installObservation.installationPassed=false;
         throw Object.assign(new Error("synthetic secret"),{code:"vm_proof_ssh_installation_transport_interrupted_unknown",diagnostic:installObservation});}
       return {passed:true,convertersStarted:0,...(flags.missingInstallEvidence?{}:{diagnostic:installObservation})};},
-    runSequence:async()=>{sequenceCount++;if(flags.sequenceThrows)throw new Error("synthetic secret");return {cases:MANIFEST.cases.map(c=>({id:c.id,passed:true,terminationProved:true,nativeLaunches:c.attempts.length})),
+    runSequence:async()=>{sequenceCount++;if(flags.sequenceThrows||flags.physicalFailure)throw new Error("synthetic secret");return {cases:MANIFEST.cases.map(c=>({id:c.id,passed:true,terminationProved:true,nativeLaunches:c.attempts.length})),
       launches:flags.badReceipt?9:8,allTerminated:true,attemptIds:MANIFEST.cases.flatMap(c=>c.attempts)};},
     collectInstallationDiagnostics:async()=>{guestCalls.push("installation_collect");
       if(flags.installCollectorFailure)throw new Error("synthetic private collection error");
       const diagnostic=clone(installObservation??await getCompleteDiagnostic());diagnostic.exitCode=0;
       diagnostic.classification=classifyInstallDiagnostic(diagnostic);diagnostic.installationPassed=diagnostic.classification==="installation_complete";
       if(flags.installCollectorPersistenceFailure)throw Object.assign(new Error("synthetic private disk detail"),{code:"vm_proof_ssh_installation_collection_persistence_failed",diagnostic});
-      return {sanitized:true,collectionSucceeded:true,sha256:"c".repeat(64),diagnostic};},
-    collect:async()=>{guestCalls.push("executor_collect");if(flags.collectFailure)throw new Error("synthetic");return {sanitized:true,sha256:"b".repeat(64)};}};
+      const stream={bytesObserved:10,bytesRetained:10,truncated:false,sha256:'e'.repeat(64)};
+      const internal=plan.resolution?{collected:true,privateRetained:true,archiveSha256:'d'.repeat(64),summary:{schema:1,
+        identity:{mission:state.missionId,attempt:installationCount,packageSha256:plan.packageSha256,installerSha256:'e'.repeat(64)},
+        createdAtMs:time,rawBytesRetained:30,terminal:true,installerExitCode:42,finishedAtMs:time,
+        events:[{operationId:'native_compile',sourceRef:'scripts/media-vm/package-install.cjs#native_compile',phase:'error',atMs:time,
+          exitCode:42,signal:flags.internalSignal?'SIGKILL':null,reason:flags.internalTimeout?'errno_etimedout':'required_c_header_missing',
+          streams:{stdout:stream,stderr:stream,exception:stream}}]}}:null;
+      return {sanitized:true,collectionSucceeded:true,sha256:"c".repeat(64),diagnostic,internal:flags.internalMissing?null:internal};},
+    prepareCorrection:async({ticket})=>{guestCalls.push('prepare_correction');return {previousEnded:!flags.partialStateUncertain,ownedResidualsOnly:true,
+      convertersStarted:0,packageSha256:ticket.packageSha256,partialStateSha256:'f'.repeat(64)};},
+    collect:async()=>{guestCalls.push("executor_collect");if(flags.collectFailure)throw new Error("synthetic");return {sanitized:true,sha256:"b".repeat(64),
+      ...(flags.physicalFailure?{evidence:{schema:1,cases:MANIFEST.cases.map((c,i)=>({id:c.id,passed:i!==1,terminationProved:i!==1,nativeLaunches:c.attempts.length,failure:i===1?{stage:'case-body',code:'assertion_failed'}:null})),
+        launches:flags.physicalUnknownCounts?null:8,attemptIds:MANIFEST.cases.flatMap(c=>c.attempts),allTerminated:false,syntheticOnly:true,metrics:null,failure:{stage:'case-body',code:'assertion_failed'}}}:{})};},
+    inspectPhysicalFailure:async()=>{guestCalls.push('physical_inspection');if(flags.physicalDeadline)time+=6000000;
+      return {priorTerminationConfirmed:!flags.physicalUncertain,quiescenceSha256:'1'.repeat(64),priorEvidenceSha256:'2'.repeat(64),candidateRuntimeRevision:'3'.repeat(64),candidatePackageSha256:plan.packageSha256};},
+    prepareSequenceCorrection:async({ticket})=>{guestCalls.push('physical_correction');physicalTicket=ticket;
+      return {previousEnded:true,ownedResidualsOnly:true,candidatePackageSha256:ticket.candidatePackageSha256,candidateRuntimeRevision:ticket.candidateRuntimeRevision};},
+    runRevalidation:async()=>{revalidationCount++;guestCalls.push('revalidation');if(flags.revalidationThrows)throw new Error('synthetic');
+      const selected=MANIFEST.cases.filter(c=>physicalTicket.caseIds.includes(c.id));return {candidatePackageSha256:plan.packageSha256,candidateRuntimeRevision:'3'.repeat(64),evidence:{
+        allPassed:true,allTerminated:true,launches:flags.revalidationExcess?9:selected.reduce((n,c)=>n+c.attempts.length,0),
+        cases:selected.map(c=>({id:c.id,passed:true,terminationProved:true,nativeLaunches:c.attempts.length}))}};},
+    collectRevalidation:async()=>({candidatePackageSha256:plan.packageSha256,candidateRuntimeRevision:'3'.repeat(64),evidence:{launches:2,allPassed:false,allTerminated:false,cases:[]}})};
   const provider=createGoogleProvider({plan,transport});
-  const execute=()=>runGoogleProof({plan,approvalSha256:plan.approvalSha256,store,provider,guest,now:()=>time,sleep:async ms=>{time+=ms;}});
-  return {execute,store,provider,calls,resources,guestCalls,getState:()=>clone(state),setState:s=>{state=clone(s);},get sequences(){return sequenceCount;},get installs(){return installationCount;}};
+  const execute=(options={})=>runGoogleProof({plan,approvalSha256:plan.approvalSha256,store,provider,guest,now:()=>time,sleep:async ms=>{time+=ms;},...options});
+  return {execute,store,provider,calls,resources,guestCalls,getState:()=>clone(state),setState:s=>{state=clone(s);},get sequences(){return sequenceCount;},get installs(){return installationCount;},get revalidations(){return revalidationCount;}};
 }
 test("Google IDs are uint64 strings without numeric precision loss",()=>{
   for(const v of ["9007199254740993","18446744073709551615"])assert.equal(P.googleId(v),v);
@@ -262,4 +285,74 @@ test("accepted asynchronous failure retains only normalized official error codes
   assert.equal(s.resources.instances.creationResponse.httpStatus,200);
   assert.equal(JSON.stringify(s).includes("secret-synthetic"),false);
   assert.equal(JSON.stringify(s).includes("private details"),false);
+});
+
+const resolutionPlan=P.createGooglePlan({imageId,operatorIpv4:'93.184.216.34',resolution:{
+  packageSha256:'a'.repeat(64),packageReviewSha256:'b'.repeat(64),authorizationSha256:'c'.repeat(64)}});
+function correctiveTicket(c){return {schema:1,action:'reviewed_correction',missionId:c.missionId,attempt:c.attempt,
+ previousDiagnosticSha256:require('../scripts/validation/vm-proof-manifest').sha256(canonical(c.diagnostic)),causeCode:'missing_c_headers_verified',
+ packagePath:require('node:path').resolve('synthetic.tar'),packageSha256:resolutionPlan.packageSha256,packageReviewSha256:'a'.repeat(64),
+ testsSha256:'b'.repeat(64),reviewSha256:'c'.repeat(64),partialStateScriptPath:require('node:path').resolve('check.sh'),
+ partialStateScriptSha256:'d'.repeat(64),repairScriptPath:require('node:path').resolve('repair.sh'),repairScriptSha256:'e'.repeat(64)};}
+test('resolution plan binds new package, review, authorization and exact bounded scope',()=>{
+ assert.equal(P.validateGooglePlan(resolutionPlan,{executable:true}),resolutionPlan);
+ assert.equal(resolutionPlan.schema,3);assert.equal(resolutionPlan.resolution.maxInstallInvocations,3);
+ assert.equal(resolutionPlan.resolution.maxAdditionalLaunches,8);assert.equal(resolutionPlan.maxExistenceSeconds,7200);
+ for(const bad of [{...resolutionPlan,resolution:{...resolutionPlan.resolution,maxInstallInvocations:4}},
+  {...resolutionPlan,packageSha256:'d'.repeat(64)}])assert.throws(()=>P.validateGooglePlan(bad),/plan_changed/);
+});
+test('certain package failure admits one reviewed same-session correction; prior attempt remains recorded',async()=>{
+ const f=fixture({packageInstallFailure:true,failInstallCount:1},resolutionPlan);
+ const r=await f.execute({onInstallFailure:async c=>correctiveTicket(c)});
+ assert.equal(r.failure,null);assert.equal(f.installs,2);assert.equal(f.sequences,1);assert.equal(r.destructionConfirmed,true);
+ assert.deepEqual(r.installationAttempts.map(a=>a.phase),['failed','passed']);
+ assert.equal(r.installationAttempts[0].correction.causeCode,'missing_c_headers_verified');
+ assert.ok(f.guestCalls.indexOf('installation_collect')<f.guestCalls.indexOf('prepare_correction'));
+ assert.equal(f.calls.filter(c=>c.method==='POST'&&c.pathname.includes('/instances?')).length,1);
+ await f.execute();assert.equal(f.installs,2);
+});
+test('three certain installation failures reach limit and cleanup without a fourth attempt',async()=>{
+ const f=fixture({packageInstallFailure:true},resolutionPlan),r=await f.execute({onInstallFailure:async c=>correctiveTicket(c)});
+ assert.equal(f.installs,3);assert.equal(f.sequences,0);assert.equal(r.installationAttempts.length,3);assert.equal(r.destructionConfirmed,true);
+});
+for(const flag of ['installUncertain','internalSignal','internalTimeout','internalMissing','installCollectorPersistenceFailure','partialStateUncertain'])
+test('resolution refuses uncertain evidence and closes resources: '+flag,async()=>{
+ const f=fixture({packageInstallFailure:flag!=='installUncertain',[flag]:true},resolutionPlan);
+ const r=await f.execute({onInstallFailure:async c=>correctiveTicket(c)});
+ assert.equal(f.installs,1);assert.equal(f.sequences,0);assert.equal(r.destructionConfirmed,true);assert.ok(r.failure);
+});
+test('correction ticket wrong binding fails before correction or retry',async()=>{
+ const f=fixture({packageInstallFailure:true},resolutionPlan);
+ const r=await f.execute({onInstallFailure:async c=>({...correctiveTicket(c),previousDiagnosticSha256:'0'.repeat(64)})});
+ assert.equal(f.installs,1);assert.equal(f.guestCalls.includes('prepare_correction'),false);assert.equal(r.destructionConfirmed,true);
+});
+test('operator stop decision closes certain failure without retry',async()=>{
+ const f=fixture({packageInstallFailure:true},resolutionPlan),r=await f.execute({onInstallFailure:async()=>null});
+ assert.equal(f.installs,1);assert.equal(r.destructionConfirmed,true);
+});
+function caseTicket(c){return {schema:1,action:'reviewed_case_correction',missionId:c.missionId,priorEvidenceSha256:c.priorEvidenceSha256,
+ causeCode:'specific_config_condition_verified',caseIds:MANIFEST.cases.slice(0,2).map(v=>v.id),candidatePackageSha256:c.candidatePackageSha256,
+ candidateRuntimeRevision:c.candidateRuntimeRevision,quiescenceSha256:c.quiescenceSha256,testsSha256:'a'.repeat(64),reviewSha256:'b'.repeat(64),
+ partialStateScriptPath:require('node:path').resolve('check-physical.sh'),partialStateScriptSha256:'c'.repeat(64),
+ repairScriptPath:require('node:path').resolve('repair-physical.sh'),repairScriptSha256:'d'.repeat(64)};}
+test('known failed physical case is inspected live and only reviewed affected cases revalidated',async()=>{
+ const f=fixture({physicalFailure:true},resolutionPlan),r=await f.execute({onSequenceFailure:async c=>caseTicket(c)});
+ assert.equal(r.failure,null);assert.equal(r.destructionConfirmed,true);assert.equal(f.sequences,1);assert.equal(f.revalidations,1);assert.equal(f.installs,1);
+ assert.equal(r.originalSequence.evidence.allTerminated,false);assert.equal(r.originalSequence.reconciliation.priorTerminationConfirmed,true);
+ assert.equal(r.originalLaunches,8);assert.equal(r.additionalLaunches,2);assert.equal(r.launches,10);assert.equal(r.finalCandidatePackageSha256,resolutionPlan.packageSha256);
+ assert.deepEqual(r.revalidation.caseIds,MANIFEST.cases.slice(0,2).map(v=>v.id));
+ assert.ok(f.guestCalls.indexOf('physical_inspection')<f.guestCalls.indexOf('physical_correction'));
+ await f.execute();assert.equal(f.revalidations,1);
+});
+for(const flag of ['physicalUnknownCounts','physicalUncertain','physicalDeadline'])test('physical correction refused without certain identity/counts/time: '+flag,async()=>{
+ const f=fixture({physicalFailure:true,[flag]:true},resolutionPlan),r=await f.execute({onSequenceFailure:async c=>caseTicket(c)});
+ assert.ok(r.failure);assert.equal(f.revalidations,0);assert.equal(r.destructionConfirmed,true);
+});
+test('physical correction ticket must include all affected cases before any write',async()=>{
+ const f=fixture({physicalFailure:true},resolutionPlan),r=await f.execute({onSequenceFailure:async c=>({...caseTicket(c),caseIds:[MANIFEST.cases[0].id]})});
+ assert.ok(r.failure);assert.equal(f.guestCalls.includes('physical_correction'),false);assert.equal(r.destructionConfirmed,true);
+});
+for(const flag of ['revalidationThrows','revalidationExcess'])test('failed or invalid retake remains recorded and never repeats: '+flag,async()=>{
+ const f=fixture({physicalFailure:true,[flag]:true},resolutionPlan),r=await f.execute({onSequenceFailure:async c=>caseTicket(c)});
+ assert.ok(r.failure);assert.equal(f.revalidations,1);assert.ok(r.revalidation.receipt);assert.equal(r.destructionConfirmed,true);assert.equal(f.sequences,1);
 });

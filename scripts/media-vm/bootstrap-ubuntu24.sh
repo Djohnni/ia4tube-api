@@ -11,7 +11,9 @@ export DEBIAN_FRONTEND=noninteractive
 export PATH=/usr/sbin:/usr/bin:/sbin:/bin
 # Installation failures stay failures; no repeated apt/npm or alternate mirrors.
 timeout --signal=TERM --kill-after=10s 900s apt-get update -qq
-timeout --signal=TERM --kill-after=10s 900s apt-get install -y --no-install-recommends gcc ffmpeg e2fsprogs util-linux sudo curl ca-certificates xz-utils
+# gcc alone only RECOMMENDS libc6-dev; --no-install-recommends on the clean
+# Google image does not supply the native supervisor's libc/Linux headers.
+timeout --signal=TERM --kill-after=10s 900s apt-get install -y --no-install-recommends gcc libc6-dev linux-libc-dev binutils ffmpeg e2fsprogs util-linux sudo curl ca-certificates xz-utils
 node_archive=/var/tmp/ia4tube-proof-node-v24.15.0-linux-x64.tar.xz
 node_root=/opt/node-v24.15.0-linux-x64
 [[ ! -e "$node_archive" && ! -e "$node_root" ]] || { echo VM_BOOTSTRAP=EXISTING_RUNTIME_REFUSED; exit 1; }

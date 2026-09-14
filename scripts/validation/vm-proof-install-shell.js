@@ -88,7 +88,11 @@ run_stage(){
   [[ "$code" == 0 ]] || exit "$code"
 }
 `;}
-function installationScript(){return String.raw`#!/bin/bash
+function installationScript({attempt=1,missionId=null,packageSha256=null,bundleRoot=BUNDLE_ROOT}={}){
+if(!Number.isInteger(attempt)||attempt<1||attempt>3||(missionId!==null&&!/^[a-f0-9-]{36}$/.test(missionId))||
+  (packageSha256!==null&&!/^[a-f0-9]{64}$/.test(packageSha256))||!/^\/var\/tmp\/ia4tube-proof-bundle(?:-attempt-[23])?$/.test(bundleRoot))throw new Error('vm_install_script_binding_invalid');
+const resolution=missionId!==null;
+return String.raw`#!/bin/bash
 # One-shot installation instrumentation; no provider credentials or media.
 # The remote outer deadline bounds its process group, including FIFO readers.
 # Nested timeout/tools can create another group; SSH/local timeouts NEVER prove
@@ -100,10 +104,15 @@ set -euo pipefail
 umask 077
 export PATH=/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 export LANG=C LC_ALL=C
-root=${DIAGNOSTIC_ROOT}
-bundle=${BUNDLE_ROOT}
+root=${resolution?DIAGNOSTIC_ROOT+'/outer-attempt-'+attempt:DIAGNOSTIC_ROOT}
+bundle=${bundleRoot}
 [[ $(id -u) == 0 && -d "$bundle" && ! -L "$bundle" ]] || exit 77
 for tool in date stat fold awk timeout mkfifo tee wc cat; do command -v "$tool" >/dev/null || exit 77; done
+# Every admitted attempt keeps its own diagnostics. The common root is fixed,
+# root-owned, and never removed to make a retry appear like a clean install.
+${resolution?`if [[ ! -e ${DIAGNOSTIC_ROOT} ]]; then mkdir -m 0700 ${DIAGNOSTIC_ROOT}; fi
+[[ -d ${DIAGNOSTIC_ROOT} && ! -L ${DIAGNOSTIC_ROOT} && $(stat -c %u ${DIAGNOSTIC_ROOT}) == 0 && $(stat -c %a ${DIAGNOSTIC_ROOT}) == 700 ]]
+export IA4TUBE_INSTALL_ATTEMPT=${attempt} IA4TUBE_INSTALL_MISSION_ID=${missionId} IA4TUBE_INSTALL_PACKAGE_SHA256=${packageSha256}`:''}
 # Never overwrite a prior installation attempt, even after uncertain SSH loss.
 mkdir -m 0700 "$root" || exit 78
 exec 3>&1
@@ -111,14 +120,26 @@ ${diagnosticFunctions()}
 emit initialization start -
 [[ ! -e "$root/intent" ]]; : > "$root/intent"
 emit initialization done 0
-run_stage dependencies_runtime timeout --signal=TERM --kill-after=10s 2000s bash "$bundle/scripts/media-vm/bootstrap-ubuntu24.sh"
+${attempt===1?`run_stage dependencies_runtime timeout --signal=TERM --kill-after=10s 2000s bash "$bundle/scripts/media-vm/bootstrap-ubuntu24.sh"`:
+`# Previous runtime stage passed certainly. Verify rather than redownload or
+# overwrite the runtime; only the revised candidate's lockfile dependencies
+# are prepared, unprivileged, without package lifecycle scripts.
+run_stage dependencies_runtime timeout --signal=TERM --kill-after=10s 340s bash -c '
+  set -euo pipefail
+  [[ $(/opt/node-v24.15.0-linux-x64/bin/node --version) == v24.15.0 ]]
+  [[ $(readlink -f /usr/local/bin/node) == /opt/node-v24.15.0-linux-x64/bin/node ]]
+  [[ $(stat -c %u /opt/node-v24.15.0-linux-x64/bin/node) == 0 ]]
+  printf "%s  %s\\n" 472655581fb851559730c48763e0c9d3bc25975c59d518003fc0849d3e4ba0f6 /var/tmp/ia4tube-proof-node-v24.15.0-linux-x64.tar.xz | sha256sum -c - >/dev/null
+  gcc -fsyntax-only ${bundleRoot}/src/social/calendar/imports/media-process-supervisor-linux.c
+  sudo -n -u ia4proof env -i PATH=/opt/node-v24.15.0-linux-x64/bin:/usr/bin:/bin HOME=/home/ia4proof LANG=C.UTF-8 npm_config_cache=/home/ia4proof/.npm timeout --signal=TERM --kill-after=10s 300s /opt/node-v24.15.0-linux-x64/bin/npm --prefix ${bundleRoot} ci --ignore-scripts --no-audit --no-fund
+'`}
 run_stage version_checks timeout --signal=TERM --kill-after=5s 20s bash -c '
   set -euo pipefail
   [[ $(node --version) == v24.15.0 ]]
   [[ $(readlink -f /usr/local/bin/node) == /opt/node-v24.15.0-linux-x64/bin/node ]]
   [[ $(stat -c %u /opt/node-v24.15.0-linux-x64/bin/node) == 0 ]]
   for p in gcc ffmpeg ffprobe curl node; do command -v "$p" >/dev/null; done
-  [[ -d /var/tmp/ia4tube-proof-bundle/node_modules/sharp ]]
+  [[ -d ${bundleRoot}/node_modules/sharp ]]
   printf "%s  %s\n" 472655581fb851559730c48763e0c9d3bc25975c59d518003fc0849d3e4ba0f6 /var/tmp/ia4tube-proof-node-v24.15.0-linux-x64.tar.xz | sha256sum -c - >/dev/null
 '
 run_stage package_install timeout --signal=TERM --kill-after=10s 300s bash "$bundle/scripts/media-vm/install-ubuntu24.sh" --synthetic-proof
@@ -150,10 +171,12 @@ for stage in dependencies_runtime version_checks package_install final_validatio
 done
 }
 `;}
-function collectInstallationScript(){return String.raw`#!/bin/bash
+function collectInstallationScript({attempt=1,resolution=false}={}){
+if(!Number.isInteger(attempt)||attempt<1||attempt>3)throw new Error('vm_install_script_binding_invalid');
+return String.raw`#!/bin/bash
 set -euo pipefail
 export PATH=/usr/sbin:/usr/bin:/sbin:/bin LANG=C LC_ALL=C
-root=${DIAGNOSTIC_ROOT}
+root=${resolution?DIAGNOSTIC_ROOT+'/outer-attempt-'+attempt:DIAGNOSTIC_ROOT}
 ${collectionFunctions()}
 collect_diagnostics
 `;}

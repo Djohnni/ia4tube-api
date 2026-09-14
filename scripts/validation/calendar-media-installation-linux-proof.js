@@ -42,7 +42,7 @@ export PATH=/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 . /etc/os-release
 [[ "$ID" == ubuntu && "$VERSION_ID" == 24.04 && "$(uname -m)" == x86_64 ]]
 printf 'os=%s-%s\narchitecture=%s\n' "$ID" "$VERSION_ID" "$(uname -m)"
-for package in gcc ffmpeg e2fsprogs util-linux sudo curl ca-certificates xz-utils; do
+for package in gcc libc6-dev linux-libc-dev binutils ffmpeg e2fsprogs util-linux sudo curl ca-certificates xz-utils; do
   value=$(dpkg-query -W -f='\${db:Status-Abbrev} \${Version}' "$package" 2>/dev/null || true)
   if [[ "$value" == 'ii '* ]]; then printf 'package_%s=%s\n' "\${package//-/_}" "\${value#ii }"; else printf 'package_%s=absent\n' "\${package//-/_}"; fi
 done
@@ -165,21 +165,35 @@ async function run() {
   if (prepared.expectedPackageSha256 !== cfg.expected || !prepared.preflightPassed || sha256(await fs.readFile(cfg.packagePath)) !== cfg.expected) fail("installation_ci_preparation_changed");
   const { runDiagnosticProcess, validateInstallDiagnostic } = require("./vm-proof-install-diagnostics");
   const { installationScript, collectInstallationScript } = require("./vm-proof-install-shell");
+  const binding = { missionId: "00000000-0000-4000-8000-000000000014", attempt: 1, packageSha256: cfg.expected };
   const startedAt = Date.now();
   // EXACTLY one installation attempt. Collection is independent and always
   // runs, even before installed Node/coordinator/executor exists.
-  let installation = null, collection = null, installationDiagnosticError = null, collectionDiagnosticError = null;
+  let installation = null, collection = null, internal = null, internalDiagnosticError = null, installationDiagnosticError = null, collectionDiagnosticError = null;
   try {
     installation = await runDiagnosticProcess("/usr/bin/sudo", ["-n", "/bin/bash", "-s"],
-      { stdin: installationScript(), timeoutMs: 2400000 });
+      { stdin: installationScript(binding), timeoutMs: 2400000 });
     if (!validateInstallDiagnostic(installation)) { installation = null; installationDiagnosticError = "invalid_schema"; }
   } catch { installationDiagnosticError = "diagnostic_invocation_failed"; }
   finally {
     try {
       collection = await runDiagnosticProcess("/usr/bin/sudo", ["-n", "/bin/bash", "-s"],
-        { stdin: collectInstallationScript(), timeoutMs: 60000 });
+        { stdin: collectInstallationScript({attempt: 1, resolution: true}), timeoutMs: 60000 });
       if (!validateInstallDiagnostic(collection)) { collection = null; collectionDiagnosticError = "invalid_schema"; }
     } catch { collectionDiagnosticError = "diagnostic_invocation_failed"; }
+    try {
+      // Read only the bounded metadata file; unknown raw diagnostic bytes stay
+      // root-private on the disposable runner and never enter the CI log.
+      const metadata = sudo(`/opt/node-v24.15.0-linux-x64/bin/node - <<'IA4INTERNAL'
+const fs=require('node:fs');
+const p='/var/tmp/ia4tube-proof-diagnostics/internal-attempt-1/summary.json';
+const s=fs.lstatSync(p);
+if(!s.isFile()||s.isSymbolicLink()||s.uid!==0||(s.mode&0o077)||s.nlink!==1||s.size>65536)process.exit(79);
+process.stdout.write(fs.readFileSync(p));
+IA4INTERNAL`);
+      internal = require('./vm-proof-install-internal').safeInternalSummary(JSON.parse(metadata), binding);
+      safePrint('INSTALLATION_CI_INTERNAL', internal);
+    } catch { internalDiagnosticError = 'internal_metadata_unconfirmed'; }
   }
   if (installation) safePrint("INSTALLATION_CI_RESULT", installation);
   else safePrint("INSTALLATION_CI_DIAGNOSTIC_ERROR", { code: installationDiagnosticError });
@@ -188,18 +202,34 @@ async function run() {
   let after = null, inventoryError = null;
   try { after = jsonSafeRecords(sudo(inventoryScript)); safePrint("INSTALLATION_CI_INVENTORY_AFTER", after); }
   catch { inventoryError = "post_inventory_unconfirmed"; safePrint("INSTALLATION_CI_INVENTORY_ERROR", { code: inventoryError }); }
+  let installedAccess = false;
+  if (installation?.installationPassed) {
+    try {
+      const access = sudo(`set -euo pipefail
+sudo -n -u ia4tube-coordinator /usr/bin/test -r /etc/ia4tube-media/worker.json
+sudo -n -u ia4tube-coordinator /usr/bin/test -r /opt/ia4tube-media/installation.json
+sudo -n -u ia4tube-coordinator /usr/bin/test -r /etc/ia4tube-media/synthetic-coordinator-secret
+sudo -n -u ia4tube-codec /usr/bin/test ! -r /etc/ia4tube-media/synthetic-coordinator-secret
+sudo -n -u ia4tube-codec /usr/bin/test -r /var/tmp/ia4tube-synthetic-outside-readable.txt
+printf 'INSTALLATION_CI_ACCESS=PASS\n'`);
+      installedAccess = /^INSTALLATION_CI_ACCESS=PASS$/m.test(access);
+    } catch { installedAccess = false; }
+    safePrint('INSTALLATION_CI_ACCESS_CHECKS', { passed: installedAccess, credentialsRead: false, syntheticOnly: true });
+  }
   const collectionPassed = collection !== null && collection.exitCode === 0 && !collection.signal && !collection.timedOut && !collection.aborted &&
     !collection.spawnFailed && !collection.stdinFailed && !collection.protocolInvalid && !collection.collectionError && !collection.remoteCaptureFailed;
   const replayVerified = installation !== null && collection !== null && collectionPassed &&
     installation.finalMarkerReceived === collection.finalMarkerReceived && JSON.stringify(installation.markers) === JSON.stringify(collection.markers);
   const began = stage => installation?.markers.some(marker => marker.stage === stage && marker.event === "start") === true;
   const evidence = { schema: 1, syntheticOnly: true, packageSha256: cfg.expected, realBootstrapStarted: began("dependencies_runtime"), realPackageInstallerStarted: began("package_install"),
-    installationInvocations: 1, converterLaunches: 0, physicalCasesRun: 0, installation, installationDiagnosticError, collection, collectionDiagnosticError, collectionPassed, replayVerified,
-    explicitCiDifferences: prepared.explicitCiDifferences, before: prepared.before, after, inventoryError, durationMs: Date.now() - startedAt };
+    installationInvocations: 1, converterLaunches: 0, physicalCasesRun: 0, installation, installationDiagnosticError, collection, collectionDiagnosticError, collectionPassed, replayVerified, internal, internalDiagnosticError,
+    explicitCiDifferences: prepared.explicitCiDifferences, before: prepared.before, after, inventoryError, installedAccess, durationMs: Date.now() - startedAt };
   await fs.writeFile(cfg.evidence, JSON.stringify(evidence), { flag: "wx", mode: 0o600 });
   safePrint("INSTALLATION_CI_SUMMARY", { packageSha256: cfg.expected, installationPassed: installation?.installationPassed === true, collectionPassed, replayVerified,
-    attempts: 1, converterLaunches: 0, durationMs: evidence.durationMs, evidenceSha256: sha256(JSON.stringify(evidence)) });
-  if (!installation?.installationPassed || !collectionPassed || !replayVerified || inventoryError) fail("installation_ci_proof_not_passed");
+    attempts: 1, converterLaunches: 0, internalTerminal: internal?.terminal===true, internalExitCode: internal?.installerExitCode??null,
+    internalEvents: internal?.events.length??0, internalDiagnosticError, installedAccess, durationMs: evidence.durationMs, evidenceSha256: sha256(JSON.stringify(evidence)) });
+  if (!installation?.installationPassed || !collectionPassed || !replayVerified || inventoryError || internalDiagnosticError ||
+      !internal?.terminal || internal.installerExitCode!==0 || internal.events.some(e=>e.phase==='error') || !installedAccess) fail("installation_ci_proof_not_passed");
 }
 if (require.main === module) {
   const action = process.argv.length === 3 ? process.argv[2] : "";

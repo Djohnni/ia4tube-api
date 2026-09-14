@@ -56,10 +56,11 @@ async function temporary(t) {
   return folder;
 }
 
-async function fixture(t, replies) {
+async function fixture(t, replies, options={}) {
   const folder = await temporary(t), packagePath = path.join(folder, "synthetic-package.tar"), packageBytes = Buffer.from("synthetic-package-with-no-real-files");
   await fs.writeFile(packagePath, packageBytes, { mode: 0o600 });
   const plan = { packageSha256: sha256(packageBytes), approvalSha256: "b".repeat(64) };
+  if(options.resolution)plan.resolution={maxInstallInvocations:3};
   const invocations = [], keygen = [];
   const run = async (command, args) => {
     assert.equal(path.basename(command), process.platform === "win32" ? "ssh-keygen.exe" : "ssh-keygen");
@@ -77,7 +78,7 @@ async function fixture(t, replies) {
     assert.notEqual(reply, undefined, "no unexpected repeat or network invocation");
     return typeof reply === "function" ? reply() : structuredClone(reply);
   };
-  const guest = await createSshGuest({ stateRoot: folder, packagePath, plan, run, diagnosticRun, providerKind: "google" });
+  const guest = await createSshGuest({ stateRoot: folder, packagePath, plan, run, diagnosticRun, providerKind: "google",...(options.archiveRun?{archiveRun:options.archiveRun}:{}) });
   await guest.prepareLocalIdentity({ missionId });
   await guest.bindHost({ networkInterfaces: [{ accessConfigs: [{ natIP: address }] }] }, { missionId });
   assert.equal(keygen.length, 2); assert.equal(invocations.length, 0);
@@ -196,4 +197,34 @@ test("collector transport failure remains collection failure without changing in
   const saved = JSON.parse(await fs.readFile(path.join(folder, "installation-collection.json"), "utf8"));
   assert.equal(saved.initialObservation.installationPassed, true); assert.equal(saved.collectedObservation.installationPassed, false);
   assert.equal(invocations.length, 2);
+});
+
+function privateTar(entries){const all=[];for(const [name,data]of entries){const b=Buffer.from(data),h=Buffer.alloc(512);h.write(name);
+ const oct=(v,n)=>v.toString(8).padStart(n-1,'0')+'\0';h.write(oct(0o600,8),100);h.write(oct(0,8),108);h.write(oct(0,8),116);
+ h.write(oct(b.length,12),124);h.write(oct(0,12),136);h.fill(32,148,156);h.write('0',156);h.write('ustar\0',257);h.write('00',263);
+ h.write(h.reduce((n,v)=>n+v,0).toString(8).padStart(6,'0')+'\0 ',148);all.push(h,b,Buffer.alloc((512-b.length%512)%512));}all.push(Buffer.alloc(1024));return Buffer.concat(all);}
+test('resolution SSH privately retains unknown diagnostic bytes and exposes only validated safe summary',async t=>{
+ let f,captured=0;const secret='synthetic-private-stderr-never-in-safe-result';
+ f=await fixture(t,[observation(),observation()],{resolution:true,archiveRun:async(command,args)=>{
+   captured++;assert.ok(args.includes('StrictHostKeyChecking=yes'));assert.equal(args.some(v=>v.includes(secret)),false);
+   const summary={schema:1,identity:{mission:missionId,attempt:1,packageSha256:f.plan.packageSha256,installerSha256:'a'.repeat(64)},
+     createdAtMs:1770000000000,rawBytesRetained:secret.length,events:[],terminal:true,installerExitCode:0,finishedAtMs:1770000000001};
+   return privateTar([['internal-attempt-1/summary.json',JSON.stringify(summary)],['internal-attempt-1/partial-state.json','{}'],
+    ['internal-attempt-1/001-native_compile.stderr.private',secret]]);
+ }});
+ await f.guest.install({timeoutMs:20000});const r=await f.guest.collectInstallationDiagnostics({missionId,timeoutMs:60000});
+ assert.equal(captured,1);assert.equal(r.internal.collected,true);assert.equal(r.internal.privateRetained,true);assert.equal(JSON.stringify(r).includes(secret),false);
+ const archive=path.join(f.folder,'internal-attempt-1-collection-1.tar');await protectedPath(archive);
+ assert.ok((await fs.readFile(archive)).includes(Buffer.from(secret)));
+ await assert.rejects(f.guest.install({attempt:2,timeoutMs:20000}),/installation_repeat_refused/);
+});
+test('invalid internal archive stays privately preserved and separately classified, never authorizes retry',async t=>{
+ const raw=Buffer.from('synthetic unknown private diagnostic retained despite invalid schema');
+ const failed=observation({failedStage:'package_install',exitCode:37});
+ const f=await fixture(t,[failed,observation({failedStage:'package_install'})],{resolution:true,archiveRun:async()=>raw});
+ let error;try{await f.guest.install({timeoutMs:20000});}catch(e){error=e;}
+ const r=await f.guest.collectInstallationDiagnostics({missionId,timeoutMs:60000});assert.equal(r.collectionSucceeded,true);assert.equal(r.internal.collected,false);
+ assert.equal(r.internal.error,'vm_proof_ssh_internal_diagnostic_invalid');assert.equal(JSON.stringify(r).includes(raw.toString()),false);
+ const archive=path.join(f.folder,'internal-attempt-1-collection-1.tar');await protectedPath(archive);assert.deepEqual(await fs.readFile(archive),raw);
+ await assert.rejects(f.guest.prepareCorrection({previousDiagnostic:error.diagnostic,ticket:{},timeoutMs:1000}),/correction_internal_termination_uncertain/);
 });

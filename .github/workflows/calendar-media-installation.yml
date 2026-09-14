@@ -20,11 +20,13 @@ jobs:
       github.ref == 'refs/heads/validation/vm-media-pilot-20260913' &&
       (github.event_name == 'workflow_dispatch' || contains(github.event.head_commit.message, '[installation-only]'))
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    # Separate budgets: minimal-container fixture <=10m, real installer <=40m,
+    # plus setup, independent collection and cleanup. Standard public runner.
+    timeout-minutes: 60
     env:
-      # Bound to the existing reviewed source-only package; this workflow does
-      # not silently accept a rebuilt/different installer or media converter.
-      PACKAGE_SHA256: e81b4d31d4fb0d1f861f439b72cca0e919cf89202ee093205e7c719c09c6e416
+      # Newly reviewed installer resolution package. Prior archive preserved.
+      # The media converter is unchanged; the expected archive is explicit.
+      PACKAGE_SHA256: ddc404614da7233139237943c82f3f3fb3b4ca544d933840aa4beda9c7f63fbf
     steps:
       - name: Sanitized source only, no persistent repository credentials
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
@@ -57,7 +59,13 @@ jobs:
             node --test --test-concurrency=1 \
             tests/calendar-vm-install-diagnostics.test.js \
             tests/calendar-vm-install-ssh.test.js \
-            tests/calendar-vm-install-shell.test.js
+            tests/calendar-vm-install-shell.test.js \
+            tests/calendar-vm-installer-internal.test.js \
+            tests/calendar-vm-install-internal-collection.test.js \
+            tests/calendar-vm-proof-revalidation.test.js
+      - name: Reproduce missing development headers on a fresh minimal Ubuntu
+        shell: bash
+        run: bash scripts/validation/calendar-media-minimal-toolchain.sh
       - name: Prepare explicit ephemeral-runner preconditions and verify package
         shell: bash
         run: |

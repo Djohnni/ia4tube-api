@@ -20,18 +20,21 @@ async function gcloudReader({python,script,account,config,run}){
   };
 }
 async function main(argv){
-  const a=argumentsOf(argv),mode=a["--mode"],allowed=["--mode","--package","--plan","--image-id","--operator-ipv4","--approval-sha256","--external-state-dir","--gcloud-python","--gcloud-script","--gcloud-config","--account","--confirm"];
+  const a=argumentsOf(argv),mode=a["--mode"],allowed=["--mode","--package","--plan","--image-id","--operator-ipv4","--approval-sha256","--external-state-dir","--gcloud-python","--gcloud-script","--gcloud-config","--account","--confirm","--resolution-authorization-sha256","--package-review-sha256"];
   if(Object.keys(a).some(k=>!allowed.includes(k))||!["prepare","preflight","execute"].includes(mode)||!a["--package"]||!a["--plan"])fail("arguments_invalid");
   const packagePath=path.resolve(a["--package"]),bytes=await fs.readFile(packagePath);
-  if(sha256(bytes)!==createGooglePlan().packageSha256)fail("package_changed");
   if(mode==="prepare"){
-    const plan=createGooglePlan({imageId:a["--image-id"]||null,operatorIpv4:a["--operator-ipv4"]||null});
+    const resolution=a['--resolution-authorization-sha256']||a['--package-review-sha256']?{
+      packageSha256:sha256(bytes),authorizationSha256:a['--resolution-authorization-sha256'],packageReviewSha256:a['--package-review-sha256']}:null;
+    if(resolution===null&&sha256(bytes)!==createGooglePlan().packageSha256)fail('package_changed');
+    const plan=createGooglePlan({imageId:a["--image-id"]||null,operatorIpv4:a["--operator-ipv4"]||null,resolution});
     await fs.writeFile(path.resolve(a["--plan"]),canonical(plan)+"\n",{flag:"wx",mode:0o600});
     return {mode,paidExecution:false,approvalSha256:plan.approvalSha256,packageSha256:plan.packageSha256,
       bindingsComplete:plan.sourceImageId!==null&&plan.operatorIpv4!==null,externalAccessVerified:false};
   }
   const planData=await fs.readFile(path.resolve(a["--plan"]));if(planData.length>32768)fail("plan_too_large");
   const plan=validateGooglePlan(JSON.parse(planData),{executable:mode==="execute"});
+  if(bytes.length>67108864||sha256(bytes)!==plan.packageSha256)fail('package_changed');
   if(mode==="execute"&&(a["--confirm"]!==CONFIRM||a["--approval-sha256"]!==plan.approvalSha256||!a["--external-state-dir"]))fail("specific_paid_confirmation_required");
   const getAccessToken=await gcloudReader({python:a["--gcloud-python"],script:a["--gcloud-script"],account:a["--account"],config:a["--gcloud-config"]});
   const provider=require("./vm-proof-google-provider").createGoogleProvider({plan,getAccessToken});
@@ -42,7 +45,9 @@ async function main(argv){
   }
   const store=await require("./vm-proof-local-state").createLocalStore(a["--external-state-dir"]);
   const guest=await require("./vm-proof-ssh").createSshGuest({stateRoot:store.root,packagePath,plan,providerKind:"google"});
-  return require("./vm-proof-google-controller").runGoogleProof({plan,approvalSha256:a["--approval-sha256"],store,provider,guest});
+  return require("./vm-proof-google-controller").runGoogleProof({plan,approvalSha256:a["--approval-sha256"],store,provider,guest,
+    onInstallFailure:plan.resolution?require('./vm-proof-google-resolution').createResolutionInbox(store.root):null,
+    onSequenceFailure:plan.resolution?require('./vm-proof-google-resolution').createCaseResolutionInbox(store.root):null});
 }
 if(require.main===module)main(process.argv.slice(2)).then(r=>{
   process.stdout.write("GOOGLE_PROOF_CONTROL="+JSON.stringify(r)+"\n");

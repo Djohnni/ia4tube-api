@@ -18,7 +18,7 @@ function ipv4(v) {
       (a === 192 && [0,168].includes(b)) || (a === 100 && b >= 64 && b <= 127) || (a === 198 && [18,19].includes(b))) fail("operator_ip_invalid");
   return v;
 }
-function createGooglePlan({ imageId = null, operatorIpv4 = null } = {}) {
+function createGooglePlan({ imageId = null, operatorIpv4 = null, resolution = null } = {}) {
   if (imageId !== null) googleId(imageId);
   if (operatorIpv4 !== null) ipv4(operatorIpv4);
   const content = {
@@ -36,10 +36,23 @@ function createGooglePlan({ imageId = null, operatorIpv4 = null } = {}) {
     serviceAccounts: [], realMedia: false, apiDeploy: false, remoteMigrations: false,
     backups: false, snapshots: false, recurring: false, instagram: false
   };
+  if (resolution !== null) {
+    if (Object.keys(resolution).sort().join(',') !== 'authorizationSha256,packageReviewSha256,packageSha256' ||
+        Object.values(resolution).some(v => typeof v !== 'string' || !/^[a-f0-9]{64}$/.test(v))) fail('resolution_binding_invalid');
+    content.schema = 3;
+    content.kind = 'ia4tube-google-synthetic-resolution';
+    content.packageSha256 = resolution.packageSha256;
+    content.resolution = { ...resolution, maxInstallInvocations: 3, maxAdditionalLaunches: 8,
+      cleanupReserveSeconds: 600, uncertainReplay: false, secondVm: false };
+  }
   return { ...content, approvalSha256: sha256(canonical(content)) };
 }
 function validateGooglePlan(plan, { executable = false } = {}) {
-  const expected = createGooglePlan({ imageId: plan?.sourceImageId, operatorIpv4: plan?.operatorIpv4 });
+  const resolution = plan?.schema === 3 ? {
+    packageSha256: plan?.resolution?.packageSha256, packageReviewSha256: plan?.resolution?.packageReviewSha256,
+    authorizationSha256: plan?.resolution?.authorizationSha256
+  } : null;
+  const expected = createGooglePlan({ imageId: plan?.sourceImageId, operatorIpv4: plan?.operatorIpv4, resolution });
   if (canonical(expected) !== canonical(plan)) fail("plan_changed");
   if (executable && (plan.sourceImageId === null || plan.operatorIpv4 === null)) fail("read_bindings_missing");
   return plan;

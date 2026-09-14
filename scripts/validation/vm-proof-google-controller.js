@@ -3,6 +3,7 @@ const crypto=require("node:crypto");
 const {MANIFEST,sha256}=require("./vm-proof-manifest");
 const {bounded}=require("./vm-proof-controller");
 const {validateInstallDiagnostic}=require("./vm-proof-install-diagnostics");
+const {certainInstallFailure,certainInternalFailure,validateCorrectionTicket,ticketReceipt,validateCaseCorrectionTicket}=require("./vm-proof-google-resolution");
 const {KINDS,UUID,googleId,fail,resourceName,resourcePath,validateGooglePlan,bindResource}=require("./vm-proof-google-plan");
 function definitiveRejection(plan,s,k){
   const r=s.resources[k],e=r.creationResponse;
@@ -24,17 +25,31 @@ function validateState(s,plan){
   if(s.cases.some((v,i)=>v.id!==MANIFEST.cases[i].id || !["intent","passed","unknown","failed"].includes(v.phase)))fail("journal_cases_invalid");
   if(s.installationDiagnostic!=null&&!validateInstallDiagnostic(s.installationDiagnostic))fail("journal_installation_diagnostic_invalid");
   if(s.installationCollection?.diagnostic!=null&&!validateInstallDiagnostic(s.installationCollection.diagnostic))fail("journal_installation_collection_invalid");
+  if(s.installationAttempts!==undefined&&(!Array.isArray(s.installationAttempts)||s.installationAttempts.length>(plan.resolution?3:1)||
+    s.installationAttempts.some((a,i)=>a.attempt!==i+1||!['intent','passed','failed'].includes(a.phase)||!/^[a-f0-9]{64}$/.test(a.packageSha256)||
+      (a.diagnostic!=null&&!validateInstallDiagnostic(a.diagnostic)))))fail('journal_installation_attempts_invalid');
+  if(s.revalidation&&(!plan.resolution||s.revalidation.index!==1||!Number.isInteger(s.revalidation.plannedLaunches)||
+    s.revalidation.plannedLaunches<1||s.revalidation.plannedLaunches>8||!Array.isArray(s.revalidation.caseIds)||
+    !['correction_intent','launch_intent','passed'].includes(s.revalidation.phase)))fail('journal_revalidation_invalid');
   return s;
 }
 function summary(s){return {missionId:s.missionId,provider:"google",phase:s.phase,deadlineAt:s.deadlineAt,
   resources:Object.fromEntries(KINDS.map(k=>[k,{id:s.resources[k].id,createdAt:s.resources[k].createdAt,absentConfirmedAt:s.resources[k].absentConfirmedAt}])),
   hostPreflight:s.hostPreflight,installation:s.installation,installationDiagnostic:s.installationDiagnostic??null,
+  installationAttempts:s.installationAttempts??[],
+  originalSequence:s.originalSequence??null,revalidation:s.revalidation??null,
+  finalCandidatePackageSha256:s.installationAttempts?.at(-1)?.packageSha256??null,
+  originalLaunches:s.originalSequence?.evidence?.launches??(s.cases.length===5&&s.cases.every(c=>c.phase==='passed')?8:null),
+  additionalLaunches:s.revalidation?.receipt?.evidence?.launches??(s.revalidation?null:0),
   installationCollection:s.installationCollection??null,collectionFailure:s.collectionFailure??null,cases:s.cases,
-  launches:s.cases.length===5 && s.cases.every(c=>c.phase==="passed")?8:null,
+  launches:s.originalSequence?(Number.isInteger(s.originalSequence.evidence?.launches)&&
+    (!s.revalidation||Number.isInteger(s.revalidation.receipt?.evidence?.launches))?
+      s.originalSequence.evidence.launches+(s.revalidation?.receipt?.evidence?.launches??0):null):
+    (s.cases.length===5 && s.cases.every(c=>c.phase==="passed")?8:null),
   allTerminated:s.allTerminated===true,evidenceCollected:s.collection?.sanitized===true,
   destructionConfirmed:s.phase==="destroyed",billingMayContinue:s.resources.instances.intentAt!==null && s.phase!=="destroyed",
   failure:s.failure,journalPersistenceFailed:s.journalPersistenceFailed===true,realMedia:false,apiChanged:false};}
-async function runGoogleProof({plan,approvalSha256,store,provider,guest,now=Date.now,sleep=ms=>new Promise(r=>setTimeout(r,ms))}){
+async function runGoogleProof({plan,approvalSha256,store,provider,guest,onInstallFailure=null,onSequenceFailure=null,now=Date.now,sleep=ms=>new Promise(r=>setTimeout(r,ms))}){
   validateGooglePlan(plan,{executable:true});
   if(approvalSha256!==plan.approvalSha256)fail("specific_paid_confirmation_required");
   return store.exclusive(async()=>{
@@ -48,7 +63,7 @@ async function runGoogleProof({plan,approvalSha256,store,provider,guest,now=Date
         preexisting,resources:Object.fromEntries(KINDS.map(k=>[k,{intentAt:null,id:null,createdAt:null,createRequestId:crypto.randomUUID(),
           deleteRequestId:crypto.randomUUID(),createOp:null,deleteOp:null,deleteIntentAt:null,absentConfirmedAt:null}])),
         phase:"prepared",hostPreflight:null,installation:null,installationDiagnostic:null,installationCollection:null,
-        cases:[],collection:null,collectionFailure:null,failure:null,allTerminated:false};
+        installationAttempts:[],cases:[],collection:null,collectionFailure:null,failure:null,allTerminated:false};
       validateState(s,plan);await store.write(s);
     }else validateState(s,plan);
     const save=async()=>{validateState(s,plan);await store.write(s);};
@@ -108,20 +123,102 @@ async function runGoogleProof({plan,approvalSha256,store,provider,guest,now=Date
       let instance;
       while(true){budget(MANIFEST.hostPreflightSeconds);instance=await reconcile("instances",now(),{strict:true});if(instance.status==="RUNNING")break;await sleep(1000);}
       await guest.bindHost(instance,{missionId:s.missionId,plan});
-      for(const [phase,field,seconds,method] of [["preflight","hostPreflight",180,"preflight"],["installation","installation",2400,"install"]]){
-        budget(seconds);s.phase=phase+"_intent";await save();
-        const r=await bounded(signal=>guest[method]({plan,signal,timeoutMs:seconds*1000}),seconds*1000);
-        if(method==="install"){
-          if(!validateInstallDiagnostic(r?.diagnostic)||r.diagnostic.installationPassed!==true)fail("installation_evidence_unconfirmed");
-          s.installationDiagnostic=r.diagnostic;
+      budget(180);s.phase='preflight_intent';await save();
+      const host=await bounded(signal=>guest.preflight({plan,signal,timeoutMs:180000}),180000);
+      if(host?.passed!==true||host.convertersStarted!==0)fail('preflight_failed');
+      s.hostPreflight='passed';await save();
+      let candidateSha256=plan.packageSha256;
+      for(let attempt=1;attempt<=(plan.resolution?3:1);attempt++){
+        budget(2400);s.phase='installation_intent';
+        const attemptRecord={attempt,packageSha256:candidateSha256,phase:'intent',startedAt:now(),diagnostic:null};
+        s.installationAttempts.push(attemptRecord);await save();
+        try{
+          const r=await bounded(signal=>guest.install({plan,attempt,signal,timeoutMs:2400000}),2400000);
+          if(!validateInstallDiagnostic(r?.diagnostic)||r.diagnostic.installationPassed!==true)fail('installation_evidence_unconfirmed');
+          s.installationDiagnostic=r.diagnostic;attemptRecord.diagnostic=r.diagnostic;
+          if(r.passed!==true||r.convertersStarted!==0)fail('installation_failed');
+          attemptRecord.phase='passed';attemptRecord.finishedAt=now();s.installation='passed';await save();break;
+        }catch(error){
+          attemptRecord.phase='failed';attemptRecord.finishedAt=now();
+          if(validateInstallDiagnostic(error?.diagnostic)){s.installationDiagnostic=error.diagnostic;attemptRecord.diagnostic=error.diagnostic;}
+          await save();
+          if(!plan.resolution||attempt>=3||typeof onInstallFailure!=='function'||!certainInstallFailure(attemptRecord.diagnostic))throw error;
+          // Collect the SAME failed attempt before any corrective decision.
+          // Unknown transport, collection/persistence errors and missing markers
+          // never enter this path. Waiting is bounded inside the original timer.
+          const collected=await bounded(signal=>guest.collectInstallationDiagnostics({missionId:s.missionId,plan,signal,timeoutMs:60000}),60000);
+          if(collected?.sanitized!==true||collected.collectionSucceeded!==true||!validateInstallDiagnostic(collected.diagnostic)||
+             collected.diagnostic.failedStage!==attemptRecord.diagnostic.failedStage||
+             collected.diagnostic.failedStageExitCode!==attemptRecord.diagnostic.failedStageExitCode)throw error;
+          attemptRecord.collection={sha256:collected.sha256,diagnostic:collected.diagnostic,internal:collected.internal??null};await save();
+          if(!certainInternalFailure(collected.internal,{missionId:s.missionId,attempt,packageSha256:candidateSha256}))throw error;
+          const correctionDeadlineAt=s.deadlineAt-600000-2400000-900000-300000;
+          if(now()>=correctionDeadlineAt)throw error;
+          s.phase='installation_correction_wait';await save();
+          const context={missionId:s.missionId,attempt:attempt+1,diagnostic:attemptRecord.diagnostic,
+            deadlineAt:s.deadlineAt,correctionDeadlineAt};
+          const ticket=await bounded(signal=>onInstallFailure({...context,signal}),correctionDeadlineAt-now());
+          if(ticket===null)throw error;
+          validateCorrectionTicket(ticket,context);budget(2400+240);
+          attemptRecord.correction=ticketReceipt(ticket);await save();
+          const prepared=await bounded(signal=>guest.prepareCorrection({ticket,previousDiagnostic:attemptRecord.diagnostic,signal,timeoutMs:240000}),240000);
+          if(prepared?.previousEnded!==true||prepared.ownedResidualsOnly!==true||prepared.convertersStarted!==0||
+             prepared.packageSha256!==ticket.packageSha256||!/^[a-f0-9]{64}$/.test(prepared.partialStateSha256||''))fail('correction_reconciliation_failed');
+          attemptRecord.correction.partialStateSha256=prepared.partialStateSha256;
+          candidateSha256=ticket.packageSha256;await save();
         }
-        if(r?.passed!==true||r.convertersStarted!==0)fail(phase+"_failed");s[field]="passed";await save();
       }
       budget(900);s.phase="sequence_intent";s.cases=MANIFEST.cases.map(c=>({id:c.id,phase:"intent"}));await save();
-      const r=await bounded(signal=>guest.runSequence({plan,signal,timeoutMs:900000}),900000);
-      const attempts=MANIFEST.cases.flatMap(c=>c.attempts);
-      if(r?.launches!==8||r.allTerminated!==true||!Array.isArray(r.attemptIds)||r.attemptIds.join(",")!==attempts.join(",")||r.cases?.length!==5 ||
-        r.cases.some((c,i)=>c.id!==MANIFEST.cases[i].id||c.passed!==true||c.terminationProved!==true||c.nativeLaunches!==MANIFEST.cases[i].attempts.length))fail("sequence_receipt_invalid");
+      try{
+        const r=await bounded(signal=>guest.runSequence({plan,signal,timeoutMs:900000}),900000);
+        const attempts=MANIFEST.cases.flatMap(c=>c.attempts);
+        if(r?.launches!==8||r.allTerminated!==true||!Array.isArray(r.attemptIds)||r.attemptIds.join(",")!==attempts.join(",")||r.cases?.length!==5 ||
+          r.cases.some((c,i)=>c.id!==MANIFEST.cases[i].id||c.passed!==true||c.terminationProved!==true||c.nativeLaunches!==MANIFEST.cases[i].attempts.length))fail("sequence_receipt_invalid");
+      }catch(error){
+        if(!plan.resolution||typeof onSequenceFailure!=='function')throw error;
+        // Reconcile the original, immutable evidence before considering a
+        // targeted correction. Missing/unknown launch counts never admit it.
+        const original=await bounded(signal=>guest.collect({missionId:s.missionId,plan,signal,timeoutMs:60000}),60000);
+        const e=original?.evidence;
+        if(original?.sanitized!==true||!e||!Number.isInteger(e.launches)||e.launches<0||e.launches>8||
+           !Array.isArray(e.cases)||!e.cases.length||e.cases.length>5||!e.cases.some(c=>!c.passed)||
+           e.cases.some((c,i)=>c.id!==MANIFEST.cases[i].id||!Number.isInteger(c.nativeLaunches)||c.nativeLaunches<0||c.nativeLaunches>MANIFEST.cases[i].attempts.length))throw error;
+        s.originalSequence={sha256:original.sha256,evidence:e,error:/^(gcp|vm)_proof_[a-z_]+$/.test(error?.code||'')?error.code:'gcp_proof_sequence_failed'};await save();
+        const inspection=await bounded(signal=>guest.inspectPhysicalFailure({signal,timeoutMs:90000}),90000);
+        if(inspection?.priorTerminationConfirmed!==true||['priorEvidenceSha256','quiescenceSha256','candidateRuntimeRevision'].some(k=>!/^[a-f0-9]{64}$/.test(inspection[k]||''))||
+           inspection.candidatePackageSha256!==candidateSha256)throw error;
+        // A later independent termination observation is separate evidence;
+        // it never changes the failed original case's termination claim.
+        s.originalSequence.reconciliation=inspection;await save();
+        const affectedCaseIds=MANIFEST.cases.filter(c=>!e.cases.find(v=>v.id===c.id&&v.passed&&v.terminationProved&&v.nativeLaunches===c.attempts.length)).map(c=>c.id);
+        const correctionDeadlineAt=s.deadlineAt-600000-900000-480000;
+        if(now()>=correctionDeadlineAt)throw error;
+        s.phase='sequence_correction_wait';await save();
+        const context={missionId:s.missionId,...inspection,affectedCaseIds,deadlineAt:s.deadlineAt,correctionDeadlineAt,evidence:e};
+        const ticket=await bounded(signal=>onSequenceFailure({...context,signal}),correctionDeadlineAt-now());
+        if(ticket===null)throw error;validateCaseCorrectionTicket(ticket,context);
+        const selected=MANIFEST.cases.filter(c=>ticket.caseIds.includes(c.id)),plannedLaunches=selected.reduce((n,c)=>n+c.attempts.length,0);
+        if(plannedLaunches>8)fail('revalidation_budget_exceeded');
+        s.revalidation={index:1,phase:'correction_intent',plannedLaunches,caseIds:ticket.caseIds,reviewSha256:ticket.reviewSha256,
+          testsSha256:ticket.testsSha256,repairScriptSha256:ticket.repairScriptSha256,candidatePackageSha256:candidateSha256};await save();
+        if(now()+360000+900000>s.deadlineAt-600000)fail('insufficient_time_for_revalidation');
+        const prepared=await bounded(signal=>guest.prepareSequenceCorrection({ticket,affectedCaseIds,signal,timeoutMs:360000,notAfterMs:s.deadlineAt-600000}),360000);
+        if(prepared?.previousEnded!==true||prepared.ownedResidualsOnly!==true||prepared.candidatePackageSha256!==candidateSha256||
+           prepared.candidateRuntimeRevision!==inspection.candidateRuntimeRevision)fail('case_correction_reconciliation_failed');
+        s.revalidation.reconciliation=prepared;s.revalidation.phase='launch_intent';await save();
+        let receipt;
+        try{receipt=await bounded(signal=>guest.runRevalidation({plan,signal,timeoutMs:900000}),900000);}
+        catch(retestError){
+          try{s.revalidation.receipt=await bounded(signal=>guest.collectRevalidation({signal,timeoutMs:60000}),60000);await save();}catch{}
+          throw retestError;
+        }
+        s.revalidation.receipt=receipt;await save();
+        const v=receipt?.evidence;
+        if(receipt?.candidatePackageSha256!==candidateSha256||receipt.candidateRuntimeRevision!==inspection.candidateRuntimeRevision||
+           v?.allPassed!==true||v.allTerminated!==true||v.launches!==plannedLaunches||v.cases?.length!==selected.length||
+           v.cases.some((c,i)=>c.id!==selected[i].id||!c.passed||!c.terminationProved||c.nativeLaunches!==selected[i].attempts.length))fail('revalidation_receipt_invalid');
+        s.revalidation.phase='passed';await save();
+      }
       s.cases=MANIFEST.cases.map(c=>({id:c.id,phase:"passed"}));s.allTerminated=true;s.phase="proof_complete";await save();
     }catch(error){s.failure=/^(gcp|vm)_proof_[a-z_]+$/.test(error?.code||"")?error.code:"gcp_proof_operation_failed";
       if(validateInstallDiagnostic(error?.diagnostic))s.installationDiagnostic=error.diagnostic;
@@ -138,7 +235,7 @@ async function runGoogleProof({plan,approvalSha256,store,provider,guest,now=Date
           if(r?.sanitized!==true||!/^[a-f0-9]{64}$/.test(r.sha256||"")||!validateInstallDiagnostic(r.diagnostic)||typeof r.collectionSucceeded!=="boolean")fail("installation_collection_schema_invalid");
           const d=r.diagnostic, collected=d.exitCode===0&&!d.timedOut&&!d.aborted&&!d.spawnFailed&&!d.stdinFailed&&!d.collectionError&&!d.remoteCaptureFailed&&d.signal===null&&!d.protocolInvalid&&d.markers.length>0;
           if(r.collectionSucceeded!==collected)fail("installation_collection_schema_invalid");
-          s.installationCollection={status:collected?"collected":"failed",sanitized:true,sha256:r.sha256,diagnostic:d};
+          s.installationCollection={status:collected?"collected":"failed",sanitized:true,sha256:r.sha256,diagnostic:d,internal:r.internal??null};
         }catch(error){s.installationCollection={status:"failed",error:/^(gcp|vm)_proof_[a-z_]+$/.test(error?.code||"")?error.code:"gcp_proof_installation_collection_failed",
           ...(validateInstallDiagnostic(error?.diagnostic)?{diagnostic:error.diagnostic}:{})};}
         else s.installationCollection={status:"skipped_cleanup_deadline"};
