@@ -52,11 +52,58 @@ for name in apt-get timeout tar sha256sum gcc ffmpeg ffprobe node npm; do
 done
 printf 'opt_owner=%s\nopt_mode=%s\n' "$(stat -c '%u' /opt)" "$(stat -c '%a' /opt)"
 `;
+// Runner-only precondition, not part of the VM package or real installer. The
+// public runner image supplies a second Node entry, unrelated to setup-node's
+// controller runtime. Preserve that exact entry, never remove its runtime.
+const normalizeRunnerNodeScript = String.raw`
+precondition_stage=runner_node_backup_target
+node_entry=/usr/local/bin/node
+node_backup=/var/tmp/ia4tube-ci-original-node
+[[ ! -e "$node_backup" && ! -L "$node_backup" ]]
+if [[ -e "$node_entry" || -L "$node_entry" ]]; then
+  precondition_stage=runner_node_entry_type
+  if [[ -L "$node_entry" ]]; then
+    node_type=symlink
+    node_link=$(readlink -- "$node_entry")
+    [[ "$node_link" == /* && "$node_link" != *$'\n'* && "$node_link" != *$'\r'* ]]
+  elif [[ -f "$node_entry" ]]; then node_type=regular;
+  else refuse_precondition; fi
+  precondition_stage=runner_node_entry_owner
+  [[ $(stat -c '%u' -- "$node_entry") == 0 ]]
+  node_real=$(readlink -f -- "$node_entry")
+  precondition_stage=runner_node_runtime_location
+  case "$node_real" in
+    /usr/local/bin/node|/opt/hostedtoolcache/node/*/x64/bin/node|/opt/node-v*-linux-x64/bin/node|/usr/local/lib/nodejs/node-v*-linux-x64/bin/node) ;;
+    *) refuse_precondition ;;
+  esac
+  [[ -f "$node_real" && ! -L "$node_real" && $(stat -c '%u' -- "$node_real") == 0 ]]
+  node_mode=$(stat -c '%a' -- "$node_real")
+  [[ "$node_mode" =~ ^[0-7]{3,4}$ ]]
+  (( (8#$node_mode & 8#022) == 0 ))
+  precondition_stage=runner_node_runtime_version
+  node_version=$(timeout --signal=TERM --kill-after=1s 5s "$node_entry" --version)
+  [[ "$node_version" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+  read -r node_hash _ < <(sha256sum -- "$node_real")
+  [[ "$node_hash" =~ ^[a-f0-9]{64}$ ]]
+  node_identity=$(stat -c '%d:%i:%u:%a:%h' -- "$node_entry")
+  printf 'runner_node_entry_type=%s\nrunner_node_entry_owner=0\nrunner_node_entry_identity=%s\nrunner_node_runtime_realpath=%s\nrunner_node_runtime_version=%s\nrunner_node_runtime_sha256=%s\n' \
+    "$node_type" "$node_identity" "$node_real" "$node_version" "$node_hash"
+  precondition_stage=runner_node_preserve_entry
+  mv -T -n -- "$node_entry" "$node_backup"
+  [[ ! -e "$node_entry" && ! -L "$node_entry" && $(stat -c '%d:%i:%u:%a:%h' -- "$node_backup") == "$node_identity" ]]
+  read -r node_preserved_hash _ < <(sha256sum -- "$node_backup")
+  [[ "$node_preserved_hash" == "$node_hash" ]]
+  printf 'runner_node_preserved=original_entry_moved_to_exclusive_backup\n'
+else
+  printf 'runner_node_preserved=entry_was_absent\n'
+fi
+`;
 async function prepare() {
   const cfg = context(); process.umask(0o077);
   const tempStat = await fs.lstat(cfg.temp); if (!tempStat.isDirectory() || tempStat.isSymbolicLink()) fail("installation_ci_temp_unsafe");
   const before = jsonSafeRecords(sudo(inventoryScript));
   safePrint("INSTALLATION_CI_INVENTORY_BEFORE", before);
+  if ((await fs.realpath(process.execPath)) === "/usr/local/bin/node") fail("installation_ci_controller_runtime_not_separate");
   const { buildPackage } = require("./vm-proof-package");
   const built = await buildPackage(ROOT), packageHash = sha256(built.bytes);
   if (packageHash !== cfg.expected) { safePrint("INSTALLATION_CI_PACKAGE_MISMATCH", { expected: cfg.expected, observed: packageHash }); fail("installation_ci_package_changed"); }
@@ -68,9 +115,20 @@ async function prepare() {
   const prepared = sudo(`set -euo pipefail
 precondition_stage=identity
 trap 'printf "INSTALLATION_CI_PRECONDITION_FAILED=%s\\n" "$precondition_stage"' ERR
+refuse_precondition(){ printf 'INSTALLATION_CI_PRECONDITION_FAILED=%s\\n' "$precondition_stage"; exit 77; }
 [[ $(id -u) == 0 ]]
 precondition_stage=existing_targets
-for target in /var/tmp/ia4tube-proof-bundle /var/tmp/ia4tube-proof-bundle.tar /var/tmp/ia4tube-proof-diagnostics /var/tmp/ia4tube-proof-node-v24.15.0-linux-x64.tar.xz /opt/node-v24.15.0-linux-x64 /opt/ia4tube-media /var/lib/ia4tube-media /etc/ia4tube-media /usr/local/bin/node; do
+for target in /var/tmp/ia4tube-proof-bundle /var/tmp/ia4tube-proof-bundle.tar /var/tmp/ia4tube-proof-diagnostics /var/tmp/ia4tube-proof-node-v24.15.0-linux-x64.tar.xz /opt/node-v24.15.0-linux-x64 /opt/ia4tube-media /var/lib/ia4tube-media /etc/ia4tube-media; do
+  case "$target" in
+    /var/tmp/ia4tube-proof-bundle) precondition_stage=existing_bundle ;;
+    /var/tmp/ia4tube-proof-bundle.tar) precondition_stage=existing_bundle_archive ;;
+    /var/tmp/ia4tube-proof-diagnostics) precondition_stage=existing_diagnostics ;;
+    /var/tmp/ia4tube-proof-node-v24.15.0-linux-x64.tar.xz) precondition_stage=existing_node_archive ;;
+    /opt/node-v24.15.0-linux-x64) precondition_stage=existing_pinned_runtime ;;
+    /opt/ia4tube-media) precondition_stage=existing_installed_package ;;
+    /var/lib/ia4tube-media) precondition_stage=existing_media_state ;;
+    /etc/ia4tube-media) precondition_stage=existing_media_config ;;
+  esac
   [[ ! -e "$target" && ! -L "$target" ]]
 done
 precondition_stage=existing_accounts
@@ -78,6 +136,7 @@ for account in ia4proof ia4tube-coordinator ia4tube-codec; do ! getent passwd "$
 precondition_stage=ephemeral_opt
 [[ -d /opt && ! -L /opt && $(stat -c '%u' /opt) == 0 ]]
 chmod 0755 -- /opt
+${normalizeRunnerNodeScript}
 precondition_stage=synthetic_account
 useradd --create-home --user-group --home-dir /home/ia4proof --shell /bin/bash ia4proof
 chmod 0700 /home/ia4proof
@@ -91,11 +150,14 @@ bash /var/tmp/ia4tube-proof-bundle/scripts/media-vm/preflight-ubuntu24.sh
 printf 'INSTALLATION_CI_PRECONDITIONS=PASS\n'
 `);
   if (!/^VM_HOST_PREFLIGHT=PASS$/m.test(prepared) || !/^INSTALLATION_CI_PRECONDITIONS=PASS$/m.test(prepared)) fail("installation_ci_preconditions_unconfirmed");
+  const nodePrecondition = jsonSafeRecords(prepared.split("\n").filter(line => line.startsWith("runner_node_")).join("\n"));
+  safePrint("INSTALLATION_CI_EXISTING_NODE_PRESERVED", nodePrecondition);
   const record = { schema: 1, syntheticOnly: true, expectedPackageSha256: cfg.expected, packageBytes: built.bytes.length,
     bootstrapReplaced: false, packageInstallerReplaced: false, preflightPassed: true,
     explicitCiDifferences: ["GitHub-hosted Ubuntu 24.04, not the exact Google image or E2 machine", "Existing distribution dependency inventory recorded before bootstrap",
       "External builder/controller uses setup-node; bootstrap still installs its separate official pinned runtime", "Ephemeral runner /opt normalized to root:0755 before unchanged preflight",
-      "Synthetic ia4proof account and source bundle prepared without SSH or provider bootstrap"], before };
+      "Existing root-owned runner Node entry preserved in an exclusive fixed backup; bundled NODE_PATH_OCCUPIED guard unchanged",
+      "Synthetic ia4proof account and source bundle prepared without SSH or provider bootstrap"], before, nodePrecondition };
   await fs.writeFile(cfg.receipt, JSON.stringify(record), { flag: "wx", mode: 0o600 });
   safePrint("INSTALLATION_CI_PREPARED", record);
 }
@@ -146,4 +208,4 @@ if (require.main === module) {
   (action === "prepare" ? prepare() : action === "run" ? run() : Promise.reject(Object.assign(new Error("installation_ci_action_invalid"), { code: "installation_ci_action_invalid" })))
     .catch(error => { safePrint("INSTALLATION_CI_FAILURE", { code: /^installation_ci_[a-z_]+$/.test(error.code || "") ? error.code : "installation_ci_unclassified_error" }); process.exitCode = 1; });
 }
-module.exports = { inventoryScript, jsonSafeRecords };
+module.exports = { inventoryScript, normalizeRunnerNodeScript, jsonSafeRecords };
