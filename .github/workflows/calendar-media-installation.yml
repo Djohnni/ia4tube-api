@@ -1,0 +1,80 @@
+name: Real synthetic media installation and independent diagnostics
+
+on:
+  push:
+    branches: [validation/vm-media-pilot-20260913]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: synthetic-calendar-media-installation
+  cancel-in-progress: false
+
+jobs:
+  real-installation:
+    if: >-
+      github.repository == 'Djohnni/ia4tube-api' &&
+      github.event.repository.private == false &&
+      github.ref == 'refs/heads/validation/vm-media-pilot-20260913' &&
+      (github.event_name == 'workflow_dispatch' || contains(github.event.head_commit.message, '[installation-only]'))
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      # Bound to the existing reviewed source-only package; this workflow does
+      # not silently accept a rebuilt/different installer or media converter.
+      PACKAGE_SHA256: e81b4d31d4fb0d1f861f439b72cca0e919cf89202ee093205e7c719c09c6e416
+    steps:
+      - name: Sanitized source only, no persistent repository credentials
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+      - name: Explicit controller and package-builder Node only
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '24.15.0'
+          check-latest: false
+      - name: Install builder dependencies without scripts or cache
+        shell: bash
+        run: |
+          set -euo pipefail
+          set +e
+          npm ci --ignore-scripts --no-audit --no-fund >/dev/null 2>&1
+          builder_exit=$?
+          set -e
+          printf 'INSTALLATION_CI_BUILDER_EXIT=%s\n' "$builder_exit"
+          exit "$builder_exit"
+      - name: Focal diagnostic, SSH boundary and actual synthetic shell fixtures
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo -n env -i PATH="$PATH" LANG=C.UTF-8 \
+            node --test --test-concurrency=1 \
+            tests/calendar-vm-install-diagnostics.test.js \
+            tests/calendar-vm-install-ssh.test.js \
+            tests/calendar-vm-install-shell.test.js
+      - name: Prepare explicit ephemeral-runner preconditions and verify package
+        shell: bash
+        run: |
+          set -euo pipefail
+          env -i PATH="$PATH" LANG=C.UTF-8 \
+            GITHUB_ACTIONS=true RUNNER_ENVIRONMENT=github-hosted \
+            RUNNER_TEMP="$RUNNER_TEMP" GITHUB_REPOSITORY="$GITHUB_REPOSITORY" \
+            PACKAGE_SHA256="$PACKAGE_SHA256" \
+            node scripts/validation/calendar-media-installation-linux-proof.js prepare
+      - name: Real bootstrap, real installation, independent collection and checks
+        shell: bash
+        run: |
+          set -euo pipefail
+          env -i PATH="$PATH" LANG=C.UTF-8 \
+            GITHUB_ACTIONS=true RUNNER_ENVIRONMENT=github-hosted \
+            RUNNER_TEMP="$RUNNER_TEMP" GITHUB_REPOSITORY="$GITHUB_REPOSITORY" \
+            PACKAGE_SHA256="$PACKAGE_SHA256" \
+            node scripts/validation/calendar-media-installation-linux-proof.js run
+      # Standard public-repository runner, no paid runner, cloud credentials,
+      # artifact/cache upload, real media, remote API or worker execution. The
+      # setup-node runtime is used only by this external harness/builder. The
+      # real bootstrap separately downloads and checks its pinned Node archive.
+      # The five cases/eight converter launches are intentionally NOT invoked.

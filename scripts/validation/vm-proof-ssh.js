@@ -3,14 +3,18 @@
 // strictly pinned to this proof's pre-provisioned host key and exact provider IP.
 const fs = require("node:fs/promises"), path = require("node:path"), net = require("node:net");
 const { spawn } = require("node:child_process");
-const { atomicWrite, protectedPath } = require("./vm-proof-local-state");
+const { atomicWrite, protectedPath, protectCreatedFile } = require("./vm-proof-local-state");
 const { sha256, MANIFEST } = require("./vm-proof-manifest");
 const { validateMetrics, validateFailure } = require("./vm-proof-guest");
+const { runDiagnosticProcess, validateInstallDiagnostic } = require("./vm-proof-install-diagnostics");
+const { installationScript, collectInstallationScript } = require("./vm-proof-install-shell");
 function fail(code) { throw Object.assign(new Error("vm_proof_ssh_" + code), { code: "vm_proof_ssh_" + code }); }
-function processRun(command, args, { signal, timeoutMs = 20000, maxBytes = 65536, stdin = null } = {}) {
+function processRun(command, args, { signal, timeoutMs = 20000, maxBytes = 65536, stdin = null, gcloudConfig = null } = {}) {
+  if (gcloudConfig !== null && (!path.isAbsolute(gcloudConfig) || /[\r\n]/.test(gcloudConfig))) fail("auth_config_invalid");
   return new Promise((resolve, reject) => {
     const child = spawn(command, args, { shell: false, windowsHide: true, stdio: ["pipe", "pipe", "pipe"],
-      env: { PATH: process.env.PATH, SystemRoot: process.env.SystemRoot, LANG: "C.UTF-8" }, signal });
+      env: { PATH: process.env.PATH, SystemRoot: process.env.SystemRoot, ProgramData: process.env.ProgramData, LANG: "C.UTF-8",
+        ...(gcloudConfig === null ? {} : { CLOUDSDK_CONFIG:gcloudConfig, CLOUDSDK_CORE_DISABLE_USAGE_REPORTING:"true", CLOUDSDK_CORE_DISABLE_PROMPTS:"1", USERPROFILE:process.env.USERPROFILE, APPDATA:process.env.APPDATA, LOCALAPPDATA:process.env.LOCALAPPDATA }) }, signal });
     let size = 0, output = "", invalid = false;
     const timer = setTimeout(() => { invalid = true; child.kill("SIGKILL"); }, timeoutMs);
     const onOutput = data => { size += data.length; if (size > maxBytes) { invalid = true; child.kill("SIGKILL"); } else output += data.toString("utf8"); };
@@ -26,14 +30,7 @@ function publicIPv4(value) {
   return value;
 }
 async function protectNewFile(file) {
-  if (process.platform !== "win32") await fs.chmod(file, 0o600);
-  else {
-    // Newly generated proof material only, not an existing credential. No
-    // inherited wider ACL is retained, and the script prints no key or path.
-    const script = '$ErrorActionPreference="Stop"; $p=[Console]::In.ReadToEnd(); $sid=[System.Security.Principal.WindowsIdentity]::GetCurrent().User; $a=New-Object System.Security.AccessControl.FileSecurity; $a.SetOwner($sid); $a.SetAccessRuleProtection($true,$false); foreach($s in @($sid.Value,"S-1-5-18")) { $r=New-Object System.Security.AccessControl.FileSystemAccessRule((New-Object System.Security.Principal.SecurityIdentifier($s)),"FullControl","Allow"); $a.AddAccessRule($r) }; Set-Acl -LiteralPath $p -AclObject $a';
-    await processRun("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script], { stdin: file });
-  }
-  await protectedPath(file);
+  await protectCreatedFile(file);
 }
 function makeCloudConfig(hostPrivate, hostPublic, adminPublic) {
   if (!/^-----BEGIN OPENSSH PRIVATE KEY-----\n[A-Za-z0-9+/=\n]+\n-----END OPENSSH PRIVATE KEY-----\n?$/.test(hostPrivate) ||
@@ -43,10 +40,11 @@ function makeCloudConfig(hostPrivate, hostPublic, adminPublic) {
     hostPrivate.trimEnd().split("\n").map(s => "    " + s).join("\n") + "\n  ed25519_public: " + JSON.stringify(hostPublic) +
     "\nusers:\n  - name: ia4proof\n    lock_passwd: true\n    shell: /bin/bash\n    sudo: ['ALL=(ALL) NOPASSWD:ALL']\n    ssh_authorized_keys:\n      - " + JSON.stringify(adminPublic) + "\n";
 }
-async function createSshGuest({ stateRoot, packagePath, plan, run = processRun }) {
+async function createSshGuest({ stateRoot, packagePath, plan, run = processRun, diagnosticRun = runDiagnosticProcess, providerKind = "digitalocean" }) {
+  if (!["digitalocean", "google"].includes(providerKind)) fail("provider_invalid");
   const files = { host: path.join(stateRoot, "proof-host-ed25519"), admin: path.join(stateRoot, "proof-admin-ed25519"),
     known: path.join(stateRoot, "proof-known-hosts"), identity: path.join(stateRoot, "proof-identity.json") };
-  let identity = null, address = null;
+  let identity = null, address = null, installationAttempted = false, installationDiagnostic = null;
   const executable = process.platform === "win32" ? { ssh: "ssh.exe", scp: "scp.exe", keygen: "ssh-keygen.exe" } : { ssh: "/usr/bin/ssh", scp: "/usr/bin/scp", keygen: "/usr/bin/ssh-keygen" };
   const options = () => ["-F", process.platform === "win32" ? "NUL" : "/dev/null", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes", "-o", "UserKnownHostsFile=" + files.known,
     "-o", "ForwardAgent=no", "-o", "ClearAllForwardings=yes", "-o", "PermitLocalCommand=no", "-o", "ProxyCommand=none",
@@ -56,6 +54,15 @@ async function createSshGuest({ stateRoot, packagePath, plan, run = processRun }
   async function remote(command, cfg = {}) {
     if (!address) fail("host_not_bound");
     return run(executable.ssh, [...options(), "ia4proof@" + address, command], cfg);
+  }
+  async function diagnosticRemote(script, { signal, timeoutMs }) {
+    if (!address) fail("host_not_bound");
+    // One invocation only. Even a full PASS marker followed by SSH 255 is
+    // uncertain transport, never permission to replay the installer.
+    const result = await diagnosticRun(executable.ssh, [...options(), "ia4proof@" + address, "sudo -n bash -s"],
+      { signal, timeoutMs: Math.max(1, timeoutMs - 5000), maxBytes: 65536, stdin: script });
+    if (!validateInstallDiagnostic(result)) fail("installation_diagnostic_invalid");
+    return result;
   }
   async function initialize({ missionId }) {
     // No private key is generated when the package changed or permissions are
@@ -78,14 +85,15 @@ async function createSshGuest({ stateRoot, packagePath, plan, run = processRun }
     }
     for (const privateFile of [files.host, files.admin]) await protectedPath(privateFile);
     const hostPrivate = await fs.readFile(files.host, "utf8");
-    identity.cloudConfig = makeCloudConfig(hostPrivate.replaceAll("\r\n", "\n"), identity.hostPublic, identity.adminPublic);
+    if (providerKind === "google") identity.startupScript = require("./vm-proof-google-bootstrap").makeGoogleBootstrap(hostPrivate.replaceAll("\r\n", "\n"), identity.hostPublic, identity.adminPublic);
+    else identity.cloudConfig = makeCloudConfig(hostPrivate.replaceAll("\r\n", "\n"), identity.hostPublic, identity.adminPublic);
   }
   return {
     prepareLocalIdentity: initialize,
-    createIdentityPayload() { if (!identity) fail("identity_not_prepared"); return { cloudConfig: identity.cloudConfig, adminPublicKey: identity.adminPublic }; },
+    createIdentityPayload() { if (!identity) fail("identity_not_prepared"); return providerKind === "google" ? { startupScript: identity.startupScript } : { cloudConfig: identity.cloudConfig, adminPublicKey: identity.adminPublic }; },
     async bindHost(droplet, { missionId }) {
       if (!identity) await initialize({ missionId });
-      const ips = droplet.networks?.v4?.filter(n => n.type === "public").map(n => n.ip_address) || [];
+      const ips = providerKind === "google" ? (droplet.networkInterfaces || []).flatMap(n => (n.accessConfigs || []).map(a=>a.natIP)) : droplet.networks?.v4?.filter(n => n.type === "public").map(n => n.ip_address) || [];
       if (ips.length !== 1) fail("public_ip_ambiguous"); address = publicIPv4(ips[0]);
       await fs.writeFile(files.known, address + " " + identity.hostPublic + "\n", { mode: 0o600, flag: "w" });
       await protectNewFile(files.known);
@@ -96,12 +104,12 @@ async function createSshGuest({ stateRoot, packagePath, plan, run = processRun }
       const deadline = Date.now() + timeoutMs;
       while (true) {
         if (signal?.aborted || Date.now() >= deadline) fail("host_not_ready");
-        try { await remote("true", { signal, timeoutMs: Math.min(10000, deadline - Date.now()) }); break; }
+        try { await remote(providerKind === "google" ? "sudo -n grep -qx GOOGLE_BOOTSTRAP=PASS /run/ia4tube-google-proof-ready" : "true", { signal, timeoutMs: Math.min(10000, deadline - Date.now()) }); break; }
         catch { if (signal?.aborted || Date.now() >= deadline) fail("host_not_ready"); }
         await new Promise(resolve => setTimeout(resolve, Math.min(1000, deadline - Date.now())));
       }
       // Wait for cloud-init completion without skipping pinned host verification.
-      await remote("sudo -n cloud-init status --wait", { signal, timeoutMs });
+      if (providerKind !== "google") await remote("sudo -n cloud-init status --wait", { signal, timeoutMs });
       const bytes = await fs.readFile(packagePath); if (sha256(bytes) !== plan.packageSha256) fail("package_changed");
       await run(executable.scp, [...options(), "--", packagePath, "ia4proof@" + address + ":/var/tmp/ia4tube-proof-bundle.tar"], { signal, timeoutMs });
       // Archive is produced by our fixed builder and hash-checked both sides.
@@ -114,11 +122,30 @@ async function createSshGuest({ stateRoot, packagePath, plan, run = processRun }
       return { passed: true, convertersStarted: 0 };
     },
     async install({ signal, timeoutMs }) {
-      const boot = await remote("sudo -n bash /var/tmp/ia4tube-proof-bundle/scripts/media-vm/bootstrap-ubuntu24.sh", { signal, timeoutMs });
-      if (!/^VM_BOOTSTRAP=PASS$/m.test(boot)) fail("bootstrap_failed");
-      const out = await remote("sudo -n bash /var/tmp/ia4tube-proof-bundle/" + MANIFEST.installer + " --synthetic-proof", { signal, timeoutMs });
-      if (!/^VM_INSTALLATION=PASS$/m.test(out)) fail("installation_failed");
-      return { passed: true, convertersStarted: 0 };
+      if (installationAttempted) fail("installation_repeat_refused");
+      installationAttempted = true;
+      installationDiagnostic = await diagnosticRemote(installationScript(), { signal, timeoutMs });
+      try { await atomicWrite(path.join(stateRoot, "installation-diagnostics.json"), {
+        schema: 1, missionId: identity.missionId, planSha256: plan.approvalSha256, observation: installationDiagnostic
+      }); } catch { throw Object.assign(new Error("vm_proof_ssh_installation_persistence_failed"), {
+        code: "vm_proof_ssh_installation_persistence_failed", diagnostic: installationDiagnostic }); }
+      if (!installationDiagnostic.installationPassed) throw Object.assign(new Error("vm_proof_ssh_installation_" + installationDiagnostic.classification), {
+        code: "vm_proof_ssh_installation_" + installationDiagnostic.classification, diagnostic: installationDiagnostic });
+      return { passed: true, convertersStarted: 0, diagnostic: installationDiagnostic };
+    },
+    async collectInstallationDiagnostics({ missionId, signal, timeoutMs }) {
+      const diagnostic = await diagnosticRemote(collectInstallationScript(), { signal, timeoutMs });
+      const collectionSucceeded = diagnostic.exitCode === 0 && !diagnostic.timedOut && !diagnostic.aborted &&
+        !diagnostic.spawnFailed && !diagnostic.stdinFailed && !diagnostic.collectionError && !diagnostic.remoteCaptureFailed &&
+        diagnostic.signal === null && !diagnostic.protocolInvalid && diagnostic.markers.length > 0;
+      // This is an independent observation. It does not rewrite the initial
+      // transport result, and does not admit conversions after uncertain install.
+      const safe = { schema: 1, missionId, planSha256: plan.approvalSha256, collectionSucceeded,
+        initialObservation: installationDiagnostic, collectedObservation: diagnostic };
+      try { await atomicWrite(path.join(stateRoot, "installation-collection.json"), safe); }
+      catch { throw Object.assign(new Error("vm_proof_ssh_installation_collection_persistence_failed"), {
+        code:"vm_proof_ssh_installation_collection_persistence_failed",diagnostic }); }
+      return { sanitized: true, sha256: sha256(JSON.stringify(safe)), collectionSucceeded, diagnostic };
     },
     async runSequence({ signal, timeoutMs }) {
       const out = await remote("sudo -n -u ia4tube-coordinator /opt/ia4tube-media/runtime/usr/bin/node /opt/ia4tube-media/proof/" + MANIFEST.guestDispatcher + " --run", { signal, timeoutMs });

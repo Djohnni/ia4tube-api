@@ -16,7 +16,7 @@ async function temporary(t, secure = false) {
     await fs.rm(actual, { recursive: true, force: false }); // Only this newly created, verified synthetic fixture.
   });
   if (secure && process.platform === "win32") {
-    const script = '$ErrorActionPreference="Stop"; $sid=[System.Security.Principal.WindowsIdentity]::GetCurrent().User; $a=New-Object System.Security.AccessControl.DirectorySecurity; $a.SetOwner($sid); $a.SetAccessRuleProtection($true,$false); foreach($s in @($sid.Value,"S-1-5-18")) { $r=New-Object System.Security.AccessControl.FileSystemAccessRule((New-Object System.Security.Principal.SecurityIdentifier($s)),"FullControl","ContainerInherit,ObjectInherit","None","Allow"); $a.AddAccessRule($r) }; Set-Acl -LiteralPath $env:VM_PROOF_FIXTURE -AclObject $a';
+    const script = '$ErrorActionPreference="Stop"; $sid=[System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value; $a=New-Object System.Security.AccessControl.DirectorySecurity; $a.SetSecurityDescriptorSddlForm(("D:P(A;OICI;FA;;;"+$sid+")(A;OICI;FA;;;SY)"),[System.Security.AccessControl.AccessControlSections]::Access); (Get-Item -LiteralPath $env:VM_PROOF_FIXTURE -Force).SetAccessControl($a)';
     const r = spawnSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script], { windowsHide: true, shell: false, encoding: "utf8", timeout: 10000,
       env: { SystemRoot: process.env.SystemRoot, PATH: process.env.PATH, VM_PROOF_FIXTURE: folder } });
     assert.equal(r.status, 0, "synthetic fixture private ACL created: " + r.stderr);

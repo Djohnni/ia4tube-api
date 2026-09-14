@@ -21,7 +21,11 @@ async function protectCreatedFile(file) {
   // protected external directory. Never change an existing provider credential.
   if (process.platform !== "win32") await fs.chmod(file, 0o600);
   else {
-    const script = '$ErrorActionPreference="Stop"; try { $sid=[System.Security.Principal.WindowsIdentity]::GetCurrent().User; $a=New-Object System.Security.AccessControl.FileSecurity; $a.SetOwner($sid); $a.SetAccessRuleProtection($true,$false); foreach($s in @($sid.Value,"S-1-5-18")) { $r=New-Object System.Security.AccessControl.FileSystemAccessRule((New-Object System.Security.Principal.SecurityIdentifier($s)),"FullControl","Allow"); $a.AddAccessRule($r) }; Set-Acl -LiteralPath $env:IA4TUBE_VM_PROTECTED_PATH -AclObject $a; exit 0 } catch { exit 4 }';
+    // Persist only the DACL of our newly created file. Set-Acl with a fresh
+    // security descriptor can request SACL/owner privileges unavailable to a
+    // normal Windows user. Do not request elevation or weaken the validator.
+    // The owner remains unchanged and is independently checked below.
+    const script = '$ErrorActionPreference="Stop"; try { $p=$env:IA4TUBE_VM_PROTECTED_PATH; $f=Get-Item -LiteralPath $p -Force; if($f.PSIsContainer -or ($f.Attributes -band [IO.FileAttributes]::ReparsePoint)) { exit 5 }; $sid=[System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value; $a=New-Object System.Security.AccessControl.FileSecurity; $a.SetSecurityDescriptorSddlForm(("D:P(A;;FA;;;"+$sid+")(A;;FA;;;SY)"),[System.Security.AccessControl.AccessControlSections]::Access); $f.SetAccessControl($a); exit 0 } catch { exit 4 }';
     const r = spawnSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script], { shell: false, windowsHide: true,
       stdio: "ignore", timeout: 10000, env: { SystemRoot: process.env.SystemRoot, PATH: process.env.PATH, IA4TUBE_VM_PROTECTED_PATH: path.resolve(file) } });
     if (r.status !== 0) fail("new_file_protection_failed");

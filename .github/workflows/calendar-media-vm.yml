@@ -27,7 +27,7 @@ concurrency:
 
 jobs:
   synthetic-vm:
-    if: github.repository == 'Djohnni/ia4tube-api' && github.ref == 'refs/heads/validation/vm-media-pilot-20260913'
+    if: github.repository == 'Djohnni/ia4tube-api' && github.ref == 'refs/heads/validation/vm-media-pilot-20260913' && !contains(github.event.head_commit.message, '[installation-only]')
     runs-on: ubuntu-24.04
     timeout-minutes: 40
     steps:
