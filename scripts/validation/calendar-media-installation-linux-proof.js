@@ -65,33 +65,29 @@ if [[ -e "$node_entry" || -L "$node_entry" ]]; then
   if [[ -L "$node_entry" ]]; then
     node_type=symlink
     node_link=$(readlink -- "$node_entry")
-    [[ "$node_link" == /* && "$node_link" != *$'\n'* && "$node_link" != *$'\r'* ]]
+    [[ $(stat -c '%s' -- "$node_entry") -le 4096 ]]
+    read -r node_hash _ < <(readlink -n -- "$node_entry" | sha256sum)
+    node_hash_kind=symlink_text_not_target
+    node_link_observed=not_exported_unrecognized_path
+    if [[ "$node_link" =~ ^/(usr/local|opt|usr/bin|home/runner)/[A-Za-z0-9._+/-]+$ && $(printf '%s' "$node_link" | wc -c) -le 240 ]]; then node_link_observed="$node_link"; fi
   elif [[ -f "$node_entry" ]]; then node_type=regular;
+    [[ $(stat -c '%s' -- "$node_entry") -ge 1 && $(stat -c '%s' -- "$node_entry") -le 134217728 ]]
+    read -r node_hash _ < <(sha256sum -- "$node_entry")
+    node_hash_kind=regular_entry_bytes
+    node_link_observed=not_a_symlink
   else refuse_precondition; fi
   precondition_stage=runner_node_entry_owner
   [[ $(stat -c '%u' -- "$node_entry") == 0 ]]
-  node_real=$(readlink -f -- "$node_entry")
-  precondition_stage=runner_node_runtime_location
-  case "$node_real" in
-    /usr/local/bin/node|/opt/hostedtoolcache/node/*/x64/bin/node|/opt/node-v*-linux-x64/bin/node|/usr/local/lib/nodejs/node-v*-linux-x64/bin/node) ;;
-    *) refuse_precondition ;;
-  esac
-  [[ -f "$node_real" && ! -L "$node_real" && $(stat -c '%u' -- "$node_real") == 0 ]]
-  node_mode=$(stat -c '%a' -- "$node_real")
-  [[ "$node_mode" =~ ^[0-7]{3,4}$ ]]
-  (( (8#$node_mode & 8#022) == 0 ))
-  precondition_stage=runner_node_runtime_version
-  node_version=$(timeout --signal=TERM --kill-after=1s 5s "$node_entry" --version)
-  [[ "$node_version" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
-  read -r node_hash _ < <(sha256sum -- "$node_real")
+  node_mode=$(stat -c '%a' -- "$node_entry")
   [[ "$node_hash" =~ ^[a-f0-9]{64}$ ]]
   node_identity=$(stat -c '%d:%i:%u:%a:%h' -- "$node_entry")
-  printf 'runner_node_entry_type=%s\nrunner_node_entry_owner=0\nrunner_node_entry_identity=%s\nrunner_node_runtime_realpath=%s\nrunner_node_runtime_version=%s\nrunner_node_runtime_sha256=%s\n' \
-    "$node_type" "$node_identity" "$node_real" "$node_version" "$node_hash"
+  printf 'runner_node_entry_type=%s\nrunner_node_entry_owner=0\nrunner_node_entry_mode=%s\nrunner_node_entry_identity=%s\nrunner_node_link_observed=%s\nrunner_node_entry_sha256=%s\nrunner_node_hash_kind=%s\nrunner_node_execution=not_executed_not_trusted_as_installer_runtime\n' \
+    "$node_type" "$node_mode" "$node_identity" "$node_link_observed" "$node_hash" "$node_hash_kind"
   precondition_stage=runner_node_preserve_entry
   mv -T -n -- "$node_entry" "$node_backup"
   [[ ! -e "$node_entry" && ! -L "$node_entry" && $(stat -c '%d:%i:%u:%a:%h' -- "$node_backup") == "$node_identity" ]]
-  read -r node_preserved_hash _ < <(sha256sum -- "$node_backup")
+  if [[ "$node_type" == symlink ]]; then read -r node_preserved_hash _ < <(readlink -n -- "$node_backup" | sha256sum);
+  else read -r node_preserved_hash _ < <(sha256sum -- "$node_backup"); fi
   [[ "$node_preserved_hash" == "$node_hash" ]]
   printf 'runner_node_preserved=original_entry_moved_to_exclusive_backup\n'
 else
@@ -103,7 +99,9 @@ async function prepare() {
   const tempStat = await fs.lstat(cfg.temp); if (!tempStat.isDirectory() || tempStat.isSymbolicLink()) fail("installation_ci_temp_unsafe");
   const before = jsonSafeRecords(sudo(inventoryScript));
   safePrint("INSTALLATION_CI_INVENTORY_BEFORE", before);
-  if ((await fs.realpath(process.execPath)) === "/usr/local/bin/node") fail("installation_ci_controller_runtime_not_separate");
+  const controllerRuntime = await fs.realpath(process.execPath);
+  if (process.execPath === "/usr/local/bin/node" || controllerRuntime === "/usr/local/bin/node" || !/^\/opt\/hostedtoolcache\/node\/24\.15\.0\/x64\/bin\/node$/.test(controllerRuntime)) fail("installation_ci_controller_runtime_not_separate");
+  safePrint("INSTALLATION_CI_CONTROLLER_RUNTIME", { source: "explicit_setup_node_cache", path: controllerRuntime, version: process.version });
   const { buildPackage } = require("./vm-proof-package");
   const built = await buildPackage(ROOT), packageHash = sha256(built.bytes);
   if (packageHash !== cfg.expected) { safePrint("INSTALLATION_CI_PACKAGE_MISMATCH", { expected: cfg.expected, observed: packageHash }); fail("installation_ci_package_changed"); }

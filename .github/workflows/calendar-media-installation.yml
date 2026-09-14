@@ -47,6 +47,9 @@ jobs:
           printf 'INSTALLATION_CI_BUILDER_EXIT=%s\n' "$builder_exit"
           exit "$builder_exit"
       - name: Focal diagnostic, SSH boundary and actual synthetic shell fixtures
+        # CI precondition-only revisions reuse the already-passed 45 tests;
+        # they neither change this wrapper nor rerun the five media cases.
+        if: ${{ !contains(github.event.head_commit.message, '[ci-preconditions-only]') }}
         shell: bash
         run: |
           set -euo pipefail
