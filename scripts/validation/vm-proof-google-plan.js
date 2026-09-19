@@ -4,6 +4,11 @@ const { MANIFEST, canonical, sha256 } = require("./vm-proof-manifest");
 const net = require("node:net");
 const PACKAGE = "e81b4d31d4fb0d1f861f439b72cca0e919cf89202ee093205e7c719c09c6e416";
 const IMAGE = "projects/ubuntu-os-cloud/global/images/ubuntu-2404-noble-amd64-v20260906";
+// Explicit replacement authorized on 2026-09-19 for the next operational
+// mission. Keep the historical default and every historical plan/hash intact.
+// This is an immutable ID binding, never a family/latest/deprecation fallback.
+const OPERATIONAL_IMAGE = "projects/ubuntu-os-cloud/global/images/ubuntu-2404-noble-amd64-v20260918";
+const OPERATIONAL_IMAGE_ID = "763874002631433611";
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/;
 const KINDS = Object.freeze(["networks", "subnetworks", "firewalls", "instances", "disks"]);
 function fail(code) { throw Object.assign(new Error("gcp_proof_" + code), { code: "gcp_proof_" + code }); }
@@ -25,7 +30,7 @@ function createGooglePlan({ imageId = null, operatorIpv4 = null, resolution = nu
     schema: 2, provider: "google", kind: "ia4tube-google-synthetic-proof", paidExecutionDefault: false,
     project: "ia4tube-futebol", region: "us-central1", zone: "us-central1-a",
     machineType: "e2-medium", visibleVcpus: 2, sustainedVcpuFraction: 1, memoryMiB: 4096,
-    sourceImage: IMAGE, sourceImageId: imageId, packageSha256: PACKAGE,
+    sourceImage: imageId === OPERATIONAL_IMAGE_ID ? OPERATIONAL_IMAGE : IMAGE, sourceImageId: imageId, packageSha256: PACKAGE,
     diskType: "pd-standard", diskGiB: 50, autoDeleteDisk: true,
     networkMode: "dedicated-custom", subnetCidr: "10.203.0.0/28", operatorIpv4,
     firewallPort: 22, maxExistenceSeconds: 7200, terminationAction: "DELETE",
@@ -139,4 +144,4 @@ function bindResource(plan, state, kind, resource, { strict = false } = {}) {
   }
   return { id, createdAt: created };
 }
-module.exports = { PACKAGE, IMAGE, UUID, KINDS, fail, googleId, ipv4, createGooglePlan, validateGooglePlan, scope, resourceName, resourcePath, relativeLink, description, bodyFor, bindResource };
+module.exports = { PACKAGE, IMAGE, OPERATIONAL_IMAGE, OPERATIONAL_IMAGE_ID, UUID, KINDS, fail, googleId, ipv4, createGooglePlan, validateGooglePlan, scope, resourceName, resourcePath, relativeLink, description, bodyFor, bindResource };
