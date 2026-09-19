@@ -5,11 +5,14 @@
 const { createGooglePlan, validateGooglePlan, UUID } = require("../validation/vm-proof-google-plan");
 const { canonical, sha256 } = require("../validation/vm-proof-manifest");
 const HASH = /^[a-f0-9]{64}$/;
+// Product identities are derived UUIDv5. Mission/worker identities retain the
+// narrower random UUIDv4 provider contract; do not recreate a product identity.
+const OWNER_UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/;
 function fail(code) { throw Object.assign(new Error("media_pilot_" + code), { code: "media_pilot_" + code }); }
 function createOperationalPlan({ imageId, operatorIpv4, packageSha256, packageReviewSha256, authorizationSha256,
   ownerCompanyId, ownerUserId, workerId, finance, admissionSeconds = 5400 } = {}) {
   if (![packageSha256, packageReviewSha256, authorizationSha256].every(v => HASH.test(v || "")) ||
-      ![ownerCompanyId, ownerUserId, workerId].every(v => UUID.test(v || ""))) fail("plan_binding_invalid");
+      ![ownerCompanyId, ownerUserId].every(v => OWNER_UUID.test(v || "")) || !UUID.test(workerId || "")) fail("plan_binding_invalid");
   if (!Number.isSafeInteger(admissionSeconds) || admissionSeconds < 600 || admissionSeconds > 5400) fail("window_invalid");
   const keys = "alreadyIncurredUsd,buildAdditionalUsd,computeHourlyUsd,diskGiBHourlyUsd,egressAllowanceGiB,egressUsdPerGiB,ipv4HourlyUsd,otherAllowanceUsd,pilotReferenceUsd,pricingEvidenceSha256,verifiedAt";
   if (!finance || Object.keys(finance).sort().join() !== keys || !HASH.test(finance.pricingEvidenceSha256 || "") ||

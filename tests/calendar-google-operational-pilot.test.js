@@ -98,6 +98,13 @@ test("operational plan is owner-bound, priced, no recurrence or old synthetic ca
   assert.throws(()=>validateOperationalPlan(p,{now:beginning+86400001}),/pricing_check_stale/);
   assert.throws(()=>makePlan({finance:{...Object.fromEntries(Object.entries(p.finance).filter(([k])=>!["estimatedInfrastructureUsd","estimatedMaximumUsd","invoiceCapGuaranteed"].includes(k))),alreadyIncurredUsd:5}}),/budget_exceeded/);
 });
+test("operational owner accepts derived UUIDv5 while worker stays random UUIDv4",()=>{
+  const ownerCompanyId='00000000-0000-5000-8000-000000000001',ownerUserId='00000000-0000-5000-8000-000000000002';
+  const p=makePlan({ownerCompanyId,ownerUserId});
+  assert.equal(validateOperationalPlan(p),p);assert.equal(p.ownerCompanyId,ownerCompanyId);assert.equal(p.ownerUserId,ownerUserId);
+  assert.throws(()=>makePlan({workerId:ownerCompanyId}),/plan_binding_invalid/);
+  assert.throws(()=>makePlan({ownerCompanyId:'00000000-0000-5000-0000-000000000001'}),/plan_binding_invalid/);
+});
 test("single operational install/start, host bound API readiness, collect and complete external destruction",async()=>{
   const f=fixture(),r=await f.execute();assert.equal(r.failure,null);assert.equal(r.destructionConfirmed,true);assert.equal(r.syntheticCases,0);assert.equal(r.invoiceUsd,null);
   assert.equal(f.resources.size,0);assert.deepEqual(f.guestCalls,["preflight","install","probe","prepare_api","start","close_api","stop","collect"]);

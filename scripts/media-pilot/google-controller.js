@@ -47,13 +47,17 @@ function summary(s, plan) {
 // module receives only a closed-schema readiness receipt, never DB credentials.
 // A restart of an existing journal is cleanup-only, never another paid launch.
 async function runOperationalPilot({ plan, approvalSha256, store, provider, guest, prepareApi, observeApi, closeApi,
-  now = Date.now, sleep = ms => new Promise(r => setTimeout(r, ms)), signal = null, onState = () => {} }) {
+  now = Date.now, sleep = ms => new Promise(r => setTimeout(r, ms)), signal = null, onState = () => {}, cleanupOnly = false }) {
   validateOperationalPlan(plan);
   if (approvalSha256 !== plan.approvalSha256) fail("bound_authorization_required");
+  if (typeof cleanupOnly !== "boolean") fail("cleanup_mode_invalid");
   if (typeof prepareApi !== "function" || typeof observeApi !== "function" || typeof closeApi !== "function") fail("api_control_required");
   const p = plan.infrastructure;
   return store.exclusive(async () => {
     let s = await store.read(), fresh = s === null;
+    // The independent recovery entry point must never turn an absent journal
+    // into a new billable mission, even if all ordinary prerequisites exist.
+    if (cleanupOnly && fresh) fail("cleanup_journal_required");
     const call = fn => bounded(fn, 20000);
     if (fresh) {
       validateOperationalPlan(plan, { now: now() });
