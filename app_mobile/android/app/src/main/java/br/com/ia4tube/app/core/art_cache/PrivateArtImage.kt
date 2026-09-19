@@ -56,6 +56,11 @@ fun PrivateArtImage(url: String, token: String, contentDescription: String,
     // Recreate all bitmap/display state on owner replacement, not just the network request.
     key(url, token, epoch, revalidationKey) {
         val allowed = token.isNotBlank() && source.currentToken() == token
+        // Compose runtime 1.7.5 lint reports this producer despite the four setter
+        // paths below (also with explicit receivers/typed setters). Real rendering
+        // tests verify saved -> final, invalid-session and error transitions.
+        // Scope the false-positive treatment to this declaration, not the file/build.
+        @Suppress("ProduceStateDoesNotAssignValue")
         val display by produceState(PrivateArtDisplay(), url, token, allowed) {
             if (!allowed || url.isBlank()) {
                 value = PrivateArtDisplay(checking = false, failed = true)

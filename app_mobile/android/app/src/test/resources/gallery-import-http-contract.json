@@ -1,0 +1,244 @@
+{
+  "capabilities": {
+    "ok": true,
+    "enabled": true,
+    "localSimulation": true,
+    "scheduling": {
+      "enabled": true,
+      "localSimulation": true
+    },
+    "upload": {
+      "origin": "https://ia4tube-api.onrender.com",
+      "chunkBytes": 5242880,
+      "maxImageBytes": 33554432,
+      "maxVideoBytes": 104857600
+    },
+    "preparation": {
+      "enabled": true,
+      "maxVideoSeconds": 60,
+      "photoMusicSeconds": 15
+    },
+    "musicTracks": [
+      {
+        "id": "synthetic-local-tone",
+        "commercialRightsConfirmed": false,
+        "testOnly": true
+      }
+    ],
+    "identity": {
+      "companyId": "af355ff4-4df9-5865-94f8-c20864dc4a43",
+      "userId": "86625b20-9ba8-5167-a28d-cd642326b058"
+    }
+  },
+  "source": {
+    "ok": true,
+    "upload": {
+      "uploadId": "019a88ce-b12a-4845-8c30-9d4b12014e81",
+      "assetId": "d7e485c5-e7a6-47fc-a4b1-4d2a31d11e32",
+      "kind": "image",
+      "mimeType": "image/jpeg",
+      "sizeBytes": 18639,
+      "chunkBytes": 5242880,
+      "partCount": 1,
+      "state": "uploaded",
+      "createdAt": 1789274657651,
+      "updatedAt": 1789274657822,
+      "errorCode": null,
+      "preparation": "pending",
+      "verification": {
+        "sha256": "30ac7a2f22c2f0f23bc844bdbde31b8fd1dba2457d41a98a742666529ad0e5b9",
+        "sizeBytes": 18639,
+        "mimeType": "image/jpeg"
+      },
+      "ready": false
+    },
+    "source": {
+      "kind": "generated_art",
+      "calendarItemId": "d92f3d20c8f7d58ae1acb427ca5fe5a17cf86ada",
+      "revision": 2,
+      "sha256": "30ac7a2f22c2f0f23bc844bdbde31b8fd1dba2457d41a98a742666529ad0e5b9",
+      "width": 1080,
+      "height": 1080
+    },
+    "identity": {
+      "companyId": "af355ff4-4df9-5865-94f8-c20864dc4a43",
+      "userId": "86625b20-9ba8-5167-a28d-cd642326b058"
+    }
+  },
+  "asset": {
+    "ok": true,
+    "asset": {
+      "assetId": "d7e485c5-e7a6-47fc-a4b1-4d2a31d11e32",
+      "uploadId": "019a88ce-b12a-4845-8c30-9d4b12014e81",
+      "mediaRevision": 1,
+      "currentRevision": 1,
+      "previousReadyRevision": 1,
+      "jobId": "39df03cf-2c46-4693-9905-7402ffb80d74",
+      "state": "ready",
+      "ready": true,
+      "errorCode": null,
+      "selection": {
+        "kind": "image",
+        "targets": [
+          "feed",
+          "story"
+        ],
+        "audioMode": "none",
+        "musicTrackId": null,
+        "musicalTargets": [],
+        "shareToFeed": false
+      },
+      "testOnly": false,
+      "previewDigest": "7c3af5128d4b67947a6393099aa76b54980e0258d13a732d793f680e48766f4a",
+      "variants": {
+        "feed": {
+          "sha256": "6c984ff259407043e00d3636fb1a99db08e77bf45e1c8294a133f4b19a632621",
+          "sourceSha256": "30ac7a2f22c2f0f23bc844bdbde31b8fd1dba2457d41a98a742666529ad0e5b9",
+          "mimeType": "image/jpeg",
+          "width": 1080,
+          "height": 1350,
+          "size": 26676,
+          "durationSeconds": null,
+          "audioMode": "none",
+          "hasAudio": false
+        },
+        "story": {
+          "sha256": "981b054c871a181bc4b8a238b371f882c3529ce66baca0275a21fbdab66382ab",
+          "sourceSha256": "30ac7a2f22c2f0f23bc844bdbde31b8fd1dba2457d41a98a742666529ad0e5b9",
+          "mimeType": "image/jpeg",
+          "width": 1080,
+          "height": 1920,
+          "size": 30947,
+          "durationSeconds": null,
+          "audioMode": "none",
+          "hasAudio": false
+        }
+      },
+      "createdAt": 1789274657830,
+      "updatedAt": 1789274658243
+    }
+  },
+  "preview": {
+    "ok": true,
+    "preview": {
+      "assetId": "d7e485c5-e7a6-47fc-a4b1-4d2a31d11e32",
+      "mediaRevision": 1,
+      "currentRevision": 1,
+      "previewDigest": "7c3af5128d4b67947a6393099aa76b54980e0258d13a732d793f680e48766f4a",
+      "testOnly": false,
+      "variants": [
+        {
+          "target": "feed",
+          "kind": "image",
+          "mimeType": "image/jpeg",
+          "sha256": "6c984ff259407043e00d3636fb1a99db08e77bf45e1c8294a133f4b19a632621",
+          "sourceSha256": "30ac7a2f22c2f0f23bc844bdbde31b8fd1dba2457d41a98a742666529ad0e5b9",
+          "width": 1080,
+          "height": 1350,
+          "sizeBytes": 26676,
+          "durationMs": null,
+          "audioMode": "none",
+          "hasAudio": false,
+          "url": "https://ia4tube-api.onrender.com/v1/social/calendar/imports/assets/d7e485c5-e7a6-47fc-a4b1-4d2a31d11e32/revisions/1/preview/feed"
+        },
+        {
+          "target": "story",
+          "kind": "image",
+          "mimeType": "image/jpeg",
+          "sha256": "981b054c871a181bc4b8a238b371f882c3529ce66baca0275a21fbdab66382ab",
+          "sourceSha256": "30ac7a2f22c2f0f23bc844bdbde31b8fd1dba2457d41a98a742666529ad0e5b9",
+          "width": 1080,
+          "height": 1920,
+          "sizeBytes": 30947,
+          "durationMs": null,
+          "audioMode": "none",
+          "hasAudio": false,
+          "url": "https://ia4tube-api.onrender.com/v1/social/calendar/imports/assets/d7e485c5-e7a6-47fc-a4b1-4d2a31d11e32/revisions/1/preview/story"
+        }
+      ],
+      "thumbnail": null
+    }
+  },
+  "availability": {
+    "ok": true,
+    "availability": {
+      "identity": {
+        "companyId": "af355ff4-4df9-5865-94f8-c20864dc4a43",
+        "userId": "86625b20-9ba8-5167-a28d-cd642326b058"
+      },
+      "assetId": "d7e485c5-e7a6-47fc-a4b1-4d2a31d11e32",
+      "mediaRevision": 1,
+      "previewDigest": "7c3af5128d4b67947a6393099aa76b54980e0258d13a732d793f680e48766f4a",
+      "ready": true,
+      "connected": true,
+      "authorized": true,
+      "automaticPreference": true,
+      "username": "synthetic_local_account",
+      "localSimulation": true,
+      "commercialReady": false,
+      "blockedReason": null
+    }
+  },
+  "schedule": {
+    "ok": true,
+    "schedule": {
+      "id": "96513cef37640ccd38bd16e509692afd90011e60",
+      "assetId": "d7e485c5-e7a6-47fc-a4b1-4d2a31d11e32",
+      "mediaRevision": 1,
+      "previewDigest": "7c3af5128d4b67947a6393099aa76b54980e0258d13a732d793f680e48766f4a",
+      "idempotencyKey": "synthetic-golden-schedule",
+      "date": "2026-09-14",
+      "time": "01:44",
+      "caption": "Material sintético local",
+      "revision": 1,
+      "phase": "ready",
+      "automaticEnabled": true,
+      "localSimulation": true,
+      "media": {
+        "assetId": "d7e485c5-e7a6-47fc-a4b1-4d2a31d11e32",
+        "mediaRevision": 1,
+        "currentRevision": 1,
+        "previewDigest": "7c3af5128d4b67947a6393099aa76b54980e0258d13a732d793f680e48766f4a",
+        "testOnly": false,
+        "variants": [
+          {
+            "target": "feed",
+            "kind": "image",
+            "mimeType": "image/jpeg",
+            "sha256": "6c984ff259407043e00d3636fb1a99db08e77bf45e1c8294a133f4b19a632621",
+            "sourceSha256": "30ac7a2f22c2f0f23bc844bdbde31b8fd1dba2457d41a98a742666529ad0e5b9",
+            "width": 1080,
+            "height": 1350,
+            "sizeBytes": 26676,
+            "durationMs": null,
+            "audioMode": "none",
+            "hasAudio": false,
+            "url": "https://ia4tube-api.onrender.com/v1/social/calendar/imports/schedules/96513cef37640ccd38bd16e509692afd90011e60/preview/feed"
+          },
+          {
+            "target": "story",
+            "kind": "image",
+            "mimeType": "image/jpeg",
+            "sha256": "981b054c871a181bc4b8a238b371f882c3529ce66baca0275a21fbdab66382ab",
+            "sourceSha256": "30ac7a2f22c2f0f23bc844bdbde31b8fd1dba2457d41a98a742666529ad0e5b9",
+            "width": 1080,
+            "height": 1920,
+            "sizeBytes": 30947,
+            "durationMs": null,
+            "audioMode": "none",
+            "hasAudio": false,
+            "url": "https://ia4tube-api.onrender.com/v1/social/calendar/imports/schedules/96513cef37640ccd38bd16e509692afd90011e60/preview/story"
+          }
+        ],
+        "thumbnail": null,
+        "sourceKind": "generated_art",
+        "shareToFeed": false
+      },
+      "selectedTargets": [
+        "feed",
+        "story"
+      ],
+      "destination": "multiple"
+    }
+  }
+}

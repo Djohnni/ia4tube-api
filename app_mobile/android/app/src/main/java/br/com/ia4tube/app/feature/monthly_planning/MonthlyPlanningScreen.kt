@@ -115,6 +115,7 @@ import java.util.TimeZone
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import br.com.ia4tube.app.feature.calendar.*
+import br.com.ia4tube.app.feature.calendar.imports.GalleryImportWorkflowHost
 
 @Composable
 fun MonthlyPlanningScreen(
@@ -126,10 +127,12 @@ fun MonthlyPlanningScreen(
     onOpenPlans: () -> Unit,
     tokenProvider: () -> String = { "" }
 ) {
-    val previewToken = remember { tokenProvider() }
+    val previewToken = tokenProvider()
     val calendarModel = rememberCalendarModel(tokenProvider)
     val calendar by calendarModel.uiState.collectAsState()
-    var showGallery by remember { mutableStateOf(false) }
+    var showGallery by remember(previewToken) { mutableStateOf(false) }
+    var showImport by remember(previewToken) { mutableStateOf(false) }
+    var cancelImported by remember(previewToken) { mutableStateOf<ScheduledArt?>(null) }
     val state by viewModel.uiState.collectAsState()
     val context = LocalContext.current
     val fileReader = remember(context) { AndroidFileReader(context) }
@@ -465,18 +468,31 @@ fun MonthlyPlanningScreen(
     }
 
     ScreenScaffold {
-        if (showGallery) {
-            CalendarGallery(calendarModel, previewToken) { showGallery = false; viewModel.refreshGeneralCalendar() }
+        if (showImport) {
+            GalleryImportWorkflowHost(tokenProvider = tokenProvider,
+                onBack = { showImport = false; calendarModel.refresh() },
+                onScheduled = { showImport = false; calendarModel.refresh(); viewModel.refreshGeneralCalendar() })
+        } else if (showGallery) {
+            CalendarGallery(calendarModel, previewToken, tokenProvider = tokenProvider) { showGallery = false; viewModel.refreshGeneralCalendar() }
         } else if (showGeneralCalendar) {
             MonthlyPlanningGeneralCalendarContent(
-                state = state,
+                state = state.copy(generalCalendarPosts = projectCalendarImports(state.generalCalendarPosts, calendar.data, calendar.fresh),
+                    calendarError = calendar.error ?: state.calendarError),
                 previewToken = previewToken,
                 onGallery = { showGallery = true },
+                onImport = { showImport = true },
                 onBack = { showGeneralCalendar = false },
-                onRefresh = viewModel::refreshGeneralCalendar,
+                onRefresh = { calendarModel.refresh(); viewModel.refreshGeneralCalendar() },
                 onOpenOrder = onOpenOrder,
-                onRemove = { item -> viewModel.removeFromGeneralCalendar(item.key) },
-                onReschedule = viewModel::rescheduleGeneralCalendarItem,
+                onRemove = { item ->
+                    if (item.calendarItemId != null) cancelImported = calendar.data.items.find { it.id == item.calendarItemId }
+                    else viewModel.removeFromGeneralCalendar(item.key)
+                },
+                onReschedule = { item, date, time ->
+                    if (item.calendarItemId != null) calendar.data.items.find { it.id == item.calendarItemId && it.revision == item.calendarRevision }?.let {
+                        calendarModel.edit(it, "schedule", date = date, time = time)
+                    } else viewModel.rescheduleGeneralCalendarItem(item, date, time)
+                },
                 onShare = viewModel::shareGeneralCalendarItem,
                 modifier = Modifier
                     .fillMaxSize()
@@ -643,6 +659,14 @@ fun MonthlyPlanningScreen(
                 Spacer(modifier = Modifier.height(18.dp))
             }
         }
+    }
+    cancelImported?.let { item ->
+        AlertDialog(onDismissRequest = { if (!calendar.busy) cancelImported = null }, title = { Text("Cancelar esta programação?") },
+            text = { Text("Somente este envio futuro será cancelado. O arquivo do telefone, a arte original e outras programações serão preservados. Um envio já iniciado não tem cancelamento garantido.") },
+            confirmButton = { TextButton(enabled = calendar.fresh && !calendar.busy && item.editable &&
+                calendar.data.items.any { it.id == item.id && it.revision == item.revision },
+                onClick = { calendarModel.edit(item, "cancel", onSuccess = { cancelImported = null }) }) { Text("Cancelar programação") } },
+            dismissButton = { TextButton(onClick = { cancelImported = null }, enabled = !calendar.busy) { Text("Voltar") } })
     }
 }
 
@@ -907,6 +931,7 @@ private fun MonthlyPlanningGeneralCalendarContent(
     state: MonthlyPlanningUiState,
     previewToken: String,
     onGallery: () -> Unit,
+    onImport: () -> Unit,
     onBack: () -> Unit,
     onRefresh: () -> Unit,
     onOpenOrder: (String) -> Unit,
@@ -935,8 +960,9 @@ private fun MonthlyPlanningGeneralCalendarContent(
             }
         }
         OutlinedButton(onClick = onGallery, modifier = Modifier.fillMaxWidth()) { Text("Ver minhas artes programadas") }
+        OutlinedButton(onClick = onImport, modifier = Modifier.fillMaxWidth()) { Text("Adicionar foto ou vídeo") }
         Text(
-            text = "Todas as artes planejadas dos seus planejamentos mensais.",
+            text = "Artes, fotos e vídeos do mesmo calendário de publicações.",
             style = MaterialTheme.typography.bodyMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant
         )

@@ -139,7 +139,7 @@ fun InstagramScreen(viewModel: InstagramViewModel, onBack: () -> Unit, tokenProv
 
     ScreenScaffold {
         if (showCalendarGallery) {
-            CalendarGallery(calendarModel, tokenProvider()) { showCalendarGallery = false; viewModel.refresh() }
+            CalendarGallery(calendarModel, tokenProvider(), tokenProvider = tokenProvider) { showCalendarGallery = false; viewModel.refresh() }
         } else Column(
             modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState()),
             verticalArrangement = Arrangement.spacedBy(16.dp)
@@ -237,7 +237,7 @@ fun InstagramScreen(viewModel: InstagramViewModel, onBack: () -> Unit, tokenProv
 
             InstagramSection("2. Imagem e legenda") {
                 if (calendar.data.next != null && !showManual) {
-                    ScheduledNextContent(calendarModel, tokenProvider()) { showCalendarGallery = true }
+                    ScheduledNextContent(calendarModel, tokenProvider(), tokenProvider = tokenProvider) { showCalendarGallery = true }
                     TextButton(onClick = { showManual = true }) { Text("Preparar outra imagem manualmente") }
                 } else {
                 if (calendar.data.next != null) TextButton(onClick = { showManual = false }) { Text("Ver próxima arte do calendário") }

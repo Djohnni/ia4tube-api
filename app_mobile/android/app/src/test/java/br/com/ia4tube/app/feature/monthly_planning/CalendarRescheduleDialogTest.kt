@@ -80,15 +80,25 @@ class CalendarRescheduleDialogTest {
 
         fun idle() {
             val main = shadowOf(Looper.getMainLooper())
-            Snapshot.sendApplyNotifications()
-            main.idle()
-            roots().forEach { view ->
-                val mode = if (view === decor) View.MeasureSpec.EXACTLY else View.MeasureSpec.AT_MOST
-                view.measure(View.MeasureSpec.makeMeasureSpec(640, mode),
-                    View.MeasureSpec.makeMeasureSpec(1782, mode))
-                view.layout(0, 0, view.measuredWidth, view.measuredHeight)
+            // Native graphics may commit a Compose Dialog during a frame, after the
+            // first root inventory. Render/drain that frame, then measure its new
+            // window as well; advancing virtual time alone is not synchronization.
+            repeat(2) {
+                Snapshot.sendApplyNotifications()
+                main.idle()
+                roots().forEach { view ->
+                    val mode = if (view === decor) View.MeasureSpec.EXACTLY else View.MeasureSpec.AT_MOST
+                    view.requestLayout()
+                    view.measure(View.MeasureSpec.makeMeasureSpec(640, mode),
+                        View.MeasureSpec.makeMeasureSpec(1782, mode))
+                    view.layout(0, 0, view.measuredWidth, view.measuredHeight)
+                    if (view.width > 0 && view.height > 0) {
+                        val frame = Bitmap.createBitmap(view.width, view.height, Bitmap.Config.ARGB_8888)
+                        view.draw(Canvas(frame)); frame.recycle()
+                    }
+                }
+                main.idleFor(Duration.ofMillis(200))
             }
-            main.idleFor(Duration.ofMillis(200))
             Snapshot.sendApplyNotifications()
             main.idle()
         }

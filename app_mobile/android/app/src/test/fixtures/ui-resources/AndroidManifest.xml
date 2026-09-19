@@ -1,0 +1,5 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="com.ia4tube.app">
+    <!-- Test-only resource host. No product components, initializers, metadata or permissions. -->
+    <uses-sdk android:minSdkVersion="26" android:targetSdkVersion="35" />
+    <application android:name="android.app.Application" android:allowBackup="false" />
+</manifest>

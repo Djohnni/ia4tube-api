@@ -78,7 +78,9 @@ data class MonthlyPlanningCalendarListItem(
     val campaignId: String = "",
     val assignmentId: String = "",
     val calendarRevision: Long? = null,
-    val calendarStatusLabel: String = ""
+    val calendarStatusLabel: String = "",
+    val calendarItemId: String? = null,
+    val calendarEditable: Boolean = true
 )
 
 @Composable
@@ -281,7 +283,7 @@ private fun MonthlyPlanningCalendarDayPost(
     onReschedule: ((MonthlyPlanningCalendarListItem) -> Unit)?
 ) {
     val canOpenOrder = item.imageReady && item.pedidoId.isNotBlank()
-    val effectiveOnReschedule = if (item.isWeeklyFreeArt()) null else onReschedule
+    val effectiveOnReschedule = if (item.isWeeklyFreeArt() || !item.calendarEditable) null else onReschedule
     val contentModifier = if (canOpenOrder) {
         Modifier.clickable { onOpenOrder(item.pedidoId) }
     } else {
@@ -371,7 +373,7 @@ private fun MonthlyPlanningCalendarDayPost(
                         Text("Data e horário")
                     }
                 }
-                onRemove?.let { remove ->
+                onRemove?.takeIf { item.calendarEditable }?.let { remove ->
                     TextButton(onClick = { remove(item) }) {
                         Text("Remover")
                     }
@@ -467,7 +469,7 @@ private fun MonthlyPlanningCalendarListCard(
                             Text(if (isSharing) "Compartilhando..." else "Compartilhar")
                         }
                     }
-                    onRemove?.let { remove ->
+                    onRemove?.takeIf { item.calendarEditable }?.let { remove ->
                         TextButton(onClick = { remove(item) }) {
                             Text("Remover")
                         }

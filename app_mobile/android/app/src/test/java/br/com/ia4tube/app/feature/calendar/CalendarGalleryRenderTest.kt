@@ -74,6 +74,8 @@ class CalendarGalleryRenderTest {
         assertTrue("Compose render must contain real content, not a blank screenshot", colors.size > 20)
         val output = File("build/reports/$filename"); output.parentFile?.mkdirs()
         output.outputStream().use { bitmap.compress(Bitmap.CompressFormat.PNG,100,it) }
-        model.dispose(); activity.finish(); bitmap.recycle(); sample.recycle()
+        model.dispose(); controller.pause().stop().destroy()
+        shadowOf(Looper.getMainLooper()).idle()
+        bitmap.recycle(); sample.recycle()
     }
 }

@@ -534,7 +534,7 @@ fun IA4TubeNavHost(
                 LaunchedEffect(Unit) { requestAuthFor(Routes.PlannedArts) }
             } else {
                 val calendarModel = rememberCalendarModel(repository::getSavedToken)
-                CalendarGallery(calendarModel, repository.getSavedToken(), backLabel = "Voltar à página inicial") {
+                CalendarGallery(calendarModel, repository.getSavedToken(), backLabel = "Voltar à página inicial", tokenProvider = repository::getSavedToken) {
                     navController.leavePlannedArts(galleryEntry)
                 }
             }

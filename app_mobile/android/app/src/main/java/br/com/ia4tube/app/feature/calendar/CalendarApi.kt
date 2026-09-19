@@ -9,6 +9,8 @@ import okhttp3.MediaType.Companion.toMediaType
 import org.json.JSONObject
 import java.time.LocalDate
 import java.util.concurrent.TimeUnit
+import br.com.ia4tube.app.feature.calendar.imports.ImportOwner
+import br.com.ia4tube.app.feature.calendar.imports.ImportPrivatePreview
 
 internal const val CALENDAR_ORIGIN = "https://ia4tube-api.onrender.com"
 
@@ -21,13 +23,16 @@ data class ScheduledArt(
     val revision: Long, val status: String, val statusLabel: String, val editable: Boolean,
     val automatic: Boolean, val imageUrl: String?, val username: String?, val scheduledAt: Long,
     val destination: String = "feed", val previews: Map<String, String> = emptyMap(),
-    val formatsReady: Boolean = false, val publications: Map<String, String> = emptyMap()
+    val formatsReady: Boolean = false, val publications: Map<String, String> = emptyMap(),
+    val sourceKind: String = "generated", val media: ImportPrivatePreview? = null,
+    val selectedTargets: List<String> = emptyList(), val shareToFeed: Boolean = false,
+    val title: String = "Arte planejada", val localSimulation: Boolean = false
 )
 data class CalendarSnapshot(
     val enabled: Boolean = false, val automatic: Boolean = false, val preferenceRevision: Long = 0,
     val connected: Boolean = false, val username: String? = null, val operationsAllowed: Boolean = false,
     val items: List<ScheduledArt> = emptyList(), val next: ScheduledArt? = null,
-    val storyEligible: Boolean = false
+    val storyEligible: Boolean = false, val identity: ImportOwner? = null
 )
 interface CalendarGateway {
     suspend fun list(): CalendarSnapshot
@@ -44,6 +49,7 @@ internal fun parseCalendar(root: JSONObject): CalendarSnapshot {
     require(root.getBoolean("ok"))
     if (!root.getBoolean("enabled")) return CalendarSnapshot()
     val preferences = root.getJSONObject("preferences")
+    val identity = root.optJSONObject("identity")?.let(::parseCalendarImportOwner)
     val rawItems = root.getJSONArray("items"); require(rawItems.length() <= 1000)
     val items = (0 until rawItems.length()).map { index ->
         val item = rawItems.getJSONObject(index)
@@ -54,27 +60,49 @@ internal fun parseCalendar(root: JSONObject): CalendarSnapshot {
         val date = item.getString("date"); LocalDate.parse(date)
         val time = item.getString("time"); require(time.matches(Regex("([01]\\d|2[0-3]):[0-5]\\d")))
         val revision = item.getLong("revision"); require(revision > 0)
-        val destination = item.optString("destination", "feed"); require(destination in setOf("feed", "story", "both"))
+        val destination = item.optString("destination", "feed"); require(destination in setOf("feed", "story", "both", "reel", "multiple"))
+        val sourceKind = item.optString("sourceKind", "generated"); require(sourceKind in setOf("generated", "planning", "order", "upload"))
+        val media = item.optJSONObject("media")?.let { parseScheduledImportPreview(it, id) }
+        require(media != null || destination in setOf("feed", "story", "both"))
+        require(media == null || (identity != null && sourceKind == "upload" && image == null))
+        require(sourceKind != "upload" || media != null)
         val previews = mutableMapOf<String, String>()
         val rawPreviews = item.optJSONObject("previews")
         for (target in listOf("feed", "story")) rawPreviews?.optString(target)?.takeIf { it.isNotBlank() }?.let { url ->
             require(url == "/v1/social/calendar/items/$id/image?destination=$target"); previews[target] = url
         }
         val publications = mutableMapOf<String, String>()
-        for (target in listOf("feed", "story")) item.optJSONObject("publications")?.optJSONObject(target)?.let {
+        for (target in listOf("feed", "story", "reel")) item.optJSONObject("publications")?.optJSONObject(target)?.let {
             publications[target] = it.optString("status", "confirming")
+        }
+        val targets = item.optJSONArray("selectedTargets")?.let { raw ->
+            require(raw.length() in 1..2)
+            (0 until raw.length()).map { raw.getString(it).also { target -> require(target in setOf("feed", "story", "reel")) } }
+                .also { require(it.distinct().size == it.size) }
+        } ?: when (destination) { "both" -> listOf("feed", "story"); else -> listOf(destination) }
+        require(media == null || targets.toSet() == media.variants.map { it.target }.toSet())
+        val shareToFeed = item.optJSONObject("media")?.let { value ->
+            value.get("shareToFeed").also { require(it is Boolean) } as Boolean
+        } ?: false
+        val localSimulation = if (item.has("localSimulation")) item.get("localSimulation").also { require(it is Boolean) } as Boolean else false
+        if (media != null) {
+            require(if (targets.size == 1) destination == targets.single()
+                else destination == "multiple" || destination == "both" && targets.toSet() == setOf("feed", "story"))
+            require(!shareToFeed || "reel" in targets && "feed" !in targets)
+            require(!media.testOnly || localSimulation)
         }
         ScheduledArt(id, item.getString("key"), date, time, caption, revision,
             item.getString("status"), item.getString("statusLabel"), item.getBoolean("editable"),
             item.getBoolean("automatic"), image, item.optString("username").takeUnless { item.isNull("username") }, item.getLong("scheduledAt"),
-            destination, previews, item.optBoolean("formatsReady", false), publications)
+            destination, previews, item.optBoolean("formatsReady", false), publications, sourceKind, media, targets,
+            shareToFeed, item.optString("title", if (media != null) "Mídia da galeria" else "Arte planejada"), localSimulation)
     }
     require(items.map { it.id }.distinct().size == items.size)
     val connection = root.optJSONObject("connection")
     val nextId = root.optJSONObject("next")?.getString("id")
     return CalendarSnapshot(true, preferences.getBoolean("enabled"), preferences.getLong("revision"),
         connection != null, connection?.optString("username"), root.getBoolean("operationsAllowed"), items, items.find { it.id == nextId },
-        connection?.optString("accountType") == "business")
+        connection?.optString("accountType") == "business", identity)
 }
 
 class CalendarApi internal constructor(private val token: String, private val origin: String,

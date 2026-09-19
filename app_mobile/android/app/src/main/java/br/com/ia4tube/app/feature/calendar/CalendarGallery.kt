@@ -31,6 +31,10 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import br.com.ia4tube.app.core.art_cache.PrivateArtImage
+import br.com.ia4tube.app.core.art_cache.AndroidPrivateArts
+import br.com.ia4tube.app.feature.calendar.imports.GalleryImportWorkflowHost
+import br.com.ia4tube.app.feature.calendar.imports.ScheduledPrivateMedia
+import kotlinx.coroutines.flow.StateFlow
 import java.time.LocalDate
 import java.time.LocalTime
 import java.time.ZoneId
@@ -50,9 +54,18 @@ private val CalendarFormatIcon = ImageVector.Builder("CalendarFormat", 24.dp, 24
 }.build()
 
 @Composable
-fun rememberCalendarModel(tokenProvider: () -> String): CalendarViewModel {
+fun rememberCalendarModel(tokenProvider: () -> String): CalendarViewModel =
+    rememberSessionCalendarModel(tokenProvider, AndroidPrivateArts.sessionChanges) { CalendarApi(it) }
+
+@Composable
+internal fun rememberSessionCalendarModel(tokenProvider: () -> String, sessionChanges: StateFlow<Long>,
+    gateway: (String) -> CalendarGateway): CalendarViewModel {
+    // SessionStore emits this existing signal on save/clear. Do not wait for navigation,
+    // a periodic request, or an unrelated parent recomposition to discard the old owner.
+    val epoch by sessionChanges.collectAsState()
+    val currentTokenProvider by rememberUpdatedState(tokenProvider)
     val token = tokenProvider()
-    val model = remember(token) { CalendarViewModel(tokenProvider, token) }
+    val model = remember(token, epoch) { CalendarViewModel({ currentTokenProvider() }, token, gateway(token)) }
     DisposableEffect(model) { onDispose { model.dispose() } }
     CalendarRefreshLifecycle(model)
     return model
@@ -111,22 +124,28 @@ fun CalendarAutomationSettings(model: CalendarViewModel) {
 }
 
 @Composable
-fun ScheduledNextContent(model: CalendarViewModel, token: String, onGallery: () -> Unit) {
+fun ScheduledNextContent(model: CalendarViewModel, token: String, tokenProvider: () -> String = { token }, onGallery: () -> Unit) {
     val state by model.uiState.collectAsState()
     val next = state.data.next ?: return
     Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
         Text("Próxima arte do calendário", fontWeight = FontWeight.Bold)
-        ScheduledArtImage(next, token, Modifier.fillMaxWidth().aspectRatio(1f).heightIn(max = 380.dp), state.imageRefresh)
+        if (next.media != null && state.data.identity != null) {
+            val target = next.media.thumbnail?.target ?: next.media.variants.first().target
+            ScheduledPrivateMedia(state.data.identity!!, tokenProvider, next.media, target, active = true,
+                modifier = Modifier.fillMaxWidth().aspectRatio(1f).heightIn(max = 380.dp))
+        } else ScheduledArtImage(next, token, Modifier.fillMaxWidth().aspectRatio(1f).heightIn(max = 380.dp), state.imageRefresh)
         Text(next.caption)
         Text("${next.date} às ${next.time} · Brasília")
         Text(if (state.fresh) next.statusLabel else "Estado não confirmado — atualize")
+        if (next.localSimulation) Text("Simulação local — nenhum envio real ao Instagram.", style = MaterialTheme.typography.bodySmall)
         OutlinedButton(onClick = onGallery) { Text("Editar na galeria") }
         Text("Destino: ${destinationLabel(next.destination)}. Não envie esta arte novamente pelo formulário manual.", style = MaterialTheme.typography.bodySmall)
     }
 }
 
 @Composable
-fun CalendarGallery(model: CalendarViewModel, token: String, backLabel: String = "Voltar ao calendário", onBack: () -> Unit) {
+fun CalendarGallery(model: CalendarViewModel, token: String, backLabel: String = "Voltar ao calendário",
+    tokenProvider: () -> String = { token }, onBack: () -> Unit) {
     // The parent retains this model when closing the gallery, so each reopening reads again.
     LaunchedEffect(model) { model.refresh() }
     val state by model.uiState.collectAsState()
@@ -135,9 +154,20 @@ fun CalendarGallery(model: CalendarViewModel, token: String, backLabel: String =
     val actionWidth = (68f * LocalDensity.current.fontScale).coerceIn(68f, 112f).dp
     var editing by remember(model, token) { mutableStateOf<Pair<ScheduledArt, String>?>(null) }
     var showStatus by remember(model, token) { mutableStateOf<ScheduledArt?>(null) }
+    var showMediaInfo by remember(model, token) { mutableStateOf<ScheduledArt?>(null) }
+    var showImport by remember(model, token) { mutableStateOf(false) }
+    var generatedSource by remember(model, token) { mutableStateOf<ScheduledArt?>(null) }
     LaunchedEffect(model, token, state.data.items) {
         if (state.data.items.none { it.id == editing?.first?.id }) editing = null
         if (state.data.items.none { it.id == showStatus?.id }) showStatus = null
+        if (state.data.items.none { it.id == showMediaInfo?.id }) showMediaInfo = null
+    }
+    if (showImport) {
+        GalleryImportWorkflowHost(tokenProvider = tokenProvider, generatedArtId = generatedSource?.id,
+            generatedArtRevision = generatedSource?.revision,
+            onBack = { showImport = false; generatedSource = null; model.refresh() },
+            onScheduled = { showImport = false; generatedSource = null; model.refresh() })
+        return
     }
     BackHandler(onBack = onBack)
     Column(Modifier.fillMaxSize().background(Color(0xFF101218)).padding(horizontal = 12.dp, vertical = 8.dp)) {
@@ -145,6 +175,9 @@ fun CalendarGallery(model: CalendarViewModel, token: String, backLabel: String =
             IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, backLabel, tint = Color.White) }
             Text("Ver minhas artes programadas", color = Color.White, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
             IconButton(onClick = model::refresh, enabled = !state.busy) { Icon(Icons.Default.Refresh, "Atualizar", tint = Color.White) }
+        }
+        OutlinedButton(onClick = { generatedSource = null; showImport = true }, modifier = Modifier.fillMaxWidth()) {
+            Text("Adicionar foto ou vídeo", color = Color.White)
         }
         if (state.busy) LinearProgressIndicator(Modifier.fillMaxWidth())
         state.error?.let { Text(it, color = Color(0xFFFFB4AB), modifier = Modifier.padding(8.dp)) }
@@ -156,20 +189,31 @@ fun CalendarGallery(model: CalendarViewModel, token: String, backLabel: String =
             val pager = rememberPagerState(initialPage = items.indexOfFirst { it.date >= today.toString() }.coerceAtLeast(0), pageCount = { items.size })
             VerticalPager(state = pager, key = { items[it].id }, modifier = Modifier.weight(1f)) { index ->
                 val art = items[index]
-                var preview by remember(art.id, art.destination) { mutableStateOf(if (art.destination == "story") "story" else "feed") }
+                val targets = art.media?.variants?.map { it.target } ?: if (art.destination == "both") listOf("feed", "story") else listOf(art.destination)
+                var preview by remember(art.id, art.revision, art.destination) { mutableStateOf(targets.first()) }
                 Column(Modifier.fillMaxSize().padding(vertical = 12.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
                     Text("${art.username?.let { "@$it · " } ?: ""}${LocalDate.parse(art.date).format(DateTimeFormatter.ofPattern("dd/MM/yyyy"))} · ${art.time}", color = Color.White)
-                    if (art.destination == "both") Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        for (target in listOf("feed", "story")) FilterChip(selected = preview == target, onClick = { preview = target },
+                    if (targets.size > 1) Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        for (target in targets) FilterChip(selected = preview == target, onClick = { preview = target },
                             colors = FilterChipDefaults.filterChipColors(labelColor = Color.White,
                                 selectedLabelColor = Color(0xFF211A31), selectedContainerColor = Color(0xFFEADDFF)),
                             label = { Text(destinationLabel(target)) })
-                        Text("2 publicações", color = Color.White, modifier = Modifier.align(Alignment.CenterVertically))
+                        Text("${targets.size} destinos", color = Color.White, modifier = Modifier.align(Alignment.CenterVertically))
                     }
                     Row(Modifier.weight(1f), verticalAlignment = Alignment.CenterVertically) {
-                        ScheduledArtImage(art.copy(imageUrl = art.previews[preview] ?: art.imageUrl, destination = preview), token, Modifier.weight(1f).fillMaxHeight(), state.imageRefresh)
+                        if (art.media != null && state.data.identity != null) {
+                            ScheduledPrivateMedia(state.data.identity!!, tokenProvider, art.media, preview,
+                                active = pager.settledPage == index && !pager.isScrollInProgress && editing == null && showStatus == null && showMediaInfo == null,
+                                modifier = Modifier.weight(1f).fillMaxHeight())
+                        } else ScheduledArtImage(art.copy(imageUrl = art.previews[preview] ?: art.imageUrl, destination = preview), token, Modifier.weight(1f).fillMaxHeight(), state.imageRefresh)
                         Column(Modifier.width(actionWidth).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(4.dp), horizontalAlignment = Alignment.CenterHorizontally) {
-                            GalleryAction(CalendarFormatIcon, "Formato", art.editable && art.formatsReady && state.fresh && !state.busy) { editing = art to "destination" }
+                            GalleryAction(CalendarFormatIcon, "Formato", art.media != null || art.editable && art.formatsReady && state.fresh && !state.busy) {
+                                if (art.media != null) showMediaInfo = art else editing = art to "destination"
+                            }
+                            if (art.media != null) GalleryAction(Icons.Default.Info, "Música/Áudio", true) { showMediaInfo = art }
+                            if (art.sourceKind != "upload" && art.imageUrl != null) {
+                                GalleryAction(Icons.Default.Add, "Usar com música", state.fresh && !state.busy) { generatedSource = art; showImport = true }
+                            }
                             GalleryAction(Icons.Default.Edit, "Legenda", art.editable && state.fresh && !state.busy) { editing = art to "caption" }
                             GalleryAction(Icons.Default.DateRange, "Data/hora", art.editable && state.fresh && !state.busy) { editing = art to "schedule" }
                             GalleryAction(if (art.automatic) Icons.Default.CheckCircle else Icons.Default.Close,
@@ -182,6 +226,9 @@ fun CalendarGallery(model: CalendarViewModel, token: String, backLabel: String =
                     }
                     if (preview == "story") Text("Story · o Instagram não exibe a legenda do Feed aqui.", color = Color.White, style = MaterialTheme.typography.bodySmall)
                     else Text(art.caption, color = Color.White, maxLines = 5, overflow = TextOverflow.Ellipsis)
+                    if (preview == "reel" && art.shareToFeed) Text("Reel também exibido no Feed — uma única publicação neste destino.", color = Color.White, style = MaterialTheme.typography.bodySmall)
+                    if (art.media?.testOnly == true) Text("Teste local com áudio sintético — não é uma publicação real.", color = Color(0xFFFFD28A))
+                    else if (art.localSimulation) Text("Simulação local — nenhum envio real ao Instagram.", color = Color(0xFFFFD28A))
                     art.publications.forEach { (target, result) -> Text("${destinationLabel(target)}: ${if (result == "published") "publicação confirmada" else if (result == "failed") "falhou — confira" else "aguardando confirmação"}", color = Color.White, style = MaterialTheme.typography.bodySmall) }
                     Text(if (state.fresh) art.statusLabel else "Estado não confirmado — atualize", color = Color(0xFFD3D6DF))
                     Text("${index + 1} de ${items.size} · Arraste para ver a próxima · Horário de Brasília", color = Color(0xFFB8BDC9), style = MaterialTheme.typography.labelSmall)
@@ -189,6 +236,16 @@ fun CalendarGallery(model: CalendarViewModel, token: String, backLabel: String =
             }
         }
     }
+    showMediaInfo?.let { art -> AlertDialog(onDismissRequest = { showMediaInfo = null }, title = { Text("Formato e áudio programados") },
+        text = { Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            art.media?.variants?.forEach { part ->
+                val audio = when (part.audioMode.wire) { "music" -> "trilha no vídeo"; "original" -> "áudio original"; "muted" -> "vídeo sem áudio"; else -> "foto sem música" }
+                Text("${destinationLabel(part.target)} · ${part.width} × ${part.height} · $audio")
+            }
+            if (art.shareToFeed) Text("O Reel também aparece no Feed; não é um terceiro envio.")
+            Text("Essas opções correspondem à prévia confirmada antes de Programar. O volume do player muda somente o que você ouve aqui, não o arquivo final.")
+            if (art.media?.testOnly == true) Text("Áudio sintético de teste local, sem licença comercial comprovada.")
+        } }, confirmButton = { TextButton(onClick = { showMediaInfo = null }) { Text("Entendi") } }) }
     editing?.takeIf { edit -> state.data.items.any { it.id == edit.first.id } }?.let { (art, action) ->
         val current = state.data.items.any { it.id == art.id && it.revision == art.revision }
         if (action in setOf("destination", "automatic")) CalendarDeliveryDialog(art, action, token,
@@ -207,14 +264,17 @@ fun CalendarGallery(model: CalendarViewModel, token: String, backLabel: String =
             })
     }
     showStatus?.takeIf { shown -> state.data.items.any { it.id == shown.id } }?.let { art -> AlertDialog(onDismissRequest = { showStatus = null }, title = { Text(if (state.fresh) art.statusLabel else "Atualização necessária") },
-        text = { Text(if (art.status == "scheduled" && state.fresh) "O envio está programado para ${art.date}, às ${art.time} (Brasília). A conexão será conferida novamente na hora. Não é preciso manter o app aberto."
+        text = { Text(if (art.localSimulation) "Simulação local da programação: ${art.statusLabel}. Nenhuma operação real no Instagram foi executada."
+            else if (art.status == "scheduled" && state.fresh) "O envio está programado para ${art.date}, às ${art.time} (Brasília). A conexão será conferida novamente na hora. Não é preciso manter o app aberto."
             else if (art.status == "published") "O Instagram confirmou esta publicação. Excluir um agendamento não apaga uma publicação já feita."
             else if (art.status in setOf("confirming", "dispatching")) "O envio já começou. Aguarde a confirmação. A IA4Tube não repetirá a publicação automaticamente se o resultado estiver incerto."
             else "${art.statusLabel}. Confira a conexão e a programação. Horários vencidos precisam ser reagendados; não são publicados em lote ao voltar.") },
         confirmButton = { TextButton(onClick = { showStatus = null }) { Text("Entendi") } }) }
 }
 
-internal fun destinationLabel(value: String): String = when (value) { "story" -> "Story"; "both" -> "Feed e Story"; else -> "Feed" }
+internal fun destinationLabel(value: String): String = when (value) {
+    "story" -> "Story"; "both" -> "Feed e Story"; "reel" -> "Reel"; "multiple" -> "Destinos selecionados"; else -> "Feed"
+}
 
 @Composable
 private fun CalendarDeliveryDialog(art: ScheduledArt, action: String, token: String, busy: Boolean,
