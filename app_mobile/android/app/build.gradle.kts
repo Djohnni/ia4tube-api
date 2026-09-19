@@ -45,14 +45,14 @@ fun String.asBuildConfigString(): String {
 
 android {
     namespace = "br.com.ia4tube.app"
-    compileSdk = 35
+    compileSdk = 36
 
     defaultConfig {
         applicationId = "com.ia4tube.app"
         minSdk = 26
-        targetSdk = 35
-        versionCode = 43
-        versionName = "0.2.30"
+        targetSdk = 36
+        versionCode = 44
+        versionName = "0.2.31"
 
         buildConfigField("String", "API_BASE", productionApiBase.asBuildConfigString())
         buildConfigField("String", "PRODUCT_DISCOVERY_API_BASE", productionApiBase.asBuildConfigString())
