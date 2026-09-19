@@ -6,6 +6,7 @@ const {createRequire}=require('node:module');
 const {validateProductionPilotConfig}=require('../../src/social/calendar/imports/production-pilot-config');
 function fixture({input,env,clock,configMode=0o600,catalogMode=0o600,directoryMode=0o700,failAt,heldTick,endFailure}={}){
   const events=[],pools=[];let factoryOptions,componentOptions,decodedConfig,musicOptions;
+  let stopState='absent',guardDirectoryUnsafe=false;
   const timers=new Map();let timerId=0;
   const step=name=>{events.push(name);if(failAt===name)throw Object.assign(new Error('synthetic-private-detail'),{code:'synthetic_startup_failure'});};
   const fakeFs={
@@ -17,6 +18,14 @@ function fixture({input,env,clock,configMode=0o600,catalogMode=0o600,directoryMo
   const store=(kind)=>({verify:async()=>{step(kind+'-verify');return true;}});
   const mocks={
     'node:fs/promises':fakeFs,'node:path':path.posix,
+    'node:fs':{lstatSync(value){
+      if(value.includes('/control/stop-')){
+        if(stopState==='absent'||stopState==='foreign')throw Object.assign(Error('missing'),{code:'ENOENT'});
+        if(stopState==='error')throw Object.assign(Error('synthetic-private-detail'),{code:'EACCES'});
+        return {isFile:()=>stopState==='present',isSymbolicLink:()=>stopState==='symlink',mode:0o600,uid:1000};
+      }
+      return {isDirectory:()=>true,isSymbolicLink:()=>false,mode:guardDirectoryUnsafe?0o777:0o700,uid:1000};
+    }},
     './production-pilot-config':{...require('../../src/social/calendar/imports/production-pilot-config'),
       validateProductionPilotConfig(value,options){decodedConfig=validateProductionPilotConfig(value,options);return decodedConfig;}},
     './music-catalog':{
@@ -49,6 +58,7 @@ function fixture({input,env,clock,configMode=0o600,catalogMode=0o600,directoryMo
   new vm.Script(fs.readFileSync(file,'utf8'),{filename:file}).runInContext(context);
   return {events,pools,timers,create:()=>context.module.exports.createProductionMediaPilot({env,clock,tenantPool:{}}),
     preflight:()=>context.module.exports.loadProductionPilotFiles({env,clock}),
+    stop(value='present'){stopState=value;},unsafeGuardDirectory(){guardDirectoryUnsafe=true;},
     get factoryOptions(){return factoryOptions;},get componentOptions(){return componentOptions;},get config(){return decodedConfig;},get musicOptions(){return musicOptions;},
     async fire(){const [id,value]=timers.entries().next().value;timers.delete(id);await value.fn();}};
 }

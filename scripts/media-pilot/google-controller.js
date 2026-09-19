@@ -1,7 +1,7 @@
 "use strict";
 const crypto = require("node:crypto");
 const { bounded } = require("../validation/vm-proof-controller");
-const { sha256 } = require("../validation/vm-proof-manifest");
+const { sha256, canonical } = require("../validation/vm-proof-manifest");
 const { KINDS, UUID, googleId, resourceName, bindResource } = require("../validation/vm-proof-google-plan");
 const { fail, HASH, validateOperationalPlan } = require("./google-plan");
 function validateState(s, p) {
@@ -17,13 +17,28 @@ function validateState(s, p) {
     if (r.id !== null) { googleId(r.id); if (r.intentAt === null || !Number.isFinite(r.createdAt)) fail("journal_resource_invalid"); }
   }
   if (s.hostEvidence !== null && (!HASH.test(s.hostEvidence.runtimeRevision || "") || !UUID.test(s.hostEvidence.bootId || ""))) fail("journal_host_invalid");
+  if (s.apiPreparation !== null && s.apiPreparation !== undefined &&
+      (!Number.isSafeInteger(s.apiPreparation.intentAt) || s.apiPreparation.intentAt < s.startedAt || !UUID.test(s.apiClosure?.requestId || ""))) fail("journal_api_invalid");
+  if (s.apiClosure !== null && s.apiClosure !== undefined && (!UUID.test(s.apiClosure.requestId || "") ||
+      !["pending", "intent", "confirmed", "unconfirmed", "skipped_cleanup_priority"].includes(s.apiClosure.phase))) fail("journal_closure_invalid");
   return s;
+}
+function validateClosureReceipt(value, context) {
+  if (!value || Object.keys(value).sort().join() !== "admissionClosed,closureRequestId,connectionEnabled,launchClosed,metaWindowEnabled,missionId,publicationEnabled,receiptSha256,schema,sentinelSha256" ||
+      value.schema !== 1 || value.missionId !== context.missionId || value.closureRequestId !== context.closureRequestId ||
+      value.admissionClosed !== true || value.launchClosed !== true || value.connectionEnabled !== false || value.publicationEnabled !== false || value.metaWindowEnabled !== false ||
+      !HASH.test(value.sentinelSha256 || "") || !HASH.test(value.receiptSha256 || "")) fail("api_closure_receipt_invalid");
+  const { receiptSha256, ...content } = value;
+  if (sha256(canonical(content)) !== receiptSha256) fail("api_closure_receipt_invalid");
+  return value;
 }
 function summary(s, plan) {
   return { missionId: s.missionId, phase: s.phase, startedAt: s.startedAt, admitUntil: s.admitUntil, workerStopAt: s.workerStopAt, deadlineAt: s.deadlineAt,
     resources: Object.fromEntries(KINDS.map(k => [k, { id: s.resources[k].id, createdAt: s.resources[k].createdAt, absentConfirmedAt: s.resources[k].absentConfirmedAt }])),
     hostEvidence: s.hostEvidence, installation: s.installation, workerStart: s.workerStart, workerStop: s.workerStop,
-    collection: s.collection, failure: s.failure, preexistingPreserved: s.preexistingPreserved || null,
+    collection: s.collection, failure: s.failure, apiClosure: s.apiClosure || null,
+    apiAdmissionClosed: s.apiPreparation == null ? null : s.apiClosure?.phase === "confirmed",
+    apiClosurePending: s.apiPreparation != null && s.apiClosure?.phase !== "confirmed", preexistingPreserved: s.preexistingPreserved || null,
     destructionConfirmed: s.phase === "destroyed", billingMayContinue: s.phase !== "destroyed" && s.resources.instances.intentAt !== null,
     journalPersistenceFailed: s.journalPersistenceFailed === true, syntheticCases: 0, externalPublication: false,
     estimateUsd: plan.finance.estimatedMaximumUsd, invoiceUsd: null };
@@ -31,11 +46,11 @@ function summary(s, plan) {
 // All API deployment/database preparation is a caller-owned prerequisite. This
 // module receives only a closed-schema readiness receipt, never DB credentials.
 // A restart of an existing journal is cleanup-only, never another paid launch.
-async function runOperationalPilot({ plan, approvalSha256, store, provider, guest, prepareApi, observeApi,
+async function runOperationalPilot({ plan, approvalSha256, store, provider, guest, prepareApi, observeApi, closeApi,
   now = Date.now, sleep = ms => new Promise(r => setTimeout(r, ms)), signal = null, onState = () => {} }) {
   validateOperationalPlan(plan);
   if (approvalSha256 !== plan.approvalSha256) fail("bound_authorization_required");
-  if (typeof prepareApi !== "function" || typeof observeApi !== "function") fail("api_control_required");
+  if (typeof prepareApi !== "function" || typeof observeApi !== "function" || typeof closeApi !== "function") fail("api_control_required");
   const p = plan.infrastructure;
   return store.exclusive(async () => {
     let s = await store.read(), fresh = s === null;
@@ -49,12 +64,17 @@ async function runOperationalPilot({ plan, approvalSha256, store, provider, gues
         deadlineAt: startedAt + 7200000, admitUntil: startedAt + plan.admissionSeconds * 1000, workerStopAt: startedAt + 6600000,
         resources: Object.fromEntries(KINDS.map(k => [k, { intentAt: null, id: null, createdAt: null, createRequestId: crypto.randomUUID(), deleteRequestId: crypto.randomUUID(),
           createOp: null, deleteOp: null, deleteIntentAt: null, absentConfirmedAt: null }])), preexisting,
-        phase: "prepared", hostEvidence: null, installation: null, workerStart: null, workerStop: null, collection: null, failure: null };
+        phase: "prepared", hostEvidence: null, installation: null, workerStart: null, workerStop: null, collection: null, failure: null,
+        apiPreparation: null, apiClosure: null };
       validateState(s, plan); await store.write(s);
     } else validateState(s, plan);
     const save = async () => { validateState(s, plan); await store.write(s); try { onState(summary(s, plan)); } catch {} };
     const safeSave = async () => { try { await save(); } catch { s.journalPersistenceFailed = true; } };
-    if (s.phase === "destroyed") return summary(s, plan);
+    // A successful provider deletion does not hide a pending API admission
+    // fence. Re-entry can reconcile that same idempotent closure, never deploy
+    // or start a worker again. No billing-time window is extended.
+    const previouslyDestroyed = s.phase === "destroyed";
+    if (previouslyDestroyed && (s.apiPreparation == null || s.apiClosure?.phase === "confirmed")) return summary(s, plan);
     const budget = seconds => { if (signal?.aborted || now() + seconds * 1000 > s.workerStopAt) fail("work_deadline"); };
     async function bind(k, resource, strict = false) { Object.assign(s.resources[k], bindResource(p, s, k, resource, { strict })); await save(); return resource; }
     async function waitOperation(op, until) {
@@ -111,7 +131,10 @@ async function runOperationalPilot({ plan, approvalSha256, store, provider, gues
       s.hostEvidence = { project: p.project, zone: p.zone, instanceId: s.resources.instances.id,
         bootId: host.bootId, runtimeRevision: host.runtimeRevision, receiptSha256: host.receiptSha256,
         verifiedAt: now(), deletionAction: "DELETE", terminationTime: s.deadlineAt };
-      s.phase = "api_readiness"; await save();
+      s.phase = "api_readiness";
+      s.apiPreparation = { intentAt: now() };
+      s.apiClosure = { requestId: crypto.randomUUID(), phase: "pending" };
+      await save();
       const context = { missionId: s.missionId, plan, createdAt: s.startedAt, admitUntil: s.admitUntil, finishBy: s.deadlineAt, stopAt: s.workerStopAt, destroyBy: s.deadlineAt, hostEvidence: s.hostEvidence };
       const api = await bounded(sig => prepareApi({ ...context, signal: sig }), Math.min(600000, s.admitUntil - now()));
       if (api?.ready !== true || api.ownerCompanyId !== plan.ownerCompanyId || api.ownerUserId !== plan.ownerUserId || api.workerId !== plan.workerId ||
@@ -130,9 +153,30 @@ async function runOperationalPilot({ plan, approvalSha256, store, provider, gues
         if (result.finished) break;
         await sleep(Math.min(15000, Math.max(0, s.workerStopAt - now())));
       }
-    } catch (error) { s.failure = /^media_pilot_[a-z_]+$/.test(error?.code || "") ? error.code : "media_pilot_operation_failed"; await safeSave(); }
+    } catch (error) { s.failure ??= /^media_pilot_[a-z_]+$/.test(error?.code || "") ? error.code : "media_pilot_operation_failed"; await safeSave(); }
     finally {
-      if (s.resources.instances.id !== null) {
+      if (s.apiPreparation != null && s.apiClosure?.phase !== "confirmed") {
+        // Never inherit the aborted operation signal: cleanup has its own small
+        // deadline. A failed close cannot postpone external provider deletion.
+        // The immutable per-mission sentinel also fences a late prepareApi.
+        const closeBudget = previouslyDestroyed ? 20000 : Math.min(20000, s.deadlineAt - now() - 180000);
+        if (closeBudget > 0) {
+          s.apiClosure.phase = "intent"; s.apiClosure.lastIntentAt = now(); await safeSave();
+          try {
+            const context = { missionId: s.missionId, plan, hostEvidence: s.hostEvidence,
+              createdAt: s.startedAt, admitUntil: s.admitUntil, finishBy: s.deadlineAt, stopAt: s.workerStopAt,
+              destroyBy: s.deadlineAt, closureRequestId: s.apiClosure.requestId };
+            const receipt = validateClosureReceipt(await bounded(sig => closeApi({ ...context, signal: sig }), closeBudget), context);
+            s.apiClosure = { ...s.apiClosure, phase: "confirmed", confirmedAt: now(), sentinelSha256: receipt.sentinelSha256, receiptSha256: receipt.receiptSha256 };
+          } catch { s.apiClosure.phase = "unconfirmed"; s.apiClosure.failure = "media_pilot_api_closure_unconfirmed"; }
+        } else {
+          s.apiClosure.phase = "skipped_cleanup_priority";
+          s.apiClosure.failure = "media_pilot_api_closure_unconfirmed";
+        }
+        if (s.apiClosure.phase !== "confirmed" && s.failure === null) s.failure = "media_pilot_api_closure_unconfirmed";
+        await safeSave();
+      }
+      if (!previouslyDestroyed && s.resources.instances.id !== null) {
         // Stop/collect may reconcile the SAME worker; no start/install replay.
         // Cleanup is independent of API availability, and never needs its key.
         const stopBudget = Math.min(250000, s.deadlineAt - now() - 180000);
@@ -186,4 +230,4 @@ async function runOperationalPilot({ plan, approvalSha256, store, provider, gues
     return summary(s, plan);
   });
 }
-module.exports = { runOperationalPilot, validateState, summary };
+module.exports = { runOperationalPilot, validateState, validateClosureReceipt, summary };

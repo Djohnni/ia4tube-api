@@ -192,3 +192,30 @@ test('the shared loader also refuses a world-readable catalog and erases its dec
   assert.ok(f.config.bridgeKey.every(value=>value===0));assert.equal(f.pools.length,0);
   assert.equal(f.events.includes('read:/var/data/private/calendar-media/music/catalog.json'),false);
 });
+
+for(const state of ['present','symlink','error'])test('mission stop '+state+' immediately fences admission/launch but preserves reads and drain',async()=>{
+  let release;const heldTick=new Promise(resolve=>{release=resolve;});
+  const f=compositionFixture({input:input(),env:env(),clock:()=>now,heldTick}),pilot=await f.create();
+  assert.equal(f.factoryOptions.canAdmit(),true);pilot.start();const active=f.fire();await Promise.resolve();
+  f.stop(state);
+  assert.equal(f.factoryOptions.canAdmit(),false);assert.equal(f.componentOptions.canLaunch(),false);
+  assert.equal(f.componentOptions.accessPolicy.resolve({authenticated:true,...input().owner}).audience,'owner_pilot');
+  assert.equal(await pilot.handlePrivateRequest({url:'/internal/calendar-media/vm/done'},{}),true);
+  f.stop('absent');assert.equal(f.factoryOptions.canAdmit(),false,'A fence observed by this process is irreversible');
+  const close=pilot.close();release();await Promise.all([close,active]);
+  assert.equal(f.events.filter(value=>value==='tick').length,1);
+});
+
+test('a stop fence survives restart while an unrelated mission file does not close this mission',async()=>{
+  const active=compositionFixture({input:input(),env:env(),clock:()=>now});active.stop('foreign');
+  const running=await active.create();assert.equal(active.factoryOptions.canAdmit(),true);await running.close();
+  const closed=compositionFixture({input:input(),env:env(),clock:()=>now});closed.stop();
+  const restarted=await closed.create();assert.equal(closed.factoryOptions.canAdmit(),false);assert.equal(closed.componentOptions.canLaunch(),false);
+  assert.equal(await closed.factoryOptions.verifyReadiness(),true);await restarted.close();
+});
+
+test('unsafe stop parent metadata fails closed and neither window expiry nor later removal reopens admission',async()=>{
+  let at=now;const f=compositionFixture({input:input(),env:env(),clock:()=>at}),pilot=await f.create();
+  f.unsafeGuardDirectory();assert.equal(f.factoryOptions.canAdmit(),false);assert.equal(f.componentOptions.canLaunch(),false);
+  at=input().admitUntil;assert.equal(f.factoryOptions.canAdmit(),false);await pilot.close();
+});

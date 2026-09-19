@@ -6,6 +6,7 @@ const { hostProbeScript, startScript, stopScript, collectionScript } = require("
 const { createGoogleProvider } = require("../scripts/validation/vm-proof-google-provider");
 const P = require("../scripts/validation/vm-proof-google-plan");
 const { makeGoogleBootstrap } = require("../scripts/validation/vm-proof-google-bootstrap");
+const {canonical,sha256}=require('../scripts/validation/vm-proof-manifest');
 const clone = v => structuredClone(v), beginning = Date.parse("2026-09-19T17:00:00Z");
 const uuid = n => `00000000-0000-4000-8000-${String(n).padStart(12,"0")}`;
 function makePlan(change = {}) {
@@ -16,7 +17,7 @@ function makePlan(change = {}) {
       pricingEvidenceSha256: "d".repeat(64), verifiedAt: beginning }, ...change });
 }
 function fixture(flags = {}, plan = makePlan()) {
-  const p = plan.infrastructure, resources = new Map(), calls = [], guestCalls = []; let state = null, clock = beginning, nextId = 100n, observes = 0;
+  const p = plan.infrastructure, resources = new Map(), calls = [], guestCalls = [], timeline=[], closeRequests=[]; let state = null, clock = beginning, nextId = 100n, observes = 0;
   const startup = makeGoogleBootstrap("-----BEGIN OPENSSH PRIVATE KEY-----\nYQ==\n-----END OPENSSH PRIVATE KEY-----\n", "ssh-ed25519 YQ== synthetic", "ssh-ed25519 Yg== synthetic");
   const link = s => "https://www.googleapis.com/compute/v1/" + s;
   const transport = async req => {
@@ -48,6 +49,7 @@ function fixture(flags = {}, plan = makePlan()) {
       return {status:200,json:{name:"operation-"+String(nextId++),targetId:r.id,targetLink:r.selfLink,operationType:"insert",clientOperationId:new URLSearchParams(query).get("requestId"),status:"DONE"}};
     }
     if (method === "DELETE") {
+      timeline.push('delete_'+kind);
       const r = resources.get(route); if (!r) return {status:404};
       if (flags.noDestroy === kind) return {status:403,json:{}};
       resources.delete(route);
@@ -65,9 +67,16 @@ function fixture(flags = {}, plan = makePlan()) {
     install:async()=>{guestCalls.push("install");if(flags.installFails)throw Error("private installation details");return {passed:true,convertersStarted:0,diagnostic:{installationPassed:true}};},
     probeInstalled:async()=>{guestCalls.push("probe");return {controlsProved:!flags.badNative,convertersStarted:0,bootId:uuid(4),runtimeRevision:"e".repeat(64),receiptSha256:"f".repeat(64)};},
     startWorker:async c=>{guestCalls.push("start");if(flags.startUnknown)throw Error("private key may not be logged");return {active:true,recurring:false,workerId:plan.workerId,stopAt:c.stopAt};},
-    stopWorker:async()=>{guestCalls.push("stop");if(flags.stopFails)throw Error("private");return {stopped:true,nativeTerminationProved:true};},
+    stopWorker:async()=>{guestCalls.push("stop");timeline.push('stop');if(flags.stopFails)throw Error("private");return {stopped:true,nativeTerminationProved:true};},
     collectOperational:async()=>{guestCalls.push("collect");if(flags.collectFails)throw Error("private");return {sanitized:true,sha256:"1".repeat(64),executionsObserved:3};},
     runSequence:async()=>{throw Error("MUST NEVER RUN OLD SYNTHETIC PROOF");}
+  };
+  const closeApi=async c=>{
+    guestCalls.push('close_api');timeline.push('close_api');closeRequests.push({missionId:c.missionId,closureRequestId:c.closureRequestId});
+    if(flags.closeThrows)throw Error('private SSH details must not be retained');
+    const content={schema:1,missionId:flags.closeWrongMission?uuid(99):c.missionId,closureRequestId:flags.closeWrongRequest?uuid(98):c.closureRequestId,
+      admissionClosed:!flags.closeAdmissionFalse,launchClosed:!flags.closeLaunchFalse,connectionEnabled:flags.closeExternalGate===true,publicationEnabled:false,metaWindowEnabled:false,sentinelSha256:'7'.repeat(64)};
+    return {...content,receiptSha256:flags.closeBadHash?'8'.repeat(64):sha256(canonical(content))};
   };
   const prepareApi = async c => {
     guestCalls.push("prepare_api");
@@ -78,8 +87,8 @@ function fixture(flags = {}, plan = makePlan()) {
       admitUntil:c.admitUntil,finishBy:c.finishBy,receiptSha256:"2".repeat(64)};
   };
   const observeApi = async()=>{observes++;return {finished:flags.waitUntilDeadline?false:observes>1,gatesClosed:!flags.observationOpen,receiptSha256:"3".repeat(64)};};
-  const execute = options=>runOperationalPilot({plan,approvalSha256:plan.approvalSha256,provider,store,guest,prepareApi,observeApi,now:()=>clock,sleep:async ms=>{clock+=ms;},...options});
-  return {execute,resources,calls,guestCalls,getState:()=>clone(state),setState:s=>{state=clone(s);},plan};
+  const execute = options=>runOperationalPilot({plan,approvalSha256:plan.approvalSha256,provider,store,guest,prepareApi,observeApi,closeApi,now:()=>clock,sleep:async ms=>{clock+=ms;},...options});
+  return {execute,resources,calls,guestCalls,timeline,closeRequests,getState:()=>clone(state),setState:s=>{state=clone(s);},setTime:t=>{clock=t;},flags,plan};
 }
 test("operational plan is owner-bound, priced, no recurrence or old synthetic cases",()=>{
   const p=makePlan();assert.equal(validateOperationalPlan(p),p);assert.equal(p.syntheticCases,0);assert.equal(p.maxInstallInvocations,1);assert.equal(p.maxWorkerStarts,1);
@@ -91,7 +100,8 @@ test("operational plan is owner-bound, priced, no recurrence or old synthetic ca
 });
 test("single operational install/start, host bound API readiness, collect and complete external destruction",async()=>{
   const f=fixture(),r=await f.execute();assert.equal(r.failure,null);assert.equal(r.destructionConfirmed,true);assert.equal(r.syntheticCases,0);assert.equal(r.invoiceUsd,null);
-  assert.equal(f.resources.size,0);assert.deepEqual(f.guestCalls,["preflight","install","probe","prepare_api","start","stop","collect"]);
+  assert.equal(f.resources.size,0);assert.deepEqual(f.guestCalls,["preflight","install","probe","prepare_api","start","close_api","stop","collect"]);
+  assert.equal(r.apiAdmissionClosed,true);assert.equal(r.apiClosurePending,false);
   assert.ok(Object.values(r.preexistingPreserved).every(Boolean));assert.equal(r.hostEvidence.terminationTime,r.deadlineAt);
   await f.execute();assert.equal(f.guestCalls.filter(x=>x==="start").length,1);
 });
@@ -146,4 +156,46 @@ test("generated remote programs parse and have no launch of synthetic test suite
   for(const s of scripts){assert.doesNotThrow(()=>new vm.Script(s));assert.doesNotMatch(s,/--test|runSequence|vm-proof-guest|DATABASE_URL|gcloud/);}
   assert.match(scripts[1],/RuntimeMaxSec/);assert.match(scripts[1],/Restart=no/);assert.match(scripts[1],/'wx'/);
   assert.doesNotMatch(scripts[1],/systemctl.*enable/);
+});
+test('API closure callback is mandatory before any provider access',async()=>{
+  const f=fixture();await assert.rejects(f.execute({closeApi:undefined}),/api_control_required/);assert.equal(f.calls.length,0);
+});
+test('closure fences admissions and launches before worker stop and provider cleanup',async()=>{
+  const f=fixture(),r=await f.execute();assert.equal(r.apiClosure.phase,'confirmed');
+  assert.ok(f.timeline.indexOf('close_api')<f.timeline.indexOf('stop'));
+  assert.ok(f.timeline.indexOf('close_api')<f.timeline.indexOf('delete_instances'));
+  assert.equal(f.closeRequests.length,1);await f.execute();assert.equal(f.closeRequests.length,1);
+});
+for(const flag of ['prepareThrows','apiUnavailable','wrongTenant','openGate','startUnknown'])test('uncertain or failed '+flag+' still invokes same mission closure',async()=>{
+  const f=fixture({[flag]:true}),r=await f.execute();assert.equal(f.closeRequests.length,1);assert.equal(r.apiAdmissionClosed,true);assert.equal(r.destructionConfirmed,true);
+});
+for(const flag of ['closeThrows','closeWrongMission','closeWrongRequest','closeAdmissionFalse','closeLaunchFalse','closeExternalGate','closeBadHash'])
+  test('invalid or failed '+flag+' reports pending closure but never blocks VM destruction',async()=>{
+    const f=fixture({[flag]:true}),r=await f.execute();assert.equal(r.apiAdmissionClosed,false);assert.equal(r.apiClosurePending,true);
+    assert.equal(r.apiClosure.failure,'media_pilot_api_closure_unconfirmed');assert.equal(r.destructionConfirmed,true);assert.equal(f.resources.size,0);
+    assert.doesNotMatch(JSON.stringify(r),/private SSH details/);
+  });
+test('cleanup-only resume reconciles the same closure after all resources are destroyed, without worker replay',async()=>{
+  const f=fixture({closeThrows:true}),a=await f.execute();assert.equal(a.destructionConfirmed,true);assert.equal(a.apiClosurePending,true);
+  f.flags.closeThrows=false;f.setTime(a.deadlineAt+1000);const count=f.guestCalls.length,b=await f.execute();
+  assert.equal(b.apiAdmissionClosed,true);assert.equal(b.apiClosurePending,false);assert.equal(b.destructionConfirmed,true);
+  assert.deepEqual(f.closeRequests[0],f.closeRequests[1]);assert.deepEqual(f.guestCalls.slice(count),['close_api']);
+  assert.equal(f.calls.filter(c=>c.method==='POST'&&c.pathname.includes('/instances?')).length,1);
+});
+test('host rejection before any API preparation does not pretend an API fence was necessary',async()=>{
+  const f=fixture({badHost:true}),r=await f.execute();assert.equal(f.closeRequests.length,0);assert.equal(r.apiAdmissionClosed,null);assert.equal(r.apiClosurePending,false);
+});
+test('aborted foreground operation does not pass its aborted signal to API closure',async()=>{
+  const f=fixture(),abort=new AbortController();let cleanupSignal;
+  const r=await f.execute({signal:abort.signal,observeApi:async()=>{abort.abort();return {finished:false,gatesClosed:true,receiptSha256:'3'.repeat(64)};},closeApi:async c=>{
+    cleanupSignal=c.signal;assert.equal(c.signal.aborted,false);
+    const receipt={schema:1,missionId:c.missionId,closureRequestId:c.closureRequestId,admissionClosed:true,launchClosed:true,connectionEnabled:false,publicationEnabled:false,metaWindowEnabled:false,sentinelSha256:'7'.repeat(64)};
+    return {...receipt,receiptSha256:sha256(canonical(receipt))};
+  }});
+  assert.ok(cleanupSignal);assert.equal(r.apiAdmissionClosed,true);assert.equal(r.destructionConfirmed,true);
+});
+test('expired external cleanup deadline skips API wait explicitly, deletes, then allows closure-only reconciliation',async()=>{
+  const f=fixture();const r=await f.execute({observeApi:async c=>{f.setTime(c.destroyBy);return {finished:true,gatesClosed:true,receiptSha256:'3'.repeat(64)};}});
+  assert.equal(r.apiClosure.phase,'skipped_cleanup_priority');assert.equal(r.apiClosurePending,true);assert.equal(r.destructionConfirmed,true);
+  assert.equal(f.closeRequests.length,0);const resumed=await f.execute();assert.equal(resumed.apiAdmissionClosed,true);assert.equal(f.closeRequests.length,1);
 });

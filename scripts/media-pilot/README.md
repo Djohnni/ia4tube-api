@@ -14,13 +14,18 @@ A infraestrutura reaproveita o contrato imutável da prova Google: e2-medium, Ub
 
 ## Composição pelo operador
 
-`createOperationalSession` em `google-session.js` requer plano revisado, pacote hash-idêntico, diretório externo protegido, Google CLI privado já autenticado e três callbacks:
+`createOperationalSession` em `google-session.js` requer plano revisado, pacote hash-idêntico, diretório externo protegido, Google CLI privado já autenticado e quatro callbacks:
 
 - `getBridgeKey()`: devolver **cópia própria** Buffer de 32 bytes da chave restrita já vinculada à API; a cópia será zerada.
 - `prepareApi(context)`: concluir automaticamente o vínculo com `hostEvidence` e devolver somente recibo seguro. Deve honrar `signal`, não aguardar intervenção humana e não repetir deploy/secret de resultado incerto. Contexto inclui `createdAt`, `admitUntil`, `finishBy`/`destroyBy` (120 minutos) e `stopAt` (110). Recibo deve conter `ready`, ownerCompanyId, ownerUserId, workerId, runtimeRevision, connectionEnabled=false, publicationEnabled=false, metaWindowEnabled=false, admitUntil, finishBy e receiptSha256.
 - `observeApi(context)`: somente observar o mesmo piloto e devolver `finished`, `gatesClosed=true`, `receiptSha256`. A própria API deve recusar novas admissões após admitUntil; o observador não substitui isso.
+- `closeApi(context)`: fechamento idempotente da admissão e dos novos lançamentos da mesma missão, por canal privado já verificado, **sem abrir endpoint administrativo público**. Recebe também `closureRequestId` estável. O destino previsto é `/var/data/private/calendar-media/control/stop-<missionId>.json`, exclusivo e `0600`, que o runtime e o bootstrap devem respeitar mesmo se o preparo chegar atrasado. Não apaga mídia nem histórico, não muda gates e não desconecta o Instagram. O callback deve devolver exatamente `schema:1`, `missionId`, `closureRequestId`, `admissionClosed:true`, `launchClosed:true`, `connectionEnabled:false`, `publicationEnabled:false`, `metaWindowEnabled:false`, `sentinelSha256` e `receiptSha256`. Este último é SHA-256 da serialização canônica dos demais campos; os hashes devem corresponder a observações, nunca a uma promessa de execução.
 
 O diretório de diário/chaves deve estar fora do Git, outputs e pacote. O canal protegido da API, migrações/roles, músicas e readiness devem estar preparados **antes** de criar a VM. O hostEvidence só existe depois do host: se a ligação final falhar, o controlador encerra a VM em vez de deixá-la cobrando por uma resposta do usuário. Callbacks não estão implementados neste módulo; pertencem à composição remota protegida da missão principal.
+
+O controlador persiste intenção antes de `prepareApi`. Depois dessa intenção, o `finally` tenta `closeApi` antes de parar o worker/coletar/excluir. Usa sinal de aborto próprio e no máximo 20 segundos, preservando a prioridade da exclusão externa. Se a confirmação falhar, marca `apiClosurePending:true` e **continua a exclusão da VM**; recursos destruídos não significam fechamento da API comprovado. Uma retomada pode reconciliar o mesmo `closureRequestId`, inclusive depois da destruição, sem recriar recursos, iniciar worker ou redeploy. Perder a janela não renova a admissão.
+
+Uma eventual coordenação root/UI por arquivo de recibo privado é escolha posterior: precisa vínculo exato, prazo/aborto e verificação real. Este módulo não implementa nem presume autenticação Render, deploy hook, clique de confirmação ou nova credencial administrativa. O contrato de fechamento precisa estar funcional antes de admitir essa coordenação durante uma VM paga.
 
 ## Evidência e limites
 

@@ -10,9 +10,9 @@ const { createGoogleProvider } = require("../validation/vm-proof-google-provider
 const { validateOperationalPlan, fail } = require("./google-plan");
 const { createOperationalGuest } = require("./google-guest");
 const { runOperationalPilot } = require("./google-controller");
-async function createOperationalSession({ plan, stateRoot, packagePath, google, getBridgeKey, prepareApi, observeApi }) {
+async function createOperationalSession({ plan, stateRoot, packagePath, google, getBridgeKey, prepareApi, observeApi, closeApi }) {
   validateOperationalPlan(plan);
-  if (!path.isAbsolute(packagePath || "") || typeof prepareApi !== "function" || typeof observeApi !== "function" || typeof getBridgeKey !== "function") fail("session_configuration_invalid");
+  if (!path.isAbsolute(packagePath || "") || typeof prepareApi !== "function" || typeof observeApi !== "function" || typeof closeApi !== "function" || typeof getBridgeKey !== "function") fail("session_configuration_invalid");
   const st = await fs.lstat(packagePath);
   if (!st.isFile() || st.isSymbolicLink() || st.size > 67108864 || st.size < 1024 || sha256(await fs.readFile(packagePath)) !== plan.packageSha256) fail("package_changed");
   const store = await createLocalStore(stateRoot);
@@ -23,7 +23,7 @@ async function createOperationalSession({ plan, stateRoot, packagePath, google, 
     // No implicit/default confirmation. Root binds the already given mission
     // authorization to the final reviewed plan after verifying its full cost.
     execute({ approvalSha256, signal, onState } = {}) {
-      return runOperationalPilot({ plan, approvalSha256, store, provider, guest, prepareApi, observeApi, signal, onState });
+      return runOperationalPilot({ plan, approvalSha256, store, provider, guest, prepareApi, observeApi, closeApi, signal, onState });
     }
   });
 }

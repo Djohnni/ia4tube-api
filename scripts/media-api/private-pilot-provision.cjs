@@ -8,6 +8,7 @@ const {validateProductionPilotConfig}=require('../../src/social/calendar/imports
 const {validateCanonicalWav,displayName,loadPrivateMusicCatalog}=require('../../src/social/calendar/imports/music-catalog');
 const MAX_PACKET=32*1024*1024, MAX_HEADER=64*1024, MAX_CONFIG=16384;
 const HASH=/^[a-f0-9]{64}$/, TRACK=/^track_[a-f0-9]{24}$/;
+const UUID=/^[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/;
 const hash=bytes=>crypto.createHash('sha256').update(bytes).digest('hex');
 function refuse(code){throw Object.assign(new Error('Private pilot preparation refused.'),{code:'calendar_private_provision_'+code});}
 function exact(value,keys){if(!value||typeof value!=='object'||Array.isArray(value)||Object.keys(value).sort().join()!==keys.slice().sort().join())refuse('packet_invalid');}
@@ -53,6 +54,11 @@ function decodePacket(packet){
     if(header.schema!==1||!Number.isSafeInteger(header.sizeBytes)||header.sizeBytes<2||header.sizeBytes>MAX_CONFIG||
       payload.length!==header.sizeBytes||!HASH.test(header.sha256)||hash(payload)!==header.sha256)refuse('configuration_packet_invalid');
     return {operation:'configuration',bytes:payload,value:parseJson(payload)};
+  }
+  if(header.operation==='stop'){
+    exact(header,['schema','operation','missionId','closureRequestId']);
+    if(header.schema!==1||!UUID.test(header.missionId)||!UUID.test(header.closureRequestId)||payload.length!==0)refuse('stop_packet_invalid');
+    return {operation:'stop',missionId:header.missionId,closureRequestId:header.closureRequestId};
   }
   refuse('operation_invalid');
 }
@@ -156,6 +162,7 @@ function createProvisioner({root=ROOT,privateBase='/var/data/private',fsApi=fs,i
     try{
       if(clock()>=config.admitUntil)refuse('window_closed');
       for(const name of ['', 'control','uploads','prepared','music'])await directories(path.join(root,name),false);
+      await requireUnstopped(config.missionId);
       const musicRoot=path.join(root,'music'),manifestBytes=await readPrivate(path.join(musicRoot,'catalog.json'),MAX_HEADER);
       const manifest=canonicalManifest(parseJson(manifestBytes));
       if(!manifestBytes.equals(Buffer.from(JSON.stringify(manifest))))refuse('catalog_not_canonical');
@@ -166,12 +173,40 @@ function createProvisioner({root=ROOT,privateBase='/var/data/private',fsApi=fs,i
         ownerCompanyId:config.owner.companyId,clock,now:clock()});
       if(clock()>=config.admitUntil)refuse('window_closed');
       const configuration=await publishExclusive(path.join(root,'control','pilot.json'),decoded.bytes);
+      await requireUnstopped(config.missionId);
       return {ok:true,operation:'configuration',configuration,missionId:config.missionId,trackCount:manifest.tracks.length,
         admitUntil:config.admitUntil,finishBy:config.finishBy};
     }finally{config.bridgeKey.fill(0);}
   }
+  async function requireUnstopped(missionId){
+    try{await fsApi.lstat(path.join(root,'control','stop-'+missionId+'.json'));}
+    catch(error){if(error.code==='ENOENT')return;throw error;}
+    refuse('mission_stopped');
+  }
+  async function provisionStop(decoded){
+    if(env.ENVIRONMENT!=='production'||env.RENDER_SERVICE_ID!=='srv-d8708kd7vvec73ap1p6g'||
+      env.PUBLIC_API_BASE_URL!=='https://ia4tube-api.onrender.com')refuse('stop_target_invalid');
+    await directories(path.join(root,'control'),false);
+    let configBytes;
+    try{configBytes=await readPrivate(path.join(root,'control','pilot.json'),MAX_CONFIG);}
+    catch(error){if(error.code!=='ENOENT')throw error;}
+    if(configBytes){try{const existing=parseJson(configBytes);
+      if(existing.schema!==1||existing.missionId!==decoded.missionId)refuse('stop_mission_mismatch');
+    }finally{configBytes.fill(0);}}
+    const marker={schema:1,missionId:decoded.missionId,closureRequestId:decoded.closureRequestId,admissionClosed:true,launchClosed:true};
+    const bytes=Buffer.from(JSON.stringify(marker)),file=path.join(root,'control','stop-'+decoded.missionId+'.json');
+    const sentinel=await publishExclusive(file,bytes);
+    // Closing local admission is still safe if an unexpected external flag was
+    // changed; report that fact instead of inventing a "gates closed" receipt.
+    const state=name=>env[name]==='false'?false:env[name]==='true'?true:null;
+    return {ok:true,operation:'stop',...marker,sentinel,sentinelSha256:hash(bytes),
+      connectionEnabled:state('SOCIAL_EXTERNAL_CONNECTION_ENABLED'),publicationEnabled:state('SOCIAL_EXTERNAL_PUBLICATION_ENABLED'),
+      metaWindowEnabled:state('META_APP_REVIEW_WINDOW_ENABLED')};
+  }
   return Object.freeze({async provision(packet){const decoded=decodePacket(packet);
-    return decoded.operation==='catalog'?provisionCatalog(decoded):provisionConfiguration(decoded);}});
+    if(decoded.operation==='catalog')return provisionCatalog(decoded);
+    if(decoded.operation==='stop')return provisionStop(decoded);
+    return provisionConfiguration(decoded);}});
 }
 async function main(args=process.argv.slice(2),{input=process.stdin,output=process.stdout,env=process.env}={}){
   let packet;
@@ -181,7 +216,7 @@ async function main(args=process.argv.slice(2),{input=process.stdin,output=proce
     if(args[0]==='preflight'){
       const loaded=await loadProductionPilotFiles({env});
       try{result={ok:true,operation:'preflight',missionId:loaded.config.missionId,trackCount:loaded.music.catalog.size,
-        admissionWindowOpen:Date.now()<loaded.config.admitUntil,admitUntil:loaded.config.admitUntil,finishBy:loaded.config.finishBy,
+        admissionWindowOpen:Date.now()<loaded.config.admitUntil&&loaded.admissionFence(),admitUntil:loaded.config.admitUntil,finishBy:loaded.config.finishBy,
         poolsOpened:0,workersStarted:0,filesChanged:0};}finally{loaded.config.bridgeKey.fill(0);}
     }else{packet=await readBoundedInput(input);result=await createProvisioner({env}).provision(packet);}
     output.write(JSON.stringify(result)+'\n');return 0;

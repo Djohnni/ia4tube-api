@@ -1,5 +1,5 @@
 "use strict";
-const fs=require('node:fs/promises'),path=require('node:path');
+const fs=require('node:fs/promises'),syncFs=require('node:fs'),path=require('node:path');
 const {validateProductionPilotConfig,fail}=require('./production-pilot-config');
 const {loadPrivateMusicCatalog,protectedBytes}=require('./music-catalog');
 const {createPostgresPool}=require('../../../persistence/postgres/pool');
@@ -17,6 +17,24 @@ const {createRenderDiskTransferService}=require('./transfer-service');
 const {createOperationalCalendarImportsRuntimeFactory}=require('./operational-runtime');
 const ROOT='/var/data/private/calendar-media', CONFIG=ROOT+'/control/pilot.json';
 const PRIVATE_PREFIX='/internal/calendar-media/';
+function createPilotAdmissionFence(missionId){
+  if(!/^[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/.test(missionId))fail('mission_invalid');
+  const marker=ROOT+'/control/stop-'+missionId+'.json';let tripped=false;
+  return ()=>{
+    if(tripped)return false;
+    try{
+      for(const directory of ['/var','/var/data','/var/data/private',ROOT,ROOT+'/control']){
+        const st=syncFs.lstatSync(directory);
+        if(!st.isDirectory()||st.isSymbolicLink()||directory.startsWith('/var/data/private')&&
+          ((st.mode&0o077)!==0||st.uid!==process.getuid())){tripped=true;return false;}
+      }
+      // Presence closes even if the marker is malformed or substituted. Never
+      // follow it or interpret invalid metadata as permission to keep working.
+      try{syncFs.lstatSync(marker);tripped=true;}catch(error){if(error.code!=='ENOENT')tripped=true;}
+    }catch{tripped=true;}
+    return !tripped;
+  };
+}
 // A bounded timer observes the same durable intentions, never spawns a codec.
 function createPilotProgressLoop({tick,finishBy,clock=Date.now,report=()=>{},timers={setTimeout,clearTimeout}}){
   if(typeof tick!=='function'||!Number.isSafeInteger(finishBy))fail('loop_invalid');
@@ -59,13 +77,13 @@ async function loadProductionPilotFiles({env=process.env,clock=Date.now}={}){
     }
     const music=await loadPrivateMusicCatalog({rootDirectory:ROOT+'/music',manifest,rights:config.musicRights,ownerCompanyId:config.owner.companyId,
       now:clock(),clock,allowExpiredForReadOnly:clock()>=config.admitUntil});
-    return {config,music};
+    return {config,music,admissionFence:createPilotAdmissionFence(config.missionId)};
   }catch(error){config.bridgeKey.fill(0);throw error;}
 }
 async function createProductionMediaPilot({env=process.env,tenantPool,clock=Date.now,logger}={}){
   if(env.SOCIAL_MEDIA_IMPORTS_ENABLED===undefined||env.SOCIAL_MEDIA_IMPORTS_ENABLED===''||env.SOCIAL_MEDIA_IMPORTS_ENABLED==='false')return null;
   if(env.SOCIAL_MEDIA_IMPORTS_ENABLED!=='true'||process.platform!=='linux')fail('enablement_invalid');
-  const {config,music}=await loadProductionPilotFiles({env,clock});
+  const {config,music,admissionFence}=await loadProductionPilotFiles({env,clock});
   let capacityPool,transferPool,loop,closed=false,closing=false,closePromise;
   const report=code=>logger?.error?.({component:'calendar_media_pilot',code});
   try{
@@ -83,12 +101,12 @@ async function createProductionMediaPilot({env=process.env,tenantPool,clock=Date
     const preparedAdmission=createPreparedDiskAdmission({capacity,tenantStore:store,accessPolicy,rootDirectory:root,diskSpaceGuard:guard,enabled:true,clock});
     const components=await createWorkflowOperationalComponents({enabled:true,store,owner:config.owner,capacity,sourceAdmission:admission,preparedAdmission,accessPolicy,diskSpaceGuard:guard,
       privateRoot:root,preparationRoot,musicRoot,publicApiOrigin:env.PUBLIC_API_BASE_URL,catalog:music.catalog,resolveMusicTrack:music.resolveMusicTrack,
-      bridgeKey:config.bridgeKey,validationOnly:true,clock,diagnostic:report,canLaunch:()=>!closing&&!closed&&clock()<config.admitUntil,
+      bridgeKey:config.bridgeKey,validationOnly:true,clock,diagnostic:report,canLaunch:()=>!closing&&!closed&&clock()<config.admitUntil&&admissionFence(),
       executionTransport:{kind:'vm',workerId:config.workerId,runtimeRevision:config.runtimeRevision}});
     const registry=createTransferAuthorizationRegistry({store:registryStore,enabled:true,clock});
     const transfer=createRenderDiskTransferService({store,provider:components.provider,registry,accessPolicy,enabled:true,clock});
     const factory=createOperationalCalendarImportsRuntimeFactory({enabled:true,preparation:components.preparation,resultStore:components.resultStore,accessPolicy,
-      upload:components.upload,provider:components.provider,uploadStore:store,transfer,catalog:music.catalog,clock,canAdmit:()=>!closing&&!closed&&clock()<config.admitUntil,
+      upload:components.upload,provider:components.provider,uploadStore:store,transfer,catalog:music.catalog,clock,canAdmit:()=>!closing&&!closed&&clock()<config.admitUntil&&admissionFence(),
       async verifyReadiness(){await registry.verify();await ledger.verify();await guard.sample();return true;}});
     loop=createPilotProgressLoop({tick:components.tick,finishBy:config.finishBy,clock,report});
     return Object.freeze({factory,start:loop.start,admitUntil:config.admitUntil,finishBy:config.finishBy,
@@ -107,4 +125,4 @@ async function createProductionMediaPilot({env=process.env,tenantPool,clock=Date
     throw error;
   }
 }
-module.exports={createProductionMediaPilot,createPilotProgressLoop,privateDirectory,loadProductionPilotFiles,CONFIG,ROOT,PRIVATE_PREFIX};
+module.exports={createProductionMediaPilot,createPilotProgressLoop,createPilotAdmissionFence,privateDirectory,loadProductionPilotFiles,CONFIG,ROOT,PRIVATE_PREFIX};

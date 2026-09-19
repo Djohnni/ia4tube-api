@@ -28,6 +28,8 @@ function configuration(){const value={schema:1,missionId:'11111111-1111-4111-811
   return value;}
 function configPacket(value=configuration()){const bytes=Buffer.from(JSON.stringify(value));
   return packet({schema:1,operation:'configuration',sizeBytes:bytes.length,sha256:sha(bytes)},bytes);}
+function stopPacket(missionId=configuration().missionId,closureRequestId='66666666-6666-4666-8666-666666666666'){
+  return packet({schema:1,operation:'stop',missionId,closureRequestId},Buffer.alloc(0));}
 async function fixture(t,options={}){
   const temporary=await fs.mkdtemp(path.join(os.tmpdir(),'ia4tube-private-provision-')),privateBase=path.join(temporary,'private'),root=path.join(privateBase,'calendar-media');
   const operations=[],overrides=new Map();let failed=false;
@@ -152,4 +154,42 @@ test('CLI has no arbitrary-path or execution options and emits only a sanitized 
   const code=await main(['provision','/tmp/escape'],{input,output:{write:text=>{output+=text;}}});
   assert.equal(code,1);assert.equal(read,false);assert.equal(output.includes('sentinel'),false);assert.equal(output.includes('/tmp'),false);
   assert.deepEqual(JSON.parse(output),{ok:false,code:'calendar_private_provision_arguments_invalid',reconcileBeforeRetry:true});
+});
+
+test('stop is exclusive, mission-bound, byte-idempotent and cannot replace another closure identity',async t=>{
+  const f=await fixture(t),catalogBytes=catalog().packet;await f.provisioner.provision(catalogBytes);await f.provisioner.provision(configPacket());
+  const first=await f.provisioner.provision(stopPacket());
+  assert.equal(first.sentinel,'installed');assert.equal(first.admissionClosed,true);assert.equal(first.launchClosed,true);
+  assert.equal(first.connectionEnabled,false);assert.equal(first.publicationEnabled,false);assert.equal(first.metaWindowEnabled,false);
+  const repeated=await f.provisioner.provision(stopPacket());assert.equal(repeated.sentinel,'identical');assert.equal(repeated.sentinelSha256,first.sentinelSha256);
+  await assert.rejects(f.provisioner.provision(stopPacket(configuration().missionId,'77777777-7777-4777-8777-777777777777')),
+    {code:'calendar_private_provision_existing_divergent'});
+  await assert.rejects(f.provisioner.provision(stopPacket('77777777-7777-4777-8777-777777777777')),
+    {code:'calendar_private_provision_stop_mission_mismatch'});
+  assert.equal(f.operations.filter(value=>value.startsWith('link:')&&value.includes('stop-')).length,1);
+  assert.equal(JSON.stringify(first).includes('sentinel-private'),false);
+  // Neither source audio nor the installed configuration was removed.
+  assert.equal((await fs.readdir(path.join(f.root,'music'))).length,2);
+  assert.deepEqual(JSON.parse(await fs.readFile(path.join(f.root,'control','pilot.json'),'utf8')),configuration());
+});
+
+test('a stop before configuration blocks later activation and concurrent duplicate stops reconcile without replacement',async t=>{
+  const f=await fixture(t);await f.provisioner.provision(catalog().packet);
+  const attempts=await Promise.allSettled([f.provisioner.provision(stopPacket()),f.provisioner.provision(stopPacket())]);
+  assert.ok(attempts.some(value=>value.status==='fulfilled'));
+  // A reader that sees the temporary second hardlink can fail closed; no retry
+  // occurs inside the operation. This explicit later lookup reconciles it.
+  const reconciled=await f.provisioner.provision(stopPacket());assert.equal(reconciled.sentinel,'identical');
+  await assert.rejects(f.provisioner.provision(configPacket()),{code:'calendar_private_provision_mission_stopped'});
+  assert.equal((await fs.readdir(path.join(f.root,'control'))).filter(name=>name==='pilot.json').length,0);
+  assert.equal((await fs.readdir(path.join(f.root,'control'))).filter(name=>name.endsWith('.pending')).length,0);
+});
+
+test('stop does not invent closed external gates and refuses a foreign service',async t=>{
+  const changed=await fixture(t,{env:{...env(),SOCIAL_EXTERNAL_PUBLICATION_ENABLED:'true',META_APP_REVIEW_WINDOW_ENABLED:undefined}});
+  await changed.provisioner.provision(catalog().packet);const receipt=await changed.provisioner.provision(stopPacket());
+  assert.equal(receipt.admissionClosed,true);assert.equal(receipt.publicationEnabled,true);assert.equal(receipt.metaWindowEnabled,null);
+  const foreign=await fixture(t,{env:{...env(),RENDER_SERVICE_ID:'wrong-service'}});await foreign.provisioner.provision(catalog().packet);
+  await assert.rejects(foreign.provisioner.provision(stopPacket()),{code:'calendar_private_provision_stop_target_invalid'});
+  assert.deepEqual(await fs.readdir(path.join(foreign.root,'control')),[]);
 });
