@@ -67,7 +67,7 @@ function createCalendarService({ store, source, media, grants, auth, identity, r
   function view(job, prefs, connection, allowed, context = null) {
     let status = availability(job, prefs, connection?.binding, allowed, clock());
     const imported = importsAvailable && job.sourceKind === "upload" && context;
-    if (imported) status = importScheduling.status(job, prefs, connection) || status;
+    if (imported) status = importScheduling.status(job, prefs, connection, allowed) || status;
     if (status === "scheduled" && targets(job).includes("story") && connection?.accountType !== "business") status = "attention";
     return { id: job.id, key: job.sourceKey, planningId: job.planningId, orderId: job.orderId,
       title: job.title, date: job.date, time: job.time, timeZone: TIME_ZONE, scheduledAt: job.scheduledAt,
@@ -138,7 +138,7 @@ function createCalendarService({ store, source, media, grants, auth, identity, r
     const allowed = publisher.allowed(current.context);
     return store.update(current.context.companyId, state => {
       if (importsAvailable && state.jobs[id]?.sourceKind === "upload") {
-        importScheduling.editState(state, importContext(current.context), id, input, connection);
+        importScheduling.editState(state, importContext(current.context), id, input, connection, allowed);
         return snapshot(state, connection, allowed, current.context);
       }
       if (input.action === "automatic" && input.enabled === true) {
@@ -344,7 +344,7 @@ function createCalendarService({ store, source, media, grants, auth, identity, r
         if (!job || job.revision !== snapshot.revision) return null;
         const candidate = delivery(job, target);
         const stateOfCandidate = candidate.sourceKind === "upload"
-          ? importScheduling.status(candidate, state.preferences, connection)
+          ? importScheduling.status(candidate, state.preferences, connection, publisher.allowed(ctx))
           : availability(candidate, state.preferences, connection.binding, publisher.allowed(ctx), clock());
         if (candidate.intent || stateOfCandidate !== "scheduled") return null;
         const intent = publisher.intent(ctx, candidate, crypto.randomUUID());

@@ -10,10 +10,10 @@ const instances = new WeakSet();
 const context = Object.freeze({ authenticated: true, role: "calendar_media_capacity_coordinator" });
 function fail(code = "unavailable") { throw Object.assign(new Error(`operational_inspection_${code}`), { code: `operational_inspection_${code}` }); }
 function createOperationalInspectionRunner({ store, owner, capacity, accessPolicy, diskSpaceGuard, getWorker,
-  enabled = false, clock = Date.now } = {}) {
+  enabled = false, clock = Date.now, canLaunch = () => true } = {}) {
   if (!["win32", "linux"].includes(process.platform)) fail("platform_unvalidated");
   if (enabled !== true || capacity?.capabilities?.persistence !== "durable" || capacity.capabilities.atomicGlobalReservations !== true ||
-      !isImportAccessPolicy(accessPolicy) || !accessPolicy.executionAvailable || typeof getWorker !== "function" ||
+      !isImportAccessPolicy(accessPolicy) || !accessPolicy.executionAvailable || typeof getWorker !== "function" || typeof canLaunch !== "function" ||
       !isDiskSpaceGuard(diskSpaceGuard) || capacity.acceptsDiskSpaceGuard?.(diskSpaceGuard) !== true ||
       !["reserve", "assertHeld", "inspect", "acquireNext", "recordCompletion", "closeNeverLaunched"].every(key => typeof capacity[key] === "function")) fail("configuration_invalid");
   const journal = createInspectionExecutionJournal({ store, owner, clock }), binding = journal.capabilities.owner;
@@ -63,6 +63,7 @@ function createOperationalInspectionRunner({ store, owner, capacity, accessPolic
     allowed(); const request = reservation(task), executor = worker();
     let { record } = await journal.begin(task);
     if (record.launchClaimed) return lookup(task);
+    if (canLaunch() !== true) return beforeLaunchFailure(record);
     try {
       await capacity.reserve(request);
       let slot = await capacity.assertHeld({ ...request, intent: "write", diskSpaceEvidence: await diskSpaceGuard.sample() }); allowed();
@@ -73,7 +74,7 @@ function createOperationalInspectionRunner({ store, owner, capacity, accessPolic
       const claim = await journal.claim({ ...task, executionId: record.executionId, capacityLeaseToken: slot.leaseToken }); record = claim.record;
       if (!claim.claimed) return response(await settle(record));
     } catch (_) { return beforeLaunchFailure(record); }
-    try { allowed(); } catch (_) {
+    try { allowed(); if (canLaunch() !== true) fail("admission_closed"); } catch (_) {
       return response(await observed(record, { executionId: record.executionId, state: "failed", elapsedMs: 0,
         termination: { proved: true, descendants: 0, proofId: crypto.createHash("sha256").update(`launcher-not-invoked:${record.executionId}:${task.executionDigest}`).digest("hex") } }));
     }

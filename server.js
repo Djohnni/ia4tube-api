@@ -142,6 +142,7 @@ app.use(cors({
   credentials: false
 }));
 
+app.use(productionSocialIntegration.privateMediaMiddleware);
 app.use("/v1/social", productionSocialIntegration.middleware);
 productionSocialIntegration.mountWeb(app);
 

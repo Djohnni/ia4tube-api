@@ -96,6 +96,51 @@ test("default integration stays closed without opening a pool", async () => {
   assert.equal(Object.isFrozen(state), true);
   assert.equal(await state.initialize(), false);
 });
+
+for (const pilotFailure of [false, true]) test(`concurrent integration close shares one ordered drain, pilot failure=${pilotFailure}`, async () => {
+  // Wiring-only harness: no real credential, database, filesystem mutation,
+  // worker, timer or external transport. The actual integration code executes.
+  const calls=[];let release;
+  const held=new Promise(resolve=>{release=resolve;});
+  const noop=()=>{};
+  const pilot={factory:noop,start:noop,async close(){calls.push('pilot-start');await held;calls.push('pilot-drained');
+    if(pilotFailure)throw Error('synthetic-private-sentinel');}};
+  const mocks={
+    '../persistence/postgres/config':{assertWebServiceDatabaseCredentialBoundary:noop},
+    express:{Router:()=>({use:noop,get:noop}),json:()=>noop,urlencoded:()=>noop},
+    './production-session':{createProductionSession:()=>({authenticate:noop})},
+    './production-media':{createProductionMedia:()=>({media:{},capability:noop})},
+    './calendar/imports/production-pilot':{createProductionMediaPilot:async()=>pilot},
+    './calendar':{createProductionCalendar:async()=>({start:noop})},
+    './server-runtime':{async initializeSocialServerRuntime(options){return {calendar:await options.createCalendar({pool:{}}),
+      auth:{},companies:{},tenantProvisioning:{},async close(){calls.push('runtime');}};}},
+    './production-tenant-readiness':{createProductionTenantReadiness:()=>({middleware:noop})},
+    './production-tenant-provisioning':{createProductionTenantProvisioning:()=>({async close(){calls.push('tenant');}})},
+    './oauth/instagram-oauth-router':{createInstagramOAuthRouter:()=>noop},
+    './oauth/instagram-oauth-visual-return':{createInstagramOAuthVisualReturn:()=>({destroy(){calls.push('visual');}})},
+    './reviewer-real/reviewer-real':{createInstagramRealReviewerRouter:()=>noop},
+    './compliance':{createMetaComplianceRouter:()=>noop},
+    '../security/runtime-security':{createRateLimiter:()=>noop},
+    './calendar/imports/transfer-router':{createCalendarImportByteRouter:()=>noop},
+    './calendar/imports/preview-router':{createPrivateImportPreviewRouter:()=>noop},
+    './calendar/imports/router':{createCalendarImportRouter:()=>noop},
+    './calendar/router':{createCalendarRouter:()=>noop}
+  };
+  const context=vm.createContext({module:{exports:{}},process:{env:{}},require(name){
+    assert.ok(Object.hasOwn(mocks,name),'Unexpected dependency '+name);return mocks[name];}});
+  new vm.Script(source('src/social/production-integration.js')).runInContext(context);
+  const state=context.module.exports.createProductionSocialIntegration({env:{ENVIRONMENT:'production',
+    PUBLIC_API_BASE_URL:integration.OFFICIAL_API_ORIGIN,RENDER_SERVICE_ID:integration.OFFICIAL_WEB_SERVICE_ID,
+    SOCIAL_PERSISTENCE_ENABLED:'true',SOCIAL_INSTAGRAM_ENABLED:'true',SOCIAL_CALENDAR_ENABLED:'true',
+    SOCIAL_MEDIA_IMPORTS_ENABLED:'true',SOCIAL_EXTERNAL_CONNECTION_ENABLED:'false',SOCIAL_EXTERNAL_PUBLICATION_ENABLED:'false'}});
+  assert.equal(await state.initialize(),true);
+  const first=state.close(),second=state.close();assert.equal(first,second);
+  const terminal=pilotFailure?assert.rejects(first,errorCode('social_startup_cleanup_failed')):first;
+  await Promise.resolve();assert.deepEqual(calls,['pilot-start']);
+  release();await terminal;
+  assert.deepEqual(calls,['pilot-start','pilot-drained','tenant','visual','runtime']);
+  assert.equal(state.close(),first);
+});
 for (const name of integration.CLOSED_FLAGS) {
   for (const value of ["TRUE", " true ", "1", true, null]) {
     test(`${name} rejects ambiguous flag ${JSON.stringify(value)}`, () => {
@@ -129,6 +174,10 @@ test("closed middleware does not consume caller input", () => {
 });
 test("legacy server code is preserved outside explicit session, startup and calendar adapter hooks", () => {
   let candidate = source("server.js");
+  const privateMediaMount = 'app.use(productionSocialIntegration.privateMediaMiddleware);\n';
+  assert.equal(candidate.split(privateMediaMount).length - 1, 1);
+  assert.ok(candidate.indexOf(privateMediaMount) < candidate.indexOf('const globalJsonParser'));
+  candidate = candidate.replace(privateMediaMount, '');
   assert.equal(candidate.split("reference: req.body").length - 1, 2);
   candidate = candidate.replace(", reference: req.body });", " });").replace("reference: req.body, date:", "date:");
   // Enumerated calendar adapter calls only; the rest of the historical server still compares byte-for-byte.
@@ -203,7 +252,7 @@ test("dependency additions preserve every legacy dependency and locked package r
   }
   assert.deepEqual(Object.keys(currentPackage.dependencies)
     .filter((name) => !Object.hasOwn(previousPackage.dependencies, name)).sort(),
-  ["@aws-sdk/client-s3", "@aws-sdk/s3-request-presigner", "pg", "sharp", "tar-stream"]);
+    ["@aws-sdk/client-s3", "@aws-sdk/s3-request-presigner", "@renderinc/sdk", "pg", "sharp", "tar-stream"]);
   for (const [name, value] of Object.entries(previousPackage)) {
     if (!["dependencies", "scripts"].includes(name)) {
       assert.deepEqual(currentPackage[name], value, name);
@@ -218,9 +267,11 @@ test("dependency additions preserve every legacy dependency and locked package r
   assert.deepEqual(currentLock.packages[""].dependencies, currentPackage.dependencies);
   const added = Object.keys(currentLock.packages)
     .filter((name) => !Object.hasOwn(previousLock.packages, name));
-  // Preserve the already-prepared optional object-storage adapter as well as
-  // the 45 prior additions. This does not activate it or relax legacy pins.
-  assert.equal(added.length, 71); // 45 prior records + 26 pinned SDK/transitive records.
+  // Preserve the pre-existing pinned object-storage and Workflow SDKs. This
+  // does not activate either adapter or relax any legacy package pin.
+  assert.equal(added.length, 83); // 71 prior records + 12 Workflow SDK records.
+  assert.equal(currentPackage.dependencies["@renderinc/sdk"], "1.1.0");
+  assert.equal(currentLock.packages["node_modules/@renderinc/sdk"].version, "1.1.0");
   for (const name of ["@aws-sdk/client-s3", "@aws-sdk/s3-request-presigner"]) {
     assert.equal(currentPackage.dependencies[name], "3.1131.0");
     assert.equal(currentLock.packages[`node_modules/${name}`].version, "3.1131.0");

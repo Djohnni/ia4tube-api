@@ -5,7 +5,7 @@ const OFFICIAL_WEB_SERVICE_ID = "srv-d8708kd7vvec73ap1p6g";
 const PREPARATION_INCOMPLETE = "social_production_preparation_incomplete";
 const SAFE_STARTUP_ERROR_CODE = /^[a-z0-9_]{2,96}$/i;
 const CLOSED_FLAGS = Object.freeze([
-  "SOCIAL_PERSISTENCE_ENABLED", "SOCIAL_INSTAGRAM_ENABLED", "SOCIAL_CALENDAR_ENABLED",
+  "SOCIAL_PERSISTENCE_ENABLED", "SOCIAL_INSTAGRAM_ENABLED", "SOCIAL_CALENDAR_ENABLED", "SOCIAL_MEDIA_IMPORTS_ENABLED",
   "SOCIAL_EXTERNAL_CONNECTION_ENABLED", "SOCIAL_EXTERNAL_PUBLICATION_ENABLED",
   "REAL_REVIEWER_UI_ENABLED", "META_APP_REVIEW_WINDOW_ENABLED",
   "REVIEW_SANDBOX_ENABLED", "SYNTHETIC_PROVIDER_ENABLED"
@@ -41,6 +41,8 @@ function assertProductionPreparationBoundary(env = process.env) {
       (env.RENDER === "true" && env.RENDER_SERVICE_ID !== OFFICIAL_WEB_SERVICE_ID))) refuse(PREPARATION_INCOMPLETE);
   if (!enabled && CLOSED_FLAGS.some(name => name !== "SOCIAL_PERSISTENCE_ENABLED" && env[name] === "true")) refuse(PREPARATION_INCOMPLETE);
   if (env.SOCIAL_CALENDAR_ENABLED === "true" && env.SOCIAL_INSTAGRAM_ENABLED !== "true") refuse(PREPARATION_INCOMPLETE);
+  if (env.SOCIAL_MEDIA_IMPORTS_ENABLED === "true" && (env.SOCIAL_CALENDAR_ENABLED !== "true" ||
+      env.SOCIAL_EXTERNAL_CONNECTION_ENABLED !== "false" || env.SOCIAL_EXTERNAL_PUBLICATION_ENABLED !== "false")) refuse(PREPARATION_INCOMPLETE);
   assertWebServiceDatabaseCredentialBoundary(env);
   return true;
 }
@@ -50,12 +52,21 @@ function noStore(res) {
   res.setHeader("X-Robots-Tag", "noindex, nofollow, noarchive");
   res.setHeader("Referrer-Policy", "no-referrer");
 }
+// Drain dependent resources in order. A failed pilot cleanup must not skip the
+// existing tenant/runtime cleanup or leave their database pools alive.
+async function closeProductionResources(steps) {
+  let failed = false;
+  for (const step of steps) {
+    try { await step(); } catch { failed = true; }
+  }
+  if (failed) refuse("social_startup_cleanup_failed");
+}
 function createProductionSocialIntegration(options = {}) {
   const env = Object.freeze({ ...(options.env || process.env) });
   assertProductionPreparationBoundary(env);
   const enabled = env.SOCIAL_PERSISTENCE_ENABLED === "true";
   let mounted = null, runtime = null, initialization = null, visualReturn = null;
-  let tenantProvisioning = null;
+  let tenantProvisioning = null, mediaPilot = null, closePromise = null;
   async function afterAuthentication(owner) {
     // The disabled path must not read product records, initialize dependencies,
     // derive an identity or open a pool. Session issuance remains unchanged.
@@ -92,8 +103,11 @@ function createProductionSocialIntegration(options = {}) {
       startupStage = "social_startup_server_runtime_failed";
       runtime = await initializeSocialServerRuntime({ env,
         realReviewerEnabled: env.SOCIAL_INSTAGRAM_ENABLED === "true",
-        createCalendar: env.SOCIAL_CALENDAR_ENABLED === "true" ? ports =>
-          require("./calendar").createProductionCalendar(dependencies, ports) : undefined,
+        createCalendar: env.SOCIAL_CALENDAR_ENABLED === "true" ? async ports => {
+          mediaPilot = await require("./calendar/imports/production-pilot").createProductionMediaPilot({env,tenantPool:ports.pool,logger:dependencies.logger});
+          if (mediaPilot && dependencies.importsRuntimeFactory !== undefined) refuse("calendar_media_pilot_factory_conflict");
+          return require("./calendar").createProductionCalendar(mediaPilot ? {...dependencies,importsRuntimeFactory:mediaPilot.factory} : dependencies, ports);
+        } : undefined,
         realReviewerMedia: mediaSurface.media, logger: dependencies.logger });
       startupStage = "social_startup_tenant_binding_failed";
       const { createProductionTenantReadiness } = require("./production-tenant-readiness");
@@ -141,6 +155,7 @@ function createProductionSocialIntegration(options = {}) {
       router.use((_error, _req, res, _next) => res.status(400).json({ ok: false, code: "social_request_invalid" }));
       mounted = router;
       runtime.calendar?.start();
+      mediaPilot?.start();
       startupStage = "social_startup_complete";
       return true;
     })();
@@ -167,15 +182,25 @@ function createProductionSocialIntegration(options = {}) {
     app.get("/reviewer-client.js", send("reviewer.js"));
     app.get("/reviewer-style.css", send("reviewer.css"));
   }
-  async function close() {
+  function close() {
+    if (closePromise) return closePromise;
     mounted = null;
-    const provisioning = tenantProvisioning;
-    tenantProvisioning = null;
-    if (provisioning) await provisioning.close();
-    visualReturn?.destroy();
-    if (runtime) { const state = runtime; runtime = null; await state.close(); }
+    closePromise = closeProductionResources([
+      async () => { if (mediaPilot) { const pilot = mediaPilot; mediaPilot = null; await pilot.close(); } },
+      async () => { const provisioning = tenantProvisioning; tenantProvisioning = null; if (provisioning) await provisioning.close(); },
+      () => { const visual = visualReturn; visualReturn = null; visual?.destroy(); },
+      async () => { if (runtime) { const state = runtime; runtime = null; await state.close(); } }
+    ]);
+    return closePromise;
   }
   return Object.freeze({ enabled, reason: enabled ? null : PREPARATION_INCOMPLETE,
+    async privateMediaMiddleware(req, res, next) {
+      if (!String(req.url || "").startsWith("/internal/calendar-media/")) return next();
+      noStore(res);
+      try { if (mediaPilot && await mediaPilot.handlePrivateRequest(req,res)) return; }
+      catch (_) { if (res.headersSent) return res.destroy(); }
+      return res.status(503).json({ok:false,code:"calendar_media_private_unavailable"});
+    },
     async prepareCalendarRequest(claims, body) {
       if (body?.calendar_automatic !== true && body?.calendar_automatic !== "true") return null;
       if (!runtime?.calendar) require("./calendar/model").fail("calendar_disabled", 503);
@@ -187,4 +212,4 @@ function createProductionSocialIntegration(options = {}) {
 }
 module.exports = { CLOSED_FLAGS, OFFICIAL_API_ORIGIN, OFFICIAL_WEB_SERVICE_ID,
   PENDING_CONTRACTS, PREPARATION_INCOMPLETE, assertProductionPreparationBoundary,
-  createProductionSocialIntegration, safeStartupError };
+  createProductionSocialIntegration, closeProductionResources, safeStartupError };

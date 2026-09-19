@@ -90,7 +90,7 @@ async function createOperationalPrivatePipelineFixture(t, options = {}) {
     assert.equal(executor.capabilities.hardTermination, true, "Principal fixture requires actual native process-tree termination");
     let inspectorWorker, preparationWorker;
     const inspectionRunner = createOperationalInspectionRunner({ store, owner: context, capacity, accessPolicy, diskSpaceGuard: guard,
-      getWorker: () => inspectorWorker, enabled: true, clock });
+      getWorker: () => inspectorWorker, enabled: true, clock, canLaunch: options.canLaunch });
     const inspectionTransport = Object.freeze({ ...inspectionRunner, async dispatch(task) {
       try { return await inspectionRunner.dispatch(task); }
       catch (error) { t.diagnostic(`PHYSICAL_INSPECTION_DISPATCH_ERROR=${error.code || error.name}`); throw error; }
@@ -111,7 +111,7 @@ async function createOperationalPrivatePipelineFixture(t, options = {}) {
     const preparedStore = createPreparedDiskResultStore({ rootDirectory: privateRoot, preparationRoot, tenantStore: store, admission: preparedAdmission,
       accessPolicy, outputInspector: createPreparedDiskOutputInspector({ ffmpegPath: FFMPEG, processExecutor: executor }), enabled: true, clock });
     const preparationRunner = createOperationalPreparationRunner({ store, owner: context, capacity, admission: preparedAdmission, accessPolicy,
-      getWorker: () => preparationWorker, enabled: true, syntheticMediaForLocalTests: options.syntheticMusic === true, clock });
+      getWorker: () => preparationWorker, enabled: true, syntheticMediaForLocalTests: options.syntheticMusic === true, clock, canLaunch: options.canLaunch });
     preparationWorker = createProcessDiskPreparationWorker({ workingDirectory: preparationWorkingRoot, preparationRoot, resultStore: preparedStore,
       admission: preparedAdmission, executor, clock,
       ...(options.syntheticMusic === true ? { musicRoot, allowSyntheticForTests: true,

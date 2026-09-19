@@ -45,7 +45,7 @@ async function createOperationalCalendarPipelineFixture(t, options = {}) {
   const originalSource = { key: "synthetic-plan:existing", planningId: "synthetic-existing-plan", orderId: "synthetic-existing-order",
     ...slot(f.clock(), 2), caption: "Arte existente preservada", imageReady: true, version: "1" };
   const key = crypto.randomBytes(48).toString("hex"), containers = new Map(), confirmed = new Map(), providerCalls = [], sourcePaths = [];
-  let current, base, nextId = 17900000000000000n, fault = null, externalGate = true;
+  let current, base, nextId = 17900000000000000n, fault = null, externalGate = true, connectionGate = true;
   const connectorContext = (verifiedPrincipal = principal) => createConnectorContext({ principal: verifiedPrincipal, provider: "instagram", environment: "production", correlationId: crypto.randomUUID(), auditEventId: crypto.randomUUID() });
   const reply = value => ({ status: 200, headers: { get: () => "application/json" }, arrayBuffer: async () => Buffer.from(JSON.stringify(value)) });
   const transport = createLocalPublicationTransport(async (url, request) => {
@@ -89,7 +89,7 @@ async function createOperationalCalendarPipelineFixture(t, options = {}) {
     const grants = createCalendarGrants(key, f.clock);
     const media = createCalendarMedia({ dataDir: f.root, secret: key, publicOrigin: ORIGIN, loadSource: async () => originals, clock: f.clock });
     const config = loadInstagramOAuthConfig({ ENVIRONMENT: "production", PUBLIC_API_BASE_URL: ORIGIN,
-      SOCIAL_INSTAGRAM_ENABLED: "true", SOCIAL_EXTERNAL_CONNECTION_ENABLED: "true", SOCIAL_EXTERNAL_PUBLICATION_ENABLED: externalGate ? "true" : "false",
+      SOCIAL_INSTAGRAM_ENABLED: "true", SOCIAL_EXTERNAL_CONNECTION_ENABLED: connectionGate ? "true" : "false", SOCIAL_EXTERNAL_PUBLICATION_ENABLED: externalGate ? "true" : "false",
       SOCIAL_PRODUCTION_OPERATION_ALLOWLIST_JSON: JSON.stringify([{ companyId: context.companyId, userId: context.userId }]), INSTAGRAM_APP_ID: "12345678901234",
       INSTAGRAM_APP_SECRET: crypto.randomBytes(32).toString("hex"), INSTAGRAM_GRAPH_API_VERSION: "v25.0",
       INSTAGRAM_OAUTH_REDIRECT_URI: `${ORIGIN}/v1/social/oauth/callback` });
@@ -99,7 +99,7 @@ async function createOperationalCalendarPipelineFixture(t, options = {}) {
     const transfer = createRenderDiskTransferService({ store: f.store, provider: f.provider, registry, accessPolicy: f.accessPolicy, enabled: true, clock: f.clock });
     const runtimeFactory = createOperationalCalendarImportsRuntimeFactory({ enabled: true, preparation: f.preparation, resultStore: f.preparedStore,
       accessPolicy: f.accessPolicy, upload: f.upload, provider: f.provider, uploadStore: f.store, transfer,
-      catalog: f.catalog, localTransport: transport, allowLocalTransportForTests: true, clock: f.clock,
+      catalog: f.catalog, localTransport: transport, allowLocalTransportForTests: true, clock: f.clock, canAdmit: options.canAdmit,
       async verifyReadiness() {
         assert.equal(await registry.verify(), true); assert.equal(await f.ledger.verify(), true);
         if (options.externalPrivateExecutor === true) {
@@ -112,6 +112,7 @@ async function createOperationalCalendarPipelineFixture(t, options = {}) {
     assert.equal(isOperationalCalendarImportsRuntimeFactory(runtimeFactory, { allowLocalTransportForTests: true }), true);
     const imports = await runtimeFactory({ store: calendarStore, grants, secret: key, publicOrigin: ORIGIN,
       connectionForPrincipal: value => publisher.connection(connectorContext(value)),
+      publicationAllowedForPrincipal: value => publisher.allowed(connectorContext(value)),
       connectionForGrant: grant => publisher.connection(connectorContext(auth.fromVerifiedCalendarGrant(grant))),
       async readGeneratedArt(verifiedPrincipal, request) {
         const job = await calendarStore.update(verifiedPrincipal.companyId, state => state.jobs[request.calendarItemId]);
@@ -146,6 +147,7 @@ async function createOperationalCalendarPipelineFixture(t, options = {}) {
   const request = (route, options = {}) => fetch(base + route, { ...options, headers: { Authorization: `Bearer ${token}`, ...options.headers } });
   return Object.assign(f, { claims, otherClaims, context, otherContext, original, originalSource, originals, token, otherToken, auth, session, base, providerCalls, sourcePaths, seeded,
     current: () => current, request, setProviderFault: value => { fault = value; }, setFixtureGate: value => { externalGate = value; },
+    setFixtureConnectionGate: value => { connectionGate = value; },
     inputFor: (ready, extra = {}) => ({ assetId: ready.assetId, mediaRevision: ready.mediaRevision, previewDigest: ready.status.previewDigest,
       idempotencyKey: crypto.randomUUID(), ...slot(f.clock()), caption: "Conteúdo sintético local", automatic: true, confirmed: true, ...extra }),
     post: (route, body) => request(route, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }) });

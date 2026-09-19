@@ -30,6 +30,7 @@ async function createProductionCalendar(dependencies, ports) {
       imports = await dependencies.importsRuntimeFactory({ store, grants, secret: dependencies.secret,
         publicOrigin: ports.config.publicOrigin,
         connectionForPrincipal: principal => publisher.connection(connectorContext(principal)),
+        publicationAllowedForPrincipal: principal => publisher.allowed(connectorContext(principal)),
         connectionForGrant: grant => publisher.connection(connectorContext(ports.auth.fromVerifiedCalendarGrant(grant))),
         async readGeneratedArt(principal, request) {
           if (!isAuthenticatedSocialPrincipal(principal) || typeof principal.subject !== "string") fail("calendar_session_required", 401);

@@ -17,7 +17,8 @@ const { createWorkflowCoordinatorTick } = require("./workflow-coordinator-tick")
 const { createVmPullRouter } = require("./vm-pull-transport");
 async function createWorkflowOperationalComponents({ enabled = false, store, owner, capacity, sourceAdmission, preparedAdmission, accessPolicy, diskSpaceGuard,
   privateRoot, preparationRoot, publicApiOrigin, musicRoot, resolveMusicTrack, catalog, bridgeKey, adapter,
-  validationOnly = false, allowControlledForTests = false, clock = Date.now, diagnostic = () => {}, transferTimeoutMs = 60000, executionTransport } = {}) {
+  validationOnly = false, allowControlledForTests = false, clock = Date.now, diagnostic = () => {}, transferTimeoutMs = 60000, executionTransport,
+  canLaunch = () => true } = {}) {
   if (enabled !== true) return Object.freeze({ available: false, reason: "workflow_disabled" });
   if (await store?.verify?.() !== true || capacity?.capabilities?.persistence !== "durable") fail("schema_not_ready");
   let resultStore, provider, preparationRunner, inspectionRunner;
@@ -30,8 +31,8 @@ async function createWorkflowOperationalComponents({ enabled = false, store, own
   resultStore = createPreparedDiskResultStore({ rootDirectory: privateRoot, preparationRoot, tenantStore: store, admission: preparedAdmission, accessPolicy,
     outputInspector: createPreparedDiskOutputInspector({ workflowBridge: bridge }), enabled: true, clock });
   preparationRunner = createOperationalPreparationRunner({ store, owner, capacity, admission: preparedAdmission, accessPolicy, getWorker: () => worker,
-    enabled: true, syntheticMediaForLocalTests: allowControlledForTests, clock });
-  inspectionRunner = createOperationalInspectionRunner({ store, owner, capacity, accessPolicy, diskSpaceGuard, getWorker: () => worker, enabled: true, clock });
+    enabled: true, syntheticMediaForLocalTests: allowControlledForTests, clock, canLaunch });
+  inspectionRunner = createOperationalInspectionRunner({ store, owner, capacity, accessPolicy, diskSpaceGuard, getWorker: () => worker, enabled: true, clock, canLaunch });
   const inspector = createDurableInspectionDispatcher({ store, runner: inspectionRunner, accessPolicy, enabled: true, clock });
   provider = createRenderDiskPrivateUploadProvider({ rootDirectory: privateRoot, store, admission: sourceAdmission, inspector, transferOrigin: publicApiOrigin, enabled: true, clock });
   const upload = createCalendarImportUploadService({ store, provider, enabled: true, clock });

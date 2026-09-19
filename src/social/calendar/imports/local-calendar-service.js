@@ -4,7 +4,7 @@ const { idFor, changeJob, sameBinding, LATE_MS } = require("../model");
 const { targets } = require("../destinations");
 const { createCalendarGrants } = require("../grants");
 const { schedulePreparedImport } = require("./calendar-entry");
-const { previewDigest } = require("./policy");
+const { previewDigest, licensedTrack } = require("./policy");
 const { descriptor, parsePreviewRange } = require("./preview-service");
 const { isImportAccessPolicy } = require("./access-policy");
 const { isPreparedDiskResultStore } = require("./prepared-disk-store");
@@ -23,7 +23,7 @@ function scheduleId(context, assetId, key) { return idFor(context.companyId, `up
  * wrapper requires its genuine PostgreSQL store; local simulation is a separate
  * explicitly branded opt-in, never the production publisher's fallback.
  */
-function createCalendarImportService({ simulation, preparation, resultStore, accessPolicy, resolveConnection,
+function createCalendarImportService({ simulation, preparation, resultStore, accessPolicy, resolveConnection, resolveAutomaticAllowed,
   catalog = null, upload, provider, uploadStore, resolveGeneratedArt, clock = Date.now, enabled = false,
   store: operationalStore, grants: operationalGrants, localTransport = null } = {}, operational = false) {
   const local = !operational || isLocalPublicationTransport(localTransport);
@@ -31,7 +31,9 @@ function createCalendarImportService({ simulation, preparation, resultStore, acc
         typeof operationalGrants.issueImport !== "function" || typeof operationalGrants.verify !== "function" : !isLocalCalendarSimulation(simulation)) ||
       !isImportAccessPolicy(accessPolicy) ||
       !isPreparedDiskResultStore(resultStore, { allowVolatileForTests: local }) || typeof preparation?.snapshot !== "function" ||
-      typeof resolveConnection !== "function" || typeof clock !== "function") fail("local_configuration_invalid", 503);
+      typeof resolveConnection !== "function" || typeof clock !== "function" ||
+      (operational && typeof resolveAutomaticAllowed !== "function") ||
+      (resolveAutomaticAllowed !== undefined && typeof resolveAutomaticAllowed !== "function")) fail("local_configuration_invalid", 503);
   const store = operational ? operationalStore : simulation.store;
   const grants = operational ? operationalGrants : createCalendarGrants(crypto.randomBytes(32), clock);
   const origins = new Map(), sourceRequests = new Map();
@@ -50,6 +52,12 @@ function createCalendarImportService({ simulation, preparation, resultStore, acc
   }
   function scheduleMutation(state, action) { return operational && local ? withLocalPublicationState(state, localTransport, action) : action(); }
   function authorize(context) { try { return accessPolicy.resolve(context); } catch (_) { fail("not_found", 404); } }
+  function automaticOperationsAllowed(context) {
+    authorize(context);
+    // Only the explicitly branded local simulator has a synthetic default.
+    // Operational hosts must supply the real publisher policy; errors fail closed.
+    try { return resolveAutomaticAllowed ? resolveAutomaticAllowed(context) === true : !operational; } catch { return false; }
+  }
   function owned(state, context, id) {
     const job = state.jobs[id];
     if (!ID.test(id || "") || !job || job.sourceKind !== "upload" || job.import?.userId !== context.userId ||
@@ -66,13 +74,14 @@ function createCalendarImportService({ simulation, preparation, resultStore, acc
       variants: value.variants.map(item => ({ ...item, url: url(item.target) })),
       thumbnail: value.thumbnail ? { ...value.thumbnail, url: url("thumbnail") } : null };
   }
-  function status(job, prefs, connection) {
+  function status(job, prefs, connection, operationsAllowed = false) {
     if (job.phase === "cancelled") return "cancelled";
     if (["published", "partial", "confirming", "dispatching"].includes(job.phase)) return job.phase;
     if (job.phase === "failed") return "attention";
     if (job.automaticEnabled === false) return "item_paused";
     if (!job.authorization) return "manual";
     if (!prefs.enabled) return "paused";
+    if (operational && operationsAllowed !== true) return "operations_closed";
     if (!sameBinding(job.authorization.binding, connection?.binding)) return "connection_required";
     if (job.authorization.validUntil <= clock() || job.scheduledAt + LATE_MS >= job.authorization.validUntil) return "attention";
     if (job.scheduledAt + LATE_MS < clock()) return "overdue";
@@ -85,11 +94,12 @@ function createCalendarImportService({ simulation, preparation, resultStore, acc
       caption: job.caption, revision: job.revision, phase: job.phase, automaticEnabled: job.automaticEnabled,
       localSimulation: local, media: preview(job), selectedTargets: targets(job), destination: job.destination };
   }
-  function editState(state, context, id, input, connection) {
+  function editState(state, context, id, input, connection, operationsAllowed = false) {
     authorize(context);
     if (!operational && !isLocalCalendarState(state, simulation)) fail("local_configuration_invalid", 503);
     const job = owned(state, context, id);
     if (input.action === "automatic" && input.enabled === true) {
+      if (operational && operationsAllowed !== true) fail("operations_closed");
       if (!job.authorization || input.confirmed !== true || !state.preferences.enabled ||
           !sameBinding(job.authorization.binding, connection?.binding) || !sameBinding(state.preferences.binding, connection?.binding) ||
           job.authorization.validUntil <= clock()) fail("consent_changed");
@@ -115,22 +125,32 @@ function createCalendarImportService({ simulation, preparation, resultStore, acc
           { ...snapshot.result.variants[item.target], ...snapshot.result.objects[item.target], shareToFeed: item.shareToFeed }, selected);
       } catch { ready = false; }
     }
+    let rightsReady = true;
+    if (ready && state.selection?.audioMode === "music") {
+      try { licensedTrack(catalog, state.selection.musicTrackId, { companyId: context.companyId,
+        audience: authorize(context).audience, now: clock(), publishAt: clock(), testMode: local }); }
+      catch { rightsReady = false; }
+    }
     const connected = Boolean(connection?.binding);
     const formatsAllowed = !state.selection?.targets?.includes("story") || connection?.accountType === "business";
     const authorized = Boolean(connected && formatsAllowed && prefs.enabled && sameBinding(prefs.binding, connection.binding));
+    const calendarSaveAllowed = ready && rightsReady;
+    const operationsAllowed = automaticOperationsAllowed(context);
+    const automaticAllowed = calendarSaveAllowed && authorized && operationsAllowed;
     return { identity: { companyId: context.companyId, userId: context.userId }, assetId,
       mediaRevision: state.mediaRevision, previewDigest: state.previewDigest || null, ready, connected, authorized,
       automaticPreference: prefs.enabled, username: connection?.username || null, localSimulation: local,
-      commercialReady: !local,
-      blockedReason: !ready ? "calendar_import_prepared_media_unavailable" : !connected ? "calendar_connection_required" :
-        !formatsAllowed ? "calendar_story_business_required" : !authorized ? "calendar_import_consent_changed" : null };
+      commercialReady: !local && rightsReady, calendarSaveAllowed, automaticAllowed,
+      blockedReason: !ready ? "calendar_import_prepared_media_unavailable" : !rightsReady ? "calendar_import_music_not_authorized" :
+        !connected ? "calendar_connection_required" : !formatsAllowed ? "calendar_story_business_required" :
+        !authorized ? "calendar_import_consent_changed" : !operationsAllowed ? "calendar_import_operations_closed" : null };
   }
   const service = Object.freeze({
     available: true, ready: true, store,
     capabilities: Object.freeze({ enabled: true, localSimulation: local, testOnly: local, networkDelivery: operational && !local, readyForProduction: false }),
     describe(job, context) { authorize(context); if (job.sourceKind !== "upload" || job.import?.userId !== context.userId) return null; return preview(job); },
     editState,
-    status(job, prefs, connection) { return (operational ? job.import?.operational === true : job.import?.localSimulation === true) ? status(job, prefs, connection) : null; },
+    status(job, prefs, connection, operationsAllowed) { return (operational ? job.import?.operational === true : job.import?.localSimulation === true) ? status(job, prefs, connection, operationsAllowed) : null; },
     availability: available,
     async schedule(context, input) {
       authorize(context);
@@ -143,6 +163,7 @@ function createCalendarImportService({ simulation, preparation, resultStore, acc
         const id = scheduleId(context, input.assetId, input.idempotencyKey), existing = state.jobs[id];
         let envelope = null, authorization = null;
         if (input.automatic && !existing) {
+          if (!automaticOperationsAllowed(context)) fail("operations_closed");
           if (!connection?.binding || !state.preferences.enabled || !sameBinding(state.preferences.binding, connection.binding) ||
               snapshot.plan.deliveries.some(item => item.target === "story") && connection.accountType !== "business") fail("consent_changed");
           envelope = grants.issueImport({ ...context, binding: connection.binding, revision: state.preferences.revision,
@@ -176,7 +197,7 @@ function createCalendarImportService({ simulation, preparation, resultStore, acc
     },
     async edit(context, id, input) {
       authorize(context); const connection = await resolveConnection(context); authorize(context);
-      const job = await store.update(context.companyId, state => editState(state, context, id, input, connection)); return receipt(job);
+      const job = await store.update(context.companyId, state => editState(state, context, id, input, connection, automaticOperationsAllowed(context))); return receipt(job);
     },
     async metadata(context, { id }) { const job = await read(context, id); if (job.phase === "cancelled") fail("not_found", 404); return preview(job); },
     async open(context, { id, target }, { rangeHeader, signal } = {}) {

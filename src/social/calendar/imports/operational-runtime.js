@@ -11,6 +11,7 @@ const { createPreparedCalendarMedia } = require("./prepared-publication-media");
 const { createOperationalCalendarImportService } = require("./local-calendar-service");
 const { isLocalPublicationTransport } = require("./publication-test-transport");
 const { LIMITS, licensedTrack } = require("./policy");
+const { displayName } = require("./music-catalog");
 const factories = new WeakMap(), runtimes = new WeakSet();
 function fail() { throw Object.assign(new Error("Importação operacional indisponível."), { code: "calendar_import_runtime_invalid", statusCode: 503 }); }
 
@@ -19,11 +20,11 @@ function fail() { throw Object.assign(new Error("Importação operacional indisp
 // here. The deployment must inject a separately supervised execution boundary.
 function createOperationalCalendarImportsRuntimeFactory({ enabled = false, preparation, resultStore, accessPolicy,
   upload, provider, uploadStore, transfer, verifyReadiness, catalog = null,
-  localTransport = null, allowLocalTransportForTests = false, clock = Date.now } = {}) {
+  localTransport = null, allowLocalTransportForTests = false, clock = Date.now, canAdmit = () => true } = {}) {
   const local = isLocalPublicationTransport(localTransport);
   if (localTransport !== null && (!local || allowLocalTransportForTests !== true)) fail();
-  if (typeof enabled !== "boolean" || typeof clock !== "function") fail();
-  const factory = async ({ store, grants, secret, publicOrigin, connectionForPrincipal, connectionForGrant, readGeneratedArt } = {}) => {
+  if (typeof enabled !== "boolean" || typeof clock !== "function" || typeof canAdmit !== "function") fail();
+  const factory = async ({ store, grants, secret, publicOrigin, connectionForPrincipal, connectionForGrant, publicationAllowedForPrincipal, readGeneratedArt } = {}) => {
     if (!enabled) return null;
     if (!isCalendarStore(store) || !isImportUploadPostgresStore(uploadStore) || !isImportAccessPolicy(accessPolicy) ||
         !isPreparedDiskResultStore(resultStore, { allowVolatileForTests: local }) ||
@@ -32,7 +33,8 @@ function createOperationalCalendarImportsRuntimeFactory({ enabled = false, prepa
         provider?.getCapabilities?.().available !== true || provider.capabilities.testOnly && !local ||
         !["request", "status", "snapshot"].every(key => typeof preparation?.[key] === "function") ||
         !["start", "resume", "status", "authorizePart", "resolvePart", "complete", "cancel"].every(key => typeof upload?.[key] === "function") ||
-        typeof connectionForPrincipal !== "function" || typeof connectionForGrant !== "function" || typeof readGeneratedArt !== "function") fail();
+        typeof connectionForPrincipal !== "function" || typeof connectionForGrant !== "function" ||
+        typeof publicationAllowedForPrincipal !== "function" || typeof readGeneratedArt !== "function") fail();
     // These are real restricted schema checks; the callback adds deployment-
     // specific executor/disk checks and cannot replace the branded requirements.
     await store.verify();
@@ -56,6 +58,7 @@ function createOperationalCalendarImportsRuntimeFactory({ enabled = false, prepa
     };
     const scheduling = createOperationalCalendarImportService({ store, grants, preparation, resultStore, accessPolicy,
       resolveConnection, catalog, upload, provider, uploadStore, clock, enabled: true, localTransport,
+      resolveAutomaticAllowed: context => publicationAllowedForPrincipal(principalFor(context)) === true,
       resolveGeneratedArt: (context, request) => readGeneratedArt(principalFor(context), request) });
     const preview = createPrivateImportPreviewService({ preparation, resultStore, accessPolicy, enabled: true, allowVolatileForTests: local });
     const preparedMedia = createPreparedCalendarMedia({ store, grants, preparation, resultStore, accessPolicy,
@@ -63,6 +66,7 @@ function createOperationalCalendarImportsRuntimeFactory({ enabled = false, prepa
     if (!preparedMedia.available || !preview.available) { preparedMedia.close(); scheduling.close(); fail(); }
     const runtime = Object.freeze({ ready: true, scheduling, preview, preparedMedia, transfer,
       upload: transfer.wrapUpload(upload), preparation, allowed,
+      canAdmit(context) { return allowed(context) && canAdmit() === true; },
       contextForPrincipal(principal) {
         if (!isAuthenticatedSocialPrincipal(principal)) fail();
         const context = Object.freeze({ authenticated: true, companyId: principal.companyId, userId: principal.userId });
@@ -75,7 +79,8 @@ function createOperationalCalendarImportsRuntimeFactory({ enabled = false, prepa
         for (const track of catalog?.values?.() || []) {
           try {
             const authorized = licensedTrack(catalog, track.id, { companyId: context.companyId, audience, now: clock(), publishAt: clock(), testMode: local });
-            musicTracks.push({ id: authorized.id, commercialRightsConfirmed: authorized.testOnly !== true, testOnly: authorized.testOnly === true });
+            musicTracks.push({ id: authorized.id, displayName: displayName(track.displayName, authorized.id),
+              commercialRightsConfirmed: authorized.testOnly !== true, testOnly: authorized.testOnly === true });
           } catch { /* Unavailable rights are never advertised as an approved track. */ }
         }
         return { enabled: true, localSimulation: local, readyForProduction: false,

@@ -11,12 +11,12 @@ const instances = new WeakSet();
 const context = Object.freeze({ authenticated: true, role: "calendar_media_capacity_coordinator" });
 function fail(code = "unavailable") { throw Object.assign(new Error(`operational_preparation_${code}`), { code: `operational_preparation_${code}` }); }
 function createOperationalPreparationRunner({ store, owner, capacity, admission, accessPolicy, getWorker,
-  enabled = false, syntheticMediaForLocalTests = false, clock = Date.now } = {}) {
+  enabled = false, syntheticMediaForLocalTests = false, clock = Date.now, canLaunch = () => true } = {}) {
   if (!["win32", "linux"].includes(process.platform)) fail("platform_unvalidated");
   if (enabled !== true || store?.capabilities?.persistence !== "durable" || capacity?.capabilities?.persistence !== "durable" ||
       capacity.capabilities.atomicGlobalReservations !== true || !isPreparedDiskAdmission(admission) ||
       !isImportAccessPolicy(accessPolicy) || !accessPolicy.executionAvailable || typeof getWorker !== "function" ||
-      typeof syntheticMediaForLocalTests !== "boolean" ||
+      typeof syntheticMediaForLocalTests !== "boolean" || typeof canLaunch !== "function" ||
       !["inspect", "acquireNext", "recordCompletion", "closeNeverLaunched"].every(key => typeof capacity[key] === "function")) fail("configuration_invalid");
   const journal = createPreparationExecutionJournal({ store, owner, clock });
   const binding = journal.capabilities.owner;
@@ -66,6 +66,7 @@ function createOperationalPreparationRunner({ store, owner, capacity, admission,
     const actualWorker = worker(); // Validate before persisting a dispatch intent.
     let { record } = await journal.begin(task);
     if (record.launchClaimed) return lookup({ dispatchKey: task.dispatchKey, executionDigest: task.executionDigest });
+    if (canLaunch() !== true) return beforeLaunchFailure(record);
     // Both operations are idempotent. A restart after global acquisition reads
     // the existing lease, while the tenant's atomic claim elects one launcher.
     try {
@@ -82,7 +83,7 @@ function createOperationalPreparationRunner({ store, owner, capacity, admission,
     // This catch is strictly before invoking the worker. The exclusive live
     // claimant can prove its invocation did not happen; other exceptions below
     // cannot use this proof, even if no receipt is visible yet.
-    try { allowed(); } catch (_) {
+    try { allowed(); if (canLaunch() !== true) fail("admission_closed"); } catch (_) {
       return publicResponse(await observeResult(record, { executionId: record.executionId, state: "failed", elapsedMs: 0,
         termination: { proved: true, descendants: 0, proofId: crypto.createHash("sha256").update(`launcher-not-invoked:${record.executionId}:${task.executionDigest}`).digest("hex") } }));
     }

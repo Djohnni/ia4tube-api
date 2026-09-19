@@ -48,7 +48,7 @@ function createCalendarImportRouter({ authenticate, resolvePrincipal, getService
     next();
   });
   router.use(express.json({ limit: "16kb", strict: true }));
-  const call = (key, operation, { capabilities = false } = {}) => async (req, res, next) => {
+  const call = (key, operation, { capabilities = false, admission = false } = {}) => async (req, res, next) => {
     try {
       const principal = await resolvePrincipal(req.user);
       if (!isAuthenticatedSocialPrincipal(principal)) fail("import_session_required", 401);
@@ -59,6 +59,7 @@ function createCalendarImportRouter({ authenticate, resolvePrincipal, getService
         if (capabilities) return res.json({ ok: true, enabled: false });
         fail("import_unavailable", 503);
       }
+      if (admission && typeof service.canAdmit === "function" && service.canAdmit(context) !== true) fail("import_pilot_admission_closed", 503);
       let result = await operation(service, context, req);
       if (capabilities && result.enabled === true) result = { ...result, identity: { companyId: context.companyId, userId: context.userId } };
       // A grant is intentionally returned only to the authenticated original owner.
@@ -68,7 +69,7 @@ function createCalendarImportRouter({ authenticate, resolvePrincipal, getService
   };
   router.get("/capabilities", call(null, (service, context) => service.capabilities(context), { capabilities: true }));
   router.post("/uploads", call("upload", (service, context, req) => service.upload.start(context,
-    body(req, ["idempotencyKey", "kind", "mimeType", "sizeBytes", "sha256"]))));
+    body(req, ["idempotencyKey", "kind", "mimeType", "sizeBytes", "sha256"])), { admission: true }));
   router.get("/uploads/:id", call("upload", (service, context, req) => service.upload.status(context, { uploadId: uploadId(req) })));
   for (const action of ["resume", "complete", "cancel"]) {
     router.post(`/uploads/:id/${action}`, call("upload", (service, context, req) => {
@@ -90,7 +91,7 @@ function createCalendarImportRouter({ authenticate, resolvePrincipal, getService
     if (!UUID.test(req.params.assetId || "")) fail("import_not_found", 404);
     if (!service.preparation) fail("import_preparation_unavailable", 503);
     return service.preparation.request(context, { ...body(req, ["uploadId", "idempotencyKey", "expectedMediaRevision", "selection"]), assetId: req.params.assetId.toLowerCase() });
-  }));
+  }, { admission: true }));
   router.get("/assets/:assetId", call("asset", (service, context, req) => {
     if (!UUID.test(req.params.assetId || "")) fail("import_not_found", 404);
     if (!service.preparation) fail("import_preparation_unavailable", 503);
@@ -109,7 +110,7 @@ function createCalendarImportRouter({ authenticate, resolvePrincipal, getService
     scheduling(service).byKey(context, req.params.assetId, req.params.key)));
   router.get("/schedules/:id", call("schedule", (service, context, req) => scheduling(service).get(context, req.params.id)));
   router.post("/sources/generated/:id", call(null, (service, context, req) =>
-    scheduling(service).importGenerated(context, { ...body(req, ["revision", "idempotencyKey"]), calendarItemId: req.params.id })));
+    scheduling(service).importGenerated(context, { ...body(req, ["revision", "idempotencyKey"]), calendarItemId: req.params.id }), { admission: true }));
   router.use((_req, res) => res.status(404).json({ ok: false, code: "import_route_not_found" }));
   router.use((error, _req, res, _next) => {
     const known = SAFE_CODE.test(error?.code || "");

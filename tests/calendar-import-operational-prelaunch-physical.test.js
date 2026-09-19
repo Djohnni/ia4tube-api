@@ -38,6 +38,39 @@ test("physical prelaunch journal fence closes known failures without trusting pr
     });
     return task;
   }
+  await t.test("pilot cutoff before reservation fences the intent without launching or holding bytes", async () => {
+    const task = await seedTask();
+    const runner = createOperationalPreparationRunner({ store: f.store, owner: f.context, capacity: f.capacity,
+      admission: f.preparedAdmission, accessPolicy: f.accessPolicy, getWorker: () => f.preparationWorker,
+      enabled: true, clock: f.clock, canLaunch: () => false });
+    const result = await runner.dispatch(task);
+    assert.equal(result.state, "failed");
+    const record = await journal().getByKey(task);
+    // The terminal claim is a permanent fence against a delayed launcher,
+    // not evidence that a process ran; the explicit neverLaunched proof is.
+    assert.equal(record.launchClaimed, true); assert.equal(record.capacityLeaseToken, null);
+    assert.equal(record.completion.neverLaunched, true);
+    assert.equal(record.capacitySettled, true); assert.equal(f.counters.preparationSourceReads, 0);
+    const slot = await f.capacity.inspect({ context: coordinator, jobId: task.jobId });
+    assert.equal(slot.state, "cancelled"); assert.equal(slot.heldBytes, 0);
+    assert.equal((await runner.dispatch(task)).executionId, result.executionId);
+    assert.equal((await f.capacity.summary({ context: coordinator })).activeJobs, 0);
+  });
+  await t.test("pilot cutoff between claim and launcher proves no process but preserves reserved storage", async () => {
+    const task = await seedTask(); let checks = 0;
+    const runner = createOperationalPreparationRunner({ store: f.store, owner: f.context, capacity: f.capacity,
+      admission: f.preparedAdmission, accessPolicy: f.accessPolicy, getWorker: () => f.preparationWorker,
+      enabled: true, clock: f.clock, canLaunch: () => ++checks === 1 });
+    const result = await runner.dispatch(task); assert.equal(result.state, "failed"); assert.equal(checks, 2);
+    const record = await journal().getByKey(task);
+    assert.equal(record.launchClaimed, true); assert.equal(record.completion.terminationProved, true);
+    assert.equal(record.capacitySettled, true); assert.equal(record.completion.actualRuntimeMs, 0);
+    assert.equal(f.counters.preparationSourceReads, 0);
+    const slot = await f.capacity.inspect({ context: coordinator, jobId: task.jobId });
+    assert.equal(slot.storageHeld, true); assert.equal(slot.heldBytes, preparedTaskReservation(task).storageBytes);
+    assert.equal((await f.capacity.summary({ context: coordinator })).activeJobs, 0);
+    assert.equal((await runner.getByKey(task)).executionId, result.executionId);
+  });
   await t.test("physical free-space refusal after reservation settles execution, never reserved bytes", async () => {
     const task = await seedTask();
     // Actual filesystem observation with an intentionally impossible safety

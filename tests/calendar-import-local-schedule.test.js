@@ -90,6 +90,11 @@ test("real synthetic photo music has separate Feed image and Story/Reel video, o
   assert.throws(() => createLocalCalendarImportService({ simulation: { ...f.simulation }, enabled: true }), { code: "calendar_import_local_configuration_invalid" });
   const saved = await scheduleHttp(f, input); assert.equal(saved.localSimulation, true); assert.equal(saved.media.testOnly, true);
   await assertPreviewBytes(f, saved);
+  f.catalog.get("synthetic-local-tone").disabled = true;
+  const rightsClosed = await f.scheduling.availability(f.context, ready.assetId);
+  assert.equal(rightsClosed.ready, true, "Existing prepared bytes are preserved");
+  assert.equal(rightsClosed.calendarSaveAllowed, false); assert.equal(rightsClosed.automaticAllowed, false);
+  assert.equal(rightsClosed.blockedReason, "calendar_import_music_not_authorized");
   const edited = { ...input, idempotencyKey: crypto.randomUUID(), mediaRevision: 99 };
   assert.equal((await f.post(`${PREFIX}/assets/${ready.assetId}/schedule`, Object.fromEntries(Object.entries(edited).filter(([key]) => key !== "assetId")))).status, 404);
 });
