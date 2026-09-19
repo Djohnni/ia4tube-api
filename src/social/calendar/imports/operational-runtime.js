@@ -14,16 +14,37 @@ const { LIMITS, licensedTrack } = require("./policy");
 const { displayName } = require("./music-catalog");
 const factories = new WeakMap(), runtimes = new WeakSet();
 function fail() { throw Object.assign(new Error("Importação operacional indisponível."), { code: "calendar_import_runtime_invalid", statusCode: 503 }); }
+const PILOT_UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/;
+function publicPilotStatus(read) {
+  try {
+    const source = read();
+    if (!source || typeof source !== "object" || Array.isArray(source)) fail();
+    // An explicit primitive whitelist prevents accidental forwarding of config,
+    // database URLs, bridge keys, host receipts or another owner's identity.
+    const status = {};
+    for (const key of ["schema", "missionId", "apiGitSha", "runtimeRevision", "workerId", "createdAt", "admitUntil", "finishBy", "observedAt",
+      "canAdmit", "canLaunch", "connectionEnabled", "publicationEnabled", "metaWindowEnabled"]) status[key] = source[key];
+    if (status.schema !== 1 || ![status.missionId, status.workerId].every(value => typeof value === "string" && PILOT_UUID.test(value)) ||
+        !(status.apiGitSha === null || typeof status.apiGitSha === "string" && /^[a-f0-9]{40}$/.test(status.apiGitSha)) ||
+        typeof status.runtimeRevision !== "string" || !/^[a-f0-9]{64}$/.test(status.runtimeRevision) ||
+        ![status.createdAt, status.admitUntil, status.finishBy, status.observedAt].every(value => Number.isSafeInteger(value) && value >= 0) ||
+        status.createdAt >= status.admitUntil || status.admitUntil >= status.finishBy ||
+        ![status.canAdmit, status.canLaunch, status.connectionEnabled, status.publicationEnabled, status.metaWindowEnabled].every(value => typeof value === "boolean") ||
+        (status.canAdmit || status.canLaunch) && status.observedAt >= status.admitUntil) fail();
+    return Object.freeze(status);
+  } catch { fail(); }
+}
 
 // Explicit host composition, not an executor factory. No token, connector store,
 // fetch fallback, FFmpeg startup, environment mutation or worker timer is owned
 // here. The deployment must inject a separately supervised execution boundary.
 function createOperationalCalendarImportsRuntimeFactory({ enabled = false, preparation, resultStore, accessPolicy,
   upload, provider, uploadStore, transfer, verifyReadiness, catalog = null,
-  localTransport = null, allowLocalTransportForTests = false, clock = Date.now, canAdmit = () => true } = {}) {
+  localTransport = null, allowLocalTransportForTests = false, clock = Date.now, canAdmit = () => true, readPilotStatus = null } = {}) {
   const local = isLocalPublicationTransport(localTransport);
   if (localTransport !== null && (!local || allowLocalTransportForTests !== true)) fail();
-  if (typeof enabled !== "boolean" || typeof clock !== "function" || typeof canAdmit !== "function") fail();
+  if (typeof enabled !== "boolean" || typeof clock !== "function" || typeof canAdmit !== "function" ||
+      readPilotStatus !== null && typeof readPilotStatus !== "function") fail();
   const factory = async ({ store, grants, secret, publicOrigin, connectionForPrincipal, connectionForGrant, publicationAllowedForPrincipal, readGeneratedArt } = {}) => {
     if (!enabled) return null;
     if (!isCalendarStore(store) || !isImportUploadPostgresStore(uploadStore) || !isImportAccessPolicy(accessPolicy) ||
@@ -76,6 +97,8 @@ function createOperationalCalendarImportsRuntimeFactory({ enabled = false, prepa
       },
       capabilities(context) {
         const audience = owner(context).audience, musicTracks = [];
+        // Owner eligibility is checked before inspecting any pilot metadata.
+        const pilot = readPilotStatus === null ? null : publicPilotStatus(readPilotStatus);
         for (const track of catalog?.values?.() || []) {
           try {
             const authorized = licensedTrack(catalog, track.id, { companyId: context.companyId, audience, now: clock(), publishAt: clock(), testMode: local });
@@ -86,7 +109,8 @@ function createOperationalCalendarImportsRuntimeFactory({ enabled = false, prepa
         return { enabled: true, localSimulation: local, readyForProduction: false,
           scheduling: { enabled: true, localSimulation: local },
           upload: { origin: publicOrigin, chunkBytes: LIMITS.chunkBytes, maxImageBytes: LIMITS.imageBytes, maxVideoBytes: LIMITS.videoBytes },
-          preparation: { enabled: true, minVideoSeconds: 3, maxVideoSeconds: 60, photoMusicSeconds: LIMITS.photoClipSeconds }, musicTracks };
+          preparation: { enabled: true, minVideoSeconds: 3, maxVideoSeconds: 60, photoMusicSeconds: LIMITS.photoClipSeconds }, musicTracks,
+          ...(pilot === null ? {} : { pilot }) };
       },
       close() { if (!closed) { closed = true; preparedMedia.close(); scheduling.close(); } }
     });

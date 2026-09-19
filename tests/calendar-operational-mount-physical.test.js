@@ -3,15 +3,45 @@ const test = require("node:test"), assert = require("node:assert/strict"), crypt
 const { createOperationalCalendarPipelineFixture, PREFIX, hash } = require("./helpers/operational-calendar-pipeline-fixture");
 const { isOperationalCalendarImportsRuntime } = require("../src/social/calendar/imports/operational-runtime");
 test("physical operational composer mounts authenticated metadata and opaque TCP bytes without decoding in GET", async t => {
-  let admissionOpen = true;
-  const f = await createOperationalCalendarPipelineFixture(t, {canAdmit:()=>admissionOpen,canLaunch:()=>admissionOpen}), runtime = f.current().imports;
+  let admissionOpen = true, observations = 0, observationOverride = {}, observationError = false;
+  const start = Date.now(), missionId = crypto.randomUUID(), workerId = crypto.randomUUID();
+  const readPilotStatus = () => {
+    observations++;
+    if (observationError) throw new Error("synthetic-private-observation-error");
+    return {schema:1,missionId,workerId,apiGitSha:"c".repeat(40),runtimeRevision:"d".repeat(64),
+      createdAt:start,admitUntil:start+600000,finishBy:start+1200000,observedAt:Date.now(),
+      canAdmit:admissionOpen,canLaunch:admissionOpen,connectionEnabled:false,publicationEnabled:false,metaWindowEnabled:false,
+      bridgeKey:"synthetic-private-not-for-response",get owner(){assert.fail("No owner forwarding");},...observationOverride};
+  };
+  const f = await createOperationalCalendarPipelineFixture(t, {canAdmit:()=>admissionOpen,canLaunch:()=>admissionOpen,readPilotStatus}), runtime = f.current().imports;
   assert.equal(isOperationalCalendarImportsRuntime(runtime), true);
-  const caps = await (await f.request(`${PREFIX}/capabilities`)).json();
+  const beforeObservation = await f.snapshot(), capsResponse = await f.request(`${PREFIX}/capabilities`), caps = await capsResponse.json();
   assert.equal(caps.enabled, true); assert.equal(caps.localSimulation, true);
+  assert.equal(capsResponse.headers.get("cache-control"),"private, no-store");
   assert.deepEqual(caps.identity, { companyId: f.context.companyId, userId: f.context.userId });
   assert.deepEqual(caps.musicTracks, []);
+  assert.equal(caps.pilot.missionId,missionId); assert.equal(caps.pilot.apiGitSha,"c".repeat(40));
+  assert.equal(caps.pilot.workerId,workerId); assert.equal(caps.pilot.canAdmit,true); assert.equal(caps.pilot.canLaunch,true);
+  assert.deepEqual(Object.keys(caps.pilot).sort(),["schema","missionId","apiGitSha","runtimeRevision","workerId","createdAt",
+    "admitUntil","finishBy","observedAt","canAdmit","canLaunch","connectionEnabled","publicationEnabled","metaWindowEnabled"].sort());
+  assert.equal(JSON.stringify(caps).includes("synthetic-private"),false);
+  assert.deepEqual(await f.snapshot(),beforeObservation,"GET observes the runtime without a reservation or a state write");
+  const ownObservations = observations;
   const denied = await (await f.request(`${PREFIX}/capabilities`, { headers: { Authorization: `Bearer ${f.otherToken}` } })).json();
-  assert.equal(denied.enabled, false); assert.equal(denied.identity, undefined);
+  assert.deepEqual(denied,{ok:true,enabled:false}); assert.equal(observations,ownObservations);
+  assert.throws(()=>runtime.capabilities(f.otherContext),{code:"calendar_import_runtime_invalid"});
+  assert.equal(observations,ownObservations,"Neither the route nor the runtime inspects another owner's pilot");
+  for (const invalid of [{missionId:"foreign-private-value"},{apiGitSha:{private:"do-not-forward"}},{runtimeRevision:"bad"},
+    {canAdmit:"true"},{observedAt:-1},{observedAt:start+600000},{workerId:null}]) {
+    observationOverride=invalid;
+    const response=await f.request(`${PREFIX}/capabilities`), text=await response.text();
+    assert.equal(response.status,503);assert.equal(text.includes("private"),false);
+    assert.equal(JSON.parse(text).code,"calendar_import_runtime_invalid");
+  }
+  observationOverride={};observationError=true;
+  const failedObservation=await f.request(`${PREFIX}/capabilities`);
+  assert.equal(failedObservation.status,503);assert.equal((await failedObservation.text()).includes("private"),false);
+  observationError=false;
   assert.throws(() => runtime.contextForPrincipal({ companyId: f.context.companyId, userId: f.context.userId }),
     { code: "calendar_import_runtime_invalid" });
   const bytes = f.originals;
@@ -46,6 +76,7 @@ test("physical operational composer mounts authenticated metadata and opaque TCP
   }
   const stillReadable = await (await f.request(`${PREFIX}/capabilities`)).json();
   assert.equal(stillReadable.enabled,true); assert.deepEqual(stillReadable.identity,caps.identity);
+  assert.equal(stillReadable.pilot.missionId,missionId); assert.equal(stillReadable.pilot.canAdmit,false); assert.equal(stillReadable.pilot.canLaunch,false);
   assert.equal((await f.request(`${PREFIX}/uploads/${upload.uploadId}`)).status,200);
   await f.post(`${PREFIX}/uploads/${upload.uploadId}/complete`, {});
   const inspected = Object.values((await f.snapshot()).inspectionExecutions.records);

@@ -7,11 +7,16 @@ const { createPreparedCalendarMedia, isPreparedCalendarMedia } = require("../src
 const { validatePreparedPublicationPart } = require("../src/social/calendar/imports/publication-descriptor");
 test("operational imports composition defaults disabled and never probes or starts a worker", async () => {
   let calls = 0;
-  const factory = createOperationalCalendarImportsRuntimeFactory({ verifyReadiness() { calls++; throw new Error("must not run"); } });
+  const factory = createOperationalCalendarImportsRuntimeFactory({ verifyReadiness() { calls++; throw new Error("must not run"); },
+    readPilotStatus() { calls++; throw new Error("must not inspect disabled pilot"); } });
   assert.equal(isOperationalCalendarImportsRuntimeFactory(factory), true);
   assert.equal(await factory(), null); assert.equal(calls, 0);
   assert.equal(isOperationalCalendarImportsRuntimeFactory({ ...factory }), false);
   assert.equal(isOperationalCalendarImportsRuntime({ ready: true }), false);
+});
+test("pilot metadata observation remains optional and refuses untrusted callback lookalikes", () => {
+  for (const readPilotStatus of [{}, true, "synthetic-private-value"])
+    assert.throws(() => createOperationalCalendarImportsRuntimeFactory({readPilotStatus}), {code:"calendar_import_runtime_invalid"});
 });
 test("an enabled factory refuses capability lookalikes before generic readiness can authorize anything", async () => {
   let probes = 0;

@@ -99,7 +99,7 @@ async function createOperationalCalendarPipelineFixture(t, options = {}) {
     const transfer = createRenderDiskTransferService({ store: f.store, provider: f.provider, registry, accessPolicy: f.accessPolicy, enabled: true, clock: f.clock });
     const runtimeFactory = createOperationalCalendarImportsRuntimeFactory({ enabled: true, preparation: f.preparation, resultStore: f.preparedStore,
       accessPolicy: f.accessPolicy, upload: f.upload, provider: f.provider, uploadStore: f.store, transfer,
-      catalog: f.catalog, localTransport: transport, allowLocalTransportForTests: true, clock: f.clock, canAdmit: options.canAdmit,
+      catalog: f.catalog, localTransport: transport, allowLocalTransportForTests: true, clock: f.clock, canAdmit: options.canAdmit, readPilotStatus: options.readPilotStatus,
       async verifyReadiness() {
         assert.equal(await registry.verify(), true); assert.equal(await f.ledger.verify(), true);
         if (options.externalPrivateExecutor === true) {

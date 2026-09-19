@@ -219,3 +219,46 @@ test('unsafe stop parent metadata fails closed and neither window expiry nor lat
   f.unsafeGuardDirectory();assert.equal(f.factoryOptions.canAdmit(),false);assert.equal(f.componentOptions.canLaunch(),false);
   at=input().admitUntil;assert.equal(f.factoryOptions.canAdmit(),false);await pilot.close();
 });
+
+test('active pilot observation binds loaded mission and deployment without reading secrets or polling work',async()=>{
+  const e={...env(),RENDER_GIT_COMMIT:'c'.repeat(40)};
+  const f=compositionFixture({input:input(),env:e,clock:()=>now}),pilot=await f.create();
+  const before=f.events.slice(),status=f.factoryOptions.readPilotStatus();
+  assert.deepEqual(JSON.parse(JSON.stringify(status)),{schema:1,missionId:input().missionId,apiGitSha:'c'.repeat(40),
+    runtimeRevision:input().runtimeRevision,workerId:input().workerId,createdAt:input().createdAt,
+    admitUntil:input().admitUntil,finishBy:input().finishBy,observedAt:now,canAdmit:true,canLaunch:true,
+    connectionEnabled:false,publicationEnabled:false,metaWindowEnabled:false});
+  assert.ok(Object.isFrozen(status));assert.deepEqual(f.events,before);assert.equal(f.timers.size,0);
+  // Diagnostics describe this process's immutable startup identity, not a later
+  // environment edit or a newer file deposited beside an old running process.
+  e.RENDER_GIT_COMMIT='d'.repeat(40);e.SOCIAL_EXTERNAL_PUBLICATION_ENABLED='true';
+  assert.equal(f.factoryOptions.readPilotStatus().apiGitSha,'c'.repeat(40));
+  assert.equal(f.factoryOptions.readPilotStatus().publicationEnabled,false);
+  f.stop();const stopped=f.factoryOptions.readPilotStatus();
+  assert.equal(stopped.canAdmit,false);assert.equal(stopped.canLaunch,false);
+  assert.equal(f.factoryOptions.canAdmit(),false);assert.equal(f.componentOptions.canLaunch(),false);
+  f.stop('absent');assert.equal(f.factoryOptions.readPilotStatus().canAdmit,false);
+  assert.deepEqual(f.events,before);await pilot.close();
+});
+
+for(const sha of [undefined,'','untrusted-short-sha','secret-sentinel','g'.repeat(40)])
+  test('observation does not invent a live API SHA when Render metadata is missing or invalid: '+String(sha),async()=>{
+    const f=compositionFixture({input:input(),env:{...env(),RENDER_GIT_COMMIT:sha},clock:()=>now}),pilot=await f.create();
+    assert.equal(f.factoryOptions.readPilotStatus().apiGitSha,null);await pilot.close();
+  });
+
+test('observed readiness closes at cutoff and immediately on drain while preserving the loaded identity',async()=>{
+  let time=now,release;const heldTick=new Promise(resolve=>{release=resolve;});
+  const f=compositionFixture({input:input(),env:env(),clock:()=>time,heldTick}),pilot=await f.create();
+  pilot.start();const active=f.fire();await Promise.resolve();
+  assert.equal(f.factoryOptions.readPilotStatus().canLaunch,true);
+  time=input().admitUntil;
+  const expired=f.factoryOptions.readPilotStatus();
+  assert.equal(expired.observedAt,time);assert.equal(expired.canAdmit,false);assert.equal(expired.canLaunch,false);
+  time=now;const closing=pilot.close();
+  const draining=f.factoryOptions.readPilotStatus();assert.equal(draining.canAdmit,false);assert.equal(draining.canLaunch,false);
+  assert.equal(draining.missionId,input().missionId);
+  assert.equal(f.events.some(value=>value.endsWith('-pool-end')),false);
+  release();await Promise.all([active,closing]);
+  assert.equal(f.factoryOptions.readPilotStatus().canAdmit,false);
+});

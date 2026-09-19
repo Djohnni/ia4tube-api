@@ -86,6 +86,18 @@ async function createProductionMediaPilot({env=process.env,tenantPool,clock=Date
   const {config,music,admissionFence}=await loadProductionPilotFiles({env,clock});
   let capacityPool,transferPool,loop,closed=false,closing=false,closePromise;
   const report=code=>logger?.error?.({component:'calendar_media_pilot',code});
+  const apiGitSha=typeof env.RENDER_GIT_COMMIT==='string'&&/^[a-f0-9]{40}$/i.test(env.RENDER_GIT_COMMIT)?env.RENDER_GIT_COMMIT.toLowerCase():null;
+  const gates=Object.freeze({connectionEnabled:env.SOCIAL_EXTERNAL_CONNECTION_ENABLED==='true',
+    publicationEnabled:env.SOCIAL_EXTERNAL_PUBLICATION_ENABLED==='true',metaWindowEnabled:env.META_APP_REVIEW_WINDOW_ENABLED==='true'});
+  const admissionOpenAt=at=>!closing&&!closed&&at<config.admitUntil&&admissionFence();
+  const admissionOpen=()=>admissionOpenAt(clock());
+  // This is the loaded process's state, not a reread of a configuration file or
+  // a worker poll. Observing it neither reserves work nor starts a conversion.
+  const readPilotStatus=()=>{
+    const observedAt=clock(),open=admissionOpenAt(observedAt);
+    return Object.freeze({schema:1,missionId:config.missionId,apiGitSha,runtimeRevision:config.runtimeRevision,workerId:config.workerId,
+      createdAt:config.createdAt,admitUntil:config.admitUntil,finishBy:config.finishBy,observedAt,canAdmit:open,canLaunch:open,...gates});
+  };
   try{
     const root=ROOT+'/uploads',preparationRoot=ROOT+'/prepared',musicRoot=ROOT+'/music';
     capacityPool=createPostgresPool(config.capacityPoolConfig,{logger});transferPool=createPostgresPool(config.transferPoolConfig,{logger});
@@ -101,12 +113,12 @@ async function createProductionMediaPilot({env=process.env,tenantPool,clock=Date
     const preparedAdmission=createPreparedDiskAdmission({capacity,tenantStore:store,accessPolicy,rootDirectory:root,diskSpaceGuard:guard,enabled:true,clock});
     const components=await createWorkflowOperationalComponents({enabled:true,store,owner:config.owner,capacity,sourceAdmission:admission,preparedAdmission,accessPolicy,diskSpaceGuard:guard,
       privateRoot:root,preparationRoot,musicRoot,publicApiOrigin:env.PUBLIC_API_BASE_URL,catalog:music.catalog,resolveMusicTrack:music.resolveMusicTrack,
-      bridgeKey:config.bridgeKey,validationOnly:true,clock,diagnostic:report,canLaunch:()=>!closing&&!closed&&clock()<config.admitUntil&&admissionFence(),
+      bridgeKey:config.bridgeKey,validationOnly:true,clock,diagnostic:report,canLaunch:admissionOpen,
       executionTransport:{kind:'vm',workerId:config.workerId,runtimeRevision:config.runtimeRevision}});
     const registry=createTransferAuthorizationRegistry({store:registryStore,enabled:true,clock});
     const transfer=createRenderDiskTransferService({store,provider:components.provider,registry,accessPolicy,enabled:true,clock});
     const factory=createOperationalCalendarImportsRuntimeFactory({enabled:true,preparation:components.preparation,resultStore:components.resultStore,accessPolicy,
-      upload:components.upload,provider:components.provider,uploadStore:store,transfer,catalog:music.catalog,clock,canAdmit:()=>!closing&&!closed&&clock()<config.admitUntil&&admissionFence(),
+      upload:components.upload,provider:components.provider,uploadStore:store,transfer,catalog:music.catalog,clock,canAdmit:admissionOpen,readPilotStatus,
       async verifyReadiness(){await registry.verify();await ledger.verify();await guard.sample();return true;}});
     loop=createPilotProgressLoop({tick:components.tick,finishBy:config.finishBy,clock,report});
     return Object.freeze({factory,start:loop.start,admitUntil:config.admitUntil,finishBy:config.finishBy,
