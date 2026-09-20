@@ -60,6 +60,16 @@ function decodePacket(packet){
     if(header.schema!==1||!UUID.test(header.missionId)||!UUID.test(header.closureRequestId)||payload.length!==0)refuse('stop_packet_invalid');
     return {operation:'stop',missionId:header.missionId,closureRequestId:header.closureRequestId};
   }
+  if(header.operation==='retire'){
+    exact(header,['schema','operation','missionId','retirementRequestId']);
+    if(header.schema!==1||!UUID.test(header.missionId)||!UUID.test(header.retirementRequestId)||payload.length!==0)refuse('retire_packet_invalid');
+    return {operation:'retire',missionId:header.missionId,retirementRequestId:header.retirementRequestId};
+  }
+  if(header.operation==='inspect'){
+    exact(header,['schema','operation']);
+    if(header.schema!==1||payload.length!==0)refuse('inspect_packet_invalid');
+    return {operation:'inspect'};
+  }
   refuse('operation_invalid');
 }
 async function readBoundedInput(input){
@@ -74,6 +84,15 @@ function privateMetadata(stat,uid,type){
   if(stat.isSymbolicLink()||stat.uid!==uid||(stat.mode&0o777)!==(type==='directory'?0o700:0o600)||
     (type==='directory'?!stat.isDirectory():!stat.isFile()||stat.nlink!==1))refuse('metadata_unsafe');
 }
+async function verifyLifecycleLockHeld(){
+  const lock=path.join(ROOT,'control','lifecycle.lock'),fd='/proc/self/fd/9',uid=process.getuid?.();
+  if(process.platform!=='linux'||!Number.isSafeInteger(uid)||uid<0)refuse('lifecycle_lock_unproved');
+  let linked,fileStat,fdStat;
+  try{linked=path.resolve(await fs.realpath(fd));fileStat=await fs.lstat(lock);fdStat=await fs.stat(fd);}
+  catch{refuse('lifecycle_lock_unproved');}
+  privateMetadata(fileStat,uid,'file');privateMetadata(fdStat,uid,'file');
+  if(linked!==lock||fileStat.dev!==fdStat.dev||fileStat.ino!==fdStat.ino)refuse('lifecycle_lock_unproved');
+}
 // Test injection is a library seam only; CLI below uses the fixed production
 // path and real Linux identity/fs. No path, uid or permission override in stdin,
 // argv or environment can select a different destination or relax protection.
@@ -82,6 +101,7 @@ function createProvisioner({root=ROOT,privateBase='/var/data/private',fsApi=fs,i
   if(!path.isAbsolute(root)||path.resolve(root)!==root||!path.isAbsolute(privateBase)||path.resolve(privateBase)!==privateBase||
     privateBase===path.parse(privateBase).root||!root.startsWith(privateBase+path.sep))refuse('root_invalid');
   const uid=identity.getuid();if(!Number.isSafeInteger(uid)||uid<0)refuse('identity_invalid');
+  let lifecycleBusy=false;
   const owned=directory=>directory===privateBase||directory.startsWith(privateBase+path.sep);
   async function directories(directory,create){
     const parsed=path.parse(directory),parts=directory.substring(parsed.root.length).split(path.sep).filter(Boolean);
@@ -138,6 +158,34 @@ function createProvisioner({root=ROOT,privateBase='/var/data/private',fsApi=fs,i
     if(!await sameFile(file,bytes))refuse('publication_uncertain');
     return installed?'installed':'identical';
   }
+  async function withControlLock(operation){
+    // The production CLI is already serialized by the kernel-held, persistent
+    // lifecycle.lock. This guard also keeps concurrent library-seam tests and
+    // accidental in-process callers fail-closed.
+    if(lifecycleBusy)refuse('control_busy');lifecycleBusy=true;
+    try{return await operation();}finally{lifecycleBusy=false;}
+  }
+  function validateStoredConfiguration(bytes){
+    // Stored configuration remains structurally validated even when reporting
+    // an unexpected live gate. The current gate state is observed separately.
+    return validateProductionPilotConfig(parseJson(bytes),{env:{...env,
+      SOCIAL_EXTERNAL_CONNECTION_ENABLED:'false',SOCIAL_EXTERNAL_PUBLICATION_ENABLED:'false',META_APP_REVIEW_WINDOW_ENABLED:'false'},now:clock()});
+  }
+  async function initializeLifecycleLock(){
+    if(env.ENVIRONMENT!=='production'||env.RENDER_SERVICE_ID!=='srv-d8708kd7vvec73ap1p6g'||
+      env.PUBLIC_API_BASE_URL!=='https://ia4tube-api.onrender.com')refuse('lifecycle_lock_target_invalid');
+    const control=path.join(root,'control'),file=path.join(control,'lifecycle.lock');await directories(control,false);
+    let handle,installed=false;
+    try{
+      try{handle=await fsApi.open(file,constants.O_WRONLY|constants.O_CREAT|constants.O_EXCL|(constants.O_NOFOLLOW||0),0o600);installed=true;}
+      catch(error){if(error.code!=='EEXIST')throw error;}
+      if(handle){const stat=await handle.stat();privateMetadata(stat,uid,'file');await handle.sync();await handle.close();handle=null;}
+      const stat=await fsApi.lstat(file);privateMetadata(stat,uid,'file');
+      if(path.resolve(await fsApi.realpath(file))!==file)refuse('lifecycle_lock_unproved');
+      await syncDirectory(control);
+      return {ok:true,operation:'initialize-lock',lock:installed?'installed':'identical'};
+    }finally{await handle?.close();}
+  }
   async function checkKnownMusic(manifest,manifestBytes){
     const music=path.join(root,'music'),expected=new Set(['catalog.json',...manifest.tracks.map(row=>row.fileName)]);
     for(const name of await fsApi.readdir(music)){if(!expected.has(name))refuse('unexpected_music_file');}
@@ -160,28 +208,37 @@ function createProvisioner({root=ROOT,privateBase='/var/data/private',fsApi=fs,i
   async function provisionConfiguration(decoded){
     const config=validateProductionPilotConfig(decoded.value,{env,now:clock()});
     try{
-      if(clock()>=config.admitUntil)refuse('window_closed');
-      for(const name of ['', 'control','uploads','prepared','music'])await directories(path.join(root,name),false);
-      await requireUnstopped(config.missionId);
-      const musicRoot=path.join(root,'music'),manifestBytes=await readPrivate(path.join(musicRoot,'catalog.json'),MAX_HEADER);
-      const manifest=canonicalManifest(parseJson(manifestBytes));
-      if(!manifestBytes.equals(Buffer.from(JSON.stringify(manifest))))refuse('catalog_not_canonical');
-      await checkKnownMusic(manifest,manifestBytes);
-      for(const row of manifest.tracks){const bytes=await readPrivate(path.join(musicRoot,row.fileName),row.sizeBytes);
-        try{if(bytes.length!==row.sizeBytes||hash(bytes)!==row.sha256)refuse('audio_hash');validateCanonicalWav(bytes);}finally{bytes.fill(0);}}
-      await loadPrivateMusicCatalog({rootDirectory:musicRoot,manifest,rights:config.musicRights,
-        ownerCompanyId:config.owner.companyId,clock,now:clock()});
-      if(clock()>=config.admitUntil)refuse('window_closed');
-      const configuration=await publishExclusive(path.join(root,'control','pilot.json'),decoded.bytes);
-      await requireUnstopped(config.missionId);
-      return {ok:true,operation:'configuration',configuration,missionId:config.missionId,trackCount:manifest.tracks.length,
-        admitUntil:config.admitUntil,finishBy:config.finishBy};
+      return await withControlLock(async()=>{
+        if(clock()>=config.admitUntil)refuse('window_closed');
+        for(const name of ['', 'control','uploads','prepared','music'])await directories(path.join(root,name),false);
+        await requireNoRetirementPending();
+        await requireUnstopped(config.missionId);
+        const musicRoot=path.join(root,'music'),manifestBytes=await readPrivate(path.join(musicRoot,'catalog.json'),MAX_HEADER);
+        const manifest=canonicalManifest(parseJson(manifestBytes));
+        if(!manifestBytes.equals(Buffer.from(JSON.stringify(manifest))))refuse('catalog_not_canonical');
+        await checkKnownMusic(manifest,manifestBytes);
+        for(const row of manifest.tracks){const bytes=await readPrivate(path.join(musicRoot,row.fileName),row.sizeBytes);
+          try{if(bytes.length!==row.sizeBytes||hash(bytes)!==row.sha256)refuse('audio_hash');validateCanonicalWav(bytes);}finally{bytes.fill(0);}}
+        await loadPrivateMusicCatalog({rootDirectory:musicRoot,manifest,rights:config.musicRights,
+          ownerCompanyId:config.owner.companyId,clock,now:clock()});
+        if(clock()>=config.admitUntil)refuse('window_closed');
+        await requireNoRetirementPending();
+        const configuration=await publishExclusive(path.join(root,'control','pilot.json'),decoded.bytes);
+        await requireUnstopped(config.missionId);
+        return {ok:true,operation:'configuration',configuration,missionId:config.missionId,trackCount:manifest.tracks.length,
+          admitUntil:config.admitUntil,finishBy:config.finishBy};
+      });
     }finally{config.bridgeKey.fill(0);}
   }
   async function requireUnstopped(missionId){
     try{await fsApi.lstat(path.join(root,'control','stop-'+missionId+'.json'));}
     catch(error){if(error.code==='ENOENT')return;throw error;}
     refuse('mission_stopped');
+  }
+  async function requireNoRetirementPending(){
+    try{await fsApi.lstat(path.join(root,'control','retirement-pending.json'));}
+    catch(error){if(error.code==='ENOENT')return;throw error;}
+    refuse('retirement_pending');
   }
   async function provisionStop(decoded){
     if(env.ENVIRONMENT!=='production'||env.RENDER_SERVICE_ID!=='srv-d8708kd7vvec73ap1p6g'||
@@ -190,9 +247,19 @@ function createProvisioner({root=ROOT,privateBase='/var/data/private',fsApi=fs,i
     let configBytes;
     try{configBytes=await readPrivate(path.join(root,'control','pilot.json'),MAX_CONFIG);}
     catch(error){if(error.code!=='ENOENT')throw error;}
-    if(configBytes){try{const existing=parseJson(configBytes);
-      if(existing.schema!==1||existing.missionId!==decoded.missionId)refuse('stop_mission_mismatch');
-    }finally{configBytes.fill(0);}}
+    if(configBytes){let existingConfig;try{
+      existingConfig=validateStoredConfiguration(configBytes);
+      if(existingConfig.missionId!==decoded.missionId){
+        if(clock()<existingConfig.finishBy)refuse('stop_mission_mismatch');
+        let priorBytes;try{
+          priorBytes=await readPrivate(path.join(root,'control','stop-'+existingConfig.missionId+'.json'),MAX_HEADER);
+          const prior=parseJson(priorBytes);exact(prior,['schema','missionId','closureRequestId','admissionClosed','launchClosed']);
+          if(prior.schema!==1||prior.missionId!==existingConfig.missionId||!UUID.test(prior.closureRequestId)||
+            prior.admissionClosed!==true||prior.launchClosed!==true)refuse('stop_mission_mismatch');
+        }catch(error){if(error.code==='ENOENT')refuse('stop_mission_mismatch');throw error;}
+        finally{priorBytes?.fill(0);}
+      }
+    }finally{existingConfig?.bridgeKey?.fill(0);configBytes.fill(0);}}
     const marker={schema:1,missionId:decoded.missionId,closureRequestId:decoded.closureRequestId,admissionClosed:true,launchClosed:true};
     const bytes=Buffer.from(JSON.stringify(marker)),file=path.join(root,'control','stop-'+decoded.missionId+'.json');
     const sentinel=await publishExclusive(file,bytes);
@@ -203,22 +270,168 @@ function createProvisioner({root=ROOT,privateBase='/var/data/private',fsApi=fs,i
       connectionEnabled:state('SOCIAL_EXTERNAL_CONNECTION_ENABLED'),publicationEnabled:state('SOCIAL_EXTERNAL_PUBLICATION_ENABLED'),
       metaWindowEnabled:state('META_APP_REVIEW_WINDOW_ENABLED')};
   }
-  return Object.freeze({async provision(packet){const decoded=decodePacket(packet);
+  async function provisionRetirement(decoded){
+    const imports=env.SOCIAL_MEDIA_IMPORTS_ENABLED==='true'?true:
+      env.SOCIAL_MEDIA_IMPORTS_ENABLED===undefined||env.SOCIAL_MEDIA_IMPORTS_ENABLED===''||env.SOCIAL_MEDIA_IMPORTS_ENABLED==='false'?false:null;
+    if(env.ENVIRONMENT!=='production'||env.RENDER_SERVICE_ID!=='srv-d8708kd7vvec73ap1p6g'||
+      env.PUBLIC_API_BASE_URL!=='https://ia4tube-api.onrender.com'||env.SOCIAL_EXTERNAL_CONNECTION_ENABLED!=='false'||
+      env.SOCIAL_EXTERNAL_PUBLICATION_ENABLED!=='false'||env.META_APP_REVIEW_WINDOW_ENABLED!=='false'||
+      imports!==false)refuse('retire_target_invalid');
+    const control=path.join(root,'control'),archiveRoot=path.join(control,'archive'),archive=path.join(archiveRoot,decoded.missionId);
+    await directories(control,false);
+    const activeConfig=path.join(control,'pilot.json'),activeStop=path.join(control,'stop-'+decoded.missionId+'.json');
+    const pendingFile=path.join(control,'retirement-pending.json'),configurationEvidenceFile=path.join(archive,'configuration-evidence.json'),stopEvidenceFile=path.join(archive,'stop-evidence.json'),
+      preparedFile=path.join(archive,'retirement-prepared.json'),completeFile=path.join(archive,'retirement.json');
+    async function optional(file,maximum){try{return await readPrivate(file,maximum);}catch(error){if(error.code==='ENOENT')return null;throw error;}}
+    function retirementMarker(bytes,status){
+      const value=parseJson(bytes);exact(value,['schema','status','missionId','retirementRequestId','finishBy','configurationSha256','stopSha256']);
+      if(value.schema!==1||value.status!==status||value.missionId!==decoded.missionId||
+        value.retirementRequestId!==decoded.retirementRequestId||!Number.isSafeInteger(value.finishBy)||value.finishBy<0||
+        !HASH.test(value.configurationSha256)||!HASH.test(value.stopSha256))refuse('retire_evidence_invalid');
+      return value;
+    }
+    function retirementReceipt(marker,configurationEvidence,stopEvidence,retirement){return {ok:true,operation:'retire',
+      missionId:decoded.missionId,retirementRequestId:decoded.retirementRequestId,configurationEvidence,stopEvidence,retirement,
+      configurationSha256:marker.configurationSha256,stopSha256:marker.stopSha256,activeConfigurationRemoved:true,activeStopRemoved:true,
+      secretMaterialArchived:false,connectionEnabled:false,publicationEnabled:false,metaWindowEnabled:false,importsEnabled:false};}
+    return withControlLock(async()=>{
+      await directories(archive,true);
+      let completeBytes=await optional(completeFile,MAX_HEADER);
+      if(completeBytes){try{
+        const complete=retirementMarker(completeBytes,'complete');
+        const active=await optional(activeConfig,MAX_CONFIG);
+        try{if(active&&hash(active)===complete.configurationSha256)refuse('retire_completion_inconsistent');}
+        finally{active?.fill(0);}
+        const prepared={...complete,status:'prepared'},pendingBytes=Buffer.from(JSON.stringify(prepared));
+        try{
+          const pending=await optional(pendingFile,MAX_HEADER);
+          if(pending){try{if(!pending.equals(pendingBytes))refuse('retire_evidence_invalid');}finally{pending.fill(0);}
+            await fsApi.unlink(pendingFile);await syncDirectory(control);}
+        }finally{pendingBytes.fill(0);}
+        return retirementReceipt(complete,'identical','identical','identical');
+      }finally{completeBytes.fill(0);}}
+      let preparedBytes=await optional(preparedFile,MAX_HEADER),configBytes=null,stopBytes=null,config;
+      try{
+        let prepared,configurationEvidence='identical',stopEvidence='identical';
+        if(preparedBytes){prepared=retirementMarker(preparedBytes,'prepared');}
+        else{
+          configBytes=await readPrivate(activeConfig,MAX_CONFIG);config=validateStoredConfiguration(configBytes);
+          if(config.missionId!==decoded.missionId||clock()<config.finishBy)refuse('retire_not_closed');
+          stopBytes=await readPrivate(activeStop,MAX_HEADER);const stop=parseJson(stopBytes);
+          exact(stop,['schema','missionId','closureRequestId','admissionClosed','launchClosed']);
+          if(stop.schema!==1||stop.missionId!==decoded.missionId||!UUID.test(stop.closureRequestId)||
+            stop.admissionClosed!==true||stop.launchClosed!==true)refuse('retire_stop_invalid');
+          prepared={schema:1,status:'prepared',missionId:decoded.missionId,retirementRequestId:decoded.retirementRequestId,
+            finishBy:config.finishBy,configurationSha256:hash(configBytes),stopSha256:hash(stopBytes)};
+          const configEvidenceBytes=Buffer.from(JSON.stringify({schema:1,missionId:decoded.missionId,finishBy:config.finishBy,
+            configurationSha256:prepared.configurationSha256}));
+          const stopEvidenceBytes=Buffer.from(JSON.stringify({schema:1,missionId:decoded.missionId,stopSha256:prepared.stopSha256}));
+          const nextPreparedBytes=Buffer.from(JSON.stringify(prepared));
+          try{
+            configurationEvidence=await publishExclusive(configurationEvidenceFile,configEvidenceBytes);
+            stopEvidence=await publishExclusive(stopEvidenceFile,stopEvidenceBytes);
+            await publishExclusive(preparedFile,nextPreparedBytes);
+          }finally{configEvidenceBytes.fill(0);stopEvidenceBytes.fill(0);nextPreparedBytes.fill(0);}
+          await syncDirectory(archive);await syncDirectory(archiveRoot);await syncDirectory(control);
+        }
+        const evidenceConfig=await readPrivate(configurationEvidenceFile,MAX_HEADER),evidenceStop=await readPrivate(stopEvidenceFile,MAX_HEADER);
+        try{
+          const ce=parseJson(evidenceConfig),se=parseJson(evidenceStop);
+          exact(ce,['schema','missionId','finishBy','configurationSha256']);exact(se,['schema','missionId','stopSha256']);
+          if(ce.schema!==1||ce.missionId!==decoded.missionId||ce.finishBy!==prepared.finishBy||ce.configurationSha256!==prepared.configurationSha256||
+            se.schema!==1||se.missionId!==decoded.missionId||se.stopSha256!==prepared.stopSha256)refuse('retire_evidence_invalid');
+        }finally{evidenceConfig.fill(0);evidenceStop.fill(0);}
+        const pendingBytes=Buffer.from(JSON.stringify(prepared));
+        try{await publishExclusive(pendingFile,pendingBytes);await syncDirectory(control);}finally{pendingBytes.fill(0);}
+        async function removeMatching(file,expected,allowNewMission=false){
+          const bytes=await optional(file,MAX_CONFIG);if(!bytes)return;
+          let currentConfig;
+          try{
+            if(hash(bytes)!==expected){
+              if(!allowNewMission)refuse('retire_source_changed');
+              currentConfig=validateStoredConfiguration(bytes);
+              if(currentConfig.missionId===decoded.missionId)refuse('retire_source_changed');
+              return;
+            }
+            const stat=await fsApi.lstat(file);privateMetadata(stat,uid,'file');await fsApi.unlink(file);
+          }
+          finally{currentConfig?.bridgeKey?.fill(0);bytes.fill(0);}
+        }
+        // The mission-specific marker is removed first; the singleton barrier
+        // remains until every durable, secret-free evidence file is in place.
+        await removeMatching(activeStop,prepared.stopSha256);await removeMatching(activeConfig,prepared.configurationSha256,true);
+        await syncDirectory(control);
+        const complete={...prepared,status:'complete'},nextCompleteBytes=Buffer.from(JSON.stringify(complete));
+        let retirement;try{retirement=await publishExclusive(completeFile,nextCompleteBytes);}finally{nextCompleteBytes.fill(0);}
+        await syncDirectory(archive);await syncDirectory(archiveRoot);await syncDirectory(control);
+        const pending=await readPrivate(pendingFile,MAX_HEADER),expectedPending=Buffer.from(JSON.stringify(prepared));
+        try{if(!pending.equals(expectedPending))refuse('retire_evidence_invalid');await fsApi.unlink(pendingFile);}
+        finally{pending.fill(0);expectedPending.fill(0);}
+        await syncDirectory(control);
+        return retirementReceipt(complete,configurationEvidence,stopEvidence,retirement);
+      }finally{config?.bridgeKey?.fill(0);preparedBytes?.fill(0);configBytes?.fill(0);stopBytes?.fill(0);}
+    });
+  }
+  async function inspectControl(){
+    if(env.ENVIRONMENT!=='production'||env.RENDER_SERVICE_ID!=='srv-d8708kd7vvec73ap1p6g'||
+      env.PUBLIC_API_BASE_URL!=='https://ia4tube-api.onrender.com')refuse('inspect_target_invalid');
+    const state=name=>env[name]==='false'?false:env[name]==='true'?true:null;
+    const imports=env.SOCIAL_MEDIA_IMPORTS_ENABLED==='true'?true:
+      env.SOCIAL_MEDIA_IMPORTS_ENABLED===undefined||env.SOCIAL_MEDIA_IMPORTS_ENABLED===''||env.SOCIAL_MEDIA_IMPORTS_ENABLED==='false'?false:null;
+    const control=path.join(root,'control'),file=path.join(control,'pilot.json'),pendingFile=path.join(control,'retirement-pending.json');await directories(control,false);
+    let bytes,stopBytes,pendingBytes,config,pendingMissionId=null,pendingRetirementRequestId=null,pendingSha256=null;
+    try{
+      pendingBytes=await readPrivate(pendingFile,MAX_HEADER);const pending=parseJson(pendingBytes);
+      exact(pending,['schema','status','missionId','retirementRequestId','finishBy','configurationSha256','stopSha256']);
+      if(pending.schema!==1||pending.status!=='prepared'||!UUID.test(pending.missionId)||!UUID.test(pending.retirementRequestId)||
+        !Number.isSafeInteger(pending.finishBy)||!HASH.test(pending.configurationSha256)||!HASH.test(pending.stopSha256))refuse('inspect_pending_invalid');
+      pendingMissionId=pending.missionId;pendingRetirementRequestId=pending.retirementRequestId;pendingSha256=hash(pendingBytes);
+    }catch(error){if(error.code!=='ENOENT')throw error;}
+    const pendingPresent=pendingBytes!==undefined;
+    try{bytes=await readPrivate(file,MAX_CONFIG);}
+    catch(error){if(error.code!=='ENOENT')throw error;const receipt={ok:true,operation:'inspect',activeConfigurationPresent:false,
+      missionId:null,finishBy:null,windowExpired:false,stopPresent:false,retirementReady:false,configurationSha256:null,stopSha256:null,
+      retirementPending:pendingPresent,pendingMissionId,pendingRetirementRequestId,pendingSha256,
+      connectionEnabled:state('SOCIAL_EXTERNAL_CONNECTION_ENABLED'),publicationEnabled:state('SOCIAL_EXTERNAL_PUBLICATION_ENABLED'),
+      metaWindowEnabled:state('META_APP_REVIEW_WINDOW_ENABLED'),importsEnabled:imports};pendingBytes?.fill(0);return receipt;}
+    try{
+      config=validateStoredConfiguration(bytes);
+      let stopPresent=false,stopSha256=null;
+      try{
+        stopBytes=await readPrivate(path.join(control,'stop-'+config.missionId+'.json'),MAX_HEADER);
+        const stop=parseJson(stopBytes);exact(stop,['schema','missionId','closureRequestId','admissionClosed','launchClosed']);
+        stopPresent=stop.schema===1&&stop.missionId===config.missionId&&UUID.test(stop.closureRequestId)&&
+          stop.admissionClosed===true&&stop.launchClosed===true;
+        if(!stopPresent)refuse('inspect_stop_invalid');stopSha256=hash(stopBytes);
+      }catch(error){if(error.code!=='ENOENT')throw error;}
+      const connectionEnabled=state('SOCIAL_EXTERNAL_CONNECTION_ENABLED'),publicationEnabled=state('SOCIAL_EXTERNAL_PUBLICATION_ENABLED'),
+        metaWindowEnabled=state('META_APP_REVIEW_WINDOW_ENABLED'),windowExpired=clock()>=config.finishBy;
+      return {ok:true,operation:'inspect',activeConfigurationPresent:true,missionId:config.missionId,finishBy:config.finishBy,
+        windowExpired,stopPresent,retirementReady:!pendingPresent&&windowExpired&&stopPresent&&connectionEnabled===false&&publicationEnabled===false&&
+          metaWindowEnabled===false&&imports===false,configurationSha256:hash(bytes),stopSha256,retirementPending:pendingPresent,
+        pendingMissionId,pendingRetirementRequestId,pendingSha256,
+        connectionEnabled,publicationEnabled,metaWindowEnabled,importsEnabled:imports};
+    }finally{config?.bridgeKey?.fill(0);bytes?.fill(0);stopBytes?.fill(0);pendingBytes?.fill(0);}
+  }
+  return Object.freeze({initializeLifecycleLock,async provision(packet){const decoded=decodePacket(packet);
     if(decoded.operation==='catalog')return provisionCatalog(decoded);
     if(decoded.operation==='stop')return provisionStop(decoded);
+    if(decoded.operation==='retire')return provisionRetirement(decoded);
+    if(decoded.operation==='inspect')return inspectControl();
     return provisionConfiguration(decoded);}});
 }
 async function main(args=process.argv.slice(2),{input=process.stdin,output=process.stdout,env=process.env}={}){
   let packet;
   try{
-    if(args.length!==1||!['provision','preflight'].includes(args[0]))refuse('arguments_invalid');
+    if(args.length!==1||!['provision','preflight','initialize-lock'].includes(args[0]))refuse('arguments_invalid');
     let result;
-    if(args[0]==='preflight'){
+    if(args[0]==='initialize-lock'){result=await createProvisioner({env}).initializeLifecycleLock();}
+    else if(args[0]==='preflight'){
       const loaded=await loadProductionPilotFiles({env});
       try{result={ok:true,operation:'preflight',missionId:loaded.config.missionId,trackCount:loaded.music.catalog.size,
         admissionWindowOpen:Date.now()<loaded.config.admitUntil&&loaded.admissionFence(),admitUntil:loaded.config.admitUntil,finishBy:loaded.config.finishBy,
         poolsOpened:0,workersStarted:0,filesChanged:0};}finally{loaded.config.bridgeKey.fill(0);}
-    }else{packet=await readBoundedInput(input);result=await createProvisioner({env}).provision(packet);}
+    }else{await verifyLifecycleLockHeld();packet=await readBoundedInput(input);result=await createProvisioner({env}).provision(packet);}
     output.write(JSON.stringify(result)+'\n');return 0;
   }catch(error){
     const code=/^(calendar_private_provision_|calendar_media_pilot_|calendar_music_catalog_)[a-z_]+$/.test(error.code||'')?
@@ -227,4 +440,5 @@ async function main(args=process.argv.slice(2),{input=process.stdin,output=proce
   }finally{packet?.fill(0);}
 }
 if(require.main===module)main().then(code=>{process.exitCode=code;});
-module.exports={MAX_PACKET,MAX_HEADER,MAX_CONFIG,canonicalManifest,decodePacket,readBoundedInput,privateMetadata,createProvisioner,main};
+module.exports={MAX_PACKET,MAX_HEADER,MAX_CONFIG,canonicalManifest,decodePacket,readBoundedInput,privateMetadata,
+  verifyLifecycleLockHeld,createProvisioner,main};

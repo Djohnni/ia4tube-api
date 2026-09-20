@@ -30,22 +30,29 @@ function configPacket(value=configuration()){const bytes=Buffer.from(JSON.string
   return packet({schema:1,operation:'configuration',sizeBytes:bytes.length,sha256:sha(bytes)},bytes);}
 function stopPacket(missionId=configuration().missionId,closureRequestId='66666666-6666-4666-8666-666666666666'){
   return packet({schema:1,operation:'stop',missionId,closureRequestId},Buffer.alloc(0));}
+function retirePacket(missionId=configuration().missionId,retirementRequestId='77777777-7777-4777-8777-777777777777'){
+  return packet({schema:1,operation:'retire',missionId,retirementRequestId},Buffer.alloc(0));}
+function inspectPacket(){return packet({schema:1,operation:'inspect'},Buffer.alloc(0));}
 async function fixture(t,options={}){
   const temporary=await fs.mkdtemp(path.join(os.tmpdir(),'ia4tube-private-provision-')),privateBase=path.join(temporary,'private'),root=path.join(privateBase,'calendar-media');
-  const operations=[],overrides=new Map();let failed=false;
+  const operations=[],overrides=new Map();let failed=false,retirementFailed=false;
   // Real local files, hashes, exclusive creation, hardlinks and reconciliation.
   // Windows cannot prove Linux uid/mode/fsync: only those metadata/capabilities
   // are injected here. Production CLI exposes no such seam or path override.
   const metadata=(stat,file)=>Object.assign(stat,{uid:1000,mode:stat.isDirectory()?0o40700:0o100600,...overrides.get(file)});
   const fsApi={...fs,
     async lstat(file){return metadata(await fs.lstat(file),file);},
+    async unlink(file){operations.push('unlink:'+file);return fs.unlink(file);},
     async open(file,...args){
       const stat=await fs.lstat(file).catch(error=>{if(error.code!=='ENOENT')throw error;return null;});
       if(stat?.isDirectory())return {async stat(){return metadata(await fs.stat(file),file);},async sync(){operations.push('sync:'+file);},async close(){}};
       const handle=await fs.open(file,...args);
       return {stat:async()=>metadata(await handle.stat(),file),readFile:(...a)=>handle.readFile(...a),writeFile:(...a)=>handle.writeFile(...a),sync:()=>handle.sync(),close:()=>handle.close()};
     },
-    async link(from,to){operations.push('link:'+to);if(options.failCatalogOnce&&to.endsWith('catalog.json')&&!failed){failed=true;throw Object.assign(Error('synthetic-private-detail'),{code:'EIO'});}return fs.link(from,to);}
+    async link(from,to){operations.push('link:'+to);
+      if(options.failCatalogOnce&&to.endsWith('catalog.json')&&!failed){failed=true;throw Object.assign(Error('synthetic-private-detail'),{code:'EIO'});}
+      if(options.failRetirementCompleteOnce&&path.basename(to)==='retirement.json'&&!retirementFailed){retirementFailed=true;throw Object.assign(Error('synthetic-retirement-crash'),{code:'EIO'});}
+      return fs.link(from,to);}
   };
   t.after(async()=>{assert.equal(path.dirname(temporary),path.resolve(os.tmpdir()));assert.ok(path.basename(temporary).startsWith('ia4tube-private-provision-'));
     await fs.rm(temporary,{recursive:true,force:true});});
@@ -137,6 +144,12 @@ test('configuration uses existing catalog, validates real contracts and rights, 
   const stored=JSON.parse(await fs.readFile(path.join(f.root,'control','pilot.json'),'utf8'));assert.equal(stored.bridgeKeyBase64,configuration().bridgeKeyBase64);
   assert.equal(f.operations.filter(operation=>operation.startsWith('link:')&&operation.endsWith('pilot.json')).length,1);
 });
+test('concurrent lifecycle mutations fail closed inside the library seam',async t=>{
+  const f=await fixture(t);await f.provisioner.provision(catalog().packet);
+  const attempts=await Promise.allSettled([f.provisioner.provision(configPacket()),f.provisioner.provision(configPacket())]);
+  assert.equal(attempts.filter(value=>value.status==='fulfilled').length,1);
+  assert.equal(attempts.filter(value=>value.status==='rejected'&&value.reason?.code==='calendar_private_provision_control_busy').length,1);
+});
 test('config cannot activate an expired window, another owner license, open gate or forged host binding',async t=>{
   for(const mutate of [value=>value.musicRights.companyId=value.workerId,value=>value.musicRights.endUserSublicensing=true,
     value=>value.hostEvidence.runtimeRevision='c'.repeat(64),value=>value.musicRights.validUntil=1500000]){
@@ -155,6 +168,20 @@ test('CLI has no arbitrary-path or execution options and emits only a sanitized 
   assert.equal(code,1);assert.equal(read,false);assert.equal(output.includes('sentinel'),false);assert.equal(output.includes('/tmp'),false);
   assert.deepEqual(JSON.parse(output),{ok:false,code:'calendar_private_provision_arguments_invalid',reconcileBeforeRetry:true});
 });
+test('production CLI refuses a provision call without the inherited kernel lifecycle lock',async()=>{
+  let output='',read=false;const input={async *[Symbol.asyncIterator](){read=true;yield inspectPacket();}};
+  const code=await main(['provision'],{input,output:{write:text=>{output+=text;}},env:env()});
+  assert.equal(code,1);assert.equal(read,false);
+  assert.deepEqual(JSON.parse(output),{ok:false,code:'calendar_private_provision_lifecycle_lock_unproved',reconcileBeforeRetry:true});
+});
+test('lifecycle lock initialization is fixed-path, exclusive, owner-only and idempotent',async t=>{
+  const f=await fixture(t);await f.provisioner.provision(catalog().packet);
+  const first=await f.provisioner.initializeLifecycleLock(),second=await f.provisioner.initializeLifecycleLock();
+  assert.deepEqual(first,{ok:true,operation:'initialize-lock',lock:'installed'});
+  assert.deepEqual(second,{ok:true,operation:'initialize-lock',lock:'identical'});
+  const file=path.join(f.root,'control','lifecycle.lock'),stat=await fs.lstat(file);
+  assert.equal(stat.isFile(),true);assert.equal(stat.isSymbolicLink(),false);
+});
 
 test('stop is exclusive, mission-bound, byte-idempotent and cannot replace another closure identity',async t=>{
   const f=await fixture(t),catalogBytes=catalog().packet;await f.provisioner.provision(catalogBytes);await f.provisioner.provision(configPacket());
@@ -171,6 +198,16 @@ test('stop is exclusive, mission-bound, byte-idempotent and cannot replace anoth
   // Neither source audio nor the installed configuration was removed.
   assert.equal((await fs.readdir(path.join(f.root,'music'))).length,2);
   assert.deepEqual(JSON.parse(await fs.readFile(path.join(f.root,'control','pilot.json'),'utf8')),configuration());
+});
+
+test('an expired, already stopped singleton permits a distinct fail-closed marker without replacing either mission',async t=>{
+  const f=await fixture(t);await f.provisioner.provision(catalog().packet);await f.provisioner.provision(configPacket());
+  await f.provisioner.provision(stopPacket());f.setTime(configuration().finishBy+1);
+  const next='77777777-7777-4777-8777-777777777777',receipt=await f.provisioner.provision(stopPacket(next,'88888888-8888-4888-8888-888888888888'));
+  assert.equal(receipt.missionId,next);assert.equal(receipt.sentinel,'installed');
+  const control=path.join(f.root,'control');
+  assert.equal((await fs.readdir(control)).filter(name=>name.startsWith('stop-')).length,2);
+  assert.equal(JSON.parse(await fs.readFile(path.join(control,'pilot.json'),'utf8')).missionId,configuration().missionId);
 });
 
 test('a stop before configuration blocks later activation and concurrent duplicate stops reconcile without replacement',async t=>{
@@ -192,4 +229,89 @@ test('stop does not invent closed external gates and refuses a foreign service',
   const foreign=await fixture(t,{env:{...env(),RENDER_SERVICE_ID:'wrong-service'}});await foreign.provisioner.provision(catalog().packet);
   await assert.rejects(foreign.provisioner.provision(stopPacket()),{code:'calendar_private_provision_stop_target_invalid'});
   assert.deepEqual(await fs.readdir(path.join(foreign.root,'control')),[]);
+  const runtimeEnv=env(),drift=await fixture(t,{env:runtimeEnv});await drift.provisioner.provision(catalog().packet);
+  await drift.provisioner.provision(configPacket());runtimeEnv.SOCIAL_EXTERNAL_PUBLICATION_ENABLED='true';
+  const stopped=await drift.provisioner.provision(stopPacket());assert.equal(stopped.publicationEnabled,true);
+  const inspected=await drift.provisioner.provision(inspectPacket());assert.equal(inspected.publicationEnabled,true);
+  assert.equal(inspected.retirementReady,false);
+});
+
+test('expired stopped configuration leaves only secret-free evidence and retirement stays idempotent after a new pilot',async t=>{
+  const f=await fixture(t),catalogBytes=catalog().packet,configBytes=configPacket(),stopBytes=stopPacket();
+  await f.provisioner.provision(catalogBytes);await f.provisioner.provision(configBytes);await f.provisioner.provision(stopBytes);
+  f.setTime(configuration().finishBy+1);
+  const first=await f.provisioner.provision(retirePacket());
+  assert.equal(first.operation,'retire');assert.equal(first.activeConfigurationRemoved,true);assert.equal(first.activeStopRemoved,true);
+  assert.equal(first.connectionEnabled,false);assert.equal(first.publicationEnabled,false);assert.equal(first.metaWindowEnabled,false);
+  const control=path.join(f.root,'control'),archive=path.join(control,'archive',configuration().missionId);
+  await assert.rejects(fs.lstat(path.join(control,'pilot.json')),{code:'ENOENT'});
+  await assert.rejects(fs.lstat(path.join(control,'stop-'+configuration().missionId+'.json')),{code:'ENOENT'});
+  const archiveText=(await Promise.all((await fs.readdir(archive)).map(name=>fs.readFile(path.join(archive,name),'utf8')))).join('\n');
+  assert.equal(archiveText.includes('bridgeKeyBase64'),false);assert.equal(archiveText.includes('postgresql://'),false);
+  assert.equal(archiveText.includes('synthetic-private-sentinel'),false);
+  assert.deepEqual((await fs.readdir(archive)).sort(),
+    ['configuration-evidence.json','retirement-prepared.json','retirement.json','stop-evidence.json'].sort());
+  const firstRetirementUnlink=f.operations.findIndex(value=>value==='unlink:'+path.join(control,'stop-'+configuration().missionId+'.json'));
+  const preparedLink=f.operations.findIndex(value=>value==='link:'+path.join(archive,'retirement-prepared.json'));
+  const durableControlSync=f.operations.findIndex((value,index)=>index>preparedLink&&value==='sync:'+control);
+  assert.ok(preparedLink>=0&&durableControlSync>preparedLink&&firstRetirementUnlink>durableControlSync);
+  const repeated=await f.provisioner.provision(retirePacket());
+  assert.equal(repeated.configurationEvidence,'identical');assert.equal(repeated.stopEvidence,'identical');
+  assert.equal(repeated.retirement,'identical');assert.equal(repeated.secretMaterialArchived,false);
+  const next={...configuration(),missionId:'88888888-8888-4888-8888-888888888888',createdAt:8000001,admitUntil:14000001,finishBy:15000001,
+    hostEvidence:{...configuration().hostEvidence,verifiedAt:8000001,terminationTime:15000001},
+    musicRights:{...configuration().musicRights,validUntil:16000001}};
+  await f.provisioner.provision(configPacket(next));
+  assert.deepEqual(JSON.parse(await fs.readFile(path.join(control,'pilot.json'),'utf8')).missionId,'88888888-8888-4888-8888-888888888888');
+  const before=await fs.readFile(path.join(control,'pilot.json'));
+  const replayed=await f.provisioner.provision(retirePacket());assert.equal(replayed.retirement,'identical');
+  assert.deepEqual(await fs.readFile(path.join(control,'pilot.json')),before);
+});
+
+test('retirement refuses an open window, missing or malformed stop, changed request identity, enabled imports and open gates',async t=>{
+  const open=await fixture(t);await open.provisioner.provision(catalog().packet);await open.provisioner.provision(configPacket());
+  await assert.rejects(open.provisioner.provision(retirePacket()),{code:'calendar_private_provision_retire_not_closed'});
+  open.setTime(configuration().finishBy+1);
+  await assert.rejects(open.provisioner.provision(retirePacket()),{code:'ENOENT'});
+  await open.provisioner.provision(stopPacket());await open.provisioner.provision(retirePacket());
+  await assert.rejects(open.provisioner.provision(retirePacket(configuration().missionId,'99999999-9999-4999-8999-999999999999')),
+    {code:'calendar_private_provision_retire_evidence_invalid'});
+  for(const changed of [{SOCIAL_MEDIA_IMPORTS_ENABLED:'true'},{SOCIAL_MEDIA_IMPORTS_ENABLED:'garbage'},
+    {SOCIAL_MEDIA_IMPORTS_ENABLED:'1'},{SOCIAL_EXTERNAL_CONNECTION_ENABLED:'true'},
+    {SOCIAL_EXTERNAL_PUBLICATION_ENABLED:'true'},{META_APP_REVIEW_WINDOW_ENABLED:'true'}]){
+    const f=await fixture(t,{env:{...env(),...changed}});await f.provisioner.provision(catalog().packet);
+    await f.provisioner.provision(configPacket()).catch(()=>{});
+    await assert.rejects(f.provisioner.provision(retirePacket()),{code:'calendar_private_provision_retire_target_invalid'});
+  }
+});
+
+test('a crash after singleton deletion leaves a durable barrier until same-request retirement reconciliation',async t=>{
+  const f=await fixture(t,{failRetirementCompleteOnce:true});await f.provisioner.provision(catalog().packet);
+  await f.provisioner.provision(configPacket());await f.provisioner.provision(stopPacket());f.setTime(configuration().finishBy+1);
+  await assert.rejects(f.provisioner.provision(retirePacket()),{code:'EIO'});
+  const control=path.join(f.root,'control');assert.equal((await fs.readdir(control)).includes('retirement-pending.json'),true);
+  await assert.rejects(fs.lstat(path.join(control,'pilot.json')),{code:'ENOENT'});
+  const inspection=await f.provisioner.provision(inspectPacket());assert.equal(inspection.activeConfigurationPresent,false);
+  assert.equal(inspection.retirementPending,true);assert.equal(inspection.pendingMissionId,configuration().missionId);
+  const next={...configuration(),missionId:'88888888-8888-4888-8888-888888888888',createdAt:8000001,admitUntil:14000001,finishBy:15000001,
+    hostEvidence:{...configuration().hostEvidence,verifiedAt:8000001,terminationTime:15000001},
+    musicRights:{...configuration().musicRights,validUntil:16000001}};
+  await assert.rejects(f.provisioner.provision(configPacket(next)),{code:'calendar_private_provision_retirement_pending'});
+  const reconciled=await f.provisioner.provision(retirePacket());assert.equal(reconciled.retirement,'installed');
+  assert.equal((await fs.readdir(control)).includes('retirement-pending.json'),false);
+  await f.provisioner.provision(configPacket(next));
+  assert.equal(JSON.parse(await fs.readFile(path.join(control,'pilot.json'),'utf8')).missionId,next.missionId);
+});
+
+test('inspection is read-only, bounded and detects a stale closed singleton before paid resources',async t=>{
+  const f=await fixture(t);await f.provisioner.provision(catalog().packet);const empty=await f.provisioner.provision(inspectPacket());
+  assert.deepEqual(empty,{ok:true,operation:'inspect',activeConfigurationPresent:false,missionId:null,finishBy:null,windowExpired:false,
+    stopPresent:false,retirementReady:false,configurationSha256:null,stopSha256:null,connectionEnabled:false,publicationEnabled:false,
+    metaWindowEnabled:false,importsEnabled:false,retirementPending:false,pendingMissionId:null,pendingRetirementRequestId:null,pendingSha256:null});
+  await f.provisioner.provision(configPacket());
+  const active=await f.provisioner.provision(inspectPacket());assert.equal(active.activeConfigurationPresent,true);
+  assert.equal(active.windowExpired,false);assert.equal(active.stopPresent,false);assert.equal(active.retirementReady,false);
+  await f.provisioner.provision(stopPacket());f.setTime(configuration().finishBy+1);
+  const stale=await f.provisioner.provision(inspectPacket());assert.equal(stale.windowExpired,true);assert.equal(stale.stopPresent,true);
+  assert.equal(stale.retirementReady,true);assert.match(stale.configurationSha256,/^[a-f0-9]{64}$/);assert.match(stale.stopSha256,/^[a-f0-9]{64}$/);
 });
