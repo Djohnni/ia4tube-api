@@ -1,7 +1,7 @@
 "use strict";
 const test = require("node:test"), assert = require("node:assert/strict"), vm = require("node:vm");
 const { createOperationalPlan, validateOperationalPlan } = require("../scripts/media-pilot/google-plan");
-const { runOperationalPilot } = require("../scripts/media-pilot/google-controller");
+const { runOperationalPilot, activationWaitBudget } = require("../scripts/media-pilot/google-controller");
 const { hostProbeScript, startScript, stopScript, collectionScript } = require("../scripts/media-pilot/google-guest");
 const { createGoogleProvider } = require("../scripts/validation/vm-proof-google-provider");
 const P = require("../scripts/validation/vm-proof-google-plan");
@@ -19,7 +19,7 @@ function makePlan(change = {}) {
       pricingEvidenceSha256: "d".repeat(64), verifiedAt: beginning }, ...change });
 }
 function fixture(flags = {}, plan = makePlan()) {
-  const p = plan.infrastructure, resources = new Map(), calls = [], guestCalls = [], timeline=[], closeRequests=[]; let state = null, clock = beginning, nextId = 100n, observes = 0;
+  const p = plan.infrastructure, resources = new Map(), calls = [], guestCalls = [], timeline=[], closeRequests=[],deleteAttempts=new Map(); let state = null, clock = beginning, nextId = 100n, observes = 0;
   const startup = makeGoogleBootstrap("-----BEGIN OPENSSH PRIVATE KEY-----\nYQ==\n-----END OPENSSH PRIVATE KEY-----\n", "ssh-ed25519 YQ== synthetic", "ssh-ed25519 Yg== synthetic");
   const link = s => "https://www.googleapis.com/compute/v1/" + s;
   const transport = async req => {
@@ -54,6 +54,8 @@ function fixture(flags = {}, plan = makePlan()) {
       timeline.push('delete_'+kind);
       const r = resources.get(route); if (!r) return {status:404};
       if (flags.noDestroy === kind) return {status:403,json:{}};
+      const attempt=(deleteAttempts.get(kind)||0)+1;deleteAttempts.set(kind,attempt);
+      if(flags.unknownDeleteBeforeOnce===kind&&attempt===1)throw Error('private request lost before provider acceptance');
       resources.delete(route);
       if (kind === "instances") for (const [k] of resources) if (k.includes("/disks/")) resources.delete(k);
       if (flags.cleanupOverrun && kind === "instances") clock = beginning + 14400001;
@@ -90,7 +92,8 @@ function fixture(flags = {}, plan = makePlan()) {
       admitUntil:c.admitUntil,finishBy:c.finishBy,receiptSha256:"2".repeat(64)};
   };
   const observeApi = async()=>{observes++;return {finished:flags.waitUntilDeadline?false:observes>1,gatesClosed:!flags.observationOpen,receiptSha256:"3".repeat(64)};};
-  const execute = options=>runOperationalPilot({plan,approvalSha256:plan.approvalSha256,provider,store,guest,prepareApi,observeApi,closeApi,now:()=>clock,sleep:async ms=>{clock+=ms;},...options});
+  const execute = (options={})=>{const {guestOverride={},...rest}=options;return runOperationalPilot({plan,approvalSha256:plan.approvalSha256,provider,store,
+    guest:{...guest,...guestOverride},prepareApi,observeApi,closeApi,now:()=>clock,sleep:async ms=>{clock+=ms;},...rest});};
   return {execute,resources,calls,guestCalls,timeline,closeRequests,getState:()=>clone(state),setState:s=>{state=clone(s);},setTime:t=>{clock=t;},flags,plan};
 }
 test("operational plan is owner-bound, priced, no recurrence or old synthetic cases",()=>{
@@ -131,6 +134,12 @@ test("mission conservative four-hour costs remain inside the single five-dollar 
     historicalPlanningReserveUsd:.5,historicalReserveIsObservedExpense:false,buildAdditionalUsd:0,pilotReferenceUsd:5,
     pricingEvidenceSha256:"d".repeat(64),verifiedAt:beginning}}),/budget_exceeded/);
 });
+test("activation readiness owns the remaining admission window, not a fixed ten-minute timeout",()=>{
+  const state={admitUntil:beginning+12000000};
+  assert.equal(activationWaitBudget(state,beginning),12000000);
+  assert.equal(activationWaitBudget(state,beginning+660000),11340000);
+  assert.throws(()=>activationWaitBudget(state,state.admitUntil),{code:'media_pilot_activation_deadline'});
+});
 test("operational owner accepts derived UUIDv5 while worker stays random UUIDv4",()=>{
   const ownerCompanyId='00000000-0000-5000-8000-000000000001',ownerUserId='00000000-0000-5000-8000-000000000002';
   const p=makePlan({ownerCompanyId,ownerUserId});
@@ -144,6 +153,7 @@ test("single operational install/start, host bound API readiness, collect and co
   assert.equal(r.priorBudgetBasisKind,'planning_reserve');assert.equal(r.planningTotalUsd,f.plan.finance.estimatedPlanningTotalUsd);
   assert.equal(f.resources.size,0);assert.deepEqual(f.guestCalls,["preflight","install","probe","prepare_api","start","close_api","stop","collect"]);
   assert.equal(r.apiAdmissionClosed,true);assert.equal(r.apiClosurePending,false);
+  assert.equal(f.getState().apiPreparation.waitUntil,r.admitUntil);
   assert.ok(Object.values(r.preexistingPreserved).every(Boolean));assert.equal(r.hostEvidence.terminationTime,r.deadlineAt);
   await f.execute();assert.equal(f.guestCalls.filter(x=>x==="start").length,1);
 });
@@ -186,6 +196,16 @@ for(const kind of ["networks","subnetworks","firewalls","instances"])test("lost 
 });
 test("lost delete reconciles absence without repeating deletion",async()=>{
   const f=fixture({unknownDelete:"instances"}),r=await f.execute();assert.equal(r.destructionConfirmed,true);assert.equal(f.calls.filter(c=>c.method==="DELETE"&&c.pathname.includes('/instances/')).length,1);
+});
+test("lost delete before provider acceptance is retried only on cleanup re-entry with the same idempotency key",async()=>{
+  const f=fixture({unknownDeleteBeforeOnce:"instances"}),first=await f.execute();
+  assert.equal(first.destructionConfirmed,false);assert.equal(first.billingMayContinue,true);
+  const before=f.calls.filter(c=>c.method==='DELETE'&&c.pathname.includes('/instances/'));assert.equal(before.length,1);
+  const second=await f.execute(),after=f.calls.filter(c=>c.method==='DELETE'&&c.pathname.includes('/instances/'));
+  assert.equal(second.destructionConfirmed,true);assert.equal(second.billingMayContinue,false);assert.equal(after.length,2);
+  assert.equal(new URL('https://example.invalid'+before[0].pathname).searchParams.get('requestId'),
+    new URL('https://example.invalid'+after[1].pathname).searchParams.get('requestId'));
+  assert.equal(f.guestCalls.filter(value=>value==='install').length,1);assert.equal(f.guestCalls.filter(value=>value==='start').length,1);
 });
 test("failed stop or collection still prioritizes external destroy without false native claim",async()=>{
   const f=fixture({stopFails:true,collectFails:true}),r=await f.execute();assert.equal(r.destructionConfirmed,true);assert.equal(r.workerStop.nativeTerminationProved,false);assert.equal(r.collection.sanitized,false);
@@ -245,6 +265,30 @@ test('aborted foreground operation does not pass its aborted signal to API closu
     return {...receipt,receiptSha256:sha256(canonical(receipt))};
   }});
   assert.ok(cleanupSignal);assert.equal(r.apiAdmissionClosed,true);assert.equal(r.destructionConfirmed,true);
+});
+test('operator abort interrupts an unresponsive activation wait immediately and still closes and destroys',async()=>{
+  const f=fixture(),controller=new AbortController();let entered;
+  const waiting=new Promise(resolve=>{entered=resolve;});
+  const run=f.execute({signal:controller.signal,prepareApi:async()=>{entered();return new Promise(()=>{});}});
+  await waiting;controller.abort();const result=await run;
+  assert.equal(result.failure,'media_pilot_operator_interrupted');
+  assert.equal(result.apiAdmissionClosed,true);assert.equal(result.destructionConfirmed,true);
+  assert.equal(f.closeRequests.length,1);assert.equal(f.resources.size,0);
+  assert.equal(f.guestCalls.includes('start'),false);
+});
+for(const phase of ['preflight','install','probeInstalled'])test('operator abort interrupts unresponsive '+phase+' and cleanup uses an independent signal',async()=>{
+  const f=fixture(),controller=new AbortController();let entered,cleanupSignal;
+  const waiting=new Promise(resolve=>{entered=resolve;});
+  const originalExecute=f.execute;
+  const guestOverride={[phase]:async c=>{entered(c.signal);return new Promise(()=>{});}};
+  const run=originalExecute({signal:controller.signal,guestOverride,closeApi:async c=>{
+    cleanupSignal=c.signal;const receipt={schema:1,missionId:c.missionId,closureRequestId:c.closureRequestId,
+      admissionClosed:true,launchClosed:true,connectionEnabled:false,publicationEnabled:false,metaWindowEnabled:false,sentinelSha256:'7'.repeat(64)};
+    return {...receipt,receiptSha256:sha256(canonical(receipt))};
+  }});
+  const foregroundSignal=await waiting;controller.abort();const result=await run;
+  assert.equal(foregroundSignal.aborted,true);assert.equal(result.failure,'media_pilot_operator_interrupted');
+  assert.ok(cleanupSignal===undefined||cleanupSignal.aborted===false);assert.equal(result.destructionConfirmed,true);
 });
 test('expired external cleanup deadline skips API wait explicitly, deletes, then allows closure-only reconciliation',async()=>{
   const f=fixture();const r=await f.execute({observeApi:async c=>{f.setTime(c.destroyBy);return {finished:true,gatesClosed:true,receiptSha256:'3'.repeat(64)};}});

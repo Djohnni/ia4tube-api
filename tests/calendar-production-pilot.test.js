@@ -81,7 +81,7 @@ test('progress loop never runs at/after deadline and an exception is not a retry
   loop.start();await timers.fire();assert.equal(executions,1);assert.equal(reports,1);assert.equal(timers.pending.size,1);
   time=100;await timers.fire();assert.equal(executions,1);assert.equal(loop.isStopped(),true);assert.equal(timers.pending.size,0);
   const expired=createPilotProgressLoop({tick:()=>assert.fail('expired launch'),finishBy:100,clock:()=>101,timers});
-  expired.start();await timers.fire();assert.equal(expired.isStopped(),true);
+  expired.start();assert.equal(expired.isStopped(),true);assert.equal(timers.pending.size,0);
 });
 test('closed private mount consumes no body and cannot expose transfer details',async()=>{
   const state=integration.createProductionSocialIntegration({env:{}});
@@ -142,7 +142,7 @@ test('expired composition can restart to serve existing private previews but nev
   assert.equal(f.factoryOptions.canAdmit(),false);assert.equal(f.componentOptions.canLaunch(),false);
   assert.equal(await f.factoryOptions.verifyReadiness(),true);
   assert.equal(f.componentOptions.accessPolicy.resolve({authenticated:true,...input().owner}).audience,'owner_pilot');
-  pilot.start();await f.fire();assert.equal(f.events.includes('tick'),false);assert.equal(f.timers.size,0);
+  pilot.start();assert.equal(f.events.includes('tick'),false);assert.equal(f.timers.size,0);
   await pilot.close();
 });
 
@@ -218,6 +218,31 @@ test('a stop fence survives restart while an unrelated mission file does not clo
   const closed=compositionFixture({input:input(),env:env(),clock:()=>now});closed.stop();
   const restarted=await closed.create();assert.equal(closed.factoryOptions.canAdmit(),false);assert.equal(closed.componentOptions.canLaunch(),false);
   assert.equal(await closed.factoryOptions.verifyReadiness(),true);await restarted.close();
+});
+
+test('a deployment that becomes live after controller abort starts permanently fenced after restart',async()=>{
+  // The stop file represents the controller's close intent installed before a
+  // delayed Render deployment starts this runtime process.
+  const late=compositionFixture({input:input(),env:env(),clock:()=>now});late.stop('present');
+  const runtime=await late.create();
+  assert.equal(late.factoryOptions.canAdmit(),false);assert.equal(late.componentOptions.canLaunch(),false);
+  const status=late.factoryOptions.readPilotStatus();
+  assert.equal(status.canAdmit,false);assert.equal(status.canLaunch,false);
+  late.stop('absent');
+  assert.equal(late.factoryOptions.canAdmit(),false);assert.equal(late.componentOptions.canLaunch(),false);
+  runtime.start();assert.equal(late.timers.size,0);assert.equal(late.events.includes('tick'),false);
+  assert.equal(late.factoryOptions.canAdmit(),false);assert.equal(late.componentOptions.canLaunch(),false);
+  await runtime.close();
+});
+
+test('admission cutoff preserves bounded progress for accepted work while a later stop halts future ticks',async()=>{
+  let at=now;const f=compositionFixture({input:input(),env:env(),clock:()=>at}),runtime=await f.create();
+  runtime.start();await f.fire();assert.equal(f.events.filter(value=>value==='tick').length,1);
+  at=input().admitUntil;
+  assert.equal(f.factoryOptions.canAdmit(),false);assert.equal(f.componentOptions.canLaunch(),false);
+  await f.fire();assert.equal(f.events.filter(value=>value==='tick').length,2);
+  f.stop('present');await f.fire();assert.equal(f.events.filter(value=>value==='tick').length,2);
+  assert.equal(f.timers.size,0);await runtime.close();
 });
 
 test('unsafe stop parent metadata fails closed and neither window expiry nor later removal reopens admission',async()=>{

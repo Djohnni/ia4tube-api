@@ -36,16 +36,16 @@ function createPilotAdmissionFence(missionId){
   };
 }
 // A bounded timer observes the same durable intentions, never spawns a codec.
-function createPilotProgressLoop({tick,finishBy,clock=Date.now,report=()=>{},timers={setTimeout,clearTimeout}}){
-  if(typeof tick!=='function'||!Number.isSafeInteger(finishBy))fail('loop_invalid');
+function createPilotProgressLoop({tick,finishBy,clock=Date.now,report=()=>{},canRun=()=>true,timers={setTimeout,clearTimeout}}){
+  if(typeof tick!=='function'||typeof canRun!=='function'||!Number.isSafeInteger(finishBy))fail('loop_invalid');
   let timer=null,active=null,stopped=false,started=false;
   async function run(){
-    if(stopped||clock()>=finishBy){stopped=true;return;}
+    if(stopped||clock()>=finishBy||!canRun()){stopped=true;return;}
     try{active=Promise.resolve().then(tick);await active;}
     catch{try{report('calendar_media_progress_attention');}catch{ /* Diagnostics never reopen or break the drain. */ }}
-    finally{active=null;if(!stopped&&clock()<finishBy){timer=timers.setTimeout(run,5000);timer.unref?.();}else{stopped=true;}}
+    finally{active=null;if(!stopped&&clock()<finishBy&&canRun()){timer=timers.setTimeout(run,5000);timer.unref?.();}else{stopped=true;}}
   }
-  return Object.freeze({start(){if(!started&&!stopped){started=true;timer=timers.setTimeout(run,0);timer.unref?.();}},
+  return Object.freeze({start(){if(!started&&!stopped){started=true;if(clock()>=finishBy||!canRun()){stopped=true;return;}timer=timers.setTimeout(run,0);timer.unref?.();}},
     async close(){stopped=true;timers.clearTimeout(timer);if(active)await active.catch(()=>{});},isStopped:()=>stopped});
 }
 async function privateDirectory(directory,{create=true}={}){
@@ -91,6 +91,10 @@ async function createProductionMediaPilot({env=process.env,tenantPool,clock=Date
     publicationEnabled:env.SOCIAL_EXTERNAL_PUBLICATION_ENABLED==='true',metaWindowEnabled:env.META_APP_REVIEW_WINDOW_ENABLED==='true'});
   const admissionOpenAt=at=>!closing&&!closed&&at<config.admitUntil&&admissionFence();
   const admissionOpen=()=>admissionOpenAt(clock());
+  // Admission closes at admitUntil, while already accepted work may continue
+  // through the bounded drain window. A durable stop/unsafe fence, however,
+  // makes even a late-starting coordinator inert immediately.
+  const progressOpen=()=>!closing&&!closed&&admissionFence();
   // This is the loaded process's state, not a reread of a configuration file or
   // a worker poll. Observing it neither reserves work nor starts a conversion.
   const readPilotStatus=()=>{
@@ -120,7 +124,7 @@ async function createProductionMediaPilot({env=process.env,tenantPool,clock=Date
     const factory=createOperationalCalendarImportsRuntimeFactory({enabled:true,preparation:components.preparation,resultStore:components.resultStore,accessPolicy,
       upload:components.upload,provider:components.provider,uploadStore:store,transfer,catalog:music.catalog,clock,canAdmit:admissionOpen,readPilotStatus,
       async verifyReadiness(){await registry.verify();await ledger.verify();await guard.sample();return true;}});
-    loop=createPilotProgressLoop({tick:components.tick,finishBy:config.finishBy,clock,report});
+    loop=createPilotProgressLoop({tick:components.tick,finishBy:config.finishBy,clock,report,canRun:progressOpen});
     return Object.freeze({factory,start:loop.start,admitUntil:config.admitUntil,finishBy:config.finishBy,
       async handlePrivateRequest(req,res){if(!String(req.url||'').startsWith(PRIVATE_PREFIX))return false;
         if(closed||clock()>=config.finishBy){res.writeHead(503,{'cache-control':'no-store'});res.end();return true;}

@@ -20,7 +20,9 @@ function validateState(s, p) {
   }
   if (s.hostEvidence !== null && (!HASH.test(s.hostEvidence.runtimeRevision || "") || !UUID.test(s.hostEvidence.bootId || ""))) fail("journal_host_invalid");
   if (s.apiPreparation !== null && s.apiPreparation !== undefined &&
-      (!Number.isSafeInteger(s.apiPreparation.intentAt) || s.apiPreparation.intentAt < s.startedAt || !UUID.test(s.apiClosure?.requestId || ""))) fail("journal_api_invalid");
+      (!Number.isSafeInteger(s.apiPreparation.intentAt) || s.apiPreparation.intentAt < s.startedAt ||
+       s.apiPreparation.waitUntil !== undefined && s.apiPreparation.waitUntil !== s.admitUntil ||
+       !UUID.test(s.apiClosure?.requestId || ""))) fail("journal_api_invalid");
   if (s.apiClosure !== null && s.apiClosure !== undefined && (!UUID.test(s.apiClosure.requestId || "") ||
       !["pending", "intent", "confirmed", "unconfirmed", "skipped_cleanup_priority"].includes(s.apiClosure.phase))) fail("journal_closure_invalid");
   return s;
@@ -33,6 +35,30 @@ function validateClosureReceipt(value, context) {
   const { receiptSha256, ...content } = value;
   if (sha256(canonical(content)) !== receiptSha256) fail("api_closure_receipt_invalid");
   return value;
+}
+function activationWaitBudget(state, at) {
+  if (!Number.isSafeInteger(at) || !Number.isSafeInteger(state?.admitUntil) || at >= state.admitUntil) fail("activation_deadline");
+  return state.admitUntil - at;
+}
+async function boundedWithSignal(operation, milliseconds, parentSignal) {
+  if (parentSignal?.aborted) fail("operator_interrupted");
+  return bounded(timeoutSignal => {
+    const combined = new AbortController(); let rejectParent;
+    const interrupted = new Promise((_, reject) => { rejectParent = reject; });
+    const abortTimeout = () => combined.abort();
+    const abortParent = () => {
+      combined.abort();
+      rejectParent(Object.assign(new Error("media_pilot_operator_interrupted"), { code: "media_pilot_operator_interrupted" }));
+    };
+    timeoutSignal.addEventListener("abort", abortTimeout, { once: true });
+    parentSignal?.addEventListener("abort", abortParent, { once: true });
+    if (parentSignal?.aborted) abortParent();
+    return Promise.race([Promise.resolve().then(() => operation(combined.signal)), interrupted]).finally(() => {
+      timeoutSignal.removeEventListener("abort", abortTimeout);
+      parentSignal?.removeEventListener("abort", abortParent);
+      combined.abort();
+    });
+  }, milliseconds);
 }
 function summary(s, plan) {
   const finishedAt = Number.isSafeInteger(s.finishedAt) ? s.finishedAt : null;
@@ -67,14 +93,19 @@ async function runOperationalPilot({ plan, approvalSha256, store, provider, gues
     // The independent recovery entry point must never turn an absent journal
     // into a new billable mission, even if all ordinary prerequisites exist.
     if (cleanupOnly && fresh) fail("cleanup_journal_required");
+    // Foreground work is interruptible by the operator. Cleanup deliberately
+    // keeps using `call`: an already-aborted foreground signal must never stop
+    // API fencing or provider deletion.
     const call = fn => bounded(fn, 20000);
+    const foregroundCall = (fn, milliseconds = 20000) => boundedWithSignal(fn, milliseconds, signal);
+    const foregroundSleep = milliseconds => boundedWithSignal(sig => sleep(milliseconds, sig), Math.max(1, milliseconds + 1000), signal);
     if (fresh) {
       // Schema 1 remains readable for cleanup/reconciliation of historical
       // journals, but must never authorize another billable launch.
       if (plan.schema !== 2) fail("legacy_plan_new_launch_refused");
       validateOperationalPlan(plan, { now: now() });
       const preexisting = {};
-      for (const k of KINDS) preexisting[k] = await call(sig => provider.inventory(k, { signal: sig }));
+      for (const k of KINDS) preexisting[k] = await foregroundCall(sig => provider.inventory(k, { signal: sig }));
       const startedAt = now();
       s = { schema: 1, kind: plan.kind, missionId: crypto.randomUUID(), planSha256: plan.approvalSha256, startedAt,
         deadlineAt: startedAt + plan.maxExistenceSeconds * 1000,
@@ -95,21 +126,21 @@ async function runOperationalPilot({ plan, approvalSha256, store, provider, gues
     if (previouslyDestroyed && (s.apiPreparation == null || s.apiClosure?.phase === "confirmed")) return summary(s, plan);
     const budget = seconds => { if (signal?.aborted || now() + seconds * 1000 > s.workerStopAt) fail("work_deadline"); };
     async function bind(k, resource, strict = false) { Object.assign(s.resources[k], bindResource(p, s, k, resource, { strict })); await save(); return resource; }
-    async function waitOperation(op, until) {
+    async function waitOperation(op, until, { invoke = call, pause = sleep } = {}) {
       const targetId = op.targetId;
       while (op.status !== "DONE") {
         if (now() >= until) fail("operation_deadline");
-        await sleep(Math.min(1000, until - now())); op = await call(sig => provider.pollOperation(op, s.missionId, { signal: sig }));
+        await pause(Math.min(1000, until - now())); op = await invoke(sig => provider.pollOperation(op, s.missionId, { signal: sig }));
         if (targetId && op.targetId !== targetId) fail("operation_identity_changed");
       }
       if (op.failed) fail("operation_failed"); return op;
     }
-    async function reconcile(k, until, strict = true) {
+    async function reconcile(k, until, strict = true, { invoke = call, pause = sleep } = {}) {
       while (true) {
-        const r = await call(sig => provider.get(k, s.missionId, { signal: sig }));
+        const r = await invoke(sig => provider.get(k, s.missionId, { signal: sig }));
         if (r) return bind(k, r, strict);
         if (now() >= until) fail("creation_unresolved_no_repeat");
-        await sleep(Math.min(1000, until - now()));
+        await pause(Math.min(1000, until - now()));
       }
     }
     async function create(k, script) {
@@ -118,31 +149,31 @@ async function runOperationalPilot({ plan, approvalSha256, store, provider, gues
       r.intentAt = now(); s.phase = "creating_" + k;
       if (k === "instances") { s.resources.disks.intentAt = r.intentAt; r.bootstrapSha256 = sha256(script); }
       await save();
-      try { r.createOp = await call(sig => provider.create(k, s, script, { signal: sig })); await save(); }
+      try { r.createOp = await foregroundCall(sig => provider.create(k, s, script, { signal: sig })); await save(); }
       catch { r.createResponseUnknown = true; await save(); }
-      if (r.createOp) r.createOp = await waitOperation(r.createOp, Math.min(s.workerStopAt, now() + 120000));
-      const resource = await reconcile(k, Math.min(s.workerStopAt, now() + 120000));
+      if (r.createOp) r.createOp = await waitOperation(r.createOp, Math.min(s.workerStopAt, now() + 120000), { invoke: foregroundCall, pause: foregroundSleep });
+      const resource = await reconcile(k, Math.min(s.workerStopAt, now() + 120000), true, { invoke: foregroundCall, pause: foregroundSleep });
       if (r.createOp?.targetId && r.createOp.targetId !== r.id) fail("create_target_changed");
-      if (k === "instances") await reconcile("disks", Math.min(s.workerStopAt, now() + 120000));
+      if (k === "instances") await reconcile("disks", Math.min(s.workerStopAt, now() + 120000), true, { invoke: foregroundCall, pause: foregroundSleep });
       return resource;
     }
     try {
       if (!fresh) fail("resume_cleanup_only");
-      const ready = await call(sig => provider.preflight({ signal: sig })); if (ready?.verified !== true) fail("provider_preflight_failed");
+      const ready = await foregroundCall(sig => provider.preflight({ signal: sig })); if (ready?.verified !== true) fail("provider_preflight_failed");
       await guest.prepareLocalIdentity({ missionId: s.missionId, plan: p });
       for (const k of ["networks", "subnetworks", "firewalls"]) await create(k);
       await create("instances", guest.createIdentityPayload().startupScript);
       let instance;
-      while (true) { budget(3000); instance = await reconcile("instances", now()); if (instance.status === "RUNNING") break; await sleep(1000); }
+      while (true) { budget(3000); instance = await reconcile("instances", now(), true, { invoke: foregroundCall, pause: foregroundSleep }); if (instance.status === "RUNNING") break; await foregroundSleep(1000); }
       await guest.bindHost(instance, { missionId: s.missionId, plan: p });
       s.phase = "host_preflight_intent"; await save();
-      const preflight = await bounded(sig => guest.preflight({ signal: sig, timeoutMs: 180000 }), 180000);
+      const preflight = await foregroundCall(sig => guest.preflight({ signal: sig, timeoutMs: 180000 }), 180000);
       if (!preflight?.passed || preflight.convertersStarted !== 0) fail("host_preflight_failed");
       budget(2700); s.phase = "installation_intent"; await save();
-      const install = await bounded(sig => guest.install({ signal: sig, timeoutMs: 2400000, attempt: 1 }), 2400000);
+      const install = await foregroundCall(sig => guest.install({ signal: sig, timeoutMs: 2400000, attempt: 1 }), 2400000);
       if (!install?.passed || install.convertersStarted !== 0 || install.diagnostic?.installationPassed !== true) fail("installation_failed");
       s.installation = "passed"; s.phase = "installed_host_probe"; await save(); budget(240);
-      const host = await bounded(sig => guest.probeInstalled({ signal: sig, timeoutMs: 180000 }), 180000);
+      const host = await foregroundCall(sig => guest.probeInstalled({ signal: sig, timeoutMs: 180000 }), 180000);
       if (host?.controlsProved !== true || host.convertersStarted !== 0 || !UUID.test(host.bootId || "") || !HASH.test(host.runtimeRevision || "") || !HASH.test(host.receiptSha256 || "")) fail("installed_host_unproved");
       // Exact API contract, not the probe's raw envelope: no extra fields and
       // the API names the enforced provider action "deletionAction".
@@ -150,26 +181,34 @@ async function runOperationalPilot({ plan, approvalSha256, store, provider, gues
         bootId: host.bootId, runtimeRevision: host.runtimeRevision, receiptSha256: host.receiptSha256,
         verifiedAt: now(), deletionAction: "DELETE", terminationTime: s.deadlineAt };
       s.phase = "api_readiness";
-      s.apiPreparation = { intentAt: now() };
+      s.apiPreparation = { intentAt: now(), waitUntil: s.admitUntil };
       s.apiClosure = { requestId: crypto.randomUUID(), phase: "pending" };
       await save();
       const context = { missionId: s.missionId, plan, createdAt: s.startedAt, admitUntil: s.admitUntil, finishBy: s.deadlineAt, stopAt: s.workerStopAt, destroyBy: s.deadlineAt, hostEvidence: s.hostEvidence };
-      const api = await bounded(sig => prepareApi({ ...context, signal: sig }), Math.min(600000, s.admitUntil - now()));
+      // Deployment/readiness owns the remaining admission window. The former
+      // ten-minute cap was unrelated to both Render deployment time and the
+      // mission's absolute worker/cleanup reserves, so a safe late deployment
+      // could be mistaken for a definitive failure. Per-file processing limits
+      // remain enforced by the worker; this wait cannot cross admitUntil.
+      const activationBudgetMs=activationWaitBudget(s,now());
+      let api;
+      try{api=await boundedWithSignal(sig => prepareApi({ ...context, signal: sig }),activationBudgetMs,signal);}
+      catch(error){if(error?.code==='vm_proof_operation_timeout')fail("activation_deadline");throw error;}
       if (api?.ready !== true || api.ownerCompanyId !== plan.ownerCompanyId || api.ownerUserId !== plan.ownerUserId || api.workerId !== plan.workerId ||
           api.runtimeRevision !== host.runtimeRevision || api.connectionEnabled !== false || api.publicationEnabled !== false || api.metaWindowEnabled !== false ||
           api.admitUntil !== s.admitUntil || api.finishBy !== s.deadlineAt || !HASH.test(api.receiptSha256 || "")) fail("api_not_bound");
       s.apiReceiptSha256 = api.receiptSha256; budget(300); if (now() >= s.admitUntil) fail("admission_window_elapsed");
       s.phase = "worker_start_intent"; s.workerStart = { phase: "intent", at: now() }; await save();
-      const start = await bounded(sig => guest.startWorker({ ...context, signal: sig, timeoutMs: 60000 }), 60000);
+      const start = await foregroundCall(sig => guest.startWorker({ ...context, signal: sig, timeoutMs: 60000 }), 60000);
       if (start?.active !== true || start.recurring !== false || start.workerId !== plan.workerId || start.stopAt !== s.workerStopAt) fail("worker_start_unconfirmed_no_repeat");
       s.workerStart = { phase: "observed_active", at: now(), stopAt: s.workerStopAt }; s.phase = "operational"; await save();
       while (now() < s.workerStopAt) {
         if (signal?.aborted) fail("operator_interrupted");
-        const result = await bounded(sig => observeApi({ ...context, signal: sig }), 20000);
+        const result = await foregroundCall(sig => observeApi({ ...context, signal: sig }), 20000);
         if (!result || typeof result.finished !== "boolean" || result.gatesClosed !== true || !HASH.test(result.receiptSha256 || "")) fail("pilot_observation_invalid");
         s.lastObservation = { at: now(), finished: result.finished, receiptSha256: result.receiptSha256 }; await save();
         if (result.finished) break;
-        await sleep(Math.min(15000, Math.max(0, s.workerStopAt - now())));
+        await foregroundSleep(Math.min(15000, Math.max(0, s.workerStopAt - now())));
       }
     } catch (error) { s.failure ??= /^media_pilot_[a-z_]+$/.test(error?.code || "") ? error.code : "media_pilot_operation_failed"; await safeSave(); }
     finally {
@@ -223,10 +262,19 @@ async function runOperationalPilot({ plan, approvalSha256, store, provider, gues
             if (k === "disks" && s.resources.instances.absentConfirmedAt !== null && s.resources.instances.id !== null) { r.absentConfirmedAt = now(); await safeSave(); continue; }
             uncertain = true; continue;
           }
-          if (resource && r.deleteIntentAt === null) {
-            r.deleteIntentAt = now(); await safeSave();
+          if (resource) {
+            if (r.deleteIntentAt === null) { r.deleteIntentAt = now(); await safeSave(); }
+            // Reconcile after the durable intent. If the previous DELETE never
+            // reached Google, a cleanup-only re-entry may send the SAME
+            // idempotency request id again. If it did reach Google, absence (or
+            // the same operation) is observed and no distinct action is made.
             resource = await call(sig => provider.get(k, s.missionId, { signal: sig }));
-            if (resource) { bindResource(p, s, k, resource); try { r.deleteOp = await call(sig => provider.destroy(k, s, { signal: sig })); } catch { r.deleteResponseUnknown = true; } await safeSave(); }
+            if (resource && r.deleteOp === null) {
+              bindResource(p, s, k, resource);
+              try { r.deleteOp = await call(sig => provider.destroy(k, s, { signal: sig })); r.deleteResponseUnknown = false; }
+              catch { r.deleteResponseUnknown = true; }
+              await safeSave();
+            }
           }
           const until = Math.max(now(), Math.min(s.deadlineAt, now() + 300000));
           if (r.deleteOp) r.deleteOp = await waitOperation(r.deleteOp, until);
@@ -252,4 +300,4 @@ async function runOperationalPilot({ plan, approvalSha256, store, provider, gues
     return summary(s, plan);
   });
 }
-module.exports = { runOperationalPilot, validateState, validateClosureReceipt, summary };
+module.exports = { runOperationalPilot, validateState, validateClosureReceipt, activationWaitBudget, boundedWithSignal, summary };
