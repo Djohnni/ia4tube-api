@@ -11,11 +11,11 @@ const { createImportAccessPolicy } = require("../src/social/calendar/imports/acc
 const hash = text => crypto.createHash("sha256").update(text).digest("hex");
 
 // Contract-only synthetic records. Actual decode tests live in preparation.test.
-function fixture(kind = "video") {
+function fixture(kind = "video", shareToFeed = true) {
   const context = { authenticated: true, companyId: crypto.randomUUID(), userId: crypto.randomUUID() };
   const accessPolicy = createImportAccessPolicy({ allowedOwners: [context] });
   const now = model.dateTime("2026-09-12", "12:00"), state = model.freshState();
-  const selection = kind === "video" ? { kind, targets: ["story", "reel"], audioMode: "original", shareToFeed: true }
+  const selection = kind === "video" ? { kind, targets: ["story", "reel"], audioMode: "original", shareToFeed }
     : { kind, targets: ["feed", "story"], audioMode: "none" };
   const source = { kind, format: kind === "video" ? "mp4" : "jpeg", decoded: true, frames: 1,
     sha256: hash("synthetic-source"), width: 1080, height: 1920, size: 1024,
@@ -54,6 +54,15 @@ test("photo and video enter the existing jobs without generation orders or credi
     assert.deepEqual(Object.keys(f.state).sort(), ["jobs", "preferences", "schema"]);
     assert.deepEqual(destinations.targets(job), f.prepared.plan.deliveries.map(part => part.target));
     assert.equal(job.assets.story.mimeType, kind === "image" ? "image/jpeg" : "video/mp4");
+  }
+});
+test("both Reel Feed choices persist on one calendar item without a Feed delivery", () => {
+  for (const shareToFeed of [false, true]) {
+    const f = fixture("video", shareToFeed), job = f.schedule();
+    assert.equal(job.assets.reel.shareToFeed, shareToFeed);
+    assert.deepEqual(job.selectedTargets, ["story", "reel"]);
+    assert.equal(job.assets.feed, undefined);
+    assert.equal(Object.keys(f.state.jobs).length, 1);
   }
 });
 test("schedule retry is canonical across JSON key order and preserves edits and cancellation", () => {

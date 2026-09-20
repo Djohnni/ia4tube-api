@@ -9,7 +9,7 @@ const { createPublicationIntent } = require("../src/social/publication/connectio
 const { loadInstagramOAuthConfig } = require("../src/social/oauth/instagram-config");
 const { preparedPublicationDescriptor } = require("../src/social/calendar/imports/publication-descriptor");
 const { createLocalPublicationTransport } = require("../src/social/calendar/imports/publication-test-transport");
-function fixture({ target = "reel", mimeType = "video/mp4", caption = "Legenda exata iA4tube", mode = "ok", change = {} } = {}) {
+function fixture({ target = "reel", mimeType = "video/mp4", caption = "Legenda exata iA4tube", mode = "ok", change = {}, shareToFeed = target === "reel" } = {}) {
   const { context } = fixtureContext(), pool = createMemoryPool(context);
   const store = createPostgresConnectorStore({ pool, publicationBindingRequired: true });
   const origin = "https://ia4tube-api.onrender.com", posts = [], reads = [];
@@ -22,7 +22,7 @@ function fixture({ target = "reel", mimeType = "video/mp4", caption = "Legenda e
   const part = { sha256: "b".repeat(64), sourceSha256: "a".repeat(64), objectKey: "c".repeat(64), objectVersion: crypto.randomUUID(),
     mimeType, size: 4096, sizeBytes: 4096, width: 1080, height: target === "feed" ? 1350 : 1920,
     durationSeconds: mimeType === "video/mp4" ? 15 : undefined, hasAudio: mimeType === "video/mp4",
-    audioMode: mimeType === "video/mp4" ? "original" : "none", shareToFeed: target === "reel" };
+    audioMode: mimeType === "video/mp4" ? "original" : "none", shareToFeed: target === "reel" && shareToFeed };
   const job = { id: "d".repeat(40), sourceKind: "upload", layout: "import_prepared_v1", target, caption,
     selectedTargets: [target], assets: { [target]: part }, import: { userId: context.userId, assetId: crypto.randomUUID(), mediaRevision: 1,
       resultRef: crypto.randomUUID(), previewDigest: "e".repeat(64), preview: { testOnly: false } } };
@@ -71,6 +71,14 @@ function fixture({ target = "reel", mimeType = "video/mp4", caption = "Legenda e
       return service.getPublicationStatus(context, { publicationId: intent.publicationId, operationId: crypto.randomUUID(), binding,
         providerReference: row.reconciliationReference }); } };
 }
+test("Reel without Feed keeps explicit false through descriptor and provider without another publication", async () => {
+  const f = fixture({ target: "reel", mimeType: "video/mp4", shareToFeed: false });
+  assert.equal(f.job.assets.reel.shareToFeed, false); assert.equal(f.descriptor.shareToFeed, false);
+  const result = await f.publish(); assert.equal(result.state, "published");
+  assert.equal(f.posts.length, 2, "One create plus one publish is still one Reel publication");
+  assert.equal(f.posts[0].body.media_type, "REELS"); assert.equal(f.posts[0].body.share_to_feed, "false");
+  assert.deepEqual(f.job.selectedTargets, ["reel"]); assert.equal(Object.keys(f.job.assets).length, 1);
+});
 for (const [target, mimeType] of [["feed", "image/jpeg"], ["story", "image/jpeg"], ["story", "video/mp4"], ["reel", "video/mp4"]]) {
   test(`prepared ${target}/${mimeType} uses real provider adapter, typed URL and persisted confirmation`, async () => {
     const f = fixture({ target, mimeType }); const result = await f.publish();
