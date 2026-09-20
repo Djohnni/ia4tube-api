@@ -226,7 +226,10 @@ fun CalendarGallery(model: CalendarViewModel, token: String, backLabel: String =
                     }
                     if (preview == "story") Text("Story · o Instagram não exibe a legenda do Feed aqui.", color = Color.White, style = MaterialTheme.typography.bodySmall)
                     else Text(art.caption, color = Color.White, maxLines = 5, overflow = TextOverflow.Ellipsis)
-                    if (preview == "reel" && art.shareToFeed) Text("Reel também exibido no Feed — uma única publicação neste destino.", color = Color.White, style = MaterialTheme.typography.bodySmall)
+                    if (preview == "reel") Text(if (art.shareToFeed)
+                        "Reel também exibido no Feed — uma única publicação neste destino."
+                        else "Reel somente na área de Reels — nenhuma publicação extra no Feed.",
+                        color = Color.White, style = MaterialTheme.typography.bodySmall)
                     if (art.media?.testOnly == true) Text("Teste local com áudio sintético — não é uma publicação real.", color = Color(0xFFFFD28A))
                     else if (art.localSimulation) Text("Simulação local — nenhum envio real ao Instagram.", color = Color(0xFFFFD28A))
                     art.publications.forEach { (target, result) -> Text("${destinationLabel(target)}: ${if (result == "published") "publicação confirmada" else if (result == "failed") "falhou — confira" else "aguardando confirmação"}", color = Color.White, style = MaterialTheme.typography.bodySmall) }
@@ -242,7 +245,9 @@ fun CalendarGallery(model: CalendarViewModel, token: String, backLabel: String =
                 val audio = when (part.audioMode.wire) { "music" -> "trilha no vídeo"; "original" -> "áudio original"; "muted" -> "vídeo sem áudio"; else -> "foto sem música" }
                 Text("${destinationLabel(part.target)} · ${part.width} × ${part.height} · $audio")
             }
-            if (art.shareToFeed) Text("O Reel também aparece no Feed; não é um terceiro envio.")
+            if (art.media?.variants?.any { it.target == "reel" } == true) Text(if (art.shareToFeed)
+                "O Reel também aparece no Feed; não é um terceiro envio."
+                else "O Reel fica somente na área de Reels; nenhum envio adicional ao Feed foi programado.")
             Text("Essas opções correspondem à prévia confirmada antes de Programar. O volume do player muda somente o que você ouve aqui, não o arquivo final.")
             if (art.media?.testOnly == true) Text("Áudio sintético de teste local, sem licença comercial comprovada.")
         } }, confirmButton = { TextButton(onClick = { showMediaInfo = null }) { Text("Entendi") } }) }

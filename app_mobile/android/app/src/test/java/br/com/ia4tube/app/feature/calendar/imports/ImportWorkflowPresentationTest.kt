@@ -59,6 +59,27 @@ class ImportWorkflowPresentationTest {
             assertTrue(choices.last().configuration.shareToFeed)
         }
     }
+    @Test fun `Reel Feed visibility is explicit in both states and never adds a Feed target`() {
+        for (shareToFeed in listOf(false, true)) {
+            val choices = importFormatChoices(ImportMediaKind.VIDEO, ImportAudioMode.ORIGINAL,
+                reelShareToFeed = shareToFeed)
+            val reels = choices.filter { ImportTarget.REEL in it.configuration.targets }
+            assertEquals(2, reels.size)
+            assertTrue(reels.all { it.configuration.shareToFeed == shareToFeed })
+            assertTrue(reels.all { ImportTarget.FEED !in it.configuration.targets })
+            assertTrue(reels.all { GalleryImportPolicy.validateConfiguration(ImportMediaKind.VIDEO,
+                it.configuration, emptyList()) == null })
+            assertTrue(importReelFeedLabel(reels.first().configuration)!!.contains(
+                if (shareToFeed) "uma única publicação" else "somente na área de Reels"))
+        }
+        assertNull(importReelFeedLabel(ImportConfiguration(setOf(ImportTarget.STORY), ImportAudioMode.ORIGINAL)))
+    }
+    @Test fun `preparation wire contract keeps false as an explicit boolean`() {
+        val configuration = ImportConfiguration(setOf(ImportTarget.REEL), ImportAudioMode.ORIGINAL, shareToFeed = false)
+        val selection = ImportPreparationProtocol.selection(ImportMediaKind.VIDEO, configuration)
+        assertTrue(selection.has("shareToFeed"))
+        assertFalse(selection.getBoolean("shareToFeed"))
+    }
     @Test fun `schedule is future whole minute Brasilia date with bounded horizon`() {
         val now = Instant.parse("2026-09-13T12:00:00Z").toEpochMilli()
         assertEquals(Instant.parse("2026-09-14T12:30:00Z").toEpochMilli(), importScheduledAt("2026-09-14", "09:30", now))

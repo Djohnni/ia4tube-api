@@ -225,12 +225,23 @@ internal fun GalleryImportWorkflowContent(view: ImportWorkflowView, runtime: Gal
                             editedConfiguration = next; runtime.configure(next)
                         }) { Text(if (track.testOnly) "Áudio sintético — somente teste local" else track.displayName) }
                     }
-                    for (choice in importFormatChoices(draft.selection.kind, configuration.audioMode, configuration.musicTrackId)) {
+                    val formatChoices = importFormatChoices(draft.selection.kind, configuration.audioMode, configuration.musicTrackId,
+                        reelShareToFeed = if (ImportTarget.REEL in configuration.targets) configuration.shareToFeed else true)
+                    for (choice in formatChoices) {
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             RadioButton(selected = choice.configuration == configuration, enabled = operational,
                                 onClick = { editedConfiguration = choice.configuration; runtime.configure(choice.configuration) })
                             Column { Text(choice.title); Text(choice.detail, style = MaterialTheme.typography.bodySmall) }
                         }
+                    }
+                    if (ImportTarget.REEL in configuration.targets) {
+                        FilterChip(selected = configuration.shareToFeed, enabled = operational,
+                            colors = importWorkflowChipColors(),
+                            onClick = {
+                                val next = configuration.copy(shareToFeed = !configuration.shareToFeed)
+                                editedConfiguration = next; runtime.configure(next)
+                            }, label = { Text("Exibir também no Feed") })
+                        importReelFeedLabel(configuration)?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
                     }
                     Text("Mudar formato ou áudio exige nova preparação e nova conferência. A legenda não será queimada no Story, nem há seletor de música nativo do Instagram.", style = MaterialTheme.typography.bodySmall)
                     Button(enabled = operational && view.capabilities.preparationEnabled, colors = importWorkflowButtonColors(), onClick = runtime::prepare,
@@ -254,6 +265,7 @@ internal fun GalleryImportWorkflowContent(view: ImportWorkflowView, runtime: Gal
                     else PrivateImportPreviewSurface(view.owner, tokenProvider, preview, target, view.foreground && view.sessionValid && !confirmSchedule && !confirmCancel,
                         previewModifier, onVerified = { review.rendered(it); reviewCounter++ }, onFailure = { review.failed(it); reviewCounter++ })
                     Text("Confira enquadramento, rotação, duração e áudio de cada destino antes de confirmar.")
+                    configuration?.let(::importReelFeedLabel)?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
                     val allReviewed = reviewCounter.let { review.complete() }
                     Button(enabled = operational && allReviewed && !confirmed, colors = importWorkflowButtonColors(), onClick = { runtime.confirm(ImportPreviewConfirmation(
                         preview.assetId, preview.mediaRevision, preview.previewDigest, review.verifiedTargets())) }, modifier = Modifier.fillMaxWidth()) {
@@ -318,7 +330,10 @@ internal fun GalleryImportWorkflowContent(view: ImportWorkflowView, runtime: Gal
         text = { Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Text("${availability?.accountLabel ?: "Conta não confirmada"} · ${preview.variants.joinToString { importTargetLabel(it.target) }}")
             Text("$date às $time · Brasília")
-            configuration?.let { Text(importFinalAudioLabel(it)) }
+            configuration?.let {
+                Text(importFinalAudioLabel(it))
+                importReelFeedLabel(it)?.let { label -> Text(label) }
+            }
             if (caption.isNotBlank()) Text(caption)
             Text(if (automatic) "Autorizo a publicação deste arquivo preparado nesta conta e data, conforme as condições disponíveis."
                 else "Salvar no calendário sem publicar automaticamente.")

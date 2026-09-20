@@ -142,6 +142,20 @@ class GalleryImportWorkflowInteractionTest {
             assertEquals(0, host.schedules)
         } finally { host.close() }
     }
+    @Test fun explicitReelFeedControlSendsFalseAndInvalidatesTheOldPreview() {
+        val host = Host(video = true)
+        try {
+            assertTrue(host.view.draft!!.configuration.shareToFeed)
+            assertTrue(host.nodes().any { host.text(it) == "O Reel também será exibido no Feed. Continua sendo uma única publicação." })
+            host.click("Exibir também no Feed")
+            assertEquals(1, host.configurations)
+            assertFalse(host.view.draft!!.configuration.shareToFeed)
+            assertNull(host.view.preparation!!.preview)
+            assertNull(host.view.preparation!!.confirmation)
+            assertFalse(host.nodes().any { host.text(it) == "Prévia do arquivo final" || host.text(it) == "Programar" })
+            assertEquals(0, host.schedules)
+        } finally { host.close() }
+    }
     @Test fun previewFailureAfterConfirmationDisablesScheduleUntilVerifiedAgain() {
         val host = Host()
         try {

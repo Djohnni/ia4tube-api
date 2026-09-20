@@ -7,18 +7,20 @@ import java.time.ZoneId
 internal data class ImportFormatChoice(val title: String, val detail: String, val configuration: ImportConfiguration)
 
 /** No implicit music licence, music picker from Instagram, or third Feed publication for a shared Reel. */
-internal fun importFormatChoices(kind: ImportMediaKind, audio: ImportAudioMode, trackId: String? = null): List<ImportFormatChoice> {
+internal fun importFormatChoices(kind: ImportMediaKind, audio: ImportAudioMode, trackId: String? = null,
+                                 reelShareToFeed: Boolean = true): List<ImportFormatChoice> {
     if (kind == ImportMediaKind.VIDEO) return listOf(
-        ImportFormatChoice("Reel", "Um Reel, também mostrado no Feed.", ImportConfiguration(setOf(ImportTarget.REEL), audio, shareToFeed = true)),
+        ImportFormatChoice("Reel", "Um Reel com exibição no Feed configurável abaixo.",
+            ImportConfiguration(setOf(ImportTarget.REEL), audio, shareToFeed = reelShareToFeed)),
         ImportFormatChoice("Story", "Um vídeo vertical no Story.", ImportConfiguration(setOf(ImportTarget.STORY), audio)),
-        ImportFormatChoice("Story e Reel", "Duas publicações independentes. O Reel também aparece no Feed.",
-            ImportConfiguration(setOf(ImportTarget.STORY, ImportTarget.REEL), audio, shareToFeed = true)))
+        ImportFormatChoice("Story e Reel", "Duas publicações independentes; a exibição do Reel no Feed é configurável abaixo.",
+            ImportConfiguration(setOf(ImportTarget.STORY, ImportTarget.REEL), audio, shareToFeed = reelShareToFeed)))
     if (audio == ImportAudioMode.MUSIC && trackId != null) return listOf(
         ImportFormatChoice("Story com música", "Vídeo de 15 segundos para Story.", ImportConfiguration(setOf(ImportTarget.STORY), audio, trackId, setOf(ImportTarget.STORY))),
-        ImportFormatChoice("Reel com música", "Vídeo de 15 segundos, também mostrado no Feed.",
-            ImportConfiguration(setOf(ImportTarget.REEL), audio, trackId, setOf(ImportTarget.REEL), true)),
+        ImportFormatChoice("Reel com música", "Vídeo de 15 segundos com exibição no Feed configurável abaixo.",
+            ImportConfiguration(setOf(ImportTarget.REEL), audio, trackId, setOf(ImportTarget.REEL), reelShareToFeed)),
         ImportFormatChoice("Story e Reel com música", "Duas publicações, com o mesmo vídeo preparado quando compatível.",
-            ImportConfiguration(setOf(ImportTarget.STORY, ImportTarget.REEL), audio, trackId, setOf(ImportTarget.STORY, ImportTarget.REEL), true)),
+            ImportConfiguration(setOf(ImportTarget.STORY, ImportTarget.REEL), audio, trackId, setOf(ImportTarget.STORY, ImportTarget.REEL), reelShareToFeed)),
         ImportFormatChoice("Foto no Feed e Story com música", "A foto do Feed permanece imagem; o Story é um vídeo separado de 15 segundos.",
             ImportConfiguration(setOf(ImportTarget.FEED, ImportTarget.STORY), audio, trackId, setOf(ImportTarget.STORY))))
     return listOf(
@@ -26,6 +28,12 @@ internal fun importFormatChoices(kind: ImportMediaKind, audio: ImportAudioMode, 
         ImportFormatChoice("Foto no Story", "Imagem vertical, sem música.", ImportConfiguration(setOf(ImportTarget.STORY), ImportAudioMode.NONE)),
         ImportFormatChoice("Foto no Feed e Story", "Duas imagens preparadas nos enquadramentos de cada destino.",
             ImportConfiguration(setOf(ImportTarget.FEED, ImportTarget.STORY), ImportAudioMode.NONE)))
+}
+
+internal fun importReelFeedLabel(configuration: ImportConfiguration): String? = when {
+    ImportTarget.REEL !in configuration.targets -> null
+    configuration.shareToFeed -> "O Reel também será exibido no Feed. Continua sendo uma única publicação."
+    else -> "O Reel ficará somente na área de Reels. Nenhuma publicação extra no Feed será criada."
 }
 
 internal fun importScheduledAt(date: String, time: String, now: Long = System.currentTimeMillis()): Long? = runCatching {

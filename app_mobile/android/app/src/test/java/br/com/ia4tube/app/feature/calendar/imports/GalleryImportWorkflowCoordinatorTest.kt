@@ -148,6 +148,24 @@ class GalleryImportWorkflowCoordinatorTest {
         assertEquals("import_preview_confirmation_changed", coordinator.confirmPreview(old).errorCode)
         assertEquals(2, f.preparationKeys.distinct().size)
     }
+    @Test fun ReelWithoutFeedPersistsThroughPreparationConfirmationAndSingleSchedule() = runBlocking {
+        val f = Fixture(video = true); val coordinator = f.prepared(); coordinator.confirmPreview(f.confirmation())
+        val originalUpload = f.store.read(data.owner)!!.state.upload
+        val changed = f.record.configuration!!.copy(shareToFeed = false)
+        assertEquals(ImportPreparationRunStatus.AWAITING_REQUEST, coordinator.configure(changed).status)
+        assertEquals(originalUpload, f.store.read(data.owner)!!.state.upload)
+        coordinator.request(); f.ready(); val preview = coordinator.reconcileOnce()
+        assertFalse(preview.state!!.configuration.shareToFeed)
+        assertEquals(setOf(ImportTarget.STORY, ImportTarget.REEL), preview.preview!!.variants.map { ImportTarget.valueOf(it.target.uppercase()) }.toSet())
+        coordinator.confirmPreview(f.confirmation())
+        val scheduled = coordinator.schedule("Reel sem Feed", at, true)
+        assertEquals(ImportPreparationRunStatus.SCHEDULED, scheduled.status)
+        val saved = f.store.read(data.owner)!!
+        assertFalse(saved.state.configuration.shareToFeed)
+        assertEquals(1, f.scheduleKeys.size)
+        val restored = ImportCheckpointCodec.decode(ImportCheckpointCodec.encode(saved), data.owner)
+        assertFalse(restored.state.configuration.shareToFeed)
+    }
     @Test fun unknownPreparationCannotBeDiscardedByEditingAndLostAckKeepsKey() = runBlocking {
         val f = Fixture(); f.losePrepareAck = true; val coordinator = f.coordinator(); coordinator.request()
         val key = f.store.read(data.owner)!!.preparationIntent!!.idempotencyKey
