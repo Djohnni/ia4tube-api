@@ -1,7 +1,7 @@
 "use strict";
 const test = require("node:test"), assert = require("node:assert/strict"), vm = require("node:vm");
 const { createOperationalPlan, validateOperationalPlan } = require("../scripts/media-pilot/google-plan");
-const { runOperationalPilot, activationWaitBudget } = require("../scripts/media-pilot/google-controller");
+const { runOperationalPilot, activationWaitBudget, transientObservationFailure } = require("../scripts/media-pilot/google-controller");
 const { hostProbeScript, startScript, stopScript, collectionScript } = require("../scripts/media-pilot/google-guest");
 const { createGoogleProvider } = require("../scripts/validation/vm-proof-google-provider");
 const P = require("../scripts/validation/vm-proof-google-plan");
@@ -180,6 +180,62 @@ test("lost start response cannot replay and still stops/collects/deletes",async(
 });
 test("API observation detects gates opened and exits instead of admitting external work",async()=>{
   const f=fixture({observationOpen:true}),r=await f.execute();assert.equal(r.failure,"media_pilot_pilot_observation_invalid");assert.equal(r.destructionConfirmed,true);
+});
+test("transient read-only observation timeout is retried without replaying worker start or provider writes",async()=>{
+  const f=fixture();let observations=0;
+  const r=await f.execute({observeApi:async()=>{
+    observations++;
+    if(observations===1)throw Object.assign(Error("synthetic timeout"),{code:"media_api_control_http_unavailable",sourceCode:"media_owner_timeout"});
+    return {finished:true,gatesClosed:true,receiptSha256:"3".repeat(64)};
+  }});
+  assert.equal(r.failure,null);assert.equal(r.destructionConfirmed,true);assert.equal(observations,2);
+  assert.equal(f.guestCalls.filter(value=>value==="start").length,1);
+  assert.equal(f.calls.filter(call=>call.method==="POST"&&call.pathname.includes("/instances?")).length,1);
+});
+test("transient observation retry never extends the worker or cleanup deadlines",async()=>{
+  const f=fixture();let observations=0;
+  const r=await f.execute({observeApi:async context=>{
+    observations++;f.setTime(context.stopAt);
+    throw Object.assign(Error("synthetic timeout at boundary"),{code:"media_api_control_http_unavailable",sourceCode:"media_owner_timeout"});
+  }});
+  assert.equal(observations,1);assert.equal(r.failure,"media_pilot_observation_unavailable");
+  assert.equal(r.destructionConfirmed,true);assert.equal(r.billingMayContinue,false);
+  assert.ok(f.getState().finishedAt<=r.deadlineAt);assert.equal(f.guestCalls.filter(value=>value==="start").length,1);
+});
+test("persistent transient observation outage fails closed after a bounded retry count",async()=>{
+  const f=fixture();let observations=0;
+  const r=await f.execute({observeApi:async()=>{
+    observations++;throw Object.assign(Error("synthetic persistent timeout"),
+      {code:"media_api_control_http_unavailable",sourceCode:"media_owner_timeout"});
+  }});
+  assert.equal(observations,3);assert.equal(r.failure,"media_pilot_observation_unavailable");
+  assert.equal(r.destructionConfirmed,true);assert.equal(r.billingMayContinue,false);
+  assert.equal(f.guestCalls.filter(value=>value==="start").length,1);
+});
+test("only enumerated observation availability failures are retryable",()=>{
+  for(const error of [
+    {code:"media_api_control_http_unavailable",statusCode:503},
+    {code:"media_api_control_http_unavailable",sourceCode:"media_owner_timeout"},
+    {code:"media_api_control_http_unavailable",sourceCode:"media_owner_response_unconfirmed"},
+    {code:"media_api_control_http_unavailable",sourceCode:"media_owner_transport_failed",transportCode:"ECONNRESET"},
+    {code:"media_api_control_deadline"},{code:"vm_proof_operation_timeout"}
+  ])assert.equal(transientObservationFailure(error),true);
+  for(const error of [
+    {code:"media_api_control_http_unavailable",statusCode:401,sourceCode:"media_owner_response_refused"},
+    {code:"media_api_control_http_unavailable",sourceCode:"media_owner_login_unconfirmed"},
+    {code:"media_api_control_http_unavailable",sourceCode:"media_owner_response_unconfirmed",transportCode:"CERT_HAS_EXPIRED"},
+    {code:"media_api_control_http_unavailable",sourceCode:"media_owner_transport_failed",transportCode:"CERT_HAS_EXPIRED"},
+    {code:"media_api_control_pilot_receipt_invalid"}
+  ])assert.equal(transientObservationFailure(error),false);
+});
+for(const error of [
+  {code:"media_api_control_http_unavailable",statusCode:401,sourceCode:"media_owner_response_refused"},
+  {code:"media_api_control_pilot_receipt_invalid"}
+])test("fatal auth or schema observation error is not retried",async()=>{
+  const f=fixture();let observations=0;
+  const r=await f.execute({observeApi:async()=>{observations++;throw Object.assign(Error("synthetic fatal"),error);}});
+  assert.equal(r.failure,"media_pilot_operation_failed");assert.equal(r.destructionConfirmed,true);assert.equal(observations,1);
+  assert.equal(f.guestCalls.filter(value=>value==="start").length,1);
 });
 test("no human activity ends at bounded worker window and reserves provider cleanup",async()=>{
   const f=fixture({waitUntilDeadline:true}),r=await f.execute();assert.equal(r.failure,null);assert.equal(r.destructionConfirmed,true);

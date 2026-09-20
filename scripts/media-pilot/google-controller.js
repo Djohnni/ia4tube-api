@@ -40,6 +40,23 @@ function activationWaitBudget(state, at) {
   if (!Number.isSafeInteger(at) || !Number.isSafeInteger(state?.admitUntil) || at >= state.admitUntil) fail("activation_deadline");
   return state.admitUntil - at;
 }
+const TRANSIENT_OBSERVATION_SOURCES = new Set([
+  "media_owner_aborted", "media_owner_timeout", "media_owner_response_limit"
+]);
+const TRANSIENT_OBSERVATION_TRANSPORTS = new Set([
+  "ECONNRESET", "ECONNREFUSED", "ETIMEDOUT", "EAI_AGAIN", "ENETUNREACH", "EHOSTUNREACH", "EPIPE"
+]);
+const MAX_CONSECUTIVE_TRANSIENT_OBSERVATIONS = 3;
+function transientObservationFailure(error) {
+  if (error?.code === "vm_proof_operation_timeout" || error?.code === "media_api_control_deadline") return true;
+  if (error?.code !== "media_api_control_http_unavailable") return false;
+  if (TRANSIENT_OBSERVATION_SOURCES.has(error.sourceCode)) return true;
+  if (error.sourceCode === "media_owner_response_unconfirmed")
+    return error.transportCode == null || TRANSIENT_OBSERVATION_TRANSPORTS.has(error.transportCode);
+  if (error.sourceCode === "media_owner_transport_failed") return TRANSIENT_OBSERVATION_TRANSPORTS.has(error.transportCode);
+  if (error.sourceCode != null) return false;
+  return [502, 503, 504].includes(error.statusCode);
+}
 async function boundedWithSignal(operation, milliseconds, parentSignal) {
   if (parentSignal?.aborted) fail("operator_interrupted");
   return bounded(timeoutSignal => {
@@ -202,10 +219,28 @@ async function runOperationalPilot({ plan, approvalSha256, store, provider, gues
       const start = await foregroundCall(sig => guest.startWorker({ ...context, signal: sig, timeoutMs: 60000 }), 60000);
       if (start?.active !== true || start.recurring !== false || start.workerId !== plan.workerId || start.stopAt !== s.workerStopAt) fail("worker_start_unconfirmed_no_repeat");
       s.workerStart = { phase: "observed_active", at: now(), stopAt: s.workerStopAt }; s.phase = "operational"; await save();
+      let consecutiveTransientObservations = 0;
       while (now() < s.workerStopAt) {
         if (signal?.aborted) fail("operator_interrupted");
-        const result = await foregroundCall(sig => observeApi({ ...context, signal: sig }), 20000);
+        let result;
+        try {
+          // This is a read-only reconciliation. A short Render/transport gap
+          // after the single durable worker start must not be mistaken for a
+          // failed launch. Retry only the enumerated transient failures and
+          // never cross the existing worker/cleanup boundary.
+          result = await foregroundCall(sig => observeApi({ ...context, signal: sig }),
+            Math.min(20000, Math.max(1, s.workerStopAt - now())));
+        } catch (error) {
+          if (signal?.aborted) fail("operator_interrupted");
+          if (!transientObservationFailure(error)) throw error;
+          consecutiveTransientObservations++;
+          if (consecutiveTransientObservations >= MAX_CONSECUTIVE_TRANSIENT_OBSERVATIONS || now() >= s.workerStopAt)
+            fail("observation_unavailable");
+          await foregroundSleep(Math.min(15000, Math.max(0, s.workerStopAt - now())));
+          continue;
+        }
         if (!result || typeof result.finished !== "boolean" || result.gatesClosed !== true || !HASH.test(result.receiptSha256 || "")) fail("pilot_observation_invalid");
+        consecutiveTransientObservations = 0;
         s.lastObservation = { at: now(), finished: result.finished, receiptSha256: result.receiptSha256 }; await save();
         if (result.finished) break;
         await foregroundSleep(Math.min(15000, Math.max(0, s.workerStopAt - now())));
@@ -300,4 +335,5 @@ async function runOperationalPilot({ plan, approvalSha256, store, provider, gues
     return summary(s, plan);
   });
 }
-module.exports = { runOperationalPilot, validateState, validateClosureReceipt, activationWaitBudget, boundedWithSignal, summary };
+module.exports = { runOperationalPilot, validateState, validateClosureReceipt, activationWaitBudget, boundedWithSignal,
+  transientObservationFailure, summary };
