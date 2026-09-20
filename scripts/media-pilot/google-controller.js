@@ -6,8 +6,10 @@ const { KINDS, UUID, googleId, resourceName, bindResource } = require("../valida
 const { fail, HASH, validateOperationalPlan } = require("./google-plan");
 function validateState(s, p) {
   if (!s || s.schema !== 1 || s.kind !== p.kind || !UUID.test(s.missionId || "") || s.planSha256 !== p.approvalSha256 ||
-      !Number.isSafeInteger(s.startedAt) || s.deadlineAt !== s.startedAt + 7200000 ||
-      s.admitUntil !== s.startedAt + p.admissionSeconds * 1000 || s.workerStopAt !== s.deadlineAt - 600000) fail("journal_invalid");
+      !Number.isSafeInteger(s.startedAt) || s.deadlineAt !== s.startedAt + p.maxExistenceSeconds * 1000 ||
+      s.admitUntil !== s.startedAt + p.admissionSeconds * 1000 ||
+      s.workerStopAt !== s.deadlineAt - p.cleanupReserveSeconds * 1000 ||
+      s.workerStopAt - s.admitUntil < p.drainReserveSeconds * 1000) fail("journal_invalid");
   for (const k of KINDS) {
     const r = s.resources?.[k];
     if (!r || !Array.isArray(s.preexisting?.[k]) || s.preexisting[k].length > 10000 ||
@@ -33,6 +35,8 @@ function validateClosureReceipt(value, context) {
   return value;
 }
 function summary(s, plan) {
+  const finishedAt = Number.isSafeInteger(s.finishedAt) ? s.finishedAt : null;
+  const completedWithinDeadline = finishedAt === null ? null : finishedAt <= s.deadlineAt;
   return { missionId: s.missionId, phase: s.phase, startedAt: s.startedAt, admitUntil: s.admitUntil, workerStopAt: s.workerStopAt, deadlineAt: s.deadlineAt,
     resources: Object.fromEntries(KINDS.map(k => [k, { id: s.resources[k].id, createdAt: s.resources[k].createdAt, absentConfirmedAt: s.resources[k].absentConfirmedAt }])),
     hostEvidence: s.hostEvidence, installation: s.installation, workerStart: s.workerStart, workerStop: s.workerStop,
@@ -41,7 +45,12 @@ function summary(s, plan) {
     apiClosurePending: s.apiPreparation != null && s.apiClosure?.phase !== "confirmed", preexistingPreserved: s.preexistingPreserved || null,
     destructionConfirmed: s.phase === "destroyed", billingMayContinue: s.phase !== "destroyed" && s.resources.instances.intentAt !== null,
     journalPersistenceFailed: s.journalPersistenceFailed === true, syntheticCases: 0, externalPublication: false,
-    estimateUsd: plan.finance.estimatedMaximumUsd, invoiceUsd: null };
+    finishedAt, completedWithinDeadline, deadlineOverrunMs: finishedAt === null ? null : Math.max(0, finishedAt - s.deadlineAt),
+    estimateUsd: plan.finance.estimatedMaximumUsd, newWindowEstimateUsd: plan.finance.estimatedMaximumUsd,
+    priorBudgetBasisUsd: plan.finance.priorBudgetBasisUsd ?? plan.finance.alreadyIncurredUsd,
+    priorBudgetBasisKind: plan.finance.priorBudgetBasisKind ?? "legacy_already_incurred",
+    planningTotalUsd: plan.finance.estimatedPlanningTotalUsd ?? plan.finance.estimatedMaximumUsd + plan.finance.alreadyIncurredUsd,
+    invoiceUsd: null };
 }
 // All API deployment/database preparation is a caller-owned prerequisite. This
 // module receives only a closed-schema readiness receipt, never DB credentials.
@@ -60,12 +69,17 @@ async function runOperationalPilot({ plan, approvalSha256, store, provider, gues
     if (cleanupOnly && fresh) fail("cleanup_journal_required");
     const call = fn => bounded(fn, 20000);
     if (fresh) {
+      // Schema 1 remains readable for cleanup/reconciliation of historical
+      // journals, but must never authorize another billable launch.
+      if (plan.schema !== 2) fail("legacy_plan_new_launch_refused");
       validateOperationalPlan(plan, { now: now() });
       const preexisting = {};
       for (const k of KINDS) preexisting[k] = await call(sig => provider.inventory(k, { signal: sig }));
       const startedAt = now();
       s = { schema: 1, kind: plan.kind, missionId: crypto.randomUUID(), planSha256: plan.approvalSha256, startedAt,
-        deadlineAt: startedAt + 7200000, admitUntil: startedAt + plan.admissionSeconds * 1000, workerStopAt: startedAt + 6600000,
+        deadlineAt: startedAt + plan.maxExistenceSeconds * 1000,
+        admitUntil: startedAt + plan.admissionSeconds * 1000,
+        workerStopAt: startedAt + (plan.maxExistenceSeconds - plan.cleanupReserveSeconds) * 1000,
         resources: Object.fromEntries(KINDS.map(k => [k, { intentAt: null, id: null, createdAt: null, createRequestId: crypto.randomUUID(), deleteRequestId: crypto.randomUUID(),
           createOp: null, deleteOp: null, deleteIntentAt: null, absentConfirmedAt: null }])), preexisting,
         phase: "prepared", hostEvidence: null, installation: null, workerStart: null, workerStop: null, collection: null, failure: null,
@@ -229,7 +243,11 @@ async function runOperationalPilot({ plan, approvalSha256, store, provider, gues
         s.preexistingPreserved[k] = s.preexisting[k].every(old => rows.some(v => v.id === old.id && v.name === old.name));
         if (!s.preexistingPreserved[k] || rows.some(v => v.name === resourceName(s.missionId, k))) uncertain = true;
       } catch { s.preexistingPreserved[k] = null; uncertain = true; }
-      s.phase = uncertain ? "cleanup_required" : "destroyed"; s.finishedAt = now(); await safeSave();
+      s.finishedAt = now();
+      s.completedWithinDeadline = s.finishedAt <= s.deadlineAt;
+      s.deadlineOverrunMs = Math.max(0, s.finishedAt - s.deadlineAt);
+      if (!s.completedWithinDeadline && s.failure === null) s.failure = "media_pilot_cleanup_deadline_overrun";
+      s.phase = uncertain ? "cleanup_required" : "destroyed"; await safeSave();
     }
     return summary(s, plan);
   });

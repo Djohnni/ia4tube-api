@@ -25,11 +25,12 @@ const {vmHostProved}=require('${ROOT}/src/social/calendar/imports/vm-coordinator
  process.stdout.write(JSON.stringify({controlsProved:true,convertersStarted:0,runtimeRevision:record.runtimeRevision,bootId})+'\\n');
 })().catch(()=>{process.stderr.write('MEDIA_PILOT_HOST=UNPROVED\\n');process.exitCode=1;});\n`;
 }
-function startScript({ missionId, workerId, runtimeRevision, stopAt, keyBase64 }) {
+function startScript({ missionId, workerId, runtimeRevision, stopAt, keyBase64, maximumRuntimeSeconds = 6600 }) {
   if (!UUID.test(missionId || "") || !UUID.test(workerId || "") || !HASH.test(runtimeRevision || "") || !Number.isSafeInteger(stopAt) ||
-      !/^[A-Za-z0-9+/]{43}=$/.test(keyBase64 || "") || Buffer.from(keyBase64, "base64").length !== 32) fail("worker_binding_invalid");
+      !/^[A-Za-z0-9+/]{43}=$/.test(keyBase64 || "") || Buffer.from(keyBase64, "base64").length !== 32 ||
+      !Number.isSafeInteger(maximumRuntimeSeconds) || maximumRuntimeSeconds < 600 || maximumRuntimeSeconds > 13200) fail("worker_binding_invalid");
   // The returned source is private: never log it or store it under outputs.
-  const config = JSON.stringify({ missionId, workerId, runtimeRevision, stopAt, keyBase64 });
+  const config = JSON.stringify({ missionId, workerId, runtimeRevision, stopAt, keyBase64, maximumRuntimeSeconds });
   return `"use strict";
 const fs=require('node:fs'),cp=require('node:child_process');
 const input=${config};
@@ -38,7 +39,7 @@ const command=(args)=>cp.execFileSync('/usr/bin/systemctl',args,{stdio:['ignore'
 const read=(name,mode)=>{const st=fs.lstatSync(name);if(!st.isFile()||st.isSymbolicLink()||st.uid!==0||st.nlink!==1||(st.mode&mode))fail();return JSON.parse(fs.readFileSync(name,'utf8'));};
 try{
  if(process.platform!=='linux'||process.getuid()!==0)fail();
- const remaining=Math.floor((input.stopAt-Date.now())/1000);if(remaining<300||remaining>6600)fail();
+ const remaining=Math.floor((input.stopAt-Date.now())/1000);if(remaining<300||remaining>input.maximumRuntimeSeconds)fail();
  const configName='/etc/ia4tube-media/worker.json';const current=read(configName,0o027);
  const installed=read('/opt/ia4tube-media/installation.json',0o222);
  if(current.enabled!==false||current.runtimeRevision!==input.runtimeRevision||installed.runtimeRevision!==input.runtimeRevision||
@@ -122,7 +123,8 @@ async function createOperationalGuest({ plan, stateRoot, packagePath, getBridgeK
       if (startIntent) fail("worker_restart_refused"); startIntent = true;
       const key = await getBridgeKey(); if (!Buffer.isBuffer(key) || key.length !== 32) fail("private_bridge_key_invalid");
       try {
-        const r = JSON.parse(await remote(startScript({ missionId, workerId: plan.workerId, runtimeRevision: hostEvidence.runtimeRevision, stopAt, keyBase64: key.toString("base64") }), { signal, timeoutMs }));
+        const r = JSON.parse(await remote(startScript({ missionId, workerId: plan.workerId, runtimeRevision: hostEvidence.runtimeRevision,
+          stopAt, keyBase64: key.toString("base64"), maximumRuntimeSeconds: plan.maxExistenceSeconds - plan.cleanupReserveSeconds }), { signal, timeoutMs }));
         if (Object.keys(r).sort().join() !== "active,recurring,stopAt,workerId") fail("start_receipt_invalid"); return r;
       } finally { key.fill(0); }
     },

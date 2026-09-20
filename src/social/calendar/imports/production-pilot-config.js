@@ -22,9 +22,10 @@ function validateProductionPilotConfig(value,{env=process.env,now=Date.now()}={}
     env.SOCIAL_CALENDAR_ENABLED!=='true'||env.SOCIAL_PERSISTENCE_ENABLED!=='true'||
     env.SOCIAL_EXTERNAL_CONNECTION_ENABLED!=='false'||env.SOCIAL_EXTERNAL_PUBLICATION_ENABLED!=='false'||env.META_APP_REVIEW_WINDOW_ENABLED!=='false')fail('boundary_invalid');
   exact(value.owner,['companyId','userId']);if(!UUID.test(value.owner.companyId)||!UUID.test(value.owner.userId))fail('owner_invalid');
+  const duration=value.finishBy-value.createdAt;
+  const minimumDrain=duration>7200000?1200000:600000;
   if(![value.createdAt,value.admitUntil,value.finishBy,now].every(Number.isSafeInteger)||value.createdAt<0||value.createdAt>now||
-    value.admitUntil<=value.createdAt||value.finishBy-value.createdAt>7200000||
-    value.finishBy-value.admitUntil<600000)fail('window_invalid');
+    value.admitUntil<=value.createdAt||duration>14400000||value.finishBy-value.admitUntil<minimumDrain)fail('window_invalid');
   const h=value.hostEvidence;exact(h,['project','zone','instanceId','bootId','runtimeRevision','receiptSha256','verifiedAt','deletionAction','terminationTime']);
   if(h.project!=='ia4tube-futebol'||h.zone!=='us-central1-a'||!/^[1-9][0-9]{1,24}$/.test(h.instanceId)||!UUID.test(h.bootId)||
     h.runtimeRevision!==value.runtimeRevision||!HASH.test(h.receiptSha256)||!Number.isSafeInteger(h.verifiedAt)||

@@ -23,9 +23,14 @@ function ipv4(v) {
       (a === 192 && [0,168].includes(b)) || (a === 100 && b >= 64 && b <= 127) || (a === 198 && [18,19].includes(b))) fail("operator_ip_invalid");
   return v;
 }
-function createGooglePlan({ imageId = null, operatorIpv4 = null, resolution = null } = {}) {
+function createGooglePlan({ imageId = null, operatorIpv4 = null, resolution = null, maxExistenceSeconds = 7200 } = {}) {
   if (imageId !== null) googleId(imageId);
   if (operatorIpv4 !== null) ipv4(operatorIpv4);
+  // Preserve the historical two-hour contract exactly. The only extended
+  // lifetime is the explicitly bound four-hour owner-media conclusion window.
+  const extended = maxExistenceSeconds === 14400;
+  if (maxExistenceSeconds !== 7200 && !extended) fail("plan_changed");
+  if (extended && resolution === null) fail("extended_requires_resolution_binding");
   const content = {
     schema: 2, provider: "google", kind: "ia4tube-google-synthetic-proof", paidExecutionDefault: false,
     project: "ia4tube-futebol", region: "us-central1", zone: "us-central1-a",
@@ -33,11 +38,13 @@ function createGooglePlan({ imageId = null, operatorIpv4 = null, resolution = nu
     sourceImage: imageId === OPERATIONAL_IMAGE_ID ? OPERATIONAL_IMAGE : IMAGE, sourceImageId: imageId, packageSha256: PACKAGE,
     diskType: "pd-standard", diskGiB: 50, autoDeleteDisk: true,
     networkMode: "dedicated-custom", subnetCidr: "10.203.0.0/28", operatorIpv4,
-    firewallPort: 22, maxExistenceSeconds: 7200, terminationAction: "DELETE",
+    firewallPort: 22, maxExistenceSeconds, terminationAction: "DELETE",
     provisioningModel: "STANDARD", onHostMaintenance: "MIGRATE", automaticRestart: false,
     createRetries: 0, launchRetries: 0, cases: MANIFEST.cases,
-    finance: { computeHourlyUsd: 0.03350571, diskGiBHourlyUsd: 0.000054795, ipv4HourlyUsd: 0.005,
-      twoHourInfrastructureUsd: 0.08249092, referenceUsd: 0.11, invoiceCapGuaranteed: false },
+    finance: extended ? { computeHourlyUsd: 0.03350571, diskGiBHourlyUsd: 0.000054795, ipv4HourlyUsd: 0.005,
+      durationHours: 4, estimatedInfrastructureUsd: 0.16498184, referenceUsd: 5, invoiceCapGuaranteed: false } :
+      { computeHourlyUsd: 0.03350571, diskGiBHourlyUsd: 0.000054795, ipv4HourlyUsd: 0.005,
+        twoHourInfrastructureUsd: 0.08249092, referenceUsd: 0.11, invoiceCapGuaranteed: false },
     serviceAccounts: [], realMedia: false, apiDeploy: false, remoteMigrations: false,
     backups: false, snapshots: false, recurring: false, instagram: false
   };
@@ -47,17 +54,19 @@ function createGooglePlan({ imageId = null, operatorIpv4 = null, resolution = nu
     content.schema = 3;
     content.kind = 'ia4tube-google-synthetic-resolution';
     content.packageSha256 = resolution.packageSha256;
-    content.resolution = { ...resolution, maxInstallInvocations: 3, maxAdditionalLaunches: 8,
-      cleanupReserveSeconds: 600, uncertainReplay: false, secondVm: false };
+    content.resolution = { ...resolution, maxInstallInvocations: extended ? 1 : 3, maxAdditionalLaunches: extended ? 0 : 8,
+      cleanupReserveSeconds: extended ? 1200 : 600, uncertainReplay: false, secondVm: false };
   }
   return { ...content, approvalSha256: sha256(canonical(content)) };
 }
 function validateGooglePlan(plan, { executable = false } = {}) {
+  if (![7200, 14400].includes(plan?.maxExistenceSeconds)) fail("plan_changed");
   const resolution = plan?.schema === 3 ? {
     packageSha256: plan?.resolution?.packageSha256, packageReviewSha256: plan?.resolution?.packageReviewSha256,
     authorizationSha256: plan?.resolution?.authorizationSha256
   } : null;
-  const expected = createGooglePlan({ imageId: plan?.sourceImageId, operatorIpv4: plan?.operatorIpv4, resolution });
+  const expected = createGooglePlan({ imageId: plan?.sourceImageId, operatorIpv4: plan?.operatorIpv4, resolution,
+    maxExistenceSeconds: plan?.maxExistenceSeconds });
   if (canonical(expected) !== canonical(plan)) fail("plan_changed");
   if (executable && (plan.sourceImageId === null || plan.operatorIpv4 === null)) fail("read_bindings_missing");
   return plan;

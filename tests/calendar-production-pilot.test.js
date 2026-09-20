@@ -39,7 +39,7 @@ test('pilot binds the exact owner, worker, host receipt, bounded window and leas
 });
 for(const [name,mutate] of [
   ['extra field',v=>v.unexpected=true],['wrong owner',v=>v.owner.userId='invalid'],['extra owner property',v=>v.owner.admin=true],
-  ['longer than two hours',v=>{v.finishBy=9_000_000;v.hostEvidence.terminationTime=v.finishBy;}],
+  ['longer than four hours',v=>{v.finishBy=15_400_001;v.hostEvidence.terminationTime=v.finishBy;}],
   ['no drain margin',v=>v.admitUntil=7_900_000],['future start',v=>v.createdAt=now+1],['negative start',v=>v.createdAt=-1],
   ['invalid key',v=>v.bridgeKeyBase64='secret-sentinel'],['foreign project',v=>v.hostEvidence.project='foreign'],
   ['different runtime',v=>v.hostEvidence.runtimeRevision='c'.repeat(64)],['missing automatic deletion',v=>v.hostEvidence.deletionAction='STOP'],
@@ -52,6 +52,12 @@ for(const [name,mutate] of [
   assert.ok(error.code.startsWith('calendar_media_pilot_'));assert.equal(error.message.includes('sentinel'),false);return true;});});
 test('expired pilot config does not break restart; admission and progress remain time-bounded separately',()=>{
   const result=valid(input(),env(),8_000_001);assert.ok(result.finishBy<8_000_001);result.bridgeKey.fill(0);
+});
+test('pilot accepts the exact four-hour window with at least twenty minutes after admission',()=>{
+  const v=input();v.admitUntil=v.createdAt+12_000_000;v.finishBy=v.createdAt+14_400_000;
+  v.hostEvidence.terminationTime=v.finishBy;v.hostEvidence.verifiedAt=v.createdAt+1;
+  v.musicRights.validUntil=v.finishBy;const result=valid(v,env(),v.createdAt+2);assert.equal(result.finishBy-v.createdAt,14_400_000);
+  result.bridgeKey.fill(0);
 });
 test('database custom trust and verification overrides remain refused',()=>{
   for(const patch of [{NODE_TLS_REJECT_UNAUTHORIZED:'0'},{NODE_EXTRA_CA_CERTS:'sentinel'}])assert.throws(()=>valid(input(),{...env(),...patch}));

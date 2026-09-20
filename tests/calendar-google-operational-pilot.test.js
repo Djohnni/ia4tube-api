@@ -12,8 +12,10 @@ const uuid = n => `00000000-0000-4000-8000-${String(n).padStart(12,"0")}`;
 function makePlan(change = {}) {
   return createOperationalPlan({ imageId: "6257327608773510097", operatorIpv4: "177.125.241.34", packageSha256: "a".repeat(64), packageReviewSha256: "b".repeat(64),
     authorizationSha256: "c".repeat(64), ownerCompanyId: uuid(1), ownerUserId: uuid(2), workerId: uuid(3),
+    maxExistenceSeconds: 14400, admissionSeconds: 12000,
     finance: { computeHourlyUsd: .03350571, diskGiBHourlyUsd: .000054795, ipv4HourlyUsd: .005, egressAllowanceGiB: .5,
-      egressUsdPerGiB: .12, otherAllowanceUsd: .02, alreadyIncurredUsd: .02, buildAdditionalUsd: 0, pilotReferenceUsd: 5,
+      egressUsdPerGiB: .12, otherAllowanceUsd: .02, alreadyIncurredUsd: null, alreadyIncurredObservedAt: null,
+      historicalPlanningReserveUsd: .5, historicalReserveIsObservedExpense: false, buildAdditionalUsd: 0, pilotReferenceUsd: 5,
       pricingEvidenceSha256: "d".repeat(64), verifiedAt: beginning }, ...change });
 }
 function fixture(flags = {}, plan = makePlan()) {
@@ -54,6 +56,7 @@ function fixture(flags = {}, plan = makePlan()) {
       if (flags.noDestroy === kind) return {status:403,json:{}};
       resources.delete(route);
       if (kind === "instances") for (const [k] of resources) if (k.includes("/disks/")) resources.delete(k);
+      if (flags.cleanupOverrun && kind === "instances") clock = beginning + 14400001;
       if (flags.unknownDelete === kind) throw Error("private response loss");
       return {status:200,json:{name:"operation-"+String(nextId++),targetId:r.id,targetLink:r.selfLink,operationType:"delete",clientOperationId:new URLSearchParams(query).get("requestId"),status:"DONE"}};
     }
@@ -92,11 +95,41 @@ function fixture(flags = {}, plan = makePlan()) {
 }
 test("operational plan is owner-bound, priced, no recurrence or old synthetic cases",()=>{
   const p=makePlan();assert.equal(validateOperationalPlan(p),p);assert.equal(p.syntheticCases,0);assert.equal(p.maxInstallInvocations,1);assert.equal(p.maxWorkerStarts,1);
-  assert.equal(p.finance.invoiceCapGuaranteed,false);assert.ok(Math.abs(p.finance.estimatedMaximumUsd-.16249092)<1e-12);
-  assert.throws(()=>validateOperationalPlan({...p,admissionSeconds:6600}),/window_invalid/);
+  assert.equal(p.schema,2);assert.equal(p.maxExistenceSeconds,14400);assert.equal(p.admissionSeconds,12000);
+  assert.equal(p.cleanupReserveSeconds,1200);assert.equal(p.drainReserveSeconds,1200);
+  assert.equal(p.finance.invoiceCapGuaranteed,false);assert.ok(Math.abs(p.finance.estimatedMaximumUsd-.24498184)<1e-12);
+  assert.equal(p.finance.alreadyIncurredUsd,null);assert.equal(p.finance.priorBudgetBasisUsd,.5);
+  assert.equal(p.finance.priorBudgetBasisKind,'planning_reserve');
+  assert.ok(Math.abs(p.finance.estimatedPlanningTotalUsd-.74498184)<1e-12);
+  assert.equal(p.infrastructure.finance.durationHours,4);assert.equal(p.infrastructure.finance.estimatedInfrastructureUsd,.16498184);
+  assert.equal(p.infrastructure.resolution.cleanupReserveSeconds,1200);assert.equal(p.infrastructure.resolution.maxInstallInvocations,1);
+  assert.throws(()=>P.createGooglePlan({imageId:"6257327608773510097",operatorIpv4:"177.125.241.34",maxExistenceSeconds:14400}),/extended_requires_resolution_binding/);
+  assert.throws(()=>validateOperationalPlan({...p,admissionSeconds:12001}),/window_invalid/);
   assert.throws(()=>validateOperationalPlan({...p,externalPublication:true}),/plan_changed/);
   assert.throws(()=>validateOperationalPlan(p,{now:beginning+86400001}),/pricing_check_stale/);
-  assert.throws(()=>makePlan({finance:{...Object.fromEntries(Object.entries(p.finance).filter(([k])=>!["estimatedInfrastructureUsd","estimatedMaximumUsd","invoiceCapGuaranteed"].includes(k))),alreadyIncurredUsd:5}}),/budget_exceeded/);
+  const inputFinance=Object.fromEntries(Object.entries(p.finance).filter(([k])=>!["estimatedInfrastructureUsd","estimatedMaximumUsd","priorBudgetBasisUsd","priorBudgetBasisKind","estimatedPlanningTotalUsd","invoiceCapGuaranteed"].includes(k)));
+  assert.throws(()=>makePlan({finance:{...inputFinance,alreadyIncurredUsd:5,alreadyIncurredObservedAt:beginning}}),/budget_exceeded/);
+});
+test("measured spend and historical reserve remain distinct and use only the larger budget basis",()=>{
+  const base=makePlan(),input=Object.fromEntries(Object.entries(base.finance).filter(([k])=>!["estimatedInfrastructureUsd","estimatedMaximumUsd","priorBudgetBasisUsd","priorBudgetBasisKind","estimatedPlanningTotalUsd","invoiceCapGuaranteed"].includes(k)));
+  const low=makePlan({finance:{...input,alreadyIncurredUsd:.03,alreadyIncurredObservedAt:beginning}});
+  assert.equal(low.finance.priorBudgetBasisUsd,.5);assert.equal(low.finance.priorBudgetBasisKind,'planning_reserve');
+  const high=makePlan({finance:{...input,alreadyIncurredUsd:.6,alreadyIncurredObservedAt:beginning}});
+  assert.equal(high.finance.priorBudgetBasisUsd,.6);assert.equal(high.finance.priorBudgetBasisKind,'measured_spend');
+  assert.throws(()=>makePlan({finance:{...input,alreadyIncurredUsd:0,alreadyIncurredObservedAt:null}}),/finance_invalid/);
+});
+test("mission conservative four-hour costs remain inside the single five-dollar pilot reference",()=>{
+  const real=makePlan({finance:{computeHourlyUsd:.03350571,diskGiBHourlyUsd:.000054795,ipv4HourlyUsd:.005,
+    egressAllowanceGiB:5,egressUsdPerGiB:.19,otherAllowanceUsd:2,alreadyIncurredUsd:null,alreadyIncurredObservedAt:null,
+    historicalPlanningReserveUsd:.5,historicalReserveIsObservedExpense:false,buildAdditionalUsd:0,pilotReferenceUsd:5,
+    pricingEvidenceSha256:"d".repeat(64),verifiedAt:beginning}});
+  assert.ok(Math.abs(real.finance.estimatedInfrastructureUsd-.16498184)<1e-12);
+  assert.ok(Math.abs(real.finance.estimatedMaximumUsd-3.11498184)<1e-12);
+  assert.ok(Math.abs(real.finance.estimatedPlanningTotalUsd-3.61498184)<1e-12);
+  assert.throws(()=>makePlan({finance:{computeHourlyUsd:.03350571,diskGiBHourlyUsd:.000054795,ipv4HourlyUsd:.005,
+    egressAllowanceGiB:5,egressUsdPerGiB:.19,otherAllowanceUsd:2,alreadyIncurredUsd:1.9,alreadyIncurredObservedAt:beginning,
+    historicalPlanningReserveUsd:.5,historicalReserveIsObservedExpense:false,buildAdditionalUsd:0,pilotReferenceUsd:5,
+    pricingEvidenceSha256:"d".repeat(64),verifiedAt:beginning}}),/budget_exceeded/);
 });
 test("operational owner accepts derived UUIDv5 while worker stays random UUIDv4",()=>{
   const ownerCompanyId='00000000-0000-5000-8000-000000000001',ownerUserId='00000000-0000-5000-8000-000000000002';
@@ -107,6 +140,8 @@ test("operational owner accepts derived UUIDv5 while worker stays random UUIDv4"
 });
 test("single operational install/start, host bound API readiness, collect and complete external destruction",async()=>{
   const f=fixture(),r=await f.execute();assert.equal(r.failure,null);assert.equal(r.destructionConfirmed,true);assert.equal(r.syntheticCases,0);assert.equal(r.invoiceUsd,null);
+  assert.equal(r.newWindowEstimateUsd,f.plan.finance.estimatedMaximumUsd);assert.equal(r.priorBudgetBasisUsd,.5);
+  assert.equal(r.priorBudgetBasisKind,'planning_reserve');assert.equal(r.planningTotalUsd,f.plan.finance.estimatedPlanningTotalUsd);
   assert.equal(f.resources.size,0);assert.deepEqual(f.guestCalls,["preflight","install","probe","prepare_api","start","close_api","stop","collect"]);
   assert.equal(r.apiAdmissionClosed,true);assert.equal(r.apiClosurePending,false);
   assert.ok(Object.values(r.preexistingPreserved).every(Boolean));assert.equal(r.hostEvidence.terminationTime,r.deadlineAt);
@@ -137,7 +172,14 @@ test("API observation detects gates opened and exits instead of admitting extern
   const f=fixture({observationOpen:true}),r=await f.execute();assert.equal(r.failure,"media_pilot_pilot_observation_invalid");assert.equal(r.destructionConfirmed,true);
 });
 test("no human activity ends at bounded worker window and reserves provider cleanup",async()=>{
-  const f=fixture({waitUntilDeadline:true}),r=await f.execute();assert.equal(r.failure,null);assert.equal(r.destructionConfirmed,true);assert.equal(r.workerStopAt,r.startedAt+6600000);assert.ok(f.getState().finishedAt<=r.deadlineAt);
+  const f=fixture({waitUntilDeadline:true}),r=await f.execute();assert.equal(r.failure,null);assert.equal(r.destructionConfirmed,true);
+  assert.equal(r.admitUntil,r.startedAt+12000000);assert.equal(r.workerStopAt,r.startedAt+13200000);
+  assert.equal(r.deadlineAt,r.startedAt+14400000);assert.ok(f.getState().finishedAt<=r.deadlineAt);
+});
+test("cleanup continues after the absolute deadline but records the overrun instead of claiming on-time completion",async()=>{
+  const f=fixture({cleanupOverrun:true}),r=await f.execute();assert.equal(r.destructionConfirmed,true);assert.equal(r.billingMayContinue,false);
+  assert.equal(r.completedWithinDeadline,false);assert.equal(r.deadlineOverrunMs,1);
+  assert.equal(r.failure,'media_pilot_cleanup_deadline_overrun');assert.equal(f.resources.size,0);
 });
 for(const kind of ["networks","subnetworks","firewalls","instances"])test("lost "+kind+" insertion reconciles exact name without duplicate POST",async()=>{
   const f=fixture({unknownCreate:kind}),r=await f.execute();assert.equal(r.destructionConfirmed,true);assert.equal(r.failure,null);assert.equal(f.calls.filter(c=>c.method==="POST"&&c.pathname.includes('/'+kind+'?')).length,1);
@@ -163,6 +205,9 @@ test("generated remote programs parse and have no launch of synthetic test suite
   for(const s of scripts){assert.doesNotThrow(()=>new vm.Script(s));assert.doesNotMatch(s,/--test|runSequence|vm-proof-guest|DATABASE_URL|gcloud/);}
   assert.match(scripts[1],/RuntimeMaxSec/);assert.match(scripts[1],/Restart=no/);assert.match(scripts[1],/'wx'/);
   assert.doesNotMatch(scripts[1],/systemctl.*enable/);
+  const extended=startScript({missionId:uuid(5),workerId:uuid(3),runtimeRevision:"e".repeat(64),stopAt:beginning+13200000,
+    keyBase64:Buffer.alloc(32,7).toString("base64"),maximumRuntimeSeconds:13200});
+  assert.doesNotThrow(()=>new vm.Script(extended));assert.match(extended,/maximumRuntimeSeconds/);
 });
 test('API closure callback is mandatory before any provider access',async()=>{
   const f=fixture();await assert.rejects(f.execute({closeApi:undefined}),/api_control_required/);assert.equal(f.calls.length,0);
