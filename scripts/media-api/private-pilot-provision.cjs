@@ -7,9 +7,14 @@ const {ROOT,loadProductionPilotFiles}=require('../../src/social/calendar/imports
 const {validateProductionPilotConfig}=require('../../src/social/calendar/imports/production-pilot-config');
 const {validateCanonicalWav,displayName,loadPrivateMusicCatalog}=require('../../src/social/calendar/imports/music-catalog');
 const MAX_PACKET=32*1024*1024, MAX_HEADER=64*1024, MAX_CONFIG=16384;
-const HASH=/^[a-f0-9]{64}$/, TRACK=/^track_[a-f0-9]{24}$/;
+const HASH=/^[a-f0-9]{64}$/, COMMIT=/^[a-f0-9]{40}$/, TRACK=/^track_[a-f0-9]{24}$/;
 const UUID=/^[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/;
 const hash=bytes=>crypto.createHash('sha256').update(bytes).digest('hex');
+function canonical(value){
+  if(value===null||typeof value!=='object')return JSON.stringify(value);
+  if(Array.isArray(value))return '['+value.map(canonical).join(',')+']';
+  return '{'+Object.keys(value).sort().map(key=>JSON.stringify(key)+':'+canonical(value[key])).join(',')+'}';
+}
 function refuse(code){throw Object.assign(new Error('Private pilot preparation refused.'),{code:'calendar_private_provision_'+code});}
 function exact(value,keys){if(!value||typeof value!=='object'||Array.isArray(value)||Object.keys(value).sort().join()!==keys.slice().sort().join())refuse('packet_invalid');}
 function parseJson(bytes){try{return JSON.parse(bytes.toString('utf8'));}catch{refuse('packet_invalid');}}
@@ -64,6 +69,29 @@ function decodePacket(packet){
     exact(header,['schema','operation','missionId','retirementRequestId']);
     if(header.schema!==1||!UUID.test(header.missionId)||!UUID.test(header.retirementRequestId)||payload.length!==0)refuse('retire_packet_invalid');
     return {operation:'retire',missionId:header.missionId,retirementRequestId:header.retirementRequestId};
+  }
+  if(header.operation==='seal'){
+    exact(header,['schema','operation','missionId','retirementRequestId','terminal']);
+    const terminal=header.terminal;
+    exact(terminal,['planSha256','sealApiGitSha','finishBy','configurationSha256','stopSha256','requestedAt','finishedAt','completedWithinDeadline','deadlineOverrunMs',
+      'finalRevision','finalHash','closureRequestId','closureSentinelSha256','closureReceiptSha256',
+      'resourcesAbsent','preexistingPreserved']);
+    if(header.schema!==1||!UUID.test(header.missionId)||!UUID.test(header.retirementRequestId)||payload.length!==0||
+      !HASH.test(terminal.planSha256)||!COMMIT.test(terminal.sealApiGitSha)||!Number.isSafeInteger(terminal.finishBy)||terminal.finishBy<1||
+      !HASH.test(terminal.configurationSha256)||!HASH.test(terminal.stopSha256)||
+      !Number.isSafeInteger(terminal.requestedAt)||!Number.isSafeInteger(terminal.finishedAt)||terminal.finishedAt<0||
+      terminal.requestedAt<terminal.finishedAt||terminal.requestedAt>=terminal.finishBy||
+      terminal.completedWithinDeadline!==true||terminal.deadlineOverrunMs!==0||
+      !Number.isSafeInteger(terminal.finalRevision)||terminal.finalRevision<1||!HASH.test(terminal.finalHash)||
+      !UUID.test(terminal.closureRequestId)||!HASH.test(terminal.closureSentinelSha256)||
+      !HASH.test(terminal.closureReceiptSha256)||terminal.resourcesAbsent!==true||terminal.preexistingPreserved!==true)
+      refuse('seal_packet_invalid');
+    return {operation:'seal',missionId:header.missionId,retirementRequestId:header.retirementRequestId,terminal:{...terminal}};
+  }
+  if(header.operation==='inspect-seal'){
+    exact(header,['schema','operation','missionId']);
+    if(header.schema!==1||!UUID.test(header.missionId)||payload.length!==0)refuse('inspect_seal_packet_invalid');
+    return {operation:'inspect-seal',missionId:header.missionId};
   }
   if(header.operation==='inspect'){
     exact(header,['schema','operation']);
@@ -236,9 +264,11 @@ function createProvisioner({root=ROOT,privateBase='/var/data/private',fsApi=fs,i
     refuse('mission_stopped');
   }
   async function requireNoRetirementPending(){
-    try{await fsApi.lstat(path.join(root,'control','retirement-pending.json'));}
-    catch(error){if(error.code==='ENOENT')return;throw error;}
-    refuse('retirement_pending');
+    for(const name of ['retirement-pending.json','terminal-seal-pending.json']){
+      try{await fsApi.lstat(path.join(root,'control',name));}
+      catch(error){if(error.code==='ENOENT')continue;throw error;}
+      refuse('retirement_pending');
+    }
   }
   async function provisionStop(decoded){
     if(env.ENVIRONMENT!=='production'||env.RENDER_SERVICE_ID!=='srv-d8708kd7vvec73ap1p6g'||
@@ -270,6 +300,264 @@ function createProvisioner({root=ROOT,privateBase='/var/data/private',fsApi=fs,i
       connectionEnabled:state('SOCIAL_EXTERNAL_CONNECTION_ENABLED'),publicationEnabled:state('SOCIAL_EXTERNAL_PUBLICATION_ENABLED'),
       metaWindowEnabled:state('META_APP_REVIEW_WINDOW_ENABLED')};
   }
+  function terminalSealMarker(bytes,status,decoded=null){
+    const value=parseJson(bytes);exact(value,['schema','status','mode','missionId','retirementRequestId','planSha256','sealApiGitSha','finishBy',
+      'configurationSha256','stopSha256','terminalFinalHash','terminalFinalRevision','terminalFinishedAt',
+      'completedWithinDeadline','deadlineOverrunMs','closureRequestId','closureSentinelSha256','closureReceiptSha256',
+      'resourcesAbsent','preexistingPreserved','requestedAt','sealedAt']);
+    if(value.schema!==1||value.status!==status||value.mode!=='sealed-terminal'||!UUID.test(value.missionId)||
+      !UUID.test(value.retirementRequestId)||!Number.isSafeInteger(value.finishBy)||value.finishBy<0||
+      !HASH.test(value.configurationSha256)||!HASH.test(value.stopSha256)||!HASH.test(value.terminalFinalHash)||
+      !Number.isSafeInteger(value.terminalFinalRevision)||value.terminalFinalRevision<1||
+      !Number.isSafeInteger(value.terminalFinishedAt)||value.terminalFinishedAt<0||value.completedWithinDeadline!==true||value.deadlineOverrunMs!==0||
+      !HASH.test(value.planSha256)||!COMMIT.test(value.sealApiGitSha)||!UUID.test(value.closureRequestId)||
+      !HASH.test(value.closureSentinelSha256)||value.closureSentinelSha256!==value.stopSha256||
+      !HASH.test(value.closureReceiptSha256)||value.resourcesAbsent!==true||value.preexistingPreserved!==true||
+      !Number.isSafeInteger(value.requestedAt)||value.requestedAt<value.terminalFinishedAt||value.requestedAt>=value.finishBy||
+      !Number.isSafeInteger(value.sealedAt)||value.sealedAt<value.requestedAt)
+      refuse('seal_evidence_invalid');
+    if(decoded&&(value.missionId!==decoded.missionId||value.retirementRequestId!==decoded.retirementRequestId||
+      value.terminalFinalHash!==decoded.terminal.finalHash||value.terminalFinalRevision!==decoded.terminal.finalRevision||
+      value.terminalFinishedAt!==decoded.terminal.finishedAt||value.closureRequestId!==decoded.terminal.closureRequestId||
+      value.planSha256!==decoded.terminal.planSha256||value.finishBy!==decoded.terminal.finishBy||
+      value.sealApiGitSha!==decoded.terminal.sealApiGitSha||
+      value.configurationSha256!==decoded.terminal.configurationSha256||
+      value.requestedAt!==decoded.terminal.requestedAt||
+      value.stopSha256!==decoded.terminal.closureSentinelSha256||
+      value.closureSentinelSha256!==decoded.terminal.closureSentinelSha256||
+      value.closureReceiptSha256!==decoded.terminal.closureReceiptSha256||
+      value.resourcesAbsent!==decoded.terminal.resourcesAbsent||
+      value.preexistingPreserved!==decoded.terminal.preexistingPreserved))refuse('seal_evidence_invalid');
+    return value;
+  }
+  function closedReceiptSha(stop,stopSha256){
+    return hash(canonical({schema:1,missionId:stop.missionId,closureRequestId:stop.closureRequestId,
+      admissionClosed:true,launchClosed:true,sentinelSha256:stopSha256,connectionEnabled:false,
+      publicationEnabled:false,metaWindowEnabled:false}));
+  }
+  async function provisionSeal(decoded){
+    const imports=env.SOCIAL_MEDIA_IMPORTS_ENABLED==='true'?true:
+      env.SOCIAL_MEDIA_IMPORTS_ENABLED===undefined||env.SOCIAL_MEDIA_IMPORTS_ENABLED===''||env.SOCIAL_MEDIA_IMPORTS_ENABLED==='false'?false:null;
+    if(env.ENVIRONMENT!=='production'||env.RENDER_SERVICE_ID!=='srv-d8708kd7vvec73ap1p6g'||
+      env.PUBLIC_API_BASE_URL!=='https://ia4tube-api.onrender.com'||env.SOCIAL_EXTERNAL_CONNECTION_ENABLED!=='false'||
+      env.SOCIAL_EXTERNAL_PUBLICATION_ENABLED!=='false'||env.META_APP_REVIEW_WINDOW_ENABLED!=='false'||imports!==false||
+      env.RENDER_GIT_COMMIT!==decoded.terminal.sealApiGitSha)
+      refuse('seal_target_invalid');
+    const control=path.join(root,'control'),archiveRoot=path.join(control,'archive'),archive=path.join(archiveRoot,decoded.missionId);
+    await directories(control,false);
+    const activeConfig=path.join(control,'pilot.json'),activeStop=path.join(control,'stop-'+decoded.missionId+'.json'),
+      retirementPending=path.join(control,'retirement-pending.json'),pendingFile=path.join(control,'terminal-seal-pending.json'),
+      configurationEvidenceFile=path.join(archive,'configuration-evidence.json'),stopEvidenceFile=path.join(archive,'stop-evidence.json'),
+      preparedFile=path.join(archive,'terminal-seal-prepared.json'),completeFile=path.join(archive,'terminal-seal.json');
+    async function optional(file,maximum){try{return await readPrivate(file,maximum);}catch(error){if(error.code==='ENOENT')return null;throw error;}}
+    function core(marker){return {schema:1,status:'prepared',missionId:marker.missionId,
+      retirementRequestId:marker.retirementRequestId,finishBy:marker.finishBy,
+      configurationSha256:marker.configurationSha256,stopSha256:marker.stopSha256};}
+    async function checkedStop(expected){
+      const bytes=await readPrivate(activeStop,MAX_HEADER);let stop;
+      try{
+        stop=parseJson(bytes);exact(stop,['schema','missionId','closureRequestId','admissionClosed','launchClosed']);
+        if(stop.schema!==1||stop.missionId!==decoded.missionId||stop.closureRequestId!==expected.closureRequestId||
+          stop.admissionClosed!==true||stop.launchClosed!==true||hash(bytes)!==expected.stopSha256||
+          closedReceiptSha(stop,expected.stopSha256)!==expected.closureReceiptSha256)refuse('seal_stop_invalid');
+        return bytes;
+      }catch(error){bytes.fill(0);throw error;}
+    }
+    async function verifyEvidence(marker){
+      const configEvidence=await readPrivate(configurationEvidenceFile,MAX_HEADER),stopEvidence=await readPrivate(stopEvidenceFile,MAX_HEADER);
+      try{
+        const ce=parseJson(configEvidence),se=parseJson(stopEvidence);
+        exact(ce,['schema','mode','missionId','planSha256','sealApiGitSha','finishBy','configurationSha256','terminalFinalHash','terminalFinalRevision','terminalFinishedAt','completedWithinDeadline','deadlineOverrunMs','resourcesAbsent','preexistingPreserved','requestedAt']);
+        exact(se,['schema','mode','missionId','stopSha256','closureRequestId','closureSentinelSha256','closureReceiptSha256']);
+        if(ce.schema!==1||ce.mode!=='sealed-terminal'||ce.missionId!==marker.missionId||ce.planSha256!==marker.planSha256||
+          ce.sealApiGitSha!==marker.sealApiGitSha||
+          ce.finishBy!==marker.finishBy||ce.completedWithinDeadline!==true||ce.deadlineOverrunMs!==0||
+          ce.configurationSha256!==marker.configurationSha256||ce.terminalFinalHash!==marker.terminalFinalHash||
+          ce.terminalFinalRevision!==marker.terminalFinalRevision||ce.terminalFinishedAt!==marker.terminalFinishedAt||
+          ce.resourcesAbsent!==true||ce.preexistingPreserved!==true||ce.requestedAt!==marker.requestedAt||
+          se.schema!==1||se.mode!=='sealed-terminal'||se.missionId!==marker.missionId||se.stopSha256!==marker.stopSha256||
+          se.closureRequestId!==marker.closureRequestId||se.closureSentinelSha256!==marker.closureSentinelSha256||
+          se.closureReceiptSha256!==marker.closureReceiptSha256)
+          refuse('seal_evidence_invalid');
+      }finally{configEvidence.fill(0);stopEvidence.fill(0);}
+    }
+    function receipt(marker,configurationEvidence,stopEvidence,seal){return {ok:true,operation:'seal',
+      missionId:decoded.missionId,retirementRequestId:decoded.retirementRequestId,configurationEvidence,stopEvidence,seal,
+      configurationSha256:marker.configurationSha256,stopSha256:marker.stopSha256,activeConfigurationRemoved:true,
+      activeStopRemoved:false,stopSentinelPreserved:true,secretMaterialArchived:false,
+      terminalFinalHash:marker.terminalFinalHash,terminalFinalRevision:marker.terminalFinalRevision,
+      terminalFinishedAt:marker.terminalFinishedAt,closureRequestId:marker.closureRequestId,
+      closureSentinelSha256:marker.closureSentinelSha256,closureReceiptSha256:marker.closureReceiptSha256,
+      planSha256:marker.planSha256,sealApiGitSha:marker.sealApiGitSha,finishBy:marker.finishBy,
+      completedWithinDeadline:true,deadlineOverrunMs:0,
+      resourcesAbsent:true,preexistingPreserved:true,requestedAt:marker.requestedAt,
+      connectionEnabled:false,publicationEnabled:false,metaWindowEnabled:false,importsEnabled:false};}
+    return withControlLock(async()=>{
+      await directories(archive,true);
+      for(const file of [retirementPending,path.join(archive,'retirement-prepared.json'),path.join(archive,'retirement.json')]){
+        const opposite=await optional(file,MAX_HEADER);
+        if(opposite){opposite.fill(0);refuse('retirement_pending');}
+      }
+      let completeBytes=await optional(completeFile,MAX_HEADER);
+      if(completeBytes){try{
+        const complete=terminalSealMarker(completeBytes,'complete',decoded);await verifyEvidence(complete);
+        const stopBytes=await checkedStop(complete);stopBytes.fill(0);
+        const active=await optional(activeConfig,MAX_CONFIG);let parsedActive;
+        try{if(active){if(hash(active)===complete.configurationSha256)refuse('seal_completion_inconsistent');
+          parsedActive=validateStoredConfiguration(active);if(parsedActive.missionId===decoded.missionId)refuse('seal_completion_inconsistent');}}
+        finally{parsedActive?.bridgeKey?.fill(0);active?.fill(0);}
+        const pending=await optional(pendingFile,MAX_HEADER),expected=Buffer.from(JSON.stringify(core(complete)));
+        try{if(pending){if(!pending.equals(expected))refuse('seal_evidence_invalid');await fsApi.unlink(pendingFile);await syncDirectory(control);}}
+        finally{pending?.fill(0);expected.fill(0);}
+        return receipt(complete,'identical','identical','identical');
+      }finally{completeBytes.fill(0);}}
+      let preparedBytes=await optional(preparedFile,MAX_HEADER),configBytes=null,stopBytes=null,config,prepared;
+      let configurationEvidence='identical',stopEvidence='identical';
+      try{
+        if(preparedBytes){prepared=terminalSealMarker(preparedBytes,'prepared',decoded);}
+        else{
+          configBytes=await readPrivate(activeConfig,MAX_CONFIG);config=validateStoredConfiguration(configBytes);
+          const at=clock();
+          if(config.missionId!==decoded.missionId||decoded.terminal.finishBy!==config.finishBy||
+            decoded.terminal.configurationSha256!==hash(configBytes)||
+            decoded.terminal.stopSha256!==decoded.terminal.closureSentinelSha256||
+            decoded.terminal.finishedAt<config.createdAt||decoded.terminal.finishedAt>at||
+            decoded.terminal.finishedAt>config.finishBy||decoded.terminal.requestedAt>at||
+            decoded.terminal.completedWithinDeadline!==true)
+            refuse('seal_not_terminal');
+          const expected={closureRequestId:decoded.terminal.closureRequestId,
+            stopSha256:decoded.terminal.closureSentinelSha256,closureReceiptSha256:decoded.terminal.closureReceiptSha256};
+          stopBytes=await checkedStop(expected);
+          prepared={schema:1,status:'prepared',mode:'sealed-terminal',missionId:decoded.missionId,
+            retirementRequestId:decoded.retirementRequestId,planSha256:decoded.terminal.planSha256,
+            sealApiGitSha:decoded.terminal.sealApiGitSha,
+            finishBy:config.finishBy,configurationSha256:hash(configBytes),
+            stopSha256:hash(stopBytes),terminalFinalHash:decoded.terminal.finalHash,
+            terminalFinalRevision:decoded.terminal.finalRevision,terminalFinishedAt:decoded.terminal.finishedAt,
+            completedWithinDeadline:true,deadlineOverrunMs:0,closureRequestId:decoded.terminal.closureRequestId,
+            closureSentinelSha256:decoded.terminal.closureSentinelSha256,
+            closureReceiptSha256:decoded.terminal.closureReceiptSha256,resourcesAbsent:true,preexistingPreserved:true,
+            requestedAt:decoded.terminal.requestedAt,sealedAt:at};
+          const ce=Buffer.from(JSON.stringify({schema:1,mode:'sealed-terminal',missionId:prepared.missionId,
+            planSha256:prepared.planSha256,sealApiGitSha:prepared.sealApiGitSha,finishBy:prepared.finishBy,
+            configurationSha256:prepared.configurationSha256,terminalFinalHash:prepared.terminalFinalHash,
+            terminalFinalRevision:prepared.terminalFinalRevision,terminalFinishedAt:prepared.terminalFinishedAt,
+            completedWithinDeadline:true,deadlineOverrunMs:0,resourcesAbsent:true,preexistingPreserved:true,
+            requestedAt:prepared.requestedAt}));
+          const se=Buffer.from(JSON.stringify({schema:1,mode:'sealed-terminal',missionId:prepared.missionId,
+            stopSha256:prepared.stopSha256,closureRequestId:prepared.closureRequestId,
+            closureSentinelSha256:prepared.closureSentinelSha256,closureReceiptSha256:prepared.closureReceiptSha256}));
+          const nextPrepared=Buffer.from(JSON.stringify(prepared));
+          try{
+            configurationEvidence=await publishExclusive(configurationEvidenceFile,ce);
+            stopEvidence=await publishExclusive(stopEvidenceFile,se);await publishExclusive(preparedFile,nextPrepared);
+          }finally{ce.fill(0);se.fill(0);nextPrepared.fill(0);}
+          await syncDirectory(archive);await syncDirectory(archiveRoot);await syncDirectory(control);
+        }
+        await verifyEvidence(prepared);
+        if(!stopBytes)stopBytes=await checkedStop(prepared);
+        const pendingBytes=Buffer.from(JSON.stringify(core(prepared)));
+        try{await publishExclusive(pendingFile,pendingBytes);await syncDirectory(control);}finally{pendingBytes.fill(0);}
+        const current=await optional(activeConfig,MAX_CONFIG);
+        if(current){try{
+          if(hash(current)!==prepared.configurationSha256){
+            const next=validateStoredConfiguration(current);try{if(next.missionId===decoded.missionId)refuse('seal_source_changed');}
+            finally{next.bridgeKey.fill(0);}
+          }else{const stat=await fsApi.lstat(activeConfig);privateMetadata(stat,uid,'file');await fsApi.unlink(activeConfig);}
+        }finally{current.fill(0);}}
+        await syncDirectory(control);
+        const stopAfter=await checkedStop(prepared);stopAfter.fill(0);
+        const complete={...prepared,status:'complete'},completeOut=Buffer.from(JSON.stringify(complete));let seal;
+        try{seal=await publishExclusive(completeFile,completeOut);}finally{completeOut.fill(0);}
+        await syncDirectory(archive);await syncDirectory(archiveRoot);await syncDirectory(control);
+        const pending=await readPrivate(pendingFile,MAX_HEADER),expected=Buffer.from(JSON.stringify(core(prepared)));
+        try{if(!pending.equals(expected))refuse('seal_evidence_invalid');await fsApi.unlink(pendingFile);}
+        finally{pending.fill(0);expected.fill(0);}
+        await syncDirectory(control);
+        return receipt(complete,configurationEvidence,stopEvidence,seal);
+      }finally{config?.bridgeKey?.fill(0);preparedBytes?.fill(0);configBytes?.fill(0);stopBytes?.fill(0);}
+    });
+  }
+  async function inspectTerminalSeal(decoded){
+    if(env.ENVIRONMENT!=='production'||env.RENDER_SERVICE_ID!=='srv-d8708kd7vvec73ap1p6g'||
+      env.PUBLIC_API_BASE_URL!=='https://ia4tube-api.onrender.com')refuse('inspect_seal_target_invalid');
+    const state=name=>env[name]==='false'?false:env[name]==='true'?true:null;
+    const imports=env.SOCIAL_MEDIA_IMPORTS_ENABLED==='true'?true:
+      env.SOCIAL_MEDIA_IMPORTS_ENABLED===undefined||env.SOCIAL_MEDIA_IMPORTS_ENABLED===''||env.SOCIAL_MEDIA_IMPORTS_ENABLED==='false'?false:null;
+    const control=path.join(root,'control'),archive=path.join(control,'archive',decoded.missionId),
+      completeFile=path.join(archive,'terminal-seal.json'),preparedFile=path.join(archive,'terminal-seal-prepared.json'),
+      pendingFile=path.join(control,'terminal-seal-pending.json'),
+      activeConfig=path.join(control,'pilot.json'),activeStop=path.join(control,'stop-'+decoded.missionId+'.json'),
+      configurationEvidenceFile=path.join(archive,'configuration-evidence.json'),stopEvidenceFile=path.join(archive,'stop-evidence.json');
+    await directories(control,false);
+    async function optional(file,maximum){try{return await readPrivate(file,maximum);}catch(error){if(error.code==='ENOENT')return null;throw error;}}
+    let completeBytes=await optional(completeFile,MAX_HEADER),preparedBytes=await optional(preparedFile,MAX_HEADER),
+      pendingBytes=await optional(pendingFile,MAX_HEADER),active=null,stop=null,
+      configurationEvidence=null,stopEvidence=null,marker=null,preparedMarker=null,parsedActive=null;
+    try{
+      if(preparedBytes)preparedMarker=terminalSealMarker(preparedBytes,'prepared');
+      if(completeBytes){marker=terminalSealMarker(completeBytes,'complete');
+        if(!preparedMarker||canonical({...preparedMarker,status:'complete'})!==canonical(marker))refuse('inspect_seal_evidence_invalid');}
+      else marker=preparedMarker;
+      const sealed=completeBytes!==null;
+      const retirementPending=pendingBytes!==null;
+      const pendingSha256=pendingBytes?hash(pendingBytes):null;
+      if(pendingBytes){const pending=parseJson(pendingBytes);
+        exact(pending,['schema','status','missionId','retirementRequestId','finishBy','configurationSha256','stopSha256']);
+        if(pending.schema!==1||pending.status!=='prepared'||pending.missionId!==decoded.missionId||
+          !UUID.test(pending.retirementRequestId)||!Number.isSafeInteger(pending.finishBy)||
+          !HASH.test(pending.configurationSha256)||!HASH.test(pending.stopSha256))refuse('inspect_seal_pending_invalid');
+        if(!marker||pending.missionId!==marker.missionId||pending.retirementRequestId!==marker.retirementRequestId||
+          pending.finishBy!==marker.finishBy||pending.configurationSha256!==marker.configurationSha256||pending.stopSha256!==marker.stopSha256)
+          refuse('inspect_seal_pending_invalid');
+      }
+      if(!marker)return {ok:true,operation:'inspect-seal',missionId:decoded.missionId,retirementRequestId:null,sealed:false,retirementPending,
+        pendingSha256,
+        sealedConfigurationPresent:false,otherConfigurationPresent:false,stopSentinelPresent:false,
+        stopSentinelPreserved:false,planSha256:null,sealApiGitSha:null,finishBy:null,configurationSha256:null,stopSha256:null,terminalFinalHash:null,
+        terminalFinalRevision:null,terminalFinishedAt:null,closureRequestId:null,closureSentinelSha256:null,
+        closureReceiptSha256:null,sealedAt:null,completedWithinDeadline:null,deadlineOverrunMs:null,
+        resourcesAbsent:null,preexistingPreserved:null,requestedAt:null,
+        connectionEnabled:state('SOCIAL_EXTERNAL_CONNECTION_ENABLED'),publicationEnabled:state('SOCIAL_EXTERNAL_PUBLICATION_ENABLED'),
+        metaWindowEnabled:state('META_APP_REVIEW_WINDOW_ENABLED'),importsEnabled:imports};
+      configurationEvidence=await readPrivate(configurationEvidenceFile,MAX_HEADER);stopEvidence=await readPrivate(stopEvidenceFile,MAX_HEADER);
+      const ce=parseJson(configurationEvidence),se=parseJson(stopEvidence);
+      exact(ce,['schema','mode','missionId','planSha256','sealApiGitSha','finishBy','configurationSha256','terminalFinalHash','terminalFinalRevision','terminalFinishedAt','completedWithinDeadline','deadlineOverrunMs','resourcesAbsent','preexistingPreserved','requestedAt']);
+      exact(se,['schema','mode','missionId','stopSha256','closureRequestId','closureSentinelSha256','closureReceiptSha256']);
+      if(ce.schema!==1||ce.mode!=='sealed-terminal'||ce.missionId!==marker.missionId||ce.planSha256!==marker.planSha256||
+        ce.sealApiGitSha!==marker.sealApiGitSha||
+        ce.finishBy!==marker.finishBy||ce.configurationSha256!==marker.configurationSha256||
+        ce.terminalFinalHash!==marker.terminalFinalHash||ce.terminalFinalRevision!==marker.terminalFinalRevision||
+        ce.terminalFinishedAt!==marker.terminalFinishedAt||ce.completedWithinDeadline!==true||ce.deadlineOverrunMs!==0||
+        ce.resourcesAbsent!==true||ce.preexistingPreserved!==true||ce.requestedAt!==marker.requestedAt||
+        se.schema!==1||se.mode!=='sealed-terminal'||
+        se.missionId!==marker.missionId||se.stopSha256!==marker.stopSha256||se.closureRequestId!==marker.closureRequestId||
+        se.closureSentinelSha256!==marker.closureSentinelSha256||se.closureReceiptSha256!==marker.closureReceiptSha256)
+        refuse('inspect_seal_evidence_invalid');
+      active=await optional(activeConfig,MAX_CONFIG);stop=await optional(activeStop,MAX_HEADER);
+      const activeHash=active?hash(active):null,stopHash=stop?hash(stop):null;
+      if(!stop||stopHash!==marker.stopSha256)refuse('inspect_seal_stop_invalid');
+      if(active){parsedActive=validateStoredConfiguration(active);
+        if(activeHash===marker.configurationSha256&&parsedActive.missionId!==decoded.missionId||
+          activeHash!==marker.configurationSha256&&parsedActive.missionId===decoded.missionId)refuse('inspect_seal_configuration_invalid');
+      }
+      return {ok:true,operation:'inspect-seal',missionId:decoded.missionId,retirementRequestId:marker.retirementRequestId,sealed,retirementPending,
+        pendingSha256,
+        sealedConfigurationPresent:activeHash===marker.configurationSha256,
+        otherConfigurationPresent:activeHash!==null&&activeHash!==marker.configurationSha256,
+        stopSentinelPresent:true,stopSentinelPreserved:true,configurationSha256:marker.configurationSha256,
+        planSha256:marker.planSha256,sealApiGitSha:marker.sealApiGitSha,finishBy:marker.finishBy,
+        stopSha256:marker.stopSha256,terminalFinalHash:marker.terminalFinalHash,
+        terminalFinalRevision:marker.terminalFinalRevision,terminalFinishedAt:marker.terminalFinishedAt,
+        closureRequestId:marker.closureRequestId,closureSentinelSha256:marker.closureSentinelSha256,
+        closureReceiptSha256:marker.closureReceiptSha256,sealedAt:marker.sealedAt,
+        completedWithinDeadline:true,deadlineOverrunMs:0,resourcesAbsent:true,preexistingPreserved:true,
+        requestedAt:marker.requestedAt,
+        connectionEnabled:state('SOCIAL_EXTERNAL_CONNECTION_ENABLED'),publicationEnabled:state('SOCIAL_EXTERNAL_PUBLICATION_ENABLED'),
+        metaWindowEnabled:state('META_APP_REVIEW_WINDOW_ENABLED'),importsEnabled:imports};
+    }finally{parsedActive?.bridgeKey?.fill(0);completeBytes?.fill(0);preparedBytes?.fill(0);pendingBytes?.fill(0);active?.fill(0);stop?.fill(0);
+      configurationEvidence?.fill(0);stopEvidence?.fill(0);}
+  }
   async function provisionRetirement(decoded){
     const imports=env.SOCIAL_MEDIA_IMPORTS_ENABLED==='true'?true:
       env.SOCIAL_MEDIA_IMPORTS_ENABLED===undefined||env.SOCIAL_MEDIA_IMPORTS_ENABLED===''||env.SOCIAL_MEDIA_IMPORTS_ENABLED==='false'?false:null;
@@ -296,6 +584,11 @@ function createProvisioner({root=ROOT,privateBase='/var/data/private',fsApi=fs,i
       secretMaterialArchived:false,connectionEnabled:false,publicationEnabled:false,metaWindowEnabled:false,importsEnabled:false};}
     return withControlLock(async()=>{
       await directories(archive,true);
+      for(const file of [path.join(control,'terminal-seal-pending.json'),path.join(archive,'terminal-seal-prepared.json'),
+        path.join(archive,'terminal-seal.json')]){
+        const opposite=await optional(file,MAX_HEADER);
+        if(opposite){opposite.fill(0);refuse('retirement_pending');}
+      }
       let completeBytes=await optional(completeFile,MAX_HEADER);
       if(completeBytes){try{
         const complete=retirementMarker(completeBytes,'complete');
@@ -378,16 +671,22 @@ function createProvisioner({root=ROOT,privateBase='/var/data/private',fsApi=fs,i
     const state=name=>env[name]==='false'?false:env[name]==='true'?true:null;
     const imports=env.SOCIAL_MEDIA_IMPORTS_ENABLED==='true'?true:
       env.SOCIAL_MEDIA_IMPORTS_ENABLED===undefined||env.SOCIAL_MEDIA_IMPORTS_ENABLED===''||env.SOCIAL_MEDIA_IMPORTS_ENABLED==='false'?false:null;
-    const control=path.join(root,'control'),file=path.join(control,'pilot.json'),pendingFile=path.join(control,'retirement-pending.json');await directories(control,false);
-    let bytes,stopBytes,pendingBytes,config,pendingMissionId=null,pendingRetirementRequestId=null,pendingSha256=null;
-    try{
-      pendingBytes=await readPrivate(pendingFile,MAX_HEADER);const pending=parseJson(pendingBytes);
+    const control=path.join(root,'control'),file=path.join(control,'pilot.json');await directories(control,false);
+    let bytes,stopBytes,pendingBytes=null,config,pendingMissionId=null,pendingRetirementRequestId=null,pendingSha256=null;
+    for(const name of ['retirement-pending.json','terminal-seal-pending.json']){
+      let candidate;
+      try{candidate=await readPrivate(path.join(control,name),MAX_HEADER);}
+      catch(error){if(error.code==='ENOENT')continue;throw error;}
+      if(pendingBytes){candidate.fill(0);refuse('inspect_pending_invalid');}
+      pendingBytes=candidate;
+    }
+    if(pendingBytes){const pending=parseJson(pendingBytes);
       exact(pending,['schema','status','missionId','retirementRequestId','finishBy','configurationSha256','stopSha256']);
       if(pending.schema!==1||pending.status!=='prepared'||!UUID.test(pending.missionId)||!UUID.test(pending.retirementRequestId)||
         !Number.isSafeInteger(pending.finishBy)||!HASH.test(pending.configurationSha256)||!HASH.test(pending.stopSha256))refuse('inspect_pending_invalid');
       pendingMissionId=pending.missionId;pendingRetirementRequestId=pending.retirementRequestId;pendingSha256=hash(pendingBytes);
-    }catch(error){if(error.code!=='ENOENT')throw error;}
-    const pendingPresent=pendingBytes!==undefined;
+    }
+    const pendingPresent=pendingBytes!==null;
     try{bytes=await readPrivate(file,MAX_CONFIG);}
     catch(error){if(error.code!=='ENOENT')throw error;const receipt={ok:true,operation:'inspect',activeConfigurationPresent:false,
       missionId:null,finishBy:null,windowExpired:false,stopPresent:false,retirementReady:false,configurationSha256:null,stopSha256:null,
@@ -417,7 +716,9 @@ function createProvisioner({root=ROOT,privateBase='/var/data/private',fsApi=fs,i
     if(decoded.operation==='catalog')return provisionCatalog(decoded);
     if(decoded.operation==='stop')return provisionStop(decoded);
     if(decoded.operation==='retire')return provisionRetirement(decoded);
+    if(decoded.operation==='seal')return provisionSeal(decoded);
     if(decoded.operation==='inspect')return inspectControl();
+    if(decoded.operation==='inspect-seal')return inspectTerminalSeal(decoded);
     return provisionConfiguration(decoded);}});
 }
 async function main(args=process.argv.slice(2),{input=process.stdin,output=process.stdout,env=process.env}={}){

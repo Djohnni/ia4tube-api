@@ -4,6 +4,8 @@ const {Readable}=require('node:stream');
 const {MAX_PACKET,MAX_HEADER,canonicalManifest,decodePacket,readBoundedInput,privateMetadata,createProvisioner,main}=
   require('../scripts/media-api/private-pilot-provision.cjs');
 const sha=bytes=>crypto.createHash('sha256').update(bytes).digest('hex');
+const canonical=value=>value===null||typeof value!=='object'?JSON.stringify(value):Array.isArray(value)?
+  '['+value.map(canonical).join(',')+']':'{'+Object.keys(value).sort().map(key=>JSON.stringify(key)+':'+canonical(value[key])).join(',')+'}';
 function wav(){const bytes=Buffer.alloc(2880044);bytes.write('RIFF');bytes.writeUInt32LE(bytes.length-8,4);bytes.write('WAVEfmt ',8);
   bytes.writeUInt32LE(16,16);bytes.writeUInt16LE(1,20);bytes.writeUInt16LE(2,22);bytes.writeUInt32LE(48000,24);bytes.writeUInt32LE(192000,28);
   bytes.writeUInt16LE(4,32);bytes.writeUInt16LE(16,34);bytes.write('data',36);bytes.writeUInt32LE(2880000,40);return bytes;}
@@ -12,7 +14,9 @@ function catalog(){const bytes=wav(),id='track_'+'a'.repeat(24),manifest=canonic
   {id,displayName:'Synthetic music',fileName:id+'.wav',sha256:sha(bytes),sizeBytes:bytes.length,durationSeconds:15,sampleRate:48000,channels:2,codec:'pcm_s16le'}]});
   const header={schema:1,operation:'catalog',manifest,manifestSha256:sha(Buffer.from(JSON.stringify(manifest)))};
   return {bytes,manifest,header,packet:packet(header,bytes)};}
-const env=()=>({ENVIRONMENT:'production',RENDER_SERVICE_ID:'srv-d8708kd7vvec73ap1p6g',PUBLIC_API_BASE_URL:'https://ia4tube-api.onrender.com',
+const SEAL_COMMIT='e'.repeat(40);
+const env=()=>({ENVIRONMENT:'production',RENDER_SERVICE_ID:'srv-d8708kd7vvec73ap1p6g',RENDER_GIT_COMMIT:SEAL_COMMIT,
+  PUBLIC_API_BASE_URL:'https://ia4tube-api.onrender.com',
   SOCIAL_CALENDAR_ENABLED:'true',SOCIAL_PERSISTENCE_ENABLED:'true',SOCIAL_MEDIA_IMPORTS_ENABLED:'false',
   SOCIAL_EXTERNAL_CONNECTION_ENABLED:'false',SOCIAL_EXTERNAL_PUBLICATION_ENABLED:'false',META_APP_REVIEW_WINDOW_ENABLED:'false'});
 function configuration(){const value={schema:1,missionId:'11111111-1111-4111-8111-111111111111',workerId:'22222222-2222-4222-8222-222222222222',
@@ -33,9 +37,22 @@ function stopPacket(missionId=configuration().missionId,closureRequestId='666666
 function retirePacket(missionId=configuration().missionId,retirementRequestId='77777777-7777-4777-8777-777777777777'){
   return packet({schema:1,operation:'retire',missionId,retirementRequestId},Buffer.alloc(0));}
 function inspectPacket(){return packet({schema:1,operation:'inspect'},Buffer.alloc(0));}
+function terminalEvidence(value=configuration(),overrides={}){
+  const stop={schema:1,missionId:value.missionId,closureRequestId:'66666666-6666-4666-8666-666666666666',admissionClosed:true,launchClosed:true};
+  const stopSha256=sha(Buffer.from(JSON.stringify(stop)));
+  const closure={...stop,sentinelSha256:stopSha256,connectionEnabled:false,publicationEnabled:false,metaWindowEnabled:false};
+  return {planSha256:'c'.repeat(64),sealApiGitSha:SEAL_COMMIT,finishBy:value.finishBy,
+    configurationSha256:sha(Buffer.from(JSON.stringify(value))),stopSha256,requestedAt:1950000,
+    finishedAt:1900000,completedWithinDeadline:true,deadlineOverrunMs:0,finalRevision:7,finalHash:'d'.repeat(64),
+    closureRequestId:stop.closureRequestId,closureSentinelSha256:stopSha256,
+    closureReceiptSha256:sha(canonical(closure)),resourcesAbsent:true,preexistingPreserved:true,...overrides};
+}
+function sealPacket(value=configuration(),terminal=terminalEvidence(value),retirementRequestId='77777777-7777-4777-8777-777777777777'){
+  return packet({schema:1,operation:'seal',missionId:value.missionId,retirementRequestId,terminal},Buffer.alloc(0));}
+function inspectSealPacket(missionId=configuration().missionId){return packet({schema:1,operation:'inspect-seal',missionId},Buffer.alloc(0));}
 async function fixture(t,options={}){
   const temporary=await fs.mkdtemp(path.join(os.tmpdir(),'ia4tube-private-provision-')),privateBase=path.join(temporary,'private'),root=path.join(privateBase,'calendar-media');
-  const operations=[],overrides=new Map();let failed=false,retirementFailed=false;
+  const operations=[],overrides=new Map();let failed=false,retirementFailed=false,sealCompleteFailed=false;
   // Real local files, hashes, exclusive creation, hardlinks and reconciliation.
   // Windows cannot prove Linux uid/mode/fsync: only those metadata/capabilities
   // are injected here. Production CLI exposes no such seam or path override.
@@ -52,6 +69,7 @@ async function fixture(t,options={}){
     async link(from,to){operations.push('link:'+to);
       if(options.failCatalogOnce&&to.endsWith('catalog.json')&&!failed){failed=true;throw Object.assign(Error('synthetic-private-detail'),{code:'EIO'});}
       if(options.failRetirementCompleteOnce&&path.basename(to)==='retirement.json'&&!retirementFailed){retirementFailed=true;throw Object.assign(Error('synthetic-retirement-crash'),{code:'EIO'});}
+      if(options.failSealCompleteOnce&&path.basename(to)==='terminal-seal.json'&&!sealCompleteFailed){sealCompleteFailed=true;throw Object.assign(Error('synthetic-seal-crash'),{code:'EIO'});}
       return fs.link(from,to);}
   };
   t.after(async()=>{assert.equal(path.dirname(temporary),path.resolve(os.tmpdir()));assert.ok(path.basename(temporary).startsWith('ia4tube-private-provision-'));
@@ -266,6 +284,76 @@ test('expired stopped configuration leaves only secret-free evidence and retirem
   const before=await fs.readFile(path.join(control,'pilot.json'));
   const replayed=await f.provisioner.provision(retirePacket());assert.equal(replayed.retirement,'identical');
   assert.deepEqual(await fs.readFile(path.join(control,'pilot.json')),before);
+});
+
+test('terminal seal before finish removes only the secret configuration, preserves the stop forever and permits a different mission',async t=>{
+  const f=await fixture(t),value=configuration();await f.provisioner.provision(catalog().packet);
+  await f.provisioner.provision(configPacket(value));await f.provisioner.provision(stopPacket());
+  const control=path.join(f.root,'control'),stopFile=path.join(control,'stop-'+value.missionId+'.json'),stopBefore=await fs.readFile(stopFile);
+  const sealed=await f.provisioner.provision(sealPacket(value));
+  assert.equal(sealed.operation,'seal');assert.equal(sealed.activeConfigurationRemoved,true);
+  assert.equal(sealed.activeStopRemoved,false);assert.equal(sealed.stopSentinelPreserved,true);
+  assert.equal(sealed.planSha256,'c'.repeat(64));assert.equal(sealed.completedWithinDeadline,true);assert.equal(sealed.deadlineOverrunMs,0);
+  await assert.rejects(fs.lstat(path.join(control,'pilot.json')),{code:'ENOENT'});
+  assert.deepEqual(await fs.readFile(stopFile),stopBefore);
+  const inspected=await f.provisioner.provision(inspectSealPacket());
+  assert.equal(inspected.sealed,true);assert.equal(inspected.retirementPending,false);
+  assert.equal(inspected.sealedConfigurationPresent,false);assert.equal(inspected.otherConfigurationPresent,false);
+  assert.equal(inspected.stopSentinelPresent,true);assert.equal(inspected.stopSentinelPreserved,true);
+  assert.equal(inspected.planSha256,'c'.repeat(64));assert.equal(inspected.finishBy,value.finishBy);
+  const replay=await f.provisioner.provision(sealPacket(value));assert.equal(replay.seal,'identical');
+  assert.equal(f.operations.filter(item=>item==='unlink:'+stopFile).length,0);
+  const archive=path.join(control,'archive',value.missionId),archiveText=(await Promise.all(
+    (await fs.readdir(archive)).map(name=>fs.readFile(path.join(archive,name),'utf8')))).join('\n');
+  assert.equal(archiveText.includes('bridgeKeyBase64'),false);assert.equal(archiveText.includes('postgresql://'),false);
+  assert.equal(archiveText.includes('synthetic-private-sentinel'),false);
+  const next={...configuration(),missionId:'88888888-8888-4888-8888-888888888888',createdAt:2000000,
+    admitUntil:7000000,finishBy:8000000,hostEvidence:{...configuration().hostEvidence,verifiedAt:2000000}};
+  await f.provisioner.provision(configPacket(next));
+  const coexist=await f.provisioner.provision(inspectSealPacket());
+  assert.equal(coexist.sealed,true);assert.equal(coexist.sealedConfigurationPresent,false);assert.equal(coexist.otherConfigurationPresent,true);
+  assert.deepEqual(await fs.readFile(stopFile),stopBefore);
+  f.setTime(value.finishBy+1);
+  await assert.rejects(f.provisioner.provision(retirePacket(value.missionId)),{code:'calendar_private_provision_retirement_pending'});
+  assert.deepEqual(await fs.readFile(stopFile),stopBefore);
+});
+
+test('terminal seal fails closed for unproved terminal state, missing stop or open boundary without removing configuration',async t=>{
+  const missing=await fixture(t);await missing.provisioner.provision(catalog().packet);await missing.provisioner.provision(configPacket());
+  await assert.rejects(missing.provisioner.provision(sealPacket()),{code:'ENOENT'});
+  assert.equal((await fs.lstat(path.join(missing.root,'control','pilot.json'))).isFile(),true);
+  for(const override of [
+    {resourcesAbsent:false},{preexistingPreserved:false},{completedWithinDeadline:false},{deadlineOverrunMs:1},
+    {configurationSha256:'0'.repeat(64)},{closureSentinelSha256:'0'.repeat(64)},{closureReceiptSha256:'0'.repeat(64)},
+    {finishedAt:9000000},{requestedAt:2000001},{sealApiGitSha:'f'.repeat(40)}
+  ]){
+    const f=await fixture(t);await f.provisioner.provision(catalog().packet);await f.provisioner.provision(configPacket());
+    await f.provisioner.provision(stopPacket());
+    await assert.rejects(f.provisioner.provision(sealPacket(configuration(),terminalEvidence(configuration(),override))));
+    assert.equal((await fs.lstat(path.join(f.root,'control','pilot.json'))).isFile(),true);
+  }
+  const open=await fixture(t,{env:{...env(),SOCIAL_MEDIA_IMPORTS_ENABLED:'true'}});
+  await open.provisioner.provision(catalog().packet);await open.provisioner.provision(configPacket());await open.provisioner.provision(stopPacket());
+  await assert.rejects(open.provisioner.provision(sealPacket()),{code:'calendar_private_provision_seal_target_invalid'});
+  assert.equal((await fs.lstat(path.join(open.root,'control','pilot.json'))).isFile(),true);
+});
+
+test('terminal seal reconciles a lost response after singleton removal and inspection refuses corrupted durable evidence',async t=>{
+  const f=await fixture(t,{failSealCompleteOnce:true}),value=configuration();await f.provisioner.provision(catalog().packet);
+  await f.provisioner.provision(configPacket(value));await f.provisioner.provision(stopPacket());
+  await assert.rejects(f.provisioner.provision(sealPacket(value)),{code:'EIO'});
+  await assert.rejects(fs.lstat(path.join(f.root,'control','pilot.json')),{code:'ENOENT'});
+  const partial=await f.provisioner.provision(inspectSealPacket());
+  assert.equal(partial.sealed,false);assert.equal(partial.retirementPending,true);
+  assert.equal(partial.sealedConfigurationPresent,false);assert.equal(partial.configurationSha256,terminalEvidence(value).configurationSha256);
+  const pendingMarker={schema:1,status:'prepared',missionId:value.missionId,
+    retirementRequestId:'77777777-7777-4777-8777-777777777777',finishBy:value.finishBy,
+    configurationSha256:terminalEvidence(value).configurationSha256,stopSha256:terminalEvidence(value).stopSha256};
+  assert.equal(partial.pendingSha256,sha(Buffer.from(JSON.stringify(pendingMarker))));
+  const recovered=await f.provisioner.provision(sealPacket(value));assert.equal(recovered.seal,'installed');
+  const archive=path.join(f.root,'control','archive',value.missionId),evidence=path.join(archive,'configuration-evidence.json');
+  await fs.writeFile(evidence,Buffer.from('{"schema":1}'));
+  await assert.rejects(f.provisioner.provision(inspectSealPacket()),{code:'calendar_private_provision_packet_invalid'});
 });
 
 test('retirement refuses an open window, missing or malformed stop, changed request identity, enabled imports and open gates',async t=>{
