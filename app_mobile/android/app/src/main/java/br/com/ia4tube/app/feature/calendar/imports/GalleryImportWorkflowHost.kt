@@ -84,21 +84,31 @@ fun GalleryImportWorkflowHost(tokenProvider: () -> String, generatedArtId: Strin
     var pendingKind by remember(current) { mutableStateOf<ImportMediaKind?>(null) }
     var reselecting by remember(current) { mutableStateOf(false) }
     var pickerRuntime by remember { mutableStateOf<GalleryImportWorkflowRuntime?>(null) }
+    var pickerSequence by remember(current) { mutableLongStateOf(0L) }
+    var pendingPickerRequest by remember(current) { mutableLongStateOf(0L) }
     val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
-        val expected = pickerRuntime; pickerRuntime = null
-        if (uri != null && expected === current && !state.busy && state.sessionValid) {
-            if (reselecting) current.reselect(uri.toString()) else pendingKind?.let { current.select(uri.toString(), it) }
+        val expected = pickerRuntime
+        val requestId = pendingPickerRequest
+        pickerRuntime = null
+        pendingPickerRequest = 0L
+        // ON_START may already be restoring when OpenDocument delivers its result. The session-bound runtime
+        // owns that race and retains exactly one result until restore completes; selection still never sends.
+        if (uri != null && expected === current && requestId > 0L && state.sessionValid) {
+            if (reselecting) current.reselect(requestId, uri.toString())
+            else pendingKind?.let { current.select(requestId, uri.toString(), it) }
         }
         pendingKind = null; reselecting = false
     }
     val choose: (ImportMediaKind?, Boolean) -> Unit = { kind, reselect ->
-        if (pickerRuntime == null && !state.busy) {
+        if (pickerRuntime == null && !state.busy && !state.pickerResultPending) {
+            pickerSequence++
+            pendingPickerRequest = pickerSequence
             pendingKind = kind; reselecting = reselect; pickerRuntime = current
             try { picker.launch(when (kind) {
                 ImportMediaKind.IMAGE -> arrayOf("image/jpeg", "image/png", "image/webp")
                 ImportMediaKind.VIDEO -> arrayOf("video/mp4", "video/quicktime")
                 null -> arrayOf("image/jpeg", "image/png", "image/webp", "video/mp4", "video/quicktime")
-            }) } catch (_: Exception) { pickerRuntime = null }
+            }) } catch (_: Exception) { pickerRuntime = null; pendingPickerRequest = 0L }
         }
     }
     GalleryImportWorkflowContent(state, current, { if (session.getToken() == token) latestToken() else "" },
@@ -178,6 +188,9 @@ internal fun GalleryImportWorkflowContent(view: ImportWorkflowView, runtime: Gal
                     uploadUi.confirmedProgress?.let { LinearProgressIndicator(progress = { it }, modifier = Modifier.fillMaxWidth())
                         Text("Recebimento confirmado: ${(it * 100).toInt()}%") }
                     uploadUi.error?.let { Text(it, color = Color(0xFFFFB4AB)) }
+                    if (view.pickerResultPending) Text(
+                        "O arquivo escolhido está preservado enquanto conferimos o rascunho desta conta.",
+                        color = Color(0xFFFFD59C))
                     for (action in uploadUi.actions) {
                         val label = when (action) {
                             GalleryImportUploadAction.SELECT_PHOTO -> "Escolher foto"
@@ -189,6 +202,8 @@ internal fun GalleryImportWorkflowContent(view: ImportWorkflowView, runtime: Gal
                             GalleryImportUploadAction.RECONCILE -> "Conferir envio existente"
                             GalleryImportUploadAction.DISCARD_CANCELLED -> "Retirar rascunho cancelado"
                         }
+                        val pickerAction = action in setOf(GalleryImportUploadAction.SELECT_PHOTO,
+                            GalleryImportUploadAction.SELECT_VIDEO, GalleryImportUploadAction.RESELECT_SOURCE)
                         OutlinedButton(onClick = { when (action) {
                             GalleryImportUploadAction.SELECT_PHOTO -> choose(ImportMediaKind.IMAGE, false)
                             GalleryImportUploadAction.SELECT_VIDEO -> choose(ImportMediaKind.VIDEO, false)
@@ -198,7 +213,8 @@ internal fun GalleryImportWorkflowContent(view: ImportWorkflowView, runtime: Gal
                             GalleryImportUploadAction.CANCEL -> { confirmCancel = true }
                             GalleryImportUploadAction.RECONCILE -> if (view.initialized) runtime.reconcileUpload() else runtime.restore()
                             GalleryImportUploadAction.DISCARD_CANCELLED -> runtime.discardCancelled()
-                        } }, enabled = operational || action == GalleryImportUploadAction.PAUSE, modifier = Modifier.fillMaxWidth()) { Text(label) }
+                        } }, enabled = (operational && !(view.pickerResultPending && pickerAction)) ||
+                            action == GalleryImportUploadAction.PAUSE, modifier = Modifier.fillMaxWidth()) { Text(label) }
                     }
                     Text("Fotos: JPEG, PNG ou WebP até 32 MiB. Vídeos: MP4 ou MOV até 100 MiB e 60 segundos.", style = MaterialTheme.typography.bodySmall)
                 }
