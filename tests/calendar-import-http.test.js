@@ -20,7 +20,8 @@ async function setup(t, patch = {}) {
       status: async () => ({ assetId, status: "ready" }) }, ...patch };
   const app = express();
   app.use("/v1/social/calendar/imports", createCalendarImportRouter({ authenticate: session.authenticate,
-    resolvePrincipal: patch.resolvePrincipal || (claims => auth.fromVerifiedJwt(claims)), getService: () => patch.absent ? null : service }));
+    resolvePrincipal: patch.resolvePrincipal || (claims => auth.fromVerifiedJwt(claims)), getService: () => patch.absent ? null : service,
+    logger: patch.logger, monotonicClock: patch.monotonicClock, diagnosticSlowMs: patch.diagnosticSlowMs }));
   const server = app.listen(0, "127.0.0.1"); await new Promise(resolve => server.once("listening", resolve));
   t.after(() => new Promise(resolve => server.close(resolve)));
   const base = `http://127.0.0.1:${server.address().port}/v1/social/calendar/imports`;
@@ -105,4 +106,39 @@ test("preparation is explicit and metadata-only; no scheduling or external publi
   assert.equal((await f.request(`/assets/${assetId}`)).status, 200);
   for (const path of ["/schedule", "/publish", "/connect", "/dispatch"]) assert.equal((await f.request(path, {})).status, 404);
   assert.equal(f.calls.length, 1);
+});
+test("capability and prepare diagnostics expose only closed stages and elapsed time", async t => {
+  const capabilityEvents = [], capabilityTimes = [0, 300, 300, 700];
+  const first = await setup(t, { logger: { error: value => capabilityEvents.push(value) },
+    monotonicClock: () => capabilityTimes.shift(), diagnosticSlowMs: 250 });
+  assert.equal((await first.request("/capabilities")).status, 200);
+  assert.deepEqual(capabilityEvents, [
+    { component: "calendar_media_http", code: "calendar_media_http_slow", stage: "principal_resolution", elapsedMs: 300 },
+    { component: "calendar_media_http", code: "calendar_media_http_slow", stage: "capability_read", elapsedMs: 400 }
+  ]);
+
+  const prepareEvents = [], prepareTimes = [0, 251, 251, 752];
+  const second = await setup(t, { logger: { error: value => prepareEvents.push(value) },
+    monotonicClock: () => prepareTimes.shift(), diagnosticSlowMs: 250 });
+  const input = { uploadId, expectedMediaRevision: 0, idempotencyKey: "fixture-observed-preparation",
+    selection: { kind: "image", targets: ["feed"], audioMode: "none" } };
+  assert.equal((await second.request(`/assets/${assetId}/prepare`, input)).status, 200);
+  assert.deepEqual(prepareEvents, [
+    { component: "calendar_media_http", code: "calendar_media_http_slow", stage: "principal_resolution", elapsedMs: 251 },
+    { component: "calendar_media_http", code: "calendar_media_http_slow", stage: "prepare_transaction", elapsedMs: 501 }
+  ]);
+  assert.doesNotMatch(JSON.stringify(prepareEvents), new RegExp(`${assetId}|${uploadId}|fixture-observed`));
+});
+test("failed observed operation never logs the error message and logger failures stay non-fatal", async t => {
+  const events = [], times = [0, 0, 0, 7];
+  const first = await setup(t, { capabilities: () => { throw new Error("sentinel-token-password-url"); },
+    logger: { error: value => events.push(value) }, monotonicClock: () => times.shift() });
+  assert.equal((await first.request("/capabilities")).status, 503);
+  assert.deepEqual(events, [{ component: "calendar_media_http", code: "calendar_media_http_failed", stage: "capability_read", elapsedMs: 7 }]);
+  assert.doesNotMatch(JSON.stringify(events), /sentinel|token|password|url/);
+
+  const secondTimes = [0, 300, 300, 700];
+  const second = await setup(t, { logger: { error() { throw new Error("logger-failed"); } },
+    monotonicClock: () => secondTimes.shift(), diagnosticSlowMs: 250 });
+  assert.equal((await second.request("/capabilities")).status, 200);
 });

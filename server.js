@@ -7362,8 +7362,7 @@ productionSocialIntegration.initialize({
   dataDir: DATA_DIR,
   planningDir: MONTHLY_PLANNINGS_DIR,
   ordersDir: PEDIDOS_DIR,
-  logger: { info() {}, warn() { console.warn("[social] Vinculo da empresa indisponivel."); },
-    error() { console.error("[social] Operacao recusada."); } }
+  logger: require("./src/social/server-runtime").createSocialDiagnosticLogger(console)
 }).then(() => {
   startLegacyBackgroundTasks();
   const httpServer = app.listen(PORT, () => {

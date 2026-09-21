@@ -6,6 +6,8 @@ const { isOperationalCalendarImportsRuntime } = require("./operational-runtime")
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i;
 const SAFE_CODE = /^(?:import|calendar_import)_[a-z_]{1,90}$/;
 const ORIGINS = new Set(["https://ia4tube-api.onrender.com", "https://ia4tube.com", "https://www.ia4tube.com"]);
+const HTTP_DIAGNOSTIC_STAGES = new Set(["principal_resolution", "capability_read", "prepare_transaction"]);
+const HTTP_SLOW_MS = 250;
 function fail(code, statusCode = 400) { throw Object.assign(new Error(code), { code, statusCode }); }
 function body(req, permitted = []) {
   const value = req.body || {};
@@ -26,10 +28,46 @@ function partNumber(req) {
  * authenticate must verify the official JWT + active tenant before resolvePrincipal.
  * getService supplies a startup-verified facade; availability cannot come from HTTP.
  */
-function createCalendarImportRouter({ authenticate, resolvePrincipal, getService }) {
+function createImportHttpObserver({ logger, monotonicClock = () => performance.now(), slowMs = HTTP_SLOW_MS } = {}) {
+  if (typeof monotonicClock !== "function" || !Number.isSafeInteger(slowMs) || slowMs < 1 || slowMs > 60000) {
+    throw new TypeError("calendar_import_router_configuration_invalid");
+  }
+  const now = () => {
+    try { const value = monotonicClock(); return Number.isFinite(value) ? value : null; }
+    catch { return null; }
+  };
+  const elapsed = started => {
+    const finished = now(); if (started === null || finished === null) return null;
+    const value = Math.floor(finished - started);
+    return Number.isSafeInteger(value) && value >= 0 ? Math.min(value, 60000) : null;
+  };
+  const emit = (code, stage, elapsedMs) => {
+    try {
+      const pending = logger?.error?.(Object.freeze({ component: "calendar_media_http", code, stage, elapsedMs }));
+      if (pending && typeof pending.then === "function") Promise.resolve(pending).catch(() => {});
+    }
+    catch { /* Diagnostics cannot change the request result. */ }
+  };
+  return async (stage, operation) => {
+    if (!HTTP_DIAGNOSTIC_STAGES.has(stage) || typeof operation !== "function") {
+      throw new TypeError("calendar_import_router_configuration_invalid");
+    }
+    const started = now();
+    try {
+      const result = await operation(), elapsedMs = elapsed(started);
+      if (elapsedMs !== null && elapsedMs >= slowMs) emit("calendar_media_http_slow", stage, elapsedMs);
+      return result;
+    } catch (error) {
+      const elapsedMs = elapsed(started); if (elapsedMs !== null) emit("calendar_media_http_failed", stage, elapsedMs);
+      throw error;
+    }
+  };
+}
+function createCalendarImportRouter({ authenticate, resolvePrincipal, getService, logger, monotonicClock, diagnosticSlowMs } = {}) {
   if ([authenticate, resolvePrincipal, getService].some(value => typeof value !== "function")) {
     throw new TypeError("calendar_import_router_configuration_invalid");
   }
+  const observe = createImportHttpObserver({ logger, monotonicClock, slowMs: diagnosticSlowMs ?? HTTP_SLOW_MS });
   const router = express.Router();
   router.use((_req, res, next) => {
     res.setHeader("Cache-Control", "private, no-store");
@@ -48,9 +86,9 @@ function createCalendarImportRouter({ authenticate, resolvePrincipal, getService
     next();
   });
   router.use(express.json({ limit: "16kb", strict: true }));
-  const call = (key, operation, { capabilities = false, admission = false } = {}) => async (req, res, next) => {
+  const call = (key, operation, { capabilities = false, admission = false, diagnosticStage = null } = {}) => async (req, res, next) => {
     try {
-      const principal = await resolvePrincipal(req.user);
+      const principal = diagnosticStage ? await observe("principal_resolution", () => resolvePrincipal(req.user)) : await resolvePrincipal(req.user);
       if (!isAuthenticatedSocialPrincipal(principal)) fail("import_session_required", 401);
       const service = getService();
       const context = isOperationalCalendarImportsRuntime(service) ? service.contextForPrincipal(principal)
@@ -60,14 +98,14 @@ function createCalendarImportRouter({ authenticate, resolvePrincipal, getService
         fail("import_unavailable", 503);
       }
       if (admission && typeof service.canAdmit === "function" && service.canAdmit(context) !== true) fail("import_pilot_admission_closed", 503);
-      let result = await operation(service, context, req);
+      let result = diagnosticStage ? await observe(diagnosticStage, () => operation(service, context, req)) : await operation(service, context, req);
       if (capabilities && result.enabled === true) result = { ...result, identity: { companyId: context.companyId, userId: context.userId } };
       // A grant is intentionally returned only to the authenticated original owner.
       // No retry wrapper: a failed POST may already have committed.
       res.json(key ? { ok: true, [key]: result } : { ok: true, ...result });
     } catch (error) { next(error); }
   };
-  router.get("/capabilities", call(null, (service, context) => service.capabilities(context), { capabilities: true }));
+  router.get("/capabilities", call(null, (service, context) => service.capabilities(context), { capabilities: true, diagnosticStage: "capability_read" }));
   router.post("/uploads", call("upload", (service, context, req) => service.upload.start(context,
     body(req, ["idempotencyKey", "kind", "mimeType", "sizeBytes", "sha256"])), { admission: true }));
   router.get("/uploads/:id", call("upload", (service, context, req) => service.upload.status(context, { uploadId: uploadId(req) })));
@@ -91,7 +129,7 @@ function createCalendarImportRouter({ authenticate, resolvePrincipal, getService
     if (!UUID.test(req.params.assetId || "")) fail("import_not_found", 404);
     if (!service.preparation) fail("import_preparation_unavailable", 503);
     return service.preparation.request(context, { ...body(req, ["uploadId", "idempotencyKey", "expectedMediaRevision", "selection"]), assetId: req.params.assetId.toLowerCase() });
-  }, { admission: true }));
+  }, { admission: true, diagnosticStage: "prepare_transaction" }));
   router.get("/assets/:assetId", call("asset", (service, context, req) => {
     if (!UUID.test(req.params.assetId || "")) fail("import_not_found", 404);
     if (!service.preparation) fail("import_preparation_unavailable", 503);
@@ -122,4 +160,4 @@ function createCalendarImportRouter({ authenticate, resolvePrincipal, getService
   });
   return router;
 }
-module.exports = { createCalendarImportRouter };
+module.exports = { HTTP_DIAGNOSTIC_STAGES, createCalendarImportRouter, createImportHttpObserver };

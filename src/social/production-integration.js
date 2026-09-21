@@ -144,7 +144,7 @@ function createProductionSocialIntegration(options = {}) {
         getService: () => runtime?.calendar?.imports?.preview, getScheduledService: () => runtime?.calendar?.imports?.scheduling }));
       router.use("/calendar/imports", require("./calendar/imports/router").createCalendarImportRouter({
         authenticate: authenticateSocial, resolvePrincipal: claims => runtime.auth.fromVerifiedJwt(claims),
-        getService: () => runtime?.calendar?.imports }));
+        getService: () => runtime?.calendar?.imports, logger: dependencies.logger }));
       router.use("/calendar", require("./calendar/router").createCalendarRouter({
         authenticate: authenticateSocial, getService: () => runtime?.calendar, logger: dependencies.logger }));
       router.use(createInstagramOAuthRouter({ authenticate: authenticateSocial, visualReturn,

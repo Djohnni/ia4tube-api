@@ -38,7 +38,7 @@ async function createWorkflowOperationalComponents({ enabled = false, store, own
   const upload = createCalendarImportUploadService({ store, provider, enabled: true, clock });
   const preparation = createPreparationQueue({ store, dispatcher: preparationRunner, resultStore, accessPolicy, enabled: true, catalog,
     allowSyntheticForTests: allowControlledForTests, clock });
-  const tick = createWorkflowCoordinatorTick({ store, owner, journal, inspectionRunner, preparationRunner, upload, preparation, accessPolicy });
+  const tick = createWorkflowCoordinatorTick({ store, owner, journal, inspectionRunner, preparationRunner, upload, preparation, accessPolicy, diagnostic });
   const vmPull = journal.transport.kind === "vm" ? createVmPullRouter({ journal, key: bridgeKey, accessPolicy, clock }) : null;
   return Object.freeze({ available: true, bridge, journal, worker, preparationRunner, inspectionRunner, inspector, provider, upload, preparation, resultStore,
     tick, handlePrivateRequest: async (req, res) => vmPull && await vmPull.handle(req, res) || bridge.handle(req, res) });

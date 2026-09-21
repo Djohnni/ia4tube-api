@@ -85,7 +85,7 @@ async function createProductionMediaPilot({env=process.env,tenantPool,clock=Date
   if(env.SOCIAL_MEDIA_IMPORTS_ENABLED!=='true'||process.platform!=='linux')fail('enablement_invalid');
   const {config,music,admissionFence}=await loadProductionPilotFiles({env,clock});
   let capacityPool,transferPool,loop,closed=false,closing=false,closePromise;
-  const report=code=>logger?.error?.({component:'calendar_media_pilot',code});
+  const report=value=>logger?.error?.(typeof value==='string'?{component:'calendar_media_pilot',code:value}:value);
   const apiGitSha=typeof env.RENDER_GIT_COMMIT==='string'&&/^[a-f0-9]{40}$/i.test(env.RENDER_GIT_COMMIT)?env.RENDER_GIT_COMMIT.toLowerCase():null;
   const gates=Object.freeze({connectionEnabled:env.SOCIAL_EXTERNAL_CONNECTION_ENABLED==='true',
     publicationEnabled:env.SOCIAL_EXTERNAL_PUBLICATION_ENABLED==='true',metaWindowEnabled:env.META_APP_REVIEW_WINDOW_ENABLED==='true'});

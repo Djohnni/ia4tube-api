@@ -7,7 +7,8 @@ const {createInstagramOAuthStateEnvelope}=require("../src/social/oauth/instagram
 const {createProductionSession}=require("../src/social/production-session");
 const {createSocialAuthAdapter}=require("../src/social/auth-adapter");
 const {databaseTargetFingerprint}=require("../src/persistence/postgres/config");
-const {initializeSocialServerRuntime,safeErrorCode}=require("../src/social/server-runtime");
+const {MAX_DIAGNOSTIC_ELAPSED_MS,createSocialDiagnosticLogger,initializeSocialServerRuntime,safeErrorCode,
+ sanitizeSocialDiagnostic}=require("../src/social/server-runtime");
 const {safeRuntimeError}=require("../src/social/runtime");
 const {fixtureContext}=require("./helpers/publication-atomic-memory-pool");
 const {loadProductionOperationPolicy}=require("../src/social/production-operation-policy");
@@ -34,6 +35,52 @@ test("runtime diagnostics expose only a bounded stage code",()=>{
  assert.equal(Object.hasOwn(safe,"cause"),false);
  const coded=Object.assign(new Error("not logged"),{code:"postgres_schema_owner_mismatch"});
  assert.equal(safeRuntimeError(coded,"social_runtime_schema_verification_failed"),coded);
+});
+test("social diagnostics expose only exact allowlisted data fields without reading accessors",()=>{
+ let extraReads=0,allowedReads=0;
+ const value={component:"calendar_media_http",code:"calendar_media_http_slow",stage:"prepare_transaction",elapsedMs:51000,
+   companyId:"private-company-id",media:"private-media",message:"private-message",secret:"private-secret"};
+ Object.defineProperty(value,"extraAccessor",{enumerable:true,get(){extraReads++;throw new Error("private-extra-getter");}});
+ const safe=sanitizeSocialDiagnostic(value);
+ assert.deepEqual(safe,{component:"calendar_media_http",code:"calendar_media_http_slow",stage:"prepare_transaction",elapsedMs:51000});
+ assert.equal(Object.isFrozen(safe),true);assert.equal(extraReads,0);
+ const accessor={code:"calendar_media_http_failed",stage:"capability_read",elapsedMs:1};
+ Object.defineProperty(accessor,"component",{enumerable:true,get(){allowedReads++;return "calendar_media_http";}});
+ assert.equal(sanitizeSocialDiagnostic(accessor),null);assert.equal(allowedReads,0);
+ const inherited=Object.create({component:"calendar_media_http"});
+ Object.assign(inherited,{code:"calendar_media_http_failed",stage:"capability_read",elapsedMs:1});
+ assert.equal(sanitizeSocialDiagnostic(inherited),null);
+});
+test("social diagnostics reject unknown taxonomy and invalid elapsed bounds",()=>{
+ const base={component:"workflow_coordinator_tick",code:"workflow_tick_stage_slow",stage:"pending_scan",elapsedMs:1};
+ for(const patch of [
+   {component:"private_component"},{code:"private_secret"},{stage:"private_stage"},{elapsedMs:-1},
+   {elapsedMs:MAX_DIAGNOSTIC_ELAPSED_MS+1},{elapsedMs:1.5},{stage:undefined},{elapsedMs:undefined}
+ ]) assert.equal(sanitizeSocialDiagnostic({...base,...patch}),null);
+ assert.deepEqual(sanitizeSocialDiagnostic({component:"social_postgres",code:"unexpected_idle_client_error"}),
+   {component:"social_postgres",code:"unexpected_idle_client_error"});
+ assert.deepEqual(sanitizeSocialDiagnostic({component:"calendar_media_pilot",code:"calendar_media_progress_attention"}),
+   {component:"calendar_media_pilot",code:"calendar_media_progress_attention"});
+});
+test("social diagnostic sink receives only sanitized objects and failures never affect the caller",async()=>{
+ const received=[];
+ const logger=createSocialDiagnosticLogger({
+   info(value){received.push(value);},
+   warn(){throw new Error("private-sink-failure");},
+   error(){return Promise.reject(new Error("private-async-sink-failure"));}
+ });
+ const input={component:"calendar_media_http",code:"calendar_media_http_failed",stage:"principal_resolution",elapsedMs:7,
+   userId:"private-user",message:"private-message"};
+ assert.doesNotThrow(()=>logger.info(input,"private-extra-argument"));
+ assert.deepEqual(received,[{component:"calendar_media_http",code:"calendar_media_http_failed",stage:"principal_resolution",elapsedMs:7}]);
+ assert.doesNotThrow(()=>logger.warn(input));assert.doesNotThrow(()=>logger.error(input));
+ assert.doesNotThrow(()=>logger.info({...input,code:"private-secret"}));assert.equal(received.length,1);
+ await new Promise(resolve=>setImmediate(resolve));
+});
+test("server uses the sanitized social diagnostic logger instead of constant messages",()=>{
+ const source=fs.readFileSync(path.join(__dirname,"..","server.js"),"utf8");
+ assert.match(source,/createSocialDiagnosticLogger\(console\)/);
+ assert.doesNotMatch(source,/Vinculo da empresa indisponivel|Operacao recusada/);
 });
 test("production provider and authenticated state use official callback, never staging, with no network",()=>{
  const env=environment(),config=loadInstagramOAuthConfig(env),key=crypto.randomBytes(32);

@@ -8,6 +8,96 @@ const {
 
 const SHUTDOWN_TIMEOUT_MS = 10000;
 const SAFE_ERROR_CODE = /^[a-z0-9_]{2,96}$/i;
+const MAX_DIAGNOSTIC_ELAPSED_MS = 300000;
+const SAFE_DIAGNOSTIC_COMPONENTS = new Set([
+  "calendar_media_http",
+  "calendar_media_pilot",
+  "social_calendar",
+  "social_postgres",
+  "social_tenant_provisioning",
+  "workflow_coordinator_tick"
+]);
+const SAFE_DIAGNOSTIC_CODES = new Set([
+  "calendar_media_http_failed",
+  "calendar_media_http_slow",
+  "calendar_media_progress_attention",
+  "calendar_read_connection_failed",
+  "calendar_read_connection_retry",
+  "social_tenant_binding_conflict",
+  "social_tenant_owner_temporary",
+  "social_tenant_owner_unavailable",
+  "social_tenant_provisioning_busy",
+  "social_tenant_provisioning_shutdown_pending",
+  "social_tenant_provisioning_timeout",
+  "social_tenant_provisioning_unavailable",
+  "unexpected_idle_client_error",
+  "workflow_tick_stage_failed",
+  "workflow_tick_stage_recovered",
+  "workflow_tick_stage_slow"
+]);
+const SAFE_DIAGNOSTIC_STAGES = new Set([
+  "capability_read",
+  "inspection_resume",
+  "pending_scan",
+  "preparation_dispatch",
+  "preparation_reconcile",
+  "preparation_resume",
+  "prepare_transaction",
+  "principal_resolution",
+  "unresolved_before_dispatch",
+  "unresolved_before_inspection",
+  "unresolved_before_preparation",
+  "unresolved_final",
+  "upload_complete"
+]);
+
+function ownDataValue(value, key) {
+  const descriptor = Object.getOwnPropertyDescriptor(value, key);
+  return descriptor && Object.hasOwn(descriptor, "value")
+    ? descriptor.value
+    : undefined;
+}
+
+// Diagnostics are data-minimized at the final output boundary. Do not enumerate
+// or spread the input: it can carry request data, identifiers or accessor traps.
+function sanitizeSocialDiagnostic(value) {
+  try {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+    const component = ownDataValue(value, "component");
+    const code = ownDataValue(value, "code");
+    if (!SAFE_DIAGNOSTIC_COMPONENTS.has(component) || !SAFE_DIAGNOSTIC_CODES.has(code)) return null;
+    const stage = ownDataValue(value, "stage");
+    const elapsedMs = ownDataValue(value, "elapsedMs");
+    if ((stage === undefined) !== (elapsedMs === undefined)) return null;
+    if (stage !== undefined && (!SAFE_DIAGNOSTIC_STAGES.has(stage) ||
+        !Number.isSafeInteger(elapsedMs) || elapsedMs < 0 || elapsedMs > MAX_DIAGNOSTIC_ELAPSED_MS)) return null;
+    return Object.freeze({ component, code, ...(stage === undefined ? {} : { stage, elapsedMs }) });
+  } catch {
+    return null;
+  }
+}
+
+function createSocialDiagnosticLogger(sink = console) {
+  function emit(method, value) {
+    const safe = sanitizeSocialDiagnostic(value);
+    if (!safe) return;
+    try {
+      const write = sink?.[method];
+      if (typeof write !== "function") return;
+      const pending = write.call(sink, safe);
+      if (pending && typeof pending.then === "function") {
+        Promise.resolve(pending).catch(() => {});
+      }
+    } catch {
+      // Observability must never alter authentication, media or shutdown flow.
+    }
+  }
+  return Object.freeze({
+    info(value) { emit("info", value); },
+    warn(value) { emit("warn", value); },
+    error(value) { emit("error", value); }
+  });
+}
 
 function safeErrorCode(error, fallback = "social_runtime_failed") {
   const code = String(error?.code || "");
@@ -220,8 +310,11 @@ function installSocialRuntimeShutdown(options = {}) {
 }
 
 module.exports = {
+  MAX_DIAGNOSTIC_ELAPSED_MS,
   SHUTDOWN_TIMEOUT_MS,
+  createSocialDiagnosticLogger,
   initializeSocialServerRuntime,
   installSocialRuntimeShutdown,
-  safeErrorCode
+  safeErrorCode,
+  sanitizeSocialDiagnostic
 };
