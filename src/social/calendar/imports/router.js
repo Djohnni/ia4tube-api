@@ -146,7 +146,7 @@ function createCalendarImportRouter({ authenticate, resolvePrincipal, getService
     return service.submissions;
   }
   router.post("/assets/:assetId/calendar-submissions", call("submission", (service, context, req) =>
-    submissions(service).request(context, { ...body(req, ["uploadId", "idempotencyKey", "expectedMediaRevision", "selection", "caption"]),
+    submissions(service).request(context, { ...body(req, ["uploadId", "idempotencyKey", "expectedMediaRevision", "selection", "caption", "schedule"]),
       assetId: req.params.assetId }), { admission: true }));
   router.get("/assets/:assetId/calendar-submissions/by-key/:key", call("submission", (service, context, req) =>
     submissions(service).byKey(context, req.params.assetId, req.params.key)));

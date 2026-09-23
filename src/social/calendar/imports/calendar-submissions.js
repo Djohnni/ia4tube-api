@@ -15,6 +15,20 @@ const hash = value => crypto.createHash("sha256").update(JSON.stringify(canonica
 const keyHash = value => crypto.createHash("sha256").update(value).digest("hex");
 const idForRequest = (context, assetId, key) => idFor(context.companyId, `upload:${assetId}:${keyHash(context.userId + ":" + key)}`);
 function fail(code, statusCode = 409) { throw Object.assign(new Error(`calendar_import_submission_${code}`), { code: `calendar_import_submission_${code}`, statusCode }); }
+function requestedSchedule(value) {
+  if (value === undefined || value === null) return null;
+  if (typeof value !== "object" || Array.isArray(value) || Object.keys(value).some(key => !["date", "time", "timeZone"].includes(key)) ||
+      typeof value.date !== "string" || typeof value.time !== "string" || value.timeZone !== undefined && value.timeZone !== TIME_ZONE) fail("schedule_invalid", 400);
+  try { dateTime(value.date, value.time); } catch { fail("schedule_invalid", 400); }
+  return { date: value.date, time: value.time, timeZone: TIME_ZONE };
+}
+function requestedSlot(state, schedule, now, exceptId) {
+  const scheduledAt = dateTime(schedule.date, schedule.time);
+  if (scheduledAt <= now || scheduledAt > now + 180 * 86400000) fail("time_outside_window", 400);
+  if (Object.values(state.jobs).some(job => job.id !== exceptId && job.phase !== "cancelled" && job.scheduledAt === scheduledAt) ||
+      Object.values(state.importSubmissions || {}).some(row => row.id !== exceptId && activeStates.has(row.state) && row.scheduledAt === scheduledAt)) fail("time_occupied");
+  return { date: schedule.date, time: schedule.time, scheduledAt };
+}
 function validateCalendarSubmissions(state) {
   if (state.importSubmissions === undefined) return;
   if (!state.importSubmissions || Array.isArray(state.importSubmissions) || Object.keys(state.importSubmissions).length > MAX_ITEMS) fail("state_invalid", 503);
@@ -25,6 +39,11 @@ function validateCalendarSubmissions(state) {
         ![...activeStates, "scheduled", "attention", "cancelled"].includes(row.state) ||
         !Number.isSafeInteger(row.mediaRevision) || row.mediaRevision < 0 || typeof row.envelope !== "string" ||
         !Number.isSafeInteger(row.scheduledAt) || row.scheduledAt !== dateTime(row.date, row.time)) fail("state_invalid", 503);
+    if (row.request.schedule !== undefined) {
+      let schedule;
+      try { schedule = requestedSchedule(row.request.schedule); } catch { fail("state_invalid", 503); }
+      if (!schedule || !isDeepStrictEqual(schedule, row.request.schedule) || schedule.date !== row.date || schedule.time !== row.time) fail("state_invalid", 503);
+    }
   }
 }
 function reserveSlot(state, now, exceptId, preferred = null) {
@@ -63,11 +82,14 @@ function createCalendarSubmissions({ store, uploadStore, preparation, grants, ac
   }
   async function request(context, input) {
     authorize(context);
-    if (!input || Array.isArray(input) || Object.keys(input).some(k => !["assetId", "uploadId", "idempotencyKey", "expectedMediaRevision", "selection", "caption"].includes(k)) ||
+    if (!input || Array.isArray(input) || Object.keys(input).some(k => !["assetId", "uploadId", "idempotencyKey", "expectedMediaRevision", "selection", "caption", "schedule"].includes(k)) ||
         !UUID.test(input.assetId || "") || !UUID.test(input.uploadId || "") || !KEY.test(input.idempotencyKey || "") ||
         !Number.isSafeInteger(input.expectedMediaRevision) || input.expectedMediaRevision < 0) fail("invalid", 400);
-    const chosen = selection(input.selection), explicitCaption = input.caption === undefined ? null : caption(input.caption);
-    const clientHash = hash([input.assetId, input.uploadId, input.idempotencyKey, input.expectedMediaRevision, chosen, explicitCaption]);
+    const chosen = selection(input.selection), explicitCaption = input.caption === undefined ? null : caption(input.caption), schedule = requestedSchedule(input.schedule);
+    // Keep the exact legacy hash for absent/null schedules, so old durable
+    // intentions still recover after this additive contract update.
+    const clientHash = hash([input.assetId, input.uploadId, input.idempotencyKey, input.expectedMediaRevision, chosen, explicitCaption,
+      ...(schedule ? [schedule] : [])]);
     const id = idForRequest(context, input.assetId, input.idempotencyKey);
     // Recover first: a retry never needs a live phone session's old preparation
     // revision and never changes a later edit, pause, cancellation or notice.
@@ -103,13 +125,14 @@ function createCalendarSubmissions({ store, uploadStore, preparation, grants, ac
       }
       const recordInput = { assetId: input.assetId, uploadId: input.uploadId, idempotencyKey: input.idempotencyKey,
         expectedMediaRevision: input.expectedMediaRevision, selection: chosen, caption: submissionCaption,
-        sourceSha256: upload.sha256, reuseRevision: reuse ? status.mediaRevision : null };
+        sourceSha256: upload.sha256, reuseRevision: reuse ? status.mediaRevision : null, ...(schedule ? { schedule } : {}) };
+      const slot = schedule ? requestedSlot(state, schedule, clock(), id) : reserveSlot(state, clock(), id, original);
       const requestHash = hash(recordInput), preferences = state.preferences;
       const automatic = preferences.enabled && sameBinding(preferences.binding, connection?.binding);
       const envelope = grants.issueSubmission({ ...context, submissionId: id, requestHash,
         ...(automatic ? { binding: connection.binding, revision: preferences.revision } : {}) });
       const row = { id, companyId: context.companyId, userId: context.userId, clientHash, requestHash, request: recordInput, envelope,
-        ...reserveSlot(state, clock(), id, original), state: "accepted", revision: 1, mediaRevision: 0, errorCode: null, createdAt: clock(), updatedAt: clock() };
+        ...slot, state: "accepted", revision: 1, mediaRevision: 0, errorCode: null, createdAt: clock(), updatedAt: clock() };
       state.importSubmissions[id] = row;
       return receipt(row, state);
     });
@@ -129,6 +152,9 @@ function createCalendarSubmissions({ store, uploadStore, preparation, grants, ac
         const delegated = grants.verifySubmission(row.envelope, companyId, row.userId);
         if (!delegated || delegated.submissionId !== row.id || delegated.requestHash !== row.requestHash || row.requestHash !== hash(row.request)) fail("authority_changed");
         const input = row.request;
+        // A chosen date is user intent, not a suggestion. Do not spend on new
+        // preparation or move the publication to another day after it expires.
+        if (input.schedule && dateTime(input.schedule.date, input.schedule.time) <= clock()) fail("time_outside_window", 400);
         const upload = await uploadStore.update(companyId, state => state.uploads[input.uploadId]);
         if (!upload || upload.assetId !== input.assetId || upload.userId !== row.userId || upload.sha256 !== input.sourceSha256) fail("source_changed");
         if (upload.state === "verifying") continue;
@@ -156,7 +182,8 @@ function createCalendarSubmissions({ store, uploadStore, preparation, grants, ac
           const current = state.importSubmissions[row.id];
           if (!activeStates.has(current.state) || state.jobs[row.id]) return;
           if (current.requestHash !== delegated.requestHash || hash(current.request) !== delegated.requestHash) fail("authority_changed");
-          if (current.scheduledAt <= clock() || Object.values(state.jobs).some(job => job.phase !== "cancelled" && job.scheduledAt === current.scheduledAt))
+          if (input.schedule) Object.assign(current, requestedSlot(state, input.schedule, clock(), row.id));
+          else if (current.scheduledAt <= clock() || Object.values(state.jobs).some(job => job.phase !== "cancelled" && job.scheduledAt === current.scheduledAt))
             Object.assign(current, reserveSlot(state, clock(), row.id, current));
           const automatic = Boolean(delegated.binding && state.preferences.enabled && state.preferences.revision === delegated.preferenceRevision &&
             sameBinding(state.preferences.binding, delegated.binding) && sameBinding(connection?.binding, delegated.binding));
