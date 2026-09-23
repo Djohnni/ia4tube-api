@@ -45,7 +45,7 @@ data class ImportPreparationRunView(val status: ImportPreparationRunStatus, val 
     val preparation: ImportPreparationRecord? = null, val preview: ImportPrivatePreview? = null, val errorCode: String? = null,
     val confirmation: ImportPreviewConfirmation? = null, val availability: ImportScheduleAvailability? = null,
     val scheduleReceipt: ImportScheduleReceipt? = null, val generatedSourceIntent: ImportGeneratedSourceIntent? = null,
-    val diagnosticStage: ImportPreparationDiagnosticStage? = null) {
+    val diagnosticStage: ImportPreparationDiagnosticStage? = null, val diagnosticHttpStatus: Int? = null) {
     override fun toString() = "ImportPreparationRunView(status=$status, content=redacted)"
 }
 private class ImportPreparationFailure(val code: String) : Exception("Confira a preparação existente antes de tentar novamente.")
@@ -369,14 +369,15 @@ class GalleryImportPreparationCoordinator internal constructor(
     }
     private fun emit(run: Run, status: ImportPreparationRunStatus, record: ImportPreparationRecord? = null,
                      preview: ImportPrivatePreview? = null, error: String? = null, availability: ImportScheduleAvailability? = null,
-                     receipt: ImportScheduleReceipt? = null): ImportPreparationRunView = synchronized(viewLock) {
+                     receipt: ImportScheduleReceipt? = null, httpStatus: Int? = null): ImportPreparationRunView = synchronized(viewLock) {
         guard(run, allowPaused = status == ImportPreparationRunStatus.PAUSED)
         val current = run.checkpoint?.state
         val safeState = if (current?.phase == ImportPhase.READY && status != ImportPreparationRunStatus.PREVIEW_AVAILABLE)
             current.copy(phase = ImportPhase.PREPARING, prepared = emptyList(), previewConfirmedRevision = null) else current
         ImportPreparationRunView(status, safeState, record, preview,
             error?.takeIf { it.matches(Regex("[a-z0-9_]{1,100}")) }, confirmedPreview?.takeIf { preview != null && matches(it, preview) }, availability, receipt,
-            run.generatedIntent ?: run.checkpoint?.generatedSource, run.diagnosticStage.takeIf { error != null }).also {
+            run.generatedIntent ?: run.checkpoint?.generatedSource, run.diagnosticStage.takeIf { error != null },
+            httpStatus?.takeIf { error != null && it in 400..599 }).also {
             visibleOwner = run.owner; visibleToken = run.token; visible = it; notify(it)
         }
     }
@@ -420,7 +421,8 @@ class GalleryImportPreparationCoordinator internal constructor(
             return emit(current, if (current.checkpoint == null && current.generatedIntent != null) ImportPreparationRunStatus.SOURCE_RECONCILIATION
             else if (current.checkpoint?.scheduleBinding != null) ImportPreparationRunStatus.SCHEDULE_RECONCILIATION
             else if (current.checkpoint?.preparationIntent?.acceptedMediaRevision == null && current.checkpoint?.preparationIntent != null)
-                ImportPreparationRunStatus.RECONCILIATION_REQUIRED else ImportPreparationRunStatus.ATTENTION, error = code)
+                ImportPreparationRunStatus.RECONCILIATION_REQUIRED else ImportPreparationRunStatus.ATTENTION, error = code,
+                httpStatus = (error as? ImportApiFailure)?.status?.takeIf { it in 400..599 })
         } finally {
             active = null
             ownerGate?.let { gate -> if (ownerLocked) gate.mutex.unlock(); releaseOwner(retainedOwner!!, gate) }

@@ -4,6 +4,21 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class ImportPreparationDiagnosticTest {
+    @Test fun `http failures have a distinct bounded numeric reference without response content`() {
+        val statuses = listOf(401, 403, 404, 503)
+        val messages = statuses.map { importPreparationDiagnostic(ImportPreparationDiagnosticStage.PREVIEW, "import_request_rejected", it) }
+        assertEquals(statuses.size, messages.toSet().size)
+        messages.zip(statuses).forEach { (message, status) ->
+            assertTrue(message.contains("P14")); assertTrue(message.contains("HTTP $status."))
+            assertTrue(message.contains("consulta da prévia")); assertTrue(message.contains("rascunho foi mantido"))
+        }
+        for (status in listOf(null, -1, 200, 399, 600, Int.MAX_VALUE)) {
+            val message = importPreparationDiagnostic(ImportPreparationDiagnosticStage.STATUS, "import_request_rejected", status)
+            assertTrue(message.contains("P14")); assertFalse(message.contains("HTTP"))
+        }
+        val untrusted = importPreparationDiagnostic(null, "https://private.invalid/?token=DO_NOT_DISPLAY", 503)
+        assertFalse(untrusted.contains("HTTP")); assertFalse(untrusted.contains("DO_NOT_DISPLAY")); assertTrue(untrusted.contains("P00"))
+    }
     @Test fun `each restore step is distinguishable without exposing input`() {
         val messages = ImportPreparationDiagnosticStage.entries.map { importPreparationDiagnostic(it, "import_response_invalid") }
         assertEquals(ImportPreparationDiagnosticStage.entries.size, messages.toSet().size)

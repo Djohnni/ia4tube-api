@@ -41,6 +41,7 @@ class GalleryImportPreparationCoordinatorTest {
         var requestHook: (suspend () -> Unit)? = null
         var previewHook: ((ImportPrivatePreview) -> ImportPrivatePreview)? = null
         var statusFailure: Boolean = false
+        var statusException: ImportApiFailure? = null
         init {
             val ticket = ImportUploadTicket(data.uploadId, data.assetId, data.sourceSha, 12)
             val selected = if (videoDurationMs == null) data.selection else data.selection.copy(kind = ImportMediaKind.VIDEO,
@@ -56,6 +57,7 @@ class GalleryImportPreparationCoordinatorTest {
                 return ImportCapabilities(true, capabilityOwner, preparationEnabled = capabilityEnabled)
             }
             override suspend fun status(owner: ImportOwner, assetId: String): ImportPreparationRecord {
+                statusException?.let { throw it }
                 if (statusFailure) throw ImportApiFailure("import_response_invalid")
                 statuses++; assertEquals(data.owner, owner); assertEquals(data.assetId, assetId); return record
             }
@@ -87,6 +89,31 @@ class GalleryImportPreparationCoordinatorTest {
             if (testOnly) record = record.copy(testOnly = true, previewDigest = ImportPreparationProtocol.fingerprint(
                 record.kind!!, record.configuration!!, true, record.variants))
         }
+    }
+
+    @Test fun restoredHttpStatusIsBoundedAndNeverChangesCheckpointOrRepeatsPreparation() = runBlocking {
+        val fixture = Fixture()
+        fixture.coordinator().request(); fixture.ready()
+        val saved = fixture.saved()
+        for (status in listOf(null, -1, 200, 399, 401, 403, 404, 503, 599, 600, Int.MAX_VALUE)) {
+            fixture.statusException = ImportApiFailure("import_request_rejected", status)
+            val view = fixture.coordinator().restore()
+            assertEquals(ImportPreparationDiagnosticStage.STATUS, view.diagnosticStage)
+            assertEquals(status?.takeIf { it in 400..599 }, view.diagnosticHttpStatus)
+            assertEquals(ImportPreparationRunStatus.ATTENTION, view.status)
+            assertEquals(saved, fixture.saved()); assertEquals(1, fixture.creations); assertEquals(1, fixture.keys.size)
+            assertNull(view.preview)
+        }
+        fixture.statusException = null
+        fixture.previewHook = { throw ImportApiFailure("import_request_rejected", 503) }
+        val previewFailed = fixture.coordinator().restore()
+        assertEquals(ImportPreparationDiagnosticStage.PREVIEW, previewFailed.diagnosticStage)
+        assertEquals(503, previewFailed.diagnosticHttpStatus)
+        assertEquals(saved, fixture.saved()); assertEquals(1, fixture.creations)
+        fixture.previewHook = null
+        val restored = fixture.coordinator().restore()
+        assertEquals(ImportPreparationRunStatus.PREVIEW_AVAILABLE, restored.status)
+        assertNull(restored.diagnosticStage); assertNull(restored.diagnosticHttpStatus)
     }
 
     @Test fun restoreDistinguishesStatusFailureFromPreviewFailureWithoutRepeatingPreparation() = runBlocking {

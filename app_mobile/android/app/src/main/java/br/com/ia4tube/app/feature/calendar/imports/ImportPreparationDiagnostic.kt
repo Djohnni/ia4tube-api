@@ -1,7 +1,7 @@
 package br.com.ia4tube.app.feature.calendar.imports
 
 /** Only fixed labels may reach the screen: never interpolate HTTP bodies, URLs or credentials. */
-internal fun importPreparationDiagnostic(stage: ImportPreparationDiagnosticStage?, code: String): String {
+internal fun importPreparationDiagnostic(stage: ImportPreparationDiagnosticStage?, code: String, httpStatus: Int? = null): String {
     val step = when (stage) {
         ImportPreparationDiagnosticStage.LOCAL_STATE -> "rascunho salvo"
         ImportPreparationDiagnosticStage.CAPABILITIES -> "disponibilidade da importação"
@@ -25,7 +25,9 @@ internal fun importPreparationDiagnostic(stage: ImportPreparationDiagnosticStage
         "import_preparation_transition_invalid" -> "P11"
         "import_preparation_invalid_result" -> "P12"
         "checkpoint_conflict" -> "P13"
+        "import_request_rejected" -> "P14"
         else -> "P00"
     }
-    return "Não foi possível concluir: $step. Referência $reference. O rascunho foi mantido; não envie outro arquivo para tentar corrigir."
+    val http = httpStatus?.takeIf { code == "import_request_rejected" && it in 400..599 }?.let { " HTTP $it." } ?: ""
+    return "Não foi possível concluir: $step. Referência $reference.$http O rascunho foi mantido; não envie outro arquivo para tentar corrigir."
 }
