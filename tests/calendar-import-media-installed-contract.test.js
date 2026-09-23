@@ -47,7 +47,11 @@ test("installed native source closes high descriptors, confines reads and retain
 test("installation never starts a worker, carries production credentials or overwrites a prior target", () => {
   const root = path.resolve(__dirname, "../scripts/media-vm");
   const installer = fs.readFileSync(path.join(root, "install-ubuntu24.sh"), "utf8"), pack = fs.readFileSync(path.join(root, "package-install.cjs"), "utf8");
-  assert.match(installer, /EXISTING_TARGET_REFUSED/); assert.match(installer, /--synthetic-proof/);
+  assert.match(installer, /run fresh_targets \/bin\/bash -c/);
+  assert.match(installer, /\[\[ ! -e "\$name" && ! -L "\$name" \]\] \|\| exit 77/);
+  assert.match(installer, /! getent passwd "\$name" >\/dev\/null \|\| exit 77/);
+  assert.match(installer, /! getent group "\$name" >\/dev\/null \|\| exit 77/);
+  assert.match(installer, /--synthetic-proof/);
   assert.match(installer, /loop,nosuid,nodev/); assert.match(installer, /VM_WORKER_STARTED=NO/);
   assert.doesNotMatch(installer + pack, /systemctl\s+(enable|start)|NOPASSWD:\s*ALL|fs\.readFileSync\([^\n]*bridge\.key/);
   assert.match(pack, /enabled: false/); assert.match(pack, /"src", "node_modules", "workflows"/);
