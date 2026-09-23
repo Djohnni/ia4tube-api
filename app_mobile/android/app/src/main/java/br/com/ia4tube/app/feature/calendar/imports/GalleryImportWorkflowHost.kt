@@ -18,6 +18,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.Lifecycle
@@ -75,11 +76,7 @@ fun GalleryImportWorkflowHost(tokenProvider: () -> String, generatedArtId: Strin
     BackHandler(onBack = back)
     val current = runtime
     if (current == null) {
-        Column(Modifier.fillMaxSize().padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-            TextButton(onClick = back) { Text("Voltar ao calendário") }
-            Text(if (generatedArtId != null) "Escolher música" else "Adicionar foto ou vídeo", style = MaterialTheme.typography.titleLarge)
-            if (loading) CircularProgressIndicator() else Text(error ?: "A sessão mudou. Abra novamente para continuar.")
-        }
+        GalleryImportWorkflowStatus(loading, error, generatedArtId != null, back)
         return
     }
     val state by current.state.collectAsState()
@@ -133,6 +130,19 @@ fun GalleryImportWorkflowHost(tokenProvider: () -> String, generatedArtId: Strin
         generatedArtId, generatedArtRevision, back, onScheduled, choose, generatedDestination)
 }
 
+/** Loading, unavailable and failed entry use the same compact dark panel as the editable workflow. */
+@Composable
+internal fun GalleryImportWorkflowStatus(loading: Boolean, error: String?, musicOnly: Boolean, onBack: () -> Unit) {
+    CompositionLocalProvider(LocalContentColor provides Color.White) {
+        Column(Modifier.fillMaxWidth().heightIn(max = importWorkflowMaxHeight()).background(Color(0xFF101218))
+            .verticalScroll(rememberScrollState()).padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            TextButton(onClick = onBack) { Text("Voltar ao calendário") }
+            Text(if (musicOnly) "Escolher música" else "Adicionar foto ou vídeo", style = MaterialTheme.typography.titleLarge)
+            if (loading) CircularProgressIndicator() else Text(error ?: "A sessão mudou. Abra novamente para continuar.")
+        }
+    }
+}
+
 @Composable
 internal fun GalleryImportWorkflowContent(view: ImportWorkflowView, runtime: GalleryImportWorkflowActions, tokenProvider: () -> String,
     generatedArtId: String?, generatedArtRevision: Long?, onBack: () -> Unit, onScheduled: (String) -> Unit,
@@ -178,7 +188,7 @@ internal fun GalleryImportWorkflowContent(view: ImportWorkflowView, runtime: Gal
         }
     }
     val uploadUi = galleryImportUploadPresentation(view.upload, view.busy, view.foreground, view.initialized, view.sessionValid)
-    Column(Modifier.fillMaxWidth().heightIn(max = 620.dp).background(Color(0xFF101218)).padding(horizontal = 12.dp, vertical = 8.dp)) {
+    Column(Modifier.fillMaxWidth().heightIn(max = importWorkflowMaxHeight()).background(Color(0xFF101218)).padding(horizontal = 12.dp, vertical = 8.dp)) {
         CompositionLocalProvider(LocalContentColor provides Color.White) {
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                 IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Voltar ao calendário") }
@@ -340,6 +350,10 @@ internal fun GalleryImportWorkflowContent(view: ImportWorkflowView, runtime: Gal
         confirmButton = { TextButton(onClick = { confirmCancel = false; runtime.cancelUpload() }) { Text("Cancelar envio") } },
         dismissButton = { TextButton(onClick = { confirmCancel = false }) { Text("Voltar") } })
 }
+
+// Bound the content, not ModalBottomSheet's anchor constraints; reserve its 48dp drag handle.
+@Composable
+private fun importWorkflowMaxHeight() = minOf(620.dp, (LocalConfiguration.current.screenHeightDp * 0.8f).dp - 48.dp)
 
 @Composable
 private fun importWorkflowButtonColors() = ButtonDefaults.buttonColors(disabledContainerColor = Color(0xFF343A46),

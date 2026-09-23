@@ -243,7 +243,7 @@ fun CalendarGallery(model: CalendarViewModel, token: String, backLabel: String =
         val closeImport = { showImport = false; generatedSource = null }
         ModalBottomSheet(onDismissRequest = closeImport,
             sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
-            containerColor = Color(0xFF101218)) {
+            containerColor = Color(0xFF101218), contentColor = Color.White) {
             GalleryImportWorkflowHost(tokenProvider = tokenProvider, generatedArtId = generatedSource?.id,
                 generatedArtRevision = generatedSource?.revision, generatedDestination = generatedSource?.destination,
                 autoOpenPicker = generatedSource == null,

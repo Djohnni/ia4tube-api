@@ -474,7 +474,7 @@ fun MonthlyPlanningScreen(
     if (showImport) {
         ModalBottomSheet(onDismissRequest = { showImport = false },
             sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
-            containerColor = Color(0xFF101218)) {
+            containerColor = Color(0xFF101218), contentColor = Color.White) {
             GalleryImportWorkflowHost(tokenProvider = tokenProvider,
                 autoOpenPicker = true,
                 onBack = { showImport = false },

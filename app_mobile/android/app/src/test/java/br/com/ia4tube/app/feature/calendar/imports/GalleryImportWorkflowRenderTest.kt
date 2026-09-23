@@ -6,14 +6,26 @@ import android.graphics.Canvas
 import android.graphics.Paint
 import android.os.Looper
 import android.view.View
+import android.view.ViewGroup
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.Image
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.material3.LocalContentColor
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.snapshots.Snapshot
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.semantics.*
+import androidx.compose.ui.text.TextLayoutResult
 import br.com.ia4tube.app.ui.theme.IA4TubeTheme
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import org.junit.Assert.*
@@ -49,6 +61,84 @@ class GalleryImportWorkflowRenderTest {
     @Test fun processingCannotRenderOrConfirmAnUnpreparedOriginal() = render(ready = false, fontScale = 1f, filename = "import-workflow-processing-preview.png")
     @Test fun videoAudioChoicesRemainReadableWithLargerText() = render(ready = true, fontScale = 1.4f,
         filename = "import-workflow-video-large-text-preview.png", video = true)
+
+    @Test @Config(qualifiers = "w411dp-h891dp-xhdpi")
+    fun loadingEntryIsCompactAndReadableOverTheGallery() = renderStatus(true, null, "loading")
+
+    @Test @Config(qualifiers = "w411dp-h891dp-xhdpi")
+    fun closedGateEntryIsCompactAndReadableOverTheGallery() = renderStatus(false,
+        "Adicionar foto ou vídeo ainda não está disponível para esta conta. Nenhum arquivo foi enviado.", "blocked")
+
+    @Test @Config(qualifiers = "w411dp-h891dp-xhdpi")
+    fun closedGatePhotoEntryUsesTheSameReadableCompactPanel() = renderStatus(false,
+        "Adicionar foto ou vídeo ainda não está disponível para esta conta. Nenhum arquivo foi enviado.", "blocked-photo", musicOnly = false)
+
+    @Test @Config(qualifiers = "w411dp-h891dp-xhdpi")
+    fun failedEntryKeepsLargerTextReadableOverTheGallery() = renderStatus(false,
+        "Não foi possível conferir a conta. Volte e abra novamente com a sessão atual.", "error", 1.5f)
+
+    @Test @Config(qualifiers = "w411dp-h891dp-xhdpi")
+    fun expiredSessionEntryUsesTheSameReadableCompactPanel() = renderStatus(false, null, "session", 1.5f)
+
+    @Test @Config(qualifiers = "w411dp-h891dp-xhdpi")
+    fun longEntryErrorIsBoundedAndScrollableWithoutHidingTheGallery() = renderStatus(false,
+        "Não foi possível conferir a conta. ".repeat(60), "long-error", 1.5f, longError = true)
+
+    private fun renderStatus(loading: Boolean, error: String?, name: String, fontScale: Float = 1f, longError: Boolean = false, musicOnly: Boolean = true) {
+        val controller = Robolectric.buildActivity(ComponentActivity::class.java)
+        val activity = controller.get(); activity.setTheme(android.R.style.Theme_Material_NoActionBar); controller.setup()
+        val config = android.content.res.Configuration(activity.resources.configuration).apply { this.fontScale = fontScale }
+        @Suppress("DEPRECATION") activity.resources.updateConfiguration(config, activity.resources.displayMetrics)
+        // Keep the indeterminate indicator visible without an unbounded Robolectric animation clock.
+        val animationScale = android.provider.Settings.Global.getFloat(activity.contentResolver,
+            android.provider.Settings.Global.ANIMATOR_DURATION_SCALE, 1f)
+        android.provider.Settings.Global.putFloat(activity.contentResolver, android.provider.Settings.Global.ANIMATOR_DURATION_SCALE, 0f)
+        var returns = 0
+        activity.setContent { MaterialTheme(colorScheme = lightColorScheme()) {
+            // A dark sheet must remain readable even when its parent page supplies dark text.
+            CompositionLocalProvider(LocalContentColor provides Color.Black) {
+                Box(Modifier.fillMaxSize().background(Color(0xFF1C4568)), contentAlignment = Alignment.BottomCenter) {
+                    GalleryImportWorkflowStatus(loading, error, musicOnly) { returns++ }
+                }
+            }
+        } }
+        try {
+            Snapshot.sendApplyNotifications(); shadowOf(Looper.getMainLooper()).idleFor(Duration.ofSeconds(2))
+            val root = activity.window.decorView
+            root.measure(View.MeasureSpec.makeMeasureSpec(822, View.MeasureSpec.EXACTLY), View.MeasureSpec.makeMeasureSpec(1782, View.MeasureSpec.EXACTLY))
+            root.layout(0, 0, 822, 1782); shadowOf(Looper.getMainLooper()).idleFor(Duration.ofSeconds(1))
+            Snapshot.sendApplyNotifications(); shadowOf(Looper.getMainLooper()).idle()
+            fun owners(view: View): List<SemanticsOwner> {
+                val own = if (view.javaClass.name == "androidx.compose.ui.platform.AndroidComposeView")
+                    listOf(view.javaClass.getMethod("getSemanticsOwner").invoke(view) as SemanticsOwner) else emptyList()
+                return own + if (view is ViewGroup) (0 until view.childCount).flatMap { owners(view.getChildAt(it)) } else emptyList()
+            }
+            fun descendants(node: SemanticsNode): List<SemanticsNode> = listOf(node) + node.children.flatMap(::descendants)
+            val nodes = owners(root).flatMap { descendants(it.rootSemanticsNode) }
+            fun label(node: SemanticsNode) = node.config.getOrNull(SemanticsProperties.Text)?.joinToString(" ") { it.text }.orEmpty()
+            val panel = nodes.single { it.config.getOrNull(SemanticsProperties.VerticalScrollAxisRange) != null }
+            val density = activity.resources.displayMetrics.density
+            assertTrue("Entry wraps content and leaves the gallery above it", panel.boundsInRoot.top > 1782 * 0.2f)
+            assertTrue("Every status respects the existing compact workflow ceiling", panel.boundsInRoot.height <= 620 * density + 1)
+            if (!longError) assertTrue("A short status must not expand to the maximum sheet height", panel.boundsInRoot.height < 1782 * 0.6f)
+            else assertTrue("Long errors stay reachable by scrolling", panel.config[SemanticsProperties.VerticalScrollAxisRange].maxValue() > 0)
+            val expected = listOfNotNull(if (musicOnly) "Escolher música" else "Adicionar foto ou vídeo",
+                if (loading) null else error ?: "A sessão mudou. Abra novamente para continuar.")
+            for (text in expected) {
+                val node = nodes.single { label(it) == text }
+                val layouts = mutableListOf<TextLayoutResult>()
+                assertTrue(node.config[SemanticsActions.GetTextLayoutResult].action!!.invoke(layouts))
+                assertEquals("Dark panel text must not inherit dark parent-page text", Color.White, layouts.single().layoutInput.style.color)
+            }
+            assertEquals("Rendering never dismisses or mutates the workflow", 0, returns)
+            val bitmap = Bitmap.createBitmap(822, 1782, Bitmap.Config.ARGB_8888); root.draw(Canvas(bitmap))
+            val output = File("build/reports/import-workflow-status-$name.png"); output.parentFile?.mkdirs()
+            output.outputStream().use { bitmap.compress(Bitmap.CompressFormat.PNG, 100, it) }; bitmap.recycle()
+        } finally {
+            controller.pause().stop().destroy(); shadowOf(Looper.getMainLooper()).idle()
+            android.provider.Settings.Global.putFloat(activity.contentResolver, android.provider.Settings.Global.ANIMATOR_DURATION_SCALE, animationScale)
+        }
+    }
 
     private fun render(ready: Boolean, fontScale: Float, filename: String, video: Boolean = false) {
         val f = ImportPreparationTestData

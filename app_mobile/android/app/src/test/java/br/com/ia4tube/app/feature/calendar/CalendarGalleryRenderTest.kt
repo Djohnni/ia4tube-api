@@ -12,9 +12,12 @@ import androidx.activity.compose.setContent
 import androidx.compose.foundation.Image
 import br.com.ia4tube.app.ui.theme.IA4TubeTheme
 import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.snapshots.Snapshot
 import androidx.compose.ui.semantics.*
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.text.TextLayoutResult
 import br.com.ia4tube.app.ui.components.ScreenScaffold
 import org.junit.Assert.*
 import org.junit.Test
@@ -58,6 +61,9 @@ class CalendarGalleryRenderTest {
         val config = android.content.res.Configuration(activity.resources.configuration).apply { this.fontScale = fontScale }
         @Suppress("DEPRECATION")
         activity.resources.updateConfiguration(config, activity.resources.displayMetrics)
+        val animationScale = android.provider.Settings.Global.getFloat(activity.contentResolver,
+            android.provider.Settings.Global.ANIMATOR_DURATION_SCALE, 1f)
+        android.provider.Settings.Global.putFloat(activity.contentResolver, android.provider.Settings.Global.ANIMATOR_DURATION_SCALE, 0f)
         val sample = Bitmap.createBitmap(1080, 1350, Bitmap.Config.ARGB_8888)
         val canvas = Canvas(sample); canvas.drawColor(android.graphics.Color.rgb(28, 69, 104))
         val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = android.graphics.Color.rgb(244, 216, 154); textSize = 120f; isFakeBoldText = true }
@@ -73,6 +79,7 @@ class CalendarGalleryRenderTest {
         val view = activity.window.decorView
         view.measure(View.MeasureSpec.makeMeasureSpec(822, View.MeasureSpec.EXACTLY), View.MeasureSpec.makeMeasureSpec(1782, View.MeasureSpec.EXACTLY)); view.layout(0,0,822,1782)
         shadowOf(Looper.getMainLooper()).idleFor(Duration.ofSeconds(1))
+        var dialogBitmap: Bitmap? = null
         if (openMusic) {
             fun owners(root: View): List<SemanticsOwner> {
                 val own = if (root.javaClass.name == "androidx.compose.ui.platform.AndroidComposeView")
@@ -93,17 +100,43 @@ class CalendarGalleryRenderTest {
             val sheet = dialog.window!!.decorView
             sheet.measure(View.MeasureSpec.makeMeasureSpec(822, View.MeasureSpec.EXACTLY), View.MeasureSpec.makeMeasureSpec(1782, View.MeasureSpec.EXACTLY))
             sheet.layout(0, 0, 822, 1782)
-            shadowOf(Looper.getMainLooper()).idleFor(Duration.ofSeconds(1))
-            assertTrue(texts(sheet).any { label(it) == "Escolher música" })
+            // The first manual measure creates sheet anchors. Publish that snapshot and
+            // remeasure the recomposed dialog before observing its final expanded position.
+            repeat(3) {
+                Snapshot.sendApplyNotifications()
+                shadowOf(Looper.getMainLooper()).idleFor(Duration.ofSeconds(1))
+                sheet.requestLayout()
+                sheet.measure(View.MeasureSpec.makeMeasureSpec(822, View.MeasureSpec.EXACTLY), View.MeasureSpec.makeMeasureSpec(1782, View.MeasureSpec.EXACTLY))
+                sheet.layout(0, 0, 822, 1782)
+            }
+            val sheetNodes = texts(sheet)
+            val panel = requireNotNull(sheetNodes.firstOrNull { it.config.getOrNull(SemanticsProperties.PaneTitle) != null }) {
+                "Modal sheet must expose its panel bounds independently of the full-window scrim"
+            }
+            val bounds = panel.boundsInRoot
+            assertTrue("Music panel must leave the underlying gallery visible above it", bounds.top > 0f)
+            assertTrue("Music panel must use at most 80% of the viewport", bounds.height <= sheet.height * 0.8f + 2f)
+            assertEquals("Compact sheet stays anchored to the bottom, not floating above it", sheet.height.toFloat(), bounds.bottom, 2f)
+            val title = requireNotNull(sheetNodes.firstOrNull {
+                label(it) == "Escolher música" && it.config.getOrNull(SemanticsActions.GetTextLayoutResult) != null
+            }) { "Music panel must contain the actual title text layout" }
+            val titleLayouts = mutableListOf<TextLayoutResult>()
+            assertTrue(title.config[SemanticsActions.GetTextLayoutResult].action!!.invoke(titleLayouts))
+            assertTrue("Title must use white text on the dark panel", titleLayouts.isNotEmpty() &&
+                titleLayouts.all { it.layoutInput.style.color == Color.White })
+            // Capture the dialog while it is shown; a gallery screenshot after
+            // dismiss would hide precisely the panel/contrast regression.
+            dialogBitmap = Bitmap.createBitmap(822, 1782, Bitmap.Config.ARGB_8888).also { sheet.draw(Canvas(it)) }
             dialog.dismiss()
         }
-        val bitmap = Bitmap.createBitmap(822,1782,Bitmap.Config.ARGB_8888); view.draw(Canvas(bitmap))
+        val bitmap = dialogBitmap ?: Bitmap.createBitmap(822,1782,Bitmap.Config.ARGB_8888).also { view.draw(Canvas(it)) }
         val colors = mutableSetOf<Int>(); for (y in 0 until 1782 step 16) for (x in 0 until 822 step 16) colors.add(bitmap.getPixel(x,y))
         assertTrue("Compose render must contain real content, not a blank screenshot", colors.size > 20)
         val output = File("build/reports/$filename"); output.parentFile?.mkdirs()
         output.outputStream().use { bitmap.compress(Bitmap.CompressFormat.PNG,100,it) }
         model.dispose(); controller.pause().stop().destroy()
         shadowOf(Looper.getMainLooper()).idle()
+        android.provider.Settings.Global.putFloat(activity.contentResolver, android.provider.Settings.Global.ANIMATOR_DURATION_SCALE, animationScale)
         bitmap.recycle(); sample.recycle()
     }
 }
