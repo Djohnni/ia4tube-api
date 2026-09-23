@@ -40,6 +40,7 @@ class GalleryImportPreparationCoordinatorTest {
         var capabilityHook: (() -> Unit)? = null
         var requestHook: (suspend () -> Unit)? = null
         var previewHook: ((ImportPrivatePreview) -> ImportPrivatePreview)? = null
+        var statusFailure: Boolean = false
         init {
             val ticket = ImportUploadTicket(data.uploadId, data.assetId, data.sourceSha, 12)
             val selected = if (videoDurationMs == null) data.selection else data.selection.copy(kind = ImportMediaKind.VIDEO,
@@ -55,6 +56,7 @@ class GalleryImportPreparationCoordinatorTest {
                 return ImportCapabilities(true, capabilityOwner, preparationEnabled = capabilityEnabled)
             }
             override suspend fun status(owner: ImportOwner, assetId: String): ImportPreparationRecord {
+                if (statusFailure) throw ImportApiFailure("import_response_invalid")
                 statuses++; assertEquals(data.owner, owner); assertEquals(data.assetId, assetId); return record
             }
             override suspend fun request(owner: ImportOwner, assetId: String, uploadId: String, intent: ImportPreparationIntent,
@@ -85,6 +87,27 @@ class GalleryImportPreparationCoordinatorTest {
             if (testOnly) record = record.copy(testOnly = true, previewDigest = ImportPreparationProtocol.fingerprint(
                 record.kind!!, record.configuration!!, true, record.variants))
         }
+    }
+
+    @Test fun restoreDistinguishesStatusFailureFromPreviewFailureWithoutRepeatingPreparation() = runBlocking {
+        val fixture = Fixture()
+        fixture.coordinator().request()
+        fixture.ready()
+        fixture.statusFailure = true
+        val statusFailed = fixture.coordinator().restore()
+        assertEquals(ImportPreparationDiagnosticStage.STATUS, statusFailed.diagnosticStage)
+        assertEquals("import_response_invalid", statusFailed.errorCode)
+        fixture.statusFailure = false
+        fixture.previewHook = { throw ImportApiFailure("import_response_invalid") }
+        val previewFailed = fixture.coordinator().restore()
+        assertEquals(ImportPreparationDiagnosticStage.PREVIEW, previewFailed.diagnosticStage)
+        assertEquals("import_response_invalid", previewFailed.errorCode)
+        assertEquals(1, fixture.creations)
+        assertNull(previewFailed.preview)
+        fixture.previewHook = null
+        val restored = fixture.coordinator().restore()
+        assertEquals(ImportPreparationRunStatus.PREVIEW_AVAILABLE, restored.status)
+        assertNull(restored.diagnosticStage)
     }
 
     @Test fun reopeningUploadedFileDoesNotPrepareAutomaticallyAndExplicitRequestPersistsFirst() = runBlocking {

@@ -267,7 +267,7 @@ internal fun GalleryImportWorkflowContent(view: ImportWorkflowView, runtime: Gal
                 }
                 if (preparation?.status in setOf(ImportPreparationRunStatus.PREPARING, ImportPreparationRunStatus.RECONCILIATION_REQUIRED))
                     Text("Preparação em andamento ou aguardando conferência. O arquivo ainda não está pronto para programar.")
-                preparation?.errorCode?.let { Text("Não foi possível concluir esta etapa. Confira o mesmo preparo ou agendamento antes de repetir.", color = Color(0xFFFFB4AB)) }
+                preparation?.errorCode?.let { Text(importPreparationDiagnostic(preparation.diagnosticStage, it), color = Color(0xFFFFB4AB)) }
                 if (preview != null && !immutableSchedule) {
                     Text("Prévia do arquivo final", style = MaterialTheme.typography.titleMedium)
                     if (preview.testOnly) Text("SIMULAÇÃO LOCAL — áudio sintético de teste. Não representa licença comercial nem publicação real.", color = Color(0xFFFFD59C))

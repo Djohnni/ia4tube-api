@@ -40,10 +40,12 @@ internal class HttpGalleryImportPreparationTransport(private val api: GalleryImp
 
 enum class ImportPreparationRunStatus { EMPTY, SOURCE_RECONCILIATION, UPLOAD_REQUIRED, AWAITING_REQUEST, PREPARING, RECONCILIATION_REQUIRED,
     PREVIEW_AVAILABLE, TEST_ONLY_PREVIEW, SCHEDULING, SCHEDULE_RECONCILIATION, SCHEDULED, ATTENTION, SESSION_CHANGED, PAUSED }
+enum class ImportPreparationDiagnosticStage { LOCAL_STATE, CAPABILITIES, STATUS, METADATA, PREVIEW, SCHEDULING_AVAILABILITY }
 data class ImportPreparationRunView(val status: ImportPreparationRunStatus, val state: GalleryImportState? = null,
     val preparation: ImportPreparationRecord? = null, val preview: ImportPrivatePreview? = null, val errorCode: String? = null,
     val confirmation: ImportPreviewConfirmation? = null, val availability: ImportScheduleAvailability? = null,
-    val scheduleReceipt: ImportScheduleReceipt? = null, val generatedSourceIntent: ImportGeneratedSourceIntent? = null) {
+    val scheduleReceipt: ImportScheduleReceipt? = null, val generatedSourceIntent: ImportGeneratedSourceIntent? = null,
+    val diagnosticStage: ImportPreparationDiagnosticStage? = null) {
     override fun toString() = "ImportPreparationRunView(status=$status, content=redacted)"
 }
 private class ImportPreparationFailure(val code: String) : Exception("Confira a preparação existente antes de tentar novamente.")
@@ -63,7 +65,8 @@ class GalleryImportPreparationCoordinator internal constructor(
             authorizedTracks, Dispatchers.IO, onChanged)
     private class Run(val owner: ImportOwner, val token: String, val epoch: Long, val api: GalleryImportPreparationTransport,
                       val machine: GalleryImportMachine, var checkpoint: ImportDurableCheckpoint?, var capability: ImportCapabilities? = null,
-                      var generatedIntent: ImportGeneratedSourceIntent? = null)
+                      var generatedIntent: ImportGeneratedSourceIntent? = null,
+                      var diagnosticStage: ImportPreparationDiagnosticStage = ImportPreparationDiagnosticStage.LOCAL_STATE)
     private val tracks = authorizedTracks.toList()
     private val mutex = Mutex()
     private val viewLock = Any()
@@ -95,7 +98,7 @@ class GalleryImportPreparationCoordinator internal constructor(
         val intent = checkpoint.preparationIntent
         if (intent == null) return@operation emit(run, ImportPreparationRunStatus.AWAITING_REQUEST)
         if (intent.acceptedMediaRevision == null) return@operation emit(run, ImportPreparationRunStatus.RECONCILIATION_REQUIRED)
-        inspect(run, run.api.status(run.owner, checkpoint.state.upload!!.ticket.assetId))
+        inspect(run, status(run, checkpoint.state.upload!!.ticket.assetId))
     }
     /** First request is explicit. Another revision/client's preparation is never overwritten automatically. */
     suspend fun request(): ImportPreparationRunView = operation { run ->
@@ -106,7 +109,7 @@ class GalleryImportPreparationCoordinator internal constructor(
             "import_preparation_music_unavailable")
         if (checkpoint.preparationIntent == null) {
             requireThat(checkpoint.state.phase == ImportPhase.UPLOADED, "import_preparation_existing_stage")
-            val record = run.api.status(run.owner, checkpoint.state.upload!!.ticket.assetId); guard(run)
+            val record = status(run, checkpoint.state.upload!!.ticket.assetId); guard(run)
             requireIdentity(run, record)
             requireThat(record.currentRevision == checkpoint.preparationBaseRevision &&
                 (checkpoint.preparationBaseRevision > 0 || record.phase == ImportPreparationPhase.AWAITING_SELECTION),
@@ -117,13 +120,13 @@ class GalleryImportPreparationCoordinator internal constructor(
             checkpoint = draft(run)
         }
         if (checkpoint.preparationIntent!!.acceptedMediaRevision != null)
-            inspect(run, run.api.status(run.owner, checkpoint.state.upload!!.ticket.assetId)) else retrySameIntent(run)
+            inspect(run, status(run, checkpoint.state.upload!!.ticket.assetId)) else retrySameIntent(run)
     }
     suspend fun reconcileOnce(): ImportPreparationRunView = operation { run ->
         val checkpoint = draft(run); capabilities(run)
         requireThat(checkpoint.preparationIntent != null, "import_preparation_no_intent")
         if (checkpoint.preparationIntent!!.acceptedMediaRevision == null) retrySameIntent(run)
-        else inspect(run, run.api.status(run.owner, checkpoint.state.upload!!.ticket.assetId))
+        else inspect(run, status(run, checkpoint.state.upload!!.ticket.assetId))
     }
     /** Resolve a known existing art privately, without a picker, generation order, credit debit or implicit preparation. */
     suspend fun adoptGenerated(artId: String, revision: Long): ImportPreparationRunView = operation { run ->
@@ -178,14 +181,14 @@ class GalleryImportPreparationCoordinator internal constructor(
         requireThat(GalleryImportPolicy.validateConfiguration(checkpoint.state.selection.kind, configuration,
             run.capability!!.musicTracks) == null, "import_preparation_music_unavailable")
         if (configuration == checkpoint.state.configuration) return@operation when {
-            checkpoint.preparationIntent?.acceptedMediaRevision != null -> inspect(run, run.api.status(run.owner, checkpoint.state.upload!!.ticket.assetId))
+            checkpoint.preparationIntent?.acceptedMediaRevision != null -> inspect(run, status(run, checkpoint.state.upload!!.ticket.assetId))
             checkpoint.preparationIntent != null -> emit(run, ImportPreparationRunStatus.RECONCILIATION_REQUIRED)
             else -> emit(run, ImportPreparationRunStatus.AWAITING_REQUEST)
         }
         var base = checkpoint.preparationBaseRevision
         checkpoint.preparationIntent?.let { intent ->
             requireThat(intent.acceptedMediaRevision != null, "import_preparation_reconcile_required")
-            val record = run.api.status(run.owner, checkpoint.state.upload!!.ticket.assetId); guard(run); requireIdentity(run, record)
+            val record = status(run, checkpoint.state.upload!!.ticket.assetId); guard(run); requireIdentity(run, record)
             requireThat(record.currentRevision == intent.acceptedMediaRevision && record.jobId == intent.jobId &&
                 record.phase in setOf(ImportPreparationPhase.READY, ImportPreparationPhase.ATTENTION), "import_preparation_reconcile_required")
             base = record.currentRevision
@@ -199,7 +202,7 @@ class GalleryImportPreparationCoordinator internal constructor(
     suspend fun confirmPreview(confirmation: ImportPreviewConfirmation): ImportPreparationRunView = operation { run ->
         capabilities(run); val checkpoint = draft(run)
         requireThat(checkpoint.scheduleBinding == null, "import_schedule_existing_intent")
-        val viewed = inspect(run, run.api.status(run.owner, checkpoint.state.upload!!.ticket.assetId))
+        val viewed = inspect(run, status(run, checkpoint.state.upload!!.ticket.assetId))
         val preview = viewed.preview ?: throw ImportPreparationFailure("import_preview_unavailable")
         requireThat(matches(confirmation, preview), "import_preview_confirmation_changed")
         confirmedPreview = confirmation.copy(verifiedTargets = confirmation.verifiedTargets.toSet())
@@ -214,7 +217,7 @@ class GalleryImportPreparationCoordinator internal constructor(
                 "import_schedule_conflicting_intent")
             return@operation reconcileSchedule(run, retry = true)
         }
-        val viewed = inspect(run, run.api.status(run.owner, checkpoint.state.upload!!.ticket.assetId))
+        val viewed = inspect(run, status(run, checkpoint.state.upload!!.ticket.assetId))
         val preview = viewed.preview ?: throw ImportPreparationFailure("import_preview_unavailable")
         requireThat(confirmedPreview?.let { matches(it, preview) } == true, "import_preview_confirmation_required")
         val availability = viewed.availability ?: throw ImportPreparationFailure("import_scheduling_unavailable")
@@ -285,6 +288,7 @@ class GalleryImportPreparationCoordinator internal constructor(
         return inspect(run, record)
     }
     private suspend fun inspect(run: Run, record: ImportPreparationRecord): ImportPreparationRunView {
+        run.diagnosticStage = ImportPreparationDiagnosticStage.METADATA
         guard(run); requireIdentity(run, record)
         val checkpoint = draft(run); val intent = checkpoint.preparationIntent ?: throw ImportPreparationFailure("import_preparation_no_intent")
         requireThat(record.mediaRevision == intent.acceptedMediaRevision && record.jobId == intent.jobId &&
@@ -301,6 +305,7 @@ class GalleryImportPreparationCoordinator internal constructor(
         if (record.kind == ImportMediaKind.VIDEO) requireThat(record.variants.all {
             it.durationMs != null && abs(it.durationMs - checkpoint.state.selection.durationMs!!) <= GalleryImportPolicy.PREPARED_DURATION_TOLERANCE_MS
         }, "import_preparation_duration_changed")
+        run.diagnosticStage = ImportPreparationDiagnosticStage.PREVIEW
         val preview = run.api.preview(run.owner, record); guard(run)
         requireThat(preview.assetId == record.assetId && preview.mediaRevision == record.mediaRevision &&
             preview.currentRevision == record.currentRevision && preview.previewDigest == record.previewDigest && preview.testOnly == record.testOnly,
@@ -316,10 +321,12 @@ class GalleryImportPreparationCoordinator internal constructor(
         // Synthetic test tracks can be inspected locally, never promoted into a
         // durable READY state that a future schedule adapter might accept.
         if (confirmedPreview?.let { matches(it, preview) } == false) confirmedPreview = null
+        run.diagnosticStage = ImportPreparationDiagnosticStage.SCHEDULING_AVAILABILITY
         val available = if (run.capability?.schedulingEnabled == true) run.api.availability(run.owner, record).also {
             guard(run); requireThat(it.localSimulation == run.capability?.localSimulation && (!record.testOnly || !it.commercialReady), "import_schedule_availability_invalid")
         } else ImportScheduleAvailability()
         if (record.testOnly) return emit(run, ImportPreparationRunStatus.TEST_ONLY_PREVIEW, record, preview, availability = available)
+        run.diagnosticStage = ImportPreparationDiagnosticStage.LOCAL_STATE
         val variants = preparedVariants(record)
         if (checkpoint.state.phase == ImportPhase.PREPARING) {
             applied(run, ImportEvent.PreparationReady(checkpoint.state.revision, record.assetId, variants))
@@ -337,9 +344,15 @@ class GalleryImportPreparationCoordinator internal constructor(
     private fun uploaded(checkpoint: ImportDurableCheckpoint) = checkpoint.state.upload?.serverVerified == true &&
         checkpoint.state.phase in setOf(ImportPhase.UPLOADED, ImportPhase.PREPARING, ImportPhase.READY)
     private suspend fun capabilities(run: Run) {
+        run.diagnosticStage = ImportPreparationDiagnosticStage.CAPABILITIES
         val capability = run.api.capabilities(); guard(run)
         requireThat(capability.enabled && capability.preparationEnabled && capability.identity == run.owner, "import_preparation_unavailable")
         run.capability = capability
+        run.diagnosticStage = ImportPreparationDiagnosticStage.LOCAL_STATE
+    }
+    private suspend fun status(run: Run, assetId: String): ImportPreparationRecord {
+        run.diagnosticStage = ImportPreparationDiagnosticStage.STATUS
+        return run.api.status(run.owner, assetId)
     }
     private suspend fun persist(run: Run, value: ImportDurableCheckpoint) {
         guard(run)
@@ -363,7 +376,7 @@ class GalleryImportPreparationCoordinator internal constructor(
             current.copy(phase = ImportPhase.PREPARING, prepared = emptyList(), previewConfirmedRevision = null) else current
         ImportPreparationRunView(status, safeState, record, preview,
             error?.takeIf { it.matches(Regex("[a-z0-9_]{1,100}")) }, confirmedPreview?.takeIf { preview != null && matches(it, preview) }, availability, receipt,
-            run.generatedIntent ?: run.checkpoint?.generatedSource).also {
+            run.generatedIntent ?: run.checkpoint?.generatedSource, run.diagnosticStage.takeIf { error != null }).also {
             visibleOwner = run.owner; visibleToken = run.token; visible = it; notify(it)
         }
     }
