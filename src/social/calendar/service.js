@@ -4,14 +4,16 @@ const { targets, started, delivery, record } = require("./destinations");
 const { createConnectorContext } = require("../connectors/contract");
 const { fail, idFor, syncSources, changeJob, sameBinding, availability, TIME_ZONE, LOCKED, LATE_MS } = require("./model");
 const { isCalendarImportService, isOperationalCalendarImportService } = require("./imports/local-calendar-service");
+const { isStoredCalendarMediaReader } = require("./imports/stored-calendar-media");
 const LABELS = { scheduled: "Programada", paused: "Automação geral pausada", manual: "Ative esta arte após conectar o Instagram",
   item_paused: "Publicação desta arte desativada", partial: "Publicada parcialmente — precisa de atenção",
   waiting_media: "Preparando imagem", operations_closed: "Publicação temporariamente indisponível",
   import_not_operational: "Importação ainda não disponível para publicação",
   connection_required: "Confira a conexão Instagram", overdue: "Horário vencido — reagende", attention: "Precisa de atenção",
   dispatching: "Publicando", confirming: "Confirmando publicação", published: "Publicada", cancelled: "Cancelada" };
-function createCalendarService({ store, source, media, grants, auth, identity, readClients, publisher, importScheduling = null, clock = Date.now }) {
+function createCalendarService({ store, source, media, grants, auth, identity, readClients, publisher, importScheduling = null, importReading = null, clock = Date.now }) {
   const importsAvailable = isCalendarImportService(importScheduling) && importScheduling.store === store;
+  const storedReading = isStoredCalendarMediaReader(importReading) && importReading.store === store;
   const operationalImports = importsAvailable && isOperationalCalendarImportService(importScheduling) && publisher.preparedAvailable === true;
   const importContext = value => ({ authenticated: true, companyId: value.companyId, userId: value.userId });
   // The owner-state transaction already scopes companyId. Preserve the narrower
@@ -69,8 +71,9 @@ function createCalendarService({ store, source, media, grants, auth, identity, r
   }
   function view(job, prefs, connection, allowed, context = null) {
     let status = availability(job, prefs, connection?.binding, allowed, clock());
-    const imported = importsAvailable && job.sourceKind === "upload" && context;
-    if (imported) status = importScheduling.status(job, prefs, connection, allowed) || status;
+    const imported = (importsAvailable || storedReading) && job.sourceKind === "upload" && context;
+    if (importsAvailable && imported) status = importScheduling.status(job, prefs, connection, allowed) || status;
+    const importedMedia = imported ? (importsAvailable ? importScheduling : importReading).describe(job, importContext(context)) : null;
     if (status === "scheduled" && targets(job).includes("story") && connection?.accountType !== "business") status = "attention";
     return { id: job.id, key: job.sourceKey, planningId: job.planningId, orderId: job.orderId,
       title: job.title, date: job.date, time: job.time, timeZone: TIME_ZONE, scheduledAt: job.scheduledAt,
@@ -84,8 +87,8 @@ function createCalendarService({ store, source, media, grants, auth, identity, r
         { status: value.phase, result: value.publication || null }])),
       username: connection?.username || null, error: job.error || null, publication: job.publication || null,
       ...(job.sourceKind === "upload" ? { sourceKind: "upload", selectedTargets: targets(job), localSimulation: job.import?.localSimulation === true,
-        media: imported ? importScheduling.describe(job, importContext(context)) : null,
-        shareToFeed: job.import?.selection?.shareToFeed === true, mediaReadAvailable: Boolean(imported) } : {}) };
+        media: importedMedia,
+        shareToFeed: job.import?.selection?.shareToFeed === true, mediaReadAvailable: Boolean(importedMedia) } : {}) };
   }
   function pendingSubmissions(state, context) {
     return Object.values(state.importSubmissions || {}).filter(row => context && row.companyId === context.companyId &&

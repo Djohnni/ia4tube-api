@@ -48,6 +48,14 @@ function createImportUploadPostgresStore({ pool, role = "ia4tube_social_runtime"
   if (!pool || typeof pool.connect !== "function" || role !== "ia4tube_social_runtime") fail("store_configuration_invalid");
   const store = Object.freeze({
     capabilities: Object.freeze({ persistence: "durable", atomicCompanyUpdates: true }),
+    async read(companyId, operation) {
+      if (!UUID.test(companyId || "") || typeof operation !== "function") fail("owner_invalid");
+      return withTransaction(pool, async client => {
+        const result = await client.query("SELECT document FROM ia4tube_calendar.import_upload_state WHERE company_id=$1", [companyId]);
+        if (!result.rows[0]) fail("not_found");
+        return structuredClone(await operation(validateImportUploadState(result.rows[0].document, companyId)));
+      }, { companyId, role });
+    },
     async verify() {
       const result = await pool.query(`SELECT c.relrowsecurity AS rls,c.relforcerowsecurity AS forced,
         pg_get_userbyid(c.relowner) AS owner,

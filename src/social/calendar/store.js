@@ -11,6 +11,14 @@ function validate(state) {
 function createCalendarStore({ pool, role }) {
   const store = Object.freeze({
     capabilities: Object.freeze({ persistence: "postgres", durable: true }),
+    async read(companyId, operation) {
+      if (!UUID.test(companyId) || typeof operation !== "function") fail("calendar_owner_invalid", 403);
+      return withTransaction(pool, async client => {
+        const rows = await client.query("SELECT document FROM ia4tube_calendar.owner_state WHERE company_id=$1", [companyId]);
+        if (!rows.rows[0]) fail("calendar_not_found", 404);
+        return structuredClone(await operation(validate(rows.rows[0].document)));
+      }, { companyId, role });
+    },
     async exists(companyId) {
       if (!UUID.test(companyId)) fail("calendar_owner_invalid", 403);
       return withTransaction(pool, async client => {

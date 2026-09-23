@@ -98,14 +98,17 @@ async function digestFile(value, part, consume, expectedIdentity, check = () => 
 }
 async function exists(value) { try { await fs.lstat(value); return true; } catch (error) { if (error.code === "ENOENT") return false; throw error; } }
 
-function createPreparedDiskResultStore({ rootDirectory, preparationRoot, tenantStore, admission, accessPolicy,
-  outputInspector = createPreparedDiskOutputInspector(), enabled = false, allowVolatileForTests = false, clock = Date.now } = {}) {
+function createPreparedDiskResultStoreInternal({ rootDirectory, preparationRoot, tenantStore, admission, accessPolicy,
+  outputInspector, enabled = false, allowVolatileForTests = false, clock = Date.now } = {}, readOnly = false) {
   const root = localRoot(rootDirectory), preparedRoot = localRoot(preparationRoot);
   if (root === preparedRoot || typeof clock !== "function") fail("configuration_invalid");
-  const testOnly = tenantStore?.capabilities?.persistence !== "durable" || admission?.capabilities?.testOnly === true;
-  const available = Boolean(enabled && isImportAccessPolicy(accessPolicy) && isPreparedDiskOutputInspector(outputInspector) &&
+  if (!readOnly && outputInspector === undefined) outputInspector = createPreparedDiskOutputInspector();
+  const testOnly = tenantStore?.capabilities?.persistence !== "durable" || !readOnly && admission?.capabilities?.testOnly === true;
+  const available = Boolean(enabled && isImportAccessPolicy(accessPolicy) &&
     tenantStore?.capabilities?.atomicCompanyUpdates === true && typeof tenantStore.update === "function" &&
-    isPreparedDiskAdmission(admission, { allowVolatileForTests, rootDirectory: root }) && (!testOnly || allowVolatileForTests));
+    (readOnly ? typeof tenantStore.read === "function" : isPreparedDiskOutputInspector(outputInspector) &&
+      isPreparedDiskAdmission(admission, { allowVolatileForTests, rootDirectory: root })) && (!testOnly || allowVolatileForTests));
+  const readState = (companyId, operation) => readOnly ? tenantStore.read(companyId, operation) : tenantStore.update(companyId, operation);
   function time() { const value = clock(); if (!Number.isSafeInteger(value) || value < 0) fail("clock_invalid"); return value; }
   async function safe(operation) {
     if (!available) fail("unavailable");
@@ -123,7 +126,7 @@ function createPreparedDiskResultStore({ rootDirectory, preparationRoot, tenantS
   }
   function queryFor(task, resultRef) { return binding(Object.fromEntries(BINDING.map(key => [key, key === "resultRef" ? resultRef : task?.[key]]))); }
   async function owned(query, suppliedTask, ready = false) {
-    return tenantStore.update(query.companyId, state => {
+    return readState(query.companyId, state => {
       const asset = state.preparation?.assets?.[query.assetId], jobId = asset?.revisions?.[String(query.mediaRevision)];
       const job = state.preparation?.jobs?.[jobId], upload = state.uploads?.[job?.uploadId];
       if (!asset || !job || !upload || asset.userId !== query.userId || job.companyId !== query.companyId || job.userId !== query.userId ||
@@ -268,7 +271,11 @@ function createPreparedDiskResultStore({ rootDirectory, preparationRoot, tenantS
         !Number.isSafeInteger(intent.finishedAt) || intent.finishedAt > actual.finishedAt) fail("manifest_invalid", 422);
     const names = new Set(["manifest.json", "intent.json", "operation.lock", ...allFiles(prepared).keys()]);
     if ((await fs.readdir(dirname)).some(name => !names.has(name))) fail("busy_or_recovery_required", 409);
-    await held(saved.task, query.resultRef, prepared, "read");
+    // A permanent reader reaches this only for the durable ready revision
+    // checked by preview(). It has no capacity/worker authority. Retention,
+    // exact owner, committed task/result and immutable bytes stay verified;
+    // reopening a processing reservation is not required to view stored media.
+    if (!readOnly) await held(saved.task, query.resultRef, prepared, "read");
     return { dirname, task: saved.task, actual };
   }
   async function immutableWrite(filename, bytes) {
@@ -313,7 +320,7 @@ function createPreparedDiskResultStore({ rootDirectory, preparationRoot, tenantS
     const owner = authorize(args.context);
     if (!UUID.test(args.assetId || "") || !UUID.test(args.resultRef || "") || !HASH.test(args.sha256 || "") ||
         !Number.isSafeInteger(args.mediaRevision) || args.mediaRevision < 1 || !["feed", "story", "reel", "thumbnail"].includes(args.target)) fail("request_invalid", 400);
-    const job = await tenantStore.update(owner.companyId, state => {
+    const job = await readState(owner.companyId, state => {
       const asset = state.preparation?.assets?.[args.assetId], jobId = asset?.revisions?.[String(args.mediaRevision)];
       const row = state.preparation?.jobs?.[jobId];
       if (!asset || asset.userId !== owner.userId || !row || row.userId !== owner.userId || row.state !== "ready" || row.result?.resultRef !== args.resultRef) fail("not_found", 404);
@@ -434,9 +441,15 @@ function createPreparedDiskResultStore({ rootDirectory, preparationRoot, tenantS
       return { sha256: part.sha256, mimeType: part.mimeType, sizeBytes: part.size, transferredBytes: end - start + 1, start, end };
     }); }
   });
+  if (readOnly) return Object.freeze({ capabilities: Object.freeze({ ...api.capabilities, readOnly: true }),
+    inspectPreview: api.inspectPreview, streamPreview: api.streamPreview });
   stores.set(api, { available, testOnly }); return api;
 }
+function createPreparedDiskResultStore(options) { return createPreparedDiskResultStoreInternal(options); }
+// Stored derivatives are read without a processing/admission composition. No
+// commit, executor, bridge credential or capacity reservation is exposed here.
+function createPreparedDiskResultReader(options) { return createPreparedDiskResultStoreInternal(options, true); }
 function isPreparedDiskResultStore(value, { allowVolatileForTests = false } = {}) {
   const record = stores.get(value); return Boolean(record?.available && (!record.testOnly || allowVolatileForTests));
 }
-module.exports = { createPreparedDiskResultStore, isPreparedDiskResultStore };
+module.exports = { createPreparedDiskResultStore, createPreparedDiskResultReader, isPreparedDiskResultStore };

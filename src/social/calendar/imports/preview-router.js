@@ -3,6 +3,7 @@ const express = require("express");
 const { isAuthenticatedSocialPrincipal } = require("../../auth-adapter");
 const { isPrivateImportPreviewService } = require("./preview-service");
 const { isCalendarImportService } = require("./local-calendar-service");
+const { isStoredCalendarMediaReader } = require("./stored-calendar-media");
 const { createSingleProcessTransferLimiter } = require("./transfer-service");
 const UUID = "[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}";
 const PATH = new RegExp(`^/assets/(${UUID})/revisions/([1-9][0-9]{0,5})/preview(?:/(feed|story|reel|thumbnail))?$`);
@@ -60,7 +61,7 @@ function createPrivateImportPreviewRouter({ authenticate, resolvePrincipal, getS
       }, async context => {
         if (abort.signal.aborted) fail();
         const service = scheduled ? getScheduledService?.() : getService();
-        if (!(scheduled ? isCalendarImportService(service) : isPrivateImportPreviewService(service)) || !service.available) fail();
+        if (!(scheduled ? isCalendarImportService(service) || isStoredCalendarMediaReader(service) : isPrivateImportPreviewService(service)) || !service.available) fail();
         const input = scheduled ? { id: match[1] } : { assetId: match[1], mediaRevision: Number(match[2]) };
         const target = scheduled ? match[2] : match[3];
         if (!target) {

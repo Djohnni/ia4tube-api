@@ -46,10 +46,13 @@ async function createProductionCalendar(dependencies, ports) {
         } });
     }
     publisher = createCalendarPublisher({ ...ports, media, preparedMedia: imports?.preparedMedia });
+    const storedImportMedia = imports ? null : require("./imports/stored-calendar-media").createStoredCalendarMediaReader({ store,
+      uploadStore: require("./imports/postgres-store").createImportUploadPostgresStore({ pool: ports.pool, role: ports.role }),
+      rootDirectory: "/var/data/private/calendar-media/uploads", preparationRoot: "/var/data/private/calendar-media/prepared", clock: dependencies.clock });
     const calendar = createCalendarService({ ...dependencies, ...ports, store, source, media, grants, publisher,
-      importScheduling: imports?.scheduling });
-    return Object.freeze({ ...calendar, imports: imports || null,
-      async close() { try { await calendar.close(); } finally { imports?.close(); } } });
+      importScheduling: imports?.scheduling, importReading: storedImportMedia });
+    return Object.freeze({ ...calendar, imports: imports || null, storedImportMedia,
+      async close() { try { await calendar.close(); } finally { imports?.close(); storedImportMedia?.close(); } } });
   } catch (error) {
     imports?.close();
     grants?.close();

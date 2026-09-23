@@ -1,7 +1,7 @@
 "use strict";
 const test = require("node:test"), assert = require("node:assert/strict"), crypto = require("node:crypto"), sharp = require("sharp");
 const fs = require("node:fs/promises"), syncFs = require("node:fs"), path = require("node:path"), os = require("node:os");
-const { createPreparedDiskResultStore, isPreparedDiskResultStore } = require("../src/social/calendar/imports/prepared-disk-store");
+const { createPreparedDiskResultStore, createPreparedDiskResultReader, isPreparedDiskResultStore } = require("../src/social/calendar/imports/prepared-disk-store");
 const { createPreparedDiskOutputInspector, parsePreparedOutputProbe } = require("../src/social/calendar/imports/prepared-disk-output-inspector");
 const { createPreparedDiskAdmission } = require("../src/social/calendar/imports/prepared-disk-admission");
 const { createImportAccessPolicy } = require("../src/social/calendar/imports/access-policy");
@@ -110,6 +110,27 @@ test("actual photo derivatives commit once, re-inspect with the existing queue a
   assert.equal(isPreparedDiskResultStore(recreated), false); assert.equal(isPreparedDiskResultStore(recreated, { allowVolatileForTests: true }), true);
   assert.equal(isPreparedDiskResultStore({ ...recreated }, { allowVolatileForTests: true }), false);
 });
+test("closed-pilot reader serves existing immutable bytes without admission, output inspection or writes and rejects tampering", async t => {
+  const f = await fixture(t); await f.ready();
+  let reads = 0;
+  const reader = createPreparedDiskResultReader({ rootDirectory: f.rootDirectory, preparationRoot: f.preparationRoot,
+    tenantStore: { capabilities: f.tenantStore.capabilities, update() { throw new Error("read-only path attempted a write"); },
+      read(companyId, operation) { reads++; return f.tenantStore.update(companyId, operation); } },
+    accessPolicy: f.options.accessPolicy, enabled: true, allowVolatileForTests: true });
+  assert.equal(reader.capabilities.available, true); assert.equal(reader.capabilities.readOnly, true);
+  assert.equal(reader.commit, undefined); assert.equal(reader.inspectCommitted, undefined);
+  assert.equal(isPreparedDiskResultStore(reader, { allowVolatileForTests: true }), false);
+  const descriptor = await reader.inspectPreview(f.preview()); assert.equal(descriptor.sha256, f.prepared.variants.feed.sha256);
+  const collected = [];
+  await reader.streamPreview({ ...f.preview(), range: { start: 7, end: 38 }, consume: bytes => collected.push(bytes) });
+  const filename = f.committed(f.prepared.variants.feed), stored = await fs.readFile(filename);
+  assert.deepEqual(Buffer.concat(collected), stored.subarray(7, 39)); assert.ok(reads > 0);
+  await assert.rejects(reader.inspectPreview({ ...f.preview(), context: { ...f.context, userId: uuid() } }), { code: "prepared_disk_not_allowed" });
+  await fs.chmod(filename, 0o600); stored[stored.length - 1] ^= 1; await fs.writeFile(filename, stored);
+  await assert.rejects(reader.inspectPreview(f.preview()), { code: "prepared_disk_checksum_invalid" });
+  f.revoke(); await assert.rejects(reader.inspectPreview(f.preview()), { code: "prepared_disk_not_allowed" });
+});
+
 test("commit requires the actual branded admission; disabled/test stores cannot silently become active", async t => {
   const f = await fixture(t);
   for (const override of [{ enabled: false }, { allowVolatileForTests: false }, { admission: { ...f.admission } },

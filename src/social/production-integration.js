@@ -141,7 +141,8 @@ function createProductionSocialIntegration(options = {}) {
       router.use(express.json({ limit: "16kb", strict: true }));
       router.use("/calendar/imports", require("./calendar/imports/preview-router").createPrivateImportPreviewRouter({
         authenticate: authenticateSocial, resolvePrincipal: claims => runtime.auth.fromVerifiedJwt(claims),
-        getService: () => runtime?.calendar?.imports?.preview, getScheduledService: () => runtime?.calendar?.imports?.scheduling }));
+        getService: () => runtime?.calendar?.imports?.preview,
+        getScheduledService: () => runtime?.calendar?.imports?.scheduling || runtime?.calendar?.storedImportMedia }));
       router.use("/calendar/imports", require("./calendar/imports/router").createCalendarImportRouter({
         authenticate: authenticateSocial, resolvePrincipal: claims => runtime.auth.fromVerifiedJwt(claims),
         getService: () => runtime?.calendar?.imports, logger: dependencies.logger }));

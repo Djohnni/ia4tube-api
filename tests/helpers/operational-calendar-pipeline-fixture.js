@@ -83,7 +83,7 @@ async function createOperationalCalendarPipelineFixture(t, options = {}) {
       permalink: `https://www.instagram.com/${record.target === "reel" ? "reel" : "p"}/Synthetic${id}/`,
       timestamp: new Date(f.clock()).toISOString() });
   });
-  async function mount() {
+  async function mount({ importsDisabled = false } = {}) {
     const calendarStore = createCalendarStore({ pool: db.tenantPool, role: "ia4tube_social_runtime" }); await calendarStore.verify();
     const connectorStore = createPostgresConnectorStore({ pool: db.tenantPool, role: "ia4tube_social_runtime", publicationBindingRequired: true });
     const grants = createCalendarGrants(key, f.clock);
@@ -110,7 +110,7 @@ async function createOperationalCalendarPipelineFixture(t, options = {}) {
       } });
     assert.equal(isOperationalCalendarImportsRuntimeFactory(runtimeFactory), false, "The production factory rejects a simulated transport");
     assert.equal(isOperationalCalendarImportsRuntimeFactory(runtimeFactory, { allowLocalTransportForTests: true }), true);
-    const imports = await runtimeFactory({ store: calendarStore, grants, secret: key, publicOrigin: ORIGIN,
+    const imports = importsDisabled ? null : await runtimeFactory({ store: calendarStore, grants, secret: key, publicOrigin: ORIGIN,
       connectionForPrincipal: value => publisher.connection(connectorContext(value)),
       publicationAllowedForPrincipal: value => publisher.allowed(connectorContext(value)),
       connectionForGrant: grant => publisher.connection(connectorContext(auth.fromVerifiedCalendarGrant(grant))),
@@ -122,30 +122,35 @@ async function createOperationalCalendarPipelineFixture(t, options = {}) {
           throw Object.assign(new Error("calendar_import_source_changed"), { code: "calendar_import_source_changed", statusCode: 409 });
         return { bytes: media.bytesFor(verifiedPrincipal.companyId, job.asset), mimeType: "image/jpeg" };
       } });
-    assert.equal(isOperationalCalendarImportsRuntime(imports), true);
-    assert.equal(isOperationalCalendarImportsRuntime({ ...imports }), false);
-    context = imports.contextForPrincipal(principal); f.context = context;
-    const { scheduling, preparedMedia, preview: privatePreview } = imports;
+    if (imports) {
+      assert.equal(isOperationalCalendarImportsRuntime(imports), true);
+      assert.equal(isOperationalCalendarImportsRuntime({ ...imports }), false);
+      context = imports.contextForPrincipal(principal); f.context = context;
+    }
+    const storedImportMedia = importsDisabled ? require("../../src/social/calendar/imports/stored-calendar-media").createStoredCalendarMediaReader({
+      store: calendarStore, uploadStore: f.store, rootDirectory: f.privateRoot, preparationRoot: f.preparationRoot, clock: f.clock }) : null;
+    const scheduling = imports?.scheduling || storedImportMedia, preparedMedia = imports?.preparedMedia, privatePreview = imports?.preview;
     publisher = createCalendarPublisher({ config, connectorStore, connectorAudit: createPostgresConnectorAudit({ pool: db.tenantPool, role: "ia4tube_social_runtime" }),
       credentials: syntheticCredentials, transport, media, preparedMedia });
     const calendar = createCalendarService({ store: calendarStore, source: { list: value => value === owner ? [originalSource] : [] }, media, grants, auth,
-      identity: value => value === owner ? context : otherContext, readClients: () => clients, publisher, importScheduling: scheduling, clock: f.clock });
-    current = { calendarStore, connectorStore, publisher, preparedMedia, scheduling, calendar, privatePreview, imports, transfer, registry };
+      identity: value => value === owner ? context : otherContext, readClients: () => clients, publisher,
+      importScheduling: imports?.scheduling, importReading: storedImportMedia, clock: f.clock });
+    current = { calendarStore, connectorStore, publisher, preparedMedia, scheduling, calendar, privatePreview, imports, transfer, registry, storedImportMedia };
   }
   await mount();
   const original = (await current.calendar.list(claims)).items[0];
   const app = express(), routerOptions = { authenticate: session.authenticate, resolvePrincipal: value => auth.fromVerifiedJwt(value) };
   app.disable("etag");
-  app.use(`${PREFIX}/bytes`, createCalendarImportByteRouter({ getService: () => current.transfer }));
+  app.use(`${PREFIX}/bytes`, createCalendarImportByteRouter({ getService: () => current.imports ? current.transfer : null }));
   app.use(express.json({ limit: "16kb", strict: true }));
   app.use(PREFIX, createPrivateImportPreviewRouter({ ...routerOptions, getService: () => current.privatePreview, getScheduledService: () => current.scheduling }));
   app.use(PREFIX, createCalendarImportRouter({ ...routerOptions, getService: () => current.imports }));
   app.use("/v1/social/calendar", createCalendarRouter({ authenticate: session.authenticate, getService: () => current.calendar }));
   const server = app.listen(0, "127.0.0.1"); await new Promise(resolve => server.once("listening", resolve));
   base = `http://127.0.0.1:${server.address().port}`;
-  db.registerBeforeCleanup(async () => { server.closeAllConnections(); await new Promise(resolve => server.close(resolve)); current.imports.close(); await current.calendar.close(); });
+  db.registerBeforeCleanup(async () => { server.closeAllConnections(); await new Promise(resolve => server.close(resolve)); current.imports?.close(); current.storedImportMedia?.close(); await current.calendar.close(); });
   const pipelineReopen = f.reopen;
-  f.reopen = async settings => { current.imports.close(); await current.calendar.close(); await pipelineReopen(settings); await mount(); };
+  f.reopen = async settings => { current.imports?.close(); current.storedImportMedia?.close(); await current.calendar.close(); await pipelineReopen(settings); await mount(settings); };
   const request = (route, options = {}) => fetch(base + route, { ...options, headers: { Authorization: `Bearer ${token}`, ...options.headers } });
   return Object.assign(f, { claims, otherClaims, context, otherContext, original, originalSource, originals, token, otherToken, auth, session, base, providerCalls, sourcePaths, seeded,
     current: () => current, request, setProviderFault: value => { fault = value; }, setFixtureGate: value => { externalGate = value; },
