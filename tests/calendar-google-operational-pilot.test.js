@@ -121,6 +121,35 @@ test("measured spend and historical reserve remain distinct and use only the lar
   assert.equal(high.finance.priorBudgetBasisUsd,.6);assert.equal(high.finance.priorBudgetBasisKind,'measured_spend');
   assert.throws(()=>makePlan({finance:{...input,alreadyIncurredUsd:0,alreadyIncurredObservedAt:null}}),/finance_invalid/);
 });
+
+test("schema-2 two-hour mission executes and cleans up without expanding duration or reserves",async()=>{
+  const input=Object.fromEntries(Object.entries(makePlan().finance).filter(([k])=>!["estimatedInfrastructureUsd",
+    "estimatedMaximumUsd","priorBudgetBasisUsd","priorBudgetBasisKind","estimatedPlanningTotalUsd","invoiceCapGuaranteed"].includes(k)));
+  const p=makePlan({schema:2,maxExistenceSeconds:7200,admissionSeconds:5400,
+    finance:{...input,alreadyIncurredUsd:.2,alreadyIncurredObservedAt:beginning,historicalPlanningReserveUsd:0}});
+  const f=fixture({},p),r=await f.execute();
+  assert.equal(r.failure,null);assert.equal(r.destructionConfirmed,true);assert.equal(f.resources.size,0);
+  assert.equal(r.deadlineAt-r.startedAt,7200000);assert.equal(r.admitUntil-r.startedAt,5400000);
+  assert.equal(r.workerStopAt-r.startedAt,6600000);assert.equal(p.drainReserveSeconds,600);
+  assert.equal(p.finance.estimatedInfrastructureUsd,.08249092);
+  assert.equal(p.finance.priorBudgetBasisKind,'measured_spend');assert.equal(p.finance.priorBudgetBasisUsd,.2);
+  assert.throws(()=>validateOperationalPlan(p,{now:beginning-1}),/pricing_check_stale/);
+  const newerSpend=makePlan({schema:2,maxExistenceSeconds:7200,admissionSeconds:5400,
+    finance:{...input,alreadyIncurredUsd:.2,alreadyIncurredObservedAt:beginning+1000,historicalPlanningReserveUsd:0}});
+  assert.throws(()=>validateOperationalPlan(newerSpend,{now:beginning}),/finance_invalid/);
+  assert.equal(validateOperationalPlan(newerSpend,{now:beginning+1000}),newerSpend);
+});
+
+test("historical two-hour schema-1 plans stay readable but cannot launch resources",async()=>{
+  const input=Object.fromEntries(Object.entries(makePlan().finance).filter(([k])=>!["estimatedInfrastructureUsd",
+    "estimatedMaximumUsd","priorBudgetBasisUsd","priorBudgetBasisKind","estimatedPlanningTotalUsd","invoiceCapGuaranteed",
+    "alreadyIncurredObservedAt","historicalPlanningReserveUsd","historicalReserveIsObservedExpense"].includes(k)));
+  const p=makePlan({schema:1,maxExistenceSeconds:7200,admissionSeconds:5400,finance:{...input,alreadyIncurredUsd:.2}});
+  assert.equal(validateOperationalPlan(p),p);
+  const f=fixture({},p);
+  await assert.rejects(f.execute(),{code:'media_pilot_legacy_plan_new_launch_refused'});
+  assert.equal(f.calls.length,0);assert.equal(f.resources.size,0);assert.equal(f.getState(),null);
+});
 test("mission conservative four-hour costs remain inside the single five-dollar pilot reference",()=>{
   const real=makePlan({finance:{computeHourlyUsd:.03350571,diskGiBHourlyUsd:.000054795,ipv4HourlyUsd:.005,
     egressAllowanceGiB:5,egressUsdPerGiB:.19,otherAllowanceUsd:2,alreadyIncurredUsd:null,alreadyIncurredObservedAt:null,
