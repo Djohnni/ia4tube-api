@@ -14,7 +14,8 @@ data class ImportDurableCheckpoint(
     val preparationIntent: ImportPreparationIntent? = null,
     val preparationBaseRevision: Long = 0,
     val scheduleBinding: ImportScheduleBinding? = null,
-    val generatedSource: ImportGeneratedSourceIntent? = null
+    val generatedSource: ImportGeneratedSourceIntent? = null,
+    val calendarSubmission: ImportCalendarSubmissionIntent? = null
 ) {
     override fun toString() = "ImportDurableCheckpoint(generation=$generation, content=redacted)"
 }
@@ -54,6 +55,10 @@ object ImportCheckpointCodec {
         } ?: json.put("scheduleBinding", JSONObject.NULL)
         value.generatedSource?.let { source -> json.put("generatedSource", JSONObject().put("calendarItemId", source.calendarItemId)
             .put("revision", source.revision).put("idempotencyKey", source.idempotencyKey)) } ?: json.put("generatedSource", JSONObject.NULL)
+        value.calendarSubmission?.let { intent -> json.put("calendarSubmission", JSONObject()
+            .put("idempotencyKey", intent.idempotencyKey).put("sourceRevision", intent.sourceRevision)
+            .put("expectedMediaRevision", intent.expectedMediaRevision).put("caption", intent.caption))
+        } ?: json.put("calendarSubmission", JSONObject.NULL)
         state.upload?.let { progress ->
             json.put("upload", JSONObject().put("uploadId", progress.ticket.uploadId).put("assetId", progress.ticket.assetId)
                 .put("selectionSha256", progress.ticket.selectionSha256).put("totalBytes", progress.ticket.totalBytes)
@@ -82,7 +87,7 @@ object ImportCheckpointCodec {
         require(json.getInt("schema") == 1)
         requireKeys(json, setOf("schema", "generation", "owner", "draftId", "revision", "phase", "selection", "configuration",
             "selectedContentUri", "uploadStartIdempotencyKey", "uploadStartIssued", "transferPaused", "cancelRequested",
-            "calendarItemId", "failure", "upload", "prepared", "scheduleIntent", "preparationIntent", "preparationBaseRevision", "scheduleBinding", "generatedSource"))
+            "calendarItemId", "failure", "upload", "prepared", "scheduleIntent", "preparationIntent", "preparationBaseRevision", "scheduleBinding", "generatedSource", "calendarSubmission"))
         val savedOwner = json.getJSONObject("owner")
         require(savedOwner.getString("companyId") == owner.companyId && savedOwner.getString("userId") == owner.userId)
         val media = json.getJSONObject("selection")
@@ -129,6 +134,10 @@ object ImportCheckpointCodec {
             }, json.strictOptionalObject("generatedSource")?.let { value ->
                 requireKeys(value, setOf("calendarItemId", "revision", "idempotencyKey"))
                 ImportGeneratedSourceIntent(value.getString("calendarItemId"), value.getLong("revision"), value.getString("idempotencyKey"))
+            }, json.strictOptionalObject("calendarSubmission")?.let { value ->
+                requireKeys(value, setOf("idempotencyKey", "sourceRevision", "expectedMediaRevision", "caption"))
+                ImportCalendarSubmissionIntent(value.getString("idempotencyKey"), value.getLong("sourceRevision"),
+                    value.getLong("expectedMediaRevision"), value.getString("caption"))
             }).also(::validate)
     }
 
@@ -138,6 +147,12 @@ object ImportCheckpointCodec {
             require(uri.length <= 8192 && uri.startsWith("content://") && uri.none { it == '\r' || it == '\n' || it == '\u0000' })
         }
         val state = checkpoint.state
+        checkpoint.calendarSubmission?.let { intent ->
+            ImportCalendarSubmissionProtocol.validate(intent)
+            require(intent.sourceRevision == state.revision && state.upload?.serverVerified == true &&
+                state.phase in setOf(ImportPhase.UPLOADED, ImportPhase.PREPARING, ImportPhase.READY) &&
+                !checkpoint.cancelRequested && checkpoint.scheduleBinding == null && state.scheduleIntent == null)
+        }
         require(checkpoint.preparationBaseRevision in 0..999998)
         checkpoint.generatedSource?.let { source ->
             require(checkpoint.selectedContentUri == null && state.selection.kind == ImportMediaKind.IMAGE &&

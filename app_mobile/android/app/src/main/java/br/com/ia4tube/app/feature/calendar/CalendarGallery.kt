@@ -98,7 +98,12 @@ fun ScheduledArtImage(item: ScheduledArt, token: String, modifier: Modifier = Mo
                 revalidationKey = refreshKey,
                 errorText = "Não foi possível carregar a prévia. Feche e reabra para tentar novamente.")
         }
-    } else Box(modifier, contentAlignment = Alignment.Center) { Text("Preparando a imagem…", color = Color(0xFFACB5C8)) }
+    } else Box(modifier, contentAlignment = Alignment.Center) { Text(when {
+        item.preparationPending && item.submissionState == "attention" -> "O arquivo precisa de atenção. Confira a situação abaixo ou exclua pelo calendário."
+        item.preparationPending -> "Preparando arquivo. Ele aparecerá aqui quando estiver pronto. Você pode fechar o aplicativo."
+        item.sourceKind == "upload" && !item.mediaReadAvailable -> "A visualização deste arquivo está indisponível no momento. Os dados do calendário estão preservados."
+        else -> "Preparando a imagem…"
+    }, color = Color(0xFFACB5C8), modifier = Modifier.padding(16.dp)) }
 }
 
 @Composable
@@ -207,17 +212,18 @@ fun CalendarGallery(model: CalendarViewModel, token: String, backLabel: String =
                                 modifier = Modifier.weight(1f).fillMaxHeight())
                         } else ScheduledArtImage(art.copy(imageUrl = art.previews[preview] ?: art.imageUrl, destination = preview), token, Modifier.weight(1f).fillMaxHeight(), state.imageRefresh)
                         Column(Modifier.width(actionWidth).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(4.dp), horizontalAlignment = Alignment.CenterHorizontally) {
-                            GalleryAction(CalendarFormatIcon, "Formato", art.media != null || art.editable && art.formatsReady && state.fresh && !state.busy) {
+                            GalleryAction(CalendarFormatIcon, "Formato", art.media != null || art.sourceKind != "upload" &&
+                                art.editable && art.formatsReady && state.fresh && !state.busy) {
                                 if (art.media != null) showMediaInfo = art else editing = art to "destination"
                             }
                             if (art.media != null) GalleryAction(Icons.Default.Info, "Música/Áudio", true) { showMediaInfo = art }
                             if (art.sourceKind != "upload" && art.imageUrl != null) {
                                 GalleryAction(Icons.Default.Add, "Usar com música", state.fresh && !state.busy) { generatedSource = art; showImport = true }
                             }
-                            GalleryAction(Icons.Default.Edit, "Legenda", art.editable && state.fresh && !state.busy) { editing = art to "caption" }
-                            GalleryAction(Icons.Default.DateRange, "Data/hora", art.editable && state.fresh && !state.busy) { editing = art to "schedule" }
+                            GalleryAction(Icons.Default.Edit, "Legenda", art.editable && !art.preparationPending && state.fresh && !state.busy) { editing = art to "caption" }
+                            GalleryAction(Icons.Default.DateRange, "Data/hora", art.editable && !art.preparationPending && state.fresh && !state.busy) { editing = art to "schedule" }
                             GalleryAction(if (art.automatic) Icons.Default.CheckCircle else Icons.Default.Close,
-                                if (art.automatic) "Ativada" else "Desativada", art.editable && state.fresh && !state.busy,
+                                if (art.automatic) "Ativada" else "Desativada", art.editable && !art.preparationPending && state.fresh && !state.busy,
                                 if (art.automatic) Color(0xFF64E6A5) else Color(0xFFFFD28A)) { editing = art to "automatic" }
                             GalleryAction(Icons.Default.Check, "Situação", true,
                                 if (state.fresh && art.status == "scheduled") Color(0xFF64E6A5) else Color(0xFFFFD28A)) { showStatus = art }

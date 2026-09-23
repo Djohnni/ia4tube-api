@@ -17,7 +17,8 @@ internal fun projectCalendarImports(planned: List<MonthlyPlanningCalendarListIte
             status = item.status, title = item.title, pedidoId = "", imageReady = false,
             sortKey = "${item.date} ${item.time}:${item.id}", origem = "gallery_import", tipo = "media",
             calendarRevision = item.revision, calendarStatusLabel = if (fresh) item.statusLabel else "Estado não confirmado — atualize",
-            calendarItemId = item.id, calendarEditable = fresh && item.editable)
+            calendarItemId = item.id, calendarEditable = fresh && item.editable,
+            calendarPreparationPending = item.preparationPending)
     }
     return (retainedPlanning + projection).sortedWith(compareBy<MonthlyPlanningCalendarListItem> { it.date }.thenBy { it.time }.thenBy { it.key })
 }

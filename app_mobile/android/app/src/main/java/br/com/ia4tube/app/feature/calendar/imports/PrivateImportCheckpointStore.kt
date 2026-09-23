@@ -91,10 +91,23 @@ class PrivateImportCheckpointStore(directory: File, private val cipher: ImportCh
         val present = readLocked(owner, scope)
         if ((present?.generation ?: 0L) != expectedGeneration ||
             expectedDraftId != null && present?.state?.draftId != expectedDraftId) throw ImportCheckpointFailure("checkpoint_conflict")
-        if (present?.state?.phase in setOf(ImportPhase.INITIALIZING, ImportPhase.VERIFYING, ImportPhase.CANCEL_PENDING, ImportPhase.SCHEDULING))
+        if (present?.calendarSubmission != null || present?.state?.phase in setOf(ImportPhase.INITIALIZING, ImportPhase.VERIFYING, ImportPhase.CANCEL_PENDING, ImportPhase.SCHEDULING))
             throw ImportCheckpointFailure("checkpoint_uncertain")
         val file = child("$scope.bin")
         ensureRegularOrAbsent(file)
+        if (file.exists() && !file.delete()) throw ImportCheckpointFailure("checkpoint_storage_unavailable")
+    }
+
+    /** A server receipt transfers responsibility to the durable server job, even before media is ready. */
+    fun clearAcceptedCalendarSubmission(owner: ImportOwner, expectedGeneration: Long,
+        expectedDraftId: String, receipt: ImportCalendarSubmissionReceipt) = locked(owner) { scope ->
+        val present = readLocked(owner, scope)
+        if (present == null || present.generation != expectedGeneration || present.state.draftId != expectedDraftId ||
+            present.calendarSubmission?.idempotencyKey != receipt.idempotencyKey ||
+            present.state.upload?.ticket?.assetId != receipt.assetId || present.state.upload.ticket.uploadId != receipt.uploadId ||
+            present.state.upload.serverVerified != true || readGeneratedLocked(scope) != null)
+            throw ImportCheckpointFailure("checkpoint_conflict")
+        val file = child("$scope.bin"); ensureRegularOrAbsent(file)
         if (file.exists() && !file.delete()) throw ImportCheckpointFailure("checkpoint_storage_unavailable")
     }
 

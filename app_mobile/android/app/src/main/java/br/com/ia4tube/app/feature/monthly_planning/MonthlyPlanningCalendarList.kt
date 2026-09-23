@@ -80,7 +80,8 @@ data class MonthlyPlanningCalendarListItem(
     val calendarRevision: Long? = null,
     val calendarStatusLabel: String = "",
     val calendarItemId: String? = null,
-    val calendarEditable: Boolean = true
+    val calendarEditable: Boolean = true,
+    val calendarPreparationPending: Boolean = false
 )
 
 @Composable
@@ -283,7 +284,7 @@ private fun MonthlyPlanningCalendarDayPost(
     onReschedule: ((MonthlyPlanningCalendarListItem) -> Unit)?
 ) {
     val canOpenOrder = item.imageReady && item.pedidoId.isNotBlank()
-    val effectiveOnReschedule = if (item.isWeeklyFreeArt() || !item.calendarEditable) null else onReschedule
+    val effectiveOnReschedule = if (item.isWeeklyFreeArt() || !item.calendarEditable || item.calendarPreparationPending) null else onReschedule
     val contentModifier = if (canOpenOrder) {
         Modifier.clickable { onOpenOrder(item.pedidoId) }
     } else {
@@ -426,7 +427,7 @@ private fun MonthlyPlanningCalendarListCard(
                     color = MaterialTheme.colorScheme.onSurface
                 )
                 Text(
-                    text = if (item.isWeeklyFreeArt()) "Arte Gratis da Semana" else item.status.ifBlank { "Planejada" },
+                    text = item.calendarStatusLabel.ifBlank { if (item.isWeeklyFreeArt()) "Arte Gratis da Semana" else item.status.ifBlank { "Planejada" } },
                     style = MaterialTheme.typography.bodySmall,
                     fontWeight = FontWeight.SemiBold,
                     color = if (item.isWeeklyFreeArt()) {

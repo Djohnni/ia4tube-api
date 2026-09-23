@@ -42,6 +42,7 @@ class GalleryImportWorkflowRenderTest {
         override fun adoptGenerated(id: String, revision: Long) { mutations++ }; override fun confirm(value: ImportPreviewConfirmation) { mutations++ }
         override fun schedule(caption: String, at: Long, automatic: Boolean) { mutations++ }; override fun reconcileSchedule() { mutations++ }
         override fun pauseTransfer() { mutations++ }; override fun finishScheduledDraft() { mutations++ }
+        override fun addToCalendar(caption: String) { mutations++ }
     }
     @Test fun completePhotoWorkflowRendersActualComposeWithoutImplicitConsent() = render(ready = true, fontScale = 1f, filename = "import-workflow-photo-preview.png")
     @Test fun fullWorkflowKeepsLargerTextReadable() = render(ready = true, fontScale = 1.4f, filename = "import-workflow-large-text-preview.png")
@@ -58,7 +59,7 @@ class GalleryImportWorkflowRenderTest {
             mimeType = "video/mp4", durationMs = 20_000) else f.selection, record.configuration!!,
             phase = if (ready) ImportPhase.READY else ImportPhase.PREPARING,
             upload = ImportUploadProgress(ImportUploadTicket(f.uploadId, f.assetId, f.sourceSha, f.selection.byteCount), serverVerified = true))
-        val view = ImportWorkflowView(f.owner, ImportCapabilities(true, f.owner, preparationEnabled = true, schedulingEnabled = true),
+        val view = ImportWorkflowView(f.owner, ImportCapabilities(true, f.owner, preparationEnabled = true, schedulingEnabled = true, calendarSubmissionEnabled = true),
             upload = ImportUploadRunView(source, ImportUploadRunStatus.UPLOADED), preparation = ImportPreparationRunView(
                 if (ready) ImportPreparationRunStatus.PREVIEW_AVAILABLE else ImportPreparationRunStatus.PREPARING,
                 source, record, preview, availability = ImportScheduleAvailability(true, true, true, "@empresa_sintetica")),
@@ -96,6 +97,6 @@ class GalleryImportWorkflowRenderTest {
         bitmap.recycle(); sample.recycle()
         assertTrue("Actual Compose must render nonblank workflow", colors.size > 20)
         assertEquals("Opening/rendering does not upload, prepare, approve or schedule", 0, actions.mutations)
-        assertEquals(if (ready) 1 else 0, renderCount)
+        assertEquals("Adding to calendar never requires loading a preview", 0, renderCount)
     }
 }

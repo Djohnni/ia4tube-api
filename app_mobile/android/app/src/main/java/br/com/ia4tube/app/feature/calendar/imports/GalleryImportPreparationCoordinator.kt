@@ -25,6 +25,10 @@ internal interface GalleryImportPreparationTransport {
     suspend fun schedule(owner: ImportOwner, binding: ImportScheduleBinding, intent: ImportScheduleIntent): ImportScheduleReceipt = throw ImportApiFailure("import_scheduling_unavailable")
     suspend fun scheduleStatus(owner: ImportOwner, binding: ImportScheduleBinding, intent: ImportScheduleIntent): ImportScheduleReceipt? = throw ImportApiFailure("import_scheduling_unavailable")
     suspend fun generated(owner: ImportOwner, intent: ImportGeneratedSourceIntent): ImportGeneratedSource = throw ImportApiFailure("import_generated_unavailable")
+    suspend fun submitToCalendar(owner: ImportOwner, assetId: String, uploadId: String, intent: ImportCalendarSubmissionIntent,
+        kind: ImportMediaKind, configuration: ImportConfiguration): ImportCalendarSubmissionReceipt = throw ImportApiFailure("import_calendar_submission_unavailable")
+    suspend fun calendarSubmissionStatus(owner: ImportOwner, assetId: String, uploadId: String,
+        intent: ImportCalendarSubmissionIntent): ImportCalendarSubmissionReceipt? = throw ImportApiFailure("import_calendar_submission_unavailable")
 }
 internal class HttpGalleryImportPreparationTransport(private val api: GalleryImportHttpApi) : GalleryImportPreparationTransport {
     override suspend fun capabilities() = api.capabilities()
@@ -36,16 +40,23 @@ internal class HttpGalleryImportPreparationTransport(private val api: GalleryImp
     override suspend fun schedule(owner: ImportOwner, binding: ImportScheduleBinding, intent: ImportScheduleIntent) = api.schedule(owner, binding, intent)
     override suspend fun scheduleStatus(owner: ImportOwner, binding: ImportScheduleBinding, intent: ImportScheduleIntent) = api.scheduleStatus(owner, binding, intent)
     override suspend fun generated(owner: ImportOwner, intent: ImportGeneratedSourceIntent) = api.adoptGenerated(owner, intent)
+    override suspend fun submitToCalendar(owner: ImportOwner, assetId: String, uploadId: String, intent: ImportCalendarSubmissionIntent,
+        kind: ImportMediaKind, configuration: ImportConfiguration) = api.submitToCalendar(owner, assetId, uploadId, intent, kind, configuration)
+    override suspend fun calendarSubmissionStatus(owner: ImportOwner, assetId: String, uploadId: String,
+        intent: ImportCalendarSubmissionIntent) = api.calendarSubmissionStatus(owner, assetId, uploadId, intent)
 }
 
 enum class ImportPreparationRunStatus { EMPTY, SOURCE_RECONCILIATION, UPLOAD_REQUIRED, AWAITING_REQUEST, PREPARING, RECONCILIATION_REQUIRED,
-    PREVIEW_AVAILABLE, TEST_ONLY_PREVIEW, SCHEDULING, SCHEDULE_RECONCILIATION, SCHEDULED, ATTENTION, SESSION_CHANGED, PAUSED }
+    PREVIEW_AVAILABLE, TEST_ONLY_PREVIEW, SCHEDULING, SCHEDULE_RECONCILIATION, SCHEDULED, CALENDAR_ACCEPTED,
+    CALENDAR_RECONCILIATION, ATTENTION, SESSION_CHANGED, PAUSED }
 enum class ImportPreparationDiagnosticStage { LOCAL_STATE, CAPABILITIES, STATUS, METADATA, PREVIEW, SCHEDULING_AVAILABILITY }
 data class ImportPreparationRunView(val status: ImportPreparationRunStatus, val state: GalleryImportState? = null,
     val preparation: ImportPreparationRecord? = null, val preview: ImportPrivatePreview? = null, val errorCode: String? = null,
     val confirmation: ImportPreviewConfirmation? = null, val availability: ImportScheduleAvailability? = null,
     val scheduleReceipt: ImportScheduleReceipt? = null, val generatedSourceIntent: ImportGeneratedSourceIntent? = null,
-    val diagnosticStage: ImportPreparationDiagnosticStage? = null, val diagnosticHttpStatus: Int? = null) {
+    val diagnosticStage: ImportPreparationDiagnosticStage? = null, val diagnosticHttpStatus: Int? = null,
+    val calendarSubmissionIntent: ImportCalendarSubmissionIntent? = null,
+    val calendarSubmissionReceipt: ImportCalendarSubmissionReceipt? = null) {
     override fun toString() = "ImportPreparationRunView(status=$status, content=redacted)"
 }
 private class ImportPreparationFailure(val code: String) : Exception("Confira a preparação existente antes de tentar novamente.")
@@ -93,6 +104,7 @@ class GalleryImportPreparationCoordinator internal constructor(
         val checkpoint = run.checkpoint ?: return@operation emit(run, if (run.generatedIntent != null)
             ImportPreparationRunStatus.SOURCE_RECONCILIATION else ImportPreparationRunStatus.EMPTY)
         capabilities(run)
+        if (checkpoint.calendarSubmission != null) return@operation reconcileCalendarSubmission(run, retry = false)
         if (checkpoint.scheduleBinding != null) return@operation reconcileSchedule(run, retry = false)
         if (!uploaded(checkpoint)) return@operation emit(run, ImportPreparationRunStatus.UPLOAD_REQUIRED)
         val intent = checkpoint.preparationIntent
@@ -103,6 +115,7 @@ class GalleryImportPreparationCoordinator internal constructor(
     /** First request is explicit. Another revision/client's preparation is never overwritten automatically. */
     suspend fun request(): ImportPreparationRunView = operation { run ->
         var checkpoint = draft(run); capabilities(run)
+        requireThat(checkpoint.calendarSubmission == null, "import_calendar_submission_pending")
         requireThat(uploaded(checkpoint), "import_preparation_upload_required")
         requireThat(!checkpoint.cancelRequested, "import_preparation_cancel_pending")
         requireThat(GalleryImportPolicy.validateConfiguration(checkpoint.state.selection.kind, checkpoint.state.configuration, run.capability!!.musicTracks) == null,
@@ -176,10 +189,19 @@ class GalleryImportPreparationCoordinator internal constructor(
     /** Configuration changes keep the verified upload and invalidate every old derived preview. */
     suspend fun configure(configuration: ImportConfiguration): ImportPreparationRunView = operation { run ->
         val checkpoint = draft(run); capabilities(run)
+        requireThat(checkpoint.calendarSubmission == null, "import_calendar_submission_pending")
         requireThat(checkpoint.scheduleBinding == null && checkpoint.state.scheduleIntent == null, "import_schedule_existing_intent")
-        requireThat(uploaded(checkpoint), "import_preparation_upload_required")
         requireThat(GalleryImportPolicy.validateConfiguration(checkpoint.state.selection.kind, configuration,
             run.capability!!.musicTracks) == null, "import_preparation_music_unavailable")
+        if (!uploaded(checkpoint)) {
+            requireThat(checkpoint.state.phase in setOf(ImportPhase.EDITING, ImportPhase.UPLOADING) && !checkpoint.cancelRequested,
+                "import_preparation_upload_required")
+            if (configuration != checkpoint.state.configuration) {
+                applied(run, ImportEvent.EditConfiguration(configuration))
+                persist(run, checkpoint.copy(state = run.machine.snapshot()!!))
+            }
+            return@operation emit(run, ImportPreparationRunStatus.UPLOAD_REQUIRED)
+        }
         if (configuration == checkpoint.state.configuration) return@operation when {
             checkpoint.preparationIntent?.acceptedMediaRevision != null -> inspect(run, status(run, checkpoint.state.upload!!.ticket.assetId))
             checkpoint.preparationIntent != null -> emit(run, ImportPreparationRunStatus.RECONCILIATION_REQUIRED)
@@ -211,6 +233,7 @@ class GalleryImportPreparationCoordinator internal constructor(
     /** Programar is an explicit action. Its complete intent is committed before the single POST. */
     suspend fun schedule(caption: String, scheduledAtEpochMs: Long, automatic: Boolean): ImportPreparationRunView = operation { run ->
         capabilities(run); var checkpoint = draft(run)
+        requireThat(checkpoint.calendarSubmission == null, "import_calendar_submission_pending")
         if (checkpoint.scheduleBinding != null) {
             val intent = checkpoint.state.scheduleIntent!!
             requireThat(intent.caption == caption.trim() && intent.scheduledAtEpochMs == scheduledAtEpochMs && intent.automatic == automatic,
@@ -246,6 +269,72 @@ class GalleryImportPreparationCoordinator internal constructor(
     suspend fun reconcileScheduleOnce(): ImportPreparationRunView = operation { run ->
         capabilities(run); requireThat(draft(run).scheduleBinding != null, "import_schedule_no_intent")
         reconcileSchedule(run, retry = true)
+    }
+
+    /** One explicit action accepts a durable server-owned prepare-to-calendar job. No preview acknowledgement is fabricated. */
+    suspend fun submitToCalendar(caption: String = ""): ImportPreparationRunView = operation { run ->
+        capabilities(run)
+        requireThat(run.capability!!.calendarSubmissionEnabled, "import_calendar_submission_unavailable")
+        var checkpoint = draft(run)
+        requireThat(checkpoint.scheduleBinding == null && checkpoint.state.scheduleIntent == null, "import_schedule_existing_intent")
+        if (checkpoint.calendarSubmission != null) return@operation reconcileCalendarSubmission(run, retry = true)
+        requireThat(uploaded(checkpoint) && !checkpoint.cancelRequested, "import_preparation_upload_required")
+        requireThat(GalleryImportPolicy.validateConfiguration(checkpoint.state.selection.kind, checkpoint.state.configuration,
+            run.capability!!.musicTracks) == null, "import_preparation_music_unavailable")
+        var record = status(run, checkpoint.state.upload!!.ticket.assetId); guard(run); requireIdentity(run, record)
+        val legacy = checkpoint.preparationIntent
+        if (legacy != null && legacy.acceptedMediaRevision == null) {
+            // An old unacknowledged preparation must resolve with its existing key before the new intent is accepted.
+            persist(run, checkpoint)
+            record = run.api.request(run.owner, record.assetId, record.uploadId, legacy,
+                checkpoint.state.selection.kind, checkpoint.state.configuration)
+            guard(run); requireIdentity(run, record)
+            requireThat(record.mediaRevision == legacy.expectedMediaRevision + 1 && record.jobId != null &&
+                record.kind == checkpoint.state.selection.kind && record.configuration == checkpoint.state.configuration,
+                "import_preparation_revision_invalid")
+            persist(run, draft(run).copy(preparationIntent = legacy.copy(acceptedMediaRevision = record.mediaRevision, jobId = record.jobId)))
+            checkpoint = draft(run)
+        }
+        val previous = checkpoint.preparationIntent
+        requireThat(record.currentRevision == (previous?.acceptedMediaRevision ?: checkpoint.preparationBaseRevision) &&
+            (previous == null || record.jobId == previous.jobId && record.configuration == checkpoint.state.configuration),
+            "import_preparation_revision_changed")
+        val intent = ImportCalendarSubmissionIntent(UUID.randomUUID().toString(), checkpoint.state.revision, record.currentRevision, caption.trim())
+        ImportCalendarSubmissionProtocol.validate(intent)
+        persist(run, checkpoint.copy(calendarSubmission = intent))
+        emit(run, ImportPreparationRunStatus.CALENDAR_RECONCILIATION)
+        submitCalendarSubmission(run)
+    }
+
+    private suspend fun reconcileCalendarSubmission(run: Run, retry: Boolean): ImportPreparationRunView {
+        val checkpoint = draft(run); val intent = checkpoint.calendarSubmission!!; val ticket = checkpoint.state.upload!!.ticket
+        val found = run.api.calendarSubmissionStatus(run.owner, ticket.assetId, ticket.uploadId, intent); guard(run)
+        if (found != null) return finishCalendarSubmission(run, found)
+        // Reopening only reads. A user retry may replay exactly the saved request, never mint another key.
+        return if (retry) submitCalendarSubmission(run) else emit(run, ImportPreparationRunStatus.CALENDAR_RECONCILIATION)
+    }
+
+    private suspend fun submitCalendarSubmission(run: Run): ImportPreparationRunView {
+        val checkpoint = draft(run); val ticket = checkpoint.state.upload!!.ticket
+        persist(run, checkpoint)
+        val receipt = run.api.submitToCalendar(run.owner, ticket.assetId, ticket.uploadId, checkpoint.calendarSubmission!!,
+            checkpoint.state.selection.kind, checkpoint.state.configuration)
+        return finishCalendarSubmission(run, receipt)
+    }
+
+    private suspend fun finishCalendarSubmission(run: Run, receipt: ImportCalendarSubmissionReceipt): ImportPreparationRunView {
+        guard(run); val checkpoint = draft(run); val ticket = checkpoint.state.upload!!.ticket
+        requireThat(receipt.assetId == ticket.assetId && receipt.uploadId == ticket.uploadId &&
+            receipt.idempotencyKey == checkpoint.calendarSubmission!!.idempotencyKey && receipt.id.matches(Regex("[a-f0-9]{40}")),
+            "import_calendar_submission_receipt_invalid")
+        if (run.generatedIntent != null) {
+            val source = checkpoint.generatedSource ?: throw ImportPreparationFailure("import_generated_existing_draft")
+            withContext(io) { guard(run); store.clearAcceptedGeneratedIntent(run.owner, source, checkpoint.generation) }
+            run.generatedIntent = null
+        }
+        withContext(io) { guard(run); store.clearAcceptedCalendarSubmission(run.owner, checkpoint.generation, checkpoint.state.draftId, receipt) }
+        guard(run); run.checkpoint = null; confirmedPreview = null
+        return emit(run, ImportPreparationRunStatus.CALENDAR_ACCEPTED, calendarReceipt = receipt)
     }
     private suspend fun reconcileSchedule(run: Run, retry: Boolean): ImportPreparationRunView {
         val checkpoint = draft(run); val binding = checkpoint.scheduleBinding!!; val intent = checkpoint.state.scheduleIntent!!
@@ -369,7 +458,8 @@ class GalleryImportPreparationCoordinator internal constructor(
     }
     private fun emit(run: Run, status: ImportPreparationRunStatus, record: ImportPreparationRecord? = null,
                      preview: ImportPrivatePreview? = null, error: String? = null, availability: ImportScheduleAvailability? = null,
-                     receipt: ImportScheduleReceipt? = null, httpStatus: Int? = null): ImportPreparationRunView = synchronized(viewLock) {
+                     receipt: ImportScheduleReceipt? = null, httpStatus: Int? = null,
+                     calendarReceipt: ImportCalendarSubmissionReceipt? = null): ImportPreparationRunView = synchronized(viewLock) {
         guard(run, allowPaused = status == ImportPreparationRunStatus.PAUSED)
         val current = run.checkpoint?.state
         val safeState = if (current?.phase == ImportPhase.READY && status != ImportPreparationRunStatus.PREVIEW_AVAILABLE)
@@ -377,7 +467,7 @@ class GalleryImportPreparationCoordinator internal constructor(
         ImportPreparationRunView(status, safeState, record, preview,
             error?.takeIf { it.matches(Regex("[a-z0-9_]{1,100}")) }, confirmedPreview?.takeIf { preview != null && matches(it, preview) }, availability, receipt,
             run.generatedIntent ?: run.checkpoint?.generatedSource, run.diagnosticStage.takeIf { error != null },
-            httpStatus?.takeIf { error != null && it in 400..599 }).also {
+            httpStatus?.takeIf { error != null && it in 400..599 }, run.checkpoint?.calendarSubmission, calendarReceipt).also {
             visibleOwner = run.owner; visibleToken = run.token; visible = it; notify(it)
         }
     }
@@ -419,6 +509,7 @@ class GalleryImportPreparationCoordinator internal constructor(
                 is ImportCheckpointFailure -> error.code; else -> "import_preparation_invalid_result" }
             confirmedPreview = null
             return emit(current, if (current.checkpoint == null && current.generatedIntent != null) ImportPreparationRunStatus.SOURCE_RECONCILIATION
+            else if (current.checkpoint?.calendarSubmission != null) ImportPreparationRunStatus.CALENDAR_RECONCILIATION
             else if (current.checkpoint?.scheduleBinding != null) ImportPreparationRunStatus.SCHEDULE_RECONCILIATION
             else if (current.checkpoint?.preparationIntent?.acceptedMediaRevision == null && current.checkpoint?.preparationIntent != null)
                 ImportPreparationRunStatus.RECONCILIATION_REQUIRED else ImportPreparationRunStatus.ATTENTION, error = code,

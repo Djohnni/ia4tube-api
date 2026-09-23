@@ -26,7 +26,9 @@ data class ScheduledArt(
     val formatsReady: Boolean = false, val publications: Map<String, String> = emptyMap(),
     val sourceKind: String = "generated", val media: ImportPrivatePreview? = null,
     val selectedTargets: List<String> = emptyList(), val shareToFeed: Boolean = false,
-    val title: String = "Arte planejada", val localSimulation: Boolean = false
+    val title: String = "Arte planejada", val localSimulation: Boolean = false,
+    val preparationPending: Boolean = false, val mediaReadAvailable: Boolean = true,
+    val submissionState: String? = null
 )
 data class CalendarSnapshot(
     val enabled: Boolean = false, val automatic: Boolean = false, val preferenceRevision: Long = 0,
@@ -62,15 +64,23 @@ internal fun parseCalendar(root: JSONObject): CalendarSnapshot {
         val revision = item.getLong("revision"); require(revision > 0)
         val destination = item.optString("destination", "feed"); require(destination in setOf("feed", "story", "both", "reel", "multiple"))
         val sourceKind = item.optString("sourceKind", "generated"); require(sourceKind in setOf("generated", "planning", "order", "upload"))
+        val preparationPending = if (item.has("preparationPending")) item.get("preparationPending").also { require(it is Boolean) } as Boolean else false
+        val mediaReadAvailable = if (item.has("mediaReadAvailable")) item.get("mediaReadAvailable").also { require(it is Boolean) } as Boolean
+            else if (root.has("calendar_media_read_available")) root.get("calendar_media_read_available").also { require(it is Boolean) } as Boolean else true
+        val submissionState = item.optString("submissionState").takeIf { !item.isNull("submissionState") && it.isNotBlank() }
+        require(submissionState == null || submissionState in setOf("accepted", "preparing", "scheduled", "attention", "cancelled"))
+        require(!preparationPending || sourceKind == "upload" && submissionState in setOf("accepted", "preparing", "attention"))
         val media = item.optJSONObject("media")?.let { parseScheduledImportPreview(it, id) }
-        require(media != null || destination in setOf("feed", "story", "both"))
+        require(media != null || destination in setOf("feed", "story", "both") || sourceKind == "upload")
         require(media == null || (identity != null && sourceKind == "upload" && image == null))
-        require(sourceKind != "upload" || media != null)
+        require(sourceKind != "upload" || identity != null && image == null && (media != null || preparationPending || !mediaReadAvailable))
+        require(mediaReadAvailable || media == null)
         val previews = mutableMapOf<String, String>()
         val rawPreviews = item.optJSONObject("previews")
         for (target in listOf("feed", "story")) rawPreviews?.optString(target)?.takeIf { it.isNotBlank() }?.let { url ->
             require(url == "/v1/social/calendar/items/$id/image?destination=$target"); previews[target] = url
         }
+        require(sourceKind != "upload" || previews.isEmpty())
         val publications = mutableMapOf<String, String>()
         for (target in listOf("feed", "story", "reel")) item.optJSONObject("publications")?.optJSONObject(target)?.let {
             publications[target] = it.optString("status", "confirming")
@@ -83,19 +93,21 @@ internal fun parseCalendar(root: JSONObject): CalendarSnapshot {
         require(media == null || targets.toSet() == media.variants.map { it.target }.toSet())
         val shareToFeed = item.optJSONObject("media")?.let { value ->
             value.get("shareToFeed").also { require(it is Boolean) } as Boolean
-        } ?: false
+        } ?: if (item.has("shareToFeed")) item.get("shareToFeed").also { require(it is Boolean) } as Boolean else false
         val localSimulation = if (item.has("localSimulation")) item.get("localSimulation").also { require(it is Boolean) } as Boolean else false
-        if (media != null) {
+        if (sourceKind == "upload") {
+            require(targets.size in 1..2 && targets.all { it in setOf("feed", "story", "reel") })
             require(if (targets.size == 1) destination == targets.single()
                 else destination == "multiple" || destination == "both" && targets.toSet() == setOf("feed", "story"))
             require(!shareToFeed || "reel" in targets && "feed" !in targets)
-            require(!media.testOnly || localSimulation)
+            require(media?.testOnly != true || localSimulation)
         }
         ScheduledArt(id, item.getString("key"), date, time, caption, revision,
             item.getString("status"), item.getString("statusLabel"), item.getBoolean("editable"),
             item.getBoolean("automatic"), image, item.optString("username").takeUnless { item.isNull("username") }, item.getLong("scheduledAt"),
             destination, previews, item.optBoolean("formatsReady", false), publications, sourceKind, media, targets,
-            shareToFeed, item.optString("title", if (media != null) "Mídia da galeria" else "Arte planejada"), localSimulation)
+            shareToFeed, item.optString("title", if (sourceKind == "upload") "Mídia da galeria" else "Arte planejada"), localSimulation,
+            preparationPending, mediaReadAvailable, submissionState)
     }
     require(items.map { it.id }.distinct().size == items.size)
     val connection = root.optJSONObject("connection")

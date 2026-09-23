@@ -12,7 +12,7 @@ internal data class ImportWorkflowView(val owner: ImportOwner, val capabilities:
     val upload: ImportUploadRunView = ImportUploadRunView(), val preparation: ImportPreparationRunView? = null,
     val busy: Boolean = false, val foreground: Boolean = false, val initialized: Boolean = false,
     val pickerResultPending: Boolean = false, val error: String? = null, val sessionValid: Boolean = true) {
-    val draft: GalleryImportState? get() = preparation?.state ?: upload.state
+    val draft: GalleryImportState? get() = if (preparation?.calendarSubmissionReceipt != null) null else preparation?.state ?: upload.state
     override fun toString() = "ImportWorkflowView(busy=$busy, content=redacted)"
 }
 
@@ -32,6 +32,7 @@ internal interface GalleryImportWorkflowActions {
     fun reconcileSchedule()
     fun pauseTransfer()
     fun finishScheduledDraft()
+    fun addToCalendar(caption: String)
 }
 
 internal interface GalleryImportPreparationControl {
@@ -44,6 +45,7 @@ internal interface GalleryImportPreparationControl {
     suspend fun schedule(caption: String, at: Long, automatic: Boolean): ImportPreparationRunView
     suspend fun reconcileScheduleOnce(): ImportPreparationRunView
     suspend fun finishScheduledDraft(): ImportPreparationRunView
+    suspend fun submitToCalendar(caption: String): ImportPreparationRunView = throw ImportApiFailure("import_calendar_submission_unavailable")
     fun pause()
     fun invalidateSession()
 }
@@ -59,6 +61,7 @@ private class CoordinatedGalleryImportPreparation(private val coordinator: Galle
     override suspend fun schedule(caption: String, at: Long, automatic: Boolean) = coordinator.schedule(caption, at, automatic)
     override suspend fun reconcileScheduleOnce() = coordinator.reconcileScheduleOnce()
     override suspend fun finishScheduledDraft() = coordinator.finishScheduledDraft()
+    override suspend fun submitToCalendar(caption: String) = coordinator.submitToCalendar(caption)
     override fun pause() = coordinator.pause()
     override fun invalidateSession() = coordinator.invalidateSession()
 }
@@ -151,6 +154,15 @@ internal class GalleryImportWorkflowRuntime internal constructor(private val own
     override fun schedule(caption: String, at: Long, automatic: Boolean) = launch { preparation.schedule(caption, at, automatic) }
     override fun reconcileSchedule() = launch { preparation.reconcileScheduleOnce() }
     override fun finishScheduledDraft() = launch { preparation.finishScheduledDraft(); upload.restore() }
+    override fun addToCalendar(caption: String) = launch {
+        val draft = mutable.value.draft ?: return@launch
+        if (draft.upload?.serverVerified != true) {
+            val transferred = upload.transfer()
+            if (transferred.state?.upload?.serverVerified != true) return@launch
+        }
+        if (!valid()) { invalidate(); return@launch }
+        preparation.submitToCalendar(caption)
+    }
 
     /**
      * ActivityResult can be delivered in the same lifecycle turn that calls [start]. The restore owns `busy`

@@ -1,8 +1,10 @@
 # Prévia privada e fluxo Android da iA4tube — candidato local
 
-`GalleryImportWorkflowHost` é a mesma tela para importar no calendário/galeria ou usar uma arte existente por ID e revisão. A identidade vem de capabilities autenticadas, nunca de claims decodificados do token. Entrar/restaurar lê estado; escolher, enviar, preparar, confirmar a prévia e Programar são ações distintas. O formulário não cria pedido de geração nem debita crédito de arte.
+`GalleryImportWorkflowHost` é a mesma tela para importar no calendário/galeria ou usar uma arte existente por ID e revisão. A identidade vem de capabilities autenticadas, nunca de claims decodificados do token. A pessoa escolhe origem, formato e áudio e toca uma vez em **Adicionar ao calendário**. A legenda é opcional; uma legenda vazia não substitui a da arte existente. O formulário não cria pedido de geração nem debita crédito de arte.
 
-O runtime retém o envio e as intenções privadas existentes, delega retomada/CAS ao coordenador, recupera explicitamente origem gerada pendente e não faz polling ou publicação por conta própria. Depois do recibo é possível concluir somente o rascunho local; o registro do calendário permanece.
+O runtime retém o envio e as intenções privadas existentes, delega retomada/CAS ao coordenador e recupera origem gerada pendente. Após verificar o upload, grava a intenção `calendarSubmission` antes de enviá-la ao servidor. O recibo aceito transfere a continuação do preparo e da inclusão no calendário ao servidor; não depende da tela nem do aplicativo aberto. A tela avisa “Arquivo recebido. Estamos preparando. Confira no calendário.” e retorna ao calendário. Nenhuma confirmação de prévia é fabricada. O novo fluxo exige a capability `scheduling.directSubmission`.
+
+Uma resposta perdida mantém a mesma chave e o pedido privado. Reabrir consulta a mesma chave sem POST automático; uma retomada explícita pode reenviar somente aquele pedido se a consulta não o encontrar. O rascunho local só é retirado com recibo válido e origem conciliada, preservando CAS e isolamento por empresa/usuário. O registro pendente já aparece no mesmo calendário e pode ser excluído; depois de pronto permite editar legenda/data e a automação existente. A reprodução privada descrita abaixo é opcional no calendário. Os contratos antigos de confirmação permanecem apenas para compatibilidade e recuperação de programações anteriores.
 
 ## Bytes e reprodução
 
@@ -14,7 +16,7 @@ O runtime retém o envio e as intenções privadas existentes, delega retomada/C
 - Media3 existente abre somente o arquivo conferido; não inclui ganchos de anúncio ou métricas. Sem autoplay; controles de reproduzir/pausar e ouvir/silenciar são locais. Silenciar a prévia não edita a opção de áudio final. Apenas um player privado pode permanecer ativo; outro item, tela parada, saída ou troca de sessão libera player e cache.
 - O calendário deve passar `active=true` somente para a página atual assentada; diálogos desativam a reprodução. A superfície também exige pelo menos metade de sua área visível na janela, interrompendo o player ao rolar para fora da prévia. A próxima publicação usa miniatura estática de vídeo e não baixa MP4 automaticamente.
 
-## Confirmação e música
+## Contrato legado de confirmação e música
 
 Cada variante deve ter os bytes verificados e uma imagem decodificada ou primeiro frame de vídeo renderizado. A confirmação da tela cobre exatamente asset, revisão, digest e todos os destinos vistos. Não é restaurada como consentimento depois da sessão; qualquer mudança de formato/áudio/preparação apaga a conferência anterior. A tela pede conferir enquadramento, rotação, duração e áudio; renderizar o primeiro frame não comprova que a pessoa ouviu o vídeo inteiro.
 
@@ -26,6 +28,6 @@ A disponibilidade operacional distingue `calendarSaveAllowed` de `automaticAllow
 
 ## Provas locais e limites
 
-`PrivateImportPreviewCacheTest` cobre transporte loopback privado com bytes sintéticos e falhas; `ImportWorkflowPresentationTest` cobre formatos, datas e invalidação; `ImportPreviewPlaybackGateTest` cobre exclusão e liberação do recurso. `GalleryImportWorkflowRenderTest` renderiza a Compose real com observação de mutações implícitas e uma imagem sintética injetada somente no teste. `GalleryImportWorkflowInteractionTest` usa cliques e edição reais das semânticas Compose: exige cada destino conferido, separa Programar do diálogo final e bloqueia programação após erro da prévia ou troca de áudio. Essas provas de UI não são decode real de vídeo em aparelho, licença musical, medição de custo, liberação de produção, validação Render ou teste físico no A55.
+`PrivateImportPreviewCacheTest` cobre transporte loopback privado com bytes sintéticos e falhas; `ImportWorkflowPresentationTest` cobre formatos, datas e invalidação; `ImportPreviewPlaybackGateTest` cobre exclusão e liberação do recurso. `GalleryImportWorkflowRenderTest` e `GalleryImportWorkflowInteractionTest` verificam a tela real, sem renderizar uma prévia e sem diálogo de programação. `ImportCalendarSubmissionTest`, `ImportCalendarSubmissionHttpTest` e `ImportCalendarSubmissionRuntimeTest` cobrem persistência antes do POST, recuperação com a mesma chave, fechamento após aceite, upload único, sessão e compatibilidade. `CalendarSubmissionProjectionTest` cobre preparo visível e metadata preservada quando a leitura da mídia está indisponível. Essas provas de UI não são decode real de vídeo em aparelho, licença musical, medição de custo, liberação de produção, validação Render ou teste físico no A55.
 
 Os relatórios de teste devem registrar a execução exata: não somar contagens de snapshots diferentes. Nenhuma alteração aqui autoriza release/AAB, instalação no telefone, migração, abertura de gates ou recurso remoto pago.

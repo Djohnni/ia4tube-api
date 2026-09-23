@@ -33,7 +33,8 @@ data class ImportCapabilities(
     val preparationEnabled: Boolean = false,
     val schedulingEnabled: Boolean = false,
     val localSimulation: Boolean = false,
-    val musicTracks: List<AuthorizedImportTrack> = emptyList()
+    val musicTracks: List<AuthorizedImportTrack> = emptyList(),
+    val calendarSubmissionEnabled: Boolean = false
 )
 
 data class ImportUploadRecord(
@@ -136,8 +137,10 @@ class GalleryImportHttpApi internal constructor(
             AuthorizedImportTrack(id, commercial, test, name)
         }
         require(tracks.map { it.id }.distinct().size == tracks.size)
+        val scheduling = json.getJSONObject("scheduling")
+        val directSubmission = if (scheduling.has("directSubmission")) scheduling.get("directSubmission").also { require(it is Boolean) } as Boolean else false
         ImportCapabilities(true, owner, origin.toString().trimEnd('/'), chunkBytes, imageBytes, videoBytes,
-            preparation.getBoolean("enabled"), json.getJSONObject("scheduling").getBoolean("enabled"), local, tracks).also { currentCapabilities = it }
+            preparation.getBoolean("enabled"), scheduling.getBoolean("enabled"), local, tracks, directSubmission).also { currentCapabilities = it }
     }
 
     suspend fun start(owner: ImportOwner, media: ImportSelection, idempotencyKey: String): ImportUploadRecord = guarded(true) {
@@ -168,6 +171,20 @@ class GalleryImportHttpApi internal constructor(
     suspend fun preparationStatus(owner: ImportOwner, assetId: String): ImportPreparationRecord = guarded(false) {
         ensurePreparationOwner(owner); uuid(assetId)
         ImportPreparationProtocol.parseRecord(request("/assets/$assetId").getJSONObject("asset")).also { require(it.assetId == assetId) }
+    }
+    suspend fun submitToCalendar(owner: ImportOwner, assetId: String, uploadId: String,
+        intent: ImportCalendarSubmissionIntent, kind: ImportMediaKind, configuration: ImportConfiguration): ImportCalendarSubmissionReceipt = guarded(true) {
+        ensurePreparationOwner(owner); uuid(assetId); uuid(uploadId)
+        if (currentCapabilities?.calendarSubmissionEnabled != true) throw ImportApiFailure("import_calendar_submission_unavailable")
+        ImportCalendarSubmissionProtocol.parse(request("/assets/$assetId/calendar-submissions",
+            ImportCalendarSubmissionProtocol.body(uploadId, intent, kind, configuration)).getJSONObject("submission"), assetId, uploadId, intent)
+    }
+    suspend fun calendarSubmissionStatus(owner: ImportOwner, assetId: String, uploadId: String,
+        intent: ImportCalendarSubmissionIntent): ImportCalendarSubmissionReceipt? = guarded(false) {
+        ensurePreparationOwner(owner); uuid(assetId); uuid(uploadId); ImportCalendarSubmissionProtocol.validate(intent)
+        try { ImportCalendarSubmissionProtocol.parse(request("/assets/$assetId/calendar-submissions/by-key/${intent.idempotencyKey}")
+            .getJSONObject("submission"), assetId, uploadId, intent) }
+        catch (error: ImportApiFailure) { if (error.status == 404) null else throw error }
     }
     suspend fun preparationPreview(owner: ImportOwner, record: ImportPreparationRecord): ImportPrivatePreview = guarded(false) {
         ensurePreparationOwner(owner); uuid(record.assetId)
