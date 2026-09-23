@@ -44,7 +44,7 @@ function reserveSlot(state, now, exceptId, preferred = null) {
 /** Durable user intent and calendar finalization. No codec, timer, provider send,
  * client principal fabrication or assertion of visual review belongs here. */
 function createCalendarSubmissions({ store, uploadStore, preparation, grants, accessPolicy, resolveConnection,
-  resolveSubmissionConnection, catalog = null, localTransport = null, clock = Date.now }) {
+  resolveSubmissionConnection, resolveDefaultCaption = null, catalog = null, localTransport = null, clock = Date.now }) {
   const local = isLocalPublicationTransport(localTransport);
   const authorize = context => accessPolicy.resolve(context);
   function receipt(row, state) {
@@ -93,8 +93,16 @@ function createCalendarSubmissions({ store, uploadStore, preparation, grants, ac
       if (state.jobs[id]) fail("idempotency_conflict");
       if (Object.keys(state.importSubmissions).length >= MAX_ITEMS || Object.keys(state.jobs).length + Object.values(state.importSubmissions).filter(r => activeStates.has(r.state)).length >= MAX_ITEMS) fail("capacity_reached");
       const origin = state.importedSources?.origins?.[input.assetId], original = origin ? state.jobs[origin.calendarItemId] : null;
+      // Resolve only once under the same owner transaction as acceptance. Retries
+      // recover above; a later profile change never rewrites a signed intention.
+      let submissionCaption = explicitCaption ?? original?.caption;
+      if (submissionCaption === undefined || submissionCaption === null) {
+        if (typeof resolveDefaultCaption !== "function") fail("caption_owner_unavailable", 503);
+        submissionCaption = caption(resolveDefaultCaption(context));
+        if (!submissionCaption) fail("caption_owner_unavailable", 503);
+      }
       const recordInput = { assetId: input.assetId, uploadId: input.uploadId, idempotencyKey: input.idempotencyKey,
-        expectedMediaRevision: input.expectedMediaRevision, selection: chosen, caption: explicitCaption ?? original?.caption ?? "",
+        expectedMediaRevision: input.expectedMediaRevision, selection: chosen, caption: submissionCaption,
         sourceSha256: upload.sha256, reuseRevision: reuse ? status.mediaRevision : null };
       const requestHash = hash(recordInput), preferences = state.preferences;
       const automatic = preferences.enabled && sameBinding(preferences.binding, connection?.binding);

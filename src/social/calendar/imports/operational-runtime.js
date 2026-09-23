@@ -47,7 +47,7 @@ function createOperationalCalendarImportsRuntimeFactory({ enabled = false, prepa
   if (localTransport !== null && (!local || allowLocalTransportForTests !== true)) fail();
   if (typeof enabled !== "boolean" || typeof clock !== "function" || typeof canAdmit !== "function" ||
       readPilotStatus !== null && typeof readPilotStatus !== "function") fail();
-  const factory = async ({ store, grants, secret, publicOrigin, connectionForPrincipal, connectionForGrant, connectionForSubmission, publicationAllowedForPrincipal, readGeneratedArt } = {}) => {
+  const factory = async ({ store, grants, secret, publicOrigin, connectionForPrincipal, connectionForGrant, connectionForSubmission, publicationAllowedForPrincipal, readGeneratedArt, defaultCaptionForPrincipal } = {}) => {
     if (!enabled) return null;
     if (!isCalendarStore(store) || !isImportUploadPostgresStore(uploadStore) || !isImportAccessPolicy(accessPolicy) ||
         !isPreparedDiskResultStore(resultStore, { allowVolatileForTests: local }) ||
@@ -84,7 +84,11 @@ function createOperationalCalendarImportsRuntimeFactory({ enabled = false, prepa
       resolveAutomaticAllowed: context => publicationAllowedForPrincipal(principalFor(context)) === true,
       resolveGeneratedArt: (context, request) => readGeneratedArt(principalFor(context), request) });
     const submissions = typeof connectionForSubmission === "function" ? createCalendarSubmissions({ store, uploadStore, preparation,
-      grants, accessPolicy, resolveConnection, resolveSubmissionConnection: connectionForSubmission, catalog, localTransport, clock }) : null;
+      grants, accessPolicy, resolveConnection, resolveSubmissionConnection: connectionForSubmission,
+      resolveDefaultCaption: context => {
+        if (typeof defaultCaptionForPrincipal !== "function") fail();
+        return defaultCaptionForPrincipal(principalFor(context));
+      }, catalog, localTransport, clock }) : null;
     const preview = createPrivateImportPreviewService({ preparation, resultStore, accessPolicy, enabled: true, allowVolatileForTests: local });
     const preparedMedia = createPreparedCalendarMedia({ store, grants, preparation, resultStore, accessPolicy,
       resolveConnection, secret, publicOrigin, clock, enabled: true, localTransport });

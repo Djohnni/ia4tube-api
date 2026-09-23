@@ -33,6 +33,7 @@ async function createProductionCalendar(dependencies, ports) {
         publicationAllowedForPrincipal: principal => publisher.allowed(connectorContext(principal)),
         connectionForGrant: grant => publisher.connection(connectorContext(ports.auth.fromVerifiedCalendarGrant(grant))),
         connectionForSubmission: grant => publisher.connection(connectorContext(ports.auth.fromVerifiedCalendarSubmission(grant))),
+        defaultCaptionForPrincipal: require("./imports/default-caption").createOwnerDefaultCaption(dependencies.readClients),
         async readGeneratedArt(principal, request) {
           if (!isAuthenticatedSocialPrincipal(principal) || typeof principal.subject !== "string") fail("calendar_session_required", 401);
           const job = await store.update(principal.companyId, state => state.jobs[request.calendarItemId]);

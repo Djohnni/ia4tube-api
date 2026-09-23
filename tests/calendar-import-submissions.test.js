@@ -35,6 +35,7 @@ async function fixture() {
     async snapshot() { return { ...context, assetId, mediaRevision: 1, currentRevision: 1, state: "ready", ready: true, selection: chosen, plan, result }; }
   };
   const options = { store, uploadStore, preparation, grants, accessPolicy, clock, resolveConnection: async () => ({ binding, accountType: "business" }),
+    resolveDefaultCaption: () => "Conheça a empresa sintética e acompanhe nosso conteúdo.",
     resolveSubmissionConnection: async grant => { assert.equal(isVerifiedCalendarSubmission(grant), true); return { binding, accountType: "business" }; } };
   let service = createCalendarSubmissions(options);
   const input = { assetId, uploadId, idempotencyKey: crypto.randomUUID(), expectedMediaRevision: 0, selection: chosen };
@@ -47,13 +48,13 @@ async function fixture() {
 }
 test("accepted intent persists before preparation, recovers lost preparation response and finishes after remount without a preview request", async () => {
   const f = await fixture(), accepted = await f.service().request(f.context, f.input);
-  assert.equal(accepted.state, "accepted"); assert.equal(accepted.caption, ""); assert.equal(f.count(), 0);
+  assert.equal(accepted.state, "accepted"); assert.equal(accepted.caption, f.options.resolveDefaultCaption()); assert.equal(f.count(), 0);
   f.crash(); await f.progress(); assert.equal(f.count(), 1); assert.equal((await f.get()).state, "accepted");
   f.remount(); await f.progress(); assert.equal(f.count(), 1); assert.equal((await f.get()).state, "preparing");
   f.ready(); f.remount(); await Promise.all([f.progress(), f.progress()]);
   const done = await f.get(), state = await f.snapshot(), job = state.jobs[accepted.id];
   assert.equal(done.state, "scheduled"); assert.equal(done.calendarItemId, accepted.id); assert.equal(Object.keys(state.jobs).length, 1);
-  assert.equal(job.caption, ""); assert.equal(job.automaticEnabled, true); assert.equal(job.import.previewDigest, f.result.previewDigest);
+  assert.equal(job.caption, accepted.caption); assert.equal(job.automaticEnabled, true); assert.equal(job.import.previewDigest, f.result.previewDigest);
   assert.equal(Object.hasOwn(job.import, "confirmed"), false); assert.match(done.notice.id, /^calendar-ready-/);
 });
 test("concurrent duplicate acceptance and response recovery keep one reserved slot and never undo edit/pause/cancel", async () => {
@@ -100,4 +101,41 @@ test("submission delegation is purpose separated, signed, owner-bound and emitte
   assert.equal(grants.verifySubmission(envelope.slice(0, -1) + (envelope.endsWith("0") ? "1" : "0"), companyId, userId), null);
   const auth = createSocialAuthAdapter(); assert.equal(auth.fromVerifiedCalendarSubmission(delegated).audience, "calendar_import_submission");
   assert.throws(() => auth.fromVerifiedCalendarSubmission({ ...delegated })); assert.throws(() => auth.fromVerifiedCalendarGrant(delegated));
+});
+
+test("default caption resolves once for concurrent acceptance and remains immutable after profile changes and remount", async () => {
+  const f = await fixture(); let calls = 0, text = "Conheça a iA4tube e veja como organizar o conteúdo da sua empresa.\n#ia4tube";
+  f.options.resolveDefaultCaption = context => { assert.equal(context, f.context); calls++; return text; }; f.remount();
+  const receipts = await Promise.all(Array.from({ length: 6 }, () => f.service().request(f.context, f.input)));
+  assert.equal(calls, 1); assert.ok(receipts.every(value => value.caption === text));
+  text = "Outra descrição posterior"; f.remount();
+  assert.equal((await f.service().request(f.context, f.input)).caption, receipts[0].caption); assert.equal(calls, 1);
+  await f.progress(); f.ready(); await f.progress();
+  assert.equal((await f.snapshot()).jobs[receipts[0].id].caption, receipts[0].caption); assert.equal(calls, 1);
+});
+
+test("explicit captions including intentional blank and original art captions bypass the institutional fallback", async () => {
+  for (const supplied of ["Legenda escolhida pelo cliente", ""]) {
+    const f = await fixture(); f.options.resolveDefaultCaption = () => assert.fail("explicit caption must not resolve profile"); f.remount();
+    const result = await f.service().request(f.context, { ...f.input, caption: supplied }); assert.equal(result.caption, supplied);
+  }
+  for (const originalCaption of ["Legenda da arte já criada", ""]) {
+    const f = await fixture(), originalId = "e".repeat(40);
+    await f.store.update(f.context.companyId, state => {
+      state.jobs[originalId] = { id: originalId, caption: originalCaption, date: "2026-09-24", time: "18:00", scheduledAt: dateTime("2026-09-24", "18:00"), phase: "ready" };
+      state.importedSources = { origins: { [f.input.assetId]: { calendarItemId: originalId } } };
+    });
+    f.options.resolveDefaultCaption = () => assert.fail("art caption must not resolve profile"); f.remount();
+    const result = await f.service().request(f.context, f.input); assert.equal(result.caption, originalCaption);
+    assert.equal(result.date, "2026-09-25"); assert.equal(result.time, "18:00");
+    assert.equal((await f.snapshot()).jobs[originalId].caption, originalCaption);
+  }
+});
+
+test("missing or invalid default-caption authority refuses acceptance without preparation or a partial intention", async () => {
+  for (const resolver of [null, () => "", () => { throw Object.assign(new Error("private details"), { code: "calendar_import_submission_caption_owner_unavailable", statusCode: 503 }); }]) {
+    const f = await fixture(); f.options.resolveDefaultCaption = resolver; f.remount();
+    await assert.rejects(f.service().request(f.context, f.input), { code: "calendar_import_submission_caption_owner_unavailable" });
+    assert.equal(f.count(), 0); assert.equal(Object.keys((await f.snapshot()).importSubmissions || {}).length, 0);
+  }
 });

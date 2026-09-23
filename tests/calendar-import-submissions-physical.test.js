@@ -17,7 +17,7 @@ test("durable submission: closed phone and PostgreSQL restart continue preparati
   const upload = await f.uploadBytes(bytes, "image", "image/png");
   f.setFixtureGate(false); await f.reopen({ restartDatabase: true });
   const { input, route, receipt } = await submit(f, upload);
-  assert.equal(receipt.state, "accepted"); assert.equal(receipt.caption, "");
+  assert.equal(receipt.state, "accepted"); assert.equal(receipt.caption, "Conheça nosso trabalho e acompanhe nosso conteúdo.");
   assert.equal(Object.keys((await f.snapshot()).preparation?.jobs || {}).length, 0, "Acceptance performs no preparation side effect");
   assert.ok((await f.current().calendar.list(f.claims)).items.some(item => item.id === receipt.id && item.preparationPending));
   await f.reopen({ restartDatabase: true });
@@ -28,7 +28,7 @@ test("durable submission: closed phone and PostgreSQL restart continue preparati
   assert.equal(recovered.state, "scheduled", JSON.stringify(recovered)); assert.equal(recovered.calendarItemId, receipt.id);
   let job = await f.current().calendarStore.update(f.context.companyId, state => state.jobs[receipt.id]);
   assert.equal(job.automaticEnabled, true, "Temporary publication closure does not pause the accepted item");
-  assert.equal(job.caption, ""); assert.equal(job.import.submissionId, receipt.id);
+  assert.equal(job.caption, receipt.caption); assert.equal(job.import.submissionId, receipt.id);
   const calendar = await f.current().calendar.list(f.claims);
   assert.equal(calendar.items.filter(item => item.id === receipt.id).length, 1);
   assert.equal(calendar.items.find(item => item.id === receipt.id).status, "operations_closed");
