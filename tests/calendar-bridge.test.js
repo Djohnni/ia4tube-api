@@ -51,14 +51,88 @@ test("typed imports never advertise legacy image URLs or claim an operational pu
   const imported = { ...structuredClone(original), id: "c".repeat(40), sourceKey: "upload:synthetic",
     sourceKind: "upload", planningId: null, orderId: null, layout: "import_prepared_v1",
     selectedTargets: ["reel"], destination: "reel", asset: { mimeType: "video/mp4", sha256: "b".repeat(64) },
-    assets: { reel: { mimeType: "video/mp4", sha256: "b".repeat(64) } }, phase: "ready" };
+    assets: { reel: { mimeType: "video/mp4", sha256: "b".repeat(64) } }, phase: "ready", import: { userId: f.ids.userId } };
   state.jobs[imported.id] = imported; f.setSources([]);
   const item = (await f.service.list(f.claims)).items.find(value => value.id === imported.id);
   assert.equal(item.status, "import_not_operational"); assert.equal(item.imageUrl, null);
   assert.equal(item.formatsReady, false); assert.deepEqual(item.previews, {});
+  assert.equal(item.sourceKind, "upload"); assert.equal(item.media, null); assert.equal(item.mediaReadAvailable, false);
+  const gallery = await f.service.overlay(f.claims, { postagens: [] });
+  assert.equal(gallery.postagens[0].calendar_schedule_id, imported.id);
+  assert.equal(gallery.postagens[0].calendar_media_read_available, false);
+  assert.equal(gallery.postagens[0].imagem_pronta, false);
   await assert.rejects(f.service.image(f.claims, item.id), { code: "calendar_import_not_operational" });
   await assert.rejects(f.service.edit(f.claims, item.id, { action: "automatic", revision: item.revision, enabled: true, confirmed: true }), { code: "calendar_import_not_operational" });
   await f.service.tick(); assert.equal(f.sends(), 0);
+});
+
+test("closed import runtime preserves owner isolation and rejects legacy edits of imported records", async () => {
+  const f = fixture(); const original = await f.first();
+  const state = f.store.rows.get(f.ids.companyId), base = state.jobs[original.id];
+  const own = { ...structuredClone(base), id: "d".repeat(40), sourceKey: "upload:own",
+    sourceKind: "upload", selectedTargets: ["feed"], import: { userId: f.ids.userId }, phase: "ready" };
+  const foreign = { ...structuredClone(own), id: "e".repeat(40), sourceKey: "upload:foreign", import: { userId: crypto.randomUUID() }, caption: "foreign-only" };
+  const unowned = { ...structuredClone(own), id: "f".repeat(40), sourceKey: "upload:unowned", import: {} };
+  Object.assign(state.jobs, { [own.id]: own, [foreign.id]: foreign, [unowned.id]: unowned });
+  f.setSources([]);
+  const listed = await f.service.list(f.claims);
+  assert.ok(listed.items.some(item => item.id === own.id));
+  assert.ok(!listed.items.some(item => [foreign.id, unowned.id].includes(item.id)));
+  const gallery = await f.service.overlay(f.claims, { postagens: [] });
+  assert.deepEqual(gallery.postagens.map(item => item.calendar_schedule_id), [own.id]);
+  assert.doesNotMatch(JSON.stringify([listed, gallery]), /foreign-only/);
+  for (const job of [foreign, unowned]) {
+    await assert.rejects(f.service.edit(f.claims, job.id, { action: "caption", caption: "changed", revision: job.revision }), { code: "calendar_not_found" });
+    await assert.rejects(f.service.image(f.claims, job.id), { code: "calendar_not_found" });
+    await assert.rejects(f.service.legacyEdit(f.claims, job.sourceKey, { action: "caption", caption: "changed", revision: job.revision }), { code: "calendar_not_found" });
+  }
+  await assert.rejects(f.service.legacyEdit(f.claims, own.sourceKey, { action: "caption", caption: "changed", revision: own.revision }), { code: "calendar_refresh_required" });
+  assert.equal(f.store.rows.get(f.ids.companyId).jobs[foreign.id].caption, "foreign-only");
+  await f.service.tick(); assert.equal(f.sends(), 0);
+});
+
+test("accepted media is visible in the same calendar before encoding and cancellation is durable", async () => {
+  const f = fixture(); await f.first(); f.setSources([]);
+  const state = f.store.rows.get(f.ids.companyId), id = "9".repeat(40);
+  const row = { id, ...f.ids, state: "accepted", revision: 1, date: "2026-09-11", time: "09:00",
+    scheduledAt: model.dateTime("2026-09-11", "09:00"), request: { caption: "", selection: { targets: ["story", "reel"], shareToFeed: true } } };
+  state.importSubmissions = { [id]: row,
+    ["8".repeat(40)]: { ...structuredClone(row), id: "8".repeat(40), userId: crypto.randomUUID() } };
+  const current = await f.service.list(f.claims), pending = current.items.find(item => item.id === id);
+  assert.equal(pending.status, "waiting_media"); assert.equal(pending.statusLabel, "Preparando arquivo");
+  assert.equal(pending.preparationPending, true); assert.equal(pending.media, null); assert.equal(pending.automatic, false);
+  assert.equal(pending.destination, "multiple"); assert.equal(pending.shareToFeed, true);
+  assert.ok(!current.items.some(item => item.id === "8".repeat(40)));
+  let gallery = await f.service.overlay(f.claims, { postagens: [] });
+  assert.equal(gallery.postagens.length, 1); assert.equal(gallery.postagens[0].calendar_schedule_id, id);
+  assert.equal(gallery.postagens[0].calendar_preparation_pending, true);
+  assert.equal(gallery.postagens[0].calendar_share_to_feed, true);
+  await assert.rejects(f.service.edit(f.claims, id, { action: "caption", caption: "not accepted", revision: 1 }), { code: "calendar_media_preparing" });
+  await assert.rejects(f.service.edit(f.claims, id, { action: "cancel", revision: 2 }), { code: "calendar_revision_conflict" });
+  const cancelled = await f.service.edit(f.claims, id, { action: "cancel", revision: 1 });
+  assert.ok(!cancelled.items.some(item => item.id === id));
+  assert.equal(f.store.rows.get(f.ids.companyId).importSubmissions[id].state, "cancelled");
+  assert.equal(f.store.rows.get(f.ids.companyId).importSubmissions[id].revision, 2);
+  gallery = await f.service.overlay(f.claims, { postagens: [] }); assert.equal(gallery.postagens.length, 0);
+  await f.service.tick(); assert.equal(f.sends(), 0);
+});
+
+test("prepared result replaces its waiting calendar projection without a second card", async () => {
+  const f = fixture(); const original = await f.first(); f.setSources([]);
+  const state = f.store.rows.get(f.ids.companyId), id = "7".repeat(40);
+  state.importSubmissions = { [id]: { id, ...f.ids, state: "attention", revision: 1, date: "2026-09-11", time: "09:00",
+    scheduledAt: model.dateTime("2026-09-11", "09:00"), errorCode: "calendar_import_submission_preparation_failed",
+    request: { caption: "sintético", selection: { targets: ["feed"] } } } };
+  assert.equal((await f.service.list(f.claims)).items.find(item => item.id === id).status, "attention");
+  const stored = f.store.rows.get(f.ids.companyId);
+  stored.importSubmissions[id].state = "scheduled";
+  stored.jobs[id] = { ...structuredClone(stored.jobs[original.id]), id, sourceKey: "upload:finished", sourceKind: "upload",
+    selectedTargets: ["feed"], import: { userId: f.ids.userId }, phase: "ready" };
+  const result = await f.service.list(f.claims);
+  assert.equal(result.items.filter(item => item.id === id).length, 1);
+  assert.notEqual(result.items.find(item => item.id === id).preparationPending, true);
+  const gallery = await f.service.overlay(f.claims, { postagens: [] });
+  assert.equal(gallery.postagens.filter(item => item.calendar_schedule_id === id).length, 1);
 });
 
 test("São Paulo schedule uses explicit zone and rejects impossible dates", () => {

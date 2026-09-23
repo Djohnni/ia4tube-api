@@ -73,6 +73,7 @@ function changeJob(state, id, input, now) {
     const at = dateTime(input.date, input.time);
     if (at <= now || at > now + 180 * 86400000) fail("calendar_time_outside_window", 400);
     if (Object.values(state.jobs).some(other => other.id !== id && other.phase !== "cancelled" && other.scheduledAt === at)) fail("calendar_time_occupied");
+    if (Object.values(state.importSubmissions || {}).some(other => other.id !== id && ["accepted", "preparing"].includes(other.state) && other.scheduledAt === at)) fail("calendar_time_occupied");
     if (job.authorization && at + LATE_MS >= job.authorization.validUntil) fail("calendar_consent_expired", 400);
     job.date = input.date; job.time = input.time; job.scheduledAt = at; job.scheduleEdited = true;
     if (job.error === "calendar_overdue") { job.error = null; job.phase = job.asset ? "ready" : "waiting_media"; }

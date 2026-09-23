@@ -25,7 +25,8 @@ function validateRetentionState(value, companyId, uploads) {
 }
 function references(state, calendar, assetId) {
   const prep = Object.values(state.preparation?.jobs || {}).filter(row => row.assetId === assetId);
-  const schedules = Object.values(calendar.jobs || {}).filter(row => row.import?.assetId === assetId);
+  const schedules = Object.values(calendar.jobs || {}).filter(row => row.import?.assetId === assetId)
+    .concat(Object.values(calendar.importSubmissions || {}).filter(row => row.request?.assetId === assetId));
   const executions = [state.preparationExecutions, state.inspectionExecutions]
     .flatMap(value => Object.values(value?.records || {})).filter(row => row.task?.assetId === assetId);
   for (const row of Object.values(state.workflowExecutions?.records || {})) {
@@ -74,6 +75,7 @@ function assertRetentionMutation(before, after) {
 }
 function calendarAssetIds(state) { return [...new Set([
   ...Object.values(state.jobs || {}).map(row => row.import?.assetId),
+  ...Object.values(state.importSubmissions || {}).map(row => row.request?.assetId),
   ...Object.keys(state.importedSources?.origins || {}),
   ...Object.values(state.importedSources?.requests || {}).map(row => row.receipt?.upload?.assetId)
 ].filter(value => UUID.test(value || "")))]; }

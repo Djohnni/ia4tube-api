@@ -141,6 +141,15 @@ function createCalendarImportRouter({ authenticate, resolvePrincipal, getService
   }
   router.get("/assets/:assetId/schedule-availability", call("availability", (service, context, req) =>
     scheduling(service).availability(context, req.params.assetId)));
+  function submissions(service) {
+    if (!require("./calendar-submissions").isCalendarSubmissions(service.submissions)) fail("calendar_import_submission_unavailable", 503);
+    return service.submissions;
+  }
+  router.post("/assets/:assetId/calendar-submissions", call("submission", (service, context, req) =>
+    submissions(service).request(context, { ...body(req, ["uploadId", "idempotencyKey", "expectedMediaRevision", "selection", "caption"]),
+      assetId: req.params.assetId }), { admission: true }));
+  router.get("/assets/:assetId/calendar-submissions/by-key/:key", call("submission", (service, context, req) =>
+    submissions(service).byKey(context, req.params.assetId, req.params.key)));
   router.post("/assets/:assetId/schedule", call("schedule", (service, context, req) =>
     scheduling(service).schedule(context, { ...body(req, ["mediaRevision", "previewDigest", "idempotencyKey", "date", "time", "caption", "automatic", "confirmed"]),
       assetId: req.params.assetId })));

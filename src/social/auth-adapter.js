@@ -27,6 +27,15 @@ function isAuthenticatedSocialPrincipal(value) {
 }
 
 function createSocialAuthAdapter(identityConfig = {}) {
+  function fromVerifiedCalendarSubmission(grant) {
+    if (!require("./calendar/grants").isVerifiedCalendarSubmission(grant)) {
+      postgresFail("social_authenticated_principal_invalid", "Principal delegado recusado.");
+    }
+    const principal = Object.freeze({ companyId: grant.companyId, userId: grant.userId,
+      tokenVersion: null, issuer: "ia4tube-calendar", audience: "calendar_import_submission", subject: grant.nonce });
+    AUTHENTICATED_SOCIAL_PRINCIPALS.add(principal);
+    return principal;
+  }
   // Only signed, owner-bound order grants verified by the calendar service can enter this path.
   // No HTTP body, saved password or fabricated JWT is an execution identity.
   function fromVerifiedCalendarGrant(grant) {
@@ -100,6 +109,7 @@ function createSocialAuthAdapter(identityConfig = {}) {
   }
 
   return Object.freeze({
+    fromVerifiedCalendarSubmission,
     fromVerifiedCalendarGrant,
     fromAuthenticatedOAuthState,
     fromVerifiedJwt

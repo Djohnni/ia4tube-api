@@ -114,6 +114,7 @@ async function createOperationalCalendarPipelineFixture(t, options = {}) {
       connectionForPrincipal: value => publisher.connection(connectorContext(value)),
       publicationAllowedForPrincipal: value => publisher.allowed(connectorContext(value)),
       connectionForGrant: grant => publisher.connection(connectorContext(auth.fromVerifiedCalendarGrant(grant))),
+      connectionForSubmission: grant => publisher.connection(connectorContext(auth.fromVerifiedCalendarSubmission(grant))),
       async readGeneratedArt(verifiedPrincipal, request) {
         const job = await calendarStore.update(verifiedPrincipal.companyId, state => state.jobs[request.calendarItemId]);
         if (!job || job.sourceKind === "upload" || job.revision !== request.revision || job.phase === "cancelled" || !job.asset)

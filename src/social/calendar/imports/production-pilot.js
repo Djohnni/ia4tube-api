@@ -121,10 +121,13 @@ async function createProductionMediaPilot({env=process.env,tenantPool,clock=Date
       executionTransport:{kind:'vm',workerId:config.workerId,runtimeRevision:config.runtimeRevision}});
     const registry=createTransferAuthorizationRegistry({store:registryStore,enabled:true,clock});
     const transfer=createRenderDiskTransferService({store,provider:components.provider,registry,accessPolicy,enabled:true,clock});
+    let submissions=null;
     const factory=createOperationalCalendarImportsRuntimeFactory({enabled:true,preparation:components.preparation,resultStore:components.resultStore,accessPolicy,
       upload:components.upload,provider:components.provider,uploadStore:store,transfer,catalog:music.catalog,clock,canAdmit:admissionOpen,readPilotStatus,
+      onSubmissionsReady:service=>{submissions=service;},
       async verifyReadiness(){await registry.verify();await ledger.verify();await guard.sample();return true;}});
-    loop=createPilotProgressLoop({tick:components.tick,finishBy:config.finishBy,clock,report,canRun:progressOpen});
+    const tick=async()=>{if(submissions)await submissions.progress(config.owner.companyId);await components.tick();if(submissions&&progressOpen())await submissions.progress(config.owner.companyId);};
+    loop=createPilotProgressLoop({tick,finishBy:config.finishBy,clock,report,canRun:progressOpen});
     return Object.freeze({factory,start:loop.start,admitUntil:config.admitUntil,finishBy:config.finishBy,
       async handlePrivateRequest(req,res){if(!String(req.url||'').startsWith(PRIVATE_PREFIX))return false;
         if(closed||clock()>=config.finishBy){res.writeHead(503,{'cache-control':'no-store'});res.end();return true;}

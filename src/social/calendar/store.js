@@ -5,6 +5,7 @@ const stores = new WeakSet();
 function validate(state) {
   if (!state || state.schema !== 1 || !state.preferences || typeof state.preferences.enabled !== "boolean" ||
       !state.jobs || Array.isArray(state.jobs) || Object.keys(state.jobs).length > MAX_ITEMS || Buffer.byteLength(JSON.stringify(state), "utf8") > 8 * 1024 * 1024) fail("calendar_state_invalid", 503);
+  require("./imports/calendar-submissions").validateCalendarSubmissions(state);
   return state;
 }
 function createCalendarStore({ pool, role }) {

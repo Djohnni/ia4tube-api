@@ -14,6 +14,9 @@ function createCalendarService({ store, source, media, grants, auth, identity, r
   const importsAvailable = isCalendarImportService(importScheduling) && importScheduling.store === store;
   const operationalImports = importsAvailable && isOperationalCalendarImportService(importScheduling) && publisher.preparedAvailable === true;
   const importContext = value => ({ authenticated: true, companyId: value.companyId, userId: value.userId });
+  // The owner-state transaction already scopes companyId. Preserve the narrower
+  // user ownership even when the processing runtime is unavailable/disabled.
+  const visibleTo = (job, context) => job.sourceKind !== "upload" || Boolean(context && job.import?.userId === context.userId);
   let stopped = false, running = false, timer = null;
   function active(owner) {
     const clients = readClients(); const client = Object.hasOwn(clients, owner) ? clients[owner] : null;
@@ -80,19 +83,36 @@ function createCalendarService({ store, source, media, grants, auth, identity, r
       publications: Object.fromEntries(Object.entries(job.deliveries || {}).map(([target, value]) => [target,
         { status: value.phase, result: value.publication || null }])),
       username: connection?.username || null, error: job.error || null, publication: job.publication || null,
-      ...(imported ? { sourceKind: "upload", selectedTargets: targets(job), localSimulation: job.import.localSimulation === true,
-        media: importScheduling.describe(job, importContext(context)) } : {}) };
+      ...(job.sourceKind === "upload" ? { sourceKind: "upload", selectedTargets: targets(job), localSimulation: job.import?.localSimulation === true,
+        media: imported ? importScheduling.describe(job, importContext(context)) : null,
+        shareToFeed: job.import?.selection?.shareToFeed === true, mediaReadAvailable: Boolean(imported) } : {}) };
+  }
+  function pendingSubmissions(state, context) {
+    return Object.values(state.importSubmissions || {}).filter(row => context && row.companyId === context.companyId &&
+      row.userId === context.userId && ["accepted", "preparing", "attention"].includes(row.state) && !state.jobs[row.id]);
+  }
+  function pendingView(row) {
+    const selectedTargets = row.request.selection.targets;
+    return { id: row.id, key: `submission:${row.id}`, planningId: null, orderId: null,
+      title: "Foto ou vídeo enviado", date: row.date, time: row.time, timeZone: TIME_ZONE, scheduledAt: row.scheduledAt,
+      caption: row.request.caption, revision: row.revision || 1,
+      status: row.state === "attention" ? "attention" : "waiting_media",
+      statusLabel: row.state === "attention" ? LABELS.attention : "Preparando arquivo",
+      imageUrl: null, editable: true, automatic: false, destination: selectedTargets.length > 1 ? "multiple" : selectedTargets[0],
+      formatsReady: false, previews: {}, publications: {}, username: null, error: row.errorCode || null, publication: null,
+      sourceKind: "upload", selectedTargets, media: null, mediaReadAvailable: false,
+      shareToFeed: row.request.selection.shareToFeed === true, preparationPending: true, submissionState: row.state };
   }
   function snapshot(state, connection, allowed, context = null) {
-    const items = Object.values(state.jobs).filter(job => job.phase !== "cancelled" &&
-      (!importsAvailable || job.sourceKind !== "upload" || job.import?.userId === context?.userId))
-        .sort((a, b) => a.scheduledAt - b.scheduledAt || a.id.localeCompare(b.id))
-        .map(job => view(job, state.preferences, connection, allowed, context));
+    const items = [...Object.values(state.jobs).filter(job => job.phase !== "cancelled" && visibleTo(job, context))
+        .map(job => view(job, state.preferences, connection, allowed, context)),
+      ...pendingSubmissions(state, context).map(pendingView)]
+        .sort((a, b) => a.scheduledAt - b.scheduledAt || a.id.localeCompare(b.id));
     const next = items.find(item => ["dispatching", "confirming"].includes(item.status)) ||
         items.find(item => item.automatic && item.status !== "published" && item.scheduledAt + LATE_MS >= clock()) || null;
     return { ok: true, enabled: true, preferences: state.preferences, connection, operationsAllowed: allowed,
         timeZone: TIME_ZONE, serverTime: clock(), items, next,
-        ...(importsAvailable && context ? { identity: { companyId: context.companyId, userId: context.userId } } : {}) };
+        ...(context ? { identity: { companyId: context.companyId, userId: context.userId } } : {}) };
   }
   async function list(claims) {
     const current = session(claims); const { companyId, userId } = current.context;
@@ -137,6 +157,16 @@ function createCalendarService({ store, source, media, grants, auth, identity, r
     const connection = await publisher.connection(current.context);
     const allowed = publisher.allowed(current.context);
     return store.update(current.context.companyId, state => {
+      if (!state.jobs[id] && state.importSubmissions?.[id]) {
+        const row = state.importSubmissions[id];
+        if (row.companyId !== current.context.companyId || row.userId !== current.context.userId ||
+            !["accepted", "preparing", "attention"].includes(row.state)) fail("calendar_not_found", 404);
+        if (input.revision !== (row.revision || 1)) fail("calendar_revision_conflict");
+        if (input.action !== "cancel") fail("calendar_media_preparing", 409);
+        row.state = "cancelled"; row.revision = (row.revision || 1) + 1; row.updatedAt = clock(); row.cancelledAt = clock();
+        return snapshot(state, connection, allowed, current.context);
+      }
+      if (state.jobs[id] && !visibleTo(state.jobs[id], current.context)) fail("calendar_not_found", 404);
       if (importsAvailable && state.jobs[id]?.sourceKind === "upload") {
         importScheduling.editState(state, importContext(current.context), id, input, connection, allowed);
         return snapshot(state, connection, allowed, current.context);
@@ -165,7 +195,7 @@ function createCalendarService({ store, source, media, grants, auth, identity, r
   async function image(claims, id, target = null) {
     const current = session(claims);
     const job = await store.update(current.context.companyId, state => state.jobs[id] || null);
-    if (!job?.asset || job.phase === "cancelled") fail("calendar_not_found", 404);
+    if (!job?.asset || job.phase === "cancelled" || !visibleTo(job, current.context)) fail("calendar_not_found", 404);
     if (job.sourceKind === "upload") fail("calendar_import_not_operational", 503);
     if (target !== null && !["feed", "story"].includes(target)) fail("calendar_destination_invalid", 400);
     const asset = target ? job.assets?.[target] : job.asset;
@@ -179,7 +209,7 @@ function createCalendarService({ store, source, media, grants, auth, identity, r
     const raw = payload.postagens || payload.itens || [];
     const postagens = raw.flatMap(item => {
       const job = state.jobs[idFor(current.context.companyId, item.calendar_key)];
-      if (importsAvailable && job?.sourceKind === "upload") return [];
+      if (job?.sourceKind === "upload") return [];
       if (!job) return [item]; if (job.phase === "cancelled") return [];
       return [{ ...item, data: job.date, data_sugerida: job.date, horario: job.time, horario_sugerido: job.time,
         legenda: job.caption, descricao_instagram: job.caption, calendar_schedule_id: job.id,
@@ -187,19 +217,32 @@ function createCalendarService({ store, source, media, grants, auth, identity, r
         calendar_status_label: view(job, state.preferences, connection, publisher.allowed(current.context)).statusLabel,
         sort_key: `${job.date}|${job.time}|${String(item.ordem || 0).padStart(4, "0")}` }];
     });
-    if (importsAvailable) for (const job of Object.values(state.jobs)) {
-      if (job.sourceKind !== "upload" || job.phase === "cancelled" || job.import?.userId !== current.context.userId) continue;
+    for (const job of Object.values(state.jobs)) {
+      if (job.sourceKind !== "upload" || job.phase === "cancelled" || !visibleTo(job, current.context)) continue;
       const item = view(job, state.preferences, connection, publisher.allowed(current.context), current.context);
       postagens.push({ calendar_key: job.sourceKey, calendar_schedule_id: job.id, calendar_revision: job.revision,
         calendar_phase: job.phase, calendar_status_label: item.statusLabel, calendar_media: item.media, media: item.media,
         calendar_selected_targets: item.selectedTargets, calendar_destination: item.destination, source_kind: "upload",
+        calendar_share_to_feed: item.shareToFeed,
         planning_id: null, pedido_id: null, item_id: job.id, tema: job.title, data: job.date, data_sugerida: job.date,
         horario: job.time, horario_sugerido: job.time, legenda: job.caption, descricao_instagram: job.caption,
-        imagem_pronta: true, imagem_url: null, sort_key: `${job.date}|${job.time}|0000` });
+        imagem_pronta: Boolean(item.media), imagem_url: null, calendar_media_read_available: item.mediaReadAvailable,
+        sort_key: `${job.date}|${job.time}|0000` });
+    }
+    for (const row of pendingSubmissions(state, current.context)) {
+      const item = pendingView(row);
+      postagens.push({ calendar_key: item.key, calendar_schedule_id: item.id, calendar_revision: item.revision,
+        calendar_phase: row.state, calendar_status_label: item.statusLabel, calendar_media: null, media: null,
+        calendar_selected_targets: item.selectedTargets, calendar_destination: item.destination, source_kind: "upload",
+        calendar_share_to_feed: item.shareToFeed,
+        calendar_preparation_pending: true, calendar_submission_state: row.state, calendar_media_read_available: false,
+        planning_id: null, pedido_id: null, item_id: item.id, tema: item.title, data: item.date, data_sugerida: item.date,
+        horario: item.time, horario_sugerido: item.time, legenda: item.caption, descricao_instagram: item.caption,
+        imagem_pronta: false, imagem_url: null, sort_key: `${item.date}|${item.time}|0000` });
     }
     postagens.sort((a, b) => `${a.data}|${a.horario}`.localeCompare(`${b.data}|${b.horario}`));
     return { ...payload, postagens, itens: postagens, total: postagens.length,
-      ...(importsAvailable ? { identity: { companyId: current.context.companyId, userId: current.context.userId } } : {}) };
+      identity: { companyId: current.context.companyId, userId: current.context.userId } };
   }
   async function legacyEdit(claims, key, input) {
     const current = session(claims); await sync(current.owner, current.context.companyId, current.context.userId);
@@ -214,7 +257,8 @@ function createCalendarService({ store, source, media, grants, auth, identity, r
       const job = matches[0]; if (!job) return false;
       // Imported records require the owner/revision checks of the typed item
       // endpoint; a legacy generation reference is not authority to edit them.
-      if (importsAvailable && job.sourceKind === "upload") fail("calendar_refresh_required");
+      if (!visibleTo(job, current.context)) fail("calendar_not_found", 404);
+      if (job.sourceKind === "upload") fail("calendar_refresh_required");
       const id = job.id;
       const original = sources.find(item => item.key === job.sourceKey)?.calendarPayload || {};
       // New UI carries the displayed revision; older clients cannot silently overwrite automatic schedules.

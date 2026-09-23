@@ -9,6 +9,7 @@ const { isRenderDiskTransferService } = require("./transfer-service");
 const { createPrivateImportPreviewService } = require("./preview-service");
 const { createPreparedCalendarMedia } = require("./prepared-publication-media");
 const { createOperationalCalendarImportService } = require("./local-calendar-service");
+const { createCalendarSubmissions } = require("./calendar-submissions");
 const { isLocalPublicationTransport } = require("./publication-test-transport");
 const { LIMITS, licensedTrack } = require("./policy");
 const { displayName } = require("./music-catalog");
@@ -40,12 +41,13 @@ function publicPilotStatus(read) {
 // here. The deployment must inject a separately supervised execution boundary.
 function createOperationalCalendarImportsRuntimeFactory({ enabled = false, preparation, resultStore, accessPolicy,
   upload, provider, uploadStore, transfer, verifyReadiness, catalog = null,
-  localTransport = null, allowLocalTransportForTests = false, clock = Date.now, canAdmit = () => true, readPilotStatus = null } = {}) {
+  localTransport = null, allowLocalTransportForTests = false, clock = Date.now, canAdmit = () => true, readPilotStatus = null,
+  onSubmissionsReady = () => {} } = {}) {
   const local = isLocalPublicationTransport(localTransport);
   if (localTransport !== null && (!local || allowLocalTransportForTests !== true)) fail();
   if (typeof enabled !== "boolean" || typeof clock !== "function" || typeof canAdmit !== "function" ||
       readPilotStatus !== null && typeof readPilotStatus !== "function") fail();
-  const factory = async ({ store, grants, secret, publicOrigin, connectionForPrincipal, connectionForGrant, publicationAllowedForPrincipal, readGeneratedArt } = {}) => {
+  const factory = async ({ store, grants, secret, publicOrigin, connectionForPrincipal, connectionForGrant, connectionForSubmission, publicationAllowedForPrincipal, readGeneratedArt } = {}) => {
     if (!enabled) return null;
     if (!isCalendarStore(store) || !isImportUploadPostgresStore(uploadStore) || !isImportAccessPolicy(accessPolicy) ||
         !isPreparedDiskResultStore(resultStore, { allowVolatileForTests: local }) ||
@@ -81,11 +83,13 @@ function createOperationalCalendarImportsRuntimeFactory({ enabled = false, prepa
       resolveConnection, catalog, upload, provider, uploadStore, clock, enabled: true, localTransport,
       resolveAutomaticAllowed: context => publicationAllowedForPrincipal(principalFor(context)) === true,
       resolveGeneratedArt: (context, request) => readGeneratedArt(principalFor(context), request) });
+    const submissions = typeof connectionForSubmission === "function" ? createCalendarSubmissions({ store, uploadStore, preparation,
+      grants, accessPolicy, resolveConnection, resolveSubmissionConnection: connectionForSubmission, catalog, localTransport, clock }) : null;
     const preview = createPrivateImportPreviewService({ preparation, resultStore, accessPolicy, enabled: true, allowVolatileForTests: local });
     const preparedMedia = createPreparedCalendarMedia({ store, grants, preparation, resultStore, accessPolicy,
       resolveConnection, secret, publicOrigin, clock, enabled: true, localTransport });
     if (!preparedMedia.available || !preview.available) { preparedMedia.close(); scheduling.close(); fail(); }
-    const runtime = Object.freeze({ ready: true, scheduling, preview, preparedMedia, transfer,
+    const runtime = Object.freeze({ ready: true, scheduling, submissions, preview, preparedMedia, transfer,
       upload: transfer.wrapUpload(upload), preparation, allowed,
       canAdmit(context) { return allowed(context) && canAdmit() === true; },
       contextForPrincipal(principal) {
@@ -107,14 +111,16 @@ function createOperationalCalendarImportsRuntimeFactory({ enabled = false, prepa
           } catch { /* Unavailable rights are never advertised as an approved track. */ }
         }
         return { enabled: true, localSimulation: local, readyForProduction: false,
-          scheduling: { enabled: true, localSimulation: local },
+          scheduling: { enabled: true, localSimulation: local, directSubmission: Boolean(submissions) },
           upload: { origin: publicOrigin, chunkBytes: LIMITS.chunkBytes, maxImageBytes: LIMITS.imageBytes, maxVideoBytes: LIMITS.videoBytes },
           preparation: { enabled: true, minVideoSeconds: 3, maxVideoSeconds: 60, photoMusicSeconds: LIMITS.photoClipSeconds }, musicTracks,
           ...(pilot === null ? {} : { pilot }) };
       },
       close() { if (!closed) { closed = true; preparedMedia.close(); scheduling.close(); } }
     });
-    runtimes.add(runtime); return runtime;
+    runtimes.add(runtime);
+    if (submissions) onSubmissionsReady(submissions);
+    return runtime;
   };
   factories.set(factory, { local, enabled }); return Object.freeze(factory);
 }

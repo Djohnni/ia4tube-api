@@ -2,7 +2,7 @@
 const crypto = require("node:crypto");
 const { UUID, idFor, MAX_ITEMS, dateTime, caption, LATE_MS, sameBinding } = require("../model");
 const { previewDigest, licensedTrack } = require("./policy");
-const { isVerifiedCalendarGrant } = require("../grants");
+const { isVerifiedCalendarGrant, isVerifiedCalendarSubmission } = require("../grants");
 const { isImportAccessPolicy } = require("./access-policy");
 const { isLocalCalendarState } = require("./local-calendar-simulation");
 const { isLocalPublicationState } = require("./publication-test-transport");
@@ -33,11 +33,12 @@ function validatePrepared(context, value, input, localState = null, localSimulat
  * no synthetic creation order, billing credit, network call or separate publicador.
  * Admission is deliberately separate from worker enablement/Meta authorization.
  */
-function schedulePreparedImport(state, context, input, snapshot, { now, authorization = null, envelope = null, connectionBinding = null, catalog = null, accessPolicy = null, localSimulation = null, localTransport = null } = {}) {
+function schedulePreparedImport(state, context, input, snapshot, { now, authorization = null, envelope = null, connectionBinding = null, catalog = null, accessPolicy = null, localSimulation = null, localTransport = null, submissionGrant = null } = {}) {
+  const submitted = isVerifiedCalendarSubmission(submissionGrant) && submissionGrant.companyId === context?.companyId && submissionGrant.userId === context?.userId;
   const allowed = ["assetId", "mediaRevision", "previewDigest", "idempotencyKey", "date", "time", "caption", "automatic", "confirmed"];
   if (!input || Array.isArray(input) || Object.keys(input).some(key => !allowed.includes(key)) ||
       !UUID.test(input.assetId || "") || !Number.isSafeInteger(input.mediaRevision) || input.mediaRevision < 1 ||
-      !/^[A-Za-z0-9_-]{8,128}$/.test(input.idempotencyKey || "") || input.confirmed !== true ||
+      !/^[A-Za-z0-9_-]{8,128}$/.test(input.idempotencyKey || "") || (!submitted && input.confirmed !== true) ||
       typeof input.automatic !== "boolean" || !Number.isSafeInteger(now) || now < 0) fail("schedule_invalid", 400);
   if (!state || state.schema !== 1 || !state.jobs || !state.preferences) fail("state_invalid", 503);
   // A previously prepared preview is not a current eligibility grant. Resolve
@@ -50,6 +51,8 @@ function schedulePreparedImport(state, context, input, snapshot, { now, authoriz
   const prepared = validatePrepared(context, snapshot, input, state, localSimulation, localTransport);
   const sourceKey = `upload:${input.assetId}:${crypto.createHash("sha256").update(context.userId + ":" + input.idempotencyKey).digest("hex")}`;
   const id = idFor(context.companyId, sourceKey);
+  if (submitted && (submissionGrant.submissionId !== id || input.confirmed !== undefined)) fail("schedule_invalid", 400);
+  if (!submitted && state.importSubmissions?.[id]) fail("idempotency_conflict");
   const text = caption(input.caption ?? "");
   const inputHash = crypto.createHash("sha256").update(JSON.stringify([
     input.assetId, input.mediaRevision, input.previewDigest, input.idempotencyKey,
@@ -71,8 +74,9 @@ function schedulePreparedImport(state, context, input, snapshot, { now, authoriz
     if (prepared.plan.deliveries.some(part => part.audioMode === "music" && part.musicSha256 !== track.sha256)) fail("preview_changed");
   }
   if (Object.values(state.jobs).some(job => job.phase !== "cancelled" && job.scheduledAt === at)) fail("time_occupied");
+  if (Object.values(state.importSubmissions || {}).some(row => row.id !== id && ["accepted", "preparing"].includes(row.state) && row.scheduledAt === at)) fail("time_occupied");
   const selectedTargets = prepared.plan.deliveries.map(item => item.target);
-  if (!text && selectedTargets.some(target => target !== "story")) fail("caption_required", 400);
+  if (!submitted && !text && selectedTargets.some(target => target !== "story")) fail("caption_required", 400);
   if (input.automatic) {
     if (!isVerifiedCalendarGrant(authorization) || authorization.sourceKind !== "upload" || authorization.companyId !== context.companyId ||
         authorization.userId !== context.userId || authorization.assetId !== input.assetId || authorization.assetRevision !== input.mediaRevision ||
