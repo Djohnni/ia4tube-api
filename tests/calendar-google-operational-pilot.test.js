@@ -1,7 +1,7 @@
 "use strict";
 const test = require("node:test"), assert = require("node:assert/strict"), vm = require("node:vm");
 const { createOperationalPlan, validateOperationalPlan } = require("../scripts/media-pilot/google-plan");
-const { runOperationalPilot, activationWaitBudget, transientObservationFailure } = require("../scripts/media-pilot/google-controller");
+const { runOperationalPilot, activationWaitBudget, apiPreparationDiagnostic, transientObservationFailure } = require("../scripts/media-pilot/google-controller");
 const { hostProbeScript, startScript, stopScript, collectionScript } = require("../scripts/media-pilot/google-guest");
 const { createGoogleProvider } = require("../scripts/validation/vm-proof-google-provider");
 const P = require("../scripts/validation/vm-proof-google-plan");
@@ -139,6 +139,25 @@ test("activation readiness owns the remaining admission window, not a fixed ten-
   assert.equal(activationWaitBudget(state,beginning),12000000);
   assert.equal(activationWaitBudget(state,beginning+660000),11340000);
   assert.throws(()=>activationWaitBudget(state,state.admitUntil),{code:'media_pilot_activation_deadline'});
+});
+test("API readiness failure persists only a bounded sanitized terminal diagnostic",async()=>{
+  const f=fixture(),privateError=Object.assign(Error("password=must-never-enter-the-journal"),{
+    code:"media_api_control_http_unavailable",sourceCode:"media_owner_response_refused",statusCode:401,
+    transportCode:"ECONNRESET",activationState:"human_confirmed",credential:"secret"});
+  const r=await f.execute({prepareApi:async()=>{throw privateError;}}),diagnostic=f.getState().apiPreparation.diagnostic;
+  assert.deepEqual(diagnostic,{phase:"prepare_api",code:"media_api_control_http_unavailable",
+    sourceCode:"media_owner_response_refused",statusCode:401,transportCode:"ECONNRESET",
+    activationState:"human_confirmed",observedAt:beginning});
+  assert.equal(r.failure,"media_pilot_operation_failed");assert.equal(r.destructionConfirmed,true);
+  assert.doesNotMatch(JSON.stringify(f.getState()),/password|must-never|credential|secret/);
+  assert.deepEqual(apiPreparationDiagnostic({code:"unexpected",sourceCode:"private",statusCode:999,
+    transportCode:"bad",activationState:"unknown",message:"secret"},beginning),{
+    phase:"prepare_api",code:"media_pilot_unclassified_failure",sourceCode:null,statusCode:null,
+    transportCode:null,activationState:null,observedAt:beginning});
+  assert.deepEqual(apiPreparationDiagnostic({code:"media_api_control_password_abc",sourceCode:"media_owner_token_xyz",
+    statusCode:418,transportCode:"ECREDENTIAL_SECRET",activationState:"human_confirmed_secret"},beginning),{
+    phase:"prepare_api",code:"media_pilot_unclassified_failure",sourceCode:null,statusCode:null,
+    transportCode:null,activationState:null,observedAt:beginning});
 });
 test("operational owner accepts derived UUIDv5 while worker stays random UUIDv4",()=>{
   const ownerCompanyId='00000000-0000-5000-8000-000000000001',ownerUserId='00000000-0000-5000-8000-000000000002';

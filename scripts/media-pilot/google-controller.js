@@ -23,6 +23,13 @@ function validateState(s, p) {
       (!Number.isSafeInteger(s.apiPreparation.intentAt) || s.apiPreparation.intentAt < s.startedAt ||
        s.apiPreparation.waitUntil !== undefined && s.apiPreparation.waitUntil !== s.admitUntil ||
        !UUID.test(s.apiClosure?.requestId || ""))) fail("journal_api_invalid");
+  if (s.apiPreparation?.diagnostic != null) {
+    const diagnostic = s.apiPreparation.diagnostic;
+    if (Object.keys(diagnostic).sort().join() !== "activationState,code,observedAt,phase,sourceCode,statusCode,transportCode" ||
+        canonical(diagnostic) !== canonical(apiPreparationDiagnostic(diagnostic, diagnostic.observedAt)) ||
+        diagnostic.observedAt < s.apiPreparation.intentAt || diagnostic.observedAt > s.deadlineAt)
+      fail("journal_api_diagnostic_invalid");
+  }
   if (s.apiClosure !== null && s.apiClosure !== undefined && (!UUID.test(s.apiClosure.requestId || "") ||
       !["pending", "intent", "confirmed", "unconfirmed", "skipped_cleanup_priority"].includes(s.apiClosure.phase))) fail("journal_closure_invalid");
   return s;
@@ -47,6 +54,38 @@ const TRANSIENT_OBSERVATION_TRANSPORTS = new Set([
   "ECONNRESET", "ECONNREFUSED", "ETIMEDOUT", "EAI_AGAIN", "ENETUNREACH", "EHOSTUNREACH", "EPIPE"
 ]);
 const MAX_CONSECUTIVE_TRANSIENT_OBSERVATIONS = 3;
+const API_DIAGNOSTIC_CODES = new Set(("aborted acceptance_invalid activation_confirmation_invalid activation_failed activation_repeat_refused admission_expired callbacks_invalid closure_concurrent " +
+  "closure_identity_changed closure_identity_invalid closure_receipt_changed closure_unconfirmed configuration_limit configuration_unconfirmed " +
+  "context_invalid deadline host_invalid http_adapter_invalid http_target_invalid http_unavailable material_invalid music_rights_invalid " +
+  "owner_capabilities_invalid packet_invalid pilot_not_ready pilot_receipt_invalid prepare_repeat_refused readiness_repeat_refused " +
+  "receipt_invalid sentinel_hash_invalid ssh_binding_invalid ssh_request_invalid transfer_unconfirmed operation_failed").split(" ").map(value => "media_api_control_" + value));
+for (const value of ["media_pilot_activation_deadline", "media_pilot_api_not_bound", "media_pilot_admission_window_elapsed",
+  "media_pilot_operator_interrupted", "media_pilot_unclassified_failure"]) API_DIAGNOSTIC_CODES.add(value);
+const API_DIAGNOSTIC_SOURCES = new Set(("media_owner_route_refused media_owner_aborted media_owner_response_limit media_owner_response_unconfirmed " +
+  "media_owner_response_refused media_owner_response_invalid media_owner_timeout media_owner_transport_failed media_owner_credential_refused " +
+  "media_owner_login_unconfirmed media_private_state_configuration_invalid media_private_state_acl_unproved media_private_state_directory_invalid " +
+  "media_private_state_directory_unsafe media_private_state_directory_unbound media_private_state_directory_changed media_private_state_metadata_unsafe " +
+  "media_private_state_key_invalid media_private_state_record_limit media_private_state_record_invalid media_private_state_file_unsafe " +
+  "media_private_state_file_changed media_private_state_manifest_changed media_private_state_temporary_changed " +
+  "media_private_state_publication_unconfirmed media_private_state_temporary_cleanup_unconfirmed media_private_state_operation_failed " +
+  "media_private_state_initialization_failed").split(" "));
+const API_DIAGNOSTIC_STATUSES = new Set([400, 401, 403, 404, 405, 408, 409, 413, 415, 422, 429, 500, 502, 503, 504]);
+const API_DIAGNOSTIC_TRANSPORTS = new Set(["ECONNRESET", "ECONNREFUSED", "ETIMEDOUT", "EAI_AGAIN", "ENOTFOUND", "ENETUNREACH", "EHOSTUNREACH", "EPIPE",
+  "ERR_TLS_CERT_ALTNAME_INVALID", "CERT_HAS_EXPIRED", "UNABLE_TO_VERIFY_LEAF_SIGNATURE", "DEPTH_ZERO_SELF_SIGNED_CERT", "SELF_SIGNED_CERT_IN_CHAIN"]);
+const API_DIAGNOSTIC_ACTIVATIONS = new Set(["configuration_installed", "manual_apply_required", "human_confirmation_pending", "human_confirmed", "authenticated_ready",
+  "deploy_failed", "http_temporarily_unavailable", "transport_temporarily_unavailable", "response_temporarily_unavailable", "live_flag_disabled"]);
+function apiPreparationDiagnostic(error, observedAt) {
+  if (!Number.isSafeInteger(observedAt) || observedAt < 0) fail("api_diagnostic_invalid");
+  return Object.freeze({
+    phase: "prepare_api",
+    code: API_DIAGNOSTIC_CODES.has(error?.code) ? error.code : "media_pilot_unclassified_failure",
+    sourceCode: API_DIAGNOSTIC_SOURCES.has(error?.sourceCode) ? error.sourceCode : null,
+    statusCode: API_DIAGNOSTIC_STATUSES.has(error?.statusCode) ? error.statusCode : null,
+    transportCode: API_DIAGNOSTIC_TRANSPORTS.has(error?.transportCode) ? error.transportCode : null,
+    activationState: API_DIAGNOSTIC_ACTIVATIONS.has(error?.activationState) ? error.activationState : null,
+    observedAt
+  });
+}
 function transientObservationFailure(error) {
   if (error?.code === "vm_proof_operation_timeout" || error?.code === "media_api_control_deadline") return true;
   if (error?.code !== "media_api_control_http_unavailable") return false;
@@ -245,7 +284,12 @@ async function runOperationalPilot({ plan, approvalSha256, store, provider, gues
         if (result.finished) break;
         await foregroundSleep(Math.min(15000, Math.max(0, s.workerStopAt - now())));
       }
-    } catch (error) { s.failure ??= /^media_pilot_[a-z_]+$/.test(error?.code || "") ? error.code : "media_pilot_operation_failed"; await safeSave(); }
+    } catch (error) {
+      if (s.phase === "api_readiness" && s.apiPreparation != null && s.apiPreparation.diagnostic == null)
+        s.apiPreparation.diagnostic = apiPreparationDiagnostic(error, now());
+      s.failure ??= /^media_pilot_[a-z_]+$/.test(error?.code || "") ? error.code : "media_pilot_operation_failed";
+      await safeSave();
+    }
     finally {
       if (s.apiPreparation != null && s.apiClosure?.phase !== "confirmed") {
         // Never inherit the aborted operation signal: cleanup has its own small
@@ -336,4 +380,4 @@ async function runOperationalPilot({ plan, approvalSha256, store, provider, gues
   });
 }
 module.exports = { runOperationalPilot, validateState, validateClosureReceipt, activationWaitBudget, boundedWithSignal,
-  transientObservationFailure, summary };
+  apiPreparationDiagnostic, transientObservationFailure, summary };
