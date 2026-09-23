@@ -148,6 +148,7 @@ fun ScheduledNextContent(model: CalendarViewModel, token: String, tokenProvider:
     }
 }
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun CalendarGallery(model: CalendarViewModel, token: String, backLabel: String = "Voltar ao calendário",
     tokenProvider: () -> String = { token }, onBack: () -> Unit) {
@@ -167,14 +168,7 @@ fun CalendarGallery(model: CalendarViewModel, token: String, backLabel: String =
         if (state.data.items.none { it.id == showStatus?.id }) showStatus = null
         if (state.data.items.none { it.id == showMediaInfo?.id }) showMediaInfo = null
     }
-    if (showImport) {
-        GalleryImportWorkflowHost(tokenProvider = tokenProvider, generatedArtId = generatedSource?.id,
-            generatedArtRevision = generatedSource?.revision,
-            onBack = { showImport = false; generatedSource = null; model.refresh() },
-            onScheduled = { showImport = false; generatedSource = null; model.refresh() })
-        return
-    }
-    BackHandler(onBack = onBack)
+    BackHandler(enabled = !showImport, onBack = onBack)
     Column(Modifier.fillMaxSize().background(Color(0xFF101218)).padding(horizontal = 12.dp, vertical = 8.dp)) {
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
             IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, backLabel, tint = Color.White) }
@@ -208,7 +202,7 @@ fun CalendarGallery(model: CalendarViewModel, token: String, backLabel: String =
                     Row(Modifier.weight(1f), verticalAlignment = Alignment.CenterVertically) {
                         if (art.media != null && state.data.identity != null) {
                             ScheduledPrivateMedia(state.data.identity!!, tokenProvider, art.media, preview,
-                                active = pager.settledPage == index && !pager.isScrollInProgress && editing == null && showStatus == null && showMediaInfo == null,
+                                active = pager.settledPage == index && !pager.isScrollInProgress && editing == null && showStatus == null && showMediaInfo == null && !showImport,
                                 modifier = Modifier.weight(1f).fillMaxHeight())
                         } else ScheduledArtImage(art.copy(imageUrl = art.previews[preview] ?: art.imageUrl, destination = preview), token, Modifier.weight(1f).fillMaxHeight(), state.imageRefresh)
                         Column(Modifier.width(actionWidth).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(4.dp), horizontalAlignment = Alignment.CenterHorizontally) {
@@ -243,6 +237,18 @@ fun CalendarGallery(model: CalendarViewModel, token: String, backLabel: String =
                     Text("${index + 1} de ${items.size} · Arraste para ver a próxima · Horário de Brasília", color = Color(0xFFB8BDC9), style = MaterialTheme.typography.labelSmall)
                 }
             }
+        }
+    }
+    if (showImport) {
+        val closeImport = { showImport = false; generatedSource = null }
+        ModalBottomSheet(onDismissRequest = closeImport,
+            sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
+            containerColor = Color(0xFF101218)) {
+            GalleryImportWorkflowHost(tokenProvider = tokenProvider, generatedArtId = generatedSource?.id,
+                generatedArtRevision = generatedSource?.revision, generatedDestination = generatedSource?.destination,
+                autoOpenPicker = generatedSource == null,
+                onBack = closeImport,
+                onScheduled = { closeImport(); model.refresh() })
         }
     }
     showMediaInfo?.let { art -> AlertDialog(onDismissRequest = { showMediaInfo = null }, title = { Text("Formato e áudio programados") },

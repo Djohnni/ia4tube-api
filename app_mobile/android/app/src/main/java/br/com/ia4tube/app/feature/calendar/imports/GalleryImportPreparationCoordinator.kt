@@ -272,12 +272,13 @@ class GalleryImportPreparationCoordinator internal constructor(
     }
 
     /** One explicit action accepts a durable server-owned prepare-to-calendar job. No preview acknowledgement is fabricated. */
-    suspend fun submitToCalendar(caption: String = ""): ImportPreparationRunView = operation { run ->
+    suspend fun submitToCalendar(caption: String = "", schedule: ImportCalendarSchedule? = null): ImportPreparationRunView = operation { run ->
         capabilities(run)
         requireThat(run.capability!!.calendarSubmissionEnabled, "import_calendar_submission_unavailable")
         var checkpoint = draft(run)
         requireThat(checkpoint.scheduleBinding == null && checkpoint.state.scheduleIntent == null, "import_schedule_existing_intent")
         if (checkpoint.calendarSubmission != null) return@operation reconcileCalendarSubmission(run, retry = true)
+        schedule?.let(ImportCalendarSubmissionProtocol::validateSchedule)
         requireThat(uploaded(checkpoint) && !checkpoint.cancelRequested, "import_preparation_upload_required")
         requireThat(GalleryImportPolicy.validateConfiguration(checkpoint.state.selection.kind, checkpoint.state.configuration,
             run.capability!!.musicTracks) == null, "import_preparation_music_unavailable")
@@ -299,11 +300,11 @@ class GalleryImportPreparationCoordinator internal constructor(
         requireThat(record.currentRevision == (previous?.acceptedMediaRevision ?: checkpoint.preparationBaseRevision) &&
             (previous == null || record.jobId == previous.jobId && record.configuration == checkpoint.state.configuration),
             "import_preparation_revision_changed")
-        val intent = ImportCalendarSubmissionIntent(UUID.randomUUID().toString(), checkpoint.state.revision, record.currentRevision, caption.trim())
+        val intent = ImportCalendarSubmissionIntent(UUID.randomUUID().toString(), checkpoint.state.revision, record.currentRevision, caption.trim(), schedule)
         ImportCalendarSubmissionProtocol.validate(intent)
         persist(run, checkpoint.copy(calendarSubmission = intent))
         emit(run, ImportPreparationRunStatus.CALENDAR_RECONCILIATION)
-        submitCalendarSubmission(run)
+        submitCalendarSubmission(run, recoverDefinitiveScheduleRejection = true)
     }
 
     private suspend fun reconcileCalendarSubmission(run: Run, retry: Boolean): ImportPreparationRunView {
@@ -314,11 +315,27 @@ class GalleryImportPreparationCoordinator internal constructor(
         return if (retry) submitCalendarSubmission(run) else emit(run, ImportPreparationRunStatus.CALENDAR_RECONCILIATION)
     }
 
-    private suspend fun submitCalendarSubmission(run: Run): ImportPreparationRunView {
+    private suspend fun submitCalendarSubmission(run: Run, recoverDefinitiveScheduleRejection: Boolean = false): ImportPreparationRunView {
         val checkpoint = draft(run); val ticket = checkpoint.state.upload!!.ticket
         persist(run, checkpoint)
-        val receipt = run.api.submitToCalendar(run.owner, ticket.assetId, ticket.uploadId, checkpoint.calendarSubmission!!,
-            checkpoint.state.selection.kind, checkpoint.state.configuration)
+        val intent = checkpoint.calendarSubmission!!
+        val receipt = try { run.api.submitToCalendar(run.owner, ticket.assetId, ticket.uploadId, intent,
+            checkpoint.state.selection.kind, checkpoint.state.configuration) }
+        catch (error: ImportApiFailure) {
+            // A restored/replayed intent may have an earlier request still in flight. Never retire its key here.
+            if (!recoverDefinitiveScheduleRejection || intent.schedule == null || error.resultUncertain) throw error
+            val diagnostic = when {
+                error.code == "calendar_import_submission_time_occupied" && error.status == 409 -> "import_calendar_schedule_rejected_occupied"
+                error.code == "calendar_import_submission_time_outside_window" && error.status == 400 -> "import_calendar_schedule_rejected_outside_window"
+                error.code == "calendar_import_submission_schedule_invalid" && error.status == 400 -> "import_calendar_schedule_rejected_invalid"
+                else -> throw error
+            }
+            val found = run.api.calendarSubmissionStatus(run.owner, ticket.assetId, ticket.uploadId, intent); guard(run)
+            if (found != null) return finishCalendarSubmission(run, found)
+            // Only the exact authenticated not-found response becomes null. Keep source/preparation; do not resend.
+            persist(run, draft(run).copy(calendarSubmission = null))
+            return emit(run, ImportPreparationRunStatus.AWAITING_REQUEST, error = diagnostic, httpStatus = error.status)
+        }
         return finishCalendarSubmission(run, receipt)
     }
 

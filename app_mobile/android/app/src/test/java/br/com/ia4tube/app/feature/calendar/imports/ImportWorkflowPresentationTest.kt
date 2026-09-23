@@ -6,6 +6,20 @@ import org.junit.Test
 import java.time.Instant
 
 class ImportWorkflowPresentationTest {
+    @Test fun `music keeps Story and mixed destinations while Feed becomes a shared Reel`() {
+        val photo = ImportConfiguration(setOf(ImportTarget.FEED), ImportAudioMode.NONE)
+        for (destination in listOf("feed", "story", "both")) {
+            val value = importMusicConfiguration(photo, "licensed-test", destination)
+            assertNull(GalleryImportPolicy.validateConfiguration(ImportMediaKind.IMAGE, value,
+                listOf(AuthorizedImportTrack("licensed-test", true))))
+            when (destination) {
+                "feed" -> { assertEquals(setOf(ImportTarget.REEL), value.targets); assertTrue(value.shareToFeed) }
+                "story" -> { assertEquals(setOf(ImportTarget.STORY), value.targets); assertFalse(value.shareToFeed) }
+                "both" -> { assertEquals(setOf(ImportTarget.FEED, ImportTarget.STORY), value.targets); assertEquals(setOf(ImportTarget.STORY), value.musicalTargets) }
+            }
+            assertEquals(value.copy(musicTrackId = "another-track"), importMusicConfiguration(value, "another-track", destination))
+        }
+    }
     private val owner = ImportPreparationTestData.owner
     private fun preview(revision: Long = 1, digest: String = "a".repeat(64)): ImportPrivatePreview {
         val asset = ImportPreparationTestData.assetId

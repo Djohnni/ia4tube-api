@@ -28,7 +28,7 @@ import java.time.Duration
 @Config(manifest = Config.NONE, application = Application::class, sdk = [28])
 @LooperMode(LooperMode.Mode.PAUSED)
 class GalleryImportWorkflowInteractionTest {
-    private class Host(video: Boolean = false, automaticAllowed: Boolean = true) {
+    private class Host(video: Boolean = false, automaticAllowed: Boolean = true, generated: Boolean = false) {
         private val f = ImportPreparationTestData
         private val record = ImportPreparationProtocol.parseRecord(if (video) f.videoStatus() else f.status("ready"))
         private val preview = ImportPreparationProtocol.parsePreview(f.preview("https://ia4tube-api.onrender.com", record), record,
@@ -36,15 +36,20 @@ class GalleryImportWorkflowInteractionTest {
         private val source = GalleryImportState(f.owner, "synthetic-draft", if (video) f.selection.copy(kind = ImportMediaKind.VIDEO,
             mimeType = "video/mp4", durationMs = 20_000) else f.selection, record.configuration!!, phase = ImportPhase.READY,
             upload = ImportUploadProgress(ImportUploadTicket(f.uploadId, f.assetId, f.sourceSha, f.selection.byteCount), serverVerified = true))
-        var view by mutableStateOf(ImportWorkflowView(f.owner, ImportCapabilities(true, f.owner, preparationEnabled = true, schedulingEnabled = true, calendarSubmissionEnabled = true),
+        private val generatedId = "e".repeat(40)
+        var view by mutableStateOf(ImportWorkflowView(f.owner, ImportCapabilities(true, f.owner, preparationEnabled = true, schedulingEnabled = true, calendarSubmissionEnabled = true,
+            musicTracks = listOf(AuthorizedImportTrack("track-a", true, displayName = "Música A"), AuthorizedImportTrack("track-b", true, displayName = "Música B"))),
             upload = ImportUploadRunView(source, ImportUploadRunStatus.UPLOADED), preparation = ImportPreparationRunView(
                 ImportPreparationRunStatus.PREVIEW_AVAILABLE, source, record, preview,
-                availability = ImportScheduleAvailability(true, automaticAllowed, true, "@conta_sintetica")), foreground = true, initialized = true))
+                availability = ImportScheduleAvailability(true, automaticAllowed, true, "@conta_sintetica"),
+                generatedSourceIntent = if (generated) ImportGeneratedSourceIntent(generatedId, 1, "generated-source-test") else null), foreground = true, initialized = true))
         var confirmations = 0; var schedules = 0; var configurations = 0; var submissions = 0; var returns = 0; var previewRenders = 0
         var previewFailed by mutableStateOf(false)
         var capturedCaption: String? = null; var capturedAutomatic: Boolean? = null
+        var capturedSchedule: ImportCalendarSchedule? = null
         val actions = object : GalleryImportWorkflowActions {
             override fun addToCalendar(caption: String) { submissions++; capturedCaption = caption }
+            override fun addToCalendar(caption: String, schedule: ImportCalendarSchedule?) { addToCalendar(caption); capturedSchedule = schedule }
             override fun restore() = error("No implicit restore from content")
             override fun transfer() = error("No implicit upload")
             override fun reconcileUpload() = error("No implicit upload retry")
@@ -81,7 +86,9 @@ class GalleryImportWorkflowInteractionTest {
                     LaunchedEffect(part.target, part.sha256, previewFailed) { previewRenders++; if (previewFailed) failed() else verified() }
                     Text("Derivado sintético conferido: ${part.target}", modifier)
                 }) {
-                    GalleryImportWorkflowContent(view, actions, { "synthetic-session" }, null, null, {}, { returns++ }, { _, _ -> error("No automatic picker") })
+                    GalleryImportWorkflowContent(view, actions, { "synthetic-session" }, if (generated) generatedId else null,
+                        if (generated) 1L else null, {}, { returns++ }, { _, _ -> error("No automatic picker") },
+                        if (generated) "feed" else null)
                 }
             } }
             idle()
@@ -120,7 +127,7 @@ class GalleryImportWorkflowInteractionTest {
         try {
             assertEquals(0, host.submissions); assertEquals(0, host.previewRenders)
             assertFalse(host.nodes().any { host.text(it) in setOf("Prévia do arquivo final", "Conferi as prévias e o áudio", "Programar", "Confirmar Programar") })
-            host.click("Adicionar ao calendário")
+            host.click("Enviar")
             assertEquals(1, host.submissions); assertEquals("", host.capturedCaption)
             assertEquals(0, host.confirmations); assertEquals(0, host.schedules)
             assertTrue(ShadowDialog.getShownDialogs().none { it.isShowing })
@@ -129,8 +136,9 @@ class GalleryImportWorkflowInteractionTest {
     @Test fun optionalCaptionIsSentWithSingleSubmission() {
         val host = Host()
         try {
+            host.click("Formato e legenda (opcional)")
             host.enterCaption("Legenda opcional")
-            host.click("Adicionar ao calendário")
+            host.click("Enviar")
             assertEquals(1, host.submissions); assertEquals("Legenda opcional", host.capturedCaption)
             assertEquals(0, host.confirmations); assertEquals(0, host.schedules)
         } finally { host.close() }
@@ -140,7 +148,7 @@ class GalleryImportWorkflowInteractionTest {
         try {
             host.click("Remover áudio")
             assertEquals(1, host.configurations); assertEquals(ImportAudioMode.MUTED, host.view.draft!!.configuration.audioMode)
-            host.click("Adicionar ao calendário")
+            host.click("Enviar")
             assertEquals(1, host.submissions); assertEquals(0, host.previewRenders); assertEquals(0, host.confirmations)
         } finally { host.close() }
     }
@@ -151,9 +159,10 @@ class GalleryImportWorkflowInteractionTest {
             host.view = host.view.copy(upload = ImportUploadRunView(local, ImportUploadRunStatus.PAUSED),
                 preparation = host.view.preparation!!.copy(state = local, preview = null))
             host.idle()
+            host.click("Formato e legenda (opcional)")
             host.click("Exibir também no Feed")
             assertFalse(host.view.draft!!.configuration.shareToFeed)
-            host.click("Adicionar ao calendário")
+            host.click("Enviar")
             assertEquals(1, host.submissions); assertEquals(0, host.schedules)
         } finally { host.close() }
     }
@@ -161,14 +170,14 @@ class GalleryImportWorkflowInteractionTest {
         val host = Host()
         try {
             host.previewFailed = true; host.idle()
-            host.click("Adicionar ao calendário")
+            host.click("Enviar")
             assertEquals(1, host.submissions); assertEquals(0, host.previewRenders)
         } finally { host.close() }
     }
     @Test fun closedAutomaticAvailabilityDoesNotFabricatePublicationConsent() {
         val host = Host(automaticAllowed = false)
         try {
-            host.click("Adicionar ao calendário")
+            host.click("Enviar")
             assertEquals(1, host.submissions); assertEquals(0, host.schedules); assertNull(host.capturedAutomatic)
         } finally { host.close() }
     }
@@ -181,6 +190,51 @@ class GalleryImportWorkflowInteractionTest {
                     "synthetic-submission", "accepted", null, 0, "2026-09-24", "09:00", "", null)))
             host.idle(); host.idle()
             assertEquals(1, host.returns); assertEquals(0, host.schedules); assertEquals(0, host.previewRenders)
+        } finally { host.close() }
+    }
+    @Test fun existingArtShowsOnlyMusicChoicesThenOneSendPreservingCalendarSchedule() {
+        val host = Host(generated = true)
+        try {
+            assertFalse(host.nodes().any { host.text(it) == "Enviar" })
+            assertFalse(host.nodes().any { host.text(it) in setOf("Formato e legenda (opcional)", "Legenda (opcional)", "Sem música") })
+            assertFalse(host.nodes().any { host.text(it).startsWith("Dia:") || host.text(it).startsWith("Hora:") })
+            host.click("Música B")
+            assertEquals(0, host.submissions)
+            assertEquals("track-b", host.view.draft!!.configuration.musicTrackId)
+            assertEquals(setOf(ImportTarget.REEL), host.view.draft!!.configuration.targets)
+            assertTrue(host.view.draft!!.configuration.shareToFeed)
+            host.click("Enviar")
+            assertEquals(1, host.submissions); assertNull(host.capturedSchedule)
+            assertEquals(0, host.schedules); assertEquals(0, host.previewRenders)
+        } finally { host.close() }
+    }
+    @Test fun importedFileSendsChosenDayAndTimeInTheSameAction() {
+        val host = Host(video = true)
+        try {
+            val day = java.time.LocalDate.now(java.time.ZoneId.of("America/Sao_Paulo")).plusDays(2)
+            val dayButton = host.nodes().map(host::text).first { it.startsWith("Dia:") }
+            host.click(dayButton)
+            val dateDialog = ShadowDialog.getLatestDialog() as android.app.DatePickerDialog
+            dateDialog.updateDate(day.year, day.monthValue - 1, day.dayOfMonth)
+            dateDialog.getButton(android.content.DialogInterface.BUTTON_POSITIVE).performClick(); host.idle()
+            host.click("Hora: 09:00")
+            val timeDialog = ShadowDialog.getLatestDialog() as android.app.TimePickerDialog
+            timeDialog.updateTime(18, 45)
+            timeDialog.getButton(android.content.DialogInterface.BUTTON_POSITIVE).performClick(); host.idle()
+            assertEquals(0, host.submissions)
+            host.click("Enviar")
+            assertEquals(ImportCalendarSchedule(day.toString(), "18:45"), host.capturedSchedule)
+            assertEquals(1, host.submissions); assertEquals(0, host.schedules)
+        } finally { host.close() }
+    }
+    @Test fun openingMusicForAnotherArtCannotSendAnOldDraft() {
+        val host = Host(generated = true)
+        try {
+            host.view = host.view.copy(preparation = host.view.preparation!!.copy(generatedSourceIntent = null))
+            host.idle()
+            assertFalse(host.nodes().any { host.text(it) == "Enviar" })
+            assertTrue(host.nodes().any { host.text(it).startsWith("Há outro arquivo em andamento") })
+            assertEquals(0, host.submissions)
         } finally { host.close() }
     }
 }

@@ -6,6 +6,19 @@ import java.time.ZoneId
 
 internal data class ImportFormatChoice(val title: String, val detail: String, val configuration: ImportConfiguration)
 
+/** Keep the destination chosen in the calendar; a musical Feed photo is a shared Reel. */
+internal fun importMusicConfiguration(current: ImportConfiguration, trackId: String, destination: String? = null): ImportConfiguration {
+    val targets = when (destination) {
+        "story" -> setOf(ImportTarget.STORY)
+        "both" -> setOf(ImportTarget.FEED, ImportTarget.STORY)
+        "feed", "reel" -> setOf(ImportTarget.REEL)
+        else -> if (current.targets == setOf(ImportTarget.FEED)) setOf(ImportTarget.REEL) else current.targets
+    }
+    return ImportConfiguration(targets, ImportAudioMode.MUSIC, trackId,
+        targets.filter { it != ImportTarget.FEED }.toSet(),
+        shareToFeed = ImportTarget.REEL in targets && (destination == "feed" || current.shareToFeed || current.targets == setOf(ImportTarget.FEED)))
+}
+
 /** No implicit music licence, music picker from Instagram, or third Feed publication for a shared Reel. */
 internal fun importFormatChoices(kind: ImportMediaKind, audio: ImportAudioMode, trackId: String? = null,
                                  reelShareToFeed: Boolean = true): List<ImportFormatChoice> {

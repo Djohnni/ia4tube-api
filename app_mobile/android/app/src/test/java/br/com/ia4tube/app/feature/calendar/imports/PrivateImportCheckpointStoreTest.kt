@@ -81,6 +81,40 @@ class PrivateImportCheckpointStoreTest {
         assertNotNull(store.read(owner))
     }
 
+    @Test fun directCalendarScheduleSurvivesEncryptedReopenAndLegacyOmission() {
+        val root = temporary.newFolder("direct-calendar"); val cipher = TestCipher()
+        val uploaded = draft(ImportPhase.UPLOADED).let { it.copy(state = it.state.copy(upload = it.state.upload!!.copy(serverVerified = true))) }
+        val schedule = ImportCalendarSchedule("2020-01-15", "08:45")
+        val intent = ImportCalendarSubmissionIntent("direct-calendar-intent", uploaded.state.revision, 0, "Saved caption", schedule)
+        val stored = PrivateImportCheckpointStore(root, cipher).write(owner, 0, uploaded.copy(calendarSubmission = intent))
+        val reopened = PrivateImportCheckpointStore(root, cipher).read(owner)!!
+        assertEquals(intent, reopened.calendarSubmission)
+        val encoded = org.json.JSONObject(String(ImportCheckpointCodec.encode(stored), Charsets.UTF_8))
+        encoded.getJSONObject("calendarSubmission").remove("schedule")
+        val legacy = ImportCheckpointCodec.decode(encoded.toString().toByteArray(Charsets.UTF_8), owner)
+        assertEquals(intent.copy(schedule = null), legacy.calendarSubmission)
+        assertFalse(org.json.JSONObject(String(ImportCheckpointCodec.encode(legacy), Charsets.UTF_8))
+            .getJSONObject("calendarSubmission").has("schedule"))
+        encoded.getJSONObject("calendarSubmission").put("schedule", org.json.JSONObject.NULL)
+        assertEquals(intent.copy(schedule = null), ImportCheckpointCodec.decode(encoded.toString().toByteArray(Charsets.UTF_8), owner).calendarSubmission)
+    }
+
+    @Test fun malformedDirectCalendarScheduleCannotBeRestoredAsAnUnscheduledIntent() {
+        val uploaded = draft(ImportPhase.UPLOADED).let { it.copy(state = it.state.copy(upload = it.state.upload!!.copy(serverVerified = true))) }
+        val intent = ImportCalendarSubmissionIntent("direct-calendar-intent", uploaded.state.revision, 0, schedule = ImportCalendarSchedule("2026-09-28", "14:35"))
+        val encoded = String(ImportCheckpointCodec.encode(uploaded.copy(calendarSubmission = intent)), Charsets.UTF_8)
+        val malformed = listOf<Any>("not-an-object", org.json.JSONObject().put("date", "2026-09-28").put("time", "14:35"),
+            org.json.JSONObject().put("date", "2026-02-30").put("time", "14:35").put("timeZone", "America/Sao_Paulo"),
+            org.json.JSONObject().put("date", "2026-09-28").put("time", "24:00").put("timeZone", "America/Sao_Paulo"),
+            org.json.JSONObject().put("date", "2026-09-28").put("time", "14:35").put("timeZone", "UTC"),
+            org.json.JSONObject().put("date", "2026-09-28").put("time", "14:35").put("timeZone", "America/Sao_Paulo").put("automatic", true))
+        for (schedule in malformed) {
+            val changed = org.json.JSONObject(encoded)
+            changed.getJSONObject("calendarSubmission").put("schedule", schedule)
+            assertThrows(RuntimeException::class.java) { ImportCheckpointCodec.decode(changed.toString().toByteArray(Charsets.UTF_8), owner) }
+        }
+    }
+
     @Test fun companyAndUserScopesCannotReadOrRelabelAnotherEncryptedCheckpoint() {
         val root = temporary.newFolder("private")
         val store = PrivateImportCheckpointStore(root, TestCipher())

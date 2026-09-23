@@ -2,6 +2,11 @@ package br.com.ia4tube.app.feature.calendar.imports
 
 /** Only fixed labels may reach the screen: never interpolate HTTP bodies, URLs or credentials. */
 internal fun importPreparationDiagnostic(stage: ImportPreparationDiagnosticStage?, code: String, httpStatus: Int? = null): String {
+    when (code) {
+        "import_calendar_schedule_rejected_occupied" -> return "Esse horário já está ocupado. Escolha outro horário e adicione ao calendário. Seu arquivo foi preservado."
+        "import_calendar_schedule_rejected_outside_window" -> return "Escolha uma data e um horário futuros, dentro de 180 dias, e adicione ao calendário. Seu arquivo foi preservado."
+        "import_calendar_schedule_rejected_invalid" -> return "Confira a data e o horário de Brasília e adicione ao calendário. Seu arquivo foi preservado."
+    }
     val step = when (stage) {
         ImportPreparationDiagnosticStage.LOCAL_STATE -> "rascunho salvo"
         ImportPreparationDiagnosticStage.CAPABILITIES -> "disponibilidade da importação"

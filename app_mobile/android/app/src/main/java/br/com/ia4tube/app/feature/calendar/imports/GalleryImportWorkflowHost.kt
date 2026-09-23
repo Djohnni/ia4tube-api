@@ -4,6 +4,7 @@ import android.app.DatePickerDialog
 import android.app.TimePickerDialog
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
@@ -35,7 +36,8 @@ internal val LocalImportWorkflowPreviewRenderer = staticCompositionLocalOf<(@Com
 /** Shared by the existing calendar and planned-art gallery. No publication consent is inferred from entry or selection. */
 @Composable
 fun GalleryImportWorkflowHost(tokenProvider: () -> String, generatedArtId: String? = null, generatedArtRevision: Long? = null,
-                              onBack: () -> Unit, onScheduled: (String) -> Unit) {
+                              onBack: () -> Unit, onScheduled: (String) -> Unit,
+                              autoOpenPicker: Boolean = false, generatedDestination: String? = null) {
     val context = LocalContext.current.applicationContext
     val scope = rememberCoroutineScope()
     val lifecycle = LocalLifecycleOwner.current.lifecycle
@@ -75,7 +77,7 @@ fun GalleryImportWorkflowHost(tokenProvider: () -> String, generatedArtId: Strin
     if (current == null) {
         Column(Modifier.fillMaxSize().padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
             TextButton(onClick = back) { Text("Voltar ao calendário") }
-            Text("Adicionar foto ou vídeo", style = MaterialTheme.typography.titleLarge)
+            Text(if (generatedArtId != null) "Escolher música" else "Adicionar foto ou vídeo", style = MaterialTheme.typography.titleLarge)
             if (loading) CircularProgressIndicator() else Text(error ?: "A sessão mudou. Abra novamente para continuar.")
         }
         return
@@ -86,7 +88,7 @@ fun GalleryImportWorkflowHost(tokenProvider: () -> String, generatedArtId: Strin
     var pickerRuntime by remember { mutableStateOf<GalleryImportWorkflowRuntime?>(null) }
     var pickerSequence by remember(current) { mutableLongStateOf(0L) }
     var pendingPickerRequest by remember(current) { mutableLongStateOf(0L) }
-    val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+    val picker = rememberLauncherForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri ->
         val expected = pickerRuntime
         val requestId = pendingPickerRequest
         pickerRuntime = null
@@ -95,30 +97,46 @@ fun GalleryImportWorkflowHost(tokenProvider: () -> String, generatedArtId: Strin
         // owns that race and retains exactly one result until restore completes; selection still never sends.
         if (uri != null && expected === current && requestId > 0L && state.sessionValid) {
             if (reselecting) current.reselect(requestId, uri.toString())
-            else pendingKind?.let { current.select(requestId, uri.toString(), it) }
+            else {
+                val mime = runCatching { context.contentResolver.getType(uri)?.lowercase() }.getOrNull()
+                val kind = pendingKind ?: if (mime?.startsWith("video/") == true) ImportMediaKind.VIDEO else ImportMediaKind.IMAGE
+                current.select(requestId, uri.toString(), kind)
+            }
         }
         pendingKind = null; reselecting = false
+        if (uri == null && autoOpenPicker && state.draft == null) back()
     }
     val choose: (ImportMediaKind?, Boolean) -> Unit = { kind, reselect ->
         if (pickerRuntime == null && !state.busy && !state.pickerResultPending) {
             pickerSequence++
             pendingPickerRequest = pickerSequence
             pendingKind = kind; reselecting = reselect; pickerRuntime = current
-            try { picker.launch(when (kind) {
-                ImportMediaKind.IMAGE -> arrayOf("image/jpeg", "image/png", "image/webp")
-                ImportMediaKind.VIDEO -> arrayOf("video/mp4", "video/quicktime")
-                null -> arrayOf("image/jpeg", "image/png", "image/webp", "video/mp4", "video/quicktime")
-            }) } catch (_: Exception) { pickerRuntime = null; pendingPickerRequest = 0L }
+            try { picker.launch(PickVisualMediaRequest(when (kind) {
+                ImportMediaKind.IMAGE -> ActivityResultContracts.PickVisualMedia.ImageOnly
+                ImportMediaKind.VIDEO -> ActivityResultContracts.PickVisualMedia.VideoOnly
+                null -> ActivityResultContracts.PickVisualMedia.ImageAndVideo
+            })) } catch (_: Exception) { pickerRuntime = null; pendingPickerRequest = 0L }
+        }
+    }
+    var pickerOpened by remember(current) { mutableStateOf(false) }
+    LaunchedEffect(current, state.foreground, state.initialized, state.busy) {
+        if (autoOpenPicker && !pickerOpened && state.foreground && state.initialized && state.sessionValid &&
+            !state.busy && state.error == null && state.upload.status == ImportUploadRunStatus.EMPTY &&
+            state.preparation?.status == ImportPreparationRunStatus.EMPTY &&
+            state.draft == null && state.preparation?.generatedSourceIntent == null &&
+            state.preparation?.calendarSubmissionReceipt == null) {
+            pickerOpened = true
+            choose(null, false)
         }
     }
     GalleryImportWorkflowContent(state, current, { if (session.getToken() == token) latestToken() else "" },
-        generatedArtId, generatedArtRevision, back, onScheduled, choose)
+        generatedArtId, generatedArtRevision, back, onScheduled, choose, generatedDestination)
 }
 
 @Composable
 internal fun GalleryImportWorkflowContent(view: ImportWorkflowView, runtime: GalleryImportWorkflowActions, tokenProvider: () -> String,
     generatedArtId: String?, generatedArtRevision: Long?, onBack: () -> Unit, onScheduled: (String) -> Unit,
-    choose: (ImportMediaKind?, Boolean) -> Unit) {
+    choose: (ImportMediaKind?, Boolean) -> Unit, generatedDestination: String? = null) {
     val context = LocalContext.current
     val draft = view.draft
     val preparation = view.preparation
@@ -127,6 +145,15 @@ internal fun GalleryImportWorkflowContent(view: ImportWorkflowView, runtime: Gal
     val operational = view.foreground && view.sessionValid && view.initialized && !view.busy && !view.pickerResultPending
     val configuration = draft?.configuration
     var caption by remember(draft?.draftId) { mutableStateOf(preparation?.calendarSubmissionIntent?.caption.orEmpty()) }
+    val musicOnly = generatedArtId != null
+    val sourceMatches = !musicOnly || preparation?.generatedSourceIntent?.let {
+        it.calendarItemId == generatedArtId && it.revision == generatedArtRevision
+    } == true
+    var date by remember(draft?.draftId) { mutableStateOf(preparation?.calendarSubmissionIntent?.schedule?.date
+        ?: LocalDate.now(ZoneId.of("America/Sao_Paulo")).plusDays(1).toString()) }
+    var time by remember(draft?.draftId) { mutableStateOf(preparation?.calendarSubmissionIntent?.schedule?.time ?: "09:00") }
+    var musicExpanded by remember(draft?.draftId) { mutableStateOf(musicOnly) }
+    var detailsExpanded by remember(draft?.draftId) { mutableStateOf(false) }
     var confirmCancel by remember(runtime) { mutableStateOf(false) }
     var generatedAdoptionStarted by remember(runtime, generatedArtId, generatedArtRevision) { mutableStateOf(false) }
     val receipt = preparation?.calendarSubmissionReceipt
@@ -151,14 +178,13 @@ internal fun GalleryImportWorkflowContent(view: ImportWorkflowView, runtime: Gal
         }
     }
     val uploadUi = galleryImportUploadPresentation(view.upload, view.busy, view.foreground, view.initialized, view.sessionValid)
-    Column(Modifier.fillMaxSize().background(Color(0xFF101218)).padding(horizontal = 12.dp, vertical = 8.dp)) {
+    Column(Modifier.fillMaxWidth().heightIn(max = 620.dp).background(Color(0xFF101218)).padding(horizontal = 12.dp, vertical = 8.dp)) {
         CompositionLocalProvider(LocalContentColor provides Color.White) {
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                 IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Voltar ao calendário") }
-                Text("Adicionar foto ou vídeo", fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
+                Text(if (musicOnly) "Escolher música" else "Adicionar foto ou vídeo", fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
             }
             Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                Text("Escolha o arquivo, o formato e o áudio.", style = MaterialTheme.typography.titleMedium)
                 if (view.capabilities.localSimulation) Text("AMBIENTE LOCAL DE TESTE — nenhuma publicação real ao Instagram.", color = Color(0xFFFFD59C))
                 if (view.busy) {
                     LinearProgressIndicator(Modifier.fillMaxWidth())
@@ -182,13 +208,11 @@ internal fun GalleryImportWorkflowContent(view: ImportWorkflowView, runtime: Gal
                     OutlinedButton(onClick = { runtime.adoptGenerated(generatedArtId, generatedArtRevision) }) { Text("Continuar com esta arte") }
                 }
                 if (draft == null && pendingGenerated == null && generatedArtId == null && receipt == null) {
-                    OutlinedButton(enabled = operational, onClick = { choose(ImportMediaKind.IMAGE, false) },
-                        modifier = Modifier.fillMaxWidth()) { Text("Escolher foto") }
-                    OutlinedButton(enabled = operational, onClick = { choose(ImportMediaKind.VIDEO, false) },
-                        modifier = Modifier.fillMaxWidth()) { Text("Escolher vídeo") }
+                    OutlinedButton(enabled = operational, onClick = { choose(null, false) },
+                        modifier = Modifier.fillMaxWidth()) { Text("Escolher foto ou vídeo") }
                     Text("Fotos: JPEG, PNG ou WebP até 32 MiB. Vídeos: MP4 ou MOV até 100 MiB e 60 segundos.", style = MaterialTheme.typography.bodySmall)
                 }
-                uploadUi.selectedSummary?.takeIf { draft != null }?.let { Text(it) }
+                uploadUi.selectedSummary?.takeIf { draft != null && !musicOnly }?.let { Text(it) }
                 uploadUi.confirmedProgress?.takeIf { draft?.upload?.serverVerified != true }?.let {
                     LinearProgressIndicator(progress = { it }, modifier = Modifier.fillMaxWidth())
                 }
@@ -212,30 +236,62 @@ internal fun GalleryImportWorkflowContent(view: ImportWorkflowView, runtime: Gal
                         Text("O cancelamento está sendo conferido.")
                         OutlinedButton(enabled = operational, onClick = runtime::reconcileUpload) { Text("Conferir cancelamento") }
                     }
+                    !sourceMatches && draft != null -> {
+                        Text("Há outro arquivo em andamento. Volte e conclua esse envio em Adicionar foto ou vídeo antes de usar música nesta arte.")
+                    }
                     submitted -> {
                         Text("Estamos conferindo se o servidor recebeu este arquivo. O mesmo pedido será recuperado.")
                         Button(enabled = operational, colors = importWorkflowButtonColors(),
-                            onClick = { runtime.addToCalendar(preparation.calendarSubmissionIntent!!.caption) },
+                            onClick = { runtime.addToCalendar(preparation.calendarSubmissionIntent!!.caption,
+                                preparation.calendarSubmissionIntent!!.schedule) },
                             modifier = Modifier.fillMaxWidth()) { Text("Continuar adição ao calendário") }
                     }
                     draft != null && configuration != null -> {
-                        Text("Formato e Música/Áudio", style = MaterialTheme.typography.titleMedium)
-                        Text(importFinalAudioLabel(configuration))
-                        if (draft.selection.kind == ImportMediaKind.VIDEO) {
+                        if (!musicOnly) {
+                            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                OutlinedButton(enabled = operational, onClick = {
+                                    val initial = LocalDate.parse(date)
+                                    DatePickerDialog(context, { _, year, month, day -> date = LocalDate.of(year, month + 1, day).toString() },
+                                        initial.year, initial.monthValue - 1, initial.dayOfMonth).show()
+                                }) { Text("Dia: ${LocalDate.parse(date).format(java.time.format.DateTimeFormatter.ofPattern("dd/MM/yyyy"))}") }
+                                OutlinedButton(enabled = operational, onClick = {
+                                    val initial = LocalTime.parse(time)
+                                    TimePickerDialog(context, { _, hour, minute -> time = "%02d:%02d".format(java.util.Locale.ROOT, hour, minute) },
+                                        initial.hour, initial.minute, true).show()
+                                }) { Text("Hora: $time") }
+                            }
+                            Text("Horário de Brasília", style = MaterialTheme.typography.bodySmall)
+                        }
+                        if (!musicOnly && draft.selection.kind == ImportMediaKind.VIDEO) {
                             for (audio in listOf(ImportAudioMode.ORIGINAL, ImportAudioMode.MUTED)) FilterChip(
                                 selected = configuration.audioMode == audio, enabled = operational,
                                 colors = importWorkflowChipColors(),
                                 onClick = { runtime.configure(configuration.copy(audioMode = audio)) },
                                 label = { Text(if (audio == ImportAudioMode.ORIGINAL) "Manter áudio original" else "Remover áudio") })
-                        } else {
+                        } else if (draft.selection.kind == ImportMediaKind.IMAGE) {
+                            if (!musicOnly) TextButton(onClick = { musicExpanded = !musicExpanded }) {
+                                Text(if (configuration.audioMode == ImportAudioMode.MUSIC) "Música escolhida · Alterar" else "Adicionar música (opcional)")
+                            }
+                            if (musicExpanded) {
+                            if (!musicOnly)
                             OutlinedButton(enabled = operational, onClick = {
                                 runtime.configure(importFormatChoices(ImportMediaKind.IMAGE, ImportAudioMode.NONE).first().configuration)
                             }) { Text("Sem música") }
-                            for (track in view.capabilities.musicTracks) OutlinedButton(enabled = operational, onClick = {
-                                runtime.configure(importFormatChoices(ImportMediaKind.IMAGE, ImportAudioMode.MUSIC, track.id).first().configuration)
-                            }) { Text(if (track.testOnly) "Áudio sintético — somente teste local" else track.displayName) }
+                            Column(Modifier.fillMaxWidth().heightIn(max = 240.dp).verticalScroll(rememberScrollState())) {
+                            for (track in view.capabilities.musicTracks) FilterChip(
+                                selected = configuration.musicTrackId == track.id, enabled = operational,
+                                colors = importWorkflowChipColors(), onClick = {
+                                    runtime.configure(importMusicConfiguration(configuration, track.id, generatedDestination))
+                                }, label = { Text(if (track.testOnly) "Áudio sintético — somente teste local" else track.displayName) })
+                            }
                             if (view.capabilities.musicTracks.isEmpty()) Text("Nenhuma música está disponível para esta conta.", style = MaterialTheme.typography.bodySmall)
+                            }
                         }
+                        if (musicOnly && configuration.audioMode == ImportAudioMode.MUSIC) Text(
+                            if (ImportTarget.REEL in configuration.targets) "A foto com música será um Reel, também exibido no Feed."
+                            else "A música será incorporada ao Story.", style = MaterialTheme.typography.bodySmall)
+                        if (!musicOnly) TextButton(onClick = { detailsExpanded = !detailsExpanded }) { Text("Formato e legenda (opcional)") }
+                        if (!musicOnly && detailsExpanded) {
                         for (choice in importFormatChoices(draft.selection.kind, configuration.audioMode, configuration.musicTrackId,
                             if (ImportTarget.REEL in configuration.targets) configuration.shareToFeed else true)) {
                             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -256,10 +312,16 @@ internal fun GalleryImportWorkflowContent(view: ImportWorkflowView, runtime: Gal
                                 focusedLabelColor = Color.White, unfocusedLabelColor = Color(0xFFD3D6DF),
                                 cursorColor = Color(0xFF72D995), focusedBorderColor = Color(0xFF72D995),
                                 unfocusedBorderColor = Color(0xFF919BAC)), modifier = Modifier.fillMaxWidth())
-                        Text("O arquivo será preparado e adicionado ao calendário. Confira, edite ou exclua por lá.", style = MaterialTheme.typography.bodyMedium)
-                        Button(enabled = operational && view.capabilities.preparationEnabled && view.capabilities.calendarSubmissionEnabled,
-                            colors = importWorkflowButtonColors(), onClick = { runtime.addToCalendar(caption) },
-                            modifier = Modifier.fillMaxWidth()) { Text("Adicionar ao calendário") }
+                        }
+                        val scheduleValid = musicOnly || importScheduledAt(date, time) != null
+                        val musicChosen = !musicOnly || configuration.audioMode == ImportAudioMode.MUSIC &&
+                            view.capabilities.musicTracks.any { it.id == configuration.musicTrackId }
+                        if (!scheduleValid) Text("Escolha uma data e hora futuras, em até 180 dias.", color = Color(0xFFFFB4AB))
+                        Text("Depois do envio, confira no calendário.", style = MaterialTheme.typography.bodyMedium)
+                        if (musicChosen) Button(enabled = operational && scheduleValid && view.capabilities.preparationEnabled && view.capabilities.calendarSubmissionEnabled,
+                            colors = importWorkflowButtonColors(), onClick = { runtime.addToCalendar(caption,
+                                if (musicOnly) null else ImportCalendarSchedule(date, time)) },
+                            modifier = Modifier.fillMaxWidth()) { Text("Enviar") }
                         if (!view.capabilities.preparationEnabled || !view.capabilities.calendarSubmissionEnabled)
                             Text("Adicionar ao calendário ainda não está disponível. Seu arquivo foi preservado.")
                         if (GalleryImportUploadAction.RESELECT_SOURCE in uploadUi.actions)
@@ -270,7 +332,6 @@ internal fun GalleryImportWorkflowContent(view: ImportWorkflowView, runtime: Gal
                 }
                 if (view.busy && view.upload.status == ImportUploadRunStatus.TRANSFERRING)
                     OutlinedButton(onClick = runtime::pauseTransfer) { Text("Pausar envio") }
-                Text("Seu original é preservado. Usar uma arte existente não consome crédito de geração.", style = MaterialTheme.typography.bodySmall)
             }
         }
     }

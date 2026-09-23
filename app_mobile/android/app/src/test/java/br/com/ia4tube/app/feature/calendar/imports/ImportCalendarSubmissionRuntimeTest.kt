@@ -15,6 +15,7 @@ class ImportCalendarSubmissionRuntimeTest {
     private inner class Fixture(scope: CoroutineScope, uploaded: Boolean = false) {
         var token = "synthetic-session"
         var transfers = 0; var submissions = 0; var oldActions = 0
+        val schedules = mutableListOf<ImportCalendarSchedule?>()
         val transferRelease = CompletableDeferred<Unit>()
         var transferSucceeds = true
         var changedAfterUpload: (() -> Unit)? = null
@@ -51,12 +52,14 @@ class ImportCalendarSubmissionRuntimeTest {
             override suspend fun schedule(caption: String, at: Long, automatic: Boolean): ImportPreparationRunView { oldActions++; return restore() }
             override suspend fun reconcileScheduleOnce() = restore()
             override suspend fun finishScheduledDraft() = restore()
-            override suspend fun submitToCalendar(caption: String): ImportPreparationRunView {
+            override suspend fun submitToCalendar(caption: String) = submitToCalendar(caption, null)
+            override suspend fun submitToCalendar(caption: String, schedule: ImportCalendarSchedule?): ImportPreparationRunView {
                 submissions++
+                schedules.add(schedule)
                 assertTrue(state.upload!!.serverVerified)
                 return ImportPreparationRunView(ImportPreparationRunStatus.CALENDAR_ACCEPTED,
                     calendarSubmissionReceipt = ImportCalendarSubmissionReceipt("d".repeat(40), f.assetId, f.uploadId,
-                        "runtime-submission", "accepted", null, 0, "2026-09-24", "09:00", caption, null)).also(preparedChanged)
+                        "runtime-submission", "accepted", null, 0, schedule?.date ?: "2026-09-24", schedule?.time ?: "09:00", caption, null)).also(preparedChanged)
             }
             override fun pause() = Unit
             override fun invalidateSession() = Unit
@@ -81,6 +84,21 @@ class ImportCalendarSubmissionRuntimeTest {
         val fixture = Fixture(this, uploaded = true); fixture.runtime.start(); advanceUntilIdle()
         fixture.runtime.addToCalendar(""); advanceUntilIdle()
         assertEquals(0, fixture.transfers); assertEquals(1, fixture.submissions); assertEquals(0, fixture.oldActions)
+        assertEquals(listOf<ImportCalendarSchedule?>(null), fixture.schedules)
+    }
+
+    @Test fun chosenScheduleSurvivesUploadAndDuplicateTapCannotReplaceIt() = runTest {
+        val fixture = Fixture(this); fixture.runtime.start(); advanceUntilIdle()
+        val chosen = ImportCalendarSchedule("2026-09-28", "14:35")
+        fixture.runtime.addToCalendar("Saved caption", chosen); runCurrent()
+        fixture.runtime.addToCalendar("Different caption", ImportCalendarSchedule("2026-10-05", "18:30")); runCurrent()
+        assertEquals(1, fixture.transfers); assertEquals(0, fixture.submissions)
+        fixture.transferRelease.complete(Unit); advanceUntilIdle()
+        assertEquals(listOf(chosen), fixture.schedules)
+        assertEquals(1, fixture.submissions); assertEquals(0, fixture.oldActions)
+        val receipt = fixture.runtime.state.value.preparation!!.calendarSubmissionReceipt!!
+        assertEquals(chosen.date, receipt.date); assertEquals(chosen.time, receipt.time)
+        assertEquals("Saved caption", receipt.caption)
     }
 
     @Test fun incompleteUploadCannotSubmitAnUnverifiedSource() = runTest {

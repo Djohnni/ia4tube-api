@@ -49,6 +49,9 @@ import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.rememberModalBottomSheetState
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
@@ -117,6 +120,7 @@ import kotlinx.coroutines.launch
 import br.com.ia4tube.app.feature.calendar.*
 import br.com.ia4tube.app.feature.calendar.imports.GalleryImportWorkflowHost
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun MonthlyPlanningScreen(
     viewModel: MonthlyPlanningViewModel,
@@ -271,13 +275,13 @@ fun MonthlyPlanningScreen(
         viewModel.clearCalendarSharePayload()
     }
 
-    BackHandler(enabled = showGeneralCalendar) {
+    BackHandler(enabled = showGeneralCalendar && !showImport) {
         showGeneralCalendar = false
     }
-    BackHandler(enabled = !showGeneralCalendar && state.step == MonthlyPlanningStep.Upload) {
+    BackHandler(enabled = !showGeneralCalendar && !showImport && state.step == MonthlyPlanningStep.Upload) {
         onBack()
     }
-    BackHandler(enabled = !showGeneralCalendar && state.step == MonthlyPlanningStep.Confirmation) {
+    BackHandler(enabled = !showGeneralCalendar && !showImport && state.step == MonthlyPlanningStep.Confirmation) {
         viewModel.backToUpload()
     }
 
@@ -467,12 +471,18 @@ fun MonthlyPlanningScreen(
         )
     }
 
-    ScreenScaffold {
-        if (showImport) {
+    if (showImport) {
+        ModalBottomSheet(onDismissRequest = { showImport = false },
+            sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
+            containerColor = Color(0xFF101218)) {
             GalleryImportWorkflowHost(tokenProvider = tokenProvider,
-                onBack = { showImport = false; calendarModel.refresh() },
+                autoOpenPicker = true,
+                onBack = { showImport = false },
                 onScheduled = { showImport = false; calendarModel.refresh(); viewModel.refreshGeneralCalendar() })
-        } else if (showGallery) {
+        }
+    }
+    ScreenScaffold {
+        if (showGallery) {
             CalendarGallery(calendarModel, previewToken, tokenProvider = tokenProvider) { showGallery = false; viewModel.refreshGeneralCalendar() }
         } else if (showGeneralCalendar) {
             MonthlyPlanningGeneralCalendarContent(

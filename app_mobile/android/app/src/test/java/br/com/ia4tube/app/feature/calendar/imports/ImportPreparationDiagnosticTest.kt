@@ -4,6 +4,14 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class ImportPreparationDiagnosticTest {
+    @Test fun `only confirmed schedule refusal diagnostics invite correction of the same file`() {
+        val occupied = importPreparationDiagnostic(null, "import_calendar_schedule_rejected_occupied")
+        assertTrue(occupied.contains("Escolha outro horário")); assertTrue(occupied.contains("arquivo foi preservado"))
+        assertTrue(importPreparationDiagnostic(null, "import_calendar_schedule_rejected_outside_window").contains("futuros, dentro de 180 dias"))
+        assertTrue(importPreparationDiagnostic(null, "import_calendar_schedule_rejected_invalid").contains("horário de Brasília"))
+        val unresolved = importPreparationDiagnostic(null, "calendar_import_submission_time_occupied", 409)
+        assertFalse(unresolved.contains("Escolha outro horário")); assertTrue(unresolved.contains("P00"))
+    }
     @Test fun `http failures have a distinct bounded numeric reference without response content`() {
         val statuses = listOf(401, 403, 404, 503)
         val messages = statuses.map { importPreparationDiagnostic(ImportPreparationDiagnosticStage.PREVIEW, "import_request_rejected", it) }

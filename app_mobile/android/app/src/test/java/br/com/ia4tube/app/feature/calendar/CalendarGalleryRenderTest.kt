@@ -6,11 +6,13 @@ import android.graphics.Canvas
 import android.graphics.Paint
 import android.os.Looper
 import android.view.View
+import android.view.ViewGroup
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.Image
 import br.com.ia4tube.app.ui.theme.IA4TubeTheme
 import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.ui.semantics.*
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import br.com.ia4tube.app.ui.components.ScreenScaffold
@@ -23,6 +25,7 @@ import org.robolectric.Shadows.shadowOf
 import org.robolectric.annotation.Config
 import org.robolectric.annotation.GraphicsMode
 import org.robolectric.annotation.LooperMode
+import org.robolectric.shadows.ShadowDialog
 import java.io.File
 import java.time.Duration
 import java.time.LocalDate
@@ -35,10 +38,11 @@ import java.time.ZoneId
 class CalendarGalleryRenderTest {
     @Test fun galleryRendersActualComposeWithSyntheticArtAndNoNetwork() = render(1f, "calendar-gallery-preview.png")
     @Test fun galleryRemainsReadableWithLargerText() = render(1.5f, "calendar-gallery-large-text-preview.png")
-    private fun render(fontScale: Float, filename: String) {
+    @Test fun musicOpensOverTheGalleryWithoutRemovingIt() = render(1f, "calendar-gallery-music-sheet.png", openMusic = true)
+    private fun render(fontScale: Float, filename: String, openMusic: Boolean = false) {
         val today = LocalDate.now(ZoneId.of("America/Sao_Paulo")).toString()
         val item = ScheduledArt("a".repeat(40), "synthetic:1", today, "18:30", "Uma arte pronta para o próximo dia. Você pode editar esta legenda antes da publicação.",
-            2, "scheduled", "Programada", true, true, null, "empresa_exemplo", System.currentTimeMillis(),
+            2, "scheduled", "Programada", true, true, "/synthetic-not-fetched", "empresa_exemplo", System.currentTimeMillis(),
             destination = "both", formatsReady = true)
         val snapshot = CalendarSnapshot(true, true, 2, true, "empresa_exemplo", true, listOf(item), item)
         val gateway = object : CalendarGateway {
@@ -69,6 +73,30 @@ class CalendarGalleryRenderTest {
         val view = activity.window.decorView
         view.measure(View.MeasureSpec.makeMeasureSpec(822, View.MeasureSpec.EXACTLY), View.MeasureSpec.makeMeasureSpec(1782, View.MeasureSpec.EXACTLY)); view.layout(0,0,822,1782)
         shadowOf(Looper.getMainLooper()).idleFor(Duration.ofSeconds(1))
+        if (openMusic) {
+            fun owners(root: View): List<SemanticsOwner> {
+                val own = if (root.javaClass.name == "androidx.compose.ui.platform.AndroidComposeView")
+                    listOf(root.javaClass.getMethod("getSemanticsOwner").invoke(root) as SemanticsOwner) else emptyList()
+                return own + if (root is ViewGroup) (0 until root.childCount).flatMap { owners(root.getChildAt(it)) } else emptyList()
+            }
+            fun nodes(node: SemanticsNode): List<SemanticsNode> = listOf(node) + node.children.flatMap(::nodes)
+            fun texts(root: View) = owners(root).flatMap { nodes(it.rootSemanticsNode) }
+            fun label(node: SemanticsNode) = node.config.getOrNull(SemanticsProperties.Text)?.joinToString(" ") { it.text }.orEmpty()
+            val action = requireNotNull(texts(view).firstOrNull {
+                it.config.getOrNull(SemanticsProperties.ContentDescription)?.contains("Usar com música") == true &&
+                    it.config.getOrNull(SemanticsActions.OnClick) != null
+            }) { "Music action must remain available in the calendar rail" }
+            assertTrue(action.config[SemanticsActions.OnClick].action!!.invoke())
+            shadowOf(Looper.getMainLooper()).idleFor(Duration.ofSeconds(2))
+            assertTrue("Underlying gallery stays composed", texts(view).any { label(it) == "Ver minhas artes programadas" })
+            val dialog = requireNotNull(ShadowDialog.getShownDialogs().lastOrNull { it.isShowing }) { "Music must open in a dialog over the gallery" }
+            val sheet = dialog.window!!.decorView
+            sheet.measure(View.MeasureSpec.makeMeasureSpec(822, View.MeasureSpec.EXACTLY), View.MeasureSpec.makeMeasureSpec(1782, View.MeasureSpec.EXACTLY))
+            sheet.layout(0, 0, 822, 1782)
+            shadowOf(Looper.getMainLooper()).idleFor(Duration.ofSeconds(1))
+            assertTrue(texts(sheet).any { label(it) == "Escolher música" })
+            dialog.dismiss()
+        }
         val bitmap = Bitmap.createBitmap(822,1782,Bitmap.Config.ARGB_8888); view.draw(Canvas(bitmap))
         val colors = mutableSetOf<Int>(); for (y in 0 until 1782 step 16) for (x in 0 until 822 step 16) colors.add(bitmap.getPixel(x,y))
         assertTrue("Compose render must contain real content, not a blank screenshot", colors.size > 20)

@@ -33,6 +33,7 @@ internal interface GalleryImportWorkflowActions {
     fun pauseTransfer()
     fun finishScheduledDraft()
     fun addToCalendar(caption: String)
+    fun addToCalendar(caption: String, schedule: ImportCalendarSchedule?) = addToCalendar(caption)
 }
 
 internal interface GalleryImportPreparationControl {
@@ -46,6 +47,7 @@ internal interface GalleryImportPreparationControl {
     suspend fun reconcileScheduleOnce(): ImportPreparationRunView
     suspend fun finishScheduledDraft(): ImportPreparationRunView
     suspend fun submitToCalendar(caption: String): ImportPreparationRunView = throw ImportApiFailure("import_calendar_submission_unavailable")
+    suspend fun submitToCalendar(caption: String, schedule: ImportCalendarSchedule?): ImportPreparationRunView = submitToCalendar(caption)
     fun pause()
     fun invalidateSession()
 }
@@ -62,6 +64,7 @@ private class CoordinatedGalleryImportPreparation(private val coordinator: Galle
     override suspend fun reconcileScheduleOnce() = coordinator.reconcileScheduleOnce()
     override suspend fun finishScheduledDraft() = coordinator.finishScheduledDraft()
     override suspend fun submitToCalendar(caption: String) = coordinator.submitToCalendar(caption)
+    override suspend fun submitToCalendar(caption: String, schedule: ImportCalendarSchedule?) = coordinator.submitToCalendar(caption, schedule)
     override fun pause() = coordinator.pause()
     override fun invalidateSession() = coordinator.invalidateSession()
 }
@@ -154,14 +157,15 @@ internal class GalleryImportWorkflowRuntime internal constructor(private val own
     override fun schedule(caption: String, at: Long, automatic: Boolean) = launch { preparation.schedule(caption, at, automatic) }
     override fun reconcileSchedule() = launch { preparation.reconcileScheduleOnce() }
     override fun finishScheduledDraft() = launch { preparation.finishScheduledDraft(); upload.restore() }
-    override fun addToCalendar(caption: String) = launch {
+    override fun addToCalendar(caption: String) = addToCalendar(caption, null)
+    override fun addToCalendar(caption: String, schedule: ImportCalendarSchedule?) = launch {
         val draft = mutable.value.draft ?: return@launch
         if (draft.upload?.serverVerified != true) {
             val transferred = upload.transfer()
             if (transferred.state?.upload?.serverVerified != true) return@launch
         }
         if (!valid()) { invalidate(); return@launch }
-        preparation.submitToCalendar(caption)
+        preparation.submitToCalendar(caption, schedule)
     }
 
     /**

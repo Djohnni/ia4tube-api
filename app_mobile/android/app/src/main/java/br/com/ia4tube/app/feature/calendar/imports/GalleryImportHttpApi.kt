@@ -177,14 +177,17 @@ class GalleryImportHttpApi internal constructor(
         ensurePreparationOwner(owner); uuid(assetId); uuid(uploadId)
         if (currentCapabilities?.calendarSubmissionEnabled != true) throw ImportApiFailure("import_calendar_submission_unavailable")
         ImportCalendarSubmissionProtocol.parse(request("/assets/$assetId/calendar-submissions",
-            ImportCalendarSubmissionProtocol.body(uploadId, intent, kind, configuration)).getJSONObject("submission"), assetId, uploadId, intent)
+            ImportCalendarSubmissionProtocol.body(uploadId, intent, kind, configuration), calendarSubmissionErrors = true)
+            .getJSONObject("submission"), assetId, uploadId, intent)
     }
     suspend fun calendarSubmissionStatus(owner: ImportOwner, assetId: String, uploadId: String,
         intent: ImportCalendarSubmissionIntent): ImportCalendarSubmissionReceipt? = guarded(false) {
         ensurePreparationOwner(owner); uuid(assetId); uuid(uploadId); ImportCalendarSubmissionProtocol.validate(intent)
-        try { ImportCalendarSubmissionProtocol.parse(request("/assets/$assetId/calendar-submissions/by-key/${intent.idempotencyKey}")
+        try { ImportCalendarSubmissionProtocol.parse(request("/assets/$assetId/calendar-submissions/by-key/${intent.idempotencyKey}", calendarSubmissionErrors = true)
             .getJSONObject("submission"), assetId, uploadId, intent) }
-        catch (error: ImportApiFailure) { if (error.status == 404) null else throw error }
+        catch (error: ImportApiFailure) {
+            if (error.status == 404 && error.code == "calendar_import_submission_not_found") null else throw error
+        }
     }
     suspend fun preparationPreview(owner: ImportOwner, record: ImportPreparationRecord): ImportPrivatePreview = guarded(false) {
         ensurePreparationOwner(owner); uuid(record.assetId)
@@ -363,14 +366,30 @@ class GalleryImportHttpApi internal constructor(
     catch (error: ImportApiFailure) { throw error }
     catch (error: CancellationException) { throw error }
     catch (_: Exception) { throw ImportApiFailure("import_response_invalid", resultUncertain = mutation) }
-    private suspend fun request(suffix: String, body: JSONObject? = null): JSONObject {
+    private suspend fun request(suffix: String, body: JSONObject? = null, calendarSubmissionErrors: Boolean = false): JSONObject {
         ensureSession()
         val request = Request.Builder().url(apiOrigin.newBuilder().encodedPath(path + suffix).build())
             .header("Authorization", "Bearer $sessionToken").header("Cache-Control", "no-store")
         if (body != null) request.post(body.toString().toRequestBody("application/json".toMediaType()))
-        return execute(metadataClient, request.build(), body != null, parseJson = true)
+        return execute(metadataClient, request.build(), body != null, parseJson = true, calendarSubmissionErrors = calendarSubmissionErrors)
     }
-    private suspend fun execute(client: OkHttpClient, request: Request, mutation: Boolean, parseJson: Boolean): JSONObject = suspendCancellableCoroutine { continuation ->
+    private fun calendarSubmissionRejection(response: Response, mutation: Boolean): String = runCatching {
+        val bytes = response.peekBody(4097).bytes()
+        try {
+            require(bytes.size <= 4096)
+            val json = JSONObject(String(bytes, Charsets.UTF_8)); require(json.opt("ok") == false)
+            val code = json.optString("code")
+            require(when (code) {
+                "calendar_import_submission_schedule_invalid", "calendar_import_submission_time_outside_window" -> mutation && response.code == 400
+                "calendar_import_submission_time_occupied" -> mutation && response.code == 409
+                "calendar_import_submission_not_found" -> !mutation && response.code == 404
+                else -> false
+            })
+            code
+        } finally { bytes.fill(0) }
+    }.getOrDefault("import_request_rejected")
+    private suspend fun execute(client: OkHttpClient, request: Request, mutation: Boolean, parseJson: Boolean,
+        calendarSubmissionErrors: Boolean = false): JSONObject = suspendCancellableCoroutine { continuation ->
         val call = client.newCall(request)
         continuation.invokeOnCancellation { call.cancel() }
         call.enqueue(object : Callback {
@@ -381,7 +400,9 @@ class GalleryImportHttpApi internal constructor(
                 response.use {
                     try {
                         ensureSession()
-                        if (!response.isSuccessful) throw ImportApiFailure("import_request_rejected", response.code, mutation && response.code >= 500)
+                        if (!response.isSuccessful) throw ImportApiFailure(
+                            if (calendarSubmissionErrors && response.code in setOf(400, 404, 409)) calendarSubmissionRejection(response, mutation)
+                            else "import_request_rejected", response.code, mutation && response.code >= 500)
                         val result = if (!parseJson) JSONObject() else {
                             val stream = response.body?.byteStream() ?: throw ImportApiFailure("import_response_invalid", resultUncertain = mutation)
                             val output = java.io.ByteArrayOutputStream(); val buffer = ByteArray(8192)

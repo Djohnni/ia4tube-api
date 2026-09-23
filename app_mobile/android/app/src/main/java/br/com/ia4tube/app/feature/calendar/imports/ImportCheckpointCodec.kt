@@ -57,7 +57,10 @@ object ImportCheckpointCodec {
             .put("revision", source.revision).put("idempotencyKey", source.idempotencyKey)) } ?: json.put("generatedSource", JSONObject.NULL)
         value.calendarSubmission?.let { intent -> json.put("calendarSubmission", JSONObject()
             .put("idempotencyKey", intent.idempotencyKey).put("sourceRevision", intent.sourceRevision)
-            .put("expectedMediaRevision", intent.expectedMediaRevision).put("caption", intent.caption))
+            .put("expectedMediaRevision", intent.expectedMediaRevision).put("caption", intent.caption).also { value ->
+                intent.schedule?.let { schedule -> value.put("schedule", JSONObject().put("date", schedule.date)
+                    .put("time", schedule.time).put("timeZone", schedule.timeZone)) }
+            })
         } ?: json.put("calendarSubmission", JSONObject.NULL)
         state.upload?.let { progress ->
             json.put("upload", JSONObject().put("uploadId", progress.ticket.uploadId).put("assetId", progress.ticket.assetId)
@@ -135,9 +138,12 @@ object ImportCheckpointCodec {
                 requireKeys(value, setOf("calendarItemId", "revision", "idempotencyKey"))
                 ImportGeneratedSourceIntent(value.getString("calendarItemId"), value.getLong("revision"), value.getString("idempotencyKey"))
             }, json.strictOptionalObject("calendarSubmission")?.let { value ->
-                requireKeys(value, setOf("idempotencyKey", "sourceRevision", "expectedMediaRevision", "caption"))
+                requireKeys(value, setOf("idempotencyKey", "sourceRevision", "expectedMediaRevision", "caption", "schedule"))
                 ImportCalendarSubmissionIntent(value.getString("idempotencyKey"), value.getLong("sourceRevision"),
-                    value.getLong("expectedMediaRevision"), value.getString("caption"))
+                    value.getLong("expectedMediaRevision"), value.getString("caption"), value.strictOptionalObject("schedule")?.let { schedule ->
+                        requireKeys(schedule, setOf("date", "time", "timeZone"))
+                        ImportCalendarSchedule(schedule.getString("date"), schedule.getString("time"), schedule.getString("timeZone"))
+                    })
             }).also(::validate)
     }
 
