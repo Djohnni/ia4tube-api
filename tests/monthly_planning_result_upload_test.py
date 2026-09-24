@@ -18,12 +18,41 @@ class MonthlyPlanningResultUploadTest(unittest.TestCase):
             video.write_bytes(b"test media bytes")
             with patch.object(sys, "argv", ["pipeline", str(order)]), patch.object(
                 pipeline, "upload_resultado_planejamento"
-            ) as upload, patch.object(pipeline, "render_via_chatgpt_api") as render:
+            ) as upload, patch.object(pipeline, "render_via_chatgpt_api") as render, patch.object(
+                pipeline, "gerar_descricao_planejamento", return_value="Legenda do planejamento"
+            ) as caption:
+                upload.side_effect = lambda *args: self.assertEqual(
+                    "Legenda do planejamento",
+                    json.loads((order / "pedido.json").read_text(encoding="utf-8"))["descricao_instagram"],
+                )
                 pipeline.main()
             upload.assert_called_once_with(order, "order-1", video, order / "preview_ia4tube.jpg")
             render.assert_not_called()
+            caption.assert_called_once()
+            self.assertEqual(
+                "Legenda do planejamento",
+                json.loads((order / "pedido.json").read_text(encoding="utf-8"))["descricao_instagram"],
+            )
             self.assertEqual("pronto", (order / "status.txt").read_text(encoding="utf-8"))
             self.assertEqual("OK", (order / "processado_handoff.txt").read_text(encoding="utf-8"))
+
+    def test_ready_video_preserves_existing_caption_without_regenerating_it(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            order = Path(tmp)
+            (order / "pedido.json").write_text(
+                json.dumps({"id": "order-1", "descricao_instagram": "Legenda aprovada\n#ia4tube"}), encoding="utf-8"
+            )
+            (order / "resultado_final.mp4").write_bytes(b"test media bytes")
+            with patch.object(sys, "argv", ["pipeline", str(order)]), patch.object(
+                pipeline, "upload_resultado_planejamento"
+            ) as upload, patch.object(pipeline, "gerar_descricao_planejamento") as caption:
+                pipeline.main()
+            caption.assert_not_called()
+            upload.assert_called_once()
+            self.assertEqual(
+                "Legenda aprovada\n#ia4tube",
+                json.loads((order / "pedido.json").read_text(encoding="utf-8"))["descricao_instagram"],
+            )
 
     def test_unsupported_result_is_not_uploaded(self):
         with tempfile.TemporaryDirectory() as tmp:

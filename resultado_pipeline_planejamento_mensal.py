@@ -823,6 +823,13 @@ def main():
     # The producer of the MP4 is responsible for creating it before this step.
     out_video_pedido = pedido_dir / "resultado_final.mp4"
     if out_video_pedido.is_file():
+        descricao = pedido.get("descricao_instagram")
+        if not isinstance(descricao, str) or not descricao.strip():
+            descricao = safe_dict(pedido.get("legacy")).get("descricao_instagram")
+        if not isinstance(descricao, str) or not descricao.strip():
+            descricao = gerar_descricao_planejamento(pedido)
+        if descricao != pedido.get("descricao_instagram"):
+            save_description(pedido_dir, pedido, descricao)
         preview = pedido_dir / "preview_ia4tube.jpg"
         upload_resultado_planejamento(pedido_dir, pedido_id, out_video_pedido, preview)
         (pedido_dir / "status.txt").write_text("pronto", encoding="utf-8")
