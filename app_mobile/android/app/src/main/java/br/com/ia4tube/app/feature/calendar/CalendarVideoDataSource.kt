@@ -47,7 +47,7 @@ internal class CalendarVideoDataSource(private val video: GeneratedCalendarVideo
         val result = client.newCall(builder.build()).execute()
         try {
             if (result.code !in setOf(200, 206) || range && result.code != 206 || !range && result.code != 200)
-                throw IOException("Resposta de vídeo inválida")
+                throw IOException("Resposta de vídeo inválida (HTTP ${result.code})")
             if (result.header("Content-Type")?.substringBefore(';')?.trim()?.lowercase() != "video/mp4")
                 throw IOException("Tipo de vídeo inválido")
             val expectedLength = end - start + 1

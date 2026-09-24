@@ -56,4 +56,21 @@ class CalendarVideoDataSourceTest {
             } finally { source.close() }
         } }
     }
+
+    @Test fun rejectedVideoReportsOnlyHttpStatusForDiagnosis() {
+        MockWebServer().use { server ->
+            server.start()
+            server.enqueue(MockResponse().setResponseCode(429).setBody("internal response"))
+            val origin = server.url("/").toString().trimEnd('/')
+            val source = CalendarVideoDataSource(video, "owner-token", origin)
+            try {
+                val error = assertThrows(IOException::class.java) {
+                    source.open(DataSpec(Uri.parse("$origin$path")))
+                }
+                assertEquals("Resposta de vídeo inválida (HTTP 429)", error.message)
+                assertFalse(error.message!!.contains("owner-token"))
+                assertFalse(error.message!!.contains(path))
+            } finally { source.close() }
+        }
+    }
 }

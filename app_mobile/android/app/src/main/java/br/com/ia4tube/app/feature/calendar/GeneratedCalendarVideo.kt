@@ -81,7 +81,7 @@ private fun GeneratedVideoPlayer(video: GeneratedCalendarVideo, token: String, r
     val player = remember(video.sha256, token) {
         ExoPlayer.Builder(context).setMediaSourceFactory(DefaultMediaSourceFactory(CalendarVideoDataSource.Factory(video, token))).build().apply {
             repeatMode = Player.REPEAT_MODE_OFF
-            // Only the visible item loads its first frame. Audio and playback wait for the tap.
+            // Visibility alone never requests the private MP4; loading starts on the tap.
             playWhenReady = false
             setMediaItem(MediaItem.fromUri(Uri.parse(CALENDAR_ORIGIN + video.url)))
         }
@@ -93,7 +93,6 @@ private fun GeneratedVideoPlayer(video: GeneratedCalendarVideo, token: String, r
             override fun onPlaybackStateChanged(state: Int) { buffering = state == Player.STATE_BUFFERING }
         }
         player.addListener(listener)
-        player.prepare()
         onDispose {
             player.playWhenReady = false
             player.stop()
@@ -122,7 +121,9 @@ private fun GeneratedVideoPlayer(video: GeneratedCalendarVideo, token: String, r
                     }
                 }
                 Button(onClick = {
-                    if (error) { error = false; buffering = true; player.prepare() }
+                    error = false
+                    buffering = true
+                    player.prepare()
                     onRequest()
                 }) { Text("Reproduzir vídeo") }
             }
