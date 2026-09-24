@@ -9,6 +9,9 @@ function createCalendarRouter({ authenticate, getService, logger }) {
   const router = express.Router();
   const mediaLimiter = createSingleProcessTransferLimiter({ maxConcurrent: 2, maxPerCompany: 2 });
   async function sendVideo(req, res, opened) {
+    // The client can disconnect while service.video() is still resolving. In
+    // that case there is no response to stream, but the limiter must return.
+    if (req.aborted || res.destroyed || res.writableEnded) return;
     if (Object.keys(req.query).length || req.headers["transfer-encoding"] || req.headers["content-encoding"] ||
         req.headers["content-length"] && req.headers["content-length"] !== "0") fail("calendar_media_invalid", 404);
     const range = parsePreviewRange(req.headers.range, opened.size);
@@ -19,13 +22,23 @@ function createCalendarRouter({ authenticate, getService, logger }) {
     if (req.method === "HEAD") { res.end(); return; }
     await new Promise((resolve, reject) => {
       const stream = fs.createReadStream(opened.file, { start: range.start, end: range.end, highWaterMark: 65536 });
-      const timer = setTimeout(() => { stream.destroy(); res.destroy(); }, 180000);
-      const cleanup = () => { clearTimeout(timer); res.off("close", stopped); res.off("finish", finished); stream.off("error", failed); };
-      const stopped = () => { stream.destroy(); cleanup(); resolve(); };
-      const finished = () => { cleanup(); resolve(); };
-      const failed = error => { cleanup(); reject(error); };
-      res.once("close", stopped); res.once("finish", finished); stream.once("error", failed);
-      stream.pipe(res);
+      let settled = false;
+      const settle = error => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        req.off("aborted", stopped); res.off("close", stopped); res.off("finish", finished);
+        stream.off("error", failed); stream.destroy();
+        if (error) reject(error); else resolve();
+      };
+      const stopped = () => settle();
+      const finished = () => settle();
+      const failed = error => settle(error);
+      const timer = setTimeout(() => { settle(); res.destroy(); }, 180000);
+      req.once("aborted", stopped); res.once("close", stopped); res.once("finish", finished);
+      stream.once("error", failed);
+      if (req.aborted || res.destroyed) { settle(); return; }
+      try { stream.pipe(res); } catch (error) { settle(error); }
     });
   }
   const call = action => async (req, res) => {

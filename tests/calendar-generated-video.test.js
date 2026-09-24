@@ -39,6 +39,46 @@ test("authenticated generated-video route returns bounded byte ranges and HEAD m
   assert.equal(await head.text(), "");
 });
 
+test("closed video clients release both transfer slots after their metadata lookups finish", async t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ia4tube-video-abort-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const file = path.join(root, "video.mp4"), bytes = Buffer.from("0123456789");
+  fs.writeFileSync(file, bytes);
+  const companyId = crypto.randomUUID(), opened = { file, size: bytes.length, companyId };
+  const lookups = [];
+  let lookupStartedResolve, clientsClosedResolve, closedCount = 0;
+  const lookupStarted = new Promise(resolve => { lookupStartedResolve = resolve; });
+  const clientsClosed = new Promise(resolve => { clientsClosedResolve = resolve; });
+  const app = require("express")();
+  app.use("/v1/social/calendar", createCalendarRouter({ authenticate: (req, res, next) => {
+    req.user = { companyId };
+    res.once("close", () => {
+      if (!res.writableFinished && ++closedCount === 2) clientsClosedResolve();
+    });
+    next();
+  }, getService: () => ({ video() {
+    if (lookups.length < 2) return new Promise(resolve => {
+      lookups.push(resolve);
+      if (lookups.length === 2) lookupStartedResolve();
+    });
+    return opened;
+  } }) }));
+  const server = await new Promise(resolve => { const value = app.listen(0, "127.0.0.1", () => resolve(value)); });
+  t.after(() => new Promise(resolve => server.close(resolve)));
+  const url = `http://127.0.0.1:${server.address().port}/v1/social/calendar/items/${"a".repeat(40)}/video`;
+  const controllers = [new AbortController(), new AbortController()];
+  const abandoned = controllers.map(({ signal }) => fetch(url, { signal }));
+  await lookupStarted;
+  controllers.forEach(controller => controller.abort());
+  await Promise.allSettled(abandoned);
+  await clientsClosed;
+  lookups.forEach(resolve => resolve(opened));
+  await new Promise(resolve => setImmediate(resolve));
+  const next = await fetch(url);
+  assert.equal(next.status, 200, "abandoned requests must not occupy the two-transfer limit");
+  assert.equal(await next.text(), bytes.toString());
+});
+
 test("a real ready MP4 enters the existing generated calendar item as Reel and Story", {
   skip: process.platform !== "win32" || !fs.existsSync(ffmpeg)
 }, async t => {
