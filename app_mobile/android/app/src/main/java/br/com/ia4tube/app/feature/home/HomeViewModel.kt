@@ -48,8 +48,15 @@ data class HomeUiState(
     val summaryError: UiText? = null,
     val error: UiText? = null
 ) {
+    val hasActivePlan: Boolean
+        get() = planoStatus.trim().equals("active", ignoreCase = true) ||
+            planoStatus.trim().equals("ativo", ignoreCase = true)
+
     val shouldFocusFirstFreeArt: Boolean
-        get() = firstFreeArtActive && firstFreeArtAvailable && !firstFreeArtUsed
+        get() = firstFreeArtActive && firstFreeArtAvailable && !firstFreeArtUsed &&
+            !hasActivePlan && artesMensaisRestantes <= 0 && artesAvulsasRestantes <= 0
+
+    fun firstFreeArtMode(isLoggedIn: Boolean): Boolean = !isLoggedIn || shouldFocusFirstFreeArt
 }
 
 class HomeViewModel(

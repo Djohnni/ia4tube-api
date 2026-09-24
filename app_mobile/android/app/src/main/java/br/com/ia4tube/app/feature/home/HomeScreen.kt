@@ -104,7 +104,7 @@ fun HomeScreen(
     val homePalette = premiumHomePalette(premiumTheme)
     val homeBackground = homePalette.screenBackground
     val context = LocalContext.current.applicationContext
-    val firstFreeArtMode = !isLoggedIn || state.shouldFocusFirstFreeArt
+    val firstFreeArtMode = state.firstFreeArtMode(isLoggedIn)
     val lifecycleOwner = LocalLifecycleOwner.current
     val cameraImageStore = remember { CameraImageStore(context) }
     var showPhotoSourceDialog by remember { mutableStateOf(false) }
