@@ -227,7 +227,10 @@ def arte_pendente(pasta):
         return False
     if not is_monthly_planning_order(pasta):
         return False
-    if (pasta / "resultado_final.png").exists():
+    if (pasta / "resultado_final.mp4").exists():
+        if (pasta / "processado_handoff.txt").exists():
+            return False
+    elif (pasta / "resultado_final.png").exists():
         return False
     if (pasta / "processando.lock").exists():
         return False

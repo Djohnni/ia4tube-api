@@ -747,6 +747,14 @@ def load_bot_token():
 
 
 def upload_resultado_planejamento(pedido_dir, pedido_id, imagem_path, preview_path=None):
+    resultado_path = Path(imagem_path)
+    resultado_mime = {
+        ".png": "image/png",
+        ".mp4": "video/mp4",
+    }.get(resultado_path.suffix.lower())
+    if not resultado_mime:
+        raise ValueError("Resultado do Planejamento Mensal deve ser PNG ou MP4.")
+
     token = load_bot_token()
     if not token:
         raise RuntimeError("IA4TUBE_BOT_TOKEN/bot_token.txt nao configurado para upload da arte do Planejamento Mensal.")
@@ -765,8 +773,8 @@ def upload_resultado_planejamento(pedido_dir, pedido_id, imagem_path, preview_pa
             api_info = ""
 
     files_upload = {}
-    with open(imagem_path, "rb") as f_resultado:
-        files_upload["resultado"] = ("resultado_final.png", f_resultado, "image/png")
+    with open(resultado_path, "rb") as f_resultado:
+        files_upload["resultado"] = (f"resultado_final{resultado_path.suffix.lower()}", f_resultado, resultado_mime)
         f_preview = None
         try:
             if preview_path and preview_path.exists():
@@ -810,6 +818,16 @@ def main():
 
     log("Pipeline Planejamento Mensal iniciado")
     log(f"Pedido: {pedido_id}")
+
+    # A ready video follows the same order/upload handoff as the generated PNG.
+    # The producer of the MP4 is responsible for creating it before this step.
+    out_video_pedido = pedido_dir / "resultado_final.mp4"
+    if out_video_pedido.is_file():
+        preview = pedido_dir / "preview_ia4tube.jpg"
+        upload_resultado_planejamento(pedido_dir, pedido_id, out_video_pedido, preview)
+        (pedido_dir / "status.txt").write_text("pronto", encoding="utf-8")
+        (pedido_dir / "processado_handoff.txt").write_text("OK", encoding="utf-8")
+        return
 
     referencias = collect_monthly_reference_images(pedido_dir, pedido)
     log(f"Referencias do pedido filho: {len(referencias)}")
