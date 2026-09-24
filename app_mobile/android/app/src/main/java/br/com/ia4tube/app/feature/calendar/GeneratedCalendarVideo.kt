@@ -17,7 +17,6 @@ import androidx.media3.common.MediaItem
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
 import androidx.media3.common.util.UnstableApi
-import androidx.media3.datasource.DefaultHttpDataSource
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.ui.AspectRatioFrameLayout
@@ -77,12 +76,7 @@ private fun GeneratedVideoPlayer(video: GeneratedCalendarVideo, token: String, m
     var buffering by remember(video.sha256, token) { mutableStateOf(true) }
     var error by remember(video.sha256, token) { mutableStateOf(false) }
     val player = remember(video.sha256, token) {
-        val source = DefaultHttpDataSource.Factory()
-            .setDefaultRequestProperties(mapOf("Authorization" to "Bearer $token", "Cache-Control" to "no-store"))
-            .setAllowCrossProtocolRedirects(false)
-            .setConnectTimeoutMs(10_000)
-            .setReadTimeoutMs(60_000)
-        ExoPlayer.Builder(context).setMediaSourceFactory(DefaultMediaSourceFactory(source)).build().apply {
+        ExoPlayer.Builder(context).setMediaSourceFactory(DefaultMediaSourceFactory(CalendarVideoDataSource.Factory(video, token))).build().apply {
             repeatMode = Player.REPEAT_MODE_OFF
             playWhenReady = false
             setMediaItem(MediaItem.fromUri(Uri.parse(CALENDAR_ORIGIN + video.url)))
