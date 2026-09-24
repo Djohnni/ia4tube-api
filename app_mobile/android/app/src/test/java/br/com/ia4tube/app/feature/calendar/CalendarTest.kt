@@ -136,6 +136,37 @@ class CalendarTest {
         assertThrows(IllegalArgumentException::class.java) { parseCalendar(json("https://example.com/private")) }
         assertThrows(IllegalArgumentException::class.java) { parseCalendar(json("/v1/social/calendar/items/${"b".repeat(40)}/image")) }
     }
+    @Test fun generatedVideoStaysOnTheSameCalendarItemAndMapsFeedToOneReel() {
+        val root = json()
+        val item = root.getJSONArray("items").getJSONObject(0)
+        item.put("sourceKind", "planning").put("destination", "both")
+            .put("selectedTargets", JSONArray().put("reel").put("story"))
+            .put("shareToFeed", true)
+            .put("generatedVideo", JSONObject().put("url", "/v1/social/calendar/items/${"a".repeat(40)}/video")
+                .put("mimeType", "video/mp4").put("sizeBytes", 1_000_000)
+                .put("sha256", "b".repeat(64)).put("hasAudio", true))
+        val parsed = parseCalendar(root).items.single()
+        assertEquals(item.getString("id"), parsed.id)
+        assertEquals("plan:1", parsed.key)
+        assertNull(parsed.imageUrl)
+        assertEquals(listOf("reel", "story"), parsed.selectedTargets)
+        assertTrue(parsed.shareToFeed)
+        assertTrue(parsed.generatedVideo!!.hasAudio)
+    }
+    @Test fun generatedVideoRejectsForeignMediaAndInvalidDestination() {
+        val root = json()
+        val item = root.getJSONArray("items").getJSONObject(0)
+        val video = JSONObject().put("url", "/v1/social/calendar/items/${"a".repeat(40)}/video")
+            .put("mimeType", "video/mp4").put("sizeBytes", 1_000_000)
+            .put("sha256", "b".repeat(64)).put("hasAudio", true)
+        item.put("generatedVideo", video).put("selectedTargets", JSONArray().put("reel")).put("shareToFeed", true)
+        assertEquals("reel", parseCalendar(root).items.single().selectedTargets.single())
+        video.put("url", "https://external.example/video.mp4")
+        assertThrows(IllegalArgumentException::class.java) { parseCalendar(root) }
+        video.put("url", "/v1/social/calendar/items/${"a".repeat(40)}/video")
+        item.put("selectedTargets", JSONArray().put("feed"))
+        assertThrows(IllegalArgumentException::class.java) { parseCalendar(root) }
+    }
     @Test fun parserRejectsRepeatedIdentityAndInvalidTime() {
         val root = json(); root.getJSONArray("items").put(root.getJSONArray("items").getJSONObject(0))
         assertThrows(IllegalArgumentException::class.java) { parseCalendar(root) }

@@ -1,5 +1,7 @@
 package br.com.ia4tube.app.data.models
 
+import br.com.ia4tube.app.feature.calendar.GeneratedCalendarVideo
+
 data class MonthlyPlanningRequest(
     val quantidadeReservada: Int,
     val nomeEmpresa: String,
@@ -100,7 +102,8 @@ data class MonthlyPlanningPostDto(
     val campaignId: String = "",
     val assignmentId: String = "",
     val calendarRevision: Long? = null,
-    val calendarStatusLabel: String = ""
+    val calendarStatusLabel: String = "",
+    val generatedVideo: GeneratedCalendarVideo? = null
 )
 
 data class MonthlyPlanningRescheduleRequest(

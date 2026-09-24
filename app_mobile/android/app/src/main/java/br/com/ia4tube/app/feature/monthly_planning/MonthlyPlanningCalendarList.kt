@@ -46,6 +46,8 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import br.com.ia4tube.app.core.art_cache.PrivateArtImage
+import br.com.ia4tube.app.feature.calendar.GeneratedCalendarVideo
+import br.com.ia4tube.app.feature.calendar.GeneratedCalendarVideoDialog
 import br.com.ia4tube.app.data.api.PreviewUrlBuilder
 import java.time.LocalDate
 import java.time.LocalTime
@@ -81,7 +83,8 @@ data class MonthlyPlanningCalendarListItem(
     val calendarStatusLabel: String = "",
     val calendarItemId: String? = null,
     val calendarEditable: Boolean = true,
-    val calendarPreparationPending: Boolean = false
+    val calendarPreparationPending: Boolean = false,
+    val generatedVideo: GeneratedCalendarVideo? = null
 )
 
 @Composable
@@ -100,6 +103,7 @@ internal fun MonthlyPlanningCalendarList(
     showNextThirtyDays: Boolean = false
 ) {
     var pendingRescheduleItem by remember { mutableStateOf<MonthlyPlanningCalendarListItem?>(null) }
+    var videoItem by remember { mutableStateOf<MonthlyPlanningCalendarListItem?>(null) }
 
     Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
         Text(
@@ -123,6 +127,7 @@ internal fun MonthlyPlanningCalendarList(
                     day = day,
                     previewToken = previewToken,
                     onOpenOrder = onOpenOrder,
+                    onOpenVideo = { videoItem = it },
                     onRemove = onRemove,
                     reschedulingItemKeys = reschedulingItemKeys,
                     sharingItemKeys = sharingItemKeys,
@@ -144,6 +149,7 @@ internal fun MonthlyPlanningCalendarList(
                     item = item,
                     previewToken = previewToken,
                     onOpenOrder = onOpenOrder,
+                    onOpenVideo = { videoItem = it },
                     onRemove = onRemove,
                     isSharing = sharingItemKeys.contains(item.key),
                     onShare = onShare
@@ -162,6 +168,9 @@ internal fun MonthlyPlanningCalendarList(
             }
         )
     }
+    videoItem?.generatedVideo?.let { video ->
+        GeneratedCalendarVideoDialog(video, previewToken) { videoItem = null }
+    }
 }
 
 private data class MonthlyPlanningCalendarDay(
@@ -175,6 +184,7 @@ private fun MonthlyPlanningCalendarDayCard(
     day: MonthlyPlanningCalendarDay,
     previewToken: String,
     onOpenOrder: (String) -> Unit,
+    onOpenVideo: (MonthlyPlanningCalendarListItem) -> Unit,
     onRemove: ((MonthlyPlanningCalendarListItem) -> Unit)?,
     reschedulingItemKeys: Set<String>,
     sharingItemKeys: Set<String>,
@@ -255,10 +265,11 @@ private fun MonthlyPlanningCalendarDayCard(
                                 .background(MaterialTheme.colorScheme.outline.copy(alpha = 0.16f))
                         )
                     }
-                    MonthlyPlanningCalendarDayPost(
+                MonthlyPlanningCalendarDayPost(
                         item = item,
                         previewToken = previewToken,
-                        onOpenOrder = onOpenOrder,
+                    onOpenOrder = onOpenOrder,
+                    onOpenVideo = onOpenVideo,
                         onRemove = onRemove,
                         isRescheduling = reschedulingItemKeys.contains(item.key),
                         isSharing = sharingItemKeys.contains(item.key),
@@ -277,15 +288,18 @@ private fun MonthlyPlanningCalendarDayPost(
     item: MonthlyPlanningCalendarListItem,
     previewToken: String,
     onOpenOrder: (String) -> Unit,
+    onOpenVideo: (MonthlyPlanningCalendarListItem) -> Unit,
     onRemove: ((MonthlyPlanningCalendarListItem) -> Unit)?,
     isRescheduling: Boolean,
     isSharing: Boolean,
     onShare: ((MonthlyPlanningCalendarListItem) -> Unit)?,
     onReschedule: ((MonthlyPlanningCalendarListItem) -> Unit)?
 ) {
-    val canOpenOrder = item.imageReady && item.pedidoId.isNotBlank()
+    val canOpenOrder = item.imageReady && item.pedidoId.isNotBlank() && item.generatedVideo == null
     val effectiveOnReschedule = if (item.isWeeklyFreeArt() || !item.calendarEditable || item.calendarPreparationPending) null else onReschedule
-    val contentModifier = if (canOpenOrder) {
+    val contentModifier = if (item.generatedVideo != null) {
+        Modifier.clickable { onOpenVideo(item) }
+    } else if (canOpenOrder) {
         Modifier.clickable { onOpenOrder(item.pedidoId) }
     } else {
         Modifier
@@ -389,12 +403,15 @@ private fun MonthlyPlanningCalendarListCard(
     item: MonthlyPlanningCalendarListItem,
     previewToken: String,
     onOpenOrder: (String) -> Unit,
+    onOpenVideo: (MonthlyPlanningCalendarListItem) -> Unit,
     onRemove: ((MonthlyPlanningCalendarListItem) -> Unit)?,
     isSharing: Boolean,
     onShare: ((MonthlyPlanningCalendarListItem) -> Unit)?
 ) {
-    val canOpenOrder = item.imageReady && item.pedidoId.isNotBlank()
-    val contentModifier = if (canOpenOrder) {
+    val canOpenOrder = item.imageReady && item.pedidoId.isNotBlank() && item.generatedVideo == null
+    val contentModifier = if (item.generatedVideo != null) {
+        Modifier.clickable { onOpenVideo(item) }
+    } else if (canOpenOrder) {
         Modifier.clickable { onOpenOrder(item.pedidoId) }
     } else {
         Modifier
@@ -507,7 +524,8 @@ internal fun MonthlyPlanningPost.toCalendarListItem(planningId: String = ""): Mo
         campaignId = campaignId,
         assignmentId = assignmentId,
         calendarRevision = calendarRevision,
-        calendarStatusLabel = calendarStatusLabel
+        calendarStatusLabel = calendarStatusLabel,
+        generatedVideo = generatedVideo
     )
 }
 
@@ -537,6 +555,10 @@ private fun MonthlyPlanningCalendarThumbnail(item: MonthlyPlanningCalendarListIt
             .border(1.dp, borderColor, shape),
         contentAlignment = Alignment.Center
     ) {
+        if (item.generatedVideo != null) {
+            Text("Vídeo", style = MaterialTheme.typography.labelSmall)
+            return@Box
+        }
         if (resolvedUrl.isBlank()) {
             CalendarImagePlaceholder()
             return@Box

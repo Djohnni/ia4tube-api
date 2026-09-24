@@ -744,7 +744,7 @@ private fun DeliverySection(
 }
 
 private fun OrderInfo.canDownloadResult(): Boolean {
-    return !pagamentoPendente && podeBaixar
+    return !pagamentoPendente && podeBaixar && resultadoMime != "video/mp4"
 }
 
 @Composable
@@ -1155,6 +1155,14 @@ private fun OrderPreviewImage(
     previewRefresh: Long,
     modifier: Modifier = Modifier
 ) {
+    if (info.resultadoMime == "video/mp4") {
+        Card(modifier = Modifier.fillMaxWidth()) {
+            Text("Vídeo pronto. Abra Ver minhas artes programadas no calendário para reproduzir e conferir a publicação.",
+                modifier = Modifier.padding(16.dp))
+        }
+        return
+    }
+
     val isCompanyArt = info.isCompanyArt()
     val previewUrl = PreviewUrlBuilder.build(info.id, info.previewUrl)
     PrivateArtImage(

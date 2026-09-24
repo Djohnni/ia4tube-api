@@ -133,12 +133,14 @@ fun ScheduledNextContent(model: CalendarViewModel, token: String, tokenProvider:
     val state by model.uiState.collectAsState()
     val next = state.data.next ?: return
     Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-        Text("Próxima arte do calendário", fontWeight = FontWeight.Bold)
+        Text(if (next.generatedVideo != null) "Próximo vídeo do calendário" else "Próxima arte do calendário", fontWeight = FontWeight.Bold)
         if (next.media != null && state.data.identity != null) {
             val target = next.media.thumbnail?.target ?: next.media.variants.first().target
             ScheduledPrivateMedia(state.data.identity!!, tokenProvider, next.media, target, active = true,
                 modifier = Modifier.fillMaxWidth().aspectRatio(1f).heightIn(max = 380.dp))
-        } else ScheduledArtImage(next, token, Modifier.fillMaxWidth().aspectRatio(1f).heightIn(max = 380.dp), state.imageRefresh)
+        } else if (next.generatedVideo != null) ScheduledGeneratedVideo(next.generatedVideo, tokenProvider, active = true,
+            modifier = Modifier.fillMaxWidth().aspectRatio(9f / 16f).heightIn(max = 380.dp))
+        else ScheduledArtImage(next, token, Modifier.fillMaxWidth().aspectRatio(1f).heightIn(max = 380.dp), state.imageRefresh)
         Text(next.caption)
         Text("${next.date} às ${next.time} · Brasília")
         Text(if (state.fresh) next.statusLabel else "Estado não confirmado — atualize")
@@ -188,7 +190,8 @@ fun CalendarGallery(model: CalendarViewModel, token: String, backLabel: String =
             val pager = rememberPagerState(initialPage = items.indexOfFirst { it.date >= today.toString() }.coerceAtLeast(0), pageCount = { items.size })
             VerticalPager(state = pager, key = { items[it].id }, modifier = Modifier.weight(1f)) { index ->
                 val art = items[index]
-                val targets = art.media?.variants?.map { it.target } ?: if (art.destination == "both") listOf("feed", "story") else listOf(art.destination)
+                val targets = art.media?.variants?.map { it.target } ?: if (art.generatedVideo != null) art.selectedTargets
+                    else if (art.destination == "both") listOf("feed", "story") else listOf(art.destination)
                 var preview by remember(art.id, art.revision, art.destination) { mutableStateOf(targets.first()) }
                 Column(Modifier.fillMaxSize().padding(vertical = 12.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
                     Text("${art.username?.let { "@$it · " } ?: ""}${LocalDate.parse(art.date).format(DateTimeFormatter.ofPattern("dd/MM/yyyy"))} · ${art.time}", color = Color.White)
@@ -204,13 +207,17 @@ fun CalendarGallery(model: CalendarViewModel, token: String, backLabel: String =
                             ScheduledPrivateMedia(state.data.identity!!, tokenProvider, art.media, preview,
                                 active = pager.settledPage == index && !pager.isScrollInProgress && editing == null && showStatus == null && showMediaInfo == null && !showImport,
                                 modifier = Modifier.weight(1f).fillMaxHeight())
+                        } else if (art.generatedVideo != null) {
+                            ScheduledGeneratedVideo(art.generatedVideo, tokenProvider,
+                                active = pager.settledPage == index && !pager.isScrollInProgress && editing == null && showStatus == null && showMediaInfo == null && !showImport,
+                                modifier = Modifier.weight(1f).fillMaxHeight())
                         } else ScheduledArtImage(art.copy(imageUrl = art.previews[preview] ?: art.imageUrl, destination = preview), token, Modifier.weight(1f).fillMaxHeight(), state.imageRefresh)
                         Column(Modifier.width(actionWidth).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(4.dp), horizontalAlignment = Alignment.CenterHorizontally) {
                             GalleryAction(CalendarFormatIcon, "Formato", art.media != null || art.sourceKind != "upload" &&
                                 art.editable && art.formatsReady && state.fresh && !state.busy) {
                                 if (art.media != null) showMediaInfo = art else editing = art to "destination"
                             }
-                            if (art.media != null) GalleryAction(Icons.Default.Info, "Música/Áudio", true) { showMediaInfo = art }
+                            if (art.media != null || art.generatedVideo != null) GalleryAction(Icons.Default.Info, "Música/Áudio", true) { showMediaInfo = art }
                             if (art.sourceKind != "upload" && art.imageUrl != null) {
                                 GalleryAction(Icons.Default.Add, "Usar com música", state.fresh && !state.busy) { generatedSource = art; showImport = true }
                             }
@@ -257,10 +264,14 @@ fun CalendarGallery(model: CalendarViewModel, token: String, backLabel: String =
                 val audio = when (part.audioMode.wire) { "music" -> "trilha no vídeo"; "original" -> "áudio original"; "muted" -> "vídeo sem áudio"; else -> "foto sem música" }
                 Text("${destinationLabel(part.target)} · ${part.width} × ${part.height} · $audio")
             }
+            art.generatedVideo?.let { video ->
+                Text(if (video.hasAudio) "Vídeo pronto com áudio incorporado." else "Vídeo pronto sem áudio.")
+                Text("O volume do player muda somente o que você ouve aqui.")
+            }
             if (art.media?.variants?.any { it.target == "reel" } == true) Text(if (art.shareToFeed)
                 "O Reel também aparece no Feed; não é um terceiro envio."
                 else "O Reel fica somente na área de Reels; nenhum envio adicional ao Feed foi programado.")
-            Text("Essas opções correspondem à prévia confirmada antes de Programar. O volume do player muda somente o que você ouve aqui, não o arquivo final.")
+            if (art.media != null) Text("Essas opções correspondem à prévia confirmada antes de Programar. O volume do player muda somente o que você ouve aqui, não o arquivo final.")
             if (art.media?.testOnly == true) Text("Áudio sintético de teste local, sem licença comercial comprovada.")
         } }, confirmButton = { TextButton(onClick = { showMediaInfo = null }) { Text("Entendi") } }) }
     editing?.takeIf { edit -> state.data.items.any { it.id == edit.first.id } }?.let { (art, action) ->
@@ -310,9 +321,13 @@ private fun CalendarDeliveryDialog(art: ScheduledArt, action: String, token: Str
                 }
                 if (!storyEligible) Text("A publicação de Story requer uma conta Business elegível.")
                 if (selected == "both") Row { for (target in listOf("feed", "story")) TextButton(onClick = { preview = target }) { Text("Ver ${destinationLabel(target)}") } }
-                ScheduledArtImage(art.copy(imageUrl = art.previews[preview], destination = preview), token,
-                    Modifier.fillMaxWidth().height(260.dp))
-                Text("Confira a prévia. Feed: 4:5. Story: 9:16, com a arte inteira e preenchimento de fundo. A legenda editável acompanha somente o Feed; ela não vira texto da imagem.")
+                if (art.generatedVideo != null) {
+                    Text("O vídeo pronto será usado como Reel no Feed e como vídeo no Story. A legenda acompanha o Reel.")
+                } else {
+                    ScheduledArtImage(art.copy(imageUrl = art.previews[preview], destination = preview), token,
+                        Modifier.fillMaxWidth().height(260.dp))
+                    Text("Confira a prévia. Feed: 4:5. Story: 9:16, com a arte inteira e preenchimento de fundo. A legenda editável acompanha somente o Feed; ela não vira texto da imagem.")
+                }
                 Text("Salvar o formato não publica agora. A data e o horário programados são mantidos.")
             } else Text(if (art.automatic) "Esta arte fica no calendário, mas não será publicada automaticamente. As outras continuam como estão."
                 else "Esta arte será enviada a ${destinationLabel(art.destination)} em ${art.date}, às ${art.time} (Brasília), mesmo com o app fechado. Conexão e disponibilidade serão conferidas na hora.")

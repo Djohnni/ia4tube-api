@@ -2,6 +2,7 @@ package br.com.ia4tube.app.core.monthly_planning
 
 import android.content.Context
 import br.com.ia4tube.app.data.models.MonthlyPlanningPostDto
+import br.com.ia4tube.app.feature.calendar.parseGeneratedCalendarVideo
 import java.security.MessageDigest
 import org.json.JSONArray
 import org.json.JSONObject
@@ -71,6 +72,10 @@ class MonthlyPlanningCalendarCacheStore(context: Context) {
             .put("image_ready", imageReady)
             .put("image_text", imageText)
             .put("thumbnail_url", thumbnailUrl)
+            .put("generated_video", generatedVideo?.let { video -> JSONObject()
+                .put("url", video.url).put("mimeType", "video/mp4")
+                .put("sizeBytes", video.sizeBytes).put("sha256", video.sha256).put("hasAudio", video.hasAudio)
+            })
     }
 
     private fun JSONObject.toMonthlyPlanningPostDto(): MonthlyPlanningPostDto {
@@ -91,7 +96,12 @@ class MonthlyPlanningCalendarCacheStore(context: Context) {
             pedidoId = optString("pedido_id"),
             imageReady = optBoolean("image_ready", false),
             imageText = optString("image_text"),
-            thumbnailUrl = optString("thumbnail_url")
+            thumbnailUrl = optString("thumbnail_url"),
+            generatedVideo = optJSONObject("generated_video")?.let { video ->
+                val id = requireNotNull(Regex("^/v1/social/calendar/items/([a-f0-9]{40})/video$")
+                    .matchEntire(video.getString("url"))).groupValues[1]
+                parseGeneratedCalendarVideo(video, id)
+            }
         )
     }
 

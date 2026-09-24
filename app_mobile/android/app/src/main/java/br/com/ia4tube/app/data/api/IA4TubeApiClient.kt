@@ -44,6 +44,7 @@ import br.com.ia4tube.app.data.models.SendSupportMessageResponse
 import br.com.ia4tube.app.data.models.SupportMessage
 import br.com.ia4tube.app.data.models.SupportSender
 import br.com.ia4tube.app.data.models.UploadFile
+import br.com.ia4tube.app.feature.calendar.parseGeneratedCalendarVideo
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.MediaType.Companion.toMediaType
@@ -560,7 +561,8 @@ class IA4TubeApiClient(
                 assignmentId = json.optString("assignment_id"),
                 arteGratisSemanal = json.optBoolean("arte_gratis_semanal", false),
                 marketingContext = json.optString("marketing_context"),
-                arteGratis = json.optBoolean("arte_gratis", false)
+                arteGratis = json.optBoolean("arte_gratis", false),
+                resultadoMime = json.optString("resultado_mime")
             )
         }
     }
@@ -1515,7 +1517,13 @@ class IA4TubeApiClient(
                 campaignId = campaignId,
                 assignmentId = item.optString("assignment_id"),
                 calendarRevision = item.optLong("calendar_revision").takeIf { it > 0 },
-                calendarStatusLabel = item.optString("calendar_status_label")
+                calendarStatusLabel = item.optString("calendar_status_label"),
+                generatedVideo = item.optJSONObject("generatedVideo")?.let { video ->
+                    val url = video.getString("url")
+                    val calendarId = requireNotNull(Regex("^/v1/social/calendar/items/([a-f0-9]{40})/video$").matchEntire(url))
+                        .groupValues[1]
+                    parseGeneratedCalendarVideo(video, calendarId)
+                }
             )
         }
 

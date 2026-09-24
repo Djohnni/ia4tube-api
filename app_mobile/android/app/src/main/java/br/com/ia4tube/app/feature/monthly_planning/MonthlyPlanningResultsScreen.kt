@@ -42,6 +42,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
 import br.com.ia4tube.app.core.art_cache.PrivateArtImage
 import br.com.ia4tube.app.data.api.PreviewUrlBuilder
+import br.com.ia4tube.app.feature.calendar.GeneratedCalendarVideoDialog
 import br.com.ia4tube.app.ui.components.ScreenScaffold
 
 @Composable
@@ -79,7 +80,7 @@ fun MonthlyPlanningResultsScreen(
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Text(
-                    text = "Suas imagens",
+                    text = "Seus conteúdos",
                     style = MaterialTheme.typography.headlineMedium,
                     fontWeight = FontWeight.ExtraBold
                 )
@@ -186,7 +187,8 @@ private fun MonthlyPlanningResultPostCard(
     onOpenOrder: (String) -> Unit,
     onExpand: () -> Unit
 ) {
-    val canOpen = post.imageReady && post.pedidoId.isNotBlank()
+    val canOpen = post.imageReady && post.pedidoId.isNotBlank() || post.generatedVideo != null
+    var showVideo by remember(post.pedidoId) { mutableStateOf(false) }
 
     Card(
         modifier = Modifier.fillMaxWidth(),
@@ -227,7 +229,9 @@ private fun MonthlyPlanningResultPostCard(
             }
 
             if (canOpen) {
-                MonthlyPlanningResultImage(
+                if (post.generatedVideo != null) {
+                    Text("Vídeo pronto para reproduzir no calendário.")
+                } else MonthlyPlanningResultImage(
                     post = post,
                     previewToken = previewToken,
                     modifier = Modifier
@@ -238,9 +242,9 @@ private fun MonthlyPlanningResultPostCard(
                 )
                 Button(
                     modifier = Modifier.fillMaxWidth(),
-                    onClick = { onOpenOrder(post.pedidoId) }
+                    onClick = { if (post.generatedVideo != null) showVideo = true else onOpenOrder(post.pedidoId) }
                 ) {
-                    Text("Ver arte")
+                    Text(if (post.generatedVideo != null) "Ver vídeo" else "Ver arte")
                 }
             } else {
                 Box(
@@ -263,6 +267,9 @@ private fun MonthlyPlanningResultPostCard(
                 }
             }
         }
+    }
+    if (showVideo) post.generatedVideo?.let { video ->
+        GeneratedCalendarVideoDialog(video, previewToken) { showVideo = false }
     }
 }
 

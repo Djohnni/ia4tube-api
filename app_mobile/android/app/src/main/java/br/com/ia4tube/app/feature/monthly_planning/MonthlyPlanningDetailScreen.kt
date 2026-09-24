@@ -32,6 +32,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import br.com.ia4tube.app.ui.components.ScreenScaffold
+import br.com.ia4tube.app.feature.calendar.GeneratedCalendarVideoDialog
 
 @Composable
 fun MonthlyPlanningDetailScreen(
@@ -98,6 +99,7 @@ fun MonthlyPlanningDetailScreen(
             when (selectedTab) {
                 MonthlyPlanningDetailTab.List -> MonthlyPlanningPostsList(
                     posts = planning.posts,
+                    previewToken = previewToken,
                     onOpenOrder = onOpenOrder
                 )
                 MonthlyPlanningDetailTab.Calendar -> MonthlyPlanningCalendar(
@@ -144,12 +146,14 @@ private fun PlanningTabButton(
 @Composable
 private fun MonthlyPlanningPostsList(
     posts: List<MonthlyPlanningPost>,
+    previewToken: String,
     onOpenOrder: (String) -> Unit
 ) {
     Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
         posts.forEach { post ->
             MonthlyPlanningPostCard(
                 post = post,
+                previewToken = previewToken,
                 onOpenOrder = onOpenOrder
             )
         }
@@ -202,9 +206,11 @@ private fun MonthlyPlanningCalendar(
 @Composable
 private fun MonthlyPlanningPostCard(
     post: MonthlyPlanningPost,
+    previewToken: String,
     onOpenOrder: (String) -> Unit
 ) {
-    val canOpenOrder = post.imageReady && post.pedidoId.isNotBlank()
+    val canOpenOrder = post.imageReady && post.pedidoId.isNotBlank() && post.generatedVideo == null
+    var showVideo by remember(post.pedidoId) { mutableStateOf(false) }
     Card(
         modifier = Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(18.dp),
@@ -235,12 +241,15 @@ private fun MonthlyPlanningPostCard(
             )
             OutlinedButton(
                 modifier = Modifier.fillMaxWidth(),
-                enabled = canOpenOrder,
-                onClick = { onOpenOrder(post.pedidoId) }
+                enabled = canOpenOrder || post.generatedVideo != null,
+                onClick = { if (post.generatedVideo != null) showVideo = true else onOpenOrder(post.pedidoId) }
             ) {
-                Text("Ver arte", maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Text(if (post.generatedVideo != null) "Ver vídeo" else "Ver arte", maxLines = 1, overflow = TextOverflow.Ellipsis)
             }
         }
+    }
+    if (showVideo) post.generatedVideo?.let { video ->
+        GeneratedCalendarVideoDialog(video, previewToken) { showVideo = false }
     }
 }
 

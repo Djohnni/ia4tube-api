@@ -107,5 +107,6 @@ data class OrderInfo(
     val assignmentId: String = "",
     val arteGratisSemanal: Boolean = false,
     val marketingContext: String = "",
-    val arteGratis: Boolean = false
+    val arteGratis: Boolean = false,
+    val resultadoMime: String = ""
 )

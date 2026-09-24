@@ -494,7 +494,8 @@ data class MonthlyPlanningPost(
     val campaignId: String = "",
     val assignmentId: String = "",
     val calendarRevision: Long? = null,
-    val calendarStatusLabel: String = ""
+    val calendarStatusLabel: String = "",
+    val generatedVideo: br.com.ia4tube.app.feature.calendar.GeneratedCalendarVideo? = null
 )
 
 sealed class MonthlyPlanningResultDestination {
@@ -2170,7 +2171,8 @@ private fun MonthlyPlanningPostDto.toUiPost(): MonthlyPlanningPost {
         campaignId = campaignId,
         assignmentId = assignmentId,
         calendarRevision = calendarRevision,
-        calendarStatusLabel = calendarStatusLabel
+        calendarStatusLabel = calendarStatusLabel,
+        generatedVideo = generatedVideo
     )
 }
 
