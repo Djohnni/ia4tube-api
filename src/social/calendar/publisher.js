@@ -16,6 +16,7 @@ function createCalendarPublisher({ config, connectorStore, connectorAudit, crede
   };
   const descriptorFor = (context, job) => job.sourceKind === "upload"
     ? preparedMedia?.descriptor(context.companyId, job) || fail("calendar_import_not_operational", 503)
+    : job.mediaKind === "video" ? media.videoDescriptor(context.companyId, context.userId, job)
     : media.descriptor(context.companyId, job);
   function assemble(context, job) {
     if (!allowed(context)) fail("calendar_operations_closed");
@@ -27,14 +28,16 @@ function createCalendarPublisher({ config, connectorStore, connectorAudit, crede
       if (job.sourceKind === "upload") fail("calendar_media_owner_invalid", 403);
       return descriptor;
     }, async resolveOwnedPreparedMedia(candidate, id) {
-      if (candidate !== context || job.sourceKind !== "upload" || id !== descriptor.mediaId) fail("calendar_media_owner_invalid", 403);
+      if (candidate !== context || id !== descriptor.mediaId) fail("calendar_media_owner_invalid", 403);
+      if (job.mediaKind === "video" && job.sourceKind !== "upload") return descriptor;
+      if (job.sourceKind !== "upload") fail("calendar_media_owner_invalid", 403);
       return preparedMedia.resolveOwnedPreparedMedia(importContext(context), id, job);
     } });
     const registry = createConnectorRegistry({ environment: config.environment, gates: {
       externalConnectionEnabled: true, externalPublicationEnabled: true,
       enabledProviders: ["instagram"], companyAllowlist: [context.companyId] } });
     registry.register(createInstagramPublicationConnector({ config, store: connectorStore, credentials, destination: job.target || "feed",
-      ...(job.sourceKind === "upload" ? { pollAttempts: 1 } : {}),
+      ...(job.sourceKind === "upload" || job.mediaKind === "video" ? { pollAttempts: 1 } : {}),
       media: scopedMedia, transport, authorizeContext: candidate => candidate === context && allowed(candidate),
       authorizeConnection: connection => connection.account?.externalId === job.authorization.binding.externalId &&
         (job.target === "story" ? connection.account?.accountType === "business" : ["business", "creator"].includes(connection.account?.accountType)),
@@ -96,7 +99,7 @@ function createCalendarPublisher({ config, connectorStore, connectorAudit, crede
       const planned = job.intent;
       // Stored intent reused on every observation, never generated again after a timeout.
       if (await status(context, planned.publicationId)) return status(context, planned.publicationId);
-      const publish = job.sourceKind === "upload" ? service.publishPreparedMedia : service.publishImage;
+      const publish = job.sourceKind === "upload" || job.mediaKind === "video" ? service.publishPreparedMedia : service.publishImage;
       await publish(context, { operationId: planned.operationId, publicationId: planned.publicationId,
         connectionId: job.authorization.binding.connectionId, clientRequestId: planned.clientRequestId,
         binding: job.authorization.binding, image: { mediaId: descriptor.mediaId, mimeType: descriptor.mimeType,

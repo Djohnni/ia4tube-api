@@ -1558,6 +1558,8 @@ const productDiscoveryUpload = multer({
 });
 
 const uploadResultado = multer({ storage });
+const uploadMonthlyPlanningResult = multer({ storage, limits: { files: 2, fields: 2, parts: 5,
+  fieldSize: 1024 * 1024, fileSize: 100000000 } });
 
 const PEDIDO_UPLOAD_FIELDS = [
   { name: "escudo1", maxCount: 1 },
@@ -4361,7 +4363,7 @@ app.get("/empresa/planejamento-mensal/calendario", auth, handleMonthlyPlanningCa
 app.post("/empresa/planejamento-mensal/calendario/ocultar", auth, handleMonthlyPlanningCalendarHide);
 app.post("/empresa/planejamento-mensal/calendario/reagendar", auth, handleMonthlyPlanningCalendarReschedule);
 
-app.get("/empresa/planejamento-mensal/:planningId", auth, (req, res, next) => {
+app.get("/empresa/planejamento-mensal/:planningId", auth, async (req, res, next) => {
   console.log("[planejamento-mensal] rota detalhe planejamento", {
     method: req.method,
     path: req.originalUrl || req.path,
@@ -4381,12 +4383,26 @@ app.get("/empresa/planejamento-mensal/:planningId", auth, (req, res, next) => {
   }
 
   try {
-    return res.json(monthlyPlanningService.publicDetailPayload({
+    const detail = monthlyPlanningService.publicDetailPayload({
       baseDir: MONTHLY_PLANNINGS_DIR,
       whatsapp,
       planningId: req.params.planningId,
       pedidosDir: PEDIDOS_DIR
-    }));
+    });
+    const raw = monthlyPlanningService.listClientPlanningCalendar({ baseDir: MONTHLY_PLANNINGS_DIR,
+      whatsapp, pedidosDir: PEDIDOS_DIR });
+    const calendar = await productionSocialIntegration.calendarOverlay(req.user, {
+      ...raw, postagens: (raw.postagens || raw.itens || []).filter(item => item.planning_id === req.params.planningId) });
+    const byOrder = new Map((calendar.postagens || []).filter(item => item.planning_id === req.params.planningId &&
+      item.pedido_id && item.generatedVideo).map(item => [item.pedido_id, item]));
+    const posts = detail.planejamento.plano_mensal.postagens.map(post => {
+      const row = byOrder.get(post.pedido_id);
+      return row ? { ...post, generatedVideo: row.generatedVideo, calendar_item_id: row.calendar_item_id,
+        calendar_schedule_id: row.calendar_schedule_id, calendar_revision: row.calendar_revision } : post;
+    });
+    detail.planejamento.plano_mensal.postagens = posts;
+    detail.planejamento.plano_mensal.itens = posts;
+    return res.json(detail);
   } catch (error) {
     return res.status(error?.statusCode || 500).json({
       ok: false,
@@ -4714,7 +4730,7 @@ app.post("/bot/empresa/planejamento-mensal/artes/:pedidoId/status", botRunnerAut
 app.post(
   "/bot/empresa/planejamento-mensal/artes/:pedidoId/upload-resultado",
   botRunnerAuth,
-  uploadResultado.fields([
+  uploadMonthlyPlanningResult.fields([
     { name: "resultado", maxCount: 1 },
     { name: "preview", maxCount: 1 }
   ]),
@@ -4728,10 +4744,19 @@ app.post(
     const preview = req.files?.preview?.[0];
     if (!resultado?.path) {
       cleanupUploadedFiles(req.files);
-      return res.status(400).json({ ok: false, error: "Arquivo resultado_final.png obrigatorio" });
+      return res.status(400).json({ ok: false, error: "Arquivo de resultado obrigatorio" });
     }
 
     try {
+      const resultMime = String(resultado.mimetype || "").toLowerCase();
+      const resultName = String(resultado.originalname || "").toLowerCase();
+      if (!((resultMime === "image/png" && resultName === "resultado_final.png") ||
+            (resultMime === "video/mp4" && resultName === "resultado_final.mp4")) ||
+          preview && (preview.mimetype !== "image/jpeg" || Number(preview.size) > 8 * 1024 * 1024)) {
+        cleanupUploadedFiles(req.files);
+        return res.status(415).json({ ok: false, code: "monthly_planning_art_result_type_invalid",
+          error: "Formato de resultado nao suportado" });
+      }
       let apiInfo = null;
       if (req.body?.api_info) {
         try {
@@ -4745,6 +4770,7 @@ app.post(
         pedidosDir: PEDIDOS_DIR,
         pedidoId: req.params.pedidoId,
         resultadoPath: resultado.path,
+        resultadoMime: resultMime,
         previewPath: preview?.path || "",
         descricaoInstagram: req.body?.descricao_instagram || "",
         apiInfo
@@ -4788,7 +4814,7 @@ function monthlyPlanningNotificationPayload({ planning, post }) {
   return {
     title: "Hora de postar",
     body: "Sua arte planejada para hoje esta pronta. Toque para ver e copiar a legenda.",
-    image_url: pedidoId ? publicApiUrl(`/pedidos/${encodeURIComponent(pedidoId)}/preview`) : "",
+    image_url: pedidoId && post.media_kind !== "video" ? publicApiUrl(`/pedidos/${encodeURIComponent(pedidoId)}/preview`) : "",
     data: {
       tipo: "planejamento_mensal",
       route: "monthly_planning_detail",
@@ -5678,7 +5704,8 @@ app.post("/pedidos/:id/aprovar", auth, (req, res) => {
 
   const clientes = readClientes();
   const cliente = clientes[whatsapp];
-  const imagemPronta = fs.existsSync(path.join(base, "resultado_final.png"));
+  const imagemPronta = fs.existsSync(path.join(base, "resultado_final.png")) ||
+    (pedido.resultado_mime === "video/mp4" && fs.existsSync(path.join(base, "resultado_final.mp4")));
   const pagamentoPendente = pedido.pagamento_pendente === true;
   const downloadBloqueado = imagemPronta && !pagamentoPendente && downloadBloqueadoPorCadastro(cliente);
 
@@ -5804,7 +5831,8 @@ app.get("/pedidos/:id/download-resultado", auth, (req, res) => {
     });
   }
 
-  const arquivo = path.join(base, "resultado_final.png");
+  const video = pedido.resultado_mime === "video/mp4";
+  const arquivo = path.join(base, video ? "resultado_final.mp4" : "resultado_final.png");
 
   if (!fs.existsSync(arquivo)) {
     return res.status(404).json({ ok: false, error: "Resultado final não encontrado" });
@@ -5817,8 +5845,8 @@ app.get("/pedidos/:id/download-resultado", auth, (req, res) => {
     fs.writeFileSync(pedidoPath, JSON.stringify(pedido, null, 2), "utf8");
   } catch {}
 
-  res.setHeader("Content-Type", "image/png");
-  res.setHeader("Content-Disposition", `attachment; filename="${req.params.id}_resultado.png"`);
+  res.setHeader("Content-Type", video ? "video/mp4" : "image/png");
+  res.setHeader("Content-Disposition", `attachment; filename="${req.params.id}_resultado.${video ? "mp4" : "png"}"`);
 
   return res.sendFile(arquivo);
 });
@@ -5960,7 +5988,6 @@ app.get("/pedidos/:id/info", auth, (req, res) => {
   }
 
   const pedidoJsonPath = path.join(base, "pedido.json");
-  const resultadoFinalPath = path.join(base, "resultado_final.png");
 
   let pedido = {};
   if (fs.existsSync(pedidoJsonPath)) {
@@ -5974,6 +6001,8 @@ app.get("/pedidos/:id/info", auth, (req, res) => {
   }
 
   const status = readOrderStatus(base, "novo");
+  const video = pedido.resultado_mime === "video/mp4";
+  const resultadoFinalPath = path.join(base, video ? "resultado_final.mp4" : "resultado_final.png");
 
   const imagem_pronta = fs.existsSync(resultadoFinalPath);
   const clientes = readClientes();
@@ -5997,7 +6026,9 @@ app.get("/pedidos/:id/info", auth, (req, res) => {
     instagram: pedido.instagram || "",
     historia_empresa: pedido.historia_empresa || "",
     imagem_pronta,
-    preview_url: imagem_pronta
+    resultado_mime: video && imagem_pronta ? "video/mp4" : imagem_pronta ? "image/png" : null,
+    video_url: video && imagem_pronta ? `/pedidos/${encodeURIComponent(req.params.id)}/download-resultado` : null,
+    preview_url: imagem_pronta && !video
       ? `${req.protocol}://${req.get("host")}/pedidos/${req.params.id}/preview`
       : null,
     aprovado_cliente: pedido.aprovado_cliente === true,
@@ -6023,7 +6054,7 @@ app.get("/pedidos/:id/info", auth, (req, res) => {
     pode_baixar: imagem_pronta && !pagamentoPendente && !downloadBloqueado,
     download_bloqueado: downloadBloqueado,
     mensagem_download_bloqueado: downloadBloqueado ? mensagemDownloadBloqueado(cliente) : "",
-    pode_pedir_ajuste: !isFreeArtWeekly && imagem_pronta && pedido.ajuste_automatico_usado !== true && status === "pronto"
+    pode_pedir_ajuste: !isFreeArtWeekly && !video && imagem_pronta && pedido.ajuste_automatico_usado !== true && status === "pronto"
   });
 });
 
@@ -6058,9 +6089,10 @@ app.get("/pedidos/:id/preview", (req, res) => {
   }
 
   const previewProtegidaPath = path.join(base, "preview_ia4tube.jpg");
-  const resultadoFinalPath = path.join(base, "resultado_final.png");
   const pedidoPath = path.join(base, "pedido.json");
   const pedido = safeReadJson(pedidoPath) || {};
+  if (pedido.resultado_mime === "video/mp4") return res.status(404).json({ ok: false, error: "Prévia indisponível" });
+  const resultadoFinalPath = path.join(base, "resultado_final.png");
   const pagamentoPendente = pedido.pagamento_pendente === true;
 
   if (isAdminFreeArtOrderHidden(pedido)) {
@@ -6093,8 +6125,9 @@ app.get("/pedidos/:id/thumbnail", (req, res) => {
   }
 
   const previewProtegidaPath = path.join(base, "preview_ia4tube.jpg");
-  const resultadoFinalPath = path.join(base, "resultado_final.png");
   const pedido = safeReadJson(path.join(base, "pedido.json")) || {};
+  if (pedido.resultado_mime === "video/mp4") return res.status(404).json({ ok: false, error: "Miniatura indisponível" });
+  const resultadoFinalPath = path.join(base, "resultado_final.png");
 
   if (isAdminFreeArtOrderHidden(pedido)) {
     return sendHiddenAdminFreeArtOrder(res);

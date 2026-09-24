@@ -3,6 +3,7 @@ const path = require("path");
 const crypto = require("crypto");
 const billingService = require("../billing/billing.service");
 const orderStorage = require("../orders/order.storage");
+const { inspectReadyVideo } = require("./ready-video");
 
 const VALID_STATUSES = new Set(["em_analise", "processando", "pronto", "erro", "cancelado"]);
 const NOTIFICATION_STATUSES = new Set(["pendente", "enviada", "erro", "cancelada"]);
@@ -1249,7 +1250,8 @@ function childOrderStatus({ pedidosDir, pedidoId }) {
 
   const pedido = orderStorage.readOrder(base) || {};
   const rawStatus = orderStorage.readStatus(base, pedido.status || "novo");
-  const resultadoFinalPath = path.join(base, "resultado_final.png");
+  const video = pedido.resultado_mime === "video/mp4";
+  const resultadoFinalPath = path.join(base, video ? "resultado_final.mp4" : "resultado_final.png");
   const imagemPronta = fs.existsSync(resultadoFinalPath);
   const imagemAtualizadaEm = imagemPronta
     ? String(
@@ -1269,6 +1271,7 @@ function childOrderStatus({ pedidosDir, pedidoId }) {
       status: "pronta",
       status_label: "Pronta",
       imagem_pronta: true,
+      media_kind: video ? "video" : "image",
       imagem_atualizada_em: imagemAtualizadaEm,
       descricao_instagram: descricaoInstagram
     };
@@ -1334,6 +1337,7 @@ function planningPosts(planning, pedidosDir = "") {
       status: childStatus.status,
       status_label: childStatus.status_label,
       imagem_pronta: childStatus.imagem_pronta,
+      media_kind: childStatus.media_kind || "image",
       imagem_atualizada_em: childStatus.imagem_atualizada_em || "",
       ...notificationFields
     };
@@ -1560,13 +1564,14 @@ function calendarPayloadForPost(planning, post) {
   const calendarKey = postCalendarKey(planningId, post);
   const pedidoId = String(post.pedido_id || "").trim();
   const imageReady = post.imagem_pronta === true;
-  const previewUrl = imageReady && pedidoId
+  const video = post.media_kind === "video";
+  const previewUrl = imageReady && pedidoId && !video
     ? `/pedidos/${encodeURIComponent(pedidoId)}/preview`
     : "";
   const thumbnailVersion = imageReady
     ? encodeURIComponent(String(post.imagem_atualizada_em || "final").trim() || "final")
     : "";
-  const thumbnailUrl = imageReady && pedidoId
+  const thumbnailUrl = imageReady && pedidoId && !video
     ? `/pedidos/${encodeURIComponent(pedidoId)}/thumbnail?v=${thumbnailVersion}`
     : "";
 
@@ -1594,6 +1599,7 @@ function calendarPayloadForPost(planning, post) {
     frase_foto: post.frase_foto || post.texto_obrigatorio_imagem || "",
     orientacao_cliente: post.orientacao_cliente || post.direcionamento_cliente || "",
     imagem_pronta: imageReady,
+    media_kind: video ? "video" : "image",
     image_url: previewUrl,
     imagem_url: previewUrl,
     thumbnail_url: thumbnailUrl,
@@ -3800,7 +3806,7 @@ function listPlanningArtPending({ pedidosDir, limit = BOT_PENDING_HARD_LIMIT }) 
 
         const status = orderStorage.readStatus(base, pedido.status || "");
         if (!["novo", "ajuste_pendente"].includes(status)) continue;
-        if (fs.existsSync(path.join(base, "resultado_final.png"))) continue;
+        if (fs.existsSync(path.join(base, "resultado_final.png")) || fs.existsSync(path.join(base, "resultado_final.mp4"))) continue;
 
         artes.push(planningArtPayload({ base, pedido, pedidoId: id, whatsapp, mes, status }));
       }
@@ -3855,6 +3861,7 @@ function savePlanningArtResult({
   pedidosDir,
   pedidoId,
   resultadoPath,
+  resultadoMime = "image/png",
   previewPath = "",
   descricaoInstagram = "",
   apiInfo = null
@@ -3868,26 +3875,64 @@ function savePlanningArtResult({
   }
 
   if (!resultadoPath || !fs.existsSync(resultadoPath)) {
-    const error = new Error("Arquivo resultado_final.png nao recebido.");
+    const error = new Error("Arquivo de resultado nao recebido.");
     error.statusCode = 400;
     error.code = "monthly_planning_art_missing_result";
     throw error;
   }
 
-  const finalPath = path.join(found.base, "resultado_final.png");
+  const video = resultadoMime === "video/mp4";
+  if (!video && resultadoMime !== "image/png") {
+    const error = new Error("Formato de resultado nao suportado.");
+    error.statusCode = 415; error.code = "monthly_planning_art_result_type_invalid"; throw error;
+  }
+  let videoMetadata = null;
+  if (video) videoMetadata = inspectReadyVideo(resultadoPath);
+  else {
+    const stat = fs.lstatSync(resultadoPath);
+    if (!stat.isFile() || stat.isSymbolicLink() || stat.size < 1 || stat.size > 32 * 1024 * 1024) {
+      const error = new Error("Imagem final invalida.");
+      error.statusCode = 422; error.code = "monthly_planning_art_result_invalid"; throw error;
+    }
+    const header = Buffer.alloc(8), fd = fs.openSync(resultadoPath, "r");
+    try { fs.readSync(fd, header, 0, 8, 0); } finally { fs.closeSync(fd); }
+    if (!header.equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]))) {
+      const error = new Error("Imagem final invalida.");
+      error.statusCode = 422; error.code = "monthly_planning_art_result_invalid"; throw error;
+    }
+  }
+  const finalPath = path.join(found.base, video ? "resultado_final.mp4" : "resultado_final.png");
+  const otherPath = path.join(found.base, video ? "resultado_final.png" : "resultado_final.mp4");
   const previewDest = path.join(found.base, "preview_ia4tube.jpg");
-  if (fs.existsSync(finalPath)) fs.unlinkSync(finalPath);
-  fs.renameSync(resultadoPath, finalPath);
-
-  if (previewPath && fs.existsSync(previewPath)) {
-    if (fs.existsSync(previewDest)) fs.unlinkSync(previewDest);
-    fs.renameSync(previewPath, previewDest);
+  if (found.status === "pronto" && (fs.existsSync(finalPath) || fs.existsSync(otherPath))) {
+    // A delayed/replayed upload cannot silently replace a scheduled or already
+    // published result. A byte-identical retry is safe and keeps the same job.
+    const existingSize = fs.existsSync(finalPath) ? fs.statSync(finalPath).size : -1;
+    let identical = !fs.existsSync(otherPath) && existingSize >= 0 &&
+      fs.statSync(resultadoPath).size === existingSize;
+    if (identical) {
+      const incoming = fs.openSync(resultadoPath, "r"), prior = fs.openSync(finalPath, "r");
+      try {
+        const left = Buffer.alloc(65536), right = Buffer.alloc(65536);
+        for (let offset = 0; offset < existingSize; offset += left.length) {
+          const count = Math.min(left.length, existingSize - offset);
+          if (fs.readSync(incoming, left, 0, count, offset) !== count ||
+              fs.readSync(prior, right, 0, count, offset) !== count ||
+              !left.subarray(0, count).equals(right.subarray(0, count))) { identical = false; break; }
+        }
+      } finally { fs.closeSync(incoming); fs.closeSync(prior); }
+    }
+    if (identical) { fs.unlinkSync(resultadoPath); return found.payload; }
+    const error = new Error("Resultado ja concluido para este pedido.");
+    error.statusCode = 409; error.code = "monthly_planning_art_already_ready"; throw error;
   }
 
   const now = new Date().toISOString();
   const pedido = {
     ...found.pedido,
     status: "pronto",
+    resultado_mime: resultadoMime,
+    resultado_video: videoMetadata,
     descricao_instagram: String(descricaoInstagram || found.pedido.descricao_instagram || "").trim(),
     resultado_enviado_em: now,
     atualizado_em: now
@@ -3897,13 +3942,37 @@ function savePlanningArtResult({
     pedido.legacy.descricao_instagram = pedido.descricao_instagram;
   }
 
-  if (apiInfo && typeof apiInfo === "object") {
-    writeJson(path.join(found.base, "resultado_api_info.json"), apiInfo);
+  const backup = `${finalPath}.${crypto.randomUUID()}.bak`;
+  const otherBackup = `${otherPath}.${crypto.randomUUID()}.bak`;
+  const previewBackup = `${previewDest}.${crypto.randomUUID()}.bak`;
+  const hadPrevious = fs.existsSync(finalPath), replacePreview = video || Boolean(previewPath && fs.existsSync(previewPath));
+  const hadPreview = replacePreview && fs.existsSync(previewDest);
+  let installed = false;
+  try {
+    if (hadPrevious) fs.renameSync(finalPath, backup);
+    fs.renameSync(resultadoPath, finalPath); installed = true;
+    if (fs.existsSync(otherPath)) fs.renameSync(otherPath, otherBackup);
+    if (hadPreview) fs.renameSync(previewDest, previewBackup);
+    if (previewPath && fs.existsSync(previewPath)) fs.renameSync(previewPath, previewDest);
+    orderStorage.writeOrder(found.base, pedido);
+    orderStorage.writeStatus(found.base, "pronto");
+    fs.writeFileSync(path.join(found.base, "processado_handoff.txt"), "OK", "utf8");
+    if (apiInfo && typeof apiInfo === "object") writeJson(path.join(found.base, "resultado_api_info.json"), apiInfo);
+  } catch (error) {
+    if (installed && fs.existsSync(finalPath)) fs.unlinkSync(finalPath);
+    if (fs.existsSync(backup)) fs.renameSync(backup, finalPath);
+    if (fs.existsSync(otherBackup)) fs.renameSync(otherBackup, otherPath);
+    if (replacePreview && fs.existsSync(previewDest)) fs.unlinkSync(previewDest);
+    if (fs.existsSync(previewBackup)) fs.renameSync(previewBackup, previewDest);
+    try { orderStorage.writeOrder(found.base, found.pedido); orderStorage.writeStatus(found.base, found.status); } catch { /* original failure still reported */ }
+    throw error;
   }
 
-  orderStorage.writeOrder(found.base, pedido);
-  orderStorage.writeStatus(found.base, "pronto");
-  fs.writeFileSync(path.join(found.base, "processado_handoff.txt"), "OK", "utf8");
+  // The result and metadata are committed. Backup cleanup must not roll back
+  // an accepted upload or revive an old format if removal is interrupted.
+  for (const stale of [backup, otherBackup, previewBackup]) {
+    try { if (fs.existsSync(stale)) fs.unlinkSync(stale); } catch { /* stale backup is not a live result */ }
+  }
 
   return planningArtPayload({
     base: found.base,

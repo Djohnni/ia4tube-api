@@ -7,7 +7,7 @@ const { isCalendarImportService, isOperationalCalendarImportService } = require(
 const { isStoredCalendarMediaReader } = require("./imports/stored-calendar-media");
 const LABELS = { scheduled: "Programada", paused: "Automação geral pausada", manual: "Ative esta arte após conectar o Instagram",
   item_paused: "Publicação desta arte desativada", partial: "Publicada parcialmente — precisa de atenção",
-  waiting_media: "Preparando imagem", operations_closed: "Publicação temporariamente indisponível",
+  waiting_media: "Preparando mídia", operations_closed: "Publicação temporariamente indisponível",
   import_not_operational: "Importação ainda não disponível para publicação",
   connection_required: "Confira a conexão Instagram", overdue: "Horário vencido — reagende", attention: "Precisa de atenção",
   dispatching: "Publicando", confirming: "Confirmando publicação", published: "Publicada", cancelled: "Cancelada" };
@@ -74,15 +74,21 @@ function createCalendarService({ store, source, media, grants, auth, identity, r
     const imported = (importsAvailable || storedReading) && job.sourceKind === "upload" && context;
     if (importsAvailable && imported) status = importScheduling.status(job, prefs, connection, allowed) || status;
     const importedMedia = imported ? (importsAvailable ? importScheduling : importReading).describe(job, importContext(context)) : null;
+    const generatedVideo = job.mediaKind === "video" && job.asset?.mimeType === "video/mp4"
+      ? { url: `/v1/social/calendar/items/${job.id}/video`, mimeType: "video/mp4",
+        sizeBytes: job.asset.size, sha256: job.asset.sha, hasAudio: job.asset.hasAudio } : null;
     if (status === "scheduled" && targets(job).includes("story") && connection?.accountType !== "business") status = "attention";
     return { id: job.id, key: job.sourceKey, planningId: job.planningId, orderId: job.orderId,
       title: job.title, date: job.date, time: job.time, timeZone: TIME_ZONE, scheduledAt: job.scheduledAt,
       caption: job.caption, revision: job.revision, status, statusLabel: LABELS[status],
-      imageUrl: job.asset && job.sourceKind !== "upload" ? `/v1/social/calendar/items/${job.id}/image` : null,
+      imageUrl: job.asset && job.sourceKind !== "upload" && !generatedVideo ? `/v1/social/calendar/items/${job.id}/image` : null,
+      ...(generatedVideo ? { generatedVideo, selectedTargets: targets(job), shareToFeed: targets(job).includes("reel") } : {}),
       editable: !started(job) && !LOCKED.has(job.phase) && job.phase !== "cancelled",
       automatic: job.automaticEnabled ?? Boolean(job.authorization), destination: job.destination || "feed",
-      formatsReady: job.sourceKind !== "upload" && Boolean(job.assets?.feed && job.assets?.story),
-      previews: job.assets && job.sourceKind !== "upload" ? Object.fromEntries(Object.keys(job.assets).map(target => [target, `/v1/social/calendar/items/${job.id}/image?destination=${target}`])) : {},
+      formatsReady: job.sourceKind !== "upload" && Boolean(job.mediaKind === "video"
+        ? job.assets?.reel && job.assets?.story : job.assets?.feed && job.assets?.story),
+      previews: job.assets && job.sourceKind !== "upload" && !generatedVideo
+        ? Object.fromEntries(Object.keys(job.assets).map(target => [target, `/v1/social/calendar/items/${job.id}/image?destination=${target}`])) : {},
       publications: Object.fromEntries(Object.entries(job.deliveries || {}).map(([target, value]) => [target,
         { status: value.phase, result: value.publication || null }])),
       username: connection?.username || null, error: job.error || null, publication: job.publication || null,
@@ -200,10 +206,18 @@ function createCalendarService({ store, source, media, grants, auth, identity, r
     const job = await store.update(current.context.companyId, state => state.jobs[id] || null);
     if (!job?.asset || job.phase === "cancelled" || !visibleTo(job, current.context)) fail("calendar_not_found", 404);
     if (job.sourceKind === "upload") fail("calendar_import_not_operational", 503);
+    if (job.mediaKind === "video") fail("calendar_not_found", 404);
     if (target !== null && !["feed", "story"].includes(target)) fail("calendar_destination_invalid", 400);
     const asset = target ? job.assets?.[target] : job.asset;
     if (!asset) fail("calendar_not_found", 404);
     return media.bytesFor(current.context.companyId, asset);
+  }
+  async function video(claims, id) {
+    const current = session(claims);
+    const job = await store.update(current.context.companyId, state => state.jobs[id] || null);
+    if (!job?.asset || job.mediaKind !== "video" || job.phase === "cancelled" ||
+        !visibleTo(job, current.context)) fail("calendar_not_found", 404);
+    return { ...media.videoFile(current.context.companyId, job.asset), companyId: current.context.companyId };
   }
   async function overlay(claims, payload) {
     const current = session(claims); await sync(current.owner, current.context.companyId, current.context.userId);
@@ -214,10 +228,15 @@ function createCalendarService({ store, source, media, grants, auth, identity, r
       const job = state.jobs[idFor(current.context.companyId, item.calendar_key)];
       if (job?.sourceKind === "upload") return [];
       if (!job) return [item]; if (job.phase === "cancelled") return [];
+      const displayed = view(job, state.preferences, connection, publisher.allowed(current.context), current.context);
       return [{ ...item, data: job.date, data_sugerida: job.date, horario: job.time, horario_sugerido: job.time,
         legenda: job.caption, descricao_instagram: job.caption, calendar_schedule_id: job.id,
+        calendar_item_id: job.id,
+        ...(displayed.generatedVideo ? { generatedVideo: displayed.generatedVideo,
+          imagem_url: null, image_url: null, preview_url: null, thumbnail_url: null, miniatura_url: null,
+          calendar_selected_targets: displayed.selectedTargets, calendar_share_to_feed: displayed.shareToFeed } : {}),
         calendar_revision: job.revision, calendar_phase: job.phase,
-        calendar_status_label: view(job, state.preferences, connection, publisher.allowed(current.context)).statusLabel,
+        calendar_status_label: displayed.statusLabel,
         sort_key: `${job.date}|${job.time}|${String(item.ordem || 0).padStart(4, "0")}` }];
     });
     for (const job of Object.values(state.jobs)) {
@@ -293,7 +312,8 @@ function createCalendarService({ store, source, media, grants, auth, identity, r
       if (grant.planningId !== snapshot.planningId || (grant.jobId && grant.jobId !== snapshot.id)) continue;
       if (snapshot.sourceKind === "upload" && (grant.sourceKind !== "upload" || grant.assetId !== snapshot.import?.assetId ||
           grant.assetRevision !== snapshot.import?.mediaRevision || grant.previewDigest !== snapshot.import?.previewDigest || grant.userId !== snapshot.import?.userId)) continue;
-      if (snapshot.assets && (snapshot.layout === "safe_master_v1" || snapshot.layout === "import_prepared_v1")) {
+      if (snapshot.assets && (snapshot.mediaKind === "video" || snapshot.layout === "safe_master_v1" ||
+          snapshot.layout === "import_prepared_v1")) {
         if (await tickFormatted(owner, ids, ctx, grant, snapshot)) break;
         continue;
       }
@@ -347,7 +367,7 @@ function createCalendarService({ store, source, media, grants, auth, identity, r
       if (part.phase === "published") continue;
       if (part.phase === "failed") continue; // Another destination still owns its independent intent/result.
       if (part.intent) {
-        if (part.sourceKind === "upload") {
+        if (part.sourceKind === "upload" || part.mediaKind === "video") {
           // One immediate status check in send, then at most four automatic
           // checks one minute apart. This claim survives concurrent instances
           // and restart. Exhaustion keeps the uncertain intent; never re-send.
@@ -377,8 +397,10 @@ function createCalendarService({ store, source, media, grants, auth, identity, r
       let intact = false;
       try {
         if (part.sourceKind === "upload") intact = await publisher.verifyPrepared(ctx, part) === true;
-        else { intact = await media.unchanged(owner, part); if (intact) media.bytesFor(ids.companyId, part.asset); }
-      } catch { /* Fail closed. No conversion or provider call in this check. */ }
+        else { intact = await media.unchanged(owner, part);
+          if (intact && part.mediaKind === "video") media.videoFile(ids.companyId, part.asset);
+          else if (intact) media.bytesFor(ids.companyId, part.asset); }
+      } catch { intact = false; /* Fail closed. No provider call in this check. */ }
       if (!intact) {
         await store.update(ids.companyId, state => { const job = state.jobs[snapshot.id];
           if (job?.revision === snapshot.revision) { job.error = "calendar_art_changed"; job.phase = started(job) ? "partial" : "attention"; job.automaticEnabled = false; job.revision++; }
@@ -423,8 +445,9 @@ function createCalendarService({ store, source, media, grants, auth, identity, r
       }
     } finally { running = false; }
   }
-  return Object.freeze({ list, preferences, prepareRequest, edit, image, overlay, legacyEdit, tick,
+  return Object.freeze({ list, preferences, prepareRequest, edit, image, video, overlay, legacyEdit, tick,
     publicBytes: media.publicBytes,
+    publicVideo: media.publicVideo,
     publicMedia: publisher.publicMedia,
     start() { if (!timer && !stopped) { timer = setInterval(() => { void tick(); }, 15000); timer.unref?.(); } },
     async close() { stopped = true; clearInterval(timer); while (running) await new Promise(resolve => setTimeout(resolve, 25)); media.close(); grants.close(); }

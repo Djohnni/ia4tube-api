@@ -12,12 +12,13 @@ function targets(job) {
         list.some(target => !["feed", "story", "reel"].includes(target))) fail("calendar_destination_invalid", 400);
     return list.slice();
   }
+  if (job.mediaKind === "video") return TARGETS[destination(job.destination || "feed")].map(target => target === "feed" ? "reel" : target);
   return TARGETS[destination(job.destination || "feed")];
 }
 function started(job) { return Boolean(job.intent || Object.values(job.deliveries || {}).some(item => item.intent)); }
 function delivery(job, target) {
   const saved = job.deliveries?.[target];
-  return { ...job, target, asset: job.assets?.[target] || (target === "feed" ? job.asset : null),
+  return { ...job, target, asset: job.assets?.[target] || (target === "feed" || target === "reel" ? job.asset : null),
     phase: saved?.phase || (job.intent ? job.phase : "ready"),
     intent: saved?.intent || (target === "feed" ? job.intent : null),
     publication: saved?.publication || null, error: saved?.error || (!started(job) ? job.error : null) };

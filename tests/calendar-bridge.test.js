@@ -45,6 +45,25 @@ function fixture() {
     async enable() { await service.preferences(claims, { enabled: true, revision: 1, confirmed: true }); },
     async first() { return (await service.list(claims)).items[0]; } };
 }
+test("generated MP4 with a legacy null layout uses the formatted video delivery", async () => {
+  const f = fixture();
+  const video = { sha: "a".repeat(64), sourceHash: "b".repeat(64), mimeType: "video/mp4",
+    size: 100, width: 1080, height: 1920, durationSeconds: 4, hasAudio: true, audioMode: "original" };
+  f.media.prepare = async () => ({ ...video, variants: { reel: video, story: video } });
+  f.media.videoFile = () => ({ file: "synthetic", size: 100, sha: video.sha });
+  f.setSources([{ key: "plan:1", planningId: "plan-synthetic", orderId: "order1",
+    date: "2026-09-10", time: "12:00", caption: "Video pronto", imageReady: true,
+    mediaKind: "video", version: "video-1", authorizationEnvelope: f.envelope,
+    destination: "feed", layout: null }]);
+  await f.enable();
+  const row = await f.first();
+  assert.equal(row.generatedVideo?.mimeType, "video/mp4");
+  assert.equal(row.imageUrl, null);
+  assert.deepEqual(row.selectedTargets, ["reel"]);
+  await f.service.tick();
+  assert.equal(f.sends(), 1);
+  assert.equal((await f.service.list(f.claims)).items[0].status, "published");
+});
 test("typed imports never advertise legacy image URLs or claim an operational publisher", async () => {
   const f = fixture(); await f.first();
   const state = f.store.rows.get(f.ids.companyId), original = Object.values(state.jobs)[0];

@@ -14,7 +14,8 @@ async function createProductionCalendar(dependencies, ports) {
   const store = createCalendarStore({ pool: ports.pool, role: ports.role });
   await store.verify(); // Optional additive schema must be prepared separately; never migrate at startup.
   const source = createCalendarSource(dependencies);
-  const media = createCalendarMedia({ ...dependencies, publicOrigin: ports.config.publicOrigin, loadSource: source.load });
+  const media = createCalendarMedia({ ...dependencies, publicOrigin: ports.config.publicOrigin,
+    loadSource: source.load, describeSource: source.describe });
   let grants, imports;
   try {
     grants = createCalendarGrants(dependencies.secret, dependencies.clock);

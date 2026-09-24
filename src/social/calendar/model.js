@@ -61,9 +61,11 @@ function changeJob(state, id, input, now) {
   else if (input.action === "destination") {
     const target = require("./destinations").destination(input.destination);
     if (input.confirmed !== true) fail("calendar_preview_required", 400);
-    if (job.layout !== "safe_master_v1" || !job.assets?.feed || !job.assets?.story) fail("calendar_formats_not_ready");
+    if ((job.layout !== "safe_master_v1" && job.mediaKind !== "video") ||
+        (job.mediaKind === "video" ? !job.assets?.reel || !job.assets?.story : !job.assets?.feed || !job.assets?.story))
+      fail("calendar_formats_not_ready");
     job.destination = target;
-    job.asset = job.assets[target === "story" ? "story" : "feed"];
+    job.asset = job.assets[target === "story" ? "story" : job.mediaKind === "video" ? "reel" : "feed"];
   }
   else if (input.action === "caption") {
     job.caption = caption(input.caption); job.captionEdited = true;
@@ -99,13 +101,15 @@ function syncSources(state, sources, companyId, now) {
         title: source.title || "Arte programada", date: source.date, time: source.time, scheduledAt,
         caption: initialCaption, error: initialError, revision: 1, phase: "waiting_media", asset: null,
         authorization, automaticEnabled: Boolean(authorization), destination: source.destination || "feed", layout: source.layout || null,
+        mediaKind: source.mediaKind || "image", videoMetadata: source.videoMetadata || null,
         grantNonce: authorization?.nonce || null, sourceVersion: source.version, createdAt: now, updatedAt: now };
     }
     if (LOCKED.has(job.phase) || job.phase === "cancelled") continue;
     if (job.sourceVersion !== source.version) {
       // A replacement of an already prepared image must never publish under the old visual approval.
       if (job.asset) { job.phase = "attention"; job.error = "calendar_art_changed"; job.authorization = null; }
-      job.asset = null; job.assets = null; job.sourceVersion = source.version; job.revision++;
+      job.asset = null; job.assets = null; job.sourceVersion = source.version;
+      job.mediaKind = source.mediaKind || "image"; job.videoMetadata = source.videoMetadata || null; job.revision++;
       if (job.error === "calendar_image_preparation_failed") job.error = null;
       if (!job.captionEdited) {
         try { job.caption = caption(source.caption || ""); if (job.error === "calendar_caption_invalid") job.error = null; }

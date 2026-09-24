@@ -36,6 +36,15 @@ test("real existing creation, plan, child artwork and calendar feed the bridge w
   const resultPath = path.join(root, "result.png"); fs.writeFileSync(resultPath, image);
   planning.savePlanningArtResult({ pedidosDir, pedidoId: pending[0].orderId, resultadoPath: resultPath, descricaoInstagram: "Legenda final gerada" });
   const ready = source.list(owner)[0]; assert.equal(ready.imageReady, true); assert.equal(ready.caption, "Legenda final gerada");
+  const legacyPng = fs.statSync(path.join(allOrders.find(entry => entry.id === pending[0].orderId).base, "resultado_final.png"));
+  assert.equal(ready.version, `${legacyPng.size}:${legacyPng.mtimeMs}`,
+    "existing scheduled PNGs must keep their persisted source version and consent");
+  const model = require("../src/social/calendar/model"), state = model.freshState();
+  model.syncSources(state, [{ ...ready, authorization: { nonce: "existing-consent", quantity: 1 } }], companyId, Date.now());
+  const persisted = Object.values(state.jobs)[0]; persisted.asset = { sha: "a".repeat(64) };
+  model.syncSources(state, [{ ...ready, authorization: { nonce: "existing-consent", quantity: 1 } }], companyId, Date.now());
+  assert.equal(persisted.asset.sha, "a".repeat(64));
+  assert.equal(persisted.authorization.nonce, "existing-consent");
   assert.deepEqual(await source.load(owner, ready), image);
   let reminders = 0;
   const notifications = await planning.processDueNotifications({ baseDir, pedidosDir, clientes: { [owner]: client },
