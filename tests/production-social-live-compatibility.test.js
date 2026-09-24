@@ -180,6 +180,124 @@ test("legacy server code is preserved outside explicit session, startup and cale
   candidate = candidate.replace(privateMediaMount, '');
   assert.equal(candidate.split("reference: req.body").length - 1, 2);
   candidate = candidate.replace(", reference: req.body });", " });").replace("reference: req.body, date:", "date:");
+  // Exact, reviewed exceptions for ready MP4 from the existing monthly motor.
+  // Each replacement must occur once; all other legacy server bytes still
+  // compare against LIVE_BASE below. This must not become a generic bypass.
+  const undoReadyMonthlyVideo = [
+    [
+      'const uploadMonthlyPlanningResult = multer({ storage, limits: { files: 2, fields: 2, parts: 5,\n  fieldSize: 1024 * 1024, fileSize: 100000000 } });\n',
+      ''
+    ],
+    [
+      'app.get("/empresa/planejamento-mensal/:planningId", auth, async (req, res, next) => {',
+      'app.get("/empresa/planejamento-mensal/:planningId", auth, (req, res, next) => {'
+    ],
+    [
+      `    const detail = monthlyPlanningService.publicDetailPayload({
+      baseDir: MONTHLY_PLANNINGS_DIR,
+      whatsapp,
+      planningId: req.params.planningId,
+      pedidosDir: PEDIDOS_DIR
+    });
+    const raw = monthlyPlanningService.listClientPlanningCalendar({ baseDir: MONTHLY_PLANNINGS_DIR,
+      whatsapp, pedidosDir: PEDIDOS_DIR });
+    const calendar = await productionSocialIntegration.calendarOverlay(req.user, {
+      ...raw, postagens: (raw.postagens || raw.itens || []).filter(item => item.planning_id === req.params.planningId) });
+    const byOrder = new Map((calendar.postagens || []).filter(item => item.planning_id === req.params.planningId &&
+      item.pedido_id && item.generatedVideo).map(item => [item.pedido_id, item]));
+    const posts = detail.planejamento.plano_mensal.postagens.map(post => {
+      const row = byOrder.get(post.pedido_id);
+      return row ? { ...post, generatedVideo: row.generatedVideo, calendar_item_id: row.calendar_item_id,
+        calendar_schedule_id: row.calendar_schedule_id, calendar_revision: row.calendar_revision } : post;
+    });
+    detail.planejamento.plano_mensal.postagens = posts;
+    detail.planejamento.plano_mensal.itens = posts;
+    return res.json(detail);`,
+      `    return res.json(monthlyPlanningService.publicDetailPayload({
+      baseDir: MONTHLY_PLANNINGS_DIR,
+      whatsapp,
+      planningId: req.params.planningId,
+      pedidosDir: PEDIDOS_DIR
+    }));`
+    ],
+    ['  uploadMonthlyPlanningResult.fields([', '  uploadResultado.fields(['],
+    ['Arquivo de resultado obrigatorio', 'Arquivo resultado_final.png obrigatorio'],
+    [
+      `      const resultMime = String(resultado.mimetype || "").toLowerCase();
+      const resultName = String(resultado.originalname || "").toLowerCase();
+      if (!((resultMime === "image/png" && resultName === "resultado_final.png") ||
+            (resultMime === "video/mp4" && resultName === "resultado_final.mp4")) ||
+          preview && (preview.mimetype !== "image/jpeg" || Number(preview.size) > 8 * 1024 * 1024)) {
+        cleanupUploadedFiles(req.files);
+        return res.status(415).json({ ok: false, code: "monthly_planning_art_result_type_invalid",
+          error: "Formato de resultado nao suportado" });
+      }
+`,
+      ''
+    ],
+    ['        resultadoMime: resultMime,\n', ''],
+    ['image_url: pedidoId && post.media_kind !== "video" ?', 'image_url: pedidoId ?'],
+    [
+      `  const imagemPronta = fs.existsSync(path.join(base, "resultado_final.png")) ||
+    (pedido.resultado_mime === "video/mp4" && fs.existsSync(path.join(base, "resultado_final.mp4")));`,
+      '  const imagemPronta = fs.existsSync(path.join(base, "resultado_final.png"));'
+    ],
+    [
+      `  const video = pedido.resultado_mime === "video/mp4";
+  const arquivo = path.join(base, video ? "resultado_final.mp4" : "resultado_final.png");`,
+      '  const arquivo = path.join(base, "resultado_final.png");'
+    ],
+    [
+      `  res.setHeader("Content-Type", video ? "video/mp4" : "image/png");
+  res.setHeader("Content-Disposition", \`attachment; filename="\${req.params.id}_resultado.\${video ? "mp4" : "png"}"\`);`,
+      `  res.setHeader("Content-Type", "image/png");
+  res.setHeader("Content-Disposition", \`attachment; filename="\${req.params.id}_resultado.png"\`);`
+    ],
+    [
+      `  const pedidoJsonPath = path.join(base, "pedido.json");
+
+  let pedido = {};`,
+      `  const pedidoJsonPath = path.join(base, "pedido.json");
+  const resultadoFinalPath = path.join(base, "resultado_final.png");
+
+  let pedido = {};`
+    ],
+    [
+      `  const status = readOrderStatus(base, "novo");
+  const video = pedido.resultado_mime === "video/mp4";
+  const resultadoFinalPath = path.join(base, video ? "resultado_final.mp4" : "resultado_final.png");`,
+      '  const status = readOrderStatus(base, "novo");'
+    ],
+    [
+      `    resultado_mime: video && imagem_pronta ? "video/mp4" : imagem_pronta ? "image/png" : null,
+    video_url: video && imagem_pronta ? \`/pedidos/\${encodeURIComponent(req.params.id)}/download-resultado\` : null,
+    preview_url: imagem_pronta && !video`,
+      '    preview_url: imagem_pronta'
+    ],
+    ['!isFreeArtWeekly && !video && imagem_pronta', '!isFreeArtWeekly && imagem_pronta'],
+    [
+      `  const pedidoPath = path.join(base, "pedido.json");
+  const pedido = safeReadJson(pedidoPath) || {};
+  if (pedido.resultado_mime === "video/mp4") return res.status(404).json({ ok: false, error: "Prévia indisponível" });
+  const resultadoFinalPath = path.join(base, "resultado_final.png");`,
+      `  const resultadoFinalPath = path.join(base, "resultado_final.png");
+  const pedidoPath = path.join(base, "pedido.json");
+  const pedido = safeReadJson(pedidoPath) || {};`
+    ],
+    [
+      `  const previewProtegidaPath = path.join(base, "preview_ia4tube.jpg");
+  const pedido = safeReadJson(path.join(base, "pedido.json")) || {};
+  if (pedido.resultado_mime === "video/mp4") return res.status(404).json({ ok: false, error: "Miniatura indisponível" });
+  const resultadoFinalPath = path.join(base, "resultado_final.png");`,
+      `  const previewProtegidaPath = path.join(base, "preview_ia4tube.jpg");
+  const resultadoFinalPath = path.join(base, "resultado_final.png");
+  const pedido = safeReadJson(path.join(base, "pedido.json")) || {};`
+    ]
+  ];
+  for (const [from, to] of undoReadyMonthlyVideo) {
+    assert.equal(candidate.split(from).length - 1, 1, `Reviewed monthly MP4 exception changed: ${from.slice(0, 72)}`);
+    candidate = candidate.replace(from, to);
+  }
   // Enumerated calendar adapter calls only; the rest of the historical server still compares byte-for-byte.
   const undoCalendar = [
     ['  upload.fields(MONTHLY_PLANNING_UPLOAD_FIELDS),\n  async (req, res) => {', '  upload.fields(MONTHLY_PLANNING_UPLOAD_FIELDS),\n  (req, res) => {'],
