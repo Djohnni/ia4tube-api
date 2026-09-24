@@ -78,7 +78,9 @@ private fun GeneratedVideoPlayer(video: GeneratedCalendarVideo, token: String, m
     val player = remember(video.sha256, token) {
         ExoPlayer.Builder(context).setMediaSourceFactory(DefaultMediaSourceFactory(CalendarVideoDataSource.Factory(video, token))).build().apply {
             repeatMode = Player.REPEAT_MODE_OFF
-            playWhenReady = false
+            // This player is only created after "Reproduzir vídeo" is tapped.
+            // Start as soon as the owned video is ready; do not require a second tap.
+            playWhenReady = true
             setMediaItem(MediaItem.fromUri(Uri.parse(CALENDAR_ORIGIN + video.url)))
         }
     }
@@ -109,13 +111,18 @@ private fun GeneratedVideoPlayer(video: GeneratedCalendarVideo, token: String, m
         }
         if (error) Text("Vídeo indisponível. Confira a conexão e tente novamente.")
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            if (error) OutlinedButton(onClick = { error = false; player.prepare() }) { Text("Tentar novamente") }
+            if (error) OutlinedButton(onClick = {
+                error = false
+                buffering = true
+                player.playWhenReady = true
+                player.prepare()
+            }) { Text("Tentar novamente") }
             OutlinedButton(onClick = {
                 if (player.isPlaying) player.pause() else {
                     if (player.playbackState == Player.STATE_ENDED) player.seekTo(0)
                     player.play()
                 }
-            }, enabled = !error) { Text(if (playing) "Pausar" else "Reproduzir") }
+            }, enabled = !error) { Text(if (playing) "Pausar" else if (buffering && player.playWhenReady) "Carregando..." else "Reproduzir") }
             if (video.hasAudio) OutlinedButton(onClick = {
                 muted = !muted
                 player.volume = if (muted) 0f else 1f
