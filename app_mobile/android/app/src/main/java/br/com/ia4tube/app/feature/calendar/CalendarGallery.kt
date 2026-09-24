@@ -208,8 +208,11 @@ fun CalendarGallery(model: CalendarViewModel, token: String, backLabel: String =
                                 active = pager.settledPage == index && !pager.isScrollInProgress && editing == null && showStatus == null && showMediaInfo == null && !showImport,
                                 modifier = Modifier.weight(1f).fillMaxHeight())
                         } else if (art.generatedVideo != null) {
+                            val posterLabel = "${LocalDate.parse(art.date).format(DateTimeFormatter.ofPattern("dd/MM"))} · ${art.time}" +
+                                art.caption.lineSequence().firstOrNull { it.isNotBlank() }?.let { "\n${it.trim()}" }.orEmpty()
                             ScheduledGeneratedVideo(art.generatedVideo, tokenProvider,
                                 active = pager.settledPage == index && !pager.isScrollInProgress && editing == null && showStatus == null && showMediaInfo == null && !showImport,
+                                posterLabel = posterLabel,
                                 modifier = Modifier.weight(1f).fillMaxHeight())
                         } else ScheduledArtImage(art.copy(imageUrl = art.previews[preview] ?: art.imageUrl, destination = preview), token, Modifier.weight(1f).fillMaxHeight(), state.imageRefresh)
                         Column(Modifier.width(actionWidth).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(4.dp), horizontalAlignment = Alignment.CenterHorizontally) {

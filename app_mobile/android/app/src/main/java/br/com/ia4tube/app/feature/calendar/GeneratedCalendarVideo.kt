@@ -2,12 +2,15 @@ package br.com.ia4tube.app.feature.calendar
 
 import android.net.Uri
 import androidx.annotation.OptIn
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.layout.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.Lifecycle
@@ -27,7 +30,7 @@ import br.com.ia4tube.app.core.session.SessionStore
 /** Plays an owned calendar result only on explicit user action while its page and session are active. */
 @Composable
 fun ScheduledGeneratedVideo(video: GeneratedCalendarVideo, tokenProvider: () -> String,
-    active: Boolean, modifier: Modifier = Modifier) {
+    active: Boolean, posterLabel: String? = null, modifier: Modifier = Modifier) {
     val context = LocalContext.current.applicationContext
     val lifecycle = LocalLifecycleOwner.current.lifecycle
     val epoch by AndroidPrivateArts.sessionChanges.collectAsState()
@@ -52,8 +55,7 @@ fun ScheduledGeneratedVideo(video: GeneratedCalendarVideo, tokenProvider: () -> 
             when {
                 !authorized -> Text("Entre novamente para ver este vídeo.")
                 !active || !foreground -> Text("Abra este item para reproduzir o vídeo.")
-                !requested -> Button(onClick = { requested = true }) { Text("Reproduzir vídeo") }
-                else -> GeneratedVideoPlayer(video, token, Modifier.fillMaxSize())
+                else -> GeneratedVideoPlayer(video, token, requested, { requested = true }, posterLabel, Modifier.fillMaxSize())
             }
         }
     }
@@ -69,7 +71,8 @@ fun GeneratedCalendarVideoDialog(video: GeneratedCalendarVideo, token: String, o
 
 @OptIn(UnstableApi::class)
 @Composable
-private fun GeneratedVideoPlayer(video: GeneratedCalendarVideo, token: String, modifier: Modifier) {
+private fun GeneratedVideoPlayer(video: GeneratedCalendarVideo, token: String, requested: Boolean,
+    onRequest: () -> Unit, posterLabel: String?, modifier: Modifier) {
     val context = LocalContext.current
     var playing by remember(video.sha256, token) { mutableStateOf(false) }
     var muted by remember(video.sha256, token) { mutableStateOf(false) }
@@ -78,9 +81,8 @@ private fun GeneratedVideoPlayer(video: GeneratedCalendarVideo, token: String, m
     val player = remember(video.sha256, token) {
         ExoPlayer.Builder(context).setMediaSourceFactory(DefaultMediaSourceFactory(CalendarVideoDataSource.Factory(video, token))).build().apply {
             repeatMode = Player.REPEAT_MODE_OFF
-            // This player is only created after "Reproduzir vídeo" is tapped.
-            // Start as soon as the owned video is ready; do not require a second tap.
-            playWhenReady = true
+            // Only the visible item loads its first frame. Audio and playback wait for the tap.
+            playWhenReady = false
             setMediaItem(MediaItem.fromUri(Uri.parse(CALENDAR_ORIGIN + video.url)))
         }
     }
@@ -100,6 +102,9 @@ private fun GeneratedVideoPlayer(video: GeneratedCalendarVideo, token: String, m
             player.release()
         }
     }
+    LaunchedEffect(player, requested) {
+        if (requested) player.play() else player.pause()
+    }
     Column(modifier) {
         Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
             AndroidView(factory = { viewContext -> PlayerView(viewContext).apply {
@@ -107,10 +112,23 @@ private fun GeneratedVideoPlayer(video: GeneratedCalendarVideo, token: String, m
                 resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT
                 this.player = player
             } }, update = { it.player = player }, onRelease = { it.player = null }, modifier = Modifier.fillMaxSize())
-            if (buffering && !error) CircularProgressIndicator()
+            if (buffering && requested && !error) CircularProgressIndicator()
+            if (!requested) {
+                posterLabel?.takeIf { it.isNotBlank() }?.let { label ->
+                    Surface(modifier = Modifier.align(Alignment.BottomStart).padding(8.dp),
+                        color = Color.Black.copy(alpha = 0.72f), shape = RoundedCornerShape(6.dp)) {
+                        Text(label, color = Color.White, maxLines = 2, overflow = TextOverflow.Ellipsis,
+                            style = MaterialTheme.typography.labelMedium, modifier = Modifier.padding(7.dp))
+                    }
+                }
+                Button(onClick = {
+                    if (error) { error = false; buffering = true; player.prepare() }
+                    onRequest()
+                }) { Text("Reproduzir vídeo") }
+            }
         }
         if (error) Text("Vídeo indisponível. Confira a conexão e tente novamente.")
-        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        if (requested) Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             if (error) OutlinedButton(onClick = {
                 error = false
                 buffering = true
