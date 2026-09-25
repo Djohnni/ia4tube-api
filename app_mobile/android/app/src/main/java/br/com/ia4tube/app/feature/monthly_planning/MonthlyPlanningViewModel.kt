@@ -127,6 +127,11 @@ data class MonthlyPlanningUiState(
     val activePhotoCount: Int
         get() = activePhotos.size
 
+    // O servidor combina artes mensais, avulsas e a primeira arte gratuita.
+    // O saldo mensal sozinho nao deve impedir o envio nem abrir o PIX.
+    val submissionQuantity: Int
+        get() = activePhotoCount
+
     val countedPhotoSlots: Int
         get() = photos.monthlyPlanningCountedSlots()
 
@@ -1015,7 +1020,7 @@ class MonthlyPlanningViewModel(
         confirmPlanningInternal()
     }
 
-    private fun confirmPlanningInternal(reservationOverride: Int? = null) {
+    private fun confirmPlanningInternal() {
         val current = _uiState.value
         val activePhotos = current.activePhotos
         if (activePhotos.isEmpty()) {
@@ -1037,72 +1042,7 @@ class MonthlyPlanningViewModel(
             return
         }
 
-        val requestedReservedArts = reservationOverride?.coerceAtLeast(0) ?: current.reservedArts
-        if (requestedReservedArts <= 0) {
-            viewModelScope.launch {
-                _uiState.update { it.copy(loading = true, uploadError = null, successMessage = null) }
-                val freeArts = when (val me = repository.me()) {
-                    is ApiResult.Success -> me.value.artesMensaisRestantes.coerceAtLeast(0)
-                    is ApiResult.Failure -> current.currentFreeArts
-                }
-                if (freeArts > 0) {
-                    _uiState.update { state ->
-                        state.copy(
-                            loading = false,
-                            currentFreeArts = freeArts,
-                            reservedInput = reservedInputForPhotos(state.activePhotoCount, freeArts),
-                            billingRequired = false,
-                            billingPix = null,
-                            billingPixError = null,
-                            billingPixLoading = false
-                        )
-                    }
-                    confirmPlanningInternal()
-                } else {
-                    val freeArtAvailable = current.requiredStandaloneArts == 1 &&
-                        when (val status = repository.freeArtStatus()) {
-                            is ApiResult.Success -> status.value.active && status.value.available && !status.value.used
-                            is ApiResult.Failure -> false
-                        }
-
-                    if (freeArtAvailable) {
-                        _uiState.update {
-                            it.copy(
-                                loading = false,
-                                billingRequired = false,
-                                billingPix = null,
-                                billingPixError = null,
-                                billingPixLoading = false,
-                                uploadError = null,
-                                successMessage = null
-                            )
-                        }
-                        confirmPlanningInternal(reservationOverride = 1)
-                        return@launch
-                    }
-
-                    MobileAnalytics.track(
-                        "mobile_sem_saldo",
-                        tela = "planejamento_mensal",
-                        produto = "planejamento_mensal",
-                        payload = mapOf("quantidade" to current.requiredStandaloneArts.toString()),
-                        flushNow = true
-                    )
-                    _uiState.update {
-                        it.copy(
-                            loading = false,
-                            billingRequired = true,
-                            billingPix = null,
-                            billingPixError = null,
-                            billingPixLoading = false,
-                            uploadError = null,
-                            successMessage = null
-                        )
-                    }
-                }
-            }
-            return
-        }
+        val requestedReservedArts = current.submissionQuantity
 
         val uiProfile = current.companyProfile
         val nomeEmpresa = uiProfile.nomeEmpresa.trim()
