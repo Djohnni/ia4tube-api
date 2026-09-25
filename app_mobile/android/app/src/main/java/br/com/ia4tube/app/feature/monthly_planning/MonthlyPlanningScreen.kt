@@ -974,7 +974,7 @@ private fun MonthlyPlanningGeneralCalendarContent(
             OutlinedButton(onClick = onImport, modifier = Modifier.fillMaxWidth()) { Text("Adicionar foto ou vídeo") }
         }
         Text(
-            text = "Artes do calendário de publicações.",
+            text = "Artes, fotos e vídeos do mesmo calendário de publicações.",
             style = MaterialTheme.typography.bodyMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant
         )
