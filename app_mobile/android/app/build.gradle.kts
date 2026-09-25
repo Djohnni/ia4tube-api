@@ -51,11 +51,12 @@ android {
         applicationId = "com.ia4tube.app"
         minSdk = 26
         targetSdk = 36
-        versionCode = 57
-        versionName = "0.2.44"
+        versionCode = 58
+        versionName = "0.2.45"
 
         buildConfigField("String", "API_BASE", productionApiBase.asBuildConfigString())
         buildConfigField("String", "PRODUCT_DISCOVERY_API_BASE", productionApiBase.asBuildConfigString())
+        buildConfigField("boolean", "MEDIA_IMPORT_ENTRY_POINTS_VISIBLE", "false")
     }
 
     signingConfigs {

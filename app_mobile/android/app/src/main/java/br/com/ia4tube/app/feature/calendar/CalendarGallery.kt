@@ -30,6 +30,7 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
+import br.com.ia4tube.app.BuildConfig
 import br.com.ia4tube.app.core.art_cache.PrivateArtImage
 import br.com.ia4tube.app.core.art_cache.AndroidPrivateArts
 import br.com.ia4tube.app.feature.calendar.imports.GalleryImportWorkflowHost
@@ -177,8 +178,10 @@ fun CalendarGallery(model: CalendarViewModel, token: String, backLabel: String =
             Text("Ver minhas artes programadas", color = Color.White, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
             IconButton(onClick = model::refresh, enabled = !state.busy) { Icon(Icons.Default.Refresh, "Atualizar", tint = Color.White) }
         }
-        OutlinedButton(onClick = { generatedSource = null; showImport = true }, modifier = Modifier.fillMaxWidth()) {
-            Text("Adicionar foto ou vídeo", color = Color.White)
+        if (BuildConfig.MEDIA_IMPORT_ENTRY_POINTS_VISIBLE) {
+            OutlinedButton(onClick = { generatedSource = null; showImport = true }, modifier = Modifier.fillMaxWidth()) {
+                Text("Adicionar foto ou vídeo", color = Color.White)
+            }
         }
         if (state.busy) LinearProgressIndicator(Modifier.fillMaxWidth())
         state.error?.let { Text(it, color = Color(0xFFFFB4AB), modifier = Modifier.padding(8.dp)) }
@@ -221,7 +224,7 @@ fun CalendarGallery(model: CalendarViewModel, token: String, backLabel: String =
                                 if (art.media != null) showMediaInfo = art else editing = art to "destination"
                             }
                             if (art.media != null || art.generatedVideo != null) GalleryAction(Icons.Default.Info, "Música/Áudio", true) { showMediaInfo = art }
-                            if (art.sourceKind != "upload" && art.imageUrl != null) {
+                            if (BuildConfig.MEDIA_IMPORT_ENTRY_POINTS_VISIBLE && art.sourceKind != "upload" && art.imageUrl != null) {
                                 GalleryAction(Icons.Default.Add, "Usar com música", state.fresh && !state.busy) { generatedSource = art; showImport = true }
                             }
                             GalleryAction(Icons.Default.Edit, "Legenda", art.editable && !art.preparationPending && state.fresh && !state.busy) { editing = art to "caption" }

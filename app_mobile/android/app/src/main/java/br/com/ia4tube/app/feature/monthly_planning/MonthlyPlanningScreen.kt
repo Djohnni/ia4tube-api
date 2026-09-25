@@ -970,9 +970,11 @@ private fun MonthlyPlanningGeneralCalendarContent(
             }
         }
         OutlinedButton(onClick = onGallery, modifier = Modifier.fillMaxWidth()) { Text("Ver minhas artes programadas") }
-        OutlinedButton(onClick = onImport, modifier = Modifier.fillMaxWidth()) { Text("Adicionar foto ou vídeo") }
+        if (br.com.ia4tube.app.BuildConfig.MEDIA_IMPORT_ENTRY_POINTS_VISIBLE) {
+            OutlinedButton(onClick = onImport, modifier = Modifier.fillMaxWidth()) { Text("Adicionar foto ou vídeo") }
+        }
         Text(
-            text = "Artes, fotos e vídeos do mesmo calendário de publicações.",
+            text = "Artes do calendário de publicações.",
             style = MaterialTheme.typography.bodyMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant
         )
