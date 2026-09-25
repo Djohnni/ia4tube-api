@@ -20,10 +20,12 @@ const {
   emitInstagramScopeEvidence
 } = require("./instagram-scope-evidence");
 const {
-  PROFESSIONAL_ACCOUNT_DISCOVERY_FAILURE_CODES
+  PROFESSIONAL_ACCOUNT_DISCOVERY_FAILURE_CODES,
+  TOKEN_EXTENSION_FAILURE_CODES
 } = require("./instagram-oauth-failure");
 
 const INSTAGRAM_EXCHANGE_TIMEOUT_MS = 5000;
+const INSTAGRAM_LONG_LIVED_EXCHANGE_TIMEOUT_MS = 15000;
 const INSTAGRAM_EXCHANGE_MAX_RESPONSE_BYTES = 32 * 1024;
 const INSTAGRAM_EXCHANGE_MAX_TOKEN_BYTES = 8 * 1024;
 const INSTAGRAM_EXCHANGE_MAX_CODE_LENGTH = 2048;
@@ -37,6 +39,9 @@ const INSTAGRAM_DISCOVERY_FIELDS = Object.freeze([
 ]);
 const INSTAGRAM_DISCOVERY_FAILURE_CODES = new Set(
   PROFESSIONAL_ACCOUNT_DISCOVERY_FAILURE_CODES
+);
+const INSTAGRAM_TOKEN_EXTENSION_FAILURE_CODES = new Set(
+  TOKEN_EXTENSION_FAILURE_CODES
 );
 const INSTAGRAM_DISCOVERY_COMPONENT = "social_instagram_oauth";
 const INSTAGRAM_DISCOVERY_EVENT = "provider_account_discovery_evidence";
@@ -83,6 +88,33 @@ class InstagramDiscoveryError extends Error {
     this.code = code;
     this.evidence = evidence;
   }
+}
+
+class InstagramTokenExtensionError extends Error {
+  constructor(code) {
+    super("Troca OAuth Instagram recusada.");
+    this.name = "InstagramTokenExtensionError";
+    this.code = INSTAGRAM_TOKEN_EXTENSION_FAILURE_CODES.has(code)
+      ? code
+      : "provider_token_extension_invalid_response";
+  }
+}
+
+function tokenExtensionFailure(code) {
+  throw new InstagramTokenExtensionError(code);
+}
+
+function tokenExtensionHttpCode(status) {
+  if ([400, 401, 403, 429].includes(status)) {
+    return `provider_token_extension_http_${status}`;
+  }
+  if (Number.isInteger(status) && status >= 400 && status <= 499) {
+    return "provider_token_extension_http_4xx";
+  }
+  if (Number.isInteger(status) && status >= 500 && status <= 599) {
+    return "provider_token_extension_http_5xx";
+  }
+  return "provider_token_extension_http_rejected";
 }
 
 function containsKnownSecret(value, forbiddenValues) {
@@ -841,15 +873,26 @@ function parseExchangeResponse(body, logger) {
 }
 
 function parseLongLivedTokenResponse(body) {
-  const decoded = strictRecord(parseJsonRecord(body), [
-    "access_token",
-    "token_type",
-    "expires_in"
-  ]);
+  let decoded;
+  try {
+    decoded = parseJsonRecord(body);
+  } catch {
+    tokenExtensionFailure("provider_token_extension_invalid_json");
+  }
+  try {
+    decoded = strictRecord(decoded, [
+      "access_token",
+      "token_type",
+      "expires_in"
+    ]);
+  } catch {
+    tokenExtensionFailure("provider_token_extension_invalid_shape");
+  }
   const rawToken = decoded.access_token;
   decoded.access_token = null;
-  const accessToken = tokenBuffer(rawToken);
+  let accessToken;
   try {
+    accessToken = tokenBuffer(rawToken);
     if (
       decoded.token_type !== "bearer" ||
       !Number.isSafeInteger(decoded.expires_in) ||
@@ -863,8 +906,9 @@ function parseLongLivedTokenResponse(body) {
       expiresIn: decoded.expires_in
     });
   } catch (error) {
-    accessToken.fill(0);
-    throw error;
+    if (accessToken) accessToken.fill(0);
+    if (error instanceof InstagramTokenExtensionError) throw error;
+    tokenExtensionFailure("provider_token_extension_invalid_shape");
   }
 }
 
@@ -931,6 +975,9 @@ function createInstagramProvider(options = {}) {
   const timeoutMs = options.timeoutMs === undefined
     ? INSTAGRAM_EXCHANGE_TIMEOUT_MS
     : options.timeoutMs;
+  const longLivedTimeoutMs = options.timeoutMs === undefined
+    ? INSTAGRAM_LONG_LIVED_EXCHANGE_TIMEOUT_MS
+    : timeoutMs;
   if (
     typeof setTimer !== "function" ||
     typeof clearTimer !== "function" ||
@@ -969,7 +1016,12 @@ function createInstagramProvider(options = {}) {
     return url.toString();
   }
 
-  async function requestOnce(startRequest, parseResponse) {
+  async function requestOnce(
+    startRequest,
+    parseResponse,
+    diagnoseExtension = false,
+    deadlineMs = timeoutMs
+  ) {
     const controller = new AbortController();
     const timedOut = Object.freeze({ timedOut: true });
     const completed = Object.freeze({ timedOut: false });
@@ -979,6 +1031,7 @@ function createInstagramProvider(options = {}) {
     let timerStarted = false;
     let response;
     let body;
+    let phase = "transport";
     const deadline = new Promise((resolve) => {
       settleDeadline = resolve;
     });
@@ -1002,9 +1055,10 @@ function createInstagramProvider(options = {}) {
         expired = true;
         settleDeadline(timedOut);
         controller.abort();
-      }, timeoutMs);
+      }, deadlineMs);
       timerStarted = true;
       response = await withinBudget(() => startRequest(controller.signal));
+      phase = "response";
       if (
         !response ||
         !Number.isInteger(response.status) ||
@@ -1012,18 +1066,38 @@ function createInstagramProvider(options = {}) {
       ) {
         providerFail();
       }
+      phase = "content_type";
       requireContentType(response);
+      phase = "body";
       body = await readResponseBody(response, Object.freeze({
         signal: controller.signal,
         withinBudget
       }));
       if (expired || controller.signal.aborted) throw timedOut;
+      phase = "parse";
       const result = parseResponse(body);
       if (expired || controller.signal.aborted) {
         clearResultToken(result);
         throw timedOut;
       }
       return result;
+    } catch (error) {
+      if (!diagnoseExtension) throw error;
+      if (error === timedOut || expired || controller.signal.aborted) {
+        tokenExtensionFailure("provider_token_extension_timeout");
+      }
+      if (error instanceof InstagramTokenExtensionError) throw error;
+      if (phase === "transport") {
+        tokenExtensionFailure("provider_token_extension_transport_failed");
+      }
+      if (phase === "response" && Number.isInteger(response?.status) &&
+          response.status !== 200) {
+        tokenExtensionFailure(tokenExtensionHttpCode(response.status));
+      }
+      if (phase === "content_type") {
+        tokenExtensionFailure("provider_token_extension_invalid_content_type");
+      }
+      tokenExtensionFailure("provider_token_extension_invalid_response");
     } finally {
       try {
         if (timerStarted) clearTimer(timer);
@@ -1105,9 +1179,16 @@ function createInstagramProvider(options = {}) {
             })
           );
         },
-        parseLongLivedTokenResponse
+        parseLongLivedTokenResponse,
+        true,
+        longLivedTimeoutMs
       );
-      const observedAt = clock();
+      let observedAt;
+      try {
+        observedAt = clock();
+      } catch {
+        tokenExtensionFailure("provider_token_extension_invalid_expiry");
+      }
       const expiresAtMilliseconds =
         observedAt + exchanged.expiresIn * 1000;
       const expiresAt = new Date(expiresAtMilliseconds);
@@ -1118,15 +1199,16 @@ function createInstagramProvider(options = {}) {
         expiresAtMilliseconds <= observedAt ||
         Number.isNaN(expiresAt.getTime())
       ) {
-        providerFail();
+        tokenExtensionFailure("provider_token_extension_invalid_expiry");
       }
       return Object.freeze({
         accessToken: exchanged.accessToken,
         expiresIn: exchanged.expiresIn,
         expiresAt
       });
-    } catch {
+    } catch (error) {
       clearResultToken(exchanged);
+      if (error instanceof InstagramTokenExtensionError) throw error;
       providerFail();
     } finally {
       shortLivedToken.fill(0);
@@ -1482,6 +1564,7 @@ module.exports = {
   INSTAGRAM_EXCHANGE_TIMEOUT_MS,
   INSTAGRAM_GRAPH_API_ORIGIN,
   INSTAGRAM_LONG_LIVED_MAX_EXPIRES_SECONDS,
+  INSTAGRAM_LONG_LIVED_EXCHANGE_TIMEOUT_MS,
   INSTAGRAM_LONG_LIVED_TOKEN_ENDPOINT,
   INSTAGRAM_OAUTH_REDIRECT_URI,
   INSTAGRAM_OAUTH_SCOPES,

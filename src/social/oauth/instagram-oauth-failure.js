@@ -26,6 +26,28 @@ const PROFESSIONAL_ACCOUNT_DISCOVERY_FAILURE_CODE_SET = new Set(
   PROFESSIONAL_ACCOUNT_DISCOVERY_FAILURE_CODES
 );
 
+// Fixed labels only: OAuth audit details must never contain provider response
+// bodies, token-bearing URLs or arbitrary error messages.
+const TOKEN_EXTENSION_FAILURE_CODES = Object.freeze([
+  "provider_token_extension_timeout",
+  "provider_token_extension_transport_failed",
+  "provider_token_extension_http_400",
+  "provider_token_extension_http_401",
+  "provider_token_extension_http_403",
+  "provider_token_extension_http_429",
+  "provider_token_extension_http_4xx",
+  "provider_token_extension_http_5xx",
+  "provider_token_extension_http_rejected",
+  "provider_token_extension_invalid_content_type",
+  "provider_token_extension_invalid_json",
+  "provider_token_extension_invalid_shape",
+  "provider_token_extension_invalid_expiry",
+  "provider_token_extension_invalid_response"
+]);
+const TOKEN_EXTENSION_FAILURE_CODE_SET = new Set(
+  TOKEN_EXTENSION_FAILURE_CODES
+);
+
 const STAGE_DETAILS = Object.freeze({
   [OAUTH_FAILURE_STAGES.CODE_EXCHANGE]: "provider_code_exchange_failed",
   [OAUTH_FAILURE_STAGES.TOKEN_EXTENSION_OR_VALIDATION]:
@@ -45,12 +67,19 @@ const OAUTH_FAILURE_DETAIL_CODES = Object.freeze([
   ...new Set([
     ...Object.values(STAGE_DETAILS),
     ...PROFESSIONAL_ACCOUNT_DISCOVERY_FAILURE_CODES,
+    ...TOKEN_EXTENSION_FAILURE_CODES,
     "controlled_username_mismatch",
     "provider_permissions_missing"
   ])
 ]);
 
 function classifyOAuthFailure(stage, error) {
+  if (
+    stage === OAUTH_FAILURE_STAGES.TOKEN_EXTENSION_OR_VALIDATION &&
+    TOKEN_EXTENSION_FAILURE_CODE_SET.has(error?.code)
+  ) {
+    return error.code;
+  }
   if (
     stage === OAUTH_FAILURE_STAGES.PROFESSIONAL_ACCOUNT_DISCOVERY &&
     PROFESSIONAL_ACCOUNT_DISCOVERY_FAILURE_CODE_SET.has(error?.code)
@@ -76,5 +105,6 @@ module.exports = {
   OAUTH_FAILURE_DETAIL_CODES,
   OAUTH_FAILURE_STAGES,
   PROFESSIONAL_ACCOUNT_DISCOVERY_FAILURE_CODES,
+  TOKEN_EXTENSION_FAILURE_CODES,
   classifyOAuthFailure
 };
