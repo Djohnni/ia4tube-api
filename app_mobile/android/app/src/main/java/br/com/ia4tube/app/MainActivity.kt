@@ -1,6 +1,7 @@
 package br.com.ia4tube.app
 
 import android.app.Activity
+import android.annotation.SuppressLint
 import android.content.Intent
 import android.net.Uri
 import android.os.Bundle
@@ -46,6 +47,8 @@ class MainActivity : ComponentActivity() {
     private var updateFlowLaunched = false
     private var updateStartRequested = false
     private var launchedMandatoryUpdate = false
+    // This activity is a ComponentActivity, not a FragmentActivity; the Fragment version check does not apply.
+    @SuppressLint("InvalidFragmentVersionForActivityResult")
     private val updateLauncher = registerForActivityResult(
         ActivityResultContracts.StartIntentSenderForResult()
     ) { result ->
