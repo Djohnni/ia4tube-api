@@ -28,6 +28,7 @@ const REQUIRED_IDENTITY = Object.freeze([
 const OFFICIAL_ADDRESS =
   "ALDO VALDIR PINTARELLI, 502, TAMANDUA, CEP 89138000, ASCURRA/SC";
 const EFFECTIVE_DATE = "2 de setembro de 2026";
+const SOCIAL_POLICY_UPDATE_DATE = "25 de setembro de 2026";
 const FORBIDDEN_DRAFT_LABELS = Object.freeze([
   "RASCUNHO TÉCNICO PÚBLICO",
   "NÃO APROVADO JURIDICAMENTE",
@@ -122,9 +123,9 @@ function assertFinalPage(response) {
     true,
     "Data de vigencia ausente"
   );
-  assert.equal(
-    response.body.includes(`<strong>Última atualização:</strong> ${EFFECTIVE_DATE}`),
-    true,
+  assert.match(
+    response.body,
+    new RegExp(`<strong>Última atualização:</strong> (?:${EFFECTIVE_DATE}|${SOCIAL_POLICY_UPDATE_DATE})\\.`),
     "Data de atualizacao ausente"
   );
   for (const value of REQUIRED_IDENTITY) {
@@ -303,8 +304,14 @@ async function main() {
   assert.ok(retentionSection, "Seção pública de retenção ausente");
   assert.deepEqual(retentionSection.match(/\b\d+(?:[.,]\d+)?\b/g), ["7", "12", "10", "5", "6"]);
   assert.match(templates.terms, /pelo menos 18 anos/i);
-  assert.match(templates.terms, /Publicação automática nunca começa selecionada/i);
+  assert.match(templates.terms, /Publicação automática inicia habilitada/i);
   assert.match(templates.terms, /permalink/i);
+  for (const id of ["privacy", "terms"]) {
+    assert.match(templates[id], new RegExp(`<strong>Última atualização:</strong> ${SOCIAL_POLICY_UPDATE_DATE}\\.`));
+  }
+  assert.match(templates.dataDeletion, new RegExp(`<strong>Última atualização:</strong> ${EFFECTIVE_DATE}\\.`));
+  assert.doesNotMatch(templates.privacy, /nunca começa selecionada|não ativa a Publicação automática/i);
+  assert.doesNotMatch(templates.terms, /nunca começa selecionada|não ativa a Publicação automática|deve revisar o resultado antes/i);
   assert.doesNotMatch(templates.dataDeletion, /migração necessária não foi aplicada/i);
   assert.doesNotMatch(
     templates.dataDeletion,
@@ -331,9 +338,9 @@ async function main() {
   const allLegalContent = Object.values(templates).join("\n");
   const requiredSocialContract = [
     /cada empresa pode conectar uma conta profissional Instagram Business ou Creator/i,
-    /conectar (?:uma conta )?não publica/i,
-    /não ativa a Publicação automática/i,
-    /Publicação automática nunca começa selecionada/i,
+    /conectar (?:a |uma )?conta, por si só, não publica/i,
+    /Publicação automática inicia habilitada/i,
+    /autoriza a publicação ao confirmar o pedido/i,
     /geração automática e publicação são controles independentes/i,
     /senha do Instagram é digitada somente no ambiente oficial da Meta/i,
     /IA4Tube não recebe (?:essa|a) senha/i,
@@ -347,7 +354,8 @@ async function main() {
     /protocolo opaco, usado como código de confirmação, e um link de acompanhamento/i,
     /conteúdo atrasado nunca é publicado automaticamente depois de uma reconexão/i,
     /“Enviando” e “Confirmando” não significam “Publicado”/i,
-    /confirmação com referência do provedor e permalink/i
+    /confirmação verificável do provedor/i,
+    /permalink é mostrado quando a plataforma o fornece/i
   ];
   for (const contractRule of requiredSocialContract) {
     assert.match(allLegalContent, contractRule, `Regra social ausente: ${contractRule}`);
