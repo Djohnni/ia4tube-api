@@ -57,6 +57,27 @@ class InstagramIntentPolicyTest {
         assertFalse(InstagramIntentPolicy.observe(intent, publication().copy(permalink = null))!!.confirmed)
     }
 
+    @Test fun onlyMatchingPermanentBackendFailureCanReleaseTheLocalIntent() {
+        val intent = InstagramIntentPolicy.create(mediaId,
+            InstagramConnection(connectionId, "connected", "healthy", "@empresa", "business", "123456789012345", 4L))
+            .copy(publicationId = publicationId)
+        val failed = publication().copy(state = "failed_permanent", providerMediaId = null,
+            permalink = null, publishedAt = null)
+        assertTrue(InstagramIntentPolicy.matchesTerminalFailure(intent, failed))
+        for (unproven in listOf(
+            failed.copy(state = "failed_temporary"),
+            failed.copy(state = "provider_confirming"),
+            failed.copy(publicationId = connectionId),
+            failed.copy(connectionId = publicationId),
+            failed.copy(mediaId = "reviewer-jpeg:" + "b".repeat(64)),
+            failed.copy(binding = failed.binding!!.copy(connectionRevision = 5L))
+        )) assertFalse(InstagramIntentPolicy.matchesTerminalFailure(intent, unproven))
+        assertFalse(InstagramIntentPolicy.matchesTerminalFailure(intent.copy(publicationId = null), failed))
+        assertFalse(InstagramIntentPolicy.matchesTerminalFailure(intent.copy(boundExternalId = null,
+            expectedConnectionRevision = null), failed))
+        assertFalse(InstagramIntentPolicy.matchesTerminalFailure(intent.copy(confirmed = true), failed))
+    }
+
     @Test fun intentCapturesConfirmedAccountAndRejectsSameConnectionWithDifferentAccount() {
         val connection = InstagramConnection(connectionId, "connected", "healthy", "@empresa", "business", "123456789012345", 4L)
         val intent = InstagramIntentPolicy.create(mediaId, connection)

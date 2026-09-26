@@ -279,6 +279,8 @@ class InstagramRouteExitTest {
         override fun create(contextKey: String, intent: InstagramPublicationIntent) = false
         override fun update(contextKey: String, intent: InstagramPublicationIntent) = false
         override fun removeConfirmed(contextKey: String, clientRequestId: String) = false
+        override fun removeTerminalFailure(contextKey: String, clientRequestId: String,
+            publication: InstagramPublication) = false
     }
 
     companion object {

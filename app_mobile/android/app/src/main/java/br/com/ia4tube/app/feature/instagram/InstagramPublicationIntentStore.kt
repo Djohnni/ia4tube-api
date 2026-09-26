@@ -25,6 +25,8 @@ interface InstagramPublicationIntentStore {
     fun create(contextKey: String, intent: InstagramPublicationIntent): Boolean
     fun update(contextKey: String, intent: InstagramPublicationIntent): Boolean
     fun removeConfirmed(contextKey: String, clientRequestId: String): Boolean
+    /** The caller must obtain the terminal publication from the server before clearing the local intent. */
+    fun removeTerminalFailure(contextKey: String, clientRequestId: String, publication: InstagramPublication): Boolean
 }
 
 object InstagramIntentPolicy {
@@ -80,6 +82,10 @@ object InstagramIntentPolicy {
         ) return null
         return intent.copy(confirmed = publication.confirmed)
     }
+
+    fun matchesTerminalFailure(intent: InstagramPublicationIntent, publication: InstagramPublication): Boolean =
+        !intent.confirmed && hasAccountBinding(intent) && intent.publicationId != null &&
+            publication.state == "failed_permanent" && observe(intent, publication) != null
 }
 
 /** v1/v2 records remain readable, but missing stable identity/revision never authorize continuation. */

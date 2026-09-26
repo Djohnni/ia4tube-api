@@ -149,6 +149,94 @@ class InstagramViewModelTest {
         assertEquals(listOf(original.clientRequestId, original.clientRequestId), gateway.intentLookups)
     }
 
+    @Test fun explicitNewDraftAfterMatchingPermanentFailureDoesNotRepeatTheOldPublication() = runTest(dispatcher) {
+        val pending = publicationFixture(confirmed = false)
+        val terminal = pending.copy(state = "failed_permanent")
+        val intent = InstagramIntentPolicy.create(MEDIA.id, CONNECTION).copy(publicationId = PUBLICATION_ID)
+        val store = MemoryIntentStore().apply { seed(contextKey(), intent) }
+        val gateway = SyntheticGateway().apply {
+            history = InstagramHistory(listOf(pending), false, true)
+            publicationResult = InstagramResult.Success(pending)
+            onReconcile = {
+                history = InstagramHistory(listOf(terminal), true, true)
+                InstagramResult.Success(terminal)
+            }
+        }
+        val model = model(gateway, store)
+        model.onResume(); model.awaitIdle()
+        assertTrue(model.uiState.value.canContinueConfirmation)
+        assertFalse(model.uiState.value.canStartNewDraft)
+
+        model.requestContinuationConfirmation()
+        model.continuePublicationConfirmation(); model.awaitIdle()
+        assertEquals(listOf(PUBLICATION_ID), gateway.reconcileCalls)
+        assertEquals(terminal, model.uiState.value.terminalFailure)
+        assertTrue(model.uiState.value.canStartNewDraft)
+        assertEquals(intent, store.read(contextKey()))
+        assertTrue(gateway.publishCalls.isEmpty())
+
+        model.startNewDraft(); model.awaitIdle()
+        assertNull(store.read(contextKey()))
+        assertNull(model.uiState.value.intent)
+        assertNull(model.uiState.value.terminalFailure)
+        assertEquals(listOf(terminal), model.uiState.value.history)
+        assertTrue(gateway.publishCalls.isEmpty())
+        assertEquals(listOf(PUBLICATION_ID), gateway.reconcileCalls)
+    }
+
+    @Test fun reopeningWithAlreadyTerminalPublicationOffersOnlyAnExplicitNewDraft() = runTest(dispatcher) {
+        val terminal = publicationFixture(confirmed = false).copy(state = "failed_permanent")
+        val original = InstagramIntentPolicy.create(MEDIA.id, CONNECTION).copy(publicationId = PUBLICATION_ID)
+        val store = MemoryIntentStore().apply { seed(contextKey(), original) }
+        val gateway = SyntheticGateway().apply {
+            history = InstagramHistory(listOf(terminal), true, true)
+            publicationResult = InstagramResult.Success(terminal)
+        }
+
+        val reopened = model(gateway, store)
+        reopened.onResume(); reopened.awaitIdle()
+        assertEquals(terminal, reopened.uiState.value.terminalFailure)
+        assertFalse(reopened.uiState.value.hasUnresolvedIntent)
+        assertTrue(reopened.uiState.value.canStartNewDraft)
+        assertFalse(reopened.uiState.value.canPublish)
+        assertEquals(original, store.read(contextKey()))
+        assertTrue(gateway.publishCalls.isEmpty())
+        assertTrue(gateway.reconcileCalls.isEmpty())
+
+        reopened.startNewDraft(); reopened.awaitIdle()
+        assertNull(store.read(contextKey()))
+        assertNull(reopened.uiState.value.intent)
+        assertTrue(gateway.publishCalls.isEmpty())
+        assertTrue(gateway.reconcileCalls.isEmpty())
+    }
+
+    @Test fun historyOrNonterminalAndMismatchedLookupsNeverClearAnUnconfirmedIntent() = runTest(dispatcher) {
+        val terminal = publicationFixture(confirmed = false).copy(state = "failed_permanent")
+        val intent = InstagramIntentPolicy.create(MEDIA.id, CONNECTION).copy(publicationId = PUBLICATION_ID)
+        val store = MemoryIntentStore().apply { seed(contextKey(), intent) }
+        val gateway = SyntheticGateway().apply {
+            history = InstagramHistory(listOf(terminal), true, true)
+            publicationResult = InstagramResult.Failure(InstagramError.NETWORK)
+        }
+        val model = model(gateway, store)
+        model.onResume(); model.awaitIdle()
+        assertTrue(model.uiState.value.hasUnresolvedIntent)
+        assertFalse(model.uiState.value.canStartNewDraft)
+
+        for (unproven in listOf(terminal.copy(state = "failed_temporary"),
+            terminal.copy(mediaId = "reviewer-jpeg:" + "b".repeat(64)),
+            terminal.copy(binding = terminal.binding!!.copy(connectionRevision = 5L)))) {
+            gateway.publicationResult = InstagramResult.Success(unproven)
+            model.refresh(); model.awaitIdle()
+            model.startNewDraft(); model.awaitIdle()
+            assertEquals(intent, store.read(contextKey()))
+            assertTrue(model.uiState.value.hasUnresolvedIntent)
+            assertFalse(model.uiState.value.canStartNewDraft)
+        }
+        assertTrue(gateway.publishCalls.isEmpty())
+        assertTrue(gateway.reconcileCalls.isEmpty())
+    }
+
     @Test fun jpegCallbackBeforeResumeWaitsForFreshContextAndCallbackAfterRefreshWorks() = runTest(dispatcher) {
         for (beforeResume in listOf(true, false)) {
             val gateway = SyntheticGateway()
@@ -874,6 +962,15 @@ class InstagramViewModelTest {
             check(!throwOnRemove) { "Synthetic ledger removal failure" }
             val saved = records[contextKey] ?: return false
             if (!saved.confirmed || saved.clientRequestId != clientRequestId) return false
+            records.remove(contextKey)
+            return true
+        }
+        @Synchronized override fun removeTerminalFailure(contextKey: String, clientRequestId: String,
+            publication: InstagramPublication): Boolean {
+            check(!throwOnRemove) { "Synthetic ledger removal failure" }
+            val saved = records[contextKey] ?: return false
+            if (saved.clientRequestId != clientRequestId ||
+                !InstagramIntentPolicy.matchesTerminalFailure(saved, publication)) return false
             records.remove(contextKey)
             return true
         }

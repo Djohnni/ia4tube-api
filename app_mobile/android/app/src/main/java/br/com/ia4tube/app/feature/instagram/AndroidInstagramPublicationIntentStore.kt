@@ -29,6 +29,14 @@ class AndroidInstagramPublicationIntentStore(context: android.content.Context) :
         preferences.edit().remove(key(contextKey)).commit()
     }
 
+    override fun removeTerminalFailure(contextKey: String, clientRequestId: String,
+        publication: InstagramPublication): Boolean = synchronized(lock) {
+        val previous = read(contextKey) ?: return@synchronized false
+        if (previous.clientRequestId != clientRequestId ||
+            !InstagramIntentPolicy.matchesTerminalFailure(previous, publication)) return@synchronized false
+        preferences.edit().remove(key(contextKey)).commit()
+    }
+
     private fun key(contextKey: String): String {
         check(Regex("[0-9a-f]{64}").matches(contextKey)) { "Invalid publication context" }
         return "intent.$contextKey"

@@ -29,6 +29,7 @@ data class InstagramUiState(
     val uploadFeedback: String? = null,
     val uploadLocalDiagnostic: InstagramRequestDiagnostic? = null,
     val intent: InstagramPublicationIntent? = null,
+    val verifiedTerminalFailure: InstagramPublication? = null,
     val storageAvailable: Boolean = true,
     val confirmationOpen: Boolean = false,
     val reconciliationConfirmationOpen: Boolean = false,
@@ -36,7 +37,14 @@ data class InstagramUiState(
     val error: String? = null
 ) {
     val selectedMedia: InstagramMedia? get() = media.firstOrNull { it.id == selectedMediaId }
-    val hasUnresolvedIntent: Boolean get() = intent != null && !intent.confirmed
+    val terminalFailure: InstagramPublication? get() = verifiedTerminalFailure?.takeIf { publication ->
+        intent?.let { InstagramIntentPolicy.matchesTerminalFailure(it, publication) } == true
+    }
+    val hasUnresolvedIntent: Boolean get() = intent != null && !intent.confirmed && terminalFailure == null
+    val canStartNewDraft: Boolean get() = !busy && storageAvailable && historyLoaded &&
+        freshPublicationAvailable && intent?.let { saved ->
+            saved.confirmed || (terminalFailure != null && connection?.binding == saved.binding)
+        } == true
     // Authorization lifecycle, connection lifecycle and operational permission are independent.
     // Only an authoritative terminal snapshot may release an unfinished connection record.
     val authorizationPurpose: String? get() {

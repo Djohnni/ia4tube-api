@@ -297,6 +297,8 @@ class InstagramNavigationRetentionTest {
                         override fun create(contextKey: String, intent: InstagramPublicationIntent): Boolean = mutationRefused()
                         override fun update(contextKey: String, intent: InstagramPublicationIntent): Boolean = mutationRefused()
                         override fun removeConfirmed(contextKey: String, clientRequestId: String): Boolean = mutationRefused()
+                        override fun removeTerminalFailure(contextKey: String, clientRequestId: String,
+                            publication: br.com.ia4tube.app.feature.instagram.InstagramPublication): Boolean = mutationRefused()
                     },
                     apiOrigin = "https://ia4tube-api.onrender.com",
                     gatewayFactory = { gatewayFactories += 1; gateway },

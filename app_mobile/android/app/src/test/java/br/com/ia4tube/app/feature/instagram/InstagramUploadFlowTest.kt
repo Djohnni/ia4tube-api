@@ -676,6 +676,8 @@ class InstagramUploadFlowTest {
         override fun create(contextKey: String, intent: InstagramPublicationIntent): Boolean = true
         override fun update(contextKey: String, intent: InstagramPublicationIntent): Boolean = true
         override fun removeConfirmed(contextKey: String, clientRequestId: String): Boolean = true
+        override fun removeTerminalFailure(contextKey: String, clientRequestId: String,
+            publication: InstagramPublication): Boolean = false
     }
 
     private class MemoryAuthorizationStore : InstagramAuthorizationWitnessStore {

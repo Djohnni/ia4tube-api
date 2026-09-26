@@ -235,6 +235,12 @@ fun InstagramScreen(viewModel: InstagramViewModel, onBack: () -> Unit, tokenProv
                 }
             }
 
+            if (state.terminalFailure != null) {
+                InstagramSection("Publicação não concluída") {
+                    Text("O serviço confirmou uma falha definitiva nesta publicação. O envio anterior não será repetido. Se desejar tentar novamente, prepare outro rascunho explicitamente.")
+                }
+            }
+
             InstagramSection("2. Imagem e legenda") {
                 if (calendar.data.next != null && !showManual) {
                     ScheduledNextContent(calendarModel, tokenProvider(), tokenProvider = tokenProvider) { showCalendarGallery = true }
@@ -359,9 +365,9 @@ fun InstagramScreen(viewModel: InstagramViewModel, onBack: () -> Unit, tokenProv
                         }
                     }
                 }
-                if (state.intent?.confirmed == true) {
+                if (state.intent?.confirmed == true || state.terminalFailure != null) {
                     OutlinedButton(onClick = viewModel::startNewDraft,
-                        enabled = !state.busy && !readingImage && state.storageAvailable && state.freshPublicationAvailable,
+                        enabled = state.canStartNewDraft && !readingImage,
                         colors = outlinedButtonColors, border = actionBorder) {
                         Text("Preparar outra publicação")
                     }
@@ -490,9 +496,10 @@ private fun authorizationLabel(status: String): String = when (status) {
     else -> "A autorização ainda não foi confirmada."
 }
 
-private fun publicationLabel(publication: InstagramPublication): String = when {
+internal fun publicationLabel(publication: InstagramPublication): String = when {
     publication.confirmed -> "Publicação confirmada"
     publication.pending -> "Aguardando confirmação"
-    publication.state == "failed" -> "Publicação não confirmada pelo serviço"
+    publication.state == "failed_temporary" -> "Falha temporária; consulte o resultado antes de outra ação"
+    publication.state == "failed_permanent" -> "Publicação não concluída: falha definitiva"
     else -> "Resultado não confirmado"
 }

@@ -72,6 +72,35 @@ class InstagramUiStateTest {
         assertFalse(state.canPublish)
     }
 
+    @Test fun verifiedPermanentFailureAllowsOnlyAnExplicitNewDraft() {
+        val intent = InstagramIntentPolicy.create(MEDIA_ID, connection).copy(publicationId = PUBLICATION_ID)
+        val failure = InstagramPublication(PUBLICATION_ID, CONNECTION_ID, "failed_permanent", MEDIA_ID,
+            "Legenda", "@empresa", "business", null, null, null,
+            "2026-09-05T12:00:00Z", "2026-09-05T12:00:00Z", connection.binding)
+        val state = ready().copy(intent = intent, verifiedTerminalFailure = failure,
+            history = listOf(failure))
+        assertFalse(state.hasUnresolvedIntent)
+        assertTrue(state.canStartNewDraft)
+        assertFalse(state.canPublish)
+        assertFalse(state.canEditDraft)
+        assertFalse(state.canUpload)
+        assertEquals("Publicação não concluída: falha definitiva", publicationLabel(failure))
+        for (unproven in listOf(
+            state.copy(verifiedTerminalFailure = null),
+            state.copy(verifiedTerminalFailure = failure.copy(state = "failed_temporary")),
+            state.copy(verifiedTerminalFailure = failure.copy(publicationId = CONNECTION_ID)),
+            state.copy(verifiedTerminalFailure = failure.copy(binding = null))
+        )) {
+            assertTrue(unproven.hasUnresolvedIntent)
+            assertFalse(unproven.canStartNewDraft)
+        }
+        assertFalse(state.copy(freshPublicationAvailable = false).canStartNewDraft)
+        assertFalse(state.copy(storageAvailable = false).canStartNewDraft)
+        assertFalse(state.copy(connection = connection.copy(connectionRevision = 5L)).canStartNewDraft)
+        assertEquals("Falha temporária; consulte o resultado antes de outra ação",
+            publicationLabel(failure.copy(state = "failed_temporary")))
+    }
+
     @Test fun busyAndUnwritableLedgerBlockPublication() {
         assertFalse(ready().copy(busy = true).canPublish)
         assertFalse(ready().copy(storageAvailable = false).canPublish)

@@ -246,6 +246,7 @@ class InstagramViewModel(
         val expectedAvailabilityEpoch = availabilityEpoch
         _uiState.update { it.copy(busy = true, availability = InstagramAvailability.CHECKING,
             authorizationUrlToOpen = null,
+            verifiedTerminalFailure = null,
             error = if (it.uploadWitness != null || it.uploadLocalDiagnostic != null) it.error else null,
             message = if (it.uploadWitness != null) it.message else null,
             confirmationOpen = false, reconciliationConfirmationOpen = false) }
@@ -276,6 +277,7 @@ class InstagramViewModel(
                                 draftJpeg = if (changed) null else it.draftJpeg,
                                 draftCaption = if (changed) "" else it.draftCaption,
                                 intent = if (changed) null else it.intent,
+                                verifiedTerminalFailure = null,
                                 uploadWitness = if (changed) null else it.uploadWitness,
                                 uploadDraftMatches = if (changed) false else it.uploadDraftMatches,
                                 uploadFeedback = if (changed) null else it.uploadFeedback,
@@ -715,7 +717,15 @@ class InstagramViewModel(
         if (!isCurrent(epoch)) return
         _uiState.update { it.copy(intent = updated, storageAvailable = saved,
             history = listOf(publication) + it.history.filterNot { item -> item.publicationId == publication.publicationId },
-            message = if (updated.confirmed) "Publicação confirmada pelo Instagram." else UNKNOWN_RESULT) }
+            verifiedTerminalFailure = publication.takeIf {
+                InstagramIntentPolicy.matchesTerminalFailure(updated, it)
+            },
+            message = when {
+                updated.confirmed -> "Publicação confirmada pelo Instagram."
+                InstagramIntentPolicy.matchesTerminalFailure(updated, publication) ->
+                    "O serviço confirmou falha definitiva. Nenhum novo envio foi iniciado."
+                else -> UNKNOWN_RESULT
+            }) }
     }
 
     fun requestContinuationConfirmation() {
@@ -771,7 +781,21 @@ class InstagramViewModel(
                     is InstagramResult.Success -> if (isCurrent(epoch)) {
                         if (InstagramIntentPolicy.observe(intent, result.value) == null) {
                             _uiState.update { it.copy(error = UNKNOWN_RESULT) }
-                        } else observePublication(contextKey, intent, result.value)
+                        } else {
+                            observePublication(contextKey, intent, result.value)
+                            if (result.value.state == "failed_permanent" && isCurrent(epoch)) {
+                                when (val historyResult = api.publications()) {
+                                    is InstagramResult.Success -> if (isCurrent(epoch)) _uiState.update {
+                                        it.copy(history = historyResult.value.publications, historyLoaded = true,
+                                            freshPublicationAvailable = historyResult.value.freshPublicationAvailable)
+                                    }
+                                    is InstagramResult.Failure -> if (isCurrent(epoch)) _uiState.update {
+                                        it.copy(freshPublicationAvailable = false,
+                                            message = "Falha definitiva confirmada. Use Atualizar para conferir se outro envio está disponível.")
+                                    }
+                                }
+                            }
+                        }
                     }
                     is InstagramResult.Failure -> if (isCurrent(epoch)) {
                         if (result.error == InstagramError.BINDING_CONFLICT) failAvailability(result.error)
@@ -792,18 +816,24 @@ class InstagramViewModel(
         if (!synchronizeSession()) return
         val state = _uiState.value
         val intent = state.intent ?: return
-        if (state.busy || !intent.confirmed || !state.storageAvailable || !state.freshPublicationAvailable) return
+        if (!state.canStartNewDraft) return
         val connection = state.connection ?: return
+        if (connection.connectionId != intent.connectionId) return
+        val terminalFailure = state.terminalFailure
         val epoch = sessionEpoch
         val contextKey = InstagramIntentPolicy.contextKey(apiOrigin, connection.connectionId)
         _uiState.update { it.copy(busy = true) }
         operation = viewModelScope.launch {
             try {
-                val removed = withContext(Dispatchers.IO) { intentStore.removeConfirmed(contextKey, intent.clientRequestId) }
+                val removed = withContext(Dispatchers.IO) {
+                    if (terminalFailure == null) intentStore.removeConfirmed(contextKey, intent.clientRequestId)
+                    else intentStore.removeTerminalFailure(contextKey, intent.clientRequestId, terminalFailure)
+                }
                 if (!isCurrent(epoch)) return@launch
                 if (removed) {
                     _uiState.value.draftJpeg?.fill(0)
-                    _uiState.update { it.copy(intent = null, draftJpeg = null, draftCaption = "",
+                    _uiState.update { it.copy(intent = null, verifiedTerminalFailure = null,
+                        draftJpeg = null, draftCaption = "",
                         selectedMediaId = null, uploadDraftMatches = false, message = null, error = null) }
                 } else _uiState.update { it.copy(storageAvailable = false, error = "O registro anterior não pôde ser confirmado.") }
             } catch (cancelled: CancellationException) {
