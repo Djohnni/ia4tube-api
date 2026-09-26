@@ -107,6 +107,24 @@ class InstagramIntentPolicyTest {
         assertTrue(observed.confirmed)
     }
 
+    @Test fun workerManagedIntentSurvivesRestartWithoutEnablingLegacyReconciliation() {
+        val connection = InstagramConnection(connectionId, "connected", "healthy", "@empresa", "business", "123456789012345", 4L)
+        val worker = InstagramIntentPolicy.create(mediaId, connection, workerManaged = true)
+            .copy(publicationId = publicationId)
+        val encoded = InstagramIntentCodec.encode(worker)
+        assertTrue(encoded.startsWith("4|"))
+        assertEquals(worker, InstagramIntentCodec.decode(encoded))
+        assertFalse(InstagramIntentPolicy.canUpdate(worker, worker.copy(workerManaged = false)))
+        assertFalse(InstagramUiState(
+            availability = InstagramAvailability.AVAILABLE,
+            operationalAvailability = InstagramOperationalAvailability(true, true),
+            connection = connection,
+            intent = worker,
+            history = listOf(publication().copy(state = "provider_confirming", providerMediaId = null,
+                permalink = null, publishedAt = null))
+        ).canContinueConfirmation)
+    }
+
     @Test fun legacyIntentRemainsBlockedAndCannotAcquireAccountFromHistory() {
         val legacy = "1|44444444-4444-4444-8444-444444444444|$mediaId|$connectionId|$publicationId|0"
         val restored = InstagramIntentCodec.decode(legacy)

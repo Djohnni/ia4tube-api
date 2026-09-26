@@ -24,6 +24,8 @@ interface InstagramUploadWitnessStore {
     fun update(contextKey: String, witness: InstagramUploadWitness): Boolean
     /** Only a resolved upload with this exact local ID may be removed. */
     fun clearResolved(contextKey: String, id: String): Boolean
+    /** Explicit recovery: archive an uncertain upload before allowing a different new draft. */
+    fun archiveUnknown(contextKey: String, id: String): Boolean = false
 }
 
 private const val UPLOAD_RECORD_UNAVAILABLE = "Upload attempt record unavailable"
@@ -199,6 +201,20 @@ internal class EncodedInstagramUploadWitnessStore(
         val previous = saved(contextKey)
         if (previous == null || previous.id != id || !InstagramUploadWitnessPolicy.isResolved(previous)) false
         else persist(key(contextKey), null)
+    }
+
+    override fun archiveUnknown(contextKey: String, id: String): Boolean = guarded {
+        check(InstagramPolicies.validUuid(id)) { UPLOAD_RECORD_UNAVAILABLE }
+        val previous = saved(contextKey)
+        if (previous == null || previous.id != id || previous.phase != InstagramUploadPhase.UNKNOWN) false
+        else {
+            val archiveKey = "upload.recovery.$contextKey.$id"
+            val encoded = InstagramUploadWitnessCodec.encode(contextKey, previous)
+            val archived = readValue(archiveKey)
+            if (archived != null && archived != encoded) false
+            else if (archived == null && !persist(archiveKey, encoded)) false
+            else persist(key(contextKey), null)
+        }
     }
 }
 

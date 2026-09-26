@@ -182,6 +182,20 @@ class InstagramUploadWitnessStoreTest {
         assertEquals(unknown(), store.read(contextKey))
     }
 
+    @Test fun explicitUnknownRecoveryArchivesTheOriginalBeforeFreeingTheActiveSlot() {
+        val memory = MemoryStorage()
+        val store = memory.store()
+        assertTrue(store.create(contextKey, prepared()))
+        assertFalse(store.archiveUnknown(contextKey, ATTEMPT_ID))
+        assertTrue(store.update(contextKey, unknown()))
+        assertFalse(store.archiveUnknown(contextKey, OTHER_ID))
+        assertTrue(store.archiveUnknown(contextKey, ATTEMPT_ID))
+        assertNull(store.read(contextKey))
+        val archived = memory.values["upload.recovery.$contextKey.$ATTEMPT_ID"]
+        assertEquals(unknown(), InstagramUploadWitnessCodec.decode(contextKey, archived!!))
+        assertTrue(store.create(contextKey, prepared().copy(id = OTHER_ID)))
+    }
+
     @Test fun explicitLocalRejectionIsAllowedOnlyBeforeUncertaintyIsEstablished() {
         for (started in listOf(false, true)) {
             val store = inMemoryUploadWitnessStore()

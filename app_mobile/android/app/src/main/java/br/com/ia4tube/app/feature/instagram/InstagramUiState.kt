@@ -25,10 +25,12 @@ data class InstagramUiState(
     val selectedMediaId: String? = null,
     val uploadWitness: InstagramUploadWitness? = null,
     val uploadStorageAvailable: Boolean = true,
+    val unknownUploadReviewed: Boolean = false,
     val uploadDraftMatches: Boolean = false,
     val uploadFeedback: String? = null,
     val uploadLocalDiagnostic: InstagramRequestDiagnostic? = null,
     val intent: InstagramPublicationIntent? = null,
+    val publicationLookupAbsent: Boolean = false,
     val verifiedTerminalFailure: InstagramPublication? = null,
     val storageAvailable: Boolean = true,
     val confirmationOpen: Boolean = false,
@@ -68,6 +70,9 @@ data class InstagramUiState(
     val canEditDraft: Boolean get() = !busy && availability == InstagramAvailability.AVAILABLE &&
         connection?.canPublish == true && intent == null && storageAvailable
     val hasUnresolvedUpload: Boolean get() = uploadWitness?.let { !InstagramUploadWitnessPolicy.isResolved(it) } == true
+    val canPrepareNewUploadAfterUnknown: Boolean get() = !busy && storageAvailable && uploadStorageAvailable &&
+        availability == InstagramAvailability.AVAILABLE && historyLoaded && unknownUploadReviewed && intent == null &&
+        uploadWitness?.phase == InstagramUploadPhase.UNKNOWN && uploadWitness?.binding == connection?.binding
     val uploadBlockReason: String? get() = when {
         busy -> uploadWitness?.takeIf { it.phase == InstagramUploadPhase.IN_FLIGHT }
             ?.let(::instagramUploadPhaseLabel) ?: "Há uma consulta ou operação em andamento. Aguarde."
@@ -92,6 +97,14 @@ data class InstagramUiState(
         uploadWitness.binding == connection?.binding && uploadWitness.mediaId == selectedMediaId &&
         operationalAvailability?.publicationAllowed == true &&
         freshPublicationAvailable && authorizationUrlToOpen == null
+    /** The single reviewer action either uploads the chosen draft or resumes its confirmed upload. */
+    val canSend: Boolean get() = !busy && historyLoaded && freshPublicationAvailable &&
+        authorizationUrlToOpen == null && (canUpload || canPublish)
+    val canResumeWorkerIntent: Boolean get() = !busy && storageAvailable && publicationLookupAbsent &&
+        availability == InstagramAvailability.AVAILABLE && operationalAvailability?.publicationAllowed == true &&
+        connection?.canPublish == true && intent?.let {
+            it.workerManaged && it.publicationId == null && InstagramIntentPolicy.matchesAccount(it, connection)
+        } == true
     val pendingPublication: InstagramPublication? get() = intent?.let { saved ->
         history.firstOrNull { it.publicationId == saved.publicationId &&
             it.connectionId == saved.connectionId && it.mediaId == saved.mediaId &&
@@ -100,6 +113,7 @@ data class InstagramUiState(
     val canContinueConfirmation: Boolean get() = !busy && storageAvailable &&
         operationalAvailability?.publicationAllowed == true &&
         availability == InstagramAvailability.AVAILABLE && connection?.canPublish == true && hasUnresolvedIntent &&
+        intent?.workerManaged != true &&
         intent?.let { InstagramIntentPolicy.matchesAccount(it, connection) } == true &&
         pendingPublication?.state == "provider_confirming"
 }

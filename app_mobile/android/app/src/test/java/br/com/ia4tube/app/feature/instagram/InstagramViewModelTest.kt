@@ -115,6 +115,35 @@ class InstagramViewModelTest {
         assertEquals("A confirmed intent still needs an explicit new draft", 1, gateway.publishCalls.size)
     }
 
+    @Test fun absentWorkerLookupCanResumeOnlyTheOriginalIdempotentIntent() = runTest(dispatcher) {
+        val original = InstagramIntentPolicy.create(MEDIA.id, CONNECTION, workerManaged = true)
+        val store = MemoryIntentStore().apply { seed(contextKey(), original) }
+        val pending = publicationFixture(confirmed = false).copy(state = "sending")
+        val gateway = SyntheticGateway().apply {
+            intentResult = InstagramResult.Success(null)
+            onPublish = { mediaId, requestId ->
+                assertEquals(original.mediaId, mediaId)
+                assertEquals(original.clientRequestId, requestId)
+                InstagramResult.Success(pending)
+            }
+        }
+        val model = model(gateway, store)
+        model.onResume(); model.awaitIdle()
+        assertEquals(listOf(original.clientRequestId), gateway.intentLookups)
+        assertTrue(model.uiState.value.canResumeWorkerIntent)
+
+        model.resumeWorkerIntent()
+        model.resumeWorkerIntent()
+        model.awaitIdle()
+
+        assertEquals(listOf(original.mediaId to original.clientRequestId), gateway.publishCalls)
+        assertEquals(original.clientRequestId, store.read(contextKey())?.clientRequestId)
+        assertEquals(PUBLICATION_ID, store.read(contextKey())?.publicationId)
+        assertTrue(store.read(contextKey())?.workerManaged == true)
+        assertFalse(model.uiState.value.canResumeWorkerIntent)
+        assertTrue(gateway.reconcileCalls.isEmpty())
+    }
+
     @Test fun lostResponseIsNeverRetriedOrGuessedFromMatchingHistoryOnResume() = runTest(dispatcher) {
         val store = MemoryIntentStore()
         val gateway = SyntheticGateway().apply {

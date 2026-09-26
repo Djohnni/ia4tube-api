@@ -43,6 +43,62 @@ class InstagramUploadFlowTest {
         Dispatchers.resetMain()
     }
 
+    @Test fun oneSendUploadsThenQueuesTheSameMediaWithADurableRequestId() = runTest(dispatcher) {
+        val model = model()
+        prepareReadyScreen(model)
+        selectDraft(model)
+        assertTrue(model.uiState.value.canSend)
+        enqueueJson(uploadSuccess(MEDIA_ONE), status = 201)
+        enqueueJson(JSONObject().put("ok", true).put("duplicateSubmissionPrevented", false)
+            .put("publication", pendingPublication(MEDIA_ONE)), status = 202)
+
+        model.send()
+        model.send()
+        model.awaitIdle()
+
+        val upload = server.takeRequest()
+        val publish = server.takeRequest()
+        assertEquals("/v1/social/reviewer/media", upload.path)
+        assertEquals("POST", upload.method)
+        assertEquals("/v1/social/reviewer/publications", publish.path)
+        assertEquals("POST", publish.method)
+        val body = JSONObject(publish.body.readUtf8())
+        assertEquals(MEDIA_ONE, body.getString("mediaId"))
+        assertEquals(CONNECTION, body.getString("expectedConnectionId"))
+        assertEquals(EXTERNAL_ID, body.getString("expectedExternalId"))
+        assertEquals(CONNECTION_REVISION, body.getLong("expectedConnectionRevision"))
+        assertEquals(model.uiState.value.intent?.clientRequestId, body.getString("clientRequestId"))
+        assertEquals("sending", model.uiState.value.pendingPublication?.state)
+        assertFalse(model.uiState.value.canSend)
+        model.send()
+        assertEquals(6, server.requestCount)
+    }
+
+    @Test fun uncertainUploadRequiresAConsultationAndExplicitNewDraftWithoutPublication() = runTest(dispatcher) {
+        val model = model()
+        prepareReadyScreen(model)
+        selectDraft(model)
+        enqueueJson(JSONObject().put("ok", false).put("code", "reviewer_media_storage_unavailable"), 500)
+        model.send()
+        model.awaitIdle()
+        assertEquals(InstagramUploadPhase.UNKNOWN, model.uiState.value.uploadWitness?.phase)
+        assertFalse(model.uiState.value.canPrepareNewUploadAfterUnknown)
+        assertEquals(5, server.requestCount)
+        assertEquals("/v1/social/reviewer/media", server.takeRequest().path)
+
+        enqueueRefresh()
+        model.refresh()
+        model.awaitIdle()
+        consumeRefreshRequests()
+        assertTrue(model.uiState.value.canPrepareNewUploadAfterUnknown)
+        model.prepareNewUploadAfterUnknown()
+        model.awaitIdle()
+        assertNull(model.uiState.value.uploadWitness)
+        assertNull(model.uiState.value.draftJpeg)
+        assertNull(model.uiState.value.intent)
+        assertEquals(9, server.requestCount)
+    }
+
     @Test fun screenUploadBlockedByClosedPublicationGateShowsTheActualReasonWithoutPosting() =
         runTest(dispatcher) {
             val model = model()
@@ -666,6 +722,22 @@ class InstagramUploadFlowTest {
         .put("ok", true)
         .put("contentOwnerDerivedFromSession", true)
         .put("media", media(mediaId, caption))
+
+    private fun pendingPublication(mediaId: String) = JSONObject()
+        .put("publicationId", "33333333-3333-4333-8333-333333333333")
+        .put("connectionId", CONNECTION)
+        .put("state", "sending")
+        .put("media", JSONObject().put("id", mediaId).put("mimeType", "image/jpeg"))
+        .put("caption", "$CAPTION\n\n#IA4TubeReview_fixture")
+        .put("account", JSONObject().put("username", "@fixture_account").put("accountType", "business"))
+        .put("providerMediaId", JSONObject.NULL)
+        .put("permalink", JSONObject.NULL)
+        .put("publishedAt", JSONObject.NULL)
+        .put("createdAt", "2026-09-26T12:00:00Z")
+        .put("updatedAt", "2026-09-26T12:00:00Z")
+        .put("binding", JSONObject().put("connectionId", CONNECTION).put("externalId", EXTERNAL_ID)
+            .put("connectionRevision", CONNECTION_REVISION))
+        .put("destination", "feed")
 
     private suspend fun InstagramViewModel.awaitIdle() {
         uiState.first { !it.busy }

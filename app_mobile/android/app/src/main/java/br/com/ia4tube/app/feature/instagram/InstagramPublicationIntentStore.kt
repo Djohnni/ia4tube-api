@@ -13,7 +13,8 @@ data class InstagramPublicationIntent(
     val accountUsername: String? = null,
     val accountType: String? = null,
     val boundExternalId: String? = null,
-    val expectedConnectionRevision: Long? = null
+    val expectedConnectionRevision: Long? = null,
+    val workerManaged: Boolean = false
 ) {
     val binding: InstagramConnectionBinding? get() = if (boundExternalId != null && expectedConnectionRevision != null)
         InstagramConnectionBinding(connectionId, boundExternalId, expectedConnectionRevision).takeIf { it.valid } else null
@@ -38,12 +39,13 @@ object InstagramIntentPolicy {
     fun create(mediaId: String, connectionId: String): InstagramPublicationIntent =
         InstagramPublicationIntent(UUID.randomUUID().toString(), mediaId, connectionId)
 
-    fun create(mediaId: String, connection: InstagramConnection): InstagramPublicationIntent {
+    fun create(mediaId: String, connection: InstagramConnection, workerManaged: Boolean = false): InstagramPublicationIntent {
         require(connection.canPublish && InstagramPolicies.validUuid(connection.connectionId))
         require(InstagramPolicies.validMediaId(mediaId))
         return InstagramPublicationIntent(UUID.randomUUID().toString(), mediaId, connection.connectionId,
             accountUsername = connection.username, accountType = connection.accountType,
-            boundExternalId = connection.externalId, expectedConnectionRevision = connection.connectionRevision).also {
+            boundExternalId = connection.externalId, expectedConnectionRevision = connection.connectionRevision,
+            workerManaged = workerManaged).also {
             require(hasAccountBinding(it))
         }
     }
@@ -64,6 +66,7 @@ object InstagramIntentPolicy {
             previous.connectionId == next.connectionId && previous.accountUsername == next.accountUsername &&
             previous.accountType == next.accountType && previous.boundExternalId == next.boundExternalId &&
             previous.expectedConnectionRevision == next.expectedConnectionRevision &&
+            previous.workerManaged == next.workerManaged &&
             (previous.publicationId == null || previous.publicationId == next.publicationId) &&
             (!previous.confirmed || next.confirmed)
 
@@ -88,20 +91,21 @@ object InstagramIntentPolicy {
             publication.state == "failed_permanent" && observe(intent, publication) != null
 }
 
-/** v1/v2 records remain readable, but missing stable identity/revision never authorize continuation. */
+/** Older records remain readable; v4 marks a job that the calendar worker reconciles itself. */
 object InstagramIntentCodec {
     fun encode(intent: InstagramPublicationIntent): String {
         require(valid(intent)) { "Publication intent unavailable" }
-        return listOf("3", intent.clientRequestId, intent.mediaId, intent.connectionId,
+        val fields = listOf(if (intent.workerManaged) "4" else "3", intent.clientRequestId, intent.mediaId, intent.connectionId,
             intent.publicationId.orEmpty(), if (intent.confirmed) "1" else "0",
             intent.accountUsername.orEmpty(), intent.accountType.orEmpty(), intent.boundExternalId.orEmpty(),
-            intent.expectedConnectionRevision?.toString().orEmpty()).joinToString("|")
+            intent.expectedConnectionRevision?.toString().orEmpty())
+        return (if (intent.workerManaged) fields + "1" else fields).joinToString("|")
     }
 
     fun decode(encoded: String): InstagramPublicationIntent {
         val fields = encoded.split('|')
         require((fields.size == 6 && fields[0] == "1") || (fields.size == 8 && fields[0] == "2") ||
-            (fields.size == 10 && fields[0] == "3")) {
+            (fields.size == 10 && fields[0] == "3") || (fields.size == 11 && fields[0] == "4" && fields[10] == "1")) {
             "Publication intent unavailable"
         }
         require(fields[5] in setOf("0", "1")) { "Publication intent unavailable" }
@@ -112,7 +116,7 @@ object InstagramIntentCodec {
         val value = InstagramPublicationIntent(fields[1], fields[2], fields[3],
             fields[4].ifBlank { null }, fields[5] == "1",
             fields.getOrNull(6)?.ifBlank { null }, fields.getOrNull(7)?.ifBlank { null },
-            fields.getOrNull(8)?.ifBlank { null }, revision)
+            fields.getOrNull(8)?.ifBlank { null }, revision, fields[0] == "4")
         require(valid(value)) { "Publication intent unavailable" }
         return value
     }
@@ -123,5 +127,6 @@ object InstagramIntentCodec {
             (intent.publicationId == null || InstagramPolicies.validUuid(intent.publicationId)) &&
             (!intent.confirmed || intent.publicationId != null) &&
             ((intent.accountUsername == null && intent.accountType == null) || InstagramIntentPolicy.hasDisplayAccount(intent)) &&
-            ((intent.boundExternalId == null && intent.expectedConnectionRevision == null) || InstagramIntentPolicy.hasAccountBinding(intent))
+            ((intent.boundExternalId == null && intent.expectedConnectionRevision == null) || InstagramIntentPolicy.hasAccountBinding(intent)) &&
+            (!intent.workerManaged || InstagramIntentPolicy.hasAccountBinding(intent))
 }

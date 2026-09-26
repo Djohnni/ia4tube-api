@@ -247,6 +247,8 @@ class InstagramViewModel(
         _uiState.update { it.copy(busy = true, availability = InstagramAvailability.CHECKING,
             authorizationUrlToOpen = null,
             verifiedTerminalFailure = null,
+            unknownUploadReviewed = false,
+            publicationLookupAbsent = false,
             error = if (it.uploadWitness != null || it.uploadLocalDiagnostic != null) it.error else null,
             message = if (it.uploadWitness != null) it.message else null,
             confirmationOpen = false, reconciliationConfirmationOpen = false) }
@@ -277,8 +279,10 @@ class InstagramViewModel(
                                 draftJpeg = if (changed) null else it.draftJpeg,
                                 draftCaption = if (changed) "" else it.draftCaption,
                                 intent = if (changed) null else it.intent,
+                                publicationLookupAbsent = false,
                                 verifiedTerminalFailure = null,
                                 uploadWitness = if (changed) null else it.uploadWitness,
+                                unknownUploadReviewed = false,
                                 uploadDraftMatches = if (changed) false else it.uploadDraftMatches,
                                 uploadFeedback = if (changed) null else it.uploadFeedback,
                                 uploadLocalDiagnostic = if (changed) null else it.uploadLocalDiagnostic,
@@ -362,7 +366,8 @@ class InstagramViewModel(
                                 val publication = result.value
                                 val identified = publication?.let { InstagramIntentPolicy.identify(saved, it) }
                                 if (identified != null) observePublication(contextKey, identified, publication)
-                                else _uiState.update { it.copy(message = UNKNOWN_RESULT) }
+                                else _uiState.update { it.copy(message = UNKNOWN_RESULT,
+                                    publicationLookupAbsent = publication == null && saved.workerManaged) }
                             }
                             is InstagramResult.Failure -> if (isCurrent(epoch)) _uiState.update { it.copy(message = UNKNOWN_RESULT) }
                         }
@@ -370,6 +375,8 @@ class InstagramViewModel(
                 }
                 if (isCurrent(epoch) && expectedAvailabilityEpoch == availabilityEpoch && foreground) {
                     completedRefreshEpoch = expectedAvailabilityEpoch
+                    _uiState.update { it.copy(unknownUploadReviewed =
+                        it.uploadWitness?.phase == InstagramUploadPhase.UNKNOWN && it.intent == null) }
                 }
             } catch (cancelled: CancellationException) {
                 throw cancelled
@@ -461,7 +468,25 @@ class InstagramViewModel(
         _uiState.update { it.copy(error = "Não foi possível abrir o navegador. A autorização não foi confirmada; consulte novamente.") }
     }
 
-    fun upload() {
+    /** One consent action: persist the upload witness, then queue that exact media for publication. */
+    fun send() {
+        if (!synchronizeSession()) {
+            showUploadBlock(InstagramError.SESSION_REQUIRED.message, "local_session_required")
+            return
+        }
+        if (_uiState.value.busy) return
+        if (!_uiState.value.canSend) {
+            showUploadBlock("Confira a imagem, a legenda, a conexão e o histórico antes de enviar.")
+            return
+        }
+        if (_uiState.value.canPublish) queueSelectedPublication(workerManaged = true)
+        else startUpload(publishAfterUpload = true)
+    }
+
+    /** Retained for existing in-progress reviewer drafts; the screen uses send(). */
+    fun upload() = startUpload(publishAfterUpload = false)
+
+    private fun startUpload(publishAfterUpload: Boolean) {
         if (!synchronizeSession()) {
             showUploadBlock(InstagramError.SESSION_REQUIRED.message, "local_session_required")
             return
@@ -473,7 +498,10 @@ class InstagramViewModel(
         val expectedAvailabilityEpoch = availabilityEpoch
         val api = gateway ?: run { showUploadBlock(InstagramError.UNAVAILABLE.message); return }
         val current = _uiState.value
-        val binding = current.connection?.binding ?: run {
+        val connection = current.connection ?: run {
+            showUploadBlock("A identidade da conta não foi confirmada. Use Atualizar."); return
+        }
+        val binding = connection.binding ?: run {
             showUploadBlock("A identidade da conta não foi confirmada. Use Atualizar."); return
         }
         val jpeg = current.draftJpeg?.copyOf() ?: run {
@@ -489,7 +517,8 @@ class InstagramViewModel(
         var record = InstagramUploadWitness(UUID.randomUUID().toString(),
             instagramUploadFingerprint(jpeg, caption), binding, System.currentTimeMillis())
         _uiState.update { it.copy(busy = true, error = null, message = null,
-            uploadFeedback = instagramUploadPhaseLabel(record), uploadLocalDiagnostic = null) }
+            uploadFeedback = instagramUploadPhaseLabel(record), uploadLocalDiagnostic = null,
+            unknownUploadReviewed = false) }
         operation = viewModelScope.launch {
             try {
                 val stored = withContext(Dispatchers.IO) {
@@ -560,8 +589,15 @@ class InstagramViewModel(
                         if (persisted && outcome.phase == InstagramUploadPhase.CONFIRMED) {
                             _uiState.update {
                                 it.copy(media = listOf(result.value) + it.media.filterNot { media -> media.id == result.value.id },
-                                    message = "Imagem enviada. Revise abaixo a prévia da legenda antes de publicar."
+                                    message = if (publishAfterUpload) "Imagem recebida. Solicitando a publicação…"
+                                        else "Imagem enviada. Revise abaixo a prévia da legenda antes de publicar."
                                 ).withUploadDraftBinding()
+                            }
+                            if (publishAfterUpload && isCurrent(epoch)) {
+                                if (_uiState.value.connection?.binding == binding) {
+                                    submitPublication(epoch, api, connection, result.value, workerManaged = true)
+                                } else _uiState.update { it.copy(message =
+                                    "A conexão mudou após o envio da imagem. A publicação não foi solicitada; use Atualizar.") }
                             }
                         } else if (outcome.phase == InstagramUploadPhase.UNKNOWN) {
                             _uiState.update { it.copy(error = InstagramError.INVALID_RESPONSE.message) }
@@ -592,6 +628,38 @@ class InstagramViewModel(
     private fun showUploadBlock(reason: String, code: String = "local_unavailable") {
         _uiState.update { it.copy(error = reason, uploadFeedback = reason,
             uploadLocalDiagnostic = localUploadDiagnostic(code)) }
+    }
+
+    /** Explicitly begin a different draft after consulting an upload whose response was lost. */
+    fun prepareNewUploadAfterUnknown() {
+        if (!synchronizeSession() || !_uiState.value.canPrepareNewUploadAfterUnknown) return
+        val record = _uiState.value.uploadWitness ?: return
+        val key = InstagramIntentPolicy.contextKey(apiOrigin, record.binding.connectionId)
+        val epoch = sessionEpoch
+        _uiState.update { it.copy(busy = true) }
+        operation = viewModelScope.launch {
+            try {
+                val archived = withContext(Dispatchers.IO) { uploadStore.archiveUnknown(key, record.id) }
+                if (!isCurrent(epoch)) return@launch
+                if (!archived) {
+                    _uiState.update { it.copy(uploadStorageAvailable = false,
+                        error = "O registro anterior não pôde ser preservado. Nenhum novo envio foi iniciado.") }
+                    return@launch
+                }
+                _uiState.value.draftJpeg?.fill(0)
+                _uiState.update { it.copy(draftJpeg = null, draftCaption = "", selectedMediaId = null,
+                    uploadWitness = null, uploadDraftMatches = false, unknownUploadReviewed = false,
+                    uploadFeedback = null, uploadLocalDiagnostic = null, error = null,
+                    message = "Escolha novamente a imagem e confira a legenda antes de um novo envio.") }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Exception) {
+                if (isCurrent(epoch)) _uiState.update { it.copy(uploadStorageAvailable = false,
+                    error = "O registro anterior não pôde ser preservado. Nenhum novo envio foi iniciado.") }
+            } finally {
+                if (isCurrent(epoch)) _uiState.update { it.copy(busy = false) }
+            }
+        }
     }
 
     private suspend fun persistUploadResult(key: String, result: InstagramUploadWitness, epoch: Long): Boolean {
@@ -648,58 +716,114 @@ class InstagramViewModel(
 
     fun confirmPublish() {
         if (!synchronizeSession() || !_uiState.value.confirmationOpen || !_uiState.value.canPublish) return
+        queueSelectedPublication(workerManaged = false)
+    }
+
+    private fun queueSelectedPublication(workerManaged: Boolean) {
+        if (!synchronizeSession() || !_uiState.value.canPublish) return
         val epoch = sessionEpoch
         val api = gateway ?: return
         val connection = _uiState.value.connection ?: return
         val selectedMedia = _uiState.value.selectedMedia ?: return
-        val contextKey = InstagramIntentPolicy.contextKey(apiOrigin, connection.connectionId)
-        val intent = InstagramIntentPolicy.create(selectedMedia.id, connection)
-        val binding = intent.binding ?: return
         _uiState.update { it.copy(busy = true, confirmationOpen = false, message = null, error = null) }
         operation = viewModelScope.launch {
             try {
-                // Synchronous durable storage completes BEFORE the first POST. A crash after this
-                // point is treated as uncertain, even if the request had not yet left the device.
-                val stored = withContext(Dispatchers.IO) { intentStore.create(contextKey, intent) }
-                if (!isCurrent(epoch)) return@launch
-                if (!stored) {
-                    _uiState.update { it.copy(storageAvailable = false,
-                        error = "Já existe um registro de envio ou não foi possível salvá-lo. Consulte o resultado antes de continuar.") }
-                    return@launch
-                }
-                _uiState.update { it.copy(intent = intent) }
-                val result = api.publish(intent.mediaId, intent.clientRequestId, binding)
-                if (!isCurrent(epoch)) return@launch
-                when (result) {
-                    is InstagramResult.Success -> {
-                        val publication = result.value
-                        if (publication.connectionId != intent.connectionId || publication.mediaId != intent.mediaId ||
-                            publication.binding != binding) {
-                            _uiState.update { it.copy(error = UNKNOWN_RESULT) }
-                            return@launch
-                        }
-                        val identified = intent.copy(publicationId = publication.publicationId, confirmed = publication.confirmed)
-                        val saved = withContext(Dispatchers.IO) { intentStore.update(contextKey, identified) }
-                        if (!isCurrent(epoch)) return@launch
-                        _uiState.update { it.copy(intent = identified, storageAvailable = saved,
-                            history = listOf(publication) + it.history.filterNot { item -> item.publicationId == publication.publicationId },
-                            freshPublicationAvailable = false,
-                            message = if (publication.confirmed) "Publicação confirmada pelo Instagram." else UNKNOWN_RESULT,
-                            error = if (saved) null else "A confirmação não pôde ser salva. O envio permanece bloqueado.") }
+                submitPublication(epoch, api, connection, selectedMedia, workerManaged)
+            } finally {
+                if (isCurrent(epoch)) _uiState.update { it.copy(busy = false) }
+            }
+        }
+    }
+
+    private suspend fun submitPublication(
+        epoch: Long, api: InstagramGateway, connection: InstagramConnection, selectedMedia: InstagramMedia,
+        workerManaged: Boolean
+    ) {
+        try {
+            val contextKey = InstagramIntentPolicy.contextKey(apiOrigin, connection.connectionId)
+            val intent = InstagramIntentPolicy.create(selectedMedia.id, connection, workerManaged)
+            val binding = intent.binding ?: return
+            // Persist the original idempotency key before the only publication POST.
+            val stored = withContext(Dispatchers.IO) { intentStore.create(contextKey, intent) }
+            if (!isCurrent(epoch)) return
+            if (!stored) {
+                _uiState.update { it.copy(storageAvailable = false,
+                    error = "Já existe um registro de envio ou não foi possível salvá-lo. Consulte o resultado antes de continuar.") }
+                return
+            }
+            _uiState.update { it.copy(intent = intent, publicationLookupAbsent = false,
+                message = "Processando envio no Instagram…") }
+            val result = api.publish(intent.mediaId, intent.clientRequestId, binding)
+            if (!isCurrent(epoch)) return
+            when (result) {
+                is InstagramResult.Success -> recordPublicationReceipt(epoch, contextKey, intent, result.value)
+                is InstagramResult.Failure -> {
+                    if (result.error in setOf(InstagramError.UNAVAILABLE, InstagramError.SESSION_REQUIRED)) {
+                        failAvailability(result.error)
                     }
-                    is InstagramResult.Failure -> {
-                        if (result.error in setOf(InstagramError.UNAVAILABLE, InstagramError.SESSION_REQUIRED)) {
-                            failAvailability(result.error)
-                        }
-                        _uiState.update { it.copy(error = if (result.error in setOf(
-                                InstagramError.NETWORK, InstagramError.RESULT_UNKNOWN, InstagramError.INVALID_RESPONSE
-                            )) UNKNOWN_RESULT else "${result.error.message} O registro foi preservado; nenhum novo envio será feito automaticamente.") }
+                    _uiState.update { it.copy(error = if (result.error in setOf(
+                            InstagramError.NETWORK, InstagramError.RESULT_UNKNOWN, InstagramError.INVALID_RESPONSE
+                        )) UNKNOWN_RESULT else "${result.error.message} O registro foi preservado; nenhum novo envio será feito automaticamente.") }
+                }
+            }
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (_: Exception) {
+            if (isCurrent(epoch)) _uiState.update { it.copy(storageAvailable = false, error = UNKNOWN_RESULT) }
+        }
+    }
+
+    private suspend fun recordPublicationReceipt(
+        epoch: Long, contextKey: String, intent: InstagramPublicationIntent, publication: InstagramPublication
+    ) {
+        val identified = InstagramIntentPolicy.identify(intent, publication)
+        if (identified == null) {
+            _uiState.update { it.copy(error = UNKNOWN_RESULT) }
+            return
+        }
+        val saved = withContext(Dispatchers.IO) { intentStore.update(contextKey, identified) }
+        if (!isCurrent(epoch)) return
+        _uiState.update { it.copy(intent = identified, storageAvailable = saved,
+            publicationLookupAbsent = false,
+            history = listOf(publication) + it.history.filterNot { item -> item.publicationId == publication.publicationId },
+            verifiedTerminalFailure = publication.takeIf {
+                InstagramIntentPolicy.matchesTerminalFailure(identified, it)
+            },
+            freshPublicationAvailable = false,
+            message = when {
+                publication.confirmed -> "Publicado no Instagram."
+                publication.state == "failed_permanent" -> "Erro: o serviço confirmou falha definitiva."
+                publication.state == "failed_temporary" -> "Erro temporário. Use Atualizar para consultar o mesmo envio."
+                else -> "Processando envio no Instagram. Use Atualizar para acompanhar."
+            },
+            error = if (saved) null else "A confirmação não pôde ser salva. O envio permanece bloqueado.") }
+    }
+
+    /** GET may have returned null after a lost response; retry only the same idempotent intent. */
+    fun resumeWorkerIntent() {
+        if (!synchronizeSession() || !_uiState.value.canResumeWorkerIntent) return
+        val intent = _uiState.value.intent ?: return
+        val binding = intent.binding ?: return
+        val api = gateway ?: return
+        val epoch = sessionEpoch
+        val contextKey = InstagramIntentPolicy.contextKey(apiOrigin, intent.connectionId)
+        _uiState.update { it.copy(busy = true, publicationLookupAbsent = false, error = null,
+            message = "Consultando o mesmo envio…") }
+        operation = viewModelScope.launch {
+            try {
+                when (val result = api.publish(intent.mediaId, intent.clientRequestId, binding)) {
+                    is InstagramResult.Success -> if (isCurrent(epoch)) {
+                        recordPublicationReceipt(epoch, contextKey, intent, result.value)
+                    }
+                    is InstagramResult.Failure -> if (isCurrent(epoch)) {
+                        _uiState.update { it.copy(error = result.error.message,
+                            message = UNKNOWN_RESULT) }
                     }
                 }
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (_: Exception) {
-                if (isCurrent(epoch)) _uiState.update { it.copy(storageAvailable = false, error = UNKNOWN_RESULT) }
+                if (isCurrent(epoch)) _uiState.update { it.copy(error = UNKNOWN_RESULT) }
             } finally {
                 if (isCurrent(epoch)) _uiState.update { it.copy(busy = false) }
             }

@@ -160,7 +160,7 @@ fun InstagramScreen(viewModel: InstagramViewModel, onBack: () -> Unit, tokenProv
                     }
                 }
             }
-            Text("Conecte sua conta profissional e publique uma imagem após revisar e confirmar.")
+            Text("Escolha uma imagem JPEG, confira a legenda e envie para sua conta profissional.")
             OutlinedButton(onClick = viewModel::refresh, enabled = !state.busy && !readingImage,
                 colors = outlinedButtonColors, border = actionBorder) {
                 Text(if (state.hasUnresolvedIntent) "Consultar resultado e histórico" else "Atualizar")
@@ -216,28 +216,48 @@ fun InstagramScreen(viewModel: InstagramViewModel, onBack: () -> Unit, tokenProv
                 }
             }
 
-            if (state.hasUnresolvedIntent) {
-                InstagramSection("Publicação aguardando confirmação") {
-                    Text("Existe um envio registrado para esta conexão. Consulte o resultado e o histórico. O aplicativo não repetirá a publicação nem iniciará outra enquanto o resultado estiver pendente.")
-                    if (state.intent?.publicationId == null) {
-                        Text(if (state.intent?.binding != null)
-                            "A referência ainda não foi confirmada. Atualize a consulta para buscar pelo identificador original; uma resposta vazia não cancela nem repete o envio."
-                            else "Este registro antigo não tem vínculo estável verificável. A recuperação precisa ser verificada pelo suporte; nenhuma conta atual será atribuída à tentativa antiga.",
+            if (state.intent != null) {
+                InstagramSection("Status do envio") {
+                    val publication = state.pendingPublication
+                    Text(when {
+                        publication?.confirmed == true || state.intent?.confirmed == true -> "Publicado no Instagram."
+                        publication?.state == "failed_permanent" || state.terminalFailure != null ->
+                            "Erro: a publicação não foi concluída."
+                        publication?.state == "failed_temporary" ->
+                            "Erro temporário. Consulte novamente o resultado deste envio."
+                        publication?.pending == true -> "Processando envio no Instagram."
+                        else -> "Confirmando o resultado deste envio."
+                    }, fontWeight = FontWeight.SemiBold)
+                    Text("Use Atualizar para acompanhar. O mesmo envio não será repetido automaticamente.",
+                        style = MaterialTheme.typography.bodySmall)
+                    if (state.publicationLookupAbsent && state.intent?.workerManaged == true) {
+                        Text("O serviço ainda não mostrou o resultado. Retomar usa a mesma referência e a mesma imagem desta tentativa.",
                             style = MaterialTheme.typography.bodySmall)
-                    }
-                    if (state.pendingPublication?.state == "provider_confirming") {
-                        Text("Você pode continuar a confirmação do envio que já aprovou. Essa ação pode concluir a mesma publicação no Instagram.")
-                        Button(onClick = viewModel::requestContinuationConfirmation,
-                            enabled = state.canContinueConfirmation && !readingImage, colors = filledButtonColors) {
-                            Text("Continuar confirmação desta publicação")
+                        OutlinedButton(onClick = viewModel::resumeWorkerIntent,
+                            enabled = state.canResumeWorkerIntent && !readingImage,
+                            colors = outlinedButtonColors, border = actionBorder) {
+                            Text("Retomar este envio")
                         }
+                    }
+                    if (state.intent?.workerManaged == false && publication?.state == "provider_confirming") {
+                        Text("Esta tentativa anterior precisa de confirmação para continuar.",
+                            style = MaterialTheme.typography.bodySmall)
+                        Button(onClick = viewModel::requestContinuationConfirmation,
+                            enabled = state.canContinueConfirmation && !readingImage,
+                            colors = filledButtonColors) { Text("Continuar confirmação desta publicação") }
                     }
                 }
             }
-
-            if (state.terminalFailure != null) {
-                InstagramSection("Publicação não concluída") {
-                    Text("O serviço confirmou uma falha definitiva nesta publicação. O envio anterior não será repetido. Se desejar tentar novamente, prepare outro rascunho explicitamente.")
+            if (state.uploadWitness?.phase == InstagramUploadPhase.UNKNOWN && state.intent == null) {
+                InstagramSection("Imagem sem confirmação") {
+                    Text("Não foi possível confirmar se a imagem chegou ao serviço. Nenhuma publicação foi solicitada por este envio.")
+                    Text("Atualize a consulta. Se quiser tentar de novo, escolha a imagem e revise a legenda como um novo envio. A imagem anterior poderá permanecer salva no serviço.",
+                        style = MaterialTheme.typography.bodySmall)
+                    OutlinedButton(onClick = viewModel::prepareNewUploadAfterUnknown,
+                        enabled = state.canPrepareNewUploadAfterUnknown && !readingImage,
+                        colors = outlinedButtonColors, border = actionBorder) {
+                        Text("Preparar novo envio")
+                    }
                 }
             }
 
@@ -290,18 +310,27 @@ fun InstagramScreen(viewModel: InstagramViewModel, onBack: () -> Unit, tokenProv
                     ),
                     minLines = 3,
                     label = { Text("Legenda") },
-                    supportingText = { Text("A prévia da legenda será exibida antes da publicação.") }
+                    supportingText = { Text("Confira o texto: ele será enviado com a imagem ao tocar Enviar.") }
                 )
-                Button(onClick = viewModel::upload, enabled = state.canUpload && !readingImage,
-                    colors = filledButtonColors) { Text("Enviar imagem para revisão") }
-                // Keep feedback beside the initiating control, even when it is disabled.
-                state.uploadMessages.forEach {
+                Text("Destino: ${instagramUsernameLabel(state.connection?.username.orEmpty())} · Feed do Instagram",
+                    style = MaterialTheme.typography.bodySmall)
+                Button(onClick = viewModel::send, enabled = state.canSend && !readingImage,
+                    colors = filledButtonColors) { Text("Enviar ao Instagram") }
+                if (!state.canSend && state.intent == null) state.uploadBlockReason?.let {
                     Text(it, style = MaterialTheme.typography.bodySmall)
                 }
-                state.uploadWitness?.let { upload ->
+                if (!state.historyLoaded) Text("Aguardando a consulta do histórico. Use Atualizar.",
+                    style = MaterialTheme.typography.bodySmall)
+                else if (!state.freshPublicationAvailable && state.intent == null) {
+                    Text("O serviço não liberou uma nova publicação para esta conta.",
+                        style = MaterialTheme.typography.bodySmall)
+                }
+                state.uploadWitness?.takeIf { state.intent == null }?.let { upload ->
                     Text(if (upload.binding == state.connection?.binding) "Último envio de imagem"
                         else "Envio preservado do vínculo anterior", fontWeight = FontWeight.SemiBold)
-                    Text(instagramUploadPhaseLabel(upload), style = MaterialTheme.typography.bodySmall)
+                    if (upload.phase != InstagramUploadPhase.CONFIRMED) {
+                        Text(instagramUploadPhaseLabel(upload), style = MaterialTheme.typography.bodySmall)
+                    }
                     Text("Horário: ${java.text.DateFormat.getDateTimeInstance().format(java.util.Date(upload.startedAtEpochMillis))}",
                         style = MaterialTheme.typography.bodySmall)
                     upload.mediaId?.let { Text("Referência: $it", style = MaterialTheme.typography.bodySmall) }
@@ -311,7 +340,7 @@ fun InstagramScreen(viewModel: InstagramViewModel, onBack: () -> Unit, tokenProv
                             style = MaterialTheme.typography.bodySmall)
                     }
                     if (!state.uploadDraftMatches) {
-                        Text("O rascunho atual não corresponde a este envio. A referência anterior foi preservada e não autoriza publicar o novo conteúdo.",
+                        Text("Para continuar com esta imagem já recebida, escolha o mesmo JPEG e a mesma legenda. Um conteúdo diferente será tratado como novo envio.",
                             style = MaterialTheme.typography.bodySmall)
                     }
                 }
@@ -320,23 +349,6 @@ fun InstagramScreen(viewModel: InstagramViewModel, onBack: () -> Unit, tokenProv
             }
             CalendarAutomationSettings(calendarModel)
             if (calendar.data.enabled) OutlinedButton(onClick = { showCalendarGallery = true }) { Text("Ver minhas artes programadas") }
-
-            state.selectedMedia?.let { selected ->
-                InstagramSection("3. Revisar publicação") {
-                    Text("Destino: ${instagramUsernameLabel(state.connection?.username.orEmpty())}", fontWeight = FontWeight.SemiBold)
-                    Text("${selected.width} × ${selected.height} · JPEG")
-                    Text("Prévia da legenda", style = MaterialTheme.typography.titleSmall)
-                    Text(selected.caption)
-                    Text("O serviço pode acrescentar ou atualizar uma identificação ao final da legenda. A legenda definitiva será exibida no histórico.", style = MaterialTheme.typography.bodySmall)
-                    Text("A publicação só será solicitada após sua confirmação.", style = MaterialTheme.typography.bodySmall)
-                    Button(onClick = viewModel::requestPublicationConfirmation,
-                        enabled = state.canPublish && !readingImage,
-                        colors = filledButtonColors) { Text("Revisar e publicar no Instagram") }
-                    if (state.historyLoaded && !state.freshPublicationAvailable && state.intent == null) {
-                        Text("O serviço não liberou uma nova publicação para esta conta.", style = MaterialTheme.typography.bodySmall)
-                    }
-                }
-            }
 
             InstagramSection("Histórico de publicações") {
                 if (!state.historyLoaded) Text("O histórico ainda não foi confirmado.")
@@ -378,49 +390,23 @@ fun InstagramScreen(viewModel: InstagramViewModel, onBack: () -> Unit, tokenProv
         }
     }
 
-    if (state.confirmationOpen && state.selectedMedia != null) {
-        AlertDialog(
-            onDismissRequest = viewModel::dismissPublicationConfirmation,
-            containerColor = colors.surface, titleContentColor = surfaceText,
-            textContentColor = surfaceText, tonalElevation = 0.dp,
-            title = { Text("Publicar agora no Instagram?") },
-            text = {
-                Column(modifier = Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                    Text("Destino: ${instagramUsernameLabel(state.connection?.username.orEmpty())}", fontWeight = FontWeight.Bold)
-                    Text("Prévia da legenda da imagem selecionada:")
-                    Text(state.selectedMedia!!.caption)
-                    Text("O serviço pode acrescentar ou atualizar uma identificação ao final. Confira a legenda definitiva no histórico.")
-                    Text("Confirme apenas uma vez. O aplicativo acompanhará o resultado deste envio.")
-                }
-            },
-            confirmButton = {
-                Button(enabled = state.canPublish, onClick = viewModel::confirmPublish,
-                    colors = filledButtonColors) { Text("Confirmar publicação") }
-            },
-            dismissButton = {
-                TextButton(onClick = viewModel::dismissPublicationConfirmation,
-                    colors = textButtonColors) { Text("Voltar à revisão") }
-            }
-        )
-    }
-    if (state.reconciliationConfirmationOpen) {
+    if (state.reconciliationConfirmationOpen && state.intent?.workerManaged == false) {
         AlertDialog(
             onDismissRequest = viewModel::dismissContinuationConfirmation,
             containerColor = colors.surface, titleContentColor = surfaceText,
             textContentColor = surfaceText, tonalElevation = 0.dp,
             title = { Text("Continuar a publicação já aprovada?") },
-            text = { Text("O serviço continuará a confirmação deste mesmo envio e poderá concluir a publicação no Instagram. A referência e a intenção do envio serão preservadas.",
+            text = { Text("O serviço continuará a confirmação desta mesma tentativa anterior no Instagram.",
                 modifier = Modifier.verticalScroll(rememberScrollState())) },
             confirmButton = {
                 Button(enabled = state.canContinueConfirmation, onClick = viewModel::continuePublicationConfirmation,
-                    colors = filledButtonColors) {
-                    Text("Confirmar continuação")
-                }
+                    colors = filledButtonColors) { Text("Confirmar continuação") }
             },
             dismissButton = { TextButton(onClick = viewModel::dismissContinuationConfirmation,
                 colors = textButtonColors) { Text("Voltar") } }
         )
     }
+
 }
 
 @Composable

@@ -19,6 +19,7 @@ class AndroidInstagramUploadWitnessStore(context: android.content.Context) : Ins
     override fun create(contextKey: String, witness: InstagramUploadWitness): Boolean = store.create(contextKey, witness)
     override fun update(contextKey: String, witness: InstagramUploadWitness): Boolean = store.update(contextKey, witness)
     override fun clearResolved(contextKey: String, id: String): Boolean = store.clearResolved(contextKey, id)
+    override fun archiveUnknown(contextKey: String, id: String): Boolean = store.archiveUnknown(contextKey, id)
 
     private companion object {
         val guard = InstagramUploadStorageGuard()
