@@ -28,6 +28,7 @@ const {
 } = require("./controlled-gate4-jpeg");
 
 const INSTAGRAM_PUBLICATION_TIMEOUT_MS = 10000;
+const OPERATION_REFERENCE_SETTLEMENT_MS = 2 * 60 * 1000;
 const INSTAGRAM_PUBLICATION_MAX_RESPONSE_BYTES = 64 * 1024;
 const INSTAGRAM_PUBLICATION_POLL_ATTEMPTS = 8;
 const INSTAGRAM_PUBLICATION_POLL_INTERVAL_MS = 1500;
@@ -926,6 +927,20 @@ function createInstagramPublicationConnector(options = {}) {
       /^igo:[0-9a-f]{32}$/.test(providerReference) &&
       !allowOperationReferenceReconciliation
     ) {
+      const now = Number(clock());
+      const referenceAgeMs = now - publication.updatedAt?.getTime();
+      // igo: is reserved before /media. A /media_publish claim requires a
+      // durable igc:created/armed reference and advances it to igc:submitted
+      // before that POST. Once the bounded create call has settled, an
+      // unchanged igo: cannot have published this intent. Never retry /media.
+      if (bound && context.environment === "production" &&
+          Number.isFinite(referenceAgeMs) &&
+          referenceAgeMs >= OPERATION_REFERENCE_SETTLEMENT_MS) {
+        await store.scope(context).verifyPublicationExecutionBinding(
+          publicationId, bound.binding
+        );
+        return Object.freeze({ outcome: "failed_permanent" });
+      }
       return Object.freeze({
         outcome: "provider_confirming",
         reconciliationReference: providerReference

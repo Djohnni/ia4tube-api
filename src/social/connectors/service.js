@@ -997,11 +997,21 @@ function createSocialConnectorService(options = {}) {
             const normalized = normalizeConnectorError(error);
             throw normalized;
           }
+          const latest = clean.binding
+            ? await scope.getPublication(clean.publicationId)
+            : publication;
+          if (clean.binding && /^igo:[0-9a-f]{32}$/.test(clean.providerReference) &&
+              providerResult.outcome === "failed_permanent" &&
+              (latest?.state !== "provider_confirming" ||
+                latest.reconciliationReference !== clean.providerReference ||
+                latest.revision !== publication.revision)) {
+            // A late /media response may have advanced igo: to igc: while the
+            // provider result was being prepared. The store's revision CAS
+            // also fences advancement between this read and the final save.
+            connectorFail("provider_result_unknown");
+          }
           publication = await applyPublicationResult(
-            scope,
-            trusted,
-            clean.binding ? await scope.getPublication(clean.publicationId) : publication,
-            providerResult
+            scope, trusted, latest, providerResult
           );
           return publicationView(publication);
         },

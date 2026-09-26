@@ -21,7 +21,7 @@ const PUBLIC_ORIGIN = "https://ia4tube-api.onrender.com";
 function json(value) { return {status:200, headers:{get:()=>"application/json"}, arrayBuffer:async()=>Buffer.from(JSON.stringify(value))}; }
 function deferred() { let resolve; const promise = new Promise(r => { resolve=r; }); return {promise,resolve}; }
 
-function fixture(customTransport, { owner, configOverrides = {}, allowOperationReferenceReconciliation = true } = {}) {
+function fixture(customTransport, { owner, configOverrides = {}, allowOperationReferenceReconciliation = true, clock } = {}) {
   const authenticated = fixtureContext(owner);
   const { context } = authenticated;
   const config = loadInstagramOAuthConfig({ENVIRONMENT:"production",PUBLIC_API_BASE_URL:PUBLIC_ORIGIN,
@@ -60,7 +60,7 @@ function fixture(customTransport, { owner, configOverrides = {}, allowOperationR
     return json({data:[]});
   };
   const connector = createInstagramPublicationConnector({config,store,media,transport,pollIntervalMs:0,pollAttempts:1,
-    allowOperationReferenceReconciliation,
+    allowOperationReferenceReconciliation, ...(clock ? {clock} : {}),
     credentials:{async withDecryptedCredential({companyId,credentialId}, operation) {
       assert.equal(companyId,context.companyId); assert.equal(credentialId,pool.state.connection.active_credential_id);
       const ephemeral = Buffer.from("SYNTHETIC_NOT_A_REAL_ACCESS_TOKEN");
@@ -132,6 +132,70 @@ test("ambiguous container POST is durably uncertain and age/history/replay never
   assert.ok(f.pool.statements.slice(before).every(q=>!q.startsWith("UPDATE")&&!q.startsWith("INSERT")&&!q.startsWith("DELETE")));
   await f.service.publishImage(f.context,input);await f.reconcile(input.publicationId);
   assert.equal(f.posts.length,1);assert.match((await f.scope.getPublicationDetails(input.publicationId)).reconciliationReference,/^igo:/);
+});
+
+test("production igo remains uncertain before two minutes, then settles terminally without provider I/O",async()=>{
+  const f=fixture(async({request})=>{if(request.method==="POST")throw new Error("synthetic lost response");return json({data:[]});},
+    {allowOperationReferenceReconciliation:false});
+  const input=f.input();
+  assert.equal((await f.service.publishImage(f.context,input)).state,"provider_confirming");
+  const row=f.pool.state.publications.get(input.publicationId);
+  row.updated_at=new Date(Date.now()-119000);
+  assert.equal((await f.reconcile(input.publicationId)).state,"provider_confirming");
+  row.updated_at=new Date(Date.now()-121000);
+  await assert.rejects(f.service.getPublicationStatus(f.context,{
+    operationId:crypto.randomUUID(),publicationId:input.publicationId,
+    providerReference:row.reconciliation_reference,
+    binding:{...f.binding,connectionRevision:f.binding.connectionRevision+1}
+  }),e=>e.code==="publication_binding_conflict");
+  assert.equal((await f.reconcile(input.publicationId)).state,"failed_permanent");
+  assert.equal((await f.scope.getPublicationDetails(input.publicationId)).reconciliationReference,null);
+  assert.equal(f.posts.length,1);
+  assert.equal(f.reads.length,0);
+  await f.service.publishImage(f.context,input);
+  assert.equal(f.posts.length,1,"replaying the original intent cannot send another POST");
+});
+
+test("late igo settlement cannot overwrite a concurrently advanced igc reference",async()=>{
+  let advanceOnClock=false;
+  const f=fixture(async({request})=>{if(request.method==="POST")throw new Error("synthetic lost response");return json({data:[]});},
+    {allowOperationReferenceReconciliation:false, clock:()=>{
+      if(advanceOnClock){
+        advanceOnClock=false;
+        const row=[...f.pool.state.publications.values()][0];
+        row.reconciliation_reference=`igc:created:${CONTAINER}`;
+        row.revision+=1;
+      }
+      return Date.now();
+    }});
+  const input=f.input();
+  await f.service.publishImage(f.context,input);
+  f.pool.state.publications.get(input.publicationId).updated_at=new Date(Date.now()-121000);
+  advanceOnClock=true;
+  await assert.rejects(f.reconcile(input.publicationId),e=>e.code==="provider_result_unknown");
+  const latest=await f.scope.getPublicationDetails(input.publicationId);
+  assert.equal(latest.state,"provider_confirming");
+  assert.equal(latest.reconciliationReference,`igc:created:${CONTAINER}`);
+  assert.equal(f.posts.length,1);
+});
+
+test("terminal igo settlement fences a delayed create response before media_publish",async()=>{
+  const entered=deferred(),resume=deferred();
+  const f=fixture(async({url,request})=>{
+    if(request.method==="POST"&&!url.endsWith("/media_publish")){
+      entered.resolve();await resume.promise;return json({id:CONTAINER});
+    }
+    if(request.method==="POST")throw new Error("unexpected media_publish");
+    return json({status_code:"FINISHED"});
+  },{allowOperationReferenceReconciliation:false});
+  const input=f.input(),publishing=f.service.publishImage(f.context,input);
+  await entered.promise;
+  f.pool.state.publications.get(input.publicationId).updated_at=new Date(Date.now()-121000);
+  assert.equal((await f.reconcile(input.publicationId)).state,"failed_permanent");
+  resume.resolve();
+  await assert.rejects(publishing,e=>e.code==="provider_result_unknown");
+  assert.equal(f.posts.length,1,"no /media_publish after terminal CAS");
+  assert.equal((await f.scope.getPublicationDetails(input.publicationId)).state,"failed_permanent");
 });
 
 test("lost publish response is reconciled by provider evidence, never by repeating POST",async()=>{
@@ -318,6 +382,7 @@ test("the fixed production reviewer can publish only when explicitly scoped, pre
   assert.deepEqual(first.publication.binding,f.binding);
   const repeated=await reviewer.publish(request);assert.equal(repeated.duplicateSubmissionPrevented,true);
   assert.equal(f.posts.length,1);assert.equal(f.pool.state.publications.size,1);
+  f.pool.state.publications.get(first.publication.publicationId).updated_at=new Date();
   const pending=await reviewer.reconcile({verifiedClaims:f.claims,publicationId:first.publication.publicationId,
     expectedConnectionId:f.binding.connectionId,expectedExternalId:f.binding.externalId,expectedConnectionRevision:7});
   assert.equal(pending.publication.state,"provider_confirming");assert.equal(f.posts.length,1);assert.equal(f.reads.length,0);
