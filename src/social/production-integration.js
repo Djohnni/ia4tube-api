@@ -67,7 +67,6 @@ function createProductionSocialIntegration(options = {}) {
   const enabled = env.SOCIAL_PERSISTENCE_ENABLED === "true";
   let mounted = null, runtime = null, initialization = null, visualReturn = null;
   let tenantProvisioning = null, mediaPilot = null, closePromise = null;
-  let availabilityProbeRemaining = 30;
   async function afterAuthentication(owner) {
     // The disabled path must not read product records, initialize dependencies,
     // derive an identity or open a pool. Session issuance remains unchanged.
@@ -77,32 +76,8 @@ function createProductionSocialIntegration(options = {}) {
   }
   function middleware(req, res, next) {
     noStore(res);
-    if (!mounted) {
-      if (enabled && availabilityProbeRemaining > 0) {
-        availabilityProbeRemaining -= 1;
-        console.info(JSON.stringify({ event: "social_availability_unmounted", status: 503 }));
-      }
-      return res.status(503).json({ ok: false, code: PREPARATION_INCOMPLETE,
-        error: "A integracao com o Instagram ainda nao esta disponivel." });
-    }
-    const availabilityRoute = req.method === "GET" && [
-      "/connections/instagram", "/reviewer/media", "/reviewer/publications"
-    ].includes(req.path) ? req.path : null;
-    if (availabilityRoute && availabilityProbeRemaining > 0) {
-      availabilityProbeRemaining -= 1;
-      let diagnosticCode = null;
-      const sendJson = res.json;
-      res.json = function (body) {
-        if (body?.ok === false && SAFE_STARTUP_ERROR_CODE.test(String(body.code || ""))) {
-          diagnosticCode = body.code;
-        }
-        return sendJson.call(this, body);
-      };
-      res.once("finish", () => console.info(JSON.stringify({
-        event: "social_availability_read", route: availabilityRoute,
-        status: res.statusCode, code: diagnosticCode
-      })));
-    }
+    if (!mounted) return res.status(503).json({ ok: false, code: PREPARATION_INCOMPLETE,
+      error: "A integracao com o Instagram ainda nao esta disponivel." });
     return mounted(req, res, next);
   }
   async function initialize(dependencies = {}) {
