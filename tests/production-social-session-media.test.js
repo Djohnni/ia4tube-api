@@ -104,6 +104,13 @@ test("direct JPEG is persisted in isolated DATA_DIR and cannot cross company/own
   assert.match(stored.metadataDigest,/^[a-f0-9]{64}$/);
   assert.equal((await surface.media.listOwnedJpegs({context,owner})).length,1);
   assert.equal((await surface.media.resolveOwnedJpeg({context,owner,mediaId:stored.mediaId})).metadataDigest,stored.metadataDigest);
+  const privateCopy = await surface.media.readOwnedJpeg({context,owner,mediaId:stored.mediaId});
+  assert.deepEqual(privateCopy.bytes,jpeg);
+  assert.equal(privateCopy.sha256,crypto.createHash("sha256").update(jpeg).digest("hex"));
+  assert.equal(privateCopy.metadataDigest,stored.metadataDigest);
+  privateCopy.bytes.fill(0);
+  assert.equal(await surface.media.readOwnedJpeg({context:{companyId:crypto.randomUUID()},owner,mediaId:stored.mediaId}),null);
+  assert.equal(await surface.media.readOwnedJpeg({context,owner:"another-owner",mediaId:stored.mediaId}),null);
   assert.equal(await surface.media.resolveOwnedJpeg({context:{companyId:crypto.randomUUID()},owner,mediaId:stored.mediaId}),null);
   assert.equal(await surface.media.resolveOwnedJpeg({context,owner:"another-owner",mediaId:stored.mediaId}),null);
   const restored = createProductionMedia({env:mediaEnv,dataDir:directory,readClients:()=>clients});

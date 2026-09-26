@@ -106,7 +106,8 @@ function createProductionSocialIntegration(options = {}) {
         createCalendar: env.SOCIAL_CALENDAR_ENABLED === "true" ? async ports => {
           mediaPilot = await require("./calendar/imports/production-pilot").createProductionMediaPilot({env,tenantPool:ports.pool,logger:dependencies.logger});
           if (mediaPilot && dependencies.importsRuntimeFactory !== undefined) refuse("calendar_media_pilot_factory_conflict");
-          return require("./calendar").createProductionCalendar(mediaPilot ? {...dependencies,importsRuntimeFactory:mediaPilot.factory} : dependencies, ports);
+          return require("./calendar").createProductionCalendar(mediaPilot ? {...dependencies,reviewerMedia:mediaSurface.media,importsRuntimeFactory:mediaPilot.factory} :
+            {...dependencies,reviewerMedia:mediaSurface.media}, ports);
         } : undefined,
         realReviewerMedia: mediaSurface.media, logger: dependencies.logger });
       startupStage = "social_startup_tenant_binding_failed";

@@ -155,10 +155,14 @@ function createCalendarMedia({ dataDir, secret, publicOrigin, loadSource, descri
     const metadata = [companyId, job.asset.sha, job.caption];
     // Pending legacy Feed intents retain the digest they were created with.
     if (job.layout === "safe_master_v1" || job.target) metadata.push(job.target || "feed");
-    return Object.freeze({ companyId, mediaId: `${job.target === "story" ? "calendar-story-jpeg" : "calendar-jpeg"}:${job.asset.sha}`, mimeType: "image/jpeg",
+    if (job.sourceKind === "reviewer" &&
+        (!/^reviewer-jpeg:[a-f0-9]{64}$/.test(job.reviewer?.mediaId || "") ||
+         !HASH.test(job.reviewer?.metadataDigest || "") || job.asset.sourceHash !== job.asset.sha)) fail("calendar_media_invalid", 404);
+    return Object.freeze({ companyId, mediaId: job.sourceKind === "reviewer" ? job.reviewer.mediaId :
+      `${job.target === "story" ? "calendar-story-jpeg" : "calendar-jpeg"}:${job.asset.sha}`, mimeType: "image/jpeg",
       width: job.asset.width, height: job.asset.height, caption: job.caption, publicUrl, thumbnailUrl: publicUrl,
       destination: job.target || "feed",
-      metadataDigest: digest(JSON.stringify(metadata)) });
+      metadataDigest: job.sourceKind === "reviewer" ? job.reviewer.metadataDigest : digest(JSON.stringify(metadata)) });
   }
   function videoDescriptor(companyId, userId, job) {
     if (!UUID.test(userId || "") || job.mediaKind !== "video" || !["reel", "story"].includes(job.target)) fail("calendar_media_invalid", 404);
@@ -200,7 +204,13 @@ function createCalendarMedia({ dataDir, secret, publicOrigin, loadSource, descri
     if (!crypto.timingSafeEqual(Buffer.from(signature, "hex"), Buffer.from(expected, "hex"))) fail("calendar_media_invalid", 404);
     return bytesFor(companyId, { sha });
   }
-  return Object.freeze({ prepare, bytesFor, descriptor, videoDescriptor, videoFile, publicVideo,
+  function ingestReviewer(companyId, value) {
+    if (!Buffer.isBuffer(value?.bytes) || value.bytes.length < 16 || value.bytes.length > MAX_BYTES ||
+        value.width !== 1080 || value.height !== 1080 || !HASH.test(value.sha256 || "") ||
+        digest(value.bytes) !== value.sha256) fail("calendar_media_invalid", 400);
+    return persist(companyId, value.bytes, value.sha256, value.width, value.height);
+  }
+  return Object.freeze({ prepare, ingestReviewer, bytesFor, descriptor, videoDescriptor, videoFile, publicVideo,
     unchanged, publicBytes, close() { key.fill(0); } });
 }
 module.exports = { createCalendarMedia };

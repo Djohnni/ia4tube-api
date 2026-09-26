@@ -51,6 +51,13 @@ const ERROR_STATUS = Object.freeze({
   connector_contract_invalid: 503,
   credential_unavailable: 503,
   external_capability_disabled: 503,
+  calendar_capacity_reached: 409,
+  calendar_connection_required: 409,
+  calendar_media_owner_invalid: 403,
+  calendar_media_unavailable: 503,
+  calendar_operations_closed: 503,
+  calendar_reviewer_pending: 409,
+  calendar_revision_conflict: 409,
   idempotency_conflict: 409,
   publication_binding_invalid: 400,
   publication_binding_conflict: 409,
@@ -530,7 +537,32 @@ function createInstagramRealReviewerService(options = {}) {
   }
 
   function session(input) {
-    return verifiedSession(input, authAdapter, randomUUID, config.environment || "staging");
+    return Object.freeze({ ...verifiedSession(input, authAdapter, randomUUID, config.environment || "staging"),
+      verifiedClaims: input.verifiedClaims });
+  }
+
+  async function queuedPublications(current) {
+    if (config.environment !== "production") return [];
+    const calendar = options.getCalendar?.();
+    return typeof calendar?.reviewerPublications === "function"
+      ? calendar.reviewerPublications(current.verifiedClaims) : [];
+  }
+
+  async function queuedPublication(current, item) {
+    const connection = await connectorStore.scope(current.context).getConnectionDetails(item.connectionId);
+    const account = connection?.id === item.connectionId &&
+      connection.account?.externalId === item.binding.externalId
+      ? publicAccount(connection.account) : null;
+    return Object.freeze({ publicationId: item.publicationId, connectionId: item.connectionId,
+      internalReference: item.publicationId, binding: normalizeConnectionBinding(item.binding),
+      state: item.phase === "confirming" ? "provider_confirming" :
+        ["failed", "attention", "cancelled"].includes(item.phase) ? "failed_temporary" : "sending",
+      account, media: Object.freeze({ id: mediaReference(item.mediaId),
+        fileName: "preview_ia4tube.jpg", mimeType: "image/jpeg" }),
+      caption: safeCaption(item.caption), destination: "feed", providerMediaId: null,
+      permalink: null, publishedAt: null, createdAt: new Date(item.createdAt).toISOString(),
+      updatedAt: new Date(item.updatedAt).toISOString(), revision: item.revision,
+      attempts: Object.freeze([]) });
   }
 
   function scopedMedia(current, publicationId = null) {
@@ -633,12 +665,16 @@ function createInstagramRealReviewerService(options = {}) {
       const connection = await scope.getConnectionDetails(value.connectionId);
       return publicPublication(value, publicationAccount(value, connection));
     }));
+    const recorded = new Set(publications.map(value => value.publicationId));
+    for (const item of await queuedPublications(current)) {
+      if (!recorded.has(item.publicationId)) publications.push(await queuedPublication(current, item));
+    }
     return Object.freeze({
       ok: true,
       canonicalPersistence: true,
       independentReview: reviewTenant,
-      freshPublicationAvailable: (reviewTenant || bindingRequired) && !details.some((item) =>
-        ["ready", "publishing", "provider_confirming"].includes(item.state)),
+      freshPublicationAvailable: (reviewTenant || bindingRequired) && !publications.some((item) =>
+        ["sending", "provider_confirming"].includes(item.state)),
       publications: Object.freeze(publications)
     });
   }
@@ -647,7 +683,11 @@ function createInstagramRealReviewerService(options = {}) {
     const cleanId = requireUuid(publicationId);
     const scope = connectorStore.scope(current.context);
     const details = await scope.getPublicationDetails(cleanId);
-    if (!details) connectorFail("resource_unavailable");
+    if (!details) {
+      const queued = (await queuedPublications(current)).find(item => item.publicationId === cleanId);
+      if (!queued) connectorFail("resource_unavailable");
+      return queuedPublication(current, queued);
+    }
     const connection = await scope.getConnectionDetails(details.connectionId);
     return publicPublication(details, publicationAccount(details, connection));
   }
@@ -789,8 +829,10 @@ function createInstagramRealReviewerService(options = {}) {
     const details = await scope.getPublicationDetails(identity.publicationId);
     // Absence is an observation, not proof that an earlier HTTP request cannot
     // still reserve the same intent. Clients must retain the original UUID.
+    const queued = details ? null : (await queuedPublications(current))
+      .find(item => item.publicationId === identity.publicationId);
     return Object.freeze({ ok: true, canonicalPersistence: true,
-      publication: details ? await publicationById(current, identity.publicationId) : null });
+      publication: details || queued ? await publicationById(current, identity.publicationId) : null });
   }
 
   async function publishBoundIntent(current, source, scope) {
@@ -816,6 +858,19 @@ function createInstagramRealReviewerService(options = {}) {
       if (existing.requestHash !== intent.requestHash) connectorFail("publication_intent_conflict");
       // The same intent never issues a fresh POST, including after a crash.
       return Object.freeze({ ok: true, duplicateSubmissionPrevented: true,
+        publication: await publicationById(current, intent.publicationId) });
+    }
+    if (config.environment === "production") {
+      const calendar = options.getCalendar?.();
+      if (typeof calendar?.enqueueReviewer !== "function") connectorFail("external_capability_disabled");
+      const pending = (await scope.listPublicationDetails()).find(item => item.id !== intent.publicationId &&
+        ["ready", "publishing", "provider_confirming"].includes(item.state));
+      if (pending) connectorFail("state_transition_invalid");
+      const queued = await calendar.enqueueReviewer(current.verifiedClaims, {
+        mediaId: cleanMediaId, metadataDigest, caption: intent.caption,
+        clientRequestId: requestId, binding, intent
+      });
+      return Object.freeze({ ok: true, duplicateSubmissionPrevented: queued.duplicate,
         publication: await publicationById(current, intent.publicationId) });
     }
     const connectorService = createConnectorService({ context: current.context, media: reviewerMedia });
@@ -850,6 +905,9 @@ function createInstagramRealReviewerService(options = {}) {
     }
     const scope = connectorStore.scope(current.context);
     const details = await scope.getPublicationDetails(publicationId);
+    if (!details && (await queuedPublications(current)).some(item => item.publicationId === publicationId)) {
+      return Object.freeze({ ok: true, publication: await publicationById(current, publicationId) });
+    }
     if (!details || details.state !== "provider_confirming") {
       connectorFail("state_transition_invalid");
     }

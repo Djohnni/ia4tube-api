@@ -625,6 +625,19 @@ function realReviewerMediaRecord(context, owner, source, descriptor) {
       if (!source) return null;
       try { return record(context, owner, source); }
       finally { source.bytes.fill(0); }
+    },
+    async readOwnedJpeg({ context, owner, mediaId }) {
+      const client = readClients()[owner];
+      if (!client || client.ativo === false || !context?.companyId) return null;
+      const source = readDirectRealReviewerMedia(owner, mediaId, { companyId: context.companyId, includeBytes: true });
+      if (!source) return null;
+      try {
+        const descriptor = record(context, owner, source);
+        return Object.freeze({ ...descriptor, sha256: source.sha256, bytes: source.bytes });
+      } catch (error) {
+        source.bytes.fill(0);
+        throw error;
+      }
     }
   });
   function capability(req, res) {

@@ -312,6 +312,7 @@ async function createSocialRuntime(options = {}) {
         connectorStore,
         connectorAudit,
         media: options.realReviewerMedia,
+        getCalendar: () => calendar,
         createPublicationConnector(expectedContext, media) {
           return createInstagramPublicationConnector({
             config: instagramConfig,

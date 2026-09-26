@@ -2,7 +2,7 @@
 const crypto = require("node:crypto");
 const { targets, started, delivery, record } = require("./destinations");
 const { createConnectorContext } = require("../connectors/contract");
-const { fail, idFor, syncSources, changeJob, sameBinding, availability, TIME_ZONE, LOCKED, LATE_MS } = require("./model");
+const { fail, idFor, syncSources, changeJob, sameBinding, availability, TIME_ZONE, LOCKED, LATE_MS, MAX_ITEMS, caption } = require("./model");
 const { isCalendarImportService, isOperationalCalendarImportService } = require("./imports/local-calendar-service");
 const { isStoredCalendarMediaReader } = require("./imports/stored-calendar-media");
 const LABELS = { scheduled: "Programada", paused: "Automação geral pausada", manual: "Ative esta arte após conectar o Instagram",
@@ -11,14 +11,15 @@ const LABELS = { scheduled: "Programada", paused: "Automação geral pausada", m
   import_not_operational: "Importação ainda não disponível para publicação",
   connection_required: "Confira a conexão Instagram", overdue: "Horário vencido — reagende", attention: "Precisa de atenção",
   dispatching: "Publicando", confirming: "Confirmando publicação", published: "Publicada", cancelled: "Cancelada" };
-function createCalendarService({ store, source, media, grants, auth, identity, readClients, publisher, importScheduling = null, importReading = null, clock = Date.now }) {
+function createCalendarService({ store, source, media, grants, auth, identity, readClients, publisher, reviewerMedia = null, importScheduling = null, importReading = null, clock = Date.now }) {
   const importsAvailable = isCalendarImportService(importScheduling) && importScheduling.store === store;
   const storedReading = isStoredCalendarMediaReader(importReading) && importReading.store === store;
   const operationalImports = importsAvailable && isOperationalCalendarImportService(importScheduling) && publisher.preparedAvailable === true;
   const importContext = value => ({ authenticated: true, companyId: value.companyId, userId: value.userId });
   // The owner-state transaction already scopes companyId. Preserve the narrower
   // user ownership even when the processing runtime is unavailable/disabled.
-  const visibleTo = (job, context) => job.sourceKind !== "upload" || Boolean(context && job.import?.userId === context.userId);
+  const visibleTo = (job, context) => job.sourceKind !== "reviewer" &&
+    (job.sourceKind !== "upload" || Boolean(context && job.import?.userId === context.userId));
   let stopped = false, running = false, timer = null;
   function active(owner) {
     const clients = readClients(); const client = Object.hasOwn(clients, owner) ? clients[owner] : null;
@@ -158,6 +159,69 @@ function createCalendarService({ store, source, media, grants, auth, identity, r
     });
     return ({ planningId, quantity }) => grants.issue({ ...consent, planningId, quantity });
   }
+  function reviewerProjection(job) {
+    return { publicationId: job.reviewer.intent.publicationId, clientRequestId: job.reviewer.clientRequestId,
+      connectionId: job.authorization.binding.connectionId, binding: job.authorization.binding,
+      mediaId: job.reviewer.mediaId, caption: job.caption, phase: job.phase, revision: job.revision,
+      createdAt: job.createdAt, updatedAt: job.dispatchAt || job.updatedAt || job.createdAt };
+  }
+  async function reviewerPublications(claims) {
+    const current = session(claims);
+    if (!await store.exists(current.context.companyId)) return [];
+    return store.read(current.context.companyId, state => Object.values(state.jobs)
+      .filter(job => job.sourceKind === "reviewer" && job.reviewer?.userId === current.context.userId &&
+        job.authorization?.sourceKind === "reviewer")
+      .map(reviewerProjection));
+  }
+  async function enqueueReviewer(claims, input) {
+    const current = session(claims);
+    if (!reviewerMedia || typeof reviewerMedia.readOwnedJpeg !== "function" ||
+        typeof media.ingestReviewer !== "function" || typeof grants.issueReviewer !== "function") fail("calendar_media_unavailable", 503);
+    if (!publisher.allowed(current.context)) fail("calendar_operations_closed", 503);
+    const connection = await publisher.connection(current.context);
+    if (!sameBinding(input.binding, connection?.binding)) fail("calendar_connection_required", 409);
+    const original = await reviewerMedia.readOwnedJpeg({ context: current.context, owner: current.owner, mediaId: input.mediaId });
+    if (!original || original.companyId !== current.context.companyId || original.mediaId !== input.mediaId ||
+        original.metadataDigest !== input.metadataDigest || !Buffer.isBuffer(original.bytes)) {
+      if (Buffer.isBuffer(original?.bytes)) original.bytes.fill(0);
+      fail("calendar_media_owner_invalid", 403);
+    }
+    let asset;
+    try { asset = media.ingestReviewer(current.context.companyId, original); }
+    finally { original.bytes.fill(0); }
+    const id = idFor(current.context.companyId, `reviewer:${input.intent.publicationId}`);
+    const now = clock();
+    const job = { id, sourceKey: `reviewer:${input.intent.publicationId}`, sourceKind: "reviewer",
+      planningId: null, orderId: null, title: "Publicação do revisor", date: null, time: null,
+      scheduledAt: now, caption: caption(input.caption), asset, assets: null, mediaKind: "image",
+      destination: "feed", phase: "ready", revision: 1, error: null, automaticEnabled: true,
+      createdAt: now, updatedAt: now, reviewer: { userId: current.context.userId,
+        mediaId: input.mediaId, metadataDigest: input.metadataDigest,
+        clientRequestId: input.clientRequestId, dispatchDeadline: now + 15 * 60000, intent: input.intent } };
+    const envelope = grants.issueReviewer({ companyId: current.context.companyId, userId: current.context.userId,
+      binding: connection.binding, jobId: id, mediaId: input.mediaId,
+      metadataDigest: input.metadataDigest, clientRequestId: input.clientRequestId });
+    job.authorization = { ...grants.verify(envelope, current.context.companyId, current.context.userId), envelope };
+    const expectedIntent = publisher.intent(current.context, job, input.clientRequestId);
+    if (expectedIntent.publicationId !== input.intent.publicationId || expectedIntent.requestHash !== input.intent.requestHash)
+      fail("calendar_consent_invalid", 400);
+    const saved = await store.update(current.context.companyId, state => {
+      const existing = state.jobs[id];
+      if (existing) {
+        if (existing.sourceKind !== "reviewer" || existing.reviewer?.userId !== current.context.userId ||
+            existing.reviewer?.intent?.requestHash !== expectedIntent.requestHash ||
+            !sameBinding(existing.authorization?.binding, connection.binding)) fail("calendar_revision_conflict");
+        return { duplicate: true, publication: reviewerProjection(existing) };
+      }
+      if (Object.values(state.jobs).some(other => other.sourceKind === "reviewer" &&
+          ["ready", "dispatching", "confirming"].includes(other.phase))) fail("calendar_reviewer_pending");
+      if (Object.keys(state.jobs).length >= MAX_ITEMS) fail("calendar_capacity_reached");
+      state.jobs[id] = job;
+      return { duplicate: false, publication: reviewerProjection(job) };
+    });
+    if (!saved.duplicate) void tickOwner(current.owner, true).catch(() => { /* The durable worker retries. */ });
+    return saved;
+  }
   async function edit(claims, id, input) {
     const current = session(claims);
     await sync(current.owner, current.context.companyId, current.context.userId);
@@ -227,6 +291,7 @@ function createCalendarService({ store, source, media, grants, auth, identity, r
     const postagens = raw.flatMap(item => {
       const job = state.jobs[idFor(current.context.companyId, item.calendar_key)];
       if (job?.sourceKind === "upload") return [];
+      if (job?.sourceKind === "reviewer") return [item];
       if (!job) return [item]; if (job.phase === "cancelled") return [];
       const displayed = view(job, state.preferences, connection, publisher.allowed(current.context), current.context);
       return [{ ...item, data: job.date, data_sugerida: job.date, horario: job.time, horario_sugerido: job.time,
@@ -293,13 +358,18 @@ function createCalendarService({ store, source, media, grants, auth, identity, r
         calendar_revision: job.revision, calendar_phase: job.phase, calendar_schedule_id: job.id } };
     });
   }
-  async function tickOwner(owner) {
+  async function tickOwner(owner, reviewerOnly = false) {
     active(owner); const ids = identity(owner, owner);
     // Calendar UI/explicit consent initializes this row after normal tenant readiness.
     // The worker must not create social data for every historical product account.
     if (!await store.exists(ids.companyId)) return;
-    await sync(owner, ids.companyId, ids.userId);
-    const jobs = await store.update(ids.companyId, state => Object.values(state.jobs).filter(job => job.authorization && !["cancelled", "published"].includes(job.phase) &&
+    let sourceReady = false;
+    if (!reviewerOnly) {
+      try { await sync(owner, ids.companyId, ids.userId); sourceReady = true; }
+      catch { /* Reviewer jobs use their already persisted JPEG, independently of generated sources. */ }
+    }
+    const jobs = await store.update(ids.companyId, state => Object.values(state.jobs).filter(job =>
+      (sourceReady || job.sourceKind === "reviewer") && job.authorization && !["cancelled", "published"].includes(job.phase) &&
       (job.phase !== "failed" || job.assets && targets(job).some(target => !["published", "failed"].includes(job.deliveries?.[target]?.phase)))));
     for (const snapshot of jobs) {
       if (stopped) return;
@@ -308,8 +378,20 @@ function createCalendarService({ store, source, media, grants, auth, identity, r
       if (snapshot.sourceKind === "upload" && !operationalImports) continue;
       let grant, ctx;
       try { ({ grant, context: ctx } = delegated(owner, snapshot.authorization.envelope)); }
-      catch { continue; }
+      catch {
+        if (snapshot.sourceKind === "reviewer" && !snapshot.intent) await store.update(ids.companyId, state => {
+          const job = state.jobs[snapshot.id];
+          if (job?.revision === snapshot.revision) { job.phase = "failed"; job.error = "reviewer_intent_expired"; job.revision++; }
+          return null;
+        });
+        continue;
+      }
       if (grant.planningId !== snapshot.planningId || (grant.jobId && grant.jobId !== snapshot.id)) continue;
+      if (snapshot.sourceKind === "reviewer" && (grant.sourceKind !== "reviewer" ||
+          grant.mediaId !== snapshot.reviewer?.mediaId || grant.metadataDigest !== snapshot.reviewer?.metadataDigest ||
+          grant.clientRequestId !== snapshot.reviewer?.clientRequestId || grant.userId !== snapshot.reviewer?.userId ||
+          grant.jobId !== snapshot.id)) continue;
+      if (snapshot.sourceKind !== "reviewer" && grant.sourceKind === "reviewer") continue;
       if (snapshot.sourceKind === "upload" && (grant.sourceKind !== "upload" || grant.assetId !== snapshot.import?.assetId ||
           grant.assetRevision !== snapshot.import?.mediaRevision || grant.previewDigest !== snapshot.import?.previewDigest || grant.userId !== snapshot.import?.userId)) continue;
       if (snapshot.assets && (snapshot.mediaKind === "video" || snapshot.layout === "safe_master_v1" ||
@@ -330,9 +412,30 @@ function createCalendarService({ store, source, media, grants, auth, identity, r
         continue;
       }
       const connection = await publisher.connection(ctx);
+      if (snapshot.sourceKind === "reviewer" && !sameBinding(grant.binding, connection?.binding)) {
+        await store.update(ids.companyId, state => {
+          const job = state.jobs[snapshot.id];
+          if (job?.revision === snapshot.revision && !job.intent) {
+            job.phase = "failed"; job.error = "reviewer_connection_changed"; job.revision++;
+          }
+          return null;
+        });
+        continue;
+      }
+      if (snapshot.sourceKind === "reviewer" && clock() >= snapshot.reviewer.dispatchDeadline) {
+        await store.update(ids.companyId, state => {
+          const job = state.jobs[snapshot.id];
+          if (job?.revision === snapshot.revision && !job.intent) {
+            job.phase = "failed"; job.error = "reviewer_intent_expired"; job.revision++;
+          }
+          return null;
+        });
+        continue;
+      }
       if (!publisher.allowed(ctx) || !sameBinding(grant.binding, connection?.binding) || !snapshot.asset || snapshot.scheduledAt > clock()) continue;
       let intact = false;
-      try { intact = await media.unchanged(owner, snapshot); if (intact) media.bytesFor(ids.companyId, snapshot.asset); } catch { intact = false; }
+      try { intact = snapshot.sourceKind === "reviewer" || await media.unchanged(owner, snapshot);
+        if (intact) media.bytesFor(ids.companyId, snapshot.asset); } catch { intact = false; }
       if (!intact) {
         await store.update(ids.companyId, state => { const job = state.jobs[snapshot.id];
           if (!LOCKED.has(job.phase)) { job.phase = "attention"; job.error = "calendar_art_changed"; job.authorization = null; job.revision++; }
@@ -342,7 +445,13 @@ function createCalendarService({ store, source, media, grants, auth, identity, r
       const selected = await store.update(ids.companyId, state => {
         const job = state.jobs[snapshot.id];
         if (job.revision !== snapshot.revision || availability(job, state.preferences, connection.binding, publisher.allowed(ctx), clock()) !== "scheduled") return null;
-        job.intent = publisher.intent(ctx, job, crypto.randomUUID());
+        const intent = publisher.intent(ctx, job, job.sourceKind === "reviewer" ? job.reviewer.clientRequestId : crypto.randomUUID());
+        if (job.sourceKind === "reviewer" && (intent.publicationId !== job.reviewer.intent.publicationId ||
+            intent.requestHash !== job.reviewer.intent.requestHash)) {
+          job.phase = "failed"; job.error = "reviewer_intent_changed"; job.revision++;
+          return null;
+        }
+        job.intent = intent;
         job.phase = "dispatching"; job.revision++; job.dispatchAt = clock();
         return job;
       });
@@ -446,6 +555,7 @@ function createCalendarService({ store, source, media, grants, auth, identity, r
     } finally { running = false; }
   }
   return Object.freeze({ list, preferences, prepareRequest, edit, image, video, overlay, legacyEdit, tick,
+    enqueueReviewer, reviewerPublications,
     publicBytes: media.publicBytes,
     publicVideo: media.publicVideo,
     publicMedia: publisher.publicMedia,

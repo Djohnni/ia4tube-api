@@ -24,10 +24,18 @@ function createCalendarGrants(secret, clock = Date.now) {
     if (extra || !/^[a-f0-9]{64}$/.test(mac || "") || !crypto.timingSafeEqual(Buffer.from(mac, "hex"), Buffer.from(sign(body), "hex"))) return null;
     let grant;
     try { grant = JSON.parse(Buffer.from(body, "base64url").toString()); } catch { return null; }
-    if (grant.purpose !== "calendar_publish" || grant.companyId !== companyId || grant.userId !== userId ||
+    if ((grant.sourceKind === "reviewer" ? grant.purpose !== "calendar_reviewer_publish" :
+          grant.purpose !== "calendar_publish") || grant.companyId !== companyId || grant.userId !== userId ||
         !validBinding(grant.binding) || !Number.isSafeInteger(grant.issuedAt) || grant.issuedAt > clock() ||
         !Number.isSafeInteger(grant.validUntil) || grant.validUntil <= clock()) return null;
-    if (grant.sourceKind === "upload") {
+    if (grant.sourceKind === "reviewer") {
+      if (grant.planningId !== null || grant.quantity !== 1 ||
+          !/^[a-f0-9]{40}$/.test(grant.jobId || "") ||
+          !/^reviewer-jpeg:[a-f0-9]{64}$/.test(grant.mediaId || "") ||
+          !/^[a-f0-9]{64}$/.test(grant.metadataDigest || "") ||
+          !UUID.test(grant.clientRequestId || "") || grant.preferenceRevision !== null ||
+          grant.validUntil > grant.issuedAt + 180 * 86400000) return null;
+    } else if (grant.sourceKind === "upload") {
       if (grant.planningId !== null || grant.quantity !== 1 || !UUID.test(grant.assetId || "") ||
           !Number.isSafeInteger(grant.assetRevision) || grant.assetRevision < 1 ||
           !/^[a-f0-9]{64}$/.test(grant.previewDigest || "") || !/^[a-f0-9]{40}$/.test(grant.jobId || "") ||
@@ -50,6 +58,18 @@ function createCalendarGrants(secret, clock = Date.now) {
     const value = { purpose: "calendar_publish", sourceKind: "upload", companyId, userId, binding,
       preferenceRevision: revision, planningId: null, quantity: 1, jobId, assetId, assetRevision,
       previewDigest, issuedAt: now, validUntil: validUntil ?? now + 180 * 86400000, nonce: crypto.randomUUID() };
+    const body = Buffer.from(JSON.stringify(value)).toString("base64url");
+    return `${body}.${sign(body)}`;
+  }
+  function issueReviewer({ companyId, userId, binding, jobId, mediaId, metadataDigest, clientRequestId }) {
+    if (!UUID.test(companyId || "") || !UUID.test(userId || "") || !validBinding(binding) ||
+        !/^[a-f0-9]{40}$/.test(jobId || "") || !/^reviewer-jpeg:[a-f0-9]{64}$/.test(mediaId || "") ||
+        !/^[a-f0-9]{64}$/.test(metadataDigest || "") || !UUID.test(clientRequestId || "")) fail("calendar_consent_invalid", 400);
+    const now = clock();
+    if (!Number.isSafeInteger(now) || now < 0) fail("calendar_consent_invalid", 400);
+    const value = { purpose: "calendar_reviewer_publish", sourceKind: "reviewer", companyId, userId, binding,
+      preferenceRevision: null, planningId: null, quantity: 1, jobId, mediaId, metadataDigest,
+      clientRequestId, issuedAt: now, validUntil: now + 180 * 86400000, nonce: crypto.randomUUID() };
     const body = Buffer.from(JSON.stringify(value)).toString("base64url");
     return `${body}.${sign(body)}`;
   }
@@ -76,6 +96,6 @@ function createCalendarGrants(secret, clock = Date.now) {
     if (value.binding) Object.freeze(value.binding);
     Object.freeze(value); submissions.add(value); return value;
   }
-  return Object.freeze({ issue, issueImport, verify, issueSubmission, verifySubmission, close() { key.fill(0); } });
+  return Object.freeze({ issue, issueImport, issueReviewer, verify, issueSubmission, verifySubmission, close() { key.fill(0); } });
 }
 module.exports = { createCalendarGrants, isVerifiedCalendarGrant, isVerifiedCalendarSubmission };

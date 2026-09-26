@@ -119,7 +119,8 @@ function syncSources(state, sources, companyId, now) {
     if (!source.imageReady) { job.asset = null; job.assets = null; job.phase = job.error ? "attention" : "waiting_media"; }
   }
   // Legacy hide/cancel operations cannot leave an invisible future dispatch behind.
-  for (const job of Object.values(state.jobs)) if (job.sourceKind !== "upload" && !seen.has(job.id) && !LOCKED.has(job.phase) && job.phase !== "cancelled") {
+  for (const job of Object.values(state.jobs)) if (job.sourceKind !== "upload" && job.sourceKind !== "reviewer" &&
+      !seen.has(job.id) && !LOCKED.has(job.phase) && job.phase !== "cancelled") {
     job.phase = "cancelled"; job.cancelledAt = now; job.revision++;
   }
 }
@@ -132,6 +133,13 @@ function availability(job, preferences, binding, gatesOpen, now) {
   // The typed publisher is not connected yet. Never promise automatic delivery
   // just because an upload has a schedule and a signed consent record.
   if (job.sourceKind === "upload") return "import_not_operational";
+  if (job.sourceKind === "reviewer") {
+    if (!job.authorization || job.authorization.sourceKind !== "reviewer" ||
+        job.authorization.validUntil <= now || !sameBinding(job.authorization.binding, binding)) return "connection_required";
+    if (now >= job.reviewer?.dispatchDeadline) return "attention";
+    if (!gatesOpen) return "operations_closed";
+    return job.asset && job.caption && !job.error ? "scheduled" : "attention";
+  }
   if (!job.authorization) return job.error ? "attention" : "manual";
   if (job.automaticEnabled === false) return "item_paused";
   if (job.authorization.validUntil <= now || job.scheduledAt + LATE_MS >= job.authorization.validUntil) return "attention";

@@ -284,10 +284,30 @@ test("cross-company media and publication IDs do not reach provider or disclose 
   assert.equal(f.posts.length,2);
 });
 
+// These service-contract tests use the already tested connector as a synthetic
+// worker completion. The reviewer service itself must obtain the calendar port.
+function calendarWorkerPort(f) {
+  return { async reviewerPublications() { return []; },
+    async enqueueReviewer(_claims, queued) {
+      const { intent, binding, mediaId, metadataDigest, caption, clientRequestId } = queued;
+      try {
+        await f.service.publishImage(f.context, { operationId: intent.operationId,
+          publicationId: intent.publicationId, connectionId: binding.connectionId,
+          clientRequestId, binding,
+          image: { mediaId, mimeType: "image/jpeg", metadataDigest }, caption });
+      } catch (error) {
+        const persisted = await f.scope.getPublicationDetails(intent.publicationId);
+        if (error?.code !== "provider_result_unknown" || persisted?.state !== "provider_confirming") throw error;
+      }
+      return { duplicate: false };
+    } };
+}
+
 test("HTTP-facing service binds original review and rejects same intent with changed content",async()=>{
   const f=fixture(async({request})=>{if(request.method==="POST")throw new Error("synthetic");return json({data:[]});});
   const reviewer=createInstagramRealReviewerService({config:f.config,authAdapter:f.adapter,connectorStore:f.store,
     connectorAudit:{async append(){}},createPublicationConnector:()=>f.connector,
+    getCalendar:()=>calendarWorkerPort(f),
     media:{async listOwnedJpegs(){return[];},async resolveOwnedJpeg(){return {...f.owned};}}});
   const body={verifiedClaims:f.claims,mediaId:MEDIA,clientRequestId:crypto.randomUUID(),
     expectedConnectionId:f.binding.connectionId,expectedExternalId:f.binding.externalId,expectedConnectionRevision:7};
@@ -335,6 +355,7 @@ test("router forwards only the exact three binding fields and exposes read-only 
 function scopedReviewer(f, config=f.config) {
   return createInstagramRealReviewerService({config,authAdapter:f.adapter,connectorStore:f.store,
     connectorAudit:{async append(){}},createPublicationConnector:()=>f.connector,
+    getCalendar:()=>calendarWorkerPort(f),
     media:{async listOwnedJpegs(){return[];},async resolveOwnedJpeg(){return {...f.owned};}}});
 }
 function reviewerRequest(f, claims=f.claims) {
