@@ -243,6 +243,18 @@ class InstagramApiClientTest {
         assertEquals(InstagramResult.Failure(InstagramError.INVALID_RESPONSE), client.publication(PUBLICATION))
     }
 
+    @Test fun publishedReelInHistoryDoesNotInvalidateConnectionScreen() = runBlocking {
+        val reelLink = "https://www.instagram.com/reel/AbCdE_123/"
+        val reel = publication("published").put("providerMediaId", "1234567890")
+            .put("publishedAt", DATE).put("permalink", reelLink)
+        val history = JSONObject().put("ok", true).put("canonicalPersistence", true)
+            .put("independentReview", true).put("freshPublicationAvailable", true)
+            .put("publications", org.json.JSONArray().put(reel))
+        enqueue(history)
+        val result = client.publications() as InstagramResult.Success
+        assertEquals(reelLink, result.value.publications.single().permalink)
+    }
+
     @Test fun reconciliationUsesExistingPublicationAndNeverCreatesNewIntent() = runBlocking {
         enqueue(JSONObject().put("ok", true).put("publication", publication("provider_confirming")), 202)
         val result = client.reconcile(PUBLICATION, BINDING) as InstagramResult.Success
