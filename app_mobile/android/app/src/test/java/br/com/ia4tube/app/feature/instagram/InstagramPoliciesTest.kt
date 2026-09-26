@@ -43,6 +43,27 @@ class InstagramPoliciesTest {
             .forEach { assertFalse(InstagramPolicies.isOfficialPermalink(it)) }
     }
 
+    @Test fun onlyCanonicalInstagramReelsCanBeOpened() {
+        assertTrue(InstagramPolicies.isOfficialPermalink("https://www.instagram.com/reel/AbCdE_123/"))
+        assertTrue(InstagramPolicies.isOfficialPermalink("https://www.instagram.com/reel/AbC/"))
+        assertTrue(InstagramPolicies.isOfficialPermalink("https://www.instagram.com/reel/${"a".repeat(100)}/"))
+        listOf(
+            "https://www.instagram.com/reels/AbCdE_123/",
+            "https://www.instagram.com/reel/AbCdE_123",
+            "https://www.instagram.com/reel/Ab/",
+            "https://www.instagram.com/reel/${"a".repeat(101)}/",
+            "https://www.instagram.com/reel/AbCdE.123/",
+            "https://www.instagram.com/reel/AbCdE_123/extra/",
+            "https://www.instagram.com/reel/AbCdE_123/?redirect=bad",
+            "https://instagram.com/reel/AbCdE_123/",
+            "https://user@www.instagram.com/reel/AbCdE_123/",
+            "https://www.instagram.com/reel/AbCdE_123/#x",
+            "http://www.instagram.com/reel/AbCdE_123/",
+            "https://www.instagram.com.evil.example/reel/AbCdE_123/",
+            "https://www.instagram.com:443/reel/AbCdE_123/"
+        ).forEach { assertFalse(it, InstagramPolicies.isOfficialPermalink(it)) }
+    }
+
     @Test fun captionsPreserveServerMarkerSpaceAndRejectControlsOrUntrimmedInput() {
         assertTrue(InstagramPolicies.validCaption("Legenda\nSegunda linha"))
         assertTrue(InstagramPolicies.validCaption("a".repeat(2150)))
