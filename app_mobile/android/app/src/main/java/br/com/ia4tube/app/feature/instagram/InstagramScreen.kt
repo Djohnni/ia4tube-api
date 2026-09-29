@@ -95,11 +95,7 @@ fun InstagramScreen(viewModel: InstagramViewModel, onBack: () -> Unit) {
     LaunchedEffect(state.authorizationUrlToOpen) {
         val url = viewModel.takeAuthorizationUrl()
         if (url != null && InstagramPolicies.isOfficialAuthorizationUrl(url)) {
-            try {
-                context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)).apply {
-                    addCategory(Intent.CATEGORY_BROWSABLE)
-                })
-            } catch (_: Exception) {
+            if (!InstagramOAuthBrowser.open(context, url)) {
                 viewModel.browserUnavailable()
             }
         }

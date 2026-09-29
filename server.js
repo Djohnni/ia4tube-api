@@ -58,6 +58,7 @@ const freeArtCampaignsStorage = require("./src/admin-free-art-campaigns/free-art
 const freeArtCampaignsScheduler = require("./src/admin-free-art-campaigns/free-art-campaigns.scheduler");
 const { createFreeArtCampaignRoutes } = require("./src/admin-free-art-campaigns/free-art-campaigns.routes");
 const seoNichePages = require("./src/seo/niche-page-renderer");
+const { createLegalPagesRouter } = require("./src/legal/legal-pages.routes");
 
 const app = express();
 app.set("trust proxy", true);
@@ -228,6 +229,7 @@ app.use("/videos", express.static(PUBLIC_VIDEOS_DIR, {
   }
 }));
 
+app.use(createLegalPagesRouter());
 app.use(express.static(PUBLIC_DIR));
 
 const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID || "";
