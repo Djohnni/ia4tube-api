@@ -1,6 +1,3 @@
-Warning: truncated output (original token count: 59242)
-Total output lines: 7420
-
 const {
   createProductionSocialIntegration
 } = require("./src/social/production-integration");
@@ -1963,7 +1960,3636 @@ app.post("/auth/auto-register", async (req, res) => {
     ).trim();
 
     const produtoOrigem = String(body.produto || "");
-    const creditoPreviewInterno = ge…29242 tokens truncated…payerEmail
+    const creditoPreviewInterno = getCustoPedido(produtoOrigem, null);
+    const login = criarLoginAutomaticoUnico(body.login || nome_time, clientes);
+    const senhaCliente = gerarSenhaAutomatica();
+    const senha_hash = bcrypt.hashSync(senhaCliente, 8);
+
+    const novo = {
+      nome_time: nome_time || "Jogador",
+      senha_hash,
+      login_tipo: "automatico",
+      cadastro_automatico: true,
+      conta_finalizada: false,
+      produto_origem: produtoOrigem,
+      credito_preview_interno: Number(creditoPreviewInterno || 0),
+      device_id: String(body.device_id || ""),
+      plano: 0,
+      saldo_mensal: 0,
+      saldo_extra: 0,
+      artes_avulsas_restantes: 0,
+      artes_avulsas_usadas: 0,
+      artes_avulsas_total_compradas: 0,
+      artes_avulsas_compras: [],
+      artes_avulsas_consumos: [],
+      usados_no_ciclo: 0,
+      ciclo_mes: nowYYYYMM(),
+      ativo: true,
+      criado_em: new Date().toISOString()
+    };
+    billingService.markFreeArtEligible(novo);
+
+    clientes[login] = novo;
+    writeClientes(clientes);
+
+    await productionSocialIntegration.afterAuthentication(login);
+    const token = productionSession.sign(login);
+
+    return res.json({
+      ok: true,
+      token,
+      login,
+      whatsapp: login,
+      nome_time: novo.nome_time,
+      plano: novo.plano,
+      saldo_mensal: Number(novo.saldo_mensal || 0),
+      saldo_extra: Number(novo.saldo_extra || 0),
+      ...billingService.getStandaloneArtStatus(novo),
+      saldo: Number(novo.saldo_mensal || 0) + Number(novo.saldo_extra || 0),
+      usados_no_ciclo: novo.usados_no_ciclo
+    });
+  } catch (e) {
+    return res.status(500).json({
+      ok: false,
+      error: "Erro ao criar acesso automático."
+    });
+  }
+});
+
+// Login
+app.post("/auth/register", async (req, res, next) => {
+  try {
+  const body = req.body || {};
+  const whatsapp = normalizarLoginId(body.whatsapp);
+  const senha = body.senha || "";
+  const nome_time = String(body.nome_time || whatsapp || "").trim();
+
+  if (!whatsapp || !senha) {
+    return res.status(400).json({ ok: false, error: "login e senha obrigatórios" });
+  }
+
+  if (whatsapp.length < 3) {
+    return res.status(400).json({ ok: false, error: "Login muito curto" });
+  }
+
+  const clientes = readClientes();
+
+  if (clientes[whatsapp]) {
+    return res.status(400).json({
+      ok: false,
+      error: `Esse login já existe. Tente algo como: ${whatsapp}${Math.floor(Math.random()*99)}`
+    });
+  }
+
+  const senha_hash = bcrypt.hashSync(senha, 8);
+
+  const novo = {
+    nome_time,
+    senha_hash,
+    plano: 0,
+    saldo_mensal: 0,
+    saldo_extra: 0,
+    artes_avulsas_restantes: 0,
+    artes_avulsas_usadas: 0,
+    artes_avulsas_total_compradas: 0,
+    artes_avulsas_compras: [],
+    artes_avulsas_consumos: [],
+    usados_no_ciclo: 0,
+    ciclo_mes: nowYYYYMM(),
+    ativo: true
+  };
+  billingService.markFreeArtEligible(novo);
+
+  const clientesAtualizados = readClientes();
+
+  if (clientesAtualizados[whatsapp]) {
+    return res.status(400).json({
+      ok: false,
+      error: `Esse login já existe. Tente outro nome.`
+    });
+  }
+
+  clientesAtualizados[whatsapp] = novo;
+  writeClientes(clientesAtualizados);
+
+  await productionSocialIntegration.afterAuthentication(whatsapp);
+  const token = productionSession.sign(whatsapp);
+
+  return res.json({
+    ok: true,
+    token,
+    nome_time: novo.nome_time,
+    plano: novo.plano,
+    ...billingService.getStandaloneArtStatus(novo),
+    usados_no_ciclo: novo.usados_no_ciclo
+  });
+  } catch (error) { return next(error); }
+});
+
+app.post("/auth/finalizar-conta-auto", auth, async (req, res) => {
+  try {
+    const loginAtual = req.user.whatsapp;
+    const novoLogin = normalizarLoginId(req.body?.login);
+    const senha = String(req.body?.senha || "");
+
+    if (!novoLogin || novoLogin.length < 3) {
+      return res.status(400).json({ ok:false, error:"Login muito curto" });
+    }
+
+    if (!senha || senha.length < 3) {
+      return res.status(400).json({ ok:false, error:"Senha muito curta" });
+    }
+
+    const clientes = readClientes();
+    const clienteAtual = clientes[loginAtual];
+
+    if (!clienteAtual) {
+      return res.status(404).json({ ok:false, error:"Conta automática não encontrada" });
+    }
+
+    if (clienteAtual.cadastro_automatico !== true || clienteAtual.conta_finalizada === true) {
+      return res.status(400).json({ ok:false, error:"Essa conta já foi finalizada" });
+    }
+
+    if (clientes[novoLogin] && novoLogin !== loginAtual) {
+      return res.status(400).json({
+        ok:false,
+        error:`Esse login já existe. Tente algo como: ${novoLogin}${Math.floor(Math.random()*99)}`
+      });
+    }
+
+    clienteAtual.nome_time = novoLogin;
+    clienteAtual.senha_hash = bcrypt.hashSync(senha, 8);
+    clienteAtual.conta_finalizada = true;
+    clienteAtual.finalizado_em = new Date().toISOString();
+
+    if (novoLogin !== loginAtual) {
+      clientes[novoLogin] = clienteAtual;
+      delete clientes[loginAtual];
+
+      try {
+        const pastaAntiga = path.join(PEDIDOS_DIR, loginAtual);
+        const pastaNova = path.join(PEDIDOS_DIR, novoLogin);
+
+        if (fs.existsSync(pastaAntiga) && !fs.existsSync(pastaNova)) {
+          fs.renameSync(pastaAntiga, pastaNova);
+        }
+      } catch {}
+    } else {
+      clientes[loginAtual] = clienteAtual;
+    }
+
+    writeClientes(clientes);
+
+    await productionSocialIntegration.afterAuthentication(novoLogin);
+    const token = productionSession.sign(novoLogin);
+
+    return res.json({
+      ok:true,
+      token,
+      whatsapp: novoLogin,
+      nome_time: clienteAtual.nome_time,
+      plano: clienteAtual.plano,
+      saldo_mensal: Number(clienteAtual.saldo_mensal || 0),
+      saldo_extra: Number(clienteAtual.saldo_extra || 0),
+      ...billingService.getStandaloneArtStatus(clienteAtual),
+      saldo: Number(clienteAtual.saldo_mensal || 0) + Number(clienteAtual.saldo_extra || 0),
+      usados_no_ciclo: clienteAtual.usados_no_ciclo
+    });
+
+  } catch (e) {
+    return res.status(500).json({
+      ok:false,
+      error:"Erro ao finalizar conta automática"
+    });
+  }
+});
+
+app.post("/auth/login", async (req, res, next) => {
+  try {
+  const body = req.body || {};
+  const whatsapp = normalizarLoginId(body.whatsapp);
+  const senha = body.senha || "";
+
+  if (!whatsapp || !senha) {
+    return res.status(400).json({ ok: false, error: "login e senha obrigatórios" });
+  }
+
+  const clientes = readClientes();
+  const c = clientes[whatsapp];
+
+  if (!c) {
+    return res.status(401).json({ ok: false, error: "Login não encontrado" });
+  }
+
+  if (!c.ativo) {
+    return res.status(403).json({ ok: false, error: "Mensalidade inativa" });
+  }
+
+  const ok = bcrypt.compareSync(senha, c.senha_hash);
+  if (!ok) {
+    return res.status(401).json({ ok: false, error: "Senha incorreta" });
+  }
+
+  const repairedCompanyLabel = repairAppReviewCompanyLabel(
+    whatsapp,
+    c.nome_time
+  );
+  const mesAtual = nowYYYYMM();
+  if (c.ciclo_mes !== mesAtual || repairedCompanyLabel !== c.nome_time) {
+    c.nome_time = repairedCompanyLabel;
+    if (c.ciclo_mes !== mesAtual) {
+      c.ciclo_mes = mesAtual;
+      c.usados_no_ciclo = 0;
+    }
+    clientes[whatsapp] = c;
+    writeClientes(clientes);
+  }
+
+  await productionSocialIntegration.afterAuthentication(whatsapp);
+  const token = productionSession.sign(whatsapp);
+
+  return res.json({
+    ok: true,
+    token,
+    nome_time: c.nome_time,
+    plano: c.plano,
+    saldo_mensal: Number(c.saldo_mensal || 0),
+    saldo_extra: Number(c.saldo_extra || 0),
+    ...billingService.getStandaloneArtStatus(c),
+    saldo: Number(c.saldo_mensal || 0) + Number(c.saldo_extra || 0),
+    usados_no_ciclo: c.usados_no_ciclo
+  });
+  } catch (error) { return next(error); }
+});
+
+// Perfil
+app.get("/me", auth, (req, res) => {
+  registrarOnline(req, { ultima_acao: "perfil" });
+
+  const clientes = readClientes();
+  const c = clientes[req.user.whatsapp];
+
+  if (!c) {
+    return res.status(404).json({ ok: false, error: "Cliente não encontrado" });
+  }
+
+  const freeArtIpLock = getFreeArtIpLockStatus(req);
+  const cicloAtualizado = billingService.refreshManualPlanCycle(c);
+  const carrosselCycleBefore = JSON.stringify({
+    carrosseis_ciclo: c.carrosseis_ciclo || "",
+    carrosseis_criados: c.carrosseis_criados || null
+  });
+  const billing = billingService.getBillingStatus(c, { freeArtBlocked: freeArtIpLock.blocked });
+  const carrosselUsage = carouselService.carouselUsagePayload(c);
+  const carrosselCycleAfter = JSON.stringify({
+    carrosseis_ciclo: c.carrosseis_ciclo || "",
+    carrosseis_criados: c.carrosseis_criados || null
+  });
+
+  if (cicloAtualizado.changed || carrosselCycleBefore !== carrosselCycleAfter) {
+    clientes[req.user.whatsapp] = c;
+    writeClientes(clientes);
+  }
+
+  const bonusTesteVisual = req.user.whatsapp === "15991120599" ? 999 : 0;
+  const saldoVisivel = Number(c.saldo_mensal || 0) + Number(c.saldo_extra || 0) + bonusTesteVisual;
+
+  return res.json({
+    ok: true,
+    nome_time: c.nome_time,
+    plano: c.plano,
+    plano_atual: billing.plano_atual,
+    plano_status: billing.plano_status,
+    plano_nome: billing.plano_nome,
+    plano_renova_em: billing.plano_renova_em,
+    artes_mensais_total: billing.artes_mensais_total,
+    artes_mensais_usadas: billing.artes_mensais_usadas,
+    artes_mensais_restantes: billing.artes_mensais_restantes,
+    artes_avulsas_restantes: billing.artes_avulsas_restantes,
+    artes_avulsas_usadas: billing.artes_avulsas_usadas,
+    artes_avulsas_total_compradas: billing.artes_avulsas_total_compradas,
+    arte_avulsa_valor: billing.arte_avulsa_valor,
+    arte_avulsa_produto_id: billing.arte_avulsa_produto_id,
+    arte_avulsa_titulo: billing.arte_avulsa_titulo,
+    saldo_mensal: Number(c.saldo_mensal || 0),
+    saldo_extra: Number(c.saldo_extra || 0),
+    saldo: saldoVisivel,
+    usados_no_ciclo: c.usados_no_ciclo,
+    carrosseis_limite: carrosselUsage.limite_plano,
+    carrosseis_usados: carrosselUsage.usado_no_ciclo,
+    carrosseis_restantes: carrosselUsage.restante_no_ciclo,
+    carrosseis_ciclo: carrosselUsage.ciclo,
+    brinde_mascote_disponivel: c.brinde_mascote_disponivel === true,
+    ativo: c.ativo,
+    billing
+  });
+});
+
+app.get("/billing/free-art/status", auth, (req, res) => {
+  const clientes = readClientes();
+  const c = clientes[req.user.whatsapp];
+
+  if (!c) {
+    return res.status(404).json({ ok: false, error: "Cliente nao encontrado" });
+  }
+
+  const freeArtIpLock = getFreeArtIpLockStatus(req);
+
+  return res.json({
+    ok: true,
+    ...billingService.getFreeArtStatus(c, { freeArtBlocked: freeArtIpLock.blocked }),
+    arte_gratis_bloqueada_ip: freeArtIpLock.blocked,
+    arte_gratis_bloqueada_ate: freeArtIpLock.lock?.bloqueado_ate || "",
+    arte_gratis_mensagem_bloqueio: freeArtIpLock.blocked
+      ? "O limite de testes gratuitos nesta rede foi atingido. Voce ainda pode continuar usando com combo ou arte avulsa."
+      : ""
+  });
+});
+
+function requireFinalTestAllowedOwner(req, res) {
+  try {
+    assertFinalTestAllowedOwner(req.user?.whatsapp, process.env);
+    return true;
+  } catch (error) {
+    const configurationUnavailable =
+      error instanceof FcmFinalTestError &&
+      error.code === "fcm_final_test_owner_allowlist_unavailable";
+    res.status(configurationUnavailable ? 503 : 403).json({
+      ok: false,
+      code: configurationUnavailable
+        ? "fcm_final_test_owner_allowlist_unavailable"
+        : "fcm_final_test_owner_not_allowed",
+      error: "Registro de notificacoes indisponivel."
+    });
+    return false;
+  }
+}
+
+app.post("/me/fcm-token", auth, (req, res) => {
+  if (!fcmService.tokenRegistrationEnabled()) {
+    return res.status(503).json({
+      ok: false,
+      code: "fcm_token_registration_disabled",
+      error: "Registro de notificacoes desativado."
+    });
+  }
+  if (req.fcmFinalTestPreauthorized !== true) {
+    return res.status(503).json({
+      ok: false,
+      code: "fcm_token_registration_unavailable",
+      error: "Registro de notificacoes indisponivel."
+    });
+  }
+  if (!requireFinalTestAllowedOwner(req, res)) return;
+
+  let requestData;
+  try {
+    requestData = parseRegisterFcmTokenBody(req.body);
+  } catch (error) {
+    return res.status(400).json({
+      ok: false,
+      code: error instanceof FcmTokenApiContractError
+        ? error.code
+        : "fcm_token_request_invalid",
+      error: "Requisicao de notificacoes invalida."
+    });
+  }
+
+  try {
+    const result = registerFinalTestDevice({
+      dataDir: DATA_DIR,
+      ownerId: req.user.whatsapp,
+      token: requestData.token,
+      previousToken: requestData.previousToken,
+      platform: requestData.platform
+    });
+    return res.json({
+      ok: true,
+      salvo: result.saved === true,
+      tokens_ativos: result.activeCount
+    });
+  } catch {
+    return res.status(503).json({
+      ok: false,
+      code: "fcm_token_secure_storage_unavailable",
+      error: "Registro seguro de notificacoes indisponivel."
+    });
+  }
+});
+
+app.delete("/me/fcm-token", auth, (req, res) => {
+  // Esta trava deve preceder leitura do body, clientes, chaves ou tokens.
+  if (!fcmService.tokenRegistrationEnabled()) {
+    return res.status(503).json({
+      ok: false,
+      code: "fcm_token_registration_disabled",
+      error: "Registro de notificacoes desativado."
+    });
+  }
+  if (req.fcmFinalTestPreauthorized !== true) {
+    return res.status(503).json({
+      ok: false,
+      code: "fcm_token_registration_unavailable",
+      error: "Registro de notificacoes indisponivel."
+    });
+  }
+  if (!requireFinalTestAllowedOwner(req, res)) return;
+
+  let requestData;
+  try {
+    requestData = parseDeactivateFcmTokenBody(req.body);
+  } catch (error) {
+    return res.status(400).json({
+      ok: false,
+      code: error instanceof FcmTokenApiContractError
+        ? error.code
+        : "fcm_token_request_invalid",
+      error: "Requisicao de notificacoes invalida."
+    });
+  }
+
+  try {
+    const result = deactivateFinalTestDevice({
+      dataDir: DATA_DIR,
+      ownerId: req.user.whatsapp,
+      token: requestData.token
+    });
+    return res.json({
+      ok: true,
+      desativado: result.deactivated > 0
+    });
+  } catch {
+    return res.status(503).json({
+      ok: false,
+      code: "fcm_token_secure_storage_unavailable",
+      error: "Desativacao segura de notificacoes indisponivel."
+    });
+  }
+});
+
+function fcmSenderForType(tipo = "") {
+  switch (String(tipo || "").trim().toLowerCase()) {
+    case "arte_pronta":
+      return fcmService.sendArtePronta;
+    case "pedido_atualizado":
+      return fcmService.sendPedidoAtualizado;
+    case "planejamento_mensal":
+      return fcmService.sendPlanejamentoMensal;
+    case "arte_gratis_semanal":
+      return fcmService.sendArteGratisSemanal;
+    case "nova_versao":
+      return fcmService.sendNovaVersao;
+    case "aviso_geral":
+    default:
+      return fcmService.sendAvisoGeral;
+  }
+}
+
+function deactivateInvalidFcmTokens(whatsapp, invalidTokens = [], reason = "firebase_invalid_token") {
+  if (!Array.isArray(invalidTokens) || invalidTokens.length === 0) {
+    return { deactivated: 0 };
+  }
+
+  const clientes = readClientes();
+  const cliente = clientes[whatsapp];
+  if (!cliente) {
+    return { deactivated: 0 };
+  }
+
+  try {
+    const result = deactivateFcmTokens({
+      cliente,
+      tokens: invalidTokens,
+      reason
+    });
+    if (result.deactivated > 0) {
+      clientes[whatsapp] = cliente;
+      atomicWriteJson(CLIENTES_FILE, clientes);
+    }
+    return result;
+  } catch {
+    return {
+      deactivated: 0,
+      code: "fcm_token_secure_storage_unavailable"
+    };
+  }
+}
+
+function publicApiUrl(pathname = "") {
+  const cleanPath = String(pathname || "").startsWith("/")
+    ? String(pathname || "")
+    : `/${pathname || ""}`;
+  return `${PUBLIC_API_BASE_URL}${cleanPath}`;
+}
+
+function sendClientPushAsync(whatsapp, tipo, payload = {}) {
+  if (!fcmService.statusNotificationsEnabled()) {
+    return;
+  }
+
+  try {
+    const clientes = readClientes();
+    const cliente = clientes[whatsapp];
+
+    if (!cliente) {
+      console.warn("[fcm] push nao preparado", {
+        code: "fcm_client_not_found",
+        type: String(tipo || "")
+      });
+      return;
+    }
+
+    const sender = fcmSenderForType(tipo);
+    const invalidTokens = [];
+    sender(cliente, payload, {
+      onInvalidToken: (token) => invalidTokens.push(token)
+    })
+      .then((result) => {
+        const cleanup = deactivateInvalidFcmTokens(whatsapp, invalidTokens);
+        if (cleanup.deactivated > 0) {
+          result.tokens_invalidos_desativados = cleanup.deactivated;
+          console.warn("[fcm] tokens invalidos desativados", {
+            type: String(tipo || ""),
+            deactivated: cleanup.deactivated
+          });
+        }
+
+        if (!result?.ok) {
+          console.warn("[fcm] push nao enviado", {
+            type: String(tipo || ""),
+            code: result?.code || "fcm_send_failed"
+          });
+          return;
+        }
+        console.log("[fcm] push enviado", {
+          type: String(tipo || ""),
+          sent: result.sent || 0,
+        });
+      })
+      .catch((error) => {
+        console.warn("[fcm] falha ao enviar push", {
+          type: String(tipo || ""),
+          message: error?.message
+        });
+      });
+  } catch (error) {
+    console.warn("[fcm] falha ao preparar push", {
+      type: String(tipo || ""),
+      message: error?.message
+    });
+  }
+}
+
+app.post("/bot/notificacoes/teste", botRunnerAuth, async (req, res) => {
+  if (!isBotAdmin(req)) {
+    return res.status(403).json({ ok: false, error: "Acesso negado" });
+  }
+  if (!fcmService.manualNotificationsEnabled()) {
+    return res.status(503).json({
+      ok: false,
+      code: "fcm_manual_notifications_disabled",
+      error: "Notificacoes manuais desativadas."
+    });
+  }
+
+  const whatsapp = String(req.body?.whatsapp || "").trim();
+  const tipo = String(req.body?.tipo || "aviso_geral").trim() || "aviso_geral";
+
+  if (!whatsapp) {
+    return res.status(400).json({ ok: false, error: "WhatsApp obrigatorio" });
+  }
+
+  const clientes = readClientes();
+  const cliente = clientes[whatsapp];
+
+  if (!cliente) {
+    return res.status(404).json({ ok: false, error: "Cliente nao encontrado" });
+  }
+
+  try {
+    const sender = fcmSenderForType(tipo);
+    const invalidTokens = [];
+    const result = await sender(cliente, {
+      title: req.body?.title,
+      body: req.body?.body || req.body?.message,
+      pedido_id: req.body?.pedido_id,
+      planejamento_id: req.body?.planejamento_id,
+      planejamento_item_id: req.body?.planejamento_item_id,
+      latest_version_code: req.body?.latest_version_code,
+      latest_version_name: req.body?.latest_version_name,
+      image_url: req.body?.image_url || req.body?.imageUrl || req.body?.image || req.body?.picture,
+      data: req.body?.data && typeof req.body.data === "object" ? req.body.data : {}
+    }, {
+      onInvalidToken: (token) => invalidTokens.push(token)
+    });
+
+    const cleanup = deactivateInvalidFcmTokens(whatsapp, invalidTokens);
+    if (cleanup.deactivated > 0) {
+      result.tokens_invalidos_desativados = cleanup.deactivated;
+    }
+
+    return res.json({ ok: result?.ok === true, result });
+  } catch (error) {
+    return res.status(500).json({
+      ok: false,
+      error: error?.message || "Falha ao enviar notificacao de teste"
+    });
+  }
+});
+
+// ===== MERCADO PAGO =====
+async function createMercadoPagoPixPayment({ amount, description, payerKey, externalReference, metadata, idempotencyKey }) {
+  if (!MP_ACCESS_TOKEN) {
+    const error = new Error("MP_ACCESS_TOKEN nao configurado");
+    error.statusCode = 500;
+    throw error;
+  }
+
+  const payerEmail = `${String(payerKey).replace(/\D/g, "") || "cliente"}@ia4tube.com.br`;
+  const paymentPayload = {
+    transaction_amount: Number(Number(amount).toFixed(2)),
+    description,
+    payment_method_id: "pix",
+    payer: {
+      email: payerEmail
+    },
+    external_reference: externalReference,
+    metadata,
+    notification_url: MP_NOTIFICATION_URL
+  };
+
+  const r = await fetch("https://api.mercadopago.com/v1/payments", {
+    method: "POST",
+    headers: {
+      "Authorization": `Bearer ${MP_ACCESS_TOKEN}`,
+      "Content-Type": "application/json",
+      "X-Idempotency-Key": idempotencyKey
+    },
+    body: JSON.stringify(paymentPayload)
+  });
+
+  const data = await r.json();
+
+  if (!r.ok) {
+    const error = new Error("Erro ao gerar Pix");
+    error.statusCode = 500;
+    error.detail = data;
+    throw error;
+  }
+
+  const transactionData = data.point_of_interaction?.transaction_data || {};
+  return {
+    data,
+    pixCopiaCola: transactionData.qr_code || "",
+    qrCodeBase64: transactionData.qr_code_base64 || "",
+    ticketUrl: transactionData.ticket_url || ""
+  };
+}
+
+app.get("/billing/status", auth, (req, res) => {
+  const clientes = readClientes();
+  const c = clientes[req.user.whatsapp];
+
+  if (!c) {
+    return res.status(404).json({ ok: false, error: "Cliente nao encontrado" });
+  }
+
+  const cicloAtualizado = billingService.refreshManualPlanCycle(c);
+  if (cicloAtualizado.changed) {
+    clientes[req.user.whatsapp] = c;
+    writeClientes(clientes);
+  }
+
+  return res.json({
+    ok: true,
+    ...billingService.getBillingStatus(c)
+  });
+});
+
+function createArteAvulsaPurchaseId(whatsapp) {
+  const cleanWhatsapp = String(whatsapp || "").replace(/\W+/g, "").slice(0, 32) || "cliente";
+  return `arte_avulsa_${cleanWhatsapp}_${Date.now()}_${crypto.randomBytes(4).toString("hex")}`;
+}
+
+async function criarArteAvulsaPixHandler(req, res) {
+  try {
+    const whatsapp = req.user.whatsapp;
+    const clientes = readClientes();
+    const c = clientes[whatsapp];
+
+    if (!c) {
+      return res.status(404).json({ ok: false, error: "Cliente nao encontrado" });
+    }
+
+    const produto = billingPlans.getSingleArtPurchase();
+    const quantidade = Math.max(
+      1,
+      Math.min(20, Math.round(Number(req.body?.quantidade || produto.quantity || 1)))
+    );
+    const valorTotal = billingService.roundMoney(Number(produto.amount) * quantidade);
+    const purchaseId = createArteAvulsaPurchaseId(whatsapp);
+
+    const result = await createMercadoPagoPixPayment({
+      amount: valorTotal,
+      description: quantidade > 1 ? `${produto.title} (${quantidade} artes)` : produto.title,
+      payerKey: whatsapp,
+      externalReference: `arte_avulsa_pix|${whatsapp}|${purchaseId}`,
+      metadata: {
+        tipo: "arte_avulsa_pix",
+        whatsapp,
+        purchase_id: purchaseId,
+        produto_id: produto.id,
+        quantidade,
+        valor_unitario: Number(produto.amount),
+        valor_pago: valorTotal
+      },
+      idempotencyKey: `arte_avulsa_pix_${purchaseId}`
+    });
+
+    billingService.recordStandaloneArtPurchasePending(c, {
+      purchaseId,
+      paymentId: String(result.data.id || ""),
+      amount: valorTotal,
+      quantity: quantidade,
+      createdAt: new Date().toISOString()
+    });
+    clientes[whatsapp] = c;
+    writeClientes(clientes);
+
+    return res.json({
+      ok: true,
+      pix_copia_cola: result.pixCopiaCola,
+      qr_code_base64: result.qrCodeBase64,
+      ticket_url: result.ticketUrl,
+      payment_id: result.data.id,
+      purchase_id: purchaseId,
+      tipo: "arte_avulsa_pix",
+      produto_id: produto.id,
+      valor_pago: valorTotal,
+      valor_unitario: Number(produto.amount),
+      quantidade,
+      cta_label: quantidade > 1
+        ? `Comprar ${quantidade} artes por R$ ${valorTotal.toFixed(2).replace(".", ",")}`
+        : "Comprar 1 arte por R$ 5,99",
+      artes_avulsas_restantes: Number(c.artes_avulsas_restantes || 0)
+    });
+  } catch (e) {
+    return res.status(e.statusCode || 500).json({
+      ok: false,
+      error: e.message || "Erro interno ao gerar Pix da arte avulsa",
+      detalhe: e.detail
+    });
+  }
+}
+
+app.post("/billing/arte-avulsa/pix", auth, criarArteAvulsaPixHandler);
+app.post("/billing/artes-avulsas/pix", auth, criarArteAvulsaPixHandler);
+
+app.post("/billing/saldo/pix", auth, async (req, res) => {
+  try {
+    const { pacote = "saldo_990" } = req.body || {};
+    const whatsapp = req.user.whatsapp;
+    const p = billingPlans.getBalancePackage(pacote);
+
+    if (!p) {
+      return res.status(400).json({ ok: false, error: "Pacote invalido" });
+    }
+
+    const result = await createMercadoPagoPixPayment({
+      amount: p.amount,
+      description: p.title,
+      payerKey: whatsapp,
+      externalReference: `saldo_extra|${whatsapp}|${p.id}|${Date.now()}`,
+      metadata: {
+        tipo: "saldo_extra",
+        whatsapp,
+        pacote: p.id,
+        credito: Number(p.credit)
+      },
+      idempotencyKey: `saldo_extra_${whatsapp}_${p.id}_${Date.now()}`
+    });
+
+    return res.json({
+      ok: true,
+      pix_copia_cola: result.pixCopiaCola,
+      qr_code_base64: result.qrCodeBase64,
+      ticket_url: result.ticketUrl,
+      payment_id: result.data.id,
+      pacote: p.id,
+      valor_pago: Number(p.amount),
+      credito: Number(p.credit)
+    });
+  } catch (e) {
+    return res.status(e.statusCode || 500).json({
+      ok: false,
+      error: e.message || "Erro interno ao gerar Pix",
+      detalhe: e.detail
+    });
+  }
+});
+
+app.post("/billing/planos/:planId/pix", auth, async (req, res) => {
+  try {
+    const whatsapp = req.user.whatsapp;
+    const plan = billingPlans.getPlan(req.params.planId);
+
+    if (!plan) {
+      return res.status(400).json({ ok: false, error: "Combo invalido" });
+    }
+
+    const result = await createMercadoPagoPixPayment({
+      amount: plan.price,
+      description: `IA4Tube - ${plan.name}`,
+      payerKey: whatsapp,
+      externalReference: `plano_pix|${whatsapp}|${plan.id}|${Date.now()}`,
+      metadata: {
+        tipo: "plano_pix",
+        whatsapp,
+        plan_id: plan.id,
+        plan_name: plan.name,
+        artes_mes: Number(plan.artsPerMonth)
+      },
+      idempotencyKey: `plano_pix_${whatsapp}_${plan.id}_${Date.now()}`
+    });
+
+    return res.json({
+      ok: true,
+      pix_copia_cola: result.pixCopiaCola,
+      qr_code_base64: result.qrCodeBase64,
+      ticket_url: result.ticketUrl,
+      payment_id: result.data.id,
+      plan_id: plan.id,
+      plan_name: plan.name,
+      valor_pago: Number(plan.price),
+      artes_mes: Number(plan.artsPerMonth)
+    });
+  } catch (e) {
+    return res.status(e.statusCode || 500).json({
+      ok: false,
+      error: e.message || "Erro interno ao gerar Pix",
+      detalhe: e.detail
+    });
+  }
+});
+
+app.post("/comprar-creditos", auth, async (req, res) => {
+  try {
+    if (!MP_ACCESS_TOKEN) {
+      return res.status(500).json({ ok: false, error: "MP_ACCESS_TOKEN não configurado" });
+    }
+
+    const { pacote } = req.body || {};
+    const whatsapp = req.user.whatsapp;
+
+    const pacotes = {
+      saldo_800: { titulo: "Saldo IA4Tube - R$8", valor_pago: 8.00, credito: 8.00 },
+      saldo_1800: { titulo: "Saldo IA4Tube - R$18", valor_pago: 18.00, credito: 18.00 },
+      saldo_2800: { titulo: "Saldo IA4Tube - R$28", valor_pago: 28.00, credito: 28.00 },
+      saldo_4800: { titulo: "Saldo IA4Tube - R$48", valor_pago: 48.00, credito: 48.00 }
+    };
+
+    const p = pacotes[pacote];
+
+    if (!p) {
+      return res.status(400).json({ ok: false, error: "Pacote inválido" });
+    }
+
+    const preference = {
+      items: [{
+        title: p.titulo,
+        quantity: 1,
+        currency_id: "BRL",
+        unit_price: Number(p.valor_pago)
+      }],
+      external_reference: `${whatsapp}|${pacote}|${Date.now()}`,
+      metadata: {
+        tipo: "saldo",
+        whatsapp,
+        pacote,
+        credito: Number(p.credito)
+      },
+      back_urls: {
+        success: "https://ia4tube.com/app.html",
+        failure: "https://ia4tube.com/app.html",
+        pending: "https://ia4tube.com/app.html"
+      },
+      notification_url: "https://ia4tube-api.onrender.com/webhook/mercadopago",
+      auto_return: "approved"
+    };
+
+    const r = await fetch("https://api.mercadopago.com/checkout/preferences", {
+      method: "POST",
+      headers: {
+        "Authorization": `Bearer ${MP_ACCESS_TOKEN}`,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify(preference)
+    });
+
+    const data = await r.json();
+
+    if (!r.ok) {
+      return res.status(500).json({ ok: false, error: "Erro ao criar checkout", detalhe: data });
+    }
+
+    return res.json({
+      ok: true,
+      init_point: data.init_point,
+      sandbox_init_point: data.sandbox_init_point
+    });
+
+  } catch (e) {
+    return res.status(500).json({ ok: false, error: "Erro interno ao criar compra" });
+  }
+});
+
+app.post("/comprar-creditos-pix", auth, async (req, res) => {
+  try {
+    if (!MP_ACCESS_TOKEN) {
+      return res.status(500).json({ ok: false, error: "MP_ACCESS_TOKEN não configurado" });
+    }
+
+    const { pacote } = req.body || {};
+    const whatsapp = req.user.whatsapp;
+
+    const pacotes = {
+      saldo_800: { titulo: "Saldo IA4Tube - R$8", valor_pago: 8.00, credito: 8.00 },
+      saldo_1800: { titulo: "Saldo IA4Tube - R$18", valor_pago: 18.00, credito: 18.00 },
+      saldo_2800: { titulo: "Saldo IA4Tube - R$28", valor_pago: 28.00, credito: 28.00 },
+      saldo_4800: { titulo: "Saldo IA4Tube - R$48", valor_pago: 48.00, credito: 48.00 }
+    };
+
+    const p = pacotes[pacote];
+
+    if (!p) {
+      return res.status(400).json({ ok: false, error: "Pacote inválido" });
+    }
+
+    const payerEmail = `${String(whatsapp).replace(/\D/g, "") || "cliente"}@ia4tube.com.br`;
+    const paymentPayload = {
+      transaction_amount: Number(Number(p.valor_pago).toFixed(2)),
+      description: p.titulo,
+      payment_method_id: "pix",
+      payer: {
+        email: payerEmail
+      },
+      external_reference: `saldo_pix|${whatsapp}|${pacote}|${Date.now()}`,
+      metadata: {
+        tipo: "saldo",
+        whatsapp,
+        pacote,
+        credito: Number(p.credito)
+      },
+      notification_url: "https://ia4tube-api.onrender.com/webhook/mercadopago"
+    };
+
+    const r = await fetch("https://api.mercadopago.com/v1/payments", {
+      method: "POST",
+      headers: {
+        "Authorization": `Bearer ${MP_ACCESS_TOKEN}`,
+        "Content-Type": "application/json",
+        "X-Idempotency-Key": `saldo_pix_${whatsapp}_${pacote}_${Date.now()}`
+      },
+      body: JSON.stringify(paymentPayload)
+    });
+
+    const data = await r.json();
+
+    if (!r.ok) {
+      return res.status(500).json({ ok: false, error: "Erro ao gerar Pix", detalhe: data });
+    }
+
+    const transactionData = data.point_of_interaction?.transaction_data || {};
+
+    return res.json({
+      ok: true,
+      pix_copia_cola: transactionData.qr_code || "",
+      qr_code_base64: transactionData.qr_code_base64 || "",
+      ticket_url: transactionData.ticket_url || "",
+      payment_id: data.id,
+      valor_pago: Number(p.valor_pago),
+      credito: Number(p.credito)
+    });
+
+  } catch (e) {
+    return res.status(500).json({ ok: false, error: "Erro interno ao gerar Pix" });
+  }
+});
+
+app.post("/webhook/mercadopago", async (req, res) => {
+  try {
+    const body = req.body || {};
+    const paymentId = body?.data?.id || body?.id || req.query?.id;
+
+    if (!paymentId) {
+      return res.json({ ok: true });
+    }
+
+    let processados = readMpProcessados();
+    const registroAtual = processados[paymentId];
+
+    if (registroAtual && registroAtual.status !== "processando") {
+      return res.json({ ok: true, duplicado: true });
+    }
+
+    if (registroAtual && !isMpProcessandoStale(registroAtual)) {
+      return res.json({ ok: true, processando: true });
+    }
+
+    processados[paymentId] = {
+      status: "processando",
+      criado_em: registroAtual?.criado_em || new Date().toISOString(),
+      ultima_tentativa_em: new Date().toISOString(),
+      tentativas: Number(registroAtual?.tentativas || 0) + 1
+    };
+
+    writeMpProcessados(processados);
+
+    const r = await fetch(`https://api.mercadopago.com/v1/payments/${paymentId}`, {
+      headers: {
+        "Authorization": `Bearer ${MP_ACCESS_TOKEN}`
+      }
+    });
+
+    const pagamento = await r.json();
+
+    if (!r.ok || pagamento.status !== "approved") {
+      processados = readMpProcessados();
+      delete processados[paymentId];
+      writeMpProcessados(processados);
+
+      return res.json({ ok: true, status: pagamento.status || "ignorado" });
+    }
+
+    const external = String(pagamento.external_reference || "");
+    const tipo = pagamento.metadata?.tipo || "";
+
+    if (tipo === "pedido_pix") {
+      const whatsapp = pagamento.metadata?.whatsapp || external.split("|")[1];
+      const pedidoId = pagamento.metadata?.pedido_id || external.split("|")[2];
+
+      if (!whatsapp || !pedidoId) {
+        processados = readMpProcessados();
+        processados[paymentId] = {
+          tipo: "pedido_pix",
+          status: "erro_sem_pedido",
+          criado_em: new Date().toISOString()
+        };
+        writeMpProcessados(processados);
+        return res.json({ ok: true });
+      }
+
+      const base = getPedidoBase(whatsapp, pedidoId);
+
+      if (!base) {
+        processados = readMpProcessados();
+        processados[paymentId] = {
+          tipo: "pedido_pix",
+          whatsapp,
+          pedido_id: pedidoId,
+          status: "pedido_nao_encontrado",
+          criado_em: new Date().toISOString()
+        };
+        writeMpProcessados(processados);
+        return res.json({ ok: true });
+      }
+
+      const pedidoPath = path.join(base, "pedido.json");
+      const pedido = safeReadJson(pedidoPath) || {};
+
+      if (pedido.pagamento_pendente !== true) {
+        processados = readMpProcessados();
+        processados[paymentId] = {
+          tipo: "pedido_pix",
+          whatsapp,
+          pedido_id: pedidoId,
+          status: "ja_liberado",
+          criado_em: new Date().toISOString()
+        };
+        writeMpProcessados(processados);
+        return res.json({ ok: true });
+      }
+
+      if (String(pedido.mp_payment_id || "") !== String(paymentId)) {
+        processados = readMpProcessados();
+        processados[paymentId] = {
+          tipo: "pedido_pix",
+          whatsapp,
+          pedido_id: pedidoId,
+          status: "payment_id_divergente",
+          criado_em: new Date().toISOString()
+        };
+        writeMpProcessados(processados);
+        return res.json({ ok: true });
+      }
+
+      pedido.pagamento_pendente = false;
+      pedido.pagamento_metodo = "pix";
+      pedido.pagamento_confirmado_em = new Date().toISOString();
+      pedido.mp_payment_status = "approved";
+
+      const deveCreditarBonusPedido = pedido.creditar_saldo_ao_pagar_pix === true;
+      const valorBonusPedido = deveCreditarBonusPedido ? Number(
+        pedido.valor_pendente ||
+        pagamento.metadata?.valor_pendente ||
+        pagamento.transaction_amount ||
+        0
+      ) : 0;
+
+      if (valorBonusPedido > 0) {
+        const clientes = readClientes();
+        const c = clientes[whatsapp];
+
+        if (c) {
+          c.saldo_extra = Number(c.saldo_extra || 0) + valorBonusPedido;
+          clientes[whatsapp] = c;
+          writeClientes(clientes);
+          pedido.bonus_saldo_extra = valorBonusPedido;
+          pedido.bonus_saldo_extra_em = new Date().toISOString();
+        }
+      }
+
+      fs.writeFileSync(pedidoPath, JSON.stringify(pedido, null, 2), "utf8");
+
+      processados = readMpProcessados();
+      processados[paymentId] = {
+        tipo: "pedido_pix",
+        whatsapp,
+        pedido_id: pedidoId,
+        status: pagamento.status,
+        criado_em: new Date().toISOString()
+      };
+      writeMpProcessados(processados);
+
+      registrarEventoServidor("pix_pago", {
+        whatsapp,
+        pedidoId,
+        produto: pedido.product_id || pedido.categoria || "pedido",
+        payload: {
+          tipo: "pedido_pix",
+          valor_pago: Number(pagamento.transaction_amount || pedido.valor_pendente || 0),
+          status: pagamento.status
+        }
+      });
+      registrarEventoServidor("compra_aprovada", {
+        whatsapp,
+        pedidoId,
+        produto: pedido.product_id || pedido.categoria || "pedido",
+        payload: {
+          tipo: "pedido_pix",
+          valor_pago: Number(pagamento.transaction_amount || pedido.valor_pendente || 0)
+        }
+      });
+      if (valorBonusPedido > 0) {
+        registrarEventoServidor("saldo_creditado", {
+          whatsapp,
+          pedidoId,
+          produto: "saldo_extra",
+          payload: {
+            tipo: "bonus_pedido_pix",
+            credito: valorBonusPedido
+          }
+        });
+      }
+
+      return res.json({ ok: true });
+    }
+
+    if (tipo === "plano_pix") {
+      const whatsapp = pagamento.metadata?.whatsapp || external.split("|")[1];
+      const planId = pagamento.metadata?.plan_id || external.split("|")[2];
+      const plan = billingPlans.getPlan(planId);
+
+      if (!whatsapp || !plan) {
+        processados = readMpProcessados();
+        processados[paymentId] = {
+          tipo: "plano_pix",
+          whatsapp,
+          plan_id: planId,
+          status: "erro_plano_invalido",
+          criado_em: new Date().toISOString()
+        };
+        writeMpProcessados(processados);
+        return res.json({ ok: true });
+      }
+
+      const clientes = readClientes();
+      const c = clientes[whatsapp];
+
+      if (!c) {
+        processados = readMpProcessados();
+        processados[paymentId] = {
+          tipo: "plano_pix",
+          whatsapp,
+          plan_id: plan.id,
+          status: "cliente_nao_encontrado",
+          criado_em: new Date().toISOString()
+        };
+        writeMpProcessados(processados);
+        return res.json({ ok: true });
+      }
+
+      const resultadoPlano = billingService.applyManualPlanPayment(c, plan, {
+        paymentId: String(paymentId),
+        paidAt: pagamento.date_approved || pagamento.date_last_updated || new Date().toISOString()
+      });
+
+      c.ultimo_pix_plano_valor = Number(pagamento.transaction_amount || plan.price);
+      c.ultimo_pix_plano_status = resultadoPlano.status;
+      clientes[whatsapp] = c;
+      writeClientes(clientes);
+
+      processados = readMpProcessados();
+      processados[paymentId] = {
+        tipo: "plano_pix",
+        whatsapp,
+        plan_id: plan.id,
+        plano_status: resultadoPlano.status,
+        status: pagamento.status,
+        criado_em: new Date().toISOString()
+      };
+      writeMpProcessados(processados);
+
+      registrarEventoServidor("pix_pago", {
+        whatsapp,
+        produto: "combo",
+        payload: {
+          tipo: "plano_pix",
+          plano_id: plan.id,
+          valor_pago: Number(pagamento.transaction_amount || plan.price),
+          status: pagamento.status
+        }
+      });
+      registrarEventoServidor("compra_aprovada", {
+        whatsapp,
+        produto: "combo",
+        payload: {
+          tipo: "plano_pix",
+          plano_id: plan.id,
+          plano_status: resultadoPlano.status,
+          artes_mes: Number(plan.artsPerMonth || 0)
+        }
+      });
+      registrarEventoServidor("saldo_creditado", {
+        whatsapp,
+        produto: "combo",
+        payload: {
+          tipo: "combo_artes_mensais",
+          plano_id: plan.id,
+          artes_mes: Number(plan.artsPerMonth || 0),
+          plano_status: resultadoPlano.status
+        }
+      });
+
+      return res.json({ ok: true });
+    }
+
+    if (tipo === "arte_avulsa_pix") {
+      const externalParts = external.split("|");
+      const whatsapp = String(pagamento.metadata?.whatsapp || externalParts[1] || "").trim();
+      const purchaseId = String(pagamento.metadata?.purchase_id || externalParts[2] || "").trim();
+      const produto = billingPlans.getSingleArtPurchase();
+      const quantidade = Math.max(1, Math.round(Number(pagamento.metadata?.quantidade || produto.quantity || 1)));
+      const valorPago = billingService.roundMoney(pagamento.transaction_amount || pagamento.metadata?.valor_pago || 0);
+      const valorEsperado = billingService.roundMoney(Number(produto.amount) * quantidade);
+
+      if (!whatsapp || !purchaseId || valorPago !== valorEsperado) {
+        processados = readMpProcessados();
+        processados[paymentId] = {
+          tipo: "arte_avulsa_pix",
+          whatsapp,
+          purchase_id: purchaseId,
+          valor_pago: valorPago,
+          valor_esperado: valorEsperado,
+          status: "erro_dados_ou_valor_invalido",
+          criado_em: new Date().toISOString()
+        };
+        writeMpProcessados(processados);
+        return res.json({ ok: true });
+      }
+
+      const clientes = readClientes();
+      const c = clientes[whatsapp];
+
+      if (!c) {
+        processados = readMpProcessados();
+        processados[paymentId] = {
+          tipo: "arte_avulsa_pix",
+          whatsapp,
+          purchase_id: purchaseId,
+          status: "cliente_nao_encontrado",
+          criado_em: new Date().toISOString()
+        };
+        writeMpProcessados(processados);
+        return res.json({ ok: true });
+      }
+
+      const credito = billingService.creditStandaloneArtPurchase(c, {
+        purchaseId,
+        paymentId: String(paymentId),
+        amount: valorPago,
+        quantity: quantidade,
+        paidAt: pagamento.date_approved || pagamento.date_last_updated || new Date().toISOString()
+      });
+
+      clientes[whatsapp] = c;
+      writeClientes(clientes);
+
+      processados = readMpProcessados();
+      processados[paymentId] = {
+        tipo: "arte_avulsa_pix",
+        whatsapp,
+        purchase_id: purchaseId,
+        produto_id: produto.id,
+        quantidade,
+        valor_pago: valorPago,
+        creditado: credito.credited === true,
+        duplicado: credito.duplicate === true,
+        artes_avulsas_restantes: Number(c.artes_avulsas_restantes || 0),
+        status: pagamento.status,
+        criado_em: new Date().toISOString()
+      };
+      writeMpProcessados(processados);
+
+      registrarEventoServidor("pix_pago", {
+        whatsapp,
+        produto: "arte_avulsa",
+        payload: {
+          tipo: "arte_avulsa_pix",
+          produto_id: produto.id,
+          quantidade,
+          valor_pago: valorPago,
+          status: pagamento.status
+        }
+      });
+      registrarEventoServidor("compra_aprovada", {
+        whatsapp,
+        produto: "arte_avulsa",
+        payload: {
+          tipo: "arte_avulsa_pix",
+          produto_id: produto.id,
+          quantidade,
+          valor_pago: valorPago
+        }
+      });
+      if (credito.credited === true) {
+        registrarEventoServidor("saldo_creditado", {
+          whatsapp,
+          produto: "arte_avulsa",
+          payload: {
+            tipo: "arte_avulsa",
+            quantidade,
+            artes_avulsas_restantes: Number(c.artes_avulsas_restantes || 0)
+          }
+        });
+      }
+
+      return res.json({ ok: true });
+    }
+
+    if (tipo !== "saldo" && tipo !== "saldo_extra") {
+      processados = readMpProcessados();
+      processados[paymentId] = {
+        tipo: tipo || "desconhecido",
+        status: "ignorado",
+        criado_em: new Date().toISOString()
+      };
+      writeMpProcessados(processados);
+      return res.json({ ok: true, status: "tipo_ignorado" });
+    }
+
+    const externalParts = external.split("|");
+    let whatsapp = String(pagamento.metadata?.whatsapp || "").trim();
+
+    if (!whatsapp) {
+      if (tipo === "saldo_extra" && externalParts[0] === "saldo_extra") {
+        whatsapp = String(externalParts[1] || "").trim();
+      } else {
+        whatsapp = String(externalParts[0] || "").trim();
+      }
+    }
+
+    const credito = Number(pagamento.metadata?.credito || 0);
+    const clienteReferenciaValida = whatsapp &&
+      whatsapp !== "saldo" &&
+      whatsapp !== "saldo_extra" &&
+      !whatsapp.includes("|");
+
+    if (!clienteReferenciaValida || !credito) {
+      processados = readMpProcessados();
+      processados[paymentId] = {
+        tipo,
+        whatsapp,
+        credito,
+        payment_id: String(paymentId),
+        external_reference: external,
+        status: "erro_sem_whatsapp_ou_credito",
+        criado_em: new Date().toISOString()
+      };
+      writeMpProcessados(processados);
+      return res.json({ ok: true, error: "sem whatsapp ou credito" });
+    }
+
+    const clientes = readClientes();
+    const c = clientes[whatsapp];
+
+    if (!c) {
+      console.warn("[mercadopago webhook] cliente_nao_encontrado", {
+        paymentId: String(paymentId),
+        tipo,
+        whatsapp,
+        external_reference: external
+      });
+      processados = readMpProcessados();
+      processados[paymentId] = {
+        tipo,
+        whatsapp,
+        credito,
+        payment_id: String(paymentId),
+        external_reference: external,
+        status: "cliente_nao_encontrado",
+        criado_em: new Date().toISOString()
+      };
+      writeMpProcessados(processados);
+      return res.json({ ok: true, error: "cliente não encontrado" });
+    }
+
+    c.saldo_extra = Number(c.saldo_extra || 0) + credito;
+    c.ativo = true;
+
+    if (c.brinde_mascote_ja_liberado !== true) {
+      c.brinde_mascote_disponivel = true;
+      c.brinde_mascote_ja_liberado = true;
+      c.brinde_mascote_liberado_em = new Date().toISOString();
+    }
+
+    clientes[whatsapp] = c;
+    writeClientes(clientes);
+
+    processados = readMpProcessados();
+    processados[paymentId] = {
+      tipo,
+      whatsapp,
+      credito,
+      status: pagamento.status,
+      criado_em: new Date().toISOString()
+    };
+
+    writeMpProcessados(processados);
+
+    registrarEventoServidor("pix_pago", {
+      whatsapp,
+      produto: "saldo_extra",
+      payload: {
+        tipo,
+        credito,
+        status: pagamento.status
+      }
+    });
+    registrarEventoServidor("compra_aprovada", {
+      whatsapp,
+      produto: "saldo_extra",
+      payload: {
+        tipo,
+        credito
+      }
+    });
+    registrarEventoServidor("saldo_creditado", {
+      whatsapp,
+      produto: "saldo_extra",
+      payload: {
+        tipo,
+        credito,
+        saldo_extra: Number(c.saldo_extra || 0)
+      }
+    });
+
+    return res.json({ ok: true });
+
+  } catch (e) {
+    return res.json({ ok: true });
+  }
+});
+
+// ===== MATERIAIS GRAFICOS DA EMPRESA =====
+app.get("/empresa/materiais-graficos", auth, (req, res) => {
+  const whatsapp = req.user.whatsapp;
+  const clientes = readClientes();
+  const cliente = clientes[whatsapp];
+
+  if (!cliente) {
+    return res.status(404).json({ ok: false, error: "Cliente nao encontrado" });
+  }
+
+  try {
+    const requestedRamo = String(req.query?.ramo || cliente.ramo || cliente.nicho || "").trim();
+    const payload = graphicMaterialsService.publicListPayload({
+      cliente,
+      ramo: requestedRamo,
+      baseDir: GRAPHIC_MATERIALS_DIR,
+      whatsapp
+    });
+    const generalCount = payload.materiais.filter((material) => material.scope !== "ramo").length;
+    const branchCount = payload.materiais.filter((material) => material.scope === "ramo").length;
+    console.log("[materiais-graficos] listagem", {
+      whatsapp,
+      ramo_recebido: req.query?.ramo || "",
+      ramo_usado: requestedRamo,
+      ramo_resolvido: graphicMaterialsCatalog.folderForRamo(requestedRamo),
+      materiais_gerais: generalCount,
+      materiais_ramo: branchCount,
+      plano_atual: cliente.plano_atual || cliente.plano || "",
+      plano_status: cliente.plano_status || "",
+      plano_ativo: billingService.isPlanActive(cliente)
+    });
+    clientes[whatsapp] = cliente;
+    writeClientes(clientes);
+    return res.json(payload);
+  } catch (error) {
+    console.error("[materiais-graficos] erro ao listar", {
+      whatsapp,
+      message: error?.message,
+      stack: error?.stack
+    });
+    return res.status(500).json({
+      ok: false,
+      error: "Nao foi possivel listar os materiais graficos agora."
+    });
+  }
+});
+
+app.post(
+  "/empresa/materiais-graficos/:materialId/solicitar",
+  auth,
+  upload.single("logo"),
+  (req, res) => {
+    const whatsapp = req.user.whatsapp;
+    const clientes = readClientes();
+    const cliente = clientes[whatsapp];
+
+    if (!cliente) {
+      if (req.file?.path && fs.existsSync(req.file.path)) fs.unlinkSync(req.file.path);
+      return res.status(404).json({ ok: false, error: "Cliente nao encontrado" });
+    }
+
+    try {
+      const document = graphicMaterialsService.createRequest({
+        baseDir: GRAPHIC_MATERIALS_DIR,
+        cliente,
+        whatsapp,
+        materialId: req.params.materialId,
+        body: req.body || {},
+        logoPath: req.file?.path || ""
+      });
+
+      clientes[whatsapp] = cliente;
+      writeClientes(clientes);
+
+      return res.json({
+        ok: true,
+        document_id: document.document_id,
+        material_id: document.material_id,
+        title: document.title,
+        scope: document.scope,
+        ciclo: document.ciclo,
+        status: "processing",
+        status_label: "Em produção"
+      });
+    } catch (error) {
+      console.error("[materiais-graficos] erro ao solicitar", {
+        whatsapp,
+        materialId: req.params.materialId,
+        message: error?.message,
+        stack: error?.stack
+      });
+      return res.status(error?.statusCode || 500).json({
+        ok: false,
+        code: error?.code || "graphic_material_request_error",
+        error: error?.message || "Nao foi possivel solicitar o material grafico agora."
+      });
+    } finally {
+      if (req.file?.path && fs.existsSync(req.file.path)) {
+        try {
+          fs.unlinkSync(req.file.path);
+        } catch {}
+      }
+    }
+  }
+);
+
+app.get("/empresa/materiais-graficos/:materialId/status", auth, (req, res) => {
+  const whatsapp = req.user.whatsapp;
+  const clientes = readClientes();
+  const cliente = clientes[whatsapp];
+
+  if (!cliente) {
+    return res.status(404).json({ ok: false, error: "Cliente nao encontrado" });
+  }
+
+  try {
+    const payload = graphicMaterialsService.materialStatusPayload({
+      cliente,
+      ramo: req.query?.ramo || "",
+      baseDir: GRAPHIC_MATERIALS_DIR,
+      whatsapp,
+      materialId: req.params.materialId
+    });
+    clientes[whatsapp] = cliente;
+    writeClientes(clientes);
+    return res.json(payload);
+  } catch (error) {
+    return res.status(error?.statusCode || 500).json({
+      ok: false,
+      code: error?.code || "graphic_material_status_error",
+      error: error?.message || "Nao foi possivel consultar o status do material grafico."
+    });
+  }
+});
+
+app.get("/empresa/materiais-graficos/:materialId/download", auth, (req, res) => {
+  const whatsapp = req.user.whatsapp;
+  const clientes = readClientes();
+  const cliente = clientes[whatsapp];
+
+  if (!cliente) {
+    return res.status(404).json({ ok: false, error: "Cliente nao encontrado" });
+  }
+
+  try {
+    const document = graphicMaterialsService.downloadForMaterial({
+      baseDir: GRAPHIC_MATERIALS_DIR,
+      cliente,
+      whatsapp,
+      materialId: req.params.materialId
+    });
+
+    res.setHeader("Content-Type", "image/png");
+    res.setHeader("Content-Disposition", `attachment; filename="${document.filename}"`);
+    return res.sendFile(document.filePath);
+  } catch (error) {
+    return res.status(error?.statusCode || 500).json({
+      ok: false,
+      code: error?.code || "graphic_material_download_error",
+      error: error?.message || "Material grafico nao encontrado"
+    });
+  }
+});
+
+app.get("/bot/empresa/materiais-graficos/novos", botRunnerAuth, (req, res) => {
+  if (!isBotAdmin(req)) {
+    return res.status(403).json({ ok: false, error: "Acesso negado" });
+  }
+
+  const limit = Number(req.query?.limit || 5);
+  const materiais = graphicMaterialsService.listBotPending({
+    baseDir: GRAPHIC_MATERIALS_DIR,
+    limit: Number.isFinite(limit) && limit > 0 ? Math.min(limit, 50) : 5
+  });
+
+  return res.json({ ok: true, materiais });
+});
+
+app.get("/bot/empresa/materiais-graficos/:documentId/zip", botRunnerAuth, async (req, res) => {
+  if (!isBotAdmin(req)) {
+    return res.status(403).json({ ok: false, error: "Acesso negado" });
+  }
+
+  const request = graphicMaterialsService.findRequestByDocument({
+    baseDir: GRAPHIC_MATERIALS_DIR,
+    documentId: req.params.documentId
+  });
+
+  if (!request) {
+    return res.status(404).json({ ok: false, error: "Solicitacao nao encontrada" });
+  }
+
+  return streamDirectoryZip({
+    res,
+    directory: request.base_path,
+    filename: `${req.params.documentId}.zip`
+  });
+});
+
+app.post("/bot/empresa/materiais-graficos/:documentId/status", botRunnerAuth, (req, res) => {
+  if (!isBotAdmin(req)) {
+    return res.status(403).json({ ok: false, error: "Acesso negado" });
+  }
+
+  const request = graphicMaterialsService.findRequestByDocument({
+    baseDir: GRAPHIC_MATERIALS_DIR,
+    documentId: req.params.documentId
+  });
+
+  if (!request) {
+    return res.status(404).json({ ok: false, error: "Solicitacao nao encontrada" });
+  }
+
+  const updated = graphicMaterialsService.updateRequestStatus(
+    request,
+    String(req.body?.status || "processando"),
+    String(req.body?.message || "")
+  );
+
+  return res.json({
+    ok: true,
+    document_id: updated.document_id || updated.id,
+    status: updated.status
+  });
+});
+
+app.post(
+  "/bot/empresa/materiais-graficos/:documentId/upload-resultado",
+  botRunnerAuth,
+  uploadResultado.fields([
+    { name: "resultado", maxCount: 1 },
+    { name: "preview", maxCount: 1 }
+  ]),
+  (req, res) => {
+    if (!isBotAdmin(req)) {
+      cleanupUploadedFiles(req.files);
+      return res.status(403).json({ ok: false, error: "Acesso negado" });
+    }
+
+    const resultadoFile = req.files?.resultado?.[0] || null;
+    const previewFile = req.files?.preview?.[0] || null;
+
+    if (!resultadoFile) {
+      cleanupUploadedFiles(req.files);
+      return res.status(400).json({ ok: false, error: "Arquivo resultado nao enviado" });
+    }
+
+    try {
+      const apiInfo = req.body?.api_info ? JSON.parse(req.body.api_info) : {};
+      const request = graphicMaterialsService.saveUploadedResult({
+        baseDir: GRAPHIC_MATERIALS_DIR,
+        documentId: req.params.documentId,
+        resultPath: resultadoFile.path,
+        previewPath: previewFile?.path || "",
+        apiInfo
+      });
+
+      const clientes = readClientes();
+      const cliente = clientes[request.whatsapp];
+      if (cliente) {
+        graphicMaterialsService.markClientCreated(cliente, request);
+        clientes[request.whatsapp] = cliente;
+        writeClientes(clientes);
+      }
+
+      return res.json({
+        ok: true,
+        document_id: request.document_id || request.id,
+        material_id: request.material_id,
+        status: "created",
+        arquivo: "resultado_final.png",
+        preview: previewFile ? "preview_ia4tube.jpg" : ""
+      });
+    } catch (error) {
+      cleanupUploadedFiles(req.files);
+      console.error("[materiais-graficos] falha ao salvar resultado", {
+        documentId: req.params.documentId,
+        message: error?.message,
+        stack: error?.stack
+      });
+      return res.status(error?.statusCode || 500).json({
+        ok: false,
+        error: error?.message || "Falha ao salvar resultado"
+      });
+    }
+  }
+);
+
+// ===== CARROSSEIS IA4TUBE =====
+app.post(
+  "/empresa/carrosseis/solicitar",
+  auth,
+  upload.fields([
+    { name: "logo", maxCount: 1 },
+    { name: "fotos", maxCount: 2 }
+  ]),
+  (req, res) => {
+    const whatsapp = req.user.whatsapp;
+    const clientes = readClientes();
+    const cliente = clientes[whatsapp];
+
+    if (!cliente) {
+      cleanupUploadedFiles(req.files);
+      return res.status(404).json({ ok: false, error: "Cliente nao encontrado" });
+    }
+
+    try {
+      const carrossel = carouselService.createRequest({
+        baseDir: CAROUSELS_DIR,
+        cliente,
+        whatsapp,
+        body: req.body || {},
+        files: req.files || {}
+      });
+
+      clientes[whatsapp] = cliente;
+      writeClientes(clientes);
+
+      return res.json({
+        ok: true,
+        carrossel_id: carrossel.carrossel_id || carrossel.id,
+        ciclo: carrossel.ciclo,
+        status: "pendente",
+        status_label: "Pendente",
+        quota: carrossel.quota || null
+      });
+    } catch (error) {
+      cleanupUploadedFiles(req.files);
+      console.error("[carrosseis] erro ao solicitar", {
+        whatsapp,
+        message: error?.message,
+        stack: error?.stack
+      });
+      return res.status(error?.statusCode || 500).json({
+        ok: false,
+        code: error?.code || "carousel_request_error",
+        error: error?.message || "Nao foi possivel solicitar o carrossel agora."
+      });
+    }
+  }
+);
+
+app.get("/empresa/carrosseis", auth, (req, res) => {
+  const whatsapp = req.user.whatsapp;
+  try {
+    const limit = Number(req.query?.limit || 50);
+    const carrosseis = carouselService.listClientRequests({
+      baseDir: CAROUSELS_DIR,
+      whatsapp,
+      limit: Number.isFinite(limit) && limit > 0 ? Math.min(limit, 100) : 50
+    });
+
+    return res.json({ ok: true, carrosseis });
+  } catch (error) {
+    return res.status(error?.statusCode || 500).json({
+      ok: false,
+      code: error?.code || "carousel_list_error",
+      error: error?.message || "Nao foi possivel listar os carrosseis."
+    });
+  }
+});
+
+app.get("/empresa/carrosseis/:carrosselId/status", auth, (req, res) => {
+  const whatsapp = req.user.whatsapp;
+  try {
+    return res.json(carouselService.publicStatusPayload({
+      baseDir: CAROUSELS_DIR,
+      whatsapp,
+      carrosselId: req.params.carrosselId
+    }));
+  } catch (error) {
+    return res.status(error?.statusCode || 500).json({
+      ok: false,
+      code: error?.code || "carousel_status_error",
+      error: error?.message || "Nao foi possivel consultar o status do carrossel."
+    });
+  }
+});
+
+app.get("/empresa/carrosseis/:carrosselId/download", auth, (req, res) => {
+  const whatsapp = req.user.whatsapp;
+  try {
+    const result = carouselService.downloadForCarousel({
+      baseDir: CAROUSELS_DIR,
+      whatsapp,
+      carrosselId: req.params.carrosselId
+    });
+
+    res.setHeader("Content-Type", "application/zip");
+    res.setHeader("Content-Disposition", `attachment; filename="${result.filename}"`);
+    return res.sendFile(result.filePath);
+  } catch (error) {
+    return res.status(error?.statusCode || 500).json({
+      ok: false,
+      code: error?.code || "carousel_download_error",
+      error: error?.message || "Carrossel nao encontrado"
+    });
+  }
+});
+
+app.get("/bot/empresa/carrosseis/novos", botRunnerAuth, (req, res) => {
+  if (!isBotAdmin(req)) {
+    return res.status(403).json({ ok: false, error: "Acesso negado" });
+  }
+
+  const limit = Number(req.query?.limit || 5);
+  const carrosseis = carouselService.listBotPending({
+    baseDir: CAROUSELS_DIR,
+    limit: Number.isFinite(limit) && limit > 0 ? Math.min(limit, 50) : 5
+  });
+
+  return res.json({ ok: true, carrosseis });
+});
+
+app.get("/bot/empresa/carrosseis/:carrosselId/zip", botRunnerAuth, async (req, res) => {
+  if (!isBotAdmin(req)) {
+    return res.status(403).json({ ok: false, error: "Acesso negado" });
+  }
+
+  const request = carouselService.findRequestById({
+    baseDir: CAROUSELS_DIR,
+    carrosselId: req.params.carrosselId
+  });
+
+  if (!request) {
+    return res.status(404).json({ ok: false, error: "Solicitacao nao encontrada" });
+  }
+
+  return streamDirectoryZip({
+    res,
+    directory: request.base_path,
+    filename: `${req.params.carrosselId}.zip`
+  });
+});
+
+app.post("/bot/empresa/carrosseis/:carrosselId/status", botRunnerAuth, (req, res) => {
+  if (!isBotAdmin(req)) {
+    return res.status(403).json({ ok: false, error: "Acesso negado" });
+  }
+
+  const request = carouselService.findRequestById({
+    baseDir: CAROUSELS_DIR,
+    carrosselId: req.params.carrosselId
+  });
+
+  if (!request) {
+    return res.status(404).json({ ok: false, error: "Solicitacao nao encontrada" });
+  }
+
+  const updated = carouselService.updateRequestStatus(
+    request,
+    String(req.body?.status || "processando"),
+    String(req.body?.message || "")
+  );
+
+  return res.json({
+    ok: true,
+    carrossel_id: updated.carrossel_id || updated.id,
+    status: updated.status
+  });
+});
+
+app.post(
+  "/bot/empresa/carrosseis/:carrosselId/upload-resultado",
+  botRunnerAuth,
+  uploadResultado.fields([
+    { name: "resultado", maxCount: 1 }
+  ]),
+  (req, res) => {
+    if (!isBotAdmin(req)) {
+      cleanupUploadedFiles(req.files);
+      return res.status(403).json({ ok: false, error: "Acesso negado" });
+    }
+
+    const resultadoFile = req.files?.resultado?.[0] || null;
+
+    if (!resultadoFile) {
+      cleanupUploadedFiles(req.files);
+      return res.status(400).json({ ok: false, error: "Arquivo resultado nao enviado" });
+    }
+
+    try {
+      const apiInfo = req.body?.api_info ? JSON.parse(req.body.api_info) : {};
+      const request = carouselService.saveUploadedResult({
+        baseDir: CAROUSELS_DIR,
+        carrosselId: req.params.carrosselId,
+        resultPath: resultadoFile.path,
+        descricaoInstagram: req.body?.descricao_instagram || "",
+        apiInfo
+      });
+
+      return res.json({
+        ok: true,
+        carrossel_id: request.carrossel_id || request.id,
+        status: "pronto",
+        arquivo: "resultado.zip"
+      });
+    } catch (error) {
+      cleanupUploadedFiles(req.files);
+      console.error("[carrosseis] falha ao salvar resultado", {
+        carrosselId: req.params.carrosselId,
+        message: error?.message,
+        stack: error?.stack
+      });
+      return res.status(error?.statusCode || 500).json({
+        ok: false,
+        error: error?.message || "Falha ao salvar resultado"
+      });
+    }
+  }
+);
+
+// ===== PLANEJAMENTO MENSAL =====
+app.post(
+  "/empresa/planejamento-mensal/descobrir-produtos",
+  auth,
+  productDiscoveryUpload.single("imagem"),
+  async (req, res) => {
+    const whatsapp = req.user.whatsapp;
+    const cliente = readClientes()[whatsapp];
+    if (!req.file) {
+      return res.status(400).json({
+        ok: false,
+        code: "product_discovery_image_required",
+        error: "Envie uma imagem para analisar."
+      });
+    }
+    if (!cliente) {
+      cleanupUploadedFiles({ imagem: [req.file] });
+      return res.status(404).json({ ok: false, error: "Cliente nao encontrado" });
+    }
+    if (productDiscoveryInFlight.has(whatsapp)) {
+      cleanupUploadedFiles({ imagem: [req.file] });
+      return res.status(429).json({
+        ok: false,
+        code: "product_discovery_in_progress",
+        error: "Ja existe uma imagem em analise. Aguarde a conclusao."
+      });
+    }
+
+    productDiscoveryInFlight.add(whatsapp);
+    try {
+      const businessContext = productDiscoveryService.resolveBusinessNicheContext(
+        req.body,
+        cliente
+      );
+      const result = await productDiscoveryService.discoverProducts({
+        filePath: req.file.path,
+        mimeType: req.file.mimetype,
+        niche: businessContext.niche,
+        maxItems: MONTHLY_PLANNING_REQUEST_MAX_ITEMS
+      });
+      return res.json({
+        ok: true,
+        produtos: result.produtos,
+        limite_tecnico_planejamento: MONTHLY_PLANNING_REQUEST_MAX_ITEMS
+      });
+    } catch (error) {
+      console.error("[product-discovery] erro ao analisar imagem", {
+        whatsapp,
+        code: error?.code,
+        message: error?.message
+      });
+      return res.status(error?.statusCode || 502).json({
+        ok: false,
+        code: error?.code || "product_discovery_error",
+        error: error?.message || "Nao foi possivel analisar a imagem agora."
+      });
+    } finally {
+      productDiscoveryInFlight.delete(whatsapp);
+      cleanupUploadedFiles({ imagem: [req.file] });
+    }
+  }
+);
+
+app.post(
+  "/empresa/planejamento-mensal/solicitar",
+  auth,
+  upload.fields(MONTHLY_PLANNING_UPLOAD_FIELDS),
+  async (req, res) => {
+    const whatsapp = req.user.whatsapp;
+    const clientes = readClientes();
+    const cliente = clientes[whatsapp];
+
+    if (!cliente) {
+      cleanupUploadedFiles(req.files);
+      return res.status(404).json({ ok: false, error: "Cliente nao encontrado" });
+    }
+
+    let freeArtClaimLockKeys = [];
+    let freeArtIpLock = { blocked: false, ipHash: "", ipMasked: "", lock: null };
+
+    try {
+      const calendarAuthorizationFactory = await productionSocialIntegration.prepareCalendarRequest(req.user, req.body);
+      freeArtIpLock = getFreeArtIpLockStatus(req);
+      let freeArtBlockedByClaimLock = false;
+
+      if (billingService.hasAvailableFreeCompanyArt(cliente, { freeArtBlocked: freeArtIpLock.blocked })) {
+        freeArtClaimLockKeys = acquireFreeArtClaimLocks(whatsapp, freeArtIpLock.ipHash);
+        freeArtBlockedByClaimLock = freeArtClaimLockKeys.length === 0;
+      }
+
+      if (freeArtIpLock.blocked && billingService.hasAvailableFreeCompanyArt(cliente)) {
+        console.info("[free-art-ip] planejamento bloqueado para arte gratis por IP", {
+          whatsapp,
+          ip_mascarado: freeArtIpLock.ipMasked,
+          bloqueado_ate: freeArtIpLock.lock?.bloqueado_ate || ""
+        });
+        registrarEventoServidor("free_art_ip_blocked", {
+          whatsapp,
+          produto: "planejamento_mensal",
+          payload: {
+            contexto: "planejamento_mensal",
+            ip_mascarado: freeArtIpLock.ipMasked,
+            bloqueado_ate: freeArtIpLock.lock?.bloqueado_ate || ""
+          }
+        });
+      }
+
+      const clienteBefore = JSON.stringify(cliente);
+      const planejamento = monthlyPlanningService.createRequest({
+        baseDir: MONTHLY_PLANNINGS_DIR,
+        cliente,
+        whatsapp,
+        body: req.body || {},
+        files: req.files || {},
+        calendarAuthorizationFactory,
+        freeArtBlocked: freeArtIpLock.blocked || freeArtBlockedByClaimLock
+      });
+
+      if (Number(planejamento?.reserva?.artes_gratis_consumidas || 0) > 0 || planejamento?.cobranca_origem === "arte_gratis") {
+        const ipLockRecord = recordFreeArtIpLock(req, {
+          whatsapp,
+          pedidoId: planejamento.planejamento_id || planejamento.id,
+          context: "planejamento_mensal"
+        });
+        if (ipLockRecord) {
+          registrarEventoServidor("free_art_ip_locked", {
+            whatsapp,
+            pedidoId: planejamento.planejamento_id || planejamento.id,
+            produto: "planejamento_mensal",
+            payload: {
+              contexto: "planejamento_mensal",
+              ip_mascarado: ipLockRecord.ip_mascarado,
+              bloqueado_ate: ipLockRecord.bloqueado_ate
+            }
+          });
+        }
+      }
+
+      if (JSON.stringify(cliente) !== clienteBefore) {
+        clientes[whatsapp] = cliente;
+        writeClientes(clientes);
+      }
+
+      return res.json({
+        ok: true,
+        planejamento_id: planejamento.planejamento_id || planejamento.id,
+        ciclo: planejamento.ciclo,
+        status: planejamento.status,
+        status_label: "Em analise",
+        cobranca_origem: planejamento.cobranca_origem || planejamento.reserva?.cobranca_origem || "",
+        tipo_compra: planejamento.tipo_compra || "",
+        valor_cobrado: Number(planejamento.valor_cobrado || 0),
+        arte_gratis: planejamento.cobranca_origem === "arte_gratis",
+        quantidade_reservada: planejamento.quantidade_reservada,
+        artes_deste_ciclo: planejamento.artes_deste_ciclo,
+        reservadas_no_planejamento: planejamento.reservadas_no_planejamento,
+        livres_para_criar_arte: planejamento.livres_para_criar_arte,
+        reserva_definitiva: true,
+        fase_4_pendente: false
+      });
+    } catch (error) {
+      cleanupUploadedFiles(req.files);
+      console.error("[planejamento-mensal] erro ao solicitar", {
+        whatsapp,
+        message: error?.message,
+        stack: error?.stack
+      });
+      return res.status(error?.statusCode || 500).json({
+        ok: false,
+        code: error?.code || "monthly_planning_request_error",
+        error: error?.message || "Nao foi possivel criar o Planejamento Mensal agora.",
+        artes_livres: error?.artes_livres,
+        free_art_ip_blocked: freeArtIpLock.blocked,
+        free_art_blocked_until: freeArtIpLock.lock?.bloqueado_ate || "",
+        free_art_message: freeArtIpLock.blocked
+          ? "O limite de testes gratuitos nesta rede foi atingido. Voce ainda pode continuar usando com combo ou arte avulsa."
+          : "",
+        billing: error?.billing
+      });
+    } finally {
+      releaseFreeArtClaimLocks(freeArtClaimLockKeys);
+    }
+  }
+);
+
+app.get("/empresa/planejamento-mensal", auth, (req, res) => {
+  const whatsapp = req.user.whatsapp;
+  const clientes = readClientes();
+  const cliente = clientes[whatsapp];
+
+  if (!cliente) {
+    return res.status(404).json({ ok: false, error: "Cliente nao encontrado" });
+  }
+
+  try {
+    return res.json(monthlyPlanningService.listClientPlannings({
+      baseDir: MONTHLY_PLANNINGS_DIR,
+      whatsapp,
+      pedidosDir: PEDIDOS_DIR
+    }));
+  } catch (error) {
+    console.error("[planejamento-mensal] erro ao listar", {
+      whatsapp,
+      message: error?.message,
+      stack: error?.stack
+    });
+    return res.status(500).json({
+      ok: false,
+      code: "monthly_planning_list_error",
+      error: "Nao foi possivel listar os Planejamentos Mensais agora."
+    });
+  }
+});
+
+async function handleMonthlyPlanningCalendarList(req, res) {
+  console.log("[planejamento-mensal][calendario] rota calendario geral", {
+    method: req.method,
+    path: req.originalUrl || req.path
+  });
+
+  const whatsapp = req.user.whatsapp;
+  const clientes = readClientes();
+  const cliente = clientes[whatsapp];
+
+  if (!cliente) {
+    return res.status(404).json({ ok: false, error: "Cliente nao encontrado" });
+  }
+
+  try {
+    const monthlyCalendar = await productionSocialIntegration.calendarOverlay(req.user, monthlyPlanningService.listClientPlanningCalendar({
+      baseDir: MONTHLY_PLANNINGS_DIR,
+      whatsapp,
+      pedidosDir: PEDIDOS_DIR
+    }));
+
+    if (!adminFreeArtsEnabled()) {
+      return res.json(monthlyCalendar);
+    }
+
+    const freeArtItems = freeArtCampaignsService.listClientCalendar({
+      baseDir: FREE_ART_CAMPAIGNS_DIR,
+      whatsapp,
+      pedidosDir: PEDIDOS_DIR
+    });
+    const postagens = [
+      ...(monthlyCalendar.postagens || monthlyCalendar.itens || []),
+      ...freeArtItems
+    ].sort((a, b) => String(a.sort_key || "").localeCompare(String(b.sort_key || "")));
+
+    return res.json({
+      ...monthlyCalendar,
+      total: postagens.length,
+      postagens,
+      itens: postagens
+    });
+  } catch (error) {
+    console.error("[planejamento-mensal][calendario] erro ao listar", {
+      whatsapp,
+      message: error?.message,
+      stack: error?.stack
+    });
+    return res.status(500).json({
+      ok: false,
+      code: "monthly_planning_calendar_list_error",
+      error: "Nao foi possivel carregar o calendario do Planejamento Mensal agora."
+    });
+  }
+}
+
+async function handleMonthlyPlanningCalendarHide(req, res) {
+  console.log("[planejamento-mensal][calendario] rota ocultar calendario", {
+    method: req.method,
+    path: req.originalUrl || req.path
+  });
+
+  const whatsapp = req.user.whatsapp;
+  const clientes = readClientes();
+  const cliente = clientes[whatsapp];
+
+  if (!cliente) {
+    return res.status(404).json({ ok: false, error: "Cliente nao encontrado" });
+  }
+
+  try {
+    if (adminFreeArtsEnabled()) {
+      const freeResult = freeArtCampaignsService.hideCalendarItem({
+        baseDir: FREE_ART_CAMPAIGNS_DIR,
+        whatsapp,
+        itemKey: req.body?.item_key || req.body?.calendar_key || req.body?.key || ""
+      });
+      if (freeResult) return res.json(freeResult);
+    }
+
+    const calendarResult = await productionSocialIntegration.calendarEdit(req.user,
+      req.body?.item_key || req.body?.calendar_key || req.body?.key || "",
+      { action: "cancel", revision: req.body?.calendar_revision, reference: req.body });
+    if (calendarResult) return res.json(calendarResult);
+    return res.json(monthlyPlanningService.hideClientPlanningCalendarItem({
+      baseDir: MONTHLY_PLANNINGS_DIR,
+      whatsapp,
+      itemKey: req.body?.item_key || req.body?.calendar_key || req.body?.key || "",
+      pedidoId: req.body?.pedido_id || "",
+      planningId: req.body?.planning_id || req.body?.planejamento_id || "",
+      planejamentoItemId: req.body?.planejamento_item_id || ""
+    }));
+  } catch (error) {
+    console.error("[planejamento-mensal][calendario] erro ao ocultar", {
+      whatsapp,
+      message: error?.message,
+      stack: error?.stack
+    });
+    return res.status(error?.statusCode || 500).json({
+      ok: false,
+      code: error?.code || "monthly_planning_calendar_hide_error",
+      error: error?.message || "Nao foi possivel remover este item do calendario."
+    });
+  }
+}
+
+async function handleMonthlyPlanningCalendarReschedule(req, res) {
+  console.log("[planejamento-mensal][calendario] rota reagendar calendario", {
+    method: req.method,
+    path: req.originalUrl || req.path
+  });
+
+  const whatsapp = req.user.whatsapp;
+  const clientes = readClientes();
+  const cliente = clientes[whatsapp];
+
+  if (!cliente) {
+    return res.status(404).json({ ok: false, error: "Cliente nao encontrado" });
+  }
+
+  try {
+    const itemKey = req.body?.item_key || req.body?.calendar_key || req.body?.key || "";
+    if (adminFreeArtsEnabled() && String(itemKey || "").startsWith("free-art:")) {
+      return res.status(400).json({
+        ok: false,
+        code: "free_art_calendar_reschedule_not_supported",
+        error: "A data da Arte Gratis da Semana e definida pela campanha."
+      });
+    }
+
+    const calendarResult = await productionSocialIntegration.calendarEdit(req.user, itemKey, { action: "schedule",
+      revision: req.body?.calendar_revision, reference: req.body, date: req.body?.data || req.body?.date || req.body?.data_sugerida || "",
+      time: req.body?.horario || req.body?.time || req.body?.horario_sugerido || "" });
+    if (calendarResult) return res.json(calendarResult);
+    return res.json(monthlyPlanningService.rescheduleClientPlanningCalendarItem({
+      baseDir: MONTHLY_PLANNINGS_DIR,
+      whatsapp,
+      pedidosDir: PEDIDOS_DIR,
+      itemKey,
+      pedidoId: req.body?.pedido_id || "",
+      planningId: req.body?.planning_id || req.body?.planejamento_id || "",
+      planejamentoItemId: req.body?.planejamento_item_id || "",
+      date: req.body?.data || req.body?.date || req.body?.data_sugerida || "",
+      time: req.body?.horario || req.body?.time || req.body?.horario_sugerido || ""
+    }));
+  } catch (error) {
+    console.error("[planejamento-mensal][calendario] erro ao reagendar", {
+      whatsapp,
+      message: error?.message,
+      stack: error?.stack
+    });
+    return res.status(error?.statusCode || 500).json({
+      ok: false,
+      code: error?.code || "monthly_planning_calendar_reschedule_error",
+      error: error?.message || "Nao foi possivel reagendar este item do calendario."
+    });
+  }
+}
+
+app.get("/empresa/calendario-planejamento-mensal", auth, handleMonthlyPlanningCalendarList);
+app.post("/empresa/calendario-planejamento-mensal/ocultar", auth, handleMonthlyPlanningCalendarHide);
+app.post("/empresa/calendario-planejamento-mensal/reagendar", auth, handleMonthlyPlanningCalendarReschedule);
+
+app.get("/empresa/planejamento-mensal/calendario", auth, handleMonthlyPlanningCalendarList);
+
+app.post("/empresa/planejamento-mensal/calendario/ocultar", auth, handleMonthlyPlanningCalendarHide);
+app.post("/empresa/planejamento-mensal/calendario/reagendar", auth, handleMonthlyPlanningCalendarReschedule);
+
+app.get("/empresa/planejamento-mensal/:planningId", auth, async (req, res, next) => {
+  console.log("[planejamento-mensal] rota detalhe planejamento", {
+    method: req.method,
+    path: req.originalUrl || req.path,
+    planningId: req.params.planningId
+  });
+
+  if (isMonthlyPlanningReservedRouteSegment(req.params.planningId)) {
+    return next("route");
+  }
+
+  const whatsapp = req.user.whatsapp;
+  const clientes = readClientes();
+  const cliente = clientes[whatsapp];
+
+  if (!cliente) {
+    return res.status(404).json({ ok: false, error: "Cliente nao encontrado" });
+  }
+
+  try {
+    const detail = monthlyPlanningService.publicDetailPayload({
+      baseDir: MONTHLY_PLANNINGS_DIR,
+      whatsapp,
+      planningId: req.params.planningId,
+      pedidosDir: PEDIDOS_DIR
+    });
+    const raw = monthlyPlanningService.listClientPlanningCalendar({ baseDir: MONTHLY_PLANNINGS_DIR,
+      whatsapp, pedidosDir: PEDIDOS_DIR });
+    const calendar = await productionSocialIntegration.calendarOverlay(req.user, {
+      ...raw, postagens: (raw.postagens || raw.itens || []).filter(item => item.planning_id === req.params.planningId) });
+    const byOrder = new Map((calendar.postagens || []).filter(item => item.planning_id === req.params.planningId &&
+      item.pedido_id && item.generatedVideo).map(item => [item.pedido_id, item]));
+    const posts = detail.planejamento.plano_mensal.postagens.map(post => {
+      const row = byOrder.get(post.pedido_id);
+      return row ? { ...post, generatedVideo: row.generatedVideo, calendar_item_id: row.calendar_item_id,
+        calendar_schedule_id: row.calendar_schedule_id, calendar_revision: row.calendar_revision } : post;
+    });
+    detail.planejamento.plano_mensal.postagens = posts;
+    detail.planejamento.plano_mensal.itens = posts;
+    return res.json(detail);
+  } catch (error) {
+    return res.status(error?.statusCode || 500).json({
+      ok: false,
+      code: error?.code || "monthly_planning_detail_error",
+      error: error?.message || "Nao foi possivel consultar o Planejamento Mensal."
+    });
+  }
+});
+
+app.post("/empresa/planejamento-mensal/:planningId/cancelar", auth, (req, res) => {
+  if (isMonthlyPlanningReservedRouteSegment(req.params.planningId)) {
+    return res.status(404).json({
+      ok: false,
+      code: "monthly_planning_reserved_route",
+      error: "Rota reservada do Planejamento Mensal."
+    });
+  }
+
+  const whatsapp = req.user.whatsapp;
+  const clientes = readClientes();
+  const cliente = clientes[whatsapp];
+
+  if (!cliente) {
+    return res.status(404).json({ ok: false, error: "Cliente nao encontrado" });
+  }
+
+  try {
+    const clienteBefore = JSON.stringify(cliente);
+    const planejamento = monthlyPlanningService.cancelPlanning({
+      baseDir: MONTHLY_PLANNINGS_DIR,
+      whatsapp,
+      planningId: req.params.planningId,
+      cliente
+    });
+
+    if (JSON.stringify(cliente) !== clienteBefore) {
+      clientes[whatsapp] = cliente;
+      writeClientes(clientes);
+    }
+
+    return res.json({
+      ok: true,
+      planejamento_id: planejamento.planejamento_id || planejamento.id,
+      status: planejamento.status,
+      status_label: planejamento.status_label || "Cancelado",
+      billing_alterado: planejamento.cancelamento?.billing_alterado === true,
+      reserva_definitiva: true,
+      artes_devolvidas: Number(planejamento.cancelamento?.artes_devolvidas || 0),
+      livres_para_criar_arte: Number(planejamento.cancelamento?.livres_para_criar_arte || planejamento.livres_para_criar_arte || 0)
+    });
+  } catch (error) {
+    return res.status(error?.statusCode || 500).json({
+      ok: false,
+      code: error?.code || "monthly_planning_cancel_error",
+      error: error?.message || "Nao foi possivel cancelar o Planejamento Mensal."
+    });
+  }
+});
+
+app.get("/bot/empresa/planejamento-mensal/novos", botRunnerAuth, (req, res) => {
+  if (!isBotAdmin(req)) {
+    return res.status(403).json({ ok: false, error: "Acesso negado" });
+  }
+
+  try {
+    return res.json(monthlyPlanningService.listBotPending({
+      baseDir: MONTHLY_PLANNINGS_DIR,
+      limit: req.query.limit,
+      claim: req.query.claim !== "false"
+    }));
+  } catch (error) {
+    console.error("[planejamento-mensal][bot] erro ao listar novos", {
+      message: error?.message,
+      stack: error?.stack
+    });
+    return res.status(500).json({
+      ok: false,
+      error: "Nao foi possivel listar Planejamentos Mensais pendentes."
+    });
+  }
+});
+
+app.get("/bot/empresa/planejamento-mensal/:planningId/zip", botRunnerAuth, async (req, res) => {
+  if (!isBotAdmin(req)) {
+    return res.status(403).json({ ok: false, error: "Acesso negado" });
+  }
+
+  try {
+    const planejamento = monthlyPlanningService.findPlanningByIdAny({
+      baseDir: MONTHLY_PLANNINGS_DIR,
+      planningId: req.params.planningId
+    });
+
+    if (!planejamento) {
+      return res.status(404).json({ ok: false, error: "Planejamento Mensal nao encontrado" });
+    }
+
+    return await streamDirectoryZip({
+      res,
+      directory: planejamento.base_path,
+      filename: `${planejamento.planejamento_id || planejamento.id}.zip`
+    });
+  } catch (error) {
+    console.error("[planejamento-mensal][bot] erro ao gerar zip", {
+      planningId: req.params.planningId,
+      message: error?.message,
+      stack: error?.stack
+    });
+    if (!res.headersSent) {
+      return res.status(500).json({ ok: false, error: "Falha ao gerar ZIP do Planejamento Mensal" });
+    }
+  }
+});
+
+app.post("/bot/empresa/planejamento-mensal/:planningId/status", botRunnerAuth, (req, res) => {
+  if (!isBotAdmin(req)) {
+    return res.status(403).json({ ok: false, error: "Acesso negado" });
+  }
+
+  try {
+    const planejamento = monthlyPlanningService.updatePlanningStatus({
+      baseDir: MONTHLY_PLANNINGS_DIR,
+      planningId: req.params.planningId,
+      status: String(req.body?.status || "").trim(),
+      message: req.body?.message || req.body?.erro || ""
+    });
+
+    const statusNormalizado = String(planejamento.status || req.body?.status || "").toLowerCase();
+    const runnerEvent = statusNormalizado.includes("timeout")
+      ? "runner_timeout"
+      : statusNormalizado.includes("erro")
+        ? "runner_erro"
+        : "";
+    if (runnerEvent) {
+      registrarEventoServidor(runnerEvent, {
+        whatsapp: planejamento.whatsapp,
+        produto: "planejamento_mensal",
+        payload: {
+          tipo: "planejamento_mensal",
+          planning_id: planejamento.planejamento_id || planejamento.id || req.params.planningId,
+          status: planejamento.status || req.body?.status || "",
+          motivo: String(req.body?.message || req.body?.erro || "").trim()
+        }
+      });
+    }
+
+    return res.json({
+      ok: true,
+      planejamento_id: planejamento.planejamento_id || planejamento.id,
+      status: planejamento.status
+    });
+  } catch (error) {
+    console.error("[planejamento-mensal][bot] erro ao atualizar status", {
+      planningId: req.params.planningId,
+      message: error?.message,
+      stack: error?.stack
+    });
+    return res.status(error?.statusCode || 500).json({
+      ok: false,
+      code: error?.code || "monthly_planning_bot_status_error",
+      error: error?.message || "Falha ao atualizar status do Planejamento Mensal"
+    });
+  }
+});
+
+app.post("/bot/empresa/planejamento-mensal/:planningId/upload-plano", botRunnerAuth, (req, res) => {
+  if (!isBotAdmin(req)) {
+    return res.status(403).json({ ok: false, error: "Acesso negado" });
+  }
+
+  try {
+    const planejamentoAtual = monthlyPlanningService.findPlanningByIdAny({
+      baseDir: MONTHLY_PLANNINGS_DIR,
+      planningId: req.params.planningId
+    });
+    const clientes = readClientes();
+    const cliente = planejamentoAtual?.whatsapp ? clientes[planejamentoAtual.whatsapp] : null;
+    const clienteBefore = cliente ? JSON.stringify(cliente) : "";
+
+    const planejamento = monthlyPlanningService.savePlanResult({
+      baseDir: MONTHLY_PLANNINGS_DIR,
+      pedidosDir: PEDIDOS_DIR,
+      planningId: req.params.planningId,
+      payload: req.body || {},
+      cliente
+    });
+
+    if (cliente && JSON.stringify(cliente) !== clienteBefore) {
+      clientes[planejamentoAtual.whatsapp] = cliente;
+      writeClientes(clientes);
+    }
+
+    const planoMensal = planejamento.plano_mensal || {};
+    const postagens = Array.isArray(planoMensal.postagens)
+      ? planoMensal.postagens
+      : Array.isArray(planoMensal.itens)
+        ? planoMensal.itens
+        : [];
+
+    return res.json({
+      ok: true,
+      planejamento_id: planejamento.planejamento_id || planejamento.id,
+      status: planejamento.status,
+      postagens: postagens.length,
+      pedidos_filhos_criados: Number(planejamento.pedidos_criados?.total || planejamento.pedidos_filhos_criados || 0)
+    });
+  } catch (error) {
+    console.error("[planejamento-mensal][bot] erro ao receber plano", {
+      planningId: req.params.planningId,
+      message: error?.message,
+      stack: error?.stack
+    });
+    return res.status(error?.statusCode || 500).json({
+      ok: false,
+      code: error?.code || "monthly_planning_bot_upload_error",
+      error: error?.message || "Falha ao salvar plano do Planejamento Mensal"
+    });
+  }
+});
+
+app.get("/bot/empresa/planejamento-mensal/artes/novas", botRunnerAuth, (req, res) => {
+  if (!isBotAdmin(req)) {
+    return res.status(403).json({ ok: false, error: "Acesso negado" });
+  }
+
+  try {
+    return res.json(monthlyPlanningService.listPlanningArtPending({
+      pedidosDir: PEDIDOS_DIR,
+      limit: req.query.limit
+    }));
+  } catch (error) {
+    console.error("[planejamento-mensal][artes] erro ao listar novas", {
+      message: error?.message,
+      stack: error?.stack
+    });
+    return res.status(500).json({
+      ok: false,
+      error: "Nao foi possivel listar artes do Planejamento Mensal."
+    });
+  }
+});
+
+app.get("/bot/empresa/planejamento-mensal/artes/:pedidoId/zip", botRunnerAuth, async (req, res) => {
+  if (!isBotAdmin(req)) {
+    return res.status(403).json({ ok: false, error: "Acesso negado" });
+  }
+
+  try {
+    const arte = monthlyPlanningService.findPlanningArtOrder({
+      pedidosDir: PEDIDOS_DIR,
+      pedidoId: req.params.pedidoId
+    });
+
+    if (!arte) {
+      return res.status(404).json({ ok: false, error: "Arte do Planejamento Mensal nao encontrada" });
+    }
+
+    return await streamDirectoryZip({
+      res,
+      directory: arte.base,
+      filename: `${arte.pedidoId}.zip`
+    });
+  } catch (error) {
+    console.error("[planejamento-mensal][artes] erro ao gerar zip", {
+      pedidoId: req.params.pedidoId,
+      message: error?.message,
+      stack: error?.stack
+    });
+    if (!res.headersSent) {
+      return res.status(500).json({ ok: false, error: "Falha ao gerar ZIP da arte do Planejamento Mensal" });
+    }
+  }
+});
+
+app.post("/bot/empresa/planejamento-mensal/artes/:pedidoId/status", botRunnerAuth, (req, res) => {
+  if (!isBotAdmin(req)) {
+    return res.status(403).json({ ok: false, error: "Acesso negado" });
+  }
+
+  try {
+    const arte = monthlyPlanningService.updatePlanningArtStatus({
+      pedidosDir: PEDIDOS_DIR,
+      pedidoId: req.params.pedidoId,
+      status: String(req.body?.status || "").trim(),
+      message: req.body?.message || req.body?.erro || ""
+    });
+
+    const statusNormalizado = String(arte.status || req.body?.status || "").toLowerCase();
+    const runnerEvent = statusNormalizado.includes("timeout")
+      ? "runner_timeout"
+      : statusNormalizado.includes("erro")
+        ? "runner_erro"
+        : "";
+    if (runnerEvent) {
+      const basePedido = getPedidoBaseGlobal(req.params.pedidoId);
+      const pedidoData = basePedido ? (readPedido(basePedido) || {}) : {};
+      registrarEventoServidor(runnerEvent, {
+        whatsapp: pedidoData.whatsapp,
+        pedidoId: req.params.pedidoId,
+        produto: "planejamento_mensal",
+        payload: {
+          tipo: "planejamento_mensal_arte",
+          planning_id: arte.planning_id || arte.planejamento_id || "",
+          status: arte.status || req.body?.status || "",
+          motivo: String(req.body?.message || req.body?.erro || "").trim()
+        }
+      });
+    }
+
+    return res.json({ ok: true, arte });
+  } catch (error) {
+    console.error("[planejamento-mensal][artes] erro ao atualizar status", {
+      pedidoId: req.params.pedidoId,
+      message: error?.message,
+      stack: error?.stack
+    });
+    return res.status(error?.statusCode || 500).json({
+      ok: false,
+      code: error?.code || "monthly_planning_art_status_error",
+      error: error?.message || "Falha ao atualizar status da arte do Planejamento Mensal"
+    });
+  }
+});
+
+app.post(
+  "/bot/empresa/planejamento-mensal/artes/:pedidoId/upload-resultado",
+  botRunnerAuth,
+  uploadMonthlyPlanningResult.fields([
+    { name: "resultado", maxCount: 1 },
+    { name: "preview", maxCount: 1 }
+  ]),
+  (req, res) => {
+    if (!isBotAdmin(req)) {
+      cleanupUploadedFiles(req.files);
+      return res.status(403).json({ ok: false, error: "Acesso negado" });
+    }
+
+    const resultado = req.files?.resultado?.[0];
+    const preview = req.files?.preview?.[0];
+    if (!resultado?.path) {
+      cleanupUploadedFiles(req.files);
+      return res.status(400).json({ ok: false, error: "Arquivo de resultado obrigatorio" });
+    }
+
+    try {
+      const resultMime = String(resultado.mimetype || "").toLowerCase();
+      const resultName = String(resultado.originalname || "").toLowerCase();
+      if (!((resultMime === "image/png" && resultName === "resultado_final.png") ||
+            (resultMime === "video/mp4" && resultName === "resultado_final.mp4")) ||
+          preview && (preview.mimetype !== "image/jpeg" || Number(preview.size) > 8 * 1024 * 1024)) {
+        cleanupUploadedFiles(req.files);
+        return res.status(415).json({ ok: false, code: "monthly_planning_art_result_type_invalid",
+          error: "Formato de resultado nao suportado" });
+      }
+      let apiInfo = null;
+      if (req.body?.api_info) {
+        try {
+          apiInfo = JSON.parse(String(req.body.api_info || "{}"));
+        } catch {
+          apiInfo = null;
+        }
+      }
+
+      const arte = monthlyPlanningService.savePlanningArtResult({
+        pedidosDir: PEDIDOS_DIR,
+        pedidoId: req.params.pedidoId,
+        resultadoPath: resultado.path,
+        resultadoMime: resultMime,
+        previewPath: preview?.path || "",
+        descricaoInstagram: req.body?.descricao_instagram || "",
+        apiInfo
+      });
+
+      const basePedido = getPedidoBaseGlobal(req.params.pedidoId);
+      const pedidoData = basePedido ? (readPedido(basePedido) || {}) : {};
+      registrarEventoServidor("pedido_pronto", {
+        whatsapp: pedidoData.whatsapp,
+        pedidoId: req.params.pedidoId,
+        produto: "planejamento_mensal",
+        payload: {
+          tipo: "planejamento_mensal",
+          planning_id: arte.planning_id || arte.planejamento_id || "",
+          status: arte.status || "pronto"
+        }
+      });
+
+      return res.json({ ok: true, arte });
+    } catch (error) {
+      cleanupUploadedFiles(req.files);
+      console.error("[planejamento-mensal][artes] erro ao receber resultado", {
+        pedidoId: req.params.pedidoId,
+        message: error?.message,
+        stack: error?.stack
+      });
+      return res.status(error?.statusCode || 500).json({
+        ok: false,
+        code: error?.code || "monthly_planning_art_upload_error",
+        error: error?.message || "Falha ao salvar resultado da arte do Planejamento Mensal"
+      });
+    }
+  }
+);
+
+let monthlyPlanningNotificationsRunning = false;
+let freeArtNotificationsRunning = false;
+
+function monthlyPlanningNotificationPayload({ planning, post }) {
+  const pedidoId = post.pedido_id || "";
+  return {
+    title: "Hora de postar",
+    body: "Sua arte planejada para hoje esta pronta. Toque para ver e copiar a legenda.",
+    image_url: pedidoId && post.media_kind !== "video" ? publicApiUrl(`/pedidos/${encodeURIComponent(pedidoId)}/preview`) : "",
+    data: {
+      tipo: "planejamento_mensal",
+      route: "monthly_planning_detail",
+      planejamento_id: planning.planejamento_id || planning.id || "",
+      planejamento_item_id: post.planejamento_item_id || "",
+      pedido_id: pedidoId
+    }
+  };
+}
+
+async function runMonthlyPlanningNotifications() {
+  if (!fcmService.scheduledNotificationsEnabled()) return;
+  if (monthlyPlanningNotificationsRunning) return;
+
+  monthlyPlanningNotificationsRunning = true;
+  try {
+    const clientes = readClientes();
+    const result = await monthlyPlanningService.processDueNotifications({
+      baseDir: MONTHLY_PLANNINGS_DIR,
+      pedidosDir: PEDIDOS_DIR,
+      clientes,
+      now: new Date(),
+      sendNotification: async ({ cliente, planning, post }) => {
+        return fcmService.sendPlanejamentoMensal(
+          cliente,
+          {
+            ...monthlyPlanningNotificationPayload({ planning, post }),
+            planejamento_id: planning.planejamento_id || planning.id || "",
+            planejamento_item_id: post.planejamento_item_id || "",
+            pedido_id: post.pedido_id || ""
+          }
+        );
+      }
+    });
+
+    if (result.sent || result.errors || result.mock) {
+      console.log("[planejamento-mensal][notificacoes]", result);
+    }
+  } catch (error) {
+    console.error("[planejamento-mensal][notificacoes] erro no agendador", {
+      message: error?.message,
+      stack: error?.stack
+    });
+  } finally {
+    monthlyPlanningNotificationsRunning = false;
+  }
+}
+
+async function runFreeArtCampaignNotifications() {
+  if (!fcmService.scheduledNotificationsEnabled()) return;
+  if (!adminFreeArtsNotificationsEnabled()) return;
+  if (freeArtNotificationsRunning) return;
+
+  freeArtNotificationsRunning = true;
+  try {
+    const clientes = readClientes();
+    const result = await freeArtCampaignsScheduler.processDueNotifications({
+      baseDir: FREE_ART_CAMPAIGNS_DIR,
+      pedidosDir: PEDIDOS_DIR,
+      clientes,
+      now: new Date(),
+      sendNotification: async ({ cliente, campaign, assignment }) => {
+        const pedidoId = assignment.pedido_id || assignment.assignment_id || "";
+        return fcmService.sendArteGratisSemanal(
+          cliente,
+          {
+            title: campaign.notificacao_titulo || "Arte Gratis da Semana",
+            body: campaign.notificacao_mensagem || "Sua arte gratis da semana esta pronta. Toque para ver.",
+            pedido_id: pedidoId,
+            campaign_id: campaign.id || "",
+            assignment_id: assignment.assignment_id || "",
+            image_url: pedidoId ? publicApiUrl(`/pedidos/${encodeURIComponent(pedidoId)}/preview`) : "",
+            data: {
+              tipo: "arte_gratis_semanal",
+              route: pedidoId ? "order_detail" : "orders",
+              campaign_id: campaign.id || "",
+              assignment_id: assignment.assignment_id || "",
+              pedido_id: pedidoId
+            }
+          }
+        );
+      }
+    });
+
+    if (result.sent || result.errors || result.mock) {
+      console.log("[arte-gratis-semanal][notificacoes]", result);
+    }
+  } catch (error) {
+    console.error("[arte-gratis-semanal][notificacoes] erro no agendador", {
+      message: error?.message,
+      stack: error?.stack
+    });
+  } finally {
+    freeArtNotificationsRunning = false;
+  }
+}
+
+function runFreeArtCampaignRecovery() {
+  if (!adminFreeArtsEnabled()) return;
+
+  try {
+    const result = freeArtCampaignsService.recoverStuckGeneration({
+      baseDir: FREE_ART_CAMPAIGNS_DIR,
+      timeoutMs: adminFreeArtsGeneratingTimeoutMs(),
+      action: adminFreeArtsStuckAction(),
+      now: new Date()
+    });
+
+    if (result.recovered_count > 0) {
+      console.log("[arte-gratis-semanal][recuperacao-geracao]", result);
+    }
+  } catch (error) {
+    console.error("[arte-gratis-semanal][recuperacao-geracao] erro", {
+      message: error?.message,
+      stack: error?.stack
+    });
+  }
+}
+
+// ===== CRIA PEDIDO =====
+function criarPedidoHandler(categoria) {
+  return async (req, res) => {
+    let freeArtClaimLockKeys = [];
+
+    try {
+    const whatsapp = req.user.whatsapp;
+    const clientes = readClientes();
+    const c = clientes[whatsapp];
+
+    if (!c) {
+      return res.status(404).json({ ok: false, error: "Cliente não encontrado" });
+    }
+
+    const mesAtual = nowYYYYMM();
+    billingService.ensureCurrentBillingCycle(c, mesAtual);
+
+    const temBrindeMascote = billingService.hasMascoteUniformeGift(categoria, c);
+
+    const custoPedido = getCustoPedido(categoria, c);
+    const isArteEmpresa = categoria === "arte_empresa";
+    const custoEfetivoPedido = isArteEmpresa ? EMPRESA_ARTE_AVULSA_VALOR : custoPedido;
+
+    const temSaldoSuficiente = !isArteEmpresa && billingService.hasEnoughBalance(c, custoEfetivoPedido);
+
+    const fields = orderService.normalizeOrderBody(req.body);
+
+    if (!orderService.hasRequiredOrderFields(fields)) {
+      return res.status(400).json({
+        ok: false,
+        error: "rodada e data são obrigatórios"
+      });
+    }
+
+    const files = req.files || {};
+    if (categoria === "arte_empresa" && !orderService.hasCompanyLogoReference(files)) {
+      return res.status(400).json({
+        ok: false,
+        error: "Envie o logo da empresa para criar a arte."
+      });
+    }
+
+    const visualStyleNormalization = orderService.normalizeCompanyVisualStyleForUploads({ categoria, fields, files });
+
+    const freeArtIpLock = isArteEmpresa
+      ? getFreeArtIpLockStatus(req)
+      : { blocked: false, ipHash: "", ipMasked: "", lock: null };
+    let freeArtBlockedByClaimLock = false;
+
+    if (isArteEmpresa && billingService.hasAvailableFreeCompanyArt(c, { freeArtBlocked: freeArtIpLock.blocked })) {
+      freeArtClaimLockKeys = acquireFreeArtClaimLocks(whatsapp, freeArtIpLock.ipHash);
+      freeArtBlockedByClaimLock = freeArtClaimLockKeys.length === 0;
+
+      if (freeArtBlockedByClaimLock) {
+        console.warn("[free-art-ip] tentativa simultanea bloqueada", {
+          whatsapp,
+          ip_mascarado: freeArtIpLock.ipMasked
+        });
+        registrarEventoServidor("free_art_claim_lock_blocked", {
+          whatsapp,
+          produto: "arte_empresa",
+          payload: {
+            motivo: "tentativa_simultanea",
+            ip_mascarado: freeArtIpLock.ipMasked
+          }
+        });
+      }
+    }
+
+    if (isArteEmpresa && freeArtIpLock.blocked && billingService.hasAvailableFreeCompanyArt(c)) {
+      console.info("[free-art-ip] arte gratis bloqueada por IP", {
+        whatsapp,
+        ip_mascarado: freeArtIpLock.ipMasked,
+        bloqueado_ate: freeArtIpLock.lock?.bloqueado_ate || ""
+      });
+      registrarEventoServidor("free_art_ip_blocked", {
+        whatsapp,
+        produto: "arte_empresa",
+        payload: {
+          contexto: "arte_empresa",
+          ip_mascarado: freeArtIpLock.ipMasked,
+          bloqueado_ate: freeArtIpLock.lock?.bloqueado_ate || ""
+        }
+      });
+    }
+
+    let cobrancaEmpresa = null;
+    if (isArteEmpresa) {
+      cobrancaEmpresa = billingService.resolveCompanyArtCharge(c, {
+        custoPedido: custoEfetivoPedido,
+        now: new Date(),
+        freeArtBlocked: freeArtIpLock.blocked || freeArtBlockedByClaimLock
+      });
+
+      if (visualStyleNormalization.converted) {
+        console.info("[pedidos] estilo visual arte_empresa ajustado", {
+          whatsapp,
+          origem_cobranca: cobrancaEmpresa.source || cobrancaEmpresa.code || "indefinida",
+          estilo_original: visualStyleNormalization.from,
+          estilo_final: visualStyleNormalization.to,
+          reason: visualStyleNormalization.reason
+        });
+      }
+
+      if (cobrancaEmpresa.allowed !== true) {
+        clientes[whatsapp] = c;
+        writeClientes(clientes);
+        return res.status(402).json({
+          ok: false,
+          code: "billing_required",
+          error: "Compre 1 arte avulsa por R$ 5,99 ou escolha um combo para criar sua arte.",
+          required_amount: cobrancaEmpresa.required_amount,
+          arte_avulsa_valor: EMPRESA_ARTE_AVULSA_VALOR,
+          arte_avulsa_cta: "Comprar 1 arte por R$ 5,99",
+          arte_avulsa_endpoint: "/billing/arte-avulsa/pix",
+          free_art_ip_blocked: freeArtIpLock.blocked,
+          free_art_blocked_until: freeArtIpLock.lock?.bloqueado_ate || "",
+          free_art_message: freeArtIpLock.blocked
+            ? "O limite de testes gratuitos nesta rede foi atingido. Voce ainda pode continuar usando com combo ou arte avulsa."
+            : "",
+          saldo_extra: cobrancaEmpresa.saldo_extra,
+          artes_mensais_restantes: cobrancaEmpresa.artes_mensais_restantes,
+          artes_avulsas_restantes: cobrancaEmpresa.artes_avulsas_restantes,
+          plano_status: cobrancaEmpresa.plano_status
+        });
+      }
+    }
+
+    const draft = await orderService.createOrderDraft({
+      categoria,
+      pedidosDir: PEDIDOS_DIR,
+      whatsapp,
+      mesAtual,
+      fields,
+      files
+    });
+
+    const id = draft.id;
+
+    if (isArteEmpresa) {
+      billingService.applyResolvedCompanyArtCharge(c, cobrancaEmpresa, {
+        custoPedido: custoEfetivoPedido,
+        mesAtual,
+        pedidoId: id
+      });
+      draft.pedido.cobranca_origem = cobrancaEmpresa.source;
+      draft.pedido.valor_cobrado = cobrancaEmpresa.source === "saldo_extra" || cobrancaEmpresa.source === "arte_avulsa"
+        ? Number(cobrancaEmpresa.amount || custoEfetivoPedido)
+        : 0;
+      if (cobrancaEmpresa.source === "arte_gratis") {
+        const ipLockRecord = recordFreeArtIpLock(req, {
+          whatsapp,
+          pedidoId: id,
+          context: "arte_empresa"
+        });
+        draft.pedido.tipo_compra = "arte_gratis";
+        draft.pedido.origem_promocional = "primeira_arte_gratis";
+        draft.pedido.marketing_context = "primeira_arte_gratis";
+        draft.pedido.beneficios_plano_aplicados = false;
+        if (ipLockRecord) {
+          registrarEventoServidor("free_art_ip_locked", {
+            whatsapp,
+            pedidoId: id,
+            produto: "arte_empresa",
+            payload: {
+              contexto: "arte_empresa",
+              ip_mascarado: ipLockRecord.ip_mascarado,
+              bloqueado_ate: ipLockRecord.bloqueado_ate
+            }
+          });
+        }
+      }
+      if (cobrancaEmpresa.source === "arte_avulsa") {
+        draft.pedido.tipo_compra = "avulsa";
+        draft.pedido.beneficios_plano_aplicados = false;
+      }
+      draft.pedido.plano_id = cobrancaEmpresa.source === "plano" ? cobrancaEmpresa.planId : "";
+      draft.pedido.plano_ciclo = cobrancaEmpresa.source === "plano" ? cobrancaEmpresa.planCycle : "";
+      draft.pedido.pagamento_pendente = false;
+      draft.pedido.valor_pendente = 0;
+      draft.pedido.motivo_pagamento_pendente = "";
+      orderService.orderStorage.writeOrder(draft.base, draft.pedido);
+    } else if (temSaldoSuficiente) {
+      billingService.applyOrderCharge(c, { custoPedido: custoEfetivoPedido, mesAtual, temBrindeMascote });
+    } else {
+      draft.pedido.pagamento_pendente = true;
+      draft.pedido.valor_pendente = custoEfetivoPedido;
+      draft.pedido.motivo_pagamento_pendente = "saldo_insuficiente";
+      orderService.orderStorage.writeOrder(draft.base, draft.pedido);
+    }
+
+    clientes[whatsapp] = c;
+    writeClientes(clientes);
+
+    removeOldPedidos(whatsapp, 15);
+
+    return res.json({
+      ok: true,
+      pedido_id: id,
+      cobranca_origem: draft.pedido?.cobranca_origem || "",
+      tipo_compra: draft.pedido?.tipo_compra || "",
+      arte_gratis: draft.pedido?.cobranca_origem === "arte_gratis"
+    });
+    } catch (error) {
+      cleanupUploadedFiles(req.files);
+      console.error("[pedidos] erro ao criar pedido", {
+        categoria,
+        message: error?.message,
+        stack: error?.stack
+      });
+
+      if (res.headersSent) return;
+
+      return res.status(error?.statusCode || 500).json({
+        ok: false,
+        error: "Não foi possível criar o pedido agora. Tente novamente em alguns instantes."
+      });
+    } finally {
+      releaseFreeArtClaimLocks(freeArtClaimLockKeys);
+    }
+  };
+}
+
+// ===== CRIAR PEDIDO =====
+app.post(
+  "/pedidos",
+  auth,
+  upload.fields(PEDIDO_UPLOAD_FIELDS),
+  (req, res) => {
+    const flyer_tipo = (req.body?.flyer_tipo || "").toLowerCase();
+    const productFromRegistry = productsRegistry.resolveProductFromRequestBody(req.body);
+
+    if (productFromRegistry) return criarPedidoHandler(productFromRegistry.id)(req, res);
+
+    if (flyer_tipo === "escudo3d") return criarPedidoHandler("escudo3d")(req, res);
+    if (flyer_tipo === "zz1fs") return criarPedidoHandler("escalacao")(req, res);
+    if (flyer_tipo === "zz1fm") return criarPedidoHandler("contratacao")(req, res);
+    if (flyer_tipo === "zz1ft") return criarPedidoHandler("proximo_jogo")(req, res);
+    if (flyer_tipo === "treino") return criarPedidoHandler("treino")(req, res);
+    if (flyer_tipo === "zz1fj") return criarPedidoHandler("patrocinador")(req, res);
+    if (flyer_tipo === "jog_proximo") return criarPedidoHandler("proximo_jogo_jogador")(req, res);
+    if (flyer_tipo === "jog_resultado") return criarPedidoHandler("resultado_jogo_jogador")(req, res);
+    if (flyer_tipo === "jog_escudo") return criarPedidoHandler("jogador_escudo")(req, res);
+    if (flyer_tipo === "mascote_uniforme") return criarPedidoHandler("mascote_uniforme")(req, res);
+
+    return criarPedidoHandler("pedido")(req, res);
+  }
+);
+
+app.post(
+  "/mascotes",
+  auth,
+  upload.fields(PEDIDO_UPLOAD_FIELDS),
+  criarPedidoHandler("mascote")
+);
+
+app.post(
+  "/resultado_do_jogo",
+  auth,
+  upload.fields(PEDIDO_UPLOAD_FIELDS),
+  criarPedidoHandler("resultado")
+);
+
+// ===== BOT ADMIN: LISTAR NOVOS DE TODOS OS CLIENTES =====
+app.get("/bot/pedidos/novos", botRunnerAuth, (req, res) => {
+  if (!isBotAdmin(req)) {
+    return res.status(403).json({ ok: false, error: "Acesso negado" });
+  }
+
+  const pedidos = [];
+
+  if (!fs.existsSync(PEDIDOS_DIR)) {
+    return res.json({ ok: true, pedidos: [] });
+  }
+
+  const whatsapps = fs.readdirSync(PEDIDOS_DIR);
+
+  for (const whatsapp of whatsapps) {
+    const pastaWhatsapp = path.join(PEDIDOS_DIR, whatsapp);
+    if (!fs.existsSync(pastaWhatsapp) || !fs.statSync(pastaWhatsapp).isDirectory()) continue;
+
+    const meses = fs.readdirSync(pastaWhatsapp);
+
+    for (const mes of meses) {
+      const pastaMes = path.join(pastaWhatsapp, mes);
+      if (!fs.existsSync(pastaMes) || !fs.statSync(pastaMes).isDirectory()) continue;
+
+      const ids = fs.readdirSync(pastaMes);
+
+      for (const id of ids) {
+        const base = path.join(pastaMes, id);
+        const statusPedido = readOrderStatus(base, "");
+
+        if (statusPedido === "novo" || statusPedido === "ajuste_pendente") {
+          const pedido = safeReadJson(path.join(base, "pedido.json")) || {};
+          if (monthlyPlanningService.isPlanningOrder(pedido)) continue;
+          if (freeArtCampaignsService.isFreeArtOrder(pedido)) continue;
+          pedidos.push({ id, whatsapp, mes, status: statusPedido });
+        }
+      }
+    }
+  }
+
+  return res.json({ ok: true, pedidos });
+});
+
+app.get("/bot/pedidos/:id/zip", botRunnerAuth, async (req, res) => {
+  if (!isBotAdmin(req)) {
+    return res.status(403).json({ ok: false, error: "Acesso negado" });
+  }
+
+  const base = getPedidoBaseGlobal(req.params.id);
+
+  if (!base) {
+    return res.status(404).json({ ok: false, error: "Pedido não encontrado" });
+  }
+
+  const pedido = safeReadJson(path.join(base, "pedido.json")) || {};
+  if (isAdminFreeArtOrderHidden(pedido)) {
+    return sendHiddenAdminFreeArtOrder(res);
+  }
+  if (freeArtCampaignsService.isFreeArtOrder(pedido)) {
+    return res.status(403).json({
+      ok: false,
+      code: "free_art_weekly_zip_blocked",
+      error: "A Arte Gratis da Semana nao entra no fluxo normal de ZIP."
+    });
+  }
+
+  return streamDirectoryZip({
+    res,
+    directory: base,
+    filename: `${req.params.id}.zip`
+  });
+});
+
+app.post("/bot/pedidos/:id/status", auth, (req, res) => {
+  if (!isBotAdmin(req)) {
+    return res.status(403).json({ ok: false, error: "Acesso negado" });
+  }
+
+  const base = getPedidoBaseGlobal(req.params.id);
+
+  if (!base) {
+    return res.status(404).json({ ok: false, error: "Pedido não encontrado" });
+  }
+
+  const pedido = safeReadJson(path.join(base, "pedido.json")) || {};
+  if (isAdminFreeArtOrderHidden(pedido)) {
+    return sendHiddenAdminFreeArtOrder(res);
+  }
+  if (freeArtCampaignsService.isFreeArtOrder(pedido)) {
+    return res.status(403).json({
+      ok: false,
+      code: "free_art_weekly_status_blocked",
+      error: "A Arte Gratis da Semana nao entra no fluxo normal de status."
+    });
+  }
+
+  const { status } = req.body || {};
+
+  if (!orderStatus.isValidPublicStatus(status)) {
+    return res.status(400).json({ ok: false, error: "status inválido" });
+  }
+
+  writeOrderStatus(base, status);
+  try {
+    const pedido = readPedido(base) || {};
+    const statusNormalizado = String(status || "").toLowerCase();
+    const runnerEvent = statusNormalizado.includes("timeout")
+      ? "runner_timeout"
+      : statusNormalizado.includes("erro")
+        ? "runner_erro"
+        : "";
+    if (runnerEvent) {
+      registrarEventoServidor(runnerEvent, {
+        whatsapp: pedido.whatsapp,
+        pedidoId: req.params.id,
+        produto: pedido.product_id || pedido.categoria || "pedido",
+        payload: {
+          tipo: "pedido",
+          status,
+          motivo: String(req.body?.message || req.body?.erro || "").trim()
+        }
+      });
+    }
+    if (
+      pedido.whatsapp &&
+      !monthlyPlanningService.isPlanningOrder(pedido) &&
+      !freeArtCampaignsService.isFreeArtOrder(pedido)
+    ) {
+      sendClientPushAsync(pedido.whatsapp, "pedido_atualizado", {
+        pedido_id: req.params.id,
+        status,
+        body: status === orderStatus.ORDER_STATUS.EM_PRODUCAO
+          ? "Sua arte entrou em producao. Toque para acompanhar."
+          : "Seu pedido teve uma atualizacao. Toque para acompanhar."
+      });
+    }
+  } catch (error) {
+    console.warn("[fcm] nao foi possivel preparar push de status", {
+      pedido_id: req.params.id,
+      message: error?.message
+    });
+  }
+
+  return res.json({ ok: true });
+});
+
+// ===== LISTAR NOVOS =====
+app.get("/pedidos/novos", auth, (req, res) => {
+  const whatsapp = req.user.whatsapp;
+  const mesAtual = nowYYYYMM();
+  const dir = path.join(PEDIDOS_DIR, whatsapp, mesAtual);
+
+  if (!fs.existsSync(dir)) {
+    return res.json({ ok: true, pedidos: [] });
+  }
+
+  const pedidos = [];
+
+  for (const id of fs.readdirSync(dir)) {
+    const pdir = path.join(dir, id);
+
+    if (readOrderStatus(pdir, "") === "novo") {
+      pedidos.push({ id });
+    }
+  }
+
+  return res.json({ ok: true, pedidos });
+});
+
+function downloadBloqueadoPorCadastro(cliente) {
+  return cliente?.cadastro_automatico === true && cliente?.conta_finalizada !== true;
+}
+
+function mensagemDownloadBloqueado(cliente) {
+  return downloadBloqueadoPorCadastro(cliente)
+    ? "Crie seu login e senha para liberar o download."
+    : "";
+}
+
+app.get("/meus-pedidos", auth, (req, res) => {
+  registrarOnline(req, { ultima_acao: "meus_pedidos" });
+
+  const whatsapp = req.user.whatsapp;
+  const clientes = readClientes();
+  const cliente = clientes[whatsapp];
+  const bloqueioDownload = downloadBloqueadoPorCadastro(cliente);
+  const mensagemBloqueioDownload = mensagemDownloadBloqueado(cliente);
+  const itens = listPedidoBasesByWhatsapp(whatsapp)
+    .filter((item) => {
+      const pedido = item.pedido || {};
+      if (isAdminFreeArtOrderHidden(pedido)) return false;
+      return !(
+        pedido.origem === "planejamento_mensal" ||
+        pedido.planejamento_id ||
+        pedido.planejamento_mensal?.planejamento_id
+      );
+    })
+    .slice(0, 15);
+  const planejamentos = monthlyPlanningService.listClientPlanningGroups({
+    baseDir: MONTHLY_PLANNINGS_DIR,
+    pedidosDir: PEDIDOS_DIR,
+    whatsapp,
+    limit: 15
+  });
+
+  const pedidos = itens.map((item) => {
+    const resultadoFinalPath = path.join(item.base, "resultado_final.png");
+    const status = readOrderStatus(item.base, item.pedido.status || "novo");
+    const imagemPronta = fs.existsSync(resultadoFinalPath);
+    const aprovadoCliente = item.pedido.aprovado_cliente === true;
+    const pagamentoPendente = item.pedido.pagamento_pendente === true;
+    const ajusteUsado = item.pedido.ajuste_automatico_usado === true;
+    const isFreeArtWeekly = freeArtCampaignsService.isFreeArtOrder(item.pedido);
+    const downloadBloqueado = imagemPronta && !pagamentoPendente && bloqueioDownload;
+    const podeBaixar = imagemPronta && !pagamentoPendente && !downloadBloqueado;
+
+    return {
+      id: item.id,
+      tipo: isFreeArtWeekly ? "Arte Gratis da Semana" : nomeCategoriaPedido(item.pedido.categoria || ""),
+      status,
+      data: item.pedido.data || item.criado_em,
+      criado_em: item.criado_em,
+      imagem_url: imagemPronta
+        ? `${req.protocol}://${req.get("host")}/pedidos/${item.id}/preview`
+        : null,
+      imagem_pronta: imagemPronta,
+      descricao_instagram: descricaoPostagemPedido(item.pedido),
+      aprovado_cliente: aprovadoCliente,
+      pagamento_pendente: pagamentoPendente,
+      valor_pendente: Number(item.pedido.valor_pendente || 0),
+      motivo_pagamento_pendente: item.pedido.motivo_pagamento_pendente || "",
+      cobranca_origem: item.pedido.cobranca_origem || "",
+      tipo_compra: item.pedido.tipo_compra || "",
+      valor_cobrado: Number(item.pedido.valor_cobrado || 0),
+      origem_promocional: item.pedido.origem_promocional || "",
+      origem: item.pedido.origem || "",
+      gratuita_administrativa: item.pedido.gratuita_administrativa === true,
+      bloquear_cobranca: item.pedido.bloquear_cobranca === true,
+      bloquear_edicao: item.pedido.bloquear_edicao === true,
+      campaign_id: item.pedido.campaign_id || "",
+      assignment_id: item.pedido.assignment_id || "",
+      marketing_context: item.pedido.marketing_context || "",
+      ajuste_automatico_usado: ajusteUsado,
+      motivo_ajuste: item.pedido.motivo_ajuste || "",
+      pode_baixar: podeBaixar,
+      download_bloqueado: downloadBloqueado,
+      mensagem_download_bloqueado: downloadBloqueado ? mensagemBloqueioDownload : "",
+      pode_pedir_ajuste: !isFreeArtWeekly && imagemPronta && !ajusteUsado && status === "pronto"
+    };
+  });
+
+  return res.json({ ok: true, pedidos, planejamentos });
+});
+
+app.post("/pedidos/:id/pagar-com-saldo", auth, (req, res) => {
+  const whatsapp = req.user.whatsapp;
+  const base = getPedidoBase(whatsapp, req.params.id);
+
+  if (!base) {
+    return res.status(404).json({ ok: false, error: "Pedido nao encontrado" });
+  }
+
+  const pedidoPath = path.join(base, "pedido.json");
+  const pedido = safeReadJson(pedidoPath) || {};
+  const isArteEmpresa = pedido.categoria === "arte_empresa" || pedido.product_id === "arte_empresa";
+
+  if (isAdminFreeArtOrderHidden(pedido)) {
+    return sendHiddenAdminFreeArtOrder(res);
+  }
+
+  if (freeArtCampaignsService.isFreeArtOrder(pedido)) {
+    return res.status(403).json({
+      ok: false,
+      code: "free_art_weekly_billing_blocked",
+      error: "A Arte Gratis da Semana nao possui cobranca."
+    });
+  }
+
+  if (pedido.pagamento_pendente !== true) {
+    return res.json({
+      ok: true,
+      mensagem: "Pedido ja liberado.",
+      pagamento_pendente: false
+    });
+  }
+
+  const valorPendente = Number(pedido.valor_pendente || 0);
+
+  if (!valorPendente || valorPendente <= 0) {
+    return res.status(400).json({ ok: false, error: "Valor pendente invalido." });
+  }
+
+  const clientes = readClientes();
+  const c = clientes[whatsapp];
+
+  if (!c) {
+    return res.status(404).json({ ok: false, error: "Cliente nao encontrado" });
+  }
+
+  const mesAtual = nowYYYYMM();
+  billingService.ensureCurrentBillingCycle(c, mesAtual);
+
+  if (!billingService.hasEnoughBalance(c, valorPendente)) {
+    clientes[whatsapp] = c;
+    writeClientes(clientes);
+    return res.status(403).json({
+      ok: false,
+      error: "Saldo insuficiente para desbloquear esta imagem."
+    });
+  }
+
+  billingService.applyOrderCharge(c, {
+    custoPedido: valorPendente,
+    mesAtual,
+    temBrindeMascote: false
+  });
+
+  pedido.pagamento_pendente = false;
+  pedido.pagamento_metodo = "saldo_ia4tube";
+  pedido.pagamento_confirmado_em = new Date().toISOString();
+
+  clientes[whatsapp] = c;
+  writeClientes(clientes);
+  fs.writeFileSync(pedidoPath, JSON.stringify(pedido, null, 2), "utf8");
+
+  return res.json({
+    ok: true,
+    pagamento_pendente: false
+  });
+});
+
+app.post("/pedidos/:id/gerar-pix", auth, async (req, res) => {
+  try {
+    if (!MP_ACCESS_TOKEN) {
+      return res.status(500).json({ ok: false, error: "MP_ACCESS_TOKEN nao configurado" });
+    }
+
+    const whatsapp = req.user.whatsapp;
+    const id = req.params.id;
+    const base = getPedidoBase(whatsapp, id);
+
+    if (!base) {
+      return res.status(404).json({ ok: false, error: "Pedido nao encontrado" });
+    }
+
+    const pedidoPath = path.join(base, "pedido.json");
+    const pedido = safeReadJson(pedidoPath) || {};
+
+    if (isAdminFreeArtOrderHidden(pedido)) {
+      return sendHiddenAdminFreeArtOrder(res);
+    }
+
+    if (freeArtCampaignsService.isFreeArtOrder(pedido)) {
+      return res.status(403).json({
+        ok: false,
+        code: "free_art_weekly_billing_blocked",
+        error: "A Arte Gratis da Semana nao possui cobranca."
+      });
+    }
+
+    if (pedido.pagamento_pendente !== true) {
+      return res.status(400).json({ ok: false, error: "Pedido ja liberado." });
+    }
+
+    const valorPendente = Number(pedido.valor_pendente || 0);
+
+    if (!valorPendente || valorPendente <= 0) {
+      return res.status(400).json({ ok: false, error: "Valor pendente invalido." });
+    }
+
+    if (
+      pedido.mp_payment_id &&
+      pedido.pix_copia_cola &&
+      String(pedido.mp_payment_status || "").toLowerCase() === "pending"
+    ) {
+      return res.json({
+        ok: true,
+        pix_copia_cola: pedido.pix_copia_cola,
+        qr_code_base64: pedido.pix_qr_code_base64 || "",
+        ticket_url: pedido.pix_ticket_url || "",
+        payment_id: pedido.mp_payment_id
+      });
+    }
+
+    const payerEmail = `${String(whatsapp).replace(/\D/g, "") || "cliente"}@ia4tube.com.br`;
+    const paymentPayload = {
+      transaction_amount: Number(valorPendente.toFixed(2)),
+      description: `IA4Tube - Desbloqueio pedido ${id}`,
+      payment_method_id: "pix",
+      payer: {
+        email: payerEmail
       },
       external_reference: `pedido_pix|${whatsapp}|${id}|${Date.now()}`,
       metadata: {
