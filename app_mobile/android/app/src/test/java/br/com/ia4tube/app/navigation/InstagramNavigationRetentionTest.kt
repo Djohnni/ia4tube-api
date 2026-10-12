@@ -195,7 +195,99 @@ class InstagramNavigationRetentionTest {
         navigation.assertNoMutations()
     }
 
-    private fun harness() = NavigationHarness().also { harnesses.add(it) }
+    private fun harness(startRoute: String = Routes.Home) = NavigationHarness(startRoute).also { harnesses.add(it) }
+
+    @Test fun returnLinkWaitsForStartupAndRequiresTheNormalLoginWithoutASession() {
+        for (hasSession in listOf(false, true)) {
+            assertEquals(InstagramReturnAction.WAIT, instagramReturnAction(null, hasSession))
+            assertEquals(InstagramReturnAction.WAIT, instagramReturnAction(Routes.Splash, hasSession))
+        }
+        for (route in listOf(Routes.Home, Routes.Instagram, Routes.Login, Routes.Register)) {
+            assertEquals(InstagramReturnAction.REQUIRE_LOGIN, instagramReturnAction(route, false))
+            assertEquals(InstagramReturnAction.OPEN_INSTAGRAM, instagramReturnAction(route, true))
+        }
+    }
+
+    @Test fun warmReturnPreservesTheActualInstagramEntryAndOnlyRefreshesAuthenticatedReads() = runTest(dispatcher) {
+        val navigation = harness()
+        val model = navigation.enterInstagram()
+        val jpeg = prepareDraft(model)
+        val entry = navigation.controller.currentBackStackEntry
+        model.onPause()
+        assertTrue(navigation.controller.openInstagramFromReturn())
+        assertSame(entry, navigation.controller.currentBackStackEntry)
+        assertSame(model, navigation.currentInstagramModel())
+        model.onResume(); model.awaitIdle()
+        assertEquals(2, navigation.gateway.snapshotCalls)
+        assertSame(jpeg, model.uiState.value.draftJpeg)
+        assertBlocked(model)
+        navigation.assertNoMutations()
+    }
+
+    @Test fun repeatedReturnFromHomeDoesNotDuplicateInstagramOrReplaceItsOwner() = runTest(dispatcher) {
+        val navigation = harness()
+        val model = navigation.enterInstagram()
+        val jpeg = prepareDraft(model)
+        navigation.exitInstagram(model)
+        val home = navigation.controller.currentBackStackEntry
+        assertTrue(navigation.controller.openInstagramFromReturn())
+        val entry = navigation.controller.currentBackStackEntry
+        assertTrue(navigation.controller.openInstagramFromReturn())
+        assertSame(entry, navigation.controller.currentBackStackEntry)
+        assertSame(model, navigation.currentInstagramModel())
+        assertSame(jpeg, model.uiState.value.draftJpeg)
+        assertEquals(1, navigation.controller.currentBackStack.value.count { it.destination.route == Routes.Instagram })
+        assertTrue(navigation.controller.popBackStack())
+        assertSame(home, navigation.controller.currentBackStackEntry)
+        navigation.assertNoMutations()
+    }
+
+    @Test fun returnReusesAnExistingInstagramEntryUnderAnotherScreen() = runTest(dispatcher) {
+        val navigation = harness()
+        val model = navigation.enterInstagram()
+        prepareDraft(model)
+        val entry = navigation.controller.currentBackStackEntry
+        navigation.controller.navigate(Routes.Register)
+        assertTrue(navigation.controller.openInstagramFromReturn())
+        assertSame(entry, navigation.controller.currentBackStackEntry)
+        assertSame(model, navigation.currentInstagramModel())
+        navigation.assertNoMutations()
+    }
+
+    @Test fun coldReturnWaitsForSplashThenUsesTheHomeCreatedByNormalStartup() {
+        val navigation = harness(Routes.Splash)
+        assertFalse(navigation.controller.openInstagramFromReturn())
+        assertEquals(Routes.Splash, navigation.controller.currentDestination?.route)
+        navigation.controller.navigate(Routes.Home) { popUpTo(Routes.Splash) { inclusive = true } }
+        val home = navigation.controller.currentBackStackEntry
+        assertTrue(navigation.controller.openInstagramFromReturn())
+        assertSame(home, navigation.controller.instagramViewModelOwner())
+        assertTrue(navigation.controller.popBackStack())
+        assertSame(home, navigation.controller.currentBackStackEntry)
+        navigation.assertNoMutations()
+    }
+
+    @Test fun loginCompletionAfterLogoutCreatesANewHomeWithoutRecoveringTheOldAccountsDraft() = runTest(dispatcher) {
+        val navigation = harness()
+        val old = navigation.enterInstagram()
+        val bytes = prepareDraft(old)
+        navigation.session = ""
+        navigation.controller.navigate(Routes.Login) { popUpTo(Routes.Home) { inclusive = true } }
+        assertEquals(InstagramReturnAction.REQUIRE_LOGIN,
+            instagramReturnAction(navigation.controller.currentDestination?.route, false))
+        assertTrue(bytes.all { it == 0.toByte() })
+        // Only the successful, existing login callback may continue the pending protected route.
+        navigation.session = "synthetic-new-session"
+        assertTrue(navigation.controller.openInstagramFromReturn())
+        val fresh = navigation.currentInstagramModel()
+        assertNotSame(old, fresh)
+        assertNull(fresh.uiState.value.draftJpeg)
+        assertFalse(fresh.uiState.value.canPublish)
+        assertTrue(navigation.controller.currentBackStack.value.none { it.destination.route == Routes.Login })
+        assertTrue(navigation.controller.popBackStack())
+        assertEquals(Routes.Home, navigation.controller.currentDestination?.route)
+        navigation.assertNoMutations()
+    }
 
     @Test fun repeatedBackCallbacksDoNotPopHomeOrClearTheDraft() = runTest(dispatcher) {
         val navigation = harness()
@@ -260,7 +352,7 @@ class InstagramNavigationRetentionTest {
         }
     }
 
-    private class NavigationHarness {
+    private class NavigationHarness(startRoute: String) {
         var session = "synthetic-session-original"
         val gateway = SyntheticGateway()
         var modelsCreated = 0
@@ -281,7 +373,9 @@ class InstagramNavigationRetentionTest {
                 addDestination(leaf.createDestination().apply { route = Routes.Home })
                 addDestination(leaf.createDestination().apply { route = Routes.Instagram })
                 addDestination(leaf.createDestination().apply { route = Routes.Login })
-                setStartDestination(Routes.Home)
+                addDestination(leaf.createDestination().apply { route = Routes.Register })
+                addDestination(leaf.createDestination().apply { route = Routes.Splash })
+                setStartDestination(startRoute)
             }
             lifecycleOwner.registry.currentState = Lifecycle.State.RESUMED
         }
@@ -319,8 +413,11 @@ class InstagramNavigationRetentionTest {
             check(controller.currentDestination?.route == Routes.Home)
             controller.navigate(Routes.Instagram)
             // This exact production function is also consumed by IA4TubeNavHost.
-            return ViewModelProvider(controller.instagramViewModelOwner(), factory)[InstagramViewModel::class.java]
+            return currentInstagramModel()
         }
+
+        fun currentInstagramModel(): InstagramViewModel =
+            ViewModelProvider(controller.instagramViewModelOwner(), factory)[InstagramViewModel::class.java]
 
         fun exitInstagram(model: InstagramViewModel) {
             check(controller.currentDestination?.route == Routes.Instagram)

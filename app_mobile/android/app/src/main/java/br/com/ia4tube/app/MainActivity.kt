@@ -26,6 +26,8 @@ import br.com.ia4tube.app.core.notifications.toNotificationNavigationTarget
 import br.com.ia4tube.app.data.api.IA4TubeApiClient
 import br.com.ia4tube.app.data.models.ApiResult
 import br.com.ia4tube.app.data.models.AppVersionInfo
+import br.com.ia4tube.app.feature.instagram.InstagramReturnTarget
+import br.com.ia4tube.app.feature.instagram.toInstagramReturnTarget
 import br.com.ia4tube.app.navigation.IA4TubeNavHost
 import br.com.ia4tube.app.ui.theme.IA4TubeTheme
 import com.google.android.play.core.appupdate.AppUpdateManagerFactory
@@ -39,6 +41,7 @@ private enum class PlayUpdateState { NONE, AVAILABLE, DOWNLOADING, DOWNLOADED }
 
 class MainActivity : ComponentActivity() {
     private var notificationTarget by mutableStateOf<NotificationNavigationTarget?>(null)
+    private var instagramReturnTarget by mutableStateOf<InstagramReturnTarget?>(null)
     private val updateManager by lazy { AppUpdateManagerFactory.create(this) }
     private var playUpdateState by mutableStateOf(PlayUpdateState.NONE)
     private var playAvailableVersionCode by mutableStateOf(0)
@@ -76,6 +79,7 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         handleNotificationIntent(intent)
+        instagramReturnTarget = intent.toInstagramReturnTarget()
         updateManager.registerListener(installListener)
         setContent {
             IA4TubeTheme {
@@ -89,7 +93,9 @@ class MainActivity : ComponentActivity() {
                 ) {
                     IA4TubeNavHost(
                         notificationTarget = notificationTarget,
-                        onNotificationTargetHandled = ::consumeNotificationTarget
+                        onNotificationTargetHandled = ::consumeNotificationTarget,
+                        instagramReturnTarget = instagramReturnTarget,
+                        onInstagramReturnHandled = ::consumeInstagramReturnTarget
                     )
                 }
             }
@@ -216,6 +222,14 @@ class MainActivity : ComponentActivity() {
         super.onNewIntent(intent)
         setIntent(intent)
         handleNotificationIntent(intent)
+        instagramReturnTarget = intent.toInstagramReturnTarget()
+    }
+
+    private fun consumeInstagramReturnTarget(target: InstagramReturnTarget) {
+        if (instagramReturnTarget != target) return
+        instagramReturnTarget = null
+        // Do not replay a handled return after rotation, or clear an unrelated notification intent.
+        if (intent.toInstagramReturnTarget() != null) setIntent(Intent(this, MainActivity::class.java))
     }
 
     private fun handleNotificationIntent(intent: Intent?) {

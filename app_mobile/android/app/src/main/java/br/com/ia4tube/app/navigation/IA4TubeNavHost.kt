@@ -106,6 +106,7 @@ import br.com.ia4tube.app.feature.instagram.AndroidInstagramPublicationIntentSto
 import br.com.ia4tube.app.feature.instagram.AndroidInstagramAuthorizationWitnessStore
 import br.com.ia4tube.app.feature.instagram.AndroidInstagramUploadWitnessStore
 import br.com.ia4tube.app.feature.instagram.InstagramScreen
+import br.com.ia4tube.app.feature.instagram.InstagramReturnTarget
 import br.com.ia4tube.app.feature.instagram.InstagramViewModel
 import br.com.ia4tube.app.feature.instagram.InstagramViewModelFactory
 import br.com.ia4tube.app.feature.monthly_planning.MonthlyPlanningDetailScreen
@@ -134,7 +135,9 @@ import kotlinx.coroutines.launch
 @Composable
 fun IA4TubeNavHost(
     notificationTarget: NotificationNavigationTarget? = null,
-    onNotificationTargetHandled: () -> Unit = {}
+    onNotificationTargetHandled: () -> Unit = {},
+    instagramReturnTarget: InstagramReturnTarget? = null,
+    onInstagramReturnHandled: (InstagramReturnTarget) -> Unit = {}
 ) {
     val navController = rememberNavController()
     val backStackEntry = navController.currentBackStackEntryAsState()
@@ -289,6 +292,9 @@ fun IA4TubeNavHost(
         pendingProtectedRoute = null
 
         when (target) {
+            Routes.Instagram -> {
+                navController.openInstagramFromReturn()
+            }
             PENDING_CAMERA_ACTION -> {
                 cameraRequestKey += 1
                 navController.navigate(Routes.Home) {
@@ -364,6 +370,25 @@ fun IA4TubeNavHost(
         }
 
         onNotificationTargetHandled()
+    }
+
+    LaunchedEffect(instagramReturnTarget?.nonce, currentRoute) {
+        val target = instagramReturnTarget ?: return@LaunchedEffect
+        when (instagramReturnAction(currentRoute, hasSavedToken())) {
+            InstagramReturnAction.WAIT -> Unit
+            InstagramReturnAction.REQUIRE_LOGIN -> {
+                // Reuse the normal login flow. The URI is not a session or evidence of OAuth success.
+                pendingProtectedRoute = Routes.Instagram
+                if (currentRoute != Routes.Login && currentRoute != Routes.Register) {
+                    requestAuthFor(Routes.Instagram)
+                }
+                onInstagramReturnHandled(target)
+            }
+            InstagramReturnAction.OPEN_INSTAGRAM -> if (navController.openInstagramFromReturn()) {
+                // InstagramScreen's existing resume handling performs only the authenticated status reads.
+                onInstagramReturnHandled(target)
+            }
+        }
     }
 
     MaterialTheme(
