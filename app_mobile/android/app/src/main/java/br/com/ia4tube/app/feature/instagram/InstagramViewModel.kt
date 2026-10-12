@@ -79,7 +79,9 @@ class InstagramViewModel(
             foreground = true
             invalidateOperationalAvailability()
         }
-        if (!_uiState.value.busy) refresh()
+        // Rotation/resume while choosing a browser must not erase the one-shot event.
+        // Session synchronization above still revokes it when the signed-in user changes.
+        if (!_uiState.value.busy && _uiState.value.authorizationUrlToOpen == null) refresh()
     }
 
     fun onPause() {

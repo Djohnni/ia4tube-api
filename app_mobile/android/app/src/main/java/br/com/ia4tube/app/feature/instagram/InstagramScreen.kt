@@ -78,6 +78,10 @@ fun InstagramScreen(viewModel: InstagramViewModel, onBack: () -> Unit, tokenProv
     var showManual by remember { mutableStateOf(false) }
     val state by viewModel.uiState.collectAsState()
     val context = LocalContext.current
+    // Only browser names/packages are held here. The one-shot URL remains in the existing VM.
+    var authorizationBrowserChoices by remember(viewModel, state.authorizationUrlToOpen) {
+        mutableStateOf<List<InstagramAuthorizationBrowser>>(emptyList())
+    }
     val lifecycleOwner = LocalLifecycleOwner.current
     val scope = rememberCoroutineScope()
     val colors = MaterialTheme.colorScheme
@@ -133,16 +137,46 @@ fun InstagramScreen(viewModel: InstagramViewModel, onBack: () -> Unit, tokenProv
     LaunchedEffect(viewModel) { viewModel.onResume() }
 
     LaunchedEffect(state.authorizationUrlToOpen) {
-        val url = viewModel.takeAuthorizationUrl()
-        if (url != null && InstagramPolicies.isOfficialAuthorizationUrl(url)) {
+        if (state.authorizationUrlToOpen != null) {
             try {
-                context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)).apply {
-                    addCategory(Intent.CATEGORY_BROWSABLE)
-                })
+                val browsers = instagramAuthorizationBrowsers(context.packageManager)
+                if (browsers.preferred != null) {
+                    openInstagramAuthorizationBrowser(context.packageManager, browsers.preferred.packageName,
+                        viewModel::takeAuthorizationUrl, context::startActivity, viewModel::browserUnavailable)
+                } else if (browsers.choices.isNotEmpty()) {
+                    authorizationBrowserChoices = browsers.choices
+                } else if (viewModel.takeAuthorizationUrl() != null) {
+                    viewModel.browserUnavailable()
+                }
             } catch (_: Exception) {
-                viewModel.browserUnavailable()
+                if (viewModel.takeAuthorizationUrl() != null) viewModel.browserUnavailable()
             }
         }
+    }
+
+    if (state.authorizationUrlToOpen != null && authorizationBrowserChoices.isNotEmpty()) {
+        val cancelBrowserChoice = {
+            authorizationBrowserChoices = emptyList()
+            if (viewModel.takeAuthorizationUrl() != null) viewModel.browserUnavailable()
+        }
+        AlertDialog(
+            onDismissRequest = cancelBrowserChoice,
+            title = { Text("Abrir autorização no navegador") },
+            text = {
+                Column(modifier = Modifier.verticalScroll(rememberScrollState())) {
+                    Text("Escolha o navegador para continuar no site oficial do Instagram.")
+                    authorizationBrowserChoices.forEach { browser ->
+                        TextButton(modifier = Modifier.fillMaxWidth(), onClick = {
+                            authorizationBrowserChoices = emptyList()
+                            openInstagramAuthorizationBrowser(context.packageManager, browser.packageName,
+                                viewModel::takeAuthorizationUrl, context::startActivity, viewModel::browserUnavailable)
+                        }) { Text(browser.label) }
+                    }
+                }
+            },
+            confirmButton = {},
+            dismissButton = { TextButton(onClick = cancelBrowserChoice) { Text("Agora não") } }
+        )
     }
 
     ScreenScaffold {

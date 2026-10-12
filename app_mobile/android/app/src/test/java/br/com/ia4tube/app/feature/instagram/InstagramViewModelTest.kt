@@ -1237,6 +1237,56 @@ class InstagramViewModelTest {
         assertEquals(1, gateway.authorizeCalls)
     }
 
+    @Test fun browserFailureOrDismissalConsumesOnlyTheLocalEventAndPreservesPendingAuthorization() = runTest(dispatcher) {
+        val gateway = expiredGateway().apply {
+            onAuthorize = { InstagramResult.Success(InstagramAuthorization(CONNECTION_ID,
+                InstagramPoliciesTest.authorizationUrl(), "2026-09-07T12:30:00Z")) }
+        }
+        val witnessStore = MemoryAuthorizationStore()
+        val model = model(gateway, MemoryIntentStore(), witnessStore)
+        model.onResume(); model.awaitIdle(); model.connect(); model.awaitIdle()
+        // The browser chooser can read the event without consuming it or issuing another POST.
+        assertNotNull(model.uiState.value.authorizationUrlToOpen)
+        model.connect(); model.awaitIdle()
+        assertNotNull(model.takeAuthorizationUrl())
+        model.browserUnavailable()
+        assertNull(model.takeAuthorizationUrl())
+        assertNotNull(model.uiState.value.error)
+        assertTrue(model.uiState.value.authorizationOutcomeUnknown)
+        assertFalse(model.uiState.value.canAuthorize)
+        gateway.authorizationResult = InstagramResult.Success(InstagramAuthorizationStatus(
+            CONNECTION_ID, "connect", "authorization_pending", "2026-09-07T12:30:00Z"))
+        model.onPause(); model.onResume(); model.awaitIdle(); model.connect()
+        val restarted = model(gateway, MemoryIntentStore(), witnessStore)
+        restarted.onResume(); restarted.awaitIdle(); restarted.connect()
+        assertNull(restarted.takeAuthorizationUrl())
+        assertFalse(restarted.uiState.value.canAuthorize)
+        assertEquals(1, gateway.authorizeCalls)
+    }
+
+    @Test fun pendingBrowserChoiceSurvivesPauseResumeButCannotSurviveSessionChange() = runTest(dispatcher) {
+        var token = "synthetic-browser-session-one"
+        val gateway = expiredGateway().apply {
+            onAuthorize = { InstagramResult.Success(InstagramAuthorization(CONNECTION_ID,
+                InstagramPoliciesTest.authorizationUrl(), "2026-09-07T12:30:00Z")) }
+        }
+        val model = InstagramViewModel({ token }, MemoryIntentStore(),
+            InstagramPolicies.OFFICIAL_API_ORIGIN, { gateway }, MemoryAuthorizationStore(), inMemoryUploadWitnessStore())
+        model.onResume(); model.awaitIdle(); model.connect(); model.awaitIdle()
+        val queuedUrl = model.uiState.value.authorizationUrlToOpen
+        assertNotNull(queuedUrl)
+        repeat(2) { model.onPause(); model.onResume(); model.awaitIdle() }
+        assertEquals(queuedUrl, model.uiState.value.authorizationUrlToOpen)
+        assertFalse(model.uiState.value.canAuthorize)
+        assertNull(model.uiState.value.operationalAvailability)
+        assertEquals(1, gateway.authorizeCalls)
+        token = "synthetic-browser-session-two"
+        model.onPause(); model.onResume(); model.awaitIdle()
+        assertNull(model.uiState.value.authorizationUrlToOpen)
+        assertNull(model.takeAuthorizationUrl())
+        assertEquals(1, gateway.authorizeCalls)
+    }
+
     @Test fun cancellationWhilePostIsUncertainPreservesWitnessAndCannotAutoRetry() = runTest(dispatcher) {
         val gateway = expiredGateway().apply {
             onAuthorize = { throw kotlinx.coroutines.CancellationException("Synthetic cancellation") }
