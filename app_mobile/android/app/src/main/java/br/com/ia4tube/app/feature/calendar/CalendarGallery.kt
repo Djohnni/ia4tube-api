@@ -111,22 +111,35 @@ fun ScheduledArtImage(item: ScheduledArt, token: String, modifier: Modifier = Mo
 fun CalendarAutomationSettings(model: CalendarViewModel) {
     val state by model.uiState.collectAsState()
     var confirm by remember { mutableStateOf(false) }
-    if (!state.data.enabled) return
-    Card { Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+    val appearance = calendarAppearance(MaterialTheme.colorScheme)
+    val cardColors = CardDefaults.cardColors(containerColor = appearance.surface, contentColor = appearance.content)
+    if (!state.data.enabled) {
+        // A pending/failed read is not a disabled feature. Show feedback, never enable actions.
+        if (state.busy || state.error != null) Card(colors = cardColors) {
+            Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text("Publicação pelo calendário", fontWeight = FontWeight.Bold)
+                if (state.busy) Text("Consultando a programação…", color = appearance.secondary)
+                state.error?.let { Text(it, color = appearance.error) }
+            }
+        }
+        return
+    }
+    Card(colors = cardColors) { Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Text("Publicação pelo calendário", fontWeight = FontWeight.Bold)
         Text(if (state.data.automatic) "A programação começa ativada para novos pedidos com Instagram conectado. Você pode desligar somente uma arte, mudar o destino, a legenda, a data e o horário no calendário."
             else "Ative uma vez para programar automaticamente as artes dos próximos pedidos.")
         Text("Conta: ${state.data.username?.let { "@$it" } ?: "conecte seu Instagram profissional"}")
         OutlinedButton(onClick = { if (state.data.automatic) model.preferences(false) else confirm = true },
+            colors = calendarOutlinedButtonColors(),
             enabled = state.fresh && !state.busy && (state.data.connected || state.data.automatic)) {
             Text(if (state.data.automatic) "Pausar programação automática" else "Ativar para novos pedidos")
         }
-        state.error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
+        state.error?.let { Text(it, color = appearance.error) }
     } }
-    if (confirm) AlertDialog(onDismissRequest = { confirm = false }, title = { Text("Ativar publicação automática?") },
+    if (confirm) CalendarAlertDialog(onDismissRequest = { confirm = false }, title = { Text("Ativar publicação automática?") },
         text = { Text("As artes dos próximos pedidos serão publicadas em @${state.data.username} nas datas e horários do calendário, mesmo com o celular desligado. A legenda final será usada como está, salvo se você a editar. Artes antigas não serão publicadas automaticamente. Você pode pausar a programação antes do início de um envio.") },
-        confirmButton = { TextButton(onClick = { confirm = false; model.preferences(true) }) { Text("Ativar") } },
-        dismissButton = { TextButton(onClick = { confirm = false }) { Text("Voltar") } })
+        confirmButton = { TextButton(colors = calendarTextButtonColors(), onClick = { confirm = false; model.preferences(true) }) { Text("Ativar") } },
+        dismissButton = { TextButton(colors = calendarTextButtonColors(), onClick = { confirm = false }) { Text("Voltar") } })
 }
 
 @Composable
@@ -264,7 +277,7 @@ fun CalendarGallery(model: CalendarViewModel, token: String, backLabel: String =
                 onScheduled = { closeImport(); model.refresh() })
         }
     }
-    showMediaInfo?.let { art -> AlertDialog(onDismissRequest = { showMediaInfo = null }, title = { Text("Formato e áudio programados") },
+    showMediaInfo?.let { art -> CalendarAlertDialog(onDismissRequest = { showMediaInfo = null }, title = { Text("Formato e áudio programados") },
         text = { Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
             art.media?.variants?.forEach { part ->
                 val audio = when (part.audioMode.wire) { "music" -> "trilha no vídeo"; "original" -> "áudio original"; "muted" -> "vídeo sem áudio"; else -> "foto sem música" }
@@ -279,7 +292,7 @@ fun CalendarGallery(model: CalendarViewModel, token: String, backLabel: String =
                 else "O Reel fica somente na área de Reels; nenhum envio adicional ao Feed foi programado.")
             if (art.media != null) Text("Essas opções correspondem à prévia confirmada antes de Programar. O volume do player muda somente o que você ouve aqui, não o arquivo final.")
             if (art.media?.testOnly == true) Text("Áudio sintético de teste local, sem licença comercial comprovada.")
-        } }, confirmButton = { TextButton(onClick = { showMediaInfo = null }) { Text("Entendi") } }) }
+        } }, confirmButton = { TextButton(colors = calendarTextButtonColors(), onClick = { showMediaInfo = null }) { Text("Entendi") } }) }
     editing?.takeIf { edit -> state.data.items.any { it.id == edit.first.id } }?.let { (art, action) ->
         val current = state.data.items.any { it.id == art.id && it.revision == art.revision }
         if (action in setOf("destination", "automatic")) CalendarDeliveryDialog(art, action, token,
@@ -297,13 +310,14 @@ fun CalendarGallery(model: CalendarViewModel, token: String, backLabel: String =
                 model.edit(art, action, caption, date, time, onSuccess = { editing = null })
             })
     }
-    showStatus?.takeIf { shown -> state.data.items.any { it.id == shown.id } }?.let { art -> AlertDialog(onDismissRequest = { showStatus = null }, title = { Text(if (state.fresh) art.statusLabel else "Atualização necessária") },
-        text = { Text(if (art.localSimulation) "Simulação local da programação: ${art.statusLabel}. Nenhuma operação real no Instagram foi executada."
+    showStatus?.let { shown -> state.data.items.firstOrNull { it.id == shown.id } }?.let { art -> CalendarAlertDialog(onDismissRequest = { showStatus = null }, title = { Text(if (state.fresh) art.statusLabel else "Atualização necessária") },
+        text = { Text(if (!state.fresh) "Último estado consultado: ${art.statusLabel}. Não foi possível confirmar a situação atual. Feche esta mensagem e toque em Atualizar."
+            else if (art.localSimulation) "Simulação local da programação: ${art.statusLabel}. Nenhuma operação real no Instagram foi executada."
             else if (art.status == "scheduled" && state.fresh) "O envio está programado para ${art.date}, às ${art.time} (Brasília). A conexão será conferida novamente na hora. Não é preciso manter o app aberto."
             else if (art.status == "published") "O Instagram confirmou esta publicação. Excluir um agendamento não apaga uma publicação já feita."
-            else if (art.status in setOf("confirming", "dispatching")) "O envio já começou. Aguarde a confirmação. A IA4Tube não repetirá a publicação automaticamente se o resultado estiver incerto."
+            else if (art.status in setOf("confirming", "dispatching")) "O envio já começou. Aguarde a confirmação. A iA4tube não repetirá a publicação automaticamente se o resultado estiver incerto."
             else "${art.statusLabel}. Confira a conexão e a programação. Horários vencidos precisam ser reagendados; não são publicados em lote ao voltar.") },
-        confirmButton = { TextButton(onClick = { showStatus = null }) { Text("Entendi") } }) }
+        confirmButton = { TextButton(colors = calendarTextButtonColors(), onClick = { showStatus = null }) { Text("Entendi") } }) }
 }
 
 internal fun destinationLabel(value: String): String = when (value) {
@@ -316,17 +330,20 @@ private fun CalendarDeliveryDialog(art: ScheduledArt, action: String, token: Str
     onDestination: (String) -> Unit, onAutomatic: (Boolean) -> Unit) {
     var selected by remember(art.id, art.revision) { mutableStateOf(art.destination) }
     var preview by remember { mutableStateOf(if (art.destination == "story") "story" else "feed") }
-    AlertDialog(onDismissRequest = onDismiss,
+    val appearance = calendarAppearance(MaterialTheme.colorScheme)
+    CalendarAlertDialog(onDismissRequest = onDismiss,
         title = { Text(if (action == "destination") "Formato da publicação" else if (art.automatic) "Desligar esta publicação?" else "Ativar esta publicação?") },
         text = { Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             if (action == "destination") {
                 for (target in listOf("feed", "story", "both")) Row(verticalAlignment = Alignment.CenterVertically) {
                     RadioButton(selected = selected == target, onClick = { selected = target; preview = if (target == "story") "story" else "feed" },
+                        colors = RadioButtonDefaults.colors(selectedColor = appearance.action, unselectedColor = appearance.secondary,
+                            disabledSelectedColor = appearance.secondary, disabledUnselectedColor = appearance.secondary),
                         enabled = !busy && (target == "feed" || storyEligible))
                     Text(destinationLabel(target) + if (target == "both") " — 2 envios" else "")
                 }
                 if (!storyEligible) Text("A publicação de Story requer uma conta Business elegível.")
-                if (selected == "both") Row { for (target in listOf("feed", "story")) TextButton(onClick = { preview = target }) { Text("Ver ${destinationLabel(target)}") } }
+                if (selected == "both") Row { for (target in listOf("feed", "story")) TextButton(colors = calendarTextButtonColors(), onClick = { preview = target }) { Text("Ver ${destinationLabel(target)}") } }
                 if (art.generatedVideo != null) {
                     Text("O vídeo pronto será usado como Reel no Feed e como vídeo no Story. A legenda acompanha o Reel.")
                 } else {
@@ -339,11 +356,11 @@ private fun CalendarDeliveryDialog(art: ScheduledArt, action: String, token: Str
                 else "Esta arte será enviada a ${destinationLabel(art.destination)} em ${art.date}, às ${art.time} (Brasília), mesmo com o app fechado. Conexão e disponibilidade serão conferidas na hora.")
             if (action == "automatic" && !art.automatic && !canEnable) Text("Conecte o Instagram e confira se a programação geral está ativada antes de ligar esta arte.")
             if (!canSave && !busy) Text("Volte e atualize a galeria antes de confirmar.")
-            error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
+            error?.let { Text(it, color = appearance.error) }
         } },
-        confirmButton = { TextButton(enabled = !busy && canSave && (action == "destination" || art.automatic || canEnable),
+        confirmButton = { TextButton(colors = calendarTextButtonColors(), enabled = !busy && canSave && (action == "destination" || art.automatic || canEnable),
             onClick = { if (action == "destination") onDestination(selected) else onAutomatic(!art.automatic) }) { Text(if (busy) "Salvando…" else if (action == "destination") "Salvar formato" else "Confirmar") } },
-        dismissButton = { TextButton(onClick = onDismiss, enabled = !busy) { Text("Voltar") } })
+        dismissButton = { TextButton(colors = calendarTextButtonColors(), onClick = onDismiss, enabled = !busy) { Text("Voltar") } })
 }
 
 @Composable
@@ -363,25 +380,27 @@ private fun CalendarEditDialog(art: ScheduledArt, action: String, busy: Boolean,
     var caption by remember(art.id, art.revision) { mutableStateOf(art.caption) }
     var date by remember { mutableStateOf(LocalDate.parse(art.date)) }
     var time by remember { mutableStateOf(LocalTime.parse(art.time)) }
-    AlertDialog(onDismissRequest = onDismiss, title = { Text(when (action) { "caption" -> "Editar legenda"; "schedule" -> "Mudar data e horário"; else -> "Excluir agendamento?" }) },
+    val appearance = calendarAppearance(MaterialTheme.colorScheme)
+    CalendarAlertDialog(onDismissRequest = onDismiss, title = { Text(when (action) { "caption" -> "Editar legenda"; "schedule" -> "Mudar data e horário"; else -> "Excluir agendamento?" }) },
         text = { Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
             when (action) {
                 "caption" -> { OutlinedTextField(value = caption, onValueChange = { if (it.length <= 2200) caption = it },
+                    colors = calendarTextFieldColors(),
                     label = { Text("Legenda do Instagram") }, minLines = 4, maxLines = 9, enabled = !busy)
                     Text("${caption.length}/2200 · Não altera o texto desenhado na imagem.") }
                 "schedule" -> {
-                    OutlinedButton(enabled = !busy, onClick = { DatePickerDialog(context, { _, y, m, d -> date = LocalDate.of(y, m + 1, d) }, date.year, date.monthValue - 1, date.dayOfMonth).show() }) { Text(date.format(DateTimeFormatter.ofPattern("dd/MM/yyyy"))) }
-                    OutlinedButton(enabled = !busy, onClick = { TimePickerDialog(context, { _, h, m -> time = LocalTime.of(h, m) }, time.hour, time.minute, true).show() }) { Text(time.toString()) }
+                    OutlinedButton(colors = calendarOutlinedButtonColors(), enabled = !busy, onClick = { DatePickerDialog(context, { _, y, m, d -> date = LocalDate.of(y, m + 1, d) }, date.year, date.monthValue - 1, date.dayOfMonth).show() }) { Text(date.format(DateTimeFormatter.ofPattern("dd/MM/yyyy"))) }
+                    OutlinedButton(colors = calendarOutlinedButtonColors(), enabled = !busy, onClick = { TimePickerDialog(context, { _, h, m -> time = LocalTime.of(h, m) }, time.hour, time.minute, true).show() }) { Text(time.toString()) }
                     Text("Horário de Brasília. A arte será movida, sem criar outra publicação.")
                 }
                 else -> Text("A arte será retirada do calendário e não será enviada. A imagem original e o pedido continuam disponíveis. Outras artes e publicações já feitas não serão apagadas.")
             }
             if (busy) Text("Salvando… Aguarde a confirmação.")
-            error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
+            error?.let { Text(it, color = appearance.error) }
         } },
-        confirmButton = { TextButton(onClick = { onSave(caption, date.toString(), time.toString()) },
+        confirmButton = { TextButton(colors = calendarTextButtonColors(), onClick = { onSave(caption, date.toString(), time.toString()) },
             enabled = !busy && canSave && (action != "caption" || caption.isNotBlank())) {
                 Text(if (busy) "Salvando…" else if (action == "cancel") "Excluir agendamento" else "Salvar")
             } },
-        dismissButton = { TextButton(onClick = onDismiss, enabled = !busy) { Text("Voltar") } })
+        dismissButton = { TextButton(colors = calendarTextButtonColors(), onClick = onDismiss, enabled = !busy) { Text("Voltar") } })
 }

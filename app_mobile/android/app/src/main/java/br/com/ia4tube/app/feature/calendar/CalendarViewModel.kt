@@ -40,7 +40,7 @@ class CalendarViewModel(private val tokenProvider: () -> String, private val tok
                         "A programação mudou. Atualize antes de editar novamente."
                     else if (mutation)
                         "Não foi possível confirmar a alteração. Ela pode ter sido salva. Volte à galeria e toque em Atualizar; não salve novamente antes de conferir."
-                    else "Não foi possível confirmar a programação. Atualize para conferir; não repita o envio.") }
+                    else "Não conseguimos atualizar o status agora. Isso não confirma falha na publicação. Toque em Atualizar para conferir.") }
             }
         }
     }

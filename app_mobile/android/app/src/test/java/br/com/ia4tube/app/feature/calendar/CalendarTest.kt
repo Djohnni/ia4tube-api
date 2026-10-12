@@ -29,11 +29,13 @@ class CalendarTest {
     private fun snapshot() = CalendarSnapshot(true, true, 2, true, "synthetic", false, listOf(art()), art())
     private class Fake(var snapshot: CalendarSnapshot) : CalendarGateway {
         var reads = 0; var edits = 0; var changes = 0; var failure: Exception? = null; var pending: CompletableDeferred<Unit>? = null
+        var editFailure: Exception? = null
         var pendingEdit: CompletableDeferred<Unit>? = null
         override suspend fun list(): CalendarSnapshot { reads++; pending?.await(); failure?.let { throw it }; return snapshot }
         override suspend fun preferences(enabled: Boolean, revision: Long): CalendarSnapshot { changes++; return snapshot.copy(automatic = enabled) }
         override suspend fun edit(item: ScheduledArt, action: String, caption: String, date: String, time: String): CalendarSnapshot {
             edits++; pendingEdit?.await()
+            editFailure?.let { throw it }
             return snapshot.copy(items = if (action == "cancel") emptyList() else snapshot.items.map { it.copy(caption = caption, revision = it.revision + 1) })
         }
     }
@@ -111,6 +113,37 @@ class CalendarTest {
         model.refresh(); advanceUntilIdle(); fake.failure = CalendarFailure(503); model.refresh(); advanceUntilIdle()
         assertFalse(model.uiState.value.fresh); assertNotNull(model.uiState.value.error)
         model.edit(art(), "cancel"); advanceUntilIdle(); assertEquals(0, fake.edits); model.dispose()
+    }
+    @Test fun failedReadExplainsStatusLookupAndRecoversPublishedStateWithoutWriting() = runTest(dispatcher) {
+        for (failure in listOf(CalendarFailure(503), java.net.SocketTimeoutException(), IllegalArgumentException())) {
+            val fake = Fake(snapshot()); val model = CalendarViewModel({ "synthetic" }, "synthetic", fake)
+            model.refresh(); advanceUntilIdle()
+            val previous = model.uiState.value.data
+            fake.failure = failure
+            model.refresh(); advanceUntilIdle()
+            assertEquals("Não conseguimos atualizar o status agora. Isso não confirma falha na publicação. Toque em Atualizar para conferir.", model.uiState.value.error)
+            assertEquals(previous, model.uiState.value.data)
+            assertFalse(model.uiState.value.fresh); assertFalse(model.uiState.value.busy)
+            model.edit(art(), "cancel"); advanceUntilIdle()
+            assertEquals(0, fake.edits); assertEquals(0, fake.changes)
+            fake.failure = null
+            fake.snapshot = previous.copy(items = listOf(art().copy(status = "published", statusLabel = "Publicada", editable = false)), next = null)
+            model.refresh(); advanceUntilIdle()
+            assertEquals("published", model.uiState.value.data.items.single().status)
+            assertTrue(model.uiState.value.fresh); assertNull(model.uiState.value.error)
+            assertEquals(3, fake.reads); assertEquals(0, fake.edits); assertEquals(0, fake.changes)
+            model.dispose()
+        }
+    }
+    @Test fun uncertainMutationRetainsItsWarningAndCannotBeRepeatedBeforeRead() = runTest(dispatcher) {
+        val fake = Fake(snapshot()); val model = CalendarViewModel({ "synthetic" }, "synthetic", fake)
+        model.refresh(); advanceUntilIdle()
+        fake.editFailure = java.net.SocketTimeoutException()
+        model.edit(art(), "caption", "Nova legenda"); advanceUntilIdle()
+        assertEquals("Não foi possível confirmar a alteração. Ela pode ter sido salva. Volte à galeria e toque em Atualizar; não salve novamente antes de conferir.", model.uiState.value.error)
+        assertFalse(model.uiState.value.fresh)
+        model.edit(art(), "caption", "Nova legenda"); advanceUntilIdle()
+        assertEquals(1, fake.edits); assertEquals(1, fake.reads); model.dispose()
     }
     @Test fun sessionChangeDropsLateResponseAndPreventsOwnerLeak() = runTest(dispatcher) {
         var token = "owner-a"; val fake = Fake(snapshot()); fake.pending = CompletableDeferred()

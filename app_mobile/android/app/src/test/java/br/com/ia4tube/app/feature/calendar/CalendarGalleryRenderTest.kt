@@ -110,19 +110,24 @@ class CalendarGalleryRenderTest {
                 sheet.layout(0, 0, 822, 1782)
             }
             val sheetNodes = texts(sheet)
+            val titleProof = Bitmap.createBitmap(822, 1782, Bitmap.Config.ARGB_8888).also { sheet.draw(Canvas(it)) }
+            val titleProofFile = File("build/reports/calendar-music-title-diagnostic.png")
+            titleProofFile.parentFile?.mkdirs()
+            titleProofFile.outputStream().use { titleProof.compress(Bitmap.CompressFormat.PNG, 100, it) }
+            titleProof.recycle()
             val panel = requireNotNull(sheetNodes.firstOrNull { it.config.getOrNull(SemanticsProperties.PaneTitle) != null }) {
                 "Modal sheet must expose its panel bounds independently of the full-window scrim"
             }
             val bounds = panel.boundsInRoot
             assertTrue("Music panel must leave the underlying gallery visible above it", bounds.top > 0f)
             assertTrue("Music panel must use at most 80% of the viewport", bounds.height <= sheet.height * 0.8f + 2f)
-            assertEquals("Compact sheet stays anchored to the bottom, not floating above it", sheet.height.toFloat(), bounds.bottom, 2f)
+            assertEquals("Compact sheet stays anchored to the bottom, not floating above it; panel=$bounds; roots=${owners(sheet).map { it.rootSemanticsNode.boundsInRoot }}; decor=${sheet.width}x${sheet.height}; metrics=${activity.resources.displayMetrics.widthPixels}x${activity.resources.displayMetrics.heightPixels}", sheet.height.toFloat(), bounds.bottom, 2f)
             val title = requireNotNull(sheetNodes.firstOrNull {
                 label(it) == "Escolher música" && it.config.getOrNull(SemanticsActions.GetTextLayoutResult) != null
             }) { "Music panel must contain the actual title text layout" }
             val titleLayouts = mutableListOf<TextLayoutResult>()
             assertTrue(title.config[SemanticsActions.GetTextLayoutResult].action!!.invoke(titleLayouts))
-            assertTrue("Title must use white text on the dark panel", titleLayouts.isNotEmpty() &&
+            assertTrue("Title must use white text on the dark panel; layoutColors=${titleLayouts.map { it.layoutInput.style.color }}", titleLayouts.isNotEmpty() &&
                 titleLayouts.all { it.layoutInput.style.color == Color.White })
             // Capture the dialog while it is shown; a gallery screenshot after
             // dismiss would hide precisely the panel/contrast regression.

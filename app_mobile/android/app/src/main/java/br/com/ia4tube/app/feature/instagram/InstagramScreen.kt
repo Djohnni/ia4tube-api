@@ -62,6 +62,14 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import br.com.ia4tube.app.feature.calendar.*
 
+internal fun refreshInstagramAndCalendar(viewModel: InstagramViewModel, calendarModel: CalendarViewModel,
+    readingImage: Boolean) {
+    // Read current state at the click, including a second click before recomposition.
+    if (readingImage || viewModel.uiState.value.busy || calendarModel.uiState.value.busy) return
+    viewModel.refresh()
+    calendarModel.refresh()
+}
+
 @Composable
 fun InstagramScreen(viewModel: InstagramViewModel, onBack: () -> Unit, tokenProvider: () -> String = { "" }) {
     val calendarModel = rememberCalendarModel(tokenProvider)
@@ -161,7 +169,8 @@ fun InstagramScreen(viewModel: InstagramViewModel, onBack: () -> Unit, tokenProv
                 }
             }
             Text("Escolha uma imagem JPEG, confira a legenda e envie para sua conta profissional.")
-            OutlinedButton(onClick = viewModel::refresh, enabled = !state.busy && !readingImage,
+            OutlinedButton(onClick = { refreshInstagramAndCalendar(viewModel, calendarModel, readingImage) },
+                enabled = !state.busy && !calendar.busy && !readingImage,
                 colors = outlinedButtonColors, border = actionBorder) {
                 Text(if (state.hasUnresolvedIntent) "Consultar resultado e histórico" else "Atualizar")
             }

@@ -620,6 +620,7 @@ fun MonthlyPlanningScreen(
 
                     MonthlyPlanningStep.Processing -> MonthlyPlanningProcessingStep(
                         planning = state.planning,
+                        awaitingConfirmation = state.loading,
                         marketingVideo = state.marketingVideo,
                         marketingVideoFinished = state.marketingVideoFinished,
                         onMarketingVideoStarted = viewModel::onMarketingVideoStarted,
@@ -2435,6 +2436,7 @@ private fun parsePlanningCreatedAt(createdAt: String): Date? {
 @Composable
 private fun MonthlyPlanningProcessingStep(
     planning: MonthlyPlanningSummary,
+    awaitingConfirmation: Boolean,
     marketingVideo: MarketingVideo?,
     marketingVideoFinished: Boolean,
     onMarketingVideoStarted: () -> Unit,
@@ -2462,13 +2464,7 @@ private fun MonthlyPlanningProcessingStep(
             )
         }
         if (!processingStatus.canOpenResults) {
-            EstimatedCreationProgressCard(
-                progressKey = "monthly-planning-submit",
-                running = true,
-                title = processingStatus.title,
-                subtitle = processingStatus.message,
-                explanation = ""
-            )
+            MonthlyPlanningWaitingCard(awaitingConfirmation = awaitingConfirmation)
         } else {
             Card(
                 modifier = Modifier.fillMaxWidth(),
