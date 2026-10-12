@@ -1,6 +1,30 @@
 "use strict";
 (() => {
   const $ = id => document.getElementById(id);
+  function showAndroidAppReturn() {
+    // This reference is UI context only, never proof of a successful authorization.
+    // The app receives no OAuth data and checks the connection with its own session.
+    try {
+      const url = new URL(location.href);
+      const references = url.searchParams.getAll("return_ref");
+      const agent = navigator.userAgent || "";
+      if (url.origin !== "https://ia4tube-api.onrender.com" || url.pathname !== "/reviewer" ||
+          !["", "#_", "#_=_"].includes(url.hash) || url.search.length > 64 || url.username || url.password ||
+          [...url.searchParams.keys()].some(key => key !== "return_ref") ||
+          references.length !== 1 || !/^[A-Za-z0-9_-]{32}$/.test(references[0]) ||
+          !/\bAndroid\b/i.test(agent)) return;
+      const chrome = /\bChrome\/[0-9]+/.test(agent);
+      $("oauthOpenApp").href = chrome
+        ? "intent://instagram/oauth-return#Intent;scheme=ia4tube;package=com.ia4tube.app;end"
+        : "ia4tube://instagram/oauth-return";
+      $("oauthAppReturnAlternative").hidden = !chrome;
+      $("oauthAppReturn").hidden = false;
+      $("status").textContent = "Continue no aplicativo ou entre abaixo para usar o painel web.";
+    } catch {
+      // Invalid browser context leaves the existing web flow untouched.
+    }
+  }
+  showAndroidAppReturn();
   const sessionKey = "ia4tube.production.session.v2";
   let intentKey = null;
   let token = sessionStorage.getItem(sessionKey), connection = null, media = [], intent = null,
