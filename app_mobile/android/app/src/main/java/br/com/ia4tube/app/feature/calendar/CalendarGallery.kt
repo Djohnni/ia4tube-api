@@ -110,7 +110,11 @@ fun ScheduledArtImage(item: ScheduledArt, token: String, modifier: Modifier = Mo
 @Composable
 fun CalendarAutomationSettings(model: CalendarViewModel) {
     val state by model.uiState.collectAsState()
-    var confirm by remember { mutableStateOf(false) }
+    var confirmation by remember(model) { mutableStateOf<CalendarAutomaticConfirmation?>(null) }
+    val currentTarget = state.data.automaticConfirmationTarget()
+    LaunchedEffect(state.fresh, currentTarget) {
+        if (!state.fresh || confirmation != currentTarget) confirmation = null
+    }
     val appearance = calendarAppearance(MaterialTheme.colorScheme)
     val cardColors = CardDefaults.cardColors(containerColor = appearance.surface, contentColor = appearance.content)
     if (!state.data.enabled) {
@@ -126,20 +130,41 @@ fun CalendarAutomationSettings(model: CalendarViewModel) {
     }
     Card(colors = cardColors) { Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Text("Publicação pelo calendário", fontWeight = FontWeight.Bold)
-        Text(if (state.data.automatic) "A programação começa ativada para novos pedidos com Instagram conectado. Você pode desligar somente uma arte, mudar o destino, a legenda, a data e o horário no calendário."
-            else "Ative uma vez para programar automaticamente as artes dos próximos pedidos.")
-        Text("Conta: ${state.data.username?.let { "@$it" } ?: "conecte seu Instagram profissional"}")
-        OutlinedButton(onClick = { if (state.data.automatic) model.preferences(false) else confirm = true },
-            colors = calendarOutlinedButtonColors(),
-            enabled = state.fresh && !state.busy && (state.data.connected || state.data.automatic)) {
-            Text(if (state.data.automatic) "Pausar programação automática" else "Ativar para novos pedidos")
+        Text(when {
+            state.data.requiresConsentRenewal -> "O Instagram está conectado, mas a programação precisa de uma nova confirmação. Confirme a conta abaixo antes de enviar seu pedido."
+            state.data.automaticAuthorized -> "A programação está ativada para novos pedidos nesta conta. Você pode desligar somente uma arte, mudar o destino, a legenda, a data e o horário no calendário."
+            state.data.automatic && !state.data.connected -> "Conecte seu Instagram profissional para conferir a programação dos próximos pedidos."
+            else -> "Ative uma vez para programar automaticamente as artes dos próximos pedidos."
+        })
+        Text("Conta: ${state.data.username?.let { "@${it.removePrefix("@")}" } ?: "conecte seu Instagram profissional"}")
+        if (!state.fresh || (state.data.connected && currentTarget == null)) {
+            OutlinedButton(onClick = model::refresh, colors = calendarOutlinedButtonColors(), enabled = !state.busy) {
+                Text(if (state.busy) "Consultando a programação…" else "Atualizar programação")
+            }
+        } else {
+            OutlinedButton(onClick = {
+                if (state.data.automatic && !state.data.requiresConsentRenewal) model.preferences(false)
+                else confirmation = currentTarget
+            }, colors = calendarOutlinedButtonColors(),
+                enabled = !state.busy && (currentTarget != null || state.data.automatic)) {
+                Text(when {
+                    state.data.requiresConsentRenewal -> "Confirmar novamente"
+                    state.data.automatic -> "Pausar programação automática"
+                    else -> "Ativar para novos pedidos"
+                })
+            }
         }
         state.error?.let { Text(it, color = appearance.error) }
     } }
-    if (confirm) CalendarAlertDialog(onDismissRequest = { confirm = false }, title = { Text("Ativar publicação automática?") },
-        text = { Text("As artes dos próximos pedidos serão publicadas em @${state.data.username} nas datas e horários do calendário, mesmo com o celular desligado. A legenda final será usada como está, salvo se você a editar. Artes antigas não serão publicadas automaticamente. Você pode pausar a programação antes do início de um envio.") },
-        confirmButton = { TextButton(colors = calendarTextButtonColors(), onClick = { confirm = false; model.preferences(true) }) { Text("Ativar") } },
-        dismissButton = { TextButton(colors = calendarTextButtonColors(), onClick = { confirm = false }) { Text("Voltar") } })
+    confirmation?.let { target ->
+        CalendarAlertDialog(onDismissRequest = { confirmation = null },
+            title = { Text(if (target.renewal) "Confirmar novamente a programação?" else "Ativar publicação automática?") },
+            text = { Text("As artes dos próximos pedidos serão publicadas em @${target.username.removePrefix("@")} nas datas e horários do calendário, mesmo com o celular desligado. A legenda final será usada como está, salvo se você a editar. Artes antigas não serão publicadas automaticamente. Esta confirmação não envia seu pedido; depois de confirmar, toque em Enviar na revisão.") },
+            confirmButton = { TextButton(colors = calendarTextButtonColors(),
+                enabled = state.fresh && !state.busy && currentTarget == target,
+                onClick = { confirmation = null; model.confirmAutomatic(target) }) { Text("Confirmar") } },
+            dismissButton = { TextButton(colors = calendarTextButtonColors(), onClick = { confirmation = null }) { Text("Voltar") } })
+    }
 }
 
 @Composable
@@ -297,7 +322,7 @@ fun CalendarGallery(model: CalendarViewModel, token: String, backLabel: String =
         val current = state.data.items.any { it.id == art.id && it.revision == art.revision }
         if (action in setOf("destination", "automatic")) CalendarDeliveryDialog(art, action, token,
             busy = state.busy, canSave = state.fresh && current, storyEligible = state.data.storyEligible,
-            canEnable = state.data.connected && state.data.automatic, error = state.error,
+            canEnable = state.data.automaticAuthorized, error = state.error,
             onDismiss = { if (!state.busy) editing = null },
             onDestination = { model.destination(art, it) { editing = null } },
             onAutomatic = { model.automatic(art, it) { editing = null } })

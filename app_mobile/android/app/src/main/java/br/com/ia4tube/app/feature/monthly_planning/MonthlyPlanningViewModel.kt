@@ -22,6 +22,7 @@ import br.com.ia4tube.app.data.models.MonthlyPlanningRequestResponse
 import br.com.ia4tube.app.data.models.MonthlyPlanningSummaryDto
 import br.com.ia4tube.app.data.models.UploadFile
 import br.com.ia4tube.app.data.repository.AuthRepository
+import br.com.ia4tube.app.feature.calendar.CalendarUiState
 import java.io.ByteArrayOutputStream
 import java.text.Normalizer
 import java.util.Locale
@@ -49,6 +50,8 @@ private const val MAX_PHOTO_EDIT_LEVEL = 3
 const val MONTHLY_PLANNING_INITIAL_VISIBLE_PHOTOS = 4
 const val MONTHLY_PLANNING_MAX_ARTS_PER_REQUEST = 20
 const val MONTHLY_PLANNING_EMPTY_REQUEST_MESSAGE = "Preencha um objetivo, uma escrita ou adicione uma imagem para criar sua arte."
+internal const val MONTHLY_PLANNING_CALENDAR_CONSENT_MESSAGE =
+    "Sua conexão com o Instagram mudou. Confirme novamente a publicação automática antes de enviar. Seu pedido preenchido foi mantido."
 const val PRODUCT_DISCOVERY_EMPTY_MESSAGE =
     "Não encontramos produtos claramente identificáveis nesta foto. Tente fotografar mais perto."
 const val PRODUCT_DISCOVERY_OFFLINE_MESSAGE =
@@ -652,6 +655,7 @@ class MonthlyPlanningViewModel(
     private var planningProcessingPollingJob: Job? = null
     private var productDiscoveryJob: Job? = null
     private var productDiscoveryProgressJob: Job? = null
+    private var planningSubmissionInFlight = false
 
     init {
         refreshCompanyProfile()
@@ -1012,15 +1016,43 @@ class MonthlyPlanningViewModel(
         if (destination !in setOf("feed", "story", "both")) return
         _uiState.update { it.copy(instagramDestination = destination) }
     }
-    fun setCalendarPreference(enabled: Boolean, revision: Long) {
-        _uiState.update { it.copy(calendarAutomatic = enabled, calendarPreferenceRevision = revision) }
+    fun calendarUnavailable() {
+        _uiState.update { it.copy(
+            billingRequired = false,
+            uploadError = "Aguarde a conferência da programação automática e tente novamente."
+        ) }
     }
-    fun calendarUnavailable() { _uiState.update { it.copy(uploadError = "Aguarde a conferência da programação automática e tente novamente.") } }
-    fun confirmPlanning() {
-        confirmPlanningInternal()
+    fun confirmPlanning(
+        calendarState: CalendarUiState,
+        previewMode: Boolean = false,
+        onCalendarConsentChanged: () -> Unit = {}
+    ) {
+        if (planningSubmissionInFlight || _uiState.value.loading) return
+        if (!previewMode && (calendarState.busy || !calendarState.fresh)) {
+            calendarUnavailable()
+            return
+        }
+        if (!previewMode && calendarState.data.requiresConsentRenewal) {
+            _uiState.update { it.copy(
+                billingRequired = false,
+                uploadError = MONTHLY_PLANNING_CALENDAR_CONSENT_MESSAGE,
+                successMessage = null
+            ) }
+            return
+        }
+        confirmPlanningInternal(
+            calendarAutomatic = !previewMode && calendarState.data.automaticAuthorized,
+            calendarPreferenceRevision = if (previewMode) 0 else calendarState.data.preferenceRevision,
+            onCalendarConsentChanged = onCalendarConsentChanged
+        )
     }
 
-    private fun confirmPlanningInternal() {
+    private fun confirmPlanningInternal(
+        calendarAutomatic: Boolean,
+        calendarPreferenceRevision: Long,
+        onCalendarConsentChanged: () -> Unit
+    ) {
+        if (planningSubmissionInFlight || _uiState.value.loading) return
         val current = _uiState.value
         val activePhotos = current.activePhotos
         if (activePhotos.isEmpty()) {
@@ -1062,58 +1094,72 @@ class MonthlyPlanningViewModel(
 
         saveCompanyProfile(uiProfile)
 
-        viewModelScope.launch {
-            _uiState.update {
-                it.copy(
-                    step = MonthlyPlanningStep.Processing,
-                    companyProfile = uiProfile,
-                    loading = true,
-                    uploadError = null,
-                    successMessage = null,
-                    marketingVideo = null,
-                    marketingVideoFinished = false
-                )
-            }
-
-            val request = MonthlyPlanningRequest(
-                quantidadeReservada = requestedReservedArts,
-                nomeEmpresa = nomeEmpresa,
-                ramo = ramo,
-                whatsapp = whatsappContato,
-                instagram = uiProfile.instagram.trim(),
-                caracteristicasEmpresa = uiProfile.caracteristicasEmpresa,
-                informacoesEmpresa = uiProfile.informacoesEmpresa.trim(),
-                logo = uiProfile.logoFile,
-                fotos = activePhotos.map { it.toRequestInput() },
-                calendarAutomatic = current.calendarAutomatic,
-                calendarPreferenceRevision = current.calendarPreferenceRevision,
-                instagramDestination = current.instagramDestination
+        // Claim the submission before scheduling its coroutine; rapid clicks must not create two requests.
+        planningSubmissionInFlight = true
+        _uiState.update {
+            it.copy(
+                step = MonthlyPlanningStep.Processing,
+                companyProfile = uiProfile,
+                loading = true,
+                calendarAutomatic = calendarAutomatic,
+                calendarPreferenceRevision = calendarPreferenceRevision,
+                uploadError = null,
+                successMessage = null,
+                marketingVideo = null,
+                marketingVideoFinished = false
             )
+        }
+        viewModelScope.launch {
+            try {
+                val request = MonthlyPlanningRequest(
+                    quantidadeReservada = requestedReservedArts,
+                    nomeEmpresa = nomeEmpresa,
+                    ramo = ramo,
+                    whatsapp = whatsappContato,
+                    instagram = uiProfile.instagram.trim(),
+                    caracteristicasEmpresa = uiProfile.caracteristicasEmpresa,
+                    informacoesEmpresa = uiProfile.informacoesEmpresa.trim(),
+                    logo = uiProfile.logoFile,
+                    fotos = activePhotos.map { it.toRequestInput() },
+                    calendarAutomatic = calendarAutomatic,
+                    calendarPreferenceRevision = calendarPreferenceRevision,
+                    instagramDestination = current.instagramDestination
+                )
 
-            when (val result = repository.solicitarPlanejamentoMensal(request)) {
-                is ApiResult.Success -> handlePlanningCreated(result.value)
-                is ApiResult.Failure -> _uiState.update {
-                    val billingRequired = result.isBillingRequired()
-                    if (billingRequired) {
-                        MobileAnalytics.track(
-                            "mobile_sem_saldo",
-                            tela = "planejamento_mensal",
-                            produto = "planejamento_mensal",
-                            payload = mapOf("quantidade" to current.requiredStandaloneArts.toString()),
-                            flushNow = true
-                        )
+                when (val result = repository.solicitarPlanejamentoMensal(request)) {
+                    is ApiResult.Success -> handlePlanningCreated(result.value)
+                    is ApiResult.Failure -> {
+                        val billingRequired = result.isBillingRequired()
+                        val consentChanged = result.statusCode == 409 && result.code == "calendar_consent_changed"
+                        if (billingRequired) {
+                            MobileAnalytics.track(
+                                "mobile_sem_saldo",
+                                tela = "planejamento_mensal",
+                                produto = "planejamento_mensal",
+                                payload = mapOf("quantidade" to current.requiredStandaloneArts.toString()),
+                                flushNow = true
+                            )
+                        }
+                        _uiState.update { it.copy(
+                            step = MonthlyPlanningStep.Confirmation,
+                            loading = false,
+                            billingRequired = billingRequired,
+                            billingPix = if (billingRequired) null else it.billingPix,
+                            billingPixError = null,
+                            billingPixLoading = false,
+                            uploadError = when {
+                                billingRequired -> null
+                                consentChanged -> MONTHLY_PLANNING_CALENDAR_CONSENT_MESSAGE
+                                else -> result.message
+                            },
+                            successMessage = null
+                        ) }
+                        // Observe the new consent state once; never repeat this POST or discard the draft.
+                        if (consentChanged) onCalendarConsentChanged()
                     }
-                    it.copy(
-                        step = MonthlyPlanningStep.Confirmation,
-                        loading = false,
-                        billingRequired = billingRequired,
-                        billingPix = if (billingRequired) null else it.billingPix,
-                        billingPixError = null,
-                        billingPixLoading = false,
-                        uploadError = if (billingRequired) null else result.message,
-                        successMessage = null
-                    )
                 }
+            } finally {
+                planningSubmissionInFlight = false
             }
         }
     }

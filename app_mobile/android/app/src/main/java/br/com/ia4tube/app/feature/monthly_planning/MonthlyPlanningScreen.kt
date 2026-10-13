@@ -138,6 +138,22 @@ fun MonthlyPlanningScreen(
     var showImport by remember(previewToken) { mutableStateOf(false) }
     var cancelImported by remember(previewToken) { mutableStateOf<ScheduledArt?>(null) }
     val state by viewModel.uiState.collectAsState()
+    val submitPlanning: () -> Unit = {
+        val currentToken = tokenProvider()
+        if (currentToken != previewToken) {
+            viewModel.calendarUnavailable()
+        } else {
+            // Both the review and payment retry use the live snapshot, never a captured preference.
+            val currentCalendar = calendarModel.uiState.value
+            val previewMode = currentToken.isBlank()
+            viewModel.confirmPlanning(currentCalendar, previewMode) {
+                if (currentToken.isNotBlank() && tokenProvider() == currentToken) calendarModel.invalidateConsent()
+            }
+            if (!previewMode && !currentCalendar.fresh && !currentCalendar.busy && !viewModel.uiState.value.loading) {
+                calendarModel.refresh()
+            }
+        }
+    }
     val context = LocalContext.current
     val fileReader = remember(context) { AndroidFileReader(context) }
     val cameraImageStore = remember(context) { CameraImageStore(context.applicationContext) }
@@ -294,7 +310,7 @@ fun MonthlyPlanningScreen(
                 viewModel.dismissBillingRequired()
                 onOpenPlans()
             },
-            onRetrySubmit = viewModel::confirmPlanning
+            onRetrySubmit = submitPlanning
         )
     }
 
@@ -590,10 +606,13 @@ fun MonthlyPlanningScreen(
 
                     MonthlyPlanningStep.Confirmation -> {
                     Text("Destino: ${br.com.ia4tube.app.feature.calendar.destinationLabel(state.instagramDestination)}" + if (state.instagramDestination == "both") " — dois envios por arte." else "")
-                    if (calendar.data.enabled) Text(if (calendar.data.automatic && calendar.data.connected)
+                    if (calendar.data.enabled) Text(if (calendar.data.requiresConsentRenewal)
+                        "Confirme novamente a publicação automática para esta conexão do Instagram antes de enviar."
+                        else if (calendar.data.automaticAuthorized)
                         "Publicação automática ativa: depois de prontas, estas artes serão enviadas nas datas e horários do calendário. Você pode editar a legenda ou mudar os agendamentos antes do envio."
                         else if (!calendar.data.connected) "Instagram não conectado: as artes serão criadas, mas será necessário conectar e ativá-las antes de publicar."
                         else "Publicação automática pausada. Este pedido não será enviado ao Instagram sozinho.")
+                    if (calendar.data.requiresConsentRenewal) CalendarAutomationSettings(calendarModel)
                     calendar.error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
                     MonthlyPlanningConfirmationStep(
                         state = state,
@@ -609,12 +628,7 @@ fun MonthlyPlanningScreen(
                         onCompanyImportantInfoChange = viewModel::updateCompanyImportantInfo,
                         onSelectLogo = { logoPicker.launch(arrayOf("image/*")) },
                         onRemoveLogo = viewModel::removeCompanyLogo,
-                        onConfirm = {
-                            if (calendar.fresh || tokenProvider().isBlank()) {
-                                viewModel.setCalendarPreference(calendar.data.automatic && calendar.data.connected, calendar.data.preferenceRevision)
-                                viewModel.confirmPlanning()
-                            } else { calendarModel.refresh(); viewModel.calendarUnavailable() }
-                        }
+                        onConfirm = submitPlanning
                     )
                     }
 

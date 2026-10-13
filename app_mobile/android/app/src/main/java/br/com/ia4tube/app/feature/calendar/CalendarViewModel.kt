@@ -51,10 +51,35 @@ class CalendarViewModel(private val tokenProvider: () -> String, private val tok
     }
     fun automatic(item: ScheduledArt, enabled: Boolean, onSuccess: () -> Unit) {
         if (!item.editable || state.value.data.items.none { it.id == item.id && it.revision == item.revision }) return
+        if (enabled && !state.value.data.automaticAuthorized) return
         run(true, onSuccess) { gateway.automatic(item, enabled) }
     }
     fun preferences(enabled: Boolean) { val revision = state.value.data.preferenceRevision
+        // Enabling always needs a captured, explicit account-bound confirmation.
+        if (enabled) return
         run(true) { gateway.preferences(enabled, revision) } }
+    fun confirmAutomatic(target: CalendarAutomaticConfirmation) {
+        if (!valid()) { invalidateSession(); return }
+        val current = state.value
+        if (current.busy || !current.fresh) return
+        if (current.data.automaticConfirmationTarget() != target) {
+            state.update { it.copy(fresh = false,
+                error = "A conta ou a programação mudou. Atualize e confirme novamente.") }
+            return
+        }
+        run(true) {
+            val result = gateway.preferences(true, target.preferenceRevision)
+            // A successful HTTP response alone is not proof of consent for the account displayed.
+            if (!result.automaticAuthorized || result.connectionBinding != target.binding ||
+                result.identity != target.identity || result.username != target.username ||
+                result.preferenceRevision != target.preferenceRevision + 1) throw CalendarFailure(409)
+            result
+        }
+    }
+    fun invalidateConsent() {
+        onPause()
+        refresh()
+    }
     fun edit(item: ScheduledArt, action: String, caption: String = "", date: String = "", time: String = "", onSuccess: () -> Unit = {}) {
         if (!item.editable || state.value.data.items.none { it.id == item.id && it.revision == item.revision }) return
         run(true, onSuccess) { gateway.edit(item, action, caption, date, time) }

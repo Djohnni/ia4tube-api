@@ -47,7 +47,9 @@ class CalendarGalleryRenderTest {
         val item = ScheduledArt("a".repeat(40), "synthetic:1", today, "18:30", "Uma arte pronta para o próximo dia. Você pode editar esta legenda antes da publicação.",
             2, "scheduled", "Programada", true, true, "/synthetic-not-fetched", "empresa_exemplo", System.currentTimeMillis(),
             destination = "both", formatsReady = true)
-        val snapshot = CalendarSnapshot(true, true, 2, true, "empresa_exemplo", true, listOf(item), item)
+        val binding = CalendarBinding("11111111-1111-4111-8111-111111111111", "123456789", 72)
+        val snapshot = CalendarSnapshot(true, true, 2, true, "empresa_exemplo", true, listOf(item), item,
+            preferenceBinding = binding, connectionBinding = binding)
         val gateway = object : CalendarGateway {
             override suspend fun list() = snapshot
             override suspend fun preferences(enabled: Boolean, revision: Long): CalendarSnapshot = error("No mutation in visual check")

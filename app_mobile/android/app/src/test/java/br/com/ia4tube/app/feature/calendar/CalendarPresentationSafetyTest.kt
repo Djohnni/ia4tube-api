@@ -43,11 +43,12 @@ import java.time.ZoneId
 class CalendarPresentationSafetyTest {
     private class Fake : CalendarGateway {
         private val date = LocalDate.now(ZoneId.of("America/Sao_Paulo")).plusDays(1).toString()
+        private val binding = CalendarBinding("11111111-1111-4111-8111-111111111111", "123456789", 72)
         var snapshot = CalendarSnapshot(enabled = true, connected = true, automatic = true,
             username = "synthetic", preferenceRevision = 2, items = listOf(ScheduledArt(
                 "a".repeat(40), "synthetic:1", date, "18:30", "Legenda de teste", 2,
                 "scheduled", "Programada", true, true, null, "synthetic", 0,
-                formatsReady = true)))
+                formatsReady = true)), preferenceBinding = binding, connectionBinding = binding)
         var pending: CompletableDeferred<Unit>? = null
         var failure: Exception? = null
         var reads = 0

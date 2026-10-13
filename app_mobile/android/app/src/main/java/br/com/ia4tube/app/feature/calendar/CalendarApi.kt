@@ -50,8 +50,13 @@ data class CalendarSnapshot(
     val enabled: Boolean = false, val automatic: Boolean = false, val preferenceRevision: Long = 0,
     val connected: Boolean = false, val username: String? = null, val operationsAllowed: Boolean = false,
     val items: List<ScheduledArt> = emptyList(), val next: ScheduledArt? = null,
-    val storyEligible: Boolean = false, val identity: ImportOwner? = null
-)
+    val storyEligible: Boolean = false, val identity: ImportOwner? = null,
+    val preferenceBinding: CalendarBinding? = null, val connectionBinding: CalendarBinding? = null
+) {
+    val automaticAuthorized: Boolean get() = enabled && automatic && connected &&
+        preferenceBinding?.valid == true && connectionBinding?.valid == true && preferenceBinding == connectionBinding
+    val requiresConsentRenewal: Boolean get() = enabled && automatic && connected && !automaticAuthorized
+}
 interface CalendarGateway {
     suspend fun list(): CalendarSnapshot
     suspend fun preferences(enabled: Boolean, revision: Long): CalendarSnapshot
@@ -141,7 +146,8 @@ internal fun parseCalendar(root: JSONObject): CalendarSnapshot {
     val nextId = root.optJSONObject("next")?.getString("id")
     return CalendarSnapshot(true, preferences.getBoolean("enabled"), preferences.getLong("revision"),
         connection != null, connection?.optString("username"), root.getBoolean("operationsAllowed"), items, items.find { it.id == nextId },
-        connection?.optString("accountType") == "business", identity)
+        connection?.optString("accountType") == "business", identity,
+        parseCalendarBinding(preferences.optJSONObject("binding")), parseCalendarBinding(connection?.optJSONObject("binding")))
 }
 
 class CalendarApi internal constructor(private val token: String, private val origin: String,

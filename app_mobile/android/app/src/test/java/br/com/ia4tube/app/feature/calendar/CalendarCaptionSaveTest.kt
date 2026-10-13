@@ -69,8 +69,12 @@ class CalendarCaptionSaveTest {
         private val decor get() = controller.get().window.decorView
 
         init {
-            if (formatted) fake.snapshot = fake.snapshot.copy(connected = true, automatic = true, storyEligible = true,
-                items = fake.snapshot.items.map { it.copy(formatsReady = true, automatic = true) })
+            if (formatted) {
+                val binding = CalendarBinding("11111111-1111-4111-8111-111111111111", "123456789", 72)
+                fake.snapshot = fake.snapshot.copy(connected = true, automatic = true, storyEligible = true,
+                    items = fake.snapshot.items.map { it.copy(formatsReady = true, automatic = true) },
+                    preferenceBinding = binding, connectionBinding = binding)
+            }
             controller.get().setContent {
                 IA4TubeTheme {
                     CompositionLocalProvider(LocalScheduledArtRenderer provides { _, modifier ->
