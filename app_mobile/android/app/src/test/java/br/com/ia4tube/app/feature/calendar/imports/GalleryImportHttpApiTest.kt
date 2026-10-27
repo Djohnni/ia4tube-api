@@ -75,6 +75,31 @@ class GalleryImportHttpApiTest {
         } }
     }
 
+    @Test(timeout = 30_000) fun delayedPutAcknowledgementStillAllowsAuthenticatedResumeWithoutReuploading() = runBlocking {
+        MockWebServer().use { metadata -> MockWebServer().use { storage ->
+            metadata.start(); storage.start()
+            metadata.reply(capabilities(storage.url("/").toString()))
+            metadata.reply(grant(storage.url("/object").toString()))
+            // PUT ignores response bodies; delay the headers past OkHttp's old
+            // 10-second read default to exercise the actual acknowledgement wait.
+            storage.enqueue(MockResponse().setResponseCode(200).setHeadersDelay(11, TimeUnit.SECONDS))
+            metadata.reply(JSONObject().put("ok", true).put("upload", record().put("completedParts", JSONArray().put(
+                JSONObject().put("partNumber", 1).put("sizeBytes", bytes.size).put("sha256", sums.sha256)))))
+            val api = api(metadata); api.capabilities()
+            val grant = api.resolvePart(owner, ImportPartAuthorization(uploadId, 1, bytes.size, authorizationId, now + 60_000), sums)
+            api.putPart(grant, bytes)
+            val resumed = api.resume(owner, uploadId)
+            assertEquals(sums.sha256, resumed.completedParts.single().sha256)
+            assertEquals(1, storage.requestCount)
+            val put = storage.takeRequest(1, TimeUnit.SECONDS)!!
+            assertEquals("PUT", put.method); assertArrayEquals(bytes, put.body.readByteArray())
+            assertNull(put.getHeader("Authorization")); assertNull(put.getHeader("Cookie"))
+            val requests = (1..3).map { metadata.takeRequest(1, TimeUnit.SECONDS)!! }
+            assertEquals("/v1/social/calendar/imports/uploads/$uploadId/resume", requests.last().path)
+            assertTrue(requests.all { it.getHeader("Authorization") == "Bearer $token" })
+        } }
+    }
+
     @Test fun disabledCapabilityDoesNotAuthorizeAnotherAccountOrAnyUpload() = runBlocking {
         MockWebServer().use { metadata ->
             metadata.start(); metadata.reply(JSONObject().put("ok", true).put("enabled", false))
