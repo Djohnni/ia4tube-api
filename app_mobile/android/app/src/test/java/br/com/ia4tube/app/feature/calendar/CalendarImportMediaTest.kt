@@ -5,6 +5,7 @@ import org.json.JSONObject
 import org.junit.Assert.*
 import org.junit.Test
 import java.util.UUID
+import br.com.ia4tube.app.feature.calendar.imports.ImportGoogleStorageTestData
 
 class CalendarImportMediaTest {
     private val id = "a".repeat(40)
@@ -19,6 +20,18 @@ class CalendarImportMediaTest {
         .put("variants", JSONArray().put(part(if (video) "reel" else "feed", video)))
         .put("thumbnail", if (video) part("thumbnail") else JSONObject.NULL)
     private fun reject(action: () -> Unit) { try { action(); fail("must reject") } catch (_: IllegalArgumentException) {} }
+
+    @Test fun optionalGooglePreviewKeepsScheduleBindingAndLegacyFallbackForOlderApps() {
+        val value = preview().put("googleStorage", ImportGoogleStorageTestData.profile())
+        val part = value.getJSONArray("variants").getJSONObject(0)
+        part.put("googleDownload", ImportGoogleStorageTestData.download(System.currentTimeMillis()))
+        val parsed = parseScheduledImportPreview(value, id)
+        assertEquals(id, parsed.scheduleId)
+        assertEquals("ia4tube-api.onrender.com", parsed.variants.single().url.host)
+        assertEquals("storage.googleapis.com", parsed.variants.single().googleDownload!!.url.host)
+        part.getJSONObject("googleDownload").put("generation", "999")
+        assertThrows(Exception::class.java) { parseScheduledImportPreview(value, id) }
+    }
 
     @Test fun scheduledPreviewReadsImmutableRevisionWithStrictTypedTargets() {
         val image = parseScheduledImportPreview(preview(), id); assertEquals("feed", image.variants.single().target)

@@ -56,11 +56,14 @@ class CalendarCaptionApiTest {
                 assertTrue(confirmed.fresh)
                 assertFalse(confirmed.busy)
                 assertEquals(2, server.requestCount)
-                assertEquals("GET", server.takeRequest(1, TimeUnit.SECONDS)!!.method)
+                val read = server.takeRequest(1, TimeUnit.SECONDS)!!
+                assertEquals("GET", read.method)
+                assertEquals("gcs-parts-v1", read.getHeader("X-IA4Tube-Media-Transport"))
                 val write = server.takeRequest(1, TimeUnit.SECONDS)!!
                 assertEquals("POST", write.method)
                 assertEquals("/v1/social/calendar/items/${"a".repeat(40)}", write.path)
                 assertEquals("no-store", write.getHeader("Cache-Control"))
+                assertEquals("gcs-parts-v1", write.getHeader("X-IA4Tube-Media-Transport"))
                 val body = JSONObject(write.body.readUtf8())
                 assertEquals("Legenda confirmada", body.getString("caption"))
                 assertEquals(1L, body.getLong("revision"))

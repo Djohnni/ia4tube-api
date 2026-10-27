@@ -19,18 +19,19 @@ internal fun parseScheduledImportPreview(json: JSONObject, scheduleId: String): 
     val revision = json.number("mediaRevision", 1, 999999)
     val current = json.number("currentRevision", revision, revision)
     val digest = json.digest("previewDigest"); val testOnly = json.boolean("testOnly")
+    val googleStorage = if (json.has("googleStorage")) ImportGoogleStoragePolicy.parseProfile(json.getJSONObject("googleStorage")) else null
     val raw = json.getJSONArray("variants"); require(raw.length() in 1..2)
-    val variants = (0 until raw.length()).map { parsePart(raw.getJSONObject(it), scheduleId) }
+    val variants = (0 until raw.length()).map { parsePart(raw.getJSONObject(it), scheduleId, googleStorage) }
     require(variants.none { it.target == "thumbnail" } && variants.map { it.target }.distinct().size == variants.size)
     require(variants.map { it.sourceSha256 }.distinct().size == 1)
     require(!(variants.any { it.target == "feed" } && variants.any { it.target == "reel" }))
-    val thumbnail = json.optJSONObject("thumbnail")?.let { parsePart(it, scheduleId) }
+    val thumbnail = json.optJSONObject("thumbnail")?.let { parsePart(it, scheduleId, googleStorage) }
     require((variants.any { it.kind == ImportMediaKind.VIDEO }) == (thumbnail != null))
     require(thumbnail == null || (thumbnail.target == "thumbnail" && thumbnail.sourceSha256 == variants.first().sourceSha256))
     return ImportPrivatePreview(asset, revision, current, digest, testOnly, variants, thumbnail, scheduleId = scheduleId)
 }
 
-private fun parsePart(json: JSONObject, scheduleId: String): ImportPrivatePreviewPart {
+private fun parsePart(json: JSONObject, scheduleId: String, googleStorage: ImportGoogleStorageProfile?): ImportPrivatePreviewPart {
     val target = json.getString("target"); require(target in setOf("feed", "story", "reel", "thumbnail"))
     val kind = ImportMediaKind.entries.single { it.wire == json.getString("kind") }
     val mime = json.getString("mimeType"); require(mime == if (kind == ImportMediaKind.IMAGE) "image/jpeg" else "video/mp4")
@@ -51,7 +52,8 @@ private fun parsePart(json: JSONObject, scheduleId: String): ImportPrivatePrevie
     require(target != "thumbnail" || kind == ImportMediaKind.IMAGE)
     return ImportPrivatePreviewPart(target, kind, mime, json.digest("sha256"), json.digest("sourceSha256"), width, height,
         json.number("sizeBytes", 1, if (kind == ImportMediaKind.IMAGE) 8L * 1024 * 1024 else GalleryImportPolicy.VIDEO_MAX_BYTES),
-        duration, audio, hasAudio, url)
+        duration, audio, hasAudio, url,
+        if (json.has("googleDownload")) ImportGoogleStoragePolicy.parseDownload(json.getJSONObject("googleDownload"), googleStorage) else null)
 }
 private fun JSONObject.number(key: String, min: Long, max: Long): Long {
     val value = get(key); require(value is Number && value.toDouble().isFinite() && value.toDouble() == value.toLong().toDouble())

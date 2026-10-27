@@ -30,7 +30,8 @@ data class ImportPreparationRecord(val assetId: String, val uploadId: String, va
 
 class ImportPrivatePreviewPart internal constructor(val target: String, val kind: ImportMediaKind, val mimeType: String,
     val sha256: String, val sourceSha256: String, val width: Int, val height: Int, val sizeBytes: Long,
-    val durationMs: Long?, val audioMode: ImportAudioMode, val hasAudio: Boolean, internal val url: HttpUrl) {
+    val durationMs: Long?, val audioMode: ImportAudioMode, val hasAudio: Boolean, internal val url: HttpUrl,
+    internal val googleDownload: ImportGoogleDownloadGrant? = null) {
     override fun toString() = "ImportPrivatePreviewPart(target=$target, content=redacted)"
 }
 data class ImportPrivatePreview(val assetId: String, val mediaRevision: Long, val currentRevision: Long,
@@ -126,8 +127,9 @@ internal object ImportPreparationProtocol {
         require(record.phase == ImportPreparationPhase.READY && record.previewDigest != null && record.mediaRevision == record.currentRevision)
         require(json.getString("assetId") == record.assetId && json.integer("mediaRevision", 1, 999999) == record.mediaRevision &&
             json.integer("currentRevision", 1, 999999) == record.currentRevision && json.hash("previewDigest") == record.previewDigest && json.flag("testOnly") == record.testOnly)
+        val googleStorage = if (json.has("googleStorage")) ImportGoogleStoragePolicy.parseProfile(json.getJSONObject("googleStorage")) else null
         val values = json.getJSONArray("variants"); require(values.length() == record.variants.size)
-        val parts = (0 until values.length()).map { parsePreviewPart(values.getJSONObject(it), record, origin) }
+        val parts = (0 until values.length()).map { parsePreviewPart(values.getJSONObject(it), record, origin, googleStorage) }
         require(parts.map { it.target }.toSet() == record.variants.map { it.target.wire }.toSet())
         for (part in parts) {
             val expected = record.variants.single { it.target.wire == part.target }
@@ -135,7 +137,7 @@ internal object ImportPreparationProtocol {
                 part.sourceSha256 == expected.sourceSha256 && part.width == expected.width && part.height == expected.height &&
                 part.sizeBytes == expected.sizeBytes && part.durationMs == expected.durationMs && part.audioMode == expected.audioMode && part.hasAudio == expected.hasAudio)
         }
-        val thumbnail = json.optJSONObject("thumbnail")?.let { parsePreviewPart(it, record, origin).also { part ->
+        val thumbnail = json.optJSONObject("thumbnail")?.let { parsePreviewPart(it, record, origin, googleStorage).also { part ->
             require(part.target == "thumbnail" && part.kind == ImportMediaKind.IMAGE && part.mimeType == "image/jpeg" &&
                 part.sourceSha256 == record.variants.first().sourceSha256 && part.width == 1080 && part.height == 1920 &&
                 part.audioMode == ImportAudioMode.NONE && !part.hasAudio && part.durationMs == null)
@@ -143,7 +145,8 @@ internal object ImportPreparationProtocol {
         require((record.variants.any { it.kind == ImportMediaKind.VIDEO }) == (thumbnail != null))
         return ImportPrivatePreview(record.assetId, record.mediaRevision, record.currentRevision, record.previewDigest, record.testOnly, parts, thumbnail)
     }
-    private fun parsePreviewPart(json: JSONObject, record: ImportPreparationRecord, origin: HttpUrl): ImportPrivatePreviewPart {
+    private fun parsePreviewPart(json: JSONObject, record: ImportPreparationRecord, origin: HttpUrl,
+        googleStorage: ImportGoogleStorageProfile?): ImportPrivatePreviewPart {
         val target = json.getString("target"); require(target in setOf("feed", "story", "reel", "thumbnail"))
         val url = json.getString("url").toHttpUrl()
         val path = "/v1/social/calendar/imports/assets/${record.assetId}/revisions/${record.mediaRevision}/preview/$target"
@@ -155,7 +158,8 @@ internal object ImportPreparationProtocol {
             json.integer("width", 1, 1080).toInt(), json.integer("height", 1, 1920).toInt(),
             json.integer("sizeBytes", 1, if (kind == ImportMediaKind.IMAGE) 8L * 1024 * 1024 else GalleryImportPolicy.VIDEO_MAX_BYTES),
             if (json.isNull("durationMs")) null else json.integer("durationMs", 1, GalleryImportPolicy.PREPARED_VIDEO_MAX_DURATION_MS),
-            ImportAudioMode.entries.single { it.wire == json.getString("audioMode") }, json.flag("hasAudio"), url)
+            ImportAudioMode.entries.single { it.wire == json.getString("audioMode") }, json.flag("hasAudio"), url,
+            if (json.has("googleDownload")) ImportGoogleStoragePolicy.parseDownload(json.getJSONObject("googleDownload"), googleStorage) else null)
     }
     private fun JSONObject.targets(key: String): Set<ImportTarget> {
         val raw = getJSONArray(key); require(raw.length() <= 3)

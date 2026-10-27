@@ -11,6 +11,7 @@ import java.time.LocalDate
 import java.util.concurrent.TimeUnit
 import br.com.ia4tube.app.feature.calendar.imports.ImportOwner
 import br.com.ia4tube.app.feature.calendar.imports.ImportPrivatePreview
+import br.com.ia4tube.app.feature.calendar.imports.ImportGoogleStoragePolicy
 
 internal const val CALENDAR_ORIGIN = "https://ia4tube-api.onrender.com"
 
@@ -157,6 +158,7 @@ class CalendarApi internal constructor(private val token: String, private val or
         require(token.isNotBlank())
         val request = Request.Builder().url("$origin/v1/social/calendar$path")
             .header("Authorization", "Bearer $token").header("Cache-Control", "no-store")
+            .header(ImportGoogleStoragePolicy.HEADER, ImportGoogleStoragePolicy.TRANSPORT)
         if (body != null) request.post(body.toString().toRequestBody("application/json".toMediaType()))
         client.newCall(request.build()).execute().use { response ->
             if (response.code == 404 && body == null && path.isEmpty()) return@withContext CalendarSnapshot()

@@ -50,6 +50,87 @@ class GalleryImportHttpApiTest {
         throw AssertionError()
     }
 
+    private fun googleCapabilities() = capabilities("https://ia4tube-api.onrender.com").also {
+        it.getJSONObject("upload").put("gcs", ImportGoogleStorageTestData.profile().put("transport", ImportGoogleStoragePolicy.TRANSPORT))
+    }
+    private fun googleGrant() = grant(ImportGoogleStorageTestData.signedUrl(now, "PUT").toString(), JSONObject()
+        .put("Content-MD5", sums.md5Base64).put("Content-Length", bytes.size.toString())
+        .put("Content-Type", "application/octet-stream").put("x-goog-if-generation-match", "0"))
+        .also { it.getJSONObject("grant").put("transport", ImportGoogleStoragePolicy.TRANSPORT) }
+
+    @Test fun negotiatedGoogleProfileKeepsTheLegacyOriginAndAllowsOldGrantAndReceiptRecovery() = runBlocking {
+        MockWebServer().use { metadata ->
+            metadata.start(); metadata.reply(googleCapabilities())
+            metadata.reply(grant("https://ia4tube-api.onrender.com/v1/social/calendar/imports/bytes/$authorizationId"))
+            metadata.reply(googleGrant())
+            metadata.reply(JSONObject().put("ok", true).put("upload", record().put("completedParts", JSONArray().put(
+                JSONObject().put("partNumber", 1).put("sizeBytes", bytes.size).put("sha256", sums.sha256)))))
+            val api = api(metadata)
+            val caps = api.capabilities()
+            assertEquals("https://ia4tube-api.onrender.com", caps.uploadOrigin)
+            assertEquals(ImportGoogleStorageTestData.bucket, caps.googleStorage!!.bucket)
+            val authorization = ImportPartAuthorization(uploadId, 1, bytes.size, authorizationId, now + 60_000)
+            assertEquals("ia4tube-api.onrender.com", api.resolvePart(owner, authorization, sums).url.host)
+            val google = api.resolvePart(owner, authorization, sums)
+            assertEquals("storage.googleapis.com", google.url.host)
+            assertEquals("0", google.headers["x-goog-if-generation-match"])
+            assertEquals(sums.sha256, api.resume(owner, uploadId).completedParts.single().sha256)
+            val requests = (1..4).map { metadata.takeRequest(1, TimeUnit.SECONDS)!! }
+            assertTrue(requests.all { it.getHeader(ImportGoogleStoragePolicy.HEADER) == ImportGoogleStoragePolicy.TRANSPORT })
+            assertTrue(requests.all { it.getHeader("Authorization") == "Bearer $token" })
+            assertTrue(requests.none { it.path!!.endsWith("/uploads") })
+        }
+    }
+
+    @Test fun googlePutHasOnlyItsBoundHeadersAndNoAppCredentialsOrNetworkRetry() = runBlocking {
+        MockWebServer().use { metadata ->
+            metadata.start(); metadata.reply(googleCapabilities()); metadata.reply(googleGrant())
+            var observed: okhttp3.Request? = null
+            var dnsCalls = 0
+            val mediaClient = GalleryImportHttpApi.mediaClient().newBuilder().eventListener(object : okhttp3.EventListener() {
+                override fun callStart(call: okhttp3.Call) { observed = call.request(); call.cancel() }
+                override fun dnsStart(call: okhttp3.Call, domainName: String) { dnsCalls++ }
+            }).build()
+            val api = GalleryImportHttpApi({ token }, token, metadata.url("/"), GalleryImportHttpApi.metadataClient(),
+                mediaClient, { now }, true)
+            api.capabilities()
+            val google = api.resolvePart(owner, ImportPartAuthorization(uploadId, 1, bytes.size, authorizationId, now + 60_000), sums)
+            assertEquals("import_network_unavailable", failure { api.putPart(google, bytes) }.code)
+            val request = requireNotNull(observed)
+            assertEquals("PUT", request.method); assertEquals("storage.googleapis.com", request.url.host)
+            assertNull(request.header("Authorization")); assertNull(request.header("Cookie"))
+            assertNull(request.header(ImportGoogleStoragePolicy.HEADER)); assertNull(request.header("Referer"))
+            assertEquals(sums.md5Base64, request.header("Content-MD5")); assertEquals("0", request.header("x-goog-if-generation-match"))
+            val buffer = okio.Buffer(); request.body!!.writeTo(buffer); assertArrayEquals(bytes, buffer.readByteArray())
+            assertEquals(0, dnsCalls); assertEquals(2, metadata.requestCount)
+        }
+    }
+
+    @Test fun googleTransportRequiresAnAdvertisedProfileAndRejectsForeignChecksumAndPrecondition() = runBlocking {
+        for (variant in listOf("not-advertised", "wrong-bucket", "sha-header", "wrong-md5", "generation", "missing-generation", "unsigned", "unknown-transport")) {
+            MockWebServer().use { metadata ->
+                metadata.start()
+                metadata.reply(if (variant == "not-advertised") capabilities("https://ia4tube-api.onrender.com") else googleCapabilities())
+                val value = googleGrant(); val grant = value.getJSONObject("grant")
+                when (variant) {
+                    "wrong-bucket" -> grant.put("url", grant.getString("url").replace(ImportGoogleStorageTestData.bucket, "different-bucket"))
+                    "sha-header" -> grant.getJSONObject("headers").put("x-amz-checksum-sha256", sums.sha256Base64)
+                    "wrong-md5" -> grant.getJSONObject("headers").put("Content-MD5", "incorrect")
+                    "generation" -> grant.getJSONObject("headers").put("x-goog-if-generation-match", "1")
+                    "missing-generation" -> grant.getJSONObject("headers").remove("x-goog-if-generation-match")
+                    "unsigned" -> grant.put("url", grant.getString("url").substringBefore('?'))
+                    "unknown-transport" -> grant.put("transport", "unrecognized")
+                }
+                metadata.reply(value)
+                val api = api(metadata); api.capabilities()
+                val error = failure { api.resolvePart(owner, ImportPartAuthorization(uploadId, 1, bytes.size, authorizationId, now + 60_000), sums) }
+                assertEquals("import_response_invalid", error.code)
+                assertFalse(error.toString().contains("X-Goog")); assertNull(error.cause)
+                assertEquals(2, metadata.requestCount)
+            }
+        }
+    }
+
     @Test fun authenticatedMetadataAndCredentialFreePutUseExplicitGrantsThenObserveProviderParts() = runBlocking {
         MockWebServer().use { metadata -> MockWebServer().use { storage ->
             metadata.start(); storage.start()

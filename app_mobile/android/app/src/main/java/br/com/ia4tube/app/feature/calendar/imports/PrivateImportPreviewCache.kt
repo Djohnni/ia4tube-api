@@ -40,7 +40,8 @@ internal class PrivateImportPreviewCache(
     private val origin: HttpUrl = "https://ia4tube-api.onrender.com".toHttpUrl(),
     private val client: OkHttpClient = previewClient(),
     private val allowLoopbackForTests: Boolean = false,
-    private val deleteFileForTests: ((File) -> Boolean)? = null
+    private val deleteFileForTests: ((File) -> Boolean)? = null,
+    private val now: () -> Long = System::currentTimeMillis
 ) {
     private val root = directory.absoluteFile
     private val lock = Any()
@@ -76,8 +77,17 @@ internal class PrivateImportPreviewCache(
         validate(preview, part)
         if (token.isBlank() || token.length > 16_384 || tokenProvider() != token || ownerProvider() != owner)
             throw ImportPreviewFailure("import_preview_session_changed")
-        val request = Request.Builder().url(part.url).header("Authorization", "Bearer $token")
-            .header("Cache-Control", "no-store").header("Accept", part.mimeType).header("Accept-Encoding", "identity").get().build()
+        // A stale optional grant chooses the authenticated legacy route before
+        // any request. No retry/fallback is performed after a network response.
+        val google = part.googleDownload?.takeIf { it.expiresAtEpochMs > now() }
+        if (google != null) {
+            ImportGoogleStoragePolicy.validateSignedUrl(google.url, google.profile, google.expiresAtEpochMs, now(), "GET")
+            require(google.url.queryParameter("generation") == google.generation)
+        }
+        val builder = Request.Builder().url(google?.url ?: part.url)
+            .header("Cache-Control", "no-store").header("Accept", part.mimeType).header("Accept-Encoding", "identity")
+        if (google == null) builder.header("Authorization", "Bearer $token")
+        val request = builder.get().build()
         val call = client.newCall(request)
         val file = File(root, "${UUID.randomUUID()}.preview")
         val epoch = synchronized(lock) {

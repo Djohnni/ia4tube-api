@@ -21,6 +21,41 @@ class GalleryImportPreparationHttpTest {
         throw AssertionError()
     }
 
+    @Test fun optionalGooglePreviewGrantPreservesTheLegacyRouteAndItsVerifiedMetadata() = runBlocking {
+        MockWebServer().use { server ->
+            server.start(); server.reply(f.capabilities(server.url("/").toString()))
+            val ready = ImportPreparationProtocol.parseRecord(f.status("ready"))
+            val metadata = f.preview(server.url("/").toString(), ready).put("googleStorage", ImportGoogleStorageTestData.profile())
+            metadata.getJSONArray("variants").getJSONObject(0).put("googleDownload", ImportGoogleStorageTestData.download(System.currentTimeMillis()))
+            server.reply(wrapped("preview", metadata))
+            val api = api(server); api.capabilities()
+            val preview = api.preparationPreview(f.owner, ready)
+            val part = preview.variants.single()
+            assertEquals(server.hostName, part.url.host)
+            assertEquals("storage.googleapis.com", part.googleDownload!!.url.host)
+            assertEquals(f.derivedSha, part.sha256); assertEquals(ready.previewDigest, preview.previewDigest)
+            assertFalse(part.toString().contains("X-Goog")); assertFalse(preview.toString().contains("X-Goog"))
+            assertEquals(2, server.requestCount)
+        }
+    }
+
+    @Test fun malformedGoogleGrantIsNotSilentlyAcceptedAsLegacyMetadata() {
+        val origin = "https://ia4tube-api.onrender.com".toHttpUrl()
+        val ready = ImportPreparationProtocol.parseRecord(f.status("ready"))
+        for (variant in listOf("missing-profile", "wrong-generation", "foreign-bucket", "different-derived-sha")) {
+            val metadata = f.preview(origin.toString(), ready)
+            if (variant != "missing-profile") metadata.put("googleStorage", ImportGoogleStorageTestData.profile())
+            val google = ImportGoogleStorageTestData.download(System.currentTimeMillis())
+            when (variant) {
+                "wrong-generation" -> google.put("generation", "999")
+                "foreign-bucket" -> google.put("url", google.getString("url").replace(ImportGoogleStorageTestData.bucket, "foreign-private-bucket"))
+                "different-derived-sha" -> metadata.getJSONArray("variants").getJSONObject(0).put("sha256", "f".repeat(64))
+            }
+            metadata.getJSONArray("variants").getJSONObject(0).put("googleDownload", google)
+            assertThrows(Exception::class.java) { ImportPreparationProtocol.parsePreview(metadata, ready, origin) }
+        }
+    }
+
     @Test fun preparationUsesExactExistingRouteAndMetadataPreviewWithoutFetchingBytes() = runBlocking {
         MockWebServer().use { server ->
             server.start(); server.reply(f.capabilities(server.url("/").toString()))

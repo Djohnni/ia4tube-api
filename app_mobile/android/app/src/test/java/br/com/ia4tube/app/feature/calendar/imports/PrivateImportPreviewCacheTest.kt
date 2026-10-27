@@ -33,12 +33,13 @@ class PrivateImportPreviewCacheTest {
         cache.clear(); server.shutdown()
         directory.listFiles()?.forEach { it.setWritable(true, true); check(it.delete()) }; check(directory.delete())
     }
-    private fun preview(sha: String = hash(bytes), target: String = "feed", url: String? = null, schedule: String? = null): ImportPrivatePreview {
+    private fun preview(sha: String = hash(bytes), target: String = "feed", url: String? = null, schedule: String? = null,
+        google: ImportGoogleDownloadGrant? = null): ImportPrivatePreview {
         val asset = ImportPreparationTestData.assetId
         val path = if (schedule != null) "/v1/social/calendar/imports/schedules/$schedule/preview/$target"
             else "/v1/social/calendar/imports/assets/$asset/revisions/1/preview/$target"
         val part = ImportPrivatePreviewPart(target, ImportMediaKind.IMAGE, "image/jpeg", sha, "a".repeat(64), 1080, 1350,
-            bytes.size.toLong(), null, ImportAudioMode.NONE, false, (url ?: server.url(path).toString()).toHttpUrl())
+            bytes.size.toLong(), null, ImportAudioMode.NONE, false, (url ?: server.url(path).toString()).toHttpUrl(), google)
         return ImportPrivatePreview(asset, 1, 1, "c".repeat(64), false, listOf(part), null, schedule)
     }
     private fun response(body: ByteArray = bytes) = MockResponse().setHeader("Content-Type", "image/jpeg").setBody(Buffer().write(body))
@@ -46,6 +47,39 @@ class PrivateImportPreviewCacheTest {
     private suspend fun failure(action: suspend () -> Unit): Exception {
         try { action(); fail("Expected bounded, sanitized rejection") } catch (failure: Exception) { return failure }
         error("unreachable")
+    }
+    @Test fun `fresh Google download never receives app token cookies referer or negotiation header`() = runBlocking {
+        val now = System.currentTimeMillis()
+        val profile = ImportGoogleStoragePolicy.parseProfile(ImportGoogleStorageTestData.profile())
+        val google = ImportGoogleStoragePolicy.parseDownload(ImportGoogleStorageTestData.download(now), profile, now)
+        var observed: okhttp3.Request? = null
+        var dnsCalls = 0
+        val client = PrivateImportPreviewCache.previewClient().newBuilder().eventListener(object : okhttp3.EventListener() {
+            override fun callStart(call: okhttp3.Call) { observed = call.request(); call.cancel() }
+            override fun dnsStart(call: okhttp3.Call, domainName: String) { dnsCalls++ }
+        }).build()
+        cache.clear()
+        cache = PrivateImportPreviewCache(directory, server.url("/"), client, allowLoopbackForTests = true, now = { now })
+        assertEquals("import_preview_interrupted", (failure { load(preview(google = google)) } as ImportPreviewFailure).code)
+        val request = requireNotNull(observed)
+        assertEquals("GET", request.method); assertEquals("storage.googleapis.com", request.url.host)
+        assertNull(request.header("Authorization")); assertNull(request.header("Cookie")); assertNull(request.header("Referer"))
+        assertNull(request.header(ImportGoogleStoragePolicy.HEADER))
+        assertEquals("identity", request.header("Accept-Encoding"))
+        assertEquals(0, dnsCalls); assertEquals(0, server.requestCount)
+        assertTrue(directory.listFiles()!!.isEmpty())
+    }
+    @Test fun `grant expiring before GET chooses one authenticated legacy download without a retry`() = runBlocking {
+        val now = System.currentTimeMillis()
+        val google = ImportGoogleStoragePolicy.parseDownload(ImportGoogleStorageTestData.download(now),
+            ImportGoogleStoragePolicy.parseProfile(ImportGoogleStorageTestData.profile()), now)
+        cache.clear()
+        cache = PrivateImportPreviewCache(directory, server.url("/"), allowLoopbackForTests = true, now = { now + 60_001 })
+        server.enqueue(response())
+        val result = load(preview(google = google))
+        assertArrayEquals(bytes, result.file.readBytes())
+        assertEquals("Bearer synthetic-session", server.takeRequest().getHeader("Authorization"))
+        assertEquals(1, server.requestCount)
     }
     @Test fun `download is exact derived bytes authenticated no-store and one bounded private lease`() = runBlocking {
         server.enqueue(response())

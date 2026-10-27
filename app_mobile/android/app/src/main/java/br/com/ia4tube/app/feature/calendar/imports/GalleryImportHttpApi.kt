@@ -35,7 +35,8 @@ data class ImportCapabilities(
     val schedulingEnabled: Boolean = false,
     val localSimulation: Boolean = false,
     val musicTracks: List<AuthorizedImportTrack> = emptyList(),
-    val calendarSubmissionEnabled: Boolean = false
+    val calendarSubmissionEnabled: Boolean = false,
+    val googleStorage: ImportGoogleStorageProfile? = null
 )
 
 data class ImportUploadRecord(
@@ -123,6 +124,10 @@ class GalleryImportHttpApi internal constructor(
         val chunkBytes = upload.getInt("chunkBytes"); require(chunkBytes == GalleryImportPolicy.CHUNK_BYTES)
         val imageBytes = upload.getLong("maxImageBytes"); require(imageBytes in 1..GalleryImportPolicy.IMAGE_MAX_BYTES)
         val videoBytes = upload.getLong("maxVideoBytes"); require(videoBytes in 1..GalleryImportPolicy.VIDEO_MAX_BYTES)
+        val googleStorage = if (upload.has("gcs")) upload.getJSONObject("gcs").let {
+            require(it.getString("transport") == ImportGoogleStoragePolicy.TRANSPORT)
+            ImportGoogleStoragePolicy.parseProfile(it)
+        } else null
         val preparation = json.getJSONObject("preparation")
         require(preparation.getInt("maxVideoSeconds") in 1..60 && preparation.getInt("photoMusicSeconds") == 15)
         val local = if (json.has("localSimulation")) json.get("localSimulation").also { require(it is Boolean) } as Boolean else false
@@ -144,7 +149,7 @@ class GalleryImportHttpApi internal constructor(
         val scheduling = json.getJSONObject("scheduling")
         val directSubmission = if (scheduling.has("directSubmission")) scheduling.get("directSubmission").also { require(it is Boolean) } as Boolean else false
         ImportCapabilities(true, owner, origin.toString().trimEnd('/'), chunkBytes, imageBytes, videoBytes,
-            preparation.getBoolean("enabled"), scheduling.getBoolean("enabled"), local, tracks, directSubmission).also { currentCapabilities = it }
+            preparation.getBoolean("enabled"), scheduling.getBoolean("enabled"), local, tracks, directSubmission, googleStorage).also { currentCapabilities = it }
     }
 
     suspend fun start(owner: ImportOwner, media: ImportSelection, idempotencyKey: String): ImportUploadRecord = guarded(ImportMediaStage.UPLOAD_START, true) {
@@ -261,13 +266,18 @@ class GalleryImportHttpApi internal constructor(
             JSONObject().put("authorizationId", authorization.authorizationId)).getJSONObject("grant")
         require(json.getString("method") == "PUT" && json.getInt("sizeBytes") == authorization.sizeBytes)
         val url = json.getString("url").toHttpUrl()
-        val expectedOrigin = currentCapabilities!!.uploadOrigin!!.toHttpUrl()
-        require(url.scheme == expectedOrigin.scheme && url.host == expectedOrigin.host && url.port == expectedOrigin.port &&
-            url.username.isEmpty() && url.password.isEmpty() && url.fragment == null)
-        if (isRenderMediaOrigin(expectedOrigin)) {
-            // A grant for our API is restricted to this exact byte transfer. It
-            // must never become a credential-free PUT to any other API route.
-            require(url.encodedPath == "$path/bytes/${authorization.authorizationId}" && url.encodedQuery == null)
+        val transport = if (json.has("transport")) json.getString("transport") else ""
+        require(transport.isEmpty() || transport == ImportGoogleStoragePolicy.TRANSPORT)
+        val google = if (transport == ImportGoogleStoragePolicy.TRANSPORT)
+            requireNotNull(currentCapabilities!!.googleStorage) else null
+        if (google == null) {
+            val expectedOrigin = currentCapabilities!!.uploadOrigin!!.toHttpUrl()
+            require(url.scheme == expectedOrigin.scheme && url.host == expectedOrigin.host && url.port == expectedOrigin.port &&
+                url.username.isEmpty() && url.password.isEmpty() && url.fragment == null)
+            if (isRenderMediaOrigin(expectedOrigin)) {
+                // Never broaden the credential-free legacy PUT to another API route.
+                require(url.encodedPath == "$path/bytes/${authorization.authorizationId}" && url.encodedQuery == null)
+            }
         }
         val expires = json.getLong("expiresAt")
         require(expires > now() && expires <= authorization.expiresAtEpochMs)
@@ -275,17 +285,27 @@ class GalleryImportHttpApi internal constructor(
         val headers = mutableMapOf<String, String>()
         rawHeaders.keys().forEach { key ->
             val normalized = key.lowercase()
-            require(normalized in setOf("content-length", "content-md5", "x-amz-checksum-sha256", "content-type") && normalized !in headers)
+            val allowed = if (google == null) setOf("content-length", "content-md5", "x-amz-checksum-sha256", "content-type")
+                else setOf("content-length", "content-md5", "content-type", "x-goog-if-generation-match")
+            require(normalized in allowed && normalized !in headers)
             val value = rawHeaders.getString(key); require(value.none { it == '\r' || it == '\n' })
             when (normalized) {
                 "content-length" -> require(value == authorization.sizeBytes.toString())
                 "content-md5" -> require(value == checksums.md5Base64)
                 "x-amz-checksum-sha256" -> require(value == checksums.sha256Base64)
                 "content-type" -> require(value == "application/octet-stream")
+                "x-goog-if-generation-match" -> require(value == "0")
             }
             headers[normalized] = value
         }
         require(headers["content-md5"] == checksums.md5Base64)
+        if (google != null) {
+            require(headers["content-length"] == authorization.sizeBytes.toString() && headers["content-type"] == "application/octet-stream")
+            require(("x-goog-if-generation-match" in headers) ==
+                (url.queryParameter("X-Goog-SignedHeaders")?.split(';')?.contains("x-goog-if-generation-match") == true))
+            val signed = setOf("content-md5", "content-type") + headers.keys.filter { it == "x-goog-if-generation-match" }
+            ImportGoogleStoragePolicy.validateSignedUrl(url, google, expires, now(), "PUT", signed)
+        }
         ImportPartGrant(url, headers.toMap(), authorization.sizeBytes, expires, sessionToken)
     }
 
@@ -404,6 +424,7 @@ class GalleryImportHttpApi internal constructor(
         ensureSession()
         val request = Request.Builder().url(apiOrigin.newBuilder().encodedPath(path + suffix).build())
             .header("Authorization", "Bearer $sessionToken").header("Cache-Control", "no-store")
+            .header(ImportGoogleStoragePolicy.HEADER, ImportGoogleStoragePolicy.TRANSPORT)
         if (body != null) request.post(body.toString().toRequestBody("application/json".toMediaType()))
         return execute(stage, metadataClient, request.build(), body != null, parseJson = true,
             calendarSubmissionErrors = calendarSubmissionErrors, uploadVerificationErrors = uploadVerificationErrors)
