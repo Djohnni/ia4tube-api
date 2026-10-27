@@ -10,7 +10,8 @@ const http = require("node:http");
 const express = require("express");
 const { fixtureContext } = require("./helpers/publication-atomic-memory-pool");
 const { requireConnectorContext, createConnectorContext } = require("../src/social/connectors/contract");
-const { loadProductionOperationPolicy, PRODUCTION_OPERATION_ALLOWLIST_ENV } = require("../src/social/production-operation-policy");
+const { loadProductionOperationPolicy, canProductionOperation, PRODUCTION_OPERATION_ALLOWLIST_ENV,
+  PRODUCTION_CUSTOMER_ACCESS_ENV } = require("../src/social/production-operation-policy");
 const { loadInstagramOAuthConfig, INSTAGRAM_OAUTH_SCOPES } = require("../src/social/oauth/instagram-config");
 const { APP_REVIEW_LOGIN, canExternalConnection, canExternalPublication } = require("../src/social/app-review-policy");
 const { createInstagramProvider } = require("../src/social/oauth/instagram-provider");
@@ -243,4 +244,122 @@ test("the production provider rejects absent/forged/unlisted context before any 
     await assert.rejects(f.actualProvider.exchangeLongLivedToken({accessToken:Buffer.from("SYNTHETIC_TOKEN")},context));
     await assert.rejects(f.actualProvider.discoverProfessionalAccount({accessToken:Buffer.from("SYNTHETIC_TOKEN"),userId:"17840000000000001"},context));
   }
+});
+
+test("customer access defaults off and explicit false preserves the exact operator/reviewer allowlist", () => {
+  assert.equal(PRODUCTION_CUSTOMER_ACCESS_ENV,"SOCIAL_PRODUCTION_CUSTOMER_ACCESS_ENABLED");
+  for (const value of [undefined,"false"]) {
+    const current=config([OWNER,APP_REVIEW_LOGIN],{[PRODUCTION_CUSTOMER_ACCESS_ENV]:value});
+    assert.equal(current.productionOperations.customerAccessEnabled,false);
+    assert.equal(canExternalConnection(current,fixtureContext(OWNER).context),true);
+    assert.equal(canExternalPublication(current,fixtureContext(APP_REVIEW_LOGIN).context),true);
+    assert.equal(canExternalConnection(current,fixtureContext(OTHER).context),false);
+    assert.equal(canExternalPublication(current,fixtureContext(OTHER).context),false);
+  }
+});
+
+for (const [name,value] of [["empty",""],["uppercase","TRUE"],["padded"," true "],
+  ["number string","1"],["boolean",true],["null",null],["object",{}]]) {
+  test(`customer access rejects ${name} without echoing configuration`, () => {
+    assert.throws(()=>config([],{[PRODUCTION_CUSTOMER_ACCESS_ENV]:value}),error=>{
+      assert.equal(error.code,"social_production_customer_access_invalid");
+      assert.equal(error.cause,undefined);
+      assert.doesNotMatch(error.message,new RegExp(pair(OWNER).companyId));
+      return true;
+    });
+  });
+}
+
+test("customer access requires explicit production and retains allowlist validation", () => {
+  for(const environment of [undefined,"test","staging"]) {
+    assert.throws(()=>loadProductionOperationPolicy({ENVIRONMENT:environment,
+      [PRODUCTION_CUSTOMER_ACCESS_ENV]:"true"}),{code:"social_production_customer_access_invalid"});
+  }
+  assert.equal(loadProductionOperationPolicy({ENVIRONMENT:"staging",
+    [PRODUCTION_CUSTOMER_ACCESS_ENV]:"false"}).customerAccessEnabled,false);
+  assert.throws(()=>config([],{[PRODUCTION_CUSTOMER_ACCESS_ENV]:"true",
+    [PRODUCTION_OPERATION_ALLOWLIST_ENV]:"{}"}),{code:"social_production_operation_allowlist_invalid"});
+});
+
+test("customer access enables two unlisted customers without dropping any production gate", () => {
+  for (const allowlist of [undefined,"[]",JSON.stringify([pair(APP_REVIEW_LOGIN)])]) {
+    const current=config([],{[PRODUCTION_CUSTOMER_ACCESS_ENV]:"true",[PRODUCTION_OPERATION_ALLOWLIST_ENV]:allowlist});
+    assert.equal(current.productionOperations.customerAccessEnabled,true);
+    assert.ok(Object.isFrozen(current.productionOperations));
+    for (const owner of [OWNER,OTHER,APP_REVIEW_LOGIN]) {
+      const context=fixtureContext(owner).context;
+      assert.equal(canExternalConnection(current,context),true);
+      assert.equal(canExternalPublication(current,context),true);
+      for(const patch of [{enabled:false},{instagramEnabled:false},{externalConnectionEnabled:false},
+        {publicOrigin:"https://foreign.invalid"},{environment:"staging"},{appReview:{enabled:true}}]) {
+        assert.equal(canProductionOperation({...current,...patch},context,"externalConnectionEnabled"),false);
+        assert.equal(canProductionOperation({...current,...patch},context,"externalPublicationEnabled"),false);
+      }
+      assert.equal(canExternalConnection({...current,externalPublicationEnabled:false},context),true);
+      assert.equal(canExternalPublication({...current,externalPublicationEnabled:false},context),false);
+      assert.equal(canProductionOperation(current,context,"enabled"),false);
+    }
+  }
+});
+
+test("customer mode and direct calendar policy cannot accept a forged or wrong-environment context", () => {
+  const current=config([],{[PRODUCTION_CUSTOMER_ACCESS_ENV]:"true"});
+  const trusted=fixtureContext(OTHER);
+  const staging=createConnectorContext({principal:trusted.adapter.fromVerifiedJwt(trusted.claims),provider:"instagram",
+    environment:"staging",correlationId:crypto.randomUUID(),auditEventId:crypto.randomUUID()});
+  for(const context of [undefined,null,{},trusted.claims,{...trusted.context},Object.freeze({...trusted.context}),staging]) {
+    assert.equal(canProductionOperation(current,context,"externalConnectionEnabled"),false);
+    assert.equal(canProductionOperation(current,context,"externalPublicationEnabled"),false);
+  }
+  assert.throws(()=>canExternalConnection(current,{...trusted.context}),{code:"social_context_invalid"});
+});
+
+test("customer mode completes independent HTTP OAuth flows and isolates current/by-ID connections",async t=>{
+  const f=oauthFixture(t,{owners:[],overrides:{[PRODUCTION_CUSTOMER_ACCESS_ENV]:"true"}}),request=await serve(t,f);
+  const connected=new Map();
+  for(const owner of [OWNER,OTHER]) {
+    const before=await request("GET","/connections/instagram",{owner});
+    assert.equal(before.status,200);assert.equal(before.body.connection,null);
+    assert.deepEqual(before.body.operationalAvailability,{connectionAllowed:true,publicationAllowed:true});
+    const started=await request("POST","/connections/instagram/authorization",{owner,body:{purpose:"connect"}});
+    assert.equal(started.status,201);
+    const state=new URL(started.body.authorizationUrl).searchParams.get("state");
+    const callback=`/oauth/callback?${new URLSearchParams({state,code:"synthetic-customer-code"})}`;
+    assert.equal((await request("GET",callback,{owner:null})).status,200);
+    const current=await request("GET","/connections/instagram",{owner});
+    assert.equal(current.status,200);assert.equal(current.body.connection.state,"connected");
+    connected.set(owner,f.connections.get(pair(owner).companyId));
+    const calls=f.providerCalls.length;
+    assert.notEqual((await request("GET",callback,{owner:null})).status,200);
+    assert.equal(f.providerCalls.length,calls);
+  }
+  assert.equal(f.connections.size,2);
+  assert.notEqual(connected.get(OWNER).id,connected.get(OTHER).id);
+  for(const [owner,foreign] of [[OWNER,OTHER],[OTHER,OWNER]]) {
+    assert.equal((await request("GET",`/connections/instagram/${connected.get(foreign).id}`,{owner})).status,404);
+    assert.equal((await request("GET",`/connections/instagram?company_id=${pair(foreign).companyId}`,{owner})).status,400);
+    assert.equal((await request("GET","/connections/instagram",{owner})).body.connection.connectionId,connected.get(owner).id);
+  }
+  assert.deepEqual(f.providerCalls,["exchange","extend","discover","exchange","extend","discover"]);
+});
+
+test("customer mode retains session checks and cannot be selected through HTTP input",async t=>{
+  const f=oauthFixture(t,{owners:[],overrides:{[PRODUCTION_CUSTOMER_ACCESS_ENV]:"true"}}),request=await serve(t,f);
+  for(const owner of [null,"synthetic-inactive","synthetic-unfinished","synthetic-unregistered"]) {
+    assert.equal((await request("GET","/connections/instagram",{owner})).status,401);
+    assert.equal((await request("POST","/connections/instagram/authorization",{owner,body:{purpose:"connect"}})).status,401);
+  }
+  for(const field of ["companyId","userId","customerAccessEnabled",PRODUCTION_CUSTOMER_ACCESS_ENV,"productionOperations"]) {
+    assert.equal((await request("POST","/connections/instagram/authorization",{body:{purpose:"connect",[field]:true}})).status,400);
+  }
+  assert.equal(f.mutations.length,0);assert.equal(f.providerCalls.length,0);
+});
+
+test("customer access rollback refuses a pending unlisted callback before token exchange",async t=>{
+  const f=oauthFixture(t,{owners:[],overrides:{[PRODUCTION_CUSTOMER_ACCESS_ENV]:"true"}});
+  const started=await f.service.authorize({verifiedClaims:f.identity.claims,purpose:"connect"});
+  const closed=createInstagramOAuthService({...f.options,config:config([],{[PRODUCTION_CUSTOMER_ACCESS_ENV]:"false"})});
+  await assert.rejects(closed.callback({state:new URL(started.authorizationUrl).searchParams.get("state"),
+    code:"synthetic-code",error:null}),denied);
+  assert.deepEqual(f.mutations,["authorize"]);assert.equal(f.providerCalls.length,0);
 });

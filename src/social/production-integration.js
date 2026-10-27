@@ -7,6 +7,7 @@ const SAFE_STARTUP_ERROR_CODE = /^[a-z0-9_]{2,96}$/i;
 const CLOSED_FLAGS = Object.freeze([
   "SOCIAL_PERSISTENCE_ENABLED", "SOCIAL_INSTAGRAM_ENABLED", "SOCIAL_CALENDAR_ENABLED", "SOCIAL_MEDIA_IMPORTS_ENABLED",
   "SOCIAL_EXTERNAL_CONNECTION_ENABLED", "SOCIAL_EXTERNAL_PUBLICATION_ENABLED",
+  "SOCIAL_PRODUCTION_CUSTOMER_ACCESS_ENABLED",
   "REAL_REVIEWER_UI_ENABLED", "META_APP_REVIEW_WINDOW_ENABLED",
   "REVIEW_SANDBOX_ENABLED", "SYNTHETIC_PROVIDER_ENABLED"
 ]);
@@ -27,6 +28,7 @@ function assertProductionPreparationBoundary(env = process.env) {
   for (const name of CLOSED_FLAGS) {
     if (env[name] !== undefined && env[name] !== "" && env[name] !== "false" && env[name] !== "true") refuse("social_production_flag_invalid");
   }
+  if (env.SOCIAL_PRODUCTION_CUSTOMER_ACCESS_ENABLED === "") refuse("social_production_flag_invalid");
   for (const name of ["REVIEW_SANDBOX_ENABLED", "SYNTHETIC_PROVIDER_ENABLED", "META_APP_REVIEW_WINDOW_ENABLED"]) {
     if (env[name] === "true") refuse(PREPARATION_INCOMPLETE);
   }
