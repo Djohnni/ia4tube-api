@@ -27,6 +27,7 @@ const { createRenderDiskTransferService, createSingleProcessTransferLimiter } = 
 const { createOperationalCalendarImportsRuntimeFactory } = require("./operational-runtime");
 const { safePath } = require("./media-process-executor");
 const { NATIVE_READY_VIDEO_PROFILE } = require("./native-ready-video");
+const { createReadyVideoDiagnostics } = require("./ready-video-diagnostics");
 const ROOT = "/var/data/private/calendar-media";
 function fail(code, statusCode = 503) { throw Object.assign(new Error(code === "original_mp4_required"
   ? "Selecione um vídeo MP4 pronto e mantenha o áudio original." : "Importação de vídeos indisponível."),
@@ -120,12 +121,17 @@ async function createReadyVideoRuntime({ env = process.env, tenantPool, capacity
   let closed = false, closing = false, submissions = null, timer = null, currentTick = null, started = false;
   const canAdmit = () => !closed && !closing;
   const accessPolicy = createImportAccessPolicy({ mode: "ready_video", allowedOwners: owners, isEligible: owner => !closed && isEligibleOwner(owner) === true });
+  // Temporary investigation scope is one configured server-derived owner. No
+  // phone/body IDs, account data or grant are passed to the diagnostic sink.
+  const diagnosticOwner = owners[config.subjects.indexOf("159911205989")];
+  const diagnostics = diagnosticOwner ? createReadyVideoDiagnostics({ logger, owner: diagnosticOwner,
+    isEligibleOwner: owner => !closed && isEligibleOwner(owner) === true }) : null;
   const guard = createDiskSpaceGuard({ rootDirectory: privateRoot, enabled: true, marginBytes: 256 * 1024 ** 2 });
   await guard.sample();
   const capacity = createGlobalMediaCapacity({ store: ledger, enabled: true, requireDiskSpaceEvidence: true, diskSpaceGuard: guard, clock });
   if ((await capacity.summary({ context: { authenticated: true, role: "calendar_media_capacity_coordinator" } })).paused) fail("capacity_paused");
   const admission = createRenderDiskAdmission({ capacity, store, rootDirectory: privateRoot, diskSpaceGuard: guard, requireDiskSpaceEvidence: true,
-    coordinatorContext: { authenticated: true, role: "calendar_media_capacity_coordinator" }, enabled: true });
+    coordinatorContext: { authenticated: true, role: "calendar_media_capacity_coordinator" }, enabled: true, diagnostics });
   const preparedAdmission = createPreparedDiskAdmission({ capacity, tenantStore: store, accessPolicy,
     rootDirectory: privateRoot, diskSpaceGuard: guard, enabled: true, clock });
   const resultStore = createPreparedDiskResultStore({ rootDirectory: privateRoot, preparationRoot, tenantStore: store, admission: preparedAdmission,
@@ -141,7 +147,7 @@ async function createReadyVideoRuntime({ env = process.env, tenantPool, capacity
   const preparationRunner = routeRunners(entries.map(entry => ({ owner: entry.owner, runner: entry.preparation })), "prepare");
   const inspector = createDurableInspectionDispatcher({ store, runner: inspectionRunner, accessPolicy, enabled: true, clock });
   const provider = createRenderDiskPrivateUploadProvider({ rootDirectory: privateRoot, store, admission, inspector,
-    transferOrigin: config.publicOrigin, enabled: true, clock });
+    transferOrigin: config.publicOrigin, enabled: true, clock, diagnostics });
   inspectionWorker = createProcessDiskInspectionWorker({ provider, workingDirectory: inspectionRoot, executor, clock,
     assertExecutionHeld: query => inspectionRunner.assertExecutionHeld(query) });
   preparationWorker = createProcessDiskPreparationWorker({ provider, workingDirectory: snapshotRoot, preparationRoot,
@@ -150,7 +156,7 @@ async function createReadyVideoRuntime({ env = process.env, tenantPool, capacity
   const basePreparation = createPreparationQueue({ store, dispatcher: preparationRunner, resultStore, accessPolicy, enabled: true, clock });
   const { upload, preparation } = restrictReadyVideoServices(baseUpload, basePreparation, accessPolicy);
   const registry = createTransferAuthorizationRegistry({ store: registryStore, enabled: true, clock });
-  const transfer = createRenderDiskTransferService({ store, provider, registry, accessPolicy, enabled: true, clock,
+  const transfer = createRenderDiskTransferService({ store, provider, registry, accessPolicy, enabled: true, clock, diagnostics,
     limiter: createSingleProcessTransferLimiter({ maxConcurrent: 1, maxPerCompany: 1 }) });
   const factory = createOperationalCalendarImportsRuntimeFactory({ enabled: true, preparation, resultStore, accessPolicy,
     upload, provider, uploadStore: store, transfer, clock, canAdmit, onSubmissionsReady: value => { submissions = value; },

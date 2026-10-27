@@ -7,6 +7,7 @@ const { constants } = require("node:fs");
 const { isDeepStrictEqual } = require("node:util");
 const { validateDiskUploadRecord } = require("./render-disk-provider");
 const { isDiskSpaceGuard } = require("./disk-space-guard");
+const { observeReadyVideoOperation } = require("./ready-video-diagnostics");
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/;
 const HASH = /^[a-f0-9]{64}$/;
 const METADATA_MARGIN = 65536;
@@ -31,7 +32,7 @@ function renderDiskCapacityIdentity(binding) {
   return { jobId, requestDigest };
 }
 function createRenderDiskAdmission({ capacity, store, rootDirectory, coordinatorContext, enabled = false, allowVolatileForTests = false,
-  requireDiskSpaceEvidence = false, diskSpaceGuard } = {}) {
+  requireDiskSpaceEvidence = false, diskSpaceGuard, diagnostics } = {}) {
   const durable = capacity?.capabilities?.persistence === "durable" && store?.capabilities?.persistence === "durable";
   const needsDiskSpace = requireDiskSpaceEvidence || capacity?.capabilities?.requiresDiskSpaceEvidence === true;
   const guarded = isDiskSpaceGuard(diskSpaceGuard, { rootDirectory, allowVolatileForTests }) &&
@@ -44,9 +45,9 @@ function createRenderDiskAdmission({ capacity, store, rootDirectory, coordinator
     (durable || allowVolatileForTests && capacity?.capabilities?.testOnly === true && store?.capabilities?.persistence === "volatile-test"));
   const context = Object.freeze({ authenticated: true, role: "calendar_media_capacity_coordinator" });
   const root = path.resolve(rootDirectory || ".");
-  async function safe(operation) {
+  async function safe(stage, owner, operation) {
     if (!available) fail();
-    try { return await operation(); }
+    try { return await observeReadyVideoOperation(diagnostics, stage, owner, operation); }
     catch (error) {
       if (/^disk_[a-z_]{1,80}$/.test(error?.code || "")) fail(error.code);
       if (/^media_capacity_[a-z_]{1,80}$/.test(error?.code || "")) fail("disk_global_capacity_refused");
@@ -125,26 +126,26 @@ function createRenderDiskAdmission({ capacity, store, rootDirectory, coordinator
   return Object.freeze({
     capabilities: Object.freeze({ persistence: durable ? "durable" : "volatile-test", testOnly: !durable,
       atomicGlobalReservations: available, storageOnly: true, financialHardCap: false, requiresDiskSpaceEvidence: needsDiskSpace }),
-    async reserve(binding) { return safe(async () => {
+    async reserve(binding) { return safe("admission_reserve", binding, async () => {
       const value = canonical(binding); await owned(value);
       const diskSpaceEvidence = needsDiskSpace ? await diskSpaceGuard.sample() : undefined;
       const result = await capacity.reserveStorage({ ...request(value), storageBytes: value.peakBytes, sourceBytes: value.sourceBytes, diskSpaceEvidence });
       verifyReceipt(result, value, value.peakBytes); return { held: true, binding: value };
     }); },
-    async assertHeld(binding, { intent = "write" } = {}) { return safe(async () => {
+    async assertHeld(binding, { intent = "write" } = {}) { return safe("admission_assert_held", binding, async () => {
       const value = canonical(binding); await owned(value);
       const diskSpaceEvidence = needsDiskSpace && intent === "write" ? await diskSpaceGuard.sample() : undefined;
       const result = await capacity.assertHeld({ ...request(value), intent, diskSpaceEvidence });
       verifyReceipt(result, value, value.peakBytes);
       return { held: true, binding: value };
     }); },
-    async sealStorage(binding) { return safe(async () => {
+    async sealStorage(binding) { return safe("admission_seal_storage", binding, async () => {
       const value = canonical(binding), row = await owned(value), proofId = await evidence(row, value, true);
       const current = await capacity.inspect({ context, jobId: renderDiskCapacityIdentity(value).jobId });
       verifyReceipt(current, value, value.peakBytes);
       return capacity.sealStorage({ context, jobId: current.jobId, remainingBytes: value.peakBytes, proofId });
     }); },
-    async releaseAfterAbort(binding) { return safe(async () => {
+    async releaseAfterAbort(binding) { return safe("admission_release_after_abort", binding, async () => {
       const value = canonical(binding), row = await owned(value), proofId = await evidence(row, value);
       const current = await capacity.inspect({ context, jobId: renderDiskCapacityIdentity(value).jobId });
       verifyReceipt(current, value, METADATA_MARGIN);

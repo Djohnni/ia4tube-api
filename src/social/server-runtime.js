@@ -7,6 +7,7 @@ const {
 } = require("../persistence/postgres/config");
 
 const SHUTDOWN_TIMEOUT_MS = 10000;
+const { CODE: READY_VIDEO_FAILURE_CODE, COMPLETED_CODE: READY_VIDEO_COMPLETED_CODE, validReadyVideoDiagnostic } = require("./calendar/imports/ready-video-diagnostics");
 const SAFE_ERROR_CODE = /^[a-z0-9_]{2,96}$/i;
 const MAX_DIAGNOSTIC_ELAPSED_MS = 300000;
 const SAFE_DIAGNOSTIC_COMPONENTS = new Set([
@@ -70,6 +71,11 @@ function sanitizeSocialDiagnostic(value) {
     if (!value || typeof value !== "object" || Array.isArray(value)) return null;
     const component = ownDataValue(value, "component");
     const code = ownDataValue(value, "code");
+    if (component === "calendar_ready_video" && [READY_VIDEO_FAILURE_CODE, READY_VIDEO_COMPLETED_CODE].includes(code)) {
+      const stage = ownDataValue(value, "stage"), reasonCode = ownDataValue(value, "reasonCode"), elapsedMs = ownDataValue(value, "elapsedMs");
+      if (!validReadyVideoDiagnostic(code, stage, reasonCode) || !Number.isSafeInteger(elapsedMs) || elapsedMs < 0 || elapsedMs > MAX_DIAGNOSTIC_ELAPSED_MS) return null;
+      return Object.freeze({ component, code, stage, reasonCode, elapsedMs });
+    }
     if (!SAFE_DIAGNOSTIC_COMPONENTS.has(component) || !SAFE_DIAGNOSTIC_CODES.has(code)) return null;
     const stage = ownDataValue(value, "stage");
     const elapsedMs = ownDataValue(value, "elapsedMs");

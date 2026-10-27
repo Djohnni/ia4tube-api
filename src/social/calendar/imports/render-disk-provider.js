@@ -8,6 +8,7 @@ const { constants } = require("node:fs");
 const path = require("node:path");
 const crypto = require("node:crypto");
 const { CalendarImportUploadError } = require("./upload-service");
+const { observeReadyVideoOperation } = require("./ready-video-diagnostics");
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/;
 const HASH = /^[a-f0-9]{64}$/;
 const MAX_CHUNK = 5 * 1024 * 1024, MAX_SOURCE = 100 * 1024 * 1024;
@@ -57,7 +58,7 @@ function validateDiskUploadRecord(row) {
 }
 
 function createRenderDiskPrivateUploadProvider({ rootDirectory, store, admission, inspector,
-  transferOrigin, enabled = false, allowVolatileForTests = false, clock = Date.now } = {}) {
+  transferOrigin, enabled = false, allowVolatileForTests = false, clock = Date.now, diagnostics } = {}) {
   const durable = store?.capabilities?.persistence === "durable" && admission?.capabilities?.persistence === "durable";
   const testOnly = !durable;
   const localInspector = allowVolatileForTests === true && testOnly &&
@@ -74,9 +75,9 @@ function createRenderDiskPrivateUploadProvider({ rootDirectory, store, admission
     inspector?.capabilities?.remoteObjectInspection === true &&
     typeof inspector.startInspection === "function" && typeof inspector.getInspection === "function");
   const root = path.resolve(rootDirectory || ".");
-  async function safe(operation) {
+  async function safe(stage, owner, operation) {
     if (!available) fail("disk_provider_disabled");
-    try { return await operation(); }
+    try { return await observeReadyVideoOperation(diagnostics, stage, owner, operation); }
     catch (error) {
       if (error instanceof CalendarImportUploadError && /^import_[a-z_]{1,80}$/.test(error.code || "")) {
         throw new CalendarImportUploadError(error.code, [400, 403, 404, 409, 413, 422, 429, 503].includes(error.statusCode) ? error.statusCode : 503);
@@ -280,7 +281,7 @@ function createRenderDiskPrivateUploadProvider({ rootDirectory, store, admission
       idempotentMultipart: available, immutableFinalObjects: available, boundedByteStorage: true }),
     getCapabilities() { return { provider: "render-private-disk", available, readyForProduction: false,
       transferRouteMounted: false, localByteDecoding: false, crashRecovery: "explicit-stopped-runtime-only" }; },
-    async beginMultipart(args) { return safe(async () => {
+    async beginMultipart(args) { return safe("provider_begin_multipart", args?.context, async () => {
       const row = await mutate(args, current => {
         if (args.assetId !== current.assetId || args.sizeBytes !== current.sizeBytes || args.chunkBytes !== current.chunkBytes ||
             args.checksumAlgorithm !== "SHA256") fail("disk_request_conflict");
@@ -307,7 +308,7 @@ function createRenderDiskPrivateUploadProvider({ rootDirectory, store, admission
         });
       }, true);
     }); },
-    async authorizePart(args) { return safe(async () => {
+    async authorizePart(args) { return safe("provider_authorize_part", args?.context, async () => {
       const row = await read(args); await held(row);
       if (!HASH.test(args.sha256 || "") || !md5(args.md5Base64) || !Number.isSafeInteger(args.expiresAt) ||
           args.expiresAt <= clock() || args.expiresAt - clock() > 600000) fail("disk_part_invalid");
@@ -323,13 +324,13 @@ function createRenderDiskPrivateUploadProvider({ rootDirectory, store, admission
         return { authorizationId: grant.authorizationId, expiresAt: grant.expiresAt };
       });
     }); },
-    async resolveAuthorization(args) { return safe(async () => {
+    async resolveAuthorization(args) { return safe("provider_resolve_authorization", args?.context, async () => {
       const row = await read(args); await held(row); const grant = grantFor(row, args);
       return { url: `${origin}/v1/social/calendar/imports/bytes/${grant.authorizationId}`, method: "PUT", sizeBytes: grant.sizeBytes,
         expiresAt: grant.expiresAt, headers: { "content-length": String(grant.sizeBytes), "content-md5": grant.md5Base64,
           "x-amz-checksum-sha256": Buffer.from(grant.sha256, "hex").toString("base64") } };
     }); },
-    async acceptPart(args) { return safe(async () => {
+    async acceptPart(args) { return safe("provider_accept_part", args?.context, async () => {
       assertWriteEligible(args);
       const row = await read(args); await held(row); const grant = grantFor(row, args);
       if (!args.stream || typeof args.stream[Symbol.asyncIterator] !== "function" || args.contentLength !== grant.sizeBytes) fail("disk_body_invalid");
@@ -369,12 +370,12 @@ function createRenderDiskPrivateUploadProvider({ rootDirectory, store, admission
         }
       });
     }); },
-    async listParts(args) { return safe(async () => {
+    async listParts(args) { return safe("provider_list_parts", args?.context, async () => {
       const row = await read(args); await held(row, row.disk?.phase === "sealed" ? "read" : "write");
       if (!["open", "sealing", "sealed"].includes(row.disk?.phase)) fail("disk_state_conflict");
       return exclusive(row, async () => parts(row));
     }); },
-    async finalizeMultipart(args) { return safe(async () => {
+    async finalizeMultipart(args) { return safe("provider_finalize_multipart", args?.context, async () => {
       const row = await read(args); await held(row, row.disk?.phase === "sealed" ? "read" : "write");
       if (row.state !== "verifying" || !["open", "sealing", "sealed"].includes(row.disk?.phase)) fail("disk_state_conflict");
       return exclusive(row, async () => {
@@ -412,7 +413,7 @@ function createRenderDiskPrivateUploadProvider({ rootDirectory, store, admission
         return { objectVersion: row.disk.objectVersion };
       });
     }); },
-    async inspectObject(args) { return safe(async () => {
+    async inspectObject(args) { return safe("provider_inspect_object", args?.context, async () => {
       const row = await read(args); await held(row, "read");
       if (row.disk?.phase !== "sealed" || args.objectVersion !== row.disk.objectVersion) fail("disk_state_conflict");
       await verifySeal(row);
@@ -438,7 +439,7 @@ function createRenderDiskPrivateUploadProvider({ rootDirectory, store, admission
       await mutate(args, current => { current.disk.inspectionResult = verified; });
       return verified;
     }); },
-    async streamSealedObject(args) { return safe(async () => {
+    async streamSealedObject(args) { return safe("provider_stream_sealed", args?.context, async () => {
       const row = await read(args); await held(row, "read");
       if (row.disk?.phase !== "sealed" || args.objectVersion !== row.disk.objectVersion || typeof args.consume !== "function") fail("disk_read_invalid");
       // Adapter caller must authenticate its owner-bound one-job grant and set a
@@ -450,7 +451,7 @@ function createRenderDiskPrivateUploadProvider({ rootDirectory, store, admission
       if (result.sha256 !== row.sha256) fail("disk_object_conflict");
       return { sizeBytes: result.sizeBytes, sha256: result.sha256 };
     }); },
-    async abortMultipart(args) { return safe(async () => {
+    async abortMultipart(args) { return safe("provider_abort_multipart", args?.context, async () => {
       const row = await read(args);
       if (row.state !== "cancel_pending") fail("disk_state_conflict");
       if (!row.disk) return { aborted: true, objectExists: false };

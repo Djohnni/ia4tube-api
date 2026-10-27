@@ -4,6 +4,7 @@ const { MEDIA_UPLOAD_TIMEOUT_MS } = require("./media-read-timeout");
 // Local composition: no server mount, decoder, cloud task or publication.
 const { isImportAccessPolicy } = require("./access-policy");
 const { validateDiskUploadRecord } = require("./render-disk-provider");
+const { observeReadyVideoOperation, wrapReadyVideoUploadDiagnostics } = require("./ready-video-diagnostics");
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/;
 const OWNER_UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/;
 const ORIGIN = "https://ia4tube-api.onrender.com";
@@ -45,7 +46,7 @@ function createSingleProcessTransferLimiter({ maxConcurrent = 2, maxPerCompany =
 
 function createRenderDiskTransferService({ store, provider, registry, accessPolicy,
   limiter = createSingleProcessTransferLimiter(), enabled = false, allowVolatileForTests = false,
-  clock = Date.now } = {}) {
+  clock = Date.now, diagnostics } = {}) {
   const durable = store?.capabilities?.persistence === "durable" && registry?.capabilities?.persistence === "durable";
   const available = Boolean(enabled && store?.capabilities?.atomicCompanyUpdates === true &&
     typeof store.update === "function" && provider?.getCapabilities?.().available === true &&
@@ -53,9 +54,9 @@ function createRenderDiskTransferService({ store, provider, registry, accessPoli
     ["register", "resolve", "revoke"].every(key => typeof registry[key] === "function") &&
     isImportAccessPolicy(accessPolicy) && accessPolicy.executionAvailable && limiterInstances.has(limiter) &&
     (durable || allowVolatileForTests && store?.capabilities?.persistence === "volatile-test" && registry?.capabilities?.testOnly === true));
-  async function safe(operation) {
+  async function safe(operation, diagnosticStage, diagnosticOwner) {
     if (!available) fail();
-    try { return await operation(); }
+    try { return await observeReadyVideoOperation(diagnostics, diagnosticStage, diagnosticOwner, operation); }
     catch (error) {
       if (/^import_transfer_[a-z_]{1,60}$/.test(error?.code || "")) fail(error.code,
         [400, 403, 404, 408, 409, 413, 415, 422, 429, 503].includes(error.statusCode) ? error.statusCode : 503);
@@ -120,7 +121,7 @@ function createRenderDiskTransferService({ store, provider, registry, accessPoli
       // response is retried with this same identity, not a replacement upload.
       await currentBinding(binding);
       return structuredClone(grant);
-    }); },
+    }, "transfer_resolve_part", context); },
     async acceptPart({ authorizationId, contentLength, md5Base64, sha256Base64, stream, timeoutMs = MEDIA_UPLOAD_TIMEOUT_MS }) {
       if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > MEDIA_UPLOAD_TIMEOUT_MS) fail();
       const deadline = performance.now() + timeoutMs;
@@ -135,7 +136,7 @@ function createRenderDiskTransferService({ store, provider, registry, accessPoli
         const binding = await registry.resolve(authorizationId);
         if (!binding) fail("import_transfer_not_found", 404);
         return binding;
-      }, async binding => {
+      }, binding => observeReadyVideoOperation(diagnostics, "transfer_accept_part", binding, async () => {
         remaining();
         const context = await currentBinding(binding);
         remaining();
@@ -160,14 +161,14 @@ function createRenderDiskTransferService({ store, provider, registry, accessPoli
           } });
         if (result?.partNumber !== binding.partNumber || result.sizeBytes !== binding.sizeBytes || result.sha256 !== binding.sha256) fail();
         return { partNumber: result.partNumber, sizeBytes: result.sizeBytes, sha256: result.sha256 };
-      }));
+      })));
     },
     wrapUpload(upload) {
       if (!upload || typeof upload.resolvePart !== "function") fail();
       const wrapper = Object.fromEntries(Object.keys(upload).map(key => [key,
         typeof upload[key] === "function" ? upload[key].bind(upload) : upload[key]]));
       wrapper.resolvePart = (context, input) => service.resolvePart(upload, context, input);
-      return Object.freeze(wrapper);
+      return wrapReadyVideoUploadDiagnostics(Object.freeze(wrapper), diagnostics);
     }
   });
   serviceInstances.add(service); return service;
