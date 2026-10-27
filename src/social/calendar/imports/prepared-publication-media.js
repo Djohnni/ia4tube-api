@@ -9,6 +9,8 @@ const { parsePreviewRange } = require("./preview-service");
 const { preparedPublicationDescriptor } = require("./publication-descriptor");
 const { isLocalPublicationTransport } = require("./publication-test-transport");
 const { isCalendarStore } = require("../store");
+const { calendarConnectionFromDetails } = require("../connection");
+const { MEDIA_READ_TIMEOUT_MS } = require("./media-read-timeout");
 const instances = new WeakSet(), ID = /^[a-f0-9]{40}$/, HASH = /^[a-f0-9]{64}$/;
 function fail() { throw Object.assign(new Error("Mídia de publicação indisponível."), { code: "calendar_import_publication_media_unavailable", statusCode: 404 }); }
 function createPreparedCalendarMedia({ store, preparation, resultStore, accessPolicy, grants, resolveConnection,
@@ -25,9 +27,9 @@ function createPreparedCalendarMedia({ store, preparation, resultStore, accessPo
   function seconds() { const value = clock(); if (!Number.isSafeInteger(value) || value < 0) fail(); return Math.floor(value / 1000); }
   function authorize(context) { ready(); try { accessPolicy.resolve(context); } catch { fail(); } }
   function sign(parts) { return crypto.createHmac("sha256", key).update(JSON.stringify(parts)).digest("hex"); }
-  async function current(context, job, requireIntent = true) {
+  async function current(context, job, requireIntent = true, snapshot = null) {
     authorize(context);
-    const saved = await store.update(context.companyId, state => state.jobs[job.id]);
+    const saved = snapshot ? snapshot.state.jobs[job.id] : await store.update(context.companyId, state => state.jobs[job.id]);
     if (!saved || saved.sourceKind !== "upload" || saved.import?.userId !== context.userId ||
         saved.phase === "cancelled" || !saved.selectedTargets?.includes(job.target)) fail();
     const part = delivery(saved, job.target), value = preparedPublicationDescriptor(context.companyId, part);
@@ -36,7 +38,7 @@ function createPreparedCalendarMedia({ store, preparation, resultStore, accessPo
         requireIntent && (!job.intent || part.intent?.publicationId !== job.intent.publicationId ||
           part.intent?.requestHash !== job.intent.requestHash)) fail();
     const grant = grants.verify(saved.authorization?.envelope, context.companyId, context.userId);
-    const connection = await resolveConnection(context, grant);
+    const connection = snapshot ? calendarConnectionFromDetails(snapshot.connection) : await resolveConnection(context, grant);
     if (!grant || grant.sourceKind !== "upload" || grant.jobId !== saved.id || grant.assetId !== value.assetId ||
         grant.assetRevision !== value.mediaRevision || grant.previewDigest !== value.previewDigest ||
         !sameBinding(grant.binding, connection?.binding) || job.target === "story" && connection.accountType !== "business") fail();
@@ -98,9 +100,15 @@ function createPreparedCalendarMedia({ store, preparation, resultStore, accessPo
       await inspect(context, part, true, signal);
       const range = parsePreviewRange(rangeHeader, value.sizeBytes);
       return { descriptor: value, range, async stream(consume) {
-        return resultStore.streamPreview({ context, assetId: value.assetId, mediaRevision: value.mediaRevision, resultRef: value.resultRef,
-          target, sha256: value.sha256, range: { start: range.start, end: range.end }, signal, timeoutMs: 60000,
-          consume: async bytes => { if (Number(expires) < seconds()) fail(); await current(context, part); await consume(bytes); } });
+        return store.withMediaReadSession(context.companyId, { userId: context.userId,
+          connectionId: part.authorization?.binding?.connectionId, signal, timeoutMs: MEDIA_READ_TIMEOUT_MS }, session =>
+          resultStore.streamPreview({ context, assetId: value.assetId, mediaRevision: value.mediaRevision, resultRef: value.resultRef,
+            target, sha256: value.sha256, range: { start: range.start, end: range.end }, signal, timeoutMs: MEDIA_READ_TIMEOUT_MS,
+            consume: async bytes => {
+              if (Number(expires) < seconds()) fail();
+              await current(context, part, true, await session.read());
+              await consume(bytes);
+            } }));
       } };
     },
     close() { closed = true; key?.fill(0); }

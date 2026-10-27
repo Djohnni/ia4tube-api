@@ -3,6 +3,7 @@
 const crypto = require("node:crypto");
 const { withTransaction } = require("./pool");
 const { requireSafeLabel } = require("./validation");
+const { connectionDetailsSelect, currentConnectionDetailsSelect } = require("./social-connection-read-sql");
 const { assertInternalConnectorAudit } = require("./social-connector-audit");
 const { lockSocialConnection, assertNoPendingPublications } = require("./social-publication-guard");
 const {
@@ -753,47 +754,7 @@ const CONNECTION_SELECT = [
   ") account ON TRUE"
 ].join("\n");
 
-const CONNECTION_DETAILS_SELECT = [
-  "SELECT connection.company_id, connection.id, connection.provider,",
-  "  connection.status, connection.revision, connection.created_at,",
-  "  connection.connected_at, connection.updated_at,",
-  "  connection.disconnected_at, connection.expires_at,",
-  "  account.id AS external_account_id, account.external_id,",
-  "  account.username, account.display_name, account.account_type,",
-  "  account.status AS external_account_status,",
-  "  credential.id AS active_credential_id,",
-  "  credential.expires_at AS credential_expires_at,",
-  "  ARRAY(",
-  "    SELECT granted.scope",
-  "    FROM ia4tube_social.social_connection_scopes granted",
-  "    WHERE granted.company_id=connection.company_id",
-  "      AND granted.connection_id=connection.id",
-  "      AND (granted.expires_at IS NULL OR",
-  "        granted.expires_at > CURRENT_TIMESTAMP)",
-  "    ORDER BY granted.scope",
-  "  ) AS granted_scopes,",
-  "  CURRENT_TIMESTAMP AS observed_at",
-  "FROM ia4tube_social.social_connections connection",
-  "LEFT JOIN LATERAL (",
-  "  SELECT id,external_id,username,display_name,account_type,status",
-  "  FROM ia4tube_social.social_external_accounts",
-  "  WHERE company_id=connection.company_id",
-  "    AND connection_id=connection.id AND provider=connection.provider",
-  "  ORDER BY (status='active') DESC,updated_at DESC,id",
-  "  LIMIT 1",
-  ") account ON TRUE",
-  "LEFT JOIN LATERAL (",
-  "  SELECT id,expires_at",
-  "  FROM ia4tube_social.social_encrypted_credentials",
-  "  WHERE company_id=connection.company_id",
-  "    AND connection_id=connection.id AND provider=connection.provider",
-  "    AND credential_type IN ('instagram_user_access_token','access_token')",
-  "    AND revoked_at IS NULL",
-  "  ORDER BY (credential_type='instagram_user_access_token') DESC,",
-  "    (expires_at IS NULL) DESC,expires_at DESC,updated_at DESC,id",
-  "  LIMIT 1",
-  ") credential ON TRUE"
-].join("\n");
+const CONNECTION_DETAILS_SELECT = connectionDetailsSelect();
 
 // JSON extraction intentionally tolerates a legacy 0006 read-only schema.
 // Writes with binding require the explicitly verified 0007 profile.
@@ -844,13 +805,28 @@ async function loadConnectionDetails(client, context, id, lock = false) {
 
 async function loadCurrentConnectionDetails(client, context) {
   const result = await client.query(
-    `${CONNECTION_DETAILS_SELECT}\n` +
-      "WHERE connection.company_id=$1 AND connection.provider=$2\n" +
-      "ORDER BY (connection.status=ANY($3::text[])) DESC," +
-      " connection.updated_at DESC,connection.id\nLIMIT 1",
+    currentConnectionDetailsSelect(),
     [context.companyId, context.provider, BLOCKING_CONNECTION_STATES]
   );
   return connectionDetailsFromRow(result.rows?.[0]);
+}
+
+// Internal SQL composition only: callers must supply the existing verified
+// role/RLS session. This cannot acquire a connection, authenticate or mutate.
+function currentConnectionReadProjection(input = {}) {
+  const source = strictObject(input, ["companyId", "provider", "statementTime"]);
+  const companyId = uuid(source.companyId), provider = source.provider;
+  const statementTime = source.statementTime === undefined ? true : source.statementTime;
+  if (provider !== "instagram" || typeof statementTime !== "boolean") connectorFail("connector_contract_invalid");
+  return Object.freeze({
+    text: currentConnectionDetailsSelect(statementTime),
+    values: Object.freeze([companyId, provider, BLOCKING_CONNECTION_STATES]),
+    map(row) {
+      if (row == null) return null;
+      if (row.company_id !== companyId || row.provider !== provider) connectorFail("resource_unavailable");
+      return connectionDetailsFromRow(row);
+    }
+  });
 }
 
 async function loadPublication(client, context, id, lock = false) {
@@ -2879,5 +2855,6 @@ function createPostgresConnectorStore(options = {}) {
 
 module.exports = {
   BLOCKING_CONNECTION_STATES,
-  createPostgresConnectorStore
+  createPostgresConnectorStore,
+  currentConnectionReadProjection
 };

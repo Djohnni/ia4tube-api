@@ -1,4 +1,5 @@
 "use strict";
+const { MEDIA_UPLOAD_TIMEOUT_MS } = require("./media-read-timeout");
 const express = require("express");
 const { isRenderDiskTransferService } = require("./transfer-service");
 const { createImportHttpObserver } = require("./router");
@@ -16,8 +17,8 @@ function redactImportTransferUrl(value) {
  * Do not place this under the authenticated metadata router: the short-lived
  * opaque grant is the authorization, and session cookies/JWTs are forbidden.
  */
-function createCalendarImportByteRouter({ getService, timeoutMs = 30000, logger, monotonicClock, diagnosticSlowMs = 10000 } = {}) {
-  if (typeof getService !== "function" || !Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 60000) throw new TypeError("import_transfer_configuration_invalid");
+function createCalendarImportByteRouter({ getService, timeoutMs = MEDIA_UPLOAD_TIMEOUT_MS, logger, monotonicClock, diagnosticSlowMs = 10000 } = {}) {
+  if (typeof getService !== "function" || !Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > MEDIA_UPLOAD_TIMEOUT_MS) throw new TypeError("import_transfer_configuration_invalid");
   const observe = createImportHttpObserver({ logger, monotonicClock, slowMs: diagnosticSlowMs });
   const router = express.Router({ strict: true, caseSensitive: true });
   router.use(async (req, res) => {

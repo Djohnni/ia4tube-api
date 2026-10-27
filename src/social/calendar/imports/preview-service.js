@@ -2,6 +2,7 @@
 const { isImportAccessPolicy } = require("./access-policy");
 const { previewDigest } = require("./policy");
 const { isPreparedDiskResultStore } = require("./prepared-disk-store");
+const { MEDIA_READ_TIMEOUT_MS } = require("./media-read-timeout");
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/;
 const HASH = /^[a-f0-9]{64}$/;
 const TARGETS = new Set(["feed", "story", "reel", "thumbnail"]);
@@ -96,7 +97,7 @@ function createPrivateImportPreviewService({ preparation, resultStore, accessPol
           const current = await snapshot(context, request);
           if (current.result.resultRef !== value.result.resultRef || current.result.previewDigest !== value.result.previewDigest) fail("changed", 409);
           let count = 0;
-          await resultStore.streamPreview({ ...binding, range: { start: range.start, end: range.end }, signal,
+          await resultStore.streamPreview({ ...binding, range: { start: range.start, end: range.end }, signal, timeoutMs: MEDIA_READ_TIMEOUT_MS,
             consume: async chunk => {
               authorize(context);
               if (signal?.aborted || !(Buffer.isBuffer(chunk) || chunk instanceof Uint8Array) || chunk.byteLength > 65536 || count + chunk.byteLength > range.length) fail("interrupted");

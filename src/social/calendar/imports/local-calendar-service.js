@@ -12,6 +12,7 @@ const { isLocalCalendarSimulation, isLocalCalendarState } = require("./local-cal
 const { isCalendarStore } = require("../store");
 const { isLocalPublicationTransport, withLocalPublicationState } = require("./publication-test-transport");
 const { preparedPublicationDescriptor, validatePreparedPublicationPart } = require("./publication-descriptor");
+const { MEDIA_READ_TIMEOUT_MS } = require("./media-read-timeout");
 const operationalServices = new WeakSet();
 const services = new WeakSet(), ID = /^[a-f0-9]{40}$/, UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/;
 const KEY = /^[A-Za-z0-9_-]{8,128}$/, ORIGIN = "https://ia4tube-api.onrender.com/v1/social/calendar/imports";
@@ -215,16 +216,28 @@ function createCalendarImportService({ simulation, preparation, resultStore, acc
       if (actual.sha256 !== expected.sha256 || actual.mimeType !== expected.mimeType || actual.sizeBytes !== expected.sizeBytes) fail("preview_changed");
       const range = parsePreviewRange(rangeHeader, expected.sizeBytes);
       return { descriptor: expected, range, async stream(consume) {
-        let count = 0;
-        await resultStore.streamPreview({ ...binding, range: { start: range.start, end: range.end }, signal,
-          consume: async bytes => {
-            const current = await read(context, id);
-            if (signal?.aborted || current.phase === "cancelled" || current.import.previewDigest !== media.previewDigest ||
-                bytes.byteLength > 65536 || count + bytes.byteLength > range.length) fail("preview_changed");
-            count += bytes.byteLength; await consume(bytes);
-          } });
-        if (count !== range.length) fail("preview_changed");
-        return { sizeBytes: count };
+        const transfer = async readCurrent => {
+          let count = 0;
+          await resultStore.streamPreview({ ...binding, range: { start: range.start, end: range.end }, signal,
+            timeoutMs: MEDIA_READ_TIMEOUT_MS, consume: async bytes => {
+              const current = await readCurrent();
+              if (signal?.aborted || current.phase === "cancelled" || current.import.previewDigest !== media.previewDigest ||
+                  bytes.byteLength > 65536 || count + bytes.byteLength > range.length) fail("preview_changed");
+              count += bytes.byteLength; await consume(bytes);
+            } });
+          if (count !== range.length) fail("preview_changed");
+          return { sizeBytes: count };
+        };
+        if (operational) {
+          return store.withMediaReadSession(context.companyId, { userId: context.userId, signal,
+            timeoutMs: MEDIA_READ_TIMEOUT_MS }, async session => transfer(async () => {
+            authorize(context);
+            const { state } = await session.read();
+            const current = owned(state, context, id);
+            authorize(context); return current;
+          }));
+        }
+        return transfer(() => read(context, id));
       } };
     },
     async importGenerated(context, input) {

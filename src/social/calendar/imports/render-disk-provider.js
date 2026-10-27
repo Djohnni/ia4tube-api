@@ -1,4 +1,5 @@
 "use strict";
+const { MEDIA_UPLOAD_TIMEOUT_MS } = require("./media-read-timeout");
 
 // Byte-storage foundation only. No HTTP mount, decoder, FFmpeg, or production
 // activation is performed here. The caller supplies a dedicated private root.
@@ -223,8 +224,8 @@ function createRenderDiskPrivateUploadProvider({ rootDirectory, store, admission
       return { sizeBytes: count, sha256: hash.digest("hex"), md5Base64: md.digest("base64") };
     } finally { await handle.close(); }
   }
-  async function receiveBounded(stream, onChunk, timeoutMs = 30000) {
-    if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 60000 || typeof stream.destroy !== "function") fail("disk_body_invalid");
+  async function receiveBounded(stream, onChunk, timeoutMs = MEDIA_UPLOAD_TIMEOUT_MS) {
+    if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > MEDIA_UPLOAD_TIMEOUT_MS || typeof stream.destroy !== "function") fail("disk_body_invalid");
     let timer;
     const timeout = new Promise((_, reject) => {
       timer = setTimeout(() => { stream.destroy(); reject(Object.assign(new Error("disk_transfer_timeout"), { code: "disk_transfer_timeout" })); }, timeoutMs);
@@ -348,7 +349,7 @@ function createRenderDiskPrivateUploadProvider({ rootDirectory, store, admission
             if (chunk.length > MAX_CHUNK || count + chunk.length > grant.sizeBytes) fail("disk_body_size_invalid");
             count += chunk.length; sha.update(chunk); md.update(chunk);
             if (handle) await handle.writeFile(chunk);
-          }, args.timeoutMs === undefined ? 30000 : args.timeoutMs);
+          }, args.timeoutMs === undefined ? MEDIA_UPLOAD_TIMEOUT_MS : args.timeoutMs);
           if (count !== grant.sizeBytes || sha.digest("hex") !== grant.sha256 || md.digest("base64") !== grant.md5Base64) fail("disk_body_checksum_invalid");
           grantFor(await read(args), args); await held(row);
           await verifyWriteBinding(args);

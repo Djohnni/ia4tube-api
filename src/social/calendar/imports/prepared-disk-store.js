@@ -1,4 +1,5 @@
 "use strict";
+const { MEDIA_READ_TIMEOUT_MS } = require("./media-read-timeout");
 
 const fs = require("node:fs/promises"), { constants } = require("node:fs"), path = require("node:path"), crypto = require("node:crypto");
 const { inspectedMedia, previewDigest } = require("./policy");
@@ -322,8 +323,8 @@ function createPreparedDiskResultStoreInternal({ rootDirectory, preparationRoot,
   async function preview(args, rangeAllowed) {
     fields(args, ["context", "assetId", "mediaRevision", "resultRef", "target", "sha256", "signal", "timeoutMs", ...(rangeAllowed ? ["range", "consume"] : [])],
       ["context", "assetId", "mediaRevision", "resultRef", "target", "sha256"]);
-    const timeoutMs = args.timeoutMs === undefined ? 30000 : args.timeoutMs, started = performance.now();
-    if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 60000 ||
+    const timeoutMs = args.timeoutMs === undefined ? MEDIA_READ_TIMEOUT_MS : args.timeoutMs, started = performance.now();
+    if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > MEDIA_READ_TIMEOUT_MS ||
         args.signal !== undefined && !(args.signal instanceof AbortSignal)) fail("request_invalid", 400);
     function check() { if (args.signal?.aborted) fail("stream_aborted", 499); if (performance.now() - started >= timeoutMs) fail("stream_timeout", 408); }
     check();
@@ -419,8 +420,8 @@ function createPreparedDiskResultStoreInternal({ rootDirectory, preparationRoot,
     }); },
     async streamPreview(args) { return safe(async () => {
       if (typeof args?.consume !== "function") fail("request_invalid", 400);
-      const timeoutMs = args.timeoutMs === undefined ? 30000 : args.timeoutMs;
-      if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 60000 ||
+      const timeoutMs = args.timeoutMs === undefined ? MEDIA_READ_TIMEOUT_MS : args.timeoutMs;
+      if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > MEDIA_READ_TIMEOUT_MS ||
           args.signal !== undefined && !(args.signal instanceof AbortSignal)) fail("request_invalid", 400);
       const started = performance.now();
       function check() { if (args.signal?.aborted) fail("stream_aborted", 499); if (performance.now() - started >= timeoutMs) fail("stream_timeout", 408); }

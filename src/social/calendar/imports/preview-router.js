@@ -1,4 +1,5 @@
 "use strict";
+const { MEDIA_READ_TIMEOUT_MS } = require("./media-read-timeout");
 const express = require("express");
 const { isAuthenticatedSocialPrincipal } = require("../../auth-adapter");
 const { isPrivateImportPreviewService } = require("./preview-service");
@@ -24,8 +25,8 @@ function writeBounded(res, bytes, signal) {
 /** Independent authenticated read router, not mounted in production. Put before
  * the metadata router's final 404. It has no write, preparation or publish action.
  */
-function createPrivateImportPreviewRouter({ authenticate, resolvePrincipal, getService, getScheduledService, timeoutMs = 60000 } = {}) {
-  if ([authenticate, resolvePrincipal, getService].some(x => typeof x !== "function") || !Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 60000) throw new TypeError("preview_router_configuration_invalid");
+function createPrivateImportPreviewRouter({ authenticate, resolvePrincipal, getService, getScheduledService, timeoutMs = MEDIA_READ_TIMEOUT_MS } = {}) {
+  if ([authenticate, resolvePrincipal, getService].some(x => typeof x !== "function") || !Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > MEDIA_READ_TIMEOUT_MS) throw new TypeError("preview_router_configuration_invalid");
   const router = express.Router({ caseSensitive: true, strict: true });
   const limiter = createSingleProcessTransferLimiter({ maxConcurrent: 2, maxPerCompany: 2 });
   router.use((req, res, next) => {

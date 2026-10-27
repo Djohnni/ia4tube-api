@@ -8,6 +8,7 @@ const { canProductionOperation } = require("../production-operation-policy");
 const { fail } = require("./model");
 const { isPreparedCalendarMedia } = require("./imports/prepared-publication-media");
 const { requireConnectorContext } = require("../connectors/contract");
+const { calendarConnectionFromDetails } = require("./connection");
 function createCalendarPublisher({ config, connectorStore, connectorAudit, credentials, transport, media, preparedMedia = null }) {
   const allowed = context => canProductionOperation(config, context, "externalPublicationEnabled");
   const importContext = context => {
@@ -73,11 +74,7 @@ function createCalendarPublisher({ config, connectorStore, connectorAudit, crede
     },
     async connection(context) {
       const connection = await connectorStore.scope(context).getCurrentConnectionDetails();
-      if (!connection || connection.state !== "connected" || connection.health !== "healthy" ||
-          !connection.activeCredentialId || !["business", "creator"].includes(connection.account?.accountType) ||
-          !["instagram_business_basic", "instagram_business_content_publish"].every(scope => (connection.grantedScopes || []).includes(scope))) return null;
-      return { binding: { connectionId: connection.id, externalId: connection.account.externalId,
-        connectionRevision: connection.revision }, username: connection.account.username, accountType: connection.account.accountType };
+      return calendarConnectionFromDetails(connection);
     },
     async observe(context, job) {
       const current = await status(context, job.intent.publicationId);

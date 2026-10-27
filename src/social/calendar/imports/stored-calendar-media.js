@@ -5,6 +5,7 @@ const { createImportAccessPolicy } = require("./access-policy");
 const { createPreparedDiskResultReader } = require("./prepared-disk-store");
 const { parsePreviewRange } = require("./preview-service");
 const { previewDigest } = require("./policy");
+const { MEDIA_READ_TIMEOUT_MS } = require("./media-read-timeout");
 const readers = new WeakSet();
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/;
 const ID = /^[a-f0-9]{40}$/;
@@ -76,16 +77,21 @@ function createStoredCalendarMediaReader({ store, uploadStore, rootDirectory, pr
       if (actual.sha256 !== expected.sha256 || actual.mimeType !== expected.mimeType || actual.sizeBytes !== expected.sizeBytes) fail("changed", 409);
       const range = parsePreviewRange(rangeHeader, expected.sizeBytes);
       return { descriptor: expected, range, async stream(consume) {
-        let count = 0;
-        await bytes.streamPreview({ ...binding, range: { start: range.start, end: range.end }, signal,
-          consume: async chunk => {
-            const current = await read(context, id);
-            if (signal?.aborted || current.import.previewDigest !== media.previewDigest ||
-                chunk.byteLength > 65536 || count + chunk.byteLength > range.length) fail("changed", 409);
-            count += chunk.byteLength; await consume(chunk);
-          } });
-        if (count !== range.length) fail("changed", 409);
-        return { sizeBytes: count };
+        return store.withMediaReadSession(context.companyId, { userId: context.userId, signal,
+          timeoutMs: MEDIA_READ_TIMEOUT_MS }, async session => {
+          let count = 0;
+          await bytes.streamPreview({ ...binding, range: { start: range.start, end: range.end }, signal,
+            timeoutMs: MEDIA_READ_TIMEOUT_MS, consume: async chunk => {
+              if (closed) fail(); owner(context);
+              const { state } = await session.read();
+              const current = owned(state.jobs[id], context);
+              if (signal?.aborted || current.import.previewDigest !== media.previewDigest ||
+                  chunk.byteLength > 65536 || count + chunk.byteLength > range.length) fail("changed", 409);
+              count += chunk.byteLength; await consume(chunk);
+            } });
+          if (count !== range.length) fail("changed", 409);
+          return { sizeBytes: count };
+        });
       } };
     },
     close() { closed = true; }

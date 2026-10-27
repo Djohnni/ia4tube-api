@@ -1,4 +1,5 @@
 "use strict";
+const { MEDIA_UPLOAD_TIMEOUT_MS } = require("./media-read-timeout");
 
 // Local composition: no server mount, decoder, cloud task or publication.
 const { isImportAccessPolicy } = require("./access-policy");
@@ -120,8 +121,8 @@ function createRenderDiskTransferService({ store, provider, registry, accessPoli
       await currentBinding(binding);
       return structuredClone(grant);
     }); },
-    async acceptPart({ authorizationId, contentLength, md5Base64, sha256Base64, stream, timeoutMs = 30000 }) {
-      if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 60000) fail();
+    async acceptPart({ authorizationId, contentLength, md5Base64, sha256Base64, stream, timeoutMs = MEDIA_UPLOAD_TIMEOUT_MS }) {
+      if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > MEDIA_UPLOAD_TIMEOUT_MS) fail();
       const deadline = performance.now() + timeoutMs;
       function remaining() {
         const left = Math.ceil(deadline - performance.now());

@@ -1,4 +1,5 @@
 "use strict";
+const { MEDIA_READ_TIMEOUT_MS } = require("./imports/media-read-timeout");
 const express = require("express");
 const fs = require("node:fs");
 const { fail } = require("./model");
@@ -68,7 +69,7 @@ function createCalendarRouter({ authenticate, getService, logger }) {
   router.get("/media/prepared/:company/:id/:target/:publicationId/:metadataDigest/:expires/:signature", call(async (service, req, res) => {
     if (typeof service.publicMedia !== "function" || Object.keys(req.query).length || req.headers["transfer-encoding"] ||
         req.headers["content-encoding"] || req.headers["content-length"] && req.headers["content-length"] !== "0") fail("calendar_media_invalid", 404);
-    const abort = new AbortController(), timer = setTimeout(() => { abort.abort(); res.destroy(); }, 60000);
+    const abort = new AbortController(), timer = setTimeout(() => { abort.abort(); res.destroy(); }, MEDIA_READ_TIMEOUT_MS);
     const close = () => { if (!res.writableFinished) abort.abort(); };
     res.once("close", close); req.once("aborted", close);
     try {

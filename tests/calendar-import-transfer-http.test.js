@@ -257,8 +257,10 @@ test("revocation between chunks prevents the part from being committed", async t
   assert.deepEqual((await fs.readdir(path.join(f.root, row.objectKey))).sort(), ["identity.json"]);
 });
 
-test("wall deadline closes stalled registry lookup and late resolution cannot begin a writer", async t => {
-  const f = await fixture(t, { timeoutMs: 100 }), issued = await f.issue();
+test("wall deadline closes stalled registry lookup and late resolution cannot begin a writer", { timeout: 5000 }, async t => {
+  // Leave enough time for the subsequent real fsync-backed PUT on Windows;
+  // the first lookup remains blocked until its request has actually expired.
+  const f = await fixture(t, { timeoutMs: 400 }), issued = await f.issue();
   let release, started;
   const start = new Promise(resolve => { started = resolve; }), gate = new Promise(resolve => { release = resolve; });
   t.after(() => release());

@@ -1,5 +1,5 @@
 "use strict";
-const { withTransaction } = require("../../persistence/postgres/pool");
+const { withTransaction, quoteIdentifier } = require("../../persistence/postgres/pool");
 const { freshState, UUID, fail, MAX_ITEMS } = require("./model");
 const stores = new WeakSet();
 function validate(state) {
@@ -8,9 +8,154 @@ function validate(state) {
   require("./imports/calendar-submissions").validateCalendarSubmissions(state);
   return state;
 }
+const MEDIA_READ_TIMEOUT_MS = 300000;
+const mediaReadAdmissions = new WeakMap();
+function mediaReadError(code = "unavailable") {
+  return Object.assign(new Error("A leitura da mídia não pôde continuar."), {
+    code: `calendar_media_read_${code}`, statusCode: code === "aborted" ? 499 : code === "timeout" ? 408 : 503
+  });
+}
+function reserveMediaReadSlot(pool) {
+  let admission = mediaReadAdmissions.get(pool);
+  if (!admission) {
+    const maximum = pool.options?.max;
+    const limit = Number.isSafeInteger(maximum) && maximum > 0 ? Math.min(2, maximum - 1) : 2;
+    admission = { limit, active: 0, waiting: [] }; mediaReadAdmissions.set(pool, admission);
+  }
+  if (admission.limit < 1) throw mediaReadError();
+  let done = false, held = false, resolve;
+  const promise = new Promise(accept => { resolve = accept; });
+  function drain() {
+    while (admission.active < admission.limit && admission.waiting.length) admission.waiting.shift()();
+  }
+  function grant() { if (!done) { held = true; admission.active++; resolve(); } }
+  function release() {
+    if (done) return; done = true;
+    if (held) admission.active--;
+    else { const index = admission.waiting.indexOf(grant); if (index >= 0) admission.waiting.splice(index, 1); }
+    drain();
+  }
+  admission.waiting.push(grant); drain();
+  return { promise, release };
+}
+// This server-only reader supplies fresh facts, not authorization. Its callers
+// still verify the exact user/job/grant before emitting every 64 KiB block.
+async function withMediaReadSession(pool, role, companyId, options, operation) {
+  if (!UUID.test(companyId || "") || role !== "ia4tube_social_runtime" ||
+      !options || Object.getPrototypeOf(options) !== Object.prototype ||
+      Object.keys(options).some(key => !["userId", "connectionId", "signal", "timeoutMs"].includes(key)) ||
+      !UUID.test(options.userId || "") ||
+      options.connectionId !== undefined && !UUID.test(options.connectionId || "") ||
+      options.signal !== undefined && !(options.signal instanceof AbortSignal) || typeof operation !== "function") {
+    fail("calendar_owner_invalid", 403);
+  }
+  const timeoutMs = options.timeoutMs ?? MEDIA_READ_TIMEOUT_MS;
+  if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > MEDIA_READ_TIMEOUT_MS) fail("calendar_media_read_invalid", 400);
+  const company = companyId.toLowerCase(), connectionId = options.connectionId?.toLowerCase();
+  const projection = connectionId ? require("../../persistence/postgres/social-connector-store")
+    .currentConnectionReadProjection({ companyId: company, provider: "instagram", statementTime: true }) : null;
+  const sql = `SELECT calendar.document AS calendar_document, imports.document->'retention' AS import_retention,
+    ${projection ? "to_jsonb(current_connection)" : "NULL::jsonb"} AS connection
+    FROM ia4tube_calendar.owner_state calendar
+    LEFT JOIN ia4tube_calendar.import_upload_state imports ON imports.company_id=calendar.company_id
+    ${projection ? `LEFT JOIN LATERAL (${projection.text}) current_connection ON TRUE` : ""}
+    WHERE calendar.company_id=$1`;
+  let client = null, admission = null, released = false, started = false, ended = false, busy = false, stopError = null;
+  let stop;
+  const stopped = new Promise((_, reject) => { stop = reject; });
+  stopped.catch(() => {});
+  function discard(error) {
+    if (client && !released) { released = true; client.release(error); }
+  }
+  function interrupt(error) {
+    if (!stopError) { stopError = error; stop(error); }
+    discard(stopError);
+    admission?.release();
+  }
+  const onAbort = () => interrupt(mediaReadError("aborted"));
+  const onConnectionError = () => interrupt(mediaReadError());
+  function guard() {
+    if (stopError) throw stopError;
+    if (ended) throw mediaReadError("closed");
+    if (options.signal?.aborted) { onAbort(); throw stopError; }
+  }
+  const timer = setTimeout(() => interrupt(mediaReadError("timeout")), timeoutMs);
+  timer.unref?.();
+  options.signal?.addEventListener("abort", onAbort, { once: true });
+  async function query(text, values) {
+    guard();
+    try {
+      const result = await Promise.race([client.query(text, values), stopped]);
+      guard(); return result;
+    } catch (error) {
+      if (error !== stopError) interrupt(mediaReadError());
+      throw stopError;
+    }
+  }
+  async function initialize() {
+    if (client) return;
+    guard();
+    // Do not reserve a client before the file preflight: it may need the same
+    // three-client pool. Media readers share at most two slots across stores,
+    // keeping a client available for cancellation, revocation and legacy work.
+    admission = reserveMediaReadSlot(pool);
+    await Promise.race([admission.promise, stopped]); guard();
+    // A late acquisition after cancellation is discarded.
+    const acquiring = Promise.resolve().then(() => pool.connect()).then(value => {
+      if (ended || stopError) { value.release(stopError || mediaReadError("closed")); return; }
+      client = value; client.on?.("error", onConnectionError); return value;
+    });
+    try { await Promise.race([acquiring, stopped]); }
+    catch (error) { if (error !== stopError) interrupt(mediaReadError()); throw stopError; }
+    guard();
+    await query("BEGIN ISOLATION LEVEL READ COMMITTED READ ONLY"); started = true;
+    await query(`SET LOCAL ROLE ${quoteIdentifier(role)}`);
+    await query("SELECT set_config('ia4tube.company_id', $1, true), " +
+      "set_config('statement_timeout', $2, true), set_config('idle_in_transaction_session_timeout', $2, true)",
+    [company, `${timeoutMs}ms`]);
+  }
+  const session = Object.freeze({ async read() {
+    guard(); if (busy) throw mediaReadError("busy"); busy = true;
+    try {
+      await initialize();
+      const result = await query(sql, projection ? projection.values : [company]);
+      if (result.rows?.length !== 1) fail("calendar_not_found", 404);
+      const row = result.rows[0], state = validate(row.calendar_document);
+      require("./imports/retention-policy").assertCalendarRetention(state, { retention: row.import_retention });
+      const connection = projection ? projection.map(row.connection) : null;
+      if (connection && connection.id !== connectionId) fail("calendar_connection_changed", 409);
+      guard(); return structuredClone({ state, connection });
+    } finally { busy = false; }
+  } });
+  try {
+    guard();
+    const result = await Promise.race([Promise.resolve().then(() => { guard(); return operation(session); }), stopped]);
+    guard();
+    if (busy) { interrupt(mediaReadError("busy")); throw stopError; }
+    if (started) { await query("COMMIT"); started = false; }
+    return result;
+  } catch (error) {
+    if (busy) interrupt(stopError || mediaReadError());
+    if (started && !released) {
+      try { await query("ROLLBACK"); started = false; }
+      catch (_) { discard(stopError || mediaReadError()); }
+    }
+    throw error;
+  } finally {
+    ended = true; clearTimeout(timer); options.signal?.removeEventListener("abort", onAbort);
+    if (client) {
+      if (!released) { released = true; client.release(); }
+      client.removeListener?.("error", onConnectionError);
+    }
+    admission?.release();
+  }
+}
 function createCalendarStore({ pool, role }) {
   const store = Object.freeze({
     capabilities: Object.freeze({ persistence: "postgres", durable: true }),
+    withMediaReadSession(companyId, options, operation) {
+      return withMediaReadSession(pool, role, companyId, options, operation);
+    },
     async read(companyId, operation) {
       if (!UUID.test(companyId) || typeof operation !== "function") fail("calendar_owner_invalid", 403);
       return withTransaction(pool, async client => {
