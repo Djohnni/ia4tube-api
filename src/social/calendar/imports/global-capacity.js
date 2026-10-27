@@ -102,6 +102,9 @@ function createGlobalMediaCapacity({ store, enabled = false, allowVolatileForTes
   const testOnly = allowVolatileForTests && store?.capabilities?.testOnly === true && store.capabilities.atomicGlobalUpdates === true;
   const available = enabled === true && typeof store?.update === "function" && (durable || testOnly) &&
     (!requireDiskSpaceEvidence || isDiskSpaceGuard(diskSpaceGuard, { allowVolatileForTests }));
+  const transactionalEvidence = requireDiskSpaceEvidence && durable && store?.capabilities?.transactionalDiskSpaceEvidence === true &&
+    typeof store.updateWithDiskSpaceEvidence === "function" &&
+    require("./postgres-global-capacity-store").isPostgresGlobalCapacityStore(store);
   function check(context) { coordinator(context); if (!available) fail("unavailable", 503); }
   function now() { const value = clock(); if (!integer(value)) fail("clock_invalid", 503); return value; }
   function physicalStorage(state, incomingBytes, evidence) {
@@ -115,6 +118,19 @@ function createGlobalMediaCapacity({ store, enabled = false, allowVolatileForTes
   async function update(context, operation) {
     check(context);
     return store.update(state => { validateGlobalCapacityState(state); const result = operation(state); validateGlobalCapacityState(state); return result; });
+  }
+  function updateWithPhysicalEvidence(context, evidence, operation) {
+    check(context);
+    if (!transactionalEvidence) return update(context, state => operation(state, evidence));
+    // Refreshing after a database wait must not legitimize a forged, mismatched
+    // or already-expired caller token. Validate it before the first await.
+    try { assertDiskSpaceEvidence(evidence, { guard: diskSpaceGuard, allowVolatileForTests }); }
+    catch (_) { fail("disk_space_evidence_invalid", 503); }
+    return store.updateWithDiskSpaceEvidence((state, freshEvidence) => {
+      validateGlobalCapacityState(state);
+      const result = operation(state, freshEvidence);
+      validateGlobalCapacityState(state); return result;
+    }, diskSpaceGuard);
   }
   function get(state, jobId) { if (!UUID.test(jobId || "") || !Object.hasOwn(state.jobs, jobId)) fail("job_not_found", 404); return state.jobs[jobId]; }
   function exactOwner(job, request) {
@@ -163,12 +179,12 @@ function createGlobalMediaCapacity({ store, enabled = false, allowVolatileForTes
       check(context);
       if (![jobId, companyId, userId].every(value => UUID.test(value || "")) || !HASH.test(requestDigest || "") ||
           !integer(storageBytes, 1) || !integer(sourceBytes, 1) || sourceBytes > storageBytes) fail("request_invalid", 400);
-      return update(context, state => {
+      return updateWithPhysicalEvidence(context, diskSpaceEvidence, (state, freshEvidence) => {
         const prior = state.jobs[jobId];
         if (prior) {
           exactOwner(prior, { companyId, userId, requestDigest });
           if (prior.purpose !== "storage" || prior.storageBytes !== storageBytes || prior.sourceBytes !== sourceBytes) fail("reservation_conflict");
-          physicalStorage(state, 0, diskSpaceEvidence);
+          physicalStorage(state, 0, freshEvidence);
           return receipt(prior);
         }
         if (state.paused) fail("paused");
@@ -176,7 +192,7 @@ function createGlobalMediaCapacity({ store, enabled = false, allowVolatileForTes
         const time = now(), month = new Date(time).toISOString().slice(0, 7);
         if (usage(state, month).storageBytes + storageBytes > budget.globalStorageBytes ||
             usage(state, month, companyId).storageBytes + storageBytes > budget.companyStorageBytes) fail("storage_exceeded");
-        physicalStorage(state, storageBytes, diskSpaceEvidence);
+        physicalStorage(state, storageBytes, freshEvidence);
         const job = { jobId, companyId, userId, requestDigest, storageBytes, sourceBytes, runtimeBudgetMs: 0, purpose: "storage",
           state: "storage_reserved", storageHeld: true, heldBytes: storageBytes, storageSettlements: {}, month, quotaMonths: [month],
           createdAt: time, sequence: ++state.sequence, dispatchSequence: 0, leaseToken: null, cleanupProof: null };
@@ -185,13 +201,14 @@ function createGlobalMediaCapacity({ store, enabled = false, allowVolatileForTes
     },
     async assertHeld({ context, jobId, companyId, userId, requestDigest, intent = "write", diskSpaceEvidence }) {
       if (!["write", "read"].includes(intent)) fail("request_invalid", 400);
-      return update(context, state => {
+      const operation = (state, evidence) => {
         const job = get(state, jobId); exactOwner(job, { companyId, userId, requestDigest });
         if (!job.storageHeld) fail("storage_not_held");
         if (intent === "write" && !["queued", "running", "storage_reserved"].includes(job.state)) fail("writes_not_allowed");
-        if (intent === "write") physicalStorage(state, 0, diskSpaceEvidence);
+        if (intent === "write") physicalStorage(state, 0, evidence);
         return receipt(job);
-      });
+      };
+      return intent === "write" ? updateWithPhysicalEvidence(context, diskSpaceEvidence, operation) : update(context, operation);
     },
     async acquireNext({ context, expectedJobId } = {}) {
       if (expectedJobId !== undefined && !UUID.test(expectedJobId || "")) fail("request_invalid", 400);

@@ -1,7 +1,9 @@
 "use strict";
 const { withTransaction } = require("../../../persistence/postgres/pool");
 const { validateGlobalCapacityState } = require("./global-capacity");
+const { isDiskSpaceGuard, assertDiskSpaceEvidence } = require("./disk-space-guard");
 const ROLE = "ia4tube_media_capacity_runtime";
+const instances = new WeakSet();
 function fail(code) {
   const error = new Error(`media_capacity_${code}`); error.code = error.message; error.statusCode = 503; throw error;
 }
@@ -59,8 +61,8 @@ function createPostgresGlobalCapacityStore({ pool, role = ROLE } = {}) {
         row.creatable || row.insertable || row.deletable || row.truncatable || row.tenant_access || row.tenant_data_access) fail("schema_not_ready");
     return true;
   }
-  return Object.freeze({
-    capabilities: Object.freeze({ persistence: "durable", atomicGlobalUpdates: true }),
+  const store = Object.freeze({
+    capabilities: Object.freeze({ persistence: "durable", atomicGlobalUpdates: true, transactionalDiskSpaceEvidence: true }),
     async verify() { return transaction(verifyClient); },
     async update(operation) {
       if (typeof operation !== "function" || operation.constructor?.name === "AsyncFunction") fail("async_transaction_forbidden");
@@ -78,7 +80,32 @@ function createPostgresGlobalCapacityStore({ pool, role = ROLE } = {}) {
           SET document=$1::jsonb,revision=revision+1,updated_at=CURRENT_TIMESTAMP WHERE singleton=1`, [after]);
         return structuredClone(result);
       }); // Existing helper commits before resolving, never blindly replays an uncertain commit.
+    },
+    async updateWithDiskSpaceEvidence(operation, guard) {
+      if (typeof operation !== "function" || operation.constructor?.name === "AsyncFunction") fail("async_transaction_forbidden");
+      if (!isDiskSpaceGuard(guard)) fail("disk_space_guard_invalid");
+      return transaction(async client => {
+        await verifyClient(client);
+        const found = await client.query("SELECT document FROM ia4tube_calendar.global_media_capacity WHERE singleton=1 FOR UPDATE");
+        if (found.rows?.length !== 1) fail("schema_not_ready");
+        const state = validateGlobalCapacityState(found.rows[0].document), before = JSON.stringify(state);
+        // Connection setup, role/schema checks and lock contention must not age
+        // the physical observation. Keep its original one-second validity and
+        // sample only after those waits, immediately before the synchronous use.
+        let evidence;
+        try { evidence = await guard.sample(); assertDiskSpaceEvidence(evidence, { guard }); }
+        catch (_) { fail("disk_space_evidence_invalid"); }
+        const result = operation(state, evidence);
+        if (result && typeof result.then === "function") { Promise.resolve(result).catch(() => {}); fail("async_transaction_forbidden"); }
+        validateGlobalCapacityState(state);
+        const after = JSON.stringify(state);
+        if (after !== before) await client.query(`UPDATE ia4tube_calendar.global_media_capacity
+          SET document=$1::jsonb,revision=revision+1,updated_at=CURRENT_TIMESTAMP WHERE singleton=1`, [after]);
+        return structuredClone(result);
+      });
     }
   });
+  instances.add(store); return store;
 }
-module.exports = { createPostgresGlobalCapacityStore };
+function isPostgresGlobalCapacityStore(value) { return instances.has(value); }
+module.exports = { createPostgresGlobalCapacityStore, isPostgresGlobalCapacityStore };
