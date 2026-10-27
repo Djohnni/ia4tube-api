@@ -9,7 +9,7 @@ function fail(code) { throw Object.assign(new Error(`calendar_import_access_${co
   code: `calendar_import_access_${code}`, statusCode: code === "configuration_invalid" ? 503 : 403
 }); }
 function createImportAccessPolicy({ mode = "owner_pilot", allowedOwners = [], isEligible = () => true } = {}) {
-  if (!["owner_pilot", "multi_company"].includes(mode) || !Array.isArray(allowedOwners) ||
+  if (!["owner_pilot", "multi_company", "ready_video"].includes(mode) || !Array.isArray(allowedOwners) ||
       allowedOwners.length > (mode === "owner_pilot" ? 1 : 1000) || typeof isEligible !== "function") fail("configuration_invalid");
   const seen = new Set(), companyAudiences = new Map();
   const owners = allowedOwners.map(value => {
@@ -18,6 +18,7 @@ function createImportAccessPolicy({ mode = "owner_pilot", allowedOwners = [], is
       audience: value.audience ?? (mode === "owner_pilot" ? "owner_pilot" : null) };
     const key = `${owner.companyId}:${owner.userId}`;
     if (!["owner_pilot", "customers"].includes(owner.audience) || mode === "owner_pilot" && owner.audience !== "owner_pilot" ||
+        mode === "ready_video" && owner.audience !== "customers" ||
         seen.has(key) || companyAudiences.has(owner.companyId) && companyAudiences.get(owner.companyId) !== owner.audience) fail("configuration_invalid");
     seen.add(key); companyAudiences.set(owner.companyId, owner.audience);
     return Object.freeze(owner);
@@ -46,7 +47,9 @@ function createImportAccessPolicy({ mode = "owner_pilot", allowedOwners = [], is
   const policy = Object.freeze({ mode, configured: owners.length > 0,
     // Do not change this based only on a caller-supplied capabilities boolean.
     // reserve/acquire/settle must be wired before enabling customer dispatch.
-    executionAvailable: mode === "owner_pilot" && owners.length === 1,
+    // ready_video has a distinct host composition with a shared durable capacity
+    // ledger around both worker types. The old multi_company candidate stays shut.
+    executionAvailable: mode === "owner_pilot" && owners.length === 1 || mode === "ready_video" && owners.length > 0,
     resolve });
   policies.add(policy);
   return policy;

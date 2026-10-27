@@ -86,6 +86,9 @@ function createCalendarSubmissions({ store, uploadStore, preparation, grants, ac
         !UUID.test(input.assetId || "") || !UUID.test(input.uploadId || "") || !KEY.test(input.idempotencyKey || "") ||
         !Number.isSafeInteger(input.expectedMediaRevision) || input.expectedMediaRevision < 0) fail("invalid", 400);
     const chosen = selection(input.selection), explicitCaption = input.caption === undefined ? null : caption(input.caption), schedule = requestedSchedule(input.schedule);
+    // A host profile may support fewer transformations than the shared Android
+    // contract. Reject those before accepting an irreversible calendar intent.
+    if (typeof preparation.validateSelection === "function") await preparation.validateSelection(context, chosen);
     // Keep the exact legacy hash for absent/null schedules, so old durable
     // intentions still recover after this additive contract update.
     const clientHash = hash([input.assetId, input.uploadId, input.idempotencyKey, input.expectedMediaRevision, chosen, explicitCaption,

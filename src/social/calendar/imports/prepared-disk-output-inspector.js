@@ -1,6 +1,7 @@
 "use strict";
 const fs = require("node:fs/promises"), path = require("node:path"), sharp = require("sharp");
 const { runBoundedProcess, parseProbe, decodedSeconds } = require("./preparation");
+const { NATIVE_READY_VIDEO_PROFILE, inspectNativeReadyVideo } = require("./native-ready-video");
 const inspectors = new WeakSet();
 function fail() { throw Object.assign(new Error("prepared_disk_inspection_invalid"), { code: "prepared_disk_inspection_invalid" }); }
 function parsePreparedOutputProbe(text) {
@@ -12,21 +13,25 @@ function parsePreparedOutputProbe(text) {
   const checked = parseProbe(text.replace(duration[0], "Duration: 00:00:01.00"), "video");
   return { ...checked, durationSeconds: seconds };
 }
-function createPreparedDiskOutputInspector({ ffmpegPath, processExecutor, workingDirectory, workflowBridge } = {}) {
+function createPreparedDiskOutputInspector({ ffmpegPath, ffprobePath, processExecutor, workingDirectory, workflowBridge, nativeProfile } = {}) {
+  if (nativeProfile !== undefined && nativeProfile !== NATIVE_READY_VIDEO_PROFILE) fail();
   if (workflowBridge !== undefined) {
-    if (ffmpegPath !== undefined || processExecutor !== undefined || workingDirectory !== undefined ||
+    if (ffmpegPath !== undefined || ffprobePath !== undefined || nativeProfile !== undefined || processExecutor !== undefined || workingDirectory !== undefined ||
         !require("./workflow-private-transfer").isWorkflowPrivateBridge(workflowBridge)) fail();
     const inspector = Object.freeze({ capabilities: Object.freeze({ actualInspection: true, testOnly: false, imageDecode: true,
       videoDecode: true, remoteReceipt: true }), inspectFile: query => workflowBridge.inspectFile(query) });
     inspectors.add(inspector); return inspector;
   }
   if (ffmpegPath !== undefined && (!path.isAbsolute(ffmpegPath || "") || /^[/\\]{2}/.test(ffmpegPath))) fail();
-  if (processExecutor !== undefined && !require("./media-process-executor").isMediaProcessExecutor(processExecutor)) fail();
+  if (ffprobePath !== undefined && (!path.isAbsolute(ffprobePath || "") || /^[/\\]{2}/.test(ffprobePath))) fail();
+  if (processExecutor !== undefined && !require("./media-process-executor").isMediaProcessExecutor(processExecutor) &&
+      !(nativeProfile === NATIVE_READY_VIDEO_PROFILE && require("./ready-video-process-executor").isReadyVideoProcessExecutor(processExecutor))) fail();
   if (workingDirectory !== undefined && (!path.isAbsolute(workingDirectory || "") || /^[/\\]{2}/.test(workingDirectory) || /[\0\r\n]/.test(workingDirectory))) fail();
   const inspector = Object.freeze({
     capabilities: Object.freeze({ actualInspection: true, testOnly: false, imageDecode: true, videoDecode: Boolean(ffmpegPath) }),
     async inspectFile({ filePath, descriptor, timeoutMs = 30000 }) {
-      if (processExecutor) return processExecutor.inspectPreparedFile({ filePath, descriptor, timeoutMs });
+      if (descriptor?.nativeProfile !== undefined && (nativeProfile !== NATIVE_READY_VIDEO_PROFILE || descriptor.nativeProfile !== nativeProfile || descriptor.mimeType !== "video/mp4")) fail();
+      if (processExecutor) return processExecutor.inspectPreparedFile({ filePath, descriptor, timeoutMs, ...(nativeProfile ? { nativeProfile } : {}) });
       try {
         if (!path.isAbsolute(filePath || "") || !Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 30000) fail();
         const start = performance.now(), remaining = () => {
@@ -58,6 +63,12 @@ function createPreparedDiskOutputInspector({ ffmpegPath, processExecutor, workin
             durationSeconds: null, hasAudio: false };
         }
         if (descriptor.mimeType !== "video/mp4" || !ffmpegPath) fail();
+        if (descriptor.nativeProfile === NATIVE_READY_VIDEO_PROFILE) {
+          if (!ffprobePath) fail();
+          const result = await inspectNativeReadyVideo({ filePath, ffmpegPath, ffprobePath, timeoutMs: remaining() });
+          if (result.size !== descriptor.size || descriptor.sha256 !== undefined && result.sha256 !== descriptor.sha256) fail();
+          return result;
+        }
         const executable = await fs.lstat(ffmpegPath);
         if (!executable.isFile() || executable.isSymbolicLink() || path.resolve(await fs.realpath(ffmpegPath)) !== path.resolve(ffmpegPath)) fail();
         const common = ["-hide_banner", "-nostdin", "-nostats", "-max_alloc", "67108864", "-protocol_whitelist", "file,pipe",

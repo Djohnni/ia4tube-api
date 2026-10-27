@@ -11,14 +11,14 @@ const instances = new WeakSet();
 const context = Object.freeze({ authenticated: true, role: "calendar_media_capacity_coordinator" });
 function fail(code = "unavailable") { throw Object.assign(new Error(`operational_preparation_${code}`), { code: `operational_preparation_${code}` }); }
 function createOperationalPreparationRunner({ store, owner, capacity, admission, accessPolicy, getWorker,
-  enabled = false, syntheticMediaForLocalTests = false, clock = Date.now, canLaunch = () => true } = {}) {
+  enabled = false, syntheticMediaForLocalTests = false, clock = Date.now, canLaunch = () => true, executionMode = "synchronous" } = {}) {
   if (!["win32", "linux"].includes(process.platform)) fail("platform_unvalidated");
   if (enabled !== true || store?.capabilities?.persistence !== "durable" || capacity?.capabilities?.persistence !== "durable" ||
       capacity.capabilities.atomicGlobalReservations !== true || !isPreparedDiskAdmission(admission) ||
       !isImportAccessPolicy(accessPolicy) || !accessPolicy.executionAvailable || typeof getWorker !== "function" ||
-      typeof syntheticMediaForLocalTests !== "boolean" || typeof canLaunch !== "function" ||
+      typeof syntheticMediaForLocalTests !== "boolean" || typeof canLaunch !== "function" || !["synchronous", "background"].includes(executionMode) ||
       !["inspect", "acquireNext", "recordCompletion", "closeNeverLaunched"].every(key => typeof capacity[key] === "function")) fail("configuration_invalid");
-  const journal = createPreparationExecutionJournal({ store, owner, clock });
+  const journal = createPreparationExecutionJournal({ store, owner, clock }), background = new Set();
   const binding = journal.capabilities.owner;
   function allowed() { accessPolicy.resolve({ authenticated: true, ...binding }); }
   allowed();
@@ -87,16 +87,24 @@ function createOperationalPreparationRunner({ store, owner, capacity, admission,
       return publicResponse(await observeResult(record, { executionId: record.executionId, state: "failed", elapsedMs: 0,
         termination: { proved: true, descendants: 0, proofId: crypto.createHash("sha256").update(`launcher-not-invoked:${record.executionId}:${task.executionDigest}`).digest("hex") } }));
     }
-    try {
-      const observed = await actualWorker.execute(task, { executionId: record.executionId, resultRef: record.resultRef });
-      return publicResponse(await observeResult(record, observed));
-    } catch (_) {
-      // An exception is not evidence that a child or remote task was stopped.
-      // Preserve the slot and original identity; recovery only observes it.
-      return publicResponse(await unknown(record));
+    const launch = async () => {
+      try {
+        const observed = await actualWorker.execute(task, { executionId: record.executionId, resultRef: record.resultRef });
+        return publicResponse(await observeResult(record, observed));
+      } catch (_) {
+        // An exception is not evidence that a child or remote task was stopped.
+        return publicResponse(await unknown(record));
+      }
+    };
+    if (executionMode === "background") {
+      const pending = Promise.resolve().then(launch); background.add(pending);
+      pending.catch(() => {}).finally(() => background.delete(pending));
+      return publicResponse(record);
     }
+    return launch();
   }
-  async function lookup({ dispatchKey, executionDigest } = {}) {
+  async function lookup({ companyId, userId, dispatchKey, executionDigest } = {}) {
+    if (companyId !== undefined && companyId !== binding.companyId || userId !== undefined && userId !== binding.userId) fail("owner_invalid");
     let record = await journal.getByKey({ dispatchKey, executionDigest });
     if (!record) return { dispatchKey, executionDigest, state: "not_found", authoritative: true };
     // Cleanup/settlement is still required after an owner is revoked, but this
@@ -114,6 +122,7 @@ function createOperationalPreparationRunner({ store, owner, capacity, admission,
       authoritativeLookup: true, maxRuntimeMs: 180000, hardTermination: true,
       host: "separate_media_executor", syntheticMediaForLocalTests, remoteWorkflowVerified: false, readyForProduction: false }),
     dispatch, getByKey: lookup,
+    async drain() { await Promise.allSettled([...background]); },
     async resumePending({ limit = 1 } = {}) {
       const pending = await journal.pending({ limit }), results = [];
       // Finite serial work only. A caller chooses when to run another tick.

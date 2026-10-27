@@ -3,7 +3,8 @@ const path = require("node:path"), { isMediaProcessExecutor } = require("./media
 const { validateDiskInspectionTask } = require("./disk-inspection-worker");
 const s = require("./process-disk-worker-support"), instances = new WeakSet();
 function createProcessDiskInspectionWorker({ provider, workingDirectory, executor, assertExecutionHeld, clock = Date.now } = {}) {
-  if (typeof provider?.streamSealedObject !== "function" || !path.isAbsolute(workingDirectory || "") || !isMediaProcessExecutor(executor) ||
+  if (typeof provider?.streamSealedObject !== "function" || !path.isAbsolute(workingDirectory || "") ||
+      !(isMediaProcessExecutor(executor) || require("./ready-video-process-executor").isReadyVideoProcessExecutor(executor)) ||
       !(executor.capabilities.supported || executor.capabilities.platform === "linux" && executor.capabilities.validationOnly && executor.capabilities.hardTermination) ||
       typeof assertExecutionHeld !== "function") s.fail("configuration_invalid");
   const root = path.resolve(workingDirectory), active = new Set(), filename = "snapshot.bin";

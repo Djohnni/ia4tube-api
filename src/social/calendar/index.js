@@ -26,6 +26,7 @@ async function createProductionCalendar(dependencies, ports) {
         correlationId: crypto.randomUUID(), auditEventId: crypto.randomUUID() });
     };
     if (dependencies.importsRuntimeFactory !== undefined) {
+      try {
       // Production never accepts the local transport opt-in, even a genuine one.
       if (!isOperationalCalendarImportsRuntimeFactory(dependencies.importsRuntimeFactory)) fail("calendar_import_runtime_invalid", 503);
       imports = await dependencies.importsRuntimeFactory({ store, grants, secret: dependencies.secret,
@@ -45,11 +46,17 @@ async function createProductionCalendar(dependencies, ports) {
           if (!current || current.revision !== job.revision || current.phase === "cancelled") fail("calendar_import_source_changed");
           return { bytes, mimeType: "image/jpeg" };
         } });
+      } catch (error) {
+        if (typeof dependencies.onImportsUnavailable !== "function") throw error;
+        await dependencies.onImportsUnavailable(error);
+        imports = null;
+      }
     }
     publisher = createCalendarPublisher({ ...ports, media, preparedMedia: imports?.preparedMedia });
     const storedImportMedia = imports ? null : require("./imports/stored-calendar-media").createStoredCalendarMediaReader({ store,
       uploadStore: require("./imports/postgres-store").createImportUploadPostgresStore({ pool: ports.pool, role: ports.role }),
-      rootDirectory: "/var/data/private/calendar-media/uploads", preparationRoot: "/var/data/private/calendar-media/prepared", clock: dependencies.clock });
+      rootDirectory: "/var/data/private/calendar-media/uploads", preparationRoot: "/var/data/private/calendar-media/prepared",
+      nativeProfile: require("./imports/native-ready-video").NATIVE_READY_VIDEO_PROFILE, clock: dependencies.clock });
     const calendar = createCalendarService({ ...dependencies, ...ports, store, source, media, grants, publisher,
       importScheduling: imports?.scheduling, importReading: storedImportMedia });
     return Object.freeze({ ...calendar, imports: imports || null, storedImportMedia,

@@ -6,7 +6,8 @@ const s = require("./process-disk-worker-support"), workers = new WeakSet();
 function createProcessDiskPreparationWorker({ provider, workingDirectory, preparationRoot, resultStore, admission, executor,
   musicRoot, resolveMusicTrack, allowSyntheticForTests = false, allowVolatileForTests = false, clock = Date.now } = {}) {
   if (typeof provider?.streamSealedObject !== "function" || !path.isAbsolute(workingDirectory || "") || !path.isAbsolute(preparationRoot || "") ||
-      !isMediaProcessExecutor(executor) || !(executor.capabilities.supported || executor.capabilities.platform === "linux" && executor.capabilities.validationOnly && executor.capabilities.hardTermination) ||
+      !(isMediaProcessExecutor(executor) || require("./ready-video-process-executor").isReadyVideoProcessExecutor(executor)) ||
+      !(executor.capabilities.supported || executor.capabilities.platform === "linux" && executor.capabilities.validationOnly && executor.capabilities.hardTermination) ||
       !isPreparedDiskAdmission(admission, { allowVolatileForTests }) || !isPreparedDiskResultStore(resultStore, { allowVolatileForTests })) s.fail("configuration_invalid");
   const root = path.resolve(workingDirectory), outputRoot = path.resolve(preparationRoot), active = new Set();
   const filename = task => `${task.uploadId}.${task.selection.kind === "video" ? "mp4" : "png"}`;

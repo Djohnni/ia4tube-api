@@ -5,6 +5,7 @@ const { inspectedMedia, previewDigest } = require("./policy");
 const { isImportAccessPolicy } = require("./access-policy");
 const { isPreparedDiskAdmission } = require("./prepared-disk-admission");
 const { createPreparedDiskOutputInspector, isPreparedDiskOutputInspector } = require("./prepared-disk-output-inspector");
+const { NATIVE_READY_VIDEO_PROFILE, NATIVE_METADATA_FIELDS, isNativeReadyVideoMetadata } = require("./native-ready-video");
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/;
 const HASH = /^[a-f0-9]{64}$/;
 const BINDING = ["companyId", "userId", "assetId", "mediaRevision", "resultRef", "dispatchKey", "executionDigest"];
@@ -99,9 +100,9 @@ async function digestFile(value, part, consume, expectedIdentity, check = () => 
 async function exists(value) { try { await fs.lstat(value); return true; } catch (error) { if (error.code === "ENOENT") return false; throw error; } }
 
 function createPreparedDiskResultStoreInternal({ rootDirectory, preparationRoot, tenantStore, admission, accessPolicy,
-  outputInspector, enabled = false, allowVolatileForTests = false, clock = Date.now } = {}, readOnly = false) {
+  outputInspector, enabled = false, allowVolatileForTests = false, clock = Date.now, nativeProfile } = {}, readOnly = false) {
   const root = localRoot(rootDirectory), preparedRoot = localRoot(preparationRoot);
-  if (root === preparedRoot || typeof clock !== "function") fail("configuration_invalid");
+  if (root === preparedRoot || typeof clock !== "function" || nativeProfile !== undefined && nativeProfile !== NATIVE_READY_VIDEO_PROFILE) fail("configuration_invalid");
   if (!readOnly && outputInspector === undefined) outputInspector = createPreparedDiskOutputInspector();
   const testOnly = tenantStore?.capabilities?.persistence !== "durable" || !readOnly && admission?.capabilities?.testOnly === true;
   const available = Boolean(enabled && isImportAccessPolicy(accessPolicy) &&
@@ -168,6 +169,10 @@ function createPreparedDiskResultStoreInternal({ rootDirectory, preparationRoot,
         (Math.abs(inspected.durationSeconds - expected.durationSeconds) > 0.25 || inspected.hasAudio !== expected.hasAudio)) fail("source_changed", 422);
     const sourceInspection = { ...inspected, decoded: true, ...(task.selection.kind === "image" ? { frames: 1 } : { colorMode: "sdr" }) };
     function part(value, target) {
+      const native = value?.nativeProfile !== undefined;
+      if (native && (nativeProfile !== NATIVE_READY_VIDEO_PROFILE || !isNativeReadyVideoMetadata(value) ||
+          task.selection.kind !== "video" || value.audioMode !== "original" || value.musicSha256 != null || value.sha256 !== task.source.sha256 ||
+          value.size !== task.source.sizeBytes)) fail("descriptor_invalid", 422);
       if (!object(value) || !HASH.test(value.sha256 || "") || value.sourceSha256 !== task.source.sha256 ||
           !["image/jpeg", "video/mp4"].includes(value.mimeType) || value.width !== 1080 || value.height !== (target === "feed" ? 1350 : 1920) ||
           !Number.isSafeInteger(value.size) || value.size < 1 || value.size > (value.mimeType === "image/jpeg" ? 8 : 100) * 1024 ** 2 ||
@@ -175,10 +180,11 @@ function createPreparedDiskResultStoreInternal({ rootDirectory, preparationRoot,
           value.fileName !== `${value.sha256}.${value.mimeType === "image/jpeg" ? "jpg" : "mp4"}` ||
           (value.mimeType === "image/jpeg" ? value.durationSeconds != null || value.hasAudio || value.audioMode !== "none" :
             !Number.isFinite(value.durationSeconds) || value.durationSeconds <= 0 || value.durationSeconds > 60.25 ||
-            value.videoCodec !== "h264" || value.audioCodec !== (value.hasAudio ? "aac" : null) || value.color !== "bt709" || value.fps !== 30) ||
+             value.videoCodec !== "h264" || value.audioCodec !== (value.hasAudio ? "aac" : null) ||
+             !native && (value.color !== "bt709" || value.fps !== 30)) ||
           value.musicSha256 !== undefined && !HASH.test(value.musicSha256)) fail("descriptor_invalid", 422);
       return Object.fromEntries(["mimeType", "width", "height", "sourceSha256", "durationSeconds", "audioMode", "hasAudio", "fileName", "sha256", "size",
-        "musicSha256", "videoCodec", "audioCodec", "color", "fps"].filter(key => value[key] !== undefined).map(key => [key, value[key]]));
+        "musicSha256", "videoCodec", "audioCodec", "color", "fps", ...(native ? NATIVE_METADATA_FIELDS : [])].filter(key => value[key] !== undefined).map(key => [key, value[key]]));
     }
     const variants = Object.fromEntries(Object.entries(value.variants).map(([target, descriptor]) => {
       if (!["feed", "story", "reel"].includes(target)) fail("descriptor_invalid", 422); return [target, part(descriptor, target)];
@@ -227,7 +233,8 @@ function createPreparedDiskResultStoreInternal({ rootDirectory, preparationRoot,
     if (decode) {
       const result = await outputInspector.inspectFile({ filePath: filename, descriptor: part, timeoutMs: remaining() });
       validateInspection(part, result);
-      inspection = { ...result, sha256: part.sha256, sizeBytes: part.size };
+      const { size, ...certificate } = result;
+      inspection = { ...certificate, sha256: part.sha256, sizeBytes: part.size };
       await digestFile(filename, part, undefined, identity, check);
     }
     return decode ? { identity, inspection } : identity;
@@ -237,6 +244,8 @@ function createPreparedDiskResultStoreInternal({ rootDirectory, preparationRoot,
           result.hasAudio !== part.hasAudio || (part.mimeType === "image/jpeg" ? result.durationSeconds != null :
             !Number.isFinite(result.durationSeconds) || result.durationSeconds > 60.25 || Math.abs(result.durationSeconds - part.durationSeconds) > 0.25 ||
             result.videoCodec !== part.videoCodec || result.audioCodec !== part.audioCodec || result.color !== part.color || result.fps !== part.fps)) fail("inspection_invalid", 422);
+      if (part.nativeProfile !== undefined && (!isNativeReadyVideoMetadata(result) ||
+          NATIVE_METADATA_FIELDS.some(key => result[key] !== part[key]))) fail("inspection_invalid", 422);
   }
   function inspectionBudget(task, elapsedMs, start) {
     return () => {
@@ -259,7 +268,8 @@ function createPreparedDiskResultStoreInternal({ rootDirectory, preparationRoot,
         !equal(Object.keys(saved.inspection.files).sort(), [...allFiles(prepared).keys()].sort())) fail("manifest_invalid", 422);
     for (const part of allFiles(prepared).values()) {
       const proof = saved.inspection.files[part.fileName];
-      fields(proof, ["decoded", "mimeType", "width", "height", "durationSeconds", "hasAudio", "videoCodec", "audioCodec", "color", "fps", "sha256", "sizeBytes"],
+      fields(proof, ["decoded", "mimeType", "width", "height", "durationSeconds", "hasAudio", "videoCodec", "audioCodec", "color", "fps", "sha256", "sizeBytes",
+        ...(part.nativeProfile ? NATIVE_METADATA_FIELDS : [])],
         ["decoded", "mimeType", "width", "height", "durationSeconds", "hasAudio", "sha256", "sizeBytes"]);
       if (proof.sha256 !== part.sha256 || proof.sizeBytes !== part.size) fail("manifest_invalid", 422);
       validateInspection(part, proof);

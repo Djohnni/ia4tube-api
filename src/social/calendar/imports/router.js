@@ -165,7 +165,9 @@ function createCalendarImportRouter({ authenticate, resolvePrincipal, getService
     const status = parse ? (error.type === "entity.too.large" ? 413 : 400) :
       known && [400, 401, 403, 404, 409, 413, 415, 422, 429, 503].includes(error.statusCode) ? error.statusCode : 503;
     res.status(status).json({ ok: false, code: parse ? "import_request_invalid" : known ? error.code : "import_unavailable",
-      error: "Não foi possível concluir. Confira o estado do envio antes de tentar novamente." });
+      error: error?.code === "calendar_import_ready_video_original_required"
+        ? "Selecione um vídeo MP4 pronto e mantenha o áudio original."
+        : "Não foi possível concluir. Confira o estado do envio antes de tentar novamente." });
   });
   return router;
 }

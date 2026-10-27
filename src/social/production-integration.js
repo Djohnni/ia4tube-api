@@ -63,12 +63,86 @@ async function closeProductionResources(steps) {
   }
   if (failed) refuse("social_startup_cleanup_failed");
 }
+async function initializeProductionReadyVideo({ env, ports, dependencies, rootDirectory = "/var/data/private/calendar-media" }) {
+  if (env.SOCIAL_READY_VIDEO_IMPORTS_ENABLED === undefined || env.SOCIAL_READY_VIDEO_IMPORTS_ENABLED === "false") return null;
+  let capacityPool, transferPool, video, closePromise, closed = false;
+  function report(code) {
+    try {
+      const pending = dependencies.logger?.warn?.({ component: "calendar_ready_video", code });
+      if (pending && typeof pending.then === "function") pending.catch(() => {});
+    } catch { /* Diagnostics never disable the existing product paths. */ }
+  }
+  function close() {
+    if (!closePromise) {
+      closed = true;
+      closePromise = closeProductionResources([
+        async () => { const state = video; video = null; await state?.close(); },
+        async () => { const pool = capacityPool; capacityPool = null; await pool?.end(); },
+        async () => { const pool = transferPool; transferPool = null; await pool?.end(); }
+      ]);
+    }
+    return closePromise;
+  }
+  async function unavailable() {
+    report("calendar_ready_video_unavailable");
+    try { await close(); } catch { report("calendar_ready_video_cleanup_failed"); }
+  }
+  try {
+    // This optional flag is intentionally not part of the API's fatal startup
+    // boundary. A malformed/unready video setup closes only this feature.
+    const { loadReadyVideoConfig, loadReadyVideoPoolConfigs } = require("./calendar/imports/ready-video-config");
+    const config = loadReadyVideoConfig(env);
+    if (!config.enabled) return null;
+    if (env.SOCIAL_MEDIA_IMPORTS_ENABLED === "true" || dependencies.importsRuntimeFactory !== undefined ||
+        typeof dependencies.readClients !== "function" || typeof ports.identity !== "function") refuse("ready_video_configuration_invalid");
+    const subjects = new Map();
+    function active(subject) {
+      const clients = dependencies.readClients();
+      const client = clients && Object.hasOwn(clients, subject) ? clients[subject] : null;
+      return Boolean(client && client.ativo === true && !(client.cadastro_automatico === true && client.conta_finalizada !== true));
+    }
+    function resolveOwnerForSubject(subject) {
+      if (!config.subjects.includes(subject) || !active(subject)) refuse("ready_video_owner_unavailable");
+      const owner = ports.identity(subject, subject);
+      if (!owner?.companyId || !owner?.userId) refuse("ready_video_owner_unavailable");
+      subjects.set(`${owner.companyId}:${owner.userId}`, subject);
+      return owner;
+    }
+    for (const subject of config.subjects) resolveOwnerForSubject(subject);
+    const fs = require("node:fs/promises"), path = require("node:path");
+    const root = path.resolve(rootDirectory), work = path.join(root, "ready-video");
+    const uploads = path.join(root, "uploads"), prepared = path.join(root, "prepared"),
+      inspection = path.join(work, "inspection"), preparation = path.join(work, "preparation"), codec = path.join(work, "codec");
+    for (const directory of [root, uploads, prepared, work, inspection, preparation, codec]) {
+      await fs.mkdir(directory, { recursive: true, mode: 0o700 });
+      await require("./calendar/imports/media-process-executor").safePath(directory);
+      const stat = await fs.stat(directory);
+      if (process.platform !== "win32" && ((stat.mode & 0o077) !== 0 || stat.uid !== process.getuid())) refuse("ready_video_storage_permissions_invalid");
+    }
+    const configs = await loadReadyVideoPoolConfigs({ env });
+    const { createPostgresPool } = require("../persistence/postgres/pool");
+    capacityPool = createPostgresPool(configs.capacity, { logger: dependencies.logger });
+    transferPool = createPostgresPool(configs.transfer, { logger: dependencies.logger });
+    const codecExecutor = require("./calendar/imports/ready-video-codec-executor").createReadyVideoCodecExecutor({
+      workingRoot: codec, allowedRoots: [uploads, prepared, inspection, preparation] });
+    video = await require("./calendar/imports/ready-video-runtime").createReadyVideoRuntime({ env,
+      tenantPool: ports.pool, capacityPool, transferPool, codecExecutor, rootDirectory: root,
+      resolveOwnerForSubject, isEligibleOwner(owner) {
+        const subject = subjects.get(`${owner.companyId}:${owner.userId}`);
+        return typeof subject === "string" && active(subject);
+      }, clock: dependencies.clock, logger: dependencies.logger });
+    if (!video?.factory || typeof video.start !== "function" || typeof video.close !== "function") refuse("ready_video_runtime_invalid");
+    const factory = video.factory;
+    return Object.freeze({ factory, onImportsUnavailable: unavailable,
+      start() { if (!closed) video?.start(); }, close });
+  } catch { await unavailable(); return null; }
+}
 function createProductionSocialIntegration(options = {}) {
   const env = Object.freeze({ ...(options.env || process.env) });
   assertProductionPreparationBoundary(env);
   const enabled = env.SOCIAL_PERSISTENCE_ENABLED === "true";
   let mounted = null, runtime = null, initialization = null, visualReturn = null;
-  let tenantProvisioning = null, mediaPilot = null, closePromise = null;
+  let tenantProvisioning = null, mediaPilot = null, readyVideo = null, closePromise = null;
   async function afterAuthentication(owner) {
     // The disabled path must not read product records, initialize dependencies,
     // derive an identity or open a pool. Session issuance remains unchanged.
@@ -108,6 +182,9 @@ function createProductionSocialIntegration(options = {}) {
         createCalendar: env.SOCIAL_CALENDAR_ENABLED === "true" ? async ports => {
           mediaPilot = await require("./calendar/imports/production-pilot").createProductionMediaPilot({env,tenantPool:ports.pool,logger:dependencies.logger});
           if (mediaPilot && dependencies.importsRuntimeFactory !== undefined) refuse("calendar_media_pilot_factory_conflict");
+          readyVideo = await initializeProductionReadyVideo({ env, ports, dependencies });
+          if (readyVideo) return require("./calendar").createProductionCalendar({ ...dependencies, reviewerMedia: mediaSurface.media,
+            importsRuntimeFactory: readyVideo.factory, onImportsUnavailable: readyVideo.onImportsUnavailable }, ports);
           return require("./calendar").createProductionCalendar(mediaPilot ? {...dependencies,reviewerMedia:mediaSurface.media,importsRuntimeFactory:mediaPilot.factory} :
             {...dependencies,reviewerMedia:mediaSurface.media}, ports);
         } : undefined,
@@ -160,6 +237,7 @@ function createProductionSocialIntegration(options = {}) {
       mounted = router;
       runtime.calendar?.start();
       mediaPilot?.start();
+      readyVideo?.start();
       startupStage = "social_startup_complete";
       return true;
     })();
@@ -190,6 +268,7 @@ function createProductionSocialIntegration(options = {}) {
     if (closePromise) return closePromise;
     mounted = null;
     closePromise = closeProductionResources([
+      ...(readyVideo ? [async () => { const video = readyVideo; readyVideo = null; await video.close(); }] : []),
       async () => { if (mediaPilot) { const pilot = mediaPilot; mediaPilot = null; await pilot.close(); } },
       async () => { const provisioning = tenantProvisioning; tenantProvisioning = null; if (provisioning) await provisioning.close(); },
       () => { const visual = visualReturn; visualReturn = null; visual?.destroy(); },
@@ -216,4 +295,4 @@ function createProductionSocialIntegration(options = {}) {
 }
 module.exports = { CLOSED_FLAGS, OFFICIAL_API_ORIGIN, OFFICIAL_WEB_SERVICE_ID,
   PENDING_CONTRACTS, PREPARATION_INCOMPLETE, assertProductionPreparationBoundary,
-  createProductionSocialIntegration, closeProductionResources, safeStartupError };
+  createProductionSocialIntegration, closeProductionResources, safeStartupError, initializeProductionReadyVideo };

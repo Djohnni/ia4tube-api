@@ -12,6 +12,7 @@ const MAX_DIAGNOSTIC_ELAPSED_MS = 300000;
 const SAFE_DIAGNOSTIC_COMPONENTS = new Set([
   "calendar_media_http",
   "calendar_media_pilot",
+  "calendar_ready_video",
   "social_calendar",
   "social_postgres",
   "social_tenant_provisioning",
@@ -21,6 +22,9 @@ const SAFE_DIAGNOSTIC_CODES = new Set([
   "calendar_media_http_failed",
   "calendar_media_http_slow",
   "calendar_media_progress_attention",
+  "calendar_ready_video_unavailable",
+  "calendar_ready_video_cleanup_failed",
+  "calendar_ready_video_progress_attention",
   "calendar_read_connection_failed",
   "calendar_read_connection_retry",
   "social_tenant_binding_conflict",

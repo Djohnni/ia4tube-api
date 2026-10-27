@@ -457,7 +457,8 @@ function createPreparationQueue(options = {}) {
       });
       if (!leased) return queue.status(context, { assetId: input.assetId });
       try {
-        const remote = remoteValid(await dispatcher.getByKey({ dispatchKey: leased.dispatchKey, executionDigest: leased.executionDigest }), leased);
+        const remote = remoteValid(await dispatcher.getByKey({ companyId: owner.companyId, userId: owner.userId,
+          dispatchKey: leased.dispatchKey, executionDigest: leased.executionDigest }), leased);
         if (remote.state === "succeeded") {
           await rememberRemote(owner, leased, remote);
           return await queue.completeWorker({ authenticated: true, role: "calendar_media_worker", companyId: owner.companyId },

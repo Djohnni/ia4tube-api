@@ -11,7 +11,9 @@ const { createMemoryImportUploadStore, createMemoryMultipartProvider } = require
 const { createCalendarImportUploadService } = require("../src/social/calendar/imports/upload-service");
 const { createPreparationQueue } = require("../src/social/calendar/imports/preparation-queue");
 const { createImportMediaPreparer, runBoundedProcess } = require("../src/social/calendar/imports/preparation");
-const FFMPEG = path.resolve(__dirname, "../../video_audit/pydeps/imageio_ffmpeg/binaries/ffmpeg-win-x86_64-v7.1.exe");
+const { createNativeReadyVideoPreparer, inspectNativeReadyVideo, NATIVE_READY_VIDEO_PROFILE } = require("../src/social/calendar/imports/native-ready-video");
+const FFMPEG = process.env.FFMPEG_TEST_BINARY || path.resolve(__dirname, "../../video_audit/pydeps/imageio_ffmpeg/binaries/ffmpeg-win-x86_64-v7.1.exe");
+const FFPROBE = process.env.FFPROBE_TEST_BINARY;
 const hash = bytes => crypto.createHash("sha256").update(bytes).digest("hex"), uuid = () => crypto.randomUUID();
 const coordinator = { authenticated: true, role: "calendar_media_capacity_coordinator" };
 test("prepared output accepts at most 250ms encoder tolerance without changing the source duration parser", () => {
@@ -29,7 +31,7 @@ function globalStore() {
       validateGlobalCapacityState(draft); current = draft; return structuredClone(value); }); tail = result.catch(() => {}); return result;
   } };
 }
-async function fixture(t, { video = false } = {}) {
+async function fixture(t, { video = false, native = false } = {}) {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "iA4tube-prepared-store-")); await fs.chmod(root, 0o700);
   t.after(async () => {
     const target = path.resolve(root); assert.equal(path.dirname(target), path.resolve(os.tmpdir()));
@@ -41,14 +43,21 @@ async function fixture(t, { video = false } = {}) {
   const context = { authenticated: true, companyId: uuid(), userId: uuid() }, tenantStore = createMemoryImportUploadStore();
   await fs.mkdir(path.join(inputRoot, context.companyId), { mode: 0o700 });
   const sourceName = video ? "source.mp4" : "source.png", sourcePath = path.join(inputRoot, context.companyId, sourceName);
-  if (video) {
+  if (native) {
+    const result = await runBoundedProcess(FFMPEG, ["-hide_banner", "-nostdin", "-v", "error", "-f", "lavfi", "-i", "color=c=blue:s=1080x1920:r=24",
+      "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000", "-t", "3", "-threads", "2", "-c:v", "libx264", "-pix_fmt", "yuv420p",
+      "-vf", "setparams=color_primaries=bt709:color_trc=iec61966-2-1:colorspace=smpte170m:range=tv",
+      "-x264-params", "colorprim=bt709:transfer=iec61966-2-1:colormatrix=smpte170m",
+      "-color_primaries", "bt709", "-color_trc", "iec61966-2-1", "-colorspace", "smpte170m", "-color_range", "tv", "-c:a", "aac", "-f", "mp4", "-n", sourcePath], { cwd: root });
+    assert.equal(result.code, 0);
+  } else if (video) {
     const result = await runBoundedProcess(FFMPEG, ["-hide_banner", "-nostdin", "-v", "error", "-f", "lavfi", "-i", "color=c=blue:s=120x160:r=30",
       "-t", "0.5", "-threads", "2", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-an", "-f", "mp4", "-n", sourcePath], { cwd: root });
     assert.equal(result.code, 0);
   } else await sharp({ create: { width: 240, height: 180, channels: 3, background: "#2277aa" } }).png().toFile(sourcePath);
   const bytes = await fs.readFile(sourcePath);
-  const sourceResult = video ? { signatureVerified: true, decoded: true, detectedMime: "video/mp4", width: 120, height: 160,
-    durationMs: 500, hasAudio: false, colorMode: "sdr" } : { signatureVerified: true, decoded: true, detectedMime: "image/png", width: 240, height: 180, frames: 1 };
+  const sourceResult = video ? { signatureVerified: true, decoded: true, detectedMime: "video/mp4", width: native ? 1080 : 120, height: native ? 1920 : 160,
+    durationMs: native ? 3000 : 500, hasAudio: native, colorMode: "sdr" } : { signatureVerified: true, decoded: true, detectedMime: "image/png", width: 240, height: 180, frames: 1 };
   const provider = createMemoryMultipartProvider({ inspectBytes: async actual => {
     assert.equal(hash(actual), hash(bytes)); if (!video) await sharp(actual).raw().toBuffer(); return sourceResult;
   } });
@@ -65,18 +74,20 @@ async function fixture(t, { video = false } = {}) {
   const admission = createPreparedDiskAdmission({ capacity, tenantStore, accessPolicy, rootDirectory, diskSpaceGuard: guard,
     enabled: true, allowVolatileForTests: true });
   const options = { rootDirectory, preparationRoot, tenantStore, admission, accessPolicy,
-    outputInspector: createPreparedDiskOutputInspector({ ffmpegPath: FFMPEG }), enabled: true, allowVolatileForTests: true };
+    outputInspector: createPreparedDiskOutputInspector({ ffmpegPath: FFMPEG, ...(native ? { ffprobePath: FFPROBE, nativeProfile: NATIVE_READY_VIDEO_PROFILE } : {}) }),
+    ...(native ? { nativeProfile: NATIVE_READY_VIDEO_PROFILE } : {}), enabled: true, allowVolatileForTests: true };
   const resultStore = createPreparedDiskResultStore(options), tasks = [];
   const dispatcher = { capabilities: { testOnly: true, idempotentDispatch: true, authoritativeLookup: true, isolatedWorker: true, maxRuntimeMs: 180000 },
     async dispatch(task) { tasks.push(task); return { state: "running", executionId: uuid(), dispatchKey: task.dispatchKey, executionDigest: task.executionDigest }; },
     async getByKey(query) { return { ...query, state: "not_found", authoritative: true }; } };
   const queue = createPreparationQueue({ store: tenantStore, dispatcher, resultStore, accessPolicy, enabled: true, allowVolatileForTests: true });
-  const selection = { kind: video ? "video" : "image", targets: video ? ["story", "reel"] : ["feed", "story"], audioMode: video ? "muted" : "none",
+  const selection = { kind: video ? "video" : "image", targets: video ? ["story", "reel"] : ["feed", "story"], audioMode: video ? native ? "original" : "muted" : "none",
     musicalTargets: [], musicTrackId: null, shareToFeed: false };
   await queue.request(context, { uploadId: uploaded.uploadId, assetId: uploaded.assetId, expectedMediaRevision: 0, idempotencyKey: uuid(), selection });
   await queue.dispatchNext(context); const task = tasks[0]; assert.ok(task);
   await admission.reserve(task); const globalLease = await capacity.acquireNext({ context: coordinator }); assert.equal(globalLease.jobId, task.jobId);
-  const preparer = createImportMediaPreparer({ inputRoot, outputRoot: preparationRoot, ffmpegPath: FFMPEG });
+  const preparer = native ? createNativeReadyVideoPreparer({ inputRoot, outputRoot: preparationRoot, ffmpegPath: FFMPEG, ffprobePath: FFPROBE })
+    : createImportMediaPreparer({ inputRoot, outputRoot: preparationRoot, ffmpegPath: FFMPEG });
   const prepared = await preparer.prepare({ companyId: context.companyId, assetId: uploaded.assetId, sourceName, ...selection }, { deadlineAt: task.deadlineAt });
   const resultRef = uuid(), request = { task, prepared, resultRef, finishedAt: Date.now(), elapsedMs: Math.max(1, prepared.elapsedMs) };
   const query = Object.fromEntries(["companyId", "userId", "assetId", "mediaRevision", "dispatchKey", "executionDigest"].map(key => [key, task[key]])); query.resultRef = resultRef;
@@ -240,4 +251,43 @@ test("real MP4 and thumbnail decode at commit, equivalent Story/Reel share one c
   const thumb = await f.resultStore.inspectPreview(f.preview("thumbnail")); assert.equal(thumb.mimeType, "image/jpeg");
   const chunks = []; await f.resultStore.streamPreview({ ...f.preview("reel"), consume: chunk => chunks.push(chunk) });
   assert.equal(hash(Buffer.concat(chunks)), actual.prepared.variants.reel.sha256);
+});
+
+test("explicit native profile commits the exact 24fps MP4 with original AAC and real colour tags; strict defaults refuse it", {
+  skip: !FFPROBE || !syncFs.existsSync(FFMPEG) || !syncFs.existsSync(FFPROBE), timeout: 60000
+}, async t => {
+  const f = await fixture(t, { video: true, native: true }), part = f.prepared.variants.reel;
+  assert.equal(part.sha256, hash(f.sourceBytes)); assert.equal(part.size, f.sourceBytes.length);
+  assert.equal(part.fps, 24); assert.equal(part.frameRate, "24/1"); assert.equal(part.color, "smpte170m");
+  assert.equal(part.colorTransfer, "iec61966-2-1"); assert.equal(part.colorPrimaries, "bt709"); assert.equal(part.audioSampleRate, 48000);
+  const strict = createPreparedDiskResultStore({ ...f.options, nativeProfile: undefined });
+  await assert.rejects(strict.commit(f.request), { code: "prepared_disk_descriptor_invalid" });
+  const forged = structuredClone(f.prepared); forged.variants.reel.fps = 30;
+  await assert.rejects(f.resultStore.commit({ ...f.request, prepared: forged }), { code: "prepared_disk_descriptor_invalid" });
+  const filename = path.join(f.preparationRoot, f.context.companyId, f.task.assetId, part.fileName);
+  let starts = 0; const results = [];
+  const inspected = await inspectNativeReadyVideo({ filePath: filename, ffmpegPath: FFMPEG, ffprobePath: FFPROBE,
+    onCodecStart() { starts++; }, onCodecResult(result) { results.push(result); } });
+  assert.equal(inspected.sha256, part.sha256); assert.equal(starts, 2); assert.equal(results.length, 2);
+  assert.ok(results.every(result => result.code === 0));
+  const syntheticFailure = Object.assign(new Error("synthetic codec failure"), { code: "synthetic_codec_failure" }); let reported;
+  await assert.rejects(inspectNativeReadyVideo({ filePath: filename, ffmpegPath: FFMPEG, ffprobePath: FFPROBE,
+    runProcess: async () => { throw syntheticFailure; }, onCodecStart() { starts++; }, onCodecResult(result) { reported = result; } }),
+    error => error === syntheticFailure);
+  assert.equal(reported, syntheticFailure); assert.equal(starts, 3);
+  await assert.rejects(createPreparedDiskOutputInspector({ ffmpegPath: FFMPEG }).inspectFile({ filePath: filename, descriptor: part }),
+    { code: "prepared_disk_inspection_invalid" });
+  const actual = await f.ready(); assert.equal(actual.prepared.variants.reel.frameRate, "24/1");
+  assert.deepEqual(await fs.readFile(f.committed(part)), f.sourceBytes);
+  assert.deepEqual(await f.resultStore.inspectCommitted(f.query), actual);
+  const chunks = []; await f.resultStore.streamPreview({ ...f.preview("reel"), consume: chunk => chunks.push(chunk) });
+  assert.deepEqual(Buffer.concat(chunks), f.sourceBytes);
+  const reader = createPreparedDiskResultReader({ ...f.options, tenantStore: { capabilities: f.tenantStore.capabilities,
+    update() { throw new Error("read-only path attempted a write"); },
+    read(companyId, operation) { return f.tenantStore.update(companyId, operation); } } });
+  assert.equal((await reader.inspectPreview(f.preview("reel"))).sha256, part.sha256);
+  const manifestPath = path.join(path.dirname(f.committed(part)), "manifest.json"), manifest = JSON.parse(await fs.readFile(manifestPath, "utf8"));
+  manifest.inspection.files[part.fileName].colorTransfer = "bt709";
+  await fs.chmod(manifestPath, 0o600); await fs.writeFile(manifestPath, JSON.stringify(manifest));
+  await assert.rejects(f.resultStore.inspectCommitted(f.query), { code: "prepared_disk_inspection_invalid" });
 });

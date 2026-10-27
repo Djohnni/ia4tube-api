@@ -10,13 +10,14 @@ const instances = new WeakSet();
 const context = Object.freeze({ authenticated: true, role: "calendar_media_capacity_coordinator" });
 function fail(code = "unavailable") { throw Object.assign(new Error(`operational_inspection_${code}`), { code: `operational_inspection_${code}` }); }
 function createOperationalInspectionRunner({ store, owner, capacity, accessPolicy, diskSpaceGuard, getWorker,
-  enabled = false, clock = Date.now, canLaunch = () => true } = {}) {
+  enabled = false, clock = Date.now, canLaunch = () => true, executionMode = "synchronous" } = {}) {
   if (!["win32", "linux"].includes(process.platform)) fail("platform_unvalidated");
   if (enabled !== true || capacity?.capabilities?.persistence !== "durable" || capacity.capabilities.atomicGlobalReservations !== true ||
       !isImportAccessPolicy(accessPolicy) || !accessPolicy.executionAvailable || typeof getWorker !== "function" || typeof canLaunch !== "function" ||
+      !["synchronous", "background"].includes(executionMode) ||
       !isDiskSpaceGuard(diskSpaceGuard) || capacity.acceptsDiskSpaceGuard?.(diskSpaceGuard) !== true ||
       !["reserve", "assertHeld", "inspect", "acquireNext", "recordCompletion", "closeNeverLaunched"].every(key => typeof capacity[key] === "function")) fail("configuration_invalid");
-  const journal = createInspectionExecutionJournal({ store, owner, clock }), binding = journal.capabilities.owner;
+  const journal = createInspectionExecutionJournal({ store, owner, clock }), binding = journal.capabilities.owner, background = new Set();
   function allowed() { accessPolicy.resolve({ authenticated: true, ...binding }); }
   allowed();
   function worker() {
@@ -78,8 +79,16 @@ function createOperationalInspectionRunner({ store, owner, capacity, accessPolic
       return response(await observed(record, { executionId: record.executionId, state: "failed", elapsedMs: 0,
         termination: { proved: true, descendants: 0, proofId: crypto.createHash("sha256").update(`launcher-not-invoked:${record.executionId}:${task.executionDigest}`).digest("hex") } }));
     }
-    try { return response(await observed(record, await executor.inspect(task, { executionId: record.executionId }))); }
-    catch (_) { return response(await unknown(record)); }
+    const launch = async () => {
+      try { return response(await observed(record, await executor.inspect(task, { executionId: record.executionId }))); }
+      catch (_) { return response(await unknown(record)); }
+    };
+    if (executionMode === "background") {
+      const pending = Promise.resolve().then(launch); background.add(pending);
+      pending.catch(() => {}).finally(() => background.delete(pending));
+      return response(record);
+    }
+    return launch();
   }
   async function lookup({ companyId, userId, dispatchKey, executionDigest } = {}) {
     if (companyId !== undefined && companyId !== binding.companyId || userId !== undefined && userId !== binding.userId) fail("owner_invalid");
@@ -96,6 +105,7 @@ function createOperationalInspectionRunner({ store, owner, capacity, accessPolic
       authoritativeLookup: true, maxRuntimeMs: 180000, hardTermination: true,
       host: "separate_media_executor", remoteWorkflowVerified: false, readyForProduction: false }),
     dispatch, getByKey: lookup,
+    async drain() { await Promise.allSettled([...background]); },
     async assertExecutionHeld({ task, snapshotBytes, maxRuntimeMs }) {
       allowed(); const request = reservation(task);
       if (snapshotBytes !== task.sizeBytes || maxRuntimeMs !== task.maxRuntimeMs || task.deadlineAt <= clock()) fail("task_invalid");

@@ -35,7 +35,7 @@ function describe(job, context) {
 /** Permanent owner-authenticated calendar reads, independent of admission,
  * processing windows and pilot secrets. It cannot upload, schedule or publish.
  */
-function createStoredCalendarMediaReader({ store, uploadStore, rootDirectory, preparationRoot, clock = Date.now } = {}) {
+function createStoredCalendarMediaReader({ store, uploadStore, rootDirectory, preparationRoot, nativeProfile, clock = Date.now } = {}) {
   if (!isCalendarStore(store) || !isImportUploadPostgresStore(uploadStore) ||
       typeof store.read !== "function" || typeof uploadStore.read !== "function") fail();
   let closed = false;
@@ -69,7 +69,7 @@ function createStoredCalendarMediaReader({ store, uploadStore, rootDirectory, pr
       // not the now-retired pilot allowlist. This policy is never used to launch.
       const accessPolicy = createImportAccessPolicy({ allowedOwners: [{ companyId: context.companyId, userId: context.userId }],
         isEligible: () => !closed });
-      const bytes = createPreparedDiskResultReader({ rootDirectory, preparationRoot, tenantStore: uploadStore, accessPolicy, enabled: true, clock });
+      const bytes = createPreparedDiskResultReader({ rootDirectory, preparationRoot, tenantStore: uploadStore, accessPolicy, nativeProfile, enabled: true, clock });
       const binding = { context, assetId: media.assetId, mediaRevision: media.mediaRevision,
         resultRef: job.import.resultRef, target, sha256: expected.sha256 };
       const actual = await bytes.inspectPreview({ ...binding, signal, timeoutMs: 60000 });
