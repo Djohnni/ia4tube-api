@@ -1,12 +1,13 @@
 "use strict";
 const express = require("express");
 const { isRenderDiskTransferService } = require("./transfer-service");
+const { createImportHttpObserver } = require("./router");
 const UUID = "[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}";
 const PATH = new RegExp(`^/(${UUID})$`);
 const ORIGINS = new Set(["https://ia4tube-api.onrender.com", "https://ia4tube.com", "https://www.ia4tube.com"]);
 const CHECKSUM = /^[A-Za-z0-9+/]{43}=$/, MD5 = /^[A-Za-z0-9+/]{22}==$/;
 function fail(code, statusCode = 400) { throw Object.assign(new Error(code), { code, statusCode }); }
-// Use this with the host logger before routing. This module itself logs nothing.
+// Use this with the host logger before routing. Diagnostics never receive URLs.
 function redactImportTransferUrl(value) {
   return String(value || "").replace(/(\/v1\/social\/calendar\/imports\/bytes)(?:[^\s]*)/gi, "$1/[redacted]");
 }
@@ -15,8 +16,9 @@ function redactImportTransferUrl(value) {
  * Do not place this under the authenticated metadata router: the short-lived
  * opaque grant is the authorization, and session cookies/JWTs are forbidden.
  */
-function createCalendarImportByteRouter({ getService, timeoutMs = 30000 } = {}) {
+function createCalendarImportByteRouter({ getService, timeoutMs = 30000, logger, monotonicClock, diagnosticSlowMs = 10000 } = {}) {
   if (typeof getService !== "function" || !Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 60000) throw new TypeError("import_transfer_configuration_invalid");
+  const observe = createImportHttpObserver({ logger, monotonicClock, slowMs: diagnosticSlowMs });
   const router = express.Router({ strict: true, caseSensitive: true });
   router.use(async (req, res) => {
     const deadline = performance.now() + timeoutMs;
@@ -51,8 +53,8 @@ function createCalendarImportByteRouter({ getService, timeoutMs = 30000 } = {}) 
       if (!isRenderDiskTransferService(service) || !service.available) fail("import_transfer_unavailable", 503);
       const remaining = Math.ceil(deadline - performance.now());
       if (remaining <= 0 || req.aborted) fail("import_transfer_timeout", 408);
-      const result = await service.acceptPart({ authorizationId: match[1], contentLength: Number(length),
-        md5Base64, sha256Base64, stream: req, timeoutMs: remaining });
+      const result = await observe("http_upload_part_transfer", () => service.acceptPart({ authorizationId: match[1], contentLength: Number(length),
+        md5Base64, sha256Base64, stream: req, timeoutMs: remaining }));
       res.json({ ok: true, part: result });
     } catch (error) {
       // Do not drain arbitrary hostile bodies to keep the connection alive.

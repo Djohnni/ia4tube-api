@@ -217,7 +217,7 @@ function createProductionSocialIntegration(options = {}) {
       // Grant-scoped bytes precede body parsers; disabled runtime still refuses
       // every transfer. No processing or worker startup occurs in these routes.
       router.use("/calendar/imports/bytes", require("./calendar/imports/transfer-router").createCalendarImportByteRouter({
-        getService: () => runtime?.calendar?.imports?.transfer }));
+        getService: () => runtime?.calendar?.imports?.transfer, logger: dependencies.logger }));
       router.use(express.json({ limit: "16kb", strict: true }));
       router.use("/calendar/imports", require("./calendar/imports/preview-router").createPrivateImportPreviewRouter({
         authenticate: authenticateSocial, resolvePrincipal: claims => runtime.auth.fromVerifiedJwt(claims),

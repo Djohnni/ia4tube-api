@@ -16,6 +16,7 @@ const { createCalendarImportRouter } = require("../src/social/calendar/imports/r
 const { createRenderDiskTransferService, createSingleProcessTransferLimiter } = require("../src/social/calendar/imports/transfer-service");
 const { createCalendarImportByteRouter, redactImportTransferUrl } = require("../src/social/calendar/imports/transfer-router");
 const { validateImportUploadState } = require("../src/social/calendar/imports/postgres-store");
+const { createSocialDiagnosticLogger } = require("../src/social/server-runtime");
 const checksum = (bytes, type = "sha256", encoding = "hex") => crypto.createHash(type).update(bytes).digest(encoding);
 const PREFIX = "/v1/social/calendar/imports";
 function ledger() {
@@ -53,7 +54,8 @@ async function fixture(t, options = {}) {
     capabilities: () => ({ enabled: true }), upload: transfer.wrapUpload(upload) };
   const app = express();
   if (options.parserBefore) app.use(express.raw({ type: "application/octet-stream", limit: "6mb" }));
-  app.use(`${PREFIX}/bytes`, createCalendarImportByteRouter({ getService: () => transfer, timeoutMs: options.timeoutMs || 30000 }));
+  app.use(`${PREFIX}/bytes`, createCalendarImportByteRouter({ getService: () => transfer, timeoutMs: options.timeoutMs || 30000,
+    logger: options.logger, monotonicClock: options.monotonicClock, diagnosticSlowMs: options.diagnosticSlowMs }));
   app.use(PREFIX, createCalendarImportRouter({ authenticate: session.authenticate, resolvePrincipal: claims => auth.fromVerifiedJwt(claims), getService: () => facade }));
   const server = app.listen(0, "127.0.0.1"); await new Promise(resolve => server.once("listening", resolve));
   const base = `http://127.0.0.1:${server.address().port}`;
@@ -97,6 +99,50 @@ test("authenticated metadata issues a private grant; real HTTP bytes resume afte
   const row = f.store.snapshotForTest(f.context.companyId).uploads[issued.item.uploadId];
   assert.deepEqual(await fs.readFile(path.join(f.root, row.objectKey, "part-1.bin")), issued.bytes);
   assert.equal(validateImportUploadState(f.store.snapshotForTest(f.context.companyId), f.context.companyId).schema, 1);
+});
+
+test("byte-transfer diagnostics preserve the received HTTP ACK and expose only elapsed stage metadata on slow success or failure", async t => {
+  const events = [], ticks = [10, 10021, 11000, 11007];
+  const f = await fixture(t, { logger: createSocialDiagnosticLogger({ error: event => events.push(event) }),
+    monotonicClock: () => ticks.shift() });
+  const issued = await f.issue(Buffer.from("SYNTHETIC_PRIVATE_TRANSFER_PAYLOAD"));
+  const response = await f.put(issued);
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), { ok: true,
+    part: { partNumber: 1, sizeBytes: issued.bytes.length, sha256: checksum(issued.bytes) } });
+  assert.equal(response.headers.get("cache-control"), "private, no-store");
+  assert.deepEqual(events, [{ component: "calendar_media_http", code: "calendar_media_http_slow",
+    stage: "http_upload_part_transfer", elapsedMs: 10011 }]);
+  const row = f.store.snapshotForTest(f.context.companyId).uploads[issued.item.uploadId];
+  assert.deepEqual(await fs.readFile(path.join(f.root, row.objectKey, "part-1.bin")), issued.bytes);
+  const privateError = `SYNTHETIC_PRIVATE_ERROR ${issued.url} ${issued.part.authorizationId} ${f.root}`;
+  f.setService(f.makeService({ registry: { ...f.registry, async resolve() { throw new Error(privateError); } } }));
+  const failed = await f.put(issued);
+  assert.equal(failed.status, 503);
+  assert.deepEqual(await failed.json(), { ok: false, code: "import_transfer_unavailable",
+    error: "Confira o estado do envio antes de tentar novamente." });
+  assert.deepEqual(events.at(-1), { component: "calendar_media_http", code: "calendar_media_http_failed",
+    stage: "http_upload_part_transfer", elapsedMs: 7 });
+  assert.equal(events.length, 2); assert.equal(ticks.length, 0);
+  for (const event of events) assert.deepEqual(Object.keys(event).sort(), ["code", "component", "elapsedMs", "stage"]);
+  const serialized = JSON.stringify(events);
+  for (const privateValue of [issued.url, issued.grant.url, issued.part.authorizationId, issued.item.uploadId,
+    f.context.companyId, f.context.userId, f.root, issued.bytes.toString(), privateError, checksum(issued.bytes)]) {
+    assert.equal(serialized.includes(privateValue), false);
+  }
+});
+
+test("fast successful transfers remain quiet and a throwing diagnostic sink cannot change the HTTP ACK", async t => {
+  const events = []; let now = 0;
+  const f = await fixture(t, { logger: { error(event) { events.push(event); throw new Error("SYNTHETIC_LOGGER_SECRET"); } },
+    monotonicClock: () => now });
+  const issued = await f.issue();
+  assert.equal((await f.put(issued)).status, 200); assert.deepEqual(events, []);
+  f.setService(f.makeService({ registry: { ...f.registry, async resolve(id) { now = 10001; return f.registry.resolve(id); } } }));
+  const response = await f.put(issued); assert.equal(response.status, 200);
+  assert.equal((await response.json()).part.partNumber, 1);
+  assert.deepEqual(events, [{ component: "calendar_media_http", code: "calendar_media_http_slow",
+    stage: "http_upload_part_transfer", elapsedMs: 10001 }]);
 });
 
 test("raw route refuses credentials, foreign origins, query/path injection, encodings and changed checksum headers", async t => {

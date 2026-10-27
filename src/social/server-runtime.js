@@ -41,6 +41,7 @@ const SAFE_DIAGNOSTIC_CODES = new Set([
 ]);
 const SAFE_DIAGNOSTIC_STAGES = new Set([
   "capability_read",
+  "http_upload_part_transfer",
   "inspection_resume",
   "pending_scan",
   "preparation_dispatch",
