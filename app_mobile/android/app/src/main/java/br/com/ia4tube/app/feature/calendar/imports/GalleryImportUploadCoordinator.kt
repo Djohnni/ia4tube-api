@@ -50,7 +50,8 @@ class GalleryImportUploadCoordinator internal constructor(
     private val transportFactory: () -> GalleryImportUploadTransport,
     authorizedTracks: Collection<AuthorizedImportTrack> = emptyList(),
     private val io: CoroutineDispatcher = Dispatchers.IO,
-    private val onChanged: (ImportUploadRunView) -> Unit = {}
+    private val onChanged: (ImportUploadRunView) -> Unit = {},
+    private val diagnostics: ImportMediaDiagnostics = ImportMediaDiagnostics()
 ) {
     constructor(ownerProvider: () -> ImportOwner?, tokenProvider: () -> String, source: AndroidImportSource,
                 store: PrivateImportCheckpointStore, authorizedTracks: Collection<AuthorizedImportTrack> = emptyList(),
@@ -62,7 +63,8 @@ class GalleryImportUploadCoordinator internal constructor(
         override fun toString() = "ImportUploadBinding(redacted)"
     }
     private class Run(val binding: Binding, val api: GalleryImportUploadTransport, val machine: GalleryImportMachine,
-                      var checkpoint: ImportDurableCheckpoint?)
+                      var checkpoint: ImportDurableCheckpoint?, var diagnosticStarted: Long,
+                      var diagnosticStage: ImportMediaStage = ImportMediaStage.CHECKPOINT)
     private val tracks = authorizedTracks.toList()
     private val mutex = Mutex()
     private val publicationLock = Any()
@@ -122,6 +124,7 @@ class GalleryImportUploadCoordinator internal constructor(
 
     /** At most 20 sequential parts. No retries hidden inside a loop after uncertain results. */
     suspend fun transfer(maxParts: Int = 20): ImportUploadRunView = operation { run ->
+        diagnosticStage(run, ImportMediaStage.TRANSFER_VALIDATION)
         requireThat(maxParts in 1..20, "import_part_limit_invalid")
         val checkpoint = draft(run); capabilities(run)
         requireUploadStage(checkpoint.state)
@@ -134,18 +137,24 @@ class GalleryImportUploadCoordinator internal constructor(
         if (draft(run).state.upload!!.complete) return@operation finishOnce(run)
         val uri = draft(run).selectedContentUri ?: throw ImportUploadCoordinatorFailure("import_source_unavailable")
         val selected = draft(run).state.selection
+        diagnosticStage(run, ImportMediaStage.SOURCE_INSPECTION)
         requireSameSource(selected, source.inspect(uri)); guard(run)
         var count = 0
         while (draft(run).state.upload!!.acknowledgedBytes < selected.byteCount && count < maxParts) {
             guard(run); currentCoroutineContext().ensureActive()
             val progress = draft(run).state.upload!!
+            diagnosticStage(run, ImportMediaStage.SOURCE_PART_READ)
             val bytes = source.part(uri, selected, progress.nextPart); guard(run)
             try {
+                diagnosticStage(run, ImportMediaStage.PART_CHECKSUM)
                 val expected = minOf(GalleryImportPolicy.CHUNK_BYTES.toLong(), selected.byteCount - progress.acknowledgedBytes).toInt()
                 requireThat(bytes.size == expected, "import_source_changed")
                 val checksums = ImportPartChecksums.calculate(bytes)
+                diagnosticStage(run, ImportMediaStage.PART_AUTHORIZE)
                 val authorization = mutate(run) { run.api.authorizePart(run.binding.owner, record, progress.nextPart + 1, checksums) }
+                diagnosticStage(run, ImportMediaStage.PART_RESOLVE)
                 val grant = mutate(run) { run.api.resolvePart(run.binding.owner, authorization, checksums) }
+                diagnosticStage(run, ImportMediaStage.MEDIA_PUT)
                 mutate(run) { run.api.putPart(grant, bytes) { transferred, total ->
                     guard(run)
                     requireThat(total == bytes.size.toLong() && transferred in 0..total, "import_progress_invalid")
@@ -153,6 +162,7 @@ class GalleryImportUploadCoordinator internal constructor(
                 } }
                 // PUT success is not acknowledgement. Only the authenticated
                 // provider-observed resume response adds a durable receipt.
+                diagnosticStage(run, ImportMediaStage.UPLOAD_RESUME)
                 record = mutate(run) { run.api.resume(run.binding.owner, progress.ticket.uploadId) }
                 observe(run, record, receiptsAuthoritative = true)
                 if (record.phase != ImportServerPhase.UPLOADING) return@operation showRecord(run, record)
@@ -228,16 +238,19 @@ class GalleryImportUploadCoordinator internal constructor(
         if (checkpoint.state.upload == null) {
             requireThat(checkpoint.state.phase == ImportPhase.EDITING, "import_upload_state_invalid")
             persist(run, checkpoint.copy(uploadStartIssued = true))
+            diagnosticStage(run, ImportMediaStage.UPLOAD_START)
             val started = mutate(run) { run.api.start(run.binding.owner, checkpoint.state.selection, checkpoint.uploadStartIdempotencyKey) }
             observe(run, started)
             if (started.phase != ImportServerPhase.UPLOADING) return started
         }
+        diagnosticStage(run, ImportMediaStage.UPLOAD_RESUME)
         val record = mutate(run) { run.api.resume(run.binding.owner, draft(run).state.upload!!.ticket.uploadId) }
         observe(run, record, receiptsAuthoritative = true)
         return record
     }
 
     private suspend fun finishOnce(run: Run): ImportUploadRunView {
+        diagnosticStage(run, ImportMediaStage.UPLOAD_COMPLETE)
         val state = draft(run).state
         if (state.phase == ImportPhase.UPLOADING) applied(run, ImportEvent.UploadCompletionRequested(state.upload!!.ticket.uploadId))
         requireThat(run.machine.snapshot()!!.phase == ImportPhase.VERIFYING, "import_upload_state_invalid")
@@ -274,6 +287,7 @@ class GalleryImportUploadCoordinator internal constructor(
     }
 
     private suspend fun observe(run: Run, record: ImportUploadRecord, receiptsAuthoritative: Boolean = false) {
+        diagnosticStage(run, ImportMediaStage.UPLOAD_RESPONSE_VALIDATION)
         guard(run)
         val checkpoint = draft(run)
         val selected = checkpoint.state.selection
@@ -296,6 +310,7 @@ class GalleryImportUploadCoordinator internal constructor(
             applied(run, ImportEvent.UploadPhaseObserved(record.uploadId, record.phase))
         }
         if (receiptsAuthoritative && record.phase == ImportServerPhase.UPLOADING && run.machine.snapshot()!!.phase == ImportPhase.UPLOADING) {
+            diagnosticStage(run, ImportMediaStage.RECEIPT_VALIDATION)
             val known = run.machine.snapshot()!!.upload!!.receipts
             requireThat(record.completedParts.size >= known.size, "import_receipts_changed")
             record.completedParts.forEachIndexed { index, receipt ->
@@ -307,6 +322,7 @@ class GalleryImportUploadCoordinator internal constructor(
     }
 
     private suspend fun capabilities(run: Run) {
+        diagnosticStage(run, ImportMediaStage.CAPABILITIES)
         guard(run)
         val capabilities = run.api.capabilities(); guard(run)
         requireThat(capabilities.enabled && capabilities.identity == run.binding.owner, "import_owner_unavailable")
@@ -375,12 +391,38 @@ class GalleryImportUploadCoordinator internal constructor(
         return Binding(owner, token, epoch.get())
     }
 
+    private fun diagnosticStage(run: Run, stage: ImportMediaStage) {
+        run.diagnosticStage = stage; run.diagnosticStarted = diagnostics.started()
+    }
+    private fun reportFailure(run: Run?, started: Long, error: Exception, code: String) {
+        if (error is ImportApiFailure && error.diagnosticReported) return
+        val reason = when {
+            error is ImportCheckpointFailure -> ImportMediaFailureReason.CHECKPOINT_FAILURE
+            error is ImportSourceFailure || code == "import_source_unavailable" -> ImportMediaFailureReason.SOURCE_UNAVAILABLE
+            code == "import_source_changed" -> ImportMediaFailureReason.SOURCE_CHANGED
+            code == "import_response_binding_invalid" -> ImportMediaFailureReason.UPLOAD_BINDING_INVALID
+            code == "import_receipts_changed" -> ImportMediaFailureReason.RECEIPTS_CHANGED
+            code == "import_transition_invalid_part" -> ImportMediaFailureReason.RECEIPT_INVALID
+            code == "import_transition_part_conflict" -> ImportMediaFailureReason.RECEIPT_CONFLICT
+            code == "import_part_not_observed" -> ImportMediaFailureReason.PART_NOT_OBSERVED
+            code == "import_upload_state_invalid" -> ImportMediaFailureReason.UPLOAD_STATE_INVALID
+            code.startsWith("import_transition_") -> ImportMediaFailureReason.STATE_TRANSITION_REJECTED
+            code == "import_session_changed" -> ImportMediaFailureReason.SESSION_CHANGED
+            code == "import_owner_unavailable" -> ImportMediaFailureReason.OWNER_UNAVAILABLE
+            else -> ImportMediaFailureReason.VALIDATION_FAILED
+        }
+        diagnostics.failed(run?.diagnosticStage ?: ImportMediaStage.CHECKPOINT, reason,
+            run?.diagnosticStarted ?: started, (error as? ImportApiFailure)?.status)
+        if (error is ImportApiFailure) error.diagnosticReported = true
+    }
+
     private suspend fun operation(wait: Boolean = false, action: suspend (Run) -> ImportUploadRunView): ImportUploadRunView {
         if (wait) mutex.lock() else if (!mutex.tryLock()) return snapshot().copy(errorCode = "import_operation_busy")
         var run: Run? = null
         var retainedOwner: ImportOwner? = null
         var ownerGate: OwnerGate? = null
         var ownerLocked = false
+        val diagnosticStarted = diagnostics.started()
         pauseRequested.set(false)
         try {
             return coroutineScope {
@@ -396,7 +438,7 @@ class GalleryImportUploadCoordinator internal constructor(
                 // Publish the restored machine's fail-closed state, never old
                 // operational availability or a persisted preview acknowledgement.
                 val checkpoint = loaded?.copy(state = machine.snapshot()!!)
-                Run(binding, transportFactory(), machine, checkpoint).also { run = it }.let { guard(it); action(it) }
+                Run(binding, transportFactory(), machine, checkpoint, diagnostics.started()).also { run = it }.let { guard(it); action(it) }
             }
         } catch (error: CancellationException) {
             val current = run
@@ -414,15 +456,16 @@ class GalleryImportUploadCoordinator internal constructor(
             return view
         } catch (error: Exception) {
             val current = run
-            if (current == null || !matches(current.binding)) {
-                return clearVisibleSession()
-            }
             val code = when (error) {
                 is ImportApiFailure -> error.code
                 is ImportCheckpointFailure -> error.code
                 is ImportUploadCoordinatorFailure -> error.code
                 is ImportSourceFailure -> "import_source_unavailable"
                 else -> "import_operation_unavailable"
+            }
+            reportFailure(current, diagnosticStarted, error, code)
+            if (current == null || !matches(current.binding)) {
+                return clearVisibleSession()
             }
             val uncertain = error is ImportApiFailure || code == "import_part_not_observed" || code == "checkpoint_conflict"
             return emit(current, if (current.checkpoint?.cancelRequested == true) ImportUploadRunStatus.CANCEL_REQUESTED

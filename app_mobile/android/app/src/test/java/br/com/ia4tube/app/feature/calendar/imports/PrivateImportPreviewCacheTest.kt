@@ -72,7 +72,8 @@ class PrivateImportPreviewCacheTest {
     @Test fun `preview budget allows slow media but remains bounded without redirects retries or cookies`() {
         val client = PrivateImportPreviewCache.previewClient()
         assertEquals(15_000, client.connectTimeoutMillis)
-        assertEquals(120_000, client.readTimeoutMillis)
+        assertEquals(300_000, client.readTimeoutMillis)
+        assertEquals(300_000, client.writeTimeoutMillis)
         assertEquals(300_000, client.callTimeoutMillis)
         assertFalse(client.retryOnConnectionFailure)
         assertFalse(client.followRedirects); assertFalse(client.followSslRedirects)

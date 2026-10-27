@@ -20,6 +20,7 @@ import java.io.IOException
 import java.security.MessageDigest
 import java.util.Base64
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
 
@@ -80,7 +81,9 @@ data class ImportPartChecksums(val sha256: String, val md5Base64: String, val sh
 
 class ImportApiFailure(val code: String, val status: Int? = null, val resultUncertain: Boolean = false) :
     Exception(if (resultUncertain) "O resultado do envio precisa ser conferido. Não inicie outro envio."
-    else "Não foi possível continuar a importação. Confira a sessão e tente consultar novamente.")
+    else "Não foi possível continuar a importação. Confira a sessão e tente consultar novamente.") {
+    internal var diagnosticReported = false
+}
 
 /** Authenticated metadata only. Media PUTs use a separate client with no credentials or redirects. */
 class GalleryImportHttpApi internal constructor(
@@ -90,7 +93,8 @@ class GalleryImportHttpApi internal constructor(
     private val metadataClient: OkHttpClient,
     private val mediaClient: OkHttpClient,
     private val now: () -> Long = System::currentTimeMillis,
-    private val allowLoopbackForTests: Boolean = false
+    private val allowLoopbackForTests: Boolean = false,
+    private val diagnostics: ImportMediaDiagnostics = ImportMediaDiagnostics()
 ) {
     constructor(tokenProvider: () -> String) : this(tokenProvider, tokenProvider(),
         "https://ia4tube-api.onrender.com".toHttpUrl(), metadataClient(), mediaClient())
@@ -107,8 +111,8 @@ class GalleryImportHttpApi internal constructor(
             mediaClient.authenticator === Authenticator.NONE && mediaClient.proxyAuthenticator === Authenticator.NONE)
     }
 
-    suspend fun capabilities(): ImportCapabilities = guarded(false) {
-        val json = request("/capabilities")
+    suspend fun capabilities(): ImportCapabilities = guarded(ImportMediaStage.CAPABILITIES, false) {
+        val json = request(ImportMediaStage.CAPABILITIES, "/capabilities")
         val enabled = json.getBoolean("enabled")
         if (!enabled) return@guarded ImportCapabilities(false).also { currentCapabilities = it }
         val identity = json.getJSONObject("identity")
@@ -143,10 +147,10 @@ class GalleryImportHttpApi internal constructor(
             preparation.getBoolean("enabled"), scheduling.getBoolean("enabled"), local, tracks, directSubmission).also { currentCapabilities = it }
     }
 
-    suspend fun start(owner: ImportOwner, media: ImportSelection, idempotencyKey: String): ImportUploadRecord = guarded(true) {
+    suspend fun start(owner: ImportOwner, media: ImportSelection, idempotencyKey: String): ImportUploadRecord = guarded(ImportMediaStage.UPLOAD_START, true) {
         ensureOwner(owner)
         require(GalleryImportPolicy.validateSelection(media) == null && idempotencyKey.matches(Regex("[A-Za-z0-9_-]{8,128}")))
-        val record = parseRecord(request("/uploads", JSONObject().put("idempotencyKey", idempotencyKey).put("kind", media.kind.wire)
+        val record = parseRecord(request(ImportMediaStage.UPLOAD_START, "/uploads", JSONObject().put("idempotencyKey", idempotencyKey).put("kind", media.kind.wire)
             .put("mimeType", media.mimeType).put("sizeBytes", media.byteCount).put("sha256", media.sha256.lowercase())).getJSONObject("upload"))
         require(record.kind == media.kind && record.mimeType == media.mimeType && record.sizeBytes == media.byteCount)
         record
@@ -159,65 +163,65 @@ class GalleryImportHttpApi internal constructor(
     suspend fun cancel(owner: ImportOwner, uploadId: String): ImportUploadRecord = record(owner, uploadId, "/cancel", true)
 
     suspend fun prepare(owner: ImportOwner, assetId: String, uploadId: String, intent: ImportPreparationIntent,
-                        kind: ImportMediaKind, configuration: ImportConfiguration): ImportPreparationRecord = guarded(true) {
+                        kind: ImportMediaKind, configuration: ImportConfiguration): ImportPreparationRecord = guarded(ImportMediaStage.PREPARATION, true) {
         ensurePreparationOwner(owner); uuid(assetId); uuid(uploadId)
         require(intent.idempotencyKey.matches(Regex("[A-Za-z0-9_-]{8,128}")) && intent.expectedMediaRevision in 0..999998)
-        val result = ImportPreparationProtocol.parseRecord(request("/assets/$assetId/prepare", JSONObject()
+        val result = ImportPreparationProtocol.parseRecord(request(ImportMediaStage.PREPARATION, "/assets/$assetId/prepare", JSONObject()
             .put("uploadId", uploadId).put("idempotencyKey", intent.idempotencyKey).put("expectedMediaRevision", intent.expectedMediaRevision)
             .put("selection", ImportPreparationProtocol.selection(kind, configuration))).getJSONObject("asset"))
         require(result.assetId == assetId && result.uploadId == uploadId && result.kind == kind && result.configuration == configuration &&
             result.mediaRevision == intent.expectedMediaRevision + 1)
         result
     }
-    suspend fun preparationStatus(owner: ImportOwner, assetId: String): ImportPreparationRecord = guarded(false) {
+    suspend fun preparationStatus(owner: ImportOwner, assetId: String): ImportPreparationRecord = guarded(ImportMediaStage.PREPARATION_STATUS, false) {
         ensurePreparationOwner(owner); uuid(assetId)
-        ImportPreparationProtocol.parseRecord(request("/assets/$assetId").getJSONObject("asset")).also { require(it.assetId == assetId) }
+        ImportPreparationProtocol.parseRecord(request(ImportMediaStage.PREPARATION_STATUS, "/assets/$assetId").getJSONObject("asset")).also { require(it.assetId == assetId) }
     }
     suspend fun submitToCalendar(owner: ImportOwner, assetId: String, uploadId: String,
-        intent: ImportCalendarSubmissionIntent, kind: ImportMediaKind, configuration: ImportConfiguration): ImportCalendarSubmissionReceipt = guarded(true) {
+        intent: ImportCalendarSubmissionIntent, kind: ImportMediaKind, configuration: ImportConfiguration): ImportCalendarSubmissionReceipt = guarded(ImportMediaStage.CALENDAR_SUBMISSION, true) {
         ensurePreparationOwner(owner); uuid(assetId); uuid(uploadId)
         if (currentCapabilities?.calendarSubmissionEnabled != true) throw ImportApiFailure("import_calendar_submission_unavailable")
-        ImportCalendarSubmissionProtocol.parse(request("/assets/$assetId/calendar-submissions",
+        ImportCalendarSubmissionProtocol.parse(request(ImportMediaStage.CALENDAR_SUBMISSION, "/assets/$assetId/calendar-submissions",
             ImportCalendarSubmissionProtocol.body(uploadId, intent, kind, configuration), calendarSubmissionErrors = true)
             .getJSONObject("submission"), assetId, uploadId, intent)
     }
     suspend fun calendarSubmissionStatus(owner: ImportOwner, assetId: String, uploadId: String,
-        intent: ImportCalendarSubmissionIntent): ImportCalendarSubmissionReceipt? = guarded(false) {
+        intent: ImportCalendarSubmissionIntent): ImportCalendarSubmissionReceipt? = guarded(ImportMediaStage.CALENDAR_SUBMISSION_STATUS, false) {
         ensurePreparationOwner(owner); uuid(assetId); uuid(uploadId); ImportCalendarSubmissionProtocol.validate(intent)
-        try { ImportCalendarSubmissionProtocol.parse(request("/assets/$assetId/calendar-submissions/by-key/${intent.idempotencyKey}", calendarSubmissionErrors = true)
+        try { ImportCalendarSubmissionProtocol.parse(request(ImportMediaStage.CALENDAR_SUBMISSION_STATUS, "/assets/$assetId/calendar-submissions/by-key/${intent.idempotencyKey}", calendarSubmissionErrors = true)
             .getJSONObject("submission"), assetId, uploadId, intent) }
         catch (error: ImportApiFailure) {
             if (error.status == 404 && error.code == "calendar_import_submission_not_found") null else throw error
         }
     }
-    suspend fun preparationPreview(owner: ImportOwner, record: ImportPreparationRecord): ImportPrivatePreview = guarded(false) {
+    suspend fun preparationPreview(owner: ImportOwner, record: ImportPreparationRecord): ImportPrivatePreview = guarded(ImportMediaStage.PREVIEW_METADATA, false) {
         ensurePreparationOwner(owner); uuid(record.assetId)
         require(record.phase == ImportPreparationPhase.READY && record.mediaRevision == record.currentRevision)
-        ImportPreparationProtocol.parsePreview(request("/assets/${record.assetId}/revisions/${record.mediaRevision}/preview").getJSONObject("preview"), record, apiOrigin)
+        ImportPreparationProtocol.parsePreview(request(ImportMediaStage.PREVIEW_METADATA, "/assets/${record.assetId}/revisions/${record.mediaRevision}/preview").getJSONObject("preview"), record, apiOrigin)
     }
 
-    suspend fun scheduleAvailability(owner: ImportOwner, record: ImportPreparationRecord): ImportScheduleAvailability = guarded(false) {
+    suspend fun scheduleAvailability(owner: ImportOwner, record: ImportPreparationRecord): ImportScheduleAvailability = guarded(ImportMediaStage.SCHEDULE_AVAILABILITY, false) {
         ensurePreparationOwner(owner); uuid(record.assetId)
-        ImportSchedulingProtocol.parseAvailability(request("/assets/${record.assetId}/schedule-availability").getJSONObject("availability"),
+        ImportSchedulingProtocol.parseAvailability(request(ImportMediaStage.SCHEDULE_AVAILABILITY, "/assets/${record.assetId}/schedule-availability").getJSONObject("availability"),
             owner, record, allowLoopbackForTests)
     }
-    suspend fun schedule(owner: ImportOwner, binding: ImportScheduleBinding, intent: ImportScheduleIntent): ImportScheduleReceipt = guarded(true) {
+    suspend fun schedule(owner: ImportOwner, binding: ImportScheduleBinding, intent: ImportScheduleIntent): ImportScheduleReceipt = guarded(ImportMediaStage.SCHEDULE, true) {
         ensureScheduleOwner(owner, binding)
-        ImportSchedulingProtocol.parseReceipt(request("/assets/${binding.assetId}/schedule", ImportSchedulingProtocol.body(binding, intent))
+        ImportSchedulingProtocol.parseReceipt(request(ImportMediaStage.SCHEDULE, "/assets/${binding.assetId}/schedule", ImportSchedulingProtocol.body(binding, intent))
             .getJSONObject("schedule"), binding, intent, allowLoopbackForTests)
     }
     /** Lookup only; a 404 is not permission to create a different schedule/key. */
-    suspend fun scheduleStatus(owner: ImportOwner, binding: ImportScheduleBinding, intent: ImportScheduleIntent): ImportScheduleReceipt? = guarded(false) {
+    suspend fun scheduleStatus(owner: ImportOwner, binding: ImportScheduleBinding, intent: ImportScheduleIntent): ImportScheduleReceipt? = guarded(ImportMediaStage.SCHEDULE_STATUS, false) {
         ensurePreparationOwner(owner); uuid(binding.assetId)
         require(binding.localSimulation == currentCapabilities?.localSimulation && (!binding.localSimulation || allowLoopbackForTests))
         require(intent.idempotencyKey.matches(Regex("[A-Za-z0-9_-]{8,128}")))
-        try { ImportSchedulingProtocol.parseReceipt(request("/assets/${binding.assetId}/schedules/by-key/${intent.idempotencyKey}")
+        try { ImportSchedulingProtocol.parseReceipt(request(ImportMediaStage.SCHEDULE_STATUS, "/assets/${binding.assetId}/schedules/by-key/${intent.idempotencyKey}")
             .getJSONObject("schedule"), binding, intent, allowLoopbackForTests) }
         catch (error: ImportApiFailure) { if (error.status == 404) null else throw error }
     }
-    suspend fun adoptGenerated(owner: ImportOwner, intent: ImportGeneratedSourceIntent): ImportGeneratedSource = guarded(true) {
+    suspend fun adoptGenerated(owner: ImportOwner, intent: ImportGeneratedSourceIntent): ImportGeneratedSource = guarded(ImportMediaStage.GENERATED_SOURCE, true) {
         ensurePreparationOwner(owner)
-        val result = request("/sources/generated/${intent.calendarItemId}", JSONObject().put("revision", intent.revision).put("idempotencyKey", intent.idempotencyKey))
+        val result = request(ImportMediaStage.GENERATED_SOURCE, "/sources/generated/${intent.calendarItemId}", JSONObject().put("revision", intent.revision).put("idempotencyKey", intent.idempotencyKey))
         val identity = result.getJSONObject("identity")
         require(identity.getString("companyId") == owner.companyId && identity.getString("userId") == owner.userId)
         val source = result.getJSONObject("source"); val upload = parseRecord(result.getJSONObject("upload"))
@@ -231,18 +235,18 @@ class GalleryImportHttpApi internal constructor(
     }
 
     private suspend fun record(owner: ImportOwner, uploadId: String, suffix: String, post: Boolean,
-        uploadVerificationErrors: Boolean = false): ImportUploadRecord = guarded(post) {
+        uploadVerificationErrors: Boolean = false): ImportUploadRecord = guarded(uploadStage(suffix), post) {
         ensureOwner(owner); uuid(uploadId)
-        val response = request("/uploads/$uploadId$suffix", if (post) JSONObject() else null,
+        val response = request(uploadStage(suffix), "/uploads/$uploadId$suffix", if (post) JSONObject() else null,
             uploadVerificationErrors = uploadVerificationErrors)
         parseRecord(response.getJSONObject("upload")).also { require(it.uploadId == uploadId) }
     }
 
-    suspend fun authorizePart(owner: ImportOwner, upload: ImportUploadRecord, partNumber: Int, checksums: ImportPartChecksums): ImportPartAuthorization = guarded(true) {
+    suspend fun authorizePart(owner: ImportOwner, upload: ImportUploadRecord, partNumber: Int, checksums: ImportPartChecksums): ImportPartAuthorization = guarded(ImportMediaStage.PART_AUTHORIZE, true) {
         ensureOwner(owner); uuid(upload.uploadId)
         require(partNumber in 1..upload.partCount && upload.phase == ImportServerPhase.UPLOADING)
         require(checksums.sha256.matches(Regex("[a-f0-9]{64}")) && Base64.getDecoder().decode(checksums.md5Base64).size == 16)
-        val json = request("/uploads/${upload.uploadId}/parts/$partNumber/authorize", JSONObject().put("sha256", checksums.sha256)
+        val json = request(ImportMediaStage.PART_AUTHORIZE, "/uploads/${upload.uploadId}/parts/$partNumber/authorize", JSONObject().put("sha256", checksums.sha256)
             .put("md5Base64", checksums.md5Base64)).getJSONObject("part")
         val expectedBytes = minOf(upload.chunkBytes.toLong(), upload.sizeBytes - (partNumber - 1L) * upload.chunkBytes).toInt()
         require(json.getString("uploadId") == upload.uploadId && json.getInt("partNumber") == partNumber && json.getInt("sizeBytes") == expectedBytes)
@@ -250,10 +254,10 @@ class GalleryImportHttpApi internal constructor(
         ImportPartAuthorization(upload.uploadId, partNumber, expectedBytes, uuid(json.getString("authorizationId")), expires)
     }
 
-    suspend fun resolvePart(owner: ImportOwner, authorization: ImportPartAuthorization, checksums: ImportPartChecksums): ImportPartGrant = guarded(true) {
+    suspend fun resolvePart(owner: ImportOwner, authorization: ImportPartAuthorization, checksums: ImportPartChecksums): ImportPartGrant = guarded(ImportMediaStage.PART_RESOLVE, true) {
         ensureOwner(owner); uuid(authorization.uploadId); uuid(authorization.authorizationId)
         require(authorization.partNumber in 1..20 && authorization.expiresAtEpochMs > now())
-        val json = request("/uploads/${authorization.uploadId}/parts/${authorization.partNumber}/resolve",
+        val json = request(ImportMediaStage.PART_RESOLVE, "/uploads/${authorization.uploadId}/parts/${authorization.partNumber}/resolve",
             JSONObject().put("authorizationId", authorization.authorizationId)).getJSONObject("grant")
         require(json.getString("method") == "PUT" && json.getInt("sizeBytes") == authorization.sizeBytes)
         val url = json.getString("url").toHttpUrl()
@@ -286,7 +290,7 @@ class GalleryImportHttpApi internal constructor(
     }
 
     /** A successful PUT is not a receipt: callers must observe parts with authenticated resume(). */
-    suspend fun putPart(grant: ImportPartGrant, bytes: ByteArray, onProgress: (Long, Long) -> Unit = { _, _ -> }): Unit = guarded(true) {
+    suspend fun putPart(grant: ImportPartGrant, bytes: ByteArray, onProgress: (Long, Long) -> Unit = { _, _ -> }): Unit = guarded(ImportMediaStage.MEDIA_PUT, true) {
         ensureSession()
         require(grant.sessionBinding == sessionToken && grant.expiresAtEpochMs > now() && bytes.size == grant.sizeBytes)
         val digest = ImportPartChecksums.calculate(bytes)
@@ -308,7 +312,7 @@ class GalleryImportHttpApi internal constructor(
         }
         val request = Request.Builder().url(grant.url).put(body)
         grant.headers.forEach { (key, value) -> request.header(key, value) }
-        execute(mediaClient, request.build(), true, parseJson = false)
+        execute(ImportMediaStage.MEDIA_PUT, mediaClient, request.build(), true, parseJson = false)
         Unit
     }
 
@@ -365,17 +369,43 @@ class GalleryImportHttpApi internal constructor(
         if (sessionToken.isBlank() || sessionToken.length > 16384 || sessionToken.any { it == '\r' || it == '\n' } || tokenProvider() != sessionToken)
             throw ImportApiFailure("import_session_changed")
     }
-    private suspend fun <T> guarded(mutation: Boolean, action: suspend () -> T): T = try { action() }
-    catch (error: ImportApiFailure) { throw error }
-    catch (error: CancellationException) { throw error }
-    catch (_: Exception) { throw ImportApiFailure("import_response_invalid", resultUncertain = mutation) }
-    private suspend fun request(suffix: String, body: JSONObject? = null, calendarSubmissionErrors: Boolean = false,
+    private fun uploadStage(suffix: String): ImportMediaStage = when (suffix) {
+        "" -> ImportMediaStage.UPLOAD_STATUS
+        "/resume" -> ImportMediaStage.UPLOAD_RESUME
+        "/complete" -> ImportMediaStage.UPLOAD_COMPLETE
+        "/cancel" -> ImportMediaStage.UPLOAD_CANCEL
+        else -> ImportMediaStage.TRANSFER_VALIDATION
+    }
+    private fun reportFailure(stage: ImportMediaStage, started: Long, error: ImportApiFailure,
+        reason: ImportMediaFailureReason, httpStatus: Int? = error.status): ImportApiFailure {
+        if (!error.diagnosticReported) {
+            val fixedReason = when (error.code) {
+                "import_session_changed" -> ImportMediaFailureReason.SESSION_CHANGED
+                "import_owner_unavailable" -> ImportMediaFailureReason.OWNER_UNAVAILABLE
+                else -> reason
+            }
+            diagnostics.failed(stage, fixedReason, started, httpStatus)
+            error.diagnosticReported = true
+        }
+        return error
+    }
+    private suspend fun <T> guarded(stage: ImportMediaStage, mutation: Boolean, action: suspend () -> T): T {
+        val started = diagnostics.started()
+        return try { action() }
+        catch (error: ImportApiFailure) { throw reportFailure(stage, started, error, ImportMediaFailureReason.VALIDATION_FAILED) }
+        catch (error: CancellationException) { throw error }
+        catch (_: Exception) {
+            throw reportFailure(stage, started, ImportApiFailure("import_response_invalid", resultUncertain = mutation),
+                ImportMediaFailureReason.VALIDATION_FAILED)
+        }
+    }
+    private suspend fun request(stage: ImportMediaStage, suffix: String, body: JSONObject? = null, calendarSubmissionErrors: Boolean = false,
         uploadVerificationErrors: Boolean = false): JSONObject {
         ensureSession()
         val request = Request.Builder().url(apiOrigin.newBuilder().encodedPath(path + suffix).build())
             .header("Authorization", "Bearer $sessionToken").header("Cache-Control", "no-store")
         if (body != null) request.post(body.toString().toRequestBody("application/json".toMediaType()))
-        return execute(metadataClient, request.build(), body != null, parseJson = true,
+        return execute(stage, metadataClient, request.build(), body != null, parseJson = true,
             calendarSubmissionErrors = calendarSubmissionErrors, uploadVerificationErrors = uploadVerificationErrors)
     }
     private fun calendarSubmissionRejection(response: Response, mutation: Boolean): String = runCatching {
@@ -402,13 +432,17 @@ class GalleryImportHttpApi internal constructor(
             "import_verification_pending"
         } finally { bytes.fill(0) }
     }.getOrDefault("import_request_rejected")
-    private suspend fun execute(client: OkHttpClient, request: Request, mutation: Boolean, parseJson: Boolean,
+    private suspend fun execute(stage: ImportMediaStage, client: OkHttpClient, request: Request, mutation: Boolean, parseJson: Boolean,
         calendarSubmissionErrors: Boolean = false, uploadVerificationErrors: Boolean = false): JSONObject = suspendCancellableCoroutine { continuation ->
+        val started = diagnostics.started()
+        val cancelledByCaller = AtomicBoolean(false)
         val call = client.newCall(request)
-        continuation.invokeOnCancellation { call.cancel() }
+        continuation.invokeOnCancellation { cancelledByCaller.set(true); call.cancel() }
         call.enqueue(object : Callback {
             override fun onFailure(call: Call, error: IOException) {
-                if (continuation.isActive) continuation.resumeWithException(ImportApiFailure("import_network_unavailable", resultUncertain = mutation))
+                val protected = reportFailure(stage, started, ImportApiFailure("import_network_unavailable", resultUncertain = mutation),
+                    ImportMediaDiagnostics.networkReason(error, cancelledByCaller.get()))
+                if (continuation.isActive) continuation.resumeWithException(protected)
             }
             override fun onResponse(call: Call, response: Response) {
                 response.use {
@@ -420,8 +454,9 @@ class GalleryImportHttpApi internal constructor(
                                 uploadVerificationErrors && response.code == 503 -> uploadVerificationRejection(response)
                                 else -> "import_request_rejected"
                             }
-                            throw ImportApiFailure(code, response.code,
-                                mutation && response.code >= 500 && code != "import_verification_pending")
+                            throw reportFailure(stage, started, ImportApiFailure(code, response.code,
+                                mutation && response.code >= 500 && code != "import_verification_pending"),
+                                ImportMediaFailureReason.HTTP_REJECTED)
                         }
                         val result = if (!parseJson) JSONObject() else {
                             val stream = response.body?.byteStream() ?: throw ImportApiFailure("import_response_invalid", resultUncertain = mutation)
@@ -431,8 +466,18 @@ class GalleryImportHttpApi internal constructor(
                             JSONObject(String(output.toByteArray(), Charsets.UTF_8)).also { require(it.getBoolean("ok")) }
                         }
                         if (continuation.isActive) continuation.resume(result)
-                    } catch (error: ImportApiFailure) { if (continuation.isActive) continuation.resumeWithException(error) }
-                    catch (_: Exception) { if (continuation.isActive) continuation.resumeWithException(ImportApiFailure("import_response_invalid", resultUncertain = mutation)) }
+                    } catch (error: ImportApiFailure) {
+                        val protected = reportFailure(stage, started, error, ImportMediaFailureReason.RESPONSE_PARSE, response.code)
+                        if (continuation.isActive) continuation.resumeWithException(protected)
+                    } catch (error: IOException) {
+                        val protected = reportFailure(stage, started, ImportApiFailure("import_response_invalid", resultUncertain = mutation),
+                            ImportMediaDiagnostics.networkReason(error, cancelledByCaller.get()), response.code)
+                        if (continuation.isActive) continuation.resumeWithException(protected)
+                    } catch (_: Exception) {
+                        val protected = reportFailure(stage, started, ImportApiFailure("import_response_invalid", resultUncertain = mutation),
+                            ImportMediaFailureReason.RESPONSE_PARSE, response.code)
+                        if (continuation.isActive) continuation.resumeWithException(protected)
+                    }
                 }
             }
         })
@@ -442,7 +487,10 @@ class GalleryImportHttpApi internal constructor(
         private val uuidPattern = Regex("[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}")
         internal fun uuid(value: String): String { require(uuidPattern.matches(value)); return value.lowercase() }
         internal fun metadataClient() = OkHttpClient.Builder().followRedirects(false).followSslRedirects(false).retryOnConnectionFailure(false)
-            .cookieJar(CookieJar.NO_COOKIES).connectTimeout(15, TimeUnit.SECONDS).readTimeout(60, TimeUnit.SECONDS).callTimeout(60, TimeUnit.SECONDS).build()
+            .cookieJar(CookieJar.NO_COOKIES).connectTimeout(ImportMediaNetworkPolicy.CONNECT_SECONDS, TimeUnit.SECONDS)
+            .readTimeout(ImportMediaNetworkPolicy.CALL_SECONDS, TimeUnit.SECONDS)
+            .writeTimeout(ImportMediaNetworkPolicy.CALL_SECONDS, TimeUnit.SECONDS)
+            .callTimeout(ImportMediaNetworkPolicy.CALL_SECONDS, TimeUnit.SECONDS).build()
         internal fun mediaClient() = OkHttpClient.Builder().followRedirects(false).followSslRedirects(false).retryOnConnectionFailure(false)
             .cookieJar(CookieJar.NO_COOKIES).connectTimeout(ImportMediaNetworkPolicy.CONNECT_SECONDS, TimeUnit.SECONDS)
             .readTimeout(ImportMediaNetworkPolicy.IDLE_SECONDS, TimeUnit.SECONDS)

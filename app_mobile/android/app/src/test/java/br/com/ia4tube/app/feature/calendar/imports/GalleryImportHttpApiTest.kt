@@ -1,13 +1,20 @@
 package br.com.ia4tube.app.feature.calendar.imports
 
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeout
 import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
+import okhttp3.mockwebserver.SocketPolicy
 import org.json.JSONArray
 import org.json.JSONObject
 import org.junit.Assert.*
 import org.junit.Test
 import java.util.concurrent.TimeUnit
+import java.util.Collections
 
 class GalleryImportHttpApiTest {
     private val owner = ImportOwner("11111111-1111-4111-8111-111111111111", "22222222-2222-4222-8222-222222222222")
@@ -36,8 +43,8 @@ class GalleryImportHttpApiTest {
         .put("x-amz-checksum-sha256", sums.sha256Base64)) = JSONObject().put("ok", true).put("grant", JSONObject()
         .put("url", url).put("method", "PUT").put("headers", headers).put("expiresAt", now + 60_000).put("sizeBytes", bytes.size))
     private fun MockWebServer.reply(json: JSONObject) { enqueue(MockResponse().setBody(json.toString()).setHeader("Content-Type", "application/json")) }
-    private fun api(server: MockWebServer, tokenProvider: () -> String = { token }) = GalleryImportHttpApi(tokenProvider, token,
-        server.url("/"), GalleryImportHttpApi.metadataClient(), GalleryImportHttpApi.mediaClient(), { now }, true)
+    private fun api(server: MockWebServer, diagnostics: ImportMediaDiagnostics = ImportMediaDiagnostics(), tokenProvider: () -> String = { token }) = GalleryImportHttpApi(tokenProvider, token,
+        server.url("/"), GalleryImportHttpApi.metadataClient(), GalleryImportHttpApi.mediaClient(), { now }, true, diagnostics)
     private suspend fun failure(action: suspend () -> Unit): ImportApiFailure {
         try { action(); fail("Expected protected failure") } catch (error: ImportApiFailure) { return error }
         throw AssertionError()
@@ -75,14 +82,14 @@ class GalleryImportHttpApiTest {
         } }
     }
 
-    @Test(timeout = 30_000) fun delayedPutAcknowledgementStillAllowsAuthenticatedResumeWithoutReuploading() = runBlocking {
+    @Test(timeout = 95_000) fun delayedPutAcknowledgementPastSixtySecondsStillAllowsAuthenticatedResumeWithoutReuploading() = runBlocking {
         MockWebServer().use { metadata -> MockWebServer().use { storage ->
             metadata.start(); storage.start()
             metadata.reply(capabilities(storage.url("/").toString()))
             metadata.reply(grant(storage.url("/object").toString()))
             // PUT ignores response bodies; delay the headers past OkHttp's old
-            // 10-second read default to exercise the actual acknowledgement wait.
-            storage.enqueue(MockResponse().setResponseCode(200).setHeadersDelay(11, TimeUnit.SECONDS))
+            // previous 60-second media wait to exercise the actual acknowledgement.
+            storage.enqueue(MockResponse().setResponseCode(200).setHeadersDelay(65, TimeUnit.SECONDS))
             metadata.reply(JSONObject().put("ok", true).put("upload", record().put("completedParts", JSONArray().put(
                 JSONObject().put("partNumber", 1).put("sizeBytes", bytes.size).put("sha256", sums.sha256)))))
             val api = api(metadata); api.capabilities()
@@ -233,11 +240,18 @@ class GalleryImportHttpApiTest {
     @Test fun foregroundMediaTransfersHaveFiniteFiveMinuteBudgetWithoutHiddenRetries() {
         val client = GalleryImportHttpApi.mediaClient()
         assertEquals(15_000, client.connectTimeoutMillis)
-        assertEquals(120_000, client.readTimeoutMillis)
-        assertEquals(120_000, client.writeTimeoutMillis)
+        assertEquals(300_000, client.readTimeoutMillis)
+        assertEquals(300_000, client.writeTimeoutMillis)
         assertEquals(300_000, client.callTimeoutMillis)
         assertFalse(client.retryOnConnectionFailure)
         assertFalse(client.followRedirects); assertFalse(client.followSslRedirects)
+        val metadata = GalleryImportHttpApi.metadataClient()
+        assertEquals(15_000, metadata.connectTimeoutMillis)
+        assertEquals(300_000, metadata.readTimeoutMillis)
+        assertEquals(300_000, metadata.writeTimeoutMillis)
+        assertEquals(300_000, metadata.callTimeoutMillis)
+        assertFalse(metadata.retryOnConnectionFailure)
+        assertFalse(metadata.followRedirects); assertFalse(metadata.followSslRedirects)
     }
 
     @Test fun duplicateProviderPartAndUnknownStateAreNotTrustedForResume() = runBlocking {
@@ -303,6 +317,125 @@ class GalleryImportHttpApiTest {
                 }.code)
                 assertEquals(2, metadata.requestCount)
             }
+        }
+    }
+
+    @Test fun safeDiagnosticsIdentifyHttpJsonAndSemanticValidationWithoutRequestOrResponseContents() = runBlocking {
+        val events = Collections.synchronizedList(mutableListOf<ImportMediaDiagnosticEvent>())
+        val diagnostics = ImportMediaDiagnostics({ events.add(it) })
+        val secret = "synthetic-private-token-and-customer-source"
+        MockWebServer().use { metadata ->
+            metadata.start(); metadata.reply(capabilities(metadata.url("/").toString()))
+            metadata.enqueue(MockResponse().setResponseCode(503).setBody(secret))
+            metadata.enqueue(MockResponse().setBody("not-json-$secret"))
+            metadata.reply(JSONObject().put("ok", true).put("upload", record().put("partCount", 2).put("private", secret)))
+            val api = api(metadata, diagnostics); api.capabilities()
+            assertEquals("import_request_rejected", failure { api.resume(owner, uploadId) }.code)
+            assertEquals("import_response_invalid", failure { api.resume(owner, uploadId) }.code)
+            assertEquals("import_response_invalid", failure { api.resume(owner, uploadId) }.code)
+            assertEquals(listOf(ImportMediaFailureReason.HTTP_REJECTED, ImportMediaFailureReason.RESPONSE_PARSE,
+                ImportMediaFailureReason.VALIDATION_FAILED), events.map { it.reason })
+            assertEquals(listOf(503, 200, null), events.map { it.httpStatus })
+            assertTrue(events.all { it.stage == ImportMediaStage.UPLOAD_RESUME })
+            val messages = events.joinToString { it.fixedMessage() }
+            for (privateValue in listOf(secret, token, uploadId, assetId, owner.companyId, metadata.url("/").toString(), sums.sha256))
+                assertFalse(messages.contains(privateValue))
+            assertEquals(4, metadata.requestCount)
+        }
+    }
+
+    @Test fun safeDiagnosticsReportInvalidGrantBeforePutAndThrowingSinkDoesNotChangeTheFailure() = runBlocking {
+        MockWebServer().use { metadata -> MockWebServer().use { storage ->
+            metadata.start(); storage.start()
+            val events = mutableListOf<ImportMediaDiagnosticEvent>()
+            val diagnostics = ImportMediaDiagnostics({ events.add(it); throw AssertionError("synthetic-sensitive-logger-error") })
+            val api = api(metadata, diagnostics)
+            val grant = ImportPartGrant(storage.url("/private-source?token=synthetic-secret"),
+                mapOf("content-md5" to "synthetic-secret-not-a-checksum"), bytes.size, now + 60_000, token)
+            val error = failure { api.putPart(grant, bytes) }
+            assertEquals("import_response_invalid", error.code); assertTrue(error.resultUncertain)
+            assertEquals(ImportMediaStage.MEDIA_PUT, events.single().stage)
+            assertEquals(ImportMediaFailureReason.VALIDATION_FAILED, events.single().reason)
+            assertFalse(events.single().fixedMessage().contains("secret"))
+            assertEquals(0, storage.requestCount); assertEquals(0, metadata.requestCount)
+        } }
+    }
+
+    @Test fun rawPutTimeoutIsDiagnosedOnceWithoutRetryEvenWhenSinkThrows() = runBlocking {
+        MockWebServer().use { storage ->
+            storage.start(); storage.enqueue(MockResponse().setHeadersDelay(1, TimeUnit.SECONDS))
+            val events = Collections.synchronizedList(mutableListOf<ImportMediaDiagnosticEvent>())
+            val diagnostics = ImportMediaDiagnostics({ events.add(it); throw AssertionError("private-logger-error") })
+            val shortClient = GalleryImportHttpApi.mediaClient().newBuilder().readTimeout(150, TimeUnit.MILLISECONDS).build()
+            val api = GalleryImportHttpApi({ token }, token, storage.url("/"), GalleryImportHttpApi.metadataClient(), shortClient,
+                { now }, true, diagnostics)
+            val grant = ImportPartGrant(storage.url("/private-id?token=synthetic-token"), mapOf("content-md5" to sums.md5Base64),
+                bytes.size, now + 60_000, token)
+            val error = failure { api.putPart(grant, bytes) }
+            assertEquals("import_network_unavailable", error.code); assertTrue(error.resultUncertain)
+            assertEquals(ImportMediaStage.MEDIA_PUT, events.single().stage)
+            assertEquals(ImportMediaFailureReason.SOCKET_TIMEOUT, events.single().reason)
+            assertNull(events.single().httpStatus); assertEquals(1, storage.requestCount)
+            assertArrayEquals(bytes, storage.takeRequest().body.readByteArray())
+        }
+    }
+
+    @Test fun explicitCancellationOfRawPutHasItsOwnSafeReasonAndDoesNotRetry() = runBlocking {
+        MockWebServer().use { storage ->
+            storage.start(); storage.enqueue(MockResponse().setSocketPolicy(SocketPolicy.NO_RESPONSE))
+            val event = CompletableDeferred<ImportMediaDiagnosticEvent>()
+            val api = api(storage, ImportMediaDiagnostics({ event.complete(it) }))
+            val grant = ImportPartGrant(storage.url("/private-source"), mapOf("content-md5" to sums.md5Base64),
+                bytes.size, now + 60_000, token)
+            val pending = async(Dispatchers.IO) { api.putPart(grant, bytes) }
+            assertNotNull(storage.takeRequest(2, TimeUnit.SECONDS))
+            pending.cancelAndJoin()
+            val diagnostic = withTimeout(2_000) { event.await() }
+            assertEquals(ImportMediaStage.MEDIA_PUT, diagnostic.stage)
+            assertEquals(ImportMediaFailureReason.CANCELLED, diagnostic.reason)
+            assertEquals(1, storage.requestCount)
+        }
+    }
+
+    @Test fun throwingDiagnosticsDuringHttpAndJsonErrorsNeverChangeTheOriginalResult() = runBlocking {
+        MockWebServer().use { metadata ->
+            metadata.start()
+            metadata.enqueue(MockResponse().setResponseCode(503).setBody("private-http-body"))
+            metadata.enqueue(MockResponse().setBody("private-malformed-body"))
+            val api = api(metadata, ImportMediaDiagnostics({ throw AssertionError("private-sink-message") }))
+            assertEquals("import_request_rejected", failure { api.capabilities() }.code)
+            assertEquals("import_response_invalid", failure { api.capabilities() }.code)
+            assertEquals(2, metadata.requestCount)
+        }
+    }
+
+    @Test fun timeoutWhileReadingMetadataBodyIsNetworkDiagnosticWithoutChangingTheExistingFailureCode() = runBlocking {
+        MockWebServer().use { metadata ->
+            metadata.start(); metadata.enqueue(MockResponse().setBody(capabilities(metadata.url("/").toString()).toString())
+                .setBodyDelay(1, TimeUnit.SECONDS))
+            val events = Collections.synchronizedList(mutableListOf<ImportMediaDiagnosticEvent>())
+            val shortClient = GalleryImportHttpApi.metadataClient().newBuilder().readTimeout(150, TimeUnit.MILLISECONDS).build()
+            val api = GalleryImportHttpApi({ token }, token, metadata.url("/"), shortClient, GalleryImportHttpApi.mediaClient(),
+                { now }, true, ImportMediaDiagnostics({ events.add(it) }))
+            assertEquals("import_response_invalid", failure { api.capabilities() }.code)
+            assertEquals(ImportMediaStage.CAPABILITIES, events.single().stage)
+            assertEquals(ImportMediaFailureReason.SOCKET_TIMEOUT, events.single().reason)
+            assertEquals(200, events.single().httpStatus); assertEquals(1, metadata.requestCount)
+        }
+    }
+
+    @Test fun rawPutCallDeadlineIsNotDiagnosedAsUserCancellation() = runBlocking {
+        MockWebServer().use { storage ->
+            storage.start(); storage.enqueue(MockResponse().setSocketPolicy(SocketPolicy.NO_RESPONSE))
+            val events = Collections.synchronizedList(mutableListOf<ImportMediaDiagnosticEvent>())
+            val shortClient = GalleryImportHttpApi.mediaClient().newBuilder().callTimeout(150, TimeUnit.MILLISECONDS).build()
+            val api = GalleryImportHttpApi({ token }, token, storage.url("/"), GalleryImportHttpApi.metadataClient(), shortClient,
+                { now }, true, ImportMediaDiagnostics({ events.add(it) }))
+            val grant = ImportPartGrant(storage.url("/private-source"), mapOf("content-md5" to sums.md5Base64),
+                bytes.size, now + 60_000, token)
+            assertEquals("import_network_unavailable", failure { api.putPart(grant, bytes) }.code)
+            assertEquals(ImportMediaFailureReason.INTERRUPTED_IO, events.single().reason)
+            assertEquals(ImportMediaStage.MEDIA_PUT, events.single().stage); assertEquals(1, storage.requestCount)
         }
     }
 }

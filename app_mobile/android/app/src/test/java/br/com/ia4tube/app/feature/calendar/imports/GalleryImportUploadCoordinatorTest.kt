@@ -55,6 +55,8 @@ class GalleryImportUploadCoordinatorTest {
         var inspectCount = 0
         val readParts = mutableListOf<Int>()
         val views = mutableListOf<ImportUploadRunView>()
+        val diagnosticEvents = mutableListOf<ImportMediaDiagnosticEvent>()
+        var throwingDiagnostics = false
         val source = object : GalleryImportUploadSource {
             override fun retain(uri: String) = sourceAvailable
             override suspend fun inspect(uri: String): ImportSelection {
@@ -163,7 +165,11 @@ class GalleryImportUploadCoordinatorTest {
         }
         fun coordinator(storeOverride: PrivateImportCheckpointStore = store, io: CoroutineDispatcher = Dispatchers.IO) = GalleryImportUploadCoordinator(
             { activeOwner }, { token }, source, storeOverride, { transport }, io = io,
-            onChanged = { synchronized(views) { views.add(it) } })
+            onChanged = { synchronized(views) { views.add(it) } },
+            diagnostics = ImportMediaDiagnostics({ event ->
+                synchronized(diagnosticEvents) { diagnosticEvents.add(event) }
+                if (throwingDiagnostics) throw AssertionError("synthetic-private-sink-error")
+            }))
         fun saved() = store.read(owner)!!
     }
     private fun fixture(size: Int = 17) = Fixture(temporary.newFolder(), size)
@@ -206,6 +212,36 @@ class GalleryImportUploadCoordinatorTest {
         assertTrue(f.saved().transferPaused); assertEquals(1, f.saved().state.upload!!.receipts.size)
         assertEquals(ImportUploadRunStatus.UPLOADED, f.coordinator().transfer().status)
         assertEquals(listOf(0, 1), f.readParts); assertEquals(2, f.puts)
+    }
+
+    @Test fun fivePartSourceResumesAfterFirstReceiptWithoutNewUploadOrChangingIndices() = runBlocking {
+        val f = fixture(22_225_691); val first = f.coordinator(); first.select(uri, config)
+        first.transfer(maxParts = 1); val saved = f.saved()
+        assertEquals(5_242_880L, saved.state.upload!!.acknowledgedBytes)
+        assertEquals(ImportUploadRunStatus.UPLOADED, f.coordinator().transfer().status)
+        assertEquals(listOf(0, 1, 2, 3, 4), f.readParts)
+        assertEquals(5, f.puts); assertEquals(1, f.creations); assertEquals(1, f.startKeys.size)
+        assertEquals(saved.state.upload.ticket, f.saved().state.upload!!.ticket)
+        assertEquals(1_254_171, f.received[5]!!.size)
+        assertTrue(f.diagnosticEvents.isEmpty())
+    }
+
+    @Test fun changedFirstReceiptGetsSafeStageAndCanResumeSameSourceAfterServerObservationIsCorrected() = runBlocking {
+        val f = fixture(GalleryImportPolicy.CHUNK_BYTES + 7); val first = f.coordinator(); first.select(uri, config)
+        first.transfer(maxParts = 1); val saved = f.saved(); val receipt = f.receipts[1]!!
+        f.receipts[1] = receipt.copy(sha256 = "f".repeat(64)); f.throwingDiagnostics = true
+        val rejected = f.coordinator().transfer()
+        assertEquals("import_transition_part_conflict", rejected.errorCode)
+        assertEquals(1, f.puts); assertEquals(1, f.grants.size)
+        val event = f.diagnosticEvents.single()
+        assertEquals(ImportMediaStage.RECEIPT_VALIDATION, event.stage)
+        assertEquals(ImportMediaFailureReason.RECEIPT_CONFLICT, event.reason)
+        assertFalse(event.fixedMessage().contains(uri)); assertFalse(event.fixedMessage().contains(f.token))
+        assertEquals(saved.state.upload!!.ticket, f.saved().state.upload!!.ticket)
+        assertEquals(saved.uploadStartIdempotencyKey, f.saved().uploadStartIdempotencyKey)
+        f.receipts[1] = receipt
+        assertEquals(ImportUploadRunStatus.UPLOADED, f.coordinator().transfer().status)
+        assertEquals(1, f.creations); assertEquals(2, f.puts)
     }
 
     @Test fun pauseDuringCancellablePutPreservesResumeAndDoesNotClaimReceiptOrReady() = runBlocking {

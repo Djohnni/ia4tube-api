@@ -189,6 +189,7 @@ internal class PrivateImportPreviewCache(
             .retryOnConnectionFailure(false).cookieJar(CookieJar.NO_COOKIES).authenticator(Authenticator.NONE)
             .proxyAuthenticator(Authenticator.NONE).connectTimeout(ImportMediaNetworkPolicy.CONNECT_SECONDS, TimeUnit.SECONDS)
             .readTimeout(ImportMediaNetworkPolicy.IDLE_SECONDS, TimeUnit.SECONDS)
+            .writeTimeout(ImportMediaNetworkPolicy.IDLE_SECONDS, TimeUnit.SECONDS)
             .callTimeout(ImportMediaNetworkPolicy.CALL_SECONDS, TimeUnit.SECONDS).build()
     }
 }
