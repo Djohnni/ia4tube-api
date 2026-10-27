@@ -19,6 +19,8 @@ internal interface GalleryImportUploadTransport {
     suspend fun capabilities(): ImportCapabilities
     suspend fun start(owner: ImportOwner, media: ImportSelection, key: String): ImportUploadRecord
     suspend fun resume(owner: ImportOwner, uploadId: String): ImportUploadRecord
+    suspend fun status(owner: ImportOwner, uploadId: String): ImportUploadRecord =
+        throw ImportApiFailure("import_verification_status_unavailable")
     suspend fun complete(owner: ImportOwner, uploadId: String): ImportUploadRecord
     suspend fun cancel(owner: ImportOwner, uploadId: String): ImportUploadRecord
     suspend fun authorizePart(owner: ImportOwner, upload: ImportUploadRecord, part: Int, checksums: ImportPartChecksums): ImportPartAuthorization
@@ -30,6 +32,7 @@ internal class HttpGalleryImportUploadTransport(private val api: GalleryImportHt
     override suspend fun capabilities() = api.capabilities()
     override suspend fun start(owner: ImportOwner, media: ImportSelection, key: String) = api.start(owner, media, key)
     override suspend fun resume(owner: ImportOwner, uploadId: String) = api.resume(owner, uploadId)
+    override suspend fun status(owner: ImportOwner, uploadId: String) = api.status(owner, uploadId)
     override suspend fun complete(owner: ImportOwner, uploadId: String) = api.complete(owner, uploadId)
     override suspend fun cancel(owner: ImportOwner, uploadId: String) = api.cancel(owner, uploadId)
     override suspend fun authorizePart(owner: ImportOwner, upload: ImportUploadRecord, part: Int, checksums: ImportPartChecksums) = api.authorizePart(owner, upload, part, checksums)

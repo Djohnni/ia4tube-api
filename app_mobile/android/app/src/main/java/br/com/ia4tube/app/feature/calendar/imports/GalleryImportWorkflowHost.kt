@@ -198,7 +198,11 @@ internal fun GalleryImportWorkflowContent(view: ImportWorkflowView, runtime: Gal
                 if (view.capabilities.localSimulation) Text("AMBIENTE LOCAL DE TESTE — nenhuma publicação real ao Instagram.", color = Color(0xFFFFD59C))
                 if (view.busy) {
                     LinearProgressIndicator(Modifier.fillMaxWidth())
-                    Text(if (view.upload.status == ImportUploadRunStatus.TRANSFERRING) "Enviando arquivo…" else "Conferindo o recebimento…")
+                    Text(when {
+                        view.upload.status == ImportUploadRunStatus.TRANSFERRING -> "Enviando arquivo…"
+                        draft?.phase == ImportPhase.VERIFYING -> "Conferindo o arquivo no servidor…"
+                        else -> "Conferindo o recebimento…"
+                    })
                 }
                 view.error?.let { Text(it, color = Color(0xFFFFB4AB)) }
                 if (!view.sessionValid) Text("A sessão mudou. Reabra na empresa correta.")
@@ -340,8 +344,10 @@ internal fun GalleryImportWorkflowContent(view: ImportWorkflowView, runtime: Gal
                             OutlinedButton(enabled = operational, onClick = { confirmCancel = true }) { Text("Cancelar envio") }
                     }
                 }
-                if (view.busy && view.upload.status == ImportUploadRunStatus.TRANSFERRING)
-                    OutlinedButton(onClick = runtime::pauseTransfer) { Text("Pausar envio") }
+                if (view.busy && (view.upload.status == ImportUploadRunStatus.TRANSFERRING || draft?.phase == ImportPhase.VERIFYING))
+                    OutlinedButton(onClick = runtime::pauseTransfer) {
+                        Text(if (draft?.phase == ImportPhase.VERIFYING) "Pausar espera" else "Pausar envio")
+                    }
             }
         }
     }

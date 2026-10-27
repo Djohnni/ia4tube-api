@@ -61,6 +61,23 @@ class PrivateImportPreviewCacheTest {
         cache.release(result.epoch)
         assertFalse(result.file.exists())
     }
+    @Test(timeout = 35_000) fun `slow initial response beyond previous idle limit still verifies one authenticated download`() = runBlocking {
+        server.enqueue(response().setHeadersDelay(21, TimeUnit.SECONDS))
+        val result = load()
+        assertArrayEquals(bytes, result.file.readBytes())
+        assertEquals(1, server.requestCount)
+        assertEquals("Bearer synthetic-session", server.takeRequest().getHeader("Authorization"))
+        assertTrue(cache.isCurrent(result.epoch, owner, token))
+    }
+    @Test fun `preview budget allows slow media but remains bounded without redirects retries or cookies`() {
+        val client = PrivateImportPreviewCache.previewClient()
+        assertEquals(15_000, client.connectTimeoutMillis)
+        assertEquals(120_000, client.readTimeoutMillis)
+        assertEquals(300_000, client.callTimeoutMillis)
+        assertFalse(client.retryOnConnectionFailure)
+        assertFalse(client.followRedirects); assertFalse(client.followSslRedirects)
+        assertSame(okhttp3.CookieJar.NO_COOKIES, client.cookieJar)
+    }
     @Test fun `checksum tamper and truncated body leave no playable cache`() = runBlocking {
         server.enqueue(response())
         assertEquals("import_preview_checksum_invalid", (failure { load(preview("e".repeat(64))) } as ImportPreviewFailure).code)

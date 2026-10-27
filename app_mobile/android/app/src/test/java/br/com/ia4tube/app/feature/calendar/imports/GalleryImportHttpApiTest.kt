@@ -196,6 +196,50 @@ class GalleryImportHttpApiTest {
         }
     }
 
+    @Test fun onlyExplicitCompleteVerificationPendingGetsTheProcessingCode() = runBlocking {
+        val pending = JSONObject().put("ok", false).put("code", "import_verification_pending")
+        MockWebServer().use { metadata ->
+            metadata.start(); metadata.reply(capabilities(metadata.url("/").toString()))
+            metadata.enqueue(MockResponse().setResponseCode(503).setBody(pending.toString()))
+            metadata.enqueue(MockResponse().setResponseCode(503).setBody(pending.toString()))
+            val api = api(metadata); api.capabilities()
+            val processing = failure { api.complete(owner, uploadId) }
+            assertEquals("import_verification_pending", processing.code)
+            assertEquals(503, processing.status); assertFalse(processing.resultUncertain)
+            // The same body on another endpoint is not permission to poll/retry.
+            val differentEndpoint = failure { api.resume(owner, uploadId) }
+            assertEquals("import_request_rejected", differentEndpoint.code)
+            assertTrue(differentEndpoint.resultUncertain)
+            assertEquals(3, metadata.requestCount)
+        }
+        for ((status, body) in listOf(
+            500 to pending.toString(),
+            503 to pending.toString().replace("import_verification_pending", "another_pending"),
+            503 to pending.toString().replace("false", "\"false\""),
+            503 to "not-json",
+            503 to pending.put("error", "x".repeat(4097)).toString()
+        )) {
+            MockWebServer().use { metadata ->
+                metadata.start(); metadata.reply(capabilities(metadata.url("/").toString()))
+                metadata.enqueue(MockResponse().setResponseCode(status).setBody(body))
+                val api = api(metadata); api.capabilities()
+                val rejected = failure { api.complete(owner, uploadId) }
+                assertEquals("import_request_rejected", rejected.code)
+                assertTrue(rejected.resultUncertain); assertEquals(2, metadata.requestCount)
+            }
+        }
+    }
+
+    @Test fun foregroundMediaTransfersHaveFiniteFiveMinuteBudgetWithoutHiddenRetries() {
+        val client = GalleryImportHttpApi.mediaClient()
+        assertEquals(15_000, client.connectTimeoutMillis)
+        assertEquals(120_000, client.readTimeoutMillis)
+        assertEquals(120_000, client.writeTimeoutMillis)
+        assertEquals(300_000, client.callTimeoutMillis)
+        assertFalse(client.retryOnConnectionFailure)
+        assertFalse(client.followRedirects); assertFalse(client.followSslRedirects)
+    }
+
     @Test fun duplicateProviderPartAndUnknownStateAreNotTrustedForResume() = runBlocking {
         MockWebServer().use { metadata ->
             metadata.start(); metadata.reply(capabilities("https://syntheticaccount.r2.cloudflarestorage.com"))

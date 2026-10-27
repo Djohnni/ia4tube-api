@@ -187,7 +187,8 @@ internal class PrivateImportPreviewCache(
     companion object {
         fun previewClient(): OkHttpClient = OkHttpClient.Builder().followRedirects(false).followSslRedirects(false)
             .retryOnConnectionFailure(false).cookieJar(CookieJar.NO_COOKIES).authenticator(Authenticator.NONE)
-            .proxyAuthenticator(Authenticator.NONE).connectTimeout(15, TimeUnit.SECONDS).readTimeout(20, TimeUnit.SECONDS)
-            .callTimeout(60, TimeUnit.SECONDS).build()
+            .proxyAuthenticator(Authenticator.NONE).connectTimeout(ImportMediaNetworkPolicy.CONNECT_SECONDS, TimeUnit.SECONDS)
+            .readTimeout(ImportMediaNetworkPolicy.IDLE_SECONDS, TimeUnit.SECONDS)
+            .callTimeout(ImportMediaNetworkPolicy.CALL_SECONDS, TimeUnit.SECONDS).build()
     }
 }

@@ -154,7 +154,8 @@ class GalleryImportHttpApi internal constructor(
 
     suspend fun status(owner: ImportOwner, uploadId: String): ImportUploadRecord = record(owner, uploadId, "", false)
     suspend fun resume(owner: ImportOwner, uploadId: String): ImportUploadRecord = record(owner, uploadId, "/resume", true)
-    suspend fun complete(owner: ImportOwner, uploadId: String): ImportUploadRecord = record(owner, uploadId, "/complete", true)
+    suspend fun complete(owner: ImportOwner, uploadId: String): ImportUploadRecord =
+        record(owner, uploadId, "/complete", true, uploadVerificationErrors = true)
     suspend fun cancel(owner: ImportOwner, uploadId: String): ImportUploadRecord = record(owner, uploadId, "/cancel", true)
 
     suspend fun prepare(owner: ImportOwner, assetId: String, uploadId: String, intent: ImportPreparationIntent,
@@ -229,9 +230,11 @@ class GalleryImportHttpApi internal constructor(
         ImportGeneratedSource(upload, selection, intent)
     }
 
-    private suspend fun record(owner: ImportOwner, uploadId: String, suffix: String, post: Boolean): ImportUploadRecord = guarded(post) {
+    private suspend fun record(owner: ImportOwner, uploadId: String, suffix: String, post: Boolean,
+        uploadVerificationErrors: Boolean = false): ImportUploadRecord = guarded(post) {
         ensureOwner(owner); uuid(uploadId)
-        val response = request("/uploads/$uploadId$suffix", if (post) JSONObject() else null)
+        val response = request("/uploads/$uploadId$suffix", if (post) JSONObject() else null,
+            uploadVerificationErrors = uploadVerificationErrors)
         parseRecord(response.getJSONObject("upload")).also { require(it.uploadId == uploadId) }
     }
 
@@ -366,12 +369,14 @@ class GalleryImportHttpApi internal constructor(
     catch (error: ImportApiFailure) { throw error }
     catch (error: CancellationException) { throw error }
     catch (_: Exception) { throw ImportApiFailure("import_response_invalid", resultUncertain = mutation) }
-    private suspend fun request(suffix: String, body: JSONObject? = null, calendarSubmissionErrors: Boolean = false): JSONObject {
+    private suspend fun request(suffix: String, body: JSONObject? = null, calendarSubmissionErrors: Boolean = false,
+        uploadVerificationErrors: Boolean = false): JSONObject {
         ensureSession()
         val request = Request.Builder().url(apiOrigin.newBuilder().encodedPath(path + suffix).build())
             .header("Authorization", "Bearer $sessionToken").header("Cache-Control", "no-store")
         if (body != null) request.post(body.toString().toRequestBody("application/json".toMediaType()))
-        return execute(metadataClient, request.build(), body != null, parseJson = true, calendarSubmissionErrors = calendarSubmissionErrors)
+        return execute(metadataClient, request.build(), body != null, parseJson = true,
+            calendarSubmissionErrors = calendarSubmissionErrors, uploadVerificationErrors = uploadVerificationErrors)
     }
     private fun calendarSubmissionRejection(response: Response, mutation: Boolean): String = runCatching {
         val bytes = response.peekBody(4097).bytes()
@@ -388,8 +393,17 @@ class GalleryImportHttpApi internal constructor(
             code
         } finally { bytes.fill(0) }
     }.getOrDefault("import_request_rejected")
+    private fun uploadVerificationRejection(response: Response): String = runCatching {
+        val bytes = response.peekBody(4097).bytes()
+        try {
+            require(response.code == 503 && bytes.size <= 4096)
+            val json = JSONObject(String(bytes, Charsets.UTF_8))
+            require(json.opt("ok") == false && json.opt("code") == "import_verification_pending")
+            "import_verification_pending"
+        } finally { bytes.fill(0) }
+    }.getOrDefault("import_request_rejected")
     private suspend fun execute(client: OkHttpClient, request: Request, mutation: Boolean, parseJson: Boolean,
-        calendarSubmissionErrors: Boolean = false): JSONObject = suspendCancellableCoroutine { continuation ->
+        calendarSubmissionErrors: Boolean = false, uploadVerificationErrors: Boolean = false): JSONObject = suspendCancellableCoroutine { continuation ->
         val call = client.newCall(request)
         continuation.invokeOnCancellation { call.cancel() }
         call.enqueue(object : Callback {
@@ -400,9 +414,15 @@ class GalleryImportHttpApi internal constructor(
                 response.use {
                     try {
                         ensureSession()
-                        if (!response.isSuccessful) throw ImportApiFailure(
-                            if (calendarSubmissionErrors && response.code in setOf(400, 404, 409)) calendarSubmissionRejection(response, mutation)
-                            else "import_request_rejected", response.code, mutation && response.code >= 500)
+                        if (!response.isSuccessful) {
+                            val code = when {
+                                calendarSubmissionErrors && response.code in setOf(400, 404, 409) -> calendarSubmissionRejection(response, mutation)
+                                uploadVerificationErrors && response.code == 503 -> uploadVerificationRejection(response)
+                                else -> "import_request_rejected"
+                            }
+                            throw ImportApiFailure(code, response.code,
+                                mutation && response.code >= 500 && code != "import_verification_pending")
+                        }
                         val result = if (!parseJson) JSONObject() else {
                             val stream = response.body?.byteStream() ?: throw ImportApiFailure("import_response_invalid", resultUncertain = mutation)
                             val output = java.io.ByteArrayOutputStream(); val buffer = ByteArray(8192)
@@ -424,7 +444,9 @@ class GalleryImportHttpApi internal constructor(
         internal fun metadataClient() = OkHttpClient.Builder().followRedirects(false).followSslRedirects(false).retryOnConnectionFailure(false)
             .cookieJar(CookieJar.NO_COOKIES).connectTimeout(15, TimeUnit.SECONDS).readTimeout(60, TimeUnit.SECONDS).callTimeout(60, TimeUnit.SECONDS).build()
         internal fun mediaClient() = OkHttpClient.Builder().followRedirects(false).followSslRedirects(false).retryOnConnectionFailure(false)
-            .cookieJar(CookieJar.NO_COOKIES).connectTimeout(15, TimeUnit.SECONDS).readTimeout(60, TimeUnit.SECONDS)
-            .writeTimeout(60, TimeUnit.SECONDS).callTimeout(90, TimeUnit.SECONDS).build()
+            .cookieJar(CookieJar.NO_COOKIES).connectTimeout(ImportMediaNetworkPolicy.CONNECT_SECONDS, TimeUnit.SECONDS)
+            .readTimeout(ImportMediaNetworkPolicy.IDLE_SECONDS, TimeUnit.SECONDS)
+            .writeTimeout(ImportMediaNetworkPolicy.IDLE_SECONDS, TimeUnit.SECONDS)
+            .callTimeout(ImportMediaNetworkPolicy.CALL_SECONDS, TimeUnit.SECONDS).build()
     }
 }

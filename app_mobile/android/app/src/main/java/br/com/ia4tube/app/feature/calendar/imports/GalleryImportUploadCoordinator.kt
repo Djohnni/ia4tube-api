@@ -7,10 +7,12 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.job
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import java.util.UUID
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
@@ -33,7 +35,8 @@ private class ImportUploadPaused : CancellationException("Importação pausada."
 private class ImportUploadSessionChanged : CancellationException("Sessão da importação alterada.")
 
 /**
- * One finite, resumable upload operation at a time. No automatic polling,
+ * One finite, resumable foreground upload operation at a time. An explicitly
+ * pending verification may be observed by GET for at most five minutes. No
  * background task, preparation, scheduling, Instagram action, or file deletion.
  * UI composition must call invalidateSession() on logout/company/token change,
  * and pause() when intentionally leaving its upload work. Reopening uses the
@@ -162,7 +165,7 @@ class GalleryImportUploadCoordinator internal constructor(
         else { persist(run, draft(run).copy(transferPaused = true)); emit(run, ImportUploadRunStatus.PAUSED) }
     }
 
-    /** One bounded reconciliation initiated by a caller, not a periodic poll. */
+    /** One reconciliation initiated by a caller; pending verification has a finite foreground wait. */
     suspend fun reconcileOnce(): ImportUploadRunView = operation { run ->
         val checkpoint = draft(run); capabilities(run); requireUploadStage(checkpoint.state)
         if (checkpoint.cancelRequested) return@operation continueCancellation(run)
@@ -239,9 +242,35 @@ class GalleryImportUploadCoordinator internal constructor(
         if (state.phase == ImportPhase.UPLOADING) applied(run, ImportEvent.UploadCompletionRequested(state.upload!!.ticket.uploadId))
         requireThat(run.machine.snapshot()!!.phase == ImportPhase.VERIFYING, "import_upload_state_invalid")
         persist(run, draft(run).copy(state = run.machine.snapshot()!!))
-        val record = mutate(run) { run.api.complete(run.binding.owner, state.upload!!.ticket.uploadId) }
-        observe(run, record)
-        return showRecord(run, record)
+        val uploadId = state.upload!!.ticket.uploadId
+        emit(run, ImportUploadRunStatus.RECONCILIATION_REQUIRED)
+        val verified = withTimeoutOrNull(ImportMediaNetworkPolicy.VERIFICATION_WAIT_MS) {
+            val record = try { mutate(run) { run.api.complete(run.binding.owner, uploadId) } }
+            catch (error: ImportApiFailure) {
+                // Only this explicit response means the server has accepted
+                // inspection. Network failures and other 503s stay uncertain.
+                if (error.code != "import_verification_pending" || error.status != 503) throw error
+                null
+            }
+            if (record != null) {
+                observe(run, record)
+                if (record.phase != ImportServerPhase.VERIFYING || record.errorCode != null)
+                    return@withTimeoutOrNull record
+            }
+            var current: ImportUploadRecord
+            do {
+                delay(ImportMediaNetworkPolicy.VERIFICATION_POLL_MS)
+                guard(run); currentCoroutineContext().ensureActive()
+                // Pure authenticated observation of this same upload. Never
+                // repeat start, PUT, complete, preparation or calendar intent.
+                current = run.api.status(run.binding.owner, uploadId)
+                guard(run)
+                observe(run, current)
+            } while (current.phase == ImportServerPhase.VERIFYING && current.errorCode == null)
+            current
+        }
+        return if (verified == null) emit(run, ImportUploadRunStatus.RECONCILIATION_REQUIRED,
+            error = "import_verification_pending") else showRecord(run, verified)
     }
 
     private suspend fun observe(run: Run, record: ImportUploadRecord, receiptsAuthoritative: Boolean = false) {

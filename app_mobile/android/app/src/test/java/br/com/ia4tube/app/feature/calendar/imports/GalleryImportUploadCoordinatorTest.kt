@@ -1,11 +1,16 @@
 package br.com.ia4tube.app.feature.calendar.imports
 
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineDispatcher
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.test.StandardTestDispatcher
+import kotlinx.coroutines.test.runTest
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import org.junit.Assert.*
 import org.junit.Rule
@@ -20,6 +25,7 @@ import javax.crypto.spec.GCMParameterSpec
 import javax.crypto.spec.SecretKeySpec
 
 /** All files, media, identities and transports are synthetic; no remote URL is fetched. */
+@OptIn(ExperimentalCoroutinesApi::class)
 class GalleryImportUploadCoordinatorTest {
     @get:Rule val temporary = TemporaryFolder()
     private val config = ImportConfiguration(setOf(ImportTarget.FEED), ImportAudioMode.NONE)
@@ -73,6 +79,8 @@ class GalleryImportUploadCoordinatorTest {
         var loseComplete = false
         var loseCancel = false
         var pendingVerification = false
+        var statusHook: (suspend () -> ImportUploadRecord)? = null
+        var completeError: ImportApiFailure? = null
         var initialPhase = ImportServerPhase.UPLOADING
         var serverRecord: ImportUploadRecord? = null
         val received = linkedMapOf<Int, ByteArray>()
@@ -83,6 +91,7 @@ class GalleryImportUploadCoordinatorTest {
         var puts = 0
         var resumes = 0
         var completions = 0
+        val statusIds = mutableListOf<String>()
         var cancellations = 0
         val transport = object : GalleryImportUploadTransport {
             override suspend fun capabilities(): ImportCapabilities {
@@ -107,6 +116,10 @@ class GalleryImportUploadCoordinatorTest {
                 resumes++; assertEquals(uploadId, serverRecord!!.uploadId)
                 return serverRecord!!.copy(completedParts = if (serverRecord!!.phase == ImportServerPhase.UPLOADING) receipts.values.toList() else emptyList())
             }
+            override suspend fun status(owner: ImportOwner, uploadId: String): ImportUploadRecord {
+                statusIds.add(uploadId); assertEquals(uploadId, serverRecord!!.uploadId)
+                return statusHook?.invoke() ?: serverRecord!!
+            }
             override suspend fun authorizePart(owner: ImportOwner, upload: ImportUploadRecord, part: Int, checksums: ImportPartChecksums): ImportPartAuthorization {
                 assertEquals(upload.uploadId, store.read(owner)!!.state.upload!!.ticket.uploadId)
                 val id = UUID.randomUUID().toString(); grants[id] = part to checksums
@@ -127,6 +140,7 @@ class GalleryImportUploadCoordinatorTest {
             }
             override suspend fun complete(owner: ImportOwner, uploadId: String): ImportUploadRecord {
                 completions++; assertEquals(ImportPhase.VERIFYING, store.read(owner)!!.state.phase)
+                completeError?.let { throw it }
                 if (pendingVerification) {
                     serverRecord = serverRecord!!.copy(phase = ImportServerPhase.VERIFYING)
                     throw ImportApiFailure("import_verification_pending", 503, true)
@@ -147,8 +161,9 @@ class GalleryImportUploadCoordinatorTest {
                 return serverRecord!!
             }
         }
-        fun coordinator(storeOverride: PrivateImportCheckpointStore = store) = GalleryImportUploadCoordinator(
-            { activeOwner }, { token }, source, storeOverride, { transport }, onChanged = { synchronized(views) { views.add(it) } })
+        fun coordinator(storeOverride: PrivateImportCheckpointStore = store, io: CoroutineDispatcher = Dispatchers.IO) = GalleryImportUploadCoordinator(
+            { activeOwner }, { token }, source, storeOverride, { transport }, io = io,
+            onChanged = { synchronized(views) { views.add(it) } })
         fun saved() = store.read(owner)!!
     }
     private fun fixture(size: Int = 17) = Fixture(temporary.newFolder(), size)
@@ -268,14 +283,71 @@ class GalleryImportUploadCoordinatorTest {
         assertEquals(ImportUploadRunStatus.PAUSED, task.await().status); assertEquals(0, f.puts); assertEquals(1, f.cancellations)
     }
 
-    @Test fun verificationPendingRequiresExplicitReconciliationAndNeverPollsContinuously() = runBlocking {
-        val f = fixture(); val coordinator = f.coordinator(); coordinator.select(uri, config); f.pendingVerification = true
-        assertEquals(ImportUploadRunStatus.RECONCILIATION_REQUIRED, coordinator.transfer().status)
-        assertEquals(ImportPhase.VERIFYING, f.saved().state.phase); assertEquals(1, f.completions)
-        f.coordinator().restore(); assertEquals(1, f.completions)
-        f.pendingVerification = false
-        assertEquals(ImportUploadRunStatus.UPLOADED, f.coordinator().reconcileOnce().status)
-        assertEquals(2, f.completions); assertEquals(1, f.puts)
+    @Test fun explicitPendingInspectionCompletesAfterThirtyOneSecondsWithoutNewUploadOrCompletePost() = runTest {
+        val f = fixture(); val coordinator = f.coordinator(io = StandardTestDispatcher(testScheduler))
+        coordinator.select(uri, config); f.pendingVerification = true
+        f.statusHook = {
+            if (testScheduler.currentTime >= 31_000) f.serverRecord = f.serverRecord!!.copy(
+                phase = ImportServerPhase.UPLOADED, verifiedSha256 = hash(f.content))
+            f.serverRecord!!
+        }
+        val result = coordinator.transfer()
+        assertEquals(ImportUploadRunStatus.UPLOADED, result.status)
+        assertTrue(result.state!!.upload!!.serverVerified)
+        assertTrue(testScheduler.currentTime in 31_000L..33_000L)
+        assertEquals(1, f.creations); assertEquals(1, f.puts); assertEquals(1, f.completions)
+        assertTrue(f.statusIds.size > 1)
+        assertEquals(setOf(f.serverRecord!!.uploadId), f.statusIds.toSet())
+        assertTrue(f.views.any { it.state?.phase == ImportPhase.VERIFYING && it.errorCode == null })
+        assertTrue(result.state.prepared.isEmpty()); assertFalse(result.state.canDisplayScheduled)
+    }
+
+    @Test fun pendingWaitStopsAtFiveMinutesAndRestoreDoesNotRestartPolling() = runTest {
+        val f = fixture(); val io = StandardTestDispatcher(testScheduler)
+        val coordinator = f.coordinator(io = io); coordinator.select(uri, config); f.pendingVerification = true
+        val result = coordinator.transfer()
+        assertEquals(300_000L, testScheduler.currentTime)
+        assertEquals(ImportUploadRunStatus.RECONCILIATION_REQUIRED, result.status)
+        assertEquals("import_verification_pending", result.errorCode)
+        assertEquals(ImportPhase.VERIFYING, f.saved().state.phase)
+        assertTrue(f.statusIds.size in 1..150)
+        val observed = f.statusIds.size
+        f.coordinator(io = io).restore()
+        assertEquals(observed, f.statusIds.size)
+        assertEquals(1, f.completions); assertEquals(1, f.puts); assertEquals(1, f.creations)
+    }
+
+    @Test fun pendingWaitCanBePausedWithoutCancellingOrReplacingTheServerUpload() = runTest {
+        val f = fixture(); val coordinator = f.coordinator(io = StandardTestDispatcher(testScheduler))
+        coordinator.select(uri, config); f.pendingVerification = true
+        val observing = CompletableDeferred<Unit>()
+        f.statusHook = { observing.complete(Unit); awaitCancellation() }
+        val task = async { coordinator.transfer() }; observing.await(); coordinator.pause()
+        assertEquals(ImportUploadRunStatus.PAUSED, task.await().status)
+        assertEquals(ImportPhase.VERIFYING, f.saved().state.phase)
+        assertEquals(1, f.completions); assertEquals(1, f.statusIds.size)
+        assertEquals(1, f.puts); assertEquals(1, f.creations); assertEquals(0, f.cancellations)
+    }
+
+    @Test fun sessionChangeDuringPendingObservationCannotContinueOrExposeAnotherOwner() = runTest {
+        val f = fixture(); val coordinator = f.coordinator(io = StandardTestDispatcher(testScheduler))
+        coordinator.select(uri, config); f.pendingVerification = true
+        f.statusHook = { f.token = "different-session"; f.serverRecord!! }
+        assertEquals(ImportUploadRunStatus.SESSION_CHANGED, coordinator.transfer().status)
+        assertEquals(1, f.statusIds.size); assertEquals(1, f.completions)
+        assertEquals(1, f.puts); assertEquals(1, f.creations)
+        assertEquals(ImportPhase.VERIFYING, f.saved().state.phase)
+    }
+
+    @Test fun otherUncertainCompleteFailureNeverStartsAnAutomaticStatusLoop() = runTest {
+        val f = fixture(); val coordinator = f.coordinator(io = StandardTestDispatcher(testScheduler))
+        coordinator.select(uri, config)
+        f.completeError = ImportApiFailure("import_request_rejected", 503, true)
+        val result = coordinator.transfer()
+        assertEquals(ImportUploadRunStatus.RECONCILIATION_REQUIRED, result.status)
+        assertEquals("import_request_rejected", result.errorCode)
+        assertTrue(f.statusIds.isEmpty()); assertEquals(1, f.completions)
+        assertEquals(1, f.puts); assertEquals(1, f.creations)
     }
 
     @Test fun uploadedButLostCompletionAckCanRecoverWithoutReadingThePhoneFileAgain() = runBlocking {

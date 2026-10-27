@@ -129,6 +129,21 @@ class GalleryImportUploadPresenterTest {
         assertEquals(1, f.reconcileCalls); assertEquals(0, f.transferCalls); assertEquals(0, f.selectCalls)
     }
 
+    @Test fun activeVerificationShowsProcessingAndCanBePausedInsteadOfShowingFailure() {
+        val processing = galleryImportUploadPresentation(
+            view(ImportPhase.VERIFYING, ImportUploadRunStatus.RECONCILIATION_REQUIRED),
+            busy = true, foreground = true, initialized = true, sessionValid = true)
+        assertEquals("Conferindo o arquivo no servidor…", processing.title)
+        assertNull(processing.error)
+        assertEquals(setOf(GalleryImportUploadAction.PAUSE), processing.actions)
+        val waiting = galleryImportUploadPresentation(
+            view(ImportPhase.VERIFYING, ImportUploadRunStatus.RECONCILIATION_REQUIRED)
+                .copy(errorCode = "import_verification_pending"),
+            busy = false, foreground = true, initialized = true, sessionValid = true)
+        assertEquals("O arquivo ainda está sendo conferido. Continue com este mesmo envio.", waiting.error)
+        assertEquals(setOf(GalleryImportUploadAction.RECONCILE), waiting.actions)
+    }
+
     @Test fun cancelPendingCannotResumeAndOnlyConfirmedCancellationEnablesLocalDiscard() = runTest {
         val f = Fixture(this); f.current = view(ImportPhase.CANCEL_PENDING, ImportUploadRunStatus.CANCEL_REQUESTED)
         f.presenter.onStart(); advanceUntilIdle()

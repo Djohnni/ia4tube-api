@@ -68,6 +68,7 @@ internal fun galleryImportUploadPresentation(view: ImportUploadRunView, busy: Bo
         cancelling -> "Cancelamento em conferência"
         uploaded -> "Arquivo enviado — aguardando preparo"
         finished -> "A etapa de envio deste arquivo terminou"
+        busy && state?.phase == ImportPhase.VERIFYING -> "Conferindo o arquivo no servidor…"
         uncertain -> "Precisamos conferir este envio"
         busy && view.status == ImportUploadRunStatus.TRANSFERRING -> "Enviando arquivo…"
         busy -> "Conferindo arquivo…"
@@ -80,6 +81,7 @@ internal fun galleryImportUploadPresentation(view: ImportUploadRunView, busy: Bo
         cancelling -> "Confira o resultado antes de escolher outro arquivo. Não retomaremos os bytes enquanto o cancelamento estiver pendente."
         uploaded -> "O servidor confirmou o recebimento. Ainda falta preparar o arquivo e conferir a prévia; ele não está programado nem publicado."
         finished -> "Volte ao calendário para conferir a etapa atual. Esta tela não altera a programação."
+        busy && state?.phase == ImportPhase.VERIFYING -> "Aguarde alguns instantes. Seu envio está preservado e você pode pausar a espera."
         uncertain -> "Use Conferir envio para recuperar o resultado do mesmo arquivo, sem criar um envio substituto."
         busy -> "Você pode pausar. A parte em trânsito só conta como recebida depois da confirmação do servidor."
         state != null -> "Toque em Enviar arquivo para transferir à iA4tube. Isso não publica nem programa no Instagram."
@@ -110,6 +112,7 @@ internal fun galleryImportUploadPresentation(view: ImportUploadRunView, busy: Bo
         "import_owner_unavailable" -> "A importação ainda não está disponível para esta conta. Nenhum novo envio foi iniciado."
         "import_upload_not_cancellable" -> "Este envio já avançou e não pode ser cancelado aqui. Confira o estado existente."
         "checkpoint_conflict" -> "O rascunho mudou em outra operação. Confira o envio antes de continuar."
+        "import_verification_pending" -> "O arquivo ainda está sendo conferido. Continue com este mesmo envio."
         else -> "Não foi possível concluir esta etapa. Confira o envio existente antes de tentar novamente."
     }
     val progress = if (uploaded) 1f else if (view.totalBytes > 0) (view.acknowledgedBytes.toDouble() / view.totalBytes).coerceIn(0.0, 1.0).toFloat() else null
