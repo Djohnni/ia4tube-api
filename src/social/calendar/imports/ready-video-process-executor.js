@@ -133,7 +133,7 @@ function createReadyVideoProcessExecutor({ workingRoot, allowedRoots = [], codec
             const inspected = await native.inspectNativeReadyVideo({ ...options, filePath: value.sourcePath, timeoutMs });
             const task = value.task;
             if (inspected.sha256 !== task.sha256 || inspected.size !== task.sizeBytes) fail("source_changed");
-            result = { providerType: "render_disk", companyId: task.companyId, userId: task.userId, ticketId: task.ticketId,
+            result = { providerType: task.providerType, companyId: task.companyId, userId: task.userId, ticketId: task.ticketId,
               objectKey: task.objectKey, objectVersion: task.objectVersion, executionDigest: task.executionDigest,
               finishedAt: clock(), elapsedMs: Math.ceil(performance.now() - started),
               inspection: { complete: true, decoded: true, signatureVerified: true, sizeBytes: inspected.size,

@@ -200,7 +200,12 @@ function createCalendarImportService({ simulation, preparation, resultStore, acc
       authorize(context); const connection = await resolveConnection(context); authorize(context);
       const job = await store.update(context.companyId, state => editState(state, context, id, input, connection, automaticOperationsAllowed(context))); return receipt(job);
     },
-    async metadata(context, { id }) { const job = await read(context, id); if (job.phase === "cancelled") fail("not_found", 404); return preview(job); },
+    async metadata(context, { id }) {
+      const job = await read(context, id); if (job.phase === "cancelled") fail("not_found", 404);
+      const result=await require("./google-preview").withGooglePreview(resultStore,context,preview(job),job.import.resultRef);
+      const current=await read(context,id);if(current.phase==="cancelled" || current.import.previewDigest!==job.import.previewDigest)fail("preview_changed");
+      return result;
+    },
     async open(context, { id, target }, { rangeHeader, signal } = {}) {
       const job = await read(context, id), media = preview(job);
       if (job.phase === "cancelled") fail("not_found", 404);

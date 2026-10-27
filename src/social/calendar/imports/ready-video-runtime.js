@@ -93,6 +93,14 @@ async function createReadyVideoRuntime({ env = process.env, tenantPool, capacity
   isEligibleOwner = () => true, clock = Date.now, logger } = {}) {
   const config = loadReadyVideoConfig(env);
   if (!config.enabled) return null;
+  let gcsConfig={enabled:false},gcsTransport=null;
+  try {
+    gcsConfig=require("./gcs-config").loadGcsConfig(env);
+    gcsTransport=require("./gcs-config").createConfiguredGcsTransport(env);
+  } catch {
+    // Google configuration/availability never closes existing disk media.
+    gcsConfig={enabled:env.SOCIAL_READY_VIDEO_GCS_ENABLED==="true"};gcsTransport=null;
+  }
   const owners = await resolveReadyVideoOwners(config, resolveOwnerForSubject);
   if (!tenantPool || !capacityPool || !transferPool || tenantPool === capacityPool || tenantPool === transferPool || capacityPool === transferPool ||
       !path.isAbsolute(rootDirectory) || typeof clock !== "function" || typeof isEligibleOwner !== "function") fail("configuration_invalid");
@@ -134,9 +142,11 @@ async function createReadyVideoRuntime({ env = process.env, tenantPool, capacity
     coordinatorContext: { authenticated: true, role: "calendar_media_capacity_coordinator" }, enabled: true, diagnostics });
   const preparedAdmission = createPreparedDiskAdmission({ capacity, tenantStore: store, accessPolicy,
     rootDirectory: privateRoot, diskSpaceGuard: guard, enabled: true, clock });
-  const resultStore = createPreparedDiskResultStore({ rootDirectory: privateRoot, preparationRoot, tenantStore: store, admission: preparedAdmission,
+  const diskResultStore = createPreparedDiskResultStore({ rootDirectory: privateRoot, preparationRoot, tenantStore: store, admission: preparedAdmission,
     accessPolicy, outputInspector: createPreparedDiskOutputInspector({ ffmpegPath, processExecutor: executor,
       nativeProfile: NATIVE_READY_VIDEO_PROFILE }), nativeProfile: NATIVE_READY_VIDEO_PROFILE, enabled: true, clock });
+  const resultStore=require("./prepared-disk-store").createRoutedPreparedResultStore({diskStore:diskResultStore,tenantStore:store,
+    gcsStore:gcsTransport?require("./gcs-prepared-store").createGcsPreparedResultStore({tenantStore:store,diskStore:diskResultStore,transport:gcsTransport,accessPolicy,clock}):null});
   let inspectionWorker, preparationWorker;
   const entries = owners.map(owner => ({ owner,
     inspection: createOperationalInspectionRunner({ store, owner, capacity, accessPolicy, diskSpaceGuard: guard,
@@ -146,8 +156,10 @@ async function createReadyVideoRuntime({ env = process.env, tenantPool, capacity
   const inspectionRunner = routeRunners(entries.map(entry => ({ owner: entry.owner, runner: entry.inspection })), "inspect");
   const preparationRunner = routeRunners(entries.map(entry => ({ owner: entry.owner, runner: entry.preparation })), "prepare");
   const inspector = createDurableInspectionDispatcher({ store, runner: inspectionRunner, accessPolicy, enabled: true, clock });
-  const provider = createRenderDiskPrivateUploadProvider({ rootDirectory: privateRoot, store, admission, inspector,
+  const diskProvider = createRenderDiskPrivateUploadProvider({ rootDirectory: privateRoot, store, admission, inspector,
     transferOrigin: config.publicOrigin, enabled: true, clock, diagnostics });
+  const gcsProvider=gcsTransport?require("./gcs-provider").createGcsPrivateUploadProvider({store,transport:gcsTransport,inspector,accessPolicy,enabled:true,clock}):null;
+  const provider=require("./storage-provider-router").createUploadStorageRouter({store,disk:diskProvider,gcs:gcsProvider,accessPolicy,newGcsEnabled:gcsConfig.enabled});
   inspectionWorker = createProcessDiskInspectionWorker({ provider, workingDirectory: inspectionRoot, executor, clock,
     assertExecutionHeld: query => inspectionRunner.assertExecutionHeld(query) });
   preparationWorker = createProcessDiskPreparationWorker({ provider, workingDirectory: snapshotRoot, preparationRoot,
@@ -156,10 +168,11 @@ async function createReadyVideoRuntime({ env = process.env, tenantPool, capacity
   const basePreparation = createPreparationQueue({ store, dispatcher: preparationRunner, resultStore, accessPolicy, enabled: true, clock });
   const { upload, preparation } = restrictReadyVideoServices(baseUpload, basePreparation, accessPolicy);
   const registry = createTransferAuthorizationRegistry({ store: registryStore, enabled: true, clock });
-  const transfer = createRenderDiskTransferService({ store, provider, registry, accessPolicy, enabled: true, clock, diagnostics,
+  const transfer = createRenderDiskTransferService({ store, provider:diskProvider, gcsProvider, registry, accessPolicy, enabled: true, clock, diagnostics,
     limiter: createSingleProcessTransferLimiter({ maxConcurrent: 1, maxPerCompany: 1 }) });
   const factory = createOperationalCalendarImportsRuntimeFactory({ enabled: true, preparation, resultStore, accessPolicy,
     upload, provider, uploadStore: store, transfer, clock, canAdmit, onSubmissionsReady: value => { submissions = value; },
+    gcsProfile:gcsTransport?{transport:"gcs-parts-v1",bucket:gcsTransport.bucketName,objectPrefix:gcsTransport.prefix}:null,
     async verifyReadiness() {
       await registry.verify(); await ledger.verify(); await guard.sample();
       if (executor.capabilities.hardTermination !== true) fail("runtime_unproved");
@@ -173,9 +186,11 @@ async function createReadyVideoRuntime({ env = process.env, tenantPool, capacity
       if (submissions) await submissions.progress(context.companyId);
       const pending = await store.update(context.companyId, state => ({
         uploadId: Object.values(state.uploads).find(row => row.userId === context.userId && row.state === "verifying")?.uploadId,
+        cancelId: Object.values(state.uploads).find(row => row.userId===context.userId && row.storageProvider==="gcs" && row.state==="cancel_pending")?.uploadId,
         job: Object.values(state.preparation?.jobs || {}).find(row => row.userId === context.userId &&
           ["dispatching", "processing", "reconciliation"].includes(row.state))
       }));
+      if(pending.cancelId){try{await baseUpload.cancel(context,{uploadId:pending.cancelId});}catch(error){report(error);}}
       if (pending.uploadId) {
         try { await baseUpload.complete(context, { uploadId: pending.uploadId }); }
         catch (error) { if (error.code !== "import_verification_pending") throw error; }
@@ -213,6 +228,7 @@ async function createReadyVideoRuntime({ env = process.env, tenantPool, capacity
       if (currentTick) await currentTick.catch(report);
       await Promise.allSettled(entries.flatMap(entry => [entry.inspection.drain(), entry.preparation.drain()]));
       closed = true;
+      gcsTransport?.close();
       // Pools are caller-owned; never close the shared social pool here.
     } });
 }

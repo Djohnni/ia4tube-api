@@ -96,10 +96,10 @@ async function createOperationalCalendarPipelineFixture(t, options = {}) {
     let publisher;
     const registryStore = createPostgresTransferRegistryStore({ pool: db.transferPool });
     const registry = createTransferAuthorizationRegistry({ store: registryStore, enabled: true, clock: f.clock });
-    const transfer = createRenderDiskTransferService({ store: f.store, provider: f.provider, registry, accessPolicy: f.accessPolicy, enabled: true, clock: f.clock });
+    const transfer = createRenderDiskTransferService({ store: f.store, provider: f.provider, gcsProvider:f.gcsProvider||null, registry, accessPolicy: f.accessPolicy, enabled: true, clock: f.clock });
     const runtimeFactory = createOperationalCalendarImportsRuntimeFactory({ enabled: true, preparation: f.preparation, resultStore: f.preparedStore,
       accessPolicy: f.accessPolicy, upload: f.upload, provider: f.provider, uploadStore: f.store, transfer,
-      catalog: f.catalog, localTransport: transport, allowLocalTransportForTests: true, clock: f.clock, canAdmit: options.canAdmit, readPilotStatus: options.readPilotStatus,
+      catalog: f.catalog, localTransport: transport, allowLocalTransportForTests: true, clock: f.clock, canAdmit: options.canAdmit, readPilotStatus: options.readPilotStatus,gcsProfile:f.gcsProfile||null,
       async verifyReadiness() {
         assert.equal(await registry.verify(), true); assert.equal(await f.ledger.verify(), true);
         if (options.externalPrivateExecutor === true) {
@@ -128,7 +128,7 @@ async function createOperationalCalendarPipelineFixture(t, options = {}) {
       context = imports.contextForPrincipal(principal); f.context = context;
     }
     const storedImportMedia = importsDisabled ? require("../../src/social/calendar/imports/stored-calendar-media").createStoredCalendarMediaReader({
-      store: calendarStore, uploadStore: f.store, rootDirectory: f.privateRoot, preparationRoot: f.preparationRoot, clock: f.clock }) : null;
+      store: calendarStore, uploadStore: f.store, rootDirectory: f.privateRoot, preparationRoot: f.preparationRoot, clock: f.clock,gcsTransport:f.gcsTransport||null }) : null;
     const scheduling = imports?.scheduling || storedImportMedia, preparedMedia = imports?.preparedMedia, privatePreview = imports?.preview;
     publisher = createCalendarPublisher({ config, connectorStore, connectorAudit: createPostgresConnectorAudit({ pool: db.tenantPool, role: "ia4tube_social_runtime" }),
       credentials: syntheticCredentials, transport, media, preparedMedia });

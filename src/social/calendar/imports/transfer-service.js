@@ -46,7 +46,8 @@ function createSingleProcessTransferLimiter({ maxConcurrent = 2, maxPerCompany =
 
 function createRenderDiskTransferService({ store, provider, registry, accessPolicy,
   limiter = createSingleProcessTransferLimiter(), enabled = false, allowVolatileForTests = false,
-  clock = Date.now, diagnostics } = {}) {
+  clock = Date.now, diagnostics, gcsProvider = null } = {}) {
+  if (gcsProvider !== null && !require("./gcs-provider").isGcsPrivateUploadProvider(gcsProvider)) fail();
   const durable = store?.capabilities?.persistence === "durable" && registry?.capabilities?.persistence === "durable";
   const available = Boolean(enabled && store?.capabilities?.atomicCompanyUpdates === true &&
     typeof store.update === "function" && provider?.getCapabilities?.().available === true &&
@@ -103,6 +104,21 @@ function createRenderDiskTransferService({ store, provider, registry, accessPoli
     async resolvePart(upload, context, input) { return safe(async () => {
       owner(context);
       if (!UUID.test(input?.authorizationId || "") || typeof upload?.resolvePart !== "function") fail("import_transfer_not_found", 404);
+      if (gcsProvider) {
+        const cloud = await store.update(context.companyId, state => {
+          const row=state.uploads[input.uploadId];
+          if (!row || row.companyId!==context.companyId || row.userId!==context.userId) fail("import_transfer_not_found",404);
+          return row.storageProvider === "gcs";
+        });
+        if (cloud) {
+          // Signed Google PUTs use the durable owner/part record. They never
+          // enter the disk byte route or its global bearer registry.
+          const grant=await upload.resolvePart(context,input);
+          owner(context);
+          if (grant.transport!=="gcs-parts-v1") fail();
+          return grant;
+        }
+      }
       const grant = await upload.resolvePart(context, input);
       const binding = await store.update(context.companyId, state => {
         const row = state.uploads[input.uploadId];

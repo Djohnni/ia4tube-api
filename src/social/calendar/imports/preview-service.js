@@ -78,8 +78,8 @@ function createPrivateImportPreviewService({ preparation, resultStore, accessPol
       const thumbnail = value.result.thumbnail ? { ...descriptor("thumbnail", value.result.thumbnail), url: url(request, "thumbnail") } : null;
       // URLs contain no bearer token, private object key, local path or signature.
       // Their bytes still require the current authenticated owner on every GET.
-      return { assetId: value.assetId, mediaRevision: value.mediaRevision, currentRevision: value.currentRevision,
-        previewDigest: value.result.previewDigest, testOnly: value.result.testOnly, variants, thumbnail };
+      return require("./google-preview").withGooglePreview(resultStore,context,{ assetId: value.assetId, mediaRevision: value.mediaRevision, currentRevision: value.currentRevision,
+        previewDigest: value.result.previewDigest, testOnly: value.result.testOnly, variants, thumbnail },value.result.resultRef);
     }); },
     async open(context, request, { rangeHeader, signal } = {}) { return safe(async () => {
       input(request, true); const value = await snapshot(context, request);

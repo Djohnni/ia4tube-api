@@ -412,6 +412,27 @@ function createPreparedDiskResultStoreInternal({ rootDirectory, preparationRoot,
       for (const part of allFiles(saved.actual.prepared).values()) await verifiedFile(saved.dirname, part);
       await owned(query, saved.task); return structuredClone(saved.actual);
     }); },
+    async openCommittedObject(input) { return safe(async () => {
+      const {target,...values}=input||{};
+      if (!["feed","story","reel","thumbnail"].includes(target)) fail("request_invalid",400);
+      const query=binding(values);await owned(query);
+      const saved=await manifest(query),part=target==="thumbnail"?saved.actual.prepared.thumbnail:saved.actual.prepared.variants[target];
+      if(!part)fail("not_found",404);
+      const fileIdentity=await verifiedFile(saved.dirname,part);
+      const bodyStream=require("node:stream").Readable.from((async function*(){
+        const file=await openFile(path.join(saved.dirname,part.fileName),RANGE_BYTES,part.size,fileIdentity),buffer=Buffer.alloc(CHUNK_BYTES);
+        const digest=crypto.createHash("sha256");let offset=0;
+        try{
+          while(offset<part.size){
+            const {bytesRead}=await file.handle.read(buffer,0,Math.min(buffer.length,part.size-offset),offset);
+            if(!bytesRead)fail("file_changed",422);
+            offset+=bytesRead;const bytes=Buffer.from(buffer.subarray(0,bytesRead));digest.update(bytes);yield bytes;
+          }
+          await file.unchanged();if(digest.digest("hex")!==part.sha256)fail("file_changed",422);
+        }finally{await file.handle.close();}
+      })());
+      return {part:structuredClone(part),bodyStream};
+    }); },
     async inspectPreview(args) { return safe(async () => {
       const { part } = await preview(args, false);
       return { assetId: args.assetId, mediaRevision: args.mediaRevision, resultRef: args.resultRef, target: args.target,
@@ -463,4 +484,22 @@ function createPreparedDiskResultReader(options) { return createPreparedDiskResu
 function isPreparedDiskResultStore(value, { allowVolatileForTests = false } = {}) {
   const record = stores.get(value); return Boolean(record?.available && (!record.testOnly || allowVolatileForTests));
 }
-module.exports = { createPreparedDiskResultStore, createPreparedDiskResultReader, isPreparedDiskResultStore };
+function createRoutedPreparedResultStore({diskStore,gcsStore,tenantStore}={}) {
+  if(!isPreparedDiskResultStore(diskStore) || gcsStore!==null && !require("./gcs-prepared-store").isGcsPreparedResultStore(gcsStore) ||
+      tenantStore?.capabilities?.persistence!=="durable")fail("configuration_invalid");
+  async function selected(args){
+    const value=args.task||args,context=value.context||value;
+    const cloud=await tenantStore.read(context.companyId,state=>{
+      const matches=Object.values(state.uploads||{}).filter(row=>row.assetId===value.assetId && row.userId===context.userId);
+      if(matches.length!==1)fail("not_found",404);return matches[0].storageProvider==="gcs";
+    });
+    if(cloud && !gcsStore)fail("cloud_unavailable");return cloud?gcsStore:diskStore;
+  }
+  const api={capabilities:diskStore.capabilities};
+  for(const name of ["commit","inspectCommitted","inspectPreview","streamPreview"])
+    api[name]=async args=>(await selected(args))[name](args);
+  api.googleDownload=async args=>{const store=await selected(args);return store===gcsStore?gcsStore.googleDownload(args):null;};
+  api.googleStorage=gcsStore?.googleStorage||null;
+  Object.freeze(api);stores.set(api,{available:true,testOnly:false});return api;
+}
+module.exports = { createPreparedDiskResultStore, createPreparedDiskResultReader, isPreparedDiskResultStore,createRoutedPreparedResultStore };

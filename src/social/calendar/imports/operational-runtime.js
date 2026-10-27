@@ -42,7 +42,7 @@ function publicPilotStatus(read) {
 function createOperationalCalendarImportsRuntimeFactory({ enabled = false, preparation, resultStore, accessPolicy,
   upload, provider, uploadStore, transfer, verifyReadiness, catalog = null,
   localTransport = null, allowLocalTransportForTests = false, clock = Date.now, canAdmit = () => true, readPilotStatus = null,
-  onSubmissionsReady = () => {} } = {}) {
+  onSubmissionsReady = () => {}, gcsProfile = null } = {}) {
   const local = isLocalPublicationTransport(localTransport);
   if (localTransport !== null && (!local || allowLocalTransportForTests !== true)) fail();
   if (typeof enabled !== "boolean" || typeof clock !== "function" || typeof canAdmit !== "function" ||
@@ -96,9 +96,11 @@ function createOperationalCalendarImportsRuntimeFactory({ enabled = false, prepa
     const runtime = Object.freeze({ ready: true, scheduling, submissions, preview, preparedMedia, transfer,
       upload: transfer.wrapUpload(upload), preparation, allowed,
       canAdmit(context) { return allowed(context) && canAdmit() === true; },
-      contextForPrincipal(principal) {
+      contextForPrincipal(principal, options = {}) {
         if (!isAuthenticatedSocialPrincipal(principal)) fail();
-        const context = Object.freeze({ authenticated: true, companyId: principal.companyId, userId: principal.userId });
+        if (options.mediaTransport != null && options.mediaTransport !== "gcs-parts-v1") fail();
+        const context = Object.freeze({ authenticated: true, companyId: principal.companyId, userId: principal.userId,
+          ...(options.mediaTransport ? {mediaTransport:options.mediaTransport} : {}) });
         // Identity is not eligibility. The router's allowed check still returns
         // disabled capabilities to an authenticated but ineligible owner.
         principals.set(context, principal); return context;
@@ -116,7 +118,8 @@ function createOperationalCalendarImportsRuntimeFactory({ enabled = false, prepa
         }
         return { enabled: true, localSimulation: local, readyForProduction: false,
           scheduling: { enabled: true, localSimulation: local, directSubmission: Boolean(submissions) },
-          upload: { origin: publicOrigin, chunkBytes: LIMITS.chunkBytes, maxImageBytes: LIMITS.imageBytes, maxVideoBytes: LIMITS.videoBytes },
+          upload: { origin: publicOrigin, chunkBytes: LIMITS.chunkBytes, maxImageBytes: LIMITS.imageBytes, maxVideoBytes: LIMITS.videoBytes,
+            ...(gcsProfile && context.mediaTransport === "gcs-parts-v1" ? {gcs:{...gcsProfile}} : {}) },
           preparation: { enabled: true, minVideoSeconds: 3, maxVideoSeconds: 60, photoMusicSeconds: LIMITS.photoClipSeconds }, musicTracks,
           ...(pilot === null ? {} : { pilot }) };
       },

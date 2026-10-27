@@ -20,7 +20,7 @@ async function snapshot({ provider, task, source, attempt, filename, held, remai
   await held(); const company = path.join(attempt, task.companyId); await fs.mkdir(company, { mode: 0o700 });
   const file = path.join(company, filename), handle = await fs.open(file, "wx", 0o600), hash = crypto.createHash("sha256"); let bytes = 0;
   try {
-    const observed = await provider.streamSealedObject({ context: { authenticated: true, companyId: task.companyId, userId: task.userId }, objectKey: source.objectKey, objectVersion: source.objectVersion,
+    const observed = await provider.streamSealedObject({ context: { authenticated: true, companyId: task.companyId, userId: task.userId }, objectKey: source.objectKey, objectVersion: source.objectVersion, timeoutMs:remaining(),
       consume: async chunk => { remaining(); if (!(Buffer.isBuffer(chunk) || chunk instanceof Uint8Array) || chunk.length > 65536 || bytes + chunk.length > source.sizeBytes) fail("source_invalid");
         hash.update(chunk); let offset = 0; while (offset < chunk.length) { const written = await handle.write(chunk, offset, chunk.length - offset); if (!written.bytesWritten) fail("source_invalid"); offset += written.bytesWritten; } bytes += chunk.length;
       } });

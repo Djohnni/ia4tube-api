@@ -91,7 +91,7 @@ function createCalendarImportRouter({ authenticate, resolvePrincipal, getService
       const principal = diagnosticStage ? await observe("principal_resolution", () => resolvePrincipal(req.user)) : await resolvePrincipal(req.user);
       if (!isAuthenticatedSocialPrincipal(principal)) fail("import_session_required", 401);
       const service = getService();
-      const context = isOperationalCalendarImportsRuntime(service) ? service.contextForPrincipal(principal)
+      const context = isOperationalCalendarImportsRuntime(service) ? service.contextForPrincipal(principal, {mediaTransport:require("./gcs-config").mediaTransport(req)})
         : Object.freeze({ authenticated: true, companyId: principal.companyId, userId: principal.userId });
       if (!service || service.ready !== true || typeof service.allowed !== "function" || !service.allowed(context)) {
         if (capabilities) return res.json({ ok: true, enabled: false });

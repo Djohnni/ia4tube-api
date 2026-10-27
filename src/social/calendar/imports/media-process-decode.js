@@ -29,7 +29,7 @@ async function inspectSnapshot({ task, sourcePath, ffmpegPath, clock, timeoutMs 
   }
   budget.remaining();
   inspectedMedia({ kind: task.mediaKind, format, size: task.sizeBytes, sha256: task.sha256, decoded: true, ...geometry, durationSeconds: geometry.durationMs / 1000 }, task.mediaKind);
-  return { providerType: "render_disk", companyId: task.companyId, userId: task.userId, ticketId: task.ticketId, objectKey: task.objectKey,
+  return { providerType: task.providerType, companyId: task.companyId, userId: task.userId, ticketId: task.ticketId, objectKey: task.objectKey,
     objectVersion: task.objectVersion, executionDigest: task.executionDigest, finishedAt: clock(), elapsedMs: budget.elapsedMs(),
     inspection: { complete: true, decoded: true, signatureVerified: true, sizeBytes: task.sizeBytes, sha256: task.sha256,
       detectedMime: { jpeg: "image/jpeg", png: "image/png", webp: "image/webp", mp4: "video/mp4", mov: "video/quicktime" }[format], ...geometry } };

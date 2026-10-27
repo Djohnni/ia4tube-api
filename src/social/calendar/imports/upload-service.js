@@ -223,6 +223,11 @@ function createCalendarImportUploadService(options = {}) {
           chunkBytes: limits.chunkBytes, requestHash, state: "created", lease: null,
           createdAt: time, updatedAt: time, errorCode: null
         };
+        if (typeof provider.storageForNewUpload === "function") {
+          const selected = provider.storageForNewUpload(context);
+          if (!["render_disk", "gcs"].includes(selected)) fail("import_provider_response_invalid", 502);
+          created.storageProvider = selected;
+        }
         state.uploads[created.uploadId] = created;
         state.idempotency[idempotencyHash] = created.uploadId;
         state.reservedBytes += created.sizeBytes;
@@ -251,7 +256,9 @@ function createCalendarImportUploadService(options = {}) {
       if (record.state !== "uploading") fail("import_upload_not_writable", 409);
       if (!Number.isSafeInteger(input.partNumber) || input.partNumber < 1 || input.partNumber > Math.ceil(record.sizeBytes / record.chunkBytes)) fail("import_part_invalid");
       const sizeBytes = Math.min(record.chunkBytes, record.sizeBytes - (input.partNumber - 1) * record.chunkBytes);
-      const expiresAt = now() + limits.authorizationLifetimeMs;
+      const lifetime = typeof provider.authorizationLifetimeMsFor === "function" ? provider.authorizationLifetimeMsFor(record) : limits.authorizationLifetimeMs;
+      if (!Number.isSafeInteger(lifetime) || lifetime < 1 || lifetime > limits.authorizationLifetimeMs) fail("import_provider_response_invalid",502);
+      const expiresAt = now() + lifetime;
       const authorization = await provider.authorizePart({ context: { ...identity, authenticated: true }, objectKey: record.objectKey, uploadId: record.providerUploadId,
         partNumber: input.partNumber, sizeBytes, expiresAt, sha256: input.sha256, md5Base64: input.md5Base64 });
       if (!UUID.test(authorization?.authorizationId || "") || authorization.expiresAt !== expiresAt) fail("import_provider_response_invalid", 502);
@@ -270,8 +277,12 @@ function createCalendarImportUploadService(options = {}) {
       const expected = Math.min(record.chunkBytes, record.sizeBytes - (input.partNumber - 1) * record.chunkBytes);
       if (!grant || grant.method !== "PUT" || grant.sizeBytes !== expected || !Number.isSafeInteger(grant.expiresAt) ||
           grant.expiresAt <= now() || typeof grant.url !== "string" || !grant.url.startsWith("https://") ||
-          !grant.headers || Object.keys(grant.headers).some(key => !["content-length", "content-md5", "x-amz-checksum-sha256"].includes(key))) fail("import_provider_response_invalid", 502);
-      return { url: grant.url, method: "PUT", headers: grant.headers, expiresAt: grant.expiresAt, sizeBytes: grant.sizeBytes };
+          !grant.headers || Object.keys(grant.headers).some(key => !(record.storageProvider === "gcs" ?
+            ["content-length", "content-md5", "content-type", "x-goog-if-generation-match"] :
+            ["content-length", "content-md5", "x-amz-checksum-sha256"]).includes(key)) ||
+          record.storageProvider === "gcs" && grant.transport !== "gcs-parts-v1") fail("import_provider_response_invalid", 502);
+      return { url: grant.url, method: "PUT", headers: grant.headers, expiresAt: grant.expiresAt, sizeBytes: grant.sizeBytes,
+        ...(record.storageProvider === "gcs" ? {transport:"gcs-parts-v1"} : {}) };
     }); },
     async complete(context, input) { return safe(async () => {
       const identity = owner(context); fields(input, ["uploadId"]);

@@ -53,10 +53,12 @@ async function createProductionCalendar(dependencies, ports) {
       }
     }
     publisher = createCalendarPublisher({ ...ports, media, preparedMedia: imports?.preparedMedia });
+    let storedGcsTransport=null;
+    if(!imports){try{storedGcsTransport=require("./imports/gcs-config").createConfiguredGcsTransport(dependencies.env||process.env);}catch{/* Only cloud bytes remain unavailable; legacy history still opens. */}}
     const storedImportMedia = imports ? null : require("./imports/stored-calendar-media").createStoredCalendarMediaReader({ store,
       uploadStore: require("./imports/postgres-store").createImportUploadPostgresStore({ pool: ports.pool, role: ports.role }),
       rootDirectory: "/var/data/private/calendar-media/uploads", preparationRoot: "/var/data/private/calendar-media/prepared",
-      nativeProfile: require("./imports/native-ready-video").NATIVE_READY_VIDEO_PROFILE, clock: dependencies.clock });
+      nativeProfile: require("./imports/native-ready-video").NATIVE_READY_VIDEO_PROFILE, clock: dependencies.clock,gcsTransport:storedGcsTransport });
     const calendar = createCalendarService({ ...dependencies, ...ports, store, source, media, grants, publisher,
       importScheduling: imports?.scheduling, importReading: storedImportMedia });
     return Object.freeze({ ...calendar, imports: imports || null, storedImportMedia,

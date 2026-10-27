@@ -58,7 +58,9 @@ function createPrivateImportPreviewRouter({ authenticate, resolvePrincipal, getS
         if (abort.signal.aborted) fail();
         const principal = await resolvePrincipal(req.user);
         if (!isAuthenticatedSocialPrincipal(principal)) fail("import_preview_session_required", 401);
-        return Object.freeze({ authenticated: true, companyId: principal.companyId, userId: principal.userId });
+        const mediaTransport=require("./gcs-config").mediaTransport(req);
+        return Object.freeze({ authenticated: true, companyId: principal.companyId, userId: principal.userId,
+          ...(mediaTransport?{mediaTransport}: {}) });
       }, async context => {
         if (abort.signal.aborted) fail();
         const service = scheduled ? getScheduledService?.() : getService();

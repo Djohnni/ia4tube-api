@@ -99,7 +99,8 @@ function createCalendarRouter({ authenticate, getService, logger }) {
     finally { clearTimeout(timer); abort.abort(); res.off("close", close); req.off("aborted", close); }
   }));
   router.use(authenticate);
-  router.get("/", call(async (service, req, res) => res.json(await readCalendarWithRecovery(() => service.list(req.user), logger))));
+  router.get("/", call(async (service, req, res) => res.json(await readCalendarWithRecovery(() => service.list(req.user,
+    {mediaTransport:require("./imports/gcs-config").mediaTransport(req)}), logger))));
   router.post("/preferences", call(async (service, req, res) => res.json(await service.preferences(req.user, req.body || {}))));
   router.get("/items/:id/image", call(async (service, req, res) => res.type("jpeg").send(await service.image(req.user, req.params.id, req.query.destination ?? null))));
   router.get("/items/:id/video", call(async (service, req, res) => {

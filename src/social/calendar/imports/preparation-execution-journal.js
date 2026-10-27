@@ -29,10 +29,11 @@ function validateExecutionState(value, companyId, uploads, preparation, kind) {
     const task = record.task, job = preparation?.jobs?.[task?.jobId], upload = uploads?.[task?.uploadId];
     taskIdentity(task, companyId, task?.userId, kind);
     if (kind === "inspect") {
-      const ticket = upload?.disk?.inspectionTicket, dispatch = ticket?.dispatch;
+      const storage=task.providerType==="gcs"?upload?.gcs:upload?.disk;
+      const ticket = storage?.inspectionTicket, dispatch = ticket?.dispatch;
       if (task.dispatchKey !== key || !upload || upload.companyId !== companyId || upload.userId !== task.userId ||
           upload.assetId !== task.assetId || upload.objectKey !== task.objectKey || upload.sha256 !== task.sha256 ||
-          upload.sizeBytes !== task.sizeBytes || upload.kind !== task.mediaKind || upload.disk.objectVersion !== task.objectVersion ||
+          upload.sizeBytes !== task.sizeBytes || upload.kind !== task.mediaKind || storage?.objectVersion !== task.objectVersion ||
           ticket?.ticketId !== task.ticketId || dispatch?.dispatchKey !== key || dispatch.requestDigest !== task.executionDigest ||
           dispatch.fenceToken !== task.fenceToken || dispatch.startedAt !== task.startedAt || dispatch.deadlineAt !== task.deadlineAt) fail("state_invalid");
       if (record.phase === "succeeded" && (!object(record.result) || record.result.companyId !== companyId ||
@@ -93,8 +94,8 @@ function createExecutionJournal({ store, owner, clock = Date.now, kind } = {}) {
         const job = state.preparation?.jobs?.[task.jobId], upload = state.uploads?.[task.uploadId];
         if (Object.keys(value.records).length >= MAX_RECORDS) fail("journal_full");
         if (kind === "inspect") {
-          const dispatch = upload?.disk?.inspectionTicket?.dispatch;
-          if (!upload || upload.disk.phase !== "sealed" || !ACTIVE.has(dispatch?.state) || task.deadlineAt <= now()) fail("task_stale");
+          const storage=task.providerType==="gcs"?upload?.gcs:upload?.disk,dispatch=storage?.inspectionTicket?.dispatch;
+          if (!upload || storage?.phase !== "sealed" || !ACTIVE.has(dispatch?.state) || task.deadlineAt <= now()) fail("task_stale");
         } else if (!job || !upload || !ACTIVE.has(job.state) || job.fence !== task.fence || job.lease?.token !== task.leaseToken ||
             job.lease.deadlineAt !== task.deadlineAt || job.runtimeBudgetMs !== task.maxRuntimeMs || job.reservedBytes !== task.reservedOutputBytes ||
             task.deadlineAt <= now() || upload.state !== "uploaded") fail("task_stale");

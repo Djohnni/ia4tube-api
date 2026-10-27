@@ -124,18 +124,30 @@ function createCalendarService({ store, source, media, grants, auth, identity, r
         timeZone: TIME_ZONE, serverTime: clock(), items, next,
         ...(context ? { identity: { companyId: context.companyId, userId: context.userId } } : {}) };
   }
-  async function list(claims) {
+  async function list(claims, {mediaTransport=null} = {}) {
     const current = session(claims); const { companyId, userId } = current.context;
     await sync(current.owner, companyId, userId);
     const connection = await publisher.connection(current.context);
     const allowed = publisher.allowed(current.context);
-    return store.update(companyId, state => {
+    const result=await store.update(companyId, state => {
       // New owners default on. Explicit pauses and old items/grants are never rewritten.
       if (state.preferences.enabled && !state.preferences.binding && connection?.binding) {
         state.preferences.binding = connection.binding; state.preferences.revision++;
       }
       return snapshot(state, connection, allowed, current.context);
     });
+    if(mediaTransport==="gcs-parts-v1" && (importsAvailable || storedReading)){
+      const reader=importsAvailable?importScheduling:importReading,started=performance.now();
+      const context={...importContext(current.context),mediaTransport};
+      // Response-only, bounded enrichment. No signed URL enters owner_state.
+      for(const item of result.items.slice(-20)){
+        if(performance.now()-started>5000)break;
+        if(item.sourceKind!=="upload" || !item.media)continue;
+        try{item.media=await reader.metadata(context,{id:item.id});}catch{/* Existing authenticated proxy metadata remains usable. */}
+      }
+      if(result.next)result.next=result.items.find(item=>item.id===result.next.id)||result.next;
+    }
+    return result;
   }
   async function preferences(claims, input) {
     const current = session(claims); const connection = await publisher.connection(current.context);

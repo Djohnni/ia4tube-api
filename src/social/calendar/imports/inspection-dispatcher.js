@@ -23,12 +23,12 @@ function identity(context) {
   return { companyId: context.companyId, userId: context.userId };
 }
 function source(upload) {
-  if (upload.disk && upload.r2) fail("state_invalid");
-  return upload.disk ? { type: "render_disk", value: upload.disk } : { type: "r2", value: upload.r2 };
+  if ([upload.disk,upload.r2,upload.gcs].filter(Boolean).length > 1) fail("state_invalid");
+  return upload.gcs ? { type:"gcs", value:upload.gcs } : upload.disk ? { type: "render_disk", value: upload.disk } : { type: "r2", value: upload.r2 };
 }
 function ticketFor(upload, create = false) {
   const storage = source(upload);
-  if (create && storage.type === "render_disk" && !storage.value.inspectionTicket) {
+  if (create && storage.type !== "r2" && !storage.value.inspectionTicket) {
     storage.value.inspectionTicket = { ticketId: storage.value.objectVersion };
   }
   return storage.value?.inspectionTicket;
@@ -36,7 +36,7 @@ function ticketFor(upload, create = false) {
 function validateInspectionDispatchState(state, companyId) {
   const quota = state.inspectionQuota;
   if (quota === undefined) {
-    if (Object.values(state.uploads || {}).some(upload => upload.r2?.inspectionTicket?.dispatch !== undefined || upload.disk?.inspectionTicket?.dispatch !== undefined)) fail("state_invalid");
+    if (Object.values(state.uploads || {}).some(upload => upload.r2?.inspectionTicket?.dispatch !== undefined || upload.disk?.inspectionTicket?.dispatch !== undefined || upload.gcs?.inspectionTicket?.dispatch !== undefined)) fail("state_invalid");
     return state;
   }
   if (!object(quota) || quota.schema !== 1 || !object(quota.months) || Object.keys(quota.months).length > LIMITS.maxMonths) fail("state_invalid");
@@ -85,11 +85,11 @@ function createDurableInspectionDispatcher({ store, runner, allowedOwners = [], 
   function now() { const value = clock(); if (!Number.isSafeInteger(value) || value < 0) fail("clock_invalid"); return value; }
   function find(state, owner, ticketId) {
     if (typeof ticketId !== "string" || !UUID.test(ticketId)) fail("not_found", 404);
-    const matches = Object.values(state.uploads || {}).filter(row => row.r2?.inspectionTicket?.ticketId === ticketId || row.disk?.objectVersion === ticketId);
+    const matches = Object.values(state.uploads || {}).filter(row => row.r2?.inspectionTicket?.ticketId === ticketId || row.disk?.objectVersion === ticketId || row.gcs?.objectVersion === ticketId);
     const upload = matches[0], storage = upload && source(upload);
     if (matches.length !== 1 || upload.companyId !== owner.companyId || upload.userId !== owner.userId ||
         storage.value.objectVersion !== ticketId || storage.value.phase !== "sealed" ||
-        storage.type === "render_disk" && upload.disk.inspectionRequested !== true) fail("not_found", 404);
+        storage.type !== "r2" && storage.value.inspectionRequested !== true) fail("not_found", 404);
     return upload;
   }
   async function update(owner, operation) {
@@ -127,7 +127,7 @@ function createDurableInspectionDispatcher({ store, runner, allowedOwners = [], 
       ticketId: ticket.ticketId, uploadId: upload.uploadId, assetId: upload.assetId,
       dispatchKey: job.dispatchKey, executionDigest: job.requestDigest, fenceToken: job.fenceToken,
       objectKey: upload.objectKey, objectVersion: storage.value.objectVersion,
-      ...(storage.type === "render_disk" ? { providerType: "render_disk" } : { etag: storage.value.etag }),
+      ...(storage.type !== "r2" ? { providerType: storage.type } : { etag: storage.value.etag }),
       sizeBytes: upload.sizeBytes, sha256: upload.sha256, mediaKind: upload.kind,
       startedAt: job.startedAt, deadlineAt: job.deadlineAt, maxRuntimeMs: job.runtimeMs };
   }
@@ -135,7 +135,7 @@ function createDurableInspectionDispatcher({ store, runner, allowedOwners = [], 
     const result = remote.result, storage = source(upload);
     if (!object(result) || result.companyId !== upload.companyId || result.userId !== upload.userId ||
         result.ticketId !== storage.value.objectVersion || result.objectKey !== upload.objectKey || result.objectVersion !== storage.value.objectVersion ||
-        (storage.type === "render_disk" ? result.providerType !== "render_disk" || result.etag !== undefined : result.etag !== storage.value.etag) || result.executionDigest !== job.requestDigest ||
+        (storage.type !== "r2" ? result.providerType !== storage.type || result.etag !== undefined : result.etag !== storage.value.etag) || result.executionDigest !== job.requestDigest ||
         !Number.isSafeInteger(result.finishedAt) || result.finishedAt < job.startedAt || result.finishedAt > job.deadlineAt || result.finishedAt > now() ||
         !Number.isSafeInteger(result.elapsedMs) || result.elapsedMs < 0 || result.elapsedMs > job.runtimeMs) fail("result_invalid");
     const actual = result.inspection;
@@ -196,7 +196,7 @@ function createDurableInspectionDispatcher({ store, runner, allowedOwners = [], 
         if (request.objectKey !== upload.objectKey || request.objectVersion !== storage.value.objectVersion || request.etag !== storage.value.etag ||
             request.sizeBytes !== upload.sizeBytes || request.sha256 !== upload.sha256 || request.kind !== upload.kind || request.deadlineMs !== limits.runtimeMs) fail("request_conflict", 409);
         const values = [owner, request.ticketId, request.objectKey, request.objectVersion, request.etag, request.sizeBytes, request.sha256, request.kind, request.deadlineMs];
-        const requestDigest = sha(JSON.stringify(storage.type === "render_disk" ? ["render_disk", ...values] : values));
+        const requestDigest = sha(JSON.stringify(storage.type !== "r2" ? [storage.type, ...values] : values));
         if (ticket.dispatch) {
           if (ticket.dispatch.requestDigest !== requestDigest) fail("idempotency_conflict", 409);
           return { first: false, upload: clone(upload) };

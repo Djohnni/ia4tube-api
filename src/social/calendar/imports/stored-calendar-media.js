@@ -36,7 +36,7 @@ function describe(job, context) {
 /** Permanent owner-authenticated calendar reads, independent of admission,
  * processing windows and pilot secrets. It cannot upload, schedule or publish.
  */
-function createStoredCalendarMediaReader({ store, uploadStore, rootDirectory, preparationRoot, nativeProfile, clock = Date.now } = {}) {
+function createStoredCalendarMediaReader({ store, uploadStore, rootDirectory, preparationRoot, nativeProfile, clock = Date.now, gcsTransport = null } = {}) {
   if (!isCalendarStore(store) || !isImportUploadPostgresStore(uploadStore) ||
       typeof store.read !== "function" || typeof uploadStore.read !== "function") fail();
   let closed = false;
@@ -45,6 +45,15 @@ function createStoredCalendarMediaReader({ store, uploadStore, rootDirectory, pr
     if (!ID.test(id || "")) fail("not_found", 404);
     return store.read(context.companyId, state => owned(state.jobs[id], context));
   }
+  async function bytesFor(context,assetId) {
+    const cloud=await uploadStore.read(context.companyId,state=>{
+      const rows=Object.values(state.uploads||{}).filter(row=>row.assetId===assetId && row.userId===context.userId);
+      if(rows.length!==1)fail("not_found",404);return rows[0].storageProvider==="gcs";
+    });
+    const accessPolicy=createImportAccessPolicy({allowedOwners:[{companyId:context.companyId,userId:context.userId}],isEligible:()=>!closed});
+    if(cloud){if(!gcsTransport)fail();return require("./gcs-prepared-store").createGcsPreparedResultReader({tenantStore:uploadStore,transport:gcsTransport,accessPolicy,clock});}
+    return createPreparedDiskResultReader({rootDirectory,preparationRoot,tenantStore:uploadStore,accessPolicy,nativeProfile,enabled:true,clock});
+  }
   const service = Object.freeze({
     available: true, store,
     describe(job, context) {
@@ -52,7 +61,13 @@ function createStoredCalendarMediaReader({ store, uploadStore, rootDirectory, pr
       // its title/date/caption without advertising bytes or breaking the list.
       try { if (closed) return null; return describe(job, context); } catch { return null; }
     },
-    async metadata(context, { id }) { return describe(await read(context, id), context); },
+    async metadata(context, { id }) {
+      const job=await read(context,id),value=describe(job,context);
+      if(context.mediaTransport!=="gcs-parts-v1" || !gcsTransport)return value;
+      const bytes=await bytesFor(context,value.assetId);
+      const result=await require("./google-preview").withGooglePreview(bytes,context,value,job.import.resultRef);
+      await read(context,id);return result;
+    },
     async open(context, { id, target }, { rangeHeader, signal } = {}) {
       const job = await read(context, id), media = describe(job, context);
       const expected = target === "thumbnail" ? media.thumbnail : media.variants.find(item => item.target === target);
@@ -68,9 +83,7 @@ function createStoredCalendarMediaReader({ store, uploadStore, rootDirectory, pr
           previewDigest(snapshot.plan, snapshot.result.variants) !== media.previewDigest) fail("changed", 409);
       // Eligibility to read this exact stored item follows its existing owner,
       // not the now-retired pilot allowlist. This policy is never used to launch.
-      const accessPolicy = createImportAccessPolicy({ allowedOwners: [{ companyId: context.companyId, userId: context.userId }],
-        isEligible: () => !closed });
-      const bytes = createPreparedDiskResultReader({ rootDirectory, preparationRoot, tenantStore: uploadStore, accessPolicy, nativeProfile, enabled: true, clock });
+      const bytes = await bytesFor(context,media.assetId);
       const binding = { context, assetId: media.assetId, mediaRevision: media.mediaRevision,
         resultRef: job.import.resultRef, target, sha256: expected.sha256 };
       const actual = await bytes.inspectPreview({ ...binding, signal, timeoutMs: 60000 });
@@ -94,7 +107,7 @@ function createStoredCalendarMediaReader({ store, uploadStore, rootDirectory, pr
         });
       } };
     },
-    close() { closed = true; }
+    close() { closed = true; gcsTransport?.close(); }
   });
   readers.add(service); return service;
 }

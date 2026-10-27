@@ -14,7 +14,7 @@ const MIME = { jpeg: "image/jpeg", png: "image/png", webp: "image/webp", mp4: "v
 function fail(code = "unavailable") { throw Object.assign(new Error("disk_inspection_" + code), { code: "disk_inspection_" + code }); }
 function validateDiskInspectionTask(task) {
   if (!task || Object.keys(task).length !== FIELDS.length || Object.keys(task).some(key => !FIELDS.includes(key)) ||
-      task.schema !== 1 || task.kind !== "inspect_import" || task.providerType !== "render_disk" ||
+      task.schema !== 1 || task.kind !== "inspect_import" || !["render_disk","gcs"].includes(task.providerType) ||
       !["companyId", "userId", "ticketId", "uploadId", "assetId", "fenceToken", "objectVersion"].every(key => UUID.test(task[key] || "")) ||
       !["dispatchKey", "executionDigest", "objectKey", "sha256"].every(key => HASH.test(task[key] || "")) ||
       task.ticketId !== task.objectVersion || !["image", "video"].includes(task.mediaKind) ||
@@ -114,7 +114,7 @@ function createDiskBoundedInspectionWorker({ provider, workingDirectory, ffmpegP
           ...geometry, durationSeconds: geometry.durationMs / 1000 }, task.mediaKind);
         const finishedAt = clock();
         if (!Number.isSafeInteger(finishedAt) || finishedAt < task.startedAt || finishedAt > task.deadlineAt) fail("deadline_exceeded");
-        return { providerType: "render_disk", companyId: task.companyId, userId: task.userId, ticketId: task.ticketId,
+        return { providerType: task.providerType, companyId: task.companyId, userId: task.userId, ticketId: task.ticketId,
           objectKey: task.objectKey, objectVersion: task.objectVersion, executionDigest: task.executionDigest,
           finishedAt, elapsedMs: budget.elapsedMs(), inspection };
       } catch (error) {

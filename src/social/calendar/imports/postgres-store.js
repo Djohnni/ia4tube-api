@@ -21,6 +21,10 @@ function validateImportUploadState(state, companyId) {
       try { require("./render-disk-provider").validateDiskUploadRecord(upload); }
       catch (_) { fail("state_invalid"); }
     }
+    if (upload.storageProvider !== undefined && !["render_disk","gcs"].includes(upload.storageProvider)) fail("state_invalid");
+    if (upload.gcs !== undefined) {
+      try { require("./gcs-provider").validateGcsUploadRecord(upload); } catch (_) { fail("state_invalid"); }
+    }
   }
   for (const [key, id] of Object.entries(state.idempotency)) {
     if (!/^[a-f0-9]{64}$/.test(key) || !Object.hasOwn(state.uploads, id)) fail("state_invalid");
@@ -42,6 +46,7 @@ function validateImportUploadState(state, companyId) {
   require("./inspection-dispatcher").validateInspectionDispatchState(state, companyId);
   if (state.workflowExecutions !== undefined) require("./workflow-private-journal").validateWorkflowPrivateState(state.workflowExecutions, companyId, state);
   require("./retention-policy").validateRetentionState(state.retention, companyId, state.uploads);
+  if (state.gcsPrepared !== undefined) require("./gcs-prepared-store").validateGcsPreparedState(state, companyId);
   return state;
 }
 function createImportUploadPostgresStore({ pool, role = "ia4tube_social_runtime" }) {
