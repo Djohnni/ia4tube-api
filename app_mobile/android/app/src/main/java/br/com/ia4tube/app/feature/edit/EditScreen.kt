@@ -1,6 +1,8 @@
 package br.com.ia4tube.app.feature.edit
 
 import android.app.Activity
+import android.app.DatePickerDialog
+import android.app.TimePickerDialog
 import android.content.Context
 import android.content.Intent
 import android.content.MutableContextWrapper
@@ -22,18 +24,25 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material3.Button
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.TextButton
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -50,6 +59,13 @@ import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.viewmodel.compose.viewModel
+import br.com.ia4tube.app.core.session.SessionStore
+import org.json.JSONObject
+import java.time.LocalDate
+import java.time.LocalTime
+import java.time.ZoneId
+import java.time.ZonedDateTime
+import java.time.format.DateTimeFormatter
 
 private val imageTypes = arrayOf("image/png", "image/jpeg", "image/webp")
 
@@ -62,6 +78,8 @@ internal class EditBrowserViewModel : ViewModel() {
     var multiple = false
     var loading by mutableStateOf(true)
     var loadFailed by mutableStateOf(false)
+    var loadedCalendarNonce: String? = null
+    var deferredCalendarRequest: Triple<String?, String?, Boolean>? = null
 
     fun attach(context: Context, binding: Any): Pair<WebView, Boolean> {
         activeBinding = binding
@@ -96,8 +114,13 @@ internal class EditBrowserViewModel : ViewModel() {
         // retaining the actual document, file callback and form during rotation.
         view?.webChromeClient = null
         view?.webViewClient = object : WebViewClient() {
-            override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean =
-                !request.isForMainFrame || !EditNavigationPolicy.isWebsite(request.url.toString())
+            override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
+                if (EditCalendarPolicy.isCallback(request.url.toString())) {
+                    deferredCalendarRequest = Triple(request.url.toString(), view.url, request.isForMainFrame)
+                    return true
+                }
+                return !request.isForMainFrame || !EditNavigationPolicy.isWebsite(request.url.toString())
+            }
             override fun onPageFinished(view: WebView, url: String?) { loading = false }
         }
         contextWrapper?.let { it.baseContext = it.baseContext.applicationContext }
@@ -149,14 +172,50 @@ internal class EditBrowserViewModel : ViewModel() {
 }
 
 @Composable
-fun EditScreen(onBackClick: () -> Unit) {
+fun EditScreen(onBackClick: () -> Unit, onAuthRequired: () -> Unit = {}) {
     val context = LocalContext.current
     val lifecycle = LocalLifecycleOwner.current.lifecycle
     val onBack by rememberUpdatedState(onBackClick)
+    val requireAuth by rememberUpdatedState(onAuthRequired)
     // The destination's ViewModelStore survives Activity recreation. It is
     // cleared when this route is removed, not when the image picker rotates.
     val browser: EditBrowserViewModel = viewModel()
+    val calendar: EditCalendarViewModel = viewModel()
+    val session = remember { SessionStore(context.applicationContext) }
     val binding = remember { Any() }
+
+    LaunchedEffect(calendar) { calendar.synchronizeSession(session.getToken()) }
+    LaunchedEffect(binding) {
+        browser.deferredCalendarRequest?.let { (target, document, mainFrame) ->
+            browser.deferredCalendarRequest = null
+            EditCalendarPolicy.requestId(target, document, mainFrame, calendar.nonce)
+                ?.let { calendar.request(it, session.getToken()) }
+        }
+    }
+    LaunchedEffect(calendar.nonce) {
+        // An account change invalidates the old page's order context. Ordinary
+        // rotation and returning from WhatsApp retain the same document/form.
+        browser.view?.takeIf { browser.loadedCalendarNonce != calendar.nonce }?.let {
+            browser.finishFiles(null)
+            browser.loadedCalendarNonce = calendar.nonce
+            it.loadUrl(EDIT_URL + "#app-calendar=" + calendar.nonce)
+        }
+    }
+    LaunchedEffect(calendar.reply, browser.loading, binding) {
+        val reply = calendar.reply ?: return@LaunchedEffect
+        val webView = browser.view ?: return@LaunchedEffect
+        if (!browser.isAttached(binding) || browser.loading || !EditCalendarPolicy.isDocument(webView.url) ||
+            !calendar.canDeliver(reply, session.getToken())) return@LaunchedEffect
+        val script = "(function(){var receiver=window.iA4tubeAppCalendar;if(!receiver||typeof receiver.receive!=='function')return false;receiver.receive(" +
+            JSONObject.quote(reply.requestId) + "," + (reply.ticket?.let(JSONObject::quote) ?: "null") + "," +
+            (reply.error?.let(JSONObject::quote) ?: "null") + ");return true;})()"
+        webView.evaluateJavascript(script) { delivered ->
+            if (delivered == "true" && calendar.canDeliver(reply, session.getToken())) {
+                calendar.delivered(reply)
+                if (reply.error == "auth_required") requireAuth()
+            }
+        }
+    }
 
     val picker = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
         val selected = if (result.resultCode == Activity.RESULT_OK) {
@@ -175,7 +234,10 @@ fun EditScreen(onBackClick: () -> Unit) {
     DisposableEffect(browser, lifecycle, binding) {
         val observer = LifecycleEventObserver { _, event ->
             if (browser.isAttached(binding)) when (event) {
-                Lifecycle.Event.ON_RESUME -> browser.resume()
+                Lifecycle.Event.ON_RESUME -> {
+                    calendar.synchronizeSession(session.getToken())
+                    browser.resume()
+                }
                 Lifecycle.Event.ON_PAUSE, Lifecycle.Event.ON_STOP -> browser.pause()
                 else -> Unit
             }
@@ -199,6 +261,11 @@ fun EditScreen(onBackClick: () -> Unit) {
                 Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Voltar", tint = Color.White)
             }
             Text("Vídeos", color = Color.White)
+            Spacer(Modifier.weight(1f))
+            TextButton(enabled = !calendar.busy, onClick = {
+                calendar.synchronizeSession(session.getToken())
+                if (session.getToken().isBlank()) requireAuth() else calendar.openSchedule()
+            }) { Text("Calendário", color = Color.White) }
         }
         Box(Modifier.fillMaxWidth().weight(1f)) {
             AndroidView(
@@ -217,6 +284,12 @@ fun EditScreen(onBackClick: () -> Unit) {
                         settings.setSupportMultipleWindows(false)
                         webViewClient = object : WebViewClient() {
                             override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
+                                if (EditCalendarPolicy.isCallback(request.url.toString())) {
+                                    EditCalendarPolicy.requestId(request.url.toString(), view.url, request.isForMainFrame,
+                                        calendar.nonce)?.let { calendar.request(it, session.getToken()) }
+                                    // This is a native request, never a document navigation.
+                                    return true
+                                }
                                 return when (EditNavigationPolicy.decide(request.url.toString(), view.url, request.isForMainFrame, request.hasGesture())) {
                                     EditNavigation.IN_WEBVIEW -> false
                                     EditNavigation.BLOCK -> true
@@ -272,7 +345,11 @@ fun EditScreen(onBackClick: () -> Unit) {
                         }
                         // Rebind clients above to the current Activity and picker,
                         // but load only when the route's WebView is first created.
-                        if (created) loadUrl(EDIT_URL)
+                        if (created) {
+                            calendar.synchronizeSession(session.getToken())
+                            browser.loadedCalendarNonce = calendar.nonce
+                            loadUrl(EDIT_URL + "#app-calendar=" + calendar.nonce)
+                        }
                         if (lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED)) browser.resume()
                     }
                 }
@@ -286,4 +363,30 @@ fun EditScreen(onBackClick: () -> Unit) {
             }
         }
     }
+    if (calendar.choosingSchedule) {
+        EditCalendarScheduleDialog(calendar.schedule, onDismiss = calendar::cancelSchedule,
+            onConfirm = { calendar.chooseSchedule(it, session.getToken()) })
+    }
+}
+
+@Composable
+private fun EditCalendarScheduleDialog(initial: EditCalendarSchedule?, onDismiss: () -> Unit,
+    onConfirm: (EditCalendarSchedule) -> Unit) {
+    val context = LocalContext.current
+    val default = remember { ZonedDateTime.now(ZoneId.of("America/Sao_Paulo")).plusHours(1).withSecond(0).withNano(0) }
+    var date by remember { mutableStateOf(initial?.let { LocalDate.parse(it.date) } ?: default.toLocalDate()) }
+    var time by remember { mutableStateOf(initial?.let { LocalTime.parse(it.time) } ?: default.toLocalTime()) }
+    val selection = EditCalendarSchedule(date.toString(), time.format(DateTimeFormatter.ofPattern("HH:mm")))
+    val future = selection.isFuture()
+    AlertDialog(onDismissRequest = onDismiss, title = { Text("Data e horário do vídeo") },
+        text = { Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            OutlinedButton(onClick = { DatePickerDialog(context, { _, year, month, day -> date = LocalDate.of(year, month + 1, day) },
+                date.year, date.monthValue - 1, date.dayOfMonth).show() }) { Text(date.format(DateTimeFormatter.ofPattern("dd/MM/yyyy"))) }
+            OutlinedButton(onClick = { TimePickerDialog(context, { _, hour, minute -> time = LocalTime.of(hour, minute) },
+                time.hour, time.minute, true).show() }) { Text(selection.time) }
+            Text("Horário de Brasília. O vídeo ficará no calendário como Reel depois de pronto.")
+            if (!future) Text("Escolha uma data e um horário futuros.", color = MaterialTheme.colorScheme.error)
+        } },
+        confirmButton = { TextButton(enabled = future, onClick = { onConfirm(selection) }) { Text("Confirmar") } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Voltar") } })
 }

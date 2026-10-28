@@ -531,7 +531,8 @@ fun IA4TubeNavHost(
         }
 
         composable(Routes.Edit) {
-            EditScreen(onBackClick = { navController.popBackStack() })
+            EditScreen(onBackClick = { navController.popBackStack() },
+                onAuthRequired = { requestAuthFor(Routes.Edit) })
         }
 
         composable(Routes.Instagram) { instagramEntry ->
