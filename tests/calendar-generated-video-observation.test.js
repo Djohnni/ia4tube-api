@@ -14,7 +14,15 @@ const model = require("../src/social/calendar/model");
 async function fixture({ timeoutCreate = false, timeoutPublish = false, unavailableConfirmation = false } = {}) {
   const owner = "synthetic-generated-video-owner";
   const { adapter, claims, context } = fixtureContext(owner), pool = createMemoryPool(context);
-  const connectorStore = createPostgresConnectorStore({ pool, publicationBindingRequired: true });
+  const realConnectorStore = createPostgresConnectorStore({ pool, publicationBindingRequired: true });
+  let afterSlotRead = null;
+  const connectorStore = { ...realConnectorStore, scope(candidate) {
+    const scoped = realConnectorStore.scope(candidate);
+    return { ...scoped, async listPublicationDetails() {
+      const records = await scoped.listPublicationDetails(), action = afterSlotRead;
+      afterSlotRead = null; if (action) await action(); return records;
+    } };
+  } };
   let now = model.dateTime("2026-10-28", "12:00"), statusCode = "IN_PROGRESS", tail = Promise.resolve();
   const rows = new Map(), posts = [], reads = [];
   const store = { async exists(id) { return rows.has(id); }, update(id, action) {
@@ -77,6 +85,7 @@ async function fixture({ timeoutCreate = false, timeoutPublish = false, unavaila
   const id = model.idFor(context.companyId, "generated-video-plan:1");
   const row = () => store.update(context.companyId, state => state.jobs[id]);
   return { pool, store, context, claims, posts, reads, container, row, open,
+    afterSlotRead: action => { afterSlotRead = action; },
     current: () => current, restart: () => { current = open(); }, setStatus: value => { statusCode = value; },
     setConfirmationAvailable: () => { unavailableConfirmation = false; },
     advance: (ms = 60001) => { now += ms; },
@@ -84,6 +93,82 @@ async function fixture({ timeoutCreate = false, timeoutPublish = false, unavaila
     async start() { await current.service.tick(); assert.equal((await row()).phase, "confirming"); },
     async observe() { now += 60001; await current.service.tick(); } };
 }
+
+async function unresolvedPublication() {
+  const previous = await fixture(); await previous.start();
+  const original = (await previous.row()).deliveries.reel.intent;
+  return structuredClone(previous.pool.state.publications.get(original.publicationId));
+}
+
+test("an occupied publication slot leaves a generated video queued and editable without inventing an intent", async () => {
+  const old = await unresolvedPublication(), f = await fixture();
+  f.pool.state.publications.set(old.id, old);
+  await f.tick(); f.restart(); await f.tick();
+  const waiting = await f.row(), item = (await f.current().service.list(f.claims)).items[0];
+  assert.equal(waiting.phase, "ready"); assert.equal(waiting.deliveries?.reel?.intent, undefined);
+  assert.equal(item.status, "publication_queued"); assert.equal(item.statusLabel, "Aguardando outra publicação");
+  assert.equal(item.editable, true); assert.equal(f.pool.state.operations.size, 0);
+  assert.equal(f.posts.length, 0); assert.equal(f.reads.length, 0);
+  assert.equal(f.pool.state.publications.get(old.id).reconciliation_reference, old.reconciliation_reference,
+    "Waiting must not observe, retire or publish the older unresolved container");
+  f.pool.state.publications.get(old.id).state = "failed_permanent";
+  f.setStatus("FINISHED"); await f.tick();
+  assert.equal((await f.row()).phase, "published");
+  assert.deepEqual(f.posts.map(value => value.operation), ["create", "publish"]);
+});
+
+test("an atomic queue rejection after preflight retains the same unreserved intent and resumes once", async () => {
+  const old = await unresolvedPublication(), f = await fixture();
+  f.afterSlotRead(() => f.pool.state.publications.set(old.id, old));
+  await f.tick();
+  const waiting = await f.row(), part = waiting.deliveries.reel, original = part.intent;
+  assert.equal(waiting.phase, "ready"); assert.equal(part.phase, "ready"); assert.equal(part.preDispatchWaiting, true);
+  assert.equal(part.providerObservationCount, undefined); assert.equal(waiting.error, null);
+  assert.equal(f.pool.state.publications.has(original.publicationId), false);
+  assert.equal(f.pool.state.operations.has(original.operationId), false, "The existing gate rejects before reservation");
+  assert.equal(f.posts.length, 0); assert.equal(f.reads.length, 0);
+  f.restart(); await f.tick();
+  assert.deepEqual((await f.row()).deliveries.reel.intent, original);
+  assert.equal((await f.current().service.list(f.claims)).items[0].status, "publication_queued");
+  f.pool.state.publications.get(old.id).state = "failed_permanent";
+  f.setStatus("FINISHED");
+  const second = f.open(); await Promise.all([f.current().service.tick(), second.service.tick()]);
+  const published = await f.row();
+  assert.equal(published.phase, "published"); assert.deepEqual(published.deliveries.reel.intent, original);
+  assert.equal(published.deliveries.reel.preDispatchWaiting, false);
+  assert.equal(f.pool.state.publications.has(original.publicationId), true);
+  assert.deepEqual(f.posts.map(value => value.operation), ["create", "publish"]);
+  await f.observe(); assert.equal(f.posts.length, 2, "Restart/concurrent workers must not add either POST");
+});
+
+test("waiting for admission never spends the provider observation budget or bypasses a paused preference", async () => {
+  const old = await unresolvedPublication(), f = await fixture();
+  f.afterSlotRead(() => f.pool.state.publications.set(old.id, old)); await f.tick();
+  const original = (await f.row()).deliveries.reel.intent;
+  for (let count = 0; count < 6; count++) await f.observe();
+  assert.equal((await f.row()).deliveries.reel.providerObservationCount, undefined);
+  await f.store.update(f.context.companyId, state => { state.preferences.enabled = false; return null; });
+  f.pool.state.publications.get(old.id).state = "failed_permanent"; await f.tick();
+  assert.equal((await f.current().service.list(f.claims)).items[0].status, "paused");
+  assert.deepEqual((await f.row()).deliveries.reel.intent, original);
+  assert.equal(f.posts.length, 0); assert.equal(f.reads.length, 0);
+});
+
+test("a queued intent cannot publish with a changed Instagram binding or after its original schedule expires", async () => {
+  for (const blockedBy of ["binding", "deadline"]) {
+    const old = await unresolvedPublication(), f = await fixture();
+    f.afterSlotRead(() => f.pool.state.publications.set(old.id, old)); await f.tick();
+    const original = (await f.row()).deliveries.reel.intent;
+    f.pool.state.publications.get(old.id).state = "failed_permanent";
+    if (blockedBy === "binding") f.pool.state.connection.revision++;
+    else f.advance(model.LATE_MS + 1);
+    f.setStatus("FINISHED"); await f.tick();
+    const item = (await f.current().service.list(f.claims)).items[0];
+    assert.equal(item.status, blockedBy === "binding" ? "connection_required" : "overdue");
+    assert.deepEqual((await f.row()).deliveries.reel.intent, original);
+    assert.equal(f.posts.length, 0); assert.equal(f.reads.length, 0);
+  }
+});
 
 test("generated 720p MP4 publishes the same container when FINISHED arrives on the fifth processing check", async () => {
   const f = await fixture(); await f.start();

@@ -10,7 +10,8 @@ const LABELS = { scheduled: "Programada", paused: "Automação geral pausada", m
   waiting_media: "Preparando mídia", operations_closed: "Publicação temporariamente indisponível",
   import_not_operational: "Importação ainda não disponível para publicação",
   connection_required: "Confira a conexão Instagram", overdue: "Horário vencido — reagende", attention: "Precisa de atenção",
-  dispatching: "Publicando", confirming: "Confirmando publicação", published: "Publicada", cancelled: "Cancelada" };
+  dispatching: "Publicando", confirming: "Confirmando publicação", publication_queued: "Aguardando outra publicação",
+  published: "Publicada", cancelled: "Cancelada" };
 function createCalendarService({ store, source, media, grants, auth, identity, readClients, publisher, reviewerMedia = null, importScheduling = null, importReading = null, clock = Date.now }) {
   const importsAvailable = isCalendarImportService(importScheduling) && importScheduling.store === store;
   const storedReading = isStoredCalendarMediaReader(importReading) && importReading.store === store;
@@ -86,6 +87,8 @@ function createCalendarService({ store, source, media, grants, auth, identity, r
       ? { url: `/v1/social/calendar/items/${job.id}/video`, mimeType: "video/mp4",
         sizeBytes: job.asset.size, sha256: job.asset.sha, hasAudio: job.asset.hasAudio } : null;
     if (status === "scheduled" && targets(job).includes("story") && connection?.accountType !== "business") status = "attention";
+    if (status === "scheduled" && job.mediaKind === "video" && job.sourceKind !== "upload" &&
+        (job.publicationQueueWaiting || Object.values(job.deliveries || {}).some(part => part.preDispatchWaiting))) status = "publication_queued";
     return { id: job.id, key: job.sourceKey, planningId: job.planningId, orderId: job.orderId,
       title: job.title, date: job.date, time: job.time, timeZone: TIME_ZONE, scheduledAt: job.scheduledAt,
       caption: job.caption, revision: job.revision, status,
@@ -495,15 +498,16 @@ function createCalendarService({ store, source, media, grants, auth, identity, r
   async function tickFormatted(owner, ids, ctx, grant, snapshot) {
     for (const target of targets(snapshot)) {
       const part = delivery(snapshot, target);
+      const generatedVideo = part.mediaKind === "video" && part.sourceKind !== "upload";
+      const preDispatchWaiting = generatedVideo && snapshot.deliveries?.[target]?.preDispatchWaiting === true;
       if (part.phase === "published") continue;
       if (part.phase === "failed") continue; // Another destination still owns its independent intent/result.
-      if (part.intent) {
+      if (part.intent && !preDispatchWaiting) {
         if (part.sourceKind === "upload" || part.mediaKind === "video") {
           // Generated MP4 processing has five minute-spaced checks. Completing
           // a durably armed container (or confirming its POST) has a separate
           // bounded budget, including after restart on the last processing check.
           // Imported media retains its existing policy. No exhausted intent is sent again.
-          const generatedVideo = part.mediaKind === "video" && part.sourceKind !== "upload";
           const stage = generatedVideo && publisher.observationStage ? await publisher.observationStage(ctx, part) : null;
           const completion = generatedVideo && ["armed", "confirmation"].includes(stage);
           const counter = completion ? "providerCompletionObservationCount" : "providerObservationCount";
@@ -537,6 +541,16 @@ function createCalendarService({ store, source, media, grants, auth, identity, r
       const connection = await publisher.connection(ctx);
       if (!publisher.allowed(ctx) || !sameBinding(grant.binding, connection?.binding) || !part.asset || part.scheduledAt > clock() ||
           (targets(snapshot).includes("story") && connection.accountType !== "business")) return false;
+      if (generatedVideo && publisher.publicationSlotAvailable && !await publisher.publicationSlotAvailable(ctx, part)) {
+        const waiting = await store.update(ids.companyId, state => {
+          const job = state.jobs[snapshot.id];
+          if (job?.revision !== snapshot.revision ||
+              availability(delivery(job, target), state.preferences, connection.binding, publisher.allowed(ctx), clock()) !== "scheduled") return false;
+          if (!job.publicationQueueWaiting) { job.publicationQueueWaiting = true; job.revision++; }
+          return true;
+        });
+        return waiting; // No provider call or observation budget is spent waiting for admission.
+      }
       let intact = false;
       try {
         if (part.sourceKind === "upload") intact = await publisher.verifyPrepared(ctx, part) === true;
@@ -558,9 +572,10 @@ function createCalendarService({ store, source, media, grants, auth, identity, r
         const stateOfCandidate = candidate.sourceKind === "upload"
           ? importScheduling.status(candidate, state.preferences, connection, publisher.allowed(ctx))
           : availability(candidate, state.preferences, connection.binding, publisher.allowed(ctx), clock());
-        if (candidate.intent || stateOfCandidate !== "scheduled") return null;
-        const intent = publisher.intent(ctx, candidate, crypto.randomUUID());
-        record(job, target, { phase: "dispatching", intent, dispatchAt: clock() });
+        if ((candidate.intent && !preDispatchWaiting) || stateOfCandidate !== "scheduled") return null;
+        const intent = candidate.intent || publisher.intent(ctx, candidate, crypto.randomUUID());
+        job.publicationQueueWaiting = false;
+        record(job, target, { phase: "dispatching", intent, dispatchAt: clock(), preDispatchWaiting: false });
         return delivery(job, target);
       });
       if (!selected) return false;
@@ -569,8 +584,16 @@ function createCalendarService({ store, source, media, grants, auth, identity, r
       catch { try { result = await publisher.status(ctx, selected.intent.publicationId); } catch { /* Uncertain means no retry. */ } }
       await store.update(ids.companyId, state => { const job = state.jobs[selected.id];
         if (job?.deliveries?.[target]?.intent?.publicationId === selected.intent.publicationId) {
+          if (job.deliveries[target].phase === "published") return null;
+          if (generatedVideo && result?.queued === true) {
+            record(job, target, { phase: "ready", preDispatchWaiting: true, publication: null, error: null });
+            if (targets(job).every(key => !job.deliveries[key] || ["ready", "published", "failed"].includes(job.deliveries[key].phase))) {
+              job.phase = "ready"; job.error = null;
+            }
+            return null;
+          }
           const phase = result?.published ? "published" : result?.state?.startsWith("failed_") ? "failed" : "confirming";
-          record(job, target, { phase, publication: result,
+          record(job, target, { phase, preDispatchWaiting: false, publication: result,
             error: phase === "published" ? null : phase === "failed" ? "calendar_provider_failed" : "calendar_result_unconfirmed" });
         }
         return null;

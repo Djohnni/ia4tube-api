@@ -68,6 +68,14 @@ function createCalendarPublisher({ config, connectorStore, connectorAudit, crede
       publishedAt: confirmed ? confirmed.publishedEpochSeconds * 1000 : null };
   }
   const generatedVideo = job => job.mediaKind === "video" && job.sourceKind !== "upload";
+  async function publicationSlotAvailable(context, job) {
+    if (!generatedVideo(job)) return true;
+    // This is only a read-ahead. The existing atomic connector reservation still
+    // owns admission, including a different worker winning after this read.
+    const publications = await connectorStore.scope(context).listPublicationDetails();
+    return !publications.some(record => record.id !== job.intent?.publicationId &&
+      ["ready", "publishing", "provider_confirming"].includes(record.state));
+  }
   function observationStage(record) {
     if (record?.state !== "provider_confirming") return null;
     const reference = record.reconciliationReference || "";
@@ -75,7 +83,7 @@ function createCalendarPublisher({ config, connectorStore, connectorAudit, crede
     if (/^igc:submitted:[0-9]{5,64}$|^igm:known:[0-9]{5,64}$/.test(reference)) return "confirmation";
     return "processing";
   }
-  return Object.freeze({ allowed, intent, status,
+  return Object.freeze({ allowed, intent, status, publicationSlotAvailable,
     preparedAvailable: isPreparedCalendarMedia(preparedMedia),
     publicMedia: preparedMedia?.publicMedia,
     async verifyPrepared(context, job) {
@@ -123,10 +131,22 @@ function createCalendarPublisher({ config, connectorStore, connectorAudit, crede
       // Stored intent reused on every observation, never generated again after a timeout.
       if (await status(context, planned.publicationId)) return status(context, planned.publicationId);
       const publish = job.sourceKind === "upload" || job.mediaKind === "video" ? service.publishPreparedMedia : service.publishImage;
-      await publish(context, { operationId: planned.operationId, publicationId: planned.publicationId,
-        connectionId: job.authorization.binding.connectionId, clientRequestId: planned.clientRequestId,
-        binding: job.authorization.binding, image: { mediaId: descriptor.mediaId, mimeType: descriptor.mimeType,
-          metadataDigest: descriptor.metadataDigest }, caption: job.caption });
+      try {
+        await publish(context, { operationId: planned.operationId, publicationId: planned.publicationId,
+          connectionId: job.authorization.binding.connectionId, clientRequestId: planned.clientRequestId,
+          binding: job.authorization.binding, image: { mediaId: descriptor.mediaId, mimeType: descriptor.mimeType,
+            metadataDigest: descriptor.metadataDigest }, caption: job.caption });
+      } catch (error) {
+        // A queue rejection happens before the connector creates its publication
+        // row. A positive missing-row read distinguishes it from uncertain I/O.
+        // Retrying retains the SAME intent/operation and all connector claims;
+        // no timeout or already-created publication is eligible for this path.
+        if (generatedVideo(job) && error?.code === "state_transition_invalid" &&
+            await connectorStore.scope(context).getPublicationDetails(planned.publicationId) === null) {
+          return { queued: true, published: false };
+        }
+        throw error;
+      }
       return status(context, planned.publicationId);
     }
   });
