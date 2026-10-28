@@ -9,6 +9,7 @@ object Routes {
     const val Register = "register"
     const val AuthRequired = "auth-required"
     const val Home = "home"
+    const val Edit = "edit"
     const val Instagram = "instagram"
     const val PlannedArts = "planned-arts"
     const val Orders = "orders?filter={filter}"

@@ -29,6 +29,9 @@
     <string name="home_hero_subtitle">Crie artes profissionais em minutos</string>
     <string name="home_balance_short">Saldo R$ %1$.2f</string>
     <string name="home_create_new_art">Criar nova arte</string>
+    <string name="home_create_image_label">Imagem</string>
+    <string name="home_edit_video_label">Vídeo</string>
+    <string name="home_edit_video_content_description">Abrir vídeos do iA4tube Edit</string>
     <string name="home_take_or_choose_photo">Câmera</string>
     <string name="home_photo_source_title">Criar com foto</string>
     <string name="home_photo_source_description">Tire uma foto agora ou escolha uma imagem da galeria para começar a arte.</string>

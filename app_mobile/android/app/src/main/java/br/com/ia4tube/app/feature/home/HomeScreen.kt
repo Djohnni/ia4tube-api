@@ -18,6 +18,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -59,6 +60,9 @@ import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
@@ -88,6 +92,7 @@ fun HomeScreen(
     onCreateArtFromPhoto: (String) -> Unit,
     onOpenCarousel: () -> Unit,
     onOpenMonthlyPlanning: () -> Unit,
+    onEditVideoClick: () -> Unit,
     onOpenInstagram: () -> Unit,
     onOpenPlannedArts: () -> Unit,
     onOpenPlans: () -> Unit,
@@ -177,6 +182,7 @@ fun HomeScreen(
                         }
                     },
                     onMonthlyPlanningClick = onOpenMonthlyPlanning,
+                    onEditVideoClick = onEditVideoClick,
                     onCompanyProfile = onCompanyProfile,
                     onSupport = onSupport,
                     onLogout = onLogout,
@@ -740,6 +746,7 @@ private fun FuturisticHomePanel(
     onCreateArtEmpresa: () -> Unit,
     onCarouselClick: () -> Unit,
     onMonthlyPlanningClick: () -> Unit,
+    onEditVideoClick: () -> Unit,
     onCompanyProfile: () -> Unit,
     onSupport: () -> Unit,
     onLogout: () -> Unit,
@@ -777,7 +784,7 @@ private fun FuturisticHomePanel(
     Box(
         modifier = Modifier
             .fillMaxWidth()
-            .height(760.dp)
+            .heightIn(min = 840.dp)
             .clip(RoundedCornerShape(28.dp))
             .background(
                 Brush.radialGradient(
@@ -788,7 +795,7 @@ private fun FuturisticHomePanel(
             .border(1.dp, palette.panelBorder, RoundedCornerShape(28.dp))
             .padding(horizontal = 12.dp, vertical = 20.dp)
     ) {
-        Canvas(modifier = Modifier.fillMaxSize()) {
+        Canvas(modifier = Modifier.matchParentSize()) {
             val centerX = size.width / 2f
             val hubY = size.height * 0.77f
             val topY = size.height * 0.15f
@@ -817,7 +824,7 @@ private fun FuturisticHomePanel(
         }
 
         Column(
-            modifier = Modifier.fillMaxSize(),
+            modifier = Modifier.fillMaxWidth(),
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
             Box(
@@ -880,11 +887,12 @@ private fun FuturisticHomePanel(
                 }
             }
 
-            Spacer(modifier = Modifier.weight(1f))
+            Spacer(modifier = Modifier.height(24.dp))
 
             PrimaryCreateArtAction(
                 palette = palette,
                 onMonthlyPlanningClick = onMonthlyPlanningClick,
+                onEditVideoClick = onEditVideoClick,
                 onCreateArtClick = onCreateArtEmpresa,
                 onIconHelpClick = onIconHelpClick,
                 onCarouselClick = onCarouselClick,
@@ -897,7 +905,7 @@ private fun FuturisticHomePanel(
                 onHelpSelected = onHelpSelected
             )
 
-            Spacer(modifier = Modifier.weight(1f))
+            Spacer(modifier = Modifier.height(24.dp))
         }
     }
 }
@@ -1289,6 +1297,7 @@ private fun QuickCircleAction(
 private fun PrimaryCreateArtAction(
     palette: PremiumHomePalette,
     onMonthlyPlanningClick: () -> Unit,
+    onEditVideoClick: () -> Unit,
     onCreateArtClick: () -> Unit,
     onIconHelpClick: () -> Unit,
     onCarouselClick: () -> Unit,
@@ -1310,53 +1319,15 @@ private fun PrimaryCreateArtAction(
             .padding(vertical = 4.dp),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
-        Box(
-            modifier = Modifier
-                .size(194.dp),
-            contentAlignment = Alignment.Center
-        ) {
-            Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .clip(CircleShape)
-                    .background(
-                        Brush.radialGradient(
-                            colors = listOf(
-                                palette.primaryHalo.copy(alpha = 0.46f),
-                                palette.primaryMiddle,
-                                palette.primaryEnd
-                            )
-                        )
-                    )
-                    .border(2.4.dp, palette.primaryBorder.copy(alpha = 0.92f), CircleShape)
-                    .clickable(onClick = onMonthlyPlanningClick)
-            )
-            if (!firstFreeArtMode) {
-                HomeHelpButton(
-                    palette = palette,
-                    onClick = { onHelpSelected(HomeHelpItem.MonthlyPlanning) },
-                    modifier = Modifier
-                        .align(Alignment.TopStart)
-                        .offset(x = 28.dp, y = 28.dp),
-                    size = 28.dp
-                )
+        HomePrimaryCreationButton(
+            palette = palette,
+            label = stringResource(R.string.home_create_image_label),
+            accessibilityLabel = stringResource(R.string.home_create_new_art),
+            onClick = onMonthlyPlanningClick,
+            onHelpClick = if (firstFreeArtMode) null else {
+                { onHelpSelected(HomeHelpItem.MonthlyPlanning) }
             }
-            Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                GoldenPlusGlyph(
-                    color = palette.primaryPlus,
-                    glow = palette.primaryHalo,
-                    modifier = Modifier.size(92.dp)
-                )
-                Text(
-                    text = if (firstFreeArtMode) "Gr\u00e1tis" else "Criar",
-                    style = MaterialTheme.typography.titleMedium,
-                    fontWeight = FontWeight.ExtraBold,
-                    color = palette.metricNumber,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
-                )
-            }
-        }
+        )
         if (firstFreeArtMode) {
             Spacer(modifier = Modifier.height(10.dp))
             Text(
@@ -1379,6 +1350,13 @@ private fun PrimaryCreateArtAction(
             )
         }
         Spacer(modifier = Modifier.height(12.dp))
+        HomePrimaryCreationButton(
+            palette = palette,
+            label = stringResource(R.string.home_edit_video_label),
+            accessibilityLabel = stringResource(R.string.home_edit_video_content_description),
+            onClick = onEditVideoClick
+        )
+        Spacer(modifier = Modifier.height(16.dp))
         Row(
             horizontalArrangement = Arrangement.spacedBy(18.dp),
             verticalAlignment = Alignment.Top
@@ -1472,6 +1450,64 @@ private fun PrimaryCreateArtAction(
             }
         }
         Spacer(modifier = Modifier.height(2.dp))
+    }
+}
+
+@Composable
+private fun HomePrimaryCreationButton(
+    palette: PremiumHomePalette,
+    label: String,
+    accessibilityLabel: String,
+    onClick: () -> Unit,
+    onHelpClick: (() -> Unit)? = null
+) {
+    Box(
+        modifier = Modifier.size(160.dp),
+        contentAlignment = Alignment.Center
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .clip(CircleShape)
+                .background(
+                    Brush.radialGradient(
+                        colors = listOf(
+                            palette.primaryHalo.copy(alpha = 0.46f),
+                            palette.primaryMiddle,
+                            palette.primaryEnd
+                        )
+                    )
+                )
+                .border(2.4.dp, palette.primaryBorder.copy(alpha = 0.92f), CircleShape)
+                .semantics { contentDescription = accessibilityLabel }
+                .clickable(role = Role.Button, onClick = onClick),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.Center
+        ) {
+            GoldenPlusGlyph(
+                color = palette.primaryPlus,
+                glow = palette.primaryHalo,
+                modifier = Modifier.size(68.dp)
+            )
+            Text(
+                text = label,
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.ExtraBold,
+                color = palette.metricNumber,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+        }
+        onHelpClick?.let { helpClick ->
+            HomeHelpButton(
+                palette = palette,
+                onClick = helpClick,
+                modifier = Modifier
+                    .align(Alignment.TopStart)
+                    .offset(x = 12.dp, y = 12.dp),
+                size = 28.dp
+            )
+        }
     }
 }
 

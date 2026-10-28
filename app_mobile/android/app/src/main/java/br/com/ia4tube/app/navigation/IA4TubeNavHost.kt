@@ -97,6 +97,7 @@ import br.com.ia4tube.app.feature.auth.RegisterScreen
 import br.com.ia4tube.app.feature.auth.RegisterViewModel
 import br.com.ia4tube.app.feature.auth.RegisterViewModelFactory
 import br.com.ia4tube.app.feature.home.HomeScreen
+import br.com.ia4tube.app.feature.edit.EditScreen
 import br.com.ia4tube.app.feature.home.PremiumHomePalette
 import br.com.ia4tube.app.feature.home.PremiumHomeTheme
 import br.com.ia4tube.app.feature.home.HomeViewModel
@@ -485,6 +486,11 @@ fun IA4TubeNavHost(
                     MobileAnalytics.track("mobile_planejamento_mensal_abriu", tela = "home", produto = "planejamento_mensal")
                     navigateProtected(Routes.MonthlyPlanning)
                 },
+                onEditVideoClick = {
+                    navController.navigate(Routes.Edit) {
+                        launchSingleTop = true
+                    }
+                },
                 onOpenInstagram = {
                     navigateProtected(Routes.Instagram)
                 },
@@ -522,6 +528,10 @@ fun IA4TubeNavHost(
                     requestAuthFor(PENDING_CAMERA_ACTION)
                 }
             )
+        }
+
+        composable(Routes.Edit) {
+            EditScreen(onBackClick = { navController.popBackStack() })
         }
 
         composable(Routes.Instagram) { instagramEntry ->
