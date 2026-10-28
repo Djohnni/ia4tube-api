@@ -14,6 +14,8 @@ internal fun importPreparationDiagnostic(stage: ImportPreparationDiagnosticStage
         ImportPreparationDiagnosticStage.METADATA -> "conferência da versão do arquivo"
         ImportPreparationDiagnosticStage.PREVIEW -> "consulta da prévia"
         ImportPreparationDiagnosticStage.SCHEDULING_AVAILABILITY -> "disponibilidade do calendário"
+        ImportPreparationDiagnosticStage.CALENDAR_SUBMISSION -> "registro no calendário"
+        ImportPreparationDiagnosticStage.CALENDAR_SUBMISSION_STATUS -> "confirmação do registro no calendário"
         null -> "preparação ou agendamento"
     }
     val reference = when (code) {
@@ -31,8 +33,12 @@ internal fun importPreparationDiagnostic(stage: ImportPreparationDiagnosticStage
         "import_preparation_invalid_result" -> "P12"
         "checkpoint_conflict" -> "P13"
         "import_request_rejected" -> "P14"
+        "import_unavailable", "import_pilot_admission_closed", "calendar_import_submission_unavailable",
+        "calendar_import_submission_await_upload_unavailable" -> "P15"
+        "calendar_import_submission_state_invalid", "calendar_import_state_invalid" -> "P16"
+        "calendar_import_submission_caption_owner_unavailable" -> "P17"
         else -> "P00"
     }
-    val http = httpStatus?.takeIf { code == "import_request_rejected" && it in 400..599 }?.let { " HTTP $it." } ?: ""
+    val http = httpStatus?.takeIf { reference in setOf("P03", "P14", "P15", "P16", "P17") && it in 400..599 }?.let { " HTTP $it." } ?: ""
     return "Não foi possível concluir: $step. Referência $reference.$http O rascunho foi mantido; não envie outro arquivo para tentar corrigir."
 }

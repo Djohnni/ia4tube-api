@@ -4,6 +4,13 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class ImportPreparationDiagnosticTest {
+    @Test fun calendarWriteAndCalendarLookup503AreDistinctFromPreparedFileStatus() {
+        val write = importPreparationDiagnostic(ImportPreparationDiagnosticStage.CALENDAR_SUBMISSION, "import_unavailable", 503)
+        val lookup = importPreparationDiagnostic(ImportPreparationDiagnosticStage.CALENDAR_SUBMISSION_STATUS, "calendar_import_submission_state_invalid", 503)
+        assertTrue(write.contains("registro no calendário")); assertTrue(write.contains("P15. HTTP 503."))
+        assertTrue(lookup.contains("confirmação do registro no calendário")); assertTrue(lookup.contains("P16. HTTP 503."))
+        assertFalse(write.contains("consulta do arquivo preparado")); assertFalse(lookup.contains("consulta do arquivo preparado"))
+    }
     @Test fun `only confirmed schedule refusal diagnostics invite correction of the same file`() {
         val occupied = importPreparationDiagnostic(null, "import_calendar_schedule_rejected_occupied")
         assertTrue(occupied.contains("Escolha outro horário")); assertTrue(occupied.contains("arquivo foi preservado"))

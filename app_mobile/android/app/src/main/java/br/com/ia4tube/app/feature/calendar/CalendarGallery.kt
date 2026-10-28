@@ -8,6 +8,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.pager.VerticalPager
+import androidx.compose.foundation.pager.PagerState
 import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
@@ -84,6 +85,36 @@ internal fun CalendarRefreshLifecycle(model: CalendarViewModel) {
         }
         lifecycle.addObserver(observer)
         onDispose { lifecycle.removeObserver(observer) }
+    }
+}
+
+@Composable
+internal fun PendingImportReturnObservation(model: CalendarViewModel, itemId: String?, enabled: Boolean) {
+    val lifecycle = LocalLifecycleOwner.current.lifecycle
+    var foreground by remember(lifecycle) { mutableStateOf(lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED)) }
+    DisposableEffect(lifecycle) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) foreground = true
+            if (event == Lifecycle.Event.ON_PAUSE) foreground = false
+        }
+        lifecycle.addObserver(observer)
+        onDispose { lifecycle.removeObserver(observer) }
+    }
+    LaunchedEffect(model, itemId, enabled, foreground) {
+        if (enabled && foreground && itemId != null) model.observePendingImportReturn(itemId)
+    }
+}
+
+@Composable
+internal fun FocusAcceptedImportReturn(pager: PagerState, itemIds: List<String>, acceptedId: String?,
+    importOpen: Boolean, onFocused: (String) -> Unit) {
+    val focused by rememberUpdatedState(onFocused)
+    LaunchedEffect(pager, itemIds, acceptedId, importOpen) {
+        if (importOpen || acceptedId == null) return@LaunchedEffect
+        val index = itemIds.indexOf(acceptedId)
+        if (index < 0) return@LaunchedEffect
+        pager.scrollToPage(index)
+        focused(acceptedId)
     }
 }
 
@@ -176,7 +207,7 @@ fun ScheduledNextContent(model: CalendarViewModel, token: String, tokenProvider:
         if (next.media != null && state.data.identity != null) {
             val target = next.media.thumbnail?.target ?: next.media.variants.first().target
             ScheduledPrivateMedia(state.data.identity!!, tokenProvider, next.media, target, active = true,
-                modifier = Modifier.fillMaxWidth().aspectRatio(1f).heightIn(max = 380.dp))
+                modifier = Modifier.fillMaxWidth().aspectRatio(1f).heightIn(max = 380.dp), refreshKey = state.imageRefresh)
         } else if (next.generatedVideo != null) ScheduledGeneratedVideo(next.generatedVideo, tokenProvider, active = true,
             modifier = Modifier.fillMaxWidth().aspectRatio(9f / 16f).heightIn(max = 380.dp))
         else ScheduledArtImage(next, token, Modifier.fillMaxWidth().aspectRatio(1f).heightIn(max = 380.dp), state.imageRefresh)
@@ -204,6 +235,7 @@ fun CalendarGallery(model: CalendarViewModel, token: String, backLabel: String =
     var showMediaInfo by remember(model, token) { mutableStateOf<ScheduledArt?>(null) }
     var showImport by remember(model, token) { mutableStateOf(false) }
     var generatedSource by remember(model, token) { mutableStateOf<ScheduledArt?>(null) }
+    var pendingFocusId by remember(model, token) { mutableStateOf<String?>(null) }
     LaunchedEffect(model, token, state.data.items) {
         if (state.data.items.none { it.id == editing?.first?.id }) editing = null
         if (state.data.items.none { it.id == showStatus?.id }) showStatus = null
@@ -229,6 +261,13 @@ fun CalendarGallery(model: CalendarViewModel, token: String, backLabel: String =
         else if (items.isEmpty()) Text("Nenhuma arte programada. As artes criadas aparecerão aqui.", color = Color.White, modifier = Modifier.padding(16.dp))
         else {
             val pager = rememberPagerState(initialPage = items.indexOfFirst { it.date >= today.toString() }.coerceAtLeast(0), pageCount = { items.size })
+            FocusAcceptedImportReturn(pager, items.map { it.id }, pendingFocusId, showImport) { focusedId ->
+                if (pendingFocusId == focusedId) pendingFocusId = null
+            }
+            val visible = items.getOrNull(pager.settledPage)
+            PendingImportReturnObservation(model, visible?.id, enabled = state.fresh && state.error == null &&
+                visible?.awaitsImportedMediaReturn() == true && !pager.isScrollInProgress &&
+                editing == null && showStatus == null && showMediaInfo == null && !showImport)
             VerticalPager(state = pager, key = { items[it].id }, modifier = Modifier.weight(1f)) { index ->
                 val art = items[index]
                 val targets = art.media?.variants?.map { it.target } ?: if (art.generatedVideo != null) art.selectedTargets
@@ -247,7 +286,7 @@ fun CalendarGallery(model: CalendarViewModel, token: String, backLabel: String =
                         if (art.media != null && state.data.identity != null) {
                             ScheduledPrivateMedia(state.data.identity!!, tokenProvider, art.media, preview,
                                 active = pager.settledPage == index && !pager.isScrollInProgress && editing == null && showStatus == null && showMediaInfo == null && !showImport,
-                                modifier = Modifier.weight(1f).fillMaxHeight())
+                                modifier = Modifier.weight(1f).fillMaxHeight(), refreshKey = state.imageRefresh)
                         } else if (art.generatedVideo != null) {
                             val posterLabel = "${LocalDate.parse(art.date).format(DateTimeFormatter.ofPattern("dd/MM"))} · ${art.time}" +
                                 art.caption.lineSequence().firstOrNull { it.isNotBlank() }?.let { "\n${it.trim()}" }.orEmpty()
@@ -299,7 +338,7 @@ fun CalendarGallery(model: CalendarViewModel, token: String, backLabel: String =
                 generatedArtRevision = generatedSource?.revision, generatedDestination = generatedSource?.destination,
                 autoOpenPicker = generatedSource == null,
                 onBack = closeImport,
-                onScheduled = { closeImport(); model.refresh() })
+                onScheduled = { acceptedId -> pendingFocusId = acceptedId; closeImport(); model.refresh() })
         }
     }
     showMediaInfo?.let { art -> CalendarAlertDialog(onDismissRequest = { showMediaInfo = null }, title = { Text("Formato e áudio programados") },

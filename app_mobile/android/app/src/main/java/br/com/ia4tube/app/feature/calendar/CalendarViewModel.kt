@@ -4,13 +4,19 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
+import java.io.IOException
 
 data class CalendarUiState(val data: CalendarSnapshot = CalendarSnapshot(), val busy: Boolean = false,
     val fresh: Boolean = false, val error: String? = null, val imageRefresh: Long = 0)
+
+internal fun ScheduledArt.awaitsImportedMediaReturn(): Boolean = sourceKind == "upload" && preparationPending &&
+    submissionState in setOf("accepted", "preparing") && status == "waiting_media" && media == null && generatedVideo == null
 
 class CalendarViewModel(private val tokenProvider: () -> String, private val token: String,
     private val gateway: CalendarGateway = CalendarApi(token)) : ViewModel() {
@@ -45,6 +51,52 @@ class CalendarViewModel(private val tokenProvider: () -> String, private val tok
         }
     }
     fun refresh() = run { gateway.list() }
+    /** The visible pending card owns this read-only loop. Leaving it cancels the observation, not server work. */
+    internal suspend fun observePendingImportReturn(itemId: String) {
+        withTimeoutOrNull(600_000L) {
+            while (pendingImportReturn(itemId)) {
+                delay(10_000L)
+                if (!pendingImportReturn(itemId)) return@withTimeoutOrNull
+                if (state.value.busy) continue
+                val ticket = ++sequence
+                state.update { it.copy(busy = true, error = null) }
+                try {
+                    var failures = 0
+                    var result: CalendarSnapshot? = null
+                    while (result == null) {
+                        try { result = gateway.list() }
+                        catch (cancelled: CancellationException) { throw cancelled }
+                        catch (error: Exception) {
+                            val transient = error is IOException || error is CalendarFailure &&
+                                error.status in setOf(408, 429, 500, 502, 503, 504)
+                            if (!transient || ++failures >= 3) throw error
+                            // This is still the same read: keep mutations disabled and the original budget.
+                            delay(10_000L)
+                            if (!pendingImportReturn(itemId) || sequence != ticket) return@withTimeoutOrNull
+                        }
+                    }
+                    if (!valid()) { invalidateSession(); return@withTimeoutOrNull }
+                    if (sequence != ticket) return@withTimeoutOrNull
+                    state.value = CalendarUiState(result, fresh = true, imageRefresh = ticket)
+                } catch (cancelled: CancellationException) {
+                    if (valid() && sequence == ticket) state.update { it.copy(busy = false) }
+                    throw cancelled
+                } catch (error: Exception) {
+                    if (!valid()) invalidateSession()
+                    else if (sequence == ticket) state.update { old -> old.copy(busy = false, fresh = false,
+                        data = if (error is CalendarFailure && error.status in setOf(401, 403)) CalendarSnapshot() else old.data,
+                        error = "Não conseguimos atualizar o status agora. Toque em Atualizar para conferir.") }
+                    return@withTimeoutOrNull
+                }
+            }
+        }
+    }
+    private fun pendingImportReturn(itemId: String): Boolean {
+        if (!valid()) { invalidateSession(); return false }
+        val current = state.value
+        return current.fresh && current.error == null && current.data.enabled &&
+            current.data.items.any { it.id == itemId && it.awaitsImportedMediaReturn() }
+    }
     fun destination(item: ScheduledArt, destination: String, onSuccess: () -> Unit) {
         if (!item.editable || state.value.data.items.none { it.id == item.id && it.revision == item.revision }) return
         run(true, onSuccess) { gateway.destination(item, destination) }

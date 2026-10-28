@@ -254,11 +254,22 @@ internal fun GalleryImportWorkflowContent(view: ImportWorkflowView, runtime: Gal
                         Text("Há outro arquivo em andamento. Volte e conclua esse envio em Adicionar foto ou vídeo antes de usar música nesta arte.")
                     }
                     submitted -> {
-                        Text("Estamos conferindo se o servidor recebeu este arquivo. O mesmo pedido será recuperado.")
+                        Text(if (preparation.calendarSubmissionIntent!!.awaitUpload) when {
+                            view.upload.transportReceived -> "Vídeo enviado. Confirmando o mesmo pedido no calendário."
+                            preparation.status == ImportPreparationRunStatus.CALENDAR_AWAITING_UPLOAD && view.busy -> "Pedido salvo. Enviando o vídeo para a preparação."
+                            preparation.status == ImportPreparationRunStatus.CALENDAR_AWAITING_UPLOAD -> "Seu pedido está salvo. Continue o envio do mesmo vídeo."
+                            else -> "Conferindo o recebimento do mesmo pedido. Seu vídeo foi preservado."
+                        } else "Estamos conferindo se o servidor recebeu este arquivo. O mesmo pedido será recuperado.")
                         Button(enabled = operational, colors = importWorkflowButtonColors(),
                             onClick = { runtime.addToCalendar(preparation.calendarSubmissionIntent!!.caption,
                                 preparation.calendarSubmissionIntent!!.schedule) },
                             modifier = Modifier.fillMaxWidth()) { Text("Continuar adição ao calendário") }
+                        if (preparation.calendarSubmissionIntent!!.awaitUpload &&
+                            GalleryImportUploadAction.RESELECT_SOURCE in uploadUi.actions)
+                            OutlinedButton(enabled = operational, onClick = { choose(null, true) }) { Text("Selecionar novamente o original") }
+                        if (preparation.calendarSubmissionIntent!!.awaitUpload && !view.upload.transportReceived &&
+                            draft?.phase in setOf(ImportPhase.UPLOADING, ImportPhase.INITIALIZING))
+                            OutlinedButton(enabled = operational, onClick = { confirmCancel = true }) { Text("Cancelar envio") }
                     }
                     draft != null && configuration != null -> {
                         if (!musicOnly) {

@@ -7,11 +7,12 @@ data class ImportCalendarSchedule(val date: String, val time: String, val timeZo
 
 /** Persisted before acceptance; independent of viewing or playing the prepared media. */
 data class ImportCalendarSubmissionIntent(val idempotencyKey: String, val sourceRevision: Long,
-    val expectedMediaRevision: Long, val caption: String = "", val schedule: ImportCalendarSchedule? = null)
+    val expectedMediaRevision: Long, val caption: String = "", val schedule: ImportCalendarSchedule? = null,
+    val awaitUpload: Boolean = false)
 
 data class ImportCalendarSubmissionReceipt(val id: String, val assetId: String, val uploadId: String,
     val idempotencyKey: String, val state: String, val calendarItemId: String?, val mediaRevision: Long,
-    val date: String, val time: String, val caption: String, val errorCode: String?) {
+    val date: String, val time: String, val caption: String, val errorCode: String?, val uploadPending: Boolean = false) {
     override fun toString() = "ImportCalendarSubmissionReceipt(state=$state, content=redacted)"
 }
 
@@ -21,6 +22,7 @@ internal object ImportCalendarSubmissionProtocol {
             intent.expectedMediaRevision in 0..999998 && intent.caption.length <= 2200 &&
             intent.caption.none { it.code in 0..8 || it.code in 11..12 || it.code in 14..31 || it.code == 127 })
         intent.schedule?.let(::validateSchedule)
+        require(!intent.awaitUpload || intent.expectedMediaRevision == 0L)
     }
     fun validateSchedule(schedule: ImportCalendarSchedule) {
         require(schedule.date.matches(Regex("[0-9]{4}-[0-9]{2}-[0-9]{2}")) &&
@@ -34,6 +36,7 @@ internal object ImportCalendarSubmissionProtocol {
         return JSONObject().put("uploadId", uploadId).put("idempotencyKey", intent.idempotencyKey)
             .put("expectedMediaRevision", intent.expectedMediaRevision)
             .put("selection", ImportPreparationProtocol.selection(kind, configuration)).also {
+                if (intent.awaitUpload) { require(kind == ImportMediaKind.VIDEO); it.put("awaitUpload", true) }
                 // Blank means no caption override; an existing art keeps its server-side caption.
                 if (intent.caption.isNotBlank()) it.put("caption", intent.caption)
                 intent.schedule?.let { schedule -> it.put("schedule", JSONObject().put("date", schedule.date)
@@ -57,6 +60,8 @@ internal object ImportCalendarSubmissionProtocol {
         val caption = json.getString("caption"); require(caption.length <= 2200)
         val error = if (json.isNull("errorCode")) null else json.getString("errorCode")
         require(error == null || error.matches(Regex("[a-z0-9_]{1,100}")))
-        return ImportCalendarSubmissionReceipt(id, assetId, uploadId, intent.idempotencyKey, state, item, revision, date, time, caption, error)
+        val uploadPending = if (json.has("uploadPending")) json.get("uploadPending").also { require(it is Boolean) } as Boolean else false
+        require(!uploadPending || intent.awaitUpload && state == "accepted" && revision == 0L)
+        return ImportCalendarSubmissionReceipt(id, assetId, uploadId, intent.idempotencyKey, state, item, revision, date, time, caption, error, uploadPending)
     }
 }

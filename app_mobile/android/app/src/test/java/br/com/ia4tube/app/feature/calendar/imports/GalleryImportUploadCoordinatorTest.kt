@@ -199,6 +199,65 @@ class GalleryImportUploadCoordinatorTest {
     }
     private fun fixture(size: Int = 17) = Fixture(temporary.newFolder(), size)
 
+    private fun Fixture.preUploadIntent(accepted: Boolean) {
+        val old = saved()
+        store.write(owner, old.generation, old.copy(calendarSubmission = ImportCalendarSubmissionIntent(
+            "same-calendar-key", old.state.revision, 0, "Frozen caption", ImportCalendarSchedule("2026-11-03", "12:00"), true),
+            calendarSubmissionAcceptedBeforeUpload = accepted))
+    }
+
+    @Test fun reservationSendsNoMediaAndUnacceptedCalendarIntentCannotAuthorizePut() = runBlocking {
+        val f = Fixture(temporary.newFolder(), 1024, true).apply { singleSupported = true }
+        val coordinator = f.coordinator()
+        coordinator.select(uri, ImportConfiguration(setOf(ImportTarget.REEL), ImportAudioMode.ORIGINAL))
+        coordinator.reserve()
+        assertEquals(1, f.creations); assertEquals(0, f.puts); assertEquals(0, f.completions)
+        f.preUploadIntent(accepted = false)
+        val refused = coordinator.transfer()
+        assertEquals("import_calendar_acceptance_required", refused.errorCode)
+        assertEquals(0, f.puts); assertNotNull(f.store.read(f.owner))
+    }
+
+    @Test fun acceptedIntentStopsAfterWholePutAndProcessRestartDoesNotCompleteOrResend() = runBlocking {
+        val f = Fixture(temporary.newFolder(), 6_000_000, true).apply { singleSupported = true }
+        val coordinator = f.coordinator()
+        coordinator.select(uri, ImportConfiguration(setOf(ImportTarget.REEL), ImportAudioMode.ORIGINAL)); coordinator.reserve()
+        f.preUploadIntent(accepted = true)
+        val sent = coordinator.transfer()
+        assertTrue(sent.transportReceived); assertFalse(sent.state!!.upload!!.serverVerified)
+        assertEquals(1, f.puts); assertEquals(0, f.completions)
+        assertTrue(f.saved().wholeVideoPutSucceeded); assertEquals(uri, f.saved().selectedContentUri)
+        f.sourceAvailable = false
+        val reopened = f.coordinator()
+        assertTrue(reopened.restore().transportReceived)
+        assertTrue(reopened.reserve().transportReceived); assertTrue(reopened.transfer().transportReceived)
+        assertEquals(1, f.puts); assertEquals(0, f.completions); assertEquals(1, f.creations)
+    }
+
+    @Test fun lostWholePutAcknowledgementUsesServerReceiptWithoutCompleteOrSecondPut() = runBlocking {
+        val f = Fixture(temporary.newFolder(), 1024, true).apply { singleSupported = true; losePut = true }
+        val coordinator = f.coordinator()
+        coordinator.select(uri, ImportConfiguration(setOf(ImportTarget.REEL), ImportAudioMode.ORIGINAL)); coordinator.reserve()
+        f.preUploadIntent(accepted = true)
+        assertFalse(coordinator.transfer().transportReceived)
+        assertFalse(f.saved().wholeVideoPutSucceeded)
+        f.sourceAvailable = false
+        assertTrue(f.coordinator().transfer().transportReceived)
+        assertEquals(1, f.puts); assertEquals(0, f.completions)
+    }
+
+    @Test fun pendingAcceptedCalendarIntentCanBeCancelledBeforePutWithoutLosingOriginal() = runBlocking {
+        val f = Fixture(temporary.newFolder(), 1024, true).apply { singleSupported = true }
+        val coordinator = f.coordinator()
+        coordinator.select(uri, ImportConfiguration(setOf(ImportTarget.REEL), ImportAudioMode.ORIGINAL)); coordinator.reserve()
+        f.preUploadIntent(accepted = true)
+        assertThrows(ImportCheckpointFailure::class.java) { f.store.clear(f.owner, f.saved().generation, f.saved().state.draftId) }
+        assertEquals(ImportUploadRunStatus.CANCELLED, coordinator.requestCancel().status)
+        assertEquals(uri, f.saved().selectedContentUri); assertEquals(0, f.puts)
+        assertEquals(ImportUploadRunStatus.EMPTY, coordinator.discardCancelledDraft().status)
+        assertTrue(f.sourceAvailable); assertEquals(1, f.cancellations)
+    }
+
     @Test fun twentyTwoMegabyteVideoUsesOneWholeTransferWithOneReceiptAndNoPartArray() = runBlocking {
         val f = Fixture(temporary.newFolder(), 22_225_691, true).apply { singleSupported = true }
         val coordinator = f.coordinator()

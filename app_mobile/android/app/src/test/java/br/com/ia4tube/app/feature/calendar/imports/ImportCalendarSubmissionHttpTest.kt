@@ -20,6 +20,54 @@ class ImportCalendarSubmissionHttpTest {
         it.getJSONObject("scheduling").put("directSubmission", true)
     }
 
+    @Test fun beforeUploadRequiresNegotiatedCapabilityAndEncodesOnlyFrozenSingleVideoIntent() = runBlocking {
+        MockWebServer().use { server ->
+            server.start()
+            val capability = capabilities(server).also {
+                it.getJSONObject("scheduling").put("beforeUploadSubmission", true)
+                it.getJSONObject("upload").put("gcs", ImportGoogleStorageTestData.profile()
+                    .put("transport", ImportGoogleStoragePolicy.TRANSPORT).put("singleRequestVideo", true))
+            }
+            server.reply(capability)
+            server.reply(JSONObject().put("ok", true).put("submission", receipt().put("uploadPending", true)))
+            val api = api(server); assertTrue(api.capabilities().beforeUploadSubmissionEnabled)
+            val pending = api.submitToCalendar(data.owner, data.assetId, data.uploadId, intent.copy(awaitUpload = true),
+                ImportMediaKind.VIDEO, ImportConfiguration(setOf(ImportTarget.REEL), ImportAudioMode.ORIGINAL))
+            assertTrue(pending.uploadPending); assertEquals("accepted", pending.state)
+            server.takeRequest()
+            val posted = JSONObject(server.takeRequest().body.readUtf8())
+            assertTrue(posted.getBoolean("awaitUpload")); assertEquals(0L, posted.getLong("expectedMediaRevision"))
+            assertEquals("video", posted.getJSONObject("selection").getString("kind"))
+            assertEquals(intent.idempotencyKey, posted.getString("idempotencyKey"))
+        }
+        MockWebServer().use { server ->
+            server.start(); server.reply(capabilities(server))
+            val api = api(server); assertFalse(api.capabilities().beforeUploadSubmissionEnabled)
+            try { api.submitToCalendar(data.owner, data.assetId, data.uploadId, intent.copy(awaitUpload = true),
+                ImportMediaKind.VIDEO, ImportConfiguration(setOf(ImportTarget.REEL), ImportAudioMode.ORIGINAL)); fail("Capability required") }
+            catch (error: ImportApiFailure) { assertEquals("import_calendar_submission_unavailable", error.code) }
+            assertEquals(1, server.requestCount)
+        }
+    }
+
+    @Test fun allowlisted503CodesStayBoundedAndNeverExposeBodyWhileUnknownCodesRemainGeneric() = runBlocking {
+        for (code in listOf("import_unavailable", "import_pilot_admission_closed", "calendar_import_submission_unavailable",
+            "calendar_import_submission_state_invalid", "calendar_import_submission_caption_owner_unavailable",
+            "calendar_import_submission_await_upload_unavailable", "calendar_import_state_invalid", "import_preparation_unavailable", "private_token_DO_NOT_DISPLAY")) {
+            MockWebServer().use { server ->
+                server.start(); server.reply(capabilities(server))
+                server.enqueue(MockResponse().setResponseCode(503).setHeader("Content-Type", "application/json")
+                    .setBody(JSONObject().put("ok", false).put("code", code).put("details", "DO_NOT_DISPLAY").toString()))
+                val api = api(server); api.capabilities()
+                try { api.calendarSubmissionStatus(data.owner, data.assetId, data.uploadId, intent); fail("Expected 503") }
+                catch (error: ImportApiFailure) {
+                    assertEquals(if (code.startsWith("private")) "import_request_rejected" else code, error.code)
+                    assertEquals(503, error.status); assertFalse(error.message!!.contains("DO_NOT_DISPLAY"))
+                }
+            }
+        }
+    }
+
     @Test fun postAcceptsWithoutPreviewDigestConfirmedDateOrMandatoryCaptionThenGetIsReadOnly() = runBlocking {
         MockWebServer().use { server ->
             server.start(); server.reply(capabilities(server))

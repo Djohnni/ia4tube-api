@@ -6,6 +6,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.job
 import kotlinx.coroutines.sync.Mutex
@@ -48,8 +49,9 @@ internal class HttpGalleryImportPreparationTransport(private val api: GalleryImp
 
 enum class ImportPreparationRunStatus { EMPTY, SOURCE_RECONCILIATION, UPLOAD_REQUIRED, AWAITING_REQUEST, PREPARING, RECONCILIATION_REQUIRED,
     PREVIEW_AVAILABLE, TEST_ONLY_PREVIEW, SCHEDULING, SCHEDULE_RECONCILIATION, SCHEDULED, CALENDAR_ACCEPTED,
-    CALENDAR_RECONCILIATION, ATTENTION, SESSION_CHANGED, PAUSED }
-enum class ImportPreparationDiagnosticStage { LOCAL_STATE, CAPABILITIES, STATUS, METADATA, PREVIEW, SCHEDULING_AVAILABILITY }
+    CALENDAR_RECONCILIATION, CALENDAR_AWAITING_UPLOAD, ATTENTION, SESSION_CHANGED, PAUSED }
+enum class ImportPreparationDiagnosticStage { LOCAL_STATE, CAPABILITIES, STATUS, METADATA, PREVIEW, SCHEDULING_AVAILABILITY,
+    CALENDAR_SUBMISSION, CALENDAR_SUBMISSION_STATUS }
 data class ImportPreparationRunView(val status: ImportPreparationRunStatus, val state: GalleryImportState? = null,
     val preparation: ImportPreparationRecord? = null, val preview: ImportPrivatePreview? = null, val errorCode: String? = null,
     val confirmation: ImportPreviewConfirmation? = null, val availability: ImportScheduleAvailability? = null,
@@ -272,13 +274,29 @@ class GalleryImportPreparationCoordinator internal constructor(
     }
 
     /** One explicit action accepts a durable server-owned prepare-to-calendar job. No preview acknowledgement is fabricated. */
-    suspend fun submitToCalendar(caption: String = "", schedule: ImportCalendarSchedule? = null): ImportPreparationRunView = operation { run ->
+    suspend fun submitToCalendar(caption: String = "", schedule: ImportCalendarSchedule? = null): ImportPreparationRunView =
+        submitCalendar(caption, schedule, beforeUpload = false)
+    suspend fun submitBeforeUpload(caption: String, schedule: ImportCalendarSchedule?): ImportPreparationRunView =
+        submitCalendar(caption, schedule, beforeUpload = true)
+    private suspend fun submitCalendar(caption: String, schedule: ImportCalendarSchedule?, beforeUpload: Boolean): ImportPreparationRunView = operation { run ->
         capabilities(run)
         requireThat(run.capability!!.calendarSubmissionEnabled, "import_calendar_submission_unavailable")
         var checkpoint = draft(run)
         requireThat(checkpoint.scheduleBinding == null && checkpoint.state.scheduleIntent == null, "import_schedule_existing_intent")
         if (checkpoint.calendarSubmission != null) return@operation reconcileCalendarSubmission(run, retry = true)
         schedule?.let(ImportCalendarSubmissionProtocol::validateSchedule)
+        if (beforeUpload) {
+            requireThat(run.capability!!.beforeUploadSubmissionEnabled &&
+                checkpoint.state.selection.kind == ImportMediaKind.VIDEO && checkpoint.state.upload?.ticket?.singleRequestVideo == true &&
+                checkpoint.state.phase == ImportPhase.UPLOADING && !checkpoint.cancelRequested && checkpoint.preparationIntent == null,
+                "import_calendar_submission_unavailable")
+            requireThat(GalleryImportPolicy.validateConfiguration(checkpoint.state.selection.kind, checkpoint.state.configuration,
+                run.capability!!.musicTracks) == null, "import_preparation_music_unavailable")
+            val intent = ImportCalendarSubmissionIntent(UUID.randomUUID().toString(), checkpoint.state.revision, 0, caption.trim(), schedule, awaitUpload = true)
+            ImportCalendarSubmissionProtocol.validate(intent)
+            persist(run, checkpoint.copy(calendarSubmission = intent))
+            return@operation submitCalendarSubmission(run, recoverDefinitiveScheduleRejection = true)
+        }
         requireThat(uploaded(checkpoint) && !checkpoint.cancelRequested, "import_preparation_upload_required")
         requireThat(GalleryImportPolicy.validateConfiguration(checkpoint.state.selection.kind, checkpoint.state.configuration,
             run.capability!!.musicTracks) == null, "import_preparation_music_unavailable")
@@ -308,8 +326,7 @@ class GalleryImportPreparationCoordinator internal constructor(
     }
 
     private suspend fun reconcileCalendarSubmission(run: Run, retry: Boolean): ImportPreparationRunView {
-        val checkpoint = draft(run); val intent = checkpoint.calendarSubmission!!; val ticket = checkpoint.state.upload!!.ticket
-        val found = run.api.calendarSubmissionStatus(run.owner, ticket.assetId, ticket.uploadId, intent); guard(run)
+        val found = lookupCalendarSubmission(run)
         if (found != null) return finishCalendarSubmission(run, found)
         // Reopening only reads. A user retry may replay exactly the saved request, never mint another key.
         return if (retry) submitCalendarSubmission(run) else emit(run, ImportPreparationRunStatus.CALENDAR_RECONCILIATION)
@@ -319,8 +336,9 @@ class GalleryImportPreparationCoordinator internal constructor(
         val checkpoint = draft(run); val ticket = checkpoint.state.upload!!.ticket
         persist(run, checkpoint)
         val intent = checkpoint.calendarSubmission!!
-        val receipt = try { run.api.submitToCalendar(run.owner, ticket.assetId, ticket.uploadId, intent,
-            checkpoint.state.selection.kind, checkpoint.state.configuration) }
+        run.diagnosticStage = ImportPreparationDiagnosticStage.CALENDAR_SUBMISSION
+        val receipt = try { postCalendarSubmission(run)
+        }
         catch (error: ImportApiFailure) {
             // A restored/replayed intent may have an earlier request still in flight. Never retire its key here.
             if (!recoverDefinitiveScheduleRejection || intent.schedule == null || error.resultUncertain) throw error
@@ -330,20 +348,65 @@ class GalleryImportPreparationCoordinator internal constructor(
                 error.code == "calendar_import_submission_schedule_invalid" && error.status == 400 -> "import_calendar_schedule_rejected_invalid"
                 else -> throw error
             }
+            run.diagnosticStage = ImportPreparationDiagnosticStage.CALENDAR_SUBMISSION_STATUS
             val found = run.api.calendarSubmissionStatus(run.owner, ticket.assetId, ticket.uploadId, intent); guard(run)
             if (found != null) return finishCalendarSubmission(run, found)
             // Only the exact authenticated not-found response becomes null. Keep source/preparation; do not resend.
-            persist(run, draft(run).copy(calendarSubmission = null))
+            persist(run, draft(run).copy(calendarSubmission = null, calendarSubmissionAcceptedBeforeUpload = false))
             return emit(run, ImportPreparationRunStatus.AWAITING_REQUEST, error = diagnostic, httpStatus = error.status)
         }
         return finishCalendarSubmission(run, receipt)
     }
 
+    private fun transientCalendarRead(error: ImportApiFailure) = error.code == "import_network_unavailable" ||
+        error.status in 500..599 && error.code !in setOf("calendar_import_submission_state_invalid", "calendar_import_state_invalid")
+
+    /** Only the negotiated before-upload path retries metadata. A missing receipt never authorizes media PUT. */
+    private suspend fun lookupCalendarSubmission(run: Run): ImportCalendarSubmissionReceipt? {
+        val checkpoint = draft(run); val intent = checkpoint.calendarSubmission!!; val ticket = checkpoint.state.upload!!.ticket
+        var attempt = 0
+        while (true) {
+            run.diagnosticStage = ImportPreparationDiagnosticStage.CALENDAR_SUBMISSION_STATUS
+            try { return run.api.calendarSubmissionStatus(run.owner, ticket.assetId, ticket.uploadId, intent).also { guard(run) } }
+            catch (error: ImportApiFailure) {
+                if (!intent.awaitUpload || !transientCalendarRead(error) || attempt++ >= 2) throw error
+                delay(500L * attempt); guard(run)
+            }
+        }
+    }
+    private suspend fun postCalendarSubmission(run: Run): ImportCalendarSubmissionReceipt {
+        val checkpoint = draft(run); val ticket = checkpoint.state.upload!!.ticket; val intent = checkpoint.calendarSubmission!!
+        var replayed = false
+        while (true) {
+            run.diagnosticStage = ImportPreparationDiagnosticStage.CALENDAR_SUBMISSION
+            try { return run.api.submitToCalendar(run.owner, ticket.assetId, ticket.uploadId, intent,
+                checkpoint.state.selection.kind, checkpoint.state.configuration).also { guard(run) } }
+            catch (error: ImportApiFailure) {
+                if (!intent.awaitUpload || !(error.resultUncertain || transientCalendarRead(error)) || replayed) throw error
+                val found = lookupCalendarSubmission(run)
+                if (found != null) return found
+                // An authenticated exact not-found permits one replay of the same frozen intent/key.
+                replayed = true; delay(500); guard(run)
+            }
+        }
+    }
+
     private suspend fun finishCalendarSubmission(run: Run, receipt: ImportCalendarSubmissionReceipt): ImportPreparationRunView {
-        guard(run); val checkpoint = draft(run); val ticket = checkpoint.state.upload!!.ticket
+        guard(run); var checkpoint = draft(run); val ticket = checkpoint.state.upload!!.ticket
         requireThat(receipt.assetId == ticket.assetId && receipt.uploadId == ticket.uploadId &&
             receipt.idempotencyKey == checkpoint.calendarSubmission!!.idempotencyKey && receipt.id.matches(Regex("[a-f0-9]{40}")),
             "import_calendar_submission_receipt_invalid")
+        if (checkpoint.calendarSubmission!!.awaitUpload) {
+            if (!checkpoint.calendarSubmissionAcceptedBeforeUpload) {
+                persist(run, checkpoint.copy(calendarSubmissionAcceptedBeforeUpload = true))
+                checkpoint = draft(run)
+            }
+            val received = checkpoint.wholeVideoPutSucceeded || checkpoint.state.upload!!.serverVerified ||
+                checkpoint.state.upload.complete || !receipt.uploadPending && receipt.state in setOf("preparing", "scheduled")
+            if (!received) return emit(run, if (receipt.state == "accepted" && receipt.uploadPending)
+                ImportPreparationRunStatus.CALENDAR_AWAITING_UPLOAD else ImportPreparationRunStatus.ATTENTION,
+                error = if (receipt.state == "accepted" && receipt.uploadPending) null else "import_calendar_submission_unavailable")
+        }
         if (run.generatedIntent != null) {
             val source = checkpoint.generatedSource ?: throw ImportPreparationFailure("import_generated_existing_draft")
             withContext(io) { guard(run); store.clearAcceptedGeneratedIntent(run.owner, source, checkpoint.generation) }

@@ -36,7 +36,8 @@ data class ImportCapabilities(
     val localSimulation: Boolean = false,
     val musicTracks: List<AuthorizedImportTrack> = emptyList(),
     val calendarSubmissionEnabled: Boolean = false,
-    val googleStorage: ImportGoogleStorageProfile? = null
+    val googleStorage: ImportGoogleStorageProfile? = null,
+    val beforeUploadSubmissionEnabled: Boolean = false
 )
 
 data class ImportUploadRecord(
@@ -150,8 +151,11 @@ class GalleryImportHttpApi internal constructor(
         require(tracks.map { it.id }.distinct().size == tracks.size)
         val scheduling = json.getJSONObject("scheduling")
         val directSubmission = if (scheduling.has("directSubmission")) scheduling.get("directSubmission").also { require(it is Boolean) } as Boolean else false
+        val beforeUploadSubmission = if (scheduling.has("beforeUploadSubmission")) scheduling.get("beforeUploadSubmission").also { require(it is Boolean) } as Boolean else false
+        require(!beforeUploadSubmission || directSubmission && googleStorage?.singleRequestVideo == true && preparation.getBoolean("enabled"))
         ImportCapabilities(true, owner, origin.toString().trimEnd('/'), chunkBytes, imageBytes, videoBytes,
-            preparation.getBoolean("enabled"), scheduling.getBoolean("enabled"), local, tracks, directSubmission, googleStorage).also { currentCapabilities = it }
+            preparation.getBoolean("enabled"), scheduling.getBoolean("enabled"), local, tracks, directSubmission, googleStorage,
+            beforeUploadSubmission).also { currentCapabilities = it }
     }
 
     suspend fun start(owner: ImportOwner, media: ImportSelection, idempotencyKey: String): ImportUploadRecord =
@@ -199,6 +203,8 @@ class GalleryImportHttpApi internal constructor(
         intent: ImportCalendarSubmissionIntent, kind: ImportMediaKind, configuration: ImportConfiguration): ImportCalendarSubmissionReceipt = guarded(ImportMediaStage.CALENDAR_SUBMISSION, true) {
         ensurePreparationOwner(owner); uuid(assetId); uuid(uploadId)
         if (currentCapabilities?.calendarSubmissionEnabled != true) throw ImportApiFailure("import_calendar_submission_unavailable")
+        if (intent.awaitUpload && (kind != ImportMediaKind.VIDEO || currentCapabilities?.beforeUploadSubmissionEnabled != true))
+            throw ImportApiFailure("import_calendar_submission_unavailable")
         ImportCalendarSubmissionProtocol.parse(request(ImportMediaStage.CALENDAR_SUBMISSION, "/assets/$assetId/calendar-submissions",
             ImportCalendarSubmissionProtocol.body(uploadId, intent, kind, configuration), calendarSubmissionErrors = true)
             .getJSONObject("submission"), assetId, uploadId, intent)
@@ -501,6 +507,10 @@ class GalleryImportHttpApi internal constructor(
                 "calendar_import_submission_schedule_invalid", "calendar_import_submission_time_outside_window" -> mutation && response.code == 400
                 "calendar_import_submission_time_occupied" -> mutation && response.code == 409
                 "calendar_import_submission_not_found" -> !mutation && response.code == 404
+                "import_unavailable", "import_pilot_admission_closed", "calendar_import_submission_unavailable",
+                "calendar_import_submission_state_invalid", "calendar_import_submission_caption_owner_unavailable",
+                "calendar_import_submission_await_upload_unavailable", "calendar_import_state_invalid",
+                "import_preparation_unavailable" -> response.code == 503
                 else -> false
             })
             code
@@ -533,7 +543,7 @@ class GalleryImportHttpApi internal constructor(
                         ensureSession()
                         if (!response.isSuccessful) {
                             val code = when {
-                                calendarSubmissionErrors && response.code in setOf(400, 404, 409) -> calendarSubmissionRejection(response, mutation)
+                                calendarSubmissionErrors && response.code in setOf(400, 404, 409, 503) -> calendarSubmissionRejection(response, mutation)
                                 uploadVerificationErrors && response.code == 503 -> uploadVerificationRejection(response)
                                 else -> "import_request_rejected"
                             }

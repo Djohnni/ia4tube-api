@@ -16,7 +16,9 @@ data class ImportDurableCheckpoint(
     val scheduleBinding: ImportScheduleBinding? = null,
     val generatedSource: ImportGeneratedSourceIntent? = null,
     val calendarSubmission: ImportCalendarSubmissionIntent? = null,
-    val singleVideoStartRequested: Boolean = false
+    val singleVideoStartRequested: Boolean = false,
+    val calendarSubmissionAcceptedBeforeUpload: Boolean = false,
+    val wholeVideoPutSucceeded: Boolean = false
 ) {
     override fun toString() = "ImportDurableCheckpoint(generation=$generation, content=redacted)"
 }
@@ -45,6 +47,8 @@ object ImportCheckpointCodec {
             .put("calendarItemId", state.calendarItemId ?: JSONObject.NULL)
             .put("failure", state.failure?.name ?: JSONObject.NULL)
         if (value.singleVideoStartRequested) json.put("singleVideoStartRequested", true)
+        if (value.calendarSubmissionAcceptedBeforeUpload) json.put("calendarSubmissionAcceptedBeforeUpload", true)
+        if (value.wholeVideoPutSucceeded) json.put("wholeVideoPutSucceeded", true)
         value.preparationIntent?.let { intent ->
             json.put("preparationIntent", JSONObject().put("idempotencyKey", intent.idempotencyKey)
                 .put("sourceRevision", intent.sourceRevision).put("expectedMediaRevision", intent.expectedMediaRevision)
@@ -60,6 +64,7 @@ object ImportCheckpointCodec {
         value.calendarSubmission?.let { intent -> json.put("calendarSubmission", JSONObject()
             .put("idempotencyKey", intent.idempotencyKey).put("sourceRevision", intent.sourceRevision)
             .put("expectedMediaRevision", intent.expectedMediaRevision).put("caption", intent.caption).also { value ->
+                if (intent.awaitUpload) value.put("awaitUpload", true)
                 intent.schedule?.let { schedule -> value.put("schedule", JSONObject().put("date", schedule.date)
                     .put("time", schedule.time).put("timeZone", schedule.timeZone)) }
             })
@@ -94,7 +99,7 @@ object ImportCheckpointCodec {
         require(json.getInt("schema") == 1)
         requireKeys(json, setOf("schema", "generation", "owner", "draftId", "revision", "phase", "selection", "configuration",
             "selectedContentUri", "uploadStartIdempotencyKey", "uploadStartIssued", "transferPaused", "cancelRequested",
-            "calendarItemId", "failure", "upload", "prepared", "scheduleIntent", "preparationIntent", "preparationBaseRevision", "scheduleBinding", "generatedSource", "calendarSubmission", "singleVideoStartRequested"))
+            "calendarItemId", "failure", "upload", "prepared", "scheduleIntent", "preparationIntent", "preparationBaseRevision", "scheduleBinding", "generatedSource", "calendarSubmission", "singleVideoStartRequested", "calendarSubmissionAcceptedBeforeUpload", "wholeVideoPutSucceeded"))
         val savedOwner = json.getJSONObject("owner")
         require(savedOwner.getString("companyId") == owner.companyId && savedOwner.getString("userId") == owner.userId)
         val media = json.getJSONObject("selection")
@@ -142,13 +147,15 @@ object ImportCheckpointCodec {
                 requireKeys(value, setOf("calendarItemId", "revision", "idempotencyKey"))
                 ImportGeneratedSourceIntent(value.getString("calendarItemId"), value.getLong("revision"), value.getString("idempotencyKey"))
             }, json.strictOptionalObject("calendarSubmission")?.let { value ->
-                requireKeys(value, setOf("idempotencyKey", "sourceRevision", "expectedMediaRevision", "caption", "schedule"))
+                requireKeys(value, setOf("idempotencyKey", "sourceRevision", "expectedMediaRevision", "caption", "schedule", "awaitUpload"))
                 ImportCalendarSubmissionIntent(value.getString("idempotencyKey"), value.getLong("sourceRevision"),
                     value.getLong("expectedMediaRevision"), value.getString("caption"), value.strictOptionalObject("schedule")?.let { schedule ->
                         requireKeys(schedule, setOf("date", "time", "timeZone"))
                         ImportCalendarSchedule(schedule.getString("date"), schedule.getString("time"), schedule.getString("timeZone"))
-                    })
-            }, json.strictOptionalBoolean("singleVideoStartRequested", false)).also(::validate)
+                    }, value.strictOptionalBoolean("awaitUpload", false))
+            }, json.strictOptionalBoolean("singleVideoStartRequested", false),
+            json.strictOptionalBoolean("calendarSubmissionAcceptedBeforeUpload", false),
+            json.strictOptionalBoolean("wholeVideoPutSucceeded", false)).also(::validate)
     }
 
     fun validate(checkpoint: ImportDurableCheckpoint) {
@@ -158,11 +165,17 @@ object ImportCheckpointCodec {
         }
         val state = checkpoint.state
         require(!checkpoint.singleVideoStartRequested || checkpoint.uploadStartIssued && state.selection.kind == ImportMediaKind.VIDEO)
+        require(!checkpoint.calendarSubmissionAcceptedBeforeUpload || checkpoint.calendarSubmission?.awaitUpload == true)
+        require(!checkpoint.wholeVideoPutSucceeded || checkpoint.calendarSubmissionAcceptedBeforeUpload && state.upload?.ticket?.singleRequestVideo == true)
         checkpoint.calendarSubmission?.let { intent ->
             ImportCalendarSubmissionProtocol.validate(intent)
-            require(intent.sourceRevision == state.revision && state.upload?.serverVerified == true &&
-                state.phase in setOf(ImportPhase.UPLOADED, ImportPhase.PREPARING, ImportPhase.READY) &&
-                !checkpoint.cancelRequested && checkpoint.scheduleBinding == null && state.scheduleIntent == null)
+            require(intent.sourceRevision == state.revision && checkpoint.scheduleBinding == null && state.scheduleIntent == null)
+            if (intent.awaitUpload) require(state.selection.kind == ImportMediaKind.VIDEO &&
+                state.upload?.ticket?.singleRequestVideo == true && checkpoint.preparationIntent == null &&
+                state.phase in setOf(ImportPhase.UPLOADING, ImportPhase.VERIFYING, ImportPhase.UPLOADED,
+                    ImportPhase.CANCEL_PENDING, ImportPhase.CANCELLED, ImportPhase.FAILED))
+            else require(state.upload?.serverVerified == true &&
+                state.phase in setOf(ImportPhase.UPLOADED, ImportPhase.PREPARING, ImportPhase.READY) && !checkpoint.cancelRequested)
         }
         require(checkpoint.preparationBaseRevision in 0..999998)
         checkpoint.generatedSource?.let { source ->

@@ -14,12 +14,13 @@ class ImportCalendarSubmissionTest {
         override fun encrypt(scope: String, plain: ByteArray) = ByteArray(28) + plain
         override fun decrypt(scope: String, sealed: ByteArray) = sealed.copyOfRange(28, sealed.size)
     }
-    private inner class Fixture(uploaded: Boolean = true) {
+    private inner class Fixture(uploaded: Boolean = true, val beforeUpload: Boolean = false) {
         val store = PrivateImportCheckpointStore(temporary.newFolder(), FixtureCipher())
         var owner: ImportOwner? = data.owner
         var token = "synthetic-calendar-session"
         var posts = 0; var gets = 0; var previews = 0; var oldPreparationPosts = 0
         var loseAck = false; var accept = true
+        var lostAckCode = "import_network_unavailable"
         var postFailure: ImportApiFailure? = null
         var lookupFailure: ImportApiFailure? = null
         var recoverReceipt = false
@@ -29,15 +30,19 @@ class ImportCalendarSubmissionTest {
         val submittedIntents = mutableListOf<ImportCalendarSubmissionIntent>()
         var record = ImportPreparationProtocol.parseRecord(data.awaiting())
         init {
-            val state = GalleryImportState(data.owner, "submission-draft", data.selection, data.config,
-                phase = if (uploaded) ImportPhase.UPLOADED else ImportPhase.EDITING,
-                upload = if (uploaded) ImportUploadProgress(ImportUploadTicket(data.uploadId, data.assetId, data.sourceSha,
-                    data.selection.byteCount), serverVerified = true) else null)
+            val selection = if (beforeUpload) data.selection.copy(kind = ImportMediaKind.VIDEO, mimeType = "video/mp4", durationMs = 16000) else data.selection
+            val configuration = if (beforeUpload) ImportConfiguration(setOf(ImportTarget.REEL), ImportAudioMode.ORIGINAL) else data.config
+            val state = GalleryImportState(data.owner, "submission-draft", selection, configuration,
+                phase = if (beforeUpload) ImportPhase.UPLOADING else if (uploaded) ImportPhase.UPLOADED else ImportPhase.EDITING,
+                upload = if (beforeUpload || uploaded) ImportUploadProgress(ImportUploadTicket(data.uploadId, data.assetId, data.sourceSha,
+                    selection.byteCount, chunkBytes = if (beforeUpload) selection.byteCount.toInt() else GalleryImportPolicy.CHUNK_BYTES,
+                    singleRequestVideo = beforeUpload), serverVerified = !beforeUpload) else null)
             store.write(data.owner, 0, ImportDurableCheckpoint(1, state, "content://synthetic/original", "synthetic-upload-key",
-                uploadStartIssued = uploaded))
+                uploadStartIssued = uploaded || beforeUpload, singleVideoStartRequested = beforeUpload))
         }
         val transport = object : GalleryImportPreparationTransport {
-            override suspend fun capabilities() = ImportCapabilities(true, owner, preparationEnabled = true, schedulingEnabled = true, calendarSubmissionEnabled = true)
+            override suspend fun capabilities() = ImportCapabilities(true, owner, preparationEnabled = true, schedulingEnabled = true,
+                calendarSubmissionEnabled = true, beforeUploadSubmissionEnabled = beforeUpload)
             override suspend fun status(owner: ImportOwner, assetId: String) = record
             override suspend fun request(owner: ImportOwner, assetId: String, uploadId: String, intent: ImportPreparationIntent,
                 kind: ImportMediaKind, configuration: ImportConfiguration): ImportPreparationRecord {
@@ -53,10 +58,11 @@ class ImportCalendarSubmissionTest {
                 posts++; keys.add(intent.idempotencyKey); submittedIntents.add(intent)
                 postFailure?.let { throw it }
                 val result = ImportCalendarSubmissionReceipt("d".repeat(40), assetId, uploadId, intent.idempotencyKey,
-                    "accepted", null, 0, intent.schedule?.date ?: "2026-09-24", intent.schedule?.time ?: "09:00", intent.caption, null)
+                    "accepted", null, 0, intent.schedule?.date ?: "2026-09-24", intent.schedule?.time ?: "09:00", intent.caption, null,
+                    uploadPending = intent.awaitUpload)
                 if (accept) receipt = result
                 afterAccept?.invoke()
-                if (loseAck) throw ImportApiFailure("import_network_unavailable", resultUncertain = true)
+                if (loseAck) throw ImportApiFailure(lostAckCode, resultUncertain = true)
                 return result
             }
             override suspend fun calendarSubmissionStatus(owner: ImportOwner, assetId: String, uploadId: String,
@@ -69,6 +75,98 @@ class ImportCalendarSubmissionTest {
             }
         }
         fun coordinator() = GalleryImportPreparationCoordinator({ owner }, { token }, store, { transport })
+    }
+
+    @Test fun beforeUploadAcceptancePreservesSourceAndIntentUntilWholeTransportReceived() = runBlocking {
+        val f = Fixture(beforeUpload = true)
+        val schedule = ImportCalendarSchedule("2026-11-03", "13:10")
+        val accepted = f.coordinator().submitBeforeUpload("My frozen caption", schedule)
+        assertEquals(ImportPreparationRunStatus.CALENDAR_AWAITING_UPLOAD, accepted.status)
+        assertNull(accepted.calendarSubmissionReceipt)
+        var saved = f.store.read(data.owner)!!
+        assertTrue(saved.calendarSubmissionAcceptedBeforeUpload); assertTrue(saved.calendarSubmission!!.awaitUpload)
+        assertEquals(schedule, saved.calendarSubmission!!.schedule); assertEquals("My frozen caption", saved.calendarSubmission!!.caption)
+        assertEquals("content://synthetic/original", saved.selectedContentUri)
+        assertEquals(ImportPreparationRunStatus.CALENDAR_AWAITING_UPLOAD, f.coordinator().restore().status)
+        assertThrows(ImportCheckpointFailure::class.java) {
+            val current = f.store.read(data.owner)!!
+            f.store.clearAcceptedCalendarSubmission(data.owner, current.generation, current.state.draftId, f.receipt!!)
+        }
+        saved = f.store.read(data.owner)!!
+        f.store.write(data.owner, saved.generation, saved.copy(wholeVideoPutSucceeded = true))
+        val returned = f.coordinator().restore()
+        assertEquals(ImportPreparationRunStatus.CALENDAR_ACCEPTED, returned.status)
+        assertEquals(f.receipt!!.id, returned.calendarSubmissionReceipt!!.id)
+        assertNull(f.store.read(data.owner)); assertEquals(1, f.posts); assertEquals(0, f.previews); assertEquals(0, f.oldPreparationPosts)
+    }
+
+    @Test fun lostInitialAcceptanceIsRecoveredBySameKeyBeforeMediaPermissionAndNeverNewPost() = runBlocking {
+        val f = Fixture(beforeUpload = true).apply { loseAck = true }
+        val result = f.coordinator().submitBeforeUpload("Kept", null)
+        assertEquals(ImportPreparationRunStatus.CALENDAR_AWAITING_UPLOAD, result.status)
+        assertEquals(1, f.posts); assertEquals(1, f.gets)
+        assertTrue(f.store.read(data.owner)!!.calendarSubmissionAcceptedBeforeUpload)
+        assertNull(result.calendarSubmissionReceipt)
+        f.coordinator().submitBeforeUpload("Do not replace", ImportCalendarSchedule("2026-11-03", "14:10"))
+        assertEquals(1, f.posts); assertEquals("Kept", f.store.read(data.owner)!!.calendarSubmission!!.caption)
+    }
+
+    @Test fun unavailableAcceptanceLookupPreservesUnacceptedIntentAndExposesCalendarStageOnly() = runBlocking {
+        val f = Fixture(beforeUpload = true).apply {
+            loseAck = true; lookupFailure = ImportApiFailure("import_unavailable", 503, true)
+        }
+        val result = f.coordinator().submitBeforeUpload("Saved", null)
+        assertEquals(1, f.posts); assertEquals(3, f.gets)
+        assertEquals(ImportPreparationDiagnosticStage.CALENDAR_SUBMISSION_STATUS, result.diagnosticStage)
+        assertEquals(503, result.diagnosticHttpStatus)
+        assertFalse(f.store.read(data.owner)!!.calendarSubmissionAcceptedBeforeUpload)
+        assertNull(result.calendarSubmissionReceipt)
+    }
+
+    @Test fun malformedAcceptanceResponseReconcilesSameIdBeforeGrantingMediaPermission() = runBlocking {
+        val f = Fixture(beforeUpload = true).apply { loseAck = true; lostAckCode = "import_response_invalid" }
+        val result = f.coordinator().submitBeforeUpload("Saved", null)
+        assertEquals(ImportPreparationRunStatus.CALENDAR_AWAITING_UPLOAD, result.status)
+        assertEquals(1, f.posts); assertEquals(1, f.gets)
+        assertTrue(f.store.read(data.owner)!!.calendarSubmissionAcceptedBeforeUpload)
+    }
+
+    @Test fun confirmedAbsenceAllowsOnlyOneReplayOfFrozenIntentAndNeverGrantsTransferWithoutReceipt() = runBlocking {
+        val f = Fixture(beforeUpload = true).apply { loseAck = true; accept = false }
+        val result = f.coordinator().submitBeforeUpload("Saved", null)
+        assertEquals(2, f.posts); assertEquals(1, f.gets); assertEquals(1, f.keys.distinct().size)
+        assertEquals(1, f.submittedIntents.distinct().size)
+        assertFalse(f.store.read(data.owner)!!.calendarSubmissionAcceptedBeforeUpload)
+        assertNull(result.calendarSubmissionReceipt)
+    }
+
+    @Test fun remotePreparationProvesReceivedUploadAfterClientRestartWithoutPutReceipt() = runBlocking {
+        val f = Fixture(beforeUpload = true)
+        f.coordinator().submitBeforeUpload("Saved", null)
+        f.receipt = f.receipt!!.copy(state = "preparing", uploadPending = false)
+        val result = f.coordinator().restore()
+        assertEquals(ImportPreparationRunStatus.CALENDAR_ACCEPTED, result.status)
+        assertNull(f.store.read(data.owner)); assertEquals(1, f.posts)
+    }
+
+    @Test fun sessionChangeDuringAcceptanceCannotGrantTransferOrExposeAnotherSessionReceipt() = runBlocking {
+        val f = Fixture(beforeUpload = true)
+        f.afterAccept = { f.token = "different-session" }
+        val result = f.coordinator().submitBeforeUpload("Saved", null)
+        assertEquals(ImportPreparationRunStatus.SESSION_CHANGED, result.status)
+        assertNull(result.calendarSubmissionReceipt); assertNull(result.state)
+        assertFalse(f.store.read(data.owner)!!.calendarSubmissionAcceptedBeforeUpload)
+        assertNotNull(f.store.read(data.owner)!!.selectedContentUri)
+    }
+
+    @Test fun terminalServerCancellationBeforePutKeepsOriginalAndCannotGrantTransfer() = runBlocking {
+        val f = Fixture(beforeUpload = true)
+        f.coordinator().submitBeforeUpload("Saved", null)
+        f.receipt = f.receipt!!.copy(state = "cancelled", uploadPending = false)
+        val result = f.coordinator().restore()
+        assertEquals(ImportPreparationRunStatus.ATTENTION, result.status)
+        assertNull(result.calendarSubmissionReceipt)
+        assertNotNull(f.store.read(data.owner)!!.selectedContentUri)
     }
 
     @Test fun acceptedServerJobRetiresOnlyLocalDraftWithoutPreviewAndAllowsAnotherFile() = runBlocking {

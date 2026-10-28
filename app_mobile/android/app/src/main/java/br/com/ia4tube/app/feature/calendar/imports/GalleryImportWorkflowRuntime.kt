@@ -48,6 +48,8 @@ internal interface GalleryImportPreparationControl {
     suspend fun finishScheduledDraft(): ImportPreparationRunView
     suspend fun submitToCalendar(caption: String): ImportPreparationRunView = throw ImportApiFailure("import_calendar_submission_unavailable")
     suspend fun submitToCalendar(caption: String, schedule: ImportCalendarSchedule?): ImportPreparationRunView = submitToCalendar(caption)
+    suspend fun submitBeforeUpload(caption: String, schedule: ImportCalendarSchedule?): ImportPreparationRunView =
+        throw ImportApiFailure("import_calendar_submission_unavailable")
     fun pause()
     fun invalidateSession()
 }
@@ -65,6 +67,7 @@ private class CoordinatedGalleryImportPreparation(private val coordinator: Galle
     override suspend fun finishScheduledDraft() = coordinator.finishScheduledDraft()
     override suspend fun submitToCalendar(caption: String) = coordinator.submitToCalendar(caption)
     override suspend fun submitToCalendar(caption: String, schedule: ImportCalendarSchedule?) = coordinator.submitToCalendar(caption, schedule)
+    override suspend fun submitBeforeUpload(caption: String, schedule: ImportCalendarSchedule?) = coordinator.submitBeforeUpload(caption, schedule)
     override fun pause() = coordinator.pause()
     override fun invalidateSession() = coordinator.invalidateSession()
 }
@@ -147,7 +150,7 @@ internal class GalleryImportWorkflowRuntime internal constructor(private val own
         acceptPickerResult(PendingPickerResult(owner, token, requestId, uri, null, true))
     override fun transfer() = launch { upload.transfer(); preparation.restore() }
     override fun reconcileUpload() = launch { upload.reconcileOnce(); preparation.restore() }
-    override fun cancelUpload() = launch { upload.requestCancel() }
+    override fun cancelUpload() = launch { upload.requestCancel(); preparation.restore() }
     override fun discardCancelled() = launch { upload.discardCancelledDraft(); mutable.value = mutable.value.copy(preparation = null) }
     override fun configure(value: ImportConfiguration) = launch { preparation.configure(value) }
     override fun prepare() = launch { preparation.request() }
@@ -160,6 +163,26 @@ internal class GalleryImportWorkflowRuntime internal constructor(private val own
     override fun addToCalendar(caption: String) = addToCalendar(caption, null)
     override fun addToCalendar(caption: String, schedule: ImportCalendarSchedule?) = launch {
         val draft = mutable.value.draft ?: return@launch
+        val existingIntent = mutable.value.preparation?.calendarSubmissionIntent
+        val beforeUpload = existingIntent?.awaitUpload == true || existingIntent == null &&
+            mutable.value.capabilities.beforeUploadSubmissionEnabled && draft.selection.kind == ImportMediaKind.VIDEO &&
+            draft.upload?.serverVerified != true && (draft.upload == null || draft.upload.ticket.singleRequestVideo)
+        if (beforeUpload) {
+            val reserved = upload.reserve()
+            if (!valid()) { invalidate(); return@launch }
+            if (reserved.errorCode != null || reserved.state?.upload == null) return@launch
+            // A legacy uncertain start retains its old upload geometry and old flow.
+            if (reserved.state.upload.ticket.singleRequestVideo) {
+                val accepted = preparation.submitBeforeUpload(caption, schedule)
+                if (!valid()) { invalidate(); return@launch }
+                if (accepted.status != ImportPreparationRunStatus.CALENDAR_AWAITING_UPLOAD) return@launch
+                val transferred = upload.transfer()
+                if (!valid()) { invalidate(); return@launch }
+                if (transferred.transportReceived || transferred.state?.upload?.serverVerified == true ||
+                    transferred.state?.upload?.complete == true) preparation.restore()
+                return@launch
+            }
+        }
         if (draft.upload?.serverVerified != true) {
             val transferred = upload.transfer()
             if (transferred.state?.upload?.serverVerified != true) return@launch

@@ -27,7 +27,8 @@ data class ImportUploadRunView(
     val transferredPartBytes: Long = 0,
     val totalBytes: Long = 0,
     val errorCode: String? = null,
-    val pickerPermissionRetained: Boolean? = null
+    val pickerPermissionRetained: Boolean? = null,
+    val transportReceived: Boolean = false
 ) { override fun toString() = "ImportUploadRunView(status=$status, content=redacted)" }
 
 private class ImportUploadCoordinatorFailure(val code: String) : Exception("Não foi possível continuar este envio. Confira o envio existente antes de iniciar outro.")
@@ -112,6 +113,14 @@ class GalleryImportUploadCoordinator internal constructor(
             else ImportUploadRunStatus.PAUSED)
     }
 
+    /** Saves only upload metadata. The caller must obtain durable calendar acceptance before sending bytes. */
+    suspend fun reserve(): ImportUploadRunView = operation { run ->
+        val checkpoint = draft(run); capabilities(run); requireUploadStage(checkpoint.state)
+        requireThat(!checkpoint.cancelRequested && checkpoint.state.phase != ImportPhase.CANCELLED, "import_cancel_pending")
+        if (checkpoint.wholeVideoPutSucceeded) return@operation emit(run, ImportUploadRunStatus.RECONCILIATION_REQUIRED)
+        showRecord(run, recoverUpload(run))
+    }
+
     /** Reattaches only the same bytes after a provider permission was lost. */
     suspend fun reselectSource(contentUri: String): ImportUploadRunView = operation { run ->
         val checkpoint = draft(run); requireThat(!checkpoint.cancelRequested, "import_cancel_pending")
@@ -129,10 +138,18 @@ class GalleryImportUploadCoordinator internal constructor(
         requireThat(maxParts in 1..20, "import_part_limit_invalid")
         val checkpoint = draft(run); capabilities(run)
         requireUploadStage(checkpoint.state)
+        requireThat(checkpoint.calendarSubmission?.awaitUpload != true || checkpoint.calendarSubmissionAcceptedBeforeUpload,
+            "import_calendar_acceptance_required")
+        if (checkpoint.wholeVideoPutSucceeded) return@operation emit(run, ImportUploadRunStatus.RECONCILIATION_REQUIRED)
         if (checkpoint.cancelRequested) return@operation continueCancellation(run)
         if (checkpoint.state.phase == ImportPhase.CANCELLED) return@operation emit(run, ImportUploadRunStatus.CANCELLED)
         persist(run, checkpoint.copy(transferPaused = false))
         var record = recoverUpload(run)
+        if (draft(run).calendarSubmission?.awaitUpload == true && draft(run).calendarSubmissionAcceptedBeforeUpload &&
+            (draft(run).state.upload!!.complete || record.phase in setOf(ImportServerPhase.VERIFYING, ImportServerPhase.UPLOADED))) {
+            persist(run, draft(run).copy(wholeVideoPutSucceeded = true, transferPaused = true))
+            return@operation emit(run, ImportUploadRunStatus.RECONCILIATION_REQUIRED)
+        }
         if (record.phase == ImportServerPhase.VERIFYING) return@operation finishOnce(run)
         if (record.phase != ImportServerPhase.UPLOADING) return@operation showRecord(run, record)
         if (draft(run).state.upload!!.complete) return@operation finishOnce(run)
@@ -200,6 +217,12 @@ class GalleryImportUploadCoordinator internal constructor(
             requireThat(total == selected.byteCount && transferred in 0..total, "import_progress_invalid")
             emit(run, ImportUploadRunStatus.TRANSFERRING, transferred = transferred)
         } }
+        if (draft(run).calendarSubmission?.awaitUpload == true && draft(run).calendarSubmissionAcceptedBeforeUpload) {
+            // HTTP 200 acknowledges the entire signed PUT, not media inspection. The accepted
+            // server job owns confirmation/preparation; no complete POST or five-minute wait here.
+            persist(run, draft(run).copy(wholeVideoPutSucceeded = true, transferPaused = true))
+            return emit(run, ImportUploadRunStatus.RECONCILIATION_REQUIRED)
+        }
         diagnosticStage(run, ImportMediaStage.UPLOAD_RESUME)
         val observed = mutate(run) { run.api.resume(run.binding.owner, record.uploadId) }
         observe(run, observed, receiptsAuthoritative = true)
@@ -212,9 +235,15 @@ class GalleryImportUploadCoordinator internal constructor(
     /** One reconciliation initiated by a caller; pending verification has a finite foreground wait. */
     suspend fun reconcileOnce(): ImportUploadRunView = operation { run ->
         val checkpoint = draft(run); capabilities(run); requireUploadStage(checkpoint.state)
+        if (checkpoint.wholeVideoPutSucceeded) return@operation emit(run, ImportUploadRunStatus.RECONCILIATION_REQUIRED)
         if (checkpoint.cancelRequested) return@operation continueCancellation(run)
         if (checkpoint.state.upload == null && !checkpoint.uploadStartIssued) return@operation emit(run, ImportUploadRunStatus.PAUSED)
         val record = recoverUpload(run)
+        if (draft(run).calendarSubmission?.awaitUpload == true && draft(run).calendarSubmissionAcceptedBeforeUpload &&
+            (draft(run).state.upload!!.complete || record.phase in setOf(ImportServerPhase.VERIFYING, ImportServerPhase.UPLOADED))) {
+            persist(run, draft(run).copy(wholeVideoPutSucceeded = true, transferPaused = true))
+            return@operation emit(run, ImportUploadRunStatus.RECONCILIATION_REQUIRED)
+        }
         if (record.phase == ImportServerPhase.VERIFYING || record.phase == ImportServerPhase.UPLOADING && draft(run).state.upload!!.complete)
             finishOnce(run) else showRecord(run, record)
     }
@@ -417,7 +446,8 @@ class GalleryImportUploadCoordinator internal constructor(
         guard(run, ignorePause = status != ImportUploadRunStatus.TRANSFERRING)
         val state = run.checkpoint?.state
         val value = ImportUploadRunView(state, status, state?.upload?.acknowledgedBytes ?: 0, transferred,
-            state?.selection?.byteCount ?: 0, error?.takeIf { it.matches(Regex("[a-z0-9_]{1,100}")) }, retained)
+            state?.selection?.byteCount ?: 0, error?.takeIf { it.matches(Regex("[a-z0-9_]{1,100}")) }, retained,
+            run.checkpoint?.wholeVideoPutSucceeded == true)
         synchronized(publicationLock) {
             guard(run, ignorePause = status != ImportUploadRunStatus.TRANSFERRING)
             visibleBinding = run.binding; visible = value; notifyChanged(value)

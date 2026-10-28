@@ -13,6 +13,7 @@ internal interface GalleryImportUploadControl {
     suspend fun select(uri: String, configuration: ImportConfiguration): ImportUploadRunView
     suspend fun reselectSource(uri: String): ImportUploadRunView
     suspend fun transfer(): ImportUploadRunView
+    suspend fun reserve(): ImportUploadRunView = throw ImportApiFailure("import_calendar_submission_unavailable")
     suspend fun reconcileOnce(): ImportUploadRunView
     suspend fun requestCancel(): ImportUploadRunView
     suspend fun discardCancelledDraft(): ImportUploadRunView
@@ -25,6 +26,7 @@ internal class CoordinatedGalleryImportUpload(private val coordinator: GalleryIm
     override suspend fun select(uri: String, configuration: ImportConfiguration) = coordinator.select(uri, configuration)
     override suspend fun reselectSource(uri: String) = coordinator.reselectSource(uri)
     override suspend fun transfer() = coordinator.transfer()
+    override suspend fun reserve() = coordinator.reserve()
     override suspend fun reconcileOnce() = coordinator.reconcileOnce()
     override suspend fun requestCancel() = coordinator.requestCancel()
     override suspend fun discardCancelledDraft() = coordinator.discardCancelledDraft()

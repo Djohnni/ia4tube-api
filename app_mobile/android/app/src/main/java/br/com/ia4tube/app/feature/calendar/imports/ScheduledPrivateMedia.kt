@@ -40,18 +40,20 @@ internal object AndroidImportPreviews {
 /** No ad hooks, tracking listeners, external URLs or automatic gallery prefetch. Active means the visible, settled item. */
 @Composable
 fun ScheduledPrivateMedia(owner: ImportOwner, tokenProvider: () -> String, preview: ImportPrivatePreview,
-                          target: String, active: Boolean, modifier: Modifier = Modifier) {
-    PrivateImportPreviewSurface(owner, tokenProvider, preview, target, active, modifier)
+                          target: String, active: Boolean, modifier: Modifier = Modifier, refreshKey: Any? = null) {
+    PrivateImportPreviewSurface(owner, tokenProvider, preview, target, active, modifier, refreshKey = refreshKey)
 }
 
 @Composable
 internal fun PrivateImportPreviewSurface(owner: ImportOwner, tokenProvider: () -> String, preview: ImportPrivatePreview,
     target: String, active: Boolean, modifier: Modifier = Modifier,
-    onVerified: (String) -> Unit = {}, onFailure: (String) -> Unit = {}) {
+    onVerified: (String) -> Unit = {}, onFailure: (String) -> Unit = {}, refreshKey: Any? = null,
+    cacheForTests: PrivateImportPreviewCache? = null, storedTokenForTests: (() -> String)? = null) {
     val context = LocalContext.current.applicationContext
     val lifecycle = LocalLifecycleOwner.current.lifecycle
-    val cache = remember(context) { AndroidImportPreviews.cache(context) }
+    val cache = remember(context, cacheForTests) { cacheForTests ?: AndroidImportPreviews.cache(context) }
     val session = remember(context) { SessionStore(context) }
+    val storedToken by rememberUpdatedState(storedTokenForTests ?: { session.getToken() })
     val token = tokenProvider()
     val currentToken by rememberUpdatedState(tokenProvider)
     val sessionEpoch by AndroidPrivateArts.sessionChanges.collectAsState()
@@ -66,8 +68,10 @@ internal fun PrivateImportPreviewSurface(owner: ImportOwner, tokenProvider: () -
         lifecycle.addObserver(observer)
         onDispose { lifecycle.removeObserver(observer) }
     }
-    val sessionAllowed = token.isNotBlank() && runCatching { session.getToken() == token && currentToken() == token }.getOrDefault(false)
-    key(owner, token, sessionEpoch, preview.assetId, preview.mediaRevision, preview.previewDigest, target) {
+    val sessionAllowed = token.isNotBlank() && runCatching { storedToken() == token && currentToken() == token }.getOrDefault(false)
+    // Only an explicit successful calendar refresh retries the same visible media.
+    // cacheEpoch is intentionally not a key: starting a load changes it itself.
+    key(owner, token, sessionEpoch, preview.assetId, preview.mediaRevision, preview.previewDigest, target, refreshKey) {
         var saved by remember { mutableStateOf<VerifiedImportPreview?>(null) }
         var error by remember { mutableStateOf<String?>(null) }
         val verifiedCallback by rememberUpdatedState(onVerified)
@@ -77,7 +81,7 @@ internal fun PrivateImportPreviewSurface(owner: ImportOwner, tokenProvider: () -
             if (!active || !foreground || !sessionAllowed || !onScreen) return@LaunchedEffect
             var lease: VerifiedImportPreview? = null
             try {
-                lease = cache.load(owner, token, { if (session.getToken() == token) currentToken() else "" }, { owner }, preview, target)
+                lease = cache.load(owner, token, { if (storedToken() == token) currentToken() else "" }, { owner }, preview, target)
                 saved = lease
                 // The DisposableEffect below owns the successful lease. Cancellation still releases a pending download.
             } catch (cancelled: CancellationException) { throw cancelled }
