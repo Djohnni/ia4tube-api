@@ -12,6 +12,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -160,7 +161,6 @@ fun HomeScreen(
                 .padding(top = 14.dp),
                 verticalArrangement = Arrangement.Top
             ) {
-                HomeArtShortcuts(homePalette, onOpenInstagram, onOpenPlannedArts)
                 FuturisticHomePanel(
                     state = state,
                     palette = homePalette,
@@ -183,6 +183,8 @@ fun HomeScreen(
                     },
                     onMonthlyPlanningClick = onOpenMonthlyPlanning,
                     onEditVideoClick = onEditVideoClick,
+                    onOpenInstagram = onOpenInstagram,
+                    onOpenPlannedArts = onOpenPlannedArts,
                     onCompanyProfile = onCompanyProfile,
                     onSupport = onSupport,
                     onLogout = onLogout,
@@ -747,6 +749,8 @@ private fun FuturisticHomePanel(
     onCarouselClick: () -> Unit,
     onMonthlyPlanningClick: () -> Unit,
     onEditVideoClick: () -> Unit,
+    onOpenInstagram: () -> Unit,
+    onOpenPlannedArts: () -> Unit,
     onCompanyProfile: () -> Unit,
     onSupport: () -> Unit,
     onLogout: () -> Unit,
@@ -827,18 +831,17 @@ private fun FuturisticHomePanel(
             modifier = Modifier.fillMaxWidth(),
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
-            Box(
-                modifier = Modifier.fillMaxWidth(),
-                contentAlignment = Alignment.TopEnd
-            ) {
-                PremiumHomeThemeToggle(
-                    premiumTheme = premiumTheme,
-                    palette = palette,
-                    onThemeSelected = onThemeSelected
-                )
-            }
+            PrimaryCreationRow(
+                palette = palette,
+                onMonthlyPlanningClick = onMonthlyPlanningClick,
+                onEditVideoClick = onEditVideoClick,
+                firstFreeArtMode = firstFreeArtMode,
+                onHelpSelected = onHelpSelected
+            )
 
-            Spacer(modifier = Modifier.height(10.dp))
+            Spacer(modifier = Modifier.height(16.dp))
+            HomeArtShortcuts(palette, onOpenInstagram, onOpenPlannedArts)
+            Spacer(modifier = Modifier.height(16.dp))
 
             Row(
                 modifier = Modifier.fillMaxWidth(),
@@ -887,12 +890,10 @@ private fun FuturisticHomePanel(
                 }
             }
 
-            Spacer(modifier = Modifier.height(24.dp))
+            Spacer(modifier = Modifier.height(16.dp))
 
-            PrimaryCreateArtAction(
+            HomeSecondaryActions(
                 palette = palette,
-                onMonthlyPlanningClick = onMonthlyPlanningClick,
-                onEditVideoClick = onEditVideoClick,
                 onCreateArtClick = onCreateArtEmpresa,
                 onIconHelpClick = onIconHelpClick,
                 onCarouselClick = onCarouselClick,
@@ -906,6 +907,11 @@ private fun FuturisticHomePanel(
             )
 
             Spacer(modifier = Modifier.height(24.dp))
+            PremiumHomeThemeToggle(
+                premiumTheme = premiumTheme,
+                palette = palette,
+                onThemeSelected = onThemeSelected
+            )
         }
     }
 }
@@ -1294,40 +1300,40 @@ private fun QuickCircleAction(
 }
 
 @Composable
-private fun PrimaryCreateArtAction(
+private fun PrimaryCreationRow(
     palette: PremiumHomePalette,
     onMonthlyPlanningClick: () -> Unit,
     onEditVideoClick: () -> Unit,
-    onCreateArtClick: () -> Unit,
-    onIconHelpClick: () -> Unit,
-    onCarouselClick: () -> Unit,
-    onCompanyProfile: () -> Unit,
-    carouselRemainingText: String?,
-    onLogout: () -> Unit,
     firstFreeArtMode: Boolean,
-    showLogout: Boolean,
-    onLockedFeatureClick: () -> Unit,
     onHelpSelected: (HomeHelpItem) -> Unit
 ) {
-    val lockableClick: ((() -> Unit) -> () -> Unit) = { action ->
-        if (firstFreeArtMode) onLockedFeatureClick else action
-    }
-
-    Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(vertical = 4.dp),
-        horizontalAlignment = Alignment.CenterHorizontally
-    ) {
-        HomePrimaryCreationButton(
-            palette = palette,
-            label = stringResource(R.string.home_create_image_label),
-            accessibilityLabel = stringResource(R.string.home_create_new_art),
-            onClick = onMonthlyPlanningClick,
-            onHelpClick = if (firstFreeArtMode) null else {
-                { onHelpSelected(HomeHelpItem.MonthlyPlanning) }
+    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+        BoxWithConstraints(modifier = Modifier.fillMaxWidth()) {
+            val buttonSize = minOf(160.dp, (maxWidth - 12.dp) / 2)
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(12.dp, Alignment.CenterHorizontally),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                HomePrimaryCreationButton(
+                    palette = palette,
+                    label = stringResource(R.string.home_create_image_label),
+                    accessibilityLabel = stringResource(R.string.home_create_new_art),
+                    size = buttonSize,
+                    onClick = onMonthlyPlanningClick,
+                    onHelpClick = if (firstFreeArtMode) null else {
+                        { onHelpSelected(HomeHelpItem.MonthlyPlanning) }
+                    }
+                )
+                HomePrimaryCreationButton(
+                    palette = palette,
+                    label = stringResource(R.string.home_edit_video_label),
+                    accessibilityLabel = stringResource(R.string.home_edit_video_content_description),
+                    size = buttonSize,
+                    onClick = onEditVideoClick
+                )
             }
-        )
+        }
         if (firstFreeArtMode) {
             Spacer(modifier = Modifier.height(10.dp))
             Text(
@@ -1349,14 +1355,33 @@ private fun PrimaryCreateArtAction(
                 overflow = TextOverflow.Ellipsis
             )
         }
-        Spacer(modifier = Modifier.height(12.dp))
-        HomePrimaryCreationButton(
-            palette = palette,
-            label = stringResource(R.string.home_edit_video_label),
-            accessibilityLabel = stringResource(R.string.home_edit_video_content_description),
-            onClick = onEditVideoClick
-        )
-        Spacer(modifier = Modifier.height(16.dp))
+    }
+}
+
+@Composable
+private fun HomeSecondaryActions(
+    palette: PremiumHomePalette,
+    onCreateArtClick: () -> Unit,
+    onIconHelpClick: () -> Unit,
+    onCarouselClick: () -> Unit,
+    onCompanyProfile: () -> Unit,
+    carouselRemainingText: String?,
+    onLogout: () -> Unit,
+    firstFreeArtMode: Boolean,
+    showLogout: Boolean,
+    onLockedFeatureClick: () -> Unit,
+    onHelpSelected: (HomeHelpItem) -> Unit
+) {
+    val lockableClick: ((() -> Unit) -> () -> Unit) = { action ->
+        if (firstFreeArtMode) onLockedFeatureClick else action
+    }
+
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 4.dp),
+        horizontalAlignment = Alignment.CenterHorizontally
+    ) {
         Row(
             horizontalArrangement = Arrangement.spacedBy(18.dp),
             verticalAlignment = Alignment.Top
@@ -1458,11 +1483,12 @@ private fun HomePrimaryCreationButton(
     palette: PremiumHomePalette,
     label: String,
     accessibilityLabel: String,
+    size: Dp = 160.dp,
     onClick: () -> Unit,
     onHelpClick: (() -> Unit)? = null
 ) {
     Box(
-        modifier = Modifier.size(160.dp),
+        modifier = Modifier.size(size),
         contentAlignment = Alignment.Center
     ) {
         Column(
