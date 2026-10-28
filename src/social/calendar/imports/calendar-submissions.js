@@ -18,7 +18,7 @@ const DIAGNOSTIC_CODES = new Set([...RETRYABLE_PG_CODES, "25P03", "57P01", "57P0
   "42501", "23505", "23503", "23514", "media_retention_asset_retired", "media_retention_state_invalid",
   "media_retention_collector_only", "postgres_connection_failure", "temporary_unavailable", "deterministic_refusal", "unknown_failure"]);
 const PROGRESS_STAGES = new Set(["authority", "upload_lookup", "preparation_request", "preparing_record",
-  "preparation_status", "prepared_snapshot", "connection", "finalize"]);
+  "upload_reconcile", "preparation_status", "prepared_snapshot", "connection", "finalize"]);
 function progressDiagnostic(error, stage, at) {
   const code = DIAGNOSTIC_CODES.has(error?.code) ? error.code : isPostgresConnectionFailure(error)
     ? "postgres_connection_failure" : error?.statusCode === 503 ? "temporary_unavailable"
@@ -73,6 +73,13 @@ function validateCalendarSubmissions(state) {
       try { schedule = requestedSchedule(row.request.schedule); } catch { fail("state_invalid", 503); }
       if (!schedule || !isDeepStrictEqual(schedule, row.request.schedule) || schedule.date !== row.date || schedule.time !== row.time) fail("state_invalid", 503);
     }
+    if (row.request.awaitUpload !== undefined && (row.request.awaitUpload !== true || row.request.selection?.kind !== "video" ||
+        row.request.expectedMediaRevision !== 0 || row.request.reuseRevision !== null || !HASH.test(row.request.sourceSha256 || ""))) fail("state_invalid", 503);
+    if ((row.uploadNextCheckAt !== undefined || row.uploadCheckCount !== undefined) && (row.request.awaitUpload !== true || !Number.isSafeInteger(row.uploadNextCheckAt) ||
+        row.uploadNextCheckAt < row.createdAt || !Number.isSafeInteger(row.uploadCheckCount) || row.uploadCheckCount < 1 ||
+        row.uploadCheckCount > 1000000)) fail("state_invalid", 503);
+    if (row.uploadCancellationSettledAt !== undefined && (row.state !== "cancelled" || row.request.awaitUpload !== true ||
+        !Number.isSafeInteger(row.uploadCancellationSettledAt) || row.uploadCancellationSettledAt < row.createdAt)) fail("state_invalid", 503);
   }
 }
 function reserveSlot(state, now, exceptId, preferred = null) {
@@ -92,7 +99,8 @@ function reserveSlot(state, now, exceptId, preferred = null) {
 /** Durable user intent and calendar finalization. No codec, timer, provider send,
  * client principal fabrication or assertion of visual review belongs here. */
 function createCalendarSubmissions({ store, uploadStore, preparation, grants, accessPolicy, resolveConnection,
-  resolveSubmissionConnection, resolveDefaultCaption = null, catalog = null, localTransport = null, clock = Date.now }) {
+  resolveSubmissionConnection, resolveDefaultCaption = null, reconcilePendingUpload = null, cancelPendingUpload = null,
+  catalog = null, localTransport = null, clock = Date.now }) {
   const local = isLocalPublicationTransport(localTransport);
   const authorize = context => accessPolicy.resolve(context);
   function receipt(row, state) {
@@ -101,6 +109,7 @@ function createCalendarSubmissions({ store, uploadStore, preparation, grants, ac
       state: job?.phase === "cancelled" ? "cancelled" : row.state, calendarItemId: job ? job.id : null,
       mediaRevision: row.mediaRevision, date: job?.date || row.date, time: job?.time || row.time,
       caption: job?.caption ?? row.request.caption, errorCode: row.errorCode || null,
+      ...(row.request.awaitUpload === true ? { uploadPending: row.state === "accepted" && !job } : {}),
       ...(job && job.phase !== "cancelled" ? { notice: { id: `calendar-ready-${job.id}`, kind: "calendar_media_ready",
         title: "Mídia no calendário", body: "Sua mídia está no calendário. Confira a programação; você pode excluir o item antes da publicação.", calendarItemId: job.id } } : {}) };
   }
@@ -111,17 +120,19 @@ function createCalendarSubmissions({ store, uploadStore, preparation, grants, ac
   }
   async function request(context, input) {
     authorize(context);
-    if (!input || Array.isArray(input) || Object.keys(input).some(k => !["assetId", "uploadId", "idempotencyKey", "expectedMediaRevision", "selection", "caption", "schedule"].includes(k)) ||
+    if (!input || Array.isArray(input) || Object.keys(input).some(k => !["assetId", "uploadId", "idempotencyKey", "expectedMediaRevision", "selection", "caption", "schedule", "awaitUpload"].includes(k)) ||
         !UUID.test(input.assetId || "") || !UUID.test(input.uploadId || "") || !KEY.test(input.idempotencyKey || "") ||
-        !Number.isSafeInteger(input.expectedMediaRevision) || input.expectedMediaRevision < 0) fail("invalid", 400);
+        !Number.isSafeInteger(input.expectedMediaRevision) || input.expectedMediaRevision < 0 ||
+        input.awaitUpload !== undefined && input.awaitUpload !== true) fail("invalid", 400);
     const chosen = selection(input.selection), explicitCaption = input.caption === undefined ? null : caption(input.caption), schedule = requestedSchedule(input.schedule);
+    if (input.awaitUpload === true && (chosen.kind !== "video" || input.expectedMediaRevision !== 0)) fail("invalid", 400);
     // A host profile may support fewer transformations than the shared Android
     // contract. Reject those before accepting an irreversible calendar intent.
     if (typeof preparation.validateSelection === "function") await preparation.validateSelection(context, chosen);
     // Keep the exact legacy hash for absent/null schedules, so old durable
     // intentions still recover after this additive contract update.
     const clientHash = hash([input.assetId, input.uploadId, input.idempotencyKey, input.expectedMediaRevision, chosen, explicitCaption,
-      ...(schedule ? [schedule] : [])]);
+      ...(schedule ? [schedule] : []), ...(input.awaitUpload === true ? [{ awaitUpload: true }] : [])]);
     const id = idForRequest(context, input.assetId, input.idempotencyKey);
     // Recover first: a retry never needs a live phone session's old preparation
     // revision and never changes a later edit, pause, cancellation or notice.
@@ -131,9 +142,12 @@ function createCalendarSubmissions({ store, uploadStore, preparation, grants, ac
       return receipt(row, state);
     });
     if (prior) return prior;
+    if (input.awaitUpload === true && typeof reconcilePendingUpload !== "function") fail("await_upload_unavailable", 503);
     const upload = await uploadStore.update(context.companyId, state => state.uploads[input.uploadId]);
     if (!upload || upload.companyId !== context.companyId || upload.userId !== context.userId || upload.assetId !== input.assetId ||
-        !["uploaded", "verifying"].includes(upload.state)) fail("source_not_ready");
+        !(input.awaitUpload === true ? ["uploading", "uploaded", "verifying"] : ["uploaded", "verifying"]).includes(upload.state)) fail("source_not_ready");
+    if (input.awaitUpload === true && (upload.kind !== "video" || upload.mimeType !== "video/mp4" || upload.storageProvider !== "gcs" ||
+        upload.uploadMode !== "single" || !HASH.test(upload.sha256 || ""))) fail("source_not_ready");
     const status = await preparation.status(context, { assetId: input.assetId });
     if ((status.currentRevision || status.mediaRevision || 0) !== input.expectedMediaRevision) fail("revision_conflict");
     const reuse = status.mediaRevision > 0 && status.state !== "attention" && isDeepStrictEqual(selection(status.selection), chosen);
@@ -157,7 +171,8 @@ function createCalendarSubmissions({ store, uploadStore, preparation, grants, ac
       }
       const recordInput = { assetId: input.assetId, uploadId: input.uploadId, idempotencyKey: input.idempotencyKey,
         expectedMediaRevision: input.expectedMediaRevision, selection: chosen, caption: submissionCaption,
-        sourceSha256: upload.sha256, reuseRevision: reuse ? status.mediaRevision : null, ...(schedule ? { schedule } : {}) };
+        sourceSha256: upload.sha256, reuseRevision: reuse ? status.mediaRevision : null, ...(schedule ? { schedule } : {}),
+        ...(input.awaitUpload === true ? { awaitUpload: true } : {}) };
       const slot = schedule ? requestedSlot(state, schedule, clock(), id) : reserveSlot(state, clock(), id, original);
       const requestHash = hash(recordInput), preferences = state.preferences;
       const automatic = preferences.enabled && sameBinding(preferences.binding, connection?.binding);
@@ -174,23 +189,83 @@ function createCalendarSubmissions({ store, uploadStore, preparation, grants, ac
     if (!UUID.test(assetId || "") || !KEY.test(key || "")) fail("not_found", 404);
     return store.update(context.companyId, state => receipt(owned(state, context, assetId, key), state));
   }
+  async function claimUploadCheck(companyId, row, cancelling = false) {
+    return store.update(companyId, state => {
+      const current = state.importSubmissions[row.id];
+      if (!current || (cancelling ? current.state !== "cancelled" || current.uploadCancellationSettledAt !== undefined
+        : !activeStates.has(current.state)) || state.jobs[row.id] || current.uploadNextCheckAt > clock()) return false;
+      current.uploadCheckCount = Math.min(1000000, (current.uploadCheckCount || 0) + 1);
+      const delay = current.uploadCheckCount <= 30 ? 10000 : current.uploadCheckCount <= 40 ? 30000 : 60000;
+      current.uploadNextCheckAt = clock() + delay;
+      return true;
+    });
+  }
   async function progress(companyId, { limit = 4 } = {}) {
     if (!UUID.test(companyId || "") || !Number.isSafeInteger(limit) || limit < 1 || limit > 10) fail("invalid", 400);
-    const pending = await store.update(companyId, state => Object.values(state.importSubmissions || {}).filter(row => activeStates.has(row.state)).slice(0, limit));
+    const pending = await store.update(companyId, state => Object.values(state.importSubmissions || {}).filter(row =>
+      (activeStates.has(row.state) || row.state === "cancelled" && row.request.awaitUpload === true &&
+        row.uploadCancellationSettledAt === undefined && typeof cancelPendingUpload === "function") &&
+      !(["accepted", "cancelled"].includes(row.state) && row.request.awaitUpload === true && row.uploadNextCheckAt > clock())).slice(0, limit));
     for (const row of pending) {
       const context = Object.freeze({ authenticated: true, companyId, userId: row.userId });
       let stage = "authority";
       try {
+        // Bound even failed cancellation-authority/source lookups. A damaged or
+        // expired cancelled row must not monopolize every worker batch.
+        if (row.state === "cancelled" && !await claimUploadCheck(companyId, row, true)) continue;
         authorize(context);
         const delegated = grants.verifySubmission(row.envelope, companyId, row.userId);
         if (!delegated || delegated.submissionId !== row.id || delegated.requestHash !== row.requestHash || row.requestHash !== hash(row.request)) fail("authority_changed");
         const input = row.request;
         // A chosen date is user intent, not a suggestion. Do not spend on new
         // preparation or move the publication to another day after it expires.
-        if (input.schedule && dateTime(input.schedule.date, input.schedule.time) <= clock()) fail("time_outside_window", 400);
+        if (row.state !== "cancelled" && input.schedule && dateTime(input.schedule.date, input.schedule.time) <= clock()) fail("time_outside_window", 400);
         stage = "upload_lookup";
-        const upload = await uploadStore.update(companyId, state => state.uploads[input.uploadId]);
-        if (!upload || upload.assetId !== input.assetId || upload.userId !== row.userId || upload.sha256 !== input.sourceSha256) fail("source_changed");
+        let upload = await uploadStore.update(companyId, state => state.uploads[input.uploadId]);
+        const matchesUpload = value => value && value.companyId === companyId && value.assetId === input.assetId &&
+          value.userId === row.userId && value.sha256 === input.sourceSha256;
+        if (!matchesUpload(upload)) fail("source_changed");
+        if (input.awaitUpload === true) {
+          if (upload.kind !== "video" || upload.mimeType !== "video/mp4" || upload.storageProvider !== "gcs" || upload.uploadMode !== "single") fail("source_changed");
+          if (row.state === "cancelled") {
+            // Cancel only this new unfinished transfer through its existing
+            // provider fence. Never delete an inspected/completed source.
+            if (["uploading", "cancel_pending"].includes(upload.state)) {
+              try { await cancelPendingUpload(context, { uploadId: input.uploadId }); }
+              catch (error) { if (error.code !== "import_upload_not_cancellable") throw error; }
+              upload = await uploadStore.update(companyId, state => state.uploads[input.uploadId]);
+              if (!matchesUpload(upload)) fail("source_changed");
+            }
+            if (["cancelled", "uploaded", "verifying", "rejected"].includes(upload.state)) await store.update(companyId, state => {
+              const current = state.importSubmissions[row.id];
+              if (current?.state === "cancelled") current.uploadCancellationSettledAt = clock();
+            });
+            continue;
+          }
+          if (upload.state === "rejected") fail("source_rejected");
+          if (upload.state === "uploading") {
+            if (typeof reconcilePendingUpload !== "function") continue;
+            // Claim the next bounded probe durably, before remote I/O. Restart,
+            // concurrent ticks and an absent/partial object cannot cause a spin.
+            const claimed = await claimUploadCheck(companyId, row);
+            if (!claimed) continue;
+            stage = "upload_reconcile";
+            await reconcilePendingUpload(context, { uploadId: input.uploadId });
+            upload = await uploadStore.update(companyId, state => state.uploads[input.uploadId]);
+            if (!matchesUpload(upload)) fail("source_changed");
+            if (upload.state === "uploading" || upload.state === "verifying") continue;
+            if (upload.state === "rejected") fail("source_rejected");
+          }
+        }
+        if (input.awaitUpload === true && ["cancelled", "cancel_pending"].includes(upload.state)) {
+          await store.update(companyId, state => {
+            const current = state.importSubmissions[row.id];
+            if (current && activeStates.has(current.state) && !state.jobs[row.id]) {
+              current.state = "cancelled"; current.updatedAt = clock(); current.cancelledAt = clock(); current.revision++;
+            }
+          });
+          continue;
+        }
         if (upload.state === "verifying") continue;
         if (upload.state !== "uploaded") fail("source_changed");
         let mediaRevision = input.reuseRevision;
@@ -253,6 +328,12 @@ function createCalendarSubmissions({ store, uploadStore, preparation, grants, ac
         const diagnostic = progressDiagnostic(error, stage, clock());
         try {
           await store.update(companyId, state => { const current = state.importSubmissions?.[row.id];
+            if (current?.state === "cancelled" && current.request.awaitUpload === true && !state.jobs[row.id]) {
+              current.progressDiagnostic = diagnostic;
+              // No valid authority/source: stop this cleanup safely, retaining
+              // any bytes. This cannot resurrect or authorize the cancelled job.
+              if (!transient) current.uploadCancellationSettledAt = diagnostic.at;
+            }
             if (current && activeStates.has(current.state) && !state.jobs[row.id]) {
               current.progressDiagnostic = diagnostic;
               if (!transient) {

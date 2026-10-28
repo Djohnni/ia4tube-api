@@ -107,7 +107,8 @@ function createCalendarService({ store, source, media, grants, auth, identity, r
       title: "Foto ou vídeo enviado", date: row.date, time: row.time, timeZone: TIME_ZONE, scheduledAt: row.scheduledAt,
       caption: row.request.caption, revision: row.revision || 1,
       status: row.state === "attention" ? "attention" : "waiting_media",
-      statusLabel: row.state === "attention" ? LABELS.attention : "Preparando arquivo",
+      statusLabel: row.state === "attention" ? LABELS.attention : row.state === "accepted" && row.request.awaitUpload === true
+        ? "Recebendo e conferindo vídeo" : "Preparando arquivo",
       imageUrl: null, editable: true, automatic: false, destination: selectedTargets.length > 1 ? "multiple" : selectedTargets[0],
       formatsReady: false, previews: {}, publications: {}, username: null, error: row.errorCode || null, publication: null,
       sourceKind: "upload", selectedTargets, media: null, mediaReadAvailable: false,

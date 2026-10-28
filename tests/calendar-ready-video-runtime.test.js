@@ -2,13 +2,26 @@
 const test = require("node:test"), assert = require("node:assert/strict");
 const { loadReadyVideoConfig, resolveReadyVideoOwners, ENABLED, SUBJECTS } = require("../src/social/calendar/imports/ready-video-config");
 const { createImportAccessPolicy } = require("../src/social/calendar/imports/access-policy");
-const { createReadyVideoRuntime, restrictReadyVideoServices, createReadyVideoUploadCompletion, routeRunners } = require("../src/social/calendar/imports/ready-video-runtime");
+const { createReadyVideoRuntime, restrictReadyVideoServices, createReadyVideoUploadCompletion, createReadyVideoUploadReconciliation, routeRunners } = require("../src/social/calendar/imports/ready-video-runtime");
 const A = { companyId: "11111111-1111-4111-8111-111111111111", userId: "22222222-2222-4222-8222-222222222222", audience: "customers" };
 const B = { companyId: "33333333-3333-4333-8333-333333333333", userId: "44444444-4444-4444-8444-444444444444", audience: "customers" };
 const context = { authenticated: true, ...A };
 const enabled = () => ({ ENVIRONMENT: "production", PUBLIC_API_BASE_URL: "https://ia4tube-api.onrender.com",
   SOCIAL_PERSISTENCE_ENABLED: "true", SOCIAL_CALENDAR_ENABLED: "true", SOCIAL_INSTAGRAM_ENABLED: "true",
   META_APP_REVIEW_WINDOW_ENABLED: "false", [ENABLED]: "true", [SUBJECTS]: '["159911205989"]' });
+test("server reconciliation waits on absent or partial objects and still requires authoritative complete inspection", async () => {
+  const accessPolicy = createImportAccessPolicy({ mode: "ready_video", allowedOwners: [A] });
+  let parts = [], state = "uploading", completions = 0;
+  const record = () => ({ kind: "video", mimeType: "video/mp4", uploadMode: "single", partCount: 1, sizeBytes: 100, state, completedParts: parts });
+  const reconcile = createReadyVideoUploadReconciliation({ accessPolicy, upload: {
+    async resume() { return record(); }, async complete() { completions++; state = "verifying"; throw Object.assign(Error(), { code: "import_verification_pending" }); }
+  } });
+  assert.equal((await reconcile(context, { uploadId: "one" })).state, "uploading");
+  parts = [{ partNumber: 1, sizeBytes: 99 }]; await reconcile(context, { uploadId: "one" }); assert.equal(completions, 0);
+  parts[0].sizeBytes = 100; assert.equal(await reconcile(context, { uploadId: "one" }), null); assert.equal(completions, 1); assert.equal(state, "verifying");
+  state = "uploaded"; assert.equal((await reconcile(context, { uploadId: "one" })).state, "uploaded"); assert.equal(completions, 1);
+  await assert.rejects(reconcile({ authenticated: true, ...B }, { uploadId: "one" }), { code: "calendar_import_access_not_allowed" });
+});
 test("ready video is opt-in and never initializes infrastructure when disabled", async () => {
   assert.equal(loadReadyVideoConfig({}).enabled, false);
   assert.equal(loadReadyVideoConfig({ [ENABLED]: "false" }).enabled, false);

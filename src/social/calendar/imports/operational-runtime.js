@@ -42,11 +42,13 @@ function publicPilotStatus(read) {
 function createOperationalCalendarImportsRuntimeFactory({ enabled = false, preparation, resultStore, accessPolicy,
   upload, provider, uploadStore, transfer, verifyReadiness, catalog = null,
   localTransport = null, allowLocalTransportForTests = false, clock = Date.now, canAdmit = () => true, readPilotStatus = null,
-  onSubmissionsReady = () => {}, gcsProfile = null } = {}) {
+  onSubmissionsReady = () => {}, gcsProfile = null, reconcilePendingUpload = null, cancelPendingUpload = null } = {}) {
   const local = isLocalPublicationTransport(localTransport);
   if (localTransport !== null && (!local || allowLocalTransportForTests !== true)) fail();
   if (typeof enabled !== "boolean" || typeof clock !== "function" || typeof canAdmit !== "function" ||
-      readPilotStatus !== null && typeof readPilotStatus !== "function") fail();
+      readPilotStatus !== null && typeof readPilotStatus !== "function" ||
+      reconcilePendingUpload !== null && typeof reconcilePendingUpload !== "function" ||
+      cancelPendingUpload !== null && typeof cancelPendingUpload !== "function") fail();
   const factory = async ({ store, grants, secret, publicOrigin, connectionForPrincipal, connectionForGrant, connectionForSubmission, publicationAllowedForPrincipal, readGeneratedArt, defaultCaptionForPrincipal } = {}) => {
     if (!enabled) return null;
     if (!isCalendarStore(store) || !isImportUploadPostgresStore(uploadStore) || !isImportAccessPolicy(accessPolicy) ||
@@ -88,7 +90,7 @@ function createOperationalCalendarImportsRuntimeFactory({ enabled = false, prepa
       resolveDefaultCaption: context => {
         if (typeof defaultCaptionForPrincipal !== "function") fail();
         return defaultCaptionForPrincipal(principalFor(context));
-      }, catalog, localTransport, clock }) : null;
+      }, reconcilePendingUpload, cancelPendingUpload, catalog, localTransport, clock }) : null;
     const preview = createPrivateImportPreviewService({ preparation, resultStore, accessPolicy, enabled: true, allowVolatileForTests: local });
     const preparedMedia = createPreparedCalendarMedia({ store, grants, preparation, resultStore, accessPolicy,
       resolveConnection, secret, publicOrigin, clock, enabled: true, localTransport });
@@ -117,7 +119,9 @@ function createOperationalCalendarImportsRuntimeFactory({ enabled = false, prepa
           } catch { /* Unavailable rights are never advertised as an approved track. */ }
         }
         return { enabled: true, localSimulation: local, readyForProduction: false,
-          scheduling: { enabled: true, localSimulation: local, directSubmission: Boolean(submissions) },
+          scheduling: { enabled: true, localSimulation: local, directSubmission: Boolean(submissions),
+            ...(submissions && reconcilePendingUpload && gcsProfile && context.mediaTransport === "gcs-parts-v1"
+              ? { beforeUploadSubmission: true } : {}) },
           upload: { origin: publicOrigin, chunkBytes: LIMITS.chunkBytes, maxImageBytes: LIMITS.imageBytes, maxVideoBytes: LIMITS.videoBytes,
             ...(gcsProfile && context.mediaTransport === "gcs-parts-v1" ? {gcs:{...gcsProfile,singleRequestVideo:true}} : {}) },
           preparation: { enabled: true, minVideoSeconds: 3, maxVideoSeconds: 60, photoMusicSeconds: LIMITS.photoClipSeconds }, musicTracks,

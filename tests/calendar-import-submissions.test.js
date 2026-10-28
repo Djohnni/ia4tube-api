@@ -8,17 +8,20 @@ const { createImportAccessPolicy } = require("../src/social/calendar/imports/acc
 const { publicationPlan, previewDigest, selection } = require("../src/social/calendar/imports/policy");
 const { dateTime, changeJob } = require("../src/social/calendar/model");
 const hash = text => crypto.createHash("sha256").update(text).digest("hex");
-async function fixture(owner = null) {
+async function fixture(owner = null, beforeUpload = false) {
   const context = owner || { authenticated: true, companyId: crypto.randomUUID(), userId: crypto.randomUUID() }, assetId = crypto.randomUUID(), uploadId = crypto.randomUUID();
   const simulation = createLocalCalendarSimulationStore({ enabled: true }), store = simulation.store;
-  const source = { kind: "image", format: "jpeg", decoded: true, frames: 1, sha256: hash("source"), size: 1024, width: 1080, height: 1350 };
-  const chosen = selection({ kind: "image", targets: ["feed"], audioMode: "none" });
+  const source = { kind: beforeUpload ? "video" : "image", format: beforeUpload ? "mp4" : "jpeg", decoded: true, frames: 1,
+    sha256: hash("source"), size: 1024, width: 1080, height: 1350,
+    ...(beforeUpload ? { durationSeconds: 3, hasAudio: true, colorMode: "sdr" } : {}) };
+  const chosen = selection(beforeUpload ? { kind: "video", targets: ["reel"], audioMode: "original" } : { kind: "image", targets: ["feed"], audioMode: "none" });
   const plan = publicationPlan(chosen, source), part = plan.deliveries[0];
-  const variants = { feed: { sha256: hash("feed"), sourceSha256: source.sha256, mimeType: "image/jpeg", width: part.width, height: part.height,
-    size: 2048, hasAudio: false, audioMode: "none", durationSeconds: null } };
+  const variants = { [part.target]: { sha256: hash("feed"), sourceSha256: source.sha256, mimeType: beforeUpload ? "video/mp4" : "image/jpeg", width: part.width, height: part.height,
+    size: 2048, hasAudio: beforeUpload, audioMode: beforeUpload ? "original" : "none", durationSeconds: beforeUpload ? 3 : null } };
   const result = { resultRef: crypto.randomUUID(), previewDigest: previewDigest(plan, variants), testOnly: false, variants,
-    objects: { feed: { objectKey: hash("object"), objectVersion: crypto.randomUUID(), sha256: variants.feed.sha256, sizeBytes: 2048 } } };
-  const upload = { uploadId, assetId, ...context, state: "uploaded", sha256: source.sha256 };
+    objects: { [part.target]: { objectKey: hash("object"), objectVersion: crypto.randomUUID(), sha256: variants[part.target].sha256, sizeBytes: 2048 } } };
+  const upload = { uploadId, assetId, ...context, state: beforeUpload ? "uploading" : "uploaded", sha256: source.sha256,
+    ...(beforeUpload ? { kind: "video", mimeType: "video/mp4", storageProvider: "gcs", uploadMode: "single", sizeBytes: 1024 } : {}) };
   const uploadStore = { update: async (_company, fn) => fn({ uploads: { [uploadId]: upload } }) };
   let now = dateTime("2026-09-23", "12:00"), prep = null, requested = 0, crashAfterPrepare = false;
   const clock = () => now, key = crypto.randomBytes(32), grants = createCalendarGrants(key, clock);
@@ -34,18 +37,141 @@ async function fixture(owner = null) {
     },
     async snapshot() { return { ...context, assetId, mediaRevision: 1, currentRevision: 1, state: "ready", ready: true, selection: chosen, plan, result }; }
   };
+  let probes = 0, completeObject = false;
   const options = { store, uploadStore, preparation, grants, accessPolicy, clock, resolveConnection: async () => ({ binding, accountType: "business" }),
+    ...(beforeUpload ? { reconcilePendingUpload: async () => { probes++; if (completeObject) upload.state = "uploaded"; } } : {}),
     resolveDefaultCaption: () => "Conheça a empresa sintética e acompanhe nosso conteúdo.",
     resolveSubmissionConnection: async grant => { assert.equal(isVerifiedCalendarSubmission(grant), true); return { binding, accountType: "business" }; } };
   let service = createCalendarSubmissions(options);
-  const input = { assetId, uploadId, idempotencyKey: crypto.randomUUID(), expectedMediaRevision: 0, selection: chosen };
+  const input = { assetId, uploadId, idempotencyKey: crypto.randomUUID(), expectedMediaRevision: 0, selection: chosen, ...(beforeUpload ? { awaitUpload: true } : {}) };
   return { context, input, store, options, grants, result, binding, preparation, service: () => service,
     remount() { service = createCalendarSubmissions({ ...options, grants: createCalendarGrants(key, clock) }); },
+    upload, probes: () => probes, put() { completeObject = true; },
     ready() { prep = { assetId, uploadId, mediaRevision: 1, currentRevision: 1, state: "ready", ready: true }; },
     crash() { crashAfterPrepare = true; }, count: () => requested, advance: ms => { now += ms; },
     get: () => service.byKey(context, assetId, input.idempotencyKey),
     snapshot: () => store.update(context.companyId, state => state), progress: () => service.progress(context.companyId) };
 }
+test("before-upload intent waits across restart, probes every ten seconds initially, then prepares once without the phone", async () => {
+  const f = await fixture(null, true), accepted = await f.service().request(f.context, f.input);
+  assert.equal(accepted.state, "accepted"); assert.equal(accepted.uploadPending, true); assert.equal(f.count(), 0);
+  const original = structuredClone((await f.snapshot()).importSubmissions[accepted.id]);
+  for (let second = 0; second <= 49; second++) {
+    if (second) f.advance(1000);
+    f.remount(); await f.progress();
+  }
+  assert.equal(f.probes(), 5); assert.equal(f.count(), 0); assert.equal((await f.get()).errorCode, null);
+  f.put(); f.advance(1000); f.remount(); await f.progress();
+  assert.equal(f.probes(), 6); assert.equal(f.count(), 1); assert.equal((await f.get()).state, "preparing");
+  f.ready(); await Promise.all([f.progress(), f.progress()]);
+  const state = await f.snapshot(), final = await f.get();
+  assert.equal(final.state, "scheduled"); assert.equal(final.calendarItemId, accepted.id); assert.equal(final.uploadPending, false);
+  assert.equal(Object.keys(state.jobs).length, 1); assert.equal(Object.keys(state.importSubmissions).length, 1); assert.equal(f.count(), 1);
+  for (const key of ["request", "requestHash", "clientHash", "envelope", "id", "createdAt"]) assert.deepEqual(state.importSubmissions[accepted.id][key], original[key]);
+  validateCalendarSubmissions(state);
+});
+test("before-upload acceptance can lose its response, but key recovery and replay never create another intention", async () => {
+  const f = await fixture(null, true), originalStore = f.options.store;
+  let lose = true;
+  f.options.store = { async update(company, operation) {
+    const value = await originalStore.update(company, operation);
+    if (lose && value?.state === "accepted") { lose = false; throw Object.assign(Error("uncertain acknowledgement"), { statusCode: 503 }); }
+    return value;
+  } }; f.remount();
+  await assert.rejects(f.service().request(f.context, f.input), { statusCode: 503 });
+  const recovered = await f.get(); assert.equal(recovered.state, "accepted"); assert.equal(f.count(), 0); assert.equal(f.probes(), 0);
+  f.remount(); assert.equal((await f.service().request(f.context, f.input)).id, recovered.id);
+  assert.equal(Object.keys((await f.snapshot()).importSubmissions).length, 1);
+  await assert.rejects(f.service().request(f.context, { ...f.input, caption: "Changed" }), { code: "calendar_import_submission_idempotency_conflict" });
+  const legacy = { ...f.input }; delete legacy.awaitUpload;
+  await assert.rejects(f.service().request(f.context, legacy), { code: "calendar_import_submission_idempotency_conflict" });
+});
+test("a failure before early acceptance creates no intention and retry persists only the same requested ID", async () => {
+  const f = await fixture(null, true), store = f.options.store; let unavailable = true;
+  f.options.store = { update(company, operation) {
+    if (unavailable) { unavailable = false; throw Object.assign(Error(), { statusCode: 503 }); }
+    return store.update(company, operation);
+  } }; f.remount();
+  await assert.rejects(f.service().request(f.context, f.input), { statusCode: 503 });
+  assert.equal(Object.keys((await f.snapshot()).importSubmissions || {}).length, 0); assert.equal(f.probes(), 0);
+  const accepted = await f.service().request(f.context, f.input);
+  assert.equal((await f.service().request(f.context, f.input)).id, accepted.id);
+  assert.equal(Object.keys((await f.snapshot()).importSubmissions).length, 1);
+});
+test("cancelled early records with invalid authority settle safely and cannot starve a later accepted intention", async () => {
+  const f = await fixture(null, true); let cancellations = 0;
+  f.options.cancelPendingUpload = async () => { cancellations++; }; f.remount();
+  const abandoned = [];
+  for (let n = 0; n < 4; n++) {
+    const receipt = await f.service().request(f.context, { ...f.input, idempotencyKey: crypto.randomUUID() }); abandoned.push(receipt.id);
+    await f.store.update(f.context.companyId, state => { const row = state.importSubmissions[receipt.id]; row.state = "cancelled"; row.envelope = "invalid"; });
+  }
+  const accepted = await f.service().request(f.context, f.input);
+  await f.progress(); await f.progress();
+  const state = await f.snapshot();
+  assert.equal(cancellations, 0); assert.equal(f.probes(), 1); assert.equal(state.importSubmissions[accepted.id].state, "accepted");
+  for (const id of abandoned) {
+    assert.equal(state.importSubmissions[id].state, "cancelled");
+    assert.equal(state.importSubmissions[id].uploadCancellationSettledAt, f.options.clock());
+  }
+  assert.equal(f.upload.state, "uploading"); validateCalendarSubmissions(state);
+});
+test("before-upload refusal leaves no accepted order; old clients, unsupported modes and foreign owners remain refused", async () => {
+  const f = await fixture(null, true), legacy = { ...f.input }; delete legacy.awaitUpload;
+  await assert.rejects(f.service().request(f.context, legacy), { code: "calendar_import_submission_source_not_ready" });
+  for (const patch of [{ uploadMode: undefined }, { storageProvider: "render_disk" }, { kind: "image" }, { userId: crypto.randomUUID() }]) {
+    const saved = structuredClone(f.upload); Object.assign(f.upload, patch);
+    await assert.rejects(f.service().request(f.context, f.input), { code: "calendar_import_submission_source_not_ready" });
+    Object.assign(f.upload, saved);
+  }
+  f.options.reconcilePendingUpload = null; f.remount();
+  await assert.rejects(f.service().request(f.context, f.input), { code: "calendar_import_submission_await_upload_unavailable" });
+  assert.equal(Object.keys((await f.snapshot()).importSubmissions || {}).length, 0); assert.equal(f.count(), 0);
+});
+for (const state of ["cancelled", "cancel_pending", "rejected"]) test(`before-upload ${state} is terminal without preparing or creating a calendar job`, async () => {
+  const f = await fixture(null, true); await f.service().request(f.context, f.input); f.upload.state = state;
+  await f.progress(); const receipt = await f.get();
+  assert.equal(receipt.state, state === "rejected" ? "attention" : "cancelled"); assert.equal(receipt.uploadPending, false);
+  assert.equal(Object.keys((await f.snapshot()).jobs).length, 0); assert.equal(f.count(), 0); assert.equal(f.probes(), 0);
+});
+test("before-upload cancellation of a calendar card aborts only its unfinished transfer and never completed or inspecting bytes", async () => {
+  for (const uploadState of ["uploading", "uploaded", "verifying"]) {
+    const f = await fixture(null, true); let cancelled = 0;
+    f.options.cancelPendingUpload = async () => { cancelled++; f.upload.state = "cancelled"; }; f.remount();
+    const accepted = await f.service().request(f.context, f.input);
+    await f.store.update(f.context.companyId, state => { state.importSubmissions[accepted.id].state = "cancelled"; });
+    f.upload.state = uploadState;
+    await f.progress(); f.advance(60000); f.remount(); await f.progress();
+    assert.equal(cancelled, uploadState === "uploading" ? 1 : 0);
+    assert.equal(f.upload.state, uploadState === "uploading" ? "cancelled" : uploadState);
+    assert.equal(Object.keys((await f.snapshot()).jobs).length, 0); assert.equal(f.count(), 0);
+    validateCalendarSubmissions(await f.snapshot());
+  }
+});
+test("before-upload explicit expired date and changed source stay visible as attention without remote probes", async () => {
+  for (const reason of ["date", "sha", "authority"]) {
+    const f = await fixture(null, true);
+    if (reason === "date") f.input.schedule = { date: "2026-09-23", time: "12:01" };
+    await f.service().request(f.context, f.input);
+    if (reason === "date") f.advance(61000);
+    if (reason === "sha") f.upload.sha256 = hash("different");
+    if (reason === "authority") f.advance(180 * 86400000 + 1);
+    await f.progress(); assert.equal((await f.get()).state, "attention");
+    assert.equal(f.count(), 0); assert.equal(f.probes(), 0);
+  }
+});
+test("an abandoned early transfer backs off to thirty then sixty seconds without losing its accepted intent", async () => {
+  const f = await fixture(null, true); const accepted = await f.service().request(f.context, f.input);
+  for (let index = 0; index < 42; index++) {
+    await Promise.all([f.progress(), f.progress()]);
+    const row = (await f.snapshot()).importSubmissions[accepted.id];
+    assert.equal(row.uploadCheckCount, index + 1); assert.equal(f.probes(), index + 1);
+    const delay = index < 30 ? 10000 : index < 40 ? 30000 : 60000;
+    assert.equal(row.uploadNextCheckAt - f.options.clock(), delay);
+    f.advance(delay); f.remount();
+  }
+  assert.equal((await f.get()).state, "accepted"); assert.equal(f.count(), 0);
+});
 async function httpFixture(t) {
   const express = require("express"), jwt = require("jsonwebtoken");
   const { createProductionSession, ISSUER, AUDIENCE } = require("../src/social/production-session");

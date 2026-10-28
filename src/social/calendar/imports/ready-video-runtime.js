@@ -55,6 +55,25 @@ function createReadyVideoUploadCompletion({ upload, accessPolicy, waitMs = 12000
     finally { expired = true; clearTimeout(timer); }
   };
 }
+// Called only for an owner-bound durable calendar intention. A successful PUT
+// followed by a closed phone still reaches the existing authoritative inspector.
+function createReadyVideoUploadReconciliation({ upload, accessPolicy }) {
+  return async (context, input) => {
+    accessPolicy.resolve(context);
+    const record = await upload.resume(context, input);
+    if (record.kind !== "video" || record.mimeType !== "video/mp4" || record.uploadMode !== "single" || record.partCount !== 1)
+      fail("original_mp4_required", 400);
+    if (record.state === "uploaded" || ["cancelled", "cancel_pending", "rejected"].includes(record.state)) return record;
+    if (record.state === "uploading" && (record.completedParts?.length !== 1 || record.completedParts[0].partNumber !== 1 ||
+        record.completedParts[0].sizeBytes !== record.sizeBytes)) return record;
+    if (!["uploading", "verifying"].includes(record.state)) return record;
+    try { return await upload.complete(context, input); }
+    catch (error) {
+      if (["import_upload_incomplete", "import_verification_pending"].includes(error.code)) return null;
+      throw error;
+    }
+  };
+}
 function routeRunners(entries, kind) {
   const check = kind === "inspect" ? isOperationalInspectionRunner : isOperationalPreparationRunner;
   if (!entries.length || entries.some(entry => !check(entry.runner))) fail("runner_invalid");
@@ -172,6 +191,8 @@ async function createReadyVideoRuntime({ env = process.env, tenantPool, capacity
     limiter: createSingleProcessTransferLimiter({ maxConcurrent: 1, maxPerCompany: 1 }) });
   const factory = createOperationalCalendarImportsRuntimeFactory({ enabled: true, preparation, resultStore, accessPolicy,
     upload, provider, uploadStore: store, transfer, clock, canAdmit, onSubmissionsReady: value => { submissions = value; },
+    reconcilePendingUpload: gcsTransport ? createReadyVideoUploadReconciliation({ upload: baseUpload, accessPolicy }) : null,
+    cancelPendingUpload: gcsTransport ? (context, input) => { accessPolicy.resolve(context); return baseUpload.cancel(context, input); } : null,
     gcsProfile:gcsTransport?{transport:"gcs-parts-v1",bucket:gcsTransport.bucketName,objectPrefix:gcsTransport.prefix}:null,
     async verifyReadiness() {
       await registry.verify(); await ledger.verify(); await guard.sample();
@@ -232,4 +253,4 @@ async function createReadyVideoRuntime({ env = process.env, tenantPool, capacity
       // Pools are caller-owned; never close the shared social pool here.
     } });
 }
-module.exports = { createReadyVideoRuntime, restrictReadyVideoServices, createReadyVideoUploadCompletion, routeRunners, ROOT };
+module.exports = { createReadyVideoRuntime, restrictReadyVideoServices, createReadyVideoUploadCompletion, createReadyVideoUploadReconciliation, routeRunners, ROOT };

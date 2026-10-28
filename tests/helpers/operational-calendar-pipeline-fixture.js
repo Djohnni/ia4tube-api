@@ -104,6 +104,9 @@ async function createOperationalCalendarPipelineFixture(t, options = {}) {
     const runtimeFactory = createOperationalCalendarImportsRuntimeFactory({ enabled: true, preparation: f.preparation, resultStore: f.preparedStore,
       accessPolicy: f.accessPolicy, upload: f.upload, provider: f.provider, uploadStore: f.store, transfer,
       catalog: f.catalog, localTransport: transport, allowLocalTransportForTests: true, clock: f.clock, canAdmit: options.canAdmit, readPilotStatus: options.readPilotStatus,gcsProfile:f.gcsProfile||null,
+      reconcilePendingUpload: options.beforeUploadSubmission && f.gcsProfile
+        ? require("../../src/social/calendar/imports/ready-video-runtime").createReadyVideoUploadReconciliation({ upload: f.upload, accessPolicy: f.accessPolicy }) : null,
+      cancelPendingUpload: options.beforeUploadSubmission && f.gcsProfile ? (context, input) => f.upload.cancel(context, input) : null,
       async verifyReadiness() {
         assert.equal(await registry.verify(), true); assert.equal(await f.ledger.verify(), true);
         if (options.externalPrivateExecutor === true) {
