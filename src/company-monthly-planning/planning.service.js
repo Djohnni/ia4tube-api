@@ -4186,6 +4186,7 @@ function savePlanResult({ baseDir, planningId, payload = {}, pedidosDir = "", cl
     throw error;
   }
 
+  const editRegistration = externalEditRegistration(planning.edit_calendar);
   const plan = normalizePlanResultPayload(payload);
   const rawPostagens = Array.isArray(plan.postagens)
     ? plan.postagens
@@ -4193,7 +4194,7 @@ function savePlanResult({ baseDir, planningId, payload = {}, pedidosDir = "", cl
       ? plan.itens
       : [];
   const postagens = enrichPlanPhotoReferences(planning, rawPostagens);
-  if (planning.edit_calendar && postagens.length !== 1)
+  if (editRegistration && postagens.length !== 1)
     throw Object.assign(new Error("O vinculo do Edit recebe um video por pedido."), { code: "edit_calendar_registration_invalid", statusCode: 400 });
 
   if (!postagens.length) {
@@ -4218,11 +4219,14 @@ function savePlanResult({ baseDir, planningId, payload = {}, pedidosDir = "", cl
     throw error;
   }
 
-  const scheduleResolution = distributePlanningCalendarSchedule({
-    baseDir,
-    planning,
-    pedidosDir,
-    postagens
+  if (editRegistration) {
+    // Edit already carries the customer's explicit selection. It is not a
+    // monthly schedule suggestion, including when production finishes late.
+    try { require("../social/calendar/model").dateTime(postagens[0].data_sugerida, postagens[0].horario_sugerido); }
+    catch { throw Object.assign(new Error("Data ou horario do Edit invalido."), { code: "edit_calendar_schedule_invalid", statusCode: 400 }); }
+  }
+  const scheduleResolution = editRegistration ? { postagens, adjustments: [] } : distributePlanningCalendarSchedule({
+    baseDir, planning, pedidosDir, postagens
   });
   const adjustedPostagens = scheduleResolution.postagens;
   const now = new Date().toISOString();
