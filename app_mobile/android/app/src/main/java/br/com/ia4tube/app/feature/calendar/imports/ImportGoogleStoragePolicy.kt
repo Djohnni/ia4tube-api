@@ -10,7 +10,8 @@ import java.time.format.ResolverStyle
 import kotlin.math.abs
 
 /** Only a profile supplied by authenticated iA4tube metadata, never a user-selected host. */
-class ImportGoogleStorageProfile internal constructor(val bucket: String, val objectPrefix: String) {
+class ImportGoogleStorageProfile internal constructor(val bucket: String, val objectPrefix: String,
+    val singleRequestVideo: Boolean = false) {
     override fun toString() = "ImportGoogleStorageProfile(redacted)"
 }
 
@@ -32,7 +33,8 @@ internal object ImportGoogleStoragePolicy {
         val bucket = json.getString("bucket")
         require(bucket.matches(Regex("[a-z0-9][a-z0-9._-]{1,61}[a-z0-9]")) && !bucket.matches(Regex("[0-9.]+")))
         require(json.getString("objectPrefix") == "ready-video/")
-        return ImportGoogleStorageProfile(bucket, "ready-video/")
+        val single = if (json.has("singleRequestVideo")) json.get("singleRequestVideo").also { require(it is Boolean) } as Boolean else false
+        return ImportGoogleStorageProfile(bucket, "ready-video/", single)
     }
 
     fun parseDownload(json: JSONObject, profile: ImportGoogleStorageProfile?, nowEpochMs: Long = System.currentTimeMillis()): ImportGoogleDownloadGrant = try {

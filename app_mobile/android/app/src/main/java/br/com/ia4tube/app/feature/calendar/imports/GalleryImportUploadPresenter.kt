@@ -116,11 +116,17 @@ internal fun galleryImportUploadPresentation(view: ImportUploadRunView, busy: Bo
         else -> "Não foi possível concluir esta etapa. Confira o envio existente antes de tentar novamente."
     }
     val progress = if (uploaded) 1f else if (view.totalBytes > 0) (view.acknowledgedBytes.toDouble() / view.totalBytes).coerceIn(0.0, 1.0).toFloat() else null
-    val partSize = if (view.totalBytes > 0) minOf(GalleryImportPolicy.CHUNK_BYTES.toLong(), view.totalBytes - view.acknowledgedBytes) else 0
+    val partSize = if (view.totalBytes > 0) minOf((state?.upload?.ticket?.chunkBytes ?: GalleryImportPolicy.CHUNK_BYTES).toLong(), view.totalBytes - view.acknowledgedBytes) else 0
     val partProgress = if (busy && partSize > 0 && view.transferredPartBytes > 0)
         (view.transferredPartBytes.toDouble() / partSize).coerceIn(0.0, 1.0).toFloat() else null
     return GalleryImportUploadUiState(title, detail, summary, progress, partProgress, busy, actions, error)
 }
+
+/** Display bytes in transit for a whole-video PUT without treating them as confirmed receipts. */
+internal fun galleryImportUploadDisplayProgress(view: ImportUploadRunView, ui: GalleryImportUploadUiState): Float? =
+    if (view.state?.upload?.ticket?.singleRequestVideo == true && ui.busy &&
+        view.status == ImportUploadRunStatus.TRANSFERRING) ui.currentPartProgress ?: ui.confirmedProgress
+    else ui.confirmedProgress
 
 /** One session-bound presenter. StateFlow callbacks are safe from any transport thread. */
 internal class GalleryImportUploadPresenter(

@@ -11,6 +11,10 @@ object GalleryImportPolicy {
     const val PREPARED_DURATION_TOLERANCE_MS = 250L
     const val PREPARED_VIDEO_MAX_DURATION_MS = VIDEO_MAX_DURATION_MS + PREPARED_DURATION_TOLERANCE_MS
     const val CHUNK_BYTES = 5 * 1024 * 1024
+    /** Only new, explicitly negotiated Google video uploads may use one whole-file part. */
+    fun validUploadGeometry(kind: ImportMediaKind, bytes: Long, chunkBytes: Int, singleRequestVideo: Boolean): Boolean =
+        if (singleRequestVideo) kind == ImportMediaKind.VIDEO && bytes in 1..VIDEO_MAX_BYTES && chunkBytes.toLong() == bytes
+        else chunkBytes == CHUNK_BYTES
     private val sha256Pattern = Regex("[a-fA-F0-9]{64}")
     private val identifierPattern = Regex("[A-Za-z0-9_-]{1,128}")
 

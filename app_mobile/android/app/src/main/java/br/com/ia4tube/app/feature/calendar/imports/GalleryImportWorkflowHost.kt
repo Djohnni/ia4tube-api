@@ -227,7 +227,7 @@ internal fun GalleryImportWorkflowContent(view: ImportWorkflowView, runtime: Gal
                     Text("Fotos: JPEG, PNG ou WebP até 32 MiB. Vídeos: MP4 ou MOV até 100 MiB e 60 segundos.", style = MaterialTheme.typography.bodySmall)
                 }
                 uploadUi.selectedSummary?.takeIf { draft != null && !musicOnly }?.let { Text(it) }
-                uploadUi.confirmedProgress?.takeIf { draft?.upload?.serverVerified != true }?.let {
+                galleryImportUploadDisplayProgress(view.upload, uploadUi)?.takeIf { draft?.upload?.serverVerified != true }?.let {
                     LinearProgressIndicator(progress = { it }, modifier = Modifier.fillMaxWidth())
                 }
                 if (draft?.upload?.serverVerified != true) uploadUi.error?.let { Text(it, color = Color(0xFFFFB4AB)) }

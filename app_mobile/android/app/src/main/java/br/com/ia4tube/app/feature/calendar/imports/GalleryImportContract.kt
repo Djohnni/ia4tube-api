@@ -54,7 +54,8 @@ data class ImportUploadTicket(
     val assetId: String,
     val selectionSha256: String,
     val totalBytes: Long,
-    val chunkBytes: Int = GalleryImportPolicy.CHUNK_BYTES
+    val chunkBytes: Int = GalleryImportPolicy.CHUNK_BYTES,
+    val singleRequestVideo: Boolean = false
 )
 
 /** Local indices are zero-based; the multipart server's partNumber is one-based. */

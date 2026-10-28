@@ -50,7 +50,8 @@ data class ImportUploadRecord(
     val phase: ImportServerPhase,
     val verifiedSha256: String?,
     val completedParts: List<ImportPartReceipt> = emptyList(),
-    val errorCode: String? = null
+    val errorCode: String? = null,
+    val singleRequestVideo: Boolean = false
 )
 
 data class ImportPartAuthorization(
@@ -66,7 +67,8 @@ class ImportPartGrant internal constructor(
     internal val headers: Map<String, String>,
     val sizeBytes: Int,
     val expiresAtEpochMs: Long,
-    internal val sessionBinding: String
+    internal val sessionBinding: String,
+    internal val googleStorage: Boolean = false
 ) { override fun toString() = "ImportPartGrant(redacted)" }
 
 data class ImportPartChecksums(val sha256: String, val md5Base64: String, val sha256Base64: String) {
@@ -152,12 +154,23 @@ class GalleryImportHttpApi internal constructor(
             preparation.getBoolean("enabled"), scheduling.getBoolean("enabled"), local, tracks, directSubmission, googleStorage).also { currentCapabilities = it }
     }
 
-    suspend fun start(owner: ImportOwner, media: ImportSelection, idempotencyKey: String): ImportUploadRecord = guarded(ImportMediaStage.UPLOAD_START, true) {
+    suspend fun start(owner: ImportOwner, media: ImportSelection, idempotencyKey: String): ImportUploadRecord =
+        startWithMode(owner, media, idempotencyKey, false)
+
+    suspend fun startSingleVideo(owner: ImportOwner, media: ImportSelection, idempotencyKey: String): ImportUploadRecord =
+        startWithMode(owner, media, idempotencyKey, true)
+
+    private suspend fun startWithMode(owner: ImportOwner, media: ImportSelection, idempotencyKey: String,
+        singleRequestVideo: Boolean): ImportUploadRecord = guarded(ImportMediaStage.UPLOAD_START, true) {
         ensureOwner(owner)
         require(GalleryImportPolicy.validateSelection(media) == null && idempotencyKey.matches(Regex("[A-Za-z0-9_-]{8,128}")))
-        val record = parseRecord(request(ImportMediaStage.UPLOAD_START, "/uploads", JSONObject().put("idempotencyKey", idempotencyKey).put("kind", media.kind.wire)
-            .put("mimeType", media.mimeType).put("sizeBytes", media.byteCount).put("sha256", media.sha256.lowercase())).getJSONObject("upload"))
-        require(record.kind == media.kind && record.mimeType == media.mimeType && record.sizeBytes == media.byteCount)
+        require(!singleRequestVideo || media.kind == ImportMediaKind.VIDEO && currentCapabilities?.googleStorage?.singleRequestVideo == true)
+        val body = JSONObject().put("idempotencyKey", idempotencyKey).put("kind", media.kind.wire)
+            .put("mimeType", media.mimeType).put("sizeBytes", media.byteCount).put("sha256", media.sha256.lowercase())
+        if (singleRequestVideo) body.put("uploadMode", "single")
+        val record = parseRecord(request(ImportMediaStage.UPLOAD_START, "/uploads", body).getJSONObject("upload"))
+        require(record.kind == media.kind && record.mimeType == media.mimeType && record.sizeBytes == media.byteCount &&
+            record.singleRequestVideo == singleRequestVideo)
         record
     }
 
@@ -306,7 +319,7 @@ class GalleryImportHttpApi internal constructor(
             val signed = setOf("content-md5", "content-type") + headers.keys.filter { it == "x-goog-if-generation-match" }
             ImportGoogleStoragePolicy.validateSignedUrl(url, google, expires, now(), "PUT", signed)
         }
-        ImportPartGrant(url, headers.toMap(), authorization.sizeBytes, expires, sessionToken)
+        ImportPartGrant(url, headers.toMap(), authorization.sizeBytes, expires, sessionToken, google != null)
     }
 
     /** A successful PUT is not a receipt: callers must observe parts with authenticated resume(). */
@@ -336,12 +349,61 @@ class GalleryImportHttpApi internal constructor(
         Unit
     }
 
+    /** Exactly one fixed-length PUT. Small socket writes are one HTTP body, never separate uploads. */
+    internal suspend fun putWholeFile(grant: ImportPartGrant, file: ImportWholeVideoFile,
+        onProgress: (Long, Long) -> Unit = { _, _ -> }): Unit = guarded(ImportMediaStage.MEDIA_PUT, true) {
+        ensureSession()
+        require(grant.googleStorage && currentCapabilities?.googleStorage != null &&
+            grant.sessionBinding == sessionToken && grant.expiresAtEpochMs > now() && file.sizeBytes == grant.sizeBytes)
+        require(grant.headers["content-md5"] == file.checksums.md5Base64)
+        val body = object : RequestBody() {
+            override fun contentType() = "application/octet-stream".toMediaType()
+            override fun contentLength() = file.sizeBytes.toLong()
+            override fun isOneShot() = true
+            override fun writeTo(sink: BufferedSink) {
+                val buffer = ByteArray(64 * 1024)
+                val sha = MessageDigest.getInstance("SHA-256")
+                val md5 = MessageDigest.getInstance("MD5")
+                try {
+                    file.open().use { input ->
+                        var total = 0
+                        while (total < file.sizeBytes) {
+                            ensureSession()
+                            val count = input.read(buffer, 0, minOf(buffer.size, file.sizeBytes - total))
+                            if (count <= 0) throw IOException("Selected video length changed")
+                            sha.update(buffer, 0, count); md5.update(buffer, 0, count)
+                            sink.write(buffer, 0, count); total += count
+                            onProgress(total.toLong(), file.sizeBytes.toLong())
+                        }
+                        ensureSession()
+                        if (input.read() != -1 ||
+                            Base64.getEncoder().encodeToString(sha.digest()) != file.checksums.sha256Base64 ||
+                            Base64.getEncoder().encodeToString(md5.digest()) != file.checksums.md5Base64)
+                            throw IOException("Selected video checksum changed")
+                    }
+                } catch (_: Exception) {
+                    // A provider exception can contain a content URI; only a closed message leaves this body.
+                    throw IOException("Could not transfer selected video")
+                } finally { buffer.fill(0) }
+            }
+        }
+        val request = Request.Builder().url(grant.url).put(body)
+        grant.headers.forEach { (key, value) -> request.header(key, value) }
+        execute(ImportMediaStage.MEDIA_PUT, mediaClient, request.build(), true, parseJson = false)
+        Unit
+    }
+
     private fun parseRecord(json: JSONObject): ImportUploadRecord {
         val kind = when (json.getString("kind")) { "image" -> ImportMediaKind.IMAGE; "video" -> ImportMediaKind.VIDEO; else -> error("Invalid media kind") }
         val mime = json.getString("mimeType")
         require(mime in if (kind == ImportMediaKind.IMAGE) setOf("image/jpeg", "image/png", "image/webp") else setOf("video/mp4", "video/quicktime"))
         val size = json.getLong("sizeBytes"); require(size in 1..if (kind == ImportMediaKind.IMAGE) GalleryImportPolicy.IMAGE_MAX_BYTES else GalleryImportPolicy.VIDEO_MAX_BYTES)
-        val chunkBytes = json.getInt("chunkBytes"); require(chunkBytes == GalleryImportPolicy.CHUNK_BYTES)
+        val single = if (json.has("uploadMode")) {
+            val mode = json.get("uploadMode"); require(mode == "single"); true
+        } else false
+        val chunkBytes = json.getInt("chunkBytes")
+        require(GalleryImportPolicy.validUploadGeometry(kind, size, chunkBytes, single))
+        require(!single || currentCapabilities?.googleStorage != null)
         val partCount = json.getInt("partCount"); require(partCount == ((size + chunkBytes - 1) / chunkBytes).toInt())
         val phase = ImportServerPhase.fromWire(json.getString("state")) ?: throw ImportApiFailure("import_response_invalid")
         require(!json.getBoolean("ready"))
@@ -362,7 +424,7 @@ class GalleryImportHttpApi internal constructor(
         }.sortedBy { it.part }
         require(parts.map { it.part }.distinct().size == parts.size)
         val errorCode = json.optString("errorCode").takeIf { !json.isNull("errorCode") && it.matches(Regex("[a-z0-9_]{1,80}")) }
-        return ImportUploadRecord(uuid(json.getString("uploadId")), uuid(json.getString("assetId")), kind, mime, size, chunkBytes, partCount, phase, verifiedSha, parts, errorCode)
+        return ImportUploadRecord(uuid(json.getString("uploadId")), uuid(json.getString("assetId")), kind, mime, size, chunkBytes, partCount, phase, verifiedSha, parts, errorCode, single)
     }
 
     private fun requireOrigin(origin: HttpUrl) {
@@ -486,6 +548,7 @@ class GalleryImportHttpApi internal constructor(
                                 require(output.size() + count <= 256 * 1024); output.write(buffer, 0, count) }
                             JSONObject(String(output.toByteArray(), Charsets.UTF_8)).also { require(it.getBoolean("ok")) }
                         }
+                        diagnostics.completed(stage, started, response.code)
                         if (continuation.isActive) continuation.resume(result)
                     } catch (error: ImportApiFailure) {
                         val protected = reportFailure(stage, started, error, ImportMediaFailureReason.RESPONSE_PARSE, response.code)

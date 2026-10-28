@@ -10,7 +10,7 @@ internal enum class ImportMediaStage {
     PART_AUTHORIZE, PART_RESOLVE, MEDIA_PUT, PREPARATION, PREPARATION_STATUS, PREVIEW_METADATA,
     CALENDAR_SUBMISSION, CALENDAR_SUBMISSION_STATUS, SCHEDULE_AVAILABILITY, SCHEDULE, SCHEDULE_STATUS,
     GENERATED_SOURCE, CHECKPOINT, TRANSFER_VALIDATION, UPLOAD_RESPONSE_VALIDATION, RECEIPT_VALIDATION,
-    SOURCE_INSPECTION, SOURCE_PART_READ, PART_CHECKSUM
+    SOURCE_INSPECTION, SOURCE_PART_READ, PART_CHECKSUM, SINGLE_FILE_CHECKSUM
 }
 
 internal enum class ImportMediaFailureReason {
@@ -33,9 +33,17 @@ internal data class ImportMediaDiagnosticEvent(
 
 internal class ImportMediaDiagnostics(
     private val sink: (ImportMediaDiagnosticEvent) -> Unit = { Log.w(TAG, it.fixedMessage()); Unit },
-    private val monotonicMs: () -> Long = { System.nanoTime() / 1_000_000 }
+    private val monotonicMs: () -> Long = { System.nanoTime() / 1_000_000 },
+    private val timingSink: (ImportMediaTimingEvent) -> Unit = { Log.i(TAG, it.fixedMessage()); Unit }
 ) {
     fun started(): Long = try { monotonicMs() } catch (_: Throwable) { 0L }
+
+    fun completed(stage: ImportMediaStage, startedMs: Long, httpStatus: Int? = null) {
+        try {
+            timingSink(ImportMediaTimingEvent(stage, httpStatus?.takeIf { it in 100..599 },
+                (monotonicMs() - startedMs).coerceIn(0, 300_000)))
+        } catch (_: Throwable) { /* Timings cannot affect a transfer. */ }
+    }
 
     /** Diagnostics can never change an upload result, including a failing Android log implementation. */
     fun failed(stage: ImportMediaStage, reason: ImportMediaFailureReason, startedMs: Long, httpStatus: Int? = null) {
@@ -54,4 +62,11 @@ internal class ImportMediaDiagnostics(
             else -> ImportMediaFailureReason.NETWORK_FAILURE
         }
     }
+}
+
+/** Successful stage duration only: no file, URL, account, caption, token or identifier. */
+internal data class ImportMediaTimingEvent(val stage: ImportMediaStage, val httpStatus: Int?, val elapsedMs: Long) {
+    init { require(httpStatus == null || httpStatus in 100..599); require(elapsedMs in 0..300_000) }
+    fun fixedMessage() = "stage=${stage.name} outcome=COMPLETED" +
+        (httpStatus?.let { " httpStatus=$it" } ?: "") + " elapsedMs=$elapsedMs"
 }

@@ -64,7 +64,8 @@ class GalleryImportUploadCoordinator internal constructor(
     }
     private class Run(val binding: Binding, val api: GalleryImportUploadTransport, val machine: GalleryImportMachine,
                       var checkpoint: ImportDurableCheckpoint?, var diagnosticStarted: Long,
-                      var diagnosticStage: ImportMediaStage = ImportMediaStage.CHECKPOINT)
+                      var diagnosticStage: ImportMediaStage = ImportMediaStage.CHECKPOINT,
+                      var singleRequestAvailable: Boolean = false)
     private val tracks = authorizedTracks.toList()
     private val mutex = Mutex()
     private val publicationLock = Any()
@@ -139,6 +140,7 @@ class GalleryImportUploadCoordinator internal constructor(
         val selected = draft(run).state.selection
         diagnosticStage(run, ImportMediaStage.SOURCE_INSPECTION)
         requireSameSource(selected, source.inspect(uri)); guard(run)
+        if (draft(run).state.upload!!.ticket.singleRequestVideo) return@operation transferWholeVideo(run, record, uri, selected)
         var count = 0
         while (draft(run).state.upload!!.acknowledgedBytes < selected.byteCount && count < maxParts) {
             guard(run); currentCoroutineContext().ensureActive()
@@ -173,6 +175,38 @@ class GalleryImportUploadCoordinator internal constructor(
         }
         if (draft(run).state.upload!!.complete) finishOnce(run)
         else { persist(run, draft(run).copy(transferPaused = true)); emit(run, ImportUploadRunStatus.PAUSED) }
+    }
+
+    private suspend fun transferWholeVideo(run: Run, record: ImportUploadRecord, uri: String,
+        selected: ImportSelection): ImportUploadRunView {
+        val upload = draft(run).state.upload!!
+        requireThat(record.singleRequestVideo && record.partCount == 1 && upload.nextPart == 0 &&
+            upload.acknowledgedBytes == 0L, "import_response_binding_invalid")
+        diagnosticStage(run, ImportMediaStage.SINGLE_FILE_CHECKSUM)
+        val file = withContext(io) {
+            val context = currentCoroutineContext()
+            ImportWholeVideoFile.inspect(selected.byteCount.toInt(), selected.sha256,
+                { source.openWholeFile(uri) }, { context.ensureActive(); guard(run) })
+        }
+        diagnostics.completed(ImportMediaStage.SINGLE_FILE_CHECKSUM, run.diagnosticStarted)
+        guard(run)
+        diagnosticStage(run, ImportMediaStage.PART_AUTHORIZE)
+        val authorization = mutate(run) { run.api.authorizePart(run.binding.owner, record, 1, file.checksums) }
+        diagnosticStage(run, ImportMediaStage.PART_RESOLVE)
+        val grant = mutate(run) { run.api.resolvePart(run.binding.owner, authorization, file.checksums) }
+        diagnosticStage(run, ImportMediaStage.MEDIA_PUT)
+        mutate(run) { run.api.putWholeFile(grant, file) { transferred, total ->
+            guard(run)
+            requireThat(total == selected.byteCount && transferred in 0..total, "import_progress_invalid")
+            emit(run, ImportUploadRunStatus.TRANSFERRING, transferred = transferred)
+        } }
+        diagnosticStage(run, ImportMediaStage.UPLOAD_RESUME)
+        val observed = mutate(run) { run.api.resume(run.binding.owner, record.uploadId) }
+        observe(run, observed, receiptsAuthoritative = true)
+        if (observed.phase != ImportServerPhase.UPLOADING) return showRecord(run, observed)
+        val receipt = draft(run).state.upload!!.receipts.singleOrNull()
+        requireThat(receipt?.sha256 == file.checksums.sha256 && receipt.bytes == file.sizeBytes, "import_part_not_observed")
+        return finishOnce(run)
     }
 
     /** One reconciliation initiated by a caller; pending verification has a finite foreground wait. */
@@ -237,9 +271,16 @@ class GalleryImportUploadCoordinator internal constructor(
         val checkpoint = draft(run)
         if (checkpoint.state.upload == null) {
             requireThat(checkpoint.state.phase == ImportPhase.EDITING, "import_upload_state_invalid")
-            persist(run, checkpoint.copy(uploadStartIssued = true))
+            // An old uncertain start must replay its original legacy body. A new
+            // choice is durably recorded before the POST, including a lost response.
+            val single = checkpoint.singleVideoStartRequested || (!checkpoint.uploadStartIssued &&
+                checkpoint.state.selection.kind == ImportMediaKind.VIDEO && run.singleRequestAvailable)
+            persist(run, checkpoint.copy(uploadStartIssued = true, singleVideoStartRequested = single))
             diagnosticStage(run, ImportMediaStage.UPLOAD_START)
-            val started = mutate(run) { run.api.start(run.binding.owner, checkpoint.state.selection, checkpoint.uploadStartIdempotencyKey) }
+            val started = mutate(run) {
+                if (single) run.api.startSingleVideo(run.binding.owner, checkpoint.state.selection, checkpoint.uploadStartIdempotencyKey)
+                else run.api.start(run.binding.owner, checkpoint.state.selection, checkpoint.uploadStartIdempotencyKey)
+            }
             observe(run, started)
             if (started.phase != ImportServerPhase.UPLOADING) return started
         }
@@ -295,13 +336,17 @@ class GalleryImportUploadCoordinator internal constructor(
         val checkpoint = draft(run)
         val selected = checkpoint.state.selection
         requireThat(record.kind == selected.kind && record.mimeType == selected.mimeType && record.sizeBytes == selected.byteCount &&
-            record.chunkBytes == GalleryImportPolicy.CHUNK_BYTES && record.partCount == ((selected.byteCount + record.chunkBytes - 1) / record.chunkBytes).toInt(),
+            GalleryImportPolicy.validUploadGeometry(selected.kind, selected.byteCount, record.chunkBytes, record.singleRequestVideo) &&
+            record.partCount == ((selected.byteCount + record.chunkBytes - 1) / record.chunkBytes).toInt(),
+            "import_response_binding_invalid")
+        requireThat(checkpoint.state.upload != null || record.singleRequestVideo == checkpoint.singleVideoStartRequested,
             "import_response_binding_invalid")
         if (checkpoint.state.upload == null) applied(run, ImportEvent.UploadStarted(checkpoint.state.revision,
-            ImportUploadTicket(record.uploadId, record.assetId, selected.sha256, selected.byteCount, record.chunkBytes),
+            ImportUploadTicket(record.uploadId, record.assetId, selected.sha256, selected.byteCount, record.chunkBytes, record.singleRequestVideo),
             if (record.phase == ImportServerPhase.UPLOADING) ImportServerPhase.UPLOADING else ImportServerPhase.CREATED))
         val upload = run.machine.snapshot()!!.upload!!
-        requireThat(upload.ticket.uploadId == record.uploadId && upload.ticket.assetId == record.assetId, "import_response_binding_invalid")
+        requireThat(upload.ticket.uploadId == record.uploadId && upload.ticket.assetId == record.assetId &&
+            upload.ticket.chunkBytes == record.chunkBytes && upload.ticket.singleRequestVideo == record.singleRequestVideo, "import_response_binding_invalid")
         if (record.phase == ImportServerPhase.UPLOADED) {
             requireThat(record.verifiedSha256 == selected.sha256.lowercase(), "import_verified_checksum_invalid")
             if (run.machine.snapshot()!!.phase != ImportPhase.UPLOADED) {
@@ -329,6 +374,7 @@ class GalleryImportUploadCoordinator internal constructor(
         guard(run)
         val capabilities = run.api.capabilities(); guard(run)
         requireThat(capabilities.enabled && capabilities.identity == run.binding.owner, "import_owner_unavailable")
+        run.singleRequestAvailable = capabilities.googleStorage?.singleRequestVideo == true
         run.checkpoint?.state?.selection?.let { selected ->
             val maximum = if (selected.kind == ImportMediaKind.IMAGE) capabilities.maxImageBytes else capabilities.maxVideoBytes
             requireThat(selected.byteCount <= maximum, "import_current_size_limit")

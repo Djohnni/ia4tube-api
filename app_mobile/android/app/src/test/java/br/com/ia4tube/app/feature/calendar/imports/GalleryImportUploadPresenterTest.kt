@@ -21,6 +21,24 @@ class GalleryImportUploadPresenterTest {
     private fun view(phase: ImportPhase = ImportPhase.EDITING, status: ImportUploadRunStatus = ImportUploadRunStatus.PAUSED,
                      verified: Boolean = false) = ImportUploadRunView(draft(phase, verified), status, totalBytes = 12)
 
+    @Test fun wholeVideoShowsTransferredPercentageWithoutClaimingServerReceipt() {
+        val media = ImportSelection("video-1", ImportMediaKind.VIDEO, "video/mp4", 22_000_000, 1080, 1920, 16_000, "a".repeat(64))
+        val state = GalleryImportState(owner, "draft-1", media,
+            ImportConfiguration(setOf(ImportTarget.REEL), ImportAudioMode.ORIGINAL), phase = ImportPhase.UPLOADING,
+            upload = ImportUploadProgress(ImportUploadTicket("upload-1", "asset-1", media.sha256, media.byteCount,
+                media.byteCount.toInt(), true)))
+        val view = ImportUploadRunView(state, ImportUploadRunStatus.TRANSFERRING, transferredPartBytes = 11_000_000, totalBytes = media.byteCount)
+        val ui = galleryImportUploadPresentation(view, true, true, true, true)
+        assertEquals(0.5f, galleryImportUploadDisplayProgress(view, ui))
+        assertEquals(0f, ui.confirmedProgress)
+        assertEquals(0L, state.upload!!.acknowledgedBytes); assertFalse(state.upload!!.serverVerified)
+        val paused = view.copy(status = ImportUploadRunStatus.PAUSED)
+        assertEquals(0f, galleryImportUploadDisplayProgress(paused, galleryImportUploadPresentation(paused, false, true, true, true)))
+        val legacy = view.copy(state = state.copy(upload = ImportUploadProgress(state.upload!!.ticket.copy(
+            chunkBytes = GalleryImportPolicy.CHUNK_BYTES, singleRequestVideo = false))))
+        assertEquals(0f, galleryImportUploadDisplayProgress(legacy, galleryImportUploadPresentation(legacy, true, true, true, true)))
+    }
+
     private inner class Fixture(scope: CoroutineScope) {
         var activeOwner: ImportOwner? = owner
         var token = "synthetic-token-not-for-display"

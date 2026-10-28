@@ -15,7 +15,8 @@ data class ImportDurableCheckpoint(
     val preparationBaseRevision: Long = 0,
     val scheduleBinding: ImportScheduleBinding? = null,
     val generatedSource: ImportGeneratedSourceIntent? = null,
-    val calendarSubmission: ImportCalendarSubmissionIntent? = null
+    val calendarSubmission: ImportCalendarSubmissionIntent? = null,
+    val singleVideoStartRequested: Boolean = false
 ) {
     override fun toString() = "ImportDurableCheckpoint(generation=$generation, content=redacted)"
 }
@@ -43,6 +44,7 @@ object ImportCheckpointCodec {
             .put("preparationBaseRevision", value.preparationBaseRevision)
             .put("calendarItemId", state.calendarItemId ?: JSONObject.NULL)
             .put("failure", state.failure?.name ?: JSONObject.NULL)
+        if (value.singleVideoStartRequested) json.put("singleVideoStartRequested", true)
         value.preparationIntent?.let { intent ->
             json.put("preparationIntent", JSONObject().put("idempotencyKey", intent.idempotencyKey)
                 .put("sourceRevision", intent.sourceRevision).put("expectedMediaRevision", intent.expectedMediaRevision)
@@ -65,7 +67,9 @@ object ImportCheckpointCodec {
         state.upload?.let { progress ->
             json.put("upload", JSONObject().put("uploadId", progress.ticket.uploadId).put("assetId", progress.ticket.assetId)
                 .put("selectionSha256", progress.ticket.selectionSha256).put("totalBytes", progress.ticket.totalBytes)
-                .put("chunkBytes", progress.ticket.chunkBytes).put("serverVerified", progress.serverVerified).put("receipts", JSONArray(progress.receipts.map { part ->
+                .put("chunkBytes", progress.ticket.chunkBytes).also {
+                    if (progress.ticket.singleRequestVideo) it.put("singleRequestVideo", true)
+                }.put("serverVerified", progress.serverVerified).put("receipts", JSONArray(progress.receipts.map { part ->
                     JSONObject().put("part", part.part).put("bytes", part.bytes).put("sha256", part.sha256)
                 })))
         } ?: json.put("upload", JSONObject.NULL)
@@ -90,7 +94,7 @@ object ImportCheckpointCodec {
         require(json.getInt("schema") == 1)
         requireKeys(json, setOf("schema", "generation", "owner", "draftId", "revision", "phase", "selection", "configuration",
             "selectedContentUri", "uploadStartIdempotencyKey", "uploadStartIssued", "transferPaused", "cancelRequested",
-            "calendarItemId", "failure", "upload", "prepared", "scheduleIntent", "preparationIntent", "preparationBaseRevision", "scheduleBinding", "generatedSource", "calendarSubmission"))
+            "calendarItemId", "failure", "upload", "prepared", "scheduleIntent", "preparationIntent", "preparationBaseRevision", "scheduleBinding", "generatedSource", "calendarSubmission", "singleVideoStartRequested"))
         val savedOwner = json.getJSONObject("owner")
         require(savedOwner.getString("companyId") == owner.companyId && savedOwner.getString("userId") == owner.userId)
         val media = json.getJSONObject("selection")
@@ -102,7 +106,7 @@ object ImportCheckpointCodec {
         val upload = json.optJSONObject("upload")?.let { value ->
             val parts = value.getJSONArray("receipts"); require(parts.length() <= 20)
             ImportUploadProgress(ImportUploadTicket(value.getString("uploadId"), value.getString("assetId"), value.getString("selectionSha256"),
-                value.getLong("totalBytes"), value.getInt("chunkBytes")), (0 until parts.length()).map { index ->
+                value.getLong("totalBytes"), value.getInt("chunkBytes"), value.strictOptionalBoolean("singleRequestVideo", false)), (0 until parts.length()).map { index ->
                 val part = parts.getJSONObject(index); ImportPartReceipt(part.getInt("part"), part.getInt("bytes"), part.getString("sha256"))
             }, value.optBoolean("serverVerified", false))
         }
@@ -144,7 +148,7 @@ object ImportCheckpointCodec {
                         requireKeys(schedule, setOf("date", "time", "timeZone"))
                         ImportCalendarSchedule(schedule.getString("date"), schedule.getString("time"), schedule.getString("timeZone"))
                     })
-            }).also(::validate)
+            }, json.strictOptionalBoolean("singleVideoStartRequested", false)).also(::validate)
     }
 
     fun validate(checkpoint: ImportDurableCheckpoint) {
@@ -153,6 +157,7 @@ object ImportCheckpointCodec {
             require(uri.length <= 8192 && uri.startsWith("content://") && uri.none { it == '\r' || it == '\n' || it == '\u0000' })
         }
         val state = checkpoint.state
+        require(!checkpoint.singleVideoStartRequested || checkpoint.uploadStartIssued && state.selection.kind == ImportMediaKind.VIDEO)
         checkpoint.calendarSubmission?.let { intent ->
             ImportCalendarSubmissionProtocol.validate(intent)
             require(intent.sourceRevision == state.revision && state.upload?.serverVerified == true &&
@@ -181,7 +186,8 @@ object ImportCheckpointCodec {
         require(GalleryImportPolicy.validateConfiguration(state.selection.kind, state.configuration, structuralTracks) == null)
         state.upload?.let { upload ->
             require(GalleryImportPolicy.validId(upload.ticket.uploadId) && GalleryImportPolicy.validId(upload.ticket.assetId))
-            require(upload.ticket.totalBytes == state.selection.byteCount && upload.ticket.chunkBytes == GalleryImportPolicy.CHUNK_BYTES)
+            require(upload.ticket.totalBytes == state.selection.byteCount &&
+                GalleryImportPolicy.validUploadGeometry(state.selection.kind, upload.ticket.totalBytes, upload.ticket.chunkBytes, upload.ticket.singleRequestVideo))
             require(upload.ticket.selectionSha256.equals(state.selection.sha256, true) && upload.receipts.size <= 20)
             var acknowledged = 0L
             upload.receipts.forEachIndexed { index, receipt ->

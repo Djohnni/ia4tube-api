@@ -47,7 +47,7 @@ class GalleryImportUploadCoordinatorTest {
         }
     }
     private fun hash(bytes: ByteArray) = MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it) }
-    private inner class Fixture(val root: File, size: Int = 17) {
+    private inner class Fixture(val root: File, size: Int = 17, val video: Boolean = false) {
         val owner = ImportOwner(UUID.randomUUID().toString(), UUID.randomUUID().toString())
         var activeOwner: ImportOwner? = owner
         var token = "synthetic-session-secret"
@@ -60,17 +60,26 @@ class GalleryImportUploadCoordinatorTest {
         val views = mutableListOf<ImportUploadRunView>()
         val diagnosticEvents = mutableListOf<ImportMediaDiagnosticEvent>()
         var throwingDiagnostics = false
+        var singleSupported = false
+        val startModes = mutableListOf<Boolean>()
+        var wholeStreams = 0
         val source = object : GalleryImportUploadSource {
             override fun retain(uri: String) = sourceAvailable
             override suspend fun inspect(uri: String): ImportSelection {
                 inspectCount++; if (!sourceAvailable) throw ImportSourceFailure()
-                return ImportSelection(UUID.randomUUID().toString(), ImportMediaKind.IMAGE, "image/png", content.size.toLong(), 10, 10, null, hash(content))
+                return ImportSelection(UUID.randomUUID().toString(), if (video) ImportMediaKind.VIDEO else ImportMediaKind.IMAGE,
+                    if (video) "video/mp4" else "image/png", content.size.toLong(), 10, 10, if (video) 16000L else null, hash(content))
             }
             override suspend fun part(uri: String, selection: ImportSelection, index: Int): ByteArray {
                 if (!sourceAvailable) throw ImportSourceFailure()
                 readParts.add(index)
                 val start = index * GalleryImportPolicy.CHUNK_BYTES
                 return content.copyOfRange(start, minOf(content.size, start + GalleryImportPolicy.CHUNK_BYTES))
+            }
+            override fun openWholeFile(uri: String): java.io.InputStream {
+                if (!sourceAvailable) throw ImportSourceFailure()
+                wholeStreams++
+                return content.inputStream()
             }
         }
         var enabled = true
@@ -104,17 +113,22 @@ class GalleryImportUploadCoordinatorTest {
             override suspend fun capabilities(): ImportCapabilities {
                 capabilityHook?.invoke()
                 return ImportCapabilities(enabled, capabilityOwner, "https://ia4tube-api.onrender.com",
-                    maxImageBytes = GalleryImportPolicy.IMAGE_MAX_BYTES, maxVideoBytes = GalleryImportPolicy.VIDEO_MAX_BYTES)
+                    maxImageBytes = GalleryImportPolicy.IMAGE_MAX_BYTES, maxVideoBytes = GalleryImportPolicy.VIDEO_MAX_BYTES,
+                    googleStorage = if (singleSupported) ImportGoogleStorageProfile("synthetic-bucket", "ready-video/", true) else null)
             }
-            override suspend fun start(owner: ImportOwner, media: ImportSelection, key: String): ImportUploadRecord {
+            override suspend fun start(owner: ImportOwner, media: ImportSelection, key: String) = startMode(owner, media, key, false)
+            override suspend fun startSingleVideo(owner: ImportOwner, media: ImportSelection, key: String) = startMode(owner, media, key, true)
+            private suspend fun startMode(owner: ImportOwner, media: ImportSelection, key: String, single: Boolean): ImportUploadRecord {
                 val saved = store.read(owner)!!
                 assertTrue(saved.uploadStartIssued); assertEquals(key, saved.uploadStartIdempotencyKey)
+                assertEquals(single, saved.singleVideoStartRequested); startModes.add(single)
                 startKeys.add(key); startHook?.invoke()
                 if (serverRecord == null) {
                     creations++
                     serverRecord = ImportUploadRecord(UUID.randomUUID().toString(), UUID.randomUUID().toString(), media.kind, media.mimeType,
-                        media.byteCount, GalleryImportPolicy.CHUNK_BYTES,
-                        ((media.byteCount + GalleryImportPolicy.CHUNK_BYTES - 1) / GalleryImportPolicy.CHUNK_BYTES).toInt(), initialPhase, null)
+                        media.byteCount, if (single) media.byteCount.toInt() else GalleryImportPolicy.CHUNK_BYTES,
+                        if (single) 1 else ((media.byteCount + GalleryImportPolicy.CHUNK_BYTES - 1) / GalleryImportPolicy.CHUNK_BYTES).toInt(),
+                        initialPhase, null, singleRequestVideo = single)
                 }
                 if (loseStart) { loseStart = false; throw ImportApiFailure("synthetic_ack_lost", resultUncertain = true) }
                 return serverRecord!!
@@ -144,6 +158,10 @@ class GalleryImportUploadCoordinatorTest {
                 afterPutHook?.invoke()
                 progress(bytes.size.toLong(), bytes.size.toLong())
                 if (losePut) { losePut = false; throw ImportApiFailure("synthetic_ack_lost", resultUncertain = true) }
+            }
+            override suspend fun putWholeFile(grant: ImportPartGrant, file: ImportWholeVideoFile, progress: (Long, Long) -> Unit) {
+                assertEquals(file.sizeBytes, content.size)
+                file.open().use { putPart(grant, it.readBytes(), progress) }
             }
             override suspend fun complete(owner: ImportOwner, uploadId: String): ImportUploadRecord {
                 completions++; assertEquals(ImportPhase.VERIFYING, store.read(owner)!!.state.phase)
@@ -180,6 +198,66 @@ class GalleryImportUploadCoordinatorTest {
         fun saved() = store.read(owner)!!
     }
     private fun fixture(size: Int = 17) = Fixture(temporary.newFolder(), size)
+
+    @Test fun twentyTwoMegabyteVideoUsesOneWholeTransferWithOneReceiptAndNoPartArray() = runBlocking {
+        val f = Fixture(temporary.newFolder(), 22_225_691, true).apply { singleSupported = true }
+        val coordinator = f.coordinator()
+        coordinator.select(uri, ImportConfiguration(setOf(ImportTarget.REEL), ImportAudioMode.ORIGINAL))
+        val result = coordinator.transfer()
+        assertEquals(ImportUploadRunStatus.UPLOADED, result.status)
+        assertEquals(listOf(true), f.startModes); assertEquals(1, f.puts)
+        assertTrue(f.readParts.isEmpty()); assertEquals(2, f.wholeStreams)
+        assertEquals(22_225_691, result.state!!.upload!!.ticket.chunkBytes)
+        assertTrue(result.state.upload!!.ticket.singleRequestVideo)
+        assertEquals(1, result.state.upload!!.receipts.size)
+        assertEquals(f.content.size, f.received[1]!!.size)
+        assertTrue(f.saved().singleVideoStartRequested)
+    }
+
+    @Test fun fullVideoLostReceiptReconcilesSameUploadWithoutAnotherPut() = runBlocking {
+        val f = Fixture(temporary.newFolder(), 6_000_000, true).apply { singleSupported = true; losePut = true }
+        val coordinator = f.coordinator()
+        coordinator.select(uri, ImportConfiguration(setOf(ImportTarget.REEL), ImportAudioMode.ORIGINAL))
+        assertEquals(ImportUploadRunStatus.RECONCILIATION_REQUIRED, coordinator.transfer().status)
+        assertEquals(1, f.puts)
+        f.sourceAvailable = false
+        assertEquals(ImportUploadRunStatus.UPLOADED, f.coordinator().transfer().status)
+        assertEquals(1, f.puts); assertEquals(1, f.creations)
+    }
+
+    @Test fun fullVideoLostStartPreservesOptInAcrossProcessRestart() = runBlocking {
+        val f = Fixture(temporary.newFolder(), 6_000_000, true).apply { singleSupported = true; loseStart = true }
+        val coordinator = f.coordinator()
+        coordinator.select(uri, ImportConfiguration(setOf(ImportTarget.REEL), ImportAudioMode.ORIGINAL))
+        assertEquals(ImportUploadRunStatus.RECONCILIATION_REQUIRED, coordinator.transfer().status)
+        assertTrue(f.saved().singleVideoStartRequested)
+        assertEquals(ImportUploadRunStatus.UPLOADED, f.coordinator().transfer().status)
+        assertEquals(listOf(true, true), f.startModes)
+        assertEquals(1, f.creations); assertEquals(1, f.puts)
+    }
+
+    @Test fun oldUncertainVideoStartDoesNotChangeRequestWhenNewCapabilityAppears() = runBlocking {
+        val f = Fixture(temporary.newFolder(), 6_000_000, true).apply { loseStart = true }
+        val coordinator = f.coordinator()
+        coordinator.select(uri, ImportConfiguration(setOf(ImportTarget.REEL), ImportAudioMode.ORIGINAL))
+        assertEquals(ImportUploadRunStatus.RECONCILIATION_REQUIRED, coordinator.transfer().status)
+        f.singleSupported = true
+        assertEquals(ImportUploadRunStatus.UPLOADED, f.coordinator().transfer().status)
+        assertEquals(listOf(false, false), f.startModes); assertEquals(2, f.puts)
+        assertFalse(f.saved().state.upload!!.ticket.singleRequestVideo)
+        assertEquals(0, f.wholeStreams)
+    }
+
+    @Test fun legacyPartialVideoResumesSameGeometryAfterSingleModeBecomesAvailable() = runBlocking {
+        val f = Fixture(temporary.newFolder(), 6_000_000, true)
+        val coordinator = f.coordinator()
+        coordinator.select(uri, ImportConfiguration(setOf(ImportTarget.REEL), ImportAudioMode.ORIGINAL))
+        assertEquals(ImportUploadRunStatus.PAUSED, coordinator.transfer(maxParts = 1).status)
+        f.singleSupported = true
+        assertEquals(ImportUploadRunStatus.UPLOADED, f.coordinator().transfer().status)
+        assertEquals(listOf(false), f.startModes); assertEquals(2, f.puts)
+        assertEquals(listOf(0, 1), f.readParts)
+    }
 
     @Test fun selectionPersistsIntentButDoesNotStartAndFiniteTransferOnlyMarksVerifiedUpload() = runBlocking {
         val f = fixture(); val coordinator = f.coordinator()

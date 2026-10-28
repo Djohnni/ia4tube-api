@@ -10,6 +10,7 @@ import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
 import java.security.MessageDigest
+import java.io.InputStream
 import java.util.UUID
 
 class ImportSourceFailure : Exception("Não foi possível ler este arquivo. Selecione novamente uma foto JPEG, PNG ou WebP, ou um vídeo MP4/MOV compatível.")
@@ -18,6 +19,12 @@ class ImportSourceFailure : Exception("Não foi possível ler este arquivo. Sele
 class AndroidImportSource(context: Context) {
     private val application = context.applicationContext
     private val resolver = application.contentResolver
+
+    /** A fresh bounded-memory stream over only the picker-selected URI. Never copies a whole video to RAM. */
+    internal fun openWholeFile(uri: Uri): InputStream = try {
+        requireUri(uri)
+        resolver.openInputStream(uri) ?: throw ImportSourceFailure()
+    } catch (_: Exception) { throw ImportSourceFailure() }
 
     fun retainReadPermission(uri: Uri): Boolean = try {
         requireUri(uri)

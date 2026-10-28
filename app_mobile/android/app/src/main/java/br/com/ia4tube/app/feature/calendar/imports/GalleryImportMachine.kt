@@ -132,7 +132,8 @@ class GalleryImportMachine(
                 if (state.phase != ImportPhase.EDITING) return reject(ImportRejection.INVALID_PHASE)
                 val ticket = event.ticket
                 if (!GalleryImportPolicy.validId(ticket.uploadId) || !GalleryImportPolicy.validId(ticket.assetId) ||
-                    ticket.totalBytes != state.selection.byteCount || ticket.chunkBytes != GalleryImportPolicy.CHUNK_BYTES ||
+                    ticket.totalBytes != state.selection.byteCount ||
+                    !GalleryImportPolicy.validUploadGeometry(state.selection.kind, ticket.totalBytes, ticket.chunkBytes, ticket.singleRequestVideo) ||
                     !ticket.selectionSha256.equals(state.selection.sha256, true)) return reject(ImportRejection.INVALID_TICKET)
                 if (event.serverPhase !in setOf(ImportServerPhase.CREATED, ImportServerPhase.UPLOADING))
                     return reject(ImportRejection.INVALID_CONFIRMATION)
