@@ -339,6 +339,9 @@ function createInstagramPublicationConnector(options = {}) {
     INSTAGRAM_PUBLICATION_POLL_ATTEMPTS;
   const pollIntervalMs = options.pollIntervalMs ??
     INSTAGRAM_PUBLICATION_POLL_INTERVAL_MS;
+  // Only the calendar's exact imported MP4 opts into deferred processing errors.
+  // Observation remains bounded by its persisted calendar counter, not a POST retry.
+  const processingVideoMediaId = options.processingVideoMediaId ?? null;
   const expectedCompanyId = options.expectedCompanyId ||
     CONTROLLED_GATE4_COMPANY_ID;
   const expectedUserId = options.expectedUserId || CONTROLLED_GATE4_USER_ID;
@@ -391,6 +394,8 @@ function createInstagramPublicationConnector(options = {}) {
     typeof authorizePublication !== "function" ||
     typeof authorizePublishedCandidate !== "function" ||
     typeof allowOperationReferenceReconciliation !== "boolean" ||
+    (processingVideoMediaId !== null &&
+      (typeof processingVideoMediaId !== "string" || !/^calendar-prepared-v1:[a-f0-9]{64}$/.test(processingVideoMediaId))) ||
     !Number.isSafeInteger(reconciliationLookbackMs) ||
     reconciliationLookbackMs < 0 ||
     reconciliationLookbackMs > INSTAGRAM_PUBLICATION_RECONCILIATION_LOOKBACK_MS ||
@@ -845,6 +850,10 @@ function createInstagramPublicationConnector(options = {}) {
             break;
           }
           if (["ERROR", "EXPIRED"].includes(status)) {
+            if (prepared && owned.mimeType === "video/mp4" && owned.mediaId === processingVideoMediaId) {
+              return Object.freeze({ outcome: "provider_confirming",
+                reconciliationReference: containerReference("created", containerId) });
+            }
             return Object.freeze({ outcome: "failed_permanent" });
           }
           if (attempt + 1 < pollAttempts) await sleep(pollIntervalMs);
@@ -967,6 +976,10 @@ function createInstagramPublicationConnector(options = {}) {
             try {
               const status = await getContainerStatus(accessToken, container[2]);
               if (["ERROR", "EXPIRED"].includes(status)) {
+        if (processingVideoMediaId !== null && publication.mediaReference === processingVideoMediaId) {
+                  return Object.freeze({ outcome: "provider_confirming",
+                    reconciliationReference: providerReference });
+                }
                 return Object.freeze({ outcome: "failed_permanent" });
               }
               if (status === "PUBLISHED") {

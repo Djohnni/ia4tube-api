@@ -39,6 +39,8 @@ function createCalendarPublisher({ config, connectorStore, connectorAudit, crede
       enabledProviders: ["instagram"], companyAllowlist: [context.companyId] } });
     registry.register(createInstagramPublicationConnector({ config, store: connectorStore, credentials, destination: job.target || "feed",
       ...(job.sourceKind === "upload" || job.mediaKind === "video" ? { pollAttempts: 1 } : {}),
+      ...(job.sourceKind === "upload" && descriptor.mimeType === "video/mp4"
+        ? { processingVideoMediaId: descriptor.mediaId } : {}),
       media: scopedMedia, transport, authorizeContext: candidate => candidate === context && allowed(candidate),
       authorizeConnection: connection => connection.account?.externalId === job.authorization.binding.externalId &&
         (job.target === "story" ? connection.account?.accountType === "business" : ["business", "creator"].includes(connection.account?.accountType)),

@@ -45,7 +45,8 @@ async function createOperationalCalendarPipelineFixture(t, options = {}) {
   const originalSource = { key: "synthetic-plan:existing", planningId: "synthetic-existing-plan", orderId: "synthetic-existing-order",
     ...slot(f.clock(), 2), caption: "Arte existente preservada", imageReady: true, version: "1" };
   const key = crypto.randomBytes(48).toString("hex"), containers = new Map(), confirmed = new Map(), providerCalls = [], sourcePaths = [];
-  let current, base, nextId = 17900000000000000n, fault = null, externalGate = true, connectionGate = true;
+  let current, base, nextId = 17900000000000000n, fault = null, externalGate = true, connectionGate = true, containerStatus = "FINISHED";
+  const containerReads = [];
   const connectorContext = (verifiedPrincipal = principal) => createConnectorContext({ principal: verifiedPrincipal, provider: "instagram", environment: "production", correlationId: crypto.randomUUID(), auditEventId: crypto.randomUUID() });
   const reply = value => ({ status: 200, headers: { get: () => "application/json" }, arrayBuffer: async () => Buffer.from(JSON.stringify(value)) });
   const transport = createLocalPublicationTransport(async (url, request) => {
@@ -76,7 +77,10 @@ async function createOperationalCalendarPipelineFixture(t, options = {}) {
       if (fault === `unknown_publish_${record.target}`) { fault = null; throw new Error("synthetic-response-lost-after-publish"); }
       return reply({ id: mediaId });
     }
-    if (containers.has(id)) return reply({ id, status_code: containers.get(id).publishedMediaId ? "PUBLISHED" : "FINISHED" });
+    if (containers.has(id)) {
+      const status = containers.get(id).publishedMediaId ? "PUBLISHED" : containerStatus;
+      containerReads.push({ id, status }); return reply({ id, status_code: status });
+    }
     const record = confirmed.get(id); assert.ok(record, "Provider read must name a known simulated media ID");
     return reply({ id, media_type: record.target === "feed" ? "IMAGE" : "VIDEO",
       media_product_type: record.target === "story" ? "STORY" : record.target === "reel" ? "REELS" : "FEED",
@@ -154,6 +158,7 @@ async function createOperationalCalendarPipelineFixture(t, options = {}) {
   const request = (route, options = {}) => fetch(base + route, { ...options, headers: { Authorization: `Bearer ${token}`, ...options.headers } });
   return Object.assign(f, { claims, otherClaims, context, otherContext, original, originalSource, originals, token, otherToken, auth, session, base, providerCalls, sourcePaths, seeded,
     current: () => current, request, setProviderFault: value => { fault = value; }, setFixtureGate: value => { externalGate = value; },
+    containerReads, setProviderContainerStatus: value => { assert.ok(["FINISHED", "ERROR", "EXPIRED", "IN_PROGRESS"].includes(value)); containerStatus = value; },
     setFixtureConnectionGate: value => { connectionGate = value; },
     inputFor: (ready, extra = {}) => ({ assetId: ready.assetId, mediaRevision: ready.mediaRevision, previewDigest: ready.status.previewDigest,
       idempotencyKey: crypto.randomUUID(), ...slot(f.clock()), caption: "Conteúdo sintético local", automatic: true, confirmed: true, ...extra }),

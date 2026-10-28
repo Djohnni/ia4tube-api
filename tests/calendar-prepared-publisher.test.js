@@ -9,7 +9,7 @@ const { createPublicationIntent } = require("../src/social/publication/connectio
 const { loadInstagramOAuthConfig } = require("../src/social/oauth/instagram-config");
 const { preparedPublicationDescriptor } = require("../src/social/calendar/imports/publication-descriptor");
 const { createLocalPublicationTransport } = require("../src/social/calendar/imports/publication-test-transport");
-function fixture({ target = "reel", mimeType = "video/mp4", caption = "Legenda exata iA4tube", mode = "ok", change = {}, shareToFeed = target === "reel" } = {}) {
+function fixture({ target = "reel", mimeType = "video/mp4", caption = "Legenda exata iA4tube", mode = "ok", change = {}, shareToFeed = target === "reel", deferVideoProcessing = false } = {}) {
   const { context } = fixtureContext(), pool = createMemoryPool(context);
   const store = createPostgresConnectorStore({ pool, publicationBindingRequired: true });
   const origin = "https://ia4tube-api.onrender.com", posts = [], reads = [];
@@ -45,7 +45,8 @@ function fixture({ target = "reel", mimeType = "video/mp4", caption = "Legenda e
       return reply({ id: publishing ? "18000000000000001" : "17900000000000001" });
     }
     reads.push(url);
-    if (url.includes("17900000000000001")) return reply({ status_code: currentMode === "publish-unknown" && posts.some(value => value.pathname.endsWith("/media_publish")) ? "PUBLISHED" : "FINISHED" });
+    if (url.includes("17900000000000001")) return reply({ status_code: currentMode === "container-error" ? "ERROR" : currentMode === "container-expired" ? "EXPIRED"
+      : currentMode === "publish-unknown" && posts.some(value => value.pathname.endsWith("/media_publish")) ? "PUBLISHED" : "FINISHED" });
     if (currentMode === "confirm-unknown") throw new Error("Synthetic unavailable confirmation");
     return reply({ id: "18000000000000001", timestamp: "2026-09-13T00:00:00Z",
       media_product_type: currentMode === "wrong-product" ? "FEED" : target === "story" ? "STORY" : target === "reel" ? "REELS" : "FEED",
@@ -53,6 +54,7 @@ function fixture({ target = "reel", mimeType = "video/mp4", caption = "Legenda e
   });
   const connector = createInstagramPublicationConnector({ config, store, media, transport, destination: target, timeoutMs: 20,
     pollAttempts: 1, pollIntervalMs: 0, authorizeContext: value => value === context,
+    ...(deferVideoProcessing ? { processingVideoMediaId: descriptor.mediaId } : {}),
     authorizeConnection: () => true, authorizePublicationRequest: () => true, authorizePublication: () => true,
     allowOperationReferenceReconciliation: false, authorizePublishedCandidate: () => false,
     credentials: { async withDecryptedCredential(_input, action) { const token = Buffer.from("synthetic-local-token");
@@ -65,12 +67,47 @@ function fixture({ target = "reel", mimeType = "video/mp4", caption = "Legenda e
     mediaId: descriptor.mediaId, mediaMetadataDigest: descriptor.metadataDigest, caption });
   const input = { ...Object.fromEntries(["operationId", "publicationId", "clientRequestId"].map(key => [key, intent[key]])),
     connectionId: binding.connectionId, binding, caption, image: { mediaId: descriptor.mediaId, mimeType, metadataDigest: descriptor.metadataDigest } };
-  return { context, service, store, input, intent, posts, reads, descriptor, job, setMode(value) { currentMode = value; },
+  return { context, service, store, pool, input, intent, posts, reads, descriptor, job, setMode(value) { currentMode = value; },
     publish: () => service.publishPreparedMedia(context, input),
-    async observe() { const row = await store.scope(context).getPublicationDetails(intent.publicationId);
-      return service.getPublicationStatus(context, { publicationId: intent.publicationId, operationId: crypto.randomUUID(), binding,
+    async observe(operationId = crypto.randomUUID()) { const row = await store.scope(context).getPublicationDetails(intent.publicationId);
+      return service.getPublicationStatus(context, { publicationId: intent.publicationId, operationId, binding,
         providerReference: row.reconciliationReference }); } };
 }
+
+for (const mode of ["container-error", "container-expired"]) test(`opted-in MP4 retains its exact container after ${mode}, then publishes once`, async () => {
+  const f = fixture({ mode, deferVideoProcessing: true });
+  const created = "igc:created:17900000000000001";
+  assert.equal((await f.publish()).state, "provider_confirming");
+  const operationId = crypto.randomUUID();
+  assert.equal((await f.observe(operationId)).reconciliationReference, created);
+  assert.equal(f.posts.length, 1);
+  const before = f.reads.length; f.setMode("ok");
+  assert.equal((await f.observe(operationId)).reconciliationReference, created, "Same operation keeps its immutable cached result");
+  assert.equal(f.reads.length, before);
+  assert.equal((await f.observe()).reconciliationReference, "igc:armed:17900000000000001", "A fresh operation checks the provider again");
+  assert.equal((await f.observe()).state, "published");
+  assert.equal((await f.store.scope(f.context).getPublicationDetails(f.intent.publicationId)).state, "published");
+  await f.publish(); assert.equal(f.posts.length, 2, "Exactly one create and one publish, including repeated publication requests");
+  assert.equal(f.posts.filter(value => value.pathname.endsWith("/media_publish")).length, 1);
+});
+
+for (const [target, mimeType] of [["feed", "image/jpeg"], ["story", "image/jpeg"], ["reel", "video/mp4"]]) {
+  test(`without opt-in, ${target}/${mimeType} retains the existing terminal processing-error policy`, async () => {
+    const f = fixture({ target, mimeType, mode: "container-error" });
+    assert.equal((await f.publish()).state, "failed_permanent");
+    assert.equal(f.posts.length, 1);
+  });
+}
+
+test("a revoked binding blocks opted-in video observation without losing the container or creating another POST", async () => {
+  const f = fixture({ mode: "container-error", deferVideoProcessing: true });
+  await f.publish(); const before = f.reads.length;
+  f.pool.state.connection.revision++;
+  await assert.rejects(f.observe(), { code: "publication_binding_conflict" });
+  assert.equal(f.reads.length, before); assert.equal(f.posts.length, 1);
+  const saved = await f.store.scope(f.context).getPublicationDetails(f.intent.publicationId);
+  assert.equal(saved.state, "provider_confirming"); assert.equal(saved.reconciliationReference, "igc:created:17900000000000001");
+});
 test("Reel without Feed keeps explicit false through descriptor and provider without another publication", async () => {
   const f = fixture({ target: "reel", mimeType: "video/mp4", shareToFeed: false });
   assert.equal(f.job.assets.reel.shareToFeed, false); assert.equal(f.descriptor.shareToFeed, false);

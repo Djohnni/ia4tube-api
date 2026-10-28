@@ -489,13 +489,14 @@ function createCalendarService({ store, source, media, grants, auth, identity, r
       if (part.phase === "failed") continue; // Another destination still owns its independent intent/result.
       if (part.intent) {
         if (part.sourceKind === "upload" || part.mediaKind === "video") {
-          // One immediate status check in send, then at most four automatic
-          // checks one minute apart. This claim survives concurrent instances
+          // Imported MP4s have twelve follow-up checks; other media keep four.
+          // Checks stay one minute apart. This claim survives concurrent instances
           // and restart. Exhaustion keeps the uncertain intent; never re-send.
+          const observationLimit = part.sourceKind === "upload" && part.asset?.mimeType === "video/mp4" ? 12 : 4;
           const claimed = await store.update(ids.companyId, state => {
             const item = state.jobs[snapshot.id]?.deliveries?.[target];
             if (!item || item.intent?.publicationId !== part.intent.publicationId || ["published", "failed"].includes(item.phase) ||
-                (item.providerObservationCount || 0) >= 4 || clock() < (item.providerObservedAt || item.dispatchAt) + 60000) return false;
+                (item.providerObservationCount || 0) >= observationLimit || clock() < (item.providerObservedAt || item.dispatchAt) + 60000) return false;
             item.providerObservedAt = clock(); item.providerObservationCount = (item.providerObservationCount || 0) + 1;
             return true;
           });
