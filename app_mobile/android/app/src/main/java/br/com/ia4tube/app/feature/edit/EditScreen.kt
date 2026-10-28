@@ -69,11 +69,21 @@ internal class EditBrowserViewModel : ViewModel() {
         if (existing != null) {
             contextWrapper?.baseContext = context
             (existing.parent as? ViewGroup)?.removeView(existing)
+            fillParent(existing)
             return existing to false
         }
         val wrapper = MutableContextWrapper(context)
         contextWrapper = wrapper
-        return WebView(wrapper).also { view = it } to true
+        return WebView(wrapper).also { fillParent(it); view = it } to true
+    }
+
+    private fun fillParent(webView: WebView) {
+        // Compose's measured size alone is not enough: Chromium treats
+        // WRAP_CONTENT height as a zero CSS viewport, collapsing the 100dvh feed.
+        webView.layoutParams = ViewGroup.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.MATCH_PARENT,
+        )
     }
 
     fun isAttached(binding: Any): Boolean = activeBinding === binding

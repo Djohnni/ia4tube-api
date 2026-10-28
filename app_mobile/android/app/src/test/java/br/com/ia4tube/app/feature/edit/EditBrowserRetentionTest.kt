@@ -4,6 +4,7 @@ import android.app.Activity
 import android.app.Application
 import android.content.MutableContextWrapper
 import android.net.Uri
+import android.view.ViewGroup
 import android.webkit.ValueCallback
 import android.widget.FrameLayout
 import androidx.lifecycle.ViewModelStore
@@ -31,6 +32,8 @@ class EditBrowserRetentionTest {
             val oldBinding = Any()
             val (view, created) = browser.attach(first.get(), oldBinding)
             assertTrue(created)
+            assertEquals(ViewGroup.LayoutParams.MATCH_PARENT, view.layoutParams.width)
+            assertEquals(ViewGroup.LayoutParams.MATCH_PARENT, view.layoutParams.height)
             val parent = FrameLayout(first.get()).also { it.addView(view) }
             browser.loading = false
             browser.loadFailed = true
@@ -43,11 +46,16 @@ class EditBrowserRetentionTest {
             assertEquals(0, replies)
             assertNotNull(browser.fileCallback)
             assertSame(first.get().applicationContext, (view.context as MutableContextWrapper).baseContext)
+            view.layoutParams = FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT,
+            )
 
             val newBinding = Any()
             val (retained, createdAgain) = browser.attach(second.get(), newBinding)
             assertSame(view, retained)
             assertFalse(createdAgain)
+            assertEquals(ViewGroup.LayoutParams.MATCH_PARENT, retained.layoutParams.width)
+            assertEquals(ViewGroup.LayoutParams.MATCH_PARENT, retained.layoutParams.height)
             assertEquals(0, parent.childCount)
             assertSame(second.get(), (view.context as MutableContextWrapper).baseContext)
             assertFalse(browser.loading)
