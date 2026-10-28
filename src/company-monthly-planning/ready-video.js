@@ -5,6 +5,10 @@ const fs = require("node:fs");
 const MAX_VIDEO_BYTES = 100000000;
 const MAX_HEADER_BYTES = 16 * 1024 * 1024;
 
+function isReadyVideoGeometry(width, height) {
+  return width === 720 && height === 1280 || width === 1080 && height === 1920;
+}
+
 function invalid() {
   const error = new Error("O MP4 final precisa ser vertical, H.264/AAC e ter de 3 a 60 segundos.");
   error.code = "monthly_planning_video_invalid";
@@ -84,7 +88,7 @@ function videoMetadata(bytes) {
       audio = true;
     } else invalid();
   }
-  if (!video || video.width !== 1080 || video.height !== 1920) invalid();
+  if (!video || !isReadyVideoGeometry(video.width, video.height)) invalid();
   return { width: video.width, height: video.height, durationSeconds, hasAudio: Boolean(audio),
     audioMode: audio ? "original" : "muted" };
 }
@@ -134,4 +138,4 @@ function inspectReadyVideo(file) {
   } finally { fs.closeSync(fd); }
 }
 
-module.exports = { inspectReadyVideo, MAX_VIDEO_BYTES };
+module.exports = { inspectReadyVideo, isReadyVideoGeometry, MAX_VIDEO_BYTES };

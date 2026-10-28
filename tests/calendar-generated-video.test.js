@@ -7,14 +7,21 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const { spawnSync } = require("node:child_process");
-const { inspectReadyVideo } = require("../src/company-monthly-planning/ready-video");
+const { inspectReadyVideo, isReadyVideoGeometry } = require("../src/company-monthly-planning/ready-video");
 const planning = require("../src/company-monthly-planning/planning.service");
 const { createCalendarMedia } = require("../src/social/calendar/media");
+const { createCalendarSource } = require("../src/social/calendar/source");
 const model = require("../src/social/calendar/model");
 const { targets } = require("../src/social/calendar/destinations");
 const { createCalendarRouter } = require("../src/social/calendar/router");
 
 const ffmpeg = path.resolve(__dirname, "../../video_audit/pydeps/imageio_ffmpeg/binaries/ffmpeg-win-x86_64-v7.1.exe");
+
+test("generated MP4 geometry accepts only the paired 720p and 1080p profiles", () => {
+  for (const [width, height] of [[720, 1280], [1080, 1920]]) assert.equal(isReadyVideoGeometry(width, height), true);
+  for (const [width, height] of [[720, 1920], [1080, 1280], [1280, 720], [540, 960], ["720", 1280], [720, NaN]])
+    assert.equal(isReadyVideoGeometry(width, height), false);
+});
 
 test("authenticated generated-video route returns bounded byte ranges and HEAD metadata", async t => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "ia4tube-video-range-"));
@@ -79,19 +86,19 @@ test("closed video clients release both transfer slots after their metadata look
   assert.equal(await next.text(), bytes.toString());
 });
 
-test("a real ready MP4 enters the existing generated calendar item as Reel and Story", {
+for (const [width, height] of [[720, 1280], [1080, 1920]]) test(`a real ready ${width}x${height} MP4 enters the existing generated calendar item as Reel and Story`, {
   skip: process.platform !== "win32" || !fs.existsSync(ffmpeg)
 }, async t => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "ia4tube-generated-video-"));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const file = path.join(root, "resultado_final.mp4");
   const command = spawnSync(ffmpeg, ["-hide_banner", "-nostdin", "-loglevel", "error", "-f", "lavfi",
-    "-i", "color=c=black:s=1080x1920:r=30", "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000",
+    "-i", `color=c=black:s=${width}x${height}:r=30`, "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000",
     "-t", "3.2", "-c:v", "libx264", "-preset", "ultrafast", "-threads", "2", "-pix_fmt", "yuv420p",
     "-c:a", "aac", "-movflags", "+faststart", file], { timeout: 30000, windowsHide: true, shell: false });
   assert.equal(command.status, 0, String(command.stderr));
   const inspected = inspectReadyVideo(file);
-  assert.equal(inspected.width, 1080); assert.equal(inspected.height, 1920);
+  assert.equal(inspected.width, width); assert.equal(inspected.height, height);
   assert.ok(inspected.durationSeconds >= 3 && inspected.durationSeconds <= 60);
   assert.equal(inspected.hasAudio, true);
 
@@ -119,6 +126,12 @@ test("a real ready MP4 enters the existing generated calendar item as Reel and S
   assert.equal(saved.status, "pronto"); assert.equal(saved.pedido.resultado_mime, "video/mp4");
   assert.equal(saved.pedido.descricao_instagram, "Legenda do vídeo");
   assert.equal(saved.pedido.resultado_video.hasAudio, true);
+  assert.equal(crypto.createHash("sha256").update(fs.readFileSync(path.join(orderBase.base, "resultado_final.mp4"))).digest("hex"),
+    crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex"), "The ready result must retain every input byte; no upscale or encoding");
+  const calendarSource = createCalendarSource({ dataDir: root, planningDir, ordersDir });
+  const ownedSource = calendarSource.describe(owner, { planningId: monthly.id, orderId: orderBase.id });
+  assert.equal(ownedSource.metadata.width, width); assert.equal(ownedSource.metadata.height, height);
+  assert.equal(ownedSource.mediaKind, "video");
   const retry = path.join(root, "retry.mp4"); fs.copyFileSync(file, retry);
   planning.savePlanningArtResult({ pedidosDir: ordersDir, pedidoId: orderBase.id,
     resultadoPath: retry, resultadoMime: "video/mp4" });
@@ -148,6 +161,7 @@ test("a real ready MP4 enters the existing generated calendar item as Reel and S
   assert.equal(job.id, model.idFor(companyId, "plan:item"));
   assert.deepEqual(targets(job), ["reel"]);
   const prepared = await media.prepare("owner", companyId, job);
+  assert.equal(prepared.sha, crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex"));
   const { variants, ...primary } = prepared;
   job.asset = primary; job.assets = variants; job.phase = "ready";
   const reel = media.videoDescriptor(companyId, userId, { ...job, target: "reel" });

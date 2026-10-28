@@ -4,7 +4,7 @@ const path = require("node:path");
 const planning = require("../../company-monthly-planning/planning.service");
 const orders = require("../../orders/order.storage");
 const { fail, consentPath } = require("./model");
-const { MAX_VIDEO_BYTES } = require("../../company-monthly-planning/ready-video");
+const { MAX_VIDEO_BYTES, isReadyVideoGeometry } = require("../../company-monthly-planning/ready-video");
 function createCalendarSource({ dataDir, planningDir, ordersDir }) {
   const baseDir = planningDir || path.join(dataDir, "planejamentos_mensais");
   const pedidosDir = ordersDir || path.join(dataDir, "pedidos");
@@ -25,7 +25,7 @@ function createCalendarSource({ dataDir, planningDir, ordersDir }) {
     const stat = fs.statSync(real);
     if (!stat.isFile() || stat.size < 1 || stat.size > (video ? MAX_VIDEO_BYTES : 32 * 1024 * 1024)) fail("calendar_source_unavailable", 404);
     const metadata = video ? pedido.resultado_video : null;
-    if (video && (!metadata || metadata.width !== 1080 || metadata.height !== 1920 ||
+    if (video && (!metadata || !isReadyVideoGeometry(metadata.width, metadata.height) ||
         !Number.isFinite(metadata.durationSeconds) || metadata.durationSeconds < 3 || metadata.durationSeconds > 60 ||
         typeof metadata.hasAudio !== "boolean")) fail("calendar_source_unavailable", 404);
     return { file: real, size: stat.size, version: `${stat.size}:${stat.mtimeMs}${video ? ":video" : ""}`,

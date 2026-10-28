@@ -67,6 +67,14 @@ function createCalendarPublisher({ config, connectorStore, connectorAudit, crede
       mediaId: confirmed?.mediaId || null, permalink: confirmed?.permalink || null,
       publishedAt: confirmed ? confirmed.publishedEpochSeconds * 1000 : null };
   }
+  const generatedVideo = job => job.mediaKind === "video" && job.sourceKind !== "upload";
+  function observationStage(record) {
+    if (record?.state !== "provider_confirming") return null;
+    const reference = record.reconciliationReference || "";
+    if (/^igc:armed:[0-9]{5,64}$/.test(reference)) return "armed";
+    if (/^igc:submitted:[0-9]{5,64}$|^igm:known:[0-9]{5,64}$/.test(reference)) return "confirmation";
+    return "processing";
+  }
   return Object.freeze({ allowed, intent, status,
     preparedAvailable: isPreparedCalendarMedia(preparedMedia),
     publicMedia: preparedMedia?.publicMedia,
@@ -77,6 +85,10 @@ function createCalendarPublisher({ config, connectorStore, connectorAudit, crede
     async connection(context) {
       const connection = await connectorStore.scope(context).getCurrentConnectionDetails();
       return calendarConnectionFromDetails(connection);
+    },
+    async observationStage(context, job) {
+      if (!generatedVideo(job)) return null;
+      return observationStage(await connectorStore.scope(context).getPublicationDetails(job.intent.publicationId));
     },
     async observe(context, job) {
       const current = await status(context, job.intent.publicationId);
@@ -89,6 +101,18 @@ function createCalendarPublisher({ config, connectorStore, connectorAudit, crede
           await service.getPublicationStatus(context, { publicationId: job.intent.publicationId,
             operationId: crypto.randomUUID(), providerReference: record.reconciliationReference,
             binding: job.authorization.binding });
+          // FINISHED has already been committed as "armed" by the existing
+          // connector. Complete that exact stage now; IN_PROGRESS never gets a
+          // second status GET, and the connector still owns the atomic POST claim.
+          const created = generatedVideo(job) && record.reconciliationReference.match(/^igc:created:([0-9]{5,64})$/);
+          if (created) {
+            const next = await connectorStore.scope(context).getPublicationDetails(job.intent.publicationId);
+            if (next?.state === "provider_confirming" && next.reconciliationReference === `igc:armed:${created[1]}`) {
+              await service.getPublicationStatus(context, { publicationId: job.intent.publicationId,
+                operationId: crypto.randomUUID(), providerReference: next.reconciliationReference,
+                binding: job.authorization.binding });
+            }
+          }
         } catch { /* The durable uncertain intent stays visible; never create a replacement. */ }
       }
       return status(context, job.intent.publicationId);

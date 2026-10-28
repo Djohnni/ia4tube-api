@@ -28,6 +28,8 @@ const graphicMaterialsService = require("./src/company-graphic-materials/materia
 const graphicMaterialsCatalog = require("./src/company-graphic-materials/materials.catalog");
 const carouselService = require("./src/company-carousels/carousels.service");
 const monthlyPlanningService = require("./src/company-monthly-planning/planning.service");
+const { createEditCalendarService } = require("./src/company-edit-calendar/service");
+const { createEditCalendarRouter } = require("./src/company-edit-calendar/router");
 const productDiscoveryService = require("./src/company-monthly-planning/product-discovery.service");
 const fcmService = require("./src/notifications/fcm.service");
 const {
@@ -881,20 +883,25 @@ function releaseFreeArtClaimLocks(keys = []) {
   }
 }
 
-function recordFreeArtIpLock(req, { whatsapp, pedidoId, context = "arte_empresa" } = {}) {
+function recordFreeArtIpLock(req, { whatsapp, pedidoId, context = "arte_empresa", ipIdentity = null } = {}) {
   try {
-    const ip = getClientIp(req);
-    const ipHash = hashFreeArtIp(ip);
+    // ipIdentity is server-created from an authenticated Edit request, never an HTTP field.
+    const ip = ipIdentity ? "" : getClientIp(req);
+    const ipHash = ipIdentity ? ipIdentity.ipHash : hashFreeArtIp(ip);
     if (!ipHash) return null;
+    if (ipIdentity && (!/^[a-f0-9]{64}$/.test(ipHash) || typeof ipIdentity.ipMasked !== "string" ||
+        ipIdentity.ipMasked.length > 80 || !/^[0-9a-fA-F.:]*$/.test(ipIdentity.ipMasked))) return null;
 
     const now = new Date();
     const blockedUntil = new Date(now.getTime() + FREE_ART_IP_LOCK_MS);
     const locks = readFreeArtIpLocks();
+    if (ipIdentity && locks[ipHash]?.pedido_id === String(pedidoId || "").trim() &&
+        locks[ipHash]?.cliente === String(whatsapp || "").trim()) return locks[ipHash];
     cleanupExpiredFreeArtIpLocks(locks, now);
 
     const lock = {
       ip_hash: ipHash,
-      ip_mascarado: maskClientIp(ip),
+      ip_mascarado: ipIdentity ? ipIdentity.ipMasked : maskClientIp(ip),
       cliente: String(whatsapp || "").trim(),
       pedido_id: String(pedidoId || "").trim(),
       contexto: String(context || "").trim() || "arte_empresa",
@@ -4046,6 +4053,20 @@ app.post(
     }
   }
 );
+
+const editCalendarService = createEditCalendarService({ dataDir: DATA_DIR, planningDir: MONTHLY_PLANNINGS_DIR,
+  ordersDir: PEDIDOS_DIR, secret: JWT_SECRET, readClients: readClientes,
+  writeClients: value => atomicWriteJson(CLIENTES_FILE, value),
+  prepareCalendarRequest: claims => productionSocialIntegration.prepareEditCalendarRequest(claims),
+  currentFreeArtBlocked: identity => {
+    if (!identity?.ipHash) return false;
+    const lock = readFreeArtIpLocks()[identity.ipHash];
+    return Boolean(lock && new Date(lock.bloqueado_ate || 0).getTime() > Date.now());
+  },
+  recordFreeArtUse: ({ owner, planningId, ipIdentity }) => Boolean(recordFreeArtIpLock(null,
+    { whatsapp: owner, pedidoId: planningId, context: "planejamento_mensal", ipIdentity })) });
+app.use(createEditCalendarRouter({ authenticate: auth, botAuthenticate: botRunnerAuth, isBotAdmin,
+  service: editCalendarService, freeArtPolicy: getFreeArtIpLockStatus }));
 
 app.post(
   "/empresa/planejamento-mensal/solicitar",

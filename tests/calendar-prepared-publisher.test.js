@@ -133,6 +133,20 @@ for (const [target, mimeType] of [["feed", "image/jpeg"], ["story", "image/jpeg"
     assert.equal((await f.publish()).state, "published"); assert.equal(f.posts.length, 2);
   });
 }
+
+for (const target of ["reel", "story"]) test(`720p ${target} reaches the provider without scaling or changing its metadata`, async () => {
+  const f = fixture({ target, change: { width: 720, height: 1280 } });
+  assert.equal((await f.publish()).state, "published");
+  assert.equal(f.descriptor.width, 720); assert.equal(f.descriptor.height, 1280);
+  assert.equal(f.posts[0].body.video_url, f.descriptor.publicUrl);
+  assert.equal(f.posts.length, 2);
+});
+
+for (const [width, height] of [[720, 1920], [1080, 1280], [1280, 720], [540, 960]])
+  test(`provider rejects unapproved generated-video geometry ${width}x${height}`, async () => {
+    const f = fixture({ target: "story", change: { width, height } });
+    await assert.rejects(f.publish()); assert.equal(f.posts.length, 0);
+  });
 test("Story-only empty caption is an exact durable intent and is not sent as text", async () => {
   const f = fixture({ target: "story", caption: "" }); assert.equal((await f.publish()).state, "published");
   assert.equal((await f.store.scope(f.context).getPublicationDetails(f.intent.publicationId)).caption, "");

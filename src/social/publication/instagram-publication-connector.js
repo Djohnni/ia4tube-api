@@ -15,6 +15,7 @@ const {
 } = require("../connectors/errors");
 const { isSafeProviderReference } = require("../connectors/states");
 const { normalizeConnectionBinding } = require("./connection-binding");
+const { isReadyVideoGeometry } = require("../../company-monthly-planning/ready-video");
 const {
   INSTAGRAM_GRAPH_API_ORIGIN,
   INSTAGRAM_OAUTH_SCOPES,
@@ -740,7 +741,7 @@ function createInstagramPublicationConnector(options = {}) {
               (destination === "reel" && !video) || (destination === "feed" && video) ||
               typeof owned.shareToFeed !== "boolean" || (destination !== "reel" && owned.shareToFeed) ||
               !video && (owned.width !== 1080 || owned.height !== (destination === "feed" ? 1350 : 1920) || owned.hasAudio !== false || owned.audioMode !== "none" || owned.durationSeconds != null) ||
-              video && (owned.width !== 1080 || owned.height !== 1920 ||
+              video && (!isReadyVideoGeometry(owned.width, owned.height) ||
                 !Number.isFinite(owned.durationSeconds) || owned.durationSeconds < 3 || owned.durationSeconds > 60 ||
                 typeof owned.hasAudio !== "boolean" || !["original", "muted", "music"].includes(owned.audioMode) ||
                 owned.audioMode === "muted" && owned.hasAudio || owned.audioMode === "music" && !owned.hasAudio)) {
@@ -748,7 +749,9 @@ function createInstagramPublicationConnector(options = {}) {
           }
         }
         if ((owned.destination || "feed") !== destination ||
-            (destination === "story" && (connection.account.accountType !== "business" || owned.width !== 1080 || owned.height !== 1920))) {
+            (destination === "story" && (connection.account.accountType !== "business" ||
+              (owned.mimeType === "video/mp4" ? !isReadyVideoGeometry(owned.width, owned.height)
+                : owned.width !== 1080 || owned.height !== 1920)))) {
           connectorFail("resource_unavailable");
         }
         if (bound && (publicationSnapshot.mediaReference !== image.mediaId ||

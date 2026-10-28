@@ -289,6 +289,14 @@ function createProductionSocialIntegration(options = {}) {
       if (!runtime?.calendar) require("./calendar/model").fail("calendar_disabled", 503);
       return runtime.calendar.prepareRequest(claims, body.calendar_automatic, body.calendar_preference_revision);
     },
+    async prepareEditCalendarRequest(claims) {
+      if (!runtime?.calendar) return null;
+      const current = await runtime.calendar.list(claims);
+      // Reuse the current image preference; browsing Edit never enables it.
+      if (!current.preferences?.enabled || !current.connection?.binding ||
+          !require("./calendar/model").sameBinding(current.preferences.binding, current.connection.binding)) return null;
+      return runtime.calendar.prepareRequest(claims, true, current.preferences.revision);
+    },
     async calendarOverlay(claims, payload) { return runtime?.calendar ? runtime.calendar.overlay(claims, payload) : payload; },
     async calendarEdit(claims, key, input) { return runtime?.calendar ? runtime.calendar.legacyEdit(claims, key, input) : false; },
     pendingContracts: PENDING_CONTRACTS, afterAuthentication, middleware, initialize, mountWeb, close });

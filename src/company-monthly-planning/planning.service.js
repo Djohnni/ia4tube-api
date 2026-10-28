@@ -1421,11 +1421,27 @@ function listAllPlanningDirs(baseDir) {
   return dirs;
 }
 
-function createRequest({ baseDir, cliente, whatsapp, body = {}, files = {}, freeArtBlocked = false, calendarAuthorizationFactory = null }) {
+// Internal adapter option only: never read this routing decision from an HTTP body.
+function externalEditRegistration(value) {
+  if (value == null) return null;
+  const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+  if (value.kind !== "edit_calendar_v1" || !uuid.test(value.contextId || "") ||
+      !uuid.test(value.editOrderId || "") || !/^[a-f0-9]{64}$/.test(value.inputHash || "")) {
+    throw Object.assign(new Error("Vinculo do Edit invalido."), { code: "edit_calendar_registration_invalid", statusCode: 400 });
+  }
+  return { kind: "edit_calendar_v1", contextId: value.contextId.toLowerCase(),
+    editOrderId: value.editOrderId.toLowerCase(), inputHash: value.inputHash };
+}
+
+function createRequest({ baseDir, cliente, whatsapp, body = {}, files = {}, freeArtBlocked = false, calendarAuthorizationFactory = null,
+  externalEdit = null }) {
+  const editRegistration = externalEditRegistration(externalEdit);
   const instagramDestination = require("../social/calendar/destinations").destination(body.instagram_destination || "feed");
   const parsedPhotoItems = parsePlanningPhotoItems(body);
   const hasStructuredPhotoItems = planningPhotoItemsAreStructured(parsedPhotoItems);
   const quantidadeReservada = hasStructuredPhotoItems ? parsedPhotoItems.length : normalizeQuantity(body);
+  if (editRegistration && quantidadeReservada !== 1)
+    throw Object.assign(new Error("O vinculo do Edit recebe um video por pedido."), { code: "edit_calendar_registration_invalid", statusCode: 400 });
   if (!Number.isFinite(quantidadeReservada) || quantidadeReservada <= 0) {
     const error = new Error("Informe pelo menos uma arte com objetivo, escrita ou imagem para o Planejamento Mensal.");
     error.statusCode = 400;
@@ -1441,13 +1457,16 @@ function createRequest({ baseDir, cliente, whatsapp, body = {}, files = {}, free
   const profile = normalizeProfile(body, cliente);
   const { billing, charge } = validatePlanAndFreeArts(cliente, quantidadeReservada, { freeArtBlocked });
   const ciclo = planCycle(cliente);
-  const planningId = newPlanningId();
+  const planningId = editRegistration ? `pm_edit_${editRegistration.contextId.replace(/-/g, "")}` : newPlanningId();
   // Internal capability, never accepted from an HTTP body or included in product responses/runner packages.
   const calendarEnvelope = calendarAuthorizationFactory?.({ planningId, quantity: quantidadeReservada }) || null;
   if (calendarEnvelope) {
     const receiptPath = require("../social/calendar/model").consentPath(baseDir, whatsapp, planningId);
     fs.mkdirSync(path.dirname(receiptPath), { recursive: true, mode: 0o700 });
-    fs.writeFileSync(receiptPath, JSON.stringify({ envelope: calendarEnvelope }), { flag: "wx", mode: 0o600 });
+    if (editRegistration && fs.existsSync(receiptPath)) {
+      if (fs.lstatSync(receiptPath).isSymbolicLink() || readJson(receiptPath)?.envelope !== calendarEnvelope)
+        throw Object.assign(new Error("Autorizacao do pedido mudou."), { code: "edit_calendar_registration_conflict", statusCode: 409 });
+    } else fs.writeFileSync(receiptPath, JSON.stringify({ envelope: calendarEnvelope }), { flag: "wx", mode: 0o600 });
   }
   const dirPath = requestDir(baseDir, whatsapp, ciclo, planningId);
   ensureDir(dirPath);
@@ -1515,6 +1534,7 @@ function createRequest({ baseDir, cliente, whatsapp, body = {}, files = {}, free
       observacao: "Reserva definitiva aplicada em artes_mensais_restantes. Criar Arte usa somente as artes livres restantes."
     },
     profile,
+    ...(editRegistration ? { edit_calendar: editRegistration } : {}),
     caracteristicas_empresa: profile.caracteristicas_empresa,
     informacoes_empresa: profile.informacoes_empresa,
     orientacoes_fotos: orientacoesFotos,
@@ -1524,7 +1544,7 @@ function createRequest({ baseDir, cliente, whatsapp, body = {}, files = {}, free
       fotos
     },
     runner_contract: {
-      pronto_para_runner: true,
+      pronto_para_runner: !editRegistration,
       fase_runner: "fase_5",
       zip_endpoint: `/bot/empresa/planejamento-mensal/${planningId}/zip`,
       observacao: "Runner local deve criar apenas plano_mensal.json. Nao gerar imagens nem pedidos filhos nesta fase."
@@ -2626,6 +2646,7 @@ function listBotPending({ baseDir, limit = 5, claim = true }) {
     .filter(Boolean)
     .map((planning) => recoverStaleProcessing(planning, now))
     .filter((planning) => planning.status === "em_analise")
+    .filter((planning) => !planning.edit_calendar)
     .filter((planning) => planning.runner_contract?.pronto_para_runner !== false)
     .filter((planning) => !hasActiveRunnerClaim(planning, nowMs))
     .sort((a, b) => String(a.criado_em || "").localeCompare(String(b.criado_em || "")))
@@ -3618,7 +3639,8 @@ function buildChildOrder({ planning, item, itemId, pedidoId, mesAtual, copiedAss
     id: pedidoId,
     whatsapp: planning.whatsapp,
     mes: mesAtual,
-    status: "novo",
+    status: planning.edit_calendar ? "processando" : "novo",
+    ...(planning.edit_calendar ? { edit_calendar: planning.edit_calendar } : {}),
     aprovado_cliente: false,
     baixado_cliente: false,
     ajuste_automatico_usado: false,
@@ -3803,6 +3825,7 @@ function listPlanningArtPending({ pedidosDir, limit = BOT_PENDING_HARD_LIMIT }) 
 
         const pedido = orderStorage.readOrder(base) || {};
         if (!isPlanningOrder(pedido)) continue;
+        if (pedido.edit_calendar) continue; // The existing Edit producer owns this result.
 
         const status = orderStorage.readStatus(base, pedido.status || "");
         if (!["novo", "ajuste_pendente"].includes(status)) continue;
@@ -3933,7 +3956,8 @@ function savePlanningArtResult({
     status: "pronto",
     resultado_mime: resultadoMime,
     resultado_video: videoMetadata,
-    descricao_instagram: String(descricaoInstagram || found.pedido.descricao_instagram || "").trim(),
+    descricao_instagram: String(found.pedido.edit_calendar && found.pedido.edit_calendar_caption ||
+      descricaoInstagram || found.pedido.descricao_instagram || "").trim(),
     resultado_enviado_em: now,
     atualizado_em: now
   };
@@ -4048,12 +4072,19 @@ function createChildOrdersFromPlan({ pedidosDir, planning, plan, cliente = null 
       };
     }
 
-    const pedidoId = newChildPedidoId(planning.planejamento_id || planning.id, index + 1, pedidosDir);
+    const editRegistration = externalEditRegistration(planning.edit_calendar);
+    const pedidoId = editRegistration ? `edit_${editRegistration.contextId.replace(/-/g, "")}`
+      : newChildPedidoId(planning.planejamento_id || planning.id, index + 1, pedidosDir);
     const orderBase = path.join(pedidosDir, safeSegment(planning.whatsapp, "sem_whatsapp"), safeSegment(mesAtual, "ciclo"), pedidoId);
     ensureDir(orderBase);
     const itemForOrder = { ...item, ordem: item.ordem || index + 1 };
     const copiedAssets = copyPlanningAssetsToOrder(planning, orderBase, itemForOrder);
-    const childOrder = buildChildOrder({
+    const previous = editRegistration ? orderStorage.readOrder(orderBase) : null;
+    if (previous && (previous.whatsapp !== planning.whatsapp ||
+        JSON.stringify(previous.edit_calendar) !== JSON.stringify(editRegistration) ||
+        previous.planejamento_id !== (planning.planejamento_id || planning.id)))
+      throw Object.assign(new Error("Vinculo do pedido mudou."), { code: "edit_calendar_registration_conflict", statusCode: 409 });
+    const childOrder = previous || buildChildOrder({
       planning,
       item: itemForOrder,
       itemId,
@@ -4062,8 +4093,10 @@ function createChildOrdersFromPlan({ pedidosDir, planning, plan, cliente = null 
       copiedAssets
     });
 
-    orderStorage.writeOrder(orderBase, childOrder);
-    orderStorage.writeStatus(orderBase, "novo");
+    if (!previous) {
+      orderStorage.writeOrder(orderBase, childOrder);
+      orderStorage.writeStatus(orderBase, editRegistration ? "processando" : "novo");
+    }
 
     const record = {
       pedido_id: pedidoId,
@@ -4160,6 +4193,8 @@ function savePlanResult({ baseDir, planningId, payload = {}, pedidosDir = "", cl
       ? plan.itens
       : [];
   const postagens = enrichPlanPhotoReferences(planning, rawPostagens);
+  if (planning.edit_calendar && postagens.length !== 1)
+    throw Object.assign(new Error("O vinculo do Edit recebe um video por pedido."), { code: "edit_calendar_registration_invalid", statusCode: 400 });
 
   if (!postagens.length) {
     const error = new Error("plano_mensal precisa conter postagens planejadas.");

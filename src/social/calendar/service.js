@@ -72,6 +72,13 @@ function createCalendarService({ store, source, media, grants, auth, identity, r
   }
   function view(job, prefs, connection, allowed, context = null) {
     let status = availability(job, prefs, connection?.binding, allowed, clock());
+    // An exhausted observation window is visible attention, not a fabricated
+    // provider failure. The underlying intent stays locked and is never re-sent.
+    const confirmationPending = status === "confirming" && job.mediaKind === "video" && job.sourceKind !== "upload" &&
+      Object.values(job.deliveries || {}).some(part => part.phase === "confirming" &&
+        (["armed", "confirmation"].includes(part.providerObservationStage)
+          ? (part.providerCompletionObservationCount || 0) >= 4 : (part.providerObservationCount || 0) >= 5));
+    if (confirmationPending) status = "attention";
     const imported = (importsAvailable || storedReading) && job.sourceKind === "upload" && context;
     if (importsAvailable && imported) status = importScheduling.status(job, prefs, connection, allowed) || status;
     const importedMedia = imported ? (importsAvailable ? importScheduling : importReading).describe(job, importContext(context)) : null;
@@ -81,7 +88,8 @@ function createCalendarService({ store, source, media, grants, auth, identity, r
     if (status === "scheduled" && targets(job).includes("story") && connection?.accountType !== "business") status = "attention";
     return { id: job.id, key: job.sourceKey, planningId: job.planningId, orderId: job.orderId,
       title: job.title, date: job.date, time: job.time, timeZone: TIME_ZONE, scheduledAt: job.scheduledAt,
-      caption: job.caption, revision: job.revision, status, statusLabel: LABELS[status],
+      caption: job.caption, revision: job.revision, status,
+      statusLabel: confirmationPending ? "Confirmação pendente — confira a publicação" : LABELS[status],
       imageUrl: job.asset && job.sourceKind !== "upload" && !generatedVideo ? `/v1/social/calendar/items/${job.id}/image` : null,
       ...(generatedVideo ? { generatedVideo, selectedTargets: targets(job), shareToFeed: targets(job).includes("reel") } : {}),
       editable: !started(job) && !LOCKED.has(job.phase) && job.phase !== "cancelled",
@@ -92,7 +100,8 @@ function createCalendarService({ store, source, media, grants, auth, identity, r
         ? Object.fromEntries(Object.keys(job.assets).map(target => [target, `/v1/social/calendar/items/${job.id}/image?destination=${target}`])) : {},
       publications: Object.fromEntries(Object.entries(job.deliveries || {}).map(([target, value]) => [target,
         { status: value.phase, result: value.publication || null }])),
-      username: connection?.username || null, error: job.error || null, publication: job.publication || null,
+      username: connection?.username || null, error: confirmationPending ? "calendar_video_confirmation_pending" : job.error || null,
+      publication: job.publication || null,
       ...(job.sourceKind === "upload" ? { sourceKind: "upload", selectedTargets: targets(job), localSimulation: job.import?.localSimulation === true,
         media: importedMedia,
         shareToFeed: job.import?.selection?.shareToFeed === true, mediaReadAvailable: Boolean(importedMedia) } : {}) };
@@ -490,25 +499,36 @@ function createCalendarService({ store, source, media, grants, auth, identity, r
       if (part.phase === "failed") continue; // Another destination still owns its independent intent/result.
       if (part.intent) {
         if (part.sourceKind === "upload" || part.mediaKind === "video") {
-          // Imported MP4s have twelve follow-up checks; other media keep four.
-          // Checks stay one minute apart. This claim survives concurrent instances
-          // and restart. Exhaustion keeps the uncertain intent; never re-send.
-          const observationLimit = part.sourceKind === "upload" && part.asset?.mimeType === "video/mp4" ? 12 : 4;
+          // Generated MP4 processing has five minute-spaced checks. Completing
+          // a durably armed container (or confirming its POST) has a separate
+          // bounded budget, including after restart on the last processing check.
+          // Imported media retains its existing policy. No exhausted intent is sent again.
+          const generatedVideo = part.mediaKind === "video" && part.sourceKind !== "upload";
+          const stage = generatedVideo && publisher.observationStage ? await publisher.observationStage(ctx, part) : null;
+          const completion = generatedVideo && ["armed", "confirmation"].includes(stage);
+          const counter = completion ? "providerCompletionObservationCount" : "providerObservationCount";
+          const observationLimit = completion ? 4 : generatedVideo ? 5
+            : part.sourceKind === "upload" && part.asset?.mimeType === "video/mp4" ? 12 : 4;
           const claimed = await store.update(ids.companyId, state => {
             const item = state.jobs[snapshot.id]?.deliveries?.[target];
             if (!item || item.intent?.publicationId !== part.intent.publicationId || ["published", "failed"].includes(item.phase) ||
-                (item.providerObservationCount || 0) >= observationLimit || clock() < (item.providerObservedAt || item.dispatchAt) + 60000) return false;
-            item.providerObservedAt = clock(); item.providerObservationCount = (item.providerObservationCount || 0) + 1;
+                (item[counter] || 0) >= observationLimit || clock() < (item.providerObservedAt || item.dispatchAt) + 60000) return false;
+            item.providerObservedAt = clock(); item[counter] = (item[counter] || 0) + 1;
             return true;
           });
           if (!claimed) continue;
         }
         const result = publisher.observe ? await publisher.observe(ctx, part) : await publisher.status(ctx, part.intent.publicationId);
+        let observedStage = null;
+        if (part.mediaKind === "video" && part.sourceKind !== "upload" && !result?.published && publisher.observationStage) {
+          try { observedStage = await publisher.observationStage(ctx, part); } catch { /* A missing read cannot invent confirmation. */ }
+        }
         await store.update(ids.companyId, state => {
           const job = state.jobs[snapshot.id];
           if (job?.deliveries?.[target]?.intent?.publicationId !== part.intent.publicationId) return null;
           const phase = result?.published ? "published" : result?.state?.startsWith("failed_") ? "failed" : "confirming";
           record(job, target, { phase, publication: result,
+            ...(part.mediaKind === "video" && part.sourceKind !== "upload" ? { providerObservationStage: observedStage } : {}),
             error: phase === "published" ? null : phase === "failed" ? "calendar_provider_failed" : "calendar_result_unconfirmed" });
           return null;
         });
