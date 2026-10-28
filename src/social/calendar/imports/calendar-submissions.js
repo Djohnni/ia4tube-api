@@ -7,8 +7,30 @@ const { schedulePreparedImport } = require("./calendar-entry");
 const { descriptor } = require("./preview-service");
 const { preparedPublicationDescriptor } = require("./publication-descriptor");
 const { withLocalPublicationState, isLocalPublicationTransport } = require("./publication-test-transport");
+const { isPostgresConnectionFailure } = require("../../../persistence/postgres/errors");
 const KEY = /^[A-Za-z0-9_-]{8,128}$/, ID = /^[a-f0-9]{40}$/, HASH = /^[a-f0-9]{64}$/;
 const services = new WeakSet(), activeStates = new Set(["accepted", "preparing"]);
+// Serialization/deadlock, lock/query timeouts and exhausted connections can all
+// occur before or after an idempotent preparation request. None revokes intent.
+const RETRYABLE_PG_CODES = new Set(["40001", "40P01", "55P03", "57014", "53300", "postgres_rollback_failed"]);
+const DIAGNOSTIC_CODES = new Set([...RETRYABLE_PG_CODES, "25P03", "57P01", "57P02", "57P03",
+  "08000", "08001", "08003", "08004", "08006", "08007", "08P01", "ECONNRESET", "ETIMEDOUT", "EPIPE",
+  "42501", "23505", "23503", "23514", "media_retention_asset_retired", "media_retention_state_invalid",
+  "media_retention_collector_only", "postgres_connection_failure", "temporary_unavailable", "deterministic_refusal", "unknown_failure"]);
+const PROGRESS_STAGES = new Set(["authority", "upload_lookup", "preparation_request", "preparing_record",
+  "preparation_status", "prepared_snapshot", "connection", "finalize"]);
+function progressDiagnostic(error, stage, at) {
+  const code = DIAGNOSTIC_CODES.has(error?.code) ? error.code : isPostgresConnectionFailure(error)
+    ? "postgres_connection_failure" : error?.statusCode === 503 ? "temporary_unavailable"
+      : /^(calendar_import_|import_preparation_)[a-z_]+$/.test(error?.code || "") ? "deterministic_refusal" : "unknown_failure";
+  const value = { stage, code, at };
+  // Only literal allowlisted codes survive; messages, stack, query and payload
+  // never become durable diagnostics, including an uncertain rollback's cause.
+  for (let cause = error?.cause, depth = 0; cause && depth < 4; cause = cause.cause, depth++) {
+    if (DIAGNOSTIC_CODES.has(cause.code)) { value.causeCode = cause.code; break; }
+  }
+  return value;
+}
 const canonical = value => Array.isArray(value) ? value.map(canonical) : value && typeof value === "object"
   ? Object.fromEntries(Object.keys(value).sort().map(key => [key, canonical(value[key])])) : value;
 const hash = value => crypto.createHash("sha256").update(JSON.stringify(canonical(value))).digest("hex");
@@ -39,6 +61,13 @@ function validateCalendarSubmissions(state) {
         ![...activeStates, "scheduled", "attention", "cancelled"].includes(row.state) ||
         !Number.isSafeInteger(row.mediaRevision) || row.mediaRevision < 0 || typeof row.envelope !== "string" ||
         !Number.isSafeInteger(row.scheduledAt) || row.scheduledAt !== dateTime(row.date, row.time)) fail("state_invalid", 503);
+    if (row.progressDiagnostic !== undefined) {
+      const value = row.progressDiagnostic;
+      if (!value || Array.isArray(value) || Object.keys(value).some(key => !["stage", "code", "causeCode", "at"].includes(key)) ||
+          !PROGRESS_STAGES.has(value.stage) || !DIAGNOSTIC_CODES.has(value.code) ||
+          value.causeCode !== undefined && !DIAGNOSTIC_CODES.has(value.causeCode) ||
+          !Number.isSafeInteger(value.at) || value.at < row.createdAt) fail("state_invalid", 503);
+    }
     if (row.request.schedule !== undefined) {
       let schedule;
       try { schedule = requestedSchedule(row.request.schedule); } catch { fail("state_invalid", 503); }
@@ -150,6 +179,7 @@ function createCalendarSubmissions({ store, uploadStore, preparation, grants, ac
     const pending = await store.update(companyId, state => Object.values(state.importSubmissions || {}).filter(row => activeStates.has(row.state)).slice(0, limit));
     for (const row of pending) {
       const context = Object.freeze({ authenticated: true, companyId, userId: row.userId });
+      let stage = "authority";
       try {
         authorize(context);
         const delegated = grants.verifySubmission(row.envelope, companyId, row.userId);
@@ -158,28 +188,35 @@ function createCalendarSubmissions({ store, uploadStore, preparation, grants, ac
         // A chosen date is user intent, not a suggestion. Do not spend on new
         // preparation or move the publication to another day after it expires.
         if (input.schedule && dateTime(input.schedule.date, input.schedule.time) <= clock()) fail("time_outside_window", 400);
+        stage = "upload_lookup";
         const upload = await uploadStore.update(companyId, state => state.uploads[input.uploadId]);
         if (!upload || upload.assetId !== input.assetId || upload.userId !== row.userId || upload.sha256 !== input.sourceSha256) fail("source_changed");
         if (upload.state === "verifying") continue;
         if (upload.state !== "uploaded") fail("source_changed");
         let mediaRevision = input.reuseRevision;
         if (mediaRevision === null) {
+          stage = "preparation_request";
           const prepared = await preparation.request(context, { assetId: input.assetId, uploadId: input.uploadId,
             idempotencyKey: `submission_${row.id}`, expectedMediaRevision: input.expectedMediaRevision, selection: input.selection });
           mediaRevision = prepared.mediaRevision;
         }
+        stage = "preparing_record";
         await store.update(companyId, state => {
           const current = state.importSubmissions[row.id];
           if (activeStates.has(current.state)) { current.state = "preparing"; current.mediaRevision = mediaRevision; current.updatedAt = clock(); }
         });
+        stage = "preparation_status";
         const status = await preparation.status(context, { assetId: input.assetId });
         if (status.currentRevision !== mediaRevision) fail("revision_conflict");
         if (status.state === "attention") fail("preparation_failed");
         if (!status.ready) continue;
+        stage = "prepared_snapshot";
         const snapshot = await preparation.snapshot(context, { assetId: input.assetId, mediaRevision });
         if (!isDeepStrictEqual(selection(snapshot.selection), selection(input.selection)) || snapshot.plan.sourceSha256 !== input.sourceSha256) fail("source_changed");
+        stage = "connection";
         const connection = delegated.binding ? await resolveSubmissionConnection(delegated) : null;
         authorize(context);
+        stage = "finalize";
         await store.update(companyId, state => {
           authorize(context);
           const current = state.importSubmissions[row.id];
@@ -211,12 +248,23 @@ function createCalendarSubmissions({ store, uploadStore, preparation, grants, ac
       } catch (error) {
         // Transient/uncertain writes keep the same durable key for the next tick.
         // A deterministic refusal is visible; it never creates replacement work.
-        if (error?.statusCode === 503 || !error?.code || error.code === "import_preparation_not_ready") continue;
-        await store.update(companyId, state => { const current = state.importSubmissions?.[row.id];
-          if (current && activeStates.has(current.state) && !state.jobs[row.id]) {
-            current.state = "attention"; current.errorCode = /^(calendar_import_|import_preparation_)[a-z_]+$/.test(error.code) ? error.code : "calendar_import_submission_failed"; current.updatedAt = clock();
-          }
-        });
+        const transient = error?.statusCode === 503 || !error?.code || error.code === "import_preparation_not_ready" ||
+          RETRYABLE_PG_CODES.has(error.code) || isPostgresConnectionFailure(error);
+        const diagnostic = progressDiagnostic(error, stage, clock());
+        try {
+          await store.update(companyId, state => { const current = state.importSubmissions?.[row.id];
+            if (current && activeStates.has(current.state) && !state.jobs[row.id]) {
+              current.progressDiagnostic = diagnostic;
+              if (!transient) {
+                current.state = "attention"; current.errorCode = /^(calendar_import_|import_preparation_)[a-z_]+$/.test(error.code) ? error.code : "calendar_import_submission_failed"; current.updatedAt = diagnostic.at;
+              }
+            }
+          });
+        } catch (diagnosticError) {
+          // A database outage may also prevent recording its diagnostic. Leave
+          // the same durable intent untouched for the next tick in that case.
+          if (!transient) throw diagnosticError;
+        }
       }
     }
     return { observed: pending.length };

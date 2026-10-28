@@ -84,6 +84,79 @@ test("accepted intent persists before preparation, recovers lost preparation res
   assert.equal(job.caption, accepted.caption); assert.equal(job.automaticEnabled, true); assert.equal(job.import.previewDigest, f.result.previewDigest);
   assert.equal(Object.hasOwn(job.import, "confirmed"), false); assert.match(done.notice.id, /^calendar-ready-/);
 });
+for (const stage of ["upload_lookup", "preparing_record"]) for (const code of ["55P03", "57014", "40P01", "postgres_rollback_failed"]) {
+  test(`transient ${code} at ${stage} preserves and resumes the same intent and preparation`, async () => {
+    const f = await fixture(), accepted = await f.service().request(f.context, f.input);
+    const before = structuredClone((await f.snapshot()).importSubmissions[accepted.id]);
+    const failure = Object.assign(new Error("PRIVATE query token https://secret.invalid"), { code,
+      cause: Object.assign(new Error("PRIVATE cause"), { code: "55P03", detail: "PRIVATE payload" }) });
+    let armed = true, updates = 0;
+    const originalUpload = f.options.uploadStore, originalCalendar = f.options.store;
+    f.options.uploadStore = { update(...args) {
+      if (stage === "upload_lookup" && armed) { armed = false; throw failure; }
+      return originalUpload.update(...args);
+    } };
+    f.options.store = { update(...args) {
+      updates++;
+      if (stage === "preparing_record" && updates === 2 && armed) { armed = false; throw failure; }
+      return originalCalendar.update(...args);
+    } };
+    f.remount(); await f.progress();
+    const pending = (await f.snapshot()).importSubmissions[accepted.id];
+    assert.equal(pending.state, "accepted"); assert.equal(pending.errorCode, null);
+    assert.deepEqual(pending.progressDiagnostic, { stage, code, at: f.options.clock(), causeCode: "55P03" });
+    for (const key of ["id", "envelope", "request", "requestHash", "clientHash", "createdAt", "updatedAt"])
+      assert.deepEqual(pending[key], before[key]);
+    assert.equal(f.count(), stage === "upload_lookup" ? 0 : 1);
+    assert.equal(JSON.stringify(pending.progressDiagnostic).includes("PRIVATE"), false);
+    validateCalendarSubmissions(await f.snapshot());
+    f.remount(); await f.progress(); f.ready(); f.remount();
+    await Promise.all([f.progress(), f.progress()]);
+    const done = await f.get(), state = await f.snapshot();
+    assert.equal(done.state, "scheduled"); assert.equal(done.calendarItemId, accepted.id);
+    assert.equal(f.count(), 1); assert.equal(Object.keys(state.jobs).length, 1);
+    assert.equal(Object.keys(state.importSubmissions).length, 1);
+    assert.equal(state.importSubmissions[accepted.id].envelope, before.envelope);
+    assert.equal((await f.service().request(f.context, f.input)).id, accepted.id);
+  });
+}
+test("connection failures and serialization/capacity contention stay recoverable even if diagnostic persistence fails", async () => {
+  for (const code of ["40001", "53300", "25P03", "08006", "57P01", "ECONNRESET", "ETIMEDOUT", "EPIPE"]) {
+    const f = await fixture(), accepted = await f.service().request(f.context, f.input), original = f.options.store;
+    let updates = 0;
+    f.options.store = { update(...args) {
+      updates++; if (updates === 2 || updates === 3) throw Object.assign(new Error("PRIVATE"), { code });
+      return original.update(...args);
+    } };
+    f.remount(); await f.progress();
+    assert.equal((await f.get()).state, "accepted"); assert.equal(f.count(), 1);
+    f.remount(); await f.progress(); f.ready(); await f.progress();
+    assert.equal((await f.get()).calendarItemId, accepted.id); assert.equal(f.count(), 1);
+  }
+});
+test("deterministic database/retention refusals remain attention and diagnostics cannot carry raw data", async () => {
+  for (const code of ["42501", "23505", "media_retention_asset_retired", "unknown_PRIVATE_secret"]) {
+    const f = await fixture(), accepted = await f.service().request(f.context, f.input), original = f.options.store;
+    let updates = 0;
+    f.options.store = { update(...args) {
+      if (++updates === 2) throw Object.assign(new Error("PRIVATE query"), { code, statusCode: 409,
+        cause: { code: "unlisted_PRIVATE_secret", message: "PRIVATE" } });
+      return original.update(...args);
+    } };
+    f.remount(); await f.progress(); const state = await f.snapshot(), row = state.importSubmissions[accepted.id];
+    assert.equal(row.state, "attention"); assert.equal(row.errorCode, "calendar_import_submission_failed");
+    assert.equal(row.progressDiagnostic.code, code.startsWith("unknown_") ? "unknown_failure" : code);
+    assert.equal(JSON.stringify(row.progressDiagnostic).includes("PRIVATE"), false);
+    validateCalendarSubmissions(state);
+    f.ready(); f.remount(); await f.progress(); assert.equal(Object.keys((await f.snapshot()).jobs).length, 0);
+    assert.equal(f.count(), 1);
+    for (const bad of [{ ...row.progressDiagnostic, code: "PRIVATE" }, { ...row.progressDiagnostic, stage: "PRIVATE" },
+      { ...row.progressDiagnostic, causeCode: "PRIVATE" }, { ...row.progressDiagnostic, message: "PRIVATE" }]) {
+      const copy = structuredClone(state); copy.importSubmissions[accepted.id].progressDiagnostic = bad;
+      assert.throws(() => validateCalendarSubmissions(copy), { code: "calendar_import_submission_state_invalid" });
+    }
+  }
+});
 test("concurrent duplicate acceptance and response recovery keep one reserved slot and never undo edit/pause/cancel", async () => {
   const f = await fixture(), receipts = await Promise.all(Array.from({ length: 8 }, () => f.service().request(f.context, f.input)));
   assert.equal(new Set(receipts.map(row => row.id)).size, 1);
