@@ -19,7 +19,7 @@ function createUploadStorageRouter({store,disk,gcs,accessPolicy,newGcsEnabled=fa
   }
   const api={capabilities:disk.capabilities,getCapabilities:()=>({available:true,provider:"private-storage-router"}),
     storageForNewUpload(context){accessPolicy.resolve(context);if(newGcsEnabled && context.mediaTransport===TRANSPORT){if(!gcs)fail();return "gcs";}return "render_disk";},
-    authorizationLifetimeMsFor(row){return row.storageProvider==="gcs"?120000:600000;}};
+    authorizationLifetimeMsFor(row){return row.storageProvider==="gcs" && row.uploadMode!=="single"?120000:600000;}};
   for(const name of ["beginMultipart","authorizePart","resolveAuthorization","listParts","finalizeMultipart","inspectObject","streamSealedObject","abortMultipart"])
     api[name]=async args=>(await selected(args))[name](args);
   api.acceptPart=async args=>{const provider=await selected(args);if(provider!==disk)fail();return disk.acceptPart(args);};

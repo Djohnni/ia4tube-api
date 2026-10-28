@@ -54,6 +54,7 @@ function publicRecord(record) {
     uploadId: record.uploadId, assetId: record.assetId, kind: record.kind,
     mimeType: record.mimeType, sizeBytes: record.sizeBytes, chunkBytes: record.chunkBytes,
     partCount: Math.ceil(record.sizeBytes / record.chunkBytes), state: record.state,
+    ...(record.uploadMode === "single" ? { uploadMode: "single" } : {}),
     createdAt: record.createdAt, updatedAt: record.updatedAt,
     errorCode: record.errorCode || null,
     preparation: record.state === "uploaded" ? "pending" : "not_queued",
@@ -200,11 +201,15 @@ function createCalendarImportUploadService(options = {}) {
   const service = {
     async start(context, input) { return safe(async () => {
       const identity = owner(context);
-      fields(input, ["idempotencyKey", "kind", "mimeType", "sizeBytes", "sha256"]);
+      fields(input, ["idempotencyKey", "kind", "mimeType", "sizeBytes", "sha256", "uploadMode"]);
       if (typeof input.idempotencyKey !== "string" || !/^[A-Za-z0-9_-]{8,128}$/.test(input.idempotencyKey) ||
           !Object.hasOwn(MIME_TYPES, input.kind) || !MIME_TYPES[input.kind].includes(input.mimeType) || !Number.isSafeInteger(input.sizeBytes) || input.sizeBytes < 1 ||
-          input.sizeBytes > limits[input.kind + "Bytes"] || typeof input.sha256 !== "string" || !HASH.test(input.sha256)) fail("import_request_invalid");
-      const requestHash = sha(JSON.stringify([input.kind, input.mimeType, input.sizeBytes, input.sha256]));
+          input.sizeBytes > limits[input.kind + "Bytes"] || typeof input.sha256 !== "string" || !HASH.test(input.sha256) ||
+          input.uploadMode !== undefined && (input.uploadMode !== "single" || input.kind !== "video")) fail("import_request_invalid");
+      // Keep legacy identities unchanged, including uploads started by older apps.
+      const requestIdentity = [input.kind, input.mimeType, input.sizeBytes, input.sha256];
+      if (input.uploadMode === "single") requestIdentity.push("single");
+      const requestHash = sha(JSON.stringify(requestIdentity));
       const idempotencyHash = sha(identity.userId + ":" + input.idempotencyKey);
       const record = await update(identity, state => {
         const existingId = state.idempotency[idempotencyHash];
@@ -227,6 +232,13 @@ function createCalendarImportUploadService(options = {}) {
           const selected = provider.storageForNewUpload(context);
           if (!["render_disk", "gcs"].includes(selected)) fail("import_provider_response_invalid", 502);
           created.storageProvider = selected;
+        }
+        if (input.uploadMode === "single") {
+          // This is an explicit new-client opt-in. Existing records keep their
+          // original geometry; Render uploads and images retain their limits.
+          if (created.storageProvider !== "gcs") fail("import_single_upload_unavailable", 409);
+          created.uploadMode = "single";
+          created.chunkBytes = created.sizeBytes;
         }
         state.uploads[created.uploadId] = created;
         state.idempotency[idempotencyHash] = created.uploadId;

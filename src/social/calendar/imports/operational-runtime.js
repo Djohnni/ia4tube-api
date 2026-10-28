@@ -119,7 +119,7 @@ function createOperationalCalendarImportsRuntimeFactory({ enabled = false, prepa
         return { enabled: true, localSimulation: local, readyForProduction: false,
           scheduling: { enabled: true, localSimulation: local, directSubmission: Boolean(submissions) },
           upload: { origin: publicOrigin, chunkBytes: LIMITS.chunkBytes, maxImageBytes: LIMITS.imageBytes, maxVideoBytes: LIMITS.videoBytes,
-            ...(gcsProfile && context.mediaTransport === "gcs-parts-v1" ? {gcs:{...gcsProfile}} : {}) },
+            ...(gcsProfile && context.mediaTransport === "gcs-parts-v1" ? {gcs:{...gcsProfile,singleRequestVideo:true}} : {}) },
           preparation: { enabled: true, minVideoSeconds: 3, maxVideoSeconds: 60, photoMusicSeconds: LIMITS.photoClipSeconds }, musicTracks,
           ...(pilot === null ? {} : { pilot }) };
       },

@@ -107,7 +107,7 @@ function createCalendarImportRouter({ authenticate, resolvePrincipal, getService
   };
   router.get("/capabilities", call(null, (service, context) => service.capabilities(context), { capabilities: true, diagnosticStage: "capability_read" }));
   router.post("/uploads", call("upload", (service, context, req) => service.upload.start(context,
-    body(req, ["idempotencyKey", "kind", "mimeType", "sizeBytes", "sha256"])), { admission: true }));
+    body(req, ["idempotencyKey", "kind", "mimeType", "sizeBytes", "sha256", "uploadMode"])), { admission: true }));
   router.get("/uploads/:id", call("upload", (service, context, req) => service.upload.status(context, { uploadId: uploadId(req) })));
   for (const action of ["resume", "complete", "cancel"]) {
     router.post(`/uploads/:id/${action}`, call("upload", (service, context, req) => {

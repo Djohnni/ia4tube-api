@@ -166,9 +166,12 @@ function createGcsSdkTransport({ bucketName, prefix = PREFIX, projectId, credent
           result.iamConfiguration?.publicAccessPrevention !== "enforced" || result.billing?.requesterPays === true) fail("bucket_not_private");
       return Object.freeze({ private: true, bucketName, location: result.location, storageClass: result.storageClass });
     },
-    async signPartWrite({ objectKey, sizeBytes, md5Base64, expiresAt } = {}) {
+    async signPartWrite({ objectKey, sizeBytes, md5Base64, expiresAt, singleRequest = false } = {}) {
       partKey(objectKey);
-      size(sizeBytes); if (sizeBytes > PART_BYTES) fail("part_size_invalid"); if (!md5(md5Base64)) fail("checksum_invalid");
+      size(sizeBytes);
+      if (typeof singleRequest !== "boolean" || singleRequest && !objectKey.endsWith("/parts/01") ||
+          !singleRequest && sizeBytes > PART_BYTES) fail("part_size_invalid");
+      if (!md5(md5Base64)) fail("checksum_invalid");
       const now = expiry(expiresAt), target = file(objectKey);
       const headers = { "content-length": String(sizeBytes), "content-md5": md5Base64,
         "content-type": "application/octet-stream", "x-goog-if-generation-match": "0" };

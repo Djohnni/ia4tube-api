@@ -58,6 +58,70 @@ test("Google objects through real tenant PostgreSQL, actual process preparation,
     assert.equal(JSON.stringify(await denied.json()).includes(started.uploadId),false);
     assert.equal((await post(`${PREFIX}/uploads/${started.uploadId}/complete`,{})).upload.state,"uploaded");
   });
+  await t.test("new clients send a whole video above 5 MiB in one PUT, then prepare the same file with audio",async()=>{
+    const capabilities=await (await f.request(`${PREFIX}/capabilities`,{headers:NEGOTIATED})).json();
+    assert.equal(capabilities.upload.gcs.singleRequestVideo,true);
+    assert.equal(capabilities.upload.chunkBytes,5242880,"Legacy clients still see their original geometry");
+    // A valid MP4 free box makes the fixture exceed one legacy part without
+    // changing the decoded video or its original audio.
+    const free=Buffer.alloc(6*1024*1024);free.writeUInt32BE(free.length);free.write("free",4,"ascii");
+    const bytes=Buffer.concat([sourceBytes,free]),idempotencyKey=crypto.randomUUID();
+    const body={idempotencyKey,kind:"video",mimeType:"video/mp4",sizeBytes:bytes.length,sha256:hash(bytes),uploadMode:"single"};
+    const post=async(route,input)=>{
+      const response=await f.request(route,{method:"POST",headers:{...NEGOTIATED,"Content-Type":"application/json"},body:JSON.stringify(input)});
+      const json=await response.json();assert.equal(response.status,200,JSON.stringify(json));return json;
+    };
+    const started=(await post(`${PREFIX}/uploads`,body)).upload;
+    assert.equal(started.uploadMode,"single");assert.equal(started.partCount,1);assert.equal(started.chunkBytes,bytes.length);
+    assert.equal((await post(`${PREFIX}/uploads`,body)).upload.uploadId,started.uploadId,"Start replay keeps its exact identity");
+    const withoutMode={...body};delete withoutMode.uploadMode;
+    const conflicting=await f.request(`${PREFIX}/uploads`,{method:"POST",headers:{...NEGOTIATED,"Content-Type":"application/json"},body:JSON.stringify(withoutMode)});
+    assert.equal(conflicting.status,409,"A legacy start cannot adopt a differently shaped transfer");
+    const authorization=(await post(`${PREFIX}/uploads/${started.uploadId}/parts/1/authorize`,{
+      sha256:hash(bytes),md5Base64:crypto.createHash("md5").update(bytes).digest("base64")})).part;
+    const grant=(await post(`${PREFIX}/uploads/${started.uploadId}/parts/1/resolve`,{authorizationId:authorization.authorizationId})).grant;
+    assert.equal(grant.sizeBytes,bytes.length);assert.equal(grant.headers["content-length"],String(bytes.length));
+    const before=cloud.calls.filter(call=>call.operation==="signed_put").length;
+    cloud.failNext("signed_put",{afterCommit:true});await assert.rejects(cloud.putSigned(grant,bytes));
+    const resumed=(await post(`${PREFIX}/uploads/${started.uploadId}/resume`,{})).upload;
+    assert.equal(resumed.uploadMode,"single");
+    assert.deepEqual(resumed.completedParts,[{partNumber:1,sizeBytes:bytes.length,sha256:hash(bytes)}]);
+    assert.equal(cloud.calls.filter(call=>call.operation==="signed_put").length,before+1,"Lost ACK is reconciled without resending bytes");
+    await assert.rejects(f.upload.authorizePart(context(),{uploadId:started.uploadId,partNumber:2,sha256:hash(bytes),md5Base64:crypto.createHash("md5").update(bytes).digest("base64")}),{code:"import_part_invalid"});
+    const completed=(await post(`${PREFIX}/uploads/${started.uploadId}/complete`,{})).upload;
+    assert.equal(completed.state,"uploaded");assert.equal(completed.uploadMode,"single");assert.equal(completed.verification.sha256,hash(bytes));
+    const prepared=await f.enqueuePrepared(completed,{kind:"video",targets:["reel"],audioMode:"original"});
+    assert.equal(prepared.status.state,"ready");
+    const state=await f.snapshot(),stored=state.uploads[started.uploadId];
+    assert.equal(Object.keys(stored.gcs.parts).length,1);assert.equal(stored.gcs.manifest.length,1);
+    assert.equal(stored.verified.hasAudio,true);
+    assert.equal(hash(cloud.objects.get(stored.objectKey+"/source").bytes),hash(bytes));
+    const preview=await f.request(`${PREFIX}/assets/${prepared.assetId}/revisions/${prepared.mediaRevision}/preview`,{headers:NEGOTIATED});
+    assert.equal(preview.status,200);assert.ok((await preview.json()).preview.variants.some(v=>v.target==="reel"));
+    assert.equal(cloud.calls.filter(call=>call.operation==="signed_put").length,before+1,"Preparation does not ask the phone to upload again");
+    const {validateGcsUploadRecord}=require("../src/social/calendar/imports/gcs-provider");
+    assert.throws(()=>validateGcsUploadRecord({...structuredClone(stored),chunkBytes:5242880}),/state_invalid/);
+  });
+  await t.test("full-file mode is rejected for images, unnegotiated disk uploads, and oversized inputs",async()=>{
+    const base={idempotencyKey:crypto.randomUUID(),kind:"video",mimeType:"video/mp4",sizeBytes:22*1024*1024,sha256:hash(sourceBytes),uploadMode:"single"};
+    await assert.rejects(f.upload.start(f.context,base),{code:"import_single_upload_unavailable"});
+    await assert.rejects(f.upload.start(context(),{...base,kind:"image",mimeType:"image/png",sizeBytes:1024}),{code:"import_request_invalid"});
+    await assert.rejects(f.upload.start(context(),{...base,sizeBytes:100*1024*1024+1}),{code:"import_request_invalid"});
+    const legacy=await f.upload.start(context(),{...base,uploadMode:undefined});
+    assert.equal(legacy.chunkBytes,5242880);assert.equal(legacy.partCount,5);assert.equal(legacy.uploadMode,undefined);
+    await f.upload.cancel(context(),{uploadId:legacy.uploadId});
+  });
+  await t.test("full-file cancellation fences its single late PUT without changing existing objects",async()=>{
+    const bytes=Buffer.alloc(6*1024*1024,29);
+    const started=await f.upload.start(context(),{idempotencyKey:crypto.randomUUID(),kind:"video",mimeType:"video/mp4",sizeBytes:bytes.length,sha256:hash(bytes),uploadMode:"single"});
+    const auth=await f.upload.authorizePart(context(),{uploadId:started.uploadId,partNumber:1,sha256:hash(bytes),md5Base64:crypto.createHash("md5").update(bytes).digest("base64")});
+    const grant=await f.upload.resolvePart(context(),{uploadId:started.uploadId,partNumber:1,authorizationId:auth.authorizationId});
+    assert.equal((await f.upload.cancel(context(),{uploadId:started.uploadId})).state,"cancelled");
+    await assert.rejects(cloud.putSigned(grant,bytes),error=>error.code===412);
+    const stored=(await f.snapshot()).uploads[started.uploadId];
+    assert.equal(stored.gcs.phase,"aborted");assert.ok(stored.gcs.parts["1"].cancelGeneration);
+    assert.equal(cloud.objects.has(stored.objectKey+"/source"),false);
+  });
   await t.test("unacknowledged prepared generation requires a real byte SHA before adoption",async()=>{
     const state=await f.snapshot(),job=state.preparation.jobs[state.preparation.assets[ready.assetId].revisions[String(ready.mediaRevision)]],execution=state.preparationExecutions.records[job.dispatchKey];
     const commit=JSON.parse(await fs.readFile(path.join(f.preparationWorkingRoot,execution.executionId,"commit.json"),"utf8"));

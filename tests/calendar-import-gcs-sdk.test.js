@@ -66,6 +66,17 @@ test("official SDK signs exact bucket, object, MD5, length, type and generation-
     }
     await assert.rejects(transport.signPartWrite({ objectKey, sizeBytes: bytes.length, md5Base64: "not-md5", expiresAt: now + 60000 }), /checksum_invalid/);
     await assert.rejects(transport.signPartWrite({ objectKey, sizeBytes: 5 * 1024 * 1024 + 1, md5Base64: hash(bytes, "md5", "base64"), expiresAt: now + 60000 }), /part_size_invalid/);
+    const whole = await transport.signPartWrite({ objectKey, sizeBytes: 22225691,
+      md5Base64: hash(bytes, "md5", "base64"), expiresAt: now + 600000, singleRequest: true });
+    assert.equal(whole.method, "PUT");
+    assert.equal(whole.headers["content-length"], "22225691");
+    assert.equal(whole.headers["x-goog-if-generation-match"], "0");
+    assert.equal(new URL(whole.url).searchParams.get("X-Goog-Expires"), "600");
+    for (const invalid of [
+      { objectKey: "a".repeat(64) + "/parts/02", sizeBytes: 22225691, singleRequest: true },
+      { objectKey, sizeBytes: 100 * 1024 * 1024 + 1, singleRequest: true },
+      { objectKey, sizeBytes: 22225691, singleRequest: "true" }
+    ]) await assert.rejects(transport.signPartWrite({ ...invalid, md5Base64: hash(bytes, "md5", "base64"), expiresAt: now + 60000 }));
     await assert.rejects(transport.signObjectRead({ objectKey, generation: objectGeneration, sizeBytes: bytes.length, contentType: "video/mp4", expiresAt: now + 900001 }), /expiry_invalid/);
   } finally { transport.close(); }
 });

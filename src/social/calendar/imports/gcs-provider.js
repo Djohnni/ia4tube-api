@@ -17,6 +17,9 @@ function validateGcsUploadRecord(row) {
   const value = row?.gcs;
   if (value === undefined) return row;
   if(!value || typeof value!=="object" || Array.isArray(value))fail("state_invalid");
+  if (row.uploadMode !== undefined && row.uploadMode !== "single" ||
+      row.uploadMode === "single" && (row.kind !== "video" || !Number.isSafeInteger(row.sizeBytes) ||
+        row.sizeBytes < 1 || row.sizeBytes > 100 * 1024 * 1024 || row.chunkBytes !== row.sizeBytes)) fail("state_invalid");
   if (row.disk || row.r2 || row.storageProvider !== "gcs" || value.schema !== 1 ||
       !UUID.test(value.uploadId || "") || !UUID.test(value.objectVersion || "") ||
       !["open", "composing", "sealed", "aborting", "aborted"].includes(value.phase) ||
@@ -118,7 +121,8 @@ function createGcsPrivateUploadProvider({ store, transport, inspector, accessPol
     }));},
     async resolveAuthorization(args){return safe(async()=>{
       const row=await read(args),grant=currentGrant(row,args);
-      const signed=await transport.signPartWrite({objectKey:key(row,args.partNumber),sizeBytes:grant.sizeBytes,md5Base64:grant.md5Base64,expiresAt:grant.expiresAt});
+      const signed=await transport.signPartWrite({objectKey:key(row,args.partNumber),sizeBytes:grant.sizeBytes,md5Base64:grant.md5Base64,expiresAt:grant.expiresAt,
+        singleRequest:row.uploadMode === "single"});
       await mutate(args,current=>currentGrant(current,args));
       return {...signed,transport:"gcs-parts-v1"};
     });},
