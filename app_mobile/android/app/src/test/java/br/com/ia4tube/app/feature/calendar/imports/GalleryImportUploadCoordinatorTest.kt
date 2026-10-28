@@ -11,6 +11,9 @@ import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.runTest
+import kotlinx.coroutines.test.advanceTimeBy
+import kotlinx.coroutines.test.advanceUntilIdle
+import kotlinx.coroutines.test.runCurrent
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import org.junit.Assert.*
 import org.junit.Rule
@@ -81,6 +84,8 @@ class GalleryImportUploadCoordinatorTest {
         var loseComplete = false
         var loseCancel = false
         var pendingVerification = false
+        var pendingRecordCode: String? = null
+        var pendingCompleteReturnsRecord = false
         var statusHook: (suspend () -> ImportUploadRecord)? = null
         var completeError: ImportApiFailure? = null
         var initialPhase = ImportServerPhase.UPLOADING
@@ -144,7 +149,8 @@ class GalleryImportUploadCoordinatorTest {
                 completions++; assertEquals(ImportPhase.VERIFYING, store.read(owner)!!.state.phase)
                 completeError?.let { throw it }
                 if (pendingVerification) {
-                    serverRecord = serverRecord!!.copy(phase = ImportServerPhase.VERIFYING)
+                    serverRecord = serverRecord!!.copy(phase = ImportServerPhase.VERIFYING, errorCode = pendingRecordCode)
+                    if (pendingCompleteReturnsRecord) return serverRecord!!
                     throw ImportApiFailure("import_verification_pending", 503, true)
                 }
                 val digest = MessageDigest.getInstance("SHA-256")
@@ -163,9 +169,10 @@ class GalleryImportUploadCoordinatorTest {
                 return serverRecord!!
             }
         }
-        fun coordinator(storeOverride: PrivateImportCheckpointStore = store, io: CoroutineDispatcher = Dispatchers.IO) = GalleryImportUploadCoordinator(
+        fun coordinator(storeOverride: PrivateImportCheckpointStore = store, io: CoroutineDispatcher = Dispatchers.IO,
+            changed: (ImportUploadRunView) -> Unit = {}) = GalleryImportUploadCoordinator(
             { activeOwner }, { token }, source, storeOverride, { transport }, io = io,
-            onChanged = { synchronized(views) { views.add(it) } },
+            onChanged = { synchronized(views) { views.add(it) }; changed(it) },
             diagnostics = ImportMediaDiagnostics({ event ->
                 synchronized(diagnosticEvents) { diagnosticEvents.add(event) }
                 if (throwingDiagnostics) throw AssertionError("synthetic-private-sink-error")
@@ -321,10 +328,10 @@ class GalleryImportUploadCoordinatorTest {
 
     @Test fun explicitPendingInspectionCompletesAfterThirtyOneSecondsWithoutNewUploadOrCompletePost() = runTest {
         val f = fixture(); val coordinator = f.coordinator(io = StandardTestDispatcher(testScheduler))
-        coordinator.select(uri, config); f.pendingVerification = true
+        coordinator.select(uri, config); f.pendingVerification = true; f.pendingRecordCode = "import_verification_pending"
         f.statusHook = {
             if (testScheduler.currentTime >= 31_000) f.serverRecord = f.serverRecord!!.copy(
-                phase = ImportServerPhase.UPLOADED, verifiedSha256 = hash(f.content))
+                phase = ImportServerPhase.UPLOADED, verifiedSha256 = hash(f.content), errorCode = null)
             f.serverRecord!!
         }
         val result = coordinator.transfer()
@@ -338,9 +345,86 @@ class GalleryImportUploadCoordinatorTest {
         assertTrue(result.state.prepared.isEmpty()); assertFalse(result.state.canDisplayScheduled)
     }
 
+    @Test fun pendingRecordErrorKeepsTheSameRuntimeActionWaitingThenSubmitsExactlyOnce() = runTest {
+        val f = fixture(); val io = StandardTestDispatcher(testScheduler)
+        f.coordinator(io = io).select(uri, config)
+        f.pendingVerification = true; f.pendingRecordCode = "import_verification_pending"
+        f.statusHook = {
+            if (testScheduler.currentTime >= 31_000) f.serverRecord = f.serverRecord!!.copy(
+                phase = ImportServerPhase.UPLOADED, verifiedSha256 = hash(f.content), errorCode = null)
+            f.serverRecord!!
+        }
+        var submissions = 0
+        val chosen = ImportCalendarSchedule("2026-10-30", "09:30")
+        val runtime = GalleryImportWorkflowRuntime(f.owner, f.token, { f.token }, ImportCapabilities(true, f.owner,
+            preparationEnabled = true, calendarSubmissionEnabled = true), this,
+            { _, changed -> CoordinatedGalleryImportUpload(f.coordinator(io = io, changed = changed)) },
+            { _, changed -> object : GalleryImportPreparationControl {
+                override suspend fun restore() = ImportPreparationRunView(ImportPreparationRunStatus.UPLOAD_REQUIRED, f.saved().state).also(changed)
+                override suspend fun configure(value: ImportConfiguration) = restore()
+                override suspend fun request() = restore()
+                override suspend fun reconcileOnce() = restore()
+                override suspend fun adoptGenerated(id: String, revision: Long) = restore()
+                override suspend fun confirmPreview(value: ImportPreviewConfirmation) = restore()
+                override suspend fun schedule(caption: String, at: Long, automatic: Boolean) = restore()
+                override suspend fun reconcileScheduleOnce() = restore()
+                override suspend fun finishScheduledDraft() = restore()
+                override suspend fun submitToCalendar(caption: String, schedule: ImportCalendarSchedule?): ImportPreparationRunView {
+                    assertTrue(f.saved().state.upload!!.serverVerified); assertEquals(chosen, schedule)
+                    submissions++
+                    return ImportPreparationRunView(ImportPreparationRunStatus.CALENDAR_ACCEPTED,
+                        calendarSubmissionReceipt = ImportCalendarSubmissionReceipt("d".repeat(40), f.serverRecord!!.assetId,
+                            f.serverRecord!!.uploadId, "one-calendar-intent", "accepted", null, 0, chosen.date, chosen.time, caption, null)).also(changed)
+                }
+                override fun pause() = Unit
+                override fun invalidateSession() = Unit
+            } })
+        runtime.start(); advanceUntilIdle()
+        runtime.addToCalendar("Caption", chosen); runCurrent()
+        advanceTimeBy(10_000); runCurrent()
+        assertTrue(runtime.state.value.busy); assertEquals(0, submissions)
+        val waiting = galleryImportUploadPresentation(runtime.state.value.upload, busy = true,
+            foreground = true, initialized = true, sessionValid = true)
+        assertEquals("Conferindo o arquivo no servidor…", waiting.title)
+        runtime.addToCalendar("Duplicate tap", chosen); runCurrent()
+        advanceUntilIdle()
+        assertFalse(runtime.state.value.busy); assertEquals(1, submissions)
+        assertEquals(1, f.creations); assertEquals(1, f.puts); assertEquals(1, f.completions)
+        assertEquals(setOf(f.serverRecord!!.uploadId), f.statusIds.toSet())
+        assertTrue(f.statusIds.size > 1); assertTrue(testScheduler.currentTime in 31_000L..33_000L)
+        assertEquals("accepted", runtime.state.value.preparation!!.calendarSubmissionReceipt!!.state)
+        assertNull(runtime.state.value.draft)
+        runtime.dispose()
+    }
+
+    @Test fun aRealVerifyingRecordErrorStillStopsPollingWithoutSubmittingOrReplacingTheUpload() = runTest {
+        val f = fixture(); val coordinator = f.coordinator(io = StandardTestDispatcher(testScheduler))
+        coordinator.select(uri, config); f.pendingVerification = true; f.pendingRecordCode = "import_media_invalid"
+        val result = coordinator.transfer()
+        assertEquals("import_media_invalid", result.errorCode)
+        assertEquals(1, f.statusIds.size); assertEquals(2_000L, testScheduler.currentTime)
+        assertEquals(1, f.creations); assertEquals(1, f.puts); assertEquals(1, f.completions)
+        assertFalse(result.state!!.upload!!.serverVerified)
+    }
+
+    @Test fun aVerifyingCompleteRecordWithTheExpectedPendingCodeAlsoWaitsForUploaded() = runTest {
+        val f = fixture(); val coordinator = f.coordinator(io = StandardTestDispatcher(testScheduler))
+        coordinator.select(uri, config)
+        f.pendingVerification = true; f.pendingRecordCode = "import_verification_pending"; f.pendingCompleteReturnsRecord = true
+        f.statusHook = {
+            if (testScheduler.currentTime >= 6_000) f.serverRecord = f.serverRecord!!.copy(
+                phase = ImportServerPhase.UPLOADED, verifiedSha256 = hash(f.content), errorCode = null)
+            f.serverRecord!!
+        }
+        assertEquals(ImportUploadRunStatus.UPLOADED, coordinator.transfer().status)
+        assertEquals(6_000L, testScheduler.currentTime); assertEquals(3, f.statusIds.size)
+        assertEquals(1, f.completions); assertEquals(1, f.puts); assertEquals(1, f.creations)
+    }
+
     @Test fun pendingWaitStopsAtFiveMinutesAndRestoreDoesNotRestartPolling() = runTest {
         val f = fixture(); val io = StandardTestDispatcher(testScheduler)
         val coordinator = f.coordinator(io = io); coordinator.select(uri, config); f.pendingVerification = true
+        f.pendingRecordCode = "import_verification_pending"
         val result = coordinator.transfer()
         assertEquals(300_000L, testScheduler.currentTime)
         assertEquals(ImportUploadRunStatus.RECONCILIATION_REQUIRED, result.status)

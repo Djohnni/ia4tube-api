@@ -267,7 +267,7 @@ class GalleryImportUploadCoordinator internal constructor(
             }
             if (record != null) {
                 observe(run, record)
-                if (record.phase != ImportServerPhase.VERIFYING || record.errorCode != null)
+                if (!verificationPending(record))
                     return@withTimeoutOrNull record
             }
             var current: ImportUploadRecord
@@ -279,12 +279,15 @@ class GalleryImportUploadCoordinator internal constructor(
                 current = run.api.status(run.binding.owner, uploadId)
                 guard(run)
                 observe(run, current)
-            } while (current.phase == ImportServerPhase.VERIFYING && current.errorCode == null)
+            } while (verificationPending(current))
             current
         }
         return if (verified == null) emit(run, ImportUploadRunStatus.RECONCILIATION_REQUIRED,
             error = "import_verification_pending") else showRecord(run, verified)
     }
+
+    private fun verificationPending(record: ImportUploadRecord) = record.phase == ImportServerPhase.VERIFYING &&
+        (record.errorCode == null || record.errorCode == "import_verification_pending")
 
     private suspend fun observe(run: Run, record: ImportUploadRecord, receiptsAuthoritative: Boolean = false) {
         diagnosticStage(run, ImportMediaStage.UPLOAD_RESPONSE_VALIDATION)
