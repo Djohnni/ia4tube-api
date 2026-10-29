@@ -1425,12 +1425,15 @@ function listAllPlanningDirs(baseDir) {
 function externalEditRegistration(value) {
   if (value == null) return null;
   const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+  const typed = Object.hasOwn(value, "mediaKind");
   if (value.kind !== "edit_calendar_v1" || !uuid.test(value.contextId || "") ||
-      !uuid.test(value.editOrderId || "") || !/^[a-f0-9]{64}$/.test(value.inputHash || "")) {
+      !uuid.test(value.editOrderId || "") || !/^[a-f0-9]{64}$/.test(value.inputHash || "") ||
+      typed && !["image", "video"].includes(value.mediaKind)) {
     throw Object.assign(new Error("Vinculo do Edit invalido."), { code: "edit_calendar_registration_invalid", statusCode: 400 });
   }
   return { kind: "edit_calendar_v1", contextId: value.contextId.toLowerCase(),
-    editOrderId: value.editOrderId.toLowerCase(), inputHash: value.inputHash };
+    editOrderId: value.editOrderId.toLowerCase(), inputHash: value.inputHash,
+    ...(typed ? { mediaKind: value.mediaKind } : {}) };
 }
 
 function createRequest({ baseDir, cliente, whatsapp, body = {}, files = {}, freeArtBlocked = false, calendarAuthorizationFactory = null,
@@ -1441,7 +1444,7 @@ function createRequest({ baseDir, cliente, whatsapp, body = {}, files = {}, free
   const hasStructuredPhotoItems = planningPhotoItemsAreStructured(parsedPhotoItems);
   const quantidadeReservada = hasStructuredPhotoItems ? parsedPhotoItems.length : normalizeQuantity(body);
   if (editRegistration && quantidadeReservada !== 1)
-    throw Object.assign(new Error("O vinculo do Edit recebe um video por pedido."), { code: "edit_calendar_registration_invalid", statusCode: 400 });
+    throw Object.assign(new Error("O vinculo do Edit recebe uma publicacao por pedido."), { code: "edit_calendar_registration_invalid", statusCode: 400 });
   if (!Number.isFinite(quantidadeReservada) || quantidadeReservada <= 0) {
     const error = new Error("Informe pelo menos uma arte com objetivo, escrita ou imagem para o Planejamento Mensal.");
     error.statusCode = 400;
@@ -3909,6 +3912,11 @@ function savePlanningArtResult({
     const error = new Error("Formato de resultado nao suportado.");
     error.statusCode = 415; error.code = "monthly_planning_art_result_type_invalid"; throw error;
   }
+  const expectedKind = externalEditRegistration(found.pedido.edit_calendar)?.mediaKind;
+  if (expectedKind && expectedKind !== (video ? "video" : "image")) {
+    const error = new Error("O resultado deve ter o formato escolhido no pedido do Edit.");
+    error.statusCode = 422; error.code = "edit_calendar_media_type_mismatch"; throw error;
+  }
   let videoMetadata = null;
   if (video) videoMetadata = inspectReadyVideo(resultadoPath);
   else {
@@ -4195,7 +4203,7 @@ function savePlanResult({ baseDir, planningId, payload = {}, pedidosDir = "", cl
       : [];
   const postagens = enrichPlanPhotoReferences(planning, rawPostagens);
   if (editRegistration && postagens.length !== 1)
-    throw Object.assign(new Error("O vinculo do Edit recebe um video por pedido."), { code: "edit_calendar_registration_invalid", statusCode: 400 });
+    throw Object.assign(new Error("O vinculo do Edit recebe uma publicacao por pedido."), { code: "edit_calendar_registration_invalid", statusCode: 400 });
 
   if (!postagens.length) {
     const error = new Error("plano_mensal precisa conter postagens planejadas.");

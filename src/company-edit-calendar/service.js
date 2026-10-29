@@ -29,12 +29,16 @@ function contextInput(value, now) {
     destination: "reel", caption: calendarCaption(value.caption ?? "") };
 }
 function bindInput(value) {
-  exact(value, ["ticket", "editOrderId", "title", "caption", "durationSeconds", "inputHash"]);
+  exact(value, ["ticket", "editOrderId", "title", "caption", "durationSeconds", "inputHash", "mediaKind"]);
+  const typed = Object.hasOwn(value, "mediaKind"), image = value.mediaKind === "image";
+  if (typed && !["image", "video"].includes(value.mediaKind)) fail("input_invalid", 400);
   if (!TICKET.test(value.ticket || "") || !UUID.test(value.editOrderId || "") || !HASH.test(value.inputHash || "") ||
-      !Number.isFinite(value.durationSeconds) || value.durationSeconds < 3 || value.durationSeconds > 60) fail("input_invalid", 400);
+      (image ? value.durationSeconds !== null :
+        !Number.isFinite(value.durationSeconds) || value.durationSeconds < 3 || value.durationSeconds > 60)) fail("input_invalid", 400);
   const title = text(value.title); if (!title) fail("input_invalid", 400);
   return { editOrderId: value.editOrderId.toLowerCase(), title, caption: calendarCaption(value.caption ?? ""),
-    durationSeconds: value.durationSeconds, inputHash: value.inputHash };
+    durationSeconds: value.durationSeconds, inputHash: value.inputHash,
+    ...(typed ? { mediaKind: value.mediaKind } : {}) };
 }
 function billingDigest(client) {
   // No password, token, contact data or entire client snapshot enters this journal.
@@ -170,7 +174,9 @@ function createEditCalendarService({ dataDir, planningDir, ordersDir, secret, re
       }
       const priorReservation = current.client.planejamento_mensal_reservas?.[row.planningId];
       let plan = planning.findPlanningById({ baseDir: planningRoot, whatsapp: row.owner, planningId: row.planningId });
-      const externalEdit = { kind: "edit_calendar_v1", contextId: id, editOrderId: request.editOrderId, inputHash: request.inputHash };
+      const externalEdit = { kind: "edit_calendar_v1", contextId: id, editOrderId: request.editOrderId, inputHash: request.inputHash,
+        ...(request.mediaKind ? { mediaKind: request.mediaKind } : {}) };
+      const image = request.mediaKind === "image", objective = image ? "Imagem escolhida no Edit" : "Vídeo escolhido no Edit";
       if (plan && (JSON.stringify(plan.edit_calendar) !== JSON.stringify(externalEdit) || plan.whatsapp !== row.owner)) fail("order_conflict");
       if (priorReservation && !plan) fail("allocation_reconciliation_required", 503);
       if (!priorReservation) {
@@ -182,7 +188,7 @@ function createEditCalendarService({ dataDir, planningDir, ordersDir, secret, re
         try {
           plan = planning.createRequest({ baseDir: planningRoot, cliente: current.client, whatsapp: row.owner,
             body: { quantidade_reservada: 1, instagram_destination: "feed", orientacoes_fotos: [
-              { slot_id: "edit-video", ordem: 1, tem_arquivo: false, objetivo: "Vídeo escolhido no Edit" } ] },
+              { slot_id: image ? "edit-image" : "edit-video", ordem: 1, tem_arquivo: false, objetivo: objective } ] },
             files: {}, freeArtBlocked: row.freeArtBlocked || currentFreeArtBlocked(row.ipIdentity) === true, externalEdit,
             calendarAuthorizationFactory: () => row.envelope });
         } catch (error) {
@@ -198,7 +204,7 @@ function createEditCalendarService({ dataDir, planningDir, ordersDir, secret, re
       const caption = row.request.caption || request.caption || "Conheça nosso trabalho e acompanhe nosso conteúdo.";
       planning.savePlanResult({ baseDir: planningRoot, planningId: row.planningId, pedidosDir: orderRoot, cliente: current.client,
         payload: { postagens: [{ planejamento_item_id: `edit-${id}`, ordem: 1, tema: request.title,
-          objetivo: "Vídeo escolhido no Edit", data_sugerida: row.request.date, horario_sugerido: row.request.time,
+          objetivo: objective, data_sugerida: row.request.date, horario_sugerido: row.request.time,
           descricao_instagram: caption, legenda: caption, sem_imagem: true }] } });
       const found = planning.findPlanningArtOrder({ pedidosDir: orderRoot, pedidoId: row.pedidoId });
       if (!found || found.pedido.whatsapp !== row.owner || JSON.stringify(found.pedido.edit_calendar) !== JSON.stringify(externalEdit))
