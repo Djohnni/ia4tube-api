@@ -68,3 +68,21 @@ gradle :app:testDebugUnitTest --offline --console=plain '-Pkotlin.incremental=fa
 No release/AAB was generated and versionCode/versionName were deliberately not advanced. No app was installed, uninstalled or cleared. AAB37, signing material and historical evidence are untouched. The future authorized internal release must use the next actually available versionCode; do not submit this changed source again as37.
 
 Before declaring the feature live: authorized backend extension/deployment with gates closed, unique internal candidate, Play installation and end-to-end device validation; real external scheduling requires a separate controlled window. This development does not postpone or substitute the existing37 Meta submission route.
+
+
+## Calendário e histórico — versão 83
+
+A galeria de artes programadas e o calendário geral exibem publicações futuras,
+excluindo itens publicados ou cancelados. Trabalhos ainda em envio, confirmação ou
+preparação real permanecem visíveis até terminar, mesmo quando o horário já passou.
+A data de apresentação usa o instante agendado existente; a alternativa é data e hora de Brasília.
+
+Em Meus pedidos, Histórico de artes abre a mesma galeria privada em modo histórico,
+com os itens restantes, recentes primeiro. Imagens, vídeos enviados e vídeos do Edit
+continuam com a mídia, o status e a autenticação originais. O histórico não oferece
+a entrada de adicionar foto/vídeo nem reutilização com música. Voltar preserva a lista
+de pedidos e seu filtro.
+
+A separação existe somente na apresentação do app iA4tube. Snapshot, cache, pedidos,
+fontes de sincronização, APIs, fila e publicação automática permanecem completos.
+Nenhum trabalho é apagado, cancelado ou republicado para realizar esta separação.

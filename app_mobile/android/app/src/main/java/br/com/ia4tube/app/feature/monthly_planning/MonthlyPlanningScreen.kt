@@ -1,5 +1,8 @@
 package br.com.ia4tube.app.feature.monthly_planning
 
+import java.time.LocalDate
+import java.time.ZoneId
+
 import android.graphics.BitmapFactory
 import android.content.Intent
 import android.net.Uri
@@ -502,7 +505,8 @@ fun MonthlyPlanningScreen(
             CalendarGallery(calendarModel, previewToken, tokenProvider = tokenProvider) { showGallery = false; viewModel.refreshGeneralCalendar() }
         } else if (showGeneralCalendar) {
             MonthlyPlanningGeneralCalendarContent(
-                state = state.copy(generalCalendarPosts = projectCalendarImports(state.generalCalendarPosts, calendar.data, calendar.fresh),
+                state = state.copy(generalCalendarPosts = upcomingGeneralCalendarItems(
+                    projectCalendarImports(state.generalCalendarPosts, calendar.data, calendar.fresh), calendar.data),
                     calendarError = calendar.error ?: state.calendarError),
                 previewToken = previewToken,
                 onGallery = { showGallery = true },
@@ -1015,6 +1019,21 @@ private fun MonthlyPlanningGeneralCalendarContent(
                 color = MaterialTheme.colorScheme.primary
             )
         }
+        val today = LocalDate.now(ZoneId.of("America/Sao_Paulo")).toString()
+        val activeEarlierDays = state.visibleGeneralCalendarPosts.filter { it.date.isNotBlank() && it.date < today }
+        if (activeEarlierDays.isNotEmpty()) MonthlyPlanningCalendarList(
+            title = "Em andamento",
+            items = activeEarlierDays,
+            previewToken = previewToken,
+            loading = state.calendarLoading,
+            emptyText = "",
+            onOpenOrder = onOpenOrder,
+            onRemove = onRemove,
+            onReschedule = onReschedule,
+            reschedulingItemKeys = state.reschedulingCalendarItemKeys,
+            sharingItemKeys = state.sharingCalendarItemKeys,
+            onShare = onShare
+        )
         MonthlyPlanningCalendarList(
             title = "Postagens planejadas",
             items = state.visibleGeneralCalendarPosts,

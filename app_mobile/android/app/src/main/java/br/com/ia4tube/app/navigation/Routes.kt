@@ -12,6 +12,7 @@ object Routes {
     const val Edit = "edit"
     const val Instagram = "instagram"
     const val PlannedArts = "planned-arts"
+    const val ArtHistory = "art-history"
     const val Orders = "orders?filter={filter}"
     const val OrderDetail = "orders/{pedidoId}"
     const val CreateArtEmpresa = "create-art/empresa?photoUri={photoUri}"

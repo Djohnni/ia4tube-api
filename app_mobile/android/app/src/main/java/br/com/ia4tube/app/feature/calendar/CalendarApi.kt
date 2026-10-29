@@ -65,10 +65,6 @@ interface CalendarGateway {
     suspend fun destination(item: ScheduledArt, destination: String): CalendarSnapshot = throw CalendarFailure(400)
     suspend fun automatic(item: ScheduledArt, enabled: Boolean): CalendarSnapshot = throw CalendarFailure(400)
 }
-internal fun galleryItems(items: List<ScheduledArt>, today: LocalDate): List<ScheduledArt> = items
-    .filter { it.date >= today.toString() || (it.automatic && it.status != "published") }
-    .sortedWith(compareBy<ScheduledArt> { it.scheduledAt }.thenBy { it.id })
-
 internal fun parseCalendar(root: JSONObject): CalendarSnapshot {
     require(root.getBoolean("ok"))
     if (!root.getBoolean("enabled")) return CalendarSnapshot()

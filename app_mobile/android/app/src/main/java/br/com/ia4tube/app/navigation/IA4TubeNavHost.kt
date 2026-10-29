@@ -78,6 +78,7 @@ import br.com.ia4tube.app.domain.usecase.RegisterUseCase
 import br.com.ia4tube.app.domain.usecase.SendSupportMessageUseCase
 import br.com.ia4tube.app.feature.carousel.CarouselScreen
 import br.com.ia4tube.app.feature.calendar.CalendarGallery
+import br.com.ia4tube.app.feature.calendar.CalendarGalleryMode
 import br.com.ia4tube.app.feature.calendar.rememberCalendarModel
 import br.com.ia4tube.app.feature.carousel.CarouselViewModel
 import br.com.ia4tube.app.feature.carousel.CarouselViewModelFactory
@@ -295,6 +296,9 @@ fun IA4TubeNavHost(
         when (target) {
             Routes.Instagram -> {
                 navController.openInstagramFromReturn()
+            }
+            Routes.ArtHistory -> {
+                navController.openArtHistoryAfterAuth(hasSavedToken())
             }
             PENDING_CAMERA_ACTION -> {
                 cameraRequestKey += 1
@@ -572,6 +576,19 @@ fun IA4TubeNavHost(
                 val calendarModel = rememberCalendarModel(repository::getSavedToken)
                 CalendarGallery(calendarModel, repository.getSavedToken(), backLabel = "Voltar à página inicial", tokenProvider = repository::getSavedToken) {
                     navController.leavePlannedArts(galleryEntry)
+                }
+            }
+        }
+
+        composable(Routes.ArtHistory) { galleryEntry ->
+            if (!hasSavedToken()) {
+                LaunchedEffect(Unit) { requestAuthFor(Routes.ArtHistory) }
+            } else {
+                val calendarModel = rememberCalendarModel(repository::getSavedToken)
+                CalendarGallery(calendarModel, repository.getSavedToken(),
+                    backLabel = "Voltar a Meus pedidos", tokenProvider = repository::getSavedToken,
+                    mode = CalendarGalleryMode.HISTORY) {
+                    navController.leaveArtHistory(galleryEntry)
                 }
             }
         }
@@ -871,6 +888,11 @@ fun IA4TubeNavHost(
                     },
                     onOpenMonthlyPlanning = { planningId ->
                         navigateProtected(Routes.monthlyPlanningDetail(planningId))
+                    },
+                    onOpenArtHistory = {
+                        navController.openArtHistory(backStackEntry, hasSavedToken()) {
+                            requestAuthFor(Routes.ArtHistory)
+                        }
                     }
                 )
             }

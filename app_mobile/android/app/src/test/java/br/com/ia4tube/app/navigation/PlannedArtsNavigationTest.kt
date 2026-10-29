@@ -12,7 +12,10 @@ import androidx.navigation.NavGraph
 import androidx.navigation.NavGraphNavigator
 import androidx.navigation.NavHostController
 import androidx.navigation.NavOptions
+import androidx.navigation.NavArgument
+import androidx.navigation.NavType
 import androidx.navigation.Navigator
+import br.com.ia4tube.app.feature.orders.OrderListFilter
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.test.StandardTestDispatcher
@@ -193,6 +196,80 @@ class PlannedArtsNavigationTest {
         }
     }
 
+    @Test fun historyFromOrdersIgnoresQueuedTapAndReturnsToSameOrderFilterAndStore() = runTest(dispatcher) {
+        val controller = harness().controller
+        controller.navigate(Routes.orders(OrderListFilter.Ready))
+        val orders = controller.currentBackStackEntry!!
+        val store = orders.viewModelStore
+        val filter = orders.arguments?.getString("filter")
+        assertTrue(controller.openArtHistory(orders, authenticated = true) { fail("Owner is logged in") })
+        val history = controller.currentBackStackEntry!!
+        assertEquals(Routes.ArtHistory, history.destination.route)
+        assertFalse(controller.openArtHistory(orders, authenticated = true) { fail("Queued tap") })
+        assertEquals(1, controller.currentBackStack.value.count { it.destination.route == Routes.ArtHistory })
+        assertTrue(controller.leaveArtHistory(history))
+        assertSame(orders, controller.currentBackStackEntry)
+        assertSame(store, controller.currentBackStackEntry!!.viewModelStore)
+        assertEquals(filter, controller.currentBackStackEntry!!.arguments?.getString("filter"))
+        assertFalse(controller.leaveArtHistory(history))
+        assertSame(orders, controller.currentBackStackEntry)
+    }
+
+    @Test fun historyRequiresLoginAndResumesOverOrdersAfterAuthentication() = runTest(dispatcher) {
+        val controller = harness().controller
+        controller.navigate(Routes.orders())
+        val oldOrders = controller.currentBackStackEntry!!
+        var requests = 0
+        assertFalse(controller.openArtHistory(oldOrders, authenticated = false) {
+            requests++
+            controller.navigate(Routes.Home)
+        })
+        assertEquals(1, requests)
+        assertTrue(controller.currentBackStack.value.none { it.destination.route == Routes.ArtHistory })
+        val beforeLogin = controller.currentBackStackEntry!!
+        assertFalse(controller.openArtHistoryAfterAuth(authenticated = false))
+        assertSame(beforeLogin, controller.currentBackStackEntry)
+        assertTrue(controller.openArtHistoryAfterAuth(authenticated = true))
+        val history = controller.currentBackStackEntry!!
+        assertEquals(Routes.ArtHistory, history.destination.route)
+        assertTrue(controller.leaveArtHistory(history))
+        assertEquals(Routes.Orders, controller.currentDestination?.route)
+    }
+
+    @Test fun staleOrdersAndWrongOriginCannotOpenHistoryOrRequestLogin() = runTest(dispatcher) {
+        val controller = harness().controller
+        val home = controller.currentBackStackEntry!!
+        assertFalse(controller.openArtHistory(home, authenticated = false) { fail("Wrong origin") })
+        controller.navigate(Routes.orders())
+        val orders = controller.currentBackStackEntry!!
+        controller.navigate(Routes.Instagram)
+        val instagram = controller.currentBackStackEntry!!
+        assertFalse(controller.openArtHistory(orders, authenticated = false) { fail("Covered Orders") })
+        assertFalse(controller.openArtHistory(instagram, authenticated = true) { fail("Wrong origin") })
+        assertSame(instagram, controller.currentBackStackEntry)
+    }
+
+    @Test fun staleHistoryBackCannotCloseAnotherRouteOrANewHistoryEntry() = runTest(dispatcher) {
+        val controller = harness().controller
+        controller.navigate(Routes.orders())
+        val orders = controller.currentBackStackEntry!!
+        assertTrue(controller.openArtHistory(orders, authenticated = true) {})
+        val old = controller.currentBackStackEntry!!
+        controller.navigate(Routes.Instagram)
+        val instagram = controller.currentBackStackEntry!!
+        assertFalse(controller.leaveArtHistory(old))
+        assertFalse(controller.leaveArtHistory(instagram))
+        assertSame(instagram, controller.currentBackStackEntry)
+        assertTrue(controller.popBackStack())
+        assertTrue(controller.leaveArtHistory(old))
+        assertTrue(controller.openArtHistory(orders, authenticated = true) {})
+        val current = controller.currentBackStackEntry!!
+        assertFalse(controller.leaveArtHistory(old))
+        assertSame(current, controller.currentBackStackEntry)
+        assertTrue(controller.leaveArtHistory(current))
+        assertSame(orders, controller.currentBackStackEntry)
+    }
+
     private fun harness() = NavigationHarness().also { harnesses.add(it) }
 
     @Navigator.Name("planned_arts_test")
@@ -219,8 +296,13 @@ class PlannedArtsNavigationTest {
             navigatorProvider.addNavigator(leaf)
             graph = NavGraph(navigatorProvider.getNavigator<NavGraphNavigator>("navigation")).apply {
                 route = "planned_arts_test_root"
-                listOf(Routes.Home, Routes.PlannedArts, Routes.Instagram, Routes.MonthlyPlanning).forEach { path ->
-                    addDestination(leaf.createDestination().apply { route = path })
+                listOf(Routes.Home, Routes.PlannedArts, Routes.ArtHistory, Routes.Orders,
+                    Routes.Instagram, Routes.MonthlyPlanning).forEach { path ->
+                    addDestination(leaf.createDestination().apply {
+                        route = path
+                        if (path == Routes.Orders) addArgument("filter", NavArgument.Builder()
+                            .setType(NavType.StringType).setDefaultValue(OrderListFilter.All.routeValue).build())
+                    })
                 }
                 setStartDestination(Routes.Home)
             }

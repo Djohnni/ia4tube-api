@@ -25,7 +25,7 @@ class CalendarTest {
     @After fun after() { Dispatchers.resetMain() }
     private fun art(id: String = "a".repeat(40), date: String = "2026-09-10", status: String = "scheduled") = ScheduledArt(
         id, "plan:1", date, "12:00", "Legenda exata", 2, status, "Programada", status != "published", true,
-        null, "synthetic", java.time.LocalDate.parse(date).toEpochDay() * 86400000)
+        null, "synthetic", java.time.LocalDate.parse(date).atTime(12, 0).atZone(java.time.ZoneId.of("America/Sao_Paulo")).toInstant().toEpochMilli())
     private fun snapshot() = CalendarSnapshot(true, true, 2, true, "synthetic", false, listOf(art()), art())
     private class Fake(var snapshot: CalendarSnapshot) : CalendarGateway {
         var reads = 0; var edits = 0; var changes = 0; var failure: Exception? = null; var pending: CompletableDeferred<Unit>? = null

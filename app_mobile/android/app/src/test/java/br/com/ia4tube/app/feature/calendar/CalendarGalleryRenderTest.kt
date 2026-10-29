@@ -42,10 +42,12 @@ class CalendarGalleryRenderTest {
     @Test fun galleryRendersActualComposeWithSyntheticArtAndNoNetwork() = render(1f, "calendar-gallery-preview.png")
     @Test fun galleryRemainsReadableWithLargerText() = render(1.5f, "calendar-gallery-large-text-preview.png")
     @Test fun musicOpensOverTheGalleryWithoutRemovingIt() = render(1f, "calendar-gallery-music-sheet.png", openMusic = true)
-    private fun render(fontScale: Float, filename: String, openMusic: Boolean = false) {
+    @Test fun historyShowsPublishedArtWithoutAnyImportEntry() = render(1f, "calendar-history-preview.png", mode = CalendarGalleryMode.HISTORY)
+    private fun render(fontScale: Float, filename: String, openMusic: Boolean = false, mode: CalendarGalleryMode = CalendarGalleryMode.UPCOMING) {
         val today = LocalDate.now(ZoneId.of("America/Sao_Paulo")).toString()
         val item = ScheduledArt("a".repeat(40), "synthetic:1", today, "18:30", "Uma arte pronta para o próximo dia. Você pode editar esta legenda antes da publicação.",
-            2, "scheduled", "Programada", true, true, "/synthetic-not-fetched", "empresa_exemplo", System.currentTimeMillis(),
+            2, if (mode == CalendarGalleryMode.HISTORY) "published" else "scheduled", if (mode == CalendarGalleryMode.HISTORY) "Publicada" else "Programada",
+            mode != CalendarGalleryMode.HISTORY, true, "/synthetic-not-fetched", "empresa_exemplo", System.currentTimeMillis() + 3_600_000,
             destination = "both", formatsReady = true)
         val binding = CalendarBinding("11111111-1111-4111-8111-111111111111", "123456789", 72)
         val snapshot = CalendarSnapshot(true, true, 2, true, "empresa_exemplo", true, listOf(item), item,
@@ -74,13 +76,26 @@ class CalendarGalleryRenderTest {
         model.refresh(); shadowOf(Looper.getMainLooper()).idle()
         activity.setContent { IA4TubeTheme {
             CompositionLocalProvider(LocalScheduledArtRenderer provides { _, modifier -> Image(sample.asImageBitmap(), "Arte sintética", modifier, contentScale = ContentScale.Fit) }) {
-                ScreenScaffold { CalendarGallery(model, "synthetic-only") {} }
+                ScreenScaffold { CalendarGallery(model, "synthetic-only", mode = mode) {} }
             }
         } }
         shadowOf(Looper.getMainLooper()).idleFor(Duration.ofSeconds(2))
         val view = activity.window.decorView
         view.measure(View.MeasureSpec.makeMeasureSpec(822, View.MeasureSpec.EXACTLY), View.MeasureSpec.makeMeasureSpec(1782, View.MeasureSpec.EXACTLY)); view.layout(0,0,822,1782)
         shadowOf(Looper.getMainLooper()).idleFor(Duration.ofSeconds(1))
+        if (mode == CalendarGalleryMode.HISTORY) {
+            fun owners(root: View): List<SemanticsOwner> {
+                val own = if (root.javaClass.name == "androidx.compose.ui.platform.AndroidComposeView")
+                    listOf(root.javaClass.getMethod("getSemanticsOwner").invoke(root) as SemanticsOwner) else emptyList()
+                return own + if (root is ViewGroup) (0 until root.childCount).flatMap { owners(root.getChildAt(it)) } else emptyList()
+            }
+            fun nodes(node: SemanticsNode): List<SemanticsNode> = listOf(node) + node.children.flatMap(::nodes)
+            val semantics = owners(view).flatMap { nodes(it.rootSemanticsNode) }
+            val texts = semantics.flatMap { it.config.getOrNull(SemanticsProperties.Text).orEmpty() }.map { it.text }
+            assertTrue(texts.contains("Histórico de artes"))
+            assertFalse(texts.contains("Adicionar foto ou vídeo"))
+            assertFalse(semantics.any { it.config.getOrNull(SemanticsProperties.ContentDescription)?.contains("Usar com música") == true })
+        }
         var dialogBitmap: Bitmap? = null
         if (openMusic) {
             fun owners(root: View): List<SemanticsOwner> {

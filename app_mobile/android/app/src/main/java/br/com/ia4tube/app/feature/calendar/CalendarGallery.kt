@@ -39,6 +39,7 @@ import br.com.ia4tube.app.feature.calendar.imports.ScheduledPrivateMedia
 import kotlinx.coroutines.flow.StateFlow
 import java.time.LocalDate
 import java.time.LocalTime
+import java.time.Instant
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 
@@ -223,19 +224,20 @@ fun ScheduledNextContent(model: CalendarViewModel, token: String, tokenProvider:
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun CalendarGallery(model: CalendarViewModel, token: String, backLabel: String = "Voltar ao calendário",
-    tokenProvider: () -> String = { token }, onBack: () -> Unit) {
+    tokenProvider: () -> String = { token }, mode: CalendarGalleryMode = CalendarGalleryMode.UPCOMING,
+    onBack: () -> Unit) {
     // The parent retains this model when closing the gallery, so each reopening reads again.
     LaunchedEffect(model) { model.refresh() }
     val state by model.uiState.collectAsState()
-    val today = LocalDate.now(ZoneId.of("America/Sao_Paulo"))
-    val items = galleryItems(state.data.items, today)
+    val presentationNow = Instant.now()
+    val items = galleryItems(state.data.items, presentationNow, mode)
     val actionWidth = (68f * LocalDensity.current.fontScale).coerceIn(68f, 112f).dp
-    var editing by remember(model, token) { mutableStateOf<Pair<ScheduledArt, String>?>(null) }
-    var showStatus by remember(model, token) { mutableStateOf<ScheduledArt?>(null) }
-    var showMediaInfo by remember(model, token) { mutableStateOf<ScheduledArt?>(null) }
-    var showImport by remember(model, token) { mutableStateOf(false) }
-    var generatedSource by remember(model, token) { mutableStateOf<ScheduledArt?>(null) }
-    var pendingFocusId by remember(model, token) { mutableStateOf<String?>(null) }
+    var editing by remember(model, token, mode) { mutableStateOf<Pair<ScheduledArt, String>?>(null) }
+    var showStatus by remember(model, token, mode) { mutableStateOf<ScheduledArt?>(null) }
+    var showMediaInfo by remember(model, token, mode) { mutableStateOf<ScheduledArt?>(null) }
+    var showImport by remember(model, token, mode) { mutableStateOf(false) }
+    var generatedSource by remember(model, token, mode) { mutableStateOf<ScheduledArt?>(null) }
+    var pendingFocusId by remember(model, token, mode) { mutableStateOf<String?>(null) }
     LaunchedEffect(model, token, state.data.items) {
         if (state.data.items.none { it.id == editing?.first?.id }) editing = null
         if (state.data.items.none { it.id == showStatus?.id }) showStatus = null
@@ -245,10 +247,10 @@ fun CalendarGallery(model: CalendarViewModel, token: String, backLabel: String =
     Column(Modifier.fillMaxSize().background(Color(0xFF101218)).padding(horizontal = 12.dp, vertical = 8.dp)) {
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
             IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, backLabel, tint = Color.White) }
-            Text("Ver minhas artes programadas", color = Color.White, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
+            Text(if (mode == CalendarGalleryMode.HISTORY) "Histórico de artes" else "Ver minhas artes programadas", color = Color.White, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
             IconButton(onClick = model::refresh, enabled = !state.busy) { Icon(Icons.Default.Refresh, "Atualizar", tint = Color.White) }
         }
-        if (BuildConfig.MEDIA_IMPORT_ENTRY_POINTS_VISIBLE) {
+        if (mode == CalendarGalleryMode.UPCOMING && BuildConfig.MEDIA_IMPORT_ENTRY_POINTS_VISIBLE) {
             OutlinedButton(onClick = { generatedSource = null; showImport = true }, modifier = Modifier.fillMaxWidth()) {
                 Text("Adicionar foto ou vídeo", color = Color.White)
             }
@@ -258,9 +260,10 @@ fun CalendarGallery(model: CalendarViewModel, token: String, backLabel: String =
         if (!state.data.enabled) {
             if (!state.busy && state.error == null) Text("A galeria programada ainda não está disponível neste servidor.", color = Color.White)
         }
-        else if (items.isEmpty()) Text("Nenhuma arte programada. As artes criadas aparecerão aqui.", color = Color.White, modifier = Modifier.padding(16.dp))
+        else if (items.isEmpty()) Text(if (mode == CalendarGalleryMode.HISTORY) "Nenhuma arte no histórico." else "Nenhuma arte programada. As artes criadas aparecerão aqui.", color = Color.White, modifier = Modifier.padding(16.dp))
         else {
-            val pager = rememberPagerState(initialPage = items.indexOfFirst { it.date >= today.toString() }.coerceAtLeast(0), pageCount = { items.size })
+            val pager = key(mode) { rememberPagerState(initialPage = if (mode == CalendarGalleryMode.HISTORY) 0 else
+                items.indexOfFirst { calendarPresentationTime(it.date, it.time, it.scheduledAt) > presentationNow.toEpochMilli() }.coerceAtLeast(0), pageCount = { items.size }) }
             FocusAcceptedImportReturn(pager, items.map { it.id }, pendingFocusId, showImport) { focusedId ->
                 if (pendingFocusId == focusedId) pendingFocusId = null
             }
@@ -301,7 +304,7 @@ fun CalendarGallery(model: CalendarViewModel, token: String, backLabel: String =
                                 if (art.media != null) showMediaInfo = art else editing = art to "destination"
                             }
                             if (art.media != null || art.generatedVideo != null) GalleryAction(Icons.Default.Info, "Música/Áudio", true) { showMediaInfo = art }
-                            if (BuildConfig.MEDIA_IMPORT_ENTRY_POINTS_VISIBLE && art.sourceKind != "upload" && art.imageUrl != null) {
+                            if (mode == CalendarGalleryMode.UPCOMING && BuildConfig.MEDIA_IMPORT_ENTRY_POINTS_VISIBLE && art.sourceKind != "upload" && art.imageUrl != null) {
                                 GalleryAction(Icons.Default.Add, "Usar com música", state.fresh && !state.busy) { generatedSource = art; showImport = true }
                             }
                             GalleryAction(Icons.Default.Edit, "Legenda", art.editable && !art.preparationPending && state.fresh && !state.busy) { editing = art to "caption" }

@@ -20,3 +20,31 @@ internal fun NavController.leavePlannedArts(entry: NavBackStackEntry): Boolean {
     if (entry.destination.route != Routes.PlannedArts || currentBackStackEntry !== entry) return false
     return popBackStack()
 }
+
+/** The owner enters history from Orders; queued or covered callbacks cannot stack galleries. */
+internal fun NavController.openArtHistory(entry: NavBackStackEntry, authenticated: Boolean,
+    onAuthRequired: () -> Unit): Boolean {
+    if (entry.destination.route != Routes.Orders || currentBackStackEntry !== entry) return false
+    if (!authenticated) {
+        onAuthRequired()
+        return false
+    }
+    navigate(Routes.ArtHistory) { launchSingleTop = true }
+    return true
+}
+
+/** An expired login resumes history over Orders rather than losing its return destination. */
+internal fun NavController.openArtHistoryAfterAuth(authenticated: Boolean): Boolean {
+    if (!authenticated) return false
+    navigate(Routes.orders()) {
+        popUpTo(Routes.Home) { inclusive = false }
+        launchSingleTop = true
+    }
+    navigate(Routes.ArtHistory) { launchSingleTop = true }
+    return true
+}
+
+internal fun NavController.leaveArtHistory(entry: NavBackStackEntry): Boolean {
+    if (entry.destination.route != Routes.ArtHistory || currentBackStackEntry !== entry) return false
+    return popBackStack()
+}

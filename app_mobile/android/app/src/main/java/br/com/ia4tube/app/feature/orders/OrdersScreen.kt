@@ -26,6 +26,7 @@ import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -54,7 +55,8 @@ fun OrdersScreen(
     initialFilter: OrderListFilter,
     onBack: () -> Unit,
     onOpenOrder: (String) -> Unit,
-    onOpenMonthlyPlanning: (String) -> Unit = {}
+    onOpenMonthlyPlanning: (String) -> Unit = {},
+    onOpenArtHistory: () -> Unit = {}
 ) {
     val state by viewModel.uiState.collectAsState()
     val listState = rememberLazyListState()
@@ -83,7 +85,8 @@ fun OrdersScreen(
                 }
             }
 
-            Spacer(modifier = Modifier.height(16.dp))
+            OrdersArtHistoryAccess(onOpenArtHistory)
+            Spacer(modifier = Modifier.height(8.dp))
             FilterChips(
                 selectedFilter = selectedFilter,
                 onSelect = { selectedFilter = it }
@@ -165,6 +168,13 @@ fun OrdersScreen(
                 }
             }
         }
+    }
+}
+
+@Composable
+internal fun OrdersArtHistoryAccess(onOpen: () -> Unit) {
+    TextButton(onClick = onOpen) {
+        Text("Histórico de artes")
     }
 }
 
