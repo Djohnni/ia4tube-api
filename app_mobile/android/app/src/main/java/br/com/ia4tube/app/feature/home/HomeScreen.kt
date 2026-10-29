@@ -79,7 +79,6 @@ import br.com.ia4tube.app.R
 import br.com.ia4tube.app.core.camera.CameraImageStore
 import br.com.ia4tube.app.data.models.OrderSummary
 import br.com.ia4tube.app.feature.orders.OrderListFilter
-import br.com.ia4tube.app.ui.components.ScreenScaffold
 import br.com.ia4tube.app.ui.text.asString
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
@@ -108,7 +107,6 @@ fun HomeScreen(
 ) {
     val state by viewModel.uiState.collectAsState()
     val homePalette = premiumHomePalette(premiumTheme)
-    val homeBackground = homePalette.screenBackground
     val context = LocalContext.current.applicationContext
     val firstFreeArtMode = state.firstFreeArtMode(isLoggedIn)
     val lifecycleOwner = LocalLifecycleOwner.current
@@ -147,62 +145,36 @@ fun HomeScreen(
         }
     }
 
-    ScreenScaffold(containerColor = homeBackground) {
-        Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .background(homeBackground)
-        ) {
-            Column(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .background(homeBackground)
-                    .verticalScroll(rememberScrollState())
-                .padding(top = 14.dp),
-                verticalArrangement = Arrangement.Top
-            ) {
-                FuturisticHomePanel(
-                    state = state,
-                    palette = homePalette,
-                    premiumTheme = premiumTheme,
-                    onThemeSelected = onPremiumThemeSelected,
-                    onOpenOrders = onOpenOrders,
-                    onOpenPlans = onOpenPlans,
-                    onCreateArtEmpresa = onCreateArtEmpresa,
-                    onCarouselClick = {
-                        val remaining = state.carrosseisRestantes
-                        if (remaining != null && remaining <= 0) {
-                            Toast.makeText(
-                                context,
-                                context.getString(R.string.carousel_limit_reached),
-                                Toast.LENGTH_LONG
-                            ).show()
-                        } else {
-                            onOpenCarousel()
-                        }
-                    },
-                    onMonthlyPlanningClick = onOpenMonthlyPlanning,
-                    onEditVideoClick = onEditVideoClick,
-                    onOpenInstagram = onOpenInstagram,
-                    onOpenPlannedArts = onOpenPlannedArts,
-                    onCompanyProfile = onCompanyProfile,
-                    onSupport = onSupport,
-                    onLogout = onLogout,
-                    firstFreeArtMode = firstFreeArtMode,
-                    showLogout = isLoggedIn,
-                    onIconHelpClick = { showIconHelpDialog = true },
-                    onHelpSelected = { selectedHelp = it }
-                )
-
-                state.summaryError?.let { error ->
-                    Spacer(modifier = Modifier.height(10.dp))
-                    Text(error.asString(), color = MaterialTheme.colorScheme.error)
-                }
-
-                Spacer(modifier = Modifier.height(28.dp))
+    HomeVisualContent(
+        state = state,
+        palette = homePalette,
+        premiumTheme = premiumTheme,
+        firstFreeArtMode = firstFreeArtMode,
+        showLogout = isLoggedIn,
+        onThemeSelected = onPremiumThemeSelected,
+        onOpenOrders = onOpenOrders,
+        onOpenPlans = onOpenPlans,
+        onCreateArtEmpresa = onCreateArtEmpresa,
+        onCarouselClick = {
+            val remaining = state.carrosseisRestantes
+            if (remaining != null && remaining <= 0) {
+                Toast.makeText(context, context.getString(R.string.carousel_limit_reached), Toast.LENGTH_LONG).show()
+            } else {
+                onOpenCarousel()
             }
+        },
+        onMonthlyPlanningClick = onOpenMonthlyPlanning,
+        onEditVideoClick = onEditVideoClick,
+        onOpenInstagram = onOpenInstagram,
+        onOpenPlannedArts = onOpenPlannedArts,
+        onCompanyProfile = onCompanyProfile,
+        onSupport = onSupport,
+        onLogout = onLogout,
+        onIconHelpClick = { showIconHelpDialog = true },
+        onLockedFeatureClick = {
+            Toast.makeText(context, "Crie sua primeira imagem grátis para liberar esta função.", Toast.LENGTH_SHORT).show()
         }
-    }
+    )
 
     if (showPhotoSourceDialog) {
         AlertDialog(

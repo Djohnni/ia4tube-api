@@ -1,0 +1,412 @@
+package br.com.ia4tube.app.feature.home
+
+import android.app.Application
+import android.graphics.Bitmap
+import android.graphics.Canvas
+import android.os.Looper
+import android.view.View
+import android.view.ViewGroup
+import androidx.activity.ComponentActivity
+import androidx.activity.compose.setContent
+import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.snapshots.Snapshot
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.semantics.SemanticsActions
+import androidx.compose.ui.semantics.SemanticsNode
+import androidx.compose.ui.semantics.SemanticsOwner
+import androidx.compose.ui.semantics.SemanticsProperties
+import androidx.compose.ui.semantics.getOrNull
+import androidx.compose.ui.text.TextLayoutResult
+import androidx.compose.ui.unit.Density
+import br.com.ia4tube.app.ui.text.UiText
+import br.com.ia4tube.app.ui.theme.IA4TubeTheme
+import org.junit.Assert.*
+import org.junit.Test
+import org.junit.runner.RunWith
+import org.robolectric.Robolectric
+import org.robolectric.RobolectricTestRunner
+import org.robolectric.Shadows.shadowOf
+import org.robolectric.annotation.Config
+import org.robolectric.annotation.GraphicsMode
+import org.robolectric.annotation.LooperMode
+import org.robolectric.shadows.ShadowChoreographer
+import org.robolectric.shadows.ShadowDialog
+import org.robolectric.shadows.ShadowSystemClock
+import java.io.File
+import java.time.Duration
+
+/** Real presentation with synthetic state and callbacks; no HomeViewModel, repository or navigation. */
+@RunWith(RobolectricTestRunner::class)
+@Config(manifest = Config.NONE, application = Application::class, sdk = [28], qualifiers = "w384dp-h832dp-xhdpi")
+@GraphicsMode(GraphicsMode.Mode.NATIVE)
+@LooperMode(LooperMode.Mode.PAUSED)
+class HomeVisualContentTest {
+    @Test fun primaryActionsUseOnlyTheirAssignedCallbacks() {
+        HomeHarness().use { home ->
+            assertTrue("Composition must not open any product flow", home.events.isEmpty())
+            home.assertAction("home_instagram", "instagram")
+            home.assertAction("home_calendar", "calendar")
+            home.assertAction("home_create_image", "monthly-planning")
+            home.assertAction("home_ready_posts", "edit")
+            assertTrue(home.nodes().none { node ->
+                home.label(node).contains("Câmera", ignoreCase = true)
+            })
+        }
+    }
+
+    @Test fun comboReplacesOrdersInFooterAndMoreOpensTheExistingAllOrdersCallback() {
+        HomeHarness().use { home ->
+            assertNull(home.findTag("home_orders"))
+            assertTrue(home.label(home.tag("home_footer_combo")).contains("Combo"))
+            home.assertAction("home_footer_home", null)
+            home.assertAction("home_footer_combo", "plans")
+            home.assertAction("home_footer_more", null)
+            assertNotNull(home.findTag("home_more_sheet"))
+            home.assertAction("home_orders", "orders:All")
+        }
+    }
+
+    @Test fun moreMenuActionsKeepSeparateCallbacks() {
+        HomeHarness().use { home ->
+            for ((tag, expected) in listOf(
+                "home_plans" to "plans", "home_support" to "support",
+                "home_help" to "help", "home_logout" to "logout"
+            )) {
+                home.assertAction("home_footer_more", null)
+                home.assertAction(tag, expected)
+            }
+        }
+    }
+
+    @Test fun firstFreeArtKeepsPrimaryEntriesAndBlocksSecondaryMenuFlows() {
+        HomeHarness(firstFree = true).use { home ->
+            home.assertAction("home_instagram", "instagram")
+            home.assertAction("home_calendar", "calendar")
+            home.assertAction("home_create_image", "monthly-planning")
+            home.assertAction("home_ready_posts", "edit")
+            home.assertAction("home_footer_combo", "locked")
+            home.assertAction("home_footer_more", null)
+            for (tag in listOf("home_orders", "home_plans", "home_support", "home_help")) {
+                home.assertAction(tag, "locked")
+                assertNotNull("A blocked item must not navigate or dismiss More", home.findTag("home_more_sheet"))
+            }
+            home.assertAction("home_theme_blue", "theme:Blue")
+            home.assertAction("home_logout", "logout")
+        }
+    }
+
+    @Test fun otherFormsStartClosedAndOnlyTheirOwnCallbacksRunAfterExpansion() {
+        HomeHarness().use { home ->
+            assertNull(home.findTag("home_multiple_photos"))
+            assertNull(home.findTag("home_printed_materials"))
+            assertNull(home.findTag("home_carousel"))
+            home.assertAction("home_other_forms", null)
+            home.assertAction("home_multiple_photos", "create-art")
+            home.assertAction("home_printed_materials", "company-profile")
+            home.assertAction("home_carousel", "carousel")
+            home.assertAction("home_other_forms", null)
+            assertNull(home.findTag("home_carousel"))
+            home.assertAction("home_other_forms", null)
+            home.assertAction("home_footer_home", null)
+            assertNull("Início returns to the compact local Home", home.findTag("home_carousel"))
+        }
+    }
+
+    @Test fun firstFreeArtCanExpandOtherFormsWithoutUnlockingThem() {
+        HomeHarness(firstFree = true).use { home ->
+            home.assertAction("home_other_forms", null)
+            for (tag in listOf("home_multiple_photos", "home_printed_materials", "home_carousel")) {
+                home.assertAction(tag, "locked")
+            }
+            home.assertAction("home_other_forms", null)
+            assertNull(home.findTag("home_multiple_photos"))
+        }
+    }
+
+    @Test fun comboBadgeUsesAvailableCreditsRatherThanMoneyOrOrderCounts() {
+        val credited = readyState().copy(
+            saldo = 999.0, saldoExtra = 800.0, artesMensaisRestantes = 4,
+            artesAvulsasRestantes = 3, emProducao = 28, artesProntas = 90
+        )
+        HomeHarness(credited).use { home ->
+            assertEquals("7", home.label(home.tag("home_credits_badge")))
+            home.update(credited.copy(planoStatus = "expired", artesMensaisRestantes = 99))
+            assertEquals("3", home.label(home.tag("home_credits_badge")))
+            home.update(credited.copy(planoStatus = "none", artesAvulsasRestantes = -2))
+            assertNull("No positive available credits means no numeric badge", home.findTag("home_credits_badge"))
+            home.update(credited.copy(planoNome = ""))
+            assertEquals("Legacy monthly credits require the plan name too", "3", home.label(home.tag("home_credits_badge")))
+            assertTrue(home.events.isEmpty())
+        }
+    }
+
+    @Test fun loadingAndDataErrorsRenderWithoutStartingWorkAndCanBeCleared() {
+        val accountError = "Falha sintética ao consultar a conta. ".repeat(8)
+        val summaryError = "Falha sintética ao consultar os pedidos."
+        HomeHarness(readyState().copy(loading = true, summaryLoading = true,
+            error = UiText.Dynamic(accountError), summaryError = UiText.Dynamic(summaryError)), fontScale = 1.5f).use { home ->
+            home.capture("home-loading-large-text-debug.png")
+            assertNotNull(home.findTag("home_loading"))
+            assertTrue(home.nodes().any { home.label(it) == accountError })
+            assertTrue(home.nodes().any { home.label(it) == summaryError })
+            home.assertFooterFits()
+            assertTrue("Rendering loading/error state must not request data or navigate", home.events.isEmpty())
+            home.update(readyState())
+            assertNull(home.findTag("home_loading"))
+            assertTrue(home.nodes().none { home.label(it) == accountError || home.label(it) == summaryError })
+            home.assertAction("home_calendar", "calendar")
+        }
+    }
+
+    @Test fun visitorHasNoLogoutAndThemesUseOnlyTheThemeCallback() {
+        HomeHarness(firstFree = true, showLogout = false).use { home ->
+            home.assertAction("home_footer_more", null)
+            assertNull(home.findTag("home_logout"))
+            for (theme in PremiumHomeTheme.entries) {
+                home.assertAction("home_theme_${theme.name.lowercase()}", "theme:${theme.name}")
+            }
+        }
+    }
+
+    @Test fun referenceWidthKeepsShortcutRowsCreationColumnsAndFixedComboFooter() =
+        checkViewport(384, 832, 1f, "home-384-preview.png")
+
+    @Test @Config(qualifiers = "w320dp-h740dp-xhdpi")
+    fun narrowViewportKeepsLabelsAndFixedFooterUsable() =
+        checkViewport(320, 740, 1f, "home-320-preview.png")
+
+    @Test @Config(qualifiers = "w320dp-h740dp-xhdpi")
+    fun largerTextOnNarrowViewportRemainsReadableAndScrollable() =
+        checkViewport(320, 740, 1.5f, "home-320-large-text-preview.png")
+
+    private fun checkViewport(widthDp: Int, heightDp: Int, fontScale: Float, filename: String) {
+        HomeHarness(widthDp = widthDp, heightDp = heightDp, fontScale = fontScale).use { home ->
+            home.capture(filename)
+            assertEquals("iA4tube", home.label(home.tag("home_brand")))
+            val instagram = home.tag("home_instagram").boundsInRoot
+            val calendar = home.tag("home_calendar").boundsInRoot
+            val create = home.tag("home_create_image").boundsInRoot
+            val posts = home.tag("home_ready_posts").boundsInRoot
+            assertTrue("Instagram and Calendário stay in vertical rows", calendar.top >= instagram.bottom - 1f)
+            assertEquals(instagram.left, calendar.left, 1f)
+            assertTrue("Creation options follow both shortcuts", create.top >= calendar.bottom - 1f)
+            assertTrue("Creation options stay side by side without overlap", posts.left >= create.right - 1f)
+            assertEquals(create.top, posts.top, 1f)
+            for (tag in listOf("home_instagram", "home_calendar", "home_create_image", "home_ready_posts")) {
+                val rect = home.tag(tag).boundsInRoot
+                assertTrue("$tag stays inside the viewport width", rect.left >= 0f && rect.right <= home.widthPx + 1f)
+                assertTrue("$tag has a readable width", rect.width > 0f)
+                home.assertTextFits(home.tag(tag))
+            }
+            home.assertFooterFits()
+            val footerBefore = home.tag("home_footer").boundsInRoot
+            home.assertAction("home_other_forms", null)
+            home.capture(filename.removeSuffix(".png") + "-expanded.png")
+            home.assertExpandedContentReachable()
+            val footerAfter = home.tag("home_footer").boundsInRoot
+            assertEquals("Scrolling content does not move the footer", footerBefore.top, footerAfter.top, 1f)
+            assertEquals(footerBefore.bottom, footerAfter.bottom, 1f)
+            home.assertFooterFits()
+            assertTrue(home.events.isEmpty())
+        }
+    }
+
+    private class HomeHarness(
+        initial: HomeUiState = readyState(),
+        firstFree: Boolean = false,
+        showLogout: Boolean = true,
+        widthDp: Int = 384,
+        heightDp: Int = 832,
+        fontScale: Float = 1f
+    ) : AutoCloseable {
+        val events = mutableListOf<String>()
+        val widthPx = widthDp * 2
+        private val heightPx = heightDp * 2
+        private val state = mutableStateOf(initial)
+        private val controller = Robolectric.buildActivity(ComponentActivity::class.java)
+        private val activity = controller.get()
+        private val main = shadowOf(Looper.getMainLooper())
+        private val originalFrameDelay = ShadowChoreographer.getFrameDelay()
+        private val originalChoreographerPaused = ShadowChoreographer.isPaused()
+
+        init {
+            ShadowChoreographer.setPaused(true)
+            ShadowChoreographer.setFrameDelay(Duration.ofMillis(16))
+            activity.setTheme(android.R.style.Theme_Material_NoActionBar)
+            controller.setup()
+            activity.setContent {
+                IA4TubeTheme {
+                    CompositionLocalProvider(LocalDensity provides Density(2f, fontScale)) {
+                        HomeVisualContent(state = state.value, palette = premiumHomePalette(PremiumHomeTheme.Black),
+                            premiumTheme = PremiumHomeTheme.Black, firstFreeArtMode = firstFree, showLogout = showLogout,
+                            onThemeSelected = { events += "theme:${it.name}" },
+                            onOpenOrders = { events += "orders:${it.name}" }, onOpenPlans = { events += "plans" },
+                            onCreateArtEmpresa = { events += "create-art" }, onCarouselClick = { events += "carousel" },
+                            onMonthlyPlanningClick = { events += "monthly-planning" }, onEditVideoClick = { events += "edit" },
+                            onOpenInstagram = { events += "instagram" }, onOpenPlannedArts = { events += "calendar" },
+                            onCompanyProfile = { events += "company-profile" }, onSupport = { events += "support" },
+                            onLogout = { events += "logout" }, onIconHelpClick = { events += "help" },
+                            onLockedFeatureClick = { events += "locked" })
+                    }
+                }
+            }
+            settle()
+        }
+
+        fun update(value: HomeUiState) { state.value = value; settle() }
+
+        fun assertAction(tagName: String, expected: String?) {
+            events.clear()
+            val action = tag(tagName).config.getOrNull(SemanticsActions.OnClick)?.action
+            assertNotNull("$tagName exposes its existing action", action)
+            assertTrue("$tagName accepts the action", action!!.invoke())
+            settle()
+            assertEquals("$tagName must not invoke another flow", listOfNotNull(expected), events)
+        }
+
+        fun tag(value: String): SemanticsNode = findTag(value)
+            ?: throw AssertionError("Missing $value; visible tags: ${nodes().mapNotNull { it.config.getOrNull(SemanticsProperties.TestTag) }}")
+
+        fun findTag(value: String): SemanticsNode? = nodes().singleOrNull {
+            it.config.getOrNull(SemanticsProperties.TestTag) == value
+        }
+
+        fun label(node: SemanticsNode): String = descendants(node)
+            .flatMap { it.config.getOrNull(SemanticsProperties.Text).orEmpty() }.joinToString(" ") { it.text }
+
+        fun nodes(): List<SemanticsNode> = roots().flatMap(::owners).flatMap { owner ->
+            // The unmerged tree also exposes the credit badge inside the clickable Combo.
+            val unmergedGetter = owner.javaClass.methods.firstOrNull {
+                it.name.startsWith("getUnmergedRootSemanticsNode") && it.parameterCount == 0
+            }
+            descendants(unmergedGetter?.invoke(owner) as? SemanticsNode ?: owner.rootSemanticsNode)
+        }
+
+        fun assertTextFits(parent: SemanticsNode) {
+            for (node in descendants(parent)) {
+                val action = node.config.getOrNull(SemanticsActions.GetTextLayoutResult)?.action ?: continue
+                val layouts = mutableListOf<TextLayoutResult>()
+                assertTrue(action.invoke(layouts))
+                for (layout in layouts) {
+                    val details = "Text must not overflow: ${layout.layoutInput.text}; " +
+                        "size=${layout.size}; constraints=${layout.layoutInput.constraints}; " +
+                        "didOverflowWidth=${layout.didOverflowWidth}; didOverflowHeight=${layout.didOverflowHeight}; " +
+                        "lineCount=${layout.lineCount}; maxLines=${layout.layoutInput.maxLines}; " +
+                        "fontSize=${layout.layoutInput.style.fontSize}; density=${layout.layoutInput.density.density}; " +
+                        "fontScale=${layout.layoutInput.density.fontScale}; " +
+                        "parentTag=${parent.config.getOrNull(SemanticsProperties.TestTag)}; bounds=${node.boundsInRoot}"
+                    assertFalse(details, layout.hasVisualOverflow)
+                }
+            }
+        }
+
+        fun assertFooterFits() {
+            val footer = tag("home_footer").boundsInRoot
+            assertTrue("Footer stays in the visible viewport", footer.top >= 0f && footer.bottom <= heightPx + 1f)
+            val tabs = listOf("home_footer_home", "home_footer_combo", "home_footer_more").map(::tag)
+            for (node in tabs) {
+                val rect = node.boundsInRoot
+                assertTrue("Footer tab stays horizontally bounded", rect.left >= 0f && rect.right <= widthPx + 1f)
+                assertTrue("Footer tabs retain a useful touch target", rect.width >= 96f && rect.height >= 96f)
+                assertTextFits(node)
+            }
+            assertTrue(tabs.zipWithNext().all { (left, right) -> left.boundsInRoot.right <= right.boundsInRoot.left + 1f })
+        }
+
+        fun assertExpandedContentReachable() {
+            val scroll = tag("home_scroll")
+            val range = scroll.config[SemanticsProperties.VerticalScrollAxisRange]
+            val maximum = range.maxValue()
+            val expandedTags = listOf("home_multiple_photos", "home_printed_materials", "home_carousel")
+            // Both branches require actual expanded items; a lost recomposition must fail.
+            expandedTags.forEach { tag(it) }
+            assertTrue("The scroll range must be finite and non-negative: $maximum", maximum.isFinite() && maximum >= 0f)
+            if (maximum > 0f) {
+                val before = range.value()
+                assertTrue("Expanded content accepts scrolling",
+                    scroll.config[SemanticsActions.ScrollBy].action!!.invoke(0f, heightPx.toFloat()))
+                settle()
+                val after = tag("home_scroll").config[SemanticsProperties.VerticalScrollAxisRange].value()
+                assertTrue("Expanded content actually moves toward the remaining items: $before -> $after", after > before)
+            } else {
+                val scrollBounds = scroll.boundsInRoot
+                val footerBounds = tag("home_footer").boundsInRoot
+                for (tagName in expandedTags) {
+                    val item = tag(tagName)
+                    val bounds = item.boundsInRoot
+                    val top = item.positionInRoot.y
+                    val bottom = top + item.size.height
+                    assertTrue("$tagName is expanded with non-empty visible bounds: $bounds",
+                        bounds.width > 0f && bounds.height > 0f)
+                    assertTrue("$tagName fits inside the scroll viewport horizontally: $bounds",
+                        bounds.left >= scrollBounds.left - 1f && bounds.right <= scrollBounds.right + 1f)
+                    assertTrue("$tagName is fully visible below the scroll viewport top: $top >= ${scrollBounds.top}",
+                        top >= scrollBounds.top - 1f)
+                    assertTrue("$tagName fits above the footer without overlap: $bottom <= ${footerBounds.top}",
+                        bottom <= footerBounds.top + 1f)
+                    assertTextFits(item)
+                }
+            }
+        }
+
+        fun capture(filename: String) {
+            val bitmap = Bitmap.createBitmap(widthPx, heightPx, Bitmap.Config.ARGB_8888)
+            try {
+                activity.window.decorView.draw(Canvas(bitmap))
+                val colors = mutableSetOf<Int>()
+                for (y in 0 until heightPx step 16) for (x in 0 until widthPx step 16) colors += bitmap.getPixel(x, y)
+                val output = File("build/reports/$filename")
+                output.parentFile?.mkdirs()
+                output.outputStream().use { bitmap.compress(Bitmap.CompressFormat.PNG, 100, it) }
+                assertTrue("Preview must contain actual Compose content", colors.size > 20)
+            } finally { bitmap.recycle() }
+        }
+
+        private fun roots(): List<View> = listOf(activity.window.decorView) +
+            listOfNotNull(ShadowDialog.getLatestDialog()?.takeIf { it.isShowing }?.window?.decorView)
+
+        private fun settle() {
+            Snapshot.sendApplyNotifications()
+            // Keep the real indeterminate indicator composed. Paused vsync and a
+            // fixed frame budget avoid draining an animation until it becomes idle.
+            repeat(8) {
+                ShadowSystemClock.advanceBy(Duration.ofMillis(64))
+                main.idleFor(Duration.ofMillis(16))
+                for (root in roots()) {
+                    root.measure(View.MeasureSpec.makeMeasureSpec(widthPx, View.MeasureSpec.EXACTLY),
+                        View.MeasureSpec.makeMeasureSpec(heightPx, View.MeasureSpec.EXACTLY))
+                    root.layout(0, 0, widthPx, heightPx)
+                }
+                Snapshot.sendApplyNotifications()
+            }
+            main.idleFor(Duration.ofMillis(32))
+        }
+
+        override fun close() {
+            try {
+                ShadowDialog.getLatestDialog()?.takeIf { it.isShowing }?.dismiss()
+                controller.pause().stop().destroy()
+                Snapshot.sendApplyNotifications()
+                main.idleFor(Duration.ofMillis(32))
+            } finally {
+                ShadowChoreographer.setFrameDelay(originalFrameDelay)
+                ShadowChoreographer.setPaused(originalChoreographerPaused)
+            }
+        }
+
+        private fun owners(view: View): List<SemanticsOwner> {
+            val own = if (view.javaClass.name == "androidx.compose.ui.platform.AndroidComposeView")
+                listOf(view.javaClass.getMethod("getSemanticsOwner").invoke(view) as SemanticsOwner) else emptyList()
+            return own + if (view is ViewGroup) (0 until view.childCount).flatMap { owners(view.getChildAt(it)) } else emptyList()
+        }
+
+        private fun descendants(node: SemanticsNode): List<SemanticsNode> = listOf(node) + node.children.flatMap(::descendants)
+    }
+
+    companion object {
+        private fun readyState() = HomeUiState(loading = false, summaryLoading = false,
+            planoStatus = "active", planoNome = "Profissional", artesMensaisRestantes = 4,
+            artesAvulsasRestantes = 3, carrosseisRestantes = 2, emProducao = 1, artesProntas = 2)
+    }
+}
