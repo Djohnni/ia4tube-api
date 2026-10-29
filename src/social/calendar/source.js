@@ -8,10 +8,10 @@ const { MAX_VIDEO_BYTES, isReadyVideoGeometry } = require("../../company-monthly
 function createCalendarSource({ dataDir, planningDir, ordersDir }) {
   const baseDir = planningDir || path.join(dataDir, "planejamentos_mensais");
   const pedidosDir = ordersDir || path.join(dataDir, "pedidos");
-  function result(owner, job) {
+  function result(owner, job, readPedidoBases) {
     const plan = planning.findPlanningById({ baseDir, whatsapp: owner, planningId: job.planningId });
     if (!plan || plan.status === "cancelado") fail("calendar_source_unavailable", 404);
-    const candidates = orders.listPedidoBasesByWhatsapp(pedidosDir, owner);
+    const candidates = readPedidoBases ? readPedidoBases(owner) : orders.listPedidoBasesByWhatsapp(pedidosDir, owner);
     const entry = candidates.find(entry => entry.id === job.orderId);
     const pedido = entry?.pedido;
     if (!entry || String(pedido?.whatsapp || "") !== owner ||
@@ -32,7 +32,14 @@ function createCalendarSource({ dataDir, planningDir, ordersDir }) {
       mediaKind: video ? "video" : "image", metadata, plan };
   }
   function list(owner) {
-    const raw = planning.listClientPlanningCalendar({ baseDir, whatsapp: owner, pedidosDir });
+    // Share only this owner's inventory for this call; publication checks stay fresh.
+    let pedidoBases;
+    const readPedidoBases = whatsapp => {
+      if (whatsapp !== owner) return orders.listPedidoBasesByWhatsapp(pedidosDir, whatsapp);
+      if (pedidoBases === undefined) pedidoBases = orders.listPedidoBasesByWhatsapp(pedidosDir, owner);
+      return pedidoBases;
+    };
+    const raw = planning.listClientPlanningCalendar({ baseDir, whatsapp: owner, pedidosDir, readPedidoBases });
     return (raw.postagens || raw.itens || []).map(item => {
       const plan = planning.findPlanningById({ baseDir, whatsapp: owner, planningId: item.planning_id });
       if (!plan || plan.status === "cancelado") return null;
@@ -43,7 +50,7 @@ function createCalendarSource({ dataDir, planningDir, ordersDir }) {
           authorizationEnvelope = JSON.parse(fs.readFileSync(file, "utf8")).envelope;
       } catch { /* Existing orders without explicit consent stay manual. */ }
       let ready = item.imagem_pronta === true, version = "pending", mediaKind = "image", videoMetadata = null;
-      if (ready) try { const source = result(owner, { planningId: item.planning_id, orderId: item.pedido_id });
+      if (ready) try { const source = result(owner, { planningId: item.planning_id, orderId: item.pedido_id }, readPedidoBases);
         version = source.version; mediaKind = source.mediaKind; videoMetadata = source.metadata; }
       catch { ready = false; }
       return { key: item.calendar_key, planningId: item.planning_id, orderId: item.pedido_id,
@@ -52,7 +59,7 @@ function createCalendarSource({ dataDir, planningDir, ordersDir }) {
         destination: plan.instagram_destination || "feed", layout: plan.instagram_layout || null };
     }).filter(item => item && item.planningId && item.orderId);
   }
-  return Object.freeze({ list, describe: result,
+  return Object.freeze({ list, describe(owner, job) { return result(owner, job); },
     async load(owner, job) { const source = result(owner, job);
       if (source.mediaKind !== "image") fail("calendar_source_unavailable", 404);
       return fs.readFileSync(source.file); } });

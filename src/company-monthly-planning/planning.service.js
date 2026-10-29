@@ -1135,12 +1135,15 @@ function calendarPostTitle(post) {
   return firstWords(source, 6) || `Postagem ${post.ordem || ""}`.trim();
 }
 
-function createdOrdersFromPedidoFiles(planning = {}, pedidosDir = "") {
+function createdOrdersFromPedidoFiles(planning = {}, pedidosDir = "", readPedidoBases = null) {
   const planningId = String(planning.planejamento_id || planning.id || "").trim();
   const whatsapp = String(planning.whatsapp || "").trim();
   if (!pedidosDir || !planningId || !whatsapp) return [];
 
-  return orderStorage.listPedidoBasesByWhatsapp(pedidosDir, whatsapp)
+  const pedidos = typeof readPedidoBases === "function"
+    ? readPedidoBases(whatsapp)
+    : orderStorage.listPedidoBasesByWhatsapp(pedidosDir, whatsapp);
+  return pedidos
     .map((item) => {
       const pedido = item.pedido || orderStorage.readOrder(item.base) || {};
       if (!isPlanningOrder(pedido)) return null;
@@ -1169,7 +1172,7 @@ function createdOrdersFromPedidoFiles(planning = {}, pedidosDir = "") {
     .filter(Boolean);
 }
 
-function createdOrderRecords(planning = {}, pedidosDir = "") {
+function createdOrderRecords(planning = {}, pedidosDir = "", readPedidoBases = null) {
   const pedidosCriados = [
     ...(planning.pedidos_criados?.pedidos || readCreatedOrdersFile(planning).pedidos || [])
   ];
@@ -1179,7 +1182,7 @@ function createdOrderRecords(planning = {}, pedidosDir = "") {
       .filter(Boolean)
   );
 
-  for (const pedido of createdOrdersFromPedidoFiles(planning, pedidosDir)) {
+  for (const pedido of createdOrdersFromPedidoFiles(planning, pedidosDir, readPedidoBases)) {
     if (seenPedidoIds.has(pedido.pedido_id)) continue;
     pedidosCriados.push(pedido);
     seenPedidoIds.add(pedido.pedido_id);
@@ -1188,8 +1191,8 @@ function createdOrderRecords(planning = {}, pedidosDir = "") {
   return pedidosCriados;
 }
 
-function createdOrdersByPlanningItem(planning = {}, pedidosDir = "") {
-  const pedidosCriados = createdOrderRecords(planning, pedidosDir);
+function createdOrdersByPlanningItem(planning = {}, pedidosDir = "", readPedidoBases = null) {
+  const pedidosCriados = createdOrderRecords(planning, pedidosDir, readPedidoBases);
 
   const byItemId = new Map();
   const byOrder = new Map();
@@ -1306,7 +1309,7 @@ function childOrderStatus({ pedidosDir, pedidoId }) {
   };
 }
 
-function planningPosts(planning, pedidosDir = "") {
+function planningPosts(planning, pedidosDir = "", readPedidoBases = null) {
   const plano = planning.plano_mensal || {};
   const sourcePosts = Array.isArray(plano.postagens)
     ? plano.postagens
@@ -1314,7 +1317,7 @@ function planningPosts(planning, pedidosDir = "") {
       ? plano.itens
       : [];
 
-  const createdOrders = createdOrdersByPlanningItem(planning, pedidosDir);
+  const createdOrders = createdOrdersByPlanningItem(planning, pedidosDir, readPedidoBases);
   return sourcePosts.map((post, index) => {
     const pedidoId = resolvePlanningPostPedidoId({ planning, post, index, createdOrders });
     const childStatus = childOrderStatus({ pedidosDir, pedidoId });
@@ -1636,12 +1639,19 @@ function calendarPayloadForPost(planning, post) {
   };
 }
 
-function listClientPlanningCalendar({ baseDir, whatsapp, pedidosDir = "" }) {
+function listClientPlanningCalendar({ baseDir, whatsapp, pedidosDir = "", readPedidoBases = null }) {
   const hiddenKeys = calendarHiddenKeys(baseDir, whatsapp);
   const postagens = [];
+  let pedidoBases;
+  const readOrders = typeof readPedidoBases === "function" ? readPedidoBases : (owner) => {
+    if (owner !== whatsapp) return orderStorage.listPedidoBasesByWhatsapp(pedidosDir, owner);
+    // Reuse only this calendar read's ordered inventory, never another owner's.
+    if (pedidoBases === undefined) pedidoBases = orderStorage.listPedidoBasesByWhatsapp(pedidosDir, owner);
+    return pedidoBases;
+  };
 
   for (const planning of listPlanningDirsForWhatsapp(baseDir, whatsapp).map(parsePlanning).filter(Boolean)) {
-    const posts = planningPosts(planning, pedidosDir);
+    const posts = planningPosts(planning, pedidosDir, readOrders);
     for (const post of posts) {
       const item = calendarPayloadForPost(planning, post);
       if (isCalendarItemHidden(hiddenKeys, item)) continue;
