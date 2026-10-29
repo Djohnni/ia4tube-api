@@ -17,7 +17,9 @@ internal data class EditCalendarReply(
     val ticket: String? = null, val error: String? = null,
 )
 
-internal class EditCalendarViewModel : ViewModel() {
+internal class EditCalendarViewModel(
+    private val clientFactory: () -> EditCalendarClient = { EditCalendarClient() },
+) : ViewModel() {
     var nonce by mutableStateOf(freshNonce())
         private set
     var schedule by mutableStateOf<EditCalendarSchedule?>(null)
@@ -32,7 +34,7 @@ internal class EditCalendarViewModel : ViewModel() {
     private var pendingRequest: String? = null
     private var job: Job? = null
     private val requestSchedules = mutableMapOf<String, EditCalendarSchedule>()
-    private val client by lazy { EditCalendarClient() }
+    private val client by lazy(clientFactory)
 
     /** Keep only a fingerprint, never a saved token or Activity in this owner. */
     fun synchronizeSession(token: String): Boolean {
@@ -85,6 +87,9 @@ internal class EditCalendarViewModel : ViewModel() {
             choosingSchedule = true
             return
         }
+        // A selection belongs to one new order. An uncertain retry keeps its
+        // frozen schedule without consuming a later manual selection.
+        if (!requestSchedules.containsKey(requestId)) schedule = null
         requestSchedules[requestId] = value
         val requestNonce = nonce
         val requestAccount = requireNotNull(accountKey)
