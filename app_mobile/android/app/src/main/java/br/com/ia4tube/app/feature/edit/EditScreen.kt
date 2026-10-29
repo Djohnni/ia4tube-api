@@ -260,7 +260,7 @@ fun EditScreen(onBackClick: () -> Unit, onAuthRequired: () -> Unit = {}) {
             IconButton(onClick = { browser.pause(); onBack() }) {
                 Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Voltar", tint = Color.White)
             }
-            Text("Vídeos", color = Color.White)
+            Text("Posts prontos", color = Color.White)
             Spacer(Modifier.weight(1f))
             TextButton(enabled = !calendar.busy, onClick = {
                 calendar.synchronizeSession(session.getToken())
@@ -357,7 +357,7 @@ fun EditScreen(onBackClick: () -> Unit, onAuthRequired: () -> Unit = {}) {
             if (browser.loading) LinearProgressIndicator(Modifier.fillMaxWidth().align(Alignment.TopCenter))
             if (browser.loadFailed) {
                 Column(Modifier.align(Alignment.Center), horizontalAlignment = Alignment.CenterHorizontally) {
-                    Text("Não foi possível abrir os vídeos.", color = Color.White)
+                    Text("Não foi possível abrir os posts prontos.", color = Color.White)
                     Button(onClick = { browser.loadFailed = false; browser.loading = true; browser.view?.reload() }) { Text("Tentar novamente") }
                 }
             }
@@ -378,13 +378,13 @@ private fun EditCalendarScheduleDialog(initial: EditCalendarSchedule?, onDismiss
     var time by remember { mutableStateOf(initial?.let { LocalTime.parse(it.time) } ?: default.toLocalTime()) }
     val selection = EditCalendarSchedule(date.toString(), time.format(DateTimeFormatter.ofPattern("HH:mm")))
     val future = selection.isFuture()
-    AlertDialog(onDismissRequest = onDismiss, title = { Text("Data e horário do vídeo") },
+    AlertDialog(onDismissRequest = onDismiss, title = { Text("Data e horário da publicação") },
         text = { Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
             OutlinedButton(onClick = { DatePickerDialog(context, { _, year, month, day -> date = LocalDate.of(year, month + 1, day) },
                 date.year, date.monthValue - 1, date.dayOfMonth).show() }) { Text(date.format(DateTimeFormatter.ofPattern("dd/MM/yyyy"))) }
             OutlinedButton(onClick = { TimePickerDialog(context, { _, hour, minute -> time = LocalTime.of(hour, minute) },
                 time.hour, time.minute, true).show() }) { Text(selection.time) }
-            Text("Horário de Brasília. O vídeo ficará no calendário como Reel depois de pronto.")
+            Text("Horário de Brasília. A publicação ficará no calendário depois de pronta.")
             if (!future) Text("Escolha uma data e um horário futuros.", color = MaterialTheme.colorScheme.error)
         } },
         confirmButton = { TextButton(enabled = future, onClick = { onConfirm(selection) }) { Text("Confirmar") } },
