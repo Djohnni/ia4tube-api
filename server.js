@@ -25,6 +25,7 @@ const orderService = require("./src/orders/order.service");
 const billingService = require("./src/billing/billing.service");
 const billingPlans = require("./src/billing/plans");
 const { assertPixIssuanceAllowed, sendBlockedPixError } = require("./src/billing/pix-account-policy");
+const { createCompanyProfileRouter } = require("./src/company-profile/router");
 const graphicMaterialsService = require("./src/company-graphic-materials/materials.service");
 const graphicMaterialsCatalog = require("./src/company-graphic-materials/materials.catalog");
 const carouselService = require("./src/company-carousels/carousels.service");
@@ -2241,6 +2242,10 @@ app.post("/auth/login", async (req, res, next) => {
 });
 
 // Perfil
+app.use("/company/profile", auth, createCompanyProfileRouter({
+  baseDir: path.join(DATA_DIR, "company_profiles")
+}));
+
 app.get("/me", auth, (req, res) => {
   registrarOnline(req, { ultima_acao: "perfil" });
 
