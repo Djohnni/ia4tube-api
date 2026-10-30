@@ -12,5 +12,7 @@ data class CompanyProfile(
     val cep: String = "",
     val email: String = "",
     val site: String = "",
-    val logoUri: String = ""
+    val logoUri: String = "",
+    val facebook: String = "",
+    val outrosLinks: String = ""
 )

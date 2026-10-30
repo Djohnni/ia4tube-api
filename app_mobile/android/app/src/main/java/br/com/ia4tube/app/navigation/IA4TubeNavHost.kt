@@ -86,6 +86,9 @@ import br.com.ia4tube.app.feature.create_art.CreateArtEmpresaScreen
 import br.com.ia4tube.app.feature.create_art.CreateArtEmpresaViewModel
 import br.com.ia4tube.app.feature.create_art.CreateArtEmpresaViewModelFactory
 import br.com.ia4tube.app.feature.company_profile.CompanyProfileScreen
+import br.com.ia4tube.app.feature.company_profile.CompanyProfileEditorScreen
+import br.com.ia4tube.app.feature.company_profile.CompanyProfileEditorViewModel
+import br.com.ia4tube.app.feature.company_profile.CompanyProfileEditorViewModelFactory
 import br.com.ia4tube.app.feature.company_profile.CompanyGraphicMaterialsViewModel
 import br.com.ia4tube.app.feature.company_profile.CompanyGraphicMaterialsViewModelFactory
 import br.com.ia4tube.app.feature.company_profile.CompanyProfileViewModel
@@ -511,6 +514,11 @@ fun IA4TubeNavHost(
                     MobileAnalytics.track("mobile_perfil_empresa_abriu", tela = "home")
                     navController.navigate(Routes.CompanyProfile)
                 },
+                onEditCompanyProfile = {
+                    if (navController.currentBackStackEntry?.id == homeEntry.id) {
+                        navigateProtected(Routes.CompanyProfileEditor)
+                    }
+                },
                 onSupport = {
                     MobileAnalytics.track("mobile_suporte_abriu", tela = "home")
                     openWhatsAppSupport(context)
@@ -770,6 +778,19 @@ fun IA4TubeNavHost(
                     }
                 )
             }
+        }
+
+        composable(Routes.CompanyProfileEditor) {
+            if (!hasSavedToken()) {
+                LaunchedEffect(Unit) { requestAuthFor(Routes.CompanyProfileEditor) }
+                return@composable
+            }
+            val editor: CompanyProfileEditorViewModel = viewModel(
+                factory = CompanyProfileEditorViewModelFactory(context, companyProfileStore, repository::getSavedToken)
+            )
+            CompanyProfileEditorScreen(editor,
+                onBack = { navController.popBackStack() },
+                onAuthRequired = { requestAuthFor(Routes.CompanyProfileEditor) })
         }
 
         composable(Routes.CompanyProfile) {

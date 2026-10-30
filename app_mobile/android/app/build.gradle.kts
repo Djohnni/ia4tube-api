@@ -51,8 +51,8 @@ android {
         applicationId = "com.ia4tube.app"
         minSdk = 26
         targetSdk = 36
-        versionCode = 89
-        versionName = "0.2.76"
+        versionCode = 90
+        versionName = "0.2.77"
 
         buildConfigField("String", "API_BASE", productionApiBase.asBuildConfigString())
         buildConfigField("String", "PRODUCT_DISCOVERY_API_BASE", productionApiBase.asBuildConfigString())

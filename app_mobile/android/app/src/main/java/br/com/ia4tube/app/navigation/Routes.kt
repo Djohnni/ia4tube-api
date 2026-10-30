@@ -21,6 +21,7 @@ object Routes {
     const val MonthlyPlanningDetail = "monthly-planning/{planningId}"
     const val MonthlyPlanningResults = "monthly-planning-results/{planningId}"
     const val CompanyProfile = "company-profile"
+    const val CompanyProfileEditor = "company-profile-editor"
     const val Support = "support"
     const val Plans = "plans"
 

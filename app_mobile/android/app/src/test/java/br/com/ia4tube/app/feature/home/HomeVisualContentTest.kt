@@ -42,6 +42,18 @@ import java.time.Duration
 @GraphicsMode(GraphicsMode.Mode.NATIVE)
 @LooperMode(LooperMode.Mode.PAUSED)
 class HomeVisualContentTest {
+    @Test fun optionalCompanyProfileIsBelowOtherFormsAndHasItsOwnUnlockedCallback() {
+        HomeHarness(firstFree = true).use { home ->
+            val editor = home.tag("home_company_profile_editor")
+            val accordion = home.tag("home_other_forms")
+            assertTrue(editor.positionInRoot.y >= accordion.positionInRoot.y + accordion.size.height - 1)
+            assertNull(home.findTag("home_printed_materials"))
+            home.assertAction("home_company_profile_editor", "company-profile-editor")
+            home.assertAction("home_other_forms", null)
+            home.assertAction("home_printed_materials", "locked")
+            home.assertAction("home_company_profile_editor", "company-profile-editor")
+        }
+    }
     @Test fun primaryActionsUseOnlyTheirAssignedCallbacks() {
         HomeHarness().use { home ->
             assertTrue("Composition must not open any product flow", home.events.isEmpty())
@@ -248,7 +260,8 @@ class HomeVisualContentTest {
                             onOpenInstagram = { events += "instagram" }, onOpenPlannedArts = { events += "calendar" },
                             onCompanyProfile = { events += "company-profile" }, onSupport = { events += "support" },
                             onLogout = { events += "logout" }, onIconHelpClick = { events += "help" },
-                            onLockedFeatureClick = { events += "locked" })
+                            onLockedFeatureClick = { events += "locked" },
+                            onEditCompanyProfile = { events += "company-profile-editor" })
                     }
                 }
             }

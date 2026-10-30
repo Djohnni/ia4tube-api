@@ -103,7 +103,8 @@ internal fun HomeVisualContent(
     onSupport: () -> Unit,
     onLogout: () -> Unit,
     onIconHelpClick: () -> Unit,
-    onLockedFeatureClick: () -> Unit
+    onLockedFeatureClick: () -> Unit,
+    onEditCompanyProfile: () -> Unit = {}
 ) {
     val scroll = rememberScrollState()
     val scope = rememberCoroutineScope()
@@ -205,6 +206,10 @@ internal fun HomeVisualContent(
                 HomeVisualMenuAction("Post Deslizante", "home_carousel", palette, firstFreeArtMode,
                     description = state.carrosseisRestantes?.let { "$it disponíveis" }, onClick = lockable(onCarouselClick))
             }
+            Text("Perfil da empresa", color = palette.textPrimary, fontSize = 16.sp,
+                modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)
+                    .clickable(role = Role.Button, onClick = onEditCompanyProfile)
+                    .padding(horizontal = 10.dp, vertical = 12.dp).testTag("home_company_profile_editor"))
             Spacer(Modifier.height(8.dp))
         }
         HomeVisualFooter(palette, credits,

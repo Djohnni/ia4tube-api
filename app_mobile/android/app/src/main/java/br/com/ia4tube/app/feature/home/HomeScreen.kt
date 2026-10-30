@@ -103,7 +103,8 @@ fun HomeScreen(
     onLogout: () -> Unit,
     isLoggedIn: Boolean = true,
     cameraRequestKey: Int = 0,
-    onCameraAuthRequired: () -> Unit = {}
+    onCameraAuthRequired: () -> Unit = {},
+    onEditCompanyProfile: () -> Unit = {}
 ) {
     val state by viewModel.uiState.collectAsState()
     val homePalette = premiumHomePalette(premiumTheme)
@@ -168,6 +169,7 @@ fun HomeScreen(
         onOpenInstagram = onOpenInstagram,
         onOpenPlannedArts = onOpenPlannedArts,
         onCompanyProfile = onCompanyProfile,
+        onEditCompanyProfile = onEditCompanyProfile,
         onSupport = onSupport,
         onLogout = onLogout,
         onIconHelpClick = { showIconHelpDialog = true },

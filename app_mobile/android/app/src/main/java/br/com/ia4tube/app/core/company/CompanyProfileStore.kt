@@ -38,7 +38,9 @@ class CompanyProfileStore(context: Context) {
             cep = preferences.getString(KEY_CEP, "").orEmpty(),
             email = preferences.getString(KEY_EMAIL, "").orEmpty(),
             site = preferences.getString(KEY_SITE, "").orEmpty(),
-            logoUri = preferences.getString(KEY_LOGO_URI, "").orEmpty()
+            logoUri = preferences.getString(KEY_LOGO_URI, "").orEmpty(),
+            facebook = preferences.getString(KEY_FACEBOOK, "").orEmpty(),
+            outrosLinks = preferences.getString(KEY_OUTROS_LINKS, "").orEmpty()
         )
     }
 
@@ -79,6 +81,22 @@ class CompanyProfileStore(context: Context) {
         }
     }
 
+    // Legacy saveProfile deliberately leaves these additive editor fields untouched.
+    fun saveEditorProfile(profile: CompanyProfile, pending: Boolean, uploadLogo: Boolean, removeLogo: Boolean) {
+        saveProfile(profile)
+        preferences.edit()
+            .putString(KEY_FACEBOOK, profile.facebook)
+            .putString(KEY_OUTROS_LINKS, profile.outrosLinks)
+            .putBoolean(KEY_EDITOR_PENDING, pending)
+            .putBoolean(KEY_UPLOAD_LOGO, uploadLogo)
+            .putBoolean(KEY_REMOVE_LOGO, removeLogo)
+            .apply()
+    }
+
+    fun editorPending(): Boolean = preferences.getBoolean(KEY_EDITOR_PENDING, false)
+    fun editorUploadLogo(): Boolean = preferences.getBoolean(KEY_UPLOAD_LOGO, false)
+    fun editorRemoveLogo(): Boolean = preferences.getBoolean(KEY_REMOVE_LOGO, false)
+
     private companion object {
         const val PREFERENCES_NAME = "ia4tube_company_profile"
         const val KEY_NOME_EMPRESA = "nome_empresa"
@@ -94,5 +112,10 @@ class CompanyProfileStore(context: Context) {
         const val KEY_SITE = "site"
         const val KEY_LOGO_URI = "logo_uri"
         const val KEY_PROFILE_OWNER = "profile_owner"
+        const val KEY_FACEBOOK = "facebook"
+        const val KEY_OUTROS_LINKS = "outros_links"
+        const val KEY_EDITOR_PENDING = "editor_pending"
+        const val KEY_UPLOAD_LOGO = "editor_upload_logo"
+        const val KEY_REMOVE_LOGO = "editor_remove_logo"
     }
 }
