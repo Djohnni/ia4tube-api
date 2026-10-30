@@ -297,6 +297,11 @@ function createProductionSocialIntegration(options = {}) {
           !require("./calendar/model").sameBinding(current.preferences.binding, current.connection.binding)) return null;
       return runtime.calendar.prepareRequest(claims, true, current.preferences.revision);
     },
+    async observeEditConnection(verifiedClaims) {
+      if (!runtime?.instagramOAuth || !verifiedClaims) return null;
+      // Existing tenant-scoped observation only: no OAuth transition, provider request, grant or calendar sync.
+      return (await runtime.instagramOAuth.getCurrentConnection({ verifiedClaims })).connection;
+    },
     async calendarOverlay(claims, payload) { return runtime?.calendar ? runtime.calendar.overlay(claims, payload) : payload; },
     async calendarEdit(claims, key, input) { return runtime?.calendar ? runtime.calendar.legacyEdit(claims, key, input) : false; },
     pendingContracts: PENDING_CONTRACTS, afterAuthentication, middleware, initialize, mountWeb, close });

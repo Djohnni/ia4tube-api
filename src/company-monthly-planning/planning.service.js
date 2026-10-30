@@ -1429,13 +1429,16 @@ function externalEditRegistration(value) {
   if (value == null) return null;
   const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
   const typed = Object.hasOwn(value, "mediaKind");
-  if (value.kind !== "edit_calendar_v1" || !uuid.test(value.contextId || "") ||
-      !uuid.test(value.editOrderId || "") || !/^[a-f0-9]{64}$/.test(value.inputHash || "") ||
+  const admission = value.kind === "edit_calendar_admission_v1";
+  if ((!admission && value.kind !== "edit_calendar_v1") || !uuid.test(value.contextId || "") ||
+      !uuid.test(value.editOrderId || "") || !/^[a-f0-9]{64}$/.test((admission ? value.requestHash : value.inputHash) || "") ||
+      admission && (!uuid.test(value.admissionId || "") || !typed || Object.hasOwn(value, "inputHash")) ||
       typed && !["image", "video"].includes(value.mediaKind)) {
     throw Object.assign(new Error("Vinculo do Edit invalido."), { code: "edit_calendar_registration_invalid", statusCode: 400 });
   }
-  return { kind: "edit_calendar_v1", contextId: value.contextId.toLowerCase(),
-    editOrderId: value.editOrderId.toLowerCase(), inputHash: value.inputHash,
+  return { kind: value.kind, contextId: value.contextId.toLowerCase(),
+    editOrderId: value.editOrderId.toLowerCase(),
+    ...(admission ? { requestHash: value.requestHash, admissionId: value.admissionId.toLowerCase() } : { inputHash: value.inputHash }),
     ...(typed ? { mediaKind: value.mediaKind } : {}) };
 }
 
@@ -4051,6 +4054,8 @@ function syncPlanningReservationAfterChildren(cliente, planning, childCount) {
 }
 
 function createChildOrdersFromPlan({ pedidosDir, planning, plan, cliente = null }) {
+  if (planning.edit_calendar?.kind === "edit_calendar_admission_v1")
+    throw Object.assign(new Error("A reserva do Edit ainda nao foi vinculada ao produtor."), { code: "edit_calendar_admission_required", statusCode: 409 });
   if (!pedidosDir) {
     return readCreatedOrdersFile(planning);
   }
@@ -4205,6 +4210,8 @@ function savePlanResult({ baseDir, planningId, payload = {}, pedidosDir = "", cl
   }
 
   const editRegistration = externalEditRegistration(planning.edit_calendar);
+  if (editRegistration?.kind === "edit_calendar_admission_v1")
+    throw Object.assign(new Error("A reserva do Edit ainda nao foi vinculada ao produtor."), { code: "edit_calendar_admission_required", statusCode: 409 });
   const plan = normalizePlanResultPayload(payload);
   const rawPostagens = Array.isArray(plan.postagens)
     ? plan.postagens

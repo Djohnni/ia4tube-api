@@ -1,6 +1,6 @@
 "use strict";
 const express = require("express");
-function createEditCalendarRouter({ authenticate, botAuthenticate, isBotAdmin, service, freeArtPolicy = () => ({}) }) {
+function createEditCalendarRouter({ authenticate, botAuthenticate, isBotAdmin, service, freeArtPolicy = () => ({}), admissionAuthenticate = null }) {
   const router = express.Router();
   const call = action => async (req, res) => {
     res.set("Cache-Control", "no-store");
@@ -21,6 +21,23 @@ function createEditCalendarRouter({ authenticate, botAuthenticate, isBotAdmin, s
   router.post("/bot/empresa/edit/orders/bind", botAuthenticate, call(req => {
     if (!isBotAdmin(req)) throw Object.assign(new Error("Acesso negado"), { statusCode: 403, code: "edit_calendar_operator_required" });
     return service.bind(req.body);
+  }));
+  const scopedAdmission = (req, res, next) => {
+    try {
+      if (typeof admissionAuthenticate !== "function") throw Object.assign(new Error("Indisponivel"),
+        { statusCode: 503, code: "edit_calendar_admission_disabled" });
+      admissionAuthenticate(req.path, req.headers, req.body); return next();
+    } catch (error) {
+      return res.status(error.statusCode === 503 ? 503 : error.statusCode === 400 ? 400 : 403)
+        .set("Cache-Control", "no-store").json({ ok: false, code: error.statusCode === 503
+          ? "edit_calendar_admission_disabled" : error.statusCode === 400 ? "edit_calendar_input_invalid" : "edit_calendar_admission_unauthorized" });
+    }
+  };
+  router.post("/empresa/edit/orders/admit", scopedAdmission, call(req => service.admit(req.body)));
+  router.post("/empresa/edit/orders/admission/cancel", scopedAdmission, call(req => service.cancelAdmission(req.body)));
+  router.get("/bot/empresa/edit/orders/:editOrderId/admission", botAuthenticate, call(req => {
+    if (!isBotAdmin(req)) throw Object.assign(new Error("Acesso negado"), { statusCode: 403, code: "edit_calendar_operator_required" });
+    return service.admissionStatus(req.params.editOrderId, req.query);
   }));
   return router;
 }

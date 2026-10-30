@@ -49,10 +49,10 @@ function privateDirectory(directory) {
   fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
   if (fs.lstatSync(directory).isSymbolicLink() || !fs.lstatSync(directory).isDirectory()) fail("storage_invalid", 503);
 }
-function read(file) {
+function read(file, maximum = 32768) {
   try {
     const stat = fs.lstatSync(file);
-    if (!stat.isFile() || stat.isSymbolicLink() || stat.size > 32768) fail("storage_invalid", 503);
+    if (!stat.isFile() || stat.isSymbolicLink() || stat.size > maximum) fail("storage_invalid", 503);
     return JSON.parse(fs.readFileSync(file, "utf8"));
   } catch (error) { if (error.code === "ENOENT") return null; throw error; }
 }
@@ -63,7 +63,8 @@ function read(file) {
  */
 function createEditCalendarService({ dataDir, planningDir, ordersDir, secret, readClients, writeClients,
   prepareCalendarRequest, currentFreeArtBlocked = () => false, recordFreeArtUse = () => true,
-  clock = Date.now, fault = () => {} }) {
+  canReuseCancelledFreeArt = () => false,
+  admissionEnabled = false, observeConnection = null, clock = Date.now, fault = () => {} }) {
   if (typeof readClients !== "function" || typeof writeClients !== "function" || typeof prepareCalendarRequest !== "function" ||
       typeof secret !== "string" || secret.length < 32) fail("configuration_invalid", 503);
   const root = path.join(path.resolve(dataDir), "private", "edit-calendar");
@@ -94,6 +95,17 @@ function createEditCalendarService({ dataDir, planningDir, ordersDir, secret, re
     if (hash(ticket.split(".")[1]) !== row.ticketHash) fail("context_unavailable", 404);
     return { ok: true, ticket, expiresAt: new Date(row.expiresAt).toISOString() };
   }
+  function ticketContext(ticket) {
+    const parsed = typeof ticket === "string" && ticket.match(TICKET);
+    if (!parsed) fail("context_unavailable", 404);
+    const row = read(contextFile(parsed[1])); verifyContext(row, parsed[1]);
+    if (!crypto.timingSafeEqual(Buffer.from(hash(parsed[2]), "hex"), Buffer.from(row.ticketHash, "hex"))) fail("context_unavailable", 404);
+    return row;
+  }
+  const admission = require("./admission").createEditAdmissionService({ enabled: admissionEnabled, root, contextFile,
+    claimFile: id => path.join(orders, `${id}.json`), read, write: atomicWriteJson, directories, acquireLock,
+    ownerClient, ticketContext, billingDigest, planningRoot, orderRoot, readClients, writeClients,
+    observeConnection, currentFreeArtBlocked, recordFreeArtUse, canReuseCancelledFreeArt, secret, clock, fault });
   async function createContext(claims, input, { freeArtBlocked = false, ipIdentity = null } = {}) {
     const current = ownerClient(claims), request = contextInput(input, clock()); directories();
     const id = request.requestId, digest = hash(JSON.stringify(request));
@@ -119,9 +131,12 @@ function createEditCalendarService({ dataDir, planningDir, ordersDir, secret, re
       const safeIpIdentity = ipIdentity && HASH.test(ipIdentity.ipHash || "") &&
         typeof ipIdentity.ipMasked === "string" && ipIdentity.ipMasked.length <= 80 && /^[0-9a-fA-F.:]*$/.test(ipIdentity.ipMasked)
         ? { ipHash: ipIdentity.ipHash, ipMasked: ipIdentity.ipMasked } : null;
+      const sessionIdentity = admissionEnabled && claims?.token_version === 2 ? Object.fromEntries(
+        ["whatsapp", "sub", "company_id", "token_version", "iss", "aud", "jti"].map(field => [field, claims[field]])) : null;
       const row = { schema: 1, id, owner: current.owner, request, requestHash: digest,
         planningId, pedidoId: `edit_${id.replace(/-/g, "")}`, phase: "pending", createdAt: clock(), expiresAt: clock() + TTL,
-        ticketHash: hash(ticket.split(".")[1]), envelope, freeArtBlocked: freeArtBlocked === true, ipIdentity: safeIpIdentity };
+        ticketHash: hash(ticket.split(".")[1]), envelope, freeArtBlocked: freeArtBlocked === true, ipIdentity: safeIpIdentity,
+        ...(sessionIdentity ? { sessionIdentity } : {}), ...(admissionEnabled ? { admissionRequired: true } : {}) };
       atomicWriteJson(contextFile(id), row);
       return contextResponse(row);
     } finally { release(); }
@@ -151,6 +166,7 @@ function createEditCalendarService({ dataDir, planningDir, ordersDir, secret, re
     if (!crypto.timingSafeEqual(Buffer.from(hash(parsed[2]), "hex"), Buffer.from(completed.ticketHash, "hex"))) fail("context_unavailable", 404);
     if (completed.binding && JSON.stringify(completed.binding) !== JSON.stringify(request)) fail("order_conflict");
     ownerClient({ whatsapp: completed.owner });
+    admission.assertBind(completed, request);
     // Reading an immutable completed receipt needs no allocation lock or charge.
     if (completed.phase === "bound") return response(completed);
     const release = acquireLock();
@@ -159,11 +175,13 @@ function createEditCalendarService({ dataDir, planningDir, ordersDir, secret, re
       const supplied = Buffer.from(hash(parsed[2]), "hex"), expected = Buffer.from(row.ticketHash, "hex");
       if (!crypto.timingSafeEqual(supplied, expected)) fail("context_unavailable", 404);
       if (row.binding && JSON.stringify(row.binding) !== JSON.stringify(request)) fail("order_conflict");
-      if (!row.binding && row.expiresAt <= clock()) fail("context_expired");
+      if (!row.binding && !row.admission && row.expiresAt <= clock()) fail("context_expired");
       ownerClient({ whatsapp: row.owner });
+      admission.assertBind(row, request);
       if (row.phase === "bound") return response(row);
       const claimFile = path.join(orders, `${request.editOrderId}.json`), claim = read(claimFile);
-      const identity = { schema: 1, contextId: id, inputHash: request.inputHash };
+      const identity = row.admission && !row.admission.legacyBound ? admission.claimIdentity(row)
+        : { schema: 1, contextId: id, inputHash: request.inputHash };
       if (claim && JSON.stringify(claim) !== JSON.stringify(identity)) fail("order_conflict");
       if (!claim) atomicWriteJson(claimFile, identity);
       const current = ownerClient({ whatsapp: row.owner });
@@ -173,13 +191,21 @@ function createEditCalendarService({ dataDir, planningDir, ordersDir, secret, re
         atomicWriteJson(contextFile(id), row);
       }
       const priorReservation = current.client.planejamento_mensal_reservas?.[row.planningId];
+      admission.prepareBind(row, request);
       let plan = planning.findPlanningById({ baseDir: planningRoot, whatsapp: row.owner, planningId: row.planningId });
       const externalEdit = { kind: "edit_calendar_v1", contextId: id, editOrderId: request.editOrderId, inputHash: request.inputHash,
         ...(request.mediaKind ? { mediaKind: request.mediaKind } : {}) };
       const image = request.mediaKind === "image", objective = image ? "Imagem escolhida no Edit" : "Vídeo escolhido no Edit";
       if (plan && (JSON.stringify(plan.edit_calendar) !== JSON.stringify(externalEdit) || plan.whatsapp !== row.owner)) fail("order_conflict");
       if (priorReservation && !plan) fail("allocation_reconciliation_required", 503);
-      if (!priorReservation) {
+      const allocated = row.admission?.reservation;
+      const previousCycleAdmission = Boolean(allocated && allocated.cycle !== String(current.client.plano_ciclo || current.client.ciclo_mes || "") &&
+        plan && plan.ciclo === allocated.cycle && Number(plan.quantidade_reservada) === 1 &&
+        Number(plan.reserva?.artes_mensais_reservadas || 0) === allocated.monthly &&
+        Number(plan.reserva?.artes_avulsas_consumidas || 0) === allocated.standalone &&
+        Number(plan.reserva?.artes_gratis_consumidas || 0) === allocated.free && allocated.monthly + allocated.standalone + allocated.free === 1);
+      if (row.admission && !priorReservation && !previousCycleAdmission) fail("allocation_reconciliation_required", 503);
+      if (!priorReservation && !previousCycleAdmission) {
         if (row.billingRefused) {
           row.beforeBillingDigest = billingDigest(current.client); delete row.billingRefused;
           atomicWriteJson(contextFile(id), row);
@@ -202,7 +228,9 @@ function createEditCalendarService({ dataDir, planningDir, ordersDir, secret, re
       }
       fault("after_request");
       const caption = row.request.caption || request.caption || "Conheça nosso trabalho e acompanhe nosso conteúdo.";
-      planning.savePlanResult({ baseDir: planningRoot, planningId: row.planningId, pedidosDir: orderRoot, cliente: current.client,
+      planning.savePlanResult({ baseDir: planningRoot, planningId: row.planningId, pedidosDir: orderRoot,
+        // A previously paid admission belongs to its original cycle. Do not reset/debit the new cycle to bind its child.
+        cliente: previousCycleAdmission ? null : current.client,
         payload: { postagens: [{ planejamento_item_id: `edit-${id}`, ordem: 1, tema: request.title,
           objetivo: objective, data_sugerida: row.request.date, horario_sugerido: row.request.time,
           descricao_instagram: caption, legenda: caption, sem_imagem: true }] } });
@@ -222,10 +250,12 @@ function createEditCalendarService({ dataDir, planningDir, ordersDir, secret, re
       const consumedFreeArt = Number(current.client.planejamento_mensal_reservas?.[row.planningId]?.artes_gratis_consumidas || 0) > 0;
       if (consumedFreeArt && row.ipIdentity && recordFreeArtUse({ owner: row.owner, planningId: row.planningId, ipIdentity: row.ipIdentity }) !== true)
         fail("free_art_receipt_unconfirmed", 503);
+      admission.finishBind(row);
       row.phase = "bound"; row.boundAt = clock(); atomicWriteJson(contextFile(id), row);
       return response(row);
     } finally { release(); }
   }
-  return Object.freeze({ createContext, bind, close() { key.fill(0); } });
+  return Object.freeze({ createContext, bind, admit: admission.admit, admissionStatus: admission.status,
+    cancelAdmission: admission.cancel, close() { admission.close(); key.fill(0); } });
 }
 module.exports = { createEditCalendarService, contextInput, bindInput };

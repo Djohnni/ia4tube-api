@@ -4054,8 +4054,12 @@ app.post(
   }
 );
 
+const editAdmissionAuthentication = require("./src/company-edit-calendar/admission-contract").createAdmissionAuthentication({
+  enabled: process.env.IA4TUBE_EDIT_ADMISSION_ENABLED === "true", secret: process.env.IA4TUBE_EDIT_ADMISSION_SECRET || "" });
 const editCalendarService = createEditCalendarService({ dataDir: DATA_DIR, planningDir: MONTHLY_PLANNINGS_DIR,
   ordersDir: PEDIDOS_DIR, secret: JWT_SECRET, readClients: readClientes,
+  admissionEnabled: editAdmissionAuthentication.configured,
+  observeConnection: verifiedClaims => productionSocialIntegration.observeEditConnection(verifiedClaims),
   writeClients: value => atomicWriteJson(CLIENTES_FILE, value),
   prepareCalendarRequest: claims => productionSocialIntegration.prepareEditCalendarRequest(claims),
   currentFreeArtBlocked: identity => {
@@ -4063,10 +4067,16 @@ const editCalendarService = createEditCalendarService({ dataDir: DATA_DIR, plann
     const lock = readFreeArtIpLocks()[identity.ipHash];
     return Boolean(lock && new Date(lock.bloqueado_ate || 0).getTime() > Date.now());
   },
+  canReuseCancelledFreeArt: ({ owner, planningId, ipIdentity }) => {
+    if (!ipIdentity?.ipHash || typeof planningId !== "string") return false;
+    const receipt = readFreeArtIpLocks()[ipIdentity.ipHash];
+    return Boolean(receipt && receipt.cliente === owner && receipt.pedido_id === planningId);
+  },
   recordFreeArtUse: ({ owner, planningId, ipIdentity }) => Boolean(recordFreeArtIpLock(null,
     { whatsapp: owner, pedidoId: planningId, context: "planejamento_mensal", ipIdentity })) });
 app.use(createEditCalendarRouter({ authenticate: auth, botAuthenticate: botRunnerAuth, isBotAdmin,
-  service: editCalendarService, freeArtPolicy: getFreeArtIpLockStatus }));
+  service: editCalendarService, freeArtPolicy: getFreeArtIpLockStatus,
+  admissionAuthenticate: editAdmissionAuthentication.authenticate }));
 
 app.post(
   "/empresa/planejamento-mensal/solicitar",
