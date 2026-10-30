@@ -6,6 +6,7 @@ import android.content.MutableContextWrapper
 import android.net.Uri
 import android.view.ViewGroup
 import android.webkit.ValueCallback
+import android.webkit.WebResourceRequest
 import android.widget.FrameLayout
 import androidx.lifecycle.ViewModelStore
 import org.junit.Assert.*
@@ -92,6 +93,35 @@ class EditBrowserRetentionTest {
             assertNull(browser.view)
             assertNull(browser.fileCallback)
             assertSame(activity.get().applicationContext, (view.context as MutableContextWrapper).baseContext)
+        } finally {
+            store.clear()
+            activity.pause().stop().destroy()
+        }
+    }
+
+    @Test fun aCombosClickDuringActivityReplacementIsSwallowedWithoutDeferringNativeNavigation() {
+        assertNull(javaClass.classLoader!!.getResource("com/android/tools/test_config.properties"))
+        val activity = Robolectric.buildActivity(Activity::class.java).setup()
+        val store = ViewModelStore()
+        val browser = EditBrowserViewModel()
+        store.put("edit", browser)
+        try {
+            val binding = Any()
+            val (view, _) = browser.attach(activity.get(), binding)
+            val callback = object : WebResourceRequest {
+                override fun getUrl(): Uri = Uri.parse(EDIT_URL + "app-combos/open?nonce=" + "A".repeat(43))
+                override fun isForMainFrame(): Boolean = true
+                override fun isRedirect(): Boolean = false
+                override fun hasGesture(): Boolean = true
+                override fun getMethod(): String = "GET"
+                override fun getRequestHeaders(): MutableMap<String, String> = mutableMapOf()
+            }
+            browser.detach(binding)
+            assertFalse(browser.isAttached(binding))
+            assertTrue(view.webViewClient.shouldOverrideUrlLoading(view, callback))
+            assertNull(browser.deferredCalendarRequest)
+            assertNull(browser.deferredAvailabilityRequest)
+            assertSame(view, browser.view)
         } finally {
             store.clear()
             activity.pause().stop().destroy()

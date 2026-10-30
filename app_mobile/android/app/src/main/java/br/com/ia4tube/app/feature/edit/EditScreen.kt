@@ -116,6 +116,8 @@ internal class EditBrowserViewModel : ViewModel() {
         view?.webChromeClient = null
         view?.webViewClient = object : WebViewClient() {
             override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
+                // A navigation click cannot be deferred into a different Activity/account.
+                if (EditCombosPolicy.isCallback(request.url.toString())) return true
                 if (EditAvailabilityPolicy.isCallback(request.url.toString())) {
                     deferredAvailabilityRequest = Triple(request.url.toString(), view.url, request.isForMainFrame)
                     return true
@@ -177,11 +179,12 @@ internal class EditBrowserViewModel : ViewModel() {
 }
 
 @Composable
-fun EditScreen(onBackClick: () -> Unit, onAuthRequired: () -> Unit = {}) {
+fun EditScreen(onBackClick: () -> Unit, onAuthRequired: () -> Unit = {}, onOpenPlans: () -> Unit = {}) {
     val context = LocalContext.current
     val lifecycle = LocalLifecycleOwner.current.lifecycle
     val onBack by rememberUpdatedState(onBackClick)
     val requireAuth by rememberUpdatedState(onAuthRequired)
+    val openPlans by rememberUpdatedState(onOpenPlans)
     // The destination's ViewModelStore survives Activity recreation. It is
     // cleared when this route is removed, not when the image picker rotates.
     val browser: EditBrowserViewModel = viewModel()
@@ -239,7 +242,7 @@ fun EditScreen(onBackClick: () -> Unit, onAuthRequired: () -> Unit = {}) {
         val script = "(function(){var receiver=window.iA4tubeAppCalendar;if(!receiver||typeof receiver.receiveAvailability!=='function')return false;return receiver.receiveAvailability(" +
             JSONObject.quote(reply.nonce) + "," + (reply.requestId?.let(JSONObject::quote) ?: "null") + "," +
             reply.revision + "," + (reply.canImage?.toString() ?: "null") + "," + (reply.canVideo?.toString() ?: "null") + "," +
-            availability.validForMs(reply) + "," + reply.loading + ")===true;})()"
+            availability.validForMs(reply) + "," + reply.loading + ",true)===true;})()"
         webView.evaluateJavascript(script) { delivered ->
             if (delivered == "true" && availability.canDeliver(reply, session.getToken(), calendar.nonce)) availability.delivered(reply)
         }
@@ -314,6 +317,16 @@ fun EditScreen(onBackClick: () -> Unit, onAuthRequired: () -> Unit = {}) {
                         settings.setSupportMultipleWindows(false)
                         webViewClient = object : WebViewClient() {
                             override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
+                                if (EditCombosPolicy.isCallback(request.url.toString())) {
+                                    val sessionChanged = calendar.synchronizeSession(session.getToken())
+                                    if (!sessionChanged && browser.isAttached(binding) && lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED) &&
+                                        EditCombosPolicy.canOpen(request.url.toString(), view.url, request.isForMainFrame,
+                                            request.hasGesture(), calendar.nonce)) {
+                                        browser.pause()
+                                        openPlans()
+                                    }
+                                    return true
+                                }
                                 if (EditAvailabilityPolicy.isCallback(request.url.toString())) {
                                     EditAvailabilityPolicy.requestId(request.url.toString(), view.url, request.isForMainFrame,
                                         calendar.nonce)?.let { availability.request(it, session.getToken(), calendar.nonce) }
