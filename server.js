@@ -24,6 +24,7 @@ const orderStatus = require("./src/orders/order.status");
 const orderService = require("./src/orders/order.service");
 const billingService = require("./src/billing/billing.service");
 const billingPlans = require("./src/billing/plans");
+const { assertPixIssuanceAllowed, sendBlockedPixError } = require("./src/billing/pix-account-policy");
 const graphicMaterialsService = require("./src/company-graphic-materials/materials.service");
 const graphicMaterialsCatalog = require("./src/company-graphic-materials/materials.catalog");
 const carouselService = require("./src/company-carousels/carousels.service");
@@ -2619,6 +2620,7 @@ app.post("/bot/notificacoes/teste", botRunnerAuth, async (req, res) => {
 
 // ===== MERCADO PAGO =====
 async function createMercadoPagoPixPayment({ amount, description, payerKey, externalReference, metadata, idempotencyKey }) {
+  assertPixIssuanceAllowed(payerKey);
   if (!MP_ACCESS_TOKEN) {
     const error = new Error("MP_ACCESS_TOKEN nao configurado");
     error.statusCode = 500;
@@ -2754,6 +2756,7 @@ async function criarArteAvulsaPixHandler(req, res) {
       artes_avulsas_restantes: Number(c.artes_avulsas_restantes || 0)
     });
   } catch (e) {
+    if (sendBlockedPixError(e, req, res)) return;
     return res.status(e.statusCode || 500).json({
       ok: false,
       error: e.message || "Erro interno ao gerar Pix da arte avulsa",
@@ -2800,6 +2803,7 @@ app.post("/billing/saldo/pix", auth, async (req, res) => {
       credito: Number(p.credit)
     });
   } catch (e) {
+    if (sendBlockedPixError(e, req, res)) return;
     return res.status(e.statusCode || 500).json({
       ok: false,
       error: e.message || "Erro interno ao gerar Pix",
@@ -2852,6 +2856,7 @@ app.post("/billing/planos/:planId/pix", auth, async (req, res) => {
       } : {})
     });
   } catch (e) {
+    if (sendBlockedPixError(e, req, res)) return;
     return res.status(e.statusCode || 500).json({
       ok: false,
       error: e.message || "Erro interno ao gerar Pix",
@@ -2862,6 +2867,7 @@ app.post("/billing/planos/:planId/pix", auth, async (req, res) => {
 
 app.post("/comprar-creditos", auth, async (req, res) => {
   try {
+    assertPixIssuanceAllowed(req.user.whatsapp);
     if (!MP_ACCESS_TOKEN) {
       return res.status(500).json({ ok: false, error: "MP_ACCESS_TOKEN não configurado" });
     }
@@ -2927,12 +2933,14 @@ app.post("/comprar-creditos", auth, async (req, res) => {
     });
 
   } catch (e) {
+    if (sendBlockedPixError(e, req, res)) return;
     return res.status(500).json({ ok: false, error: "Erro interno ao criar compra" });
   }
 });
 
 app.post("/comprar-creditos-pix", auth, async (req, res) => {
   try {
+    assertPixIssuanceAllowed(req.user.whatsapp);
     if (!MP_ACCESS_TOKEN) {
       return res.status(500).json({ ok: false, error: "MP_ACCESS_TOKEN não configurado" });
     }
@@ -3000,6 +3008,7 @@ app.post("/comprar-creditos-pix", auth, async (req, res) => {
     });
 
   } catch (e) {
+    if (sendBlockedPixError(e, req, res)) return;
     return res.status(500).json({ ok: false, error: "Erro interno ao gerar Pix" });
   }
 });
@@ -5669,6 +5678,7 @@ app.post("/pedidos/:id/gerar-pix", auth, async (req, res) => {
       });
     }
 
+    assertPixIssuanceAllowed(whatsapp);
     const payerEmail = `${String(whatsapp).replace(/\D/g, "") || "cliente"}@ia4tube.com.br`;
     const paymentPayload = {
       transaction_amount: Number(valorPendente.toFixed(2)),
@@ -5730,6 +5740,7 @@ app.post("/pedidos/:id/gerar-pix", auth, async (req, res) => {
       payment_id: pedido.mp_payment_id
     });
   } catch (e) {
+    if (sendBlockedPixError(e, req, res)) return;
     return res.status(500).json({ ok: false, error: "Erro interno ao gerar Pix" });
   }
 });
