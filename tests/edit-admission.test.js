@@ -5,7 +5,8 @@ const express = require("express");
 const { spawnSync } = require("node:child_process");
 const { createEditCalendarService } = require("../src/company-edit-calendar/service");
 const { createEditCalendarRouter } = require("../src/company-edit-calendar/router");
-const { createAdmissionAuthentication, canonicalJson, hash, ADMIT_PATH, CANCEL_PATH } = require("../src/company-edit-calendar/admission-contract");
+const { createAdmissionAuthentication, canonicalJson, admissionOrderId, hash, ADMIT_PATH, CANCEL_PATH } = require("../src/company-edit-calendar/admission-contract");
+const { isAdmissionRequest, admissionJsonParser, admissionJsonError, createCapabilityRateGuard } = require("../src/company-edit-calendar/admission-http");
 const { atomicWriteJson } = require("../src/notifications/fcm-token-store");
 const planning = require("../src/company-monthly-planning/planning.service");
 const billing = require("../src/billing/billing.service");
@@ -32,7 +33,7 @@ function fixture(t, options = {}) {
       time: "14:00", destination: "reel", caption: "Legenda nativa" }, policy);
   }
   function body(ticket, mediaKind = "image") {
-    return { schemaVersion: 1, ticket, editOrderId: crypto.randomUUID(), requestHash: hash(crypto.randomUUID()), mediaKind,
+    return { schemaVersion: 1, ticket, editOrderId: admissionOrderId(ticket), requestHash: hash(crypto.randomUUID()), mediaKind,
       title: "Modelo sintetico", caption: "Legenda sintetica", durationSeconds: mediaKind === "image" ? null : 10,
       selection: { modelId: crypto.randomUUID(), modelVersion: 1, sourceDigest: hash("synthetic-canonical-catalog") }, quantity: 1 };
   }
@@ -44,27 +45,64 @@ function fixture(t, options = {}) {
   return { root, owner, other, service, dependencies, readClients, writeClients, context, body, bindBody, status, cancel,
     setNow: value => { now = value; }, now: () => now, observations: () => observations, setConnection: value => { connection = value; } };
 }
-function signature(body, timestamp, route = ADMIT_PATH, key = rpcSecret) {
+function signature(body, timestamp, route = CANCEL_PATH, key = rpcSecret) {
   return "v1=" + crypto.createHmac("sha256", key).update(`v1\nPOST\n${route}\n${timestamp}\n${hash(canonicalJson(body))}`).digest("hex");
 }
-test("feature off and missing secret refuse admission authentication before any capability is used", () => {
-  for (const options of [{}, { enabled: true }, { enabled: false, secret: rpcSecret }, { enabled: true, secret: "too-short" }])
-    assert.throws(() => createAdmissionAuthentication(options).authenticate(ADMIT_PATH, {}, {}), { code: "edit_calendar_admission_disabled", statusCode: 503 });
+async function withoutFilesystemWrites(action) {
+  const writes = [], originals = new Map();
+  for (const name of ["mkdirSync", "writeFileSync", "appendFileSync", "renameSync", "unlinkSync", "rmSync", "truncateSync", "ftruncateSync", "writeSync", "chmodSync", "chownSync", "symlinkSync", "linkSync", "copyFileSync", "utimesSync"]) {
+    originals.set(name, fs[name]); fs[name] = function () { writes.push(name); throw new Error("Unexpected filesystem write in capability validation"); };
+  }
+  originals.set("openSync", fs.openSync); fs.openSync = function (file, flags, ...rest) {
+    if (typeof flags !== "string" || /[wax+]/.test(flags)) { writes.push("openSync-write"); throw new Error("Unexpected write-open in capability validation"); }
+    return originals.get("openSync").call(fs, file, flags, ...rest);
+  };
+  try { return await action(); }
+  finally { for (const [name, original] of originals) fs[name] = original; assert.deepEqual(writes, [], "Rejected capability must attempt no filesystem mutations"); }
+}
+function seedPriorRandomAdmissionId(f, request) {
+  // Synthetic on-disk fixture for intents emitted by the previous trusted receiver, before deterministic IDs.
+  const contextPath = path.join(f.root, "private/edit-calendar/contexts", request.ticket.slice(0, 36) + ".json");
+  const row = JSON.parse(fs.readFileSync(contextPath, "utf8")), legacy = { ...request, editOrderId: crypto.randomUUID() };
+  const { ticket, ...identity } = legacy;
+  row.admission.editOrderId = legacy.editOrderId; row.admission.inputIdentity = hash(canonicalJson(identity));
+  atomicWriteJson(contextPath, row);
+  const claimRoot = path.join(f.root, "private/edit-calendar/orders");
+  fs.renameSync(path.join(claimRoot, request.editOrderId + ".json"), path.join(claimRoot, legacy.editOrderId + ".json"));
+  const plan = planning.findPlanningById({ baseDir: f.dependencies.planningDir, whatsapp: f.owner, planningId: row.planningId });
+  if (plan) {
+    const stored = JSON.parse(fs.readFileSync(plan.solicitacao_path, "utf8")); stored.edit_calendar.editOrderId = legacy.editOrderId;
+    atomicWriteJson(plan.solicitacao_path, stored);
+  }
+  return legacy;
+}
+
+test("new admission UUID is the exact purpose-separated full-ticket SHA256 vector", () => {
+  const ticket = "11111111-1111-4111-8111-111111111111." + "A".repeat(43);
+  assert.equal(admissionOrderId(ticket), "0abe965a-0229-4e18-8e15-6672e8cabb9f");
+  assert.match(admissionOrderId(ticket), /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+  assert.throws(() => admissionOrderId(" " + ticket), { code: "edit_calendar_input_invalid" });
+  assert.throws(() => admissionOrderId(ticket + "\n"), { code: "edit_calendar_input_invalid" });
+  assert.notEqual(admissionOrderId(ticket), admissionOrderId(ticket.slice(0, -1) + "B"));
 });
-test("dedicated HMAC accepts reordered JSON keys without changing the receiver request digest", () => {
+test("feature off and missing private key keep cancellation disabled", () => {
+  for (const options of [{}, { enabled: true }, { enabled: false, secret: rpcSecret }, { enabled: true, secret: "too-short" }])
+    assert.throws(() => createAdmissionAuthentication(options).authenticate(CANCEL_PATH, {}, {}), { code: "edit_calendar_admission_disabled", statusCode: 503 });
+});
+test("private cancellation HMAC accepts reordered JSON keys without changing request identity", () => {
   const now = Date.now(), timestamp = String(Math.floor(now / 1000)), body = { z: [3, { b: 2, a: 1 }], a: "stable" };
   const auth = createAdmissionAuthentication({ enabled: true, secret: rpcSecret, clock: () => now });
-  assert.doesNotThrow(() => auth.authenticate(ADMIT_PATH, { "x-ia4tube-edit-timestamp": timestamp,
+  assert.doesNotThrow(() => auth.authenticate(CANCEL_PATH, { "x-ia4tube-edit-timestamp": timestamp,
     "x-ia4tube-edit-signature": signature(body, timestamp) }, { a: "stable", z: [3, { a: 1, b: 2 }] }));
 });
-for (const variant of ["missing", "wrong-secret", "changed-body", "old", "future", "wrong-path", "malformed"]) test(`HMAC rejects ${variant}`, () => {
+for (const variant of ["missing", "wrong-secret", "changed-body", "old", "future", "wrong-path", "malformed"]) test(`private cancellation HMAC rejects ${variant}`, () => {
   const now = Date.now(), timestamp = String(Math.floor(now / 1000) + (variant === "old" ? -301 : variant === "future" ? 301 : 0));
   const body = { a: 1 }, headers = { "x-ia4tube-edit-timestamp": timestamp,
-    "x-ia4tube-edit-signature": signature(body, timestamp, ADMIT_PATH, variant === "wrong-secret" ? secret : rpcSecret) };
+    "x-ia4tube-edit-signature": signature(body, timestamp, CANCEL_PATH, variant === "wrong-secret" ? secret : rpcSecret) };
   if (variant === "missing") delete headers["x-ia4tube-edit-signature"];
   if (variant === "malformed") headers["x-ia4tube-edit-signature"] = "v1=bad";
   assert.throws(() => createAdmissionAuthentication({ enabled: true, secret: rpcSecret, clock: () => now })
-    .authenticate(variant === "wrong-path" ? CANCEL_PATH : ADMIT_PATH, headers, variant === "changed-body" ? { a: 2 } : body),
+    .authenticate(variant === "wrong-path" ? ADMIT_PATH : CANCEL_PATH, headers, variant === "changed-body" ? { a: 2 } : body),
   { code: "edit_calendar_admission_unauthorized" });
 });
 test("context remains free and a reserved admission creates no child or production input hash", async t => {
@@ -267,25 +305,28 @@ test("a legacy planning cancellation cannot be offered as a reserved admission o
 });
 test("flag off retains existing unpaid browsing and legacy operator binding behavior", async t => {
   const f = fixture(t, { admissionEnabled: false }), request = f.body((await f.context()).ticket);
+  request.editOrderId = crypto.randomUUID();
   await assert.rejects(f.service.admit(request), { code: "edit_calendar_admission_disabled" });
   const bound = f.service.bind(f.bindBody(request)); assert.deepEqual(f.service.bind(f.bindBody(request)), bound);
   assert.equal(f.readClients()[f.owner].artes_mensais_restantes, 1);
 });
 test("enabling admission preserves an already emitted legacy bound intent without another charge", async t => {
-  const f = fixture(t, { admissionEnabled: false }), request = f.body((await f.context()).ticket); f.service.bind(f.bindBody(request));
+  const f = fixture(t, { admissionEnabled: false }), request = f.body((await f.context()).ticket);
+  request.editOrderId = crypto.randomUUID(); f.service.bind(f.bindBody(request));
   const fresh = createEditCalendarService({ ...f.dependencies, admissionEnabled: true }); t.after(() => fresh.close());
   assert.equal((await fresh.admit(request)).admission.state, "bound"); assert.equal(f.readClients()[f.owner].artes_mensais_restantes, 1);
 });
 test("enabling admission preserves a legacy allocation already issued before the feature", async t => {
   let failed = false;
   const f = fixture(t, { admissionEnabled: false, fault: stage => { if (stage === "after_request" && !failed) { failed = true; throw new Error("legacy interruption"); } } });
-  const request = f.body((await f.context()).ticket), input = f.bindBody(request);
+  const request = f.body((await f.context()).ticket); request.editOrderId = crypto.randomUUID(); const input = f.bindBody(request);
   assert.throws(() => f.service.bind(input), /legacy interruption/);
   const fresh = createEditCalendarService({ ...f.dependencies, admissionEnabled: true, fault: () => {} }); t.after(() => fresh.close());
   const bound = fresh.bind(input); assert.deepEqual(fresh.bind(input), bound); assert.equal(f.readClients()[f.owner].artes_mensais_restantes, 1);
 });
 test("a pending legacy context remains manually bindable after enabling admission", async t => {
   const f = fixture(t, { admissionEnabled: false }), request = f.body((await f.context()).ticket, "video");
+  request.editOrderId = crypto.randomUUID();
   const fresh = createEditCalendarService({ ...f.dependencies, admissionEnabled: true }); t.after(() => fresh.close());
   const bound = fresh.bind(f.bindBody(request)); assert.deepEqual(fresh.bind(f.bindBody(request)), bound);
   assert.equal(f.readClients()[f.owner].artes_mensais_restantes, 1);
@@ -384,20 +425,181 @@ test("status fences a producer claim after a crash instead of offering it for au
   assert.equal(f.status(request).admission.state, "bound");
   assert.throws(() => f.cancel(request), { code: "edit_calendar_admission_not_cancellable" });
 });
-test("HTTP admission uses the dedicated scope; bot read access cannot create an admission", async t => {
-  const f = fixture(t), auth = createAdmissionAuthentication({ enabled: true, secret: rpcSecret, clock: f.now });
-  const app = express(); app.use(express.json());
+test("HTTP admission uses only its ticket capability; private bot scope and cancellation stay separate", async t => {
+  const f = fixture(t), auth = createAdmissionAuthentication({ enabled: true, clock: f.now });
+  const app = express(); app.use((req, res, next) => isAdmissionRequest(req) ? admissionJsonParser(req, res, next) : express.json()(req, res, next));
+  app.use(admissionJsonError);
   const botAuthenticate = (req, res, next) => { if (req.headers.authorization !== "synthetic-bot") return res.sendStatus(401); req.user = { admin: true }; next(); };
   app.use(createEditCalendarRouter({ authenticate: (_req, res) => res.sendStatus(401), botAuthenticate,
     isBotAdmin: req => req.user.admin, service: f.service, admissionAuthenticate: auth.authenticate }));
   const server = app.listen(0, "127.0.0.1"); await new Promise(resolve => server.once("listening", resolve));
   t.after(() => new Promise(resolve => server.close(resolve)));
-  const origin = `http://127.0.0.1:${server.address().port}`, request = f.body((await f.context()).ticket), timestamp = String(Math.floor(f.now() / 1000));
-  const send = headers => fetch(origin + ADMIT_PATH, { method: "POST", headers: { "content-type": "application/json", ...headers }, body: JSON.stringify(request) });
-  assert.equal((await send({ authorization: "synthetic-bot" })).status, 403);
-  const accepted = await send({ "x-ia4tube-edit-timestamp": timestamp, "x-ia4tube-edit-signature": signature(request, timestamp) });
+  const origin = `http://127.0.0.1:${server.address().port}`, request = f.body((await f.context()).ticket);
+  const send = (headers = {}, body = request) => fetch(origin + ADMIT_PATH, { method: "POST", headers: { "content-type": "application/json", ...headers }, body: JSON.stringify(body) });
+  assert.equal((await send({ authorization: "synthetic-bot" }, { ...request, ticket: `${crypto.randomUUID()}.${"x".repeat(43)}` })).status, 404);
+  const accepted = await send();
   assert.equal(accepted.status, 200); assert.equal(accepted.headers.get("cache-control"), "no-store");
   const query = new URLSearchParams({ requestHash: request.requestHash, contextHash: hash(request.ticket), mediaKind: request.mediaKind });
   const lookup = origin + `/bot/empresa/edit/orders/${request.editOrderId}/admission?${query}`;
   assert.equal((await fetch(lookup)).status, 401); assert.equal((await fetch(lookup, { headers: { authorization: "synthetic-bot" } })).status, 200);
+  const cancelled = await fetch(origin + CANCEL_PATH, { method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ schemaVersion: 1, ticket: request.ticket, editOrderId: request.editOrderId, requestHash: request.requestHash, reason: "submission_aborted" }) });
+  assert.equal(cancelled.status, 503); assert.equal(f.status(request).admission.state, "reserved");
+});
+
+for (const variant of ["unknown", "bad-mac", "inactive-owner", "expired", "extra-owner", "quantity-two", "long-title", "long-caption", "disabled",
+  "ticket-array", "order-id-array", "request-hash-array", "model-id-array", "source-digest-array"]) test(`public capability ${variant} is rejected before any filesystem mutation`, async t => {
+  const f = fixture(t, { admissionEnabled: variant !== "disabled" }), request = f.body((await f.context()).ticket);
+  const before = f.readClients();
+  if (variant === "unknown") request.ticket = `${crypto.randomUUID()}.${"x".repeat(43)}`;
+  if (variant === "bad-mac") request.ticket = `${request.ticket.split(".")[0]}.${"x".repeat(43)}`;
+  if (variant === "inactive-owner") { before[f.owner].ativo = false; f.writeClients(before); }
+  if (variant === "expired") f.setNow(f.now() + 8 * 86400000);
+  if (variant === "extra-owner") request.owner = f.other;
+  if (variant === "quantity-two") request.quantity = 2;
+  if (variant === "long-title") request.title = "x".repeat(201);
+  if (variant === "long-caption") request.caption = "x".repeat(2201);
+  if (variant === "ticket-array") request.ticket = [request.ticket];
+  if (variant === "order-id-array") request.editOrderId = [request.editOrderId];
+  if (variant === "request-hash-array") request.requestHash = [request.requestHash];
+  if (variant === "model-id-array") request.selection.modelId = [request.selection.modelId];
+  if (variant === "source-digest-array") request.selection.sourceDigest = [request.selection.sourceDigest];
+  const code = ["unknown", "bad-mac"].includes(variant) ? "edit_calendar_context_unavailable" : variant === "inactive-owner" ? "edit_calendar_session_required" :
+    variant === "expired" ? "edit_calendar_context_expired" : variant === "disabled" ? "edit_calendar_admission_disabled" : "edit_calendar_input_invalid";
+  await assert.rejects(withoutFilesystemWrites(() => f.service.admit(request)), { code });
+  assert.deepEqual(f.readClients(), before);
+});
+
+test("combining another owner's context ID with one's own MAC cannot spend the other owner's quota", async t => {
+  const f = fixture(t), own = await f.context(), other = await f.context(f.other), request = f.body(own.ticket);
+  request.ticket = `${other.ticket.split(".")[0]}.${own.ticket.split(".")[1]}`;
+  const before = f.readClients();
+  await assert.rejects(withoutFilesystemWrites(() => f.service.admit(request)), { code: "edit_calendar_context_unavailable" });
+  assert.deepEqual(f.readClients(), before);
+});
+
+for (const variant of ["another-owner", "known-legacy-unclaimed", "no-balance-known-legacy"]) test(`new capability cannot preempt ${variant} UUID or write its claim`, async t => {
+  const f = fixture(t, { client: variant === "no-balance-known-legacy" ? { artes_mensais_restantes: 0 } : {} });
+  const request = f.body((await f.context()).ticket, "video");
+  request.editOrderId = variant === "another-owner" ? admissionOrderId((await f.context(f.other)).ticket) : "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+  const before = f.readClients(), claimPath = path.join(f.root, "private/edit-calendar/orders", request.editOrderId + ".json");
+  assert.equal(fs.existsSync(claimPath), false);
+  await assert.rejects(withoutFilesystemWrites(() => f.service.admit(request)), { code: "edit_calendar_order_conflict", statusCode: 409 });
+  assert.equal(fs.existsSync(claimPath), false); assert.deepEqual(f.readClients(), before);
+});
+
+test("a previously reserved random-ID admission replays after TTL and binds without a second debit", async t => {
+  const f = fixture(t), request = f.body((await f.context()).ticket, "video"); await f.service.admit(request);
+  const legacy = seedPriorRandomAdmissionId(f, request), before = f.readClients(); f.setNow(f.now() + 8 * 86400000);
+  const replay = await f.service.admit(legacy); assert.equal(replay.admission.editOrderId, legacy.editOrderId);
+  assert.deepEqual(f.readClients(), before);
+  const bound = f.service.bind(f.bindBody(legacy)); assert.deepEqual(f.service.bind(f.bindBody(legacy)), bound);
+  assert.equal(f.readClients()[f.owner].artes_mensais_restantes, 1);
+});
+
+test("a previously emitted random-ID allocating journal is recovered with its original identity", async t => {
+  let failed = false;
+  const f = fixture(t, { fault: stage => { if (stage === "admission_after_journal" && !failed) { failed = true; throw new Error("legacy journal"); } } });
+  const request = f.body((await f.context()).ticket, "video"); await assert.rejects(f.service.admit(request), /legacy journal/);
+  const legacy = seedPriorRandomAdmissionId(f, request), result = await f.service.admit(legacy);
+  assert.equal(result.admission.editOrderId, legacy.editOrderId); assert.equal(result.admission.state, "reserved");
+  assert.equal(f.readClients()[f.owner].artes_mensais_restantes, 1);
+});
+
+test("a refused pre-existing random-ID admission remains the same intent when funded inside TTL", async t => {
+  const f = fixture(t, { client: { artes_mensais_restantes: 0 } }), request = f.body((await f.context()).ticket, "video");
+  await assert.rejects(f.service.admit(request), { code: "billing_required" }); const legacy = seedPriorRandomAdmissionId(f, request);
+  const clients = f.readClients(); clients[f.owner].artes_mensais_restantes = 1; f.writeClients(clients);
+  const result = await f.service.admit(legacy); assert.equal(result.admission.editOrderId, legacy.editOrderId);
+  assert.equal(f.readClients()[f.owner].artes_mensais_restantes, 0);
+});
+
+test("capability expiry during observational Instagram read is rechecked before filesystem mutations", async t => {
+  let f;
+  f = fixture(t, { client: { artes_mensais_restantes: 0, arte_gratis_usada: false, arte_gratis_disponivel: false },
+    observeConnection: async () => { f.setNow(f.now() + 8 * 86400000); return null; } });
+  const request = f.body((await f.context()).ticket), before = f.readClients();
+  await assert.rejects(withoutFilesystemWrites(() => f.service.admit(request)), { code: "edit_calendar_context_expired" });
+  assert.deepEqual(f.readClients(), before);
+});
+
+test("an owner deactivated during the Instagram observation cannot write an admission journal or ledger", async t => {
+  let f, active = true;
+  f = fixture(t, { client: { artes_mensais_restantes: 0, arte_gratis_usada: false, arte_gratis_disponivel: false },
+    readClients: () => { const clients = f.readClients(); clients[f.owner].ativo = active; return clients; },
+    observeConnection: async () => { active = false; return null; } });
+  const request = f.body((await f.context()).ticket), before = f.readClients();
+  await assert.rejects(withoutFilesystemWrites(() => f.service.admit(request)), { code: "edit_calendar_session_required" });
+  assert.deepEqual(f.readClients(), before);
+});
+
+test("invalid IP attempts never exhaust a valid ticket or another ticket behind shared egress", () => {
+  let now = 0;
+  const guard = createCapabilityRateGuard({ capacity: 2, clock: () => now, verifyCapability: body => {
+    if (!body.valid) throw Object.assign(new Error("invalid"), { statusCode: 404, code: "edit_calendar_context_not_found" });
+    return hash(body.ticket);
+  } });
+  const req = body => ({ body, ip: "synthetic-shared-egress" });
+  for (let index = 0; index < 2; index++) assert.throws(() => guard.authorize(req({})), { statusCode: 404 });
+  assert.throws(() => guard.authorize(req({})), { statusCode: 429, retryAfter: 30 });
+  for (let index = 0; index < 2; index++) assert.doesNotThrow(() => guard.authorize(req({ valid: true, ticket: "first-owner-capability" })));
+  assert.throws(() => guard.authorize(req({ valid: true, ticket: "first-owner-capability" })), { statusCode: 429 });
+  assert.doesNotThrow(() => guard.authorize(req({ valid: true, ticket: "another-owner-capability" })));
+  now = 30000; assert.doesNotThrow(() => guard.authorize(req({ valid: true, ticket: "first-owner-capability" })));
+});
+
+test("capability rate maps have bounded cardinality and expire stale keys", () => {
+  let now = 0;
+  const guard = createCapabilityRateGuard({ maximumKeys: 2, ttlMs: 1000, clock: () => now, verifyCapability: body => {
+    if (!body.valid) throw Object.assign(new Error("invalid"), { statusCode: 404 });
+    return hash(body.ticket);
+  } });
+  for (let index = 0; index < 5; index++) {
+    guard.authorize({ body: { valid: true, ticket: String(index) }, ip: String(index) });
+    assert.throws(() => guard.authorize({ body: {}, ip: String(index) }), { statusCode: 404 });
+  }
+  assert.deepEqual(guard.sizes(), { invalidIps: 2, tickets: 2 });
+  now = 1001; guard.authorize({ body: { valid: true, ticket: "fresh" }, ip: "fresh" });
+  assert.throws(() => guard.authorize({ body: {}, ip: "fresh" }), { statusCode: 404 });
+  assert.deepEqual(guard.sizes(), { invalidIps: 1, tickets: 1 });
+});
+
+test("HTTP public admission bounds JSON at 16KB, sanitizes rate errors and never grants private routes", async t => {
+  const f = fixture(t), request = f.body((await f.context()).ticket);
+  const guard = createCapabilityRateGuard({ capacity: 2, clock: f.now, verifyCapability: body => f.service.verifyAdmissionCapability(body) });
+  const app = express(); app.use((req, res, next) => isAdmissionRequest(req) ? admissionJsonParser(req, res, next) : express.json()(req, res, next));
+  app.use(admissionJsonError);
+  app.use(createEditCalendarRouter({ service: f.service, authenticate: (_req, res) => res.sendStatus(401),
+    botAuthenticate: (_req, res) => res.sendStatus(401), isBotAdmin: () => false, capabilityRateGuard: guard }));
+  const server = await new Promise(resolve => { const listener = app.listen(0, "127.0.0.1", () => resolve(listener)); });
+  t.after(() => new Promise(resolve => server.close(resolve)));
+  const origin = `http://127.0.0.1:${server.address().port}`;
+  const send = (body, headers = { "content-type": "application/json" }, route = ADMIT_PATH) => fetch(origin + route, { method: "POST", headers, body });
+  const before = f.readClients();
+  await withoutFilesystemWrites(async () => {
+    const oversized = await send(JSON.stringify(request) + " ".repeat(16384)); assert.equal(oversized.status, 413);
+    assert.deepEqual(await oversized.json(), { ok: false, code: "edit_calendar_input_invalid" });
+    assert.equal((await send(JSON.stringify(request) + " ".repeat(16384), undefined, ADMIT_PATH.toUpperCase() + "/")).status, 413);
+    assert.equal((await send("{" )).status, 400);
+    assert.equal((await send(JSON.stringify(request), { "content-type": "application/x-www-form-urlencoded" })).status, 415);
+    for (const headers of [{ "content-type": "application/json; charset=iso-8859-1" },
+      { "content-type": "application/json", "content-encoding": "unsupported" }]) {
+      const unsupported = await send(JSON.stringify(request), headers); assert.equal(unsupported.status, 415);
+      assert.deepEqual(await unsupported.json(), { ok: false, code: "edit_calendar_input_invalid" });
+    }
+    const preemption = await send(JSON.stringify({ ...request, editOrderId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa" }));
+    assert.equal(preemption.status, 409); assert.deepEqual(await preemption.json(), { ok: false, code: "edit_calendar_order_conflict" });
+  });
+  assert.deepEqual(f.readClients(), before);
+  for (let index = 0; index < 2; index++) assert.equal((await send(JSON.stringify(request))).status, 200);
+  const limited = await send(JSON.stringify(request)); assert.equal(limited.status, 429); assert.equal(limited.headers.get("Retry-After"), "30");
+  assert.deepEqual(await limited.json(), { ok: false, code: "edit_calendar_admission_rate_limited" });
+  assert.equal(f.readClients()[f.owner].artes_mensais_restantes, 1);
+  assert.equal((await send(JSON.stringify(f.bindBody(request)), undefined, "/bot/empresa/edit/orders/bind")).status, 401);
+  assert.equal((await send(JSON.stringify({ schemaVersion: 1, ticket: request.ticket, editOrderId: request.editOrderId,
+    requestHash: request.requestHash, reason: "upload_unavailable" }), undefined, CANCEL_PATH)).status, 503);
+  const receipt = f.status(request).admission; assert.equal(receipt.state, "reserved");
+  const plan = planning.findPlanningById({ baseDir: f.dependencies.planningDir, whatsapp: f.owner, planningId: receipt.planningId });
+  assert.equal(plan.runner_contract.pronto_para_runner, false);
+  assert.equal(planning.findPlanningArtOrder({ pedidosDir: f.dependencies.ordersDir, pedidoId: receipt.pedidoId }), null);
 });

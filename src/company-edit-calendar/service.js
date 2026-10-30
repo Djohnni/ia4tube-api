@@ -256,6 +256,7 @@ function createEditCalendarService({ dataDir, planningDir, ordersDir, secret, re
     } finally { release(); }
   }
   return Object.freeze({ createContext, bind, admit: admission.admit, admissionStatus: admission.status,
+    verifyAdmissionCapability: admission.verifyCapability, availability: admission.availability,
     cancelAdmission: admission.cancel, close() { admission.close(); key.fill(0); } });
 }
 module.exports = { createEditCalendarService, contextInput, bindInput };

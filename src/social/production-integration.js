@@ -298,7 +298,9 @@ function createProductionSocialIntegration(options = {}) {
       return runtime.calendar.prepareRequest(claims, true, current.preferences.revision);
     },
     async observeEditConnection(verifiedClaims) {
-      if (!runtime?.instagramOAuth || !verifiedClaims) return null;
+      if (!verifiedClaims) return null;
+      if (!runtime?.instagramOAuth) throw Object.assign(new Error("Consulta da conexao indisponivel."),
+        { code: "edit_calendar_admission_unavailable", statusCode: 503 });
       // Existing tenant-scoped observation only: no OAuth transition, provider request, grant or calendar sync.
       return (await runtime.instagramOAuth.getCurrentConnection({ verifiedClaims })).connection;
     },

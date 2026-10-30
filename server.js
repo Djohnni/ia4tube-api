@@ -152,6 +152,7 @@ productionSocialIntegration.mountWeb(app);
 const globalJsonParser = express.json({ limit: "50mb" });
 const globalUrlencodedParser = express.urlencoded({ extended: false, limit: "1mb" });
 const finalTestFcmJsonParser = express.json({ limit: "16kb" });
+const { isAdmissionRequest, admissionJsonParser, admissionJsonError } = require("./src/company-edit-calendar/admission-http");
 
 function isFcmTokenRouteRequest(req) {
   const normalizedPath = String(req.path || "")
@@ -187,16 +188,18 @@ app.use((req, res, next) => {
 });
 
 app.use((req, res, next) => {
+  if (isAdmissionRequest(req)) return admissionJsonParser(req, res, next);
   if (req.fcmFinalTestPreauthorized === true) {
     return finalTestFcmJsonParser(req, res, next);
   }
   return globalJsonParser(req, res, next);
 });
 app.use((req, res, next) => {
-  if (req.fcmFinalTestPreauthorized === true) return next();
+  if (req.fcmFinalTestPreauthorized === true || isAdmissionRequest(req)) return next();
   return globalUrlencodedParser(req, res, next);
 });
 app.use((err, req, res, next) => {
+  if (isAdmissionRequest(req)) return admissionJsonError(err, req, res, next);
   if (
     req.fcmFinalTestPreauthorized === true &&
     ["entity.parse.failed", "entity.too.large"].includes(err?.type)
@@ -864,6 +867,12 @@ function getFreeArtIpLockStatus(req, now = new Date()) {
     ipMasked,
     lock: blocked ? lock : null
   };
+}
+
+function observeFreeArtIpLock(req, now = Date.now()) {
+  const ip = getClientIp(req), ipHash = hashFreeArtIp(ip), ipMasked = maskClientIp(ip);
+  const receipt = ipHash ? readFreeArtIpLocks()[ipHash] : null;
+  return { blocked: Boolean(receipt && new Date(receipt.bloqueado_ate || 0).getTime() > Number(now)), ipHash, ipMasked };
 }
 
 function acquireFreeArtClaimLocks(whatsapp, ipHash) {
@@ -4058,7 +4067,7 @@ const editAdmissionAuthentication = require("./src/company-edit-calendar/admissi
   enabled: process.env.IA4TUBE_EDIT_ADMISSION_ENABLED === "true", secret: process.env.IA4TUBE_EDIT_ADMISSION_SECRET || "" });
 const editCalendarService = createEditCalendarService({ dataDir: DATA_DIR, planningDir: MONTHLY_PLANNINGS_DIR,
   ordersDir: PEDIDOS_DIR, secret: JWT_SECRET, readClients: readClientes,
-  admissionEnabled: editAdmissionAuthentication.configured,
+  admissionEnabled: process.env.IA4TUBE_EDIT_ADMISSION_ENABLED === "true",
   observeConnection: verifiedClaims => productionSocialIntegration.observeEditConnection(verifiedClaims),
   writeClients: value => atomicWriteJson(CLIENTES_FILE, value),
   prepareCalendarRequest: claims => productionSocialIntegration.prepareEditCalendarRequest(claims),
@@ -4076,6 +4085,7 @@ const editCalendarService = createEditCalendarService({ dataDir: DATA_DIR, plann
     { whatsapp: owner, pedidoId: planningId, context: "planejamento_mensal", ipIdentity })) });
 app.use(createEditCalendarRouter({ authenticate: auth, botAuthenticate: botRunnerAuth, isBotAdmin,
   service: editCalendarService, freeArtPolicy: getFreeArtIpLockStatus,
+  availabilityAuthenticate: productionSession.authenticate, freeArtReadPolicy: observeFreeArtIpLock,
   admissionAuthenticate: editAdmissionAuthentication.authenticate }));
 
 app.post(

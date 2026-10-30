@@ -1,6 +1,8 @@
 "use strict";
 const express = require("express");
-function createEditCalendarRouter({ authenticate, botAuthenticate, isBotAdmin, service, freeArtPolicy = () => ({}), admissionAuthenticate = null }) {
+const { createCapabilityRateGuard } = require("./admission-http");
+function createEditCalendarRouter({ authenticate, botAuthenticate, isBotAdmin, service, freeArtPolicy = () => ({}),
+  admissionAuthenticate = null, availabilityAuthenticate = authenticate, freeArtReadPolicy = () => ({}), capabilityRateGuard = null }) {
   const router = express.Router();
   const call = action => async (req, res) => {
     res.set("Cache-Control", "no-store");
@@ -13,6 +15,11 @@ function createEditCalendarRouter({ authenticate, botAuthenticate, isBotAdmin, s
         : "Não foi possível vincular este pedido ao calendário. Confira a conta e a programação." });
     }
   };
+  router.get("/empresa/edit/availability", availabilityAuthenticate, call(req => {
+    const policy = freeArtReadPolicy(req) || {};
+    return service.availability(req.user, { freeArtBlocked: policy.blocked === true,
+      ipIdentity: { ipHash: policy.ipHash, ipMasked: policy.ipMasked } });
+  }));
   router.post("/empresa/edit/context", authenticate, call(req => {
     const policy = freeArtPolicy(req) || {};
     return service.createContext(req.user, req.body, { freeArtBlocked: policy.blocked === true,
@@ -33,7 +40,16 @@ function createEditCalendarRouter({ authenticate, botAuthenticate, isBotAdmin, s
           ? "edit_calendar_admission_disabled" : error.statusCode === 400 ? "edit_calendar_input_invalid" : "edit_calendar_admission_unauthorized" });
     }
   };
-  router.post("/empresa/edit/orders/admit", scopedAdmission, call(req => service.admit(req.body)));
+  const capabilityGuard = capabilityRateGuard || createCapabilityRateGuard({ verifyCapability: body => service.verifyAdmissionCapability(body) });
+  const scopedCapability = (req, res, next) => {
+    try { capabilityGuard.authorize(req); return next(); }
+    catch (error) {
+      if (error.statusCode === 429) res.set("Retry-After", String(error.retryAfter || 1));
+      return res.status(Number.isInteger(error.statusCode) ? error.statusCode : 503).set("Cache-Control", "no-store")
+        .json({ ok: false, code: /^edit_calendar_[a-z_]+$/.test(error.code || "") ? error.code : "edit_calendar_admission_unavailable" });
+    }
+  };
+  router.post("/empresa/edit/orders/admit", scopedCapability, call(req => service.admit(req.body)));
   router.post("/empresa/edit/orders/admission/cancel", scopedAdmission, call(req => service.cancelAdmission(req.body)));
   router.get("/bot/empresa/edit/orders/:editOrderId/admission", botAuthenticate, call(req => {
     if (!isBotAdmin(req)) throw Object.assign(new Error("Acesso negado"), { statusCode: 403, code: "edit_calendar_operator_required" });
