@@ -76,6 +76,11 @@ function seedPriorRandomAdmissionId(f, request) {
   }
   return legacy;
 }
+function countChildOrderFiles(directory) {
+  if (!fs.existsSync(directory)) return 0;
+  return fs.readdirSync(directory, { withFileTypes: true }).reduce((count, entry) => count +
+    (entry.isDirectory() ? countChildOrderFiles(path.join(directory, entry.name)) : entry.name === "pedido.json" ? 1 : 0), 0);
+}
 
 test("new admission UUID is the exact purpose-separated full-ticket SHA256 vector", () => {
   const ticket = "11111111-1111-4111-8111-111111111111." + "A".repeat(43);
@@ -156,6 +161,61 @@ test("producer bind uses its distinct snapshot hash and never debits the admissi
   const child = planning.findPlanningArtOrder({ pedidosDir: f.dependencies.ordersDir, pedidoId: admitted.admission.pedidoId });
   assert.equal(child.pedido.edit_calendar.inputHash, input.inputHash);
   assert.equal(Object.hasOwn(child.pedido.edit_calendar, "requestHash"), false);
+});
+
+test("classic video bind without mediaKind reuses its admitted unit and canonical video marker", async t => {
+  const f = fixture(t), request = f.body((await f.context()).ticket, "video"), admitted = await f.service.admit(request);
+  const input = f.bindBody(request); delete input.mediaKind;
+  const result = f.service.bind(input); assert.deepEqual(f.service.bind(input), result);
+  assert.equal(result.editOrderId, request.editOrderId); assert.equal(result.planningId, admitted.admission.planningId);
+  assert.equal(f.readClients()[f.owner].artes_mensais_restantes, 1);
+  const found = planning.findPlanningArtOrder({ pedidosDir: f.dependencies.ordersDir, pedidoId: result.pedidoId });
+  assert.equal(found.pedido.edit_calendar.mediaKind, "video"); assert.equal(found.pedido.edit_calendar.inputHash, input.inputHash);
+  assert.equal(countChildOrderFiles(f.dependencies.ordersDir), 1);
+  const row = JSON.parse(fs.readFileSync(path.join(f.root, "private/edit-calendar/contexts", request.ticket.slice(0, 36) + ".json"), "utf8"));
+  assert.equal(Object.hasOwn(row.binding, "mediaKind"), false); assert.equal(row.binding.inputHash, input.inputHash);
+});
+
+test("partial classic video bind resumes its already frozen untyped binding without new debit or child", async t => {
+  t.mock.timers.enable({ apis: ["Date"], now: Date.parse("2026-10-30T04:30:00Z") });
+  let interrupted = false;
+  const f = fixture(t, { fault: stage => { if (stage === "after_request" && !interrupted) { interrupted = true; throw new Error("bind stopped before child"); } } });
+  const context = await f.service.createContext({ whatsapp: f.owner }, { requestId: crypto.randomUUID(),
+    date: "2026-10-30", time: "01:38", destination: "reel", caption: "Legenda nativa" });
+  const request = f.body(context.ticket, "video"); await f.service.admit(request);
+  const input = f.bindBody(request); delete input.mediaKind;
+  assert.throws(() => f.service.bind(input), /bind stopped before child/);
+  const contextPath = path.join(f.root, "private/edit-calendar/contexts", request.ticket.slice(0, 36) + ".json");
+  const stopped = JSON.parse(fs.readFileSync(contextPath, "utf8")), frozen = structuredClone(stopped.binding);
+  assert.equal(stopped.phase, "allocating"); assert.equal(stopped.admission.state, "reserved");
+  assert.equal(f.status(request).admission.state, "bound"); assert.equal(Object.hasOwn(frozen, "mediaKind"), false);
+  assert.equal(countChildOrderFiles(f.dependencies.ordersDir), 0); assert.equal(f.readClients()[f.owner].artes_mensais_restantes, 1);
+  const plan = planning.findPlanningById({ baseDir: f.dependencies.planningDir, whatsapp: f.owner, planningId: stopped.planningId });
+  assert.equal(plan.edit_calendar.kind, "edit_calendar_v1"); assert.equal(plan.edit_calendar.mediaKind, "video");
+  assert.equal(plan.edit_calendar.inputHash, input.inputHash);
+  f.setNow(f.now() + 10 * 60000); t.mock.timers.tick(10 * 60000);
+  assert.ok(Date.now() > Date.parse("2026-10-30T04:38:00Z"), "Resume occurs after the selected Brazilian time");
+  const resumed = createEditCalendarService({ ...f.dependencies, fault: () => {} }); t.after(() => resumed.close());
+  const result = resumed.bind(input); assert.deepEqual(resumed.bind(input), result);
+  assert.equal(result.editOrderId, request.editOrderId); assert.equal(result.planningId, stopped.planningId); assert.equal(result.pedidoId, stopped.pedidoId);
+  const completed = JSON.parse(fs.readFileSync(contextPath, "utf8")); assert.deepEqual(completed.binding, frozen); assert.equal(completed.phase, "bound");
+  assert.equal(f.readClients()[f.owner].artes_mensais_restantes, 1); assert.equal(countChildOrderFiles(f.dependencies.ordersDir), 1);
+  const found = planning.findPlanningArtOrder({ pedidosDir: f.dependencies.ordersDir, pedidoId: result.pedidoId });
+  assert.equal(found.pedido.edit_calendar.inputHash, frozen.inputHash); assert.equal(found.pedido.edit_calendar.mediaKind, "video");
+  assert.equal(found.pedido.data_sugerida, "2026-10-30"); assert.equal(found.pedido.horario_sugerido, "01:38");
+  const returned = planning.findPlanningById({ baseDir: f.dependencies.planningDir, whatsapp: f.owner, planningId: result.planningId });
+  assert.equal(returned.plano_mensal.postagens[0].data_sugerida, "2026-10-30"); assert.equal(returned.plano_mensal.postagens[0].horario_sugerido, "01:38");
+});
+
+test("legacy untyped video binding keeps its original marker and retry behavior with admission off", async t => {
+  const f = fixture(t, { admissionEnabled: false }), request = f.body((await f.context()).ticket, "video"); request.editOrderId = crypto.randomUUID();
+  const input = f.bindBody(request); delete input.mediaKind;
+  const result = f.service.bind(input); assert.deepEqual(f.service.bind(input), result);
+  const found = planning.findPlanningArtOrder({ pedidosDir: f.dependencies.ordersDir, pedidoId: result.pedidoId });
+  assert.equal(Object.hasOwn(found.pedido.edit_calendar, "mediaKind"), false); assert.equal(found.pedido.edit_calendar.inputHash, input.inputHash);
+  const plan = planning.findPlanningById({ baseDir: f.dependencies.planningDir, whatsapp: f.owner, planningId: result.planningId });
+  assert.equal(Object.hasOwn(plan.edit_calendar, "mediaKind"), false);
+  assert.equal(f.readClients()[f.owner].artes_mensais_restantes, 1); assert.equal(countChildOrderFiles(f.dependencies.ordersDir), 1);
 });
 test("a new production bind without admission is refused when enabled", async t => {
   const f = fixture(t), request = f.body((await f.context()).ticket);

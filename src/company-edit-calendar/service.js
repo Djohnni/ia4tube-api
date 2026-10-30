@@ -193,8 +193,9 @@ function createEditCalendarService({ dataDir, planningDir, ordersDir, secret, re
       const priorReservation = current.client.planejamento_mensal_reservas?.[row.planningId];
       admission.prepareBind(row, request);
       let plan = planning.findPlanningById({ baseDir: planningRoot, whatsapp: row.owner, planningId: row.planningId });
+      const externalMediaKind = row.admission && !row.admission.legacyBound ? row.admission.mediaKind : request.mediaKind;
       const externalEdit = { kind: "edit_calendar_v1", contextId: id, editOrderId: request.editOrderId, inputHash: request.inputHash,
-        ...(request.mediaKind ? { mediaKind: request.mediaKind } : {}) };
+        ...(externalMediaKind ? { mediaKind: externalMediaKind } : {}) };
       const image = request.mediaKind === "image", objective = image ? "Imagem escolhida no Edit" : "Vídeo escolhido no Edit";
       if (plan && (JSON.stringify(plan.edit_calendar) !== JSON.stringify(externalEdit) || plan.whatsapp !== row.owner)) fail("order_conflict");
       if (priorReservation && !plan) fail("allocation_reconciliation_required", 503);
