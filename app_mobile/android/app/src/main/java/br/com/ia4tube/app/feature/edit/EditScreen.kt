@@ -80,6 +80,7 @@ internal class EditBrowserViewModel : ViewModel() {
     var loadFailed by mutableStateOf(false)
     var loadedCalendarNonce: String? = null
     var deferredCalendarRequest: Triple<String?, String?, Boolean>? = null
+    var deferredAvailabilityRequest: Triple<String?, String?, Boolean>? = null
 
     fun attach(context: Context, binding: Any): Pair<WebView, Boolean> {
         activeBinding = binding
@@ -115,6 +116,10 @@ internal class EditBrowserViewModel : ViewModel() {
         view?.webChromeClient = null
         view?.webViewClient = object : WebViewClient() {
             override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
+                if (EditAvailabilityPolicy.isCallback(request.url.toString())) {
+                    deferredAvailabilityRequest = Triple(request.url.toString(), view.url, request.isForMainFrame)
+                    return true
+                }
                 if (EditCalendarPolicy.isCallback(request.url.toString())) {
                     deferredCalendarRequest = Triple(request.url.toString(), view.url, request.isForMainFrame)
                     return true
@@ -181,11 +186,21 @@ fun EditScreen(onBackClick: () -> Unit, onAuthRequired: () -> Unit = {}) {
     // cleared when this route is removed, not when the image picker rotates.
     val browser: EditBrowserViewModel = viewModel()
     val calendar: EditCalendarViewModel = viewModel()
+    val availability: EditAvailabilityViewModel = viewModel()
     val session = remember { SessionStore(context.applicationContext) }
     val binding = remember { Any() }
 
-    LaunchedEffect(calendar) { calendar.synchronizeSession(session.getToken()) }
+    LaunchedEffect(calendar, calendar.nonce) {
+        val token = session.getToken()
+        calendar.synchronizeSession(token)
+        availability.refresh(token, calendar.nonce)
+    }
     LaunchedEffect(binding) {
+        browser.deferredAvailabilityRequest?.let { (target, document, mainFrame) ->
+            browser.deferredAvailabilityRequest = null
+            EditAvailabilityPolicy.requestId(target, document, mainFrame, calendar.nonce)
+                ?.let { availability.request(it, session.getToken(), calendar.nonce) }
+        }
         browser.deferredCalendarRequest?.let { (target, document, mainFrame) ->
             browser.deferredCalendarRequest = null
             EditCalendarPolicy.requestId(target, document, mainFrame, calendar.nonce)
@@ -198,7 +213,7 @@ fun EditScreen(onBackClick: () -> Unit, onAuthRequired: () -> Unit = {}) {
         browser.view?.takeIf { browser.loadedCalendarNonce != calendar.nonce }?.let {
             browser.finishFiles(null)
             browser.loadedCalendarNonce = calendar.nonce
-            it.loadUrl(EDIT_URL + "#app-calendar=" + calendar.nonce)
+            it.loadUrl(EditAvailabilityPolicy.entryUrl(calendar.nonce), mapOf("Cache-Control" to "no-cache"))
         }
     }
     LaunchedEffect(calendar.reply, browser.loading, binding) {
@@ -214,6 +229,19 @@ fun EditScreen(onBackClick: () -> Unit, onAuthRequired: () -> Unit = {}) {
                 calendar.delivered(reply)
                 if (reply.error == "auth_required") requireAuth()
             }
+        }
+    }
+    LaunchedEffect(availability.reply, browser.loading, binding) {
+        val reply = availability.reply ?: return@LaunchedEffect
+        val webView = browser.view ?: return@LaunchedEffect
+        if (!browser.isAttached(binding) || browser.loading || !EditCalendarPolicy.isDocument(webView.url) ||
+            !availability.canDeliver(reply, session.getToken(), calendar.nonce)) return@LaunchedEffect
+        val script = "(function(){var receiver=window.iA4tubeAppCalendar;if(!receiver||typeof receiver.receiveAvailability!=='function')return false;return receiver.receiveAvailability(" +
+            JSONObject.quote(reply.nonce) + "," + (reply.requestId?.let(JSONObject::quote) ?: "null") + "," +
+            reply.revision + "," + (reply.canImage?.toString() ?: "null") + "," + (reply.canVideo?.toString() ?: "null") + "," +
+            availability.validForMs(reply) + "," + reply.loading + ")===true;})()"
+        webView.evaluateJavascript(script) { delivered ->
+            if (delivered == "true" && availability.canDeliver(reply, session.getToken(), calendar.nonce)) availability.delivered(reply)
         }
     }
 
@@ -235,7 +263,9 @@ fun EditScreen(onBackClick: () -> Unit, onAuthRequired: () -> Unit = {}) {
         val observer = LifecycleEventObserver { _, event ->
             if (browser.isAttached(binding)) when (event) {
                 Lifecycle.Event.ON_RESUME -> {
-                    calendar.synchronizeSession(session.getToken())
+                    val token = session.getToken()
+                    calendar.synchronizeSession(token)
+                    availability.refresh(token, calendar.nonce)
                     browser.resume()
                 }
                 Lifecycle.Event.ON_PAUSE, Lifecycle.Event.ON_STOP -> browser.pause()
@@ -284,6 +314,11 @@ fun EditScreen(onBackClick: () -> Unit, onAuthRequired: () -> Unit = {}) {
                         settings.setSupportMultipleWindows(false)
                         webViewClient = object : WebViewClient() {
                             override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
+                                if (EditAvailabilityPolicy.isCallback(request.url.toString())) {
+                                    EditAvailabilityPolicy.requestId(request.url.toString(), view.url, request.isForMainFrame,
+                                        calendar.nonce)?.let { availability.request(it, session.getToken(), calendar.nonce) }
+                                    return true
+                                }
                                 if (EditCalendarPolicy.isCallback(request.url.toString())) {
                                     EditCalendarPolicy.requestId(request.url.toString(), view.url, request.isForMainFrame,
                                         calendar.nonce)?.let { calendar.request(it, session.getToken()) }
@@ -310,7 +345,15 @@ fun EditScreen(onBackClick: () -> Unit, onAuthRequired: () -> Unit = {}) {
                                 browser.loadFailed = false
                             }
 
-                            override fun onPageFinished(view: WebView, url: String?) { browser.loading = false }
+                            override fun onPageFinished(view: WebView, url: String?) {
+                                browser.loading = false
+                                if (EditCalendarPolicy.isDocument(url) && !availability.busy &&
+                                    availability.reply?.let { availability.validForMs(it) == 0L } != false) {
+                                    val token = session.getToken()
+                                    calendar.synchronizeSession(token)
+                                    availability.refresh(token, calendar.nonce)
+                                }
+                            }
 
                             override fun onReceivedError(view: WebView, request: WebResourceRequest, error: WebResourceError) {
                                 if (request.isForMainFrame) { browser.loading = false; browser.loadFailed = true }
@@ -348,7 +391,7 @@ fun EditScreen(onBackClick: () -> Unit, onAuthRequired: () -> Unit = {}) {
                         if (created) {
                             calendar.synchronizeSession(session.getToken())
                             browser.loadedCalendarNonce = calendar.nonce
-                            loadUrl(EDIT_URL + "#app-calendar=" + calendar.nonce)
+                            loadUrl(EditAvailabilityPolicy.entryUrl(calendar.nonce), mapOf("Cache-Control" to "no-cache"))
                         }
                         if (lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED)) browser.resume()
                     }
