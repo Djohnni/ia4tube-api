@@ -163,7 +163,7 @@ internal fun HomeVisualContent(
             state.summaryError?.let { Text(it.asString(), color = MaterialTheme.colorScheme.error, fontSize = 16.sp) }
 
             HomeVisualShortcut("Instagram", R.drawable.home_instagram_3d, "home_instagram", palette,
-                onClick = onOpenInstagram)
+                subtitle = "conecte seu instagram ao iA4tube", onClick = onOpenInstagram)
             HomeVisualShortcut("Calendário", R.drawable.home_calendar_3d, "home_calendar", palette,
                 accessibilityLabel = "Minhas artes planejadas", onClick = onOpenPlannedArts)
             Spacer(Modifier.height(8.dp))
@@ -272,17 +272,23 @@ private fun HomeMetallicHeading(palette: PremiumHomePalette) {
 
 @Composable
 private fun HomeVisualShortcut(label: String, @DrawableRes illustration: Int, tag: String,
-    palette: PremiumHomePalette, accessibilityLabel: String = label, onClick: () -> Unit) {
-    Row(Modifier.fillMaxWidth().heightIn(min = 88.dp).clip(RoundedCornerShape(18.dp))
+    palette: PremiumHomePalette, accessibilityLabel: String = label, subtitle: String? = null, onClick: () -> Unit) {
+    Row(Modifier.fillMaxWidth().heightIn(min = 80.dp).clip(RoundedCornerShape(18.dp))
         .clickable(role = Role.Button, onClick = onClick).semantics { contentDescription = accessibilityLabel }
-        .testTag(tag).padding(horizontal = 8.dp, vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+        .testTag(tag).padding(horizontal = 8.dp), verticalAlignment = Alignment.CenterVertically) {
         Image(painterResource(illustration), contentDescription = null, contentScale = ContentScale.Fit,
-            modifier = Modifier.size(88.dp))
-        Spacer(Modifier.width(20.dp))
-        Text(label, color = palette.textPrimary, fontSize = 20.sp, fontWeight = FontWeight.Bold,
-            modifier = Modifier.weight(1f))
+            modifier = Modifier.size(80.dp))
+        Spacer(Modifier.width(16.dp))
+        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+            Text(label, color = palette.textPrimary, fontSize = 20.sp, fontWeight = FontWeight.Bold,
+                modifier = Modifier.fillMaxWidth().testTag("${tag}_title"))
+            subtitle?.let {
+                Text(it, color = palette.textSecondary, fontSize = 13.sp, lineHeight = 17.sp,
+                    modifier = Modifier.fillMaxWidth().testTag("${tag}_subtitle"))
+            }
+        }
         Icon(Icons.Default.KeyboardArrowRight, contentDescription = null, tint = palette.primaryBorder,
-            modifier = Modifier.size(28.dp))
+            modifier = Modifier.size(24.dp))
     }
 }
 
@@ -290,12 +296,13 @@ private fun HomeVisualShortcut(label: String, @DrawableRes illustration: Int, ta
 private fun HomeVisualCreation(label: String, @DrawableRes illustration: Int, tag: String,
     palette: PremiumHomePalette, modifier: Modifier = Modifier, onClick: () -> Unit) {
     Column(modifier.clip(RoundedCornerShape(20.dp)).clickable(role = Role.Button, onClick = onClick)
-        .testTag(tag).padding(vertical = 8.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+        .testTag(tag).padding(vertical = 8.dp), horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy((-8).dp)) {
         BoxWithConstraints(Modifier.fillMaxWidth()) {
             Image(painterResource(illustration), contentDescription = null, contentScale = ContentScale.Fit,
                 modifier = Modifier.fillMaxWidth().height(maxWidth))
         }
-        Row(Modifier.fillMaxWidth().heightIn(min = 52.dp).padding(horizontal = 4.dp),
+        Row(Modifier.fillMaxWidth().heightIn(min = 36.dp).padding(horizontal = 4.dp),
             verticalAlignment = Alignment.CenterVertically) {
             Text(label, color = palette.textPrimary, fontSize = 18.sp, fontWeight = FontWeight.Bold,
                 modifier = Modifier.weight(1f), textAlign = TextAlign.Center)
@@ -326,18 +333,18 @@ private fun HomeVisualMenuAction(label: String, tag: String, palette: PremiumHom
 private fun HomeVisualFooter(palette: PremiumHomePalette, credits: Int,
     onHome: () -> Unit, onCombo: () -> Unit, onMore: () -> Unit) {
     Row(Modifier.fillMaxWidth().background(palette.screenBackground.copy(alpha = 0.96f))
-        .testTag("home_footer").padding(horizontal = 20.dp, vertical = 8.dp),
+        .testTag("home_footer").padding(horizontal = 20.dp, vertical = 6.dp),
         horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.Top) {
         HomeFooterAction("Início", "home_footer_home", palette, true, Modifier.weight(1f), onHome) {
-            Icon(Icons.Default.Home, contentDescription = null, tint = palette.primaryBorder, modifier = Modifier.size(30.dp))
+            Icon(Icons.Default.Home, contentDescription = null, tint = palette.primaryBorder, modifier = Modifier.size(24.dp))
         }
         HomeFooterAction("Combo", "home_footer_combo", palette, false, Modifier.weight(1f), onCombo) {
-            Box(Modifier.size(38.dp), contentAlignment = Alignment.Center) {
-                HomeComboGlyph(palette.textPrimary, Modifier.size(30.dp))
+            Box(Modifier.size(30.dp), contentAlignment = Alignment.Center) {
+                HomeComboGlyph(palette.textPrimary, Modifier.size(24.dp))
                 if (credits > 0) {
-                    Text(credits.toString(), color = Color.White, fontSize = 16.sp, lineHeight = 20.sp,
+                    Text(credits.toString(), color = Color.White, fontSize = 13.sp, lineHeight = 17.sp,
                         fontWeight = FontWeight.Bold, softWrap = false, maxLines = 1,
-                        modifier = Modifier.align(Alignment.TopEnd).offset(x = 14.dp, y = (-3).dp)
+                        modifier = Modifier.align(Alignment.TopEnd).offset(x = 10.dp, y = (-3).dp)
                             .wrapContentSize(Alignment.TopEnd, unbounded = true).width(IntrinsicSize.Max)
                             .background(Color(0xFFE95532), RoundedCornerShape(20.dp))
                             .padding(horizontal = 6.dp, vertical = 2.dp).testTag("home_credits_badge"))
@@ -346,7 +353,7 @@ private fun HomeVisualFooter(palette: PremiumHomePalette, credits: Int,
         }
         HomeFooterAction("Mais", "home_footer_more", palette, false, Modifier.weight(1f), onMore) {
             Icon(Icons.Default.MoreVert, contentDescription = null, tint = palette.textPrimary,
-                modifier = Modifier.size(30.dp).rotate(90f))
+                modifier = Modifier.size(24.dp).rotate(90f))
         }
     }
 }
@@ -354,11 +361,11 @@ private fun HomeVisualFooter(palette: PremiumHomePalette, credits: Int,
 @Composable
 private fun HomeFooterAction(label: String, tag: String, palette: PremiumHomePalette, selected: Boolean,
     modifier: Modifier, onClick: () -> Unit, icon: @Composable () -> Unit) {
-    Column(modifier.heightIn(min = 72.dp).clip(RoundedCornerShape(12.dp))
+    Column(modifier.heightIn(min = 60.dp).clip(RoundedCornerShape(12.dp))
         .clickable(role = Role.Button, onClick = onClick).testTag(tag).padding(vertical = 6.dp),
-        horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(5.dp)) {
-        Box(Modifier.height(38.dp), contentAlignment = Alignment.Center) { icon() }
-        Text(label, color = if (selected) palette.primaryBorder else palette.textPrimary, fontSize = 17.sp,
+        horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(3.dp)) {
+        Box(Modifier.height(30.dp), contentAlignment = Alignment.Center) { icon() }
+        Text(label, color = if (selected) palette.primaryBorder else palette.textPrimary, fontSize = 14.sp, lineHeight = 18.sp,
             fontWeight = FontWeight.SemiBold, textAlign = TextAlign.Center, modifier = Modifier.fillMaxWidth())
         if (selected) Box(Modifier.width(44.dp).height(3.dp).background(palette.primaryBorder, RoundedCornerShape(3.dp)))
     }

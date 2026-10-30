@@ -184,6 +184,7 @@ class HomeVisualContentTest {
         HomeHarness(widthDp = widthDp, heightDp = heightDp, fontScale = fontScale).use { home ->
             home.capture(filename)
             assertEquals("iA4tube", home.label(home.tag("home_brand")))
+            home.assertInstagramSubtitleFitsBelowItsTitle()
             val instagram = home.tag("home_instagram").boundsInRoot
             val calendar = home.tag("home_calendar").boundsInRoot
             val create = home.tag("home_create_image").boundsInRoot
@@ -299,6 +300,40 @@ class HomeVisualContentTest {
                     assertFalse(details, layout.hasVisualOverflow)
                 }
             }
+        }
+
+        fun assertInstagramSubtitleFitsBelowItsTitle() {
+            val expected = "conecte seu instagram ao iA4tube"
+            val instagram = tag("home_instagram")
+            val title = tag("home_instagram_title")
+            val subtitle = tag("home_instagram_subtitle")
+            assertEquals("Instagram", label(title))
+            assertEquals(expected, label(subtitle))
+            val occurrences = nodes().filter { node ->
+                node.config.getOrNull(SemanticsProperties.Text)?.singleOrNull()?.text == expected
+            }
+            assertEquals("The Instagram subtitle is rendered exactly once", 1, occurrences.size)
+            assertEquals(subtitle.id, occurrences.single().id)
+            assertTrue("The subtitle belongs only to the Instagram shortcut",
+                descendants(instagram).any { it.id == subtitle.id })
+            assertEquals("Calendário has no Instagram subtitle or additional label", "Calendário", label(tag("home_calendar")))
+            val bounds = subtitle.boundsInRoot
+            val row = instagram.boundsInRoot
+            val scroll = tag("home_scroll").boundsInRoot
+            val left = subtitle.positionInRoot.x
+            val top = subtitle.positionInRoot.y
+            val right = left + subtitle.size.width
+            val bottom = top + subtitle.size.height
+            assertTrue("The Instagram subtitle has non-empty visible bounds: $bounds", bounds.width > 0f && bounds.height > 0f)
+            assertTrue("The subtitle sits below its title without overlap",
+                top >= title.positionInRoot.y + title.size.height - 1f)
+            assertEquals("The subtitle aligns with its title", title.positionInRoot.x, left, 1f)
+            assertTrue("The complete subtitle fits inside Instagram: $bounds; shortcut=$row",
+                left >= row.left - 1f && right <= row.right + 1f && top >= row.top - 1f && bottom <= row.bottom + 1f)
+            assertTrue("The complete subtitle remains visible in the scroll viewport: $bounds; viewport=$scroll",
+                left >= scroll.left - 1f && right <= scroll.right + 1f && top >= scroll.top - 1f && bottom <= scroll.bottom + 1f)
+            assertTextFits(title)
+            assertTextFits(subtitle)
         }
 
         fun assertFooterFits() {
