@@ -2282,6 +2282,9 @@ app.get("/me", auth, (req, res) => {
     artes_mensais_total: billing.artes_mensais_total,
     artes_mensais_usadas: billing.artes_mensais_usadas,
     artes_mensais_restantes: billing.artes_mensais_restantes,
+    quotaVersion: billing.quotaVersion,
+    imageQuota: billing.imageQuota,
+    videoQuota: billing.videoQuota,
     artes_avulsas_restantes: billing.artes_avulsas_restantes,
     artes_avulsas_usadas: billing.artes_avulsas_usadas,
     artes_avulsas_total_compradas: billing.artes_avulsas_total_compradas,
@@ -2808,10 +2811,12 @@ app.post("/billing/saldo/pix", auth, async (req, res) => {
 app.post("/billing/planos/:planId/pix", auth, async (req, res) => {
   try {
     const whatsapp = req.user.whatsapp;
-    const plan = billingPlans.getPlan(req.params.planId);
+    const plan = billingPlans.getPurchasablePlan(req.params.planId);
 
     if (!plan) {
-      return res.status(400).json({ ok: false, error: "Combo invalido" });
+      const previous = billingPlans.getPlan(req.params.planId);
+      return res.status(400).json({ ok: false, code: previous ? "plan_updated" : "invalid_plan",
+        error: previous ? "Este combo foi atualizado. Atualize o app para escolher os novos combos." : "Combo invalido" });
     }
 
     const result = await createMercadoPagoPixPayment({
@@ -2824,7 +2829,10 @@ app.post("/billing/planos/:planId/pix", auth, async (req, res) => {
         whatsapp,
         plan_id: plan.id,
         plan_name: plan.name,
-        artes_mes: Number(plan.artsPerMonth)
+        artes_mes: Number(plan.artsPerMonth),
+        ...(plan.quotaVersion === 1 ? {
+          quota_version: 1, images_per_month: plan.imagesPerMonth, videos_per_month: plan.videosPerMonth
+        } : {})
       },
       idempotencyKey: `plano_pix_${whatsapp}_${plan.id}_${Date.now()}`
     });
@@ -2838,7 +2846,10 @@ app.post("/billing/planos/:planId/pix", auth, async (req, res) => {
       plan_id: plan.id,
       plan_name: plan.name,
       valor_pago: Number(plan.price),
-      artes_mes: Number(plan.artsPerMonth)
+      artes_mes: Number(plan.artsPerMonth),
+      ...(plan.quotaVersion === 1 ? {
+        quotaVersion: 1, imagesPerMonth: plan.imagesPerMonth, videosPerMonth: plan.videosPerMonth
+      } : {})
     });
   } catch (e) {
     return res.status(e.statusCode || 500).json({
@@ -4984,8 +4995,8 @@ function criarPedidoHandler(categoria) {
 
     try {
     const whatsapp = req.user.whatsapp;
-    const clientes = readClientes();
-    const c = clientes[whatsapp];
+    let clientes = readClientes();
+    let c = clientes[whatsapp];
 
     if (!c) {
       return res.status(404).json({ ok: false, error: "Cliente não encontrado" });
@@ -5117,11 +5128,45 @@ function criarPedidoHandler(categoria) {
     const id = draft.id;
 
     if (isArteEmpresa) {
-      billingService.applyResolvedCompanyArtCharge(c, cobrancaEmpresa, {
-        custoPedido: custoEfetivoPedido,
-        mesAtual,
-        pedidoId: id
-      });
+      // A typed reservation may have consumed the last image while the draft
+      // awaited filesystem work. Keep read, validation, debit and write in one
+      // synchronous turn; do not overwrite a concurrent reservation or grant.
+      const freshClients = readClientes();
+      const freshClient = freshClients[whatsapp];
+      // The file also contains other owners: keep their concurrent changes even
+      // when this particular owner still has the historical charging regime.
+      clientes = freshClients;
+      if (billingService.isTypedMonthlyPlan(c) || billingService.isTypedMonthlyPlan(freshClient)) {
+        if (!freshClient) throw Object.assign(new Error("Cliente não encontrado"), { statusCode: 404 });
+        c = freshClient;
+        cobrancaEmpresa = billingService.resolveCompanyArtCharge(c, {
+          custoPedido: custoEfetivoPedido, now: new Date(),
+          freeArtBlocked: freeArtIpLock.blocked || freeArtBlockedByClaimLock
+        });
+        if (cobrancaEmpresa.allowed !== true) {
+          draft.pedido.pagamento_pendente = true;
+          draft.pedido.valor_pendente = custoEfetivoPedido;
+          draft.pedido.motivo_pagamento_pendente = "saldo_insuficiente";
+          orderService.orderStorage.writeOrder(draft.base, draft.pedido);
+          return res.status(402).json({ ok: false, code: "billing_required",
+            error: "Você não tem saldo suficiente para criar esta imagem." });
+        }
+      }
+      try {
+        billingService.applyResolvedCompanyArtCharge(c, cobrancaEmpresa, {
+          custoPedido: custoEfetivoPedido,
+          mesAtual,
+          pedidoId: id
+        });
+      } catch (error) {
+        if (billingService.isTypedMonthlyPlan(c)) {
+          draft.pedido.pagamento_pendente = true;
+          draft.pedido.valor_pendente = custoEfetivoPedido;
+          draft.pedido.motivo_pagamento_pendente = "saldo_insuficiente";
+          orderService.orderStorage.writeOrder(draft.base, draft.pedido);
+        }
+        throw error;
+      }
       draft.pedido.cobranca_origem = cobrancaEmpresa.source;
       draft.pedido.valor_cobrado = cobrancaEmpresa.source === "saldo_extra" || cobrancaEmpresa.source === "arte_avulsa"
         ? Number(cobrancaEmpresa.amount || custoEfetivoPedido)

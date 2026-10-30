@@ -1,4 +1,5 @@
-const PLANS = {
+// Historical IDs keep their original grants, including pending Pix and renewals.
+const LEGACY_PLANS = {
   i4_essencial: {
     id: "i4_essencial",
     name: "i4 Essencial",
@@ -22,6 +23,30 @@ const PLANS = {
   }
 };
 
+const CURRENT_PLANS = {
+  i4_imagens_10_v1: {
+    id: "i4_imagens_10_v1", name: "Imagens", price: 69,
+    quotaVersion: 1, imagesPerMonth: 10, videosPerMonth: 0, artsPerMonth: 10, whatsappDirect: false
+  },
+  i4_combo_10i_4v_v1: {
+    id: "i4_combo_10i_4v_v1", name: "Essencial", price: 99,
+    quotaVersion: 1, imagesPerMonth: 10, videosPerMonth: 4, artsPerMonth: 10, whatsappDirect: false
+  },
+  i4_combo_15i_6v_v1: {
+    id: "i4_combo_15i_6v_v1", name: "Destaque", price: 139,
+    quotaVersion: 1, imagesPerMonth: 15, videosPerMonth: 6, artsPerMonth: 15, whatsappDirect: false
+  },
+  i4_combo_20i_10v_v1: {
+    id: "i4_combo_20i_10v_v1", name: "Profissional", price: 199,
+    quotaVersion: 1, imagesPerMonth: 20, videosPerMonth: 10, artsPerMonth: 20, whatsappDirect: false
+  },
+  i4_combo_20i_15v_v1: {
+    id: "i4_combo_20i_15v_v1", name: "Empresarial", price: 259,
+    quotaVersion: 1, imagesPerMonth: 20, videosPerMonth: 15, artsPerMonth: 20, whatsappDirect: false
+  }
+};
+const PLANS = { ...LEGACY_PLANS, ...CURRENT_PLANS };
+
 const BALANCE_PACKAGES = {
   saldo_990: { id: "saldo_990", title: "Saldo IA4Tube - R$9,90", amount: 9.90, credit: 9.90 },
   saldo_2990: { id: "saldo_2990", title: "Saldo IA4Tube - R$29,90", amount: 29.90, credit: 29.90 },
@@ -41,11 +66,17 @@ function normalizeId(value) {
 }
 
 function getPlan(planId) {
-  return PLANS[normalizeId(planId)] || null;
+  const key = normalizeId(planId);
+  return Object.hasOwn(PLANS, key) ? PLANS[key] : null;
+}
+
+function getPurchasablePlan(planId) {
+  const key = normalizeId(planId);
+  return Object.hasOwn(CURRENT_PLANS, key) ? CURRENT_PLANS[key] : null;
 }
 
 function listPlans() {
-  return Object.values(PLANS);
+  return Object.values(CURRENT_PLANS);
 }
 
 function getBalancePackage(packageId) {
@@ -65,6 +96,7 @@ module.exports = {
   BALANCE_PACKAGES,
   SINGLE_ART_PURCHASE,
   getPlan,
+  getPurchasablePlan,
   listPlans,
   getBalancePackage,
   listBalancePackages,

@@ -2,6 +2,7 @@
 
 const fs = require("node:fs"), path = require("node:path"), crypto = require("node:crypto"), os = require("node:os");
 const planning = require("../company-monthly-planning/planning.service");
+const { allocationUnits, matchesAllocation } = require("./media-allocation");
 const { dateTime, caption: calendarCaption } = require("../social/calendar/model");
 const { atomicWriteJson } = require("../notifications/fcm-token-store");
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -42,7 +43,7 @@ function bindInput(value) {
 }
 function billingDigest(client) {
   // No password, token, contact data or entire client snapshot enters this journal.
-  const fields = Object.keys(client).filter(key => /^(plano|artes_|arte_gratis|planejamento_mensal|ciclo_|usados_no_ciclo|saldo|ultimo_pagamento)/.test(key)).sort();
+  const fields = Object.keys(client).filter(key => /^(plano|artes_|videos_|arte_gratis|planejamento_mensal|ciclo_|usados_no_ciclo|saldo|ultimo_pagamento)/.test(key)).sort();
   return hash(JSON.stringify(fields.map(key => [key, client[key]])));
 }
 function privateDirectory(directory) {
@@ -200,11 +201,15 @@ function createEditCalendarService({ dataDir, planningDir, ordersDir, secret, re
       if (plan && (JSON.stringify(plan.edit_calendar) !== JSON.stringify(externalEdit) || plan.whatsapp !== row.owner)) fail("order_conflict");
       if (priorReservation && !plan) fail("allocation_reconciliation_required", 503);
       const allocated = row.admission?.reservation;
-      const previousCycleAdmission = Boolean(allocated && allocated.cycle !== String(current.client.plano_ciclo || current.client.ciclo_mes || "") &&
+      if (allocated?.mediaQuota) allocationUnits(allocated);
+      const grant = allocated?.mediaQuota?.grantRef;
+      const previousGrant = Boolean(grant && (current.client.plano_cotas_versao !== 1 ||
+        grant.grantId !== current.client.plano_cotas_concessao_id ||
+        grant.planId !== (current.client.plano_atual || current.client.plano) || grant.cycleStart !== current.client.plano_ciclo_inicio_em));
+      const previousCycleAdmission = Boolean(allocated &&
+        (allocated.cycle !== String(current.client.plano_ciclo || current.client.ciclo_mes || "") || previousGrant) &&
         plan && plan.ciclo === allocated.cycle && Number(plan.quantidade_reservada) === 1 &&
-        Number(plan.reserva?.artes_mensais_reservadas || 0) === allocated.monthly &&
-        Number(plan.reserva?.artes_avulsas_consumidas || 0) === allocated.standalone &&
-        Number(plan.reserva?.artes_gratis_consumidas || 0) === allocated.free && allocated.monthly + allocated.standalone + allocated.free === 1);
+        allocationUnits(allocated) === 1 && matchesAllocation(allocated, plan.reserva, plan.ciclo));
       if (row.admission && !priorReservation && !previousCycleAdmission) fail("allocation_reconciliation_required", 503);
       if (!priorReservation && !previousCycleAdmission) {
         if (row.billingRefused) {
@@ -230,7 +235,7 @@ function createEditCalendarService({ dataDir, planningDir, ordersDir, secret, re
       fault("after_request");
       const caption = row.request.caption || request.caption || "Conheça nosso trabalho e acompanhe nosso conteúdo.";
       planning.savePlanResult({ baseDir: planningRoot, planningId: row.planningId, pedidosDir: orderRoot,
-        // A previously paid admission belongs to its original cycle. Do not reset/debit the new cycle to bind its child.
+        // A paid admission keeps its original cycle/concession. Do not reset/debit a new grant to bind its child.
         cliente: previousCycleAdmission ? null : current.client,
         payload: { postagens: [{ planejamento_item_id: `edit-${id}`, ordem: 1, tema: request.title,
           objetivo: objective, data_sugerida: row.request.date, horario_sugerido: row.request.time,

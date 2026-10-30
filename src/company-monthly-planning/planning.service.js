@@ -757,6 +757,7 @@ function ensurePlanningReservationState(cliente, ciclo = planCycle(cliente)) {
     cliente.planejamento_mensal_reservas = {};
     cliente.planejamento_mensal_artes_reservadas = 0;
     cliente.planejamento_mensal_ja_produzidas = 0;
+    if (cliente.plano_cotas_versao === 1) cliente.planejamento_mensal_videos_reservados = 0;
   }
 
   return cliente.planejamento_mensal_reservas;
@@ -766,17 +767,20 @@ function refreshPlanningReservationCounters(cliente) {
   const reservas = cliente.planejamento_mensal_reservas || {};
   let reservadas = 0;
   let produzidas = 0;
+  let videosReservados = 0;
 
   for (const reserva of Object.values(reservas)) {
     if (!reserva || typeof reserva !== "object") continue;
     produzidas += Number(reserva.artes_produzidas || 0);
     if (String(reserva.status || "") === "ativa") {
       reservadas += Number(reserva.artes_bloqueadas_ativas || 0);
+      videosReservados += Number(reserva.videos_bloqueados_ativos || 0);
     }
   }
 
   cliente.planejamento_mensal_artes_reservadas = Math.max(0, reservadas);
   cliente.planejamento_mensal_ja_produzidas = Math.max(0, produzidas);
+  if (cliente.plano_cotas_versao === 1) cliente.planejamento_mensal_videos_reservados = Math.max(0, videosReservados);
   cliente.planejamento_mensal_atualizado_em = new Date().toISOString();
 
   return {
@@ -792,6 +796,31 @@ function validatePlanAndFreeArts(cliente, quantity, options = {}) {
   const standalone = billingService.getStandaloneArtStatus(cliente);
   ensurePlanningReservationState(cliente, planCycle(cliente));
   refreshPlanningReservationCounters(cliente);
+
+  const mediaQuota = billingService.getMediaQuotaStatus(cliente);
+  if (mediaQuota.policyVersion === 1) {
+    const mediaKind = options.mediaKind === "video" ? "video" : "image";
+    const monthlyAvailable = mediaQuota.monthly[mediaKind].remaining;
+    const monthlyQuantity = Math.min(quantity, monthlyAvailable);
+    const remaining = quantity - monthlyQuantity;
+    const freeArtQuantity = mediaKind === "image" && remaining > 0 &&
+      billingService.hasAvailableFreeCompanyArt(cliente, { freeArtBlocked }) ? Math.min(1, remaining) : 0;
+    const standaloneQuantity = remaining - freeArtQuantity;
+    const standaloneAvailable = Number(standalone.artes_avulsas_restantes || 0);
+    if (standaloneQuantity > standaloneAvailable) {
+      const error = new Error("Voce nao tem saldo suficiente para continuar.");
+      Object.assign(error, { statusCode: 402, code: "billing_required", billing,
+        artes_livres: monthlyAvailable, artes_avulsas_restantes: standaloneAvailable });
+      throw error;
+    }
+    return { billing, artes_livres: monthlyAvailable, charge: {
+      mensal: mediaKind === "image" ? monthlyQuantity : 0,
+      mensal_video: mediaKind === "video" ? monthlyQuantity : 0,
+      gratis: freeArtQuantity, avulsa: standaloneQuantity,
+      arte_avulsa_valor: Number(standalone.arte_avulsa_valor || 0),
+      media_quota: { policyVersion: 1, mediaKind, grantRef: mediaQuota.grantRef }
+    } };
+  }
 
   const planActive = billingService.isPlanActive(cliente);
   const freeArts = Number(billing.artes_mensais_restantes || 0);
@@ -832,8 +861,23 @@ function reservePlanningArts(cliente, planningId, quantity, createdAt, billing, 
   const monthlyQuantity = Math.max(0, Number(charge.mensal ?? quantity));
   const freeArtQuantity = Math.max(0, Math.min(1, Number(charge.gratis || 0)));
   const standaloneQuantity = Math.max(0, Number(charge.avulsa || 0));
+  const mediaQuota = charge.media_quota;
+  const videoMonthlyQuantity = Math.max(0, Number(charge.mensal_video || 0));
 
-  if (monthlyQuantity > freeArts) {
+  if (mediaQuota?.policyVersion === 1) {
+    if (!["image", "video"].includes(mediaQuota.mediaKind) ||
+        ![monthlyQuantity, videoMonthlyQuantity, freeArtQuantity, standaloneQuantity].every(Number.isSafeInteger) ||
+        monthlyQuantity + videoMonthlyQuantity + freeArtQuantity + standaloneQuantity !== quantity ||
+        (mediaQuota.mediaKind === "image" ? videoMonthlyQuantity !== 0 : monthlyQuantity !== 0 || freeArtQuantity !== 0))
+      throw Object.assign(new Error("Reserva de cotas invalida."), { code: "billing_media_quota_invalid", statusCode: 503 });
+    // Validate every source before any financial mutation. The legacy branch below keeps its previous policy.
+    if (standaloneQuantity > Number(cliente.artes_avulsas_restantes || 0) ||
+        freeArtQuantity > 0 && !billingService.hasAvailableFreeCompanyArt(cliente))
+      throw Object.assign(new Error("Voce nao tem saldo suficiente para continuar."), { code: "billing_required", statusCode: 402 });
+    if (monthlyQuantity + videoMonthlyQuantity > 0)
+      billingService.consumeMonthlyMediaQuota(cliente, mediaQuota.mediaKind,
+        monthlyQuantity + videoMonthlyQuantity, mediaQuota.grantRef);
+  } else if (monthlyQuantity > freeArts) {
     const error = new Error("Voce nao tem artes livres suficientes para este Planejamento Mensal.");
     error.statusCode = 400;
     error.code = "monthly_planning_insufficient_arts";
@@ -842,7 +886,7 @@ function reservePlanningArts(cliente, planningId, quantity, createdAt, billing, 
     throw error;
   }
 
-  cliente.artes_mensais_restantes = Math.max(0, freeArts - monthlyQuantity);
+  if (mediaQuota?.policyVersion !== 1) cliente.artes_mensais_restantes = Math.max(0, freeArts - monthlyQuantity);
 
   if (standaloneQuantity > 0) {
     billingService.ensureStandaloneArtFields(cliente);
@@ -894,6 +938,8 @@ function reservePlanningArts(cliente, planningId, quantity, createdAt, billing, 
     artes_mensais_reservadas: monthlyQuantity,
     artes_gratis_consumidas: freeArtQuantity,
     artes_avulsas_consumidas: standaloneQuantity,
+    ...(mediaQuota?.policyVersion === 1 ? { videos_mensais_reservados: videoMonthlyQuantity,
+      videos_bloqueados_ativos: videoMonthlyQuantity, media_quota: structuredClone(mediaQuota) } : {}),
     artes_bloqueadas_ativas: monthlyQuantity,
     artes_produzidas: 0,
     artes_devolvidas: 0,
@@ -910,11 +956,14 @@ function reservePlanningArts(cliente, planningId, quantity, createdAt, billing, 
     ciclo,
     definitiva: true,
     quantidade_reservada: quantity,
-    artes_deste_ciclo: Number(cliente.artes_mensais_total || billing?.artes_mensais_total || 0),
+    artes_deste_ciclo: Number(mediaQuota?.mediaKind === "video" ? cliente.videos_mensais_total || 0
+      : cliente.artes_mensais_total || billing?.artes_mensais_total || 0),
     reservadas_no_planejamento: quantity,
     artes_mensais_reservadas: monthlyQuantity,
     artes_gratis_consumidas: freeArtQuantity,
     artes_avulsas_consumidas: standaloneQuantity,
+    ...(mediaQuota?.policyVersion === 1 ? { videos_mensais_reservados: videoMonthlyQuantity,
+      videos_bloqueados_ativos: videoMonthlyQuantity, media_quota: structuredClone(mediaQuota) } : {}),
     livres_para_criar_arte: usage.livres_para_criar_arte,
     ja_produzidas: 0,
     total_reservadas_no_ciclo: usage.reservadas_no_planejamento,
@@ -944,6 +993,21 @@ function releasePlanningReservation(cliente, planning) {
       artes_devolvidas: 0,
       livres_para_criar_arte: Number(cliente.artes_mensais_restantes || 0)
     };
+  }
+
+  if (reserva.media_quota?.policyVersion === 1) {
+    const quota = reserva.media_quota, video = quota.mediaKind === "video";
+    const monthly = Number(video ? reserva.videos_mensais_reservados || 0 : reserva.artes_mensais_reservadas || 0);
+    const produced = Math.max(Number(reserva.artes_produzidas || 0), Number(planning.ja_produzidas || 0));
+    const returned = Number(reserva.artes_devolvidas || 0);
+    const blocked = Number(video ? reserva.videos_bloqueados_ativos || 0 : reserva.artes_bloqueadas_ativas || 0);
+    const refund = Math.max(0, Math.min(blocked, monthly - produced - returned));
+    if (refund > 0) billingService.refundMonthlyMediaQuota(cliente, quota.mediaKind, refund, quota.grantRef);
+    const now = new Date().toISOString();
+    Object.assign(reserva, { status: "cancelada", cancelado_em: now, atualizado_em: now,
+      artes_devolvidas: returned + refund, artes_bloqueadas_ativas: 0, videos_bloqueados_ativos: 0 });
+    const usage = refreshPlanningReservationCounters(cliente);
+    return { billing_alterado: refund > 0, artes_devolvidas: refund, livres_para_criar_arte: usage.livres_para_criar_arte };
   }
 
   const reservadas = Number(reserva.quantidade_reservada || planning.quantidade_reservada || 0);
@@ -1464,7 +1528,8 @@ function createRequest({ baseDir, cliente, whatsapp, body = {}, files = {}, free
     throw error;
   }
   const profile = normalizeProfile(body, cliente);
-  const { billing, charge } = validatePlanAndFreeArts(cliente, quantidadeReservada, { freeArtBlocked });
+  const { billing, charge } = validatePlanAndFreeArts(cliente, quantidadeReservada, { freeArtBlocked,
+    mediaKind: editRegistration ? editRegistration.mediaKind || "video" : "image" });
   const ciclo = planCycle(cliente);
   const planningId = editRegistration ? `pm_edit_${editRegistration.contextId.replace(/-/g, "")}` : newPlanningId();
   // Internal capability, never accepted from an HTTP body or included in product responses/runner packages.
@@ -1534,6 +1599,8 @@ function createRequest({ baseDir, cliente, whatsapp, body = {}, files = {}, free
       artes_mensais_reservadas: reservation.artes_mensais_reservadas,
       artes_gratis_consumidas: reservation.artes_gratis_consumidas,
       artes_avulsas_consumidas: reservation.artes_avulsas_consumidas,
+      ...(reservation.media_quota ? { videos_mensais_reservados: reservation.videos_mensais_reservados,
+        videos_bloqueados_ativos: reservation.videos_bloqueados_ativos, media_quota: reservation.media_quota } : {}),
       artes_bloqueadas_ativas: reservation.artes_mensais_reservadas,
       artes_produzidas: 0,
       artes_devolvidas: 0,
@@ -4048,6 +4115,10 @@ function syncPlanningReservationAfterChildren(cliente, planning, childCount) {
     0,
     mensalReservada - Math.min(mensalReservada, reserva.artes_produzidas)
   );
+  if (reserva.media_quota?.policyVersion === 1) {
+    const videos = Number(reserva.videos_mensais_reservados || 0);
+    reserva.videos_bloqueados_ativos = Math.max(0, videos - Math.min(videos, reserva.artes_produzidas));
+  }
   reserva.atualizado_em = new Date().toISOString();
 
   return refreshPlanningReservationCounters(cliente);

@@ -3,6 +3,7 @@
 const path = require("node:path"), crypto = require("node:crypto");
 const planning = require("../company-monthly-planning/planning.service");
 const billing = require("../billing/billing.service");
+const { reservationAllocation, allocationUnits, matchesAllocation } = require("./media-allocation");
 const { admissionInput, admissionOrderId, statusInput, cancelInput, hash, canonicalJson, fail, UUID, HASH } = require("./admission-contract");
 const FREE_FIELDS = ["arte_gratis_disponivel", "arte_gratis_usada", "arte_gratis_usada_em", "arte_gratis_pedido_id", "arte_gratis_criada_em"];
 function legacyConsumed(client) {
@@ -85,10 +86,11 @@ function createEditAdmissionService(ports) {
   function readPaidAvailability(client) {
     // Billing normalizes/rolls cycles in memory. The observation owns this copy and never persists it.
     const copy = structuredClone(client), now = new Date(clock()), status = billing.getBillingStatus(copy, now);
-    const monthly = billing.isPlanActive(copy, now) ? status.artes_mensais_restantes : 0;
     const standalone = status.artes_avulsas_restantes;
-    if (![monthly, standalone].every(value => Number.isSafeInteger(value) && value >= 0)) throw new Error("availability_billing_invalid");
-    return { paid: monthly + standalone >= 1, freeFeature: status.arte_gratis_ativa === true };
+    const quota = billing.getMediaQuotaStatus(copy, now);
+    const image = quota.monthly.image.remaining, video = quota.monthly.video.remaining;
+    if (![image, video, standalone].every(value => Number.isSafeInteger(value) && value >= 0)) throw new Error("availability_billing_invalid");
+    return { image: image + standalone >= 1, video: video + standalone >= 1, freeFeature: status.arte_gratis_ativa === true };
   }
   async function availability(claims, policy = {}) {
     let current = ownerClient(claims);
@@ -96,21 +98,21 @@ function createEditAdmissionService(ports) {
     let measured;
     try { measured = readPaidAvailability(current.client); }
     catch { return availabilityResponse(null, null); }
-    if (measured.paid) return availabilityResponse(true, true);
-    if (!measured.freeFeature || legacyConsumed(current.client)) return availabilityResponse(false, false);
+    if (measured.image) return availabilityResponse(true, measured.video);
+    if (!measured.freeFeature || legacyConsumed(current.client)) return availabilityResponse(false, measured.video);
     let connection = null, observationFailed = typeof observeConnection !== "function";
     try { if (!observationFailed) connection = await observeConnection(claims); }
     catch { observationFailed = true; }
     // A reservation/credit may have changed during the connection read. Use the fresh client for the final hint.
     try { current = ownerClient(claims); measured = readPaidAvailability(current.client); }
     catch (error) { if (error.statusCode === 401) throw error; return availabilityResponse(null, null); }
-    if (measured.paid) return availabilityResponse(true, true);
-    if (!measured.freeFeature || legacyConsumed(current.client)) return availabilityResponse(false, false);
-    if (observationFailed) return availabilityResponse(null, false);
+    if (measured.image) return availabilityResponse(true, measured.video);
+    if (!measured.freeFeature || legacyConsumed(current.client)) return availabilityResponse(false, measured.video);
+    if (observationFailed) return availabilityResponse(null, measured.video);
     try {
       return availabilityResponse(Boolean(inspectFreeClaim(current.owner, current.client, connection, ledger(),
-        { ipIdentity: policy.ipIdentity, blocked: policy.freeArtBlocked === true })), false);
-    } catch { return availabilityResponse(null, false); }
+        { ipIdentity: policy.ipIdentity, blocked: policy.freeArtBlocked === true })), measured.video);
+    } catch { return availabilityResponse(null, measured.video); }
   }
   function reserveFreeClaim(row) {
     const claim = row.admission.freeClaim;
@@ -167,9 +169,9 @@ function createEditAdmissionService(ports) {
     const reservation = current.client.planejamento_mensal_reservas?.[row.planningId];
     if (!reservation || reservation.status !== "ativa" || Number(reservation.quantidade_reservada) !== 1 ||
         Number(reservation.artes_produzidas || 0) !== 0) fail("allocation_reconciliation_required", 503);
-    value.reservation = { cycle: reservation.ciclo, monthly: Number(reservation.artes_mensais_reservadas || 0),
-      standalone: Number(reservation.artes_avulsas_consumidas || 0), free: Number(reservation.artes_gratis_consumidas || 0) };
-    if (value.reservation.monthly + value.reservation.standalone + value.reservation.free !== 1) fail("allocation_reconciliation_required", 503);
+    value.reservation = reservationAllocation(reservation);
+    if (allocationUnits(value.reservation) !== 1 ||
+        value.reservation.mediaQuota && value.reservation.mediaQuota.mediaKind !== value.mediaKind) fail("allocation_reconciliation_required", 503);
     if (value.reservation.free && row.ipIdentity && recordFreeArtUse({ owner: row.owner, planningId: row.planningId, ipIdentity: row.ipIdentity }) !== true)
       fail("free_art_receipt_unconfirmed", 503);
     if (!value.reservation.free && value.freeClaim) {
@@ -300,7 +302,16 @@ function createEditAdmissionService(ports) {
     const held = current.client.planejamento_mensal_reservas?.[row.planningId];
     if (!held || held.status !== "ativa" || Number(held.artes_produzidas || 0) !== 0 || !allocation)
       fail("allocation_reconciliation_required", 503);
-    if (allocation.monthly) {
+    if (allocation.mediaQuota) {
+      if (allocationUnits(allocation) !== 1 || !matchesAllocation(allocation, held)) fail("allocation_reconciliation_required", 503);
+      if (allocation.monthly || allocation.monthlyVideo) {
+        if (current.client.planejamento_mensal_ciclo !== allocation.cycle ||
+            String(current.client.plano_ciclo || current.client.ciclo_mes || "") !== allocation.cycle)
+          fail("allocation_reconciliation_required", 503);
+        billing.refundMonthlyMediaQuota(current.client, allocation.mediaQuota.mediaKind,
+          allocation.monthly + (allocation.monthlyVideo || 0), allocation.mediaQuota.grantRef, new Date(clock()));
+      }
+    } else if (allocation.monthly) {
       if (current.client.planejamento_mensal_ciclo !== allocation.cycle) fail("allocation_reconciliation_required", 503);
       current.client.artes_mensais_restantes = Number(current.client.artes_mensais_restantes || 0) + 1;
     }
@@ -319,6 +330,11 @@ function createEditAdmissionService(ports) {
         current.client.usados_no_ciclo = Math.max(0, Number(current.client.usados_no_ciclo || 0) - 1);
     }
     held.status = "cancelada"; held.artes_bloqueadas_ativas = 0; held.artes_devolvidas = Number(held.artes_devolvidas || 0) + 1;
+    if (allocation.mediaQuota) {
+      held.videos_bloqueados_ativos = 0;
+      current.client.planejamento_mensal_videos_reservados = Object.values(current.client.planejamento_mensal_reservas)
+        .filter(item => item.status === "ativa").reduce((sum, item) => sum + Number(item.videos_bloqueados_ativos || 0), 0);
+    }
     current.client.planejamento_mensal_artes_reservadas = Object.values(current.client.planejamento_mensal_reservas)
       .filter(item => item.status === "ativa").reduce((sum, item) => sum + Number(item.artes_bloqueadas_ativas || 0), 0);
   }

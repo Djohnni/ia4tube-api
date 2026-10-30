@@ -1,4 +1,5 @@
 const plansRegistry = require("./plans");
+const crypto = require("node:crypto");
 
 const PLAN_GRACE_DAYS = 3;
 
@@ -58,9 +59,112 @@ function clearPendingPlanCycle(cliente) {
   delete cliente.plano_proximo_ciclo_renova_em;
   delete cliente.plano_proximo_ciclo_pagamento_id;
   delete cliente.plano_proximo_ciclo_pago_em;
+  delete cliente.plano_proximo_ciclo_cotas_concessao_id;
 }
 
-function activatePlanCycle(cliente, plan, { paymentId, paidAt, cycleStart, renewalDate }) {
+function mediaQuotaError(code, statusCode = 503) {
+  const error = new Error("As cotas deste combo precisam ser conferidas.");
+  error.code = code;
+  error.statusCode = statusCode;
+  return error;
+}
+
+const MONTHLY_MEDIA_FIELDS = {
+  image: ["artes_mensais_total", "artes_mensais_usadas", "artes_mensais_restantes"],
+  video: ["videos_mensais_total", "videos_mensais_usados", "videos_mensais_restantes"]
+};
+
+function isTypedMonthlyPlan(cliente) {
+  if (cliente?.plano_cotas_versao === undefined) return false;
+  if (cliente.plano_cotas_versao !== 1) throw mediaQuotaError("billing_media_quota_invalid");
+  return true;
+}
+
+function assertTypedPlan(plan) {
+  if (plan.quotaVersion !== 1 || ![plan.imagesPerMonth, plan.videosPerMonth].every(
+    value => Number.isSafeInteger(value) && value >= 0) || plan.artsPerMonth !== plan.imagesPerMonth) {
+    throw mediaQuotaError("billing_media_quota_invalid");
+  }
+}
+
+function concessionId(plan, start, paymentId, savedId) {
+  if (paymentId) return crypto.createHash("sha256").update(JSON.stringify(
+    [1, String(plan.id), toIsoDate(start), String(paymentId)])).digest("hex");
+  return savedId || crypto.randomUUID();
+}
+
+function typedGrantRef(cliente) {
+  const grantId = cliente.plano_cotas_concessao_id;
+  const planId = cliente.plano_atual || cliente.plano;
+  const cycleStart = cliente.plano_ciclo_inicio_em;
+  if (typeof grantId !== "string" || !/^[A-Za-z0-9_-]{1,128}$/.test(grantId) ||
+      typeof planId !== "string" || !planId || typeof cycleStart !== "string" || !parseDate(cycleStart)) {
+    throw mediaQuotaError("billing_media_quota_invalid");
+  }
+  return { policyVersion: 1, grantId, planId, cycleStart };
+}
+
+function sameGrantRef(left, right) {
+  return left && typeof left === "object" && left.policyVersion === right.policyVersion &&
+    left.grantId === right.grantId && left.planId === right.planId && left.cycleStart === right.cycleStart;
+}
+
+function readTypedMonthlyBucket(cliente, kind) {
+  const names = MONTHLY_MEDIA_FIELDS[kind];
+  if (!names) throw mediaQuotaError("billing_media_quota_invalid_kind", 400);
+  const [total, used, remaining] = names.map(name => cliente[name]);
+  if (![total, used, remaining].every(value => Number.isSafeInteger(value) && value >= 0) ||
+      used + remaining > total) throw mediaQuotaError("billing_media_quota_invalid");
+  return { total, used, remaining };
+}
+
+/** Pure projection. Legacy image/video entries refer to the SAME shared pool. */
+function getMediaQuotaStatus(cliente, now = new Date()) {
+  const copy = structuredClone(cliente || {});
+  refreshManualPlanCycle(copy, now);
+  const active = isPlanActive(copy, now);
+  if (!isTypedMonthlyPlan(copy)) {
+    const nonnegative = value => Math.max(0, Number(value) || 0);
+    const bucket = { total: nonnegative(copy.artes_mensais_total), used: nonnegative(copy.artes_mensais_usadas),
+      remaining: active ? nonnegative(copy.artes_mensais_restantes) : 0 };
+    return { policyVersion: 0, active, monthly: { image: { ...bucket }, video: { ...bucket } }, grantRef: null };
+  }
+  const image = readTypedMonthlyBucket(copy, "image"), video = readTypedMonthlyBucket(copy, "video");
+  return { policyVersion: 1, active, monthly: {
+    image: { ...image, remaining: active ? image.remaining : 0 },
+    video: { ...video, remaining: active ? video.remaining : 0 }
+  }, grantRef: typedGrantRef(copy) };
+}
+
+/** Caller persists this synchronous mutation under its existing reservation receipt. */
+function changeMonthlyMediaQuota(cliente, kind, quantity, expectedGrantRef, now, refund) {
+  if (!Number.isSafeInteger(quantity) || quantity <= 0) throw mediaQuotaError("billing_media_quota_invalid_quantity", 400);
+  if (!MONTHLY_MEDIA_FIELDS[kind]) throw mediaQuotaError("billing_media_quota_invalid_kind", 400);
+  refreshManualPlanCycle(cliente, now);
+  if (!isTypedMonthlyPlan(cliente)) throw mediaQuotaError("billing_media_quota_not_typed");
+  const reference = typedGrantRef(cliente);
+  if (!sameGrantRef(expectedGrantRef, reference)) throw mediaQuotaError("billing_media_quota_grant_changed");
+  if (!isPlanActive(cliente, now)) throw mediaQuotaError("billing_media_quota_inactive", 409);
+  const bucket = readTypedMonthlyBucket(cliente, kind);
+  if (refund ? quantity > bucket.used : quantity > bucket.remaining) {
+    throw mediaQuotaError(refund ? "billing_media_quota_invalid_refund" : "billing_required", refund ? 503 : 402);
+  }
+  const [, usedName, remainingName] = MONTHLY_MEDIA_FIELDS[kind];
+  cliente[usedName] = bucket.used + (refund ? -quantity : quantity);
+  cliente[remainingName] = bucket.remaining + (refund ? quantity : -quantity);
+  return { policyVersion: 1, mediaKind: kind, quantity, grantRef: reference,
+    monthly: readTypedMonthlyBucket(cliente, kind) };
+}
+
+function consumeMonthlyMediaQuota(cliente, kind, quantity, expectedGrantRef, now = new Date()) {
+  return changeMonthlyMediaQuota(cliente, kind, quantity, expectedGrantRef, now, false);
+}
+
+function refundMonthlyMediaQuota(cliente, kind, quantity, expectedGrantRef, now = new Date()) {
+  return changeMonthlyMediaQuota(cliente, kind, quantity, expectedGrantRef, now, true);
+}
+
+function activatePlanCycle(cliente, plan, { paymentId, paidAt, cycleStart, renewalDate, quotaGrantId }) {
   const start = parseDate(cycleStart) || parseDate(paidAt) || new Date();
   const renewal = parseDate(renewalDate) || addMonthsPreserveDay(start, 1);
   const paid = parseDate(paidAt) || new Date();
@@ -78,6 +182,17 @@ function activatePlanCycle(cliente, plan, { paymentId, paidAt, cycleStart, renew
   cliente.artes_mensais_total = Number(plan.artsPerMonth || 0);
   cliente.artes_mensais_usadas = 0;
   cliente.artes_mensais_restantes = Number(plan.artsPerMonth || 0);
+  if (plan.quotaVersion === 1) {
+    assertTypedPlan(plan);
+    cliente.plano_cotas_versao = 1;
+    cliente.plano_cotas_concessao_id = concessionId(plan, start, paymentId, quotaGrantId);
+    cliente.videos_mensais_total = plan.videosPerMonth;
+    cliente.videos_mensais_usados = 0;
+    cliente.videos_mensais_restantes = plan.videosPerMonth;
+  } else {
+    // An old purchase still activates its original shared-credit regime.
+    for (const name of ["plano_cotas_versao", "plano_cotas_concessao_id", ...MONTHLY_MEDIA_FIELDS.video]) delete cliente[name];
+  }
   cliente.ultimo_pagamento_plano_id = paymentId ? String(paymentId) : "";
   cliente.ultimo_pagamento_plano_em = toIsoDate(paid);
   cliente.ativo = true;
@@ -99,6 +214,10 @@ function scheduleNextPlanCycle(cliente, plan, { paymentId, paidAt, currentRenewa
   cliente.plano_proximo_ciclo_renova_em = toIsoDate(addMonthsPreserveDay(start, 1));
   cliente.plano_proximo_ciclo_pagamento_id = paymentId ? String(paymentId) : "";
   cliente.plano_proximo_ciclo_pago_em = toIsoDate(paid);
+  if (plan.quotaVersion === 1) {
+    assertTypedPlan(plan);
+    cliente.plano_proximo_ciclo_cotas_concessao_id = concessionId(plan, start, paymentId);
+  } else delete cliente.plano_proximo_ciclo_cotas_concessao_id;
   return true;
 }
 
@@ -205,7 +324,8 @@ function refreshManualPlanCycle(cliente, now = new Date()) {
         paymentId: cliente.plano_proximo_ciclo_pagamento_id,
         paidAt: cliente.plano_proximo_ciclo_pago_em,
         cycleStart: pendingStart,
-        renewalDate: pendingRenewal
+        renewalDate: pendingRenewal,
+        quotaGrantId: cliente.plano_proximo_ciclo_cotas_concessao_id
       });
       changed = true;
     }
@@ -215,6 +335,7 @@ function refreshManualPlanCycle(cliente, now = new Date()) {
   if (cliente.plano_status === "active" && renewal && current >= renewal) {
     cliente.plano_status = "past_due";
     cliente.artes_mensais_restantes = 0;
+    if (cliente.plano_cotas_versao === 1) cliente.videos_mensais_restantes = 0;
     changed = true;
   }
 
@@ -230,6 +351,7 @@ function getBillingStatus(cliente, now = new Date(), options = {}) {
   const standaloneArt = getStandaloneArtStatus(cliente);
   const availableCombos = plansRegistry.listPlans();
   const freeArt = getFreeArtStatus(cliente, options);
+  const mediaQuota = getMediaQuotaStatus(cliente, now);
 
   return {
     plano: cliente.plano || "",
@@ -245,6 +367,9 @@ function getBillingStatus(cliente, now = new Date(), options = {}) {
     artes_mensais_total: Number(cliente.artes_mensais_total || 0),
     artes_mensais_usadas: Number(cliente.artes_mensais_usadas || 0),
     artes_mensais_restantes: Number(cliente.artes_mensais_restantes || 0),
+    quotaVersion: mediaQuota.policyVersion,
+    imageQuota: mediaQuota.monthly.image,
+    videoQuota: mediaQuota.monthly.video,
     ...freeArt,
     ...standaloneArt,
     saldo_mensal: roundMoney(cliente.saldo_mensal || 0),
@@ -308,12 +433,16 @@ function resolveCompanyArtCharge(cliente, { custoPedido, now = new Date(), freeA
   }
 
   if (hasAvailablePlanArt(cliente, now)) {
+    const mediaQuota = getMediaQuotaStatus(cliente, now);
     return {
       allowed: true,
       source: "plano",
       billingChanged: refresh.changed,
       planId: cliente.plano_atual || cliente.plano || "",
-      planCycle: cliente.plano_ciclo || ""
+      planCycle: cliente.plano_ciclo || "",
+      ...(mediaQuota.policyVersion === 1 ? {
+        mediaKind: "image", quotaPolicyVersion: 1, grantRef: mediaQuota.grantRef
+      } : {})
     };
   }
 
@@ -415,8 +544,13 @@ function applyResolvedCompanyArtCharge(cliente, charge, { custoPedido, mesAtual,
   if (!charge || charge.allowed !== true) return cliente;
 
   if (charge.source === "plano") {
-    cliente.artes_mensais_usadas = Number(cliente.artes_mensais_usadas || 0) + 1;
-    cliente.artes_mensais_restantes = Math.max(0, Number(cliente.artes_mensais_restantes || 0) - 1);
+    if (isTypedMonthlyPlan(cliente)) {
+      if (charge.mediaKind !== "image" || charge.quotaPolicyVersion !== 1) throw mediaQuotaError("billing_media_quota_invalid");
+      consumeMonthlyMediaQuota(cliente, "image", 1, charge.grantRef);
+    } else {
+      cliente.artes_mensais_usadas = Number(cliente.artes_mensais_usadas || 0) + 1;
+      cliente.artes_mensais_restantes = Math.max(0, Number(cliente.artes_mensais_restantes || 0) - 1);
+    }
   } else if (charge.source === "arte_gratis") {
     ensureFreeArtFields(cliente);
     const now = new Date().toISOString();
@@ -449,7 +583,45 @@ function applyResolvedCompanyArtCharge(cliente, charge, { custoPedido, mesAtual,
   return cliente;
 }
 
+function typedPaymentContext(cliente, plan, paymentId) {
+  if (plan.quotaVersion !== 1) return null;
+  assertTypedPlan(plan);
+  const paymentKey = paymentId == null ? "" : String(paymentId).trim();
+  if (!paymentKey) return null;
+  const receipts = cliente.plano_cotas_pagamentos;
+  if (receipts !== undefined && (!receipts || typeof receipts !== "object" || Array.isArray(receipts)))
+    throw mediaQuotaError("billing_media_quota_invalid");
+  const key = crypto.createHash("sha256").update(paymentKey).digest("hex");
+  const hasPrior = receipts && Object.hasOwn(receipts, key);
+  const prior = hasPrior ? receipts[key] : null;
+  if (hasPrior && (!prior || typeof prior !== "object" || prior.schemaVersion !== 1 || prior.planId !== plan.id ||
+      !["scheduled_next_cycle", "renewed_from_previous_due_date", "activated_from_payment_date"].includes(prior.status) ||
+      prior.grantRef?.policyVersion !== 1 || prior.grantRef.planId !== plan.id ||
+      typeof prior.grantRef.grantId !== "string" || !/^[A-Za-z0-9_-]{1,128}$/.test(prior.grantRef.grantId) ||
+      typeof prior.grantRef.cycleStart !== "string" || !parseDate(prior.grantRef.cycleStart)))
+    throw mediaQuotaError("billing_media_quota_payment_conflict");
+  return { key, prior, paymentKey };
+}
+
+function finishManualPlanPayment(cliente, plan, receipt, status, paid) {
+  if (!receipt) return { status, cliente };
+  const grantRef = status === "scheduled_next_cycle" ? {
+    policyVersion: 1, grantId: cliente.plano_proximo_ciclo_cotas_concessao_id,
+    planId: plan.id, cycleStart: cliente.plano_proximo_ciclo_inicio_em
+  } : typedGrantRef(cliente);
+  if (!cliente.plano_cotas_pagamentos) cliente.plano_cotas_pagamentos = {};
+  cliente.plano_cotas_pagamentos[receipt.key] = {
+    schemaVersion: 1, planId: plan.id, status, paidAt: toIsoDate(paid), grantRef
+  };
+  return { status, cliente, duplicate: false };
+}
+
 function applyManualPlanPayment(cliente, plan, { paymentId, paidAt } = {}) {
+  // For new products the same client write owns both the grant and its receipt.
+  // Check before any cycle refresh: a crash replay must not roll or reset stock.
+  const receipt = typedPaymentContext(cliente, plan, paymentId);
+  if (receipt?.prior) return { status: receipt.prior.status, cliente, duplicate: true };
+  if (receipt) paymentId = receipt.paymentKey;
   const paid = parseDate(paidAt) || new Date();
   refreshManualPlanCycle(cliente, paid);
 
@@ -459,7 +631,7 @@ function applyManualPlanPayment(cliente, plan, { paymentId, paidAt } = {}) {
 
   if (samePlan && active && currentRenewal && paid < currentRenewal) {
     scheduleNextPlanCycle(cliente, plan, { paymentId, paidAt: paid, currentRenewal });
-    return { status: "scheduled_next_cycle", cliente };
+    return finishManualPlanPayment(cliente, plan, receipt, "scheduled_next_cycle", paid);
   }
 
   if (samePlan && currentRenewal && paid <= addDays(currentRenewal, PLAN_GRACE_DAYS)) {
@@ -469,7 +641,7 @@ function applyManualPlanPayment(cliente, plan, { paymentId, paidAt } = {}) {
       cycleStart: currentRenewal,
       renewalDate: addMonthsPreserveDay(currentRenewal, 1)
     });
-    return { status: "renewed_from_previous_due_date", cliente };
+    return finishManualPlanPayment(cliente, plan, receipt, "renewed_from_previous_due_date", paid);
   }
 
   activatePlanCycle(cliente, plan, {
@@ -478,7 +650,7 @@ function applyManualPlanPayment(cliente, plan, { paymentId, paidAt } = {}) {
     cycleStart: paid,
     renewalDate: addMonthsPreserveDay(paid, 1)
   });
-  return { status: "activated_from_payment_date", cliente };
+  return finishManualPlanPayment(cliente, plan, receipt, "activated_from_payment_date", paid);
 }
 
 function applyOrderCharge(cliente, { custoPedido, mesAtual, temBrindeMascote }) {
@@ -513,6 +685,10 @@ module.exports = {
   addDays,
   addMonthsPreserveDay,
   getBillingStatus,
+  getMediaQuotaStatus,
+  isTypedMonthlyPlan,
+  consumeMonthlyMediaQuota,
+  refundMonthlyMediaQuota,
   ensureStandaloneArtFields,
   getStandaloneArtStatus,
   hasAvailableStandaloneArt,
