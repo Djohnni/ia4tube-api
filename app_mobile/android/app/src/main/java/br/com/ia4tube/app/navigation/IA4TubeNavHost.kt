@@ -853,7 +853,8 @@ fun IA4TubeNavHost(
                 )
                 PlansScreen(
                     viewModel = viewModel,
-                    onBack = { navController.popBackStack() }
+                    onBack = { navController.popBackStack() },
+                    palette = premiumPalette
                 )
             }
         }

@@ -114,7 +114,12 @@ internal fun HomeVisualContent(
     }
     val activePlan = state.planoStatus.trim().lowercase() in setOf("active", "ativo") && state.planoNome.isNotBlank()
     // Same credit calculation as the previous Home combo shortcut; these are not order counts.
-    val credits = (if (activePlan) state.artesMensaisRestantes else 0) + state.artesAvulsasRestantes.coerceAtLeast(0)
+    val imageCredits = (if (activePlan) state.artesMensaisRestantes else 0).coerceAtLeast(0)
+    val videoCredits = (if (activePlan && state.quotaVersion == 1) state.videosMensaisRestantes else 0).coerceAtLeast(0)
+    val credits = imageCredits + videoCredits + state.artesAvulsasRestantes.coerceAtLeast(0)
+    val creditDescription = if (state.quotaVersion == 1) "$imageCredits imagens · $videoCredits vídeos" +
+        (if (state.artesAvulsasRestantes > 0) " · ${state.artesAvulsasRestantes} créditos anteriores" else "")
+        else "$credits imagens disponíveis"
 
     Column(
         Modifier.fillMaxSize().background(Brush.verticalGradient(
@@ -225,7 +230,7 @@ internal fun HomeVisualContent(
                     else "${state.emProducao} em produção · ${state.artesProntas} prontas",
                     onClick = lockable(dismissAndRun { onOpenOrders(OrderListFilter.All) }))
                 HomeVisualMenuAction("Meus combos", "home_plans", palette, firstFreeArtMode,
-                    description = if (state.loading) "Consultando seu saldo…" else "$credits imagens disponíveis" +
+                    description = if (state.loading) "Consultando seu saldo…" else creditDescription +
                         if (state.planoNome.isNotBlank()) " · ${state.planoNome}" else "",
                     onClick = lockable(dismissAndRun(onOpenPlans)))
                 HomeVisualMenuAction("Suporte", "home_support", palette, firstFreeArtMode,

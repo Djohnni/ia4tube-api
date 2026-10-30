@@ -218,7 +218,9 @@ class IA4TubeApiClient(
                 carrosseisLimite = json.optionalInt("carrosseis_limite"),
                 carrosseisUsados = json.optionalInt("carrosseis_usados"),
                 carrosseisRestantes = json.optionalInt("carrosseis_restantes"),
-                carrosseisCiclo = json.optionalString("carrosseis_ciclo")
+                carrosseisCiclo = json.optionalString("carrosseis_ciclo"),
+                quotaVersion = json.optInt("quotaVersion", 0),
+                videosMensaisRestantes = json.optJSONObject("videoQuota")?.optInt("remaining", 0)?.coerceAtLeast(0) ?: 0
             )
         }
     }

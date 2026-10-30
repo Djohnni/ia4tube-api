@@ -37,7 +37,9 @@ data class MeResponse(
     val carrosseisLimite: Int? = null,
     val carrosseisUsados: Int? = null,
     val carrosseisRestantes: Int? = null,
-    val carrosseisCiclo: String? = null
+    val carrosseisCiclo: String? = null,
+    val quotaVersion: Int = 0,
+    val videosMensaisRestantes: Int = 0
 )
 
 data class FreeArtStatus(
