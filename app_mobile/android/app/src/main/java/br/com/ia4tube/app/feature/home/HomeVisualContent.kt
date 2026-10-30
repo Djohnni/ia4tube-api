@@ -151,8 +151,8 @@ internal fun HomeVisualContent(
     ) {
         Column(
             Modifier.weight(1f).fillMaxWidth().verticalScroll(scroll).testTag("home_scroll")
-                .padding(horizontal = 20.dp, vertical = 12.dp),
-            verticalArrangement = Arrangement.spacedBy(10.dp)
+                .padding(horizontal = 20.dp, vertical = 10.dp),
+            verticalArrangement = Arrangement.spacedBy(6.dp)
         ) {
             HomeMetallicHeading(palette)
             if (state.loading || state.summaryLoading) {
@@ -166,7 +166,7 @@ internal fun HomeVisualContent(
                 onClick = onOpenInstagram)
             HomeVisualShortcut("Calendário", R.drawable.home_calendar_3d, "home_calendar", palette,
                 accessibilityLabel = "Minhas artes planejadas", onClick = onOpenPlannedArts)
-            Spacer(Modifier.height(12.dp))
+            Spacer(Modifier.height(8.dp))
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                 HomeVisualCreation("Criar imagem", R.drawable.home_create_image_3d, "home_create_image", palette,
                     modifier = Modifier.weight(1f), onClick = onMonthlyPlanningClick)
@@ -179,7 +179,7 @@ internal fun HomeVisualContent(
                 Text("Depois disso, você desbloqueia o acesso ao app completo.", color = palette.textSecondary,
                     fontSize = 16.sp, textAlign = TextAlign.Center, modifier = Modifier.fillMaxWidth())
             }
-            Spacer(Modifier.height(8.dp))
+            Spacer(Modifier.height(4.dp))
             Row(
                 Modifier.fillMaxWidth().heightIn(min = 56.dp).clip(RoundedCornerShape(14.dp))
                     .clickable(role = Role.Button) { otherForms = !otherForms }.testTag("home_other_forms")
@@ -257,7 +257,7 @@ internal fun HomeVisualContent(
 private fun HomeMetallicHeading(palette: PremiumHomePalette) {
     BoxWithConstraints(Modifier.fillMaxWidth()) {
         val brandSize = minOf(50f, maxWidth.value / (4.5f * LocalDensity.current.fontScale)).sp
-        Column(Modifier.fillMaxWidth().padding(top = 4.dp, bottom = 12.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+        Column(Modifier.fillMaxWidth().padding(top = 4.dp, bottom = 8.dp), horizontalAlignment = Alignment.CenterHorizontally) {
         Text("iA4tube", modifier = Modifier.testTag("home_brand"), style = TextStyle(
             brush = Brush.verticalGradient(listOf(Color.White, Color(0xFFEAE6DB), Color(0xFF97948D), Color.White)),
             fontFamily = FontFamily.SansSerif, fontWeight = FontWeight.Black, fontSize = brandSize,
@@ -293,7 +293,7 @@ private fun HomeVisualCreation(label: String, @DrawableRes illustration: Int, ta
         .testTag(tag).padding(vertical = 8.dp), horizontalAlignment = Alignment.CenterHorizontally) {
         BoxWithConstraints(Modifier.fillMaxWidth()) {
             Image(painterResource(illustration), contentDescription = null, contentScale = ContentScale.Fit,
-                modifier = Modifier.fillMaxWidth().height(maxWidth * 1.05f))
+                modifier = Modifier.fillMaxWidth().height(maxWidth))
         }
         Row(Modifier.fillMaxWidth().heightIn(min = 52.dp).padding(horizontal = 4.dp),
             verticalAlignment = Alignment.CenterVertically) {
