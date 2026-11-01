@@ -15,6 +15,7 @@ data class InstagramUiState(
     val authorizationChecked: Boolean = false,
     val authorizationOutcomeUnknown: Boolean = false,
     val authorizationUrlToOpen: String? = null,
+    val authorizationAppUrlToOpen: String? = null,
     val media: List<InstagramMedia> = emptyList(),
     val history: List<InstagramPublication> = emptyList(),
     val historyLoaded: Boolean = false,
@@ -51,6 +52,7 @@ data class InstagramUiState(
     // Only an authoritative terminal snapshot may release an unfinished connection record.
     val authorizationPurpose: String? get() {
         if (!authorizationChecked || authorizationOutcomeUnknown || authorizationUrlToOpen != null ||
+            authorizationAppUrlToOpen != null ||
             authorizationStatus in setOf("authorization_pending", "authorization_processing")) return null
         val current = connection ?: return "connect"
         val observed = authorization?.takeIf { it.connectionId == current.connectionId && it.status == authorizationStatus }
@@ -96,10 +98,10 @@ data class InstagramUiState(
         uploadStorageAvailable && uploadDraftMatches && uploadWitness?.phase == InstagramUploadPhase.CONFIRMED &&
         uploadWitness.binding == connection?.binding && uploadWitness.mediaId == selectedMediaId &&
         operationalAvailability?.publicationAllowed == true &&
-        freshPublicationAvailable && authorizationUrlToOpen == null
+        freshPublicationAvailable && authorizationUrlToOpen == null && authorizationAppUrlToOpen == null
     /** The single reviewer action either uploads the chosen draft or resumes its confirmed upload. */
     val canSend: Boolean get() = !busy && historyLoaded && freshPublicationAvailable &&
-        authorizationUrlToOpen == null && (canUpload || canPublish)
+        authorizationUrlToOpen == null && authorizationAppUrlToOpen == null && (canUpload || canPublish)
     val canResumeWorkerIntent: Boolean get() = !busy && storageAvailable && publicationLookupAbsent &&
         availability == InstagramAvailability.AVAILABLE && operationalAvailability?.publicationAllowed == true &&
         connection?.canPublish == true && intent?.let {

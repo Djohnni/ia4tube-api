@@ -81,7 +81,8 @@ class InstagramViewModel(
         }
         // Rotation/resume while choosing a browser must not erase the one-shot event.
         // Session synchronization above still revokes it when the signed-in user changes.
-        if (!_uiState.value.busy && _uiState.value.authorizationUrlToOpen == null) refresh()
+        if (!_uiState.value.busy && _uiState.value.authorizationUrlToOpen == null &&
+            _uiState.value.authorizationAppUrlToOpen == null) refresh()
     }
 
     fun onPause() {
@@ -100,7 +101,7 @@ class InstagramViewModel(
         val previousOperation = operation
         operation = null
         previousOperation?.cancel()
-        _uiState.update { it.copy(busy = false, authorizationUrlToOpen = null,
+        _uiState.update { it.copy(busy = false, authorizationUrlToOpen = null, authorizationAppUrlToOpen = null,
             availability = if (it.availability == InstagramAvailability.SESSION_REQUIRED)
                 InstagramAvailability.SESSION_REQUIRED else InstagramAvailability.CHECKING) }
     }
@@ -248,6 +249,7 @@ class InstagramViewModel(
         val expectedAvailabilityEpoch = availabilityEpoch
         _uiState.update { it.copy(busy = true, availability = InstagramAvailability.CHECKING,
             authorizationUrlToOpen = null,
+            authorizationAppUrlToOpen = null,
             verifiedTerminalFailure = null,
             unknownUploadReviewed = false,
             publicationLookupAbsent = false,
@@ -468,6 +470,76 @@ class InstagramViewModel(
 
     fun browserUnavailable() {
         _uiState.update { it.copy(error = "Não foi possível abrir o navegador. A autorização não foi confirmada; consulte novamente.") }
+    }
+
+    /** Separate app experiment: preserve the browser action and its event unchanged. */
+    fun connectWithInstagramApp() {
+        if (!synchronizeSession() || !_uiState.value.canAuthorize) return
+        val epoch = sessionEpoch
+        val api = gateway ?: return
+        val current = _uiState.value
+        val purpose = current.authorizationPurpose ?: return
+        val authorizationKey = authorizationContextKey()
+        val witness = InstagramAuthorizationWitness(UUID.randomUUID().toString(), purpose,
+            current.connection?.connectionId, current.authorization?.expiresAt)
+        _uiState.update { it.copy(busy = true, authorization = null, authorizationChecked = false,
+            authorizationOutcomeUnknown = true, authorizationUrlToOpen = null, authorizationAppUrlToOpen = null,
+            authorizationStatus = "authorization_pending", error = null, message = null) }
+        operation = viewModelScope.launch {
+            try {
+                // This attempt uses the existing durable witness and the same sole POST.
+                // Never persist an authorization URL or retry through the browser on failure.
+                val stored = withContext(Dispatchers.IO) { authorizationStore.create(authorizationKey, witness) }
+                if (!isCurrent(epoch)) return@launch
+                check(stored) { "Authorization witness not persisted" }
+                authorizationWitness = witness
+                val result = api.authorize(purpose)
+                if (!isCurrent(epoch)) return@launch
+                when (result) {
+                    is InstagramResult.Success -> {
+                        if (!InstagramPolicies.isOfficialAuthorizationUrl(result.value.authorizationUrl)) {
+                            _uiState.update { it.copy(error = "O endereço de autorização não pôde ser confirmado.") }
+                            return@launch
+                        }
+                        val identified = witness.copy(connectionId = result.value.connectionId, expiresAt = result.value.expiresAt)
+                        val identifiedStored = withContext(Dispatchers.IO) { authorizationStore.update(authorizationKey, identified) }
+                        if (!isCurrent(epoch)) return@launch
+                        check(identifiedStored) { "Authorization response not persisted" }
+                        authorizationWitness = identified
+                        _uiState.update { it.copy(authorizationStatus = "authorization_pending",
+                            authorizationAppUrlToOpen = result.value.authorizationUrl,
+                            message = "Conclua a autorização no Instagram e volte ao aplicativo para consultar o resultado.") }
+                    }
+                    is InstagramResult.Failure -> {
+                        if (result.error == InstagramError.UNAVAILABLE || result.error == InstagramError.SESSION_REQUIRED) {
+                            failAvailability(result.error)
+                        } else _uiState.update { it.copy(error = result.error.message, message = AUTHORIZATION_UNKNOWN) }
+                    }
+                }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Exception) {
+                if (isCurrent(epoch)) _uiState.update { it.copy(authorizationStatus = "authorization_pending",
+                    authorizationChecked = false, error = AUTHORIZATION_UNKNOWN) }
+            } finally {
+                if (isCurrent(epoch)) _uiState.update { it.copy(busy = false) }
+            }
+        }
+    }
+
+    /** Native dispatch cannot consume or create the original browser event. */
+    fun takeAuthorizationAppUrl(): String? {
+        if (!synchronizeSession()) return null
+        val url = _uiState.value.authorizationAppUrlToOpen ?: return null
+        _uiState.update { it.copy(authorizationAppUrlToOpen = null) }
+        return url.takeIf(InstagramPolicies::isOfficialAuthorizationUrl)
+    }
+
+    fun instagramAppUnavailable() {
+        if (!synchronizeSession()) return
+        _uiState.update { it.copy(error = if (it.authorizationOutcomeUnknown)
+            "Não foi possível abrir o aplicativo Instagram. A autorização não foi confirmada; use Atualizar para consultar esta tentativa."
+        else "O aplicativo Instagram não está disponível para esta autorização. Use Conectar Instagram para continuar pelo navegador.") }
     }
 
     /** One consent action: persist the upload witness, then queue that exact media for publication. */

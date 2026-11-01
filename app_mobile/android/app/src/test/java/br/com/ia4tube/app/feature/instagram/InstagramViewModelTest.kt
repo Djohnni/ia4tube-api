@@ -1098,6 +1098,191 @@ class InstagramViewModelTest {
         }
     }
 
+    @Test fun authorizationButtonsKeepDistinctEventsAndCannotCreateConcurrentAttempts() = runTest(dispatcher) {
+        for (useInstagramApp in listOf(false, true)) {
+            val gateway = appAuthorizationGateway()
+            val model = model(gateway, MemoryIntentStore())
+            model.onResume(); model.awaitIdle()
+            if (useInstagramApp) model.connectWithInstagramApp() else model.connect()
+            model.connectWithInstagramApp()
+            model.connect()
+            model.awaitIdle()
+            assertEquals(listOf("connect"), gateway.authorizePurposes)
+            if (useInstagramApp) {
+                assertNull(model.uiState.value.authorizationUrlToOpen)
+                assertNotNull(model.uiState.value.authorizationAppUrlToOpen)
+                assertNull(model.takeAuthorizationUrl())
+                assertEquals(InstagramPoliciesTest.authorizationUrl(), model.takeAuthorizationAppUrl())
+                assertNull(model.takeAuthorizationAppUrl())
+            } else {
+                assertNotNull(model.uiState.value.authorizationUrlToOpen)
+                assertNull(model.uiState.value.authorizationAppUrlToOpen)
+                assertNull(model.takeAuthorizationAppUrl())
+                assertEquals(InstagramPoliciesTest.authorizationUrl(), model.takeAuthorizationUrl())
+                assertNull(model.takeAuthorizationUrl())
+            }
+            assertFalse(model.uiState.value.canAuthorize)
+            assertTrue(model.uiState.value.authorizationOutcomeUnknown)
+        }
+    }
+
+    @Test fun appAuthorizationPendingEventSurvivesPauseResumeButNotSessionChange() = runTest(dispatcher) {
+        var token = "synthetic-instagram-app-session-one"
+        val gateway = appAuthorizationGateway()
+        val model = InstagramViewModel({ token }, MemoryIntentStore(), ORIGIN,
+            { gateway }, MemoryAuthorizationStore(), inMemoryUploadWitnessStore())
+        model.onResume(); model.awaitIdle(); model.connectWithInstagramApp(); model.awaitIdle()
+        val queuedUrl = model.uiState.value.authorizationAppUrlToOpen
+        assertNotNull(queuedUrl)
+        repeat(2) { model.onPause(); model.onResume(); model.awaitIdle() }
+        assertEquals(queuedUrl, model.uiState.value.authorizationAppUrlToOpen)
+        assertNull(model.uiState.value.authorizationUrlToOpen)
+        assertFalse(model.uiState.value.canAuthorize)
+        assertNull(model.uiState.value.operationalAvailability)
+        assertEquals(1, gateway.authorizeCalls)
+        token = "synthetic-instagram-app-session-two"
+        model.onPause(); model.onResume(); model.awaitIdle()
+        assertNull(model.uiState.value.authorizationAppUrlToOpen)
+        assertNull(model.takeAuthorizationAppUrl())
+        assertEquals(1, gateway.authorizeCalls)
+    }
+
+    @Test fun appAuthorizationRouteExitRevokesItsEventWithoutOpeningBrowser() = runTest(dispatcher) {
+        val gateway = appAuthorizationGateway()
+        val model = model(gateway, MemoryIntentStore())
+        model.onResume(); model.awaitIdle(); model.connectWithInstagramApp(); model.awaitIdle()
+        assertNotNull(model.uiState.value.authorizationAppUrlToOpen)
+        model.onRouteExit()
+        assertNull(model.uiState.value.authorizationAppUrlToOpen)
+        assertNull(model.takeAuthorizationAppUrl())
+        assertNull(model.takeAuthorizationUrl())
+        assertFalse(model.uiState.value.canAuthorize)
+        assertEquals(1, gateway.authorizeCalls)
+    }
+
+    @Test fun appOpeningFailurePreservesPendingAttemptAndDoesNotRetryThroughBrowser() = runTest(dispatcher) {
+        val gateway = appAuthorizationGateway()
+        val witnessStore = MemoryAuthorizationStore()
+        val model = model(gateway, MemoryIntentStore(), witnessStore)
+        model.onResume(); model.awaitIdle(); model.connectWithInstagramApp(); model.awaitIdle()
+        assertNotNull(model.takeAuthorizationAppUrl())
+        model.instagramAppUnavailable()
+        assertNull(model.takeAuthorizationAppUrl())
+        assertNull(model.takeAuthorizationUrl())
+        assertTrue(model.uiState.value.error!!.contains("não foi confirmada"))
+        assertTrue(model.uiState.value.authorizationOutcomeUnknown)
+        assertFalse(model.uiState.value.canAuthorize)
+        gateway.authorizationResult = InstagramResult.Success(InstagramAuthorizationStatus(
+            CONNECTION_ID, "connect", "authorization_pending", "2026-09-07T12:30:00Z"))
+        model.onPause(); model.onResume(); model.awaitIdle()
+        model.connect(); model.connectWithInstagramApp()
+        val restarted = model(gateway, MemoryIntentStore(), witnessStore)
+        restarted.onResume(); restarted.awaitIdle()
+        restarted.connect(); restarted.connectWithInstagramApp()
+        assertNull(restarted.takeAuthorizationAppUrl())
+        assertNull(restarted.takeAuthorizationUrl())
+        assertFalse(restarted.uiState.value.canAuthorize)
+        assertEquals(1, gateway.authorizeCalls)
+    }
+
+    @Test fun appUnavailableBeforeAuthorizationKeepsExistingBrowserActionAvailable() = runTest(dispatcher) {
+        val gateway = appAuthorizationGateway()
+        val model = model(gateway, MemoryIntentStore())
+        model.onResume(); model.awaitIdle()
+        model.instagramAppUnavailable()
+        assertEquals(0, gateway.authorizeCalls)
+        assertFalse(model.uiState.value.authorizationOutcomeUnknown)
+        assertTrue(model.uiState.value.canAuthorize)
+        assertTrue(model.uiState.value.error!!.contains("pelo navegador"))
+        model.connect(); model.awaitIdle()
+        assertNotNull(model.takeAuthorizationUrl())
+        assertNull(model.takeAuthorizationAppUrl())
+        assertEquals(listOf("connect"), gateway.authorizePurposes)
+    }
+
+    @Test fun appAuthorizationCannotPostWithoutDurableWitnessOrOperationalPermission() = runTest(dispatcher) {
+        val gateway = appAuthorizationGateway()
+        val witnessStore = MemoryAuthorizationStore().apply { createSucceeds = false }
+        val model = model(gateway, MemoryIntentStore(), witnessStore)
+        model.onResume(); model.awaitIdle(); model.connectWithInstagramApp(); model.awaitIdle()
+        assertEquals(0, gateway.authorizeCalls)
+        assertFalse(model.uiState.value.canAuthorize)
+        assertNull(model.takeAuthorizationAppUrl())
+        val unavailableGateway = appAuthorizationGateway().apply {
+            operational = InstagramOperationalAvailability(false, false)
+        }
+        val unavailable = model(unavailableGateway, MemoryIntentStore())
+        unavailable.onResume(); unavailable.awaitIdle()
+        unavailable.connectWithInstagramApp()
+        assertEquals(0, unavailableGateway.authorizeCalls)
+    }
+
+    @Test fun appAuthorizationRejectsUnofficialUrlAndKeepsUncertainAttemptBlocked() = runTest(dispatcher) {
+        val gateway = appAuthorizationGateway().apply {
+            onAuthorize = { InstagramResult.Success(InstagramAuthorization(CONNECTION_ID,
+                "https://example.com/oauth/authorize", "2026-09-07T12:30:00Z")) }
+        }
+        val model = model(gateway, MemoryIntentStore())
+        model.onResume(); model.awaitIdle(); model.connectWithInstagramApp(); model.awaitIdle()
+        assertNull(model.takeAuthorizationAppUrl())
+        assertNull(model.takeAuthorizationUrl())
+        assertTrue(model.uiState.value.authorizationOutcomeUnknown)
+        assertFalse(model.uiState.value.canAuthorize)
+        model.connect(); model.connectWithInstagramApp()
+        assertEquals(1, gateway.authorizeCalls)
+    }
+
+    @Test fun delayedAppAuthorizationResponseCannotReachAnotherSignedInUser() = runTest(dispatcher) {
+        val started = CompletableDeferred<Unit>()
+        val finish = CompletableDeferred<Unit>()
+        val oldGateway = appAuthorizationGateway().apply {
+            onAuthorize = {
+                started.complete(Unit)
+                kotlinx.coroutines.withContext(kotlinx.coroutines.NonCancellable) { finish.await() }
+                InstagramResult.Success(InstagramAuthorization(CONNECTION_ID,
+                    InstagramPoliciesTest.authorizationUrl(), "2026-09-07T12:30:00Z"))
+            }
+        }
+        val newGateway = SyntheticGateway().apply { connection = CONNECTION.copy(connectionId = OTHER_CONNECTION_ID) }
+        var token = "synthetic-app-old-company"
+        val model = InstagramViewModel({ token }, MemoryIntentStore(), ORIGIN,
+            { captured -> if (captured() == "synthetic-app-old-company") oldGateway else newGateway },
+            MemoryAuthorizationStore(), inMemoryUploadWitnessStore())
+        model.onResume(); model.awaitIdle(); model.connectWithInstagramApp(); started.await()
+        token = "synthetic-app-new-company"
+        model.onResume(); model.awaitIdle()
+        finish.complete(Unit)
+        testScheduler.runCurrent()
+        assertEquals(OTHER_CONNECTION_ID, model.uiState.value.connection?.connectionId)
+        assertNull(model.takeAuthorizationAppUrl())
+        assertNull(model.takeAuthorizationUrl())
+        assertFalse(model.uiState.value.canAuthorize)
+        assertEquals(1, oldGateway.authorizeCalls)
+        assertEquals(0, newGateway.authorizeCalls)
+    }
+
+    @Test fun appAuthorizationUsesSameReconnectPurposeAndServerConfirmedReturn() = runTest(dispatcher) {
+        val gateway = appAuthorizationGateway("reconnect")
+        val model = model(gateway, MemoryIntentStore())
+        model.onResume(); model.awaitIdle(); model.connectWithInstagramApp(); model.awaitIdle()
+        assertEquals(listOf("reconnect"), gateway.authorizePurposes)
+        assertNotNull(model.takeAuthorizationAppUrl())
+        gateway.connection = CONNECTION
+        gateway.authorizationResult = InstagramResult.Success(InstagramAuthorizationStatus(
+            CONNECTION_ID, "reconnect", "authorization_completed", "2026-09-07T12:30:00Z"))
+        model.onPause(); model.onResume(); model.awaitIdle()
+        assertFalse(model.uiState.value.authorizationOutcomeUnknown)
+        assertTrue(model.uiState.value.connection!!.canPublish)
+        assertNull(model.uiState.value.authorizationUrlToOpen)
+        assertNull(model.uiState.value.authorizationAppUrlToOpen)
+        assertEquals(1, gateway.authorizeCalls)
+    }
+
+    private fun appAuthorizationGateway(purpose: String = "connect") = expiredGateway(purpose).apply {
+        onAuthorize = { InstagramResult.Success(InstagramAuthorization(CONNECTION_ID,
+            InstagramPoliciesTest.authorizationUrl(), "2026-09-07T12:30:00Z")) }
+    }
+
     private fun expiredGateway(purpose: String = "connect") = SyntheticGateway().apply {
         connection = if (purpose == "connect")
             InstagramConnection(CONNECTION_ID, "authorization_pending", "authorization_pending", null, null)

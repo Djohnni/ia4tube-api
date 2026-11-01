@@ -136,6 +136,14 @@ fun InstagramScreen(viewModel: InstagramViewModel, onBack: () -> Unit, tokenProv
     }
     LaunchedEffect(viewModel) { viewModel.onResume() }
 
+    // The app experiment has its own event. The browser effect below stays unchanged.
+    LaunchedEffect(state.authorizationAppUrlToOpen) {
+        if (state.authorizationAppUrlToOpen != null) {
+            openInstagramAuthorizationApp(context, viewModel::takeAuthorizationAppUrl,
+                context::startActivity, viewModel::instagramAppUnavailable)
+        }
+    }
+
     LaunchedEffect(state.authorizationUrlToOpen) {
         if (state.authorizationUrlToOpen != null) {
             try {
@@ -255,6 +263,14 @@ fun InstagramScreen(viewModel: InstagramViewModel, onBack: () -> Unit, tokenProv
                         colors = filledButtonColors) {
                         Text(if (state.authorizationPurpose == "connect" || state.connection == null)
                             "Conectar Instagram" else "Reconectar Instagram")
+                    }
+                    OutlinedButton(onClick = {
+                        // Check before creating an authorization attempt, then recheck at dispatch.
+                        if (instagramAuthorizationAppAvailable(context)) viewModel.connectWithInstagramApp()
+                        else viewModel.instagramAppUnavailable()
+                    }, enabled = state.canAuthorize && !readingImage,
+                        colors = outlinedButtonColors, border = actionBorder) {
+                        Text("Testar pelo app do Instagram")
                     }
                 }
             }
