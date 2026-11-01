@@ -1,12 +1,44 @@
 package br.com.ia4tube.app.feature.edit
 
 import java.text.Normalizer
+import java.time.Instant
+import java.time.LocalDate
 import java.time.LocalTime
+import java.time.ZoneId
+import java.time.format.DateTimeFormatter
+import java.time.temporal.ChronoUnit
 import java.util.Locale
 
 internal data class EditPostingTimeSlot(val time: LocalTime, val contextLabel: String)
 
 internal data class EditPostingTimeCategory(val label: String, val slots: List<EditPostingTimeSlot>)
+
+internal data class EditPostingTimeWindow(val start: LocalTime, val end: LocalTime) {
+    init { require(!end.isBefore(start)) }
+
+    /** Keep this date and pick a future minute inside the displayed range. */
+    fun selection(date: LocalDate, now: Instant = Instant.now()): EditCalendarSchedule? {
+        fun schedule(time: LocalTime) = EditCalendarSchedule(date.toString(), time.format(postingTimeFormat))
+            .takeIf { it.isFuture(now) }
+        val middle = start.plusMinutes(ChronoUnit.MINUTES.between(start, end) / 2)
+        schedule(middle)?.let { return it }
+        val nextMinute = now.atZone(postingTimeZone).truncatedTo(ChronoUnit.MINUTES).plusMinutes(1)
+        if (nextMinute.toLocalDate() != date) return null
+        val time = nextMinute.toLocalTime()
+        return if (!time.isBefore(start) && !time.isAfter(end)) schedule(time) else null
+    }
+}
+
+private val postingTimeZone = ZoneId.of("America/Sao_Paulo")
+private val postingTimeFormat = DateTimeFormatter.ofPattern("HH:mm", Locale.ROOT)
+
+/** Repeatable editorial variation by day, not measured follower activity. */
+internal fun editPostingTimeWindow(baseTime: LocalTime, date: LocalDate): EditPostingTimeWindow {
+    val offset = Math.floorMod(15 - (date.dayOfMonth - 1) * 7, 31) - 15
+    val middle = (baseTime.hour * 60 + baseTime.minute + offset).coerceIn(0, 1439)
+    fun time(minutes: Int) = LocalTime.of(minutes / 60, minutes % 60)
+    return EditPostingTimeWindow(time((middle - 5).coerceAtLeast(0)), time((middle + 5).coerceAtMost(1439)))
+}
 
 /** Contextual starting points by business type, not measured audience activity or guaranteed optimal times. */
 internal fun editPostingTimeCategory(businessType: String): EditPostingTimeCategory {

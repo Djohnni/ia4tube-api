@@ -21,8 +21,10 @@ import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -31,10 +33,11 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material3.Button
-import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.MaterialTheme
@@ -54,6 +57,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.Lifecycle
@@ -62,6 +66,10 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.viewmodel.compose.viewModel
 import br.com.ia4tube.app.core.session.SessionStore
+import br.com.ia4tube.app.feature.calendar.CalendarAlertDialog
+import br.com.ia4tube.app.feature.calendar.calendarAppearance
+import br.com.ia4tube.app.feature.calendar.calendarOutlinedButtonColors
+import br.com.ia4tube.app.feature.calendar.calendarTextButtonColors
 import org.json.JSONObject
 import java.time.LocalDate
 import java.time.LocalTime
@@ -430,7 +438,7 @@ fun EditScreen(onBackClick: () -> Unit, onAuthRequired: () -> Unit = {}, onOpenP
 }
 
 @Composable
-private fun EditCalendarScheduleDialog(initial: EditCalendarSchedule?, suggestionCategory: EditPostingTimeCategory,
+internal fun EditCalendarScheduleDialog(initial: EditCalendarSchedule?, suggestionCategory: EditPostingTimeCategory,
     onDismiss: () -> Unit,
     onConfirm: (EditCalendarSchedule) -> Unit) {
     val context = LocalContext.current
@@ -439,26 +447,49 @@ private fun EditCalendarScheduleDialog(initial: EditCalendarSchedule?, suggestio
     var time by remember { mutableStateOf(initial?.let { LocalTime.parse(it.time) } ?: default.toLocalTime()) }
     val selection = EditCalendarSchedule(date.toString(), time.format(DateTimeFormatter.ofPattern("HH:mm")))
     val future = selection.isFuture()
-    AlertDialog(onDismissRequest = onDismiss, title = { Text("Data e horário da publicação") },
+    val appearance = calendarAppearance(MaterialTheme.colorScheme)
+    val clockFormat = remember { DateTimeFormatter.ofPattern("HH:mm") }
+    val buttonShape = RoundedCornerShape(14.dp)
+    CalendarAlertDialog(onDismissRequest = onDismiss,
+        title = { Text("Quando publicar?", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold) },
         text = { Column(modifier = Modifier.verticalScroll(rememberScrollState()),
-            verticalArrangement = Arrangement.spacedBy(12.dp)) {
-            OutlinedButton(onClick = { DatePickerDialog(context, { _, year, month, day -> date = LocalDate.of(year, month + 1, day) },
-                date.year, date.monthValue - 1, date.dayOfMonth).show() }) { Text(date.format(DateTimeFormatter.ofPattern("dd/MM/yyyy"))) }
-            OutlinedButton(onClick = { TimePickerDialog(context, { _, hour, minute -> time = LocalTime.of(hour, minute) },
-                time.hour, time.minute, true).show() }) { Text(selection.time) }
-            Text(if (suggestionCategory.label == "Sugestões gerais") suggestionCategory.label
-                else "Horários sugeridos · ${suggestionCategory.label}", style = MaterialTheme.typography.labelLarge)
-            suggestionCategory.slots.forEach { slot ->
-                val suggested = EditCalendarSchedule(date.toString(), slot.time.format(DateTimeFormatter.ofPattern("HH:mm")))
-                OutlinedButton(modifier = Modifier.fillMaxWidth(), enabled = suggested.isFuture(), onClick = {
-                    // Suggestions only replace the time on the day the customer chose.
-                    if (suggested.isFuture()) time = slot.time
-                }) { Text("Usar ${suggested.time} · ${slot.contextLabel}") }
+            verticalArrangement = Arrangement.spacedBy(14.dp)) {
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                OutlinedButton(modifier = Modifier.weight(1.35f).heightIn(min = 48.dp), shape = buttonShape,
+                    colors = calendarOutlinedButtonColors(), border = BorderStroke(1.dp, appearance.secondary),
+                    onClick = { DatePickerDialog(context, { _, year, month, day -> date = LocalDate.of(year, month + 1, day) },
+                        date.year, date.monthValue - 1, date.dayOfMonth).show() }) {
+                    Text(date.format(DateTimeFormatter.ofPattern("dd/MM/yyyy")), fontWeight = FontWeight.SemiBold)
+                }
+                OutlinedButton(modifier = Modifier.weight(1f).heightIn(min = 48.dp), shape = buttonShape,
+                    colors = calendarOutlinedButtonColors(), border = BorderStroke(1.dp, appearance.secondary),
+                    onClick = { TimePickerDialog(context, { _, hour, minute -> time = LocalTime.of(hour, minute) },
+                        time.hour, time.minute, true).show() }) { Text(selection.time, fontWeight = FontWeight.SemiBold) }
             }
-            Text("Sugestões pelo ramo. Você pode escolher outro horário.", style = MaterialTheme.typography.bodySmall)
-            Text("Horário de Brasília. A publicação ficará no calendário depois de pronta.")
-            if (!future) Text("Escolha uma data e um horário futuros.", color = MaterialTheme.colorScheme.error)
+            Text("Sugestão de horário para você baseado no seu negócio", style = MaterialTheme.typography.bodyMedium)
+            suggestionCategory.slots.forEach { slot ->
+                val window = editPostingTimeWindow(slot.time, date)
+                val available = window.selection(date) != null
+                val selected = time >= window.start && time <= window.end
+                OutlinedButton(modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp),
+                    shape = buttonShape, colors = calendarOutlinedButtonColors(), enabled = available,
+                    border = BorderStroke(if (selected) 2.dp else 1.dp,
+                        if (available) appearance.action else appearance.secondary), onClick = {
+                        // Recheck the same day; never roll the customer's date forward.
+                        window.selection(date)?.let { time = LocalTime.parse(it.time) }
+                    }) {
+                    Text("${window.start.format(clockFormat)} às ${window.end.format(clockFormat)}",
+                        style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.SemiBold)
+                }
+            }
+            Text("Horário de Brasília", style = MaterialTheme.typography.bodySmall, color = appearance.secondary)
+            if (!future) Text("Escolha uma data e um horário futuros.", color = appearance.error)
         } },
-        confirmButton = { TextButton(enabled = future, onClick = { onConfirm(selection) }) { Text("Confirmar") } },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("Voltar") } })
+        confirmButton = {
+            Button(enabled = future, shape = buttonShape, modifier = Modifier.heightIn(min = 48.dp),
+                colors = ButtonDefaults.buttonColors(containerColor = appearance.action, contentColor = appearance.surface,
+                    disabledContainerColor = appearance.surface, disabledContentColor = appearance.secondary),
+                onClick = { onConfirm(selection) }) { Text("Confirmar", fontWeight = FontWeight.SemiBold) }
+        },
+        dismissButton = { TextButton(colors = calendarTextButtonColors(), onClick = onDismiss) { Text("Voltar") } })
 }
