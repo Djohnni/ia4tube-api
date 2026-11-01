@@ -24,6 +24,7 @@ class FcmTokenRegistrar(
     backend: FcmDeviceBackend = FcmDeviceApiClient()
 ) {
     private val appContext = context.applicationContext
+    private val authTokenProvider = sessionStore::getToken
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val coordinator = FcmRegistrationCoordinator(
         backend = backend,
@@ -76,16 +77,18 @@ class FcmTokenRegistrar(
         }
     }
 
-    suspend fun grantConsentAndActivate(): ApiResult<Unit> {
-        return OPERATION_MUTEX.withLock {
+    suspend fun grantConsentAndActivate(expectedAuthToken: String? = null): ApiResult<Unit> {
+        return withExpectedFcmSession(expectedAuthToken, authTokenProvider, OPERATION_MUTEX,
+            stale = { ApiResult.Failure("Sessão alterada.", code = "fcm_session_changed") }) {
             coordinator.grantConsentAndActivate()
         }
     }
 
-    suspend fun declineConsent() {
+    suspend fun declineConsent(expectedAuthToken: String? = null) {
+        if (!fcmSessionMatches(expectedAuthToken, authTokenProvider)) return
         beginDisplayBlock()
         try {
-            OPERATION_MUTEX.withLock {
+            withExpectedFcmSession(expectedAuthToken, authTokenProvider, OPERATION_MUTEX, stale = {}) {
                 coordinator.declineConsent()
             }
         } finally {

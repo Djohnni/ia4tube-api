@@ -15,10 +15,13 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.ColorScheme
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -43,6 +46,8 @@ import br.com.ia4tube.app.core.notifications.FcmActivationPolicy
 import br.com.ia4tube.app.core.notifications.IA4TubeNotificationHelper
 import br.com.ia4tube.app.core.notifications.FcmTokenRegistrar
 import br.com.ia4tube.app.core.notifications.NotificationNavigationTarget
+import br.com.ia4tube.app.core.notifications.NotificationConsentViewModel
+import br.com.ia4tube.app.core.notifications.NotificationConsentViewModelFactory
 import br.com.ia4tube.app.core.session.SessionStore
 import br.com.ia4tube.app.core.analytics.MobileAnalytics
 import br.com.ia4tube.app.core.analytics.MobileAnalyticsTracker
@@ -209,28 +214,25 @@ fun IA4TubeNavHost(
     var pendingProtectedRoute by rememberSaveable { mutableStateOf<String?>(null) }
     var cameraRequestKey by rememberSaveable { mutableStateOf(0) }
     var showAuthSheet by rememberSaveable { mutableStateOf(false) }
-    var showNotificationConsent by rememberSaveable { mutableStateOf(false) }
-    var notificationConsentError by rememberSaveable { mutableStateOf(false) }
+    val notificationConsent: NotificationConsentViewModel = viewModel(
+        factory = NotificationConsentViewModelFactory(repository::getSavedToken, fcmTokenRegistrar) {
+            IA4TubeNotificationHelper.ensureDefaultChannel(context)
+        }
+    )
+    val notificationConsentState by notificationConsent.state.collectAsState()
+    val notificationSnackbars = remember { SnackbarHostState() }
+    // The original request stays bound across rotation; no JWT is saved in instance state.
+    var pendingNotificationPermission by rememberSaveable(key = "notification-permission-request-v1") {
+        mutableStateOf<String?>(null)
+    }
+    val notificationSessionKey = NotificationConsentViewModel.sessionKey(repository.getSavedToken())
     val notificationPermissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission()
     ) { granted ->
-        notificationScope.launch {
-            if (granted) {
-                val result = runCatching {
-                    IA4TubeNotificationHelper.ensureDefaultChannel(context)
-                    fcmTokenRegistrar.grantConsentAndActivate()
-                }.getOrNull()
-                val activated = result is ApiResult.Success
-                notificationConsentError = !activated
-                showNotificationConsent = !activated
-            } else {
-                runCatching {
-                    fcmTokenRegistrar.declineConsent()
-                }
-                notificationConsentError = false
-                showNotificationConsent = false
-            }
-        }
+        val request = pendingNotificationPermission
+        pendingNotificationPermission = null
+        notificationConsent.refresh(request)
+        notificationConsent.permissionResult(request, granted)
     }
 
     fun hasSavedToken(): Boolean = repository.getSavedToken().isNotBlank()
@@ -340,25 +342,33 @@ fun IA4TubeNavHost(
         MobileAnalytics.init(analyticsTracker)
     }
 
-    LaunchedEffect(hasSavedToken(), currentRoute) {
-        if (hasSavedToken()) {
+    LaunchedEffect(notificationSessionKey, currentRoute, pendingNotificationPermission) {
+        notificationConsent.refresh(pendingNotificationPermission)
+        val expectedToken = repository.getSavedToken()
+        if (expectedToken.isNotBlank() && !notificationConsent.isDecisionInFlight(expectedToken)) {
             if (fcmTokenRegistrar.hasConsentDecisionForCurrentAccount()) {
+                notificationConsent.acknowledgeExistingDecision(expectedToken)
                 if (fcmTokenRegistrar.hasGrantedConsentForCurrentAccount()) {
                     if (hasNotificationPermission()) {
                         fcmTokenRegistrar.syncCurrentToken()
                     } else {
                         notificationScope.launch {
                             runCatching {
-                                fcmTokenRegistrar.declineConsent()
+                                fcmTokenRegistrar.declineConsent(expectedAuthToken = expectedToken)
                             }
                         }
                     }
                 }
-            } else {
-                showNotificationConsent = true
             }
-        } else {
-            showNotificationConsent = false
+        }
+    }
+
+    LaunchedEffect(notificationConsentState.ownerKey, notificationConsentState.messageId) {
+        val message = notificationConsentState.message
+        val messageId = notificationConsentState.messageId
+        if (message != null && notificationConsent.isCurrentOwner(notificationConsentState.ownerKey)) {
+            notificationSnackbars.showSnackbar(message)
+            notificationConsent.clearMessage(messageId)
         }
     }
 
@@ -407,7 +417,8 @@ fun IA4TubeNavHost(
         }
     ) {
         Scaffold(
-            containerColor = MaterialTheme.colorScheme.background
+            containerColor = MaterialTheme.colorScheme.background,
+            snackbarHost = { SnackbarHost(notificationSnackbars) }
         ) { innerPadding ->
             NavHost(
                 navController = navController,
@@ -967,60 +978,35 @@ fun IA4TubeNavHost(
                     onAuthenticated = ::finishAuthSheet
                 )
             }
-            if (showNotificationConsent) {
+            if (notificationConsentState.showPrompt) {
                 AlertDialog(
-                    onDismissRequest = {
-                        notificationScope.launch {
-                            runCatching {
-                                fcmTokenRegistrar.declineConsent()
-                            }
-                            notificationConsentError = false
-                            showNotificationConsent = false
-                        }
-                    },
+                    onDismissRequest = notificationConsent::dismiss,
                     title = {
                         Text("Receber aviso quando sua arte ficar pronta?")
                     },
                     text = {
                         Text(
-                            "A IA4Tube pode avisar quando sua criação estiver pronta. " +
-                                "Você pode continuar acompanhando manualmente se preferir." +
-                                if (notificationConsentError) {
-                                    " Não foi possível ativar agora. Tente novamente."
-                                } else {
-                                    ""
-                                }
+                            "A iA4tube pode avisar quando sua criação estiver pronta. " +
+                                "Você pode continuar acompanhando manualmente se preferir."
                         )
                     },
                     confirmButton = {
                         Button(
                             onClick = {
                                 val permissionGranted = hasNotificationPermission()
-                                if (
-                                    FcmActivationPolicy.shouldRequestSystemPermission(
+                                val needsPermission = FcmActivationPolicy.shouldRequestSystemPermission(
                                         sdkInt = Build.VERSION.SDK_INT,
                                         explicitConsentGranted = true,
                                         permissionGranted = permissionGranted
                                     )
-                                ) {
-                                    notificationPermissionLauncher.launch(
-                                        Manifest.permission.POST_NOTIFICATIONS
-                                    )
-                                } else if (
-                                    FcmActivationPolicy.canActivate(
-                                        sdkInt = Build.VERSION.SDK_INT,
-                                        explicitConsentGranted = true,
-                                        permissionGranted = permissionGranted
-                                    )
-                                ) {
-                                    notificationScope.launch {
-                                        val result = runCatching {
-                                            IA4TubeNotificationHelper.ensureDefaultChannel(context)
-                                            fcmTokenRegistrar.grantConsentAndActivate()
-                                        }.getOrNull()
-                                        val activated = result is ApiResult.Success
-                                        notificationConsentError = !activated
-                                        showNotificationConsent = !activated
+                                val request = notificationConsent.enable(needsPermission)
+                                if (request != null) {
+                                    pendingNotificationPermission = request.encode()
+                                    try {
+                                        notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+                                    } catch (_: Exception) {
+                                        pendingNotificationPermission = null
+                                        notificationConsent.permissionLaunchFailed(request)
                                     }
                                 }
                             }
@@ -1030,15 +1016,7 @@ fun IA4TubeNavHost(
                     },
                     dismissButton = {
                         TextButton(
-                            onClick = {
-                                notificationScope.launch {
-                                    runCatching {
-                                        fcmTokenRegistrar.declineConsent()
-                                    }
-                                    notificationConsentError = false
-                                    showNotificationConsent = false
-                                }
-                            }
+                            onClick = notificationConsent::dismiss
                         ) {
                             Text("Agora não")
                         }
