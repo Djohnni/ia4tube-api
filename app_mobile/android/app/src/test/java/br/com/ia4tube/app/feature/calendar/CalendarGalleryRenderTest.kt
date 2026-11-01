@@ -43,19 +43,35 @@ class CalendarGalleryRenderTest {
     @Test fun galleryRemainsReadableWithLargerText() = render(1.5f, "calendar-gallery-large-text-preview.png")
     @Test fun musicOpensOverTheGalleryWithoutRemovingIt() = render(1f, "calendar-gallery-music-sheet.png", openMusic = true)
     @Test fun historyShowsPublishedArtWithoutAnyImportEntry() = render(1f, "calendar-history-preview.png", mode = CalendarGalleryMode.HISTORY)
-    private fun render(fontScale: Float, filename: String, openMusic: Boolean = false, mode: CalendarGalleryMode = CalendarGalleryMode.UPCOMING) {
+    @Test fun monthOverviewUsesLoadedSchedulesWithoutAnotherReadOrMutation() =
+        render(1f, "calendar-month-overview-preview.png", openMonth = true)
+
+    @Test
+    @Config(qualifiers = "w360dp-h800dp-xhdpi")
+    fun monthOverviewRemainsReadableOnSmallPhoneWithLargestText() =
+        render(2f, "calendar-month-360dp-large-text-preview.png", openMonth = true,
+            widthPx = 720, heightPx = 1600)
+
+    private fun render(fontScale: Float, filename: String, openMusic: Boolean = false,
+        mode: CalendarGalleryMode = CalendarGalleryMode.UPCOMING, openMonth: Boolean = false,
+        widthPx: Int = 822, heightPx: Int = 1782) {
         val today = LocalDate.now(ZoneId.of("America/Sao_Paulo")).toString()
         val item = ScheduledArt("a".repeat(40), "synthetic:1", today, "18:30", "Uma arte pronta para o próximo dia. Você pode editar esta legenda antes da publicação.",
             2, if (mode == CalendarGalleryMode.HISTORY) "published" else "scheduled", if (mode == CalendarGalleryMode.HISTORY) "Publicada" else "Programada",
             mode != CalendarGalleryMode.HISTORY, true, "/synthetic-not-fetched", "empresa_exemplo", System.currentTimeMillis() + 3_600_000,
             destination = "both", formatsReady = true)
         val binding = CalendarBinding("11111111-1111-4111-8111-111111111111", "123456789", 72)
-        val snapshot = CalendarSnapshot(true, true, 2, true, "empresa_exemplo", true, listOf(item), item,
+        val sampleItems = if (openMonth) listOf(item,
+            item.copy(id = "b".repeat(40), key = "synthetic:2", date = LocalDate.parse(today).plusDays(2).toString(),
+                caption = "Publicação futura do calendário", scheduledAt = System.currentTimeMillis() + 172_800_000)) else listOf(item)
+        val snapshot = CalendarSnapshot(true, true, 2, true, "empresa_exemplo", true, sampleItems, item,
             preferenceBinding = binding, connectionBinding = binding)
+        var calendarReads = 0
+        var mutations = 0
         val gateway = object : CalendarGateway {
-            override suspend fun list() = snapshot
-            override suspend fun preferences(enabled: Boolean, revision: Long): CalendarSnapshot = error("No mutation in visual check")
-            override suspend fun edit(item: ScheduledArt, action: String, caption: String, date: String, time: String): CalendarSnapshot = error("No mutation in visual check")
+            override suspend fun list(): CalendarSnapshot { calendarReads++; return snapshot }
+            override suspend fun preferences(enabled: Boolean, revision: Long): CalendarSnapshot { mutations++; error("No mutation in visual check") }
+            override suspend fun edit(item: ScheduledArt, action: String, caption: String, date: String, time: String): CalendarSnapshot { mutations++; error("No mutation in visual check") }
         }
         val model = CalendarViewModel({ "synthetic-only" }, "synthetic-only", gateway)
         val controller = Robolectric.buildActivity(ComponentActivity::class.java)
@@ -81,8 +97,12 @@ class CalendarGalleryRenderTest {
         } }
         shadowOf(Looper.getMainLooper()).idleFor(Duration.ofSeconds(2))
         val view = activity.window.decorView
-        view.measure(View.MeasureSpec.makeMeasureSpec(822, View.MeasureSpec.EXACTLY), View.MeasureSpec.makeMeasureSpec(1782, View.MeasureSpec.EXACTLY)); view.layout(0,0,822,1782)
+        view.measure(View.MeasureSpec.makeMeasureSpec(widthPx, View.MeasureSpec.EXACTLY), View.MeasureSpec.makeMeasureSpec(heightPx, View.MeasureSpec.EXACTLY)); view.layout(0,0,widthPx,heightPx)
         shadowOf(Looper.getMainLooper()).idleFor(Duration.ofSeconds(1))
+        val initialNodes = monthRenderOwners(view).flatMap { monthRenderNodes(it.rootSemanticsNode) }
+        val initialTexts = initialNodes.flatMap { it.config.getOrNull(SemanticsProperties.Text).orEmpty() }.map { it.text }
+        assertFalse("Direct manual uploads stay hidden without deleting their workflow", initialTexts.contains("Adicionar foto ou vídeo"))
+        assertEquals(mode == CalendarGalleryMode.UPCOMING, initialTexts.contains("Veja seu calendário"))
         if (mode == CalendarGalleryMode.HISTORY) {
             fun owners(root: View): List<SemanticsOwner> {
                 val own = if (root.javaClass.name == "androidx.compose.ui.platform.AndroidComposeView")
@@ -97,6 +117,127 @@ class CalendarGalleryRenderTest {
             assertFalse(semantics.any { it.config.getOrNull(SemanticsProperties.ContentDescription)?.contains("Usar com música") == true })
         }
         var dialogBitmap: Bitmap? = null
+        if (openMonth) {
+            val readsBeforeOpening = calendarReads
+            val shortcut = requireNotNull(initialNodes.firstOrNull {
+                it.config.getOrNull(SemanticsActions.OnClick) != null &&
+                    it.config.getOrNull(SemanticsProperties.Text)?.joinToString(" ") { value -> value.text } == "Veja seu calendário"
+            })
+            assertTrue(shortcut.config[SemanticsActions.OnClick].action!!.invoke())
+            shadowOf(Looper.getMainLooper()).idleFor(Duration.ofSeconds(1))
+            val dialog = requireNotNull(ShadowDialog.getShownDialogs().lastOrNull { it.isShowing })
+            val monthView = dialog.window!!.decorView
+            fun settleMonth() {
+                repeat(5) {
+                    Snapshot.sendApplyNotifications()
+                    monthView.requestLayout()
+                    monthView.measure(View.MeasureSpec.makeMeasureSpec(widthPx, View.MeasureSpec.AT_MOST),
+                        View.MeasureSpec.makeMeasureSpec(heightPx, View.MeasureSpec.AT_MOST))
+                    monthView.layout(0, 0, monthView.measuredWidth, monthView.measuredHeight)
+                    shadowOf(Looper.getMainLooper()).idleFor(Duration.ofMillis(100))
+                }
+            }
+            fun currentMonthNodes() = monthRenderOwners(monthView).flatMap { monthRenderNodes(it.rootSemanticsNode) }
+            settleMonth()
+            val monthNodes = monthRenderOwners(monthView).flatMap { monthRenderNodes(it.rootSemanticsNode) }
+            val monthTexts = monthNodes.flatMap { it.config.getOrNull(SemanticsProperties.Text).orEmpty() }.map { it.text }
+            assertTrue(monthTexts.contains("Seu calendário"))
+            assertTrue(monthTexts.contains("Dias com publicações"))
+            assertTrue(monthNodes.any { node -> node.config.getOrNull(SemanticsProperties.ContentDescription)
+                ?.any { it.contains(LocalDate.parse(today).format(java.time.format.DateTimeFormatter.ofPattern("dd/MM/yyyy"))) && it.contains("publica") } == true })
+            // Keep the actual popup proof even if a large-font text assertion fails.
+            val monthPreview = Bitmap.createBitmap(monthView.width, monthView.height, Bitmap.Config.ARGB_8888)
+                .also { monthView.draw(Canvas(it)) }
+            dialogBitmap = monthPreview
+            val monthProof = File("build/reports/$filename").also { it.parentFile?.mkdirs() }
+            monthProof.outputStream().use { monthPreview.compress(Bitmap.CompressFormat.PNG, 100, it) }
+
+            val dayNumbers = (1..LocalDate.parse(today).lengthOfMonth()).map { it.toString() }.toSet()
+            val fullWeekdays = listOf("Domingo", "Segunda-feira", "Terça-feira", "Quarta-feira", "Quinta-feira", "Sexta-feira", "Sábado")
+            val weekdayLabels = if (fontScale > 1.4f) listOf("D", "S", "T", "Q", "Q", "S", "S")
+                else listOf("Dom", "Seg", "Ter", "Qua", "Qui", "Sex", "Sáb")
+            val gridTextNodes = monthNodes.filter { node ->
+                val label = node.config.getOrNull(SemanticsProperties.Text)?.joinToString(" ") { it.text }
+                label != null && (label in dayNumbers || label in weekdayLabels)
+            }
+            val gridLabels = gridTextNodes.map { node ->
+                node.config[SemanticsProperties.Text].joinToString(" ") { it.text }
+            }.toSet()
+            assertTrue("Every day must remain in the actual popup; labels=$gridLabels; fontScale=$fontScale; viewport=${widthPx}x$heightPx",
+                gridLabels.containsAll(dayNumbers))
+            val weekdayNodes = gridTextNodes.filter { node ->
+                node.config[SemanticsProperties.Text].joinToString(" ") { it.text } in weekdayLabels
+            }.sortedBy { it.boundsInRoot.left }
+            val actualWeekdays = weekdayNodes.map { it.config[SemanticsProperties.Text].joinToString(" ") { value -> value.text } }
+            assertEquals("Seven weekday labels must stay ordered; fontScale=$fontScale; viewport=${widthPx}x$heightPx", weekdayLabels, actualWeekdays)
+            weekdayNodes.zip(fullWeekdays).forEach { (node, fullName) ->
+                assertTrue("Weekday '$fullName' must keep its full accessible name; semantics=${node.config}",
+                    node.config.getOrNull(SemanticsProperties.ContentDescription)?.any { it.equals(fullName, ignoreCase = true) } == true)
+            }
+            gridTextNodes.forEach { node ->
+                val label = node.config[SemanticsProperties.Text].joinToString(" ") { it.text }
+                val layouts = mutableListOf<TextLayoutResult>()
+                val getLayout = requireNotNull(node.config.getOrNull(SemanticsActions.GetTextLayoutResult)) {
+                    "Grid label '$label' must expose its measured text layout"
+                }
+                assertTrue(getLayout.action!!.invoke(layouts))
+                assertTrue("Grid label '$label' must have a measured text layout", layouts.isNotEmpty())
+                layouts.forEach { layout ->
+                    val diagnostic = buildString {
+                        append("label='$label', layoutText='${layout.layoutInput.text.text}', fontScale=$fontScale, viewport=${widthPx}x$heightPx")
+                        append(", size=${layout.size}, constraints=${layout.layoutInput.constraints}, bounds=${node.boundsInRoot}")
+                        append(", paragraph=${layout.multiParagraph.width}x${layout.multiParagraph.height}, lines=${layout.lineCount}")
+                        append(", overflow=${layout.hasVisualOverflow}, widthOverflow=${layout.didOverflowWidth}, heightOverflow=${layout.didOverflowHeight}")
+                        (0 until layout.lineCount).forEach { line ->
+                            append(", line$line(left=${layout.getLineLeft(line)}, right=${layout.getLineRight(line)}, top=${layout.getLineTop(line)}, bottom=${layout.getLineBottom(line)}, end=${layout.getLineEnd(line, visibleEnd = true)}, ellipsized=${layout.isLineEllipsized(line)})")
+                        }
+                    }
+                    if (layout.hasVisualOverflow) println("Calendar grid overflow diagnostic: $diagnostic")
+                    assertEquals("Grid text must preserve its label; $diagnostic", label, layout.layoutInput.text.text)
+                    assertEquals("Grid label must stay on one line; $diagnostic", 1, layout.lineCount)
+                    assertFalse("Grid label must not be ellipsized; $diagnostic", layout.isLineEllipsized(0))
+                    assertEquals("Grid label must show every character; $diagnostic", label.length, layout.getLineEnd(0, visibleEnd = true))
+                    // hasVisualOverflow compares floating paragraph dimensions with rounded
+                    // IntSize, which can flag a subpixel remainder despite fully visible text.
+                    // Check the measured line itself with at most one physical pixel of rounding.
+                    assertTrue("Grid text must fit horizontally; $diagnostic",
+                        layout.getLineLeft(0) >= -1f && layout.getLineRight(0) <= layout.size.width + 1f)
+                    assertTrue("Grid text must fit vertically; $diagnostic",
+                        layout.getLineTop(0) >= -1f && layout.getLineBottom(0) <= layout.size.height + 1f)
+                }
+            }
+
+            val dateFormat = java.time.format.DateTimeFormatter.ofPattern("dd/MM/yyyy")
+            val selectedDate = LocalDate.parse(today).withDayOfMonth(if (LocalDate.parse(today).dayOfMonth == 1) 2 else 1)
+            fun dayNode(date: LocalDate) = requireNotNull(currentMonthNodes().firstOrNull { node ->
+                node.config.getOrNull(SemanticsActions.OnClick) != null &&
+                    node.config.getOrNull(SemanticsProperties.ContentDescription)?.any { it.startsWith(date.format(dateFormat)) } == true
+            }) { "The day $date must have a semantic click action" }
+            assertTrue(dayNode(selectedDate).config[SemanticsActions.OnClick].action!!.invoke())
+            settleMonth()
+            assertEquals("Selecting a day only changes the local selection", true,
+                dayNode(selectedDate).config.getOrNull(SemanticsProperties.Selected))
+            assertEquals("Selecting a day must not read the gateway", readsBeforeOpening, calendarReads)
+            assertEquals("Selecting a day must not mutate a publication", 0, mutations)
+
+            fun clickMonthArrow(description: String) {
+                val arrow = requireNotNull(currentMonthNodes().firstOrNull { node ->
+                    node.config.getOrNull(SemanticsActions.OnClick) != null &&
+                        node.config.getOrNull(SemanticsProperties.ContentDescription)?.contains(description) == true
+                }) { "Month arrow '$description' must have a semantic click action" }
+                assertTrue(arrow.config[SemanticsActions.OnClick].action!!.invoke())
+                settleMonth()
+                assertEquals("Month navigation must not read the gateway", readsBeforeOpening, calendarReads)
+                assertEquals("Month navigation must not mutate a publication", 0, mutations)
+            }
+            clickMonthArrow("Próximo mês")
+            dayNode(LocalDate.parse(today).plusMonths(1).withDayOfMonth(1))
+            clickMonthArrow("Mês anterior")
+            dayNode(LocalDate.parse(today).withDayOfMonth(1))
+            assertEquals("Opening the month must reuse the loaded snapshot", readsBeforeOpening, calendarReads)
+            assertEquals("The month is a read-only overview", 0, mutations)
+            dialog.dismiss()
+        }
         if (openMusic) {
             fun owners(root: View): List<SemanticsOwner> {
                 val own = if (root.javaClass.name == "androidx.compose.ui.platform.AndroidComposeView")
@@ -115,19 +256,19 @@ class CalendarGalleryRenderTest {
             assertTrue("Underlying gallery stays composed", texts(view).any { label(it) == "Ver minhas artes programadas" })
             val dialog = requireNotNull(ShadowDialog.getShownDialogs().lastOrNull { it.isShowing }) { "Music must open in a dialog over the gallery" }
             val sheet = dialog.window!!.decorView
-            sheet.measure(View.MeasureSpec.makeMeasureSpec(822, View.MeasureSpec.EXACTLY), View.MeasureSpec.makeMeasureSpec(1782, View.MeasureSpec.EXACTLY))
-            sheet.layout(0, 0, 822, 1782)
+            sheet.measure(View.MeasureSpec.makeMeasureSpec(widthPx, View.MeasureSpec.EXACTLY), View.MeasureSpec.makeMeasureSpec(heightPx, View.MeasureSpec.EXACTLY))
+            sheet.layout(0, 0, widthPx, heightPx)
             // The first manual measure creates sheet anchors. Publish that snapshot and
             // remeasure the recomposed dialog before observing its final expanded position.
             repeat(3) {
                 Snapshot.sendApplyNotifications()
                 shadowOf(Looper.getMainLooper()).idleFor(Duration.ofSeconds(1))
                 sheet.requestLayout()
-                sheet.measure(View.MeasureSpec.makeMeasureSpec(822, View.MeasureSpec.EXACTLY), View.MeasureSpec.makeMeasureSpec(1782, View.MeasureSpec.EXACTLY))
-                sheet.layout(0, 0, 822, 1782)
+                sheet.measure(View.MeasureSpec.makeMeasureSpec(widthPx, View.MeasureSpec.EXACTLY), View.MeasureSpec.makeMeasureSpec(heightPx, View.MeasureSpec.EXACTLY))
+                sheet.layout(0, 0, widthPx, heightPx)
             }
             val sheetNodes = texts(sheet)
-            val titleProof = Bitmap.createBitmap(822, 1782, Bitmap.Config.ARGB_8888).also { sheet.draw(Canvas(it)) }
+            val titleProof = Bitmap.createBitmap(widthPx, heightPx, Bitmap.Config.ARGB_8888).also { sheet.draw(Canvas(it)) }
             val titleProofFile = File("build/reports/calendar-music-title-diagnostic.png")
             titleProofFile.parentFile?.mkdirs()
             titleProofFile.outputStream().use { titleProof.compress(Bitmap.CompressFormat.PNG, 100, it) }
@@ -148,11 +289,11 @@ class CalendarGalleryRenderTest {
                 titleLayouts.all { it.layoutInput.style.color == Color.White })
             // Capture the dialog while it is shown; a gallery screenshot after
             // dismiss would hide precisely the panel/contrast regression.
-            dialogBitmap = Bitmap.createBitmap(822, 1782, Bitmap.Config.ARGB_8888).also { sheet.draw(Canvas(it)) }
+            dialogBitmap = Bitmap.createBitmap(widthPx, heightPx, Bitmap.Config.ARGB_8888).also { sheet.draw(Canvas(it)) }
             dialog.dismiss()
         }
-        val bitmap = dialogBitmap ?: Bitmap.createBitmap(822,1782,Bitmap.Config.ARGB_8888).also { view.draw(Canvas(it)) }
-        val colors = mutableSetOf<Int>(); for (y in 0 until 1782 step 16) for (x in 0 until 822 step 16) colors.add(bitmap.getPixel(x,y))
+        val bitmap = dialogBitmap ?: Bitmap.createBitmap(widthPx,heightPx,Bitmap.Config.ARGB_8888).also { view.draw(Canvas(it)) }
+        val colors = mutableSetOf<Int>(); for (y in 0 until bitmap.height step 16) for (x in 0 until bitmap.width step 16) colors.add(bitmap.getPixel(x,y))
         assertTrue("Compose render must contain real content, not a blank screenshot", colors.size > 20)
         val output = File("build/reports/$filename"); output.parentFile?.mkdirs()
         output.outputStream().use { bitmap.compress(Bitmap.CompressFormat.PNG,100,it) }
@@ -161,4 +302,11 @@ class CalendarGalleryRenderTest {
         android.provider.Settings.Global.putFloat(activity.contentResolver, android.provider.Settings.Global.ANIMATOR_DURATION_SCALE, animationScale)
         bitmap.recycle(); sample.recycle()
     }
+
+    private fun monthRenderOwners(view: View): List<SemanticsOwner> {
+        val own = if (view.javaClass.name == "androidx.compose.ui.platform.AndroidComposeView")
+            listOf(view.javaClass.getMethod("getSemanticsOwner").invoke(view) as SemanticsOwner) else emptyList()
+        return own + if (view is ViewGroup) (0 until view.childCount).flatMap { monthRenderOwners(view.getChildAt(it)) } else emptyList()
+    }
+    private fun monthRenderNodes(node: SemanticsNode): List<SemanticsNode> = listOf(node) + node.children.flatMap(::monthRenderNodes)
 }

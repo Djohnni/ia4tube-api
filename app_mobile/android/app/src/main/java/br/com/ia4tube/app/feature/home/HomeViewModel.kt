@@ -58,7 +58,7 @@ data class HomeUiState(
         get() = firstFreeArtActive && firstFreeArtAvailable && !firstFreeArtUsed &&
             !hasActivePlan && artesMensaisRestantes <= 0 && artesAvulsasRestantes <= 0
 
-    fun firstFreeArtMode(isLoggedIn: Boolean): Boolean = !isLoggedIn || shouldFocusFirstFreeArt
+    fun firstFreeArtMode(isLoggedIn: Boolean): Boolean = !isLoggedIn
 }
 
 class HomeViewModel(

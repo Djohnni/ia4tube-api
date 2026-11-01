@@ -4,8 +4,10 @@ import android.app.DatePickerDialog
 import android.app.TimePickerDialog
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.pager.VerticalPager
 import androidx.compose.foundation.pager.PagerState
@@ -236,6 +238,7 @@ fun CalendarGallery(model: CalendarViewModel, token: String, backLabel: String =
     var showStatus by remember(model, token, mode) { mutableStateOf<ScheduledArt?>(null) }
     var showMediaInfo by remember(model, token, mode) { mutableStateOf<ScheduledArt?>(null) }
     var showImport by remember(model, token, mode) { mutableStateOf(false) }
+    var showMonthCalendar by remember(model, token, mode) { mutableStateOf(false) }
     var generatedSource by remember(model, token, mode) { mutableStateOf<ScheduledArt?>(null) }
     var pendingFocusId by remember(model, token, mode) { mutableStateOf<String?>(null) }
     LaunchedEffect(model, token, state.data.items) {
@@ -243,14 +246,26 @@ fun CalendarGallery(model: CalendarViewModel, token: String, backLabel: String =
         if (state.data.items.none { it.id == showStatus?.id }) showStatus = null
         if (state.data.items.none { it.id == showMediaInfo?.id }) showMediaInfo = null
     }
-    BackHandler(enabled = !showImport, onBack = onBack)
+    BackHandler(enabled = !showImport && !showMonthCalendar, onBack = onBack)
     Column(Modifier.fillMaxSize().background(Color(0xFF101218)).padding(horizontal = 12.dp, vertical = 8.dp)) {
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
             IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, backLabel, tint = Color.White) }
             Text(if (mode == CalendarGalleryMode.HISTORY) "Histórico de artes" else "Ver minhas artes programadas", color = Color.White, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
             IconButton(onClick = model::refresh, enabled = !state.busy) { Icon(Icons.Default.Refresh, "Atualizar", tint = Color.White) }
         }
-        if (mode == CalendarGalleryMode.UPCOMING && BuildConfig.MEDIA_IMPORT_ENTRY_POINTS_VISIBLE) {
+        if (mode == CalendarGalleryMode.UPCOMING) {
+            OutlinedButton(onClick = { showMonthCalendar = true },
+                modifier = Modifier.fillMaxWidth().heightIn(min = 52.dp), shape = RoundedCornerShape(16.dp),
+                border = BorderStroke(1.dp, Color(0xFFB98F39)),
+                colors = ButtonDefaults.outlinedButtonColors(contentColor = Color(0xFFF4D381),
+                    containerColor = Color(0xFF1A1C22))) {
+                Icon(Icons.Default.DateRange, contentDescription = null)
+                Spacer(Modifier.width(10.dp))
+                Text("Veja seu calendário", fontWeight = FontWeight.SemiBold)
+            }
+        }
+        if (mode == CalendarGalleryMode.UPCOMING && BuildConfig.MEDIA_IMPORT_ENTRY_POINTS_VISIBLE &&
+            CALENDAR_MANUAL_UPLOAD_ENTRY_VISIBLE) {
             OutlinedButton(onClick = { generatedSource = null; showImport = true }, modifier = Modifier.fillMaxWidth()) {
                 Text("Adicionar foto ou vídeo", color = Color.White)
             }
@@ -288,13 +303,13 @@ fun CalendarGallery(model: CalendarViewModel, token: String, backLabel: String =
                     Row(Modifier.weight(1f), verticalAlignment = Alignment.CenterVertically) {
                         if (art.media != null && state.data.identity != null) {
                             ScheduledPrivateMedia(state.data.identity!!, tokenProvider, art.media, preview,
-                                active = pager.settledPage == index && !pager.isScrollInProgress && editing == null && showStatus == null && showMediaInfo == null && !showImport,
+                                active = pager.settledPage == index && !pager.isScrollInProgress && editing == null && showStatus == null && showMediaInfo == null && !showImport && !showMonthCalendar,
                                 modifier = Modifier.weight(1f).fillMaxHeight(), refreshKey = state.imageRefresh)
                         } else if (art.generatedVideo != null) {
                             val posterLabel = "${LocalDate.parse(art.date).format(DateTimeFormatter.ofPattern("dd/MM"))} · ${art.time}" +
                                 art.caption.lineSequence().firstOrNull { it.isNotBlank() }?.let { "\n${it.trim()}" }.orEmpty()
                             ScheduledGeneratedVideo(art.generatedVideo, tokenProvider,
-                                active = pager.settledPage == index && !pager.isScrollInProgress && editing == null && showStatus == null && showMediaInfo == null && !showImport,
+                                active = pager.settledPage == index && !pager.isScrollInProgress && editing == null && showStatus == null && showMediaInfo == null && !showImport && !showMonthCalendar,
                                 posterLabel = posterLabel,
                                 modifier = Modifier.weight(1f).fillMaxHeight())
                         } else ScheduledArtImage(art.copy(imageUrl = art.previews[preview] ?: art.imageUrl, destination = preview), token, Modifier.weight(1f).fillMaxHeight(), state.imageRefresh)
@@ -331,6 +346,10 @@ fun CalendarGallery(model: CalendarViewModel, token: String, backLabel: String =
                 }
             }
         }
+    }
+    if (showMonthCalendar && mode == CalendarGalleryMode.UPCOMING) {
+        CalendarMonthDialog(items = state.data.items, fresh = state.fresh, busy = state.busy,
+            onDismiss = { showMonthCalendar = false })
     }
     if (showImport) {
         val closeImport = { showImport = false; generatedSource = null }

@@ -34,8 +34,12 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.DateRange
+import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.OutlinedButton
@@ -44,6 +48,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -56,7 +61,13 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.StrokeJoin
+import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.graphics.vector.path
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
@@ -78,6 +89,17 @@ import java.time.ZonedDateTime
 import java.time.format.DateTimeFormatter
 
 private val imageTypes = arrayOf("image/png", "image/jpeg", "image/webp")
+
+private val EditScheduleClockIcon = ImageVector.Builder("EditScheduleClock", 24.dp, 24.dp, 24f, 24f).apply {
+    path(fill = null, stroke = SolidColor(Color.Black), strokeLineWidth = 1.8f,
+        strokeLineCap = StrokeCap.Round, strokeLineJoin = StrokeJoin.Round) {
+        moveTo(21f, 12f)
+        arcTo(9f, 9f, 0f, true, true, 3f, 12f)
+        arcTo(9f, 9f, 0f, true, true, 21f, 12f)
+        close()
+        moveTo(12f, 7f); lineTo(12f, 12f); lineTo(16f, 14f)
+    }
+}.build()
 
 internal class EditBrowserViewModel : ViewModel() {
     var view: WebView? = null
@@ -450,21 +472,30 @@ internal fun EditCalendarScheduleDialog(initial: EditCalendarSchedule?, suggesti
     val appearance = calendarAppearance(MaterialTheme.colorScheme)
     val clockFormat = remember { DateTimeFormatter.ofPattern("HH:mm") }
     val buttonShape = RoundedCornerShape(14.dp)
+    val editDate = {
+        DatePickerDialog(context, { _, year, month, day -> date = LocalDate.of(year, month + 1, day) },
+            date.year, date.monthValue - 1, date.dayOfMonth).show()
+    }
+    val editTime = {
+        TimePickerDialog(context, { _, hour, minute -> time = LocalTime.of(hour, minute) },
+            time.hour, time.minute, true).show()
+    }
     CalendarAlertDialog(onDismissRequest = onDismiss,
-        title = { Text("Quando publicar?", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold) },
+        title = { Text("Que dia e hora você quer que seja publicado?", style = MaterialTheme.typography.titleLarge,
+            fontWeight = FontWeight.Bold) },
         text = { Column(modifier = Modifier.verticalScroll(rememberScrollState()),
             verticalArrangement = Arrangement.spacedBy(14.dp)) {
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                OutlinedButton(modifier = Modifier.weight(1.35f).heightIn(min = 48.dp), shape = buttonShape,
-                    colors = calendarOutlinedButtonColors(), border = BorderStroke(1.dp, appearance.secondary),
-                    onClick = { DatePickerDialog(context, { _, year, month, day -> date = LocalDate.of(year, month + 1, day) },
-                        date.year, date.monthValue - 1, date.dayOfMonth).show() }) {
-                    Text(date.format(DateTimeFormatter.ofPattern("dd/MM/yyyy")), fontWeight = FontWeight.SemiBold)
+            val dateLabel = date.format(DateTimeFormatter.ofPattern("dd/MM/yyyy"))
+            if (LocalDensity.current.fontScale > 1.15f) {
+                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    EditScheduleField("Dia", dateLabel, Icons.Default.DateRange, Modifier.fillMaxWidth(), editDate)
+                    EditScheduleField("Hora", selection.time, EditScheduleClockIcon, Modifier.fillMaxWidth(), editTime)
                 }
-                OutlinedButton(modifier = Modifier.weight(1f).heightIn(min = 48.dp), shape = buttonShape,
-                    colors = calendarOutlinedButtonColors(), border = BorderStroke(1.dp, appearance.secondary),
-                    onClick = { TimePickerDialog(context, { _, hour, minute -> time = LocalTime.of(hour, minute) },
-                        time.hour, time.minute, true).show() }) { Text(selection.time, fontWeight = FontWeight.SemiBold) }
+            } else {
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    EditScheduleField("Dia", dateLabel, Icons.Default.DateRange, Modifier.weight(1.45f), editDate)
+                    EditScheduleField("Hora", selection.time, EditScheduleClockIcon, Modifier.weight(1f), editTime)
+                }
             }
             Text("Sugestão de horário para você baseado no seu negócio", style = MaterialTheme.typography.bodyMedium)
             suggestionCategory.slots.forEach { slot ->
@@ -492,4 +523,23 @@ internal fun EditCalendarScheduleDialog(initial: EditCalendarSchedule?, suggesti
                 onClick = { onConfirm(selection) }) { Text("Confirmar", fontWeight = FontWeight.SemiBold) }
         },
         dismissButton = { TextButton(colors = calendarTextButtonColors(), onClick = onDismiss) { Text("Voltar") } })
+}
+
+@Composable
+private fun EditScheduleField(label: String, value: String, icon: ImageVector, modifier: Modifier,
+    onClick: () -> Unit) {
+    Column(modifier, verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        Text(label, style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.SemiBold)
+        Surface(onClick = onClick, modifier = Modifier.fillMaxWidth().heightIn(min = 56.dp),
+            shape = RoundedCornerShape(12.dp), color = Color.White, contentColor = Color(0xFF111827),
+            border = BorderStroke(1.dp, Color(0xFF6B7280))) {
+            Row(Modifier.padding(horizontal = 8.dp, vertical = 12.dp),
+                verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                Icon(icon, contentDescription = null, modifier = Modifier.size(18.dp))
+                Text(value, modifier = Modifier.weight(1f), style = MaterialTheme.typography.bodyMedium,
+                    fontWeight = FontWeight.SemiBold)
+                Icon(Icons.Default.Edit, contentDescription = "Editar $label", modifier = Modifier.size(16.dp))
+            }
+        }
+    }
 }

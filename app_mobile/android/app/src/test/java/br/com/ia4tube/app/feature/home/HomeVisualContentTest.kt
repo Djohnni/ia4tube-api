@@ -59,7 +59,7 @@ class HomeVisualContentTest {
             assertTrue("Composition must not open any product flow", home.events.isEmpty())
             home.assertAction("home_instagram", "instagram")
             home.assertAction("home_calendar", "calendar")
-            home.assertAction("home_create_image", "monthly-planning")
+            assertNull("Image creation belongs only to the closed Other forms menu", home.findTag("home_create_image"))
             home.assertAction("home_ready_posts", "edit")
             assertTrue(home.nodes().none { node ->
                 home.label(node).contains("Câmera", ignoreCase = true)
@@ -93,9 +93,12 @@ class HomeVisualContentTest {
 
     @Test fun firstFreeArtKeepsPrimaryEntriesAndBlocksSecondaryMenuFlows() {
         HomeHarness(firstFree = true).use { home ->
+            assertTrue("Visitor Home must not promise an unconditional free image", home.nodes().none { node ->
+                home.label(node) in setOf("Crie sua primeira imagem grátis.", "Depois disso, você desbloqueia o acesso ao app completo.")
+            })
             home.assertAction("home_instagram", "instagram")
             home.assertAction("home_calendar", "calendar")
-            home.assertAction("home_create_image", "monthly-planning")
+            assertNull("The free-image entry also starts inside Other forms", home.findTag("home_create_image"))
             home.assertAction("home_ready_posts", "edit")
             home.assertAction("home_footer_combo", "locked")
             home.assertAction("home_footer_more", null)
@@ -110,28 +113,37 @@ class HomeVisualContentTest {
 
     @Test fun otherFormsStartClosedAndOnlyTheirOwnCallbacksRunAfterExpansion() {
         HomeHarness().use { home ->
+            assertNull(home.findTag("home_create_image"))
             assertNull(home.findTag("home_multiple_photos"))
             assertNull(home.findTag("home_printed_materials"))
             assertNull(home.findTag("home_carousel"))
             home.assertAction("home_other_forms", null)
+            assertEquals("Criar imagens", home.label(home.tag("home_create_image")))
+            home.assertAction("home_create_image", "monthly-planning")
             home.assertAction("home_multiple_photos", "create-art")
             home.assertAction("home_printed_materials", "company-profile")
             home.assertAction("home_carousel", "carousel")
             home.assertAction("home_other_forms", null)
+            assertNull(home.findTag("home_create_image"))
             assertNull(home.findTag("home_carousel"))
             home.assertAction("home_other_forms", null)
             home.assertAction("home_footer_home", null)
+            assertNull("Início hides image creation again", home.findTag("home_create_image"))
             assertNull("Início returns to the compact local Home", home.findTag("home_carousel"))
         }
     }
 
     @Test fun firstFreeArtCanExpandOtherFormsWithoutUnlockingThem() {
         HomeHarness(firstFree = true).use { home ->
+            assertNull(home.findTag("home_create_image"))
             home.assertAction("home_other_forms", null)
+            assertEquals("Criar imagens", home.label(home.tag("home_create_image")))
+            home.assertAction("home_create_image", "monthly-planning")
             for (tag in listOf("home_multiple_photos", "home_printed_materials", "home_carousel")) {
                 home.assertAction(tag, "locked")
             }
             home.assertAction("home_other_forms", null)
+            assertNull(home.findTag("home_create_image"))
             assertNull(home.findTag("home_multiple_photos"))
         }
     }
@@ -181,7 +193,7 @@ class HomeVisualContentTest {
         }
     }
 
-    @Test fun referenceWidthKeepsShortcutRowsCreationColumnsAndFixedComboFooter() =
+    @Test fun referenceWidthKeepsShortcutRowsCenteredPostsAndFixedComboFooter() =
         checkViewport(384, 832, 1f, "home-384-preview.png")
 
     @Test @Config(qualifiers = "w320dp-h740dp-xhdpi")
@@ -199,14 +211,15 @@ class HomeVisualContentTest {
             home.assertInstagramSubtitleFitsBelowItsTitle()
             val instagram = home.tag("home_instagram").boundsInRoot
             val calendar = home.tag("home_calendar").boundsInRoot
-            val create = home.tag("home_create_image").boundsInRoot
+            assertNull("No large image-creation action remains outside Other forms", home.findTag("home_create_image"))
             val posts = home.tag("home_ready_posts").boundsInRoot
             assertTrue("Instagram and Calendário stay in vertical rows", calendar.top >= instagram.bottom - 1f)
             assertEquals(instagram.left, calendar.left, 1f)
-            assertTrue("Creation options follow both shortcuts", create.top >= calendar.bottom - 1f)
-            assertTrue("Creation options stay side by side without overlap", posts.left >= create.right - 1f)
-            assertEquals(create.top, posts.top, 1f)
-            for (tag in listOf("home_instagram", "home_calendar", "home_create_image", "home_ready_posts")) {
+            assertTrue("Posts follow both shortcuts", posts.top >= calendar.bottom - 1f)
+            assertEquals("The single Posts action stays centered", home.widthPx / 2f, posts.center.x, 1f)
+            // The harness uses density=2: preserve one old column's width and its 12dp gap.
+            assertEquals("Posts keep their previous individual width", (instagram.width - 12f * 2f) / 2f, posts.width, 1f)
+            for (tag in listOf("home_instagram", "home_calendar", "home_ready_posts")) {
                 val rect = home.tag(tag).boundsInRoot
                 assertTrue("$tag stays inside the viewport width", rect.left >= 0f && rect.right <= home.widthPx + 1f)
                 assertTrue("$tag has a readable width", rect.width > 0f)
@@ -216,6 +229,8 @@ class HomeVisualContentTest {
             val footerBefore = home.tag("home_footer").boundsInRoot
             home.assertAction("home_other_forms", null)
             home.capture(filename.removeSuffix(".png") + "-expanded.png")
+            assertEquals("Criar imagens", home.label(home.tag("home_create_image")))
+            home.assertTextFits(home.tag("home_create_image"))
             home.assertExpandedContentReachable()
             val footerAfter = home.tag("home_footer").boundsInRoot
             assertEquals("Scrolling content does not move the footer", footerBefore.top, footerAfter.top, 1f)
@@ -301,16 +316,38 @@ class HomeVisualContentTest {
             for (node in descendants(parent)) {
                 val action = node.config.getOrNull(SemanticsActions.GetTextLayoutResult)?.action ?: continue
                 val layouts = mutableListOf<TextLayoutResult>()
-                assertTrue(action.invoke(layouts))
+                assertTrue("Text layout must be measured after settling; text=${label(node)}; " +
+                    "parentTag=${parent.config.getOrNull(SemanticsProperties.TestTag)}; " +
+                    "position=${node.positionInRoot}; size=${node.size}; bounds=${node.boundsInRoot}", action.invoke(layouts))
+                assertTrue("Measured text must expose its layout; text=${label(node)}", layouts.isNotEmpty())
                 for (layout in layouts) {
                     val details = "Text must not overflow: ${layout.layoutInput.text}; " +
                         "size=${layout.size}; constraints=${layout.layoutInput.constraints}; " +
                         "didOverflowWidth=${layout.didOverflowWidth}; didOverflowHeight=${layout.didOverflowHeight}; " +
+                        "paragraph=${layout.multiParagraph.width}x${layout.multiParagraph.height}; " +
                         "lineCount=${layout.lineCount}; maxLines=${layout.layoutInput.maxLines}; " +
                         "fontSize=${layout.layoutInput.style.fontSize}; density=${layout.layoutInput.density.density}; " +
                         "fontScale=${layout.layoutInput.density.fontScale}; " +
-                        "parentTag=${parent.config.getOrNull(SemanticsProperties.TestTag)}; bounds=${node.boundsInRoot}"
-                    assertFalse(details, layout.hasVisualOverflow)
+                        "parentTag=${parent.config.getOrNull(SemanticsProperties.TestTag)}; bounds=${node.boundsInRoot}; " +
+                        (0 until layout.lineCount).joinToString { line ->
+                            "line$line(left=${layout.getLineLeft(line)}, right=${layout.getLineRight(line)}, " +
+                                "top=${layout.getLineTop(line)}, bottom=${layout.getLineBottom(line)}, " +
+                                "end=${layout.getLineEnd(line)}, ellipsized=${layout.isLineEllipsized(line)})"
+                        }
+                    if (layout.hasVisualOverflow) println("Home text measurement diagnostic: $details")
+                    assertTrue("Text must contain a measured line; $details", layout.lineCount > 0)
+                    assertEquals("Every character must remain laid out; $details", layout.layoutInput.text.length,
+                        layout.getLineEnd(layout.lineCount - 1))
+                    // Simple text can expose a paragraph at the maximum constraint width
+                    // while its IntSize wraps the narrower visible text. Check the actual
+                    // lines, allowing only one physical pixel for coordinate rounding.
+                    (0 until layout.lineCount).forEach { line ->
+                        assertFalse("Text must not be ellipsized; $details", layout.isLineEllipsized(line))
+                        assertTrue("Text must fit horizontally; $details", layout.getLineLeft(line) >= -1f &&
+                            layout.getLineRight(line) <= layout.size.width + 1f)
+                        assertTrue("Text must fit vertically; $details", layout.getLineTop(line) >= -1f &&
+                            layout.getLineBottom(line) <= layout.size.height + 1f)
+                    }
                 }
             }
         }
@@ -366,7 +403,7 @@ class HomeVisualContentTest {
             val scroll = tag("home_scroll")
             val range = scroll.config[SemanticsProperties.VerticalScrollAxisRange]
             val maximum = range.maxValue()
-            val expandedTags = listOf("home_multiple_photos", "home_printed_materials", "home_carousel")
+            val expandedTags = listOf("home_create_image", "home_multiple_photos", "home_printed_materials", "home_carousel")
             // Both branches require actual expanded items; a lost recomposition must fail.
             expandedTags.forEach { tag(it) }
             assertTrue("The scroll range must be finite and non-negative: $maximum", maximum.isFinite() && maximum >= 0f)
@@ -418,17 +455,33 @@ class HomeVisualContentTest {
             Snapshot.sendApplyNotifications()
             // Keep the real indeterminate indicator composed. Paused vsync and a
             // fixed frame budget avoid draining an animation until it becomes idle.
-            repeat(8) {
-                ShadowSystemClock.advanceBy(Duration.ofMillis(64))
-                main.idleFor(Duration.ofMillis(16))
-                for (root in roots()) {
-                    root.measure(View.MeasureSpec.makeMeasureSpec(widthPx, View.MeasureSpec.EXACTLY),
-                        View.MeasureSpec.makeMeasureSpec(heightPx, View.MeasureSpec.EXACTLY))
-                    root.layout(0, 0, widthPx, heightPx)
+            // A same-size Android measure alone can leave Compose's new descendants
+            // queued. Flush the owner's test layout pass, then draw each bounded frame.
+            val frame = Bitmap.createBitmap(widthPx, heightPx, Bitmap.Config.ARGB_8888)
+            try {
+                val frameCanvas = Canvas(frame)
+                repeat(8) {
+                    ShadowSystemClock.advanceBy(Duration.ofMillis(64))
+                    main.idleFor(Duration.ofMillis(16))
+                    for (root in roots()) {
+                        root.requestLayout()
+                        root.measure(View.MeasureSpec.makeMeasureSpec(widthPx, View.MeasureSpec.EXACTLY),
+                            View.MeasureSpec.makeMeasureSpec(heightPx, View.MeasureSpec.EXACTLY))
+                        root.layout(0, 0, widthPx, heightPx)
+                        measureComposeOwners(root)
+                        root.draw(frameCanvas)
+                    }
+                    Snapshot.sendApplyNotifications()
                 }
-                Snapshot.sendApplyNotifications()
-            }
+            } finally { frame.recycle() }
             main.idleFor(Duration.ofMillis(32))
+        }
+
+        private fun measureComposeOwners(view: View) {
+            if (view.javaClass.name == "androidx.compose.ui.platform.AndroidComposeView") {
+                view.javaClass.getMethod("measureAndLayoutForTest").invoke(view)
+            }
+            if (view is ViewGroup) (0 until view.childCount).forEach { measureComposeOwners(view.getChildAt(it)) }
         }
 
         override fun close() {

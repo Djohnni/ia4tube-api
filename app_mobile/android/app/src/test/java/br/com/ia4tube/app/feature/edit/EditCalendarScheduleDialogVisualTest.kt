@@ -165,9 +165,15 @@ class EditCalendarScheduleDialogVisualTest {
             settle()
         }
         fun assertContent(date: LocalDate, range: String) {
-            assertTrue(text().contains("Quando publicar?"))
+            assertTrue(text().contains("Que dia e hora você quer que seja publicado?"))
+            assertTrue(text().contains("Dia"))
+            assertTrue(text().contains("Hora"))
             assertTrue(text().contains("Sugestão de horário para você baseado no seu negócio"))
-            assertTrue(text().contains(date.format(DateTimeFormatter.ofPattern("dd/MM/yyyy"))))
+            val dateValue = date.format(DateTimeFormatter.ofPattern("dd/MM/yyyy"))
+            assertTrue(text().contains(dateValue))
+            assertNotNull("The day field must remain directly editable", button(dateValue))
+            val timeValue = text().first { it.matches(Regex("[0-9]{2}:[0-9]{2}")) }
+            assertNotNull("The time field must remain directly editable", button(timeValue))
             assertTrue(text().contains(range))
             assertTrue(text().contains("Horário de Brasília"))
             assertFalse(text().any { it.contains("Sugestões gerais") || it.contains("Sugestões pelo ramo") })

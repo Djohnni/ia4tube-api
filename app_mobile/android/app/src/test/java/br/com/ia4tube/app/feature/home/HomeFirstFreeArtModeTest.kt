@@ -32,8 +32,9 @@ class HomeFirstFreeArtModeTest {
         assertTrue(HomeUiState().firstFreeArtMode(isLoggedIn = false))
     }
 
-    @Test fun genuinelyNewEligibleAccountStillUsesFirstFreeArtMode() {
-        assertTrue(freeOffer.firstFreeArtMode(isLoggedIn = true))
+    @Test fun newAuthenticatedAccountDoesNotLockHomeWithOrWithoutFreeOffer() {
+        assertFalse(HomeUiState().firstFreeArtMode(isLoggedIn = true))
+        assertFalse(freeOffer.firstFreeArtMode(isLoggedIn = true))
     }
 
     @Test fun unavailableOrUsedFreeOfferDoesNotLockLoggedInAccount() {

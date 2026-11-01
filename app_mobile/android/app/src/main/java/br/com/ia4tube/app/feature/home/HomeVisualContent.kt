@@ -173,17 +173,9 @@ internal fun HomeVisualContent(
             HomeVisualShortcut("Calendário", R.drawable.home_calendar_3d, "home_calendar", palette,
                 accessibilityLabel = "Minhas artes planejadas", onClick = onOpenPlannedArts)
             Spacer(Modifier.height(8.dp))
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                HomeVisualCreation("Criar imagem", R.drawable.home_create_image_3d, "home_create_image", palette,
-                    modifier = Modifier.weight(1f), onClick = onMonthlyPlanningClick)
+            BoxWithConstraints(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
                 HomeVisualCreation("Posts prontos", R.drawable.home_ready_posts_3d, "home_ready_posts", palette,
-                    modifier = Modifier.weight(1f), onClick = onEditVideoClick)
-            }
-            if (firstFreeArtMode) {
-                Text("Crie sua primeira imagem grátis.", color = palette.textPrimary, fontSize = 18.sp,
-                    fontWeight = FontWeight.Bold, modifier = Modifier.fillMaxWidth(), textAlign = TextAlign.Center)
-                Text("Depois disso, você desbloqueia o acesso ao app completo.", color = palette.textSecondary,
-                    fontSize = 16.sp, textAlign = TextAlign.Center, modifier = Modifier.fillMaxWidth())
+                    modifier = Modifier.width((maxWidth - 12.dp) / 2), onClick = onEditVideoClick)
             }
             Spacer(Modifier.height(4.dp))
             Row(
@@ -199,6 +191,8 @@ internal fun HomeVisualContent(
                     tint = palette.primaryBorder, modifier = Modifier.size(28.dp))
             }
             if (otherForms) {
+                HomeVisualMenuAction("Criar imagens", "home_create_image", palette,
+                    onClick = onMonthlyPlanningClick)
                 HomeVisualMenuAction("Várias fotos", "home_multiple_photos", palette, firstFreeArtMode,
                     onClick = lockable(onCreateArtEmpresa))
                 HomeVisualMenuAction("Mat. Impresso", "home_printed_materials", palette, firstFreeArtMode,
@@ -334,7 +328,7 @@ private fun HomeVisualMenuAction(label: String, tag: String, palette: PremiumHom
             description?.let { Text(it, color = palette.textSecondary, fontSize = 16.sp) }
         }
         Icon(if (locked) Icons.Default.Lock else Icons.Default.KeyboardArrowRight, contentDescription =
-            if (locked) "Disponível depois da primeira imagem grátis" else null,
+            if (locked) "Entre na sua conta para acessar" else null,
             tint = palette.primaryBorder, modifier = Modifier.padding(start = 8.dp).size(24.dp))
     }
 }

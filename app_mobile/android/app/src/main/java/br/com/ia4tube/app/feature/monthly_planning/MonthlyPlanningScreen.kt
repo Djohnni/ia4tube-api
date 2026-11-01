@@ -138,6 +138,7 @@ fun MonthlyPlanningScreen(
     val calendarModel = rememberCalendarModel(tokenProvider)
     val calendar by calendarModel.uiState.collectAsState()
     var showGallery by remember(previewToken) { mutableStateOf(false) }
+    var showMonthCalendar by remember(previewToken) { mutableStateOf(false) }
     var showImport by remember(previewToken) { mutableStateOf(false) }
     var cancelImported by remember(previewToken) { mutableStateOf<ScheduledArt?>(null) }
     val state by viewModel.uiState.collectAsState()
@@ -510,6 +511,7 @@ fun MonthlyPlanningScreen(
                     calendarError = calendar.error ?: state.calendarError),
                 previewToken = previewToken,
                 onGallery = { showGallery = true },
+                onMonthCalendar = { showMonthCalendar = true },
                 onImport = { showImport = true },
                 onBack = { showGeneralCalendar = false },
                 onRefresh = { calendarModel.refresh(); viewModel.refreshGeneralCalendar() },
@@ -688,6 +690,10 @@ fun MonthlyPlanningScreen(
                 Spacer(modifier = Modifier.height(18.dp))
             }
         }
+    }
+    if (showMonthCalendar) {
+        CalendarMonthDialog(items = calendar.data.items, fresh = calendar.fresh, busy = calendar.busy,
+            onDismiss = { showMonthCalendar = false })
     }
     cancelImported?.let { item ->
         AlertDialog(onDismissRequest = { if (!calendar.busy) cancelImported = null }, title = { Text("Cancelar esta programação?") },
@@ -960,6 +966,7 @@ private fun MonthlyPlanningGeneralCalendarContent(
     state: MonthlyPlanningUiState,
     previewToken: String,
     onGallery: () -> Unit,
+    onMonthCalendar: () -> Unit,
     onImport: () -> Unit,
     onBack: () -> Unit,
     onRefresh: () -> Unit,
@@ -989,9 +996,10 @@ private fun MonthlyPlanningGeneralCalendarContent(
             }
         }
         OutlinedButton(onClick = onGallery, modifier = Modifier.fillMaxWidth()) { Text("Ver minhas artes programadas") }
-        if (br.com.ia4tube.app.BuildConfig.MEDIA_IMPORT_ENTRY_POINTS_VISIBLE) {
+        if (br.com.ia4tube.app.BuildConfig.MEDIA_IMPORT_ENTRY_POINTS_VISIBLE && CALENDAR_MANUAL_UPLOAD_ENTRY_VISIBLE) {
             OutlinedButton(onClick = onImport, modifier = Modifier.fillMaxWidth()) { Text("Adicionar foto ou vídeo") }
         }
+        TextButton(onClick = onMonthCalendar, modifier = Modifier.fillMaxWidth()) { Text("Veja seu calendário") }
         Text(
             text = "Artes, fotos e vídeos do mesmo calendário de publicações.",
             style = MaterialTheme.typography.bodyMedium,

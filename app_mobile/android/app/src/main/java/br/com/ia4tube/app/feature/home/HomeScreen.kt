@@ -174,7 +174,7 @@ fun HomeScreen(
         onLogout = onLogout,
         onIconHelpClick = { showIconHelpDialog = true },
         onLockedFeatureClick = {
-            Toast.makeText(context, "Crie sua primeira imagem grátis para liberar esta função.", Toast.LENGTH_SHORT).show()
+            Toast.makeText(context, "Entre na sua conta para acessar esta função.", Toast.LENGTH_SHORT).show()
         }
     )
 
