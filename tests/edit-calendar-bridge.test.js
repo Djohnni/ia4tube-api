@@ -119,13 +119,25 @@ test("insufficient normal credits can be replenished without creating duplicate 
   const done = f.service.bind(body); assert.deepEqual(f.service.bind(body), done);
   assert.equal(f.readClients()[f.owner].artes_mensais_restantes, 1);
 });
-test("free-art IP receipt uses only the authenticated hash/mask and retries never consume another free art", async t => {
+test("an already reserved legacy free art retains its IP receipt and retries never consume another free art", async t => {
   let attempts = 0, observed = null;
   const f = fixture(t, { recordFreeArtUse: value => { attempts++; observed = value; return attempts > 1; } });
   const clients = f.readClients(); clients[f.owner].artes_mensais_restantes = 0;
   clients[f.owner].arte_gratis_disponivel = true; clients[f.owner].arte_gratis_usada = false; f.writeClients(clients);
   const identity = { ipHash: "c".repeat(64), ipMasked: "192.0.2.0" }, contextBody = f.contextBody();
   const ctx = await f.service.createContext({ whatsapp: f.owner }, contextBody, { ipIdentity: identity }), body = f.bindBody(ctx.ticket);
+  // Seed a prior committed free reservation: retiring signup eligibility must not re-bill this accepted intent.
+  const contextId = ctx.ticket.slice(0, 36), row = JSON.parse(fs.readFileSync(
+    path.join(f.root, "private/edit-calendar/contexts", contextId + ".json"), "utf8"));
+  planning.createRequest({ baseDir: f.planningDir, whatsapp: f.owner, cliente: clients[f.owner],
+    body: { quantidade_reservada: 1 }, files: {}, instagramFreeClaim: true,
+    externalEdit: { kind: "edit_calendar_admission_v1", contextId, editOrderId: body.editOrderId,
+      admissionId: crypto.randomUUID(), requestHash: "b".repeat(64), mediaKind: "image" },
+    calendarAuthorizationFactory: () => row.envelope });
+  const prior = planning.findPlanningById({ baseDir: f.planningDir, whatsapp: f.owner, planningId: row.planningId });
+  const stored = JSON.parse(fs.readFileSync(prior.solicitacao_path, "utf8"));
+  stored.edit_calendar = { kind: "edit_calendar_v1", contextId, editOrderId: body.editOrderId, inputHash: body.inputHash };
+  atomicWriteJson(prior.solicitacao_path, stored); f.writeClients(clients);
   assert.throws(() => f.service.bind(body), { code: "edit_calendar_free_art_receipt_unconfirmed" });
   const charged = f.readClients()[f.owner]; assert.equal(charged.arte_gratis_usada, true); assert.equal(charged.arte_gratis_usos.length, 1);
   const done = f.service.bind(body); assert.equal(attempts, 2); assert.equal(observed.planningId, done.planningId);

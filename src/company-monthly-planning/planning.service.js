@@ -792,7 +792,9 @@ function refreshPlanningReservationCounters(cliente) {
 
 function validatePlanAndFreeArts(cliente, quantity, options = {}) {
   const freeArtBlocked = options?.freeArtBlocked === true;
-  const billing = billingService.getBillingStatus(cliente, { freeArtBlocked });
+  const freeArtOptions = { freeArtBlocked,
+    instagramFreeClaim: options?.instagramFreeClaim === true && options.mediaKind === "image" };
+  const billing = billingService.getBillingStatus(cliente, freeArtOptions);
   const standalone = billingService.getStandaloneArtStatus(cliente);
   ensurePlanningReservationState(cliente, planCycle(cliente));
   refreshPlanningReservationCounters(cliente);
@@ -804,7 +806,7 @@ function validatePlanAndFreeArts(cliente, quantity, options = {}) {
     const monthlyQuantity = Math.min(quantity, monthlyAvailable);
     const remaining = quantity - monthlyQuantity;
     const freeArtQuantity = mediaKind === "image" && remaining > 0 &&
-      billingService.hasAvailableFreeCompanyArt(cliente, { freeArtBlocked }) ? Math.min(1, remaining) : 0;
+      billingService.hasAvailableFreeCompanyArt(cliente, freeArtOptions) ? Math.min(1, remaining) : 0;
     const standaloneQuantity = remaining - freeArtQuantity;
     const standaloneAvailable = Number(standalone.artes_avulsas_restantes || 0);
     if (standaloneQuantity > standaloneAvailable) {
@@ -826,7 +828,7 @@ function validatePlanAndFreeArts(cliente, quantity, options = {}) {
   const freeArts = Number(billing.artes_mensais_restantes || 0);
   const monthlyQuantity = planActive ? Math.min(quantity, freeArts) : 0;
   const remainingAfterPlan = Math.max(0, quantity - monthlyQuantity);
-  const freeArtQuantity = remainingAfterPlan > 0 && billingService.hasAvailableFreeCompanyArt(cliente, { freeArtBlocked })
+  const freeArtQuantity = remainingAfterPlan > 0 && billingService.hasAvailableFreeCompanyArt(cliente, freeArtOptions)
     ? Math.min(1, remainingAfterPlan)
     : 0;
   const standaloneQuantity = Math.max(0, remainingAfterPlan - freeArtQuantity);
@@ -854,7 +856,7 @@ function validatePlanAndFreeArts(cliente, quantity, options = {}) {
   };
 }
 
-function reservePlanningArts(cliente, planningId, quantity, createdAt, billing, charge = {}) {
+function reservePlanningArts(cliente, planningId, quantity, createdAt, billing, charge = {}, freeArtOptions = {}) {
   const ciclo = planCycle(cliente);
   const reservas = ensurePlanningReservationState(cliente, ciclo);
   const freeArts = Number(cliente.artes_mensais_restantes || 0);
@@ -872,7 +874,7 @@ function reservePlanningArts(cliente, planningId, quantity, createdAt, billing, 
       throw Object.assign(new Error("Reserva de cotas invalida."), { code: "billing_media_quota_invalid", statusCode: 503 });
     // Validate every source before any financial mutation. The legacy branch below keeps its previous policy.
     if (standaloneQuantity > Number(cliente.artes_avulsas_restantes || 0) ||
-        freeArtQuantity > 0 && !billingService.hasAvailableFreeCompanyArt(cliente))
+        freeArtQuantity > 0 && !billingService.hasAvailableFreeCompanyArt(cliente, freeArtOptions))
       throw Object.assign(new Error("Voce nao tem saldo suficiente para continuar."), { code: "billing_required", statusCode: 402 });
     if (monthlyQuantity + videoMonthlyQuantity > 0)
       billingService.consumeMonthlyMediaQuota(cliente, mediaQuota.mediaKind,
@@ -912,7 +914,7 @@ function reservePlanningArts(cliente, planningId, quantity, createdAt, billing, 
   }
 
   if (freeArtQuantity > 0) {
-    if (!billingService.hasAvailableFreeCompanyArt(cliente)) {
+    if (!billingService.hasAvailableFreeCompanyArt(cliente, freeArtOptions)) {
       const error = new Error("Voce nao tem saldo suficiente para continuar.");
       error.statusCode = 402;
       error.code = "billing_required";
@@ -1507,7 +1509,7 @@ function externalEditRegistration(value) {
 }
 
 function createRequest({ baseDir, cliente, whatsapp, body = {}, files = {}, freeArtBlocked = false, calendarAuthorizationFactory = null,
-  externalEdit = null }) {
+  externalEdit = null, instagramFreeClaim = false }) {
   const editRegistration = externalEditRegistration(externalEdit);
   const instagramDestination = require("../social/calendar/destinations").destination(body.instagram_destination || "feed");
   const parsedPhotoItems = parsePlanningPhotoItems(body);
@@ -1528,8 +1530,12 @@ function createRequest({ baseDir, cliente, whatsapp, body = {}, files = {}, free
     throw error;
   }
   const profile = normalizeProfile(body, cliente);
-  const { billing, charge } = validatePlanAndFreeArts(cliente, quantidadeReservada, { freeArtBlocked,
-    mediaKind: editRegistration ? editRegistration.mediaKind || "video" : "image" });
+  // This capability is a trusted function argument from verified admission, never an HTTP body field.
+  const billingOptions = { freeArtBlocked,
+    mediaKind: editRegistration ? editRegistration.mediaKind || "video" : "image",
+    instagramFreeClaim: instagramFreeClaim === true && editRegistration?.kind === "edit_calendar_admission_v1" &&
+      editRegistration.mediaKind === "image" };
+  const { billing, charge } = validatePlanAndFreeArts(cliente, quantidadeReservada, billingOptions);
   const ciclo = planCycle(cliente);
   const planningId = editRegistration ? `pm_edit_${editRegistration.contextId.replace(/-/g, "")}` : newPlanningId();
   // Internal capability, never accepted from an HTTP body or included in product responses/runner packages.
@@ -1569,7 +1575,7 @@ function createRequest({ baseDir, cliente, whatsapp, body = {}, files = {}, free
     orientacao: item.orientacao || ""
   }));
   const now = new Date().toISOString();
-  const reservation = reservePlanningArts(cliente, planningId, quantidadeReservada, now, billing, charge);
+  const reservation = reservePlanningArts(cliente, planningId, quantidadeReservada, now, billing, charge, billingOptions);
   const solicitacao = {
     id: planningId,
     instagram_destination: instagramDestination,

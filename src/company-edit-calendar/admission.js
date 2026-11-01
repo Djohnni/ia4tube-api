@@ -161,6 +161,7 @@ function createEditAdmissionService(ports) {
         // The admission marker deliberately has no producer inputHash and cannot create children.
         externalEdit: { kind: "edit_calendar_admission_v1", contextId: row.id, editOrderId: value.editOrderId,
           requestHash: value.requestHash, admissionId: value.admissionId, mediaKind: value.mediaKind }, freeArtBlocked: !value.freeClaim,
+        instagramFreeClaim: Boolean(value.freeClaim),
         calendarAuthorizationFactory: () => row.envelope });
       fault("admission_after_request");
       writeClients(current.clients);

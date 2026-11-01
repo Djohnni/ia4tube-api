@@ -241,11 +241,11 @@ test("standalone credit can be reserved and safely returned before bind", async 
   const client = f.readClients()[f.owner]; assert.equal(client.artes_avulsas_restantes, 1); assert.equal(client.artes_avulsas_usadas, 0);
   assert.deepEqual(client.artes_avulsas_consumos, []);
 });
-test("new signup policy is opt-in and never resets a consumed legacy benefit", () => {
+test("signup never emits the retired generic gift and never resets consumed legacy history", () => {
   const old = process.env.IA4TUBE_FREE_ART_POLICY_INSTAGRAM_ONLY;
   try {
     delete process.env.IA4TUBE_FREE_ART_POLICY_INSTAGRAM_ONLY;
-    const legacy = {}; billing.markFreeArtEligible(legacy); assert.equal(legacy.arte_gratis_disponivel, true);
+    const legacy = {}; billing.markFreeArtEligible(legacy); assert.equal(legacy.arte_gratis_disponivel, false);
     process.env.IA4TUBE_FREE_ART_POLICY_INSTAGRAM_ONLY = "true";
     const fresh = {}; billing.markFreeArtEligible(fresh); assert.equal(fresh.arte_gratis_disponivel, false);
     const used = { arte_gratis_usada: true, arte_gratis_usos: [{ pedido_id: "historical" }] };
@@ -305,10 +305,13 @@ test("a pre-production cancelled new gift restores only that right without emitt
   assert.deepEqual(client.arte_gratis_usos, []);
   await f.service.admit(f.body((await f.context()).ticket)); assert.equal(f.readClients()[f.owner].arte_gratis_usos.length, 1);
 });
-test("grandfathered unused free right is one shared right and is preserved on cancellation", async t => {
+test("an old unused flag remains one Instagram claim and cancellation never restores generic eligibility", async t => {
   const f = fixture(t, { client: { ...freeClient, arte_gratis_disponivel: true } }), request = f.body((await f.context()).ticket);
   await f.service.admit(request); assert.equal(billing.hasAvailableFreeCompanyArt(f.readClients()[f.owner]), false);
-  f.cancel(request); assert.equal(billing.hasAvailableFreeCompanyArt(f.readClients()[f.owner]), true);
+  f.cancel(request); assert.equal(billing.hasAvailableFreeCompanyArt(f.readClients()[f.owner]), false);
+  assert.equal(f.readClients()[f.owner].arte_gratis_disponivel, true, "preserve old bookkeeping without authorizing an old route");
+  await f.service.admit(f.body((await f.context()).ticket));
+  assert.equal(f.readClients()[f.owner].arte_gratis_usos.length, 1);
 });
 for (const stage of ["admission_after_journal", "admission_after_request", "admission_after_client_commit"]) test(`admission crash recovery ${stage} keeps one debit`, async t => {
   let injected = false;

@@ -262,7 +262,7 @@ function freeArtFeatureEnabled() {
   return !["0", "false", "no", "nao", "não", "off"].includes(value);
 }
 
-function markFreeArtEligible(cliente, { eligible = process.env.IA4TUBE_FREE_ART_POLICY_INSTAGRAM_ONLY !== "true", now = new Date() } = {}) {
+function markFreeArtEligible(cliente, { eligible = false, now = new Date() } = {}) {
   if (!cliente || typeof cliente !== "object") return cliente;
 
   if (cliente.arte_gratis_usada !== true) {
@@ -292,10 +292,13 @@ function ensureFreeArtFields(cliente) {
 
 function getFreeArtStatus(cliente, options = {}) {
   ensureFreeArtFields(cliente);
-  const used = cliente?.arte_gratis_usada === true || process.env.IA4TUBE_FREE_ART_POLICY_INSTAGRAM_ONLY === "true" &&
+  const used = cliente?.arte_gratis_usada === true ||
     (Boolean(cliente?.arte_gratis_pedido_id) || Number(cliente?.arte_gratis_usos?.length || 0) > 0);
   const blocked = options?.freeArtBlocked === true;
-  const available = freeArtFeatureEnabled() && !blocked && used !== true && cliente?.arte_gratis_disponivel === true;
+  // Only the verified Edit admission may spend the shared one-time benefit.
+  // A legacy signup flag is not an authorization to create a free order.
+  const available = options?.instagramFreeClaim === true && freeArtFeatureEnabled() &&
+    !blocked && used !== true && cliente?.arte_gratis_disponivel === true;
 
   return {
     arte_gratis_ativa: freeArtFeatureEnabled(),
@@ -422,15 +425,6 @@ function formatInsufficientBalanceMessage(custoPedido) {
 function resolveCompanyArtCharge(cliente, { custoPedido, now = new Date(), freeArtBlocked = false }) {
   const refresh = refreshManualPlanCycle(cliente, now);
   const standaloneArt = plansRegistry.getSingleArtPurchase();
-
-  if (hasAvailableFreeCompanyArt(cliente, { freeArtBlocked })) {
-    return {
-      allowed: true,
-      source: "arte_gratis",
-      amount: 0,
-      billingChanged: true
-    };
-  }
 
   if (hasAvailablePlanArt(cliente, now)) {
     const mediaQuota = getMediaQuotaStatus(cliente, now);
