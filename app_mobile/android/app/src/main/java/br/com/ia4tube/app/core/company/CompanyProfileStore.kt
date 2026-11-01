@@ -25,6 +25,14 @@ internal fun shouldClearCompanyProfileForAccountChange(
 class CompanyProfileStore(context: Context) {
     private val preferences = context.getSharedPreferences(PREFERENCES_NAME, Context.MODE_PRIVATE)
 
+    /** Read-only hint: never reuse a previous account's cached business type. */
+    fun getBusinessTypeForAccount(accountId: String): String {
+        val account = normalizeCompanyProfileOwner(accountId)
+        val owner = normalizeCompanyProfileOwner(preferences.getString(KEY_PROFILE_OWNER, "").orEmpty())
+        return if (account.isNotBlank() && account == owner)
+            preferences.getString(KEY_RAMO, "").orEmpty() else ""
+    }
+
     fun getProfile(): CompanyProfile {
         return CompanyProfile(
             nomeEmpresa = preferences.getString(KEY_NOME_EMPRESA, "").orEmpty(),

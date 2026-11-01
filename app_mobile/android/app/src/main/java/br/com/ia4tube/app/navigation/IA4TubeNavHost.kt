@@ -55,6 +55,7 @@ import br.com.ia4tube.app.core.monthly_planning.MonthlyPlanningCalendarCacheStor
 import br.com.ia4tube.app.data.api.IA4TubeApiClient
 import br.com.ia4tube.app.data.models.ApiResult
 import br.com.ia4tube.app.data.repository.AuthRepository
+import br.com.ia4tube.app.data.repository.authenticatedAccountFromJwt
 import br.com.ia4tube.app.data.repository.CarouselRepository
 import br.com.ia4tube.app.data.repository.CompanyGraphicMaterialsRepository
 import br.com.ia4tube.app.domain.usecase.ApproveOrderUseCase
@@ -558,6 +559,9 @@ fun IA4TubeNavHost(
                 onAuthRequired = { requestAuthFor(Routes.Edit) },
                 onOpenPlans = {
                     if (navController.currentDestination?.route == Routes.Edit) navigateProtected(Routes.Plans)
+                },
+                businessType = {
+                    companyProfileStore.getBusinessTypeForAccount(authenticatedAccountFromJwt(repository.getSavedToken()))
                 })
         }
 

@@ -51,6 +51,24 @@ class CompanyProfileEditorStoreTest {
         assertEquals(CompanyProfile(), store.getProfile())
         assertFalse(store.editorPending()); assertFalse(store.editorRemoveLogo())
     }
+    @Test fun postingHintsReadOnlyTheAuthenticatedOwnersBusinessType() {
+        val store = CompanyProfileStore(context)
+        store.prepareForAuthenticatedAccount("Conta.A")
+        store.saveEditorProfile(CompanyProfile(ramo = "Pizzaria", historia = "Preservar"), true, false, true)
+        assertEquals("Pizzaria", store.getBusinessTypeForAccount(" conta.a "))
+        assertEquals("", store.getBusinessTypeForAccount(""))
+        assertEquals("", store.getBusinessTypeForAccount("conta-b"))
+        assertEquals(CompanyProfile(ramo = "Pizzaria", historia = "Preservar"), store.getProfile())
+        assertTrue(store.editorPending()); assertTrue(store.editorRemoveLogo())
+    }
+    @Test fun postingHintsDoNotClaimAnUnboundLegacyProfile() {
+        val store = CompanyProfileStore(context)
+        store.saveProfile(CompanyProfile(ramo = "Padaria"))
+        assertEquals("", store.getBusinessTypeForAccount("conta-a"))
+        assertEquals("Padaria", store.getProfile().ramo)
+        store.prepareForAuthenticatedAccount("conta-a")
+        assertEquals("Padaria", store.getBusinessTypeForAccount("conta-a"))
+    }
     @Test fun privateLogoCacheDeduplicatesIdenticalBytesWithinTheSameAccountOnly() = runBlocking {
         fun jwt(owner: String) = "header." + Base64.getUrlEncoder().withoutPadding()
             .encodeToString(("{\"whatsapp\":\"" + owner + "\"}").toByteArray()) + ".signature"

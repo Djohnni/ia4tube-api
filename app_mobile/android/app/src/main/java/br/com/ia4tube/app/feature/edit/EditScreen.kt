@@ -21,6 +21,8 @@ import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -179,7 +181,8 @@ internal class EditBrowserViewModel : ViewModel() {
 }
 
 @Composable
-fun EditScreen(onBackClick: () -> Unit, onAuthRequired: () -> Unit = {}, onOpenPlans: () -> Unit = {}) {
+fun EditScreen(onBackClick: () -> Unit, onAuthRequired: () -> Unit = {}, onOpenPlans: () -> Unit = {},
+    businessType: () -> String = { "" }) {
     val context = LocalContext.current
     val lifecycle = LocalLifecycleOwner.current.lifecycle
     val onBack by rememberUpdatedState(onBackClick)
@@ -420,13 +423,15 @@ fun EditScreen(onBackClick: () -> Unit, onAuthRequired: () -> Unit = {}, onOpenP
         }
     }
     if (calendar.choosingSchedule) {
-        EditCalendarScheduleDialog(calendar.schedule, onDismiss = calendar::cancelSchedule,
+        val suggestionCategory = remember(calendar.nonce) { editPostingTimeCategory(businessType()) }
+        EditCalendarScheduleDialog(calendar.schedule, suggestionCategory, onDismiss = calendar::cancelSchedule,
             onConfirm = { calendar.chooseSchedule(it, session.getToken()) })
     }
 }
 
 @Composable
-private fun EditCalendarScheduleDialog(initial: EditCalendarSchedule?, onDismiss: () -> Unit,
+private fun EditCalendarScheduleDialog(initial: EditCalendarSchedule?, suggestionCategory: EditPostingTimeCategory,
+    onDismiss: () -> Unit,
     onConfirm: (EditCalendarSchedule) -> Unit) {
     val context = LocalContext.current
     val default = remember { ZonedDateTime.now(ZoneId.of("America/Sao_Paulo")).plusHours(1).withSecond(0).withNano(0) }
@@ -435,11 +440,22 @@ private fun EditCalendarScheduleDialog(initial: EditCalendarSchedule?, onDismiss
     val selection = EditCalendarSchedule(date.toString(), time.format(DateTimeFormatter.ofPattern("HH:mm")))
     val future = selection.isFuture()
     AlertDialog(onDismissRequest = onDismiss, title = { Text("Data e horário da publicação") },
-        text = { Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        text = { Column(modifier = Modifier.verticalScroll(rememberScrollState()),
+            verticalArrangement = Arrangement.spacedBy(12.dp)) {
             OutlinedButton(onClick = { DatePickerDialog(context, { _, year, month, day -> date = LocalDate.of(year, month + 1, day) },
                 date.year, date.monthValue - 1, date.dayOfMonth).show() }) { Text(date.format(DateTimeFormatter.ofPattern("dd/MM/yyyy"))) }
             OutlinedButton(onClick = { TimePickerDialog(context, { _, hour, minute -> time = LocalTime.of(hour, minute) },
                 time.hour, time.minute, true).show() }) { Text(selection.time) }
+            Text(if (suggestionCategory.label == "Sugestões gerais") suggestionCategory.label
+                else "Horários sugeridos · ${suggestionCategory.label}", style = MaterialTheme.typography.labelLarge)
+            suggestionCategory.slots.forEach { slot ->
+                val suggested = EditCalendarSchedule(date.toString(), slot.time.format(DateTimeFormatter.ofPattern("HH:mm")))
+                OutlinedButton(modifier = Modifier.fillMaxWidth(), enabled = suggested.isFuture(), onClick = {
+                    // Suggestions only replace the time on the day the customer chose.
+                    if (suggested.isFuture()) time = slot.time
+                }) { Text("Usar ${suggested.time} · ${slot.contextLabel}") }
+            }
+            Text("Sugestões pelo ramo. Você pode escolher outro horário.", style = MaterialTheme.typography.bodySmall)
             Text("Horário de Brasília. A publicação ficará no calendário depois de pronta.")
             if (!future) Text("Escolha uma data e um horário futuros.", color = MaterialTheme.colorScheme.error)
         } },
