@@ -264,14 +264,6 @@ fun InstagramScreen(viewModel: InstagramViewModel, onBack: () -> Unit, tokenProv
                         Text(if (state.authorizationPurpose == "connect" || state.connection == null)
                             "Conectar Instagram" else "Reconectar Instagram")
                     }
-                    OutlinedButton(onClick = {
-                        // Check before creating an authorization attempt, then recheck at dispatch.
-                        if (instagramAuthorizationAppAvailable(context)) viewModel.connectWithInstagramApp()
-                        else viewModel.instagramAppUnavailable()
-                    }, enabled = state.canAuthorize && !readingImage,
-                        colors = outlinedButtonColors, border = actionBorder) {
-                        Text("Testar pelo app do Instagram")
-                    }
                 }
             }
 
