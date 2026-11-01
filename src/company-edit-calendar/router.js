@@ -2,7 +2,8 @@
 const express = require("express");
 const { createCapabilityRateGuard } = require("./admission-http");
 function createEditCalendarRouter({ authenticate, botAuthenticate, isBotAdmin, service, freeArtPolicy = () => ({}),
-  admissionAuthenticate = null, availabilityAuthenticate = authenticate, freeArtReadPolicy = () => ({}), capabilityRateGuard = null }) {
+  admissionAuthenticate = null, availabilityAuthenticate = authenticate, freeArtReadPolicy = () => ({}), capabilityRateGuard = null,
+  readyImageUpload = null, readyImageCleanup = () => {} }) {
   const router = express.Router();
   const call = action => async (req, res) => {
     res.set("Cache-Control", "no-store");
@@ -12,7 +13,11 @@ function createEditCalendarRouter({ authenticate, botAuthenticate, isBotAdmin, s
       const code = /^(edit_calendar_|calendar_|monthly_planning_)[a-z_]+$/.test(error.code || "") || error.code === "billing_required"
         ? error.code : "edit_calendar_unavailable";
       res.status(status).json({ ok: false, code, error: error.code === "billing_required" ? "Você não tem saldo suficiente para continuar."
-        : "Não foi possível vincular este pedido ao calendário. Confira a conta e a programação." });
+        : code === "edit_calendar_ready_image_caption_required" ? "Escreva a legenda desta imagem."
+        : code === "edit_calendar_ready_image_invalid" ? "Confira a imagem e tente novamente."
+        : "Não foi possível vincular este pedido ao calendário. Confira a conta e a programação.",
+        ...(req.readyImageTicket && [400, 413, 415, 422].includes(status) &&
+          service.readyImageCanEdit(req.readyImageTicket) === true ? { safeToEdit: true } : {}) });
     }
   };
   router.get("/empresa/edit/availability", availabilityAuthenticate, call(req => {
@@ -24,6 +29,35 @@ function createEditCalendarRouter({ authenticate, botAuthenticate, isBotAdmin, s
     const policy = freeArtPolicy(req) || {};
     return service.createContext(req.user, req.body, { freeArtBlocked: policy.blocked === true,
       ipIdentity: { ipHash: policy.ipHash, ipMasked: policy.ipMasked } });
+  }));
+  const readyGuard = createCapabilityRateGuard({ capacity: 20,
+    verifyCapability: body => service.verifyReadyImageCapability(body.ticket) });
+  router.post("/empresa/edit/ready-images", (req, res, next) => {
+    try {
+      const header = req.get("Authorization"), match = typeof header === "string" && header.match(/^EditTicket ([A-Za-z0-9_.-]{80})$/);
+      if (!match) throw Object.assign(new Error("Sessão necessária"), { statusCode: 401, code: "edit_calendar_session_required" });
+      readyGuard.authorize({ body: { ticket: match[1] }, ip: req.ip, socket: req.socket });
+      req.readyImageTicket = match[1];
+      if (typeof readyImageUpload !== "function") throw Object.assign(new Error("Indisponível"),
+        { statusCode: 503, code: "edit_calendar_admission_disabled" });
+      next();
+    } catch (error) {
+      if (error.statusCode === 429) res.set("Retry-After", String(error.retryAfter || 1));
+      res.status(error.statusCode || 403).set("Cache-Control", "no-store")
+        .json({ ok: false, code: error.code || "edit_calendar_context_unavailable" });
+    }
+  }, (req, res, next) => readyImageUpload(req, res, error => {
+    if (!error) return next();
+    readyImageCleanup(req.file);
+    return res.status(error.code === "LIMIT_FILE_SIZE" ? 413 : 400).set("Cache-Control", "no-store")
+      .json({ ok: false, code: "edit_calendar_ready_image_invalid", error: "Confira a imagem e tente novamente.",
+        ...(service.readyImageCanEdit(req.readyImageTicket) === true ? { safeToEdit: true } : {}) });
+  }), call(async req => {
+    try {
+      if (req.body?.ticket !== req.readyImageTicket) throw Object.assign(new Error("Sessão divergente"),
+        { statusCode: 403, code: "edit_calendar_context_unavailable" });
+      return await service.submitReadyImage(req.body, req.file);
+    } finally { readyImageCleanup(req.file); }
   }));
   router.post("/bot/empresa/edit/orders/bind", botAuthenticate, call(req => {
     if (!isBotAdmin(req)) throw Object.assign(new Error("Acesso negado"), { statusCode: 403, code: "edit_calendar_operator_required" });

@@ -107,6 +107,9 @@ function createEditCalendarService({ dataDir, planningDir, ordersDir, secret, re
     claimFile: id => path.join(orders, `${id}.json`), read, write: atomicWriteJson, directories, acquireLock,
     ownerClient, ticketContext, billingDigest, planningRoot, orderRoot, readClients, writeClients,
     observeConnection, currentFreeArtBlocked, recordFreeArtUse, canReuseCancelledFreeArt, secret, clock, fault });
+  const readyImages = require("./ready-images").createReadyImageService({ enabled: admissionEnabled, root, directories,
+    contextFile, read, write: atomicWriteJson, ticketContext, ownerClient, acquireAllocationLock: acquireLock,
+    admit: admission.admit, bind, orderRoot, clock, fault });
   async function createContext(claims, input, { freeArtBlocked = false, ipIdentity = null } = {}) {
     const current = ownerClient(claims), request = contextInput(input, clock()); directories();
     const id = request.requestId, digest = hash(JSON.stringify(request));
@@ -165,6 +168,7 @@ function createEditCalendarService({ dataDir, planningDir, ordersDir, secret, re
     const request = bindInput(input), parsed = input.ticket.match(TICKET), id = parsed[1]; directories();
     const completed = read(contextFile(id)); verifyContext(completed, id);
     if (!crypto.timingSafeEqual(Buffer.from(hash(parsed[2]), "hex"), Buffer.from(completed.ticketHash, "hex"))) fail("context_unavailable", 404);
+    if (completed.readyImage && (request.mediaKind !== "image" || request.inputHash !== completed.readyImage.bindingHash)) fail("order_conflict");
     if (completed.binding && JSON.stringify(completed.binding) !== JSON.stringify(request)) fail("order_conflict");
     ownerClient({ whatsapp: completed.owner });
     admission.assertBind(completed, request);
@@ -173,6 +177,7 @@ function createEditCalendarService({ dataDir, planningDir, ordersDir, secret, re
     const release = acquireLock();
     try {
       const row = read(contextFile(id)); verifyContext(row, id);
+      if (row.readyImage && (request.mediaKind !== "image" || request.inputHash !== row.readyImage.bindingHash)) fail("order_conflict");
       const supplied = Buffer.from(hash(parsed[2]), "hex"), expected = Buffer.from(row.ticketHash, "hex");
       if (!crypto.timingSafeEqual(supplied, expected)) fail("context_unavailable", 404);
       if (row.binding && JSON.stringify(row.binding) !== JSON.stringify(request)) fail("order_conflict");
@@ -262,6 +267,8 @@ function createEditCalendarService({ dataDir, planningDir, ordersDir, secret, re
     } finally { release(); }
   }
   return Object.freeze({ createContext, bind, admit: admission.admit, admissionStatus: admission.status,
+    verifyReadyImageCapability: readyImages.verifyCapability, readyImageCanEdit: readyImages.canEdit,
+    submitReadyImage: readyImages.submit,
     verifyAdmissionCapability: admission.verifyCapability, availability: admission.availability,
     cancelAdmission: admission.cancel, close() { admission.close(); key.fill(0); } });
 }

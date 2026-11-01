@@ -182,8 +182,14 @@ function createEditAdmissionService(ports) {
     return response(row);
   }
   const writeClients = ports.writeClients;
+  function assertReadyImageAdmission(row, request) {
+    if (row.readyImage && (request.mediaKind !== "image" || request.requestHash !== row.readyImage.requestHash ||
+        request.selection.sourceDigest !== row.readyImage.sourceDigest || request.selection.modelId !== row.readyImage.modelId ||
+        request.selection.modelVersion !== 1 || request.caption !== row.readyImage.caption || request.title !== "Minha imagem")) fail("order_conflict");
+  }
   function inspectCapability(request) {
     const row = ticketContext(request.ticket), current = ownerClient({ whatsapp: row.owner });
+    assertReadyImageAdmission(row, request);
     const reservation = current.client.planejamento_mensal_reservas?.[row.planningId];
     if (!row.binding && row.expiresAt <= clock() && !reservation) fail("context_expired");
     if (row.admission) {
@@ -215,6 +221,7 @@ function createEditAdmissionService(ports) {
     inspectCapability(request); directories(); const release = acquireLock();
     try {
       const row = ticketContext(request.ticket), current = ownerClient({ whatsapp: row.owner });
+      assertReadyImageAdmission(row, request);
       if (!row.binding && row.expiresAt <= clock() && !current.client.planejamento_mensal_reservas?.[row.planningId]) fail("context_expired");
       if (row.admission) {
         if (row.admission.inputIdentity !== inputIdentity(request) || row.admission.contextHash !== hash(request.ticket)) fail("admission_conflict");

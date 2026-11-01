@@ -1578,6 +1578,10 @@ const productDiscoveryUpload = multer({
 });
 
 const uploadResultado = multer({ storage });
+const readyImageUpload = multer({ storage: multer.diskStorage({
+  destination: (_req, _file, cb) => cb(null, TMP_UPLOADS_DIR),
+  filename: (_req, _file, cb) => cb(null, `ready-image-${require("node:crypto").randomUUID()}.tmp`)
+}), limits: { files: 1, fields: 3, parts: 5, fieldSize: 12288, fileSize: 10 * 1024 * 1024 } }).single("image");
 const uploadMonthlyPlanningResult = multer({ storage, limits: { files: 2, fields: 2, parts: 5,
   fieldSize: 1024 * 1024, fileSize: 100000000 } });
 
@@ -4111,7 +4115,8 @@ const editCalendarService = createEditCalendarService({ dataDir: DATA_DIR, plann
 app.use(createEditCalendarRouter({ authenticate: auth, botAuthenticate: botRunnerAuth, isBotAdmin,
   service: editCalendarService, freeArtPolicy: getFreeArtIpLockStatus,
   availabilityAuthenticate: productionSession.authenticate, freeArtReadPolicy: observeFreeArtIpLock,
-  admissionAuthenticate: editAdmissionAuthentication.authenticate }));
+  admissionAuthenticate: editAdmissionAuthentication.authenticate, readyImageUpload,
+  readyImageCleanup: file => cleanupUploadedFiles({ image: file ? [file] : [] }) }));
 
 app.post(
   "/empresa/planejamento-mensal/solicitar",
