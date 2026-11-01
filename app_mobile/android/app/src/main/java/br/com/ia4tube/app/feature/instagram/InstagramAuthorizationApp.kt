@@ -1,6 +1,7 @@
 package br.com.ia4tube.app.feature.instagram
 
 import android.annotation.TargetApi
+import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
@@ -20,11 +21,16 @@ private fun instagramAppProbe() =
         .addCategory(Intent.CATEGORY_BROWSABLE)
         .setPackage(INSTAGRAM_PACKAGE)
 
-private fun ResolveInfo.isEnabledInstagramHandler(): Boolean = activityInfo?.let { activity ->
+private fun ResolveInfo.isEnabledInstagramHandler(pm: PackageManager): Boolean = activityInfo?.let { activity ->
     activity.packageName == INSTAGRAM_PACKAGE && !activity.name.isNullOrBlank() &&
-        activity.enabled && activity.exported && activity.applicationInfo?.let { application ->
+        activity.exported && activity.applicationInfo?.let { application ->
             application.packageName == INSTAGRAM_PACKAGE && application.enabled
-        } == true
+        } == true && when (pm.getComponentEnabledSetting(ComponentName(activity.packageName, activity.name))) {
+            // Instagram enables its URL handler at runtime; ActivityInfo keeps the manifest default.
+            PackageManager.COMPONENT_ENABLED_STATE_ENABLED -> true
+            PackageManager.COMPONENT_ENABLED_STATE_DEFAULT -> activity.enabled
+            else -> false
+        }
 } == true
 
 /** Only the platform verifier's proof for this package and exact host establishes identity. */
@@ -49,7 +55,7 @@ internal fun instagramAuthorizationAppAvailable(
     officialDomainVerified: () -> Boolean
 ): Boolean = try {
     pm.queryIntentActivities(instagramAppProbe(), PackageManager.MATCH_DEFAULT_ONLY)
-        .any(ResolveInfo::isEnabledInstagramHandler) && officialDomainVerified()
+        .any { it.isEnabledInstagramHandler(pm) } && officialDomainVerified()
 } catch (_: Exception) {
     false
 }

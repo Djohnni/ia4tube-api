@@ -2,6 +2,7 @@ package br.com.ia4tube.app.navigation
 
 import android.app.Application
 import android.content.ActivityNotFoundException
+import android.content.ComponentName
 import android.content.Intent
 import android.content.pm.ActivityInfo
 import android.content.pm.ApplicationInfo
@@ -69,6 +70,43 @@ class InstagramAuthorizationAppTest {
         fixture.handlers += resolved()
         assertFalse(instagramAuthorizationAppAvailable(pm) { false })
         assertNull(instagramAuthorizationAppIntent(pm, officialUrl()) { false })
+    }
+
+    @Test fun runtimeEnabledHandlerOverridesDisabledManifestWithoutSkippingDomainProof() {
+        val handler = resolved().apply { activityInfo.enabled = false }
+        fixture.handlers += handler
+        val component = ComponentName(INSTAGRAM, handler.activityInfo.name)
+        fixture.componentEnabledSettings[component] = PackageManager.COMPONENT_ENABLED_STATE_ENABLED
+        assertTrue(instagramAuthorizationAppAvailable(pm) { true })
+        assertEquals(listOf(component), fixture.componentSettingQueries)
+        assertFalse(instagramAuthorizationAppAvailable(pm) { false })
+    }
+
+    @Test fun runtimeDisabledOrUnknownStateOverridesEnabledManifest() {
+        val handler = resolved()
+        fixture.handlers += handler
+        val component = ComponentName(INSTAGRAM, handler.activityInfo.name)
+        for (state in listOf(PackageManager.COMPONENT_ENABLED_STATE_DISABLED,
+            PackageManager.COMPONENT_ENABLED_STATE_DISABLED_USER,
+            PackageManager.COMPONENT_ENABLED_STATE_DISABLED_UNTIL_USED, -1, 99)) {
+            fixture.componentEnabledSettings[component] = state
+            assertFalse(instagramAuthorizationAppAvailable(pm) { fail("Disabled handler"); true })
+        }
+    }
+
+    @Test fun defaultComponentStatePreservesManifestEnabledValue() {
+        val handler = resolved()
+        fixture.handlers += handler
+        assertTrue(instagramAuthorizationAppAvailable(pm) { true })
+        handler.activityInfo.enabled = false
+        assertFalse(instagramAuthorizationAppAvailable(pm) { fail("Disabled manifest default"); true })
+    }
+
+    @Test fun componentStateReadFailureDoesNotFallBackToEnabledManifest() {
+        fixture.handlers += resolved()
+        fixture.throwOnComponentSetting = true
+        assertFalse(instagramAuthorizationAppAvailable(pm) { fail("Unconfirmed component state"); true })
+        assertNull(instagramAuthorizationAppIntent(pm, officialUrl()) { fail("Unconfirmed component state"); true })
     }
 
     @Test fun userSelectedUnverifiedOrDifferentDomainCannotEstablishOfficialAppIdentity() {
@@ -230,7 +268,10 @@ class InstagramAuthorizationAppTest {
     class PackageFixture {
         val handlers = mutableListOf<ResolveInfo>()
         val queries = mutableListOf<Pair<Intent, Int>>()
+        val componentEnabledSettings = mutableMapOf<ComponentName, Int>()
+        val componentSettingQueries = mutableListOf<ComponentName>()
         var throwOnQuery = false
+        var throwOnComponentSetting = false
     }
 
     @Implements(className = "android.app.ApplicationPackageManager", isInAndroidSdk = false)
@@ -240,6 +281,12 @@ class InstagramAuthorizationAppTest {
             if (fixture.throwOnQuery) throw IllegalStateException("Synthetic package discovery failure")
             return if (intent.action == Intent.ACTION_VIEW && intent.dataString == PUBLIC_PROBE &&
                 intent.`package` == INSTAGRAM) fixture.handlers.toList() else emptyList()
+        }
+
+        @Implementation public override fun getComponentEnabledSetting(componentName: ComponentName): Int {
+            fixture.componentSettingQueries += componentName
+            if (fixture.throwOnComponentSetting) throw SecurityException("Synthetic component state failure")
+            return fixture.componentEnabledSettings[componentName] ?: PackageManager.COMPONENT_ENABLED_STATE_DEFAULT
         }
 
         companion object { var fixture = PackageFixture() }
